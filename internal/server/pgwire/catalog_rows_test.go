@@ -66,7 +66,7 @@ func TestPgDatabaseListing(t *testing.T) {
 			// the point: the answer must be labelled TABLE_CAT, which is what
 			// the driver reads the value back under.
 			name:     "pgJDBC getCatalogs",
-			sql:      "SELECT datname AS TABLE_CAT FROM pg_catalog.pg_database WHERE datallowconn = true ORDER BY datname",
+			sql:      `SELECT datname AS "TABLE_CAT" FROM pg_catalog.pg_database WHERE datallowconn = true ORDER BY datname`,
 			wantCols: []string{"TABLE_CAT"},
 			wantVals: []string{"wadjet"},
 		},
@@ -111,11 +111,16 @@ func TestPgDatabaseListing(t *testing.T) {
 			wantVals: []string{"wadjet", "NULL"},
 		},
 		{
+			// PostgreSQL 17's pg_database, every column in its order: the
+			// relation is the catalog's, not a vocabulary this layer picked.
 			name: "select star names the relation's columns",
 			sql:  "SELECT * FROM pg_database",
-			wantCols: []string{"oid", "datname", "datdba", "encoding", "datcollate",
-				"datctype", "datistemplate", "datallowconn"},
-			wantVals: []string{"", "wadjet", "10", "6", "en_US.UTF-8", "en_US.UTF-8", "f", "t"},
+			wantCols: []string{"oid", "datname", "datdba", "encoding", "datlocprovider",
+				"datistemplate", "datallowconn", "dathasloginevt", "datconnlimit", "datfrozenxid",
+				"datminmxid", "dattablespace", "datcollate", "datctype", "datlocale",
+				"daticurules", "datcollversion", "datacl"},
+			wantVals: []string{"", "wadjet", "10", "6", "c", "f", "t", "f", "-1", "NULL",
+				"NULL", "1663", "en_US.UTF-8", "en_US.UTF-8", "NULL", "NULL", "NULL", "NULL"},
 		},
 		{
 			name:     "distinct",
@@ -167,38 +172,30 @@ func TestPgDatabaseOIDIsStable(t *testing.T) {
 	}
 }
 
-// TestPgDatabaseUnrecognizedShapeStaysEmpty holds the floor: a pg_database
-// statement asking for nothing the relation has is declined, and falls to the
-// generic empty answer rather than being handed a row of NULLs under labels
-// it did not ask for.
-func TestPgDatabaseUnrecognizedShapeStaysEmpty(t *testing.T) {
+// TestPgDatabaseAggregatesAreQueries: pg_database is a relation, so an
+// aggregate over it is answered as one — `count(*)` is 1, the one database —
+// and a function this server does not implement is refused by name. The
+// canned responder this replaced answered both with no rows (#1251).
+func TestPgDatabaseAggregatesAreQueries(t *testing.T) {
 	db := setupTestDB(t)
 	srv := startTestServer(t, db)
 	client := newPGClient(t, srv.Addr())
 	client.startup("wadjet", "wadjet")
 	defer client.terminate()
 
-	for _, sqlText := range []string{
-		"SELECT count(*) FROM pg_database",
-		"SELECT pg_size_pretty(pg_database_size(datname)) FROM pg_database",
-	} {
-		cols, rows, tag := client.simpleQuery(sqlText)
-		if strings.HasPrefix(tag, "ERROR") {
-			t.Errorf("%s: %s", sqlText, tag)
-			continue
-		}
-		if len(rows) != 0 {
-			t.Errorf("%s: got rows %v, want none", sqlText, rows)
-		}
-		if len(cols) == 0 {
-			t.Errorf("%s: no columns declared", sqlText)
-		}
+	cols, rows, tag := client.simpleQuery("SELECT count(*) FROM pg_database")
+	assertOneRow(t, "count", cols, rows, tag, []string{"count"}, []string{"1"})
+
+	_, _, tag = client.simpleQuery("SELECT pg_size_pretty(pg_database_size(datname)) FROM pg_database")
+	if !strings.HasPrefix(tag, "ERROR") || !strings.Contains(tag, "pg_database_size") {
+		t.Errorf("pg_database_size: tag %q, want an error naming the function", tag)
 	}
 }
 
-// TestPgNamespaceListing is the schema picker's half. The answer used to be a
-// fixed one-column "nspname" whatever the client asked for, so a picker that
-// selects oid alongside it, or labels it TABLE_SCHEM, read the wrong column.
+// TestPgNamespaceListing is the schema picker's half: pg_namespace lists the
+// schemas that exist — pg_catalog, information_schema and public — in the
+// client's own shape. It used to be one fixed row, "public", whatever the
+// statement asked.
 func TestPgNamespaceListing(t *testing.T) {
 	db := setupTestDB(t)
 	srv := startTestServer(t, db)
@@ -210,40 +207,48 @@ func TestPgNamespaceListing(t *testing.T) {
 		name     string
 		sql      string
 		wantCols []string
-		wantVals []string
+		wantRows [][]string
 	}{
 		{
 			name:     "bare nspname",
-			sql:      "SELECT nspname FROM pg_namespace",
+			sql:      "SELECT nspname FROM pg_namespace ORDER BY nspname",
 			wantCols: []string{"nspname"},
-			wantVals: []string{"public"},
+			wantRows: [][]string{{"information_schema"}, {"pg_catalog"}, {"public"}},
 		},
 		{
 			name:     "oid alongside nspname",
-			sql:      "SELECT oid, nspname FROM pg_namespace",
+			sql:      "SELECT oid, nspname FROM pg_namespace ORDER BY oid",
 			wantCols: []string{"oid", "nspname"},
-			wantVals: []string{"", "public"},
+			wantRows: [][]string{{"11", "pg_catalog"}, {"2200", "public"}, {"13317", "information_schema"}},
 		},
 		{
-			// pgJDBC's getSchemas().
+			// pgJDBC's getSchemas(), its quoted labels verbatim.
 			name: "pgJDBC getSchemas",
-			sql: "SELECT nspname AS TABLE_SCHEM, NULL AS TABLE_CATALOG FROM pg_catalog.pg_namespace " +
-				"ORDER BY TABLE_SCHEM",
+			sql: `SELECT nspname AS "TABLE_SCHEM", NULL AS "TABLE_CATALOG" FROM pg_catalog.pg_namespace ` +
+				`ORDER BY "TABLE_SCHEM"`,
 			wantCols: []string{"TABLE_SCHEM", "TABLE_CATALOG"},
-			wantVals: []string{"public", "NULL"},
+			wantRows: [][]string{{"information_schema", "NULL"}, {"pg_catalog", "NULL"}, {"public", "NULL"}},
 		},
 		{
-			name:     "aliased relation",
-			sql:      "select n.oid, n.nspname from pg_namespace n",
+			name:     "aliased relation, filtered",
+			sql:      "select n.oid, n.nspname from pg_namespace n where n.nspname = 'public'",
 			wantCols: []string{"oid", "nspname"},
-			wantVals: []string{"", "public"},
+			wantRows: [][]string{{"2200", "public"}},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cols, rows, tag := client.simpleQuery(tt.sql)
-			assertOneRow(t, tt.sql, cols, rows, tag, tt.wantCols, tt.wantVals)
+			if strings.HasPrefix(tag, "ERROR") {
+				t.Fatalf("%s: %s", tt.sql, tag)
+			}
+			if strings.Join(cols, ",") != strings.Join(tt.wantCols, ",") {
+				t.Fatalf("columns = %v, want %v", cols, tt.wantCols)
+			}
+			if fmt.Sprint(rows) != fmt.Sprint(tt.wantRows) {
+				t.Fatalf("rows = %v, want %v", rows, tt.wantRows)
+			}
 		})
 	}
 }
@@ -259,13 +264,13 @@ func TestCatalogPickerShapeCoherence(t *testing.T) {
 	defer client.terminate()
 
 	for _, sqlText := range []string{
-		"SELECT datname AS TABLE_CAT FROM pg_catalog.pg_database WHERE datallowconn = true ORDER BY datname",
+		`SELECT datname AS "TABLE_CAT" FROM pg_catalog.pg_database WHERE datallowconn = true ORDER BY datname`,
 		"SELECT datname FROM pg_database",
 		"select d.oid, d.datname, d.datallowconn from pg_database d",
 		"SELECT * FROM pg_database",
 		"SELECT count(*) FROM pg_database",
 		"SELECT oid, nspname FROM pg_namespace",
-		"SELECT nspname AS TABLE_SCHEM, NULL AS TABLE_CATALOG FROM pg_catalog.pg_namespace ORDER BY TABLE_SCHEM",
+		`SELECT nspname AS "TABLE_SCHEM", NULL AS "TABLE_CATALOG" FROM pg_catalog.pg_namespace ORDER BY "TABLE_SCHEM"`,
 	} {
 		t.Run(sqlText, func(t *testing.T) {
 			trace := client.extendedTrace(sqlText)
@@ -292,7 +297,7 @@ func TestPgxGetCatalogs(t *testing.T) {
 
 	var catalog string
 	err = conn.QueryRow(ctx,
-		"SELECT datname AS TABLE_CAT FROM pg_catalog.pg_database WHERE datallowconn = true ORDER BY datname").
+		`SELECT datname AS "TABLE_CAT" FROM pg_catalog.pg_database WHERE datallowconn = true ORDER BY datname`).
 		Scan(&catalog)
 	if err != nil {
 		t.Fatalf("getCatalogs: %v", err)
@@ -302,7 +307,7 @@ func TestPgxGetCatalogs(t *testing.T) {
 	}
 
 	var schema string
-	err = conn.QueryRow(ctx, "SELECT nspname FROM pg_namespace").Scan(&schema)
+	err = conn.QueryRow(ctx, "SELECT nspname FROM pg_namespace WHERE nspname = 'public'").Scan(&schema)
 	if err != nil {
 		t.Fatalf("getSchemas: %v", err)
 	}
@@ -322,66 +327,3 @@ func TestPgxGetCatalogs(t *testing.T) {
 }
 
 // --- SELECT-list parsing ---
-
-func TestSelectItems(t *testing.T) {
-	tests := []struct {
-		sql  string
-		want []selectItem
-	}{
-		{
-			"SELECT datname FROM pg_database",
-			[]selectItem{{expr: "datname", label: "datname"}},
-		},
-		{
-			"SELECT datname AS TABLE_CAT FROM pg_database",
-			[]selectItem{{expr: "datname", label: "TABLE_CAT"}},
-		},
-		{
-			"select d.oid, d.datname from pg_database d",
-			[]selectItem{{expr: "oid", label: "oid"}, {expr: "datname", label: "datname"}},
-		},
-		{
-			`SELECT "datname" FROM pg_database`,
-			[]selectItem{{expr: "datname", label: "datname"}},
-		},
-		{
-			"SELECT DATNAME FROM pg_database",
-			[]selectItem{{expr: "datname", label: "DATNAME"}},
-		},
-		{
-			"SELECT DISTINCT datname FROM pg_database",
-			[]selectItem{{expr: "datname", label: "datname"}},
-		},
-		{
-			`SELECT nspname AS "TABLE_SCHEM", NULL AS TABLE_CATALOG FROM pg_namespace`,
-			[]selectItem{{expr: "nspname", label: "TABLE_SCHEM"}, {expr: "null", label: "TABLE_CATALOG"}},
-		},
-		{
-			"SELECT * FROM pg_database",
-			[]selectItem{{expr: "*", label: "*"}},
-		},
-		{
-			"SELECT 1",
-			[]selectItem{{expr: "1", label: "1"}},
-		},
-		{
-			"UPDATE t SET a = 1",
-			nil,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.sql, func(t *testing.T) {
-			got := selectItems(tt.sql)
-			if len(got) != len(tt.want) {
-				t.Fatalf("got %+v, want %+v", got, tt.want)
-			}
-			for i, w := range tt.want {
-				// raw carries the entry's own text; this test is about the
-				// attribute an item reads and the label it reads it under.
-				if got[i].expr != w.expr || got[i].label != w.label {
-					t.Errorf("item %d = %+v, want %+v", i, got[i], w)
-				}
-			}
-		})
-	}
-}

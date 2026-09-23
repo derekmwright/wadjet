@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -315,14 +316,17 @@ func TestDataGripOpeningSequence(t *testing.T) {
 		// The database and schema pickers. Both used to come back empty,
 		// which left DataGrip with nothing to select.
 		{
-			sql:      "SELECT datname AS TABLE_CAT FROM pg_catalog.pg_database WHERE datallowconn = true ORDER BY datname",
+			sql:      `SELECT datname AS "TABLE_CAT" FROM pg_catalog.pg_database WHERE datallowconn = true ORDER BY datname`,
 			wantCols: []string{"TABLE_CAT"},
 			wantRows: 1,
 		},
 		{
-			sql:      "SELECT nspname AS TABLE_SCHEM, NULL AS TABLE_CATALOG FROM pg_catalog.pg_namespace ORDER BY TABLE_SCHEM",
+			// pg_catalog, information_schema and public: the schemas that
+			// exist, as PostgreSQL lists them (pg_toast aside, which this
+			// server has none of).
+			sql:      `SELECT nspname AS "TABLE_SCHEM", NULL AS "TABLE_CATALOG" FROM pg_catalog.pg_namespace ORDER BY "TABLE_SCHEM"`,
 			wantCols: []string{"TABLE_SCHEM", "TABLE_CATALOG"},
-			wantRows: 1,
+			wantRows: 3,
 		},
 	}
 
@@ -601,7 +605,7 @@ func TestDataGripOpeningSequencePgx(t *testing.T) {
 	// database to select.
 	var cat string
 	err = conn.QueryRow(ctx,
-		"SELECT datname AS TABLE_CAT FROM pg_catalog.pg_database WHERE datallowconn = true ORDER BY datname").
+		`SELECT datname AS "TABLE_CAT" FROM pg_catalog.pg_database WHERE datallowconn = true ORDER BY datname`).
 		Scan(&cat)
 	if err != nil {
 		t.Fatalf("getCatalogs: %v", err)
@@ -613,7 +617,7 @@ func TestDataGripOpeningSequencePgx(t *testing.T) {
 	// The schema picker alongside it.
 	var schem, schemCat *string
 	err = conn.QueryRow(ctx,
-		"SELECT nspname AS TABLE_SCHEM, NULL AS TABLE_CATALOG FROM pg_catalog.pg_namespace ORDER BY TABLE_SCHEM").
+		`SELECT nspname AS "TABLE_SCHEM", NULL AS "TABLE_CATALOG" FROM pg_catalog.pg_namespace WHERE nspname = 'public' ORDER BY "TABLE_SCHEM"`).
 		Scan(&schem, &schemCat)
 	if err != nil {
 		t.Fatalf("getSchemas: %v", err)
@@ -762,8 +766,11 @@ func TestCatalogFallbackDescribesTheStatementNotThePortal(t *testing.T) {
 	}
 
 	// Now a one-column pg_index lookup, described as a STATEMENT before Bind.
+	// The parameter is an OID, as pgJDBC binds it; PostgreSQL refuses a
+	// relation NAME there (22P02, `invalid input syntax for type oid`).
 	trace := client.extendedTraceParams(
-		"SELECT i.indexrelid FROM pg_index i WHERE i.indrelid = $1", []string{"users"})
+		"SELECT i.indexrelid FROM pg_index i WHERE i.indrelid = $1",
+		[]string{strconv.Itoa(tableOID("users"))})
 	t.Logf("%s", traceString(trace))
 	assertShapeCoherent(t, "pg_index lookup", trace)
 
@@ -1003,7 +1010,7 @@ func TestDescribeAndExecuteAgreeOnColumns(t *testing.T) {
 		"SELECT relname FROM pg_class WHERE relkind = 'r'",
 		"SELECT oid, typname, typlen, typtype, typnamespace FROM pg_type",
 		"SELECT table_name FROM information_schema.tables",
-		"SELECT attname, format_type FROM pg_attribute WHERE attrelid = 'users'",
+		"SELECT attname, format_type(atttypid, atttypmod) FROM pg_attribute WHERE attrelid = 'users'::regclass",
 	} {
 		names, _, rows, tag := client.extendedQuery(sql)
 		if strings.HasPrefix(tag, "ERROR") {

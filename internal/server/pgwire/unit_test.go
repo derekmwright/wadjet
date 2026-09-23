@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/derekmwright/wadjet/internal/engine/expr"
+	"github.com/derekmwright/wadjet/internal/planner/syscatalog"
 	"github.com/derekmwright/wadjet/internal/storage/ingest"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -164,43 +165,6 @@ func TestPgTypeSize(t *testing.T) {
 	}
 }
 
-func TestPgFormatType(t *testing.T) {
-	tests := []struct {
-		typeName string
-		want     string
-	}{
-		{"INT32", "integer"},
-		{"INT64", "bigint"},
-		{"FLOAT32", "real"},
-		{"FLOAT64", "double precision"},
-		{"BOOLEAN", "boolean"},
-		{"BOOL", "boolean"},
-		{"TIMESTAMP", "timestamp without time zone"},
-		{"DATE", "date"},
-		{"DECIMAL", "numeric"},
-		{"BYTES", "bytea"}, // must agree with pgTypeOID's 17 (#570)
-		{"VARCHAR", "text"},
-		{"UNKNOWN", "text"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.typeName, func(t *testing.T) {
-			got := pgFormatType(tt.typeName)
-			if got != tt.want {
-				t.Errorf("pgFormatType(%q) = %q, want %q", tt.typeName, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestBoolStr(t *testing.T) {
-	if boolStr(true) != "t" {
-		t.Errorf("boolStr(true) = %q, want \"t\"", boolStr(true))
-	}
-	if boolStr(false) != "f" {
-		t.Errorf("boolStr(false) = %q, want \"f\"", boolStr(false))
-	}
-}
-
 func TestIsCommandSQL(t *testing.T) {
 	tests := []struct {
 		sql  string
@@ -220,79 +184,6 @@ func TestIsCommandSQL(t *testing.T) {
 			got := isCommandSQL(tt.sql)
 			if got != tt.want {
 				t.Errorf("isCommandSQL(%q) = %v, want %v", tt.sql, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestExtractParamValue(t *testing.T) {
-	tests := []struct {
-		name       string
-		normalized string
-		field      string
-		want       string
-	}{
-		{"quoted_value", "WHERE RELNAME = 'client_traffic' AND FOO", "RELNAME", "client_traffic"},
-		{"no_match", "WHERE FOO = 'bar'", "RELNAME", ""},
-		{"no_quote", "WHERE RELNAME = abc", "RELNAME", ""},
-		{"equals_no_space", "WHERE RELNAME ='test'", "RELNAME", "test"},
-		{"numeric_unquoted", "WHERE ATTRELID = 16384 AND ATTNUM > 0", "ATTRELID", "16384"},
-		{"numeric_at_end", "WHERE OID = 23", "OID", "23"},
-		{"numeric_cast", "WHERE OID = 23::OID", "OID", "23"},
-		{"join_condition_is_not_a_literal", "WHERE ATTRELID = C.OID", "ATTRELID", ""},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := extractParamValue(tt.normalized, tt.field)
-			if got != tt.want {
-				t.Errorf("extractParamValue(%q, %q) = %q, want %q", tt.normalized, tt.field, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestExtractSelectColumns(t *testing.T) {
-	tests := []struct {
-		name string
-		sql  string
-		want []string
-	}{
-		{
-			"basic", "SELECT a, b, c FROM t",
-			[]string{"a", "b", "c"},
-		},
-		{
-			"aliases", "SELECT a AS x, b AS y FROM t",
-			[]string{"x", "y"},
-		},
-		{
-			"dotted", "SELECT t.oid, t.name FROM t",
-			[]string{"oid", "name"},
-		},
-		{
-			"no_from", "SELECT 1, 'hello'",
-			[]string{"1", "'hello'"},
-		},
-		{
-			"not_select", "INSERT INTO t VALUES(1)",
-			nil,
-		},
-		{
-			"quoted_alias", `SELECT a AS "MyCol" FROM t`,
-			[]string{"MyCol"},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := extractSelectColumns(tt.sql)
-			if len(got) != len(tt.want) {
-				t.Errorf("expected %d columns, got %d: %v", len(tt.want), len(got), got)
-				return
-			}
-			for i := range got {
-				if got[i] != tt.want[i] {
-					t.Errorf("column %d: got %q, want %q", i, got[i], tt.want[i])
-				}
 			}
 		})
 	}
@@ -1259,8 +1150,10 @@ func TestPGWireAttributeQuery(t *testing.T) {
 	client := newPGClient(t, srv.Addr())
 	client.startup("testuser", "testdb")
 
-	// Query pg_attribute - should return column metadata
-	cols, rows, tag := client.simpleQuery("SELECT attname, format_type FROM pg_attribute WHERE attrelid = 'users'")
+	// Query pg_attribute - should return column metadata. The relation is
+	// named through regclass, as PostgreSQL requires: attrelid is an OID and
+	// a bare 'users' is not one (22P02 there).
+	cols, rows, tag := client.simpleQuery("SELECT attname, format_type(atttypid, atttypmod) FROM pg_attribute WHERE attrelid = 'users'::regclass")
 	t.Logf("pg_attribute: cols=%v rows=%d tag=%s", cols, len(rows), tag)
 	if len(rows) < 3 {
 		t.Errorf("expected at least 3 attribute rows for users table, got %d", len(rows))
@@ -1354,7 +1247,7 @@ func TestPGWirePgNamespace(t *testing.T) {
 	client := newPGClient(t, srv.Addr())
 	client.startup("testuser", "testdb")
 
-	cols, rows, tag := client.simpleQuery("SELECT nspname FROM pg_namespace")
+	cols, rows, tag := client.simpleQuery("SELECT nspname FROM pg_namespace WHERE nspname !~ '^pg_' AND nspname <> 'information_schema'")
 	t.Logf("pg_namespace: cols=%v rows=%v tag=%s", cols, rows, tag)
 	if len(rows) != 1 || rows[0][0] != "public" {
 		t.Errorf("expected nspname=public, got %v", rows)
@@ -1629,3 +1522,6 @@ func TestPGWireBindWithNullParam(t *testing.T) {
 	}
 	client.terminate()
 }
+
+// tableOID is the OID a user relation reports in the catalog.
+func tableOID(name string) int { return int(syscatalog.ObjectOID(name)) }

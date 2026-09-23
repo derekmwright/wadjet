@@ -28,6 +28,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/engine/expr"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
+	"github.com/derekmwright/wadjet/internal/planner/syscatalog"
 	"github.com/derekmwright/wadjet/internal/queryroute"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/ingest"
@@ -594,6 +595,15 @@ func (c *pgConn) queryContext() (context.Context, context.CancelFunc) {
 			SourceIP: peerAddr(c.conn), Protocol: "pgwire",
 		})
 	}
+	// What the catalog reports about this connection (pg_stat_ssl).
+	sess := syscatalog.Session{}
+	if tc, ok := c.conn.(*tls.Conn); ok {
+		sess.SSL = true
+		st := tc.ConnectionState()
+		sess.SSLVersion = tls.VersionName(st.Version)
+		sess.SSLCipher = tls.CipherSuiteName(st.CipherSuite)
+	}
+	ctx = syscatalog.WithSession(ctx, sess)
 	// Session-level statement_timeout overrides server default
 	timeout := c.queryTimeout
 	if v, ok := c.sessionVars["statement_timeout"]; ok {
@@ -2054,14 +2064,19 @@ func (ans *synthAnswer) colOID(col string) int32 {
 	return 25
 }
 
-// matchIntrospection resolves pg_catalog queries and the synthetic expressions
-// BI tools (Superset, SQLAlchemy, DBeaver, DataGrip, psql) send during
-// connection setup. It returns nil when the statement is not one this layer
-// answers — the caller then runs it on the query engine.
+// matchIntrospection answers the handful of statements this layer answers
+// itself rather than the engine: SHOW, the bare version() probe, and the
+// one-column FROM-less session expressions (matchSyntheticSelect). It returns
+// nil for everything else, which the caller runs on the query engine.
+//
+// The CATALOG is not here. pg_catalog and information_schema are relations the
+// engine scans (package syscatalog, ADR-0044): a canned responder that matched
+// a statement's TEXT answered its precomputed rows whatever the WHERE, the
+// JOIN or the aggregate said (#1251), and no amount of teaching it spellings
+// would have made it a query.
 func (c *pgConn) matchIntrospection(sql, upper string) *synthAnswer {
-	// Comments are not part of the statement. Strip them before anything
-	// reads the text, so subject detection and column shaping both see what
-	// the server would actually run (see stripSQLComments).
+	// Comments are not part of the statement: `/* app */ SHOW search_path`
+	// is SHOW (see stripSQLComments).
 	if strings.Contains(sql, "--") || strings.Contains(sql, "/*") {
 		sql = stripSQLComments(sql)
 		upper = strings.ToUpper(sql)
@@ -2075,11 +2090,10 @@ func (c *pgConn) matchIntrospection(sql, upper string) *synthAnswer {
 		return c.matchShow(normalized)
 	}
 
-	// version() is often spelled with a pg_catalog qualifier, which would
-	// otherwise fall into the blanket pg_catalog intercept below and come
-	// back empty. Only the bare one-expression form is claimed here; any
-	// richer spelling (an alias, more columns) is a real query the engine
-	// answers with version()'s value under the client's own labels.
+	// version(), bare or pg_catalog-qualified. Only the one-expression form
+	// is claimed; any richer spelling (an alias, more columns) is a real
+	// query the engine answers with version()'s value under the client's own
+	// labels.
 	if list, ok := selectList(normalized); ok &&
 		(list == "VERSION()" || list == "PG_CATALOG.VERSION()") {
 		return singleRow([]string{"version"}, map[string]any{
@@ -2087,292 +2101,71 @@ func (c *pgConn) matchIntrospection(sql, upper string) *synthAnswer {
 		})
 	}
 
-	// The catalog intercept matches on statement text, so it may only look at
-	// statements that read. A write whose literal happens to mention a catalog
-	// name — INSERT INTO audit(msg) VALUES ('pg_class scan failed') — used to
-	// be answered with an empty result set and a success tag, and never
-	// executed: a silent lost write.
-	if !strings.HasPrefix(normalized, "SELECT ") && !strings.HasPrefix(normalized, "WITH ") {
-		return nil
-	}
-
-	// pg_stat_ssl: pgJDBC probes its own connection's TLS state right after
-	// startup (select ssl from pg_stat_ssl where pid = pg_backend_pid()).
-	// Left unclaimed this reached the engine, which tried to SCAN a table
-	// named pg_stat_ssl and aborted DataGrip's whole introspection pass.
-	// Answer from the connection's actual state.
-	if strings.Contains(normalized, "PG_STAT_SSL") {
-		_, isTLS := c.conn.(*tls.Conn)
-		return singleRow([]string{"ssl"}, map[string]any{"ssl": isTLS})
-	}
-
-	// pg_catalog / information_schema introspection — return real catalog data
-	// for table/column discovery, empty results for everything else.
-	//
-	// A statement that reads relations is claimed if and only if one of them
-	// is a system relation (pg_ / information_schema) that is not a real
-	// table here. Substring matching claimed real queries: SELECT
-	// pg_typeof(id) FROM users contains "PG_TYPE" and was answered with a
-	// silent empty result (#305 item 8). A FROM-less statement has no
-	// relations to protect, so the text match stands for it: the pg_catalog
-	// functions clients call there include ones the engine deliberately does
-	// not implement (see pgcompat.go's ledger), and the empty-but-coherent
-	// answer keeps those clients moving.
-	var isPgCatalog bool
-	if refs := relationRefsAll(normalized); len(refs) > 0 {
-		isPgCatalog = c.claimsSystemRelations(refs)
-	} else {
-		isPgCatalog = strings.Contains(normalized, "PG_CATALOG") ||
-			strings.Contains(normalized, "INFORMATION_SCHEMA") ||
-			strings.Contains(normalized, "PG_TYPE") ||
-			strings.Contains(normalized, "PG_NAMESPACE") ||
-			strings.Contains(normalized, "PG_CLASS") ||
-			strings.Contains(normalized, "PG_ATTRIBUTE") ||
-			strings.Contains(normalized, "PG_DATABASE")
-	}
-
-	if isPgCatalog {
-		ctx, cancel := c.queryContext()
-		defer cancel()
-		if ans := c.matchCatalogQuery(ctx, sql, normalized); ans != nil {
-			return ans
-		}
-		// Fallback: empty result with the columns the SELECT list names.
-		cols := extractSelectColumns(sql)
-		if len(cols) == 0 {
-			cols = []string{"?column?"}
-		}
-		return &synthAnswer{cols: cols}
-	}
-
-	// SELECT with no FROM clause — evaluate common synthetic expressions.
-	// Wadjet requires FROM, but PostgreSQL clients expect these to work.
+	// SELECT with no FROM clause — the session expressions whose answer is
+	// this connection's (current_user is the authenticated identity).
 	if strings.HasPrefix(normalized, "SELECT ") && !strings.Contains(normalized, " FROM ") {
 		return c.matchSyntheticSelect(normalized)
 	}
-
 	return nil
 }
 
-// claimsSystemRelations reports whether refs — the relations a statement
-// reads, at any depth — include one in PostgreSQL's reserved pg_ namespace
-// (or information_schema) that this server does not have as a real table.
+// stripSQLComments removes -- line comments and /* block */ comments (nested,
+// as PostgreSQL nests them), leaving a space where each stood so tokens do not
+// fuse. String literals and quoted identifiers are respected.
 //
-// The intercept above once was a list of catalog names spelled out one at a
-// time, which meant every system relation nobody thought of reached the query
-// engine, where it became a scan of a table that does not exist:
-//
-//	select usesuper from pg_user where usename = current_user
-//	→ ERROR: stage scan-0 has no dependencies and no ScanFiles
-//
-// That is what DataGrip hit on pg_user after pg_stat_ssl was fixed the same
-// way, one name at a time. PostgreSQL reserves the pg_ prefix for system
-// catalogs, so a FROM/JOIN target under it is introspection by definition and
-// belongs to this layer — answered with real data where this server knows it,
-// and with an empty result of the right shape where it does not. The catalog
-// is still consulted, so a table that genuinely exists is never intercepted.
-func (c *pgConn) claimsSystemRelations(refs []string) bool {
-	if len(refs) == 0 {
-		return false
-	}
-	var systemRefs []string
-	for _, r := range refs {
-		if strings.HasPrefix(r, "PG_") || strings.HasPrefix(r, "INFORMATION_SCHEMA.") {
-			systemRefs = append(systemRefs, r)
-		}
-	}
-	if len(systemRefs) == 0 {
-		return false
-	}
-	// A real table wins over the reserved-prefix rule: this layer must never
-	// swallow a query the engine can actually answer.
-	//
-	// Deliberately the UNFILTERED list, unlike visibleCatalogTables, which is
-	// what every synthetic ROW is built from: this is a name-existence check
-	// that decides which layer answers, not a row source. Filtering it would
-	// route a denied table named `pg_something` into the synthetic layer,
-	// which would answer catalog rows about it instead of letting the engine
-	// refuse the read — a weaker answer, not a stronger one.
-	ctx, cancel := c.queryContext()
-	defer cancel()
-	tables, err := c.db.ListTables(ctx)
-	if err != nil {
-		return true // catalog unavailable; a pg_ scan would fail anyway
-	}
-	for _, r := range systemRefs {
-		real := false
-		for _, t := range tables {
-			if strings.EqualFold(t, r) {
-				real = true
-				break
-			}
-		}
-		if !real {
-			return true
-		}
-	}
-	return false
-}
-
-// catalogRank orders the catalog relations this layer models by how specific
-// a subject they are. A statement that reads pg_attribute is about columns
-// even when it enters through a pg_namespace/pg_class join chain, which is
-// how pgJDBC's DatabaseMetaData.getColumns is written.
-var catalogRank = map[string]int{
-	"PG_ATTRIBUTE": 5,
-	"PG_CLASS":     4,
-	"PG_TABLES":    4,
-	"PG_TYPE":      3,
-	"PG_DATABASE":  2,
-	"PG_NAMESPACE": 1,
-	"PG_USER":      0,
-	"PG_SHADOW":    0,
-	"PG_ROLES":     0,
-}
-
-// catalogSubject returns the catalog relation a statement is about, or "" when
-// this layer should not answer it as any of them.
-//
-// A branch that fires on "the statement mentions my relation somewhere" will
-// answer a question nobody asked: DataGrip's foreign-data-wrapper query joins
-// pg_namespace twice to resolve handler schemas, matched the pg_namespace
-// branch on that alone, and came back as a one-row schema listing whose
-// fdwname-labelled "name" column was NULL — which the client turned into
-// "Argument for @NotNull parameter 'name' ... must not be null" and stopped
-// introspecting. So the FROM target has to be a relation this layer models
-// before any branch may claim the statement; when it is, the most specific
-// relation among all its references wins.
-func catalogSubject(normalized string) string {
-	refs := relationRefs(normalized)
-	if len(refs) == 0 {
-		return ""
-	}
-	if _, ok := catalogRank[refs[0]]; !ok {
-		// A CTE name is not a relation — it is a local name for a subquery,
-		// so the statement's subject is whatever the outer query joins it to.
-		// DataGrip reads columns as `from T join pg_catalog.pg_attribute C`
-		// where T wraps pg_class; declining on T alone returned no columns at
-		// all. Only the outer query's own relations are considered, never the
-		// CTE's body: the rules query also wraps pg_class in a CTE but joins
-		// pg_rewrite, and it is about rules, which this layer does not model.
-		if !isCTEName(normalized, refs[0]) {
-			// Subject is a relation this layer does not model (pg_tablespace,
-			// pg_foreign_data_wrapper, pg_event_trigger, pg_locks, ...). It
-			// gets the empty-but-coherent answer, not another relation's rows.
-			return ""
-		}
-		refs = refs[1:]
-	}
-	best, bestRank := "", -1
-	for _, r := range refs {
-		if rank, ok := catalogRank[r]; ok && rank > bestRank {
-			best, bestRank = r, rank
-		}
-	}
-	return best
-}
-
-// isCTEName reports whether name is bound by the statement's WITH clause.
-func isCTEName(normalized, name string) bool {
-	if !strings.HasPrefix(normalized, "WITH ") {
-		return false
-	}
-	return strings.Contains(normalized, " "+name+" AS (") ||
-		strings.HasPrefix(normalized, "WITH "+name+" AS (")
-}
-
-// relationRefs returns the relation names a normalized statement reads: the
-// token after each FROM or JOIN at paren depth zero, with any pg_catalog
-// qualifier stripped.
-//
-// Depth is what makes FROM mean FROM. `extract(epoch from
-// pg_postmaster_start_time())` carries the word inside a function call, and
-// reading it as a clause makes the timestamp function look like a system
-// relation — which turned DataGrip's startup-time query into an empty
-// intercepted answer. Only a top-level FROM introduces a relation.
-func relationRefs(normalized string) []string {
-	return scanRelationRefs(normalized, false)
-}
-
-// relationRefsAll is relationRefs at every paren depth: a subquery's FROM
-// reads a relation just as the outer one does, and the claim decision (does
-// this statement read a system catalog?) has to see it — pgJDBC's type query
-// joins pg_type against a subquery over pg_type. A token terminated by an
-// opening paren is a function call, never a relation, which is what keeps
-// `extract(epoch from pg_postmaster_start_time())` out of the refs here too.
-func relationRefsAll(normalized string) []string {
-	return scanRelationRefs(normalized, true)
-}
-
-func scanRelationRefs(normalized string, anyDepth bool) []string {
-	var refs []string
-	depth, tokDepth := 0, 0
+// This layer decides by the statement's leading word (SHOW, a FROM-less
+// SELECT), so it has to read the statement the server will run, not the
+// commentary in front of it.
+func stripSQLComments(sql string) string {
+	var out strings.Builder
+	out.Grow(len(sql))
 	inSingle, inDouble := false, false
-	start := -1
-	want := false
-
-	emit := func(tok string, d int, term byte) {
-		if (!anyDepth && d != 0) || tok == "" {
-			return
-		}
-		if want {
-			want = false
-			if term == '(' {
-				return // a function call: extract(epoch from f()), substring(x from f())
-			}
-			name := strings.TrimPrefix(tok, "PG_CATALOG.")
-			if name != "" {
-				refs = append(refs, name)
-			}
-			return
-		}
-		if tok == "FROM" || tok == "JOIN" {
-			want = true
-		}
-	}
-
-	for i := 0; i <= len(normalized); i++ {
-		ch := byte(' ')
-		if i < len(normalized) {
-			ch = normalized[i]
-		}
+	for i := 0; i < len(sql); i++ {
+		ch := sql[i]
 		switch {
 		case inSingle:
 			if ch == '\'' {
 				inSingle = false
 			}
-			continue
 		case inDouble:
 			if ch == '"' {
 				inDouble = false
 			}
-			continue
-		}
-		if ch != ' ' && ch != '(' && ch != ')' && ch != ',' && ch != ';' &&
-			ch != '\'' && ch != '"' {
-			if start < 0 {
-				start, tokDepth = i, depth
-			}
-			continue
-		}
-		if start >= 0 {
-			emit(normalized[start:i], tokDepth, ch)
-			start = -1
-		}
-		switch ch {
-		case '(':
-			depth++
-		case ')':
-			if depth > 0 {
-				depth--
-			}
-		case '\'':
+		case ch == '\'':
 			inSingle = true
-		case '"':
+		case ch == '"':
 			inDouble = true
+		case ch == '-' && i+1 < len(sql) && sql[i+1] == '-':
+			for i < len(sql) && sql[i] != '\n' {
+				i++
+			}
+			out.WriteByte(' ')
+			if i < len(sql) {
+				out.WriteByte('\n')
+			}
+			continue
+		case ch == '/' && i+1 < len(sql) && sql[i+1] == '*':
+			depth, j := 1, i+2
+			for j < len(sql) && depth > 0 {
+				if sql[j] == '/' && j+1 < len(sql) && sql[j+1] == '*' {
+					depth++
+					j += 2
+					continue
+				}
+				if sql[j] == '*' && j+1 < len(sql) && sql[j+1] == '/' {
+					depth--
+					j += 2
+					continue
+				}
+				j++
+			}
+			i = j - 1
+			out.WriteByte(' ')
+			continue
 		}
+		out.WriteByte(ch)
 	}
-	return refs
+	return out.String()
 }
 
 // selectList returns the projection list of a normalized SELECT that has no
@@ -2560,21 +2353,6 @@ func (c *pgConn) sendSynthRows(ans *synthAnswer, fmtCodes []int16) {
 	c.sendCommandComplete(fmt.Sprintf("SELECT %d", len(ans.rows)))
 }
 
-// tableOID returns a deterministic fake OID for a catalog object's name.
-//
-// The result stays inside PostgreSQL's OID range, above the 16384 the system
-// objects end at. The previous hash accumulated without a bound and returned
-// values in the trillions — nothing a client can hold in an oid or int4
-// column, which is where a driver puts a catalog OID it reads.
-func tableOID(name string) int {
-	const base = 16384
-	h := uint32(2166136261) // FNV-1a
-	for _, c := range name {
-		h = (h ^ uint32(c)) * 16777619
-	}
-	return base + int(h%(1<<31-base))
-}
-
 // pgColumnOID uses the whole meta: TypeString with StringLength != 0 is
 // VARCHAR/1043, not text/25 (#838). Positive length is constrained; -1 is
 // unconstrained varchar; zero is text. OID follows destination, not length presence.
@@ -2760,675 +2538,6 @@ func (c *pgConn) visibleCatalogTables(ctx context.Context) ([]string, error) {
 		return nil, err
 	}
 	return auth.VisibleTables(ctx, c.authProvider, tables), nil
-}
-
-// matchCatalogQuery returns real catalog data for specific pg_catalog queries
-// that SQLAlchemy/Superset uses for schema introspection. sql is the statement
-// being answered; normalized is its uppercased, whitespace-collapsed form.
-func (c *pgConn) matchCatalogQuery(ctx context.Context, sql, normalized string) *synthAnswer {
-	// Which catalog relation this statement is about. A branch may only claim
-	// a statement whose subject it models — see catalogSubject.
-	subject := catalogSubject(normalized)
-
-	// pg_database — the database picker's source.
-	if subject == "PG_DATABASE" {
-		if ans := c.matchPgDatabase(sql); ans != nil {
-			return ans
-		}
-	}
-
-	// pg_user / pg_shadow / pg_roles: the identity on this connection. Clients
-	// ask right after startup (DataGrip: select usesuper from pg_user where
-	// usename = current_user) to size their feature set.
-	if subject == "PG_USER" || subject == "PG_SHADOW" || subject == "PG_ROLES" {
-		user := expr.SessionUser
-		if c.identity != nil {
-			user = c.identity.Name
-		}
-		attrs := pgUserAttrs(user)
-		if subject == "PG_ROLES" {
-			// pg_roles names the same principal under rol* columns.
-			attrs["rolname"] = user
-			attrs["rolsuper"] = false
-			attrs["rolcreatedb"] = false
-			attrs["rolcanlogin"] = true
-			attrs["rolreplication"] = false
-			attrs["rolbypassrls"] = false
-			attrs["oid"] = 10
-		}
-		if ans := catalogRowAnswer(sql, attrs, []string{"usename", "usesysid", "usesuper"}); ans != nil {
-			return ans
-		}
-	}
-
-	// pg_type — JDBC drivers query this to map OIDs to type names
-	if subject == "PG_TYPE" {
-		return c.matchPgType(sql, normalized)
-	}
-
-	// pg_tables — the user-facing table listing (SELECT * FROM pg_tables).
-	// An empty answer while tables exist is a wrong answer (#305 item 6).
-	if subject == "PG_TABLES" {
-		tables, err := c.visibleCatalogTables(ctx)
-		if err != nil {
-			return nil
-		}
-		user := expr.SessionUser
-		if c.identity != nil {
-			user = c.identity.Name
-		}
-		if schema := extractParamValue(normalized, "SCHEMANAME"); schema != "" && schema != expr.SessionSchema {
-			tables = nil // every table here lives in the one schema
-		}
-		want := extractParamValue(normalized, "TABLENAME")
-		rows := make([]map[string]any, 0, len(tables))
-		for _, t := range tables {
-			if want == "" || want == t {
-				rows = append(rows, pgTablesAttrs(t, user))
-			}
-		}
-		return catalogRowsAnswer(sql, pgTablesAttrs("", user), rows,
-			[]string{"schemaname", "tablename", "tableowner", "tablespace",
-				"hasindexes", "hasrules", "hastriggers", "rowsecurity"})
-	}
-
-	// information_schema — branch on the relation the statement reads, not on
-	// a substring of its text: `... FROM information_schema.columns WHERE
-	// table_name = 'alerts'` contains the word ALERTS but asks about columns,
-	// and used to be answered with the alert listing (#305 item 8).
-	infoSchema := map[string]bool{}
-	for _, r := range relationRefsAll(normalized) {
-		if strings.HasPrefix(r, "INFORMATION_SCHEMA.") {
-			infoSchema[strings.TrimPrefix(r, "INFORMATION_SCHEMA.")] = true
-		}
-	}
-	switch {
-	case infoSchema["ALERTS"]:
-		return c.matchInfoSchemaAlerts(ctx)
-	case infoSchema["COLUMNS"]:
-		return c.matchInfoSchemaColumns(ctx, sql, normalized)
-	case infoSchema["TABLES"]:
-		return c.matchInfoSchemaTables(ctx, sql)
-	}
-
-	// Schema listing: SELECT nspname FROM pg_namespace (used by get_schema_names
-	// and by the schema picker, which asks for oid alongside nspname).
-	// Exclude queries that mention pg_type/pg_class/pg_attribute — those just JOIN pg_namespace.
-	if subject == "PG_NAMESPACE" && strings.Contains(normalized, "NSPNAME") {
-		if ans := catalogRowAnswer(sql, pgNamespaceAttrs(), []string{"oid", "nspname"}); ans != nil {
-			return ans
-		}
-		return singleRow([]string{"nspname"}, map[string]any{"nspname": expr.SessionSchema})
-	}
-
-	// Index/constraint queries that happen to JOIN pg_attribute — return empty.
-	// The columns come from the statement being answered, not from portalSQL:
-	// at a statement Describe the portal still holds the PREVIOUS query, which
-	// described one shape and then executed another.
-	if strings.Contains(normalized, "PG_INDEX") ||
-		strings.Contains(normalized, "PG_CONSTRAINT") {
-		cols := extractSelectColumns(sql)
-		if len(cols) == 0 {
-			cols = []string{"?column?"}
-		}
-		return &synthAnswer{cols: cols}
-	}
-
-	// Column info: pg_attribute query
-	if subject == "PG_ATTRIBUTE" {
-		return c.matchAttributeQuery(ctx, sql, normalized)
-	}
-
-	// pg_class queries: table listing, OID lookup, or reverse OID lookup.
-	//
-	// All three shapes are the same answer over a different row set, so they
-	// share one builder: the statement's SELECT list decides the columns, the
-	// WHERE decides which tables are in it. The branches used to hardcode a
-	// single column each — a client selecting `relname, relkind` was described
-	// one column and sent one, which is how DataGrip's table tree came back
-	// without the kind it uses to tell a table from a view.
-	// A pg_class statement is claimed when it names `relname` — the listing
-	// and the lookups — or when it carries a LITERAL `oid = '<n>'`.
-	//
-	// The second half is `\d`'s SECOND statement, which reads relchecks,
-	// relkind and the flag columns once the first has resolved the OID and
-	// names no `relname` at all: it never reached the OID branch below and
-	// answered zero rows, and psql reports "Did not find any relation with
-	// OID …" on an empty result, so BOTH statements have to answer for `\d`
-	// to work (#944). It is a LITERAL and not a join condition on purpose —
-	// `\d`'s pg_inherits queries say `WHERE c.oid = i.inhparent`, name no
-	// relname, and must keep falling through to the empty answer rather than
-	// being handed every visible relation as this table's parent.
-	if subject == "PG_CLASS" &&
-		(strings.Contains(normalized, "RELNAME") || extractParamValue(normalized, "OID") != "") {
-		tables, err := c.visibleCatalogTables(ctx)
-		if err != nil {
-			return nil
-		}
-
-		keep := func(string) bool { return true }
-		regexName, regexFound, regexOK := anchoredRelnameRegex(sql)
-		switch {
-		case extractParamValue(normalized, "RELNAME") != "":
-			// Specific table lookup: relname = '<value>' in WHERE.
-			want := extractParamValue(normalized, "RELNAME")
-			keep = func(t string) bool { return t == want }
-		case regexFound:
-			// The anchored regex psql's `\d <name>` sends. A pattern this
-			// server does not model is REFUSED and never answered with the
-			// predicate ignored: a listing that quietly drops a filter is a
-			// wrong answer, and a silent empty one is what #944 was.
-			if !regexOK {
-				return &synthAnswer{
-					cols: extractSelectColumns(sql),
-					err: sqlerr.New("0A000", "this server matches pg_class.relname "+
-						"against the anchored whole-name pattern psql sends for "+
-						`\d ('^(name)$'), not the general regular-expression `+
-						"operator; spell the lookup relname = 'name', or list the "+
-						"relations with SHOW TABLES"),
-				}
-			}
-			keep = func(t string) bool { return strings.EqualFold(t, regexName) }
-		case extractParamValue(normalized, "OID") != "":
-			// Reverse lookup: WHERE oid = '<value>'.
-			want := extractParamValue(normalized, "OID")
-			keep = func(t string) bool { return strconv.Itoa(tableOID(t)) == want }
-		case !strings.Contains(normalized, "RELKIND"):
-			// Unknown pg_class query — don't handle, fall through to blanket.
-			return nil
-		}
-
-		rows := make([]map[string]any, 0, len(tables))
-		for _, t := range tables {
-			if keep(t) {
-				rows = append(rows, pgClassAttrs(t))
-			}
-		}
-		return catalogRowsAnswer(sql, pgClassAttrs(""), rows,
-			[]string{"oid", "relname", "relnamespace", "relkind"})
-	}
-
-	return nil
-}
-
-// matchAttributeQuery returns column metadata from our catalog for pg_attribute queries.
-func (c *pgConn) matchAttributeQuery(ctx context.Context, sql, normalized string) *synthAnswer {
-	tables, err := c.visibleCatalogTables(ctx)
-	if err != nil || len(tables) == 0 {
-		return nil
-	}
-
-	// Try to find the target from the query text.
-	// SQLAlchemy may send a table name or a numeric OID as the attrelid
-	// parameter; clients that JOIN pg_class instead name the table in
-	// relname (DataGrip's column query), which used to match nothing here —
-	// so a request for one table's columns was answered with every table's
-	// columns, and every table in the tree got every column in the database.
-	target := extractParamValue(normalized, "ATTRELID")
-	if target == "" {
-		target = extractParamValue(normalized, "RELNAME")
-	}
-
-	// Determine which table(s) to describe
-	var targetTables []string
-	if target == "" {
-		targetTables = tables
-	} else {
-		// Check if target is a table name (SQLAlchemy sends table name as table_oid param)
-		for _, t := range tables {
-			if t == target {
-				targetTables = []string{t}
-				break
-			}
-		}
-		// If not a name, try matching as numeric OID
-		if len(targetTables) == 0 {
-			for _, t := range tables {
-				if fmt.Sprintf("%d", tableOID(t)) == target {
-					targetTables = []string{t}
-					break
-				}
-			}
-		}
-		// If still no match, return empty
-		if len(targetTables) == 0 {
-			targetTables = nil
-		}
-	}
-
-	// SQLAlchemy 1.4 PGDialect.get_columns unpacks exactly 8 values per row:
-	//   name, format_type, default_, notnull, table_oid, comment, generated, identity
-	cols := []string{"attname", "format_type", "default", "attnotnull",
-		"table_oid", "comment", "generated", "identity"}
-
-	var resultRows []map[string]any
-	aliases := cteAliases(sql)
-
-	for _, tableName := range targetTables {
-		table, err := c.db.Query(ctx, fmt.Sprintf("DESCRIBE %s", tableName))
-		if err != nil {
-			continue
-		}
-
-		oid := tableOID(tableName)
-		attnum := 0
-		for _, row := range table.Rows {
-			colName, _ := row["column_name"].(string)
-			colType, _ := row["type"].(string)
-			nullable, _ := row["nullable"].(string)
-			if colName == "" || colName == "Partition Keys" {
-				continue
-			}
-			attnum++
-
-			row := map[string]any{
-				// SQLAlchemy's positional labels.
-				"attname":     colName,
-				"format_type": pgFormatType(colType),
-				"default":     nil,
-				"attnotnull":  nullable == "NO",
-				"table_oid":   oid,
-				"comment":     nil,
-				"generated":   "",
-				"identity":    "",
-				// pg_attribute's own columns, for clients that select them
-				// by name rather than unpacking a fixed tuple.
-				"attrelid":      oid,
-				"atttypid":      pgTypeOID(colType),
-				"atttypmod":     -1,
-				"attnum":        attnum,
-				"attisdropped":  false,
-				"atthasdef":     false,
-				"attidentity":   "",
-				"attgenerated":  "",
-				"attndims":      0,
-				"attcollation":  0,
-				"attstattarget": -1,
-				"attislocal":    true,
-			}
-			// The statement joins pg_class to pg_attribute, so one row of the
-			// answer spans both relations: carry the table's own attributes
-			// alongside the column's, then resolve whatever the statement's
-			// CTE renamed them to (T.oid as table_id, T.relkind as kind, ...).
-			for k, v := range pgClassAttrs(tableName) {
-				if _, taken := row[k]; !taken {
-					row[k] = v
-				}
-			}
-			for alias, under := range aliases {
-				if v, ok := row[under]; ok {
-					if _, taken := row[alias]; !taken {
-						row[alias] = v
-					}
-				}
-			}
-			resultRows = append(resultRows, row)
-		}
-	}
-
-	// A client that asked for plain pg_attribute columns is answered in its
-	// own shape. SQLAlchemy's query is a positional unpack of format_type()
-	// calls and CASE expressions, which map to no attribute name — it keeps
-	// the fixed 8-column tuple it expects.
-	if shaped := shapedAttributeAnswer(sql, resultRows); shaped != nil {
-		return shaped
-	}
-	return &synthAnswer{cols: cols, rows: resultRows}
-}
-
-// shapedAttributeAnswer reshapes a pg_attribute answer to the statement's own
-// SELECT list, but only when every item in that list names an attribute this
-// layer models. A partial match would hand back NULLs where the client asked
-// for a computed value, which is worse than the fixed tuple.
-func shapedAttributeAnswer(sql string, rows []map[string]any) *synthAnswer {
-	items := selectItems(sql)
-	if len(items) == 0 {
-		return nil
-	}
-	for _, it := range items {
-		if it.expr == "*" {
-			return nil // let the fixed tuple answer SELECT *
-		}
-	}
-
-	// Resolvability is judged against a real row, which carries the column's
-	// attributes, its table's pg_class attributes (the statement joins them),
-	// and whatever the statement's CTE renamed those to.
-	probe := attributeShape()
-	if len(rows) > 0 {
-		probe = rows[0]
-	}
-	resolvable := 0
-	for _, it := range items {
-		if _, ok := probe[it.expr]; ok {
-			resolvable++
-			continue
-		}
-		if _, ok := evalCatalogExpr(it.raw, probe); ok {
-			resolvable++
-		}
-	}
-	if resolvable == 0 {
-		return nil
-	}
-	return catalogRowsAnswer(sql, probe, rows, nil)
-}
-
-// attributeShape names the pg_attribute columns a statement may select by
-// name. Values are irrelevant — only membership is read.
-func attributeShape() map[string]any {
-	return map[string]any{
-		"attname": nil, "format_type": nil, "default": nil, "attnotnull": nil,
-		"table_oid": nil, "comment": nil, "generated": nil, "identity": nil,
-		"attrelid": nil, "atttypid": nil, "atttypmod": nil, "attnum": nil,
-		"attisdropped": nil, "atthasdef": nil, "attidentity": nil,
-		"attgenerated": nil, "attndims": nil, "attcollation": nil,
-		"attstattarget": nil,
-	}
-}
-
-// matchPgType returns rows from pg_type for JDBC/ODBC type mapping, shaped by
-// the client's own SELECT list — pgJDBC's TypeInfoCache reads columns by
-// position from the list it wrote, not from a fixed vocabulary (#305 item 2).
-// A SELECT list naming nothing this relation has falls back to the old
-// five-column answer rather than answering with a different shape.
-func (c *pgConn) matchPgType(sql, normalized string) *synthAnswer {
-	type pgType struct {
-		oid     int
-		typname string
-		typlen  int
-	}
-
-	types := []pgType{
-		{16, "bool", 1},
-		{17, "bytea", -1},
-		{20, "int8", 8},
-		{21, "int2", 2},
-		{23, "int4", 4},
-		{25, "text", -1},
-		{26, "oid", 4},
-		{700, "float4", 4},
-		{701, "float8", 8},
-		{1042, "bpchar", -1},
-		{1043, "varchar", -1},
-		{1082, "date", 4},
-		{1114, "timestamp", 8},
-		{1184, "timestamptz", 8},
-		{1700, "numeric", -1},
-	}
-
-	attrsFor := func(t pgType) map[string]any {
-		return map[string]any{
-			"oid":          t.oid,
-			"typname":      t.typname,
-			"typlen":       t.typlen,
-			"typtype":      "b",
-			"typnamespace": 11,
-			"typelem":      0,
-			"typarray":     0,
-			"typdelim":     ",",
-			"typrelid":     0,
-			"typbasetype":  0,
-			"typtypmod":    -1,
-			"typnotnull":   false,
-			"typcollation": 0,
-			"typndims":     0,
-			"typisdefined": true,
-			// pg_namespace joined alongside: every one of these lives in pg_catalog.
-			"nspname": "pg_catalog",
-		}
-	}
-
-	// Narrowing predicates a driver sends: WHERE oid = 23 / typname = 'int4'.
-	specificOID := extractParamValue(normalized, "OID")
-	specificName := extractParamValue(normalized, "TYPNAME")
-
-	var rows []map[string]any
-	for _, t := range types {
-		if specificOID != "" && strconv.Itoa(t.oid) != specificOID {
-			continue
-		}
-		if specificName != "" && t.typname != specificName {
-			continue
-		}
-		rows = append(rows, attrsFor(t))
-	}
-
-	fallbackCols := []string{"oid", "typname", "typlen", "typtype", "typnamespace"}
-	if ans := catalogRowsAnswer(sql, attrsFor(pgType{}), rows, fallbackCols); ans != nil {
-		return ans
-	}
-	ans := &synthAnswer{cols: fallbackCols}
-	for _, r := range rows {
-		ans.rows = append(ans.rows, map[string]any{
-			"oid": r["oid"], "typname": r["typname"], "typlen": r["typlen"],
-			"typtype": r["typtype"], "typnamespace": r["typnamespace"],
-		})
-	}
-	return ans
-}
-
-// matchInfoSchemaTables returns information_schema.tables data, shaped by the
-// client's own SELECT list (getTables() asks for its columns by name and
-// label; a fixed vocabulary answered a different shape — #305 item 2).
-func (c *pgConn) matchInfoSchemaTables(ctx context.Context, sql string) *synthAnswer {
-	tables, err := c.visibleCatalogTables(ctx)
-	if err != nil {
-		return nil
-	}
-
-	fallbackCols := []string{"table_catalog", "table_schema", "table_name", "table_type"}
-	rows := make([]map[string]any, 0, len(tables))
-	for _, t := range tables {
-		rows = append(rows, map[string]any{
-			"table_catalog": "wadjet",
-			"table_schema":  "public",
-			"table_name":    t,
-			"table_type":    "BASE TABLE",
-		})
-	}
-	shape := map[string]any{
-		"table_catalog": nil, "table_schema": nil, "table_name": nil, "table_type": nil,
-	}
-	if ans := catalogRowsAnswer(sql, shape, rows, fallbackCols); ans != nil {
-		return ans
-	}
-	return &synthAnswer{cols: fallbackCols, rows: rows}
-}
-
-// matchInfoSchemaColumns returns information_schema.columns data, shaped by
-// the client's own SELECT list (#305 item 2), scoped to the table its WHERE
-// names.
-func (c *pgConn) matchInfoSchemaColumns(ctx context.Context, sql, normalized string) *synthAnswer {
-	tables, err := c.visibleCatalogTables(ctx)
-	if err != nil {
-		return nil
-	}
-
-	// Filter to specific table if referenced
-	targetTable := extractParamValue(normalized, "TABLE_NAME")
-
-	fallbackCols := []string{"table_catalog", "table_schema", "table_name",
-		"column_name", "ordinal_position", "data_type", "is_nullable"}
-	var rows []map[string]any
-	for _, tableName := range tables {
-		if targetTable != "" && tableName != targetTable {
-			continue
-		}
-		table, err := c.db.Query(ctx, fmt.Sprintf("DESCRIBE %s", tableName))
-		if err != nil {
-			continue
-		}
-		pos := 0
-		for _, row := range table.Rows {
-			colName, _ := row["column_name"].(string)
-			colType, _ := row["type"].(string)
-			nullable, _ := row["nullable"].(string)
-			if colName == "" || colName == "Partition Keys" {
-				continue
-			}
-			pos++
-			isNullable := "YES"
-			if nullable == "NO" {
-				isNullable = "NO"
-			}
-			rows = append(rows, map[string]any{
-				"table_catalog":    "wadjet",
-				"table_schema":     "public",
-				"table_name":       tableName,
-				"column_name":      colName,
-				"ordinal_position": pos,
-				"data_type":        pgFormatType(colType),
-				"is_nullable":      isNullable,
-				"column_default":   nil,
-				"udt_name":         nil,
-			})
-		}
-	}
-	shape := map[string]any{
-		"table_catalog": nil, "table_schema": nil, "table_name": nil,
-		"column_name": nil, "ordinal_position": nil, "data_type": nil,
-		"is_nullable": nil, "column_default": nil, "udt_name": nil,
-	}
-	if ans := catalogRowsAnswer(sql, shape, rows, fallbackCols); ans != nil {
-		return ans
-	}
-	ans := &synthAnswer{cols: fallbackCols}
-	for _, r := range rows {
-		row := make(map[string]any, len(fallbackCols))
-		for _, col := range fallbackCols {
-			row[col] = r[col]
-		}
-		ans.rows = append(ans.rows, row)
-	}
-	return ans
-}
-
-// matchInfoSchemaAlerts returns information_schema.alerts data.
-func (c *pgConn) matchInfoSchemaAlerts(ctx context.Context) *synthAnswer {
-	alerts, err := c.db.Catalog().ListAlerts(ctx)
-	if err != nil {
-		return nil
-	}
-
-	ans := &synthAnswer{cols: []string{"name", "interval_seconds", "enabled", "webhook_url",
-		"insert_into_table", "last_evaluated_at"}}
-	for _, a := range alerts {
-		lastEval := ""
-		if !a.LastEvaluatedAt.IsZero() {
-			lastEval = a.LastEvaluatedAt.UTC().Format(time.RFC3339)
-		}
-		ans.rows = append(ans.rows, map[string]any{
-			"name":              a.Name,
-			"interval_seconds":  fmt.Sprintf("%d", a.IntervalSeconds),
-			"enabled":           boolStr(a.Enabled),
-			"webhook_url":       a.WebhookURL,
-			"insert_into_table": a.InsertIntoTable,
-			"last_evaluated_at": lastEval,
-		})
-	}
-	return ans
-}
-
-// pgFormatType maps Wadjet type names to PostgreSQL format_type() output.
-func pgFormatType(typeName string) string {
-	switch strings.ToUpper(typeName) {
-	case "INT32":
-		return "integer"
-	case "INT64":
-		return "bigint"
-	case "FLOAT32":
-		return "real"
-	case "FLOAT64":
-		return "double precision"
-	case "BOOLEAN", "BOOL":
-		return "boolean"
-	case "TIMESTAMP":
-		return "timestamp without time zone"
-	case "DATE":
-		return "date"
-	case "DECIMAL":
-		return "numeric"
-	case "BYTES":
-		return "bytea"
-	case "UUID":
-		return "uuid"
-	case "PORT", "PROTOCOL":
-		// The catalog must agree with the wire: pgTypeOID declares OID 23 for
-		// these, and an introspecting client (DataGrip, Superset, SQLAlchemy)
-		// reads BOTH — a pg_attribute row saying `text` beside a
-		// RowDescription saying int4 is the contradiction #834 is about.
-		return "integer"
-	case "DURATION":
-		return "bigint"
-	default:
-		return "text"
-	}
-}
-
-func boolStr(b bool) string {
-	if b {
-		return "t"
-	}
-	return "f"
-}
-
-// extractParamValue tries to extract a literal value from a WHERE clause.
-// e.g., "WHERE relname = 'client_traffic'" returns "client_traffic".
-func extractParamValue(normalized, field string) string {
-	idx := strings.Index(normalized, field+" = ")
-	if idx < 0 {
-		idx = strings.Index(normalized, field+" =")
-	}
-	if idx < 0 {
-		return ""
-	}
-	rest := normalized[idx+len(field)+2:]
-	rest = strings.TrimSpace(rest)
-	// Look for quoted value
-	if len(rest) > 0 && rest[0] == '\'' {
-		end := strings.Index(rest[1:], "'")
-		if end >= 0 {
-			return strings.ToLower(rest[1 : end+1])
-		}
-	}
-	// Unquoted numeric literal: pgJDBC inlines OIDs bare (attrelid = 16384),
-	// which used to be invisible here — so a request for one table's columns
-	// was answered with every table's (#305 item 4). Only digits are read: a
-	// bare identifier after = is a join condition, not a literal.
-	end := 0
-	for end < len(rest) && rest[end] >= '0' && rest[end] <= '9' {
-		end++
-	}
-	if end > 0 && (end == len(rest) || rest[end] == ' ' || rest[end] == ')' || rest[end] == ':' || rest[end] == ';') {
-		return rest[:end]
-	}
-	return ""
-}
-
-// extractSelectColumns returns the column labels a SELECT promises, so an
-// empty intercepted answer still carries headers a client can read (psycopg2
-// crashes on empty tuples; DataGrip reads results by label).
-//
-// It delegates to selectItems, which scans with paren depth and quote state.
-// The hand-rolled split this replaced looked for " FROM " literally, so a
-// statement with FROM at the start of a line — every introspection query a BI
-// tool formats across lines — never found it and turned the entire remainder
-// of the statement into one column name:
-//
-//	select L.transactionid::varchar::bigint as transaction_id
-//	from pg_catalog.pg_locks L ...
-//	→ column named "transaction_id\nfrom pg_catalog.pg_locks L\nwhere ..."
-func extractSelectColumns(sql string) []string {
-	items := selectItems(sql)
-	if len(items) == 0 {
-		return nil
-	}
-	cols := make([]string, 0, len(items))
-	for _, it := range items {
-		cols = append(cols, it.label)
-	}
-	return cols
 }
 
 // isWriteSQL reports whether a statement is a WRITE — one whose answer is a

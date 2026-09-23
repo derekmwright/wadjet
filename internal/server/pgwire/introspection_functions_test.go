@@ -57,14 +57,13 @@ func TestIntrospectionFunctionsAnswer(t *testing.T) {
 		{"col_description", `SELECT col_description(1, 1)`},
 		{"shobj_description", `SELECT shobj_description(1, 'pg_database')`},
 
-		// These reach the synthetic path rather than the compiler. They are
-		// here so that a change to the intercept which accidentally routes
-		// them at the engine fails as a pgwire test rather than in a client.
+		// The catalog relations are the engine's (ADR-0044), so these reach
+		// the compiler like any other query; version() and the session
+		// functions are still this layer's.
 		{"intercepted", `SELECT version()`},
 		{"intercepted", `SELECT current_schema()`},
 		{"intercepted", `SELECT current_schemas(true)`},
 		{"intercepted", `SELECT pg_postmaster_start_time()`},
-		{"intercepted", `SELECT pg_size_pretty(pg_database_size(current_database()))`},
 		{"intercepted", `SELECT c.relname, obj_description(c.oid, 'pg_class') FROM pg_catalog.pg_class c`},
 		{"intercepted", `SELECT a.attname, pg_catalog.format_type(a.atttypid, a.atttypmod) FROM pg_catalog.pg_attribute a WHERE a.attnum > 0`},
 		{"intercepted", `select relname from pg_class c join pg_namespace n on n.oid=c.relnamespace where pg_catalog.pg_table_is_visible(c.oid) and relkind in ('r','v')`},
@@ -100,7 +99,7 @@ func TestUnshimmedIntrospectionReportsTheName(t *testing.T) {
 
 	for _, fn := range []string{
 		"pg_get_functiondef", "pg_get_partkeydef", "pg_relation_size",
-		"pg_total_relation_size", "to_regclass", "pg_sleep",
+		"pg_total_relation_size", "to_regclass", "pg_sleep", "pg_database_size",
 	} {
 		sql := "SELECT " + fn + "(1)"
 		rows, err := db.Query(sql)

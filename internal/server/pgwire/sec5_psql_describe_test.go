@@ -59,7 +59,7 @@ const (
 		"WHERE c.relkind IN ('r','p','')\n      AND n.nspname <> 'pg_catalog'\n" +
 		"  AND pg_catalog.pg_table_is_visible(c.oid)\nORDER BY 1,2;"
 	// psqlListRelationsPattern is `\dt <pattern>` — the same listing with a
-	// WILDCARD pattern, which this server does not model.
+	// WILDCARD pattern.
 	psqlListRelationsPattern = "SELECT n.nspname as \"Schema\",\n  c.relname as \"Name\",\n" +
 		"  c.relkind\nFROM pg_catalog.pg_class c\n" +
 		"     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace\n" +
@@ -181,42 +181,47 @@ func TestPsqlDescribeResolvesItsRelation(t *testing.T) {
 	}
 }
 
-// TestAnUnsupportedRelnameRegexRefuses — the general regex operator is NOT
-// implemented, and a pattern this server cannot answer says so.
+// TestRelnameRegexAnswersAsPostgreSQL — the pattern operators are the
+// engine's (textregexeq and its siblings), so every spelling psql and a client
+// write is a predicate over pg_class that answers PostgreSQL's rows.
 //
-// The alternative shipped for a year: the predicate was ignored, so a
-// `\dt <pattern>` listing answered EVERY visible relation, and the anchored
-// form answered NONE. A filter that is silently dropped is a wrong answer, and
-// a silently empty one is #944 itself.
-func TestAnUnsupportedRelnameRegexRefuses(t *testing.T) {
+// These four were REFUSED while the catalog was a canned responder that could
+// only recognise psql's one anchored whole-name form; the refusal was the
+// honest disposition then, and a wrong listing (every relation, or none) was
+// what it replaced.
+func TestRelnameRegexAnswersAsPostgreSQL(t *testing.T) {
 	db := sec5DescribeDB(t)
 	srv := startTestServer(t, db)
 	conn := sec5Pgconn(t, srv.Addr())
 
-	for _, tc := range []struct{ name, sql string }{
-		{"a wildcard pattern", psqlListRelationsPattern},
-		{"an unanchored pattern",
-			"SELECT c.relname FROM pg_catalog.pg_class c WHERE c.relname OPERATOR(pg_catalog.~) 'sec5'"},
-		{"a negated match",
-			"SELECT c.relname FROM pg_catalog.pg_class c WHERE c.relname !~ '^(sec5_t)$'"},
-		{"a case-insensitive match",
-			"SELECT c.relname FROM pg_catalog.pg_class c WHERE c.relname ~* '^(sec5_t)$'"},
+	for _, tc := range []struct {
+		name, sql   string
+		want        []string // exact rows, when set
+		has, hasNot string   // membership, for a listing over every relation
+	}{
+		{name: "a wildcard pattern", sql: psqlListRelationsPattern,
+			want: []string{"public|sec5_t|r"}},
+		{name: "an unanchored pattern",
+			sql:  "SELECT c.relname FROM pg_catalog.pg_class c WHERE c.relname OPERATOR(pg_catalog.~) 'sec5'",
+			want: []string{"sec5_t"}},
+		{name: "a negated match",
+			sql: "SELECT c.relname FROM pg_catalog.pg_class c WHERE c.relname !~ '^(sec5_t)$'",
+			has: "Sec5Mixed", hasNot: "sec5_t"},
+		{name: "a case-insensitive match",
+			sql:  "SELECT c.relname FROM pg_catalog.pg_class c WHERE c.relname ~* '^(SEC5_T)$'",
+			want: []string{"sec5_t"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			res := conn.ExecParams(context.Background(), tc.sql, nil, nil, nil, nil).Read()
-			if res.Err == nil {
-				t.Fatalf("an unsupported pattern answered %d rows instead of refusing",
-					len(res.Rows))
+			rows := sec5Rows(t, conn, tc.sql)
+			if tc.want != nil {
+				if strings.Join(rows, ",") != strings.Join(tc.want, ",") {
+					t.Fatalf("rows = %v, want %v", rows, tc.want)
+				}
+				return
 			}
-			pgErr, ok := res.Err.(*pgconn.PgError)
-			if !ok {
-				t.Fatalf("refusal is not a PostgreSQL error: %v", res.Err)
-			}
-			if pgErr.Code != "0A000" {
-				t.Errorf("SQLSTATE %s, want 0A000 (feature_not_supported)", pgErr.Code)
-			}
-			if !strings.Contains(pgErr.Message, "^(name)$") {
-				t.Errorf("the refusal does not name the form that works: %s", pgErr.Message)
+			joined := "," + strings.Join(rows, ",") + ","
+			if !strings.Contains(joined, ","+tc.has+",") || strings.Contains(joined, ","+tc.hasNot+",") {
+				t.Fatalf("rows %v: want %q in and %q out", rows, tc.has, tc.hasNot)
 			}
 		})
 	}
@@ -254,61 +259,6 @@ func TestPsqlDescribeFollowsTheTableDecision(t *testing.T) {
 			// filter is the DECISION and not a blanket emptying of the branch.
 			if got := sec5Rows(t, conn, fmt.Sprintf(psqlRelationLookup, "public_t")); len(got) != 1 {
 				t.Errorf("the permitted relation answered %d rows, want 1", len(got))
-			}
-		})
-	}
-}
-
-// TestAnchoredRelnameRegexReadsWhatPsqlSends is the unit half: every pattern
-// psql actually emits, and every one it does not.
-func TestAnchoredRelnameRegexReadsWhatPsqlSends(t *testing.T) {
-	for _, tc := range []struct {
-		name, sql        string
-		found, supported bool
-		want             string
-	}{
-		{name: "the plain anchored form psql sends",
-			sql:   `WHERE c.relname OPERATOR(pg_catalog.~) '^(sec5_t)$' COLLATE pg_catalog.default`,
-			found: true, supported: true, want: "sec5_t"},
-		{name: "a quoted identifier keeps its case",
-			sql:   `WHERE c.relname OPERATOR(pg_catalog.~) '^(Sec5Mixed)$'`,
-			found: true, supported: true, want: "Sec5Mixed"},
-		{name: "the bare operator spelling",
-			sql:   `WHERE relname ~ '^(sec5_t)$'`,
-			found: true, supported: true, want: "sec5_t"},
-		{name: "an E-string with an escaped metacharacter",
-			sql:   `WHERE c.relname OPERATOR(pg_catalog.~) E'^(sec5\\.dot)$'`,
-			found: true, supported: true, want: "sec5.dot"},
-		{name: "a wildcard pattern is not this form",
-			sql:   `WHERE c.relname OPERATOR(pg_catalog.~) '^(sec5.*)$'`,
-			found: true, supported: false},
-		{name: "an unanchored pattern is not this form",
-			sql:   `WHERE c.relname ~ 'sec5'`,
-			found: true, supported: false},
-		{name: "a negated match is a different operator",
-			sql:   `WHERE c.relname !~ '^(sec5_t)$'`,
-			found: true, supported: false},
-		{name: "a case-insensitive match is a different operator",
-			sql:   `WHERE c.relname ~* '^(sec5_t)$'`,
-			found: true, supported: false},
-		{name: "an equality lookup is not a regex at all",
-			sql:   `WHERE c.relname = 'sec5_t'`,
-			found: false},
-		{name: "a regex over another column is not this predicate",
-			sql:   `WHERE n.nspname !~ '^pg_toast' AND c.relname = 'sec5_t'`,
-			found: false},
-		{name: "relnamespace is not relname",
-			sql:   `LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace`,
-			found: false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			got, found, supported := anchoredRelnameRegex(tc.sql)
-			if found != tc.found || supported != tc.supported {
-				t.Fatalf("found=%v supported=%v, want found=%v supported=%v",
-					found, supported, tc.found, tc.supported)
-			}
-			if tc.supported && got != tc.want {
-				t.Errorf("name = %q, want %q", got, tc.want)
 			}
 		})
 	}

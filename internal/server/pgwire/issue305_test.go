@@ -253,8 +253,11 @@ func TestIssue305Item8AlertsWordIsNotTheAlertCatalog(t *testing.T) {
 	_, srv := setupRealDB(t)
 	db := openPQ(t, srv.Addr())
 
+	// information_schema.alerts IS a relation here (this server's own view of
+	// its alerts), so the question is asked of the user schema, where no
+	// table named alerts exists.
 	rows, err := db.Query(
-		`SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'alerts'`)
+		`SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'alerts' AND table_schema = 'public'`)
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
