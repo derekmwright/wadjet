@@ -266,3 +266,23 @@ func fnASCII(args []any) any {
 	}
 	return float64(0)
 }
+
+// QuoteIdent is quote_ident(): an identifier that would not survive as
+// written — upper case, a leading digit, anything outside [a-z0-9_] — in
+// double quotes, with embedded quotes doubled.
+func QuoteIdent(s string) string {
+	if s != "" && !needsQuoting(s) {
+		return s
+	}
+	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
+}
+
+// Settings is the GUC vocabulary current_setting() answers from, copied —
+// what pg_catalog.pg_settings lists.
+func Settings() map[string]string {
+	out := make(map[string]string, len(pgSettings))
+	for k, v := range pgSettings {
+		out[k] = v
+	}
+	return out
+}

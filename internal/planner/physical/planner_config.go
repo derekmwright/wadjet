@@ -15,6 +15,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/engine/memory"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
+	"github.com/derekmwright/wadjet/internal/planner/syscatalog/sysrows"
 	"github.com/derekmwright/wadjet/internal/storage/catalog"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
@@ -23,7 +24,8 @@ import (
 type Planner struct {
 	Catalog        *catalog.Catalog
 	subqueryRunner expr.SubqueryRunner
-	PlanCtx        context.Context  // context from the current Plan() call, used by subquery runner
+	PlanCtx        context.Context // context from the current Plan() call, used by subquery runner
+	catResolver    *sysrows.Resolver
 	Ctes           []plansql.CTEDef // CTE definitions from the current query, for subquery resolution
 	// outputProjection is the Project whose names LEAVE the engine, resolved
 	// once per Plan() call. Only that projection publishes PostgreSQL's
@@ -255,6 +257,22 @@ func (p *Planner) getMemTracker() *memory.Tracker {
 // logged the scan forcing its file load past that budget. The shapes that DO
 // decorrelate never reach this type; their build side is already budgeted and
 // spillable.
+// catalogOption binds the catalog functions — regclass, pg_get_userbyid and
+// their siblings (expr.CatalogResolver) — to this statement's view of the
+// catalog: the identity's Access on the planning context, over this planner's
+// catalog. One resolver per statement, so every expression in it reads one
+// snapshot.
+func (p *Planner) catalogOption() expr.CompileOption {
+	if p.catResolver == nil {
+		ctx := p.PlanCtx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		p.catResolver = sysrows.NewResolver(ctx, p.Catalog)
+	}
+	return expr.WithCatalog(p.catResolver)
+}
+
 func (p *Planner) subqueryBudgetOption() expr.CompileOption {
 	tracker := p.getMemTracker()
 	if tracker == nil {

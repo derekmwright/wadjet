@@ -528,10 +528,19 @@ func (a *AnyAllExpr) String() string {
 // SubqueryNode wraps a subquery as raw SQL.
 type SubqueryNode struct {
 	SQL string
+	// Array marks the ARRAY(subquery) constructor: an array of the
+	// subquery's single column, one element per row in the subquery's row
+	// order, and '{}' — not NULL — when it returns none. Everything that
+	// treats a scalar subquery as an opaque, possibly correlated body treats
+	// this one the same way; what differs is only how its value is formed.
+	Array bool
 }
 
 func (*SubqueryNode) nodeTag() {}
 func (s *SubqueryNode) String() string {
+	if s.Array {
+		return "ARRAY(" + s.SQL + ")"
+	}
 	return "(" + s.SQL + ")"
 }
 

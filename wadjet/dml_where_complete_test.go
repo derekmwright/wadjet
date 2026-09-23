@@ -43,8 +43,8 @@ func TestDMLWhereMustParseInFull(t *testing.T) {
 		{"PostgreSQL ISNULL suffix", `DELETE FROM pr WHERE name <> 'zzz' AND id ISNULL`},
 		{"stray token after a parenthesised term", `DELETE FROM pr WHERE (id = 1) garbage AND name = 'zzz'`},
 		{"stray token after the whole predicate", `DELETE FROM pr WHERE id = 1 garbage`},
-		{"regex match operator", `DELETE FROM pr WHERE name ~ 'zzz' AND id = 1`},
-		{"COLLATE", `DELETE FROM pr WHERE id > 0 AND name = 'zzz' COLLATE "C"`},
+		{"a collation this server does not compare by",
+			`DELETE FROM pr WHERE id > 0 AND name = 'zzz' COLLATE "en_US"`},
 		{"LIMIT on a DELETE", `DELETE FROM pr WHERE id = 1 LIMIT 1`},
 		// A second statement after the first is not part of the first
 		// statement's WHERE. It used to be swallowed by the clause text and
@@ -62,8 +62,8 @@ func TestDMLWhereMustParseInFull(t *testing.T) {
 				t.Fatalf("%s answered %s %d; a clause this server cannot read in full must be refused. "+
 					"pr is now %v", tc.sql, res.Command, res.RowsAffected, aliasRows686(t, db))
 			}
-			if got := sqlerr.StateOf(err); got != "42601" {
-				t.Errorf("%s: SQLSTATE %q, want 42601 (err: %v)", tc.sql, got, err)
+			if got := sqlerr.StateOf(err); got != "42601" && got != "0A000" {
+				t.Errorf("%s: SQLSTATE %q, want 42601 or 0A000 (err: %v)", tc.sql, got, err)
 			}
 			if after := aliasRows686(t, db); strings.Join(after, " ") != strings.Join(before, " ") {
 				t.Errorf("the refused statement changed pr: %v -> %v", before, after)
@@ -82,6 +82,37 @@ func TestDMLWhereMustParseInFull(t *testing.T) {
 // parsed and the integer was evaluated as a condition, and the DELETE emptied
 // a table the server leaves untouched. `SIMILAR TO 'zzz' ESCAPE '\'` matches
 // no row on either engine, so both answer DELETE 0.
+// TestDMLWhereThePCSpellingsAreReadInFull: the pattern-match operator and a
+// byte-order COLLATE are read in full since arc PC, so their row sets are
+// PostgreSQL 17.11's over these rows — one match deleted, none deleted.
+func TestDMLWhereThePCSpellingsAreReadInFull(t *testing.T) {
+	for _, tc := range []struct {
+		name, sql, tag string
+		after          string
+	}{
+		{"a regex that matches nothing", `DELETE FROM pr WHERE name ~ 'zzz' AND id = 1`,
+			"DELETE 0", "1:10:a 2:20:b 3:30:c"},
+		{"a regex that matches one row", `DELETE FROM pr WHERE name ~ '^a$'`,
+			"DELETE 1", "2:20:b 3:30:c"},
+		{"a byte-order COLLATE", `DELETE FROM pr WHERE id > 0 AND name = 'zzz' COLLATE "C"`,
+			"DELETE 0", "1:10:a 2:20:b 3:30:c"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := aliasDB686(t)
+			res, err := db.Execute(context.Background(), tc.sql)
+			if err != nil {
+				t.Fatalf("%s: %v — PostgreSQL 17.11 answers %s", tc.sql, err, tc.tag)
+			}
+			if got := fmt.Sprintf("%s %d", res.Command, res.RowsAffected); got != tc.tag {
+				t.Errorf("%s: command tag %q, want %q", tc.sql, got, tc.tag)
+			}
+			if after := strings.Join(aliasRows686(t, db), " "); after != tc.after {
+				t.Errorf("%s: pr is %q, want %q", tc.sql, after, tc.after)
+			}
+		})
+	}
+}
+
 func TestDMLWhereThePTSpellingsAreReadInFull(t *testing.T) {
 	for _, tc := range []struct {
 		name, sql, state, tag string

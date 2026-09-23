@@ -10,6 +10,8 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
+	"github.com/derekmwright/wadjet/internal/planner/syscatalog"
+	"github.com/derekmwright/wadjet/internal/planner/syscatalog/sysrows"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -124,7 +126,11 @@ func (p *Planner) buildScan(ctx context.Context, node *logical.Node) (exec.Sourc
 		}
 		var source exec.Source
 		var readerSchema []parquet.Column
-		if node.FuncName == "unnest" {
+		if rel, ok := syscatalog.ByFuncName(node.FuncName); ok {
+			// A system relation, materialized from this planner's catalog
+			// through the identity's view on ctx (sysrows.Source).
+			source = sysrows.NewSource(rel, p.Catalog)
+		} else if node.FuncName == "unnest" {
 			us, err := newUnnestSource(node.FuncArgs, node.WithOrdinality)
 			if err != nil {
 				return nil, nil, nil, fmt.Errorf("unnest: %w", err)

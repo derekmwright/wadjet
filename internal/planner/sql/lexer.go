@@ -52,6 +52,10 @@ const (
 	TokenLTEq            // <=
 	TokenGT              // >
 	TokenGTEq            // >=
+	// TokenRegexOp is one of PostgreSQL's pattern-match operators, spelled
+	// in val: ~ ~* !~ !~* (POSIX regular expression) and ~~ ~~* !~~ !~~*
+	// (LIKE and ILIKE's operator spellings).
+	TokenRegexOp
 
 	// Keywords (case-insensitive, val is always uppercase)
 	TokenKWCreate
@@ -711,7 +715,13 @@ func lexStart(l *lexer) stateFn {
 			l.emit(TokenNotEq)
 			return nil
 		}
+		if l.peek() == '~' {
+			l.next()
+			return lexRegexOpTail(l, "!~")
+		}
 		return l.errorf("unexpected character: !")
+	case r == '~':
+		return lexRegexOpTail(l, "~")
 	case r == '<':
 		p := l.peek()
 		if p == '=' {
@@ -776,6 +786,24 @@ func lexStart(l *lexer) stateFn {
 	default:
 		return l.errorf("unexpected character: %c", r)
 	}
+}
+
+// lexRegexOpTail finishes a pattern-match operator whose leading `~` or `!~`
+// has been consumed: an optional second `~` (the LIKE spelling) and an
+// optional `*` (case-insensitive). PostgreSQL's operator lexer takes the
+// longest run of operator characters, and these eight are the runs that name
+// an operator it has; anything longer is its "operator does not exist".
+func lexRegexOpTail(l *lexer, op string) stateFn {
+	if l.peek() == '~' {
+		l.next()
+		op += "~"
+	}
+	if l.peek() == '*' {
+		l.next()
+		op += "*"
+	}
+	l.emitVal(TokenRegexOp, op)
+	return nil
 }
 
 // lexString scans a single-quoted string literal.

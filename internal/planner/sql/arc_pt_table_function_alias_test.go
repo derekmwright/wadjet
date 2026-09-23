@@ -62,10 +62,13 @@ func TestArcPTParserReadsATableFunctionsColumnAliasList(t *testing.T) {
 		{name: "with_ordinality_short_list_renames_a_prefix",
 			sql:   `SELECT * FROM unnest(1,2) WITH ORDINALITY AS u(v)`,
 			alias: "u", cols: []string{"v"}, pg: "1|1;2|2, published as v and ordinality"},
-		// An alias with NO list stays an alias: the item keeps the
-		// function's own column names.
+		// An alias with NO list names the ONE column of a function that
+		// returns a base type as well as the relation: PostgreSQL 17.11
+		// publishes this item's column as `g`, and `generate_series` is then
+		// no column of it (arc PC measured the name; this cell had asserted
+		// only the values).
 		{name: "alias_without_a_list", sql: `SELECT * FROM generate_series(1,3) AS g`,
-			alias: "g", cols: nil, pg: "1;2;3"},
+			alias: "g", cols: []string{"g"}, pg: "1;2;3 under the column g"},
 		{name: "no_alias_at_all", sql: `SELECT * FROM generate_series(1,3)`,
 			alias: "generate_series", cols: nil, pg: "1;2;3"},
 

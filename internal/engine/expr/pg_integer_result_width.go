@@ -140,6 +140,16 @@ var pgIntegerResultWidths = map[string]PGIntegerResult{
 	// PostgreSQL has no sum(oid) at all, so neither width is its answer; int4
 	// is the value's own.
 	"pg_my_temp_schema": {Width: PGIntWidth4},
+	// array_upper/array_lower declare integer on 17.11. The reg* reads and
+	// to_regclass answer an OID, which PostgreSQL types oid and has no sum()
+	// for (as pg_my_temp_schema above); int8 is the width that holds one.
+	"array_upper":    {Width: PGIntWidth4},
+	"array_lower":    {Width: PGIntWidth4},
+	"regclassin":     {Width: PGIntWidth8},
+	"regtypein":      {Width: PGIntWidth8},
+	"regnamespacein": {Width: PGIntWidth8},
+	"regrolein":      {Width: PGIntWidth8},
+	"to_regclass":    {Width: PGIntWidth8},
 	// vector_dims is pgvector's, and it declares integer.
 	"vector_dims": {Width: PGIntWidth4},
 	// bit_count is PostgreSQL's own, and it declares BIGINT even though a

@@ -1204,6 +1204,13 @@ func (b *binder) resolveSource(ctx context.Context, tr *plansql.TableRef, latera
 	// readerPlanTimeSchema reads once the door has authorized the capability,
 	// and stays OPEN only when it reads none: no authorization record on the
 	// context, an http(s) or read-once input, a database reader, an empty one.
+	// An unqualified system-relation name is a WITH query's first
+	// (plansql.resolveSystemRelation): give it back before resolving.
+	if tr.SystemShadowable {
+		if _, ok := b.ctes[strings.ToLower(tr.SystemWritten)]; ok {
+			tr.UnresolveSystemRelation()
+		}
+	}
 	if tr.IsFunction {
 		cols, known := tableFuncDeclaredSchema(tr.Name, tr.FuncArgs, tr.WithOrdinality)
 		if !known {

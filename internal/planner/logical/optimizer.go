@@ -1528,6 +1528,10 @@ func unwrapSubquery(expr plansql.Node) *plansql.SubqueryNode {
 	}
 	switch e := expr.(type) {
 	case *plansql.SubqueryNode:
+		if e.Array {
+			// ARRAY(subquery) is not a scalar: it is never a join key.
+			return nil
+		}
 		return e
 	case *plansql.ParenNode:
 		return unwrapSubquery(e.Inner)

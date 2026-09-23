@@ -208,3 +208,11 @@ func raiseRealConversionError(operand Expr, f float64, fit kernel.Float32Fit) {
 	}
 	panic(fatalEval{sqlerr.New("22003", "value out of range: %s", kind)})
 }
+
+// RaiseFatal aborts the evaluation in progress with err, through the same
+// channel every expression refusal uses (fatalEval). It is for a
+// CatalogResolver, whose answers are read inside an evaluation that has no
+// error return.
+func RaiseFatal(err error) {
+	panic(fatalEval{err})
+}

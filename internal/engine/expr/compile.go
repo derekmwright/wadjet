@@ -15,6 +15,9 @@ import (
 
 // compileContext holds optional state for expression compilation.
 type compileContext struct {
+	// catalog answers the catalog functions (pg_catalog_fns.go) for this
+	// statement's identity; nil refuses them by name.
+	catalog     CatalogResolver
 	runner      SubqueryRunner
 	outerTables map[string]bool      // table aliases from the outer query scope
 	outerCols   map[string]string    // column name → table mapping for unqualified resolution
@@ -712,6 +715,18 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 				if refusal := refuseUnrebuildableBody("scalar", n.SQL, info, refs, ctx.outerTables); refusal != nil {
 					return nil, refusal
 				}
+				if info != nil && n.Array {
+					return &ArraySubquery{SQL: n.SQL, Runner: ctx.runner, Cols: ctx.subqueryCols,
+						Scope: ctx.subqueryScope, Corr: &CorrelatedScalarSubquery{
+							Scope:           ctx.subqueryScope,
+							Cols:            ctx.subqueryCols,
+							Runner:          ctx.runner,
+							OuterRefs:       refs,
+							OuterTables:     ctx.outerTables,
+							ParsedInfo:      info,
+							UnqualOuterCols: buildUnqualOuterCols(refs, ctx.outerCols),
+						}}, nil
+				}
 				if info != nil {
 					cs := &CorrelatedScalarSubquery{
 						Scope:           ctx.subqueryScope,
@@ -736,6 +751,10 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 					return cs, nil
 				}
 			}
+		}
+		if n.Array {
+			return &ArraySubquery{SQL: n.SQL, Runner: ctx.runner, Cols: ctx.subqueryCols,
+				Scope: ctx.subqueryScope}, nil
 		}
 		sq := &ScalarSubquery{SQL: n.SQL, Runner: ctx.runner, Cols: ctx.subqueryCols, Scope: ctx.subqueryScope}
 		// The subquery's OUTPUT declaration, so the boxed comparison can read
@@ -1328,6 +1347,11 @@ func compileFuncCallNamed(n *plansql.FuncCallNode, ctx *compileContext, checked 
 	// shape — #607).
 	if name == "element_at" && len(args) == 2 {
 		return &elementAtExpr{arg0: args[0], arg1: args[1]}, nil
+	}
+
+	// A catalog function is bound to the statement's catalog view.
+	if e, ok, err := compileCatalogCall(name, args, ctx); ok {
+		return e, err
 	}
 
 	fc := &FuncCall{Name: name, Args: args}

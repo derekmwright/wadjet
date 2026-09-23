@@ -138,7 +138,7 @@ func TestArcTFATableFunctionInFromIsARelation(t *testing.T) {
 			sql: `SELECT * FROM ` + rc + ` ORDER BY a`, want: "[a,b] 1|x;2|y", pg: "the file's columns"},
 		{name: "a_qualified_star_over_a_declared_function_answers",
 			sql:  `SELECT g.* FROM generate_series(1,2) AS g`,
-			want: "[generate_series] 1;2", pg: "1;2"},
+			want: "[g] 1;2", pg: "1;2, under the column g (arc PC measured the name)"},
 
 		// ---- 2. correlation binds (#1203) -------------------------------
 		{name: "correlated_count_over_generate_series",

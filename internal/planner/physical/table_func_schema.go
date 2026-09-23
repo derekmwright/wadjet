@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/derekmwright/wadjet/internal/planner/syscatalog"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
@@ -30,6 +31,11 @@ import (
 // refused at its FIRST BATCH (table_func_required.go). ok=false means "not
 // knowable from the call", the caller's signal to ask the reader path.
 func tableFuncDeclaredSchema(funcName string, args []string, withOrdinality bool) ([]parquet.Column, bool) {
+	// A SYSTEM RELATION's columns are its definition's (package syscatalog):
+	// the parser resolved `pg_catalog.pg_class` to a FROM item of this name.
+	if rel, ok := syscatalog.ByFuncName(funcName); ok {
+		return append([]parquet.Column(nil), rel.Columns...), true
+	}
 	switch strings.ToLower(funcName) {
 	case "generate_series":
 		if len(args) < 2 || len(args) > 3 {

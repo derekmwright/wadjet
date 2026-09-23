@@ -229,6 +229,11 @@ func unfoldIn(n Node, scope map[string]bool, hasFrom bool) Node {
 	}
 	switch e := n.(type) {
 	case *SubqueryNode:
+		if e.Array {
+			// ARRAY(subquery) forms an array of rows; it is not a scalar
+			// that a FROM-less body can be unfolded into.
+			return e
+		}
 		if repl, ok := fromlessScalarExpr(e.SQL, scope, hasFrom); ok {
 			// To a FIXED POINT: `(SELECT (SELECT u.x))` is `(SELECT u.x)` is
 			// `u.x`, and each unfold hands back a strictly shorter statement,

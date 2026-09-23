@@ -103,10 +103,10 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 			if len(aggOuterTables) > 0 {
 				compiled, compErr = expr.CompileWithScopeResolver(agg.InputExpr, p.subqueryRunner,
 					aggOuterTables, aggOuterCols, p.SubqueryInnerColumns(),
-					p.subqueryDeclOption(), p.subqueryBudgetOption())
+					p.subqueryDeclOption(), p.subqueryBudgetOption(), p.catalogOption())
 			} else {
 				compiled, compErr = expr.CompileWithRunner(agg.InputExpr, p.subqueryRunner,
-					p.subqueryDeclOption(), p.subqueryBudgetOption())
+					p.subqueryDeclOption(), p.subqueryBudgetOption(), p.catalogOption())
 			}
 			if expr.IsCompileRefusal(compErr) {
 				return nil, nil, nil, compErr
@@ -370,7 +370,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 				if _, isLit := gbExpr.(*plansql.Lit); !isLit {
 					continue
 				}
-				compiled, compErr := expr.CompileWithRunner(gbExpr, p.subqueryRunner, p.subqueryDeclOption(), p.subqueryBudgetOption())
+				compiled, compErr := expr.CompileWithRunner(gbExpr, p.subqueryRunner, p.subqueryDeclOption(), p.subqueryBudgetOption(), p.catalogOption())
 				if expr.IsCompileRefusal(compErr) {
 					return nil, nil, nil, compErr
 				}
@@ -413,7 +413,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 				// GroupByOutNames below, which is what keeps the two
 				// engines' output schemas equal (#720, ADR-0026).
 				synName := keyOuts[i].Slot
-				compiled, compErr := expr.CompileWithRunner(gbExpr, p.subqueryRunner, p.subqueryDeclOption(), p.subqueryBudgetOption())
+				compiled, compErr := expr.CompileWithRunner(gbExpr, p.subqueryRunner, p.subqueryDeclOption(), p.subqueryBudgetOption(), p.catalogOption())
 				if expr.IsCompileRefusal(compErr) {
 					return nil, nil, nil, compErr
 				}

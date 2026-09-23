@@ -502,7 +502,7 @@ func CanonicalSubqueryTerms(n Node, unqualify bool) Node {
 		if !ok {
 			return nil, false
 		}
-		return &SubqueryNode{SQL: canonicalSubquerySQL(sq.SQL, unqualify)}, true
+		return &SubqueryNode{SQL: canonicalSubquerySQL(sq.SQL, unqualify), Array: sq.Array}, true
 	})
 }
 

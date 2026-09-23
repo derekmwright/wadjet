@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/derekmwright/wadjet/internal/planner/syscatalog"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
@@ -1115,6 +1116,12 @@ func (p *selectParser) parseTableRefTail() (TableRef, error) {
 	qualifier := ""
 	for p.peek() == TokenDot {
 		p.advance() // consume .
+		// A name AFTER a dot may be any keyword: PostgreSQL's grammar takes
+		// a ColLabel there, which is how information_schema.columns and
+		// information_schema.tables are spelled at all.
+		if p.cur.typ >= TokenKWCreate && p.cur.typ < TokenRawBody {
+			p.cur = token{typ: TokenIdent, val: strings.ToLower(p.cur.val), pos: p.cur.pos}
+		}
 		partTok, err := p.expect(TokenIdent)
 		if err != nil {
 			return TableRef{}, fmt.Errorf("expected name after %q.", name)
@@ -1125,6 +1132,11 @@ func (p *selectParser) parseTableRefTail() (TableRef, error) {
 			qualifier += "." + name
 		}
 		name = partTok.val
+	}
+	// pg_catalog.unnest(…), pg_catalog.generate_series(…): a built-in table
+	// function named by the schema it lives in.
+	if qualifier == "pg_catalog" && p.peek() == TokenLParen {
+		return p.parseTableFunction(name)
 	}
 
 	tr := TableRef{Name: name, Qualifier: qualifier, Alias: name}
@@ -1181,9 +1193,63 @@ func (p *selectParser) parseTableRefTail() (TableRef, error) {
 		}
 		if len(tr.ColumnAliases) > 0 {
 			lowerNamedRelationColumnAliases(&tr)
+			// The lowered body is `SELECT * FROM <name>`, which resolves a
+			// system relation when it is parsed in turn.
+			return tr, nil
 		}
 	}
+	resolveSystemRelation(&tr)
 	return tr, nil
+}
+
+// resolveSystemRelation turns a FROM item that names a system relation —
+// pg_catalog.pg_class, information_schema.columns, or an unqualified pg_catalog
+// name — into the scan of that relation (package syscatalog, ADR-0044).
+//
+// It is resolved HERE, where the name is read, so that everything downstream
+// sees a RELATION: the binder closes the scope over its declared columns (an
+// unknown column is 42703, a star expands), the planner scans it, and WHERE,
+// JOIN, aggregates and ORDER BY are the ordinary engine's. It travels as a
+// table-function FROM item named by its schema-qualified name, because that is
+// the path whose every consumer already takes a relation whose columns are
+// declared by its name rather than read from the storage catalog.
+//
+// An unqualified name is pg_catalog's before it is any other schema's —
+// PostgreSQL searches pg_catalog first — but NOT before a WITH query of the
+// same name, which the parser cannot see from here (an enclosing block's WITH
+// list is not in its scope). SystemShadowable marks such a reference, and the
+// binder and the logical builder, which do have the CTE scope, give the name
+// back to the CTE (TableRef.UnresolveSystemRelation).
+func resolveSystemRelation(tr *TableRef) {
+	rel, ok := syscatalog.Resolve(tr.Qualifier, tr.Name, syscatalog.Database)
+	if !ok {
+		return
+	}
+	written := tr.Name
+	if tr.Qualifier != "" {
+		written = tr.Qualifier + "." + tr.Name
+	}
+	alias := tr.Alias
+	tr.SystemWritten = written
+	tr.SystemShadowable = tr.Qualifier == ""
+	tr.Name = rel.FuncName()
+	tr.Qualifier = ""
+	tr.Alias = alias
+	tr.IsFunction = true
+}
+
+// UnresolveSystemRelation gives an unqualified system-relation reference back
+// to the name the query wrote, for a caller that found a WITH query of that
+// name in scope (resolveSystemRelation). It reports whether it did.
+func (t *TableRef) UnresolveSystemRelation() bool {
+	if !t.SystemShadowable || !t.IsFunction {
+		return false
+	}
+	t.Name = t.SystemWritten
+	t.IsFunction = false
+	t.SystemWritten = ""
+	t.SystemShadowable = false
+	return true
 }
 
 // lowerNamedRelationColumnAliases rewrites `FROM t [AS] a (c1, …)` into the
@@ -1356,6 +1422,16 @@ func (p *selectParser) parseTableFunction(name string) (TableRef, error) {
 	if aliased {
 		if err := p.parseColumnAliasList(&tr); err != nil {
 			return TableRef{}, err
+		}
+		// A function returning a BASE type names its one column after the
+		// table alias when no column list is written (§7.2.1.4): `SELECT s
+		// FROM generate_series(1,2) s` reads the series as `s`, and
+		// `generate_series` is then no column of it — measured on 17.11.
+		// Only the two functions whose single column is a base type are
+		// this rule's; a reader's columns are its input's.
+		if len(tr.ColumnAliases) == 0 && (strings.EqualFold(name, "generate_series") ||
+			strings.EqualFold(name, "unnest")) {
+			tr.ColumnAliases = []string{tr.Alias}
 		}
 	}
 	return tr, nil
@@ -2016,19 +2092,133 @@ func (p *selectParser) parseBitwise() (Node, error) {
 	if err != nil {
 		return nil, err
 	}
-	for p.peek() == TokenHash {
-		p.advance()
+	for {
+		var op string
+		switch {
+		case p.peek() == TokenHash:
+			p.advance()
+			op = "#"
+		case p.peek() == TokenRegexOp:
+			op = p.advance().val
+		case p.atOperatorSyntax():
+			// `OPERATOR(pg_catalog.~)`: the explicitly schema-qualified
+			// spelling psql writes for every pattern it sends. PostgreSQL
+			// gives the construct THIS band's precedence whatever operator
+			// it names (§4.1.6, "any other operator").
+			var err error
+			if op, err = p.parseOperatorSyntax(); err != nil {
+				return nil, err
+			}
+		default:
+			return left, nil
+		}
 		right, err := p.parseAddition()
 		if err != nil {
 			return nil, err
 		}
-		// An OPERATOR's unaliased result is `?column?` on the server, never
-		// the implementing function's name — the same label `^`, EXTRACT and
-		// POSITION carry through their own rewrites.
-		left = &FuncCallNode{Name: "bitwise_xor", Args: []Node{left, right},
-			OutputLabel: UnnamedOutputColumn}
+		if left, err = binaryOperatorNode(op, left, right); err != nil {
+			return nil, err
+		}
 	}
-	return left, nil
+}
+
+// binaryOperatorNode is the node an operator in the "any other operator" band
+// builds, whether it was written bare or through OPERATOR().
+//
+// The pattern-match operators are PostgreSQL's own functions: `~` is
+// textregexeq, `~*` texticregexeq, `!~` textregexne and `!~*` texticregexne,
+// which is what the server's pg_operator says they call. `~~` and `!~~` are
+// LIKE and NOT LIKE, and `~~*` / `!~~*` ILIKE and NOT ILIKE, built as the
+// LIKE spelling builds them. An OPERATOR's unaliased result is `?column?` on
+// the server, never the implementing function's name — the same label `^`,
+// EXTRACT and POSITION carry through their own rewrites.
+func binaryOperatorNode(op string, left, right Node) (Node, error) {
+	call := func(name string) Node {
+		return &FuncCallNode{Name: name, Args: []Node{left, right}, OutputLabel: UnnamedOutputColumn}
+	}
+	switch op {
+	case "#":
+		return call("bitwise_xor"), nil
+	case "~":
+		return call("textregexeq"), nil
+	case "~*":
+		return call("texticregexeq"), nil
+	case "!~":
+		return call("textregexne"), nil
+	case "!~*":
+		return call("texticregexne"), nil
+	case "~~", "!~~":
+		return &LikeExpr{Left: left, Not: op == "!~~", Pattern: right}, nil
+	case "~~*", "!~~*":
+		return &LikeExpr{
+			Left:    &FuncCallNode{Name: "lower", Args: []Node{left}},
+			Not:     op == "!~~*",
+			Pattern: &FuncCallNode{Name: "lower", Args: []Node{right}},
+		}, nil
+	case "=", "<>", "!=", "<", "<=", ">", ">=":
+		if op == "<>" {
+			op = "!="
+		}
+		return &CmpExpr{Left: left, Op: op, Right: right}, nil
+	}
+	return nil, sqlerr.New("0A000",
+		"OPERATOR(%s) is not supported: write the operator itself", op)
+}
+
+// atOperatorSyntax reports whether the parser stands on `OPERATOR (`.
+func (p *selectParser) atOperatorSyntax() bool {
+	return p.peek() == TokenIdent && !p.cur.quoted && p.cur.val == "operator" &&
+		p.peekN(1) == TokenLParen
+}
+
+// parseOperatorSyntax reads `OPERATOR ( [schema .] op )` and returns op.
+//
+// The schema, when written, must be pg_catalog: every operator this engine
+// has is a built-in, and PostgreSQL resolves an operator named in any other
+// schema there (42883 when the schema has none of that name).
+func (p *selectParser) parseOperatorSyntax() (string, error) {
+	p.advance() // OPERATOR
+	p.advance() // (
+	if p.peek() == TokenIdent && p.peekN(1) == TokenDot {
+		schema := p.advance().val
+		p.advance() // .
+		if schema != "pg_catalog" {
+			return "", sqlerr.New("42883", "operator does not exist: %s.", schema)
+		}
+	}
+	var op string
+	switch t := p.advance(); t.typ {
+	case TokenRegexOp:
+		op = t.val
+	case TokenEq:
+		op = "="
+	case TokenNotEq:
+		op = t.val
+		if op != "<>" {
+			op = "!="
+		}
+	case TokenLT:
+		op = "<"
+	case TokenLTEq:
+		op = "<="
+	case TokenGT:
+		op = ">"
+	case TokenGTEq:
+		op = ">="
+	case TokenHash:
+		op = "#"
+	case TokenPlus, TokenMinus, TokenStar, TokenSlash, TokenPercent, TokenCaret, TokenConcat:
+		op = t.val
+		if op == "" {
+			op = "?"
+		}
+	default:
+		return "", fmt.Errorf("syntax error in OPERATOR(): expected an operator at position %d", t.pos)
+	}
+	if _, err := p.expect(TokenRParen); err != nil {
+		return "", fmt.Errorf("expected ) after OPERATOR(%s", op)
+	}
+	return op, nil
 }
 
 // symmetricBetween is `a BETWEEN SYMMETRIC b AND c`, expanded to the pair of
@@ -2181,12 +2371,12 @@ func (p *selectParser) parsePower() (Node, error) {
 // tighter (parseUnary) and a chain groups as `(ts AT TIME ZONE a) AT TIME
 // ZONE b`.
 func (p *selectParser) parseAtTimeZone() (Node, error) {
-	left, err := p.parseUnary()
+	left, err := p.parseCollate()
 	if err != nil {
 		return nil, err
 	}
 	for p.matchAtTimeZone() {
-		zone, err := p.parseUnary()
+		zone, err := p.parseCollate()
 		if err != nil {
 			return nil, fmt.Errorf("expected time zone after AT TIME ZONE: %w", err)
 		}
@@ -2230,6 +2420,55 @@ func (p *selectParser) matchAtTimeZone() bool {
 	p.advance() // TIME
 	p.advance() // ZONE
 	return true
+}
+
+// parseCollate reads `expr COLLATE collation`, which binds tighter than AT
+// TIME ZONE and looser than unary minus (§4.1.6).
+//
+// This server compares text by its BYTES, which is the order of exactly the
+// collations whose order is byte order — C and POSIX, ucs_basic (code point
+// order, which for UTF-8 is byte order), and the database's default, which
+// here is that same order. Naming one of them changes nothing and is
+// accepted; psql writes `COLLATE pg_catalog.default` after every pattern it
+// sends. Any other collation would ORDER and COMPARE differently, and is
+// refused rather than silently compared by bytes.
+func (p *selectParser) parseCollate() (Node, error) {
+	left, err := p.parseUnary()
+	if err != nil {
+		return nil, err
+	}
+	for p.peek() == TokenIdent && !p.cur.quoted && p.cur.val == "collate" {
+		p.advance()
+		nameTok, err := p.expect(TokenIdent)
+		if err != nil {
+			return nil, fmt.Errorf("expected a collation name after COLLATE")
+		}
+		name := nameTok.val
+		if p.peek() == TokenDot {
+			p.advance()
+			schema := name
+			if p.cur.typ >= TokenKWCreate && p.cur.typ < TokenRawBody {
+				p.cur = token{typ: TokenIdent, val: strings.ToLower(p.cur.val), pos: p.cur.pos}
+			}
+			part, err := p.expect(TokenIdent)
+			if err != nil {
+				return nil, fmt.Errorf("expected a collation name after %s.", schema)
+			}
+			if schema != "pg_catalog" {
+				return nil, sqlerr.New("42704", "collation \"%s.%s\" for encoding \"UTF8\" does not exist",
+					schema, part.val)
+			}
+			name = part.val
+		}
+		switch name {
+		case "C", "POSIX", "default", "ucs_basic":
+		default:
+			return nil, sqlerr.New("0A000",
+				"collation %q is not supported: this server compares text by its bytes, "+
+					"the order of the C collation", name)
+		}
+	}
+	return left, nil
 }
 
 func (p *selectParser) parseUnary() (Node, error) {
@@ -2283,17 +2522,11 @@ func (p *selectParser) parsePostfix() (Node, error) {
 		case TokenDoubleColon:
 			// PostgreSQL-style type cast: expr::type
 			p.advance() // consume ::
-			typeTok, err := p.expect(TokenIdent)
+			typeName, err := p.parseCastTypeName()
 			if err != nil {
-				return nil, fmt.Errorf("expected type name after ::")
+				return nil, fmt.Errorf("expected type name after ::: %w", err)
 			}
-			typeName := strings.ToLower(typeTok.val)
-			typeName = p.maybeExtendTwoWordType(typeName)
-			// Optional precision: ::decimal(10,2)
-			if p.peek() == TokenLParen {
-				typeName += p.consumeTypeParams()
-			}
-			expr = &CastNode{Inner: expr, TypeName: typeName}
+			expr = buildCast(expr, typeName)
 		case TokenLBracket:
 			// Subscript: expr[index] → element_at(expr, index)
 			p.advance() // consume [
@@ -2662,6 +2895,17 @@ func (p *selectParser) parsePrimary() (Node, error) {
 			p.advance() // consume ARRAY
 			return p.parseArrayLiteral()
 		}
+		// ARRAY(subquery): the array of a subquery's rows.
+		if upper == "ARRAY" && p.peekN(1) == TokenLParen &&
+			(p.peekN(2) == TokenKWSelect || p.peekN(2) == TokenKWWith) {
+			p.advance() // ARRAY
+			p.advance() // (
+			subSQL := p.consumeBalancedParens()
+			if _, err := p.expect(TokenRParen); err != nil {
+				return nil, fmt.Errorf("expected ) after ARRAY subquery")
+			}
+			return &SubqueryNode{SQL: subSQL, Array: true}, nil
+		}
 		return p.parseIdentExpr()
 
 	default:
@@ -2742,9 +2986,29 @@ func (p *selectParser) parseIdentExpr() (Node, error) {
 			p.advance()
 			return &StarNode{Table: name.val}, nil
 		}
+		// A FUNCTION name after a schema may be any keyword (PostgreSQL's
+		// ColLabel): `pg_catalog.left(…)`, `pg_catalog.replace(…)`. A keyword
+		// as a qualified COLUMN name is #1215's, and is left to it.
+		if p.cur.typ >= TokenKWCreate && p.cur.typ < TokenRawBody && p.peekN(1) == TokenLParen {
+			p.cur = token{typ: TokenIdent, val: strings.ToLower(p.cur.val), pos: p.cur.pos}
+		}
 		colTok, err := p.expect(TokenIdent)
 		if err != nil {
 			return nil, fmt.Errorf("expected column name after '.'")
+		}
+		// schema.function(…): a schema-qualified call. Every built-in
+		// function lives in pg_catalog, which is where PostgreSQL resolves
+		// `pg_catalog.format_type(…)` — the spelling psql, pgJDBC and every
+		// catalog query write — and a user function lives in public.
+		if p.peek() == TokenLParen {
+			switch name.val {
+			case "pg_catalog", "public":
+				return p.parseFuncCall(colTok.val)
+			case "information_schema":
+				return nil, sqlerr.New("42883",
+					"function information_schema.%s does not exist", colTok.val)
+			}
+			return nil, sqlerr.New("3F000", "schema %q does not exist", name.val)
 		}
 		col := &ColRef{Table: name.val, Column: colTok.val}
 		// Check for table.column.func() — not supported, but just return the ref
@@ -3183,24 +3447,131 @@ func (p *selectParser) parseCastExpr() (Node, error) {
 		return nil, fmt.Errorf("expected AS in CAST")
 	}
 
-	typeTok, err := p.expect(TokenIdent)
+	typeName, err := p.parseCastTypeName()
 	if err != nil {
-		return nil, fmt.Errorf("expected type name in CAST")
-	}
-
-	typeName := strings.ToLower(typeTok.val)
-	typeName = p.maybeExtendTwoWordType(typeName)
-
-	// Handle parameterized types: ARRAY(...), ROW(...), MAP(...), DECIMAL(...)
-	if p.cur.typ == TokenLParen {
-		typeName += p.consumeTypeParams()
+		return nil, fmt.Errorf("expected type name in CAST: %w", err)
 	}
 
 	if _, err := p.expect(TokenRParen); err != nil {
 		return nil, fmt.Errorf("expected ) after CAST")
 	}
 
-	return &CastNode{Inner: inner, TypeName: typeName}, nil
+	return buildCast(inner, typeName), nil
+}
+
+// parseCastTypeName reads a cast's destination type: a name, optionally
+// qualified by pg_catalog (where every built-in type lives, and the spelling
+// psql and pgJDBC write — `::pg_catalog.regtype`), a two-word name, a
+// parameter list, and PostgreSQL's array suffix `[]` (or `[n]`, whose bound
+// PostgreSQL ignores), which is the engine's ARRAY(t).
+func (p *selectParser) parseCastTypeName() (string, error) {
+	typeTok, err := p.expect(TokenIdent)
+	if err != nil {
+		return "", err
+	}
+	typeName := strings.ToLower(typeTok.val)
+	if p.peek() == TokenDot {
+		if typeName != "pg_catalog" {
+			// A type in any other schema is one this server does not have.
+			p.advance()
+			rest := p.advance()
+			return "", sqlerr.New("42704", "type \"%s.%s\" does not exist", typeTok.val, rest.val)
+		}
+		p.advance() // consume .
+		if p.cur.typ >= TokenKWCreate && p.cur.typ < TokenRawBody {
+			p.cur = token{typ: TokenIdent, val: strings.ToLower(p.cur.val), pos: p.cur.pos}
+		}
+		nameTok, err := p.expect(TokenIdent)
+		if err != nil {
+			return "", err
+		}
+		typeName = strings.ToLower(nameTok.val)
+	}
+	typeName = p.maybeExtendTwoWordType(typeName)
+	// Handle parameterized types: ARRAY(...), ROW(...), MAP(...), DECIMAL(...)
+	if p.peek() == TokenLParen {
+		typeName += p.consumeTypeParams()
+	}
+	for p.peek() == TokenLBracket &&
+		(p.peekN(1) == TokenRBracket || (p.peekN(1) == TokenNumber && p.peekN(2) == TokenRBracket)) {
+		p.advance() // [
+		if p.peek() == TokenNumber {
+			p.advance()
+		}
+		p.advance() // ]
+		typeName = "array(" + typeName + ")"
+	}
+	return typeName, nil
+}
+
+// buildCast is the node a cast to typeName builds.
+//
+// PostgreSQL's reg* types (regclass, regtype, regnamespace, regrole,
+// regproc) are OIDs that PRINT as names, and a catalog query uses them both
+// ways: `'pg_class'::regclass` to compare an OID column with a relation it
+// names (pgJDBC), `c.oid::regclass` to print one (psql). This engine has no
+// such dual type, so the cast is resolved by what it is applied to:
+//
+//   - a string LITERAL is a name being read: regclassin('pg_class') and its
+//     siblings, which answer the OID (or PostgreSQL's refusal for a name that
+//     names nothing) and compare as the integer an OID column holds;
+//   - anything else is an OID being printed: regclassout(c.oid), which answers
+//     the name (or the number, for an OID that names nothing).
+//
+// `::oid` after a read keeps the OID; `::oid` after a print is the OID it
+// printed. The one spelling that answers differently from PostgreSQL is a
+// literal read that is then PRINTED — `SELECT 'o'::regclass` shows the OID
+// where PostgreSQL shows `o` — which docs/postgres-differences.md records.
+func buildCast(inner Node, typeName string) Node {
+	lit, isLit := inner.(*Lit)
+	isStringLit := isLit && lit.Kind == LitString
+	// PostgreSQL labels a cast of a literal with the type's name and a cast
+	// of anything else with the operand's own label.
+	label := func(typ string) string {
+		if isLit {
+			return typ
+		}
+		return exprOutputName(inner)
+	}
+	regCall := func(in, out, typ string) Node {
+		if isStringLit {
+			return &FuncCallNode{Name: in, Args: []Node{inner}, OutputLabel: label(typ)}
+		}
+		return &FuncCallNode{Name: out, Args: []Node{inner}, OutputLabel: label(typ)}
+	}
+	switch typeName {
+	case "regclass":
+		return regCall("regclassin", "regclassout", "regclass")
+	case "regtype":
+		return regCall("regtypein", "regtypeout", "regtype")
+	case "regnamespace":
+		return regCall("regnamespacein", "regnamespaceout", "regnamespace")
+	case "regrole":
+		return regCall("regrolein", "regroleout", "regrole")
+	case "regproc", "regprocedure":
+		// This server lists no functions, and its catalog carries a regproc
+		// column as the function's NAME (pg_type.typinput is `array_in`), so
+		// a name read is the name, unqualified.
+		if isStringLit {
+			return &Lit{Value: strings.TrimPrefix(lit.Value, "pg_catalog."), Kind: LitString}
+		}
+		return &FuncCallNode{Name: "regprocout", Args: []Node{inner}, OutputLabel: label("regproc")}
+	case "oid":
+		if fn, ok := inner.(*FuncCallNode); ok {
+			switch fn.Name {
+			case "regclassin", "regtypein", "regnamespacein", "regrolein":
+				read := *fn
+				read.OutputLabel = "oid"
+				return &read
+			case "regclassout", "regtypeout", "regnamespaceout", "regroleout", "regprocout":
+				return &CastNode{Inner: fn.Args[0], TypeName: "bigint"}
+			}
+		}
+		return &CastNode{Inner: inner, TypeName: "bigint"}
+	case "name":
+		return &CastNode{Inner: inner, TypeName: "text"}
+	}
+	return &CastNode{Inner: inner, TypeName: typeName}
 }
 
 // parseExtractExpr parses EXTRACT(field FROM expr) and rewrites to field(expr).

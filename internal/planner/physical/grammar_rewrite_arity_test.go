@@ -200,6 +200,22 @@ func grammarRewriteSpellings() []grammarRewrite {
 		{"like_escape", `s LIKE 'a' ESCAPE '#'`, "like_escape", 3},
 		{"not_like_escape", `s NOT LIKE 'a' ESCAPE '#'`, "like_escape", 3},
 		{"ilike_escape", `s ILIKE 'A' ESCAPE '#'`, "like_escape", 3},
+		// --- the pattern-match operators and their OPERATOR() spelling, and
+		// the reg* casts a catalog query writes (arc PC).
+		{"regex_match", `s ~ 'a'`, "textregexeq", 2},
+		{"regex_match_ci", `s ~* 'a'`, "texticregexeq", 2},
+		{"regex_no_match", `s !~ 'a'`, "textregexne", 2},
+		{"regex_no_match_ci", `s !~* 'a'`, "texticregexne", 2},
+		{"operator_syntax", `s OPERATOR(pg_catalog.~) 'a'`, "textregexeq", 2},
+		{"regclass_read", `'pg_class'::regclass`, "regclassin", 1},
+		{"regclass_print", `n::regclass`, "regclassout", 1},
+		{"regtype_read", `'int4'::regtype`, "regtypein", 1},
+		{"regtype_print", `n::regtype`, "regtypeout", 1},
+		{"regnamespace_read", `'public'::regnamespace`, "regnamespacein", 1},
+		{"regnamespace_print", `n::regnamespace`, "regnamespaceout", 1},
+		{"regrole_read", `'wadjet'::regrole`, "regrolein", 1},
+		{"regrole_print", `n::regrole`, "regroleout", 1},
+		{"regproc_print", `n::regproc`, "regprocout", 1},
 		// --- `a # b` -> bitwise_xor(a, b), PostgreSQL's integer XOR (#1179).
 		{"hash_xor_operator", `5 # 3`, "bitwise_xor", 2},
 		{"hash_xor_left_associative", `5 # 3 # 2`, "bitwise_xor", 2},

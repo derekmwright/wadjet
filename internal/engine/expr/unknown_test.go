@@ -216,6 +216,10 @@ func TestPgCompatShimsRegistered(t *testing.T) {
 		"pg_opclass_is_visible",
 		"obj_description", "col_description", "shobj_description",
 		"quote_ident", "quote_literal", "array_to_string",
+		// The catalog functions (pg_catalog_fns.go): answered from the
+		// statement's catalog view, so the NULL-for-every-table hazard the
+		// unshimmed list below guards is not theirs.
+		"to_regclass", "pg_get_serial_sequence", "pg_get_userbyid", "format_type",
 	} {
 		if !DefaultRegistry.Has(name) {
 			t.Errorf("pg compat shim %q is not registered", name)
@@ -275,15 +279,15 @@ func TestPgCompatValues(t *testing.T) {
 }
 
 // TestUnshimmedIntrospectionErrors pins the other half of the decision: the
-// pg_catalog functions deliberately left unimplemented. Each needs catalog or
-// storage state a scalar function cannot reach, and a plausible-looking wrong
-// answer from one of them is worse than a named error — to_regclass in
-// particular returns NULL for "no such table", so a NULL shim would report
-// every table in the database as missing.
+// pg_catalog functions deliberately left unimplemented. Each needs state no
+// catalog view answers — a relation's storage size, a function's definition —
+// and a plausible-looking wrong answer from one of them is worse than a named
+// error. to_regclass and pg_get_serial_sequence left this list when the
+// catalog became relations the planner can bind a function to (ADR-0044).
 func TestUnshimmedIntrospectionErrors(t *testing.T) {
 	for _, name := range []string{
-		"pg_get_functiondef", "pg_get_partkeydef", "pg_get_serial_sequence",
-		"pg_relation_size", "pg_total_relation_size", "to_regclass", "pg_sleep",
+		"pg_get_functiondef", "pg_get_partkeydef",
+		"pg_relation_size", "pg_total_relation_size", "pg_sleep", "pg_database_size",
 	} {
 		if err := checkKnown(name); err == nil {
 			t.Errorf("%s: expected an error, got nil — if this was implemented "+

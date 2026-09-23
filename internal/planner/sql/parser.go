@@ -650,10 +650,20 @@ type TableRef struct {
 	// where PostgreSQL answers the correlated count (#1203). The arguments
 	// cannot be rebuilt from FuncArgs: the lexer strips a string literal's
 	// quotes, so a path and an identifier are the same bytes by then.
-	FuncCallText  string
-	ColumnAliases []string // AS alias(col1, col2, ...)
-	SampleMethod  string   // TABLESAMPLE method: BERNOULLI, SYSTEM
-	SamplePercent string   // percentage for TABLESAMPLE
+	FuncCallText string
+	// SystemWritten is the name a SYSTEM RELATION reference was written with
+	// (`pg_class`, `pg_catalog.pg_class`, `information_schema.columns`), set
+	// when the parser resolved it to that relation's scan (Name is then the
+	// relation's schema-qualified name and IsFunction is set; see
+	// resolveSystemRelation). A statement rebuilt from this tree writes the
+	// name back as the client wrote it, so it resolves the same way again.
+	SystemWritten string
+	// SystemShadowable marks an UNQUALIFIED system-relation reference: a WITH
+	// query of the same name in scope takes it back (UnresolveSystemRelation).
+	SystemShadowable bool
+	ColumnAliases    []string // AS alias(col1, col2, ...)
+	SampleMethod     string   // TABLESAMPLE method: BERNOULLI, SYSTEM
+	SamplePercent    string   // percentage for TABLESAMPLE
 	// ColumnAliasSource is the relation this derived body was LOWERED from,
 	// for the one rewrite that builds a derived table out of a named
 	// relation: `FROM t [AS] a (c1, …)` becomes `FROM (SELECT * FROM t) AS a

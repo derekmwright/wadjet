@@ -20,8 +20,18 @@ import (
 var ErrTableLessSelectDistributed = errors.New(
 	"a table-less SELECT has no distributed stage")
 
-// refuseTableLessSelect returns a typed refusal for the first Dual node
-// anywhere in the plan.
+// refuseTableLessSelect returns a typed refusal for the first source in the
+// plan that reads no stored table: a Dual node, and a TABLE-FUNCTION scan —
+// generate_series, unnest, a file reader, and the system catalog relations
+// (pg_catalog.*, information_schema.*), which are materialized from the
+// catalog by the pipeline that scans them.
+//
+// A table-function scan emits a SCAN stage, which refuseUnbuildableStages
+// exempts because a scan stage resolves its files from the catalog at
+// dispatch — and a table function has no files to resolve, so every such
+// statement failed three task attempts later with `stage scan-0 has no
+// dependencies and no ScanFiles` on every DAG door. It is the #806 shape
+// through a second source kind, refused at the same seam.
 func refuseTableLessSelect(n *logical.Node) error {
 	if n == nil {
 		return nil
@@ -31,6 +41,11 @@ func refuseTableLessSelect(n *logical.Node) error {
 			" with no dependencies and no scan files, which the dispatcher cannot"+
 			" build task inputs for",
 			ErrTableLessSelectDistributed)
+	}
+	if n.Type == logical.NodeScan && n.IsTableFunc {
+		return fmt.Errorf("%w: the table function %s reads no stored table, so its"+
+			" scan stage has no files the dispatcher can build task inputs from",
+			ErrTableLessSelectDistributed, n.FuncName)
 	}
 	for _, child := range n.Children {
 		if err := refuseTableLessSelect(child); err != nil {

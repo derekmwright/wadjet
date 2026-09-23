@@ -140,6 +140,14 @@ func (p *StagePlanner) resolveSubqueryAST(ctx context.Context, node plansql.Node
 
 	switch n := node.(type) {
 	case *plansql.SubqueryNode:
+		// ARRAY(subquery) is a whole result, not a scalar: neither a producer
+		// stage's one-row rule nor a plan-time literal can carry it. The plan
+		// is refused to the coordinator-local pipeline, which forms it.
+		if n.Array {
+			p.refuseCorrelated(fmt.Errorf("%w: an ARRAY(subquery) is formed on the "+
+				"coordinator-local pipeline", ErrCorrelatedSubqueryDistributed))
+			return node
+		}
 		// A subquery that is not self-contained must NOT be deferred to a
 		// producer stage or eagerly executed: standalone, its dangling outer
 		// reference resolves to no column, evaluates NULL, and the query

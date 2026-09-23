@@ -572,7 +572,7 @@ func (p *Planner) windowKeyProjections(keys map[string]windowKey) ([]exec.Projec
 	meta := make([]parquet.Column, 0, len(specs))
 	for _, spec := range specs {
 		k := byName[spec.Name]
-		compiled, err := expr.CompileWithRunner(k.Expr, p.subqueryRunner, p.subqueryBudgetOption())
+		compiled, err := expr.CompileWithRunner(k.Expr, p.subqueryRunner, p.subqueryBudgetOption(), p.catalogOption())
 		if err != nil {
 			return nil, nil, windowKeyCompileError(k.Text, err)
 		}

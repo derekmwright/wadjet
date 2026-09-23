@@ -86,6 +86,7 @@ func (p *Planner) mergeDuplicateScans(node *logical.Node) {
 // Plan converts a logical plan to a physical plan for local execution.
 func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, error) {
 	p.PlanCtx = ctx           // store for subquery runner context propagation
+	p.catResolver = nil       // one catalog view per statement (catalogOption)
 	p.releaseScanCache()      // reset per-query scan cache (drops tracker reservation)
 	p.res = &queryResources{} // reset per-query spill manager + memory tracker
 	p.releaseCTECache()       // reset per-query CTE cache (frees stale spill scratch)

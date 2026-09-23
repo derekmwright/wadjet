@@ -77,6 +77,10 @@ func exprOutputName(n Node) string {
 	case *ArrayLitNode:
 		return "array"
 	case *SubqueryNode:
+		// ARRAY(subquery) is `array`, as the ARRAY[...] constructor is.
+		if e.Array {
+			return "array"
+		}
 		// A scalar subquery takes the name of its own single output column,
 		// which is that block's answer to this same question.
 		if name := subqueryOutputName(e.SQL); name != "" {

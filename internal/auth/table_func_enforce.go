@@ -13,6 +13,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	"github.com/derekmwright/wadjet/internal/planner/physical"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
+	"github.com/derekmwright/wadjet/internal/planner/syscatalog"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
@@ -55,6 +56,12 @@ func AuthorizeTableFunction(ctx context.Context, provider *Provider, protocol st
 		return nil
 	}
 	if pureTableFunctions[strings.ToLower(funcName)] {
+		return nil
+	}
+	// A system relation (pg_catalog.*, information_schema.*) is not a
+	// capability: it opens nothing, and what it shows is filtered to this
+	// identity's view where it is materialized (CatalogAccess).
+	if _, ok := syscatalog.ByFuncName(funcName); ok {
 		return nil
 	}
 	if err := provider.BindError(); err != nil {
@@ -256,7 +263,46 @@ func AuthorizeTableFunctions(ctx context.Context, provider *Provider, protocol s
 				return AuthorizeTableFunction(ctx, provider, protocol, funcName, args, namedArgs)
 			})
 	}
+	ctx = syscatalog.WithAccess(ctx, CatalogAccess(ctx, provider, protocol))
 	return physical.ContextWithReaderSchemaProbe(ctx), nil
+}
+
+// CatalogAccess is the calling identity's view of the storage catalog, which
+// every system relation is materialized through (syscatalog.Access): the
+// relations the shared table decision lets it READ, and on each the columns
+// its column policy does not deny. It is the same decision a SELECT of the
+// relation gets — `tableAccess` for the relation, the evaluator's column
+// decision for its columns — so the catalog lists exactly what the identity
+// can query, and a relation or column it cannot is absent from pg_class,
+// pg_attribute and information_schema alike (ADR-0034's "metadata follows the
+// effective table decision").
+//
+// Nil/disabled auth is the whole catalog, as it always was.
+func CatalogAccess(ctx context.Context, provider *Provider, protocol string) syscatalog.Access {
+	var a syscatalog.Access
+	id := IdentityFromContext(ctx)
+	if id != nil {
+		a.User = id.Name
+	}
+	if provider == nil || !provider.Enabled() {
+		return a
+	}
+	a.VisibleTables = func(ctx context.Context, tables []string) []string {
+		visible := make([]string, 0, len(tables))
+		for _, t := range tables {
+			if tableAccess(ctx, provider, t, ActionRead, protocol) == nil {
+				visible = append(visible, t)
+			}
+		}
+		return visible
+	}
+	if ev := provider.Evaluator(); ev != nil && id != nil {
+		a.DeniedColumns = func(ctx context.Context, table string) map[string]bool {
+			r := newPolicyResolver(ctx, nil, ev, id.ToSubject(), DecisionEnvironment(ctx, protocol))
+			return r.deniedColumns(table)
+		}
+	}
+	return a
 }
 
 // statementTableFunctions lists the table-function FROM items of the block

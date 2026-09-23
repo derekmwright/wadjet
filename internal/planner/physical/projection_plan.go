@@ -307,7 +307,7 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 					aggOutputCol += ")"
 					// Replace inner aggregate with a column reference in the AST
 					rewritten := replaceAggWithColRef(proj.ASTExpr, innerAgg, aggOutputCol)
-					compiled, compErr := expr.CompileWithRunner(rewritten, p.subqueryRunner, p.subqueryBudgetOption())
+					compiled, compErr := expr.CompileWithRunner(rewritten, p.subqueryRunner, p.subqueryBudgetOption(), p.catalogOption())
 					if expr.IsCompileRefusal(compErr) {
 						return nil, nil, nil, compErr
 					}
@@ -352,9 +352,9 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 			var compErr error
 			if len(outerTables) > 0 {
 				if len(outerCols) > 0 {
-					compiled, compErr = expr.CompileWithScopeResolver(astExpr, p.subqueryRunner, outerTables, outerCols, p.SubqueryInnerColumns(), p.subqueryDeclOption(), p.subqueryBudgetOption())
+					compiled, compErr = expr.CompileWithScopeResolver(astExpr, p.subqueryRunner, outerTables, outerCols, p.SubqueryInnerColumns(), p.subqueryDeclOption(), p.subqueryBudgetOption(), p.catalogOption())
 				} else {
-					compiled, compErr = expr.CompileWithScope(astExpr, p.subqueryRunner, outerTables, p.subqueryDeclOption(), p.subqueryBudgetOption())
+					compiled, compErr = expr.CompileWithScope(astExpr, p.subqueryRunner, outerTables, p.subqueryDeclOption(), p.subqueryBudgetOption(), p.catalogOption())
 				}
 			} else {
 				// With the child's DECLARED column types in hand, so a pair
@@ -363,7 +363,7 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 				// always compiled to instead of deferring the question to the
 				// first batch (#555 review).
 				compiled, compErr = expr.CompileWithColumnTypes(
-					astExpr, p.subqueryRunner, childColTypes.Types, p.subqueryBudgetOption())
+					astExpr, p.subqueryRunner, childColTypes.Types, p.subqueryBudgetOption(), p.catalogOption())
 			}
 			// A name nothing implements has no input column to fall back to,
 			// so the direct-copy path below would only re-report it as a

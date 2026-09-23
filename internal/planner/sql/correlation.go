@@ -1015,7 +1015,7 @@ func RewriteOuterRefs(node Node, outerTables map[string]bool, vals map[string]an
 		if sql, ok := rewriteNestedSubquery(n.SQL, func(inner Node) Node {
 			return RewriteOuterRefs(inner, outerTables, vals)
 		}); ok {
-			return &SubqueryNode{SQL: sql}
+			return &SubqueryNode{SQL: sql, Array: n.Array}
 		}
 		return n
 	case *ExistsNode:
@@ -1102,7 +1102,7 @@ func RewriteUnqualifiedOuterRefs(node Node, unqualOuter map[string]string, vals 
 		if sql, ok := rewriteNestedSubquery(n.SQL, func(inner Node) Node {
 			return RewriteUnqualifiedOuterRefs(inner, unqualOuter, vals)
 		}); ok {
-			return &SubqueryNode{SQL: sql}
+			return &SubqueryNode{SQL: sql, Array: n.Array}
 		}
 		return n
 	case *ExistsNode:
@@ -1350,7 +1350,13 @@ func rebuildSQLFull(info *SelectInfo, cols []string, rewrittenWhere Node, having
 			if i > 0 {
 				sb.WriteString(", ")
 			}
-			sb.WriteString(t.Name)
+			if t.SystemWritten != "" {
+				// A system relation is written back as the client wrote it,
+				// so it resolves in the rebuilt scope as it did in this one.
+				sb.WriteString(t.SystemWritten)
+			} else {
+				sb.WriteString(t.Name)
+			}
 			// A TABLE FUNCTION'S FROM ITEM IS ITS CALL. The name alone is
 			// not the relation: re-emitting `generate_series(1,2) AS g(x)`
 			// as `generate_series g(x)` hands the re-parsed statement a base
@@ -1394,7 +1400,11 @@ func rebuildSQLFull(info *SelectInfo, cols []string, rewrittenWhere Node, having
 		sb.WriteString(" ")
 		sb.WriteString(strings.ToUpper(j.Type))
 		sb.WriteString(" ")
-		sb.WriteString(j.RightTable)
+		if tr := j.RightTableRef; tr != nil && tr.SystemWritten != "" {
+			sb.WriteString(tr.SystemWritten)
+		} else {
+			sb.WriteString(j.RightTable)
+		}
 		// A JOIN ARM IS A FROM ITEM, and a table function's FROM item is its
 		// CALL — the same rule the comma-separated items above follow. The
 		// name alone re-parses as a base table nothing declares, so the arm

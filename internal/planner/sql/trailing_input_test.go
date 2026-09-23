@@ -87,13 +87,6 @@ func TestParseRejectsTrailingInput(t *testing.T) {
 			stopsAt: "UPDATE",
 		},
 		{
-			// The user asked for a specific collation; ignoring it returns a
-			// different order than the one requested.
-			name:    "ORDER BY ... COLLATE",
-			sql:     `SELECT n_name FROM nation ORDER BY n_name COLLATE "C"`,
-			stopsAt: "COLLATE",
-		},
-		{
 			// `LIKE … ESCAPE` used to be trailing input — the escape was
 			// DROPPED and a different predicate evaluated, which is why it
 			// was pinned here. The clause is read now (#1169), so what this
@@ -138,6 +131,10 @@ func TestParseAcceptsCompleteStatements(t *testing.T) {
 		"SELECT 1 -- trailing comment",
 		"SELECT 1 /* trailing block comment */",
 		"SELECT n_name FROM nation",
+		// COLLATE is read (arc PC): a byte-order collation is this
+		// server's own order, and any other is refused by name, never
+		// discarded.
+		`SELECT n_name FROM nation ORDER BY n_name COLLATE "C"`,
 		"SELECT n_name FROM nation WHERE n_regionkey = 1",
 		"SELECT n_name FROM nation ORDER BY n_name LIMIT 5",
 		"SELECT n_name FROM nation ORDER BY n_name LIMIT 5 OFFSET 2",

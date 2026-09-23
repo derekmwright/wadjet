@@ -1316,6 +1316,14 @@ func nodeDeclaredType(node plansql.Node, decls ColDecls) (expr.DeclType, expr.Co
 		// honest answer: a wrong declaration here builds an output vector
 		// that reads every value back wrong, and that is worse than the
 		// fallback (ADR-0012 item 8).
+		if n.Array {
+			// ARRAY(subquery) declares what the ARRAY[...] constructor
+			// declares — a computed array is carried as text in a
+			// projection's output here (a boundary the differences page
+			// records) — and never the subquery column's own type, which
+			// would build an output vector no array can be written to.
+			return expr.Decl(parquet.TypeString), expr.Decided
+		}
 		if decls.subqueryDecl == nil {
 			return expr.DeclType{}, expr.Undecided
 		}
