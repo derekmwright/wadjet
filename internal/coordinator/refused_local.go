@@ -84,6 +84,12 @@ func (c *Coordinator) runRefusedLocal(
 		if refusal, ok := authorizationRefusal(err); ok {
 			return nil, refusal
 		}
+		// Any coded refusal is its own sentence, as #945 made the 42501
+		// one: the route the statement took is not the client's business
+		// (#1145).
+		if sqlerr.StateOf(err) != "" {
+			return nil, err
+		}
 		return nil, fmt.Errorf("%s local execution: %w", what, err)
 	}
 	defer pipeline.Close()

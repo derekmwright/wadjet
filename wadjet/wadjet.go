@@ -558,6 +558,21 @@ func (r *QueryResult) Cells(i int) []any {
 	return cells
 }
 
+// stageError labels an error with the stage of this door it happened in —
+// unless it carries a SQLSTATE. A coded error is a REFUSAL whose sentence is
+// the whole message, the way PostgreSQL sends it, and a stage label in front
+// of it made the embedded door say `executing query: division by zero` where
+// the DAG door and PostgreSQL say `division by zero`, and `parsing SQL:
+// parsing SQL: …` where the parser had already named its stage (#1145). The
+// 42501 arm below was the first instance of this rule (#945); an UNCODED
+// error is an internal failure, and keeps the label that says where.
+func stageError(stage string, err error) error {
+	if sqlerr.StateOf(err) != "" {
+		return err
+	}
+	return fmt.Errorf("%s: %w", stage, err)
+}
+
 // Query executes a SQL query and returns the results.
 func (db *DB) Query(ctx context.Context, sql string) (*QueryResult, error) {
 	return db.query(ctx, sql, 0)
@@ -588,7 +603,7 @@ func (db *DB) query(ctx context.Context, sql string, gatherBytes int64) (res *Qu
 	}()
 	parsed, err := plansql.Parse(sql)
 	if err != nil {
-		return nil, fmt.Errorf("parsing SQL: %w", err)
+		return nil, stageError("parsing SQL", err)
 	}
 
 	switch parsed.Type {
@@ -637,7 +652,7 @@ func (db *DB) query(ctx context.Context, sql string, gatherBytes int64) (res *Qu
 
 	selectInfo, err := plansql.ExtractSelect(parsed)
 	if err != nil {
-		return nil, fmt.Errorf("extracting SELECT: %w", err)
+		return nil, stageError("extracting SELECT", err)
 	}
 
 	planner := db.newPlanner(ctx)
@@ -670,7 +685,7 @@ func (db *DB) query(ctx context.Context, sql string, gatherBytes int64) (res *Qu
 
 	logicalPlan, err := logical.BuildFromSelect(selectInfo)
 	if err != nil {
-		return nil, fmt.Errorf("building logical plan: %w", err)
+		return nil, stageError("building logical plan", err)
 	}
 
 	// Annotate scan columns before ABAC enforcement so column policies can resolve
@@ -696,7 +711,7 @@ func (db *DB) query(ctx context.Context, sql string, gatherBytes int64) (res *Qu
 
 	physPlan, err := planner.Plan(ctx, logicalPlan)
 	if err != nil {
-		return nil, fmt.Errorf("building physical plan: %w", err)
+		return nil, stageError("building physical plan", err)
 	}
 	if physPlan.Cleanup != nil {
 		defer physPlan.Cleanup()
@@ -735,7 +750,7 @@ func (db *DB) query(ctx context.Context, sql string, gatherBytes int64) (res *Qu
 		if refusal := (*sqlerr.Error)(nil); errors.As(err, &refusal) && refusal.Code == "42501" {
 			return nil, refusal
 		}
-		return nil, fmt.Errorf("executing query: %w", err)
+		return nil, stageError("executing query", err)
 	}
 
 	var rows []map[string]any
@@ -809,7 +824,7 @@ func (db *DB) explain(ctx context.Context, parsed *plansql.ParsedQuery) (*QueryR
 	}
 	selectInfo, err := plansql.ExtractSelect(parsed)
 	if err != nil {
-		return nil, fmt.Errorf("extracting SELECT: %w", err)
+		return nil, stageError("extracting SELECT", err)
 	}
 
 	planner := db.newPlanner(ctx)
@@ -832,7 +847,7 @@ func (db *DB) explain(ctx context.Context, parsed *plansql.ParsedQuery) (*QueryR
 
 	logicalPlan, err := logical.BuildFromSelect(selectInfo)
 	if err != nil {
-		return nil, fmt.Errorf("building logical plan: %w", err)
+		return nil, stageError("building logical plan", err)
 	}
 	planner.AnnotateScanColumns(ctx, logicalPlan)
 
@@ -859,7 +874,7 @@ func (db *DB) explain(ctx context.Context, parsed *plansql.ParsedQuery) (*QueryR
 	if parsed.Explain.Verbose {
 		physPlan, err := planner.Plan(ctx, logicalPlan)
 		if err != nil {
-			return nil, fmt.Errorf("building physical plan: %w", err)
+			return nil, stageError("building physical plan", err)
 		}
 		// The pipeline is never run for EXPLAIN, but planning may have
 		// materialized CTEs to spill scratch - release it now.
@@ -888,7 +903,7 @@ func (db *DB) explain(ctx context.Context, parsed *plansql.ParsedQuery) (*QueryR
 func (db *DB) explainAnalyze(ctx context.Context, logicalPlan *logical.Node, logicalStr string, verbose bool, planner *physical.Planner) (*QueryResult, error) {
 	physPlan, err := planner.Plan(ctx, logicalPlan)
 	if err != nil {
-		return nil, fmt.Errorf("building physical plan: %w", err)
+		return nil, stageError("building physical plan", err)
 	}
 	if physPlan.Cleanup != nil {
 		defer physPlan.Cleanup()

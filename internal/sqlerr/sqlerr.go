@@ -80,3 +80,24 @@ func StateOf(err error) string {
 	}
 	return ""
 }
+
+// SentenceOf is the text a client is owed for a coded error: the message of
+// the DEEPEST error in err's wrap chain that carries a SQLSTATE — the
+// refusal where it was raised — without the stage and task labels the
+// layers above it wrap around it on the way out. An uncoded error has no
+// sentence ("").
+//
+// It is how a stage-DAG task failure reaches a client with PostgreSQL's
+// sentence: `division by zero`, not `native DAG: stage scan-0 (scan): …:
+// task 9f… failed after 3 attempts: fragment task 9f…: division by zero`,
+// which is what made the embedded and the DAG servers send two messages for
+// one refusal (#1145).
+func SentenceOf(err error) string {
+	sentence := ""
+	for e := err; e != nil; e = errors.Unwrap(e) {
+		if c, ok := e.(Coder); ok && c.SQLState() != "" {
+			sentence = e.Error()
+		}
+	}
+	return sentence
+}

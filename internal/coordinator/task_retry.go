@@ -90,6 +90,7 @@ type taskAttemptState struct {
 	errMsg    string
 	panicked  bool
 	sqlState  string
+	sqlMsg    string
 	attempts  int
 	terminal  bool
 }
@@ -105,6 +106,8 @@ type taskFailure struct {
 	// SQLState is ResultNotification.SQLState for the same failure: the class
 	// the worker's typed error carried, or "" when it carried none.
 	SQLState string
+	// SQLMessage is ResultNotification.SQLMessage: that error's own sentence.
+	SQLMessage string
 }
 
 // stageTaskFailure preserves the worker's classification across ResultNotification;
@@ -120,10 +123,28 @@ func stageTaskFailure(f taskFailure, err error) error {
 		return sqlerr.Wrap(exec.SQLStateInternalError, err)
 	}
 	if f.SQLState != "" {
+		if f.SQLMessage != "" {
+			// The client is owed the refusal's sentence; the framing —
+			// stage, task, attempts — stays reachable through Unwrap for the
+			// log that records it (#1145).
+			return &taskRefusal{code: f.SQLState, sentence: f.SQLMessage, framing: err}
+		}
 		return sqlerr.Wrap(f.SQLState, err)
 	}
 	return err
 }
+
+// taskRefusal is a coded worker failure as the client sees it: the
+// refusal's own sentence under its class, with the coordinator's framing of
+// where it failed kept behind Unwrap.
+type taskRefusal struct {
+	code, sentence string
+	framing        error
+}
+
+func (e *taskRefusal) Error() string    { return e.sentence }
+func (e *taskRefusal) SQLState() string { return e.code }
+func (e *taskRefusal) Unwrap() error    { return e.framing }
 
 // newTaskRetrier registers the dispatched tasks. republish re-dispatches a
 // single task; it is invoked on the caller-provided function asynchronously
@@ -222,6 +243,7 @@ func (tr *taskRetrier) Observe(r distributed.ResultNotification) (allDone bool) 
 	st.errMsg = r.Error
 	st.panicked = r.Panicked
 	st.sqlState = r.SQLState
+	st.sqlMsg = r.SQLMessage
 	if r.MissingInputKey != "" {
 		// Tag both the fatal-classified case and attempts-exhausted-on-
 		// missing-input so ExecuteSQL's streaming-disabled re-execution
@@ -311,7 +333,7 @@ func (tr *taskRetrier) FirstError() (taskFailure, bool) {
 		if st := tr.states[id]; st.terminal && st.errMsg != "" {
 			return taskFailure{
 				TaskID: id, Message: st.errMsg,
-				Panicked: st.panicked, SQLState: st.sqlState,
+				Panicked: st.panicked, SQLState: st.sqlState, SQLMessage: st.sqlMsg,
 			}, true
 		}
 	}

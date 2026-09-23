@@ -1020,7 +1020,10 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 	// Parse
 	parsed, err := plansql.Parse(sql)
 	if err != nil {
-		return nil, fmt.Errorf("parse: %w", err)
+		// The parser's error is coded (42601, or the refusal's own class)
+		// and names its stage itself; a second label here made this door's
+		// message differ from the embedded one for the same statement (#1145).
+		return nil, err
 	}
 
 	// Dispatch snapshot DDL — returns a populated result row.
@@ -1341,12 +1344,19 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 				"query", queryID, "error", gerr)
 			return c.ExecuteSQL(withStreamingExchangeDisabled(ctx), sql)
 		}
+		// A coded failure is a refusal whose sentence is the whole message,
+		// as it is on the embedded door; an uncoded one keeps the label that
+		// says where it happened (#1145).
+		derr := error(fmt.Errorf("native DAG: %w", gerr))
+		if sqlerr.StateOf(gerr) != "" {
+			derr = gerr
+		}
 		return &SQLResult{
 			QueryID: queryID,
-			Error:   gerr.Error(),
+			Error:   derr.Error(),
 			Elapsed: time.Since(start),
 			Plan:    planStr,
-		}, fmt.Errorf("native DAG: %w", gerr)
+		}, derr
 	}
 	// #163: walkStages passes NodeDistinct through (no dedup stage), so a
 	// distributed SELECT DISTINCT arrives here un-deduplicated. The gather
@@ -3618,7 +3628,7 @@ func (c *Coordinator) SubmitSQL(ctx context.Context, sql string) (queryID string
 	// Parse
 	parsed, err := plansql.Parse(sql)
 	if err != nil {
-		return "", "", fmt.Errorf("parse: %w", err)
+		return "", "", err
 	}
 
 	// One dispatch point per door (#860). The async door runs queries only, so

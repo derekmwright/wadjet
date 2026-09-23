@@ -400,7 +400,7 @@ func (db *DB) tableExists(ctx context.Context, name string) (bool, error) {
 func (db *DB) declaredOutputFor(ctx context.Context, parsed *plansql.ParsedQuery) ([]parquet.Column, error) {
 	selectInfo, err := plansql.ExtractSelect(parsed)
 	if err != nil {
-		return nil, fmt.Errorf("extracting SELECT: %w", err)
+		return nil, stageError("extracting SELECT", err)
 	}
 	planner := db.newPlanner(ctx)
 	// The table-function CAPABILITY, BEFORE the binder and before the scan
@@ -416,7 +416,7 @@ func (db *DB) declaredOutputFor(ctx context.Context, parsed *plansql.ParsedQuery
 	}
 	logicalPlan, err := logical.BuildFromSelect(selectInfo)
 	if err != nil {
-		return nil, fmt.Errorf("building logical plan: %w", err)
+		return nil, stageError("building logical plan", err)
 	}
 	planner.AnnotateScanColumns(ctx, logicalPlan)
 	ctx, logicalPlan, err = db.enforceAccessPolicies(ctx, selectInfo, logicalPlan)

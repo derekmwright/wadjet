@@ -72,7 +72,7 @@ func CommandTag(command string, rows int64) string {
 func (db *DB) Execute(ctx context.Context, sql string) (*ExecResult, error) {
 	parsed, err := plansql.Parse(sql)
 	if err != nil {
-		return nil, fmt.Errorf("parsing SQL: %w", err)
+		return nil, stageError("parsing SQL", err)
 	}
 	return db.ExecuteParsed(ctx, parsed)
 }

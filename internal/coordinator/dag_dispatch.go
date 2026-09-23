@@ -17,6 +17,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/auth"
 	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/distributed"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
 // gatherFusion carries the pre-installed gather subscription + reply subject
@@ -689,6 +690,11 @@ func (c *Coordinator) executeStageDAG(
 				out, err = c.dispatchPipelineStage(gctx, queryID, sql, s, inputs, workerCount, probeOfBroadcast[s.ID], stageFusion, deferredScalars)
 			}
 			if err != nil {
+				// A coded failure is the refusal's own sentence (#1145); an
+				// uncoded one keeps the stage that failed.
+				if sqlerr.StateOf(err) != "" {
+					return err
+				}
 				return fmt.Errorf("stage %s (%s): %w", s.ID, s.Type, err)
 			}
 			outputsMu.Lock()

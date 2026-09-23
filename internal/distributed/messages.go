@@ -1148,6 +1148,11 @@ type ResultNotification struct {
 	// an internal one. Plan-time refusals were unaffected — they never leave
 	// the coordinator — which is why the split looked arbitrary from outside.
 	SQLState string `json:"sqlstate,omitempty"`
+	// SQLMessage is that coded error's own sentence (sqlerr.SentenceOf),
+	// without the task and fragment labels Error carries, so the coordinator
+	// hands the client the refusal PostgreSQL would send and not the path it
+	// took to fail (#1145). Empty when SQLState is.
+	SQLMessage string `json:"sqlmessage,omitempty"`
 
 	// Result location
 	ResultPath  string   `json:"result_path,omitempty"`
