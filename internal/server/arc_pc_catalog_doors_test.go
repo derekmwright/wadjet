@@ -239,12 +239,15 @@ func TestArcPCTheTwoServerDoorsSendOneMessage(t *testing.T) {
 }
 
 // TestArcPCADerivedTableRefusalIsOneSentenceOnEveryDoor holds the
-// one-sentence rule for an error raised INSIDE a derived table: the parser
-// and the plan builder label their derived-table stages ("parsing derived
-// table: parsing SQL: parsing WHERE: ...", "building plan for derived
-// table: ..."), and every door chooses the sentence at its boundary
-// (sqlerr.Sentence), so no door sends a stage label in front of a coded
-// refusal — whatever the error's origin.
+// one-sentence rule for an error raised INSIDE a parenthesised body — a
+// derived table, a CTE, an IN subquery — on all nine doors: the client
+// receives PostgreSQL's sentence and NOTHING ELSE. The parser used to wrap
+// its own stages around a failure before Parse assigned 42601 ("parsing SQL:
+// parsing WHERE: unexpected token "" at position 22"), and sqlerr.SentenceOf
+// kept what was inside the coded wrapper, so every door sent the labels. The
+// sentence is now chosen where the code is (the parser's syntaxError, from
+// the token it stopped at), and a body's end is the ")" that closes it
+// (arc PC round 3, B6). Every expected sentence is PostgreSQL 17.11's.
 func TestArcPCADerivedTableRefusalIsOneSentenceOnEveryDoor(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: embedded cluster")
@@ -252,26 +255,32 @@ func TestArcPCADerivedTableRefusalIsOneSentenceOnEveryDoor(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
 	t.Cleanup(cancel)
 	rig := pmRigUp(t, ctx)
-	for _, q := range []string{
-		`SELECT * FROM (SELECT id FROM e7emp WHERE) d`,
-		`SELECT * FROM (SELECT nosuch FROM e7emp) d`,
+	for _, c := range []struct{ sql, sentence string }{
+		{`SELECT * FROM (SELECT id FROM e7emp WHERE) d`, `syntax error at or near ")"`},
+		{`WITH c AS (SELECT id FROM e7emp WHERE) SELECT * FROM c`, `syntax error at or near ")"`},
+		{`SELECT id FROM e7emp WHERE id IN (SELECT id FROM e7emp WHERE)`, `syntax error at or near ")"`},
+		{`SELECT id FROM e7emp WHERE`, `syntax error at end of input`},
+		{`SELECT id FROM e7emp WHERE id = 1 GARBAGE`, `syntax error at or near "GARBAGE"`},
+		{`SELECT * FROM (SELECT nosuch FROM e7emp) d`, `column "nosuch" does not exist`},
+		{`SELECT E'\uD83D' AS v`, `invalid Unicode surrogate pair`},
+		{`SELECT E'\u12' AS v`, `invalid Unicode escape`},
 	} {
 		for _, d := range rig.doors {
-			_, err := d.run(t, "admin-key", q)
+			_, err := d.run(t, "admin-key", c.sql)
 			if err == nil {
-				t.Errorf("%s answered %q; PostgreSQL refuses it", d.name, q)
+				t.Errorf("%s answered %q; PostgreSQL refuses it", d.name, c.sql)
 				continue
 			}
-			// The HTTP door's runner reads only the body's "error" text; the
-			// SQLSTATE of every door is held by the two-door census. One
-			// "parsing SQL:" in front of an UNCODED parse failure is the
-			// recorded door label (http_door_sqlstate_test.go); a
-			// derived-table stage label is not.
+			// A pgwire door's error is the ErrorResponse's Message field; the
+			// embedded doors' is the error itself; the HTTP runner reads the
+			// body's "error" text. Each must be the sentence and no more.
 			m := err.Error()
-			for _, label := range []string{"parsing derived table:", "building plan for derived table:", "parsing SQL: parsing SQL:"} {
-				if strings.Contains(m, label) {
-					t.Errorf("%s: a stage label %q in front of the refusal of %q: %s", d.name, label, q, m)
-				}
+			var pe *pgconn.PgError
+			if errors.As(err, &pe) {
+				m = pe.Message
+			}
+			if m != c.sentence {
+				t.Errorf("%s: %q\n  sent %q\n  want PostgreSQL's %q", d.name, c.sql, m, c.sentence)
 			}
 		}
 	}

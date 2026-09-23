@@ -5,6 +5,8 @@ package sql
 import (
 	"strings"
 	"testing"
+
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
 // TestParseRejectsTrailingInput pins the end-of-statement guard (#337).
@@ -110,12 +112,20 @@ func TestParseRejectsTrailingInput(t *testing.T) {
 			if err == nil {
 				t.Fatalf("Parse(%q) returned no error — the trailing input was silently discarded", tt.sql)
 			}
-			if !strings.Contains(err.Error(), tt.stopsAt) {
-				t.Errorf("Parse(%q) error does not name where parsing stopped (%q):\n  %v",
-					tt.sql, tt.stopsAt, err)
+			// PostgreSQL's sentence, naming the token where parsing stopped
+			// and nothing else (arc PC round 3, B6): the position is the
+			// protocol's, not the message's.
+			if sqlerr.StateOf(err) != "42601" {
+				// A deliberate refusal (NATURAL JOIN, 0A000) names its own
+				// token in its own sentence.
+				if !strings.Contains(err.Error(), tt.stopsAt) {
+					t.Errorf("Parse(%q) refusal does not name %q: %v", tt.sql, tt.stopsAt, err)
+				}
+				return
 			}
-			if !strings.Contains(err.Error(), "position") {
-				t.Errorf("Parse(%q) error gives no position:\n  %v", tt.sql, err)
+			if want := `syntax error at or near "` + tt.stopsAt + `"`; err.Error() != want {
+				t.Errorf("Parse(%q) error is not PostgreSQL's sentence at where parsing stopped:\n  got  %v\n  want %s",
+					tt.sql, err, want)
 			}
 		})
 	}

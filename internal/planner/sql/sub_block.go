@@ -2,7 +2,10 @@
 
 package sql
 
-import "strings"
+import (
+	"errors"
+	"strings"
+)
 
 // Parse each derived-table/CTE block ONCE: binder and logical builder must
 // share the SAME SelectInfo, including binder rewrites (#739, #851).
@@ -43,9 +46,17 @@ func (c *CTEDef) BodySelect() (*SelectInfo, error) {
 }
 
 // parseBlockText parses one block's SQL text into a SelectInfo.
+//
+// The block is the text between a pair of parentheses, so a syntax error at
+// the END of that text is PostgreSQL's `syntax error at or near ")"` — the
+// token that closes it in the statement the client sent.
 func parseBlockText(sql string) (*SelectInfo, error) {
 	parsed, err := Parse(sql)
 	if err != nil {
+		var se *syntaxError
+		if errors.As(err, &se) && se.atEnd {
+			return nil, &syntaxError{code: se.code, msg: `syntax error at or near ")"`, err: se.err}
+		}
 		return nil, err
 	}
 	info, err := ExtractSelect(parsed)
@@ -53,6 +64,25 @@ func parseBlockText(sql string) (*SelectInfo, error) {
 		return nil, err
 	}
 	return info, nil
+}
+
+// bodySyntax is a parenthesised subquery body's SYNTAX, checked where the
+// statement is read: a body that cannot be parsed is the statement's syntax
+// error, worded as PostgreSQL words it for the statement the client sent — a
+// failure at the end of the body is at the ")" that closes it. Any other
+// failure is left for the planner that parses the body later, exactly as
+// before; only the sentence of a syntax error is decided here (arc PC round
+// 3, B6: `x IN (SELECT … WHERE)` said "at end of input").
+func bodySyntax(sql string) error {
+	_, err := Parse(sql)
+	var se *syntaxError
+	if !errors.As(err, &se) {
+		return nil
+	}
+	if se.atEnd {
+		return &syntaxError{code: se.code, msg: `syntax error at or near ")"`, err: se.err}
+	}
+	return se
 }
 
 // BlockOutputColumns lists the column names one query block PUBLISHES, and

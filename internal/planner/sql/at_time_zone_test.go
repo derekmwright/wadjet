@@ -245,7 +245,9 @@ func TestAtTimeZonePartialMatchConsumesNothing(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error for AT TIME ZONE with no zone")
 	}
-	if !strings.Contains(err.Error(), "expected time zone after AT TIME ZONE") {
+	// PostgreSQL 17: `syntax error at or near "FROM"` — the token where the
+	// zone should have been.
+	if err.Error() != `syntax error at or near "FROM"` {
 		t.Fatalf("unhelpful error for a missing zone: %v", err)
 	}
 }

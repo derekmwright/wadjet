@@ -453,13 +453,13 @@ func parseSelectStatement(stmt, body string) (*ParsedQuery, error) {
 	sp := newSelectParser(trimmed)
 	info, err := sp.parseSelectOrUnion()
 	if err != nil {
-		return nil, wrapParseFailure(err)
+		return nil, wrapParseFailure(sp.syntaxFailure(err))
 	}
 	// The statement has to be consumed in full. Anything left over is input
 	// this parser did not understand, and returning an answer computed from
 	// the prefix would silently discard it (#337).
 	if err := sp.expectEndOfStatement(); err != nil {
-		return nil, wrapParseFailure(err)
+		return nil, wrapParseFailure(sp.syntaxFailure(err))
 	}
 
 	// Resolve positional references (GROUP BY 1, ORDER BY 1 DESC)
@@ -814,7 +814,9 @@ func lexParseExplain(sql string, l *lexer) (*ParsedQuery, error) {
 	rest := strings.TrimSpace(l.rest())
 	inner, err := Parse(rest)
 	if err != nil {
-		return nil, fmt.Errorf("parsing EXPLAIN query: %w", err)
+		// Parse's failure is always coded, and a coded failure is its own
+		// sentence (wrapParseFailure's rule): EXPLAIN adds no stage label.
+		return nil, err
 	}
 
 	return &ParsedQuery{

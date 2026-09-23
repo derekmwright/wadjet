@@ -300,6 +300,10 @@ type token struct {
 	// dots, spaces, or keyword spellings inside it are part of the name
 	// rather than syntax.
 	quoted bool
+	// code is a TokenError's SQLSTATE when it is not 42601: a malformed
+	// escape in an E'' string is PostgreSQL's 22025, an invalid byte
+	// sequence 22021 (errorCode).
+	code string
 }
 
 // source is the spelling the client actually sent, for a message that echoes
@@ -419,14 +423,21 @@ func (l *lexer) emitVal(typ TokenType, val string) {
 // errorf emits an error token, formatting the message with fmt.Sprintf so
 // that verbs such as %c and %q render the offending input.
 func (l *lexer) errorf(format string, args ...any) stateFn {
+	return l.errorCode("", format, args...)
+}
+
+// errorCode is errorf for a lexical failure PostgreSQL gives its own
+// SQLSTATE; the message is PostgreSQL's sentence.
+func (l *lexer) errorCode(code, format string, args ...any) stateFn {
 	msg := format
 	if len(args) > 0 {
 		msg = fmt.Sprintf(format, args...)
 	}
 	l.pending = &token{
-		typ: TokenError,
-		val: msg,
-		pos: l.start,
+		typ:  TokenError,
+		val:  msg,
+		pos:  l.start,
+		code: code,
 	}
 	return nil
 }
@@ -860,21 +871,12 @@ func lexString(l *lexer) stateFn {
 // E'…' is a spelling of a literal, not a type. PostgreSQL refuses a result
 // that is not valid UTF-8 (a byte escape above 0x7F that starts no
 // sequence, or \000) and a \u escape that is not a code point; so does this
-// lexer — the lexer's refusal is a syntax error here, where PostgreSQL's
-// code for those two is 22021 / 22025 (docs/postgres-differences.md).
+// lexer, with PostgreSQL's sentence and code: 22021 for the bytes, 22025 for
+// a \u with too few hex digits, 42601 for a code point out of range or a
+// UTF-16 surrogate that is not half of a pair (a valid pair is one code
+// point, `E'\uD83D\uDE00'` is U+1F600).
 func lexEscapeString(l *lexer) stateFn {
 	var sb strings.Builder
-	hexVal := func(c byte) (int, bool) {
-		switch {
-		case c >= '0' && c <= '9':
-			return int(c - '0'), true
-		case c >= 'a' && c <= 'f':
-			return int(c-'a') + 10, true
-		case c >= 'A' && c <= 'F':
-			return int(c-'A') + 10, true
-		}
-		return 0, false
-	}
 	for {
 		r := l.next()
 		switch {
@@ -888,7 +890,7 @@ func lexEscapeString(l *lexer) stateFn {
 			}
 			v := sb.String()
 			if !utf8.ValidString(v) || strings.IndexByte(v, 0) >= 0 {
-				return l.errorf("invalid byte sequence for encoding \"UTF8\" in escape string")
+				return l.errorCode("22021", "invalid byte sequence for encoding \"UTF8\": %s", invalidUTF8(v))
 			}
 			l.emitVal(TokenString, v)
 			return nil
@@ -927,25 +929,32 @@ func lexEscapeString(l *lexer) stateFn {
 				l.pos += 1 + n
 				sb.WriteByte(byte(v))
 			case 'u', 'U':
-				want := 4
-				if c == 'U' {
-					want = 8
+				v, code, msg := l.unicodeEscape(c)
+				if msg != "" {
+					return l.errorCode(code, "%s", msg)
 				}
-				if l.pos+1+want > len(l.input) {
-					return l.errorf("invalid Unicode escape")
-				}
-				v := 0
-				for i := 0; i < want; i++ {
-					d, ok := hexVal(l.input[l.pos+1+i])
-					if !ok {
-						return l.errorf("invalid Unicode escape")
+				if v >= 0xD800 && v <= 0xDBFF {
+					// A HIGH surrogate is half of a UTF-16 pair: the next
+					// thing in the string must be a \u or \U escape of the
+					// LOW half, and the two are one code point (PostgreSQL
+					// scan.l). Anything else is 42601 "invalid Unicode
+					// surrogate pair".
+					if l.pos+1 >= len(l.input) || l.input[l.pos] != '\\' ||
+						(l.input[l.pos+1] != 'u' && l.input[l.pos+1] != 'U') {
+						return l.errorCode("42601", "invalid Unicode surrogate pair")
 					}
-					v = v*16 + d
+					l.pos++
+					lo, code, msg := l.unicodeEscape(l.input[l.pos])
+					if msg != "" {
+						return l.errorCode(code, "%s", msg)
+					}
+					if lo < 0xDC00 || lo > 0xDFFF {
+						return l.errorCode("42601", "invalid Unicode surrogate pair")
+					}
+					v = 0x10000 + (v-0xD800)<<10 + (lo - 0xDC00)
+				} else if v >= 0xDC00 && v <= 0xDFFF {
+					return l.errorCode("42601", "invalid Unicode surrogate pair")
 				}
-				if v == 0 || v > utf8.MaxRune || (v >= 0xD800 && v <= 0xDFFF) {
-					return l.errorf("invalid Unicode escape value")
-				}
-				l.pos += 1 + want
 				sb.WriteRune(rune(v))
 			default:
 				// Any other character after a backslash is itself; a
@@ -958,6 +967,78 @@ func lexEscapeString(l *lexer) stateFn {
 			sb.WriteString(l.input[l.pos-l.width : l.pos])
 		}
 	}
+}
+
+// hexVal is one hex digit's value.
+func hexVal(c byte) (int, bool) {
+	switch {
+	case c >= '0' && c <= '9':
+		return int(c - '0'), true
+	case c >= 'a' && c <= 'f':
+		return int(c-'a') + 10, true
+	case c >= 'A' && c <= 'F':
+		return int(c-'A') + 10, true
+	}
+	return 0, false
+}
+
+// invalidUTF8 renders the first byte sequence of s that is not UTF-8 (a NUL
+// included) the way PostgreSQL's report_invalid_encoding does: the bytes the
+// lead byte claims, as far as the string has them — `0xd8`, `0xe9 0x28`.
+func invalidUTF8(s string) string {
+	for i := 0; i < len(s); {
+		r, w := utf8.DecodeRuneInString(s[i:])
+		if r != 0 && (r != utf8.RuneError || w != 1) {
+			i += w
+			continue
+		}
+		n := 1
+		switch b := s[i]; {
+		case b >= 0xC0 && b < 0xE0:
+			n = 2
+		case b >= 0xE0 && b < 0xF0:
+			n = 3
+		case b >= 0xF0 && b < 0xF8:
+			n = 4
+		}
+		if i+n > len(s) {
+			n = len(s) - i
+		}
+		parts := make([]string, n)
+		for k := 0; k < n; k++ {
+			parts[k] = fmt.Sprintf("0x%02x", s[i+k])
+		}
+		return strings.Join(parts, " ")
+	}
+	return ""
+}
+
+// unicodeEscape reads the hex digits of a \\u (four) or \\U (eight) escape
+// whose letter is at l.pos, advancing past them. The failure is PostgreSQL's
+// sentence and SQLSTATE: too few hex digits is
+// 22025 "invalid Unicode escape", a code point that is zero or past U+10FFFF
+// is 42601 "invalid Unicode escape value". A surrogate is returned for the
+// caller to pair.
+func (l *lexer) unicodeEscape(letter byte) (v int, code, msg string) {
+	want := 4
+	if letter == 'U' {
+		want = 8
+	}
+	if l.pos+1+want > len(l.input) {
+		return 0, "22025", "invalid Unicode escape"
+	}
+	for i := 0; i < want; i++ {
+		d, ok := hexVal(l.input[l.pos+1+i])
+		if !ok {
+			return 0, "22025", "invalid Unicode escape"
+		}
+		v = v*16 + d
+	}
+	if v == 0 || v > utf8.MaxRune {
+		return 0, "42601", "invalid Unicode escape value"
+	}
+	l.pos += 1 + want
+	return v, "", ""
 }
 
 // lexQuotedIdent scans a double-quoted ("delimited") identifier.

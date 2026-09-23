@@ -17,12 +17,64 @@ type selectParser struct {
 	lex       *lexer
 	cur       token
 	lookahead []token // buffered tokens for lookahead
+	// lexErr is the first lexical failure the parse reached: the sentence
+	// and SQLSTATE a statement that stops there is refused with
+	// (syntaxFailure), whatever the grammar said about it afterwards.
+	lexErr *token
 }
 
 func newSelectParser(input string) *selectParser {
 	p := &selectParser{lex: newLexer(input)}
 	p.advance()
 	return p
+}
+
+// syntaxError is a statement this parser cannot read, as a client receives
+// it: PostgreSQL's sentence — `syntax error at or near "…"` naming the token
+// the parse stopped at, `syntax error at end of input`, or a lexical
+// failure's own sentence and SQLSTATE — and nothing else. It is chosen ONCE,
+// where the code is assigned (parseSelectStatement), from the parser's
+// position; the parser's own account of the failure (`parsing WHERE:
+// unexpected token …`) stays reachable through Unwrap for a log, and never
+// reaches a client, because it carries no code and sqlerr.SentenceOf reads
+// the deepest error that does (arc PC round 3, B6).
+type syntaxError struct {
+	code, msg string
+	// atEnd marks a failure at the end of the text parsed — which, for the
+	// body of a derived table or a CTE, is the ")" that closes it.
+	atEnd bool
+	err   error
+}
+
+func (e *syntaxError) Error() string    { return e.msg }
+func (e *syntaxError) SQLState() string { return e.code }
+func (e *syntaxError) Unwrap() error    { return e.err }
+
+// syntaxFailure is err as the syntax error the client receives: a coded
+// refusal keeps its own sentence; anything else is PostgreSQL's sentence
+// for where the parse stopped.
+func (p *selectParser) syntaxFailure(err error) error {
+	if err == nil || sqlerr.StateOf(err) != "" {
+		return err
+	}
+	tok := p.cur
+	if p.lexErr != nil {
+		tok = *p.lexErr
+	}
+	switch tok.typ {
+	case TokenError:
+		code := tok.code
+		if code == "" {
+			code = "42601"
+		}
+		return &syntaxError{code: code, msg: tok.val, err: err}
+	case TokenEOF:
+		return &syntaxError{code: "42601", msg: "syntax error at end of input", atEnd: true, err: err}
+	case TokenString:
+		return &syntaxError{code: "42601",
+			msg: "syntax error at or near " + sqlerr.Quote("'"+strings.ReplaceAll(tok.val, "'", "''")+"'"), err: err}
+	}
+	return &syntaxError{code: "42601", msg: "syntax error at or near " + sqlerr.Quote(tok.source()), err: err}
 }
 
 func (p *selectParser) advance() token {
@@ -32,6 +84,10 @@ func (p *selectParser) advance() token {
 		p.lookahead = p.lookahead[1:]
 	} else {
 		p.cur = p.lex.nextToken()
+	}
+	if p.cur.typ == TokenError && p.lexErr == nil {
+		t := p.cur
+		p.lexErr = &t
 	}
 	return prev
 }
@@ -1011,7 +1067,7 @@ func (p *selectParser) parseValuesTableRef() (TableRef, error) {
 		if ncols == -1 {
 			ncols = len(row)
 		} else if len(row) != ncols {
-			return TableRef{}, fmt.Errorf("VALUES rows have differing column counts (%d vs %d)", len(row), ncols)
+			return TableRef{}, sqlerr.New("42601", "VALUES lists must all be the same length")
 		}
 		rows = append(rows, row)
 		if p.peek() != TokenComma {
@@ -1700,6 +1756,9 @@ func (p *selectParser) parseExists(not bool) (Node, error) {
 	if _, err := p.expect(TokenRParen); err != nil {
 		return nil, fmt.Errorf("expected ) after EXISTS subquery")
 	}
+	if err := bodySyntax(subSQL); err != nil {
+		return nil, err
+	}
 	return &ExistsNode{Not: not, SQL: subSQL}, nil
 }
 
@@ -1898,6 +1957,9 @@ func (p *selectParser) parsePredicateOperand() (Node, error) {
 			if _, err := p.expect(TokenRParen); err != nil {
 				return nil, fmt.Errorf("expected ) after IN subquery")
 			}
+			if err := bodySyntax(subSQL); err != nil {
+				return nil, err
+			}
 			return &InExpr{Left: left, Not: not, Values: []Node{&SubqueryNode{SQL: subSQL}}}, nil
 		}
 		// Value list
@@ -2072,6 +2134,9 @@ func (p *selectParser) finishComparison(left Node, op string) (Node, error) {
 				subSQL := p.consumeBalancedParens()
 				if _, err := p.expect(TokenRParen); err != nil {
 					return nil, fmt.Errorf("expected ) after %s subquery", upper)
+				}
+				if err := bodySyntax(subSQL); err != nil {
+					return nil, err
 				}
 				// `x = ANY (subquery)` IS `x IN (subquery)`, and
 				// `x <> ALL (subquery)` IS `x NOT IN (subquery)` — the
@@ -2431,7 +2496,7 @@ func (p *selectParser) parseAtTimeZone() (Node, error) {
 			return nil, fmt.Errorf("expected time zone after AT TIME ZONE: %w", err)
 		}
 		if lit, ok := zone.(*Lit); ok && lit.Kind == LitString && !isUTCZoneName(lit.Value) {
-			return nil, fmt.Errorf("AT TIME ZONE: only UTC is supported, got %q", lit.Value)
+			return nil, sqlerr.New("0A000", "AT TIME ZONE: only UTC is supported, got %q", lit.Value)
 		}
 		left = &FuncCallNode{Name: "timezone", Args: []Node{zone, left}}
 	}
@@ -2812,6 +2877,9 @@ func (p *selectParser) parsePrimary() (Node, error) {
 			if _, err := p.expect(TokenRParen); err != nil {
 				return nil, fmt.Errorf("expected ) after subquery")
 			}
+			if err := bodySyntax(subSQL); err != nil {
+				return nil, err
+			}
 			return &SubqueryNode{SQL: subSQL}, nil
 		}
 		inner, err := p.parseExpr()
@@ -2951,6 +3019,9 @@ func (p *selectParser) parsePrimary() (Node, error) {
 			subSQL := p.consumeBalancedParens()
 			if _, err := p.expect(TokenRParen); err != nil {
 				return nil, fmt.Errorf("expected ) after ARRAY subquery")
+			}
+			if err := bodySyntax(subSQL); err != nil {
+				return nil, err
 			}
 			return &SubqueryNode{SQL: subSQL, Array: true}, nil
 		}
@@ -3190,7 +3261,7 @@ func (p *selectParser) parseAggFilter(fn *FuncCallNode) (*FuncCallNode, error) {
 		}, nil
 	}
 
-	return nil, fmt.Errorf("FILTER clause on %s() with no arguments", fn.Name)
+	return nil, sqlerr.New("0A000", "FILTER clause on %s() with no arguments", fn.Name)
 }
 
 // parseWindowFunc parses OVER (...) after a function call.
@@ -3358,7 +3429,7 @@ func (p *selectParser) parseWindowFrame() (*WindowFrame, error) {
 	// is not.
 	if frame.Mode == FrameRange {
 		if rangeOffsetBound(frame.Start) || (frame.End != nil && rangeOffsetBound(*frame.End)) {
-			return nil, fmt.Errorf("RANGE frame with a value offset is not supported; use ROWS for a row-count frame")
+			return nil, sqlerr.New("0A000", "RANGE frame with a value offset is not supported; use ROWS for a row-count frame")
 		}
 	}
 
@@ -3829,7 +3900,7 @@ func (p *selectParser) parseIntervalLiteral() (Node, error) {
 			unit = "second"
 		}
 	} else {
-		return nil, fmt.Errorf("invalid INTERVAL literal %q", valStr)
+		return nil, sqlerr.New("22007", "invalid input syntax for type interval: %s", sqlerr.Quote(valStr))
 	}
 
 	return &IntervalLit{Value: value, Unit: unit}, nil
