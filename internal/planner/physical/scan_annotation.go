@@ -159,7 +159,14 @@ func stampScanSchema(node *logical.Node, columns []parquet.Column) {
 	colDecimal := make(map[string]logical.DecimalMeta)
 	strictInt := make(map[string]bool, len(columns))
 	var colFields map[string][]parquet.Column
+	var colElems map[string]parquet.Column
 	for i, c := range columns {
+		if c.Type == parquet.TypeArray && c.ElementType != nil {
+			if colElems == nil {
+				colElems = make(map[string]parquet.Column)
+			}
+			colElems[strings.ToLower(c.Name)] = *c.ElementType
+		}
 		cols[i] = c.Name
 		colTypes[strings.ToLower(c.Name)] = c.Type
 		if c.Type == parquet.TypeDecimal {
@@ -194,4 +201,5 @@ func stampScanSchema(node *logical.Node, columns []parquet.Column) {
 	node.ScanColTypes = colTypes
 	node.ScanColDecimal = colDecimal
 	node.ScanColFields = colFields
+	node.ScanColElems = colElems
 }

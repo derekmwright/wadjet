@@ -1287,6 +1287,23 @@ func lowerNamedRelationColumnAliases(tr *TableRef) {
 	tr.SamplePercent = ""
 }
 
+// tableFuncLiteralText is a table-function argument's text when the argument
+// is a literal — a number, a string or a signed number — the spelling the
+// token loop always produced; ok=false for any other expression.
+func tableFuncLiteralText(e Node) (string, bool) {
+	switch n := e.(type) {
+	case *Lit:
+		if n.Kind == LitNumber || n.Kind == LitString {
+			return n.Value, true
+		}
+	case *UnaryOp:
+		if l, ok := n.Inner.(*Lit); ok && l.Kind == LitNumber && (n.Op == "-" || n.Op == "+") {
+			return n.Op + l.Value, true
+		}
+	}
+	return e.String(), false
+}
+
 // parseTableFunction parses a table function call: name(arg1, key=val, ...) [AS alias]
 // Supports both positional arguments and named parameters (key=value).
 func (p *selectParser) parseTableFunction(name string) (TableRef, error) {
@@ -1294,8 +1311,39 @@ func (p *selectParser) parseTableFunction(name string) (TableRef, error) {
 	p.advance() // consume (
 
 	var args []string
+	var argExprs []Node
 	namedArgs := make(map[string]string)
 	argCount := 0
+	// generate_series takes EXPRESSIONS, as every PostgreSQL function does:
+	// each argument is parsed as one, a literal (signed or not) keeps its
+	// text in FuncArgs, and anything else rides FuncArgExprs to be folded.
+	if strings.EqualFold(name, "generate_series") {
+		for p.peek() != TokenRParen && p.peek() != TokenEOF {
+			if argCount > 0 {
+				if _, err := p.expect(TokenComma); err != nil {
+					return TableRef{}, fmt.Errorf("expected , between function arguments")
+				}
+			}
+			argCount++
+			e, err := p.parseExpr()
+			if err != nil {
+				return TableRef{}, err
+			}
+			text, isLit := tableFuncLiteralText(e)
+			args = append(args, text)
+			if isLit {
+				argExprs = append(argExprs, nil)
+			} else {
+				argExprs = append(argExprs, e)
+			}
+		}
+		for _, e := range argExprs {
+			if e != nil {
+				goto parsedArgs
+			}
+		}
+		argExprs = nil
+	}
 	for p.peek() != TokenRParen && p.peek() != TokenEOF {
 		if argCount > 0 {
 			if _, err := p.expect(TokenComma); err != nil {
@@ -1350,6 +1398,7 @@ func (p *selectParser) parseTableFunction(name string) (TableRef, error) {
 		}
 	}
 
+parsedArgs:
 	rparen, err := p.expect(TokenRParen)
 	if err != nil {
 		return TableRef{}, fmt.Errorf("expected ) after function arguments")
@@ -1367,6 +1416,7 @@ func (p *selectParser) parseTableFunction(name string) (TableRef, error) {
 		Alias:         name,
 		IsFunction:    true,
 		FuncArgs:      args,
+		FuncArgExprs:  argExprs,
 		FuncNamedArgs: namedArgs,
 		FuncCallText:  callText,
 	}
@@ -3005,6 +3055,12 @@ func (p *selectParser) parseIdentExpr() (Node, error) {
 			case "pg_catalog", "public":
 				return p.parseFuncCall(colTok.val)
 			case "information_schema":
+				// _pg_expandarray is the one information_schema function a
+				// client calls (pgJDBC's getPrimaryKeys); it is a
+				// set-returning SELECT item (physical/set_returning.go).
+				if strings.EqualFold(colTok.val, "_pg_expandarray") {
+					return p.parseFuncCall("_pg_expandarray")
+				}
 				return nil, sqlerr.New("42883",
 					"function information_schema.%s does not exist", colTok.val)
 			}

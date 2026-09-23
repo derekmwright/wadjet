@@ -13,6 +13,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/engine/expr"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -250,7 +251,15 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 	aggSlotSeen := map[string]int{}
 
 	var projCols []exec.ProjectColumn
+	var setCols []exec.SetColumn
 	for _, proj := range node.Projections {
+		// A SET-RETURNING item — unnest(a), generate_subscripts(a, 1) — is
+		// planned as its ARRAY argument, and the ProjectSet above this
+		// Project expands it (set_returning.go).
+		setCol, err := p.setReturningProjection(&proj, childColTypes, child, isOverAggregate || wrapsAWindow(child), len(projCols))
+		if err != nil {
+			return nil, nil, nil, err
+		}
 		colRef := proj.Column
 		if colRef == "" {
 			colRef = cleanExpr(proj.Expr)
@@ -437,6 +446,18 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 			Precision: outDecl.Precision,
 			Scale:     outDecl.Scale,
 		}
+		// A computed ARRAY carries its element declaration to the operator,
+		// and ARRAY(subquery) must have one: without it the array would go
+		// out as TEXT in a Go rendering (arc PC round 2, B4).
+		if outType == parquet.TypeArray && outDecl.Schema != nil && outDecl.Schema.ElementType != nil {
+			elem := *outDecl.Schema.ElementType
+			pc.ElementType = &elem
+		}
+		if sq, ok := plansql.Unparen(proj.ASTExpr).(*plansql.SubqueryNode); ok && sq.Array && pc.ElementType == nil {
+			return nil, nil, nil, sqlerr.New("0A000",
+				"ARRAY(%s): the subquery's column type is not known here, so the array's element "+
+					"type cannot be declared", sq.SQL)
+		}
 		// VECTOR-returning functions (embed()) need their output dimension
 		// carried so the runtime sizes the output vector. Resolve it from the
 		// registry at plan time (embed() derives it from the live provider).
@@ -563,11 +584,20 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 				}
 			}
 		}
+		if setCol != nil {
+			if err := finishSetColumn(setCol, &pc); err != nil {
+				return nil, nil, nil, err
+			}
+			setCols = append(setCols, *setCol)
+		}
 		projCols = append(projCols, pc)
 	}
 
 	if len(projCols) > 0 {
 		ops = append(ops, exec.NewProject(projCols))
+	}
+	if len(setCols) > 0 {
+		ops = append(ops, &exec.ProjectSet{Cols: setCols})
 	}
 
 	return source, ops, sink, nil

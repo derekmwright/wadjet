@@ -183,6 +183,11 @@ type Node struct {
 	// reported OID 25 for both (#568). Populated by
 	// physical.AnnotateScanColumns alongside ScanColTypes.
 	ScanColFields map[string][]parquet.Column
+	// ScanColElems maps this scan's lower-cased ARRAY column names to their
+	// declared ELEMENT, which ScanColTypes' bare TypeID cannot carry: the
+	// set-returning expansion of `unnest(ix.indkey)` declares its column from
+	// it (physical/set_returning.go). Stamped with ScanColTypes.
+	ScanColElems map[string]parquet.Column
 	// SubqueryColDecls is the declared output column of every SCALAR
 	// SUBQUERY this plan contains, keyed by the subquery's own SQL TEXT —
 	// the key nodeDeclaredType already resolves a subquery by. ONE map is

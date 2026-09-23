@@ -387,7 +387,7 @@ func init() {
 		"current_catalog":  {fnCurrentCatalog, RetString},
 		"current_database": {fnCurrentCatalog, RetString},
 		"current_schema":   {fnCurrentSchema, RetString},
-		"current_schemas":  {fnCurrentSchemas, RetString},
+		"current_schemas":  {fnCurrentSchemas, RetArray},
 		"version":          {fnVersion, RetString},
 
 		"date_add": {fnDateAdd, RetString},

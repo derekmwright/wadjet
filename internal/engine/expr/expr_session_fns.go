@@ -50,23 +50,28 @@ func fnCurrentCatalog(args []any) any { return SessionCatalog }
 
 func fnCurrentSchema(args []any) any { return SessionSchema }
 
-// fnCurrentSchemas mirrors PostgreSQL's current_schemas(include_implicit),
-// which returns the search path as a text array. pgJDBC calls it during
-// connection setup; the value is rendered in PostgreSQL's array text format.
+// fnCurrentSchemas is PostgreSQL's current_schemas(include_implicit): the
+// search path as a name[] ARRAY — `(current_schemas(false))[1]` is its first
+// schema and `x = ANY(current_schemas(true))` tests membership, both of which
+// pgJDBC's TypeInfoCache asks. With include_implicit the implicitly searched
+// pg_catalog leads, as it does on PostgreSQL. It answered the array's TEXT
+// ('{public}') here, so a subscript read NULL and `= ANY` compared against a
+// string (arc PC). A NULL argument is NULL, the function being strict.
 func fnCurrentSchemas(args []any) any {
+	if len(args) == 0 || args[0] == nil {
+		return nil
+	}
 	includeImplicit := false
-	if len(args) > 0 {
-		switch v := args[0].(type) {
-		case bool:
-			includeImplicit = v
-		case string:
-			includeImplicit = strings.EqualFold(v, "true") || strings.EqualFold(v, "t")
-		}
+	switch v := args[0].(type) {
+	case bool:
+		includeImplicit = v
+	case string:
+		includeImplicit = strings.EqualFold(v, "true") || strings.EqualFold(v, "t")
 	}
 	if includeImplicit {
-		return "{pg_catalog," + SessionSchema + "}"
+		return []any{"pg_catalog", SessionSchema}
 	}
-	return "{" + SessionSchema + "}"
+	return []any{SessionSchema}
 }
 
 // fnDateDiff returns the number of whole days between two instants.

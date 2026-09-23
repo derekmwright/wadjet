@@ -777,6 +777,9 @@ func lexStart(l *lexer) stateFn {
 		return nil
 	case r == '\'':
 		return lexString
+	case (r == 'E' || r == 'e') && l.peek() == '\'':
+		l.next() // the opening quote
+		return lexEscapeString
 	case r == '"':
 		return lexQuotedIdent
 	case r >= '0' && r <= '9':
@@ -842,6 +845,115 @@ func lexString(l *lexer) stateFn {
 			// End of string
 			l.emitVal(TokenString, sb.String())
 			return nil
+		default:
+			sb.WriteString(l.input[l.pos-l.width : l.pos])
+		}
+	}
+}
+
+// lexEscapeString scans PostgreSQL's escape string constant, E'…' (§4.1.2.2);
+// the E and the opening quote have been consumed. A backslash starts an
+// escape: \b \f \n \r \t, an octal byte \o \oo \ooo, a hex byte \xh \xhh,
+// a code point \uXXXX or \UXXXXXXXX, and any other character after a
+// backslash is that character (\\ and \' among them). A doubled quote is a
+// quote, as in an ordinary literal. The value is an ordinary string token:
+// E'…' is a spelling of a literal, not a type. PostgreSQL refuses a result
+// that is not valid UTF-8 (a byte escape above 0x7F that starts no
+// sequence, or \000) and a \u escape that is not a code point; so does this
+// lexer — the lexer's refusal is a syntax error here, where PostgreSQL's
+// code for those two is 22021 / 22025 (docs/postgres-differences.md).
+func lexEscapeString(l *lexer) stateFn {
+	var sb strings.Builder
+	hexVal := func(c byte) (int, bool) {
+		switch {
+		case c >= '0' && c <= '9':
+			return int(c - '0'), true
+		case c >= 'a' && c <= 'f':
+			return int(c-'a') + 10, true
+		case c >= 'A' && c <= 'F':
+			return int(c-'A') + 10, true
+		}
+		return 0, false
+	}
+	for {
+		r := l.next()
+		switch {
+		case r == eof:
+			return l.errorf("unterminated quoted string")
+		case r == '\'':
+			if l.peek() == '\'' {
+				l.next()
+				sb.WriteByte('\'')
+				continue
+			}
+			v := sb.String()
+			if !utf8.ValidString(v) || strings.IndexByte(v, 0) >= 0 {
+				return l.errorf("invalid byte sequence for encoding \"UTF8\" in escape string")
+			}
+			l.emitVal(TokenString, v)
+			return nil
+		case r == '\\':
+			if l.pos >= len(l.input) {
+				return l.errorf("unterminated quoted string")
+			}
+			c := l.input[l.pos]
+			switch c {
+			case 'b', 'f', 'n', 'r', 't':
+				l.pos++
+				sb.WriteByte(map[byte]byte{'b': '\b', 'f': '\f', 'n': '\n', 'r': '\r', 't': '\t'}[c])
+			case '0', '1', '2', '3', '4', '5', '6', '7':
+				v := 0
+				for n := 0; n < 3 && l.pos < len(l.input) && l.input[l.pos] >= '0' && l.input[l.pos] <= '7'; n++ {
+					v = v*8 + int(l.input[l.pos]-'0')
+					l.pos++
+				}
+				sb.WriteByte(byte(v))
+			case 'x':
+				v, n := 0, 0
+				for n < 2 && l.pos+1+n < len(l.input) {
+					d, ok := hexVal(l.input[l.pos+1+n])
+					if !ok {
+						break
+					}
+					v = v*16 + d
+					n++
+				}
+				if n == 0 {
+					// `\x` with no hex digit is the letter x.
+					l.pos++
+					sb.WriteByte('x')
+					continue
+				}
+				l.pos += 1 + n
+				sb.WriteByte(byte(v))
+			case 'u', 'U':
+				want := 4
+				if c == 'U' {
+					want = 8
+				}
+				if l.pos+1+want > len(l.input) {
+					return l.errorf("invalid Unicode escape")
+				}
+				v := 0
+				for i := 0; i < want; i++ {
+					d, ok := hexVal(l.input[l.pos+1+i])
+					if !ok {
+						return l.errorf("invalid Unicode escape")
+					}
+					v = v*16 + d
+				}
+				if v == 0 || v > utf8.MaxRune || (v >= 0xD800 && v <= 0xDFFF) {
+					return l.errorf("invalid Unicode escape value")
+				}
+				l.pos += 1 + want
+				sb.WriteRune(rune(v))
+			default:
+				// Any other character after a backslash is itself; a
+				// multi-byte one is copied whole.
+				_, w := utf8.DecodeRuneInString(l.input[l.pos:])
+				sb.WriteString(l.input[l.pos : l.pos+w])
+				l.pos += w
+			}
 		default:
 			sb.WriteString(l.input[l.pos-l.width : l.pos])
 		}

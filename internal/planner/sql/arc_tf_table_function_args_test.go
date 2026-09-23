@@ -29,8 +29,9 @@ func TestArcTFATableFunctionReadsASignedNumberAsOneArgument(t *testing.T) {
 			args: []string{"-2", "2"}},
 		{name: "negative_start_and_stop", sql: `SELECT * FROM generate_series(-5, -1)`,
 			args: []string{"-5", "-1"}},
+		// The expression parser folds a unary plus away; the value is the same.
 		{name: "explicit_plus", sql: `SELECT * FROM generate_series(+1, +3, +1)`,
-			args: []string{"+1", "+3", "+1"}},
+			args: []string{"1", "3", "1"}},
 		// The sign FOLDS onto the number, so the whitespace between them is
 		// not part of the value — `generate_series(1, 0, - 1)` is two rows
 		// on 17.11 too.
@@ -42,13 +43,11 @@ func TestArcTFATableFunctionReadsASignedNumberAsOneArgument(t *testing.T) {
 			args: []string{"1", "3"}},
 		{name: "a_string_argument_is_unchanged", sql: `SELECT * FROM read_json('a-b.json')`,
 			args: []string{"a-b.json"}},
-		// A sign in front of something that is NOT a number keeps the old
-		// reading — a separate argument — because the fold is only over a
-		// number. PostgreSQL 17.11 is a syntax error here; this parser reads
-		// the token and the call then refuses at the source build, which is
-		// the pre-existing boundary and not one this arc moved.
-		{name: "a_lone_sign_is_its_own_argument", sql: `SELECT * FROM generate_series(1, -)`,
-			args: []string{"1", "-"}},
+		// A sign in front of nothing is PostgreSQL 17.11's syntax error, and
+		// now this parser's too: generate_series reads each argument as an
+		// expression (arc PC round 2), so the lone sign no longer reaches
+		// the source as an argument of its own.
+		{name: "a_lone_sign_is_a_syntax_error", sql: `SELECT * FROM generate_series(1, -)`, bad: true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			stmt, err := Parse(c.sql)

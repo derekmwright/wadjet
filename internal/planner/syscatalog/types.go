@@ -51,6 +51,9 @@ type TypeInfo struct {
 
 // FormatType is format_type(oid, typmod) for this column.
 func (t TypeInfo) FormatType() string {
+	if t.OID != 1700 && t.Ndims > 0 {
+		return t.SQLName
+	}
 	if t.OID == 1700 && t.Typmod >= 4 {
 		p := (t.Typmod - 4) >> 16
 		s := (t.Typmod - 4) & 0xFFFF
@@ -137,11 +140,18 @@ func TypeOf(c parquet.Column) TypeInfo {
 	oid := ColumnOID(c)
 	if c.Type == parquet.TypeArray && oid != 25 {
 		elem := scalarTypes[ScalarOID(c.ElementType.Type)]
-		return TypeInfo{
+		info := TypeInfo{
 			OID: oid, Typname: "_" + elem.Typname, SQLName: elem.SQLName + "[]",
 			DataType: "ARRAY", Typmod: -1, Len: -1, Align: arrayAlign(elem.Align),
 			Storage: "x", Collation: elem.Collation, Ndims: 1,
 		}
+		// An array's modifier is its element's: DECIMAL(10,2)[] is
+		// numeric(10,2)[] with typmod 655366, as PostgreSQL describes it.
+		if et := TypeOf(*c.ElementType); et.Typmod >= 0 {
+			info.Typmod = et.Typmod
+			info.SQLName = et.FormatType() + "[]"
+		}
+		return info
 	}
 	info := scalarTypes[oid]
 	info.DataType = info.SQLName

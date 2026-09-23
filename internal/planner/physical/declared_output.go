@@ -1316,20 +1316,23 @@ func nodeDeclaredType(node plansql.Node, decls ColDecls) (expr.DeclType, expr.Co
 		// honest answer: a wrong declaration here builds an output vector
 		// that reads every value back wrong, and that is worse than the
 		// fallback (ADR-0012 item 8).
-		if n.Array {
-			// ARRAY(subquery) declares what the ARRAY[...] constructor
-			// declares — a computed array is carried as text in a
-			// projection's output here (a boundary the differences page
-			// records) — and never the subquery column's own type, which
-			// would build an output vector no array can be written to.
-			return expr.Decl(parquet.TypeString), expr.Decided
-		}
 		if decls.subqueryDecl == nil {
 			return expr.DeclType{}, expr.Undecided
 		}
 		col, ok := decls.subqueryDecl(n.SQL)
 		if !ok {
 			return expr.DeclType{}, expr.Undecided
+		}
+		if n.Array {
+			// ARRAY(subquery) is an array OF the subquery's column, and it
+			// declares that element — bigint[] over a bigint column — so the
+			// operator builds an array vector and the wire declares the
+			// array type (arc PC round 2, B4).
+			elem := col
+			elem.Name = "element"
+			elem.Nullable = true
+			arr := parquet.Column{Name: col.Name, Type: parquet.TypeArray, Nullable: true, ElementType: &elem}
+			return expr.DeclType{ID: parquet.TypeArray, Schema: &arr}, expr.Decided
 		}
 		if col.Type == parquet.TypeDecimal {
 			// (p,s) or nothing: a DECIMAL declared without its scale builds a
@@ -1519,6 +1522,17 @@ func bytesPreservingReturn(n *plansql.FuncCallNode, decls ColDecls) (expr.DeclTy
 }
 
 func funcReturnType(n *plansql.FuncCallNode, decls ColDecls) (expr.DeclType, expr.Confidence) {
+	if t, c, ok := setReturningDeclType(n, decls); ok {
+		return t, c
+	}
+	// current_schemas() is name[]: an ARRAY whose element this engine carries
+	// as text, declared so the wire sends `{public}` under 1009 — an array
+	// without its element went out in a Go rendering (ADR-0044 decision 3).
+	if srfName(n.Name) == "current_schemas" {
+		el := parquet.Column{Name: "element", Type: parquet.TypeString, Nullable: true}
+		arr := parquet.Column{Type: parquet.TypeArray, Nullable: true, ElementType: &el}
+		return expr.DeclType{ID: parquet.TypeArray, Schema: &arr}, expr.Decided
+	}
 	if strings.EqualFold(n.Name, "row_field") && len(n.Args) == 2 {
 		parent, confidence := nodeDeclaredType(n.Args[0], decls)
 		if field, ok := n.Args[1].(*plansql.Lit); ok && parent.Schema != nil {

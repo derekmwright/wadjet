@@ -1890,6 +1890,13 @@ func resolveTableOrCTE(table *plansql.TableRef, ctes []plansql.CTEDef) (*Node, e
 		node.IsTableFunc = true
 		node.FuncName = strings.ToLower(table.Name)
 		node.FuncArgs = table.FuncArgs
+		if len(table.FuncArgExprs) > 0 {
+			folded, err := foldTableFuncArgs(table.Name, table.FuncArgs, table.FuncArgExprs)
+			if err != nil {
+				return nil, err
+			}
+			node.FuncArgs = folded
+		}
 		node.FuncNamedArgs = table.FuncNamedArgs
 		node.WithOrdinality = table.WithOrdinality
 		node.FuncColAliases = table.ColumnAliases

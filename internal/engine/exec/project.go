@@ -173,6 +173,10 @@ type ProjectColumn struct {
 	// class this work exists to close.
 	VecDecimalEval VecDecimalExpression
 	Dimension      int // VECTOR output dimensionality (e.g. embed()); 0 = not a vector
+	// ElementType declares a COMPUTED ARRAY's element, as Dimension does a
+	// computed VECTOR's: an ARRAY(subquery) output exists in no input schema,
+	// so without it the pooled vector has no child to write elements into.
+	ElementType *parquet.Column
 	// Precision and Scale declare a COMPUTED DECIMAL output, the same way
 	// Dimension declares a computed VECTOR one: the output column does not
 	// exist in the input, so there is no vector to read (p,s) off, and a
@@ -376,6 +380,9 @@ func (p *Project) Execute(_ context.Context, in *batch.RecordBatch) (*batch.Reco
 			// batched VecEval path and the per-row SetVector path can write.
 			if col.Type == parquet.TypeVector && col.Dimension == 0 && proj.Dimension > 0 {
 				col.Dimension = proj.Dimension
+			}
+			if col.Type == parquet.TypeArray && col.ElementType == nil && proj.ElementType != nil {
+				col.ElementType = proj.ElementType
 			}
 			// The same repair for a computed DECIMAL: GREATEST/LEAST/
 			// COALESCE/CASE over DECIMAL columns produce a value the input

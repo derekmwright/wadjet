@@ -65,20 +65,14 @@ type pcOutcome struct {
 // its mechanism. A pin that starts agreeing with PostgreSQL fails — deleting
 // it is the proof.
 var pcPins = map[string]string{
-	"psql \\l #1": "E'…' escape-string literals are not in this parser's grammar " +
-		"(42601); psql's \\l renders the ACL with E'\\n'",
+	"psql \\l #1": "as datagrip databases (one database): the E'\\n' ACL " +
+		"rendering answers now",
 	"psql \\d o #2": "pg_class.relam is 0 and pg_am is empty: a stored table here " +
 		"has no PostgreSQL access method, so \\d prints no 'Access method: heap' line",
 	"psql \\d+ o #2": "as psql \\d o #2 (relam)",
-	"sqlalchemy 13": "a set-returning function in the SELECT list (unnest, " +
-		"generate_subscripts) is not implemented by the engine: SQLAlchemy's " +
-		"get_pk_constraint refuses 42883 where PostgreSQL answers no rows",
-	"pgjdbc getPrimaryKeys o": "information_schema._pg_expandarray and the field " +
-		"access over its composite are not implemented: 42883 where PostgreSQL " +
-		"answers no rows",
-	"pgjdbc TypeInfoCache getSQLType": "a table function's arguments are literals in " +
-		"this grammar: generate_series(1, array_upper(…)) is 42601 where PostgreSQL " +
-		"answers",
+	"pgjdbc getPrimaryKeys o": "`(result.KEYS).x` is a RELATION-QUALIFIED row field " +
+		"path, which ADR-0022 refuses 0A000 while a column reference carries a " +
+		"two-part identity; _pg_expandarray itself answers (arc PC round 2)",
 	"datagrip databases": "this server is ONE database: PostgreSQL also lists " +
 		"template0, template1 and postgres",
 	"pgjdbc getCatalogs": "as datagrip databases (one database)",
@@ -87,9 +81,6 @@ var pcPins = map[string]string{
 		"pg_database_owner",
 	"psql \\dn #1": "as information_schema schemata (public's owner)",
 	"psql \\du #1": "one role: PostgreSQL also lists its bootstrap superuser",
-	"pgjdbc TypeInfoCache getPGType": "current_schemas(true) answers the TEXT " +
-		"'{public}' — not a name[] with pg_catalog in it — so `= ANY(…)` is false " +
-		"(filing candidate)",
 	"regclass round trip": "a string literal cast to regclass is READ to its OID " +
 		"(buildCast), so `'ev'::regclass::text` prints the OID where PostgreSQL " +
 		"prints ev",

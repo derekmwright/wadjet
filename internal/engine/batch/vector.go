@@ -2535,3 +2535,11 @@ func (v *Vector) SetComputedChecked(i int, val any) error {
 	v.DecimalData.Data[i] = d
 	return nil
 }
+
+// AppendNull appends one NULL row to v, advancing every shape's
+// variable-length bookkeeping as a NULL write must (see WriteNullAt).
+func (v *Vector) AppendNull() { appendToVector(v, nil) }
+
+// AppendValue appends one boxed value as a row of v — a map[string]any for a
+// ROW — through the same writer every append uses.
+func (v *Vector) AppendValue(val any) { appendToVector(v, val) }

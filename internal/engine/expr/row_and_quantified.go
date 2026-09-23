@@ -81,6 +81,65 @@ func (e *Quantified) EvalBoolNull(b *batch.RecordBatch, row int) (val, null bool
 	return e.All, false
 }
 
+// ArrayQuantified is `left <op> ANY|SOME|ALL (array expression)`: the
+// right operand is evaluated per row and the left compared with each of its
+// elements, with PostgreSQL's three-valued reduction — ANY is true at the
+// first true, ALL false at the first false, a NULL element makes an
+// otherwise undecided answer NULL, a NULL array is NULL and an empty one
+// answers false (ANY) or true (ALL). A right operand that is not an array
+// at run time is compared as the single candidate it is, as the value-list
+// spelling `x = ANY(y)` always was.
+type ArrayQuantified struct {
+	Left, Array Expr
+	Op          CmpOp
+	All         bool
+}
+
+func (e *ArrayQuantified) Eval(b *batch.RecordBatch, row int) any {
+	return boolNullBox(e.EvalBoolNull(b, row))
+}
+
+func (e *ArrayQuantified) EvalBool(b *batch.RecordBatch, row int) bool {
+	v, null := e.EvalBoolNull(b, row)
+	return v && !null
+}
+
+func (e *ArrayQuantified) EvalBoolNull(b *batch.RecordBatch, row int) (val, null bool) {
+	av := e.Array.Eval(b, row)
+	if av == nil {
+		return false, true
+	}
+	elems, ok := toSlice(av)
+	if !ok {
+		return NewCmp(e.Left, e.Array, e.Op).EvalBoolNull(b, row)
+	}
+	if e.Left.Eval(b, row) == nil && len(elems) > 0 {
+		return false, true
+	}
+	sawNull := false
+	for _, el := range elems {
+		if el == nil {
+			sawNull = true
+			continue
+		}
+		v, isNull := NewCmp(e.Left, &Lit{Val: el}, e.Op).EvalBoolNull(b, row)
+		if isNull {
+			sawNull = true
+			continue
+		}
+		if e.All && !v {
+			return false, false
+		}
+		if !e.All && v {
+			return true, false
+		}
+	}
+	if sawNull {
+		return false, true
+	}
+	return e.All, false
+}
+
 // RowCmp compares two row values field by field, as PostgreSQL does.
 //
 // `=` and `<>` compare every field; the ordering operators stop at the first
@@ -219,6 +278,20 @@ func compileQuantified(n *plansql.AnyAllExpr, ctx *compileContext) (Expr, error)
 	if len(n.Values) == 1 {
 		if arr, ok := n.Values[0].(*plansql.ArrayLitNode); ok {
 			candidates = arr.Elements
+		}
+	}
+	// ONE candidate that is neither an ARRAY literal nor a subquery is an
+	// array-valued EXPRESSION — `a.attnum = ANY(ix.indkey)`,
+	// `nspname = ANY(current_schemas(true))` — whose elements are known only
+	// per row. Comparing the left operand with the ARRAY itself answered
+	// false for every row (arc PC).
+	if len(n.Values) == 1 && len(candidates) == 1 && candidates[0] == n.Values[0] {
+		if _, isArr := n.Values[0].(*plansql.ArrayLitNode); !isArr {
+			arr, err := compileWithCtx(n.Values[0], ctx)
+			if err != nil {
+				return nil, err
+			}
+			return &ArrayQuantified{Left: left, Array: arr, Op: op, All: all}, nil
 		}
 	}
 	out := &Quantified{All: all}

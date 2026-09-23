@@ -58,6 +58,10 @@ func declaredOutputSchema(root *logical.Node,
 			Fields:   d.RowFields(),
 			Nullable: true,
 		}
+		if d.ID == parquet.TypeArray && d.Schema != nil && d.Schema.ElementType != nil {
+			elem := *d.Schema.ElementType
+			col.ElementType = &elem
+		}
 		if d.ID == parquet.TypeDecimal && d.DecKnown {
 			// precision 0 (pgTypeMod's "unconstrained") when it cannot be
 			// resolved — the honest fallback, not a fabricated (p,s) (#458).

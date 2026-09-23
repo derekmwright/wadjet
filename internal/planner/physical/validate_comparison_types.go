@@ -378,6 +378,17 @@ func (c *comparisonTyper) walk(node plansql.Node) error {
 		}
 	case *plansql.AnyAllExpr:
 		for _, v := range n.Values {
+			// `x = ANY(arr)` over an ARRAY expression compares x with the
+			// array's ELEMENTS — PostgreSQL's scalar-op-ANY(array) form, which
+			// every catalog query writes (`oid = ANY(pol.polroles)`,
+			// `a.attnum = ANY(ix.indkey)`). Pairing x with the array itself
+			// refused it 42883; the element pair is not checked here, and a
+			// mismatched element is compared at run time as any value pair is.
+			if _, isSub := plansql.Unparen(v).(*plansql.SubqueryNode); !isSub {
+				if t, ok := c.operand(v); ok && t == parquet.TypeArray {
+					continue
+				}
+			}
 			if err := c.inPair(n.Left, v, pgComparisonOp(n.Op)); err != nil {
 				return err
 			}

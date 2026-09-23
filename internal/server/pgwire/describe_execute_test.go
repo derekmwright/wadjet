@@ -518,17 +518,20 @@ func TestDataGripOpeningSequencePgx(t *testing.T) {
 	}
 	t.Logf("version() = %s", version)
 
-	var a, b string
+	// current_schemas() is name[]: pgx reads it as an array (1009), as it
+	// reads PostgreSQL's (arc PC round 2).
+	var a string
+	var b []string
 	err = conn.QueryRow(ctx, "select current_database() as a, current_schemas(false) as b").Scan(&a, &b)
 	if err != nil {
 		t.Fatalf("select current_database() as a, current_schemas(false) as b: %v", err)
 	}
-	t.Logf("current_database()=%s current_schemas(false)=%s", a, b)
+	t.Logf("current_database()=%s current_schemas(false)=%v", a, b)
 	if a != "wadjet" {
 		t.Errorf("current_database() = %q, want wadjet", a)
 	}
-	if b != "{public}" {
-		t.Errorf("current_schemas(false) = %q, want {public}", b)
+	if len(b) != 1 || b[0] != "public" {
+		t.Errorf("current_schemas(false) = %q, want [public]", b)
 	}
 
 	// The reported statement.

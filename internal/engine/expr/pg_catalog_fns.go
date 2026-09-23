@@ -396,6 +396,10 @@ func fnFormatType(args []any) any {
 		if mod >= 4 {
 			return fmt.Sprintf("numeric(%d,%d)", (mod-4)>>16, (mod-4)&0xFFFF)
 		}
+	case 1231: // numeric(p,s)[]: an array's modifier is its element's
+		if mod >= 4 {
+			return fmt.Sprintf("numeric(%d,%d)[]", (mod-4)>>16, (mod-4)&0xFFFF)
+		}
 	case 1043, 1042: // character varying(n), character(n)
 		if mod >= 4 {
 			return fmt.Sprintf("%s(%d)", sql, mod-4)

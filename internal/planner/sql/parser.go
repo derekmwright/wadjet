@@ -631,11 +631,18 @@ type SelectInfo struct {
 
 // TableRef is a reference to a table or table-producing function.
 type TableRef struct {
-	Name           string
-	Qualifier      string // schema or catalog.schema written before the name
-	Alias          string
-	IsFunction     bool              // true for table functions like read_json(...)
-	FuncArgs       []string          // positional arguments
+	Name       string
+	Qualifier  string // schema or catalog.schema written before the name
+	Alias      string
+	IsFunction bool     // true for table functions like read_json(...)
+	FuncArgs   []string // positional arguments
+	// FuncArgExprs holds, for generate_series, the argument at each position
+	// that is an EXPRESSION rather than a single literal —
+	// `generate_series(1, array_upper(current_schemas(false), 1))`, which
+	// pgJDBC's TypeInfoCache sends. The logical builder folds each to its
+	// constant value (logical.foldTableFuncArgs); nil where FuncArgs holds the
+	// literal as before.
+	FuncArgExprs   []Node
 	FuncNamedArgs  map[string]string // named arguments (key=value)
 	WithOrdinality bool              // UNNEST(...) WITH ORDINALITY
 	// FuncCallText is the VERBATIM argument list of a table function's call,

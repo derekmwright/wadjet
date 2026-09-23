@@ -110,7 +110,9 @@ func checkKnown(name string) error {
 	if !strictFunctions {
 		return nil
 	}
-	return &UnknownFuncError{Name: name, Aggregate: unimplementedAggregates[name]}
+	return &UnknownFuncError{Name: name, Aggregate: unimplementedAggregates[name],
+		SetReturning: name == "unnest" || name == "generate_subscripts" || name == "_pg_expandarray" ||
+			name == "pg_catalog.unnest" || name == "pg_catalog.generate_subscripts"}
 }
 
 // ResolveFuncName reports whether a call's name is one this engine implements,
@@ -143,9 +145,19 @@ type UnknownFuncError struct {
 	// the reader: an unimplemented aggregate silently dropped the GROUP BY
 	// as well as the value, so the result had the wrong row COUNT.
 	Aggregate bool
+	// SetReturning marks a set-returning function the physical planner
+	// expands only as a whole SELECT item (physical/set_returning.go):
+	// anywhere else — inside an expression, a WHERE, beside DISTINCT — it is
+	// a feature this engine does not implement (0A000), not a name it does
+	// not know.
+	SetReturning bool
 }
 
 func (e *UnknownFuncError) Error() string {
+	if e.SetReturning {
+		return fmt.Sprintf("set-returning function %s is supported only as a whole item of a SELECT list "+
+			"without aggregates, window functions or DISTINCT", e.Name)
+	}
 	if e.Aggregate {
 		return fmt.Sprintf("unknown function: %s is an aggregate function that Wadjet does not implement", e.Name)
 	}
@@ -158,7 +170,12 @@ func (e *UnknownFuncError) Error() string {
 // SQLState returns PostgreSQL's undefined_function code. sqlerr.StateOf picks
 // it up through the Coder interface so the wire reports 42883 rather than the
 // blanket 42000 (#366).
-func (e *UnknownFuncError) SQLState() string { return "42883" }
+func (e *UnknownFuncError) SQLState() string {
+	if e.SetReturning {
+		return "0A000"
+	}
+	return "42883"
+}
 
 // IsUnknownFunc reports whether err is, or wraps, an UnknownFuncError.
 func IsUnknownFunc(err error) bool {
