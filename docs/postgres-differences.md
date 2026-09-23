@@ -394,7 +394,15 @@ PostgreSQL has none. SemVer 2.0.0 defines precedence; node-semver defines ranges
 
 **The system catalog describes one database, one role and this server's objects.**
 
-`pg_database` lists one database and `pg_roles` one role, the connection's identity, which is not a superuser; PostgreSQL also lists its templates and bootstrap superuser. `pg_class.relam` is 0 and `pg_am` is empty (a stored table has no PostgreSQL access method), `pg_type` lists the types the wire declares and their arrays but no DOMAIN types, `pg_proc` lists no functions, and the relations for objects this server does not have (indexes, triggers, rules, policies, publications, sequences) are empty. A column is typed by the engine type that carries it — an OID column declares `int8`. `current_schemas()` answers text, not `name[]`. A string literal cast to `regclass` is read to its OID and prints as the OID where PostgreSQL prints the name. `E'…'` escape strings, set-returning functions in a SELECT list (`unnest(x)`, `generate_subscripts`) and `information_schema._pg_expandarray` are not implemented, so psql's `\l`, SQLAlchemy's `get_pk_constraint` and pgJDBC's `getPrimaryKeys` are refused where PostgreSQL answers. (ADR-0044, #1251)
+`pg_database` lists one database and `pg_roles` one role, the connection's identity, which is not a superuser; PostgreSQL also lists its templates and bootstrap superuser. `pg_class.relam` is 0 and `pg_am` is empty (a stored table has no PostgreSQL access method), `pg_type` lists the types the wire declares and their arrays but no DOMAIN types, `pg_proc` lists no functions, and the relations for objects this server does not have (indexes, triggers, rules, policies, publications, sequences) are empty. A column is typed by the engine type that carries it — an OID column declares `int8`, and `current_schemas()` is `text[]` where PostgreSQL's is `name[]`. A masked column's definition is listed and its values arrive masked; a denied column is absent. A string literal cast to `regclass` is read to its OID and prints as the OID where PostgreSQL prints the name. pgJDBC's `getPrimaryKeys` is refused 0A000 where PostgreSQL answers: it reads `(result.KEYS).x`, a relation-qualified row field path (ADR-0022). (ADR-0044, #1251)
+
+**A malformed escape string is a syntax error.**
+
+`E'…'` reads PostgreSQL's escapes. One whose result is not valid UTF-8 (`E'\xff'`, `E'\000'`) or a `\u` escape that is not a code point is 42601 here, where PostgreSQL raises 22021 / 22025. Both refuse. (ADR-0044)
+
+**Set-returning functions answer only as a whole SELECT item.**
+
+`unnest(array)`, `generate_subscripts(array, dim)` and `information_schema._pg_expandarray(array)` expand each row when they ARE a SELECT item, by PostgreSQL 10's rule (the longest set decides the row count, shorter sets are padded with NULL). Inside an expression, in WHERE, beside an aggregate, a window function or DISTINCT they are refused 0A000 where PostgreSQL answers (or, in WHERE, refuses with the same code). `generate_subscripts`' dimension must be a constant, and a table function's arguments must be constants: `generate_series(1, t.n)` is 0A000. (ADR-0044)
 
 **The pattern-match operators match with RE2.**
 

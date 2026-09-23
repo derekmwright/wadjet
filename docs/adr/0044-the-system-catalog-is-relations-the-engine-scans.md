@@ -38,7 +38,24 @@ it one more spelling.
    client relies on** (an OID is int8, `name` is text), and a user column's
    type is described by the rule the wire declares it with
    (`syscatalog.TypeOf` restates `pgwire.pgColumnOID`). The catalog and the
-   RowDescription say the same thing.
+   RowDescription say the same thing. **The rule is what the wire declares
+   today**: an ARRAY column is described as its element's array type with
+   the element's typmod (`numeric(10,2)[]`, 1231/655366), which is what a
+   result carrying rows declares. Where the wire itself is not yet
+   self-consistent — a stored array read through a zero-row result declares
+   text (25), and a container's element typmod is not carried on the wire
+   (#1250, #1268, #1017) — the catalog does not paper over it: those
+   issues move the wire, and the catalog follows by construction. A
+   computed array (`ARRAY(subquery)`, `current_schemas()`) declares its
+   element's array type or is refused; it never goes out as text in a Go
+   rendering.
+2a. **Masked is visible, denied is absent.** A column the identity may read
+   under a MASK is part of the relation it can see: its definition (name,
+   type, NOT NULL, ordinal) is listed in every catalog relation and its
+   values arrive masked. A DENIED column or relation is absent from every
+   catalog relation. The catalog describes what the identity can SELECT;
+   hiding a masked column's definition would describe a relation the
+   identity's own `SELECT *` contradicts (arc PC round 2, B5).
 4. **What the catalog lists:** pg_catalog, public and information_schema;
    the user tables and the system relations themselves (pg_class,
    pg_attribute, information_schema.tables/columns); the types the wire
@@ -56,7 +73,11 @@ it one more spelling.
 The recorded divergences are listed on the differences page and pinned in
 `pgwire.TestArcPCToolCatalogQueriesAnswerAsPostgreSQL`: one database and one
 role (PostgreSQL also lists templates and its superuser); `relam` is 0 and
-`pg_am` empty; no DOMAIN types in pg_type; `current_schemas()` answers text;
-a string literal cast to `regclass` is read to its OID and printed as it;
-`E'…'` strings, set-returning functions in a SELECT list and
-`information_schema._pg_expandarray` are not implemented.
+`pg_am` empty; no DOMAIN types in pg_type; a string literal cast to
+`regclass` is read to its OID and printed as it; pgJDBC's `getPrimaryKeys`
+reads `(result.KEYS).x`, a relation-qualified row field path ADR-0022
+refuses 0A000. Round 2 made the rest answer: `E'…'` strings, `x = ANY(array
+expression)`, set-returning functions as whole SELECT items (`unnest`,
+`generate_subscripts`, `information_schema._pg_expandarray`), constant
+expressions as `generate_series` arguments, and `current_schemas()` as an
+array.
