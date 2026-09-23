@@ -417,3 +417,43 @@ func TestArcFR2CSVBlankLinesAndLineEndingsAreKeptRaggedRowsRefused(t *testing.T)
 		})
 	}
 }
+
+// TestArcFR2AMultibyteDelimiterThroughSQL (review B2): the `delimiter`
+// option is its first CHARACTER. At base the option took the first byte and
+// encoding/csv split on the whole rune only through the Go API; at 784aac60
+// the scanner took a byte too, so `§` left half a character on every field.
+func TestArcFR2AMultibyteDelimiterThroughSQL(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, Config{Store: objstore.NewMemStore(), Bucket: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, path := range []string{"plan_time_schema", "first_batch"} {
+		t.Run(path, func(t *testing.T) {
+			if path == "first_batch" {
+				t.Setenv("WADJET_TEST_NO_READER_SCHEMA", "1")
+			}
+			for _, sep := range []string{"|", "§", "界"} {
+				t.Run(sep, func(t *testing.T) {
+					p := filepath.Join(t.TempDir(), "f.csv")
+					body := strings.ReplaceAll("a,b\n1,x\n2,y\n", ",", sep)
+					if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					res, err := db.Query(ctx, fmt.Sprintf("SELECT a, b FROM read_csv('%s', delimiter='%s') ORDER BY a", p, sep))
+					if err != nil {
+						t.Fatal(err)
+					}
+					var got []string
+					for i := range res.Rows {
+						got = append(got, fmt.Sprint(res.Cells(i)))
+					}
+					if g := strings.Join(got, " "); g != "[1 x] [2 y]" {
+						t.Fatalf("rows %q, want [1 x] [2 y]", g)
+					}
+				})
+			}
+		})
+	}
+}

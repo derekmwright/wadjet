@@ -194,7 +194,7 @@ func (r *Reader) nextRecord() (record, error) {
 				return record{}, err
 			}
 			r.cur, r.curName, r.curRows, r.first = rc, in.Name, 0, true
-			r.sc = newRecordScanner(rc, byte(r.cfg.Delimiter))
+			r.sc = newRecordScanner(rc, r.cfg.Delimiter)
 		}
 		fields, nulls, line, err := r.sc.next()
 		if err == io.EOF {

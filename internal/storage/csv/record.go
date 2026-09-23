@@ -3,7 +3,9 @@
 package csv
 
 import (
+	"bytes"
 	"io"
+	"unicode/utf8"
 
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
@@ -44,7 +46,7 @@ type recordScanner struct {
 	pos   int
 	end   int
 	eof   bool
-	comma byte
+	comma []byte // the delimiter's UTF-8 bytes: one, or up to four for a non-ASCII rune
 
 	line    int // 1-based line the scanner is on
 	started bool
@@ -56,21 +58,28 @@ type recordScanner struct {
 
 const scanChunk = 64 << 10
 
-func newRecordScanner(r io.Reader, comma byte) *recordScanner {
+// newRecordScanner scans r with the delimiter comma, which may be any rune:
+// a field boundary is the rune's whole UTF-8 sequence, so a multibyte
+// delimiter (`§`, `界`) never splits a character (the reader's configuration
+// has always been a rune; a byte conversion cut it).
+func newRecordScanner(r io.Reader, comma rune) *recordScanner {
 	if comma == 0 {
 		comma = ','
 	}
-	return &recordScanner{r: r, comma: comma, line: 1, buf: make([]byte, scanChunk)}
+	return &recordScanner{r: r, comma: utf8.AppendRune(nil, comma), line: 1, buf: make([]byte, scanChunk)}
 }
 
-// fill reads more input; it reports false at the end of the file.
+// fill reads more input after the unconsumed bytes, which it moves to the
+// front of the buffer; it reports false at the end of the file.
 func (s *recordScanner) fill() (bool, error) {
 	if s.eof {
 		return false, nil
 	}
+	rest := copy(s.buf, s.buf[s.pos:s.end])
+	s.pos, s.end = 0, rest
 	for {
-		n, err := s.r.Read(s.buf)
-		s.pos, s.end = 0, n
+		n, err := s.r.Read(s.buf[rest:])
+		s.end = rest + n
 		if n > 0 {
 			if err == io.EOF {
 				s.eof = true
@@ -85,6 +94,24 @@ func (s *recordScanner) fill() (bool, error) {
 			return false, err
 		}
 	}
+}
+
+// isComma reports whether the delimiter starts at s.pos, reading ahead as
+// far as the delimiter's length needs.
+func (s *recordScanner) isComma() (bool, error) {
+	if s.buf[s.pos] != s.comma[0] {
+		return false, nil
+	}
+	for s.end-s.pos < len(s.comma) {
+		ok, err := s.fill()
+		if err != nil {
+			return false, err
+		}
+		if !ok {
+			return false, nil
+		}
+	}
+	return bytes.Equal(s.buf[s.pos:s.pos+len(s.comma)], s.comma), nil
 }
 
 // peek returns the next byte without consuming it.
@@ -168,11 +195,18 @@ func (s *recordScanner) next() (fields []string, nulls []bool, line int, err err
 			inQuote = false
 			continue
 		}
+		if c == s.comma[0] {
+			is, err := s.isComma()
+			if err != nil {
+				return nil, nil, 0, err
+			}
+			if is {
+				s.pos += len(s.comma)
+				endField()
+				continue
+			}
+		}
 		switch c {
-		case s.comma:
-			s.pos++
-			endField()
-			continue
 		case '"':
 			s.pos++
 			sawQuote, inQuote = true, true
@@ -197,7 +231,7 @@ func (s *recordScanner) next() (fields []string, nulls []bool, line int, err err
 			i := s.pos + 1
 			for i < s.end {
 				b := s.buf[i]
-				if b == s.comma || b == '"' || b == '\n' || b == '\r' {
+				if b == s.comma[0] || b == '"' || b == '\n' || b == '\r' {
 					break
 				}
 				i++
@@ -224,16 +258,13 @@ func (s *recordScanner) next() (fields []string, nulls []bool, line int, err err
 
 // skipBOM skips a UTF-8 byte-order mark at the very start of the file.
 func (s *recordScanner) skipBOM() error {
-	for s.end-s.pos < 3 && !s.eof {
-		// Gather up to three bytes without losing any already buffered.
-		rest := append([]byte(nil), s.buf[s.pos:s.end]...)
-		n, err := s.r.Read(s.buf[len(rest):])
-		copy(s.buf, rest)
-		s.pos, s.end = 0, len(rest)+n
-		if err == io.EOF {
-			s.eof = true
-		} else if err != nil {
+	for s.end-s.pos < 3 {
+		ok, err := s.fill()
+		if err != nil {
 			return err
+		}
+		if !ok {
+			break
 		}
 	}
 	if s.end-s.pos >= 3 && s.buf[s.pos] == 0xEF && s.buf[s.pos+1] == 0xBB && s.buf[s.pos+2] == 0xBF {

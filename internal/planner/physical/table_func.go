@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"database/sql"
 
@@ -441,14 +442,12 @@ type csvTableFuncSource struct {
 
 func (s *csvTableFuncSource) Init(_ context.Context) error {
 	cfg := csvreader.DefaultConfig()
-	if delim, ok := s.NamedArgs["delimiter"]; ok && len(delim) > 0 {
-		cfg.Delimiter = rune(delim[0])
-	}
-	if delim, ok := s.NamedArgs["delim"]; ok && len(delim) > 0 {
-		cfg.Delimiter = rune(delim[0])
-	}
-	if delim, ok := s.NamedArgs["sep"]; ok && len(delim) > 0 {
-		cfg.Delimiter = rune(delim[0])
+	// The delimiter is the option's first CHARACTER, not its first byte: a
+	// byte of a multibyte `§` or `界` is half a character.
+	for _, key := range []string{"delimiter", "delim", "sep"} {
+		if delim, ok := s.NamedArgs[key]; ok && len(delim) > 0 {
+			cfg.Delimiter, _ = utf8.DecodeRuneInString(delim)
+		}
 	}
 	if hdr, ok := s.NamedArgs["header"]; ok {
 		cfg.HasHeader = hdr == "true" || hdr == "TRUE" || hdr == "1"
