@@ -373,52 +373,81 @@ func TestArcBRComparisonOperandClassesMatchPostgres(t *testing.T) {
 		"c_ts": "time", "c_date": "time", "c_ipv4": "inet", "c_ipv6": "inet", "c_cidr": "inet",
 		"c_mac": "mac", "c_uuid": "uuid",
 	}
-	// The kept superset (ADR-0012 §5): a DIRECT comparison of text with one of
-	// these reads the text through that type's input, the same on every arm.
-	// A membership test (IN / = ANY) keeps no text reading.
-	textInput := map[string]bool{"c_date": true, "c_ts": true, "c_uuid": true,
-		"c_ipv6": true, "c_cidr": true, "c_bool": true}
+	// The kept text pairs (ADR-0012 §5), written out from the base
+	// measurement (br_codex/corpus.json text*/): {direct / JOIN / IN list,
+	// IN (subquery)} answer where one conversion answered the same on every
+	// arm.
+	textKeep := map[string][2]bool{
+		"c_i32": {true, true}, "c_i64": {true, true}, "c_f64": {true, true}, "c_dec": {true, true},
+		"c_port": {true, true}, "c_proto": {true, true}, "c_dur": {true, true},
+		"c_uuid": {true, true}, "c_ipv6": {true, true}, "c_cidr": {true, true},
+		"c_date": {true, false}, "c_ts": {true, false}, "c_bool": {true, false},
+	}
 	var cells []brCell
 	for x, cx := range class {
 		for y, cy := range class {
 			direct := fmt.Sprintf("SELECT id FROM tm WHERE %s = %s", x, y)
 			member := fmt.Sprintf("SELECT id FROM tm a WHERE a.%s IN (SELECT b.%s FROM tm b)", x, y)
-			superset := (x == "c_str" && textInput[y]) || (y == "c_str" && textInput[x])
-			switch {
-			case cx == cy:
-				cells = append(cells, brCell{direct, "", ""}, brCell{member, "", ""})
-			case superset:
-				cells = append(cells, brCell{direct, "", ""},
-					brCell{member, "42883", "operator does not exist: "})
-			default:
-				cells = append(cells, brCell{direct, "42883", "operator does not exist: "},
-					brCell{member, "42883", "operator does not exist: "})
+			keep := [2]bool{}
+			if x == "c_str" {
+				keep = textKeep[y]
+			} else if y == "c_str" {
+				keep = textKeep[x]
+			}
+			if cx == cy {
+				keep = [2]bool{true, true}
+			}
+			for i, sql := range []string{direct, member} {
+				if keep[i] {
+					cells = append(cells, brCell{sql, "", ""})
+				} else {
+					cells = append(cells, brCell{sql, "42883", "operator does not exist: "})
+				}
 			}
 		}
 	}
 	cells = append(cells,
 		// PostgreSQL's sentence, operator and operand order, verbatim.
-		brCell{"SELECT o.id FROM lat_ord o WHERE o.id IN (SELECT product FROM lat_item)", "42883", "operator does not exist: bigint = text"},
-		brCell{"SELECT o.id FROM lat_ord o WHERE o.id NOT IN (SELECT product FROM lat_item)", "42883", "operator does not exist: bigint = text"},
-		brCell{"SELECT o.customer FROM lat_ord o WHERE o.customer IN (SELECT id FROM lat_item)", "42883", "operator does not exist: text = bigint"},
+		// A text subquery against a number is the kept pair; with a SET
+		// OPERATION in the body it was arm-dependent at base (0 rows single,
+		// a cast error on the DAG) and is refused.
+		brCell{"SELECT o.id FROM lat_ord o WHERE o.id IN (SELECT product FROM lat_item)", "", ""},
+		brCell{"SELECT o.id FROM lat_ord o WHERE o.id NOT IN (SELECT product FROM lat_item)", "", ""},
+		brCell{"SELECT o.customer FROM lat_ord o WHERE o.customer IN (SELECT id FROM lat_item)", "", ""},
+		brCell{"SELECT o.id FROM lat_ord o WHERE o.id IN (SELECT CAST(id AS TEXT) FROM lat_item)", "", ""},
+		brCell{"SELECT a.c_date FROM tm a WHERE a.c_date IN (SELECT CAST(b.c_date AS TEXT) FROM tm b)", "42883", "operator does not exist: date = text"},
+		brCell{"SELECT a.c_f32 FROM tm a WHERE a.c_f32 = CAST(a.c_f32 AS TEXT)", "42883", "operator does not exist: real = text"},
 		brCell{"SELECT o.id FROM lat_ord o WHERE o.id IN (SELECT product FROM lat_item UNION ALL SELECT product FROM lat_item)", "42883", "operator does not exist: bigint = text"},
-		brCell{"SELECT o.id FROM lat_ord o WHERE o.id = ANY (SELECT product FROM lat_item)", "42883", "operator does not exist: bigint = text"},
-		brCell{"SELECT o.id FROM lat_ord o WHERE o.id > ALL (SELECT product FROM lat_item)", "42883", "operator does not exist: bigint > text"},
-		brCell{"SELECT o.id, o.id IN (SELECT product FROM lat_item) AS v FROM lat_ord o", "42883", "operator does not exist: bigint = text"},
-		brCell{"SELECT o.id FROM lat_ord o WHERE o.id IN (SELECT o.customer)", "42883", "operator does not exist: bigint = text"},
-		brCell{"SELECT o.id FROM lat_ord o WHERE o.id = (SELECT product FROM lat_item LIMIT 1)", "42883", "operator does not exist: bigint = text"},
-		brCell{"SELECT o.id FROM lat_ord o WHERE o.id <> o.customer", "42883", "operator does not exist: bigint <> text"},
-		brCell{"SELECT o.id FROM lat_ord o WHERE o.id != o.customer", "42883", "operator does not exist: bigint <> text"},
-		brCell{"SELECT o.id FROM lat_ord o WHERE o.id < o.customer", "42883", "operator does not exist: bigint < text"},
-		brCell{"SELECT o.id FROM lat_ord o WHERE o.id BETWEEN o.customer AND o.customer", "42883", "operator does not exist: bigint >= text"},
-		brCell{"SELECT o.id FROM lat_ord o WHERE o.id BETWEEN 1 AND o.customer", "42883", "operator does not exist: bigint <= text"},
-		brCell{"SELECT o.id FROM lat_ord o WHERE o.id IS DISTINCT FROM o.customer", "42883", "operator does not exist: bigint = text"},
-		brCell{"SELECT o.id FROM lat_ord o WHERE o.id IS NOT DISTINCT FROM o.customer", "42883", "operator does not exist: bigint = text"},
-		brCell{"SELECT o.id FROM lat_ord o WHERE o.id IN (o.customer, 1)", "42883", "operator does not exist: bigint = text"},
+		// The kept pair in every spelling (bigint against text).
+		brCell{"SELECT o.id FROM lat_ord o WHERE o.id = ANY (SELECT product FROM lat_item)", "", ""},
+		brCell{"SELECT o.id, o.id IN (SELECT product FROM lat_item) AS v FROM lat_ord o", "", ""},
+		brCell{"SELECT o.id FROM lat_ord o WHERE o.id <> o.customer", "", ""},
+		// Two plain COLUMNS of the pair as a JOIN key are refused: that is
+		// the hash-join key path, broken by arm at base (#615).
 		brCell{"SELECT o.id FROM lat_ord o JOIN lat_item i ON o.id = i.product", "42883", "operator does not exist: bigint = text"},
-		brCell{"SELECT o.id FROM lat_ord o WHERE (o.id, o.customer) IN (SELECT id, id FROM lat_item)", "42883", "operator does not exist: text = bigint"},
-		brCell{"SELECT CASE o.id WHEN o.customer THEN 1 END AS v FROM lat_ord o", "42883", "operator does not exist: bigint = text"},
-		brCell{"SELECT o.id FROM lat_ord o GROUP BY o.id HAVING o.id = MAX(o.customer)", "42883", "operator does not exist: bigint = text"},
+		brCell{"SELECT a.id FROM tm a JOIN tm b ON a.c_i32 = CAST(b.c_i32 AS TEXT)", "", ""},
+		brCell{"SELECT NULLIF(customer, id) AS v FROM lat_ord", "", ""},
+		// PostgreSQL's sentence, operator and operand order, over a REFUSED
+		// pair (integer against date) in every spelling.
+		brCell{"SELECT id FROM tm WHERE c_i32 IN (SELECT c_date FROM tm)", "42883", "operator does not exist: integer = date"},
+		brCell{"SELECT id FROM tm WHERE c_i32 NOT IN (SELECT c_date FROM tm)", "42883", "operator does not exist: integer = date"},
+		brCell{"SELECT id FROM tm WHERE c_date IN (SELECT c_i32 FROM tm)", "42883", "operator does not exist: date = integer"},
+		brCell{"SELECT id FROM tm WHERE c_i32 = ANY (SELECT c_date FROM tm)", "42883", "operator does not exist: integer = date"},
+		brCell{"SELECT id FROM tm WHERE c_i32 > ALL (SELECT c_date FROM tm)", "42883", "operator does not exist: integer > date"},
+		brCell{"SELECT id, c_i32 IN (SELECT c_date FROM tm) AS v FROM tm", "42883", "operator does not exist: integer = date"},
+		brCell{"SELECT id FROM tm WHERE c_i32 = (SELECT c_date FROM tm LIMIT 1)", "42883", "operator does not exist: integer = date"},
+		brCell{"SELECT id FROM tm WHERE c_i32 <> c_date", "42883", "operator does not exist: integer <> date"},
+		brCell{"SELECT id FROM tm WHERE c_i32 != c_date", "42883", "operator does not exist: integer <> date"},
+		brCell{"SELECT id FROM tm WHERE c_i32 < c_date", "42883", "operator does not exist: integer < date"},
+		brCell{"SELECT id FROM tm WHERE c_i32 BETWEEN c_date AND c_date", "42883", "operator does not exist: integer >= date"},
+		brCell{"SELECT id FROM tm WHERE c_i32 BETWEEN 1 AND c_date", "42883", "operator does not exist: integer <= date"},
+		brCell{"SELECT id FROM tm WHERE c_i32 IS DISTINCT FROM c_date", "42883", "operator does not exist: integer = date"},
+		brCell{"SELECT id FROM tm WHERE c_i32 IS NOT DISTINCT FROM c_date", "42883", "operator does not exist: integer = date"},
+		brCell{"SELECT id FROM tm WHERE c_i32 IN (c_date, 1)", "42883", "operator does not exist: integer = date"},
+		brCell{"SELECT a.id FROM tm a JOIN tm b ON a.c_i32 = b.c_date", "42883", "operator does not exist: integer = date"},
+		brCell{"SELECT id FROM tm WHERE (c_i64, c_i32) IN (SELECT id, c_date FROM tm)", "42883", "operator does not exist: integer = date"},
+		brCell{"SELECT CASE c_i32 WHEN c_date THEN 1 END AS v FROM tm", "42883", "operator does not exist: integer = date"},
+		brCell{"SELECT c_i32 FROM tm GROUP BY c_i32 HAVING c_i32 = MAX(c_date)", "42883", "operator does not exist: integer = date"},
 		brCell{"SELECT o.id FROM lat_ord o WHERE (o.id > 1) = 1", "42883", "operator does not exist: boolean = integer"},
 		brCell{"SELECT 1 = true AS v", "42883", "operator does not exist: integer = boolean"},
 		brCell{"SELECT 1 IS DISTINCT FROM 1 = true AS v", "42883", "operator does not exist: integer = boolean"},

@@ -30,21 +30,9 @@ import (
 // int8), text, bytea, boolean, the date/time pair, the inet family (IPV4,
 // IPV6, CIDR), macaddr, uuid, and each container on its own.
 //
-// TEXT against a typed operand was read three ways at base, measured with the
-// text holding each value's own rendering: as the other type's INPUT for
-// DATE, TIMESTAMP, UUID, IPV6, CIDR and BOOL (every row matched, on every
-// arm); as the other side's RENDERED text for the numbers (#504: "12.7500"
-// against 12.75 is unequal); and as nothing at all for IPV4, MACADDR and BYTEA
-// (zero rows where every row matched). Through IN (SELECT …) and = ANY it was
-// worse — 0 rows on the single arm and every row on the DAG for DATE,
-// TIMESTAMP and IPV4. So:
-//
-//   - a DIRECT comparison of text with DATE, TIMESTAMP, UUID, IPV6, CIDR or
-//     BOOL keeps its reading, which is the input function's and the same on
-//     every arm: a recorded superset (ADR-0012 §5, #826's column spelling);
-//   - text against a number, IPV4, MACADDR or BYTEA is refused, and so is ANY
-//     text membership test against a typed subquery or list, as PostgreSQL
-//     refuses all of them.
+// TEXT against a typed operand is decided PER PAIR from what the base engine
+// answered (textConversionAnswers): kept where one conversion answered the
+// same on every arm, refused where it matched wrongly or differed by arm.
 //
 // LITERALS keep their own rule. A QUOTED or NULL literal is SQL's `unknown`
 // and takes the other side's type (validate_literal.go). An UNQUOTED numeric
@@ -120,6 +108,11 @@ type comparisonTyper struct {
 	subquery func(sql string) []parquet.TypeID
 	// shape is an operand's full declaration, for two ROWs.
 	shape func(plansql.Node) (parquet.Column, bool)
+	// joinKeys is set for a JOIN's ON clause, where two plain COLUMNS of a
+	// text/typed pair become hash-join keys: that path failed on three arms
+	// (#615's key-type error) and answered zero rows on the shuffled one at
+	// base, so no text reading is kept for it (arc BR round 2).
+	joinKeys bool
 }
 
 func (c *comparisonTyper) operand(n plansql.Node) (parquet.TypeID, bool) {
@@ -173,13 +166,29 @@ func isTypedLiteral(n plansql.Node) bool {
 	return ok && (lit.Kind == plansql.LitNumber || lit.Kind == plansql.LitBool)
 }
 
-// textReadsAsInput is the set of classes a DIRECT comparison with a text
-// operand reads through the other type's input function — the kept superset.
-func textReadsAsInput(t parquet.TypeID) bool {
+// textConversionAnswers is the MEASURED per-pair table for text against a
+// typed operand (arc BR round 2, br_codex/corpus.json text*/, base 260fc569):
+// the pair is kept where the base engine had ONE conversion that answered the
+// same on all five arms — a value compared with its own rendering matched all
+// 20 rows everywhere — and refused where it did not.
+//
+//	type            direct / JOIN / IN list   IN (subquery), = ANY
+//	int4, int8, float8, numeric,
+//	port, protocol, duration        keep            keep
+//	uuid, ipv6, cidr                keep            keep
+//	date, timestamp, boolean        keep            REFUSE: 0 rows single, 20 DAG
+//	real                            REFUSE: 3 of 20 matched (a wrong conversion)
+//	bytea, ipv4, macaddr            REFUSE: 0 of 20 matched
+//
+// subquery is set for a membership test against a subquery body.
+func textConversionAnswers(t parquet.TypeID, subquery bool) bool {
 	switch t {
-	case parquet.TypeDate, parquet.TypeTimestamp, parquet.TypeUUID,
-		parquet.TypeIPv6, parquet.TypeCIDR, parquet.TypeBool:
+	case parquet.TypeInt32, parquet.TypeInt64, parquet.TypeFloat64, parquet.TypeDecimal,
+		parquet.TypePort, parquet.TypeProtocol, parquet.TypeDuration,
+		parquet.TypeUUID, parquet.TypeIPv6, parquet.TypeCIDR:
 		return true
+	case parquet.TypeDate, parquet.TypeTimestamp, parquet.TypeBool:
+		return !subquery
 	}
 	return false
 }
@@ -190,9 +199,9 @@ func (c *comparisonTyper) pair(a, b plansql.Node, op string) error {
 	return c.pairOf(a, b, op, false)
 }
 
-// pairOf is pair, and for a MEMBERSHIP test (IN, = ANY / ALL) when member is
-// set — where no text reading is kept.
-func (c *comparisonTyper) pairOf(a, b plansql.Node, op string, member bool) error {
+// pairOf is pair, and for a membership test against a SUBQUERY (IN, = ANY /
+// ALL) when subquery is set.
+func (c *comparisonTyper) pairOf(a, b plansql.Node, op string, subquery bool) error {
 	ta, ok := c.operand(a)
 	if !ok {
 		return nil
@@ -212,7 +221,10 @@ func (c *comparisonTyper) pairOf(a, b plansql.Node, op string, member bool) erro
 		!(ca == cmpBool && cb == cmpNumber) && !(ca == cmpNumber && cb == cmpBool) {
 		return nil
 	}
-	if !member && ((ca == cmpText && textReadsAsInput(tb)) || (cb == cmpText && textReadsAsInput(ta))) {
+	_, colA := plansql.Unparen(a).(*plansql.ColRef)
+	_, colB := plansql.Unparen(b).(*plansql.ColRef)
+	hashKey := c.joinKeys && colA && colB
+	if !hashKey && ((ca == cmpText && textConversionAnswers(tb, subquery)) || (cb == cmpText && textConversionAnswers(ta, subquery))) {
 		return nil
 	}
 	return sqlerr.New("42883", "operator does not exist: %s %s %s", cmpTypeName(ta), op, cmpTypeName(tb))
@@ -405,11 +417,43 @@ func (c *comparisonTyper) inPair(left, member plansql.Node, op string) error {
 			if !ok {
 				continue
 			}
-			if ca, cb := comparisonClass(te), comparisonClass(ts[i]); ca != cmpUnknown && cb != cmpUnknown && ca != cb {
+			if ca, cb := comparisonClass(te), comparisonClass(ts[i]); ca != cmpUnknown && cb != cmpUnknown && ca != cb &&
+				!(ca == cmpText && textConversionAnswers(ts[i], true)) && !(cb == cmpText && textConversionAnswers(te, true)) {
 				return sqlerr.New("42883", "operator does not exist: %s %s %s", cmpTypeName(te), op, cmpTypeName(ts[i]))
 			}
 		}
 		return nil
 	}
-	return c.pairOf(left, member, op, true)
+	sub, isSub := plansql.Unparen(member).(*plansql.SubqueryNode)
+	if isSub && isSetOpBody(sub.SQL) {
+		// A text/typed membership against a SET-OPERATION body was
+		// arm-dependent at base whatever the type: 0 rows on the single arm,
+		// the DAG's cast of the text failing (`invalid input syntax for type
+		// integer: "alice"`, #1073). No text reading is kept there.
+		return c.pairStrict(left, member, op)
+	}
+	return c.pairOf(left, member, op, isSub)
+}
+
+// isSetOpBody reports whether a subquery body is a UNION / INTERSECT / EXCEPT.
+func isSetOpBody(sql string) bool {
+	info := parseSelect(sql)
+	return info != nil && info.Union != nil
+}
+
+// pairStrict is pairOf with no text reading kept.
+func (c *comparisonTyper) pairStrict(a, b plansql.Node, op string) error {
+	ta, ok := c.operand(a)
+	if !ok {
+		return nil
+	}
+	tb, ok := c.operand(b)
+	if !ok {
+		return nil
+	}
+	ca, cb := comparisonClass(ta), comparisonClass(tb)
+	if (ca == cmpText) != (cb == cmpText) && ca != cmpUnknown && cb != cmpUnknown {
+		return sqlerr.New("42883", "operator does not exist: %s %s %s", cmpTypeName(ta), op, cmpTypeName(tb))
+	}
+	return c.pairOf(a, b, op, true)
 }

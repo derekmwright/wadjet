@@ -416,10 +416,14 @@ func brComparisonCells() []brArmCell {
 		{"c_ipv6", "inet"}, {"c_cidr", "inet"}, {"c_mac", "mac"}, {"c_port", "n"},
 		{"c_proto", "n"}, {"c_dur", "n"}, {"c_uuid", "uuid"}, {"c_date", "time"}, {"c_dec", "n"},
 	}
-	// The kept superset (ADR-0012 §5): text compared DIRECTLY with these reads
-	// through their input function, identically on every arm.
-	textInput := map[string]bool{"c_date": true, "c_ts": true, "c_uuid": true,
-		"c_ipv6": true, "c_cidr": true, "c_bool": true}
+	// The kept text pairs (ADR-0012 §5), from the base measurement:
+	// {direct, IN (subquery)}.
+	textKeep := map[string][2]bool{
+		"c_i32": {true, true}, "c_i64": {true, true}, "c_f64": {true, true}, "c_dec": {true, true},
+		"c_port": {true, true}, "c_proto": {true, true}, "c_dur": {true, true},
+		"c_uuid": {true, true}, "c_ipv6": {true, true}, "c_cidr": {true, true},
+		"c_date": {true, false}, "c_ts": {true, false}, "c_bool": {true, false},
+	}
 	var out []brArmCell
 	for _, x := range class {
 		for _, y := range class {
@@ -438,8 +442,20 @@ func brComparisonCells() []brArmCell {
 			} else {
 				eq.state, eq.msg = "42883", "operator does not exist: "
 				in.state, in.msg = "42883", "operator does not exist: "
-				if (x.col == "c_str" && textInput[y.col]) || (y.col == "c_str" && textInput[x.col]) {
+				keep := [2]bool{}
+				if x.col == "c_str" {
+					keep = textKeep[y.col]
+				} else if y.col == "c_str" {
+					keep = textKeep[x.col]
+				}
+				if keep[0] {
 					eq = brArmCell{name: eq.name, sql: eq.sql, same: true}
+				}
+				if keep[1] {
+					// Over arbitrary text a kept membership can fail at run
+					// time (#615's join-key path) — loud, pre-existing; the
+					// kept pair is asserted in its CAST form below.
+					in = brArmCell{}
 				}
 			}
 			out = append(out, eq)
@@ -448,19 +464,45 @@ func brComparisonCells() []brArmCell {
 			}
 		}
 	}
+	// The kept text pairs in the form the base measurement used: a value
+	// against its own text rendering matches every row, on every arm.
+	for col, keep := range textKeep {
+		cast := "CAST(b." + col + " AS TEXT)"
+		in := brArmCell{name: "cmpTextIn/" + col,
+			sql: "SELECT count(*) AS n FROM typemx a WHERE a.id < 20 AND a." + col +
+				" IN (SELECT " + cast + " FROM typemx b WHERE b.id < 20)"}
+		if keep[1] {
+			in.same = true
+		} else {
+			in.state, in.msg = "42883", "operator does not exist: "
+		}
+		out = append(out, in,
+			brArmCell{name: "cmpTextEq/" + col, same: true,
+				sql: "SELECT count(*) AS n FROM typemx b WHERE b.id < 20 AND b." + col + " = " + cast})
+	}
+	for _, col := range []string{"c_f32", "c_bytes", "c_ipv4", "c_mac"} {
+		out = append(out, brArmCell{name: "cmpTextEq/" + col,
+			sql:   "SELECT count(*) AS n FROM typemx b WHERE b.id < 20 AND b." + col + " = CAST(b." + col + " AS TEXT)",
+			state: "42883", msg: "operator does not exist: "})
+	}
+	out = append(out,
+		brArmCell{name: "cmpOk/textIdInSubquery",
+			sql:  "SELECT id FROM lat_ord WHERE id IN (SELECT CAST(id AS TEXT) FROM lat_item)",
+			want: "rows=3 1 | 2 | 3"},
+		brArmCell{name: "cmpOk/intInTextSubquery", sql: "SELECT o.id FROM lat_ord o WHERE o.id IN (SELECT product FROM lat_item)", same: true},
+		brArmCell{name: "cmpOk/columnPairIntText", sql: "SELECT o.id FROM lat_ord o WHERE o.id = o.customer", same: true},
+		brArmCell{name: "cmpOk/joinIntTextExpressionKey",
+			sql:  "SELECT count(*) AS n FROM typemx a JOIN typemx b ON a.c_i32 = CAST(b.c_i32 AS TEXT) WHERE a.id < 20 AND b.id < 20",
+			same: true},
+	)
 	for _, c := range []struct{ name, sql, msg string }{
-		{"inSubquery", "SELECT o.id FROM lat_ord o WHERE o.id IN (SELECT product FROM lat_item)", "operator does not exist: bigint = text"},
 		{"inSetOpSubquery", "SELECT o.id FROM lat_ord o WHERE o.id IN (SELECT product FROM lat_item UNION ALL SELECT product FROM lat_item)", "operator does not exist: bigint = text"},
-		{"inSubqueryMirror", "SELECT o.customer FROM lat_ord o WHERE o.customer IN (SELECT id FROM lat_item)", "operator does not exist: text = bigint"},
-		{"notInSubquery", "SELECT o.id FROM lat_ord o WHERE o.id NOT IN (SELECT product FROM lat_item)", "operator does not exist: bigint = text"},
-		{"anySubquery", "SELECT o.id FROM lat_ord o WHERE o.id = ANY (SELECT product FROM lat_item)", "operator does not exist: bigint = text"},
-		{"inSubqueryInSelectList", "SELECT o.id, o.id IN (SELECT product FROM lat_item) AS v FROM lat_ord o", "operator does not exist: bigint = text"},
-		{"columnPair", "SELECT o.id FROM lat_ord o WHERE o.id = o.customer", "operator does not exist: bigint = text"},
-		{"joinOn", "SELECT o.id FROM lat_ord o JOIN lat_item i ON o.id = i.product", "operator does not exist: bigint = text"},
 		{"integerBoolean", "SELECT 1 = true AS v", "operator does not exist: integer = boolean"},
 		{"distinctFromBoolean", "SELECT 1 IS DISTINCT FROM 1 = true AS v", "operator does not exist: integer = boolean"},
 		{"columnBooleanLiteral", "SELECT id FROM lat_ord WHERE id = true", "operator does not exist: bigint = boolean"},
 		{"predicateInteger", "SELECT id FROM lat_ord WHERE (id > 1) = 1", "operator does not exist: boolean = integer"},
+		{"joinIntTextColumns", "SELECT o.id FROM lat_ord o JOIN lat_item i ON o.id = i.product", "operator does not exist: bigint = text"},
+		{"dateInIntSubquery", "SELECT count(*) AS n FROM typemx a WHERE a.c_date IN (SELECT b.c_i32 FROM typemx b)", "operator does not exist: date = integer"},
 	} {
 		out = append(out, brArmCell{name: "cmp/" + c.name, sql: c.sql, state: "42883", msg: c.msg})
 	}

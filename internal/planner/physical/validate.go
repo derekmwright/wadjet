@@ -639,8 +639,11 @@ type binder struct {
 	// structural is each block's output column TYPES as the comparison rule
 	// may read them (structuralTypeOf), typeAmbiguous where it cannot.
 	structural map[*plansql.SelectInfo][]parquet.TypeID
-	src        tableColumnSource
-	ctes       map[string]cteEntry
+	// joinCond is set while a JOIN's ON clause is checked: a text/typed pair
+	// of two plain COLUMNS there is a hash-join key (comparisonTyper).
+	joinCond bool
+	src      tableColumnSource
+	ctes     map[string]cteEntry
 	// outerDiag is the enclosing query levels a DERIVED TABLE's body sits
 	// under, carried for DIAGNOSIS and never for resolution (#614). See
 	// outerDiagScope. Nil everywhere but inside a plain derived table's block.
@@ -844,7 +847,10 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 			onScope = from.scopeAtJoin(visible, through)
 			onScope.merge(outer)
 		}
-		if err := b.checkExpr(info.Joins[i].CondExpr, onScope); err != nil {
+		b.joinCond = true
+		err := b.checkExpr(info.Joins[i].CondExpr, onScope)
+		b.joinCond = false
+		if err != nil {
 			return err
 		}
 		if err := checkBooleanContext(info.Joins[i].CondExpr, onScope, "JOIN/ON"); err != nil {
@@ -1042,7 +1048,7 @@ func (b *binder) refuseIncomparableOperands(node plansql.Node, scope *colScope) 
 		return nil
 	}
 	decls := rowFieldScopeDecls(scope)
-	c := &comparisonTyper{scope: scope, typeOf: structuralTypeOf(decls), shape: foldTypeOf(decls),
+	c := &comparisonTyper{scope: scope, typeOf: structuralTypeOf(decls), shape: foldTypeOf(decls), joinKeys: b.joinCond,
 		subquery: func(sql string) []parquet.TypeID { return b.subqueryOutputTypes(sql, scope) }}
 	return c.walk(node)
 }
