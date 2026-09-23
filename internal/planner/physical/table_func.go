@@ -5,13 +5,11 @@ package physical
 import (
 	"bytes"
 	"context"
-	"encoding/csv"
 	"fmt"
 	"io"
 	"math/rand"
 	"os"
 	"path/filepath"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -23,6 +21,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 	csvreader "github.com/derekmwright/wadjet/internal/storage/csv"
 	"github.com/derekmwright/wadjet/internal/storage/dbscan"
+	"github.com/derekmwright/wadjet/internal/storage/fileinput"
 	jsonreader "github.com/derekmwright/wadjet/internal/storage/json"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -324,7 +323,6 @@ type csvTableFuncSource struct {
 	path      string
 	NamedArgs map[string]string
 	reader    *csvreader.Reader
-	closer    io.Closer // file handle to close when done
 }
 
 func (s *csvTableFuncSource) Init(_ context.Context) error {
@@ -342,22 +340,15 @@ func (s *csvTableFuncSource) Init(_ context.Context) error {
 		cfg.HasHeader = hdr == "true" || hdr == "TRUE" || hdr == "1"
 	}
 
-	// Every source shape streams: local files directly, globs through the
-	// lazy multi-file reader, HTTP straight off the response body. The
-	// URL/glob paths previously buffered the full input (globs 2×) before
-	// the CSV reader saw a byte.
-	rc, err := openData(s.path)
+	// Every source shape streams, and a glob is a SEQUENCE of files the
+	// reader decodes one at a time — each with its own header and its own
+	// record grammar state — never their bytes run together (fileinput).
+	inputs, err := readerInputs(s.path)
 	if err != nil {
 		return fmt.Errorf("read_csv: %w", err)
 	}
-	if m, ok := rc.(*multiFileReadCloser); ok && cfg.HasHeader {
-		m.csvHeaderComma = cfg.Delimiter
-	}
-	s.closer = rc
-	r, err := csvreader.NewStreamReader(rc, cfg)
+	r, err := csvreader.NewFilesReader(inputs, cfg)
 	if err != nil {
-		rc.Close()
-		s.closer = nil
 		return fmt.Errorf("read_csv: %w", err)
 	}
 	s.reader = r
@@ -373,10 +364,36 @@ func (s *csvTableFuncSource) Next(_ context.Context) (*batch.RecordBatch, error)
 }
 
 func (s *csvTableFuncSource) Close() error {
-	if s.closer != nil {
-		return s.closer.Close()
+	if s.reader != nil {
+		return s.reader.Close()
 	}
 	return nil
+}
+
+// readerInputs is a reader's input as the SEQUENCE of files it names: a URL
+// or a single path is one input the caller names in its errors; a glob is
+// every match in name order, each named, each opened only when the reader
+// reaches it. A reader decodes each file on its own (fileinput).
+func readerInputs(path string) ([]fileinput.Input, error) {
+	if isURL(path) {
+		return []fileinput.Input{{Open: func() (io.ReadCloser, error) { return openHTTP(path) }}}, nil
+	}
+	if !isGlob(path) {
+		return []fileinput.Input{{Open: func() (io.ReadCloser, error) { return os.Open(path) }}}, nil
+	}
+	matches, err := filepath.Glob(path)
+	if err != nil {
+		return nil, fmt.Errorf("glob %s: %w", path, err)
+	}
+	if len(matches) == 0 {
+		return nil, fmt.Errorf("glob %s: no matching files", path)
+	}
+	sort.Strings(matches)
+	inputs := make([]fileinput.Input, len(matches))
+	for i, m := range matches {
+		inputs[i] = fileinput.Input{Name: m, Open: func() (io.ReadCloser, error) { return os.Open(m) }}
+	}
+	return inputs, nil
 }
 
 // openData opens a local file path, glob pattern, or HTTP/HTTPS URL as a
@@ -405,15 +422,6 @@ func openData(path string) (io.ReadCloser, error) {
 // multiFileReadCloser streams a sorted glob expansion file-by-file. At most
 // one file is open at a time; a '\n' is injected after any file that does
 // not end with one (matching fetchGlob's concatenation framing).
-//
-// For a CSV with a header (csvHeaderComma set to its delimiter) the first
-// file's first record is THE header, and a later file whose first record is
-// that same header has it skipped rather than read as a data row. Read as
-// data it was a row of header names — counted by COUNT(*), a text value in
-// every text column, and, inside the 100-row sample, enough to infer every
-// column as text; past the sample it is a 22P02, since "age" is not a
-// bigint. A later file that does not repeat the header is a continuation
-// (a file split after its header) and is read whole, as it always was.
 type multiFileReadCloser struct {
 	paths     []string
 	idx       int
@@ -421,9 +429,6 @@ type multiFileReadCloser struct {
 	hadData   bool
 	lastByte  byte
 	pendingNL bool
-
-	csvHeaderComma rune     // 0: not a CSV with a header
-	csvHeader      []string // the first file's header record, once read
 
 	// emitted counts the bytes Read has returned; segments records, for
 	// every file opened, the stream offset its bytes start at, so a reader
@@ -475,11 +480,6 @@ func (m *multiFileReadCloser) Read(p []byte) (int, error) {
 			m.idx++
 			m.cur = f
 			m.hadData = false
-			if m.csvHeaderComma != 0 {
-				if err := m.positionAfterCSVHeader(); err != nil {
-					return 0, err
-				}
-			}
 			m.segments = append(m.segments, streamSegment{start: m.emitted, path: m.paths[m.idx-1]})
 		}
 		n, err := m.cur.Read(p)
@@ -501,32 +501,6 @@ func (m *multiFileReadCloser) Read(p []byte) (int, error) {
 		m.cur = nil
 		return 0, err
 	}
-}
-
-// positionAfterCSVHeader leaves the file just opened where its data starts:
-// at its beginning, unless an earlier file supplied the header and this
-// file's first record repeats it exactly, in which case just past that
-// record. The record is parsed as CSV, so a quoted field holding a newline
-// is one record; a file with no record contributes nothing either way.
-func (m *multiFileReadCloser) positionAfterCSVHeader() error {
-	cr := csv.NewReader(m.cur)
-	cr.Comma = m.csvHeaderComma
-	cr.FieldsPerRecord = -1
-	var offset int64
-	record, err := cr.Read()
-	switch {
-	case err == io.EOF:
-	case err != nil:
-		return fmt.Errorf("reading the header of %s: %w", m.cur.Name(), err)
-	case m.csvHeader == nil:
-		m.csvHeader = record
-	case slices.Equal(record, m.csvHeader):
-		offset = cr.InputOffset()
-	}
-	if _, err := m.cur.Seek(offset, io.SeekStart); err != nil {
-		return fmt.Errorf("reading %s: %w", m.cur.Name(), err)
-	}
-	return nil
 }
 
 func (m *multiFileReadCloser) Close() error {

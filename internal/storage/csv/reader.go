@@ -4,12 +4,12 @@ package csv
 
 import (
 	"bytes"
-	"encoding/csv"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -17,6 +17,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
+	"github.com/derekmwright/wadjet/internal/storage/fileinput"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -35,14 +36,6 @@ var (
 	errNotType    = errors.New("value does not parse as the column's type")
 	errOutOfRange = errors.New("value is out of range for the column's type")
 )
-
-// Locator is implemented by an input that is several files read as one
-// stream (read_csv over a glob): Segment names the file holding the input
-// offset, where that file starts, and an offset before which every later
-// offset still lies in the same file.
-type Locator interface {
-	Segment(offset int64) (file string, start, next int64)
-}
 
 var (
 	ipv4Re            = regexp.MustCompile(`^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$`)
@@ -69,161 +62,206 @@ func DefaultConfig() ReaderConfig {
 	}
 }
 
+// record is one data row: its fields, which of them are NULL (nil when
+// none is), and where it came from — the file (named only across a glob)
+// and its 1-based data row within that file, which is what a refusal names.
+type record struct {
+	fields []string
+	nulls  []bool
+	file   string
+	row    int
+}
+
 // Reader reads CSV data into columnar RecordBatches.
+//
+// Its input is a SEQUENCE of files (fileinput): read_csv over a glob hands it
+// the matched files in name order, and each is decoded on its own — its own
+// record grammar state, its own line numbers, its own first record — with
+// at most one open at a time. The schema is ONE across them: the header is
+// the first file's, and the types are inferred from the first 100 data rows
+// of the sequence (which cross into later files when the first is short).
+// A later file whose first record repeats the header has it skipped; one
+// whose first record does not is read whole, as data (a file split after
+// its header). A later file whose values do not fit the inferred types is
+// refused past the sample like any other row, naming that file and its row.
 type Reader struct {
 	schema   []parquet.Column
 	colIdx   map[string]int
-	rows     [][]string // all data rows (excluding header) — used for []byte path
+	rows     []record // buffered rows (the sample, or every row for NewReader)
 	offset   int
-	readRows int         // data rows already built into batches
-	cr       *csv.Reader // streaming csv reader — used for io.Reader path
+	readRows int // data rows already built into batches
+	named    bool
 
-	// starts are the input offsets of the buffered rows (streaming path).
-	// loc, for a glob, names the file an offset lies in; seg* follow the file
-	// of the current row so a refusal names that file and its own row.
-	starts      []int64
-	loc         Locator
-	segFile     string
-	segStart    int64
-	segNext     int64
-	segRowsSeen int
+	cfg     ReaderConfig
+	inputs  []fileinput.Input
+	nextIn  int
+	cur     io.ReadCloser
+	curName string
+	sc      *recordScanner
+	curRows int
+	first   bool     // the next record is the current file's first
+	header  []string // the header record, once read (HasHeader)
+	width   int      // fields per record; 0 until the first record fixes it
+	done    bool
 }
 
-// NewReader creates a CSV reader from raw bytes with the given config.
+// NewReader creates a CSV reader from raw bytes with the given config. It
+// reads every row up front, so a malformed input is refused here.
 func NewReader(data []byte, cfg ReaderConfig) (*Reader, error) {
 	trimmed := bytes.TrimSpace(data)
-	if len(trimmed) == 0 {
-		return &Reader{}, nil
-	}
-
-	cr := csv.NewReader(bytes.NewReader(trimmed))
-	cr.FieldsPerRecord = -1 // allow variable field counts
-	if cfg.Delimiter != 0 {
-		cr.Comma = cfg.Delimiter
-	}
-
-	allRows, err := cr.ReadAll()
+	r, err := NewStreamReader(bytes.NewReader(trimmed), cfg)
 	if err != nil {
-		return nil, fmt.Errorf("parsing CSV: %w", err)
+		return nil, err
 	}
-	if len(allRows) == 0 {
-		return &Reader{}, nil
-	}
-
-	var header []string
-	var dataRows [][]string
-
-	if cfg.HasHeader {
-		header = allRows[0]
-		dataRows = allRows[1:]
-	} else {
-		// Generate column names: col0, col1, ...
-		numCols := len(allRows[0])
-		header = make([]string, numCols)
-		for i := range header {
-			header[i] = fmt.Sprintf("col%d", i)
+	for !r.done {
+		rec, err := r.nextRecord()
+		if err == io.EOF {
+			break
 		}
-		dataRows = allRows
-	}
-
-	if len(dataRows) == 0 {
-		// Header only, no data
-		schema := make([]parquet.Column, len(header))
-		for i, name := range header {
-			schema[i] = parquet.Column{Name: name, Type: parquet.TypeString}
+		if err != nil {
+			return nil, fmt.Errorf("parsing CSV: %w", err)
 		}
-		return &Reader{schema: schema, colIdx: makeColIdx(schema)}, nil
+		r.rows = append(r.rows, rec)
 	}
-
-	// Infer schema from sample rows
-	schema := inferCSVSchema(header, dataRows)
-	return &Reader{
-		schema: schema,
-		colIdx: makeColIdx(schema),
-		rows:   dataRows,
-	}, nil
+	r.done = true
+	return r, nil
 }
 
-// NewStreamReader creates a streaming CSV reader from an io.Reader.
-// Reads the header and a sample of rows for schema inference, then streams
-// remaining rows on demand via Next(). Memory usage is O(batch_size) instead
-// of O(total_rows).
+// NewStreamReader creates a streaming CSV reader over one input. The
+// caller keeps ownership of r.
 func NewStreamReader(r io.Reader, cfg ReaderConfig) (*Reader, error) {
-	cr := csv.NewReader(r)
-	cr.FieldsPerRecord = -1
-	cr.ReuseRecord = true
-	if cfg.Delimiter != 0 {
-		cr.Comma = cfg.Delimiter
-	}
+	return NewFilesReader(fileinput.Reader(r), cfg)
+}
 
-	// Read header
-	firstRow, err := cr.Read()
-	if err != nil {
+// NewFilesReader creates a streaming CSV reader over a sequence of files.
+// It reads the header and a sample of rows for schema inference, then
+// streams the rest on demand via Next(). Memory is O(batch size) plus one
+// open file. Close releases the file it holds.
+func NewFilesReader(inputs []fileinput.Input, cfg ReaderConfig) (*Reader, error) {
+	r := &Reader{cfg: cfg, inputs: inputs, named: len(inputs) > 1}
+	for _, in := range inputs {
+		r.named = r.named || in.Name != ""
+	}
+	var sample []record
+	for len(sample) < sampleSize {
+		rec, err := r.nextRecord()
 		if err == io.EOF {
-			return &Reader{}, nil
+			break
 		}
-		return nil, fmt.Errorf("reading CSV header: %w", err)
+		if err != nil {
+			r.Close()
+			return nil, err
+		}
+		sample = append(sample, rec)
 	}
-
-	var header []string
-	var sampleRows [][]string
-
-	if cfg.HasHeader {
-		header = make([]string, len(firstRow))
-		copy(header, firstRow)
-	} else {
-		header = make([]string, len(firstRow))
+	header := r.header
+	if !cfg.HasHeader && r.width > 0 {
+		header = make([]string, r.width)
 		for i := range header {
 			header[i] = fmt.Sprintf("col%d", i)
 		}
-		row := make([]string, len(firstRow))
-		copy(row, firstRow)
-		sampleRows = append(sampleRows, row)
 	}
-
-	// Row offsets are kept only for a glob, where they name a row's file.
-	loc, _ := r.(Locator)
-	var starts []int64
-	if loc != nil && !cfg.HasHeader {
-		starts = append(starts, 0)
+	if len(header) == 0 {
+		return r, nil // an input with no record: no columns
 	}
-	// Read sample rows for schema inference (up to sampleSize)
-	for len(sampleRows) < sampleSize {
-		start := cr.InputOffset()
-		record, err := cr.Read()
-		if err != nil {
-			break // EOF or error — use what we have
-		}
-		row := make([]string, len(record))
-		copy(row, record)
-		sampleRows = append(sampleRows, row)
-		if loc != nil {
-			starts = append(starts, start)
-		}
-	}
-
-	if len(sampleRows) == 0 && len(header) > 0 {
+	if len(sample) == 0 {
 		schema := make([]parquet.Column, len(header))
 		for i, name := range header {
 			schema[i] = parquet.Column{Name: name, Type: parquet.TypeString}
 		}
-		return &Reader{schema: schema, colIdx: makeColIdx(schema)}, nil
+		r.schema, r.colIdx = schema, makeColIdx(schema)
+		return r, nil
 	}
+	r.schema = inferCSVSchema(header, sample)
+	r.colIdx = makeColIdx(r.schema)
+	r.rows = sample
+	return r, nil
+}
 
-	schema := inferCSVSchema(header, sampleRows)
-	// ReuseRecord was on for sampling; turn off a fresh reader wrapping isn't
-	// possible, but the sample rows are already copied. The cr will continue
-	// streaming from where it left off.
-	cr.ReuseRecord = false
+// nextRecord is the next data record of the sequence, opening the next file
+// when one ends; io.EOF after the last.
+func (r *Reader) nextRecord() (record, error) {
+	for {
+		if r.sc == nil {
+			if r.done || r.nextIn >= len(r.inputs) {
+				r.done = true
+				return record{}, io.EOF
+			}
+			in := r.inputs[r.nextIn]
+			r.nextIn++
+			rc, err := in.Open()
+			if err != nil {
+				return record{}, err
+			}
+			r.cur, r.curName, r.curRows, r.first = rc, in.Name, 0, true
+			r.sc = newRecordScanner(rc, byte(r.cfg.Delimiter))
+		}
+		fields, nulls, line, err := r.sc.next()
+		if err == io.EOF {
+			r.closeCurrent()
+			continue
+		}
+		if err != nil {
+			return record{}, r.inFile(err)
+		}
+		if r.first {
+			r.first = false
+			if r.cfg.HasHeader {
+				if r.header == nil {
+					r.header = fields
+					r.width = len(fields)
+					continue
+				}
+				// A later file that repeats the header has it skipped (#1247).
+				if slices.Equal(fields, r.header) {
+					continue
+				}
+			}
+		}
+		if r.width == 0 {
+			r.width = len(fields)
+		}
+		if len(fields) != r.width {
+			return record{}, r.inFile(r.widthError(len(fields), line))
+		}
+		r.curRows++
+		return record{fields: fields, nulls: nulls, file: r.curName, row: r.curRows}, nil
+	}
+}
 
-	return &Reader{
-		schema: schema,
-		colIdx: makeColIdx(schema),
-		rows:   sampleRows, // buffered sample rows returned first
-		starts: starts,
-		cr:     cr, // then stream remaining from here
-		loc:    loc,
-	}, nil
+// widthError is PostgreSQL's COPY refusal of a record whose field count is
+// not the relation's: 22P04, as `COPY … (FORMAT csv)` raises it.
+func (r *Reader) widthError(n, line int) error {
+	if n > r.width {
+		return sqlerr.New("22P04", "line %d: extra data after last expected column", line)
+	}
+	name := fmt.Sprintf("col%d", n)
+	if n < len(r.header) {
+		name = r.header[n]
+	}
+	return sqlerr.New("22P04", "line %d: missing data for column %q", line, name)
+}
+
+// inFile names the current file in an error about it, across a glob.
+func (r *Reader) inFile(err error) error {
+	if r.curName == "" {
+		return err
+	}
+	return fmt.Errorf("%s: %w", r.curName, err)
+}
+
+func (r *Reader) closeCurrent() {
+	if r.cur != nil {
+		r.cur.Close()
+	}
+	r.cur, r.sc = nil, nil
+}
+
+// Close releases the file the reader holds open, if any.
+func (r *Reader) Close() error {
+	r.closeCurrent()
+	r.done = true
+	return nil
 }
 
 // Schema returns the inferred schema.
@@ -233,101 +271,68 @@ func (r *Reader) Schema() []parquet.Column {
 
 // Next returns the next batch of rows as a RecordBatch.
 func (r *Reader) Next() (*batch.RecordBatch, error) {
-	// If we have buffered rows (from []byte path or streaming sample), use those first
-	if r.offset < len(r.rows) {
-		end := r.offset + defaultBatchSize
-		if end > len(r.rows) {
-			end = len(r.rows)
-		}
-		chunk := r.rows[r.offset:end]
-		var starts []int64
-		if r.starts != nil {
-			starts = r.starts[r.offset:end]
-		}
-		r.offset = end
-		return r.buildBatch(chunk, starts)
+	if r.schema == nil {
+		return nil, nil
 	}
-
-	// If we have a streaming csv.Reader, read the next batch from it
-	if r.cr != nil {
-		chunk, starts, err := r.readStreamBatch()
+	if r.offset < len(r.rows) {
+		end := min(r.offset+defaultBatchSize, len(r.rows))
+		chunk := r.rows[r.offset:end]
+		r.offset = end
+		return r.buildBatch(chunk)
+	}
+	if r.done {
+		return nil, nil
+	}
+	chunk := make([]record, 0, defaultBatchSize)
+	for len(chunk) < defaultBatchSize {
+		rec, err := r.nextRecord()
+		if err == io.EOF {
+			break
+		}
 		if err != nil {
 			return nil, err
 		}
-		if len(chunk) == 0 {
-			return nil, nil // EOF
-		}
-		return r.buildBatch(chunk, starts)
+		chunk = append(chunk, rec)
 	}
-
-	return nil, nil
+	if len(chunk) == 0 {
+		return nil, nil
+	}
+	return r.buildBatch(chunk)
 }
 
-// readStreamBatch reads up to defaultBatchSize rows from the streaming csv.Reader.
-func (r *Reader) readStreamBatch() ([][]string, []int64, error) {
-	var rows [][]string
-	var starts []int64
-	for len(rows) < defaultBatchSize {
-		start := r.cr.InputOffset()
-		record, err := r.cr.Read()
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			return nil, nil, fmt.Errorf("reading CSV row: %w", err)
-		}
-		row := make([]string, len(record))
-		copy(row, record)
-		rows = append(rows, row)
-		if r.loc != nil {
-			starts = append(starts, start)
-		}
-	}
-	return rows, starts, nil
-}
-
-// buildBatch creates a RecordBatch from a slice of string rows.
+// buildBatch creates a RecordBatch from a slice of rows.
 //
 // Every vector of the batch is numRows long (NewRecordBatch) and row ranges
 // over the chunk, so no write below indexes past a vector; a field reaches a
-// typed vector only through writeCSVValue's parse.
-func (r *Reader) buildBatch(chunk [][]string, starts []int64) (*batch.RecordBatch, error) {
+// typed vector only through writeCSVValue's parse. Every record has the
+// schema's width (nextRecord refuses one that does not).
+func (r *Reader) buildBatch(chunk []record) (*batch.RecordBatch, error) {
 	numRows := len(chunk)
 	b := batch.NewRecordBatch(r.schema, numRows)
 
-	for row, fields := range chunk {
-		if r.loc != nil && starts != nil && starts[row] >= r.segNext {
-			r.enterSegment(starts[row], r.readRows+row+1)
-		}
+	for row, rec := range chunk {
 		for col, sc := range r.schema {
-			if col >= len(fields) {
+			if rec.nulls != nil && rec.nulls[col] {
 				b.Columns[col].Nulls.SetNull(row)
 				if needsBytesNull(sc.Type) {
 					b.Columns[col].BytesData.Set(row, nil)
 				}
 				continue
 			}
-			val := fields[col]
-			if val == "" {
-				b.Columns[col].Nulls.SetNull(row)
-				if needsBytesNull(sc.Type) {
-					b.Columns[col].BytesData.Set(row, nil)
-				}
-				continue
-			}
+			val := rec.fields[col]
 			err := writeCSVValue(b.Columns[col], row, val, sc.Type)
 			if err == nil {
 				continue
+			}
+			if !errors.Is(err, errNotType) && !errors.Is(err, errOutOfRange) {
+				return nil, err
 			}
 			// Inside the sample a field that does not parse keeps the
 			// NULL it has always read as (a "true" in a column the sample
 			// widened to bigint); past it the field is refused, as
 			// PostgreSQL's COPY refuses it.
-			if !errors.Is(err, errNotType) && !errors.Is(err, errOutOfRange) {
-				return nil, err
-			}
-			if inputRow := r.readRows + row + 1; inputRow > sampleSize {
-				return nil, r.refusal(err, inputRow, sc, val)
+			if r.readRows+row+1 > sampleSize {
+				return nil, r.refusal(err, rec, sc, val)
 			}
 		}
 	}
@@ -335,28 +340,18 @@ func (r *Reader) buildBatch(chunk [][]string, starts []int64) (*batch.RecordBatc
 	return b, nil
 }
 
-// enterSegment moves the file tracking to the file holding off, the input
-// offset of data row inputRow: a new file's first row makes every earlier
-// row belong to earlier files.
-func (r *Reader) enterSegment(off int64, inputRow int) {
-	file, start, next := r.loc.Segment(off)
-	if file != r.segFile || start != r.segStart {
-		r.segFile, r.segStart = file, start
-		r.segRowsSeen = inputRow - 1
-	}
-	r.segNext = next
-}
-
-// refusal is the error for field val of column sc in data row inputRow past
-// the sample, with PostgreSQL's SQLSTATE for the same text in COPY: 22003 for
+// refusal is the error for field val of column sc in rec, a row past the
+// sample, with PostgreSQL's SQLSTATE for the same text in COPY: 22003 for
 // a number outside the type, 22007 for a timestamp, 22P02 otherwise. Across
 // a glob it names the file and the row within it. The caller (read_csv)
 // prefixes the reader and the input.
-func (r *Reader) refusal(err error, inputRow int, sc parquet.Column, val string) error {
-	where := fmt.Sprintf("row %d column %q", inputRow-r.segRowsSeen, sc.Name)
+func (r *Reader) refusal(err error, rec record, sc parquet.Column, val string) error {
+	where := fmt.Sprintf("row %d column %q", rec.row, sc.Name)
 	sample := fmt.Sprintf("the file's first %d rows", sampleSize)
-	if r.segFile != "" {
-		where = r.segFile + " " + where
+	if r.named {
+		if rec.file != "" {
+			where = rec.file + " " + where
+		}
 		sample = fmt.Sprintf("the first %d rows of the input", sampleSize)
 	}
 	if errors.Is(err, errOutOfRange) {
@@ -375,6 +370,12 @@ func (r *Reader) refusal(err error, inputRow int, sc parquet.Column, val string)
 // outside the type); the caller decides whether that is the NULL (inside
 // the sample) or a refusal (past it).
 func writeCSVValue(vec *batch.Vector, row int, val string, typ parquet.TypeID) error {
+	if val == "" && typ != parquet.TypeString {
+		// A QUOTED empty field is the empty string, not NULL, and no type
+		// but text reads it: PostgreSQL's COPY refuses "" for a bigint.
+		vec.Nulls.SetNull(row)
+		return errNotType
+	}
 	switch typ {
 	// Bool, bigint and double precision read a field with PostgreSQL's own
 	// input grammar for the type (the kernel's, which CAST uses): surrounding
@@ -506,21 +507,22 @@ func numStatusError(st kernel.NumConstStatus) error {
 	return errNotType
 }
 
-func inferCSVSchema(header []string, rows [][]string) []parquet.Column {
+func inferCSVSchema(header []string, rows []record) []parquet.Column {
 	sample := rows[:min(sampleSize, len(rows))]
 
 	cols := make([]parquet.Column, len(header))
 	for i, name := range header {
 		cols[i] = parquet.Column{Name: name, Type: parquet.TypeString, Nullable: true}
 
-		// Detect type from non-empty sample values
+		// Detect the type from the sample's non-NULL values. A quoted empty
+		// field is a value (the empty string), and it is text.
 		var detected parquet.TypeID
 		first := true
 		for _, row := range sample {
-			if i >= len(row) || row[i] == "" {
+			if i >= len(row.fields) || (row.nulls != nil && row.nulls[i]) {
 				continue
 			}
-			t := detectStringType(row[i])
+			t := detectStringType(row.fields[i])
 			if first {
 				detected = t
 				first = false
