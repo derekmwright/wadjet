@@ -237,3 +237,42 @@ func TestArcPCTheTwoServerDoorsSendOneMessage(t *testing.T) {
 		}
 	}
 }
+
+// TestArcPCADerivedTableRefusalIsOneSentenceOnEveryDoor holds the
+// one-sentence rule for an error raised INSIDE a derived table: the parser
+// and the plan builder label their derived-table stages ("parsing derived
+// table: parsing SQL: parsing WHERE: ...", "building plan for derived
+// table: ..."), and every door chooses the sentence at its boundary
+// (sqlerr.Sentence), so no door sends a stage label in front of a coded
+// refusal — whatever the error's origin.
+func TestArcPCADerivedTableRefusalIsOneSentenceOnEveryDoor(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: embedded cluster")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+	t.Cleanup(cancel)
+	rig := pmRigUp(t, ctx)
+	for _, q := range []string{
+		`SELECT * FROM (SELECT id FROM e7emp WHERE) d`,
+		`SELECT * FROM (SELECT nosuch FROM e7emp) d`,
+	} {
+		for _, d := range rig.doors {
+			_, err := d.run(t, "admin-key", q)
+			if err == nil {
+				t.Errorf("%s answered %q; PostgreSQL refuses it", d.name, q)
+				continue
+			}
+			// The HTTP door's runner reads only the body's "error" text; the
+			// SQLSTATE of every door is held by the two-door census. One
+			// "parsing SQL:" in front of an UNCODED parse failure is the
+			// recorded door label (http_door_sqlstate_test.go); a
+			// derived-table stage label is not.
+			m := err.Error()
+			for _, label := range []string{"parsing derived table:", "building plan for derived table:", "parsing SQL: parsing SQL:"} {
+				if strings.Contains(m, label) {
+					t.Errorf("%s: a stage label %q in front of the refusal of %q: %s", d.name, label, q, m)
+				}
+			}
+		}
+	}
+}

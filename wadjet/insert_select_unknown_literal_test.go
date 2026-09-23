@@ -118,8 +118,12 @@ func TestInsertSelectTypesAnUnknownLiteralFromItsTarget(t *testing.T) {
 		if err == nil {
 			t.Fatal("INSERT … SELECT 'zzz' into an IPV4 column succeeded")
 		}
-		if !strings.Contains(err.Error(), "c_ipv4") || !strings.Contains(err.Error(), `"zzz"`) {
-			t.Errorf("refusal %q names neither the column nor the literal", err)
+		// The client receives PostgreSQL's sentence, which names the literal
+		// and the type (`invalid input syntax for type inet: "zzz"`, 22P02);
+		// the column label above it is a stage label a door strips (arc PC,
+		// the one-sentence rule).
+		if !strings.Contains(err.Error(), `"zzz"`) || sqlerr.StateOf(err) != "22P02" {
+			t.Errorf("refusal %q (SQLSTATE %s) does not name the literal as 22P02", err, sqlerr.StateOf(err))
 		}
 	})
 

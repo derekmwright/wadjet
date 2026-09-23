@@ -97,6 +97,7 @@ func (db *DB) ExecuteParsed(ctx context.Context, parsed *plansql.ParsedQuery) (r
 		if r := recover(); r != nil {
 			err = exec.RecoverQueryPanic(ctx, "embedded statement", r)
 		}
+		err = sqlerr.Sentence(err)
 	}()
 
 	// ABAC, before any row is read or written. This is the one DML entry

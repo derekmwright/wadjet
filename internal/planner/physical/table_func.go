@@ -235,7 +235,7 @@ func (s *jsonTableFuncSource) Init(_ context.Context) error {
 func (s *jsonTableFuncSource) Next(_ context.Context) (*batch.RecordBatch, error) {
 	b, err := s.reader.Next()
 	if err != nil {
-		return nil, fmt.Errorf("read_json: %s: %w", s.path, err)
+		return nil, readerError("read_json", s.path, err)
 	}
 	return b, nil
 }
@@ -515,7 +515,7 @@ func (s *csvTableFuncSource) Init(_ context.Context) error {
 func (s *csvTableFuncSource) Next(_ context.Context) (*batch.RecordBatch, error) {
 	b, err := s.reader.Next()
 	if err != nil {
-		return nil, fmt.Errorf("read_csv: %s: %w", s.path, err)
+		return nil, readerError("read_csv", s.path, err)
 	}
 	return b, nil
 }
@@ -926,3 +926,15 @@ func (s *sampleOperator) Execute(_ context.Context, b *batch.RecordBatch) (*batc
 }
 
 func (s *sampleOperator) Close() error { return nil }
+
+// readerError names the file a reader's error came from. A coded refusal —
+// a value that is not of the column's sampled type — keeps its SQLSTATE and
+// carries the file in its own sentence, because the sentence is what a door
+// sends (sqlerr.Sentence) and "which file, which row" is the refusal's
+// content, not a stage label.
+func readerError(fn, path string, err error) error {
+	if code := sqlerr.StateOf(err); code != "" {
+		return sqlerr.New(code, "%s: %s: %s", fn, path, sqlerr.SentenceOf(err))
+	}
+	return fmt.Errorf("%s: %s: %w", fn, path, err)
+}

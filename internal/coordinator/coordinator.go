@@ -973,6 +973,11 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 		if r := recover(); r != nil {
 			err = exec.RecoverQueryPanic(ctx, "coordinator query", r)
 		}
+		// The door's boundary: a refusal is its own sentence (#1145).
+		err = sqlerr.Sentence(err)
+		if err != nil && res != nil && res.Error != "" {
+			res.Error = err.Error()
+		}
 	}()
 	if !c.isLeaderOrStandalone() {
 		leaderID := ""

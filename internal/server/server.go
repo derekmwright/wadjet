@@ -1072,7 +1072,7 @@ func writeSQLError(w http.ResponseWriter, status int, msg string, err error) {
 	if status >= http.StatusInternalServerError && sqlStateIsClientFault(state) {
 		status = http.StatusBadRequest
 	}
-	writeJSON(w, status, map[string]string{"error": err.Error(), "sqlstate": state})
+	writeJSON(w, status, map[string]string{"error": sqlerr.Sentence(err).Error(), "sqlstate": state})
 }
 
 // sqlStateIsClientFault reports whether a SQLSTATE names something wrong with

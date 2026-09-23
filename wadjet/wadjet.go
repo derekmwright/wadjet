@@ -575,7 +575,10 @@ func stageError(stage string, err error) error {
 
 // Query executes a SQL query and returns the results.
 func (db *DB) Query(ctx context.Context, sql string) (*QueryResult, error) {
-	return db.query(ctx, sql, 0)
+	res, err := db.query(ctx, sql, 0)
+	// The door's boundary: a refusal is its own sentence, whatever layer
+	// labelled it on the way out (sqlerr.Sentence, #1145).
+	return res, sqlerr.Sentence(err)
 }
 
 // query is Query with a GATHER BUDGET.

@@ -206,7 +206,7 @@ func (c *pgConn) sendQueryError(ctx context.Context, code string, err error) {
 	if s := sqlerr.StateOf(err); s != "" {
 		code = s
 	}
-	c.sendError("ERROR", code, err.Error())
+	c.sendError("ERROR", code, sqlerr.Sentence(err).Error())
 }
 
 // copyIngestError reports a COPY row the ingester refused.

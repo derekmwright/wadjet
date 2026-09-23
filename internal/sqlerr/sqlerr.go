@@ -101,3 +101,35 @@ func SentenceOf(err error) string {
 	}
 	return sentence
 }
+
+// Sentence is err as a client receives it at a door's boundary: a coded
+// error carries the sentence of the refusal that raised it (SentenceOf),
+// without the stage labels a layer above wrapped around it — `parsing
+// derived table:`, `building plan for derived table:`, `executing query:` —
+// wherever in the planner those labels were added (#1145). The original
+// chain stays reachable through Unwrap, so errors.As/Is and StateOf see
+// exactly what they saw. An uncoded error is an internal failure and is
+// returned as it is, labels and all.
+func Sentence(err error) error {
+	if err == nil {
+		return nil
+	}
+	code := StateOf(err)
+	if code == "" {
+		return err
+	}
+	msg := SentenceOf(err)
+	if msg == "" || msg == err.Error() {
+		return err
+	}
+	return &sentence{code: code, msg: msg, err: err}
+}
+
+type sentence struct {
+	code, msg string
+	err       error
+}
+
+func (s *sentence) Error() string    { return s.msg }
+func (s *sentence) SQLState() string { return s.code }
+func (s *sentence) Unwrap() error    { return s.err }
