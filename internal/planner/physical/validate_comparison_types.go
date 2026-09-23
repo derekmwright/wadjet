@@ -178,9 +178,10 @@ func isTypedLiteral(n plansql.Node) bool {
 //	uuid, ipv6, cidr                keep            keep
 //	date, timestamp, boolean        keep            REFUSE: 0 rows single, 20 DAG
 //	real                            REFUSE: 3 of 20 matched (a wrong conversion)
-//	bytea, ipv4, macaddr            REFUSE: 0 of 20 matched
+//	bytea, ipv4, macaddr            REFUSE: 0 of 20 directly; 0 single, 20 DAG as a subquery
 //
-// subquery is set for a membership test against a subquery body.
+// subquery is set for a membership test against a subquery body, a
+// set-operation body included (measured the same way per type).
 func textConversionAnswers(t parquet.TypeID, subquery bool) bool {
 	switch t {
 	case parquet.TypeInt32, parquet.TypeInt64, parquet.TypeFloat64, parquet.TypeDecimal,
@@ -424,36 +425,10 @@ func (c *comparisonTyper) inPair(left, member plansql.Node, op string) error {
 		}
 		return nil
 	}
-	sub, isSub := plansql.Unparen(member).(*plansql.SubqueryNode)
-	if isSub && isSetOpBody(sub.SQL) {
-		// A text/typed membership against a SET-OPERATION body was
-		// arm-dependent at base whatever the type: 0 rows on the single arm,
-		// the DAG's cast of the text failing (`invalid input syntax for type
-		// integer: "alice"`, #1073). No text reading is kept there.
-		return c.pairStrict(left, member, op)
-	}
+	// A SET-OPERATION body takes the same per-pair rule as any subquery:
+	// measured (arc BR round 3, br_codex2 setin/*), the kept types answered
+	// identically on every arm through UNION ALL / UNION / INTERSECT /
+	// EXCEPT, and the refused ones were arm-dependent or wrong there too.
+	_, isSub := plansql.Unparen(member).(*plansql.SubqueryNode)
 	return c.pairOf(left, member, op, isSub)
-}
-
-// isSetOpBody reports whether a subquery body is a UNION / INTERSECT / EXCEPT.
-func isSetOpBody(sql string) bool {
-	info := parseSelect(sql)
-	return info != nil && info.Union != nil
-}
-
-// pairStrict is pairOf with no text reading kept.
-func (c *comparisonTyper) pairStrict(a, b plansql.Node, op string) error {
-	ta, ok := c.operand(a)
-	if !ok {
-		return nil
-	}
-	tb, ok := c.operand(b)
-	if !ok {
-		return nil
-	}
-	ca, cb := comparisonClass(ta), comparisonClass(tb)
-	if (ca == cmpText) != (cb == cmpText) && ca != cmpUnknown && cb != cmpUnknown {
-		return sqlerr.New("42883", "operator does not exist: %s %s %s", cmpTypeName(ta), op, cmpTypeName(tb))
-	}
-	return c.pairOf(a, b, op, true)
 }

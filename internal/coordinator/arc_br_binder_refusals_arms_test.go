@@ -493,6 +493,35 @@ func brComparisonCells() []brArmCell {
 			sql:   "SELECT count(*) AS n FROM typemx b WHERE b.id < 20 AND b." + col + " = CAST(b." + col + " AS TEXT)",
 			state: "42883", msg: "operator does not exist: "})
 	}
+	// A SET-OPERATION body takes the same per-pair rule (arc BR round 3,
+	// the review's br_codex2 setin/* cells: base answered these identically
+	// on all five arms). The refused types stay refused through every op.
+	for _, col := range []string{"c_i32", "c_i64", "c_f64", "c_dec", "c_port", "c_proto",
+		"c_dur", "c_uuid", "c_ipv6", "c_cidr", "c_date", "c_f32"} {
+		for _, op := range []string{"UNION ALL", "UNION", "INTERSECT", "EXCEPT"} {
+			c := brArmCell{name: "cmpSetIn/" + op + "/" + col,
+				sql: "SELECT count(*) AS n FROM typemx WHERE id < 20 AND " + col + " IN (SELECT CAST(" + col +
+					" AS TEXT) FROM typemx WHERE id < 20 " + op + " SELECT CAST(" + col + " AS TEXT) FROM typemx WHERE id < 10)"}
+			switch col {
+			case "c_date", "c_f32":
+				c.state, c.msg = "42883", "operator does not exist: "
+			default:
+				c.want = "rows=1 20"
+				if op == "INTERSECT" || op == "EXCEPT" {
+					c.want = "rows=1 10"
+				}
+			}
+			out = append(out, c)
+		}
+	}
+	for _, sp := range []struct{ op, want string }{
+		{"UNION ALL", "rows=3 1 | 2 | 3"}, {"UNION", "rows=3 1 | 2 | 3"},
+		{"INTERSECT", "rows=2 1 | 2"}, {"EXCEPT", "rows=1 3"},
+	} {
+		out = append(out, brArmCell{name: "cmpSetIn/id/" + sp.op, want: sp.want,
+			sql: "SELECT id FROM lat_ord WHERE id IN (SELECT CAST(id AS TEXT) FROM lat_item " + sp.op +
+				" SELECT CAST(id AS TEXT) FROM lat_item WHERE id < 3)"})
+	}
 	out = append(out,
 		brArmCell{name: "cmpOk/textIdInSubquery",
 			sql:  "SELECT id FROM lat_ord WHERE id IN (SELECT CAST(id AS TEXT) FROM lat_item)",
@@ -504,7 +533,6 @@ func brComparisonCells() []brArmCell {
 			same: true},
 	)
 	for _, c := range []struct{ name, sql, msg string }{
-		{"inSetOpSubquery", "SELECT o.id FROM lat_ord o WHERE o.id IN (SELECT product FROM lat_item UNION ALL SELECT product FROM lat_item)", "operator does not exist: bigint = text"},
 		{"integerBoolean", "SELECT 1 = true AS v", "operator does not exist: integer = boolean"},
 		{"distinctFromBoolean", "SELECT 1 IS DISTINCT FROM 1 = true AS v", "operator does not exist: integer = boolean"},
 		{"columnBooleanLiteral", "SELECT id FROM lat_ord WHERE id = true", "operator does not exist: bigint = boolean"},
