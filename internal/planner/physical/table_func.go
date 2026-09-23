@@ -3,7 +3,6 @@
 package physical
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -18,6 +17,7 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec"
+	"github.com/derekmwright/wadjet/internal/engine/scan"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 	csvreader "github.com/derekmwright/wadjet/internal/storage/csv"
 	"github.com/derekmwright/wadjet/internal/storage/dbscan"
@@ -264,10 +264,16 @@ func (s *jsonTableFuncSource) Close() error {
 type parquetTableFuncSource struct {
 	path   string
 	files  []string // local inputs, in name order
-	next   int
+	next   int      // the next file to open
 	schema []parquet.Column
-	mem    *batch.RecordBatch // an http(s) input, read whole
-	done   bool
+	url    []byte // an http(s) input, fetched whole (random access)
+
+	// The member being read, ROW GROUP by row group: at most one decoded row
+	// group is held here, and it is handed on before the next is decoded.
+	cur     *parquet.Reader
+	curFile io.Closer
+	curPath string
+	rg      int
 }
 
 func (s *parquetTableFuncSource) Init(_ context.Context) error {
@@ -277,15 +283,11 @@ func (s *parquetTableFuncSource) Init(_ context.Context) error {
 		if err != nil {
 			return fmt.Errorf("read_parquet: %w", err)
 		}
-		reader, err := parquet.NewReader(bytes.NewReader(data), int64(len(data)))
+		reader, err := parquet.NewReaderFromBytes(data)
 		if err != nil {
 			return fmt.Errorf("read_parquet: %w", err)
 		}
-		b, err := readBatchDirect(reader, reader.Schema().Columns, nil)
-		if err != nil {
-			return fmt.Errorf("read_parquet: %w", err)
-		}
-		s.mem = b
+		s.url, s.schema, s.cur = data, reader.Schema().Columns, reader
 		return nil
 	}
 	files, err := readerFiles(s.path)
@@ -295,68 +297,110 @@ func (s *parquetTableFuncSource) Init(_ context.Context) error {
 	s.files = files
 	// The relation's columns: the first file's footer. Opening it here also
 	// reports an unreadable first file at Init, as a single file always was.
-	return s.withFile(s.files[0], func(r *parquet.Reader) error {
-		s.schema = r.Schema().Columns
-		return nil
-	})
+	return s.open()
 }
 
-// withFile opens one input file as a Parquet reader over io.ReaderAt, runs
-// fn, and closes it.
-func (s *parquetTableFuncSource) withFile(path string, fn func(*parquet.Reader) error) error {
+// open opens the next member file as a Parquet reader over io.ReaderAt (the
+// file is never loaded whole) and holds a later member to the first one's
+// columns.
+func (s *parquetTableFuncSource) open() error {
+	path := s.files[s.next]
+	s.next++
 	f, fi, err := openInputFile(path)
 	if err != nil {
 		return fmt.Errorf("read_parquet: %w", err)
 	}
-	defer f.Close()
-	r, err := parquet.NewReader(f, fi.Size())
+	// NewReaderAt reads the footer only, and each column chunk as a row
+	// group is decoded: NewReader copied the whole FILE to the heap first —
+	// 199 MB live for a 205 MB member before a row was decoded.
+	r, err := parquet.NewReaderAt(f, fi.Size())
 	if err != nil {
-		if len(s.files) > 1 {
-			return fmt.Errorf("read_parquet: %s: %w", path, err)
-		}
-		return fmt.Errorf("read_parquet: %w", err)
+		f.Close()
+		return s.fileError(path, err)
 	}
-	return fn(r)
+	if s.schema == nil {
+		s.schema = r.Schema().Columns
+	} else if err := sameParquetColumns(path, s.schema, r.Schema().Columns); err != nil {
+		f.Close()
+		return err
+	}
+	s.cur, s.curFile, s.curPath, s.rg = r, f, path, 0
+	return nil
 }
 
-func (s *parquetTableFuncSource) Next(_ context.Context) (*batch.RecordBatch, error) {
-	if s.mem != nil || s.done {
-		b := s.mem
-		s.mem, s.done = nil, true
-		return b, nil
+func (s *parquetTableFuncSource) fileError(path string, err error) error {
+	if len(s.files) > 1 {
+		return fmt.Errorf("read_parquet: %s: %w", path, err)
 	}
-	for s.next < len(s.files) {
-		path := s.files[s.next]
-		s.next++
-		var out *batch.RecordBatch
-		err := s.withFile(path, func(r *parquet.Reader) error {
-			if s.next > 1 {
-				if err := sameParquetColumns(path, s.schema, r.Schema().Columns); err != nil {
-					return err
-				}
+	return fmt.Errorf("read_parquet: %w", err)
+}
+
+// Next is the next ROW GROUP of the current member, opening the next member
+// when one is exhausted. Through v0.24.0 (and FR2 round 1) a member was
+// decoded whole into one merged batch — every row group decoded, then copied
+// into a batch the file's size — so a 500 MB file held ~2.7 GB (review B3).
+// Now a decoded row group is released to the consumer before the next one is
+// decoded, and peak memory follows the largest row group, not the file.
+func (s *parquetTableFuncSource) Next(_ context.Context) (*batch.RecordBatch, error) {
+	for {
+		if s.cur == nil {
+			if s.next >= len(s.files) {
+				return nil, nil
 			}
-			b, err := readBatchDirect(r, s.schema, nil)
-			if err != nil {
-				if len(s.files) > 1 {
-					return fmt.Errorf("read_parquet: %s: %w", path, err)
-				}
-				return fmt.Errorf("read_parquet: %w", err)
+			if err := s.open(); err != nil {
+				return nil, err
 			}
-			out = b
-			return nil
-		})
+		}
+		if s.rg >= s.cur.NumRowGroups() {
+			s.closeCurrent()
+			continue
+		}
+		rg := s.rg
+		s.rg++
+		b, err := readParquetRowGroup(s.cur, rg, s.schema)
+		if err != nil {
+			return nil, s.fileError(s.curPath, fmt.Errorf("decoding row group %d: %w", rg, err))
+		}
+		if b != nil && b.Len > 0 {
+			return b, nil
+		}
+	}
+}
+
+// readParquetRowGroup decodes one row group of the relation's columns, by
+// name: the native column reader for flat columns, the row reader for a
+// schema with nested ones (the native reader does not resolve their leaves,
+// readBatchDirect's own rule).
+func readParquetRowGroup(r *parquet.Reader, rg int, schema []parquet.Column) (*batch.RecordBatch, error) {
+	if (&parquet.Schema{Columns: schema}).HasNestedColumns() {
+		names := make([]string, len(schema))
+		for i, c := range schema {
+			names[i] = c.Name
+		}
+		rows, err := r.ReadRowGroupAs(rg, schema, names)
 		if err != nil {
 			return nil, err
 		}
-		if out != nil && out.Len > 0 {
-			return out, nil
+		if len(rows) == 0 {
+			return nil, nil
 		}
+		return fromRows(schema, rows), nil
 	}
-	s.done = true
-	return nil, nil
+	return scan.ReadRowGroupNative(r.FileReader(), rg, schema, nil)
 }
 
-func (s *parquetTableFuncSource) Close() error { return nil }
+func (s *parquetTableFuncSource) closeCurrent() {
+	if s.curFile != nil {
+		s.curFile.Close()
+	}
+	s.cur, s.curFile = nil, nil
+}
+
+func (s *parquetTableFuncSource) Close() error {
+	s.closeCurrent()
+	s.url = nil
+	return nil
+}
 
 // sameParquetColumns holds a later file of a Parquet glob to the relation's
 // columns, which are the first file's: each by NAME, at the same type.

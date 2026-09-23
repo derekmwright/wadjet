@@ -344,7 +344,7 @@ func parquetFooterSchema(path string) ([]parquet.Column, bool, error) {
 		return nil, false, unopenable(err)
 	}
 	defer f.Close()
-	r, err := parquet.NewReader(f, fi.Size())
+	r, err := parquet.NewReaderAt(f, fi.Size()) // the footer, not the file
 	if err != nil {
 		return nil, false, nil
 	}

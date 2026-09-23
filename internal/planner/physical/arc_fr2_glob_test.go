@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -213,6 +214,110 @@ func BenchmarkArcFR2Glob100(b *testing.B) {
 				if rows != 200000 {
 					b.Fatalf("rows = %d", rows)
 				}
+			}
+		})
+	}
+}
+
+// TestArcFR2AParquetReadIsBoundedByARowGroup (review B3): read_parquet
+// decodes a member ROW GROUP by row group and hands each on before the next
+// is decoded. Through FR2 round 1 a member was decoded whole into one merged
+// batch, so peak RSS followed the FILE: a 500 MB file (100 row groups of
+// 5,000 rows × 1 KiB) held 2.7 GB and a two-file 1 GB glob 2.84 GiB.
+//
+// The fixture is the review's shape (5,000-row row groups, a 1 KiB string
+// per row, uncompressed) at 40 row groups — a 205 MB file whose whole decode
+// is ~1.1 GiB — read alone and as a two-file glob in a CHILD process, whose
+// peak RSS (VmHWM) is the measurement. The bound, 256 MiB, is under a
+// quarter of the file-sized decode and far above one row group's ~6 MiB, so
+// it holds any incremental reader and fails any file-sized one.
+func TestArcFR2AParquetReadIsBoundedByARowGroup(t *testing.T) {
+	if p := os.Getenv("FR2_RSS_CHILD"); p != "" {
+		src, err := buildTableFunctionSource("read_parquet", []string{p}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := src.Init(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		rows := 0
+		for {
+			b, err := src.Next(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if b == nil {
+				break
+			}
+			rows += b.Len
+		}
+		src.Close()
+		status, _ := os.ReadFile("/proc/self/status")
+		for _, line := range strings.Split(string(status), "\n") {
+			if strings.HasPrefix(line, "VmHWM:") {
+				fmt.Printf("FR2RSS rows=%d %s\n", rows, strings.Join(strings.Fields(line), " "))
+			}
+		}
+		return
+	}
+	if testing.Short() {
+		t.Skip("-short: writes a 205 MB fixture twice and measures a child's peak RSS")
+	}
+	if _, err := os.Stat("/proc/self/status"); err != nil {
+		t.Skip("no /proc/self/status")
+	}
+	dir := t.TempDir()
+	payload := strings.Repeat("x", 1024)
+	var buf bytes.Buffer
+	w, err := parquet.NewWriter(&buf, parquet.Schema{Columns: []parquet.Column{
+		{Name: "a", Type: parquet.TypeInt64}, {Name: "payload", Type: parquet.TypeString},
+	}}, parquet.WriterConfig{RowGroupSize: 5000, PageBufferSize: 256 << 10, Compression: parquet.CompressionNone})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := make([]map[string]any, 5000)
+	for g := 0; g < 40; g++ {
+		for i := range rows {
+			rows[i] = map[string]any{"a": int64(g*5000 + i), "payload": payload}
+		}
+		if err := w.WriteRows(rows); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"p000.parquet", "p001.parquet"} {
+		if err := os.WriteFile(filepath.Join(dir, name), buf.Bytes(), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	size := buf.Len()
+	buf = bytes.Buffer{}
+	const bound = 256 << 10 // KiB
+	for _, c := range []struct{ name, path, rows string }{
+		{"one_file", filepath.Join(dir, "p000.parquet"), "200000"},
+		{"two_file_glob", filepath.Join(dir, "*.parquet"), "400000"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			cmd := exec.Command(os.Args[0], "-test.run", "^TestArcFR2AParquetReadIsBoundedByARowGroup$")
+			cmd.Env = append(os.Environ(), "FR2_RSS_CHILD="+c.path)
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("child: %v\n%s", err, out)
+			}
+			var gotRows, hwm int
+			for _, line := range strings.Split(string(out), "\n") {
+				if strings.HasPrefix(line, "FR2RSS ") {
+					fmt.Sscanf(line, "FR2RSS rows=%d VmHWM: %d kB", &gotRows, &hwm)
+				}
+			}
+			t.Logf("%s: %d bytes per file, rows %d, peak RSS %d KiB (bound %d KiB)", c.name, size, gotRows, hwm, bound)
+			if fmt.Sprint(gotRows) != c.rows {
+				t.Fatalf("rows = %d, want %s\n%s", gotRows, c.rows, out)
+			}
+			if hwm == 0 || hwm > bound {
+				t.Fatalf("peak RSS %d KiB, bound %d KiB: the member is not read row group by row group", hwm, bound)
 			}
 		})
 	}
