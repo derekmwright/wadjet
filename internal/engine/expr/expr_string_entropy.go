@@ -45,14 +45,14 @@ func fnEntropy(args []any) any {
 // scalar FuncCall.resolveTemporalArgs; both paths must read the same units (#319).
 // TypeDate reads Int32Data as epoch DAYS; TypeTimestamp reads Int64Data as epoch
 // MILLISECONDS, matching TimestampMillis writes and parseTemporalInt64OK comparisons.
-// String/Bytes parse text; other Int64Data values read as seconds, as parseTime(int64).
+// String/Bytes parse text; other Int64Data values read as seconds, as parseTimeOK(int64).
 // Report whether resolution succeeded; never read a DATE from the absent Int64Data.
 // See docs/internals/column-instant-storage-units.md for the design.
 func columnInstant(src *batch.Vector, i int) (time.Time, bool) {
 	switch src.Type {
 	case batch.TypeString, batch.TypeBytes:
-		t := parseTime(src.BytesData.StringValue(i))
-		if t.IsZero() {
+		t, ok := parseTimeOK(src.BytesData.StringValue(i))
+		if !ok {
 			return time.Time{}, false
 		}
 		return t, true

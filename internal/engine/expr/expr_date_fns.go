@@ -16,48 +16,48 @@ func fnNow(args []any) any {
 }
 
 func fnYear(args []any) any {
-	t := toTime(args)
-	if t.IsZero() {
+	t, ok := toTime(args)
+	if !ok {
 		return nil
 	}
 	return float64(t.Year())
 }
 
 func fnMonth(args []any) any {
-	t := toTime(args)
-	if t.IsZero() {
+	t, ok := toTime(args)
+	if !ok {
 		return nil
 	}
 	return float64(t.Month())
 }
 
 func fnDay(args []any) any {
-	t := toTime(args)
-	if t.IsZero() {
+	t, ok := toTime(args)
+	if !ok {
 		return nil
 	}
 	return float64(t.Day())
 }
 
 func fnHour(args []any) any {
-	t := toTime(args)
-	if t.IsZero() {
+	t, ok := toTime(args)
+	if !ok {
 		return nil
 	}
 	return float64(t.Hour())
 }
 
 func fnMinute(args []any) any {
-	t := toTime(args)
-	if t.IsZero() {
+	t, ok := toTime(args)
+	if !ok {
 		return nil
 	}
 	return float64(t.Minute())
 }
 
 func fnSecond(args []any) any {
-	t := toTime(args)
-	if t.IsZero() {
+	t, ok := toTime(args)
+	if !ok {
 		return nil
 	}
 	return float64(t.Second())
@@ -68,8 +68,8 @@ func fnDateTrunc(args []any) any {
 		return nil
 	}
 	unit := strings.ToLower(fmt.Sprint(args[0]))
-	t := parseTime(args[1])
-	if t.IsZero() {
+	t, ok := parseTimeOK(args[1])
+	if !ok {
 		return nil
 	}
 	switch unit {
@@ -124,8 +124,8 @@ func fnExtract(args []any) any {
 		return nil
 	}
 	unit := strings.ToLower(fmt.Sprint(args[0]))
-	t := parseTime(args[1])
-	if t.IsZero() {
+	t, ok := parseTimeOK(args[1])
+	if !ok {
 		return nil
 	}
 	// Unit set kept identical to vecExtract's, so the two paths answer the
@@ -153,7 +153,7 @@ func fnExtract(args []any) any {
 	case "doy", "dayofyear":
 		return float64(t.YearDay())
 	case "epoch":
-		return float64(t.Unix())
+		return epochSeconds(t)
 	default:
 		return nil
 	}

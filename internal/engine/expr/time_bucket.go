@@ -33,14 +33,14 @@ func fnTimeBucket(args []any) any {
 	}
 	strideMs := timeBucketStrideMillis(iv)
 
-	src := parseTime(args[1])
-	if src.IsZero() {
+	src, ok := parseTimeOK(args[1])
+	if !ok {
 		return nil
 	}
 	originMs := int64(0) // 1970-01-01 00:00:00, PostgreSQL's conventional origin
 	if len(args) == 3 {
-		origin := parseTime(args[2])
-		if origin.IsZero() {
+		origin, ok := parseTimeOK(args[2])
+		if !ok {
 			return nil
 		}
 		originMs = origin.UTC().UnixMilli()

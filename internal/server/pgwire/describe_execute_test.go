@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -436,28 +437,16 @@ func TestDataGripOpeningSequenceSimpleProtocol(t *testing.T) {
 //
 // pg_postmaster_start_time formats expr.processStart through the engine's one
 // instant rendering, which carries MILLISECONDS — it was RFC3339, second
-// precision, until #544's second pass. The admissible answer did NOT move with
-// it, and the reason is worth writing down because the obvious reading is
-// wrong: the query's `extract(epoch from …)` is expr.fnEpoch, which is
-// `float64(t.Unix())` and TRUNCATES to the second. The fractional part never
-// reaches the `round()`, so this process's start is still exactly one second.
-//
-// Widening it to "that second or the next" was measured and FAILED — the
-// server answered 1788552675 for a start of 1788552675.714 — which is the
-// evidence for the paragraph above.
+// precision, until #544's second pass. The query's `extract(epoch from …)`
+// carries that millisecond fraction since #1266 review B1 (it truncated to
+// the second before, which is what this helper used to encode), so
+// `round()` sees it and the admissible answer is this process's start
+// ROUNDED to the second, as PostgreSQL's round of its own epoch is: a start of
+// 1788552675.714 answers 1788552676.
 func startupTimeIsThisProcess(startup float64, procStart time.Time) bool {
-	return int64(startup) == procStart.Unix()
+	return startup == math.Round(float64(procStart.UnixMilli())/1000)
 }
 
-// TestStartupTimeIsThisProcess pins both spellings this replaces: the value
-// this process started at is accepted however long the suite has been running
-// (#563/#518), and a stale constant or a future timestamp is not (#563's
-// property, which the unbounded check could not see).
-//
-// The substitution was RUN, not reasoned about: making fnPgPostmasterStartTime
-// return a fixed 2020 timestamp fails TestDataGripOpeningSequencePgx with
-// "startup_time 1.6e+09 is not this process's start (1788460853)", where the
-// previous `now - startup >= 0` check passed. Re-verified in review.
 func TestStartupTimeIsThisProcess(t *testing.T) {
 	procStart := time.Unix(1_700_000_000, 0)
 	tests := []struct {
@@ -475,6 +464,15 @@ func TestStartupTimeIsThisProcess(t *testing.T) {
 		{"a stale constant is not this process", 1_600_000_000, false},
 		{"one second late is not this process", 1_700_000_001, false},
 		{"the future is never a process start", 1_700_000_060, false},
+	}
+	// A start with a fraction rounds, as PostgreSQL's round(extract(epoch))
+	// does: .714 is the NEXT second, .4 this one.
+	late := time.UnixMilli(1_700_000_000_714)
+	if !startupTimeIsThisProcess(1_700_000_001, late) || startupTimeIsThisProcess(1_700_000_000, late) {
+		t.Errorf("a .714 start must answer the next second")
+	}
+	if !startupTimeIsThisProcess(1_700_000_000, time.UnixMilli(1_700_000_000_400)) {
+		t.Errorf("a .4 start must answer its own second")
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

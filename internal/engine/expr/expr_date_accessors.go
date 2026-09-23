@@ -12,16 +12,16 @@ import (
 // --- Date: additional accessors ---
 
 func fnQuarter(args []any) any {
-	t := toTime(args)
-	if t.IsZero() {
+	t, ok := toTime(args)
+	if !ok {
 		return nil
 	}
 	return float64((int(t.Month())-1)/3 + 1)
 }
 
 func fnWeek(args []any) any {
-	t := toTime(args)
-	if t.IsZero() {
+	t, ok := toTime(args)
+	if !ok {
 		return nil
 	}
 	_, week := t.ISOWeek()
@@ -29,24 +29,24 @@ func fnWeek(args []any) any {
 }
 
 func fnDayOfWeek(args []any) any {
-	t := toTime(args)
-	if t.IsZero() {
+	t, ok := toTime(args)
+	if !ok {
 		return nil
 	}
 	return float64(t.Weekday())
 }
 
 func fnDayOfYear(args []any) any {
-	t := toTime(args)
-	if t.IsZero() {
+	t, ok := toTime(args)
+	if !ok {
 		return nil
 	}
 	return float64(t.YearDay())
 }
 
 func fnLastDayOfMonth(args []any) any {
-	t := toTime(args)
-	if t.IsZero() {
+	t, ok := toTime(args)
+	if !ok {
 		return nil
 	}
 	firstOfNext := time.Date(t.Year(), t.Month()+1, 1, 0, 0, 0, 0, t.Location())
@@ -62,8 +62,8 @@ func fnAtTimezone(args []any) any {
 	if len(args) < 2 || args[0] == nil || args[1] == nil {
 		return nil
 	}
-	t := parseTime(args[0])
-	if t.IsZero() {
+	t, ok := parseTimeOK(args[0])
+	if !ok {
 		return nil
 	}
 	tz := toString(args[1])
@@ -117,11 +117,22 @@ func fnEpoch(args []any) any {
 	if len(args) < 1 || args[0] == nil {
 		return nil
 	}
-	t := parseTime(args[0])
-	if t.IsZero() {
+	t, ok := parseTimeOK(args[0])
+	if !ok {
 		return nil
 	}
-	return float64(t.Unix())
+	return epochSeconds(t)
+}
+
+// epochSeconds is EXTRACT(EPOCH)'s number: seconds since 1970-01-01 with the
+// fraction the TIMESTAMP carrier holds, which is milliseconds. It read
+// float64(t.Unix()), whole seconds FLOORED, so `TIMESTAMP '2024-06-15
+// 12:30:45.5'` answered 1718454645 and `'1969-07-20 20:17:40.123'`
+// -14182940, where PostgreSQL answers 1718454645.5 and -14182939.877 (#1266
+// review B1). UnixMilli floors a sub-millisecond instant to the carrier first,
+// so a value parsed from text answers what the same value stored would.
+func epochSeconds(t time.Time) float64 {
+	return float64(t.UnixMilli()) / 1000
 }
 
 // fnTimezone implements the parser's AT TIME ZONE rewrite for UTC only.
@@ -138,8 +149,8 @@ func fnTimezone(args []any) any {
 	if !isUTCZone(toString(args[0])) {
 		return nil
 	}
-	t := parseTime(args[1])
-	if t.IsZero() {
+	t, ok := parseTimeOK(args[1])
+	if !ok {
 		return nil
 	}
 	return formatInstant(t)

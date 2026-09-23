@@ -449,23 +449,29 @@ func isNumeric(v any) bool {
 	}
 }
 
-func toTime(args []any) time.Time {
+func toTime(args []any) (time.Time, bool) {
 	if len(args) < 1 || args[0] == nil {
-		return time.Time{}
+		return time.Time{}, false
 	}
-	return parseTime(args[0])
+	return parseTimeOK(args[0])
 }
 
-func parseTime(v any) time.Time {
+// parseTimeOK resolves an argument to the instant it names, and reports
+// whether it named one. Callers read the flag, never IsZero(): the zero
+// time.Time is 0001-01-01 00:00:00 UTC, a valid TIMESTAMP (PostgreSQL's
+// EXTRACT(EPOCH) of it is -62135596800), and the IsZero test answered NULL for
+// year 1 in EXTRACT, DATE_TRUNC, TIME_BUCKET and the part accessors (#1266
+// review B2).
+func parseTimeOK(v any) (time.Time, bool) {
 	switch tv := v.(type) {
 	case time.Time:
-		return tv
+		return tv, true
 	case int64:
 		// UTC, matching the vectorized kernels (vecExtract/vecHour/…).
 		// Local time made date_trunc/extract results depend on host TZ.
-		return time.Unix(tv, 0).UTC()
+		return time.Unix(tv, 0).UTC(), true
 	case float64:
-		return time.Unix(int64(tv), 0).UTC()
+		return time.Unix(int64(tv), 0).UTC(), true
 	case string:
 		for _, layout := range []string{
 			time.RFC3339,
@@ -474,11 +480,11 @@ func parseTime(v any) time.Time {
 			"2006-01-02",
 		} {
 			if t, err := time.Parse(layout, tv); err == nil {
-				return t
+				return t, true
 			}
 		}
 	}
-	return time.Time{}
+	return time.Time{}, false
 }
 
 // matchLike implements SQL LIKE pattern matching.
