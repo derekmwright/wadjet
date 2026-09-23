@@ -100,11 +100,15 @@ func starOnlySourceScan(n *logical.Node) (*logical.Node, []string) {
 	for n != nil {
 		switch n.Type {
 		case logical.NodeScan:
-			if n.IsTableFunc {
-				// A table function is declined here: a READER carries no
-				// column annotation at all, and a signature-declared one
-				// (generate_series, unnest) is annotated but is outside
-				// this walk's boundary.
+			if n.IsTableFunc && len(n.ScanColTypes) == 0 {
+				// A table function whose columns the annotation did not
+				// stamp — a reader that read no schema at plan time — has
+				// nothing to declare. One whose columns ARE declared (a
+				// system catalog relation, generate_series, unnest, a
+				// reader with a plan-time schema) is a relation like any
+				// other: a zero-row `SELECT * … WHERE <nothing matches>`
+				// over it publishes its columns, as PostgreSQL does (arc
+				// PC round 2, B3).
 				return nil, nil
 			}
 			return n, names
