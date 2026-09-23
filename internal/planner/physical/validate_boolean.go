@@ -172,6 +172,15 @@ func provableNonBooleanType(node plansql.Node, scope *colScope) (parquet.TypeID,
 		switch strings.ToLower(n.Name) {
 		case "count":
 			return parquet.TypeInt64, "bigint", true
+		case "min", "max":
+			// A value the input HELD, so the argument's type: `HAVING CASE
+			// WHEN MAX(customer) THEN …` is 42804 text on 17.11 (#1216).
+			if len(n.Args) == 1 {
+				return provableNonBooleanType(n.Args[0], scope)
+			}
+			return 0, "", false
+		case "string_agg":
+			return parquet.TypeString, "text", true
 		}
 		// ...and every registered scalar function whose return type is
 		// DECLARED and fixed. The declaration is the contract (ADR-0038), not

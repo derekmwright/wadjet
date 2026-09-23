@@ -1016,6 +1016,14 @@ func (b *binder) checkExpr(expr plansql.Node, scope *colScope) error {
 	if err := b.refuseIncomparableOperands(expr, scope); err != nil {
 		return err
 	}
+	// A searched CASE's WHEN is a boolean context WHEREVER the CASE sits —
+	// under a comparison in a WHERE as much as in the SELECT list, which was
+	// the one position this call reached: `WHERE CASE WHEN upper(s) THEN 1
+	// ELSE 0 END = 1` answered every row where PostgreSQL 17.11 raises 42804
+	// (#1216 item 1).
+	if err := checkCaseWhenContexts(expr, scope); err != nil {
+		return err
+	}
 	// A container folded with something it cannot be (validate_container_fold.go,
 	// #1060).
 	if err := refuseContainerFold(expr, foldTypeOf(rowFieldScopeDecls(scope))); err != nil {

@@ -429,6 +429,25 @@ func TestArcBRComparisonOperandClassesMatchPostgres(t *testing.T) {
 	runBRCells(t, cells)
 }
 
+// A searched CASE's WHEN is a boolean context in every clause (#1216 item 1),
+// measured on 17.11.
+func TestArcBRCaseWhenIsABooleanContextInEveryClause(t *testing.T) {
+	runBRCells(t, []brCell{
+		{"SELECT id FROM lat_ord WHERE CASE WHEN upper(customer) THEN 1 ELSE 0 END = 1",
+			"42804", "argument of CASE/WHEN must be type boolean, not type text"},
+		{"SELECT id FROM lat_ord o JOIN lat_item i ON CASE WHEN i.product THEN 1 END = o.id",
+			"42804", "argument of CASE/WHEN must be type boolean, not type text"},
+		{"SELECT id FROM lat_ord GROUP BY id HAVING CASE WHEN MAX(customer) THEN 1 END = 1",
+			"42804", "argument of CASE/WHEN must be type boolean, not type text"},
+		{"SELECT id FROM lat_ord ORDER BY CASE WHEN customer THEN 1 END",
+			"42804", "argument of CASE/WHEN must be type boolean, not type text"},
+		{"SELECT id FROM lat_ord WHERE CASE WHEN id > 1 THEN 1 ELSE 0 END = 1", "", ""},
+		{"SELECT id FROM lat_ord WHERE CASE customer WHEN 'Bob' THEN 1 ELSE 0 END = 1", "", ""},
+		{"SELECT id FROM lat_ord GROUP BY id HAVING CASE WHEN MIN(id) THEN 1 END = 1",
+			"42804", "argument of CASE/WHEN must be type boolean, not type bigint"},
+	})
+}
+
 // A container folded with something it cannot be is refused (#1060), and two
 // ROWs of different shapes are not compared (#1060/#1065). Verdicts measured
 // on 17.11 over typed columns of the same PostgreSQL types.
