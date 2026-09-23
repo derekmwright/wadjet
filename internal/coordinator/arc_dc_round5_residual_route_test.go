@@ -6,6 +6,8 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
 // The ROUTE, not only the rows: on a stage-DAG coordinator the refusal moves
@@ -45,5 +47,30 @@ func TestArcDCAMergedResidualRoutesLocalOnTheDAGAndStaysOnTheFastPath(t *testing
 		if moved := fast.ResidualSidesLocalRoutes() - fb; moved != 0 {
 			t.Errorf("fastpath %s: ResidualSidesLocalRoutes moved by %d, want 0 (the fast path runs single-process)", tc.name, moved)
 		}
+	}
+}
+
+// The shadowing-WITH refusal carries its SQLSTATE through every door that
+// runs it: the embedded single-process query and the stage-DAG coordinator,
+// which routes the correlated subquery to its local pipeline.
+func TestArcDCAShadowingBodyWithRefusalIs0A000(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: embedded cluster")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	t.Cleanup(cancel)
+	const sql = "WITH d AS (SELECT k,amt FROM dc_in) SELECT o.id AS a FROM dc_out o " +
+		"WHERE EXISTS (WITH d AS (SELECT k,amt AS total FROM dc_in) SELECT 1 FROM d b " +
+		"WHERE b.k=o.id AND total>o.total) ORDER BY a"
+	single := tmdStandalone(t, ctx)
+	if _, err := single.Query(ctx, sql); sqlerr.StateOf(err) != "0A000" {
+		t.Errorf("single: SQLSTATE %q (%v), want 0A000", sqlerr.StateOf(err), err)
+	}
+	infra := tmdInfra(t, ctx)
+	tmdWriteTables(t, ctx, infra, nil)
+	dag := tmdCoordinator(t, ctx, infra)
+	_, err := dag.ExecuteSQL(ctx, sql)
+	if sqlerr.StateOf(err) != "0A000" {
+		t.Errorf("dag: SQLSTATE %q (%v), want 0A000", sqlerr.StateOf(err), err)
 	}
 }
