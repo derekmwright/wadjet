@@ -141,7 +141,7 @@ The catalog is a JSON-serialized metadata layer stored in **NATS KV** (bucket: `
 
 The `PartitionManifest` contains an array of `PartitionEntry` objects, each with a `path`, `values` (partition key → value map), and `files` (list of Parquet `FileEntry` objects with path, size, row count, and creation time).
 
-**Concurrency control**: NATS KV provides revision-based optimistic concurrency — each key tracks a monotonic revision, and concurrent writers are detected automatically. An in-memory `MemKV` implementation is used for standalone/embedded mode.
+**Concurrency control**: NATS KV provides revision-based optimistic concurrency — each key tracks a monotonic revision, and concurrent writers are detected automatically. Both `serve` commands, and an embedded `wadjet.Config` that names `DataDir` or `CatalogDir`, keep that KV in a NATS JetStream store — for a directory, under `<dir>/_catalog`, opened by one holder at a time (ADR-0041). An embedded `Config` that names neither gets the in-memory `MemKV`: process-local, gone when the process exits.
 
 **Distributed locking**: An optional `LockManager` uses NATS KV for read-write locks with a 30-second TTL, auto-refreshed every 10 seconds. Write locks are exclusive; read locks are shared.
 
