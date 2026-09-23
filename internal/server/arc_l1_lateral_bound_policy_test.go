@@ -120,14 +120,33 @@ func TestArcL1ABoundedLateralReadsThePublishedValue(t *testing.T) {
 					want = "which the enclosing relation also publishes"
 				}
 				if err == nil {
+					// The QUALIFIED star over the contested body ANSWERS on
+					// the four DAG doors (round 2: the contested refusal is
+					// the single path's alone) — and the answer must be the
+					// MASK's: `c.bal < b.bal` is false for every pair under
+					// the mask, so every outer row pads NULL.
+					if c.name == "qualifiedStarOverLifted" {
+						if r := strings.Join(got.canon(), " ; "); r == strings.Repeat("m=NULL ; ", 7)+"m=NULL" {
+							return
+						}
+					}
 					t.Fatalf("a star over a lifted-predicate lateral answered where "+
 						"arc LT refuses it: %v\n  SQL: %s", got.canon(), c.sql)
 				}
-				if !strings.Contains(err.Error(), want) {
+				// The four DAG doors refuse the bare-star shapes with arc JR's
+				// residual sentence (the decline is the single path's alone
+				// since round 2), and the five single-process doors with the
+				// star sentence; either is the refusal this cell holds.
+				if !strings.Contains(err.Error(), want) &&
+					!strings.Contains(err.Error(), "and a bare star would publish that column too") &&
+					!strings.Contains(err.Error(), "resolves on neither side") {
 					t.Fatalf("refused with a different sentence: %v\n  SQL: %s", err, c.sql)
 				}
+				// The `(SQLSTATE 42000)` suffix carries "200" as a substring;
+				// the scan reads the sentence without it.
+				text := pmStripSQLState(err.Error())
 				for _, s := range pmTrueValues() {
-					if strings.Contains(err.Error(), s) {
+					if strings.Contains(text, s) {
 						t.Fatalf("a policed value reached the client in a refusal: %q\n  %v", s, err)
 					}
 				}
@@ -214,4 +233,13 @@ var l1LiftedStarDAGDoors = map[string]bool{
 	"embedded/dag-shuffled": true,
 	"pgwire/dag":            true,
 	"http/dag":              true,
+}
+
+// pmStripSQLState removes a trailing `(SQLSTATE xxxxx)` so a leak scan over a
+// refusal's text does not read the code's digits as a stored value.
+func pmStripSQLState(msg string) string {
+	if i := strings.LastIndex(msg, "(SQLSTATE "); i >= 0 {
+		return msg[:i]
+	}
+	return msg
 }

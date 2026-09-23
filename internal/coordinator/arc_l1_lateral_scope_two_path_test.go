@@ -374,6 +374,7 @@ const (
 	l1BoundNoKey             = `cannot apply that bound per outer row`
 	l1LiftedRefCannotPublish = `which would have to publish the column it names, and here it cannot`
 	l1LiftedRefContested     = `which the enclosing relation also publishes`
+	l1LiftedRefUnderStar     = `and a bare star would publish that column too`
 	// A LATERAL body that is a SET OPERATION whose second arm has no FROM
 	// clause: the table-less lowering claims the whole body.
 	l1FromlessSetOpBody = `a LATERAL subquery with no FROM clause`
@@ -616,13 +617,20 @@ var l1RefusalPins = map[string][]string{
 	// the ENCLOSING relation also publishes (#1130), decided on the annotated
 	// plan so a base outer relation is seen too. The three DAG arms answered
 	// four of these before; a refusal is a property of the plan (§1q's rule).
-	"R2/boundLiftedFrac":     {l1BoundNoKey},
-	"R2/boundLiftedPlain":    {l1BoundNoKey},
-	"R4/distinctBody":        {l1LiftedRefCannotPublish},
-	"R4/aliasCollides":       {l1LiftedRefCannotPublish},
-	"R4/bareStar":            {l1LiftedRefCannotPublish},
-	"R5/ctlPlainUnderStar":   {l1LiftedRefCannotPublish},
-	"R4/outerContestsName":   {l1LiftedRefContested},
+	"R2/boundLiftedFrac":  {l1BoundNoKey},
+	"R2/boundLiftedPlain": {l1BoundNoKey},
+	// A LEFT lateral whose lifted column the outer relation contests: refused
+	// on every arm. The DAG answered it right on THIS fixture at base and
+	// wrong (NULL pads) on arc LT's, and in round 2 the same LT statement
+	// padded on one run and routed on the next — not one answer, so the DAG
+	// refuses the OUTER spelling (round-2 review B5, stated in the notes).
+	"R4/outerContestsName": {l1LiftedRefContested},
+	"R4/distinctBody":      {l1LiftedRefCannotPublish},
+	"R4/aliasCollides":     {l1LiftedRefCannotPublish},
+	// `R4/bareStar` (a LEFT lateral under a bare star): the single arms refuse
+	// with the star sentence (round 2 — the decline is theirs alone), the DAG
+	// arms with arc JR's residual refusal, as at base.
+	"R4/bareStar":            {l1LiftedRefUnderStar, "resolves on neither side"},
 	"R4/groupedBody":         {l1LiftedRefNotPublished},
 	"R4/setopBody":           {l1FromlessSetOpBody},
 	"R5/aggUnderBareStar":    {l1LiftedRefNotPublished},
@@ -708,6 +716,15 @@ var l1RefusalPins = map[string][]string{
 // l1ArmPins is a divergence that is NOT the same on every arm, so it is
 // recorded per arm. A pin that starts agreeing FAILS.
 var l1ArmPins = map[string]map[string]string{
+	// ARC LT round 2 (review B5): the two single-process arms REFUSE these
+	// — the enclosing bare star would publish the materialized column
+	// (`ctlPlainUnderStar`) — and the three DAG arms, which evaluate the
+	// predicate at the join off the scan's own stream, assert PostgreSQL's
+	// rows, as they did at base on two fixtures.
+	"R5/ctlPlainUnderStar": {
+		"single":      "ERR ~" + l1LiftedRefUnderStar,
+		"spilled512k": "ERR ~" + l1LiftedRefUnderStar,
+	},
 	// The QUALIFIED star over a lifted-predicate body: the enclosing query
 	// writes a star over this join, so the materialization DECLINES (round 4)
 	// and the two single-process arms answer what they answered at c34cdbcb.
@@ -754,30 +771,10 @@ var l1ArmPins = map[string]map[string]string{
 		"dag":         "ERR ~sort consume: sink consume: sort: key column \"m\" does not exist in the input schema",
 		"dag-morsel4": "ERR ~sort consume: sink consume: sort: key column \"m\" does not exist in the input schema",
 	},
-	// ARC LT: the two single-process arms answer PostgreSQL's rows for the
-	// bounded spellings now (the bound is per outer row), and the three DAG
-	// arms take the disposition their UNBOUNDED twin `R2/collideWinNoBound`
-	// has always had — the OUTER window keyed on `o.id` over a lateral join
-	// binds the wrong arm on the DAG (ADR-0026 §8j's LATERAL-producer residue,
-	// `distributed`). For `collideWinBound` that is a move from a DAG REFUSAL
-	// (`ORDER BY "s.m" is not a column of its input`, incidental to the
-	// whole-relation bound's stage shape) to the twin's wrong rows; recorded
-	// as such in arc LT's notes, not hidden.
-	"R2/collideWinArg": {
-		"dag":          "rows=4 1,NULL | 1,NULL | 2,NULL | 2,NULL",
-		"dag-morsel4":  "rows=4 1,NULL | 1,NULL | 2,NULL | 2,NULL",
-		"dag-shuffled": "rows=4 1,NULL | 1,NULL | 2,NULL | 2,NULL",
-	},
-	"R2/collideWinBound": {
-		"dag":          "rows=4 1,1,1 | 1,1,2 | 2,2,1 | 2,2,2",
-		"dag-morsel4":  "rows=4 1,1,1 | 1,1,2 | 2,2,1 | 2,2,2",
-		"dag-shuffled": "rows=4 1,1,1 | 1,1,2 | 2,2,1 | 2,2,2",
-	},
-	"R2/collideWinNoBound": {
-		"dag":          "rows=4 1,1,1 | 1,1,2 | 2,2,1 | 2,2,2",
-		"dag-morsel4":  "rows=4 1,1,1 | 1,1,2 | 2,2,1 | 2,2,2",
-		"dag-shuffled": "rows=4 1,1,1 | 1,1,2 | 2,2,1 | 2,2,2",
-	},
+	// ARC LT round 2: an OUTER window above a lateral join is routed to the
+	// single-process pipeline on the DAG (dagplan.refuseWindowOverDependentJoin),
+	// so `R2/collideWinBound`, `R2/collideWinNoBound` and `R2/collideWinArg`
+	// assert PostgreSQL's rows on all five arms; their DAG pins are deleted.
 	"R2/shadowOrderBy": {
 		"dag":          "rows=6 1,50 | 1,50 | 1,50 | 3,75 | 3,75 | 3,75",
 		"dag-morsel4":  "rows=6 1,50 | 1,50 | 1,50 | 3,75 | 3,75 | 3,75",

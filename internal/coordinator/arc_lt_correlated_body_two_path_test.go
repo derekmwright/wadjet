@@ -1438,9 +1438,7 @@ const (
 
 var ltRefuses = map[string]string{
 
-	"LATERAL/plain/shared":              ltLiftedRefContested,
 	"LEFTLATERAL/plain/shared":          ltLiftedRefContested,
-	"COMMALATERAL/plain/shared":         ltLiftedRefContested,
 	"LEFTLATERAL/plain/none":            ltKeylessLeftJoin,
 	"LATERAL/limit/ineq":                ltBoundNoKey,
 	"LEFTLATERAL/limit/ineq":            ltBoundNoKey,
@@ -1452,15 +1450,7 @@ var ltRefuses = map[string]string{
 	"LEFTLATERAL/limit/shared":          ltBoundNoKey,
 	"COMMALATERAL/limit/shared":         ltBoundNoKey,
 	"LEFTLATERAL/limit/none":            ltKeylessLeftJoin,
-	"LATERAL/limit0/ineq":               ltBoundNoKey,
-	"LEFTLATERAL/limit0/ineq":           ltBoundNoKey,
-	"COMMALATERAL/limit0/ineq":          ltBoundNoKey,
-	"LATERAL/limit0/mixed":              ltBoundNoKey,
-	"LEFTLATERAL/limit0/mixed":          ltBoundNoKey,
-	"COMMALATERAL/limit0/mixed":         ltBoundNoKey,
-	"LATERAL/limit0/shared":             ltBoundNoKey,
-	"LEFTLATERAL/limit0/shared":         ltBoundNoKey,
-	"COMMALATERAL/limit0/shared":        ltBoundNoKey,
+	"LEFTLATERAL/limit0/shared":         ltLiftedRefContested,
 	"LEFTLATERAL/limit0/none":           ltKeylessLeftJoin,
 	"LATERAL/offset/ineq":               ltBoundNoKey,
 	"LEFTLATERAL/offset/ineq":           ltBoundNoKey,
@@ -1607,9 +1597,7 @@ var ltRefuses = map[string]string{
 	"LATERAL/aliasCollides/mixed":       ltLiftedRefCannotPublish,
 	"LEFTLATERAL/aliasCollides/mixed":   ltLiftedRefCannotPublish,
 	"COMMALATERAL/aliasCollides/mixed":  ltLiftedRefCannotPublish,
-	"LATERAL/aliasCollides/shared":      ltLiftedRefContested,
 	"LEFTLATERAL/aliasCollides/shared":  ltLiftedRefContested,
-	"COMMALATERAL/aliasCollides/shared": ltLiftedRefContested,
 	"LEFTLATERAL/aliasCollides/none":    ltKeylessLeftJoin,
 	"LATERAL/ordinalLimit/ineq":         ltBoundNoKey,
 	"LEFTLATERAL/ordinalLimit/ineq":     ltBoundNoKey,
@@ -1675,9 +1663,27 @@ var ltBudgetBounded = map[string]bool{
 	"COMMALATERAL/aggHaving/none":     true,
 }
 
-// ltArmPins records a divergence that is NOT the same on every arm, per arm,
-// with the mechanism. A pin that starts agreeing FAILS.
-var ltArmPins = map[string]map[string]string{}
+// ltArmPins records a disposition that is NOT the same on every arm, per
+// arm, with the mechanism. The INNER and comma spellings of a lifted
+// predicate over a column the enclosing relation also publishes (#1130) are
+// REFUSED on the two single-process arms — which bound the outer column and
+// answered no rows — and answer PostgreSQL's rows on the three DAG arms,
+// which evaluate the predicate at the join off the scan's own stream (as at
+// 51addfb6, on two fixtures; round-2 review B5). The LEFT spellings are
+// refused on every arm (ltRefuses): the DAG padded every row NULL on one
+// stage shape and routed to the refusal on another for the same statement
+// (r2_gates3/4.log). `aliasCollides/shared`'s broadcast and morsel shapes
+// refuse with the stage's own `key column "v" does not exist` (L1's LIFTED/*
+// class) while the shuffled shape answers.
+var ltArmPins = map[string]map[string]string{
+
+	"LATERAL/plain/shared":              {"single": "ERR ~" + ltLiftedRefContested, "spilled512k": "ERR ~" + ltLiftedRefContested},
+	"COMMALATERAL/plain/shared":         {"single": "ERR ~" + ltLiftedRefContested, "spilled512k": "ERR ~" + ltLiftedRefContested},
+	"LATERAL/limit0/shared":             {"single": "ERR ~" + ltLiftedRefContested, "spilled512k": "ERR ~" + ltLiftedRefContested},
+	"COMMALATERAL/limit0/shared":        {"single": "ERR ~" + ltLiftedRefContested, "spilled512k": "ERR ~" + ltLiftedRefContested},
+	"LATERAL/aliasCollides/shared":      {"single": "ERR ~" + ltLiftedRefContested, "spilled512k": "ERR ~" + ltLiftedRefContested, "dag": "ERR ~key column \"v\" does not exist in the input schema", "dag-morsel4": "ERR ~key column \"v\" does not exist in the input schema"},
+	"COMMALATERAL/aliasCollides/shared": {"single": "ERR ~" + ltLiftedRefContested, "spilled512k": "ERR ~" + ltLiftedRefContested, "dag": "ERR ~key column \"v\" does not exist in the input schema", "dag-morsel4": "ERR ~key column \"v\" does not exist in the input schema"},
+}
 
 func TestArcLTACorrelatedBodyIsEvaluatedPerOuterRowOnEveryArm(t *testing.T) {
 	if testing.Short() {

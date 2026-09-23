@@ -103,34 +103,25 @@ func wkSeamCells() []c1Case {
 			name: "winpart/lateral",
 			sql:  "SELECT o.id AS a, p.id AS b, COUNT(*) OVER (PARTITION BY p.id) AS n FROM lat_ord o JOIN LATERAL (SELECT i.id, i.amount FROM lat_item i WHERE i.order_id = o.id) p ON true ORDER BY a, b",
 			want: "cols=[a:INT64 b:INT64 n:INT64] rows=4 | 1,1,1 | 1,2,1 | 2,3,1 | 2,4,1",
-			pin: map[string]string{
-				"dag":          "cols=[a:INT64 b:INT64 n:INT64] rows=4 | 1,1,2 | 1,1,2 | 2,2,2 | 2,2,2",
-				"dag-shuffled": "cols=[a:INT64 b:INT64 n:INT64] rows=4 | 1,1,2 | 1,1,2 | 2,2,2 | 2,2,2",
-				"dag-morsel4":  "cols=[a:INT64 b:INT64 n:INT64] rows=4 | 1,1,2 | 1,1,2 | 2,2,2 | 2,2,2",
-			},
-			why: "DAG-ONLY, pre-existing, `distributed`: a decorrelated LATERAL body's Project emits no stage, so the DAG's join publishes the body's INNER SCAN spelling (`i.id`) where the single-process join publishes the arm's own alias (`l.id`). The reference `p.id` therefore misses exactly and `exec.ColumnIndexFallback`'s qualifier strip binds the OUTER `id` \u2014 corollary 2's precondition failing, not its lookup working (docs/design/window-key-ownership.md). Closing it is the rule's DAG half: translate `p.id` to the body's carrier inside the occurrence the qualifier names before the consumer binds it. Identical at aed447e3.",
+			// ARC LT round 2: the DAG routes a window above a LATERAL join to
+			// the single-process pipeline (dagplan.refuseWindowOverDependentJoin),
+			// so the DAG-only pin that stood here agrees now and is deleted.
 		},
 		{
 			name: "winorder/lateral",
 			sql:  "SELECT o.id AS a, p.id AS b, COUNT(*) OVER (ORDER BY p.id) AS n FROM lat_ord o JOIN LATERAL (SELECT i.id, i.amount FROM lat_item i WHERE i.order_id = o.id) p ON true ORDER BY a, b",
 			want: "cols=[a:INT64 b:INT64 n:INT64] rows=4 | 1,1,1 | 1,2,2 | 2,3,3 | 2,4,4",
-			pin: map[string]string{
-				"dag":          "cols=[a:INT64 b:INT64 n:INT64] rows=4 | 1,1,2 | 1,1,2 | 2,2,4 | 2,2,4",
-				"dag-shuffled": "cols=[a:INT64 b:INT64 n:INT64] rows=4 | 1,1,2 | 1,1,2 | 2,2,4 | 2,2,4",
-				"dag-morsel4":  "cols=[a:INT64 b:INT64 n:INT64] rows=4 | 1,1,2 | 1,1,2 | 2,2,4 | 2,2,4",
-			},
-			why: "DAG-ONLY, pre-existing, `distributed`: a decorrelated LATERAL body's Project emits no stage, so the DAG's join publishes the body's INNER SCAN spelling (`i.id`) where the single-process join publishes the arm's own alias (`l.id`). The reference `p.id` therefore misses exactly and `exec.ColumnIndexFallback`'s qualifier strip binds the OUTER `id` \u2014 corollary 2's precondition failing, not its lookup working (docs/design/window-key-ownership.md). Closing it is the rule's DAG half: translate `p.id` to the body's carrier inside the occurrence the qualifier names before the consumer binds it. Identical at aed447e3.",
+			// ARC LT round 2: the DAG routes a window above a LATERAL join to
+			// the single-process pipeline (dagplan.refuseWindowOverDependentJoin),
+			// so the DAG-only pin that stood here agrees now and is deleted.
 		},
 		{
 			name: "winarg/lateral",
 			sql:  "SELECT o.id AS a, p.id AS b, SUM(o.id) OVER () AS n FROM lat_ord o JOIN LATERAL (SELECT i.id, i.amount FROM lat_item i WHERE i.order_id = o.id) p ON true ORDER BY a, b",
 			want: "cols=[a:INT64 b:INT64 n:DECIMAL(38,0)] rows=4 | 1,1,6 | 1,2,6 | 2,3,6 | 2,4,6",
-			pin: map[string]string{
-				"dag":          "cols=[a:INT64 b:INT64 n:DECIMAL(38,0)] rows=4 | 1,1,6 | 1,1,6 | 2,2,6 | 2,2,6",
-				"dag-shuffled": "cols=[a:INT64 b:INT64 n:DECIMAL(38,0)] rows=4 | 1,1,6 | 1,1,6 | 2,2,6 | 2,2,6",
-				"dag-morsel4":  "cols=[a:INT64 b:INT64 n:DECIMAL(38,0)] rows=4 | 1,1,6 | 1,1,6 | 2,2,6 | 2,2,6",
-			},
-			why: "DAG-ONLY, pre-existing, `distributed`: a decorrelated LATERAL body's Project emits no stage, so the DAG's join publishes the body's INNER SCAN spelling (`i.id`) where the single-process join publishes the arm's own alias (`l.id`). The reference `p.id` therefore misses exactly and `exec.ColumnIndexFallback`'s qualifier strip binds the OUTER `id` \u2014 corollary 2's precondition failing, not its lookup working (docs/design/window-key-ownership.md). Closing it is the rule's DAG half: translate `p.id` to the body's carrier inside the occurrence the qualifier names before the consumer binds it. Identical at aed447e3.",
+			// ARC LT round 2: the DAG routes a window above a LATERAL join to
+			// the single-process pipeline (dagplan.refuseWindowOverDependentJoin),
+			// so the DAG-only pin that stood here agrees now and is deleted.
 		},
 		{
 			name: "sortkey/lateral",
@@ -334,12 +325,9 @@ func wkSeamCells() []c1Case {
 			name: "winpartOuter/lateral",
 			sql:  "SELECT o.id AS a, p.id AS b, COUNT(*) OVER (PARTITION BY o.id) AS n FROM lat_ord o JOIN LATERAL (SELECT i.id, i.amount FROM lat_item i WHERE i.order_id = o.id) p ON true ORDER BY a, b",
 			want: "cols=[a:INT64 b:INT64 n:INT64] rows=4 | 1,1,2 | 1,2,2 | 2,3,2 | 2,4,2",
-			pin: map[string]string{
-				"dag":          "cols=[a:INT64 b:INT64 n:INT64] rows=4 | 1,1,2 | 1,1,2 | 2,2,2 | 2,2,2",
-				"dag-shuffled": "cols=[a:INT64 b:INT64 n:INT64] rows=4 | 1,1,2 | 1,1,2 | 2,2,2 | 2,2,2",
-				"dag-morsel4":  "cols=[a:INT64 b:INT64 n:INT64] rows=4 | 1,1,2 | 1,1,2 | 2,2,2 | 2,2,2",
-			},
-			why: "DAG-ONLY, pre-existing, `distributed`: the LATERAL column of this table, same mechanism as the `p.id` spelling beside it. Identical at aed447e3.",
+			// ARC LT round 2: the DAG routes a window above a LATERAL join to
+			// the single-process pipeline (dagplan.refuseWindowOverDependentJoin),
+			// so the DAG-only pin that stood here agrees now and is deleted.
 		},
 		{
 			name: "winpartOuter/setop",
@@ -369,15 +357,13 @@ func wkSeamCells() []c1Case {
 		{
 			name: "lifted/lateralContested",
 			sql:  "SELECT o.id AS a, p.m AS b FROM lat_ord o LEFT JOIN LATERAL (SELECT i.product AS m FROM lat_item i WHERE i.id < o.id) p ON true ORDER BY a, b",
-			// SINCE ARC LT this is a REFUSAL on every arm, not a per-arm
-			// pin (ADR-0021 §1s, logical.RefuseContestedLiftedRefs): the
-			// lifted column `id` is one the enclosing relation also
-			// publishes, and the two single arms answered NULL pads for
-			// PostgreSQL's `1,NULL | 2,Widget | 3,Gadget | 3,Widget` where
-			// the three DAG arms answered them — a refusal is a property of
-			// the plan, so the DAG arms move right → loud with the single
-			// arms' wrong → loud, stated in arc LT's notes. The closure is a
-			// dependent join (#1130 stays open on it).
+			// SINCE ARC LT this LEFT spelling is a REFUSAL on every arm (#1130;
+			// ADR-0021 §1s): the two single-process arms bound the outer
+			// column (NULL pads before), and the DAG's answer for a LEFT
+			// contested lateral was not ONE answer — right on this fixture,
+			// NULL pads then a route on arc LT's for the same statement — so
+			// the DAG refuses the OUTER spelling too. Its INNER twin answers
+			// on the DAG arms.
 			want: "ERR which the enclosing relation also publishes",
 			why:  "#1130: refused uniformly since arc LT; PostgreSQL answers 1,NULL | 2,Widget | 3,Gadget | 3,Widget",
 		}}

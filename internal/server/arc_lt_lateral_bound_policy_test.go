@@ -136,25 +136,32 @@ func TestArcLTAPerOuterRowBodyReadsThePublishedValueOnEveryDoor(t *testing.T) {
 			""},
 	}
 
-	refusals := []struct{ name, sql, class string }{
+	// A refusal cell REFUSES with its class on every door — except where the
+	// DAG doors evaluate the shape correctly (the contested lifted column,
+	// round-2 review B5), where they answer the MASK's rows instead; `rows`
+	// is that answer, empty where every door must refuse.
+	refusals := []struct{ name, sql, class, rows string }{
 		// A bound with no equality key over a POLICED comparison is refused,
 		// and the refusal carries no stored value.
 		{"boundNoKeyOnMasked",
 			`SELECT b.id AS a, s.m AS m FROM e7bal b JOIN LATERAL (SELECT c.id AS m ` +
 				`FROM e7bal c WHERE c.bal < b.bal ORDER BY c.id LIMIT 1) s ON true`,
-			"cannot apply that bound per outer row"},
+			"cannot apply that bound per outer row", ""},
 		{"boundMixedOnMasked",
 			`SELECT b.id AS a, s.m AS m FROM e7bal b JOIN LATERAL (SELECT c.id AS m ` +
 				`FROM e7bal c WHERE c.id = b.id AND c.bal < b.bal ORDER BY c.id LIMIT 1) s ON true`,
-			"cannot apply that bound per outer row"},
+			"cannot apply that bound per outer row", ""},
 		{"distinctLiftedOnMasked",
 			`SELECT b.id AS a, s.m AS m FROM e7bal b JOIN LATERAL (SELECT DISTINCT c.id % 2 AS m ` +
 				`FROM e7bal c WHERE c.bal < b.bal) s ON true`,
-			"which would have to publish the column it names"},
+			"which would have to publish the column it names", ""},
+		// The contested lifted column: the five single-process doors refuse;
+		// the four DAG doors answer the mask — `c.bal` is 0 for every pair
+		// `c.id < b.id`, and the unpoliced ids decide the pairing.
 		{"contestedLiftedOnMasked",
 			`SELECT b.id AS a, s.m AS m FROM e7bal b JOIN LATERAL (SELECT c.bal AS m ` +
 				`FROM e7bal c WHERE c.id < b.id) s ON true`,
-			"which the enclosing relation also publishes"},
+			"which the enclosing relation also publishes", pmContestedPairs()},
 	}
 
 	answered := 0
@@ -187,13 +194,27 @@ func TestArcLTAPerOuterRowBodyReadsThePublishedValueOnEveryDoor(t *testing.T) {
 			t.Run(c.name+"/"+door.name, func(t *testing.T) {
 				got, err := door.run(t, "analyst-key", c.sql)
 				if err == nil {
-					t.Fatalf("answered where arc LT refuses (%q): %v\n  SQL: %s", c.class, got.canon(), c.sql)
+					if c.rows == "" {
+						t.Fatalf("answered where arc LT refuses (%q): %v\n  SQL: %s", c.class, got.canon(), c.sql)
+					}
+					rendered := strings.Join(got.canon(), " ; ")
+					for _, s := range leaks {
+						if strings.Contains(rendered, s) {
+							t.Fatalf("a masked or denied value reached the client: %q\n  %s\n  SQL: %s", s, rendered, c.sql)
+						}
+					}
+					if rendered != c.rows {
+						t.Fatalf("%s\n  door %s\n  got  %s\n  want %s (the MASK's rows, or the refusal)", c.sql, door.name, rendered, c.rows)
+					}
+					refused++
+					return
 				}
 				if !strings.Contains(err.Error(), c.class) {
 					t.Fatalf("refused with a different sentence: %v\n  SQL: %s", err, c.sql)
 				}
+				text := pmStripSQLState(err.Error())
 				for _, s := range leaks {
-					if strings.Contains(err.Error(), s) {
+					if strings.Contains(text, s) {
 						t.Fatalf("a policed value reached the client inside a refusal: %q\n  %v", s, err)
 					}
 				}
@@ -228,6 +249,19 @@ func pmWindowPairs() string {
 	for a := 1; a <= 8; a++ {
 		for j := 1; j <= 8; j++ {
 			out = append(out, fmt.Sprintf("a=%d|m=%d|rn=%d", a, j, j))
+		}
+	}
+	sort.Strings(out)
+	return strings.Join(out, " ; ")
+}
+
+// pmContestedPairs is `a=b|m=0` for every pair c.id < b.id of e7bal's eight
+// rows: b-1 rows per b, the masked `bal` in each.
+func pmContestedPairs() string {
+	out := make([]string, 0, 28)
+	for b := 2; b <= 8; b++ {
+		for c := 1; c < b; c++ {
+			out = append(out, fmt.Sprintf("a=%d|m=0", b))
 		}
 	}
 	sort.Strings(out)
