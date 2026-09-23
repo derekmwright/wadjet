@@ -223,8 +223,10 @@ func setReturningDeclType(n *plansql.FuncCallNode, decls ColDecls) (expr.DeclTyp
 }
 
 // setElement is the declared ELEMENT of a set-returning call's array
-// argument: a column's declared element, an ARRAY[…] literal's first
-// decided element, or the element of an array-returning expression whose
+// argument: a column's declared element, an ARRAY[…] literal's COMMON
+// element type (expr.ArrayLitElementDecl — every element is materialized
+// through it, so the first element's type read `unnest(ARRAY[1,2.5])` as
+// 1, 2), or the element of an array-returning expression whose
 // declaration carries one. current_schemas() is name[], whose element this
 // engine carries as text.
 func setElement(n plansql.Node, decls ColDecls) (parquet.Column, bool) {
@@ -235,10 +237,14 @@ func setElement(n plansql.Node, decls ColDecls) (parquet.Column, bool) {
 		}
 	}
 	if al, ok := n.(*plansql.ArrayLitNode); ok {
+		var decided []expr.DeclType
 		for _, e := range al.Elements {
 			if t, conf := nodeDeclaredType(e, decls); conf == expr.Decided {
-				return declTypeParts(t), true
+				decided = append(decided, t)
 			}
+		}
+		if t, ok := expr.ArrayLitElementDecl(decided); ok {
+			return declTypeParts(t), true
 		}
 	}
 	if fc, ok := n.(*plansql.FuncCallNode); ok &&

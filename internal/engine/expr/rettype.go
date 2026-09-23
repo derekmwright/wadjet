@@ -613,6 +613,41 @@ func (r Ret) Resolve(nargs int, argType func(i int) (DeclType, Confidence)) (Dec
 	return DeclType{ID: batch.TypeString}, Undecided
 }
 
+// ArrayLitElementDecl is an ARRAY[…] constructor's ELEMENT declaration.
+// PostgreSQL resolves an array constructor's elements to one common type
+// (§10.5, the rule UNION and CASE use): ARRAY[1, 2.5] is numeric[]. It is
+// CommonDeclType with one difference — a constructor of nothing but
+// constants still folds the NUMERIC rung, because whoever reads the array
+// through this declaration (a set-returning item) materializes EVERY element
+// through it, and the first constant's rung truncated the rest (2.5 read 2).
+// Each constant keeps its own declaration (ADR-0024's literal deferral: a
+// fractional literal is FLOAT64 here), so ARRAY[1, 2.5] is FLOAT64's.
+func ArrayLitElementDecl(decided []DeclType) (DeclType, bool) {
+	typed := make([]DeclType, 0, len(decided))
+	for _, d := range decided {
+		if !d.Quoted {
+			typed = append(typed, d)
+		}
+	}
+	if len(typed) > 1 && allLiterals(typed) {
+		// The constants' OWN declarations, widest wins (a literal's FoldID
+		// names the DECIMAL rung its spelling would fold to, which is the
+		// deferral's business, not this materialization's).
+		out, numeric := typed[0].ID, true
+		for _, d := range typed {
+			if _, ok := numericRank(d.ID); !ok || d.ID == batch.TypeDecimal {
+				numeric = false
+				break
+			}
+			out = widerNumericType(out, d.ID)
+		}
+		if numeric {
+			return Decl(out), true
+		}
+	}
+	return CommonDeclType(decided, false)
+}
+
 // CommonDeclType is shared by choice functions and planner CASE branches;
 // ok=false declines the declaration. Numeric deciders fold INT32 → INT64 →
 // DECIMAL → FLOAT32 → FLOAT64; never first-decider narrowing (#724, #462).
