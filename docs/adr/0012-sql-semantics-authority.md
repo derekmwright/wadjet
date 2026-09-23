@@ -80,11 +80,16 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
        them: PORT and PROTOCOL are int4 and DURATION is int8 (nanoseconds,
        #834), so SUM/AVG/STDDEV/VARIANCE/CORR/COVAR and the comparisons treat
        them as numbers where PostgreSQL's `interval` has no stddev.
-     - MEDIAN, MODE and QUANTILE_* are DuckDB's spellings (PostgreSQL has
-       none, or only the ordered-set form) and answer over numbers. Refused
-       they carry PostgreSQL's state: MODE and PERCENTILE_* are its
-       ordered-set aggregates, 42809 `WITHIN GROUP is required for
-       ordered-set aggregate mode`; MEDIAN and QUANTILE_* 42883.
+     - MEDIAN, QUANTILE_*, and the plain-call MODE, PERCENTILE_CONT and
+       PERCENTILE_DISC (DuckDB's spellings; PostgreSQL has none, or only the
+       ordered-set WITHIN GROUP form, and raises 42809 for the plain call)
+       answer over numbers — `percentile_cont(0.5, c_i32)` 28.5 and
+       `percentile_disc(0.5, c_i32)` 27 on every arm. Refused over anything
+       else they carry PostgreSQL's per-function state: MODE and
+       PERCENTILE_DISC 42809 `WITHIN GROUP is required for ordered-set
+       aggregate mode`; PERCENTILE_CONT 42883 `function
+       percentile_cont(numeric, text) does not exist` (its overloads resolve
+       first); MEDIAN and QUANTILE_* 42883.
      - STRING_AGG renders a non-text argument as its own text — BOOL, the
        integers, REAL, DOUBLE, DECIMAL, IPV4, IPV6, CIDR, MACADDR, PORT,
        PROTOCOL, DURATION, UUID and DATE (ISO) — which base answered
@@ -101,12 +106,16 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
        | uuid, ipv6, cidr | kept | kept |
        | date, timestamp, boolean | kept | 42883 (0 rows single, 20 DAG) |
        | real | 42883 (3 of 20 matched) | 42883 |
-       | bytea, ipv4, macaddr | 42883 (0 of 20 matched) | 42883 |
+       | bytea, ipv4, macaddr | 42883 (0 of 20 matched) | 42883 (0 single, 20 DAG) |
 
-       Two shapes keep no text reading for any type: a membership test
-       against a SET-OPERATION body (0 rows single, the DAG's cast failing,
-       #1073) and two plain COLUMNS as a JOIN key (the hash-join key path:
-       #615's error on three arms, 0 rows on the shuffled one).
+       A SET-OPERATION subquery body (UNION ALL / UNION / INTERSECT /
+       EXCEPT) takes the subquery column: measured per type, the kept types
+       answered identically on every arm through each operation and the
+       refused ones were arm-dependent or wrong there too (arc BR round 3).
+       One shape keeps no text reading for any type: two plain COLUMNS as a
+       JOIN key (the hash-join key path: #615's error on three arms, 0 rows
+       on the shuffled one, and 0 rows for every text/typed derived-column
+       pair).
      - An UNQUOTED numeric literal keeps its recorded readings: against TEXT
        its source text (#504), against a TIMESTAMP the epoch-millisecond
        instant the carrier holds. A literal is refused only against a

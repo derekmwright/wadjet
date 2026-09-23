@@ -328,15 +328,15 @@ BOOL, UUID, MAC, BYTES, MAP and VECTOR have defined orders here; PostgreSQL lack
 
 **Aggregate arguments read the wire types.**
 
-SUM, AVG, STDDEV, VARIANCE, CORR and COVAR accept PORT, PROTOCOL and DURATION as the int4/int8 the wire declares them; PostgreSQL's `interval` has no STDDEV. MEDIAN, MODE and QUANTILE_* answer over numbers; refused, MODE and PERCENTILE_* raise PostgreSQL's 42809 `WITHIN GROUP is required` and MEDIAN/QUANTILE_* 42883. `STRING_AGG` renders BOOL, numbers, network values, UUID and DATE as their text where PostgreSQL raises 42883; over TIMESTAMP or a container it raises 42883, over BYTEA 0A000 (PostgreSQL answers). Every other argument PostgreSQL has no overload for raises its 42883 (`function sum(text) does not exist`), and `SUM('5')` / `SUM(NULL)` its 42725. (ADR-0012 §5/arc BR, #1249)
+SUM, AVG, STDDEV, VARIANCE, CORR and COVAR accept PORT, PROTOCOL and DURATION as the int4/int8 the wire declares them; PostgreSQL's `interval` has no STDDEV. MEDIAN, QUANTILE_* and the plain calls `mode(x)`, `percentile_cont(p, x)` and `percentile_disc(p, x)` answer over numbers (PostgreSQL raises 42809 for the plain ordered-set calls); refused, MODE and PERCENTILE_DISC raise 42809 `WITHIN GROUP is required`, PERCENTILE_CONT and MEDIAN/QUANTILE_* 42883. `STRING_AGG` renders BOOL, numbers, network values, UUID and DATE as their text where PostgreSQL raises 42883; over TIMESTAMP or a container it raises 42883, over BYTEA 0A000 (PostgreSQL answers). Every other argument PostgreSQL has no overload for raises its 42883 (`function sum(text) does not exist`), and `SUM('5')` / `SUM(NULL)` its 42725. (ADR-0012 §5/arc BR, #1249)
 
 **Text compares with typed values, pair by pair.**
 
-Text compared with an integer, double, numeric, PORT, PROTOCOL, DURATION, UUID, IPv6 or CIDR value — directly, in an IN list or against an IN subquery — answers through the value's text; with a DATE, TIMESTAMP or boolean it answers directly and in an IN list. PostgreSQL raises 42883 for all of them. Text against REAL, BYTEA, IPv4 or MAC, text membership against a DATE/TIMESTAMP/boolean subquery or a set-operation body, and two text/typed COLUMNS as a JOIN key raise 42883 here too. (ADR-0012 §5/arc BR, #826, #1073)
+Text compared with an integer, double, numeric, PORT, PROTOCOL, DURATION, UUID, IPv6 or CIDR value — directly, in an IN list or against an IN subquery — answers through the value's text; with a DATE, TIMESTAMP or boolean it answers directly and in an IN list. PostgreSQL raises 42883 for all of them. A set-operation subquery body (UNION, INTERSECT, EXCEPT) follows the same types. Text against REAL, BYTEA, IPv4 or MAC, text membership against a DATE/TIMESTAMP/boolean subquery, and two text/typed COLUMNS as a JOIN key raise 42883 here too. (ADR-0012 §5/arc BR, #826, #1073)
 
 **A number literal against a timestamp reads epoch milliseconds.**
 
-`c_ts >= 1700000000000` compares against the instant that many milliseconds after the epoch; PostgreSQL raises 42883. A number against a boolean, and a boolean literal against a number, raise 42883 on both. (ADR-0012 §5/arc BR, #1216)
+`c_ts >= 1700000000000` compares against the instant that many milliseconds after the epoch; PostgreSQL raises 42883. (A number against TEXT is the entry "SELECT compares numeric spelling with text" above, kept by arc BR.) A number against a boolean, and a boolean literal against a number, raise 42883 on both. (ADR-0012 §5/arc BR, #1216)
 
 **Two ROW shapes do not fold.**
 
