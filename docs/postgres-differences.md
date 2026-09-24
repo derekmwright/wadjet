@@ -154,10 +154,6 @@ A field is NULL only when it is empty and unquoted (`""` is the empty string), a
 
 `SELECT * FROM read_json('<zero-byte file>')` raises `0A000 the table function "read_json" published no columns: its input "…" is empty`. PostgreSQL permits a relation with zero columns (`CREATE TABLE t (); SELECT * FROM t` answers zero rows of zero columns) and this engine does not, at any door — a result that declares no columns is not an answer it has. A Parquet file carries its schema in the footer and a CSV in its header row, so an empty file of either kind is an ordinary empty relation: zero rows, columns declared. (ADR-0012 §5/#1230)
 
-**A FROM alias does not rename a single-column table function's column.**
-
-`SELECT * FROM generate_series(1,2) AS g` publishes `generate_series` here and `g` on PostgreSQL 17.11, which names a single-column function in FROM after its alias; so `SELECT g FROM generate_series(1,2) AS g` is 42703 here and answers there, and `SELECT generate_series FROM … AS g` is the other way round. The column-alias list, `AS g(x)`, is applied by both. (ADR-0012 §5/#1210-alias-naming)
-
 **`generate_series(…) WITH ORDINALITY` publishes one column.**
 
 PostgreSQL adds a second `ordinality` column to any function in FROM; this engine adds it for `unnest` only, so `generate_series(1,2) WITH ORDINALITY` publishes `generate_series` alone — and a two-name column-alias list over it is 42P10. (ADR-0012 §5/#1210-ordinality)
@@ -176,7 +172,7 @@ DURATION, BYTES, VECTOR and container destinations can retain the operand becaus
 
 **Undescribable results are refused.**
 
-Empty results over an ungrouped-aggregate LATERAL or recursive CTE can raise XX000 where PostgreSQL supplies column metadata. Refusal prevents shapeless results. (ADR-0012 §5/#1008, #1010)
+Empty results over an ungrouped-aggregate LATERAL can raise XX000 where PostgreSQL supplies column metadata. Refusal prevents shapeless results. Recursive CTEs now retain the seed's declared columns for an empty result (ADR-0021 §1o-b). (ADR-0012 §5/#1008, #1010)
 
 **Table metadata follows table access.**
 
@@ -514,9 +510,9 @@ An outer LATERAL’s ON retaining an empty-input default raises 0A000: `ON s.n =
 
 Name-based expansion cannot distinguish positions: `SELECT x.*` raises 0A000 where PostgreSQL returns both columns. A bare star reads positions and answers. (ADR-0012 §5/2026-09-13/duplicate-star)
 
-**Qualified stars refuse bounded LATERALs.**
+**Some bounded LATERAL bodies are refused.**
 
-No per-outer-row bound is available: the qualified star raises 0A000 where PostgreSQL answers. (ADR-0012 §5/2026-09-13/bounded-LATERAL)
+Equality-keyed correlated bodies apply `LIMIT`/`OFFSET` per outer row, including `SELECT s.*`. A bound over an inequality correlation, a mixed inner/outer key expression, an outer-side expression, a DISTINCT body other than exactly the key, a set operation or a body with its own QUALIFY raises `0A000` where PostgreSQL evaluates it per outer row. This engine has no general relation-valued per-row runner. See [LATERAL joins](sql-reference.md#lateral-joins). (ADR-0021 §1s)
 
 **Window aggregate support is limited.**
 

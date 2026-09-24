@@ -51,7 +51,7 @@ SQL text → Parser (`internal/planner/sql/`, recursive descent, custom AST) →
 | `internal/catalogdir/` | The catalog DIRECTORY (`<data-dir>/_catalog`): the flock, the embedded JetStream store, the published holder — one mechanism under `wadjet.Config.DataDir`, the CLI commands and `wadjet serve` (ADR-0041) |
 | `internal/engine/batch/` | Record batches, vectors, selection vectors, batch pooling |
 | `internal/engine/exec/` | Pipeline executor, operators (filter, project, join, sort, aggregate, window); aggregate seams in `agg_consume.go`, `agg_accumulators.go`, `agg_partial_merge.go`, `agg_spill.go` |
-| `internal/engine/expr/` | Expression compiler, 387 scalar functions; sections in `expr_arith.go`, `expr_compare.go`, `expr_scalar_fns.go`, `expr_string_fns.go` |
+| `internal/engine/expr/` | Expression compiler, 417 scalar functions; sections in `expr_arith.go`, `expr_compare.go`, `expr_scalar_fns.go`, `expr_string_fns.go` |
 | `internal/engine/scan/` | 3-level predicate pushdown scanner |
 | `internal/engine/memory/` | Per-task memory budget, spill-to-disk |
 | `internal/planner/sql/` | SQL parser + AST types |

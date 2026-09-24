@@ -19,11 +19,10 @@ body evaluated with that row's values:
 σ_{K = v}( Body′(R) )  ==  Body(R, outer = v)        for every outer value v
 ```
 
-which holds iff
+The implemented sufficient condition (amended 2026-09-24) is:
 
-1. every correlated predicate is an EQUALITY between an inner column and an
-   expression over the outer row alone — so the correlation IS a restriction
-   on inner columns K — and
+1. every correlated predicate is an EQUALITY between an inner-only expression
+   and a bare outer column, restricting inner keys K; and
 2. every operator in the body between that restriction and the body's output
    COMMUTES with `σ_{K=v}`. Filters and projections always do. A PIPELINE
    BREAKER does only when it is partitioned by K: an aggregate whose GROUP BY
@@ -60,8 +59,10 @@ scalar rewrite already did this. A LATERAL has no per-row runner, so a
 bounded body with no equality key, a DISTINCT body under a bound, a DISTINCT
 body whose lifted predicate names a column it does not publish, a lifted
 column the body's own alias list or the enclosing relation also publishes, and
-a lifted predicate under an enclosing star are REFUSED, 0A000, one sentence
-each, on every arm. Each answered a plausible wrong row set before.
+a lifted predicate under an enclosing star have the boundaries in ADR-0021
+§1s. A contested column or bare-star decline refuses on the single-process
+pipeline; the DAG retains its supported inner/comma cases and refuses a
+contested column in an outer join.
 
 **An ungrouped aggregate with a HAVING** is a special case of the pad rule
 (§1h): the HAVING is folded over the default row (COUNT 0, NULL otherwise).
@@ -144,10 +145,10 @@ SQL reference with the deadline that bounds it.
   QUALIFY` block under a LEFT join, identically at base. The five-arm gate
   bounds those cells' spilled arm to {PostgreSQL's rows, that refusal}; the
   other four arms assert the rows. Filing candidate (exec/memory).
-- `R2/collideWinBound`'s three DAG arms moved from a refusal to the wrong rows
-  their unbounded twin `R2/collideWinNoBound` has always answered: an OUTER
-  window keyed on `o.id` over a lateral join binds the wrong arm on the DAG
-  (ADR-0026 §8j's LATERAL-producer residue, `distributed`). Pinned per arm.
+- A window above a lateral join runs on the single-process pipeline when
+  requested through the DAG. `refuseWindowOverDependentJoin` handles the
+  bounded and unbounded shapes; `WindowOverLateralLocalRoutes` measures the
+  route (amended 2026-09-24, ADR-0021 §1s).
 - Three self-joined arms of one table with per-arm ON filters answer a wrong
   pairing on the single-process path with no lateral in the query
   (`lat_ord o JOIN lat_item s ON s.order_id = o.id AND s.id IN (2,4) JOIN

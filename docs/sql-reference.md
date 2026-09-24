@@ -477,11 +477,9 @@ step is `22023 step size cannot equal zero`. The series ends at the carrier's
 edge: a step that would leave the 64-bit range ends it there rather than
 wrapping.
 
-A FROM alias does not rename the column. `SELECT * FROM generate_series(1,2)
-AS g` publishes `generate_series`, where PostgreSQL publishes `g` — a
-single-column function in FROM takes its column's name from the alias there.
-Use the column-alias list, `AS g(x)`, which both engines apply. The same holds
-for `unnest`.
+A FROM alias names a single-column function's output: `SELECT g FROM
+generate_series(1,2) AS g` returns 1 and 2. An explicit column-alias list,
+`AS g(x)`, names the column `x` instead, as in PostgreSQL.
 
 The column is `integer` when every argument fits a 32-bit integer and `bigint`
 otherwise, which is the overload PostgreSQL resolves for the same call. The
@@ -742,6 +740,10 @@ as `Ledger` exactly as `SELECT * FROM Ledger` does.
 server's catalog when the statement runs, so `WHERE`, `JOIN`, aggregates,
 `ORDER BY` and `LIMIT` over them are ordinary queries. psql's `\d` family,
 pgJDBC's `DatabaseMetaData` and SQLAlchemy's inspector read them unchanged.
+The server reports PostgreSQL 17: `SELECT version()` names that major, and
+the startup `server_version` parameter and `SHOW server_version` report
+`17.0` (`server_version_num` is `170000`).
+
 An unqualified `pg_class` is `pg_catalog.pg_class`, as PostgreSQL's search
 path makes it; a WITH query of the same name is the WITH query.
 
@@ -1470,9 +1472,11 @@ body writes `SELECT i.amount`, `SELECT i.amount AS m` or `SELECT i.id AS m` —
 and the materialized column is not published by `s.*`. Where publishing it
 would change something else the statement is **refused** (`0A000`): a body
 carrying `DISTINCT` (the column would join the DISTINCT key), a body whose own
-alias already publishes that name, an enclosing relation that publishes it
-(`WHERE i.id < o.id` over two relations that both have `id`), and an enclosing
-`SELECT *` over the join. Over an AGGREGATED body it is refused too, in every
+alias already publishes that name, on the single-process pipeline, an enclosing relation that publishes it
+(`WHERE i.id < o.id` over two relations that both have `id`), or an enclosing
+`SELECT *` over the join. The distributed path retains its supported
+inner/comma spellings for those last two cases; a contested column in an
+outer join is refused there too. Over an AGGREGATED body it is refused too, in every
 one of those spellings: there is no projection to publish the column in, and
 publishing it would put it in the `GROUP BY` and change what the aggregate
 computes. PostgreSQL evaluates each of these per outer row; restate the
@@ -1703,25 +1707,10 @@ ALIASED CTE reference, and one that publishes TWO columns of one name — there
 the references would both bind the first column, which is a wrong value.
 PostgreSQL answers all of these; name the columns.
 
-A `LIMIT` or `OFFSET` inside a LATERAL subquery that is CORRELATED is applied
-to the whole inner relation ONCE, where PostgreSQL applies it to each outer
-row's own result — so `JOIN LATERAL (… WHERE i.order_id = o.id ORDER BY i.p
-LIMIT 1) s` answers ONE row where PostgreSQL answers one per outer row. The
-boundary is exact and worth stating:
-
-- a bound that cannot remove a row — `OFFSET 0`, `LIMIT ALL`, no bound — means
-  the same thing either way and is unaffected;
-- a bound that does not actually bind, because no outer row's own result is
-  longer than it, gives PostgreSQL's rows either way and is answered;
-- a bound that binds returns the whole relation's first rows rather than each
-  outer row's, which is a wrong ROW COUNT and is a known open defect;
-- the QUALIFIED star over such a subquery (`SELECT s.*`) is REFUSED (`0A000`),
-  because a star publishes a relation and the row count of this one is not the
-  one the query wrote. `SELECT *` and an explicit column list answer.
-
-Rank inside the subquery with a window function (`ROW_NUMBER() OVER (PARTITION
-BY …)`) to get PostgreSQL's per-outer-row bound today. An UNCORRELATED
-LATERAL's own bound means exactly what it says.
+A correlated LATERAL's bound follows the per-outer-row rule above, including
+when the enclosing query selects `s.*`. Equality-keyed bodies apply the bound
+to each key's rows; unsupported bounded bodies raise `0A000`. An uncorrelated
+LATERAL applies its bound to its own result.
 
 An inner `SELECT` list that aliases something to the correlation key's own name
 answers what PostgreSQL answers. `JOIN LATERAL (SELECT MAX(t.id) AS g …
@@ -2329,7 +2318,7 @@ arms.
 
 The recursive term is iterated until it produces no rows, as in PostgreSQL:
 there is no silent cap, and the CTE holds its WHOLE closure — a date series,
-a hierarchy or a walk of any depth answers every row. The closure is held like
+a hierarchy or a walk answers every row when it completes within the bounds below. The closure is held like
 any other materialized result and spills to disk past the memory budget. Three
 things end a recursion that never reaches a fixed point, each with an error
 and never with the rows produced so far:
@@ -2511,30 +2500,15 @@ and no rows, and so does `SELECT *` over a table, over ONE join, over ONE
 `LATERAL` — grouped, ungrouped or `LEFT` — over a derived table, over a
 non-recursive CTE, over a grouping and over a set operation.
 
-The declaration is a walk over the PLAN, and it describes ONE join by asking
-the join operator itself what it publishes. Three shapes are past that bound,
-and a query of one of them that returns NO ROWS is REFUSED (`XX000`) rather
-than answered with an empty column list:
+The plan supplies the declaration when there are no data rows. A recursive
+CTE on the single-process pipeline keeps its seed's column names and types,
+including for a zero-row seed. A star over an ordinary join is expanded in
+FROM order before its declaration is derived.
 
-* `SELECT *` over a join whose own SIDES contain a join — three or more
-  relations, and equally TWO or more `LATERAL`s, because each one is a join the
-  planner manufactures;
-* `SELECT *` over a `LATERAL` whose subquery is an UNGROUPED aggregate
-  (`SELECT MAX(x) …`), whose join carries a column the planner minted for
-  itself and the declaration will not publish;
-* `SELECT *` over a RECURSIVE CTE.
-
-A single `LATERAL` that is not an ungrouped aggregate is NOT among them: a
-zero-row `SELECT * FROM t JOIN LATERAL (SELECT c FROM u WHERE u.k = t.k) s ON
-true` answers with its columns, and so do the `GROUP BY` and `LEFT JOIN
-LATERAL` spellings.
-
-PostgreSQL answers all three refused shapes with a header and zero rows. The
-refusal is a wadjet-side bound and it replaces something worse: a result
-carrying no columns at all, which psql prints as nothing, which pgJDBC's
-`executeQuery` has no metadata for, and which a client cannot tell from a query
-that legitimately found nothing. Naming the columns in the SELECT list answers
-in every one of the three cases.
+An empty `SELECT *` over a LATERAL whose body is an ungrouped aggregate can
+still raise `XX000`: the declaration cannot publish the join's internal
+empty-input column. Naming the result columns explicitly avoids that star
+boundary. PostgreSQL supplies the columns for the empty result.
 
 Every door answers the same way — the embedded API, the PostgreSQL wire
 protocol, `POST /v1/queries`, `POST /v1/queries/async` with
