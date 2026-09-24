@@ -2996,6 +2996,8 @@ are different answers — a client branches on them:
 | `CAST('2020-02-30' AS DATE)` | `22008` | date/time field value out of range: "2020-02-30" |
 | `CAST('x' AS TIMESTAMP)` | `22007` | invalid input syntax for type timestamp: "x" |
 | `CAST('2020-02-30 12:00' AS TIMESTAMP)` | `22008` | date/time field value out of range: … |
+| a DATE or TIMESTAMP past PostgreSQL's range (DATE 4714-11-24 BC … 5874897-12-31, TIMESTAMP … 294276-12-31) however it is built — `d + 2147483647`, `DATE '2026-03-03' - 5000000`, `ts + INTERVAL '300000000 years'`, `CAST('5874898-01-01' AS DATE)`, `2147483647::DATE`, `date_add(d, n)` — in any clause and on every write | `22008` | date out of range / timestamp out of range / date out of range for timestamp |
+| `CAST('1 day' AS INTERVAL)` is the INTERVAL `'1 day'`; text naming no interval | `22007` | invalid input syntax for type interval: … |
 | `CAST('abc' AS UUID)` | `22P02` | invalid input syntax for type uuid: "abc" |
 | `CAST('abc' AS INTEGER \| BIGINT \| REAL \| DOUBLE PRECISION \| NUMERIC \| BOOLEAN)` | `22P02` | invalid input syntax for type … |
 | `CAST('2.5' AS INTEGER \| BIGINT \| SMALLINT \| INT32 \| INT64 \| PORT \| PROTOCOL)` — a FRACTION is not an integer spelling | `22P02` | invalid input syntax for type integer: "2.5" |
@@ -4675,10 +4677,13 @@ literal (`TIMESTAMP '2026-01-01 00:00:00'`), a function call (`now()`,
 same expression compiler a `SELECT` list does, with no row to read from — so
 the expression must be a constant.
 
-**One assignment table for every write.** An `INSERT ... VALUES` cell, an
-`INSERT ... SELECT` column, an `UPDATE ... SET` and a `MERGE` clause are all
-assigned by PostgreSQL's assignment casts, from the source's DECLARED type,
-before any row is read:
+**One assignment function for every write.** An `INSERT ... VALUES` cell, an
+`INSERT ... SELECT` column, an `UPDATE ... SET` and a `MERGE` clause (SET or
+INSERT VALUES) are all assigned by the same function, from the same reading
+of the source expression — a constant by its own spelling, anything else by
+its DECLARED type — through PostgreSQL's assignment casts, checked before any
+row is read. A source × target pair answers the same on every door (gated
+cell by cell across the doors, and against PostgreSQL 17.11):
 
 | Source (declared) | Target | Answer |
 |---|---|---|
@@ -4687,7 +4692,8 @@ before any row is read:
 | DATE | TIMESTAMP | its midnight |
 | TIMESTAMP | DATE | its calendar day |
 | TEXT (a column, `s \|\| ''`, `CAST(x AS TEXT)`) | anything but TEXT | 42804 — PostgreSQL has no assignment cast from text |
-| a quoted literal (`'2026-01-01'`, `'10.0.0.1'`) | any type | read by the column's own input function (22P02 / 22007 when it names no value) |
+| a quoted literal (`'2026-01-01'`, `'10.0.0.1'`, `'yes'`) | any type | read by the column's own input function — BOOLEAN takes `t`/`true`/`y`/`yes`/`on`/`1` and their negations, any unique prefix (22P02 / 22007 when it names no value) |
+| a numeric literal (`2.50`, `1e3`, `2.5`) | any type | read as the numeric value it spells: into TEXT its numeric text at its own scale (`2.50`, `1000`), into an integer rounded half away from zero (`2.5` → 3) |
 | `INT_TO_IP(n)`, `UUID()` and the other TEXT-declared address/UUID functions above | any type | read like a quoted literal (a superset; docs/postgres-differences.md) |
 | anything else (an integer into DATE, BOOLEAN or an address; a date into a number; a typed NULL of the wrong type) | | 42804 `column "x" is of type ... but expression is of type ...` |
 

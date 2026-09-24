@@ -5934,6 +5934,26 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     WhatItProduces`, `wadjet.TestOneAssignmentTableOnEveryDoor` (580 cells ×
     four doors against PostgreSQL 17.11's measured answers).
 
+    **Amended 2026-09-24 (arc VL round 4): one assignment FUNCTION, and a
+    door-diff gate.** Round 3's one table sat under two converters — INSERT …
+    SELECT assigned a constant from the value its select list had evaluated
+    (a decimal literal is a double there, ADR-0024), so `SELECT 2.50` into
+    TEXT stored `2.5` there and `2.50` on every other door. Every door now
+    classifies its source through one function (a constant by its spelling,
+    a typed-text call, or the declared type) and calls one check and one
+    converter. `wadjet.TestAssignmentDoorsAgree` proves, for 560 source ×
+    target cells (constants on all five write doors — VALUES, INSERT …
+    SELECT, UPDATE SET, MERGE SET, MERGE INSERT — and column expressions on
+    the four with a FROM) and 42 CTAS cells, that no two doors store a
+    different value or raise a different SQLSTATE, and that the common
+    answer is PostgreSQL 17.11's; the only listed differences are CTAS
+    column TYPES (a decimal literal is double precision by ADR-0024's literal
+    rule; integer arithmetic and a negated integer literal declare bigint),
+    never a stored value another door disagrees with. The same round put
+    PostgreSQL's DATE / TIMESTAMP range (22008) at the one place a temporal
+    value is constructed (#911's family), and the date/timestamp operator
+    refusal (42883) into expression typing on every DML door.
+
   - **A CTAS over a star of a self join answered where PostgreSQL refuses —
     CLOSED 2026-09-13 by arc O1 (#997, #1012).** (Added 2026-09-12, #1024.)
     `CREATE TABLE t AS SELECT * FROM s a JOIN s b ON b.id = a.id` is `42701`

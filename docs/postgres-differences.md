@@ -354,7 +354,7 @@ Text compared with an integer, double, numeric, PORT, PROTOCOL, DURATION, UUID, 
 
 `ts1 - ts2` (and `now() - now()`) answers the difference as a number of milliseconds where PostgreSQL answers an `interval` (`01:00:00`): this engine has no INTERVAL column type, only the INTERVAL literal. Such a value assigned to a DATE, TIMESTAMP or address column is 42804, as PostgreSQL's interval is. `date1 - date2` is the day count PostgreSQL answers, declared `bigint` (OID 20) where PostgreSQL declares `integer`. (ADR-0012 §5/arc VL)
 
-A date minus a timestamp (PostgreSQL: an `interval`) is refused 42883 here, as the pairs PostgreSQL has no operator for are (`timestamp + integer`, `date + numeric`, `integer - date`, `date + timestamp`) — it used to answer the day count minus the millisecond count. (ADR-0012 §5/arc VL)
+A date minus a timestamp (PostgreSQL: an `interval`) is refused 42883 here, as the pairs PostgreSQL has no operator for are (`timestamp + integer`, `date + numeric`, `integer - date`, `date + timestamp`) — it used to answer the day count minus the millisecond count. The refusal is part of typing the expression, so it holds in every statement that evaluates one: a SELECT's clauses, `INSERT ... VALUES`, `INSERT ... SELECT`, `UPDATE` SET and WHERE, `DELETE` WHERE, `MERGE` and CTAS. `ts - ts` is declared `double precision` (the millisecond count). (ADR-0012 §5/arc VL)
 
 **A number literal against a timestamp reads epoch milliseconds.**
 
