@@ -88,14 +88,17 @@ func TestArcPCRound3AnswersAsPostgreSQLOnBothPaths(t *testing.T) {
 			cols: []string{"v"}, want: "1 rows: \U0001F600;"},
 		{name: "escape/surrogate-pair-long-form", sql: `SELECT E'a\U0000D83D\U0000DE00b' AS v`,
 			cols: []string{"v"}, want: "1 rows: a\U0001F600b;"},
+		// #1307: each sentence now carries PostgreSQL's own `at or near "…"`
+		// suffix — the character that broke the pending pair, or the
+		// offending escape's own source text.
 		{name: "escape/lone-high-surrogate", sql: `SELECT E'\uD83Dx' AS v`,
-			state: "42601", sentence: "invalid Unicode surrogate pair"},
+			state: "42601", sentence: `invalid Unicode surrogate pair at or near "x"`},
 		{name: "escape/lone-low-surrogate", sql: `SELECT E'\uDE00' AS v`,
-			state: "42601", sentence: "invalid Unicode surrogate pair"},
+			state: "42601", sentence: `invalid Unicode surrogate pair at or near "\uDE00"`},
 		{name: "escape/short", sql: `SELECT E'\u12' AS v`,
 			state: "22025", sentence: "invalid Unicode escape"},
 		{name: "escape/out-of-range", sql: `SELECT E'\U00110000' AS v`,
-			state: "42601", sentence: "invalid Unicode escape value"},
+			state: "42601", sentence: `invalid Unicode escape value at or near "\U00110000"`},
 		{name: "escape/invalid-byte", sql: `SELECT E'\xD8' AS v`,
 			state: "22021", sentence: `invalid byte sequence for encoding "UTF8": 0xd8`},
 	} {

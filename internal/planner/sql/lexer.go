@@ -8,6 +8,8 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
 // TokenType identifies the kind of lexical token.
@@ -440,6 +442,19 @@ func (l *lexer) errorCode(code, format string, args ...any) stateFn {
 		code: code,
 	}
 	return nil
+}
+
+// nextRuneText decodes the single rune starting at l.pos and returns its
+// source text, or "" at end of input. It is PostgreSQL's "at or near" text
+// for a refusal about whatever comes NEXT rather than about the token just
+// read — a Unicode surrogate pair broken by the character that follows it,
+// not by the escape itself (#1307).
+func (l *lexer) nextRuneText() string {
+	if l.pos >= len(l.input) {
+		return ""
+	}
+	_, w := utf8.DecodeRuneInString(l.input[l.pos:])
+	return l.input[l.pos : l.pos+w]
 }
 
 // skipWhitespace advances past any whitespace and resets start.
@@ -929,6 +944,11 @@ func lexEscapeString(l *lexer) stateFn {
 				l.pos += 1 + n
 				sb.WriteByte(byte(v))
 			case 'u', 'U':
+				// The escape's OWN start — the backslash consumed above, one
+				// byte before the letter l.pos still sits on — is what a
+				// refusal below quotes as PostgreSQL's "at or near" text
+				// when the escape itself is the offender (#1307).
+				escStart := l.pos - 1
 				v, code, msg := l.unicodeEscape(c)
 				if msg != "" {
 					return l.errorCode(code, "%s", msg)
@@ -938,22 +958,34 @@ func lexEscapeString(l *lexer) stateFn {
 					// thing in the string must be a \u or \U escape of the
 					// LOW half, and the two are one code point (PostgreSQL
 					// scan.l). Anything else is 42601 "invalid Unicode
-					// surrogate pair".
+					// surrogate pair", naming whatever character follows the
+					// high half instead — the token that broke the pair,
+					// which is PostgreSQL's own "at or near" (#1307).
 					if l.pos+1 >= len(l.input) || l.input[l.pos] != '\\' ||
 						(l.input[l.pos+1] != 'u' && l.input[l.pos+1] != 'U') {
-						return l.errorCode("42601", "invalid Unicode surrogate pair")
+						return l.errorCode("42601", "invalid Unicode surrogate pair at or near %s",
+							sqlerr.Quote(l.nextRuneText()))
 					}
 					l.pos++
+					loStart := l.pos - 1
 					lo, code, msg := l.unicodeEscape(l.input[l.pos])
 					if msg != "" {
 						return l.errorCode(code, "%s", msg)
 					}
 					if lo < 0xDC00 || lo > 0xDFFF {
-						return l.errorCode("42601", "invalid Unicode surrogate pair")
+						// A VALID \u/\U escape, read in full — l.pos already
+						// sits past it — but not a value the low-surrogate
+						// range holds: the escape's own source text is what
+						// PostgreSQL names, not its resolved (wrong) value.
+						return l.errorCode("42601", "invalid Unicode surrogate pair at or near %s",
+							sqlerr.Quote(l.input[loStart:l.pos]))
 					}
 					v = 0x10000 + (v-0xD800)<<10 + (lo - 0xDC00)
 				} else if v >= 0xDC00 && v <= 0xDFFF {
-					return l.errorCode("42601", "invalid Unicode surrogate pair")
+					// A LOW surrogate with no high half before it: the
+					// escape's own source text, the same rule as above.
+					return l.errorCode("42601", "invalid Unicode surrogate pair at or near %s",
+						sqlerr.Quote(l.input[escStart:l.pos]))
 				}
 				sb.WriteRune(rune(v))
 			default:
@@ -1014,10 +1046,13 @@ func invalidUTF8(s string) string {
 }
 
 // unicodeEscape reads the hex digits of a \\u (four) or \\U (eight) escape
-// whose letter is at l.pos, advancing past them. The failure is PostgreSQL's
-// sentence and SQLSTATE: too few hex digits is
+// whose letter is at l.pos, advancing past them on success. The failure is
+// PostgreSQL's sentence and SQLSTATE: too few hex digits is
 // 22025 "invalid Unicode escape", a code point that is zero or past U+10FFFF
-// is 42601 "invalid Unicode escape value". A surrogate is returned for the
+// is 42601 "invalid Unicode escape value at or near" the escape's own
+// source text — l.pos has not moved past it yet on this arm, so
+// l.pos-1 (the backslash) through l.pos+1+want (past the last hex digit)
+// is exactly what the client typed (#1307). A surrogate is returned for the
 // caller to pair.
 func (l *lexer) unicodeEscape(letter byte) (v int, code, msg string) {
 	want := 4
@@ -1035,7 +1070,8 @@ func (l *lexer) unicodeEscape(letter byte) (v int, code, msg string) {
 		v = v*16 + d
 	}
 	if v == 0 || v > utf8.MaxRune {
-		return 0, "42601", "invalid Unicode escape value"
+		return 0, "42601", fmt.Sprintf("invalid Unicode escape value at or near %s",
+			sqlerr.Quote(l.input[l.pos-1:l.pos+1+want]))
 	}
 	l.pos += 1 + want
 	return v, "", ""

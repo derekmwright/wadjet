@@ -266,7 +266,12 @@ func TestArcPCADerivedTableRefusalIsOneSentenceOnEveryDoor(t *testing.T) {
 		// "nosuch" does not exist` — a recorded difference; the point here
 		// is that nothing is wrapped around it.
 		{`SELECT * FROM (SELECT nosuch FROM e7emp) d`, `unknown column "nosuch" (available: acct, amt, dept, id, salary, ssn)`},
-		{`SELECT E'\uD83D' AS v`, `invalid Unicode surrogate pair`},
+		// The three #1307 sentences carry PostgreSQL's own `at or near "…"`
+		// suffix now: the character that broke a pending surrogate pair, or
+		// the offending escape's own source text.
+		{`SELECT E'\uD83D' AS v`, `invalid Unicode surrogate pair at or near "'"`},
+		{`SELECT E'\uDE00' AS v`, `invalid Unicode surrogate pair at or near "\uDE00"`},
+		{`SELECT E'\U00110000' AS v`, `invalid Unicode escape value at or near "\U00110000"`},
 		{`SELECT E'\u12' AS v`, `invalid Unicode escape`},
 	} {
 		for _, d := range rig.doors {
