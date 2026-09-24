@@ -24,12 +24,15 @@ func TestEveryIntegerArgumentIsReadExactly(t *testing.T) {
 		{"parse_rate", []any{"9007199254740993 B/S"}, int64(9007199254740993)},
 		{"human_readable_seconds", []any{int64(9007199254740993)},
 			"104249991374 days, 7 hours, 36 minutes, 33 seconds"},
-		{"from_unixtime", []any{int64(9007199254740993)}, int64(9007199254740993000)}, // TIMESTAMP box: 285428751-11-12 07:36:33
+		{"from_unixtime", []any{int64(9224318015999)}, int64(9224318015999000)}, // TIMESTAMP box: 294276-12-31 23:59:59
 		// A STRING spelling of the same integer reaches the same value: the
 		// box a scalar subquery or a CAST hands over is not always an int64.
 		{"human_readable_seconds", []any{"9007199254740993"},
 			"104249991374 days, 7 hours, 36 minutes, 33 seconds"},
-		{"from_unixtime", []any{"9007199254740993"}, int64(9007199254740993000)},
+		// 2^53+1 seconds is past PostgreSQL's TIMESTAMP range (294276 AD) —
+		// 22008 now, TestTemporalConstructionRefusesPastPostgreSQLRange — so
+		// exactness is pinned at the range's last whole second instead.
+		{"from_unixtime", []any{"9224318015999"}, int64(9224318015999000)},
 
 		// The controls the pin carried, unchanged: these were already exact,
 		// so the fix is about the carrier and not about the functions.

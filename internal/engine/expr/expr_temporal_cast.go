@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
 // --- CAST to a temporal type, and the arithmetic that reads its result ---
@@ -74,19 +75,25 @@ func castTemporal(b *batch.RecordBatch, row int, operand Expr, v any, kind castT
 	// fits an int32 — so the store's own guard, which refuses 3000000000::DATE
 	// with 22003, had nothing left to reject. The narrowing has to be decided
 	// where the day count is still the number the query wrote.
-	if kind == castToDateKind {
-		if days, isNum := epochDayOperand(src); isNum {
-			return castIntInRange(days, "date")
+	//
+	// And the day count is a DATE only inside PostgreSQL's range: past it
+	// is 22008 (dateDaysBox, the one range rule — temporal_range.go). A number
+	// cast to TIMESTAMP reads the same day count and takes its midnight.
+	if days, isNum := epochDayOperand(src); isNum {
+		days = castIntInRange(days, "date")
+		if kind == castToDateKind {
+			return dateDaysBox(days)
 		}
+		return daysToInstant(days)
 	}
 	t, _, ok := parseDateArg(src)
 	if !ok {
 		return nil
 	}
 	if kind == castToDateKind {
-		return epochDaysOf(t)
+		return dateBox(t)
 	}
-	return t.UTC().UnixMilli()
+	return instantBox(t)
 }
 
 // epochDayOperand reads a bare NUMBER as the day count a DATE cast means, with
@@ -160,7 +167,7 @@ func (e *BinOp) dateArith(b *batch.RecordBatch, row int, lv, rv any) (any, bool)
 		if !parsed || !dateOnly {
 			return nil, false
 		}
-		return epochDaysOf(rt.AddDate(0, 0, int(n))), true
+		return shiftDays(epochDaysOf(rt), n), true
 	}
 	lt, lDateOnly, lparsed := parseDateArg(ld)
 	if !lparsed {
@@ -178,9 +185,12 @@ func (e *BinOp) dateArith(b *batch.RecordBatch, row int, lv, rv any) (any, bool)
 		return nil, false
 	}
 	if e.Op == "-" {
+		if n == math.MinInt64 {
+			panic(fatalEval{sqlerr.New("22008", "date out of range")})
+		}
 		n = -n
 	}
-	return epochDaysOf(lt.AddDate(0, 0, int(n))), true
+	return shiftDays(epochDaysOf(lt), n), true
 }
 
 // plainDayCount reads the non-date side of `date ± n` as a whole number of
@@ -196,12 +206,22 @@ func plainDayCount(v any) (int64, bool) {
 		return int64(n), true
 	case float64:
 		if n == math.Trunc(n) {
-			return int64(n), true
+			return wholeDayCount(n), true
 		}
 	case float32:
 		if float64(n) == math.Trunc(float64(n)) {
-			return int64(n), true
+			return wholeDayCount(float64(n)), true
 		}
 	}
 	return 0, false
+}
+
+// wholeDayCount is a whole float day count as int64; one no DATE can be
+// shifted by (past any day the range holds, or with no int64 at all, where Go's
+// conversion is implementation-defined) is 22008 here.
+func wholeDayCount(f float64) int64 {
+	if math.IsNaN(f) || f > float64(maxEpochDay-minEpochDay) || f < -float64(maxEpochDay-minEpochDay) {
+		panic(fatalEval{sqlerr.New("22008", "date out of range")})
+	}
+	return int64(f)
 }

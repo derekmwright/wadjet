@@ -198,8 +198,16 @@ func TestAnOutOfRangeCastRefusesAtTheDoor(t *testing.T) {
 		sql  string
 		want string // "" = must answer
 	}{
-		{`SELECT 2147483647::DATE`, ""},
-		{`SELECT (-2147483648)::DATE`, ""},
+		// The int32 extremes fit the carrier but lie past PostgreSQL's DATE
+		// range (4714-11-24 BC … 5874897-12-31): 22008 `date out of range`,
+		// the one range rule every temporal constructor applies (arc VL
+		// round 4). The range's own ends answer.
+		{`SELECT 2147483647::DATE`, "22008"},
+		{`SELECT (-2147483648)::DATE`, "22008"},
+		{`SELECT 2145042905::DATE`, ""},
+		{`SELECT (-2440588)::DATE`, ""},
+		{`SELECT 2145042906::DATE`, "22008"},
+		{`SELECT (-2440589)::DATE`, "22008"},
 		{`SELECT 2147483648::DATE`, "22003"},
 		{`SELECT (-2147483649)::DATE`, "22003"},
 		{`SELECT 3000000000::DATE`, "22003"},

@@ -5,7 +5,6 @@ package parquet
 import (
 	"errors"
 	"fmt"
-	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -21,9 +20,29 @@ import (
 type DateParseError struct {
 	Text       string
 	FieldRange bool
+	// OutOfRange marks a real calendar date outside PostgreSQL's DATE range
+	// (MinDateDay … MaxDateDay): still 22008, under PostgreSQL's own words.
+	OutOfRange bool
 }
 
+// PostgreSQL's DATE and TIMESTAMP ranges in the carriers' units — epoch days
+// and epoch milliseconds — measured on 17.11: DATE 4714-11-24 BC …
+// 5874897-12-31, TIMESTAMP 4714-11-24 00:00 BC … 294276-12-31 23:59:59.999999.
+// The carriers (int32 days, int64 ms) hold wider values; nothing PostgreSQL
+// refuses may be constructed or stored (arc VL round 4, #911's family). The
+// expression layer's constructors (expr temporal_range.go) and this package's
+// text readers take the bounds from here, so there is one range.
+const (
+	MinDateDay        int64 = -2440588
+	MaxDateDay        int64 = 2145042905
+	MinTimestampMilli int64 = -210866803200000
+	EndTimestampMilli int64 = 9224318016000000 // exclusive
+)
+
 func (e *DateParseError) Error() string {
+	if e.OutOfRange {
+		return fmt.Sprintf("date out of range: %q", e.Text)
+	}
 	if e.FieldRange {
 		return fmt.Sprintf("date/time field value out of range: %q", e.Text)
 	}
@@ -117,8 +136,10 @@ func ParseDateDays(s string) (int32, error) {
 	}
 
 	days := civilDaysSinceEpoch(t)
-	if days < math.MinInt32 || days > math.MaxInt32 {
-		return 0, &DateParseError{Text: s, FieldRange: true}
+	if days < MinDateDay || days > MaxDateDay {
+		// PostgreSQL's DATE range, not the int32 carrier's: the ONE range
+		// rule (expr's temporal_range.go reads these same bounds).
+		return 0, &DateParseError{Text: s, FieldRange: true, OutOfRange: true}
 	}
 	return int32(days), nil
 }
@@ -376,8 +397,8 @@ func normalizeTemporalBox(t TypeID, val any) (any, bool, error) {
 		case time.Time:
 			y, mo, d := v.Date()
 			days := civilDaysSinceEpoch(time.Date(y, mo, d, 0, 0, 0, 0, time.UTC))
-			if days < math.MinInt32 || days > math.MaxInt32 {
-				return nil, false, &DateParseError{Text: v.Format("2006-01-02"), FieldRange: true}
+			if days < MinDateDay || days > MaxDateDay {
+				return nil, false, &DateParseError{Text: v.Format("2006-01-02"), FieldRange: true, OutOfRange: true}
 			}
 			return int32(days), true, nil
 		}

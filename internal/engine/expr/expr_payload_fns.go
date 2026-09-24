@@ -458,7 +458,7 @@ func fnFromISO8601Timestamp(args []any) any {
 		"2006-01-02 15:04:05",
 	} {
 		if t, err := time.Parse(layout, s); err == nil {
-			return t.UnixMilli()
+			return instantBox(t)
 		}
 	}
 	return nil
@@ -473,7 +473,7 @@ func fnFromISO8601Date(args []any) any {
 	if err != nil {
 		return nil
 	}
-	return epochDaysOf(t)
+	return dateBox(t)
 }
 
 func fnToISO8601(args []any) any {

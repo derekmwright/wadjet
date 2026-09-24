@@ -5,6 +5,7 @@ package expr
 
 import (
 	"encoding/hex"
+	"math"
 	"strings"
 	"time"
 
@@ -142,7 +143,9 @@ func dateShift(args []any, subtract bool) any {
 	if !ok {
 		return nil
 	}
-	days := int(ToFloat64(args[1]))
+	// The day count by the operator's own reading (plainDayCount's whole-day
+	// rule, the range refusal included), truncated as it always was here.
+	days := wholeDayCount(math.Trunc(ToFloat64(args[1])))
 	if subtract {
 		days = -days
 	}
@@ -150,11 +153,10 @@ func dateShift(args []any, subtract bool) any {
 	// argument — a TIMESTAMP, a text instant — is a TIMESTAMP (epoch
 	// milliseconds). The same rule shiftProducedTemporal names for the box
 	// and physical.funcReturnType for the declaration (arc VL round 3).
-	shifted := t.AddDate(0, 0, days)
 	if _, isDate := args[0].(civilDate); isDate {
-		return epochDaysOf(shifted)
+		return shiftDays(epochDaysOf(t), days)
 	}
-	return instantBox(shifted)
+	return instantBox(t.AddDate(0, 0, int(days)))
 }
 
 // intervalShift applies an INTERVAL to a date-valued operand. It is the shared
@@ -228,11 +230,6 @@ func formatInstant(t time.Time) string {
 	return batch.FormatTimestamp(t.UTC().UnixMilli())
 }
 
-// instantBox is the TIMESTAMP box of an instant: UTC epoch milliseconds, what
-// a TIMESTAMP column's ColRef.Eval hands out. Every TIMESTAMP-declared kernel
-// returns it (arc VL round 3), so its value and its declaration agree.
-func instantBox(t time.Time) int64 { return t.UTC().UnixMilli() }
-
 // fnToDate converts a date, a timestamp or a string to a calendar date.
 func fnToDate(args []any) any {
 	if len(args) < 1 || args[0] == nil {
@@ -243,7 +240,7 @@ func fnToDate(args []any) any {
 		return nil
 	}
 	// A DATE, boxed as a DATE column is: epoch days (arc VL round 3).
-	return epochDaysOf(t)
+	return dateBox(t)
 }
 
 // parseDateValue parses a date from various formats.

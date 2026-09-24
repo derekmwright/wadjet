@@ -2056,30 +2056,56 @@ func nonNumericAssignmentSource(t parquet.TypeID) bool {
 // count: every DATE producer boxes an int64 day count (a column, a cast, a
 // date/time function, date arithmetic — arc VL round 3); the INSERT … SELECT
 // door hands its rows' rendered text.
+//
+// It never narrows on its own: a day count outside PostgreSQL's DATE range is
+// the ONE range rule's 22008 (expr.DateDaysInRange), asked before the int32
+// the carrier is. It used to be `int32(t)`, which stored `-5877585-08-22` for
+// `SET d = d + 2147483647` (arc VL round-3 review B1, #911's family).
 func dateBoxToDays(v any) (int32, error) {
+	var n int64
 	switch t := v.(type) {
 	case int32:
-		return t, nil
+		n = int64(t)
 	case int64:
-		return int32(t), nil
+		n = t
 	case int:
-		return int32(t), nil
+		n = int64(t)
 	case string:
-		return parquet.ParseDateDays(t)
+		d, err := parquet.ParseDateDays(t)
+		if err != nil {
+			return 0, err
+		}
+		n = int64(d)
+	default:
+		return 0, fmt.Errorf("unexpected DATE-declared box %T", v)
 	}
-	return 0, fmt.Errorf("unexpected DATE-declared box %T", v)
+	if err := expr.DateDaysInRange(n); err != nil {
+		return 0, err
+	}
+	return int32(n), nil
 }
 
 // timestampBoxToMillis is dateBoxToDays's TIMESTAMP twin: every TIMESTAMP
-// producer boxes epoch milliseconds.
+// producer boxes epoch milliseconds, held to the same range rule
+// (expr.TimestampMillisInRange).
 func timestampBoxToMillis(v any) (int64, error) {
+	var ms int64
 	switch t := v.(type) {
 	case int64:
-		return t, nil
+		ms = t
 	case string:
-		return parquet.ParseTimestampMillis(t)
+		m, err := parquet.ParseTimestampMillis(t)
+		if err != nil {
+			return 0, err
+		}
+		ms = m
+	default:
+		return 0, fmt.Errorf("unexpected TIMESTAMP-declared box %T", v)
 	}
-	return 0, fmt.Errorf("unexpected TIMESTAMP-declared box %T", v)
+	if err := expr.TimestampMillisInRange(ms); err != nil {
+		return 0, err
+	}
+	return ms, nil
 }
 
 // assignDateValue normalizes a computed expression's box to the SAME shape
@@ -2114,6 +2140,9 @@ func assignDateValue(v any, col parquet.Column, srcType parquet.TypeID, srcKnown
 		return nil, datatypeMismatch(v, col)
 	}
 	days, err := dateBoxToDays(v)
+	if sqlerr.StateOf(err) == "22008" {
+		return nil, err // the range rule's answer, not a type mismatch
+	}
 	if err != nil {
 		// A box no DATE reading exists for — a float from `now() - now()`,
 		// say — is PostgreSQL's 42804, never a raw box handed to the writer
@@ -2137,6 +2166,9 @@ func assignTimestampValue(v any, col parquet.Column, srcType parquet.TypeID, src
 		if err != nil {
 			return nil, err
 		}
+		if expr.TimestampMillisInRange(int64(days)*86400000) != nil {
+			return nil, sqlerr.New("22008", "date out of range for timestamp")
+		}
 		return time.Unix(int64(days)*86400, 0).UTC(), nil
 	}
 	if srcKnown && srcType != parquet.TypeTimestamp {
@@ -2146,6 +2178,9 @@ func assignTimestampValue(v any, col parquet.Column, srcType parquet.TypeID, src
 		return nil, datatypeMismatch(v, col)
 	}
 	ms, err := timestampBoxToMillis(v)
+	if sqlerr.StateOf(err) == "22008" {
+		return nil, err
+	}
 	if err != nil {
 		// assignDateValue's rule: an unreadable box is 42804 (review P1).
 		return nil, datatypeMismatchDeclared(v, col, srcType, srcKnown)
@@ -2381,6 +2416,9 @@ func assignFloatValue(v any, col parquet.Column, srcType parquet.TypeID, srcKnow
 func assignTextValue(v any, _ parquet.Column, srcType parquet.TypeID, srcKnown bool) (any, error) {
 	if srcKnown && srcType == parquet.TypeDate {
 		days, err := dateBoxToDays(v)
+		if sqlerr.StateOf(err) == "22008" {
+			return nil, err
+		}
 		if err != nil {
 			return v, nil
 		}
@@ -2388,6 +2426,9 @@ func assignTextValue(v any, _ parquet.Column, srcType parquet.TypeID, srcKnown b
 	}
 	if srcKnown && srcType == parquet.TypeTimestamp {
 		ms, err := timestampBoxToMillis(v)
+		if sqlerr.StateOf(err) == "22008" {
+			return nil, err
+		}
 		if err != nil {
 			return v, nil
 		}

@@ -51,7 +51,7 @@ func fnLastDayOfMonth(args []any) any {
 	}
 	firstOfNext := time.Date(t.Year(), t.Month()+1, 1, 0, 0, 0, 0, t.Location())
 	last := firstOfNext.AddDate(0, 0, -1)
-	return epochDaysOf(time.Date(last.Year(), last.Month(), last.Day(), 0, 0, 0, 0, time.UTC))
+	return dateBox(time.Date(last.Year(), last.Month(), last.Day(), 0, 0, 0, 0, time.UTC))
 }
 
 func fnCurrentTimestamp(args []any) any {

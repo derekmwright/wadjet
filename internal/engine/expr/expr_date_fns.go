@@ -164,5 +164,5 @@ func fnCurrentDate(args []any) any {
 	// the machine's LOCAL date, so `CURRENT_DATE` and `CAST(NOW() AS DATE)`
 	// named two different days for the hours between local midnight and UTC
 	// midnight — #870.
-	return epochDaysOf(clockNow().UTC())
+	return dateBox(clockNow().UTC())
 }
