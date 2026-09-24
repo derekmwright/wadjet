@@ -23,11 +23,23 @@ func RefuseContestedLiftedRefs(n *Node, outerJoinsOnly bool) error {
 		if build != nil && !build.LateralSubtree && probe != nil && probe.LateralSubtree {
 			probe, build = build, probe
 		}
+		// A lateral WITH an alias has its lifted predicate spelled through
+		// that alias (`s.id <> o.id`, qualifyLiftedRefsByLateralAlias), and
+		// the join emits the body's colliding column under exactly that
+		// name — so on the single-process pipeline the two columns ARE told
+		// apart and there is nothing to refuse (arc JP round 3, B7: `i.k =
+		// o.k AND i.id <> o.id` answers PostgreSQL's rows, JOIN, LEFT and
+		// comma). The stage DAG keeps the refusal; it routes such a plan
+		// single-process first (dagplan.ErrLateralIdentityDistributed).
+		aliased := !outerJoinsOnly && build != nil && build.LateralSubtree && build.DerivedAlias != ""
 		outer := map[string]bool{}
 		for _, e := range emittedColumns(probe) {
 			outer[strings.ToLower(stripQualifier(e.name))] = true
 		}
 		for _, slot := range n.StarLiftedRefCols {
+			if aliased {
+				break
+			}
 			bare := strings.ToLower(stripQualifier(strings.TrimSpace(slot)))
 			if outer[bare] {
 				return sqlerr.New("0A000",
