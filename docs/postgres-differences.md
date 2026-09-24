@@ -74,6 +74,10 @@ PostgreSQL answers the statement's start time for every row, so `WHERE LOCALTIME
 
 ## Declared types
 
+**A few date/address functions still declare text.**
+
+`TO_DATE`, `INT_TO_IP`, `NETWORK_ADDRESS` and `UUID()` register a fixed STRING return in the scalar-function registry though the value each renders is a date or an address, so `INSERT ... SELECT TO_DATE(x, fmt)` into a DATE column, or `... SELECT UUID()` into a UUID column, is refused as a type mismatch though the rendered VALUE already reads as one. This is the same class of gap #1254 fixed for `CURRENT_DATE` alone — one registry entry per function, not one mechanism for all of them — and is tracked separately (docs/sql-reference.md's Declared types section points here). (ADR-0012 §5/#1254-siblings)
+
 **Array-returning functions can publish text.**
 
 `SELECT tcp_flags(f)` returns `[SYN ACK]` under OID 25 because the projection lacks an element declaration; PostgreSQL has no corresponding function. (ADR-0012 §5/#1017)
