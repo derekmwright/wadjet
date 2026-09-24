@@ -2707,6 +2707,75 @@ side. The name-collision dimension is load-bearing: with names nothing else
 spells, three of the five classes answer correctly by luck. So is the OUTER
 one: an inner join never asks a task to shape a row its data did not produce.
 
+### 8k. A join conjunct hangs where every relation its QUALIFIERS name is joined (2026-09-24, arc JP: #1299)
+
+`reorderJoins` takes an inner-join chain apart into relations and edges and
+rebuilds it in the cheapest order, hanging each ON conjunct on the first join
+that holds its edge's relations. `flattenJoinChain` resolved an edge's two
+relations by BARE COLUMN NAME: the right endpoint was a relation owning one of
+the conjunct's column names, the left one found by excluding the names the
+right one owned. Where two relations carry the same names, that elimination
+excluded every name and fell back to "the last relation of the left side" —
+which, with a table joined three times, is a SIBLING copy:
+
+```
+FROM lat_ord o JOIN lat_item s ON s.order_id = o.id AND s.id IN (2,4)
+               JOIN lat_item t ON t.order_id = o.id AND t.id IN (1,3)
+               JOIN lat_item u ON u.order_id = o.id AND u.id IN (1,3)
+-- t's edge recorded as s–t; the DP joined s and t on `t.order_id = o.id`,
+-- the executor stripped the qualifier it could not find and bound `o.id` to
+-- s.id: one row `1,2,3,3` where PostgreSQL 17.11 answers `1,2,1,1` and
+-- `2,4,3,3`
+```
+
+The seam is not "the same table three times": the arc's seam table reaches it
+with three DIFFERENT tables that share column names, with no per-arm filter at
+all, and in a chain as well as a star — every INNER cell whose key names a
+column the other relations also carry under another meaning (`a.oid = o.v`,
+the issue's `s.order_id = o.id`). Where the shared name holds the SAME value in
+every relation (`x.oid = o.oid` in a star) the mis-hung key happens to be
+transitively equal and the answer is right by luck, which is why the issue
+read as specific to per-arm filters.
+
+**The rule.** A conjunct's edge is the SET of relations its column references
+name: a qualified reference belongs to the one relation that publishes its
+qualifier (`joinSidesScanInfo`'s scope names, byte-exact), a bare one to the
+one relation that carries the column; the edge applies only at a join that
+holds every one of them (`joinEdge.extra` carries a third and later relation,
+so `c.x = a.y + b.z` is never a pair that leaves one to chance). Where a
+reference does not resolve to exactly one relation, the column-name endpoints
+stand, WIDENED by every relation that did resolve — a wider edge only delays a
+conjunct to a join that certainly holds what it reads
+(`logical/join_edge_members.go`).
+
+**The net.** The single-process planner refuses a join whose condition
+qualifies a column by a relation NEITHER of its sides answers to — any scan,
+CTE reference or derived table below it, compared without case, so it can
+refuse only a name that is nowhere
+(`physical.refuseStrandedJoinQualifier`). With the edge rule in place no plan
+reaches it; with the edge rule reverted, the issue's query refuses instead of
+answering the wrong pairing.
+
+The 22 TPC-H plans are byte-identical (their conjuncts name distinct columns,
+so the column-name endpoints were already the qualifier's).
+
+Gate: `coordinator.TestArcJPASelfJoinArmPairsTheRowsItsQualifierNamesOnEveryArm`
+— 1 008 cells, {the same table ×2, ×3, ×4; three different tables sharing every
+column name; mixed ×3, ×4} × {a per-arm ON filter on every arm, on some, on
+none} × {IN, equality, range} × {INNER, LEFT, RIGHT, INNER/LEFT alternating} ×
+{the key under a shared name with one meaning, under a shared name with a
+different value per relation, under a name only the outer relation has} ×
+{star, chain}, on five arms against live PostgreSQL 17.11: 40 wrong on the
+single arm at base, 0 at the tip. The masking gate
+`server.TestArcJPAReorderedAndReKeyedJoinsReadThePublishedValueOnEveryDoor`
+reorders copies of e7bal and e7emp on all nine doors.
+
+**Not settled (distributed).** An OUTER-join chain whose second arm is keyed
+on the first, where the outer relation's key has a name no item relation has,
+comes back on the stage DAG with the first arm's columns NULL on a row the
+second arm pads (and dropped when every build is shuffled) — identical at base,
+the logical plan right; pinned per arm in the gate, filed `distributed`.
+
 ## §9 A derived block publishes its VISIBLE list, and a qualified star reads it
 
 Added 2026-09-13 by arc O2 (#1077, #991, #1020).

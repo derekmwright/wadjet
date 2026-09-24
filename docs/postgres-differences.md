@@ -532,6 +532,10 @@ The standalone subquery cannot retain the aggregate’s outer scope: 42803 where
 
 An outer LATERAL’s ON retaining an empty-input default raises 0A000: `ON s.n = 0` requires PostgreSQL’s `Carol, 0`, which this evaluation cannot produce. (ADR-0012 §5/#977)
 
+**A bare star over a LATERAL keyed on an outer EXPRESSION is refused.**
+
+`SELECT * FROM o JOIN LATERAL (SELECT i.id FROM i WHERE i.k = o.k - 0) s ON true` raises 0A000 where PostgreSQL answers: the join evaluates that equality over its output and carries the body's key column there, and an unexpanded star over a LATERAL would publish it. A named select list and `SELECT o.*, s.*` answer. (ADR-0012 §5/#1302)
+
 **Qualified stars refuse duplicate names.**
 
 Name-based expansion cannot distinguish positions: `SELECT x.*` raises 0A000 where PostgreSQL returns both columns. A bare star reads positions and answers. (ADR-0012 §5/2026-09-13/duplicate-star)

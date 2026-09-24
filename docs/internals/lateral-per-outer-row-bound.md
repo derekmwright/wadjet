@@ -155,3 +155,14 @@ SQL reference with the deadline that bounds it.
   lat_item t ON … AND t.id IN (1,3) JOIN lat_item u ON … AND u.id IN (1,3)`:
   `1,2,3,3` for PostgreSQL's `1,2,1,1 | 2,4,3,3`). Found beside the QUALIFY
   slot fix; filing candidate (engine, join order).
+
+## Arc JP (2026-09-24, #1302): an outer expression is a key
+
+Round 2's "outer expressions refuse" was a stand-in for a placement fault:
+the unbounded lowering answered zero rows for `i.k = o.k - 0` because the key
+slot was dropped at the join while the equality, no hash key, was evaluated
+above it. `lateralCorrelatedEquality` now reads the predicate for both paths
+(inner-only side = outer-only side); the bound partitions by the inner side,
+and the unbounded join emits a non-key slot star-hidden
+(`Node.StarLiftedRefCols`) instead of dropping it. A bare enclosing star over
+such a lateral is refused. See ADR-0021 §1s, "AN OUTER EXPRESSION IS A KEY".

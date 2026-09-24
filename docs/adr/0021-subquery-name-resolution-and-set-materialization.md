@@ -2505,6 +2505,37 @@ the single path only. A window ABOVE a lateral join is refused on the DAG
 answers PostgreSQL's rows — the loud → wrong move of `R2/collideWinBound` is
 withdrawn, and its unbounded twin is right for the first time.
 
+**AN OUTER EXPRESSION IS A KEY (2026-09-24, arc JP, #1302).** The rule above
+says "an expression over the outer row alone", and the code said "a bare outer
+column": `i.order_id = o.id - 0` answered ZERO rows unbounded and was refused
+bounded. The unbounded zero was a placement fault, not a key question: the
+lowering minted the key slot `__key_0` and DROPPED it at the join
+(`Node.HiddenJoinCols`), while the equality — no hash key, because its outer
+side is not a column — was lifted into a filter ABOVE the join, where the slot
+read NULL. Now one reader decides both paths (`lateralCorrelatedEquality`: an
+inner-only side and an outer-only side, either way round, parentheses
+looked through): where the outer side is a bare column the join keys on the
+pair and drops the slot, as before; where it is an expression the slot is
+EMITTED and hidden from a qualified star only (`Node.StarLiftedRefCols`, the
+disposition a lifted predicate's slots already have) and the equality is
+evaluated over the join's output — exactly what an ordinary `JOIN … ON
+i.k = o.k - 0` does, a cross product filtered, so one predicate shape has one
+answer in both spellings. The bound partitions by the INNER side, which is
+right for any outer-only expression: the inner rows one outer row may match
+are those whose key equals ONE value. A BARE enclosing star is refused, 0A000
+(ADR-0012 §5): a star over a LATERAL is not expanded and would publish the
+emitted slot. Projecting the outer expression into a slot of its own so the
+pair becomes a hash key was considered and not taken: it needs a pass-through
+projection over an arbitrary outer subtree on both paths, for a shape the
+plain join answers the same way today — a performance question, recorded.
+Gate: `coordinator.TestArcJPALateralOuterExpressionKeyAnswersOnEveryArm`, 231
+cells — {`o.k`, `o.k - 0`, `o.k + 1`, CAST, `abs`, `coalesce`, two outer
+columns} × {inner side left, outer side left, an inner expression} × {JOIN /
+LEFT / comma LATERAL, ORDER BY LIMIT 1 and 2, COUNT(*), SUM, a bare star, a
+qualified star, EXISTS, EXISTS LIMIT 1, NOT EXISTS, IN, scalar} on five arms:
+54 wrong and 42 refused on the single arm at base, 0 wrong and the 12 bare
+stars refused at the tip.
+
 **THE STRUCTURAL CLOSURE OF THE REFUSED SHAPES IS A DEPENDENT JOIN** — the
 body re-run per outer row with the outer values substituted, the way the
 scalar rerun does, emitting the joined rows — recorded as a filing candidate

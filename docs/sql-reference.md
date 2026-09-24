@@ -1413,6 +1413,18 @@ JOIN LATERAL (
 `SELECT *` over a lateral join publishes the OUTER relation's columns first
 and the lateral's after them, which is PostgreSQL's order.
 
+**A correlated equality's OUTER side may be any expression over the outer
+row** — `WHERE i.order_id = o.id - 0`, `= o.id + 1`, `= CAST(o.id AS integer)`,
+`= coalesce(o.id, 0)`, `= o.a + o.b` — and its inner side any expression over
+the body's own relations. Where the outer side is a bare column the join keys
+on it; where it is an expression the equality is evaluated over the join's
+output, as an ordinary `JOIN … ON i.order_id = o.id - 0` is, so the lateral
+answers PostgreSQL's rows (before 2026-09-24 it answered zero rows, #1302). A
+bare `SELECT *` over such a lateral is refused (`0A000`): the join carries the
+body's key column to evaluate the equality, and an unexpanded star over a
+LATERAL publishes the join's output whole — name the columns, or write
+`o.*, s.*`.
+
 **A correlated LATERAL's `ORDER BY … LIMIT`/`OFFSET` is applied per outer
 row** when the correlation is an equality on an inner column — the
 top-N-per-group idiom:
@@ -1429,16 +1441,17 @@ relation (ADR-0021 §1s), so the cost is one pass over the inner relation and
 the join — top-3-per-group over 100 000 outer rows with ten line items each
 measured 0.17 s single-process and 1.1–1.4 s under a 512 KiB memory budget —
 and the same holds for `OFFSET`, `LIMIT … OFFSET`, a grouped body bounded by
-its aggregate, an ordinal or a SELECT alias in the body's `ORDER BY`, and an
-inner expression on the key side (`i.k + 0 = o.k`). A bound with no `ORDER
+its aggregate, an ordinal or a SELECT alias in the body's `ORDER BY`, an
+inner expression on the key side (`i.k + 0 = o.k`), and an outer expression
+on the other (`i.k = o.k - 0`). A bound with no `ORDER
 BY` keeps an arbitrary row per outer row, as in PostgreSQL; `LIMIT 0` is
 empty; an ungrouped aggregate whose one row the bound removes yields no row
 (`LEFT JOIN LATERAL` pads it).
 
 A bound the engine cannot apply per outer row is **refused** (`0A000`) rather
 than applied to the whole relation: a correlated predicate that is not
-`<inner expression> = <outer column>` (`WHERE i.amount > o.total … LIMIT 1`,
-an equality beside one, `i.k = o.k + i.id`, or an outer expression `o.k + 0`),
+`<inner expression> = <outer expression>` (`WHERE i.amount > o.total … LIMIT 1`,
+an equality beside one, or `i.k = o.k + i.id`, whose side mixes the two),
 a `DISTINCT` (other than over exactly the key) or set-operation body under a
 bound, a body carrying its own `QUALIFY`, or a `LIMIT`/`OFFSET` that is not
 an integer literal (a parameter or an expression there is a parse error
@@ -2789,6 +2802,25 @@ and two derived tables sharing an alias are `42712`
 (`table name "t" specified more than once`), because the name would answer to
 two relations. Aliasing one side — `FROM t JOIN t b ON …` — is the fix, and a
 DELIMITED alias is a different name, so `FROM qa t, qb "T"` declares two.
+
+**A condition binds the relation its QUALIFIER names, wherever the join order
+puts it.** The planner reorders a chain of inner joins by estimated cost, and
+hangs each `ON` conjunct on a join that holds every relation the conjunct
+names — a qualified column is the relation that publishes the qualifier, never
+another one that merely carries a column of that name. So joining one table
+several times, each copy with its own filter, pairs each copy's rows with the
+row its own condition names:
+
+```sql
+SELECT o.id, s.id, t.id, u.id FROM ord o
+JOIN item s ON s.order_id = o.id AND s.id IN (2,4)
+JOIN item t ON t.order_id = o.id AND t.id IN (1,3)
+JOIN item u ON u.order_id = o.id AND u.id IN (1,3)
+```
+
+(Before 2026-09-24 a chain of three or more relations sharing column names
+could hang `t.order_id = o.id` on a join of `s` and `t` and bind `o.id` to
+`s.id` — a wrong pairing with no error, #1299.)
 
 ### Inner Join
 

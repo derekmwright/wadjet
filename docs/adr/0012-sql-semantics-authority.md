@@ -2724,6 +2724,18 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      option. Gated in
      `coordinator.TestArcJ1AnOnConditionOverADefaultedColumnIsRightOrLoud`.
 
+   - **A bare `SELECT *` over a LATERAL whose correlated equality has an
+     EXPRESSION on its outer side is REFUSED (0A000) where PostgreSQL
+     answers.** (Added 2026-09-24, arc JP, #1302.) `i.k = o.k - 0` is no hash
+     key, so it is evaluated over the lateral join's OUTPUT and the join
+     carries the body's key column there, hidden from a qualified star
+     (`Node.StarLiftedRefCols`). A star over a LATERAL is not expanded into the
+     arms' lists, so a BARE one publishes the join's output whole and would
+     show that column; the refusal names the predicate and the two spellings
+     that answer (a named list, `o.*, s.*`). It is the disposition a lifted
+     non-equality predicate under a bare star already has (ADR-0021 §1s).
+     Gated in `coordinator.TestArcJPALateralOuterExpressionKeyAnswersOnEveryArm`.
+
    - **A CORRELATED subquery holding a WINDOW CALL is REFUSED (0A000) where
      PostgreSQL answers.** (Added 2026-09-12, arc C2, #1045.) A correlated
      subquery this engine does not decorrelate is re-run per outer row by
