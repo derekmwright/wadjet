@@ -112,6 +112,13 @@ func TestArcLTACorrelatedBodyIsEvaluatedPerOuterRow(t *testing.T) {
 		{"EXISTS OFFSET past the matches under a mixed correlation",
 			`SELECT o.id AS a FROM lt_o o WHERE EXISTS (SELECT i.v FROM lt_i i WHERE i.k = o.k AND i.v > o.total ORDER BY i.v OFFSET 1) ORDER BY a`,
 			"3"},
+		// #1130: refused 0A000 from arc LT until arc JP round 3 spelled the
+		// lifted predicate through the lateral's alias (`s.id < o.id`), which
+		// tells the body's `id` from the outer one over the join (five NULL
+		// pads at 51addfb6). PostgreSQL 17.11's 11 rows.
+		{"#1130 a lifted column the enclosing relation also publishes",
+			`SELECT o.id AS a, s.v AS v FROM lt_o o LEFT JOIN LATERAL (SELECT i.v AS v FROM lt_i i WHERE i.id < o.id) s ON true ORDER BY a, v`,
+			"1,NULL;2,10;3,10;3,10;4,10;4,10;4,30;5,10;5,10;5,20;5,30"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -155,9 +162,6 @@ func TestArcLTACorrelatedBodyIsEvaluatedPerOuterRow(t *testing.T) {
 		{"IN over a body carrying a QUALIFY declines to the rerun, which refuses the window loudly",
 			`SELECT o.id AS a FROM lt_o o WHERE o.k IN (SELECT i.k FROM lt_i i WHERE i.k = o.k QUALIFY ROW_NUMBER() OVER (PARTITION BY i.k ORDER BY i.id) > 3) ORDER BY a`,
 			"holds a window function", "1;2;3 at 51addfb6 and b1e67749 (the QUALIFY dropped) for PostgreSQL's equivalent zero rows"},
-		{"#1130 a lifted column the enclosing relation also publishes",
-			`SELECT o.id AS a, s.v AS v FROM lt_o o LEFT JOIN LATERAL (SELECT i.v AS v FROM lt_i i WHERE i.id < o.id) s ON true ORDER BY a, v`,
-			"which the enclosing relation also publishes", "five NULL pads for PostgreSQL's 11 rows"},
 	}
 	for _, c := range refusals {
 		t.Run(c.name, func(t *testing.T) {

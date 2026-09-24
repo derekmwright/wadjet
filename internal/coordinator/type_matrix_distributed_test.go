@@ -555,6 +555,7 @@ func tmdTables() []tmdTable {
 		{jpITable, jpItemSchema(), jpIData()},
 		{jpJTable, jpItemSchema(), jpJData()},
 		{jpKTable, jpItemSchema(), jpKData()},
+		{jpQTable, jpQSchema(), jpQData()},
 		// The MIXED-CASE RELATION fixture. Every other table name in every
 		// two-path corpus is already its own folded form, so the case
 		// concession for a RELATION name (ADR-0012) had no fixture on the DAG

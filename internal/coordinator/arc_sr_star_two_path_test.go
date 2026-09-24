@@ -401,35 +401,21 @@ func srStarCases() []c1Case {
 		// §9's decline list — its subtree carries the correlation slot the
 		// join drops (§3c) — so the star is not expanded and reads the JOIN
 		// OPERATOR's stream, where `joinOutputSchemaWithMapping` qualifies the
-		// duplicate `id` by its owning alias: PostgreSQL publishes `id`, the
-		// two single-process arms `l.id`, the three DAG arms `i.id` (the
-		// body's inner-scan spelling, because a decorrelated body's Project
-		// emits no stage — ADR-0026 §8j, #1126).
+		// duplicate `id` by its owning alias: PostgreSQL publishes `id`, every
+		// arm here `l.id` (#1126's name half; the three DAG arms spelled it
+		// `i.id`, the body's inner-scan spelling, until arc JP round 3 ran this
+		// plan single-process).
 		//
-		// The DAG pins below are NOT that: they are a per-arm `distributed`
-		// pin over a wrong ROW ORDER, one consumer over. `ORDER BY o.id, l.id`
-		// is a TOTAL key here, and on the DAG arms the secondary term binds the
-		// OUTER relation's `id` (the qualifier strip, where corollary 2's
-		// precondition fails), so every row of one order carries the same key
-		// and the rows come back in the arm's own sequence. The single and
-		// spilled arms assert PostgreSQL 17.11's SEQUENCE row for row, which is
-		// what makes the pinned arms a measured divergence rather than an
-		// unordered compare. PRE-EXISTING (identical at 563aa517 and c393cfaa),
-		// `distributed` by the arm rule; the review's round-1 probe isolated it
-		// with no star in the statement at all.
+		// The three DAG arms were pinned here over a wrong ROW ORDER (the
+		// secondary key `l.id` bound the OUTER `id` on the stage DAG, #1126's
+		// column) until arc JP round 3 routed a LATERAL whose arm shares a name
+		// with the outer relation to the single-process pipeline
+		// (dagplan.ErrLateralIdentityDistributed); every arm now answers the
+		// single arms' sequence and name, and the pins are deleted.
 		{
 			name: "lateral/a-star-over-a-lateral-arm",
 			sql:  "SELECT * FROM lat_ord o, LATERAL (SELECT i.id, i.amount FROM lat_item i WHERE i.order_id = o.id) l ORDER BY o.id, l.id",
 			want: "cols=[id:INT64 customer:STRING total:FLOAT64 l.id:INT64 amount:FLOAT64] rows=4 | 1,Alice,150,1,50 | 1,Alice,150,2,100 | 2,Bob,200,3,75 | 2,Bob,200,4,125",
-			why: "distributed, PRE-EXISTING: the published NAME is #1126's two spellings, and the " +
-				"ROW ORDER is #1126's column — `l.id` binds the OUTER relation's `id` on the three " +
-				"DAG arms, so the written secondary key does not order. The two single-process arms " +
-				"assert PostgreSQL's own sequence.",
-			pin: map[string]string{
-				"dag":          "cols=[id:INT64 customer:STRING total:FLOAT64 i.id:INT64 amount:FLOAT64] rows=4 | 1,Alice,150,2,100 | 1,Alice,150,1,50 | 2,Bob,200,4,125 | 2,Bob,200,3,75",
-				"dag-shuffled": "cols=[id:INT64 customer:STRING total:FLOAT64 i.id:INT64 amount:FLOAT64] rows=4 | 1,Alice,150,2,100 | 1,Alice,150,1,50 | 2,Bob,200,4,125 | 2,Bob,200,3,75",
-				"dag-morsel4":  "cols=[id:INT64 customer:STRING total:FLOAT64 i.id:INT64 amount:FLOAT64] rows=4 | 1,Alice,150,2,100 | 1,Alice,150,1,50 | 2,Bob,200,4,125 | 2,Bob,200,3,75",
-			},
 		},
 		// The SAME reference with no star in the statement: `l.id` was 1,1,2,2
 		// on the three DAG arms (#1126's column, round-1 review B2) until arc JP

@@ -1412,7 +1412,6 @@ const (
 
 var ltRefuses = map[string]string{
 
-	"LEFTLATERAL/plain/shared":          ltLiftedRefContested,
 	"LEFTLATERAL/plain/none":            ltKeylessLeftJoin,
 	"LATERAL/limit/ineq":                ltBoundNoKey,
 	"LEFTLATERAL/limit/ineq":            ltBoundNoKey,
@@ -1424,7 +1423,6 @@ var ltRefuses = map[string]string{
 	"LEFTLATERAL/limit/shared":          ltBoundNoKey,
 	"COMMALATERAL/limit/shared":         ltBoundNoKey,
 	"LEFTLATERAL/limit/none":            ltKeylessLeftJoin,
-	"LEFTLATERAL/limit0/shared":         ltLiftedRefContested,
 	"LEFTLATERAL/limit0/none":           ltKeylessLeftJoin,
 	"LATERAL/offset/ineq":               ltBoundNoKey,
 	"LEFTLATERAL/offset/ineq":           ltBoundNoKey,
@@ -1571,7 +1569,6 @@ var ltRefuses = map[string]string{
 	"LATERAL/aliasCollides/mixed":       ltLiftedRefCannotPublish,
 	"LEFTLATERAL/aliasCollides/mixed":   ltLiftedRefCannotPublish,
 	"COMMALATERAL/aliasCollides/mixed":  ltLiftedRefCannotPublish,
-	"LEFTLATERAL/aliasCollides/shared":  ltLiftedRefContested,
 	"LEFTLATERAL/aliasCollides/none":    ltKeylessLeftJoin,
 	"LATERAL/ordinalLimit/ineq":         ltBoundNoKey,
 	"LEFTLATERAL/ordinalLimit/ineq":     ltBoundNoKey,
@@ -1638,26 +1635,14 @@ var ltBudgetBounded = map[string]bool{
 }
 
 // ltArmPins records a disposition that is NOT the same on every arm, per
-// arm, with the mechanism. The INNER and comma spellings of a lifted
-// predicate over a column the enclosing relation also publishes (#1130) are
-// REFUSED on the two single-process arms — which bound the outer column and
-// answered no rows — and answer PostgreSQL's rows on the three DAG arms,
-// which evaluate the predicate at the join off the scan's own stream (as at
-// 51addfb6, on two fixtures; round-2 review B5). The LEFT spellings are
-// refused on every arm (ltRefuses): the DAG padded every row NULL on one
-// stage shape and routed to the refusal on another for the same statement
-// (r2_gates3/4.log). `aliasCollides/shared`'s broadcast and morsel shapes
-// refuse with the stage's own `key column "v" does not exist` (L1's LIFTED/*
-// class) while the shuffled shape answers.
-var ltArmPins = map[string]map[string]string{
-
-	"LATERAL/plain/shared":              {"single": "ERR ~" + ltLiftedRefContested, "spilled512k": "ERR ~" + ltLiftedRefContested},
-	"COMMALATERAL/plain/shared":         {"single": "ERR ~" + ltLiftedRefContested, "spilled512k": "ERR ~" + ltLiftedRefContested},
-	"LATERAL/limit0/shared":             {"single": "ERR ~" + ltLiftedRefContested, "spilled512k": "ERR ~" + ltLiftedRefContested},
-	"COMMALATERAL/limit0/shared":        {"single": "ERR ~" + ltLiftedRefContested, "spilled512k": "ERR ~" + ltLiftedRefContested},
-	"LATERAL/aliasCollides/shared":      {"single": "ERR ~" + ltLiftedRefContested, "spilled512k": "ERR ~" + ltLiftedRefContested, "dag": "ERR ~key column \"v\" does not exist in the input schema", "dag-morsel4": "ERR ~key column \"v\" does not exist in the input schema"},
-	"COMMALATERAL/aliasCollides/shared": {"single": "ERR ~" + ltLiftedRefContested, "spilled512k": "ERR ~" + ltLiftedRefContested, "dag": "ERR ~key column \"v\" does not exist in the input schema", "dag-morsel4": "ERR ~key column \"v\" does not exist in the input schema"},
-}
+// arm, with the mechanism. A lifted predicate over a column the enclosing
+// relation also publishes (#1130, the `shared` cells) was refused on the
+// single-process arms and, LEFT, on every arm; since arc JP round 3 it is
+// spelled through the lateral's alias, the single-process pipeline tells the
+// two columns apart, and the stage DAG routes it there
+// (dagplan.ErrLateralIdentityDistributed): JOIN, LEFT and comma answer
+// PostgreSQL's rows on every arm, and their pins are gone.
+var ltArmPins = map[string]map[string]string{}
 
 func TestArcLTACorrelatedBodyIsEvaluatedPerOuterRowOnEveryArm(t *testing.T) {
 	if testing.Short() {

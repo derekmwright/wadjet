@@ -39,10 +39,11 @@ import (
 // aggregate-published slot as its own name (filter_project_pushdown.go).
 //
 // Loud, never wrong: a bounded DISTINCT body not over the key alone refuses
-// on every arm (arc LT's documented refusal); a bare-key LEFT lateral over a
-// DISTINCT body fails loudly on the stage DAG with ADR-0010's schema check
-// (pre-existing, a `distributed` filing candidate); the 512 KiB arm may refuse
-// a build its budget cannot hold (documented).
+// on every arm (arc LT's documented refusal); the 512 KiB arm may refuse a
+// build its budget cannot hold (documented). A bare-key LEFT lateral over a
+// DISTINCT body, which failed loudly on the stage DAG with ADR-0010's schema
+// check, runs single-process since arc JP round 3 (a LEFT join padding a
+// grouped arm, dagplan.ErrLateralIdentityDistributed) and answers.
 
 type jpbCell struct{ name, sql string }
 
@@ -2025,14 +2026,6 @@ var jpbLoud = map[string]string{
 	"bare/bareKV/distinctLimit/left/qualStar\x00fastpath":         "cannot apply that bound per outer row",
 	"bare/bareKV/distinctLimit/left/qualStar\x00single":           "cannot apply that bound per outer row",
 	"bare/bareKV/distinctLimit/left/qualStar\x00spilled512k":      "cannot apply that bound per outer row",
-	"bare/bareKV/groupCount/left/named\x00dag":                    "one stage's files describe one relation",
-	"bare/bareKV/groupCount/left/named\x00dag-shuffled":           "one stage's files describe one relation",
-	"bare/bareKV/groupCount/left/qualStar\x00dag":                 "one stage's files describe one relation",
-	"bare/bareKV/groupCount/left/qualStar\x00dag-shuffled":        "one stage's files describe one relation",
-	"bare/id/distinct/left/named\x00dag":                          "one stage's files describe one relation",
-	"bare/id/distinct/left/named\x00dag-shuffled":                 "one stage's files describe one relation",
-	"bare/id/distinct/left/qualStar\x00dag":                       "one stage's files describe one relation",
-	"bare/id/distinct/left/qualStar\x00dag-shuffled":              "one stage's files describe one relation",
 	"bare/id/distinctLimit/join/named\x00dag":                     "cannot apply that bound per outer row",
 	"bare/id/distinctLimit/join/named\x00dag-shuffled":            "cannot apply that bound per outer row",
 	"bare/id/distinctLimit/join/named\x00fastpath":                "cannot apply that bound per outer row",
@@ -2053,10 +2046,6 @@ var jpbLoud = map[string]string{
 	"bare/id/distinctLimit/left/qualStar\x00fastpath":             "cannot apply that bound per outer row",
 	"bare/id/distinctLimit/left/qualStar\x00single":               "cannot apply that bound per outer row",
 	"bare/id/distinctLimit/left/qualStar\x00spilled512k":          "cannot apply that bound per outer row",
-	"bare/idv/distinct/left/named\x00dag":                         "one stage's files describe one relation",
-	"bare/idv/distinct/left/named\x00dag-shuffled":                "one stage's files describe one relation",
-	"bare/idv/distinct/left/qualStar\x00dag":                      "one stage's files describe one relation",
-	"bare/idv/distinct/left/qualStar\x00dag-shuffled":             "one stage's files describe one relation",
 	"bare/idv/distinctLimit/join/named\x00dag":                    "cannot apply that bound per outer row",
 	"bare/idv/distinctLimit/join/named\x00dag-shuffled":           "cannot apply that bound per outer row",
 	"bare/idv/distinctLimit/join/named\x00fastpath":               "cannot apply that bound per outer row",
@@ -2077,18 +2066,6 @@ var jpbLoud = map[string]string{
 	"bare/idv/distinctLimit/left/qualStar\x00fastpath":            "cannot apply that bound per outer row",
 	"bare/idv/distinctLimit/left/qualStar\x00single":              "cannot apply that bound per outer row",
 	"bare/idv/distinctLimit/left/qualStar\x00spilled512k":         "cannot apply that bound per outer row",
-	"bare/k/distinct/left/named\x00dag":                           "one stage's files describe one relation",
-	"bare/k/distinct/left/named\x00dag-shuffled":                  "one stage's files describe one relation",
-	"bare/k/distinct/left/qualStar\x00dag":                        "one stage's files describe one relation",
-	"bare/k/distinct/left/qualStar\x00dag-shuffled":               "one stage's files describe one relation",
-	"bare/k/distinctLimit/left/named\x00dag":                      "one stage's files describe one relation",
-	"bare/k/distinctLimit/left/named\x00dag-shuffled":             "one stage's files describe one relation",
-	"bare/k/distinctLimit/left/qualStar\x00dag":                   "one stage's files describe one relation",
-	"bare/k/distinctLimit/left/qualStar\x00dag-shuffled":          "one stage's files describe one relation",
-	"bare/kid/distinct/left/named\x00dag":                         "one stage's files describe one relation",
-	"bare/kid/distinct/left/named\x00dag-shuffled":                "one stage's files describe one relation",
-	"bare/kid/distinct/left/qualStar\x00dag":                      "one stage's files describe one relation",
-	"bare/kid/distinct/left/qualStar\x00dag-shuffled":             "one stage's files describe one relation",
 	"bare/kid/distinctLimit/join/named\x00dag":                    "cannot apply that bound per outer row",
 	"bare/kid/distinctLimit/join/named\x00dag-shuffled":           "cannot apply that bound per outer row",
 	"bare/kid/distinctLimit/join/named\x00fastpath":               "cannot apply that bound per outer row",
@@ -2109,10 +2086,6 @@ var jpbLoud = map[string]string{
 	"bare/kid/distinctLimit/left/qualStar\x00fastpath":            "cannot apply that bound per outer row",
 	"bare/kid/distinctLimit/left/qualStar\x00single":              "cannot apply that bound per outer row",
 	"bare/kid/distinctLimit/left/qualStar\x00spilled512k":         "cannot apply that bound per outer row",
-	"bare/kv/distinct/left/named\x00dag":                          "one stage's files describe one relation",
-	"bare/kv/distinct/left/named\x00dag-shuffled":                 "one stage's files describe one relation",
-	"bare/kv/distinct/left/qualStar\x00dag":                       "one stage's files describe one relation",
-	"bare/kv/distinct/left/qualStar\x00dag-shuffled":              "one stage's files describe one relation",
 	"bare/kv/distinctLimit/join/named\x00dag":                     "cannot apply that bound per outer row",
 	"bare/kv/distinctLimit/join/named\x00dag-shuffled":            "cannot apply that bound per outer row",
 	"bare/kv/distinctLimit/join/named\x00fastpath":                "cannot apply that bound per outer row",
@@ -2133,10 +2106,6 @@ var jpbLoud = map[string]string{
 	"bare/kv/distinctLimit/left/qualStar\x00fastpath":             "cannot apply that bound per outer row",
 	"bare/kv/distinctLimit/left/qualStar\x00single":               "cannot apply that bound per outer row",
 	"bare/kv/distinctLimit/left/qualStar\x00spilled512k":          "cannot apply that bound per outer row",
-	"bare/v/distinct/left/named\x00dag":                           "one stage's files describe one relation",
-	"bare/v/distinct/left/named\x00dag-shuffled":                  "one stage's files describe one relation",
-	"bare/v/distinct/left/qualStar\x00dag":                        "one stage's files describe one relation",
-	"bare/v/distinct/left/qualStar\x00dag-shuffled":               "one stage's files describe one relation",
 	"bare/v/distinctLimit/join/named\x00dag":                      "cannot apply that bound per outer row",
 	"bare/v/distinctLimit/join/named\x00dag-shuffled":             "cannot apply that bound per outer row",
 	"bare/v/distinctLimit/join/named\x00fastpath":                 "cannot apply that bound per outer row",

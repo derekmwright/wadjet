@@ -85,3 +85,26 @@ func jpKData() []map[string]any {
 		[3]any{int64(1), int64(1), int64(7)}, [3]any{int64(2), int64(1), int64(5)},
 		[3]any{int64(3), int64(3), int64(6)}, [3]any{int64(4), int64(9), int64(5)})
 }
+
+// jpQTable is lt_i's data under names NO other fixture relation carries
+// (qid, qk, qv, qtag): a LATERAL over lt_o and jp_q shares no column name, so
+// it is the shape the stage DAG carries (dagplan.ErrLateralIdentityDistributed
+// routes every other correlated LATERAL single-process; arc JP round 3).
+const jpQTable = "jp_q"
+
+func jpQSchema() parquet.Schema {
+	return parquet.Schema{Columns: []parquet.Column{
+		{Name: "qid", Type: parquet.TypeInt64},
+		{Name: "qk", Type: parquet.TypeInt64, Nullable: true},
+		{Name: "qv", Type: parquet.TypeInt64},
+		{Name: "qtag", Type: parquet.TypeString},
+	}}
+}
+
+func jpQData() []map[string]any {
+	var out []map[string]any
+	for _, r := range ltIData() {
+		out = append(out, map[string]any{"qid": r["id"], "qk": r["k"], "qv": r["v"], "qtag": r["tag"]})
+	}
+	return out
+}

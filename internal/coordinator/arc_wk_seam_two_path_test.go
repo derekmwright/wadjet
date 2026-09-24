@@ -353,14 +353,11 @@ func wkSeamCells() []c1Case {
 		{
 			name: "lifted/lateralContested",
 			sql:  "SELECT o.id AS a, p.m AS b FROM lat_ord o LEFT JOIN LATERAL (SELECT i.product AS m FROM lat_item i WHERE i.id < o.id) p ON true ORDER BY a, b",
-			// SINCE ARC LT this LEFT spelling is a REFUSAL on every arm (#1130;
-			// ADR-0021 §1s): the two single-process arms bound the outer
-			// column (NULL pads before), and the DAG's answer for a LEFT
-			// contested lateral was not ONE answer — right on this fixture,
-			// NULL pads then a route on arc LT's for the same statement — so
-			// the DAG refuses the OUTER spelling too. Its INNER twin answers
-			// on the DAG arms.
-			want: "ERR which the enclosing relation also publishes",
-			why:  "#1130: refused uniformly since arc LT; PostgreSQL answers 1,NULL | 2,Widget | 3,Gadget | 3,Widget",
+			// Refused on every arm from arc LT (#1130) until arc JP round 3:
+			// the lifted predicate is spelled through the lateral's alias
+			// (`p.id < o.id`), the single-process pipeline tells the two `id`
+			// columns apart, and the stage DAG routes the plan there
+			// (dagplan.ErrLateralIdentityDistributed). PostgreSQL 17.11's rows.
+			want: "cols=[a:INT64 b:STRING] rows=4 | 1,NULL | 2,Widget | 3,Gadget | 3,Widget",
 		}}
 }
