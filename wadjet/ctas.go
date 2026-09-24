@@ -109,7 +109,7 @@ func (db *DB) executeCreateTableAs(ctx context.Context, ct *plansql.CreateTableI
 		Schema:  schema,
 		Columns: schema.ColumnNames(),
 		Create:  true,
-	}, resultRows(res, nil, nil, nil))
+	}, resultRows(res, nil, nil))
 	if err != nil {
 		return nil, err
 	}
@@ -181,8 +181,10 @@ func (db *DB) executeInsertSelect(ctx context.Context, info *plansql.InsertInfo)
 		return nil, querySourceError(err, db.querySourcedWriteBudget())
 	}
 
-	if err := checkInsertSelectShape(res.OutputSchema, cols, len(info.Columns) > 0,
-		unknownTypedSelectItems(info.Select, len(res.OutputSchema))); err != nil {
+	// The one assignment function's source per select position — the SAME
+	// classification a VALUES cell or a SET clause gets (assignSourceOf).
+	sources := selectItemSources(info.Select, res.OutputSchema)
+	if err := checkInsertSelectShape(res.OutputSchema, cols, len(info.Columns) > 0, sources); err != nil {
 		return nil, err
 	}
 
@@ -192,8 +194,7 @@ func (db *DB) executeInsertSelect(ctx context.Context, info *plansql.InsertInfo)
 		Columns:       columns[:len(res.OutputSchema)],
 		PartitionKeys: tableMeta.PartitionKeys,
 		Incarnation:   incarnation,
-	}, resultRows(res, res.OutputSchema, cols,
-		unknownTypedSelectItems(info.Select, len(res.OutputSchema))))
+	}, resultRows(res, cols, sources))
 	if err != nil {
 		return nil, err
 	}
@@ -211,99 +212,61 @@ func (db *DB) executeInsertSelect(ctx context.Context, info *plansql.InsertInfo)
 // same shortfall is 42601 there, under its own message, because the list is a
 // promise about how many values follow.
 func checkInsertSelectShape(declared []parquet.Column, cols []parquet.Column, explicitList bool,
-	unknownLit []ntUnknownKind) error {
+	sources []assignSource) error {
 	switch {
 	case len(declared) > len(cols):
 		return sqlerr.New("42601", "INSERT has more expressions than target columns")
 	case len(declared) < len(cols) && explicitList:
 		return sqlerr.New("42601", "INSERT has more target columns than expressions")
 	}
-	for i, d := range declared {
-		if i < len(unknownLit) && unknownLit[i] != ntNotUnknown {
-			// SQL's `unknown`, typed FROM the target rather than compared
-			// against it (#1088). A NULL literal is unknown-typed too and
-			// needs no grammar at all — it produces no value — so it is
-			// assignable to EVERY declaration, which is what PostgreSQL does
-			// with `INSERT INTO t (c) SELECT NULL` (review NT N1).
-			if unknownLit[i] == ntUnknownNull {
-				continue
-			}
-			// ntUnknownText and ntTypedText: the target's input function.
-			if err := ingest.AssignableFromUnknownLiteral(cols[i]); err != nil {
-				return err
-			}
-			continue
-		}
-		if err := ingest.AssignableToColumn(d, cols[i]); err != nil {
+	for i := range declared {
+		if err := sources[i].check(cols[i]); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// unknownTypedSelectItems marks the select-list positions written as a BARE
-// QUOTED LITERAL — SQL's `unknown`, which PostgreSQL types from the INSERT's
-// target column rather than from itself.
+// selectItemSources is the one assignment function's source for every
+// position of an INSERT … SELECT's select list: the plan's DECLARED output
+// type by default, and — for an item the statement wrote as a CONSTANT (a
+// number, a quoted literal, TRUE/FALSE, NULL, a signed number) or as a
+// typed-text call — assignSourceOf over the item's own AST, exactly the
+// classification a VALUES cell gets. So `SELECT 2.50` into TEXT stores
+// `2.50`, `SELECT 2.5` into INTEGER stores 3 and `SELECT 't'` into BOOLEAN
+// stores true, as `VALUES (…)` and PostgreSQL do; the evaluated value of a
+// numeric literal is a float here and carried neither its scale nor
+// PostgreSQL's numeric rounding (round-3 review B2 / P2).
 //
-// It answers only for the shape it can PROVE: a single SELECT block whose item
-// count matches the declared output, with no star and no set operation. A
-// literal reached through a UNION, a CTE or a derived table is typed by that
-// construct's own fold before it ever meets the target, and guessing here
-// would put a wrong rule on it — so those positions stay false and keep the
-// 42804 they have today (the honest answer: this walk cannot see them).
-func unknownTypedSelectItems(q *plansql.ParsedQuery, n int) []ntUnknownKind {
-	if q == nil || n == 0 {
-		return nil
+// The AST is read only for the shape it can PROVE: a single SELECT block whose
+// item count matches the declared output, with no star and no set operation.
+// A constant reached through a UNION, a CTE or a derived table is typed by
+// that construct's own fold before it meets the target, so those positions
+// keep their declared type.
+func selectItemSources(q *plansql.ParsedQuery, declared []parquet.Column) []assignSource {
+	out := make([]assignSource, len(declared))
+	for i, c := range declared {
+		out[i] = declaredSource(c)
+	}
+	if q == nil || len(declared) == 0 {
+		return out
 	}
 	info, err := plansql.ExtractSelect(q)
-	if err != nil || info == nil || info.Union != nil || len(info.Columns) != n {
-		return nil
+	if err != nil || info == nil || info.Union != nil || len(info.Columns) != len(declared) {
+		return out
 	}
-	out := make([]ntUnknownKind, n)
-	for i, c := range info.Columns {
+	for _, c := range info.Columns {
 		if c.Star {
-			return nil
+			return out
 		}
-		// PARENTHESES carry no meaning past grouping, so `SELECT ('10.0.0.1')`
-		// is the same item as `SELECT '10.0.0.1'` and was 42804 while its twin
-		// inserted a row (review NT N1) — the same rule physical.unwrapParens
-		// states for the refusal side.
-		e := c.ASTExpr
-		for {
-			pn, ok := e.(*plansql.ParenNode)
-			if !ok || pn.Inner == nil {
-				break
-			}
-			e = pn.Inner
-		}
-		lit, ok := e.(*plansql.Lit)
-		switch {
-		case ok && lit.Kind == plansql.LitString:
-			out[i] = ntUnknownText
-		case ok && lit.Kind == plansql.LitNull:
-			out[i] = ntUnknownNull
-		case dmlTypedTextSource(e):
-			out[i] = ntTypedText
+	}
+	for i, c := range info.Columns {
+		if _, isConst := dmlLiteralText(c.ASTExpr); isConst || dmlTypedTextSource(c.ASTExpr) {
+			out[i] = assignSourceOf(c.ASTExpr, nil)
 		}
 	}
 	return out
 }
-
-// ntUnknownKind classifies a select-list item as SQL's `unknown`: a bare
-// quoted literal, whose TEXT the target's input function reads, or a NULL,
-// which produces no value and so needs no grammar.
-type ntUnknownKind int
-
-const (
-	ntNotUnknown ntUnknownKind = iota
-	ntUnknownText
-	ntUnknownNull
-	// ntTypedText: a call the registry declares TEXT for a network or UUID
-	// value (expr.DeclaresTextForTypedValue) — read by the target's input
-	// function exactly as an unknown-typed literal is, the rule the VALUES,
-	// SET and MERGE doors apply to the same call (dmlAssignmentCheck).
-	ntTypedText
-)
 
 // resultRows reads a result POSITIONALLY, one row at a time, converting each
 // row to the target's declared types as it goes.
@@ -315,12 +278,12 @@ const (
 // 21 GB of live heap at SF10 Q18. Cells is the accessor that is right whether
 // or not two output columns share a name, which the map form is not.
 //
-// `declared` and `target`, when given, are the APPEND's two type lists and
-// every cell goes through the engine's one assignment conversion between them
-// — see assignQueryCells. A CREATE passes neither: its target columns ARE the
-// query's declared output, so there is nothing to convert.
-func resultRows(res *QueryResult, declared, target []parquet.Column,
-	unknownLit []ntUnknownKind) ingest.RowSource {
+// `target` and `sources`, when given, are the APPEND's target columns and the
+// one assignment function's source per position (selectItemSources), and
+// every cell goes through that function — see assignQueryCells. A CREATE
+// passes neither: its target columns ARE the query's declared output, so
+// there is nothing to convert.
+func resultRows(res *QueryResult, target []parquet.Column, sources []assignSource) ingest.RowSource {
 	if res == nil {
 		return ingest.RowSource{}
 	}
@@ -333,7 +296,7 @@ func resultRows(res *QueryResult, declared, target []parquet.Column,
 		if target == nil {
 			return cells, nil
 		}
-		return assignQueryCells(cells, declared, target, unknownLit)
+		return assignQueryCells(cells, target, sources)
 	}}
 }
 
@@ -573,9 +536,11 @@ func querySourceError(err error, budget int64) error {
 	return err
 }
 
-// assignQueryCells applies the engine's ONE assignment conversion to every cell
-// of ONE row an `INSERT INTO … SELECT` writes — `assignEvaluatedValue`, the converter
-// `INSERT … VALUES` and `UPDATE … SET` have used since #647/#678
+// assignQueryCells applies the engine's ONE assignment function to every cell
+// of ONE row an `INSERT INTO … SELECT` writes — assignSource.assign, which
+// `INSERT … VALUES`, `UPDATE … SET` and MERGE call too, with the source each
+// position was classified as (selectItemSources): a constant by its SQL text,
+// everything else by its declared type through `assignEvaluatedValue`
 // (docs/internals/dml-evaluated-assignment-value-domain.md).
 //
 // It is the difference between a value and a CARRIER. Without it the query's
@@ -595,39 +560,12 @@ func querySourceError(err error, budget int64) error {
 // The conversion belongs HERE and not at the writer, which is what ADR-0036
 // rejected: this is the one place that holds BOTH facts, the source's declared
 // type (the plan's output schema) and the target's (the catalog).
-func assignQueryCells(row []any, declared, target []parquet.Column,
-	unknownLit []ntUnknownKind) ([]any, error) {
+func assignQueryCells(row []any, target []parquet.Column, sources []assignSource) ([]any, error) {
 	for j := range row {
-		if j >= len(target) || j >= len(declared) {
+		if j >= len(target) || j >= len(sources) {
 			break
 		}
-		// An UNKNOWN-typed literal is coerced by the TARGET's input function,
-		// not by the numeric assignment cast — PostgreSQL's rule and the one
-		// #1088 relies on. The difference shows for a quoted FRACTIONAL
-		// literal: `'2.5'::integer` is 22P02 on the server and this converter
-		// rounded it to 3, so `INSERT INTO t (port_col) SELECT '2.5'` put a
-		// number no PORT can be at REST while the same text at the VALUES,
-		// COPY, UPDATE and ingester doors was 22P02 (review NT round 2, P).
-		// A value from a COLUMN keeps the assignment cast, which is what
-		// rounds a DECIMAL into an integer as PostgreSQL's numeric→int does.
-		if j < len(unknownLit) && (unknownLit[j] == ntUnknownText || unknownLit[j] == ntTypedText) {
-			v, err := assignUnknownLiteral(row[j], target[j])
-			if err != nil {
-				return nil, fmt.Errorf("column %q: %w", target[j].Name, err)
-			}
-			row[j] = v
-			continue
-		}
-		// srcFloat tells the integer converter whether a fractional source
-		// rounds (a float does, PostgreSQL's float→int assignment cast) or
-		// refuses; the declared output is where that fact lives. The full
-		// declared type is the SAME fact assignEvaluatedValue's DATE,
-		// TIMESTAMP, BOOL and network/UUID arms need (round-2 review B1/B2):
-		// it is already resolved here as declared[j], with no AST to walk —
-		// the plan's own output schema for this SELECT position — so it is
-		// always KNOWN, never undecided.
-		srcFloat := declared[j].Type == parquet.TypeFloat32 || declared[j].Type == parquet.TypeFloat64
-		v, err := assignEvaluatedValue(row[j], target[j], srcFloat, declared[j].Type, true)
+		v, err := sources[j].assign(row[j], target[j])
 		if err != nil {
 			return nil, fmt.Errorf("column %q: %w", target[j].Name, err)
 		}

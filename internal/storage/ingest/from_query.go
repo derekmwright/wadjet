@@ -382,9 +382,11 @@ func assignmentCast(from, to parquet.TypeID) bool {
 	return false
 }
 
-// AssignableFromUnknownLiteral is the same question for an item the select
-// list wrote as a BARE QUOTED LITERAL, which is SQL's `unknown` and not a text
-// column: PostgreSQL types it FROM the target and coerces it with that type's
+// AssignableFromUnknownLiteral is the same question for a source read AS an
+// unknown-typed literal — since arc VL round 4 only a call the registry
+// declares TEXT for a network or UUID value (a bare quoted literal is read by
+// the target's input function on every door, wadjet's assignSource).
+// PostgreSQL types an unknown FROM the target and coerces it with that type's
 // own input function, so `INSERT INTO t (ip) SELECT '10.0.0.1'` is a value
 // there and was 42804 here for every target type at once (#1088) — while
 // `INSERT INTO t (ip) SELECT text_col` is 42804 on both, because text has no
@@ -396,9 +398,8 @@ func assignmentCast(from, to parquet.TypeID) bool {
 // there, loudly and naming the column — which is what the coercion does on the
 // server too, at execution rather than at parse analysis.
 //
-// BOOL, BYTES and the containers are deliberately absent: no leaf in this
-// writer reads their text, so admitting one would replace a plan-time 42804
-// with a flush-time box error. They stay 42804 and are in ADR-0012's list.
+// BOOL, BYTES and the containers are deliberately absent for those calls: no
+// typed-text function produces one of them.
 func AssignableFromUnknownLiteral(to parquet.Column) error {
 	switch to.Type {
 	case parquet.TypeInt32, parquet.TypeInt64, parquet.TypeFloat32, parquet.TypeFloat64,

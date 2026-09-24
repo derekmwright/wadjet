@@ -195,12 +195,17 @@ func TestInsertSelectTypesAnUnknownLiteralFromItsTarget(t *testing.T) {
 		}
 	})
 
-	// And the declarations whose text no leaf in this writer reads stay
-	// 42804 rather than failing at the flush with a box error.
-	t.Run("bool/stays_42804", func(t *testing.T) {
-		_, err := db.Query(ctx, "INSERT INTO t (c_bool) SELECT 'true'")
-		if err == nil || sqlerr.StateOf(err) != "42804" {
-			t.Errorf("INSERT … SELECT 'true' into a BOOL column = %v, want 42804", err)
+	// A quoted literal into BOOLEAN is read by boolean's input function, as
+	// it is on INSERT … VALUES and as PostgreSQL 17.11 reads it: this pin was
+	// 42804 while no leaf read boolean text, and it started agreeing with
+	// PostgreSQL when every write door began calling the one assignment
+	// function (arc VL round 4) — the pin is now the value.
+	t.Run("bool/read_by_boolin", func(t *testing.T) {
+		if _, err := db.Query(ctx, "INSERT INTO t (c_bool) SELECT 'yes'"); err != nil {
+			t.Fatalf("INSERT … SELECT 'yes' into a BOOL column: %v, PostgreSQL stores true", err)
+		}
+		if _, err := db.Query(ctx, "INSERT INTO t (c_bool) SELECT 'maybe'"); sqlerr.StateOf(err) != "22P02" {
+			t.Errorf("INSERT … SELECT 'maybe' into a BOOL column = %v, PostgreSQL 22P02", err)
 		}
 	})
 }

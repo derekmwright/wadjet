@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"math/big"
 	"strconv"
 	"strings"
 	"time"
@@ -1555,60 +1556,162 @@ func dmlSourceDeclaredType(node plansql.Node, schema []parquet.Column) (parquet.
 	return decl.ID, true
 }
 
-// dmlAssignmentCheck is the ONE assignment table (ingest.AssignableToColumn,
-// PostgreSQL's assignment casts) asked of a VALUES cell, a SET clause or a
-// MERGE clause from the expression's DECLARED type, before any row is read —
-// the question INSERT … SELECT asks per column from the plan's declared
-// output, so one source × target pair answers one way on every door (arc VL
-// round 3; round 2's P2 found VALUES/SET storing `'5' || ”` into a bigint
-// while INSERT … SELECT refused it, and INSERT … SELECT refusing a bigint into
-// TEXT while VALUES/SET rendered it — PostgreSQL refuses the first and
-// renders the second, and now so does every door).
+// assignSource is everything the ONE assignment function needs to know about
+// the value a write door assigns to a column, and every door builds it the
+// same way (assignSourceOf) from the same fact — the source EXPRESSION as the
+// statement wrote it:
 //
-// A source the declaration walk cannot type, NULL (which has no type of its
-// own), a quoted literal (SQL's unknown, read by the column's own input
-// function — the literal path's question) and the pairs outside the classified
-// scalar set (containers, VECTOR, BYTES, DURATION) are not asked here and keep
-// their value path unchanged. A declared-TEXT source that produces a typed
-// value (expr.DeclaresTextForTypedValue: uuid(), int_to_ip, …) is read as an
-// unknown-typed literal instead — the documented superset.
-func dmlAssignmentCheck(node plansql.Node, schema []parquet.Column, col parquet.Column) error {
+//   - a bare constant (a number, a quoted literal, TRUE/FALSE, NULL, a signed
+//     number): its SQL text, read by the TARGET's input rules exactly as
+//     PostgreSQL types an unknown or numeric literal from its target — so
+//     `2.50` into TEXT is `2.50` and `2.5` into INTEGER is 3 on EVERY door;
+//   - a bare call the registry declares TEXT for a network or UUID value
+//     (expr.DeclaresTextForTypedValue): read as an unknown-typed literal, the
+//     documented superset;
+//   - anything else: its DECLARED type (and whether that is a float, which
+//     decides the integer rounding), read by assignEvaluatedValue.
+//
+// Round 3 had one TABLE but two converters: VALUES / SET / MERGE read a
+// constant through its literal text, INSERT … SELECT through the value the
+// SELECT list had already evaluated — a numeric literal there is a float, so
+// `SELECT 2.50` into TEXT stored `2.5` and `SELECT 2.5` into INTEGER stored 2,
+// and a quoted `'t'` into BOOLEAN stored on VALUES and was 42804 on INSERT …
+// SELECT (round-3 review B2 / P2). Now INSERT … SELECT classifies each select
+// item's AST through the same assignSourceOf (selectItemSources), and every
+// door calls check then assign on the result.
+type assignSource struct {
+	literal   string // the constant's SQL text when isLiteral
+	isLiteral bool
+	typedText bool
+	declType  parquet.TypeID
+	declKnown bool
+	declFloat bool
+}
+
+// assignSourceOf classifies a source expression. schema resolves column
+// references (nil for a VALUES cell, which has none).
+func assignSourceOf(node plansql.Node, schema []parquet.Column) assignSource {
+	if lit, ok := dmlLiteralText(node); ok {
+		src := assignSource{literal: lit, isLiteral: true}
+		src.declType, src.declKnown = literalDeclaredType(node)
+		return src
+	}
 	if dmlTypedTextSource(node) {
+		return assignSource{typedText: true}
+	}
+	t, known := dmlSourceDeclaredType(node, schema)
+	return assignSource{declType: t, declKnown: known, declFloat: dmlSourceIsFloat(node, schema)}
+}
+
+// declaredSource is the source of a query output column whose expression is
+// not a constant: its declaration from the plan.
+func declaredSource(c parquet.Column) assignSource {
+	return assignSource{declType: c.Type, declKnown: true,
+		declFloat: c.Type == parquet.TypeFloat32 || c.Type == parquet.TypeFloat64}
+}
+
+// literalDeclaredType is a constant's own type for the assignment TABLE:
+// PostgreSQL's literal rule — an integer literal is integer when it fits and
+// bigint otherwise, any other number numeric, TRUE/FALSE boolean. A quoted
+// literal and NULL are SQL's unknown, typed from the target: no declaration.
+func literalDeclaredType(node plansql.Node) (parquet.TypeID, bool) {
+	n := unwrapDMLParens(node)
+	if u, ok := n.(*plansql.UnaryOp); ok {
+		n = unwrapDMLParens(u.Inner)
+	}
+	lit, ok := n.(*plansql.Lit)
+	if !ok {
+		return 0, false
+	}
+	switch lit.Kind {
+	case plansql.LitBool:
+		return parquet.TypeBool, true
+	case plansql.LitNumber:
+		if i, err := strconv.ParseInt(lit.Value, 10, 64); err == nil {
+			if i >= math.MinInt32 && i <= math.MaxInt32 {
+				return parquet.TypeInt32, true
+			}
+			return parquet.TypeInt64, true
+		}
+		return parquet.TypeDecimal, true
+	}
+	return 0, false
+}
+
+// numericLiteralText renders a numeric literal as PostgreSQL's numeric output
+// does: exact, at the literal's display scale — the digits after the point
+// less the exponent, never below zero.
+func numericLiteralText(lit string) string {
+	r, ok := new(big.Rat).SetString(lit)
+	if !ok {
+		return lit
+	}
+	mant, exp := lit, 0
+	if i := strings.IndexAny(lit, "eE"); i >= 0 {
+		mant = lit[:i]
+		if e, err := strconv.Atoi(lit[i+1:]); err == nil {
+			exp = e
+		}
+	}
+	scale := 0
+	if i := strings.IndexByte(mant, '.'); i >= 0 {
+		scale = len(mant) - i - 1
+	}
+	scale -= exp
+	if scale < 0 {
+		scale = 0
+	}
+	return r.FloatString(scale)
+}
+
+// check is the ONE assignment table (ingest.AssignableToColumn, PostgreSQL's
+// assignment casts) asked of a source before any row is read — PostgreSQL's
+// order: a type mismatch refuses the statement even when no row matches.
+//
+// An unknown-typed constant (quoted, NULL) is typed from the target and has
+// nothing to ask here: the target's input function answers at assign. A
+// typed-text call asks AssignableFromUnknownLiteral. A source the declaration
+// walk cannot type keeps its value path unchanged. The pairs outside the
+// classified scalar set (containers, VECTOR, BYTES, DURATION) are asked of
+// the table too when the source is DECLARED by a plan's output (INSERT …
+// SELECT), which is where they reach a write.
+func (s assignSource) check(col parquet.Column) error {
+	if s.typedText {
 		return ingest.AssignableFromUnknownLiteral(col)
 	}
-	var src parquet.TypeID
-	switch n := unwrapDMLParens(node).(type) {
-	case *plansql.Lit:
-		switch n.Kind {
-		case plansql.LitBool:
-			src = parquet.TypeBool
-		case plansql.LitNumber:
-			if i, err := strconv.ParseInt(n.Value, 10, 64); err == nil {
-				// PostgreSQL's literal rule: integer when it fits, else bigint.
-				src = parquet.TypeInt64
-				if i >= math.MinInt32 && i <= math.MaxInt32 {
-					src = parquet.TypeInt32
-				}
-			} else {
-				src = parquet.TypeDecimal
-			}
-		default:
-			return nil
-		}
-	default:
-		t, known := dmlSourceDeclaredType(node, schema)
-		if !known {
-			return nil
-		}
-		src = t
-	}
-	if !assignmentClassified(src) || !assignmentClassified(col.Type) {
+	if !s.declKnown {
 		return nil
 	}
-	if err := ingest.AssignableToColumn(parquet.Column{Type: src, Precision: col.Precision, Scale: col.Scale}, col); err != nil {
-		return datatypeMismatchNamed(col, src)
+	if !assignmentClassified(s.declType) || !assignmentClassified(col.Type) {
+		if s.declType == col.Type || s.isLiteral {
+			// A constant into a type outside the classified set (a number
+			// into DURATION) is read by that column's own input rule.
+			return nil
+		}
+		return ingest.AssignableToColumn(parquet.Column{Type: s.declType}, col)
+	}
+	if err := ingest.AssignableToColumn(parquet.Column{Type: s.declType, Precision: col.Precision, Scale: col.Scale}, col); err != nil {
+		return datatypeMismatchNamed(col, s.declType)
 	}
 	return nil
+}
+
+// assign converts one value of the source to the column's box — the ONE
+// converter. v is ignored for a constant, whose SQL text is the value.
+func (s assignSource) assign(v any, col parquet.Column) (any, error) {
+	switch {
+	case s.isLiteral && col.Type == parquet.TypeString && s.declKnown && s.declType != parquet.TypeBool:
+		// A NUMERIC literal is a numeric value, and its text is numeric's
+		// output: its own digits at its own scale (`2.50` stays `2.50`), an
+		// exponent spelled out (`1e3` is `1000`) — PostgreSQL's numeric
+		// assignment to text.
+		return numericLiteralText(s.literal), nil
+	case s.isLiteral:
+		return assignLiteralToColumn(s.literal, col)
+	case s.typedText:
+		return assignUnknownLiteral(v, col)
+	}
+	return assignEvaluatedValue(v, col, s.declFloat, s.declType, s.declKnown)
 }
 
 // assignmentClassified is the scalar set the one assignment table decides:
@@ -1623,18 +1726,6 @@ func assignmentClassified(t parquet.TypeID) bool {
 		return true
 	}
 	return false
-}
-
-// assignDMLSource converts one evaluated value of a VALUES cell or a MERGE
-// clause through the one converter, reading the source's declaration from its
-// node: a typed-text source as an unknown-typed literal, everything else by
-// assignEvaluatedValue's declared-type arms.
-func assignDMLSource(node plansql.Node, schema []parquet.Column, v any, col parquet.Column) (any, error) {
-	if dmlTypedTextSource(node) {
-		return assignUnknownLiteral(v, col)
-	}
-	srcType, srcKnown := dmlSourceDeclaredType(node, schema)
-	return assignEvaluatedValue(v, col, dmlSourceIsFloat(node, schema), srcType, srcKnown)
 }
 
 // dmlExpressionTyping is the expression-typing rule every DML door runs on
@@ -1686,11 +1777,12 @@ func (ev *mergeEvaluator) value(text string, merged map[string]any, col parquet.
 	if err := dmlExpressionTyping(node, "", ev.mergedCols); err != nil {
 		return nil, err
 	}
-	if err := dmlAssignmentCheck(node, ev.mergedCols, col); err != nil {
+	src := assignSourceOf(node, ev.mergedCols)
+	if err := src.check(col); err != nil {
 		return nil, err
 	}
-	if lit, isLit := dmlLiteralText(node); isLit {
-		return assignLiteralToColumn(lit, col)
+	if src.isLiteral {
+		return src.assign(nil, col)
 	}
 	// A bare reference is read straight out of the merged row — but RESOLVED
 	// first, so an unknown name is 42703 and an unknown qualifier is 42P01
@@ -1712,8 +1804,7 @@ func (ev *mergeEvaluator) value(text string, merged map[string]any, col parquet.
 					}
 				}
 			}
-			srcType, srcKnown := ev.sourceDeclaredType(node)
-			cast, cerr := assignEvaluatedValue(v, col, ev.sourceIsFloat(node), srcType, srcKnown)
+			cast, cerr := src.assign(v, col)
 			if cerr != nil {
 				return nil, cerr
 			}
@@ -1741,7 +1832,7 @@ func (ev *mergeEvaluator) value(text string, merged map[string]any, col parquet.
 		return nil, fmt.Errorf("compiling %q: %w", text, err)
 	}
 	b := batch.FromRows(ev.mergedCols, []map[string]any{lowercaseKeys(merged)})
-	v, err := assignDMLSource(node, ev.mergedCols, compiled.Eval(b, 0), col)
+	v, err := src.assign(compiled.Eval(b, 0), col)
 	if err != nil {
 		return nil, err
 	}
@@ -2634,11 +2725,12 @@ func assignInsertValue(text string, col parquet.Column) (any, error) {
 	if err := dmlExpressionTyping(node, "", nil); err != nil {
 		return nil, err
 	}
-	if err := dmlAssignmentCheck(node, nil, col); err != nil {
+	src := assignSourceOf(node, nil)
+	if err := src.check(col); err != nil {
 		return nil, err
 	}
-	if lit, isLit := dmlLiteralText(node); isLit {
-		return assignLiteralToColumn(lit, col)
+	if src.isLiteral {
+		return src.assign(nil, col)
 	}
 	if err := refuseNonConstantValuesExpr(node); err != nil {
 		return nil, err
@@ -2647,7 +2739,7 @@ func assignInsertValue(text string, col parquet.Column) (any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("compiling %q: %w", trimmed, err)
 	}
-	v, err := assignDMLSource(node, nil, compiled.Eval(&batch.RecordBatch{Len: 1}, 0), col)
+	v, err := src.assign(compiled.Eval(&batch.RecordBatch{Len: 1}, 0), col)
 	if err != nil {
 		return nil, err
 	}
@@ -3380,24 +3472,12 @@ type DMLAssignment struct {
 	col      parquet.Column
 	constant any       // used when expr is nil
 	expr     expr.Expr // per-row evaluation
-	// srcFloat is the source expression's DECLARED family: true for float4 /
-	// float8, which round half to EVEN on assignment to an integer column,
-	// false for everything else, which rounds half away from zero. The
-	// compiled expr cannot carry it — expr.Expr is one method, Eval — and the
-	// BOX cannot decide it, because this engine boxes both families as
-	// float64 (#699).
-	srcFloat bool
-	// typedText: the source is a call expr.DeclaresTextForTypedValue names,
-	// read by the column's input function (see dmlAssignmentCheck).
-	typedText bool
-	// srcType/srcKnown are the source's full declared type (dmlSourceDeclaredType),
-	// the assignment-cast table's other input (round-2 review B1): a DATE or
-	// TIMESTAMP source's box collides with a plain INTEGER's at the very
-	// arms srcFloat does not cover, and an UPDATE's SET reaches the same
-	// assignEvaluatedValue VALUES does, so it carries the same defect until
-	// this is threaded through too.
-	srcType  parquet.TypeID
-	srcKnown bool
+	// src is the source expression as the one assignment function reads it
+	// (assignSourceOf): its declared type and float-ness (#699, round-2
+	// review B1), or the typed-text reading. The compiled expr cannot carry
+	// any of it — expr.Expr is one method, Eval — and the BOX cannot decide
+	// it, because a DATE, a TIMESTAMP and a plain INTEGER collide there.
+	src assignSource
 }
 
 // ResolveDMLSetClauses resolves targets against schema before execution;
@@ -3435,11 +3515,11 @@ func ResolveDMLSetClauses(clauses []plansql.SetClause, target plansql.DMLTarget,
 		if err != nil {
 			return nil, sqlerr.Wrap("42601", fmt.Errorf("SET %s: parsing %q: %w", name, sc.Value, err))
 		}
-		if text, isLit := dmlLiteralText(node); isLit {
-			if err := dmlAssignmentCheck(node, schema, col); err != nil {
+		if src := assignSourceOf(node, schema); src.isLiteral {
+			if err := src.check(col); err != nil {
 				return nil, fmt.Errorf("SET %s: %w", name, err)
 			}
-			v, err := assignLiteralToColumn(text, col)
+			v, err := src.assign(nil, col)
 			if err != nil {
 				return nil, fmt.Errorf("SET %s: %w", name, err)
 			}
@@ -3455,7 +3535,8 @@ func ResolveDMLSetClauses(clauses []plansql.SetClause, target plansql.DMLTarget,
 		// The one assignment table, asked once per clause before any row —
 		// which is also PostgreSQL's order: a type mismatch refuses the
 		// statement even when no row matches.
-		if err := dmlAssignmentCheck(node, schema, col); err != nil {
+		src := assignSourceOf(node, schema)
+		if err := src.check(col); err != nil {
 			return nil, fmt.Errorf("SET %s: %w", name, err)
 		}
 		// A SUBQUERY in the SET list is refused HERE and explicitly. It used
@@ -3476,10 +3557,7 @@ func ResolveDMLSetClauses(clauses []plansql.SetClause, target plansql.DMLTarget,
 		// The AST is still in hand here, and it is the only place the source's
 		// DECLARED family can be read — one line above where it used to be
 		// thrown away at expr.Compile (#699).
-		srcType, srcKnown := dmlSourceDeclaredType(node, schema)
-		out = append(out, DMLAssignment{Column: col.Name, col: col, expr: compiled,
-			srcFloat: dmlSourceIsFloat(node, schema), srcType: srcType, srcKnown: srcKnown,
-			typedText: dmlTypedTextSource(node)})
+		out = append(out, DMLAssignment{Column: col.Name, col: col, expr: compiled, src: src})
 	}
 	return out, nil
 }
@@ -3568,13 +3646,7 @@ func BuildUpdatedRows(ctx context.Context, b *batch.RecordBatch, matched []int64
 				row[a.Column] = a.constant
 				continue
 			}
-			var v any
-			var err error
-			if a.typedText {
-				v, err = assignUnknownLiteral(a.expr.Eval(b, int(idx)), a.col)
-			} else {
-				v, err = assignEvaluatedValue(a.expr.Eval(b, int(idx)), a.col, a.srcFloat, a.srcType, a.srcKnown)
-			}
+			v, err := a.src.assign(a.expr.Eval(b, int(idx)), a.col)
 			if err != nil {
 				return nil, fmt.Errorf("SET %s: %w", a.Column, err)
 			}
@@ -3810,7 +3882,16 @@ func convertUnquoted(s string, typ parquet.TypeID) (any, error) {
 
 	switch typ {
 	case parquet.TypeBool:
-		return strconv.ParseBool(s)
+		// PostgreSQL's boolean INPUT function (boolin): t/true/y/yes/on/1 and
+		// their negations, any unique prefix, case- and space-insensitive —
+		// the reading a truth context already gives a quoted literal. It was
+		// strconv.ParseBool, which refused `'yes'`, `'no'` and `'off'` with no
+		// SQLSTATE (round-3 review P2) and took `'T'`/`'F'` spellings boolin
+		// does not share with it.
+		if v, ok := plansql.ParseBoolText(s); ok {
+			return v, nil
+		}
+		return nil, sqlerr.New("22P02", "invalid input syntax for type boolean: %s", sqlerr.Quote(s))
 	case parquet.TypeInt32:
 		v, err := strconv.ParseInt(s, 10, 32)
 		if err != nil {
@@ -3819,14 +3900,26 @@ func convertUnquoted(s string, typ parquet.TypeID) (any, error) {
 		return int32(v), nil
 	case parquet.TypeInt64:
 		return strconv.ParseInt(s, 10, 64)
-	case parquet.TypeFloat32:
-		v, err := strconv.ParseFloat(s, 32)
-		if err != nil {
-			return nil, err
+	case parquet.TypeFloat32, parquet.TypeFloat64:
+		// float4in / float8in's two refusals, classified: text naming no
+		// number is 22P02 and a magnitude the type cannot hold 22003. The raw
+		// strconv error crossed every door with no SQLSTATE (`'yes'` into a
+		// double precision column; arc VL round 4's door-diff table).
+		bits := 64
+		if typ == parquet.TypeFloat32 {
+			bits = 32
 		}
-		return float32(v), nil
-	case parquet.TypeFloat64:
-		return strconv.ParseFloat(s, 64)
+		v, err := strconv.ParseFloat(s, bits)
+		if err != nil {
+			if errors.Is(err, strconv.ErrRange) {
+				return nil, sqlerr.New("22003", "%s is out of range for type %s", sqlerr.Quote(s), pgOperandTypeName(typ))
+			}
+			return nil, sqlerr.New("22P02", "invalid input syntax for type %s: %s", pgOperandTypeName(typ), sqlerr.Quote(s))
+		}
+		if bits == 32 {
+			return float32(v), nil
+		}
+		return v, nil
 	case parquet.TypeString:
 		return s, nil
 	case parquet.TypeIPv4, parquet.TypeIPv6, parquet.TypeCIDR, parquet.TypeMAC, parquet.TypeUUID:
