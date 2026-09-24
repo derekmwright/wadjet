@@ -331,7 +331,7 @@ func queryCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				return format.WriteTyped(os.Stdout, f, result.Columns, columnTypes(result), resultRows(result))
+				return format.WriteDeclared(os.Stdout, f, result.Columns, columnDecls(result), resultRows(result))
 			}
 
 			db, release, err := openSharedDB(ctx, logger)
@@ -345,7 +345,7 @@ func queryCmd() *cobra.Command {
 				return err
 			}
 
-			return format.WriteTyped(os.Stdout, f, result.Columns, columnTypes(result), resultRows(result))
+			return format.WriteDeclared(os.Stdout, f, result.Columns, columnDecls(result), resultRows(result))
 		},
 	}
 
@@ -704,19 +704,22 @@ func resultRows(result *wadjet.QueryResult) [][]any {
 	return rows
 }
 
-// columnTypes returns the declared type of each result column, positionally
-// aligned with result.Columns, or nil when the query carried no typed
-// metadata (introspection answers). The formatter needs it to render
-// TIMESTAMP columns, which the engine boxes as epoch milliseconds.
-func columnTypes(result *wadjet.QueryResult) []parquet.TypeID {
+// columnDecls returns the declared column of each result column,
+// positionally aligned with result.Columns, or nil when the query carried no
+// typed metadata (introspection answers). The formatter needs the TYPE to
+// render a TIMESTAMP column, which the engine boxes as epoch milliseconds,
+// and a container's whole shape — its element, its fields — to render it as
+// PostgreSQL does (arc CW).
+func columnDecls(result *wadjet.QueryResult) []parquet.Column {
 	if result == nil || len(result.ColumnMetas) == 0 {
 		return nil
 	}
-	types := make([]parquet.TypeID, len(result.ColumnMetas))
+	decls := make([]parquet.Column, len(result.ColumnMetas))
 	for i, m := range result.ColumnMetas {
-		types[i] = m.TypeID
+		decls[i] = parquet.Column{Name: m.Name, Type: m.TypeID, Precision: m.Precision, Scale: m.Scale,
+			Fields: m.Fields, ElementType: m.ElementType}
 	}
-	return types
+	return decls
 }
 
 func runShell(ctx context.Context, db *wadjet.DB, f format.Format) error {
@@ -816,7 +819,7 @@ func runShell(ctx context.Context, db *wadjet.DB, f format.Format) error {
 			continue
 		}
 
-		format.WriteTyped(os.Stdout, f, result.Columns, columnTypes(result), rows)
+		format.WriteDeclared(os.Stdout, f, result.Columns, columnDecls(result), rows)
 	}
 
 	return nil

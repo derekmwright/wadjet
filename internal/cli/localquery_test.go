@@ -123,7 +123,7 @@ func TestQueryCmdTableFunctionNoObjectStore(t *testing.T) {
 // aggregate over a reader's column and over a catalog BIGINT column reaches
 // the CLI's renderer in the same Go box and prints the same JSON.
 //
-// It goes through `format.WriteTyped` with `columnTypes`/`resultRows` — the
+// It goes through `format.WriteDeclared` with `columnDecls`/`resultRows` — the
 // three the `query` command itself calls — rather than through `runQueryCmd`,
 // because the catalog half needs an object store and that rig deliberately
 // points at a dead one (TestQueryCmdCatalogTableStillNeedsStore).
@@ -161,8 +161,8 @@ func TestQueryCmdReaderAndCatalogSumRenderTheSame(t *testing.T) {
 			t.Fatalf("%s: %v", sql, err)
 		}
 		var buf bytes.Buffer
-		if err := format.WriteTyped(&buf, format.JSON, res.Columns,
-			columnTypes(res), resultRows(res)); err != nil {
+		if err := format.WriteDeclared(&buf, format.JSON, res.Columns,
+			columnDecls(res), resultRows(res)); err != nil {
 			t.Fatalf("rendering: %v", err)
 		}
 		return buf.String()

@@ -186,7 +186,7 @@ func TestTheShellDoorPrintsEveryColumnTheWireCarries(t *testing.T) {
 		out := runCLIWithStdin(t, sql+";\nexit\n", append(storage, "shell", "--format="+tc.spelling)...)
 		if !strings.Contains(out, tc.want) {
 			t.Errorf("wadjet shell --format=%s over %q printed\n%s\nwant a line containing %q "+
-				"— the shell renders through its own format.WriteTyped call and it read the "+
+				"— the shell renders through its own format.WriteDeclared call and it read the "+
 				"row by column NAME (#1218)", tc.spelling, sql, out, tc.want)
 		}
 	}

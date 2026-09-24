@@ -10,7 +10,6 @@ import (
 	"net"
 	"sort"
 	"strconv"
-	"strings"
 	"sync/atomic"
 	"time"
 	"unsafe"
@@ -1943,85 +1942,6 @@ func (v *Vector) memBytes(depth int) int64 {
 // String returns a debug representation of the vector.
 func (v *Vector) String() string {
 	return fmt.Sprintf("Vector{type=%v, len=%d, nulls=%d}", v.Type, v.Len, v.Nulls.NullCount())
-}
-
-// FormatValue formats any value for display, producing SQL-like text
-// for nested types (arrays, rows, maps).
-func FormatValue(v any) string {
-	if v == nil {
-		return "NULL"
-	}
-	switch tv := v.(type) {
-	case []float32:
-		return formatFloat32Slice(tv)
-	case []any:
-		return formatArrayValue(tv)
-	case map[string]any:
-		return formatRowValue(tv)
-	case string:
-		return tv
-	default:
-		return fmt.Sprint(v)
-	}
-}
-
-func formatFloat32Slice(v []float32) string {
-	var buf strings.Builder
-	buf.WriteByte('[')
-	for i, f := range v {
-		if i > 0 {
-			buf.WriteString(", ")
-		}
-		buf.WriteString(fmt.Sprintf("%g", f))
-	}
-	buf.WriteByte(']')
-	return buf.String()
-}
-
-func formatArrayValue(arr []any) string {
-	var buf strings.Builder
-	buf.WriteByte('[')
-	for i, elem := range arr {
-		if i > 0 {
-			buf.WriteString(", ")
-		}
-		if elem == nil {
-			buf.WriteString("NULL")
-		} else if s, ok := elem.(string); ok {
-			buf.WriteByte('\'')
-			buf.WriteString(s)
-			buf.WriteByte('\'')
-		} else {
-			buf.WriteString(FormatValue(elem))
-		}
-	}
-	buf.WriteByte(']')
-	return buf.String()
-}
-
-func formatRowValue(row map[string]any) string {
-	var buf strings.Builder
-	buf.WriteByte('{')
-	first := true
-	for k, v := range row {
-		if !first {
-			buf.WriteString(", ")
-		}
-		first = false
-		buf.WriteString(k)
-		buf.WriteString(": ")
-		if v == nil {
-			buf.WriteString("NULL")
-		} else if s, ok := v.(string); ok {
-			buf.WriteByte('\'')
-			buf.WriteString(s)
-			buf.WriteByte('\'')
-		} else {
-			buf.WriteString(FormatValue(v))
-		}
-	}
-	buf.WriteByte('}')
-	return buf.String()
 }
 
 // formatUUID formats 16 raw bytes as a UUID string "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx".

@@ -196,35 +196,6 @@ func TestVectorString(t *testing.T) {
 	}
 }
 
-func TestFormatValue(t *testing.T) {
-	tests := []struct {
-		name   string
-		input  any
-		expect string
-	}{
-		{"nil", nil, "NULL"},
-		{"string", "hello", "hello"},
-		{"int64", int64(42), "42"},
-		{"float64", float64(3.14), "3.14"},
-		{"array_empty", []any{}, "[]"},
-		{"array_ints", []any{int64(1), int64(2)}, "[1, 2]"},
-		{"array_strings", []any{"a", "b"}, "['a', 'b']"},
-		{"array_with_null", []any{"a", nil}, "['a', NULL]"},
-		{"map", map[string]any{"key": "val"}, "{key: 'val'}"},
-		{"map_with_null", map[string]any{"key": nil}, "{key: NULL}"},
-		{"map_with_int", map[string]any{"n": int64(5)}, "{n: 5}"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := FormatValue(tt.input)
-			if got != tt.expect {
-				t.Fatalf("FormatValue(%v) = %q, want %q", tt.input, got, tt.expect)
-			}
-		})
-	}
-}
-
 func TestFormatUUIDAndParseUUID(t *testing.T) {
 	uuid := "550e8400-e29b-41d4-a716-446655440000"
 	v := NewVector(TypeUUID, 1)
