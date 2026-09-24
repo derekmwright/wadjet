@@ -112,22 +112,6 @@ func (p *StagePlanner) PlanDistributed(ctx context.Context, node *logical.Node) 
 	if err := refuseWindowOverDependentJoin(node); err != nil {
 		return nil, err
 	}
-	// A correlated LATERAL whose arm shares a non-minted column name with
-	// another relation of the query: the join stage reads the body's scan
-	// stream and re-spells every reference onto it, binding by bare name
-	// where a qualifier is lost (arc JP round 3, lateral_identity_guard.go).
-	// The coordinator runs the plan single-process.
-	if err := refuseCollidingLateral(node); err != nil {
-		return nil, err
-	}
-	// A lifted predicate whose column the enclosing relation also publishes
-	// (#1130): the INNER and comma spellings answer on this path (the
-	// predicate is evaluated at the join off the scan's own stream), the LEFT
-	// spelling is refused — it padded every row NULL on one stage shape and
-	// routed on another for the same statement (arc LT round 2).
-	if err := logical.RefuseContestedLiftedRefs(node, true); err != nil {
-		return nil, err
-	}
 	// A DISTINCT with no stage and no coordinator dedup is a DROPPED
 	// DISTINCT — the raw row set, returned confidently (#466). Refuse it
 	// here for the same reason: loud beats silently different.
@@ -158,6 +142,28 @@ func (p *StagePlanner) PlanDistributed(ctx context.Context, node *logical.Node) 
 	// stage generation so the coordinator routes it onto its local engine,
 	// which is what the dual stage's own comment has always claimed happens.
 	if err := refuseTableLessSelect(node); err != nil {
+		return nil, err
+	}
+	// A correlated LATERAL whose arm carries a name across its join that
+	// another relation of the query also carries, or whose join pads a
+	// grouped arm (arc JP round 3, lateral_identity_guard.go): the join stage
+	// reads the body's scan stream and re-spells every reference onto it,
+	// binding by bare name where a qualifier is lost. The coordinator runs the
+	// plan single-process. Asked, and returned, BEFORE stage generation: the
+	// routed pipeline runs this same logical plan, and stage generation
+	// rewrites names in it (returned after it, `max(i.id) AS id` answered the
+	// outer id on the routed pipeline too). A lifted predicate over a shared
+	// name is such a shape, so the DAG's own refusal of it (#1130) below is
+	// never reached for it.
+	if err := refuseCollidingLateral(node); err != nil {
+		return nil, err
+	}
+	// A lifted predicate whose column the enclosing relation also publishes
+	// (#1130): the INNER and comma spellings answer on this path (the
+	// predicate is evaluated at the join off the scan's own stream), the LEFT
+	// spelling is refused — it padded every row NULL on one stage shape and
+	// routed on another for the same statement (arc LT round 2).
+	if err := logical.RefuseContestedLiftedRefs(node, true); err != nil {
 		return nil, err
 	}
 	stages := p.generateStages(node)

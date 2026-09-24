@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/derekmwright/wadjet/internal/planner/logical"
+	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
 
 // ErrLateralIdentityDistributed hands a plan with a correlated LATERAL the
@@ -69,11 +70,11 @@ func refuseCollidingLateral(root *logical.Node) error {
 	return walk(root)
 }
 
-// lateralArmShares refuses when the arm at the end of path carries a name a
-// subtree hanging off path also carries.
+// lateralArmShares refuses when a name the arm at the end of path carries
+// ACROSS the join (crossingNames) is carried by a subtree hanging off path.
 func lateralArmShares(arm *logical.Node, path []*logical.Node) error {
 	inside := map[string]bool{}
-	carriedNames(arm, inside)
+	crossingNames(arm, inside)
 	outside := map[string]bool{}
 	for i := 0; i+1 < len(path); i++ {
 		for _, c := range path[i].Children {
@@ -100,8 +101,8 @@ func lateralArmShares(arm *logical.Node, path []*logical.Node) error {
 
 // nullExtends reports whether a join pads an unmatched row with NULLs.
 func nullExtends(join *logical.Node) bool {
-	switch strings.ToLower(join.JoinType) {
-	case "", "inner", "cross":
+	switch strings.ToLower(strings.TrimSpace(join.JoinType)) {
+	case "", "join", "inner", "inner join", "cross", "cross join", "semi", "anti":
 		return false
 	}
 	return true
@@ -168,5 +169,95 @@ func carriedNames(n *logical.Node, out map[string]bool) {
 	}
 	for _, c := range n.Children {
 		carriedNames(c, out)
+	}
+}
+
+// crossingNames adds to out the names an arm carries across its join: what
+// its SELECT list publishes and every column those items (the minted key
+// slot's source, a lifted predicate's column, an aggregate's input) are
+// computed from — the names a reference above the join is re-spelled to on
+// the stage DAG. A column the body only filters on stays inside the body's
+// own stage and cannot be re-spelled onto, so it is not one. The walk goes
+// down the arm's root chain to the first Project, Aggregate or Scan (a Scan
+// reached with no Project above it publishes its every column).
+func crossingNames(arm *logical.Node, out map[string]bool) {
+	add := func(name string) {
+		if i := strings.LastIndexByte(name, '.'); i >= 0 {
+			name = name[i+1:]
+		}
+		name = strings.ToLower(strings.Trim(strings.TrimSpace(name), `"`))
+		if name == "" || name == "*" || strings.HasPrefix(name, "__") {
+			return
+		}
+		out[name] = true
+	}
+	reads := func(n plansql.Node, text string) {
+		if n == nil && text != "" {
+			n, _ = plansql.ParseExpression(text)
+		}
+		if n == nil {
+			return
+		}
+		refs, err := plansql.ColumnRefs(n)
+		if err != nil {
+			return
+		}
+		for _, r := range refs {
+			add(r.Column)
+		}
+	}
+	for n := arm; n != nil; {
+		switch n.Type {
+		case logical.NodeProject:
+			for _, p := range n.Projections {
+				switch {
+				case p.Alias != "":
+					add(p.Alias)
+				case p.Column != "":
+					add(p.Column)
+				}
+				if p.Column != "" {
+					add(p.Column)
+				}
+				expr := p.Expr
+				if p.ASTExpr == nil && p.Column != "" {
+					expr = ""
+				}
+				reads(p.ASTExpr, expr)
+			}
+			for _, a := range n.DeferredColumnAliases {
+				add(a)
+			}
+			// A Project over an Aggregate publishes what the aggregate
+			// computes: its inputs are what the stage reads.
+			if len(n.Children) > 0 && n.Children[0] != nil && n.Children[0].Type == logical.NodeAggregate {
+				n = n.Children[0]
+				continue
+			}
+			return
+		case logical.NodeAggregate:
+			for _, a := range n.AggExprs {
+				add(a.OutputCol)
+				add(a.InputCol)
+				add(a.InputCol2)
+				reads(a.InputExpr, "")
+			}
+			for _, g := range n.GroupBy {
+				add(g)
+			}
+			for _, g := range n.GroupByPublish {
+				add(g)
+			}
+			return
+		case logical.NodeScan:
+			for _, c := range n.ScanColumns {
+				add(c)
+			}
+			return
+		}
+		if len(n.Children) == 0 {
+			return
+		}
+		n = n.Children[0]
 	}
 }
