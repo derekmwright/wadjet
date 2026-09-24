@@ -257,3 +257,110 @@ func refuseJoinResidual(filter, joinType string, err error) error {
 	return fmt.Errorf("join ON residual %q on a %s join is not evaluable at the join: %w",
 		filter, joinType, err)
 }
+
+// refuseStrandedJoinQualifier refuses a join whose condition QUALIFIES a
+// column by a relation neither of its sides holds (#1299, ADR-0026 §8k).
+//
+// The executor matches keys on column names and strips a qualifier it cannot
+// find, so `t.order_id = o.id` on a join of two copies of item — one where o
+// is not below it at all — resolved `o.id` to whichever copy's `id` was
+// there, and answered a wrong pairing with no error. The reorderer's edges now
+// name the relations a conjunct reads (logical/join_edge_members.go), so no
+// plan it builds hangs a conjunct where one is missing; this is the check that
+// keeps a plan that does from answering. A qualifier is known to a side when
+// any node below it answers to that name — a scan's table, alias or enclosing
+// derived tables, a CTE reference, a derived table — compared without case, so
+// the check can only refuse a name that is nowhere at all.
+func refuseStrandedJoinQualifier(node *logical.Node) error {
+	for _, cond := range []string{node.JoinCond, node.JoinFilter} {
+		if strings.TrimSpace(cond) == "" {
+			continue
+		}
+		expr := parseJoinCondExpr(cond)
+		if expr == nil {
+			continue
+		}
+		var stranded string
+		walkJoinColRefs(expr, func(c *plansql.ColRef) {
+			if stranded != "" || c.Table == "" {
+				return
+			}
+			if !subtreeAnswersTo(node.Children[0], c.Table) &&
+				!subtreeAnswersTo(node.Children[1], c.Table) {
+				stranded = c.Table + "." + c.Column
+			}
+		})
+		if stranded != "" {
+			return fmt.Errorf("join ON %q: %s names a relation neither side of this join holds; "+
+				"the join was placed where its condition cannot be evaluated (a planner defect, "+
+				"refused rather than matched against another relation's column)", cond, stranded)
+		}
+	}
+	return nil
+}
+
+// subtreeAnswersTo reports whether any node under n answers to the qualifier q.
+func subtreeAnswersTo(n *logical.Node, q string) bool {
+	if n == nil {
+		return false
+	}
+	for _, name := range append(n.ScopeNames(), n.CTEName, n.CTERefAlias, n.DerivedAlias) {
+		if name != "" && strings.EqualFold(name, q) {
+			return true
+		}
+	}
+	for _, c := range n.Children {
+		if subtreeAnswersTo(c, q) {
+			return true
+		}
+	}
+	return false
+}
+
+// walkJoinColRefs visits every column reference of a join condition. A shape
+// it does not descend into hides its references, which only means the check
+// above does not see them.
+func walkJoinColRefs(node plansql.Node, visit func(*plansql.ColRef)) {
+	switch n := node.(type) {
+	case *plansql.ColRef:
+		visit(n)
+	case *plansql.ParenNode:
+		walkJoinColRefs(n.Inner, visit)
+	case *plansql.NotNode:
+		walkJoinColRefs(n.Inner, visit)
+	case *plansql.UnaryOp:
+		walkJoinColRefs(n.Inner, visit)
+	case *plansql.AndNode:
+		walkJoinColRefs(n.Left, visit)
+		walkJoinColRefs(n.Right, visit)
+	case *plansql.OrNode:
+		walkJoinColRefs(n.Left, visit)
+		walkJoinColRefs(n.Right, visit)
+	case *plansql.BinaryOp:
+		walkJoinColRefs(n.Left, visit)
+		walkJoinColRefs(n.Right, visit)
+	case *plansql.CmpExpr:
+		walkJoinColRefs(n.Left, visit)
+		walkJoinColRefs(n.Right, visit)
+	case *plansql.IsExpr:
+		walkJoinColRefs(n.Left, visit)
+	case *plansql.LikeExpr:
+		walkJoinColRefs(n.Left, visit)
+		walkJoinColRefs(n.Pattern, visit)
+	case *plansql.BetweenExpr:
+		walkJoinColRefs(n.Left, visit)
+		walkJoinColRefs(n.Low, visit)
+		walkJoinColRefs(n.High, visit)
+	case *plansql.InExpr:
+		walkJoinColRefs(n.Left, visit)
+		for _, v := range n.Values {
+			walkJoinColRefs(v, visit)
+		}
+	case *plansql.CastNode:
+		walkJoinColRefs(n.Inner, visit)
+	case *plansql.FuncCallNode:
+		for _, a := range n.Args {
+			walkJoinColRefs(a, visit)
+		}
+	}
+}

@@ -241,6 +241,9 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 		assignJoinKeySides(leftKeys, rightKeys,
 			subtreeNamingOf(node.Children[0]), subtreeNamingOf(node.Children[1]))
 	}
+	if err := refuseStrandedJoinQualifier(node); err != nil {
+		return nil, nil, nil, err
+	}
 
 	// Big-vs-big inner equi-joins route to sort-merge join when BOTH sides'
 	// estimated bytes reach SortMergeJoinBytes (0 = disabled, the shipped

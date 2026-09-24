@@ -4138,9 +4138,14 @@ func pruneProjections(n *Node) *Node {
 // ---------------------------------------------------------------------------
 
 // joinEdge represents a join condition between two relations.
+//
+// leftIdx and rightIdx are two relations the condition names; extra holds any
+// further ones (a conjunct over three relations), and the edge applies only
+// at a join that holds all of them (join_edge_members.go, #1299).
 type joinEdge struct {
 	leftIdx  int
 	rightIdx int
+	extra    []int
 	joinType string
 	joinCond string
 }
@@ -4276,7 +4281,9 @@ func flattenJoinChain(n *Node, rels *[]*Node, edges *[]joinEdge) {
 		}
 	}
 
-	// endpoints returns the (left, right) relation indexes cond relates.
+	// endpoints returns the (left, right) relation indexes cond relates, by
+	// bare column name — the fallback edgeFor keeps for a conjunct whose
+	// references do not all resolve to one relation each.
 	endpoints := func(cond string) (int, int) {
 		condRefs := make(map[string]bool, 4)
 		extractJoinColumnRefs(cond, condRefs)
@@ -4359,6 +4366,39 @@ func flattenJoinChain(n *Node, rels *[]*Node, edges *[]joinEdge) {
 	// Splitting is only safe when every part is a self-contained comparison.
 	// The split is on the AST (splitJoinConjuncts), so a parenthesised OR and
 	// a BETWEEN arrive whole and simply fail the comparison test below.
+	//
+	// Each edge names the relations its conjunct READS, resolved by
+	// qualifier: see join_edge_members.go for the rule and #1299 for what
+	// the column-name endpoints alone did to a table joined three times.
+	membership := membershipOf((*rels)[leftStart:])
+	edgeFor := func(text string, expr plansql.Node) joinEdge {
+		if expr == nil {
+			expr = tryParseExpr(text)
+		}
+		var named []int
+		complete := false
+		if expr != nil {
+			named, complete = membership.conjunctRelations(expr)
+			for i := range named {
+				named[i] += leftStart
+			}
+		}
+		var e joinEdge
+		if complete && len(named) >= 2 {
+			e = joinEdge{leftIdx: named[0], rightIdx: named[1], extra: named[2:]}
+		} else {
+			l, r := endpoints(text)
+			e = joinEdge{leftIdx: l, rightIdx: r}
+			for _, i := range named {
+				if i != l && i != r {
+					e.extra = append(e.extra, i)
+				}
+			}
+		}
+		e.joinType = n.JoinType
+		return e
+	}
+
 	parts := splitJoinConjuncts(n.JoinCond)
 	splittable := len(parts) > 1
 	for _, conj := range parts {
@@ -4368,34 +4408,28 @@ func flattenJoinChain(n *Node, rels *[]*Node, edges *[]joinEdge) {
 		}
 	}
 	if !splittable {
-		l, r := endpoints(n.JoinCond)
-		*edges = append(*edges, joinEdge{
-			leftIdx:  l,
-			rightIdx: r,
-			joinType: n.JoinType,
-			joinCond: n.JoinCond,
-		})
+		e := edgeFor(n.JoinCond, nil)
+		e.joinCond = n.JoinCond
+		*edges = append(*edges, e)
 		return
 	}
 
-	type edgeKey struct{ l, r int }
-	grouped := make(map[edgeKey][]string, len(parts))
-	order := make([]edgeKey, 0, len(parts))
+	grouped := make(map[string]*joinEdge, len(parts))
+	order := make([]string, 0, len(parts))
 	for _, conj := range parts {
-		l, r := endpoints(conj.text)
-		k := edgeKey{l, r}
-		if _, seen := grouped[k]; !seen {
-			order = append(order, k)
+		e := edgeFor(conj.text, conj.expr)
+		k := e.edgeKey()
+		text := strings.TrimSpace(conj.text)
+		if g, seen := grouped[k]; seen {
+			g.joinCond += " AND " + text
+			continue
 		}
-		grouped[k] = append(grouped[k], strings.TrimSpace(conj.text))
+		e.joinCond = text
+		grouped[k] = &e
+		order = append(order, k)
 	}
 	for _, k := range order {
-		*edges = append(*edges, joinEdge{
-			leftIdx:  k.l,
-			rightIdx: k.r,
-			joinType: n.JoinType,
-			joinCond: strings.Join(grouped[k], " AND "),
-		})
+		*edges = append(*edges, *grouped[k])
 	}
 }
 
@@ -4483,16 +4517,6 @@ func greedyJoinReorder(rels []*Node, edges []joinEdge) *Node {
 		costs[i] = estimateRelCost(r)
 	}
 
-	// Build adjacency: for each relation, which edges connect to it
-	relEdges := make([][]int, n)
-	for i := range relEdges {
-		relEdges[i] = []int{}
-	}
-	for ei, e := range edges {
-		relEdges[e.leftIdx] = append(relEdges[e.leftIdx], ei)
-		relEdges[e.rightIdx] = append(relEdges[e.rightIdx], ei)
-	}
-
 	// Track which table names each slot in the plan covers (for condition matching)
 	relTables, _ := joinSidesScanInfo(rels...)
 
@@ -4533,12 +4557,16 @@ func greedyJoinReorder(rels []*Node, edges []joinEdge) *Node {
 			if usedEdges[ei] {
 				continue
 			}
-			var candidate int
-			if used[e.leftIdx] && !used[e.rightIdx] {
-				candidate = e.rightIdx
-			} else if used[e.rightIdx] && !used[e.leftIdx] {
-				candidate = e.leftIdx
-			} else {
+			// The edge applies at the join that adds its ONE relation not
+			// yet used, once every other relation it names is.
+			candidate, open := -1, 0
+			for _, m := range e.members() {
+				if !used[m] {
+					candidate = m
+					open++
+				}
+			}
+			if open != 1 || len(e.members()) < 2 {
 				continue
 			}
 			cf := filtered[candidate] && costs[candidate] < 1000
@@ -4589,8 +4617,12 @@ func greedyJoinReorder(rels []*Node, edges []joinEdge) *Node {
 			if usedEdges[ei] {
 				continue
 			}
-			if used[e.leftIdx] && used[e.rightIdx] {
-				// Both sides covered — add as additional filter on the join
+			covered := true
+			for _, m := range e.members() {
+				covered = covered && used[m]
+			}
+			if covered {
+				// Every relation covered — add as additional filter on the join
 				usedEdges[ei] = true
 				if plan.JoinCond != "" {
 					plan.JoinCond = plan.JoinCond + " AND " + e.joinCond
@@ -4755,8 +4787,10 @@ func dpJoinReorder(rels []*Node, edges []joinEdge, opts Options) (*Node, int) {
 				var conds []string
 				joinType := "inner"
 				for _, e := range edges {
-					l, r := 1<<e.leftIdx, 1<<e.rightIdx
-					if (sub&l != 0 && other&r != 0) || (sub&r != 0 && other&l != 0) {
+					// An edge crosses the cut when it lies within the
+					// subset and names relations on both halves of it.
+					em := e.mask()
+					if em&^mask == 0 && em&sub != 0 && em&other != 0 {
 						if e.joinCond != "" {
 							conds = append(conds, e.joinCond)
 						}
@@ -4810,9 +4844,7 @@ func dpJoinReorder(rels []*Node, edges []joinEdge, opts Options) (*Node, int) {
 			joinType := "inner"
 			connected := false
 			for _, e := range edges {
-				jLeft := e.leftIdx == j && (mask&(1<<e.rightIdx)) != 0
-				jRight := e.rightIdx == j && (mask&(1<<e.leftIdx)) != 0
-				if jLeft || jRight {
+				if e.joinsInto(mask, j) {
 					connected = true
 					if e.joinCond != "" {
 						allConds = append(allConds, e.joinCond)
