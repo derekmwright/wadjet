@@ -50,12 +50,34 @@ func rewriteDistinctAsGroupBy(n *Node) *Node {
 	agg := NewAggregate(proj.Children[0], groupBy, nil)
 	agg.GroupByExprs = groupByExprs
 	proj.Children = []*Node{agg}
-	// The Distinct may be the plan root, which carries the CTE
-	// definitions the physical planner resolves against.
-	if len(n.CTEs) > 0 {
-		proj.CTEs = n.CTEs
-	}
+	inheritRootNaming(proj, n)
 	return proj
+}
+
+// inheritRootNaming moves what the ENCLOSING query stamped on a block's
+// subtree root onto the node that replaces that root. The Distinct may be the
+// root of a derived table, a CTE body or a LATERAL body, and its alias is how
+// a join qualifies the arm's duplicate columns (joinArmAlias): dropped with
+// the Distinct, `FROM lt_o o CROSS JOIN (SELECT DISTINCT i.k FROM lt_i i) s
+// WHERE s.k = o.k + 1` qualified the build's `k` by the SCAN's alias `i`, and
+// `s.k` then bound the OUTER `k` — zero rows for PostgreSQL's two, on every
+// arm (arc JP round 2). The WITH list travels for the reason it always did:
+// the Distinct may be the plan root.
+func inheritRootNaming(dst, src *Node) {
+	if dst.DerivedAlias == "" {
+		dst.DerivedAlias = src.DerivedAlias
+	}
+	if dst.CTEName == "" {
+		dst.CTEName = src.CTEName
+	}
+	if dst.CTERefAlias == "" {
+		dst.CTERefAlias = src.CTERefAlias
+	}
+	if len(dst.CTEs) == 0 {
+		dst.CTEs = src.CTEs
+	}
+	dst.LateralSubtree = dst.LateralSubtree || src.LateralSubtree
+	dst.LiftedRefDeclinedUnderStar = dst.LiftedRefDeclinedUnderStar || src.LiftedRefDeclinedUnderStar
 }
 
 // rewriteStarDistinct handles the one user DISTINCT that reaches the rewrite
@@ -89,11 +111,7 @@ func rewriteStarDistinct(n *Node) *Node {
 	}
 	agg := NewAggregate(n.Children[0], groupBy, nil)
 	agg.GroupByExprs = groupByExprs
-	// The Distinct may be the plan root, which carries the CTE definitions
-	// the physical planner resolves against.
-	if len(n.CTEs) > 0 {
-		agg.CTEs = n.CTEs
-	}
+	inheritRootNaming(agg, n)
 	return agg
 }
 
