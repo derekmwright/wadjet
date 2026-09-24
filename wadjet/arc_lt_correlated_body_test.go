@@ -104,6 +104,11 @@ func TestArcLTACorrelatedBodyIsEvaluatedPerOuterRow(t *testing.T) {
 		{"an inner EXPRESSION on the key side partitions correctly",
 			`SELECT o.id AS a, s.v AS v FROM lt_o o JOIN LATERAL (SELECT i.v AS v FROM lt_i i WHERE i.k + 0 = o.k ORDER BY i.v, i.id LIMIT 2) s ON true ORDER BY a, v`,
 			"1,10;1,10;2,10;2,10;3,20;3,40"},
+		// Arc JP (#1302): an outer EXPRESSION is a key too — this cell was a
+		// refusal pin until the unbounded join it rides answered.
+		{"an outer EXPRESSION on the key side partitions correctly",
+			`SELECT o.id AS a, s.v AS v FROM lt_o o JOIN LATERAL (SELECT i.v AS v FROM lt_i i WHERE i.k = o.k + 0 ORDER BY i.v, i.id LIMIT 2) s ON true ORDER BY a, v`,
+			"1,10;1,10;2,10;2,10;3,20;3,40"},
 		{"EXISTS OFFSET past the matches under a mixed correlation",
 			`SELECT o.id AS a FROM lt_o o WHERE EXISTS (SELECT i.v FROM lt_i i WHERE i.k = o.k AND i.v > o.total ORDER BY i.v OFFSET 1) ORDER BY a`,
 			"3"},
@@ -147,9 +152,6 @@ func TestArcLTACorrelatedBodyIsEvaluatedPerOuterRow(t *testing.T) {
 		{"a key whose opposite side mixes inner and outer references",
 			`SELECT o.id AS a, s.v AS v FROM lt_o o JOIN LATERAL (SELECT i.v AS v FROM lt_i i WHERE i.k = o.k + i.id - 3 ORDER BY i.v, i.id LIMIT 1) s ON true ORDER BY a, v`,
 			"cannot apply that bound per outer row", "zero rows at b1e67749 for PostgreSQL's 4"},
-		{"a key whose outer side is an expression",
-			`SELECT o.id AS a, s.v AS v FROM lt_o o JOIN LATERAL (SELECT i.v AS v FROM lt_i i WHERE i.k = o.k + 0 ORDER BY i.v, i.id LIMIT 2) s ON true ORDER BY a, v`,
-			"cannot apply that bound per outer row", "zero rows at b1e67749 and at 51addfb6 with or without the bound (FC-LT-7) for PostgreSQL's 6"},
 		{"IN over a body carrying a QUALIFY declines to the rerun, which refuses the window loudly",
 			`SELECT o.id AS a FROM lt_o o WHERE o.k IN (SELECT i.k FROM lt_i i WHERE i.k = o.k QUALIFY ROW_NUMBER() OVER (PARTITION BY i.k ORDER BY i.id) > 3) ORDER BY a`,
 			"holds a window function", "1;2;3 at 51addfb6 and b1e67749 (the QUALIFY dropped) for PostgreSQL's equivalent zero rows"},

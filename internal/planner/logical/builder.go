@@ -2359,7 +2359,38 @@ func buildLateralSubquery(outer *plansql.SelectInfo, left *Node, join plansql.Jo
 			}
 			col.Alias = slot
 			injected = append(injected, col)
-			injectedSlots = append(injectedSlots, slot)
+			// A SLOT THE JOIN CANNOT KEY ON IS READ ABOVE IT (#1302). Where
+			// the outer side is a bare column, `o.k = s.__key_0` is a hash
+			// key, the join consumes the slot and drops it from its output.
+			// Where it is an expression (`o.id - 0`) the equality is no key:
+			// it is evaluated over the join's OUTPUT, as an ordinary
+			// `JOIN … ON i.k = o.k - 0` is, and a slot dropped at the join
+			// read NULL there — every row failed the equality and the
+			// lateral answered zero rows where PostgreSQL answers the
+			// matches. So that slot is EMITTED and hidden from a star only
+			// (Node.StarLiftedRefCols), the disposition a lifted
+			// predicate's slots already have.
+			//
+			// Under a BARE enclosing star the emitted slot would be
+			// published: a star over a LATERAL is not expanded into the
+			// arms' lists (ExpandStarProjections), so it reads the join's
+			// stream. That is refused, as a lifted predicate under a bare
+			// star is (ADR-0021 §1s): name the columns, or write `s.*`,
+			// which reads the lateral's own list without the slot.
+			if lateralOuterSideIsColumn(cp, leftAliases) {
+				injectedSlots = append(injectedSlots, slot)
+			} else {
+				if lateralEnclosingBareStar(outer) {
+					return nil, "", lateralEmptyInput{}, nil, nil, sqlerr.New("0A000",
+						"LATERAL body's correlated equality %s has an EXPRESSION on its outer side, "+
+							"so the join evaluates it over its output and must carry the body's key "+
+							"column there; a bare `SELECT *` over a LATERAL publishes that output "+
+							"whole and would show the column. Name the columns, or select `%s.*` "+
+							"for the lateral's own list",
+						sqlerr.Quote(strings.TrimSpace(cp)), lateralStarHint(join.RightAlias))
+				}
+				starLifted = append(starLifted, slot)
+			}
 			if keyRename == nil {
 				keyRename = map[string]string{}
 			}

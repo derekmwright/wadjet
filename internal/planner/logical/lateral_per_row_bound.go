@@ -56,21 +56,21 @@ func lateralBoundPerOuterRow(info *plansql.SelectInfo, correlatedParts []string,
 		return lateralBoundRefusal(info, "the body carries its own QUALIFY, and the bound would number the rows before that clause removes any")
 	}
 	// THE KEY RULE, checked on the parsed predicate and not on its text
-	// (round-2 review, B6): every correlated part must be `<inner column> =
-	// <outer column>` — one side a bare column of the body's own relations,
-	// the other a bare column of the enclosing query. An opposite side that
-	// mixes inner and outer references (`i.k = o.k + i.id - 3`) is not a
+	// (round-2 review, B6): every correlated part must be `<inner expression>
+	// = <outer expression>` — one side over the body's own relations alone,
+	// the other over the enclosing query's alone. An opposite side that mixes
+	// inner and outer references (`i.k = o.k + i.id - 3`) is not a
 	// restriction on an inner column at all, and the partition it would name
-	// is not the one PostgreSQL evaluates per outer row; an outer EXPRESSION
-	// (`o.k + 0`) is a join key this engine does not yet bind (it answered
-	// zero rows with or without the bound; recorded), so it is refused here
-	// rather than partitioned on a guess.
+	// is not the one PostgreSQL evaluates per outer row. An outer EXPRESSION
+	// (`o.k + 0`) is: the rows one outer row may match are the inner rows
+	// whose key equals ONE value, so the per-key bound over the inner side is
+	// the per-row bound (ADR-0021 §1s; #1302 closed the join it rides).
 	parts := make([]plansql.Node, 0, len(correlatedParts))
 	for _, cp := range correlatedParts {
 		innerCol, ok := lateralEqualityKey(cp, leftAliases)
 		if !ok {
 			return lateralBoundRefusal(info, "its correlated predicate "+
-				sqlerr.Quote(strings.TrimSpace(cp))+" is not `<inner expression> = <outer column>`, so there is no key to partition the bound by")
+				sqlerr.Quote(strings.TrimSpace(cp))+" is not `<inner expression> = <outer expression>`, so there is no key to partition the bound by")
 		}
 		term := strings.TrimSpace(innerCol)
 		if aggregates {
@@ -131,43 +131,85 @@ func lateralBoundPerOuterRow(info *plansql.SelectInfo, correlatedParts []string,
 }
 
 // lateralEqualityKey reads a correlated part as `<inner expression> = <outer
-// column>` and returns the inner side's text. The OUTER side must be a bare
-// column of the enclosing query; the INNER side may be any expression over the
-// body's own relations alone (`i.k + 0`, `i.k % 2` partition correctly on
-// every arm) — a side that mixes inner and outer references, an inequality,
-// or an outer EXPRESSION is not a key this rewrite may partition by.
+// expression>` and returns the inner side's text (lateralCorrelatedEquality).
 func lateralEqualityKey(cp string, leftAliases map[string]bool) (string, bool) {
+	inner, _, ok := lateralCorrelatedEquality(cp, leftAliases)
+	if !ok {
+		return "", false
+	}
+	return inner.String(), true
+}
+
+// lateralCorrelatedEquality splits a correlated part into its INNER side — any
+// expression over the body's own relations alone (`i.k`, `i.k + 0`, `i.k % 2`;
+// a bare reference is the body's, which is how SQL scopes it) — and its OUTER
+// side, an expression every reference of which names the enclosing query
+// (`o.k`, `o.k - 0`, `CAST(o.k AS text)`, `o.a + o.b`). A side that mixes the
+// two, or an inequality, is not one: it restricts no inner column to a value
+// fixed by the outer row.
+//
+// THE ONE RULE for one predicate shape (#1302): the bounded rewrite partitions
+// by the inner side, and the unbounded lowering keys the join on it — where
+// the outer side is a bare column the pair is a hash key, and where it is an
+// expression the equality is evaluated over the join's output, exactly as an
+// ordinary `JOIN … ON i.k = o.k - 0` is (buildLateralSubquery emits the key
+// slot for that read).
+func lateralCorrelatedEquality(cp string, leftAliases map[string]bool) (inner, outer plansql.Node, ok bool) {
 	node, err := plansql.ParseExpression(cp)
 	if err != nil || node == nil {
-		return "", false
+		return nil, nil, false
 	}
-	cmp, ok := node.(*plansql.CmpExpr)
-	if !ok || cmp.Op != "=" {
-		return "", false
+	for {
+		p, isParen := node.(*plansql.ParenNode)
+		if !isParen {
+			break
+		}
+		node = p.Inner
 	}
-	outerCol := func(n plansql.Node) bool {
-		ref, ok := n.(*plansql.ColRef)
-		return ok && ref.Table != "" && leftAliases[strings.ToLower(ref.Table)]
+	cmp, isCmp := node.(*plansql.CmpExpr)
+	if !isCmp || cmp.Op != "=" {
+		return nil, nil, false
 	}
-	innerOnly := func(n plansql.Node) bool {
+	side := func(n plansql.Node, wantOuter bool) bool {
 		refs, err := plansql.ColumnRefs(n)
 		if err != nil || len(refs) == 0 {
 			return false
 		}
 		for _, r := range refs {
-			if r.Table != "" && leftAliases[strings.ToLower(r.Table)] {
+			isOuter := r.Table != "" && leftAliases[strings.ToLower(r.Table)]
+			if isOuter != wantOuter {
 				return false
 			}
 		}
 		return true
 	}
 	switch {
-	case outerCol(cmp.Left) && innerOnly(cmp.Right):
-		return cmp.Right.String(), true
-	case outerCol(cmp.Right) && innerOnly(cmp.Left):
-		return cmp.Left.String(), true
+	case side(cmp.Left, true) && side(cmp.Right, false):
+		return cmp.Right, cmp.Left, true
+	case side(cmp.Right, true) && side(cmp.Left, false):
+		return cmp.Left, cmp.Right, true
 	}
-	return "", false
+	return nil, nil, false
+}
+
+// lateralOuterSideIsColumn reports whether a correlated equality's OUTER side
+// is a bare column — the only shape the join can key on by name. Anything else
+// (an outer expression, or a part lateralCorrelatedEquality does not read) is
+// evaluated over the join's output.
+func lateralOuterSideIsColumn(cp string, leftAliases map[string]bool) bool {
+	_, outer, ok := lateralCorrelatedEquality(cp, leftAliases)
+	if !ok {
+		return false
+	}
+	for {
+		p, isParen := outer.(*plansql.ParenNode)
+		if !isParen {
+			break
+		}
+		outer = p.Inner
+	}
+	_, isRef := outer.(*plansql.ColRef)
+	return isRef
 }
 
 // lateralDistinctOverKeyOnly reports whether a DISTINCT body's list is
@@ -316,4 +358,27 @@ func lateralBoundRemovesTheOneRow(info *plansql.SelectInfo) bool {
 		return false
 	}
 	return (hasLimit && limit == 0) || (hasOffset && offset >= 1)
+}
+
+// lateralEnclosingBareStar reports whether the enclosing SELECT list writes an
+// UNQUALIFIED star — the one spelling that publishes a LATERAL join's stream
+// whole (a star over a LATERAL is not expanded into the arms' lists).
+func lateralEnclosingBareStar(outer *plansql.SelectInfo) bool {
+	if outer == nil {
+		return false
+	}
+	for _, c := range outer.Columns {
+		if c.Star && c.TableRef == "" {
+			return true
+		}
+	}
+	return false
+}
+
+// lateralStarHint is the qualifier the refusal suggests a star under.
+func lateralStarHint(alias string) string {
+	if alias == "" {
+		return "<lateral alias>"
+	}
+	return alias
 }
