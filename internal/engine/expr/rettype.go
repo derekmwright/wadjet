@@ -394,9 +394,15 @@ const (
 	retDynamic
 )
 
-// The fixed declarations. These name the type the function's Go results are
-// stored as, not the type SQL calls them: the date/time functions below return
-// formatted strings, so they declare RetString.
+// The fixed declarations. These name the SQL type a function's result
+// declares, not the shape of the Go value its kernel happens to hand back:
+// now/current_timestamp/localtimestamp all return formatted TEXT at runtime
+// and still declare RetTimestamp, and current_date does the same for DATE
+// since #1254 — RetTypeOf(batch.TypeDate), because DATE has no named
+// constant of its own below. A function that is genuinely SQL TEXT declares
+// RetString; a few date/address functions still wrongly do the same
+// (to_date, network_address, int_to_ip, uuid — #1254's issue thread, not
+// fixed here).
 var (
 	RetBool      = Ret{kind: retFixed, typ: batch.TypeBool}
 	RetInt32     = Ret{kind: retFixed, typ: batch.TypeInt32}

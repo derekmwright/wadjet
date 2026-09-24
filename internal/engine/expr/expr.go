@@ -374,9 +374,18 @@ func init() {
 		// time-series engine spells it. TIMESTAMP in, TIMESTAMP out — the
 		// declaration a downsampling GROUP BY key has to carry, or every
 		// client reads the bucket as text (#965).
-		"time_bucket":  {fnTimeBucket, RetTimestamp},
-		"extract":      {fnExtract, RetFloat64},
-		"current_date": {fnCurrentDate, RetString},
+		"time_bucket": {fnTimeBucket, RetTimestamp},
+		"extract":     {fnExtract, RetFloat64},
+		// CURRENT_DATE declares DATE (#1254), not RetString: its siblings in
+		// this file already declare their own real type — now/current_timestamp/
+		// localtimestamp are RetTimestamp a few lines down — and current_date
+		// was the one holdout, so `INSERT ... SELECT CURRENT_DATE` into a DATE
+		// column was refused as a type mismatch even though the VALUE renders
+		// a date correctly. RetTypeOf, not a new RetDate constant: the pattern
+		// RetTypeOf's own doc names it for — a fixed declaration over a type
+		// with no dedicated constant, and DATE already has a real vector type
+		// (batch.TypeDate) to declare.
+		"current_date": {fnCurrentDate, RetTypeOf(batch.TypeDate)},
 		"date_diff":    {fnDateDiff, RetFloat64},
 
 		// Session / catalog information (see the SessionUser block below)
