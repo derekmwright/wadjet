@@ -301,36 +301,28 @@ func TestArcK3ADerivedBlockPublishesItsOwnProjection(t *testing.T) {
 			sql: `SELECT * FROM lat_ord o JOIN (SELECT order_id, ARRAY[amount] AS a ` +
 				`FROM lat_item WHERE amount > 60) s ON s.order_id = o.id ORDER BY o.id, a`,
 			want: `id,customer,total,order_id,a | 1,Alice,150,1,[100] | ` +
-				`2,Bob,200,2,[125] | 2,Bob,200,2,[75]`},
+				`2,Bob,200,2,[75] | 2,Bob,200,2,[125]`},
 		// A CONTAINER INSIDE A LATERAL, both join kinds. At bb8635a4 these
 		// were ROUTED; at round 3 they read the lateral's stream and published
 		// the correlation columns (dag) or failed under ADR-0010 (dagshuf).
 		{name: "computed/a-container-inside-a-LEFT-lateral",
 			sql: `SELECT * FROM lat_ord o LEFT JOIN LATERAL (SELECT ARRAY[amount] AS a ` +
 				`FROM lat_item WHERE order_id = o.id) s ON true ORDER BY o.id, a`,
-			want: `id,customer,total,a | 1,Alice,150,[100] | 1,Alice,150,[50] | ` +
-				`2,Bob,200,[125] | 2,Bob,200,[75] | 3,Carol,0,NULL`},
+			want: `id,customer,total,a | 1,Alice,150,[50] | 1,Alice,150,[100] | ` +
+				`2,Bob,200,[75] | 2,Bob,200,[125] | 3,Carol,0,NULL`},
 		// Its column ORDER used to differ from the LEFT twin's above — the
 		// lateral's column first — because `reorderJoins` swapped a
 		// manufactured lateral join's sides by estimated rows and only an
 		// INNER join is reordered. A dependent join is not reorderable
 		// (#1008, ADR-0026 §8e), so the two twins now agree and both are
-		// PostgreSQL's column order.
-		//
-		// THE ROW ORDER IS NOT PostgreSQL'S, in this cell and in its LEFT and
-		// FILTERED siblings, and that is recorded rather than fixed here.
-		// `ORDER BY … a` over an ARRAY sorts by the value's TEXT rendering
-		// (`"[100]" < "[50]"`), where PostgreSQL compares arrays
-		// element-wise and answers `{50}, {100}` and `{75}, {125}` — measured
-		// live on postgres:17-alpine at arc N1's tip. Pre-existing (K3,
-		// v0.18.62), unmoved by anything in #1008, and a defect of the
-		// comparison kernel rather than of what a stage publishes: it is a
-		// filing candidate, not this cell's subject.
+		// PostgreSQL's column order. `ORDER BY … a` compares the arrays
+		// element-wise, as PostgreSQL does (`{50}, {100}`; it sorted the
+		// value's text until arc CW, #1021).
 		{name: "computed/a-container-inside-an-INNER-lateral",
 			sql: `SELECT * FROM lat_ord o JOIN LATERAL (SELECT ARRAY[amount] AS a ` +
 				`FROM lat_item WHERE order_id = o.id) s ON true ORDER BY o.id, a`,
-			want: `id,customer,total,a | 1,Alice,150,[100] | 1,Alice,150,[50] | ` +
-				`2,Bob,200,[125] | 2,Bob,200,[75]`},
+			want: `id,customer,total,a | 1,Alice,150,[50] | 1,Alice,150,[100] | ` +
+				`2,Bob,200,[75] | 2,Bob,200,[125]`},
 		{name: "computed/an-all-NULL-CASE-inside-a-lateral",
 			sql: `SELECT * FROM lat_ord o LEFT JOIN LATERAL (SELECT ` +
 				`CASE WHEN amount > 60 THEN NULL ELSE NULL END AS c FROM lat_item ` +
@@ -345,14 +337,13 @@ func TestArcK3ADerivedBlockPublishesItsOwnProjection(t *testing.T) {
 		// come after `lat_ord`'s because that is the FROM clause's order —
 		// PostgreSQL 17.11 answers `id,customer,total,order_id,a` here, and
 		// this cell recorded the BUILD-side-first order the star published
-		// while it declined a set-operation arm (#1102, arc R2). The ARRAY
-		// sequence is the comparison-kernel residue the cells above record.
+		// while it declined a set-operation arm (#1102, arc R2).
 		{name: "computed/a-container-in-a-set-op-arm",
 			sql: `SELECT * FROM lat_ord o JOIN (SELECT order_id, ARRAY[amount] AS a ` +
 				`FROM lat_item UNION ALL SELECT order_id, ARRAY[amount] FROM lat_item ` +
 				`WHERE amount > 1000) s ON s.order_id = o.id ORDER BY o.id, a`,
-			want: `id,customer,total,order_id,a | 1,Alice,150,1,[100] | ` +
-				`1,Alice,150,1,[50] | 2,Bob,200,2,[125] | 2,Bob,200,2,[75]`},
+			want: `id,customer,total,order_id,a | 1,Alice,150,1,[50] | ` +
+				`1,Alice,150,1,[100] | 2,Bob,200,2,[75] | 2,Bob,200,2,[125]`},
 
 		// THE SAME RULE where the block ALSO introduces a column. At bb8635a4
 		// this lost `a2` silently on both DAG arms and the `order_id AS oid`
