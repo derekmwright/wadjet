@@ -2540,6 +2540,18 @@ func buildLateralSubquery(outer *plansql.SelectInfo, left *Node, join plansql.Jo
 	for i, part := range correlatedParts {
 		correlatedParts[i] = renameCorrelatedInnerRef(part, keyRename, join.RightAlias)
 	}
+	// …and a correlated predicate that is NOT the key reads a column the
+	// body publishes through the LATERAL'S alias. The predicate is evaluated
+	// over the join's output (at the join, or above it when the key is an
+	// expression), where the body's own qualifier `i` names nothing: the
+	// stripped name bound the OUTER column wherever the enclosing relation
+	// publishes it too — `i.k = o.k - 0 AND i.id <> o.id` compared `o.id`
+	// with itself and answered zero rows (arc JP round 3, B7). The join emits
+	// the body's column under `s.id` when it collides and `id` when it does
+	// not; `s.id` reads it either way.
+	for i, part := range correlatedParts {
+		correlatedParts[i] = qualifyLiftedRefsByLateralAlias(part, leftAliases, subInfo.Columns, join.RightAlias)
+	}
 
 	// The correlation the DECORRELATION produced and the ON the QUERY WROTE
 	// are returned apart, because the empty-input repair may keep only the

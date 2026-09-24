@@ -215,3 +215,37 @@ func lateralAliasPublishes(cols []plansql.SelectColumn, bare string) bool {
 	}
 	return false
 }
+
+// qualifyLiftedRefsByLateralAlias respells, in a correlated predicate that is not
+// the lateral's equality key, every INNER column reference the body publishes
+// under its own name to the lateral's alias (`i.id` → `s.id`) — the one name
+// that reads the body's column over the join's output whatever the enclosing
+// relation publishes (the builder cannot ask: scan columns are annotated
+// later). Anything else is returned unchanged.
+func qualifyLiftedRefsByLateralAlias(cp string, leftAliases map[string]bool, cols []plansql.SelectColumn,
+	rightAlias string) string {
+	if rightAlias == "" || extractInnerColumn(cp, leftAliases) != "" {
+		return cp
+	}
+	node, err := plansql.ParseExpression(cp)
+	if err != nil || node == nil {
+		return cp
+	}
+	changed := false
+	out := plansql.RewriteExpr(node, func(n plansql.Node) (plansql.Node, bool) {
+		ref, ok := n.(*plansql.ColRef)
+		if !ok || ref.Column == "" || leftAliases[strings.ToLower(ref.Table)] {
+			return nil, false
+		}
+		if _, renamed := lateralPublishedKeyName(cols, ref.Column); renamed ||
+			!lateralSelectsColumn(cols, ref.Column) {
+			return nil, false
+		}
+		changed = true
+		return &plansql.ColRef{Table: rightAlias, Column: ref.Column}, true
+	})
+	if !changed {
+		return cp
+	}
+	return out.String()
+}
