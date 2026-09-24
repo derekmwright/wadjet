@@ -60,6 +60,34 @@ func TestArcJPAJoinArmKeyIsTheColumnTheQueryWrote(t *testing.T) {
 			"SELECT o.id AS a, s.m AS m FROM lat_ord o JOIN LATERAL (" +
 				"SELECT i.id AS m FROM lat_item i WHERE i.order_id = o.id - o.id + 1) s ON true",
 			"1,1 | 1,2 | 2,1 | 2,2 | 3,1 | 3,2"},
+		// Round 2: the body publishes UNALIASED names the outer relation also
+		// publishes (`id`). At 76c7903d the lifted key travelled under the
+		// body's own name and a DISTINCT body lost its block's name, so `s.id`
+		// read the OUTER `id`: 12 rows / zero rows. An aliased table whose
+		// alias is another table's name bound the table's name (P1).
+		{"distinctKeyBounded",
+			"SELECT o.id, s.id FROM lat_ord o JOIN LATERAL (" +
+				"SELECT DISTINCT i.id FROM lat_item i WHERE i.id = o.id - 0 LIMIT 1) s ON true",
+			"1,1 | 2,2 | 3,3"},
+		{"distinctKeyUnbounded",
+			"SELECT o.id, s.id FROM lat_ord o JOIN LATERAL (" +
+				"SELECT DISTINCT i.id FROM lat_item i WHERE i.id = o.id + 1) s ON true",
+			"1,2 | 2,3 | 3,4"},
+		{"groupedKey",
+			"SELECT o.id, s.id, s.n FROM lat_ord o JOIN LATERAL (" +
+				"SELECT i.id, count(*) AS n FROM lat_item i WHERE i.id = o.id + 1 GROUP BY i.id) s ON true",
+			"1,2,1 | 2,3,1 | 3,4,1"},
+		{"boundedCollidingItem",
+			"SELECT o.id, s.id FROM lat_ord o JOIN LATERAL (" +
+				"SELECT i.id FROM lat_item i WHERE i.order_id = o.id * 1 ORDER BY i.amount DESC LIMIT 1) s ON true",
+			"1,2 | 2,4"},
+		{"derivedDistinct",
+			"SELECT o.id, s.id FROM lat_ord o CROSS JOIN (SELECT DISTINCT i.id FROM lat_item i) s WHERE s.id = o.id + 1",
+			"1,2 | 2,3 | 3,4"},
+		{"aliasIsAnotherTablesName",
+			"SELECT lat_item.id, lat_ord.id FROM lat_ord lat_item JOIN lat_item lat_ord " +
+				"ON lat_ord.order_id = lat_item.id AND lat_ord.amount > 60",
+			"1,2 | 2,3 | 2,4"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

@@ -116,6 +116,32 @@ func TestArcJPAReorderedAndReKeyedJoinsReadThePublishedValueOnEveryDoor(t *testi
 			`SELECT b.id AS a, s.m AS m FROM e7emp b JOIN LATERAL (SELECT c.ssn AS m ` +
 				`FROM e7emp c WHERE c.dept = b.dept || '' ORDER BY c.id LIMIT 1) s ON true`,
 			pmSSNPairs()},
+		// Round 2: bodies that publish their columns UNALIASED, so every
+		// name they publish is a name the outer copy of the same table
+		// publishes too. Read by name, `s.id` would be the OUTER `b.id` (one
+		// pair per row); the lateral's own rows are all eight under the mask.
+		{"r2DistinctUnaliasedOnMasked",
+			`SELECT b.id AS a, s.id AS m FROM e7bal b JOIN LATERAL (SELECT DISTINCT c.id ` +
+				`FROM e7bal c WHERE c.bal = b.bal - 0) s ON true`,
+			pmPairs(8, 1, 2, 3, 4, 5, 6, 7, 8)},
+		{"r2BoundUnaliasedOnMasked",
+			`SELECT b.id AS a, s.id AS m FROM e7bal b JOIN LATERAL (SELECT c.id ` +
+				`FROM e7bal c WHERE c.bal = b.bal + 0 ORDER BY c.id LIMIT 2) s ON true`,
+			pmPairs(8, 1, 2)},
+		{"r2GroupedUnaliasedOnMasked",
+			`SELECT b.id AS a, s.n AS m FROM e7bal b JOIN LATERAL (SELECT c.bal, count(*) AS n ` +
+				`FROM e7bal c WHERE c.bal = b.bal * 1 GROUP BY c.bal) s ON true`,
+			pmPairs(8, 8)},
+		{"r2UnaliasedPublishesMasked",
+			`SELECT b.id AS a, s.ssn AS m FROM e7emp b JOIN LATERAL (SELECT c.ssn ` +
+				`FROM e7emp c WHERE c.dept = b.dept || '' ORDER BY c.id LIMIT 1) s ON true`,
+			pmSSNPairs()},
+		// P1: an alias that is the OTHER table's name names that FROM item
+		// only — `e7emp.` is the e7bal copy here, whose masked bal is 0.
+		{"r2AliasIsOtherTablesNameOnMasked",
+			`SELECT e7bal.id AS a, e7emp.id AS m FROM e7emp e7bal JOIN e7bal e7emp ` +
+				`ON e7emp.id = e7bal.id + 1 AND e7emp.bal = 0`,
+			"a=1|m=2 ; a=2|m=3 ; a=3|m=4 ; a=4|m=5 ; a=5|m=6 ; a=6|m=7 ; a=7|m=8"},
 	}
 	refusals := []struct{ name, sql, class string }{
 		// A bare star over an expression-keyed LATERAL would publish the key
