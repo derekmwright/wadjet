@@ -45,9 +45,15 @@ psql).
    Set-op arms fold their ELEMENTS on the numeric ladder (`int4[] ∪ bigint[]`
    is `bigint[]`); arms with no common element are 42804.
 2. **Loud, not plausible.** A container box written into a STRING or BYTES
-   vector is a `*TypeMismatchError` (#361's guard), not `fmt.Sprint` text.
-   After (1) no declared path reaches it; a path that does not carry the
-   declaration fails with a named error instead of publishing Go text.
+   vector is a `*TypeMismatchError` (#361's guard), not `fmt.Sprint` text;
+   a container written into an ARRAY/MAP/ROW vector allocated without its
+   element or fields is a `*ContainerShapeError`, not the NULL the old silent
+   return left. After (1) no declared path reaches either; a path that does
+   not carry the declaration fails with a named error. A CAST to a destination
+   this engine accepts but does not convert to (`VECTOR(n)`, `JSON`, `BYTES`,
+   …) hands back the operand's TEXT, which for a container is the rendering of
+   §3. A function registered with a container return and no shape (no builtin
+   is) refuses in every whole-value position.
 3. **One renderer.** PostgreSQL's text output — `array_out` (`{…}`, its
    quoting, bare NULL, a nested dimension bare) and `record_out` (`(…)`, an
    empty slot for NULL), with temporal leaves in their text form — lives in

@@ -3067,8 +3067,9 @@ produce a native column over a foreign file's string column.
 
 The remaining type names are **accepted destinations this engine does not
 convert to**: `BYTES`, `DURATION`, `ARRAY`, `MAP` and `VECTOR(n)` hand the
-operand's text back under a `text` declaration (OID 25), and `ROW` is a syntax
-error. A name that answers to no type at all is `42704`, not a text column
+operand's text back under a `text` declaration (OID 25) — for an ARRAY, MAP or
+ROW operand that is its PostgreSQL text, `CAST(ARRAY[2] AS VECTOR(1))` is
+`{2}` — and `ROW` is a syntax error. A name that answers to no type at all is `42704`, not a text column
 (#652).
 
 `CAST(<col> AS STRING)` renders the value's own printed form — the text the

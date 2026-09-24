@@ -106,6 +106,8 @@ Nested arrays and ROW/MAP elements use OID 25; ordinary arrays — stored, const
 
 These casts pass text through. `CAST('12:34:56' AS time)` returns `12:34:56` on both engines, but wadjet declares OID 25. (ADR-0012 §5/#652)
 
+A container operand passes through as its PostgreSQL text: `CAST(ARRAY[1,2] AS JSON)` is the text `{1,2}`, where PostgreSQL has no cast from `integer[]` to `json` and raises 42846. (ADR-0045)
+
 **Decimal set operations keep one declared scale.**
 
 Storage requires one scale. PostgreSQL declares unconstrained numeric; wadjet retains `(p,s)` and prints `12.7500` where PostgreSQL prints `12.75`. (ADR-0012 §12/decimal-carrier)
