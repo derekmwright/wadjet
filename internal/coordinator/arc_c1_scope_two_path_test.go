@@ -621,14 +621,15 @@ func TestC1ATableLessLateralIsAProjectionOverTheOuterRow(t *testing.T) {
 			routed: map[string]string{"dag": "LateralIdentity +1", "dag-morsel4": "LateralIdentity +1", "dag-shuffled": "LateralIdentity +1"},
 		},
 		{
-			// PINNED, and NOT the lateral's: an ARRAY literal declares STRING
-			// wherever it is written. `SELECT ARRAY[id, id] AS v FROM lat_ord`
-			// declares STRING too, with no LATERAL in the query. The VALUES are
-			// right on both.
-			name:   "an ARRAY item carries its values under a pinned declaration",
+			// An ARRAY item of a table-less lateral declares ARRAY of its
+			// element, as PostgreSQL's bigint[] does. This was a pin of the
+			// engine-wide STRING declaration of an ARRAY literal until arc CW
+			// (ADR-0045); the declaration flipped and the pin with it. The
+			// lateral's projection must CARRY the element: declared ARRAY with
+			// no child vector it answered NULL for every row in between.
+			name:   "an ARRAY item carries its values under its declaration",
 			sql:    "SELECT l.v FROM lat_ord u, LATERAL (SELECT ARRAY[u.id, u.id] AS v) l ORDER BY 1",
-			want:   "cols=[v:STRING] rows=3 | [1 1] | [2 2] | [3 3]",
-			why:    "PostgreSQL declares bigint[]; an ARRAY literal declares STRING engine-wide, with or without a LATERAL",
+			want:   "cols=[v:ARRAY] rows=3 | [1 1] | [2 2] | [3 3]",
 			routed: c1TableLess,
 		},
 		{

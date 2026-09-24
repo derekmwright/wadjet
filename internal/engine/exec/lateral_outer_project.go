@@ -7,6 +7,7 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/expr"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // LateralOuterProject appends a table-less LATERAL body's SELECT list to the
@@ -63,7 +64,7 @@ type LateralOuterColumn struct {
 // in no input schema and the operator has nothing else to read them off
 // (ADR-0024 item 2).
 func (c LateralOuterColumn) projectColumn(name string) ProjectColumn {
-	return ProjectColumn{
+	pc := ProjectColumn{
 		Name:      name,
 		Type:      c.Decl.ID,
 		Expr:      c.Expr,
@@ -71,6 +72,14 @@ func (c LateralOuterColumn) projectColumn(name string) ProjectColumn {
 		Precision: c.Decl.Precision,
 		Scale:     c.Decl.Scale,
 	}
+	// A computed ARRAY/MAP's element, for the same reason (arc CW): an
+	// ARRAY vector allocated without one has no child to write into.
+	if (c.Decl.ID == parquet.TypeArray || c.Decl.ID == parquet.TypeMap) &&
+		c.Decl.Schema != nil && c.Decl.Schema.ElementType != nil {
+		el := c.Decl.Schema.ElementType.Clone()
+		pc.ElementType = &el
+	}
+	return pc
 }
 
 func NewLateralOuterProject(alias string, cols []LateralOuterColumn) *LateralOuterProject {
