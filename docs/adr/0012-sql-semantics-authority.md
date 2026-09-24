@@ -94,19 +94,23 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
        integers, REAL, DOUBLE, DECIMAL, IPV4, IPV6, CIDR, MACADDR, PORT,
        PROTOCOL, DURATION, UUID and DATE (ISO) — which base answered
        identically on every arm (arc BR round 2). TIMESTAMP (epoch
-       milliseconds) and the containers (Go's `map[…]`) are 42883; BYTEA is
-       below.
+       milliseconds) and typed container columns are 42883; BYTEA is
+       below. An `ARRAY(subquery)` aggregate argument can instead return
+       an incorrect value (#1309).
      - TEXT compared with a typed operand is decided PER PAIR, from what the
        base engine answered for a value against its own text rendering over
        20 rows on five arms (`physical.textConversionAnswers`):
 
        | typed side | direct `=`/`<`/…, IN list | IN / = ANY (subquery) |
        |---|---|---|
-       | int4, int8, float8, numeric, port, protocol, duration | kept | kept |
-       | uuid, ipv6, cidr | kept | kept |
+       | int4, int8, float8, numeric, port, protocol, duration | kept | kept where the body selects `CAST(x AS TEXT)` of the compared type |
+       | uuid, ipv6, cidr | kept | kept where the body selects `CAST(x AS TEXT)` of the compared type |
        | date, timestamp, boolean | kept | 42883 (0 rows single, 20 DAG) |
        | real | 42883 (3 of 20 matched) | 42883 |
        | bytea, ipv4, macaddr | 42883 (0 of 20 matched) | 42883 (0 single, 20 DAG) |
+
+       A stored-text body can answer no rows for matching values (and NOT IN
+       every row), tracked by #1308; this is not a working extension.
 
        A SET-OPERATION subquery body (UNION ALL / UNION / INTERSECT /
        EXCEPT) is kept only where its text PROVABLY converts: every arm of
@@ -155,7 +159,7 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      RECURSIVE CTE. With no rows to read a schema off, those returned a result
      with zero columns and no error.
 
-     **The first of the three is CLOSED (2026-09-13, arc O1, #997/#1012).** A
+     **Ordinary nested joins are CLOSED (2026-09-13, arc O1, #997/#1012).** A
      star over a join is now EXPANDED into the FROM clause's arms in written
      order (ADR-0026 §9), so it is an ordinary SELECT list and the ordinary
      projection walk declares it — at any join depth, because the expansion is
@@ -165,6 +169,8 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      `TestN1AResultWithNoColumnsIsRefused`). **Amended 2026-09-24 for arc
      RC:** recursive CTEs now retain the seed declaration even when empty
      (ADR-0021 §1o-b); the ungrouped-aggregate LATERAL boundary remains.
+     A `SELECT *` over two or more LATERALs, or a LATERAL beside another
+     join, that returns no rows is `XX000`; name the columns (#1013, open).
 
      A SINGLE LATERAL that is not an ungrouped aggregate is not among them and
      answers with its columns, in the plain, `GROUP BY` and `LEFT JOIN LATERAL`
@@ -4014,6 +4020,13 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      `0A000`. There is no general relation-valued per-row runner. ADR-0021
      §1s records the decision and
      `TestArcLTACorrelatedBodyIsEvaluatedPerOuterRowOnEveryArm` gates it.
+
+     *History (2026-09-13, arc O2):* the first cut refused every bounded
+     spelling on the bound's existence; whether a bound binds is a property
+     of the data, so a non-binding `LIMIT 10` (right on five arms at
+     `0193c4e9`) and `OFFSET 0` became errors — a new refusal on a shape that
+     answered correctly is a regression. It was narrowed to the qualified
+     star the same day; arc LT's per-key bound superseded it.
 
    - **A star over a NON-aggregated LATERAL publishes PostgreSQL's columns in
      a different ORDER.** (Added 2026-09-07, arc J1 round 2; PRE-EXISTING.

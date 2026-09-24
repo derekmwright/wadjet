@@ -257,7 +257,8 @@ func (p *Planner) catalogOption() expr.CompileOption {
 
 // subqueryBudgetOption charges membership sets to this query tracker and
 // records their owners for release at plan cleanup. With no tracker it is nil.
-// See ADR-0006 and releaseSubqueryCharges.
+// An uncorrelated IN set needs an owner: without one, a 120,000-byte set
+// answered at an 8 KiB budget. See ADR-0006 and releaseSubqueryCharges.
 func (p *Planner) subqueryBudgetOption() expr.CompileOption {
 	tracker := p.getMemTracker()
 	if tracker == nil {

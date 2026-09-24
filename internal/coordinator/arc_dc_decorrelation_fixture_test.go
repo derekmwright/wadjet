@@ -7,7 +7,8 @@ import (
 )
 
 // The DC fixture separates outer-only predicates from inner predicates.
-// NULL keys occur on both sides; dc_in repeats key 1 with different amounts
+// NULL keys occur in dc_out and dc_nul; dc_in stays NULL-free so its
+// NOT IN cells are not all UNKNOWN. dc_in repeats key 1 with different amounts
 // and has key 5 absent from dc_side. These distinguish residual filtering,
 // NOT IN null handling and outer-join padding (ADR-0021 §1r).
 const (

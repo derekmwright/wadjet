@@ -2,7 +2,9 @@
 
 // Command testquiet summarizes test output by package and failing test.
 // It reads go test JSON or a saved text log, retaining failure details
-// without printing the whole successful run. See docs/testing/GATES.md.
+// without printing the whole successful run. Live mode exits with go test's
+// own exit code; log mode derives it from whether anything failed.
+// See Taskfile.yml tasks test-quiet and test-quiet-log.
 package main
 
 import (

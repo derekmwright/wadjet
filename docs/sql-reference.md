@@ -2506,6 +2506,9 @@ CTE on the single-process pipeline keeps its seed's column names and types,
 including for a zero-row seed. A star over an ordinary join is expanded in
 FROM order before its declaration is derived.
 
+A `SELECT *` over two or more LATERALs, or a LATERAL beside another join,
+that returns no rows is `XX000`; name the columns (#1013, open).
+
 An empty `SELECT *` over a LATERAL whose body is an ungrouped aggregate can
 still raise `XX000`: the declaration cannot publish the join's internal
 empty-input column. Naming the result columns explicitly avoids that star

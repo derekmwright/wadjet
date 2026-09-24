@@ -18,6 +18,8 @@ import (
 // MIN/MAX over supported non-ROW types, STRING_AGG scalar renderings and
 // plain numeric ordered-set calls. ROW extrema refuse because declarations
 // differed by execution arm, not because the value lacked a row ordering.
+// The check belongs in the binder: a DAG fragment compiles only when a task
+// runs, too late for a planning refusal.
 // Untyped operands defer; see ADR-0012 §5 for the exact accepted types and codes.
 type aggArgClass int
 

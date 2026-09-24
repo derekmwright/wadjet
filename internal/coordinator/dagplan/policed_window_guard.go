@@ -8,7 +8,7 @@ import (
 )
 
 // ErrPolicedWindowUnderJoinDistributed routes a plan to the coordinator
-// single-process pipeline when a window reads a scan with a column projection
+// single-process pipeline when a window reads a scan with a policy projection
 // and has a consumer other than the final gather. This retains the published
 // values when the distributed window-to-join path would read stored values.
 // CheckPolicedWindowUnderJoin runs after each planning pass. The distributed

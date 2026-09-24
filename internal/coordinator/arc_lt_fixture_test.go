@@ -8,7 +8,9 @@ import (
 
 // The LT fixture distinguishes a per-outer-row body from one global body.
 // Duplicate outer keys preserve multiplicity; tied inner values exercise
-// partial ordering; unmatched and NULL keys exercise padding; shared id
+// partial ordering: v=10 twice under key 1 is deliberate. Under ORDER BY v
+// LIMIT 1, wants project v, never id (ADR-0013 nondeterminism).
+// Unmatched and NULL keys exercise padding; shared id
 // names exercise lifted-reference ownership. Different totals select
 // different inner subsets under inequality correlations (ADR-0021 §1s).
 const (

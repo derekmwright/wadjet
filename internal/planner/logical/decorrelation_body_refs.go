@@ -18,7 +18,9 @@ import (
 // A qualifier must name an enclosing relation and no body relation.
 // An unqualified name counts only in bodyOuter, the enclosing columns that
 // the complete body namespace cannot supply; nil permits qualified names only.
-// The walker handles nested blocks and window calls (ADR-0021 §1r).
+// It must not use plansql.ColumnRefs: that walker refuses subquery, EXISTS
+// and window nodes, and a clause holding one would stop decorrelating
+// (arc L1's EXISTS/*/winord answers only through nodeTableRefs).
 func namesEnclosingQuery(node plansql.Node, outerTables, innerTables map[string]bool, bodyOuter map[string]string) bool {
 	if node == nil {
 		return false

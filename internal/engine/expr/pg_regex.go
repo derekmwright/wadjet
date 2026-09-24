@@ -124,6 +124,9 @@ func invalidARE(why string) error {
 // Back references, lookaround, word-edge forms, collating elements and
 // unsupported embedded options refuse rather than change the match.
 // Malformed forms raise 2201B; unrepresentable forms raise 0A000.
+// Traps: \b is backspace and \B backslash (\y/\Y are word boundaries);
+// \mnn is a back reference only with that many groups, else octal, else 2201B;
+// a { that starts no bound is literal; . matches newline (RE2 needs (?s)).
 // See ADR-0044 and TestPatternMatchOperatorsAnswerAsPostgreSQL.
 func aregexToRE2(p string, icase bool) (string, error) {
 	// Metasyntax: ***= and ***: director prefixes.

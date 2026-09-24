@@ -14,6 +14,8 @@ import (
 // sibling, but not a later join or comma item. Alias-hidden, duplicate and
 // unknown qualifiers keep their named refusals. The earlier-comma extension
 // is recorded in ADR-0012 §5 (#617); #1220 retains the later-reference rule.
+// The 42P01 DETAIL/HINT text is verbatim because clients, including
+// SQLancer's getCommonFetchErrors, match it.
 
 // relationSite is one relation the block's FROM declares: the name it answers
 // to, the comma-separated FROM item it belongs to, and the JOIN that

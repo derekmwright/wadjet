@@ -16,7 +16,8 @@ import (
 // unmoved references intact. If translation merges distinct leaves, it
 // returns ErrResidualSidesMergedDistributed so the coordinator runs the
 // statement on the single-process pipeline. Side identity must survive
-// translation; see ADR-0021 §1r and docs/design/window-key-ownership.md.
+// translation. Build-side leaves must be qualified because a bare name
+// binds probe-first; see ADR-0021 §1r and docs/design/window-key-ownership.md.
 func (p *StagePlanner) residualWithStageSpellings(node *logical.Node, buildAlias, filter string) (string, error) {
 	if filter == "" || node == nil || len(node.Children) != 2 {
 		return filter, nil
