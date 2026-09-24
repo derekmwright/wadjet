@@ -2585,6 +2585,24 @@ func collectLogicalAliases(n *Node) map[string]bool {
 				aliases[strings.ToLower(name)] = true
 			}
 		}
+		// …and the name a CTE REFERENCE answers to, which sits on the
+		// subtree root rather than on a scan: `FROM c` answers to `c`,
+		// `FROM c x` to `x` alone (PostgreSQL hides the CTE's name behind a
+		// reference's alias, the ScopeNames rule for an aliased table). A
+		// derived table's own alias sits there too. Without these the
+		// correlation `i.k = c.k - 0` was not recognized as one, stayed in
+		// the body, and `c.k - 0` reached the scan as a string: zero rows for
+		// a text key, `invalid input syntax for type bigint` for an integer
+		// one (arc JP round 3, B3).
+		switch {
+		case n.CTERefAlias != "":
+			aliases[strings.ToLower(n.CTERefAlias)] = true
+		case n.CTEName != "":
+			aliases[strings.ToLower(n.CTEName)] = true
+		}
+		if n.DerivedAlias != "" {
+			aliases[strings.ToLower(n.DerivedAlias)] = true
+		}
 		for _, c := range n.Children {
 			walk(c)
 		}
@@ -2642,6 +2660,20 @@ func splitANDPredicates(where string) []string {
 // referencesAliases returns true if the expression contains a qualified
 // column reference (alias.column) where alias is in the given set.
 func referencesAliases(expr string, aliases map[string]bool) bool {
+	// The PARSED qualifiers first: a delimited alias (`"O".t`) is a
+	// qualifier the text scan below cannot see past its quote, and a
+	// string literal holding `o.` is not a reference at all. The text scan
+	// stays for a fragment the expression parser does not read.
+	if node, err := plansql.ParseExpression(expr); err == nil && node != nil {
+		if refs, err := plansql.ColumnRefs(node); err == nil {
+			for _, r := range refs {
+				if r.Table != "" && aliases[strings.ToLower(r.Table)] {
+					return true
+				}
+			}
+			return false
+		}
+	}
 	lower := strings.ToLower(expr)
 	for alias := range aliases {
 		// Look for alias.column pattern, ensuring it's a word boundary
@@ -3027,11 +3059,32 @@ func renameCorrelatedInnerRef(part string, keyRename map[string]string, rightAli
 	if len(keyRename) == 0 {
 		return part
 	}
-	eq := strings.Index(part, "=")
-	if eq <= 0 || part[eq-1] == '!' || part[eq-1] == '<' || part[eq-1] == '>' {
-		return part
+	// The equality's two sides from the parse, never from the text's first
+	// `=`: an outer side `CASE WHEN o.k = 1 …` holds one of its own, and the
+	// split renamed nothing — the key slot was never read and the equality
+	// compared the outer value with the body's raw column above the join
+	// (zero rows on the single-process pipeline; arc JP round 3, B3).
+	outer, inner := "", ""
+	if node, err := plansql.ParseExpression(part); err == nil && node != nil {
+		for {
+			p, isParen := node.(*plansql.ParenNode)
+			if !isParen {
+				break
+			}
+			node = p.Inner
+		}
+		cmp, isCmp := node.(*plansql.CmpExpr)
+		if !isCmp || cmp.Op != "=" {
+			return part
+		}
+		outer, inner = cmp.Left.String(), cmp.Right.String()
+	} else {
+		eq := strings.Index(part, "=")
+		if eq <= 0 || part[eq-1] == '!' || part[eq-1] == '<' || part[eq-1] == '>' {
+			return part
+		}
+		outer, inner = strings.TrimSpace(part[:eq]), strings.TrimSpace(part[eq+1:])
 	}
-	inner := strings.TrimSpace(part[eq+1:])
 	pub, ok := keyRename[strings.ToLower(inner)]
 	if !ok {
 		return part
@@ -3039,7 +3092,7 @@ func renameCorrelatedInnerRef(part string, keyRename map[string]string, rightAli
 	if rightAlias != "" {
 		pub = rightAlias + "." + pub
 	}
-	return strings.TrimSpace(part[:eq]) + " = " + pub
+	return outer + " = " + pub
 }
 
 // lateralSelectsColumn reports whether a subquery's select list already
@@ -3076,6 +3129,12 @@ func lateralSelectsColumn(cols []plansql.SelectColumn, innerCol string) bool {
 // extractInnerColumn extracts the inner (non-outer) column from a correlated
 // equality predicate like "order_id = o.id". Returns the unqualified inner column.
 func extractInnerColumn(expr string, outerAliases map[string]bool) string {
+	// The equality's own two sides, from the parse — the first `=` of the
+	// TEXT is inside the outer side when that side is `CASE WHEN o.k = 1 …`
+	// (arc JP round 3, B3). One binding path: lateralCorrelatedEquality.
+	if inner, _, ok := lateralCorrelatedEquality(expr, outerAliases); ok {
+		return inner.String()
+	}
 	eqIdx := strings.Index(expr, "=")
 	if eqIdx < 0 {
 		return ""
@@ -3099,6 +3158,9 @@ func extractInnerColumn(expr string, outerAliases map[string]bool) string {
 // side of an equality predicate. This is needed so parseJoinKeys assigns
 // probe keys to the outer (left) child and build keys to the inner (right).
 func normalizeCorrelatedEquality(expr string, outerAliases map[string]bool) string {
+	if inner, outer, ok := lateralCorrelatedEquality(expr, outerAliases); ok {
+		return outer.String() + " = " + inner.String()
+	}
 	eqIdx := strings.Index(expr, "=")
 	if eqIdx < 0 {
 		return expr
