@@ -238,14 +238,19 @@ func TestAnOuterExpressionOverAPublishedSlotMatchesPostgres(t *testing.T) {
 		// The derived-table spelling is the one #831 names as the proof the
 		// CAST kernel is innocent; the arithmetic, integer-CAST, DECIMAL and
 		// comparison arms are the four the gather already materialized.
-		// NAMED for what it actually controls. It exonerates the CAST kernel
-		// for the CAST-to-STRING spelling and for nothing wider: with the
-		// result typed as the aggregate's OWN type the same derived-table
-		// spelling is WRONG on both DAG arms, which
-		// `TestTheDerivedTableSpellingIsNotAControlForTheOwnTypeCase` pins.
 		{"ctl_derived_table_spelling_cast_to_string",
 			`SELECT CAST(m AS STRING) AS v FROM (SELECT MAX(c_ts) AS m FROM typemx WHERE id < 5) d`,
 			[]string{"v=2023-11-14 22:17:24"}, "2023-11-14 22:17:24"},
+		// The same derived-table spelling with the result typed as the
+		// aggregate's OWN type. Both DAG arms answered the DATE's epoch day
+		// (16195) — the stage's SELECT list was typed against a walk that
+		// stops at the derived table's Project and fell to STRING — and a
+		// pin recorded it until arc CW typed that list against the child's
+		// EMITTED declarations, the walk the single-process projection reads.
+		{"ctl_derived_table_spelling_own_type",
+			`SELECT CASE WHEN m > 0 THEN d ELSE NULL END AS v FROM ` +
+				`(SELECT MAX(id) AS m, MAX(c_date) AS d FROM typemx WHERE id < 5) x`,
+			[]string{"v=2014-05-05"}, "2014-05-05"},
 		{"ctl_arithmetic_over_aggregate",
 			`SELECT MAX(c_i32) + 1 AS v FROM typemx WHERE id < 5`,
 			[]string{"v=int64:13"}, "13 (integer)"},
@@ -283,74 +288,5 @@ func TestAnOuterExpressionOverAPublishedSlotMatchesPostgres(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-// THE DERIVED-TABLE SPELLING IS NOT A CONTROL FOR THE OWN-TYPE CASE.
-//
-// #831's argument, and this file's, is "the derived-table spelling of the same
-// question is right on every arm, so the CAST kernel is innocent". True of the
-// CAST-to-STRING spelling; FALSE when the result is the aggregate's OWN type —
-// a DATE comes back as its epoch day on both DAG arms. Pinned rather than
-// reworded away, because the sentence it qualifies is load-bearing for two
-// issues and because a pin FAILS when it starts agreeing.
-//
-// It is a DIFFERENT SITE from the one this branch fixes, and the plan says so.
-// The aggregate spelling reaches the gather as an `OutputRename` carrying an
-// `Expr`, typed by `inferRenameExprDecl` — which asks the EMITTED scope now, so
-// the aggregate's `__agg_N` outputs are declared and the family is right. This
-// spelling gets a real `project` stage whose `ProjectExprSpec.Type` comes from
-// `attachScanSelectProjections`' `inputColDecls(projNode.Children[0])`, and
-// `inputColTypes` has arms for Scan, Filter/Sort/Limit/Distinct, Window and
-// Join and NONE for Project or Aggregate — so above either of those it answers
-// nothing and the spec takes its STRING fallback. Byte-identical at `fd679ae9`;
-// this branch does not touch that walk.
-//
-// The fix is to give that walk the answer `emittedColTypes` already has, which
-// means merging the two walks — numeric-typing territory, not this arc's.
-func TestTheDerivedTableSpellingIsNotAControlForTheOwnTypeCase(t *testing.T) {
-	if testing.Short() {
-		t.Skip("-short: this gate stands up an embedded NATS cluster")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
-	t.Cleanup(cancel)
-
-	single := tmdStandalone(t, ctx)
-	infra := tmdInfra(t, ctx)
-	tmdWriteTables(t, ctx, infra, nil)
-	coord := tmdCoordinator(t, ctx, infra)
-	infraB := tmdInfra(t, ctx)
-	tmdWriteTables(t, ctx, infraB, nil)
-	coordB := tmdCoordinator(t, ctx, infraB, func(c *Config) { c.BroadcastBytesOverride = 1 })
-
-	const sql = `SELECT CASE WHEN m > 0 THEN d ELSE NULL END AS v FROM ` +
-		`(SELECT MAX(id) AS m, MAX(c_date) AS d FROM typemx WHERE id < 5) x`
-
-	got, err := na2Run(tmdRunSingle(ctx, single, sql))
-	if err != nil {
-		t.Fatalf("single arm: %v", err)
-	}
-	if strings.Join(got, "\n") != "v=2014-05-05" {
-		t.Errorf("single arm got %v, want [v=2014-05-05] (live PostgreSQL 17: 2014-05-05)", got)
-	}
-	for _, arm := range []struct {
-		name string
-		c    *Coordinator
-	}{{"dag", coord}, {"dag-shuffled", coordB}} {
-		dgot, derr := na2Run(tmdRunDAG(ctx, arm.c, sql))
-		if derr != nil {
-			t.Errorf("%s arm: %v", arm.name, derr)
-			continue
-		}
-		if strings.Join(dgot, "\n") == "v=2014-05-05" {
-			t.Errorf("%s arm now AGREES — the second site is fixed, so delete this pin and "+
-				"move the shape into TestAnOuterExpressionOverAPublishedSlotMatchesPostgres "+
-				"as a control", arm.name)
-			continue
-		}
-		if strings.Join(dgot, "\n") != "v=16195" {
-			t.Errorf("%s arm got %v, want [v=16195] — the pinned wrong answer moved without "+
-				"becoming right, which is a change nobody recorded", arm.name, dgot)
-		}
 	}
 }

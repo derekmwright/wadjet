@@ -2386,6 +2386,11 @@ day on the DAG (pinned in
 `coordinator.TestTheDerivedTableSpellingIsNotAControlForTheOwnTypeCase`; the fix
 is to give that walk `emittedColTypes`' answer, which is merging the two).
 What holds is that the GATHER no longer declares a type it did not derive.
+**Closed 2026-09-24 (arc CW, ADR-0045):** `attachScanSelectProjections` types
+the stage's SELECT list against the child's EMITTED declarations — the walk the
+single-process projection reads — and the pin was deleted as the proof; the
+shape is the control `ctl_derived_table_spelling_own_type` in
+`coordinator.TestAnOuterExpressionOverAPublishedSlotMatchesPostgres`.
 
 Two smaller members of the same family, both "a projection NARROWS to its
 outputs, so everything the operator will read has to be one of them":
