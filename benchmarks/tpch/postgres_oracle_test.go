@@ -265,6 +265,18 @@ func (o *postgresOracle) reportCollation(t *testing.T, ctx context.Context) {
 			"Wadjet compares strings by bytes; without a byte-ordering collation this arm compares "+
 			"two different questions and every string ORDER BY reads as a divergence.", postgresCollation)
 	}
+	// …and the DATABASE collation, which a comparison of two literals or of
+	// a literal with a computed value reaches and the fixture's column
+	// COLLATE does not: over an en_US database ten subtests compared a
+	// different question (StringComparisonCollation, NumericLookingText*,
+	// ValuesListInFrom — arc JP round-2 review, N2). `task pg-oracle:up`
+	// creates a C database; a DSN the caller supplies is held to the same.
+	if collate != "C" && collate != "POSIX" {
+		t.Fatalf("the oracle database's collation is %q, not C: a literal comparison reads it rather "+
+			"than the fixture's COLLATE %s, and Wadjet compares strings by bytes. Create the database "+
+			"with `--locale=C` (task pg-oracle:up does) or point %s at one that has it",
+			collate, postgresCollation, postgresDSNEnv)
+	}
 	t.Logf("PostgreSQL oracle: %s, database collation %s/%s, fixture text columns declared COLLATE %s",
 		version, collate, ctype, postgresCollation)
 }
