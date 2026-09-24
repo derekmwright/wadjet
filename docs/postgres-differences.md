@@ -74,9 +74,13 @@ PostgreSQL answers the statement's start time for every row, so `WHERE LOCALTIME
 
 ## Declared types
 
-**A few date/address functions still declare text.**
+**Some address and UUID functions declare text; assigned to a typed column, their text is read as a literal.**
 
-`TO_DATE`, `INT_TO_IP`, `NETWORK_ADDRESS` and `UUID()` register a fixed STRING return in the scalar-function registry though the value each renders is a date or an address, so `INSERT ... SELECT TO_DATE(x, fmt)` into a DATE column, or `... SELECT UUID()` into a UUID column, is refused as a type mismatch though the rendered VALUE already reads as one. This is the same class of gap #1254 fixed for `CURRENT_DATE` alone — one registry entry per function, not one mechanism for all of them — and is tracked separately (docs/sql-reference.md's Declared types section points here). (ADR-0012 §5/#1254-siblings)
+`INT_TO_IP(n)`, `IP_ADD(ip, n)`, `IP_SUBTRACT(ip, n)`, `MASK_IP(ip, bits)`, `IP_SUBNET(ip)`, `IP_NETMASK(cidr)`, `NETWORK_ADDRESS(cidr)`, `BROADCAST_ADDRESS(cidr)` and `UUID()` declare TEXT (OID 25) though each value is an address or a UUID — PostgreSQL's analogues are typed `inet` / `uuid`. Assigned to a typed column by any write (`INSERT ... VALUES`, `INSERT ... SELECT`, `UPDATE`, `MERGE`), such a call is read by the column's input function, as a quoted literal is, where a genuine text expression is 42804: a superset, and the one exception the assignment table keeps. Every date/time function declares and produces its own type (sql-reference.md, Declared types). (ADR-0012 §5/#1254-siblings)
+
+**`DATE_ADD` over text is a timestamp.**
+
+`DATE_ADD(x, n)` and `DATE_SUB(x, n)` (this engine's own functions; PostgreSQL has neither) answer a DATE only for a DATE `x` shifted by whole days; over text — `DATE_ADD('2026-03-03', 1)` — the result is a TIMESTAMP (`2026-03-04 00:00:00`), PostgreSQL's preferred datetime type for an unknown-typed argument. They used to answer text that rendered a date or an instant by the spelling of the input. (ADR-0012 §5/#1254-siblings)
 
 **Array-returning functions can publish text.**
 
@@ -282,9 +286,9 @@ Unknown argument width leaves bigint results: totals beyond bigint raise 22003 v
 
 `SELECT amount AS __key_0` raises 42939 here; PostgreSQL answers. Intermediate columns need these names; stored columns remain readable. (ADR-0012 §5/#956)
 
-**INSERT SELECT refuses some text assignments.**
+**A BYTES, container or DURATION value is not assigned to a text column.**
 
-`INSERT INTO t (text_col) SELECT bigint_col` raises 42804 here; PostgreSQL converts the integer to text. Assignment supports numeric-family conversions. (ADR-0012 §13/#1024-assignment)
+`INSERT INTO t (text_col) SELECT bytes_col` (and the same through VALUES, UPDATE and MERGE) raises 42804 here; PostgreSQL converts a bytea, an array or an interval to its text. Every other scalar is assigned to TEXT as PostgreSQL renders it. (ADR-0012 §13/#1024-assignment)
 
 **Quoted INSERT SELECT targets are limited.**
 
@@ -345,6 +349,10 @@ SUM, AVG, STDDEV, VARIANCE, CORR and COVAR accept PORT, PROTOCOL and DURATION as
 **Text compares with typed values, pair by pair.**
 
 Text compared with an integer, double, numeric, PORT, PROTOCOL, DURATION, UUID, IPv6 or CIDR value — directly or in an IN list — answers through the value's text; an `IN`/`= ANY` subquery is accepted where its body selects `CAST(x AS TEXT)` of the compared type; with a DATE, TIMESTAMP or boolean it answers directly and in an IN list. A stored-text body can answer no rows for matching values (and NOT IN every row), tracked by #1308; this is not a working extension. PostgreSQL raises 42883 for all of them. A set-operation subquery body (UNION, INTERSECT, EXCEPT) is kept only when each arm selects `CAST(x AS TEXT)` of a value of the compared type; any other text there raises 42883. Text against REAL, BYTEA, IPv4 or MAC, text membership against a DATE/TIMESTAMP/boolean subquery, and two text/typed COLUMNS as a JOIN key raise 42883 here too. (ADR-0012 §5/arc BR, #826, #1073)
+
+**A timestamp minus a timestamp answers milliseconds; a date minus a date is bigint.**
+
+`ts1 - ts2` (and `now() - now()`) answers the difference as a number of milliseconds where PostgreSQL answers an `interval` (`01:00:00`): this engine has no INTERVAL column type, only the INTERVAL literal. Such a value assigned to a DATE, TIMESTAMP or address column is 42804, as PostgreSQL's interval is. `date1 - date2` is the day count PostgreSQL answers, declared `bigint` (OID 20) where PostgreSQL declares `integer`. (ADR-0012 §5/arc VL)
 
 **A number literal against a timestamp reads epoch milliseconds.**
 

@@ -5910,6 +5910,30 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     VALUES pair by pair, against each other and against PostgreSQL's measured
     answer.
 
+    **Amended 2026-09-24 (arc VL round 3, #1252 #1254): ONE assignment table
+    for every write, and it is PostgreSQL's.** `ingest.AssignableToColumn` is
+    asked by `INSERT … VALUES`, `INSERT … SELECT`, `UPDATE … SET` and `MERGE`
+    alike, from the source's DECLARED type, before a row is read. It assigns
+    every scalar into TEXT (rendered as PostgreSQL's I/O cast renders it — an
+    inet host as `10.0.0.1/32`) and DATE↔TIMESTAMP, which closes the refusing
+    divergence above for those pairs; it refuses TEXT into every non-text
+    type (42804), which VALUES and SET used to ACCEPT by reading the text as a
+    number — a superset no entry here kept, so it is closed rather than
+    recorded. Kept: BYTES, the containers and DURATION into TEXT refuse
+    (refusing direction), and ONE superset — a call the registry declares
+    TEXT for a network or UUID value (`expr.DeclaresTextForTypedValue`:
+    `uuid()`, `int_to_ip`, …) is read by the target's input function like an
+    unknown-typed literal. The table is only as right as the declarations it
+    reads, so the same round made every TEMPORAL declaration true: a
+    date/time function or operator declares PostgreSQL's type and its kernel
+    produces that type's box (int64 epoch days / epoch milliseconds), the
+    unit of a box is read from its PRODUCER (`expr.producedTemporal`) at every
+    consumer, and `date ± n` is typed by the operand's declared type, never
+    its spelling. Gates: `expr.TestRegistryDeclaredTypeIsTheProducedType`
+    (census, every registry entry), `physical.TestTemporalArithmeticDeclares
+    WhatItProduces`, `wadjet.TestOneAssignmentTableOnEveryDoor` (580 cells ×
+    four doors against PostgreSQL 17.11's measured answers).
+
   - **A CTAS over a star of a self join answered where PostgreSQL refuses —
     CLOSED 2026-09-13 by arc O1 (#997, #1012).** (Added 2026-09-12, #1024.)
     `CREATE TABLE t AS SELECT * FROM s a JOIN s b ON b.id = a.id` is `42701`

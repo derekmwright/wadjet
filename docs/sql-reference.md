@@ -4159,22 +4159,40 @@ LIMIT 10
 
 #### Declared types
 
-`NOW()`, `CURRENT_TIMESTAMP` and `LOCALTIMESTAMP` declare TIMESTAMP;
-`CURRENT_DATE` declares DATE (#1254 — it used to declare STRING, so an
-`INSERT ... SELECT CURRENT_DATE` into a DATE column was refused as a type
-mismatch though the rendered VALUE was already a date). This is the type a
-downstream context — an assignment, a comparison, a wire `RowDescription` —
-sees; it is not always the shape the function's own Go result takes (`NOW()`
-renders formatted text and still declares TIMESTAMP). `CURRENT_TIME` has no
+Every date/time function and operator DECLARES the type of the value it
+produces, and produces a value of that type — a DATE is a DATE and a
+TIMESTAMP a TIMESTAMP to every consumer: a parent operator, a string or
+date-part function, a comparison, an assignment, the wire's `RowDescription`
+(arc VL round 3; a census test holds every registry entry to it).
+
+| Expression | Declares |
+|---|---|
+| `CURRENT_DATE`, `TO_DATE(s)`, `LAST_DAY_OF_MONTH(t)`, `FROM_ISO8601_DATE(s)` | DATE |
+| `NOW()`, `CURRENT_TIMESTAMP`, `LOCALTIMESTAMP`, `DATE_TRUNC(unit, t)`, `TIME_BUCKET(stride, t)`, `FROM_UNIXTIME(n)`, `DATE_PARSE(s, fmt)`, `pg_postmaster_start_time()`, `pg_conf_load_time()` | TIMESTAMP |
+| `date + integer`, `integer + date`, `date - integer` | DATE |
+| `date - date` | BIGINT, a count of days |
+| `date ± interval`, `timestamp ± interval`, `'text' ± interval` | TIMESTAMP |
+| `DATE_ADD(x, n)` / `DATE_SUB(x, n)` | DATE when `x` is a DATE and `n` a whole number of days; TIMESTAMP otherwise (a TIMESTAMP, text, or an INTERVAL shift) |
+
+The integer operand of `date ± n` is judged by its declared type, never its
+spelling: `DATE '2026-01-01' + CAST(1 AS INTEGER)`, `(d + 1) + 1`, `d + i`
+over an INTEGER column and `CURRENT_DATE + 1 - 1` are all DATE, and
+`CURRENT_DATE + 1 - 1 - CURRENT_DATE` is `0`. A DATE compared with a
+TIMESTAMP compares its midnight, as in PostgreSQL. `NOW()` and its siblings
+declare `timestamp without time zone` where PostgreSQL declares
+`timestamptz` (docs/postgres-differences.md). `CURRENT_TIME` has no
 declaration at all: this engine has no TIME type among its 22, so the
 SQL-standard niladic spelling parses but the call itself is refused
 (`unknown function: current_time`) rather than declaring a value it cannot
-represent.
+represent. A timestamp minus a timestamp is PostgreSQL's INTERVAL, which this
+engine cannot hold as a column value: it answers the difference in
+milliseconds.
 
-A few other date/address functions still declare STRING where the value is
-not text — `TO_DATE`, `INT_TO_IP`, `NETWORK_ADDRESS`, `UUID()` — the same
-class of gap #1254 fixed for `CURRENT_DATE` alone; see
-docs/postgres-differences.md.
+`INT_TO_IP(n)`, `IP_ADD(ip, n)`, `IP_SUBTRACT(ip, n)`, `MASK_IP(ip, bits)`,
+`IP_SUBNET(ip)`, `IP_NETMASK(cidr)`, `NETWORK_ADDRESS(cidr)`,
+`BROADCAST_ADDRESS(cidr)` and `UUID()` declare TEXT for a value
+that is an address or a UUID; assigned to a typed column, their text is read
+by the column's input function (see [INSERT](#insert)).
 
 #### TIME_BUCKET
 
@@ -4655,15 +4673,29 @@ Each VALUES cell is a full scalar expression, not only a bare literal: a typed
 literal (`TIMESTAMP '2026-01-01 00:00:00'`), a function call (`now()`,
 `CURRENT_DATE`), a CAST, and arithmetic (`1 + 1`) all evaluate through the
 same expression compiler a `SELECT` list does, with no row to read from — so
-the expression must be a constant. It is coerced to the target column's
-declared type by PostgreSQL's own assignment rules (a text literal into
-DATE/TIMESTAMP/INTEGER/DECIMAL/IPv4/UUID parses through that type's own input
-function; an INTEGER into a wider numeric type widens):
+the expression must be a constant.
+
+**One assignment table for every write.** An `INSERT ... VALUES` cell, an
+`INSERT ... SELECT` column, an `UPDATE ... SET` and a `MERGE` clause are all
+assigned by PostgreSQL's assignment casts, from the source's DECLARED type,
+before any row is read:
+
+| Source (declared) | Target | Answer |
+|---|---|---|
+| any numeric type | any numeric type | stored; a fractional value into an integer rounds (half away from zero, half to even from a float); out of range is 22003 |
+| any scalar — number, boolean, date, timestamp, address, UUID | TEXT | stored as its text (`true`, `2026-01-02`, `10.0.0.1/32`, `1e+20`) |
+| DATE | TIMESTAMP | its midnight |
+| TIMESTAMP | DATE | its calendar day |
+| TEXT (a column, `s \|\| ''`, `CAST(x AS TEXT)`) | anything but TEXT | 42804 — PostgreSQL has no assignment cast from text |
+| a quoted literal (`'2026-01-01'`, `'10.0.0.1'`) | any type | read by the column's own input function (22P02 / 22007 when it names no value) |
+| `INT_TO_IP(n)`, `UUID()` and the other TEXT-declared address/UUID functions above | any type | read like a quoted literal (a superset; docs/postgres-differences.md) |
+| anything else (an integer into DATE, BOOLEAN or an address; a date into a number; a typed NULL of the wrong type) | | 42804 `column "x" is of type ... but expression is of type ...` |
+
+The remaining cell refusals:
 
 | Cell | SQLSTATE |
 |---|---|
 | `DEFAULT` | NULL — no column this catalog describes carries an explicit default, so PostgreSQL's own rule for one that has none applies uniformly |
-| a value whose type the column cannot take at all (`VALUES (TRUE)` into an INTEGER column) | 42804 `column "x" is of type ... but expression is of type ...` |
 | a bare column reference — VALUES has no FROM to resolve one against | 42703 `column "x" does not exist` |
 | a subquery — PostgreSQL accepts one here (a scalar subquery is a constant to it); this engine has no query environment at this seam | 0A000 |
 
