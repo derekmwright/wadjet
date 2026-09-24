@@ -628,9 +628,13 @@ func collectUntil(l *lexer, stops ...TokenType) string {
 			break
 		}
 		tok := l.nextToken()
-		if tok.typ == TokenLParen {
+		// Brackets nest like parentheses: an ARRAY constructor's commas
+		// (`SET a = ARRAY[7, 8]`) are not the SET list's, and ending the
+		// value at the first one left `8]` as the next "column name"
+		// (arc CW round 2, N4).
+		if tok.typ == TokenLParen || tok.typ == TokenLBracket {
 			depth++
-		} else if tok.typ == TokenRParen {
+		} else if tok.typ == TokenRParen || tok.typ == TokenRBracket {
 			depth--
 		}
 		// A string token's value arrives with its quotes STRIPPED and its ''

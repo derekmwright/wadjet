@@ -425,3 +425,26 @@ func TestParseInsert_ValuesRowKeepsLexerErrorSQLState(t *testing.T) {
 		})
 	}
 }
+
+// An ARRAY constructor's commas belong to the constructor, not to the SET
+// list: `SET a = ARRAY[7, 8], b = 1` is two clauses (arc CW round 2, N4 —
+// the value ended at the first comma and `8]` was read as the next column).
+func TestParseUpdate_ArrayConstructorValue(t *testing.T) {
+	q, err := Parse("UPDATE t SET a = ARRAY[7, 8], b = ARRAY[ARRAY[1, 2]][1], c = 1 WHERE id = 1")
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	want := []struct{ col, val string }{
+		{"a", "array [ 7 , 8 ]"},
+		{"b", "array [ array [ 1 , 2 ] ] [ 1 ]"},
+		{"c", "1"},
+	}
+	if len(q.Update.SetClauses) != len(want) {
+		t.Fatalf("got %d SET clauses %+v, want %d", len(q.Update.SetClauses), q.Update.SetClauses, len(want))
+	}
+	for i, w := range want {
+		if got := q.Update.SetClauses[i]; got.Column != w.col || got.Value != w.val {
+			t.Errorf("clause %d: got %q = %q, want %q = %q", i, got.Column, got.Value, w.col, w.val)
+		}
+	}
+}
