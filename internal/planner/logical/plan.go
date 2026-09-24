@@ -1241,8 +1241,8 @@ func NewScan(table, alias string) *Node {
 }
 
 // ScopeNames lists every name an ENCLOSING scope may use to qualify a column
-// of this scan: its table name, its own alias, and every derived table it sits
-// inside. Empty for a node that is not a scan.
+// of this scan: its own alias (its table name when the query gave it none),
+// and every derived table it sits inside. Empty for a node that is not a scan.
 //
 // This is the question "could `x.` in a predicate mean something in here",
 // which is what the correlated-subquery collectors ask, and it is NOT the same
@@ -1269,12 +1269,33 @@ func (n *Node) ScopeNames() []string {
 		}
 		out = append(out, name)
 	}
-	add(n.TableName)
+	if !n.userAliased() {
+		add(n.TableName)
+	}
 	add(n.TableAlias)
 	for _, d := range n.DerivedAliases {
 		add(d)
 	}
 	return out
+}
+
+// userAliased reports whether the QUERY gave this scan an alias of its own
+// (`FROM jp_i a`). PostgreSQL then hides the table name: in `FROM jp_i jp_j
+// JOIN jp_j jp_i`, `jp_i.v` is the SECOND table's column, and a scan that
+// still answered to its table name made `jp_i` name both relations (arc JP
+// round 2, P1). An alias setSubtreeAlias stamped from an enclosing derived
+// table is not one — it is recorded in DerivedAliases too, and the body the
+// scan sits in still writes the table's own name.
+func (n *Node) userAliased() bool {
+	if n.TableAlias == "" || strings.EqualFold(n.TableAlias, n.TableName) {
+		return false
+	}
+	for _, d := range n.DerivedAliases {
+		if strings.EqualFold(d, n.TableAlias) {
+			return false
+		}
+	}
+	return true
 }
 
 // OuterTableID is the single name an enclosing scope calls this scan by: the

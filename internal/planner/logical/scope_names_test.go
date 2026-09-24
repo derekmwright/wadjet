@@ -25,13 +25,44 @@ func TestScopeNamesCoverTheDerivedTable(t *testing.T) {
 		DerivedAliases: []string{"x", "y"},
 	}
 	got := n.ScopeNames()
-	for _, want := range []string{"nation", "n1", "x", "y"} {
+	for _, want := range []string{"n1", "x", "y"} {
 		if !containsFold(got, want) {
 			t.Errorf("ScopeNames() = %v, missing %q", got, want)
 		}
 	}
-	if len(got) != 4 {
-		t.Errorf("ScopeNames() = %v, want exactly the four distinct names", got)
+	// The query ALIASED the scan, so its table name is hidden (PostgreSQL:
+	// an aliased table answers to its alias alone; arc JP round 2, P1).
+	if containsFold(got, "nation") || len(got) != 3 {
+		t.Errorf("ScopeNames() = %v, want exactly [n1 x y]", got)
+	}
+}
+
+// TestScopeNamesHideAnAliasedTablesName: `FROM jp_i jp_j JOIN jp_j jp_i` —
+// each scan answers to its alias, and the alias another scan's TABLE name
+// spells names that other scan only. An unaliased scan answers to its table
+// name, and so does one whose only alias is a derived table's stamp.
+func TestScopeNamesHideAnAliasedTablesName(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		node *Node
+		want []string
+	}{
+		{"aliased by another table's name", &Node{Type: NodeScan, TableName: "jp_i", TableAlias: "jp_j"}, []string{"jp_j"}},
+		{"unaliased", &Node{Type: NodeScan, TableName: "jp_i"}, []string{"jp_i"}},
+		{"aliased by its own name", &Node{Type: NodeScan, TableName: "jp_i", TableAlias: "JP_I"}, []string{"jp_i"}},
+		{"derived stamp only", &Node{Type: NodeScan, TableName: "jp_i", TableAlias: "u", DerivedAliases: []string{"u"}}, []string{"jp_i", "u"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.node.ScopeNames()
+			if len(got) != len(tc.want) {
+				t.Fatalf("ScopeNames() = %v, want %v", got, tc.want)
+			}
+			for _, w := range tc.want {
+				if !containsFold(got, w) {
+					t.Errorf("ScopeNames() = %v, want %v", got, tc.want)
+				}
+			}
+		})
 	}
 }
 
@@ -95,7 +126,10 @@ func TestCorrelatedRefIntoDerivedTableIsSeenAsOuter(t *testing.T) {
 	}
 	tables := map[string]bool{}
 	collectTableNames(plan, tables)
-	for _, want := range []string{"u", "n1", "nation"} {
+	if tables["nation"] {
+		t.Errorf("collectTableNames = %v: the scan is aliased n1, so `nation.` names nothing in it", tables)
+	}
+	for _, want := range []string{"u", "n1"} {
 		if !tables[want] {
 			t.Errorf("collectTableNames = %v, missing %q — a reference qualified by it "+
 				"is not recognized as outer, so the subquery stays per-row", tables, want)
@@ -116,7 +150,7 @@ func TestCollectScanInfoAttributesColumnsToTheDerivedTable(t *testing.T) {
 		}},
 	}
 	tables, colToTable := collectScanInfo(subtree)
-	for _, want := range []string{"u", "n1", "nation"} {
+	for _, want := range []string{"u", "n1"} {
 		if !tables[want] {
 			t.Errorf("collectScanInfo tables = %v, missing %q", tables, want)
 		}
