@@ -98,9 +98,13 @@ Out of scope, recorded as filing candidates: `array_agg(x ORDER BY y)`, the
 - `cli.TestArcCWContainersRenderOnTheCLI` — table, CSV and JSON.
 - `coordinator.TestArcCWConstructedArraysOrderElementWiseOnEveryArm` — ORDER BY
   / MIN / MAX / DISTINCT / subscript on single, spilled, DAG and shuffled DAG.
+- `coordinator.TestArcCWContainerOverARelationDeclaresOnEveryArm` — a
+  container over a UNION's column, a derived table under a join or window,
+  and MIN/MAX whose partial matched nothing (the aggregate spec carries the
+  output element for that identity row), on every arm.
 - `server.TestArcCWContainersOnEveryDeploymentDoor` — pgwire local and DAG,
   HTTP local and DAG, async.
 - `batch.TestSetValueGuardPanicsOnUnholdableValues` — the container-into-text
   cells of §2.
 
-Each of the first five fails at 83cd4a93.
+Each of the first six fails at 83cd4a93.
