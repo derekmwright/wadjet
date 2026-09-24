@@ -1804,7 +1804,23 @@ const (
 )
 
 // nodeTemporalKind reports what kind of temporal value an operand carries: a
-// CAST names one outright, and a column reference has one in the catalog.
+// CAST names one outright, a column reference has one in the catalog, and a
+// FUNCTION CALL has one in the registry — CHECKED THERE, not only in its
+// fixed declaration (round-2 review B3): `current_date`, `now()`,
+// `current_timestamp` and `localtimestamp` declare DATE/TIMESTAMP
+// (expr.DefaultRegistry via funcReturnType, the same resolution
+// nodeDeclaredType's own FuncCallNode arm uses), and before this arm existed
+// `CURRENT_DATE + 1` fell out of this switch's default with no temporal kind
+// at all — undecided at binOpTemporalType, and separately EXCLUDED from the
+// numeric-arithmetic fallback by binOpInvolvesInterval's blanket "this binop
+// touches a date/interval function" guard — so the expression's declared
+// output landed on the ultimate STRING fallback (OID 25) even though
+// #1254 already made current_date's OWN declaration DATE, and even though
+// the runtime kernel (expr.BinOp.dateArith, via temporalOperand's TEXT arm)
+// already computed the right day-count VALUE. Recognizing the call here is
+// the one seam that makes the DECLARATION agree with the value everywhere
+// arithmetic touches one of these functions: date-date, date±n and
+// CTAS/INSERT…SELECT's declared output all resolve through this same walk.
 func nodeTemporalKind(node plansql.Node, decls ColDecls) temporalKind {
 	var t parquet.TypeID
 	switch n := node.(type) {
@@ -1820,6 +1836,12 @@ func nodeTemporalKind(node plansql.Node, decls ColDecls) temporalKind {
 		if t == parquet.TypeString {
 			return temporalDay
 		}
+	case *plansql.FuncCallNode:
+		dt, conf := funcReturnType(n, decls)
+		if conf != expr.Decided {
+			return temporalNone
+		}
+		t = dt.ID
 	default:
 		return temporalNone
 	}

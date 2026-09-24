@@ -5,6 +5,7 @@ package wadjet
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -77,5 +78,83 @@ func TestCurrentDateEqualsCastNowAsDate(t *testing.T) {
 	}
 	if eq, ok := res.Rows[0]["eq"].(bool); !ok || !eq {
 		t.Errorf("eq = %#v, want true", res.Rows[0]["eq"])
+	}
+}
+
+// TestCurrentDatePlusOneCTASStoresDate is round-2 review B3: current_date's
+// declaration (RetTypeOf(batch.TypeDate), #1254) told the projection what
+// the FUNCTION returns, but `CURRENT_DATE + 1` is a BinaryOp over it, and
+// nodeTemporalKind (declared_output.go) only recognized a CAST or a column
+// reference as a temporal operand — never a function call — so the
+// expression's own declared output fell through to the STRING fallback even
+// though #1254 had already fixed current_date's OWN declaration. A CTAS off
+// that expression minted a STRING column holding the raw day-count number
+// ("20721") instead of a DATE column holding the date.
+func TestCurrentDatePlusOneCTASStoresDate(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, Config{Store: objstore.NewMemStore(), Bucket: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	if _, err := db.Execute(ctx, "CREATE TABLE cd1 AS SELECT CURRENT_DATE + 1 AS cd1"); err != nil {
+		t.Fatalf("CTAS CURRENT_DATE + 1: %v", err)
+	}
+	meta, err := db.catalog.GetTable(ctx, "cd1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(meta.Schema.Columns) != 1 || meta.Schema.Columns[0].Type != parquet.TypeDate {
+		t.Fatalf("cd1 column declared %#v, want a single DATE column", meta.Schema.Columns)
+	}
+
+	want := time.Now().UTC().AddDate(0, 0, 1).Format("2006-01-02")
+	res, err := db.Query(ctx, "SELECT cd1 FROM cd1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Rows) != 1 {
+		t.Fatalf("got %d rows, want 1", len(res.Rows))
+	}
+	if got, _ := res.Rows[0]["cd1"].(string); got != want {
+		t.Errorf("cd1 = %q, want %q", got, want)
+	}
+}
+
+// TestInsertSelectCurrentDatePlusOneIntoDateColumn is B3's second cell:
+// `INSERT INTO t (d DATE) SELECT CURRENT_DATE + 1` used to refuse 42804,
+// "column \"d\" is of type DATE but expression is of type STRING", because
+// AssignableToColumn compared the target's DATE against the expression's
+// undeclared-arithmetic STRING fallback — the same gap
+// TestCurrentDatePlusOneCTASStoresDate exercises for CTAS.
+func TestInsertSelectCurrentDatePlusOneIntoDateColumn(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, Config{Store: objstore.NewMemStore(), Bucket: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	schema := parquet.Schema{Columns: []parquet.Column{
+		{Name: "d", Type: parquet.TypeDate, Nullable: true},
+	}}
+	if err := db.CreateTable(ctx, "cd2", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Execute(ctx, "INSERT INTO cd2 SELECT CURRENT_DATE + 1"); err != nil {
+		t.Fatalf("INSERT ... SELECT CURRENT_DATE + 1: %v", err)
+	}
+
+	want := time.Now().UTC().AddDate(0, 0, 1).Format("2006-01-02")
+	res, err := db.Query(ctx, "SELECT d FROM cd2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Rows) != 1 {
+		t.Fatalf("got %d rows, want 1", len(res.Rows))
+	}
+	if got, _ := res.Rows[0]["d"].(string); got != want {
+		t.Errorf("d = %q, want %q", got, want)
 	}
 }
