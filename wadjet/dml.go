@@ -1449,6 +1449,9 @@ func (ev *mergeEvaluator) checkClauseColumns(node plansql.Node, matched bool) er
 // already resolves against — so `WHEN MATCHED AND t.id IN (SELECT …)` answers
 // and a subquery correlated to either side compiles as correlated.
 func (ev *mergeEvaluator) compile(node plansql.Node) (expr.Expr, error) {
+	if err := dmlExpressionTyping(node, "", ev.mergedCols); err != nil {
+		return nil, err
+	}
 	if !dmlClauseHasSubquery(node) {
 		return expr.Compile(node)
 	}
@@ -1634,6 +1637,17 @@ func assignDMLSource(node plansql.Node, schema []parquet.Column, v any, col parq
 	return assignEvaluatedValue(v, col, dmlSourceIsFloat(node, schema), srcType, srcKnown)
 }
 
+// dmlExpressionTyping is the expression-typing rule every DML door runs on
+// every expression it evaluates — a VALUES cell, a SET value, a WHERE, a
+// MERGE clause — before it compiles it: the rule the SELECT binder applies to
+// every clause (physical.RefuseTemporalArithmetic, the date/timestamp `+` /
+// `-` pairs PostgreSQL has no operator for, 42883). Round 3 installed that
+// rule in the binder only, so the same expression was refused on SELECT and
+// INSERT … SELECT and stored on VALUES / UPDATE (round-3 review B3).
+func dmlExpressionTyping(node plansql.Node, alias string, schema []parquet.Column) error {
+	return physical.RefuseTemporalArithmetic(node, alias, schema)
+}
+
 // dmlTypedTextSource reports a bare call to a function the registry declares
 // TEXT for a network or UUID value (expr.DeclaresTextForTypedValue).
 func dmlTypedTextSource(node plansql.Node) bool {
@@ -1668,6 +1682,9 @@ func (ev *mergeEvaluator) value(text string, merged map[string]any, col parquet.
 	node, err := plansql.ParseExpressionComplete(text)
 	if err != nil {
 		return nil, sqlerr.Wrap("42601", fmt.Errorf("parsing %q: %w", text, err))
+	}
+	if err := dmlExpressionTyping(node, "", ev.mergedCols); err != nil {
+		return nil, err
 	}
 	if err := dmlAssignmentCheck(node, ev.mergedCols, col); err != nil {
 		return nil, err
@@ -2613,6 +2630,10 @@ func assignInsertValue(text string, col parquet.Column) (any, error) {
 	if err != nil {
 		return nil, sqlerr.Wrap("42601", fmt.Errorf("parsing %q: %w", trimmed, err))
 	}
+	// The expression is typed before it is assigned — PostgreSQL's order.
+	if err := dmlExpressionTyping(node, "", nil); err != nil {
+		return nil, err
+	}
 	if err := dmlAssignmentCheck(node, nil, col); err != nil {
 		return nil, err
 	}
@@ -3263,6 +3284,9 @@ func BuildDMLPredicate(target plansql.DMLTarget, schema []parquet.Column, sub *D
 	if err := refuseDMLLiteralPairs(node, schema); err != nil {
 		return nil, err
 	}
+	if err := dmlExpressionTyping(node, target.Alias, schema); err != nil {
+		return nil, err
+	}
 	// A TRUTH CONTEXT, held to the same rule a SELECT's WHERE is held to:
 	// `DELETE FROM t WHERE id > 0 AND n # 3` is 42804 on the server and
 	// deleted every row here, because the per-row closure reads a non-boolean
@@ -3423,6 +3447,9 @@ func ResolveDMLSetClauses(clauses []plansql.SetClause, target plansql.DMLTarget,
 			continue
 		}
 		if err := checkDMLColumns(node, target, schema); err != nil {
+			return nil, fmt.Errorf("SET %s: %w", name, err)
+		}
+		if err := dmlExpressionTyping(node, target.Alias, schema); err != nil {
 			return nil, fmt.Errorf("SET %s: %w", name, err)
 		}
 		// The one assignment table, asked once per clause before any row —

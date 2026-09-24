@@ -590,3 +590,65 @@ func textCastOrigin(n plansql.Node, typeOf func(plansql.Node) (parquet.TypeID, b
 	}
 	return typeAmbiguous
 }
+
+// RefuseTemporalArithmetic is the expression-typing rule temporalArithmetic
+// states, for an expression a DML door evaluates with no SELECT around it: an
+// INSERT … VALUES cell, an UPDATE SET value, an UPDATE / DELETE WHERE, a
+// MERGE clause. Every `+` / `-` in the tree is typed exactly as the SELECT
+// binder types it (comparisonTyper.arithOperand over the target's declared
+// columns — the structure first, then nodeDeclaredType), so `ts + 0`,
+// `d + 1.5`, `1 - d` and `d + ts` are 42883 on every statement, not only on
+// the ones the binder's clause walk reaches (round-3 review B3: VALUES stored
+// the epoch-count number, UPDATE SET stored it, and UPDATE / DELETE WHERE
+// compared it). alias is the name the target answers to ("" for none); a
+// subquery's body is its own statement and is not entered.
+func RefuseTemporalArithmetic(node plansql.Node, alias string, schema []parquet.Column) error {
+	if node == nil {
+		return nil
+	}
+	scope := newColScope()
+	for _, c := range schema {
+		scope.addQualifiedTyped(alias, c.Name, c.Type)
+		scope.addRowColumn(c)
+		scope.addElementType(c)
+	}
+	decls := rowFieldScopeDecls(scope)
+	c := &comparisonTyper{scope: scope, typeOf: structuralTypeOf(decls), shape: foldTypeOf(decls), decls: decls,
+		subquery:   func(string) []parquet.TypeID { return nil },
+		setOrigins: func(string) []parquet.TypeID { return nil }}
+	return c.walkTemporalArithmetic(node)
+}
+
+// walkTemporalArithmetic visits every operand the comparison walk visits
+// (exprOperands, a window's argument / PARTITION BY / ORDER BY) and applies
+// temporalArithmetic to each `+` / `-`, innermost first.
+func (c *comparisonTyper) walkTemporalArithmetic(node plansql.Node) error {
+	switch n := node.(type) {
+	case nil, *plansql.SubqueryNode, *plansql.ExistsNode:
+		return nil
+	case *plansql.WindowFuncNode:
+		var kids []plansql.Node
+		if n.Func != nil {
+			kids = append(kids, n.Func)
+		}
+		kids = append(kids, n.PartitionBy...)
+		for _, o := range n.OrderBy {
+			kids = append(kids, o.Expr)
+		}
+		for _, k := range kids {
+			if err := c.walkTemporalArithmetic(k); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	for _, child := range exprOperands(node) {
+		if err := c.walkTemporalArithmetic(child); err != nil {
+			return err
+		}
+	}
+	if b, ok := node.(*plansql.BinaryOp); ok {
+		return c.temporalArithmetic(b)
+	}
+	return nil
+}
