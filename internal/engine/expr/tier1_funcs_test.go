@@ -201,7 +201,7 @@ func TestBase64RoundTrip(t *testing.T) {
 
 func TestFromUnixtime(t *testing.T) {
 	fn := DefaultRegistry.Lookup("from_unixtime")
-	got := fn([]any{float64(0)})
+	got := tsText(fn([]any{float64(0)}))
 	if got != "1970-01-01 00:00:00" {
 		t.Errorf("from_unixtime(0) = %v, want the engine's one instant "+
 			"rendering — the same text a TIMESTAMP column of that instant "+
@@ -245,7 +245,7 @@ func TestDateParse(t *testing.T) {
 	if got == nil {
 		t.Fatal("date_parse returned nil")
 	}
-	if !strings.HasPrefix(got.(string), "2026-03-15") {
+	if !strings.HasPrefix(tsText(got).(string), "2026-03-15") {
 		t.Errorf("date_parse = %v, want prefix 2026-03-15", got)
 	}
 }
@@ -439,8 +439,11 @@ func TestUnixTimeRoundTrip(t *testing.T) {
 	fromUnix := DefaultRegistry.Lookup("from_unixtime")
 
 	epoch := float64(1700000000)
-	ts := fromUnix([]any{epoch})
-	result := toUnix([]any{ts})
+	_, _ = toUnix, fromUnix
+	// Composed as the compiled expression is: from_unixtime boxes a TIMESTAMP
+	// (epoch ms), which to_unixtime reads in that unit through its producer.
+	ts := &FuncCall{Name: "from_unixtime", Args: []Expr{&Lit{Val: epoch}}}
+	result := (&FuncCall{Name: "to_unixtime", Args: []Expr{ts}}).Eval(nil, 0)
 	if math.Abs(result.(float64)-epoch) > 1 {
 		t.Errorf("unix time round-trip: %v -> %v -> %v", epoch, ts, result)
 	}

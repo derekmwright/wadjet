@@ -4,8 +4,11 @@ package wadjet
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/derekmwright/wadjet/internal/engine/batch"
 
 	"github.com/derekmwright/wadjet/internal/storage/ingest"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
@@ -74,6 +77,11 @@ func TestDateArithOverTimestampColumn(t *testing.T) {
 		{"back_a_day", -1.0},
 	} {
 		got := r[tc.col]
+		// date_add over a TIMESTAMP is a TIMESTAMP (arc VL round 3), which
+		// this API hands back as epoch milliseconds.
+		if ms, ok := got.(int64); ok && strings.HasPrefix(tc.col, "ts_") {
+			got = batch.FormatTimestamp(ms)
+		}
 		if f, ok := toF(got); ok {
 			if w, isNum := tc.want.(float64); isNum && f == w {
 				continue

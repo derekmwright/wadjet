@@ -23,11 +23,16 @@ func fnFromUnixtime(args []any) any {
 	// (#1266 review B6). An integer is still read exactly (#1031).
 	if _, isInt := toInt64Safe(args[0]); !isInt {
 		if ms, ok := epochSecondsTextMillis(numberText(args[0])); ok {
-			return formatInstant(time.UnixMilli(ms))
+			return ms
 		}
 	}
 	epoch := exactIntArg(args[0]) // exactly, not through a double (#1031)
-	return formatInstant(time.Unix(epoch, 0))
+	// The TIMESTAMP box is epoch MILLISECONDS; past ±MaxInt64/1000 seconds it
+	// has no carrier, and PostgreSQL's to_timestamp raises there too.
+	if epoch > math.MaxInt64/1000 || epoch < math.MinInt64/1000 {
+		raiseTimestampOutOfRange()
+	}
+	return instantBox(time.Unix(epoch, 0))
 }
 
 // numberText is a number argument's decimal spelling: the shortest text that
@@ -114,7 +119,7 @@ func fnDateParse(args []any) any {
 	if err != nil {
 		return nil
 	}
-	return formatInstant(t)
+	return instantBox(t)
 }
 
 // sqlFormatToGo converts SQL date format specifiers to Go time layout.

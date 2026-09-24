@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"math"
 	"testing"
+
+	"github.com/derekmwright/wadjet/internal/engine/batch"
 )
 
 // Tests for scalar functions at 0% or low coverage.
@@ -1077,9 +1079,9 @@ func TestFnNow(t *testing.T) {
 	if result == nil {
 		t.Error("expected non-nil")
 	}
-	s, ok := result.(string)
-	if !ok || len(s) < 10 {
-		t.Errorf("expected RFC3339 string, got %v", result)
+	// TIMESTAMP-declared, so the TIMESTAMP box: epoch milliseconds.
+	if ms, ok := result.(int64); !ok || ms <= 0 {
+		t.Errorf("expected an epoch-millisecond TIMESTAMP box, got %v (%T)", result, result)
 	}
 }
 
@@ -1231,9 +1233,10 @@ func TestFnCurrentDate(t *testing.T) {
 	if result == nil {
 		t.Fatal("expected non-nil")
 	}
-	s := result.(string)
-	if len(s) != 10 {
-		t.Errorf("expected date format YYYY-MM-DD, got %q", s)
+	// DATE-declared, so the DATE box: epoch days (#1254, arc VL round 3).
+	days, ok := result.(int64)
+	if !ok || len(batch.FormatDate(int32(days))) != 10 {
+		t.Errorf("expected an epoch-day DATE box, got %v (%T)", result, result)
 	}
 }
 
@@ -1260,9 +1263,9 @@ func TestFnDateAdd(t *testing.T) {
 	if fnDateAdd([]any{nil, int64(5)}) != nil {
 		t.Error("nil date")
 	}
-	result := fnDateAdd([]any{"2024-01-01", int64(10)})
-	if result != "2024-01-11" {
-		t.Errorf("expected 2024-01-11, got %v", result)
+	result := tsText(fnDateAdd([]any{"2024-01-01", int64(10)}))
+	if result != "2024-01-11 00:00:00" {
+		t.Errorf("expected 2024-01-11 00:00:00, got %v", result)
 	}
 }
 
@@ -1274,26 +1277,26 @@ func TestFnDateSub(t *testing.T) {
 		t.Error("nil date")
 	}
 	// Numeric days
-	result := fnDateSub([]any{"2024-01-11", int64(10)})
-	if result != "2024-01-01" {
-		t.Errorf("expected 2024-01-01, got %v", result)
+	result := tsText(fnDateSub([]any{"2024-01-11", int64(10)}))
+	if result != "2024-01-01 00:00:00" {
+		t.Errorf("expected 2024-01-01 00:00:00, got %v", result)
 	}
 	// Interval value
-	result = fnDateSub([]any{"2024-03-15", IntervalValue{Months: 1}})
-	if result != "2024-02-15" {
-		t.Errorf("expected 2024-02-15, got %v", result)
+	result = tsText(fnDateSub([]any{"2024-03-15", IntervalValue{Months: 1}}))
+	if result != "2024-02-15 00:00:00" {
+		t.Errorf("expected 2024-02-15 00:00:00, got %v", result)
 	}
 }
 
 func TestFnDateAddInterval(t *testing.T) {
 	// date_add with IntervalValue
-	result := fnDateAdd([]any{"2024-01-01", IntervalValue{Days: 30}})
-	if result != "2024-01-31" {
-		t.Errorf("expected 2024-01-31, got %v", result)
+	result := tsText(fnDateAdd([]any{"2024-01-01", IntervalValue{Days: 30}}))
+	if result != "2024-01-31 00:00:00" {
+		t.Errorf("expected 2024-01-31 00:00:00, got %v", result)
 	}
-	result = fnDateAdd([]any{"2024-01-01", IntervalValue{Years: 1}})
-	if result != "2025-01-01" {
-		t.Errorf("expected 2025-01-01, got %v", result)
+	result = tsText(fnDateAdd([]any{"2024-01-01", IntervalValue{Years: 1}}))
+	if result != "2025-01-01 00:00:00" {
+		t.Errorf("expected 2025-01-01 00:00:00, got %v", result)
 	}
 }
 
@@ -1305,16 +1308,16 @@ func TestDateIntervalArithmetic(t *testing.T) {
 		Right: &Lit{Val: iv},
 		Op:    "-",
 	}
-	result := binop.Eval(nil, 0)
-	if result != "2026-02-16" {
-		t.Errorf("date - interval: expected 2026-02-16, got %v", result)
+	result := tsText(binop.Eval(nil, 0))
+	if result != "2026-02-16 00:00:00" {
+		t.Errorf("date - interval: expected 2026-02-16 00:00:00, got %v", result)
 	}
 
 	// Test date + interval
 	binop.Op = "+"
-	result = binop.Eval(nil, 0)
-	if result != "2026-04-17" {
-		t.Errorf("date + interval: expected 2026-04-17, got %v", result)
+	result = tsText(binop.Eval(nil, 0))
+	if result != "2026-04-17 00:00:00" {
+		t.Errorf("date + interval: expected 2026-04-17 00:00:00, got %v", result)
 	}
 
 	// Test interval + date (commutative for +)
@@ -1323,9 +1326,9 @@ func TestDateIntervalArithmetic(t *testing.T) {
 		Right: &Lit{Val: "2026-03-18"},
 		Op:    "+",
 	}
-	result = binop2.Eval(nil, 0)
-	if result != "2026-04-17" {
-		t.Errorf("interval + date: expected 2026-04-17, got %v", result)
+	result = tsText(binop2.Eval(nil, 0))
+	if result != "2026-04-17 00:00:00" {
+		t.Errorf("interval + date: expected 2026-04-17 00:00:00, got %v", result)
 	}
 
 	// Test month interval
@@ -1334,9 +1337,9 @@ func TestDateIntervalArithmetic(t *testing.T) {
 		Right: &Lit{Val: IntervalValue{Months: 3}},
 		Op:    "-",
 	}
-	result = binop3.Eval(nil, 0)
-	if result != "2025-12-18" {
-		t.Errorf("date - 3 months: expected 2025-12-18, got %v", result)
+	result = tsText(binop3.Eval(nil, 0))
+	if result != "2025-12-18 00:00:00" {
+		t.Errorf("date - 3 months: expected 2025-12-18 00:00:00, got %v", result)
 	}
 
 	// Test year interval
@@ -1345,9 +1348,9 @@ func TestDateIntervalArithmetic(t *testing.T) {
 		Right: &Lit{Val: IntervalValue{Years: 1}},
 		Op:    "+",
 	}
-	result = binop4.Eval(nil, 0)
-	if result != "2027-03-18" {
-		t.Errorf("date + 1 year: expected 2027-03-18, got %v", result)
+	result = tsText(binop4.Eval(nil, 0))
+	if result != "2027-03-18 00:00:00" {
+		t.Errorf("date + 1 year: expected 2027-03-18 00:00:00, got %v", result)
 	}
 
 	// Test nil handling
@@ -1368,7 +1371,7 @@ func TestFnToDate(t *testing.T) {
 	if fnToDate([]any{nil}) != nil {
 		t.Error("nil arg")
 	}
-	if fnToDate([]any{"2024-06-15"}) != "2024-06-15" {
+	if dateText(fnToDate([]any{"2024-06-15"})) != "2024-06-15" {
 		t.Error("expected same date back")
 	}
 	// Invalid date

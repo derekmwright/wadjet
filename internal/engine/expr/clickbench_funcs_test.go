@@ -2,7 +2,11 @@
 
 package expr
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/derekmwright/wadjet/internal/engine/batch"
+)
 
 // ClickBench-surfaced scalar gaps: date_trunc minute/second/week/quarter
 // units (Q43) and SQL-style \N backreferences in regexp_replace (Q29).
@@ -23,7 +27,8 @@ func TestDateTruncSubHourUnits(t *testing.T) {
 	}
 	for _, tc := range cases {
 		got := fnDateTrunc([]any{tc.unit, ts})
-		if got != tc.want {
+		// date_trunc is TIMESTAMP-declared and boxes epoch milliseconds.
+		if ms, ok := got.(int64); !ok || batch.FormatTimestamp(ms) != tc.want {
 			t.Errorf("date_trunc(%q): got %v, want %q", tc.unit, got, tc.want)
 		}
 	}

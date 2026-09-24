@@ -473,7 +473,7 @@ func fnFromISO8601Date(args []any) any {
 	if err != nil {
 		return nil
 	}
-	return t.Format("2006-01-02")
+	return epochDaysOf(t)
 }
 
 func fnToISO8601(args []any) any {

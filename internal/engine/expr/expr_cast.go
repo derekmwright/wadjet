@@ -308,16 +308,11 @@ func boxedTextOperand(b *batch.RecordBatch, row int, operand Expr, v any) any {
 	// "826727136000" on the wire while the same cast over a COLUMN answered
 	// the instant. FuncCall.formatTemporalArgs has had this arm since #273;
 	// this is the same rule at the other text site (#544).
-	if c, ok := operand.(*Cast); ok {
-		ms, isInt := v.(int64)
-		if !isInt {
-			return v
-		}
-		switch castTemporalKind(c.DestType) {
-		case castToDateKind:
-			return batch.FormatDate(int32(ms))
-		case castToTimestampKind:
-			return batch.FormatTimestamp(ms)
+	if _, isCol := operand.(*ColRef); !isCol {
+		// Every non-column temporal producer — the cast above, a clock
+		// function, date arithmetic — boxes a unit producedTemporal names.
+		if s, ok := renderTemporalBox(operand, b, v); ok {
+			return s
 		}
 		return v
 	}

@@ -12,7 +12,7 @@ import (
 // --- Date/time functions ---
 
 func fnNow(args []any) any {
-	return formatInstant(clockNow())
+	return instantBox(clockNow())
 }
 
 func fnYear(args []any) any {
@@ -74,41 +74,41 @@ func fnDateTrunc(args []any) any {
 	}
 	switch unit {
 	case "year":
-		return formatInstant(time.Date(t.Year(), 1, 1, 0, 0, 0, 0, t.Location()))
+		return instantBox(time.Date(t.Year(), 1, 1, 0, 0, 0, 0, t.Location()))
 	case "quarter":
 		q1 := time.Month((int(t.Month())-1)/3*3 + 1)
-		return formatInstant(time.Date(t.Year(), q1, 1, 0, 0, 0, 0, t.Location()))
+		return instantBox(time.Date(t.Year(), q1, 1, 0, 0, 0, 0, t.Location()))
 	case "month":
-		return formatInstant(time.Date(t.Year(), t.Month(), 1, 0, 0, 0, 0, t.Location()))
+		return instantBox(time.Date(t.Year(), t.Month(), 1, 0, 0, 0, 0, t.Location()))
 	case "week":
 		// ISO convention (DuckDB/Postgres): truncate to Monday.
 		d := t
 		for d.Weekday() != time.Monday {
 			d = d.AddDate(0, 0, -1)
 		}
-		return formatInstant(time.Date(d.Year(), d.Month(), d.Day(), 0, 0, 0, 0, t.Location()))
+		return instantBox(time.Date(d.Year(), d.Month(), d.Day(), 0, 0, 0, 0, t.Location()))
 	case "day":
-		return formatInstant(time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location()))
+		return instantBox(time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location()))
 	case "hour":
-		return formatInstant(time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), 0, 0, 0, t.Location()))
+		return instantBox(time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), 0, 0, 0, t.Location()))
 	case "minute":
-		return formatInstant(time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), 0, 0, t.Location()))
+		return instantBox(time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), 0, 0, t.Location()))
 	case "second":
-		return formatInstant(time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), 0, t.Location()))
+		return instantBox(time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), 0, t.Location()))
 	case "decade":
-		return formatInstant(time.Date(t.Year()/10*10, 1, 1, 0, 0, 0, 0, t.Location()))
+		return instantBox(time.Date(t.Year()/10*10, 1, 1, 0, 0, 0, 0, t.Location()))
 	case "century":
 		// PostgreSQL's centuries START at year 1: date_trunc('century',
 		// '2023-05-17') is 2001-01-01, not 2000-01-01. Measured live.
-		return formatInstant(time.Date((t.Year()-1)/100*100+1, 1, 1, 0, 0, 0, 0, t.Location()))
+		return instantBox(time.Date((t.Year()-1)/100*100+1, 1, 1, 0, 0, 0, 0, t.Location()))
 	case "millennium":
-		return formatInstant(time.Date((t.Year()-1)/1000*1000+1, 1, 1, 0, 0, 0, 0, t.Location()))
+		return instantBox(time.Date((t.Year()-1)/1000*1000+1, 1, 1, 0, 0, 0, 0, t.Location()))
 	case "milliseconds", "microseconds":
 		// This engine's instants are epoch MILLISECONDS, so both of these are
 		// the identity here. PostgreSQL truncates a microsecond value to the
 		// millisecond for the first and answers the value itself for the
 		// second; over a millisecond-resolution instant those coincide.
-		return formatInstant(t)
+		return instantBox(t)
 	default:
 		// PostgreSQL refuses a unit its timestamp functions do not know rather
 		// than answering NULL, and the accepted set is exactly the thirteen
@@ -164,5 +164,5 @@ func fnCurrentDate(args []any) any {
 	// the machine's LOCAL date, so `CURRENT_DATE` and `CAST(NOW() AS DATE)`
 	// named two different days for the hours between local midnight and UTC
 	// midnight — #870.
-	return clockNow().UTC().Format("2006-01-02")
+	return epochDaysOf(clockNow().UTC())
 }

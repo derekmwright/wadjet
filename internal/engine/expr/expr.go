@@ -399,9 +399,13 @@ func init() {
 		"current_schemas":  {fnCurrentSchemas, RetArray},
 		"version":          {fnVersion, RetString},
 
-		"date_add": {fnDateAdd, RetString},
-		"date_sub": {fnDateSub, RetString},
-		"to_date":  {fnToDate, RetString},
+		// date_add / date_sub declare TIMESTAMP here and DATE for a DATE
+		// shifted by whole days — the argument-dependent half is
+		// physical.funcReturnType's, the same rule dateShift boxes by (arc VL
+		// round 3). to_date is a DATE.
+		"date_add": {fnDateAdd, RetTimestamp},
+		"date_sub": {fnDateSub, RetTimestamp},
+		"to_date":  {fnToDate, RetTypeOf(batch.TypeDate)},
 
 		// UUID functions
 		"uuid_version":   {fnUUIDVersion, RetFloat64},
@@ -540,7 +544,7 @@ func init() {
 		"week":              {fnWeek, RetFloat64},
 		"day_of_week":       {fnDayOfWeek, RetFloat64},
 		"day_of_year":       {fnDayOfYear, RetFloat64},
-		"last_day_of_month": {fnLastDayOfMonth, RetString},
+		"last_day_of_month": {fnLastDayOfMonth, RetTypeOf(batch.TypeDate)},
 		"current_timestamp": {fnCurrentTimestamp, RetTimestamp},
 		// LOCALTIMESTAMP is CURRENT_TIMESTAMP's value with PostgreSQL's
 		// OTHER declaration: timestamp without time zone (#1169).
@@ -706,7 +710,7 @@ func init() {
 
 		// Date/time: ISO 8601
 		"from_iso8601_timestamp": {fnFromISO8601Timestamp, RetInt64},
-		"from_iso8601_date":      {fnFromISO8601Date, RetString},
+		"from_iso8601_date":      {fnFromISO8601Date, RetTypeOf(batch.TypeDate)},
 		"to_iso8601":             {fnToISO8601, RetString},
 		"to_milliseconds":        {fnToMilliseconds, RetInt64},
 		"timezone_hour":          {fnTimezoneHour, RetInt64},

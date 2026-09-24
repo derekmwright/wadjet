@@ -3,6 +3,8 @@
 package expr
 
 import (
+	"strings"
+
 	"fmt"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
@@ -394,15 +396,14 @@ const (
 	retDynamic
 )
 
-// The fixed declarations. These name the SQL type a function's result
-// declares, not the shape of the Go value its kernel happens to hand back:
-// now/current_timestamp/localtimestamp all return formatted TEXT at runtime
-// and still declare RetTimestamp, and current_date does the same for DATE
-// since #1254 — RetTypeOf(batch.TypeDate), because DATE has no named
-// constant of its own below. A function that is genuinely SQL TEXT declares
-// RetString; a few date/address functions still wrongly do the same
-// (to_date, network_address, int_to_ip, uuid — #1254's issue thread, not
-// fixed here).
+// The fixed declarations. A declaration names the SQL type of the function's
+// result AND the box its kernel returns: a DATE is int64 epoch days and a
+// TIMESTAMP int64 epoch milliseconds, the boxes a column of that type gives
+// (arc VL round 3 — now/current_date used to return formatted TEXT under a
+// TIMESTAMP / DATE declaration, and to_date a date under a TEXT one).
+// TestRegistryDeclaredTypeIsTheProducedType holds every entry to it; the
+// address/UUID functions that still declare TEXT are declaredTextTypedValue.
+// DATE has no named constant below: it is RetTypeOf(batch.TypeDate).
 var (
 	RetBool      = Ret{kind: retFixed, typ: batch.TypeBool}
 	RetInt32     = Ret{kind: retFixed, typ: batch.TypeInt32}
@@ -995,4 +996,25 @@ func (d DeclType) RowFields() []parquet.Column {
 		return nil
 	}
 	return d.Schema.Fields
+}
+
+// declaredTextTypedValue are the registry entries that DECLARE text while the
+// value they produce is the text of a NETWORK address or a UUID — values a
+// PostgreSQL client would receive typed inet or uuid. They are the one list
+// the census gate (TestRegistryDeclaredTypeIsTheProducedType) pins after arc
+// VL round 3 made every TEMPORAL entry declare and produce its own type, and
+// the assignment rule reads the same list: such a source assigned into a
+// typed column is read by the column's input function, as SQL's unknown-typed
+// literal is, rather than refused as text (a documented superset —
+// docs/postgres-differences.md). Retyping them belongs to the network-type
+// lane.
+var declaredTextTypedValue = map[string]bool{
+	"int_to_ip": true, "ip_add": true, "ip_subtract": true, "mask_ip": true,
+	"network_address": true, "broadcast_address": true, "ip_netmask": true,
+	"ip_subnet": true, "uuid": true,
+}
+
+// DeclaresTextForTypedValue reports whether a function is on that list.
+func DeclaresTextForTypedValue(name string) bool {
+	return declaredTextTypedValue[strings.ToLower(name)]
 }

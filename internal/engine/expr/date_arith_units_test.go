@@ -113,14 +113,19 @@ func dateArithFamily() []dateArithCase {
 		// Text: a clock in the literal makes it an instant, its absence a day.
 		{"date_add_text_instant", "date_add", []Expr{col("s"), &Lit{Val: int64(1)}},
 			[2]any{"1996-03-14 14:25:36", "1961-04-13 06:07:00"}},
+		// Text is not a DATE, so the result is a TIMESTAMP (PostgreSQL's
+		// preferred datetime type) — its midnight when the text has no clock
+		// (arc VL round 3: the value's type follows the argument's TYPE, never
+		// the spelling of the text).
 		{"date_add_text_date", "date_add", []Expr{col("sd"), &Lit{Val: int64(1)}},
-			[2]any{"1996-03-14", "1961-04-13"}},
+			[2]any{"1996-03-14 00:00:00", "1961-04-13 00:00:00"}},
 
-		// A bare untyped integer still means days since the epoch.
+		// A bare untyped integer still means days since the epoch, and it is
+		// not a DATE either.
 		{"date_add_bare_int", "date_add", []Expr{col("n"), &Lit{Val: int64(1)}},
-			[2]any{"1996-03-14", "1961-04-13"}},
+			[2]any{"1996-03-14 00:00:00", "1961-04-13 00:00:00"}},
 		{"date_sub_bare_int", "date_sub", []Expr{col("n"), &Lit{Val: int64(14)}},
-			[2]any{"1996-02-28", "1961-03-29"}},
+			[2]any{"1996-02-28 00:00:00", "1961-03-29 00:00:00"}},
 
 		// An INTERVAL keeps its own unit. Two hours added to a whole day
 		// makes an instant; a month added to one does not.
@@ -130,9 +135,10 @@ func dateArithFamily() []dateArithCase {
 		{"date_sub_interval_hours", "date_sub",
 			[]Expr{col("d"), &Lit{Val: IntervalValue{Hours: 2}}},
 			[2]any{"1996-03-12 22:00:00", "1961-04-11 22:00:00"}},
+		// Any INTERVAL shift is a TIMESTAMP, PostgreSQL's `date + interval`.
 		{"date_add_interval_month", "date_add",
 			[]Expr{col("d"), &Lit{Val: IntervalValue{Months: 1}}},
-			[2]any{"1996-04-13", "1961-05-12"}},
+			[2]any{"1996-04-13 00:00:00", "1961-05-12 00:00:00"}},
 
 		// date_diff: whole days, truncating toward the past. The DATE column
 		// is midnight of the same day the TIMESTAMP column falls in, so the
@@ -175,7 +181,8 @@ func TestDateArithOverTemporalColumns(t *testing.T) {
 	for _, c := range dateArithFamily() {
 		for row := 0; row < 2; row++ {
 			t.Run(c.label, func(t *testing.T) {
-				got := c.build().Eval(b, row)
+				e := c.build()
+				got := shownBox(e, b, e.Eval(b, row))
 				if got != c.want[row] {
 					t.Errorf("row %d: %s = %v (%T), want %v",
 						row, c.label, got, got, c.want[row])
@@ -199,18 +206,25 @@ func TestDateArithScalarVecAgree(t *testing.T) {
 			}
 			// A fresh FuncCall per path: EvalVec and Eval must not share
 			// per-instance state that makes them agree by accident.
-			out := batch.NewVector(declared.ID, 2)
+			probe := c.build()
+			vt := producedVectorType(probe, b, declared.ID)
+			out := batch.NewVector(vt, 2)
 			c.build().EvalVec(b, out, 2)
 			for row := 0; row < 2; row++ {
-				scalar := c.build().Eval(b, row)
-				if vec := out.GetValue(row); vec != scalar {
+				e := c.build()
+				scalar := e.Eval(b, row)
+				if vec := shownVec(out, row); vec != shownBox(e, b, scalar) {
 					t.Errorf("row %d: vec = %v (%T), scalar = %v (%T)",
 						row, vec, vec, scalar, scalar)
 				}
 				// The declared type has to be the type the value is
 				// actually stored as, or the output vector above could
 				// not have held it.
-				switch declared.ID {
+				switch vt {
+				case batch.TypeDate, batch.TypeTimestamp:
+					if _, isBox := scalar.(int64); !isBox && scalar != nil {
+						t.Errorf("%s produces %s but returned %T", c.fn, vt, scalar)
+					}
 				case batch.TypeString:
 					if _, isText := scalar.(string); !isText {
 						t.Errorf("%s declares String but returned %T", c.fn, scalar)
@@ -245,15 +259,16 @@ func TestDateArithNullRows(t *testing.T) {
 		{"ts", "1996-03-14 14:25:36"},
 	} {
 		args := []Expr{&ColRef{Name: tc.col}, &Lit{Val: int64(1)}}
-		if got := (&FuncCall{Name: "date_add", Args: args}).Eval(b, 0); got != tc.want {
+		call := &FuncCall{Name: "date_add", Args: args}
+		if got := shownBox(call, b, call.Eval(b, 0)); got != tc.want {
 			t.Errorf("scalar date_add(%s) row 0: got %v want %v", tc.col, got, tc.want)
 		}
 		if got := (&FuncCall{Name: "date_add", Args: args}).Eval(b, 1); got != nil {
 			t.Errorf("scalar date_add(%s) row 1 (null): got %v want nil", tc.col, got)
 		}
-		out := batch.NewVector(batch.TypeString, 2)
+		out := batch.NewVector(producedVectorType(call, b, batch.TypeString), 2)
 		(&FuncCall{Name: "date_add", Args: args}).EvalVec(b, out, 2)
-		if got := out.GetValue(0); got != tc.want {
+		if got := shownVec(out, 0); got != tc.want {
 			t.Errorf("vec date_add(%s) row 0: got %v want %v", tc.col, got, tc.want)
 		}
 		if got := out.GetValue(1); got != nil {
@@ -268,14 +283,10 @@ func TestDateArithNullRows(t *testing.T) {
 // timestamp answered year 2,196,240.
 func TestDateArithMillisecondsAreNotDays(t *testing.T) {
 	b := dateArithBatch(t)
-	fromDate := (&FuncCall{
-		Name: "date_add",
-		Args: []Expr{&ColRef{Name: "d"}, &Lit{Val: int64(1)}},
-	}).Eval(b, 0)
-	fromTS := (&FuncCall{
-		Name: "date_add",
-		Args: []Expr{&ColRef{Name: "ts"}, &Lit{Val: int64(1)}},
-	}).Eval(b, 0)
+	dcall := &FuncCall{Name: "date_add", Args: []Expr{&ColRef{Name: "d"}, &Lit{Val: int64(1)}}}
+	tcall := &FuncCall{Name: "date_add", Args: []Expr{&ColRef{Name: "ts"}, &Lit{Val: int64(1)}}}
+	fromDate := shownBox(dcall, b, dcall.Eval(b, 0))
+	fromTS := shownBox(tcall, b, tcall.Eval(b, 0))
 	ts, isText := fromTS.(string)
 	if !isText || len(ts) < 10 || ts[:10] != fromDate {
 		t.Errorf("date_add(ts) = %v, want the same day as date_add(d) = %v", fromTS, fromDate)

@@ -138,7 +138,7 @@ func dateShift(args []any, subtract bool) any {
 	if iv, ok := args[1].(IntervalValue); ok {
 		return intervalShift(args[0], iv, subtract)
 	}
-	t, dateOnly, ok := parseDateArg(args[0])
+	t, _, ok := parseDateArg(args[0])
 	if !ok {
 		return nil
 	}
@@ -146,7 +146,15 @@ func dateShift(args []any, subtract bool) any {
 	if subtract {
 		days = -days
 	}
-	return formatDateResult(t.AddDate(0, 0, days), dateOnly)
+	// A DATE shifted by whole days is a DATE (epoch days); every other
+	// argument — a TIMESTAMP, a text instant — is a TIMESTAMP (epoch
+	// milliseconds). The same rule shiftProducedTemporal names for the box
+	// and physical.funcReturnType for the declaration (arc VL round 3).
+	shifted := t.AddDate(0, 0, days)
+	if _, isDate := args[0].(civilDate); isDate {
+		return epochDaysOf(shifted)
+	}
+	return instantBox(shifted)
 }
 
 // intervalShift applies an INTERVAL to a date-valued operand. It is the shared
@@ -162,17 +170,16 @@ func dateShift(args []any, subtract bool) any {
 // whole DAY still renders as a calendar date on both paths, which is what
 // TPC-H Q1's pinned `DATE '1998-12-01' - INTERVAL '90' DAY` reads.
 func intervalShift(v any, iv IntervalValue, subtract bool) any {
-	if ds, ok := v.(string); ok {
-		return dateAddInterval(ds, iv, subtract)
-	}
-	t, dateOnly, ok := parseDateArg(v)
+	t, _, ok := parseDateArg(v)
 	if !ok {
 		return nil
 	}
-	// An interval carrying a time component makes the result an instant even
-	// when the input was a whole day.
-	dateOnly = dateOnly && iv.Hours == 0 && iv.Minutes == 0 && iv.Seconds == 0
-	return formatDateResult(addInterval(t, iv, subtract), dateOnly)
+	// PostgreSQL's `date ± interval` and `timestamp ± interval` are both a
+	// TIMESTAMP, whole days or not: the result is the TIMESTAMP box (epoch
+	// milliseconds) the declaration names. It used to render a whole day as
+	// DATE text under a DATE declaration — a value PostgreSQL prints with its
+	// midnight (arc VL round 3).
+	return instantBox(addInterval(t, iv, subtract))
 }
 
 // parseDateArg resolves a date-arithmetic argument to the instant it denotes,
@@ -221,15 +228,10 @@ func formatInstant(t time.Time) string {
 	return batch.FormatTimestamp(t.UTC().UnixMilli())
 }
 
-// formatDateResult renders a date-arithmetic result. A whole day stays a
-// calendar date; an instant goes through formatInstant, so date_add over a
-// TIMESTAMP column reads exactly the way the column itself does.
-func formatDateResult(t time.Time, dateOnly bool) string {
-	if dateOnly {
-		return t.UTC().Format("2006-01-02")
-	}
-	return formatInstant(t)
-}
+// instantBox is the TIMESTAMP box of an instant: UTC epoch milliseconds, what
+// a TIMESTAMP column's ColRef.Eval hands out. Every TIMESTAMP-declared kernel
+// returns it (arc VL round 3), so its value and its declaration agree.
+func instantBox(t time.Time) int64 { return t.UTC().UnixMilli() }
 
 // fnToDate converts a date, a timestamp or a string to a calendar date.
 func fnToDate(args []any) any {
@@ -240,7 +242,8 @@ func fnToDate(args []any) any {
 	if t.IsZero() {
 		return nil
 	}
-	return t.Format("2006-01-02")
+	// A DATE, boxed as a DATE column is: epoch days (arc VL round 3).
+	return epochDaysOf(t)
 }
 
 // parseDateValue parses a date from various formats.

@@ -63,6 +63,9 @@ type FuncCall struct {
 	wantsNetworkText bool
 	wantsInstant     bool
 	wantsDateKind    bool
+	// fixedTemporal is the temporal type a FIXED DATE / TIMESTAMP declaration
+	// names — the unit this call's int64 box carries (producedTemporal).
+	fixedTemporal castTemporalKindT
 	// This function picks the extremum of its arguments (GREATEST / LEAST),
 	// so it is evaluated with the argument EXPRESSIONS in hand: a numeric
 	// literal's exact source text settles an ordering its float64 box cannot
@@ -119,48 +122,15 @@ type FuncCall struct {
 // references are covered — a nested expression's output type isn't known
 // here (and nothing in the TPC-H or observed customer shapes feeds a
 // computed date into a string function).
-func (e *FuncCall) formatTemporalArgs(args []any) {
+func (e *FuncCall) formatTemporalArgs(b *batch.RecordBatch, args []any) {
+	// A temporal argument boxes as the unit its producer carries — a column,
+	// a cast (#340, #273, #544), a clock function, date arithmetic, a choice
+	// over them — and producedTemporal is the one place that names it, so a
+	// string function reads the value's text rather than its epoch digits
+	// whatever produced it (arc VL round 3).
 	for i, a := range e.Args {
-		// A CAST to a temporal type boxes its result exactly as the matching
-		// column does (#340), so it needs the same rendering before a string
-		// function reads it — otherwise SUBSTR(CAST(d AS DATE), 1, 4)
-		// substrings the epoch-day digits, which is the #273 defect reached
-		// through the cast instead of through the column.
-		if c, ok := a.(*Cast); ok {
-			v, isInt := args[i].(int64)
-			if !isInt {
-				continue
-			}
-			switch castTemporalKind(c.DestType) {
-			case castToDateKind:
-				args[i] = batch.FormatDate(int32(v))
-			case castToTimestampKind:
-				args[i] = batch.FormatTimestamp(v)
-			}
-			continue
-		}
-		// valueType: a ROW FIELD PATH of type DATE boxes as the same epoch
-		// day a DATE column does, so it needs the same rendering, and typ
-		// names the CONTAINER (#568).
-		cr, ok := a.(*ColRef)
-		if !ok {
-			continue
-		}
-		v, isInt := args[i].(int64)
-		if !isInt {
-			continue
-		}
-		switch cr.valueType() {
-		case batch.TypeDate:
-			args[i] = batch.FormatDate(int32(v))
-		case batch.TypeTimestamp:
-			// The TIMESTAMP twin of the DATE arm above, and it was missing:
-			// `c_ts || ''`, `CONCAT(c_ts, 'x')` and `UPPER(c_ts)` all read the
-			// raw epoch-millisecond box and answered "1700000000000" where
-			// pgwire renders the instant for the SAME column. One connection,
-			// one column, two answers — which is exactly what #544 is, reached
-			// through a string function instead of through CAST (#544).
-			args[i] = batch.FormatTimestamp(v)
+		if s, ok := renderTemporalBox(a, b, args[i]); ok {
+			args[i] = s
 		}
 	}
 }
@@ -218,27 +188,18 @@ func (e *FuncCall) resolveTemporalArgs(b *batch.RecordBatch, row int, args []any
 		if args[i] == nil {
 			continue
 		}
-		// A CAST to a temporal type is a column value in all but name once
-		// #340 made it box epoch days / epoch milliseconds, and it loses the
-		// unit at exactly the same point. Resolve it here for the same reason
-		// and by the same rule, or YEAR(CAST(d AS DATE)) reads 9505 days as
-		// 9505 seconds and answers 1970 — the #319 defect, reached through
-		// the cast instead of through the column.
-		if c, ok := a.(*Cast); ok {
-			v, isInt := args[i].(int64)
-			if !isInt {
-				continue
-			}
-			switch castTemporalKind(c.DestType) {
-			case castToDateKind:
-				t := time.Unix(v*86400, 0).UTC()
-				if e.wantsDateKind {
-					args[i] = civilDate{t: t}
-				} else {
-					args[i] = t
+		// A non-column producer — a CAST (#340), a clock function, date
+		// arithmetic, a choice over temporal arms — boxes its unit the way a
+		// column does and loses it at exactly the same point; producedTemporal
+		// names it, by the same rule for every producer (arc VL round 3).
+		// Without it YEAR(CAST(d AS DATE)) read 9505 days as 9505 seconds and
+		// answered 1970 — #319 reached through the cast.
+		if _, isCol := a.(*ColRef); !isCol {
+			if inst, k, ok := temporalBoxInstant(a, b, args[i]); ok {
+				if k == castToDateKind && !e.wantsDateKind {
+					inst = inst.(civilDate).t
 				}
-			case castToTimestampKind:
-				args[i] = time.UnixMilli(v).UTC()
+				args[i] = inst
 			}
 			continue
 		}
@@ -279,18 +240,10 @@ func temporalOperand(b *batch.RecordBatch, row int, e Expr, v any) (any, bool) {
 	if s, ok := v.(string); ok {
 		return s, true
 	}
-	if c, ok := e.(*Cast); ok {
-		n, isInt := v.(int64)
-		if !isInt {
-			return nil, false
-		}
-		switch castTemporalKind(c.DestType) {
-		case castToDateKind:
-			return civilDate{t: time.Unix(n*86400, 0).UTC()}, true
-		case castToTimestampKind:
-			return time.UnixMilli(n).UTC(), true
-		}
-		return nil, false
+	if _, isCol := e.(*ColRef); !isCol {
+		// Every non-column producer, by the one rule (producedTemporal).
+		inst, _, ok := temporalBoxInstant(e, b, v)
+		return inst, ok
 	}
 	cr, ok := e.(*ColRef)
 	if !ok {
@@ -337,6 +290,14 @@ func (e *FuncCall) resolveFnSlow() {
 	e.wantsNetworkText = networkTextFuncs[lower]
 	e.wantsInstant = temporalInputFuncs[lower]
 	e.wantsDateKind = dateArithFuncs[lower]
+	if d, c := DefaultRegistry.ReturnType(e.Name).Resolve(0, nil); c == Decided {
+		switch d.ID {
+		case batch.TypeDate:
+			e.fixedTemporal = castToDateKind
+		case batch.TypeTimestamp:
+			e.fixedTemporal = castToTimestampKind
+		}
+	}
 	switch lower {
 	case "greatest":
 		e.extremum, e.extremumOp = true, CmpGt
@@ -387,7 +348,7 @@ func (e *FuncCall) Eval(b *batch.RecordBatch, row int) any {
 		args[i] = a.Eval(b, row)
 	}
 	if e.wantsText {
-		e.formatTemporalArgs(args)
+		e.formatTemporalArgs(b, args)
 		// stringInputFuncs (length/concat/upper/starts_with/... — #500) has
 		// the identical gap networkTextFuncs already closed for a different
 		// function family: a TypeIPv4/TypeMAC ColRef argument boxes as its

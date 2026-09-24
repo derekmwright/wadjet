@@ -188,7 +188,8 @@ func TestDatePartsOverTemporalColumns(t *testing.T) {
 	for _, cc := range cols {
 		for _, c := range datePartFamily() {
 			t.Run(cc.col+"_"+caseLabel(c), func(t *testing.T) {
-				got := c.build(&ColRef{Name: cc.col}).Eval(b, 0)
+				e := c.build(&ColRef{Name: cc.col})
+				got := shownBox(e, b, e.Eval(b, 0))
 				if got != cc.want(c) {
 					t.Errorf("%s(%s) = %v (%T), want %v", c.fn, cc.col, got, got, cc.want(c))
 				}
@@ -207,17 +208,20 @@ func TestDatePartsScalarVecAgree(t *testing.T) {
 	for _, col := range []string{"d", "ts", "s"} {
 		for _, c := range datePartFamily() {
 			t.Run(col+"_"+caseLabel(c), func(t *testing.T) {
-				scalar := c.build(&ColRef{Name: col}).Eval(b, 0)
+				e := c.build(&ColRef{Name: col})
+				raw := e.Eval(b, 0)
+				scalar := shownBox(e, b, raw)
 
 				outType := batch.TypeFloat64
 				if _, isText := scalar.(string); isText {
 					outType = batch.TypeString
 				}
+				outType = producedVectorType(e, b, outType)
 				out := batch.NewVector(outType, 1)
 				// A fresh FuncCall: EvalVec and Eval must not share
 				// per-instance state that makes them agree by accident.
 				c.build(&ColRef{Name: col}).EvalVec(b, out, 1)
-				vec := out.GetValue(0)
+				vec := shownVec(out, 0)
 
 				if vec != scalar {
 					t.Errorf("%s(%s): vec = %v (%T), scalar = %v (%T)",
@@ -352,7 +356,7 @@ func TestTemporalInputFuncsCoverage(t *testing.T) {
 func TestAtTimezoneOverTemporalColumns(t *testing.T) {
 	b := temporalBatch(t)
 	tz := &FuncCall{Name: "timezone", Args: []Expr{&Lit{Val: "UTC"}, &ColRef{Name: "ts"}}}
-	if got := tz.Eval(b, 0); got != testInstantText {
+	if got := shownBox(tz, b, tz.Eval(b, 0)); got != testInstantText {
 		t.Errorf("timezone('UTC', ts): got %v want %v", got, testInstantText)
 	}
 	// at_timezone is the ONE instant-valued function that does not render

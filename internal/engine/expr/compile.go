@@ -1052,6 +1052,20 @@ func compileBinOp(left, right Expr, op string, ctx *compileContext) Expr {
 	if isIntervalLit(left) || isIntervalLit(right) {
 		return &BinOp{Left: left, Right: right, Op: op}
 	}
+	// The same for an operand that PRODUCES a date or a timestamp — a clock
+	// function, a cast, nested date arithmetic: its box is a day or an
+	// instant, never a number to the typed float/int nodes, which have no
+	// date arm (producedTemporal, arc VL round 3). Column operands resolve
+	// per batch and are BinOpNumeric's dateNode question.
+	if (op == "+" || op == "-") &&
+		(producedTemporal(left, nil) != castNotTemporal || producedTemporal(right, nil) != castNotTemporal) {
+		if _, lcol := left.(*ColRef); !lcol {
+			return &BinOp{Left: left, Right: right, Op: op}
+		}
+		if _, rcol := right.(*ColRef); !rcol {
+			return &BinOp{Left: left, Right: right, Op: op}
+		}
+	}
 	// Try float64 typed path (covers float64 columns, int64 columns via promotion, and literals)
 	lf, lfOk := left.(Float64Expr)
 	rf, rfOk := right.(Float64Expr)

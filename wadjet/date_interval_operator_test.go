@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/derekmwright/wadjet/internal/engine/batch"
+
 	"github.com/derekmwright/wadjet/internal/storage/ingest"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -71,23 +73,28 @@ func TestColumnIntervalArithmetic(t *testing.T) {
 		col  string
 		want string
 	}{
-		// A DATE column stays a calendar date; MONTH and YEAR are calendar
+		// `date ± interval` is a TIMESTAMP, PostgreSQL's type (arc VL round
+		// 3): a DATE column's midnight, shifted. MONTH and YEAR are calendar
 		// arithmetic, not a fixed number of days.
-		{"d_minus90", "1995-12-14"},
-		{"d_plus1m", "1996-04-13"},
-		{"d_plus1y", "1997-03-13"},
-		{"d_plus1d", "1996-03-14"},
+		{"d_minus90", "1995-12-14 00:00:00"},
+		{"d_plus1m", "1996-04-13 00:00:00"},
+		{"d_plus1y", "1997-03-13 00:00:00"},
+		{"d_plus1d", "1996-03-14 00:00:00"},
 		// A TIMESTAMP column keeps its time-of-day, rendered by
 		// batch.FormatTimestamp — the way the column itself reads.
 		{"ts_minus90", "1995-12-14 14:25:36"},
 		{"ts_plus2h", "1996-03-13 16:25:36"},
-		// Text and the date literal: the forms that route through the string
-		// path. The literal is the control from the issue — it was already
-		// correct, and must stay bit-identical (TPC-H Q1 depends on it).
-		{"s_minus90", "1995-12-14"},
-		{"lit_minus90", "1995-12-14"},
+		// Text and the date literal: the same TIMESTAMP. TPC-H Q1 compares
+		// the literal's shift against a date column, which the boxed
+		// comparison orders in the TIMESTAMP domain.
+		{"s_minus90", "1995-12-14 00:00:00"},
+		{"lit_minus90", "1995-12-14 00:00:00"},
 	} {
-		if got := r[tc.col]; got != tc.want {
+		got := r[tc.col]
+		if ms, ok := got.(int64); ok {
+			got = batch.FormatTimestamp(ms)
+		}
+		if got != tc.want {
 			t.Errorf("%s = %v (%T), want %q", tc.col, got, got, tc.want)
 		}
 	}

@@ -51,11 +51,11 @@ func fnLastDayOfMonth(args []any) any {
 	}
 	firstOfNext := time.Date(t.Year(), t.Month()+1, 1, 0, 0, 0, 0, t.Location())
 	last := firstOfNext.AddDate(0, 0, -1)
-	return last.Format("2006-01-02")
+	return epochDaysOf(time.Date(last.Year(), last.Month(), last.Day(), 0, 0, 0, 0, time.UTC))
 }
 
 func fnCurrentTimestamp(args []any) any {
-	return formatInstant(clockNow())
+	return instantBox(clockNow())
 }
 
 func fnAtTimezone(args []any) any {
@@ -103,7 +103,7 @@ func ProcessStart() time.Time { return processStart }
 // every temporal function downstream (parseTimeOK, epoch, timezone) reads that
 // form. It carries the MILLISECOND now, where RFC3339 second-truncated it.
 func fnPgPostmasterStartTime(args []any) any {
-	return formatInstant(processStart)
+	return instantBox(processStart)
 }
 
 // fnEpoch implements EXTRACT(EPOCH FROM ts), which the parser rewrites to
@@ -153,7 +153,7 @@ func fnTimezone(args []any) any {
 	if !ok {
 		return nil
 	}
-	return formatInstant(t)
+	return instantBox(t)
 }
 
 // isUTCZone reports whether a zone name is one of the spellings of UTC that

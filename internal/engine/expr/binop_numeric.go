@@ -194,8 +194,14 @@ func (e *BinOpNumeric) resolveModeSlow(b *batch.RecordBatch) {
 		e.divTrunc = e.Op == "/" &&
 			operandIsIntStructural(e.Left, b) && operandIsIntStructural(e.Right, b)
 	}
+	// A temporal operand — a column, or any producer of a DATE / TIMESTAMP
+	// box (producedTemporal: `(d + 1) + 1`'s inner node is one) — makes this
+	// node a date-arithmetic candidate. Only the COLUMN test existed, so the
+	// outer `+ 1` of `(d + 1) + 1` took the float path and boxed a float64
+	// day count under a DATE declaration (arc VL round 3).
 	if !e.isDec && (e.Op == "+" || e.Op == "-") &&
-		(temporalColOperand(e.Left, b) || temporalColOperand(e.Right, b)) {
+		(temporalColOperand(e.Left, b) || temporalColOperand(e.Right, b) ||
+			producedTemporal(e.Left, b) != castNotTemporal || producedTemporal(e.Right, b) != castNotTemporal) {
 		e.dateNode = &BinOp{Left: e.Left, Right: e.Right, Op: e.Op}
 	}
 	e.opCode = resolveArithOp(e.Op)

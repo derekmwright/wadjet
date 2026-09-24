@@ -1196,7 +1196,7 @@ func nodeDeclaredType(node plansql.Node, decls ColDecls) (expr.DeclType, expr.Co
 		if t, c := binOpTemporalType(n, decls); c != expr.Undecided {
 			return t, c
 		}
-		if !binOpInvolvesInterval(n) {
+		if !binOpInvolvesTemporal(n, decls) {
 			// ADR-0024 item 3: a DECIMAL operand makes this DECIMAL, at the
 			// (p,s) batch.DecimalResultType names, and expr.BinOpNumeric's
 			// decimal mode computes it exactly on the Int128 carrier (#555).
@@ -1573,6 +1573,9 @@ func funcReturnType(n *plansql.FuncCallNode, decls ColDecls) (expr.DeclType, exp
 	if t, ok := bytesPreservingReturn(n, decls); ok {
 		return t, expr.Decided
 	}
+	if t, ok := dateShiftReturn(n, decls); ok {
+		return t, expr.Decided
+	}
 	t, c := expr.DefaultRegistry.ReturnType(n.Name).Resolve(len(n.Args), func(i int) (expr.DeclType, expr.Confidence) {
 		return nodeDeclaredType(n.Args[i], decls)
 	})
@@ -1604,6 +1607,27 @@ func funcReturnType(n *plansql.FuncCallNode, decls ColDecls) (expr.DeclType, exp
 		}
 	}
 	return t, c
+}
+
+// dateShiftReturn is date_add / date_sub's declaration, which follows the
+// FIRST argument's declared type the way the `date ± n` operator's does: a
+// DATE shifted by a whole number of days is a DATE, and anything else — a
+// TIMESTAMP, text, an INTERVAL shift — is a TIMESTAMP. expr.dateShift boxes
+// by the same rule and expr.shiftProducedTemporal names it for consumers, so
+// the declaration and the value agree (arc VL round 3: the registry declared
+// both functions TEXT while they returned a date, so `UPDATE … SET d =
+// date_add(d, 1)` was refused as a text source).
+func dateShiftReturn(n *plansql.FuncCallNode, decls ColDecls) (expr.DeclType, bool) {
+	switch strings.ToLower(n.Name) {
+	case "date_add", "date_sub":
+	default:
+		return expr.DeclType{}, false
+	}
+	if len(n.Args) == 2 && !nodeIsInterval(n.Args[1], decls) &&
+		nodeTemporalKind(n.Args[0], decls) == temporalDay && !isTextColRef(n.Args[0], decls) {
+		return expr.Decl(parquet.TypeDate), true
+	}
+	return expr.Decl(parquet.TypeTimestamp), true
 }
 
 // bitwiseInt4Result reports whether this call is a member of the BITWISE
@@ -1758,17 +1782,25 @@ func inferCastType(typeName string) parquet.TypeID {
 	}
 }
 
-// binOpTemporalType types the two date-arithmetic shapes expr.BinOp evaluates,
-// so the projection's output column can hold what the evaluator produces —
-// the disagreement #340 is about, in the other direction.
+// binOpTemporalType types the date-arithmetic shapes expr.BinOp evaluates,
+// so the projection's output column holds what the evaluator produces — the
+// disagreement #340 is about, in the other direction:
 //
-//	date - date → BIGINT, a count of days
-//	date ± n    → DATE, the day n days away
+//	date - date             → BIGINT, a count of days
+//	date ± integer          → DATE, the day n days away
+//	integer + date          → DATE
+//	date|timestamp ± interval, interval + date|timestamp → TIMESTAMP
 //
-// Everything else declines and the caller's numeric/interval rules stand. In
-// particular a TIMESTAMP operand declines: SQL calls that difference an
-// INTERVAL and the engine has no interval column, so expr.BinOp.dateArith
-// leaves it on the numeric path and this must agree.
+// Every operand is judged by its DECLARED type, never by how it is spelled
+// (arc VL round 3): `DATE '…' + CAST(1 AS INT)`, `(d + 1) + 1`, `d + i` over an
+// INTEGER column and `CURRENT_DATE + 1 - 1` are all DATE, where the old rule
+// accepted only a bare number literal on the integer side and declared every
+// other spelling double precision while expr.BinOp produced a day count.
+// expr.arithProducedTemporal is the same rule over the evaluator's boxes.
+//
+// Everything else declines and the caller's numeric rules stand. A TIMESTAMP
+// minus a TIMESTAMP is SQL's INTERVAL and the engine has no interval column;
+// expr.BinOp.dateArith leaves it on the numeric path and this agrees.
 func binOpTemporalType(n *plansql.BinaryOp, decls ColDecls) (expr.DeclType, expr.Confidence) {
 	if n.Op != "+" && n.Op != "-" {
 		return expr.DeclType{}, expr.Undecided
@@ -1776,11 +1808,15 @@ func binOpTemporalType(n *plansql.BinaryOp, decls ColDecls) (expr.DeclType, expr
 	lk := nodeTemporalKind(n.Left, decls)
 	rk := nodeTemporalKind(n.Right, decls)
 	switch {
+	case (lk != temporalNone || nodeIsQuotedText(n.Left)) && nodeIsInterval(n.Right, decls):
+		return expr.Decl(parquet.TypeTimestamp), expr.Decided
+	case n.Op == "+" && (rk != temporalNone || nodeIsQuotedText(n.Right)) && nodeIsInterval(n.Left, decls):
+		return expr.Decl(parquet.TypeTimestamp), expr.Decided
 	case n.Op == "-" && lk == temporalDay && rk == temporalDay:
 		return expr.Decl(parquet.TypeInt64), expr.Decided
-	case lk == temporalDay && nodeIsPlainNumber(n.Right):
+	case lk == temporalDay && rk == temporalNone && nodeIsIntegerDeclared(n.Right, decls):
 		return expr.Decl(parquet.TypeDate), expr.Decided
-	case rk == temporalDay && n.Op == "+" && nodeIsPlainNumber(n.Left):
+	case rk == temporalDay && lk == temporalNone && n.Op == "+" && nodeIsIntegerDeclared(n.Left, decls):
 		return expr.Decl(parquet.TypeDate), expr.Decided
 	}
 	return expr.DeclType{}, expr.Undecided
@@ -1803,101 +1839,120 @@ const (
 	temporalInstant
 )
 
-// nodeTemporalKind reports what kind of temporal value an operand carries: a
-// CAST names one outright, a column reference has one in the catalog, and a
-// FUNCTION CALL has one in the registry — CHECKED THERE, not only in its
-// fixed declaration (round-2 review B3): `current_date`, `now()`,
-// `current_timestamp` and `localtimestamp` declare DATE/TIMESTAMP
-// (expr.DefaultRegistry via funcReturnType, the same resolution
-// nodeDeclaredType's own FuncCallNode arm uses), and before this arm existed
-// `CURRENT_DATE + 1` fell out of this switch's default with no temporal kind
-// at all — undecided at binOpTemporalType, and separately EXCLUDED from the
-// numeric-arithmetic fallback by binOpInvolvesInterval's blanket "this binop
-// touches a date/interval function" guard — so the expression's declared
-// output landed on the ultimate STRING fallback (OID 25) even though
-// #1254 already made current_date's OWN declaration DATE, and even though
-// the runtime kernel (expr.BinOp.dateArith, via temporalOperand's TEXT arm)
-// already computed the right day-count VALUE. Recognizing the call here is
-// the one seam that makes the DECLARATION agree with the value everywhere
-// arithmetic touches one of these functions: date-date, date±n and
-// CTAS/INSERT…SELECT's declared output all resolve through this same walk.
+// nodeTemporalKind reports what kind of temporal value an operand carries,
+// from its DECLARED type — a cast's destination, a column's catalog type, a
+// function's registry declaration, a nested arithmetic node's own
+// binOpTemporalType answer — so a DATE is a DATE however it was produced (arc
+// VL round 3; round 2 added the function arm alone, and a nested `(d + 1) + 1`
+// or `CURRENT_DATE + 1 - 1` still fell to double precision). A quoted literal
+// is SQL's unknown and names nothing; a column the catalog declares VARCHAR is
+// the one text operand read as a day (see temporalKind).
 func nodeTemporalKind(node plansql.Node, decls ColDecls) temporalKind {
-	var t parquet.TypeID
 	switch n := node.(type) {
 	case *plansql.ParenNode:
 		return nodeTemporalKind(n.Inner, decls)
-	case *plansql.CastNode:
-		t = inferCastType(n.TypeName)
 	case *plansql.ColRef:
-		var ok bool
-		if t, ok = decls.colType(n); !ok {
+		t, ok := decls.colType(n)
+		if !ok {
 			return temporalNone
 		}
 		if t == parquet.TypeString {
 			return temporalDay
 		}
-	case *plansql.FuncCallNode:
-		dt, conf := funcReturnType(n, decls)
-		if conf != expr.Decided {
+		return temporalKindOf(t)
+	case *plansql.BinaryOp:
+		// The arithmetic rule alone, not the whole declaration walk: a long
+		// numeric chain `a + b + c …` stays linear here.
+		t, c := binOpTemporalType(n, decls)
+		if c != expr.Decided {
 			return temporalNone
 		}
-		t = dt.ID
-	default:
+		return temporalKindOf(t.ID)
+	case *plansql.Lit, *plansql.IntervalLit:
 		return temporalNone
 	}
+	t, c := nodeDeclaredType(node, decls)
+	if c != expr.Decided {
+		return temporalNone
+	}
+	return temporalKindOf(t.ID)
+}
+
+func temporalKindOf(t parquet.TypeID) temporalKind {
 	switch t {
 	case parquet.TypeDate:
 		return temporalDay
 	case parquet.TypeTimestamp:
-		// An instant difference is an INTERVAL in SQL and this engine has no
-		// interval column to hold one, so expr.BinOp.dateArith declines it
-		// and the caller's numeric rules stand.
 		return temporalInstant
 	}
 	return temporalNone
 }
 
-// nodeIsPlainNumber reports whether an operand is a whole number written into
-// the query — the `n` of `date ± n`. A column or a computed expression is
-// deliberately excluded: its runtime value decides whether expr.BinOp takes
-// the date branch at all, and a projection column typed DATE on a guess would
-// print an integer difference as a date.
-func nodeIsPlainNumber(node plansql.Node) bool {
+// nodeIsIntegerDeclared reports whether an operand DECLARES an integer — the
+// `n` of `date ± n`, by its type: an integer literal, an integer column (PORT
+// and PROTOCOL are int4 arithmetic too, #1000), a cast to an integer type,
+// integer arithmetic.
+func nodeIsIntegerDeclared(node plansql.Node, decls ColDecls) bool {
+	t, c := nodeDeclaredType(node, decls)
+	return c == expr.Decided && intArithColumnType(t.ID)
+}
+
+// nodeIsQuotedText reports a quoted literal — SQL's unknown, which an INTERVAL
+// shift resolves to PostgreSQL's preferred datetime type, timestamp
+// (expr.textOperand is the runtime half).
+func nodeIsQuotedText(node plansql.Node) bool {
+	if p, ok := node.(*plansql.ParenNode); ok {
+		return nodeIsQuotedText(p.Inner)
+	}
+	l, ok := node.(*plansql.Lit)
+	return ok && l.Kind == plansql.LitString
+}
+
+// nodeIsInterval reports whether an operand is an INTERVAL: a literal, or a
+// cast to one.
+func nodeIsInterval(node plansql.Node, decls ColDecls) bool {
 	switch n := node.(type) {
 	case *plansql.ParenNode:
-		return nodeIsPlainNumber(n.Inner)
-	case *plansql.Lit:
-		if n.Kind != plansql.LitNumber {
-			return false
-		}
-		_, err := strconv.ParseInt(n.Value, 10, 64)
-		return err == nil
+		return nodeIsInterval(n.Inner, decls)
+	case *plansql.IntervalLit:
+		return true
+	case *plansql.CastNode:
+		return strings.EqualFold(strings.TrimSpace(n.TypeName), "interval")
 	}
 	return false
 }
 
-// binOpInvolvesInterval reports whether either operand of a BinaryOp is an
-// IntervalLit or a date/timestamp function (current_date, current_timestamp).
-// Date ± interval produces a date string, not a numeric value.
-func binOpInvolvesInterval(b *plansql.BinaryOp) bool {
-	return nodeIsDateOrInterval(b.Left) || nodeIsDateOrInterval(b.Right)
-}
-
-func nodeIsDateOrInterval(n plansql.Node) bool {
-	switch v := n.(type) {
-	case *plansql.IntervalLit:
-		return true
-	case *plansql.FuncCallNode:
-		lower := strings.ToLower(v.Name)
-		return lower == "current_date" || lower == "current_timestamp" ||
-			lower == "current_time" || lower == "now" ||
-			lower == "date_add" || lower == "date_sub"
-	case *plansql.BinaryOp:
-		// Nested: (CURRENT_DATE - INTERVAL '1' DAY) + INTERVAL '2' HOUR
-		return binOpInvolvesInterval(v)
-	default:
+// isTextColRef reports a column the catalog declares VARCHAR — a day to the
+// `date ± n` operator (temporalKind), but not a DATE argument to date_add,
+// whose text argument is a TIMESTAMP like any other text (dateShiftReturn).
+func isTextColRef(node plansql.Node, decls ColDecls) bool {
+	if p, ok := node.(*plansql.ParenNode); ok {
+		return isTextColRef(p.Inner, decls)
+	}
+	cr, ok := node.(*plansql.ColRef)
+	if !ok {
 		return false
 	}
+	t, ok := decls.colType(cr)
+	return ok && t == parquet.TypeString
+}
+
+// binOpInvolvesTemporal reports whether either operand of a BinaryOp is an
+// INTERVAL or DECLARES a date or timestamp. Such an operator is temporal
+// arithmetic, never numeric: binOpTemporalType types the shapes that have a
+// type, and every other one (a timestamp plus a number, say) must not be
+// declared a number either. Judged by declared type (arc VL round 3); it was a
+// list of five function NAMES, which missed every other date-valued producer.
+// A VARCHAR column is not temporal here — `s * 2` over one stays numeric.
+func binOpInvolvesTemporal(b *plansql.BinaryOp, decls ColDecls) bool {
+	return operandIsTemporal(b.Left, decls) || operandIsTemporal(b.Right, decls)
+}
+
+func operandIsTemporal(n plansql.Node, decls ColDecls) bool {
+	if nodeIsInterval(n, decls) {
+		return true
+	}
+	return nodeTemporalKind(n, decls) != temporalNone && !isTextColRef(n, decls)
 }
 
 // isPlainGroupKey reports whether a GROUP BY expression is a bare column

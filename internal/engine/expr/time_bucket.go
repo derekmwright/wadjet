@@ -5,7 +5,6 @@ package expr
 import (
 	"math"
 
-	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
@@ -53,7 +52,7 @@ func fnTimeBucket(args []any) any {
 	// instant renderer. A TIMESTAMP vector materializes this text back into
 	// the epoch milliseconds it stores, exactly as date_trunc's result does
 	// (#868).
-	return batch.FormatTimestamp(binned)
+	return binned
 }
 
 // timeBucketStrideMillis is the stride in milliseconds, with PostgreSQL's two

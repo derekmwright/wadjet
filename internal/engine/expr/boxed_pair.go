@@ -405,6 +405,18 @@ func declaredBoxKind(t batch.TypeID) (boxKind, bool) {
 	return boxUnknown, false
 }
 
+// temporalBoxKind is boxDate / boxTimestamp for an operand producedTemporal
+// says carries that unit.
+func temporalBoxKind(e Expr, b *batch.RecordBatch) (boxKind, bool) {
+	switch producedTemporal(e, b) {
+	case castToDateKind:
+		return boxDate, true
+	case castToTimestampKind:
+		return boxTimestamp, true
+	}
+	return boxUnknown, false
+}
+
 // isTemporalKind reports whether a kind names a temporal DOMAIN.
 func isTemporalKind(k boxKind) bool { return k == boxTimestamp || k == boxDate }
 
@@ -518,6 +530,12 @@ func classifyOperand(e Expr, b *batch.RecordBatch) (boxKind, bool) {
 		if DefaultRegistry.ReturnType(v.Name).Boolean() {
 			return boxBool, true
 		}
+		// A function whose VALUE is a DATE or TIMESTAMP is a temporal operand
+		// in the unit its box carries — the same kinds a column of that type
+		// gets (producedTemporal, arc VL round 3).
+		if k, ok := temporalBoxKind(v, b); ok {
+			return k, true
+		}
 		return boxUnknown, true
 	case *elementAtExpr:
 		// element_at lifts a value OUT of a container, so its kind is the
@@ -546,6 +564,9 @@ func classifyOperand(e Expr, b *batch.RecordBatch) (boxKind, bool) {
 	case *Coalesce:
 		return joinOperandKinds(v.Args, b)
 	case *BinOpNumeric:
+		if k, ok := temporalBoxKind(v, b); ok {
+			return k, true
+		}
 		// Exact fixed-point arithmetic boxes as its rendered TEXT, the same
 		// as the DECIMAL column it computes over (ADR-0024 item 3, #555). So
 		// the kind is boxDecimal exactly when the node resolved that mode:
@@ -566,6 +587,11 @@ func classifyOperand(e Expr, b *batch.RecordBatch) (boxKind, bool) {
 		// Integer mode returns a real int64 and boxNumber. Leave other modes unclassified:
 		// this node also evaluates date/interval shifts, and temporal values are not numbers.
 		// See docs/internals/generic-arithmetic-box-classification.md for the design.
+		// `date ± integer` and `± interval` produce a DATE / TIMESTAMP box,
+		// which is a temporal operand, not a number (producedTemporal).
+		if k, ok := temporalBoxKind(v, b); ok {
+			return k, true
+		}
 		if _, on := v.dec.resolve(v.Op, v.Left, v.Right, b); on {
 			return boxDecimal, true
 		}
@@ -594,6 +620,9 @@ func classifyOperand(e Expr, b *batch.RecordBatch) (boxKind, bool) {
 		// rather than by the bytes of "12.75".
 		if castIsExactDecimal(v) {
 			return boxDecimal, true
+		}
+		if k, ok := temporalBoxKind(v, b); ok {
+			return k, true
 		}
 		// A cast to any other NUMERIC type is a typed operand too, and saying
 		// otherwise cost a fold: `COALESCE(numeric_col, CAST(k AS DOUBLE
@@ -1008,8 +1037,29 @@ func pairApplies(lk, rk boxKind, lText, rText string) bool {
 		return true
 	case isTemporalKind(rk) && (lk == boxQuoted || lk == boxText):
 		return true
+	// A DATE against a TIMESTAMP: two domains, epoch DAYS and epoch
+	// MILLISECONDS. PostgreSQL promotes the date to its midnight; compare()
+	// read the two numbers as one unit, so `DATE '2026-01-02' > TIMESTAMP
+	// '2026-01-01 10:00:00'` answered false (arc VL round 3).
+	case (lk == boxDate && rk == boxTimestamp) || (lk == boxTimestamp && rk == boxDate):
+		return true
 	}
 	return false
+}
+
+// dateTimestampOrder orders a DATE box against a TIMESTAMP box in the
+// TIMESTAMP domain — the date's midnight, PostgreSQL's date→timestamp
+// promotion.
+func dateTimestampOrder(lk boxKind, lv, rv any) (int, bool) {
+	l, lok := lv.(int64)
+	r, rok := rv.(int64)
+	if !lok || !rok {
+		return 0, false
+	}
+	if lk == boxDate {
+		return cmpInt64(l*86_400_000, r), true
+	}
+	return cmpInt64(l, r*86_400_000), true
 }
 
 // temporalTextOrder compares a TEMPORAL operand against a text one in the
@@ -1462,6 +1512,10 @@ func orderByKindsFold(lk, rk, lFold, rFold boxKind, lv, rv any, lText, rText str
 	case isTemporalKind(rk) && (lk == boxQuoted || lk == boxText):
 		if c, ok := temporalTextOrder(rk, rv, lv, lText); ok {
 			return -c, true, false
+		}
+	case (lk == boxDate && rk == boxTimestamp) || (lk == boxTimestamp && rk == boxDate):
+		if c, ok := dateTimestampOrder(lk, lv, rv); ok {
+			return c, true, false
 		}
 	}
 	// Nothing above could read this pair. If both KINDS say numeric, the boxes

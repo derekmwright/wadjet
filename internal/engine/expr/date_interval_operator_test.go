@@ -88,26 +88,26 @@ func intervalOperatorCases() []intervalOpCase {
 	return []intervalOpCase{
 		// A DATE column shifts by whole days and stays a calendar date.
 		{label: "date_minus_90_day", col: "d", op: "-", unit: "day", n: 90,
-			want: [2]string{"1995-12-14", "1961-01-12"}},
+			want: [2]string{"1995-12-14 00:00:00", "1961-01-12 00:00:00"}},
 		{label: "date_plus_90_day", col: "d", op: "+", unit: "day", n: 90,
-			want: [2]string{"1996-06-11", "1961-07-11"}},
+			want: [2]string{"1996-06-11 00:00:00", "1961-07-11 00:00:00"}},
 		// MONTH and YEAR are calendar arithmetic: adding a month lands on the
 		// same day number of the next month, not 30 days later.
 		{label: "date_minus_1_month", col: "d", op: "-", unit: "month", n: 1,
-			want: [2]string{"1996-02-13", "1961-03-12"}},
+			want: [2]string{"1996-02-13 00:00:00", "1961-03-12 00:00:00"}},
 		{label: "date_plus_1_month", col: "d", op: "+", unit: "month", n: 1,
-			want: [2]string{"1996-04-13", "1961-05-12"}},
+			want: [2]string{"1996-04-13 00:00:00", "1961-05-12 00:00:00"}},
 		{label: "date_minus_1_year", col: "d", op: "-", unit: "year", n: 1,
-			want: [2]string{"1995-03-13", "1960-04-12"}},
+			want: [2]string{"1995-03-13 00:00:00", "1960-04-12 00:00:00"}},
 		{label: "date_plus_1_year", col: "d", op: "+", unit: "year", n: 1,
-			want: [2]string{"1997-03-13", "1962-04-12"}},
+			want: [2]string{"1997-03-13 00:00:00", "1962-04-12 00:00:00"}},
 		// The reversed operand order, which only addition admits.
 		{label: "day_plus_date", col: "d", op: "+", unit: "day", n: 1, flip: true,
-			want: [2]string{"1996-03-14", "1961-04-13"}},
+			want: [2]string{"1996-03-14 00:00:00", "1961-04-13 00:00:00"}},
 		{label: "month_plus_date", col: "d", op: "+", unit: "month", n: 1, flip: true,
-			want: [2]string{"1996-04-13", "1961-05-12"}},
+			want: [2]string{"1996-04-13 00:00:00", "1961-05-12 00:00:00"}},
 		{label: "year_plus_date", col: "d", op: "+", unit: "year", n: 1, flip: true,
-			want: [2]string{"1997-03-13", "1962-04-12"}},
+			want: [2]string{"1997-03-13 00:00:00", "1962-04-12 00:00:00"}},
 		// An interval carrying a time component turns a whole day into an
 		// instant — the same rule date_sub(d, INTERVAL '2' HOUR) follows.
 		{label: "date_minus_2_hour", col: "d", op: "-", unit: "hour", n: 2,
@@ -137,11 +137,11 @@ func intervalOperatorCases() []intervalOpCase {
 
 		// Whole-day TEXT answers exactly what the DATE column answers.
 		{label: "text_day_minus_90_day", col: "sd", op: "-", unit: "day", n: 90,
-			want: [2]string{"1995-12-14", "1961-01-12"}},
+			want: [2]string{"1995-12-14 00:00:00", "1961-01-12 00:00:00"}},
 		{label: "text_day_plus_1_month", col: "sd", op: "+", unit: "month", n: 1,
-			want: [2]string{"1996-04-13", "1961-05-12"}},
+			want: [2]string{"1996-04-13 00:00:00", "1961-05-12 00:00:00"}},
 		{label: "text_day_plus_1_year", col: "sd", op: "+", unit: "year", n: 1,
-			want: [2]string{"1997-03-13", "1962-04-12"}},
+			want: [2]string{"1997-03-13 00:00:00", "1962-04-12 00:00:00"}},
 		// TEXT carrying a clock. This pin used to read "the second of the two
 		// renderers … so a future change has to notice it rather than quietly
 		// make it a third" — and #544's second pass is that change: the string
@@ -154,13 +154,13 @@ func intervalOperatorCases() []intervalOpCase {
 		// The control: a date LITERAL, the form that was already correct. Its
 		// answer does not depend on the row, and must not change.
 		{label: "literal_minus_90_day", op: "-", unit: "day", n: 90,
-			want: [2]string{"1995-12-14", "1995-12-14"}},
+			want: [2]string{"1995-12-14 00:00:00", "1995-12-14 00:00:00"}},
 		{label: "literal_plus_1_month", op: "+", unit: "month", n: 1,
-			want: [2]string{"1996-04-13", "1996-04-13"}},
+			want: [2]string{"1996-04-13 00:00:00", "1996-04-13 00:00:00"}},
 		{label: "literal_plus_1_year", op: "+", unit: "year", n: 1,
-			want: [2]string{"1997-03-13", "1997-03-13"}},
+			want: [2]string{"1997-03-13 00:00:00", "1997-03-13 00:00:00"}},
 		{label: "literal_day_plus_date", op: "+", unit: "day", n: 1, flip: true,
-			want: [2]string{"1996-03-14", "1996-03-14"}},
+			want: [2]string{"1996-03-14 00:00:00", "1996-03-14 00:00:00"}},
 	}
 }
 
@@ -171,7 +171,8 @@ func TestDateIntervalOperator(t *testing.T) {
 	for _, c := range intervalOperatorCases() {
 		for row := 0; row < 2; row++ {
 			t.Run(c.label, func(t *testing.T) {
-				got := c.build(t).Eval(b, row)
+				e := c.build(t)
+				got := shownBox(e, b, e.Eval(b, row))
 				if got != c.want[row] {
 					t.Errorf("row %d: %s = %v (%T), want %q",
 						row, c.label, got, got, c.want[row])
@@ -291,11 +292,11 @@ func TestDateIntervalOperatorNullRow(t *testing.T) {
 		col  string
 		want string
 	}{
-		{"d", "1996-03-12"},
+		{"d", "1996-03-12 00:00:00"},
 		{"ts", "1996-03-12 14:25:36"},
 	} {
 		e := compileBinOp(&ColRef{Name: tc.col}, &Lit{Val: IntervalValue{Days: 1}}, "-", nil)
-		if got := e.Eval(b, 0); got != tc.want {
+		if got := shownBox(e, b, e.Eval(b, 0)); got != tc.want {
 			t.Errorf("%s - INTERVAL '1' DAY row 0: got %v, want %q", tc.col, got, tc.want)
 		}
 		if got := e.Eval(b, 1); got != nil {

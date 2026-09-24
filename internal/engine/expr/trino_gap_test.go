@@ -262,7 +262,7 @@ func TestFromISO8601Timestamp(t *testing.T) {
 
 func TestFromISO8601Date(t *testing.T) {
 	fn := DefaultRegistry.Lookup("from_iso8601_date")
-	got := fn([]any{"2026-03-15"})
+	got := dateText(fn([]any{"2026-03-15"}))
 	if got != "2026-03-15" {
 		t.Errorf("from_iso8601_date = %v, want 2026-03-15", got)
 	}

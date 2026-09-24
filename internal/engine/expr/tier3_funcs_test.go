@@ -541,7 +541,7 @@ func TestTier3LastDayOfMonth(t *testing.T) {
 		{"2026-12-05T00:00:00Z", "2026-12-31"},
 	}
 	for _, tt := range tests {
-		got := fn([]any{tt.arg})
+		got := dateText(fn([]any{tt.arg}))
 		if got != tt.want {
 			t.Errorf("last_day_of_month(%q) = %v, want %v", tt.arg, got, tt.want)
 		}
@@ -557,9 +557,10 @@ func TestTier3CurrentTimestamp(t *testing.T) {
 	if got == nil {
 		t.Fatal("current_timestamp() returned nil")
 	}
-	s, ok := got.(string)
+	// TIMESTAMP-declared, so the TIMESTAMP box (arc VL round 3).
+	s, ok := tsText(got).(string)
 	if !ok {
-		t.Fatalf("current_timestamp() returned %T, want string", got)
+		t.Fatalf("current_timestamp() returned %T, want an epoch-millisecond box", got)
 	}
 	// Should be a valid RFC3339 timestamp starting with "20"
 	if !strings.HasPrefix(s, "20") {

@@ -158,7 +158,7 @@ func TestScalarFunctionsStillAnswerInsideTheirDomain(t *testing.T) {
 			&FuncCall{Name: "chr", Args: []Expr{&Lit{Val: int64(0x10FFFF)}}}, "\U0010FFFF"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			if got := c.expr.Eval(b, 0); got != c.want {
+			if got := shownBox(c.expr, b, c.expr.Eval(b, 0)); got != c.want {
 				t.Errorf("= %T(%v), want %T(%v) (live PostgreSQL 17.11). A refusal PostgreSQL "+
 					"does not make is as much a divergence as a value it does not produce (#855)",
 					got, got, c.want, c.want)

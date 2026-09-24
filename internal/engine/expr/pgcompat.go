@@ -33,7 +33,7 @@ func init() {
 		"pg_encoding_to_char": {fnPgEncodingToChar, RetString},
 		"pg_is_in_recovery":   {fnFalse, RetBool},
 		"pg_my_temp_schema":   {fnZero, RetInt64},
-		"pg_conf_load_time":   {fnPgConfLoadTime, RetString},
+		"pg_conf_load_time":   {fnPgConfLoadTime, RetTimestamp},
 		"inet_server_addr":    {fnNull, RetString},
 		"inet_client_addr":    {fnNull, RetString},
 		"current_query":       {fnNull, RetString},
@@ -164,7 +164,7 @@ func fnPgEncodingToChar(args []any) any {
 // pg_postmaster_start_time): there is no configuration file to reload, so the
 // last time settings took effect is when the process came up.
 func fnPgConfLoadTime(args []any) any {
-	return processStart.UTC().Format("2006-01-02 15:04:05Z07:00")
+	return instantBox(processStart)
 }
 
 func fnTrue(args []any) any  { return true }

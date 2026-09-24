@@ -787,12 +787,14 @@ func TestCompileCurrentDateMinusInterval(t *testing.T) {
 	if result == nil {
 		t.Fatal("CURRENT_DATE - INTERVAL '30 days' returned nil")
 	}
-	dateStr, ok := result.(string)
+	// `date - interval` is a TIMESTAMP (PostgreSQL's type): epoch ms.
+	ms, ok := result.(int64)
 	if !ok {
-		t.Fatalf("expected string result, got %T: %v", result, result)
+		t.Fatalf("expected a TIMESTAMP box, got %T: %v", result, result)
 	}
-	if len(dateStr) != 10 || dateStr[4] != '-' || dateStr[7] != '-' {
-		t.Fatalf("expected date format YYYY-MM-DD, got %q", dateStr)
+	dateStr := batch.FormatTimestamp(ms)
+	if len(dateStr) != 19 || dateStr[4] != '-' || dateStr[7] != '-' || dateStr[10:] != " 00:00:00" {
+		t.Fatalf("expected the midnight of a date, got %q", dateStr)
 	}
 	t.Logf("CURRENT_DATE - INTERVAL '30 days' = %s", dateStr)
 }
@@ -813,12 +815,13 @@ func TestCompileCurrentDatePlusInterval(t *testing.T) {
 	if result == nil {
 		t.Fatal("CURRENT_DATE + INTERVAL '1' YEAR returned nil")
 	}
-	dateStr, ok := result.(string)
+	ms, ok := result.(int64)
 	if !ok {
-		t.Fatalf("expected string result, got %T: %v", result, result)
+		t.Fatalf("expected a TIMESTAMP box, got %T: %v", result, result)
 	}
-	if len(dateStr) != 10 {
-		t.Fatalf("expected date format YYYY-MM-DD, got %q", dateStr)
+	dateStr := batch.FormatTimestamp(ms)
+	if len(dateStr) != 19 || dateStr[10:] != " 00:00:00" {
+		t.Fatalf("expected the midnight of a date, got %q", dateStr)
 	}
 	t.Logf("CURRENT_DATE + INTERVAL '1' YEAR = %s", dateStr)
 }

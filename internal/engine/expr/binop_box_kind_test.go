@@ -320,8 +320,11 @@ func TestGenericBinOpOverATemporalOperandStaysUnclassified(t *testing.T) {
 	if !ok {
 		t.Fatalf("date + interval compiled to %T, not the generic *BinOp", e)
 	}
-	if k, _ := classifyOperand(bo, b); k != boxUnknown {
-		t.Errorf("classifyOperand(d + INTERVAL '1 day') = kind %d, want boxUnknown (%d) — "+
-			"a shifted date is not a number and must not be declared one", k, boxUnknown)
+	// Not a number, and since arc VL round 3 not unclassified either: the
+	// shift is a TIMESTAMP (PostgreSQL's `date + interval`) and boxes epoch
+	// milliseconds, so it compares in the TIMESTAMP domain.
+	if k, _ := classifyOperand(bo, b); k != boxTimestamp {
+		t.Errorf("classifyOperand(d + INTERVAL '1 day') = kind %d, want boxTimestamp (%d) — "+
+			"a shifted date is a timestamp, never a number", k, boxTimestamp)
 	}
 }

@@ -541,8 +541,9 @@ func TestTemporalOperandResolvesACast(t *testing.T) {
 
 	// And the INTERVAL shift over a cast still renders the way #322 pinned.
 	shift := &BinOp{Left: dc, Right: &Lit{Val: IntervalValue{Days: 90}}, Op: "-"}
-	if got := shift.Eval(b, 0); got != "1995-10-12" {
-		t.Errorf("CAST('1996-01-10' AS DATE) - INTERVAL '90' DAY = %v (%T), want \"1995-10-12\"", got, got)
+	// PostgreSQL's `date - interval` is a TIMESTAMP (arc VL round 3).
+	if got := shownBox(shift, b, shift.Eval(b, 0)); got != "1995-10-12 00:00:00" {
+		t.Errorf("CAST('1996-01-10' AS DATE) - INTERVAL '90' DAY = %v (%T), want \"1995-10-12 00:00:00\"", got, got)
 	}
 }
 
@@ -567,7 +568,8 @@ func TestCastArgumentsReachTemporalFunctions(t *testing.T) {
 	}
 	// date_add renders its result, and a whole day must render as a
 	// calendar date (#322).
-	if got := (&FuncCall{Name: "date_add", Args: []Expr{dc, &Lit{Val: int64(1)}}}).Eval(b, 0); got != "1996-01-11" {
+	da := &FuncCall{Name: "date_add", Args: []Expr{dc, &Lit{Val: int64(1)}}}
+	if got := shownBox(da, b, da.Eval(b, 0)); got != "1996-01-11" {
 		t.Errorf("date_add(CAST(d AS DATE), 1) = %v (%T), want \"1996-01-11\"", got, got)
 	}
 	if got := (&FuncCall{Name: "date_diff", Args: []Expr{tc, dc}}).Eval(b, 0); got != float64(0) {

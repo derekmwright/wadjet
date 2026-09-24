@@ -17,7 +17,7 @@ func TestPgPostmasterStartTime(t *testing.T) {
 	if fn == nil {
 		t.Fatal("pg_postmaster_start_time not registered")
 	}
-	got, ok := fn(nil).(string)
+	got, ok := tsText(fn(nil)).(string)
 	if !ok {
 		t.Fatalf("want timestamp text like now(), got %T", fn(nil))
 	}
@@ -32,7 +32,7 @@ func TestPgPostmasterStartTime(t *testing.T) {
 	if d := time.Since(ts); d < 0 || d > time.Minute {
 		t.Fatalf("process start %v is %v away from now — not this process", ts, d)
 	}
-	if second := fn(nil).(string); second != got {
+	if second := tsText(fn(nil)).(string); second != got {
 		t.Fatalf("value moved between calls: %q then %q", got, second)
 	}
 }
@@ -93,7 +93,7 @@ func TestTimezoneUTCIsInstantPreserving(t *testing.T) {
 				t.Fatalf("timezone(%q, %v) = nil", zone, in)
 			}
 			before := epochFn([]any{in})
-			after := epochFn([]any{shifted})
+			after := epochFn([]any{tsText(shifted)})
 			if before != after {
 				t.Fatalf("timezone(%q, %v) moved the instant: epoch %v → %v", zone, in, before, after)
 			}
@@ -101,7 +101,7 @@ func TestTimezoneUTCIsInstantPreserving(t *testing.T) {
 			// engine's one rendering carries no zone AT ALL — which is what
 			// makes it correct only here, where the value IS UTC — so the
 			// check is that no offset survived, not that a `Z` did (#544).
-			s, ok := shifted.(string)
+			s, ok := tsText(shifted).(string)
 			if !ok || strings.ContainsAny(s, "TZ+") {
 				t.Fatalf("timezone(%q, %v) = %v, want a UTC-rendered timestamp "+
 					"with no zone suffix", zone, in, shifted)
@@ -135,10 +135,13 @@ func TestTimezoneRejectsNonUTC(t *testing.T) {
 // —  round(extract(epoch from pg_postmaster_start_time() at time zone 'UTC'))
 // — through the registry, and checks it lands on this process's start.
 func TestDataGripStartupTimeChain(t *testing.T) {
-	start := DefaultRegistry.Lookup("pg_postmaster_start_time")(nil)
-	shifted := DefaultRegistry.Lookup("timezone")([]any{"UTC", start})
-	secs := DefaultRegistry.Lookup("epoch")([]any{shifted})
-	rounded := DefaultRegistry.Lookup("round")([]any{secs})
+	// Composed as the compiled expression is, so each temporal box reaches
+	// its consumer through the producer that names its unit.
+	chain := &FuncCall{Name: "round", Args: []Expr{
+		&FuncCall{Name: "epoch", Args: []Expr{
+			&FuncCall{Name: "timezone", Args: []Expr{
+				&Lit{Val: "UTC"}, &FuncCall{Name: "pg_postmaster_start_time"}}}}}}}
+	rounded := chain.Eval(nil, 0)
 
 	got, ok := rounded.(float64)
 	if !ok {
