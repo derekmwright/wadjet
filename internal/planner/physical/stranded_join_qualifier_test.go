@@ -30,6 +30,12 @@ func TestAJoinKeyNamingARelationNeitherSideHoldsIsRefused(t *testing.T) {
 	if err := refuseStrandedJoinQualifier(held); err != nil {
 		t.Fatalf("a condition whose relations are both below the join was refused: %v", err)
 	}
+	// A ROW field path's "qualifier" is a COLUMN of a side (`c_row.b`).
+	fieldPath := logical.NewJoin(scan("typemx_nested", "n", "id", "c_row"), scan("decpair", "d", "b"),
+		"left", "c_row.b = d.b")
+	if err := refuseStrandedJoinQualifier(fieldPath); err != nil {
+		t.Fatalf("a ROW field path was refused as a stranded qualifier: %v", err)
+	}
 	// A qualifier is matched without case and by table name too.
 	byTable := logical.NewJoin(scan("lat_ord", "", "id"), scan("lat_item", "i", "order_id"),
 		"inner", "i.order_id = LAT_ORD.id")

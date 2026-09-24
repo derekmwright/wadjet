@@ -269,8 +269,9 @@ func refuseJoinResidual(filter, joinType string, err error) error {
 // plan it builds hangs a conjunct where one is missing; this is the check that
 // keeps a plan that does from answering. A qualifier is known to a side when
 // any node below it answers to that name — a scan's table, alias or enclosing
-// derived tables, a CTE reference, a derived table — compared without case, so
-// the check can only refuse a name that is nowhere at all.
+// derived tables, a CTE reference, a derived table, or a COLUMN (a ROW field
+// path `c_row.b`) — compared without case, so the check can only refuse a
+// name that is nowhere at all.
 func refuseStrandedJoinQualifier(node *logical.Node) error {
 	for _, cond := range []string{node.JoinCond, node.JoinFilter} {
 		if strings.TrimSpace(cond) == "" {
@@ -299,12 +300,24 @@ func refuseStrandedJoinQualifier(node *logical.Node) error {
 	return nil
 }
 
-// subtreeAnswersTo reports whether any node under n answers to the qualifier q.
+// subtreeAnswersTo reports whether any node under n answers to the qualifier
+// q — as a relation, or as a COLUMN: `c_row.b` is a ROW field path, whose
+// "qualifier" is a column of a scan or a name a projection or an aggregate
+// publishes.
 func subtreeAnswersTo(n *logical.Node, q string) bool {
 	if n == nil {
 		return false
 	}
-	for _, name := range append(n.ScopeNames(), n.CTEName, n.CTERefAlias, n.DerivedAlias) {
+	names := append(n.ScopeNames(), n.CTEName, n.CTERefAlias, n.DerivedAlias)
+	names = append(names, n.ScanColumns...)
+	for _, p := range n.Projections {
+		names = append(names, p.Alias, p.Column)
+	}
+	for _, a := range n.AggExprs {
+		names = append(names, a.OutputCol)
+	}
+	names = append(names, n.GroupBy...)
+	for _, name := range names {
 		if name != "" && strings.EqualFold(name, q) {
 			return true
 		}
