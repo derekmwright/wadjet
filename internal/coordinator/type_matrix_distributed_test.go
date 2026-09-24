@@ -548,6 +548,13 @@ func tmdTables() []tmdTable {
 		// every shape the seam table writes (arc_lt_fixture_test.go).
 		{ltOTable, ltOSchema(), ltOData()},
 		{ltITable, ltISchema(), ltIData()},
+		// The ARC JP fixture (#1299): item relations sharing every column
+		// name, so a join arm identified by a column name instead of its
+		// qualifier binds a sibling (arc_jp_fixture_test.go).
+		{jpOTable, jpOSchema(), jpOData()},
+		{jpITable, jpItemSchema(), jpIData()},
+		{jpJTable, jpItemSchema(), jpJData()},
+		{jpKTable, jpItemSchema(), jpKData()},
 		// The MIXED-CASE RELATION fixture. Every other table name in every
 		// two-path corpus is already its own folded form, so the case
 		// concession for a RELATION name (ADR-0012) had no fixture on the DAG
