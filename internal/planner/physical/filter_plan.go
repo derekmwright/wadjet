@@ -4,6 +4,7 @@
 package physical
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
@@ -22,6 +23,7 @@ type recordBatch = batch.RecordBatch
 // A refusal must never become an omitted filter (ADR-0021).
 func (p *Planner) buildFilterOp(pred logical.Predicate, outerTables map[string]bool, outerCols map[string]string) (exec.UnaryOperator, error) {
 	// Try to compile from AST expression first (full expression engine)
+	var compileErr error
 	if pred.ASTExpr != nil {
 		var compiled expr.Expr
 		var err error
@@ -37,6 +39,7 @@ func (p *Planner) buildFilterOp(pred logical.Predicate, outerTables map[string]b
 		if expr.IsCompileRefusal(err) {
 			return nil, err
 		}
+		compileErr = err
 		if err == nil {
 			// Try to extract vectorized filter for simple comparison patterns.
 			// First try full vectorization, then partial (vectorize what we can
@@ -60,7 +63,19 @@ func (p *Planner) buildFilterOp(pred logical.Predicate, outerTables map[string]b
 		}
 	}
 
-	// Fall back to raw string parsing
+	// Fall back to raw string parsing — but never for a predicate whose
+	// VALUE side names a column. The text path reads `col op value` and takes
+	// the value as a literal, so an outer reference no scope here resolves
+	// (`j.k = o.k - 0` in a LATERAL nested inside another, whose `o` is two
+	// levels out) was compared as the STRING "o.k - 0": `invalid input
+	// syntax for type bigint` for an integer key and zero rows, silently,
+	// for a text one (arc JP round 3). Loud beats plausible.
+	if pred.Raw != "" && rawValueNamesAColumn(pred.Raw) {
+		if compileErr != nil {
+			return nil, fmt.Errorf("predicate %q cannot be evaluated here: %w", pred.Raw, compileErr)
+		}
+		return nil, fmt.Errorf("predicate %q names a column no relation in its scope provides", pred.Raw)
+	}
 	if pred.Raw != "" {
 		p := parseSimplePredicate(pred.Raw)
 		if p != nil {
@@ -649,4 +664,32 @@ func collectTableAliases(node *logical.Node) map[string]bool {
 	}
 	walk(node)
 	return aliases
+}
+
+// rawValueNamesAColumn reports whether a raw predicate's parse holds a
+// comparison whose two sides BOTH read columns, or a column reference inside
+// a side the text path would read as a literal — the shapes
+// parseSimplePredicate cannot evaluate, because it compares its left column
+// with the right side's TEXT.
+func rawValueNamesAColumn(raw string) bool {
+	node, err := plansql.ParseExpression(raw)
+	if err != nil || node == nil {
+		return false
+	}
+	for {
+		p, ok := node.(*plansql.ParenNode)
+		if !ok {
+			break
+		}
+		node = p.Inner
+	}
+	cmp, ok := node.(*plansql.CmpExpr)
+	if !ok {
+		return false
+	}
+	refs, err := plansql.ColumnRefs(cmp.Right)
+	if err != nil {
+		return false
+	}
+	return len(refs) > 0
 }
