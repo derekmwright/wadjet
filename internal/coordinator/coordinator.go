@@ -371,6 +371,10 @@ type Coordinator struct {
 	// localWindowOverLateral counts queries whose plan the stage DAG refused
 	// for a window above a LATERAL join (dagplan.ErrWindowOverLateralDistributed).
 	localWindowOverLateral atomic.Int64
+	// localLateralIdentity counts queries whose plan the stage DAG refused
+	// for a correlated LATERAL whose arm shares a column name with another
+	// relation (dagplan.ErrLateralIdentityDistributed).
+	localLateralIdentity atomic.Int64
 	// local executions reported to the client instead of retried on the
 	// DAG (#308) — every increment is a query the two paths might have
 	// answered differently.
@@ -1295,6 +1299,13 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 		// answers PostgreSQL's rows.
 		if errors.Is(err, dagplan.ErrWindowOverLateralDistributed) {
 			return c.runWindowOverLateralLocal(ctx, queryID, logicalPlan, planStr, start, err)
+		}
+		// And a correlated LATERAL whose arm shares a column name with another
+		// relation (arc JP round 3): the DAG re-spells the body's names onto
+		// its scan stream and a lost qualifier binds the other relation's
+		// column. The single-process pipeline runs the body as written.
+		if errors.Is(err, dagplan.ErrLateralIdentityDistributed) {
+			return c.runLateralIdentityLocal(ctx, queryID, logicalPlan, planStr, start, err)
 		}
 		// An authorization refusal is not a planning narrative: it reaches
 		// the client as the decision's own sentence, the same one the
@@ -3745,6 +3756,16 @@ func (c *Coordinator) SubmitSQL(ctx context.Context, sql string) (queryID string
 	// describe one statement with one list.
 	declaredOut := planner.DeclaredOutputSchema(logicalPlan)
 	physStages, err := planner.PlanDistributed(ctx, logicalPlan)
+	if errors.Is(err, dagplan.ErrLateralIdentityDistributed) {
+		// This door runs ONE pipeline task over the logical plan (below);
+		// the stage list only decides a probe split, which a LATERAL whose
+		// arm shares a name with another relation does not take (arc JP
+		// round 3). Run it as one task rather than refuse it.
+		c.localLateralIdentity.Add(1)
+		c.logger.Info("stage DAG refused the plan, running it as one pipeline task",
+			"query", queryID, "refusal", err)
+		physStages, err = nil, nil
+	}
 	if err != nil {
 		// The async door's sibling of the same rule.
 		if refusal, ok := authorizationRefusal(err); ok {

@@ -319,3 +319,19 @@ func (c *Coordinator) runWindowOverLateralLocal(ctx context.Context, queryID str
 func (c *Coordinator) WindowOverLateralLocalRoutes() int64 {
 	return c.localWindowOverLateral.Load()
 }
+
+// runLateralIdentityLocal runs a plan the stage DAG refused for a correlated
+// LATERAL whose arm shares a column name with another relation
+// (dagplan.ErrLateralIdentityDistributed) on the coordinator-local
+// single-process pipeline, which runs the body as written.
+func (c *Coordinator) runLateralIdentityLocal(ctx context.Context, queryID string, logicalPlan *logical.Node, planStr string, start time.Time, refusal error) (*SQLResult, error) {
+	return c.runRefusedLocal(ctx, queryID, logicalPlan, planStr, start, refusal,
+		"a LATERAL whose arm shares a column name with another relation", &c.localLateralIdentity)
+}
+
+// LateralIdentityLocalRoutes reports how many plans refused for a correlated
+// LATERAL whose arm shares a column name with another relation were routed to
+// the coordinator-local pipeline (or, on the async door, run as one task).
+func (c *Coordinator) LateralIdentityLocalRoutes() int64 {
+	return c.localLateralIdentity.Load()
+}

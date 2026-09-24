@@ -112,6 +112,14 @@ func (p *StagePlanner) PlanDistributed(ctx context.Context, node *logical.Node) 
 	if err := refuseWindowOverDependentJoin(node); err != nil {
 		return nil, err
 	}
+	// A correlated LATERAL whose arm shares a non-minted column name with
+	// another relation of the query: the join stage reads the body's scan
+	// stream and re-spells every reference onto it, binding by bare name
+	// where a qualifier is lost (arc JP round 3, lateral_identity_guard.go).
+	// The coordinator runs the plan single-process.
+	if err := refuseCollidingLateral(node); err != nil {
+		return nil, err
+	}
 	// A lifted predicate whose column the enclosing relation also publishes
 	// (#1130): the INNER and comma spellings answer on this path (the
 	// predicate is evaluated at the join off the scan's own stream), the LEFT

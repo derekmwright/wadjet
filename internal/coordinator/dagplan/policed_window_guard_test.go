@@ -67,13 +67,22 @@ func TestArcLTAWindowOverAPolicedScanFeedingAJoinIsRefusedDistributed(t *testing
 			planner.WorkerCount = 3
 			_, err = planner.PlanDistributed(ctx, plan)
 			if c.refused {
-				if !errors.Is(err, ErrPolicedWindowUnderJoinDistributed) {
+				// A SELF-correlated body is routed single-process first by the
+				// LATERAL identity guard (every name is shared); the other
+				// refused cells (another outer relation, the QUALIFY derived
+				// table) still reach this guard.
+				if !errors.Is(err, ErrPolicedWindowUnderJoinDistributed) &&
+					!errors.Is(err, ErrLateralIdentityDistributed) {
 					t.Fatalf("planned (err=%v) where the distributed path must refuse: the DAG doors "+
 						"answered the stored column's pairing under the mask for this shape\n  %s", err, c.sql)
 				}
 				return
 			}
-			if err != nil {
+			// A self-correlated LATERAL shares every column name with its
+			// outer relation, so it runs single-process for THAT reason
+			// (ErrLateralIdentityDistributed, arc JP round 3); the control
+			// holds that the policed-window refusal is not what fires.
+			if err != nil && !errors.Is(err, ErrLateralIdentityDistributed) {
 				t.Fatalf("the control refused: %v\n  %s", err, c.sql)
 			}
 		})
