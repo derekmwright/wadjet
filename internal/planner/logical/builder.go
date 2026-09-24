@@ -2280,7 +2280,20 @@ func buildLateralSubquery(outer *plansql.SelectInfo, left *Node, join plansql.Jo
 			// key the join on that slot. The aggregate publishes it, the projection carries it,
 			// the shuffle can name it, and the join drops it on output on every path.
 			// See docs/internals/lateral-published-key-collisions.md for the design.
-			collides := aggregates && lateralKeyNameCollides(subInfo.Columns, innerCol)
+			// THE LIFTED KEY OWNS A SLOT (#1302, round 2). Where the outer side
+			// is an EXPRESSION the equality is no hash key: it is evaluated
+			// ABOVE the join, over a stream that carries BOTH sides' columns,
+			// and a reference there binds by NAME. The two shortcuts below
+			// hand the key to the join under a name the BODY publishes (its
+			// own `k`, or its alias) — a name the outer side may publish too,
+			// and then `o.k + 1 = s.k` read the OUTER `k` (every outer row
+			// matched every inner row for `- 0`, none for `+ 1`). So a lifted
+			// key never travels by name: it is always minted into its own
+			// slot, which no user name can be, whatever the body's list
+			// writes (ADR-0026 §3a; the join that mints it drops it only
+			// where it keys on it).
+			lifted := !lateralOuterSideIsColumn(cp, leftAliases)
+			collides := lifted || (aggregates && lateralKeyNameCollides(subInfo.Columns, innerCol))
 			published := false
 			if pub, ok := lateralPublishedKeyName(subInfo.Columns, innerCol); ok && !collides {
 				if keyRename == nil {
@@ -2377,7 +2390,7 @@ func buildLateralSubquery(outer *plansql.SelectInfo, left *Node, join plansql.Jo
 			// stream. That is refused, as a lifted predicate under a bare
 			// star is (ADR-0021 §1s): name the columns, or write `s.*`,
 			// which reads the lateral's own list without the slot.
-			if lateralOuterSideIsColumn(cp, leftAliases) {
+			if !lifted {
 				injectedSlots = append(injectedSlots, slot)
 			} else {
 				if lateralEnclosingBareStar(outer) {
@@ -2803,6 +2816,13 @@ func respellKeyRefsToSlot(info *plansql.SelectInfo, innerCol, slot string) {
 		rewritten := respell(c.ASTExpr)
 		if rewritten == c.ASTExpr {
 			continue
+		}
+		// The item keeps the NAME the query gave it: respelling what it
+		// reads does not rename what it publishes. An unaliased `i.k`
+		// respelled to the slot published `__key_0`, and the enclosing
+		// `s.k` then bound the outer relation's `k` (arc JP round 2).
+		if c.Alias == "" {
+			c.Alias = plansql.OutputColumnName(*c)
 		}
 		c.ASTExpr = rewritten
 		c.Expr = rewritten.String()
