@@ -4,6 +4,7 @@ package wadjet
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -153,7 +154,6 @@ func TestUnknownCastDestinationIsUndefinedObject(t *testing.T) {
 		// PostgreSQL's 42846, pinned in wadjet.TestTextCastToIntervalIsTheLiteralsInterval.
 		`SELECT CAST('1 day' AS INTERVAL) AS v FROM ` + tbl + ` WHERE id = 1`,
 		`SELECT CAST(c_str AS BYTES) AS v FROM ` + tbl + ` WHERE id = 1`,
-		`SELECT CAST(c_str AS VECTOR(3)) AS v FROM ` + tbl + ` WHERE id = 1`,
 	} {
 		t.Run("ctl_unimplemented_but_named", func(t *testing.T) {
 			if _, err := db.Query(ctx, sql); err != nil {
@@ -161,4 +161,21 @@ func TestUnknownCastDestinationIsUndefinedObject(t *testing.T) {
 			}
 		})
 	}
+	// VECTOR(n) moved UP from the pass-through list in arc CW round 2, as the
+	// address types did with #1092: the cast converts (pgvector's vector_in),
+	// so its own text answers a VECTOR and a STRING column holding `s-000001`
+	// is 22P02 rather than that string handed back.
+	t.Run("ctl_vector", func(t *testing.T) {
+		res, err := db.Query(ctx, `SELECT CAST('[1,2,3]' AS VECTOR(3)) AS v FROM `+tbl+` WHERE id = 1`)
+		if err != nil {
+			t.Fatalf("REFUSED a destination this engine has: %v", err)
+		}
+		if got := fmt.Sprint(res.Rows[0]["v"]); len(res.Rows) != 1 || got != "[1 2 3]" {
+			t.Errorf("= %#v, want the VECTOR [1 2 3]", res.Rows)
+		}
+		if _, err := db.Query(ctx, `SELECT CAST(c_str AS VECTOR(3)) AS v FROM `+tbl+` WHERE id = 1`); err == nil ||
+			sqlerr.StateOf(err) != "22P02" {
+			t.Errorf("CAST(c_str AS VECTOR(3)) over 's-000001': %v, want 22P02", err)
+		}
+	})
 }
