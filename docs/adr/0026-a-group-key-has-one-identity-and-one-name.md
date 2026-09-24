@@ -2776,6 +2776,53 @@ comes back on the stage DAG with the first arm's columns NULL on a row the
 second arm pads (and dropped when every build is shuffled) — identical at base,
 the logical plan right; pinned per arm in the gate, filed `distributed`.
 
+### 8l. A block's name belongs to the block, and a minted slot is its own name (2026-09-24, arc JP round 2: #1302, #1299)
+
+Round 1 made one key rule for bounded and unbounded LATERAL bodies and read
+the key back by NAME wherever the body already published one. The review
+found the rows that name then bound: the OUTER relation's column of the same
+name. Four sites carried a name where an identity belonged, and each is now
+guarded where it happens, not per spelling:
+
+- **The lifted key owns a slot** (`logical.buildLateralSubquery`). A
+  correlated equality whose outer side is an expression is evaluated above
+  the join, over both sides' columns; its inner key is ALWAYS minted into a
+  `__key_N` slot (§3a), never handed over under the body's own `k` or alias.
+  A select item §3c respells to that slot keeps the name the query gave it.
+- **A DISTINCT keeps its block's name** (`logical.rewriteDistinctAsGroupBy`).
+  The rewrite returned the Project below the Distinct and dropped the
+  derived / LATERAL alias, CTE name and LateralSubtree stamped on the root, so
+  the join qualified the arm's duplicates by the scan's alias and `s.k` fell
+  to the other arm's `k` — on every path, a plain derived table included.
+- **An aliased table answers to its alias alone** (`Node.ScopeNames`), as in
+  PostgreSQL: `FROM jp_i jp_j JOIN jp_j jp_i` made `jp_i` name both scans, and
+  §8k's edge rule, finding two, fell back.
+- **The stage DAG reads what a LATERAL's stream carries**
+  (`physical.resolveRenameSource`, `logical.ResolveFilterThroughProjects`). A
+  LATERAL arm is never materialized on the DAG, so its stream is the body's
+  raw columns qualified by the scan's alias: a reference by the lateral's name
+  resolves to the unaliased item publishing it (qualified by the body's one
+  relation when written bare), and a filter over a slot an aggregate
+  publishes (`GroupByPublish`) keeps the slot rather than its source column.
+  Scoped to LATERAL roots: the generic form moved CTE and derived arms onto a
+  wrong spelling (measured).
+
+Gate: `coordinator.TestArcJPBLateralBodyNamesNeverBindTheOuterRelationOnEveryArm`
+(954 cells, every body unaliased, five arms, PostgreSQL 17.11; 2 696
+(cell, arm) fail at 6cbe2041 and 1 737 at round 1), the round-2 cells of the
+nine-door masking gate, and the embedded cells of
+`wadjet.TestArcJPAJoinArmKeyIsTheColumnTheQueryWrote`.
+
+**Not settled (distributed).** A derived table (not a LATERAL) whose
+colliding column the DAG reads through a filter over a cross join
+(`(SELECT i.id, i.k FROM lt_i i) s … WHERE s.k = o.k + 1`) or through a window
+(`row_number() OVER …` in the block), and two copies of one block whose scans
+share an inner alias, still read the other arm's column on the DAG — the
+generic resolution is the fix and it needs the arm's materialization state,
+which the resolver does not see. A bare-key `LEFT JOIN LATERAL` over a
+`DISTINCT` body fails loudly on the DAG (ADR-0010's schema check). Both are
+filing candidates with their cells.
+
 ## §9 A derived block publishes its VISIBLE list, and a qualified star reads it
 
 Added 2026-09-13 by arc O2 (#1077, #991, #1020).

@@ -2536,6 +2536,18 @@ qualified star, EXISTS, EXISTS LIMIT 1, NOT EXISTS, IN, scalar} on five arms:
 54 wrong and 42 refused on the single arm at base, 0 wrong and the 12 bare
 stars refused at the tip.
 
+**Round 2 (2026-09-24): the key is an identity, never a name.** Every body in
+that gate aliased its columns; with the body publishing a name the outer
+relation also has (`SELECT DISTINCT i.k … = o.k - 0`, `SELECT i.id … LIMIT 2`)
+the key travelled under the body's name and the lifted equality or the
+enclosing `s.id` read the OUTER column — 12 rows for 3 on every arm, and every
+colliding name on the stage DAG. A lifted key is now always minted into its
+own slot, a DISTINCT body keeps the lateral's name, and the DAG resolves the
+lateral's unaliased items and aggregate-published slot to what its stream
+carries (ADR-0026 §8l). A grouped body keyed on an outer expression, which
+answered zero or every row on the DAG at base and at round 1, answers too.
+Gate: `coordinator.TestArcJPBLateralBodyNamesNeverBindTheOuterRelationOnEveryArm`.
+
 **THE STRUCTURAL CLOSURE OF THE REFUSED SHAPES IS A DEPENDENT JOIN** — the
 body re-run per outer row with the outer values substituted, the way the
 scalar rerun does, emitting the joined rows — recorded as a filing candidate

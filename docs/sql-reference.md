@@ -1425,6 +1425,19 @@ body's key column to evaluate the equality, and an unexpanded star over a
 LATERAL publishes the join's output whole — name the columns, or write
 `o.*, s.*`.
 
+**The body's column names never decide what the enclosing query reads.** A
+body may publish its columns unaliased, under names the outer relation also
+has — `SELECT i.id`, `SELECT DISTINCT i.k`, `SELECT k, v`, `SELECT i.k,
+count(*) … GROUP BY i.k` beside an outer `o.id`, `o.k` — plain, `DISTINCT`,
+grouped or bounded, and `s.id` is the lateral's `id` on every execution path
+(single-process, spilled, the stage DAG, the fast path): the correlation key
+travels in a slot of its own, never under a name the body publishes. (Before
+2026-09-24 such a body could read the OUTER relation's column of that name:
+12 rows or zero for PostgreSQL's 3 and 2 with a `DISTINCT` key, and on the
+stage DAG any colliding name.) One loud exception on the stage DAG: a
+`LEFT JOIN LATERAL` over a `DISTINCT` body keyed on a bare outer column fails
+with a schema error rather than answering.
+
 **A correlated LATERAL's `ORDER BY … LIMIT`/`OFFSET` is applied per outer
 row** when the correlation is an equality on an inner column — the
 top-N-per-group idiom:
@@ -2804,8 +2817,11 @@ two relations. Aliasing one side — `FROM t JOIN t b ON …` — is the fix, an
 DELIMITED alias is a different name, so `FROM qa t, qb "T"` declares two.
 
 **A condition binds the relation its QUALIFIER names, wherever the join order
-puts it.** The planner reorders a chain of inner joins by estimated cost, and
-hangs each `ON` conjunct on a join that holds every relation the conjunct
+puts it.** An aliased table answers to its alias alone, as in PostgreSQL: in
+`FROM a b JOIN b a ON a.k = b.k AND a.v = 6`, `a.` names the SECOND item (the
+table `b`), and a reference by the table name of an aliased table is refused.
+(Before 2026-09-24 `a.v` there could bind the table `a`.) The planner reorders
+a chain of inner joins by estimated cost, and hangs each `ON` conjunct on a join that holds every relation the conjunct
 names — a qualified column is the relation that publishes the qualifier, never
 another one that merely carries a column of that name. So joining one table
 several times, each copy with its own filter, pairs each copy's rows with the
