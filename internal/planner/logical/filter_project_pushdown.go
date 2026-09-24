@@ -259,6 +259,14 @@ type projRefs struct {
 	// (#656 shape f, through a derived table).
 	overAgg  bool
 	groupBys map[string]bool
+	// published are the names that aggregate publishes a group key under in
+	// place of its source text (Node.GroupByPublish — a LATERAL's minted
+	// key slot). The output of that name IS the stream's column, so it is a
+	// passthrough: substituting its source (`s.__key_0` → `i.k`) named a
+	// column the aggregate never emits, and a lifted equality over a grouped
+	// LATERAL body read the OUTER `k` through the qualifier strip, or
+	// nothing — every row or no row on the stage DAG (arc JP round 2).
+	published map[string]bool
 	// rowFields maps a lower-cased column name BELOW this Project to the
 	// fields it declares, when it is a ROW. It is what tells a candidate ROW
 	// FIELD PATH from an ordinary qualified reference whose qualifier happens
@@ -272,6 +280,7 @@ func newProjRefs(n *Node) projRefs {
 		names:     nodeScopeNames(n),
 		overAgg:   readsAnAggregate(n),
 		groupBys:  aggregateGroupKeys(n),
+		published: aggregatePublishedKeys(n),
 		rowFields: subtreeRowFields(n),
 	}
 }
@@ -389,6 +398,26 @@ func aggregateGroupKeys(n *Node) map[string]bool {
 	return out
 }
 
+// aggregatePublishedKeys is the set of names the aggregate under n publishes a
+// group key under instead of the key's own text (Node.GroupByPublish).
+func aggregatePublishedKeys(n *Node) map[string]bool {
+	agg := AggregateOverGroupRows(n)
+	if agg == nil {
+		return nil
+	}
+	var out map[string]bool
+	for _, pub := range agg.GroupByPublish {
+		if pub == "" {
+			continue
+		}
+		if out == nil {
+			out = map[string]bool{}
+		}
+		out[strings.ToLower(pub)] = true
+	}
+	return out
+}
+
 // withSubstitutionLog returns a copy of p that records every output name it
 // substitutes away into names.
 func (p projRefs) withSubstitutionLog(names *[]string) projRefs {
@@ -473,6 +502,9 @@ func (p projRefs) apply(o projOutput, name, field string) (plansql.Node, bool) {
 	}
 	if o.def == nil {
 		return nil, true // passthrough: the input carries the same name
+	}
+	if p.overAgg && field == "" && p.published[strings.ToLower(name)] {
+		return nil, true // the aggregate emits this very name (see published)
 	}
 	// Below an aggregate's output the rows are one per GROUP. A definition
 	// that is not a bare column of that output — a computed group key, an
