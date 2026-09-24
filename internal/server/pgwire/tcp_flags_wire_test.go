@@ -55,10 +55,9 @@ func TestPGWireDeclaresTheTCPFlagFamily(t *testing.T) {
 		{0, "tcp_flags_has_all", 16, 1}, // bool
 		{1, "tcp_flag_mask", 23, 4},     // int4
 		{2, "tcp_flags_text", 25, -1},   // text
-		// An ARRAY declares OID 25 on this wire (#992). It is recorded in
-		// ADR-0012's divergence list rather than pinned per function; when
-		// that changes, this line changes with every other ARRAY column.
-		{3, "tcp_flags", 25, -1},
+		// tcp_flags is text[] — the registry declares its element since arc
+		// CW (#1017), and an ARRAY declares its element's array OID (#992).
+		{3, "tcp_flags", 1009, -1},
 	} {
 		f := res.FieldDescriptions[want.col]
 		if f.DataTypeOID != want.oid {
@@ -71,9 +70,9 @@ func TestPGWireDeclaresTheTCPFlagFamily(t *testing.T) {
 
 	// The rendered cells, in id order: users holds visits 100, 42, 200.
 	wantRows := [][]string{
-		{"f", "18", "RST|URG|ECE", "[RST URG ECE]"},
-		{"f", "18", "SYN|PSH|URG", "[SYN PSH URG]"},
-		{"f", "18", "PSH|ECE|CWR", "[PSH ECE CWR]"},
+		{"f", "18", "RST|URG|ECE", "{RST,URG,ECE}"},
+		{"f", "18", "SYN|PSH|URG", "{SYN,PSH,URG}"},
+		{"f", "18", "PSH|ECE|CWR", "{PSH,ECE,CWR}"},
 	}
 	if len(res.Rows) != len(wantRows) {
 		t.Fatalf("got %d rows, want %d", len(res.Rows), len(wantRows))

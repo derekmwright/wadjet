@@ -235,53 +235,6 @@ func TestTheTCPFlagFamilyAnswersPostgresBitArithmeticEndToEnd(t *testing.T) {
 	}
 }
 
-// `tcp_flags` REALLY RETURNS AN ARRAY, and a top-level projection of it is
-// TEXT — a pre-existing engine limitation, pinned here so it fails when fixed.
-//
-// The registry declares RetArray and the value is a real []any: element_at and
-// array_length read it as one. But `scalarFnDeclaredType`
-// (internal/planner/physical/plan.go) DECLINES every ARRAY/MAP/ROW-returning
-// function, in as many words — "a projection has no element type to size the
-// child vector with and an ARRAY column built without one reads back empty" —
-// so the projection falls back to text and the client is handed Go's rendering
-// of the slice rather than a slice or PostgreSQL's `{SYN,ACK}`. `map_keys`,
-// `map_values` and `map_entries` have answered that way since they were added;
-// this function inherits it and does not cause it.
-//
-// It is asserted rather than glossed because when a projection CAN carry a
-// nested type, this test fails, and that failure is the reminder to move the
-// expectation to ARRAY (and to check the wire, where ARRAY declares OID 25 —
-// ADR-0012, #992). Fixing it is a change to every container-returning function
-// at once, not to this one.
-func TestATopLevelTCPFlagsProjectionIsTextToday(t *testing.T) {
-	db, ctx := flagFixture(t)
-	res, err := db.Query(ctx, `SELECT tcp_flags(f8) AS a,
-	                                  element_at(tcp_flags(f8), 1) AS e,
-	                                  array_length(tcp_flags(f8)) AS n
-	                           FROM a2flow WHERE id = 3`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// The ARRAY is real where a consumer reads it as one.
-	if got := fmt.Sprint(res.Rows[0]["e"]); got != "SYN" {
-		t.Errorf("element_at(tcp_flags(18), 1) = %q, want \"SYN\"", got)
-	}
-	if got, _ := tmAsInt64(res.Rows[0]["n"]); got != 2 {
-		t.Errorf("array_length(tcp_flags(18)) = %v, want 2", res.Rows[0]["n"])
-	}
-	for _, cm := range res.ColumnMetas {
-		if cm.Name != "a" {
-			continue
-		}
-		if cm.TypeID != parquet.TypeString {
-			t.Errorf("a top-level tcp_flags() projection now declares %v rather than "+
-				"STRING. If a projection can carry a nested type, that is the fix — "+
-				"move this expectation to ARRAY, and check the wire OID with it "+
-				"(ADR-0012, #992).", cm.TypeID)
-		}
-	}
-}
-
 // An unknown flag name is a REFUSAL that reaches the client, with PostgreSQL's
 // invalid_parameter_value SQLSTATE and the name in the message — not a query
 // that answers a larger row set.

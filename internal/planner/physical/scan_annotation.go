@@ -161,7 +161,9 @@ func stampScanSchema(node *logical.Node, columns []parquet.Column) {
 	var colFields map[string][]parquet.Column
 	var colElems map[string]parquet.Column
 	for i, c := range columns {
-		if c.Type == parquet.TypeArray && c.ElementType != nil {
+		// An ARRAY's element, and a MAP's entry ROW (key, value) — the
+		// element a bare TypeID cannot carry; ScanColTypes says which.
+		if (c.Type == parquet.TypeArray || c.Type == parquet.TypeMap) && c.ElementType != nil {
 			if colElems == nil {
 				colElems = make(map[string]parquet.Column)
 			}

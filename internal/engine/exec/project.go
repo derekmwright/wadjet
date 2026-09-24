@@ -173,9 +173,10 @@ type ProjectColumn struct {
 	// class this work exists to close.
 	VecDecimalEval VecDecimalExpression
 	Dimension      int // VECTOR output dimensionality (e.g. embed()); 0 = not a vector
-	// ElementType declares a COMPUTED ARRAY's element, as Dimension does a
-	// computed VECTOR's: an ARRAY(subquery) output exists in no input schema,
-	// so without it the pooled vector has no child to write elements into.
+	// ElementType declares a COMPUTED ARRAY's element (or a MAP's entry
+	// ROW), as Dimension does a computed VECTOR's: a constructed or
+	// function-returned container exists in no input schema, so without it
+	// the pooled vector has no child to write elements into (arc CW).
 	ElementType *parquet.Column
 	// Precision and Scale declare a COMPUTED DECIMAL output, the same way
 	// Dimension declares a computed VECTOR one: the output column does not
@@ -381,7 +382,7 @@ func (p *Project) Execute(_ context.Context, in *batch.RecordBatch) (*batch.Reco
 			if col.Type == parquet.TypeVector && col.Dimension == 0 && proj.Dimension > 0 {
 				col.Dimension = proj.Dimension
 			}
-			if col.Type == parquet.TypeArray && col.ElementType == nil && proj.ElementType != nil {
+			if (col.Type == parquet.TypeArray || col.Type == parquet.TypeMap) && col.ElementType == nil && proj.ElementType != nil {
 				col.ElementType = proj.ElementType
 			}
 			// The same repair for a computed DECIMAL: GREATEST/LEAST/
@@ -613,39 +614,7 @@ func fieldPathColumn(b *batch.RecordBatch, name string) (parquet.Column, bool) {
 			return fc, true
 		}
 	}
-	return vectorColumn(field, b.Columns[pi].Children[fj]), true
-}
-
-// vectorColumn reconstructs a declaration from a VECTOR, for the fallback
-// path where the batch's schema lost it. It recurses into ARRAY/MAP elements
-// and ROW children: an earlier version copied Type/Scale/Dimension only, so
-// the pooled output vector for a nested field came back with nil Child /
-// Children and every value inside it was silently dropped — the same
-// shape-loss the schema-carrying path above exists to avoid.
-func vectorColumn(name string, v *batch.Vector) parquet.Column {
-	col := parquet.Column{
-		Name:      name,
-		Type:      v.Type,
-		Nullable:  true,
-		Scale:     v.DecimalData.Scale,
-		Dimension: v.VectorDim,
-	}
-	switch v.Type {
-	case batch.TypeArray, batch.TypeMap:
-		if v.Child != nil {
-			el := vectorColumn("element", v.Child)
-			col.ElementType = &el
-		}
-	case batch.TypeRow:
-		for i, ch := range v.Children {
-			fn := fmt.Sprintf("f%d", i)
-			if i < len(v.FieldNames) {
-				fn = v.FieldNames[i]
-			}
-			col.Fields = append(col.Fields, vectorColumn(fn, ch))
-		}
-	}
-	return col
+	return batch.VectorDecl(field, b.Columns[pi].Children[fj]), true
 }
 
 func resolvePlainColumn(b *batch.RecordBatch, name string) (int, bool) {

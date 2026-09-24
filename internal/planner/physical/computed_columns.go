@@ -103,6 +103,13 @@ func (a *aggPreProject) columnMeta(in *batch.RecordBatch, k int, c exec.ProjectC
 		}
 	}
 	col := parquet.Column{Name: c.Name, Type: c.Type, Nullable: true, Fields: c.Fields}
+	if (c.Type == parquet.TypeArray || c.Type == parquet.TypeMap) && c.ElementType != nil {
+		// A computed container's element, for the reason a VECTOR's
+		// dimension rides here: a container vector allocated without it has
+		// no child, and MIN(ARRAY[x]) / DISTINCT ARRAY[x] read NULL (arc CW).
+		el := c.ElementType.Clone()
+		col.ElementType = &el
+	}
 	if c.Type == parquet.TypeVector {
 		col.Dimension = c.Dimension
 	}

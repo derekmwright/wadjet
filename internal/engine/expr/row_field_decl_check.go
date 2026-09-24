@@ -86,7 +86,7 @@ func FieldContainerType(n plansql.Node, resolvers ...func(plansql.Node) (DeclTyp
 		ret := DefaultRegistry.ReturnType(v.Name)
 		d, c := ret.Resolve(len(v.Args), func(i int) (DeclType, Confidence) { return recur(v.Args[i]) })
 		// Dynamic scalar declarations use the declared-output TEXT disposition.
-		if c == Undecided && ret.kind == retDynamic {
+		if c == Undecided && (ret.kind == retDynamic || ret.kind == retDerived) {
 			return Decl(batch.TypeString), Decided
 		}
 		return d, c

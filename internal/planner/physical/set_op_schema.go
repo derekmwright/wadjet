@@ -105,6 +105,20 @@ func unifySetOpSchemas(left, right []parquet.Column) []parquet.Column {
 // first arm's column exactly as it is", which is the answer for every pair
 // the numeric ladder does not describe and for every pair already agreed.
 func setOpUnifyColumn(l, r parquet.Column) (parquet.Column, bool) {
+	// Two ARRAY (or MAP) arms fold their ELEMENTS on the ladder the stage
+	// arms use (setOpElementTarget), so `int[] ∪ bigint[]` is bigint[] on
+	// every path and the boxes are coerced into the wider child (arc CW).
+	if (l.Type == parquet.TypeArray || l.Type == parquet.TypeMap) && l.Type == r.Type &&
+		l.ElementType != nil && r.ElementType != nil && l.ElementType.Type != r.ElementType.Type {
+		el, err := setOpElementTarget(SetOpColType{Typ: l.Type, ElementType: l.ElementType},
+			SetOpColType{Typ: r.Type, ElementType: r.ElementType}, l.Name, "UNION")
+		if err != nil || el == nil {
+			return parquet.Column{}, false
+		}
+		out := l
+		out.ElementType = el
+		return out, true
+	}
 	lc, ok1 := setOpColTypeFromColumn(l)
 	rc, ok2 := setOpColTypeFromColumn(r)
 	if !ok1 || !ok2 {

@@ -227,8 +227,8 @@ func setReturningDeclType(n *plansql.FuncCallNode, decls ColDecls) (expr.DeclTyp
 // element type (expr.ArrayLitElementDecl — every element is materialized
 // through it, so the first element's type read `unnest(ARRAY[1,2.5])` as
 // 1, 2), or the element of an array-returning expression whose
-// declaration carries one. current_schemas() is name[], whose element this
-// engine carries as text.
+// declaration carries one (current_schemas() is name[], whose element the
+// registry declares as text).
 func setElement(n plansql.Node, decls ColDecls) (parquet.Column, bool) {
 	n = plansql.Unparen(n)
 	if cr, ok := n.(*plansql.ColRef); ok {
@@ -246,10 +246,6 @@ func setElement(n plansql.Node, decls ColDecls) (parquet.Column, bool) {
 		if t, ok := expr.ArrayLitElementDecl(decided); ok {
 			return declTypeParts(t), true
 		}
-	}
-	if fc, ok := n.(*plansql.FuncCallNode); ok &&
-		strings.TrimPrefix(strings.ToLower(fc.Name), "pg_catalog.") == "current_schemas" {
-		return parquet.Column{Type: parquet.TypeString, Nullable: true}, true
 	}
 	if t, _ := nodeDeclaredType(n, decls); t.ID == parquet.TypeArray && t.Schema != nil && t.Schema.ElementType != nil {
 		return *t.Schema.ElementType, true
@@ -270,7 +266,7 @@ func scanElement(n *logical.Node, ref *plansql.ColRef) (parquet.Column, bool) {
 			return
 		}
 		if n.Type == logical.NodeScan {
-			if el, ok := n.ScanColElems[strings.ToLower(ref.Column)]; ok {
+			if el, ok := n.ScanColElems[strings.ToLower(ref.Column)]; ok && n.ScanColTypes[strings.ToLower(ref.Column)] == parquet.TypeArray {
 				if ref.Table == "" || strings.EqualFold(ref.Table, n.TableAlias) || strings.EqualFold(ref.Table, n.TableName) {
 					if hits == 0 || found.Type != el.Type {
 						hits++

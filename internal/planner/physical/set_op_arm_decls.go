@@ -155,7 +155,7 @@ func scanArmDecls(n *logical.Node) ColDecls {
 			}
 		}
 	}
-	return ColDecls{Types: types, Fields: n.ScanColFields, Dec: dec}
+	return ColDecls{Types: types, Fields: n.ScanColFields, Elems: shapeElems(inputColShapes(n)), Dec: dec}
 }
 
 // joinArmDecls unions the two sides. A QUALIFIED key belongs to exactly one
@@ -315,7 +315,8 @@ func projectArmDecls(n *logical.Node, in ColDecls, quals []string) ColDecls {
 	if len(types) == 0 {
 		return ColDecls{}
 	}
-	return ColDecls{Types: types, Fields: inputColFields(n), Dec: dec}
+	shapes := inputColShapes(n)
+	return ColDecls{Types: types, Fields: shapeFields(shapes), Elems: shapeElems(shapes), Dec: dec}
 }
 
 // armScopeAt adds the relation names recorded ON ONE NODE to the scope in
@@ -429,6 +430,12 @@ func declFromKey(decls ColDecls, key string) expr.DeclType {
 	t := decls.Types[key]
 	if t == parquet.TypeRow {
 		return expr.DeclType{ID: t, Schema: &parquet.Column{Type: t, Fields: decls.Fields[key]}}
+	}
+	if e, ok := decls.Elems[key]; ok && e.Type == t && e.ElementType != nil {
+		// An ARRAY/MAP arm column carries its element, which is what the
+		// arms reconcile (setOpElementTarget, arc CW).
+		c := e.Clone()
+		return expr.DeclType{ID: t, Schema: &c}
 	}
 	if t != parquet.TypeDecimal {
 		return expr.Decl(t)

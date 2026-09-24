@@ -144,10 +144,12 @@ func arrOidCells() []struct {
 		{"a_mac", 1009, "{aa:bb:cc:00:00:01}"},
 		// The two that keep OID 25.
 		// PostgreSQL cannot hold this value at all: its nested arrays are
-		// RECTANGULAR, and `{{1,2},{3}}` is a syntax error there. This engine
-		// renders each inner array as a quoted element, which is why the
-		// column keeps OID 25 — see the file header.
-		{"a_nest", 25, `{"{1,2}","{3}"}`},
+		// RECTANGULAR, and `{{1,2},{3}}` is a syntax error there, which is
+		// why the column keeps OID 25 — see the file header. The TEXT is
+		// array_out's form for a nested dimension, the one PostgreSQL 17.11
+		// prints for a rectangular `ARRAY[ARRAY[1,2],ARRAY[3,4]]` (arc CW;
+		// each inner array used to go out as a quoted element).
+		{"a_nest", 25, `{{1,2},{3}}`},
 		{"a_row", 25, "{(7)}"},
 	}
 }
@@ -257,22 +259,12 @@ func TestAZeroRowArrayResultKeepsItsDeclaration(t *testing.T) {
 	if _, err := rr.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
-	// PINNED at 25, and PostgreSQL 17.11 declares 1007 here.
-	//
-	// A zero-row result has no vector, so its declaration is the PLAN's
-	// alone — and the planner's declaration layer carries no element type for
-	// an ARRAY at all: colDecls holds a bare TypeID plus a ROW's Fields and a
-	// DECIMAL's (p,s), so colRefDeclaredType DECLINES every ARRAY column and
-	// the schema falls to text. That is the pre-existing gap its own comment
-	// names, not something #992 introduced, and closing it means giving the
-	// scan annotation and colDecls an element map the way #568 gave them a
-	// field map.
-	//
-	// The pin FAILS when it starts agreeing, which is the proof the day that
-	// lands.
-	if got := fds[0].DataTypeOID; got != 25 {
-		t.Errorf("a zero-row ARRAY result now declares OID %d rather than the pinned 25. "+
-			"If that is 1007, the planner learned an ARRAY's element type: delete this pin "+
-			"and assert PostgreSQL's OID.", got)
+	// PostgreSQL 17.11's 1007. A zero-row result has no vector, so its
+	// declaration is the PLAN's alone, and the planner's declaration layer
+	// carries an ARRAY's element since arc CW (ColDecls.Elems, filled by the
+	// walk that fills a ROW's Fields — #1133). This was a pin at 25 until
+	// then.
+	if got := fds[0].DataTypeOID; got != 1007 {
+		t.Errorf("a zero-row int4[] result declares OID %d, want PostgreSQL's 1007", got)
 	}
 }

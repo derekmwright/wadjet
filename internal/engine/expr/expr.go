@@ -336,7 +336,7 @@ func init() {
 		"tcp_flags_has_any":  {fnTCPFlagsHasAny, RetBool},
 		"tcp_flags_has_none": {fnTCPFlagsHasNone, RetBool},
 		"tcp_flag_mask":      {fnTCPFlagMask, RetInt32},
-		"tcp_flags":          {fnTCPFlags, RetArray},
+		"tcp_flags":          {fnTCPFlags, RetArrayOf(batch.TypeString)},
 		"tcp_flags_text":     {fnTCPFlagsText, RetString},
 
 		// Semantic Versioning 2.0.0 over STRING (#967, semver.go). No new
@@ -396,7 +396,7 @@ func init() {
 		"current_catalog":  {fnCurrentCatalog, RetString},
 		"current_database": {fnCurrentCatalog, RetString},
 		"current_schema":   {fnCurrentSchema, RetString},
-		"current_schemas":  {fnCurrentSchemas, RetArray},
+		"current_schemas":  {fnCurrentSchemas, RetArrayOf(batch.TypeString)},
 		"version":          {fnVersion, RetString},
 
 		// date_add / date_sub declare TIMESTAMP here and DATE for a DATE
@@ -749,11 +749,11 @@ func init() {
 		// Array/nested type functions (Trino-compatible)
 		"cardinality":    {fnCardinality, RetInt32},
 		"array_length":   {fnArrayLength, RetInt32},
-		"element_at":     {fnElementAt, RetDynamic},
+		"element_at":     {fnElementAt, RetDerivedFrom(batch.TypeString, ArrayElementOf(0))},
 		"array_contains": {fnArrayContains, RetBool},
 		"array_join":     {fnArrayJoin, RetString},
-		"array_min":      {fnArrayMin, RetDynamic},
-		"array_max":      {fnArrayMax, RetDynamic},
+		"array_min":      {fnArrayMin, RetDerivedFrom(batch.TypeString, ArrayElementOf(0))},
+		"array_max":      {fnArrayMax, RetDerivedFrom(batch.TypeString, ArrayElementOf(0))},
 
 		// ROW/struct functions
 		"row_field":    {fnRowField, RetDynamic},
@@ -773,10 +773,10 @@ func init() {
 		"entropy": {fnEntropy, RetFloat64},
 
 		// MAP functions
-		"map_keys":         {fnMapKeys, RetArray},
-		"map_values":       {fnMapValues, RetArray},
-		"map_entries":      {fnMapEntries, RetArray},
-		"map_from_entries": {fnMapFromEntries, RetMap},
+		"map_keys":         {fnMapKeys, RetDerivedFrom(batch.TypeArray, MapPartOf(0))},
+		"map_values":       {fnMapValues, RetDerivedFrom(batch.TypeArray, MapPartOf(1))},
+		"map_entries":      {fnMapEntries, RetDerivedFrom(batch.TypeArray, MapPartOf(2))},
+		"map_from_entries": {fnMapFromEntries, RetDerivedFrom(batch.TypeMap, MapFromEntriesOf)},
 	}
 	for name, b := range builtins {
 		DefaultRegistry.Register(name, b.fn, b.ret)

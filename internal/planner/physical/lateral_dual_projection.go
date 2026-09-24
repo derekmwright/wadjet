@@ -183,6 +183,7 @@ func lateralOuterDecls(outer *logical.Node) ColDecls {
 	merged := ColDecls{
 		Types:    make(map[string]parquet.TypeID, len(in.Types)+len(emitted.Types)),
 		Fields:   emitted.Fields,
+		Elems:    emitted.Elems,
 		Dec:      emitted.Dec,
 		intWidth: emitted.intWidth,
 	}

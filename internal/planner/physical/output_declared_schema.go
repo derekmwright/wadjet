@@ -58,8 +58,8 @@ func declaredOutputSchema(root *logical.Node,
 			Fields:   d.RowFields(),
 			Nullable: true,
 		}
-		if d.ID == parquet.TypeArray && d.Schema != nil && d.Schema.ElementType != nil {
-			elem := *d.Schema.ElementType
+		if (d.ID == parquet.TypeArray || d.ID == parquet.TypeMap) && d.Schema != nil && d.Schema.ElementType != nil {
+			elem := d.Schema.ElementType.Clone()
 			col.ElementType = &elem
 		}
 		if d.ID == parquet.TypeDecimal && d.DecKnown {
@@ -119,6 +119,7 @@ func setOpDeclaredOutputSchema(root *logical.Node) ([]parquet.Column, bool) {
 				if (unknown[a] == nil || i >= len(unknown[a]) || !unknown[a][i]) && i < len(arms[a]) {
 					out[i].Type = arms[a][i].Type
 					out[i].Fields = arms[a][i].Fields
+					out[i].ElementType = arms[a][i].ElementType
 					out[i].Precision, out[i].Scale = arms[a][i].Precision, arms[a][i].Scale
 					break
 				}
@@ -141,6 +142,12 @@ func setOpDeclaredOutputSchema(root *logical.Node) ([]parquet.Column, bool) {
 				break
 			}
 			out[i].Type = t
+			// Two ARRAY arms fold their ELEMENTS on the same ladder, so the
+			// declared result is the array the stage arms write (arc CW).
+			if el, err := setOpElementTarget(SetOpColType{Typ: out[i].Type, ElementType: out[i].ElementType},
+				SetOpColType{Typ: arm[i].Type, ElementType: arm[i].ElementType}, out[i].Name, "UNION"); err == nil {
+				out[i].ElementType = el
+			}
 			if m, ok := batch.DecimalTypeOf(arm[i].Type,
 				batch.DecimalType{Precision: arm[i].Precision, Scale: arm[i].Scale}); ok && metas != nil {
 				metas = append(metas, m)
@@ -799,9 +806,11 @@ func declaredProjectionInputs(root *logical.Node) (projs []logical.Projection, c
 		// Aggregate and a Project — rebind names, and a field path over
 		// either resolves against nothing anyway. Everything else passes
 		// its input through, which is exactly inputColFields' walk (#568).
+		shapes := inputColShapes(pn.Children[0])
 		childTypes = ColDecls{
 			Types:  emittedColTypes(pn.Children[0]),
-			Fields: inputColFields(pn.Children[0]),
+			Fields: shapeFields(shapes),
+			Elems:  shapeElems(shapes),
 			// The (p,s) beside the TypeIDs, so a DECIMAL projection is
 			// resolved by ONE walk instead of two hand-mirrored ones
 			// (declaredProjectionDecl, ADR-0024 item 2).

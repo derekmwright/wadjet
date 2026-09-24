@@ -284,11 +284,10 @@ func TestFormatPgValue(t *testing.T) {
 		// PostgreSQL 17 (array_out; see formatPgArrayElement/quotePgArray).
 		{"array", []any{"a", "b", "c"}, "{a,b,c}"},
 		{"empty_array", []any{}, "{}"},
-		// The inner array's own text is "{1,2}", which itself contains a
-		// brace — one of the characters that triggers ARRAY-element
-		// quoting (quotePgArray) — so the outer level quotes it, the same
-		// way it quotes a nested composite's parens-and-comma text.
-		{"nested_array", []any{[]any{1, 2}}, `{"{1,2}"}`},
+		// An inner array is a further DIMENSION and array_out writes it bare
+		// — `{{1,2},{3,4}}`, measured on PostgreSQL 17.11 — not quoted as an
+		// element the way a nested composite's text is (arc CW).
+		{"nested_array", []any{[]any{1, 2}}, `{{1,2}}`},
 		{"array_with_null", []any{"a", nil, "c"}, "{a,NULL,c}"},
 		{"array_needs_quoting", []any{"has,comma", "has space", ""}, `{"has,comma","has space",""}`},
 		// pgArrayNeedsQuoting's whitespace set omitted \v and \f (vertical

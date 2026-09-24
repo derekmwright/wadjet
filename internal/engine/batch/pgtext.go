@@ -156,6 +156,13 @@ func formatPGArrayElement(val any, col *parquet.Column) string {
 	if val == nil {
 		return "NULL"
 	}
+	// An element that is itself an ARRAY is a further DIMENSION, and
+	// array_out writes it bare — `{{1,2},{3,4}}`, never `{"{1,2}","{3,4}"}`.
+	// Only a MAP (an entry list rendered `{k: v}`) or a composite needs the
+	// quoting below.
+	if inner, ok := val.([]any); ok && (col == nil || col.Type == parquet.TypeArray) {
+		return formatPGArrayOrMap(inner, col)
+	}
 	return QuotePGArrayElement(FormatPGText(val, col))
 }
 
@@ -394,4 +401,38 @@ func FormatPGFloat(v float64, bits int) string {
 		return strconv.FormatFloat(v, 'f', -1, bits)
 	}
 	return strconv.FormatFloat(v, 'e', -1, bits)
+}
+
+// VectorDecl reconstructs a declaration from a VECTOR, for a caller whose
+// batch schema lost it (exec.Project's field-path fallback) or that holds only
+// the vector (a CAST of a container column to text, which renders it through
+// FormatPGText and needs its element's type — arc CW). It recurses into
+// ARRAY/MAP elements and ROW children: an earlier version copied
+// Type/Scale/Dimension only, so the pooled output vector for a nested field
+// came back with nil Child / Children and every value inside it was silently
+// dropped.
+func VectorDecl(name string, v *Vector) parquet.Column {
+	col := parquet.Column{
+		Name:      name,
+		Type:      v.Type,
+		Nullable:  true,
+		Scale:     v.DecimalData.Scale,
+		Dimension: v.VectorDim,
+	}
+	switch v.Type {
+	case TypeArray, TypeMap:
+		if v.Child != nil {
+			el := VectorDecl("element", v.Child)
+			col.ElementType = &el
+		}
+	case TypeRow:
+		for i, ch := range v.Children {
+			fn := fmt.Sprintf("f%d", i)
+			if i < len(v.FieldNames) {
+				fn = v.FieldNames[i]
+			}
+			col.Fields = append(col.Fields, VectorDecl(fn, ch))
+		}
+	}
+	return col
 }

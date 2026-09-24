@@ -438,55 +438,150 @@ func aggregateProjectionFields(project *logical.Node, p logical.Projection) ([]p
 	return nil, false
 }
 
+// inputColFields is the ROW view of inputColShapes: each name's declared
+// FIELDS (nil for a name whose shape is not a ROW, or that a computed item
+// shadows).
 func inputColFields(n *logical.Node) map[string][]parquet.Column {
+	return shapeFields(inputColShapes(n))
+}
+
+// inputColElems is the ARRAY/MAP view of inputColShapes: each container
+// name's whole declared column, element included (arc CW, #1133 #1303).
+func inputColElems(n *logical.Node) map[string]parquet.Column {
+	return shapeElems(inputColShapes(n))
+}
+
+func shapeFields(shapes map[string]parquet.Column) map[string][]parquet.Column {
+	if shapes == nil {
+		return nil
+	}
+	out := make(map[string][]parquet.Column, len(shapes))
+	for k, c := range shapes {
+		if c.Type == parquet.TypeRow {
+			out[k] = c.Fields
+			continue
+		}
+		out[k] = nil
+	}
+	return out
+}
+
+func shapeElems(shapes map[string]parquet.Column) map[string]parquet.Column {
+	var out map[string]parquet.Column
+	for k, c := range shapes {
+		if (c.Type == parquet.TypeArray || c.Type == parquet.TypeMap) && c.ElementType != nil {
+			if out == nil {
+				out = make(map[string]parquet.Column)
+			}
+			out[k] = c
+		}
+	}
+	return out
+}
+
+// declShape is the container SHAPE a declaration carries — a ROW's fields,
+// an ARRAY's or MAP's element — and the zero Column (a name the shape walk
+// holds but says nothing about) for everything else.
+func declShape(d expr.DeclType) parquet.Column {
+	switch d.ID {
+	case parquet.TypeRow:
+		if f := d.RowFields(); len(f) > 0 {
+			return parquet.Column{Type: parquet.TypeRow, Fields: f}
+		}
+	case parquet.TypeArray, parquet.TypeMap:
+		if d.Schema != nil && d.Schema.ElementType != nil {
+			el := d.Schema.ElementType.Clone()
+			return parquet.Column{Type: d.ID, ElementType: &el}
+		}
+	}
+	return parquet.Column{}
+}
+
+// inputColShapes answers, per name a node's output carries, the CONTAINER
+// shape that name is declared with — a ROW's field list, an ARRAY's or a
+// MAP's element — which a bare TypeID cannot say. One walk serves both
+// halves: the ROW fields a field path is typed from (#568) and the ARRAY/MAP
+// element a column reference to a container is declared with, which is what
+// a derived table, a CTE, a set operation and a zero-row result carry an
+// array's element type through (arc CW; before it the element had no map at
+// all and a container column reference declined to the STRING fallback —
+// #1133, #1303). A name present with the zero Column is SHADOWED: something
+// above rebinds it, and the shapes below no longer describe it.
+func inputColShapes(n *logical.Node) map[string]parquet.Column {
 	if n == nil {
 		return nil
 	}
 	switch n.Type {
 	case logical.NodeScan:
-		return n.ScanColFields
+		var out map[string]parquet.Column
+		put := func(k string, c parquet.Column) {
+			if out == nil {
+				out = make(map[string]parquet.Column)
+			}
+			out[k] = c
+		}
+		for k, f := range n.ScanColFields {
+			put(k, parquet.Column{Type: parquet.TypeRow, Fields: f})
+		}
+		for k, el := range n.ScanColElems {
+			t := n.ScanColTypes[k]
+			if t != parquet.TypeArray && t != parquet.TypeMap {
+				continue
+			}
+			e := el
+			put(k, parquet.Column{Type: t, ElementType: &e})
+		}
+		return out
 	case logical.NodeDual:
-		return inputColFields(n.LateralOuterScope)
+		return inputColShapes(n.LateralOuterScope)
 	case logical.NodeFilter, logical.NodeLimit, logical.NodeSort, logical.NodeDistinct:
 		if len(n.Children) != 1 {
 			return nil
 		}
-		return inputColFields(n.Children[0])
+		return inputColShapes(n.Children[0])
 
 	case logical.NodeUnion, logical.NodeIntersect, logical.NodeExcept:
 		cols, ok := setOpDeclaredOutputSchema(n)
 		if !ok {
 			return nil
 		}
-		var fields map[string][]parquet.Column
+		var shapes map[string]parquet.Column
 		for _, c := range cols {
-			if len(c.Fields) > 0 {
-				if fields == nil {
-					fields = map[string][]parquet.Column{}
-				}
-				fields[strings.ToLower(c.Name)] = c.Fields
+			sh := parquet.Column{}
+			switch {
+			case c.Type == parquet.TypeRow && len(c.Fields) > 0:
+				sh = parquet.Column{Type: parquet.TypeRow, Fields: c.Fields}
+			case (c.Type == parquet.TypeArray || c.Type == parquet.TypeMap) && c.ElementType != nil:
+				el := c.ElementType.Clone()
+				sh = parquet.Column{Type: c.Type, ElementType: &el}
+			default:
+				continue
 			}
+			if shapes == nil {
+				shapes = map[string]parquet.Column{}
+			}
+			shapes[strings.ToLower(c.Name)] = sh
 		}
-		return fields
+		return shapes
 	case logical.NodeProject:
 		// inputColTypes STOPS at a Project because a rename can bind a name
-		// to a different value. The FIELDS walk does not have to: a
+		// to a different value. The SHAPES walk does not have to: a
 		// rename-only projection FORWARDS its columns, and which column each
 		// output name forwards is written down right here. Mapping them is
 		// what lets a field path through a derived table or a CTE keep its
 		// type — `SELECT rw.n FROM (SELECT rw FROM t) s` answered string("9")
 		// and `MIN(rw.n)` over the same subquery could not resolve its input
 		// at all, because the walk answered nil the moment a Project was in
-		// the way (#568).
+		// the way (#568) — and an array keep its element (#1303).
 		//
-		// A computed or aggregate item stops the whole walk, exactly as
-		// sourceColTypesThroughRenames stops for it: past that point a name
-		// may be bound to a value the fields below do not describe.
+		// A computed or aggregate item SHADOWS its own name with whatever it
+		// declares itself: past that point the name is bound to a value the
+		// shapes below do not describe.
 		if len(n.Children) != 1 {
 			return nil
 		}
-		below := inputColFields(n.Children[0])
-		var out map[string][]parquet.Column
+		below := inputColShapes(n.Children[0])
+		var out map[string]parquet.Column
 		for _, p := range n.Projections {
 			if p.IsAgg {
 				// An aggregate output is a NEW name, and its declaration
@@ -499,7 +594,7 @@ func inputColFields(n *logical.Node) map[string][]parquet.Column {
 				//
 				// So: publish what the aggregate itself declares (a bar's
 				// ROW, #965), and SHADOW the name otherwise, which is the
-				// precise statement of "the fields below no longer describe
+				// precise statement of "the shapes below no longer describe
 				// this name".
 				name := strings.ToLower(cleanExpr(p.Alias))
 				if name == "" {
@@ -509,17 +604,17 @@ func inputColFields(n *logical.Node) map[string][]parquet.Column {
 					return nil
 				}
 				if out == nil {
-					out = make(map[string][]parquet.Column)
+					out = make(map[string]parquet.Column)
 				}
 				if f, ok := aggregateProjectionFields(n, p); ok {
-					out[name] = f
+					out[name] = parquet.Column{Type: parquet.TypeRow, Fields: f}
 				} else {
-					out[name] = nil
+					out[name] = parquet.Column{}
 				}
 				continue
 			}
 			if p.Column == "" {
-				// A computed item SHADOWS its own name, but leaves other names' field
+				// A computed item SHADOWS its own name, but leaves other names' shape
 				// declarations intact (#965). Clearing the whole map loses the bar's (p,s)
 				// when a computed group key sits beside OHLCV; WSHF child metadata retains
 				// scale without precision. As with the aggregate arm, refuse the map if
@@ -532,10 +627,11 @@ func inputColFields(n *logical.Node) map[string][]parquet.Column {
 					return nil
 				}
 				if out == nil {
-					out = make(map[string][]parquet.Column)
+					out = make(map[string]parquet.Column)
 				}
-				d, _ := nodeDeclaredType(p.ASTExpr, ColDecls{Types: inputColTypes(n.Children[0]), Fields: below, Dec: inputColDecimal(n.Children[0])})
-				out[name] = d.RowFields()
+				d, _ := nodeDeclaredType(p.ASTExpr, ColDecls{Types: inputColTypes(n.Children[0]),
+					Fields: shapeFields(below), Elems: shapeElems(below), Dec: inputColDecimal(n.Children[0])})
+				out[name] = declShape(d)
 				continue
 			}
 			f, ok := below[strings.ToLower(cleanExpr(p.Column))]
@@ -547,19 +643,18 @@ func inputColFields(n *logical.Node) map[string][]parquet.Column {
 				name = p.Column
 			}
 			if out == nil {
-				out = make(map[string][]parquet.Column)
+				out = make(map[string]parquet.Column)
 			}
 			out[strings.ToLower(cleanExpr(name))] = f
 		}
 		return out
 	case logical.NodeAggregate:
 		// An aggregate publishes its OWN outputs and forwards nothing: every
-		// name it emits is either a group KEY (whose fields come from the
-		// column below, and a container group key is a different question
-		// this walk has never answered) or an aggregate OUTPUT. Only the
-		// second kind can declare a ROW today — the bar — and it declares it
-		// through the one derivation ADR-0035 item 5 names.
-		var out map[string][]parquet.Column
+		// name it emits is either a group KEY (whose shape comes from the
+		// column below) or an aggregate OUTPUT. Only the second kind can
+		// declare a ROW today — the bar — and it declares it through the one
+		// derivation ADR-0035 item 5 names.
+		var out map[string]parquet.Column
 		if len(n.Children) == 1 {
 			for i, k := range groupKeyOutputs(n) {
 				var ast plansql.Node
@@ -570,23 +665,57 @@ func inputColFields(n *logical.Node) map[string][]parquet.Column {
 					ast, _ = plansql.ParseExpression(n.GroupBy[i])
 				}
 				d := derivedGroupKeyDecl(n.GroupBy[i], ast, n.Children[0])
-				if len(d.RowFields()) > 0 {
+				if sh := declShape(d); sh.Type != 0 || sh.Fields != nil || sh.ElementType != nil {
 					if out == nil {
-						out = map[string][]parquet.Column{}
+						out = map[string]parquet.Column{}
 					}
-					out[strings.ToLower(cleanExpr(k.Name))] = d.RowFields()
+					out[strings.ToLower(cleanExpr(k.Name))] = sh
 				}
 			}
 		}
+		var childDecls *ColDecls
 		for i := range n.AggExprs {
-			f, ok := aggOhlcvOutputFields(n, n.AggExprs[i])
-			if !ok {
+			a := n.AggExprs[i]
+			if f, ok := aggOhlcvOutputFields(n, a); ok {
+				if out == nil {
+					out = make(map[string]parquet.Column)
+				}
+				out[strings.ToLower(cleanExpr(a.OutputCol))] = parquet.Column{Type: parquet.TypeRow, Fields: f}
 				continue
 			}
-			if out == nil {
-				out = make(map[string][]parquet.Column)
+			// MIN/MAX (and MIN_BY/MAX_BY) of a CONTAINER answer with an
+			// input value (#426), so the output's shape is the input's —
+			// the element a subscript over `MIN(ARRAY[x])` is declared from
+			// (arc CW).
+			switch strings.ToLower(a.Func) {
+			case "min", "max", "min_by", "max_by":
+			default:
+				continue
 			}
-			out[strings.ToLower(cleanExpr(n.AggExprs[i].OutputCol))] = f
+			if len(n.Children) != 1 {
+				continue
+			}
+			if childDecls == nil {
+				d := emittedColDecls(n.Children[0])
+				childDecls = &d
+			}
+			arg := a.InputExpr
+			if arg == nil && a.InputCol != "" {
+				arg = &plansql.ColRef{Column: a.InputCol}
+			}
+			if arg == nil {
+				continue
+			}
+			d, c := nodeDeclaredType(arg, *childDecls)
+			if c != expr.Decided {
+				continue
+			}
+			if sh := declShape(d); sh.ElementType != nil || sh.Fields != nil {
+				if out == nil {
+					out = make(map[string]parquet.Column)
+				}
+				out[strings.ToLower(cleanExpr(a.OutputCol))] = sh
+			}
 		}
 		return out
 	case logical.NodeJoin:
@@ -594,32 +723,32 @@ func inputColFields(n *logical.Node) map[string][]parquet.Column {
 			return nil
 		}
 		if items := lateralDualItemDecls(n); items != nil {
-			merged := make(map[string][]parquet.Column, len(items))
-			for c, f := range inputColFields(n.Children[0]) {
+			merged := make(map[string]parquet.Column, len(items))
+			for c, f := range inputColShapes(n.Children[0]) {
 				merged[c] = f
 			}
 			for name, d := range items {
-				if f := d.RowFields(); len(f) > 0 {
-					merged[name] = f
+				if sh := declShape(d); sh.Fields != nil || sh.ElementType != nil {
+					merged[name] = sh
 					continue
 				}
 				delete(merged, name)
 			}
 			return merged
 		}
-		left, right := inputColFields(n.Children[0]), inputColFields(n.Children[1])
+		left, right := inputColShapes(n.Children[0]), inputColShapes(n.Children[1])
 		if left == nil {
 			return right
 		}
 		if right == nil {
 			return left
 		}
-		merged := make(map[string][]parquet.Column, len(left)+len(right))
+		merged := make(map[string]parquet.Column, len(left)+len(right))
 		for c, f := range left {
 			merged[c] = f
 		}
 		for c, f := range right {
-			if prev, dup := merged[c]; dup && !sameRowFields(prev, f) {
+			if prev, dup := merged[c]; dup && !sameShape(prev, f) {
 				delete(merged, c)
 				continue
 			}
@@ -628,6 +757,22 @@ func inputColFields(n *logical.Node) map[string][]parquet.Column {
 		return merged
 	}
 	return nil
+}
+
+// sameShape reports whether two container shapes describe one declaration,
+// so a join that carries the name on both sides can keep it.
+func sameShape(a, b parquet.Column) bool {
+	if a.Type != b.Type || !sameRowFields(a.Fields, b.Fields) {
+		return false
+	}
+	if (a.ElementType == nil) != (b.ElementType == nil) {
+		return false
+	}
+	if a.ElementType == nil {
+		return true
+	}
+	return a.ElementType.Type == b.ElementType.Type && sameShape(*a.ElementType, *b.ElementType) &&
+		a.ElementType.Precision == b.ElementType.Precision && a.ElementType.Scale == b.ElementType.Scale
 }
 
 // sameRowFields reports whether two ROW declarations are the same shape, so a
@@ -653,7 +798,8 @@ func sameRowFields(a, b []parquet.Column) bool {
 // hold the logical node an expression reads should build the context here
 // rather than passing inputColTypes alone, which cannot type a field path.
 func inputColDecls(n *logical.Node) ColDecls {
-	return ColDecls{Types: inputColTypes(n), Fields: inputColFields(n), Dec: inputColDecimal(n)}
+	shapes := inputColShapes(n)
+	return ColDecls{Types: inputColTypes(n), Fields: shapeFields(shapes), Elems: shapeElems(shapes), Dec: inputColDecimal(n)}
 }
 
 // windowOutputColTypes adds a Window node's own output SLOTS to the types its
@@ -839,6 +985,13 @@ func strictIntArithColsThroughRenames(n *logical.Node) map[string]bool {
 type ColDecls struct {
 	Types  map[string]parquet.TypeID
 	Fields map[string][]parquet.Column
+	// Elems carries the whole declared column of the ARRAY and MAP entries in
+	// types — the element a bare TypeID cannot say (arc CW). Without it a
+	// column reference to a container declined, and a derived table, a CTE, a
+	// set operation or a zero-row result over one declared the STRING
+	// fallback (#1133, #1303). Filled from the same walk as Fields
+	// (inputColShapes), so the two can never describe different columns.
+	Elems map[string]parquet.Column
 	// Dec carries the (precision, scale) of the DECIMAL entries in types.
 	// A bare TypeID is not a type for a DECIMAL — a projection declared
 	// DECIMAL without its scale builds an output vector that reads every
@@ -922,6 +1075,10 @@ func (d ColDecls) colDecl(n *plansql.ColRef) (parquet.Column, bool) {
 			return parquet.Column{}, false
 		}
 		col := parquet.Column{Name: key, Type: t, Fields: d.Fields[key]}
+		if e, ok := d.Elems[key]; ok && e.Type == t && e.ElementType != nil {
+			el := e.ElementType.Clone()
+			col.ElementType = &el
+		}
 		if t == parquet.TypeDecimal {
 			if m, ok := lookupColDecimal(d.Dec, key); ok {
 				col.Precision, col.Scale = m.Precision, m.Scale
@@ -1088,12 +1245,19 @@ func colRefDeclaredType(n *plansql.ColRef, decls ColDecls) (expr.DeclType, expr.
 			return expr.DeclType{ID: c.Type, Schema: &c}, expr.Decided
 		}
 		return expr.DeclType{}, expr.Undecided
-	case parquet.TypeVector, parquet.TypeArray, parquet.TypeMap:
-		// The other parameterized types: the catalog map carries the TypeID
+	case parquet.TypeArray, parquet.TypeMap:
+		// A container DECIDES with its element, which ColDecls.Elems carries
+		// (arc CW): the output vector is sized from it and the wire declares
+		// the element's array OID. Without one — a container whose element no
+		// walk could say — it declines like VECTOR below.
+		if c.ElementType != nil {
+			return expr.DeclType{ID: c.Type, Schema: &c}, expr.Decided
+		}
+		return expr.DeclType{}, expr.Undecided
+	case parquet.TypeVector:
+		// The other parameterized type: the catalog map carries the TypeID
 		// and nothing else, and a projection declared VECTOR without its
-		// dimension or ARRAY without its element type builds an output
-		// vector that reads back wrong. funcReturnType declines the nested
-		// types for the same reason.
+		// dimension builds an output vector that reads back wrong.
 		//
 		// A field path of one of these types declines too, and for the same
 		// reason — exec.Project repairs it from the input batch, where the
@@ -1104,9 +1268,19 @@ func colRefDeclaredType(n *plansql.ColRef, decls ColDecls) (expr.DeclType, expr.
 }
 
 // declTypeParts carries the complete allocation declaration across every
-// materialization boundary, including a fixed ROW's child fields.
+// materialization boundary, including a fixed ROW's child fields and an
+// ARRAY's or MAP's element (arc CW): every site that materializes a computed
+// value — a projection, a sort, group or window key, an aggregate's input, a
+// set-operation arm, a DAG stage's spec — allocates its vector from these
+// parts, and a container vector allocated without its element has no child to
+// hold one.
 func declTypeParts(d expr.DeclType) parquet.Column {
-	return parquet.Column{Type: d.ID, Precision: d.Precision, Scale: d.Scale, Fields: d.RowFields()}
+	c := parquet.Column{Type: d.ID, Precision: d.Precision, Scale: d.Scale, Fields: d.RowFields()}
+	if (d.ID == parquet.TypeArray || d.ID == parquet.TypeMap) && d.Schema != nil && d.Schema.ElementType != nil {
+		el := d.Schema.ElementType.Clone()
+		c.ElementType = &el
+	}
+	return c
 }
 
 // emittedColDecls is InputColDecls over what a node EMITS rather than what it
@@ -1122,9 +1296,11 @@ func declTypeParts(d expr.DeclType) parquet.Column {
 // declaredOutputSchema already resolves the OUTPUT projection against, so the
 // SELECT list and the plan-declared schema now answer from one map.
 func emittedColDecls(n *logical.Node) ColDecls {
+	shapes := inputColShapes(n)
 	return ColDecls{
 		Types:    emittedColTypes(n),
-		Fields:   inputColFields(n),
+		Fields:   shapeFields(shapes),
+		Elems:    shapeElems(shapes),
 		Dec:      emittedColDecimal(n),
 		intWidth: emittedColIntWidth(n),
 	}
@@ -1353,6 +1529,8 @@ func nodeDeclaredType(node plansql.Node, decls ColDecls) (expr.DeclType, expr.Co
 		// boolean writes were dropped, and BOOL_AND/BOOL_OR read 0 (false)
 		// on every row.
 		return expr.Decl(parquet.TypeBool), expr.Decided
+	case *plansql.ArrayLitNode:
+		return arrayLitDeclaredType(n, decls)
 	case *plansql.CastNode:
 		// A DECIMAL destination carries its own (p,s), and a BARE one takes
 		// the operand's — neither of which a plain TypeID can express, which
@@ -1360,6 +1538,13 @@ func nodeDeclaredType(node plansql.Node, decls ColDecls) (expr.DeclType, expr.Co
 		// `CAST(x AS DECIMAL)` FLOAT64 (ADR-0024 item 3, #555).
 		if t, ok := castDeclaredDecimal(n, decls); ok {
 			return t, expr.Decided
+		}
+		// An ARRAY destination (`x::int[]`, CAST(x AS ARRAY(T))) declares the
+		// array OF the element the same spelling declares as a scalar — so
+		// `int[]` is bigint[] exactly as `CAST(x AS INT)` is bigint (ADR-0012
+		// item 12) — and the evaluator converts each element to it.
+		if el, ok := expr.ArrayCastElement(n.TypeName); ok {
+			return arrayOfDecl(expr.Decl(inferCastType(el)))
 		}
 		return expr.Decl(inferCastType(n.TypeName)), expr.Decided
 	case *plansql.Lit:
@@ -1541,29 +1726,18 @@ func funcReturnType(n *plansql.FuncCallNode, decls ColDecls) (expr.DeclType, exp
 	if t, c, ok := setReturningDeclType(n, decls); ok {
 		return t, c
 	}
-	// current_schemas() is name[]: an ARRAY whose element this engine carries
-	// as text, declared so the wire sends `{public}` under 1009 — an array
-	// without its element went out in a Go rendering (ADR-0044 decision 3).
-	if srfName(n.Name) == "current_schemas" {
-		el := parquet.Column{Name: "element", Type: parquet.TypeString, Nullable: true}
-		arr := parquet.Column{Type: parquet.TypeArray, Nullable: true, ElementType: &el}
-		return expr.DeclType{ID: parquet.TypeArray, Schema: &arr}, expr.Decided
-	}
 	if strings.EqualFold(n.Name, "row_field") && len(n.Args) == 2 {
 		parent, confidence := nodeDeclaredType(n.Args[0], decls)
 		if field, ok := n.Args[1].(*plansql.Lit); ok && parent.Schema != nil {
 			if c, found := parent.Schema.Field(field.Value); found {
-				// Extracting a parameterized non-ROW value remains on the
-				// existing scalar disposition (#1017); only fixed ROW
-				// declarations are carried by this arc.
-				switch c.Type {
-				case parquet.TypeArray, parquet.TypeMap, parquet.TypeVector:
-					return expr.DeclType{}, expr.Undecided
+				// A field is declared by its own column: a DECIMAL its
+				// (p,s), a container its element or fields (arc CW); a
+				// VECTOR, whose dimension a projection reads elsewhere,
+				// declares nothing.
+				if d, ok := expr.ColumnDecl(c); ok {
+					return d, confidence
 				}
-				if c.Type == parquet.TypeDecimal {
-					return expr.DeclDecimal(c.Precision, c.Scale), confidence
-				}
-				return expr.DeclType{ID: c.Type, Schema: &c}, confidence
+				return expr.DeclType{}, expr.Undecided
 			}
 		}
 	}
@@ -1612,10 +1786,15 @@ func funcReturnType(n *plansql.FuncCallNode, decls ColDecls) (expr.DeclType, exp
 		}
 		return expr.DeclType{}, expr.Undecided
 	case parquet.TypeArray, parquet.TypeMap:
-		// map_keys() really does return an ARRAY, and the declaration says
-		// so, but a projection has no element type to size the child vector
-		// with and an ARRAY column built without one reads back empty. Keep
-		// the string fallback until a projection can carry a nested type.
+		// A container declares only WITH its element — the child vector is
+		// sized from it and the wire's array OID is read off it. The
+		// registry carries it for every container-returning function
+		// (tcp_flags, map_keys, element_at over a nested array …, arc CW
+		// #1017); one that cannot say declines rather than build an ARRAY
+		// column that reads back empty.
+		if t.Schema != nil && t.Schema.ElementType != nil {
+			return t, c
+		}
 		return expr.DeclType{}, expr.Undecided
 	case parquet.TypeInt64:
 		if bitwiseInt4Result(n, decls) {
@@ -2038,4 +2217,80 @@ func isSimpleColRef(node plansql.Node) bool {
 	// (#621).
 	_, ok := node.(*plansql.ColRef)
 	return ok
+}
+
+// arrayLitDeclaredType is an ARRAY[…] constructor's declaration: the array OF
+// its elements' common type (expr.ArrayLitElementDecl — PostgreSQL's §10.5
+// rule, the one UNION and CASE use), with that element carried so the
+// projection builds an array vector and the wire declares the element's
+// array OID. Before arc CW the constructor had no arm here, so it declared
+// the STRING fallback: the value went out as Go's `[1 2 3]` under OID 25,
+// and every reader above it — a subscript, ANY(), ORDER BY — read that text
+// (#1250, #1303, #1021).
+//
+// An element nothing can type (a scalar subquery the caller cannot resolve)
+// declines the whole constructor. A constructor of nothing but NULLs is
+// text[], as PostgreSQL resolves `unknown`; one of NO elements has no type
+// to declare (PostgreSQL refuses it outright, 42P18) and declines.
+func arrayLitDeclaredType(n *plansql.ArrayLitNode, decls ColDecls) (expr.DeclType, expr.Confidence) {
+	var decided []expr.DeclType
+	for _, e := range n.Elements {
+		t, c := nodeDeclaredType(e, decls)
+		switch {
+		case c == expr.Decided:
+			decided = append(decided, t)
+		case t.Untyped:
+			// A NULL element names no type and adopts the others'.
+		default:
+			return expr.DeclType{}, expr.Undecided
+		}
+	}
+	if len(decided) == 0 {
+		if len(n.Elements) == 0 {
+			return expr.DeclType{}, expr.Undecided
+		}
+		return arrayOfDecl(expr.Decl(parquet.TypeString))
+	}
+	el, ok := expr.ArrayLitElementDecl(decided)
+	if !ok {
+		return expr.DeclType{}, expr.Undecided
+	}
+	return arrayOfDecl(el)
+}
+
+// arrayOfDecl is the ARRAY declaration whose element is el — its (p,s), its
+// own element or fields carried whole — or Undecided when el is not a
+// declaration a child vector can be built from (a DECIMAL with no scale).
+func arrayOfDecl(el expr.DeclType) (expr.DeclType, expr.Confidence) {
+	col, ok := declColumn(el)
+	if !ok {
+		return expr.DeclType{}, expr.Undecided
+	}
+	col.Name, col.Nullable = "element", true
+	arr := parquet.Column{Type: parquet.TypeArray, Nullable: true, ElementType: &col}
+	return expr.DeclType{ID: parquet.TypeArray, Schema: &arr}, expr.Decided
+}
+
+// declColumn is a declaration as the column it allocates: a container its
+// whole shape, a DECIMAL its (p,s).
+func declColumn(d expr.DeclType) (parquet.Column, bool) {
+	switch d.ID {
+	case parquet.TypeArray, parquet.TypeMap, parquet.TypeRow:
+		if d.Schema == nil {
+			return parquet.Column{}, false
+		}
+		c := d.Schema.Clone()
+		c.Type = d.ID
+		if (c.Type == parquet.TypeRow && len(c.Fields) == 0) || (c.Type != parquet.TypeRow && c.ElementType == nil) {
+			return parquet.Column{}, false
+		}
+		return c, true
+	case parquet.TypeDecimal:
+		if !d.DecKnown {
+			return parquet.Column{}, false
+		}
+	case parquet.TypeVector:
+		return parquet.Column{}, false
+	}
+	return declTypeParts(d), true
 }

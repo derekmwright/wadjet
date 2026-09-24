@@ -122,6 +122,14 @@ func (PlanContext) DeclTypeParts(d expr.DeclType) parquet.Column {
 	return declTypeParts(d)
 }
 
+// ScanColDecls is a scan's own column declarations — types, ROW fields,
+// ARRAY/MAP elements, DECIMAL (p,s) — for an expression evaluated directly
+// over it.
+func (PlanContext) ScanColDecls(scan *logical.Node) ColDecls {
+	shapes := inputColShapes(scan)
+	return ColDecls{Types: scan.ScanColTypes, Fields: shapeFields(shapes), Elems: shapeElems(shapes), Dec: scan.ScanColDecimal}
+}
+
 func (PlanContext) DeclaredJoinSchema(n *logical.Node, want []string, published map[*logical.Node]bool,
 	subqueryDecl func(string) (parquet.Column, bool)) []parquet.Column {
 	return declaredJoinSchema(n, want, published, subqueryDecl)

@@ -43,6 +43,9 @@ func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
 	// runs per row, and a WHERE over a typed date literal evaluates it once
 	// per row of the scan.
 	dest := strings.ToLower(e.DestType)
+	if elem, ok := ArrayCastElement(dest); ok {
+		return castToArray(v, elem)
+	}
 	if k := castTemporalKindLower(strings.TrimSpace(dest)); k != castNotTemporal {
 		return castTemporal(b, row, e.Operand, v, k)
 	}
@@ -286,6 +289,14 @@ func (e *Cast) castToReal(v any) any {
 // first cut to four characters (#838). See the arm above for what each source
 // family renders as and why.
 func castStringRender(b *batch.RecordBatch, row int, operand Expr, v any) string {
+	switch v.(type) {
+	case []any, map[string]any:
+		// A container's text is PostgreSQL's array_out / record_out — the
+		// one renderer every door uses — under the operand's declaration,
+		// which is what tells a TIMESTAMP element from a bigint one. Before
+		// arc CW this fell to fmt.Sprint and `CAST(a AS TEXT)` was `[1 2 3]`.
+		return batch.FormatPGText(v, containerOperandDecl(b, row, operand))
+	}
 	text := boxedTextOperand(b, row, operand, v)
 	if raw, ok := text.([]byte); ok {
 		return `\x` + hex.EncodeToString(raw)

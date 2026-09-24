@@ -5,6 +5,7 @@ package expr
 
 import (
 	"fmt"
+	"sort"
 	"sync"
 	"sync/atomic"
 
@@ -69,7 +70,7 @@ func (e *elementAtExpr) resolveDispatch(b *batch.RecordBatch) {
 // evaluate to a MAP — never from a runtime value's shape, which a MAP shares
 // with an ARRAY of {key,value} rows. b supplies a ColRef its column's declared
 // type. A FuncCall is a MAP when its registered return type fixes it to one
-// (map_from_entries is RetMap; map_entries is RetArray, so map_entries(m)[i]
+// (map_from_entries declares a MAP; map_entries an ARRAY, so map_entries(m)[i]
 // correctly indexes). Anything else is treated as an ARRAY.
 func staticallyMap(e Expr, b *batch.RecordBatch) bool {
 	if a, ok := e.(*FuncCall); ok {
@@ -168,18 +169,57 @@ func toMap(v any) (map[string]any, bool) {
 	}
 }
 
+// orderedMapEntries is a MAP value's entries in its STORED order — the
+// sorted-key order the engine writes a MAP in — with each key and value as
+// the box it is, not its text. map_keys, map_values and map_entries read it,
+// so the three agree with one another and with the declaration the planner
+// gives them: before arc CW they ranged over a Go map, so `map_keys(m)` came
+// back in a different order on different runs (`{b,a}` beside `{a,b}`),
+// `map_keys(m)[1]` and `map_values(m)[1]` could name different entries, and
+// every key came back as its text whatever the key's type.
+func orderedMapEntries(v any) ([][2]any, bool) {
+	switch tv := v.(type) {
+	case []any:
+		out := make([][2]any, 0, len(tv))
+		for _, entry := range tv {
+			if row, ok := entry.(map[string]any); ok {
+				out = append(out, [2]any{row["key"], row["value"]})
+			}
+		}
+		return out, true
+	case []map[string]any:
+		out := make([][2]any, 0, len(tv))
+		for _, row := range tv {
+			out = append(out, [2]any{row["key"], row["value"]})
+		}
+		return out, true
+	case map[string]any:
+		keys := make([]string, 0, len(tv))
+		for k := range tv {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		out := make([][2]any, 0, len(keys))
+		for _, k := range keys {
+			out = append(out, [2]any{k, tv[k]})
+		}
+		return out, true
+	}
+	return nil, false
+}
+
 // map_keys(map) — returns the keys as an array
 func fnMapKeys(args []any) any {
 	if len(args) < 1 || args[0] == nil {
 		return nil
 	}
-	m, ok := toMap(args[0])
+	es, ok := orderedMapEntries(args[0])
 	if !ok {
 		return nil
 	}
-	keys := make([]any, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
+	keys := make([]any, 0, len(es))
+	for _, e := range es {
+		keys = append(keys, e[0])
 	}
 	return keys
 }
@@ -189,29 +229,29 @@ func fnMapValues(args []any) any {
 	if len(args) < 1 || args[0] == nil {
 		return nil
 	}
-	m, ok := toMap(args[0])
+	es, ok := orderedMapEntries(args[0])
 	if !ok {
 		return nil
 	}
-	vals := make([]any, 0, len(m))
-	for _, v := range m {
-		vals = append(vals, v)
+	vals := make([]any, 0, len(es))
+	for _, e := range es {
+		vals = append(vals, e[1])
 	}
 	return vals
 }
 
-// map_entries(map) — returns array of ROW(key, value) entries
+// map_entries(map) — returns an ARRAY of ROW(key, value)
 func fnMapEntries(args []any) any {
 	if len(args) < 1 || args[0] == nil {
 		return nil
 	}
-	m, ok := toMap(args[0])
+	es, ok := orderedMapEntries(args[0])
 	if !ok {
 		return nil
 	}
-	entries := make([]any, 0, len(m))
-	for k, v := range m {
-		entries = append(entries, map[string]any{"key": k, "value": v})
+	entries := make([]any, 0, len(es))
+	for _, e := range es {
+		entries = append(entries, map[string]any{"key": e[0], "value": e[1]})
 	}
 	return entries
 }

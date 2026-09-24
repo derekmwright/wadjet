@@ -54,6 +54,11 @@ type ProjectExprSpec struct {
 	// a hundredfold out (ADR-0024 item 2; #529, #555).
 	Precision int
 	Scale     int
+	// ElementType carries a computed ARRAY's element (a MAP's entry ROW)
+	// beside Type, for the reason Precision and Scale carry a DECIMAL's: a
+	// worker that learns only the TypeID builds a container vector with no
+	// child, and every element is dropped (arc CW).
+	ElementType *parquet.Column
 	// SourceSlot names the input column by POSITION rather than by name, for
 	// a projection whose input publishes the name TWICE. It is
 	// exec.ProjectColumn.SourceIdx on the wire, and it exists for the same

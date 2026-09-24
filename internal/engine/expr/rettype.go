@@ -214,6 +214,10 @@ type Ret struct {
 	// so `NULLIF(0, numeric)` is numeric), select_common_typmod over the one
 	// the value comes from (so the pair keeps argument 0's numeric(9,2)).
 	typeAll bool
+	// derive answers a CONTAINER declaration from the arguments' own
+	// declarations — map_keys' element is its MAP's key, element_at's result
+	// is its ARRAY's element (arc CW). nil for every other kind.
+	derive func(nargs int, argType func(i int) (DeclType, Confidence)) (DeclType, bool)
 	// opResolved marks a declaration whose type comes from the comparison
 	// OPERATOR its two arguments select rather than from select_common_type
 	// over them. NULLIF is the only one; see operatorResolvedType, where the
@@ -397,6 +401,7 @@ const (
 	retFixed
 	retSameAsArg
 	retDynamic
+	retDerived
 )
 
 // The fixed declarations. A declaration names the SQL type of the function's
@@ -546,6 +551,11 @@ func (r Ret) Resolve(nargs int, argType func(i int) (DeclType, Confidence)) (Dec
 	switch r.kind {
 	case retFixed:
 		return DeclType{ID: r.typ, Schema: r.schema}, Decided
+	case retDerived:
+		if t, ok := r.derive(nargs, argType); ok {
+			return t, Decided
+		}
+		return DeclType{ID: batch.TypeString}, Undecided
 	case retSameAsArg:
 		if argType != nil {
 			// ONE pass, and one argType call per argument. argType is a
@@ -916,6 +926,8 @@ func (r Ret) String() string {
 		return fmt.Sprintf("SAME AS ARG %v (else %s)", r.args, r.typ)
 	case retDynamic:
 		return "DYNAMIC"
+	case retDerived:
+		return "DERIVED FROM ARGS"
 	}
 	return "UNDECLARED"
 }
@@ -1008,6 +1020,140 @@ func FuncPolymorphicArgPositions(name string) ([]int, bool) {
 		return nil, false
 	}
 	return r.args, true
+}
+
+// RetArrayOf declares an ARRAY of a fixed element — tcp_flags' text[] — with
+// the element carried, so a projection can size the child vector and the
+// wire can declare the element's array OID (arc CW, #1017). RetArray, with no
+// element, is a declaration no projection can allocate from.
+func RetArrayOf(elem parquet.TypeID) Ret {
+	el := parquet.Column{Name: "element", Type: elem, Nullable: true}
+	return Ret{kind: retFixed, typ: batch.TypeArray,
+		schema: &parquet.Column{Type: parquet.TypeArray, Nullable: true, ElementType: &el}}
+}
+
+// RetDerivedFrom declares a result whose type is a function of the
+// arguments' DECLARED shapes — a MAP's keys, an ARRAY's element — which no
+// fixed declaration can name. f answers false when the arguments do not
+// decide it, and the call is then Undecided (fallback is the type its Go
+// result is stored as, for Ret.Kind readers).
+func RetDerivedFrom(fallback batch.TypeID, f func(nargs int, argType func(i int) (DeclType, Confidence)) (DeclType, bool)) Ret {
+	return Ret{kind: retDerived, typ: fallback, derive: f}
+}
+
+// ArrayElementOf declares the element of argument i's ARRAY, or a MAP's
+// VALUE (the subscript's two readings); element_at, array_min, array_max.
+func ArrayElementOf(i int) func(int, func(int) (DeclType, Confidence)) (DeclType, bool) {
+	return func(nargs int, argType func(int) (DeclType, Confidence)) (DeclType, bool) {
+		if i >= nargs || argType == nil {
+			return DeclType{}, false
+		}
+		t, c := argType(i)
+		if c != Decided || t.Schema == nil || t.Schema.ElementType == nil {
+			return DeclType{}, false
+		}
+		switch t.ID {
+		case batch.TypeArray:
+			return ColumnDecl(*t.Schema.ElementType)
+		case batch.TypeMap:
+			if _, v, ok := mapEntryFields(t.Schema); ok {
+				return ColumnDecl(v)
+			}
+		}
+		return DeclType{}, false
+	}
+}
+
+// MapPartOf declares map_keys (part 0), map_values (part 1) or map_entries
+// (part 2) of argument 0's MAP: an ARRAY of the key, of the value, or of the
+// entry ROW.
+func MapPartOf(part int) func(int, func(int) (DeclType, Confidence)) (DeclType, bool) {
+	return func(nargs int, argType func(int) (DeclType, Confidence)) (DeclType, bool) {
+		if nargs < 1 || argType == nil {
+			return DeclType{}, false
+		}
+		t, c := argType(0)
+		if c != Decided || t.ID != batch.TypeMap || t.Schema == nil {
+			return DeclType{}, false
+		}
+		k, v, ok := mapEntryFields(t.Schema)
+		if !ok {
+			return DeclType{}, false
+		}
+		var el parquet.Column
+		switch part {
+		case 0:
+			el = k
+		case 1:
+			el = v
+		default:
+			el = parquet.Column{Type: parquet.TypeRow, Nullable: true, Fields: []parquet.Column{k, v}}
+		}
+		el.Name, el.Nullable = "element", true
+		arr := parquet.Column{Type: parquet.TypeArray, Nullable: true, ElementType: &el}
+		return DeclType{ID: batch.TypeArray, Schema: &arr}, true
+	}
+}
+
+// MapFromEntriesOf declares map_from_entries over argument 0's ARRAY of
+// two-field ROWs: a MAP whose entry is that ROW, its fields named key and
+// value as a MAP's entry is everywhere else.
+func MapFromEntriesOf(nargs int, argType func(int) (DeclType, Confidence)) (DeclType, bool) {
+	if nargs < 1 || argType == nil {
+		return DeclType{}, false
+	}
+	t, c := argType(0)
+	if c != Decided || t.ID != batch.TypeArray || t.Schema == nil || t.Schema.ElementType == nil {
+		return DeclType{}, false
+	}
+	row := t.Schema.ElementType
+	if row.Type != parquet.TypeRow || len(row.Fields) != 2 {
+		return DeclType{}, false
+	}
+	k, v := row.Fields[0].Clone(), row.Fields[1].Clone()
+	k.Name, v.Name, v.Nullable = "key", "value", true
+	entry := parquet.Column{Name: "entry", Type: parquet.TypeRow, Fields: []parquet.Column{k, v}}
+	m := parquet.Column{Type: parquet.TypeMap, Nullable: true, ElementType: &entry}
+	return DeclType{ID: batch.TypeMap, Schema: &m}, true
+}
+
+// mapEntryFields is a MAP declaration's key and value columns — its
+// ElementType is the entry ROW (key, value), the shape every MAP schema in
+// the engine carries.
+func mapEntryFields(m *parquet.Column) (parquet.Column, parquet.Column, bool) {
+	if m == nil || m.ElementType == nil || len(m.ElementType.Fields) != 2 {
+		return parquet.Column{}, parquet.Column{}, false
+	}
+	return m.ElementType.Fields[0].Clone(), m.ElementType.Fields[1].Clone(), true
+}
+
+// ColumnDecl is the declaration of a value of declared column c: a DECIMAL
+// its (p,s), a container its whole shape. A DECIMAL with no (p,s) and a
+// VECTOR (whose dimension a projection reads from the registry, not from
+// here) decide nothing.
+func ColumnDecl(c parquet.Column) (DeclType, bool) {
+	switch c.Type {
+	case parquet.TypeDecimal:
+		if c.Precision <= 0 {
+			return DeclType{}, false
+		}
+		return DeclDecimal(c.Precision, c.Scale), true
+	case parquet.TypeVector:
+		return DeclType{}, false
+	case parquet.TypeArray, parquet.TypeMap:
+		if c.ElementType == nil {
+			return DeclType{}, false
+		}
+		cc := c.Clone()
+		return DeclType{ID: c.Type, Schema: &cc}, true
+	case parquet.TypeRow:
+		if len(c.Fields) == 0 {
+			return DeclType{}, false
+		}
+		cc := c.Clone()
+		return DeclType{ID: c.Type, Schema: &cc}, true
+	}
+	return Decl(c.Type), true
 }
 
 // RetRow declares the complete child schema needed to allocate a ROW result.

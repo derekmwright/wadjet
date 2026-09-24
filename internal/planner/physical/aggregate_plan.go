@@ -125,11 +125,12 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 					// and a DECIMAL needs its (p,s) with the TypeID or the
 					// materialized vector truncates at scale 0 (ADR-0024
 					// item 2).
-					Type:      aggDecl.ID,
-					Fields:    declTypeParts(aggDecl).Fields,
-					Precision: aggDecl.Precision,
-					Scale:     aggDecl.Scale,
-					Expr:      wrapExpr(compiled),
+					Type:        aggDecl.ID,
+					Fields:      declTypeParts(aggDecl).Fields,
+					ElementType: declTypeParts(aggDecl).ElementType,
+					Precision:   aggDecl.Precision,
+					Scale:       aggDecl.Scale,
+					Expr:        wrapExpr(compiled),
 				}
 				// Use general vectorized evaluation when available.
 				if ve, ok := compiled.(expr.VecExpr); ok {
@@ -208,7 +209,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 				// Float64 default and a container field to Float64 outright
 				// (#568).
 				meta := parquet.Column{Name: synName, Type: pc.Type, Nullable: true,
-					Precision: pc.Precision, Scale: pc.Scale, Fields: pc.Fields}
+					Precision: pc.Precision, Scale: pc.Scale, Fields: pc.Fields, ElementType: pc.ElementType}
 				if fc, ok := aggInputDecls.field(fieldPathColRef(agg.InputExpr)); ok {
 					meta = fc
 					meta.Name, meta.Nullable = synName, true
@@ -430,10 +431,11 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 						// in, so `GROUP BY COALESCE(a, b)` collapsed 12.75
 						// and 12.7501 into one group holding 12 (ADR-0024
 						// item 2).
-						Precision: gbDecl.Precision,
-						Scale:     gbDecl.Scale,
-						Fields:    declTypeParts(gbDecl).Fields,
-						Expr:      wrapExpr(compiled),
+						Precision:   gbDecl.Precision,
+						Scale:       gbDecl.Scale,
+						Fields:      declTypeParts(gbDecl).Fields,
+						ElementType: declTypeParts(gbDecl).ElementType,
+						Expr:        wrapExpr(compiled),
 					}
 					// Batched evaluation when available — beyond the vec
 					// kernels themselves, FuncCall.EvalVec is where the
@@ -448,7 +450,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 					// written through the boxed route so a NULL field stays
 					// NULL (#568).
 					meta := parquet.Column{Name: synName, Type: pc.Type, Nullable: true,
-						Precision: pc.Precision, Scale: pc.Scale, Fields: pc.Fields}
+						Precision: pc.Precision, Scale: pc.Scale, Fields: pc.Fields, ElementType: pc.ElementType}
 					if fc, ok := aggChildColTypes.field(fieldPathColRef(gbExpr)); ok {
 						meta = fc
 						meta.Name, meta.Nullable = synName, true

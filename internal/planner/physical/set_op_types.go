@@ -512,7 +512,7 @@ func setOpArmTypeConflict(node *logical.Node) error {
 				// depends on column ORDER is not a rule.
 				break
 			}
-			want = SetOpColType{Typ: widened, Known: true, Fields: want.Fields}
+			want = SetOpColType{Typ: widened, Known: true, Fields: want.Fields, ElementType: want.ElementType}
 		}
 		// A QUOTED literal whose resolved type cannot be built from text.
 		// Deferred like the carrier gap and for the same reason: it is a fact
@@ -632,8 +632,12 @@ type SetOpArmPlan struct {
 // carries it.
 type SetOpColType struct {
 	Fields []parquet.Column
-	Typ    parquet.TypeID
-	Known  bool
+	// ElementType is an ARRAY/MAP arm column's element (arc CW): the arm's
+	// materialized spec allocates its vector from it, and the result's
+	// declared output carries it.
+	ElementType *parquet.Column
+	Typ         parquet.TypeID
+	Known       bool
 	// Dec is a DECIMAL column's declared precision and scale: the two facts
 	// a bare TypeID cannot express, and the ones two DECIMAL arms can
 	// DISAGREE on while looking identical to a TypeID comparison. That is
@@ -720,6 +724,10 @@ func setOpArmProjection(arm *logical.Node, outNames []string) (SetOpArmPlan, err
 			plan.Specs[i] = ProjectExprSpec{Expr: lc, Name: outNames[i]}
 			if t, ok := inner.ScanColTypes[lc]; ok {
 				plan.Types[i] = SetOpColType{Typ: t, Known: true, Fields: inner.ScanColFields[lc]}
+				if el, ok := inner.ScanColElems[lc]; ok && (t == parquet.TypeArray || t == parquet.TypeMap) {
+					e := el
+					plan.Types[i].ElementType = &e
+				}
 				if t == parquet.TypeDecimal {
 					plan.Types[i].Dec, plan.Types[i].DecKnown = setOpColDecimalMeta(inner.ScanColDecimal, lc)
 				}
@@ -842,8 +850,9 @@ func setOpArmProjection(arm *logical.Node, outNames []string) (SetOpArmPlan, err
 			}
 			materialized := declTypeParts(decl)
 			spec.Type, spec.Precision, spec.Scale, spec.Fields = materialized.Type, materialized.Precision, materialized.Scale, materialized.Fields
+			spec.ElementType = materialized.ElementType
 			spec.TypeKnown = true
-			ct = SetOpColType{Typ: spec.Type, Known: true, Fields: materialized.Fields}
+			ct = SetOpColType{Typ: spec.Type, Known: true, Fields: materialized.Fields, ElementType: materialized.ElementType}
 			if decl.ID == parquet.TypeDecimal && decl.DecKnown {
 				// A computed DECIMAL arm now knows its own (p,s), so the
 				// arms reconcile through the ordinary rule instead of
@@ -863,6 +872,7 @@ func setOpArmProjection(arm *logical.Node, outNames []string) (SetOpArmPlan, err
 			if forwardedComputed {
 				spec.Type = ct.Typ
 				spec.Fields = ct.Fields
+				spec.ElementType = ct.ElementType
 				spec.TypeKnown = true
 				if ct.DecKnown {
 					spec.Precision, spec.Scale = ct.Dec.Precision, ct.Dec.Scale
@@ -878,9 +888,10 @@ func setOpArmProjection(arm *logical.Node, outNames []string) (SetOpArmPlan, err
 			// type because nothing downstream resolves a field path by name:
 			// it is MATERIALIZED the way a computed expression is.
 			if fc, ok := colTypes.field(cr); ok {
-				ct = SetOpColType{Typ: fc.Type, Known: true, Fields: fc.Fields}
+				ct = SetOpColType{Typ: fc.Type, Known: true, Fields: fc.Fields, ElementType: fc.ElementType}
 				spec.Type = fc.Type
 				spec.Fields = fc.Fields
+				spec.ElementType = fc.ElementType
 				spec.TypeKnown = true
 				if fc.Type == parquet.TypeDecimal && fc.Precision > 0 {
 					ct.Dec = logical.DecimalMeta{Precision: fc.Precision, Scale: fc.Scale}
@@ -911,7 +922,7 @@ func setOpRefDecl(decls ColDecls, resolved string, pr logical.Projection) (SetOp
 			continue
 		}
 		d := declFromKey(decls, key)
-		ct := SetOpColType{Typ: d.ID, Known: true, Fields: declTypeParts(d).Fields}
+		ct := SetOpColType{Typ: d.ID, Known: true, Fields: declTypeParts(d).Fields, ElementType: declTypeParts(d).ElementType}
 		if d.ID == parquet.TypeDecimal && d.DecKnown && d.Precision > 0 {
 			ct.Dec = logical.DecimalMeta{Precision: d.Precision, Scale: d.Scale}
 			ct.DecKnown = true
@@ -971,7 +982,11 @@ func setOpTargetType(plans []SetOpArmPlan, col int, name, op string, unknown [][
 			// shape that reaches here without it.
 			return SetOpColType{}, false, setOpCarrierGap(name, want.Typ, ct.Typ)
 		}
-		want = SetOpColType{Typ: widened, Known: true, Fields: want.Fields}
+		elem, err := setOpElementTarget(want, ct, name, op)
+		if err != nil {
+			return SetOpColType{}, false, err
+		}
+		want = SetOpColType{Typ: widened, Known: true, Fields: want.Fields, ElementType: elem}
 	}
 	if want.Known && want.Typ == parquet.TypeDecimal && allKnown {
 		arms := make([]SetOpColType, 0, len(plans))
@@ -1074,4 +1089,50 @@ func setOpWiden(a, b parquet.TypeID) (parquet.TypeID, bool) {
 	// an INT32 carrier, so declaring int4 would put the type on a box that is
 	// not one. Recorded in ADR-0012 item 12 as a width divergence.
 	return parquet.TypeInt64, true
+}
+
+// setOpElementTarget reconciles two ARRAY (or MAP) arms' ELEMENTS the way the
+// arms themselves are reconciled: one element type both widen to on the
+// numeric ladder (`int[] ∪ bigint[]` is bigint[], PostgreSQL's
+// select_common_type over the element), the same element kept, and PostgreSQL's
+// 42804 for two elements with no common type (`integer[] ∪ text[]`). Before
+// arc CW a constructed array declared text, so the arms never differed; with
+// the element declared, two arms writing two element types into one column
+// is a stage file the next stage cannot read (arc CW).
+//
+// A container ELEMENT (a nested array, a ROW) matches only itself.
+func setOpElementTarget(want, ct SetOpColType, name, op string) (*parquet.Column, error) {
+	if want.ElementType == nil || ct.ElementType == nil ||
+		(want.Typ != parquet.TypeArray && want.Typ != parquet.TypeMap) || want.Typ != ct.Typ {
+		return want.ElementType, nil
+	}
+	a, b := want.ElementType, ct.ElementType
+	if a.Type == parquet.TypeDecimal || b.Type == parquet.TypeDecimal {
+		if a.Type == b.Type && a.Precision == b.Precision && a.Scale == b.Scale {
+			return want.ElementType, nil
+		}
+		// Moving a DECIMAL element to another (p,s) is a rescale of every
+		// element this reconciliation does not perform; refused rather than
+		// read at the wrong power of ten.
+		return nil, sqlerr.New("0A000", "%s over ARRAY columns whose DECIMAL elements differ in "+
+			"type or (precision, scale) is not supported: result column %q", op, name)
+	}
+	if a.Type == b.Type {
+		if batch.IsContainerType(a.Type) && !sameShape(*a, *b) {
+			return nil, sqlerr.New("42804", "%s types %s[] and %s[] cannot be matched: result column %q",
+				op, strings.ToLower(a.Type.String()), strings.ToLower(b.Type.String()), name)
+		}
+		return want.ElementType, nil
+	}
+	if batch.IsContainerType(a.Type) || batch.IsContainerType(b.Type) {
+		return nil, sqlerr.New("42804", "%s types %s[] and %s[] cannot be matched: result column %q",
+			op, strings.ToLower(a.Type.String()), strings.ToLower(b.Type.String()), name)
+	}
+	widened, ok := setOpWiden(a.Type, b.Type)
+	if !ok {
+		return nil, sqlerr.New("42804", "%s types %s[] and %s[] cannot be matched: result column %q",
+			op, strings.ToLower(a.Type.String()), strings.ToLower(b.Type.String()), name)
+	}
+	el := parquet.Column{Name: "element", Type: widened, Nullable: true}
+	return &el, nil
 }

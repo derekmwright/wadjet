@@ -441,13 +441,12 @@ func TestDecimalChoiceExpressionRefusesAValueWithNoCarrier(t *testing.T) {
 // every such shape back exactly where it was before ADR-0024: a loud refusal,
 // or the STRING fallback that renders the decimal text unchanged.
 //
-// THE UNDECLARED OPERAND IS NOW A CONTAINER ELEMENT, not a scalar subquery.
-// `element_at(arr, 2)` over a DECIMAL element list still decides nothing —
-// the call is typed from the registry and the container's element declaration
-// does not reach it — while a SCALAR SUBQUERY does declare its own output
-// column since #874, and the four shapes it used to stand for now ANSWER
-// PostgreSQL's values (TestDecimalChoiceFoldsOverAScalarSubquery below).
-// Swapping the operand keeps this clause testing what it is about.
+// THE OPERAND THAT DECIDED NOTHING WAS A CONTAINER ELEMENT, and before it a
+// scalar subquery. Both declare now — a subquery its own output column since
+// #874, `element_at(arr, 2)` its numeric(9,2) element since arc CW — so the
+// shapes that were refusals here ANSWER PostgreSQL's values, measured live.
+// The decline stays expr.Ret.Resolve's (sawUnknown), for an operand no walk
+// can type.
 //
 // A bare NULL is the exception and stays one: it names no type AND produces
 // no value, which is SQL's `unknown`, so COALESCE(d, NULL) is numeric here as
@@ -471,17 +470,31 @@ func TestDecimalChoiceDeclinesOverAnUndeclaredProducer(t *testing.T) {
 			"value, which a fold to numeric(9,2) would render at the fold's scale)", got, want)
 	}
 
-	// COALESCE and GREATEST have a numeric fallback rather than a string one,
-	// so the same decline surfaces as the #361 store guard — loud, and the
-	// answer this engine gave before a DECIMAL could decide anything.
-	for _, sql := range []string{
-		"SELECT COALESCE(a, " + sub + ") AS c FROM " + ddrTable,
-		"SELECT GREATEST(a, " + sub + ") AS c FROM " + ddrTable,
-		"SELECT LEAST(a, " + sub + ") AS c FROM " + ddrTable,
+	// THE CONTAINER ELEMENT DECLARES SINCE ARC CW: element_at over a
+	// numeric(9,2)[] is numeric(9,2) (expr.ArrayElementOf), so the three
+	// shapes that were this clause's refusals now FOLD over a declared
+	// operand and answer PostgreSQL 17.11's values, measured live over the
+	// same rows with the same declaration. The decline itself — a fold over
+	// an operand that decides nothing — is expr.Ret.Resolve's sawUnknown,
+	// which a scalar subquery and a container element no longer reach.
+	for _, tc := range []struct{ sql, want string }{
+		{"SELECT COALESCE(a, " + sub + ") AS c FROM " + ddrTable + " ORDER BY id",
+			"12.75,12.75,12.75,2.00,-0.01,3.00,12.75"},
+		{"SELECT GREATEST(a, " + sub + ") AS c FROM " + ddrTable + " ORDER BY id",
+			"12.75,12.75,12.75,3.00,3.00,3.00,12.75"},
+		{"SELECT LEAST(a, " + sub + ") AS c FROM " + ddrTable + " ORDER BY id",
+			"3.00,3.00,3.00,2.00,-0.01,3.00,3.00"},
 	} {
-		if _, err := db.Query(context.Background(), sql); err == nil {
-			t.Errorf("%s: answered — a DECIMAL fold over an operand with no declaration "+
-				"silently truncates it to the fold's scale", sql)
+		res := ddrQuery(t, db, tc.sql)
+		var got []string
+		for _, r := range res.Rows {
+			got = append(got, fmt.Sprintf("%v", r["c"]))
+		}
+		if strings.Join(got, ",") != tc.want {
+			t.Errorf("%s = %v, want %s (live PostgreSQL 17)", tc.sql, got, tc.want)
+		}
+		if m := res.ColumnMetas[0]; m.TypeID != parquet.TypeDecimal || m.Precision != 9 || m.Scale != 2 {
+			t.Errorf("%s declared %s(%d,%d), want numeric(9,2) — PostgreSQL's own", tc.sql, m.TypeID, m.Precision, m.Scale)
 		}
 	}
 
@@ -972,17 +985,22 @@ func TestDecimalChoiceFoldsOverAScalarSubquery(t *testing.T) {
 		})
 	}
 
-	// THE BOUNDARY, and it is reachable: a subquery whose OWN SELECT LIST is
-	// an undeclared producer — a container element — names no type at all, so
-	// the item declares STRING and the fold declines exactly as it does for
-	// the element itself. The declaration this commit adds is the SUBQUERY'S
-	// OWN PLAN's answer and nothing more.
+	// A subquery whose OWN SELECT LIST is a container element declares that
+	// element since arc CW (it was this test's boundary: an item that named no
+	// type), so the fold resolves over it — numeric(9,2) and PostgreSQL's
+	// values, measured live.
 	res := ddrQuery(t, db, "SELECT COALESCE(a, (SELECT element_at(arr, 2) FROM "+ddrTable+
 		" WHERE id = 1)) AS c FROM "+ddrTable+" ORDER BY id")
-	if m := res.ColumnMetas[0]; m.TypeID != parquet.TypeString {
+	var subVals []string
+	for _, r := range res.Rows {
+		subVals = append(subVals, fmt.Sprintf("%v", r["c"]))
+	}
+	if want := "12.75,12.75,12.75,2.00,-0.01,3.00,12.75"; strings.Join(subVals, ",") != want {
+		t.Errorf("COALESCE over a subquery selecting a container element = %v, want %s", subVals, want)
+	}
+	if m := res.ColumnMetas[0]; m.TypeID != parquet.TypeDecimal || m.Precision != 9 || m.Scale != 2 {
 		t.Errorf("COALESCE over a subquery that selects a container element declared %s(%d,%d), "+
-			"want STRING — its plan can name no type, so neither can the fold",
-			m.TypeID, m.Precision, m.Scale)
+			"want numeric(9,2)", m.TypeID, m.Precision, m.Scale)
 	}
 }
 
@@ -1049,12 +1067,17 @@ func TestNullifComparesByValueAgainstAnUndeclaredOperand(t *testing.T) {
 			m.TypeID, m.Precision, m.Scale)
 	}
 
-	// The BOUNDARY, unchanged: a CONTAINER ELEMENT still decides nothing, so
-	// the same projected call over one keeps its refusal.
-	if _, err := db.Query(context.Background(),
-		"SELECT NULLIF(a, element_at(arr, 2)) AS c FROM "+ddrTable); err == nil {
-		t.Error("a projected NULLIF over a container element answered; the fold must decline " +
-			"while the operand has no declaration")
+	// A CONTAINER ELEMENT declares since arc CW (it was this test's
+	// boundary), so the projected call over one compares BY VALUE under
+	// numeric(9,2): row 6's NULL a stays NULL and nothing equals 3.00 —
+	// PostgreSQL 17.11's answer, measured live.
+	res = ddrQuery(t, db, "SELECT NULLIF(a, element_at(arr, 2)) AS c FROM "+ddrTable+" ORDER BY id")
+	got = nil
+	for _, r := range res.Rows {
+		got = append(got, fmt.Sprintf("%v", r["c"]))
+	}
+	if want := "12.75,12.75,12.75,2.00,-0.01,<nil>,12.75"; strings.Join(got, ",") != want {
+		t.Errorf("projected NULLIF over a container element = %v, want %s", got, want)
 	}
 }
 

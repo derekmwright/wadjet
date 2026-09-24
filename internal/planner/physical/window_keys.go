@@ -28,6 +28,8 @@ import (
 // windowKey is one resolved PARTITION BY or window ORDER BY term.
 type windowKey struct {
 	Fields []parquet.Column
+	// ElementType is a materialized ARRAY/MAP key's element (arc CW).
+	ElementType *parquet.Column
 	// Name is what the operator reads off the batch: the input column for a
 	// bound reference, the synthetic __winkey_N for a materialized one.
 	Name string
@@ -177,7 +179,7 @@ func resolveWindowKeys(node *logical.Node) map[string]windowKey {
 			}
 			k.Name = fresh
 			if k.Field != nil {
-				k.Type, k.Precision, k.Scale, k.Fields = k.Field.Type, k.Field.Precision, k.Field.Scale, k.Field.Fields
+				k.Type, k.Precision, k.Scale, k.Fields, k.ElementType = k.Field.Type, k.Field.Precision, k.Field.Scale, k.Field.Fields, k.Field.ElementType
 			} else {
 				// The declaration is inferred from the expression RESPELLED
 				// through any derived-table or CTE rename between here and
@@ -211,7 +213,7 @@ func resolveWindowKeys(node *logical.Node) map[string]windowKey {
 				materialized := declTypeParts(
 					inferProjectionDeclType(typed, parquet.TypeString, strictInt,
 						withSubqueryDecls(ColDecls{Types: typeCols, Dec: typeDec}, node)))
-				k.Type, k.Precision, k.Scale, k.Fields = materialized.Type, materialized.Precision, materialized.Scale, materialized.Fields
+				k.Type, k.Precision, k.Scale, k.Fields, k.ElementType = materialized.Type, materialized.Precision, materialized.Scale, materialized.Fields, materialized.ElementType
 			}
 		}
 		out[term] = k
@@ -537,7 +539,7 @@ func windowKeySpecs(keys map[string]windowKey) []ProjectExprSpec {
 			Type:      k.Type,
 			TypeKnown: true,
 			Fields:    k.Fields, Precision: k.Precision,
-			Scale: k.Scale,
+			Scale: k.Scale, ElementType: k.ElementType,
 		})
 	}
 	sort.Slice(specs, func(i, j int) bool { return specs[i].Name < specs[j].Name })
@@ -580,9 +582,10 @@ func (p *Planner) windowKeyProjections(keys map[string]windowKey) ([]exec.Projec
 			Name:   k.Name,
 			Type:   k.Type,
 			Fields: k.Fields, Precision: k.Precision,
-			Scale:    k.Scale,
-			Expr:     wrapExpr(compiled),
-			Computed: true,
+			Scale:       k.Scale,
+			ElementType: k.ElementType,
+			Expr:        wrapExpr(compiled),
+			Computed:    true,
 		}
 		if ve, ok := compiled.(expr.VecExpr); ok {
 			pc.VecEval = ve.EvalVec
@@ -600,7 +603,7 @@ func (p *Planner) windowKeyProjections(keys map[string]windowKey) ([]exec.Projec
 		// does: a vectorized kernel over a container writes into a vector
 		// shape it does not have, and a NULL field has to stay NULL.
 		m := parquet.Column{Name: k.Name, Type: k.Type, Nullable: true,
-			Fields: k.Fields, Precision: k.Precision, Scale: k.Scale}
+			Fields: k.Fields, Precision: k.Precision, Scale: k.Scale, ElementType: k.ElementType}
 		if k.Field != nil {
 			m = *k.Field
 			m.Name, m.Nullable = k.Name, true

@@ -449,7 +449,7 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 		// A computed ARRAY carries its element declaration to the operator,
 		// and ARRAY(subquery) must have one: without it the array would go
 		// out as TEXT in a Go rendering (arc PC round 2, B4).
-		if outType == parquet.TypeArray && outDecl.Schema != nil && outDecl.Schema.ElementType != nil {
+		if (outType == parquet.TypeArray || outType == parquet.TypeMap) && outDecl.Schema != nil && outDecl.Schema.ElementType != nil {
 			elem := *outDecl.Schema.ElementType
 			pc.ElementType = &elem
 		}
