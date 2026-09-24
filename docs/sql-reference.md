@@ -3879,8 +3879,13 @@ when the seed is empty or the CTE is unused. The self-reference remains an
 open column scope while literal names are validated.
 
 The expression-position guarantee above concerns supported SELECT syntax.
-Expression-valued window frame bounds, named windows, LIMIT/OFFSET and
-INSERT expressions are rejected by the parser before this check. DML runs
+Expression-valued window frame bounds, named windows, and LIMIT/OFFSET
+expressions are rejected by the parser before this check. An `INSERT ...
+VALUES` cell IS an expression (#1252) but is not covered by this guarantee
+either: it is evaluated by a narrower, CONSTANT-only path (no row, no
+subquery environment) rather than walked by the general subquery-checking
+machinery this section describes — a subquery in a VALUES cell is refused
+outright (0A000), never silently unwalked. DML runs
 locally; UPDATE/DELETE predicates and UPDATE SET compile before rows, while
 a MERGE WHEN clause no row reaches — a MATCHED UPDATE's SET or a MATCHED
 `AND … DELETE` condition over an ON that matches nothing — can return `MERGE 0`
@@ -4151,6 +4156,25 @@ LIMIT 10
 | `TIMEZONE_MINUTE(epoch_ms)` | Extract timezone minute offset | `TIMEZONE_MINUTE(ts)` → `0` |
 | `AT_TIMEZONE(ts, tz)` | Convert timestamp to timezone | `AT_TIMEZONE(ts, 'America/New_York')` |
 | `HUMAN_READABLE_SECONDS(n)` | Format seconds as human string | `HUMAN_READABLE_SECONDS(3661)` → `'1 hour, 1 minute, 1 second'` |
+
+#### Declared types
+
+`NOW()`, `CURRENT_TIMESTAMP` and `LOCALTIMESTAMP` declare TIMESTAMP;
+`CURRENT_DATE` declares DATE (#1254 — it used to declare STRING, so an
+`INSERT ... SELECT CURRENT_DATE` into a DATE column was refused as a type
+mismatch though the rendered VALUE was already a date). This is the type a
+downstream context — an assignment, a comparison, a wire `RowDescription` —
+sees; it is not always the shape the function's own Go result takes (`NOW()`
+renders formatted text and still declares TIMESTAMP). `CURRENT_TIME` has no
+declaration at all: this engine has no TIME type among its 22, so the
+SQL-standard niladic spelling parses but the call itself is refused
+(`unknown function: current_time`) rather than declaring a value it cannot
+represent.
+
+A few other date/address functions still declare STRING where the value is
+not text — `TO_DATE`, `INT_TO_IP`, `NETWORK_ADDRESS`, `UUID()` — the same
+class of gap #1254 fixed for `CURRENT_DATE` alone; see
+docs/postgres-differences.md.
 
 #### TIME_BUCKET
 
@@ -4627,6 +4651,27 @@ the refusals carry PostgreSQL's classes:
 Column names are matched case-insensitively, as they are in `UPDATE ... SET`
 and in a `WHERE` clause.
 
+Each VALUES cell is a full scalar expression, not only a bare literal: a typed
+literal (`TIMESTAMP '2026-01-01 00:00:00'`), a function call (`now()`,
+`CURRENT_DATE`), a CAST, and arithmetic (`1 + 1`) all evaluate through the
+same expression compiler a `SELECT` list does, with no row to read from — so
+the expression must be a constant. It is coerced to the target column's
+declared type by PostgreSQL's own assignment rules (a text literal into
+DATE/TIMESTAMP/INTEGER/DECIMAL/IPv4/UUID parses through that type's own input
+function; an INTEGER into a wider numeric type widens):
+
+| Cell | SQLSTATE |
+|---|---|
+| `DEFAULT` | NULL — no column this catalog describes carries an explicit default, so PostgreSQL's own rule for one that has none applies uniformly |
+| a value whose type the column cannot take at all (`VALUES (TRUE)` into an INTEGER column) | 42804 `column "x" is of type ... but expression is of type ...` |
+| a bare column reference — VALUES has no FROM to resolve one against | 42703 `column "x" does not exist` |
+| a subquery — PostgreSQL accepts one here (a scalar subquery is a constant to it); this engine has no query environment at this seam | 0A000 |
+
+The subquery restriction is narrower than `MERGE`'s own `WHEN NOT MATCHED
+THEN INSERT ... VALUES`, which DOES accept one (see below): a plain
+top-level `INSERT ... VALUES` has no source row to build a query environment
+from, and `MERGE` does.
+
 ### DELETE
 
 ```sql
@@ -4799,7 +4844,11 @@ accepted and ignored and each statement commits on its own.
 
 ### Type Coercion
 
-Values in INSERT/UPDATE are automatically coerced to the target column type:
+Values in INSERT/UPDATE are automatically coerced to the target column type.
+The table below is the LITERAL grammar each type reads; an `INSERT ...
+VALUES` cell or an `UPDATE ... SET` right-hand side may also be a computed
+expression — a CAST, arithmetic, a function call — evaluated first and then
+coerced by the same rule (see [INSERT](#insert)).
 
 | Column Type | Accepted Formats |
 |---|---|
@@ -4816,9 +4865,12 @@ Values in INSERT/UPDATE are automatically coerced to the target column type:
 | BYTES | Quoted: `'raw'` |
 | IPV4, IPV6, MAC, CIDR, UUID | Quoted literal in the type's text form: `'10.0.0.1'`, `'aa:bb:cc:dd:ee:ff'` |
 
-ARRAY, ROW, MAP and VECTOR columns cannot be written with `INSERT ... VALUES`:
-the value parser accepts a single literal token per value, not a composite
-expression.
+An `ARRAY[...]` constructor now writes into an ARRAY column with `INSERT ...
+VALUES` (#1252: a VALUES cell is a full expression, and `ARRAY[...]` is one).
+ROW, MAP and VECTOR still cannot be: not a VALUES restriction any more, but
+because the engine has no literal or CAST syntax that PRODUCES a ROW, a MAP,
+or a VECTOR value from a scalar expression at all — the same gap a `SELECT`
+list has.
 
 ### Errors
 
