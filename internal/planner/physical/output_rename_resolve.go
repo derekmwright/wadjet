@@ -68,7 +68,12 @@ func resolveRenameSource(name string, child *logical.Node, forGather bool) strin
 			// to its rename-only fallback, and the client saw the join's
 			// full upstream width under source names instead of `k` (#467).
 			bare := derivedScopeBareName(resolved, n)
-			if proj := projectionForName(n.Projections, resolved, bare); proj != nil {
+			proj := projectionForName(n.Projections, resolved, bare)
+			lateralItem := false
+			if proj == nil && n.LateralSubtree {
+				proj, lateralItem = lateralUnaliasedItem(n, bare), true
+			}
+			if proj != nil {
 				if proj.IsAgg || proj.Column == "" {
 					// A computed alias over an AGGREGATE is the exception,
 					// and only for the GATHER's rename: the aggregate stage
@@ -98,6 +103,11 @@ func resolveRenameSource(name string, child *logical.Node, forGather bool) strin
 				next := proj.Column
 				if proj.Expr != "" {
 					next = strings.ToLower(proj.Expr)
+				}
+				if lateralItem && !strings.Contains(next, ".") {
+					if q := soleRelationAlias(n.Children); q != "" {
+						next = q + "." + next
+					}
 				}
 				if strings.EqualFold(next, resolved) {
 					return resolved // self-rename, nothing to chase
@@ -145,6 +155,59 @@ func resolveRenameSource(name string, child *logical.Node, forGather bool) strin
 		break
 	}
 	return resolved
+}
+
+// lateralUnaliasedItem is the UNALIASED column item of a decorrelated
+// LATERAL body that publishes bare — `i.id` publishes `id` — or nil when
+// there is none or more than one.
+//
+// A LATERAL's arm is never materialized onto a stage of its own on the stage
+// DAG (a dependent join, ADR-0026 §3c), so the join receives the body's RAW
+// stream and qualifies the build's duplicate columns by the SCAN's alias. A
+// reference the enclosing query qualifies by the lateral's own name (`s.id`)
+// must therefore be resolved to the item's source column: projectionForName
+// finds only an ALIASED item, so an unaliased one stayed spelled `s.id`,
+// matched neither `i.id` nor `id`, and the resolver's qualifier strip bound
+// the OUTER relation's `id` — every LATERAL body publishing a name the outer
+// side also publishes read the outer value on the DAG, whatever its key (arc
+// JP round 2; `SELECT i.id AS id` answered right). An item written without a
+// qualifier (`SELECT k, v FROM lt_i i`) is the one relation's column and is
+// qualified here (the caller) the way `i.k` already is.
+func lateralUnaliasedItem(n *logical.Node, bare string) *logical.Projection {
+	if bare == "" {
+		return nil
+	}
+	var hit *logical.Projection
+	for i := range n.Projections {
+		pr := &n.Projections[i]
+		if pr.Alias != "" || pr.IsAgg || pr.SlotSource != "" || !strings.EqualFold(pr.Column, bare) {
+			continue
+		}
+		if _, isRef := pr.ASTExpr.(*plansql.ColRef); !isRef {
+			continue
+		}
+		if hit != nil {
+			return nil // two items of one name: PostgreSQL's ambiguous reference
+		}
+		hit = pr
+	}
+	return hit
+}
+
+// soleRelationAlias is the one relation a Project's input holds, by the name
+// its columns are qualified with, or "" when it holds none or several.
+func soleRelationAlias(children []*logical.Node) string {
+	if len(children) != 1 {
+		return ""
+	}
+	cols := subtreeNamingOf(children[0]).AliasCols
+	if len(cols) != 1 {
+		return ""
+	}
+	for alias := range cols {
+		return alias
+	}
+	return ""
 }
 
 // ownedJoinArm returns the join arm whose subtree answers to a QUALIFIED
