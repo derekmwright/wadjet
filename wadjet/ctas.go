@@ -228,6 +228,7 @@ func checkInsertSelectShape(declared []parquet.Column, cols []parquet.Column, ex
 			if unknownLit[i] == ntUnknownNull {
 				continue
 			}
+			// ntUnknownText and ntTypedText: the target's input function.
 			if err := ingest.AssignableFromUnknownLiteral(cols[i]); err != nil {
 				return err
 			}
@@ -281,6 +282,8 @@ func unknownTypedSelectItems(q *plansql.ParsedQuery, n int) []ntUnknownKind {
 			out[i] = ntUnknownText
 		case ok && lit.Kind == plansql.LitNull:
 			out[i] = ntUnknownNull
+		case dmlTypedTextSource(e):
+			out[i] = ntTypedText
 		}
 	}
 	return out
@@ -295,6 +298,11 @@ const (
 	ntNotUnknown ntUnknownKind = iota
 	ntUnknownText
 	ntUnknownNull
+	// ntTypedText: a call the registry declares TEXT for a network or UUID
+	// value (expr.DeclaresTextForTypedValue) — read by the target's input
+	// function exactly as an unknown-typed literal is, the rule the VALUES,
+	// SET and MERGE doors apply to the same call (dmlAssignmentCheck).
+	ntTypedText
 )
 
 // resultRows reads a result POSITIONALLY, one row at a time, converting each
@@ -602,7 +610,7 @@ func assignQueryCells(row []any, declared, target []parquet.Column,
 		// COPY, UPDATE and ingester doors was 22P02 (review NT round 2, P).
 		// A value from a COLUMN keeps the assignment cast, which is what
 		// rounds a DECIMAL into an integer as PostgreSQL's numeric→int does.
-		if j < len(unknownLit) && unknownLit[j] == ntUnknownText {
+		if j < len(unknownLit) && (unknownLit[j] == ntUnknownText || unknownLit[j] == ntTypedText) {
 			v, err := assignUnknownLiteral(row[j], target[j])
 			if err != nil {
 				return nil, fmt.Errorf("column %q: %w", target[j].Name, err)

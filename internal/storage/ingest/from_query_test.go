@@ -152,16 +152,28 @@ func TestAssignableToColumn(t *testing.T) {
 		{"FloatIntoDecimal", fqCol("a", parquet.TypeFloat64), dec123, true},
 		{"IntIntoPort", fqCol("a", parquet.TypeInt64), fqCol("b", parquet.TypePort), true},
 
-		// The refusals: a pair outside the numeric family, where an assignment
-		// would have to invent a meaning the converter does not have.
-		// PostgreSQL assignment-casts some of them (bigint into text); this
-		// engine answers 42804 with its hint, which is ADR-0012's recorded
-		// divergence.
-		{"IntIntoString", fqCol("a", parquet.TypeInt64), fqCol("b", parquet.TypeString), false},
+		// PostgreSQL's assignment casts into TEXT and across DATE/TIMESTAMP
+		// (arc VL round 3). These two were pinned as ADR-0012's recorded
+		// divergence (42804 here) and now agree with PostgreSQL.
+		{"IntIntoString", fqCol("a", parquet.TypeInt64), fqCol("b", parquet.TypeString), true},
+		{"IPv4IntoString", fqCol("a", parquet.TypeIPv4), fqCol("b", parquet.TypeString), true},
+		{"BoolIntoString", fqCol("a", parquet.TypeBool), fqCol("b", parquet.TypeString), true},
+		{"UUIDIntoString", fqCol("a", parquet.TypeUUID), fqCol("b", parquet.TypeString), true},
+		{"DateIntoTimestamp", fqCol("a", parquet.TypeDate), fqCol("b", parquet.TypeTimestamp), true},
+		{"TimestampIntoDate", fqCol("a", parquet.TypeTimestamp), fqCol("b", parquet.TypeDate), true},
+
+		// The refusals: PostgreSQL has no assignment cast for these pairs.
 		{"StringIntoInt", fqCol("a", parquet.TypeString), fqCol("b", parquet.TypeInt64), false},
+		{"StringIntoDate", fqCol("a", parquet.TypeString), fqCol("b", parquet.TypeDate), false},
+		{"StringIntoUUID", fqCol("a", parquet.TypeString), fqCol("b", parquet.TypeUUID), false},
 		{"BoolIntoInt", fqCol("a", parquet.TypeBool), fqCol("b", parquet.TypeInt64), false},
+		{"IntIntoBool", fqCol("a", parquet.TypeInt64), fqCol("b", parquet.TypeBool), false},
+		{"IntIntoDate", fqCol("a", parquet.TypeInt32), fqCol("b", parquet.TypeDate), false},
 		{"TimestampIntoInt", fqCol("a", parquet.TypeTimestamp), fqCol("b", parquet.TypeInt64), false},
-		{"IPv4IntoString", fqCol("a", parquet.TypeIPv4), fqCol("b", parquet.TypeString), false},
+		{"IntIntoIPv4", fqCol("a", parquet.TypeInt64), fqCol("b", parquet.TypeIPv4), false},
+		// BYTES into TEXT is an assignment cast in PostgreSQL (its \x text);
+		// this engine refuses it — the refusing direction, ADR-0012.
+		{"BytesIntoString", fqCol("a", parquet.TypeBytes), fqCol("b", parquet.TypeString), false},
 		{"RowFieldNameDiffers", row1, row2, false},
 		{"VectorWidthDiffers",
 			parquet.Column{Name: "v", Type: parquet.TypeVector, Dimension: 4},

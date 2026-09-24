@@ -152,7 +152,13 @@ func TestMergeRefusesAValueTheTargetCannotHold(t *testing.T) {
 		{name: "literal past the precision", set: "d = 99999999999999999999.99", state: "22003"},
 		{name: "quoted text naming no number", set: "d = 'abc'", state: "22P02"},
 		{name: "quoted NaN", set: "d = 'NaN'", state: "22003"},
-		{name: "source column past the precision", set: "d = s.v", state: "22003"},
+		// A NUMERIC source column past the target's precision: 22003, as on
+		// PostgreSQL 17.11 (measured).
+		{name: "source column past the precision", set: "d = s.w", state: "22003"},
+		// A TEXT source column has no assignment cast into numeric: 42804 on
+		// PostgreSQL (measured). It answered 22003 here, reading the text as
+		// a number, until arc VL round 3 put every door on one table.
+		{name: "text source column", set: "d = s.v", state: "42804"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -171,13 +177,14 @@ func TestMergeRefusesAValueTheTargetCannotHold(t *testing.T) {
 			if err := db.CreateTable(ctx, "s", parquet.Schema{Columns: []parquet.Column{
 				{Name: "id", Type: parquet.TypeInt64},
 				{Name: "v", Type: parquet.TypeString, Nullable: true},
+				{Name: "w", Type: parquet.TypeDecimal, Precision: 22, Scale: 2, Nullable: true},
 			}}, nil); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := db.Execute(ctx, "INSERT INTO u (id, d) VALUES (1, 1.50)"); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := db.Execute(ctx, "INSERT INTO s (id, v) VALUES (1, '99999999999999999999.99')"); err != nil {
+			if _, err := db.Execute(ctx, "INSERT INTO s (id, v, w) VALUES (1, '99999999999999999999.99', 99999999999999999999.99)"); err != nil {
 				t.Fatal(err)
 			}
 

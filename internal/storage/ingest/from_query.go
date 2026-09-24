@@ -326,21 +326,27 @@ func reclaimPendingObjects(ctx context.Context, cat *catalog.Catalog, pending []
 //     22003;
 //   - an integer into FLOAT32, FLOAT64 or DECIMAL, and a float into a float.
 //
-// A DATE or TIMESTAMP source is the fourth pair, and it DOES need a
-// conversion — assignQueryCells's own assignEvaluatedValue call, the same
-// converter VALUES and SET already route every cell through (round-2 review
-// B2): PostgreSQL 17.11 answers `INSERT INTO t (s text) SELECT CURRENT_DATE`
-// with the rendered date and `INSERT INTO t (ts timestamp) SELECT
-// CURRENT_DATE` with that date's midnight — an assignment I/O cast to text,
-// and a DATE↔TIMESTAMP cross, not a refusal. Refusing it here was itself a
-// REGRESSION: #1254 moved CURRENT_DATE's declaration from STRING to DATE, so
-// a `SELECT CURRENT_DATE` that used to satisfy sameDeclaredType(STRING,
-// STRING) started reaching this refusal for a value that had always rendered
-// correctly.
+// Beside those, the pairs PostgreSQL's ASSIGNMENT casts cover and this
+// engine's converter (assignEvaluatedValue) renders or converts exactly
+// (assignmentCast):
 //
-// Everything else is 42804 carrying PostgreSQL's message and its hint, so the
-// statement's answer is "write the CAST" rather than a number nobody can
-// audit. The difference is in ADR-0012's divergence list.
+//   - every scalar into TEXT — a number, a boolean, a date, a timestamp, an
+//     address, a UUID — rendered as PostgreSQL's I/O cast renders it
+//     (`10.0.0.1/32` for an inet host, `true`, `1e+20`);
+//   - a DATE into a TIMESTAMP (its midnight) and a TIMESTAMP into a DATE (its
+//     calendar day).
+//
+// Everything else is 42804 carrying PostgreSQL's message and its hint — TEXT
+// into a number, a date or an address among them: PostgreSQL has no
+// assignment cast from text, and a quoted LITERAL, which it does type from
+// the target, is AssignableFromUnknownLiteral's question, not this one.
+//
+// This is the ONE table (arc VL round 3): INSERT … SELECT asks it per column
+// from the plan's declared output, and INSERT … VALUES, UPDATE … SET and
+// MERGE ask it per cell or clause from the expression's declared type before
+// a row is read — so one source × target pair answers one way on every door.
+// The pairs this engine still refuses where PostgreSQL assigns (BYTES, the
+// containers and DURATION into TEXT) are in ADR-0012's divergence list.
 func AssignableToColumn(from, to parquet.Column) error {
 	if sameDeclaredType(from, to) {
 		return nil
@@ -348,7 +354,7 @@ func AssignableToColumn(from, to parquet.Column) error {
 	if numericDeclaration(from.Type) && numericDeclaration(to.Type) {
 		return nil
 	}
-	if temporalAssignmentCast(from.Type, to.Type) {
+	if assignmentCast(from.Type, to.Type) {
 		return nil
 	}
 	return sqlerr.New("42804",
@@ -357,21 +363,21 @@ func AssignableToColumn(from, to parquet.Column) error {
 		to.Name, declaredTypeText(to), declaredTypeText(from))
 }
 
-// temporalAssignmentCast is AssignableToColumn's DATE/TIMESTAMP pair: a DATE
-// or TIMESTAMP source assigns into TEXT (PostgreSQL's I/O-cast rendering) and
-// into the OTHER temporal type (DATE's midnight for a TIMESTAMP target,
-// TIMESTAMP truncated to its calendar day for a DATE target). The
-// same-type case (DATE into DATE, TIMESTAMP into TIMESTAMP) is already
-// covered by sameDeclaredType and is not repeated here.
-func temporalAssignmentCast(from, to parquet.TypeID) bool {
-	switch from {
-	case parquet.TypeDate, parquet.TypeTimestamp:
-	default:
-		return false
-	}
+// assignmentCast is AssignableToColumn's cross-family pairs: a scalar into
+// TEXT, and the DATE↔TIMESTAMP cross. The same-type and numeric-family cases
+// are the caller's and are not repeated here.
+func assignmentCast(from, to parquet.TypeID) bool {
 	switch to {
-	case parquet.TypeString, parquet.TypeDate, parquet.TypeTimestamp:
-		return true
+	case parquet.TypeString:
+		switch from {
+		case parquet.TypeInt32, parquet.TypeInt64, parquet.TypePort, parquet.TypeProtocol,
+			parquet.TypeFloat32, parquet.TypeFloat64, parquet.TypeDecimal,
+			parquet.TypeBool, parquet.TypeDate, parquet.TypeTimestamp,
+			parquet.TypeIPv4, parquet.TypeIPv6, parquet.TypeCIDR, parquet.TypeMAC, parquet.TypeUUID:
+			return true
+		}
+	case parquet.TypeDate, parquet.TypeTimestamp:
+		return from == parquet.TypeDate || from == parquet.TypeTimestamp
 	}
 	return false
 }
