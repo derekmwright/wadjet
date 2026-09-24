@@ -172,7 +172,16 @@ func routedColumnMetas(res queryroute.Result) []wadjet.ColumnMeta {
 	unconstrained := res.WireUnconstrainedDecimal()
 	stringLength := res.StringLength()
 	for i, name := range columns {
-		col, ok := byName[name]
+		// The POSITION first where the schema carries this column's name
+		// there, for the reason nestedColumnFor gives: two output columns of
+		// one name declared the LAST one's OID for both (arc CW round 2, B2).
+		var col parquet.Column
+		ok := false
+		if i < len(schema) && schema[i].Name == name {
+			col, ok = schema[i], true
+		} else {
+			col, ok = byName[name]
+		}
 		if !ok {
 			// Positional fallback: a renamed output column (the gather's
 			// renamer) keeps its position but not its name.

@@ -2986,6 +2986,18 @@ func nestedColumnFor(nestedSchema *nestedFieldSchema, name string, pos int) *par
 	if nestedSchema == nil {
 		return nil
 	}
+	// The POSITION first, where the ordered schema carries this column's own
+	// name there: a name is not an identity (ADR-0026), and two output
+	// columns of one name — `max(ats), max(ad)`, the default naming of an
+	// ordinary query — resolved to the LAST one's declaration, so a
+	// timestamp[] rendered under the date[] column's element as epoch
+	// milliseconds, and a binary client read a wrong date (arc CW round 2,
+	// B2). The name lookup stays for the renamed column the gather's renamer
+	// publishes and for the legacy catalog map, which has no order.
+	if nestedSchema.ordered != nil && pos >= 0 && pos < len(nestedSchema.ordered) && nestedSchema.ordered[pos].Name == name {
+		col := nestedSchema.ordered[pos]
+		return &col
+	}
 	if col, ok := nestedSchema.byName[name]; ok {
 		return &col
 	}
