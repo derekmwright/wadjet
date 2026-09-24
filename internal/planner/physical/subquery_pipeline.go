@@ -68,22 +68,10 @@ func (p *Planner) forSubquery() *Planner {
 	return &sub
 }
 
-// buildSubqueryPipeline parses, plans, and builds (but does not run) the
-// physical pipeline for a SQL subquery, merging the enclosing WITH clause's
-// CTEs so the subquery can reference them. Shared by executeSubquery (boxed
-// results) and materializeCTEColumnar (columnar collection).
-// subqueryDeclOption is the expr.CompileOption that lets a compiled scalar
-// subquery carry its OUTPUT DECLARATION, so a comparison against it is made at
-// the type the subquery answers rather than by the bytes of the box (#696).
-//
-// It plans the subquery's SQL — parse, logical build, annotate — and reads
-// declaredOutputSchema, the same walk the top-level statement's own output
-// schema comes from. No execution: the question is the TYPE, and the value is
-// resolved once at evaluation as it always was. A subquery that does not
-// resolve to exactly one column answers ok=false and the comparison keeps the
-// boxed rules it had.
-//
-// The cost is one logical build per compiled scalar subquery, at plan time.
+// subqueryDeclOption plans a scalar subquery without executing it and reads
+// its single output declaration. The compiler uses that type for comparisons.
+// An output that cannot be described as exactly one column returns ok=false
+// and leaves the existing boxed comparison behavior. See ADR-0021.
 func (p *Planner) subqueryDeclOption() expr.CompileOption {
 	env := expr.WithSubqueryEnv(func(sql string) (parquet.TypeID, int, int, bool) {
 		cols, ok := p.SubqueryOutputColumn(sql)

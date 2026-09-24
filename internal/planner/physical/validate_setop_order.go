@@ -12,32 +12,11 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// refuseSetOpOrderBy holds a set operation's OWN ORDER BY to PostgreSQL's
-// rule: a term is a RESULT COLUMN NAME or an ORDINAL and nothing else (#1236).
-//
-// The result of `a UNION b` has no FROM clause. PostgreSQL resolves each term
-// first as an output name or position (findTargetlistEntrySQL92) and otherwise
-// transforms it against a scope holding only the result columns, so, measured
-// on 17.11, term by term in the order written:
-//
-//	ORDER BY zz.id / lat_ord.id / b.id   42P01 missing FROM-clause entry for table "zz"
-//	ORDER BY nosuch, ORDER BY "ID"       42703 column "nosuch" does not exist
-//	ORDER BY id + 1, -id, SUM(id)        0A000 invalid UNION/INTERSECT/EXCEPT ORDER BY clause
-//	ORDER BY id = true / id = 'x'        42883 / 22P02 — the transform's error first
-//	ORDER BY id, 1, "V" for AS "V"       answered
-//
-// One qualified spelling is KEPT beyond PostgreSQL: a qualifier naming the
-// FIRST arm's selected `q.col` (setOpResult.qualified). Every other qualifier
-// is refused — an arm's FROM is out of scope above the operation. Before this,
-// validateBlock returned from its set-operation branch before any clause
-// check ran, the qualifier was dropped, and `… UNION ALL … ORDER BY zz.id`
-// answered every row sorted by `id`; the expression and unknown-name terms
-// failed in the executor with an internal "sort: key column … does not exist".
-//
-// The output names are the FIRST arm's, which is PostgreSQL's naming rule for
-// a set operation. When they cannot be enumerated (a star over a source this
-// binder cannot read) only the qualifier rule is applied — it asks nothing of
-// the names — and everything else is left to the pipeline, as before.
+// refuseSetOpOrderBy accepts exact output names, ordinals and the recorded
+// first-arm selected qualified-column extension. Other qualifiers raise
+// 42P01, unknown output names 42703, and expressions their transform error
+// or 0A000. Output names come from the first arm; an unenumerable output
+// permits only qualifier checking here. See ADR-0012 §5, #1236.
 func (b *binder) refuseSetOpOrderBy(ctx context.Context, info *plansql.SelectInfo) error {
 	if info == nil || info.Union == nil || len(info.OrderBy) == 0 {
 		return nil

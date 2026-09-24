@@ -11,29 +11,10 @@ import (
 	"time"
 )
 
-// A BODY EVALUATED PER OUTER ROW READS THE VALUE THE POLICY PUBLISHES, ON
-// EVERY DOOR — arc LT, the masking gate COMMON names for a rewrite that
-// re-runs, rewrites or partitions over a relation.
-//
-// Arc LT applies a correlated LATERAL's bound per outer row through a window
-// the PLANNER mints — `ROW_NUMBER() OVER (PARTITION BY <the inner correlation
-// column> ORDER BY <the body's own ORDER BY>)` — declines the EXISTS rewrite
-// to the per-row rerun for a body it does not reproduce, and REFUSES a body
-// with no equality key. Each of those touches a policed relation in a way the
-// row-level census does not: the minted window partitions on the correlation
-// column, and over `e7bal` — whose masked `bal` has singleton equivalence
-// classes under its STORED values — a partition bound to the stored column is
-// arithmetic on the value the policy hides (the disclosure arc L1 round 2
-// measured on four doors, ADR-0021 §1q). So every cell here is asserted
-// against the MASK's answer on all nine doors, every rendered cell is checked
-// against every stored policed value, and the count of (cell, door) pairs
-// that answered is asserted so the gate cannot pass by refusing everywhere.
-//
-// `TestArcL1ABoundedLateralReadsThePublishedValue` beside this one holds the
-// INNER `ORDER BY c.id LIMIT 2` / `OFFSET 6` spellings and the user-written
-// window; this table is the rest of the seam: LEFT, comma, grouped, two
-// bounds, the enclosing WHERE, EXISTS with the bound the rewrite now declines,
-// and the refusals — which must refuse without a stored value in their text.
+// These LT cells check published values through per-key ranking and
+// per-outer-row execution on nine statement paths. Matching controls and
+// row-count assertions distinguish projected from stored values. Unsupported
+// bodies retain their refusal. See ADR-0021 §1s and #1297.
 func TestArcLTAPerOuterRowBodyReadsThePublishedValueOnEveryDoor(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: this gate stands up all nine policy doors")

@@ -2076,11 +2076,11 @@ func getOutputColNames(info *plansql.SelectInfo) []string {
 	return names
 }
 
-// buildLateralSubquery decorrelates a LATERAL subquery join by:
-// 1. Collecting left-side table aliases
-// 2. Parsing the subquery and splitting WHERE into correlated vs local predicates
-// 3. Building the inner plan with only local predicates
-// 4. Returning the inner plan and the combined join condition
+// buildLateralSubquery lowers a LATERAL body into its inner plan and join
+// condition. It preserves equality-keyed bounds per outer row, publishes
+// columns needed by lifted predicates, and refuses unsupported outer-reference
+// positions. FROM-less correlated bodies follow their projection rule.
+// See ADR-0021 §1n and §1s.
 func buildLateralSubquery(outer *plansql.SelectInfo, left *Node, join plansql.JoinInfo, ctes []plansql.CTEDef) (*Node, string, lateralEmptyInput, []string, []string, error) {
 	// Collect left-side table aliases to detect correlated references
 	leftAliases := collectLogicalAliases(left)

@@ -2183,25 +2183,10 @@ func (p *selectParser) finishComparison(left Node, op string) (Node, error) {
 	return &CmpExpr{Left: left, Op: op, Right: right}, nil
 }
 
-// parseBitwise is PostgreSQL's "any other operator" precedence band: LOOSER
-// than `+` and `-`, TIGHTER than BETWEEN / IN / LIKE and every comparison,
-// and LEFT associative. Measured on 17.11:
-//
-//	1 + 2 # 3   →  (1 + 2) # 3   = 0
-//	2 * 3 # 1   →  (2 * 3) # 1   = 7
-//	1 | 2 # 3   →  (1 | 2) # 3   = 0      (one band, left to right)
-//	5 # 3 = 6   →  (5 # 3) = 6   = t
-//	5 # 3 BETWEEN 6 AND 6        = t
-//
-// `#` is PostgreSQL's INTEGER XOR — `^` is exponentiation there and is
-// already parsed as `power()` (#1155) — and it was unlexed entirely, so
-// `SELECT 5 # 3` was `unexpected character: #` for a statement the server
-// answers 6 (#1179).
-//
-// It lowers to the `bitwise_xor(a, b)` call rather than to a second kernel of
-// its own: that body reads its operands EXACTLY (bitwise_exact.go, #1031) and
-// answers int64 for both int4 and int8 operands, which is the family's
-// recorded widening (ADR-0012) and not a new one.
+// parseBitwise parses PostgreSQL's other-operator band, left associative,
+// below addition and above BETWEEN, IN, LIKE and comparisons. The # operator
+// lowers to bitwise_xor; expression result-width rules retain integer for
+// int4 operands and bigint when an operand is bigint. See ADR-0012 §5/#1179.
 func (p *selectParser) parseBitwise() (Node, error) {
 	left, err := p.parseAddition()
 	if err != nil {

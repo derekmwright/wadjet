@@ -17,31 +17,11 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// recursiveIterationLimit is the LOUD bound on a recursive CTE's fixed point.
-//
-// PostgreSQL has no such limit: it iterates until the recursive term yields no
-// rows, and a recursion that never stops runs until statement_timeout or
-// temp_file_limit ends it (measured on 17.11: `WITH RECURSIVE r(n) AS (SELECT 1
-// UNION ALL SELECT n+1 FROM r) SELECT count(*) FROM r` is 53400 after 4.9 s
-// under a 256 MB temp_file_limit). This engine iterates to the fixed point the
-// same way, and three things end a recursion that has none, each with an
-// error and never with the rows produced so far (#1246):
-//
-//   - a cancelled statement (statement_timeout, CancelRequest) between
-//     iterations;
-//   - one iteration's rows exceeding the memory budget (53200) — the working
-//     table is held in memory, so a recursion whose rows GROW is stopped by
-//     the budget;
-//   - this many iterations (54000). The closure spills past the budget like any
-//     other materialization, so a recursion whose rows do NOT grow — `SELECT
-//     n+1 FROM r` with no WHERE — is bounded by nothing else, and without a
-//     bound it would run until the disk filled.
-//
-// The number is measured, not chosen for comfort: an iteration costs tens of
-// microseconds, so this is the order of seconds of work before the refusal, and
-// it is two orders of magnitude above any date series or hierarchy depth an
-// application writes. The old limit was 1000 and it was SILENT: it returned
-// the partial closure as if it were the answer.
+// recursiveIterationLimit bounds fixed-point iteration at 1,000,000 steps.
+// A still-producing term raises 54000; an oversized working table raises
+// 53200; cancellation is checked between iterations. Each replaces the answer
+// with an error. The closure spills, but the current working table must fit
+// the budget. See ADR-0021 §1o-b for the measured choice of both bounds.
 const recursiveIterationLimit = 1_000_000
 
 // iterateRecursiveCTE runs `anchor UNION ALL recursive-term` to its fixed

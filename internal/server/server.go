@@ -1045,15 +1045,11 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
 }
 
-// writeSQLError is the shared HTTP SQLSTATE mapping via sqlerr.StateOf
-// (#647, #848); classified errors carry err.Error() verbatim, matching pgwire.
-// 42501 always maps to 403. For other states, promote only caller-chosen 5xx
-// for classes 0A/22/23/42 to 400; retain resource statuses such as 404/409.
-// Unmapped classes (including XX/58) retain caller status.
-// Unclassified request/errors keep writeError and the contextual msg prefix.
-// Route query/DML/EXPLAIN/DDL statement refusals here; docs/api-reference.md
-// must agree with this one class-to-status rule.
-// See docs/internals/server-http-sql-error-class.md for the design.
+// writeSQLError maps classified SQL errors to HTTP status and the shared
+// sqlerr.Sentence text. 42501 maps to 403; classes 0A/22/23/42 promote a
+// caller-selected 5xx to 400 while preserving statuses such as 404/409.
+// Unclassified errors retain writeError and the contextual prefix.
+// See docs/internals/server-http-sql-error-class.md.
 func writeSQLError(w http.ResponseWriter, status int, msg string, err error) {
 	state := sqlerr.StateOf(err)
 	if state == "" {

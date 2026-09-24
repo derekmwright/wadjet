@@ -16,13 +16,10 @@ import (
 // recordBatch type alias for convenience
 type recordBatch = batch.RecordBatch
 
-// buildFilterOp compiles one predicate into a filter operator. It returns an
-// error only for a predicate naming a function that does not exist: every other
-// compile failure falls through to the raw-string and column-compare paths
-// below, which is what makes those fallbacks useful. An unknown function has
-// nothing to fall through TO — the string parser would not recognize it either,
-// so the predicate would quietly become nil and the filter would vanish,
-// admitting every row (#341).
+// buildFilterOp compiles a predicate with the statement scope, catalog and
+// subquery options. A classified compile refusal is returned unchanged;
+// other compile failures may use the vectorized or raw-expression fallbacks.
+// A refusal must never become an omitted filter (ADR-0021).
 func (p *Planner) buildFilterOp(pred logical.Predicate, outerTables map[string]bool, outerCols map[string]string) (exec.UnaryOperator, error) {
 	// Try to compile from AST expression first (full expression engine)
 	if pred.ASTExpr != nil {

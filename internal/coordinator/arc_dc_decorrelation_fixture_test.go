@@ -6,30 +6,10 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// The ARC DC fixture: four relations built so that WHERE a subquery's outer
-// reference sits decides the answer.
-//
-// It rides in tmdTables() for the reason every fixture there does — only the
-// arc-DC gate names these tables, and no type-matrix corpus entry does. Neither
-// the type matrix nor the LATERAL fixture can stand in for it:
-//
-//   - lat_ord/lat_item have no NULL anywhere, so no cell over them can say what
-//     a NULL outer key, a NULL inner key or NOT IN's three-valued answer does.
-//     dc_out.id and dc_nul.k supply both, on the probe side and on the build
-//     side, with dc_in kept NULL-free so the NOT IN cells over it are not all
-//     UNKNOWN;
-//   - dc_in holds k=1 TWICE with DIFFERENT amounts, so a residual over the
-//     payload keeps one of the two and drops the other — a build side that
-//     deduplicates its key answers differently;
-//   - dc_in holds a key (5) the join partner dc_side does not, which is what
-//     makes an inner JOIN inside the body drop a row and a LEFT JOIN pad one —
-//     the difference an outer reference written in the ON changes.
-//
-// dc_out.total and dc_in.amt are chosen so an OUTER-ONLY condition (o.total >
-// 100) selects a DIFFERENT set of outer rows from any inner condition, and so
-// that stripping its qualifier — reading `total > 100` against the inner
-// relation, which has no `total` — cannot silently coincide with the right
-// answer.
+// The DC fixture separates outer-only predicates from inner predicates.
+// NULL keys occur on both sides; dc_in repeats key 1 with different amounts
+// and has key 5 absent from dc_side. These distinguish residual filtering,
+// NOT IN null handling and outer-join padding (ADR-0021 §1r).
 const (
 	dcOutTable  = "dc_out"
 	dcInTable   = "dc_in"

@@ -16,34 +16,11 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// ARC RC: A RECURSIVE CTE ANSWERS ITS WHOLE CLOSURE OR FAILS.
-//
-// Every cell's answer was measured on PostgreSQL 17.11 over the same two
-// tables (lat_ord: ids 1..3; lat_item: four items) before the code changed,
-// and each runs on the unbudgeted engine AND at a 512 KiB budget, which is
-// where the closure spills. The families, and what the base answered:
-//
-//   - DEPTH (#1246). A 1000-iteration cap ended the fixed point and returned
-//     the partial closure: 5000 → 1001 rows. There is no cap now; a recursion
-//     that never stops ends in 54000 at the iteration limit, and a cancelled
-//     statement ends between iterations.
-//   - ERRORS (#1041). An error in the recursive term was discarded and the
-//     rows so far were the answer: a division by zero on the third step
-//     answered 1, 2, 3.
-//   - TYPES. The CTE's schema was guessed from the Go values of the seed's
-//     first row: a DATE was text, so a date series added 1 to a string; a
-//     text '1' became bigint; a zero-row seed declared text; a NULL seed made
-//     COUNT(*) zero; `n + 0.5` was truncated back into an integer and recursed
-//     without end. PostgreSQL's rule is that the non-recursive term decides.
-//   - NAMES (#1074, #1193). A name only the recursive term spells answered
-//     NULLs where PostgreSQL raises 42703; a non-recursive sibling in a WITH
-//     RECURSIVE list published its expression text for `?column?`.
-//   - REFERENCES. Two references to one recursive CTE in a join answered zero
-//     rows, because both arms answered to the CTE's name.
-//   - SHAPES. The recursive terms PostgreSQL refuses with 42P19 — an
-//     aggregate, a self-reference in a subquery expression, on the nullable
-//     side of an outer join, or twice — iterated here, several of them
-//     without end.
+// These RC cells require the complete closure or a statement error.
+// They compare depth, seed types, iteration errors and refused recursive
+// forms on single-process and limited-memory paths with PostgreSQL 17.11.
+// The iteration and working-table limits must fail without a partial result.
+// See ADR-0021 §1o-b.
 func TestArcRCRecursiveCTEAnswersItsWholeClosureOrFails(t *testing.T) {
 	type cell struct {
 		name, sql string

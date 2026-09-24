@@ -10,36 +10,11 @@ import (
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
-// recordScanner reads the records of ONE file in PostgreSQL's CSV format —
-// the grammar `COPY … FROM … WITH (FORMAT csv)` reads (PostgreSQL 17 §COPY,
-// "CSV Format"), with the default QUOTE and ESCAPE (`"`) and the default NULL
-// (an unquoted empty field):
-//
-//   - a field is NULL only when it is EMPTY and NO part of it was quoted: `,,`
-//     is NULL, `,"",` is the empty string, `, ""` is a space (#1259);
-//   - a quote may open anywhere in a field and closes at the next lone quote;
-//     inside it a doubled quote is one quote and a delimiter or a line break
-//     is data (`x"y,z"w` is the field `xy,zw`; `"x" y` is `x y`);
-//   - whitespace is data, quoted or not;
-//   - a line ends at LF, CR or CRLF, and the three may be mixed in one file
-//     (COPY fixes the first one and refuses a different one later with 22P04;
-//     this reader answered them all as line ends through v0.24.0, on every
-//     path, and keeps that — ADR-0012 §5's superset rule);
-//   - a file that ends inside a quote is 22P04 "unterminated CSV quoted
-//     field" (#1248: encoding/csv's error ended the 100-row sample as if it
-//     were the end of the file, and the query answered the rows before it);
-//   - a blank line is ONE empty unquoted field (the Reader skips it in a file
-//     of more than one column, as it always has, where COPY refuses it).
-//
-// Two differences from PostgreSQL 17 are deliberate (docs/postgres-differences.md):
-// a line holding `\.` is data, not an end-of-data marker (PostgreSQL 18 stopped
-// honouring it in files too, since it silently dropped every later row), and
-// a UTF-8 byte-order mark at the start of a file is skipped (it would
-// otherwise be part of the first header name).
-//
-// Encoding/csv could not be kept: it discards whether a field was quoted, so
-// `""` and an empty field are the same string, and it refuses `x"y"z` and
-// `"x" y`, which PostgreSQL reads.
+// The record scanner reads COPY-style CSV quoting and field boundaries.
+// Only empty unquoted fields are NULL; quotes may open inside a field.
+// Unterminated quotes raise 22P04; Reader checks record widths. Blank lines,
+// mixed endings and extra trailing empty fields retain the documented
+// extensions. See ADR-0039 §3 and docs/sql-reference.md.
 type recordScanner struct {
 	r     io.Reader
 	buf   []byte

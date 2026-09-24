@@ -71,27 +71,12 @@ func readerSchemaProbeFromContext(ctx context.Context) *readerSchemaProbe {
 	return p
 }
 
-// readerPlanTimeSchema is the column list a FILE READER publishes, read from
-// its input at PLAN time (ADR-0039 §3, #1230). With it the reader is an
-// ordinary relation: an unknown column is 42703 at plan time through any
-// path (#1231), `f.*` expands, and the aggregate rules read the real type —
-// SUM over the bigint a whole-number column infers is numeric, MAX keeps it.
-//
-// THE BOUND: `read_parquet` reads the FOOTER and no page; `read_json` and
-// `read_csv` read ONE BATCH through the very reader the source uses, so the
-// plan-time and run-time schemas are one inference — the readers' 100-ROW
-// SAMPLE, whose later misfits the reader refuses (22P02 / 22003 / 22007;
-// docs/sql-reference.md). An HTTP(S) source reads NOTHING here (a second
-// request per statement, and EXPLAIN would reach the network), and neither
-// does an input that can be read only ONCE (readerInputIsRereadable). An
-// input that CHANGES between this read and the execution's is caught,
-// loudly, by withPlanTimeSchema.
-//
-// ok=false means "not knowable here", the caller's signal to keep the open
-// scope and the first-batch refusal. err is a REFUSAL: the input does not
-// exist, may not be read, or is a directory (58P01 / 42501 / 42809,
-// readerInputReachable) — known at plan time, so the statement, and EXPLAIN
-// over it, is refused here as a statement over a missing relation is (#1245).
+// readerPlanTimeSchema reads a regular local reader input after the calling
+// door permits it. Parquet reads the footer; CSV/JSON use the reader sample.
+// HTTP and read-once inputs return ok=false and retain first-batch checks.
+// A missing, unreadable or directory input returns 58P01, 42501 or 42809,
+// including for EXPLAIN. withPlanTimeSchema checks the execution schema
+// against this declaration; see ADR-0039 §3.
 func readerPlanTimeSchema(ctx context.Context, funcName string, args []string,
 	namedArgs map[string]string,
 ) ([]parquet.Column, bool, error) {

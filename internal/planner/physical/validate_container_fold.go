@@ -12,35 +12,11 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// A CONTAINER FOLDED WITH SOMETHING IT CANNOT BE IS REFUSED, NOT RENDERED
-// (#1060).
-//
-// CASE, COALESCE, GREATEST and LEAST resolve ONE result type over their arms
-// (PostgreSQL's select_common_type). Where the arms put a ROW, an ARRAY, a MAP
-// or a VECTOR beside a value of another kind — or two ROWs of different
-// shapes — this engine took its STRING fallback and answered a column holding
-// both `alice`-style strings and Go-rendered maps (`map[build: major:1 …]`)
-// under OID 25; `COALESCE(c_arr, id)` and `CASE … THEN c_row ELSE <text>` failed
-// mid-execution with the #361 silent-write guard instead. PostgreSQL 17.11
-// refuses all of them at parse analysis (measured, arc BR's notes):
-//
-//	COALESCE(c_row, c_arr)                     42804 COALESCE types rowt and text[] cannot be matched
-//	COALESCE(c_row, id)                        42804 COALESCE types rowt and bigint cannot be matched
-//	CASE WHEN … THEN c_row ELSE CAST(id AS TEXT) END
-//	                                           42804 CASE types text and rowt cannot be matched
-//	CASE WHEN … THEN c_row ELSE c_rownest END  42846 CASE/WHEN could not convert type rowt to rownt
-//	COALESCE(c_row, 'x')                       22P02 malformed record literal: "x"
-//	GREATEST(c_arr, 'x')                       22P02 malformed array literal: "x"
-//
-// The pair a message names is PostgreSQL's: the type resolved so far against
-// the first arm that cannot join it, with a CASE's ELSE read FIRST (the
-// server puts the default result at the head of the list). Two ROWs of
-// different shapes are the server's 42846 `could not convert type`, with each
-// shape spelled where it would name a composite type. A QUOTED literal beside a ROW or an ARRAY is that
-// container's own input: text not written in its grammar (`(…)`, `{…}`) is
-// PostgreSQL's 22P02, and text that is is 0A000 here — PostgreSQL reads it and
-// this fold answered the literal's TEXT as the value (`GREATEST(c_arr, '{x}')`
-// answered the string `{x}`). An arm this layer cannot type decides nothing.
+// refuseContainerFold checks a common result type for container folds.
+// CASE reads ELSE first; the first incompatible arm names the error pair.
+// Different container kinds raise 42804 and differing ROW shapes 42846.
+// Malformed ROW/ARRAY text raises 22P02; valid container text raises 0A000
+// until this fold can convert it. Unknown arm types defer (ADR-0012 §5).
 func refuseContainerFold(node plansql.Node, typeOf func(plansql.Node) (parquet.Column, bool)) error {
 	switch n := node.(type) {
 	case nil, *plansql.SubqueryNode, *plansql.ExistsNode:

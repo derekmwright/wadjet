@@ -2177,10 +2177,10 @@ func (c *Coordinator) deduplicatePartials(in BatchStream, columns []string) ([]*
 	return out, nil
 }
 
-// reAggregatePartials merges partial aggregate results by group-by key.
-// For COUNT → SUM, SUM → SUM, MIN → MIN, MAX → MAX.
-// mergeScalarAggregates merges N partial scalar aggregate rows into 1.
-// For SUM/COUNT: sum all partials. For MIN: take min. For MAX: take max.
+// mergeScalarAggregates combines partial scalar aggregate rows into one:
+// SUM/COUNT add and MIN/MAX take extrema. Other functions retain the first
+// non-NULL partial; this legacy path does not reconstruct AVG from sum/count.
+// reAggregatePartials handles the grouped form.
 func (c *Coordinator) mergeScalarAggregates(batches []*batch.RecordBatch, columns []string, colIdx map[string]int, mi *logical.MergeInfo) []*batch.RecordBatch {
 	if len(batches) == 0 || len(mi.AggExprs) == 0 {
 		return batches

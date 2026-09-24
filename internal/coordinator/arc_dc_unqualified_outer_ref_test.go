@@ -9,35 +9,10 @@ import (
 	"time"
 )
 
-// AN UNQUALIFIED NAME THE BODY CANNOT SUPPLY IS AN OUTER REFERENCE, IN EVERY
-// POSITION OF THE BODY (arc DC review round 1, B1 and N1).
-//
-// PostgreSQL resolves a column name innermost-first: `total` inside a body
-// over dc_in, which has no `total`, binds to the enclosing dc_out row. The
-// decorrelations read an outer reference by its QUALIFIER only, because the
-// logical classifier had no catalog for the body's relations and TPC-H Q02
-// writes every correlated key unqualified with both names in the enclosing
-// map. So an unqualified outer reference was invisible to the body walker: in
-// a JOIN's ON it became a join key no relation publishes (zero rows), in a
-// HAVING it was dropped by the aggregate rewrite (every row), in the SELECT
-// list it became a key the build side does not have (zero rows), and only in
-// the WHERE did it fail loudly.
-//
-// bodyOuterColumns now asks the catalog — through a throwaway Scan, never the
-// plan being built — what the body's own FROM clause publishes, and the part
-// of the enclosing column map the body cannot supply is read as outer by the
-// body walker and by provablyOuterOnly. A name the body DOES publish stays the
-// body's (the shadow* cells), and a body whose namespace cannot be named
-// completely keeps the qualifier-only reading.
-//
-// Cells: {IN, NOT IN, EXISTS, NOT EXISTS, scalar in WHERE, scalar in SELECT} ×
-// every position the name can sit in, plus the reviewer's statements (A09 is
-// IN/selfJoinBareCorr, B04 IN/onCorrEq, B06 IN/onCorrNe, B08 EXISTS/havingAgg,
-// B10 EXISTS/havingOnly, B14 IN/selectBare, B17 IN/twoPlaces). Wants are live
-// PostgreSQL 17.11 over the fixture this package writes. At 16b924d1, 51 of
-// the first 115 statements disagreed with PostgreSQL (27 a wrong row set, 24 a
-// refusal); four of those are pins, so 47 of them fail there — and so do five
-// of the six table-function cells (TF/IN/onQual is #1232 itself).
+// An unqualified name belongs to the innermost relation that supplies it.
+// These cells check each subquery clause, including shadowed inner names
+// and table-function bodies whose complete namespace is unavailable.
+// Expected rows are PostgreSQL 17.11 over the DC fixture (ADR-0021 §1r).
 func TestArcDCAnUnqualifiedOuterReferenceBindsWhereTheBodyCannotSupplyIt(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: five arms")

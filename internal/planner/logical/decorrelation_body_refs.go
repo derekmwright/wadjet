@@ -8,66 +8,17 @@ import (
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
 
-// A DECORRELATED SUBQUERY KEEPS EVERY OUTER REFERENCE, WHEREVER IN ITS BODY
-// IT IS WRITTEN.
-//
-// The three decorrelations (IN/NOT IN, EXISTS/NOT EXISTS, and the scalar
-// comparison) all classify the body's WHERE clause and nothing else. A body is
-// larger than its WHERE: a JOIN's ON, the HAVING, the GROUP BY, the SELECT
-// list and the ORDER BY can each name the enclosing row, and PostgreSQL
-// evaluates the whole body once per outer row, so every one of those
-// references decides the answer.
-//
-// The rule this file states is:
-//
-//   - an INNER (or cross) join's ON conjunct IS a WHERE conjunct, so a
-//     conjunct of one that names the enclosing query is LIFTED into the
-//     classification the caller already runs over the WHERE — it becomes a
-//     correlation key, a residual, or an outer-side filter exactly as the same
-//     text written in the WHERE would;
-//   - an outer reference anywhere the rewrite cannot carry it — an OUTER
-//     join's ON, where the padding makes a conjunct mean something a WHERE
-//     conjunct does not; the HAVING, which is read after the grouping the
-//     build side performs; the GROUP BY; the SELECT list; the ORDER BY; the
-//     QUALIFY — BLOCKS the rewrite, and the subquery stays an executable
-//     predicate re-run per outer row, which answers PostgreSQL's rows;
-//   - a condition that PROVABLY names only the enclosing query is neither a
-//     key nor an inner filter. PostgreSQL applies it per outer row, so it
-//     gates WHICH outer rows can match at all. See outerOnlyDisposition.
-//
-// Before this, the ON was invisible: `o.id IN (SELECT b.order_id FROM lat_item
-// b JOIN lat_item c ON c.id = b.id AND o.total > b.amount)` built the body's
-// join with `o.total` still in its condition, where the enclosing relation is
-// not in scope, and answered ZERO rows for PostgreSQL 17.11's two (#1232).
+// The decorrelation body walk accounts for outer references in every clause.
+// Inner-join ON conjuncts may join the WHERE classification; an outer-join
+// ON or another clause the rewrite cannot preserve declines to per-row
+// execution. No reference may disappear or bind a different relation.
+// See ADR-0021 §1r.
 
-// namesEnclosingQuery reports whether a clause of a subquery body contains a
-// column reference QUALIFIED by a relation the ENCLOSING query reads and the
-// body does not.
-//
-// A qualifier is read only when it names an outer relation and NO inner one:
-// `dc_out o` outside and `dc_out z` inside makes `o.total` outer and `z.id`
-// inner, while `dc_out.total` names both and is not decided here.
-//
-// It asks nodeTableRefs — the correlation classifier's own reader — with
-// bodyOuter as the column map rather than the enclosing one, so an unqualified
-// name counts only when the body provably cannot supply it. Reading the clause any other way costs a
-// right answer. plansql.ColumnRefs is the strict walker and REFUSES the three
-// nodes that carry raw SQL rather than a parsed subtree (a subquery, an
-// EXISTS, a window call), so a clause holding one would have to be treated as
-// "may name anything" — and `EXISTS (SELECT 1 FROM z WHERE z.k = o.id ORDER BY
-// ROW_NUMBER() OVER ())`, whose ORDER BY names nothing outer at all, would
-// stop decorrelating and be refused by the per-row rebuild instead of
-// answering PostgreSQL's rows (arc L1's `EXISTS/*/winord`). nodeTableRefs has
-// a case for a window call and for a nested block, which is the reader this
-// question needs.
-//
-// bodyOuter is the one exception, and it is exact rather than name-only: the
-// enclosing columns the body's OWN relations cannot supply (see
-// bodyOuterColumns). An unqualified name in it binds to the enclosing row in
-// PostgreSQL, and reading it that way here is what keeps `ON b.k = id`, `HAVING
-// SUM(b.amt) > total` and `SELECT total` from travelling into the body as a
-// name no relation of the body publishes. nil means "not known", which is the
-// qualifier-only reading.
+// namesEnclosingQuery detects enclosing references through nodeTableRefs.
+// A qualifier must name an enclosing relation and no body relation.
+// An unqualified name counts only in bodyOuter, the enclosing columns that
+// the complete body namespace cannot supply; nil permits qualified names only.
+// The walker handles nested blocks and window calls (ADR-0021 §1r).
 func namesEnclosingQuery(node plansql.Node, outerTables, innerTables map[string]bool, bodyOuter map[string]string) bool {
 	if node == nil {
 		return false
@@ -76,33 +27,11 @@ func namesEnclosingQuery(node plansql.Node, outerTables, innerTables map[string]
 	return hasOuter
 }
 
-// bodyOuterColumns is the part of the enclosing query's column map that names
-// a column the subquery body's OWN FROM clause does not publish — the
-// unqualified names PostgreSQL binds to the enclosing row, because it resolves
-// a name innermost-first and the body has nothing of that name.
-//
-// It is nil when the body's namespace cannot be named COMPLETELY (a table the
-// catalog does not answer, a table function, a star over one): absent from a
-// partial list is not absent from the body, and reading it as outer would move
-// an inner column outward. nil keeps the qualifier-only reading every caller
-// had before.
-//
-// The namespace is read from the catalog through annotate, run on a throwaway
-// Scan per relation and never on the plan being built: annotating the real
-// inner subtree hands reorderJoins statistics it did not have and moved TPC-H
-// Q2's join order (decorrelatedInnerPlan). The rule cannot be the enclosing
-// map alone either — Q2 writes `p_partkey = ps_partkey` unqualified with BOTH
-// names in it — and it is not: `ps_partkey` is the body's, so it is not here.
-//
-// undecided is the other half of the answer: when the namespace is NOT known,
-// it is the whole enclosing map, and an unqualified name in it is one this
-// pass cannot place. The body walker then DECLINES wherever such a name sits
-// in a clause the rewrite has no classification for (see
-// liftBodyOuterConditions) — the per-row rerun resolves it with the binder's
-// own scope — rather than let it travel into the body as a column no relation
-// there may publish. A table function in the body's FROM is the ordinary way
-// to get here: its columns are its CALL's or its INPUT's, and reading an input
-// a second time to answer this question is not a cost this pass may impose.
+// bodyOuterColumns returns enclosing names absent from the complete body
+// namespace. annotate reads throwaway scans so it cannot change join costs.
+// An incomplete namespace returns nil and the full enclosing map as undecided;
+// callers decline unclassifiable clauses without re-reading reader inputs.
+// See ADR-0021 §1r.
 func bodyOuterColumns(info *plansql.SelectInfo, outerColMap map[string]string,
 	ctes []plansql.CTEDef, annotate func(*Node)) (bodyOuter, undecided map[string]string) {
 	if info == nil || len(outerColMap) == 0 {
@@ -307,35 +236,10 @@ func andAll(parts []plansql.Node) plansql.Node {
 	return out
 }
 
-// outerOnlyDisposition says what a decorrelation may do with a condition
-// inside the body that names only the ENCLOSING row.
-//
-// PostgreSQL evaluates the body once per outer row, so such a condition
-// decides whether the body produces ANY row for that outer row:
-//
-//	WHERE o.id IN (SELECT z.id FROM t z WHERE P(o))
-//	    ≡ WHERE P(o) AND o.id IN (SELECT z.id FROM t z)
-//	WHERE EXISTS (SELECT 1 FROM t z WHERE Q(z) AND P(o))
-//	    ≡ WHERE P(o) AND EXISTS (SELECT 1 FROM t z WHERE Q(z))
-//
-// Both hold in a WHERE, where only TRUE passes: when P(o) is FALSE the body is
-// empty, IN over an empty set is FALSE and EXISTS is FALSE, so the row is
-// rejected — which is also what the conjunction does, NULL included.
-//
-// The NEGATED spellings are NOT a conjunction and there is nothing to hoist
-// them into:
-//
-//	WHERE o.id NOT IN (SELECT … WHERE P(o))   ≡ NOT P(o) OR o.id NOT IN (…)
-//	WHERE NOT EXISTS (SELECT … WHERE P(o))    ≡ NOT P(o) OR NOT EXISTS (…)
-//
-// An outer row for which P is false passes BOTH, because the body it would
-// have to contradict is empty. So a negated operator declines and the
-// subquery is re-run per outer row with the condition where the query wrote it.
-//
-// Before this, the IN rewrite put the condition in the build side's filter
-// with its QUALIFIER STRIPPED — `o.total > 100` became `total > 100` read
-// against the subquery's own relation — and the EXISTS rewrite dropped it
-// outright under a comment saying the shape "shouldn't happen" (#1104).
+// outerOnlyDisposition permits hoisting an outer-only condition into a
+// positive IN or EXISTS filter, preserving its qualifier and NULL behavior.
+// Negated forms decline to per-row execution: an empty body makes them true
+// even when the outer-only condition is false or unknown (ADR-0021 §1r).
 func outerOnlyDisposition(negated bool) (hoist bool) { return !negated }
 
 // bodyWithShadowsEnclosing reports whether the subquery's OWN WITH declares an

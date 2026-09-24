@@ -13,38 +13,12 @@ import (
 	"time"
 )
 
-// A CORRELATED BODY IS EVALUATED PER OUTER ROW — #1019, #1238, #1274, #1131,
-// #1130, on FIVE ARMS (arc LT, ADR-0021 §1s).
-//
-// The seam, enumerated once:
-//
-//	{IN, NOT IN, EXISTS, NOT EXISTS, scalar, JOIN LATERAL, LEFT JOIN LATERAL,
-//	 comma LATERAL}
-//	x {plain, ORDER BY+LIMIT 2, LIMIT 0, OFFSET 1, LIMIT 1 OFFSET 1, ORDER BY v
-//	   LIMIT 1 with a TIE, ORDER BY DESC LIMIT 2, DISTINCT on the correlated
-//	   column, DISTINCT on another column, GROUP BY/HAVING, GROUP BY + ORDER BY
-//	   agg LIMIT 1, a SELECT-list window, an ungrouped aggregate, an ungrouped
-//	   aggregate with HAVING, DISTINCT + bound, an alias colliding with the
-//	   lifted column, ORDER BY <ordinal> + bound}
-//	x {correlation by equality, by inequality, MIXED (equality and inequality),
-//	   by inequality over a SHARED name (#1130's shape), none}
-//	x {single, spilled512k, dag, dag-shuffled, dag-morsel4}
-//
-// over lt_o / lt_i (arc_lt_fixture_test.go: a duplicate outer key, a tie, a
-// key with no inner row, NULL keys on both sides, a shared column name).
-// EVERY want is live PostgreSQL 17.11. At 51addfb6, 87 of the 680 cells
-// answered a WRONG row set on the single arm (the eq-keyed LATERAL bounds,
-// #1019; EXISTS with LIMIT 0 / HAVING / an ungrouped aggregate, #1238 and
-// #1274; the inequality-correlated bounds and lifted predicates, #1131 and
-// #1130) and 61 refused. At the tip 0 are wrong: 494 agree and 183 refuse
-// LOUDLY with one of the classes below, on every arm.
-//
-// The RULE the cells are read against is key-partitionability: a body
-// decorrelates only where every correlated predicate is an equality on an
-// inner column and every pipeline breaker in it is (or is made) partitioned
-// by that key — the bound becomes a per-key ROW_NUMBER; otherwise EXISTS /
-// IN / scalar decline to the per-row rerun, and a LATERAL, which has no
-// per-row runner, is refused.
+// The LT corpus compares correlated bodies with recorded PostgreSQL 17.11
+// rows on five execution arms. It crosses membership, existence, scalar
+// and LATERAL forms with bounds, grouping, ties, NULLs and key spellings.
+// Equality-keyed bounds partition by key; unreproduced scalar/existence
+// bodies run per outer row, while unsupported relation-valued forms refuse.
+// The per-cell pins state the remaining path-specific boundaries (ADR-0021 §1s).
 
 type ltCell struct{ name, sql string }
 

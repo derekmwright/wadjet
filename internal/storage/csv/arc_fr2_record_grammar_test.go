@@ -13,32 +13,10 @@ import (
 // pgNull marks an expected NULL in a grammar cell's rows.
 const pgNull = "\x00NULL"
 
-// TestArcFR2CSVRecordGrammarIsPostgreSQLs holds read_csv's record grammar to
-// PostgreSQL 17.11's `COPY t(a text, b text) FROM '<file>' WITH (FORMAT csv,
-// HEADER true)` — every expectation below is what that statement answered
-// for the same bytes (tooling evidence pg_csv_grammar_17.11.txt and
-// pg_csv_grammar_extra_17.11.txt): the documented accepted forms (quoted and
-// unquoted empty fields, whitespace, quotes opening mid-field, doubled
-// quotes, line breaks inside quotes, LF/CR/CRLF line endings) and the
-// documented rejected ones that are 22P04 bad_copy_file_format here too (an
-// unterminated quote, a record whose field count is not the relation's —
-// through v0.24.0 a short record was NULL-padded and a long one truncated,
-// silently, which is why those are refused rather than kept).
-//
-// The deliberate differences (ADR-0012 §5, the superset rule: PostgreSQL
-// refuses, and base answered the same meaningful rows on every path):
-//   - a trailing delimiter's empty extra fields are dropped (COPY: 22P04
-//     "extra data"); a SHORT record stays refused, although base NULL-padded
-//     it: a stray unquoted line break splits one record into two short ones;
-//   - a BLANK line in a file of more than one column is skipped (COPY: 22P04
-//     "missing data"), a trailing one at the end of a file above all;
-//   - LF, CR and CRLF line endings may be mixed in one file (COPY: 22P04
-//     "unquoted carriage return/newline found in data");
-//   - `\.` is data: PostgreSQL 17 ends the data at a line holding it and
-//     reads NO later row; PostgreSQL 18 reads it from a file as data — here a
-//     one-field record in a two-column file, which is 22P04 "missing data".
-//
-// A cell whose answer differs from 17.11's says so.
+// This table compares CSV records with PostgreSQL 17.11 COPY measurements.
+// It covers quoting, whitespace, delimiters, empty fields and record widths.
+// Blank lines, mixed endings and extra trailing empty fields retain the
+// reader extensions recorded in ADR-0012 §5; malformed records carry 22P04.
 func TestArcFR2CSVRecordGrammarIsPostgreSQLs(t *testing.T) {
 	cells := []struct {
 		name string

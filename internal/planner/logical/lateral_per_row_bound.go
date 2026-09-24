@@ -11,73 +11,15 @@ import (
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
-// A CORRELATED LATERAL'S BOUND IS PER OUTER ROW, AND A PER-KEY TOP-N IS HOW
-// THE DECORRELATION KEEPS IT — #1019, ADR-0021 §1s.
-//
-// PostgreSQL evaluates a LATERAL body once per outer row, so its `ORDER BY …
-// LIMIT n` bounds EACH evaluation:
-//
-//	SELECT * FROM lat_ord o JOIN LATERAL (SELECT i.product, i.amount
-//	  FROM lat_item i WHERE i.order_id = o.id
-//	  ORDER BY i.amount DESC LIMIT 1) s ON true
-//	-- PostgreSQL 17.11: one row per order — 1,Gadget,100 and 2,Doohickey,125
-//
-// The decorrelation promotes `i.order_id = o.id` into the JOIN condition,
-// which makes the body ONE relation joined once — and the bound then applied
-// to the whole of it, so the statement answered a single row, silently, on
-// every arm and in every spelling of the consumer.
-//
-// THE RULE IS KEY-PARTITIONABILITY (ADR-0021 §1s). The join is exact when the
-// body's result restricted to one outer key equals the body evaluated for that
-// key, and a bound is a pipeline breaker that commutes with that restriction
-// only when it is a PER-KEY bound. So when every correlated predicate is an
-// equality naming an inner column — the keys K the join partitions by — the
-// bound travels with K: `ROW_NUMBER() OVER (PARTITION BY K ORDER BY <the
-// body's own ORDER BY>)` numbers each key's rows in the body's order and a
-// QUALIFY over that number is the bound. The join then matches each outer row
-// to its own key's surviving rows.
-//
-//	OFFSET m LIMIT n  ->  QUALIFY rn > m AND rn <= m+n
-//	OFFSET m          ->  QUALIFY rn > m
-//	LIMIT n           ->  QUALIFY rn <= n
-//
-// The body's `ORDER BY` is CONSUMED by the window: a FROM item's row order is
-// not preserved by SQL, so the clause's only effect was to decide which rows
-// the bound keeps, and that is exactly what the window's ORDER BY now decides.
-// With no ORDER BY the surviving row is arbitrary, which is what PostgreSQL
-// answers for an unordered `LIMIT 1` too (ADR-0013's nondeterminism classes).
-// An ORDINAL term names the select item at that position.
-//
-// **The partition is spelled against what the window's INPUT carries**, which
-// is the rule `respellKeyRefsToSlot` states for HAVING and the body's own
-// ORDER BY. Over a plain body the window sits above the scan and the inner
-// column is there under its own name; over an AGGREGATED one it sits above the
-// aggregate, which publishes the correlation key under the name the join keys
-// on — a hidden `__key_N` where the lowering minted one, the list's own alias
-// where it published one, the source column otherwise.
-//
-// WHAT IS REFUSED, AND WHY EACH IS THE SAME RULE. Where there is no K the
-// bound cannot be made per key, and there is no per-row runner for a
-// relation-valued body — so the shape is refused, 0A000, on every arm, in
-// place of the plausible wrong row set it used to answer (39 cells of the arc
-// LT seam table, `lateralBoundRefusal`):
-//
-//   - a correlated predicate that is not an equality on an inner column —
-//     `i.v > o.total`, or `i.k = o.k AND i.v > o.total`: the bound is over
-//     the rows the OUTER value selects, which differ per outer row;
-//   - a bound this pass cannot read as a non-negative integer constant: a
-//     rewrite needs `m+n`, and guessing at an expression would put a number
-//     in the plan the query does not contain;
-//   - a DISTINCT body, or a set operation: the bound applies to what those
-//     operators PRODUCE, and the QUALIFY filter runs below both.
-//
-// An UNCORRELATED body is untouched: there is no decorrelation, the body is
-// evaluated once, and its own bound means exactly what it says. So is a bound
-// that cannot change any answer (`OFFSET 0`, no LIMIT).
-//
-// The structural closure of the refused shapes is a DEPENDENT JOIN — the body
-// re-run per outer row with the outer values substituted, the way the scalar
-// rerun does — recorded with its mechanism in arc LT's notes.
+// lateralBoundPerOuterRow preserves a correlated bound with a per-key
+// ROW_NUMBER and QUALIFY: rn > offset and rn <= offset+limit, saturating
+// the upper sum. Keys require an inner-only expression equal to a bare
+// outer column. ORDER BY aliases and ordinals resolve to the selected items.
+// An uncorrelated body and a non-removing bound need no rewrite; LIMIT 0
+// stays empty. DISTINCT over exactly the keys needs no positive limit.
+// Other DISTINCT bodies, set operations, QUALIFY and unsupported correlations
+// refuse 0A000. See ADR-0021 §1s and
+// docs/internals/lateral-per-outer-row-bound.md.
 func lateralBoundPerOuterRow(info *plansql.SelectInfo, correlatedParts []string,
 	leftAliases map[string]bool, aggregates bool, keyRename map[string]string, injectedLead int) error {
 	if info == nil || len(correlatedParts) == 0 {

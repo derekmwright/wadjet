@@ -8,35 +8,11 @@ import (
 	"time"
 )
 
-// AN OUTER JOIN'S ON BESIDE A WHERE THAT REJECTS ITS PADDING — the body shape
-// the 776-cell table does not write (arc DC round-1 review, P1 and B2).
-//
-// Every `on*Left*` / `onRight*` site in dcSites() writes a body with NO WHERE
-// clause, so the outer-join guard in liftBodyOuterConditions was never reached
-// at the row set, and neither was what happens after it fires: the subquery
-// declines the rewrite and is re-run per outer row with the outer values
-// substituted, so `o.total > 100` in the ON becomes `100 > 100`.
-//
-// That rerun used to REFUSE ("100 > 100 cannot be represented as an equi-join
-// key … legal for an inner join only") whenever the body's WHERE rejects the
-// outer join's padding. The site is not the rerun: pushFilterThroughJoin
-// DEMOTES such a join to inner (#335) after liftInnerJoinOnResiduals (#336) has
-// run, and routeOuterJoinOnResiduals (#358) skips a join that is no longer
-// outer, so a non-key ON conjunct sat in an inner join's ON with nothing left to
-// place it. The PLAIN/* cells are the same demotion with no subquery at all —
-// they refused at base too — and `PLAIN/rightNoWhereCtl` is the control the
-// route has always placed.
-//
-// Cells:
-//   - P1/*: an outer join's ON beside a correlated WHERE whose padding
-//     survives; with the `!isInnerOrCrossJoin` guard deleted each is wrong.
-//   - B2/*: the review's family, named by its cell id there. The first four
-//     were PINNED refusals in the review's patch; they answer now, so the pins
-//     are deleted and PostgreSQL's row set is asserted instead.
-//   - PLAIN/*: the demotion itself.
-//
-// Wants are live PostgreSQL 17.11 over the dc_out / dc_in / dc_side fixture
-// this package writes.
+// These cells distinguish an outer join whose padding survives from one
+// whose WHERE demotes it to an inner join. A demoted join must lift its
+// non-key ON conjunct into a filter; a surviving outer join keeps it in ON.
+// PLAIN cells exercise the same rule without a subquery. Expected rows were
+// measured on PostgreSQL 17.11 over the DC fixture (ADR-0021 §1r).
 func TestArcDCAnOuterJoinsOnBesideACorrelatedWhere(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: five arms")

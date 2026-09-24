@@ -241,27 +241,9 @@ func (p *Planner) getMemTracker() *memory.Tracker {
 	return r.memTracker
 }
 
-// subqueryBudgetOption charges an uncorrelated IN-subquery's membership set to
-// this query's tracker, and records the node so the charge is released when the
-// plan is torn down (#531, ADR-0006).
-//
-// Returns nil — a no-op option — when this query has no tracker, which keeps
-// the unbudgeted behavior for embedded callers that set no MemoryBudget.
-//
-// Why the charge needs an owner at all. An InSubquery holds its membership map
-// for the life of the compiled Expr tree: `id IN (SELECT id + 0 FROM t)`
-// declines decorrelation (a computed inner item is not a semi-join key), so it
-// builds a hash set of every inner row and probes it per row. Measured on the
-// type-matrix fixture, that set is 120,000 bytes and the query ANSWERED at an
-// 8 KiB budget — 14.6× the whole allowance, unaccounted, while the same run
-// logged the scan forcing its file load past that budget. The shapes that DO
-// decorrelate never reach this type; their build side is already budgeted and
-// spillable.
-// catalogOption binds the catalog functions — regclass, pg_get_userbyid and
-// their siblings (expr.CatalogResolver) — to this statement's view of the
-// catalog: the identity's Access on the planning context, over this planner's
-// catalog. One resolver per statement, so every expression in it reads one
-// snapshot.
+// catalogOption binds catalog functions to one resolver over this statement
+// view. It reuses that resolver for every expression so they read one
+// catalog snapshot (ADR-0044).
 func (p *Planner) catalogOption() expr.CompileOption {
 	if p.catResolver == nil {
 		ctx := p.PlanCtx
@@ -273,6 +255,9 @@ func (p *Planner) catalogOption() expr.CompileOption {
 	return expr.WithCatalog(p.catResolver)
 }
 
+// subqueryBudgetOption charges membership sets to this query tracker and
+// records their owners for release at plan cleanup. With no tracker it is nil.
+// See ADR-0006 and releaseSubqueryCharges.
 func (p *Planner) subqueryBudgetOption() expr.CompileOption {
 	tracker := p.getMemTracker()
 	if tracker == nil {

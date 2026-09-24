@@ -1,27 +1,10 @@
 // SPDX-License-Identifier: MIT
 
-// Package syscatalog is the system catalog as RELATIONS: pg_catalog and
-// information_schema, answered by the engine like any other FROM item.
-//
-// A client — psql's \d family, pgJDBC's DatabaseMetaData, DataGrip, Superset,
-// Metabase — reads the catalog before it sends a single query of its own, and
-// it reads it with ordinary SQL: WHERE, JOIN, COUNT, ORDER BY, LIMIT. The
-// catalog used to be a canned responder in the pgwire layer that matched the
-// statement's TEXT and answered a precomputed row set, so every predicate it
-// had not been taught to recognise was silently ignored (`WHERE table_name =
-// 'nosuch'` listed every column of every table, #1251) and every shape it had
-// not been taught to answer came back as the raw rows (`SELECT COUNT(*)`).
-// Here a catalog relation is a SOURCE the planner scans: its rows are
-// materialized from the storage catalog when the statement runs, and
-// everything above the scan is the ordinary engine (ADR-0044).
-//
-// The relations and their columns are PostgreSQL 17's own, read off a live
-// 17.11 catalog into pg17_relations.tsv — every column of every pg_catalog
-// table and view and every information_schema view, so a client that selects
-// a column this server has no value for gets NULL rather than 42703. Which of
-// them carry rows is the population in rows.go; the rest are relations this
-// server has no objects for (triggers, constraints, indexes, rules,
-// publications, …) and are empty, which for those is the true answer.
+// Package syscatalog describes PostgreSQL 17 catalog relations as engine
+// FROM sources. pg17_relations.tsv records their columns from PostgreSQL
+// 17.11; sysrows supplies current rows from this server catalog. Ordinary
+// query operators evaluate everything above the scan. Relations for absent
+// object kinds are empty. See ADR-0044.
 package syscatalog
 
 import (

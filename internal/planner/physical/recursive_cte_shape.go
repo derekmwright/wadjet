@@ -11,30 +11,11 @@ import (
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
-// refuseRecursiveTermShape is PostgreSQL's checkWellFormedRecursion over the
-// RECURSIVE term, with PostgreSQL's class (42P19) and sentence for each shape,
-// measured on 17.11:
-//
-//   - an aggregate in a block of the recursive term whose own FROM names the
-//     reference — "aggregate functions are not allowed in a recursive
-//     query's recursive term" (aggregateOverTheReference);
-//   - the self-reference inside a subquery expression (EXISTS, IN, a scalar
-//     subquery) — "… must not appear within a subquery";
-//   - the self-reference on the NULLABLE side of an outer join — "… must not
-//     appear within an outer join";
-//   - the self-reference more than once — "… must not appear more than once".
-//
-// These are not style rules. Each of them is a term that, iterated the way
-// this engine iterates, does not reach a fixed point or reaches the wrong one:
-// `SELECT max(n) + 1 FROM r WHERE n < 3` produces a NULL row from an empty
-// working table forever, and `lat_ord LEFT JOIN r` produces the same outer rows
-// at every step. With the old 1000-iteration cap those answered 1000 rows of a
-// truncated recursion; without it they would run until the iteration limit, so
-// they are refused before anything runs.
-//
-// It sees the parsed tree only. A self-reference it cannot see — inside a
-// nested WITH's body that shadows the name, say — is refused where it is
-// conservative to (a false refusal) and never answered as something else.
+// refuseRecursiveTermShape checks the parsed recursive term before execution.
+// It raises 42P19 for an aggregate over the self-reference, a self-reference
+// in a subquery expression or on an outer join nullable side, or repeated
+// self-references. Nested blocks are checked at their own scope; unsupported
+// forms refuse. See ADR-0021 §1o-b.
 func refuseRecursiveTermShape(cteName string, term *plansql.SelectInfo) error {
 	name := strings.ToLower(strings.TrimSpace(cteName))
 	if aggregateOverTheReference(term, name) {

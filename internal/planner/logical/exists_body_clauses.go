@@ -9,41 +9,12 @@ import (
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
 
-// THE EXISTS REWRITE KEEPS ONLY A BODY IT REPRODUCES — ADR-0021 §1s, #1238,
-// arc DC's N2.
-//
-// `tryDecorrelateExists` builds the body's FROM and its WHERE as a semi (anti)
-// join's build side and nothing else. PostgreSQL evaluates the whole body once
-// per outer row, so every clause that can change WHETHER the body yields a row
-// decides the answer, and a clause the build side does not carry was silently
-// dropped:
-//
-//	EXISTS (SELECT 1 FROM lt_i i WHERE i.k = o.k LIMIT 0)      -- PG: no row, ever
-//	EXISTS (SELECT MAX(i.v) FROM lt_i i WHERE i.k = o.k
-//	        GROUP BY i.tag HAVING MAX(i.v) > 35)               -- PG: only where a group survives
-//	EXISTS (SELECT MAX(i.v) FROM lt_i i WHERE i.k = o.k)       -- PG: EVERY outer row (an
-//	                                                           --   ungrouped aggregate is one row)
-//
-// answered the plain `EXISTS (SELECT 1 … WHERE i.k = o.k)` on all five arms.
-//
-// The rule is key-partitionability (ADR-0021 §1s): the semi join is exact when
-// the body's result restricted to one key equals the body evaluated for that
-// key, and a bound, a grouping, a HAVING, an ungrouped aggregate, a QUALIFY or
-// a set operation is a breaker the build side does not partition by the key.
-// Such a body DECLINES here, and the per-row rerun — which executes the text
-// as written — answers it. That is the same disposition the IN rewrite has
-// had for a bound since #482 (`tryDecorrelateInSubquery`).
-//
-// What existence is INVARIANT under is stripped before the check rather than
-// declined: `LIMIT n` with n >= 1 and no OFFSET cannot change whether there is
-// a row, and `EXISTS (… LIMIT 1)` is a spelling people write on purpose. A
-// DISTINCT and a SELECT-list window are invariant too and were never carried,
-// so they need no strip. A `LIMIT 0` removes every row and declines like any
-// other bound; the rerun answers it as PostgreSQL does.
-//
-// The rerun's cost is linear in the outer rows — one body run per row, 10.9 ms
-// per row over a 1 000 000-row inner relation when this was measured — which
-// is what a decline here costs and what the seam table's cells record.
+// existsBodyIsReproduced permits only clauses the semi/anti join preserves.
+// A bound, grouping, HAVING, ungrouped aggregate, QUALIFY or set operation
+// declines to per-outer-row execution. A positive literal LIMIT without OFFSET
+// is removed because it cannot change existence; LIMIT 0 is not removed.
+// DISTINCT and a SELECT-list window do not change existence. The fallback
+// runs once per outer row; see ADR-0021 §1s.
 func existsBodyIsReproduced(info *plansql.SelectInfo) bool {
 	if info == nil {
 		return false

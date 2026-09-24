@@ -9,40 +9,11 @@ import (
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
-// refuseMisplacedCallInOrder is PostgreSQL's parse-analysis ORDER for the two
-// refusals a clause makes about WHERE a call sits: a WINDOW function in HAVING
-// (42P20, #1205) and an AGGREGATE in WHERE (42803, #1216 item 3).
-//
-// PostgreSQL transforms a clause node by node, left to right, and a call's
-// ARGUMENTS before the call itself; the placement check is made when the call
-// is reached. So the class a client sees depends on which comes first,
-// measured on 17.11:
-//
-//	HAVING row_number() OVER () = 1 AND zz > 0   42P20
-//	HAVING zz > 0 AND row_number() OVER () = 1   42703 column "zz" does not exist
-//	WHERE SUM(total) > 0 AND zz > 0              42803
-//	WHERE zz > 0 AND SUM(total) > 0              42703
-//	WHERE SUM(zz) > 0                            42703 (the argument first)
-//
-// A window's OVER clause is transformed AFTER the placement check, so only its
-// function's arguments are resolved first: `HAVING COUNT(*) OVER (PARTITION BY
-// zz)` is 42P20.
-//
-// Before this, HAVING's window was never refused at all: it reached the
-// executor as a filter over a column no operator produces, which is an
-// internal message on one path and three failed task attempts on the DAG
-// (#1205). The WHERE aggregate WAS refused, by the logical builder — after
-// this binder had already reported every unknown name in the whole clause, so
-// `WHERE SUM(total) > 0 AND zz > 0` was 42703 where PostgreSQL says 42803.
-//
-// An aggregate belongs to the query level of the variables it reads
-// (PostgreSQL's agglevelsup): `WHERE d.k = SUM(typemx.g)` inside a subquery,
-// over only the OUTER block's column, is the outer block's aggregate and not
-// this WHERE's — it is left to the level that owns it. own reports whether
-// this block owns one; an aggregate reading no column is this block's.
-//
-// Only the first refusal in that order is returned; a clause with neither
-// shape returns nil and is checked exactly as before.
+// refuseMisplacedCallInOrder checks nodes left to right, arguments before
+// calls, returning the first error. A window in HAVING is 42P20 before its
+// OVER clause is resolved; an aggregate in WHERE is 42803. An aggregate
+// belongs to the level of its variables, with no-variable calls owned here.
+// No matching construct returns nil. See ADR-0012 §5, #1205 and #1216.
 func refuseMisplacedCallInOrder(node plansql.Node, scope *colScope, clause string, own *colScope) error {
 	if node == nil {
 		return nil

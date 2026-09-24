@@ -11,40 +11,12 @@ import (
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
 
-// residualWithStageSpellings re-spells an outer join's ON residual into the
-// names the STAGE publishes, so the residual crosses the stage boundary with
-// its identity (docs/design/window-key-ownership.md).
-//
-// A residual is evaluated AT the join and is the only part of an ON clause
-// that travels to the worker as TEXT. The join's equi-KEYS already make that
-// trip re-spelled (`resolveShuffleKey`); the residual's leaves did not, and a
-// Project emits no stage of its own, so a residual over two RENAMING derived
-// arms reached a fragment whose sides publish the source names. Nothing
-// resolved, the evaluator's unbound slot is SQL NULL, the residual was UNKNOWN
-// for every candidate pair, and a LEFT join answered its whole probe side
-// NULL-padded — in silence, on a shape the base refused loudly.
-//
-// THE SIDE IS PART OF THE IDENTITY, not just the name: two arms of one join
-// routinely re-spell to the same source column, and a bare name in the
-// residual binds PROBE-first. A build-side reference is therefore re-spelled
-// QUALIFIED BY THE STAGE'S OWN BUILD ALIAS (`spec.BuildAlias`, the side the
-// evaluator forces); a probe-side one is left bare. A reference neither arm
-// re-spells is left exactly as written, so a residual over two base tables is
-// byte-identical to what it was.
-//
-// A RESPELLING THAT MERGES TWO LEAVES IS REFUSED, NOT EMITTED. The side of a
-// leaf is decided by which arm MOVES its name, so two leaves that were
-// different columns in the logical residual can come out as ONE stage column:
-// a decorrelated `total < total` (outer `o.total`, inner `b.total` over a body
-// that renames `amt AS total`, through any number of pass-through layers)
-// became `b.amt < b.amt`, and an enclosing `total AS amt` turned `amt < amt`
-// into `total < total` on the probe — false for every pair, so EXISTS answered
-// no rows and NOT EXISTS every row on the DAG arms (arc DC rounds 4–5, the
-// Codex reviews' B2/B1). The respelled text cannot say which leaf was which, so
-// the plan is refused with ErrResidualSidesMergedDistributed and the
-// coordinator runs it on the single-process pipeline, which binds the two
-// leaves by their own arms and answers PostgreSQL's rows. Keeping each leaf's
-// side through the respell is the real repair (filed, `distributed`).
+// residualWithStageSpellings translates ON residual leaves to stage columns,
+// qualifying a moved build-side leaf with the stage build alias and leaving
+// unmoved references intact. If translation merges distinct leaves, it
+// returns ErrResidualSidesMergedDistributed so the coordinator runs the
+// statement on the single-process pipeline. Side identity must survive
+// translation; see ADR-0021 §1r and docs/design/window-key-ownership.md.
 func (p *StagePlanner) residualWithStageSpellings(node *logical.Node, buildAlias, filter string) (string, error) {
 	if filter == "" || node == nil || len(node.Children) != 2 {
 		return filter, nil

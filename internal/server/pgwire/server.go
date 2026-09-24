@@ -1588,9 +1588,10 @@ func analysisRefusal(err error, parameterized bool) bool {
 	return false
 }
 
-// describeSQL executes a SQL statement to discover its result columns
-// and sends either a typed RowDescription or NoData. fmtCodes are the result
-// format codes the RowDescription declares per field (see sendRowDescription).
+// describeSQL discovers result columns and sends a typed RowDescription,
+// NoData, or an analysis-class ErrorResponse. Runtime failures retain the
+// Execute-time path; analysisRefusal defines the parameter and 42501 exceptions.
+// fmtCodes supplies each field format (ADR-0044).
 func (c *pgConn) describeSQL(sql string, fmtCodes []int16) {
 	sql = strings.TrimSpace(sql)
 	sql = strings.TrimRight(sql, ";")

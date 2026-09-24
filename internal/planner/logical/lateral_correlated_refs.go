@@ -10,62 +10,12 @@ import (
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
-// A LIFTED CORRELATED PREDICATE IS EVALUATED OVER THE BODY'S OUTPUT, SO THE
-// BODY PUBLISHES WHAT IT NAMES.
-//
-// The decorrelation lifts a correlated WHERE predicate out of the body and
-// evaluates it at or above the JOIN, over the body's OUTPUT rows. For an
-// EQUALITY the key loop already guarantees the inner column is there. A
-// predicate that is NOT an equality took none of that path, so where the body
-// RENAMES the column or does not select it, the condition named nothing:
-//
-//	SELECT s.m FROM lat_ord o LEFT JOIN LATERAL (
-//	  SELECT i.amount AS m FROM lat_item i WHERE i.amount < o.total) s ON true
-//	-- PostgreSQL 17.11: 9 rows   single / spilled: 3 NULL-padded rows
-//	                              the three DAG arms: PostgreSQL's 9
-//
-// **The DAG was right by MECHANISM, not by accident**, which is what the
-// round-2 review established and what this repair follows: its stage plan
-// evaluates the predicate where the inner column still exists —
-// `AG/liftedScaleRenamed` lands on PostgreSQL's 177 500 rows over 40×5 000 with
-// the column published under NO name at all. An earlier version of this file
-// REFUSED the shape uniformly, which turned four right answers into `0A000`.
-//
-// The repair gives the single-process path the same evaluation point: the
-// inner columns the predicate names are materialized into hidden slots of the
-// body's own projection and the predicate is respelled to them. Two placements
-// exist and the difference is measured, not guessed:
-//
-//   - the column is published under its OWN name and the predicate is NOT
-//     respelled. A first attempt minted `__key_N` slots and respelled to them:
-//     the two single-process arms became right and the three DAG arms went
-//     from PostgreSQL's nine rows to three NULL-padded ones, because the
-//     minted name is one the DAG's evaluation point does not carry. What the
-//     single path lacked was not a NAME but the COLUMN.
-//   - the column is EMITTED by the join and hidden from a STAR only
-//     (`Node.StarLiftedRefCols`). `HiddenJoinCols` is both properties at once,
-//     and a predicate the physical planner routes to a FILTER ABOVE the join —
-//     where a non-equi residual goes when an equality beside it keys the join
-//     — reads the join's OUTPUT: dropping answered ZERO rows there.
-//
-// An AGGREGATED body is still refused, and for a reason the projection cannot
-// answer: publishing `i.amount` beside `SUM(i.amount)` needs it in the GROUP
-// BY, which changes what the aggregate computes.
-//
-// publishLiftedRefs materializes every inner column a LIFTED correlated
-// predicate names, so the predicate can be EVALUATED wherever the planner puts
-// it, and respells the predicate to those slots.
-//
-// It returns the slots and whether they may be DROPPED at the join. They may
-// when every correlated part is a non-equality: the whole correlation is then
-// the join's own `ON`, evaluated over the pair before the output mapping runs.
-// They may NOT when an equality rides along — the physical planner keys on the
-// equality and routes the non-equi residual to a FILTER ABOVE the join, which
-// reads the join's OUTPUT, and a dropped slot answers zero rows there. Those
-// slots are hidden from a STAR instead (`Node.StarLiftedRefCols`).
-//
-// An AGGREGATED body is still refused: there is no projection to publish the
-// column in at all, and publishing it would put it in the GROUP BY.
+// publishLiftedRefs materializes inner columns used by lifted non-equality
+// predicates under their existing names. A pure non-equality join may drop
+// these columns after evaluating ON; with an equality key, the residual may
+// run above the join, so the columns remain in its output and are hidden only
+// from stars. Aggregated bodies refuse because publishing a column would
+// change their grouping. See ADR-0021 §1s.
 func publishLiftedRefs(info *plansql.SelectInfo, correlatedParts []string,
 	leftAliases map[string]bool, aggregates bool, outer *plansql.SelectInfo, left *Node,
 	injected *[]plansql.SelectColumn) (slots []string, err error) {

@@ -50,39 +50,13 @@ func (l recursiveArmLiterals) numericText(i int) (string, bool) {
 	return "", false
 }
 
-// coerceRecursiveTerm restates the recursive term's batches under the SEED's
-// column types, which is PostgreSQL's rule: the non-recursive term decides, the
-// UNION's type resolution runs with the seed first, and the query is 42804
-// ("column 1 has type integer in non-recursive term but type numeric overall")
-// exactly when that resolution does not come back to the seed's type.
-//
-// The table below was MEASURED on PostgreSQL 17.11, every seed type against
-// every term type (rc_author/pg_matrix_short.tsv); a term type a seed accepts
-// is converted, and every other pair is PostgreSQL's 42804:
-//
-//	seed                 accepts from the term
-//	integer / bigint     integer, bigint (range-checked into the seed: 22003)
-//	numeric              integer, bigint, numeric, a numeric literal
-//	numeric(p,s)         numeric(p,s) and nothing else — not even a NULL literal
-//	real                 integer, bigint, numeric, a numeric literal
-//	double precision     integer, bigint, numeric, real, a numeric literal
-//	timestamp            date
-//	any other type       itself
-//	any type             an UNKNOWN literal: NULL, or a quoted string read
-//	                     with the seed type's input rules (22P02 / 22007)
-//
-// Cells wider than PostgreSQL's, because this engine's declared types are:
-// an integer term into an integer seed of the other width is accepted (`n + 1`
-// over an integer column is bigint here and integer there); text and
-// varchar(n) are one carrier, so a varchar(n) seed accepts text; and a quoted
-// seed is text here where PostgreSQL resolves it from the term. An
-// UNCONSTRAINED numeric seed carries one scale per column here, not one per
-// value: a finer term value restarts the fixed point with the column widened
-// (errWidenRecursiveScale), so PostgreSQL's values come back at a common scale.
-//
-// It reads the types the term's BATCHES carry, not the term's plan-time
-// declaration, so a term that produces no row is not checked (a refusal
-// PostgreSQL makes at parse time and this engine does not; never a value).
+// coerceRecursiveTerm converts produced batches to the seed declaration.
+// Unsupported pairs raise 42804; integer narrowing is range-checked (22003).
+// Unknown literals use the seed input rules. Integer widths and text/varchar
+// share carriers beyond PostgreSQL matching, as recorded in ADR-0021 §1o-b.
+// A finer unconstrained numeric value restarts the closure at a wider scale,
+// up to 38; no earlier row is kept at the narrower scale. Empty terms have
+// no batch type to check. See the seed/term table in docs/sql-reference.md.
 func coerceRecursiveTerm(name string, anchor []parquet.Column, batches []*batch.RecordBatch,
 	lits recursiveArmLiterals) ([]*batch.RecordBatch, error) {
 	out := make([]*batch.RecordBatch, 0, len(batches))

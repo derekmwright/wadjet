@@ -12,40 +12,13 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// AN AGGREGATE OVER AN ARGUMENT IT HAS NO OVERLOAD FOR IS REFUSED, NOT
-// ANSWERED (#1249, #1061).
-//
-// The aggregate layer computed whatever its accumulator did with a value of
-// the wrong class: SUM/AVG/STDDEV/VARIANCE/CORR/COVAR/MEDIAN/MODE over TEXT,
-// BYTEA, UUID, INET, MACADDR or a container answered NULL on every arm; over
-// TIMESTAMP and DATE they answered the sum of the internal epoch integers
-// (`SUM(ts)` = 3.4e13) under a numeric type; AVG over IPV4 and MACADDR
-// answered a number that differed by arm; BOOL_AND/BOOL_OR/EVERY over a
-// non-boolean answered `false`/`true`; STRING_AGG rendered each value with
-// Go's fmt (`[98 121 …]` for bytes, `map[…]` for a row); MIN/MAX over a ROW
-// answered a FIELD-WISE minimum presented as one row. PostgreSQL 17.11 raises
-// 42883 `function sum(text) does not exist` for every one of them (measured
-// over the 22-type matrix; the table is in arc BR's landing notes).
-//
-// The accept-sets are PostgreSQL's, read over this engine's types by what the
-// WIRE declares them as: PORT and PROTOCOL are int4 and DURATION is int8 on
-// the wire, so they are numbers here too. Two sets are wider than
-// PostgreSQL's and stay so, recorded in ADR-0012 §5: MIN/MAX over BOOL, UUID,
-// MACADDR, BYTEA, MAP and VECTOR (a defined total order, identical on every
-// arm). ROW is removed from that list by this rule — its order was never a
-// row order.
-//
-// A QUOTED or NULL literal is SQL's `unknown`. PostgreSQL resolves it against
-// the overloads: SUM and AVG have several numeric ones and none preferred, so
-// `SUM('5')` and `SUM(NULL)` are 42725 `function sum(unknown) is not unique`
-// (wadjet answered NULL and 0); MEDIAN has none at all. Everywhere else an
-// unknown literal takes the one type the aggregate demands, which is the
-// literal rule's business and not this one's.
-//
-// The deciding site is here, in the binder, for refuseUnknownFlagNames'
-// reason: a DAG stage compiles when a task runs, so a refusal made there is
-// made only where a row arrives. An argument whose type this layer cannot
-// decide is not refused.
+// aggArgClass describes aggregate argument requirements at binding.
+// Numeric functions accept numeric wire classes; boolean functions require
+// boolean. SUM of an unknown literal is 42725. Recorded extensions retain
+// MIN/MAX over supported non-ROW types, STRING_AGG scalar renderings and
+// plain numeric ordered-set calls. ROW extrema refuse because declarations
+// differed by execution arm, not because the value lacked a row ordering.
+// Untyped operands defer; see ADR-0012 §5 for the exact accepted types and codes.
 type aggArgClass int
 
 const (

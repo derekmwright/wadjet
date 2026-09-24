@@ -9,33 +9,11 @@ import (
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
-// A QUALIFIED REFERENCE NAMES ONE RELATION IN SCOPE AT THE POINT IT IS
-// WRITTEN, and the point is not the whole query block. The block's one flat
-// scope is right for WHERE, the SELECT list, GROUP BY, HAVING and ORDER BY,
-// and wrong for a JOIN's ON clause, which SQL scopes an ON to what the FROM
-// clause has ALREADY DECLARED at that point: `FROM a JOIN b ON c.x = a.x
-// JOIN c ON …` names `c` before it is joined, which PostgreSQL refuses and
-// this binder refuses too (#1220) — that reference is a typo answered with
-// rows, not a superset. `FROM a, b JOIN c ON a.x = c.x` names an EARLIER
-// comma-separated FROM item, which PostgreSQL also refuses but this binder
-// deliberately answers, matching DuckDB (ADR-0012 §5 #617); an ON reaching
-// back across a comma sibling that is already on the page is not the same
-// defect as one reaching forward to a name the parser has not read yet, and
-// #1220 conflated the two until the BX hotfix told them apart again.
-//
-// This file is the block's relation CENSUS, in FROM order, and what it
-// decides: which relations an ON may name (relationCensus.visibleAtJoin), and
-// which of PostgreSQL's 42P01 sentences an unmatched qualifier earns — each
-// with PostgreSQL's DETAIL or HINT after a colon, verbatim, because clients
-// match on it (SQLancer's getCommonFetchErrors lists "but it cannot be
-// referenced from this part of the query"). The split is POSITIONAL:
-// `invalid reference to FROM-clause entry` is said of an entry already read
-// that this position cannot reach (reserved now for the alias and
-// out-of-scope-derived-table cases below, since a plain earlier relation is
-// simply visible); a relation a LATER join or LATER comma item introduces has
-// not been read, so it is `missing FROM-clause entry`; a table name the FROM
-// reads under an alias earns the hint to use the alias. See
-// docs/sql-reference.md "What an ON clause may name" and ADR-0012 §5 #617.
+// The relation census resolves qualifiers by scope and FROM position.
+// An ON clause sees relations declared so far, including an earlier comma
+// sibling, but not a later join or comma item. Alias-hidden, duplicate and
+// unknown qualifiers keep their named refusals. The earlier-comma extension
+// is recorded in ADR-0012 §5 (#617); #1220 retains the later-reference rule.
 
 // relationSite is one relation the block's FROM declares: the name it answers
 // to, the comma-separated FROM item it belongs to, and the JOIN that

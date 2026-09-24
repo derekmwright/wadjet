@@ -9,37 +9,10 @@ import (
 	"time"
 )
 
-// A DECORRELATION THAT MOVES A CONDITION MOVES IT ABOVE THE MASK (arc DC).
-//
-// Arc DC changes WHERE a predicate over a relation's columns is evaluated: a
-// condition inside a subquery body that names only the enclosing row is now
-// applied to the OUTER rows, and a conjunct of a body JOIN's ON that names the
-// enclosing query is lifted into the same classification the WHERE goes
-// through. Both are relocations of a predicate ACROSS a relation boundary, and
-// a policed relation is where a relocation stops being a performance question:
-// a masked column read at the wrong place answers the STORED value, and the
-// answer is the ROW SET rather than a cell, so a leak scan over the output
-// alone cannot see it (#859 round 2, ADR-0033).
-//
-// The cells are the two positions this arc moved, over the two policed
-// relations the census already stands up, with the row set each door must
-// answer written from the MASK's reading:
-//
-//	e7bal.bal is masked to 0 and STORED as ±100i, so `o.bal < 0` is FALSE for
-//	every row through the mask and TRUE for the odd ids through the column.
-//	e7emp.ssn is masked to '***' and stored as `true-ssn-NN`, so `o.ssn =
-//	'true-ssn-01'` matches NOTHING through the mask and row 1 through the
-//	column — and `o.ssn = '***'` matches EVERY row through the mask, which is
-//	the cell that proves the relocation fires at all rather than the whole
-//	gate passing on refusals.
-//
-// The salary cell is the third disposition: a DENIED column named from inside
-// a body must not become readable by being relocated.
-//
-// At 6b9c7acf every one of these bodies was planned with its condition pushed
-// into the SUBQUERY's relation with the qualifier stripped, so each refused
-// ("column does not exist") rather than answering — which is why this gate
-// fails at base on every door.
+// These DC cells check that relocated outer predicates read published
+// column values on every statement path. e7bal and e7emp distinguish stored
+// values from projected ones, include a matching control, and require a
+// refusal for an unavailable column. See ADR-0021 §1r and ADR-0033.
 func TestArcDCARelocatedBodyConditionReadsTheMaskOnEveryDoor(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: embedded cluster")

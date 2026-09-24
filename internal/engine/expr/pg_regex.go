@@ -118,42 +118,13 @@ func invalidARE(why string) error {
 	return sqlerr.New("2201B", "invalid regular expression: %s", why)
 }
 
-// aregexToRE2 translates a PostgreSQL ARE into the RE2 pattern that matches
-// the same strings. The form table (PostgreSQL 17 §9.7.3):
-//
-//	metasyntax  ***= rest-is-literal; ***: rest-is-ARE; a leading (?opts)
-//	            of b c e i m n p q s t w x — c, i, q, s, t are honoured,
-//	            the rest (BRE/ERE flavours, newline sensitivity, expanded
-//	            syntax) are refused
-//	.           any character INCLUDING newline → RE2 needs (?s)
-//	^ $         string start / end — RE2's defaults without (?m)
-//	\A \Z       string start / end → \A \z
-//	\m \M       start / end of word — no RE2 form: refused
-//	\y \Y       word boundary / not → \b \B
-//	\d \s \w    and their negations: the same in both, in brackets too
-//	\a \b \B \e \f \n \r \t \v
-//	            alert, BACKSPACE, BACKSLASH, escape, form feed, newline,
-//	            return, tab, vertical tab → the characters themselves
-//	\cX         the control character X & 0x1F
-//	\uwxyz \Ustuvwxyz \xhhh
-//	            the character with that hexadecimal code
-//	\0 \0nn     octal; \mnn a back reference when the pattern has that
-//	            many groups (refused — no RE2 form), else three octal
-//	            digits, else PostgreSQL's 2201B
-//	(?= (?! (?<= (?<!
-//	            lookaround — no RE2 form: refused
-//	[[.x.]] [[=x=]] [[:<:]] [[:>:]]
-//	            collating elements, equivalence classes and the word-edge
-//	            classes — refused; [[:class:]] is the same in both
-//	{m,n}       a bound; past PostgreSQL's 255 it is 2201B, and a `{` that
-//	            begins no bound is the literal brace
-//
-// Case-insensitivity (~*, (?i)) folds ASCII letters only: this server
-// compares text by its bytes — the C collation — and PostgreSQL under C folds
-// exactly the ASCII letters (`'É' ~* 'é'` is false there, measured). RE2's
-// own (?i) folds Unicode, so the letters are expanded here instead.
-//
-// Every other escaped character that is not alphanumeric is that character.
+// aregexToRE2 translates PostgreSQL ARE forms into equivalent RE2 forms.
+// It preserves newline matching, anchors, literal modes, character escapes
+// and bounds up to 255. Case-insensitive matching folds ASCII only.
+// Back references, lookaround, word-edge forms, collating elements and
+// unsupported embedded options refuse rather than change the match.
+// Malformed forms raise 2201B; unrepresentable forms raise 0A000.
+// See ADR-0044 and TestPatternMatchOperatorsAnswerAsPostgreSQL.
 func aregexToRE2(p string, icase bool) (string, error) {
 	// Metasyntax: ***= and ***: director prefixes.
 	switch {

@@ -472,10 +472,10 @@ func (r *Reader) refusal(err error, rec record, sc parquet.Column, val string) e
 		where, val, sqlTypeName(detectStringType(val)), sqlTypeName(sc.Type), sample)
 }
 
-// writeCSVValue parses val as typ into vec at row. A field that does not
-// parse is set NULL and answers errNotType (errOutOfRange for a number
-// outside the type); the caller decides whether that is the NULL (inside
-// the sample) or a refusal (past it).
+// writeCSVValue parses val as typ into vec at row. A field that cannot parse
+// is set NULL and returns errNotType, or errOutOfRange when outside the type.
+// The caller returns a typed refusal wherever the record occurs, including
+// inside the inference sample (ADR-0039 §3).
 func writeCSVValue(vec *batch.Vector, row int, val string, typ parquet.TypeID) error {
 	if val == "" && typ != parquet.TypeString {
 		// A QUOTED empty field is the empty string, not NULL, and no type

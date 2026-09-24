@@ -22,32 +22,11 @@ const (
 	maxObjectBytes   = 64 << 20
 )
 
-// StreamReader is the incremental counterpart of ColumnarReader: it parses
-// JSON (a top-level array of objects, or JSONL/concatenated objects) one
-// batch at a time, holding only a bounded byte window instead of the whole
-// file plus a full columnar copy (issue #130 — read_json materialized ~2-3×
-// the input in heap).
-//
-// Its input is a SEQUENCE of files (fileinput): read_json over a glob hands
-// it the matched files in name order, and each is its own JSON DOCUMENT —
-// its own `[`…`]` or run of objects, its own row numbers — with at most one
-// open at a time. Through v0.24.0 the files' bytes were concatenated and the
-// first file's `]` ended the whole input, so a glob of array files read the
-// first file only (#1262). A document that is not one — content after the
-// closing `]`, a top-level value that is not an object, an array with no
-// `]` — is refused with 22P02, naming the file and row, rather than ending
-// the input early as if it were the end of the file.
-//
-// Schema semantics match the eager reader's: inferred from the first
-// defaultSampleSize complete objects of the SEQUENCE (crossing into later
-// files when the first is short), except that the sample stops at
-// maxSampleBytes — then it is the complete objects that fit, and `sampled`
-// records how many, since every row past it is checked against the schema
-// (22P02 on a mismatch, 22003 out of range, 22007 for a timestamp). The
-// sampled objects are copied out of their files, so a sample that crosses
-// files holds at most maxSampleBytes and still only one open file.
-// Values are parsed by the same scanObjectInto byte scanner, so output
-// batches are identical to NewColumnarReader's whenever the samples agree.
+// StreamReader reads each file as its own JSON document and streams batches.
+// Each value must be an object; an array must close and have no content after
+// its closing bracket. Malformed input raises 22P02 with input and row context.
+// The first 100 rows determine the shared schema across files; later values
+// are checked against it. See ADR-0039 §3 and docs/sql-reference.md.
 type StreamReader struct {
 	inputs  []fileinput.Input
 	nextIn  int

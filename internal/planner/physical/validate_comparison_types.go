@@ -10,47 +10,13 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// TWO OPERANDS OF CLASSES POSTGRESQL HAS NO OPERATOR BETWEEN ARE REFUSED, NOT
-// COMPARED (#1073, #1216 item 2).
-//
-// The comparison kernels compared a value of one class with a value of
-// another and found them unequal, so a type mismatch answered like data.
-// Measured over every pair of the 18 flat types on five arms against
-// PostgreSQL 17.11 (arc BR's notes): `a.x = a.y` across classes answered ZERO
-// ROWS for every one of the 146 pairs PostgreSQL refuses; `x IN (SELECT y …)`
-// answered zero rows, or a runtime join-key error, or — date against integer —
-// 11 and 128 rows, or with a set operation in the body a cast error on the
-// DAG arms only; NOT IN answered every row; `1 = true` answered false and
-// `id = true` was 22P02 on one arm and zero rows on the other. PostgreSQL
-// raises 42883 `operator does not exist: bigint = text` for all of them, at
-// parse analysis, before any row.
-//
-// The classes are PostgreSQL's type categories over this engine's types, read
-// by what the WIRE declares: numbers (PORT and PROTOCOL are int4, DURATION is
-// int8), text, bytea, boolean, the date/time pair, the inet family (IPV4,
-// IPV6, CIDR), macaddr, uuid, and each container on its own.
-//
-// TEXT against a typed operand is decided PER PAIR from what the base engine
-// answered (textConversionAnswers): kept where one conversion answered the
-// same on every arm, refused where it matched wrongly or differed by arm.
-//
-// LITERALS keep their own rule. A QUOTED or NULL literal is SQL's `unknown`
-// and takes the other side's type (validate_literal.go). An UNQUOTED numeric
-// literal against a text or a temporal column is a recorded superset (ADR-0012
-// §5: the literal's text, the epoch instant), so a literal is refused here only
-// in the one pairing no reading makes sense of — a number against a boolean,
-// either way round (`1 = true`, `id = true`, `(id > 1) = 1`).
-//
-// An operand is typed STRUCTURALLY — a column's declaration, a CAST, a
-// predicate, an aggregate over those — and never from a scalar function's
-// registered return type: several of those declare text where the value is a
-// date or an address (`current_date`, `to_date`, `network_address`), and a
-// refusal built on that would refuse `current_date = CAST(now() AS date)`,
-// which PostgreSQL answers. An operand this layer cannot type is never
-// refused.
-//
-// The operator in the message is PostgreSQL's: `=` for IN, = ANY and IS [NOT]
-// DISTINCT FROM, `<>` for != and <>, `>=` then `<=` for BETWEEN.
+// cmpClass groups structurally known operands for comparison validation.
+// Unresolved operands defer; unknown literals use the other operand type.
+// Text conversion follows textConversionAnswers per pair and context, with
+// set-operation membership additionally requiring a matching CAST origin.
+// Two typed/text column join keys refuse; recorded numeric-literal readings
+// remain accepted. Number/boolean pairs refuse 42883. Scalar function return
+// labels alone do not prove a class. See ADR-0012 §5, #1073 and #1216.
 type cmpClass int
 
 const (
@@ -175,7 +141,7 @@ func isTypedLiteral(n plansql.Node) bool {
 // same on all five arms — a value compared with its own rendering matched all
 // 20 rows everywhere — and refused where it did not.
 //
-//	type            direct / JOIN / IN list   IN (subquery), = ANY
+//	type            direct / CAST JOIN / IN list   IN (subquery), = ANY
 //	int4, int8, float8, numeric,
 //	port, protocol, duration        keep            keep
 //	uuid, ipv6, cidr                keep            keep
@@ -184,7 +150,8 @@ func isTypedLiteral(n plansql.Node) bool {
 //	bytea, ipv4, macaddr            REFUSE: 0 of 20 directly; 0 single, 20 DAG as a subquery
 //
 // subquery is set for a membership test against a subquery body, a
-// set-operation body included (measured the same way per type).
+// set-operation body included; setOpMemberPair also requires the CAST origin.
+// Two plain text/typed column join keys are refused separately.
 func textConversionAnswers(t parquet.TypeID, subquery bool) bool {
 	switch t {
 	case parquet.TypeInt32, parquet.TypeInt64, parquet.TypeFloat64, parquet.TypeDecimal,
