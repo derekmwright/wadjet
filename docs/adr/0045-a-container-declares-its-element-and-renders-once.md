@@ -44,12 +44,28 @@ psql).
    (Type, Precision, Scale, Fields) — carries the element beside the fields.
    Set-op arms fold their ELEMENTS on the numeric ladder (`int4[] ∪ bigint[]`
    is `bigint[]`); arms with no common element are 42804.
+   **Round 2 (every PUBLISHER, from the same walk).** A column that an
+   operator PUBLISHES — an aggregate's output (grouped, HAVING, the empty
+   identity row), a window function's (MIN/MAX and the value functions over a
+   column or a computed argument), a scalar subquery's (the stamp carries the
+   element and fields), a bare GROUP BY / DISTINCT key, an aggregate read
+   through a renaming projection (a decorrelated LATERAL body) — declares its
+   element through `inputColShapes` and `ColDecls.namedDecl`, which answers a
+   named column's WHOLE shape; the single-process aggregate reads its
+   `AggColumn.OutputElementType` from that walk as the DAG's stage spec does,
+   and the DAG gather allocates and publishes a computed column from the whole
+   declaration. A zero-row result therefore declares what the same query with
+   rows declares, on every arm.
 2. **Loud, not plausible.** A container box written into a STRING or BYTES
    vector is a `*TypeMismatchError` (#361's guard), not `fmt.Sprint` text;
    a container written into an ARRAY/MAP/ROW vector allocated without its
    element or fields is a `*ContainerShapeError`, not the NULL the old silent
-   return left. After (1) no declared path reaches either; a path that does
-   not carry the declaration fails with a named error. A CAST of a container is
+   return left. Round 1 claimed no declared path reached either and the
+   review measured two that did (a correlated scalar subquery's MIN/MAX of an
+   array, the single path's empty MIN/MAX); round 2 closed both at the walk
+   above, and the claim is now the gates' — every publisher in the round-2
+   zero-row table and the correlated-subquery cells answer on every arm. A
+   path that does not carry the declaration fails with a named error. A CAST of a container is
    decided by ONE table before any scalar arm reads the box
    (`expr/cast_container.go`, round 2): text destinations take the rendering of
    §3, an array type converts element-wise, `VECTOR(n)` CONVERTS (pgvector's

@@ -233,6 +233,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 	}
 
 	var aggCols []exec.AggColumn
+	var aggShapes map[string]parquet.Column
 	for i, agg := range node.AggExprs {
 		fn := parseAggFunc(agg.Func)
 		if agg.Distinct && fn == exec.AggCount {
@@ -301,6 +302,21 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 		// one bar (#965).
 		if fields, ok := aggOhlcvOutputFields(node, agg); ok {
 			ac.OutputFields = fields
+		}
+		// A container-valued output's ELEMENT, from the same walk that
+		// declares the aggregate's output shape for every consumer above it
+		// (inputColShapes' Aggregate arm). The identity row of an EMPTY input
+		// has no vector to read it from, and without it the zero-row answer
+		// of `SELECT MIN(ARRAY[x]) … WHERE false` declared text on this path
+		// while the DAG declared the array (arc CW round 2, B1).
+		if (ac.OutputType == parquet.TypeArray || ac.OutputType == parquet.TypeMap) && ac.OutputElementType == nil {
+			if aggShapes == nil {
+				aggShapes = inputColShapes(node)
+			}
+			if sh, ok := aggShapes[strings.ToLower(cleanExpr(agg.OutputCol))]; ok && sh.Type == ac.OutputType && sh.ElementType != nil {
+				el := sh.ElementType.Clone()
+				ac.OutputElementType = &el
+			}
 		}
 		// A COMPUTED argument is declared from the projection this path
 		// materializes it under, which is the DAG's rule read off the local

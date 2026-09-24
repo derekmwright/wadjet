@@ -31,6 +31,12 @@ type SubqueryColumnDecl struct {
 	Type             parquet.TypeID
 	Precision, Scale int
 	IntWidth         int
+	// ElementType and Fields are a container column's shape — an ARRAY's
+	// or MAP's element, a ROW's fields — which a TypeID cannot say (arc CW
+	// round 2: a scalar subquery answering an ARRAY declared text on a
+	// zero-row result).
+	ElementType *parquet.Column
+	Fields      []parquet.Column
 }
 
 // ScanColumnStats holds aggregated column statistics from the catalog.

@@ -608,6 +608,14 @@ func inputColShapes(n *logical.Node) map[string]parquet.Column {
 				}
 				if f, ok := aggregateProjectionFields(n, p); ok {
 					out[name] = parquet.Column{Type: parquet.TypeRow, Fields: f}
+				} else if sh, ok := aggOutputShapeBelow(below, p); ok {
+					// The aggregate's OWN output shape, which the Aggregate
+					// arm below publishes under its output column — a
+					// container MIN/MAX's element. SHADOWING it lost the
+					// element of every aggregate read through a projection
+					// that renames it: a LATERAL body's `MAX(c2.ad) AS a`
+					// declared a zero-row `t.a` as text (arc CW round 2, B1).
+					out[name] = sh
 				} else {
 					out[name] = parquet.Column{}
 				}
@@ -655,6 +663,7 @@ func inputColShapes(n *logical.Node) map[string]parquet.Column {
 		// declare a ROW today — the bar — and it declares it through the one
 		// derivation ADR-0035 item 5 names.
 		var out map[string]parquet.Column
+		var childShapes map[string]parquet.Column
 		if len(n.Children) == 1 {
 			for i, k := range groupKeyOutputs(n) {
 				var ast plansql.Node
@@ -665,11 +674,39 @@ func inputColShapes(n *logical.Node) map[string]parquet.Column {
 					ast, _ = plansql.ParseExpression(n.GroupBy[i])
 				}
 				d := derivedGroupKeyDecl(n.GroupBy[i], ast, n.Children[0])
-				if sh := declShape(d); sh.Type != 0 || sh.Fields != nil || sh.ElementType != nil {
+				sh := declShape(d)
+				// A BARE column key forwards the column: derivedGroupKeyDecl
+				// withholds a bare reference's declaration (exec.Project types
+				// a copy from the column it copies), so a container key's
+				// element came from nowhere and `SELECT DISTINCT av` /
+				// `GROUP BY av` declared its zero-row array as text (arc CW
+				// round 2, B1). The shape below IS the key's shape.
+				if sh.Fields == nil && sh.ElementType == nil {
+					if cr, ok := plansql.Unparen(ast).(*plansql.ColRef); ok {
+						if childShapes == nil {
+							childShapes = inputColShapes(n.Children[0])
+						}
+						// The qualified spelling first, then the bare one — a
+						// join's walk drops a bare name its two sides declare
+						// differently, so the bare entry is never the other
+						// side's shape.
+						if c, ok := childShapes[strings.ToLower(cr.Table+"."+cr.Column)]; ok && cr.Table != "" {
+							sh = c
+						} else if c, ok := childShapes[strings.ToLower(cleanExpr(cr.Column))]; ok {
+							sh = c
+						}
+					}
+				}
+				if sh.Type != 0 || sh.Fields != nil || sh.ElementType != nil {
 					if out == nil {
 						out = map[string]parquet.Column{}
 					}
 					out[strings.ToLower(cleanExpr(k.Name))] = sh
+					// And under the spelling the aggregate EMITS the key as
+					// (`q.a` over a derived table), which is the key its
+					// emitted TYPE is published under — colDecl reads the
+					// type and the element from one key.
+					out[strings.ToLower(strings.TrimSpace(k.Name))] = sh
 				}
 			}
 		}
@@ -718,6 +755,32 @@ func inputColShapes(n *logical.Node) map[string]parquet.Column {
 			}
 		}
 		return out
+	case logical.NodeWindow:
+		// A Window forwards its input and ADDS one column per window
+		// function. A MIN/MAX (or a value function) over a container answers
+		// the argument's value, so its output's shape is the argument's —
+		// the declaration a zero-row `MIN(ARRAY[x]) OVER ()` is described
+		// from (arc CW round 2, B1).
+		if len(n.Children) != 1 {
+			return nil
+		}
+		out := inputColShapes(n.Children[0])
+		for _, we := range n.WindowExprs {
+			name := strings.ToLower(strings.TrimSpace(we.OutputCol))
+			if name == "" {
+				continue
+			}
+			sh := declShape(windowSpecOutputType(n, we))
+			if sh.Fields == nil && sh.ElementType == nil {
+				delete(out, name)
+				continue
+			}
+			if out == nil {
+				out = map[string]parquet.Column{}
+			}
+			out[name] = sh
+		}
+		return out
 	case logical.NodeJoin:
 		if len(n.Children) != 2 {
 			return nil
@@ -757,6 +820,22 @@ func inputColShapes(n *logical.Node) map[string]parquet.Column {
 		return merged
 	}
 	return nil
+}
+
+// aggOutputShapeBelow is the container shape the Aggregate below publishes
+// for the aggregate an IsAgg projection reads, under whichever spelling the
+// projection names it by.
+func aggOutputShapeBelow(below map[string]parquet.Column, p logical.Projection) (parquet.Column, bool) {
+	for _, k := range []string{p.Column, p.Alias, p.Expr} {
+		k = strings.ToLower(cleanExpr(k))
+		if k == "" {
+			continue
+		}
+		if sh, ok := below[k]; ok && (sh.Fields != nil || sh.ElementType != nil) {
+			return sh, true
+		}
+	}
+	return parquet.Column{}, false
 }
 
 // sameShape reports whether two container shapes describe one declaration,
@@ -1075,7 +1154,19 @@ func (d ColDecls) colDecl(n *plansql.ColRef) (parquet.Column, bool) {
 			return parquet.Column{}, false
 		}
 		col := parquet.Column{Name: key, Type: t, Fields: d.Fields[key]}
-		if e, ok := d.Elems[key]; ok && e.Type == t && e.ElementType != nil {
+		e, ok := d.Elems[key]
+		if !ok {
+			// A QUALIFIED key (`c2.ad` over an aliased scan) whose type the
+			// map carries under the qualifier while the shape walk keys the
+			// column bare: the bare entry is this column's element, because
+			// a join's shape walk drops a bare name its sides declare
+			// differently (arc CW round 2, B1 — a decorrelated LATERAL's
+			// `MAX(c2.ad)` declared no element).
+			if dot := strings.LastIndexByte(key, '.'); dot >= 0 {
+				e, ok = d.Elems[key[dot+1:]]
+			}
+		}
+		if ok && e.Type == t && e.ElementType != nil {
 			el := e.ElementType.Clone()
 			col.ElementType = &el
 		}

@@ -159,7 +159,12 @@ func (c *Coordinator) dispatchGatherStage(
 // declared type, SetValue per row — so the gather and the single-process
 // projection build the same column from the same expression.
 func evalDeclaredColumn(e expr.Expr, b *batch.RecordBatch, decl parquet.Column) *batch.Vector {
-	v := batch.NewVectorWithScale(decl.Type, b.Len, decl.Scale)
+	// The WHOLE declaration allocates the vector — a container's element or
+	// fields, a VECTOR's dimension — as exec.Project's does: a bare TypeID
+	// built an ARRAY with no child, and `COALESCE(MIN(av), …)` over the
+	// gather refused where the single-process path answered (arc CW round
+	// 2, B1).
+	v := batch.NewColumnVector(decl, b.Len)
 	emit := func(row, dst int) { v.SetValue(dst, e.Eval(b, row)) }
 	if b.Sel != nil {
 		for i, src := range b.Sel {

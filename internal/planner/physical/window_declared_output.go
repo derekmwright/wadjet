@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/engine/expr"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
@@ -169,8 +170,24 @@ func windowSpecOutputType(node *logical.Node, we logical.WindowExpr) expr.DeclTy
 					if out == parquet.TypeDecimal && d.DecKnown {
 						return d
 					}
+					// A container's whole shape, the element with it: the
+					// zero-row answer is described from this alone (arc CW
+					// round 2, B1).
+					if batch.IsContainerType(batch.TypeID(out)) && d.Schema != nil {
+						return d
+					}
 					return expr.Decl(out)
 				}
+			}
+		}
+		// A VALUE function (FIRST_VALUE, LAG, …) copies its argument too,
+		// so a computed argument declares the result exactly as a column
+		// argument does below (`return t`): FIRST_VALUE(ARRAY[x]) OVER (…)
+		// fell to float8 on a zero-row result, which is described from this
+		// declaration alone (arc CW round 2, B1).
+		if windowValueFunc(fn) {
+			if d, _, ok := windowComputedArgDecl(node, we); ok {
+				return d
 			}
 		}
 		return expr.Decl(windowOutputType(fn))
@@ -236,6 +253,9 @@ func windowSpecOutputType(node *logical.Node, we logical.WindowExpr) expr.DeclTy
 			// is described from this declaration alone, with no vector to
 			// re-type from — went out as float8 where the same query over
 			// rows went out as numeric (#587).
+			return t
+		}
+		if batch.IsContainerType(batch.TypeID(out)) && t.Schema != nil {
 			return t
 		}
 		return expr.Decl(out)

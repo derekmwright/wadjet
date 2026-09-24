@@ -410,6 +410,13 @@ func (br *batchRenamer) apply(b *batch.RecordBatch) *batch.RecordBatch {
 			// disagreed with its own vector would be read back at the wrong
 			// power of ten.
 			newSchema[i] = parquet.Column{Name: r.To, Type: col.Type, Nullable: true}
+			// A container's shape follows the vector too — its element, its
+			// fields, a VECTOR's dimension — or the wire declares text for an
+			// array the gather computed (arc CW round 2, B1).
+			if batch.IsContainerType(col.Type) || col.Type == parquet.TypeVector {
+				newSchema[i] = batch.VectorDecl(r.To, col)
+				newSchema[i].Nullable = true
+			}
 			if col.Type == parquet.TypeDecimal {
 				newSchema[i].Precision = br.exprDecPrecision(i, e, b)
 				newSchema[i].Scale = col.DecimalData.Scale

@@ -144,7 +144,8 @@ func subqueryDeclsOf(n *logical.Node) (func(string) (parquet.Column, bool), func
 			if !ok {
 				return parquet.Column{}, false
 			}
-			return parquet.Column{Type: d.Type, Precision: d.Precision, Scale: d.Scale}, true
+			return parquet.Column{Type: d.Type, Precision: d.Precision, Scale: d.Scale,
+				ElementType: d.ElementType, Fields: d.Fields}, true
 		}, func(sql string) (intWidth, bool) {
 			d, ok := m[sql]
 			if !ok {
@@ -207,7 +208,8 @@ func (p *Planner) scalarSubqueryColumnDecl(sql string) (decl logical.SubqueryCol
 	if ok {
 		d = logical.SubqueryColumnDecl{
 			Type: col.Type, Precision: col.Precision, Scale: col.Scale,
-			IntWidth: p.subqueryOutputIntWidth(sql, col.Type),
+			IntWidth:    p.subqueryOutputIntWidth(sql, col.Type),
+			ElementType: col.ElementType, Fields: col.Fields,
 		}
 		// A DECIMAL without its scale is not a declaration: a vector built
 		// from it reads every value at the wrong power of ten, which is why

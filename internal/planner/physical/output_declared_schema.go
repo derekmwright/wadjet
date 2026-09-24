@@ -864,18 +864,10 @@ func declaredProjectionDecl(proj logical.Projection, decls ColDecls, strictInt m
 	if proj.IsAgg {
 		// The aggregate below emitted a column under this alias; its type
 		// is in the child's emitted map.
-		name := declaredProjectionName(proj)
-		t, ok := lookupColType(decls.Types, name)
-		if !ok {
-			return expr.Decl(parquet.TypeString)
+		if d, ok := decls.namedDecl(declaredProjectionName(proj)); ok {
+			return d
 		}
-		if t == parquet.TypeDecimal {
-			if m, ok := lookupColDecimal(decls.Dec, name); ok && m.Precision > 0 {
-				return expr.DeclDecimal(m.Precision, m.Scale)
-			}
-			return expr.Decl(parquet.TypeDecimal)
-		}
-		return expr.DeclType{ID: t, Schema: &parquet.Column{Type: t, Fields: decls.Fields[strings.ToLower(name)]}}
+		return expr.Decl(parquet.TypeString)
 	}
 	// A ROW FIELD PATH is not the bare reference it looks like: the name
 	// resolution below strips the qualifier and then finds no column, so
@@ -915,13 +907,8 @@ func declaredProjectionDecl(proj logical.Projection, decls ColDecls, strictInt m
 		// #361's silent-write guard failed the task after three attempts
 		// (#949).
 		if name := strings.TrimSpace(proj.Expr); name != "" {
-			if t, ok := lookupColType(decls.Types, name); ok {
-				if t == parquet.TypeDecimal {
-					if m, ok := lookupColDecimal(decls.Dec, name); ok && m.Precision > 0 {
-						return expr.DeclDecimal(m.Precision, m.Scale)
-					}
-				}
-				return expr.DeclType{ID: t, Schema: &parquet.Column{Type: t, Fields: decls.Fields[strings.ToLower(name)]}}
+			if d, ok := decls.namedDecl(name); ok {
+				return d
 			}
 		}
 		return inferProjectionDeclType(proj.ASTExpr, parquet.TypeString, strictInt, decls)
@@ -944,17 +931,43 @@ func declaredProjectionDecl(proj logical.Projection, decls ColDecls, strictInt m
 	if ref == "" {
 		ref = cleanExpr(proj.Expr)
 	}
-	t, ok := lookupColType(decls.Types, ref)
+	if d, ok := decls.namedDecl(ref); ok {
+		return d
+	}
+	return expr.Decl(parquet.TypeString)
+}
+
+// namedDecl is a column the walk below emitted under name, as the WHOLE
+// declaration: a DECIMAL's (p,s), a ROW's fields, an ARRAY's or MAP's
+// element. It is the one lookup declaredProjectionDecl's three name-resolving
+// arms share (arc CW round 2, B1): each used to rebuild the column from the
+// TypeID and the ROW fields alone, so an aggregate, window or scalar-subquery
+// output that IS an ARRAY — `MIN(av)` grouped, `MIN(ARRAY[x]) OVER ()` — was
+// declared ARRAY with no element, and a zero-row result told the client text
+// (OID 25) where the same query with a row declared the array's OID.
+func (d ColDecls) namedDecl(name string) (expr.DeclType, bool) {
+	t, ok := lookupColType(d.Types, name)
 	if !ok {
-		return expr.Decl(parquet.TypeString)
+		return expr.DeclType{}, false
 	}
 	if t == parquet.TypeDecimal {
-		if m, ok := lookupColDecimal(decls.Dec, ref); ok && m.Precision > 0 {
-			return expr.DeclDecimal(m.Precision, m.Scale)
+		if m, ok := lookupColDecimal(d.Dec, name); ok && m.Precision > 0 {
+			return expr.DeclDecimal(m.Precision, m.Scale), true
 		}
-		return expr.Decl(parquet.TypeDecimal)
+		return expr.Decl(parquet.TypeDecimal), true
 	}
-	return expr.DeclType{ID: t, Schema: &parquet.Column{Type: t, Fields: decls.Fields[strings.ToLower(ref)]}}
+	key := strings.ToLower(strings.TrimSpace(name))
+	if _, direct := d.Types[key]; !direct {
+		if dot := strings.LastIndexByte(key, '.'); dot >= 0 {
+			key = key[dot+1:]
+		}
+	}
+	col := parquet.Column{Type: t, Fields: d.Fields[key]}
+	if e, ok := d.Elems[key]; ok && e.Type == t && e.ElementType != nil {
+		el := e.ElementType.Clone()
+		col.ElementType = &el
+	}
+	return expr.DeclType{ID: t, Schema: &col}, true
 }
 
 // declaredProjectionDecimal is the DECIMAL half of declaredProjectionDecl,
