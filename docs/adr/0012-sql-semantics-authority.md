@@ -3002,6 +3002,11 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      vector to read the element from and `colDecls` carries no element map.
      The last is pinned fail-on-agree in
      `pgwire.TestAZeroRowArrayResultKeepsItsDeclaration`.
+     **The zero-row shape left the list 2026-09-24 (arc CW, #1133):** the
+     declared-output seam carries a container's element (ADR-0045), so a
+     zero-row ARRAY result declares its array OID; the pin flipped to 1007
+     as the proof. A nested array now renders bare (`{{1,2},{3,4}}`,
+     `array_out`'s form) and keeps OID 25 for the raggedness above.
 
      The ROW half of this entry is unchanged. The VALUE is
      PostgreSQL's own composite text in DECLARED field order, byte for byte
@@ -3625,6 +3630,12 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      projection can carry an ARRAY declaration. Fixed-schema ROW declarations
      travel through the complete column declaration independently (A3b);
      ARRAY/MAP element declarations remain #1017's open class.
+     **CLOSED 2026-09-24 (arc CW, #1017):** the registry's container returns
+     carry their element (`tcp_flags`, `current_schemas`: text; the MAP
+     functions: derived from the argument's key/value), so `SELECT
+     tcp_flags(f)` declares `text[]` (1009) and renders `{SYN,ACK}` on every
+     door; the pin `wadjet.TestATopLevelTCPFlagsProjectionIsTextToday` was
+     deleted as the proof (ADR-0045).
 
    - **`has_tcp_flag` and `tcp_flags_from_string` now REFUSE a name they do not
      know.** (Added 2026-09-08, arc A2, #966.) They predate the family above
@@ -3974,8 +3985,8 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      are empty strings. Invalid strings return NULL, or 22023 naming the string
      in the strict form. NULL remains NULL in either form.
      This covers #1017's fixed-schema ROW case and #1055's derived stored-field
-     grouping. ARRAY/MAP scalar declarations remain on their existing #1017
-     disposition. Composite scalar-subquery transport retains its existing
+     grouping. ARRAY/MAP scalar declarations were closed by arc CW
+     (2026-09-24, ADR-0045). Composite scalar-subquery transport retains its existing
      local route; declarations and values now survive it. See
      [fixed ROW declarations](../internals/scalar-row-declarations.md).
 

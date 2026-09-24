@@ -70,9 +70,21 @@ PostgreSQL answers the statement's start time for every row, so `WHERE LOCALTIME
 
 `DATE_ADD(x, n)` and `DATE_SUB(x, n)` (this engine's own functions; PostgreSQL has neither) answer a DATE only for a DATE `x` shifted by whole days; over text — `DATE_ADD('2026-03-03', 1)` — the result is a TIMESTAMP (`2026-03-04 00:00:00`), PostgreSQL's preferred datetime type for an unknown-typed argument. They used to answer text that rendered a date or an instant by the spelling of the input. (ADR-0012 §5/#1254-siblings)
 
-**Array-returning functions can publish text.**
+**`tcp_flags` and the MAP functions have no PostgreSQL spelling; their arrays are PostgreSQL's.**
 
-`SELECT tcp_flags(f)` returns `[SYN ACK]` under OID 25 because the projection lacks an element declaration; PostgreSQL has no corresponding function. (ADR-0012 §5/#1017)
+`tcp_flags(18)` is `text[]` (OID 1009) rendering `{SYN,ACK}`; `map_keys`/`map_values` are arrays of the MAP's key/value type in the MAP's stored order, and `map_entries` is an array of `(key,value)` composites (OID 25, as every ROW-element array is). (ADR-0045)
+
+**A MAP renders as `{k: v, …}` under OID 25.**
+
+PostgreSQL has no MAP type, so the rendering is this engine's rule: `{a: 1, b: 2}`, `{}` for an empty map. (ADR-0045)
+
+**An array of a network type declares `text[]`.**
+
+`ARRAY[CAST('1.2.3.4' AS IPV4)]` is `text[]` (1009) rendering `{1.2.3.4}`; PostgreSQL's `ARRAY['1.2.3.4'::inet]` is `inet[]` (1041) with the same text. The scalar network types declare text as well. (ADR-0045)
+
+**`x::int[]` is `bigint[]`, and a fractional literal array is `double precision[]`.**
+
+An array cast's element follows the scalar cast of the same spelling, and `CAST(x AS INT)` is bigint here (ADR-0012 item 12), so `ARRAY[]::int[]` declares 1016 where PostgreSQL declares 1007. `ARRAY[1.5, 2.25]` is `float8[]` (1022) where PostgreSQL's is `numeric[]` (1231) — ADR-0024's literal deferral; the text `{1.5,2.25}` agrees. (ADR-0045)
 
 **Grouped MIN/MAX over REAL declares float8.**
 
@@ -88,7 +100,7 @@ Composite text agrees; wire mapping uses OID 25 versus record OID 2249. (ADR-001
 
 **Some ARRAY results still declare text.**
 
-Nested arrays, ROW/MAP elements and unknown element types use OID 25; ordinary arrays use PostgreSQL OIDs. PostgreSQL cannot represent ragged arrays. (ADR-0012 §5/#992-residuals)
+Nested arrays and ROW/MAP elements use OID 25; ordinary arrays — stored, constructed, returned by a function, read through a derived table, VALUES or UNION, and a zero-row result — use PostgreSQL's array OIDs. A nested array renders as PostgreSQL's array_out does (`{{1,2},{3,4}}`) but may be ragged (`{{1,2},{3}}`), which PostgreSQL cannot represent. (ADR-0012 §5/#992-residuals, ADR-0045)
 
 **TIME, JSON and XML casts declare text.**
 

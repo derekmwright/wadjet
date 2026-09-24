@@ -60,3 +60,4 @@ Conventions:
 | [0040](0040-a-resolved-setting-belongs-to-the-instance-that-uses-it.md) | A resolved setting belongs to the instance that uses it — never package state — and rides the task to a process that re-plans the statement | Accepted |
 | [0041](0041-an-embedded-catalog-is-a-directory-opened-the-way-serve-opens-it.md) | An embedded program's catalog is a DIRECTORY, opened the way `serve` opens it: one lock, one JetStream store, one set of tables across the program, the CLI and the server | Accepted |
 | [0044](0044-the-system-catalog-is-relations-the-engine-scans.md) | pg_catalog and information_schema are relations the engine scans, materialized through the identity's view — not a canned responder over statement text | Accepted |
+| [0045](0045-a-container-declares-its-element-and-renders-once.md) | A container carries its element type through the declared-output seam to every door, and renders through one PostgreSQL text renderer | Accepted |

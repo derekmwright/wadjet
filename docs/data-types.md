@@ -694,13 +694,46 @@ reads a real array rather than a string:
 | `UUID` | `uuid[]` | 2951 |
 
 The BINARY format carries PostgreSQL's array wire form under those OIDs, and
-the text format is the `{…}` it always was. Two element kinds keep OID 25, and
-both are a fact about PostgreSQL rather than a gap: a NESTED array, because
-PostgreSQL's `int4[][]` is rectangular and this engine's nested arrays are
-ragged (`{{1,2},{3}}` is a value here and a syntax error there), and a `ROW` or
-`MAP` element, which would need a registered composite OID. An ARRAY the
-planner could not type — a ZERO-ROW result, where there is no vector to read
-the element from — declares 25 as well; both are in ADR-0012's list.
+the text format is PostgreSQL's `array_out`: `{…}`, an element quoted (with `"`
+and `\` escaped) when it is empty, contains a delimiter, brace, quote,
+backslash or space, or is the word `NULL`; a NULL element as bare `NULL`; a
+`TIMESTAMP` or `DATE` element in its text form (`{"2024-06-15 12:30:45.5",NULL}`).
+Two element kinds keep OID 25, and both are a fact about PostgreSQL rather than
+a gap: a NESTED array, because PostgreSQL's `int4[][]` is rectangular and this
+engine's nested arrays are ragged (`{{1,2},{3}}` is a value here and a syntax
+error there; it renders bare, as `array_out` does), and a `ROW` or `MAP`
+element, which would need a registered composite OID (an array of ROW renders
+`{"(1,a)","(2,\"b c\")"}`).
+
+**Every producer declares the same way** (ADR-0045). The declaration is not a
+property of a stored column: the `ARRAY[…]` constructor, an array cast
+(`'{1,2}'::int[]`), a container-returning function (`tcp_flags` is `text[]`;
+`map_keys`/`map_values` are arrays of the MAP's key/value type, in its stored
+order; `map_entries` an array of `(key,value)` composites), a column read
+through a derived table, a CTE, `VALUES` or a `UNION`, and a ZERO-ROW result
+all declare the element and render as above. So an array read back through a
+derived table is still an array — `v[1]` is its element (a `TIMESTAMP` element
+is a timestamp, not an integer), `2 = ANY(v)` compares elements — and `ORDER
+BY`, `MIN`, `MAX` and `DISTINCT` compare arrays ELEMENT-WISE as PostgreSQL
+does: an empty array first, a shorter prefix before a longer array, a NULL
+element after every value. `UNION` arms whose elements differ fold on the
+numeric ladder (`int4[] ∪ bigint[]` is `bigint[]`); arms with no common element
+type are `42804`. `CAST(container AS TEXT)` is the same rendering.
+
+A MAP has no PostgreSQL type; it declares OID 25 and renders `{a: 1, b: 2}`
+(`{}` when empty).
+
+**The other doors render the same value.** The CLI's table and CSV output print
+the PostgreSQL text above for every container. Its JSON output keeps a JSON
+array / object (as PostgreSQL's `to_json` of an array is a JSON array), with
+each temporal leaf in its text form. The HTTP query API and the async query
+API return raw values: an ARRAY is a JSON array and a ROW or MAP a JSON object,
+with each leaf boxed as a top-level value of its type is (a `TIMESTAMP` element
+is epoch milliseconds there, as a `TIMESTAMP` column is).
+
+A container value that reaches a TEXT column through some path that did not
+carry its declaration is refused with a type-mismatch error rather than
+published as text (ADR-0045 §2).
 
 **Array functions:** `cardinality`, `element_at`, `array_contains`, `array_join`, `array_min`, `array_max`, `array_length`
 

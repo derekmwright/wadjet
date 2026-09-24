@@ -4021,7 +4021,7 @@ folded before execution and pushed into the scan.
 | `TCP_FLAGS_HAS_ANY(flags, name, ...)` | At least one named bit is set | `(flags & mask) <> 0` | `TCP_FLAGS_HAS_ANY(tcp_flags, 'RST', 'FIN')` |
 | `TCP_FLAGS_HAS_NONE(flags, name, ...)` | No named bit is set | `(flags & mask) = 0` | `TCP_FLAGS_HAS_NONE(tcp_flags, 'ACK')` |
 | `TCP_FLAG_MASK(name, ...)` | The integer mask the names denote | — | `TCP_FLAG_MASK('SYN', 'ACK')` → `18` |
-| `TCP_FLAGS(flags)` | The set bits as an ARRAY of names, in header bit order | — | `TCP_FLAGS(18)` → `[SYN ACK]` (see below) |
+| `TCP_FLAGS(flags)` | The set bits as a `text[]` of names, in header bit order | — | `TCP_FLAGS(18)` → `{SYN,ACK}` |
 | `TCP_FLAGS_TEXT(flags)` | The same names joined with a pipe | — | `TCP_FLAGS_TEXT(18)` → `'SYN\|ACK'` |
 
 `TCP_FLAGS` and `TCP_FLAGS_TEXT` name only the nine bits above; a bit outside
@@ -4046,11 +4046,10 @@ statistics prune is ever attributed to one. A row group whose values the scan
 has already read and found unmatching is still skipped, which is the ordinary
 post-evaluation skip and a different counter.
 
-A top-level projection of `TCP_FLAGS(flags)` is declared `TEXT` rather than
-`ARRAY`, as every container-returning function's is, and renders Go's slice
-form — `[SYN ACK]`, not PostgreSQL's `{SYN,ACK}` (issue #1017). `ELEMENT_AT`
-and `ARRAY_LENGTH` read the same value as the array it is, and
-`TCP_FLAGS_TEXT` is the function to use for a rendered list.
+`TCP_FLAGS(flags)` declares `text[]` (OID 1009) wherever it is projected — at
+the top level, through a derived table and in a zero-row result — and renders
+PostgreSQL's array text `{SYN,ACK}`; `TCP_FLAGS(flags)[1]` is `SYN`.
+`TCP_FLAGS_TEXT` is the function to use for a pipe-joined string.
 
 `TCP_FLAGS_FROM_STRING` reads a comma-separated list. An EMPTY string is a list
 of no names and answers `0`; an empty ELEMENT (`'SYN,'`, `'SYN,,ACK'`) is
@@ -4490,9 +4489,9 @@ in PostgreSQL: `CARDINALITY(ARRAY[])` is `0` because there are no elements, and
 | Function | Description | Example |
 |----------|-------------|---------|
 | `ELEMENT_AT(map, key)` | Lookup value by key | `ELEMENT_AT(headers, 'Host')` |
-| `MAP_KEYS(map)` | Extract all keys as ARRAY | `MAP_KEYS(labels)` |
-| `MAP_VALUES(map)` | Extract all values as ARRAY | `MAP_VALUES(labels)` |
-| `MAP_ENTRIES(map)` | Convert to ARRAY(ROW(key, value)) | `MAP_ENTRIES(headers)` |
+| `MAP_KEYS(map)` | The keys as an ARRAY of the key type, in the map's stored order | `MAP_KEYS(labels)` → `{a,b}` |
+| `MAP_VALUES(map)` | The values as an ARRAY of the value type, in the same order | `MAP_VALUES(labels)` → `{1,2}` |
+| `MAP_ENTRIES(map)` | An ARRAY(ROW(key, value)) in the same order | `MAP_ENTRIES(labels)` → `{"(a,1)","(b,2)"}` |
 | `MAP_FROM_ENTRIES(entries)` | Construct MAP from entry array | `MAP_FROM_ENTRIES(pairs)` |
 
 ### Vector Functions
@@ -5118,4 +5117,6 @@ Fixed-schema scalar ROW results retain their declared fields through projections
 DISTINCT, GROUP BY, set operations and window keys. A computed field can be read
 as `(function(arg)).field`; derived-table field grouping uses the same parent
 binding as aggregate inputs. See [scalar ROW declarations](internals/scalar-row-declarations.md).
-The existing ARRAY/MAP scalar declaration limitation remains tracked by #1017.
+ARRAY and MAP results declare their element the same way — through derived tables,
+set operations and zero-row results — and render as PostgreSQL's array text on
+every door; see [data-types.md](data-types.md) §Nested Types and ADR-0045.
