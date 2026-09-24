@@ -1199,18 +1199,30 @@ func (v *Vector) SetValue(i int, val any) {
 			v.BytesData.Set(i, []byte(tv))
 		case []byte:
 			v.BytesData.Set(i, tv)
+		case []any, map[string]any:
+			// A container box has no text form without its DECLARED type
+			// (ARRAY vs MAP, a timestamp element vs an int64): fmt.Sprint
+			// printed Go text (`[1 2 3]`, `map[k:v]`) that every door then
+			// shipped as a string (#1250 #1017). A container reaching a
+			// string vector means a declaration seam did not carry the
+			// element — fail loudly instead of publishing that text
+			// (ADR-0026's declared-output amendment; batch.FormatPGText is
+			// the one renderer, keyed on the declared column).
+			v.mismatch(val)
 		default:
-			// Coerce non-string values to string representation
+			// Coerce a scalar to its string representation.
 			v.BytesData.Set(i, []byte(fmt.Sprint(val)))
 		}
 	case TypeBytes:
-		// Coerces like TypeString above: any value has a string form, so a
-		// bytes destination can always hold it. Deliberately NOT guarded.
+		// Coerces a scalar like TypeString above; a container box fails
+		// loudly for the same reason.
 		switch tv := val.(type) {
 		case []byte:
 			v.BytesData.Set(i, tv)
 		case string:
 			v.BytesData.Set(i, []byte(tv))
+		case []any, map[string]any:
+			v.mismatch(val)
 		default:
 			v.BytesData.Set(i, []byte(fmt.Sprint(val)))
 		}

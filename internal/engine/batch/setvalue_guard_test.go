@@ -76,6 +76,13 @@ func TestSetValueGuardPanicsOnUnholdableValues(t *testing.T) {
 		// advancing Offsets, so every LATER row read back shifted.
 		{"map into Array", TypeArray, map[string]any{"a": 1}},
 		{"slice into Row", TypeRow, []any{int64(1)}},
+		// Arc CW item 2: a container box into a STRING/BYTES vector printed
+		// Go text (`[1 2 3]`, `map[k:v]`) that the wire shipped as text
+		// (#1250 #1017). Only the declared column can render it.
+		{"array box into String", TypeString, []any{int64(1), int64(2)}},
+		{"row/map box into String", TypeString, map[string]any{"k": "v"}},
+		{"array box into Bytes", TypeBytes, []any{"a"}},
+		{"row/map box into Bytes", TypeBytes, map[string]any{"k": int64(1)}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
