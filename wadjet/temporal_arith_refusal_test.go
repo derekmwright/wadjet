@@ -39,6 +39,7 @@ func TestTemporalArithmeticPostgreSQLHasNoOperatorFor(t *testing.T) {
 	for _, tc := range []struct{ sql, msg string }{
 		{"SELECT ts + 0 AS v FROM ta", "operator does not exist: timestamp without time zone + integer"},
 		{"SELECT MAX(ts) + 0 AS v FROM ta", "operator does not exist: timestamp without time zone + integer"},
+		{"SELECT MAX(ts) OVER () + 0 AS v FROM ta", "operator does not exist: timestamp without time zone + integer"},
 		{"SELECT now() + 1 AS v", "operator does not exist: timestamp without time zone + integer"},
 		{"SELECT d + 1.5 AS v FROM ta", "operator does not exist: date + numeric"},
 		{"SELECT CURRENT_DATE - 1.5 AS v", "operator does not exist: date - numeric"},

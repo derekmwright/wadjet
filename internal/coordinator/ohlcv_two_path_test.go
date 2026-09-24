@@ -310,7 +310,9 @@ func ohlcvCells() []ohlcvCell {
 		// name nothing produces, which would replace one engine's loud failure
 		// with a column of NULLs.
 		{name: "a_computed_ordering_key_is_loud_on_every_arm",
-			sql:            `SELECT ohlcv(ts + 0, px_f64, vol_i64) AS b FROM ` + ohlcvTable,
+			// A computed TIMESTAMP (`ts + 0` was one before arc VL round 3
+			// refused a timestamp plus a number, 42883, as PostgreSQL does).
+			sql:            `SELECT ohlcv(ts + INTERVAL '1 second', px_f64, vol_i64) AS b FROM ` + ohlcvTable,
 			wantErrLikeAll: "is not a column of its input",
 			pgSays:         "PostgreSQL answers it; no wadjet engine materializes a computed second argument"},
 		{name: "a_computed_volume_is_loud_on_every_arm",

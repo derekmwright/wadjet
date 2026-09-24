@@ -441,6 +441,11 @@ func (c *comparisonTyper) temporalArithmetic(n *plansql.BinaryOp) error {
 // its declaration — so a clock function or nested date arithmetic is typed
 // too.
 func (c *comparisonTyper) arithOperand(n plansql.Node) (parquet.TypeID, bool) {
+	// A window aggregate is typed as its aggregate is: `MAX(ts) OVER ()` is
+	// the timestamp `MAX(ts)` is, on every arm.
+	if w, ok := plansql.Unparen(n).(*plansql.WindowFuncNode); ok && w.Func != nil {
+		return c.arithOperand(w.Func)
+	}
 	if t, ok := c.operand(n); ok {
 		if t == parquet.TypeString && isTextColRef(n, c.decls) {
 			return 0, false // a VARCHAR column is a day to date arithmetic
