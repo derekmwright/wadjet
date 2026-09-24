@@ -98,6 +98,18 @@ func collectColRefsBelow(n plansql.Node, stop func(plansql.Node) bool) []*plansq
 				walk(w.Cond)
 				walk(w.Result)
 			}
+		case *plansql.ArrayLitNode:
+			// ARRAY[u.x]'s elements are references like any other: a walk
+			// that stopped here left `u.x` un-respelled inside an aggregate
+			// argument on the DAG, and every element read NULL (arc CW).
+			for _, el := range e.Elements {
+				walk(el)
+			}
+		case *plansql.AnyAllExpr:
+			walk(e.Left)
+			for _, v := range e.Values {
+				walk(v)
+			}
 		}
 	}
 	walk(n)

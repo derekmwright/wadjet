@@ -554,6 +554,14 @@ func (h *HashAggregate) outputSchema() []parquet.Column {
 				}
 			}
 		case AggMin, AggMax:
+			// A container's element as the PLAN declared it, for the row
+			// that observed no input (the identity row of an empty
+			// partial); the observed arm below replaces it when there is
+			// input, exactly as the DECIMAL (p,s) above is refined.
+			if batch.IsContainerType(batch.TypeID(out.Type)) && agg.OutputElementType != nil {
+				el := agg.OutputElementType.Clone()
+				out.ElementType = &el
+			}
 			// MIN/MAX preserve their input's type. The planner declares
 			// float64 for the types whose ACCUMULATOR used to finalize as a
 			// float; override from the type observed at Consume so MIN(url)

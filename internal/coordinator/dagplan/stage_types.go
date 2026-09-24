@@ -734,8 +734,14 @@ type AggSpec struct {
 	// FieldNames cannot be written at all, so the declaration travels with
 	// the spec the way OutputPrecision/OutputScale do for a DECIMAL.
 	OutputFields []parquet.Column
-	Separator    string
-	Percentile   float64
+	// OutputElementType is a container-valued aggregate's element (arc CW):
+	// MIN/MAX of an ARRAY or MAP. The identity row a partial task whose
+	// filter matched nothing emits has no input vector to take the element
+	// from, and a container vector declared without one wrote a partial the
+	// merge read back as NULL.
+	OutputElementType *parquet.Column
+	Separator         string
+	Percentile        float64
 	// Distinct is SQL's `AGG(DISTINCT x)` for every aggregate but COUNT,
 	// which travels as the Func string "count_distinct" instead. It is
 	// mirrored onto distributed.AggSpec at dispatch and read back into

@@ -392,6 +392,19 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 			// records nothing — and settled at the end of planning, where the
 			// producing fragment's real output is known (#770).
 			spec.InputRefs = aggInputAliasCandidates(spec, aggChild)
+			// A container MIN/MAX answers its input's own value, so its
+			// output element is the input's — declared here for the identity
+			// row a partial whose filter matched nothing emits, which has no
+			// input vector to read it from (arc CW).
+			if (strings.EqualFold(spec.Func, "min") || strings.EqualFold(spec.Func, "max")) &&
+				(spec.OutputType == parquet.TypeArray || spec.OutputType == parquet.TypeMap) {
+				if spec.InputElementType != nil {
+					spec.OutputElementType = spec.InputElementType
+				} else if c, ok := p.PlanContext.EmittedColDecls(aggChild).Elems[strings.ToLower(spec.InputCol)]; ok && c.ElementType != nil {
+					el := c.ElementType.Clone()
+					spec.OutputElementType = &el
+				}
+			}
 			aggSpecs = append(aggSpecs, spec)
 		}
 		// The key's TWO names: what the aggregate publishes it as, and what

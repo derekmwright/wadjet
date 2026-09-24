@@ -5,6 +5,7 @@ package dagplan
 import (
 	"strings"
 
+	"github.com/derekmwright/wadjet/internal/engine/expr"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	"github.com/derekmwright/wadjet/internal/planner/physical"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -132,7 +133,7 @@ func (p *StagePlanner) attachScanSelectProjections(root *logical.Node, stages []
 	var colTypes physical.ColDecls
 	var strictInt map[string]bool
 	if len(projNode.Children) == 1 {
-		colTypes = p.PlanContext.InputColDecls(projNode.Children[0])
+		colTypes = p.PlanContext.EmittedColDecls(projNode.Children[0])
 		// The same integer-preserving-arithmetic hint the single-process
 		// path resolves via physical.PlanContext.EmittedColTypes/declaredProjectionType (#297):
 		// without it, `id + 1` over a strict-int column declares (and
@@ -286,10 +287,24 @@ func (p *StagePlanner) attachScanSelectProjections(root *logical.Node, stages []
 				// just below it: the rewritten expression names only SOURCE
 				// columns, so the strict-int set to check it against is the
 				// one visible BELOW the rename chain, same as #445 above.
-				materialized := p.PlanContext.DeclTypeParts(
-					p.PlanContext.InferProjectionDeclType(rewritten, parquet.TypeString,
-						p.PlanContext.StrictIntArithColsThroughRenames(renameChild),
-						p.PlanContext.SourceColDeclsThroughRenames(renameChild)))
+				decl, conf := p.PlanContext.InferProjectionDeclTypeConf(rewritten, parquet.TypeString,
+					p.PlanContext.StrictIntArithColsThroughRenames(renameChild),
+					p.PlanContext.SourceColDeclsThroughRenames(renameChild))
+				if conf != expr.Decided {
+					// The source walk stops at a join, window or set
+					// operation under the rename chain and cannot decide. The
+					// substitution is rename-only, so the expression over the
+					// OUTER names is the same value — declare it from the
+					// child's emitted declaration, the one the single-process
+					// projection reads (arc CW: `ARRAY[u.x]` over a derived
+					// table under a join declared STRING and the fragment
+					// could not store the array).
+					if outer, oconf := p.PlanContext.InferProjectionDeclTypeConf(proj[j].ASTExpr, parquet.TypeString,
+						strictInt, colTypes); oconf == expr.Decided {
+						decl = outer
+					}
+				}
+				materialized := p.PlanContext.DeclTypeParts(decl)
 				specs[j].Type, specs[j].Precision, specs[j].Scale, specs[j].Fields = materialized.Type, materialized.Precision, materialized.Scale, materialized.Fields
 				specs[j].ElementType = materialized.ElementType
 				specs[j].TypeKnown = true

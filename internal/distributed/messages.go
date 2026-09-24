@@ -917,6 +917,10 @@ type AggSpec struct {
 	// vector cannot be written without them, and the worker has no catalog to
 	// re-derive them from.
 	OutputFields []AggFieldSpec `json:"output_fields,omitempty"`
+	// OutputElementType is a container-valued aggregate's element (MIN/MAX
+	// of an ARRAY or MAP, arc CW), declared for the identity row as
+	// OutputPrecision/OutputScale are for a DECIMAL.
+	OutputElementType *parquet.Column `json:"output_element_type,omitempty"`
 	// Separator is STRING_AGG's delimiter literal. Empty means the default
 	// "," — the same fallback exec.HashAggregate applies.
 	Separator string `json:"separator,omitempty"`

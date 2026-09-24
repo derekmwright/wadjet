@@ -98,7 +98,11 @@ type AggColumn struct {
 	// The output vector is built from them, so a missing list is a bar that
 	// cannot be written at all rather than one written wrong.
 	OutputFields []parquet.Column
-	Percentile   float64 // percentile value for percentile_cont/percentile_disc
+	// OutputElementType declares a container-valued MIN/MAX's element for
+	// the output row that has no input vector to read it from — an
+	// ungrouped aggregate's identity row (arc CW).
+	OutputElementType *parquet.Column
+	Percentile        float64 // percentile value for percentile_cont/percentile_disc
 	// Distinct is SQL's `AGG(DISTINCT x)` for every aggregate but COUNT,
 	// which spells it as its own AggFunc (AggCountDistinct) because its whole
 	// state IS the set.

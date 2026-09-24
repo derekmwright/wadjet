@@ -2490,6 +2490,9 @@ func (e *Executor) buildFragmentHashAggregate(ctx context.Context, spec distribu
 			// catalog to re-derive them from, so they cross on the spec
 			// (distributed.AggFieldSpec) the way the DECIMAL (p,s) does.
 			OutputFields: aggSpecOutputFields(a),
+			// A container MIN/MAX's element, for the same identity row
+			// (arc CW).
+			OutputElementType: a.OutputElementType,
 		}
 		if mergeByPosition {
 			aggCols[i].InputColIdx = len(spec.GroupByCols) + i

@@ -122,3 +122,97 @@ func TestArcCWConstructedArraysOrderElementWiseOnEveryArm(t *testing.T) {
 		}
 	}
 }
+
+// TestArcCWContainerOverARelationDeclaresOnEveryArm holds the DAG seams a
+// computed container crosses when its operand is a column a RELATION below
+// publishes — a UNION, a derived table under a join or a window — and the
+// ungrouped MIN/MAX whose partial on some worker matched nothing. Each cell
+// must answer, on every arm, exactly what the single-process arm answers,
+// value AND Go type (a container is a slice, never its text).
+//
+// Before this: the DAG typed `ARRAY[x]` over a union's column against a walk
+// that stops at the set operation, and a rename-substituted expression under
+// a join or window against one that stops at the derived table — both fell
+// to STRING, so the container reached a text vector (Go text at 83cd4a93,
+// the loud #361 refusal once a container can no longer be coerced); MIN/MAX's
+// identity row declared ARRAY with no element and the merge read NULL; and
+// `u.x` inside ARRAY[...] in an aggregate argument was never re-spelled
+// (the reference walk did not descend into an array constructor), so every
+// element read NULL.
+func TestArcCWContainerOverARelationDeclaresOnEveryArm(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: this gate stands up an embedded NATS cluster")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+	t.Cleanup(cancel)
+	arms := e3Arms(t, ctx)
+
+	typed := func(rows [][]any) string {
+		var out []string
+		for _, r := range rows {
+			var cells []string
+			for _, v := range r {
+				cells = append(cells, fmt.Sprintf("%T:%v", v, v))
+			}
+			out = append(out, strings.Join(cells, ","))
+		}
+		return strings.Join(out, " | ")
+	}
+	const u = "(SELECT c_i32 AS x, c_ts AS ts, id FROM typemx WHERE id < 4 UNION ALL " +
+		"SELECT c_i32 + 1, c_ts, id FROM typemx WHERE id < 4) u"
+	const d = "(SELECT c_i32 AS x, c_ts AS ts, id FROM typemx WHERE id < 4) u"
+	cells := []struct{ name, sql string }{
+		{"union/projection", "SELECT ARRAY[x] AS a FROM " + u + " ORDER BY x, a"},
+		{"union/projection-beside-its-operand", "SELECT ARRAY[x] AS a, x FROM " + u + " ORDER BY x"},
+		{"union/under-a-join", "SELECT ARRAY[u.x] AS a FROM " + u + " JOIN typemx t ON t.c_i32 = u.x ORDER BY a"},
+		{"intersect/projection", "SELECT ARRAY[x] AS a FROM (SELECT c_i32 AS x FROM typemx WHERE id < 6 " +
+			"INTERSECT SELECT c_i32 FROM typemx WHERE id < 4) u ORDER BY a"},
+		{"derived/under-a-join", "SELECT ARRAY[u.x] AS a FROM " + d + " JOIN typemx t ON t.c_i32 = u.x ORDER BY a"},
+		{"derived/under-a-window", "SELECT ARRAY[x] AS a, ROW_NUMBER() OVER (ORDER BY x DESC) AS r FROM " + d + " ORDER BY r"},
+		{"derived/window-key", "SELECT ARRAY[x] AS a, ROW_NUMBER() OVER (ORDER BY ARRAY[x] DESC) AS r FROM " + d + " ORDER BY r"},
+		{"join/min-max-empty-partial", "SELECT MIN(ARRAY[t.c_i32]) AS lo, MAX(ARRAY[t.c_ts]) AS hi " +
+			"FROM typemx t JOIN typemx t2 ON t.id = t2.id WHERE t.id < 4"},
+		{"derived-join/min-max", "SELECT MIN(ARRAY[u.x]) AS lo, MAX(ARRAY[u.ts]) AS hi FROM " + d +
+			" JOIN typemx t ON t.id = u.id"},
+		{"union-join/min-max", "SELECT MIN(ARRAY[u.x]) AS lo, MAX(ARRAY[u.ts]) AS hi FROM " + u +
+			" JOIN typemx t ON t.id = u.id"},
+		{"derived-join/any", "SELECT u.id FROM " + d + " JOIN typemx t ON t.id = u.id " +
+			"WHERE 3 = ANY(ARRAY[u.x, u.x + 3]) ORDER BY u.id"},
+	}
+	answered := 0
+	for _, c := range cells {
+		_, want, err := arms[0].run(c.sql)
+		if err != nil || len(want) == 0 {
+			t.Errorf("%s / %s: the reference arm answered %v %v", c.name, arms[0].name, want, err)
+			continue
+		}
+		w := typed(want)
+		if strings.Contains(w, "<nil>") {
+			t.Errorf("%s / %s: the reference arm answered a NULL: %s", c.name, arms[0].name, w)
+		}
+		// The reference must itself be an ARRAY (a slice) — two arms agreeing
+		// on the text a TEXT declaration boxes is the defect, not a pass.
+		if !strings.HasSuffix(c.name, "/any") {
+			for _, r := range want {
+				if reflect.ValueOf(r[0]).Kind() != reflect.Slice {
+					t.Errorf("%s / %s: column 0 is %T %v, not an array", c.name, arms[0].name, r[0], r[0])
+					break
+				}
+			}
+		}
+		for _, arm := range arms {
+			_, got, err := arm.run(c.sql)
+			if err != nil {
+				t.Errorf("%s / %s: %s\n  refused: %v", c.name, arm.name, c.sql, err)
+				continue
+			}
+			answered++
+			if g := typed(got); g != w {
+				t.Errorf("%s / %s: %s\n  got  %s\n  want %s", c.name, arm.name, c.sql, g, w)
+			}
+		}
+	}
+	if want := len(cells) * len(arms); answered != want {
+		t.Errorf("%d of %d (cell, arm) pairs answered", answered, want)
+	}
+}

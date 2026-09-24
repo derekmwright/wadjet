@@ -159,6 +159,7 @@ func wireAggSpecs(specs []dagplan.AggSpec) []distributed.AggSpec {
 		// new about the ones that had it before.
 		spec.InputFields = a.InputFields
 		spec.InputElementType = a.InputElementType
+		spec.OutputElementType = a.OutputElementType
 		spec.InputPrecision, spec.InputScale = a.InputPrecision, a.InputScale
 		out = append(out, spec)
 	}

@@ -107,6 +107,8 @@ func newCappedPartialAggPartitioned(keys []string, specs []distributed.AggSpec, 
 			Percentile:   s.Percentile,
 			OutputCol:    s.OutputCol,
 			OutputType:   aggSpecOutputType(s),
+			// arc CW: the identity row's container element.
+			OutputElementType: s.OutputElementType,
 		}
 	}
 	return &cappedPartialAgg{
