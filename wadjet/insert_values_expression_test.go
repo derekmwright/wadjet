@@ -41,6 +41,8 @@ func TestInsertValuesAcceptsExpressions(t *testing.T) {
 		{Name: "dec", Type: parquet.TypeDecimal, Precision: 10, Scale: 2, Nullable: true},
 		{Name: "ip", Type: parquet.TypeIPv4, Nullable: true},
 		{Name: "u", Type: parquet.TypeUUID, Nullable: true},
+		{Name: "arr", Type: parquet.TypeArray, Nullable: true,
+			ElementType: &parquet.Column{Name: "element", Type: parquet.TypeInt64, Nullable: true}},
 	}}
 	if err := db.CreateTable(ctx, "cov", schema, nil); err != nil {
 		t.Fatal(err)
@@ -71,6 +73,16 @@ func TestInsertValuesAcceptsExpressions(t *testing.T) {
 		{"mismatch: bool literal into an integer column", `INSERT INTO cov (id, n) VALUES (18, TRUE)`, "42804"},
 		{"a column reference — VALUES has no FROM", `INSERT INTO cov (id, n) VALUES (19, id)`, "42703"},
 		{"a subquery — accepted by PostgreSQL, refused here", `INSERT INTO cov (id, n) VALUES (20, (SELECT 1))`, "0A000"},
+		// B4 (round-2 review): the bracket-depth revert cell the notes
+		// claimed had no test. Before the `[`/`]` depth-tracking fix,
+		// parseValuesRow's top-level-comma split did not track `[`/`]` at
+		// all, so the comma INSIDE the ARRAY constructor was read as the
+		// row's own value separator and this single-value row mis-split
+		// into 3 raw values for 1 target column (42601 arity mismatch, or —
+		// see TestInsertValuesArrayBracketWrongSplitStillRefuses below —
+		// silent garbage on a row shaped to make the wrong split's COUNT
+		// coincidentally match).
+		{"array literal — the bracket-depth fix", `INSERT INTO cov (id, arr) VALUES (21, ARRAY[1, 2, 3])`, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -158,5 +170,66 @@ func TestInsertValuesDefaultIsNullOnEveryColumn(t *testing.T) {
 		if v != nil {
 			t.Errorf("column %q = %#v, want NULL", col, v)
 		}
+	}
+}
+
+// TestInsertValuesArrayBracketWrongSplitStillRefuses is round-2 review B4's
+// attempt at the discriminating fixture the original notes' filing candidate
+// 4 asked for: a row shaped so the PRE-FIX split bug's WRONG value count
+// would equal the target column count, so the arity check alone could not
+// catch it and the row would store a plausible-looking but WRONG value
+// instead of refusing.
+//
+// `ARRAY[1,2][1]` has exactly one comma inside its brackets, so — measured
+// by hand in a scratch copy of this tip with ONLY the `[`/`]` depth-tracking
+// arms of parseValuesRow reverted — the pre-fix split DOES turn this row's
+// 2 real values (`ARRAY[1,2][1]`, `5`) into 3 raw pieces ("ARRAY [ 1",
+// "2 ] [ 1 ]", "5"), matching the 3-column target (id, a, b) by coincidence
+// and slipping past the arity check exactly as the filing candidate
+// predicted. But it does NOT silently store garbage: every fragment a
+// bracket-internal split produces carries an UNBALANCED bracket (one side
+// opens without closing, the other closes without opening), and
+// `plansql.ParseExpressionComplete` refuses that fragment as its own syntax
+// error (42601) before it ever reaches a target column — reverted, this row
+// fails with "row 0, column \"id\": parsing \"ARRAY [ 1\": ..." instead of
+// the arity message below, but it still fails. This is a STRUCTURAL
+// property of the grammar (brackets are used ONLY for an ARRAY literal or a
+// subscript, both requiring balance), not a property of this one fixture:
+// the "coincidentally-matching-count, plausible-wrong-value" shape the
+// filing candidate worried about does not appear to be reachable through
+// `[`/`]` in this grammar. Kept as a regression test for the CORRECT arity
+// refusal at this tip; the SQLSTATE is 42601 either way, so it does not
+// discriminate reverted-vs-fixed on its own — TestInsertValuesAcceptsExpressions's
+// "array literal" case (the single-value ARRAY[1, 2, 3] row) is the cell
+// that actually fails when the depth-tracking arms are reverted.
+func TestInsertValuesArrayBracketWrongSplitStillRefuses(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, Config{Store: objstore.NewMemStore(), Bucket: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	schema := parquet.Schema{Columns: []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64, Nullable: true},
+		{Name: "a", Type: parquet.TypeInt64, Nullable: true},
+		{Name: "b", Type: parquet.TypeInt64, Nullable: true},
+	}}
+	if err := db.CreateTable(ctx, "vab", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Execute(ctx, "INSERT INTO vab (id, a, b) VALUES (ARRAY[1,2][1], 5)")
+	if err == nil {
+		t.Fatal("2 values for 3 columns (id, a, b) succeeded; " +
+			"want a 42601 arity refusal, not a silent 3-way mis-split")
+	}
+	if got := sqlerr.StateOf(err); got != "42601" {
+		t.Errorf("SQLSTATE %q, want 42601 (err: %v)", got, err)
+	}
+	res, qerr := db.Query(ctx, "SELECT id, a, b FROM vab")
+	if qerr != nil {
+		t.Fatal(qerr)
+	}
+	if len(res.Rows) != 0 {
+		t.Errorf("row was stored despite the refusal: %#v", res.Rows)
 	}
 }
