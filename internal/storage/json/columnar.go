@@ -807,7 +807,18 @@ func coerceToColumn(val any, col parquet.Column) any {
 		}
 		return out
 	case parquet.TypeString, parquet.TypeBytes:
-		return val // SetValue coerces anything through its string form
+		// A text field or element holding a nested value stores its JSON
+		// text, as a top-level text column does (scanObjectInto). It held
+		// Go's rendering of the decoded box (`map[z:w]`) until a container
+		// into a text vector became a refusal (arc CW, ADR-0045 §2).
+		switch val.(type) {
+		case []any, map[string]any:
+			if text, err := json.Marshal(val); err == nil {
+				return string(text)
+			}
+			return nil
+		}
+		return val // SetValue coerces a scalar through its string form
 	case parquet.TypeBool:
 		switch val.(type) {
 		case bool, float64:

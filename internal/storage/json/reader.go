@@ -96,7 +96,30 @@ func (r *Reader) Next() (*batch.RecordBatch, error) {
 		}
 	}
 	r.offset = end
+	nestedAsJSONText(chunk, r.schema)
 	return batch.FromRows(r.schema, chunk), nil
+}
+
+// nestedAsJSONText rewrites a nested value (a JSON array or object) in a
+// column this reader typed as text into its JSON text. Sampling types a
+// nested value STRING, and the text vector used to hold Go's rendering of the
+// decoded box (`[a b]`, `map[t:x]`) — which is not the value's JSON at all —
+// until a container box into a text vector became a refusal (arc CW,
+// ADR-0045 §2). The streaming reader types nested values instead.
+func nestedAsJSONText(rows []map[string]any, schema []parquet.Column) {
+	for _, col := range schema {
+		if col.Type != parquet.TypeString {
+			continue
+		}
+		for _, row := range rows {
+			switch v := row[col.Name].(type) {
+			case []any, map[string]any:
+				if text, err := json.Marshal(v); err == nil {
+					row[col.Name] = string(text)
+				}
+			}
+		}
+	}
 }
 
 // parseJSON auto-detects JSONL vs JSON array and returns parsed rows.
