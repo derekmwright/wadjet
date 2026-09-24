@@ -244,3 +244,40 @@ func TestInsertValuesArrayBracketWrongSplitStillRefuses(t *testing.T) {
 		t.Errorf("row was stored despite the refusal: %#v", res.Rows)
 	}
 }
+
+// TestInsertValuesDateSourceMismatchNamesItsOwnType catches a bug this
+// arc's own B1/P2 fix introduced and then corrected in the same round:
+// nonNumericAssignmentSource's refusal named the expression side from the
+// Go BOX (dmlBoxTypeName), not the source's declared type — and a DATE
+// source's box is int32/int64, the SAME shape dmlBoxTypeName reads as
+// "bigint" for a plain integer, so `UPDATE t SET n = DATE '2026-01-01'`
+// answered `column "n" is of type bigint but expression is of type
+// bigint` — the SAME word on both sides of a message about two DIFFERENT
+// types. datatypeMismatchDeclared reads physical.PgTypeName(srcType)
+// instead, the same renderer the column side already uses.
+func TestInsertValuesDateSourceMismatchNamesItsOwnType(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, Config{Store: objstore.NewMemStore(), Bucket: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	schema := parquet.Schema{Columns: []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+		{Name: "n", Type: parquet.TypeInt64, Nullable: true},
+	}}
+	if err := db.CreateTable(ctx, "dsm", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Execute(ctx, "INSERT INTO dsm (id) VALUES (1)"); err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Execute(ctx, "UPDATE dsm SET n = DATE '2026-01-01' WHERE id = 1")
+	if err == nil {
+		t.Fatal("SET n = DATE '2026-01-01' succeeded; want 42804")
+	}
+	want := `column "n" is of type bigint but expression is of type date`
+	if err.Error() != want {
+		t.Errorf("got %q, want %q", err.Error(), want)
+	}
+}

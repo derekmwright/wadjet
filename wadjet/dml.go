@@ -1881,7 +1881,7 @@ func assignEvaluatedValue(v any, col parquet.Column, srcFloat bool, srcType parq
 		// from a genuinely boolean-typed expression — so no declared-type
 		// lookup is needed to tell an assignable value from a mismatched one.
 		if _, isBool := v.(bool); !isBool {
-			return nil, datatypeMismatch(v, col)
+			return nil, datatypeMismatchDeclared(v, col, srcType, srcKnown)
 		}
 	case parquet.TypeIPv4, parquet.TypeIPv6, parquet.TypeCIDR, parquet.TypeMAC, parquet.TypeUUID:
 		// The same rule convertUnquoted applies to a VALUES literal: a SQL
@@ -1901,7 +1901,7 @@ func assignEvaluatedValue(v any, col parquet.Column, srcFloat bool, srcType parq
 			// source genuinely IS this column's own network family (an
 			// UPDATE/MERGE column-to-column move, whose native box is not
 			// text), is unchanged from before this arc.
-			return nil, datatypeMismatch(v, col)
+			return nil, datatypeMismatchDeclared(v, col, srcType, srcKnown)
 		}
 	case parquet.TypeDate:
 		return assignDateValue(v, col, srcType, srcKnown)
@@ -2000,7 +2000,7 @@ func assignDateValue(v any, col parquet.Column, srcType parquet.TypeID, srcKnown
 		return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC), nil
 	}
 	if srcKnown && srcType != parquet.TypeDate {
-		return nil, datatypeMismatch(v, col)
+		return nil, datatypeMismatchDeclared(v, col, srcType, srcKnown)
 	}
 	if _, isBool := v.(bool); isBool {
 		return nil, datatypeMismatch(v, col)
@@ -2033,7 +2033,7 @@ func assignTimestampValue(v any, col parquet.Column, srcType parquet.TypeID, src
 		return time.Unix(int64(days)*86400, 0).UTC(), nil
 	}
 	if srcKnown && srcType != parquet.TypeTimestamp {
-		return nil, datatypeMismatch(v, col)
+		return nil, datatypeMismatchDeclared(v, col, srcType, srcKnown)
 	}
 	if _, isBool := v.(bool); isBool {
 		return nil, datatypeMismatch(v, col)
@@ -2058,7 +2058,7 @@ func assignTimestampValue(v any, col parquet.Column, srcType parquet.TypeID, src
 // cell, which stored 20454.00).
 func assignDecimalValue(v any, col parquet.Column, srcType parquet.TypeID, srcKnown bool) (any, error) {
 	if srcKnown && nonNumericAssignmentSource(srcType) {
-		return nil, datatypeMismatch(v, col)
+		return nil, datatypeMismatchDeclared(v, col, srcType, srcKnown)
 	}
 	switch t := v.(type) {
 	case bool:
@@ -2117,6 +2117,32 @@ func datatypeMismatch(v any, col parquet.Column) error {
 		col.Name, physical.PgTypeName(col.Type), dmlBoxTypeName(v))
 }
 
+// datatypeMismatchDeclared is datatypeMismatch's round-2 sibling: it names
+// the expression side from the SOURCE's declared type when one is known,
+// not from the Go box dmlBoxTypeName reads.
+//
+// The box collides across families the declared type does not: a DATE
+// source boxes as the SAME int32/int64 shape a plain INTEGER expression
+// does, so `datatypeMismatch` alone — asked about a DATE-declared source
+// refused into a bigint column — answered "column \"n\" is of type bigint
+// but expression is of type bigint", naming the SAME word on both sides of
+// a message about two DIFFERENT types (measured: `UPDATE ... SET n = DATE
+// '2026-01-01'`). physical.PgTypeName(srcType) is the same renderer the
+// column side already uses, so "date"/"timestamp without time zone"/"inet"/
+// "uuid" now appear on the expression side exactly as PostgreSQL spells them.
+//
+// srcKnown == false falls back to datatypeMismatch's box-based guess
+// unchanged — every caller of THIS function already routes through it only
+// when srcKnown is true (nonNumericAssignmentSource, the network/UUID arm),
+// so the fallback is a defensive default, not a reachable path today.
+func datatypeMismatchDeclared(v any, col parquet.Column, srcType parquet.TypeID, srcKnown bool) error {
+	if !srcKnown {
+		return datatypeMismatch(v, col)
+	}
+	return sqlerr.New("42804", "column %q is of type %s but expression is of type %s",
+		col.Name, physical.PgTypeName(col.Type), physical.PgTypeName(srcType))
+}
+
 func dmlBoxTypeName(v any) string {
 	switch v.(type) {
 	case bool:
@@ -2145,7 +2171,7 @@ func dmlBoxTypeName(v any) string {
 // See docs/internals/dml-integer-assignment-rounding.md for the design.
 func assignIntegerValue(v any, col parquet.Column, srcFloat bool, srcType parquet.TypeID, srcKnown bool) (any, error) {
 	if srcKnown && nonNumericAssignmentSource(srcType) {
-		return nil, datatypeMismatch(v, col)
+		return nil, datatypeMismatchDeclared(v, col, srcType, srcKnown)
 	}
 	var n int64
 	switch t := v.(type) {
@@ -2216,7 +2242,7 @@ func assignIntegerValue(v any, col parquet.Column, srcFloat bool, srcType parque
 // any box is read (round-2 review B1's `(f double) VALUES (DATE …)` cell).
 func assignFloatValue(v any, col parquet.Column, srcType parquet.TypeID, srcKnown bool) (any, error) {
 	if srcKnown && nonNumericAssignmentSource(srcType) {
-		return nil, datatypeMismatch(v, col)
+		return nil, datatypeMismatchDeclared(v, col, srcType, srcKnown)
 	}
 	if _, isBool := v.(bool); isBool {
 		return nil, datatypeMismatch(v, col)
