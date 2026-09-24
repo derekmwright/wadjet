@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
 func TestParseDelete_Basic(t *testing.T) {
@@ -372,6 +374,53 @@ func TestParseInsert_RefusalNamesValueOrdinal(t *testing.T) {
 			}
 			if got != tc.wantOrd {
 				t.Errorf("error names value %d, want value %d: %q", got, tc.wantOrd, msg)
+			}
+		})
+	}
+}
+
+// TestParseInsert_ValuesRowKeepsLexerErrorSQLState is round-2 review P1:
+// parseValuesRow folded TokenEOF and TokenError into the SAME arm, so a
+// lexer error inside a VALUES row — #1307's own Unicode-escape refusals
+// among them — lost its own sentence and SQLSTATE to the generic
+// "unterminated VALUES row" 42601, the message meant for the OTHER case
+// (the ')' never arriving). SELECT already keeps the lexer's own error
+// (selectParser.syntaxFailure); this pins the same rule at the VALUES door,
+// covering a #1307 surrogate-pair escape (42601, but with the RIGHT
+// sentence) and a malformed-escape class that carries a DIFFERENT SQLSTATE
+// (22025) to prove the code itself passes through, not only the text.
+func TestParseInsert_ValuesRowKeepsLexerErrorSQLState(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		sql      string
+		wantCode string
+		wantMsg  string
+	}{
+		{
+			name:     "unicode surrogate pair — #1307's own message and code",
+			sql:      `INSERT INTO vd (id, s) VALUES (1, E'\uD83Dx')`,
+			wantCode: "42601",
+			wantMsg:  `invalid Unicode surrogate pair at or near "x"`,
+		},
+		{
+			name:     "too few hex digits — a DIFFERENT SQLSTATE than the generic 42601",
+			sql:      `INSERT INTO vd (id, s) VALUES (1, E'\u12')`,
+			wantCode: "22025",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Parse(tc.sql)
+			if err == nil {
+				t.Fatalf("%s parsed with no error", tc.sql)
+			}
+			if got := sqlerr.StateOf(err); got != tc.wantCode {
+				t.Errorf("SQLSTATE %q, want %q (message: %q)", got, tc.wantCode, err.Error())
+			}
+			if strings.Contains(err.Error(), "unterminated VALUES row") {
+				t.Errorf("lexer error %q was folded into the generic unterminated-row refusal", err.Error())
+			}
+			if tc.wantMsg != "" && err.Error() != tc.wantMsg {
+				t.Errorf("got %q, want %q", err.Error(), tc.wantMsg)
 			}
 		})
 	}

@@ -402,7 +402,22 @@ func parseValuesRow(l *lexer, tableName string) ([]string, error) {
 	for {
 		tok := l.nextToken()
 		switch {
-		case tok.typ == TokenEOF || tok.typ == TokenError:
+		case tok.typ == TokenError:
+			// The LEXER's own sentence and SQLSTATE, the same rule
+			// selectParser.syntaxFailure already applies for SELECT — not
+			// folded into the generic "unterminated VALUES row" refusal
+			// below, which used to discard both: `VALUES (1, E'\uD83Dx')`
+			// answered 42601 "unterminated VALUES row ... input ended at
+			// value 2" instead of #1307's own 22025 "invalid Unicode
+			// surrogate pair at or near ..." (round-2 review P1). EOF is a
+			// separate case immediately below: a lexer error names what went
+			// wrong, EOF only names where the input ran out.
+			code := tok.code
+			if code == "" {
+				code = "42601"
+			}
+			return nil, sqlerr.New(code, "%s", tok.val)
+		case tok.typ == TokenEOF:
 			return nil, fmt.Errorf("unterminated VALUES row in INSERT INTO %s: input ended at value %d of the VALUES tuple",
 				tableName, len(row)+1)
 		case tok.typ == TokenLParen || tok.typ == TokenLBracket:
