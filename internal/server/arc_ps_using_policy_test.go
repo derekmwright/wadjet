@@ -73,15 +73,13 @@ func TestArcPSAUsingMergedKeyOverAPolicedColumnOnEveryDoor(t *testing.T) {
 		{name: "derived_right_using_a_masked_key", answers: true,
 			sql: `SELECT * FROM (SELECT ssn, amt AS m FROM e7emp) x ` +
 				`RIGHT JOIN (SELECT ssn, id AS n FROM e7emp) y USING (ssn)`},
-		// The MINTED COALESCE over a masked STRING column. It answers on the
-		// single-process doors and is LOUD on the three DAG doors: the minted
-		// `coalesce(x.ssn, y.ssn)` reaches the DAG's join stage under a
-		// FLOAT64 declaration and the #361 silent-write guard stops it. That
-		// is a `distributed` divergence (single answers, DAG differs), loud
-		// on every door that takes it, and it is PINNED here rather than
-		// chased — engine first. Measured by the round-1 review (N9).
+		// The MINTED COALESCE over a masked STRING column. It was LOUD on
+		// the three DAG doors — the minted `coalesce(x.ssn, y.ssn)` reached
+		// the join stage under a FLOAT64 declaration typed against a walk
+		// that stops at the derived arms — until arc CW typed a stage's
+		// SELECT list against the child's EMITTED declarations (the
+		// single-process walk); the pin was deleted as that fix's proof.
 		{name: "derived_full_using_a_minted_coalesce_over_a_masked_key", answers: true,
-			dagLoud: "#361 silent-write guard",
 			sql: `SELECT * FROM (SELECT ssn, amt AS m FROM e7emp) x ` +
 				`FULL JOIN (SELECT ssn, id AS n FROM e7emp) y USING (ssn)`},
 		{name: "derived_full_using_a_masked_numeric_key", answers: true,
