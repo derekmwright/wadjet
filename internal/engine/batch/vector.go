@@ -1453,6 +1453,14 @@ func (v *Vector) SetValue(i int, val any) {
 		}
 	case TypeArray, TypeMap:
 		if v.Child == nil {
+			if _, shapeOnly := val.(ShapeOnlyLen); !shapeOnly {
+				// A container vector allocated without its element has no
+				// child to write into, and returning here left the slot NULL:
+				// a declaration seam that did not carry the element answered
+				// a plausible NULL (arc CW, the lateral-body ARRAY item).
+				// Loud, as a container into a STRING vector is.
+				panic(&ContainerShapeError{Dst: v.Type, Val: val})
+			}
 			return
 		}
 		elems := v.arrayElements(val)
@@ -1464,6 +1472,9 @@ func (v *Vector) SetValue(i int, val any) {
 		v.Offsets[i+1] = int32(v.Child.Len)
 	case TypeRow:
 		if v.Children == nil {
+			if _, shapeOnly := val.(ShapeOnlyLen); !shapeOnly {
+				panic(&ContainerShapeError{Dst: v.Type, Val: val})
+			}
 			return
 		}
 		row, ok := val.(map[string]any)

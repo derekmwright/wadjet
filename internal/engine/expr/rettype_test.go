@@ -130,6 +130,13 @@ func TestVecFuncsSurviveEveryOutputType(t *testing.T) {
 				if _, ok := r.(*batch.NetworkTextWriteError); ok {
 					return
 				}
+				// batch.ContainerShapeError is the FOURTH (arc CW, ADR-0045
+				// §2): the sweep hands kernels an ARRAY/MAP/ROW output vector
+				// with no element or fields, and the write that used to be a
+				// silent NULL is refused — the same query-error contract.
+				if _, ok := r.(*batch.ContainerShapeError); ok {
+					return
+				}
 				msg = fmt.Sprint(r)
 			}
 		}()

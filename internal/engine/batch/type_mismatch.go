@@ -15,7 +15,8 @@ import (
 // It implements FatalEvalPanic (Error + FatalEvalError): drivers, worker recover,
 // coordinator and embedded query entries return a query error, never kill the
 // server or silently leave a valid zero slot (#347).
-// Nil is NULL; STRING/BYTES render any value, as group keys require.
+// Nil is NULL; STRING/BYTES render any SCALAR value, as group keys require;
+// a container box into STRING/BYTES is refused (arc CW, ADR-0045 §2).
 // Value-level parse failures for IPv4/MAC/UUID retain their null-ish result:
 // the type was accepted, so these do not raise this mismatch guard.
 // See docs/internals/batch-vector-type-mismatch-boundary.md for the design.
@@ -31,6 +32,23 @@ func (e *TypeMismatchError) Error() string {
 // FatalEvalError implements the exec.FatalEvalPanic contract, so pipeline
 // drivers convert the panic into a query error instead of a process exit.
 func (e *TypeMismatchError) FatalEvalError() error { return e }
+
+// ContainerShapeError panics when a container value reaches an ARRAY, MAP or
+// ROW vector that was allocated without its shape — no element child, no
+// field children. Such a vector has nowhere to put the value, and the old
+// silent return left the slot NULL: a declaration seam that did not carry
+// the container's shape answered a plausible NULL (arc CW, ADR-0045 §2).
+type ContainerShapeError struct {
+	Dst TypeID
+	Val any
+}
+
+func (e *ContainerShapeError) Error() string {
+	return fmt.Sprintf("batch: cannot store %T into a %s vector declared without its element or fields (ADR-0045)", e.Val, e.Dst)
+}
+
+// FatalEvalError implements the exec.FatalEvalPanic contract.
+func (e *ContainerShapeError) FatalEvalError() error { return e }
 
 // mismatch raises the guard. Split out so every SetValue arm reads as one
 // line and the panic allocates nothing until it actually fires.

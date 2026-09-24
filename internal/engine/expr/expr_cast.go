@@ -220,6 +220,14 @@ func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
 		// See docs/internals/bytes-cast-text-versus-like.md for the design.
 		return castStringRender(b, row, e.Operand, v)
 	default:
+		// An accepted destination this engine does not convert to hands the
+		// operand's TEXT back under a text declaration (sql-reference, #652).
+		// A container's text is PostgreSQL's array_out / record_out, not the
+		// Go box, which a text column refuses (arc CW, ADR-0045 §2).
+		switch v.(type) {
+		case []any, map[string]any:
+			return castStringRender(b, row, e.Operand, v)
+		}
 		return v
 	}
 }

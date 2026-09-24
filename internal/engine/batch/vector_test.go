@@ -457,11 +457,12 @@ func TestSetValueUUIDBytes(t *testing.T) {
 }
 
 func TestSetValueArrayMap(t *testing.T) {
+	// A container vector with no shape used to swallow the value and leave
+	// the slot NULL; since arc CW it refuses loudly (ADR-0045 §2).
 	t.Run("NilChild", func(t *testing.T) {
 		v := NewVector(TypeArray, 1)
 		v.Child = nil
-		v.SetValue(0, []any{int64(1)})
-		// Should not panic, just return
+		mustContainerShape(t, func() { v.SetValue(0, []any{int64(1)}) })
 	})
 
 	t.Run("MapOfStrings", func(t *testing.T) {
@@ -496,9 +497,23 @@ func TestSetValueRowEdge(t *testing.T) {
 	t.Run("NilChildren", func(t *testing.T) {
 		v := NewVector(TypeRow, 1)
 		v.Children = nil
-		v.SetValue(0, map[string]any{"key": "val"})
-		// Should not panic
+		mustContainerShape(t, func() { v.SetValue(0, map[string]any{"key": "val"}) })
 	})
+}
+
+func mustContainerShape(t *testing.T, fn func()) {
+	t.Helper()
+	defer func() {
+		r := recover()
+		e, ok := r.(*ContainerShapeError)
+		if !ok {
+			t.Fatalf("panicked with %T (%v), want *ContainerShapeError", r, r)
+		}
+		if e.FatalEvalError() == nil || e.Error() == "" {
+			t.Fatal("the error must be usable as a query error")
+		}
+	}()
+	fn()
 }
 
 func TestGetValueRowNilChildren(t *testing.T) {

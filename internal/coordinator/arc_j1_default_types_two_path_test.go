@@ -124,8 +124,12 @@ func TestArcJ1TheEmptyInputDefaultIsRightForEveryTypeFamily(t *testing.T) {
 		{"array-int", nullThen(`ARRAY[COUNT(*)]`), `Alice,NULL | Bob,[2] | Carol,[0]`},
 		{"array-string", nullThen(`ARRAY[CAST(COUNT(*) AS VARCHAR)]`),
 			`Alice,NULL | Bob,[2] | Carol,[0]`},
+		// VECTOR(n) is an accepted destination this engine does not convert
+		// to: it hands the operand's TEXT back (sql-reference), and an
+		// array's text is PostgreSQL's `{2}` since arc CW — it was Go's
+		// `[2]`, coerced into the text column.
 		{"vector", nullThen(`CAST(ARRAY[COUNT(*)] AS VECTOR(1))`),
-			`Alice,NULL | Bob,[2] | Carol,[0]`},
+			`Alice,NULL | Bob,{2} | Carol,{0}`},
 		{"date", twoBranch(`CAST('2020-01-01' AS DATE)`, `CAST('2021-01-01' AS DATE)`),
 			`Alice,NULL | Bob,2021-01-01 | Carol,2020-01-01`},
 		{"timestamp", twoBranch(`CAST('2020-01-01 00:00:00' AS TIMESTAMP)`,

@@ -57,9 +57,26 @@ func TestFixedRowScalarInEveryPosition(t *testing.T) {
 					if producer == "a3b_untyped(id)" && cell.Name != "projection" && cell.Name != "limit" && cell.Name != "distinct" && cell.Name != "group" && cell.Name != "scalar_argument_routed" {
 						continue
 					}
+					// A ROW function that declares no fields has no shape a
+					// projection can allocate, and its value used to be
+					// coerced into the STRING fallback as Go text. Since arc
+					// CW that write is LOUD (ADR-0045 §2): every whole-value
+					// position below refuses on every arm rather than publish
+					// text.
+					// No registered builtin returns an undeclared container.
+					loudUntyped := producer == "a3b_untyped(id)"
 					t.Run(producer+"/"+cell.Name, func(t *testing.T) {
-						if mode == "spilled" {
+						if mode == "spilled" && !loudUntyped {
 							defer FixedRowSpill(t, cell.Name)()
+						}
+						loud := func(err string) bool {
+							if !loudUntyped {
+								return false
+							}
+							if !strings.Contains(err, "silent-write guard") {
+								t.Errorf("want the ADR-0045 §2 refusal, got %s", err)
+							}
+							return true
 						}
 						before := a2fReadRoutes(coord)
 						var rows []map[string]any
@@ -67,9 +84,15 @@ func TestFixedRowScalarInEveryPosition(t *testing.T) {
 						if coord != nil {
 							r, e := coord.ExecuteSQL(ctx, cell.SQL)
 							if e != nil {
+								if loud(e.Error()) {
+									return
+								}
 								t.Fatal(e)
 							}
 							if r.Error != "" {
+								if loud(r.Error) {
+									return
+								}
 								t.Fatal(r.Error)
 							}
 							schema = r.OutputSchema()
@@ -80,12 +103,19 @@ func TestFixedRowScalarInEveryPosition(t *testing.T) {
 						} else {
 							r, e := db.Query(ctx, cell.SQL)
 							if e != nil {
+								if loud(e.Error()) {
+									return
+								}
 								t.Fatal(e)
 							}
 							rows = r.Rows
 							for _, m := range r.ColumnMetas {
 								schema = append(schema, parquet.Column{Name: m.Name, Type: m.TypeID, Fields: m.Fields})
 							}
+						}
+						if loudUntyped {
+							t.Errorf("an undeclared ROW answered in a whole-value position; ADR-0045 §2 says it refuses\n  SQL: %s", cell.SQL)
+							return
 						}
 						a3bCheckRoutes(t, coord, before, cell.Name)
 						if cell.Row && producer != "a3b_untyped(id)" {

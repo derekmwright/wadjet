@@ -23,7 +23,16 @@ holds, with the improvement that it now costs an ERROR instead of a wrong
 answer.
 
 The deliberate non-panics: a nil value is a NULL (WriteNullAt); STRING and
-BYTES destinations coerce any value through its string form, which is a
-documented rendering (group keys rely on it); and a PARSE failure of a
+BYTES destinations coerce any SCALAR value through its string form, which is
+a documented rendering (group keys rely on it); and a PARSE failure of a
 value-level string (an unparseable IPv4, MAC, UUID) keeps its historical
 null-ish result — the type was right, the value was not.
+
+Two container writes joined the guard in arc CW (ADR-0045 §2). A container
+box (`[]any`, `map[string]any`) into a STRING/BYTES vector is a
+`TypeMismatchError`: its only string form there was Go's (`[1 2 3]`), and a
+container's text needs its DECLARED type (`batch.FormatPGText`). A container
+value into an ARRAY/MAP/ROW vector allocated without its element or fields is
+a `ContainerShapeError`: the vector has nowhere to put it, and the old silent
+return left the slot NULL. Both mean a declaration seam did not carry the
+container's shape; both are query errors, never a plausible value.
