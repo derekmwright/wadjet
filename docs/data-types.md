@@ -714,9 +714,11 @@ through a derived table, a CTE, `VALUES` or a `UNION`, and a ZERO-ROW result
 all declare the element and render as above. So an array read back through a
 derived table is still an array — `v[1]` is its element (a `TIMESTAMP` element
 is a timestamp, not an integer), `2 = ANY(v)` compares elements — and `ORDER
-BY`, `MIN`, `MAX` and `DISTINCT` compare arrays ELEMENT-WISE as PostgreSQL
-does: an empty array first, a shorter prefix before a longer array, a NULL
-element after every value. `UNION` arms whose elements differ fold on the
+BY`, `MIN`, `MAX`, `DISTINCT` and the comparison operators (`=`, `<>`, `<`,
+`<=`, `>`, `>=`) compare arrays ELEMENT-WISE as PostgreSQL does — one kernel
+for all of them: an empty array first, a shorter prefix before a longer array,
+a NULL element after every value and equal to another NULL element
+(`ARRAY[1,NULL] = ARRAY[1,NULL]` is true). `UNION` arms whose elements differ fold on the
 numeric ladder (`int4[] ∪ bigint[]` is `bigint[]`); arms with no common element
 type are `42804`. `CAST(container AS TEXT)` is the same rendering.
 

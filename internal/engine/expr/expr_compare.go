@@ -92,6 +92,14 @@ func (e *Cmp) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool) {
 	if lv == nil || rv == nil {
 		return false, true // a comparison against NULL is UNKNOWN (#370)
 	}
+	// Two containers order element-wise through the sort's own kernel
+	// (cmp_container.go, arc CW round 2) — never through the text of the
+	// boxes.
+	if isContainerBox(lv) && isContainerBox(rv) {
+		if c, ok := containerCmpOrder(b, row, e.Left, e.Right, lv, rv); ok {
+			return cmpOrder(c, e.Op), false
+		}
+	}
 	// compareNull, not compare: a network comparison has a third answer for a
 	// stored value that names no address, and it is the one a NULL row gets
 	// (ADR-0012 item 10, #565). Every other pair answers null=false here, so
