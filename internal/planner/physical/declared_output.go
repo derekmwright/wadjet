@@ -1814,6 +1814,13 @@ func binOpTemporalType(n *plansql.BinaryOp, decls ColDecls) (expr.DeclType, expr
 		return expr.Decl(parquet.TypeTimestamp), expr.Decided
 	case n.Op == "-" && lk == temporalDay && rk == temporalDay:
 		return expr.Decl(parquet.TypeInt64), expr.Decided
+	case n.Op == "-" && lk == temporalInstant && rk == temporalInstant:
+		// No INTERVAL type: the difference of two instants is the documented
+		// number of milliseconds (docs/postgres-differences.md), a double —
+		// the value the kernel produces. Undecided, it was published as TEXT
+		// (OID 25) on the wire: `now() - now()` read `0` as a string
+		// (round-3 review N4).
+		return expr.Decl(parquet.TypeFloat64), expr.Decided
 	case lk == temporalDay && rk == temporalNone && nodeIsIntegerDeclared(n.Right, decls):
 		return expr.Decl(parquet.TypeDate), expr.Decided
 	case rk == temporalDay && lk == temporalNone && n.Op == "+" && nodeIsIntegerDeclared(n.Left, decls):

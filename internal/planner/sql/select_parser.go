@@ -3852,13 +3852,13 @@ func (p *selectParser) parseIntervalLiteral() (Node, error) {
 	var unit string
 
 	if len(parts) == 2 {
-		// Combined: '30 days'
-		n, err := strconv.Atoi(parts[0])
+		// Combined: '30 days' — the same reading a CAST of text to INTERVAL
+		// takes at runtime (ParseIntervalText).
+		lit, err := ParseIntervalText(valStr)
 		if err != nil {
-			return nil, fmt.Errorf("invalid interval value %q: %w", parts[0], err)
+			return nil, err
 		}
-		value = n
-		unit = normalizeIntervalUnit(parts[1])
+		value, unit = lit.Value, lit.Unit
 	} else if len(parts) == 1 {
 		// Separate: 'N' followed by keyword unit
 		n, err := strconv.Atoi(parts[0])
@@ -3889,6 +3889,28 @@ func (p *selectParser) parseIntervalLiteral() (Node, error) {
 	}
 
 	return &IntervalLit{Value: value, Unit: unit}, nil
+}
+
+// ParseIntervalText reads an INTERVAL's TEXT the one way this engine reads
+// it — `'N unit'`, or `'N'` alone, which PostgreSQL reads as seconds — for
+// the `INTERVAL '30 days'` literal and for a CAST of text to INTERVAL
+// (`CAST('1 day' AS INTERVAL)`, `'1 day'::interval`, a bound parameter), which
+// used to pass the text through uncast so `ts + CAST('1 day' AS INTERVAL)`
+// added ONE MILLISECOND (arc VL round 4, round-3 review N2). Anything else is
+// 22007.
+func ParseIntervalText(s string) (*IntervalLit, error) {
+	parts := strings.Fields(s)
+	if len(parts) == 0 || len(parts) > 2 {
+		return nil, sqlerr.New("22007", "invalid input syntax for type interval: %s", sqlerr.Quote(s))
+	}
+	n, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return nil, sqlerr.New("22007", "invalid input syntax for type interval: %s", sqlerr.Quote(s))
+	}
+	if len(parts) == 1 {
+		return &IntervalLit{Value: n, Unit: "second"}, nil
+	}
+	return &IntervalLit{Value: n, Unit: normalizeIntervalUnit(parts[1])}, nil
 }
 
 // normalizeIntervalUnit maps plural/mixed-case units to canonical lowercase singular.

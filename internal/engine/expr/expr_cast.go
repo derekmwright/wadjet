@@ -11,6 +11,8 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
+	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -84,6 +86,9 @@ func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
 	// published its operand unparsed under a network declaration.
 	if nt, ok := networkCastType(dest); ok {
 		return castToNetwork(b, row, e.Operand, v, nt)
+	}
+	if strings.TrimSpace(dest) == "interval" {
+		return castToInterval(v)
 	}
 	switch dest {
 	// Keep this label list and IsIntegerCastDest in step: that predicate tells
@@ -375,4 +380,44 @@ func stringOperand(v any) (string, bool) {
 		return string(s), true
 	}
 	return "", false
+}
+
+// castToInterval is CAST(x AS INTERVAL): an INTERVAL passes through, TEXT is
+// read by the same grammar and unit table the `INTERVAL '…'` literal uses
+// (plansql.ParseIntervalText, intervalValueOf), and anything else has no cast
+// (PostgreSQL: 42846 `cannot cast type integer to interval`). The text used to
+// fall through this switch unparsed, so `ts + CAST('1 day' AS INTERVAL)` —
+// declared a TIMESTAMP shift — added the text's leading number as ONE
+// MILLISECOND (arc VL round 4; round-3 review N2).
+func castToInterval(v any) any {
+	switch x := v.(type) {
+	case IntervalValue:
+		return x
+	case string:
+		lit, err := plansql.ParseIntervalText(x)
+		if err != nil {
+			panic(fatalEval{err})
+		}
+		iv, err := intervalValueOf(lit)
+		if err != nil {
+			panic(fatalEval{err})
+		}
+		return iv
+	}
+	panic(fatalEval{sqlerr.New("42846", "cannot cast type %s to interval", intervalSourceName(v))})
+}
+
+// intervalSourceName names a non-text operand's type for the 42846 sentence.
+func intervalSourceName(v any) string {
+	switch v.(type) {
+	case int32:
+		return "integer"
+	case int64, int:
+		return "bigint"
+	case float32, float64:
+		return "double precision"
+	case bool:
+		return "boolean"
+	}
+	return "numeric"
 }

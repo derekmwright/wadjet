@@ -294,44 +294,9 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 		return &Lit{Val: "*"}, nil
 
 	case *plansql.IntervalLit:
-		iv := IntervalValue{}
-		switch n.Unit {
-		case "year":
-			iv.Years = n.Value
-		case "month":
-			iv.Months = n.Value
-		case "week":
-			iv.Days = n.Value * 7
-		case "day":
-			iv.Days = n.Value
-		case "hour":
-			iv.Hours = n.Value
-		case "minute":
-			iv.Minutes = n.Value
-		case "second":
-			iv.Seconds = n.Value
-		default:
-			// A UNIT THIS TYPE CANNOT HOLD IS A REFUSAL, NOT A DAY.
-			//
-			// This arm used to be `iv.Days = n.Value`, so `INTERVAL '500'
-			// MILLISECOND` was a 500-DAY interval — half a second asked for,
-			// sixteen months delivered, silently, to date arithmetic and to
-			// `time_bucket` alike. PostgreSQL accepts that spelling and means
-			// half a second; `IntervalValue` has no sub-second field, so this
-			// engine cannot mean it, and the standing rule is the loud error
-			// (ADR-0012). Every unit MICROSECOND and MILLISECOND, and the
-			// calendar units QUARTER / DECADE / CENTURY / MILLENNIUM, land
-			// here — as does a typo, which the parser accepts as an
-			// identifier and which used to become days too.
-			//
-			// Nothing in the tree spelled any of them, so this costs no query
-			// that worked; it converts a class that answered WRONGLY into one
-			// that answers not at all. Supporting sub-second intervals is a
-			// change to IntervalValue and to every consumer of it, which is a
-			// feature rather than this fix.
-			return nil, sqlerr.New("0A000",
-				"interval unit %q is not supported; use YEAR, MONTH, WEEK, DAY, "+
-					"HOUR, MINUTE or SECOND", n.Unit)
+		iv, err := intervalValueOf(n)
+		if err != nil {
+			return nil, err
 		}
 		return &Lit{Val: iv}, nil
 
@@ -1533,4 +1498,50 @@ func CompileSelectExpr(expr plansql.Node, alias string) (Expr, string, error) {
 	}
 
 	return compiled, name, nil
+}
+
+// intervalValueOf is an INTERVAL literal's value: the literal `INTERVAL '1'
+// DAY` at compile time and a CAST of text to INTERVAL at runtime
+// (castToInterval) read their unit through this one table.
+func intervalValueOf(n *plansql.IntervalLit) (IntervalValue, error) {
+	iv := IntervalValue{}
+	switch n.Unit {
+	case "year":
+		iv.Years = n.Value
+	case "month":
+		iv.Months = n.Value
+	case "week":
+		iv.Days = n.Value * 7
+	case "day":
+		iv.Days = n.Value
+	case "hour":
+		iv.Hours = n.Value
+	case "minute":
+		iv.Minutes = n.Value
+	case "second":
+		iv.Seconds = n.Value
+	default:
+		// A UNIT THIS TYPE CANNOT HOLD IS A REFUSAL, NOT A DAY.
+		//
+		// This arm used to be `iv.Days = n.Value`, so `INTERVAL '500'
+		// MILLISECOND` was a 500-DAY interval — half a second asked for,
+		// sixteen months delivered, silently, to date arithmetic and to
+		// `time_bucket` alike. PostgreSQL accepts that spelling and means
+		// half a second; `IntervalValue` has no sub-second field, so this
+		// engine cannot mean it, and the standing rule is the loud error
+		// (ADR-0012). Every unit MICROSECOND and MILLISECOND, and the
+		// calendar units QUARTER / DECADE / CENTURY / MILLENNIUM, land
+		// here — as does a typo, which the parser accepts as an
+		// identifier and which used to become days too.
+		//
+		// Nothing in the tree spelled any of them, so this costs no query
+		// that worked; it converts a class that answered WRONGLY into one
+		// that answers not at all. Supporting sub-second intervals is a
+		// change to IntervalValue and to every consumer of it, which is a
+		// feature rather than this fix.
+		return IntervalValue{}, sqlerr.New("0A000",
+			"interval unit %q is not supported; use YEAR, MONTH, WEEK, DAY, "+
+				"HOUR, MINUTE or SECOND", n.Unit)
+	}
+	return iv, nil
 }
