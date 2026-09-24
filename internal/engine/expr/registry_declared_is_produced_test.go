@@ -73,6 +73,8 @@ func TestRegistryDeclaredTypeIsTheProducedType(t *testing.T) {
 
 	names := DefaultRegistry.Names()
 	sort.Strings(names)
+	noValue := map[string]bool{}
+	walked := 0
 	var census []string
 	temporalSeen := map[string]bool{}
 	for _, n := range names {
@@ -85,8 +87,10 @@ func TestRegistryDeclaredTypeIsTheProducedType(t *testing.T) {
 		}
 		shapes := sampleShapes(DefaultRegistry.Lookup(n), n, pool)
 		if len(shapes) == 0 {
+			noValue[n] = true
 			continue
 		}
+		walked++
 		temporal := decl.ID == batch.TypeDate || decl.ID == batch.TypeTimestamp
 		if temporal {
 			temporalSeen[n] = true
@@ -132,7 +136,80 @@ func TestRegistryDeclaredTypeIsTheProducedType(t *testing.T) {
 			t.Errorf("temporal entry %s produced no value from the sample pool — extend the pool", n)
 		}
 	}
+	// COVERAGE: every registry name is walked, or is listed below with the
+	// reason it cannot be evaluated GENERICALLY — and none of those is
+	// temporal-declared (the loop above already fails a temporal entry the
+	// pool cannot reach). A listed name that starts producing a value FAILS
+	// (move it into the walk by deleting it here), and a new name the pool
+	// cannot reach fails until it is listed.
+	notEvaluated := map[string]bool{}
+	for _, group := range censusNotEvaluated {
+		for _, n := range strings.Fields(group) {
+			notEvaluated[n] = true
+		}
+	}
+	undecided, skipped, builtin := 0, 0, 0
+	for _, n := range names {
+		if _, ok := funcSignatures[n]; !ok {
+			// Registered by another test at runtime (a UDF such as expr_test's
+			// `double`), not a built-in: the registry and the signature table
+			// are held equal by their own gate.
+			continue
+		}
+		builtin++
+		d, c := DefaultRegistry.ReturnType(n).Resolve(0, nil)
+		switch {
+		case skip(n):
+			skipped++
+			if !notEvaluated[n] {
+				t.Errorf("%s is skipped by the census but not listed in censusNotEvaluated", n)
+			}
+		case c != Decided || DefaultRegistry.ReturnType(n).Boolean() && d.ID != batch.TypeBool:
+			undecided++
+			if !notEvaluated[n] {
+				t.Errorf("%s has no fixed declaration and is not listed in censusNotEvaluated", n)
+			}
+		case noValue[n] && !notEvaluated[n]:
+			t.Errorf("%s produced no value from the sample pool: extend the pool or list it in censusNotEvaluated", n)
+		case !noValue[n] && notEvaluated[n]:
+			t.Errorf("%s is listed in censusNotEvaluated but the census walks it — delete it from the list", n)
+		}
+		if notEvaluated[n] && c == Decided && (d.ID == batch.TypeDate || d.ID == batch.TypeTimestamp) {
+			t.Errorf("%s is temporal-declared and may not be left out of the census", n)
+		}
+	}
+	t.Logf("registry %d names: %d walked, %d without a fixed declaration, %d skipped, %d unreachable by the generic pool",
+		builtin, walked, undecided, skipped, len(noValue))
 	t.Logf("declared ≠ produced (pinned, non-temporal): %d\n%s", len(census), strings.Join(census, "\n"))
+}
+
+// censusNotEvaluated are the registry names the census cannot evaluate
+// GENERICALLY, by why. None is temporal-declared; the temporal entries are
+// all walked here and, for their UNIT, evaluated on a known instant by
+// TestTemporalRegistryEntriesProduceTheirDeclaredUnit.
+var censusNotEvaluated = map[string]string{
+	// No fixed declaration: the value is one of the arguments (or an element
+	// or field of one), declared per call by the planner.
+	"pass-through": "array_max array_min coalesce element_at greatest if ifnull json_extract json_extract_scalar least nullif row_field struct_field",
+	// The kernel reaches the network or a host database, or allocates by an
+	// argument's magnitude.
+	"not sampled": "geoip_asn geoip_city geoip_continent geoip_country geoip_country_name geoip_latitude geoip_longitude geoip_org " +
+		"geoip_postal_code geoip_subdivision geoip_timezone has_sequence_privilege hosts_in_cidr lpad pg_get_serial_sequence repeat reverse_dns rpad",
+	// Their arguments are containers, vectors, packet / HTTP / TLS / DNS
+	// payload bytes, semantic versions, catalog OIDs or MAC / TCP-flag values
+	// the text-and-number pool does not spell; each has its own tests.
+	"argument domain outside the pool": "map_entries map_keys map_values map_from_entries array_contains array_length array_lower array_upper " +
+		"array_join cardinality width_bucket json_array_length cosine_similarity dot_product l2_distance vector_norm decode encode " +
+		"has_tcp_flag tcp_flags_has_all tcp_flags_has_any tcp_flags_has_none tcp_flag_mask tcp_flags_from_string tcp_session_id " +
+		"mac_is_local mac_is_unicast mac_format mac_to_string mac_vendor_oui ipv6_to_eui64 sixto4_gateway teredo_client teredo_server " +
+		"semver_satisfies semver_cmp semver_major semver_minor semver_patch semver_parse semver_parse_strict semver_build semver_normalize " +
+		"semver_normalize_strict semver_prerelease semver_sort_key url_extract_port uuid_version uuid_to_string " +
+		"http_content_length http_status_code http_content_type http_header http_host http_method http_status_class http_user_agent http_version " +
+		"dns_query_name dns_query_type ja3_fingerprint ja3_string ja3s_fingerprint ja3s_string tls_handshake_type tls_sni " +
+		"protocol_number port_name vlan_id pg_relation_is_publishable regclassin regrolein regclassout regroleout to_regclass " +
+		"col_description obj_description shobj_description current_query inet_client_addr inet_server_addr " +
+		"pg_get_constraintdef pg_get_expr pg_get_function_arguments pg_get_function_result pg_get_indexdef pg_get_ruledef " +
+		"pg_get_statisticsobjdef_columns pg_get_triggerdef pg_get_userbyid pg_get_viewdef",
 }
 
 var (
