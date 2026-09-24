@@ -63,6 +63,10 @@ func wireGroupKeyResolve(resolve []physical.GroupKeyResolution) []distributed.Gr
 	out := make([]distributed.GroupKeyResolveSpec, len(resolve))
 	for i, r := range resolve {
 		out[i] = distributed.GroupKeyResolveSpec{Expr: r.Expr, Computed: r.Computed, Fields: r.Decl.RowFields()}
+		if (r.Decl.ID == parquet.TypeArray || r.Decl.ID == parquet.TypeMap) && r.Decl.Schema != nil && r.Decl.Schema.ElementType != nil {
+			el := r.Decl.Schema.ElementType.Clone()
+			out[i].ElementType = &el
+		}
 	}
 	return out
 }
@@ -154,6 +158,7 @@ func wireAggSpecs(specs []dagplan.AggSpec) []distributed.AggSpec {
 		// every non-DECIMAL input, so carrying it unconditionally says nothing
 		// new about the ones that had it before.
 		spec.InputFields = a.InputFields
+		spec.InputElementType = a.InputElementType
 		spec.InputPrecision, spec.InputScale = a.InputPrecision, a.InputScale
 		out = append(out, spec)
 	}

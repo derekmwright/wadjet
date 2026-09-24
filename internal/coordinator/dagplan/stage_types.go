@@ -523,6 +523,8 @@ type OutputRename struct {
 	TypeKnown bool
 	Precision int
 	Scale     int
+	// ElementType is a computed container rename's element (arc CW).
+	ElementType *parquet.Column
 }
 
 // UnionArm is one arm of a StageUnion: the projection that puts its output
@@ -711,6 +713,11 @@ type AggSpec struct {
 	InputFields    []parquet.Column
 	InputPrecision int
 	InputScale     int
+	// InputElementType is a container input's element (arc CW): the
+	// materialized input vector is built from the declaration alone, and a
+	// container one without its element has no child — MIN(ARRAY[x]) read
+	// NULL.
+	InputElementType *parquet.Column
 	// InputCol2, Separator and Percentile carry the aggregate arguments
 	// past the first one — the second column of CORR/COVAR_*/MIN_BY/MAX_BY,
 	// STRING_AGG's delimiter, PERCENTILE_CONT/DISC's fraction. They are
@@ -817,6 +824,10 @@ type SortKeySpec struct {
 	SourceFields    []parquet.Column
 	SourcePrecision int
 	SourceScale     int
+	// SourceElementType is a container key's element (arc CW): an ARRAY
+	// sort key materialized without it has no child, and every key compares
+	// equal.
+	SourceElementType *parquet.Column
 
 	// AliasExpr is the DEFINING EXPRESSION of a key that names a DERIVED
 	// TABLE's COMPUTED alias, with AliasExprType its declared type. It is
@@ -841,6 +852,8 @@ type SortKeySpec struct {
 	AliasExprFields    []parquet.Column
 	AliasExprPrecision int
 	AliasExprScale     int
+	// AliasExprElementType is SourceElementType's twin for the alias arm.
+	AliasExprElementType *parquet.Column
 
 	// AliasSource names the producing stream column behind a derived-table
 	// SELECT-list alias, the nonsynthetic counterpart of SourceColumn (#467, #468).

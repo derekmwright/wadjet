@@ -198,6 +198,7 @@ func extractOutputRenames(root *logical.Node) []OutputRename {
 			From: src, To: target, Expr: astExpr, IsAgg: isAgg,
 			Type: declType.ID, TypeKnown: declKnown,
 			Precision: declType.Precision, Scale: declType.Scale, Fields: declType.RowFields(),
+			ElementType: localPlanFacts.DeclTypeParts(declType).ElementType,
 		})
 	}
 	return renames

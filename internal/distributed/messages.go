@@ -790,9 +790,14 @@ type ColumnSpec struct {
 // which the worker resolves by DirectCopy and never consults this for).
 type ProjectSpec struct {
 	Fields []parquet.Column `json:"fields,omitempty"`
-	Expr   string           `json:"expr"`
-	Name   string           `json:"name"`
-	Type   *int             `json:"type,omitempty"`
+	// ElementType is a computed ARRAY's element (a MAP's entry ROW), for
+	// the reason Precision/Scale carry a DECIMAL's: the worker builds the
+	// output vector from the declaration alone, and a container one without
+	// its element has no child (arc CW).
+	ElementType *parquet.Column `json:"element_type,omitempty"`
+	Expr        string          `json:"expr"`
+	Name        string          `json:"name"`
+	Type        *int            `json:"type,omitempty"`
 	// Precision and Scale carry a computed DECIMAL's declaration. A bare
 	// TypeID is not a type for a DECIMAL: the worker builds the output
 	// vector from Type alone, and a DECIMAL vector with no scale reads every
@@ -830,9 +835,11 @@ type DecimalMeta struct {
 // this fragment materialize the value", which no reader may re-derive from the
 // text (§2c).
 type GroupKeyResolveSpec struct {
-	Fields   []parquet.Column `json:"fields,omitempty"`
-	Expr     string           `json:"expr,omitempty"`
-	Computed bool             `json:"computed,omitempty"`
+	Fields []parquet.Column `json:"fields,omitempty"`
+	// ElementType is a computed container key's element (arc CW).
+	ElementType *parquet.Column `json:"element_type,omitempty"`
+	Expr        string          `json:"expr,omitempty"`
+	Computed    bool            `json:"computed,omitempty"`
 }
 
 // AggSpec defines an aggregation in a task.
@@ -897,6 +904,8 @@ type AggSpec struct {
 	InputFields    []parquet.Column `json:"input_fields,omitempty"`
 	InputPrecision int              `json:"input_precision,omitempty"`
 	InputScale     int              `json:"input_scale,omitempty"`
+	// InputElementType is a container input's element (arc CW).
+	InputElementType *parquet.Column `json:"input_element_type,omitempty"`
 	// InputCol2 is the second column argument of a two-column aggregate:
 	// CORR(x, y), COVAR_SAMP/POP(x, y) and MIN_BY/MAX_BY(value, ordering).
 	// Empty for every other function.

@@ -386,7 +386,7 @@ func materializeSortKey(producer *Stage, key SortKeySpec) bool {
 		Type:      key.SourceType,
 		TypeKnown: key.SourceTypeKnown,
 		Fields:    key.SourceFields, Precision: key.SourcePrecision,
-		Scale: key.SourceScale,
+		Scale: key.SourceScale, ElementType: key.SourceElementType,
 	})
 	return true
 }
@@ -429,6 +429,7 @@ func annotateDerivedAliasSortKey(key *SortKeySpec, child *logical.Node) {
 				localPlanFacts.InferProjectionDeclType(def, parquet.TypeString,
 					localPlanFacts.StrictIntArithCols(owner.Children[0]), localPlanFacts.InputColDecls(owner.Children[0])))
 			key.AliasExprType, key.AliasExprPrecision, key.AliasExprScale, key.AliasExprFields = materialized.Type, materialized.Precision, materialized.Scale, materialized.Fields
+			key.AliasExprElementType = materialized.ElementType
 			key.AliasExprTypeKnown = true
 		}
 	}
@@ -634,6 +635,7 @@ func annotateHiddenSortSource(key *SortKeySpec, child *logical.Node) {
 			localPlanFacts.InferProjectionDeclType(proj.ASTExpr, parquet.TypeString,
 				strictInt, localPlanFacts.InputColDecls(owner.Children[0])))
 		key.SourceType, key.SourcePrecision, key.SourceScale, key.SourceFields = materialized.Type, materialized.Precision, materialized.Scale, materialized.Fields
+		key.SourceElementType = materialized.ElementType
 		key.SourceTypeKnown = true
 	}
 }
@@ -684,6 +686,7 @@ func materializeAliasKey(producer *Stage, key SortKeySpec) bool {
 		Name: stripQualifier(key.Column), Expr: key.AliasExpr,
 		Type: key.AliasExprType, TypeKnown: key.AliasExprTypeKnown,
 		Fields: key.AliasExprFields, Precision: key.AliasExprPrecision, Scale: key.AliasExprScale,
+		ElementType: key.AliasExprElementType,
 	}})
 }
 
@@ -691,13 +694,14 @@ func materializeAliasKey(producer *Stage, key SortKeySpec) bool {
 // the query calls it and the expression that defines it, spelled in the
 // producer's own scope.
 type aliasColumn struct {
-	Fields    []parquet.Column
-	Name      string
-	Expr      string
-	Type      parquet.TypeID
-	TypeKnown bool
-	Precision int
-	Scale     int
+	Fields      []parquet.Column
+	ElementType *parquet.Column
+	Name        string
+	Expr        string
+	Type        parquet.TypeID
+	TypeKnown   bool
+	Precision   int
+	Scale       int
 }
 
 // materializeAliasColumns projects a set of computed derived aliases into the
@@ -746,6 +750,7 @@ func materializeAliasColumns(producer *Stage, cols []aliasColumn) bool {
 		spec := physical.ProjectExprSpec{
 			Expr: c.Expr, Name: c.Name, Type: c.Type,
 			TypeKnown: c.TypeKnown, Fields: c.Fields, Precision: c.Precision, Scale: c.Scale,
+			ElementType: c.ElementType,
 		}
 		if seen[lower] {
 			// The producer already emits a column of that name, and which of
@@ -799,6 +804,7 @@ func derivedAliasColumnFor(name string, child *logical.Node) aliasColumn {
 			localPlanFacts.InferProjectionDeclType(def, parquet.TypeString,
 				localPlanFacts.StrictIntArithCols(owner.Children[0]), localPlanFacts.InputColDecls(owner.Children[0])))
 		out.Type, out.Precision, out.Scale, out.Fields = materialized.Type, materialized.Precision, materialized.Scale, materialized.Fields
+		out.ElementType = materialized.ElementType
 		out.TypeKnown = true
 	}
 	return out

@@ -122,6 +122,7 @@ func absorbAggregateOutputProjection(project *logical.Node, stage *Stage) map[st
 			specs = append(specs, physical.ProjectExprSpec{
 				Expr: src, Name: strings.ToLower(alias),
 				Type: typ, TypeKnown: true, Precision: prec, Scale: scale, Fields: fields,
+				ElementType: materialized.ElementType,
 			})
 			needed = true
 		case !localPlanFacts.NameIsPlainColumn(src):

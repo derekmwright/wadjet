@@ -165,6 +165,7 @@ func (p *StagePlanner) attachScanSelectProjections(root *logical.Node, stages []
 		var typeKnown bool
 		var prec, scale int
 		var fields []parquet.Column
+		var elem *parquet.Column
 		// A ROW FIELD PATH looks like a simple column reference and is not
 		// one: no stage carries a column by that name, so the fragment has
 		// to COMPUTE it, and its type has to be declared here — nothing
@@ -210,17 +211,19 @@ func (p *StagePlanner) attachScanSelectProjections(root *logical.Node, stages []
 				p.loweredScalarProjExprs[&proj[j]] = true
 				specs = append(specs, physical.ProjectExprSpec{Expr: lowered, Name: name,
 					Type: ldecl.ID, TypeKnown: ldeclKnown,
-					Precision: ldecl.Precision, Scale: ldecl.Scale, Fields: p.PlanContext.DeclTypeParts(ldecl).Fields})
+					Precision: ldecl.Precision, Scale: ldecl.Scale, Fields: p.PlanContext.DeclTypeParts(ldecl).Fields,
+					ElementType: p.PlanContext.DeclTypeParts(ldecl).ElementType})
 				continue
 			}
 			decl := p.PlanContext.InferProjectionDeclType(it.ASTExpr, parquet.TypeString, strictInt, colTypes)
 			typ = decl.ID
 			prec, scale = decl.Precision, decl.Scale
 			fields = p.PlanContext.DeclTypeParts(decl).Fields
+			elem = p.PlanContext.DeclTypeParts(decl).ElementType
 			typeKnown = true
 		}
 		specs = append(specs, physical.ProjectExprSpec{Expr: itemExpr, Name: name, Type: typ,
-			TypeKnown: typeKnown, Precision: prec, Scale: scale, Fields: fields})
+			TypeKnown: typeKnown, Precision: prec, Scale: scale, Fields: fields, ElementType: elem})
 	}
 	// A wrapped item reading TWO slots needs both on the stream, and only the
 	// first could take its own position. The rest ride at the END, past the
@@ -288,6 +291,7 @@ func (p *StagePlanner) attachScanSelectProjections(root *logical.Node, stages []
 						p.PlanContext.StrictIntArithColsThroughRenames(renameChild),
 						p.PlanContext.SourceColDeclsThroughRenames(renameChild)))
 				specs[j].Type, specs[j].Precision, specs[j].Scale, specs[j].Fields = materialized.Type, materialized.Precision, materialized.Scale, materialized.Fields
+				specs[j].ElementType = materialized.ElementType
 				specs[j].TypeKnown = true
 				anyNestedRename = true
 			}
@@ -306,6 +310,7 @@ func (p *StagePlanner) attachScanSelectProjections(root *logical.Node, stages []
 				d := p.PlanContext.DeclTypeParts(p.PlanContext.InferProjectionDeclType(def, parquet.TypeString, p.PlanContext.StrictIntArithCols(owner.Children[0]), p.PlanContext.EmittedColDecls(owner.Children[0])))
 				specs[j].Expr = def.String()
 				specs[j].Type, specs[j].Precision, specs[j].Scale, specs[j].Fields = d.Type, d.Precision, d.Scale, d.Fields
+				specs[j].ElementType = d.ElementType
 				specs[j].TypeKnown = true
 				hasExpr = true
 				anyNestedRename = true

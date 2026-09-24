@@ -119,6 +119,7 @@ func newBatchRenamer(renames []dagplan.OutputRename, columns []string) *batchRen
 			br.exprType[i] = r.Type
 			br.exprDecl[i] = parquet.Column{
 				Type: r.Type, Precision: r.Precision, Scale: r.Scale, Fields: r.Fields,
+				ElementType: r.ElementType,
 			}
 		}
 	}

@@ -431,10 +431,26 @@ type pmRig struct {
 	// route (it must be none: it is configured with LocalFastPathBytes: 0).
 	// The census asserts on it — see TestPolicyMaskingIsPlanTimeOnEveryDoor.
 	fastPathStats func() (calls, engaged, dagHits int64)
+	// pgSingle / pgDAG / httpLocal are the raw addresses of the pgwire and
+	// HTTP doors, for a gate that asserts on what a door SENDS (the
+	// RowDescription's OIDs, the JSON body) rather than on the rendered rows
+	// the doors above hand back — arc CW's container gate.
+	pgSingle, pgDAG, httpLocal string
 }
 
-func pmWriteFixture(t *testing.T, ctx context.Context, store objstore.Store, cat *catalog.Catalog) {
+// pmExtraTable is a fixture a gate adds to the rig's four, loaded into every
+// door's store the same way.
+type pmExtraTable struct {
+	name   string
+	schema parquet.Schema
+	rows   []map[string]any
+}
+
+func pmWriteFixture(t *testing.T, ctx context.Context, store objstore.Store, cat *catalog.Catalog, extra ...pmExtraTable) {
 	t.Helper()
+	for _, x := range extra {
+		pmWriteTable(t, ctx, store, cat, x.name, x.schema, x.rows)
+	}
 	pmWriteTable(t, ctx, store, cat, pmTable, pmSchema(), pmFixture())
 	pmWriteTable(t, ctx, store, cat, pmOther, pmOtherSchema(), pmOtherFixture())
 	pmWriteTable(t, ctx, store, cat, pmBal, pmBalSchema(), pmBalFixture())
@@ -482,7 +498,7 @@ func pmWriteTable(t *testing.T, ctx context.Context, store objstore.Store, cat *
 	}
 }
 
-func pmEmbeddedDB(t *testing.T, ctx context.Context, budget int64) *wadjet.DB {
+func pmEmbeddedDB(t *testing.T, ctx context.Context, budget int64, extra ...pmExtraTable) *wadjet.DB {
 	t.Helper()
 	cfg := wadjet.Config{Store: objstore.NewMemStore(), Bucket: "test", MemoryBudget: budget}
 	if budget > 0 {
@@ -509,6 +525,9 @@ func pmEmbeddedDB(t *testing.T, ctx context.Context, budget int64) *wadjet.DB {
 	ingest1(pmOther, pmOtherSchema(), pmOtherFixture())
 	ingest1(pmBal, pmBalSchema(), pmBalFixture())
 	ingest1(pmNet, pmNetSchema(), pmNetFixture())
+	for _, x := range extra {
+		ingest1(x.name, x.schema, x.rows)
+	}
 	return db
 }
 
@@ -519,7 +538,7 @@ func pmRigUp(t *testing.T, ctx context.Context) pmRig {
 }
 
 // pmRigUpWith stands up every door over the given policy provider.
-func pmRigUpWith(t *testing.T, ctx context.Context, provider *auth.Provider) pmRig {
+func pmRigUpWith(t *testing.T, ctx context.Context, provider *auth.Provider, extra ...pmExtraTable) pmRig {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 
@@ -540,9 +559,9 @@ func pmRigUpWith(t *testing.T, ctx context.Context, provider *auth.Provider) pmR
 	var doors []pmDoor
 
 	// --- embedded: single and spilled -------------------------------------
-	single := pmEmbeddedDB(t, ctx, 0)
+	single := pmEmbeddedDB(t, ctx, 0, extra...)
 	single.SetAuthProvider(provider)
-	spilled := pmEmbeddedDB(t, ctx, 512*1024)
+	spilled := pmEmbeddedDB(t, ctx, 512*1024, extra...)
 	spilled.SetAuthProvider(provider)
 	embed := func(db *wadjet.DB) func(*testing.T, string, string) (pmResult, error) {
 		return func(t *testing.T, key, sql string) (res pmResult, err error) {
@@ -595,7 +614,7 @@ func pmRigUpWith(t *testing.T, ctx context.Context, provider *auth.Provider) pmR
 	if err := cat.Init(ctx); err != nil {
 		t.Fatal(err)
 	}
-	pmWriteFixture(t, ctx, store, cat)
+	pmWriteFixture(t, ctx, store, cat, extra...)
 
 	ids := make([]string, 3)
 	for i := range ids {
@@ -848,6 +867,7 @@ func pmRigUpWith(t *testing.T, ctx context.Context, provider *auth.Provider) pmR
 		pmDoor{"http/dag", httpRun(hsDAG.URL)})
 
 	return pmRig{doors: doors, provider: provider, asyncBase: hsDAG.URL, store: store,
+		pgSingle: pgSingle.Addr(), pgDAG: pgDAG.Addr(), httpLocal: hsLocal.URL,
 		fastPathStats: fastPathStats}
 }
 

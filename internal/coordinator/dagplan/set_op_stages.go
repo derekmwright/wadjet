@@ -314,6 +314,7 @@ func reconcileSetOpArmTypes(plans []physical.SetOpArmPlan, outNames []string, op
 					// file the next stage reads beside a DECIMAL one.
 					plans[i].Specs[col].Type = want.Typ
 					plans[i].Specs[col].Fields = want.Fields
+					plans[i].Specs[col].ElementType = want.ElementType
 					plans[i].Specs[col].TypeKnown = true
 					plans[i].Specs[col].Precision = want.Dec.Precision
 					plans[i].Specs[col].Scale = want.Dec.Scale
@@ -357,11 +358,29 @@ func reconcileSetOpArmTypes(plans []physical.SetOpArmPlan, outNames []string, op
 				// doing the work, where the single-process path answered.
 				plans[i].Specs[col].Type = want.Typ
 				plans[i].Specs[col].Fields = want.Fields
+				plans[i].Specs[col].ElementType = want.ElementType
 				plans[i].Specs[col].TypeKnown = true
 				plans[i].Types[col] = want
 				continue
 			}
 			if plans[i].Types[col].Typ == want.Typ {
+				// Two ARRAY arms can still disagree about the ELEMENT
+				// (`int[] ∪ bigint[]`); the narrower arm converts its
+				// elements, or the stage writes two element types into one
+				// column (arc CW).
+				if el, ae := want.ElementType, plans[i].Types[col].ElementType; el != nil && ae != nil && ae.Type != el.Type {
+					cast, ok := setOpCastExpr("x", ae.Type, el.Type)
+					if !ok {
+						return fmt.Errorf("result column %q must be an array of %s to match the other arms, "+
+							"and arm %d's elements cannot be cast to it", outNames[col], el.Type, i+1)
+					}
+					elemName := strings.TrimSuffix(cast[strings.LastIndex(cast, " AS ")+4:], ")")
+					plans[i].Specs[col].Expr = "CAST(" + plans[i].Specs[col].Expr + " AS " + elemName + "[])"
+					plans[i].Specs[col].Type = want.Typ
+					plans[i].Specs[col].ElementType = el
+					plans[i].Specs[col].TypeKnown = true
+					plans[i].Types[col] = physical.SetOpColType{Typ: want.Typ, Known: true, ElementType: el}
+				}
 				continue
 			}
 			cast, ok := setOpCastExpr(plans[i].Specs[col].Expr, plans[i].Types[col].Typ, want.Typ)
@@ -372,8 +391,9 @@ func reconcileSetOpArmTypes(plans []physical.SetOpArmPlan, outNames []string, op
 			plans[i].Specs[col].Expr = cast
 			plans[i].Specs[col].Type = want.Typ
 			plans[i].Specs[col].Fields = want.Fields
+			plans[i].Specs[col].ElementType = want.ElementType
 			plans[i].Specs[col].TypeKnown = true
-			plans[i].Types[col] = physical.SetOpColType{Typ: want.Typ, Known: true}
+			plans[i].Types[col] = physical.SetOpColType{Typ: want.Typ, Known: true, ElementType: want.ElementType}
 		}
 	}
 	return nil

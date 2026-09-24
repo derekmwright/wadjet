@@ -61,12 +61,13 @@ func buildWindowKeyProjection(specs []distributed.ProjectSpec) (exec.UnaryOperat
 		}
 		e := compiled
 		pc := exec.ProjectColumn{
-			Name:      spec.Name,
-			Type:      outType.ID,
-			Fields:    outType.RowFields(),
-			Precision: outType.Precision,
-			Scale:     outType.Scale,
-			Computed:  true,
+			Name:        spec.Name,
+			Type:        outType.ID,
+			Fields:      outType.RowFields(),
+			ElementType: spec.ElementType,
+			Precision:   outType.Precision,
+			Scale:       outType.Scale,
+			Computed:    true,
 			Expr: func(b *batch.RecordBatch, row int) any {
 				return e.Eval(b, row)
 			},
@@ -287,8 +288,10 @@ func buildAggInputProjection(
 					outType = expr.DeclDecimal(m.Precision, m.Scale)
 				}
 			}
+			var elem *parquet.Column
 			if keys != nil {
 				outType.Schema = &parquet.Column{Type: parquet.TypeRow, Fields: keys.slotFields[slot]}
+				elem = keys.slotElems[slot]
 			}
 			projCols = append(projCols, exec.ProjectColumn{
 				Name: slot,
@@ -300,10 +303,11 @@ func buildAggInputProjection(
 				// epoch-day number and grouped as the digits of that number
 				// (#340). String stays the fallback for anything the rule
 				// leaves undecided, which is what it was standing in for.
-				Type:      outType.ID,
-				Fields:    outType.RowFields(),
-				Precision: outType.Precision,
-				Scale:     outType.Scale,
+				Type:        outType.ID,
+				Fields:      outType.RowFields(),
+				ElementType: elem,
+				Precision:   outType.Precision,
+				Scale:       outType.Scale,
 				Expr: func(b *batch.RecordBatch, row int) any {
 					return e.Eval(b, row)
 				},
@@ -363,7 +367,7 @@ func buildAggInputProjection(
 			Name:   a.InputCol,
 			Type:   inTyp,
 			Fields: a.InputFields, Precision: inPrec,
-			Scale: inScale,
+			Scale: inScale, ElementType: a.InputElementType,
 			Expr: func(b *batch.RecordBatch, row int) any {
 				return e.Eval(b, row)
 			},
@@ -558,10 +562,11 @@ func buildSelectProjection(specs []distributed.ProjectSpec) (*exec.Project, erro
 			// And a DECIMAL's (p,s) with it: the vector this fills is built
 			// from the declaration alone, and one without a scale reads
 			// every value back at 10^0 (ADR-0024 item 2).
-			Fields:    p.Fields,
-			Precision: p.Precision,
-			Scale:     p.Scale,
-			Computed:  true,
+			Fields:      p.Fields,
+			ElementType: p.ElementType,
+			Precision:   p.Precision,
+			Scale:       p.Scale,
+			Computed:    true,
 			Expr: func(b *batch.RecordBatch, row int) any {
 				return e.Eval(b, row)
 			},
@@ -586,7 +591,9 @@ type fragmentGroupKeys struct {
 	computed map[string]plansql.Node
 	// slotType / slotDecimal are the planner's declaration for each slot,
 	// re-keyed off the published name the wire carries them under.
-	slotFields  map[string][]parquet.Column
+	slotFields map[string][]parquet.Column
+	// slotElems is a computed container key's element (arc CW), beside slotFields.
+	slotElems   map[string]*parquet.Column
 	slotType    map[string]int
 	slotDecimal map[string]distributed.DecimalMeta
 }
@@ -636,6 +643,7 @@ func fragmentGroupKeyPlan(spec distributed.OpSpec) (*fragmentGroupKeys, error) {
 		computed:    map[string]plansql.Node{},
 		slotType:    map[string]int{},
 		slotFields:  map[string][]parquet.Column{},
+		slotElems:   map[string]*parquet.Column{},
 		slotDecimal: map[string]distributed.DecimalMeta{},
 	}
 	byRule := make([]string, len(spec.GroupByCols))
@@ -668,6 +676,9 @@ func fragmentGroupKeyPlan(spec distributed.OpSpec) (*fragmentGroupKeys, error) {
 		p.resolve[i], byRule[i], overrides[i] = slot, slot, pub
 		p.computed[slot] = node
 		p.slotFields[slot] = r.Fields
+		if r.ElementType != nil {
+			p.slotElems[slot] = r.ElementType
+		}
 		if t, has := spec.GroupByTypes[pub]; has {
 			p.slotType[slot] = t
 		}
