@@ -2389,9 +2389,9 @@ key:
 σ_{K = v}( Body′(R) )  ==  Body(R, outer = v)        for every outer value v
 ```
 
-which holds iff (1) every correlated predicate is an EQUALITY between an inner
-column and an expression over the outer row alone — the correlation IS a
-restriction on inner columns K — and (2) every operator between that
+The implemented sufficient condition (amended 2026-09-24) is (1) every
+correlated predicate is an EQUALITY between an inner-only expression and a
+bare outer column — the correlation restricts the inner keys K — and (2) every operator between that
 restriction and the body's output commutes with `σ_{K=v}`: filters and
 projections always, a PIPELINE BREAKER only when it is partitioned by K (an
 aggregate grouped on K, a DISTINCT keyed on K, a window partitioned on K, a

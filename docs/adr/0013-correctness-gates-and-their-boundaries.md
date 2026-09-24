@@ -4,7 +4,7 @@ Status: Accepted (2026-08-19; nondeterminism class 9 added 2026-08-22 and
 amended 2026-09-14 for a REAL accumulator;
 type-matrix gates and the per-issue ratchet amendment added 2026-08-23;
 nondeterminism class 10 added 2026-08-29;
-replication-floor amendment added 2026-09-02)
+replication-floor amendment added 2026-09-02; class 7 retired 2026-09-24)
 
 ## Context
 
@@ -85,8 +85,10 @@ named mechanism.
    tie. Both documented in `baseline-sf100.json`'s `captured_on`.
 6. **String ordering differs from PostgreSQL by design** — binary collation,
    per ADR-0012.
-7. **`MODE` over a string column returns NULL** — a pre-existing engine gap,
-   pinned, not a distribution defect.
+7. **Retired 2026-09-24 (arc BR).** A plain `MODE(text_column)` is now
+   refused with `42809` (`WITHIN GROUP is required`); it is no longer a NULL
+   result or an accepted difference between execution paths. Plain numeric
+   calls remain a recorded extension (ADR-0012 §5).
 8. **Concurrent load produces false failures.** Coordinator tests fail with
    `workers failed to register within 15s` and `context deadline exceeded`
    under heavy parallel load — never a wrong row. Test output from a busy

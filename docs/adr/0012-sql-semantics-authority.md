@@ -162,8 +162,9 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      per ARM rather than per operator. `SELECT * FROM a JOIN b JOIN c WHERE
      false` declares its columns on every arm and on the async door
      (`coordinator.TestN1AnAsyncResultDeclaresItsColumns`,
-     `TestN1AResultWithNoColumnsIsRefused`). The other two shapes are
-     unchanged and the refusal still stands for them.
+     `TestN1AResultWithNoColumnsIsRefused`). **Amended 2026-09-24 for arc
+     RC:** recursive CTEs now retain the seed declaration even when empty
+     (ADR-0021 §1o-b); the ungrouped-aggregate LATERAL boundary remains.
 
      A SINGLE LATERAL that is not an ungrouped aggregate is not among them and
      answers with its columns, in the plain, `GROUP BY` and `LEFT JOIN LATERAL`
@@ -4003,33 +4004,16 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      `a-derived-table-whose-body-is-a-star-over-a-join`, with the
      distinct-names control beside it.
 
-   - **A QUALIFIED STAR over a CORRELATED LATERAL whose own bound is not
-     applied per outer row is REFUSED.** (Added 2026-09-13, arc O2; NARROWED
-     the same day after review.) PostgreSQL evaluates a LATERAL body once per OUTER
-     ROW, so `JOIN LATERAL (SELECT i.product … WHERE i.order_id = o.id ORDER BY
-     i.product LIMIT 3) x` yields up to three rows for every order. The
-     decorrelation promotes the correlation into a join condition, which makes
-     the body ONE relation joined once, and the bound then applies to the whole
-     of it — three rows for PostgreSQL's four, silently. Honouring it needs the
-     bound travelling WITH the correlation key as a per-key top-N (ADR-0021's
-     territory), and that defect stays OPEN and PINNED with PostgreSQL's answer
-     recorded.
-
-     What is REFUSED is the QUALIFIED star over such a body, and only it: a
-     star publishes a RELATION, and this one's ROW COUNT is not the one the
-     query wrote. `SELECT *` and an explicit list answer, with the row count
-     pinned.
-
-     THE FIRST CUT OF THIS ENTRY REFUSED EVERY SPELLING, on the bound's
-     EXISTENCE, and that was measured wrong: whether a bound BINDS is a
-     property of the DATA, so `… ORDER BY p LIMIT 10` over a body that never
-     yields ten rows for one outer key — RIGHT on five arms at `0193c4e9` —
-     became an error, as did `OFFSET 0`. A new refusal on a shape that answered
-     correctly is a regression whatever it stands in for; `OFFSET 0` and
-     `LIMIT ALL` are not marked at all, because they cannot remove a row. An
-     UNCORRELATED lateral is untouched. Gated as a refusal in
-     `coordinator.TestArcO2ADerivedBlockPublishesItsVisibleList`'s `o2Refuses`
-     (two `qstar` cells) with the four named spellings pinned beside them.
+   - **Some bounded correlated LATERAL bodies are refused.**
+     (Amended 2026-09-24 for arc LT, #1019; supersedes the 2026-09-13
+     qualified-star refusal.) An equality-keyed body applies its bound per
+     outer row, including a qualified star. Keys are inner-only expressions
+     equal to bare outer columns. A bound over an inequality, a mixed
+     inner/outer expression, an outer-side expression, a DISTINCT body other
+     than exactly the key, a set operation or the body's own QUALIFY raises
+     `0A000`. There is no general relation-valued per-row runner. ADR-0021
+     §1s records the decision and
+     `TestArcLTACorrelatedBodyIsEvaluatedPerOuterRowOnEveryArm` gates it.
 
    - **A star over a NON-aggregated LATERAL publishes PostgreSQL's columns in
      a different ORDER.** (Added 2026-09-07, arc J1 round 2; PRE-EXISTING.
@@ -6070,9 +6054,10 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     the FIRST BATCH, one that produces no batch answers zero rows where
     PostgreSQL raises, `EXPLAIN` over such a statement does not refuse, an
     aggregate over their column declares `double precision` and a qualified
-    star over one is `0A000`; a FROM alias does not rename a single-column
-    function's column, which PostgreSQL does; and `generate_series(…) WITH
-    ORDINALITY` publishes one column where PostgreSQL publishes two.
+    star over one is `0A000`; and `generate_series(…) WITH ORDINALITY`
+    publishes one column where PostgreSQL publishes two. Amended 2026-09-24
+    for arc PC: a FROM alias now names a single-column function's output,
+    as PostgreSQL does (`SELECT g FROM generate_series(1,2) AS g`).
 
   - **A FILE READER WHOSE INPUT DECLARES NO COLUMNS IS `0A000`, WHERE
     POSTGRESQL HAS A ZERO-COLUMN RELATION.** (Added 2026-09-20, arc FR /
