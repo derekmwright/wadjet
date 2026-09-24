@@ -741,8 +741,9 @@ server's catalog when the statement runs, so `WHERE`, `JOIN`, aggregates,
 `ORDER BY` and `LIMIT` over them are ordinary queries. psql's `\d` family,
 pgJDBC's `DatabaseMetaData` and SQLAlchemy's inspector read them unchanged.
 The server reports PostgreSQL 17: `SELECT version()` names that major, and
-the startup `server_version` parameter and `SHOW server_version` report
-`17.0` (`server_version_num` is `170000`).
+the startup `server_version` parameter reports `17.0 (Wadjet)`, while
+`current_setting('server_version')` is `17.0` and `server_version_num` is
+`170000`.
 
 An unqualified `pg_class` is `pg_catalog.pg_class`, as PostgreSQL's search
 path makes it; a WITH query of the same name is the WITH query.
