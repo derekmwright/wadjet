@@ -158,3 +158,100 @@ func TestInsertSelectCurrentDatePlusOneIntoDateColumn(t *testing.T) {
 		t.Errorf("d = %q, want %q", got, want)
 	}
 }
+
+// TestInsertSelectDateIntoTextColumn is round-2 review B2: a REGRESSION.
+// `INSERT INTO t (s TEXT) SELECT CURRENT_DATE` answered right at base
+// (CURRENT_DATE declared STRING there, so the DATE-rendered text passed
+// AssignableToColumn's same-declared-type check) and refused 42804 at
+// round-1's tip, because #1254 moved CURRENT_DATE's declaration to DATE and
+// nothing had taught AssignableToColumn (internal/storage/ingest/from_query.go)
+// that DATE/TIMESTAMP assign into TEXT — an assignment I/O cast PostgreSQL
+// 17.11 performs — so a shape that used to work stopped working. The three
+// spellings PostgreSQL always accepted and this engine always refused
+// (`SELECT DATE '...'`, a DATE column, `now()`) close through the SAME
+// mechanism fix; this table covers all of them plus the DATE<->TIMESTAMP
+// cross (`(ts) SELECT CURRENT_DATE`, `(d) SELECT now()`), one assignment
+// rule for VALUES and for INSERT ... SELECT, per the brief.
+func TestInsertSelectDateIntoTextColumn(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, Config{Store: objstore.NewMemStore(), Bucket: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	schema := parquet.Schema{Columns: []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+		{Name: "s", Type: parquet.TypeString, Nullable: true},
+		{Name: "ts", Type: parquet.TypeTimestamp, Nullable: true},
+		{Name: "d", Type: parquet.TypeDate, Nullable: true},
+	}}
+	if err := db.CreateTable(ctx, "b2t", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+	// A DATE-column source for the "DATE column into text" case below.
+	if _, err := db.Execute(ctx, "INSERT INTO b2t (id, d) VALUES (0, DATE '2026-01-01')"); err != nil {
+		t.Fatal(err)
+	}
+
+	today := time.Now().UTC().Format("2006-01-02")
+	cases := []struct {
+		name   string
+		sql    string
+		query  string
+		column string
+		want   string
+	}{
+		{"CURRENT_DATE into text (the regression itself)",
+			"INSERT INTO b2t (id, s) SELECT 1, CURRENT_DATE",
+			"SELECT s FROM b2t WHERE id = 1", "s", today},
+		{"current_date() into text",
+			"INSERT INTO b2t (id, s) SELECT 2, current_date()",
+			"SELECT s FROM b2t WHERE id = 2", "s", today},
+		{"a DATE typed literal into text — base-refused, PostgreSQL answers",
+			"INSERT INTO b2t (id, s) SELECT 3, DATE '2026-01-01'",
+			"SELECT s FROM b2t WHERE id = 3", "s", "2026-01-01"},
+		{"a DATE column into text — base-refused, PostgreSQL answers",
+			"INSERT INTO b2t (id, s) SELECT 4, d FROM b2t WHERE id = 0",
+			"SELECT s FROM b2t WHERE id = 4", "s", "2026-01-01"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := db.Execute(ctx, tc.sql); err != nil {
+				t.Fatalf("%s: %v", tc.sql, err)
+			}
+			res, err := db.Query(ctx, tc.query)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(res.Rows) != 1 {
+				t.Fatalf("%s: got %d rows, want 1", tc.query, len(res.Rows))
+			}
+			if got, _ := res.Rows[0][tc.column].(string); got != tc.want {
+				t.Errorf("%s: %s = %q, want %q", tc.query, tc.column, got, tc.want)
+			}
+		})
+	}
+
+	// CURRENT_DATE into a TIMESTAMP column — the DATE-to-TIMESTAMP cross —
+	// is a separate assertion: a TIMESTAMP column renders as its epoch-
+	// millisecond int64 through this door (row maps keep the RAW box, unlike
+	// DATE's display-string rendering), so the check is a numeric one.
+	t.Run("CURRENT_DATE into timestamp — the DATE-to-TIMESTAMP cross", func(t *testing.T) {
+		if _, err := db.Execute(ctx, "INSERT INTO b2t (id, ts) SELECT 5, CURRENT_DATE"); err != nil {
+			t.Fatalf("INSERT ... SELECT CURRENT_DATE into ts: %v", err)
+		}
+		res, err := db.Query(ctx, "SELECT ts FROM b2t WHERE id = 5")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(res.Rows) != 1 {
+			t.Fatalf("got %d rows, want 1", len(res.Rows))
+		}
+		wantMidnight := time.Now().UTC().Truncate(24 * time.Hour).UnixMilli()
+		got, ok := res.Rows[0]["ts"].(int64)
+		if !ok || got != wantMidnight {
+			t.Errorf("ts = %#v, want %d (today's midnight, epoch-ms)", res.Rows[0]["ts"], wantMidnight)
+		}
+	})
+}

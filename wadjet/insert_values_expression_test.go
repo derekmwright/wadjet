@@ -41,6 +41,7 @@ func TestInsertValuesAcceptsExpressions(t *testing.T) {
 		{Name: "dec", Type: parquet.TypeDecimal, Precision: 10, Scale: 2, Nullable: true},
 		{Name: "ip", Type: parquet.TypeIPv4, Nullable: true},
 		{Name: "u", Type: parquet.TypeUUID, Nullable: true},
+		{Name: "b", Type: parquet.TypeBool, Nullable: true},
 		{Name: "arr", Type: parquet.TypeArray, Nullable: true,
 			ElementType: &parquet.Column{Name: "element", Type: parquet.TypeInt64, Nullable: true}},
 	}}
@@ -83,6 +84,16 @@ func TestInsertValuesAcceptsExpressions(t *testing.T) {
 		// silent garbage on a row shaped to make the wrong split's COUNT
 		// coincidentally match).
 		{"array literal — the bracket-depth fix", `INSERT INTO cov (id, arr) VALUES (21, ARRAY[1, 2, 3])`, ""},
+		// P2 (round-2 review): a computed INTEGER expression into BOOL,
+		// IPv4 or UUID answered with no SQLSTATE at all — `assignEvaluatedValue`
+		// had no BOOL arm and let a non-string box through the network/UUID
+		// arm unchecked, reaching ingest.checkType's raw "expected bool, got
+		// int64" / "expected string, got int64". PostgreSQL: 42804 for all
+		// three, the same declared-source-type table B1's DATE/TIMESTAMP
+		// cells use.
+		{"P2: integer expression into BOOL", `INSERT INTO cov (id, b) VALUES (22, 1 + 0)`, "42804"},
+		{"P2: integer expression into IPv4", `INSERT INTO cov (id, ip) VALUES (23, 1 + 1)`, "42804"},
+		{"P2: integer expression into UUID", `INSERT INTO cov (id, u) VALUES (24, 1 + 1)`, "42804"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

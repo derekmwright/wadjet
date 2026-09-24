@@ -326,6 +326,18 @@ func reclaimPendingObjects(ctx context.Context, cat *catalog.Catalog, pending []
 //     22003;
 //   - an integer into FLOAT32, FLOAT64 or DECIMAL, and a float into a float.
 //
+// A DATE or TIMESTAMP source is the fourth pair, and it DOES need a
+// conversion — assignQueryCells's own assignEvaluatedValue call, the same
+// converter VALUES and SET already route every cell through (round-2 review
+// B2): PostgreSQL 17.11 answers `INSERT INTO t (s text) SELECT CURRENT_DATE`
+// with the rendered date and `INSERT INTO t (ts timestamp) SELECT
+// CURRENT_DATE` with that date's midnight — an assignment I/O cast to text,
+// and a DATE↔TIMESTAMP cross, not a refusal. Refusing it here was itself a
+// REGRESSION: #1254 moved CURRENT_DATE's declaration from STRING to DATE, so
+// a `SELECT CURRENT_DATE` that used to satisfy sameDeclaredType(STRING,
+// STRING) started reaching this refusal for a value that had always rendered
+// correctly.
+//
 // Everything else is 42804 carrying PostgreSQL's message and its hint, so the
 // statement's answer is "write the CAST" rather than a number nobody can
 // audit. The difference is in ADR-0012's divergence list.
@@ -336,10 +348,32 @@ func AssignableToColumn(from, to parquet.Column) error {
 	if numericDeclaration(from.Type) && numericDeclaration(to.Type) {
 		return nil
 	}
+	if temporalAssignmentCast(from.Type, to.Type) {
+		return nil
+	}
 	return sqlerr.New("42804",
 		"column %q is of type %s but expression is of type %s; "+
 			"you will need to rewrite or cast the expression",
 		to.Name, declaredTypeText(to), declaredTypeText(from))
+}
+
+// temporalAssignmentCast is AssignableToColumn's DATE/TIMESTAMP pair: a DATE
+// or TIMESTAMP source assigns into TEXT (PostgreSQL's I/O-cast rendering) and
+// into the OTHER temporal type (DATE's midnight for a TIMESTAMP target,
+// TIMESTAMP truncated to its calendar day for a DATE target). The
+// same-type case (DATE into DATE, TIMESTAMP into TIMESTAMP) is already
+// covered by sameDeclaredType and is not repeated here.
+func temporalAssignmentCast(from, to parquet.TypeID) bool {
+	switch from {
+	case parquet.TypeDate, parquet.TypeTimestamp:
+	default:
+		return false
+	}
+	switch to {
+	case parquet.TypeString, parquet.TypeDate, parquet.TypeTimestamp:
+		return true
+	}
+	return false
 }
 
 // AssignableFromUnknownLiteral is the same question for an item the select

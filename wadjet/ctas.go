@@ -336,9 +336,13 @@ func resultRows(res *QueryResult, declared, target []parquet.Column,
 // those types' input functions (parquet's accept-sets for the network and
 // temporal families, DecimalValueFromText for DECIMAL).
 func assignUnknownLiteral(v any, col parquet.Column) (any, error) {
+	// No declared source type: an `unknown` literal has none by definition —
+	// PostgreSQL types it FROM the target, which is this whole function's
+	// point — so every call below passes srcKnown=false and keeps the
+	// pre-arc box-shape reading.
 	s, isText := v.(string)
 	if !isText {
-		return assignEvaluatedValue(v, col, false)
+		return assignEvaluatedValue(v, col, false, 0, false)
 	}
 	switch col.Type {
 	case parquet.TypePort, parquet.TypeProtocol:
@@ -360,9 +364,9 @@ func assignUnknownLiteral(v any, col parquet.Column) (any, error) {
 			return nil, sqlerr.New("22P02", "invalid input syntax for type %s: %s",
 				name, sqlerr.Quote(s))
 		}
-		return assignEvaluatedValue(n, col, false)
+		return assignEvaluatedValue(n, col, false, 0, false)
 	}
-	return assignEvaluatedValue(v, col, false)
+	return assignEvaluatedValue(v, col, false, 0, false)
 }
 
 // tableExists reports whether the catalog holds this exact name.
@@ -608,9 +612,14 @@ func assignQueryCells(row []any, declared, target []parquet.Column,
 		}
 		// srcFloat tells the integer converter whether a fractional source
 		// rounds (a float does, PostgreSQL's float→int assignment cast) or
-		// refuses; the declared output is where that fact lives.
+		// refuses; the declared output is where that fact lives. The full
+		// declared type is the SAME fact assignEvaluatedValue's DATE,
+		// TIMESTAMP, BOOL and network/UUID arms need (round-2 review B1/B2):
+		// it is already resolved here as declared[j], with no AST to walk —
+		// the plan's own output schema for this SELECT position — so it is
+		// always KNOWN, never undecided.
 		srcFloat := declared[j].Type == parquet.TypeFloat32 || declared[j].Type == parquet.TypeFloat64
-		v, err := assignEvaluatedValue(row[j], target[j], srcFloat)
+		v, err := assignEvaluatedValue(row[j], target[j], srcFloat, declared[j].Type, true)
 		if err != nil {
 			return nil, fmt.Errorf("column %q: %w", target[j].Name, err)
 		}
