@@ -5,6 +5,7 @@ package physical
 import (
 	"strings"
 
+	"github.com/derekmwright/wadjet/internal/engine/expr"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -82,6 +83,9 @@ type comparisonTyper struct {
 	// (#615's key-type error) and answered zero rows on the shuffled one at
 	// base, so no text reading is kept for it (arc BR round 2).
 	joinKeys bool
+	// decls is the scope's declarations, for the temporal-arithmetic rule's
+	// DECLARED operand types (temporalArithmetic).
+	decls ColDecls
 }
 
 func (c *comparisonTyper) operand(n plansql.Node) (parquet.TypeID, bool) {
@@ -383,8 +387,74 @@ func (c *comparisonTyper) walk(node plansql.Node) error {
 				}
 			}
 		}
+	case *plansql.BinaryOp:
+		return c.temporalArithmetic(n)
 	}
 	return nil
+}
+
+// temporalArithmetic refuses the `+` / `-` pairs PostgreSQL has no operator
+// for once one side is a DATE or a TIMESTAMP: a timestamp and a number
+// (`ts + 0`, `now() - 1`), a date and a fractional number (`d + 1.5`), a
+// number minus a date or a timestamp, and the sum of two temporal values.
+// Each answered a NUMBER here — the epoch count plus the operand, under no
+// temporal declaration — and the two execution paths typed that number
+// differently (arc VL round 3's census: `MAX(c_ts) + 0` answered
+// 1.772532e+12 on one arm and 1.7e+12 on the DAG). `date ± integer`,
+// `date - date`, `timestamp - timestamp` and any INTERVAL shift keep their
+// meaning (binOpTemporalType). A side typed by neither the statement's
+// structure nor its declarations is never refused.
+func (c *comparisonTyper) temporalArithmetic(n *plansql.BinaryOp) error {
+	if n.Op != "+" && n.Op != "-" {
+		return nil
+	}
+	if nodeIsInterval(n.Left, c.decls) || nodeIsInterval(n.Right, c.decls) {
+		return nil
+	}
+	lt, lok := c.arithOperand(n.Left)
+	rt, rok := c.arithOperand(n.Right)
+	if !lok || !rok {
+		return nil
+	}
+	lTemp := lt == parquet.TypeDate || lt == parquet.TypeTimestamp
+	rTemp := rt == parquet.TypeDate || rt == parquet.TypeTimestamp
+	refuse := false
+	switch {
+	case lTemp && rTemp:
+		// date - date and timestamp - timestamp have a meaning; a sum of two
+		// temporal values, or a date against a timestamp, is refused.
+		refuse = n.Op == "+" || lt != rt
+	case lTemp:
+		refuse = comparisonClass(rt) == cmpNumber && (lt == parquet.TypeTimestamp || !intArithColumnType(rt))
+	case rTemp:
+		refuse = comparisonClass(lt) == cmpNumber &&
+			(n.Op == "-" || rt == parquet.TypeTimestamp || !intArithColumnType(lt))
+	}
+	if !refuse {
+		return nil
+	}
+	return sqlerr.New("42883", "operator does not exist: %s %s %s", pgTypeName(lt), n.Op, pgTypeName(rt))
+}
+
+// arithOperand types one side of a `+` / `-`: by the statement's structure
+// (a column, a cast, a literal, an aggregate over those) and, past that, by
+// its declaration — so a clock function or nested date arithmetic is typed
+// too.
+func (c *comparisonTyper) arithOperand(n plansql.Node) (parquet.TypeID, bool) {
+	if t, ok := c.operand(n); ok {
+		if t == parquet.TypeString && isTextColRef(n, c.decls) {
+			return 0, false // a VARCHAR column is a day to date arithmetic
+		}
+		return t, true
+	}
+	if lit, ok := plansql.Unparen(n).(*plansql.Lit); ok && lit.Kind == plansql.LitString {
+		return 0, false // SQL's unknown
+	}
+	d, conf := nodeDeclaredType(n, c.decls)
+	if conf != expr.Decided || d.Untyped {
+		return 0, false
+	}
+	return d.ID, true
 }
 
 // elementPair is `x op ANY/ALL(arr)` over a TYPED array: x against the

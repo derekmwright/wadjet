@@ -354,6 +354,8 @@ Text compared with an integer, double, numeric, PORT, PROTOCOL, DURATION, UUID, 
 
 `ts1 - ts2` (and `now() - now()`) answers the difference as a number of milliseconds where PostgreSQL answers an `interval` (`01:00:00`): this engine has no INTERVAL column type, only the INTERVAL literal. Such a value assigned to a DATE, TIMESTAMP or address column is 42804, as PostgreSQL's interval is. `date1 - date2` is the day count PostgreSQL answers, declared `bigint` (OID 20) where PostgreSQL declares `integer`. (ADR-0012 §5/arc VL)
 
+A date minus a timestamp (PostgreSQL: an `interval`) is refused 42883 here, as the pairs PostgreSQL has no operator for are (`timestamp + integer`, `date + numeric`, `integer - date`, `date + timestamp`) — it used to answer the day count minus the millisecond count. (ADR-0012 §5/arc VL)
+
 **A number literal against a timestamp reads epoch milliseconds.**
 
 `c_ts >= 1700000000000` compares against the instant that many milliseconds after the epoch; PostgreSQL raises 42883. (A number against TEXT is the entry "SELECT compares numeric spelling with text" above, kept by arc BR.) A number against a boolean, and a boolean literal against a number, raise 42883 on both. (ADR-0012 §5/arc BR, #1216)

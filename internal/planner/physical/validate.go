@@ -1075,7 +1075,7 @@ func (b *binder) refuseIncomparableOperands(node plansql.Node, scope *colScope) 
 		return nil
 	}
 	decls := rowFieldScopeDecls(scope)
-	c := &comparisonTyper{scope: scope, typeOf: structuralTypeOf(decls), shape: foldTypeOf(decls), joinKeys: b.joinCond,
+	c := &comparisonTyper{scope: scope, typeOf: structuralTypeOf(decls), shape: foldTypeOf(decls), joinKeys: b.joinCond, decls: decls,
 		subquery:   func(sql string) []parquet.TypeID { return b.subqueryOutputTypes(sql, scope) },
 		setOrigins: func(sql string) []parquet.TypeID { return b.setOpTextOrigins(sql, scope) }}
 	return c.walk(node)
