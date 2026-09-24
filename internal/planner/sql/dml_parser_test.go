@@ -262,19 +262,63 @@ func TestParseInsert_ValueSplitting(t *testing.T) {
 	}
 }
 
-// An expression this path cannot evaluate is a NAMED error. The old loop
-// answered `VALUES (coalesce(a, b))` with a truncated row, no error, and the
-// tuple's closing paren left in the stream.
-func TestParseInsert_RefusesExpressionsItCannotEvaluate(t *testing.T) {
-	for _, sql := range []string{
-		`INSERT INTO t (a) VALUES (2 * 3)`,
-		`INSERT INTO t (a) VALUES (coalesce(1, 2))`,
-		`INSERT INTO t (a, b) VALUES (1, a + 1)`,
-		`INSERT INTO t (a) VALUES ()`,
+// VALUES accepts a full scalar expression in each position (#1252) — the
+// same grammar SELECT's expression parser reads — so the parser's job is
+// only to find each value's own SOURCE TEXT, not to decide what shapes are
+// legal. The old loop refused every one of these ("VALUES accepts literals,
+// not the expression …"); this parser reconstructs the text instead and
+// leaves evaluating it — and refusing the shapes this engine cannot
+// evaluate with no FROM, a column reference or a subquery — to
+// wadjet/dml.go's assignInsertValue, one layer up where the target column's
+// declaration is in hand (TestAssignInsertValue* there covers that half).
+func TestParseInsert_AcceptsExpressionsAndCapturesSourceText(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		sql  string
+		want [][]string
+	}{
+		{"arithmetic", `INSERT INTO t (a) VALUES (2 * 3)`, [][]string{{"2 * 3"}}},
+		{"function_call", `INSERT INTO t (a) VALUES (coalesce(1, 2))`,
+			[][]string{{"coalesce ( 1 , 2 )"}}},
+		{"column_ref_reconstructs_too", `INSERT INTO t (a, b) VALUES (1, a + 1)`,
+			[][]string{{"1", "a + 1"}}},
+		{"typed_literal", `INSERT INTO t (a) VALUES (TIMESTAMP '2026-01-01 00:00:00')`,
+			[][]string{{"TIMESTAMP '2026-01-01 00:00:00'"}}},
+		{"cast", `INSERT INTO t (a) VALUES (CAST('1' AS INTEGER))`,
+			[][]string{{"CAST ( '1' AS INTEGER )"}}},
+		{"second_row_restarts_count", `INSERT INTO t (a, b) VALUES (1, 2), (3, 4 * 5)`,
+			[][]string{{"1", "2"}, {"3", "4 * 5"}}},
 	} {
-		if q, err := Parse(sql); err == nil {
-			t.Errorf("%s parsed with no error: %#v", sql, q.Insert)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			q, err := Parse(tc.sql)
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			if len(q.Insert.Values) != len(tc.want) {
+				t.Fatalf("got %d rows, want %d: %#v", len(q.Insert.Values), len(tc.want), q.Insert.Values)
+			}
+			for i, wantRow := range tc.want {
+				gotRow := q.Insert.Values[i]
+				if len(gotRow) != len(wantRow) {
+					t.Fatalf("row %d: got %d values %#v, want %d %#v",
+						i, len(gotRow), gotRow, len(wantRow), wantRow)
+				}
+				for j := range wantRow {
+					if gotRow[j] != wantRow[j] {
+						t.Errorf("row %d value %d = %q, want %q", i, j, gotRow[j], wantRow[j])
+					}
+				}
+			}
+		})
+	}
+}
+
+// An entry with NO tokens at all is still refused at parse time: there is no
+// expression to reconstruct, and VALUES () is not a shape PostgreSQL accepts
+// for a table with columns either.
+func TestParseInsert_StillRefusesEmptyValue(t *testing.T) {
+	if q, err := Parse(`INSERT INTO t (a) VALUES ()`); err == nil {
+		t.Fatalf("VALUES () parsed with no error: %#v", q.Insert)
 	}
 }
 
@@ -282,8 +326,15 @@ func TestParseInsert_RefusesExpressionsItCannotEvaluate(t *testing.T) {
 // author of `VALUES (1, 'a', <bad>, 4)` to find the value by inspection. Every
 // per-value refusal carries the value's 1-based position in the tuple, and the
 // position must be the value's own — an off-by-one is exactly as unhelpful as
-// no position at all, so these cases pin the first, a middle and the last
-// entry, and the count restarts with each tuple.
+// no position at all, so these cases pin a middle and a last entry, and the
+// count restarts with each tuple.
+//
+// The "not the expression" reason this test used to pin for a bare
+// arithmetic or function-call VALUES entry is gone (#1252): those shapes
+// parse now, covered by TestParseInsert_AcceptsExpressionsAndCapturesSourceText
+// instead. Only the two shapes that remain genuinely unparseable here — an
+// entry with no tokens at all, and a tuple whose ')' never arrives — still
+// refuse at THIS layer.
 var valuesOrdinalRE = regexp.MustCompile(`value (\d+) of the VALUES tuple`)
 
 func TestParseInsert_RefusalNamesValueOrdinal(t *testing.T) {
@@ -293,15 +344,7 @@ func TestParseInsert_RefusalNamesValueOrdinal(t *testing.T) {
 		wantOrd    int
 		wantReason string
 	}{
-		{"expression_first", `INSERT INTO t (a, b, c, d) VALUES (2 * 3, 'x', 3, 4)`,
-			1, "not the expression"},
-		{"expression_middle", `INSERT INTO t (a, b, c, d) VALUES (1, 'x', 2 * 3, 4)`,
-			3, "not the expression"},
-		{"expression_last", `INSERT INTO t (a, b, c, d) VALUES (1, 'x', 3, 2 * 3)`,
-			4, "not the expression"},
-		{"function_call_middle", `INSERT INTO t (a, b, c) VALUES (1, coalesce(1, 2), 3)`,
-			2, "not the expression"},
-		// An entry with no tokens at all: the reason is still "empty value".
+		// An entry with no tokens at all: the reason is "empty value".
 		{"empty_value_first", `INSERT INTO t (a, b, c) VALUES (, 2, 3)`, 1, "empty value"},
 		{"empty_value_middle", `INSERT INTO t (a, b, c) VALUES (1, , 3)`, 2, "empty value"},
 		{"empty_value_last", `INSERT INTO t (a, b, c) VALUES (1, 2, )`, 3, "empty value"},
@@ -309,9 +352,6 @@ func TestParseInsert_RefusalNamesValueOrdinal(t *testing.T) {
 		// when the input ran out, not the count of completed values.
 		{"unterminated_first", `INSERT INTO t (a, b) VALUES (1`, 1, "unterminated VALUES row"},
 		{"unterminated_third", `INSERT INTO t (a, b, c) VALUES (1, 2, 3`, 3, "unterminated VALUES row"},
-		// The count is per TUPLE, not per statement.
-		{"second_row_restarts_count", `INSERT INTO t (a, b) VALUES (1, 2), (3, 4 * 5)`,
-			2, "not the expression"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := Parse(tc.sql)

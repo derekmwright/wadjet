@@ -242,7 +242,7 @@ func (db *DB) executeInsert(ctx context.Context, info *plansql.InsertInfo) (*Exe
 		}
 		row := make(map[string]any, len(columns))
 		for i, colName := range columns {
-			// assignLiteralToColumn, not ConvertValueForColumn: the ASSIGNMENT
+			// assignInsertValue, not ConvertValueForColumn: the ASSIGNMENT
 			// CAST is part of what a literal means, and INSERT was the one
 			// verb that did not get it. `INSERT INTO t (n) VALUES (2.5)` into
 			// an INT64 column failed with `strconv.ParseInt: parsing "2.5"`
@@ -251,7 +251,7 @@ func (db *DB) executeInsert(ctx context.Context, info *plansql.InsertInfo) (*Exe
 			// PostgreSQL, which stores 3 (review P6). It also carries the
 			// classes the cast raises, so an out-of-range INSERT is 22003 and
 			// unreadable text is 22P02 rather than the blanket 42000 (P18).
-			v, err := assignLiteralToColumn(vals[i], cols[i])
+			v, err := assignInsertValue(vals[i], cols[i])
 			if err != nil {
 				return nil, fmt.Errorf("row %d, column %q: %w", rowIdx, colName, err)
 			}
@@ -1833,6 +1833,51 @@ func assignEvaluatedValue(v any, col parquet.Column, srcFloat bool) (any, error)
 				return nil, parquet.NetworkTextError(col.Type, s, st)
 			}
 		}
+	case parquet.TypeDate:
+		return assignDateValue(v, col)
+	case parquet.TypeTimestamp:
+		return assignTimestampValue(v, col)
+	}
+	return v, nil
+}
+
+// assignDateValue normalizes a computed expression's box to the SAME shape
+// the literal path already returns for DATE (convertTemporalValue):
+// time.Time, so ingest.formatPartitionValue's temporal case — which reads
+// ONLY a time.Time and falls back to `%v` for anything else — names a
+// PARTITION KEY the same way for `CAST(x AS DATE)` as it does for a
+// `DATE '...'` literal assigned to the same column (#1252). expr.Cast boxes
+// a DATE result as the int32 day count the matching COLUMN carries
+// (declared_output.go's boxedTextOperand comment); a date/time function
+// (current_date, an eventual date_add) boxes its result as formatted TEXT.
+func assignDateValue(v any, col parquet.Column) (any, error) {
+	switch t := v.(type) {
+	case bool:
+		return nil, datatypeMismatch(v, col)
+	case int32:
+		return time.Unix(int64(t)*86400, 0).UTC(), nil
+	case int64:
+		return time.Unix(t*86400, 0).UTC(), nil
+	case int:
+		return time.Unix(int64(t)*86400, 0).UTC(), nil
+	case string:
+		return convertTemporalValue(t, parquet.TypeDate)
+	}
+	return v, nil
+}
+
+// assignTimestampValue is assignDateValue's TIMESTAMP twin: expr.Cast boxes a
+// TIMESTAMP result as the int64 epoch-millisecond count the matching COLUMN
+// carries, and a date/time function (now, current_timestamp, localtimestamp)
+// boxes its result as formatted TEXT.
+func assignTimestampValue(v any, col parquet.Column) (any, error) {
+	switch t := v.(type) {
+	case bool:
+		return nil, datatypeMismatch(v, col)
+	case int64:
+		return time.UnixMilli(t).UTC(), nil
+	case string:
+		return convertTemporalValue(t, parquet.TypeTimestamp)
 	}
 	return v, nil
 }
@@ -1886,10 +1931,19 @@ func assignDecimalValue(v any, col parquet.Column) (any, error) {
 // ingest.checkType with "expected integer, got bool" and no SQLSTATE, and
 // `SET d = b` reached DecimalValueFromBox's default and answered 22P02, where
 // PostgreSQL says 42804 for both (#678 re-review N3). A bool assigned to a
-// TEXT column is NOT here: PostgreSQL accepts it and stores 'true'.
+// TEXT column is NOT here: PostgreSQL accepts it and stores 'true'. A bare
+// `VALUES (TRUE)` into a numeric column reaches it too (#1252) — the LITERAL
+// keyword, not only a computed bool.
+//
+// physical.PgTypeName, not col.Type's own stringer: PostgreSQL's message
+// names the column "bigint", and col.Type.String() answers the wadjet-
+// internal spelling "INT64" — a message about the SAME SQLSTATE a query
+// author can already see get PostgreSQL's own wording elsewhere
+// (validate_boolean.go, validate_comparison_types.go) had not been carried
+// to this door.
 func datatypeMismatch(v any, col parquet.Column) error {
 	return sqlerr.New("42804", "column %q is of type %s but expression is of type %s",
-		col.Name, col.Type, dmlBoxTypeName(v))
+		col.Name, physical.PgTypeName(col.Type), dmlBoxTypeName(v))
 }
 
 func dmlBoxTypeName(v any) string {
@@ -2050,6 +2104,17 @@ func assignLiteralToColumn(text string, col parquet.Column) (any, error) {
 	}
 	switch col.Type {
 	case parquet.TypeInt32, parquet.TypeInt64, parquet.TypePort, parquet.TypeProtocol:
+		// The BOOLEAN KEYWORD, unquoted, is a TYPE the column cannot take at
+		// all — PostgreSQL's 42804 — not a NUMBER it cannot parse: `SELECT
+		// true::bigint` is 42804 `cannot cast type boolean to bigint`, where
+		// `SELECT 'true'::bigint` (a STRING) is 22P02, the reading the
+		// fallback below still gives a QUOTED 'true' or 'false'. Checked here,
+		// on the literal's own TEXT, because the second reading below hands
+		// this branch only TEXT, never the Go bool assignIntegerValue's own
+		// `case bool` already catches for a COMPUTED value (#1252).
+		if strings.EqualFold(text, "true") || strings.EqualFold(text, "false") {
+			return nil, datatypeMismatch(false, col)
+		}
 		// The cast's answer wins outright here, error included: strconv's
 		// "invalid syntax" and "value out of range" carry no SQLSTATE, while
 		// the cast raises PostgreSQL's own 22P02 for text naming no number
@@ -2087,6 +2152,73 @@ func assignLiteralToColumn(text string, col parquet.Column) (any, error) {
 		return nil, cerr
 	}
 	return nil, err
+}
+
+// assignInsertValue resolves one VALUES cell against its target column
+// (#1252). insertValueText hands over the cell's SOURCE TEXT — no longer
+// only a bare literal's — because VALUES accepts any scalar expression
+// PostgreSQL's does: a typed literal (`TIMESTAMP '...'`), a function call
+// (`now()`), arithmetic (`1 + 1`), a CAST. It is evaluated through the SAME
+// expression compiler SELECT uses (expr.Compile), no second evaluator, with
+// the constant path unchanged: a bare literal (including a signed number)
+// still goes through assignLiteralToColumn exactly as it always did, so
+// DECIMAL exactness and every SQLSTATE that path already carries are
+// untouched.
+//
+// DEFAULT is the one keyword this clause does not compile: no column this
+// catalog describes ever carries an explicit default (parquet.Column has no
+// such field), so PostgreSQL's own rule for a column with none — the value
+// is NULL — applies uniformly, and NULL is exactly what an explicit
+// `VALUES (NULL)` already resolves to two lines below.
+//
+// A column reference and a subquery are refused, not evaluated: VALUES has
+// no FROM to resolve either against, and PostgreSQL raises 42703 for the
+// first for the same reason. The second it DOES accept (a scalar subquery is
+// a constant to it), a query environment this evaluator has none of, so it
+// names the gap with 0A000 instead of silently answering NULL.
+func assignInsertValue(text string, col parquet.Column) (any, error) {
+	trimmed := strings.TrimSpace(text)
+	if strings.EqualFold(trimmed, "default") {
+		return nil, nil
+	}
+	node, err := plansql.ParseExpressionComplete(trimmed)
+	if err != nil {
+		return nil, sqlerr.Wrap("42601", fmt.Errorf("parsing %q: %w", trimmed, err))
+	}
+	if lit, isLit := dmlLiteralText(node); isLit {
+		return assignLiteralToColumn(lit, col)
+	}
+	if err := refuseNonConstantValuesExpr(node); err != nil {
+		return nil, err
+	}
+	compiled, err := expr.Compile(node)
+	if err != nil {
+		return nil, fmt.Errorf("compiling %q: %w", trimmed, err)
+	}
+	v, err := assignEvaluatedValue(compiled.Eval(&batch.RecordBatch{Len: 1}, 0), col, dmlSourceIsFloat(node, nil))
+	if err != nil {
+		return nil, err
+	}
+	return v, checkValueForColumn(v, col)
+}
+
+// refuseNonConstantValuesExpr refuses the two shapes a VALUES cell can name
+// that assignInsertValue cannot evaluate with no FROM and no query
+// environment: see assignInsertValue's own doc for why each is refused
+// rather than answered.
+func refuseNonConstantValuesExpr(node plansql.Node) error {
+	if dmlClauseHasSubquery(node) {
+		return sqlerr.New("0A000",
+			"a subquery in an INSERT ... VALUES expression is not supported")
+	}
+	refs, err := plansql.ColumnRefsOutsideSubqueries(node)
+	if err != nil {
+		return sqlerr.Wrap("0A000", err)
+	}
+	if len(refs) > 0 {
+		return sqlerr.New("42703", "column %q does not exist", refs[0].Column)
+	}
+	return nil
 }
 
 // dmlUnquotedLiteral is convertValue's quoting rule, asked of a literal's

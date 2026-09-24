@@ -405,9 +405,14 @@ func parseValuesRow(l *lexer, tableName string) ([]string, error) {
 		case tok.typ == TokenEOF || tok.typ == TokenError:
 			return nil, fmt.Errorf("unterminated VALUES row in INSERT INTO %s: input ended at value %d of the VALUES tuple",
 				tableName, len(row)+1)
-		case tok.typ == TokenLParen:
+		case tok.typ == TokenLParen || tok.typ == TokenLBracket:
+			// A single combined depth: this loop only needs to know whether a
+			// comma or the tuple's own ')' sits INSIDE some nested structure,
+			// never which kind — `[` unbalanced this counter until now, so
+			// `VALUES (ARRAY[1, 2, 3])` split at the brackets' own commas into
+			// three values instead of one expression (#1252).
 			depth++
-		case tok.typ == TokenRParen && depth > 0:
+		case (tok.typ == TokenRParen || tok.typ == TokenRBracket) && depth > 0:
 			depth--
 		case tok.typ == TokenRParen:
 			// The tuple's own closing paren.
@@ -462,21 +467,29 @@ func LeadingKeyword(sql string) string {
 	}
 }
 
-// insertValueText renders one VALUES entry as the literal text the executors'
-// converters read.
+// insertValueText renders one VALUES entry as the SOURCE TEXT the executor's
+// expression evaluator reads (#1252).
 //
-// A single token keeps its own val, which is what makes a string literal
-// arrive without its quotes and `NULL` arrive as the keyword — the behaviour
-// the converters (wadjet/dml.go convertValue, server.go convertDMLValue) are
-// written against. The two shapes above that are a signed numeric literal and
-// a value wrapped in redundant parentheses.
+// A single token keeps its own val, which is what makes a bare string literal
+// arrive without its quotes and `NULL` arrive as the keyword, and the signed-
+// numeric and redundant-parenthesis shapes above get the same direct
+// spelling — all three are exactly what wadjet/dml.go's dmlLiteralText,
+// handed the re-parsed node, already reads back out again, so keeping them
+// as their own arms costs nothing and stays the narrowest text for the
+// common case.
 //
-// Anything else is an EXPRESSION, and this path has no evaluator: the old loop
-// answered `VALUES (coalesce(a, b))` with a truncated row and no error at all.
-// Naming it is the honest answer, and it costs nothing that worked before.
+// Anything else is a general EXPRESSION — a typed literal, a function call, a
+// CAST, arithmetic — and exprTextFromTokens reconstructs its source text
+// rather than refusing it: VALUES accepts any scalar expression PostgreSQL's
+// does, evaluated by the SAME expression compiler SELECT uses, one layer up
+// where the target column's declaration is in hand. The old loop refused
+// every one of these ("VALUES accepts literals, not the expression …"); this
+// parser no longer decides what VALUES can hold, only how to spell what it
+// read.
 //
 // ordinal is the value's 1-based position in the tuple and is used only in the
-// refusals, so that a rejected entry can be found without counting commas.
+// refusals still raised here (an empty value, an unterminated row), so that a
+// rejected entry can be found without counting commas.
 func insertValueText(toks []token, tableName string, ordinal int) (string, error) {
 	toks = stripRedundantParens(toks)
 	switch {
@@ -499,22 +512,61 @@ func insertValueText(toks []token, tableName string, ordinal int) (string, error
 	case len(toks) == 2 && toks[1].typ == TokenNumber && toks[0].typ == TokenPlus:
 		return toks[1].val, nil
 	}
+	return exprTextFromTokens(toks), nil
+}
+
+// exprTextFromTokens reconstructs a VALUES cell's SOURCE TEXT from its
+// tokens, for the general-expression shapes insertValueText's literal arms do
+// not cover. The reconstruction only has to be SYNTACTICALLY faithful — the
+// caller re-parses it as an expression, and SQL is whitespace-insensitive
+// between tokens — so joining with a single space is enough for a function
+// call, a CAST, arithmetic or a typed literal (`now()`, `1 + 1`,
+// `TIMESTAMP '2026-01-01 00:00:00'`).
+//
+// A string literal is the one shape that needs explicit re-quoting: the
+// lexer already stripped its quotes and un-doubled its escaped apostrophes,
+// the same transform insertValueText's own single-string-token arm reverses.
+// A delimited identifier needs the same treatment with double quotes — it
+// can only reach here inside a larger expression (`x + 1`), since a BARE one
+// takes the single-token arm above, and it is refused downstream as a column
+// reference VALUES has nothing to resolve it against (#1252).
+func exprTextFromTokens(toks []token) string {
 	var b strings.Builder
 	for i, t := range toks {
 		if i > 0 {
 			b.WriteByte(' ')
 		}
-		b.WriteString(t.val)
+		switch {
+		case t.typ == TokenString:
+			b.WriteByte('\'')
+			b.WriteString(strings.ReplaceAll(t.val, "'", "''"))
+			b.WriteByte('\'')
+		case t.quoted:
+			b.WriteByte('"')
+			b.WriteString(t.val)
+			b.WriteByte('"')
+		default:
+			b.WriteString(t.source())
+		}
 	}
-	return "", fmt.Errorf("value %d of the VALUES tuple in INSERT INTO %s: VALUES accepts literals, not the expression %q",
-		ordinal, tableName, b.String())
+	return b.String()
 }
 
 // stripRedundantParens removes parentheses that wrap the WHOLE value, so
 // `((-3))` is the literal -3. A leading '(' that closes before the end — the
 // `(1) + (2)` shape — wraps nothing and is left alone.
+//
+// A pair whose FIRST inner token is SELECT or WITH is left alone too, even
+// though it wraps the whole value: `(SELECT 1)` is a scalar subquery, and the
+// parens are the one thing that makes it an EXPRESSION rather than a bare
+// SELECT statement — stripping them the way `((-3))` strips to `-3` handed
+// exprTextFromTokens the text `SELECT 1`, which the expression grammar has no
+// primary for (#1252).
 func stripRedundantParens(toks []token) []token {
 	for len(toks) >= 2 && toks[0].typ == TokenLParen && toks[len(toks)-1].typ == TokenRParen {
+		if toks[1].typ == TokenKWSelect || toks[1].typ == TokenKWWith {
+			return toks
+		}
 		depth := 0
 		wraps := true
 		for i, t := range toks {

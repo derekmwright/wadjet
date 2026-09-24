@@ -357,6 +357,13 @@ func pgTypeName(t parquet.TypeID) string {
 	return strings.ToLower(t.String())
 }
 
+// PgTypeName exports pgTypeName for a caller outside this package that needs
+// PostgreSQL's own spelling for a 42804 message — wadjet/dml.go's
+// datatypeMismatch, which used to print the wadjet-internal TypeID stringer
+// ("INT64") in a column that PostgreSQL's own 42804 spells "bigint" (#1252
+// review).
+func PgTypeName(t parquet.TypeID) string { return pgTypeName(t) }
+
 // RefuseNonBooleanClause is the truth-context rule over a clause whose scope
 // is a plain column list and whose SITE has its own name — MERGE's
 // `WHEN … AND <cond>`, which PostgreSQL reports as `argument of WHEN must be

@@ -98,8 +98,7 @@ var ResidualState = map[string]string{
 	"window_frame_start": "42601", "window_frame_end": "42601",
 	"named_window": "42601", "limit": "42601", "offset": "42601",
 	"table_function": "42601", "table_function_named": "42601", "table_sample": "42601",
-	"insert_values": "42601",
-	"merge_on":      "0A000", "merge_set": "", "merge_values": "",
+	"merge_on": "0A000", "merge_set": "", "merge_values": "",
 }
 
 func State(name, door string) string {
@@ -121,6 +120,18 @@ func State(name, door string) string {
 			// 42601 on all of them because the parser refused the grammar
 			// itself ("expected VALUES"), and that pin is deleted here as the
 			// proof the grammar landed.
+			//
+			// `INSERT ... VALUES` joins this list for #1252, not #1024's
+			// reason: plansql.RefuseUnsupportedStatement refuses a QueryInsert
+			// whose SelectInfo is nil (a bare VALUES tuple has none) with
+			// 0A000 "INSERT is not supported" BEFORE the coordinator's
+			// dispatch reaches expression evaluation at all — so the bad flag
+			// name inside the VALUES cell is never even reached on this door,
+			// where the parser used to refuse the whole statement before that
+			// dispatch point existed. The pin used to be a uniform 42601
+			// residual across both doors for the SAME reason `insert_select`'s
+			// was: the grammar itself refused the shape everywhere.
+			"insert_values",
 			"insert_select":
 			return "0A000"
 		}

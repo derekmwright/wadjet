@@ -26,9 +26,12 @@ import (
 // for every row of this table (ADR-0012): the overflow is 22003 with
 // "A field with precision 9, scale 2 must round to an absolute value less
 // than 10^7", 'abc' is 22P02 "invalid input syntax for type numeric", a
-// literal finer than the column's scale ROUNDS half away from zero on
-// assignment (1.239 -> 1.24), an integer literal is the VALUE (5 -> 5.00)
-// and surrounding C whitespace is stripped (' 3.50 ' -> 3.50).
+// BARE unquoted abc is 42703 "column \"abc\" does not exist" — VALUES has
+// no FROM to resolve it against, and an unquoted word is an identifier
+// there, never a malformed number (#1252) — a literal finer than the
+// column's scale ROUNDS half away from zero on assignment (1.239 -> 1.24),
+// an integer literal is the VALUE (5 -> 5.00) and surrounding C whitespace
+// is stripped (' 3.50 ' -> 3.50).
 func TestInsertDecimalLiteralFollowsPostgres(t *testing.T) {
 	ctx := context.Background()
 	db, err := Open(ctx, Config{Store: objstore.NewMemStore(), Bucket: "test"})
@@ -54,7 +57,7 @@ func TestInsertDecimalLiteralFollowsPostgres(t *testing.T) {
 		{name: "in range", literal: "12.34", want: "12.34"},
 		{name: "past the declared precision", literal: "99999999999999999999.99", state: "22003"},
 		{name: "exponent past the declared precision", literal: "1e40", state: "22003"},
-		{name: "not a number", literal: "abc", state: "22P02"},
+		{name: "not a number", literal: "abc", state: "42703"},
 		{name: "quoted, not a number", literal: "'abc'", state: "22P02"},
 		{name: "surrounding whitespace", literal: "' 3.50 '", want: "3.50"},
 		{name: "finer scale rounds half away from zero", literal: "1.239", want: "1.24"},
