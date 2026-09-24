@@ -148,7 +148,10 @@ func TestUnknownCastDestinationIsUndefinedObject(t *testing.T) {
 		`SELECT CAST('{"a":1}' AS json) AS v FROM ` + tbl + ` WHERE id = 1`,
 		`SELECT CAST('<a/>' AS xml) AS v FROM ` + tbl + ` WHERE id = 1`,
 		`SELECT CAST(c_i64 AS DURATION) AS v FROM ` + tbl + ` WHERE id = 1`,
-		`SELECT CAST(c_i64 AS INTERVAL) AS v FROM ` + tbl + ` WHERE id = 1`,
+		// INTERVAL is implemented since arc VL round 4 (a TEXT operand is read
+		// by the INTERVAL literal's grammar); a bigint has no cast to it —
+		// PostgreSQL's 42846, pinned in wadjet.TestTextCastToIntervalIsTheLiteralsInterval.
+		`SELECT CAST('1 day' AS INTERVAL) AS v FROM ` + tbl + ` WHERE id = 1`,
 		`SELECT CAST(c_str AS BYTES) AS v FROM ` + tbl + ` WHERE id = 1`,
 		`SELECT CAST(c_str AS VECTOR(3)) AS v FROM ` + tbl + ` WHERE id = 1`,
 	} {
