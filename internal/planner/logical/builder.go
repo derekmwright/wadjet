@@ -2526,6 +2526,7 @@ func buildLateralSubquery(outer *plansql.SelectInfo, left *Node, join plansql.Jo
 	if join.RightAlias != "" {
 		setSubtreeAlias(right, join.RightAlias)
 	}
+	empty.defaults = nameEmptyDefaultsAsPublished(empty.defaults, right, injectedLead, empty.padMarker)
 
 	// Normalize correlated equalities so the outer reference is on the left
 	// and the inner reference on the right. This ensures parseJoinKeys in

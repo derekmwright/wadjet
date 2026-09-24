@@ -114,12 +114,35 @@ func (o *LateralEmptyDefault) resolve(in *batch.RecordBatch) {
 		return // the plan and the runtime disagree; leave the batch alone
 	}
 
-	byName := make(map[string]Expression, len(o.Cols))
+	// A DEFAULTED COLUMN IS MATCHED THE MARKER'S WAY: qualified first, then
+	// a bare name only when exactly one column carries it. Keyed by the bare
+	// name alone, `max(i.id) AS id` beside the outer relation's `id`
+	// rewrote BOTH columns — the outer `o.id` read NULL on every padded row
+	// and the lateral's `s.id` read the outer value (arc JP round 3, B4).
+	byIdx := make(map[int]Expression, len(o.Cols))
 	for _, c := range o.Cols {
 		if c.Expr == nil {
 			continue
 		}
-		byName[batch.FoldIdent(bare(c.Column))] = c.Expr
+		exact := batch.FoldIdent(strings.TrimSpace(c.Column))
+		fold := batch.FoldIdent(bare(c.Column))
+		at := -1
+		var hits []int
+		for i, col := range in.Schema {
+			if batch.FoldIdent(strings.TrimSpace(col.Name)) == exact {
+				at = i
+				break
+			}
+			if batch.FoldIdent(bare(col.Name)) == fold {
+				hits = append(hits, i)
+			}
+		}
+		if at < 0 && len(hits) == 1 {
+			at = hits[0]
+		}
+		if at >= 0 {
+			byIdx[at] = c.Expr
+		}
 	}
 	projections := make([]ProjectColumn, 0, len(in.Schema))
 	for i, col := range in.Schema {
@@ -134,7 +157,7 @@ func (o *LateralEmptyDefault) resolve(in *batch.RecordBatch) {
 			SourceIdx:    i,
 			SourceIdxSet: true,
 		}
-		if e, ok := byName[batch.FoldIdent(bare(col.Name))]; ok {
+		if e, ok := byIdx[i]; ok {
 			p = ProjectColumn{Name: col.Name, Type: col.Type, Expr: e, SourceCol: col.Name}
 		}
 		projections = append(projections, p)

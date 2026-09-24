@@ -28,8 +28,12 @@ import (
 // varlen or a container vector: a STRING default emptied a MATCHED row and
 // concatenated two values into the padded one.
 type LateralEmptyDefault struct {
-	// Column is the lateral's output name for this item.
+	// Column is the column this rule rewrites in the join's output: the name
+	// the body PUBLISHES for the item, qualified by the lateral's alias.
 	Column string
+	// Name is the item's SQL output name — what the enclosing query writes
+	// after `alias.` to reference it (`count` for an unaliased `count(*)`).
+	Name string
 	// ExprSQL is the CASE above, rendered; empty when the item's empty-input
 	// value is NULL, which is what the pad already writes, or when this pass
 	// could not build it — in which case the column is left exactly as the
@@ -47,6 +51,18 @@ func lateralEmptyDefaults(info *plansql.SelectInfo, marker string) []LateralEmpt
 	if info == nil || marker == "" {
 		return nil
 	}
+	// THE DEFAULT NAMES THE LATERAL'S OWN COLUMN, qualified the way the
+	// marker is: the join emits a lateral column that collides with an outer
+	// one as `alias.name`, and a bare name reached the OUTER column first
+	// (`max(i.id) AS id` beside `o.id`, arc JP round 3, B4). The ELSE branch
+	// is a quoted identifier, never the name's text as SQL: an unaliased
+	// `count(*)` publishes the name `count(*)`, which as SQL is an aggregate
+	// CALL — the rule failed to compile, was skipped, and the pad's NULL
+	// stood where PostgreSQL answers 0 (B5).
+	qual := ""
+	if dot := strings.LastIndexByte(marker, '.'); dot > 0 {
+		qual = marker[:dot]
+	}
 	out := make([]LateralEmptyDefault, 0, len(info.Columns))
 	for _, col := range info.Columns {
 		if col.Star {
@@ -56,12 +72,17 @@ func lateralEmptyDefaults(info *plansql.SelectInfo, marker string) []LateralEmpt
 		if name == "" {
 			return nil
 		}
-		d := LateralEmptyDefault{Column: name}
+		ref := plansql.QuoteIdent(name)
+		d := LateralEmptyDefault{Column: name, Name: name}
+		if qual != "" {
+			d.Column = qual + "." + name
+			ref = qual + "." + ref
+		}
 		if node := lateralItemAST(col); node != nil {
 			if sub, ok := substituteEmptyInput(node); ok {
 				d.Item = sub
 				d.ExprSQL = fmt.Sprintf("CASE WHEN %s IS NULL THEN %s ELSE %s END",
-					marker, sub.String(), name)
+					marker, sub.String(), ref)
 			}
 		}
 		out = append(out, d)
@@ -125,7 +146,7 @@ func refuseUnorderedLateralOn(plan lateralEmptyInputCase, empty lateralEmptyInpu
 	items := make(map[string]plansql.Node, len(empty.defaults))
 	for _, d := range empty.defaults {
 		if d.Item != nil {
-			items[strings.ToLower(d.Column)] = d.Item
+			items[strings.ToLower(d.Name)] = d.Item
 		}
 	}
 	folded := plansql.RewriteExpr(onExpr, func(n plansql.Node) (plansql.Node, bool) {
@@ -289,4 +310,54 @@ func lateralHavingHoldsOnEmpty(having plansql.Node) (keep, decided bool) {
 	}
 	b, isBool := val.(bool)
 	return isBool && b, true
+}
+
+// nameEmptyDefaultsAsPublished re-spells each default's column with the name
+// the BUILT body publishes at that item's position (after the lead injected
+// key slots), where that differs from the SQL output name the rule was built
+// with. An unaliased `count(*)` is named `count` by PostgreSQL and published
+// `count(*)` by the body's aggregate: the rule named a column the stream does
+// not carry, matched nothing, and the pad's NULL stood where PostgreSQL
+// answers 0 (arc JP round 3, B5). The identity is the POSITION the item holds
+// in the body's own list, not either spelling of its name.
+func nameEmptyDefaultsAsPublished(defs []LateralEmptyDefault, body *Node, lead int, marker string) []LateralEmptyDefault {
+	if len(defs) == 0 || body == nil || body.Type != NodeProject || marker == "" {
+		return defs
+	}
+	qual := ""
+	if dot := strings.LastIndexByte(marker, '.'); dot > 0 {
+		qual = marker[:dot]
+	}
+	for i := range defs {
+		j := lead + i
+		if j >= len(body.Projections) {
+			break
+		}
+		pr := body.Projections[j]
+		pub := pr.Alias
+		if pub == "" {
+			pub = pr.Column
+		}
+		if pub == "" {
+			pub = pr.Expr
+		}
+		bare := defs[i].Column
+		if dot := strings.LastIndexByte(bare, '.'); qual != "" && dot == len(qual) && strings.HasPrefix(bare, qual) {
+			bare = bare[dot+1:]
+		}
+		if pub == "" || pub == bare {
+			continue
+		}
+		ref := plansql.QuoteIdent(pub)
+		defs[i].Column = pub
+		if qual != "" {
+			defs[i].Column = qual + "." + pub
+			ref = qual + "." + ref
+		}
+		if defs[i].Item != nil {
+			defs[i].ExprSQL = fmt.Sprintf("CASE WHEN %s IS NULL THEN %s ELSE %s END",
+				marker, defs[i].Item.String(), ref)
+		}
+	}
+	return defs
 }
