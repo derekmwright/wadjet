@@ -2548,6 +2548,53 @@ carries (ADR-0026 §8l). A grouped body keyed on an outer expression, which
 answered zero or every row on the DAG at base and at round 1, answers too.
 Gate: `coordinator.TestArcJPBLateralBodyNamesNeverBindTheOuterRelationOnEveryArm`.
 
+**Round 3 (2026-09-24): the DAG carries a LATERAL by a PROPERTY, and routes
+the rest.** The round-2 closure review found the round-2 DAG rule wrong through
+new spellings — a body naming its relation by its TABLE or CTE name (28 rows
+for 9), `SELECT DISTINCT *` (`s.id` read `o.id`), a `SELECT *` body with a bare
+key, a derived table or CTE inside the body, a third relation joined on `s.k`
+— the same defect as round 1's colliding unaliased column: the stage DAG does
+not run a decorrelated body's Project, the join stage reads the body's SCAN
+stream, and every reference above it is re-spelled onto that stream, binding
+by bare name where a qualifier is lost. Two rounds taught the re-spell one
+spelling each; round 3 asks the plan instead
+(`dagplan.refuseCollidingLateral`, `ErrLateralIdentityDistributed`). The DAG
+carries a correlated LATERAL only when (1) no non-minted name its arm carries —
+a scan column below it, a SELECT-list item or alias, an aggregate or group
+output — is carried by another relation of the query (the subtrees hanging off
+the path from the root to the arm; a minted slot such as `__key_0` is unique by
+construction), and (2) the join does not null-extend a grouped arm (a LEFT
+lateral over a DISTINCT or GROUP BY body wrote pad and aggregate files of
+different widths, ADR-0010, or padded every row NULL through a table-named
+body, measured over arms that share no name). Every other correlated LATERAL
+runs on the coordinator-local single-process pipeline
+(`Coordinator.runLateralIdentityLocal`, counted and logged; the async door
+runs it as one pipeline task). Right-and-single beats wrong-and-distributed.
+Measured over the closure corpus (1143 statements) and 634 carried cells
+(`lt_o` × `jp_q`, no shared name): the dag, dag-shuffled and fast-path arms
+differ from single-process on no LATERAL cell; 708 of the corpus route and 140
+of the carried cells route (clause 2), the other 494 run as stages and answer
+PostgreSQL's rows.
+
+The single-process half, at the seams the review named: the outer side of a
+key binds through ONE path — the outer names include a CTE reference's name
+(its alias alone when it has one) and a derived table's, a qualifier is read
+from the parse (a delimited `"O"` included), and the equality's two sides come
+from `lateralCorrelatedEquality` rather than the text's first `=` (which sat
+inside `CASE WHEN o.k = 1 …`) — so `c.k - 0` no longer reaches the scan as a
+string; an ungrouped aggregate's empty-input default rewrites the lateral's
+OWN column (qualified by its alias, matched exact-first, named as the built
+body publishes it: `max(i.id) AS id` beside `o.id`, and an unaliased
+`count(*)` answering 0); and a non-key correlated conjunct (`i.id <> o.id`) is
+spelled through the lateral's alias, `s.id`, which reads the body's column
+over the join's output — so arc LT's "the two columns cannot be told apart"
+refusal stands only for a lateral with no alias. A filter whose value side
+names a column never falls back to the text path's literal comparison: a
+LATERAL nested in another that names the outermost relation is refused,
+not compared as the string `o.k`.
+Gate: `coordinator.TestArcJP3CorrelatedLateralRoutesOrAnswersOnEveryArm`
+(every cell's routing decision recorded).
+
 **THE STRUCTURAL CLOSURE OF THE REFUSED SHAPES IS A DEPENDENT JOIN** — the
 body re-run per outer row with the outer values substituted, the way the
 scalar rerun does, emitting the joined rows — recorded as a filing candidate

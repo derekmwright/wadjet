@@ -1428,15 +1428,26 @@ LATERAL publishes the join's output whole — name the columns, or write
 **The body's column names never decide what the enclosing query reads.** A
 body may publish its columns unaliased, under names the outer relation also
 has — `SELECT i.id`, `SELECT DISTINCT i.k`, `SELECT k, v`, `SELECT i.k,
-count(*) … GROUP BY i.k` beside an outer `o.id`, `o.k` — plain, `DISTINCT`,
-grouped or bounded, and `s.id` is the lateral's `id` on every execution path
-(single-process, spilled, the stage DAG, the fast path): the correlation key
-travels in a slot of its own, never under a name the body publishes. (Before
-2026-09-24 such a body could read the OUTER relation's column of that name:
-12 rows or zero for PostgreSQL's 3 and 2 with a `DISTINCT` key, and on the
-stage DAG any colliding name.) One loud exception on the stage DAG: a
-`LEFT JOIN LATERAL` over a `DISTINCT` body keyed on a bare outer column fails
-with a schema error rather than answering.
+count(*) … GROUP BY i.k`, `SELECT max(i.id) AS id`, `SELECT DISTINCT *` beside
+an outer `o.id`, `o.k` — plain, `DISTINCT`, grouped or bounded, and `s.id` is
+the lateral's `id` on every execution path (single-process, spilled, the stage
+DAG, the fast path). The body's relation may be named by its table or CTE name,
+the outer relation may be a CTE reference or carry a quoted alias, and the
+outer side of the key may be any expression (`lower(c.t)`, `CASE WHEN o.k = 1
+… END`); a second correlated conjunct beside the key (`AND i.id <> o.id`) reads
+the body's column. An unaliased `count(*)` answers 0 for an outer row it
+matches nothing for. (Before 2026-09-24 each of these could read the OUTER
+relation's column, answer zero rows, or answer NULL for 0.)
+
+On a distributed server a correlated LATERAL whose body carries a column name
+another relation of the query also carries — or a `LEFT JOIN LATERAL` over a
+grouped or `DISTINCT` body — runs on the coordinator's single-process
+pipeline rather than as stages; a lateral over relations that share no column
+name runs distributed. The answer is the same either way.
+
+A LATERAL nested inside another whose body names the OUTERMOST relation
+(`… JOIN LATERAL (… JOIN LATERAL (SELECT … WHERE j.k = o.k) t …) s`) is
+refused rather than answered.
 
 **A correlated LATERAL's `ORDER BY … LIMIT`/`OFFSET` is applied per outer
 row** when the correlation is an equality on an inner column — the

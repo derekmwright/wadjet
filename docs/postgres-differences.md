@@ -536,6 +536,10 @@ An outer LATERAL’s ON retaining an empty-input default raises 0A000: `ON s.n =
 
 `SELECT * FROM o JOIN LATERAL (SELECT i.id FROM i WHERE i.k = o.k - 0) s ON true` raises 0A000 where PostgreSQL answers: the join evaluates that equality over its output and carries the body's key column there, and an unexpanded star over a LATERAL would publish it. A named select list and `SELECT o.*, s.*` answer. (ADR-0012 §5/#1302)
 
+**A LATERAL nested in another that names the OUTERMOST relation is refused.**
+
+`SELECT … FROM o JOIN LATERAL (SELECT … FROM i JOIN LATERAL (SELECT j.k FROM i j WHERE j.k = o.k) t ON true …) s ON true` raises an error where PostgreSQL answers: a LATERAL is decorrelated against the relation it joins, and `o` is two levels out. Before 2026-09-24 the reference was compared as the text `o.k` — an error for an integer key and zero rows for a text key. (arc JP round 3)
+
 **Qualified stars refuse duplicate names.**
 
 Name-based expansion cannot distinguish positions: `SELECT x.*` raises 0A000 where PostgreSQL returns both columns. A bare star reads positions and answers. (ADR-0012 §5/2026-09-13/duplicate-star)
