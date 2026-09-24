@@ -3065,12 +3065,25 @@ target holds a bare address (`CAST('10/8' AS IPV4)`) is `0A000`. This is what
 makes `CREATE TABLE t AS SELECT CAST(col AS IPV4) FROM read_parquet(...)`
 produce a native column over a foreign file's string column.
 
+`VECTOR(n)` (and the unconstrained `VECTOR`) CONVERTS, as pgvector's casts
+do: an ARRAY of numbers or the vector text `'[1,2,3]'` becomes a VECTOR, so
+`cosine_similarity(v, CAST(ARRAY[1.0, 2.0] AS VECTOR(2)))` reads it. A width
+other than n is `22000 expected n dimensions, not m`, a NULL element `22004`,
+an empty vector `22000`. A top-level `CAST(x AS VECTOR)` must be able to say
+its width — an ARRAY constructor operand does — or it is `0A000`.
+
+A CONTAINER operand (ARRAY, MAP, ROW) is decided before any scalar
+conversion: to text (`TEXT`, `VARCHAR(n)`, `CHAR(n)`) it is its PostgreSQL
+text (`{1,2}`, `(1,x)`), to an array type element by element, to `VECTOR(n)`
+as above, to `JSON` its `to_json` text (`[1,2]`, a timestamp element as
+`"2024-01-01T01:00:00"`) — PostgreSQL has no such cast and raises `42846`,
+and the JSON text is what the JSON functions read — and to every other type
+`42846 cannot cast type … to …`, as PostgreSQL raises.
+
 The remaining type names are **accepted destinations this engine does not
-convert to**: `BYTES`, `DURATION`, `ARRAY`, `MAP` and `VECTOR(n)` hand the
-operand's text back under a `text` declaration (OID 25) — for an ARRAY, MAP or
-ROW operand that is its PostgreSQL text, `CAST(ARRAY[2] AS VECTOR(1))` is
-`{2}` — and `ROW` is a syntax error. A name that answers to no type at all is `42704`, not a text column
-(#652).
+convert to**: `BYTES`, `DURATION`, `MAP` hand a scalar operand's text back
+under a `text` declaration (OID 25), and `ROW` is a syntax error. A name that
+answers to no type at all is `42704`, not a text column (#652).
 
 `CAST(<col> AS STRING)` renders the value's own printed form — the text the
 column projects and the text `LIKE` matches against, which for a TIMESTAMP is
@@ -3193,8 +3206,8 @@ time)` is `12:34:56` on both. They are described as `text` on the wire where
 PostgreSQL describes them as their own types.
 
 A cast to a destination this engine HAS but does not convert — the network
-types, `DURATION`, `BYTES`, `VECTOR(n)`, the containers — still returns its
-operand unchanged, and a cast of non-address text to `IPV4`, `IPV6`, `CIDR` or
+types, `DURATION`, `BYTES`, the containers — still returns a scalar operand
+unchanged, and a cast of non-address text to `IPV4`, `IPV6`, `CIDR` or
 `MACADDR` does the same rather than raising. Also in that list.
 
 ## Window Functions

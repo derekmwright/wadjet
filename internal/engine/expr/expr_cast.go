@@ -46,6 +46,20 @@ func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
 	if elem, ok := ArrayCastElement(dest); ok {
 		return castToArray(v, elem)
 	}
+	// A VECTOR destination converts (pgvector's array_to_vector / vector_in)
+	// and a CONTAINER operand is decided by the container table before any
+	// scalar arm can read its box (cast_container.go, arc CW round 2).
+	if dim, err, ok := VectorCastDim(dest); ok {
+		if err != nil {
+			panic(fatalEval{err})
+		}
+		return castToVector(v, dim)
+	}
+	if isContainerBox(v) {
+		if r, ok := e.castContainerDest(b, row, v, dest); ok {
+			return r
+		}
+	}
 	if k := castTemporalKindLower(strings.TrimSpace(dest)); k != castNotTemporal {
 		return castTemporal(b, row, e.Operand, v, k)
 	}
@@ -222,12 +236,8 @@ func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
 	default:
 		// An accepted destination this engine does not convert to hands the
 		// operand's TEXT back under a text declaration (sql-reference, #652).
-		// A container's text is PostgreSQL's array_out / record_out, not the
-		// Go box, which a text column refuses (arc CW, ADR-0045 §2).
-		switch v.(type) {
-		case []any, map[string]any:
-			return castStringRender(b, row, e.Operand, v)
-		}
+		// A container operand never reaches here: the container table above
+		// decided it (cast_container.go).
 		return v
 	}
 }
@@ -304,6 +314,9 @@ func castStringRender(b *batch.RecordBatch, row int, operand Expr, v any) string
 		// which is what tells a TIMESTAMP element from a bigint one. Before
 		// arc CW this fell to fmt.Sprint and `CAST(a AS TEXT)` was `[1 2 3]`.
 		return batch.FormatPGText(v, containerOperandDecl(b, row, operand))
+	case []float32:
+		// A VECTOR's text is pgvector's vector_out, `[1,2,3]`.
+		return batch.FormatPGText(v, nil)
 	}
 	text := boxedTextOperand(b, row, operand, v)
 	if raw, ok := text.([]byte); ok {

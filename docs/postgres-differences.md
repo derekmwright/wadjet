@@ -106,7 +106,7 @@ Nested arrays and ROW/MAP elements use OID 25; ordinary arrays — stored, const
 
 These casts pass text through. `CAST('12:34:56' AS time)` returns `12:34:56` on both engines, but wadjet declares OID 25. (ADR-0012 §5/#652)
 
-A container operand passes through as its PostgreSQL text: `CAST(ARRAY[1,2] AS JSON)` is the text `{1,2}`, where PostgreSQL has no cast from `integer[]` to `json` and raises 42846. (ADR-0045)
+`CAST(ARRAY[1,2] AS JSON)` is `[1,2]` — `to_json`'s text, which `json_array_length` and the other JSON functions read — where PostgreSQL has no cast from `integer[]` to `json` and raises 42846; a ROW is its `to_json` object. Every other non-text destination of a container is 42846 as on PostgreSQL. `CAST(ARRAY[1,2] AS VECTOR(2))` converts as pgvector's cast does. (ADR-0045)
 
 **Decimal set operations keep one declared scale.**
 

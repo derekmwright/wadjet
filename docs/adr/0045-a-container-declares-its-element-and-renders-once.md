@@ -49,10 +49,17 @@ psql).
    a container written into an ARRAY/MAP/ROW vector allocated without its
    element or fields is a `*ContainerShapeError`, not the NULL the old silent
    return left. After (1) no declared path reaches either; a path that does
-   not carry the declaration fails with a named error. A CAST to a destination
-   this engine accepts but does not convert to (`VECTOR(n)`, `JSON`, `BYTES`,
-   …) hands back the operand's TEXT, which for a container is the rendering of
-   §3. A function registered with a container return and no shape (no builtin
+   not carry the declaration fails with a named error. A CAST of a container is
+   decided by ONE table before any scalar arm reads the box
+   (`expr/cast_container.go`, round 2): text destinations take the rendering of
+   §3, an array type converts element-wise, `VECTOR(n)` CONVERTS (pgvector's
+   array_to_vector; round 1 had it hand back the `{…}` text, and every vector
+   function over it read NULL), `JSON` takes `to_json`'s text
+   (`batch.FormatPGJSON`), and every other destination is 42846 as on
+   PostgreSQL — round 1 left `CAST(ARRAY[1,2] AS INT)` answering 0 and
+   `AS DATE` NULL. A VECTOR's dimension is part of its declaration and rides
+   every projection spec beside the element; a VECTOR vector allocated without
+   it refuses (`*ContainerShapeError`) instead of keeping the slot NULL. A function registered with a container return and no shape (no builtin
    is) refuses in every whole-value position.
 3. **One renderer.** PostgreSQL's text output — `array_out` (`{…}`, its
    quoting, bare NULL, a nested dimension bare) and `record_out` (`(…)`, an

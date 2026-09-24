@@ -795,9 +795,12 @@ type ProjectSpec struct {
 	// output vector from the declaration alone, and a container one without
 	// its element has no child (arc CW).
 	ElementType *parquet.Column `json:"element_type,omitempty"`
-	Expr        string          `json:"expr"`
-	Name        string          `json:"name"`
-	Type        *int            `json:"type,omitempty"`
+	// Dimension is a computed VECTOR's width, for the same reason (arc CW
+	// round 2).
+	Dimension int    `json:"dimension,omitempty"`
+	Expr      string `json:"expr"`
+	Name      string `json:"name"`
+	Type      *int   `json:"type,omitempty"`
 	// Precision and Scale carry a computed DECIMAL's declaration. A bare
 	// TypeID is not a type for a DECIMAL: the worker builds the output
 	// vector from Type alone, and a DECIMAL vector with no scale reads every

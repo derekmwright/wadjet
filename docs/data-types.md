@@ -761,6 +761,11 @@ a vector — no brackets, a component that is not a number, `NaN` or an infinity
 |---|---|---|
 | `INSERT`, `UPDATE`, `MERGE`, `COPY` | `22000`, `expected N dimensions, not M` | `22P02`, `invalid input syntax for type vector` |
 | embedded ingest API | `22000`, `column "v": expected N dimensions, not M` | — (it takes Go values, not text) |
+| `CAST(… AS VECTOR(N))` | `22000`, `expected N dimensions, not M` | `22P02`, `invalid input syntax for type vector` |
+
+A query vector is written `CAST(ARRAY[0.1, 0.2, …] AS VECTOR(N))` (or
+`CAST('[0.1,0.2,…]' AS VECTOR(N))`): the cast converts, as pgvector's does, and
+a NULL element is `22004`.
 
 `22000` with pgvector's wording is what PostgreSQL's `vector` extension answers
 for `'[1]'::vector(2)`, and it is the class this engine means at every door.

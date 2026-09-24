@@ -64,12 +64,21 @@ func TestInferCastTypeInt32DomainSpellings(t *testing.T) {
 			t.Errorf("inferCastType(%q) = %v, want %v", c.spelling, got, c.want)
 		}
 	}
+	for _, spelling := range []string{"VECTOR", "vector(3)", " Vector(1536) "} {
+		if got := inferCastType(spelling); got != parquet.TypeVector {
+			t.Errorf("inferCastType(%q) = %v, want VECTOR", spelling, got)
+		}
+	}
 	// The BOUNDARY of this pass, from the other side: the destinations
 	// Cast.Eval still passes through keep their STRING declaration, because
 	// the two layers must agree about which names this engine converts. A
 	// declaration change without a kernel change is the #310/#443 shape in
 	// the other direction.
-	for _, spelling := range []string{"DURATION", "BYTES", "VECTOR"} {
+	//
+	// VECTOR left this list in arc CW round 2: Cast.Eval converts to it
+	// (pgvector's array_to_vector / vector_in), so it declares VECTOR — the
+	// pass-through text it answered made every vector function read NULL.
+	for _, spelling := range []string{"DURATION", "BYTES"} {
 		if got := inferCastType(spelling); got != parquet.TypeString {
 			t.Errorf("inferCastType(%q) = %v, want STRING — Cast.Eval has no arm for it, "+
 				"so declaring a type would publish the operand under an OID nothing produces",

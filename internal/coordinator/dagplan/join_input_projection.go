@@ -191,6 +191,7 @@ func absorbComputedSubqueryProjection(child *logical.Node, childStages []Stage, 
 		spec.Precision, spec.Scale = decl.Precision, decl.Scale
 		spec.Fields = localPlanFacts.DeclTypeParts(decl).Fields
 		spec.ElementType = localPlanFacts.DeclTypeParts(decl).ElementType
+		spec.Dimension = localPlanFacts.DeclTypeParts(decl).Dimension
 		computed = append(computed, spec)
 		localPlanFacts.CollectASTCols(ast, needCols)
 	}

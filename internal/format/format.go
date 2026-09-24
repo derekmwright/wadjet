@@ -151,6 +151,12 @@ func renderCell(f Format, v any, col *parquet.Column) (any, bool) {
 			return jsonContainer(v, col), true
 		}
 		return batch.FormatPGText(v, col), true
+	case []float32:
+		// A VECTOR prints as pgvector's `[1,2]` in table and CSV, as it does
+		// on pgwire; JSON's own array form already is that.
+		if f != JSON {
+			return batch.FormatPGText(v, col), true
+		}
 	}
 	return nil, false
 }

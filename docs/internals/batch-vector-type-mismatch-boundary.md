@@ -34,5 +34,6 @@ box (`[]any`, `map[string]any`) into a STRING/BYTES vector is a
 container's text needs its DECLARED type (`batch.FormatPGText`). A container
 value into an ARRAY/MAP/ROW vector allocated without its element or fields is
 a `ContainerShapeError`: the vector has nowhere to put it, and the old silent
-return left the slot NULL. Both mean a declaration seam did not carry the
+return left the slot NULL. A VECTOR value into a VECTOR vector allocated with
+no dimension is the same error (round 2). Both mean a declaration seam did not carry the
 container's shape; both are query errors, never a plausible value.

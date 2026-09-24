@@ -180,7 +180,7 @@ func blockPublishedColumns(p *logical.Node, published map[*logical.Node]bool,
 				Name: name, Expr: pr.ASTExpr.String(),
 				Decl: parquet.Column{
 					Name: name, Type: t, Precision: prec, Scale: scale, Fields: fields, Nullable: true,
-					ElementType: materialized.ElementType,
+					ElementType: materialized.ElementType, Dimension: materialized.Dimension,
 				},
 				DeclKnown: true,
 			})

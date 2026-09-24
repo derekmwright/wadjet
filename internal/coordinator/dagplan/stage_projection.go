@@ -167,6 +167,7 @@ func (p *StagePlanner) attachScanSelectProjections(root *logical.Node, stages []
 		var prec, scale int
 		var fields []parquet.Column
 		var elem *parquet.Column
+		var dim int
 		// A ROW FIELD PATH looks like a simple column reference and is not
 		// one: no stage carries a column by that name, so the fragment has
 		// to COMPUTE it, and its type has to be declared here — nothing
@@ -213,7 +214,8 @@ func (p *StagePlanner) attachScanSelectProjections(root *logical.Node, stages []
 				specs = append(specs, physical.ProjectExprSpec{Expr: lowered, Name: name,
 					Type: ldecl.ID, TypeKnown: ldeclKnown,
 					Precision: ldecl.Precision, Scale: ldecl.Scale, Fields: p.PlanContext.DeclTypeParts(ldecl).Fields,
-					ElementType: p.PlanContext.DeclTypeParts(ldecl).ElementType})
+					ElementType: p.PlanContext.DeclTypeParts(ldecl).ElementType,
+					Dimension:   p.PlanContext.DeclTypeParts(ldecl).Dimension})
 				continue
 			}
 			decl := p.PlanContext.InferProjectionDeclType(it.ASTExpr, parquet.TypeString, strictInt, colTypes)
@@ -221,10 +223,11 @@ func (p *StagePlanner) attachScanSelectProjections(root *logical.Node, stages []
 			prec, scale = decl.Precision, decl.Scale
 			fields = p.PlanContext.DeclTypeParts(decl).Fields
 			elem = p.PlanContext.DeclTypeParts(decl).ElementType
+			dim = p.PlanContext.DeclTypeParts(decl).Dimension
 			typeKnown = true
 		}
 		specs = append(specs, physical.ProjectExprSpec{Expr: itemExpr, Name: name, Type: typ,
-			TypeKnown: typeKnown, Precision: prec, Scale: scale, Fields: fields, ElementType: elem})
+			TypeKnown: typeKnown, Precision: prec, Scale: scale, Fields: fields, ElementType: elem, Dimension: dim})
 	}
 	// A wrapped item reading TWO slots needs both on the stream, and only the
 	// first could take its own position. The rest ride at the END, past the

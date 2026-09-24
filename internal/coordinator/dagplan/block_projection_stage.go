@@ -252,7 +252,7 @@ func publishBlockProjection(node *logical.Node, stages *[]Stage, from int,
 		specs[i] = physical.ProjectExprSpec{
 			Expr: c.Expr, Name: c.Name, Type: c.Decl.Type, TypeKnown: c.DeclKnown,
 			Precision: c.Decl.Precision, Scale: c.Decl.Scale, Fields: c.Decl.Fields,
-			ElementType: c.Decl.ElementType,
+			ElementType: c.Decl.ElementType, Dimension: c.Decl.Dimension,
 		}
 	}
 	respelled, ok := respellSpecsOverProducerOutput(*stages, target, specs)

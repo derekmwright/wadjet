@@ -1280,6 +1280,9 @@ func declTypeParts(d expr.DeclType) parquet.Column {
 		el := d.Schema.ElementType.Clone()
 		c.ElementType = &el
 	}
+	if d.ID == parquet.TypeVector && d.Schema != nil {
+		c.Dimension = d.Schema.Dimension
+	}
 	return c
 }
 
@@ -1545,6 +1548,13 @@ func nodeDeclaredType(node plansql.Node, decls ColDecls) (expr.DeclType, expr.Co
 		// item 12) — and the evaluator converts each element to it.
 		if el, ok := expr.ArrayCastElement(n.TypeName); ok {
 			return arrayOfDecl(expr.Decl(inferCastType(el)))
+		}
+		// A VECTOR destination declares a VECTOR of its dimension — the
+		// evaluator converts (pgvector's array_to_vector), and the projection
+		// sizes its output from the declared dimension (arc CW round 2).
+		if _, _, ok := expr.VectorCastDim(n.TypeName); ok {
+			col := parquet.Column{Type: parquet.TypeVector, Nullable: true, Dimension: castVectorDim(n)}
+			return expr.DeclType{ID: parquet.TypeVector, Schema: &col}, expr.Decided
 		}
 		return expr.Decl(inferCastType(n.TypeName)), expr.Decided
 	case *plansql.Lit:
@@ -1888,6 +1898,9 @@ func inferCastType(typeName string) parquet.TypeID {
 		}
 		return parquet.TypeFloat64
 	}
+	if _, _, ok := expr.VectorCastDim(typeName); ok {
+		return parquet.TypeVector
+	}
 	switch strings.ToUpper(strings.TrimSpace(typeName)) {
 	// SIGNED is here because expr.IsIntegerCastDest lists it and Cast.Eval's
 	// integer arm takes it: without it the evaluator produced an int64 and the
@@ -1967,14 +1980,30 @@ func inferCastType(typeName string) parquet.TypeID {
 		return parquet.TypeUUID
 	default:
 		// What is LEFT here is the destinations Cast.Eval does not implement
-		// and passes its operand through — the containers, DURATION, BYTES,
-		// VECTOR. A name that answers to NO type at all no
+		// and passes its operand through — the containers, DURATION, BYTES.
+		// A name that answers to NO type at all no
 		// longer reaches this arm: expr.KnownCastDest refuses it at compile
 		// with 42704, because declaring STRING for it made the two layers
 		// agree with each other about a column PostgreSQL says cannot be
 		// described (#652).
 		return parquet.TypeString
 	}
+}
+
+// castVectorDim is the dimension a VECTOR cast produces: its modifier, or for
+// the unconstrained `VECTOR` an ARRAY constructor operand's own length. 0
+// means the plan cannot say, which a projection refuses (projection_plan.go).
+func castVectorDim(n *plansql.CastNode) int {
+	dim, err, _ := expr.VectorCastDim(n.TypeName)
+	if err != nil {
+		return 0
+	}
+	if dim == 0 {
+		if lit, ok := plansql.Unparen(n.Inner).(*plansql.ArrayLitNode); ok {
+			dim = len(lit.Elements)
+		}
+	}
+	return dim
 }
 
 // binOpTemporalType types the date-arithmetic shapes expr.BinOp evaluates,

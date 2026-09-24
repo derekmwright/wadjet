@@ -65,6 +65,7 @@ func buildWindowKeyProjection(specs []distributed.ProjectSpec) (exec.UnaryOperat
 			Type:        outType.ID,
 			Fields:      outType.RowFields(),
 			ElementType: spec.ElementType,
+			Dimension:   spec.Dimension,
 			Precision:   outType.Precision,
 			Scale:       outType.Scale,
 			Computed:    true,
@@ -564,6 +565,7 @@ func buildSelectProjection(specs []distributed.ProjectSpec) (*exec.Project, erro
 			// every value back at 10^0 (ADR-0024 item 2).
 			Fields:      p.Fields,
 			ElementType: p.ElementType,
+			Dimension:   p.Dimension,
 			Precision:   p.Precision,
 			Scale:       p.Scale,
 			Computed:    true,

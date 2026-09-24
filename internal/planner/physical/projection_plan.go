@@ -467,6 +467,21 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 					pc.Dimension = dim
 				}
 			}
+			// A VECTOR cast declares its dimension (castVectorDim) and the
+			// declaration carries it through CASE / COALESCE like any other
+			// shape. A cast whose dimension the plan cannot say —
+			// `CAST(x AS VECTOR)` over anything but a constructor — has no
+			// allocatable column: refused here rather than left to the
+			// vector's own shape refusal at the first row.
+			if pc.Dimension == 0 && outDecl.Schema != nil && outDecl.Schema.Dimension > 0 {
+				pc.Dimension = outDecl.Schema.Dimension
+			}
+			if cn, ok := plansql.Unparen(proj.ASTExpr).(*plansql.CastNode); ok && pc.Dimension == 0 {
+				if _, _, isVec := expr.VectorCastDim(cn.TypeName); isVec {
+					return nil, nil, nil, sqlerr.New("0A000",
+						"CAST(%s AS %s): the vector's dimension is not known here; write VECTOR(n)", cn.Inner, cn.TypeName)
+				}
+			}
 		}
 		// For column renames (e.g., l_suppkey AS supplier_no), record the
 		// source column so Project.Execute can resolve the correct type.

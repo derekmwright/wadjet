@@ -1416,6 +1416,14 @@ func (v *Vector) SetValue(i int, val any) {
 		}
 	case TypeVector:
 		if v.VectorDim <= 0 {
+			// A VECTOR vector allocated without its dimension has nowhere to
+			// put a value, and returning here left the slot NULL — the
+			// VECTOR twin of the shapeless container above (arc CW round 2:
+			// a CASE over a VECTOR(n) cast answered NULL on every row).
+			switch val.(type) {
+			case []float32, []any:
+				panic(&ContainerShapeError{Dst: v.Type, Val: val})
+			}
 			return
 		}
 		switch tv := val.(type) {

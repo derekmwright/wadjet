@@ -525,6 +525,8 @@ type OutputRename struct {
 	Scale     int
 	// ElementType is a computed container rename's element (arc CW).
 	ElementType *parquet.Column
+	// Dimension is a computed VECTOR rename's width (arc CW round 2).
+	Dimension int
 }
 
 // UnionArm is one arm of a StageUnion: the projection that puts its output
