@@ -27,7 +27,9 @@ import (
 // which `lat_ord o` also publishes, so ownership is LIVE in every cell. What
 // remains is the LATERAL producer and an expression key naming two occurrences
 // — DAG-only, `distributed`, pinned per arm (#1126). Excluded dimensions: the
-// memo's own list. A pin that starts agreeing FAILS.
+// memo's own list. A pin that starts agreeing FAILS (arc JP round 2 deleted
+// the sortkey/lateral and armref/lateral pins: the DAG now resolves `p.id` to
+// the LATERAL body's source column, ADR-0026 §8l).
 func TestWKASeamConsumerBindsItsOwnOccurrence(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: five arms over the ownership seam's own table")
@@ -127,23 +129,17 @@ func wkSeamCells() []c1Case {
 			name: "sortkey/lateral",
 			sql:  "SELECT o.id AS a, p.id AS b FROM lat_ord o JOIN LATERAL (SELECT i.id, i.amount FROM lat_item i WHERE i.order_id = o.id) p ON true ORDER BY p.id DESC, a",
 			want: "cols=[a:INT64 b:INT64] rows=4 | 2,4 | 2,3 | 1,2 | 1,1",
-			pin: map[string]string{
-				"dag":          "cols=[a:INT64 b:INT64] rows=4 | 2,2 | 2,2 | 1,1 | 1,1",
-				"dag-shuffled": "cols=[a:INT64 b:INT64] rows=4 | 2,2 | 2,2 | 1,1 | 1,1",
-				"dag-morsel4":  "cols=[a:INT64 b:INT64] rows=4 | 2,2 | 2,2 | 1,1 | 1,1",
-			},
-			why: "DAG-ONLY, pre-existing, `distributed`: a decorrelated LATERAL body's Project emits no stage, so the DAG's join publishes the body's INNER SCAN spelling (`i.id`) where the single-process join publishes the arm's own alias (`l.id`). The reference `p.id` therefore misses exactly and `exec.ColumnIndexFallback`'s qualifier strip binds the OUTER `id` \u2014 corollary 2's precondition failing, not its lookup working (docs/design/window-key-ownership.md). Closing it is the rule's DAG half: translate `p.id` to the body's carrier inside the occurrence the qualifier names before the consumer binds it. Identical at aed447e3.",
+			// ARC JP round 2: the DAG resolves a LATERAL body's unaliased item
+			// to its source column (ADR-0026 §8l), so the DAG-only pin that
+			// stood here agrees now and is deleted.
 		},
 		{
 			name: "armref/lateral",
 			sql:  "SELECT o.id AS a, p.id AS b FROM lat_ord o JOIN LATERAL (SELECT i.id, i.amount FROM lat_item i WHERE i.order_id = o.id) p ON true ORDER BY a, b",
 			want: "cols=[a:INT64 b:INT64] rows=4 | 1,1 | 1,2 | 2,3 | 2,4",
-			pin: map[string]string{
-				"dag":          "cols=[a:INT64 b:INT64] rows=4 | 1,1 | 1,1 | 2,2 | 2,2",
-				"dag-shuffled": "cols=[a:INT64 b:INT64] rows=4 | 1,1 | 1,1 | 2,2 | 2,2",
-				"dag-morsel4":  "cols=[a:INT64 b:INT64] rows=4 | 1,1 | 1,1 | 2,2 | 2,2",
-			},
-			why: "DAG-ONLY, pre-existing, `distributed`: a decorrelated LATERAL body's Project emits no stage, so the DAG's join publishes the body's INNER SCAN spelling (`i.id`) where the single-process join publishes the arm's own alias (`l.id`). The reference `p.id` therefore misses exactly and `exec.ColumnIndexFallback`'s qualifier strip binds the OUTER `id` \u2014 corollary 2's precondition failing, not its lookup working (docs/design/window-key-ownership.md). Closing it is the rule's DAG half: translate `p.id` to the body's carrier inside the occurrence the qualifier names before the consumer binds it. Identical at aed447e3.",
+			// ARC JP round 2: the DAG resolves a LATERAL body's unaliased item
+			// to its source column (ADR-0026 §8l), so the DAG-only pin that
+			// stood here agrees now and is deleted.
 		},
 		{
 			name: "star/lateral",

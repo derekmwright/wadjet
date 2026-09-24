@@ -431,24 +431,15 @@ func srStarCases() []c1Case {
 				"dag-morsel4":  "cols=[id:INT64 customer:STRING total:FLOAT64 i.id:INT64 amount:FLOAT64] rows=4 | 1,Alice,150,2,100 | 1,Alice,150,1,50 | 2,Bob,200,4,125 | 2,Bob,200,3,75",
 			},
 		},
-		// The SAME defect with no star in the statement at all, which is what
-		// localises it to the reference rather than to the star's decline:
-		// `l.id` is 1,1,2,2 on the three DAG arms where it is 1,2,3,4 on the
-		// two single-process ones and in PostgreSQL. A wrong VALUE, pinned
-		// per arm, `distributed`, PRE-EXISTING (round-1 review, B2).
+		// The SAME reference with no star in the statement: `l.id` was 1,1,2,2
+		// on the three DAG arms (#1126's column, round-1 review B2) until arc JP
+		// round 2 resolved a LATERAL body's unaliased item to its source column
+		// on the DAG (ADR-0026 §8l); the pin agreed and is deleted.
 		// PG: cols=[id:INT64 id:INT64 amount:FLOAT64] rows=4 1|1|50 · 1|2|100 · 2|3|75 · 2|4|125
 		{
 			name: "lateral/a-reference-into-a-lateral-arm",
 			sql:  "SELECT o.id, l.id, l.amount FROM lat_ord o, LATERAL (SELECT i.id, i.amount FROM lat_item i WHERE i.order_id = o.id) l ORDER BY o.id, l.id",
 			want: "cols=[id:INT64 id:INT64 amount:FLOAT64] rows=4 | 1,1,50 | 1,2,100 | 2,3,75 | 2,4,125",
-			why: "distributed, PRE-EXISTING: on the three DAG arms `l.id` answers the OUTER `o.id` — " +
-				"the qualifier strip binds the outer occurrence because the DAG's join publishes the " +
-				"body's inner-scan spelling (ADR-0026 §8j, #1126). It is a wrong VALUE, not a name.",
-			pin: map[string]string{
-				"dag":          "cols=[id:INT64 id:INT64 amount:FLOAT64] rows=4 | 1,1,100 | 1,1,50 | 2,2,125 | 2,2,75",
-				"dag-shuffled": "cols=[id:INT64 id:INT64 amount:FLOAT64] rows=4 | 1,1,100 | 1,1,50 | 2,2,125 | 2,2,75",
-				"dag-morsel4":  "cols=[id:INT64 id:INT64 amount:FLOAT64] rows=4 | 1,1,100 | 1,1,50 | 2,2,125 | 2,2,75",
-			},
 		},
 		{
 			name: "ctl/arms-share-one-name",
