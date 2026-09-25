@@ -29,7 +29,7 @@ func toString(v any) string {
 
 // toTextOperand is toString with a DOUBLE/REAL rendered through the one
 // float-text renderer (#1252, review r5 P1) instead of fmt.Sprint's shortest
-// %v: `2500000.5 || ''` and `CONCAT(2500000.5, 'x')` stored "2.5000005e+06x"
+// %v: 2500000.5 concatenated with the empty string, and `CONCAT(2500000.5, 'x')`, stored "2.5000005e+06x"
 // where PostgreSQL's float8out answers "2500000.5x". It is toString's
 // narrower twin for the sites that build a TEXT VALUE from an operand — `||`
 // and CONCAT() — and not toString's other 30-odd callers (hashing, URL/JSON
