@@ -141,9 +141,27 @@ func outerLiteral(v *batch.Vector, row int) (plansql.Node, error) {
 			return nil, unrenderableOuterValue(v.Type, val)
 		}
 		return str(string(raw)), nil
+
+	case batch.TypeArray:
+		// An ARRAY outer value is its typed array literal (arc CW round 5,
+		// review P2): `CAST('{1,2}' AS BIGINT[])`, the spelling the DAG's
+		// scalar-subquery substitution already writes (ArrayValueLiteral), so
+		// `(SELECT count(*) FROM ca c2 WHERE c2.ai = ca.ai)` over a stored
+		// array column is a plain array comparison per outer row — it
+		// refused here once CREATE TABLE AS stored a real array instead of
+		// its text. The vector's own declaration names the element; an
+		// element with no exact cast spelling keeps the refusal below.
+		base := v
+		for base.Base != nil {
+			base = base.Base
+		}
+		if n, ok := ArrayValueLiteral(val, batch.VectorDecl("", base)); ok {
+			return n, nil
+		}
 	}
 
-	// ARRAY, ROW, MAP, VECTOR: no literal spelling at all.
+	// ROW, MAP, VECTOR (and an ARRAY whose element has no exact cast
+	// spelling): no literal spelling at all.
 	return nil, unrenderableOuterValue(v.Type, val)
 }
 

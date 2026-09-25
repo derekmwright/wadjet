@@ -150,8 +150,11 @@ func TestOuterLiteralRefusesValuesWithNoLiteralSpelling(t *testing.T) {
 		})
 	}
 
-	// The four container types have no literal at all. They are built through
-	// a batch rather than SetValue, which the container vectors do not take.
+	// ROW, MAP and VECTOR have no literal at all. An ARRAY has one since arc CW
+	// round 5 — its typed array literal (ArrayValueLiteral), which reads back
+	// as the same value — so it is asserted rendered, not refused. They are
+	// built through a batch rather than SetValue, which the container vectors
+	// do not take.
 	t.Run("containers", func(t *testing.T) {
 		schema := []parquet.Column{
 			{Name: "c_arr", Type: parquet.TypeArray, Nullable: true,
@@ -173,6 +176,15 @@ func TestOuterLiteralRefusesValuesWithNoLiteralSpelling(t *testing.T) {
 				// A NULL container renders as `null`, which is correct and
 				// covered above; give it a value so the refusal is reached.
 				col.Nulls.SetValid(0)
+			}
+			if schema[i].Type == parquet.TypeArray {
+				t.Run(schema[i].Name, func(t *testing.T) {
+					lit, err := outerLiteral(col, 0)
+					if err != nil || lit.String() != "cast('{}' as TEXT[])" {
+						t.Fatalf("outerLiteral(empty text[]) = %v, %v; want the typed literal cast('{}' as TEXT[])", lit, err)
+					}
+				})
+				continue
 			}
 			t.Run(schema[i].Name, func(t *testing.T) { assertUnrenderable(t, col) })
 		}
