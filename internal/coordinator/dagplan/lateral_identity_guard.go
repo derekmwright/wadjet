@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode"
 
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
@@ -142,11 +143,11 @@ func carriedNames(n *logical.Node, out map[string]bool) {
 		if i := strings.LastIndexByte(name, '.'); i >= 0 {
 			name = name[i+1:]
 		}
-		name = strings.ToLower(strings.Trim(strings.TrimSpace(name), `"`))
-		if name == "" || strings.HasPrefix(name, "__") {
+		name = strings.Trim(strings.TrimSpace(name), `"`)
+		if name == "" || plansql.ReservedSlotFamily(name) != "" {
 			return
 		}
-		out[name] = true
+		out[foldKey(name)] = true
 	}
 	for _, c := range n.ScanColumns {
 		add(c)
@@ -192,11 +193,11 @@ func crossingNames(arm *logical.Node, out map[string]bool) {
 		if i := strings.LastIndexByte(name, '.'); i >= 0 {
 			name = name[i+1:]
 		}
-		name = strings.ToLower(strings.Trim(strings.TrimSpace(name), `"`))
-		if name == "" || name == "*" || strings.HasPrefix(name, "__") {
+		name = strings.Trim(strings.TrimSpace(name), `"`)
+		if name == "" || name == "*" || plansql.ReservedSlotFamily(name) != "" {
 			return
 		}
-		out[name] = true
+		out[foldKey(name)] = true
 	}
 	reads := func(n plansql.Node, text string) {
 		if n == nil && text != "" {
@@ -267,4 +268,24 @@ func crossingNames(arm *logical.Node, out map[string]bool) {
 		}
 		n = n.Children[0]
 	}
+}
+
+// foldKey is a name under the folding the stage re-spell's resolvers compare
+// by — strings.EqualFold, Unicode SIMPLE folding — as one comparable key: each
+// rune becomes the lower case of the least rune of its folding orbit.
+// Lower-casing alone is not that identity: `ſ` (U+017F) lower-cases to itself
+// and EqualFold-matches `s`, so a body publishing `"ſ"` beside an outer `s`
+// passed the guard and its star read the OUTER `s` on the DAG (arc JP round 4).
+func foldKey(name string) string {
+	var b strings.Builder
+	for _, r := range name {
+		least := r
+		for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
+			if f < least {
+				least = f
+			}
+		}
+		b.WriteRune(unicode.ToLower(least))
+	}
+	return b.String()
 }
