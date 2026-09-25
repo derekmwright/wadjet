@@ -50,9 +50,20 @@ func declaredJoinSchema(n *logical.Node, want []string, published map[*logical.N
 			// stream below it. Declaring the stream here made an EMPTY side
 			// write a file of a different WIDTH from its siblings' —
 			// ADR-0010's `one stage's files describe one relation`.
+			// The block's OWN list is declared as written, a name it
+			// publishes twice included: the Project emits both columns
+			// (`SELECT i.v AS m, i.id AS m …`), and dropping the second
+			// declared four columns for a zero-row star over the lateral
+			// where the executed answer, and PostgreSQL, have five (arc JP
+			// round 4 review, B3). Only a name an EARLIER side of this walk
+			// already declared is skipped.
+			before := make(map[string]bool, len(seen))
+			for k := range seen {
+				before[k] = true
+			}
 			for _, col := range declaredBlockSchema(cur, wantSet, published, subqueryDecl) {
 				lc := strings.ToLower(blockBareName(col.Name))
-				if seen[lc] {
+				if before[lc] {
 					continue
 				}
 				seen[lc] = true
