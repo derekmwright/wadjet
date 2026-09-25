@@ -73,14 +73,16 @@ func TestN1ANestedPipelineDrainsItsSpilledJoins(t *testing.T) {
 		"ORDER BY o.id"
 	const plain = "SELECT o.id, o.customer FROM lat_ord o ORDER BY o.id"
 
-	// PostgreSQL 17's answer. The column ORDER is wadjet's — an ordinary
-	// inner join's sides are still ordered by the cost model, so `w` leads —
-	// and it is identical on every arm and at every budget; what this gate is
-	// about is that the ROWS are there at all.
-	const wantNested = "cols=[id:INT64 order_id:INT64 product:STRING amount:FLOAT64 " +
-		"o.id:INT64 customer:STRING total:FLOAT64 mx:FLOAT64 c:INT64] rows=4 | " +
-		"1,1,Widget,50,1,Alice,150,100,1 | 2,1,Gadget,100,1,Alice,150,100,1 | " +
-		"3,2,Widget,75,2,Bob,200,125,1 | 4,2,Doohickey,125,2,Bob,200,125,1"
+	// PostgreSQL 17's answer, columns included: the star over the join chain
+	// is expanded to the FROM arms' own lists in written order, each LATERAL's
+	// read as `s.*` reads it (arc JP round 4) — before that the star read the
+	// join operator's stream, whose side order was the cost model's (`w` led)
+	// and whose duplicate `id` was published `o.id`. What this gate is about
+	// is that the ROWS are there at all, on every arm and at every budget.
+	const wantNested = "cols=[id:INT64 customer:STRING total:FLOAT64 mx:FLOAT64 c:INT64 " +
+		"id:INT64 order_id:INT64 product:STRING amount:FLOAT64] rows=4 | " +
+		"1,Alice,150,100,1,1,1,Widget,50 | 1,Alice,150,100,1,2,1,Gadget,100 | " +
+		"2,Bob,200,125,1,3,2,Widget,75 | 2,Bob,200,125,1,4,2,Doohickey,125"
 	const wantTwo = "cols=[id:INT64 customer:STRING total:FLOAT64 mx:FLOAT64 mn:FLOAT64] rows=3 | " +
 		"1,Alice,150,100,50 | 2,Bob,200,125,75 | 3,Carol,0,NULL,NULL"
 	const wantPlain = "cols=[id:INT64 customer:STRING] rows=3 | 1,Alice | 2,Bob | 3,Carol"

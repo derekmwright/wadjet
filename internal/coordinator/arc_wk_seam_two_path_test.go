@@ -151,14 +151,12 @@ func wkSeamCells() []c1Case {
 			name: "star/lateral",
 			sql:  "SELECT * FROM lat_ord o JOIN LATERAL (SELECT i.id, i.amount FROM lat_item i WHERE i.order_id = o.id) p ON true ORDER BY 1, 4",
 			want: "cols=[id:INT64 customer:STRING total:FLOAT64 id:INT64 amount:FLOAT64] rows=4 | 1,Alice,150,1,50 | 1,Alice,150,2,100 | 2,Bob,200,3,75 | 2,Bob,200,4,125",
-			pin: map[string]string{
-				"single":       "ERR ORDER BY position 1: this `SELECT *` was not expanded into a column list, so there is no position to count. A star over a JOIN is expanded \u2014 every FROM arm's own list, in the clause's written order \u2014 and one is left alone only where an arm's list is not knowable here: a LATERAL, a table function, a relation whose own list a block does not state, or an arm publishing one name twice. Name the columns, or ORDER BY the column itself",
-				"spilled512k":  "ERR ORDER BY position 1: this `SELECT *` was not expanded into a column list, so there is no position to count. A star over a JOIN is expanded \u2014 every FROM arm's own list, in the clause's written order \u2014 and one is left alone only where an arm's list is not knowable here: a LATERAL, a table function, a relation whose own list a block does not state, or an arm publishing one name twice. Name the columns, or ORDER BY the column itself",
-				"dag":          "ERR ORDER BY position 1: this `SELECT *` was not expanded into a column list, so there is no position to count. A star over a JOIN is expanded \u2014 every FROM arm's own list, in the clause's written order \u2014 and one is left alone only where an arm's list is not knowable here: a LATERAL, a table function, a relation whose own list a block does not state, or an arm publishing one name twice. Name the columns, or ORDER BY the column itself",
-				"dag-shuffled": "ERR ORDER BY position 1: this `SELECT *` was not expanded into a column list, so there is no position to count. A star over a JOIN is expanded \u2014 every FROM arm's own list, in the clause's written order \u2014 and one is left alone only where an arm's list is not knowable here: a LATERAL, a table function, a relation whose own list a block does not state, or an arm publishing one name twice. Name the columns, or ORDER BY the column itself",
-				"dag-morsel4":  "ERR ORDER BY position 1: this `SELECT *` was not expanded into a column list, so there is no position to count. A star over a JOIN is expanded \u2014 every FROM arm's own list, in the clause's written order \u2014 and one is left alone only where an arm's list is not knowable here: a LATERAL, a table function, a relation whose own list a block does not state, or an arm publishing one name twice. Name the columns, or ORDER BY the column itself",
-			},
-			why: "REFUSED on all five arms, pre-existing: a star over a LATERAL arm is not expanded \u2014 the arm's list carries the correlation slot the join drops (ADR-0026 \u00a73c) \u2014 so `ORDER BY 1` has no position to count. The refusal states that; PostgreSQL answers the query. ADR-0026 \u00a79's decline list. Identical at aed447e3.",
+			// Refused on all five arms until arc JP round 4 (`ORDER BY 1` had no
+			// position to count over an unexpanded star); the star is expanded to
+			// the arms' own lists now and the pin is deleted. It runs
+			// single-process: the lateral arm carries `id`, which the outer
+			// relation carries too (dagplan.ErrLateralIdentityDistributed).
+			routed: map[string]string{"dag": "LateralIdentity +1", "dag-morsel4": "LateralIdentity +1", "dag-shuffled": "LateralIdentity +1"},
 		},
 		{
 			name: "winpart/setop",

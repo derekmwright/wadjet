@@ -2637,26 +2637,13 @@ var jpKeyPostgres = map[string]string{
 // jpPairRefuses: #1299 cells every arm refuses, with the class (none).
 var jpPairRefuses = map[string]string{}
 
-// jpKeyRefuses: a correlated equality whose OUTER side is an expression is
-// evaluated over the lateral join's OUTPUT, so the join emits the body's key
-// column (star-hidden, Node.StarLiftedRefCols); a BARE `SELECT *` over a
-// LATERAL publishes that output whole, so it is refused on every arm, 0A000,
-// as a lifted predicate under a bare star is (ADR-0021 §1s). `o.*, s.*`
-// answers (the lateralQualStar cells).
-var jpKeyRefuses = map[string]string{
-	"minus0/innerLeft/lateralStar":   "has an EXPRESSION on its outer side",
-	"minus0/outerLeft/lateralStar":   "has an EXPRESSION on its outer side",
-	"plus1/innerLeft/lateralStar":    "has an EXPRESSION on its outer side",
-	"plus1/outerLeft/lateralStar":    "has an EXPRESSION on its outer side",
-	"cast/innerLeft/lateralStar":     "has an EXPRESSION on its outer side",
-	"cast/outerLeft/lateralStar":     "has an EXPRESSION on its outer side",
-	"func/innerLeft/lateralStar":     "has an EXPRESSION on its outer side",
-	"func/outerLeft/lateralStar":     "has an EXPRESSION on its outer side",
-	"coalesce/innerLeft/lateralStar": "has an EXPRESSION on its outer side",
-	"coalesce/outerLeft/lateralStar": "has an EXPRESSION on its outer side",
-	"twocols/innerLeft/lateralStar":  "has an EXPRESSION on its outer side",
-	"twocols/outerLeft/lateralStar":  "has an EXPRESSION on its outer side",
-}
+// jpKeyRefuses: none. A bare `SELECT *` over an expression-keyed LATERAL was
+// refused here from round 1 (the join emits the body's key slot, and an
+// unexpanded star published it); arc JP round 4 expands the star to the FROM
+// arms' own lists, the lateral's read as `s.*` reads it, and the twelve
+// lateralStar cells answer PostgreSQL's rows on every arm — their refusals
+// are deleted as the proof.
+var jpKeyRefuses = map[string]string{}
 
 // jpArmPins: the DISTRIBUTED divergences the seam table found, recorded per
 // arm as measured (identical at base 83cd4a93; filing candidate FC-JP-1,

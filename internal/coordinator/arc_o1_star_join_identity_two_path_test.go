@@ -555,22 +555,9 @@ func TestO1AStarOverAJoinPublishesTheQueryNotThePlan(t *testing.T) {
 			name: "lateral-arm-star",
 			sql:  "SELECT * FROM lat_ord o, LATERAL (SELECT i.id, i.amount FROM lat_item i WHERE i.order_id = o.id) l ORDER BY o.id, l.id",
 			want: "cols=[id:INT64 customer:STRING total:FLOAT64 id:INT64 amount:FLOAT64] rows=4 | 1,Alice,150,1,50 | 1,Alice,150,2,100 | 2,Bob,200,3,75 | 2,Bob,200,4,125",
-			pin: map[string]string{
-				"single":       "cols=[id:INT64 customer:STRING total:FLOAT64 l.id:INT64 amount:FLOAT64] rows=4 | 1,Alice,150,1,50 | 1,Alice,150,2,100 | 2,Bob,200,3,75 | 2,Bob,200,4,125",
-				"spilled512k":  "cols=[id:INT64 customer:STRING total:FLOAT64 l.id:INT64 amount:FLOAT64] rows=4 | 1,Alice,150,1,50 | 1,Alice,150,2,100 | 2,Bob,200,3,75 | 2,Bob,200,4,125",
-				"dag":          "cols=[id:INT64 customer:STRING total:FLOAT64 l.id:INT64 amount:FLOAT64] rows=4 | 1,Alice,150,1,50 | 1,Alice,150,2,100 | 2,Bob,200,3,75 | 2,Bob,200,4,125",
-				"dag-shuffled": "cols=[id:INT64 customer:STRING total:FLOAT64 l.id:INT64 amount:FLOAT64] rows=4 | 1,Alice,150,1,50 | 1,Alice,150,2,100 | 2,Bob,200,3,75 | 2,Bob,200,4,125",
-				"dag-morsel4":  "cols=[id:INT64 customer:STRING total:FLOAT64 l.id:INT64 amount:FLOAT64] rows=4 | 1,Alice,150,1,50 | 1,Alice,150,2,100 | 2,Bob,200,3,75 | 2,Bob,200,4,125",
-			},
-			why: "DECLINED by design: a written LATERAL's subtree carries the correlation " +
-				"slot the join drops (ADR-0026 §3c), so the star is left to read the " +
-				"stream, and a join qualifies the build arm's duplicate. Arc L1's alias " +
-				"stamp (#1111) reaches it " +
-				"and it moves it HALFWAY: the lateral's subtree " +
-				"root carries the alias the query wrote now, so the column is published " +
-				"as `l.id` rather than the inner scan's `i.id` and `ORDER BY l.id` BINDS " +
-				"— the ties are ordered. What is left is the QUALIFIER: PostgreSQL " +
-				"publishes the bare `id`, because it does not qualify a duplicate at all.",
+			// The pin that stood here (`l.id`, the join stream's qualified
+			// duplicate) agrees now: the star is expanded to the arms' own lists
+			// (arc JP round 4) and publishes PostgreSQL's bare `id`.
 			// Runs single-process since arc JP round 3: the lateral arm carries a
 			// name the outer relation also carries (dagplan.ErrLateralIdentityDistributed).
 			routed: map[string]string{"dag": "LateralIdentity +1", "dag-morsel4": "LateralIdentity +1", "dag-shuffled": "LateralIdentity +1"},

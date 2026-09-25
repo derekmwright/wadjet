@@ -397,25 +397,15 @@ func srStarCases() []c1Case {
 			sql:  "SELECT * FROM (SELECT a.id, b.id FROM lat_item a JOIN lat_item b ON a.id = b.id) x ORDER BY 1",
 			want: "cols=[id:INT64 id:INT64] rows=4 | 1,1 | 2,2 | 3,3 | 4,4",
 		},
-		// TWO DIVERGENCES, and only one of them is a name. A LATERAL arm is on
-		// §9's decline list — its subtree carries the correlation slot the
-		// join drops (§3c) — so the star is not expanded and reads the JOIN
-		// OPERATOR's stream, where `joinOutputSchemaWithMapping` qualifies the
-		// duplicate `id` by its owning alias: PostgreSQL publishes `id`, every
-		// arm here `l.id` (#1126's name half; the three DAG arms spelled it
-		// `i.id`, the body's inner-scan spelling, until arc JP round 3 ran this
-		// plan single-process).
-		//
-		// The three DAG arms were pinned here over a wrong ROW ORDER (the
-		// secondary key `l.id` bound the OUTER `id` on the stage DAG, #1126's
-		// column) until arc JP round 3 routed a LATERAL whose arm shares a name
-		// with the outer relation to the single-process pipeline
-		// (dagplan.ErrLateralIdentityDistributed); every arm now answers the
-		// single arms' sequence and name, and the pins are deleted.
+		// A star over a LATERAL arm is expanded to the FROM arms' own lists
+		// since arc JP round 4, the lateral's read as `l.*` reads it: every arm
+		// publishes PostgreSQL's bare `id` (#1126's name half, which the arm
+		// published `l.id` — `i.id` on the DAG — while the star read the join
+		// operator's stream), and the pin that recorded it is gone.
 		{
 			name: "lateral/a-star-over-a-lateral-arm",
 			sql:  "SELECT * FROM lat_ord o, LATERAL (SELECT i.id, i.amount FROM lat_item i WHERE i.order_id = o.id) l ORDER BY o.id, l.id",
-			want: "cols=[id:INT64 customer:STRING total:FLOAT64 l.id:INT64 amount:FLOAT64] rows=4 | 1,Alice,150,1,50 | 1,Alice,150,2,100 | 2,Bob,200,3,75 | 2,Bob,200,4,125",
+			want: "cols=[id:INT64 customer:STRING total:FLOAT64 id:INT64 amount:FLOAT64] rows=4 | 1,Alice,150,1,50 | 1,Alice,150,2,100 | 2,Bob,200,3,75 | 2,Bob,200,4,125",
 			// Runs single-process since arc JP round 3: the lateral arm carries a
 			// name the outer relation also carries (dagplan.ErrLateralIdentityDistributed).
 			routed: map[string]string{"dag": "LateralIdentity +1", "dag-morsel4": "LateralIdentity +1", "dag-shuffled": "LateralIdentity +1"},

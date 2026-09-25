@@ -347,11 +347,6 @@ const (
 	// door — recorded separately so the day the rendering is fixed, both
 	// move together.
 	l1OverClauseRebuild = `syntax error at or near "."`
-	// `ORDER BY <ordinal>` over a `SELECT *` whose FROM is a JOIN — which a
-	// LATERAL always is once it is lowered. The star is not expanded over a
-	// join, so there is no position to count. It reproduces with an ordinary
-	// join in place of the lateral and is not a lateral defect.
-	l1StarOrdinal = `was not expanded into a column list`
 	// A LEFT JOIN LATERAL over an UNCORRELATED body: the join has no keys,
 	// and the physical planner, the DAG's SELECT-list check and the join
 	// operator each refuse it in their own words. PostgreSQL answers the
@@ -670,11 +665,6 @@ var l1RefusalPins = map[string][]string{
 	"LAT/left/winarg":          {l1OuterRefOutsideWhere},
 	"LAT/left/winord":          {l1OuterRefOutsideWhere},
 	"LAT/left/winpart":         {l1OuterRefOutsideWhere},
-	"LAT/star/agg":             {l1StarOrdinal},
-	"LAT/star/grouped":         {l1StarOrdinal},
-	"LAT/star/groupedLimit":    {l1StarOrdinal},
-	"LAT/star/orderLimit":      {l1StarOrdinal},
-	"LAT/star/where":           {l1StarOrdinal},
 	"LIFTED/aggregated":        {l1LiftedRefNotPublished},
 	"OUTERREF/aggArg":          {l1OuterRefOutsideWhere},
 	"OUTERREF/groupBy":         {l1OuterRefOutsideWhere},

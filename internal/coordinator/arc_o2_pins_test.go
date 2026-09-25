@@ -13,66 +13,14 @@ package coordinator
 // arc closing half of each. No pin records a value this arc made worse: a
 // pin that starts agreeing FAILS, and deleting it is the proof of the fix.
 var o2Pin = map[string]map[string]string{
-	// THE PUBLISHED NAME OF AN UNALIASED ITEM inside a block a LATERAL reads.
-	// PostgreSQL calls it `?column?`; wadjet publishes the spelling the block's
-	// own Project emits it under — its expression text — because the star over
-	// the lateral reads the STREAM, and the published name is applied only
-	// where the block IS the statement's output projection. Values and
-	// positions agree on every arm; the NAME is the divergence. Recorded in
-	// ADR-0012. PRE-EXISTING: byte-identical at base 0193c4e9 on all five arms.
-	//
-	// THE `joined/*` HALF OF THIS PIN IS CLOSED (arc O1, #997/#1012): a star
-	// item is ADR-0026 §2's PAIR — it RESOLVES by the producer's spelling and
-	// PUBLISHES PostgreSQL's — so a star over a JOIN publishes `?column?` over
-	// a stream still carrying `amount + 1`. The six `joined/*` pins this
-	// comment used to carry are deleted, which is the proof. The LATERAL
-	// spelling has no such projection to carry the pair: its body is
-	// decorrelated into the join and the star reads the stream directly, so it
-	// keeps the divergence and its own mechanism — the block's published names
-	// travelling BESIDE the stream, addressed by POSITION
-	// (`ProjectExprSpec.SourceSlot` one relation out).
-	"lateral/unaliased/star": {
-		"single":       "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 i.amount + 1:FLOAT64] rows=4 | 1,Alice,150,1,101 | 1,Alice,150,1,51 | 2,Bob,200,2,126 | 2,Bob,200,2,76",
-		"spilled512k":  "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 i.amount + 1:FLOAT64] rows=4 | 1,Alice,150,1,101 | 1,Alice,150,1,51 | 2,Bob,200,2,126 | 2,Bob,200,2,76",
-		"dag":          "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 i.amount + 1:FLOAT64] rows=4 | 1,Alice,150,1,101 | 1,Alice,150,1,51 | 2,Bob,200,2,126 | 2,Bob,200,2,76",
-		"dag-shuffled": "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 i.amount + 1:FLOAT64] rows=4 | 1,Alice,150,1,101 | 1,Alice,150,1,51 | 2,Bob,200,2,126 | 2,Bob,200,2,76",
-		"dag-morsel4":  "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 i.amount + 1:FLOAT64] rows=4 | 1,Alice,150,1,101 | 1,Alice,150,1,51 | 2,Bob,200,2,126 | 2,Bob,200,2,76",
-	},
-	"lateral/unaliased/ordstar": {
-		"single":       "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 i.amount + 1:FLOAT64] rows=4 | 1,Alice,150,1,101 | 1,Alice,150,1,51 | 2,Bob,200,2,126 | 2,Bob,200,2,76",
-		"spilled512k":  "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 i.amount + 1:FLOAT64] rows=4 | 1,Alice,150,1,101 | 1,Alice,150,1,51 | 2,Bob,200,2,126 | 2,Bob,200,2,76",
-		"dag":          "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 i.amount + 1:FLOAT64] rows=4 | 1,Alice,150,1,101 | 1,Alice,150,1,51 | 2,Bob,200,2,126 | 2,Bob,200,2,76",
-		"dag-shuffled": "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 i.amount + 1:FLOAT64] rows=4 | 1,Alice,150,1,101 | 1,Alice,150,1,51 | 2,Bob,200,2,126 | 2,Bob,200,2,76",
-		"dag-morsel4":  "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 i.amount + 1:FLOAT64] rows=4 | 1,Alice,150,1,101 | 1,Alice,150,1,51 | 2,Bob,200,2,126 | 2,Bob,200,2,76",
-	},
-	"lateral/unaliased-string/star": {
-		"single":       "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 i.product || 'y':STRING] rows=4 | 1,Alice,150,1,Gadgety | 1,Alice,150,1,Widgety | 2,Bob,200,2,Doohickeyy | 2,Bob,200,2,Widgety",
-		"spilled512k":  "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 i.product || 'y':STRING] rows=4 | 1,Alice,150,1,Gadgety | 1,Alice,150,1,Widgety | 2,Bob,200,2,Doohickeyy | 2,Bob,200,2,Widgety",
-		"dag":          "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 i.product || 'y':STRING] rows=4 | 1,Alice,150,1,Gadgety | 1,Alice,150,1,Widgety | 2,Bob,200,2,Doohickeyy | 2,Bob,200,2,Widgety",
-		"dag-shuffled": "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 i.product || 'y':STRING] rows=4 | 1,Alice,150,1,Gadgety | 1,Alice,150,1,Widgety | 2,Bob,200,2,Doohickeyy | 2,Bob,200,2,Widgety",
-		"dag-morsel4":  "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 i.product || 'y':STRING] rows=4 | 1,Alice,150,1,Gadgety | 1,Alice,150,1,Widgety | 2,Bob,200,2,Doohickeyy | 2,Bob,200,2,Widgety",
-	},
-	"lateral/unaliased-string/ordstar": {
-		"single":       "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 i.product || 'y':STRING] rows=4 | 1,Alice,150,1,Gadgety | 1,Alice,150,1,Widgety | 2,Bob,200,2,Doohickeyy | 2,Bob,200,2,Widgety",
-		"spilled512k":  "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 i.product || 'y':STRING] rows=4 | 1,Alice,150,1,Gadgety | 1,Alice,150,1,Widgety | 2,Bob,200,2,Doohickeyy | 2,Bob,200,2,Widgety",
-		"dag":          "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 i.product || 'y':STRING] rows=4 | 1,Alice,150,1,Gadgety | 1,Alice,150,1,Widgety | 2,Bob,200,2,Doohickeyy | 2,Bob,200,2,Widgety",
-		"dag-shuffled": "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 i.product || 'y':STRING] rows=4 | 1,Alice,150,1,Gadgety | 1,Alice,150,1,Widgety | 2,Bob,200,2,Doohickeyy | 2,Bob,200,2,Widgety",
-		"dag-morsel4":  "cols=[id:INT64 customer:STRING total:FLOAT64 order_id:INT64 i.product || 'y':STRING] rows=4 | 1,Alice,150,1,Gadgety | 1,Alice,150,1,Widgety | 2,Bob,200,2,Doohickeyy | 2,Bob,200,2,Widgety",
-	},
-	"lateral/group-unaliased/star": {
-		"single":       "cols=[id:INT64 customer:STRING total:FLOAT64 product:STRING count(*) + 1:INT64] rows=4 | 1,Alice,150,Gadget,2 | 1,Alice,150,Widget,2 | 2,Bob,200,Doohickey,2 | 2,Bob,200,Widget,2",
-		"spilled512k":  "cols=[id:INT64 customer:STRING total:FLOAT64 product:STRING count(*) + 1:INT64] rows=4 | 1,Alice,150,Gadget,2 | 1,Alice,150,Widget,2 | 2,Bob,200,Doohickey,2 | 2,Bob,200,Widget,2",
-		"dag":          "cols=[id:INT64 customer:STRING total:FLOAT64 product:STRING count(*) + 1:INT64] rows=4 | 1,Alice,150,Gadget,2 | 1,Alice,150,Widget,2 | 2,Bob,200,Doohickey,2 | 2,Bob,200,Widget,2",
-		"dag-shuffled": "cols=[id:INT64 customer:STRING total:FLOAT64 product:STRING count(*) + 1:INT64] rows=4 | 1,Alice,150,Gadget,2 | 1,Alice,150,Widget,2 | 2,Bob,200,Doohickey,2 | 2,Bob,200,Widget,2",
-		"dag-morsel4":  "cols=[id:INT64 customer:STRING total:FLOAT64 product:STRING count(*) + 1:INT64] rows=4 | 1,Alice,150,Gadget,2 | 1,Alice,150,Widget,2 | 2,Bob,200,Doohickey,2 | 2,Bob,200,Widget,2",
-	},
-	"lateral/group-unaliased/ordstar": {
-		"single":       "cols=[id:INT64 customer:STRING total:FLOAT64 product:STRING count(*) + 1:INT64] rows=4 | 1,Alice,150,Gadget,2 | 1,Alice,150,Widget,2 | 2,Bob,200,Doohickey,2 | 2,Bob,200,Widget,2",
-		"spilled512k":  "cols=[id:INT64 customer:STRING total:FLOAT64 product:STRING count(*) + 1:INT64] rows=4 | 1,Alice,150,Gadget,2 | 1,Alice,150,Widget,2 | 2,Bob,200,Doohickey,2 | 2,Bob,200,Widget,2",
-		"dag":          "cols=[id:INT64 customer:STRING total:FLOAT64 product:STRING count(*) + 1:INT64] rows=4 | 1,Alice,150,Gadget,2 | 1,Alice,150,Widget,2 | 2,Bob,200,Doohickey,2 | 2,Bob,200,Widget,2",
-		"dag-shuffled": "cols=[id:INT64 customer:STRING total:FLOAT64 product:STRING count(*) + 1:INT64] rows=4 | 1,Alice,150,Gadget,2 | 1,Alice,150,Widget,2 | 2,Bob,200,Doohickey,2 | 2,Bob,200,Widget,2",
-		"dag-morsel4":  "cols=[id:INT64 customer:STRING total:FLOAT64 product:STRING count(*) + 1:INT64] rows=4 | 1,Alice,150,Gadget,2 | 1,Alice,150,Widget,2 | 2,Bob,200,Doohickey,2 | 2,Bob,200,Widget,2",
-	},
+	// THE PUBLISHED NAME OF AN UNALIASED ITEM inside a block a LATERAL reads
+	// is CLOSED (arc JP round 4): a star over a LATERAL join is expanded to the
+	// FROM arms' own lists, the lateral's read as `s.*` reads it, so each item
+	// is ADR-0026 §2's pair like the `joined/*` half arc O1 closed — it
+	// resolves by the block's spelling (`i.amount + 1`) and publishes
+	// PostgreSQL's `?column?`. The six `lateral/{unaliased,unaliased-string,
+	// group-unaliased}/{star,ordstar}` pins that stood here agree now and are
+	// deleted as the proof.
 
 	// A CORRELATED LATERAL'S OWN BOUND IS APPLIED PER OUTER ROW since arc LT
 	// (#1019, ADR-0021 §1s): the four `lateral/inner-order-*-limit/{star,list}`
