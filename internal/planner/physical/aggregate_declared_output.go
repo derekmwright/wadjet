@@ -361,13 +361,29 @@ func aggInputColumnType(node *logical.Node, col string) (parquet.TypeID, bool) {
 	// coverage, so a name the Project DOES answer for still stops there and no
 	// rebinding is read past.
 	if node != nil && len(node.Children) == 1 {
-		if decls, _, ok := namingScopeDecls(&plansql.ColRef{Column: col}, node.Children[0]); ok {
-			if t, c := colRefDeclaredType(&plansql.ColRef{Column: col}, decls); c == expr.Decided {
-				return t.ID, true
+		for _, ref := range aggInputRefs(col) {
+			if decls, _, ok := namingScopeDecls(ref, node.Children[0]); ok {
+				if t, c := colRefDeclaredType(ref, decls); c == expr.Decided {
+					return t.ID, true
+				}
 			}
 		}
 	}
 	return 0, false
+}
+
+// aggInputRefs are the spellings an aggregate's input column name is asked
+// under: as recorded, and — for a QUALIFIED name over a derived table
+// (`MAX(s.pb)`, recorded "s.pb") — as the qualified reference it is. Asked
+// only as the one-part name `s.pb`, the walk found no such column, the output
+// declared float8 and a zero-row or subquery-declared container came back
+// untyped (arc CW round 4, the one-ordering gate's aggregate operand).
+func aggInputRefs(col string) []*plansql.ColRef {
+	refs := []*plansql.ColRef{{Column: col}}
+	if dot := strings.LastIndexByte(col, '.'); dot > 0 && dot < len(col)-1 && !strings.ContainsAny(col, " ()\"'") {
+		refs = append(refs, &plansql.ColRef{Table: col[:dot], Column: col[dot+1:]})
+	}
+	return refs
 }
 
 func aggInputColumnDecimal(node *logical.Node, col string) (logical.DecimalMeta, bool) {
@@ -387,10 +403,13 @@ func aggInputColumnDecimal(node *logical.Node, col string) (logical.DecimalMeta,
 	// same order: the two answer one question about one column, and a
 	// disagreement between them is a DECIMAL declared with someone else's scale.
 	if node != nil && len(node.Children) == 1 {
-		if decls, _, ok := namingScopeDecls(&plansql.ColRef{Column: col}, node.Children[0]); ok {
-			if t, c := colRefDeclaredType(&plansql.ColRef{Column: col}, decls); c == expr.Decided {
-				if t.ID == parquet.TypeDecimal && t.DecKnown {
-					return logical.DecimalMeta{Precision: t.Precision, Scale: t.Scale}, true
+		for _, ref := range aggInputRefs(col) {
+			if decls, _, ok := namingScopeDecls(ref, node.Children[0]); ok {
+				if t, c := colRefDeclaredType(ref, decls); c == expr.Decided {
+					if t.ID == parquet.TypeDecimal && t.DecKnown {
+						return logical.DecimalMeta{Precision: t.Precision, Scale: t.Scale}, true
+					}
+					break
 				}
 			}
 		}

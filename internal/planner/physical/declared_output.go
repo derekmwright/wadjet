@@ -744,6 +744,14 @@ func inputColShapes(n *logical.Node) map[string]parquet.Column {
 				continue
 			}
 			d, c := nodeDeclaredType(arg, *childDecls)
+			if c != expr.Decided && a.InputExpr == nil {
+				// The qualified spelling of a derived table's column (round 4).
+				for _, ref := range aggInputRefs(a.InputCol)[1:] {
+					if d, c = nodeDeclaredType(ref, *childDecls); c == expr.Decided {
+						break
+					}
+				}
+			}
 			if c != expr.Decided {
 				continue
 			}

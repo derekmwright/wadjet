@@ -255,12 +255,21 @@ func projectArmDecls(n *logical.Node, in ColDecls, quals []string) ColDecls {
 	strictInt := strictIntArithCols(n.Children[0])
 	types := make(map[string]parquet.TypeID, len(n.Projections))
 	var dec map[string]logical.DecimalMeta
+	// A projected CONTAINER's element / fields, by output name: the input's
+	// shapes below describe the projection's INPUT, so a container the
+	// projection COMPUTES (`ARRAY[2] AS pa`) had no element here, and an arm
+	// forwarding it declared a bare ARRAY the stage could not allocate
+	// (round 4).
+	outShapes := map[string]parquet.Column{}
 	put := func(name string, d expr.DeclType) {
 		lc := strings.ToLower(strings.TrimSpace(name))
 		if lc == "" {
 			return
 		}
 		types[lc] = d.ID
+		if col, ok := declColumn(d); ok && batch.IsContainerType(col.Type) {
+			outShapes[lc] = col
+		}
 		if d.ID == parquet.TypeDecimal && d.DecKnown && d.Precision > 0 {
 			if dec == nil {
 				dec = make(map[string]logical.DecimalMeta, len(n.Projections))
@@ -316,7 +325,21 @@ func projectArmDecls(n *logical.Node, in ColDecls, quals []string) ColDecls {
 		return ColDecls{}
 	}
 	shapes := inputColShapes(n)
-	return ColDecls{Types: types, Fields: shapeFields(shapes), Elems: shapeElems(shapes), Dec: dec}
+	fields, elems := shapeFields(shapes), shapeElems(shapes)
+	for k, c := range outShapes {
+		if c.Type == parquet.TypeRow {
+			if fields == nil {
+				fields = map[string][]parquet.Column{}
+			}
+			fields[k] = c.Fields
+			continue
+		}
+		if elems == nil {
+			elems = map[string]parquet.Column{}
+		}
+		elems[k] = c
+	}
+	return ColDecls{Types: types, Fields: fields, Elems: elems, Dec: dec}
 }
 
 // armScopeAt adds the relation names recorded ON ONE NODE to the scope in
@@ -389,6 +412,14 @@ func projectionArmDecl(proj logical.Projection, decls ColDecls, strictInt map[st
 					return expr.Decl(parquet.TypeDecimal), true
 				}
 				return expr.DeclDecimal(c.Precision, c.Scale), true
+			}
+			// A container column keeps its element / fields: an arm that
+			// forwards a derived table's ARRAY declared a bare ARRAY, and the
+			// stage allocated a vector with no element to write it into
+			// (round 4 — the one-ordering gate's `column` operand under
+			// UNION on the DAG).
+			if col, ok := declColumn(expr.DeclType{ID: c.Type, Schema: &c}); ok {
+				return expr.DeclType{ID: c.Type, Schema: &col}, true
 			}
 			return expr.Decl(c.Type), true
 		}
