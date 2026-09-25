@@ -631,7 +631,17 @@ func (r Ret) Resolve(nargs int, argType func(i int) (DeclType, Confidence)) (Dec
 // fractional literal is FLOAT64 here), so ARRAY[1, 2.5] is FLOAT64's.
 func ArrayLitElementDecl(decided []DeclType) (DeclType, bool) {
 	typed := make([]DeclType, 0, len(decided))
-	for _, d := range decided {
+	for i, d := range decided {
+		if d.Lit && d.ID == batch.TypeDecimal {
+			// A fractional literal declares its numeric since arc VL round 5,
+			// but an ARRAY[…] of constants materializes each element's OWN
+			// box — an integer constant's int64 — into the element vector,
+			// and an int64 in a DECIMAL vector is the already-scaled carrier
+			// (`unnest(ARRAY[1,2.5])` read 0.1). The array keeps the
+			// double-precision element it had (postgres-differences).
+			d.ID, d.Precision, d.Scale, d.DecKnown = batch.TypeFloat64, 0, 0, false
+			decided[i] = d
+		}
 		if !d.Quoted {
 			typed = append(typed, d)
 		}
