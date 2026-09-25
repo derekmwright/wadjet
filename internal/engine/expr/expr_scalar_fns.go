@@ -63,6 +63,16 @@ type FuncCall struct {
 	wantsNetworkText bool
 	wantsInstant     bool
 	wantsDateKind    bool
+	// typedArgs names, for a stringInputFuncs entry, the argument positions
+	// that are NOT read as text — SUBSTR's start/length, LEFT/RIGHT's count,
+	// LPAD/RPAD's width, SPLIT_PART's field, OVERLAY's start/count
+	// (typedArgPositions). formatDecimalLitArgs must not rewrite one of
+	// these to its literal text: the function's OWN declaration says the
+	// position is a NUMBER, regardless of whether the function as a whole
+	// "wants text" for its other arguments (round 8, #1252 — the guard keys
+	// on the parameter's declared type, never on "text-input function").
+	// nil when every argument is text, same convention as vecTypedArgs.
+	typedArgs map[int]bool
 	// fixedTemporal is the temporal type a FIXED DATE / TIMESTAMP declaration
 	// names — the unit this call's int64 box carries (producedTemporal).
 	fixedTemporal castTemporalKindT
@@ -170,8 +180,27 @@ func (e *FuncCall) formatNetworkArgs(b *batch.RecordBatch, row int, args []any) 
 // spelling", #1252). decimalLitText is the shared renderer; a DECIMAL
 // COLUMN or a computed decimal expression already boxes as its rendered
 // text from Eval() and needs no rewrite.
+//
+// typedArgs is consulted first: a stringInputFuncs entry "wants text" for
+// the function as a whole, but a specific ARGUMENT POSITION can still be
+// declared a NUMBER by the function's own signature — SUBSTR('abcdef', 2)'s
+// second argument is a character POSITION, never text, no matter that
+// SUBSTR's first argument is. Rewriting that position anyway turned the
+// integer 2 into the Go string "2", and fnSubstr's own #1169 rule — decide
+// the two-argument form's second operand is a REGEX PATTERN when it is a
+// string, a character position when it is a number — then read "2" as a
+// pattern that does not match "abcdef" and answered NULL (round 8, #1252):
+// a DAG stage recompiles this projection through the per-row Eval path
+// where the single-process pipeline's constant fold uses the vectorized
+// kernel instead, which formatDecimalLitArgs never touches, so only the DAG
+// arms saw it. The rule belongs at the seam regardless of which arm reaches
+// it: key it on the PARAMETER's declared type, never on "text-input
+// function".
 func (e *FuncCall) formatDecimalLitArgs(b *batch.RecordBatch, row int, args []any) {
 	for i, a := range e.Args {
+		if e.typedArgs[i] {
+			continue
+		}
 		if s, ok := decimalLitText(a, b, row); ok {
 			args[i] = s
 		}
@@ -307,6 +336,7 @@ func (e *FuncCall) resolveFnSlow() {
 	e.wantsNetworkText = networkTextFuncs[lower]
 	e.wantsInstant = temporalInputFuncs[lower]
 	e.wantsDateKind = dateArithFuncs[lower]
+	e.typedArgs = typedArgPositions[lower]
 	if d, c := DefaultRegistry.ReturnType(e.Name).Resolve(0, nil); c == Decided {
 		switch d.ID {
 		case batch.TypeDate:
