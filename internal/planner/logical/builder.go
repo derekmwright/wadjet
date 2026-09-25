@@ -2315,7 +2315,8 @@ func buildLateralSubquery(outer *plansql.SelectInfo, left *Node, join plansql.Jo
 			// writes (ADR-0026 §3a; the join that mints it drops it only
 			// where it keys on it).
 			lifted := !lateralOuterSideIsColumn(cp, leftAliases)
-			collides := lifted || (aggregates && lateralKeyNameCollides(subInfo.Columns, innerCol))
+			collides := lifted || (aggregates && lateralKeyNameCollides(subInfo.Columns, innerCol)) ||
+				lateralKeyNamePublishedTwice(subInfo.Columns, innerCol)
 			published := false
 			if pub, ok := lateralPublishedKeyName(subInfo.Columns, innerCol); ok && !collides {
 				if keyRename == nil {
@@ -2719,6 +2720,35 @@ func lateralKeySelectItem(innerCol string) (plansql.SelectColumn, bool) {
 		col.TableRef = ref.Table
 	}
 	return col, true
+}
+
+// lateralKeyNamePublishedTwice reports whether the name the list publishes
+// the correlation key under — its alias, or its own bare name — is also the
+// name ANOTHER item of the list publishes. The join resolves its key by that
+// name and took the first: `SELECT i.id AS m, i.k AS m … WHERE i.k = o.k`
+// keyed `o.k` on `i.id` (4 rows for PostgreSQL's 9, every arm, base = tip;
+// arc JP round 5). Such a key is minted into a slot like any other
+// collision, and both columns are published as written.
+func lateralKeyNamePublishedTwice(cols []plansql.SelectColumn, innerCol string) bool {
+	name, ok := lateralPublishedKeyName(cols, innerCol)
+	if !ok {
+		if !lateralSelectsColumn(cols, innerCol) {
+			return false
+		}
+		if name = lateralBareKeyName(innerCol); name == "" {
+			return false
+		}
+	}
+	n := 0
+	for _, c := range cols {
+		if c.Star {
+			continue
+		}
+		if strings.EqualFold(plansql.OutputColumnName(c), name) {
+			n++
+		}
+	}
+	return n > 1
 }
 
 // lateralKeyNameCollides reports whether the name an AGGREGATE would publish
