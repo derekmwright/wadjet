@@ -1107,48 +1107,27 @@ func setOpElementTarget(want, ct SetOpColType, name, op string) (*parquet.Column
 		return want.ElementType, nil
 	}
 	a, b := want.ElementType, ct.ElementType
+	// The ONE element rule every meeting point of two containers unifies
+	// through (batch.CommonContainerColumn, arc CW round 5): the numeric
+	// promotion ladder, two DECIMALs at their common (p,s), an integer
+	// beside a DECIMAL at the DECIMAL's scale with the integer's range. So
+	// `int[] ∪ numeric(9,2)[]` is a numeric(21,2)[] union here — it refused
+	// 0A000 on the DAG and answered each arm's own keys on the single path —
+	// and every arm's elements are moved into it (the DAG casts the arm to
+	// that `T[]`; the single path moves its boxes, setOpMoveValue).
+	if el, ok := batch.CommonContainerColumn(*a, *b); ok {
+		el.Name, el.Nullable = "element", true
+		return &el, nil
+	}
 	if a.Type == parquet.TypeDecimal || b.Type == parquet.TypeDecimal {
-		if a.Type == b.Type && a.Precision == b.Precision && a.Scale == b.Scale {
-			return want.ElementType, nil
-		}
-		// Two DECIMAL elements meet at the arms' common DECIMAL(p,s) — ADR-0024's rule for a scalar column,
-		// applied to the element — and every arm's elements are rescaled
-		// into it (the DAG casts the arm to that `DECIMAL(p,s)[]`; the single
-		// path writes its boxes, exact at a scale no smaller than their own).
-		// So `{10.00}` and `{10.0000}` are one member of a UNION, as they are
-		// equal to `=` (round 4, B3). An element whose (p,s) nothing resolved,
-		// or a float element, keeps the refusal: there is no scale to move
-		// the values to without guessing. An INTEGER element beside a DECIMAL
-		// one keeps it too: its boxes are values at scale 0, which the
-		// element writer would read as unscaled carriers (ADR-0018 §4).
-		ea, oka := setOpColTypeFromColumn(*a)
-		eb, okb := setOpColTypeFromColumn(*b)
-		if oka && okb && ea.Typ == parquet.TypeDecimal && eb.Typ == parquet.TypeDecimal {
-			if m, ok := setOpDecimalTarget([]SetOpColType{ea, eb}); ok {
-				el := parquet.Column{Name: "element", Type: parquet.TypeDecimal, Nullable: true,
-					Precision: m.Precision, Scale: m.Scale}
-				return &el, nil
-			}
-		}
+		// An element whose (p,s) nothing resolved has no scale to move the
+		// values to without guessing.
 		return nil, sqlerr.New("0A000", "%s over ARRAY columns whose DECIMAL elements differ in "+
 			"type or (precision, scale) is not supported: result column %q", op, name)
 	}
-	if a.Type == b.Type {
-		if batch.IsContainerType(a.Type) && !sameShape(*a, *b) {
-			return nil, sqlerr.New("42804", "%s types %s[] and %s[] cannot be matched: result column %q",
-				op, strings.ToLower(a.Type.String()), strings.ToLower(b.Type.String()), name)
-		}
+	if a.Type == b.Type && (!batch.IsContainerType(a.Type) || sameShape(*a, *b)) {
 		return want.ElementType, nil
 	}
-	if batch.IsContainerType(a.Type) || batch.IsContainerType(b.Type) {
-		return nil, sqlerr.New("42804", "%s types %s[] and %s[] cannot be matched: result column %q",
-			op, strings.ToLower(a.Type.String()), strings.ToLower(b.Type.String()), name)
-	}
-	widened, ok := setOpWiden(a.Type, b.Type)
-	if !ok {
-		return nil, sqlerr.New("42804", "%s types %s[] and %s[] cannot be matched: result column %q",
-			op, strings.ToLower(a.Type.String()), strings.ToLower(b.Type.String()), name)
-	}
-	el := parquet.Column{Name: "element", Type: widened, Nullable: true}
-	return &el, nil
+	return nil, sqlerr.New("42804", "%s types %s[] and %s[] cannot be matched: result column %q",
+		op, strings.ToLower(a.Type.String()), strings.ToLower(b.Type.String()), name)
 }

@@ -2,7 +2,12 @@
 
 package kernel
 
-import "github.com/derekmwright/wadjet/internal/engine/batch"
+import (
+	"strconv"
+
+	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
+)
 
 // Container comparisons must agree with group-key serialization equality
 // (#415, #394; ADR-0012). ARRAY is lexicographic, shorter on prefix ties;
@@ -76,7 +81,120 @@ func compareElemAt(a *batch.Vector, ai int, b *batch.Vector, bi int) int {
 			return -1
 		}
 	}
+	if a.Type != b.Type {
+		if c, ok := compareMixedLeafAt(a, ai, b, bi); ok {
+			return c
+		}
+	}
 	return CompareValuesAt(a, ai, b, bi)
+}
+
+// compareMixedLeafAt orders two container ELEMENTS of different numeric types
+// — an int[] beside a float8[] or a numeric[], met as a sort-merge join key or
+// under any other comparator that hands the kernel two element vectors — at
+// their common type, batch.CommonContainerColumn's rule (arc CW round 5): an
+// integer beside a DECIMAL is compared exactly at the common scale, anything
+// beside a float as a double (a REAL pair as a REAL). Before it the pair was
+// ordered by the LEFT child's kernel over the right child's storage — the
+// INT64 kernel indexing an empty Int64Data (round-4 review B1: XX000 index
+// out of range on the sort-merge arm). ok is false for a pair with no common
+// type; CompareValuesAt keeps its own answer for that.
+func compareMixedLeafAt(a *batch.Vector, ai int, b *batch.Vector, bi int) (int, bool) {
+	common, ok := batch.CommonContainerColumn(leafDecl(a), leafDecl(b))
+	if !ok {
+		return 0, false
+	}
+	switch common.Type {
+	case batch.TypeInt64:
+		x, okx := leafInt64(a, ai)
+		y, oky := leafInt64(b, bi)
+		if !okx || !oky {
+			return 0, false
+		}
+		return cmpInt64(x, y), true
+	case batch.TypeDecimal:
+		xv, xs, okx := leafDecimal(a, ai)
+		yv, ys, oky := leafDecimal(b, bi)
+		if !okx || !oky {
+			return 0, false
+		}
+		return CompareDecimalValues(xv, xs, yv, ys), true
+	case batch.TypeFloat32:
+		x, okx := leafFloat64(a, ai)
+		y, oky := leafFloat64(b, bi)
+		if !okx || !oky {
+			return 0, false
+		}
+		return CompareFloat64(float64(float32(x)), float64(float32(y))), true
+	case batch.TypeFloat64:
+		x, okx := leafFloat64(a, ai)
+		y, oky := leafFloat64(b, bi)
+		if !okx || !oky {
+			return 0, false
+		}
+		return CompareFloat64(x, y), true
+	}
+	return 0, false
+}
+
+func cmpInt64(x, y int64) int {
+	switch {
+	case x < y:
+		return -1
+	case x > y:
+		return 1
+	}
+	return 0
+}
+
+// leafDecl is a leaf element vector's declaration, as far as the common-type
+// rule reads it: its type, and a DECIMAL's scale (the precision the vector
+// does not carry is the widest, which moves no digit).
+func leafDecl(v *batch.Vector) parquet.Column {
+	c := parquet.Column{Type: v.Type, Nullable: true}
+	if v.Type == batch.TypeDecimal {
+		c.Precision, c.Scale = batch.MaxDecimalPrecision, v.DecimalData.Scale
+	}
+	return c
+}
+
+func leafInt64(v *batch.Vector, i int) (int64, bool) {
+	switch v.Type {
+	case batch.TypeInt64:
+		return v.Int64Data[i], true
+	case batch.TypeInt32:
+		return int64(v.Int32Data[i]), true
+	}
+	return 0, false
+}
+
+func leafDecimal(v *batch.Vector, i int) (batch.Int128, int, bool) {
+	switch v.Type {
+	case batch.TypeDecimal:
+		return v.DecimalData.Data[i], v.DecimalData.Scale, true
+	case batch.TypeInt64, batch.TypeInt32:
+		x, _ := leafInt64(v, i)
+		return batch.Int128From(x), 0, true
+	}
+	return batch.Int128{}, 0, false
+}
+
+func leafFloat64(v *batch.Vector, i int) (float64, bool) {
+	switch v.Type {
+	case batch.TypeFloat64:
+		return v.Float64Data[i], true
+	case batch.TypeFloat32:
+		return float64(v.Float32Data[i]), true
+	case batch.TypeInt64, batch.TypeInt32:
+		x, _ := leafInt64(v, i)
+		return float64(x), true
+	case batch.TypeDecimal:
+		// The correctly rounded double of the exact value, as PostgreSQL's
+		// numeric::float8 is: through the value's own text.
+		f, err := strconv.ParseFloat(v.DecimalData.Data[i].FormatDecimal(v.DecimalData.Scale), 64)
+		return f, err == nil
+	}
+	return 0, false
 }
 
 // compareListAt compares one ARRAY or MAP row: element-wise over the common

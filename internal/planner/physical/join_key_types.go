@@ -5,6 +5,7 @@ package physical
 import (
 	"strings"
 
+	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
@@ -46,6 +47,53 @@ func joinKeyCommonType(a, b parquet.TypeID) (parquet.TypeID, bool) {
 		// int4 ⊕ int8.
 		return parquet.TypeInt64, true
 	}
+}
+
+// containerJoinKeyLeaf is the key type of an ARRAY pair whose ELEMENTS differ
+// in numeric type (arc CW round 5, review B1): the pair's common declaration
+// is batch.CommonContainerColumn's — the rule `=` compares under — and both
+// sides' leaves are keyed at its leaf type (exec.appendListKeyAt), so
+// `int[] JOIN float8[]` matches `{2}` to `{2.0}` on the hash key, the FULL
+// join's matched set and the partition hash alike. A float leaf keys at
+// FLOAT64 (the encoder's one float rung; a REAL pair is a == b and never
+// reaches here). ok is false for a pair whose leaves already agree, whose
+// declarations nothing resolves, or that has no common type — those keep the
+// encoding they had.
+func containerJoinKeyLeaf(node *logical.Node, leftKey, rightKey string) (parquet.TypeID, bool) {
+	l, lok := joinSideKeyColumn(node.Children[0], leftKey)
+	r, rok := joinSideKeyColumn(node.Children[1], rightKey)
+	if !lok || !rok {
+		return 0, false
+	}
+	ll, okl := batch.ContainerLeafType(l)
+	rl, okr := batch.ContainerLeafType(r)
+	if !okl || !okr || ll == rl {
+		return 0, false
+	}
+	common, ok := batch.CommonContainerColumn(l, r)
+	if !ok {
+		return 0, false
+	}
+	leaf, ok := batch.ContainerLeafType(common)
+	if !ok {
+		return 0, false
+	}
+	if leaf == parquet.TypeFloat32 {
+		leaf = parquet.TypeFloat64
+	}
+	return leaf, true
+}
+
+// joinSideKeyColumn is one join side's DECLARED column for a key, element
+// included, from the side's plan-time schema (declaredJoinSchema).
+func joinSideKeyColumn(side *logical.Node, key string) (parquet.Column, bool) {
+	want := joinKeyLookupName(key)
+	for _, c := range declaredJoinSchema(side, []string{key}, nil, nil) {
+		if joinKeyLookupName(c.Name) == want {
+			return c, true
+		}
+	}
+	return parquet.Column{}, false
 }
 
 func joinKeyNumeric(t parquet.TypeID) bool {
@@ -123,6 +171,12 @@ func resolveJoinKeyTypes(node *logical.Node, leftKeys, rightKeys []string, cte c
 			continue
 		}
 		if !lok || !rok {
+			continue
+		}
+		if lt == parquet.TypeArray && rt == parquet.TypeArray {
+			if leaf, ok := containerJoinKeyLeaf(node, leftKeys[i], rightKeys[i]); ok {
+				out[i], any = leaf, true
+			}
 			continue
 		}
 		if common, ok := joinKeyCommonType(lt, rt); ok {

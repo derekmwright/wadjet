@@ -372,9 +372,12 @@ func reconcileSetOpArmTypes(plans []physical.SetOpArmPlan, outNames []string, op
 				// one (setOpElementTarget): the arm casts to that
 				// `DECIMAL(p,s)[]`, whose declared element the cast writes
 				// at the target scale (round 4, B3).
+				// An INTEGER element beside a DECIMAL one meets there too
+				// (batch.CommonContainerColumn, round 5): the integer arm casts
+				// to the same `DECIMAL(p,s)[]`.
 				if el, ae := want.ElementType, plans[i].Types[col].ElementType; el != nil && ae != nil &&
-					el.Type == parquet.TypeDecimal && ae.Type == parquet.TypeDecimal &&
-					(ae.Precision != el.Precision || ae.Scale != el.Scale) {
+					el.Type == parquet.TypeDecimal && el.Precision > 0 &&
+					(ae.Type != parquet.TypeDecimal || ae.Precision != el.Precision || ae.Scale != el.Scale) {
 					plans[i].Specs[col].Expr = fmt.Sprintf("CAST(%s AS DECIMAL(%d,%d)[])",
 						plans[i].Specs[col].Expr, el.Precision, el.Scale)
 					plans[i].Specs[col].Type = want.Typ

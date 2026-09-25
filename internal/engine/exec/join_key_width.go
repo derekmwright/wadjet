@@ -57,6 +57,16 @@ func AppendWidenedKeyValue(buf []byte, v *batch.Vector, row int, target batch.Ty
 // always was, which is what keeps a same-type join — every TPC-H join — at
 // its old cost.
 func appendCoercedKeyValue(buf []byte, v *batch.Vector, row int, target batch.TypeID) []byte {
+	if v.Type == batch.TypeArray {
+		// An ARRAY key whose pair's ELEMENTS differ in numeric type: the
+		// planner resolved the common LEAF type (physical.resolveJoinKeyTypes
+		// through batch.CommonContainerColumn, arc CW round 5), and every
+		// leaf is keyed at it — the same count-then-flagged-element framing
+		// appendListKey writes, one level at a time. Both sides of the pair
+		// take this arm (an ARRAY is never its own leaf type), so an int[]'s
+		// {2} and a float8[]'s {2.0} are one key, as `=` calls them one value.
+		return appendListKeyAt(buf, v, row, target)
+	}
 	switch target {
 	case batch.TypeInt64:
 		// INT32 ⊕ INT64 → INT64: the narrow side's four little-endian bytes
@@ -362,6 +372,35 @@ func resolvedKeyType(types []batch.TypeID, i int) (batch.TypeID, bool) {
 	return 0, false
 }
 
+// appendListKeyAt is appendListKey with every leaf keyed at target.
+func appendListKeyAt(buf []byte, v *batch.Vector, row int, target batch.TypeID) []byte {
+	if row+1 >= len(v.Offsets) {
+		panic(malformedKeyColumn(v.Type.String(), "row %d needs offsets[%d] but the column carries %d",
+			row, row+1, len(v.Offsets)))
+	}
+	start, end := int(v.Offsets[row]), int(v.Offsets[row+1])
+	if end < start {
+		end = start
+	}
+	buf = appendKeyUint32(buf, uint32(end-start))
+	if v.Child == nil {
+		if end > start {
+			panic(malformedKeyColumn(v.Type.String(), "row %d spans elements [%d,%d) but the column has no child vector",
+				row, start, end))
+		}
+		return buf
+	}
+	for i := start; i < end; i++ {
+		if i >= v.Child.Len || v.Child.Nulls.IsNullFast(i) {
+			buf = append(buf, 1)
+			continue
+		}
+		buf = append(buf, 0)
+		buf = AppendWidenedKeyValue(buf, v.Child, i, target)
+	}
+	return buf
+}
+
 // canEncodeKeyAt reports whether a vector of type `vec` has a reading at the
 // resolved key type `target` — whether appendCoercedKeyValue has an arm for
 // the pair rather than a raise.
@@ -376,6 +415,15 @@ func resolvedKeyType(types []batch.TypeID, i int) (batch.TypeID, bool) {
 func canEncodeKeyAt(vec, target batch.TypeID) bool {
 	if vec == target {
 		return true
+	}
+	if vec == batch.TypeArray {
+		// A container key keyed at its pair's common LEAF type
+		// (appendListKeyAt): each leaf is checked as it is encoded.
+		switch target {
+		case batch.TypeInt64, batch.TypeFloat64, batch.TypeFloat32, batch.TypeDecimal:
+			return true
+		}
+		return false
 	}
 	switch target {
 	case batch.TypeInt64:

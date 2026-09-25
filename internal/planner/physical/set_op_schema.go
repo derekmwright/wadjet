@@ -285,6 +285,13 @@ func coerceSetOpArmRows(rows []map[string]any, srcSchema, target []parquet.Colum
 // land in the target column. A column the unification left alone never does.
 func setOpArmNeedsMove(src, dst parquet.Column) bool {
 	switch dst.Type {
+	case parquet.TypeArray:
+		// An ARRAY arm whose ELEMENT the unification moved (arc CW round 5):
+		// the element's own rule, one level down, so `int[] ∪ float8[]`
+		// writes the int arm's leaves as doubles and the dedup key sees one
+		// value where `=` does.
+		return src.Type == parquet.TypeArray && src.ElementType != nil && dst.ElementType != nil &&
+			setOpArmNeedsMove(*src.ElementType, *dst.ElementType)
 	case parquet.TypeDecimal:
 		switch src.Type {
 		case parquet.TypeInt32, parquet.TypeInt64:
@@ -327,6 +334,23 @@ func setOpArmNeedsMove(src, dst parquet.Column) bool {
 // produces is returned untouched rather than guessed at.
 func setOpMoveValue(v any, src, dst parquet.Column) (any, error) {
 	switch dst.Type {
+	case parquet.TypeArray:
+		elems, ok := v.([]any)
+		if !ok || src.ElementType == nil || dst.ElementType == nil {
+			return v, nil
+		}
+		out := make([]any, len(elems))
+		for i, e := range elems {
+			if e == nil {
+				continue
+			}
+			m, err := setOpMoveValue(e, *src.ElementType, *dst.ElementType)
+			if err != nil {
+				return nil, err
+			}
+			out[i] = m
+		}
+		return out, nil
 	case parquet.TypeDecimal:
 		if src.Type == parquet.TypeDecimal {
 			return setOpCheckedDecimalText(v, dst.Name, dst.Precision, dst.Scale)

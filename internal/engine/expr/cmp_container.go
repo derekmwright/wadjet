@@ -117,13 +117,17 @@ func boxShape(v any) *parquet.Column {
 }
 
 // commonContainerShapes are the shapes the two sides are written under: the
-// declaration they share, or — for two numeric leaves of different types —
-// double precision, PostgreSQL's common type for the pairs this engine boxes
-// (`int[] < numeric[]` compares numerically there). Two DECIMAL leaves of
-// different scales keep EACH SIDE'S OWN declaration: the kernel compares two
-// DECIMAL vectors at their common scale exactly (kernel.CompareDecimalValues),
-// so `{10.00}` equals `{10.0000}` by value — never through a double, which
-// would tie two values that differ past its sixteenth digit (round 4, B3).
+// pair's COMMON declaration, batch.CommonContainerColumn — the one rule every
+// meeting point of two containers unifies through (arc CW round 5: the join
+// keys, the set operations and CASE / COALESCE read the same function), so
+// `int[] = float8[]` compares at float8, `int[] = numeric(9,2)[]` exactly at
+// scale 2, and `numeric(5,2)[] = numeric(9,4)[]` at (9,4) — never through a
+// double for two exact sides, never rounding either side's digits. A pair
+// with no common declaration (a DECIMAL whose (p,s) nothing resolved) keeps
+// EACH SIDE'S OWN declaration where the two agree in type: the kernel
+// compares two DECIMAL vectors at their common scale exactly
+// (kernel.CompareDecimalValues) and two numeric element vectors of different
+// types at their common type (kernel.compareMixedLeafAt).
 func commonContainerShapes(a, b *parquet.Column) (*parquet.Column, *parquet.Column, bool) {
 	switch {
 	case a == nil && b == nil:
@@ -133,18 +137,17 @@ func commonContainerShapes(a, b *parquet.Column) (*parquet.Column, *parquet.Colu
 	case b == nil:
 		return a, a, shapeComparable(a)
 	}
+	if c, ok := batch.CommonContainerColumn(*a, *b); ok && shapeComparable(&c) {
+		return &c, &c, true
+	}
+	return ownContainerShapes(a, b)
+}
+
+// ownContainerShapes is commonContainerShapes' fallback for a pair with no
+// common declaration: each side keeps its own, level by level, when the two
+// agree in type.
+func ownContainerShapes(a, b *parquet.Column) (*parquet.Column, *parquet.Column, bool) {
 	if a.Type != b.Type {
-		// integer ⊕ numeric is numeric in PostgreSQL, and exact: the integer
-		// side is written as a DECIMAL at scale 0.
-		switch {
-		case a.Type == parquet.TypeDecimal && integerLeaf(b.Type):
-			return a, &parquet.Column{Type: parquet.TypeDecimal, Precision: 38, Nullable: true}, true
-		case b.Type == parquet.TypeDecimal && integerLeaf(a.Type):
-			return &parquet.Column{Type: parquet.TypeDecimal, Precision: 38, Nullable: true}, b, true
-		case numericLeaf(a.Type) && numericLeaf(b.Type):
-			f := &parquet.Column{Type: parquet.TypeFloat64, Nullable: true}
-			return f, f, true
-		}
 		return nil, nil, false
 	}
 	switch a.Type {
@@ -152,7 +155,7 @@ func commonContainerShapes(a, b *parquet.Column) (*parquet.Column, *parquet.Colu
 		if a.ElementType == nil || b.ElementType == nil {
 			return nil, nil, false
 		}
-		la, lb, ok := commonContainerShapes(a.ElementType, b.ElementType)
+		la, lb, ok := ownContainerShapes(a.ElementType, b.ElementType)
 		if !ok {
 			return nil, nil, false
 		}
@@ -167,7 +170,7 @@ func commonContainerShapes(a, b *parquet.Column) (*parquet.Column, *parquet.Colu
 		outA.Fields = make([]parquet.Column, len(a.Fields))
 		outB.Fields = make([]parquet.Column, len(a.Fields))
 		for i := range a.Fields {
-			fa, fb, ok := commonContainerShapes(&a.Fields[i], &b.Fields[i])
+			fa, fb, ok := ownContainerShapes(&a.Fields[i], &b.Fields[i])
 			if !ok {
 				return nil, nil, false
 			}
@@ -191,10 +194,6 @@ func shapeComparable(c *parquet.Column) bool {
 	return true
 }
 
-func integerLeaf(t parquet.TypeID) bool {
-	return t == parquet.TypeInt32 || t == parquet.TypeInt64
-}
-
 func numericLeaf(t parquet.TypeID) bool {
 	switch t {
 	case parquet.TypeInt32, parquet.TypeInt64, parquet.TypeFloat32, parquet.TypeFloat64, parquet.TypeDecimal:
@@ -203,14 +202,29 @@ func numericLeaf(t parquet.TypeID) bool {
 	return false
 }
 
-// conformBox rewrites a box's numeric leaves to float64 where the common
-// shape widened them, so the vector write takes a DECIMAL's text carrier.
+// conformBox rewrites a box's numeric leaves into the common shape's carrier:
+// a DECIMAL's text as a float where the shape widened to a float, an integer
+// as its text where it widened to a DECIMAL.
 func conformBox(v any, col *parquet.Column) any {
 	if v == nil || col == nil {
 		return v
 	}
 	switch col.Type {
-	case parquet.TypeFloat64:
+	case parquet.TypeDecimal:
+		// An integer box written into a DECIMAL vector would be read as an
+		// UNSCALED carrier (ADR-0018 §4): 2 into a scale-2 child is 0.02. The
+		// common shape of `int[]` and `numeric(9,2)[]` is a scale-2 DECIMAL,
+		// so the integer side goes in as its exact text.
+		switch x := v.(type) {
+		case int64:
+			return strconv.FormatInt(x, 10)
+		case int32:
+			return strconv.FormatInt(int64(x), 10)
+		case int:
+			return strconv.Itoa(x)
+		}
+		return v
+	case parquet.TypeFloat64, parquet.TypeFloat32:
 		if s, ok := v.(string); ok {
 			if f, err := strconv.ParseFloat(s, 64); err == nil {
 				return f
