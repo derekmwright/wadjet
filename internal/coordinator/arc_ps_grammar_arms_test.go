@@ -529,10 +529,10 @@ func TestArcPSGrammarAnswersTheSameOnEveryArm(t *testing.T) {
 			pg:      "10.5, 20.5"},
 		{issue: "#655", name: "dot_literal_exponent_form",
 			sql:  `SELECT .5e1 AS v FROM psa WHERE id = 1`,
-			want: []string{"v=float:5"}, pg: "5"},
+			want: []string{"v=5"}, pg: "5 (numeric; arc VL round 5)"},
 		{issue: "#655", name: "trailing_dot_form",
 			sql:  `SELECT 1. AS v FROM psa WHERE id = 1`,
-			want: []string{"v=float:1"}, pg: "1"},
+			want: []string{"v=1"}, pg: "1 (numeric; arc VL round 5)"},
 	} {
 		t.Run(c.issue+"/"+c.name, func(t *testing.T) {
 			want := append([]string(nil), c.want...)

@@ -81,7 +81,13 @@ func TestAnInt32DomainRefusalHoldsOnEveryArm(t *testing.T) {
 		// the store as a computed per-row box, which is the shape #841's guard
 		// exists for.
 		{"date_above_the_range", "SELECT (c_i64 + 3000000000)::DATE AS v FROM " + tbl, true},
-		{"date_below_the_range", "SELECT (c_i64 - 3000000000)::DATE AS v FROM " + tbl, true},
+		// -9000000000, not -3000000000: c_i64 runs to ~5e9, so `c_i64 -
+		// 3000000000` put some rows INSIDE int32 and past PostgreSQL's DATE
+		// range, which is 22008 since arc VL round 4's range rule — and the
+		// sentence then depended on which row the arm reached first (1 run
+		// in 8-12 on the spilled and single arms). Every row here is past
+		// int32, so the cell asks what it was written to ask.
+		{"date_below_the_range", "SELECT (c_i64 - 9000000000)::DATE AS v FROM " + tbl, true},
 		// The boundary from the other side: a day count an int32 holds is an
 		// ANSWER, so the refusals above are about the VALUE and not about the
 		// cast existing. c_i32 rather than c_i64 because c_i64 runs to

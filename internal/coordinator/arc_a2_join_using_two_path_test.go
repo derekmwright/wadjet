@@ -97,10 +97,10 @@ func a2JoinCells() []a2JoinCell {
 		// ---- the leading-dot numeric literal ------------------------------
 		//
 		// The bar these cells hold is EQUIVALENCE with the zero-prefixed
-		// spelling, not agreement with PostgreSQL on the literal's TYPE: a
-		// bare `0.5` boxes as a float64 here and is `numeric` there, which is
-		// a standing literal-typing divergence (ADR-0012) that this lexer
-		// change neither causes nor fixes. The `ctl_zero_prefixed_form`
+		// spelling. A bare `0.5` was a float64 here and `numeric` there — a
+		// literal-typing divergence this lexer change neither caused nor
+		// fixed; arc VL round 5 closed it (ADR-0024's 2026-09-24 amendment),
+		// and both spellings now carry PostgreSQL's numeric. The `ctl_zero_prefixed_form`
 		// control below carries the same box for the same number written the
 		// other way, which is what makes "the two spellings are one literal"
 		// the assertion rather than a coincidence.
@@ -113,13 +113,13 @@ func a2JoinCells() []a2JoinCell {
 		// ASSERTED, so both states are covered.
 		{issue: "#655", name: "dot_literal_projection",
 			sql:  `SELECT .5 AS v FROM zzp WHERE id = 1`,
-			want: []string{"v=float:0.5"}, pgSays: "0.5 (numeric)"},
+			want: []string{"v=0.5"}, pgSays: "0.5 (numeric)"},
 		{issue: "#655", name: "dot_literal_arithmetic",
 			sql:  `SELECT .5 + 1 AS v FROM zzp WHERE id = 1`,
 			want: []string{"v=1.5"}, pgSays: "1.5"},
 		{issue: "#655", name: "dot_literal_tableless_routes",
 			sql:  `SELECT .5 AS v`,
-			want: []string{"v=float:0.5"}, wantRoutes: a2Routes{TableLess: 1},
+			want: []string{"v=0.5"}, wantRoutes: a2Routes{TableLess: 1},
 			pgSays: "0.5 — and on the DAG this ROUTES (#806), so both DAG arms " +
 				"here are the coordinator-local pipeline"},
 		{issue: "#655", name: "dot_literal_in_where",
@@ -133,7 +133,7 @@ func a2JoinCells() []a2JoinCell {
 			want: []string{"v=int64:1"}, pgSays: "1"},
 		{issue: "#655", name: "ctl_zero_prefixed_form_unchanged",
 			sql:    `SELECT 0.5 AS v, 0.5 + 1 AS w FROM zzp WHERE id = 1`,
-			want:   []string{"v=float:0.5|w=1.5"},
+			want:   []string{"v=0.5|w=1.5"},
 			pgSays: "0.5, 1.5 — byte-identical to the leading-dot spelling above"},
 
 		// ---- the shapes still refused, with their classes -----------------
