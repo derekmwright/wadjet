@@ -36,14 +36,24 @@ func TestN1AnEmptyColumnListIsRefusedOnTheWire(t *testing.T) {
 		wantSQLState string
 	}{
 		{
-			// THE SHAPE NO DOOR CAN DECLARE, and the one this cell now holds:
-			// a zero-row star over a LATERAL whose subquery is an UNGROUPED
-			// AGGREGATE. Its join carries the pad marker the declaration will
-			// not publish (ADR-0012's list), so the refusal is what crosses
-			// the wire — SQLSTATE and sentence — and the door keeps a fixture
-			// for it after arc O1 closed the bushy-join half below.
-			name: "a_zero_row_star_over_an_ungrouped_lateral_is_XX000",
+			// A zero-row star over a LATERAL whose subquery is an UNGROUPED
+			// AGGREGATE was the shape no door could declare (its join carries
+			// the pad marker) and was refused XX000 here. Arc JP round 4
+			// expands a star over a LATERAL join to the FROM arms' own lists,
+			// the lateral's read as `s.*` reads it, so it declares PostgreSQL's
+			// columns like any other star.
+			name: "a_zero_row_star_over_an_ungrouped_lateral_declares",
 			sql: `SELECT * FROM j1ord o JOIN LATERAL (SELECT MAX(amount) AS mx ` +
+				`FROM j1item WHERE order_id = o.id) s ON true WHERE o.id > 99`,
+			want: []string{"id", "customer", "total", "mx"},
+		},
+		{
+			// THE SHAPE NO DOOR CAN DECLARE now: the same zero-row star where
+			// the lateral publishes one name twice, so its list cannot be
+			// enumerated by name and the star stays on the join's stream,
+			// which carries the pad marker the declaration will not publish.
+			name: "a_zero_row_star_over_an_ungrouped_lateral_naming_one_column_twice_is_XX000",
+			sql: `SELECT * FROM j1ord o JOIN LATERAL (SELECT MAX(amount) AS mx, MIN(amount) AS mx ` +
 				`FROM j1item WHERE order_id = o.id) s ON true WHERE o.id > 99`,
 			wantSQLState: sqlerr.EmptyResultSQLState,
 		},

@@ -138,19 +138,23 @@ func TestArcJPAReorderedAndReKeyedJoinsReadThePublishedValueOnEveryDoor(t *testi
 			pmSSNPairs()},
 		// P1: an alias that is the OTHER table's name names that FROM item
 		// only — `e7emp.` is the e7bal copy here, whose masked bal is 0.
+		// Round 4: a bare star over an expression-keyed LATERAL is expanded
+		// to the FROM arms' own lists — the POLICED list of the outer e7bal
+		// (its masked bal publishes 0) and the lateral's `m` — never the key
+		// slot the join evaluates the equality against. Under the mask every
+		// bal is 0, so every visible row pairs with all eight.
+		{"exprKeyBareStarOnMasked",
+			`SELECT * FROM e7bal b JOIN LATERAL (SELECT c.id AS m ` +
+				`FROM e7bal c WHERE c.bal = b.bal - 0) s ON true`,
+			pmStarPairs(8)},
 		{"r2AliasIsOtherTablesNameOnMasked",
 			`SELECT e7bal.id AS a, e7emp.id AS m FROM e7emp e7bal JOIN e7bal e7emp ` +
 				`ON e7emp.id = e7bal.id + 1 AND e7emp.bal = 0`,
 			"a=1|m=2 ; a=2|m=3 ; a=3|m=4 ; a=4|m=5 ; a=5|m=6 ; a=6|m=7 ; a=7|m=8"},
 	}
-	refusals := []struct{ name, sql, class string }{
-		// A bare star over an expression-keyed LATERAL would publish the key
-		// the join carries; refused on every door, with no stored value.
-		{"exprKeyBareStarOnMasked",
-			`SELECT * FROM e7bal b JOIN LATERAL (SELECT c.id AS m ` +
-				`FROM e7bal c WHERE c.bal = b.bal - 0) s ON true`,
-			"has an EXPRESSION on its outer side"},
-	}
+	// No refusal remains: the bare star that was refused through round 3 is
+	// an answered cell above (arc JP round 4).
+	refusals := []struct{ name, sql, class string }{}
 
 	answered := 0
 	for _, c := range cells {
@@ -224,4 +228,16 @@ func pmSorted(s string) string {
 	rows := strings.Split(s, " ; ")
 	sort.Strings(rows)
 	return strings.Join(rows, " ; ")
+}
+
+// pmStarPairs is `bal=0|id=k|m=j` for every k, j in 1..n: `SELECT *` over
+// e7bal (masked bal 0) beside the lateral's `m`.
+func pmStarPairs(n int) string {
+	out := make([]string, 0, n*n)
+	for a := 1; a <= n; a++ {
+		for m := 1; m <= n; m++ {
+			out = append(out, fmt.Sprintf("bal=0|id=%d|m=%d", a, m))
+		}
+	}
+	return strings.Join(out, " ; ")
 }

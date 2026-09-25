@@ -71,14 +71,14 @@ func TestN1AnEmptyColumnListIsRefusedOnTheHTTPDoor(t *testing.T) {
 	client := ts.Client()
 
 	// The shape no door CAN declare, on this door: a zero-row star over a
-	// LATERAL whose subquery is an UNGROUPED AGGREGATE, whose join carries the
-	// pad marker the declaration will not publish (ADR-0012's list). It used
-	// to be the BUSHY JOIN below, which arc O1 taught every door to declare
-	// (#997/#1012, ADR-0026 §9) — so the refusal keeps a fixture here and the
-	// bushy join joins the controls.
-	t.Run("a zero-row star over an ungrouped lateral is refused", func(t *testing.T) {
+	// LATERAL whose subquery is an UNGROUPED AGGREGATE publishing one name
+	// twice. Its list cannot be enumerated by name, so the star stays on the
+	// join's stream, which carries the pad marker the declaration will not
+	// publish (ADR-0012's list). The same lateral with distinct names declares
+	// since arc JP round 4 (the controls); before it, that was the fixture.
+	t.Run("a zero-row star over an ungrouped lateral naming one column twice is refused", func(t *testing.T) {
 		status, body := postSQL(t, client, ts.URL,
-			"SELECT * FROM n1ord o JOIN LATERAL (SELECT MAX(order_id) AS mx "+
+			"SELECT * FROM n1ord o JOIN LATERAL (SELECT MAX(order_id) AS mx, MIN(order_id) AS mx "+
 				"FROM n1item WHERE order_id = o.id) s ON true WHERE o.id > 99")
 		if status == http.StatusOK {
 			t.Fatalf("answered HTTP 200 with %s — a result set declares its columns or fails", body)
@@ -106,6 +106,14 @@ func TestN1AnEmptyColumnListIsRefusedOnTheHTTPDoor(t *testing.T) {
 		{"control: a zero-row named select list",
 			"SELECT o.id, o.customer FROM n1ord o WHERE o.id > 99", 2},
 		{"control: the same query with rows", "SELECT * FROM n1ord", 2},
+		// A zero-row star over a LATERAL whose subquery is an UNGROUPED
+		// AGGREGATE was refused XX000 here (its join carries the pad marker a
+		// declaration would not publish); arc JP round 4 expands a star over a
+		// LATERAL join to the FROM arms' own lists, so it declares
+		// PostgreSQL's three columns.
+		{"control: a zero-row star over an ungrouped lateral (declared since arc JP round 4)",
+			"SELECT * FROM n1ord o JOIN LATERAL (SELECT MAX(order_id) AS mx " +
+				"FROM n1item WHERE order_id = o.id) s ON true WHERE o.id > 99", 3},
 	} {
 		t.Run(ctl.name, func(t *testing.T) {
 			status, body := postSQL(t, client, ts.URL, ctl.sql)
