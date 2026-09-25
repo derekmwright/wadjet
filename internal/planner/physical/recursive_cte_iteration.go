@@ -59,12 +59,22 @@ func (p *Planner) iterateRecursiveCTE(ctx context.Context, cte plansql.CTEDef, a
 
 func (p *Planner) iterateRecursiveCTEAt(ctx context.Context, cte plansql.CTEDef, anchorSQL, recursiveSQL string,
 	widen map[int]int) error {
-	anchorBatches, schema, _, err := p.runRecursiveArm(ctx, anchorSQL)
+	anchorBatches, schema, anchorLits, err := p.runRecursiveArm(ctx, anchorSQL)
 	if err != nil {
 		return err
 	}
 	if len(schema) == 0 {
 		return errNoCTESchema(cte.Name)
+	}
+	// A numeric CONSTANT seeds an UNCONSTRAINED numeric column: PostgreSQL
+	// gives a numeric literal typmod -1, so `SELECT 1.5 … UNION ALL SELECT
+	// 2::int` is numeric overall, not numeric(2,1). The literal declares its
+	// spelling's DECIMAL(p,s) (arc VL round 5); the CTE column takes its
+	// scale and the unconstrained precision.
+	for i := range schema {
+		if schema[i].Type == parquet.TypeDecimal && anchorLits.isNumericLiteral(i) {
+			schema[i].Precision = parquet.MaxDecimalDigits
+		}
 	}
 	if len(widen) > 0 {
 		declared := append([]parquet.Column(nil), schema...)

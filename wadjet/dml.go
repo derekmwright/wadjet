@@ -1586,6 +1586,10 @@ type assignSource struct {
 	declType  parquet.TypeID
 	declKnown bool
 	declFloat bool
+	// declScale is a DECIMAL source's declared scale: a numeric constant
+	// evaluated inside an expression (`CASE … THEN 2.50 END`) arrives as a
+	// float box and is numeric at that scale (arc VL round 5).
+	declScale int
 }
 
 // assignSourceOf classifies a source expression. schema resolves column
@@ -1599,14 +1603,18 @@ func assignSourceOf(node plansql.Node, schema []parquet.Column) assignSource {
 	if dmlTypedTextSource(node) {
 		return assignSource{typedText: true}
 	}
-	t, known := dmlSourceDeclaredType(node, schema)
-	return assignSource{declType: t, declKnown: known, declFloat: dmlSourceIsFloat(node, schema)}
+	decl, conf := physical.DeclaredTypeOfNode(node, schema)
+	if conf != expr.Decided {
+		return assignSource{declFloat: dmlSourceIsFloat(node, schema)}
+	}
+	return assignSource{declType: decl.ID, declKnown: true, declFloat: dmlSourceIsFloat(node, schema),
+		declScale: decl.Scale}
 }
 
 // declaredSource is the source of a query output column whose expression is
 // not a constant: its declaration from the plan.
 func declaredSource(c parquet.Column) assignSource {
-	return assignSource{declType: c.Type, declKnown: true,
+	return assignSource{declType: c.Type, declKnown: true, declScale: c.Scale,
 		declFloat: c.Type == parquet.TypeFloat32 || c.Type == parquet.TypeFloat64}
 }
 
@@ -1711,7 +1719,35 @@ func (s assignSource) assign(v any, col parquet.Column) (any, error) {
 	case s.typedText:
 		return assignUnknownLiteral(v, col)
 	}
+	if s.declKnown && s.declType == parquet.TypeDecimal {
+		v = decimalDeclaredText(v, s.declScale)
+	}
 	return assignEvaluatedValue(v, col, s.declFloat, s.declType, s.declKnown)
+}
+
+// decimalDeclaredText is a DECIMAL-declared value carried in a float or an
+// integer box — a numeric constant under CASE / COALESCE / GREATEST in a
+// VALUES cell, a SET, a MERGE clause — as the text a DECIMAL column's box
+// already is: the numeric at its declared scale, so every door assigns what
+// the SELECT-list doors store from their DECIMAL vector (`2.50` into text, 3
+// into integer — numeric rounds half away from zero — never the double's
+// `2.5` / 2; arc VL round 5, round-4 review B2). Any other box is returned as
+// it is.
+func decimalDeclaredText(v any, scale int) any {
+	switch x := v.(type) {
+	case float64:
+		if math.IsNaN(x) || math.IsInf(x, 0) {
+			return v
+		}
+		return strconv.FormatFloat(x, 'f', scale, 64)
+	case int64, int32, int:
+		text := fmt.Sprint(x)
+		if scale > 0 {
+			text += "." + strings.Repeat("0", scale)
+		}
+		return text
+	}
+	return v
 }
 
 // assignmentClassified is the scalar set the one assignment table decides:

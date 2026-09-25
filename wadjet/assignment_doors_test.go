@@ -248,18 +248,12 @@ var assignmentDoorDivergences = map[string]string{}
 // assignmentCTASDivergences is the same list for the CTAS cells: the column
 // TYPE a CTAS declares for a constant, not the assignment (every door stores
 // the same value into a column of that type). Both are the SELECT list's
-// declaration lane, recorded as filing candidates: an unadorned decimal
-// literal is typed double precision where PostgreSQL types numeric (so its
-// scale is not kept: `2.50` stores 2.5), and a negated integer literal,
+// declaration lane, recorded as filing candidates: a negated integer literal,
 // integer arithmetic and CAST(… AS INTEGER) are typed bigint where
-// PostgreSQL types integer (a width, the value is the same).
+// PostgreSQL types integer (a width, the value is the same). A decimal
+// literal was on this list (typed double precision, so `2.50` stored 2.5)
+// until arc VL round 5 typed it numeric.
 var assignmentCTASDivergences = map[string]string{
-	"2.5":                   "decimal literal typed double precision",
-	"2.50":                  "decimal literal typed double precision",
-	"1.10":                  "decimal literal typed double precision",
-	"-2.50":                 "decimal literal typed double precision",
-	"0.5":                   "decimal literal typed double precision",
-	"1e3":                   "decimal literal typed double precision",
 	"-5":                    "negated integer literal typed bigint",
 	"1 + 1":                 "integer arithmetic typed bigint",
 	"CAST(NULL AS INTEGER)": "CAST(… AS INTEGER) typed bigint",

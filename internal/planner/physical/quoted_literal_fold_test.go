@@ -205,8 +205,10 @@ func TestNumericLiteralKeepsItsOwnDeclarationInAFold(t *testing.T) {
 		// literal's spelling; the precision from the column's range plus it.
 		{"a fractional literal beside an int column widens to the decimal rung",
 			"COALESCE(i32, 1.5)", expr.DeclDecimal(11, 1)},
-		{"two literals keep the literal declaration",
-			"GREATEST(0.5, 1.5)", expr.DeclNumericLit(parquet.TypeFloat64, "0.5")},
+		// A fractional literal is PostgreSQL's numeric (arc VL round 5), so
+		// two of them fold to the DECIMAL their spellings need.
+		{"two fractional literals fold to their numeric",
+			"GREATEST(0.5, 1.5)", expr.DeclDecimal(2, 1)},
 		{"a wide literal beside a decimal stays float",
 			"GREATEST(d3810, 493827160549382.7160549350)", expr.Decl(parquet.TypeFloat64)},
 	} {

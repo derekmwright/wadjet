@@ -1391,7 +1391,22 @@ func nodeDeclaredType(node plansql.Node, decls ColDecls) (expr.DeclType, expr.Co
 				}
 				return expr.DeclNumericLit(parquet.TypeInt64, n.Value), expr.Decided
 			}
-			return expr.DeclNumericLit(parquet.TypeFloat64, n.Value), expr.Decided
+			// A fractional or exponent literal is PostgreSQL's `numeric`:
+			// it declares the DECIMAL(p,s) of its spelling wherever it sits —
+			// a bare projection, a CASE / COALESCE / GREATEST arm, a derived
+			// table's or CTE's column, a VALUES list, a set-operation arm —
+			// so `SELECT 2.50` is 2.50 (OID 1700) and so is the value it
+			// assigns to a text column through any of them (arc VL round 5;
+			// round-4 review B2: `CASE WHEN true THEN 2.50 END` stored `2.5`).
+			// It closes ADR-0024's recorded literal deferral. A spelling past
+			// what the DECIMAL carrier holds exactly (DeclNumericLit sets no
+			// Exact) keeps FLOAT64: the box has already lost digits, and a
+			// DECIMAL declaration would present the rounded double as exact.
+			d := expr.DeclNumericLit(parquet.TypeFloat64, n.Value)
+			if d.ExactSet {
+				d.ID, d.Precision, d.Scale, d.DecKnown = parquet.TypeDecimal, d.Exact.Precision, d.Exact.Scale, true
+			}
+			return d, expr.Decided
 		case plansql.LitBool:
 			return expr.Decl(parquet.TypeBool), expr.Decided
 		case plansql.LitString:

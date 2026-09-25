@@ -144,8 +144,8 @@ func TestDecimalChoiceExpressionsDeclareTheCommonType(t *testing.T) {
 		// not this rule's business.
 		{"an integer beside an integer stays integer", "COALESCE(i64, 0)",
 			expr.Decl(parquet.TypeInt64), expr.Decided},
-		{"two literals keep the literal declaration", "GREATEST(0.5, 1.5)",
-			expr.DeclNumericLit(parquet.TypeFloat64, "0.5"), expr.Decided},
+		{"two fractional literals fold to their numeric", "GREATEST(0.5, 1.5)",
+			expr.DeclDecimal(2, 1), expr.Decided},
 		// A FLOAT COLUMN makes the whole construct float8, which is
 		// PostgreSQL's rule: float8 is the preferred type of the numeric
 		// category. The literal above and this column both declare FLOAT64

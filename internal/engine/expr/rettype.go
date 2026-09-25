@@ -682,13 +682,13 @@ func CommonDeclType(decided []DeclType, sawUnknown bool) (DeclType, bool) {
 	if len(typed) == 0 {
 		return decided[0], true
 	}
-	if allLiterals(typed) {
-		// Nothing but CONSTANTS. A constant's OWN declaration is ADR-0024's
-		// recorded deferral — `SELECT 1` is a bigint here and an integer in
-		// PostgreSQL — and with no typed operand there is nothing for the
-		// fold to resolve it FROM, so the deferral stands exactly where it
-		// was: `GREATEST(0.5, 1.5)` keeps the FLOAT64 a bare numeric literal
-		// declares, along with the spelling an OUTER fold reads off it.
+	if allLiterals(typed) && !anyDecimalDecl(typed) {
+		// Nothing but INTEGER constants (or non-numeric ones). With no typed
+		// operand there is nothing for the fold to resolve them FROM, and the
+		// first declares the call. A FRACTIONAL constant declares PostgreSQL's
+		// numeric (DECIMAL of its spelling, arc VL round 5), so a choice over
+		// constants that holds one folds below like any DECIMAL decider:
+		// `GREATEST(0.5, 1.5)` is DECIMAL(2,1), `COALESCE(2.50, 1)` numeric.
 		return typed[0], true
 	}
 	rung, numeric := numericRungFold(typed)
@@ -750,6 +750,16 @@ func CommonDeclType(decided []DeclType, sawUnknown bool) (DeclType, bool) {
 		return typed[0], true
 	}
 	return DeclDecimal(m.Precision, m.Scale), true
+}
+
+// anyDecimalDecl reports a DECIMAL-declared decider among ds.
+func anyDecimalDecl(ds []DeclType) bool {
+	for _, d := range ds {
+		if d.ID == batch.TypeDecimal {
+			return true
+		}
+	}
+	return false
 }
 
 // fractionalLitTriggersFold promotes a choice to DECIMAL only when a
