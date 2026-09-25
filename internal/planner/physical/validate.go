@@ -439,11 +439,22 @@ func (s *colScope) clone() *colScope {
 // lacks the spelling. Derived aliases may have lost case during planning, so
 // an uncertain spelling must not manufacture a refusal.
 // See docs/internals/scope-resolution-delimited-names.md for the design.
+//
+// A QUALIFIED reference asks its OWN relation's declarations, never another
+// source's: `s."Id"` over a derived or LATERAL `s` publishing `"Id"`, beside
+// a base table `o` declaring `id`, was refused because `o`'s fold-equal `id`
+// counted as the declaration the spelling missed — for a relation the
+// qualifier does not name (arc JP round 4 review, N5; PostgreSQL answers,
+// and a plain join over the same derived table was refused too).
 func (s *colScope) refuseDelimitedMiss(ref *plansql.ColRef) error {
 	if plansql.FoldIdent(ref.Column) == ref.Column || s.exact[ref.Column] {
 		return nil
 	}
-	if _, fromBaseTable := s.colTypes[strings.ToLower(ref.Column)]; !fromBaseTable {
+	decls := s.colTypes
+	if ref.Table != "" {
+		decls = s.qualColTypes[strings.ToLower(ref.Table)]
+	}
+	if _, fromBaseTable := decls[strings.ToLower(ref.Column)]; !fromBaseTable {
 		return nil
 	}
 	return sqlerr.New("42703", "column %q does not exist", ref.Column)
