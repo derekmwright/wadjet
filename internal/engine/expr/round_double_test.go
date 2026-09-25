@@ -44,17 +44,26 @@ func TestRoundDoublePrecisionHalfToEven(t *testing.T) {
 // bare literal, a column, and an explicit NUMERIC/DECIMAL cast must all keep
 // rounding half AWAY from zero — the DOUBLE PRECISION routing must not leak
 // onto them.
+//
+// A bare literal argument boxes as a decimal string, not a float64: since
+// #1252's round 5 (`9b096b9e`) a fractional literal declares DECIMAL
+// wherever it sits, and round 7's B1 fix moved scalarFnDeclaredDecimal's own
+// declaration with it, so `ROUND(2.5)` now answers a decimal "3" the way
+// PostgreSQL's numeric does (review r5 B1, #1252). A bare, unparameterized
+// `CAST(x AS numeric/decimal)` still declines the exact path — its (p,s) is
+// resolved per VALUE at runtime, not a declaration this layer can name — so
+// it is unchanged, still float64.
 func TestRoundNumericStillHalfAwayFromZero(t *testing.T) {
 	b := testBatch()
 	cases := []struct {
 		sql  string
-		want float64
+		want any
 	}{
-		{"ROUND(0.5)", 1.0},
-		{"ROUND(1.5)", 2.0},
-		{"ROUND(2.5)", 3.0},
-		{"ROUND(-0.5)", -1.0},
-		{"ROUND(-1.5)", -2.0},
+		{"ROUND(0.5)", "1"},
+		{"ROUND(1.5)", "2"},
+		{"ROUND(2.5)", "3"},
+		{"ROUND(-0.5)", "-1"},
+		{"ROUND(-1.5)", "-2"},
 		{"ROUND(CAST(0.5 AS numeric))", 1.0},
 		{"ROUND(CAST(2.5 AS decimal))", 3.0},
 	}

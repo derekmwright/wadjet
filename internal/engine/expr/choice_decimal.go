@@ -273,11 +273,20 @@ func foldDecimalMetas(all, constrained []batch.DecimalType) (batch.DecimalType, 
 // line or the plan would declare a type the runtime does not produce.
 func decimalChoiceArm(e Expr, b *batch.RecordBatch) (batch.DecimalType, bool, bool) {
 	if isConstNumericLit(e) {
-		// A CONSTANT contributes its spelling and never TRIGGERS the fold:
-		// `GREATEST(-2.5, -7.5)` is a float8 expression here, because a bare
-		// numeric literal declares FLOAT64 and ADR-0024 leaves that deferral
-		// open — the runtime must not answer DECIMAL for something the plan
-		// built a float vector for.
+		// A CONSTANT contributes its spelling but never independently
+		// triggers THIS runtime fold — sawDecimal stays false below when
+		// every arm is a constant literal, and fracLitArmTriggersFold's
+		// exception (binop_decimal.go) needs a NON-constant arm beside it to
+		// fire. That is not a gap for `GREATEST(2.50, 1.25)`: since #1252's
+		// round 5 (`9b096b9e`) a fractional literal declares DECIMAL
+		// wherever it sits, so a choice whose every arm is constant is
+		// already declared DECIMAL by the plan (physical.nodeDeclaredType's
+		// Case/FuncCall arms) before the compiled tree ever reaches this
+		// function — verified: `GREATEST(-2.5, -7.5)`, `NULLIF(2.50, 0)` and
+		// their product by 2 all answer DECIMAL, matching PostgreSQL. This
+		// branch's target is a choice the plan could NOT already decide
+		// statically: a fractional literal beside a genuinely NON-constant
+		// arm.
 		t, ok := constArmDecimalType(e)
 		return t, false, ok
 	}

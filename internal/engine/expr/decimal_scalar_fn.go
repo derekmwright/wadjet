@@ -172,31 +172,28 @@ func (e *decimalScalarFn) resolveMode(b *batch.RecordBatch) bool {
 
 // decimalScalarArg reports whether an argument makes this call exact.
 //
-// It is operandIsDecimalTyped with a BARE NUMERIC LITERAL excluded, and the
-// exclusion is deliberate: `SELECT 1.5` declares FLOAT64 in this engine
-// (physical.nodeDeclaredType's Lit arm), so `ROUND(0.5)` answering an exact
-// DECIMAL would make a constant-folded expression change type depending on
-// which function wrapped it. PostgreSQL types both as numeric, and closing
-// that gap is a change to the LITERAL's own declaration — every projection,
-// comparison and set-operation arm that carries one — not to this family.
-// A literal INSIDE an expression still counts: `ROUND(d + 0.5, 1)` is exact,
-// because its argument is arithmetic over a real DECIMAL.
-//
-// Unary ± over a literal is a literal too. `ROUND(-0.5)` parses as a UnaryOp
-// and `ROUND(0.5)` as a Lit, and letting only one of them take this path made
-// the two halves of one query disagree about their own type — which is how the
-// oracle found it: `SELECT ROUND(0.5), ROUND(-0.5)` came back float 1 beside
-// decimal -1.
+// It is operandIsDecimalTyped, unchanged. A BARE NUMERIC LITERAL argument
+// used to be excluded here, on the reasoning that `SELECT 1.5` declared
+// FLOAT64 and so `ROUND(0.5)` answering DECIMAL would make a constant-folded
+// expression change type depending on which function wrapped it. Since
+// #1252's round 5 (`9b096b9e`) a fractional literal declares DECIMAL
+// wherever it sits, so `ROUND(0.5)` and a DECIMAL column now agree without a
+// carve-out: `operandIsDecimalTyped`'s own Lit arm (`litIsExactDecimal`)
+// already answers DECIMAL for the literal, and its UnaryOp arm recurses
+// through unary ± the same way `ROUND(-0.5)` and `ROUND(0.5)` need to
+// (review r5 B1, #1252).
 func decimalScalarArg(e Expr, b *batch.RecordBatch) bool {
-	if isConstNumericLit(e) {
-		return false
-	}
 	return operandIsDecimalTyped(e, b)
 }
 
 // isConstNumericLit reports whether an operand is a numeric CONSTANT — a
 // literal, or unary ± over one. physical.isConstNumericLitNode makes the same
-// test over the AST.
+// test over the AST. Used by the constant-division and CASE/choice fold
+// guards (binop_decimal.go, choice_decimal.go), which are unchanged by B1:
+// constant division and the transcendental functions stay on the float path
+// (ADR-0024's recorded divergence, review r5 N3) — only a scalar function's
+// own DECIMAL declaration (decimalScalarArg, above) stopped excluding a
+// constant argument.
 func isConstNumericLit(e Expr) bool {
 	switch v := e.(type) {
 	case *Lit:

@@ -284,16 +284,12 @@ func scalarFnDeclaredDecimal(n *plansql.FuncCallNode, decls ColDecls) (expr.Decl
 	if !expr.IsDecimalScalarFn(n.Name) || len(n.Args) < 1 {
 		return expr.DeclType{}, false
 	}
-	if isConstNumericLitNode(n.Args[0]) {
-		// A CONSTANT argument stays on the float path, mirroring
-		// expr.decimalScalarArg: `SELECT 1.5` declares FLOAT64 here, so
-		// `ROUND(0.5)` answering a DECIMAL would make a constant-folded
-		// expression change type depending on what wrapped it. Unary ± over a
-		// literal is a constant too — `ROUND(-0.5)` parses as a UnaryOp and
-		// `ROUND(0.5)` as a Lit, and covering only one of them made the two
-		// halves of one query disagree about their own type.
-		return expr.DeclType{}, false
-	}
+	// A CONSTANT argument is no longer routed off this path: since #1252's
+	// round 5 (`9b096b9e`) a fractional literal declares DECIMAL wherever it
+	// sits, so `decimalArithOperand`'s own Lit/UnaryOp arms already answer the
+	// same DECIMAL for `ROUND(0.5)` and `ROUND(-0.5)` that they answer for a
+	// DECIMAL column — there is no longer a second type for a constant-folded
+	// expression to disagree with itself over (review r5 B1, #1252).
 	in, isDec, ok := decimalArithOperand(n.Args[0], decls)
 	if !ok || !isDec {
 		return expr.DeclType{}, false

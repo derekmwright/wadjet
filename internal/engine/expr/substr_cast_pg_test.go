@@ -103,8 +103,15 @@ func TestCastFractionalToIntegerRounds(t *testing.T) {
 		{"CAST(4.7 AS bigint)", int64(5)},
 		{"CAST(4 AS integer)", int64(4)},
 		{"CAST('42' AS integer)", int64(42)},
-		{"TRUNC(4.7)", 4.0},
-		{"TRUNC(-4.7)", -4.0},
+		// TRUNC over a bare fractional literal is a DECIMAL argument since
+		// #1252's round 5 made the literal itself numeric (`9b096b9e`), and
+		// round 7's B1 fix moved this scalar function's own DECIMAL
+		// declaration with it — so the result boxes as a decimal string at
+		// scale 0, PostgreSQL's numeric, rather than the float64 this pin
+		// held before the guard that kept a constant argument off the exact
+		// path was removed (review r5 B1, #1252).
+		{"TRUNC(4.7)", "4"},
+		{"TRUNC(-4.7)", "-4"},
 	}
 	for _, c := range cases {
 		t.Run(c.sql, func(t *testing.T) {

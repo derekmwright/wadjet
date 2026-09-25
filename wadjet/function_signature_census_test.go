@@ -68,8 +68,12 @@ func TestACallResolvesByItsArgumentsOrIs42883(t *testing.T) {
 		// break: an optional trailing argument, and a variadic tail.
 		{name: "substr_two_args", sql: `SELECT SUBSTR('abcdef',2) AS v`, want: "bcdef", pg: `bcdef`},
 		{name: "substr_three_args", sql: `SELECT SUBSTR('abcdef',2,3) AS v`, want: "bcd", pg: `bcd`},
-		{name: "round_one_arg", sql: `SELECT ROUND(1.5) AS v`, want: 2.0, pg: `2`},
-		{name: "round_two_args", sql: `SELECT ROUND(1.55,1) AS v`, want: 1.6, pg: `1.6`},
+		// A bare fractional literal argument boxes as a decimal string, not a
+		// float64: since #1252's round 5 (`9b096b9e`) the literal declares
+		// DECIMAL wherever it sits, and round 7's B1 fix moved
+		// scalarFnDeclaredDecimal's own declaration with it (review r5 B1).
+		{name: "round_one_arg", sql: `SELECT ROUND(1.5) AS v`, want: "2", pg: `2`},
+		{name: "round_two_args", sql: `SELECT ROUND(1.55,1) AS v`, want: "1.6", pg: `1.6`},
 		{name: "concat_one_arg", sql: `SELECT CONCAT('a') AS v`, want: "a", pg: `a`},
 		{name: "concat_five_args", sql: `SELECT CONCAT('a','b','c','d','e') AS v`, want: "abcde", pg: `abcde`},
 		{name: "greatest_one_arg", sql: `SELECT GREATEST(1) AS v`, want: int32(1), pg: `1`},
