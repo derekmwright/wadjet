@@ -195,18 +195,14 @@ func TestC1ATableLessLateralIsAProjectionOverTheOuterRow(t *testing.T) {
 			// PostgreSQL 17.11: numeric, 6. The VALUE is the whole of what
 			// #1033 lost — it was NULL on every arm — and it is right here.
 			//
-			// THE DECLARATION IS PINNED, and it is NOT this lowering's: the
-			// identical shape over a plain derived table,
-			// `SELECT SUM(s.v) FROM (SELECT u.id AS v FROM lat_ord u) s`,
-			// declares float8 at this arc's base with no LATERAL anywhere in
-			// it. An accumulating aggregate reads its input's declared width
-			// through `aggInputColumnType`, which stops at a JOIN because
-			// `emittedColTypes` has no arm for one — the "a declaration has to
-			// RIDE through every materialization" gap ADR-0024 and #1018 name.
-			// The control below is the twin that proves it, and it FAILS if
-			// this ever starts agreeing.
-			want:   "cols=[s:FLOAT64] rows=1 | 6",
-			why:    "SUM over a materialized block declares float8 where PostgreSQL declares numeric — pre-existing, reproduces with no LATERAL (see the derived-table control)",
+			// The DECLARATION was pinned at float8 here until arc CW round 4:
+			// `aggInputColumnType` asked for the QUALIFIED input `l.v` as the
+			// one-part name "l.v", which no scope carries, and fell to the
+			// float rule. It now asks the qualified reference too
+			// (aggInputRefs), and the cell agrees with PostgreSQL on every
+			// arm — the pin deleted as the proof, with the derived-table
+			// control below.
+			want:   "cols=[s:DECIMAL(38,0)] rows=1 | 6",
 			routed: c1TableLess,
 		},
 		{
@@ -220,8 +216,7 @@ func TestC1ATableLessLateralIsAProjectionOverTheOuterRow(t *testing.T) {
 		{
 			name:   "1033 the grouped twin",
 			sql:    "SELECT SUM(l.v) AS s FROM lat_ord u, LATERAL (SELECT u.id * 2 AS v) l",
-			want:   "cols=[s:FLOAT64] rows=1 | 12",
-			why:    "the same pinned SUM declaration",
+			want:   "cols=[s:DECIMAL(38,0)] rows=1 | 12",
 			routed: c1TableLess,
 		},
 		{
@@ -231,8 +226,7 @@ func TestC1ATableLessLateralIsAProjectionOverTheOuterRow(t *testing.T) {
 			// nothing asked the outer relation to read what the body names.
 			name:   "1033 the grouped twin under GROUP BY",
 			sql:    "SELECT u.customer AS c, SUM(l.v) AS s FROM lat_ord u, LATERAL (SELECT u.id * 2 AS v) l GROUP BY u.customer ORDER BY 1",
-			want:   "cols=[c:STRING s:FLOAT64] rows=3 | Alice,2 | Bob,4 | Carol,6",
-			why:    "the same pinned SUM declaration",
+			want:   "cols=[c:STRING s:DECIMAL(38,0)] rows=3 | Alice,2 | Bob,4 | Carol,6",
 			routed: c1TableLess,
 		},
 		{
@@ -641,8 +635,9 @@ func TestC1ATableLessLateralIsAProjectionOverTheOuterRow(t *testing.T) {
 			name: "an item inside a scalar subquery's block is pinned",
 			sql: "SELECT u.id, (SELECT MAX(l.v) FROM lat_ord z, " +
 				"LATERAL (SELECT z.id AS v) l) AS m FROM lat_ord u ORDER BY 1",
-			want: "cols=[id:INT64 m:STRING] rows=3 | 1,3 | 2,3 | 3,3",
-			why:  "PostgreSQL declares bigint; the values are right on both",
+			// Pinned at STRING until arc CW round 4 (the qualified aggregate
+			// input `l.v`, aggInputRefs); PostgreSQL's bigint now.
+			want: "cols=[id:INT64 m:INT64] rows=3 | 1,3 | 2,3 | 3,3",
 			routed: map[string]string{
 				"dag": "UnbuildableStage +1", "dag-shuffled": "UnbuildableStage +1",
 				"dag-morsel4": "UnbuildableStage +1",
@@ -660,24 +655,17 @@ func TestC1ATableLessLateralIsAProjectionOverTheOuterRow(t *testing.T) {
 			routed: c1TableLess,
 		},
 		{
-			// CONTROL + PIN: the SUM declaration divergence with no LATERAL in
-			// the query. It is the proof that the pinned cells above are not
-			// this lowering's, and it FAILS when it starts agreeing — at which
-			// point those pins come out in the same commit.
+			// CONTROL: the SUM declaration with no LATERAL in the query. It
+			// was the proof that the SUM pins above were not this lowering's;
+			// it started agreeing with PostgreSQL in arc CW round 4 and those
+			// pins came out in the same commit.
 			name: "control: SUM over a plain derived block declares the same thing",
 			sql:  "SELECT SUM(s.v) AS s FROM (SELECT u.id AS v FROM lat_ord u) s",
-			want: "cols=[s:FLOAT64] rows=1 | 6",
-			// AND THE TWO ENGINES DISAGREE ABOUT IT. The DAG declares
-			// DECIMAL(38,0) — PostgreSQL's numeric — for the same query the
-			// single path declares float8 for. Both are recorded: a pin that
-			// carried one expectation for both could not state what the
-			// divergence IS (#993).
-			pin: map[string]string{
-				"dag":          "cols=[s:DECIMAL(38,0)] rows=1 | 6",
-				"dag-shuffled": "cols=[s:DECIMAL(38,0)] rows=1 | 6",
-				"dag-morsel4":  "cols=[s:DECIMAL(38,0)] rows=1 | 6",
-			},
-			why:    "PostgreSQL 17.11 declares numeric; the single path declares float8 and the DAG declares numeric — the pre-existing gap the two SUM cells above inherit",
+			// PostgreSQL 17.11 declares numeric. The single path declared
+			// float8 and the DAG numeric (#993) until arc CW round 4 resolved
+			// the qualified aggregate input `s.v` (aggInputRefs); both arms
+			// now declare PostgreSQL's type — the pin deleted as the proof.
+			want:   "cols=[s:DECIMAL(38,0)] rows=1 | 6",
 			routed: map[string]string{},
 		},
 	})
