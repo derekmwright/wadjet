@@ -27,6 +27,25 @@ func toString(v any) string {
 	}
 }
 
+// toTextOperand is toString with a DOUBLE/REAL rendered through the one
+// float-text renderer (#1252, review r5 P1) instead of fmt.Sprint's shortest
+// %v: `2500000.5 || ''` and `CONCAT(2500000.5, 'x')` stored "2.5000005e+06x"
+// where PostgreSQL's float8out answers "2500000.5x". It is toString's
+// narrower twin for the sites that build a TEXT VALUE from an operand — `||`
+// and CONCAT() — and not toString's other 30-odd callers (hashing, URL/JSON
+// encoding, regex), which read a value's Go %v for their own purposes and
+// are outside this fix's measured scope.
+func toTextOperand(v any) string {
+	switch tv := v.(type) {
+	case float64:
+		return batch.FormatFloat8Text(tv, 64)
+	case float32:
+		return batch.FormatFloat8Text(float64(tv), 32)
+	default:
+		return toString(v)
+	}
+}
+
 // ToFloat64 converts any numeric value to float64.
 func ToFloat64(v any) float64 {
 	switch tv := v.(type) {

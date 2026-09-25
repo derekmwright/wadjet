@@ -215,6 +215,34 @@ func litDecimal(text string) (batch.DecimalType, batch.Int128, bool) {
 	return t, d.Unscaled, true
 }
 
+// decimalLitText renders a bare CONSTANT numeric expression (a literal, or
+// unary ± over one) at its OWN scale — "2.50" stays "2.50", never the
+// float64 arithmetic box's "2.5" — for a site that needs the exact text a
+// decimal literal was written with rather than its arithmetic value:
+// castStringRender's non-column arm and FuncCall.formatDecimalLitArgs both
+// call this rather than reimplementing it (review r5 B1's "second spelling",
+// #1252). ok is false for anything that is not a constant, or not decimal
+// (an integer literal, one too wide for the DECIMAL carrier) — the caller
+// falls back to its own rendering.
+func decimalLitText(e Expr, b *batch.RecordBatch, row int) (string, bool) {
+	if !isConstNumericLit(e) {
+		return "", false
+	}
+	do, ok := e.(decimalOperand)
+	if !ok {
+		return "", false
+	}
+	dt, ok := do.decimalType(b)
+	if !ok {
+		return "", false
+	}
+	v, ok := do.evalDecimal(b, row)
+	if !ok {
+		return "", false
+	}
+	return v.FormatDecimal(dt.Scale), true
+}
+
 func (e *Lit) decimalType(_ *batch.RecordBatch) (batch.DecimalType, bool) {
 	t, _, ok := e.decimalValue()
 	return t, ok

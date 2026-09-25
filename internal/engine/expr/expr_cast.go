@@ -293,6 +293,17 @@ func castStringRender(b *batch.RecordBatch, row int, operand Expr, v any) string
 	if s, ok := stringOperand(text); ok {
 		return s
 	}
+	// A DOUBLE/REAL renders through the one float-text renderer (#1252,
+	// review r5 P1) rather than fmt.Sprint's shortest %v, which switches to
+	// exponent form once the exponent reaches the digit count:
+	// `CAST(1234567.0 AS TEXT)` stored "1.234567e+06" where PostgreSQL's
+	// float8out answers "1234567".
+	switch fv := text.(type) {
+	case float64:
+		return batch.FormatFloat8Text(fv, 64)
+	case float32:
+		return batch.FormatFloat8Text(float64(fv), 32)
+	}
 	return fmt.Sprint(text)
 }
 
@@ -316,6 +327,14 @@ func boxedTextOperand(b *batch.RecordBatch, row int, operand Expr, v any) any {
 		// Every non-column temporal producer — the cast above, a clock
 		// function, date arithmetic — boxes a unit producedTemporal names.
 		if s, ok := renderTemporalBox(operand, b, v); ok {
+			return s
+		}
+		// A bare DECIMAL LITERAL has the identical gap: Lit.Eval's float64
+		// box loses the literal's own scale, so `CAST(2.50 AS TEXT)` read
+		// "2.5" where PostgreSQL's numeric spelling is "2.50" — only
+		// decimalType/evalDecimal carry the scale the literal was written
+		// with (review r5 B1's "second spelling", #1252).
+		if s, ok := decimalLitText(operand, b, row); ok {
 			return s
 		}
 		return v

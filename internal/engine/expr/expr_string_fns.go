@@ -51,7 +51,7 @@ func fnConcat(args []any) any {
 		if a == nil {
 			continue
 		}
-		sb.WriteString(toString(a))
+		sb.WriteString(toTextOperand(a))
 	}
 	return sb.String()
 }
@@ -83,7 +83,7 @@ func fnConcatOp(args []any) any {
 				out = append(out, raw...)
 				continue
 			}
-			out = append(out, toString(a)...)
+			out = append(out, toTextOperand(a)...)
 		}
 		return out
 	}
@@ -92,7 +92,7 @@ func fnConcatOp(args []any) any {
 		if a == nil {
 			return nil
 		}
-		sb.WriteString(toString(a))
+		sb.WriteString(toTextOperand(a))
 	}
 	return sb.String()
 }

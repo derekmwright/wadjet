@@ -161,6 +161,23 @@ func (e *FuncCall) formatNetworkArgs(b *batch.RecordBatch, row int, args []any) 
 	}
 }
 
+// formatDecimalLitArgs renders a bare DECIMAL LITERAL argument at its own
+// scale before a text-input function reads it, the same rewrite
+// formatTemporalArgs and formatNetworkArgs already make for a boxed DATE or
+// network column: `2.50 || 'x'` and `CONCAT(2.50, 'x')` read Lit.Val, the
+// literal's float64 box for arithmetic, and answered "2.5x" where
+// PostgreSQL's numeric spelling is "2.50x" (review r5 B1's "second
+// spelling", #1252). decimalLitText is the shared renderer; a DECIMAL
+// COLUMN or a computed decimal expression already boxes as its rendered
+// text from Eval() and needs no rewrite.
+func (e *FuncCall) formatDecimalLitArgs(b *batch.RecordBatch, row int, args []any) {
+	for i, a := range e.Args {
+		if s, ok := decimalLitText(a, b, row); ok {
+			args[i] = s
+		}
+	}
+}
+
 // civilDate is a DATE column's value resolved to the instant it denotes (UTC
 // midnight of that day), carrying the one fact the instant alone cannot: its
 // column has no time-of-day to preserve. Only resolveTemporalArgs mints one,
@@ -356,6 +373,9 @@ func (e *FuncCall) Eval(b *batch.RecordBatch, row int) any {
 		// turns it back into address text, so it runs for both families
 		// rather than being duplicated.
 		e.formatNetworkArgs(b, row, args)
+		// A bare DECIMAL LITERAL has the same gap again: Lit.Eval's float64
+		// box loses the literal's own scale (review r5 B1, #1252).
+		e.formatDecimalLitArgs(b, row, args)
 	}
 	if e.wantsNetworkText {
 		e.formatNetworkArgs(b, row, args)
