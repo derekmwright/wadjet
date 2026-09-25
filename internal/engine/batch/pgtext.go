@@ -46,12 +46,20 @@ func FormatPGText(val any, col *parquet.Column) string {
 		}
 	}
 	// A DATE is boxed as its text by a vector, but an element an expression
-	// built before it reached one (a constructor's DATE literal) is still the
-	// day count; under its declaration it is a date either way (#1268's
-	// sibling for DATE).
+	// built before it reached one is still the day count — an int32 from a
+	// constructor's DATE literal, an int64 from a column reference (ColRef
+	// widens every integer storage) — and under its declaration it is a date
+	// either way (#1268's sibling for DATE). The DECLARATION picks the arm and
+	// the box may be either storage width; before arc CW round 3 only the int32
+	// was taken and `CAST(ARRAY[d] AS TEXT)` printed `{19724}`.
 	if col != nil && col.Type == parquet.TypeDate {
-		if days, ok := val.(int32); ok {
+		switch days := val.(type) {
+		case int32:
 			return FormatDate(days)
+		case int64:
+			if days >= math.MinInt32 && days <= math.MaxInt32 {
+				return FormatDate(int32(days))
+			}
 		}
 	}
 	switch tv := val.(type) {
@@ -401,6 +409,26 @@ func FormatPGFloat(v float64, bits int) string {
 		return strconv.FormatFloat(v, 'f', -1, bits)
 	}
 	return strconv.FormatFloat(v, 'e', -1, bits)
+}
+
+// DeclaredValue is val as a vector of col's declared type holds and reads it
+// back: every leaf in the box its type's vector gives (a DATE, an address, a
+// UUID, a DECIMAL as its text; a TIMESTAMP as its epoch milliseconds, which
+// FormatPGText renders under the declaration). It is how a site holding an
+// EXPRESSION's box — not a vector's — renders it under the declaration the
+// planner gave the expression (arc CW round 3): the box of an element an
+// expression built is whatever its kernel produced (an int64 day count, an
+// int64 address), and the vector's own writer is the one place that accepts
+// every storage width a type has. A box the declared type cannot hold fails
+// the write loudly (TypeMismatchError), exactly as the same value projected.
+func DeclaredValue(val any, col *parquet.Column) any {
+	if val == nil || col == nil {
+		return val
+	}
+	v := NewColumnVector(*col, 1)
+	v.SetValue(0, val)
+	v.Len = 1
+	return v.GetValue(0)
 }
 
 // VectorDecl reconstructs a declaration from a VECTOR, for a caller whose

@@ -446,6 +446,15 @@ func armExtremumArms(argExprs []Expr) *extremumArms {
 	return a
 }
 
+// bindDecls attaches each argument's declaration source (operand_decl.go).
+func (a *extremumArms) bindDecls(decls []*operandDecl) {
+	for i := range a.ops {
+		if i < len(decls) {
+			a.ops[i].decl = decls[i]
+		}
+	}
+}
+
 // order compares the values at argument indices li and ri under the rule
 // their DECLARATIONS select, reports ok=false when none applies, and reports
 // unknown when the rule that applies says the two have no comparable relation
@@ -458,6 +467,13 @@ func armExtremumArms(argExprs []Expr) *extremumArms {
 func (a *extremumArms) order(b *batch.RecordBatch, li, ri int, lv, rv any) (c int, ok, unknown bool) {
 	if a == nil || li < 0 || li >= len(a.ops) || ri < 0 || ri >= len(a.ops) {
 		return 0, false, false
+	}
+	// Two containers order element-wise under their declarations, the sort's
+	// kernel (cmp_container.go): GREATEST(ARRAY[2], ARRAY[10]) is {10}.
+	if isContainerBox(lv) && isContainerBox(rv) {
+		if c, ok := containerOrder(a.ops[li].shape(b), a.ops[ri].shape(b), lv, rv); ok {
+			return c, true, false
+		}
 	}
 	lk := a.ops[li].resolve(b)
 	rk := a.ops[ri].resolve(b)

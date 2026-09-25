@@ -10,6 +10,7 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // Boxed comparison order follows the COLUMN DECLARATION, never numeric
@@ -848,6 +849,10 @@ func joinOperandKinds(args []Expr, b *batch.RecordBatch) (boxKind, bool) {
 // the answer is a pure function of the operand's fixed declaration.
 type boxOperand struct {
 	expr Expr
+	// decl is the operand's declared-shape source (operand_decl.go), bound by
+	// the compiler from the operand's AST; nil for a node built by struct
+	// literal. Only a CONTAINER pair reads it (containerOrder).
+	decl *operandDecl
 	// kind holds int32(k)+1 once settled; 0 means "not settled yet".
 	kind atomic.Int32
 	// fold holds the operand's TYPE answer the same way, which differs from
@@ -859,6 +864,11 @@ type boxOperand struct {
 	// says "double precision", and would have REFUSED `= '0x1p3'`, which the
 	// float input function reads as 8 and the numeric one does not.
 	fold atomic.Int32
+}
+
+// shape is the operand's declared shape against b (operand_decl.go).
+func (o *boxOperand) shape(b *batch.RecordBatch) *parquet.Column {
+	return o.decl.shape(b, 0, o.expr)
 }
 
 func (o *boxOperand) resolve(b *batch.RecordBatch) boxKind {
@@ -909,6 +919,13 @@ func newBoxedPair(left, right Expr) *boxedPair {
 		right: boxOperand{expr: right},
 		lText: operandLitText(left), rText: operandLitText(right),
 	}
+}
+
+// newDeclaredPair is newBoxedPair with the two operands' declaration sources.
+func newDeclaredPair(left, right Expr, ld, rd *operandDecl) *boxedPair {
+	p := newBoxedPair(left, right)
+	p.left.decl, p.right.decl = ld, rd
+	return p
 }
 
 // netIntKindType is the TypeID a boxPort/boxProtocol kind names, so the
@@ -1333,7 +1350,19 @@ func ipv4Order(lv, rv any) (c int, ok, unknown bool) {
 // NUMBER/quoted literal resolves the unknown literal from the NUMBER's type.
 // See docs/internals/boxed-pair-order-table.md for the design.
 func (p *boxedPair) order(b *batch.RecordBatch, lv, rv any) (c int, ok, unknown bool) {
-	if p == nil || p.disarmed.Load() {
+	if p == nil {
+		return 0, false, false
+	}
+	// Two containers order element-wise under their declarations, through
+	// the sort's kernel (cmp_container.go). Before the disarm check, and a
+	// container pair never reaches the line that disarms, so a list or a
+	// bound over containers is never sent down compare()'s fast path.
+	if isContainerBox(lv) && isContainerBox(rv) {
+		if c, ok := containerOrder(p.left.shape(b), p.right.shape(b), lv, rv); ok {
+			return c, true, false
+		}
+	}
+	if p.disarmed.Load() {
 		return 0, false, false
 	}
 	lk := p.left.resolve(b)

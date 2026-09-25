@@ -92,14 +92,9 @@ func (e *Cmp) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool) {
 	if lv == nil || rv == nil {
 		return false, true // a comparison against NULL is UNKNOWN (#370)
 	}
-	// Two containers order element-wise through the sort's own kernel
-	// (cmp_container.go, arc CW round 2) — never through the text of the
-	// boxes.
-	if isContainerBox(lv) && isContainerBox(rv) {
-		if c, ok := containerCmpOrder(b, row, e.Left, e.Right, lv, rv); ok {
-			return cmpOrder(c, e.Op), false
-		}
-	}
+	// Two containers order element-wise through the sort's own kernel, under
+	// both operands' declarations — boxedPair.order's container arm
+	// (cmp_container.go).
 	// compareNull, not compare: a network comparison has a third answer for a
 	// stored value that names no address, and it is the one a NULL row gets
 	// (ADR-0012 item 10, #565). Every other pair answers null=false here, so
@@ -426,6 +421,9 @@ type IsDistinctFrom struct {
 	// built by direct struct literal, and a refusal that only existed on the
 	// compiler's path would be a refusal the compiler's tests alone see.
 	arms atomic.Pointer[isDistinctArms]
+	// lDecl / rDecl are the operands' declaration sources (operand_decl.go),
+	// bound by the compiler.
+	lDecl, rDecl *operandDecl
 }
 
 // isDistinctArms is IsDistinctFrom's per-node binding, published as one
@@ -439,7 +437,7 @@ func (e *IsDistinctFrom) armed() *isDistinctArms {
 	if a := e.arms.Load(); a != nil {
 		return a
 	}
-	a := &isDistinctArms{refuse: armRefusal(e.Left, e.Right), pair: newBoxedPair(e.Left, e.Right)}
+	a := &isDistinctArms{refuse: armRefusal(e.Left, e.Right), pair: newDeclaredPair(e.Left, e.Right, e.lDecl, e.rDecl)}
 	e.arms.Store(a)
 	return a
 }

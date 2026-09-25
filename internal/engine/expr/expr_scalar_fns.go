@@ -96,6 +96,10 @@ type FuncCall struct {
 	// missed, and was invisible until a projected NULLIF over a DECIMAL could
 	// run at all (ADR-0024 item 2).
 	nullifArms *extremumArms
+	// argDecls are the arguments' declaration sources (operand_decl.go),
+	// bound by the compiler; the extremum and NULLIF arms read them for a
+	// container pair.
+	argDecls []*operandDecl
 	// choiceArms is the argument list this call CHOOSES its value from, read
 	// off the registry's polymorphic declaration (Ret.SameAsArgs) so it
 	// cannot drift from the type fold: GREATEST/LEAST/COALESCE/IFNULL mirror
@@ -349,13 +353,16 @@ func (e *FuncCall) resolveFnSlow() {
 	case "greatest":
 		e.extremum, e.extremumOp = true, CmpGt
 		e.extremumArms = armExtremumArms(e.Args)
+		e.extremumArms.bindDecls(e.argDecls)
 	case "least":
 		e.extremum, e.extremumOp = true, CmpLt
 		e.extremumArms = armExtremumArms(e.Args)
+		e.extremumArms.bindDecls(e.argDecls)
 	case "nullif":
 		if len(e.Args) >= 2 {
 			e.nullifArms = armExtremumArms(e.Args)
 			e.nullifArms.nullif = true
+			e.nullifArms.bindDecls(e.argDecls)
 		}
 		// The box follows the DECLARATION's rule, which for NULLIF is the
 		// operator its two arguments select rather than a fold over them

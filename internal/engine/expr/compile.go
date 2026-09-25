@@ -414,11 +414,14 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 		if err != nil {
 			return nil, err
 		}
+		// Each comparator carries its operands' declaration sources, for the
+		// container arm of the one comparator (cmp_container.go).
+		ld, rd := newOperandDecl(n.Left, ctx), newOperandDecl(n.Right, ctx)
 		switch n.Op {
 		case "is distinct from":
-			return &IsDistinctFrom{Left: left, Right: right}, nil
+			return &IsDistinctFrom{Left: left, Right: right, lDecl: ld, rDecl: rd}, nil
 		case "is not distinct from":
-			return &IsDistinctFrom{Left: left, Right: right, Not: true}, nil
+			return &IsDistinctFrom{Left: left, Right: right, Not: true, lDecl: ld, rDecl: rd}, nil
 		}
 		var op CmpOp
 		switch n.Op {
@@ -437,7 +440,11 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 		default:
 			op = CmpEq
 		}
-		return compileCmp(left, right, op), nil
+		cmp := compileCmp(left, right, op)
+		if c, ok := cmp.(*Cmp); ok {
+			c.pair.left.decl, c.pair.right.decl = ld, rd
+		}
+		return cmp, nil
 
 	case *plansql.InExpr:
 		// `(a, b) IN ((1, 2), (3, 4))` is a disjunction of row equalities,
@@ -538,7 +545,12 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 			}
 			values = append(values, compiled)
 		}
-		return NewIn(left, values, n.Not), nil
+		in := NewIn(left, values, n.Not)
+		ld := newOperandDecl(n.Left, ctx)
+		for i, p := range in.pairs {
+			p.left.decl, p.right.decl = ld, newOperandDecl(n.Values[i], ctx)
+		}
+		return in, nil
 
 	case *plansql.BetweenExpr:
 		e, err := compileWithCtx(n.Left, ctx)
@@ -553,7 +565,11 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 		if err != nil {
 			return nil, err
 		}
-		return NewBetween(e, low, hi, n.Not), nil
+		bt := NewBetween(e, low, hi, n.Not)
+		ld := newOperandDecl(n.Left, ctx)
+		bt.loPair.left.decl, bt.loPair.right.decl = ld, newOperandDecl(n.Low, ctx)
+		bt.hiPair.left.decl, bt.hiPair.right.decl = ld, newOperandDecl(n.High, ctx)
+		return bt, nil
 
 	case *plansql.LikeExpr:
 		left, err := compileWithCtx(n.Left, ctx)
@@ -646,7 +662,8 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 		if err != nil {
 			return nil, err
 		}
-		return &Cast{Operand: operand, DestType: strings.ToLower(n.TypeName)}, nil
+		return &Cast{Operand: operand, DestType: strings.ToLower(n.TypeName),
+			opDecl: newOperandDecl(n.Inner, ctx)}, nil
 
 	case *plansql.SubqueryNode:
 		// Scalar subquery: (SELECT ...)
@@ -1345,6 +1362,13 @@ func compileFuncCallNamed(n *plansql.FuncCallNode, ctx *compileContext, checked 
 	}
 
 	fc := &FuncCall{Name: name, Args: args}
+	if len(args) == len(n.Args) {
+		// GREATEST / LEAST / NULLIF order their arguments through the one
+		// container comparator under each argument's declaration.
+		for _, a := range n.Args {
+			fc.argDecls = append(fc.argDecls, newOperandDecl(a, ctx))
+		}
+	}
 	// ROUND on a DOUBLE PRECISION (or REAL/FLOAT — Wadjet's Cast collapses
 	// all three to the same runtime float64) operand rounds half TO EVEN in
 	// PostgreSQL; ROUND on NUMERIC — the default, no CAST at all — rounds
@@ -1434,6 +1458,7 @@ func compileCaseNode(n *plansql.CaseNode, ctx *compileContext) (Expr, error) {
 		if err != nil {
 			return nil, err
 		}
+		c.operandDecl = newOperandDecl(n.Subject, ctx)
 	}
 
 	for _, when := range n.Whens {
@@ -1446,6 +1471,7 @@ func compileCaseNode(n *plansql.CaseNode, ctx *compileContext) (Expr, error) {
 			return nil, err
 		}
 		c.Whens = append(c.Whens, CaseWhen{Cond: cond, Result: result})
+		c.whenDecls = append(c.whenDecls, newOperandDecl(when.Cond, ctx))
 	}
 
 	if n.Else != nil {

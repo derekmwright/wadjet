@@ -76,6 +76,15 @@ func appendPGJSON(b *strings.Builder, val any, col *parquet.Column) {
 			return
 		}
 	}
+	// A DATE's day count is a date under its declaration, whichever storage
+	// width boxes it (FormatPGText's DATE arm): to_json writes it as a string.
+	if col != nil && col.Type == parquet.TypeDate {
+		switch val.(type) {
+		case int32, int64:
+			writeJSONString(b, FormatPGText(val, col))
+			return
+		}
+	}
 	switch tv := val.(type) {
 	case int64, int32, int:
 		b.WriteString(FormatPGText(tv, col))

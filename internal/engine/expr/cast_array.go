@@ -30,7 +30,15 @@ func ArrayCastElement(typeName string) (string, bool) {
 // castToArray converts v to an array whose every element is cast to elem: an
 // array operand element by element, a text operand through PostgreSQL's
 // one-dimensional array input syntax (`{1,2,"a b",NULL}`).
-func castToArray(v any, elem string) any {
+//
+// from is the operand's declaration (nil when nothing declares it). With it,
+// each element is cast exactly as a COLUMN of the element's declared type is:
+// the elements are written into one vector of that type and the scalar cast
+// reads them there, so a TIMESTAMP element converts as a timestamp (its text,
+// its date) and a DECIMAL one as a number — not as the epoch milliseconds or
+// the text its box holds (arc CW round 3: `CAST(ARRAY[ts] AS TEXT[])` was
+// `{1704070800000}`).
+func castToArray(v any, elem string, from *parquet.Column) any {
 	var elems []any
 	switch tv := v.(type) {
 	case []any:
@@ -40,6 +48,16 @@ func castToArray(v any, elem string) any {
 	default:
 		panic(fatalEval{sqlerr.New("42846", "cannot cast a %T value to %s[]", v, elem)})
 	}
+	// An element with no text form here (an INTERVAL's struct) is refused
+	// before any element is cast: its per-element cast to text would be Go's
+	// rendering of the struct (arc CW round 3).
+	if textCastDest(strings.ToLower(strings.TrimSpace(elem))) {
+		refuseUnrenderable(elems)
+	}
+	if _, isArr := v.([]any); isArr && from != nil && from.Type == parquet.TypeArray &&
+		from.ElementType != nil && ambiguousBoxDecl(from.ElementType) {
+		return castElementsAsColumn(elems, elem, *from.ElementType)
+	}
 	out := make([]any, len(elems))
 	for i, e := range elems {
 		if e == nil {
@@ -48,6 +66,44 @@ func castToArray(v any, elem string) any {
 		out[i] = (&Cast{Operand: &Lit{Val: e}, DestType: elem}).Eval(nil, 0)
 	}
 	return out
+}
+
+// castElementsAsColumn casts each element as a column of the declared element
+// type: one vector holds them all, and the same scalar Cast a column operand
+// takes reads each row.
+func castElementsAsColumn(elems []any, elem string, decl parquet.Column) []any {
+	decl.Name, decl.Nullable = "element", true
+	eb := batch.NewRecordBatch([]parquet.Column{decl}, len(elems))
+	for i, e := range elems {
+		eb.Columns[0].SetValue(i, e)
+	}
+	c := &Cast{Operand: &ColRef{Name: "element"}, DestType: elem}
+	out := make([]any, len(elems))
+	for i, e := range elems {
+		if e == nil {
+			continue
+		}
+		out[i] = c.Eval(eb, i)
+	}
+	return out
+}
+
+// ambiguousBoxDecl reports whether c declares a scalar whose BOX does not say what
+// it is — the types a vector boxes as something other than their value (an
+// epoch-milliseconds int64, a day count, an address's integer, a DECIMAL's
+// text, a REAL widened to a double) — which is where casting the box would
+// cast the wrong thing. Every other element's box IS its value and keeps the
+// per-box cast, literal spelling and all (`ARRAY[1.5, 2.5]::int[]` rounds its
+// literals as numerics, `{2,3}`).
+func ambiguousBoxDecl(c *parquet.Column) bool {
+	switch c.Type {
+	case parquet.TypeTimestamp, parquet.TypeDate, parquet.TypeIPv4, parquet.TypeIPv6,
+		parquet.TypeMAC, parquet.TypeUUID, parquet.TypeCIDR, parquet.TypeFloat32:
+		return true
+	case parquet.TypeDecimal:
+		return c.Precision > 0
+	}
+	return false
 }
 
 // parsePGArrayText reads PostgreSQL's array text form for ONE dimension:
@@ -126,57 +182,4 @@ func parsePGArrayText(s string) []any {
 	}
 	flush()
 	return out
-}
-
-// containerOperandDecl is the declaration a container operand's value is
-// rendered under, as far as the operand itself can say it: a column's (or
-// field's) own vector, an array cast's element, a constructor's temporal
-// elements. The renderer needs it for one reason — a TIMESTAMP element is
-// boxed as its epoch milliseconds and a DATE element built by an expression
-// as its day count — and degrades to the value's own rendering (correct for
-// every other element type) when nothing can say.
-func containerOperandDecl(b *batch.RecordBatch, row int, operand Expr) *parquet.Column {
-	switch x := operand.(type) {
-	case *ColRef:
-		if b == nil {
-			return nil
-		}
-		x.resolve(b)
-		if v, _, ok := x.valueVector(b, row); ok && v != nil {
-			c := batch.VectorDecl("", v)
-			return &c
-		}
-	case *Cast:
-		if elem, ok := ArrayCastElement(x.DestType); ok {
-			if t, ok := castElementTemporal(elem); ok {
-				el := parquet.Column{Name: "element", Type: t, Nullable: true}
-				return &parquet.Column{Type: parquet.TypeArray, ElementType: &el}
-			}
-		}
-	case *ArrayLitExpr:
-		for _, e := range x.Elements {
-			if c, ok := e.(*Cast); ok {
-				if t, ok := castElementTemporal(c.DestType); ok {
-					el := parquet.Column{Name: "element", Type: t, Nullable: true}
-					return &parquet.Column{Type: parquet.TypeArray, ElementType: &el}
-				}
-			}
-			if inner := containerOperandDecl(b, row, e); inner != nil {
-				return &parquet.Column{Type: parquet.TypeArray, ElementType: inner}
-			}
-		}
-	}
-	return nil
-}
-
-// castElementTemporal names the temporal type a cast destination produces,
-// the two whose boxed element is a number the renderer must not print raw.
-func castElementTemporal(dest string) (parquet.TypeID, bool) {
-	switch castTemporalKind(dest) {
-	case castToDateKind:
-		return parquet.TypeDate, true
-	case castToTimestampKind:
-		return parquet.TypeTimestamp, true
-	}
-	return 0, false
 }

@@ -371,8 +371,13 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 				// fractional literal — keeps the vectorized float node it has
 				// always compiled to instead of deferring the question to the
 				// first batch (#555 review).
+				// …and the subquery declarations the scoped branches above
+				// already pass: a scalar subquery inside a container (ARRAY[
+				// (SELECT MAX(ts) …)]) is declared by its own plan, which is
+				// what a CAST of that container renders its element under (arc
+				// CW round 3, expr/operand_decl.go).
 				compiled, compErr = expr.CompileWithColumnTypes(
-					astExpr, p.subqueryRunner, childColTypes.Types, p.subqueryBudgetOption(), p.catalogOption())
+					astExpr, p.subqueryRunner, childColTypes.Types, p.subqueryDeclOption(), p.subqueryBudgetOption(), p.catalogOption())
 			}
 			// A name nothing implements has no input column to fall back to,
 			// so the direct-copy path below would only re-report it as a

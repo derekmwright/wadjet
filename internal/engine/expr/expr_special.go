@@ -309,6 +309,10 @@ type Case struct {
 	// — see caseArms for why the arming is per-WHEN and not per-CASE. Armed
 	// lazily, like IsDistinctFrom's, and for the same reason.
 	arms atomic.Pointer[caseArms]
+	// operandDecl / whenDecls are the simple CASE's subject and each WHEN's
+	// declaration sources (operand_decl.go), bound by the compiler.
+	operandDecl *operandDecl
+	whenDecls   []*operandDecl
 
 	// dch is the DECIMAL box mode: whether the result branches fold to a
 	// DECIMAL, so a branch that answers an INTEGER hands over the value's
@@ -337,7 +341,11 @@ func (e *Case) armed() *caseArms {
 	}
 	for i, w := range e.Whens {
 		r.refuse[i] = armRefusal(e.Operand, w.Cond)
-		r.pairs[i] = newBoxedPair(e.Operand, w.Cond)
+		var wd *operandDecl
+		if i < len(e.whenDecls) {
+			wd = e.whenDecls[i]
+		}
+		r.pairs[i] = newDeclaredPair(e.Operand, w.Cond, e.operandDecl, wd)
 	}
 	e.arms.Store(r)
 	return r

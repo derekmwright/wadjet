@@ -320,6 +320,14 @@ func toFloat64Safe(v any) (float64, bool) {
 }
 
 func compare(a, b any, op CmpOp) bool {
+	// Two containers never compare as their boxes' text: the one container
+	// comparator orders them (cmp_container.go), with the shape read off the
+	// boxes — this is the last resort, for a caller with no declarations.
+	if isContainerBox(a) && isContainerBox(b) {
+		if r, ok := containerCompare(nil, nil, a, b, op); ok {
+			return r
+		}
+	}
 	// Fast path: both int64 (most common for column comparisons)
 	if ai, ok := a.(int64); ok {
 		if bi, ok := b.(int64); ok {

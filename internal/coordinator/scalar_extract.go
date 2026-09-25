@@ -200,9 +200,30 @@ func formatScalar(vec *batch.Vector, row int, typ parquet.TypeID) string {
 			return "true"
 		}
 		return "false"
-	case parquet.TypeInt32, parquet.TypePort, parquet.TypeProtocol, parquet.TypeDate:
+	case parquet.TypeDate, parquet.TypeTimestamp:
+		// A DATE or TIMESTAMP substitutes as a TYPED literal — a cast of its
+		// text — so the stage that compiles it declares it as the type it is
+		// (arc CW round 3). The bare day count / epoch milliseconds this sent
+		// before boxed identically but declared bigint, and a container built
+		// over it (`CAST(ARRAY[(SELECT MAX(ts) …)] AS TEXT)`) rendered the
+		// number on the DAG where the single-process path, declaring from the
+		// subquery's plan, rendered the instant. A year outside 1..9999 has no
+		// text a cast reads back exactly, and keeps the number.
+		if typ == parquet.TypeDate {
+			days := vec.Int32Data[row]
+			if t := time.Unix(int64(days)*86400, 0).UTC(); t.Year() >= 1 && t.Year() <= 9999 {
+				return "CAST('" + batch.FormatDate(days) + "' AS DATE)"
+			}
+			return strconv.FormatInt(int64(days), 10)
+		}
+		ms := vec.Int64Data[row]
+		if t := time.UnixMilli(ms).UTC(); t.Year() >= 1 && t.Year() <= 9999 {
+			return "CAST('" + batch.FormatTimestamp(ms) + "' AS TIMESTAMP)"
+		}
+		return strconv.FormatInt(ms, 10)
+	case parquet.TypeInt32, parquet.TypePort, parquet.TypeProtocol:
 		return strconv.FormatInt(int64(vec.Int32Data[row]), 10)
-	case parquet.TypeInt64, parquet.TypeTimestamp, parquet.TypeIPv4, parquet.TypeMAC, parquet.TypeDuration:
+	case parquet.TypeInt64, parquet.TypeIPv4, parquet.TypeMAC, parquet.TypeDuration:
 		return strconv.FormatInt(vec.Int64Data[row], 10)
 	case parquet.TypeFloat32:
 		v := float64(vec.Float32Data[row])

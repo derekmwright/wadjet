@@ -32,6 +32,16 @@ type Cast struct {
 	// strDest caches the parsed VARCHAR(n) / CHAR(n) length, for the same
 	// reason again (cast_string_length.go, #838).
 	strDest castStringState
+	// opDecl is the OPERAND's declared shape source (operand_decl.go): a
+	// container operand renders and converts under the declaration the
+	// planner's walk gives it, never under what its box looks like (arc CW
+	// round 3). Nil for a Cast built outside the compiler.
+	opDecl *operandDecl
+}
+
+// operandShape is the operand's declared shape against b (operand_decl.go).
+func (e *Cast) operandShape(b *batch.RecordBatch, row int) *parquet.Column {
+	return e.opDecl.shape(b, row, e.Operand)
 }
 
 func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
@@ -44,7 +54,7 @@ func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
 	// per row of the scan.
 	dest := strings.ToLower(e.DestType)
 	if elem, ok := ArrayCastElement(dest); ok {
-		return castToArray(v, elem)
+		return castToArray(v, elem, e.containerShape(b, row, v))
 	}
 	// A VECTOR destination converts (pgvector's array_to_vector / vector_in)
 	// and a CONTAINER operand is decided by the container table before any
@@ -52,6 +62,15 @@ func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
 	if dim, err, ok := VectorCastDim(dest); ok {
 		if err != nil {
 			panic(fatalEval{err})
+		}
+		// pgvector converts an array of NUMBERS; any other element is its
+		// 42846, decided by the operand's DECLARED element — a DATE element's
+		// box is a day count, which the numeric reader below would take
+		// (arc CW round 3: `CAST(ARRAY[d] AS VECTOR(1))` was `[19724]`).
+		if col := e.containerShape(b, row, v); col != nil && col.Type == parquet.TypeArray &&
+			col.ElementType != nil && !numericLeaf(col.ElementType.Type) {
+			panic(fatalEval{sqlerr.New("42846", "cannot cast type %s to vector",
+				containerTypeName(col, v))})
 		}
 		return castToVector(v, dim)
 	}
@@ -75,7 +94,7 @@ func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
 	// cast reached `default: return v` and returned six characters where
 	// PostgreSQL returns four (#838).
 	if n, ok := e.stringDestination(); ok {
-		return truncateToChars(castStringRender(b, row, e.Operand, v), n)
+		return truncateToChars(e.castStringRender(b, row, v), n)
 	}
 	// FLOAT(n), the third parameterized destination and the third one that
 	// matched no case label: `float(1)` reached `default: return v` and
@@ -232,7 +251,7 @@ func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
 		// LIKE deliberately differs: bytea ~~ is BYTEWISE, so kernel.likeTextRenderer
 		// must continue matching raw bytes, not the hex text rendering.
 		// See docs/internals/bytes-cast-text-versus-like.md for the design.
-		return castStringRender(b, row, e.Operand, v)
+		return e.castStringRender(b, row, v)
 	default:
 		// An accepted destination this engine does not convert to hands the
 		// operand's TEXT back under a text declaration (sql-reference, #652).
@@ -306,14 +325,15 @@ func (e *Cast) castToReal(v any) any {
 // `CAST(ts AS VARCHAR(4))` render the same instant, and the second is the
 // first cut to four characters (#838). See the arm above for what each source
 // family renders as and why.
-func castStringRender(b *batch.RecordBatch, row int, operand Expr, v any) string {
+func (e *Cast) castStringRender(b *batch.RecordBatch, row int, v any) string {
+	operand := e.Operand
 	switch v.(type) {
 	case []any, map[string]any:
 		// A container's text is PostgreSQL's array_out / record_out — the
-		// one renderer every door uses — under the operand's declaration,
+		// one renderer every door uses — under the operand's DECLARATION,
 		// which is what tells a TIMESTAMP element from a bigint one. Before
 		// arc CW this fell to fmt.Sprint and `CAST(a AS TEXT)` was `[1 2 3]`.
-		return batch.FormatPGText(v, containerOperandDecl(b, row, operand))
+		return containerText(v, e.containerShape(b, row, v))
 	case []float32:
 		// A VECTOR's text is pgvector's vector_out, `[1,2,3]`.
 		return batch.FormatPGText(v, nil)

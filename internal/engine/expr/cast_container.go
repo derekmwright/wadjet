@@ -3,6 +3,7 @@
 package expr
 
 import (
+	"fmt"
 	"math"
 	"strconv"
 	"strings"
@@ -74,17 +75,26 @@ func VectorCastDim(typeName string) (int, error, bool) {
 // the destination is a text one and Cast.Eval's text arms render the value.
 func (e *Cast) castContainerDest(b *batch.RecordBatch, row int, v any, dest string) (any, bool) {
 	d := strings.TrimSpace(dest)
-	switch d {
-	case "char", "varchar", "text", "string", "character", "character varying":
+	if textCastDest(d) {
 		return nil, false
-	case "json":
-		return batch.FormatPGJSON(v, containerOperandDecl(b, row, e.Operand)), true
 	}
-	if _, _, ok := parquet.StringTypeLength(d); ok {
-		return nil, false
+	if d == "json" {
+		col := e.containerShape(b, row, v)
+		return batch.FormatPGJSON(declaredBox(v, col), col), true
 	}
 	panic(fatalEval{sqlerr.New("42846", "cannot cast type %s to %s",
-		containerTypeName(containerOperandDecl(b, row, e.Operand), v), d)})
+		containerTypeName(e.containerShape(b, row, v), v), d)})
+}
+
+// textCastDest reports whether d (lower-cased, trimmed) is a destination of
+// the string family: text, varchar, char, and their length-carrying spellings.
+func textCastDest(d string) bool {
+	switch d {
+	case "char", "varchar", "text", "string", "character", "character varying":
+		return true
+	}
+	_, _, ok := parquet.StringTypeLength(d)
+	return ok
 }
 
 // containerTypeName names a container operand as PostgreSQL's cast error
@@ -97,7 +107,13 @@ func containerTypeName(col *parquet.Column, v any) string {
 		return "map"
 	}
 	if col != nil && col.ElementType != nil {
-		return pgCastSourceName(col.ElementType.Type) + "[]"
+		// A nested array is one type in PostgreSQL (`integer[]` whatever its
+		// dimensions): name its leaf.
+		el := col.ElementType
+		for el.Type == parquet.TypeArray && el.ElementType != nil {
+			el = el.ElementType
+		}
+		return pgCastSourceName(el.Type) + "[]"
 	}
 	return "array"
 }
@@ -174,4 +190,126 @@ func vectorComponent(el any) (float32, bool) {
 		return float32(f), true
 	}
 	return 0, false
+}
+
+// containerShape is the operand's declaration when it describes the box in
+// hand — an ARRAY or MAP declaration for a []any, a ROW one for a Go map — and
+// nil otherwise (arc CW round 3, operand_decl.go).
+func (e *Cast) containerShape(b *batch.RecordBatch, row int, v any) *parquet.Column {
+	col := e.operandShape(b, row)
+	if col == nil {
+		return nil
+	}
+	switch v.(type) {
+	case []any:
+		if (col.Type == parquet.TypeArray || col.Type == parquet.TypeMap) && col.ElementType != nil {
+			return col
+		}
+	case map[string]any:
+		if col.Type == parquet.TypeRow && len(col.Fields) > 0 {
+			return col
+		}
+	}
+	return nil
+}
+
+// containerText is PostgreSQL's text of a container under its declaration:
+// the box as the declared type's vector holds it (batch.DeclaredValue — an
+// element's day count, address or epoch milliseconds read back as that
+// type), rendered by the one renderer every door uses.
+func containerText(v any, col *parquet.Column) string {
+	return batch.FormatPGText(declaredBox(v, col), col)
+}
+
+// declaredBox is v read through its declaration, or — with no declaration —
+// v itself once every leaf is a box whose own rendering is its value. A leaf
+// that is not (an INTERVAL's struct: this engine has no interval text form
+// yet) refuses, because its only rendering is Go's `{0 0 0 1 0 0}`, a value
+// no PostgreSQL type prints (ADR-0045 §2: loud, never plausible).
+func declaredBox(v any, col *parquet.Column) any {
+	refuseUnrenderable(v)
+	if col != nil && boxKeysDeclared(v, col) {
+		return batch.DeclaredValue(v, col)
+	}
+	return v
+}
+
+// refuseUnrenderable raises when v holds a leaf with no PostgreSQL text form
+// here — checked BEFORE any declaration is applied, because a declaration
+// that says text would otherwise store the leaf's Go rendering as the text.
+func refuseUnrenderable(v any) {
+	if leaf, ok := unrenderableLeaf(v); ok {
+		panic(fatalEval{sqlerr.New("0A000",
+			"a container element of type %s has no text form here", leafTypeName(leaf))})
+	}
+}
+
+// leafTypeName names an unrenderable leaf for the refusal: the SQL type where
+// the box is one this engine knows.
+func leafTypeName(v any) string {
+	if _, ok := v.(IntervalValue); ok {
+		return "interval"
+	}
+	return fmt.Sprintf("%T", v)
+}
+
+// boxKeysDeclared reports whether a ROW box's every key is a field the
+// declaration names (at any depth the box is a ROW); writing a box through a
+// declaration that does not name its keys would drop their values.
+func boxKeysDeclared(v any, col *parquet.Column) bool {
+	switch tv := v.(type) {
+	case map[string]any:
+		if col.Type != parquet.TypeRow {
+			return false
+		}
+		for k, e := range tv {
+			var f *parquet.Column
+			for i := range col.Fields {
+				if col.Fields[i].Name == k {
+					f = &col.Fields[i]
+					break
+				}
+			}
+			if f == nil || (e != nil && !boxKeysDeclared(e, f)) {
+				return false
+			}
+		}
+	case []any:
+		if col.ElementType == nil {
+			return false
+		}
+		if col.Type == parquet.TypeMap {
+			return true
+		}
+		for _, e := range tv {
+			if e != nil && !boxKeysDeclared(e, col.ElementType) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// unrenderableLeaf finds a leaf whose box is not a value FormatPGText renders
+// as itself.
+func unrenderableLeaf(v any) (any, bool) {
+	switch tv := v.(type) {
+	case nil, string, bool, int, int32, int64, uint32, uint64, float32, float64, []byte, []float32:
+		return nil, false
+	case []any:
+		for _, e := range tv {
+			if l, ok := unrenderableLeaf(e); ok {
+				return l, true
+			}
+		}
+		return nil, false
+	case map[string]any:
+		for _, e := range tv {
+			if l, ok := unrenderableLeaf(e); ok {
+				return l, true
+			}
+		}
+		return nil, false
+	}
+	return v, true
 }
