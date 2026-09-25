@@ -22,6 +22,17 @@ type recordBatch = batch.RecordBatch
 // other compile failures may use the vectorized or raw-expression fallbacks.
 // A refusal must never become an omitted filter (ADR-0021).
 func (p *Planner) buildFilterOp(pred logical.Predicate, outerTables map[string]bool, outerCols map[string]string) (exec.UnaryOperator, error) {
+	// A CONSTANT predicate that arrived as text alone (`WHERE 1=1`, `WHERE
+	// true`, `WHERE 3 > 2` in a LATERAL body over no table) is compiled like
+	// any other: the text path reads it as a column called `1` (loud) or
+	// returns nothing for it (the filter dropped — right only for a true
+	// constant), and the shape net below refuses what it cannot read
+	// (arc JP round 4).
+	if pred.ASTExpr == nil && pred.Raw != "" {
+		if node, err := plansql.ParseExpression(pred.Raw); err == nil && node != nil && constantPredicate(node) {
+			pred.ASTExpr = node
+		}
+	}
 	// Try to compile from AST expression first (full expression engine)
 	var compileErr error
 	if pred.ASTExpr != nil {
@@ -706,19 +717,7 @@ func rawTextPathReads(raw string) bool {
 			if n == nil {
 				return false
 			}
-			refs, err := plansql.ColumnRefs(n)
-			if err != nil || len(refs) > 0 {
-				return false
-			}
-			sub := false
-			plansql.RewriteExpr(n, func(x plansql.Node) (plansql.Node, bool) {
-				switch x.(type) {
-				case *plansql.SubqueryNode, *plansql.ExistsNode:
-					sub = true
-				}
-				return nil, false
-			})
-			if sub {
+			if !constantPredicate(n) {
 				return false
 			}
 		}
@@ -749,4 +748,22 @@ func rawTextPathReads(raw string) bool {
 		return subject(e.Left) && (e.Check == "null")
 	}
 	return false
+}
+
+// constantPredicate reports whether a parsed predicate reads no column and
+// holds no subquery.
+func constantPredicate(node plansql.Node) bool {
+	refs, err := plansql.ColumnRefs(node)
+	if err != nil || len(refs) > 0 {
+		return false
+	}
+	sub := false
+	plansql.RewriteExpr(node, func(x plansql.Node) (plansql.Node, bool) {
+		switch x.(type) {
+		case *plansql.SubqueryNode, *plansql.ExistsNode:
+			sub = true
+		}
+		return nil, false
+	})
+	return !sub
 }

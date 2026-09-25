@@ -220,14 +220,11 @@ func TestC1EATheBodyClassTable(t *testing.T) {
 			// BASE PATH - the body reads nothing, so nothing depends on the outer row
 			name: "body WHERE / no outer reference",
 			sql:  "SELECT l.v FROM lat_ord u, LATERAL (SELECT 7 AS v WHERE 1=1) l ORDER BY 1",
-			// PINNED, and it is the BASE path's own gap: a WHERE made only of
-			// constants over a `Dual` reaches the filter as the column name
-			// "1". Identical at bf99c56c — the body is uncorrelated, so the
-			// decorrelation left the predicate as a local WHERE there too —
-			// and the same for `WHERE 1=0`. Recorded as a filing candidate; the
-			// class table is where it becomes visible, not what introduced it.
-			want:   "ERR filter column \"1\" does not exist in the input schema",
-			why:    "PostgreSQL answers 7,7,7; a constant-only WHERE over a Dual is loud at the base too",
+			// A WHERE made only of constants over a `Dual` reached the filter
+			// as text and was read as the column name "1" (loud, from
+			// bf99c56c); a constant raw predicate is compiled now (arc JP
+			// round 4), and the pin that recorded the gap is deleted.
+			want:   "cols=[v:INT32] rows=3 | 7 | 7 | 7",
 			routed: c1TableLess,
 		},
 		{
@@ -353,8 +350,7 @@ func TestC1EBThePredicateInputTable(t *testing.T) {
 			// where / predicate inputs: constant expression
 			name:   "where_constexpr (constant expression)",
 			sql:    "SELECT l.v FROM lat_ord u, LATERAL (SELECT 7 AS v WHERE 3 > 2) l ORDER BY 1",
-			want:   "ERR filter column \"3\" does not exist in the input schema",
-			why:    "PostgreSQL answers 7,7,7; a constant-only WHERE over a Dual is loud at the base too (filing candidate 8)",
+			want:   "cols=[v:INT32] rows=3 | 7 | 7 | 7",
 			routed: c1TableLess,
 		},
 		{
@@ -368,8 +364,15 @@ func TestC1EBThePredicateInputTable(t *testing.T) {
 			// where / predicate inputs: body-local value
 			name:   "where_bodylocal (body-local value)",
 			sql:    "SELECT l.v FROM lat_ord u, LATERAL (SELECT 7 AS v WHERE 7 = 7) l ORDER BY 1",
-			want:   "ERR filter column \"7\" does not exist in the input schema",
-			why:    "the same pre-existing constant-WHERE gap",
+			want:   "cols=[v:INT32] rows=3 | 7 | 7 | 7",
+			routed: c1TableLess,
+		},
+		{
+			// where / predicate inputs: a FALSE constant — the compiled
+			// constant filters every row (arc JP round 4)
+			name:   "where_constfalse (constant false)",
+			sql:    "SELECT l.v FROM lat_ord u, LATERAL (SELECT 7 AS v WHERE 1 = 0) l ORDER BY 1",
+			want:   "cols=[v:INT32] rows=0",
 			routed: c1TableLess,
 		},
 		{
