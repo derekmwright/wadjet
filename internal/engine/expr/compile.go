@@ -1017,6 +1017,17 @@ func compileBinOp(left, right Expr, op string, ctx *compileContext) Expr {
 	if isIntervalLit(left) || isIntervalLit(right) {
 		return &BinOp{Left: left, Right: right, Op: op}
 	}
+	// A quoted literal beside an operand that may be a DATE or a TIMESTAMP
+	// is typed by operator resolution (BinOp.unknownTemporalArith), which
+	// only the generic node knows: the typed numeric nodes read the literal's
+	// leading number (`d - '2026-03-01'` was d − 2026 days).
+	if op == "+" || op == "-" {
+		_, ls := unknownLiteralText(left)
+		_, rs := unknownLiteralText(right)
+		if ls != rs {
+			return &BinOp{Left: left, Right: right, Op: op}
+		}
+	}
 	// The same for an operand that PRODUCES a date or a timestamp — a clock
 	// function, a cast, nested date arithmetic: its box is a day or an
 	// instant, never a number to the typed float/int nodes, which have no

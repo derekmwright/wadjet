@@ -1812,6 +1812,26 @@ func binOpTemporalType(n *plansql.BinaryOp, decls ColDecls) (expr.DeclType, expr
 		return expr.Decl(parquet.TypeTimestamp), expr.Decided
 	case n.Op == "+" && (rk != temporalNone || nodeIsQuotedText(n.Right)) && nodeIsInterval(n.Left, decls):
 		return expr.Decl(parquet.TypeTimestamp), expr.Decided
+	case nodeIsQuotedText(n.Left) != nodeIsQuotedText(n.Right) &&
+		(strictTemporalKind(n.Left, lk, decls) != temporalNone || strictTemporalKind(n.Right, rk, decls) != temporalNone):
+		// A quoted operand beside a DATE / TIMESTAMP: the type PostgreSQL's
+		// operator resolution gives it (expr.ResolveUnknownTemporal) —
+		// `date - '…'` a day count, `ts - '…'` the documented milliseconds,
+		// `ts + '…'` a TIMESTAMP. `date + '…'` is refused (42725) by the
+		// typing rule and declares nothing.
+		k := strictTemporalKind(n.Left, lk, decls)
+		if k == temporalNone {
+			k = strictTemporalKind(n.Right, rk, decls)
+		}
+		switch expr.ResolveUnknownTemporal(n.Op, k == temporalInstant) {
+		case expr.UnknownAsDate:
+			return expr.Decl(parquet.TypeInt64), expr.Decided
+		case expr.UnknownAsTimestamp:
+			return expr.Decl(parquet.TypeFloat64), expr.Decided
+		case expr.UnknownAsInterval:
+			return expr.Decl(parquet.TypeTimestamp), expr.Decided
+		}
+		return expr.DeclType{}, expr.Undecided
 	case n.Op == "-" && lk == temporalDay && rk == temporalDay:
 		return expr.Decl(parquet.TypeInt64), expr.Decided
 	case n.Op == "-" && lk == temporalInstant && rk == temporalInstant:
@@ -1827,6 +1847,16 @@ func binOpTemporalType(n *plansql.BinaryOp, decls ColDecls) (expr.DeclType, expr
 		return expr.Decl(parquet.TypeDate), expr.Decided
 	}
 	return expr.DeclType{}, expr.Undecided
+}
+
+// strictTemporalKind is an operand's temporal kind with a VARCHAR column
+// counted as text, not as a day: the unknown-literal resolution is
+// PostgreSQL's for a DATE or TIMESTAMP operand only.
+func strictTemporalKind(node plansql.Node, k temporalKind, decls ColDecls) temporalKind {
+	if isTextColRef(node, decls) {
+		return temporalNone
+	}
+	return k
 }
 
 // temporalKind is what an operand of `date ± x` can be.

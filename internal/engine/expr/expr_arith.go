@@ -48,6 +48,11 @@ func (e *BinOp) Eval(b *batch.RecordBatch, row int) any {
 	// date-on-the-left form takes an interval on the right; `interval + date`
 	// is the one reversed shape that means anything.
 	if e.Op == "+" || e.Op == "-" {
+		// A quoted operand beside a DATE / TIMESTAMP is typed by PostgreSQL's
+		// operator resolution, never read as a number (temporal_unknown.go).
+		if res, ok := e.unknownTemporalArith(b, row, lv, rv); ok {
+			return res
+		}
 		if iv, ok := rv.(IntervalValue); ok {
 			if dv, ok := temporalOperand(b, row, e.Left, lv); ok {
 				return intervalShift(dv, iv, e.Op == "-")

@@ -411,6 +411,9 @@ func (c *comparisonTyper) temporalArithmetic(n *plansql.BinaryOp) error {
 	if nodeIsInterval(n.Left, c.decls) || nodeIsInterval(n.Right, c.decls) {
 		return nil
 	}
+	if r, err := c.unknownTemporal(n); r != expr.UnknownNotTemporal || err != nil {
+		return err
+	}
 	lt, lok := c.arithOperand(n.Left)
 	rt, rok := c.arithOperand(n.Right)
 	if !lok || !rok {
@@ -434,6 +437,55 @@ func (c *comparisonTyper) temporalArithmetic(n *plansql.BinaryOp) error {
 		return nil
 	}
 	return sqlerr.New("42883", "operator does not exist: %s %s %s", pgTypeName(lt), n.Op, pgTypeName(rt))
+}
+
+// unknownTemporal is the unknown-literal branch of temporalArithmetic: a
+// quoted literal (or NULL) beside an operand typed DATE or TIMESTAMP is
+// resolved by PostgreSQL's operator resolution (expr.ResolveUnknownTemporal)
+// — `date + unknown` is 42725, and a literal the resolution reads as a DATE,
+// a TIMESTAMP or an INTERVAL is refused here when its text is not one, as
+// PostgreSQL refuses the constant while it analyses the statement. Before arc
+// VL round 5 arithOperand called the quoted side SQL's unknown and let the
+// pair through, and the kernel read the literal's leading number (round-4
+// review B3: `DATE '…' + '1.5'` stored 20516.5).
+func (c *comparisonTyper) unknownTemporal(n *plansql.BinaryOp) (expr.UnknownTemporal, error) {
+	lText, lUnknown := unknownOperand(n.Left)
+	rText, rUnknown := unknownOperand(n.Right)
+	if lUnknown == rUnknown {
+		return expr.UnknownNotTemporal, nil
+	}
+	other, text := n.Left, rText
+	if lUnknown {
+		other, text = n.Right, lText
+	}
+	t, ok := c.arithOperand(other)
+	if !ok || (t != parquet.TypeDate && t != parquet.TypeTimestamp) {
+		return expr.UnknownNotTemporal, nil
+	}
+	r := expr.ResolveUnknownTemporal(n.Op, t == parquet.TypeTimestamp)
+	if r == expr.UnknownAmbiguous {
+		return r, expr.UnknownTemporalAmbiguous(n.Op, lUnknown)
+	}
+	if text == nil {
+		return r, nil // NULL: the resolved operator answers NULL
+	}
+	return r, expr.CheckUnknownTemporalLiteral(r, *text)
+}
+
+// unknownOperand reports an unknown-typed operand — a quoted literal (its
+// text) or NULL (nil text).
+func unknownOperand(n plansql.Node) (*string, bool) {
+	lit, ok := plansql.Unparen(n).(*plansql.Lit)
+	if !ok {
+		return nil, false
+	}
+	switch lit.Kind {
+	case plansql.LitString:
+		return &lit.Value, true
+	case plansql.LitNull:
+		return nil, true
+	}
+	return nil, false
 }
 
 // arithOperand types one side of a `+` / `-`: by the statement's structure

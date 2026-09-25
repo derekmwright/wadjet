@@ -144,12 +144,22 @@ func arithProducedTemporal(op string, left, right Expr, b *batch.RecordBatch) ca
 		return castToTimestampKind
 	case op == "+" && (rk != castNotTemporal || textOperand(right, b)) && producesInterval(left):
 		return castToTimestampKind
+	case op == "+" && ((lk == castToTimestampKind && isUnknownLit(right)) || (rk == castToTimestampKind && isUnknownLit(left))):
+		// `ts + '…'`: the quoted operand resolves to an INTERVAL
+		// (ResolveUnknownTemporal), so the sum is a TIMESTAMP.
+		return castToTimestampKind
 	case (lk == castToDateKind || textDayOperand(left, b)) && rk == castNotTemporal && operandIsInt(right, b):
 		return castToDateKind
 	case op == "+" && (rk == castToDateKind || textDayOperand(right, b)) && lk == castNotTemporal && operandIsInt(left, b):
 		return castToDateKind
 	}
 	return castNotTemporal
+}
+
+// isUnknownLit reports a quoted (string) literal operand.
+func isUnknownLit(e Expr) bool {
+	_, ok := unknownLiteralText(e)
+	return ok
 }
 
 // producesInterval reports whether an operand is an INTERVAL: a literal, or a
