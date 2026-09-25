@@ -100,7 +100,7 @@ Composite text agrees; wire mapping uses OID 25 versus record OID 2249. (ADR-001
 
 **Some ARRAY results still declare text.**
 
-Nested arrays and ROW/MAP elements use OID 25; ordinary arrays — stored, constructed, returned by a function, read through a derived table, VALUES or UNION, and a zero-row result — use PostgreSQL's array OIDs. A nested array renders as PostgreSQL's array_out does (`{{1,2},{3,4}}`) but may be ragged (`{{1,2},{3}}`), which PostgreSQL cannot represent. (ADR-0012 §5/#992-residuals, ADR-0045)
+Nested arrays and ROW/MAP elements use OID 25; ordinary arrays — stored, constructed, returned by a function, read through a derived table, VALUES or UNION, and a zero-row result — use PostgreSQL's array OIDs. A nested array renders as PostgreSQL's array_out does (`{{1,2},{3,4}}`) but may be ragged (`{{1,2},{3}}`), which PostgreSQL cannot represent. A nested array is PostgreSQL's multi-dimensional array otherwise: a cast into `T[]` converts its leaves and keeps its dimensions (`{{1,2},{3,4}}`), and it orders as `array_cmp` does (the flattened elements, then their count, then the dimensions). A subscript reads the OUTER array (`(ARRAY[ARRAY[1,2]])[1]` is `{1,2}`; PostgreSQL's one-subscript read of a 2-D array is NULL). (ADR-0012 §5/#992-residuals, ADR-0045)
 
 **TIME, JSON and XML casts declare text.**
 

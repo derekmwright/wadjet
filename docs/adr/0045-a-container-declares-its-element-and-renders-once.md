@@ -74,6 +74,23 @@ psql).
    box. A DATE or TIMESTAMP scalar a DAG stage substitutes for a subquery is a
    typed literal (`CAST('…' AS TIMESTAMP)`), so the stage declares it as the
    plan does.
+   **Round 4 (a subquery that IS the container).** The expression layer asked
+   for a scalar subquery's declaration through `expr.SubqueryDeclFunc`, which
+   carried a TypeID, a precision and a scale — so a subquery that RETURNS an
+   array reached the cast and every comparator with no element, and the box
+   was read instead (`CAST((SELECT ARRAY[ts] …) AS TEXT)` = the epoch; a DATE
+   array never equal; `{}` equal to `{""}`). The function now answers the
+   subquery's whole declared column, the one the planner's walk computes for
+   its projection. The membership constructs over a subquery — `IN`,
+   `= ANY`, `<> ALL`, correlated or not — test a container member through the
+   one comparator of §4 under the probe's and the set's declarations. On the
+   DAG, a subquery's array value is substituted as the typed literal of that
+   declaration (`CAST('{2024-01-10}' AS DATE[])`; a multi-dimensional one as
+   the constructor of typed leaves), where it had been Go's text of the box
+   (unparseable) or `null`. A `T[]` cast whose T is DECIMAL/NUMERIC declares
+   its element's (p,s) by the scalar cast's rule (a bare NUMERIC takes the
+   operand element's scale); it declared text[], so its elements were
+   compared and hashed as text.
 2. **Loud, not plausible.** A container box written into a STRING or BYTES
    vector is a `*TypeMismatchError` (#361's guard), not `fmt.Sprint` text;
    a container written into an ARRAY/MAP/ROW vector allocated without its
@@ -98,7 +115,13 @@ psql).
    no PostgreSQL text form here — an INTERVAL (this engine has no interval
    text form) — refuses a text or JSON cast with 0A000 rather than printing
    Go's struct text (round 3). An array cast to `VECTOR(n)` whose declared
-   element is not a number is 42846, pgvector's answer, whatever its box.
+   element is not a number is 42846, pgvector's answer, whatever its box. A
+   MULTI-DIMENSIONAL array cast into `T[]` casts its LEAVES and keeps its
+   dimensions, PostgreSQL's shape (`{{1,2},{3,4}}`), round 4: this engine holds
+   such a value as an array of arrays, and casting each outer ELEMENT to the
+   scalar destination made a one-dimensional `text[]` of the inner arrays'
+   text. A value mixing inner arrays and scalars (ragged in a way no
+   PostgreSQL array is) refuses 0A000.
 3. **One renderer.** PostgreSQL's text output — `array_out` (`{…}`, its
    quoting, bare NULL, a nested dimension bare) and `record_out` (`(…)`, an
    empty slot for NULL), with temporal leaves in their text form — lives in
@@ -127,6 +150,21 @@ psql).
    caller reaches, with the shape read off the boxes. Round 2 routed the six
    operators alone, and GREATEST/LEAST answered the text-greater array while
    BETWEEN kept the text order (round-2 review B3, P1).
+   **Round 4.** Two DECIMAL elements of different scales are ordered by VALUE:
+   each side is written under its OWN declaration and the kernel compares two
+   DECIMAL vectors at their common scale exactly
+   (`kernel.CompareDecimalValues`) — never through a double; an integer beside
+   a DECIMAL is a DECIMAL at scale 0. The keys agree with that ordering: the
+   columnar key was already scale-normalized (`batch.AppendDecimalKey`), the
+   boxed key of a DECIMAL element is its canonical digits, and a set
+   operation over two DECIMAL element types meets at their common `DECIMAL(p,s)`
+   (ADR-0024's rule for a scalar column) — the DAG casts the arm, where it
+   refused 0A000. A comparison of two array COLUMNS in a filter
+   (`exec.ColColFilter`) orders through the same kernel (it refused). A
+   MULTI-DIMENSIONAL array orders as PostgreSQL's `array_cmp` does — the
+   flattened leaves, then their count, then the dimensions (each level's
+   lengths; a ragged value's keep two shapes apart) — in the columnar kernel
+   and the boxed comparator alike, so `{{1,2},{3,4}}` > `{{1,2,3}}`.
 
 ## Alternatives rejected
 
@@ -182,5 +220,22 @@ Out of scope, recorded as filing candidates: `array_agg(x ORDER BY y)`, the
   over an empty and a non-empty padded side.
 - `coordinator.TestArcCW3EveryComparatorOrdersArraysOneWay` — eleven array
   pairs through twenty-four comparators, one ordering (PostgreSQL's).
+- `coordinator.TestArcCW4OneOrderingEveryOperandComparatorElement` — the one
+  ordering over OPERAND {constructor, column, expression, subquery, aggregate,
+  window, LATERAL} × COMPARATOR {the six operators, GREATEST, LEAST, BETWEEN,
+  IN list, IN / `= ANY` / `<> ALL` over a subquery, CASE, NULLIF, IS DISTINCT
+  FROM, ORDER BY, MIN, MAX, DISTINCT, GROUP BY, window ORDER / PARTITION, hash
+  join, sort-merge join, UNION, INTERSECT, EXCEPT, filter} × ELEMENT {int,
+  text, empty text, date, timestamp, two DECIMAL scales, bool, IPv4, nested}
+  on six arms (two with the sort-merge join forced).
+- `coordinator.TestArcCW4SubqueryOperandCarriesItsDeclaredElement` — a scalar,
+  ARRAY(…), correlated and COALESCE'd subquery of six element types cast to
+  TEXT, JSON, TEXT[], VARCHAR and VECTOR(1), pinned to PostgreSQL 17.11.
+- `coordinator.TestArcCW4DecimalElementsKeyByValueOnEveryKeyPath` — two
+  DECIMAL scales of one array through hash join, IN / ANY / ALL, UNION /
+  INTERSECT / EXCEPT, DISTINCT, GROUP BY, window PARTITION, a join filter and
+  `<`, on six arms.
+- `wadjet.TestArcCW4ContainersAnswerAsPostgreSQLOnTheEmbeddedEngine` — the
+  embedded engine's cells of the three above.
 
 Each of the first six fails at 83cd4a93.

@@ -717,18 +717,28 @@ is a timestamp, not an integer), `2 = ANY(v)` compares elements — and `ORDER
 BY`, `MIN`, `MAX`, `DISTINCT`, `GROUP BY`, a window's `ORDER BY` and
 `PARTITION BY`, a join key, the comparison operators (`=`, `<>`, `<`, `<=`,
 `>`, `>=`), `BETWEEN`, `IN`, a simple `CASE`, `IS [NOT] DISTINCT FROM`,
-`GREATEST`, `LEAST` and `NULLIF` compare arrays ELEMENT-WISE as PostgreSQL does
-— one kernel for all of them, under each operand's declared element (a
-`numeric` element orders as a number): an empty array first, a shorter prefix before a longer array,
+`GREATEST`, `LEAST`, `NULLIF`, and `IN` / `= ANY` / `<> ALL` over a subquery
+compare arrays ELEMENT-WISE as PostgreSQL does — one kernel for all of them,
+under each operand's declared element, whatever produced the operand (a
+column, an expression, a subquery, an aggregate, a window, a LATERAL): a
+`numeric` element orders as a number, and two `numeric` elements of different
+scales by value (`ARRAY[10.00] = ARRAY[10.0000]` is true, as a join key, an
+`IN` member and a `UNION` member too); an empty array first, a shorter prefix before a longer array,
 a NULL element after every value and equal to another NULL element
-(`ARRAY[1,NULL] = ARRAY[1,NULL]` is true). `UNION` arms whose elements differ fold on the
-numeric ladder (`int4[] ∪ bigint[]` is `bigint[]`); arms with no common element
+(`ARRAY[1,NULL] = ARRAY[1,NULL]` is true). A multi-dimensional array orders by
+its flattened elements, then their count, then its dimensions
+(`{{1,2},{3,4}}` > `{{1,2,3}}`), as PostgreSQL's does. `UNION` arms whose elements differ fold on the
+numeric ladder (`int4[] ∪ bigint[]` is `bigint[]`; two `numeric` elements meet
+at their common `numeric(p,s)`); arms with no common element
 type are `42804`. `CAST(container AS TEXT)` (and `VARCHAR(n)`) is the same
 rendering under the operand's DECLARED element, whatever expression built it —
 `CAST(ARRAY[COALESCE(ts, …)] AS TEXT)` is `{"2024-01-01 01:00:00"}` and
-`CAST(ARRAY[d] AS TEXT)` `{2024-01-02}`; `CAST(container AS TEXT[])` converts
+`CAST(ARRAY[d] AS TEXT)` `{2024-01-02}`, and a subquery that returns the
+array renders the same (`CAST((SELECT ARRAY[ts] …) AS TEXT)`); `CAST(container AS TEXT[])` converts
 each element as a column of its type converts (a timestamp's text, not its
-number), and `CAST(container AS JSON)` is `to_json`'s text
+number) — a multi-dimensional array's leaves, keeping its dimensions
+(`CAST(ARRAY[ARRAY[1,2],ARRAY[3,4]] AS TEXT[])` is `{{1,2},{3,4}}`) — a
+`numeric(p,s)[]` destination declares `numeric(p,s)` elements, and `CAST(container AS JSON)` is `to_json`'s text
 (`["2024-01-01T01:00:00"]`). An `INTERVAL` element has no text form here and
 the cast refuses (`0A000`); PostgreSQL prints `{01:00:00}`.
 
