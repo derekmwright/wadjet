@@ -1437,8 +1437,11 @@ the outer relation may be a CTE reference or carry a quoted alias, and the
 outer side of the key may be any expression (`lower(c.t)`, `CASE WHEN o.k = 1
 … END`); a second correlated conjunct beside the key (`AND i.id <> o.id`) reads
 the body's column. An unaliased `count(*)` answers 0 for an outer row it
-matches nothing for. (Before 2026-09-24 each of these could read the OUTER
-relation's column, answer zero rows, or answer NULL for 0.)
+matches nothing for. A list that publishes the key under a name another of
+its items also publishes (`SELECT i.id AS m, i.k AS m … WHERE i.k = o.k`)
+joins on the key, not on the first `m`. (Before 2026-09-24 each of these
+could read the OUTER relation's column, answer zero rows, or answer NULL for
+0; before 2026-09-25 the duplicate-name key joined on the other item.)
 
 A correlated condition in the body may be any predicate over the outer row and
 the body's own columns — a comparison, `BETWEEN` (`q.qv BETWEEN o.total AND
