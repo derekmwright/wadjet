@@ -678,7 +678,16 @@ func setOpArmProjection(arm *logical.Node, outNames []string) (SetOpArmPlan, err
 		}
 		for i, n := range innerNames {
 			plan.Specs[i] = ProjectExprSpec{
-				Expr: n, Name: outNames[i],
+				// QUOTED: the nested operation's result name is the TEXT of
+				// its first arm's expression when that arm is unaliased
+				// (`array[1]`, `id + 0`), and read back unquoted it is that
+				// EXPRESSION again, evaluated over the nested result's rows
+				// — a constant `{1}` for every row, or an `id` the result
+				// does not carry (NULL, declared text). On the DAG,
+				// `SELECT ARRAY[1] … UNION SELECT ARRAY[2] … UNION SELECT
+				// ARRAY[3] …` answered {1},{3}, scalars refused on a STRING
+				// file (arc CW round 5, review B2's arity gate).
+				Expr: plansql.QuoteIdent(n), Name: outNames[i],
 				// The SLOT, because a nested operation's result columns may
 				// repeat a NAME and the enclosing arm reads them from its
 				// stream: `A UNION B UNION C` parses left-deep, so arm 1 of
