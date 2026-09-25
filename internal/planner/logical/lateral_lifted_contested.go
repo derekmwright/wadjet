@@ -61,33 +61,6 @@ func RefuseContestedLiftedRefs(n *Node, outerJoinsOnly bool) error {
 	return nil
 }
 
-// RefuseDeclinedLiftedRefs is the single-process pipeline's refusal for a
-// lateral whose lifted predicate declined under a bare enclosing star
-// (Node.LiftedRefDeclinedUnderStar): that pipeline evaluates the predicate
-// above the join over a column the body did not publish and answered a
-// NULL-padded row per outer row for PostgreSQL's rows (arc L1 round 4, arc LT
-// round 2). Called from physical.Plan only; the stage DAG answers this shape.
-func RefuseDeclinedLiftedRefs(n *Node) error {
-	if n == nil {
-		return nil
-	}
-	if n.LiftedRefDeclinedUnderStar {
-		return sqlerr.New("0A000",
-			"LATERAL body's correlated predicate is not an equality on an inner column and the "+
-				"enclosing query writes a star over this join: the predicate is evaluated over the "+
-				"body's OUTPUT, which would have to publish the column it names, and a bare star "+
-				"would publish that column too. PostgreSQL evaluates the body per outer row, which "+
-				"this engine does not do for this shape on the single-process path. Name the columns "+
-				"instead of a star, or correlate on an equality")
-	}
-	for _, c := range n.Children {
-		if err := RefuseDeclinedLiftedRefs(c); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 // hasBareStarItem reports whether a Project still carries an unexpanded bare
 // `*` item.
 func hasBareStarItem(n *Node) bool {

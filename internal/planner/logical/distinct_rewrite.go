@@ -77,7 +77,6 @@ func inheritRootNaming(dst, src *Node) {
 		dst.CTEs = src.CTEs
 	}
 	dst.LateralSubtree = dst.LateralSubtree || src.LateralSubtree
-	dst.LiftedRefDeclinedUnderStar = dst.LiftedRefDeclinedUnderStar || src.LiftedRefDeclinedUnderStar
 }
 
 // rewriteStarDistinct handles the one user DISTINCT that reaches the rewrite

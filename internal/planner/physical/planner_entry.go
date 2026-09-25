@@ -122,11 +122,6 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 	if err := logical.RefuseContestedLiftedRefs(node, false); err != nil {
 		return nil, err
 	}
-	// …and the lifted predicate that declined under a bare enclosing star,
-	// which THIS pipeline cannot evaluate (the DAG can).
-	if err := logical.RefuseDeclinedLiftedRefs(node); err != nil {
-		return nil, err
-	}
 	// …and a star that would publish a lateral join's lifted key slot.
 	if err := logical.RefuseStarPublishingLiftedSlot(node); err != nil {
 		return nil, err

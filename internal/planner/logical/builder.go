@@ -3,7 +3,6 @@
 package logical
 
 import (
-	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -2261,9 +2260,6 @@ func buildLateralSubquery(outer *plansql.SelectInfo, left *Node, join plansql.Jo
 	// list, so an ORDINAL in the body's own ORDER BY still counts the list
 	// the query wrote (lateralWindowOrder).
 	injectedLead := 0
-	// declinedUnderStar records publishLiftedRefs' bare-star decline for the
-	// single-process refusal (Node.LiftedRefDeclinedUnderStar).
-	declinedUnderStar := false
 	if len(correlatedParts) > 0 {
 		// The inner correlation key must be SELECTED, for non-aggregated laterals too,
 		// and GROUPED only when the subquery aggregates (#591, #767 part 2).
@@ -2400,7 +2396,7 @@ func buildLateralSubquery(outer *plansql.SelectInfo, left *Node, join plansql.Jo
 			// the star expands to the arms' own lists (joinArmColumns reads
 			// the lateral's list as `s.*` does, without the slot). A star
 			// that cannot be expanded that way is refused after expansion,
-			// where it is known (RefuseDeclinedLiftedRefs) — refusing here
+			// where it is known (RefuseStarPublishingLiftedSlot) — refusing here
 			// refused every bare star over an expression-keyed lateral,
 			// including the ones base answered right (arc JP round 4, B5).
 			if !lifted {
@@ -2439,10 +2435,8 @@ func buildLateralSubquery(outer *plansql.SelectInfo, left *Node, join plansql.Jo
 		// dropped at the join; where an equality keys the join and the
 		// residual routes ABOVE it, they are emitted and hidden from a STAR.
 		lifted, lerr := publishLiftedRefs(subInfo, correlatedParts,
-			leftAliases, aggregates, outer, left, &injected)
-		if errors.Is(lerr, errLiftedRefDeclinedUnderStar) {
-			declinedUnderStar = true
-		} else if lerr != nil {
+			leftAliases, aggregates, left, &injected)
+		if lerr != nil {
 			return nil, "", lateralEmptyInput{}, nil, nil, lerr
 		}
 		starLifted = append(starLifted, lifted...)
@@ -2505,7 +2499,6 @@ func buildLateralSubquery(outer *plansql.SelectInfo, left *Node, join plansql.Jo
 	// and nothing above does (#991, block_visible_output.go). Where there is
 	// none the plan is unchanged.
 	right = dropBlockHiddenSlots(right)
-	right.LiftedRefDeclinedUnderStar = declinedUnderStar
 	// An AGGREGATED lateral groups on the key, and an aggregate publishes a
 	// group key under the key's own text -- which is the collision the slot
 	// exists to avoid, one operator lower. Record the slot as the key's

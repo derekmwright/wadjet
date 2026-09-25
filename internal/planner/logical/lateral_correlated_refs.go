@@ -3,7 +3,6 @@
 package logical
 
 import (
-	"errors"
 	"strings"
 
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
@@ -17,7 +16,7 @@ import (
 // from stars. Aggregated bodies refuse because publishing a column would
 // change their grouping. See ADR-0021 §1s.
 func publishLiftedRefs(info *plansql.SelectInfo, correlatedParts []string,
-	leftAliases map[string]bool, aggregates bool, outer *plansql.SelectInfo, left *Node,
+	leftAliases map[string]bool, aggregates bool, left *Node,
 	injected *[]plansql.SelectColumn) (slots []string, err error) {
 	// THE COLUMN IS PUBLISHED, SO IT IS ONLY MATERIALIZED WHERE PUBLISHING IT
 	// CHANGES NOTHING ELSE. Four shapes decline, and each returns the query to
@@ -36,13 +35,12 @@ func publishLiftedRefs(info *plansql.SelectInfo, correlatedParts []string,
 	//   - the ENCLOSING relation publishes that name. The lifted predicate
 	//     then reads the outer column instead of the body's, which is the
 	//     `i.id < o.id` shape.
-	//   - the enclosing query writes a STAR over this join. A bare `SELECT *`
-	//     publishes the join's stream, and the materialized column is in it —
-	//     on all nine doors, in `RowDescription`. The QUALIFIED star reads the
-	//     body's own list and is already clean (`Node.StarLiftedRefCols`).
+	//   - (until arc JP round 4) the enclosing query writes a bare STAR over
+	//     this join. That star is expanded to the FROM arms' own lists now,
+	//     which hide the materialized column as the QUALIFIED star always did
+	//     (`Node.StarLiftedRefCols`), so it declines nothing.
 	//
-	// The first three are read off the body and the enclosing query; the
-	// fourth off the enclosing SELECT list. None of them can be decided after
+	// They are read off the body and the enclosing query. None of them can be decided after
 	// the plan is built, which is why they are conditions on the injection and
 	// not a repair above it.
 	//
@@ -60,19 +58,6 @@ func publishLiftedRefs(info *plansql.SelectInfo, correlatedParts []string,
 	// trigger above with an aggregated body.
 	if info == nil {
 		return nil, nil
-	}
-	// A BARE star only. A QUALIFIED star (`s.*`) reads the lateral's own
-	// published list, from which `Node.StarLiftedRefCols` hides the slot, so
-	// the materialization is clean under it (ADR-0021 §1q); reading it as an
-	// enclosing star refused — and, before arc LT, declined to NULL pads —
-	// a shape the DAG arms answered right (`R3/liftedStar`).
-	enclosingStar := false
-	if outer != nil {
-		for _, c := range outer.Columns {
-			if c.Star && c.TableRef == "" {
-				enclosingStar = true
-			}
-		}
 	}
 	outerNames := map[string]bool{}
 	for _, e := range emittedColumns(left) {
@@ -152,14 +137,6 @@ func publishLiftedRefs(info *plansql.SelectInfo, correlatedParts []string,
 		// relation-valued body has no per-row runner here yet — so it is loud.
 		// (A GROUPED body needs no arm here — it aggregates, so the refusal
 		// above has already fired.)
-		// A BARE enclosing star DECLINES rather than refuses (round-2
-		// review, B5): the DAG evaluates the lifted predicate at the join
-		// off the scan's own stream and answered PostgreSQL's rows on both
-		// fixtures, so the refusal is the SINGLE-PROCESS pipeline's alone
-		// (Node.LiftedRefDeclinedUnderStar, RefuseDeclinedLiftedRefs).
-		if enclosingStar && !contested && !info.Distinct {
-			return nil, errLiftedRefDeclinedUnderStar
-		}
 		if contested || info.Distinct {
 			why := "the column it names is also published by the enclosing relation or by the body's own alias list, so the join could not tell the two apart"
 			if info.Distinct && !contested {
@@ -207,11 +184,6 @@ func publishLiftedRefs(info *plansql.SelectInfo, correlatedParts []string,
 	}
 	return slots, nil
 }
-
-// errLiftedRefDeclinedUnderStar is publishLiftedRefs' private signal that the
-// materialization declined under a bare enclosing star; buildLateralSubquery
-// turns it into Node.LiftedRefDeclinedUnderStar.
-var errLiftedRefDeclinedUnderStar = errors.New("lifted predicate declined under an enclosing star")
 
 // lateralAliasPublishes reports whether one of the body's own output items
 // publishes `bare` as its ALIAS — a name the injection may not take.

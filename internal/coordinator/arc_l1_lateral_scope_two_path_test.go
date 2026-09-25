@@ -364,12 +364,12 @@ const (
 	// rewrite declines — does not PARSE. PostgreSQL accepts it and means "no
 	// bound"; this parser wants a number (round 2, P1).
 	l1LimitAllUnparsed = `syntax error at or near "ALL"`
-	// ARC LT's three refusals (lateral_per_row_bound.go, lateral_correlated_refs.go,
-	// lateral_lifted_contested.go).
+	// ARC LT's refusals (lateral_per_row_bound.go, lateral_correlated_refs.go,
+	// lateral_lifted_contested.go); its bare-star one is gone since arc JP
+	// round 4.
 	l1BoundNoKey             = `cannot apply that bound per outer row`
 	l1LiftedRefCannotPublish = `which would have to publish the column it names, and here it cannot`
 	l1LiftedRefContested     = `which the enclosing relation also publishes`
-	l1LiftedRefUnderStar     = `and a bare star would publish that column too`
 	// A LATERAL body that is a SET OPERATION whose second arm has no FROM
 	// clause: the table-less lowering claims the whole body.
 	l1FromlessSetOpBody = `a LATERAL subquery with no FROM clause`
@@ -620,10 +620,11 @@ var l1RefusalPins = map[string][]string{
 	// routed the DAG arms single-process: it answers PostgreSQL's rows.
 	"R4/distinctBody":  {l1LiftedRefCannotPublish},
 	"R4/aliasCollides": {l1LiftedRefCannotPublish},
-	// `R4/bareStar` (a LEFT lateral under a bare star): the single arms refuse
-	// with the star sentence (round 2 — the decline is theirs alone), the DAG
-	// arms with arc JR's residual refusal, as at base.
-	"R4/bareStar":            {l1LiftedRefUnderStar, "resolves on neither side"},
+	// `R4/bareStar` (a LEFT lateral under a bare star) was refused on every
+	// arm — the single arms with the star sentence, the DAG arms with arc JR's
+	// residual refusal — until arc JP round 4 expanded the star to the arms'
+	// own lists and stopped declining the lift under it: it answers
+	// PostgreSQL's nine rows.
 	"R4/groupedBody":         {l1LiftedRefNotPublished},
 	"R4/setopBody":           {l1FromlessSetOpBody},
 	"R5/aggUnderBareStar":    {l1LiftedRefNotPublished},
@@ -704,15 +705,10 @@ var l1RefusalPins = map[string][]string{
 // l1ArmPins is a divergence that is NOT the same on every arm, so it is
 // recorded per arm. A pin that starts agreeing FAILS.
 var l1ArmPins = map[string]map[string]string{
-	// ARC LT round 2 (review B5): the two single-process arms REFUSE these
-	// — the enclosing bare star would publish the materialized column
-	// (`ctlPlainUnderStar`) — and the three DAG arms, which evaluate the
-	// predicate at the join off the scan's own stream, assert PostgreSQL's
-	// rows, as they did at base on two fixtures.
-	"R5/ctlPlainUnderStar": {
-		"single":      "ERR ~" + l1LiftedRefUnderStar,
-		"spilled512k": "ERR ~" + l1LiftedRefUnderStar,
-	},
+	// `R5/ctlPlainUnderStar`: the two single-process arms REFUSED it from arc
+	// LT round 2 (the enclosing bare star would have published the
+	// materialized column); arc JP round 4 expands that star to the arms' own
+	// lists, which hide the column, and every arm answers PostgreSQL's rows.
 	// The QUALIFIED star over a lifted-predicate body: the enclosing query
 	// writes a star over this join, so the materialization DECLINES (round 4)
 	// and the two single-process arms answer what they answered at c34cdbcb.

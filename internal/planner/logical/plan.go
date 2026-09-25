@@ -385,15 +385,6 @@ type Node struct {
 	// found the OUTER relation's stored `__key_0` and dropped the user's
 	// column — the round-2 blocker in its third shape.
 	LateralSubtree bool
-	// LiftedRefDeclinedUnderStar marks a decorrelated LATERAL whose lifted
-	// non-equality predicate names a column the body could not publish
-	// because the enclosing query writes a BARE star over the join. The
-	// single-process pipeline cannot evaluate that predicate and REFUSES the
-	// plan (RefuseDeclinedLiftedRefs, from physical.Plan); the stage DAG
-	// evaluates the predicate at the join off the scan's own stream and
-	// answers PostgreSQL's rows, so it is not refused there (arc LT round 2,
-	// measured on both fixtures).
-	LiftedRefDeclinedUnderStar bool
 	// LateralEmptyDefaults, on the same JOIN node, is what each output column
 	// of an UNGROUPED-aggregate lateral reads for an outer row the lateral
 	// matched nothing for — the item's own value over an empty input, folded
