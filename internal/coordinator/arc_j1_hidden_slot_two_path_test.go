@@ -945,14 +945,17 @@ func TestArcJ1AQualifiedStarExpandsFromTheRelationsOutput(t *testing.T) {
 //	before          Alice,350 | Alice,350 | Bob,350 | Bob,350   on all four arms
 //
 // 350 is the whole table's sum: a different question's answer, given in
-// silence. The lowering cannot express the right one — it would need the
-// window evaluated per outer row — so the shape is refused (0A000), which is
-// what a wrong number is traded for.
+// silence. The shape was refused (0A000) until arc JP round 5, which is what
+// a wrong number was traded for.
 //
-// The one spelling the move PRESERVES is a window PARTITIONED BY the
-// correlation key: each output row still reads exactly its own correlated
-// group. That one answers, and it is the workaround the message names.
-func TestArcJ1AWindowInsideACorrelatedLateralIsRefused(t *testing.T) {
+// The spelling the move PRESERVES is a window PARTITIONED BY the correlation
+// key: each output row still reads exactly its own correlated group. Since
+// arc JP round 5 the lowering writes that partition itself — every window of
+// an equality-correlated body is partitioned by the key before its own
+// PARTITION BY (logical.lateralWindowsPerOuterRow) — so the four shapes
+// that were refused answer PostgreSQL's rows (measured against PostgreSQL
+// 17.11 over the same rows).
+func TestArcJ1AWindowInsideACorrelatedLateralReadsItsOuterRow(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: this gate stands up an embedded NATS cluster")
 	}
@@ -969,19 +972,23 @@ func TestArcJ1AWindowInsideACorrelatedLateralIsRefused(t *testing.T) {
 		{name: "the-filing-shape",
 			sql: `SELECT o.customer AS c, s.w AS g FROM lat_ord o JOIN LATERAL (` +
 				`SELECT SUM(amount) OVER () AS w FROM lat_item WHERE order_id = o.id) s ` +
-				`ON true ORDER BY 1,2`},
+				`ON true ORDER BY 1,2`,
+			want: `c,g | Alice,150 | Alice,150 | Bob,200 | Bob,200`},
 		{name: "the-window-aliased-like-the-correlation-key",
 			sql: `SELECT o.customer AS c, s.order_id AS g FROM lat_ord o JOIN LATERAL (` +
 				`SELECT SUM(amount) OVER () AS order_id FROM lat_item WHERE order_id = o.id) s ` +
-				`ON true ORDER BY 1,2`},
+				`ON true ORDER BY 1,2`,
+			want: `c,g | Alice,150 | Alice,150 | Bob,200 | Bob,200`},
 		{name: "a-ranking-window",
 			sql: `SELECT o.customer AS c, s.r AS r FROM lat_ord o JOIN LATERAL (` +
 				`SELECT ROW_NUMBER() OVER (ORDER BY amount) AS r FROM lat_item ` +
-				`WHERE order_id = o.id) s ON true ORDER BY 1,2`},
+				`WHERE order_id = o.id) s ON true ORDER BY 1,2`,
+			want: `c,r | Alice,1 | Alice,2 | Bob,1 | Bob,2`},
 		{name: "a-window-partitioned-by-something-else",
 			sql: `SELECT o.customer AS c, s.w AS g FROM lat_ord o JOIN LATERAL (` +
 				`SELECT SUM(amount) OVER (PARTITION BY product) AS w FROM lat_item ` +
-				`WHERE order_id = o.id) s ON true ORDER BY 1,2`},
+				`WHERE order_id = o.id) s ON true ORDER BY 1,2`,
+			want: `c,g | Alice,50 | Alice,100 | Bob,75 | Bob,125`},
 
 		// THE THREE THAT ANSWER, and each is a control for a different half
 		// of the rule: the correlation key IS the partition, the lateral is

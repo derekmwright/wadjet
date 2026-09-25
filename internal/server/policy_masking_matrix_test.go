@@ -1382,15 +1382,19 @@ func pmCells() []pmCell {
 			sql: `SELECT id FROM e7bal WHERE bal > (` +
 				`SELECT MAX(bal) FROM e7bal WHERE bal > 0) ORDER BY id`,
 			want: nil},
-		// LATERAL's decorrelated inner keeps its predicate below the
-		// projection in a shape the planner cannot reorder, so the invariant
-		// REFUSES on every arm and every door rather than answer. That is the
-		// branch's doctrine for a shape it cannot express safely, and it is
-		// uniform — the same 0A000 everywhere, not an arm divergence.
+		// LATERAL's decorrelated inner READS THE MASK like the EXISTS above:
+		// `b.bal > 0` is false on every masked row, so no pair survives and
+		// the count is the mask's 0 — a stored read answers the positive
+		// balances' count. The body's local predicate reached its filter as
+		// TEXT until arc JP round 5, in a shape the invariant could not
+		// place above the security projection, and every door refused; it
+		// now reaches it as the parsed node, which the planner places above
+		// the projection like any other predicate (a refusal that became the
+		// mask's answer on every arm and door).
 		{name: "inner_predicate_over_masked_lateral",
 			sql: `SELECT COUNT(*) AS c FROM e7bal a, LATERAL (` +
 				`SELECT bal FROM e7bal b WHERE b.id = a.id AND b.bal > 0) x`,
-			wantErrLike: "could not be placed above the security projection"},
+			want: []string{"c=0"}},
 		{name: "inner_predicate_over_masked_derived_table",
 			sql:  `SELECT id FROM (SELECT id, bal FROM e7bal WHERE bal > 0) t ORDER BY id`,
 			want: nil},

@@ -329,11 +329,9 @@ func l1LateralCases() []l1Case {
 // raised at plan time on the single-process arms is raised by the DAG's own
 // route-local check on the distributed ones and the two say different things.
 const (
-	// A window inside a CORRELATED LATERAL body. The correlation is lowered
-	// into a join, so the window would be computed over the whole inner
-	// relation rather than per outer row (arc J1, v0.18.60). PostgreSQL
-	// answers all fourteen of these.
-	l1WindowInLateral = `window function "m" inside a LATERAL subquery`
+	// (A window inside a CORRELATED LATERAL body was refused here until arc
+	// JP round 5; it is partitioned by the correlation key now and answers
+	// PostgreSQL's rows — the three LAT/*/frame pins were deleted.)
 	// A correlated scalar / IN subquery holding a window call. The per-row
 	// re-run rebuilds the subquery's TEXT and `WindowFuncNode.String()`
 	// renders `OVER (...)` — three literal dots — so the rebuilt statement
@@ -646,12 +644,10 @@ var l1RefusalPins = map[string][]string{
 	"R3/outerRefOnlyOuter":     {l1OuterRefOutsideWhere},
 	"R3/outerRefTwoOuter":      {l1OuterRefOutsideWhere},
 	"IN/noJoin/winsel":         {l1WindowInSubquery},
-	"LAT/comma/frame":          {l1WindowInLateral},
 	"LAT/comma/selectlist":     {l1OuterRefOutsideWhere},
 	"LAT/comma/winarg":         {l1OuterRefOutsideWhere},
 	"LAT/comma/winord":         {l1OuterRefOutsideWhere},
 	"LAT/comma/winpart":        {l1OuterRefOutsideWhere},
-	"LAT/inner/frame":          {l1WindowInLateral},
 	"LAT/inner/selectlist":     {l1OuterRefOutsideWhere},
 	"LAT/inner/winarg":         {l1OuterRefOutsideWhere},
 	"LAT/inner/winord":         {l1OuterRefOutsideWhere},
@@ -659,7 +655,6 @@ var l1RefusalPins = map[string][]string{
 	"LAT/joinInner/winarg":     {l1OuterRefOutsideWhere},
 	"LAT/joinLeft/winarg":      {l1OuterRefOutsideWhere},
 	"LAT/left/cteUncorr":       {l1KeylessLeftJoin},
-	"LAT/left/frame":           {l1WindowInLateral},
 	"LAT/left/selectlist":      {l1OuterRefOutsideWhere},
 	"LAT/left/uncorr":          {l1KeylessLeftJoin},
 	"LAT/left/uncorrLimit":     {l1KeylessLeftJoin, l1KeylessLeftJoinTask},
