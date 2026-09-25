@@ -74,34 +74,36 @@ func TestArcJ1ALateralKeyIsPublishedUnderAHiddenSlot(t *testing.T) {
 			sql: `SELECT d.k AS k, s.g AS g, s.c AS c FROM typemx_dim d JOIN LATERAL (` +
 				`SELECT MAX(t.id) AS g, COUNT(*) AS c FROM typemx t WHERE t.g = d.k) s ON true ` +
 				`ORDER BY d.k`,
-			want: eightGroups},
+			// Single-process since arc JP round 3: the join pads a grouped arm
+			// (dagplan.ErrLateralIdentityDistributed).
+			want: eightGroups, routes: "lateral identity"},
 		{name: "956/sum-aliased-like-the-key", budgeted: true,
 			sql: `SELECT d.k AS k, s.g AS g FROM typemx_dim d JOIN LATERAL (` +
 				`SELECT SUM(t.id) AS g FROM typemx t WHERE t.g = d.k) s ON true ORDER BY d.k`,
 			want: `k,g | 0,1647415 | 1,1648845 | 2,1645275 | 3,1646704 | 4,1648133 | ` +
-				`5,1649562 | 6,1650990 | 7,NULL`},
+				`5,1649562 | 6,1650990 | 7,NULL`, routes: "lateral identity"},
 		{name: "956/count-aliased-like-the-key", budgeted: true,
 			sql: `SELECT d.k AS k, s.g AS g FROM typemx_dim d JOIN LATERAL (` +
 				`SELECT COUNT(*) AS g FROM typemx t WHERE t.g = d.k) s ON true ORDER BY d.k`,
-			want: `k,g | 0,660 | 1,660 | 2,659 | 3,659 | 4,659 | 5,659 | 6,660 | 7,0`},
+			want: `k,g | 0,660 | 1,660 | 2,659 | 3,659 | 4,659 | 5,659 | 6,660 | 7,0`, routes: "lateral identity"},
 		{name: "956/the-LEFT-spelling", budgeted: true,
 			sql: `SELECT d.k AS k, s.g AS g, s.c AS c FROM typemx_dim d LEFT JOIN LATERAL (` +
 				`SELECT MAX(t.id) AS g, COUNT(*) AS c FROM typemx t WHERE t.g = d.k) s ON true ` +
 				`ORDER BY d.k`,
-			want: eightGroups},
+			want: eightGroups, routes: "lateral identity"},
 		{name: "956/on-the-small-fixture",
 			sql: `SELECT o.customer AS cu, s.order_id AS oi FROM lat_ord o JOIN LATERAL (` +
 				`SELECT MAX(amount) AS order_id FROM lat_item WHERE order_id = o.id) s ON true ` +
 				`ORDER BY o.customer`,
-			want: `cu,oi | Alice,100 | Bob,125 | Carol,NULL`},
+			want: `cu,oi | Alice,100 | Bob,125 | Carol,NULL`, routes: "lateral identity"},
 		{name: "956/ctl-MIN-answers-the-key-s-own-value", budgeted: true,
 			sql: `SELECT d.k AS k, s.g AS g FROM typemx_dim d JOIN LATERAL (` +
 				`SELECT MIN(t.id) AS g FROM typemx t WHERE t.g = d.k) s ON true ORDER BY d.k`,
-			want: `k,g | 0,0 | 1,1 | 2,2 | 3,3 | 4,4 | 5,5 | 6,6 | 7,NULL`},
+			want: `k,g | 0,0 | 1,1 | 2,2 | 3,3 | 4,4 | 5,5 | 6,6 | 7,NULL`, routes: "lateral identity"},
 		{name: "956/ctl-aggregate-under-its-own-alias", budgeted: true,
 			sql: `SELECT d.k AS k, s.mx AS mx FROM typemx_dim d JOIN LATERAL (` +
 				`SELECT MAX(t.id) AS mx FROM typemx t WHERE t.g = d.k) s ON true ORDER BY d.k`,
-			want: `k,mx | 0,4998 | 1,4999 | 2,4993 | 3,4994 | 4,4995 | 5,4996 | 6,4997 | 7,NULL`},
+			want: `k,mx | 0,4998 | 1,4999 | 2,4993 | 3,4994 | 4,4995 | 5,4996 | 6,4997 | 7,NULL`, routes: "lateral identity"},
 
 		// ---------------------------------------------------------------
 		// #767's MIRROR — an inner ALIAS shadowing the key's name while
@@ -121,7 +123,7 @@ func TestArcJ1ALateralKeyIsPublishedUnderAHiddenSlot(t *testing.T) {
 			sql: `SELECT o.customer AS cu, li.id AS i FROM lat_ord o JOIN LATERAL (` +
 				`SELECT amount AS id FROM lat_item WHERE order_id = o.id) li ON true ` +
 				`ORDER BY o.customer, i`,
-			want: `cu,i | Alice,50 | Alice,100 | Bob,75 | Bob,125`},
+			want: `cu,i | Alice,50 | Alice,100 | Bob,75 | Bob,125`, routes: "lateral identity"},
 
 		// ---------------------------------------------------------------
 		// #767's DAG HALF — the LATERAL join stage's files declare ONE
@@ -141,13 +143,13 @@ func TestArcJ1ALateralKeyIsPublishedUnderAHiddenSlot(t *testing.T) {
 			// the plan is refused and the coordinator answers it (ADR-0021
 			// §1c). It FAILED at base; the values are PostgreSQL's on every
 			// arm now, and the counter says which engine produced them.
-			routes: "unreachable output"},
+			routes: "lateral identity"},
 		{name: "767/dag-LEFT-key-under-its-own-name-ORDER-BY", budgeted: true,
 			sql: `SELECT d.k AS k, s.g AS g, s.c AS c FROM typemx_dim d LEFT JOIN LATERAL (` +
 				`SELECT t.g, COUNT(*) AS c FROM typemx t WHERE t.g = d.k GROUP BY t.g) s ` +
 				`ON true ORDER BY d.k`,
 			want: `k,g,c | 0,0,660 | 1,1,660 | 2,2,659 | 3,3,659 | 4,4,659 | 5,5,659 | ` +
-				`6,6,660 | 7,NULL,NULL`},
+				`6,6,660 | 7,NULL,NULL`, routes: "lateral identity"},
 		{name: "767/dag-INNER-key-under-its-own-name-ORDER-BY", budgeted: true,
 			sql: `SELECT d.k AS k, s.g AS g, s.c AS c FROM typemx_dim d JOIN LATERAL (` +
 				`SELECT t.g, COUNT(*) AS c FROM typemx t WHERE t.g = d.k GROUP BY t.g) s ` +
@@ -166,7 +168,7 @@ func TestArcJ1ALateralKeyIsPublishedUnderAHiddenSlot(t *testing.T) {
 				`SELECT COUNT(*) AS n FROM lat_item WHERE order_id = o.id) s ON true ` +
 				`ORDER BY o.customer`,
 			want:   `c,n | Alice,2 | Bob,2 | Carol,0`,
-			routes: "unreachable output"},
+			routes: "lateral identity"},
 		{name: "767/ctl-non-aggregated-lateral",
 			sql: `SELECT o.customer AS c, li.amount AS a FROM lat_ord o JOIN LATERAL (` +
 				`SELECT amount FROM lat_item WHERE order_id = o.id) li ON true ` +
@@ -209,7 +211,7 @@ func TestArcJ1ALateralKeyIsPublishedUnderAHiddenSlot(t *testing.T) {
 				`GROUP BY t.g) s ON true ORDER BY d.k`,
 			want: `k,gk,g | 0,0,4998 | 1,1,4999 | 2,2,4993 | 3,3,4994 | 4,4,4995 | ` +
 				`5,5,4996 | 6,6,4997 | 7,NULL,NULL`,
-			routes: "unreachable output"},
+			routes: "lateral identity"},
 		// A CONTROL, not a proof: the small fixture's key is `order_id` and
 		// its aggregate is `g`, so the two names do not collide and no slot
 		// is taken. Reverting the mint leaves this cell green, which is what

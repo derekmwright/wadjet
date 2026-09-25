@@ -61,6 +61,8 @@ func TestN1ATwoGroupedLateralsPublishTheirOwnColumns(t *testing.T) {
 				"JOIN LATERAL (SELECT i2.product AS q FROM lat_item i2 WHERE i2.order_id = o.id GROUP BY i2.product) s2 ON true " +
 				"ORDER BY o.id, p, q",
 			want: fiveCols + eightRows,
+			// Single-process since arc JP round 3 (dagplan.ErrLateralIdentityDistributed).
+			routed: map[string]string{"dag": "lateral identity +1", "dagshuf": "lateral identity +1"},
 		},
 		{
 			// ONE grouped lateral: the reorder's two-way SWAP alone, with no
@@ -89,6 +91,8 @@ func TestN1ATwoGroupedLateralsPublishTheirOwnColumns(t *testing.T) {
 				"1,Alice,150,Widget,1,Gadget,100 | 1,Alice,150,Widget,1,Widget,50 | " +
 				"2,Bob,200,Doohickey,1,Doohickey,125 | 2,Bob,200,Doohickey,1,Widget,75 | " +
 				"2,Bob,200,Widget,1,Doohickey,125 | 2,Bob,200,Widget,1,Widget,75",
+			// Single-process since arc JP round 3 (dagplan.ErrLateralIdentityDistributed).
+			routed: map[string]string{"dag": "lateral identity +1", "dagshuf": "lateral identity +1"},
 		},
 		{
 			// Two DIFFERENT tables, so the chain rebuild is not a property of
@@ -101,6 +105,8 @@ func TestN1ATwoGroupedLateralsPublishTheirOwnColumns(t *testing.T) {
 			want: "cols=[id:INT64 customer:STRING total:FLOAT64 p:STRING c:STRING] rows=4 | " +
 				"1,Alice,150,Gadget,Alice | 1,Alice,150,Widget,Alice | " +
 				"2,Bob,200,Doohickey,Bob | 2,Bob,200,Widget,Bob",
+			// Single-process since arc JP round 3 (dagplan.ErrLateralIdentityDistributed).
+			routed: map[string]string{"dag": "lateral identity +1", "dagshuf": "lateral identity +1"},
 		},
 		{
 			// NESTED: the second lateral correlates on the first's OUTPUT, so
@@ -114,6 +120,8 @@ func TestN1ATwoGroupedLateralsPublishTheirOwnColumns(t *testing.T) {
 			want: "cols=[id:INT64 customer:STRING total:FLOAT64 p:STRING am:FLOAT64] rows=6 | " +
 				"1,Alice,150,Gadget,100 | 1,Alice,150,Widget,50 | 1,Alice,150,Widget,75 | " +
 				"2,Bob,200,Doohickey,125 | 2,Bob,200,Widget,50 | 2,Bob,200,Widget,75",
+			// Single-process since arc JP round 3 (dagplan.ErrLateralIdentityDistributed).
+			routed: map[string]string{"dag": "lateral identity +1", "dagshuf": "lateral identity +1"},
 		},
 		{
 			// The LEFT spelling is not reorderable for a reason of its own
@@ -131,6 +139,8 @@ func TestN1ATwoGroupedLateralsPublishTheirOwnColumns(t *testing.T) {
 				"2,Bob,200,Doohickey,Doohickey | 2,Bob,200,Doohickey,Widget | " +
 				"2,Bob,200,Widget,Doohickey | 2,Bob,200,Widget,Widget | " +
 				"3,Carol,0,NULL,NULL",
+			// Single-process since arc JP round 3 (dagplan.ErrLateralIdentityDistributed).
+			routed: map[string]string{"dag": "lateral identity +1", "dagshuf": "lateral identity +1"},
 		},
 		{
 			// CONTROL: #988's own shape — two INDEPENDENT ungrouped laterals,
@@ -143,6 +153,8 @@ func TestN1ATwoGroupedLateralsPublishTheirOwnColumns(t *testing.T) {
 				"ORDER BY o.id",
 			want: "cols=[id:INT64 customer:STRING total:FLOAT64 mx:FLOAT64 mn:FLOAT64] rows=3 | " +
 				"1,Alice,150,100,50 | 2,Bob,200,125,75 | 3,Carol,0,NULL,NULL",
+			// Single-process since arc JP round 3 (dagplan.ErrLateralIdentityDistributed).
+			routed: map[string]string{"dag": "lateral identity +1", "dagshuf": "lateral identity +1"},
 		},
 		{
 			// CONTROL: an ORDINARY two-way inner join, which the cost model

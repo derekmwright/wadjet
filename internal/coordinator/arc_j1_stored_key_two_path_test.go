@@ -101,18 +101,20 @@ func TestArcJ1AStoredReservedColumnSurvivesALateral(t *testing.T) {
 		// disabled, so it is that keep and not the correlation family.
 		//
 		// Loud, never a wrong value, and the single-process arms answer.
+		// Since arc JP round 3 the plan runs single-process on the DAG arms
+		// too (a LEFT lateral over a grouped arm routes before stage
+		// planning, dagplan.ErrLateralIdentityDistributed), so both DAG pins
+		// agreed and are deleted; the cell names keep their history.
 		{name: "pinned-a-reserved-name-through-a-derived-star-is-loud-on-the-dag",
 			sql: `SELECT x.__key_0 AS mine FROM (SELECT * FROM jko o JOIN LATERAL (` +
 				`SELECT MAX(amount) AS mx FROM lat_item WHERE order_id = o.id) s ON true) x ` +
 				`ORDER BY 1`,
-			want:    `mine | mine-1 | mine-2`,
-			wantDAG: "ERR",
-			pgSays:  "mine-1 | mine-2 on every arm"},
+			want:   `mine | mine-1 | mine-2`,
+			pgSays: "mine-1 | mine-2 on every arm"},
 		{name: "pinned-the-same-when-the-inner-relation-stores-the-name-too",
-			sql:     `SELECT x.__key_0 AS mine FROM (SELECT * FROM jko o ` + lat + `) x ORDER BY 1`,
-			want:    `mine | mine-1 | mine-2`,
-			wantDAG: "ERR",
-			pgSays:  "mine-1 | mine-2 on every arm"},
+			sql:    `SELECT x.__key_0 AS mine FROM (SELECT * FROM jko o ` + lat + `) x ORDER BY 1`,
+			want:   `mine | mine-1 | mine-2`,
+			pgSays: "mine-1 | mine-2 on every arm"},
 		{name: "ctl-an-ORDINARY-column-through-the-same-derived-star-answers",
 			sql: `SELECT x.id AS i FROM (SELECT * FROM jko o JOIN LATERAL (` +
 				`SELECT MAX(amount) AS mx FROM lat_item WHERE order_id = o.id) s ON true) x ` +

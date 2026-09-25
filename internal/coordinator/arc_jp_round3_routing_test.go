@@ -48,13 +48,15 @@ func TestArcJP3CorrelatedLateralRoutesOrAnswersOnEveryArm(t *testing.T) {
 	dag := coord()
 	shuffled := coord(func(c *Config) { c.BroadcastBytesOverride = 1 })
 	fast := coord(func(c *Config) { c.LocalFastPathBytes = DefaultLocalFastPathBytes })
-	// Asked through an interface so the file compiles on a tree without the
-	// guard, where every routed cell then fails (the gate's at-base run).
+	// EVERY local route the coordinator counts, not the identity guard's
+	// alone: a shape an earlier refusal routes keeps that refusal's counter,
+	// and what is recorded is where the plan RAN.
 	routes := func(c *Coordinator) int64 {
-		if r, ok := any(c).(interface{ LateralIdentityLocalRoutes() int64 }); ok {
-			return r.LateralIdentityLocalRoutes()
+		var n int64
+		for _, v := range a2fReadRoutes(c).values {
+			n += v
 		}
-		return 0
+		return n + c.WindowOverLateralLocalRoutes() + c.PolicedWindowLocalRoutes() + c.ResidualSidesLocalRoutes()
 	}
 	type arm struct {
 		name  string
@@ -3738,7 +3740,7 @@ var jp3Postgres = map[string]string{
 	"lc/twoPreds":                         "rows=3 1,10 | 2,10 | 3,20",
 }
 
-// jp3Routed: the dag arm routed the cell to the coordinator-local pipeline.
+// jp3Routed: the dag arm ran the cell on the coordinator-local pipeline.
 var jp3Routed = map[string]bool{
 	"t1/bare/k/plain/unb/join/qs":         true,
 	"t1/bare/k/plain/unb/join/nm":         true,
@@ -4390,8 +4392,10 @@ var jp3Routed = map[string]bool{
 	"misc/commaLat":                       true,
 	"misc/whereOnS":                       true,
 	"misc/onNotTrue":                      true,
+	"misc/existsInBody":                   true,
 	"misc/innerExprKey":                   true,
 	"s/lateralAliasIsTable":               true,
+	"s/subqInnerSameTable":                true,
 	"n/countStarLateral":                  true,
 	"n/lateralGroupAlias":                 true,
 	"n/lateralDistinctAlias":              true,
@@ -4448,34 +4452,19 @@ var jp3Routed = map[string]bool{
 	"pin/nameHalfStar":                    true,
 	"pin/nameHalfQual":                    true,
 	"pin/nameHalfNamed":                   true,
-	"carry/bare/qk/dist/unb/join/qs":      true,
-	"carry/bare/qk/dist/unb/join/nm":      true,
 	"carry/bare/qk/dist/unb/left/qs":      true,
 	"carry/bare/qk/dist/unb/left/nm":      true,
-	"carry/bare/qk/dist/lim1/join/qs":     true,
-	"carry/bare/qk/dist/lim1/join/nm":     true,
 	"carry/bare/qk/dist/lim1/left/qs":     true,
 	"carry/bare/qk/dist/lim1/left/nm":     true,
-	"carry/bare/qid/dist/unb/join/qs":     true,
-	"carry/bare/qid/dist/unb/join/nm":     true,
 	"carry/bare/qid/dist/unb/left/qs":     true,
 	"carry/bare/qid/dist/unb/left/nm":     true,
-	"carry/bare/two/dist/unb/join/qs":     true,
-	"carry/bare/two/dist/unb/join/nm":     true,
 	"carry/bare/two/dist/unb/left/qs":     true,
 	"carry/bare/two/dist/unb/left/nm":     true,
-	"carry/bare/unq/dist/unb/join/qs":     true,
-	"carry/bare/unq/dist/unb/join/nm":     true,
 	"carry/bare/unq/dist/unb/left/qs":     true,
 	"carry/bare/unq/dist/unb/left/nm":     true,
-	"carry/bare/tbl/dist/unb/join/qs":     true,
-	"carry/bare/tbl/dist/unb/join/nm":     true,
 	"carry/bare/tbl/dist/unb/left/qs":     true,
 	"carry/bare/tbl/dist/unb/left/nm":     true,
-	"carry/bare/star/dist/unb/join/nm":    true,
 	"carry/bare/star/dist/unb/left/nm":    true,
-	"carry/bare/alias/dist/unb/join/qs":   true,
-	"carry/bare/alias/dist/unb/join/nm":   true,
 	"carry/bare/alias/dist/unb/left/qs":   true,
 	"carry/bare/alias/dist/unb/left/nm":   true,
 	"carry/bare/max/plain/unb/join/qs":    true,
@@ -4582,14 +4571,13 @@ var jp3Routed = map[string]bool{
 	"carry/fn/cnt/plain/unb/join/nm":      true,
 	"carry/fn/cnt/plain/unb/left/qs":      true,
 	"carry/fn/cnt/plain/unb/left/nm":      true,
-	"carry/grouped":                       true,
 	"carry/countBare":                     true,
 	"cx/nested":                           true,
 	"cx/leftMax":                          true,
-	"cx/innerGroup":                       true,
 	"cx/semiAbove":                        true,
 	"nn/str":                              true,
 	"nn/int":                              true,
+	"nn/exists":                           true,
 	"lc/leftStar":                         true,
 	"lc/leftExpr":                         true,
 	"lc/bareStar":                         true,

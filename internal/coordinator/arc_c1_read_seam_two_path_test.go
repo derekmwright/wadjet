@@ -59,6 +59,9 @@ func TestC1FTheReadTestSeam(t *testing.T) {
 			name: "select item, a column of the same lateral the list does NOT introduce -> the body -> ANSWERS",
 			sql:  "SELECT l.amount " + lat + "ORDER BY 1",
 			want: "cols=[amount:FLOAT64] rows=4 | 50 | 75 | 100 | 125",
+			// Runs single-process since arc JP round 3: the lateral arm carries a
+			// name the outer relation also carries (dagplan.ErrLateralIdentityDistributed).
+			routed: map[string]string{"dag": "LateralIdentity +1", "dag-morsel4": "LateralIdentity +1", "dag-shuffled": "LateralIdentity +1"},
 		},
 		{
 			name: "an aggregate's ARGUMENT -> the list -> LOUD",
@@ -153,6 +156,9 @@ func TestC1FTheReadTestSeam(t *testing.T) {
 			name: "sort term, bare, SHADOWED by an output alias -> the output column -> ANSWERS",
 			sql:  "SELECT u.total AS w " + lat + "ORDER BY w DESC",
 			want: "cols=[w:FLOAT64] rows=4 | 200 | 200 | 150 | 150",
+			// Runs single-process since arc JP round 3: the lateral arm carries a
+			// name the outer relation also carries (dagplan.ErrLateralIdentityDistributed).
+			routed: map[string]string{"dag": "LateralIdentity +1", "dag-morsel4": "LateralIdentity +1", "dag-shuffled": "LateralIdentity +1"},
 		},
 		{
 			// THE OTHER HALF OF PostgreSQL'S RULE (round-7 review, B1): "an
@@ -226,27 +232,42 @@ func TestC1FTheReadTestSeam(t *testing.T) {
 				"WHERE i.order_id = u.id) l(w) ORDER BY w DESC",
 			want: "cols=[w:FLOAT64] rows=4 | -150 | -150 | -200 | -200",
 			why:  "PostgreSQL answers -150,-150,-200,-200 — the output column, which is the half this branch applies",
+			// Runs single-process since arc JP round 3: the lateral arm carries a
+			// name the outer relation also carries (dagplan.ErrLateralIdentityDistributed).
+			routed: map[string]string{"dag": "LateralIdentity +1", "dag-morsel4": "LateralIdentity +1", "dag-shuffled": "LateralIdentity +1"},
 		},
 		{
 			name: "sort term, bare, an output alias the list does not introduce -> the output column -> ANSWERS",
 			sql: "SELECT u.id AS w FROM lat_ord u, LATERAL (SELECT * FROM lat_item i " +
 				"WHERE i.order_id = u.id) l(x) ORDER BY w DESC",
 			want: "cols=[w:INT64] rows=4 | 2 | 2 | 1 | 1",
+			// Runs single-process since arc JP round 3: the lateral arm carries a
+			// name the outer relation also carries (dagplan.ErrLateralIdentityDistributed).
+			routed: map[string]string{"dag": "LateralIdentity +1", "dag-morsel4": "LateralIdentity +1", "dag-shuffled": "LateralIdentity +1"},
 		},
 		{
 			name: "sort term, an ORDINAL -> the output position -> ANSWERS",
 			sql:  "SELECT u.id " + lat + "ORDER BY 1",
 			want: "cols=[id:INT64] rows=4 | 1 | 1 | 2 | 2",
+			// Runs single-process since arc JP round 3: the lateral arm carries a
+			// name the outer relation also carries (dagplan.ErrLateralIdentityDistributed).
+			routed: map[string]string{"dag": "LateralIdentity +1", "dag-morsel4": "LateralIdentity +1", "dag-shuffled": "LateralIdentity +1"},
 		},
 		{
 			name: "sort term, a column of the same lateral the list does not introduce -> the body -> ANSWERS",
 			sql:  "SELECT u.id " + lat + "ORDER BY l.amount DESC",
 			want: "cols=[id:INT64] rows=4 | 2 | 1 | 2 | 1",
+			// Runs single-process since arc JP round 3: the lateral arm carries a
+			// name the outer relation also carries (dagplan.ErrLateralIdentityDistributed).
+			routed: map[string]string{"dag": "LateralIdentity +1", "dag-morsel4": "LateralIdentity +1", "dag-shuffled": "LateralIdentity +1"},
 		},
 		{
 			name: "sort term, the OUTER column -> the outer relation -> ANSWERS",
 			sql:  "SELECT u.id " + lat + "ORDER BY u.id",
 			want: "cols=[id:INT64] rows=4 | 1 | 1 | 2 | 2",
+			// Runs single-process since arc JP round 3: the lateral arm carries a
+			// name the outer relation also carries (dagplan.ErrLateralIdentityDistributed).
+			routed: map[string]string{"dag": "LateralIdentity +1", "dag-morsel4": "LateralIdentity +1", "dag-shuffled": "LateralIdentity +1"},
 		},
 
 		// ── A LATER FROM ITEM'S BODY ────────────────────────────────────
@@ -326,6 +347,9 @@ func TestC1FTheReadTestSeam(t *testing.T) {
 			name: "a star qualified with the OUTER relation -> that relation's names -> ANSWERS",
 			sql:  "SELECT u.* " + lat + "ORDER BY 1",
 			want: "cols=[id:INT64 customer:STRING total:FLOAT64] rows=4 | 1,Alice,150 | 1,Alice,150 | 2,Bob,200 | 2,Bob,200",
+			// Runs single-process since arc JP round 3: the lateral arm carries a
+			// name the outer relation also carries (dagplan.ErrLateralIdentityDistributed).
+			routed: map[string]string{"dag": "LateralIdentity +1", "dag-morsel4": "LateralIdentity +1", "dag-shuffled": "LateralIdentity +1"},
 		},
 		{
 			name: "a star qualified with a THIRD relation -> that relation's names -> ANSWERS",
@@ -333,6 +357,9 @@ func TestC1FTheReadTestSeam(t *testing.T) {
 				"WHERE i.order_id = u.id) l(w) ORDER BY 1",
 			want: "cols=[customer:STRING] rows=12 | Alice | Alice | Alice | Alice | Bob | Bob | Bob | Bob | " +
 				"Carol | Carol | Carol | Carol",
+			// Runs single-process since arc JP round 3: the lateral arm carries a
+			// name the outer relation also carries (dagplan.ErrLateralIdentityDistributed).
+			routed: map[string]string{"dag": "LateralIdentity +1", "dag-morsel4": "LateralIdentity +1", "dag-shuffled": "LateralIdentity +1"},
 		},
 		{
 			name: "ONE BLOCK UP through a bare star -> the list -> LOUD",
@@ -346,6 +373,9 @@ func TestC1FTheReadTestSeam(t *testing.T) {
 			sql: "SELECT x.id FROM (SELECT u.* FROM lat_ord u, LATERAL (SELECT * FROM lat_item i " +
 				"WHERE i.order_id = u.id) l(w)) x ORDER BY 1",
 			want: "cols=[id:INT64] rows=4 | 1 | 1 | 2 | 2",
+			// Runs single-process since arc JP round 3: the lateral arm carries a
+			// name the outer relation also carries (dagplan.ErrLateralIdentityDistributed).
+			routed: map[string]string{"dag": "LateralIdentity +1", "dag-morsel4": "LateralIdentity +1", "dag-shuffled": "LateralIdentity +1"},
 		},
 
 		// ── A NESTED SUBQUERY ───────────────────────────────────────────
@@ -365,10 +395,7 @@ func TestC1FTheReadTestSeam(t *testing.T) {
 			// distributed stage of its own; the coordinator answers it
 			// in-process. Pre-existing, and asserted so a right-to-routed move
 			// stays visible.
-			routed: map[string]string{
-				"dag": "ScalarProjection +1", "dag-shuffled": "ScalarProjection +1",
-				"dag-morsel4": "ScalarProjection +1",
-			},
+			routed: map[string]string{"dag": "LateralIdentity +1", "dag-morsel4": "LateralIdentity +1", "dag-shuffled": "LateralIdentity +1"},
 		},
 		{
 			// PINNED, and NOT this lane's: the walk stops at a subquery, whose
@@ -382,13 +409,11 @@ func TestC1FTheReadTestSeam(t *testing.T) {
 			sql:  "SELECT u.id " + lat + "WHERE EXISTS (SELECT 1 FROM lat_item j WHERE j.id = l.w) ORDER BY 1",
 			want: "cols=[id:INT64] rows=0",
 			why:  "PostgreSQL answers 1,1,2,2; main answers zero rows identically — a pre-existing gap, filed",
-			// The shuffled arm does not even produce the wrong answer: the
-			// dropped rename leaves the shuffle keying on a column no schema
-			// carries. Loud, and pinned as measured.
-			pin: map[string]string{
-				"dag-shuffled": `ERR partitioned shuffle: key "w" not in schema`,
-			},
-			routed: map[string]string{},
+			// The shuffled arm failed loudly on a shuffle key no schema carried
+			// until arc JP round 3 ran the plan single-process on every DAG
+			// arm (the lateral publishes lat_item's `id` beside lat_ord's):
+			// it now answers what the single-process arms answer.
+			routed: map[string]string{"dag": "LateralIdentity +1", "dag-morsel4": "LateralIdentity +1", "dag-shuffled": "LateralIdentity +1"},
 		},
 		{
 			// Since arc C2 landed (ADR-0021 §1l), a FROM-less scalar subquery
@@ -410,6 +435,9 @@ func TestC1FTheReadTestSeam(t *testing.T) {
 			sql: "SELECT l.amount FROM lat_ord u, LATERAL (SELECT * FROM lat_item i " +
 				"WHERE i.order_id = u.id) l ORDER BY 1",
 			want: "cols=[amount:FLOAT64] rows=4 | 50 | 75 | 100 | 125",
+			// Runs single-process since arc JP round 3: the lateral arm carries a
+			// name the outer relation also carries (dagplan.ErrLateralIdentityDistributed).
+			routed: map[string]string{"dag": "LateralIdentity +1", "dag-morsel4": "LateralIdentity +1", "dag-shuffled": "LateralIdentity +1"},
 		},
 		{
 			name: "control: a list over a NAMED body -> the rename is applied -> ANSWERS",

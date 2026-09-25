@@ -177,6 +177,7 @@ var f1RouteCounters = []struct {
 	{"group key", (*Coordinator).GroupKeyLocalRoutes},
 	{"unreachable output", (*Coordinator).UnreachableOutputLocalRoutes},
 	{"scalar projection", (*Coordinator).ScalarProjectionLocalRoutes},
+	{"lateral identity", (*Coordinator).LateralIdentityLocalRoutes},
 }
 
 func f1Counters(c *Coordinator) []int64 {

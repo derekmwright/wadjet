@@ -347,7 +347,7 @@ func TestC1ATableLessLateralIsAProjectionOverTheOuterRow(t *testing.T) {
 			// It EXECUTES as stages on all three DAG arms — no counter moves —
 			// which is the other half of the claim: the lowering did not push
 			// a shape it does not own onto the local route.
-			routed: map[string]string{},
+			routed: map[string]string{"dag": "LateralIdentity +1", "dag-morsel4": "LateralIdentity +1", "dag-shuffled": "LateralIdentity +1"},
 		},
 		{
 			// THE OUTER SIDE NEED NOT BE A SCAN. `inputColDecls` stops at a
@@ -418,14 +418,14 @@ func TestC1ATableLessLateralIsAProjectionOverTheOuterRow(t *testing.T) {
 				"WHERE i.order_id = u.id) l(w) ORDER BY 1",
 			want: "cols=[id:INT64] rows=4 | 1 | 1 | 2 | 2",
 			// It EXECUTES as stages on all three DAG arms.
-			routed: map[string]string{},
+			routed: map[string]string{"dag": "LateralIdentity +1", "dag-morsel4": "LateralIdentity +1", "dag-shuffled": "LateralIdentity +1"},
 		},
 		{
 			name: "a star body, reading a column the list does NOT rename",
 			sql: "SELECT l.amount FROM lat_ord u, LATERAL (SELECT * FROM lat_item i " +
 				"WHERE i.order_id = u.id) l(w) ORDER BY 1",
 			want:   "cols=[amount:FLOAT64] rows=4 | 50 | 75 | 100 | 125",
-			routed: map[string]string{},
+			routed: map[string]string{"dag": "LateralIdentity +1", "dag-morsel4": "LateralIdentity +1", "dag-shuffled": "LateralIdentity +1"},
 		},
 		{
 			// READ, and therefore refused: the width the rename needs is not
@@ -460,7 +460,7 @@ func TestC1ATableLessLateralIsAProjectionOverTheOuterRow(t *testing.T) {
 			sql: "SELECT l.amount FROM lat_ord u, LATERAL (SELECT * FROM lat_item i " +
 				"WHERE i.order_id = u.id) l ORDER BY 1",
 			want:   "cols=[amount:FLOAT64] rows=4 | 50 | 75 | 100 | 125",
-			routed: map[string]string{},
+			routed: map[string]string{"dag": "LateralIdentity +1", "dag-morsel4": "LateralIdentity +1", "dag-shuffled": "LateralIdentity +1"},
 		},
 		{
 			// THE READ IS FOUND BY THE ONE WALK (round-4 review, B2). The old
@@ -533,7 +533,7 @@ func TestC1ATableLessLateralIsAProjectionOverTheOuterRow(t *testing.T) {
 			name:   "control: a star qualified with the OUTER relation is not a read",
 			sql:    "SELECT u.* FROM lat_ord u, LATERAL (SELECT * FROM lat_item i WHERE i.order_id = u.id) l(w) ORDER BY 1",
 			want:   "cols=[id:INT64 customer:STRING total:FLOAT64] rows=4 | 1,Alice,150 | 1,Alice,150 | 2,Bob,200 | 2,Bob,200",
-			routed: map[string]string{},
+			routed: map[string]string{"dag": "LateralIdentity +1", "dag-morsel4": "LateralIdentity +1", "dag-shuffled": "LateralIdentity +1"},
 		},
 		{
 			// CONTROL: the same qualified star beside a named outer column, so
@@ -544,10 +544,7 @@ func TestC1ATableLessLateralIsAProjectionOverTheOuterRow(t *testing.T) {
 			// The star expanded beside the same column under another name is a
 			// DAG-unbuildable output, so the DAG arms answer it in-process —
 			// again an existing disposition, and the VALUES are the same.
-			routed: map[string]string{
-				"dag": "UnreachableOutput +1", "dag-shuffled": "UnreachableOutput +1",
-				"dag-morsel4": "UnreachableOutput +1",
-			},
+			routed: map[string]string{"dag": "LateralIdentity +1", "dag-morsel4": "LateralIdentity +1", "dag-shuffled": "LateralIdentity +1"},
 		},
 		{
 			name:   "a read inside COALESCE",
@@ -621,7 +618,7 @@ func TestC1ATableLessLateralIsAProjectionOverTheOuterRow(t *testing.T) {
 				"WHERE i.order_id = u.id) l(w) ORDER BY 1",
 			want: "cols=[w:INT64] rows=4 | 1 | 2 | 3 | 4",
 			// It EXECUTES as stages on all three DAG arms.
-			routed: map[string]string{},
+			routed: map[string]string{"dag": "LateralIdentity +1", "dag-morsel4": "LateralIdentity +1", "dag-shuffled": "LateralIdentity +1"},
 		},
 		{
 			// PINNED, and NOT the lateral's: an ARRAY literal declares STRING

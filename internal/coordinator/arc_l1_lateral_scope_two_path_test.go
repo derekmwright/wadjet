@@ -619,14 +619,12 @@ var l1RefusalPins = map[string][]string{
 	// four of these before; a refusal is a property of the plan (§1q's rule).
 	"R2/boundLiftedFrac":  {l1BoundNoKey},
 	"R2/boundLiftedPlain": {l1BoundNoKey},
-	// A LEFT lateral whose lifted column the outer relation contests: refused
-	// on every arm. The DAG answered it right on THIS fixture at base and
-	// wrong (NULL pads) on arc LT's, and in round 2 the same LT statement
-	// padded on one run and routed on the next — not one answer, so the DAG
-	// refuses the OUTER spelling (round-2 review B5, stated in the notes).
-	"R4/outerContestsName": {l1LiftedRefContested},
-	"R4/distinctBody":      {l1LiftedRefCannotPublish},
-	"R4/aliasCollides":     {l1LiftedRefCannotPublish},
+	// `R4/outerContestsName` (a LEFT lateral whose lifted column the outer
+	// relation contests) was refused on every arm from arc LT until arc JP
+	// round 3 spelled the lifted predicate through the lateral's alias and
+	// routed the DAG arms single-process: it answers PostgreSQL's rows.
+	"R4/distinctBody":  {l1LiftedRefCannotPublish},
+	"R4/aliasCollides": {l1LiftedRefCannotPublish},
 	// `R4/bareStar` (a LEFT lateral under a bare star): the single arms refuse
 	// with the star sentence (round 2 — the decline is theirs alone), the DAG
 	// arms with arc JR's residual refusal, as at base.
@@ -762,11 +760,8 @@ var l1ArmPins = map[string]map[string]string{
 		"dag-morsel4":  "ERR ~sort: key column \"m\" does not exist in the input schema",
 		"dag-shuffled": "ERR ~sort: key column \"m\" does not exist in the input schema",
 	},
-	"LIFTED/twoColumns": {
-		"dag":          "ERR ~sort: key column \"m\" does not exist in the input schema",
-		"dag-morsel4":  "ERR ~sort: key column \"m\" does not exist in the input schema",
-		"dag-shuffled": "ERR ~sort: key column \"m\" does not exist in the input schema",
-	},
+	// `LIFTED/twoColumns` publishes `i.id AS k` beside lat_ord's `id`: it
+	// runs single-process since arc JP round 3 and answers; its pin is gone.
 	"OUTERREF/whereInequality": {
 		"dag":         "ERR ~sort: key column \"m\" does not exist in the input schema",
 		"dag-morsel4": "ERR ~sort: key column \"m\" does not exist in the input schema",
@@ -785,11 +780,9 @@ var l1ArmPins = map[string]map[string]string{
 		"dag-morsel4":  "rows=6 1,50 | 1,50 | 1,50 | 2,100 | 2,100 | 2,100",
 		"dag-shuffled": "rows=6 1,50 | 1,50 | 1,50 | 2,100 | 2,100 | 2,100",
 	},
-	"UNCORRLAT/collidingName": {
-		"dag":          "rows=3 1,150 | 2,200 | 3,0",
-		"dag-morsel4":  "rows=3 1,150 | 2,200 | 3,0",
-		"dag-shuffled": "rows=3 1,150 | 2,200 | 3,0",
-	},
+	// `UNCORRLAT/collidingName` (an aggregate aliased `total` beside
+	// lat_ord's `total`) read the outer column on the DAG; it runs
+	// single-process since arc JP round 3 and answers. Its pin is gone.
 }
 
 // l1RefusesLikePostgres names the cells where EVERY arm refuses and

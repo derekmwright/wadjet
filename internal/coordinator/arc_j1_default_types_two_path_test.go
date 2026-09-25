@@ -298,14 +298,20 @@ func TestArcJ1APublishedKeyIsAUserColumn(t *testing.T) {
 				{"left", `SELECT * ` + lat("LEFT", tc.items), tc.wantLeft},
 			} {
 				for _, arm := range arms {
-					var routesBefore int64
+					var routesBefore, idBefore int64
 					if arm.coord != nil {
-						routesBefore = arm.coord.LateralProjectionLocalRoutes()
+						routesBefore, idBefore = arm.coord.LateralProjectionLocalRoutes(), arm.coord.LateralIdentityLocalRoutes()
 					}
 					cols, rows, err := arm.run(kind.sql)
 					if arm.coord != nil {
 						routed := arm.coord.LateralProjectionLocalRoutes() > routesBefore
-						if routed != tc.wantRouted {
+						// A LEFT lateral over a grouped arm routes single-process
+						// before stage planning since arc JP round 3
+						// (dagplan.ErrLateralIdentityDistributed): the
+						// lateral-projection refusal is then never asked, and the
+						// plan's routing is recorded by TestArcJP3's corpus.
+						identity := arm.coord.LateralIdentityLocalRoutes() > idBefore
+						if !identity && routed != tc.wantRouted {
 							t.Fatalf("%s/%s routed=%v, want %v — a star over a lateral "+
 								"whose projection its stage does not publish is ROUTED, "+
 								"and one whose projection IS its stream is not\n  SQL: %s",
@@ -468,14 +474,15 @@ func TestArcJ1AStarOverAnUnstageableLateralProjectionIsRouted(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			for _, arm := range arms {
-				var routesBefore int64
+				var routesBefore, idBefore int64
 				if arm.coord != nil {
-					routesBefore = arm.coord.LateralProjectionLocalRoutes()
+					routesBefore, idBefore = arm.coord.LateralProjectionLocalRoutes(), arm.coord.LateralIdentityLocalRoutes()
 				}
 				cols, rows, err := arm.run(tc.sql)
 				if arm.coord != nil {
 					routed := arm.coord.LateralProjectionLocalRoutes() > routesBefore
-					if routed != tc.wantRouted {
+					identity := arm.coord.LateralIdentityLocalRoutes() > idBefore // see above
+					if !identity && routed != tc.wantRouted {
 						t.Fatalf("%s arm routed=%v, want %v\n  SQL: %s",
 							arm.name, routed, tc.wantRouted, tc.sql)
 					}

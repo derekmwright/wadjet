@@ -59,6 +59,8 @@ func TestM1AEveryLateralJoinDropsItsOwnSlot(t *testing.T) {
 			name: "988 two independent laterals over one table publish five columns",
 			sql:  "SELECT * " + two + "ORDER BY o.id",
 			want: fiveCols + fiveRows,
+			// Single-process since arc JP round 3 (dagplan.ErrLateralIdentityDistributed).
+			routed: map[string]string{"dag": "lateral identity +1", "dagshuf": "lateral identity +1"},
 		},
 		{
 			// THE SILENT HALF. An ungrouped aggregate over an empty input
@@ -73,6 +75,8 @@ func TestM1AEveryLateralJoinDropsItsOwnSlot(t *testing.T) {
 				"ORDER BY o.id",
 			want: "cols=[id:INT64 customer:STRING total:FLOAT64 mx:INT64 mn:INT64] rows=3 | " +
 				"1,Alice,150,3,3 | 2,Bob,200,3,3 | 3,Carol,0,1,1",
+			// Single-process since arc JP round 3 (dagplan.ErrLateralIdentityDistributed).
+			routed: map[string]string{"dag": "lateral identity +1", "dagshuf": "lateral identity +1"},
 		},
 		{
 			// THREE laterals: the chain absorbs twice, so a fix that carries
@@ -86,6 +90,8 @@ func TestM1AEveryLateralJoinDropsItsOwnSlot(t *testing.T) {
 				"ORDER BY o.id",
 			want: "cols=[id:INT64 customer:STRING total:FLOAT64 mx:FLOAT64 mn:FLOAT64 sm:FLOAT64] rows=3 | " +
 				"1,Alice,150,100,50,150 | 2,Bob,200,125,75,200 | 3,Carol,0,NULL,NULL,NULL",
+			// Single-process since arc JP round 3 (dagplan.ErrLateralIdentityDistributed).
+			routed: map[string]string{"dag": "lateral identity +1", "dagshuf": "lateral identity +1"},
 		},
 		{
 			// Two laterals over DIFFERENT tables, so the shape is not a
@@ -97,6 +103,8 @@ func TestM1AEveryLateralJoinDropsItsOwnSlot(t *testing.T) {
 				"ORDER BY o.id",
 			want: "cols=[id:INT64 customer:STRING total:FLOAT64 mx:FLOAT64 c:INT64] rows=3 | " +
 				"1,Alice,150,100,1 | 2,Bob,200,125,1 | 3,Carol,0,NULL,1",
+			// Single-process since arc JP round 3 (dagplan.ErrLateralIdentityDistributed).
+			routed: map[string]string{"dag": "lateral identity +1", "dagshuf": "lateral identity +1"},
 		},
 		{
 			// NESTED: the second lateral correlates on the FIRST one's output,
@@ -110,6 +118,8 @@ func TestM1AEveryLateralJoinDropsItsOwnSlot(t *testing.T) {
 				"ORDER BY o.id",
 			want: "cols=[id:INT64 customer:STRING total:FLOAT64 mx:FLOAT64 c:INT64] rows=3 | " +
 				"1,Alice,150,100,1 | 2,Bob,200,125,1 | 3,Carol,0,NULL,0",
+			// Single-process since arc JP round 3 (dagplan.ErrLateralIdentityDistributed).
+			routed: map[string]string{"dag": "lateral identity +1", "dagshuf": "lateral identity +1"},
 		},
 		{
 			// A DERIVED star over the whole thing: the drop is below every
@@ -118,12 +128,16 @@ func TestM1AEveryLateralJoinDropsItsOwnSlot(t *testing.T) {
 			name: "988 a derived star over two independent laterals",
 			sql:  "SELECT * FROM (SELECT * " + two + ") d ORDER BY d.id",
 			want: fiveCols + fiveRows,
+			// Single-process since arc JP round 3 (dagplan.ErrLateralIdentityDistributed).
+			routed: map[string]string{"dag": "lateral identity +1", "dagshuf": "lateral identity +1"},
 		},
 		{
 			// A CTE's star, the third consumer of the same drop.
 			name: "988 a CTE star over two independent laterals",
 			sql:  "WITH c AS (SELECT * " + two + ") SELECT * FROM c ORDER BY id",
 			want: fiveCols + fiveRows,
+			// Single-process since arc JP round 3 (dagplan.ErrLateralIdentityDistributed).
+			routed: map[string]string{"dag": "lateral identity +1", "dagshuf": "lateral identity +1"},
 		},
 		{
 			// The LEFT spelling of both joins, which is what an outer row the
@@ -135,6 +149,8 @@ func TestM1AEveryLateralJoinDropsItsOwnSlot(t *testing.T) {
 				"LEFT JOIN LATERAL (SELECT MIN(amount) AS mn FROM lat_item i2 WHERE i2.order_id = o.id) s2 ON true " +
 				"ORDER BY o.id",
 			want: fiveCols + fiveRows,
+			// Single-process since arc JP round 3 (dagplan.ErrLateralIdentityDistributed).
+			routed: map[string]string{"dag": "lateral identity +1", "dagshuf": "lateral identity +1"},
 		},
 		{
 			// CONTROL: a QUALIFIED star names one relation, so it never
@@ -143,6 +159,8 @@ func TestM1AEveryLateralJoinDropsItsOwnSlot(t *testing.T) {
 			sql:  "SELECT o.*, s2.mn " + two + "ORDER BY o.id",
 			want: "cols=[id:INT64 customer:STRING total:FLOAT64 mn:FLOAT64] rows=3 | " +
 				"1,Alice,150,50 | 2,Bob,200,75 | 3,Carol,0,NULL",
+			// Single-process since arc JP round 3 (dagplan.ErrLateralIdentityDistributed).
+			routed: map[string]string{"dag": "lateral identity +1", "dagshuf": "lateral identity +1"},
 		},
 		{
 			// CONTROL: ONE lateral. Its join keeps a stage of its own, so its
@@ -154,6 +172,8 @@ func TestM1AEveryLateralJoinDropsItsOwnSlot(t *testing.T) {
 				"ORDER BY o.id",
 			want: "cols=[id:INT64 customer:STRING total:FLOAT64 mx:FLOAT64] rows=3 | " +
 				"1,Alice,150,100 | 2,Bob,200,125 | 3,Carol,0,NULL",
+			// Single-process since arc JP round 3 (dagplan.ErrLateralIdentityDistributed).
+			routed: map[string]string{"dag": "lateral identity +1", "dagshuf": "lateral identity +1"},
 		},
 	})
 }

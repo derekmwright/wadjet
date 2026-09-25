@@ -20,6 +20,16 @@ var n1RoutedLocal = map[string]string{
 	"dagshuf": "unreachable output +1",
 }
 
+// n1RoutedIdentity: since arc JP round 3 a LEFT lateral over a grouped arm,
+// and a second grouped lateral whose items share a name with the first's,
+// route single-process before stage planning
+// (dagplan.ErrLateralIdentityDistributed) — the same pipeline, under that
+// refusal's counter.
+var n1RoutedIdentity = map[string]string{
+	"dag":     "lateral identity +1",
+	"dagshuf": "lateral identity +1",
+}
+
 // A LATERAL WHOSE INNER BLOCK **GROUPS** IS AN AGGREGATE TO THE LOWERING —
 // #1008, four arms, every answer measured on live postgres:17-alpine.
 //
@@ -69,7 +79,7 @@ func TestN1AGroupedLateralAnswersItsRows(t *testing.T) {
 			want: "cols=[id:INT64 customer:STRING p:STRING q:STRING] rows=8 | " +
 				"1,Alice,Gadget,Gadget | 1,Alice,Gadget,Widget | 1,Alice,Widget,Gadget | 1,Alice,Widget,Widget | " +
 				"2,Bob,Doohickey,Doohickey | 2,Bob,Doohickey,Widget | 2,Bob,Widget,Doohickey | 2,Bob,Widget,Widget",
-			routed: n1RoutedLocal,
+			routed: n1RoutedIdentity,
 		},
 		{
 			// ONE grouped lateral: the defect is not a property of having two.
@@ -96,7 +106,7 @@ func TestN1AGroupedLateralAnswersItsRows(t *testing.T) {
 				"1,Alice,Gadget,Gadget | 1,Alice,Gadget,Widget | 1,Alice,Widget,Gadget | 1,Alice,Widget,Widget | " +
 				"2,Bob,Doohickey,Doohickey | 2,Bob,Doohickey,Widget | 2,Bob,Widget,Doohickey | 2,Bob,Widget,Widget | " +
 				"3,Carol,NULL,NULL",
-			routed: n1RoutedLocal,
+			routed: n1RoutedIdentity,
 		},
 		{
 			// Two DIFFERENT tables, so the shape is not a property of reading
@@ -108,7 +118,7 @@ func TestN1AGroupedLateralAnswersItsRows(t *testing.T) {
 				"ORDER BY o.id, s.p, s2.c",
 			want: "cols=[id:INT64 p:STRING c:STRING] rows=4 | " +
 				"1,Gadget,Alice | 1,Widget,Alice | 2,Doohickey,Bob | 2,Widget,Bob",
-			routed: n1RoutedLocal,
+			routed: n1RoutedIdentity,
 		},
 		{
 			// NESTED: the second grouped lateral correlates on the FIRST
@@ -121,7 +131,7 @@ func TestN1AGroupedLateralAnswersItsRows(t *testing.T) {
 				"ORDER BY o.id, s.p, s2.am",
 			want: "cols=[id:INT64 p:STRING am:FLOAT64] rows=6 | " +
 				"1,Gadget,100 | 1,Widget,50 | 1,Widget,75 | 2,Doohickey,125 | 2,Widget,50 | 2,Widget,75",
-			routed: n1RoutedLocal,
+			routed: n1RoutedIdentity,
 		},
 		{
 			// CONTROL: an inner that both GROUPS and AGGREGATES always
@@ -145,6 +155,8 @@ func TestN1AGroupedLateralAnswersItsRows(t *testing.T) {
 			// …and it EXECUTES as stages, where every grouped cell above
 			// routes local: the disposition is part of the control.
 			want: "cols=[id:INT64 mx:FLOAT64] rows=3 | 1,100 | 2,125 | 3,NULL",
+			// Single-process since arc JP round 3 (dagplan.ErrLateralIdentityDistributed).
+			routed: map[string]string{"dag": "lateral identity +1", "dagshuf": "lateral identity +1"},
 		},
 	})
 }

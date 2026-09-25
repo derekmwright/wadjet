@@ -137,6 +137,11 @@ type arcD5Cell struct {
 	wantScalarProjRoutes  int64
 	wantInSubqueryRoutes  int64
 	wantUnreachableRoutes int64
+	// wantLateralIdentityRoutes: an ungrouped aggregate LATERAL lowers to a
+	// LEFT join over a grouped arm, which runs single-process since arc JP
+	// round 3 (dagplan.ErrLateralIdentityDistributed) before stage planning
+	// could refuse it for an unreachable output.
+	wantLateralIdentityRoutes int64
 	// wantSQLState, when set, is the SQLSTATE every arm's error must carry.
 	// A documented refusal is a promise about the CODE as much as the text,
 	// and the code is what a client branches on.
@@ -542,13 +547,13 @@ func arcD5LateralCells() []arcD5Cell {
 		{issue: "#767", name: "inner_lateral_ungrouped_count_keeps_the_unmatched_row",
 			sql: `SELECT o.customer AS c, s.n AS n FROM lat_ord o ` + lat +
 				`ON true ORDER BY o.customer`,
-			want:                  []string{"c=Alice|n=int64:2", "c=Bob|n=int64:2", "c=Carol|n=int64:0"},
-			wantUnreachableRoutes: 1},
+			want:                      []string{"c=Alice|n=int64:2", "c=Bob|n=int64:2", "c=Carol|n=int64:0"},
+			wantLateralIdentityRoutes: 1},
 		{issue: "#767", name: "left_lateral_ungrouped_count_reads_zero_not_null",
 			sql: `SELECT o.customer AS c, s.n AS n FROM lat_ord o ` + left +
 				`ON true ORDER BY o.customer`,
-			want:                  []string{"c=Alice|n=int64:2", "c=Bob|n=int64:2", "c=Carol|n=int64:0"},
-			wantUnreachableRoutes: 1},
+			want:                      []string{"c=Alice|n=int64:2", "c=Bob|n=int64:2", "c=Carol|n=int64:0"},
+			wantLateralIdentityRoutes: 1},
 
 		// --- A LATER RIGHT OR FULL JOIN NULL-EXTENDS THE LATERAL'S COLUMNS,
 		// and that is where BOTH halves of the repair stop being entitled to
@@ -722,7 +727,7 @@ func arcD5LateralCells() []arcD5Cell {
 				`ON true LEFT JOIN lat_ord c2 ON c2.id = o.id AND c2.id < 3 ORDER BY 1`,
 			want: []string{"c=Alice|n=int64:2|cid=int64:1", "c=Bob|n=int64:2|cid=int64:2",
 				"c=Carol|n=int64:0|cid=NULL"},
-			wantUnreachableRoutes: 1},
+			wantLateralIdentityRoutes: 1},
 
 		// --- THE `ON` MATRIX. The review found six PostgreSQL-correct answers
 		// turned wrong by a repair that forced LEFT and defaulted the COUNT
@@ -734,40 +739,40 @@ func arcD5LateralCells() []arcD5Cell {
 		{issue: "#767", name: "inner_on_over_the_lateral_aggregate",
 			sql: `SELECT o.customer AS c, s.n AS n FROM lat_ord o ` + lat +
 				`ON s.n > 1 ORDER BY o.customer`,
-			want:                  []string{"c=Alice|n=int64:2", "c=Bob|n=int64:2"},
-			wantUnreachableRoutes: 1},
+			want:                      []string{"c=Alice|n=int64:2", "c=Bob|n=int64:2"},
+			wantLateralIdentityRoutes: 1},
 		{issue: "#767", name: "inner_on_no_row_can_satisfy",
 			sql: `SELECT o.customer AS c, s.n AS n FROM lat_ord o ` + lat +
 				`ON s.n > 5 ORDER BY o.customer`,
-			want:                  []string{},
-			wantUnreachableRoutes: 1,
-			pgSays:                "no rows — and the repair printed three, with n=0 where the counts are 2"},
+			want:                      []string{},
+			wantLateralIdentityRoutes: 1,
+			pgSays:                    "no rows — and the repair printed three, with n=0 where the counts are 2"},
 		// The one the DECLINE alone would still get wrong, and the reason
 		// this is a pad-then-filter and not a decline: the DEFAULT row PASSES
 		// this ON, so PostgreSQL keeps the unmatched outer row.
 		{issue: "#767", name: "inner_on_the_default_row_satisfies",
 			sql: `SELECT o.customer AS c, s.n AS n FROM lat_ord o ` + lat +
 				`ON s.n = 0 ORDER BY o.customer`,
-			want:                  []string{"c=Carol|n=int64:0"},
-			wantUnreachableRoutes: 1,
-			pgSays:                "Carol at 0 — the lateral's own empty-input row, kept by an ON it satisfies"},
+			want:                      []string{"c=Carol|n=int64:0"},
+			wantLateralIdentityRoutes: 1,
+			pgSays:                    "Carol at 0 — the lateral's own empty-input row, kept by an ON it satisfies"},
 		{issue: "#767", name: "inner_on_names_only_the_outer_row",
 			sql: `SELECT o.customer AS c, s.n AS n FROM lat_ord o ` + lat +
 				`ON o.total > 100 ORDER BY o.customer`,
-			want:                  []string{"c=Alice|n=int64:2", "c=Bob|n=int64:2"},
-			wantUnreachableRoutes: 1},
+			want:                      []string{"c=Alice|n=int64:2", "c=Bob|n=int64:2"},
+			wantLateralIdentityRoutes: 1},
 		{issue: "#767", name: "inner_on_constant_false",
 			sql: `SELECT o.customer AS c, s.n AS n FROM lat_ord o ` + lat +
 				`ON 1 = 0 ORDER BY o.customer`,
-			want:                  []string{},
-			wantUnreachableRoutes: 1},
+			want:                      []string{},
+			wantLateralIdentityRoutes: 1},
 		{issue: "#767", name: "inner_on_over_a_non_count_aggregate",
 			sql: `SELECT o.customer AS c, s.mn AS mn FROM lat_ord o JOIN LATERAL (` +
 				`SELECT MIN(amount) AS mn FROM lat_item WHERE order_id = o.id) s ` +
 				`ON s.mn > 60 ORDER BY o.customer`,
-			want:                  []string{"c=Bob|mn=float:75"},
-			wantUnreachableRoutes: 1,
-			pgSays:                "Bob 75 — MIN of nothing is NULL and NULL > 60 is UNKNOWN, so Carol is dropped"},
+			want:                      []string{"c=Bob|mn=float:75"},
+			wantLateralIdentityRoutes: 1,
+			pgSays:                    "Bob 75 — MIN of nothing is NULL and NULL > 60 is UNKNOWN, so Carol is dropped"},
 		{issue: "#767", name: "inner_on_over_two_outputs",
 			sql: `SELECT o.customer AS c, s.n AS n, s.t AS t FROM lat_ord o JOIN LATERAL (` +
 				`SELECT COUNT(*) AS n, SUM(amount) AS t FROM lat_item WHERE order_id = o.id) s ` +
@@ -775,7 +780,7 @@ func arcD5LateralCells() []arcD5Cell {
 			want: []string{
 				"c=Alice|n=int64:2|t=float:150", "c=Bob|n=int64:2|t=float:200",
 				"c=Carol|n=int64:0|t=NULL"},
-			wantUnreachableRoutes: 1},
+			wantLateralIdentityRoutes: 1},
 		{issue: "#767", name: "left_on_over_the_lateral_aggregate",
 			sql: `SELECT o.customer AS c, s.n AS n FROM lat_ord o ` + left +
 				`ON s.n > 1 ORDER BY o.customer`,
@@ -817,18 +822,18 @@ func arcD5LateralCells() []arcD5Cell {
 		{issue: "#767", name: "lateral_count_default_reaches_the_where_clause",
 			sql: `SELECT o.customer AS c, s.n AS n FROM lat_ord o ` + lat +
 				`ON true WHERE s.n = 0 ORDER BY o.customer`,
-			want:                  []string{"c=Carol|n=int64:0"},
-			wantUnreachableRoutes: 1},
+			want:                      []string{"c=Carol|n=int64:0"},
+			wantLateralIdentityRoutes: 1},
 		{issue: "#767", name: "lateral_count_default_reaches_an_in_list",
 			sql: `SELECT o.customer AS c, s.n AS n FROM lat_ord o ` + lat +
 				`ON true WHERE s.n IN (0, 2) ORDER BY o.customer`,
-			want:                  []string{"c=Alice|n=int64:2", "c=Bob|n=int64:2", "c=Carol|n=int64:0"},
-			wantUnreachableRoutes: 1},
+			want:                      []string{"c=Alice|n=int64:2", "c=Bob|n=int64:2", "c=Carol|n=int64:0"},
+			wantLateralIdentityRoutes: 1},
 		{issue: "#767", name: "lateral_count_default_reaches_a_between",
 			sql: `SELECT o.customer AS c, s.n AS n FROM lat_ord o ` + lat +
 				`ON true WHERE s.n BETWEEN 0 AND 1 ORDER BY o.customer`,
-			want:                  []string{"c=Carol|n=int64:0"},
-			wantUnreachableRoutes: 1},
+			want:                      []string{"c=Carol|n=int64:0"},
+			wantLateralIdentityRoutes: 1},
 		// The BOX here is exact, and it changed under this branch at the
 		// landing rebase: `SUM` over a BIGINT used to come back int64 and now
 		// comes back a DECIMAL, which is what PostgreSQL declares
@@ -849,12 +854,13 @@ func arcD5LateralCells() []arcD5Cell {
 			want: []string{"c=Alice|t=2", "c=Bob|t=2", "c=Carol|t=0"},
 			pgSays: "Alice 2, Bob 2, Carol 0 as NUMERIC — the values and now the box too. " +
 				"Carol read NULL on the single-process arm and FAILED on both DAG arms " +
-				"until the aggregate-argument fields were rewritten"},
+				"until the aggregate-argument fields were rewritten",
+			wantLateralIdentityRoutes: 1},
 		{issue: "#767", name: "lateral_count_default_reaches_an_order_by",
 			sql: `SELECT o.customer AS c, s.n AS n FROM lat_ord o ` + lat +
 				`ON true ORDER BY s.n, o.customer`,
-			want:                  []string{"c=Alice|n=int64:2", "c=Bob|n=int64:2", "c=Carol|n=int64:0"},
-			wantUnreachableRoutes: 1},
+			want:                      []string{"c=Alice|n=int64:2", "c=Bob|n=int64:2", "c=Carol|n=int64:0"},
+			wantLateralIdentityRoutes: 1},
 		// ARITHMETIC over the default. This was PINNED with a float64 box and
 		// the note "the day the rung is fixed this fails and becomes int64".
 		// #849 fixed that rung: the integer domain is a property of the
@@ -869,9 +875,9 @@ func arcD5LateralCells() []arcD5Cell {
 		{issue: "#767", name: "boundary_arithmetic_over_the_default_is_float_boxed",
 			sql: `SELECT o.customer AS c, s.n + 1 AS n FROM lat_ord o ` + lat +
 				`ON true ORDER BY o.customer`,
-			want:                  []string{"c=Alice|n=int64:3", "c=Bob|n=int64:3", "c=Carol|n=int64:1"},
-			wantUnreachableRoutes: 1,
-			pgSays:                "3, 3, 1 as BIGINT — the values and now the box too (#849)"},
+			want:                      []string{"c=Alice|n=int64:3", "c=Bob|n=int64:3", "c=Carol|n=int64:1"},
+			wantLateralIdentityRoutes: 1,
+			pgSays:                    "3, 3, 1 as BIGINT — the values and now the box too (#849)"},
 
 		// THE `SELECT *` OVER AN AGGREGATED LATERAL ANSWERS POSTGRESQL, and
 		// this cell is the third disposition it has had in one arc: NULL for
@@ -886,7 +892,8 @@ func arcD5LateralCells() []arcD5Cell {
 			want: []string{
 				"id=int64:1|customer=Alice|total=float:150|n=int64:2",
 				"id=int64:2|customer=Bob|total=float:200|n=int64:2",
-				"id=int64:3|customer=Carol|total=float:0|n=int64:0"}},
+				"id=int64:3|customer=Carol|total=float:0|n=int64:0"},
+			wantLateralIdentityRoutes: 1},
 
 		// The NON-aggregated lateral, which none of this may touch.
 		// THE NESTED SHAPES the filing asks for, and the third of them is a
@@ -900,14 +907,14 @@ func arcD5LateralCells() []arcD5Cell {
 			sql: `SELECT o.customer AS c, s.n AS n FROM lat_ord o JOIN LATERAL (` +
 				`SELECT COUNT(*) AS n FROM (SELECT order_id FROM lat_item) d ` +
 				`WHERE d.order_id = o.id) s ON true ORDER BY 1`,
-			want:                  []string{"c=Alice|n=int64:2", "c=Bob|n=int64:2", "c=Carol|n=int64:0"},
-			wantUnreachableRoutes: 1},
+			want:                      []string{"c=Alice|n=int64:2", "c=Bob|n=int64:2", "c=Carol|n=int64:0"},
+			wantLateralIdentityRoutes: 1},
 		{issue: "#767", name: "control_lateral_over_a_cte_reference",
 			sql: `WITH d AS (SELECT order_id FROM lat_item) ` +
 				`SELECT o.customer AS c, s.n AS n FROM lat_ord o JOIN LATERAL (` +
 				`SELECT COUNT(*) AS n FROM d WHERE d.order_id = o.id) s ON true ORDER BY 1`,
-			want:                  []string{"c=Alice|n=int64:2", "c=Bob|n=int64:2", "c=Carol|n=int64:0"},
-			wantUnreachableRoutes: 1},
+			want:                      []string{"c=Alice|n=int64:2", "c=Bob|n=int64:2", "c=Carol|n=int64:0"},
+			wantLateralIdentityRoutes: 1},
 		// A SECOND LATERAL THAT READS THE FIRST ONE'S OUTPUT. PostgreSQL
 		// resolves `s.n` inside the second lateral's WHERE — a lateral may
 		// name any FROM item to its left — and answers `Alice 2 2, Bob 2 2,
@@ -943,8 +950,8 @@ func arcD5LateralCells() []arcD5Cell {
 		{issue: "#767", name: "cross_join_lateral_aggregated_keeps_the_unmatched_row",
 			sql: `SELECT o.customer AS c, s.n AS n FROM lat_ord o CROSS JOIN LATERAL (` +
 				`SELECT COUNT(*) AS n FROM lat_item WHERE order_id = o.id) s ORDER BY 1`,
-			want:                  []string{"c=Alice|n=int64:2", "c=Bob|n=int64:2", "c=Carol|n=int64:0"},
-			wantUnreachableRoutes: 1},
+			want:                      []string{"c=Alice|n=int64:2", "c=Bob|n=int64:2", "c=Carol|n=int64:0"},
+			wantLateralIdentityRoutes: 1},
 		{issue: "#767", name: "cross_join_lateral_not_aggregated_drops_it",
 			sql: `SELECT o.customer AS c, s.product AS p FROM lat_ord o CROSS JOIN LATERAL (` +
 				`SELECT product FROM lat_item WHERE order_id = o.id) s ORDER BY 1, 2`,
@@ -966,8 +973,8 @@ func arcD5LateralCells() []arcD5Cell {
 			sql: `SELECT o.customer AS c, s.n AS n FROM lat_ord o CROSS JOIN LATERAL (` +
 				`SELECT COUNT(*) AS n FROM (SELECT order_id FROM lat_item) d ` +
 				`WHERE d.order_id = o.id) s ORDER BY 1`,
-			want:                  []string{"c=Alice|n=int64:2", "c=Bob|n=int64:2", "c=Carol|n=int64:0"},
-			wantUnreachableRoutes: 1},
+			want:                      []string{"c=Alice|n=int64:2", "c=Bob|n=int64:2", "c=Carol|n=int64:0"},
+			wantLateralIdentityRoutes: 1},
 
 		{issue: "#767", name: "control_non_aggregated_lateral_inner",
 			sql: `SELECT o.customer AS c, li.amount AS a FROM lat_ord o JOIN LATERAL (` +
@@ -994,7 +1001,8 @@ func arcD5LateralCells() []arcD5Cell {
 		{issue: "#767", name: "control_grouped_outer_over_the_lateral",
 			sql: `SELECT o.customer AS c, COUNT(*) AS k FROM lat_ord o ` + lat +
 				`ON true GROUP BY o.customer ORDER BY c`,
-			want: []string{"c=Alice|k=int64:1", "c=Bob|k=int64:1", "c=Carol|k=int64:1"}},
+			want:                      []string{"c=Alice|k=int64:1", "c=Bob|k=int64:1", "c=Carol|k=int64:1"},
+			wantLateralIdentityRoutes: 1},
 	}
 }
 
@@ -1507,9 +1515,10 @@ func TestArcD5CorrelationMatchesPostgres(t *testing.T) {
 					wantScalarProj = 1
 				}
 				for i, d := range arcD5RouteDelta(before, arcD5Routes(arm.c)) {
-					wantRoute := [4]int64{
+					wantRoute := [5]int64{
 						tc.wantCorrRoutes, wantScalarProj,
 						tc.wantInSubqueryRoutes, tc.wantUnreachableRoutes,
+						tc.wantLateralIdentityRoutes,
 					}[i]
 					if d != wantRoute {
 						t.Errorf("%s arm: %s moved by %d, want %d\n"+
@@ -1523,20 +1532,22 @@ func TestArcD5CorrelationMatchesPostgres(t *testing.T) {
 	}
 }
 
-var arcD5RouteNames = [4]string{
+var arcD5RouteNames = [5]string{
 	"CorrelatedLocalRoutes", "ScalarProjectionLocalRoutes",
 	"InSubqueryLocalRoutes", "UnreachableOutputLocalRoutes",
+	"LateralIdentityLocalRoutes",
 }
 
-func arcD5Routes(c *Coordinator) [4]int64 {
-	return [4]int64{
+func arcD5Routes(c *Coordinator) [5]int64 {
+	return [5]int64{
 		c.CorrelatedLocalRoutes(), c.ScalarProjectionLocalRoutes(),
 		c.InSubqueryLocalRoutes(), c.UnreachableOutputLocalRoutes(),
+		c.LateralIdentityLocalRoutes(),
 	}
 }
 
-func arcD5RouteDelta(before, after [4]int64) [4]int64 {
-	var d [4]int64
+func arcD5RouteDelta(before, after [5]int64) [5]int64 {
+	var d [5]int64
 	for i := range d {
 		d[i] = after[i] - before[i]
 	}

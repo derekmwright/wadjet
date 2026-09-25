@@ -558,9 +558,9 @@ func TestO1AStarOverAJoinPublishesTheQueryNotThePlan(t *testing.T) {
 			pin: map[string]string{
 				"single":       "cols=[id:INT64 customer:STRING total:FLOAT64 l.id:INT64 amount:FLOAT64] rows=4 | 1,Alice,150,1,50 | 1,Alice,150,2,100 | 2,Bob,200,3,75 | 2,Bob,200,4,125",
 				"spilled512k":  "cols=[id:INT64 customer:STRING total:FLOAT64 l.id:INT64 amount:FLOAT64] rows=4 | 1,Alice,150,1,50 | 1,Alice,150,2,100 | 2,Bob,200,3,75 | 2,Bob,200,4,125",
-				"dag":          "cols=[id:INT64 customer:STRING total:FLOAT64 i.id:INT64 amount:FLOAT64] rows=4 | 1,Alice,150,2,100 | 1,Alice,150,1,50 | 2,Bob,200,4,125 | 2,Bob,200,3,75",
-				"dag-shuffled": "cols=[id:INT64 customer:STRING total:FLOAT64 i.id:INT64 amount:FLOAT64] rows=4 | 1,Alice,150,2,100 | 1,Alice,150,1,50 | 2,Bob,200,4,125 | 2,Bob,200,3,75",
-				"dag-morsel4":  "cols=[id:INT64 customer:STRING total:FLOAT64 i.id:INT64 amount:FLOAT64] rows=4 | 1,Alice,150,2,100 | 1,Alice,150,1,50 | 2,Bob,200,4,125 | 2,Bob,200,3,75",
+				"dag":          "cols=[id:INT64 customer:STRING total:FLOAT64 l.id:INT64 amount:FLOAT64] rows=4 | 1,Alice,150,1,50 | 1,Alice,150,2,100 | 2,Bob,200,3,75 | 2,Bob,200,4,125",
+				"dag-shuffled": "cols=[id:INT64 customer:STRING total:FLOAT64 l.id:INT64 amount:FLOAT64] rows=4 | 1,Alice,150,1,50 | 1,Alice,150,2,100 | 2,Bob,200,3,75 | 2,Bob,200,4,125",
+				"dag-morsel4":  "cols=[id:INT64 customer:STRING total:FLOAT64 l.id:INT64 amount:FLOAT64] rows=4 | 1,Alice,150,1,50 | 1,Alice,150,2,100 | 2,Bob,200,3,75 | 2,Bob,200,4,125",
 			},
 			why: "DECLINED by design: a written LATERAL's subtree carries the correlation " +
 				"slot the join drops (ADR-0026 §3c), so the star is left to read the " +
@@ -571,6 +571,9 @@ func TestO1AStarOverAJoinPublishesTheQueryNotThePlan(t *testing.T) {
 				"as `l.id` rather than the inner scan's `i.id` and `ORDER BY l.id` BINDS " +
 				"— the ties are ordered. What is left is the QUALIFIER: PostgreSQL " +
 				"publishes the bare `id`, because it does not qualify a duplicate at all.",
+			// Runs single-process since arc JP round 3: the lateral arm carries a
+			// name the outer relation also carries (dagplan.ErrLateralIdentityDistributed).
+			routed: map[string]string{"dag": "LateralIdentity +1", "dag-morsel4": "LateralIdentity +1", "dag-shuffled": "LateralIdentity +1"},
 		},
 		{
 			name: "using-star",

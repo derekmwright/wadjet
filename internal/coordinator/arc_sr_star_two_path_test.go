@@ -416,6 +416,9 @@ func srStarCases() []c1Case {
 			name: "lateral/a-star-over-a-lateral-arm",
 			sql:  "SELECT * FROM lat_ord o, LATERAL (SELECT i.id, i.amount FROM lat_item i WHERE i.order_id = o.id) l ORDER BY o.id, l.id",
 			want: "cols=[id:INT64 customer:STRING total:FLOAT64 l.id:INT64 amount:FLOAT64] rows=4 | 1,Alice,150,1,50 | 1,Alice,150,2,100 | 2,Bob,200,3,75 | 2,Bob,200,4,125",
+			// Runs single-process since arc JP round 3: the lateral arm carries a
+			// name the outer relation also carries (dagplan.ErrLateralIdentityDistributed).
+			routed: map[string]string{"dag": "LateralIdentity +1", "dag-morsel4": "LateralIdentity +1", "dag-shuffled": "LateralIdentity +1"},
 		},
 		// The SAME reference with no star in the statement: `l.id` was 1,1,2,2
 		// on the three DAG arms (#1126's column, round-1 review B2) until arc JP
@@ -426,6 +429,9 @@ func srStarCases() []c1Case {
 			name: "lateral/a-reference-into-a-lateral-arm",
 			sql:  "SELECT o.id, l.id, l.amount FROM lat_ord o, LATERAL (SELECT i.id, i.amount FROM lat_item i WHERE i.order_id = o.id) l ORDER BY o.id, l.id",
 			want: "cols=[id:INT64 id:INT64 amount:FLOAT64] rows=4 | 1,1,50 | 1,2,100 | 2,3,75 | 2,4,125",
+			// Runs single-process since arc JP round 3: the lateral arm carries a
+			// name the outer relation also carries (dagplan.ErrLateralIdentityDistributed).
+			routed: map[string]string{"dag": "LateralIdentity +1", "dag-morsel4": "LateralIdentity +1", "dag-shuffled": "LateralIdentity +1"},
 		},
 		{
 			name: "ctl/arms-share-one-name",

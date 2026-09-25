@@ -132,6 +132,9 @@ func wkSeamCells() []c1Case {
 			// ARC JP round 2: the DAG resolves a LATERAL body's unaliased item
 			// to its source column (ADR-0026 §8l), so the DAG-only pin that
 			// stood here agrees now and is deleted.
+			// Runs single-process since arc JP round 3: the lateral arm carries a
+			// name the outer relation also carries (dagplan.ErrLateralIdentityDistributed).
+			routed: map[string]string{"dag": "LateralIdentity +1", "dag-morsel4": "LateralIdentity +1", "dag-shuffled": "LateralIdentity +1"},
 		},
 		{
 			name: "armref/lateral",
@@ -140,6 +143,9 @@ func wkSeamCells() []c1Case {
 			// ARC JP round 2: the DAG resolves a LATERAL body's unaliased item
 			// to its source column (ADR-0026 §8l), so the DAG-only pin that
 			// stood here agrees now and is deleted.
+			// Runs single-process since arc JP round 3: the lateral arm carries a
+			// name the outer relation also carries (dagplan.ErrLateralIdentityDistributed).
+			routed: map[string]string{"dag": "LateralIdentity +1", "dag-morsel4": "LateralIdentity +1", "dag-shuffled": "LateralIdentity +1"},
 		},
 		{
 			name: "star/lateral",
@@ -344,6 +350,9 @@ func wkSeamCells() []c1Case {
 			name: "lifted/lateral",
 			sql:  "SELECT o.id AS a, p.m AS b FROM lat_ord o LEFT JOIN LATERAL (SELECT i.id AS m FROM lat_item i WHERE i.amount < o.total) p ON true ORDER BY a, b",
 			want: "cols=[a:INT64 b:INT64] rows=9 | 1,1 | 1,2 | 1,3 | 1,4 | 2,1 | 2,2 | 2,3 | 2,4 | 3,NULL",
+			// Runs single-process since arc JP round 3: the lateral arm carries a
+			// name the outer relation also carries (dagplan.ErrLateralIdentityDistributed).
+			routed: map[string]string{"dag": "LateralIdentity +1", "dag-morsel4": "LateralIdentity +1", "dag-shuffled": "LateralIdentity +1"},
 		},
 		{
 			name: "lifted/lateralRenamed",
@@ -359,5 +368,8 @@ func wkSeamCells() []c1Case {
 			// columns apart, and the stage DAG routes the plan there
 			// (dagplan.ErrLateralIdentityDistributed). PostgreSQL 17.11's rows.
 			want: "cols=[a:INT64 b:STRING] rows=4 | 1,NULL | 2,Widget | 3,Gadget | 3,Widget",
+			// Runs single-process since arc JP round 3: the lateral arm carries a
+			// name the outer relation also carries (dagplan.ErrLateralIdentityDistributed).
+			routed: map[string]string{"dag": "LateralIdentity +1", "dag-morsel4": "LateralIdentity +1", "dag-shuffled": "LateralIdentity +1"},
 		}}
 }

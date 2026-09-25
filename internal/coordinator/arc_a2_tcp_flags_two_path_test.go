@@ -937,7 +937,7 @@ func a2fReadRoutes(c *Coordinator) a2fRoutes {
 		names: []string{
 			"Correlated", "Distinct", "GroupKey", "GroupingSets", "InSubquery",
 			"LateralProjection", "NullAwareAnti", "ScalarProjection",
-			"TableLess", "UnbuildableStage", "UnreachableOutput",
+			"TableLess", "UnbuildableStage", "UnreachableOutput", "LateralIdentity",
 		},
 		values: []int64{
 			c.CorrelatedLocalRoutes(), c.DistinctLocalRoutes(), c.GroupKeyLocalRoutes(),
@@ -945,6 +945,7 @@ func a2fReadRoutes(c *Coordinator) a2fRoutes {
 			c.LateralProjectionLocalRoutes(), c.NullAwareAntiLocalRoutes(),
 			c.ScalarProjectionLocalRoutes(), c.TableLessLocalRoutes(),
 			c.UnbuildableStageLocalRoutes(), c.UnreachableOutputLocalRoutes(),
+			c.LateralIdentityLocalRoutes(),
 		},
 	}
 }

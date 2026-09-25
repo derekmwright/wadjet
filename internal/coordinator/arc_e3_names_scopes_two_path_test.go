@@ -224,6 +224,7 @@ var e3RouteCounters = []struct {
 	{"group key", (*Coordinator).GroupKeyLocalRoutes},
 	{"unreachable output", (*Coordinator).UnreachableOutputLocalRoutes},
 	{"scalar projection", (*Coordinator).ScalarProjectionLocalRoutes},
+	{"lateral identity", (*Coordinator).LateralIdentityLocalRoutes},
 }
 
 type e3Case struct {
