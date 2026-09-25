@@ -51,6 +51,13 @@ func (p *Planner) buildSetOp(ctx context.Context, node *logical.Node, op string)
 		rightLits:    setOpArmLiterals(node.Children[1]),
 		leftUnknown:  setOpArmUnknownLits(node.Children[0]),
 		rightUnknown: setOpArmUnknownLits(node.Children[1]),
+		// Each arm's DECLARED output, for an arm that produces no batch: its
+		// sink then still has the arm's names and types (round 4, N2). An
+		// empty FIRST arm left the operation with only the second arm's
+		// schema — ITS names — so the parent's reference to the first arm's
+		// name found no column and read NULL for every row.
+		leftHint:  declaredOutputSchema(node.Children[0], p.SubqueryOutputColumn),
+		rightHint: declaredOutputSchema(node.Children[1], p.SubqueryOutputColumn),
 	}
 
 	return src, nil, &exec.CollectSink{}, nil
@@ -175,6 +182,8 @@ type setOpSourceAdapter struct {
 	// PostgreSQL types from the OTHER arm. See setOpResolveUnknownLiteralArms.
 	leftUnknown  []bool
 	rightUnknown []bool
+	leftHint     []parquet.Column
+	rightHint    []parquet.Column
 
 	batches     []*batch.RecordBatch
 	idx         int
@@ -188,7 +197,7 @@ func (u *setOpSourceAdapter) Next(ctx context.Context) (*batch.RecordBatch, erro
 		u.initialized = true
 
 		// Run left pipeline
-		leftSink := &exec.CollectSink{}
+		leftSink := &exec.CollectSink{SchemaHint: u.leftHint}
 		leftPipe := &exec.Pipeline{
 			Source: u.leftSource,
 			Ops:    u.leftOps,
@@ -199,7 +208,7 @@ func (u *setOpSourceAdapter) Next(ctx context.Context) (*batch.RecordBatch, erro
 		}
 
 		// Run right pipeline
-		rightSink := &exec.CollectSink{}
+		rightSink := &exec.CollectSink{SchemaHint: u.rightHint}
 		rightPipe := &exec.Pipeline{
 			Source: u.rightSource,
 			Ops:    u.rightOps,
