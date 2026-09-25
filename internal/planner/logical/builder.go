@@ -2495,12 +2495,14 @@ func buildLateralSubquery(outer *plansql.SelectInfo, left *Node, join plansql.Jo
 	// after the key injection, because over an aggregated body the window
 	// reads what the AGGREGATE publishes the key under — which is what that
 	// loop just decided.
-	if err := lateralBoundPerOuterRow(subInfo, correlatedParts, leftAliases, aggregates, keyRename, injectedLead); err != nil {
-		return nil, "", lateralEmptyInput{}, nil, nil, err
-	}
-
+	// The body's OWN windows first: the bound below mints a rank of its own,
+	// already partitioned by the keys, and an ungrouped aggregate under an
+	// OFFSET is its business, not a window the query wrote.
 	if err := lateralWindowsPerOuterRow(subInfo, correlatedParts, leftAliases, aggregates,
 		ungroupedAggregate, mintedKeys); err != nil {
+		return nil, "", lateralEmptyInput{}, nil, nil, err
+	}
+	if err := lateralBoundPerOuterRow(subInfo, correlatedParts, leftAliases, aggregates, keyRename, injectedLead); err != nil {
 		return nil, "", lateralEmptyInput{}, nil, nil, err
 	}
 
