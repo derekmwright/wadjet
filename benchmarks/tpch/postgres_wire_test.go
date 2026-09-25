@@ -890,15 +890,10 @@ func wireCorpus() []wireCase {
 				wirePropTypeSizes: "same cause — the declared SIZE follows the OID",
 			}},
 		// A literal of each basic type, which is how a client probes a server.
-		{name: "LiteralTypes", sql: `SELECT 1 AS i, 'x' AS t, TRUE AS b, 1.5 AS f`,
-			pins: map[string]string{
-				wirePropTypeOIDs: "DELIBERATE for the integer, deliberate-by-consequence for the decimal: " +
-					"Wadjet widens every integer literal to INT64 (OID 20) where PostgreSQL types it int4 " +
-					"(23), and types 1.5 as float8 (701) where PostgreSQL uses numeric (1700). The integer " +
-					"widening is safe in one direction only — a client asking for an Integer column gets a " +
-					"Long — and the decimal is the no-exact-numeric position again",
-				wirePropTypeSizes: "DELIBERATE, follows the OIDs above (8 for int8/float8, 4 and -1 in PostgreSQL)",
-			}},
+		// Gated whole since arc VL round 5: the integer literal is int4 (#1070)
+		// and the fractional one PostgreSQL's numeric (ADR-0024's 2026-09-24
+		// amendment), so its OIDs and sizes agree and the pins are gone.
+		{name: "LiteralTypes", sql: `SELECT 1 AS i, 'x' AS t, TRUE AS b, 1.5 AS f`},
 		// NULL beside the empty string: the wire tells them apart by length,
 		// and a renderer that does not is invisible to a value comparison.
 		// Wadjet gets this right — the entry exists to keep it right.
