@@ -179,3 +179,68 @@ func lateralOuterRefIn(n plansql.Node, leftAliases map[string]bool) string {
 	})
 	return found
 }
+
+// refuseOuterReferenceThroughLateralSubquery refuses a correlated predicate of
+// a LATERAL body that reaches the enclosing relation THROUGH a subquery whose
+// own FROM holds a LATERAL join — `… LATERAL (SELECT q.qid FROM jp_q q WHERE
+// … AND EXISTS (SELECT 1 FROM jp_j j JOIN LATERAL (…) t ON true WHERE j.id =
+// q.qid AND t.xv > o.id)) s`. A subquery with a LATERAL join does not keep its
+// correlation with the query around it on any execution path (the EXISTS
+// admits every row even at top level — filed, arc JP round 4 N1), so the
+// reference to `o` is not evaluated per outer row and the lateral answered
+// every pair for PostgreSQL's two. Until 2026-09-24 the text path refused it
+// by accident (it split the key at the first `=` inside the EXISTS); the
+// parsed equality let the plan build (b2070cbb). Loud until N1 is fixed
+// (arc JP round 4, B4).
+func refuseOuterReferenceThroughLateralSubquery(correlatedParts []string) error {
+	for _, cp := range correlatedParts {
+		node, err := plansql.ParseExpression(cp)
+		if err != nil || node == nil {
+			continue
+		}
+		found := false
+		walkExprNodes(node, func(x plansql.Node) {
+			var body string
+			switch e := x.(type) {
+			case *plansql.ExistsNode:
+				body = e.SQL
+			case *plansql.SubqueryNode:
+				body = e.SQL
+			default:
+				return
+			}
+			if !found && subqueryJoinsLaterally(body) {
+				found = true
+			}
+		})
+		if found {
+			return sqlerr.New("0A000",
+				"LATERAL body's correlated predicate %s reads the enclosing relation inside a "+
+					"subquery whose FROM holds a LATERAL join, and such a subquery does not keep "+
+					"its correlation with the query around it on this engine, so the reference "+
+					"would not be evaluated per outer row. Join the subquery's relations without "+
+					"LATERAL, or move the condition out of the lateral body",
+				sqlerr.Quote(strings.TrimSpace(cp)))
+		}
+	}
+	return nil
+}
+
+// subqueryJoinsLaterally reports whether a subquery's own FROM holds a LATERAL
+// join (a subquery the parser cannot read is judged by its text).
+func subqueryJoinsLaterally(sql string) bool {
+	parsed, err := plansql.Parse(sql)
+	if err != nil {
+		return strings.Contains(strings.ToUpper(sql), "LATERAL")
+	}
+	info, err := plansql.ExtractSelect(parsed)
+	if err != nil || info == nil {
+		return strings.Contains(strings.ToUpper(sql), "LATERAL")
+	}
+	for _, j := range info.Joins {
+		if j.Lateral {
+			return true
+		}
+	}
+	return false
+}

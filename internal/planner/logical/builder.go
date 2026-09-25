@@ -2170,6 +2170,9 @@ func buildLateralSubquery(outer *plansql.SelectInfo, left *Node, join plansql.Jo
 	if err := refuseLateralOuterReferenceOutsideWhere(subInfo, leftAliases); err != nil {
 		return nil, "", lateralEmptyInput{}, nil, nil, err
 	}
+	if err := refuseOuterReferenceThroughLateralSubquery(correlatedParts); err != nil {
+		return nil, "", lateralEmptyInput{}, nil, nil, err
+	}
 
 	// Rebuild the inner plan with only local WHERE predicates.
 	// Always clear WhereExpr — it's the AST for the original full WHERE and
