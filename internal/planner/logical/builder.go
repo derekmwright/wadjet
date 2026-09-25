@@ -2148,16 +2148,21 @@ func buildLateralSubquery(outer *plansql.SelectInfo, left *Node, join plansql.Jo
 	}
 
 	// Split WHERE clause into correlated and local predicates
+	// The split is taken on the PARSED WHERE, and each LOCAL term keeps its
+	// node: the body's own filter is rebuilt from those nodes below and never
+	// from text (arc JP round 5, B1).
 	var correlatedParts []string
-	var localParts []string
-	if subInfo.Where != "" {
-		parts := splitANDPredicates(subInfo.Where)
-		for _, p := range parts {
-			if referencesAliases(p, leftAliases) {
-				correlatedParts = append(correlatedParts, p)
-			} else {
-				localParts = append(localParts, p)
-			}
+	var localNodes []plansql.Node
+	conjuncts, err := lateralWhereConjuncts(subInfo)
+	if err != nil {
+		return nil, "", lateralEmptyInput{}, nil, nil, err
+	}
+	for _, n := range conjuncts {
+		p := renderConjunct(n)
+		if referencesAliases(p, leftAliases) {
+			correlatedParts = append(correlatedParts, p)
+		} else {
+			localNodes = append(localNodes, n)
 		}
 	}
 
@@ -2173,14 +2178,22 @@ func buildLateralSubquery(outer *plansql.SelectInfo, left *Node, join plansql.Jo
 		return nil, "", lateralEmptyInput{}, nil, nil, err
 	}
 
-	// Rebuild the inner plan with only local WHERE predicates.
-	// Always clear WhereExpr — it's the AST for the original full WHERE and
-	// would conflict with the modified Where string.
-	subInfo.WhereExpr = nil
-	if len(localParts) > 0 {
-		subInfo.Where = strings.Join(localParts, " AND ")
-	} else {
-		subInfo.Where = ""
+	if err := refuseLocalSubqueryWithLateral(localNodes, subInfo, leftAliases); err != nil {
+		return nil, "", lateralEmptyInput{}, nil, nil, err
+	}
+	if err := refuseReferenceBeyondLateralScope(conjuncts, subInfo, leftAliases); err != nil {
+		return nil, "", lateralEmptyInput{}, nil, nil, err
+	}
+
+	// Rebuild the inner plan with only the LOCAL terms, as the nodes the
+	// parse produced. The WHERE used to be rebuilt as the terms' text with
+	// no AST, and the filter then re-split that text at every textual AND:
+	// `q.qv BETWEEN 10 AND 30` became `q.qv between 10` and a constant `30`
+	// (zero rows on the single-process arm, a parse error on the DAG — arc
+	// JP round 4 review, B1). The text is kept only as the node's rendering.
+	subInfo.Where, subInfo.WhereExpr = "", nil
+	for _, n := range localNodes {
+		andIntoWhere(subInfo, renderConjunct(n), n)
 	}
 
 	// Add correlated inner columns to GROUP BY for every aggregated LATERAL.
@@ -2621,69 +2634,31 @@ func collectLogicalAliases(n *Node) map[string]bool {
 	return aliases
 }
 
-// splitANDPredicates splits a LATERAL body's WHERE into its top-level AND
-// terms ON THE AST — the rule splitJoinConjuncts states for an ON clause
-// (#1178). The textual split cut `q.qv BETWEEN o.total AND o.total + 20` into
-// `q.qv BETWEEN o.total` and `o.total + 20` (and a `CASE WHEN a AND b …`
-// inside its WHEN): neither half parses, so the correlated predicate lost the
-// inner column it reads, the join output never carried it, and the filter
-// above the join fell back to the text path, which compared `q.qv` with the
-// STRING `o.total` — zero rows, silently, on the single-process arm (arc JP
-// round 4, B3). A WHERE that does not parse keeps the text split below.
-func splitANDPredicates(where string) []string {
-	if root := tryParseExpr(where); root != nil {
-		var nodes []plansql.Node
-		flattenAndNodes(root, &nodes)
-		if len(nodes) == 1 {
-			return []string{strings.TrimSpace(where)}
-		}
-		out := make([]string, 0, len(nodes))
-		for _, n := range nodes {
-			out = append(out, renderConjunct(n))
-		}
-		return out
-	}
-	var parts []string
-	depth := 0
-	inStr := false
-	start := 0
-	upper := strings.ToUpper(where)
-
-	for i := 0; i < len(where); i++ {
-		ch := where[i]
-		if inStr {
-			if ch == '\'' {
-				if i+1 < len(where) && where[i+1] == '\'' {
-					i++
-				} else {
-					inStr = false
-				}
-			}
-			continue
-		}
-		if ch == '\'' {
-			inStr = true
-			continue
-		}
-		if ch == '(' {
-			depth++
-		} else if ch == ')' {
-			depth--
-		}
-		if depth == 0 && i+4 <= len(upper) && upper[i:i+3] == "AND" {
-			// Ensure it's a word boundary (not part of an identifier)
-			before := i == 0 || where[i-1] == ' ' || where[i-1] == ')'
-			after := i+3 >= len(where) || where[i+3] == ' ' || where[i+3] == '('
-			if before && after {
-				parts = append(parts, strings.TrimSpace(where[start:i]))
-				start = i + 3
-			}
+// lateralWhereConjuncts is a LATERAL body's WHERE as its top-level AND terms,
+// read ON THE AST — the rule splitJoinConjuncts states for an ON clause
+// (#1178). The body's WHERE was split at every top-level AND of its TEXT,
+// cutting `q.qv BETWEEN o.total AND o.total + 20` (and a `CASE WHEN a AND b
+// …`) in two (arc JP round 4, B3); and the LOCAL terms were then rebuilt as
+// text and split again one layer down (round 5, B1). The terms are the parse's
+// own nodes, so the correlated ones are rendered once for the key reading and
+// the local ones reach the body's filter as the nodes themselves. A WHERE with
+// no AST is parsed; one the expression parser cannot read is refused, never
+// cut as text and never dropped.
+func lateralWhereConjuncts(info *plansql.SelectInfo) ([]plansql.Node, error) {
+	root := info.WhereExpr
+	if root == nil && strings.TrimSpace(info.Where) != "" {
+		if root = tryParseExpr(info.Where); root == nil {
+			return nil, sqlerr.New("0A000",
+				"LATERAL body's WHERE %s cannot be read as an expression",
+				sqlerr.Quote(strings.TrimSpace(info.Where)))
 		}
 	}
-	if start < len(where) {
-		parts = append(parts, strings.TrimSpace(where[start:]))
+	if root == nil {
+		return nil, nil
 	}
-	return parts
+	var nodes []plansql.Node
+	flattenAndNodes(root, &nodes)
+	return nodes, nil
 }
 
 // referencesAliases returns true if the expression contains a qualified

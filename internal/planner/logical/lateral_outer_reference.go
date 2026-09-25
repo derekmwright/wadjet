@@ -244,3 +244,139 @@ func subqueryJoinsLaterally(sql string) bool {
 	}
 	return false
 }
+
+// correlatedSubqueryWithLateral reports whether n holds a subquery (EXISTS,
+// scalar, IN) whose own FROM holds a LATERAL join AND whose text names one of
+// the relations in scope around it — the property FC-JP-10 is wrong on. An
+// uncorrelated one (`EXISTS (SELECT 1 FROM jp_j j JOIN LATERAL (…) t ON true
+// WHERE t.xv > 6)`) keeps nothing to lose and answers PostgreSQL's rows
+// (measured on five arms at 6cbe2041 and here). A name the subquery hides
+// behind an alias of its own reads as a reference: refused, never guessed.
+func correlatedSubqueryWithLateral(n plansql.Node, scope map[string]bool) bool {
+	found := false
+	walkExprNodes(n, func(x plansql.Node) {
+		var body string
+		switch e := x.(type) {
+		case *plansql.ExistsNode:
+			body = e.SQL
+		case *plansql.SubqueryNode:
+			body = e.SQL
+		default:
+			return
+		}
+		if !found && subqueryJoinsLaterally(body) && referencesAliases(body, scope) {
+			found = true
+		}
+	})
+	return found
+}
+
+// refuseLocalSubqueryWithLateral refuses a LOCAL term of a LATERAL body's
+// WHERE that holds a subquery whose own FROM holds a LATERAL join and which
+// reads the body's relations — `… LATERAL (SELECT q.qid FROM jp_q q WHERE
+// q.qk = o.k AND EXISTS (SELECT 1 FROM jp_j j JOIN LATERAL (…) t ON true
+// WHERE j.id = q.qid)) s`. It is the property
+// refuseOuterReferenceThroughLateralSubquery keys on, reached from the other
+// side of the split: such a subquery does not keep its correlation with the
+// query around it on this engine (arc JP round 4 N1, FC-JP-10: the EXISTS
+// admits every row even at top level), so the body's rows would not be
+// filtered per body row. Until round 5 the text path refused it by accident
+// (`filter column "exists (SELECT 1 …"`); carrying the local terms as parsed
+// nodes let it compile and answer every row (arc JP round 5, B1). Loud until
+// FC-JP-10 is fixed.
+func refuseLocalSubqueryWithLateral(local []plansql.Node, body *plansql.SelectInfo, leftAliases map[string]bool) error {
+	scope := lateralBodyRelationNames(body)
+	for a := range leftAliases {
+		scope[a] = true
+	}
+	for _, n := range local {
+		if correlatedSubqueryWithLateral(n, scope) {
+			return sqlerr.New("0A000",
+				"LATERAL body's condition %s holds a correlated subquery whose FROM holds a "+
+					"LATERAL join, and such a subquery does not keep its correlation with the query "+
+					"around it on this engine, so the condition would not be evaluated per row. Join "+
+					"the subquery's relations without LATERAL, or move the condition out of the "+
+					"lateral body",
+				sqlerr.Quote(strings.TrimSpace(n.String())))
+		}
+	}
+	return nil
+}
+
+// refuseReferenceBeyondLateralScope refuses a term of a LATERAL body's WHERE
+// that qualifies a column with a relation which is neither one of the body's
+// own FROM items nor a relation to the lateral's left. That is a reference to
+// an ENCLOSING query level — a LATERAL nested inside another whose inner body
+// names the outermost relation (`… JOIN LATERAL (SELECT … FROM jp_q q JOIN
+// LATERAL (SELECT … FROM jp_k x WHERE x.oid = q.qid AND x.v > o.k) t ON true)
+// s`) — or to no relation at all. The decorrelation lowers one level at a
+// time: the inner lateral's left is the outer body, where `o` is not a
+// relation, so the term was classified LOCAL and compiled over the inner
+// relation (rows=0 on every arm for PostgreSQL's 13, arc JP round 4 review).
+// The text path used to refuse it as a side effect (42000, `reached the
+// raw-text filter path`); the property is refused here, 0A000, for every
+// term and whatever its shape (arc JP round 5, B1; FC-JP-8 is the answer).
+// Names inside a nested subquery belong to that subquery's own planning and
+// are not read here.
+func refuseReferenceBeyondLateralScope(terms []plansql.Node, body *plansql.SelectInfo, leftAliases map[string]bool) error {
+	own := lateralBodyRelationNames(body)
+	for _, n := range terms {
+		refs, err := plansql.ColumnRefsOutsideSubqueries(n)
+		if err != nil {
+			continue
+		}
+		for _, r := range refs {
+			if r.Table == "" || r.Slot {
+				continue
+			}
+			q := strings.ToLower(r.Table)
+			if i := strings.LastIndex(q, "."); i >= 0 {
+				q = q[i+1:]
+			}
+			if own[q] || leftAliases[q] {
+				continue
+			}
+			return sqlerr.New("0A000",
+				"LATERAL body's condition %s names %s, which is neither a relation of the body's "+
+					"FROM nor one to the lateral's left: a reference to an enclosing query level "+
+					"(a LATERAL nested inside another that names the outermost relation) is not "+
+					"supported. Move the condition to the level whose relations it reads",
+				sqlerr.Quote(strings.TrimSpace(n.String())), sqlerr.Quote(r.Table+"."+r.Column))
+		}
+	}
+	return nil
+}
+
+// lateralBodyRelationNames is every name a LATERAL body's own FROM answers to
+// (lower-cased): its tables and derived tables by alias and by name, its join
+// items, its CTEs.
+func lateralBodyRelationNames(info *plansql.SelectInfo) map[string]bool {
+	out := map[string]bool{}
+	add := func(s string) {
+		s = strings.ToLower(strings.TrimSpace(s))
+		if s == "" || strings.HasPrefix(s, "(") {
+			return
+		}
+		if i := strings.LastIndex(s, "."); i >= 0 {
+			s = s[i+1:]
+		}
+		out[s] = true
+	}
+	for _, tr := range info.Tables {
+		add(tr.Alias)
+		add(tr.Name)
+	}
+	for _, j := range info.Joins {
+		add(j.RightAlias)
+		add(j.LeftTable)
+		add(j.RightTable)
+		if j.RightTableRef != nil {
+			add(j.RightTableRef.Alias)
+			add(j.RightTableRef.Name)
+		}
+	}
+	for _, c := range info.CTEs {
+		add(c.Name)
+	}
+	return out
+}
