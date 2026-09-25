@@ -396,14 +396,28 @@ func arcD5TypedRerunCells() []arcD5Cell {
 		// never reaches the refusal — the pair below it records what it
 		// answers instead. The promise is kept in the position that still
 		// re-runs.
-		arcD5Cell{issue: "#679", name: "container_outer_value_is_refused_with_0A000",
+		//
+		// An ARRAY outer value is no longer in that class: arc CW round 5
+		// spells it as its typed array literal (expr.ArrayValueLiteral), so
+		// the cell that pinned its refusal here started answering
+		// PostgreSQL's value and was turned into the answer it gives. The
+		// second cell discriminates: every row matches ITSELF, so the first
+		// answers 5 for any reading that returns true; excluding the row
+		// itself leaves only the two empty arrays (ids 0 and 3) — a reading
+		// that equated arrays by anything but element-wise value answers
+		// otherwise. ROW / MAP / VECTOR keep the refusal (the cells below).
+		arcD5Cell{issue: "#679", name: "array_outer_value_rerun_answers",
 			sql: `SELECT SUM(CASE WHEN EXISTS (SELECT 1 FROM typemx_nested b ` +
 				`WHERE b.c_arr = a.c_arr) THEN 1 ELSE 0 END) AS n ` +
 				`FROM typemx_nested a WHERE a.id < 5`,
-			wantErrLike:    "has no literal spelling that reads back as the same value",
-			wantSQLState:   "0A000",
-			wantCorrRoutes: 1,
-			pgSays:         "PostgreSQL compares arrays and answers; this engine has no literal for one"},
+			want:           []string{"n=int64:5"},
+			wantCorrRoutes: 1},
+		arcD5Cell{issue: "#679", name: "array_outer_value_rerun_matches_by_element",
+			sql: `SELECT SUM(CASE WHEN EXISTS (SELECT 1 FROM typemx_nested b ` +
+				`WHERE b.c_arr = a.c_arr AND b.id <> a.id) THEN 1 ELSE 0 END) AS n ` +
+				`FROM typemx_nested a WHERE a.id < 5`,
+			want:           []string{"n=int64:2"},
+			wantCorrRoutes: 1},
 		arcD5Cell{issue: "#679", name: "vector_outer_value_is_refused_with_0A000",
 			sql: `SELECT SUM(CASE WHEN EXISTS (SELECT 1 FROM typemx_nested b ` +
 				`WHERE b.c_vec = a.c_vec) THEN 1 ELSE 0 END) AS n ` +

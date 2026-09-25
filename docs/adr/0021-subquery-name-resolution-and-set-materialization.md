@@ -353,8 +353,13 @@ Two families have no literal at all, and both FAIL the query with 0A000
 (`expr.UnrenderableOuterValueError`) rather than being rendered as something
 else:
 
-- **ARRAY, ROW, MAP and VECTOR.** There is no container literal in this
-  dialect.
+- **ROW, MAP and VECTOR.** There is no literal for these containers in this
+  dialect. (An ARRAY was in this family until arc CW round 5, 2026-09-25: it
+  is now spelled as its typed array literal, `CAST('{1,2}' AS BIGINT[])` —
+  `expr.ArrayValueLiteral`, the spelling a DAG scalar subquery's array
+  already used — so a correlated re-run over an array column answers
+  PostgreSQL's value; the #679 census cells `array_outer_value_rerun_*` gate
+  it.)
 - **A BYTES value that is not valid UTF-8, or that holds a NUL.** The only
   bytea spelling the parser accepts is a quoted string, and those bytes do not
   survive it — a NUL cannot travel through the wire's text format at all
