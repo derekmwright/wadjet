@@ -1544,7 +1544,16 @@ func buildFromClause(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*Node, er
 				// `setSubtreeAlias` would make the body's own relations
 				// answer to the lateral's name, and the body resolves its own
 				// references against the names it wrote.
-				if join.RightAlias != "" && right.DerivedAlias == "" {
+				//
+				// It REPLACES a derived alias already on the root: a body that
+				// is `SELECT * FROM (SELECT …) i` collapses onto the derived
+				// table's own Project, which carries `i` — a name the
+				// enclosing query cannot write. Kept, the join qualified the
+				// body's duplicate columns `i.id`, the enclosing `s.id`
+				// matched nothing, and its qualifier strip bound the OUTER
+				// relation's `id` (arc JP round 4, B2: `d/b6starBare`, every
+				// arm).
+				if join.RightAlias != "" {
 					right.DerivedAlias = join.RightAlias
 				}
 				lat := NewJoin(left, right, jt, joinCond)

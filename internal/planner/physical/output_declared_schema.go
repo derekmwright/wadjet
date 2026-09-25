@@ -1237,14 +1237,18 @@ func withJoinArmQualifiers[V comparable](n *logical.Node, left, right, merged ma
 // this arc exists to remove, pointing inward.
 func namedArmScope(n *logical.Node) string {
 	for cur := n; cur != nil; {
+		// A DERIVED alias first: it is stamped by the ENCLOSING item — a
+		// derived table or a LATERAL whose body is `SELECT * FROM c` collapses
+		// onto the CTE reference's own root — so it is the one name the
+		// enclosing query can write for the arm (arc JP round 4, B2).
+		if cur.DerivedAlias != "" {
+			return cur.DerivedAlias
+		}
 		if cur.CTERefAlias != "" {
 			return cur.CTERefAlias
 		}
 		if cur.CTEName != "" {
 			return cur.CTEName
-		}
-		if cur.DerivedAlias != "" {
-			return cur.DerivedAlias
 		}
 		if len(cur.Children) != 1 {
 			return ""

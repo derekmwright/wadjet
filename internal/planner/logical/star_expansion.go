@@ -138,6 +138,24 @@ func StarSourceColumns(input *Node, qualifier string) []StarColumn {
 	if qualifier != "" {
 		return relationOutputColumns(input, qualifier)
 	}
+	// A bare star over a BLOCK publishes the block's list, never the scan
+	// beneath it: `SELECT *` over `(SELECT id AS xid … FROM lt_i) i` is `xid`,
+	// not `id`. The lone-scan walk below looks through every Project to the
+	// scan, which is right only when nothing between renames. A LATERAL body
+	// `SELECT * FROM (SELECT …) i` whose correlation key is minted keeps its
+	// star Project over the derived block's, and expanding the scan's names
+	// published columns the block renamed away — `s.xid` then bound the OUTER
+	// relation's `xid` (arc JP round 4, B2: a bare star over an
+	// expression-keyed lateral). A security projection is not a block: the
+	// lone-scan walk already answers its list.
+	src := input
+	for src != nil && len(src.Children) == 1 && (src.Type == NodeFilter || src.Type == NodeSort ||
+		src.Type == NodeLimit || src.Type == NodeDistinct) {
+		src = src.Children[0]
+	}
+	if src != nil && src.Type == NodeProject && !src.SecurityBarrier && !HasStarProjection(src) {
+		return projectionOutputNames(src)
+	}
 	scan, barrier := loneScan(input)
 	if scan == nil {
 		return nil
