@@ -20,7 +20,7 @@ import (
 //
 // The property (dagplan/lateral_identity_guard.go, ADR-0021 §1s): the DAG
 // carries a correlated LATERAL only when no non-minted name its arm carries
-// is carried by another relation of the query, and the join does not pad a
+// across its join is carried by another relation of the query, and the join does not pad a
 // grouped arm; every other one routes to the coordinator-local pipeline.
 // Here, on five arms, every cell answers PostgreSQL's rows or refuses where
 // the tip refuses (jp3Loud: a refusal that starts answering fails), the

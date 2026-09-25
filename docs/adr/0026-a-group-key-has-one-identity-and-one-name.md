@@ -2826,8 +2826,8 @@ rule.** The review of round 2 found the DAG re-spell reading the outer
 column through spellings the four sites above did not reach (a body naming
 its relation by table or CTE name, `SELECT DISTINCT *`, a derived table or a
 CTE inside the body). A correlated LATERAL now runs as stages only when no
-non-minted name its arm carries is carried by another relation of the query
-and its join does not pad a grouped arm; every other one runs on the
+non-minted name its arm carries across its join is carried by another
+relation of the query and its join does not pad a grouped arm; every other one runs on the
 coordinator's single-process pipeline (`dagplan.refuseCollidingLateral`,
 ADR-0021 §1s). The resolver rules above stay for the plans the DAG carries.
 The bare-key `LEFT JOIN LATERAL` over a `DISTINCT` body that failed ADR-0010's
