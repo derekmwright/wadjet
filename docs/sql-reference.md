@@ -2588,8 +2588,9 @@ list names one column twice is not expanded (the list cannot be enumerated by
 name): it declares both columns, the second named `s.m` where PostgreSQL says
 `m` (the non-empty result names it the same way, see postgres-differences.md);
 over an expression-keyed correlation it is refused (`0A000`, the join's key
-column cannot be kept out of it). Before 2026-09-25 the empty result declared
-the duplicate once.
+column cannot be kept out of it), and over an UNGROUPED AGGREGATE body with no
+rows it is `XX000` (the join's empty-input column cannot be published).
+Before 2026-09-25 the plain body's empty result declared the duplicate once.
 
 Every door answers the same way — the embedded API, the PostgreSQL wire
 protocol, `POST /v1/queries`, `POST /v1/queries/async` with

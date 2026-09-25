@@ -175,9 +175,10 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      LATERALs, a LATERAL beside another join, and an ungrouped-aggregate
      LATERAL declares its columns on every arm and door. A LATERAL whose own
      list names one column twice is not enumerable by name, so the star still
-     reads the join's output; it was said here to refuse, and measured it
-     answered, declaring the duplicate ONCE (four columns for PostgreSQL's
-     five, arc JP round 4 review). **Amended 2026-09-25 for arc JP round 5:**
+     reads the join's output. Over an UNGROUPED AGGREGATE body it refuses
+     (XX000: the join carries the pad marker); over a PLAIN body it was said
+     to refuse too, and measured it answered, declaring the duplicate ONCE
+     (four columns for PostgreSQL's five, arc JP round 4 review). **Amended 2026-09-25 for arc JP round 5:**
      the block's own list is declared as written, so the empty result
      declares both columns, the second as `s.m` — the join's qualified name
      for a duplicate, the non-empty result's name too (FC-JP-13); over an
