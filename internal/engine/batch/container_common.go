@@ -92,8 +92,8 @@ func commonLeafColumn(a, b parquet.Column) (parquet.Column, bool) {
 	case ra == 4 || rb == 4:
 		out.Type, out.Precision, out.Scale = TypeFloat32, 0, 0
 	case ra == 3 || rb == 3:
-		da, oka := DecimalTypeOf(a.Type, DecimalType{Precision: a.Precision, Scale: a.Scale})
-		db, okb := DecimalTypeOf(b.Type, DecimalType{Precision: b.Precision, Scale: b.Scale})
+		da, oka := DecimalTypeOf(a.Type, DecimalType{Precision: knownPrecision(a), Scale: a.Scale})
+		db, okb := DecimalTypeOf(b.Type, DecimalType{Precision: knownPrecision(b), Scale: b.Scale})
 		if !oka || !okb {
 			return parquet.Column{}, false
 		}
@@ -106,6 +106,16 @@ func commonLeafColumn(a, b parquet.Column) (parquet.Column, bool) {
 		out.Type, out.Precision, out.Scale = TypeInt64, 0, 0
 	}
 	return out, true
+}
+
+// knownPrecision is a DECIMAL leaf's precision for the common-type rule: a
+// declaration read off a VECTOR carries its scale and not its precision
+// (VectorDecl), and the widest precision at that scale moves no digit.
+func knownPrecision(c parquet.Column) int {
+	if c.Type == TypeDecimal && c.Precision <= 0 {
+		return MaxDecimalPrecision
+	}
+	return c.Precision
 }
 
 // leafNumericRank is the numeric promotion ladder's rung of a leaf type, 0
