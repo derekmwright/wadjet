@@ -727,17 +727,24 @@ scales by value (`ARRAY[10.00] = ARRAY[10.0000]` is true, as a join key, an
 a NULL element after every value and equal to another NULL element
 (`ARRAY[1,NULL] = ARRAY[1,NULL]` is true). A multi-dimensional array orders by
 its flattened elements, then their count, then its dimensions
-(`{{1,2},{3,4}}` > `{{1,2,3}}`), as PostgreSQL's does. `UNION` arms whose elements differ fold on the
-numeric ladder (`int4[] ∪ bigint[]` is `bigint[]`; two `numeric` elements meet
-at their common `numeric(p,s)`); arms with no common element
-type are `42804`. `CAST(container AS TEXT)` (and `VARCHAR(n)`) is the same
+(`{{1,2},{3,4}}` > `{{1,2,3}}`), as PostgreSQL's does. Two arrays whose ELEMENT
+types differ meet at ONE common element type wherever they meet — a comparison,
+`IN` / `= ANY`, a hash or sort-merge join key, `UNION` / `INTERSECT` / `EXCEPT`,
+`CASE`, `COALESCE`, `GREATEST`, `LEAST`, `ARRAY[a, b]` — PostgreSQL's numeric
+promotion over the element: `int4[]` and `bigint[]` meet at `bigint[]`, an
+integer and a `numeric` at `numeric` (exactly), anything and a float at
+`double precision`, two `numeric(p,s)` at their common `numeric(p,s)` (the
+larger scale, so no digit is rounded: `CASE … THEN numeric(5,2)[] ELSE
+numeric(9,4)[] END` keeps `{1.2345}`). PostgreSQL has no `int[] = float8[]`
+operator without the coercion; this engine answers the comparison it would
+make after it. Arms with no common element type are `42804`. `CAST(container AS TEXT)` (and `VARCHAR(n)`) is the same
 rendering under the operand's DECLARED element, whatever expression built it —
 `CAST(ARRAY[COALESCE(ts, …)] AS TEXT)` is `{"2024-01-01 01:00:00"}` and
 `CAST(ARRAY[d] AS TEXT)` `{2024-01-02}`, and a subquery that returns the
 array renders the same (`CAST((SELECT ARRAY[ts] …) AS TEXT)`); `CAST(container AS TEXT[])` converts
 each element as a column of its type converts (a timestamp's text, not its
-number) — a multi-dimensional array's leaves, keeping its dimensions
-(`CAST(ARRAY[ARRAY[1,2],ARRAY[3,4]] AS TEXT[])` is `{{1,2},{3,4}}`) — a
+number) — a multi-dimensional array passes through unchanged (its
+multi-dimensional semantics are not PostgreSQL's; see postgres-differences) — a
 `numeric(p,s)[]` destination declares `numeric(p,s)` elements, and `CAST(container AS JSON)` is `to_json`'s text
 (`["2024-01-01T01:00:00"]`). An `INTERVAL` element has no text form here and
 the cast refuses (`0A000`); PostgreSQL prints `{01:00:00}`.

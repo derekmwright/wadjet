@@ -26,7 +26,11 @@ Two rules, and the second is the one that keeps this honest:
     `TestOuterLiteralRoundTripsEveryType` compares each rendering against
     the value read straight out of the column.
  2. A type with NO literal spelling in this dialect is a REFUSAL, not a
-    guess. ARRAY, ROW, MAP and VECTOR have no literal at all, and a BYTES
+    guess. ROW, MAP and VECTOR have no literal at all (an ARRAY has one since
+    arc CW round 5 — its typed array literal, `CAST('{1,2}' AS BIGINT[])`,
+    expr.ArrayValueLiteral, the spelling the DAG's scalar-subquery
+    substitution writes; an element with no exact cast spelling still
+    refuses), and a BYTES
     value that is not valid UTF-8 (or holds a NUL) has none either: the
     only bytea spelling the parser accepts is a quoted string, and the
     bytes that do not survive that round trip would come back as different

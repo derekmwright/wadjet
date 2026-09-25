@@ -4876,9 +4876,10 @@ Three properties are worth knowing:
   FROM t WHERE ...)` — sees no row this statement has removed, which is what
   PostgreSQL does.
 - An UNCORRELATED subquery runs once for the statement. A CORRELATED one runs
-  once per candidate row, with the outer values substituted as literals, so an
-  outer column with no literal spelling (`ARRAY`, `ROW`, `MAP`, `VECTOR`) is
-  SQLSTATE `0A000`.
+  once per candidate row, with the outer values substituted as literals (an
+  `ARRAY` as its typed array literal, `CAST('{1,2}' AS BIGINT[])`), so an
+  outer column with no literal spelling (`ROW`, `MAP`, `VECTOR`) is SQLSTATE
+  `0A000`.
 - A subquery that cannot run **fails the statement and writes nothing** —
   never a row set decided by a failure.
 - A **scalar** subquery is at most ONE row. Zero rows is SQL `NULL`; more than
@@ -5126,7 +5127,7 @@ and `internal/storage/parquet/wide_decimal_test.go`.)
 - An AGGREGATE in a subquery's own `WHERE` — `x IN (SELECT y FROM t WHERE SUM(y) > 0)` — SQLSTATE `42803`, `aggregate functions are not allowed in WHERE`, which is what PostgreSQL raises. An aggregate belonging to the ENCLOSING query is legal there in PostgreSQL and is refused here with the same code: a lowering gap, recorded in ADR-0012's divergence list.
 - A WINDOW FUNCTION in a subquery's own `WHERE` or `JOIN` condition — `WHERE EXISTS (SELECT 1 FROM t z WHERE SUM(z.n) OVER () > 0)` — SQLSTATE `42P20`, `window functions are not allowed in WHERE`, which is what PostgreSQL raises. The rule holds at EVERY query level, because a window is evaluated after the rows are selected and so cannot select them, and it is applied at PLAN time: the same class reaches the client on the single-process and the distributed arms alike.
 - A DERIVED TABLE inside a subquery's `FROM` that references the enclosing query — `WHERE EXISTS (SELECT 1 FROM (SELECT … WHERE t.k = a.k) d)` — SQLSTATE `0A000`, naming two workarounds: lift the correlated predicate ABOVE the derived table (`… (SELECT … ) d WHERE d.k = a.k`, which answers), or write the derived table as a `LATERAL` join. PostgreSQL answers the original — no `LATERAL` is needed for a reference to an OUTER query level — and this engine has no lowering for it. A reference to a SIBLING of the same `FROM` list is a different thing and stays `42P01`: `LATERAL` is what governs that one, and PostgreSQL refuses it too.
-- A correlated subquery this engine cannot express as a join is re-run per outer row with the outer values substituted as literals, so an outer value with no literal spelling that reads back unchanged — an ARRAY / ROW / MAP / VECTOR, a BYTES value that is not valid UTF-8 or holds a NUL, NaN or ±Infinity — is SQLSTATE `0A000` rather than a wrong answer.
+- A correlated subquery this engine cannot express as a join is re-run per outer row with the outer values substituted as literals, so an outer value with no literal spelling that reads back unchanged — a ROW / MAP / VECTOR (an ARRAY is its typed array literal, `CAST('{…}' AS T[])`), a BYTES value that is not valid UTF-8 or holds a NUL, NaN or ±Infinity — is SQLSTATE `0A000` rather than a wrong answer.
 - No time-of-day type: a Parquet `TIME` column is read as its raw integer in the file's own unit
 
 

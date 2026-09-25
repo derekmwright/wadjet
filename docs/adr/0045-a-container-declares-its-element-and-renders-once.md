@@ -115,13 +115,25 @@ psql).
    no PostgreSQL text form here — an INTERVAL (this engine has no interval
    text form) — refuses a text or JSON cast with 0A000 rather than printing
    Go's struct text (round 3). An array cast to `VECTOR(n)` whose declared
-   element is not a number is 42846, pgvector's answer, whatever its box. A
-   MULTI-DIMENSIONAL array cast into `T[]` casts its LEAVES and keeps its
-   dimensions, PostgreSQL's shape (`{{1,2},{3,4}}`), round 4: this engine holds
-   such a value as an array of arrays, and casting each outer ELEMENT to the
-   scalar destination made a one-dimensional `text[]` of the inner arrays'
-   text. A value mixing inner arrays and scalars (ragged in a way no
-   PostgreSQL array is) refuses 0A000.
+   element is not a number is 42846, pgvector's answer, whatever its box.
+   **Multi-dimensional arrays are out of this decision's scope (round 5).**
+   This engine holds a nested array as an array of arrays and renders it as
+   `array_out` does (`{{1,2},{3,4}}`, OID 25, §3), but it does not have
+   PostgreSQL's multi-dimensional SEMANTICS: its leaves, its dimensions,
+   `unnest` over the leaves, `cardinality`, `array_length(…, 2)`,
+   `array_to_string` of the leaves. Round 4 made the cast into `T[]` convert
+   the leaves and keep the dimensions, and the rest of the engine then read
+   that shape as the outer array's inner arrays (`unnest` answered `{1,2}`
+   rows where PostgreSQL answers the leaves; a constructed argument had
+   refused before). Round 5 returns every multi-dimensional spelling to its
+   pre-arc behaviour: the cast of a nested value into `T[]` passes it through
+   unchanged under its own declaration, a text operand spelling a
+   multi-dimensional array (`CAST('{{1,2},{3,4}}' AS INT[])`) passes through
+   as its text, and `unnest` / `generate_subscripts` of a constructed or cast
+   nested argument refuse 0A000 as they did. The one exception is the
+   ordering (§4), where `array_cmp` stays: reverting it moved cells AWAY from
+   PostgreSQL that main answered right. The semantics are a follow-up of
+   their own (postgres-differences records them).
 3. **One renderer.** PostgreSQL's text output — `array_out` (`{…}`, its
    quoting, bare NULL, a nested dimension bare) and `record_out` (`(…)`, an
    empty slot for NULL), with temporal leaves in their text form — lives in
@@ -165,6 +177,30 @@ psql).
    flattened leaves, then their count, then the dimensions (each level's
    lengths; a ragged value's keep two shapes apart) — in the columnar kernel
    and the boxed comparator alike, so `{{1,2},{3,4}}` > `{{1,2,3}}`.
+   **Round 5 (the element types of a pair are unified ONCE).** Round 4
+   unified two DECIMAL scales and left every other pair to its meeting point:
+   `=` widened int ⊕ float8 to a double while the hash-join key, the set
+   operations and the FULL join's matched set keyed each side under its own
+   element type (`int[] JOIN float8[]` 0 rows for 49, UNION 98), the
+   sort-merge key read a FLOAT64 child with the INT64 kernel (XX000), and
+   CASE / COALESCE / GREATEST / LEAST / `ARRAY[a, b]` declared the FIRST
+   operand's DECIMAL scale and rounded the others' elements into it. Now ONE
+   function decides the pair, `batch.CommonContainerColumn` — PostgreSQL's
+   numeric promotion over the element (INT32 → INT64 → DECIMAL → FLOAT32 →
+   FLOAT64; two DECIMALs at ADR-0024's common `(p,s)`, max scale, so no digit
+   is rounded; an integer beside a DECIMAL brings its whole range at scale 0)
+   — and every meeting point reads it: the comparator writes both sides under
+   it (`expr.commonContainerShapes`); the kernel orders two element vectors
+   of different numeric types at it (`kernel.compareMixedLeafAt`, the
+   sort-merge key); the join resolves the pair's common LEAF type and both
+   sides key every leaf at it (`physical.resolveJoinKeyTypes` →
+   `exec.appendListKeyAt`, the same bytes for the build, the probe, the
+   bloom filter and the DAG's partition hash); a set operation's element
+   target is it and each arm's boxes move into it (the DAG casts the arm);
+   and `expr.CommonDeclType` declares it for the choice constructs, whose
+   chosen box is moved into it before the declared vector receives it
+   (`expr.containerChoice`: an integer leaf as its exact text for a DECIMAL
+   element, never an unscaled carrier).
 
 ## Alternatives rejected
 
