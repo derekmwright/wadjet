@@ -252,6 +252,10 @@ type extremumArms struct {
 	// select rather than the ladder above (#757), so materialize must not
 	// bring its winner to this fold's width.
 	nullif bool
+	// cc is the container half of the call's common type
+	// (choice_container.go); nil for NULLIF, whose type is its first
+	// argument's.
+	cc *containerChoice
 }
 
 // commonKind folds every non-quoted argument's kind through PostgreSQL's
@@ -304,6 +308,11 @@ func (a *extremumArms) commonKind(b *batch.RecordBatch) boxKind {
 func (a *extremumArms) materialize(b *batch.RecordBatch, idx int, v any) any {
 	if a == nil || idx < 0 || idx >= len(a.ops) {
 		return v
+	}
+	if _, isArr := v.([]any); isArr {
+		// A container argument wins AT THE CALL'S common container shape
+		// (choice_container.go, arc CW round 5), not in its own.
+		return a.cc.conform(b, v)
 	}
 	typ, ok := numberKindType(a.commonKind(b))
 	if !ok {
@@ -452,6 +461,9 @@ func (a *extremumArms) bindDecls(decls []*operandDecl) {
 		if i < len(decls) {
 			a.ops[i].decl = decls[i]
 		}
+	}
+	if !a.nullif {
+		a.cc = newContainerChoice(decls)
 	}
 }
 

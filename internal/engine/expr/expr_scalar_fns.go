@@ -18,12 +18,16 @@ import (
 // ArrayLitExpr evaluates to a []any containing the evaluated elements.
 type ArrayLitExpr struct {
 	Elements []Expr
+	// cc moves an element that is itself an array into the elements' common
+	// shape (choice_container.go, arc CW round 5): `ARRAY[a, b]` of a
+	// numeric(5,2)[] and a numeric(9,4)[] declares numeric(9,4) leaves.
+	cc *containerChoice
 }
 
 func (e *ArrayLitExpr) Eval(b *batch.RecordBatch, row int) any {
 	result := make([]any, len(e.Elements))
 	for i, elem := range e.Elements {
-		result[i] = elem.Eval(b, row)
+		result[i] = e.cc.conform(b, elem.Eval(b, row))
 	}
 	return result
 }

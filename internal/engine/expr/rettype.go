@@ -716,6 +716,9 @@ func CommonDeclType(decided []DeclType, sawUnknown bool) (DeclType, bool) {
 		// `GREATEST(0.5, 1.5)` is DECIMAL(2,1), `COALESCE(2.50, 1)` numeric.
 		return typed[0], true
 	}
+	if d, ok := commonContainerDecl(typed); ok {
+		return d, true
+	}
 	rung, numeric := numericRungFold(typed)
 	if !numeric {
 		// Not a fold this rule can make: a string, a date, a bool, a mixture
@@ -785,6 +788,41 @@ func anyDecimalDecl(ds []DeclType) bool {
 		}
 	}
 	return false
+}
+
+// commonContainerDecl is CommonDeclType's arm for CONTAINER operands — CASE
+// branches, COALESCE / GREATEST / LEAST arguments, an ARRAY[a, b]
+// constructor's elements — that are all declared containers: their common
+// declaration is batch.CommonContainerColumn's, the one rule the comparators,
+// the join keys and the set operations unify through (arc CW round 5, review
+// B5). Before it the FIRST decider answered, so a numeric(5,2)[] branch beside
+// a numeric(20,6)[] one declared scale 2 and the other branch's elements were
+// rounded into it. The runtime moves every branch's box into the same shape
+// (containerChoice). ok is false when an operand is not a declared container
+// or the pair has no common type; the first decider then answers as before.
+func commonContainerDecl(typed []DeclType) (DeclType, bool) {
+	if len(typed) < 2 {
+		return DeclType{}, false
+	}
+	var common parquet.Column
+	for i, d := range typed {
+		if (d.ID != batch.TypeArray && d.ID != batch.TypeMap) || d.Schema == nil || d.Schema.ElementType == nil {
+			return DeclType{}, false
+		}
+		c := d.Schema.Clone()
+		c.Type = d.ID
+		if i == 0 {
+			common = c
+			continue
+		}
+		u, ok := batch.CommonContainerColumn(common, c)
+		if !ok {
+			return DeclType{}, false
+		}
+		common = u
+	}
+	common.Nullable = true
+	return DeclType{ID: common.Type, Schema: &common}, true
 }
 
 // fractionalLitTriggersFold promotes a choice to DECIMAL only when a

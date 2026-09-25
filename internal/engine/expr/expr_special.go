@@ -318,6 +318,9 @@ type Case struct {
 	// DECIMAL, so a branch that answers an INTEGER hands over the value's
 	// TEXT rather than a carrier (choice_decimal.go, #695).
 	dch decimalChoice
+	// cc moves a container branch into the branches' common shape
+	// (choice_container.go, arc CW round 5).
+	cc *containerChoice
 }
 
 // boxMode reports what this CASE's chosen box must be rewritten to so it
@@ -362,7 +365,7 @@ func (e *Case) Eval(b *batch.RecordBatch, row int) any {
 	if v == nil {
 		return v
 	}
-	return choiceBox(e.boxMode(b), v)
+	return e.cc.conform(b, choiceBox(e.boxMode(b), v))
 }
 
 func (e *Case) eval(b *batch.RecordBatch, row int) any {
@@ -410,6 +413,8 @@ type Coalesce struct {
 
 	// dch is the DECIMAL box mode — see Case.dch (#695).
 	dch decimalChoice
+	// cc is Case.cc's twin (choice_container.go).
+	cc *containerChoice
 }
 
 func (e *Coalesce) Eval(b *batch.RecordBatch, row int) any {
@@ -418,7 +423,7 @@ func (e *Coalesce) Eval(b *batch.RecordBatch, row int) any {
 		if v == nil {
 			continue
 		}
-		return choiceBox(e.boxMode(b), v)
+		return e.cc.conform(b, choiceBox(e.boxMode(b), v))
 	}
 	return nil
 }

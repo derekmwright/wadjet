@@ -813,7 +813,11 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 			}
 			elems[i] = compiled
 		}
-		return &ArrayLitExpr{Elements: elems}, nil
+		decls := make([]*operandDecl, len(n.Elements))
+		for i, e := range n.Elements {
+			decls[i] = newOperandDecl(e, ctx)
+		}
+		return &ArrayLitExpr{Elements: elems, cc: newContainerChoice(decls)}, nil
 
 	case *plansql.WindowFuncNode:
 		// A window call must be extracted into a NodeWindow output column by
@@ -1305,7 +1309,11 @@ func compileFuncCallNamed(n *plansql.FuncCallNode, ctx *compileContext, checked 
 
 	// Check for COALESCE special form
 	if name == "coalesce" {
-		return &Coalesce{Args: args}, nil
+		decls := make([]*operandDecl, len(n.Args))
+		for i, a := range n.Args {
+			decls[i] = newOperandDecl(a, ctx)
+		}
+		return &Coalesce{Args: args, cc: newContainerChoice(decls)}, nil
 	}
 
 	if checked {
@@ -1489,6 +1497,14 @@ func compileCaseNode(n *plansql.CaseNode, ctx *compileContext) (Expr, error) {
 			return nil, err
 		}
 	}
+	results := make([]*operandDecl, 0, len(n.Whens)+1)
+	for _, when := range n.Whens {
+		results = append(results, newOperandDecl(when.Result, ctx))
+	}
+	if n.Else != nil {
+		results = append(results, newOperandDecl(n.Else, ctx))
+	}
+	c.cc = newContainerChoice(results)
 
 	return c, nil
 }
