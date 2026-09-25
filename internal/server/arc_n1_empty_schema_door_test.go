@@ -114,6 +114,13 @@ func TestN1AnEmptyColumnListIsRefusedOnTheHTTPDoor(t *testing.T) {
 		{"control: a zero-row star over an ungrouped lateral (declared since arc JP round 4)",
 			"SELECT * FROM n1ord o JOIN LATERAL (SELECT MAX(order_id) AS mx " +
 				"FROM n1item WHERE order_id = o.id) s ON true WHERE o.id > 99", 3},
+		// A PLAIN lateral list naming one column twice is not enumerable by
+		// name either, but its join carries no pad marker: the block's list
+		// is declared as written, both columns (arc JP round 5, B3 — it
+		// declared the duplicate once, three columns for PostgreSQL's four).
+		{"control: a zero-row star over a plain lateral naming one column twice declares both",
+			"SELECT * FROM n1ord o JOIN LATERAL (SELECT order_id AS mx, id AS mx " +
+				"FROM n1item WHERE order_id = o.id) s ON true WHERE o.id > 99", 4},
 	} {
 		t.Run(ctl.name, func(t *testing.T) {
 			status, body := postSQL(t, client, ts.URL, ctl.sql)

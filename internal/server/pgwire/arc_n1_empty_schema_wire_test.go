@@ -58,6 +58,17 @@ func TestN1AnEmptyColumnListIsRefusedOnTheWire(t *testing.T) {
 			wantSQLState: sqlerr.EmptyResultSQLState,
 		},
 		{
+			// A PLAIN lateral list naming one column twice carries no pad
+			// marker: the block's list is declared as written, both columns
+			// (arc JP round 5, B3 — the duplicate was declared once). The
+			// second is named `s.mx` where PostgreSQL says `mx`, as on the
+			// non-empty result (the join qualifies a duplicate name; FC-JP-13).
+			name: "a_zero_row_star_over_a_plain_lateral_naming_one_column_twice_declares_both",
+			sql: `SELECT * FROM j1ord o JOIN LATERAL (SELECT amount AS mx, id AS mx ` +
+				`FROM j1item WHERE order_id = o.id) s ON true WHERE o.id > 99`,
+			want: []string{"id", "customer", "total", "mx", "s.mx"},
+		},
+		{
 			// The shape no door COULD declare — a zero-row star over a BUSHY
 			// join, where `starJoinDeclaredOutputSchema` declined because a
 			// side contains a join of its own (#978's stated bound). Arc O1
