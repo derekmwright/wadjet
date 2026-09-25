@@ -1231,6 +1231,9 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 							} else {
 								typ, typed := scalarColType(schema)
 								lit := scalarToLiteral(v, typ, typed).String()
+								if al, ok := ArrayScalarLiteral(v, schema); ok {
+									lit = al.String()
+								}
 								resolvedExpr = strings.ReplaceAll(resolvedExpr, ":"+d.Placeholder, lit)
 								spliced = true
 							}

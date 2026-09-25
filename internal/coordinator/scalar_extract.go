@@ -14,6 +14,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/expr"
 	"github.com/derekmwright/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 	"github.com/derekmwright/wadjet/internal/wshf"
 )
@@ -78,7 +79,10 @@ func (c *Coordinator) readScalarFromStageOutput(ctx context.Context, out StageOu
 		if err := guard.CheckBatches(path, batches); err != nil {
 			return "", tier, err
 		}
-		lit, ok := scalarFromBatches(batches, projection)
+		lit, ok, err := scalarFromBatches(batches, projection)
+		if err != nil {
+			return "", tier, err
+		}
 		if ok {
 			return lit, tier, nil
 		}
@@ -91,7 +95,7 @@ func (c *Coordinator) readScalarFromStageOutput(ctx context.Context, out StageOu
 // wrapped-aggregate SELECT — e.g. SUM(...) * 0.0001), compile and evaluate
 // the expression for row 0 and return its formatted literal. Otherwise fall
 // back to firstScalarLiteral on the raw first column.
-func scalarFromBatches(batches []*batch.RecordBatch, projection []dagplan.OutputRename) (string, bool) {
+func scalarFromBatches(batches []*batch.RecordBatch, projection []dagplan.OutputRename) (string, bool, error) {
 	for _, r := range projection {
 		if r.Expr == nil {
 			continue
@@ -117,12 +121,31 @@ func scalarFromBatches(batches []*batch.RecordBatch, projection []dagplan.Output
 			// for a query PostgreSQL answers as numeric. The DECLARATION says
 			// which it is; the box cannot (item 8).
 			if s, ok := v.(string); ok && expr.ResultIsDecimalText(compiled, b) {
-				return s, true
+				return s, true, nil
 			}
-			return formatGoValue(v), true
+			if isContainerValue(v) {
+				// A projection that COMPUTES a container has no declaration
+				// here to spell its literal from; loud, never Go's text of the
+				// box (`a.v = [2024-01-10]` failed to parse, round-3 N5).
+				return "", false, noContainerLiteral()
+			}
+			return formatGoValue(v), true, nil
 		}
 	}
 	return firstScalarLiteral(batches)
+}
+
+func isContainerValue(v any) bool {
+	switch v.(type) {
+	case []any, map[string]any:
+		return true
+	}
+	return false
+}
+
+func noContainerLiteral() error {
+	return sqlerr.New("0A000", "a scalar subquery that returns a multi-dimensional array, a ROW or a MAP "+
+		"cannot be substituted into a distributed stage here; the single-process path answers it")
 }
 
 // formatGoValue stringifies an arbitrary Go value into its SQL-literal
@@ -166,7 +189,7 @@ func formatGoValue(v any) string {
 // firstScalarLiteral returns the SQL-literal rendering of the first column of
 // the first non-empty row across batches. Returns ok=false when batches have
 // no rows.
-func firstScalarLiteral(batches []*batch.RecordBatch) (string, bool) {
+func firstScalarLiteral(batches []*batch.RecordBatch) (string, bool, error) {
 	for _, b := range batches {
 		n := b.ActiveLen()
 		if n == 0 {
@@ -182,11 +205,50 @@ func firstScalarLiteral(batches []*batch.RecordBatch) (string, bool) {
 			row = int(b.Sel[0])
 		}
 		if vec.Nulls.IsNull(row) {
-			return "null", true
+			return "null", true, nil
 		}
-		return formatScalar(vec, row, typ), true
+		if typ == parquet.TypeArray {
+			lit, ok := arrayScalarLiteral(vec, row)
+			if !ok {
+				return "", false, noContainerLiteral()
+			}
+			return lit, true, nil
+		}
+		if typ == parquet.TypeMap || typ == parquet.TypeRow {
+			return "", false, noContainerLiteral()
+		}
+		return formatScalar(vec, row, typ), true, nil
 	}
-	return "", false
+	return "", false, nil
+}
+
+// arrayScalarLiteral spells a one-dimensional ARRAY value as the typed literal
+// the stage that reads it compiles back to the same array: its PostgreSQL text
+// cast to the element's array type, `CAST('{2024-01-10}' AS DATE[])` (round
+// 4). The DAG substituted an array-valued scalar subquery as Go's text of the
+// box (a parse error) or, through the raw path, as `null` — every comparison
+// against it then answered no row where the single-process path answered.
+// ok=false for an element with no castable name here (a nested array, a ROW).
+func arrayScalarLiteral(vec *batch.Vector, row int) (string, bool) {
+	decl := batch.VectorDecl("", vec)
+	markDecimalPrecision(&decl)
+	lit, ok := dagplan.ArrayScalarLiteral(vec.GetValue(row), []parquet.Column{decl})
+	if !ok {
+		return "", false
+	}
+	return lit.String(), true
+}
+
+// markDecimalPrecision gives every DECIMAL leaf of a vector's declaration the
+// carrier's full precision: a vector knows its scale, not its declared
+// precision, and the literal's cast needs one that holds every value.
+func markDecimalPrecision(c *parquet.Column) {
+	if c.Type == parquet.TypeDecimal && c.Precision <= 0 {
+		c.Precision = batch.MaxDecimalPrecision
+	}
+	if c.ElementType != nil {
+		markDecimalPrecision(c.ElementType)
+	}
 }
 
 // formatScalar renders a column value at row index as a SQL literal suitable

@@ -101,7 +101,7 @@ func TestFirstScalarLiteral(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			b := batch.NewRecordBatch(tc.schema, 1)
 			tc.fill(b)
-			got, ok := firstScalarLiteral([]*batch.RecordBatch{b})
+			got, ok, _ := firstScalarLiteral([]*batch.RecordBatch{b})
 			if !ok {
 				t.Fatalf("firstScalarLiteral returned ok=false")
 			}
@@ -115,12 +115,12 @@ func TestFirstScalarLiteral(t *testing.T) {
 // TestFirstScalarLiteral_EmptyBatches verifies the scalar extractor returns
 // ok=false when the batches are all empty (caller then errors out).
 func TestFirstScalarLiteral_EmptyBatches(t *testing.T) {
-	if _, ok := firstScalarLiteral(nil); ok {
+	if _, ok, _ := firstScalarLiteral(nil); ok {
 		t.Fatal("nil batches: want ok=false")
 	}
 	schema := []parquet.Column{{Name: "x", Type: parquet.TypeFloat64}}
 	b := batch.NewRecordBatch(schema, 0)
-	if _, ok := firstScalarLiteral([]*batch.RecordBatch{b}); ok {
+	if _, ok, _ := firstScalarLiteral([]*batch.RecordBatch{b}); ok {
 		t.Fatal("empty batch: want ok=false")
 	}
 }
@@ -207,7 +207,7 @@ func TestReadScalarFromStageOutput_WSHFDecode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("readShuffleBatches: %v", err)
 	}
-	got, ok := firstScalarLiteral(batches)
+	got, ok, _ := firstScalarLiteral(batches)
 	if !ok {
 		t.Fatalf("firstScalarLiteral returned ok=false")
 	}
