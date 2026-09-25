@@ -3069,8 +3069,11 @@ produce a native column over a foreign file's string column.
 do: an ARRAY of numbers or the vector text `'[1,2,3]'` becomes a VECTOR, so
 `cosine_similarity(v, CAST(ARRAY[1.0, 2.0] AS VECTOR(2)))` reads it. A width
 other than n is `22000 expected n dimensions, not m`, a NULL element `22004`,
-an empty vector `22000`. A top-level `CAST(x AS VECTOR)` must be able to say
-its width — an ARRAY constructor operand does — or it is `0A000`.
+an empty vector `22000`, and a modifier pgvector refuses (`VECTOR(0)`, a
+width past 16000) `22023`. A top-level `CAST(x AS VECTOR)` must be able to say
+its width — an ARRAY constructor operand does — or it is `0A000`
+(`CAST(CAST(ARRAY[] AS INT[]) AS VECTOR)` among them, where pgvector reads the
+empty array at run time and answers `22000`).
 
 A CONTAINER operand (ARRAY, MAP, ROW) is decided before any scalar
 conversion: to text (`TEXT`, `VARCHAR(n)`, `CHAR(n)`) it is its PostgreSQL

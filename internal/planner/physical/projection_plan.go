@@ -482,7 +482,13 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 				pc.Dimension = outDecl.Schema.Dimension
 			}
 			if cn, ok := plansql.Unparen(proj.ASTExpr).(*plansql.CastNode); ok && pc.Dimension == 0 {
-				if _, _, isVec := expr.VectorCastDim(cn.TypeName); isVec {
+				if _, err, isVec := expr.VectorCastDim(cn.TypeName); isVec {
+					// A modifier pgvector refuses (VECTOR(0), past 16000) is
+					// its typmod error, 22023 — decided by the type name before
+					// the width question arises (arc CW round 3, N3).
+					if err != nil {
+						return nil, nil, nil, err
+					}
 					return nil, nil, nil, sqlerr.New("0A000",
 						"CAST(%s AS %s): the vector's dimension is not known here; write VECTOR(n)", cn.Inner, cn.TypeName)
 				}
