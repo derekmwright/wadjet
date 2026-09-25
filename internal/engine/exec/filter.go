@@ -1850,6 +1850,13 @@ type ColColFilter struct {
 	resolved    bool
 	useFallback bool
 	inner       *Filter
+	// container is set when both columns are containers: the typed kernels
+	// have no container arm, so each row orders through the ONE container
+	// comparator (kernel.CompareValuesAt) — what ORDER BY, the join keys and
+	// every expression comparator of two arrays use (ADR-0045 §4). Round 4:
+	// `WHERE v > w` over two array columns of a derived table refused with
+	// "could not resolve kernel".
+	container bool
 }
 
 func NewColColFilter(leftCol, rightCol string, op CompareOp) *ColColFilter {
@@ -1874,7 +1881,9 @@ func (f *ColColFilter) Execute(ctx context.Context, in *batch.RecordBatch) (*bat
 		}
 		if f.leftIdx >= 0 && f.rightIdx >= 0 {
 			lt, rt := in.Columns[f.leftIdx].Type, in.Columns[f.rightIdx].Type
-			if lt == rt {
+			if batch.IsContainerType(lt) && batch.IsContainerType(rt) && lt == rt {
+				f.container = true
+			} else if lt == rt {
 				f.kern = kernel.ResolveColColFilterKernel(lt, toKernelOp(f.Op))
 			} else if f.RowFallback != nil {
 				// Mixed-type comparison: the kernel would read the right
@@ -1892,6 +1901,9 @@ func (f *ColColFilter) Execute(ctx context.Context, in *batch.RecordBatch) (*bat
 
 	if f.useFallback {
 		return f.inner.Execute(ctx, in)
+	}
+	if f.container {
+		return f.executeContainer(in), nil
 	}
 	if f.kern == nil {
 		return nil, fmt.Errorf("ColColFilter: could not resolve kernel for %s %v %s (leftIdx=%d, rightIdx=%d)",
@@ -1911,6 +1923,52 @@ func (f *ColColFilter) Execute(ctx context.Context, in *batch.RecordBatch) (*bat
 
 	in.Sel = sel
 	return in, nil
+}
+
+// executeContainer keeps the rows whose two container values satisfy the
+// operator under kernel.CompareValuesAt; a NULL on either side keeps no row.
+func (f *ColColFilter) executeContainer(in *batch.RecordBatch) *batch.RecordBatch {
+	lv, rv := in.Columns[f.leftIdx], in.Columns[f.rightIdx]
+	out := f.outSel[:0]
+	keep := func(i int) {
+		if lv.Nulls.IsNull(i) || rv.Nulls.IsNull(i) {
+			return
+		}
+		c := kernel.CompareValuesAt(lv, i, rv, i)
+		var ok bool
+		switch f.Op {
+		case OpEq:
+			ok = c == 0
+		case OpNe:
+			ok = c != 0
+		case OpLt:
+			ok = c < 0
+		case OpLe:
+			ok = c <= 0
+		case OpGt:
+			ok = c > 0
+		case OpGe:
+			ok = c >= 0
+		}
+		if ok {
+			out = append(out, uint32(i))
+		}
+	}
+	if in.Sel != nil {
+		for _, i := range in.Sel {
+			keep(int(i))
+		}
+	} else {
+		for i := 0; i < in.Len; i++ {
+			keep(i)
+		}
+	}
+	f.outSel = out
+	if len(out) == 0 {
+		return nil
+	}
+	in.Sel = append([]uint32(nil), out...)
+	return in
 }
 
 func (f *ColColFilter) Close() error { return nil }
