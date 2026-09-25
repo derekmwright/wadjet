@@ -910,7 +910,12 @@ func ReplaceAllAggregates(node Node, replacements map[string]string) Node {
 		}
 		return &CmpExpr{Left: left, Op: n.Op, Right: right}
 	case *CaseNode:
-		changed := false
+		// The SUBJECT of a simple CASE too: `CASE MIN(x) WHEN MAX(x) …` left
+		// MIN(x) unreplaced, so the post-aggregate projection evaluated an
+		// aggregate call as a scalar and every WHEN missed (arc CW round 4,
+		// found by the one-ordering gate's aggregate operand).
+		subject := ReplaceAllAggregates(n.Subject, replacements)
+		changed := subject != n.Subject
 		newWhens := make([]WhenClause, len(n.Whens))
 		for i, w := range n.Whens {
 			cond := ReplaceAllAggregates(w.Cond, replacements)
@@ -930,7 +935,7 @@ func ReplaceAllAggregates(node Node, replacements map[string]string) Node {
 		if !changed {
 			return node
 		}
-		return &CaseNode{Subject: n.Subject, Whens: newWhens, Else: elseNode}
+		return &CaseNode{Subject: subject, Whens: newWhens, Else: elseNode}
 	case *IsExpr:
 		left := ReplaceAllAggregates(n.Left, replacements)
 		if left == n.Left {
