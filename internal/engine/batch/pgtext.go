@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"math"
 	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -390,26 +389,10 @@ func pgCompositeNeedsQuoting(s string) bool {
 	return false
 }
 
-// FormatPGFloat renders a float the way PostgreSQL's text protocol does:
-// plain decimal for ordinary magnitudes, where Go's %v switches to
-// e-notation once the exponent reaches the digit count — an epoch like
-// 1787049120 came out "1.78704912e+09", which a client reading it as an
-// integer rejects. Extreme magnitudes keep e-notation, and the special
-// values use PostgreSQL's spellings.
-func FormatPGFloat(v float64, bits int) string {
-	switch {
-	case math.IsNaN(v):
-		return "NaN"
-	case math.IsInf(v, 1):
-		return "Infinity"
-	case math.IsInf(v, -1):
-		return "-Infinity"
-	}
-	if a := math.Abs(v); v == 0 || (a >= 1e-4 && a < 1e15) {
-		return strconv.FormatFloat(v, 'f', -1, bits)
-	}
-	return strconv.FormatFloat(v, 'e', -1, bits)
-}
+// FormatPGFloat is FormatFloat8Text, the ONE renderer for a float's text
+// form (main's arc VL, #1252): a container's float element renders exactly as
+// the scalar does on the wire and in a TEXT column.
+func FormatPGFloat(v float64, bits int) string { return FormatFloat8Text(v, bits) }
 
 // DeclaredValue is val as a vector of col's declared type holds and reads it
 // back: every leaf in the box its type's vector gives (a DATE, an address, a
