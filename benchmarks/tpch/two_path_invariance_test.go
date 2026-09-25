@@ -1600,12 +1600,21 @@ func twoPathCorpus() []twoPathQuery {
 	shiftedDate := func(tb testing.TB, r map[string]any, col string) (time.Time, bool) {
 		tb.Helper()
 		v := cellText(r, col)
-		// A whole-day result renders YYYY-MM-DD; anything else means the
-		// interval turned a date into an instant, which none of these do.
-		t, err := time.Parse("2006-01-02", v)
-		if err != nil {
-			tb.Errorf("%s = %q, want a calendar date — a DATE column shifted by a "+
-				"whole-day interval is still a date (%v)", col, v, err)
+		// `date ± interval` is PostgreSQL's TIMESTAMP (arc VL round 3): a
+		// whole-day shift is that day's MIDNIGHT, carried as epoch
+		// milliseconds or printed `YYYY-MM-DD HH:MM:SS`; the DATE column
+		// itself prints YYYY-MM-DD. Anything off midnight means the interval
+		// moved the clock, which none of these do.
+		var t time.Time
+		var err error
+		if ms, perr := strconv.ParseInt(v, 10, 64); perr == nil {
+			t = time.UnixMilli(ms).UTC()
+		} else if t, err = time.Parse("2006-01-02 15:04:05", v); err != nil {
+			t, err = time.Parse("2006-01-02", v)
+		}
+		if err != nil || !t.Equal(t.Truncate(24*time.Hour)) {
+			tb.Errorf("%s = %q, want a calendar day (a date, or a timestamp at its "+
+				"midnight) — a DATE column shifted by a whole-day interval (%v)", col, v, err)
 			return time.Time{}, false
 		}
 		return t, true
