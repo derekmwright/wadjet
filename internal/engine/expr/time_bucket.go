@@ -61,6 +61,9 @@ func fnTimeBucket(args []any) any {
 // a non-positive one has no buckets, and answering either with a number would
 // be a bar nobody can check.
 func timeBucketStrideMillis(iv IntervalValue) int64 {
+	if iv.text != "" {
+		raiseIntervalNotApplicable(iv)
+	}
 	if iv.Years != 0 || iv.Months != 0 {
 		raiseCalendarStride()
 	}

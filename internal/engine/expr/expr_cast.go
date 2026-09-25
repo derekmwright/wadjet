@@ -11,7 +11,6 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
-	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
@@ -383,10 +382,9 @@ func stringOperand(v any) (string, bool) {
 }
 
 // castToInterval is CAST(x AS INTERVAL): an INTERVAL passes through, TEXT is
-// read by the same grammar and unit table the `INTERVAL '…'` literal uses
-// (plansql.ParseIntervalText, intervalValueOf), and anything else has no cast
-// (PostgreSQL: 42846 `cannot cast type integer to interval`). The text used to
-// fall through this switch unparsed, so `ts + CAST('1 day' AS INTERVAL)` —
+// read by castToIntervalText, and anything else has no cast (PostgreSQL:
+// 42846 `cannot cast type integer to interval`). The text used to fall
+// through this switch unparsed, so `ts + CAST('1 day' AS INTERVAL)` —
 // declared a TIMESTAMP shift — added the text's leading number as ONE
 // MILLISECOND (arc VL round 4; round-3 review N2).
 func castToInterval(v any) any {
@@ -394,15 +392,7 @@ func castToInterval(v any) any {
 	case IntervalValue:
 		return x
 	case string:
-		lit, err := plansql.ParseIntervalText(x)
-		if err != nil {
-			panic(fatalEval{err})
-		}
-		iv, err := intervalValueOf(lit)
-		if err != nil {
-			panic(fatalEval{err})
-		}
-		return iv
+		return castToIntervalText(x)
 	}
 	panic(fatalEval{sqlerr.New("42846", "cannot cast type %s to interval", intervalSourceName(v))})
 }

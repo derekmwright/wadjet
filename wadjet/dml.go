@@ -2057,6 +2057,18 @@ func assignEvaluatedValue(v any, col parquet.Column, srcFloat bool, srcType parq
 	if v == nil {
 		return nil, nil
 	}
+	if iv, isInterval := v.(expr.IntervalValue); isInterval {
+		// There is no INTERVAL column type. A TEXT column takes an interval's
+		// text (PostgreSQL's assignment cast through interval's output — the
+		// value INSERT … SELECT already stored); every other column is
+		// PostgreSQL's 42804. Both used to reach the writer's box validation
+		// and fail there with no SQLSTATE (arc VL round-4 review P1).
+		if col.Type == parquet.TypeString {
+			return iv.String(), nil
+		}
+		return nil, sqlerr.New("42804", "column %q is of type %s but expression is of type interval",
+			col.Name, physical.PgTypeName(col.Type))
+	}
 	switch col.Type {
 	case parquet.TypeDecimal:
 		return assignDecimalValue(v, col, srcType, srcKnown)
