@@ -110,10 +110,26 @@ func TestArcJPAJoinArmKeyIsTheColumnTheQueryWrote(t *testing.T) {
 			}
 		})
 	}
-	// The bare star over the expression-keyed lateral is refused, 0A000.
-	_, err = db.Query(ctx, "SELECT * FROM lat_ord o JOIN LATERAL (SELECT i.id AS m FROM lat_item i "+
+	// The bare star over the expression-keyed lateral is the arms' own lists —
+	// PostgreSQL's star, without the key slot the join evaluates the equality
+	// against (arc JP round 4, B5; it was refused from round 1).
+	res, err := db.Query(ctx, "SELECT * FROM lat_ord o JOIN LATERAL (SELECT i.id AS m FROM lat_item i "+
 		"WHERE i.order_id = o.id - 0) s ON true")
-	if err == nil || !strings.Contains(err.Error(), "has an EXPRESSION on its outer side") {
-		t.Errorf("a bare star over an expression-keyed LATERAL: got %v, want the 0A000 refusal", err)
+	if err != nil {
+		t.Fatalf("a bare star over an expression-keyed LATERAL: %v", err)
+	}
+	rows := make([]string, 0, len(res.Rows))
+	for i := range res.Rows {
+		cells := res.Cells(i)
+		parts := make([]string, len(cells))
+		for j, v := range cells {
+			parts[j] = fmt.Sprint(v)
+		}
+		rows = append(rows, strings.Join(parts, ","))
+	}
+	sort.Strings(rows)
+	got := strings.Join(res.Columns, ",") + " " + strings.Join(rows, " | ")
+	if want := "id,customer,total,m 1,Alice,150,1 | 1,Alice,150,2 | 2,Bob,200,3 | 2,Bob,200,4"; got != want {
+		t.Errorf("a bare star over an expression-keyed LATERAL\n  got  %s\n  want %s (PostgreSQL 17.11)", got, want)
 	}
 }
