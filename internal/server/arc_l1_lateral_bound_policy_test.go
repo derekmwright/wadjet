@@ -83,19 +83,24 @@ func TestArcL1ABoundedLateralReadsThePublishedValue(t *testing.T) {
 			pmDeptPairs()},
 	}
 
-	// THE DECLARED OUTPUT IS PostgreSQL's, ON EVERY DOOR. A bare `SELECT *`
-	// publishes the join's STREAM, so a column the planner materializes for a
-	// lifted predicate would enter it — and two of the nine doors are pgwire,
-	// where that is `RowDescription`. The materialization declines over a star
-	// for exactly this reason (ADR-0021 §1q, round 4); this cell is what says
-	// so on the wire.
+	// THE DECLARED OUTPUT IS PostgreSQL's, ON EVERY DOOR. A column the
+	// planner materializes for a lifted predicate must never enter a star's
+	// list — two of the nine doors are pgwire, where that is `RowDescription`.
+	// Since arc JP round 4 a BARE star over a LATERAL is expanded into the
+	// FROM arms' own lists, which hide it as the qualified star always did, so
+	// the two bare-star cells ANSWER — with the mask's rows (`c.bal < b.bal` is
+	// false for every pair under the mask, so every outer row pads NULL) and
+	// exactly PostgreSQL's columns, which the canonical rows spell (`want`).
 	starCols := []struct{ name, sql, want string }{
 		{"starOverLifted",
 			`SELECT * FROM e7bal b LEFT JOIN LATERAL (SELECT c.id AS m FROM e7bal c ` +
-				`WHERE c.bal < b.bal) s ON true`, "bal,id,m"},
+				`WHERE c.bal < b.bal) s ON true`,
+			"bal=0|id=1|m=NULL ; bal=0|id=2|m=NULL ; bal=0|id=3|m=NULL ; bal=0|id=4|m=NULL ; " +
+				"bal=0|id=5|m=NULL ; bal=0|id=6|m=NULL ; bal=0|id=7|m=NULL ; bal=0|id=8|m=NULL"},
 		{"starOverLiftedUnpoliced",
 			`SELECT * FROM e7other b LEFT JOIN LATERAL (SELECT c.note AS m FROM e7other c ` +
-				`WHERE c.id < b.id) s ON true`, "id,m,note"},
+				`WHERE c.id < b.id) s ON true`,
+			"id=1|m=NULL|note=n1 ; id=2|m=n1|note=n2 ; id=3|m=n1|note=n3 ; id=3|m=n2|note=n3"},
 		{"qualifiedStarOverLifted",
 			`SELECT s.* FROM e7bal b LEFT JOIN LATERAL (SELECT c.id AS m FROM e7bal c ` +
 				`WHERE c.bal < b.bal) s ON true`, "m"},
@@ -104,6 +109,22 @@ func TestArcL1ABoundedLateralReadsThePublishedValue(t *testing.T) {
 		for _, door := range rig.doors {
 			t.Run(c.name+"/"+door.name, func(t *testing.T) {
 				got, err := door.run(t, "analyst-key", c.sql)
+				if c.name != "qualifiedStarOverLifted" {
+					if err != nil {
+						t.Fatalf("a bare star over a lifted-predicate lateral was refused: %v\n  SQL: %s", err, c.sql)
+					}
+					rendered := strings.Join(got.canon(), " ; ")
+					for _, v := range pmTrueValues() {
+						if strings.Contains(rendered, v) {
+							t.Fatalf("a masked or denied value reached the client: %q\n  %s", v, rendered)
+						}
+					}
+					if rendered != c.want {
+						t.Errorf("%s\n  door %s\n  got  %s\n  want %s (the value the policy PUBLISHES)",
+							c.sql, door.name, rendered, c.want)
+					}
+					return
+				}
 				// SINCE ARC LT the materialization no longer DECLINES under an
 				// enclosing BARE star — it REFUSES, on every door, because the
 				// declined shape answered a NULL-padded row per outer row for
