@@ -85,9 +85,14 @@ func containerJoinKeyLeaf(node *logical.Node, leftKey, rightKey string) (parquet
 }
 
 // joinSideKeyColumn is one join side's DECLARED column for a key, element
-// included, from the side's plan-time schema (declaredJoinSchema).
+// included: the side's EMITTED declarations first (emittedColDecls, the walk
+// the SELECT list resolves against — it follows a derived table's renames
+// through every level), then its plan-time join schema (declaredJoinSchema).
 func joinSideKeyColumn(side *logical.Node, key string) (parquet.Column, bool) {
 	want := joinKeyLookupName(key)
+	if c, ok := emittedColDecls(side).Elems[want]; ok && c.Type == parquet.TypeArray && c.ElementType != nil {
+		return c, true
+	}
 	for _, c := range declaredJoinSchema(side, []string{key}, nil, nil) {
 		if joinKeyLookupName(c.Name) == want {
 			return c, true

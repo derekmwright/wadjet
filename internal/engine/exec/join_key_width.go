@@ -256,6 +256,19 @@ func (h *HashJoin) checkProbeKeyTypes(b *batch.RecordBatch) error {
 		}
 		// UNRESOLVED: the implied target is each side's own type, so the two
 		// encodings have to agree.
+		if haveBuild && probeT == batch.TypeArray && buildT == batch.TypeArray {
+			// Two ARRAY keys encode alike as containers and still key their
+			// LEAVES at two encodings when the element types differ (an int[]
+			// beside a float8[]): unresolved, they match only by coincidence
+			// — 0 rows where `=` answers every pair. The planner resolves the
+			// pair's common leaf (physical.resolveJoinKeyTypes, arc CW round
+			// 5); a pair it could not resolve refuses here, as a scalar pair
+			// does, rather than answering the per-side keys.
+			if err := h.checkArrayKeyLeaves(b, i, pi); err != nil {
+				return err
+			}
+			continue
+		}
 		if !haveBuild || keyEncodingClass(probeT) == keyEncodingClass(buildT) {
 			continue
 		}
@@ -269,6 +282,28 @@ func (h *HashJoin) checkProbeKeyTypes(b *batch.RecordBatch) error {
 			h.LeftKeys[i], probeT, h.RightKeys[i], buildT)
 	}
 	return nil
+}
+
+// checkArrayKeyLeaves refuses an unresolved ARRAY key pair whose two sides'
+// LEAF types would key at different encodings.
+func (h *HashJoin) checkArrayKeyLeaves(b *batch.RecordBatch, i, pi int) error {
+	bi := h.buildKeyIdx[i]
+	probeLeaf, okp := batch.ContainerLeafType(batch.VectorDecl("", b.Columns[pi]))
+	buildLeaf, okb := batch.ContainerLeafType(h.buildSchema[bi])
+	if !okp || !okb || probeLeaf == buildLeaf || keyEncodingClass(probeLeaf) == keyEncodingClass(buildLeaf) {
+		return nil
+	}
+	if !joinKeyLadderType(probeLeaf) || !joinKeyLadderType(buildLeaf) {
+		return nil
+	}
+	name := ""
+	if i < len(h.RightKeys) {
+		name = h.RightKeys[i]
+	}
+	return fmt.Errorf("join key %q is an array of %s on the probe side and %q an array of %s on the build "+
+		"side, and the pair's common element type was not resolved at plan time: the two sides would be "+
+		"keyed at two different encodings and match only by coincidence (exec.HashJoin.KeyTypes, #615)",
+		h.LeftKeys[i], probeLeaf, name, buildLeaf)
 }
 
 // checkKeyPairResolved is the refusal for an ON clause that would be DROPPED.
