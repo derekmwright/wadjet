@@ -2205,10 +2205,28 @@ func pushdownPredicates(n *Node) *Node {
 			n.Predicates = pushed
 			n.Children[0] = child.Children[0]
 			child.Children[0] = n
+			// THE ROOT'S NAMING STAYS AT THE ROOT. A Filter that is the root
+			// of a derived block or a LATERAL arm carries the name the
+			// enclosing query calls that subtree (DerivedAlias, the lateral
+			// marker); swapped below the Project it left the name on a node
+			// in the middle and the Project's own inner alias on top. `JOIN
+			// LATERAL (SELECT * FROM (SELECT id AS xxid, … FROM lt_i) i WHERE
+			// i.xxk = o.xxk AND i.xxv > 10) s` then qualified the arm's
+			// duplicate `xxid` as `i.xxid`, `s.xxid` matched nothing, and its
+			// qualifier strip bound the OUTER `xxid` (arc JP round 5: reached
+			// once the body's local WHERE compiled). The alias REPLACES the
+			// Project's, as the lateral's does at build time (round 4, B2).
+			root := child
 			if len(kept) > 0 {
-				return NewFilter(child, kept)
+				root = NewFilter(child, kept)
 			}
-			return child
+			if n.DerivedAlias != "" {
+				root.DerivedAlias, n.DerivedAlias = n.DerivedAlias, ""
+			}
+			if n.LateralSubtree {
+				root.LateralSubtree, n.LateralSubtree = true, false
+			}
+			return root
 		}
 		if child.Type == NodeJoin && len(child.Children) == 2 {
 			return pushFilterThroughJoin(n, child)
