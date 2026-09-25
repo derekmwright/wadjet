@@ -50,21 +50,14 @@ var (
 )
 
 // DateDaysInRange is the write path's question for a DATE-declared box: nil
-// when n is a day PostgreSQL's DATE holds, else its 22008.
-func DateDaysInRange(n int64) error {
-	if n < minEpochDay || n > maxEpochDay {
-		return sqlerr.New("22008", "date out of range")
-	}
-	return nil
-}
+// when n is a day PostgreSQL's DATE holds, else its 22008. It IS
+// parquet.DateDaysInRange — one range question for the constructors here, the
+// SQL write doors and the writer's own box normalisation (the embedded
+// ingester API).
+func DateDaysInRange(n int64) error { return parquet.DateDaysInRange(n) }
 
 // TimestampMillisInRange is DateDaysInRange for a TIMESTAMP-declared box.
-func TimestampMillisInRange(ms int64) error {
-	if ms < minEpochMilli || ms >= endEpochMilli {
-		return sqlerr.New("22008", "timestamp out of range")
-	}
-	return nil
-}
+func TimestampMillisInRange(ms int64) error { return parquet.TimestampMillisInRange(ms) }
 
 // dateDaysBox is the DATE box of an epoch-day count, refused 22008 outside
 // PostgreSQL's range.

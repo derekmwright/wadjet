@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
 // DateParseError is the classified failure of ParseDateDays: a DATE string
@@ -38,6 +40,39 @@ const (
 	MinTimestampMilli int64 = -210866803200000
 	EndTimestampMilli int64 = 9224318016000000 // exclusive
 )
+
+// DateDaysInRange is THE range question for a DATE's epoch-day count: nil
+// when PostgreSQL's DATE holds it, else its 22008. Every construction of a
+// DATE asks it — the expression layer's constructors (expr temporal_range.go
+// reads it through expr.DateDaysInRange), the SQL write doors, and this
+// writer's own box normalisation (normalizeTemporalBox), which the embedded
+// ingester API reaches through CheckLeafBox: a typed int32 day count past the
+// range was stored there and read back as year 5881580 (arc VL round-4
+// review P2).
+func DateDaysInRange(n int64) error {
+	if n < MinDateDay || n > MaxDateDay {
+		return sqlerr.New("22008", "date out of range")
+	}
+	return nil
+}
+
+// TimestampMillisInRange is DateDaysInRange for a TIMESTAMP's epoch
+// milliseconds.
+func TimestampMillisInRange(ms int64) error {
+	if ms < MinTimestampMilli || ms >= EndTimestampMilli {
+		return sqlerr.New("22008", "timestamp out of range")
+	}
+	return nil
+}
+
+// timestampInstantMillis is a time.Time as a TIMESTAMP box, range-checked on
+// the INSTANT before UnixMilli (which wraps past ±292 million years) is taken.
+func timestampInstantMillis(t time.Time) (int64, error) {
+	if t.Before(time.UnixMilli(MinTimestampMilli)) || !t.Before(time.UnixMilli(EndTimestampMilli)) {
+		return 0, sqlerr.New("22008", "timestamp out of range")
+	}
+	return t.UnixMilli(), nil
+}
 
 func (e *DateParseError) Error() string {
 	if e.OutOfRange {
@@ -401,14 +436,34 @@ func normalizeTemporalBox(t TypeID, val any) (any, bool, error) {
 				return nil, false, &DateParseError{Text: v.Format("2006-01-02"), FieldRange: true, OutOfRange: true}
 			}
 			return int32(days), true, nil
+		case int, int32, int64:
+			// A typed day count: the carrier holds ±5.8 million years,
+			// PostgreSQL's DATE does not.
+			n := reflectInt(v)
+			if err := DateDaysInRange(n); err != nil {
+				return nil, false, err
+			}
+			return int32(n), true, nil
 		}
 	case TypeTimestamp:
-		if s, ok := val.(string); ok {
-			ms, err := ParseTimestampMillis(s)
+		switch v := val.(type) {
+		case string:
+			ms, err := ParseTimestampMillis(v)
 			if err != nil {
 				return nil, false, err
 			}
 			return ms, true, nil
+		case time.Time:
+			ms, err := timestampInstantMillis(v)
+			if err != nil {
+				return nil, false, err
+			}
+			return ms, true, nil
+		case int64:
+			if err := TimestampMillisInRange(v); err != nil {
+				return nil, false, err
+			}
+			return v, true, nil
 		}
 	case TypeDuration:
 		switch v := val.(type) {
@@ -423,6 +478,19 @@ func normalizeTemporalBox(t TypeID, val any) (any, bool, error) {
 		}
 	}
 	return nil, false, nil
+}
+
+// reflectInt widens the typed integer day-count boxes a DATE accepts.
+func reflectInt(v any) int64 {
+	switch n := v.(type) {
+	case int:
+		return int64(n)
+	case int32:
+		return int64(n)
+	case int64:
+		return n
+	}
+	return 0
 }
 
 // timestampLayouts is the accept-set for a TIMESTAMP text literal, in the
