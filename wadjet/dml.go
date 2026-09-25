@@ -2732,6 +2732,18 @@ func assignLiteralToColumn(text string, col parquet.Column) (any, error) {
 					return nil, nerr
 				}
 			}
+			// int4in / int8in's own sentence, on the unquoted text: a bound
+			// `$1 = '2.5'` into an integer said `for type numeric: "'2.5'"`
+			// (round-4 review N4).
+			if (col.Type == parquet.TypeInt32 || col.Type == parquet.TypeInt64) && sqlerr.StateOf(cerr) == "22P02" {
+				if n, perr := strconv.ParseInt(strings.TrimSpace(inner), 10, 64); errors.Is(perr, strconv.ErrRange) ||
+					(perr == nil && col.Type == parquet.TypeInt32 && (n < math.MinInt32 || n > math.MaxInt32)) {
+					return nil, sqlerr.New("22003", "value %s is out of range for type %s",
+						sqlerr.Quote(inner), physical.PgTypeName(col.Type))
+				}
+				return nil, sqlerr.New("22P02", "invalid input syntax for type %s: %s",
+					physical.PgTypeName(col.Type), sqlerr.Quote(inner))
+			}
 		}
 		return nil, cerr
 	}
