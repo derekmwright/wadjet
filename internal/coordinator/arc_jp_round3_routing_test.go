@@ -4366,7 +4366,6 @@ var jp3Routed = map[string]bool{
 	"third/commaLim":                      true,
 	"third/twoLaterals":                   true,
 	"third/twoLateralsUnb":                true,
-	"nest/innerUsesOuterMost":             true,
 	"nest/innerUsesMiddle":                true,
 	"nest/innerUnb":                       true,
 	"nest/innerUnbK":                      true,
@@ -4575,8 +4574,6 @@ var jp3Routed = map[string]bool{
 	"cx/nested":                           true,
 	"cx/leftMax":                          true,
 	"cx/semiAbove":                        true,
-	"nn/str":                              true,
-	"nn/int":                              true,
 	"nn/exists":                           true,
 	"lc/leftStar":                         true,
 	"lc/leftExpr":                         true,
@@ -4585,6 +4582,9 @@ var jp3Routed = map[string]bool{
 	"lc/leftSelected":                     true,
 	"lc/leftSelExpr":                      true,
 	"lc/twoPreds":                         true,
+	"quote/mixedKeyName":                  true,
+	"win/countOver":                       true,
+	"win/rowNumber":                       true,
 }
 
 var jp3Loud = map[string]string{
