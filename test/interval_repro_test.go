@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/storage/ingest"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -30,18 +31,18 @@ func TestCurrentDateMinusInterval(t *testing.T) {
 	if len(result.Rows) == 0 {
 		t.Fatal("no rows returned")
 	}
-	colName := result.Columns[0]
-	val := result.Rows[0][colName]
-	t.Logf("CURRENT_DATE - INTERVAL '30 days' = %v (type: %T)", val, val)
-
 	// UTC, the one zone every clock function reads (#870). This computed the
 	// machine's LOCAL date, which agreed with CURRENT_DATE only because
 	// CURRENT_DATE had the same defect — west of Greenwich the two named
 	// different days for the hours between local midnight and UTC midnight.
-	expected := time.Now().UTC().AddDate(0, 0, -30).Format("2006-01-02")
-	valStr := fmt.Sprintf("%v", val)
-	if valStr != expected {
-		t.Errorf("got %q, want %q", valStr, expected)
+	//
+	// The answer is PostgreSQL's TIMESTAMP at that day's midnight (arc VL
+	// round 3): declared TIMESTAMP and, on this door, its epoch milliseconds —
+	// how every TIMESTAMP is carried here. It was the date text under a TEXT
+	// declaration before.
+	expected := time.Now().UTC().AddDate(0, 0, -30).Format("2006-01-02") + " 00:00:00"
+	if got := timestampCell(t, result); got != expected {
+		t.Errorf("CURRENT_DATE - INTERVAL '30 days': got %q, want %q", got, expected)
 	}
 
 	// Addition variant
@@ -49,12 +50,26 @@ func TestCurrentDateMinusInterval(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query error: %v", err)
 	}
-	col2 := result2.Columns[0]
-	val2 := fmt.Sprintf("%v", result2.Rows[0][col2])
-	expected2 := time.Now().UTC().AddDate(0, 0, 7).Format("2006-01-02")
+	val2 := timestampCell(t, result2)
+	expected2 := time.Now().UTC().AddDate(0, 0, 7).Format("2006-01-02") + " 00:00:00"
 	if val2 != expected2 {
 		t.Errorf("CURRENT_DATE + INTERVAL '7 days': got %q, want %q", val2, expected2)
 	}
+}
+
+// timestampCell renders the first cell of a one-column result that must be
+// declared TIMESTAMP, from its declaration — the way the CLI renders it.
+func timestampCell(t *testing.T, r *wadjet.QueryResult) string {
+	t.Helper()
+	if len(r.ColumnMetas) != 1 || r.ColumnMetas[0].TypeName != "TIMESTAMP" {
+		t.Errorf("declared %+v, want TIMESTAMP", r.ColumnMetas)
+	}
+	v := r.Rows[0][r.Columns[0]]
+	ms, ok := v.(int64)
+	if !ok {
+		return fmt.Sprintf("%v (%T)", v, v)
+	}
+	return batch.FormatTimestamp(ms)
 }
 
 func TestIntervalInWhereClause(t *testing.T) {

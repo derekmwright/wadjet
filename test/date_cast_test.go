@@ -409,23 +409,37 @@ func TestDateCastLeavesNonTemporalArithmeticAlone(t *testing.T) {
 }
 
 // TestDateCastIntervalShiftUnchanged pins the neighbouring path this fix must
-// not disturb. `date ± INTERVAL` keeps the rendered-string result #322/#332
-// settled for it — TPC-H Q01's `DATE '1998-12-01' - INTERVAL '90' DAY` is that
-// expression — and it has to keep working now that the cast beside it produces
-// a number instead of the text intervalShift used to receive.
+// not disturb. `date ± INTERVAL` is PostgreSQL's TIMESTAMP (arc VL round 3;
+// it rendered the date text under a TEXT declaration before, OID 25 where
+// PostgreSQL sends 1114) — TPC-H Q01's `DATE '1998-12-01' - INTERVAL '90' DAY`
+// is that expression — and it has to keep working now that the cast beside it
+// produces a number instead of the text intervalShift used to receive. On
+// this door a TIMESTAMP is its epoch milliseconds under a TIMESTAMP
+// declaration, the way `SELECT TIMESTAMP '…'` answers here.
 func TestDateCastIntervalShiftUnchanged(t *testing.T) {
 	ctx, db := dateCastDB(t)
 
-	rows := dateCastRows(t, ctx, db, "SELECT DATE '1998-12-01' - INTERVAL '90' DAY AS d")
-	if got := rows[0]["d"]; got != "1998-09-02" {
-		t.Errorf("DATE '1998-12-01' - INTERVAL '90' DAY = %v (%T), want \"1998-09-02\"", got, got)
-	}
-	rows = dateCastRows(t, ctx, db, "SELECT COUNT(*) AS c FROM evt WHERE sd <= DATE '1996-01-14' - INTERVAL '2' DAY")
+	assertMidnight(t, ctx, db, "SELECT DATE '1998-12-01' - INTERVAL '90' DAY AS d", "1998-09-02 00:00:00")
+	rows := dateCastRows(t, ctx, db, "SELECT COUNT(*) AS c FROM evt WHERE sd <= DATE '1996-01-14' - INTERVAL '2' DAY")
 	if got := rows[0]["c"]; got != int64(3) {
 		t.Errorf("filtered count = %v, want 3", got)
 	}
-	rows = dateCastRows(t, ctx, db, "SELECT CAST(sd AS DATE) + INTERVAL '1' MONTH AS d FROM evt WHERE id = 1")
-	if got := rows[0]["d"]; got != "1996-02-10" {
-		t.Errorf("CAST(sd AS DATE) + INTERVAL '1' MONTH = %v (%T), want \"1996-02-10\"", got, got)
+	assertMidnight(t, ctx, db, "SELECT CAST(sd AS DATE) + INTERVAL '1' MONTH AS d FROM evt WHERE id = 1", "1996-02-10 00:00:00")
+}
+
+// assertMidnight runs a one-row, one-column (`d`) statement and holds it to a
+// TIMESTAMP declaration whose value renders as want.
+func assertMidnight(t *testing.T, ctx context.Context, db *wadjet.DB, sql, want string) {
+	t.Helper()
+	res, err := db.Query(ctx, sql)
+	if err != nil {
+		t.Fatalf("query %s: %v", sql, err)
+	}
+	if len(res.ColumnMetas) != 1 || res.ColumnMetas[0].TypeName != "TIMESTAMP" {
+		t.Errorf("%s declared %+v, want TIMESTAMP (PostgreSQL's timestamp)", sql, res.ColumnMetas)
+	}
+	ms, ok := res.Rows[0]["d"].(int64)
+	if !ok || batch.FormatTimestamp(ms) != want {
+		t.Errorf("%s = %v (%T), want the TIMESTAMP %s", sql, res.Rows[0]["d"], res.Rows[0]["d"], want)
 	}
 }
