@@ -70,7 +70,17 @@ func (p *Planner) buildFilterOp(pred logical.Predicate, outerTables map[string]b
 	// levels out) was compared as the STRING "o.k - 0": `invalid input
 	// syntax for type bigint` for an integer key and zero rows, silently,
 	// for a text one (arc JP round 3). Loud beats plausible.
-	if pred.Raw != "" && rawValueNamesAColumn(pred.Raw) {
+	//
+	// THE NET IS THE PREDICATE'S SHAPE, not its operator (arc JP round 4, B3):
+	// the text path evaluates exactly `<column> <op> <constants>` — a
+	// comparison, [NOT] BETWEEN, [NOT] IN over a list, [NOT] LIKE, IS [NOT]
+	// NULL — and nothing else. A column anywhere but the subject (a BETWEEN
+	// bound, an IN element, a LIKE pattern, the right of a comparison), or a
+	// shape the text path cannot read at all (AND / OR / NOT, CASE, IS
+	// DISTINCT FROM, a function call, a comparison of two expressions), is
+	// refused: BETWEEN over outer columns answered zero rows through this
+	// path while the operator list only knew comparisons.
+	if pred.Raw != "" && !rawTextPathReads(pred.Raw) {
 		if compileErr != nil {
 			return nil, fmt.Errorf("predicate %q cannot be evaluated here: %w", pred.Raw, compileErr)
 		}
@@ -80,6 +90,12 @@ func (p *Planner) buildFilterOp(pred logical.Predicate, outerTables map[string]b
 		p := parseSimplePredicate(pred.Raw)
 		if p != nil {
 			return p, nil
+		}
+		// A predicate that did not compile and that the text path does not
+		// read is never dropped: an omitted filter admits every row
+		// (ADR-0021: a refusal must never become an omitted filter).
+		if compileErr != nil {
+			return nil, fmt.Errorf("predicate %q cannot be evaluated here: %w", pred.Raw, compileErr)
 		}
 	}
 
@@ -666,15 +682,16 @@ func collectTableAliases(node *logical.Node) map[string]bool {
 	return aliases
 }
 
-// rawValueNamesAColumn reports whether a raw predicate's parse holds a
-// comparison whose two sides BOTH read columns, or a column reference inside
-// a side the text path would read as a literal — the shapes
-// parseSimplePredicate cannot evaluate, because it compares its left column
-// with the right side's TEXT.
-func rawValueNamesAColumn(raw string) bool {
+// rawTextPathReads reports whether parseSimplePredicate reads a raw
+// predicate as the predicate it is: a bare column subject compared with
+// constants only — `c op k`, `c BETWEEN k1 AND k2`, `c IN (k, …)`,
+// `c [NOT] LIKE 'p'`, `c IS [NOT] NULL`. The text path reads NOT BETWEEN and
+// NOT IN as a column called `c NOT`, and `<>` as `c <`, so those are not read;
+// a predicate the expression parser cannot read keeps the text path.
+func rawTextPathReads(raw string) bool {
 	node, err := plansql.ParseExpression(raw)
 	if err != nil || node == nil {
-		return false
+		return true
 	}
 	for {
 		p, ok := node.(*plansql.ParenNode)
@@ -683,13 +700,52 @@ func rawValueNamesAColumn(raw string) bool {
 		}
 		node = p.Inner
 	}
-	cmp, ok := node.(*plansql.CmpExpr)
-	if !ok {
-		return false
+	constant := func(ns ...plansql.Node) bool {
+		for _, n := range ns {
+			if n == nil {
+				return false
+			}
+			refs, err := plansql.ColumnRefs(n)
+			if err != nil || len(refs) > 0 {
+				return false
+			}
+			sub := false
+			plansql.RewriteExpr(n, func(x plansql.Node) (plansql.Node, bool) {
+				switch x.(type) {
+				case *plansql.SubqueryNode, *plansql.ExistsNode:
+					sub = true
+				}
+				return nil, false
+			})
+			if sub {
+				return false
+			}
+		}
+		return true
 	}
-	refs, err := plansql.ColumnRefs(cmp.Right)
-	if err != nil {
-		return false
+	subject := func(n plansql.Node) bool {
+		_, ok := n.(*plansql.ColRef)
+		return ok
 	}
-	return len(refs) > 0
+	switch e := node.(type) {
+	case *plansql.CmpExpr:
+		switch e.Op {
+		case "=", "!=", "<", "<=", ">", ">=":
+		default:
+			return false
+		}
+		if strings.Contains(raw, "<>") {
+			return false // parsed as `!=`, split by the text path at `>`
+		}
+		return subject(e.Left) && constant(e.Right)
+	case *plansql.BetweenExpr:
+		return !e.Not && subject(e.Left) && constant(e.Low, e.High)
+	case *plansql.InExpr:
+		return !e.Not && subject(e.Left) && constant(e.Values...)
+	case *plansql.LikeExpr:
+		return subject(e.Left) && constant(e.Pattern)
+	case *plansql.IsExpr:
+		return subject(e.Left) && (e.Check == "null")
+	}
+	return false
 }
