@@ -2997,7 +2997,9 @@ are different answers — a client branches on them:
 | `CAST('x' AS TIMESTAMP)` | `22007` | invalid input syntax for type timestamp: "x" |
 | `CAST('2020-02-30 12:00' AS TIMESTAMP)` | `22008` | date/time field value out of range: … |
 | a DATE or TIMESTAMP past PostgreSQL's range (DATE 4714-11-24 BC … 5874897-12-31, TIMESTAMP … 294276-12-31) however it is built — `d + 2147483647`, `DATE '2026-03-03' - 5000000`, `ts + INTERVAL '300000000 years'`, `CAST('5874898-01-01' AS DATE)`, `2147483647::DATE`, `date_add(d, n)` — in any clause and on every write | `22008` | date out of range / timestamp out of range / date out of range for timestamp |
-| `CAST('1 day' AS INTERVAL)` is the INTERVAL `'1 day'`; text naming no interval | `22007` | invalid input syntax for type interval: … |
+| `CAST('1 day' AS INTERVAL)` is the INTERVAL `'1 day'` (a single-unit spelling); other interval text PostgreSQL reads is kept as written and applying it to a date or timestamp is `0A000`; text naming no interval | `22007` | invalid input syntax for type interval: … |
+| a quoted operand beside a DATE: `d + '1'`, `'1' + d`, `d + NULL` | `42725` | operator is not unique: date + unknown |
+| a quoted operand the operator reads as a DATE / TIMESTAMP / INTERVAL that is not one: `d - 'abc'`, `ts - '1 day'`, `ts + 'abc'` | `22007` | invalid input syntax for type date / timestamp / interval: … |
 | `CAST('abc' AS UUID)` | `22P02` | invalid input syntax for type uuid: "abc" |
 | `CAST('abc' AS INTEGER \| BIGINT \| REAL \| DOUBLE PRECISION \| NUMERIC \| BOOLEAN)` | `22P02` | invalid input syntax for type … |
 | `CAST('2.5' AS INTEGER \| BIGINT \| SMALLINT \| INT32 \| INT64 \| PORT \| PROTOCOL)` — a FRACTION is not an integer spelling | `22P02` | invalid input syntax for type integer: "2.5" |
@@ -4682,8 +4684,14 @@ the expression must be a constant.
 INSERT VALUES) are all assigned by the same function, from the same reading
 of the source expression — a constant by its own spelling, anything else by
 its DECLARED type — through PostgreSQL's assignment casts, checked before any
-row is read. A source × target pair answers the same on every door (gated
-cell by cell across the doors, and against PostgreSQL 17.11):
+row is read. A source × target pair answers the same on every door, and the
+answer is PostgreSQL 17.11's, for the gated cells: constants and column
+expressions on the five write doors (`wadjet.TestAssignmentDoorsAgree`), and
+numeric constants inside CASE / COALESCE / GREATEST / NULLIF / arithmetic and
+through a CTE, a derived table, a VALUES list and MERGE's `USING (SELECT …)`
+on nine (`wadjet.TestAssignmentExpressionSourcesAgreeWithPostgreSQL`; a choice
+over constants of different scales prints at one scale, `1.0` for `1` — the
+one listed difference):
 
 | Source (declared) | Target | Answer |
 |---|---|---|
@@ -4693,7 +4701,8 @@ cell by cell across the doors, and against PostgreSQL 17.11):
 | TIMESTAMP | DATE | its calendar day |
 | TEXT (a column, `s \|\| ''`, `CAST(x AS TEXT)`) | anything but TEXT | 42804 — PostgreSQL has no assignment cast from text |
 | a quoted literal (`'2026-01-01'`, `'10.0.0.1'`, `'yes'`) | any type | read by the column's own input function — BOOLEAN takes `t`/`true`/`y`/`yes`/`on`/`1` and their negations, any unique prefix (22P02 / 22007 when it names no value) |
-| a numeric literal (`2.50`, `1e3`, `2.5`) | any type | read as the numeric value it spells: into TEXT its numeric text at its own scale (`2.50`, `1000`), into an integer rounded half away from zero (`2.5` → 3) |
+| a numeric literal (`2.50`, `1e3`, `2.5`), bare or inside an expression | any type | read as the numeric value it spells: into TEXT its numeric text at its own scale (`2.50`, `1000`), into an integer rounded half away from zero (`2.5` → 3) |
+| an INTERVAL | TEXT / anything else | its text (`1 day`) / 42804 |
 | `INT_TO_IP(n)`, `UUID()` and the other TEXT-declared address/UUID functions above | any type | read like a quoted literal (a superset; docs/postgres-differences.md) |
 | anything else (an integer into DATE, BOOLEAN or an address; a date into a number; a typed NULL of the wrong type) | | 42804 `column "x" is of type ... but expression is of type ...` |
 

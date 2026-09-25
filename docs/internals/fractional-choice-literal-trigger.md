@@ -20,11 +20,12 @@ Two conditions, and the second is what keeps the deferral this narrows:
 
   - the literal's SPELLING has a non-zero scale. `COALESCE(i32, 2)` is
     integer in PostgreSQL too and is untouched.
-  - at least one arm is NOT a constant. With every arm constant there is
-    nothing to resolve the literal against, and `GREATEST(-2.5, -7.5)` keeps
-    the FLOAT64 a bare numeric literal declares — ADR-0024's literal
-    deferral, unchanged, and the case CommonDeclType's allLiterals clause
-    returns before reaching here anyway.
+  - at least one arm is NOT a constant. With every arm constant,
+    CommonDeclType's allLiterals clause answers first: since ADR-0024's
+    2026-09-24 amendment a fractional literal DECLARES its spelling's
+    DECIMAL, so a choice over constants that holds one folds as a DECIMAL
+    decider (`GREATEST(-2.5, -7.5)` is DECIMAL(2,1)), and one of integer
+    constants only keeps the first constant's declaration.
 
 expr.decimalArmFold makes the identical call over the COMPILED arms, so the
 vector the plan builds and the box the runtime hands it stay one decision.

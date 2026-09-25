@@ -56,8 +56,9 @@ type DeclType struct {
 	// INT64 column would be read as a DECIMAL's.
 	//
 	// The one operand that needs it is a numeric LITERAL, whose own
-	// declaration is INT64 or FLOAT64 (`SELECT 1.5` is a double — ADR-0024's
-	// recorded deferral) while its fixed-point contribution is its SPELLING:
+	// declaration is INT32/INT64 for an integer — and was FLOAT64 for a
+	// fraction until ADR-0024's 2026-09-24 amendment made it the spelling's
+	// DECIMAL — while its fixed-point contribution is its SPELLING:
 	// `0` is DECIMAL(1,0) and `0.5` is DECIMAL(1,1). That is the whole
 	// difference between `CASE … THEN d ELSE 0.5 END`, which PostgreSQL types
 	// numeric, and `CASE … THEN d ELSE f END` over a FLOAT COLUMN, which it
@@ -73,7 +74,8 @@ type DeclType struct {
 	// column, a cast or a computed expression, and FoldID is the type
 	// PostgreSQL resolves that constant to inside select_common_type — which
 	// is NOT the type it declares on its own here (a bare numeric literal
-	// declares INT64 or FLOAT64, ADR-0024's recorded deferral, while
+	// declares INT32/INT64 (a fraction its DECIMAL since ADR-0024's
+	// 2026-09-24 amendment), while
 	// PostgreSQL calls `0` an integer and `1.5` a numeric).
 	//
 	// The two are separate because only the FOLD needs PostgreSQL's rung.
@@ -101,10 +103,11 @@ type DeclType struct {
 	Quoted bool
 }
 
-// DeclNumericLit builds the declaration of a numeric LITERAL: the type it
-// declares on its own (INT64 for integer digits, FLOAT64 otherwise — ADR-0024's
-// recorded deferral) plus the exact fixed-point (p,s) of its spelling, which is
-// what a DECIMAL fold over it resolves against.
+// DeclNumericLit builds the declaration of a numeric LITERAL from the id its
+// caller names (the planner passes INT32/INT64 for integer digits and FLOAT64
+// for a fraction, which it then turns into the spelling's DECIMAL when Exact is
+// set — ADR-0024's 2026-09-24 amendment) plus the exact fixed-point (p,s) of
+// its spelling, which is what a DECIMAL fold over it resolves against.
 func DeclNumericLit(id batch.TypeID, text string) DeclType {
 	d := DeclType{ID: id, Lit: true}
 	if t, ok := LiteralChoiceDecimalType(text); ok {
@@ -627,8 +630,10 @@ func (r Ret) Resolve(nargs int, argType func(i int) (DeclType, Confidence)) (Dec
 // constants still folds the NUMERIC rung, because whoever reads the array
 // through this declaration (a set-returning item) materializes EVERY element
 // through it, and the first constant's rung truncated the rest (2.5 read 2).
-// Each constant keeps its own declaration (ADR-0024's literal deferral: a
-// fractional literal is FLOAT64 here), so ARRAY[1, 2.5] is FLOAT64's.
+// A fractional constant is read at FLOAT64 here although it declares its
+// numeric elsewhere (ADR-0024's 2026-09-24 amendment): the array materializes
+// each constant's own box, and an integer's int64 in a DECIMAL element vector
+// is the already-scaled carrier. So ARRAY[1, 2.5] is FLOAT64's.
 func ArrayLitElementDecl(decided []DeclType) (DeclType, bool) {
 	typed := make([]DeclType, 0, len(decided))
 	for i, d := range decided {

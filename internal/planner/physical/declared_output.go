@@ -1370,9 +1370,10 @@ func nodeDeclaredType(node plansql.Node, decls ColDecls) (expr.DeclType, expr.Co
 		// hash lookup against an int column fails to match.
 		switch n.Kind {
 		case plansql.LitNumber:
-			// The literal declares INT64 or FLOAT64 on its own — ADR-0024's
-			// recorded deferral, and `SELECT 1.5` is still a double — and
-			// CARRIES the exact fixed-point (p,s) of its spelling beside it,
+			// An integer literal declares INT32 or INT64 on its own, a
+			// fractional one its spelling's DECIMAL (below; ADR-0024's
+			// 2026-09-24 amendment) — and each CARRIES the exact fixed-point
+			// (p,s) of its spelling beside it,
 			// which is what a DECIMAL fold over it resolves against (#695).
 			// `CASE … THEN d ELSE 0 END` is numeric in PostgreSQL and the
 			// literal's `0` is DECIMAL(1,0) in that fold; a FLOAT COLUMN

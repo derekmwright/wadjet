@@ -294,6 +294,8 @@ PostgreSQL's rung for its spelling only when there is a TYPED operand to
 resolve it against: `CASE … THEN int4_col ELSE 0 END` is `integer` on both
 engines, while `GREATEST(0.5, 1.5)` keeps the FLOAT64 a bare numeric literal
 declares — the literal deferral recorded above, which #724 does not reopen.
+(Amended 2026-09-24: a fractional literal is numeric now, and
+`GREATEST(0.5, 1.5)` is DECIMAL(2,1) — see Consequences.)
 
 **THE STORE, not the classification, is what makes the box rule hold.** The
 runtime fold classifies arms by NODE KIND, and the declared fold takes any arm
@@ -1133,8 +1135,34 @@ which is why the defect was invisible for as long as it was.
     answer in their argument's OWN domain (abs/ceil/floor/round/trunc/sign
     /mod) are exact. Pinned by
     `wadjet.TestTranscendentalFunctionsStayFloat64`.
+  - **A fractional literal IS numeric (amended 2026-09-24, arc VL round 5;
+    the paragraph below is the position it replaced).** The literal
+    declares the DECIMAL(p,s) of its spelling wherever it sits — a bare
+    projection (`SELECT 2.50` is 2.50, OID 1700), a CASE / COALESCE /
+    GREATEST / LEAST / NULLIF arm, a derived table's, a CTE's or a VALUES
+    list's column, a set-operation arm — so the write doors assign PostgreSQL's
+    numeric through all of them (round-4 review B2: one CASE deeper the
+    literal was a double and `2.50` stored `2.5` into TEXT). The objection
+    recorded below — covering half of the positions is worse than none — is
+    met by covering the declaration itself, not a list of positions; the
+    measured blast radius was three places that read the old declaration:
+    `CommonDeclType`'s all-constants branch (it kept the FIRST argument, so
+    `LEAST(3, 2.5)` answered 2; a choice holding a numeric constant now
+    folds, `GREATEST(0.5, 1.5)` is DECIMAL(2,1)); a recursive CTE seeded by a
+    numeric constant (seeds an UNCONSTRAINED numeric, PostgreSQL's typmod
+    −1); and an ARRAY[…] of constants, which materializes each constant's
+    own box — an integer's int64 in a DECIMAL element vector is the
+    already-scaled carrier (`unnest(ARRAY[1,2.5])` read 0.1) — and so keeps
+    its double-precision element (`ArrayLitElementDecl`). A spelling the
+    carrier cannot hold exactly (no `Exact`) keeps FLOAT64, as before. What
+    remains is #764's rendering, now reached by constants too: a choice over
+    constants of different scales prints at the fold's one scale
+    (`COALESCE(1, 2.5)` is `1.0`, PostgreSQL `1`). Gated by
+    `wadjet.TestDecimalLiteralIsNumericInEveryContext` and
+    `wadjet.TestAssignmentExpressionSourcesAgreeWithPostgreSQL`.
   - **A numeric literal is an EXACT operand of ARITHMETIC, and float8 as a
-    bare projection.** In an expression the literal's spelling IS its (p,s),
+    bare projection.** (Superseded for the projection half by the amendment
+    above.) In an expression the literal's spelling IS its (p,s),
     trailing zeros included — `d * 100.0` is scale 3 because the literal
     contributed one, and `0.1 + 0.2` is exactly `0.3`, as PostgreSQL answers.
     A literal PROJECTED on its own (`SELECT 1.5`) still declares FLOAT64, and

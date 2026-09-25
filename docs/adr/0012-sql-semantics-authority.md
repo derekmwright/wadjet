@@ -4051,9 +4051,10 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      here (PostgreSQL answers), and mutual recursion is 42P01 here where it is
      0A000 there. SUPERSET, kept: an ORDER BY or LIMIT on the whole recursive
      body, an integer term of another width than the seed (range-checked into
-     the seed's width), a text term under a varchar(n) seed, a float term under
-     a fractional-literal seed (double precision here), and a mistyped term
-     that never produces a row. A quoted seed is text here and resolved from the
+     the seed's width), a text term under a varchar(n) seed, and a mistyped
+     term that never produces a row. (A float term under a fractional-literal
+     seed was on this list while the literal was double precision here; since
+     arc VL round 5 the literal is numeric and the cell is PostgreSQL's 42804.) A quoted seed is text here and resolved from the
      term there (42804 here for a non-text term). Gated in
      `wadjet.TestArcRCRecursiveCTEAnswersItsWholeClosureOrFails` and, cell by
      cell against PostgreSQL, `…SeedTypeDecidesAgainstEveryTermType`.
@@ -5947,12 +5948,39 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     the four with a FROM) and 42 CTAS cells, that no two doors store a
     different value or raise a different SQLSTATE, and that the common
     answer is PostgreSQL 17.11's; the only listed differences are CTAS
-    column TYPES (a decimal literal is double precision by ADR-0024's literal
-    rule; integer arithmetic and a negated integer literal declare bigint),
+    column TYPES (a decimal literal was double precision by ADR-0024's
+    literal rule — closed in round 5 below; integer arithmetic and a negated
+    integer literal declare bigint),
     never a stored value another door disagrees with. The same round put
     PostgreSQL's DATE / TIMESTAMP range (22008) at the one place a temporal
     value is constructed (#911's family), and the date/timestamp operator
     refusal (42883) into expression typing on every DML door.
+
+    **Amended 2026-09-24 (arc VL round 5): the door-diff gate gets its
+    SOURCE axis and its PostgreSQL column.** Round 4's gate proved no two
+    doors differ; it could not see every door being equally wrong, and they
+    were: a decimal constant one expression deeper (`CASE WHEN true THEN 2.50
+    END`, `COALESCE(2.50, 1)`, a CTE's, a derived table's, a VALUES list's)
+    was double precision and stored `2.5` into TEXT and 2 into INTEGER. A
+    fractional literal now declares its spelling's numeric wherever it sits
+    (ADR-0024's 2026-09-24 amendment), and
+    `wadjet.TestAssignmentExpressionSourcesAgreeWithPostgreSQL` proves, for
+    49 constant-expression sources × 5 targets × 9 doors (VALUES, INSERT …
+    SELECT directly and through a CTE, a derived table and a VALUES list,
+    UPDATE SET, MERGE SET, MERGE USING (SELECT …), MERGE INSERT), zero door
+    splits and zero unlisted differences from PostgreSQL 17.11; the three
+    listed cells are the #764 trailing-zero class (a choice over constants of
+    different scales prints at one scale). The CTAS decimal-literal type
+    divergences are closed. The same round: a quoted operand beside a DATE or
+    TIMESTAMP is typed by PostgreSQL's operator resolution in every statement
+    (`date + '…'` 42725; the literal of `date - '…'`, `ts - '…'`, `ts + '…'`
+    read as a date, a timestamp, an interval); an INTERVAL's clock part is
+    summed in checked seconds, so the 22008 range rule holds for it too
+    (PostgreSQL raises 22015 at the literal for a field past its own range;
+    here the shift is 22008); and the writer's temporal box normalisation —
+    the embedded ingester API's door — asks the same range question.
+    INTERVAL itself stays what it was before arc VL except where that was a
+    wrong value (see postgres-differences, "INTERVAL").
 
   - **A CTAS over a star of a self join answered where PostgreSQL refuses —
     CLOSED 2026-09-13 by arc O1 (#997, #1012).** (Added 2026-09-12, #1024.)

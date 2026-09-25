@@ -34,7 +34,7 @@ func TestDecimalLiteralIsNumericInEveryContext(t *testing.T) {
 	defer db.Close()
 	for _, tc := range []struct {
 		sql, want, pg string
-		typ       parquet.TypeID
+		typ           parquet.TypeID
 	}{
 		{"SELECT 2.50 AS v", "[2.50]", "", parquet.TypeDecimal},
 		{"SELECT -2.50 AS v", "[-2.50]", "", parquet.TypeDecimal},

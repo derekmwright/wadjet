@@ -33,3 +33,8 @@ Source: internal/planner/physical/set_op_arm_decls.go — litDeclType, moved 202
 // where the literal's own type is the whole answer — the arm produces the
 // literal and nothing else.
 ```
+
+(Amended 2026-09-24, arc VL round 5: nodeDeclaredType's Lit case now
+declares a fractional literal's spelling DECIMAL everywhere — ADR-0024's
+2026-09-24 amendment — so the set-operation arm and every other position read
+the same numeric; the paragraph above records why this site came first.)
