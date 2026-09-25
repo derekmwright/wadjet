@@ -2570,7 +2570,11 @@ different widths, ADR-0010, or padded every row NULL through a table-named
 body, measured over arms that share no name). Every other correlated LATERAL
 runs on the coordinator-local single-process pipeline
 (`Coordinator.runLateralIdentityLocal`, counted and logged; the async door
-runs it as one pipeline task). Right-and-single beats wrong-and-distributed.
+runs it as one pipeline task). The property is asked of every LATERAL arm,
+correlated or not: an uncorrelated body aliasing an aggregate `total` beside
+`lat_ord.total` read the outer column on the DAG too (arc L1's
+`UNCORRLAT/collidingName` pin, deleted). Right-and-single beats
+wrong-and-distributed.
 Measured over the closure corpus (1143 statements) and 634 carried cells
 (`lt_o` × `jp_q`, no shared name): the dag, dag-shuffled and fast-path arms
 differ from single-process on no LATERAL cell; 710 of the corpus route and 123

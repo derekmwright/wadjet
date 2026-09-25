@@ -42,15 +42,20 @@ func TestArcK1AStarIsItsSourceInItsPosition(t *testing.T) {
 		`WHERE order_id = o.id) s ON true`
 	const ord3 = "cols=[id:INT64 customer:STRING total:FLOAT64] rows=3 | " +
 		"1,Alice,150 | 2,Bob,200 | 3,Carol,0"
+	// `lat` is an ungrouped-aggregate LATERAL, which lowers to a LEFT pad of
+	// a grouped arm: the DAG arms run it single-process (arc JP round 3,
+	// dagplan/lateral_identity_guard.go clause 2). Rows are unchanged.
+	k1LateralIdentity := map[string]string{"dag": "lateral identity +1", "dagshuf": "lateral identity +1"}
 
 	f1Run(t, arms, []f1Case{
 		// ---- #979 a qualified star ALONE names ONE relation ----------------
 		{
 			// The filing's shape. It published `id, customer, total, mx` —
 			// four columns where PostgreSQL publishes o's three.
-			name: "979 a qualified star alone over a LATERAL",
-			sql:  `SELECT o.* ` + lat + ` ORDER BY o.id`,
-			want: ord3,
+			name:   "979 a qualified star alone over a LATERAL",
+			sql:    `SELECT o.* ` + lat + ` ORDER BY o.id`,
+			want:   ord3,
+			routed: k1LateralIdentity,
 		},
 		{
 			// WIDER than filed, and this is the cell that says so: over a
@@ -93,15 +98,17 @@ func TestArcK1AStarIsItsSourceInItsPosition(t *testing.T) {
 			// `Node.HiddenJoinCols` — the same identity the drop itself uses
 			// (ADR-0026 §3c, §9). PostgreSQL's column and PostgreSQL's value,
 			// on every arm; the ADR-0012 divergence is deleted with the pin.
-			name: "979 the lateral's own star alone publishes the body's list",
-			sql:  `SELECT s.* ` + lat + ` ORDER BY o.id`,
-			want: "cols=[mx:FLOAT64] rows=3 | 100 | 125 | NULL",
+			name:   "979 the lateral's own star alone publishes the body's list",
+			sql:    `SELECT s.* ` + lat + ` ORDER BY o.id`,
+			want:   "cols=[mx:FLOAT64] rows=3 | 100 | 125 | NULL",
+			routed: k1LateralIdentity,
 		},
 		{
 			name: "979 ctl a qualified star BESIDE another item, right since J1",
 			sql:  `SELECT o.*, s.mx ` + lat + ` ORDER BY o.id`,
 			want: "cols=[id:INT64 customer:STRING total:FLOAT64 mx:FLOAT64] rows=3 | " +
 				"1,Alice,150,100 | 2,Bob,200,125 | 3,Carol,0,NULL",
+			routed: k1LateralIdentity,
 		},
 		{
 			// A qualified star ALONE under DISTINCT, which is the shape that
@@ -184,9 +191,10 @@ func TestArcK1AStarIsItsSourceInItsPosition(t *testing.T) {
 			want: `ERR unknown column "x.nosuchcol" (available: id)`,
 		},
 		{
-			name: "976 ctl a REAL column through a derived star over a join",
-			sql:  `SELECT x.mx AS m FROM (SELECT * ` + lat + `) x ORDER BY 1`,
-			want: "cols=[m:FLOAT64] rows=3 | 100 | 125 | NULL",
+			name:   "976 ctl a REAL column through a derived star over a join",
+			sql:    `SELECT x.mx AS m FROM (SELECT * ` + lat + `) x ORDER BY 1`,
+			want:   "cols=[m:FLOAT64] rows=3 | 100 | 125 | NULL",
+			routed: k1LateralIdentity,
 		},
 
 		// ---- #963 a derived table whose SELECT list is a star over a JOIN --

@@ -168,6 +168,13 @@ func a3bCheckRoutes(t *testing.T, c *Coordinator, before a2fRoutes, cell string)
 		if (cell == "scalar_subquery" || cell == "scalar_argument_routed") && name == "ScalarProjection" {
 			want = 1
 		}
+		// The lateral cell's body computes its item from a column the outer
+		// a3b_rows also carries (`id`, `v`, `r`), so the stage DAG — which
+		// re-spells a LATERAL body's names onto its scan stream by bare name —
+		// runs it single-process (arc JP round 3, lateral_identity_guard.go).
+		if cell == "lateral" && name == "LateralIdentity" {
+			want = 1
+		}
 		if delta := after.values[i] - before.values[i]; delta != want {
 			t.Errorf("%s route %s moved %d, base disposition %d", cell, name, delta, want)
 		}

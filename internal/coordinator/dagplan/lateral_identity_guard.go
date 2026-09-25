@@ -30,8 +30,11 @@ import (
 // items are computed from) is carried by another relation of the query (the
 // subtrees hanging off the path from the root to the arm), and (2) its join
 // does not null-extend a grouped arm. Any other correlated LATERAL runs
-// single-process. The guard is asked just before stage generation, which
-// rewrites names; the routed pipeline runs the same logical node.
+// single-process. The property is asked of every LATERAL arm, correlated or
+// not (an uncorrelated body's colliding aggregate alias read the outer column
+// on the DAG too — arc L1's UNCORRLAT/collidingName). The guard is asked just
+// before stage generation, which rewrites names; the routed pipeline runs the
+// same logical node.
 //
 // MEASURED (arc JP round 2 closure review, 1143 statements × five arms): every
 // DAG wrong value in the lane was a LATERAL whose arm shares a name with the
