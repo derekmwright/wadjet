@@ -30,8 +30,11 @@ import (
 // its SELECT list, aggregate or bare scan publishes and the columns those
 // items are computed from) is carried by another relation of the query (the
 // subtrees hanging off the path from the root to the arm), and (2) its join
-// does not null-extend a grouped arm. Any other correlated LATERAL runs
-// single-process. The property is asked of every LATERAL arm, correlated or
+// does not null-extend a grouped arm (or one publishing a window's output).
+// Any other correlated LATERAL runs single-process — the distributed
+// disposition until such laterals are evaluated as stages (#1323, the
+// planner-phase follow-up); a routed answer is exactly the single-process
+// pipeline's. The property is asked of every LATERAL arm, correlated or
 // not (an uncorrelated body's colliding aggregate alias read the outer column
 // on the DAG too — arc L1's UNCORRLAT/collidingName). The guard is asked just
 // before stage generation, which rewrites names; the routed pipeline runs the

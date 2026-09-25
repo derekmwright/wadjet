@@ -1444,22 +1444,29 @@ A correlated condition in the body may be any predicate over the outer row and
 the body's own columns — a comparison, `BETWEEN` (`q.qv BETWEEN o.total AND
 o.total + 20`), `IN` over a list, `LIKE`, `IS [NOT] NULL`, `IS [NOT] DISTINCT
 FROM`, `OR` / `NOT`, a `CASE` — keyed on an equality beside it or not, `JOIN`
-or `LEFT`. (Before 2026-09-25 a `BETWEEN` over outer columns answered zero
-rows, and a `LIKE` or `CASE` holding an `=` could.)
+or `LEFT`. A LOCAL condition (one over the body's own columns only) is any
+predicate too, and is evaluated exactly as written. (Before 2026-09-25 a
+`BETWEEN` over outer columns answered zero rows, and a `LIKE` or `CASE`
+holding an `=` could; a local `q.qv BETWEEN 10 AND 30` beside the key answered
+zero rows, or its upper bound was dropped.)
 
 On a distributed server a correlated LATERAL whose body carries a column name
 another relation of the query also carries (compared as `EqualFold` compares
 names; a user name beginning `__` is an ordinary name) — or a `LEFT JOIN
 LATERAL` over a grouped or `DISTINCT` body — runs on the coordinator's
-single-process pipeline rather than as stages; a lateral over relations that
-share no column name runs distributed. Every measured cell answers
-PostgreSQL's rows either way.
+single-process pipeline rather than as stages (so does a `LEFT JOIN LATERAL`
+whose body publishes a window function's value); a lateral over relations
+that share no column name runs distributed. A routed lateral answers exactly
+what the single-process pipeline answers; running such laterals as stages is
+#1323.
 
 Refused rather than answered (`0A000`): a LATERAL nested inside another whose
 body names the OUTERMOST relation (`… JOIN LATERAL (… JOIN LATERAL (SELECT …
-WHERE j.k = o.k) t …) s`), and a body condition that reads the enclosing
-relation inside a subquery whose own FROM holds a LATERAL join (`… AND EXISTS
-(SELECT 1 FROM j JOIN LATERAL (…) t ON true WHERE … AND t.x > o.id)`).
+WHERE j.k = o.k) t …) s`), and a body condition — correlated or local — holding
+a subquery whose own FROM holds a LATERAL join and that reads the body's or
+the enclosing relation (`… AND EXISTS (SELECT 1 FROM j JOIN LATERAL (…) t ON
+true WHERE j.id = q.qid)`); such a subquery does not keep its correlation on
+this engine. An uncorrelated one answers.
 
 **A correlated LATERAL's `ORDER BY … LIMIT`/`OFFSET` is applied per outer
 row** when the correlation is an equality on an inner column — the
@@ -1770,13 +1777,29 @@ and `JOIN LATERAL (SELECT amount AS order_id … WHERE order_id = o.id) li` read
 `li.order_id` as the amount — the key the planner adds cannot be shadowed by an
 alias, because it does not use a name a query can write.
 
-A WINDOW FUNCTION inside a CORRELATED lateral is refused (`0A000`). The
-correlation is evaluated as a join, so the window would be computed over the
-whole inner relation instead of over the correlated rows — a different
-answer, not a near miss. Add the correlation column to the window's
-`PARTITION BY` (`SUM(amount) OVER (PARTITION BY order_id)` beside
-`WHERE order_id = o.id`), which answers, or compute the window outside the
-lateral. An UNcorrelated lateral's window is unaffected.
+A WINDOW FUNCTION inside a CORRELATED lateral is computed over the rows ONE
+outer row sees, as PostgreSQL computes it, wherever the body evaluates it — a
+SELECT item (bare or inside an expression), `QUALIFY`, `ORDER BY` — when every
+correlated condition is an equality `<inner expression> = <outer
+expression>`: the window is partitioned by the correlation key before its own
+`PARTITION BY`, which is exactly the correlated rows. The top-1-per-row idiom
+answers:
+
+```sql
+SELECT o.id, s.v FROM lt_o o JOIN LATERAL (
+  SELECT i.v FROM lt_i i WHERE i.k = o.k
+  QUALIFY row_number() OVER (ORDER BY i.v DESC) = 1) s ON true
+```
+
+Refused (`0A000`): a window beside a correlated condition that is NOT such an
+equality (`AND i.v < o.total` is evaluated as a filter over the join, after the
+window numbered rows it then removes), and a window in an UNGROUPED aggregate
+body (`SELECT count(*), rank() OVER (…)`: its row for an outer row with no
+matches is supplied by the join). Compute the window outside the lateral.
+An UNcorrelated lateral's window is unaffected. (Before 2026-09-25 a window
+in `QUALIFY` or nested in an expression was computed over the whole inner
+relation — zero rows, or the whole relation's numbers — and a bare one was
+refused.)
 
 A WINDOW FUNCTION inside a CORRELATED SUBQUERY is refused (`0A000`) for a
 different reason than the lateral above: a correlated subquery that is not
@@ -2557,11 +2580,13 @@ FROM order before its declaration is derived.
 
 A star over a LATERAL — one or several, beside other joins, over an
 ungrouped aggregate — is expanded into the FROM items' own lists the same way,
-so it declares its columns with no rows. An empty `SELECT *` over a LATERAL
-whose own list names one column twice is `XX000`: that list cannot be
-enumerated by name, and the join's internal empty-input column cannot be
-published. Naming the result columns avoids it; PostgreSQL supplies the
-columns for the empty result.
+so it declares its columns with no rows. A star over a LATERAL whose own
+list names one column twice is not expanded (the list cannot be enumerated by
+name): it declares both columns, the second named `s.m` where PostgreSQL says
+`m` (the non-empty result names it the same way, see postgres-differences.md);
+over an expression-keyed correlation it is refused (`0A000`, the join's key
+column cannot be kept out of it). Before 2026-09-25 the empty result declared
+the duplicate once.
 
 Every door answers the same way — the embedded API, the PostgreSQL wire
 protocol, `POST /v1/queries`, `POST /v1/queries/async` with

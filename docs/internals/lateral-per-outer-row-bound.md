@@ -35,7 +35,7 @@ rule keys on. It is a property of the plan, not a list of spellings, and every
 lowering this engine already had is an instance of MAKING a breaker
 key-partitionable: the aggregated LATERAL injects K into the GROUP BY
 (ADR-0021 §1h), a DISTINCT body carries K in its list, and the window refusal
-(`refuseDecorrelatedWindow`) checks PARTITION BY for K.
+(`lateralWindowsPerOuterRow`, until 2026-09-25 `refuseDecorrelatedWindow`) partitions every other window by K.
 
 ## The decision
 

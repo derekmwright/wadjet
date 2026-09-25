@@ -2397,7 +2397,7 @@ projections always, a PIPELINE BREAKER only when it is partitioned by K (an
 aggregate grouped on K, a DISTINCT keyed on K, a window partitioned on K, a
 bound that is a PER-K bound). **That is the rule — key-partitionability of the
 body's plan — and it is a property of the plan, not a list of spellings.**
-§1h's GROUP BY injection, the DISTINCT body's key and `refuseDecorrelatedWindow`
+§1h's GROUP BY injection, the DISTINCT body's key and `refuseDecorrelatedWindow` (now `lateralWindowsPerOuterRow`)
 were already instances of making a breaker key-partitionable; the bound was
 the breaker nobody had made so, and the shapes with no K had no disposition
 but a plausible row set.
@@ -2634,10 +2634,42 @@ body over no table) is compiled rather than read as a column. A correlated predi
 relation through a subquery whose FROM holds a LATERAL join is refused, 0A000:
 such a subquery loses its correlation on every path (filed), and b2070cbb had
 turned base's accidental refusal into every-pair answers.
-Gate: `coordinator.TestArcJP4RoutedLateralIsRightOnlyWhenSingleIsRight` (365
+Gate: `coordinator.TestArcJP4RoutedLateralIsRightOnlyWhenSingleIsRight` (643
 cells incl. a 208-cell predicate-shape census; a routed cell's single-process
 answer asserted against PostgreSQL's) and
-`physical.TestTheTextPathReadsOnlyAColumnAgainstConstants`.
+`physical.TestTheTextPathReadsOnlyAColumnAgainstConstants`. Routing is the
+distributed disposition, not the destination: evaluating such a lateral as
+stages is #1323 (a planner-phase follow-up); until then a routed cell is
+right exactly when the single-process pipeline is.
+
+**Round 5 (2026-09-25): a correlated body is evaluated for ONE outer row in
+every clause the lowering moves.** Round 4 split the body's WHERE on the AST
+but rebuilt its LOCAL terms as text with no AST, and the filter re-split that
+text at every AND — `q.qv BETWEEN 10 AND 30` became `q.qv between 10` and a
+constant `30` (zero rows single-process, a parse error on the DAG). The split
+now keeps each local term as its parsed node from the split to the filter;
+no text round-trip remains on the path, and a WHERE the parser cannot read
+is refused, never cut. Two shapes the text path had refused by accident are
+refused by their property, 0A000: a local term holding a CORRELATED subquery
+whose FROM holds a LATERAL join (it loses its correlation, filed), and a term
+naming a relation that is neither the body's nor to its left — a LATERAL
+nested in another that names the outermost relation (42000 until now). A
+Filter pushed below a Project hands the subtree's name (its derived alias,
+the lateral marker) to the new root, round 4's alias rule at the rewrite
+that moves the root. A WINDOW is the other clause: a window anywhere in the
+body — a bare or nested SELECT item, QUALIFY, HAVING, ORDER BY — is
+partitioned by every correlation key it does not already carry (the per-key
+partition arc LT's bound mints), which is exactly the rows one outer row
+sees when every correlated part is `<inner expression> = <outer
+expression>`; a non-key correlated part (evaluated above the join, after the
+window numbered rows it removes) or an ungrouped-aggregate body (whose
+no-match row is the join's pad) is refused. `QUALIFY row_number() OVER (…) =
+1` answered zero rows on every arm. On the DAG a LEFT lateral over an arm
+that publishes a window's output routes single-process like a grouped arm
+(its pad file was a column narrower). Gate:
+`coordinator.TestArcJP5LateralBodyIsRightPerOuterRow` (1086 cells: local
+predicate shapes × key forms × body kinds × join kinds, window positions ×
+key forms × join kinds × bounds, the property refusals).
 
 **THE STRUCTURAL CLOSURE OF THE REFUSED SHAPES IS A DEPENDENT JOIN** — the
 body re-run per outer row with the outer values substituted, the way the

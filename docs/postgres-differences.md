@@ -164,7 +164,7 @@ DURATION, BYTES, VECTOR and container destinations can retain the operand becaus
 
 **Undescribable results are refused.**
 
-A `SELECT *` over a LATERAL whose own list names one column twice, that returns no rows, is `XX000` where PostgreSQL supplies column metadata: the list cannot be enumerated by name, so the star reads the join's output, whose pad marker the declaration will not publish. Refusal prevents shapeless results. A star over any other LATERAL — two or more of them, one beside another join, or an ungrouped aggregate — is expanded into the FROM items' own lists and declares its columns with no rows (arc JP round 4, #1013). Recursive CTEs now retain the seed's declared columns for an empty result (ADR-0021 §1o-b). (ADR-0012 §5/#1008, #1010)
+A `SELECT *` over a LATERAL whose own list names one column twice declares both columns with no rows, the second named `s.m` where PostgreSQL says `m` — the name the non-empty result gives it too (the list cannot be enumerated by name, so the star reads the join's output, which qualifies a duplicate name by its owning alias). Before 2026-09-25 the empty result declared the duplicate once: four columns for PostgreSQL's five. A star over any other LATERAL — two or more of them, one beside another join, or an ungrouped aggregate — is expanded into the FROM items' own lists and declares its columns with no rows (arc JP round 4, #1013). Recursive CTEs now retain the seed's declared columns for an empty result (ADR-0021 §1o-b). (ADR-0012 §5/#1008, #1010)
 
 **Table metadata follows table access.**
 
@@ -522,11 +522,15 @@ An outer LATERAL’s ON retaining an empty-input default raises 0A000: `ON s.n =
 
 **A LATERAL nested in another that names the OUTERMOST relation is refused.**
 
-`SELECT … FROM o JOIN LATERAL (SELECT … FROM i JOIN LATERAL (SELECT j.k FROM i j WHERE j.k = o.k) t ON true …) s ON true` raises an error where PostgreSQL answers: a LATERAL is decorrelated against the relation it joins, and `o` is two levels out. Before 2026-09-24 the reference was compared as the text `o.k` — an error for an integer key and zero rows for a text key. (arc JP round 3)
+`SELECT … FROM o JOIN LATERAL (SELECT … FROM i JOIN LATERAL (SELECT j.k FROM i j WHERE j.k = o.k) t ON true …) s ON true` raises 0A000 where PostgreSQL answers: a LATERAL is decorrelated against the relation it joins, and `o` is two levels out. Any condition of a LATERAL body naming a relation that is neither the body's nor to its left is refused the same way. Before 2026-09-24 the reference was compared as the text `o.k` — an error for an integer key and zero rows for a text key; until 2026-09-25 it was refused 42000. (arc JP rounds 3 and 5)
 
-**A LATERAL body's condition that reads the enclosing relation inside a subquery with a LATERAL join is refused.**
+**A LATERAL body's condition holding a correlated subquery with a LATERAL join is refused.**
 
-`SELECT o.id, s.* FROM o JOIN LATERAL (SELECT q.qid FROM q WHERE q.qk = o.k AND EXISTS (SELECT 1 FROM j JOIN LATERAL (SELECT x.v AS xv FROM x WHERE x.oid = j.oid) t ON true WHERE j.id = q.qid AND t.xv > o.id)) s ON true` raises 0A000 where PostgreSQL answers: a subquery whose FROM holds a LATERAL join does not keep its correlation with the query around it (the same EXISTS at top level admits every row — a wrong answer this engine has at every level, recorded for repair), so the reference to `o` would not be evaluated per outer row. (arc JP round 4)
+`SELECT o.id, s.* FROM o JOIN LATERAL (SELECT q.qid FROM q WHERE q.qk = o.k AND EXISTS (SELECT 1 FROM j JOIN LATERAL (SELECT x.v AS xv FROM x WHERE x.oid = j.oid) t ON true WHERE j.id = q.qid AND t.xv > o.id)) s ON true` raises 0A000 where PostgreSQL answers, and so does the same EXISTS reading only the body's `q.qid`: a subquery whose FROM holds a LATERAL join does not keep its correlation with the query around it (the same EXISTS at top level admits every row — a wrong answer this engine has at every level, recorded for repair), so the condition would not be evaluated per row. An uncorrelated one answers. (arc JP rounds 4 and 5)
+
+**A window in a correlated LATERAL body beside a non-equality correlation is refused.**
+
+`JOIN LATERAL (SELECT i.v, row_number() OVER (ORDER BY i.v) FROM i WHERE i.k = o.k AND i.v < o.total) s` raises 0A000 where PostgreSQL answers: the correlation is evaluated as a join, the inequality as a filter over it, and the window would number rows that filter then removes. So does a window in an ungrouped aggregate body (`SELECT count(*), rank() OVER (…)`), whose row for an outer row with no matches is supplied by the join. A window beside equality correlations answers PostgreSQL's rows in every body position, `QUALIFY` included. (arc JP round 5)
 
 **Qualified stars refuse duplicate names.**
 

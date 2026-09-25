@@ -173,11 +173,18 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      join is expanded into the FROM arms' own lists too, the lateral's read
      as `s.*` reads it (ADR-0026 §8l), so a zero-row star over two or more
      LATERALs, a LATERAL beside another join, and an ungrouped-aggregate
-     LATERAL declares its columns on every arm and door. The refusal remains
-     for a LATERAL whose own list names one column twice (not enumerable by
-     name, so the star still reads the join's output):
-     `server.TestN1AnEmptyColumnListIsRefusedOnTheHTTPDoor` and
-     `pgwire.TestN1AnEmptyColumnListIsRefusedOnTheWire` hold both halves.
+     LATERAL declares its columns on every arm and door. A LATERAL whose own
+     list names one column twice is not enumerable by name, so the star still
+     reads the join's output; it was said here to refuse, and measured it
+     answered, declaring the duplicate ONCE (four columns for PostgreSQL's
+     five, arc JP round 4 review). **Amended 2026-09-25 for arc JP round 5:**
+     the block's own list is declared as written, so the empty result
+     declares both columns, the second as `s.m` — the join's qualified name
+     for a duplicate, the non-empty result's name too (FC-JP-13); over an
+     expression key the star is refused 0A000 (the join's key column cannot be
+     kept out of it). `server.TestN1AnEmptyColumnListIsRefusedOnTheHTTPDoor`
+     and `pgwire.TestN1AnEmptyColumnListIsRefusedOnTheWire` hold the
+     declaring half.
 
      A SINGLE LATERAL that is not an ungrouped aggregate is not among them and
      answers with its columns, in the plain, `GROUP BY` and `LEFT JOIN LATERAL`
@@ -2763,6 +2770,23 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      outer row, and the lateral answered every pair. Base refused it by
      accident (a text split at the first `=` inside the EXISTS); the
      property is refused now (`logical.refuseOuterReferenceThroughLateralSubquery`).
+     **Amended 2026-09-25 for arc JP round 5:** the same subquery in a LOCAL
+     condition of the body (reading only the body's relation, `j.id = q.qid`)
+     is refused too (`logical.refuseLocalSubqueryWithLateral`) — the text
+     path had refused it by accident, and the local condition now reaches the
+     filter as parsed nodes; an uncorrelated one answers. And a body
+     condition naming a relation that is neither the body's nor to its left
+     (a LATERAL nested in another naming the outermost relation) is refused
+     0A000 (`logical.refuseReferenceBeyondLateralScope`; it was 42000).
+
+   - **A window in a correlated LATERAL body beside a NON-EQUALITY correlated
+     condition, or in an UNGROUPED aggregate body, is REFUSED (0A000) where
+     PostgreSQL answers.** (Added 2026-09-25, arc JP round 5.) The window is
+     evaluated per outer row by partitioning it by the correlation keys
+     (ADR-0021 §1s round 5), which is exact only when every correlated part is
+     an equality key; a non-key part is a filter over the join, applied after
+     the window numbered the rows, and an ungrouped aggregate's no-match row
+     is the join's default pad, whose window value the pad cannot know.
 
    - **A CORRELATED subquery holding a WINDOW CALL is REFUSED (0A000) where
      PostgreSQL answers.** (Added 2026-09-12, arc C2, #1045.) A correlated

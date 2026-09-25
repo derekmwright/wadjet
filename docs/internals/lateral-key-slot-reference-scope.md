@@ -30,7 +30,7 @@ resolved against its INPUT and keep the source column. `plansql.RewriteExpr`
 reaches a reference nested in a CASE, a cast or a function call, and stops
 at an aggregate call for the same reason the WHERE is left alone.
 
-A WINDOW spec is deliberately not walked: `refuseDecorrelatedWindow` reads
+A WINDOW spec is deliberately not walked: `lateralWindowsPerOuterRow` reads
 PARTITION BY as the query WROTE it to decide whether the decorrelation
 preserves the frame, and a slot there would make the allowed spelling
 (`PARTITION BY <the correlation key>`) look like an unrelated partition and
