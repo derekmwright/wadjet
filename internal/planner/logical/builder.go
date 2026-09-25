@@ -4,7 +4,6 @@ package logical
 
 import (
 	"fmt"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -2211,6 +2210,8 @@ func buildLateralSubquery(outer *plansql.SelectInfo, left *Node, join plansql.Jo
 		}
 	}
 	aggregates := hasAgg || len(subInfo.GroupBy) > 0
+	// Read before the key injection below adds a GROUP BY of its own.
+	ungroupedAggregate := hasAgg && len(subInfo.GroupBy) == 0
 	// What an EMPTY inner input means for this lateral, decided BEFORE the
 	// key injection below adds a GROUP BY of its own. See lateralEmptyInput.
 	empty := lateralEmptyInputOf(subInfo, hasAgg, len(correlatedParts) > 0)
@@ -2498,7 +2499,8 @@ func buildLateralSubquery(outer *plansql.SelectInfo, left *Node, join plansql.Jo
 		return nil, "", lateralEmptyInput{}, nil, nil, err
 	}
 
-	if err := refuseDecorrelatedWindow(subInfo, correlatedParts, leftAliases); err != nil {
+	if err := lateralWindowsPerOuterRow(subInfo, correlatedParts, leftAliases, aggregates,
+		ungroupedAggregate, mintedKeys); err != nil {
 		return nil, "", lateralEmptyInput{}, nil, nil, err
 	}
 
@@ -2742,65 +2744,147 @@ func lateralKeyNameCollides(cols []plansql.SelectColumn, innerCol string) bool {
 	return false
 }
 
-// refuseDecorrelatedWindow refuses a LATERAL whose window frame decorrelation changes.
-// Moving the correlated filter into the join makes the window see the WHOLE inner relation.
-// Allow only windows whose PARTITION BY carries the correlation key, so each row
-// still reads exactly its correlated group; otherwise refuse 0A000.
-// Per-outer-row window evaluation is not expressed by this lowering.
-// See docs/internals/decorrelated-window-frame-boundary.md for the design.
-func refuseDecorrelatedWindow(info *plansql.SelectInfo, correlatedParts []string, leftAliases map[string]bool) error {
+// lateralWindowsPerOuterRow makes every window of a correlated LATERAL body
+// read the rows ONE outer row sees, or refuses the body.
+//
+// Decorrelation moves the correlated predicate OUT of the body and into the
+// join, so the body runs over the WHOLE inner relation and the join selects
+// rows afterwards. For a filter that is exact; a window is computed over the
+// rows the body sees, and after the move it sees every row
+// (docs/internals/decorrelated-window-frame-boundary.md). Where every
+// correlated part is a key — `<inner expression> = <outer expression>` — the
+// rows one outer row sees are exactly the inner rows whose key equals one
+// value, so a window partitioned by the keys (and then by its own PARTITION
+// BY) reads exactly those rows: the rewrite below prepends every key the
+// window's PARTITION BY does not already carry. It is the per-key partition
+// arc LT's bound mints (lateralBoundPerOuterRow), applied to the body's own
+// windows.
+//
+// The property is the WINDOW, wherever the body evaluates one: a SELECT item
+// that is a window, a window nested inside a SELECT expression, QUALIFY,
+// HAVING, ORDER BY. Only the list's bare windows were asked until arc JP
+// round 5, so `QUALIFY row_number() OVER (ORDER BY i.v DESC) = 1` numbered
+// the whole relation and answered zero rows (LEFT: every row NULL) on every
+// arm, and `row_number() OVER (…) + 0` answered the whole relation's numbers
+// (B2). A window inside a NESTED subquery of the body belongs to that
+// subquery's own block, which the decorrelation does not move.
+//
+// A correlated part that is NOT a key is evaluated above the join, after the
+// window has already numbered the rows it removes, so no partition makes the
+// window right: refused 0A000, as before, whatever the PARTITION BY says
+// (a PARTITION BY the key did not help there — measured wrong on five arms).
+func lateralWindowsPerOuterRow(info *plansql.SelectInfo, correlatedParts []string, leftAliases map[string]bool,
+	aggregates, ungroupedAggregate bool, mintedKeys map[string]string) error {
 	if info == nil || len(correlatedParts) == 0 {
 		return nil
 	}
-	keys := make(map[string]bool, len(correlatedParts))
-	for _, cp := range correlatedParts {
-		inner := extractInnerColumn(cp, leftAliases)
-		if inner == "" {
+	var bare []*plansql.SelectColumn
+	var nodes []*plansql.WindowFuncNode
+	for i := range info.Columns {
+		c := &info.Columns[i]
+		if c.IsWindow && c.WindowSpec != nil {
+			bare = append(bare, c)
 			continue
 		}
-		keys[strings.ToLower(strings.TrimSpace(inner))] = true
-		if bare := lateralBareKeyName(inner); bare != "" {
-			keys[strings.ToLower(bare)] = true
+		if c.ASTExpr != nil {
+			nodes = append(nodes, plansql.FindAllWindowFuncs(c.ASTExpr)...)
 		}
 	}
-	for _, c := range info.Columns {
-		if !c.IsWindow || c.WindowSpec == nil {
-			continue
-		}
-		partitioned := false
-		for _, pb := range c.WindowSpec.PartitionBy {
-			p := strings.ToLower(strings.TrimSpace(pb))
-			if keys[p] {
-				partitioned = true
-				break
-			}
-			if bare := lateralBareKeyName(pb); bare != "" && keys[strings.ToLower(bare)] {
-				partitioned = true
-				break
-			}
-		}
-		if partitioned {
-			continue
-		}
+	nodes = append(nodes, plansql.FindAllWindowFuncs(info.QualifyExpr)...)
+	nodes = append(nodes, plansql.FindAllWindowFuncs(info.HavingExpr)...)
+	for _, ob := range info.OrderBy {
+		nodes = append(nodes, plansql.FindAllWindowFuncs(ob.Expr)...)
+	}
+	if len(bare) == 0 && len(nodes) == 0 {
+		return nil
+	}
+	name := ""
+	if len(bare) > 0 {
+		name = plansql.WindowOutputName(*bare[0])
+	} else if nodes[0].Func != nil {
+		name = nodes[0].Func.Name
+	}
+	// An UNGROUPED aggregate body answers one row for an outer row with no
+	// matches — the default row the decorrelation pads (lateralEmptyInput) —
+	// and a window over that row has a value the pad cannot know (`rank()`
+	// is 1 there, the pad NULL; measured). Refused.
+	if ungroupedAggregate {
 		return sqlerr.New("0A000",
 			"window function %q inside a LATERAL subquery correlated on %s is not supported: "+
-				"the correlation is evaluated as a join, so the window would be computed over the "+
-				"whole inner relation rather than over the correlated rows, which is a different "+
-				"answer — add the correlation column to the window's PARTITION BY, or compute the "+
-				"window outside the LATERAL",
-			plansql.WindowOutputName(c), strings.Join(sortedKeyNames(keys), ", "))
+				"the body is an ungrouped aggregate, whose one row for an outer row with no "+
+				"matches is supplied by the join as a default row, and the window's value over "+
+				"that row is not known there. Compute the window outside the LATERAL",
+			name, sqlerr.Quote(strings.Join(correlatedParts, " AND ")))
+	}
+	var keys []plansql.Node
+	for _, cp := range correlatedParts {
+		inner, ok := lateralEqualityKey(cp, leftAliases)
+		var node plansql.Node
+		if ok {
+			// Over an AGGREGATED body the window reads what the aggregate
+			// publishes: a key the injection MINTED into a slot is read
+			// there, and any other key by its source column, which the
+			// window's own respelling over the aggregate maps onto the
+			// group key's output (respellOverAggregate).
+			term := strings.TrimSpace(inner)
+			if aggregates {
+				if slot, hit := mintedKeys[strings.ToLower(term)]; hit && slot != "" {
+					term = slot
+				}
+			}
+			node, _ = plansql.ParseExpression(term)
+		}
+		if node == nil {
+			return sqlerr.New("0A000",
+				"window function %q inside a LATERAL subquery correlated on %s is not supported: "+
+					"that condition is not `<inner expression> = <outer expression>`, so it is "+
+					"evaluated as a filter over the join, after the window has been computed over "+
+					"rows it then removes — a different answer. Compute the window outside the "+
+					"LATERAL, or write the correlation as an equality",
+				name, sqlerr.Quote(strings.TrimSpace(cp)))
+		}
+		keys = append(keys, node)
+	}
+	carries := func(have []string, k plansql.Node) bool {
+		for _, h := range have {
+			if strings.EqualFold(strings.TrimSpace(h), k.String()) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, c := range bare {
+		ws := *c.WindowSpec
+		var lead []string
+		for _, k := range keys {
+			if !carries(ws.PartitionBy, k) {
+				lead = append(lead, k.String())
+			}
+		}
+		if len(lead) > 0 {
+			ws.PartitionBy = append(lead, ws.PartitionBy...)
+			c.WindowSpec = &ws
+		}
+	}
+	for _, w := range nodes {
+		have := make([]string, len(w.PartitionBy))
+		for i, p := range w.PartitionBy {
+			have[i] = p.String()
+		}
+		var lead []plansql.Node
+		for _, k := range keys {
+			if !carries(have, k) {
+				lead = append(lead, k)
+			}
+		}
+		if len(lead) > 0 {
+			w.PartitionBy = append(lead, w.PartitionBy...)
+		}
+	}
+	if len(nodes) > 0 && info.QualifyExpr != nil {
+		info.Qualify = info.QualifyExpr.String()
 	}
 	return nil
-}
-
-// sortedKeyNames renders a correlation-key set in a stable order for a message.
-func sortedKeyNames(keys map[string]bool) []string {
-	out := make([]string, 0, len(keys))
-	for k := range keys {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
 }
 
 // lateralBareKeyName is the unqualified column a correlated equality's inner
@@ -2822,7 +2906,7 @@ func lateralBareKeyName(innerCol string) string {
 // Walk the block: SELECT items, HAVING and its ORDER BY read the output and take
 // the slot; WHERE and GROUP BY read the INPUT and retain the source column.
 // RewriteExpr reaches references in CASE, casts and functions, stopping at aggregates.
-// Do not walk WINDOW specs: refuseDecorrelatedWindow must read the original
+// Do not walk WINDOW specs: lateralWindowsPerOuterRow must read the original
 // PARTITION BY to recognize the correlation key and decide frame preservation.
 // Plant ColRef.Slot provenance to distinguish planner references from user names
 // (ADR-0025 rule 1).

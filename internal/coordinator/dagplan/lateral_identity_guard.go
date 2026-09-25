@@ -104,7 +104,66 @@ func lateralArmShares(arm *logical.Node, path []*logical.Node) error {
 	if join := path[len(path)-2]; nullExtends(join) && groups(arm) {
 		return fmt.Errorf("%w (a %s join pads a grouped arm)", ErrLateralIdentityDistributed, join.JoinType)
 	}
+	if join := path[len(path)-2]; nullExtends(join) && publishesWindow(arm) {
+		return fmt.Errorf("%w (a %s join pads an arm publishing a window)", ErrLateralIdentityDistributed, join.JoinType)
+	}
 	return nil
+}
+
+// publishesWindow reports whether the arm's own list publishes a window's
+// output. The pad file of a null-extending join over such an arm is written
+// one column narrower than the arm's stream (`declares 4 columns where an
+// earlier file of the same stage input declared 5`, the grouped arm's
+// FC-JP-4 family) — measured once a correlated LATERAL body's window became
+// evaluable per outer row (arc JP round 5, B2). A window read only by the
+// body's own QUALIFY (arc LT's per-key bound) is not published and runs as
+// stages as before.
+func publishesWindow(arm *logical.Node) bool {
+	outs := map[string]bool{}
+	var collect func(n *logical.Node)
+	collect = func(n *logical.Node) {
+		if n == nil {
+			return
+		}
+		if n.Type == logical.NodeWindow {
+			for _, w := range n.WindowExprs {
+				outs[strings.ToLower(w.OutputCol)] = true
+			}
+		}
+		for _, c := range n.Children {
+			collect(c)
+		}
+	}
+	collect(arm)
+	if len(outs) == 0 {
+		return false
+	}
+	for n := arm; n != nil && n.Type == logical.NodeProject; {
+		for _, p := range n.Projections {
+			if outs[strings.ToLower(p.Column)] {
+				return true
+			}
+			node := p.ASTExpr
+			if node == nil && p.Expr != "" {
+				node, _ = plansql.ParseExpression(p.Expr)
+			}
+			if node == nil {
+				continue
+			}
+			if refs, err := plansql.ColumnRefs(node); err == nil {
+				for _, r := range refs {
+					if outs[strings.ToLower(r.Column)] {
+						return true
+					}
+				}
+			}
+		}
+		if len(n.Children) == 0 {
+			break
+		}
+		n = n.Children[0]
+	}
+	return false
 }
 
 // nullExtends reports whether a join pads an unmatched row with NULLs.
