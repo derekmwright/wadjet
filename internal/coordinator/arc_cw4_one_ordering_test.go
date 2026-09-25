@@ -63,7 +63,36 @@ func cw4Pairs() []cw4Pair {
 		{"bool", "ARRAY[true]", "ARRAY[false]", 1},
 		{"ipv4", "ARRAY[" + ip("10.0.0.10") + "]", "ARRAY[" + ip("9.255.0.1") + "]", 1},
 		{"nested", "ARRAY[ARRAY[1,2],ARRAY[3,4]]", "ARRAY[ARRAY[1,2,3]]", 1},
+		// Round 5: the MIXED-ELEMENT axis. Two element TYPES meet at
+		// batch.CommonContainerColumn's type (int ⊕ bigint = bigint, int ⊕
+		// numeric = numeric, anything ⊕ float = double), and every comparator
+		// — the key paths included — must answer that one ordering (review
+		// B1: `=` said equal while the hash key, the set operations and the
+		// FULL join keyed each side under its own element type, and the
+		// sort-merge key raised XX000). Signs: PostgreSQL 17.11's
+		// btarraycmp over the explicit coercion it needs (cw_author5/).
+		{"mixed-int-bigint", "ARRAY[CAST(2 AS INT)]", "ARRAY[CAST(10 AS BIGINT)]", -1},
+		{"mixed-int-numeric-equal", "ARRAY[CAST(2 AS INT)]", "ARRAY[CAST(2 AS DECIMAL(9,2))]", 0},
+		{"mixed-int-float8", "ARRAY[CAST(2 AS INT)]", "ARRAY[CAST(2.5 AS DOUBLE)]", -1},
+		{"mixed-int-float8-equal", "ARRAY[CAST(2 AS INT)]", "ARRAY[CAST(2 AS DOUBLE)]", 0},
+		{"mixed-numeric-float8", "ARRAY[CAST(10 AS DECIMAL(5,2))]", "ARRAY[CAST(9.5 AS DOUBLE)]", 1},
+		{"mixed-numeric-float8-equal", "ARRAY[CAST(2.5 AS DECIMAL(5,2))]", "ARRAY[CAST(2.5 AS DOUBLE)]", 0},
+		{"mixed-float4-float8-equal", "ARRAY[CAST(0.5 AS REAL)]", "ARRAY[CAST(0.5 AS DOUBLE)]", 0},
 	}
+}
+
+// cw5TextComparator names the comparators whose expectation compares a
+// value's TEXT with one operand's own text (GREATEST / LEAST): for two
+// element TYPES the chosen value is rendered at the pair's common type
+// (`{10}` for a numeric(5,2) 10 beside a double), which PostgreSQL does too,
+// and for two DECIMAL scales at the common scale, ADR-0024's recorded choice
+// rule (`{10.0000}`; PostgreSQL's unconstrained numeric keeps `{10.00}`, the
+// scalar GREATEST identically at main) — so the sign formula does not apply.
+// The unification gate asserts those values directly
+// (TestArcCW5ElementTypesUnifyAtEveryMeetingPoint).
+func cw5TextComparator(pair, comparator string) bool {
+	return (strings.HasPrefix(pair, "mixed-") || strings.HasPrefix(pair, "decimal-scales")) &&
+		(comparator == "greatest" || comparator == "least")
 }
 
 // cw4Operand spells how each side of a pair is PRODUCED: ea/eb are the two
@@ -200,6 +229,13 @@ func cw4ShapeRefusal(err error) bool {
 		// columns (`COALESCE(s.a, s.a) AS v … ON x.v = y.w`): refused for
 		// integers identically at main 6cbe2041.
 		"resolves to no column on either side",
+		// A DAG join whose key is a derived table's RENAMED column is
+		// respelled to its source name, and the pair's common type is not
+		// resolved from that spelling: the scalar twin (`CAST(2 AS INT) AS a`
+		// … `CAST(2 AS DOUBLE) AS b`) refuses identically at main 6cbe2041
+		// (#615's backstop); round 5 makes the array pair refuse the same way
+		// rather than key its leaves apart (filed, cw_landing_notes (v)).
+		"was not resolved at plan time",
 		"so the condition would be dropped",
 		"not in schema",
 	} {
@@ -253,6 +289,9 @@ func TestArcCW4OneOrderingEveryOperandComparatorElement(t *testing.T) {
 			for _, o := range cw4Operands(p) {
 				for _, cm := range cw4Comparators() {
 					if arm.sortMerge && !cm.join {
+						continue
+					}
+					if cw5TextComparator(p.name, cm.name) {
 						continue
 					}
 					if cw4KnownDAGDefect(arm.name, o.name, cm.name) {
