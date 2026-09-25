@@ -141,10 +141,26 @@ func (p *Planner) setReturningProjection(proj *logical.Projection, decls ColDecl
 	return col, nil
 }
 
+// nestedSetArgument reports a MULTI-DIMENSIONAL array argument that is not a
+// stored column: its element is itself an array. PostgreSQL's unnest yields
+// the LEAVES of such a value and this engine, which holds it as an array of
+// arrays, would yield the inner arrays — so it refuses, as it did before arc
+// CW declared a constructor's element (round-4 review B3; round 5 returns
+// multi-dimensional arrays to base behaviour, and the stored-column spelling,
+// which answered the inner arrays at base too, is recorded in
+// postgres-differences with the rest of the multi-dimensional semantics).
+func nestedSetArgument(col *exec.SetColumn, arg plansql.Node) bool {
+	if col.Out.Type != parquet.TypeArray {
+		return false
+	}
+	_, isRef := plansql.Unparen(arg).(*plansql.ColRef)
+	return !isRef
+}
+
 // finishSetColumn records what the expanded item publishes once its array
 // argument's projection is planned: the element's declaration for unnest,
 // int4 for generate_subscripts.
-func finishSetColumn(col *exec.SetColumn, pc *exec.ProjectColumn) error {
+func finishSetColumn(col *exec.SetColumn, pc *exec.ProjectColumn, arg plansql.Node) error {
 	if pc.Type != parquet.TypeArray && pc.Type != parquet.TypeString {
 		return sqlerr.New("42883", "function %s(%s) does not exist", setName(col), pc.Type)
 	}
@@ -156,7 +172,7 @@ func finishSetColumn(col *exec.SetColumn, pc *exec.ProjectColumn) error {
 		col.Out = *pc.ElementType
 		col.OutKnown = true
 	}
-	if !col.OutKnown {
+	if !col.OutKnown || nestedSetArgument(col, arg) {
 		return sqlerr.New("0A000",
 			"%s: the element type of its array argument is not known here, so the set cannot be declared", setName(col))
 	}
@@ -231,6 +247,19 @@ func setReturningDeclType(n *plansql.FuncCallNode, decls ColDecls) (expr.DeclTyp
 // registry declares as text).
 func setElement(n plansql.Node, decls ColDecls) (parquet.Column, bool) {
 	n = plansql.Unparen(n)
+	el, ok := setElementDecl(n, decls)
+	if ok && el.Type == parquet.TypeArray {
+		// A multi-dimensional argument that is not a stored column declares
+		// no set (nestedSetArgument): the element PostgreSQL yields is its
+		// LEAF, not the inner array this engine holds.
+		if _, isRef := n.(*plansql.ColRef); !isRef {
+			return parquet.Column{}, false
+		}
+	}
+	return el, ok
+}
+
+func setElementDecl(n plansql.Node, decls ColDecls) (parquet.Column, bool) {
 	if cr, ok := n.(*plansql.ColRef); ok {
 		if c, ok := decls.colDecl(cr); ok && c.Type == parquet.TypeArray && c.ElementType != nil {
 			return *c.ElementType, true

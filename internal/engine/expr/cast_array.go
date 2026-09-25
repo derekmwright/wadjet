@@ -44,6 +44,13 @@ func castToArray(v any, elem string, from *parquet.Column) any {
 	case []any:
 		elems = tv
 	case string:
+		if MultiDimArrayText(tv) {
+			// Multi-dimensional input passes through as its text, as it did
+			// before arc CW (round 5; the planner declares it text): this
+			// engine has no multi-dimensional array semantics to read it
+			// into (castToArray's array arm, above).
+			return tv
+		}
 		elems = parsePGArrayText(tv)
 	default:
 		panic(fatalEval{sqlerr.New("42846", "cannot cast a %T value to %s[]", v, elem)})
@@ -54,32 +61,18 @@ func castToArray(v any, elem string, from *parquet.Column) any {
 	if textCastDest(strings.ToLower(strings.TrimSpace(elem))) {
 		refuseUnrenderable(elems)
 	}
-	// A multi-dimensional array casts its LEAVES and keeps its dimensions,
-	// as PostgreSQL does (`CAST(ARRAY[ARRAY[1,2],ARRAY[3,4]] AS TEXT[])` is
-	// `{{1,2},{3,4}}`): this engine holds such a value as an array of arrays,
-	// so each inner array is cast the same way, under its own declaration
-	// (round 4, B2 — casting each ELEMENT to the scalar destination made a
-	// one-dimensional text[] of the inner arrays' text, a shape PostgreSQL
-	// never answers).
+	// A MULTI-DIMENSIONAL array passes through unchanged, as it did before
+	// arc CW (arc CW round 5): this engine holds one as an array of arrays
+	// and does not have PostgreSQL's multi-dimensional semantics — its
+	// leaves, its dimensions, unnest over its leaves — so the round-4 cast
+	// that converted the leaves and kept the dimensions answered a shape the
+	// rest of the engine then read as the outer array's inner arrays
+	// (`unnest` returned `{1,2}` rows where PostgreSQL returns leaves). The
+	// value keeps its own declaration (physical.nodeDeclaredType) and is
+	// recorded as not PostgreSQL's in postgres-differences; the
+	// multi-dimensional semantics are a follow-up of their own.
 	if nestedArrayOperand(v, from) {
-		var inner *parquet.Column
-		if from != nil && from.Type == parquet.TypeArray {
-			inner = from.ElementType
-		}
-		out := make([]any, len(elems))
-		for i, e := range elems {
-			if e == nil {
-				continue
-			}
-			if _, ok := e.([]any); !ok {
-				// A scalar beside an inner array: a ragged value no
-				// PostgreSQL array can hold, and no leaf to cast in place.
-				panic(fatalEval{sqlerr.New("0A000", "cannot cast a multi-dimensional %s whose "+
-					"elements mix arrays and scalars to %s[]", containerTypeName(from, v), elem)})
-			}
-			out[i] = castToArray(e, elem, inner)
-		}
-		return out
+		return v
 	}
 	if _, isArr := v.([]any); isArr && from != nil && from.Type == parquet.TypeArray &&
 		from.ElementType != nil && ambiguousBoxDecl(from.ElementType) {
@@ -90,30 +83,25 @@ func castToArray(v any, elem string, from *parquet.Column) any {
 		if e == nil {
 			continue
 		}
-		if _, inner := e.([]any); inner {
-			panic(fatalEval{sqlerr.New("0A000", "cannot cast a multi-dimensional %s whose "+
-				"elements mix arrays and scalars to %s[]", containerTypeName(from, v), elem)})
-		}
 		out[i] = (&Cast{Operand: &Lit{Val: e}, DestType: elem}).Eval(nil, 0)
 	}
 	return out
 }
 
 // nestedArrayOperand reports whether an array operand is multi-dimensional:
-// its declaration's element is an array, or (undeclared) a non-NULL element
-// is one.
+// its declaration's element is an array, or an element is one.
 func nestedArrayOperand(v any, from *parquet.Column) bool {
 	elems, ok := v.([]any)
 	if !ok {
 		return false
 	}
-	if from != nil && from.Type == parquet.TypeArray && from.ElementType != nil {
-		return from.ElementType.Type == parquet.TypeArray
+	if from != nil && from.Type == parquet.TypeArray && from.ElementType != nil &&
+		from.ElementType.Type == parquet.TypeArray {
+		return true
 	}
 	for _, e := range elems {
-		if e != nil {
-			_, nested := e.([]any)
-			return nested
+		if _, nested := e.([]any); nested {
+			return true
 		}
 	}
 	return false
@@ -153,6 +141,27 @@ func ambiguousBoxDecl(c *parquet.Column) bool {
 		return true
 	case parquet.TypeDecimal:
 		return c.Precision > 0
+	}
+	return false
+}
+
+// MultiDimArrayText reports whether s spells a multi-dimensional array in
+// PostgreSQL's text form: an unquoted brace inside the outer pair.
+func MultiDimArrayText(s string) bool {
+	t := strings.TrimSpace(s)
+	if len(t) < 2 || t[0] != '{' {
+		return false
+	}
+	inQuotes := false
+	for i := 1; i < len(t)-1; i++ {
+		switch c := t[i]; {
+		case c == '\\':
+			i++
+		case c == '"':
+			inQuotes = !inQuotes
+		case !inQuotes && (c == '{' || c == '}'):
+			return true
+		}
 	}
 	return false
 }

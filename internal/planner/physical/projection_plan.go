@@ -611,7 +611,7 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 			}
 		}
 		if setCol != nil {
-			if err := finishSetColumn(setCol, &pc); err != nil {
+			if err := finishSetColumn(setCol, &pc, proj.ASTExpr); err != nil {
 				return nil, nil, nil, err
 			}
 			setCols = append(setCols, *setCol)

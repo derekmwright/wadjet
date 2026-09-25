@@ -20,7 +20,12 @@ import (
 //	decimal    `CAST(v AS DECIMAL(9,4)[])` declared text[], so a DECIMAL element
 //	           keyed and compared as its text across two scales (B3)
 //	nested     a multi-dimensional array cast into T[] became a 1-D text[] of its
-//	           inner arrays' text, and ordered nested-lexicographically (B2, P2)
+//	           inner arrays' text, and ordered nested-lexicographically (B2, P2).
+//	           Round 5 returns the cast of a multi-dimensional value to its
+//	           pre-arc pass-through (the engine has no multi-dimensional
+//	           semantics; postgres-differences records it), so the LEAF
+//	           conversion cell `CAST(ARRAY[ARRAY[1.5,2.5]] AS INT[])` is no
+//	           longer asserted here; the rendering and the ordering are.
 //	case       `CASE MIN(x) WHEN MAX(x)` compared an unreplaced aggregate call
 //	colcol     `WHERE v > w` over two array columns refused ("could not resolve
 //	           kernel")
@@ -55,7 +60,6 @@ func TestArcCW4ContainersAnswerAsPostgreSQLOnTheEmbeddedEngine(t *testing.T) {
 		{"decimal/join-two-scales", "SELECT COUNT(*) FROM (SELECT ARRAY[" + dec("10", "5,2") + "] AS v FROM cw4) x JOIN (SELECT CAST(ARRAY[" + dec("10", "5,2") + "] AS DECIMAL(9,4)[]) AS w FROM cw4) y ON x.v = y.w", "4"},
 		{"decimal/union-two-scales", "SELECT COUNT(*) FROM (SELECT ARRAY[" + dec("10", "5,2") + "] AS v FROM cw4 UNION SELECT CAST(ARRAY[" + dec("10", "5,2") + "] AS DECIMAL(9,4)[]) FROM cw4) z", "1"},
 		{"nested/cast-text-array", "SELECT CAST(CAST(ARRAY[ARRAY[1,2],ARRAY[3,4]] AS TEXT[]) AS TEXT)", "{{1,2},{3,4}}"},
-		{"nested/cast-int-array", "SELECT CAST(CAST(ARRAY[ARRAY[1.5,2.5]] AS INT[]) AS TEXT)", "{{2,3}}"},
 		{"nested/array-length", "SELECT array_length(CAST(ARRAY[ARRAY[1,2],ARRAY[3,4]] AS TEXT[]), 1)", "2"},
 		{"nested/array-cmp-flattened", "SELECT ARRAY[ARRAY[1,2],ARRAY[3,4]] > ARRAY[ARRAY[1,2,3]]", "true"},
 		{"nested/array-cmp-order-by", "SELECT k FROM (SELECT 1 AS k, ARRAY[ARRAY[1,2],ARRAY[3,4]] AS v UNION ALL SELECT 2, ARRAY[ARRAY[1,2,3]]) q ORDER BY v LIMIT 1", "2"},

@@ -1650,15 +1650,18 @@ func nodeDeclaredType(node plansql.Node, decls ColDecls) (expr.DeclType, expr.Co
 			if !ok {
 				d = expr.Decl(inferCastType(el))
 			}
-			// A multi-dimensional operand keeps its dimensions: the cast
-			// converts its LEAVES (expr.castToArray), so the declaration is
-			// the leaf type nested as deep as the operand (round 4, B2).
-			for i := arrayCastExtraDims(n, decls); i > 0; i-- {
-				inner, c := arrayOfDecl(d)
-				if c != expr.Decided {
-					return expr.DeclType{}, expr.Undecided
-				}
-				d = inner
+			// A MULTI-DIMENSIONAL operand passes through the cast unchanged
+			// (expr.castToArray, arc CW round 5: the engine has no
+			// multi-dimensional semantics), so it keeps its own declaration.
+			if src, ok := nestedArrayCastOperand(n, decls); ok {
+				return src, expr.Decided
+			}
+			// A TEXT operand spelling a multi-dimensional array passes
+			// through as its text (expr.castToArray), as it did before arc
+			// CW: `CAST('{{1,2},{3,4}}' AS INT[])` is that text (round-4
+			// review B4; round 5 returns multi-dimensional input to base).
+			if multiDimTextCastOperand(n.Inner, decls) {
+				return expr.Decl(parquet.TypeString), expr.Decided
 			}
 			return arrayOfDecl(d)
 		}
@@ -2403,18 +2406,46 @@ func arrayLitDeclaredType(n *plansql.ArrayLitNode, decls ColDecls) (expr.DeclTyp
 // arrayOfDecl is the ARRAY declaration whose element is el — its (p,s), its
 // own element or fields carried whole — or Undecided when el is not a
 // declaration a child vector can be built from (a DECIMAL with no scale).
-// arrayCastExtraDims is how many array levels a `T[]` cast's operand has
-// beyond the one the destination spells: 0 for a one-dimensional operand.
-func arrayCastExtraDims(n *plansql.CastNode, decls ColDecls) int {
+// multiDimTextCastOperand reports whether a `T[]` cast's TEXT operand spells a
+// multi-dimensional array: a string literal whose array text nests a brace,
+// or the text rendering of a declared multi-dimensional array.
+func multiDimTextCastOperand(inner plansql.Node, decls ColDecls) bool {
+	switch x := inner.(type) {
+	case *plansql.Lit:
+		return x.Kind == plansql.LitString && expr.MultiDimArrayText(x.Value)
+	case *plansql.CastNode:
+		if !castDestIsText(x.TypeName) {
+			return false
+		}
+		src, c := nodeDeclaredType(x.Inner, decls)
+		return c == expr.Decided && src.ID == parquet.TypeArray && src.Schema != nil &&
+			src.Schema.ElementType != nil && src.Schema.ElementType.Type == parquet.TypeArray
+	}
+	return false
+}
+
+// castDestIsText reports whether a cast destination is a text type.
+func castDestIsText(typeName string) bool {
+	t := strings.ToLower(strings.TrimSpace(typeName))
+	if i := strings.IndexByte(t, '('); i >= 0 {
+		t = strings.TrimSpace(t[:i])
+	}
+	switch t {
+	case "text", "varchar", "string", "char", "character varying", "character", "bpchar":
+		return true
+	}
+	return false
+}
+
+// nestedArrayCastOperand is a `T[]` cast's operand declaration when that
+// operand is a multi-dimensional array (an array whose element is an array).
+func nestedArrayCastOperand(n *plansql.CastNode, decls ColDecls) (expr.DeclType, bool) {
 	src, c := nodeDeclaredType(n.Inner, decls)
-	if c != expr.Decided || src.ID != parquet.TypeArray || src.Schema == nil {
-		return 0
+	if c != expr.Decided || src.ID != parquet.TypeArray || src.Schema == nil ||
+		src.Schema.ElementType == nil || src.Schema.ElementType.Type != parquet.TypeArray {
+		return expr.DeclType{}, false
 	}
-	extra := 0
-	for el := src.Schema.ElementType; el != nil && el.Type == parquet.TypeArray; el = el.ElementType {
-		extra++
-	}
-	return extra
+	return src, true
 }
 
 func arrayOfDecl(el expr.DeclType) (expr.DeclType, expr.Confidence) {
