@@ -142,6 +142,19 @@ func liftWhereEquiPredsIntoJoins(n *Node) *Node {
 			hi = ri
 		}
 		target := spine[len(spine)-hi]
+		if target.LateralDualItems != nil {
+			// A table-less LATERAL body is not a join at all: it is lowered
+			// to a projection over the outer row (exec.LateralOuterProject),
+			// which consults NO join condition. An equality lifted onto it was
+			// dropped, so `… CROSS JOIN LATERAL (SELECT o.x + 1 AS w) t WHERE
+			// o.x = t.w` answered every outer row where PostgreSQL answers
+			// none — and `JOIN LATERAL (SELECT o.x AS w) t ON o.x = t.w`,
+			// whose ON the lowering moves into this WHERE, kept the rows
+			// whose x is NULL (round-4 review N2, every type). The predicate
+			// stays in the WHERE, which runs above the projection.
+			kept = append(kept, pred)
+			continue
+		}
 		cond := strings.TrimSpace(pred.Raw)
 		if cond == "" {
 			cond = cmp.String()
