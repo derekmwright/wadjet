@@ -65,6 +65,23 @@ type blockColumn struct {
 // leaves the plan exactly as it was.
 func blockPublishedColumns(p *logical.Node, published map[*logical.Node]bool,
 	subqueryDecl func(string) (parquet.Column, bool)) ([]blockColumn, bool) {
+	return blockColumnsOf(p, published, subqueryDecl, false)
+}
+
+// blockColumnsOf is blockPublishedColumns with one choice exposed: whether an
+// AGGREGATE item is read from the stream below, under its published name. The
+// DAG materializes a block only when every item is a projection's own
+// (blockPublishedColumns declines an aggregate item); the declaration of an
+// EMPTY side (declaredBlockSchema) reads the aggregate's output where the
+// aggregate publishes it — the single path runs the block's Project over the
+// aggregate, and a side whose aggregate produced no group delivered no batch.
+// Declining there left the empty side with no declaration at all, and the
+// outer join dropped its columns: a LATERAL aggregate that matched nothing
+// published its array as the STRING fallback on the single path (arc CW
+// round 3, B2), where the DAG's walk — and the same side with rows — declared
+// the array.
+func blockColumnsOf(p *logical.Node, published map[*logical.Node]bool,
+	subqueryDecl func(string) (parquet.Column, bool), aggFromStream bool) ([]blockColumn, bool) {
 	if p == nil || len(p.Children) != 1 || len(p.Projections) == 0 {
 		return nil, false
 	}
@@ -129,7 +146,7 @@ func blockPublishedColumns(p *logical.Node, published map[*logical.Node]bool,
 	sortKeyFamily := plansql.ReservedSlotFamily(plansql.SlotName(plansql.SlotSortKey, 0))
 	out := make([]blockColumn, 0, len(items))
 	for _, pr := range items {
-		if pr.IsAgg {
+		if pr.IsAgg && !aggFromStream {
 			// An aggregate SELECT item is computed by the aggregate stage,
 			// not by a projection above it.
 			return nil, false
@@ -155,7 +172,7 @@ func blockPublishedColumns(p *logical.Node, published map[*logical.Node]bool,
 		if plansql.ReservedSlotFamily(bare) == sortKeyFamily {
 			continue
 		}
-		if pr.ASTExpr != nil && !isSimpleColRefForRename(pr.ASTExpr) {
+		if pr.ASTExpr != nil && !isSimpleColRefForRename(pr.ASTExpr) && !pr.IsAgg {
 			// ONE INFERENCE, and it is the SINGLE PATH'S. This is the call
 			// `DeclaredJoinSchema`'s own computed-column arm makes and the
 			// call `attachScanSelectProjections` makes for the statement's own
@@ -225,7 +242,7 @@ func blockPublishedColumns(p *logical.Node, published map[*logical.Node]bool,
 // route stops standing in front of it.
 func declaredBlockSchema(p *logical.Node, wantSet map[string]bool,
 	published map[*logical.Node]bool, subqueryDecl func(string) (parquet.Column, bool)) []parquet.Column {
-	cols, ok := blockPublishedColumns(p, published, subqueryDecl)
+	cols, ok := blockColumnsOf(p, published, subqueryDecl, true)
 	if !ok {
 		return nil
 	}

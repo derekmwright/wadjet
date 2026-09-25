@@ -30,6 +30,13 @@ func declaredJoinSchema(n *logical.Node, want []string, published map[*logical.N
 
 	var out []parquet.Column
 	seen := make(map[string]bool)
+	// shadowed names a column a COMPUTING projection above has replaced: the
+	// side publishes the projection's value under that name, and the scan's
+	// own column of the name is not part of the relation (arc CW round 3,
+	// B2). Declaring it too — qualified, by the duplicate rule below — made
+	// the empty side of `(SELECT id, ARRAY[ts] AS x FROM st …) a` answer
+	// `a.x` with st's bigint `x` where the side with rows answers the array.
+	shadowed := make(map[string]bool)
 	var walk func(*logical.Node)
 	walk = func(cur *logical.Node) {
 		if cur == nil {
@@ -104,14 +111,20 @@ func declaredJoinSchema(n *logical.Node, want []string, published map[*logical.N
 					haveTypes = true
 				}
 				seen[lc] = true
+				if !shadowed[lc] {
+					// Scoped to THIS projection's subtree: another branch of
+					// a join side is another relation, and its column of the
+					// same name is its own.
+					shadowed[lc] = true
+					defer delete(shadowed, lc)
+				}
 				decl := inferProjectionDeclType(pr.ASTExpr, parquet.TypeString, strictInt, colTypes)
-				out = append(out, parquet.Column{
-					Name:      pr.Alias,
-					Type:      decl.ID,
-					Precision: decl.Precision,
-					Scale:     decl.Scale,
-					Nullable:  true,
-				})
+				// The WHOLE declaration — a container's element, a ROW's
+				// fields — as the materializing projection allocates it
+				// (declTypeParts), not its TypeID alone (arc CW round 3, B2).
+				col := declTypeParts(decl)
+				col.Name, col.Nullable = pr.Alias, true
+				out = append(out, col)
 			}
 			// A RENAME'S WANT ARRIVES IN THE CONSUMER'S SPELLING and the walk
 			// below enumerates the PRODUCER'S. `(SELECT o2.customer AS c …) s`
@@ -125,6 +138,15 @@ func declaredJoinSchema(n *logical.Node, want []string, published map[*logical.N
 			// The want is WIDENED rather than replaced: this Project's own
 			// items may also be wanted under their published names, and an
 			// empty want already means "every column".
+			// A name this projection also READS under a rename (`x AS orig,
+			// ARRAY[ts] AS x`) is still a column of the stream below, so it is
+			// not shadowed.
+			for _, pr := range cur.Projections {
+				if src := wantBareName(pr.Column); pr.Column != "" && shadowed[src] {
+					delete(shadowed, src)
+					defer func() { shadowed[src] = true }()
+				}
+			}
 			if len(wantSet) > 0 {
 				for _, pr := range cur.Projections {
 					if pr.Column == "" {
@@ -152,6 +174,13 @@ func declaredJoinSchema(n *logical.Node, want []string, published map[*logical.N
 			// (exec.PublishedGroupKeyNames), then each aggregate under its OutputCol,
 			// in the operator's emission order.
 			in := emittedColTypes(cur.Children[0])
+			// A container key or aggregate output carries its element / fields
+			// from the shape walk the aggregate's own output is declared by
+			// (arc CW round 3, B2): declared from its TypeID alone, the
+			// null-padded side of an OUTER join or a LATERAL whose body
+			// produced no rows declared `ARRAY` with no element, which the wire
+			// sends as text, where the same side with rows declared the array.
+			shapes := inputColShapes(cur)
 			published, resolve := groupKeyNames(cur, cur.Children[0])
 			emitted := emittedKeyNames(published, resolve, logicalAggOutNames(cur))
 			keyTypes, _ := derivedGroupKeyTypes(cur.GroupBy, cur.Children[0])
@@ -172,7 +201,7 @@ func declaredJoinSchema(n *logical.Node, want []string, published map[*logical.N
 					continue
 				}
 				seen[lc] = true
-				out = append(out, parquet.Column{Name: name, Type: t, Nullable: true})
+				out = append(out, withDeclaredShape(parquet.Column{Name: name, Type: t, Nullable: true}, shapes[lc]))
 			}
 			for _, agg := range cur.AggExprs {
 				lc := strings.ToLower(agg.OutputCol)
@@ -198,7 +227,7 @@ func declaredJoinSchema(n *logical.Node, want []string, published map[*logical.N
 					col.Precision, col.Scale = m.Precision, m.Scale
 				}
 				seen[lc] = true
-				out = append(out, col)
+				out = append(out, withDeclaredShape(col, shapes[lc]))
 			}
 			return
 		}
@@ -211,6 +240,9 @@ func declaredJoinSchema(n *logical.Node, want []string, published map[*logical.N
 				lc := strings.ToLower(name)
 				bare := lc
 				emit := name
+				if shadowed[bare] {
+					continue
+				}
 				if seen[lc] {
 					// A SECOND RELATION INSIDE THIS SIDE ANSWERING TO ONE
 					// NAME is not a column to drop: a JOIN under this side
@@ -247,6 +279,15 @@ func declaredJoinSchema(n *logical.Node, want []string, published map[*logical.N
 				}
 				seen[lc] = true
 				col := parquet.Column{Name: emit, Type: t, Nullable: true}
+				// A stored container carries its element / fields (arc CW
+				// round 3, B2): the same shape inputColShapes reads off a scan.
+				if el, ok := cur.ScanColElems[bare]; ok && (t == parquet.TypeArray || t == parquet.TypeMap) {
+					e := el.Clone()
+					col.ElementType = &e
+				}
+				if f, ok := cur.ScanColFields[bare]; ok && t == parquet.TypeRow {
+					col.Fields = f
+				}
 				if t == parquet.TypeDecimal {
 					// A DECIMAL carries half of every value in its (p, s):
 					// the chunk holds the unscaled integer and the header
@@ -318,4 +359,25 @@ func wantBareName(name string) string {
 		name = name[dot+1:]
 	}
 	return name
+}
+
+// withDeclaredShape completes a container column's declaration from the shape
+// walk's answer for the same name — its element or its fields — when the shape
+// describes the same type; a scalar, or a shape of another type, is left as is.
+func withDeclaredShape(col, sh parquet.Column) parquet.Column {
+	if sh.Type != col.Type {
+		return col
+	}
+	switch col.Type {
+	case parquet.TypeArray, parquet.TypeMap:
+		if col.ElementType == nil && sh.ElementType != nil {
+			el := sh.ElementType.Clone()
+			col.ElementType = &el
+		}
+	case parquet.TypeRow:
+		if len(col.Fields) == 0 && len(sh.Fields) > 0 {
+			col.Fields = sh.Fields
+		}
+	}
+	return col
 }
