@@ -80,10 +80,62 @@ func RefuseDeclinedLiftedRefs(n *Node) error {
 				"this engine does not do for this shape on the single-process path. Name the columns "+
 				"instead of a star, or correlate on an equality")
 	}
+	// A BARE star left unexpanded over a lateral join publishes the join's
+	// stream, and a join that EMITS a lifted slot (an expression-keyed
+	// correlation, `i.k = o.k + 1`) would show it. The star is normally
+	// expanded to the arms' lists, which hide it (joinArmColumns); where it
+	// could not be — a list naming one column twice, say — it is refused
+	// here, after expansion, rather than before it for every such star (arc
+	// JP round 4, B5).
+	if n.Type == NodeProject && len(n.Children) == 1 && hasBareStarItem(n) && streamEmitsLiftedSlot(n.Children[0]) {
+		return sqlerr.New("0A000",
+			"a bare `SELECT *` over a LATERAL whose correlated equality has an EXPRESSION on its "+
+				"outer side could not be expanded into the relations' own column lists, and the "+
+				"join's output carries the body's key column the equality is evaluated against. "+
+				"Name the columns, or select `<lateral alias>.*` for the lateral's own list")
+	}
 	for _, c := range n.Children {
 		if err := RefuseDeclinedLiftedRefs(c); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// hasBareStarItem reports whether a Project still carries an unexpanded bare
+// `*` item.
+func hasBareStarItem(n *Node) bool {
+	for _, p := range n.Projections {
+		if isStarProjection(p) && starQualifier(p) == "" {
+			return true
+		}
+	}
+	return false
+}
+
+// streamEmitsLiftedSlot reports whether the stream a bare star over n
+// publishes comes from a join chain one of whose joins emits a lifted slot.
+func streamEmitsLiftedSlot(n *Node) bool {
+	for n != nil {
+		switch n.Type {
+		case NodeFilter, NodeSort, NodeLimit, NodeDistinct:
+			if len(n.Children) != 1 {
+				return false
+			}
+			n = n.Children[0]
+		case NodeJoin:
+			if len(n.StarLiftedRefCols) > 0 {
+				return true
+			}
+			for _, c := range n.Children {
+				if streamEmitsLiftedSlot(c) {
+					return true
+				}
+			}
+			return false
+		default:
+			return false
+		}
+	}
+	return false
 }

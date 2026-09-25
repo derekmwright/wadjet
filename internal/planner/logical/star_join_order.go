@@ -357,9 +357,32 @@ func joinArmColumns(join *Node) []joinStarItem {
 	var items []joinStarItem
 	seen := make(map[string]bool, 4)
 	ok := true
-	var walk func(n *Node)
-	walk = func(n *Node) {
+	var walk func(n, parent *Node)
+	walk = func(n, parent *Node) {
 		if !ok || n == nil {
+			return
+		}
+		// A DECORRELATED LATERAL arm publishes the body's own list — the one
+		// `s.*` reads (relationOutputColumns): the correlation slots the join
+		// minted, hidden or emitted for a lifted predicate, are not in it. So a
+		// bare `*` over it is `o.*, s.*`, which is PostgreSQL's star over
+		// `FROM o JOIN LATERAL (…) s`. Read off the join stream instead, a bare
+		// star published the minted key slot, and was refused for that (arc
+		// JP round 4, B5). The arm is named by the lateral's alias alone.
+		if n.LateralSubtree && parent != nil {
+			name := n.DerivedAlias
+			var cols []StarColumn
+			if name != "" {
+				cols = relationOutputColumns(parent, name)
+			}
+			if name == "" || len(cols) == 0 || repeatsAName(cols) || seen[strings.ToLower(name)] {
+				ok = false
+				return
+			}
+			seen[strings.ToLower(name)] = true
+			for _, c := range cols {
+				items = append(items, joinStarItem{qualifier: name, column: c})
+			}
 			return
 		}
 		if n.Type == NodeJoin {
@@ -377,8 +400,8 @@ func joinArmColumns(join *Node) []joinStarItem {
 				ok = false
 				return
 			}
-			walk(n.Children[0])
-			walk(n.Children[1])
+			walk(n.Children[0], n)
+			walk(n.Children[1], n)
 			return
 		}
 		name, cols := armRelationColumns(n)
@@ -407,7 +430,7 @@ func joinArmColumns(join *Node) []joinStarItem {
 			items = append(items, joinStarItem{qualifier: name, column: c})
 		}
 	}
-	walk(join)
+	walk(join, nil)
 	if !ok {
 		return nil
 	}
@@ -429,15 +452,21 @@ func joinPublishesBothArms(n *Node) bool {
 	case "semi", "anti":
 		return false
 	}
-	if isDependentJoin(n) {
-		return false
-	}
+	// A decorrelated LATERAL's join publishes both arms: the outer relation's
+	// columns and the body's list, plus the slots it minted, which the arm walk
+	// reads the lateral's list without (joinArmColumns). Only the lateral's
+	// OWN arm is expanded that way; the other must be a relation the query
+	// wrote.
+	lateralArms := 0
 	for _, c := range n.Children {
 		if c != nil && c.LateralSubtree {
-			return false
+			lateralArms++
 		}
 	}
-	return true
+	if lateralArms > 0 {
+		return lateralArms == 1 && n.Children[1] != nil && n.Children[1].LateralSubtree
+	}
+	return !isDependentJoin(n)
 }
 
 // armRelationColumns is one FROM arm's NAME and PUBLISHED column list.

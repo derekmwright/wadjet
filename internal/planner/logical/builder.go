@@ -2393,24 +2393,16 @@ func buildLateralSubquery(outer *plansql.SelectInfo, left *Node, join plansql.Jo
 			// (Node.StarLiftedRefCols), the disposition a lifted
 			// predicate's slots already have.
 			//
-			// Under a BARE enclosing star the emitted slot would be
-			// published: a star over a LATERAL is not expanded into the
-			// arms' lists (ExpandStarProjections), so it reads the join's
-			// stream. That is refused, as a lifted predicate under a bare
-			// star is (ADR-0021 §1s): name the columns, or write `s.*`,
-			// which reads the lateral's own list without the slot.
+			// Under a BARE enclosing star the emitted slot is not published:
+			// the star expands to the arms' own lists (joinArmColumns reads
+			// the lateral's list as `s.*` does, without the slot). A star
+			// that cannot be expanded that way is refused after expansion,
+			// where it is known (RefuseDeclinedLiftedRefs) — refusing here
+			// refused every bare star over an expression-keyed lateral,
+			// including the ones base answered right (arc JP round 4, B5).
 			if !lifted {
 				injectedSlots = append(injectedSlots, slot)
 			} else {
-				if lateralEnclosingBareStar(outer) {
-					return nil, "", lateralEmptyInput{}, nil, nil, sqlerr.New("0A000",
-						"LATERAL body's correlated equality %s has an EXPRESSION on its outer side, "+
-							"so the join evaluates it over its output and must carry the body's key "+
-							"column there; a bare `SELECT *` over a LATERAL publishes that output "+
-							"whole and would show the column. Name the columns, or select `%s.*` "+
-							"for the lateral's own list",
-						sqlerr.Quote(strings.TrimSpace(cp)), lateralStarHint(join.RightAlias))
-				}
 				starLifted = append(starLifted, slot)
 			}
 			if keyRename == nil {
