@@ -12,6 +12,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // --- Subquery expressions ---
@@ -217,6 +218,14 @@ type InSubquery struct {
 	// declaration-driven comparison site caches its operands'.
 	probe boxOperand
 	vals  []any // fallback for mixed types
+	// probeDecl and setDecl are the two sides' DECLARATIONS for a container
+	// probe (round 4, B4): the probe's from its AST, the set's from the
+	// subquery's declared output column. A container member is equal to the
+	// probe by the one container comparator under both (containerMember) —
+	// the box alone cannot say that a DATE element boxed as an int32 and one
+	// boxed as an int64 are one day, or that `{}` is not `{""}`.
+	probeDecl *operandDecl
+	setDecl   *parquet.Column
 	// chargedBytes is exactly what was handed to Budget.Reserve, guarded by
 	// resolveMu, so Release returns exactly that many bytes exactly once.
 	chargedBytes int64
@@ -284,6 +293,9 @@ func (e *InSubquery) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool) {
 			}
 		}
 	}
+	if isContainerBox(lv) {
+		return e.containerProbe(b, row, lv)
+	}
 	// Fast path: typed hash lookup
 	if e.intSet != nil {
 		if iv, ok := toInt64Safe(lv); ok {
@@ -321,6 +333,25 @@ func (e *InSubquery) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool) {
 	// Fallback: linear scan for mixed types
 	for _, rv := range e.vals {
 		if rv != nil && compare(lv, rv, CmpEq) {
+			return !e.Not, false
+		}
+	}
+	return e.missAnswer()
+}
+
+// containerProbe is a container probe's membership test: every member through
+// the one container comparator, under the probe's and the set's declarations.
+func (e *InSubquery) containerProbe(b *batch.RecordBatch, row int, lv any) (bool, bool) {
+	ld := e.probeDecl.shape(b, row, e.Expr)
+	for _, rv := range e.vals {
+		if rv == nil {
+			continue
+		}
+		eq, decided := containerMember(ld, e.setDecl, lv, rv)
+		if !decided {
+			eq = compare(lv, rv, CmpEq)
+		}
+		if eq {
 			return !e.Not, false
 		}
 	}

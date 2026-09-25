@@ -11,6 +11,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // compileContext holds optional state for expression compilation.
@@ -93,11 +94,15 @@ type compileContext struct {
 	enclosingCTEs map[string]bool
 }
 
-// SubqueryDeclFunc resolves a scalar subquery's SQL to the declared type of
-// its single output column. ok=false for a subquery whose output type the
-// caller cannot resolve; the comparison then falls back to the boxed rules it
-// had before.
-type SubqueryDeclFunc func(sql string) (typ batch.TypeID, precision, scale int, ok bool)
+// SubqueryDeclFunc resolves a scalar subquery's SQL to the declared column of
+// its single output: the type, a DECIMAL's precision and scale, and — for a
+// container — its element or fields, the same declaration the planner's
+// declared-output walk gives every other producer (arc CW round 4: a subquery
+// that RETURNS an array reached the cast and the comparators with no element,
+// so a TIMESTAMP element printed its epoch and a DATE array never equalled).
+// ok=false for a subquery whose output the caller cannot resolve; the
+// comparison then falls back to the boxed rules it had before.
+type SubqueryDeclFunc func(sql string) (col parquet.Column, ok bool)
 
 // A CompileOption is an optional input to the Compile* entry points. It is
 // variadic so that adding one costs no caller a signature change — the
@@ -524,6 +529,8 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 								ParsedInfo:      info,
 								UnqualOuterCols: buildUnqualOuterCols(refs, ctx.outerCols),
 								SetBound:        ctx.setRowBound,
+								probeDecl:       newOperandDecl(n.Left, ctx),
+								setDecl:         subquerySetDecl(sq.SQL, ctx),
 							}, nil
 						}
 					}
@@ -531,6 +538,7 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 				in := &InSubquery{Expr: left, SQL: sq.SQL, Runner: ctx.runner, Not: n.Not,
 					Cols: ctx.subqueryCols, Scope: ctx.subqueryScope,
 					Budget: ctx.budget, SetBound: ctx.setRowBound}
+				in.probeDecl, in.setDecl = newOperandDecl(n.Left, ctx), subquerySetDecl(sq.SQL, ctx)
 				if ctx.trackInSubquery != nil {
 					ctx.trackInSubquery(in)
 				}
@@ -725,9 +733,9 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 					// references — a resolver that cannot plan it answers
 					// not-known and the comparison keeps the boxed rules.
 					if ctx.subqueryDecl != nil {
-						if dt, dp, ds, ok := ctx.subqueryDecl(n.SQL); ok {
-							cs.Decl, cs.DeclKnown = dt, true
-							cs.DecPrecision, cs.DecScale = dp, ds
+						if dc, ok := ctx.subqueryDecl(n.SQL); ok {
+							cs.Decl, cs.DeclKnown = dc.Type, true
+							cs.DecPrecision, cs.DecScale = dc.Precision, dc.Scale
 						}
 					}
 					return cs, nil
@@ -744,9 +752,9 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 		// to (#696). Resolved once, at compile time, from the plan — never
 		// from the value, which would be #727's defect pointed at a scalar.
 		if ctx.subqueryDecl != nil {
-			if t, p, s, ok := ctx.subqueryDecl(n.SQL); ok {
-				sq.Decl, sq.DeclKnown = t, true
-				sq.DecPrecision, sq.DecScale = p, s
+			if dc, ok := ctx.subqueryDecl(n.SQL); ok {
+				sq.Decl, sq.DeclKnown = dc.Type, true
+				sq.DecPrecision, sq.DecScale = dc.Precision, dc.Scale
 			}
 		}
 		return sq, nil

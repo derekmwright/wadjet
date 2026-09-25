@@ -45,15 +45,28 @@ func containerOrder(ld, rd *parquet.Column, lv, rv any) (int, bool) {
 	if rd == nil {
 		rd = boxShape(rv)
 	}
-	col, ok := commonContainerShape(ld, rd)
+	lcol, rcol, ok := commonContainerShapes(ld, rd)
 	if !ok {
 		return 0, false
 	}
-	lvec := batch.NewColumnVector(*col, 1)
-	rvec := batch.NewColumnVector(*col, 1)
-	lvec.SetValue(0, conformBox(lv, col))
-	rvec.SetValue(0, conformBox(rv, col))
+	lvec := batch.NewColumnVector(*lcol, 1)
+	rvec := batch.NewColumnVector(*rcol, 1)
+	lvec.SetValue(0, conformBox(lv, lcol))
+	rvec.SetValue(0, conformBox(rv, rcol))
 	return kernel.CompareValuesAt(lvec, 0, rvec, 0), true
+}
+
+// containerMember reports whether the container box lv equals the member rv
+// under their declarations — the membership test of `IN (SELECT …)`,
+// `= ANY (SELECT …)` and `<> ALL (SELECT …)`, which is `=` quantified and so
+// the same ordering the six operators use (round 4, B4). decided is false for
+// a pair the kernel has no common shape for; the caller then keeps compare().
+func containerMember(ld, rd *parquet.Column, lv, rv any) (eq, decided bool) {
+	c, ok := containerOrder(ld, rd, lv, rv)
+	if !ok {
+		return false, false
+	}
+	return c == 0, true
 }
 
 // containerCompare is containerOrder under a comparison operator, for the
@@ -103,58 +116,67 @@ func boxShape(v any) *parquet.Column {
 	return &parquet.Column{Type: parquet.TypeArray, Nullable: true, ElementType: el}
 }
 
-// commonContainerShape is the one shape both sides are written under: the
+// commonContainerShapes are the shapes the two sides are written under: the
 // declaration they share, or — for two numeric leaves of different types —
 // double precision, PostgreSQL's common type for the pairs this engine boxes
-// (`int[] < numeric[]` compares numerically there).
-func commonContainerShape(a, b *parquet.Column) (*parquet.Column, bool) {
+// (`int[] < numeric[]` compares numerically there). Two DECIMAL leaves of
+// different scales keep EACH SIDE'S OWN declaration: the kernel compares two
+// DECIMAL vectors at their common scale exactly (kernel.CompareDecimalValues),
+// so `{10.00}` equals `{10.0000}` by value — never through a double, which
+// would tie two values that differ past its sixteenth digit (round 4, B3).
+func commonContainerShapes(a, b *parquet.Column) (*parquet.Column, *parquet.Column, bool) {
 	switch {
 	case a == nil && b == nil:
-		return nil, false
+		return nil, nil, false
 	case a == nil:
-		return b, shapeComparable(b)
+		return b, b, shapeComparable(b)
 	case b == nil:
-		return a, shapeComparable(a)
+		return a, a, shapeComparable(a)
 	}
 	if a.Type != b.Type {
-		if numericLeaf(a.Type) && numericLeaf(b.Type) {
-			return &parquet.Column{Type: parquet.TypeFloat64, Nullable: true}, true
+		// integer ⊕ numeric is numeric in PostgreSQL, and exact: the integer
+		// side is written as a DECIMAL at scale 0.
+		switch {
+		case a.Type == parquet.TypeDecimal && integerLeaf(b.Type):
+			return a, &parquet.Column{Type: parquet.TypeDecimal, Precision: 38, Nullable: true}, true
+		case b.Type == parquet.TypeDecimal && integerLeaf(a.Type):
+			return &parquet.Column{Type: parquet.TypeDecimal, Precision: 38, Nullable: true}, b, true
+		case numericLeaf(a.Type) && numericLeaf(b.Type):
+			f := &parquet.Column{Type: parquet.TypeFloat64, Nullable: true}
+			return f, f, true
 		}
-		return nil, false
+		return nil, nil, false
 	}
 	switch a.Type {
 	case parquet.TypeArray, parquet.TypeMap:
 		if a.ElementType == nil || b.ElementType == nil {
-			return nil, false
+			return nil, nil, false
 		}
-		el, ok := commonContainerShape(a.ElementType, b.ElementType)
+		la, lb, ok := commonContainerShapes(a.ElementType, b.ElementType)
 		if !ok {
-			return nil, false
+			return nil, nil, false
 		}
-		out := *a
-		out.ElementType = el
-		return &out, true
+		outA, outB := *a, *b
+		outA.ElementType, outB.ElementType = la, lb
+		return &outA, &outB, true
 	case parquet.TypeRow:
 		if len(a.Fields) == 0 || len(a.Fields) != len(b.Fields) {
-			return nil, false
+			return nil, nil, false
 		}
-		out := *a
-		out.Fields = make([]parquet.Column, len(a.Fields))
+		outA, outB := *a, *b
+		outA.Fields = make([]parquet.Column, len(a.Fields))
+		outB.Fields = make([]parquet.Column, len(a.Fields))
 		for i := range a.Fields {
-			f, ok := commonContainerShape(&a.Fields[i], &b.Fields[i])
+			fa, fb, ok := commonContainerShapes(&a.Fields[i], &b.Fields[i])
 			if !ok {
-				return nil, false
+				return nil, nil, false
 			}
-			out.Fields[i] = *f
-			out.Fields[i].Name = a.Fields[i].Name
+			outA.Fields[i], outB.Fields[i] = *fa, *fb
+			outA.Fields[i].Name, outB.Fields[i].Name = a.Fields[i].Name, a.Fields[i].Name
 		}
-		return &out, true
-	case parquet.TypeDecimal:
-		if a.Scale != b.Scale {
-			return &parquet.Column{Type: parquet.TypeFloat64, Nullable: true}, true
-		}
+		return &outA, &outB, true
 	}
-	return a, true
+	return a, b, true
 }
 
 // shapeComparable reports whether a lone declaration can allocate both sides:
@@ -167,6 +189,10 @@ func shapeComparable(c *parquet.Column) bool {
 		return len(c.Fields) > 0
 	}
 	return true
+}
+
+func integerLeaf(t parquet.TypeID) bool {
+	return t == parquet.TypeInt32 || t == parquet.TypeInt64
 }
 
 func numericLeaf(t parquet.TypeID) bool {

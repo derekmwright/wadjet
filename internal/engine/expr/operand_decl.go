@@ -112,3 +112,17 @@ func batchSchema(b *batch.RecordBatch) []parquet.Column {
 	}
 	return out
 }
+
+// subquerySetDecl is a subquery's declared output column, for the membership
+// constructs whose SET is that subquery (IN / `= ANY` / `<> ALL`): nil when the
+// compile has no resolver or the resolver cannot plan it.
+func subquerySetDecl(sql string, ctx *compileContext) *parquet.Column {
+	if ctx == nil || ctx.subqueryDecl == nil {
+		return nil
+	}
+	c, ok := ctx.subqueryDecl(sql)
+	if !ok || !shapeComparable(&c) {
+		return nil
+	}
+	return &c
+}

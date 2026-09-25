@@ -9,6 +9,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // CorrelatedScalarSubquery evaluates a correlated scalar subquery per-row.
@@ -109,6 +110,10 @@ type CorrelatedInSubquery struct {
 	// (plansql.AppendRowLimit). Bounding all three in the runner charged
 	// those two for a set neither builds.
 	SetBound int
+	// probeDecl / setDecl: a container probe's and the set's declarations,
+	// as on InSubquery (round 4, B4).
+	probeDecl *operandDecl
+	setDecl   *parquet.Column
 }
 
 func (e *CorrelatedInSubquery) Eval(b *batch.RecordBatch, row int) any {
@@ -157,6 +162,11 @@ func (e *CorrelatedInSubquery) EvalBoolNull(b *batch.RecordBatch, row int) (bool
 		return false, true
 	}
 
+	var ld *parquet.Column
+	container := isContainerBox(lv)
+	if container {
+		ld = e.probeDecl.shape(b, row, e.Expr)
+	}
 	sawNull := false
 	for _, r := range rows {
 		// PostgreSQL refuses a multi-column IN subquery outright (42601,
@@ -173,7 +183,16 @@ func (e *CorrelatedInSubquery) EvalBoolNull(b *batch.RecordBatch, row int) (bool
 		for _, v := range r {
 			if v == nil {
 				sawNull = true
-			} else if compare(lv, v, CmpEq) {
+				continue
+			}
+			eq, decided := false, false
+			if container {
+				eq, decided = containerMember(ld, e.setDecl, lv, v)
+			}
+			if !decided {
+				eq = compare(lv, v, CmpEq)
+			}
+			if eq {
 				return !e.Not, false
 			}
 		}

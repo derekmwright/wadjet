@@ -47,13 +47,11 @@ func declaredShapeOf(node plansql.Node, schema []parquet.Column, sub expr.Subque
 		}
 	}
 	if sub != nil {
-		decls.subqueryDecl = func(sql string) (parquet.Column, bool) {
-			t, p, s, ok := sub(sql)
-			if !ok {
-				return parquet.Column{}, false
-			}
-			return parquet.Column{Type: t, Precision: p, Scale: s, Nullable: true}, true
-		}
+		// The subquery's WHOLE declared column — its element and fields
+		// with it — so a cast or a comparator whose operand is a subquery
+		// that returns a container reads the same declaration the
+		// projection of that subquery does (round 4, B1/B4).
+		decls.subqueryDecl = sub
 	}
 	d, c := nodeDeclaredType(node, decls)
 	if c == expr.Undecided {

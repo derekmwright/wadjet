@@ -73,13 +73,7 @@ func (p *Planner) forSubquery() *Planner {
 // An output that cannot be described as exactly one column returns ok=false
 // and leaves the existing boxed comparison behavior. See ADR-0021.
 func (p *Planner) subqueryDeclOption() expr.CompileOption {
-	env := expr.WithSubqueryEnv(func(sql string) (parquet.TypeID, int, int, bool) {
-		cols, ok := p.SubqueryOutputColumn(sql)
-		if !ok {
-			return 0, 0, 0, false
-		}
-		return cols.Type, cols.Precision, cols.Scale, true
-	}, p.SubqueryOutputArity)
+	env := expr.WithSubqueryEnv(p.SubqueryOutputColumn, p.SubqueryOutputArity)
 	// …and the RELATION resolver the dangling-reference guard needs to tell a
 	// ROW FIELD PATH from a lost correlation (#866). It travels with the
 	// other two plan-time answers because it is the same question asked of

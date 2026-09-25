@@ -260,13 +260,10 @@ func compileQuantified(n *plansql.AnyAllExpr, ctx *compileContext) (Expr, error)
 			if ctx.runner == nil {
 				return nil, fmt.Errorf("%s subquery requires a SubqueryRunner", n.Modifier)
 			}
-			switch {
-			case op == CmpEq && !all:
-				return &InSubquery{Expr: left, SQL: sq.SQL, Runner: ctx.runner,
-					Scope: ctx.subqueryScope, Budget: ctx.budget, SetBound: ctx.setRowBound}, nil
-			case op == CmpNe && all:
-				return &InSubquery{Expr: left, SQL: sq.SQL, Runner: ctx.runner, Not: true,
-					Scope: ctx.subqueryScope, Budget: ctx.budget, SetBound: ctx.setRowBound}, nil
+			if (op == CmpEq && !all) || (op == CmpNe && all) {
+				return &InSubquery{Expr: left, SQL: sq.SQL, Runner: ctx.runner, Not: all,
+					Scope: ctx.subqueryScope, Budget: ctx.budget, SetBound: ctx.setRowBound,
+					probeDecl: newOperandDecl(n.Left, ctx), setDecl: subquerySetDecl(sq.SQL, ctx)}, nil
 			}
 			return nil, sqlerr.New("0A000",
 				"%s %s (subquery) is not supported; only `= ANY` and `<> ALL` over a subquery are", n.Op, n.Modifier)
@@ -295,7 +292,8 @@ func compileQuantified(n *plansql.AnyAllExpr, ctx *compileContext) (Expr, error)
 		}
 	}
 	out := &Quantified{All: all}
-	for _, c := range candidates {
+	for _, c0 := range candidates {
+		c := c0
 		switch c.(type) {
 		case *plansql.SubqueryNode, *plansql.ArrayLitNode:
 			return nil, sqlerr.New("0A000",
@@ -305,7 +303,11 @@ func compileQuantified(n *plansql.AnyAllExpr, ctx *compileContext) (Expr, error)
 		if err != nil {
 			return nil, err
 		}
-		out.Cmps = append(out.Cmps, compileCmp(left, compiled, op))
+		cmp := compileCmp(left, compiled, op)
+		if c, ok := cmp.(*Cmp); ok {
+			c.pair.left.decl, c.pair.right.decl = newOperandDecl(n.Left, ctx), newOperandDecl(c0, ctx)
+		}
+		out.Cmps = append(out.Cmps, cmp)
 	}
 	return out, nil
 }

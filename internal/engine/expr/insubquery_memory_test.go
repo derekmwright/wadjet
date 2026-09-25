@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/derekmwright/wadjet/internal/engine/batch"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // fakeAccountant is a minimal, deterministic MemoryAccountant test double:
@@ -204,7 +204,7 @@ func TestCompileWithBudgetChargesTheCompiledInSubquery(t *testing.T) {
 	tracked := 0
 	compiled3, err := CompileWithRunner(info.WhereExpr, runner,
 		WithBudget(acct, func(*InSubquery) { tracked++ }),
-		WithSubqueryDeclTypes(func(string) (batch.TypeID, int, int, bool) { return 0, 0, 0, false }))
+		WithSubqueryDeclTypes(func(string) (parquet.Column, bool) { return parquet.Column{}, false }))
 	if err != nil {
 		t.Fatalf("CompileWithRunner+WithBudget: %v", err)
 	}
