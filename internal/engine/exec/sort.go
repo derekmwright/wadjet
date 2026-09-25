@@ -1356,6 +1356,20 @@ func appendKeyElemWithMeta(buf []byte, v any, meta *parquet.Column) []byte {
 			// BYTES a CIDR value contributes, never its framing.
 			return appendKeyRaw(append(buf, keyElemString), kernel.CidrOrderKey(s))
 		}
+	case parquet.TypeDecimal:
+		// A DECIMAL element boxes as its text at its column's scale, so two
+		// sources of one value at two scales (`{10.00}`, `{10.0000}` — the
+		// arms of a set operation) keyed as two members while `=` calls them
+		// one (round 4, B3). Keyed by its canonical digits — exact, and the
+		// value's own: the text is read at ITS scale, never the
+		// declaration's, so no digit is rounded into a merge. The columnar
+		// key (appendNestedElem → batch.AppendDecimalKey) is scale-normalized
+		// the same way.
+		if s, ok := v.(string); ok {
+			if canon, ok := batch.CanonicalDecimalText(s); ok {
+				return appendKeyRaw(append(buf, keyElemString), canon)
+			}
+		}
 	case parquet.TypeArray, parquet.TypeMap:
 		if vals, ok := v.([]any); ok {
 			return appendKeyElemsWithMeta(append(buf, keyElemList), vals, meta.ElementType)

@@ -1111,9 +1111,25 @@ func setOpElementTarget(want, ct SetOpColType, name, op string) (*parquet.Column
 		if a.Type == b.Type && a.Precision == b.Precision && a.Scale == b.Scale {
 			return want.ElementType, nil
 		}
-		// Moving a DECIMAL element to another (p,s) is a rescale of every
-		// element this reconciliation does not perform; refused rather than
-		// read at the wrong power of ten.
+		// Two DECIMAL elements meet at the arms' common DECIMAL(p,s) — ADR-0024's rule for a scalar column,
+		// applied to the element — and every arm's elements are rescaled
+		// into it (the DAG casts the arm to that `DECIMAL(p,s)[]`; the single
+		// path writes its boxes, exact at a scale no smaller than their own).
+		// So `{10.00}` and `{10.0000}` are one member of a UNION, as they are
+		// equal to `=` (round 4, B3). An element whose (p,s) nothing resolved,
+		// or a float element, keeps the refusal: there is no scale to move
+		// the values to without guessing. An INTEGER element beside a DECIMAL
+		// one keeps it too: its boxes are values at scale 0, which the
+		// element writer would read as unscaled carriers (ADR-0018 §4).
+		ea, oka := setOpColTypeFromColumn(*a)
+		eb, okb := setOpColTypeFromColumn(*b)
+		if oka && okb && ea.Typ == parquet.TypeDecimal && eb.Typ == parquet.TypeDecimal {
+			if m, ok := setOpDecimalTarget([]SetOpColType{ea, eb}); ok {
+				el := parquet.Column{Name: "element", Type: parquet.TypeDecimal, Nullable: true,
+					Precision: m.Precision, Scale: m.Scale}
+				return &el, nil
+			}
+		}
 		return nil, sqlerr.New("0A000", "%s over ARRAY columns whose DECIMAL elements differ in "+
 			"type or (precision, scale) is not supported: result column %q", op, name)
 	}

@@ -1638,7 +1638,11 @@ func nodeDeclaredType(node plansql.Node, decls ColDecls) (expr.DeclType, expr.Co
 		// `int[]` is bigint[] exactly as `CAST(x AS INT)` is bigint (ADR-0012
 		// item 12) — and the evaluator converts each element to it.
 		if el, ok := expr.ArrayCastElement(n.TypeName); ok {
-			return arrayOfDecl(expr.Decl(inferCastType(el)))
+			d, ok := arrayCastDecimalElement(n, el, decls)
+			if !ok {
+				d = expr.Decl(inferCastType(el))
+			}
+			return arrayOfDecl(d)
 		}
 		// A VECTOR destination declares a VECTOR of its dimension — the
 		// evaluator converts (pgvector's array_to_vector), and the projection

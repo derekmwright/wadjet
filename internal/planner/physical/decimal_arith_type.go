@@ -429,3 +429,32 @@ func decimalArithOperandDecided(node plansql.Node, decls ColDecls) bool {
 	_, isDec, ok := decimalArithOperand(node, decls)
 	return ok && isDec
 }
+
+// arrayCastDecimalElement is the element a `T[]` cast declares when T is
+// DECIMAL/NUMERIC, by the scalar cast's own rule (castDeclaredDecimal): a
+// DECIMAL(p,s) destination is its (p,s), and a bare one takes the operand
+// ELEMENT's scale — an integer element scale 0. Round 4 (B3): the element was
+// declared by inferCastType, which knows no (p,s), so `CAST(v AS
+// DECIMAL(9,4)[])` declared text[] — its elements were compared and hashed as
+// their TEXT (`10.0000` ≠ `10.00` in a join key, IN, UNION) — and `CAST(… AS
+// NUMERIC[])` declared a double its decimal text could not be written into.
+func arrayCastDecimalElement(n *plansql.CastNode, el string, decls ColDecls) (expr.DeclType, bool) {
+	p, s, hasParams, ok := expr.DecimalCastDest(el)
+	if !ok {
+		return expr.DeclType{}, false
+	}
+	if hasParams {
+		return expr.DeclDecimal(p, s), true
+	}
+	src, c := nodeDeclaredType(n.Inner, decls)
+	if c != expr.Decided || src.Schema == nil || src.Schema.ElementType == nil {
+		return expr.DeclType{}, false
+	}
+	switch e := src.Schema.ElementType; e.Type {
+	case parquet.TypeDecimal:
+		return expr.DeclDecimal(batch.MaxDecimalPrecision, e.Scale), true
+	case parquet.TypeInt32, parquet.TypeInt64:
+		return expr.DeclDecimal(batch.MaxDecimalPrecision, 0), true
+	}
+	return expr.DeclType{}, false
+}

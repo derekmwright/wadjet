@@ -368,6 +368,21 @@ func reconcileSetOpArmTypes(plans []physical.SetOpArmPlan, outNames []string, op
 				// (`int[] ∪ bigint[]`); the narrower arm converts its
 				// elements, or the stage writes two element types into one
 				// column (arc CW).
+				// Two DECIMAL elements of different (p,s) meet at the common
+				// one (setOpElementTarget): the arm casts to that
+				// `DECIMAL(p,s)[]`, whose declared element the cast writes
+				// at the target scale (round 4, B3).
+				if el, ae := want.ElementType, plans[i].Types[col].ElementType; el != nil && ae != nil &&
+					el.Type == parquet.TypeDecimal && ae.Type == parquet.TypeDecimal &&
+					(ae.Precision != el.Precision || ae.Scale != el.Scale) {
+					plans[i].Specs[col].Expr = fmt.Sprintf("CAST(%s AS DECIMAL(%d,%d)[])",
+						plans[i].Specs[col].Expr, el.Precision, el.Scale)
+					plans[i].Specs[col].Type = want.Typ
+					plans[i].Specs[col].ElementType = el
+					plans[i].Specs[col].TypeKnown = true
+					plans[i].Types[col] = physical.SetOpColType{Typ: want.Typ, Known: true, ElementType: el}
+					continue
+				}
 				if el, ae := want.ElementType, plans[i].Types[col].ElementType; el != nil && ae != nil && ae.Type != el.Type {
 					cast, ok := setOpCastExpr("x", ae.Type, el.Type)
 					if !ok {

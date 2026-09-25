@@ -109,7 +109,9 @@ func setOpUnifyColumn(l, r parquet.Column) (parquet.Column, bool) {
 	// arms use (setOpElementTarget), so `int[] ∪ bigint[]` is bigint[] on
 	// every path and the boxes are coerced into the wider child (arc CW).
 	if (l.Type == parquet.TypeArray || l.Type == parquet.TypeMap) && l.Type == r.Type &&
-		l.ElementType != nil && r.ElementType != nil && l.ElementType.Type != r.ElementType.Type {
+		l.ElementType != nil && r.ElementType != nil && (l.ElementType.Type != r.ElementType.Type ||
+		(l.ElementType.Type == parquet.TypeDecimal && (l.ElementType.Precision != r.ElementType.Precision ||
+			l.ElementType.Scale != r.ElementType.Scale))) {
 		el, err := setOpElementTarget(SetOpColType{Typ: l.Type, ElementType: l.ElementType},
 			SetOpColType{Typ: r.Type, ElementType: r.ElementType}, l.Name, "UNION")
 		if err != nil || el == nil {
