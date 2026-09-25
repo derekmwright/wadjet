@@ -24,10 +24,14 @@ import (
 // Where the re-spell loses a qualifier it binds by BARE name, so a name the
 // lateral arm carries is resolved correctly only when no other relation of the
 // query carries it too. A slot the planner MINTED (`__key_0`, a pad marker) is
-// unique by construction. So the DAG carries a correlated LATERAL exactly when
-// every non-minted name its arm carries — a scan column below it, an item or
-// alias its SELECT list, an aggregate or a grouping publishes — is carried by
-// no relation outside it. Any other correlated LATERAL runs single-process.
+// unique by construction. So the DAG carries a correlated LATERAL only when
+// (1) no non-minted name its arm carries ACROSS the join (crossingNames: what
+// its SELECT list, aggregate or bare scan publishes and the columns those
+// items are computed from) is carried by another relation of the query (the
+// subtrees hanging off the path from the root to the arm), and (2) its join
+// does not null-extend a grouped arm. Any other correlated LATERAL runs
+// single-process. The guard is asked just before stage generation, which
+// rewrites names; the routed pipeline runs the same logical node.
 //
 // MEASURED (arc JP round 2 closure review, 1143 statements × five arms): every
 // DAG wrong value in the lane was a LATERAL whose arm shares a name with the

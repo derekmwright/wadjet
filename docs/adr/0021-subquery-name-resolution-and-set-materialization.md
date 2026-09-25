@@ -2559,11 +2559,12 @@ stream, and every reference above it is re-spelled onto that stream, binding
 by bare name where a qualifier is lost. Two rounds taught the re-spell one
 spelling each; round 3 asks the plan instead
 (`dagplan.refuseCollidingLateral`, `ErrLateralIdentityDistributed`). The DAG
-carries a correlated LATERAL only when (1) no non-minted name its arm carries —
-a scan column below it, a SELECT-list item or alias, an aggregate or group
-output — is carried by another relation of the query (the subtrees hanging off
-the path from the root to the arm; a minted slot such as `__key_0` is unique by
-construction), and (2) the join does not null-extend a grouped arm (a LEFT
+carries a correlated LATERAL only when (1) no non-minted name its arm carries
+ACROSS its join — what its SELECT list, aggregate or bare scan publishes, and
+the columns those items are computed from (a column the body only filters on
+stays in the body's own stage) — is carried by another relation of the query
+(the subtrees hanging off the path from the root to the arm; a minted slot
+such as `__key_0` is unique by construction), and (2) the join does not null-extend a grouped arm (a LEFT
 lateral over a DISTINCT or GROUP BY body wrote pad and aggregate files of
 different widths, ADR-0010, or padded every row NULL through a table-named
 body, measured over arms that share no name). Every other correlated LATERAL
@@ -2572,8 +2573,8 @@ runs on the coordinator-local single-process pipeline
 runs it as one pipeline task). Right-and-single beats wrong-and-distributed.
 Measured over the closure corpus (1143 statements) and 634 carried cells
 (`lt_o` × `jp_q`, no shared name): the dag, dag-shuffled and fast-path arms
-differ from single-process on no LATERAL cell; 708 of the corpus route and 140
-of the carried cells route (clause 2), the other 494 run as stages and answer
+differ from single-process on no LATERAL cell; 710 of the corpus route and 123
+of the carried cells route (clause 2), the other 511 run as stages and answer
 PostgreSQL's rows.
 
 The single-process half, at the seams the review named: the outer side of a
