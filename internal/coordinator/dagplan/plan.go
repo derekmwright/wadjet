@@ -155,6 +155,11 @@ func (p *StagePlanner) PlanDistributed(ctx context.Context, node *logical.Node) 
 	// outer id on the routed pipeline too). A lifted predicate over a shared
 	// name is such a shape, so the DAG's own refusal of it (#1130) below is
 	// never reached for it.
+	// A star that would publish a lateral join's lifted key slot is refused
+	// on this path as on the single-process one (arc JP round 4).
+	if err := logical.RefuseStarPublishingLiftedSlot(node); err != nil {
+		return nil, err
+	}
 	if err := refuseCollidingLateral(node); err != nil {
 		return nil, err
 	}

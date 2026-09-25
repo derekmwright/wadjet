@@ -127,6 +127,10 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 	if err := logical.RefuseDeclinedLiftedRefs(node); err != nil {
 		return nil, err
 	}
+	// …and a star that would publish a lateral join's lifted key slot.
+	if err := logical.RefuseStarPublishingLiftedSlot(node); err != nil {
+		return nil, err
+	}
 	// …and a COLUMN-ALIAS LIST longer than the `SELECT *` body it renames, for
 	// the same reason and at the same place: the width is a pass later than
 	// the builder, so PostgreSQL's 42P10 is raised a pass later too (#958,

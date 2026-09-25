@@ -80,20 +80,6 @@ func RefuseDeclinedLiftedRefs(n *Node) error {
 				"this engine does not do for this shape on the single-process path. Name the columns "+
 				"instead of a star, or correlate on an equality")
 	}
-	// A BARE star left unexpanded over a lateral join publishes the join's
-	// stream, and a join that EMITS a lifted slot (an expression-keyed
-	// correlation, `i.k = o.k + 1`) would show it. The star is normally
-	// expanded to the arms' lists, which hide it (joinArmColumns); where it
-	// could not be — a list naming one column twice, say — it is refused
-	// here, after expansion, rather than before it for every such star (arc
-	// JP round 4, B5).
-	if n.Type == NodeProject && len(n.Children) == 1 && hasBareStarItem(n) && streamEmitsLiftedSlot(n.Children[0]) {
-		return sqlerr.New("0A000",
-			"a bare `SELECT *` over a LATERAL whose correlated equality has an EXPRESSION on its "+
-				"outer side could not be expanded into the relations' own column lists, and the "+
-				"join's output carries the body's key column the equality is evaluated against. "+
-				"Name the columns, or select `<lateral alias>.*` for the lateral's own list")
-	}
 	for _, c := range n.Children {
 		if err := RefuseDeclinedLiftedRefs(c); err != nil {
 			return err
@@ -138,4 +124,42 @@ func streamEmitsLiftedSlot(n *Node) bool {
 		}
 	}
 	return false
+}
+
+// RefuseStarPublishingLiftedSlot refuses a plan whose published stream would
+// carry a slot a lateral join EMITS for a lifted equality (an expression-keyed
+// correlation, `i.k = o.k + 1`, is evaluated over the join's output, so the
+// join carries the body's key under a minted `__key_N`). A bare star over a
+// lateral join is expanded to the FROM arms' own lists, which hide it
+// (joinArmColumns); where it could not be — a lateral list naming one column
+// twice — the star either stays unexpanded in a Project or, star-only, the
+// plan publishes the join's stream with no Project at all, and the slot
+// reached the client as a sixth column (arc JP round 4, measured). Asked of
+// the statement's root and of every block root (a derived table, CTE or
+// lateral body publishes its stream to the query around it), on both paths.
+func RefuseStarPublishingLiftedSlot(root *Node) error {
+	var walk func(n *Node, publishes bool) error
+	walk = func(n *Node, publishes bool) error {
+		if n == nil {
+			return nil
+		}
+		unexpandedStar := n.Type == NodeProject && len(n.Children) == 1 && hasBareStarItem(n) &&
+			streamEmitsLiftedSlot(n.Children[0])
+		starOnly := publishes && streamEmitsLiftedSlot(n)
+		if unexpandedStar || starOnly {
+			return sqlerr.New("0A000",
+				"a bare `SELECT *` over a LATERAL whose correlated equality has an EXPRESSION on "+
+					"its outer side could not be expanded into the relations' own column lists "+
+					"(a list naming one column twice), and the join's output carries the body's "+
+					"key column the equality is evaluated against. Name the columns")
+		}
+		for _, c := range n.Children {
+			block := c.DerivedAlias != "" || c.CTEName != "" || c.CTERefAlias != "" || c.LateralSubtree
+			if err := walk(c, block); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	return walk(root, true)
 }
