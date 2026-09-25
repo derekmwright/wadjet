@@ -84,7 +84,8 @@ func (p *Planner) buildFilterOp(pred logical.Predicate, outerTables map[string]b
 		if compileErr != nil {
 			return nil, fmt.Errorf("predicate %q cannot be evaluated here: %w", pred.Raw, compileErr)
 		}
-		return nil, fmt.Errorf("predicate %q names a column no relation in its scope provides", pred.Raw)
+		return nil, fmt.Errorf("predicate %q cannot be evaluated here: it reached the raw-text "+
+			"filter path, which evaluates only a column compared with constants", pred.Raw)
 	}
 	if pred.Raw != "" {
 		p := parseSimplePredicate(pred.Raw)
