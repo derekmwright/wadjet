@@ -290,6 +290,15 @@ func owaDeclName(oid uint32, typmod int32) string {
 // than a difference in fixture.
 func owaDoors(t *testing.T, ctx context.Context) (singleAddr, dagAddr string, coord *coordinator.Coordinator) {
 	t.Helper()
+	singleAddr, dagAddr, coord, _ = owaDoorsOver(t, ctx, owaWriteBars)
+	return singleAddr, dagAddr, coord
+}
+
+// owaDoorsOver is owaDoors over the rows `write` loads, and it also returns
+// the embedded DB both wire doors are built over, so a gate can ask the
+// embedded, HTTP and gRPC doors the same statement over the same rows.
+func owaDoorsOver(t *testing.T, ctx context.Context, write func(*testing.T, context.Context, *wadjet.DB)) (singleAddr, dagAddr string, coord *coordinator.Coordinator, db *wadjet.DB) {
+	t.Helper()
 	natsCfg := distributed.DefaultNATSConfig()
 	natsCfg.Port = -1
 	natsCfg.StoreDir = t.TempDir()
@@ -323,12 +332,12 @@ func owaDoors(t *testing.T, ctx context.Context) (singleAddr, dagAddr string, co
 		t.Fatal(err)
 	}
 
-	db, err := wadjet.Open(ctx, wadjet.Config{Store: store, Bucket: "test", MetaKV: kv})
+	db, err = wadjet.Open(ctx, wadjet.Config{Store: store, Bucket: "test", MetaKV: kv})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	owaWriteBars(t, ctx, db)
+	write(t, ctx, db)
 
 	ids := make([]string, 3)
 	for i := range ids {
@@ -378,7 +387,7 @@ func owaDoors(t *testing.T, ctx context.Context) (singleAddr, dagAddr string, co
 		t.Fatal(err)
 	}
 	t.Cleanup(pgDAG.Shutdown)
-	return pgSingle.Addr(), pgDAG.Addr(), coord
+	return pgSingle.Addr(), pgDAG.Addr(), coord, db
 }
 
 func owaWriteBars(t *testing.T, ctx context.Context, db *wadjet.DB) {
