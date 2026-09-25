@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"net"
 	"sort"
 	"strconv"
@@ -2111,6 +2112,36 @@ func FormatTimestamp(ms int64) string {
 	// Go's `.9` verb does exactly that trimming and, unlike a hand-rolled
 	// strip, cannot leave a bare point behind.
 	return t.Format("2006-01-02 15:04:05.999")
+}
+
+// FormatFloat8Text renders a FLOAT32/FLOAT64 the way PostgreSQL's text
+// output (float4out/float8out) does: plain decimal for ordinary magnitudes,
+// where Go's shortest %v/%g switches to e-notation once the exponent reaches
+// the digit count — an epoch like 1787049120 came out "1.78704912e+09",
+// which a client reading it as an integer rejects, and a DOUBLE assigned to
+// a TEXT column stored "1.234567e+06" where PostgreSQL stores "1234567"
+// (review r5 P1, #1252). Extreme magnitudes keep e-notation, and the special
+// values use PostgreSQL's spellings.
+//
+// This is the ONE renderer for a float's text form: pgwire's own wire
+// rendering of a genuine FLOAT32/FLOAT64 column (server.go) and the engine's
+// double/real-to-TEXT assignment and cast sites (wadjet.assignTextValue,
+// expr.castStringRender, expr.toString) all call this, so a DOUBLE never
+// prints one text through the wire and a second one once it lands in a TEXT
+// column.
+func FormatFloat8Text(v float64, bits int) string {
+	switch {
+	case math.IsNaN(v):
+		return "NaN"
+	case math.IsInf(v, 1):
+		return "Infinity"
+	case math.IsInf(v, -1):
+		return "-Infinity"
+	}
+	if a := math.Abs(v); v == 0 || (a >= 1e-4 && a < 1e15) {
+		return strconv.FormatFloat(v, 'f', -1, bits)
+	}
+	return strconv.FormatFloat(v, 'e', -1, bits)
 }
 
 // parseDateString parses a DATE string to days since epoch via the shared

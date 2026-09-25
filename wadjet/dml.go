@@ -2605,9 +2605,9 @@ func assignTextValue(v any, _ parquet.Column, srcType parquet.TypeID, srcKnown b
 	case int:
 		return strconv.FormatInt(int64(t), 10), nil
 	case float64:
-		return strconv.FormatFloat(t, 'g', -1, 64), nil
+		return batch.FormatFloat8Text(t, 64), nil
 	case float32:
-		return strconv.FormatFloat(float64(t), 'g', -1, 32), nil
+		return batch.FormatFloat8Text(float64(t), 32), nil
 	case bool:
 		if t {
 			return "true", nil

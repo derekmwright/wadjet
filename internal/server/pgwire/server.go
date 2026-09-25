@@ -3784,25 +3784,14 @@ func pgCompositeNeedsQuoting(s string) bool {
 	return false
 }
 
-// formatPgFloat renders a float the way PostgreSQL's text protocol does:
-// plain decimal for ordinary magnitudes, where Go's %v switches to
-// e-notation once the exponent reaches the digit count — an epoch like
-// 1787049120 came out "1.78704912e+09", which a client reading it as an
-// integer rejects. Extreme magnitudes keep e-notation, and the special
-// values use PostgreSQL's spellings.
+// formatPgFloat renders a float the way PostgreSQL's text protocol does. It
+// is batch.FormatFloat8Text, the ONE renderer this engine has for a float's
+// text form — the double/real-to-TEXT assignment and cast sites in the
+// embedded engine call the same function, so a DOUBLE prints one text on the
+// wire and the identical one once it is stored in a TEXT column (review r5
+// P1, #1252).
 func formatPgFloat(v float64, bits int) string {
-	switch {
-	case math.IsNaN(v):
-		return "NaN"
-	case math.IsInf(v, 1):
-		return "Infinity"
-	case math.IsInf(v, -1):
-		return "-Infinity"
-	}
-	if a := math.Abs(v); v == 0 || (a >= 1e-4 && a < 1e15) {
-		return strconv.FormatFloat(v, 'f', -1, bits)
-	}
-	return strconv.FormatFloat(v, 'e', -1, bits)
+	return batch.FormatFloat8Text(v, bits)
 }
 
 func (c *pgConn) sendCommandComplete(tag string) {
