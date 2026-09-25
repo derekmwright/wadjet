@@ -110,6 +110,8 @@ Comparing arrays whose element types differ within the numeric family (`ARRAY[1.
 
 `CAST(ARRAY[1,2] AS JSON)` is `[1,2]` — `to_json`'s text, which `json_array_length` and the other JSON functions read — where PostgreSQL has no cast from `integer[]` to `json` and raises 42846; a ROW is its `to_json` object. Every other non-text destination of a container is 42846 as on PostgreSQL. `CAST(ARRAY[1,2] AS VECTOR(2))` converts as pgvector's cast does. (ADR-0045)
 
+An array of `INTERVAL` has no text here: `CAST(ARRAY[INTERVAL '1 hour'] AS TEXT)` (and `AS JSON`, `AS TEXT[]`) raises 0A000 where PostgreSQL prints `{01:00:00}`, and `SELECT ARRAY[INTERVAL '1 hour']` raises 42000 — this engine has no interval text form (a scalar `INTERVAL` prints its internal fields). An interval that already became text before the array was built (through a derived table or a scalar subquery) is that text. (ADR-0045)
+
 **Decimal set operations keep one declared scale.**
 
 Storage requires one scale. PostgreSQL declares unconstrained numeric; wadjet retains `(p,s)` and prints `12.7500` where PostgreSQL prints `12.75`. (ADR-0012 §12/decimal-carrier)

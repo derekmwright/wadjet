@@ -56,6 +56,24 @@ psql).
    and the DAG gather allocates and publishes a computed column from the whole
    declaration. A zero-row result therefore declares what the same query with
    rows declares, on every arm.
+   **Round 3 (the null-padded side, and every READER of a box).** The side of
+   an OUTER join or a LATERAL that produced no rows is declared by the plan's
+   join-side schema (`declaredJoinSchema` / `declaredBlockSchema`), which built
+   a scan, computed or aggregate column from its TypeID alone and declined a
+   block holding an aggregate item outright — so the padded column declared
+   text (the single path's LATERAL aggregate lost the column entirely and fell
+   to the STRING fallback). It now carries the same shape the side with rows
+   declares. And the sites that read a container's BOX rather than a vector —
+   a CAST that renders or converts one, every comparator of two — take their
+   operand's declaration from the same walk (`physical.nodeDeclaredType`,
+   registered with the expression layer as `expr.SetShapeResolver` and asked
+   of the operand's AST against the input batch's executed columns,
+   `expr/operand_decl.go`), not from a narrow operand walk that knew a column,
+   a cast and a constructor of those: an element that COALESCE, CASE, a scalar
+   subquery or an aggregate built had no declaration there and printed its
+   box. A DATE or TIMESTAMP scalar a DAG stage substitutes for a subquery is a
+   typed literal (`CAST('…' AS TIMESTAMP)`), so the stage declares it as the
+   plan does.
 2. **Loud, not plausible.** A container box written into a STRING or BYTES
    vector is a `*TypeMismatchError` (#361's guard), not `fmt.Sprint` text;
    a container written into an ARRAY/MAP/ROW vector allocated without its
@@ -76,20 +94,39 @@ psql).
    `AS DATE` NULL. A VECTOR's dimension is part of its declaration and rides
    every projection spec beside the element; a VECTOR vector allocated without
    it refuses (`*ContainerShapeError`) instead of keeping the slot NULL. A function registered with a container return and no shape (no builtin
-   is) refuses in every whole-value position.
+   is) refuses in every whole-value position. A container whose element has
+   no PostgreSQL text form here — an INTERVAL (this engine has no interval
+   text form) — refuses a text or JSON cast with 0A000 rather than printing
+   Go's struct text (round 3). An array cast to `VECTOR(n)` whose declared
+   element is not a number is 42846, pgvector's answer, whatever its box.
 3. **One renderer.** PostgreSQL's text output — `array_out` (`{…}`, its
    quoting, bare NULL, a nested dimension bare) and `record_out` (`(…)`, an
    empty slot for NULL), with temporal leaves in their text form — lives in
    `batch.FormatPGText`, keyed on the DECLARED column, in the lowest MIT layer
    every door imports. pgwire's text format, the CLI's table and CSV, and
-   `CAST(container AS TEXT)` call it; pgwire's binary format keeps PostgreSQL's
+   `CAST(container AS TEXT)` call it — the cast under its operand's DECLARED
+   element (§1, round 3): the box is first read through a vector of that
+   declaration (`batch.DeclaredValue`), which is the one writer that accepts
+   every storage width a type has (a DATE's int32 or int64 day count, an
+   address's integer), and an element cast into `T[]` casts each element as a
+   COLUMN of its declared type would be cast; pgwire's binary format keeps PostgreSQL's
    array wire form under the declared element OID. The CLI's JSON form keeps a
    JSON array/object with typed leaves; the HTTP and async APIs return raw
    values, and the fix there is that the value is a container again.
-4. **Ordering is the typed comparator.** Once the value is a declared ARRAY
-   vector, ORDER BY, MIN, MAX, DISTINCT and merge keys run the existing
-   element-wise `kernel.CompareValuesAt`; measured against PostgreSQL 17.11 for
-   ten element types (empty first, prefix before extension, NULL element last).
+4. **Ordering is the typed comparator — for every comparator.** Once the
+   value is a declared ARRAY vector, ORDER BY, MIN, MAX, DISTINCT, GROUP BY,
+   window ORDER/PARTITION BY and merge keys run the existing element-wise
+   `kernel.CompareValuesAt`; measured against PostgreSQL 17.11 for ten element
+   types (empty first, prefix before extension, NULL element last). Every
+   comparator of two BOXES goes through one function, `expr.containerOrder`,
+   which writes both into one-row vectors of the pair's declared shape and
+   asks the same kernel: the six operators, IN, BETWEEN, a simple CASE's WHEN
+   and IS [NOT] DISTINCT FROM through `boxedPair.order`; GREATEST, LEAST and
+   NULLIF through `extremumArms.order` (both with their operands'
+   declarations, §1 round 3); and `compare()`, the last resort every other
+   caller reaches, with the shape read off the boxes. Round 2 routed the six
+   operators alone, and GREATEST/LEAST answered the text-greater array while
+   BETWEEN kept the text order (round-2 review B3, P1).
 
 ## Alternatives rejected
 
@@ -135,5 +172,15 @@ Out of scope, recorded as filing candidates: `array_agg(x ORDER BY y)`, the
   HTTP local and DAG, async.
 - `batch.TestSetValueGuardPanicsOnUnholdableValues` — the container-into-text
   cells of §2.
+- `coordinator.TestArcCW3ContainerCastsRenderTheDeclaredElementOnEveryArm` —
+  element {date, timestamp, numeric, bool, ipv4, uuid} × producer {column,
+  COALESCE, CASE, scalar subquery, aggregate} × {TEXT, JSON, TEXT[], VARCHAR}
+  on four arms, each cast against the one renderer over the same container
+  projected, plus PostgreSQL's literal cells and the INTERVAL refusal.
+- `coordinator.TestArcCW3NullPaddedSideDeclaresItsContainerOnEveryArm` —
+  LEFT / RIGHT / FULL join, a LATERAL aggregate and LEFT JOIN LATERAL, each
+  over an empty and a non-empty padded side.
+- `coordinator.TestArcCW3EveryComparatorOrdersArraysOneWay` — eleven array
+  pairs through twenty-four comparators, one ordering (PostgreSQL's).
 
 Each of the first six fails at 83cd4a93.

@@ -714,13 +714,23 @@ through a derived table, a CTE, `VALUES` or a `UNION`, and a ZERO-ROW result
 all declare the element and render as above. So an array read back through a
 derived table is still an array — `v[1]` is its element (a `TIMESTAMP` element
 is a timestamp, not an integer), `2 = ANY(v)` compares elements — and `ORDER
-BY`, `MIN`, `MAX`, `DISTINCT` and the comparison operators (`=`, `<>`, `<`,
-`<=`, `>`, `>=`) compare arrays ELEMENT-WISE as PostgreSQL does — one kernel
-for all of them: an empty array first, a shorter prefix before a longer array,
+BY`, `MIN`, `MAX`, `DISTINCT`, `GROUP BY`, a window's `ORDER BY` and
+`PARTITION BY`, a join key, the comparison operators (`=`, `<>`, `<`, `<=`,
+`>`, `>=`), `BETWEEN`, `IN`, a simple `CASE`, `IS [NOT] DISTINCT FROM`,
+`GREATEST`, `LEAST` and `NULLIF` compare arrays ELEMENT-WISE as PostgreSQL does
+— one kernel for all of them, under each operand's declared element (a
+`numeric` element orders as a number): an empty array first, a shorter prefix before a longer array,
 a NULL element after every value and equal to another NULL element
 (`ARRAY[1,NULL] = ARRAY[1,NULL]` is true). `UNION` arms whose elements differ fold on the
 numeric ladder (`int4[] ∪ bigint[]` is `bigint[]`); arms with no common element
-type are `42804`. `CAST(container AS TEXT)` is the same rendering.
+type are `42804`. `CAST(container AS TEXT)` (and `VARCHAR(n)`) is the same
+rendering under the operand's DECLARED element, whatever expression built it —
+`CAST(ARRAY[COALESCE(ts, …)] AS TEXT)` is `{"2024-01-01 01:00:00"}` and
+`CAST(ARRAY[d] AS TEXT)` `{2024-01-02}`; `CAST(container AS TEXT[])` converts
+each element as a column of its type converts (a timestamp's text, not its
+number), and `CAST(container AS JSON)` is `to_json`'s text
+(`["2024-01-01T01:00:00"]`). An `INTERVAL` element has no text form here and
+the cast refuses (`0A000`); PostgreSQL prints `{01:00:00}`.
 
 A MAP has no PostgreSQL type; it declares OID 25 and renders `{a: 1, b: 2}`
 (`{}` when empty).
