@@ -183,6 +183,14 @@ func publishLiftedRefs(info *plansql.SelectInfo, correlatedParts []string,
 		// arms to three NULL-padded ones. What the single-process path lacked
 		// was not a NAME but the COLUMN, which its projection had dropped.
 		for _, col := range mint {
+			// Two lifted parts reading one column publish it ONCE: the WHERE
+			// split is on the AST, so `(q.qv >= o.total AND q.qv <= o.total +
+			// 20)` is two parts, and a second `qv` item made the body's list
+			// name a column twice — `s.*` could not be enumerated (arc JP
+			// round 4).
+			if lateralAliasPublishes(*injected, lateralBareKeyNameOr(col)) {
+				continue
+			}
 			item, ok := lateralKeySelectItem(col)
 			if !ok {
 				continue
@@ -248,4 +256,13 @@ func qualifyLiftedRefsByLateralAlias(cp string, leftAliases map[string]bool, col
 		return cp
 	}
 	return out.String()
+}
+
+// lateralBareKeyNameOr is lateralBareKeyName, or the trimmed column when it
+// has no bare name.
+func lateralBareKeyNameOr(col string) string {
+	if bare := lateralBareKeyName(col); bare != "" {
+		return bare
+	}
+	return strings.TrimSpace(col)
 }

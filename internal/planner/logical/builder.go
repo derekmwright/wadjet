@@ -2624,9 +2624,28 @@ func collectLogicalAliases(n *Node) map[string]bool {
 	return aliases
 }
 
-// splitANDPredicates splits a WHERE expression on top-level AND boundaries,
-// respecting parentheses nesting.
+// splitANDPredicates splits a LATERAL body's WHERE into its top-level AND
+// terms ON THE AST — the rule splitJoinConjuncts states for an ON clause
+// (#1178). The textual split cut `q.qv BETWEEN o.total AND o.total + 20` into
+// `q.qv BETWEEN o.total` and `o.total + 20` (and a `CASE WHEN a AND b …`
+// inside its WHEN): neither half parses, so the correlated predicate lost the
+// inner column it reads, the join output never carried it, and the filter
+// above the join fell back to the text path, which compared `q.qv` with the
+// STRING `o.total` — zero rows, silently, on the single-process arm (arc JP
+// round 4, B3). A WHERE that does not parse keeps the text split below.
 func splitANDPredicates(where string) []string {
+	if root := tryParseExpr(where); root != nil {
+		var nodes []plansql.Node
+		flattenAndNodes(root, &nodes)
+		if len(nodes) == 1 {
+			return []string{strings.TrimSpace(where)}
+		}
+		out := make([]string, 0, len(nodes))
+		for _, n := range nodes {
+			out = append(out, renderConjunct(n))
+		}
+		return out
+	}
 	var parts []string
 	depth := 0
 	inStr := false
@@ -3148,6 +3167,14 @@ func extractInnerColumn(expr string, outerAliases map[string]bool) string {
 	if inner, _, ok := lateralCorrelatedEquality(expr, outerAliases); ok {
 		return inner.String()
 	}
+	// A part that PARSES and is not that equality has no inner key column,
+	// whatever `=` its text holds: the text split below read the `=` inside
+	// `q.qtag LIKE CASE WHEN o.k = 1 …` (or `(q.qv > o.total) = true`) as the
+	// key and minted `1 THEN …` as its inner side — zero rows (arc JP round 4,
+	// B3). The text path stays for a part the expression parser cannot read.
+	if node, err := plansql.ParseExpression(expr); err == nil && node != nil {
+		return ""
+	}
 	eqIdx := strings.Index(expr, "=")
 	if eqIdx < 0 {
 		return ""
@@ -3173,6 +3200,9 @@ func extractInnerColumn(expr string, outerAliases map[string]bool) string {
 func normalizeCorrelatedEquality(expr string, outerAliases map[string]bool) string {
 	if inner, outer, ok := lateralCorrelatedEquality(expr, outerAliases); ok {
 		return outer.String() + " = " + inner.String()
+	}
+	if node, err := plansql.ParseExpression(expr); err == nil && node != nil {
+		return expr // not a correlated equality (see extractInnerColumn)
 	}
 	eqIdx := strings.Index(expr, "=")
 	if eqIdx < 0 {
