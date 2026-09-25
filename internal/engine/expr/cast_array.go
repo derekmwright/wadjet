@@ -54,6 +54,33 @@ func castToArray(v any, elem string, from *parquet.Column) any {
 	if textCastDest(strings.ToLower(strings.TrimSpace(elem))) {
 		refuseUnrenderable(elems)
 	}
+	// A multi-dimensional array casts its LEAVES and keeps its dimensions,
+	// as PostgreSQL does (`CAST(ARRAY[ARRAY[1,2],ARRAY[3,4]] AS TEXT[])` is
+	// `{{1,2},{3,4}}`): this engine holds such a value as an array of arrays,
+	// so each inner array is cast the same way, under its own declaration
+	// (round 4, B2 — casting each ELEMENT to the scalar destination made a
+	// one-dimensional text[] of the inner arrays' text, a shape PostgreSQL
+	// never answers).
+	if nestedArrayOperand(v, from) {
+		var inner *parquet.Column
+		if from != nil && from.Type == parquet.TypeArray {
+			inner = from.ElementType
+		}
+		out := make([]any, len(elems))
+		for i, e := range elems {
+			if e == nil {
+				continue
+			}
+			if _, ok := e.([]any); !ok {
+				// A scalar beside an inner array: a ragged value no
+				// PostgreSQL array can hold, and no leaf to cast in place.
+				panic(fatalEval{sqlerr.New("0A000", "cannot cast a multi-dimensional %s whose "+
+					"elements mix arrays and scalars to %s[]", containerTypeName(from, v), elem)})
+			}
+			out[i] = castToArray(e, elem, inner)
+		}
+		return out
+	}
 	if _, isArr := v.([]any); isArr && from != nil && from.Type == parquet.TypeArray &&
 		from.ElementType != nil && ambiguousBoxDecl(from.ElementType) {
 		return castElementsAsColumn(elems, elem, *from.ElementType)
@@ -63,9 +90,33 @@ func castToArray(v any, elem string, from *parquet.Column) any {
 		if e == nil {
 			continue
 		}
+		if _, inner := e.([]any); inner {
+			panic(fatalEval{sqlerr.New("0A000", "cannot cast a multi-dimensional %s whose "+
+				"elements mix arrays and scalars to %s[]", containerTypeName(from, v), elem)})
+		}
 		out[i] = (&Cast{Operand: &Lit{Val: e}, DestType: elem}).Eval(nil, 0)
 	}
 	return out
+}
+
+// nestedArrayOperand reports whether an array operand is multi-dimensional:
+// its declaration's element is an array, or (undeclared) a non-NULL element
+// is one.
+func nestedArrayOperand(v any, from *parquet.Column) bool {
+	elems, ok := v.([]any)
+	if !ok {
+		return false
+	}
+	if from != nil && from.Type == parquet.TypeArray && from.ElementType != nil {
+		return from.ElementType.Type == parquet.TypeArray
+	}
+	for _, e := range elems {
+		if e != nil {
+			_, nested := e.([]any)
+			return nested
+		}
+	}
+	return false
 }
 
 // castElementsAsColumn casts each element as a column of the declared element

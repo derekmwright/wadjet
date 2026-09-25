@@ -1642,6 +1642,16 @@ func nodeDeclaredType(node plansql.Node, decls ColDecls) (expr.DeclType, expr.Co
 			if !ok {
 				d = expr.Decl(inferCastType(el))
 			}
+			// A multi-dimensional operand keeps its dimensions: the cast
+			// converts its LEAVES (expr.castToArray), so the declaration is
+			// the leaf type nested as deep as the operand (round 4, B2).
+			for i := arrayCastExtraDims(n, decls); i > 0; i-- {
+				inner, c := arrayOfDecl(d)
+				if c != expr.Decided {
+					return expr.DeclType{}, expr.Undecided
+				}
+				d = inner
+			}
 			return arrayOfDecl(d)
 		}
 		// A VECTOR destination declares a VECTOR of its dimension — the
@@ -2385,6 +2395,20 @@ func arrayLitDeclaredType(n *plansql.ArrayLitNode, decls ColDecls) (expr.DeclTyp
 // arrayOfDecl is the ARRAY declaration whose element is el — its (p,s), its
 // own element or fields carried whole — or Undecided when el is not a
 // declaration a child vector can be built from (a DECIMAL with no scale).
+// arrayCastExtraDims is how many array levels a `T[]` cast's operand has
+// beyond the one the destination spells: 0 for a one-dimensional operand.
+func arrayCastExtraDims(n *plansql.CastNode, decls ColDecls) int {
+	src, c := nodeDeclaredType(n.Inner, decls)
+	if c != expr.Decided || src.ID != parquet.TypeArray || src.Schema == nil {
+		return 0
+	}
+	extra := 0
+	for el := src.Schema.ElementType; el != nil && el.Type == parquet.TypeArray; el = el.ElementType {
+		extra++
+	}
+	return extra
+}
+
 func arrayOfDecl(el expr.DeclType) (expr.DeclType, expr.Confidence) {
 	col, ok := declColumn(el)
 	if !ok {

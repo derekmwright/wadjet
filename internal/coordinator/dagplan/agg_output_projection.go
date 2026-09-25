@@ -433,7 +433,7 @@ func bareGroupKeyDecls(decls physical.ColDecls, stage *Stage, project *logical.N
 	if types == nil {
 		return decls
 	}
-	return physical.ColDecls{Types: types, Fields: decls.Fields, Dec: dec}
+	return physical.ColDecls{Types: types, Fields: decls.Fields, Elems: decls.Elems, Dec: dec}
 }
 
 func aggregateStageDecls(s *Stage) physical.ColDecls {
@@ -479,11 +479,22 @@ func stageAggregateDecls(stage *Stage, decls physical.ColDecls) (physical.ColDec
 	for k, v := range decls.Dec {
 		dec[k] = v
 	}
+	// A container aggregate output's ELEMENT rides with it, so an expression
+	// over it (`CAST(MIN(arr) AS TEXT[])`) declares what the local path
+	// declares — the element, and a multi-dimensional value's depth (round 4).
+	elems := make(map[string]parquet.Column, len(decls.Elems))
+	for k, v := range decls.Elems {
+		elems[k] = v
+	}
 	complete := true
 	for _, a := range stage.AggSpecs {
 		name := strings.ToLower(strings.TrimSpace(a.OutputCol))
 		if name == "" || !a.OutputTypeKnown {
 			continue
+		}
+		if (a.OutputType == parquet.TypeArray || a.OutputType == parquet.TypeMap) && a.OutputElementType != nil {
+			el := a.OutputElementType.Clone()
+			elems[name] = parquet.Column{Name: name, Type: a.OutputType, Nullable: true, ElementType: &el}
 		}
 		if a.OutputType == parquet.TypeDecimal {
 			if a.OutputPrecision <= 0 {
@@ -494,7 +505,7 @@ func stageAggregateDecls(stage *Stage, decls physical.ColDecls) (physical.ColDec
 		}
 		types[name] = a.OutputType
 	}
-	return physical.ColDecls{Types: types, Fields: decls.Fields, Dec: dec}, complete
+	return physical.ColDecls{Types: types, Fields: decls.Fields, Elems: elems, Dec: dec}, complete
 }
 
 func referencesDecimalAggregate(n plansql.Node, stage *Stage) bool {

@@ -255,6 +255,9 @@ func boxedRowCompare(fields []parquet.Column) boxedCompare {
 // common prefix, then by length — PostgreSQL's array_cmp, and compareListAt's
 // rule columnar-side.
 func boxedListCompare(elem *parquet.Column) boxedCompare {
+	if elem != nil && elem.Type == parquet.TypeArray {
+		return boxedMultiDimCompare(elem)
+	}
 	var ec boxedCompare
 	if elem == nil {
 		// A container declared without its element type: the elements still
@@ -277,6 +280,70 @@ func boxedListCompare(elem *parquet.Column) boxedCompare {
 		}
 		return cmpInt(len(av), len(bv))
 	}
+}
+
+// boxedMultiDimCompare is kernel.compareMultiDimAt over boxes: a multi-
+// dimensional array (an array whose element is an array) orders by its
+// flattened leaves, then their count, then its shape — PostgreSQL's array_cmp
+// (round 4, P2).
+func boxedMultiDimCompare(elem *parquet.Column) boxedCompare {
+	leaf, depth := elem, 2
+	for leaf.Type == parquet.TypeArray && leaf.ElementType != nil && leaf.ElementType.Type == parquet.TypeArray {
+		leaf, depth = leaf.ElementType, depth+1
+	}
+	if leaf.Type == parquet.TypeArray && leaf.ElementType != nil {
+		leaf = leaf.ElementType
+	}
+	var lc boxedCompare
+	if leaf.Type == parquet.TypeArray {
+		lc = compareAnyElem
+	} else {
+		lc = boxedElemCompare(*leaf)
+	}
+	return func(a, b any) int {
+		av, aok := a.([]any)
+		bv, bok := b.([]any)
+		if !aok || !bok {
+			return compareAny(a, b)
+		}
+		al, as := flattenBoxedList(av, depth, nil, nil)
+		bl, bs := flattenBoxedList(bv, depth, nil, nil)
+		n := min(len(al), len(bl))
+		for i := 0; i < n; i++ {
+			if c := lc(al[i], bl[i]); c != 0 {
+				return c
+			}
+		}
+		if c := cmpInt(len(al), len(bl)); c != 0 {
+			return c
+		}
+		m := min(len(as), len(bs))
+		for i := 0; i < m; i++ {
+			if c := cmpInt(as[i], bs[i]); c != 0 {
+				return c
+			}
+		}
+		return cmpInt(len(as), len(bs))
+	}
+}
+
+// flattenBoxedList is kernel.flattenListAt over a box: the leaves and the
+// pre-order lengths (-1 for a NULL inner array). depth is how many array
+// levels v has (1: its elements are the leaves).
+func flattenBoxedList(v []any, depth int, leaves []any, shape []int) ([]any, []int) {
+	shape = append(shape, len(v))
+	if depth <= 1 {
+		return append(leaves, v...), shape
+	}
+	for _, e := range v {
+		inner, ok := e.([]any)
+		if !ok {
+			shape = append(shape, -1)
+			continue
+		}
+		leaves, shape = flattenBoxedList(inner, depth-1, leaves, shape)
+	}
+	return leaves, shape
 }
 
 // boxedDecimalCompare compares two boxed DECIMALs NUMERICALLY, by parsing the

@@ -82,6 +82,10 @@ func compareElemAt(a *batch.Vector, ai int, b *batch.Vector, bi int) int {
 // compareListAt compares one ARRAY or MAP row: element-wise over the common
 // prefix, then by length.
 func compareListAt(a *batch.Vector, ai int, b *batch.Vector, bi int) int {
+	if a.Type == batch.TypeArray && b.Type == batch.TypeArray && a.Child != nil && b.Child != nil &&
+		a.Child.Type == batch.TypeArray && b.Child.Type == batch.TypeArray {
+		return compareMultiDimAt(a, ai, b, bi)
+	}
 	as, ae := listRange(a, ai)
 	bs, be := listRange(b, bi)
 	if a.Child == nil || b.Child == nil {
@@ -100,6 +104,67 @@ func compareListAt(a *batch.Vector, ai int, b *batch.Vector, bi int) int {
 		}
 	}
 	return compareLen(ae-as, be-bs)
+}
+
+// compareMultiDimAt is PostgreSQL's array_cmp for a MULTI-DIMENSIONAL array,
+// which this engine holds as an array of arrays (round 4, P2): the FLATTENED
+// leaves element-wise (a NULL leaf after every value, equal to another NULL),
+// then the leaf count, then the dimensions. So `{{1,2},{3,4}}` > `{{1,2,3}}`
+// — 1,2,3 tie and four leaves beat three — where the element-wise order of
+// the outer array put `{1,2}` < `{1,2,3}` first. The dimensions step reads
+// each level's lengths in order (a rectangular value's are its dims; a ragged
+// one's keep two different shapes apart), so the order is 0 exactly when the
+// two values are identical — what DISTINCT, GROUP BY and the join keys call
+// equal.
+func compareMultiDimAt(a *batch.Vector, ai int, b *batch.Vector, bi int) int {
+	al, as := flattenListAt(a, ai, nil, nil)
+	bl, bs := flattenListAt(b, bi, nil, nil)
+	n := min(len(al), len(bl))
+	for k := 0; k < n; k++ {
+		if c := compareElemAt(al[k].v, al[k].i, bl[k].v, bl[k].i); c != 0 {
+			return c
+		}
+	}
+	if c := compareLen(len(al), len(bl)); c != 0 {
+		return c
+	}
+	m := min(len(as), len(bs))
+	for k := 0; k < m; k++ {
+		if c := compareLen(as[k], bs[k]); c != 0 {
+			return c
+		}
+	}
+	return compareLen(len(as), len(bs))
+}
+
+type leafAt struct {
+	v *batch.Vector
+	i int
+}
+
+// flattenListAt appends row i's leaves (the elements of its innermost arrays,
+// in order) and its shape (each array's length in pre-order; -1 for a NULL
+// inner array) to leaves and shape.
+func flattenListAt(v *batch.Vector, i int, leaves []leafAt, shape []int) ([]leafAt, []int) {
+	s, e := listRange(v, i)
+	shape = append(shape, e-s)
+	if v.Child == nil {
+		return leaves, shape
+	}
+	if v.Child.Type != batch.TypeArray {
+		for k := s; k < e; k++ {
+			leaves = append(leaves, leafAt{v.Child, k})
+		}
+		return leaves, shape
+	}
+	for k := s; k < e; k++ {
+		if v.Child.Nulls.IsNullFast(k) {
+			shape = append(shape, -1)
+			continue
+		}
+		leaves, shape = flattenListAt(v.Child, k, leaves, shape)
+	}
+	return leaves, shape
 }
 
 // compareRowAt compares one ROW: field by field in declaration order, then by
