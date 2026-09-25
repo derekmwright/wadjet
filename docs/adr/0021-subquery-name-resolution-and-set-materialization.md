@@ -2563,8 +2563,10 @@ carries a correlated LATERAL only when (1) no non-minted name its arm carries
 ACROSS its join — what its SELECT list, aggregate or bare scan publishes, and
 the columns those items are computed from (a column the body only filters on
 stays in the body's own stage) — is carried by another relation of the query
-(the subtrees hanging off the path from the root to the arm; a minted slot
-such as `__key_0` is unique by construction), and (2) the join does not null-extend a grouped arm (a LEFT
+(the subtrees hanging off the path from the root to the arm; a slot the
+planner mints in a RESERVED family such as `__key_0` is unique by
+construction — round 4: only those families, `plansql.ReservedSlotFamily`,
+not every `__` name), and (2) the join does not null-extend a grouped arm (a LEFT
 lateral over a DISTINCT or GROUP BY body wrote pad and aggregate files of
 different widths, ADR-0010, or padded every row NULL through a table-named
 body, measured over arms that share no name). Every other correlated LATERAL
@@ -2599,6 +2601,43 @@ LATERAL nested in another that names the outermost relation is refused,
 not compared as the string `o.k`.
 Gate: `coordinator.TestArcJP3CorrelatedLateralRoutesOrAnswersOnEveryArm`
 (every cell's routing decision recorded).
+
+**Round 4 (2026-09-25): a routed LATERAL is right only when single-process is
+right, and every net keys on the predicate's SHAPE.** The round-3 closure
+review found the property passable and the routing dishonest in three places,
+each one mechanism: (1) the guard dropped every `__`-prefixed name as minted,
+so a LATERAL over user names `__id` / `__k` crossed exactly the names the
+property is about and ran as stages with the round-2 wrong rows; it now skips
+only the planner's reserved families and compares names under
+`strings.EqualFold`'s folding, the identity the re-spell's resolvers use (a
+body's `"ſ"` beside an outer `s`). (2) Three routed cells answered the
+single-process pipeline's wrong rows on every arm — routing made the arms
+agree, not right. The single arm is fixed at its seams: the lateral's alias
+names its arm when the body is a derived table's star (ADR-0026 §8l round 4),
+and (3) the body's WHERE splits into conjuncts on the AST (the text split cut
+`BETWEEN o.total AND o.total + 20` in two; a part that parses and is not a
+correlated equality has no key, so `LIKE CASE WHEN o.k = 1 …` no longer mints
+`1 THEN …`). The raw-text filter path is netted by shape: it reads only a
+bare column against constants, and every other predicate that reaches it —
+a column in a value position, NOT BETWEEN / NOT IN, `<>`, AND / OR / NOT, CASE,
+IS DISTINCT FROM, a function — is refused, never compared as text or dropped
+(this supersedes round 3's "a filter whose value side names a column"). A
+bare `SELECT *` over an expression-keyed LATERAL is no longer refused: it
+expands to the FROM arms' own lists (the lateral's read as `s.*` reads it,
+without the key slot), which is PostgreSQL's star — round 1's refusal refused
+cells base answered right; a star that cannot be expanded (a lateral list
+naming one column twice) is refused after expansion, on both paths. For the
+same reason a lifted non-equality predicate under a bare star is no longer
+declined: the expanded star hides its materialized column as `s.*` always
+did. A constant predicate that reaches the filter as text (`WHERE 1=1` in a
+body over no table) is compiled rather than read as a column. A correlated predicate of a LATERAL body that reaches the enclosing
+relation through a subquery whose FROM holds a LATERAL join is refused, 0A000:
+such a subquery loses its correlation on every path (filed), and b2070cbb had
+turned base's accidental refusal into every-pair answers.
+Gate: `coordinator.TestArcJP4RoutedLateralIsRightOnlyWhenSingleIsRight` (365
+cells incl. a 208-cell predicate-shape census; a routed cell's single-process
+answer asserted against PostgreSQL's) and
+`physical.TestTheTextPathReadsOnlyAColumnAgainstConstants`.
 
 **THE STRUCTURAL CLOSURE OF THE REFUSED SHAPES IS A DEPENDENT JOIN** — the
 body re-run per outer row with the outer values substituted, the way the

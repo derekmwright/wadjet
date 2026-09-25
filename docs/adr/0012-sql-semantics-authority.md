@@ -169,8 +169,15 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      `TestN1AResultWithNoColumnsIsRefused`). **Amended 2026-09-24 for arc
      RC:** recursive CTEs now retain the seed declaration even when empty
      (ADR-0021 §1o-b); the ungrouped-aggregate LATERAL boundary remains.
-     A `SELECT *` over two or more LATERALs, or a LATERAL beside another
-     join, that returns no rows is `XX000`; name the columns (#1013, open).
+     **Amended 2026-09-25 for arc JP round 4 (#1013):** a star over a LATERAL
+     join is expanded into the FROM arms' own lists too, the lateral's read
+     as `s.*` reads it (ADR-0026 §8l), so a zero-row star over two or more
+     LATERALs, a LATERAL beside another join, and an ungrouped-aggregate
+     LATERAL declares its columns on every arm and door. The refusal remains
+     for a LATERAL whose own list names one column twice (not enumerable by
+     name, so the star still reads the join's output):
+     `server.TestN1AnEmptyColumnListIsRefusedOnTheHTTPDoor` and
+     `pgwire.TestN1AnEmptyColumnListIsRefusedOnTheWire` hold both halves.
 
      A SINGLE LATERAL that is not an ungrouped aggregate is not among them and
      answers with its columns, in the plain, `GROUP BY` and `LEFT JOIN LATERAL`
@@ -2735,6 +2742,27 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      that answer (a named list, `o.*, s.*`). It is the disposition a lifted
      non-equality predicate under a bare star already has (ADR-0021 §1s).
      Gated in `coordinator.TestArcJPALateralOuterExpressionKeyAnswersOnEveryArm`.
+     **NARROWED 2026-09-25 (arc JP round 4):** a bare star over a LATERAL
+     join is expanded into the FROM arms' own lists, the lateral's read as
+     `s.*` reads it, which hides the slot — so the star answers PostgreSQL's
+     rows and names, and the lifted non-equality predicate under a bare star
+     is no longer declined either. What remains refused is the star that
+     cannot be expanded — a lateral list naming one column twice
+     (`logical.RefuseStarPublishingLiftedSlot`, both paths). The twelve JPA
+     refusals are deleted; `coordinator.TestArcJP4RoutedLateralIsRightOnlyWhenSingleIsRight`
+     holds the 274-cell star census and the duplicate-name refusals.
+
+   - **A LATERAL body's correlated predicate that reads the enclosing
+     relation through a subquery whose FROM holds a LATERAL join is REFUSED
+     (0A000) where PostgreSQL answers.** (Added 2026-09-25, arc JP round 4.)
+     A subquery with a LATERAL join does not keep its correlation with the
+     query around it on any execution path — `EXISTS (SELECT 1 FROM j JOIN
+     LATERAL (…) t ON true WHERE j.id = q.qid AND t.xv > 5)` admits every
+     row even at top level (a wrong value, recorded for repair, not a
+     divergence) — so a body's `t.xv > o.id` inside it is not evaluated per
+     outer row, and the lateral answered every pair. Base refused it by
+     accident (a text split at the first `=` inside the EXISTS); the
+     property is refused now (`logical.refuseOuterReferenceThroughLateralSubquery`).
 
    - **A CORRELATED subquery holding a WINDOW CALL is REFUSED (0A000) where
      PostgreSQL answers.** (Added 2026-09-12, arc C2, #1045.) A correlated
@@ -3970,7 +3998,12 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
    - **The published NAME of an UNALIASED item inside a block a LATERAL reads
      is its expression text, where PostgreSQL publishes `?column?`.** (Added
      2026-09-13, arc O2; PRE-EXISTING, measured byte-identical at `0193c4e9`.
-     NARROWED 2026-09-14 by arc O1 — the JOIN half is CLOSED.) `SELECT * FROM
+     NARROWED 2026-09-14 by arc O1 — the JOIN half is CLOSED. **CLOSED
+     2026-09-25 by arc JP round 4**: a star over a LATERAL join is expanded
+     into the arms' own lists like a star over any join, each item ADR-0026
+     §2's pair, and the six `lateral/*` pins in
+     `coordinator.TestArcO2ADerivedBlockPublishesItsVisibleList` are
+     deleted.) `SELECT * FROM
      lat_ord o JOIN LATERAL (SELECT order_id, i.amount + 1 FROM lat_item i
      WHERE i.order_id = o.id) s ON true` sends `i.amount + 1` in
      `RowDescription` where PostgreSQL sends `?column?`. A column has two names

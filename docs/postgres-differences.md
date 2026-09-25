@@ -8,18 +8,6 @@ PostgreSQL 17.11 is the SQL semantics authority. Its wire protocol is the contra
 
 `AVG` over an integer or a `DECIMAL` column declares `numeric` with no fixed modifier, as PostgreSQL does, and the value is the same number; the rendered text carries scale 4 for an integer input and `min(s+4, 38)` for a decimal one, where PostgreSQL prints up to sixteen significant digits. `AVG(c_i32)`: wadjet `7497.6450`; PostgreSQL `7497.6449875724937862` for the same rows. (ADR-0012 §9/AVG)
 
-**A reference into a decorrelated LATERAL arm reads the outer relation on the distributed binary.**
-
-A qualified reference into a correlated `LATERAL` arm — a window `PARTITION BY`
-or `ORDER BY`, a sort key, a select item, or a star — binds the OUTER
-relation's column of that bare name on `wadjetd`'s distributed paths, where the
-embedded binary and PostgreSQL bind the lateral body's own. `SELECT o.id AS a,
-l.id AS b FROM lat_ord o, LATERAL (SELECT i.id, i.amount FROM lat_item i WHERE
-i.order_id = o.id) l ORDER BY a, b`: wadjetd `1,1 | 1,1 | 2,2 | 2,2`; wadjet
-and PostgreSQL `1,1 | 1,2 | 2,3 | 2,4`. The decorrelated body's projection
-emits no stage, so the join publishes the body's inner-scan spelling rather
-than the arm's alias. (ADR-0026 §8j, #1126)
-
 **Decimal statistics use double precision.**
 
 Decimal statistics (`STDDEV`, `VARIANCE`, `CORR`, `COVAR`, `MEDIAN`, `PERCENTILE`) use float64; PostgreSQL uses numeric. Fixed-point roots and running means are unavailable. (ADR-0012 §9/statistics)
@@ -122,13 +110,9 @@ Stored columns require `(p,s)`. A CTAS over `COALESCE(numeric(15,2), numeric(38,
 
 Fields retain storage types. `(b).open` over DECIMAL(9,2) has typmod 589830; PostgreSQL’s corresponding composite aggregate field has −1. (ADR-0012 §9/#965-field-typmod)
 
-**An unaliased expression inside a block a LATERAL reads is named by its text.**
+**A star over a LATERAL whose body is itself `SELECT *` qualifies a name the two arms share.**
 
-`SELECT * FROM lat_ord o JOIN LATERAL (SELECT order_id, i.amount + 1 FROM lat_item i WHERE i.order_id = o.id) s ON true` names the second column `i.amount + 1` where PostgreSQL names it `?column?`. Values, types and positions agree; only the name differs. The same item inside a plain derived table or a join is named `?column?` as PostgreSQL names it. (ADR-0012 §5/LATERAL-labels)
-
-**A star over a LATERAL arm qualifies a name the two arms share.**
-
-`SELECT * FROM lat_ord o, LATERAL (SELECT i.id, i.amount FROM lat_item i WHERE i.order_id = o.id) l` names the fourth column `l.id` on the single-process arms and `i.id` — the body's inner scan spelling — on the three distributed ones, where PostgreSQL names it `id`. A LATERAL arm is not expanded (its subtree carries the correlation slot the join drops), so the star reads the join operator's stream, which qualifies a duplicate name by its owning alias. Values, types and positions agree. (ADR-0012 §5/#1126)
+`SELECT * FROM lt_o o JOIN LATERAL (SELECT * FROM lt_i i WHERE i.k = o.k) s ON true` names the body's `id` and `k` `s.id` and `s.k` on every execution path, where PostgreSQL names them `id` and `k`. A star over a LATERAL is expanded into the FROM items' own lists, but a body whose own list is a star is not enumerated there, so that arm is read off the join's stream, which qualifies a duplicate name by its owning alias. Values, types and positions agree. A body that names its columns publishes PostgreSQL's names. (ADR-0012 §5/#1126)
 
 ## Errors and refusals
 
@@ -180,7 +164,7 @@ DURATION, BYTES, VECTOR and container destinations can retain the operand becaus
 
 **Undescribable results are refused.**
 
-A `SELECT *` over two or more LATERALs, or a LATERAL beside another join, that returns no rows is `XX000`; name the columns (#1013, open). Empty results over an ungrouped-aggregate LATERAL can also raise XX000 where PostgreSQL supplies column metadata. Refusal prevents shapeless results. Recursive CTEs now retain the seed's declared columns for an empty result (ADR-0021 §1o-b). (ADR-0012 §5/#1008, #1010)
+A `SELECT *` over a LATERAL whose own list names one column twice, that returns no rows, is `XX000` where PostgreSQL supplies column metadata: the list cannot be enumerated by name, so the star reads the join's output, whose pad marker the declaration will not publish. Refusal prevents shapeless results. A star over any other LATERAL — two or more of them, one beside another join, or an ungrouped aggregate — is expanded into the FROM items' own lists and declares its columns with no rows (arc JP round 4, #1013). Recursive CTEs now retain the seed's declared columns for an empty result (ADR-0021 §1o-b). (ADR-0012 §5/#1008, #1010)
 
 **Table metadata follows table access.**
 
@@ -454,7 +438,7 @@ Unknown types/scales cause distributed refusal to avoid decimal reinterpretation
 
 **A `SELECT *` over a `JOIN … USING` with a LATERAL arm publishes the joined column twice.**
 
-`SELECT * FROM lat_ord o JOIN LATERAL (SELECT i.id FROM lat_item i WHERE i.order_id = o.id) l USING (id)` publishes `id, customer, total, l.id` where PostgreSQL publishes `id, customer, total`: a LATERAL arm's own list is not enumerated, so the star stays unexpanded and the join operator's stream — which carries the joined column twice — is published instead of the merged list. The merge's own refusal does not fire because the marker is set only where the star's pass sees the USING list under it. (ADR-0012 §5/#1177-lateral-using)
+`SELECT * FROM lat_ord o JOIN LATERAL (SELECT i.id FROM lat_item i WHERE i.order_id = o.id) l USING (id)` publishes `id, customer, total, id` where PostgreSQL publishes `id, customer, total`: the star is expanded into both arms' own lists, but the USING merge is not applied over a LATERAL's lowered join, so the joined column is published a second time. (ADR-0012 §5/#1177-lateral-using)
 
 **A USING merge of two DECIMAL columns at different scales declares the left arm's.**
 
@@ -532,13 +516,17 @@ The standalone subquery cannot retain the aggregate’s outer scope: 42803 where
 
 An outer LATERAL’s ON retaining an empty-input default raises 0A000: `ON s.n = 0` requires PostgreSQL’s `Carol, 0`, which this evaluation cannot produce. (ADR-0012 §5/#977)
 
-**A bare star over a LATERAL keyed on an outer EXPRESSION is refused.**
+**A bare star over a LATERAL whose list names one column twice is refused where the key is an outer EXPRESSION.**
 
-`SELECT * FROM o JOIN LATERAL (SELECT i.id FROM i WHERE i.k = o.k - 0) s ON true` raises 0A000 where PostgreSQL answers: the join evaluates that equality over its output and carries the body's key column there, and an unexpanded star over a LATERAL would publish it. A named select list and `SELECT o.*, s.*` answer. (ADR-0012 §5/#1302)
+`SELECT * FROM o JOIN LATERAL (SELECT i.id AS m, i.v AS m FROM i WHERE i.k = o.k - 0) s ON true` raises 0A000 where PostgreSQL answers: a list naming one column twice cannot be enumerated by name, so the star reads the join's output, which carries the body's key column the equality is evaluated against. A bare star over any other LATERAL — an expression key included — is expanded into the FROM items' own lists and answers. (ADR-0012 §5/#1302)
 
 **A LATERAL nested in another that names the OUTERMOST relation is refused.**
 
 `SELECT … FROM o JOIN LATERAL (SELECT … FROM i JOIN LATERAL (SELECT j.k FROM i j WHERE j.k = o.k) t ON true …) s ON true` raises an error where PostgreSQL answers: a LATERAL is decorrelated against the relation it joins, and `o` is two levels out. Before 2026-09-24 the reference was compared as the text `o.k` — an error for an integer key and zero rows for a text key. (arc JP round 3)
+
+**A LATERAL body's condition that reads the enclosing relation inside a subquery with a LATERAL join is refused.**
+
+`SELECT o.id, s.* FROM o JOIN LATERAL (SELECT q.qid FROM q WHERE q.qk = o.k AND EXISTS (SELECT 1 FROM j JOIN LATERAL (SELECT x.v AS xv FROM x WHERE x.oid = j.oid) t ON true WHERE j.id = q.qid AND t.xv > o.id)) s ON true` raises 0A000 where PostgreSQL answers: a subquery whose FROM holds a LATERAL join does not keep its correlation with the query around it (the same EXISTS at top level admits every row — a wrong answer this engine has at every level, recorded for repair), so the reference to `o` would not be evaluated per outer row. (arc JP round 4)
 
 **Qualified stars refuse duplicate names.**
 

@@ -1420,10 +1420,11 @@ the body's own relations. Where the outer side is a bare column the join keys
 on it; where it is an expression the equality is evaluated over the join's
 output, as an ordinary `JOIN … ON i.order_id = o.id - 0` is, so the lateral
 answers PostgreSQL's rows (before 2026-09-24 it answered zero rows, #1302). A
-bare `SELECT *` over such a lateral is refused (`0A000`): the join carries the
-body's key column to evaluate the equality, and an unexpanded star over a
-LATERAL publishes the join's output whole — name the columns, or write
-`o.*, s.*`.
+bare `SELECT *` over a lateral is the FROM items' own columns in written order,
+the lateral's as `s.*` gives them — PostgreSQL's star, names included (a
+`JOIN LATERAL … USING` and a body that is itself `SELECT *` excepted, see
+postgres-differences.md); the key
+column the join carries to evaluate the equality is not among them.
 
 **The body's column names never decide what the enclosing query reads.** A
 body may publish its columns unaliased, under names the outer relation also
@@ -1439,15 +1440,26 @@ the body's column. An unaliased `count(*)` answers 0 for an outer row it
 matches nothing for. (Before 2026-09-24 each of these could read the OUTER
 relation's column, answer zero rows, or answer NULL for 0.)
 
-On a distributed server a correlated LATERAL whose body carries a column name
-another relation of the query also carries — or a `LEFT JOIN LATERAL` over a
-grouped or `DISTINCT` body — runs on the coordinator's single-process
-pipeline rather than as stages; a lateral over relations that share no column
-name runs distributed. The answer is the same either way.
+A correlated condition in the body may be any predicate over the outer row and
+the body's own columns — a comparison, `BETWEEN` (`q.qv BETWEEN o.total AND
+o.total + 20`), `IN` over a list, `LIKE`, `IS [NOT] NULL`, `IS [NOT] DISTINCT
+FROM`, `OR` / `NOT`, a `CASE` — keyed on an equality beside it or not, `JOIN`
+or `LEFT`. (Before 2026-09-25 a `BETWEEN` over outer columns answered zero
+rows, and a `LIKE` or `CASE` holding an `=` could.)
 
-A LATERAL nested inside another whose body names the OUTERMOST relation
-(`… JOIN LATERAL (… JOIN LATERAL (SELECT … WHERE j.k = o.k) t …) s`) is
-refused rather than answered.
+On a distributed server a correlated LATERAL whose body carries a column name
+another relation of the query also carries (compared as `EqualFold` compares
+names; a user name beginning `__` is an ordinary name) — or a `LEFT JOIN
+LATERAL` over a grouped or `DISTINCT` body — runs on the coordinator's
+single-process pipeline rather than as stages; a lateral over relations that
+share no column name runs distributed. Every measured cell answers
+PostgreSQL's rows either way.
+
+Refused rather than answered (`0A000`): a LATERAL nested inside another whose
+body names the OUTERMOST relation (`… JOIN LATERAL (… JOIN LATERAL (SELECT …
+WHERE j.k = o.k) t …) s`), and a body condition that reads the enclosing
+relation inside a subquery whose own FROM holds a LATERAL join (`… AND EXISTS
+(SELECT 1 FROM j JOIN LATERAL (…) t ON true WHERE … AND t.x > o.id)`).
 
 **A correlated LATERAL's `ORDER BY … LIMIT`/`OFFSET` is applied per outer
 row** when the correlation is an equality on an inner column — the
@@ -2543,13 +2555,13 @@ CTE on the single-process pipeline keeps its seed's column names and types,
 including for a zero-row seed. A star over an ordinary join is expanded in
 FROM order before its declaration is derived.
 
-A `SELECT *` over two or more LATERALs, or a LATERAL beside another join,
-that returns no rows is `XX000`; name the columns (#1013, open).
-
-An empty `SELECT *` over a LATERAL whose body is an ungrouped aggregate can
-still raise `XX000`: the declaration cannot publish the join's internal
-empty-input column. Naming the result columns explicitly avoids that star
-boundary. PostgreSQL supplies the columns for the empty result.
+A star over a LATERAL — one or several, beside other joins, over an
+ungrouped aggregate — is expanded into the FROM items' own lists the same way,
+so it declares its columns with no rows. An empty `SELECT *` over a LATERAL
+whose own list names one column twice is `XX000`: that list cannot be
+enumerated by name, and the join's internal empty-input column cannot be
+published. Naming the result columns avoids it; PostgreSQL supplies the
+columns for the empty result.
 
 Every door answers the same way — the embedded API, the PostgreSQL wire
 protocol, `POST /v1/queries`, `POST /v1/queries/async` with

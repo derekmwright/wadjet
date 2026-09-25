@@ -2808,10 +2808,28 @@ guarded where it happens, not per spelling:
   wrong spelling (measured).
 
 Gate: `coordinator.TestArcJPBLateralBodyNamesNeverBindTheOuterRelationOnEveryArm`
-(954 cells, every body unaliased, five arms, PostgreSQL 17.11; 2 696
-(cell, arm) fail at 6cbe2041 and 1 737 at round 1), the round-2 cells of the
+(954 cells, every body unaliased, five arms, PostgreSQL 17.11; about 2 691
+(cell, arm) fail at 6cbe2041 — the 512 KiB arm's budget refusals vary by a few
+cells run to run and 1 737 at round 1), the round-2 cells of the
 nine-door masking gate, and the embedded cells of
 `wadjet.TestArcJPAJoinArmKeyIsTheColumnTheQueryWrote`.
+
+**Round 4 (2026-09-25): the name the enclosing query writes is the arm's
+name.** A LATERAL body `SELECT * FROM (SELECT id AS xid, … FROM lt_i) i`
+collapses onto the derived table's own Project, which carried `i`; the
+lateral stamped its alias only on a root with none, so the join qualified the
+body's duplicates `i.xid`, the enclosing `s.xid` matched nothing and its
+qualifier strip bound the OUTER `xid` — every arm, any spelling of the names.
+The lateral's alias now replaces the root's derived alias, the join's arm
+scope (`physical.namedArmScope`) asks the derived alias before a CTE
+reference's names (the stamp of the ENCLOSING item wins), and a bare star
+over a block publishes the block's list, not the scan's below it
+(`logical.StarSourceColumns`). A bare star over a LATERAL join is expanded
+into the FROM arms' own lists, the lateral's read as `s.*` reads it
+(`joinArmColumns`), so it names the columns as PostgreSQL does and never
+publishes a slot the join minted. Gate:
+`coordinator.TestArcJP4RoutedLateralIsRightOnlyWhenSingleIsRight` (`d/b6star*`,
+`v/*`, `a/*`).
 
 **Not settled (distributed).** A derived table (not a LATERAL) whose
 colliding column the DAG reads through a filter over a cross join
