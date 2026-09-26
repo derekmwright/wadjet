@@ -98,10 +98,10 @@ func ProcessStart() time.Time { return processStart }
 // PostgreSQL reports when the postmaster — the process that owns the cluster —
 // started. `wadjet serve` is that process, so process start is the honest
 // answer. The value is a timestamp in the representation now() and
-// current_timestamp use — formatInstant text, the engine's one instant
-// rendering: the scalar registry is func([]any) any with no type channel, and
-// every temporal function downstream (parseTimeOK, epoch, timezone) reads that
-// form. It carries the MILLISECOND now, where RFC3339 second-truncated it.
+// current_timestamp use — the TIMESTAMP box, int64 epoch milliseconds
+// (instantBox) under the function's RetTimestamp declaration, which is how
+// every temporal consumer downstream (producedTemporal) reads its unit. It
+// carries the MILLISECOND, where RFC3339 second-truncated it.
 func fnPgPostmasterStartTime(args []any) any {
 	return instantBox(processStart)
 }

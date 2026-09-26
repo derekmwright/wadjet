@@ -540,7 +540,8 @@ func (r Ret) Declared() bool { return r.kind != retUndeclared }
 // be nil.
 //
 // Undecided means the caller should keep its own fallback: the function is
-// RetDynamic, or the name is not registered at all.
+// RetDynamic, a RetDerivedFrom its arguments do not decide, or the name is not
+// registered at all.
 //
 // A polymorphic declaration takes the first candidate argument that DECIDED a
 // type. A candidate that only guessed does not end the search — it is
@@ -683,7 +684,9 @@ func ArrayLitElementDecl(decided []DeclType) (DeclType, bool) {
 // CommonDeclType is shared by choice functions and planner CASE branches;
 // ok=false declines the declaration. Numeric deciders fold INT32 → INT64 →
 // DECIMAL → FLOAT32 → FLOAT64; never first-decider narrowing (#724, #462).
-// Quoted literals add no rung; all-quoted is text. Preserve all-constant typing.
+// Quoted literals add no rung; all-quoted is text. Preserve all-constant typing
+// unless a constant is DECIMAL (a fractional literal), which folds. Declared
+// containers meet at batch.CommonContainerColumn (commonContainerDecl).
 // On DECIMAL, fold fixed-point contributions through DecimalCommon
 // (ADR-0024 item 2); integer columns contribute whole range at scale 0,
 // literals their spelling (#695). Unknown arms forbid the decimal fold.

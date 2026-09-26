@@ -2078,9 +2078,9 @@ func lowercaseKeys(m map[string]any) map[string]any {
 // NULL remains NULL; unsupported target families keep the original box.
 // See docs/internals/dml-evaluated-assignment-value-domain.md for the design.
 //
-// srcType/srcKnown are the SOURCE expression's declared type
-// (dmlSourceDeclaredType) — the ONE assignment-cast table every target arm
-// below reads (round-2 review B1/B2/P2): the Go box a DATE, a TIMESTAMP and a
+// srcType/srcKnown are the SOURCE expression's declared type (assignSource,
+// via assignSourceOf) — the ONE assignment-cast table every target arm below
+// reads (round-2 review B1/B2/P2): the Go box a DATE, a TIMESTAMP and a
 // plain INTEGER expression produce collide (int32/int64 day counts and
 // epoch-ms counts are indistinguishable at the box from a number that
 // happens to share the shape), so only the DECLARATION can tell
@@ -2193,7 +2193,7 @@ func nativeNetworkBox(v any, t parquet.TypeID) bool {
 // VALUES (DATE '2026-01-01')` stored 20454 where PostgreSQL raises 42804).
 //
 // TEXT is not on this list because a TEXT source never reaches these arms
-// declared: dmlAssignmentCheck (the one assignment table) refuses it 42804
+// declared: assignSource.check (the one assignment table) refuses it 42804
 // before any value is read, on every door. The arms' own text readings are
 // for the boxes that ARE numbers — a DECIMAL source boxes its value as
 // canonical text (assignDecimalValue's own doc) — and for sources the
@@ -2397,8 +2397,10 @@ func assignDecimalValue(v any, col parquet.Column, srcType parquet.TypeID, srcKn
 // cannot take at all — as opposed to 22P02 (the text does not spell a value of
 // that type) or 22003 (it does, and the column cannot hold it).
 //
-// BOOL is the case that reaches it: `SET n = b` used to fail at
-// ingest.checkType with "expected integer, got bool" and no SQLSTATE, and
+// BOOL is the usual case that reaches it (so does an undecided source's box
+// with no reading for the column, and datatypeMismatchDeclared's fallback):
+// `SET n = b` used to fail at ingest.checkType with "expected integer, got
+// bool" and no SQLSTATE, and
 // `SET d = b` reached DecimalValueFromBox's default and answered 22P02, where
 // PostgreSQL says 42804 for both (#678 re-review N3). A bool assigned to a
 // TEXT column is NOT here: PostgreSQL accepts it and stores 'true'. A bare
@@ -2431,9 +2433,8 @@ func datatypeMismatch(v any, col parquet.Column) error {
 // "uuid" now appear on the expression side exactly as PostgreSQL spells them.
 //
 // srcKnown == false falls back to datatypeMismatch's box-based guess
-// unchanged — every caller of THIS function already routes through it only
-// when srcKnown is true (nonNumericAssignmentSource, the network/UUID arm),
-// so the fallback is a defensive default, not a reachable path today.
+// unchanged — the path assignDateValue / assignTimestampValue take for an
+// undecided source whose box has no DATE / TIMESTAMP reading.
 func datatypeMismatchDeclared(v any, col parquet.Column, srcType parquet.TypeID, srcKnown bool) error {
 	if !srcKnown {
 		return datatypeMismatch(v, col)
@@ -2755,11 +2756,11 @@ func assignLiteralToColumn(text string, col parquet.Column) (any, error) {
 // only a bare literal's — because VALUES accepts any scalar expression
 // PostgreSQL's does: a typed literal (`TIMESTAMP '...'`), a function call
 // (`now()`), arithmetic (`1 + 1`), a CAST. It is evaluated through the SAME
-// expression compiler SELECT uses (expr.Compile), no second evaluator, with
-// the constant path unchanged: a bare literal (including a signed number)
-// still goes through assignLiteralToColumn exactly as it always did, so
-// DECIMAL exactness and every SQLSTATE that path already carries are
-// untouched.
+// expression compiler SELECT uses (expr.Compile), no second evaluator. Every
+// cell is first classified and checked by the one assignment table
+// (assignSourceOf, assignSource.check); a bare literal (including a signed
+// number) is then read from its SQL text (assignSource.assign →
+// assignLiteralToColumn), keeping DECIMAL exactness and that path's SQLSTATEs.
 //
 // DEFAULT is the one keyword this clause does not compile: no column this
 // catalog describes ever carries an explicit default (parquet.Column has no

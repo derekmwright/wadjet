@@ -11,28 +11,21 @@ import (
 )
 
 // Every comparison of two CONTAINERS (#1021 and its spellings, arc CW rounds
-// 1–3) orders through ONE function, containerOrder, and it orders through the
-// sort's kernel: each box is written into a one-row vector of the pair's
-// declared shape and kernel.CompareValuesAt orders the two — element-wise, a
-// NULL element after every value and equal to another NULL, a shorter prefix
-// first. ORDER BY, MIN, MAX, DISTINCT and the window order read the same
-// kernel over their vectors, so no comparator can disagree with the sort.
-//
-// Round 2 wired the six operators (`=`, `<>`, `<`, `<=`, `>`, `>=`) to it and
-// left the other spellings on compare()'s text order of the boxes' Go text:
-// GREATEST/LEAST (`GREATEST(ARRAY[2], ARRAY[10])` = `{2}`), BETWEEN (2283 rows
-// where `>= AND <=` answered 914). Round 3 routes it at the comparators' SHARED
-// seams instead of per spelling:
-//
-//	boxedPair.order      the six operators, IN, BETWEEN, a simple CASE's WHEN,
-//	                     IS [NOT] DISTINCT FROM — with both operands' declarations
-//	extremumArms.order   GREATEST, LEAST, NULLIF — with every argument's declaration
-//	compare()            every remaining caller (the last resort, shape read off
-//	                     the boxes)
-//
-// A declaration (operand_decl.go) decides the shape when the operand has one,
-// which is what orders a DECIMAL element (boxed as its text) as a number and a
-// DATE element by its day, whatever its box.
+// 1–3, ADR-0045 §4) orders through ONE function, containerOrder, and it orders
+// through the sort's kernel: each box is written into a one-row vector of the
+// pair's declared shape and kernel.CompareValuesAt orders the two —
+// element-wise, a NULL element after every value and equal to another NULL, a
+// shorter prefix first — so no comparator can disagree with ORDER BY, MIN,
+// MAX, DISTINCT or the window order. The shared seams (round 3):
+// boxedPair.order (the six operators, IN, BETWEEN, a simple CASE's WHEN, IS
+// [NOT] DISTINCT FROM) and extremumArms.order (GREATEST, LEAST, NULLIF), each
+// with its operands' declarations, and compare() for every remaining caller
+// (the last resort, shape read off the boxes). Round 2 had wired the six
+// operators alone and left the rest on the boxes' Go text:
+// `GREATEST(ARRAY[2], ARRAY[10])` = `{2}`, BETWEEN 2283 rows where `>= AND
+// <=` answered 914. A declaration (operand_decl.go) decides the shape when the
+// operand has one, which is what orders a DECIMAL element (boxed as its text)
+// as a number and a DATE element by its day, whatever its box.
 
 // containerOrder orders two container boxes under their declared shapes (nil
 // when an operand has none: its shape is read off its box), and false when the

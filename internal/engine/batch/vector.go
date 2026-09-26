@@ -1054,8 +1054,11 @@ func (v *Vector) GetValue(i int) any {
 // PANICS with *TypeMismatchError (#361) instead of silently keeping the
 // zero value — see that type's doc for the contract and the seams that
 // convert the panic into a query error. nil is a NULL; STRING/BYTES coerce
-// everything through its string form; a parseable-type string that fails to
-// parse (IPv4, MAC, UUID) keeps its historical value-level behavior.
+// every SCALAR through its string form, and a container box ([]any,
+// map[string]any) into them is that same mismatch; an ARRAY/MAP/ROW/VECTOR
+// vector allocated without its shape panics with *ContainerShapeError; a
+// parseable-type string that fails to parse (IPv4, MAC, UUID) keeps its
+// historical value-level behavior.
 func (v *Vector) SetValue(i int, val any) {
 	if val == nil {
 		// WriteNullAt advances variable-length bookkeeping for EVERY shape —
@@ -2088,9 +2091,10 @@ func FormatTimestamp(ms int64) string {
 // values use PostgreSQL's spellings.
 //
 // This is the ONE renderer for a float's text form: pgwire's own wire
-// rendering of a genuine FLOAT32/FLOAT64 column (server.go) and the engine's
-// double/real-to-TEXT assignment and cast sites (wadjet.assignTextValue,
-// expr.castStringRender, expr.toString) all call this, so a DOUBLE never
+// rendering of a genuine FLOAT32/FLOAT64 column (server.go), a container's
+// float element (FormatPGFloat) and the engine's double/real-to-TEXT
+// assignment, cast and concatenation sites (wadjet.assignTextValue,
+// expr.castStringRender, expr.toTextOperand) all call this, so a DOUBLE never
 // prints one text through the wire and a second one once it lands in a TEXT
 // column.
 func FormatFloat8Text(v float64, bits int) string {

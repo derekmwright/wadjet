@@ -55,9 +55,9 @@ func castToArray(v any, elem string, from *parquet.Column) any {
 	default:
 		panic(fatalEval{sqlerr.New("42846", "cannot cast a %T value to %s[]", v, elem)})
 	}
-	// An element with no text form here (an INTERVAL's struct) is refused
-	// before any element is cast: its per-element cast to text would be Go's
-	// rendering of the struct (arc CW round 3).
+	// An element with no container text form here (an INTERVAL, which a
+	// container carries as a DURATION nanosecond count) is refused before
+	// any element is cast (arc CW round 3, ADR-0045 §2).
 	if textCastDest(strings.ToLower(strings.TrimSpace(elem))) {
 		refuseUnrenderable(elems)
 	}

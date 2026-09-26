@@ -141,10 +141,10 @@ func epochDaysOf(t time.Time) int64 {
 }
 
 // dateArith handles date-date as whole days and date±n as epoch days (#340).
-// temporalOperand treats DATE/TIMESTAMP columns, casts and date-shaped strings alike.
+// temporalOperand treats DATE/TIMESTAMP columns, every temporal producer and date-shaped strings alike.
 // Require WHOLE DAYS: instants with clocks decline to the caller's arithmetic path;
 // timestamp subtraction needs INTERVAL, not an invented unit (#319, #322).
-// date±INTERVAL belongs to intervalShift with its pinned rendered-string result (#322).
+// date±INTERVAL belongs to intervalShift, whose result is the TIMESTAMP box (#322).
 // ok=false means not date arithmetic; leave numeric fallback unchanged, including
 // strings that do not parse as dates.
 // See docs/internals/whole-day-date-arithmetic-boundary.md for the design.
@@ -195,7 +195,8 @@ func (e *BinOp) dateArith(b *batch.RecordBatch, row int, lv, rv any) (any, bool)
 
 // plainDayCount reads the non-date side of `date ± n` as a whole number of
 // days. A fractional float declines rather than truncating, so the caller
-// falls through to ordinary arithmetic instead of quietly rounding a date.
+// falls through to ordinary arithmetic instead of quietly rounding a date; a
+// whole float no DATE can be shifted by is 22008 (wholeDayCount).
 func plainDayCount(v any) (int64, bool) {
 	switch n := v.(type) {
 	case int64:

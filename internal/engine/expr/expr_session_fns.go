@@ -109,15 +109,15 @@ func fnDateDiff(args []any) any {
 }
 
 // fnDateAdd adds days (or an interval) to a date or timestamp.
-// Usage: date_add(date, days) → date string
-//
-//	date_add(date, interval) → date string
+// Usage: date_add(date, days) → DATE; any other first argument (a timestamp,
+// text) or an interval shift → TIMESTAMP (dateShift; sql-reference.md,
+// Declared types).
 func fnDateAdd(args []any) any { return dateShift(args, false) }
 
 // fnDateSub subtracts days (or an interval) from a date or timestamp.
-// Usage: date_sub(date, days) → date string
-//
-//	date_sub(date, interval) → date string
+// Usage: date_sub(date, days) → DATE; any other first argument (a timestamp,
+// text) or an interval shift → TIMESTAMP (dateShift; sql-reference.md,
+// Declared types).
 func fnDateSub(args []any) any { return dateShift(args, true) }
 
 // dateShift is the shared body of date_add / date_sub.
@@ -126,8 +126,9 @@ func fnDateSub(args []any) any { return dateShift(args, true) }
 // meant here, and what Spark/Hive date_add means; an INTERVAL keeps its own
 // unit. The result preserves the input's time-of-day: before issue #322 both
 // functions formatted the result "2006-01-02" unconditionally, so a TIMESTAMP
-// argument silently lost its clock on the way out. A whole-day argument still
-// renders as a calendar date.
+// argument silently lost its clock on the way out. A DATE argument shifted by
+// whole days is a DATE (its epoch-day box); every other argument answers the
+// TIMESTAMP box (epoch milliseconds).
 //
 // The interval branch is intervalShift, shared verbatim with `date ± INTERVAL`
 // in BinOp.Eval so date_sub(d, INTERVAL '90' DAY) and d - INTERVAL '90' DAY
@@ -164,13 +165,11 @@ func dateShift(args []any, subtract bool) any {
 // interval argument (dateShift) — one function, so the operator and the
 // function family cannot answer the same question differently (issue #332).
 //
-// There is ONE instant renderer now. A TEXT operand goes through
-// dateAddInterval and a resolved temporal COLUMN through formatDateResult, and
-// both end at formatInstant — so the output format no longer depends on how
-// the value reached the operator, which is what #322 settled for date_add over
-// a TIMESTAMP column and what #544's second pass finished for the rest. A
-// whole DAY still renders as a calendar date on both paths, which is what
-// TPC-H Q1's pinned `DATE '1998-12-01' - INTERVAL '90' DAY` reads.
+// Every operand — text or a resolved temporal value — is read by
+// parseDateArg, and the result is always the TIMESTAMP box (instantBox, epoch
+// milliseconds): PostgreSQL's `date ± interval` is a timestamp even for a
+// whole DAY, so the output no longer depends on how the value reached the
+// operator (#322, #544).
 func intervalShift(v any, iv IntervalValue, subtract bool) any {
 	t, _, ok := parseDateArg(v)
 	if !ok {

@@ -770,9 +770,10 @@ func floatTextIsZero(num []byte) bool {
 //
 // Values past the sample are checked before calling this conversion.
 // Within the sample, incompatible values retain the existing NULL behavior.
-// Values SetValue can already convert pass through untouched.
-// TIMESTAMP strings are the one enrichment: they parse with the same
-// patterns the scalar path uses; they used to be dropped for 0.
+// Scalars SetValue can already convert pass through untouched. Two
+// enrichments: TIMESTAMP strings parse with the same patterns the scalar path
+// uses (they used to be dropped for 0), and a nested value bound for a
+// TEXT/BYTES slot becomes its JSON text (arc CW, ADR-0045 §2).
 func coerceToColumn(val any, col parquet.Column) any {
 	if val == nil {
 		return nil

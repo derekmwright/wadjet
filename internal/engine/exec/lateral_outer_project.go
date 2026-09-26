@@ -56,13 +56,11 @@ type LateralOuterColumn struct {
 	Decl expr.DeclType
 }
 
-// NewLateralOuterProject returns the operator, or nil when this join has no
-// table-less body to compute.
 // projectColumn is this item as the projection operator's own column: the
 // compiled expression under the planner's declared type, with a computed
-// DECIMAL's (p,s) and a ROW's fields carried, because the output column exists
-// in no input schema and the operator has nothing else to read them off
-// (ADR-0024 item 2).
+// DECIMAL's (p,s), a ROW's fields and an ARRAY/MAP's element carried,
+// because the output column exists in no input schema and the operator has
+// nothing else to read them off (ADR-0024 item 2).
 func (c LateralOuterColumn) projectColumn(name string) ProjectColumn {
 	pc := ProjectColumn{
 		Name:      name,
@@ -82,6 +80,8 @@ func (c LateralOuterColumn) projectColumn(name string) ProjectColumn {
 	return pc
 }
 
+// NewLateralOuterProject returns the operator, or nil when this join has no
+// table-less body to compute.
 func NewLateralOuterProject(alias string, cols []LateralOuterColumn) *LateralOuterProject {
 	if len(cols) == 0 {
 		return nil

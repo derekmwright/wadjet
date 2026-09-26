@@ -2971,17 +2971,16 @@ func (c *pgConn) sendDataRow(columns []string, cells []any, colTypes []parquet.T
 // a declared field order or element type instead of refusing.
 //
 // pos is col's index in the row's own output column list — sendDataRow and
-// sendDataRowFormatted's loop variable, unchanged from the caller. When the
-// name lookup misses, a positional fallback tries nestedSchema.ordered at
-// pos: nestedFieldSchema's doc explains why that is sound for the coord
-// path's schema (positionally aligned with the output columns) and a no-op
-// for the legacy catalog-lookup one (ordered left nil there). Without this,
-// a renamed ROW/ARRAY/MAP output column — an alias, or the gather's own
-// renamer — lost its declared structure entirely and fell back to
-// formatPgComposite's schema-less rendering (sorted keys for a ROW) even
-// though the query's real output schema still had it, at the same position
-// coordColumnMetas already trusts for its own positional fallback (#471
-// resurfacing).
+// sendDataRowFormatted's loop variable, unchanged from the caller. The entry
+// of nestedSchema.ordered at pos wins when it carries this name; then the
+// name lookup; then, when that misses, ordered at pos regardless of name:
+// nestedFieldSchema's doc explains why that is sound for the coord path's
+// schema (positionally aligned with the output columns) and a no-op for the
+// legacy catalog-lookup one (ordered left nil there). Without the fallback, a
+// renamed ROW/ARRAY/MAP output column — an alias, or the gather's own
+// renamer — lost its declared structure and fell back to batch.FormatPGText's
+// schema-less rendering (sorted keys for a ROW), at the same position
+// coordColumnMetas already trusts for its own positional fallback (#471).
 func nestedColumnFor(nestedSchema *nestedFieldSchema, name string, pos int) *parquet.Column {
 	if nestedSchema == nil {
 		return nil

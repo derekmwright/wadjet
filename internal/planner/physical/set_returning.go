@@ -159,7 +159,9 @@ func nestedSetArgument(col *exec.SetColumn, arg plansql.Node) bool {
 
 // finishSetColumn records what the expanded item publishes once its array
 // argument's projection is planned: the element's declaration for unnest,
-// int4 for generate_subscripts.
+// int4 for generate_subscripts. An argument whose element is unknown, or a
+// multi-dimensional one that is not a stored column (nestedSetArgument), is
+// refused 0A000.
 func finishSetColumn(col *exec.SetColumn, pc *exec.ProjectColumn, arg plansql.Node) error {
 	if pc.Type != parquet.TypeArray && pc.Type != parquet.TypeString {
 		return sqlerr.New("42883", "function %s(%s) does not exist", setName(col), pc.Type)

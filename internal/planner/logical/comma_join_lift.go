@@ -24,9 +24,10 @@ import (
 // filters, see pushOneSemi) → left-deep inner-join chain. A filter
 // predicate is lifted when it is a bare column equality whose two sides
 // are owned by two DIFFERENT relations of the chain; it attaches to the
-// first chain join whose subtree covers both. Activation is gated on the
-// chain containing at least one condition-less inner/cross join, so
-// explicit-JOIN queries are untouched.
+// first chain join whose subtree covers both (a table-less LATERAL target,
+// LateralDualItems, reads no condition: the predicate stays in the WHERE).
+// Activation is gated on the chain containing at least one condition-less
+// inner/cross join, so explicit-JOIN queries are untouched.
 func liftWhereEquiPredsIntoJoins(n *Node) *Node {
 	if n == nil {
 		return nil

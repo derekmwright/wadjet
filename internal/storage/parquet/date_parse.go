@@ -412,8 +412,10 @@ func validateNestedLeaf(col Column, val any) error {
 
 // normalizeTemporalBox shares temporal conversion between ingest and writer:
 // DATE stores epoch days, TIMESTAMP milliseconds and DURATION nanoseconds.
-// Normalize DATE string/time.Time, TIMESTAMP string and DURATION string/
-// time.Duration; TIMESTAMP time.Time is handled by int64LeafValue (#673).
+// Normalize DATE string/time.Time/typed day count, TIMESTAMP string/
+// time.Time (#673)/int64 and DURATION string/time.Duration; every DATE and
+// TIMESTAMP is held to PostgreSQL's range (DateDaysInRange,
+// TimestampMillisInRange: 22008).
 // A DATE time.Time uses its CALENDAR DATE in its own location, not its UTC
 // instant, matching temporal partition-key formatting.
 // Unconvertible boxes must fail the write with column/row context, never

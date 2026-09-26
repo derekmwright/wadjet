@@ -124,7 +124,7 @@ func ExpandStarProjections(n *Node) {
 
 // StarSourceColumns is the ONE list every star spelling asks: this identity's
 // PUBLISHED relation output, in the star's position, never a catalog bypass.
-// qualifier is empty for bare star over a single scan, or the relation name for alias.*;
+// qualifier is empty for bare star over a single scan or a block's own list, or the relation name for alias.*;
 // nil means unknown: leave unexpanded for refusal in the next pass.
 // An ABAC security projection drops DENIED columns and replaces MASKED values
 // (#859, ADR-0033 decision 1); stars must read that projection, including column NAMES.

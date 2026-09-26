@@ -16,16 +16,13 @@ import (
 // This file is the CAST table for a CONTAINER operand (an ARRAY, MAP or ROW
 // box) and for a VECTOR destination — the one place Cast.Eval decides what a
 // container becomes, before any scalar arm can read it (arc CW round 2,
-// ADR-0045 §2).
-//
-// Before it, a container reached whichever scalar arm its destination named
-// and each arm read the []any box its own way: `CAST(ARRAY[1,2] AS INT)` was
-// 0 (ToFloat64 of a slice), `AS DATE` was NULL, `AS DECIMAL` refused over the
-// Go text, and every destination the engine does not convert to handed back
-// the array's TEXT — including VECTOR(n), which the engine DOES convert to, so
-// cosine_similarity over `CAST(ARRAY[…] AS VECTOR(n))` read a string and
-// answered NULL. The table, measured on PostgreSQL 17.11 (pgvector for
-// VECTOR, whose type PostgreSQL itself lacks):
+// ADR-0045 §2). Before it, each scalar arm read the []any box its own way:
+// `CAST(ARRAY[1,2] AS INT)` was 0 (ToFloat64 of a slice), `AS DATE` NULL,
+// `AS DECIMAL` refused over the Go text, and every destination the engine does
+// not convert to handed back the array's TEXT — including VECTOR(n), which the
+// engine DOES convert to, so cosine_similarity over `CAST(ARRAY[…] AS
+// VECTOR(n))` read a string and answered NULL. The table, measured on
+// PostgreSQL 17.11 (pgvector for VECTOR, whose type PostgreSQL itself lacks):
 //
 //	destination                       container operand
 //	text, varchar(n), char(n)         its PostgreSQL text (array_out / record_out)
@@ -223,9 +220,10 @@ func containerText(v any, col *parquet.Column) string {
 
 // declaredBox is v read through its declaration, or — with no declaration —
 // v itself once every leaf is a box whose own rendering is its value. A leaf
-// that is not (an INTERVAL's struct: this engine has no interval text form
-// yet) refuses, because its only rendering is Go's `{0 0 0 1 0 0}`, a value
-// no PostgreSQL type prints (ADR-0045 §2: loud, never plausible).
+// that is not (an INTERVAL: a container declares its element as the DURATION
+// carrier, whose rendering is a nanosecond count, not interval text) refuses
+// 0A000 rather than print a value no PostgreSQL type prints (ADR-0045 §2:
+// loud, never plausible).
 func declaredBox(v any, col *parquet.Column) any {
 	refuseUnrenderable(v)
 	if col != nil && boxKeysDeclared(v, col) {

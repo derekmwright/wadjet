@@ -110,6 +110,11 @@ func joinKeyNumeric(t parquet.TypeID) bool {
 	return false
 }
 
+// cteColTypes answers what a MATERIALIZED CTE's columns are called and what
+// they carry, or false for a name the caller cannot resolve. nil is a caller
+// with no cache to ask — every test, and any site that has no Planner.
+type cteColTypes func(ref *logical.Node) (map[string]parquet.TypeID, bool)
+
 // resolveJoinKeyTypes returns one entry per key PAIR: the type both sides'
 // key bytes must be built at, or exec.KeyTypeUnresolved where no widening
 // applies. A nil result means "no pair needs widening", which is every
@@ -123,12 +128,8 @@ func joinKeyNumeric(t parquet.TypeID) bool {
 // all — a file or database reader — is keyed at int8 (ADR-0024 §2a, ADR-0039
 // §7; see sideHasUntypedTableFunc below). Declining otherwise leaves the
 // pre-existing behaviour, and the pre-existing behaviour is correct for every
-// pair whose two sides agree.
-// cteColTypes answers what a MATERIALIZED CTE's columns are called and what
-// they carry, or false for a name the caller cannot resolve. nil is a caller
-// with no cache to ask — every test, and any site that has no Planner.
-type cteColTypes func(ref *logical.Node) (map[string]parquet.TypeID, bool)
-
+// pair whose two sides agree. An ARRAY pair keys at its elements' common leaf
+// type where the two element types differ (containerJoinKeyLeaf).
 func resolveJoinKeyTypes(node *logical.Node, leftKeys, rightKeys []string, cte cteColTypes) []parquet.TypeID {
 	if node == nil || len(node.Children) < 2 ||
 		len(leftKeys) == 0 || len(leftKeys) != len(rightKeys) {

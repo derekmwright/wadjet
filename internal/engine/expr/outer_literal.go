@@ -17,8 +17,10 @@ import (
 // Use CAST for DECIMAL/DATE/TIMESTAMP/REAL, numeric spelling for numeric
 // values and quoted text for network/UUID values; the round-trip gate is
 // TestOuterLiteralRendersEveryTypeAsItsOwnType.
-// Refuse ARRAY/ROW/MAP/VECTOR and BYTES containing invalid UTF-8 or NUL:
-// this substitution path has no faithful literal spelling for them.
+// An ARRAY is its typed array literal (ArrayValueLiteral). Refuse ROW/MAP/
+// VECTOR, an ARRAY whose element has no exact cast spelling, and BYTES
+// containing invalid UTF-8 or NUL: this substitution path has no faithful
+// literal spelling for them.
 // NULL renders as null for every type and comparisons remain UNKNOWN.
 // See docs/internals/correlated-outer-literal-roundtrip.md for the design.
 

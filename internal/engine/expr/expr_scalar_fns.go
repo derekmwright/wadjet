@@ -135,11 +135,10 @@ type FuncCall struct {
 	prepared *preparedRegexp
 }
 
-// formatTemporalArgs rewrites boxed TypeDate ColRef argument values to
-// their canonical ISO form for string-input functions. Only direct column
-// references are covered — a nested expression's output type isn't known
-// here (and nothing in the TPC-H or observed customer shapes feeds a
-// computed date into a string function).
+// formatTemporalArgs rewrites a boxed DATE / TIMESTAMP argument value to its
+// text (batch.FormatDate / FormatTimestamp) for string-input functions,
+// whatever produced it — a column, a cast, a clock function, date arithmetic:
+// renderTemporalBox reads the unit producedTemporal names for the argument.
 func (e *FuncCall) formatTemporalArgs(b *batch.RecordBatch, args []any) {
 	// A temporal argument boxes as the unit its producer carries — a column,
 	// a cast (#340, #273, #544), a clock function, date arithmetic, a choice
@@ -228,11 +227,11 @@ type civilDate struct{ t time.Time }
 // columnInstant — the same resolver the vectorized kernels use — which is what
 // makes the two paths agree by construction rather than by coincidence.
 //
-// Only direct column references are covered, matching formatTemporalArgs: a
-// nested expression's output type isn't known here, and a literal or a
-// computed value already carries its own unambiguous form (text, or a number
-// that means seconds). Columns of any other type are left alone, so
-// year(int_col) keeps reading its int64 as epoch seconds exactly as before.
+// A non-column argument is resolved when producedTemporal names its unit (a
+// cast, a clock function, date arithmetic — temporalBoxInstant); any other
+// literal or computed value keeps its own form (text, or a number that means
+// seconds). Columns of any other type are left alone, so year(int_col) keeps
+// reading its int64 as epoch seconds exactly as before.
 //
 // For the date-arithmetic family a resolved DATE column is tagged civilDate,
 // because those functions render their result and a DATE must render as a
@@ -285,8 +284,9 @@ func (e *FuncCall) resolveTemporalArgs(b *batch.RecordBatch, row int, args []any
 // temporalOperand recovers the declared unit for date ± interval:
 // DATE columns/fields become civilDate from epoch days; TIMESTAMP columns
 // become time.Time from epoch milliseconds (#322, #332).
-// Temporal CAST destinations supply the same unit as the matching column,
-// including typed date literals lowered to CAST (#340).
+// Every non-column temporal producer (producedTemporal: a CAST, including a
+// typed date literal lowered to one (#340), a clock function, date
+// arithmetic) supplies the same unit as the matching column.
 // Text passes through with its own rendering. Bare numbers, other column
 // types and unsupported expressions decline to unchanged numeric arithmetic.
 // See docs/internals/temporal-arithmetic-operand-units.md for the design.
@@ -330,8 +330,9 @@ func (e *FuncCall) resolveFn() {
 	}
 }
 
-// resolveFnSlow runs exactly once per node: the registry lookup plus the
-// three argument-family flags derived from it.
+// resolveFnSlow runs exactly once per node: the registry lookup plus what is
+// derived from it — the argument-family flags, the typed argument positions,
+// the fixed temporal unit, and the extremum / NULLIF / choice arms.
 func (e *FuncCall) resolveFnSlow() {
 	e.fnMu.Lock()
 	defer e.fnMu.Unlock()

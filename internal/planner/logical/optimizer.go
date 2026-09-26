@@ -4386,8 +4386,7 @@ func flattenJoinChain(n *Node, rels *[]*Node, edges *[]joinEdge) {
 	// a BETWEEN arrive whole and simply fail the comparison test below.
 	//
 	// Each edge names the relations its conjunct READS, resolved by
-	// qualifier: see join_edge_members.go for the rule and #1299 for what
-	// the column-name endpoints alone did to a table joined three times.
+	// qualifier (join_edge_members.go, ADR-0026 §8k: a table joined three times, #1299).
 	membership := membershipOf((*rels)[leftStart:])
 	edgeFor := func(text string, expr plansql.Node) joinEdge {
 		if expr == nil {

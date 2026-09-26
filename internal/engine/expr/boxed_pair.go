@@ -1082,8 +1082,9 @@ func dateTimestampOrder(lk boxKind, lv, rv any) (int, bool) {
 // temporalTextOrder compares a TEMPORAL operand against a text one in the
 // temporal operand's OWN domain, which its kind names.
 //
-// tv is the temporal operand's box: a TIMESTAMP column boxes as int64 epoch
-// milliseconds, a DATE column as its formatted "YYYY-MM-DD" text. other is
+// tv is the temporal operand's box: a TIMESTAMP boxes as int64 epoch
+// milliseconds, a DATE as its epoch-day count (or its "YYYY-MM-DD" text when
+// a CAST or a rendered element carries it). other is
 // the text operand's box, and otherText its literal source when it has one
 // (a quoted literal's box and its text are the same string; a STRING column
 // has no source text).

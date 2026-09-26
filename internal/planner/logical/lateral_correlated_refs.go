@@ -19,7 +19,7 @@ func publishLiftedRefs(info *plansql.SelectInfo, correlatedParts []string,
 	leftAliases map[string]bool, aggregates bool, left *Node,
 	injected *[]plansql.SelectColumn) (slots []string, err error) {
 	// THE COLUMN IS PUBLISHED, SO IT IS ONLY MATERIALIZED WHERE PUBLISHING IT
-	// CHANGES NOTHING ELSE. Four shapes decline, and each returns the query to
+	// CHANGES NOTHING ELSE. Three shapes decline, and each returns the query to
 	// the disposition it had before this repair existed — never to a new wrong
 	// answer (round-4 review, B1r / B2r / B3r / P1r):
 	//
@@ -45,8 +45,8 @@ func publishLiftedRefs(info *plansql.SelectInfo, correlatedParts []string,
 	// not a repair above it.
 	//
 	// EVERY ONE OF THEM IS TESTED AFTER THE AGGREGATED REFUSAL, inside the
-	// loop — the star test sets a flag rather than returning, for exactly that
-	// reason. A decline on an aggregated body is a silent wrong answer, so
+	// loop — the retired star test set a flag rather than returning, for
+	// exactly that reason. A decline on an aggregated body is a silent wrong answer, so
 	// while the refusal and the declines look alike (neither materializes
 	// anything), they are not interchangeable: round 4 left the star test as a
 	// return above the loop and one statement got two dispositions decided by

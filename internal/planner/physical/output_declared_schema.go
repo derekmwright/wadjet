@@ -849,7 +849,8 @@ func declaredProjectionType(proj logical.Projection, decls ColDecls, strictInt m
 }
 
 // declaredProjectionDecl is declaredProjectionType with the parameterized
-// part of the answer kept — a DECIMAL's (precision, scale).
+// part of the answer kept — a DECIMAL's (precision, scale), a ROW's fields, an
+// ARRAY's or MAP's element (namedDecl).
 //
 // It replaces the pair declaredProjectionType/declaredProjectionDecimal,
 // which resolved the SAME name twice through two hand-mirrored copies of one

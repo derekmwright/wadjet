@@ -442,11 +442,12 @@ func joinArmColumns(join *Node) []joinStarItem {
 // them.
 //
 // A SEMI or ANTI join publishes its probe ALONE, and no star spells one: the
-// lowering makes them from IN and EXISTS. A join carrying a MANUFACTURED
-// LATERAL's lowering publishes minted slots and empty-input defaults that
-// belong to the operator above it (ADR-0026 §3c), and the arms it is built
-// from are not the relations the query wrote, so those decline here and keep
-// the answer they have.
+// lowering makes them from IN and EXISTS. A decorrelated LATERAL's join
+// publishes minted slots beside its arms (ADR-0026 §3c); it counts as both
+// arms only when the lateral is its RIGHT arm and the only one, since the arm
+// walk reads the lateral's list without those slots (joinArmColumns). Any
+// other lateral placement, and a DEPENDENT join, declines here and keeps the
+// answer it has.
 func joinPublishesBothArms(n *Node) bool {
 	switch strings.ToLower(strings.TrimSpace(n.JoinType)) {
 	case "semi", "anti":

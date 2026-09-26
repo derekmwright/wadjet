@@ -12,18 +12,12 @@ import (
 
 // A JOIN ARM IS THE RELATION ITS QUALIFIER NAMES (#1299, ADR-0026 §8k).
 //
-// The reorderer takes an inner-join chain apart into relations and edges and
-// puts it back together in the cheapest order, hanging every ON conjunct on
-// the first join whose subtree holds the relations the conjunct's edge names.
-// So an edge's relations have to be the ones the conjunct READS. They were
-// resolved by bare COLUMN NAME: the endpoint was a relation owning `order_id`
-// or `id`. Where one table is joined more than once every copy owns every
-// such name, and the self-join arms were told apart by elimination — which
-// fails as soon as three copies meet: `o JOIN item s ON s.order_id = o.id
-// JOIN item t ON t.order_id = o.id` recorded t's edge as s–t, the DP joined s
-// and t first on `t.order_id = o.id`, and the physical planner resolved the
-// absent `o.id` against the copy that was there. The answer paired one
-// order's s with another order's t, with no error.
+// The reorderer hangs every ON conjunct on the first join whose subtree holds
+// the relations the conjunct's edge names, so an edge's relations have to be
+// the ones the conjunct READS. Resolved by bare COLUMN NAME, the self-join
+// arms were told apart by elimination, which fails once three copies of a
+// table meet: the answer paired one order's s with another order's t, with no
+// error (§8k's `lat_item` s / t / u case).
 //
 // The rule: a conjunct's edge is the set of relations its column references
 // name — a qualified reference belongs to the one relation that publishes its

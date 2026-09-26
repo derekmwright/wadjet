@@ -53,8 +53,9 @@ func (c *containerChoice) conform(b *batch.RecordBatch, v any) any {
 	return conformBox(v, r.col)
 }
 
-// common is the operands' common container declaration when they DIFFER, nil
-// when they agree (nothing to move) or when one is not a declared container.
+// common is the operands' common array declaration when they DIFFER, nil
+// when they agree (nothing to move) or have no common type; an operand that
+// declares no array element (a NULL, an undeclared one) is skipped.
 func (c *containerChoice) common(b *batch.RecordBatch) *parquet.Column {
 	var common *parquet.Column
 	differ := false

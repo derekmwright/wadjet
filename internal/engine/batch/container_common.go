@@ -5,33 +5,25 @@ package batch
 import "github.com/derekmwright/wadjet/internal/storage/parquet"
 
 // CommonContainerColumn is the ONE rule by which two container declarations
-// meet (arc CW round 5): wherever two array operands meet — a comparison
-// operator, IN / ANY / ALL, a hash or sort-merge join key, a UNION /
-// INTERSECT / EXCEPT arm, CASE / COALESCE / GREATEST / LEAST / NULLIF, an
-// ARRAY[a, b] constructor — their ELEMENTS unify here, and nowhere else: the
-// comparator kernel (kernel.compareElemAt, expr.commonContainerShapes), the
-// join-key resolution (physical.resolveJoinKeyTypes), the set operation's arm
-// target (physical.setOpElementTarget) and the declared-output walk
-// (expr.CommonDeclType) all call it.
+// meet (arc CW round 5, ADR-0045 §4 "Round 5"): a comparison operator, IN /
+// ANY / ALL, a hash or sort-merge join key, a UNION / INTERSECT / EXCEPT arm,
+// CASE / COALESCE / GREATEST / LEAST / NULLIF and an ARRAY[a, b] constructor
+// unify their ELEMENTS here and nowhere else — kernel.compareElemAt,
+// expr.commonContainerShapes, physical.resolveJoinKeyTypes,
+// physical.setOpElementTarget and expr.CommonDeclType all call it.
 //
 // The element rule is PostgreSQL's numeric promotion, the ladder a scalar set
 // operation already climbs (physical.setOpWiden): INT32 → INT64 → DECIMAL →
-// FLOAT32 → FLOAT64, independent of order. Two DECIMAL elements meet at
-// DecimalCommon's (p,s) — max(scale), the integer part rebuilt — so no digit
-// of either side is ever rounded away; an integer beside a DECIMAL brings its
-// whole range at scale 0 (ADR-0024 item 2). Two identical element types are
-// themselves. Anything else — a text element beside a number, a DECIMAL whose
-// (p,s) nothing resolved — has no common type here, and ok is false: the
-// caller keeps its own disposition (a refusal, or each side's declaration).
-//
-// Before this rule the pair was decided once per meeting point: `=` widened
-// int ⊕ float8 to a double while the hash-join key, the set operations and
-// the FULL join's matched set keyed each side's boxes under its own element
-// type (`int[] JOIN float8[]` answered 0 rows for 49, UNION 98), the
-// sort-merge key compared an INT64 child against a FLOAT64 one with the
-// INT64 kernel (index out of range), and CASE / COALESCE declared the FIRST
-// branch's DECIMAL scale and rounded the other branch's elements into it
-// (`{0.043333}` answered `{0.04}`) — round-4 review B1 and B5.
+// FLOAT32 → FLOAT64, independent of order; two DECIMALs meet at DecimalCommon's
+// (p,s), max(scale), so no digit is rounded away, and an integer beside a
+// DECIMAL brings its whole range at scale 0 (ADR-0024 item 2). Two identical
+// element types are themselves. Anything else — a text element beside a
+// number, a DECIMAL whose (p,s) nothing resolved — has no common type here,
+// and ok is false: the caller keeps its own disposition (a refusal, or each
+// side's declaration). What per-meeting-point unification answered before
+// (round-4 review B1, B5) is ADR-0045 §4 "Round 5"; beside it, the sort-merge
+// INT64 kernel over a FLOAT64 child indexed out of range, and CASE / COALESCE
+// rounded `{0.043333}` to `{0.04}`.
 func CommonContainerColumn(a, b parquet.Column) (parquet.Column, bool) {
 	if IsContainerType(a.Type) || IsContainerType(b.Type) || a.Type == TypeRow || b.Type == TypeRow {
 		if a.Type != b.Type {

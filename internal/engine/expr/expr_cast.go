@@ -363,8 +363,9 @@ func (e *Cast) castStringRender(b *batch.RecordBatch, row int, v any) string {
 // scalar rendering agree with Vector.GetValue / likeTextRenderer.
 // IPv4/MAC integer encodings, DATE day counts and widened FLOAT32 boxes
 // must render as their declared values (#497, #521, ADR-0012).
-// Resolve column references (including ROW fields) and temporal CASTs;
-// other operand shapes pass v through unchanged.
+// Resolve column references (including ROW fields), every non-column
+// temporal producer (producedTemporal) and a bare DECIMAL literal at its own
+// scale (decimalLitText); other operand shapes pass v through unchanged.
 // TestLikeAnswersTheSameAtBothSites sweeps flat types for rendering drift.
 // See docs/internals/boxed-text-operand-rendering.md for the design.
 func boxedTextOperand(b *batch.RecordBatch, row int, operand Expr, v any) any {

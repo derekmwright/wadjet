@@ -40,7 +40,7 @@ func ParseFormat(s string) (Format, error) {
 
 // Write formats columns and rows to the writer in the given format, with no
 // column type information. Values render as the engine boxes them, so a
-// TIMESTAMP column prints as its raw epoch integer; prefer WriteTyped
+// TIMESTAMP column prints as its raw epoch integer; prefer WriteDeclared
 // wherever the result's column metadata is on hand.
 func Write(w io.Writer, f Format, columns []string, rows [][]any) error {
 	return WriteTyped(w, f, columns, nil, rows)

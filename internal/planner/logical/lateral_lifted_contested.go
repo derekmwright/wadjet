@@ -10,8 +10,9 @@ import (
 
 // RefuseContestedLiftedRefs checks lifted columns after annotation supplies
 // the enclosing schema. A shared name would bind the wrong output column
-// on the single-process pipeline, so it refuses every join spelling there.
-// With outerJoinsOnly, the DAG retains its supported inner/comma spellings
+// on the single-process pipeline, so it refuses every join spelling there —
+// except an ALIASED lateral, whose lifted predicate reads the body's column
+// through that alias (qualifyLiftedRefsByLateralAlias). With outerJoinsOnly, the DAG retains its supported inner/comma spellings
 // and refuses outer joins. See ADR-0021 §1s and ADR-0026 §8j.
 func RefuseContestedLiftedRefs(n *Node, outerJoinsOnly bool) error {
 	if n == nil {

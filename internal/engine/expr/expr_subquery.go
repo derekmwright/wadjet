@@ -358,7 +358,6 @@ func (e *InSubquery) containerProbe(b *batch.RecordBatch, row int, lv any) (bool
 	return e.missAnswer()
 }
 
-// resolveSlow runs the subquery once and builds the probe set. Idempotent.
 // inSetKind is what an IN-subquery's materialised value set holds. It is the
 // SET half of the operator ladder; boxOperand.resolve gives the probe half.
 type inSetKind int8
@@ -454,6 +453,7 @@ func toInt64SafeStrict(lv any) (int64, bool) {
 	return 0, false
 }
 
+// resolveSlow runs the subquery once and builds the probe set. Idempotent.
 func (e *InSubquery) resolveSlow() {
 	e.resolveMu.Lock()
 	defer e.resolveMu.Unlock()

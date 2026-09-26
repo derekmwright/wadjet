@@ -297,8 +297,9 @@ func pgComparisonOp(op string) string {
 	return op
 }
 
-// walk visits every comparison in node, CHILDREN FIRST — PostgreSQL analyses
-// inside-out, so `(id > 1) = 1` names the outer `boolean = integer`.
+// walk visits every comparison — and every `+` / `-` (temporalArithmetic) —
+// in node, CHILDREN FIRST — PostgreSQL analyses inside-out, so `(id > 1) = 1`
+// names the outer `boolean = integer`.
 // Subqueries are their own blocks and are not entered.
 func (c *comparisonTyper) walk(node plansql.Node) error {
 	switch n := node.(type) {

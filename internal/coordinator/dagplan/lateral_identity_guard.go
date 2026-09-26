@@ -56,7 +56,9 @@ var ErrLateralIdentityDistributed = errors.New(
 // that another relation of the query also carries. The other relations are
 // the subtrees hanging off the path from the root down to the arm: the nodes
 // ON that path (the joins, filters and projections above the arm) republish
-// the arm's own names and are not another relation.
+// the arm's own names and are not another relation. It also refuses an arm
+// whose null-extending join pads a grouped arm or one publishing a window's
+// output (lateralArmShares).
 func refuseCollidingLateral(root *logical.Node) error {
 	var path []*logical.Node
 	var walk func(n *logical.Node) error
@@ -82,7 +84,9 @@ func refuseCollidingLateral(root *logical.Node) error {
 }
 
 // lateralArmShares refuses when a name the arm at the end of path carries
-// ACROSS the join (crossingNames) is carried by a subtree hanging off path.
+// ACROSS the join (crossingNames) is carried by a subtree hanging off path,
+// or when that join null-extends an arm that groups (groups) or publishes a
+// window's output (publishesWindow).
 func lateralArmShares(arm *logical.Node, path []*logical.Node) error {
 	inside := map[string]bool{}
 	crossingNames(arm, inside)

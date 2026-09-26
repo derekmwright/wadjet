@@ -129,8 +129,10 @@ func shiftProducedTemporal(args []Expr, b *batch.RecordBatch) castTemporalKindT 
 
 // arithProducedTemporal is the operator rule, the runtime mirror of
 // physical.binOpTemporalType: `date ± integer` and `integer + date` are a
-// DATE; `date ± interval` and `timestamp ± interval` are a TIMESTAMP;
-// `date - date` is an integer day count, and nothing else is temporal.
+// DATE (a VARCHAR column reads as a date, textDayOperand); `date ± interval`,
+// `timestamp ± interval`, a text instant ± interval and `timestamp + '…'` are
+// a TIMESTAMP; `date - date` is an integer day count, and nothing else is
+// temporal.
 // "integer" is the operand's own integer-ness (operandIsInt), never the
 // spelling of a literal.
 func arithProducedTemporal(op string, left, right Expr, b *batch.RecordBatch) castTemporalKindT {

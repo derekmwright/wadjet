@@ -1152,7 +1152,8 @@ func (d ColDecls) colType(n *plansql.ColRef) (parquet.TypeID, bool) {
 }
 
 // colDecl is colType with the parameterized part of the declaration kept: a
-// DECIMAL's (precision, scale). It resolves in exactly the order colType
+// DECIMAL's (precision, scale), a ROW's fields, an ARRAY's or MAP's element
+// (Elems; a qualified key falls back to its bare entry). It resolves in exactly the order colType
 // documents above, and reads the (p,s) out of the SAME key that answered the
 // type, so the two halves can never describe different columns.
 func (d ColDecls) colDecl(n *plansql.ColRef) (parquet.Column, bool) {
@@ -2130,6 +2131,8 @@ func castVectorDim(n *plansql.CastNode) int {
 //	date ± integer          → DATE, the day n days away
 //	integer + date          → DATE
 //	date|timestamp ± interval, interval + date|timestamp → TIMESTAMP
+//	timestamp - timestamp   → DOUBLE, milliseconds (the engine has no interval column)
+//	date|timestamp ± 'text' → as expr.ResolveUnknownTemporal resolves it
 //
 // Every operand is judged by its DECLARED type, never by how it is spelled
 // (arc VL round 3): `DATE '…' + CAST(1 AS INT)`, `(d + 1) + 1`, `d + i` over an
@@ -2138,9 +2141,7 @@ func castVectorDim(n *plansql.CastNode) int {
 // other spelling double precision while expr.BinOp produced a day count.
 // expr.arithProducedTemporal is the same rule over the evaluator's boxes.
 //
-// Everything else declines and the caller's numeric rules stand. A TIMESTAMP
-// minus a TIMESTAMP is SQL's INTERVAL and the engine has no interval column;
-// expr.BinOp.dateArith leaves it on the numeric path and this agrees.
+// Everything else declines and the caller's numeric rules stand.
 func binOpTemporalType(n *plansql.BinaryOp, decls ColDecls) (expr.DeclType, expr.Confidence) {
 	if n.Op != "+" && n.Op != "-" {
 		return expr.DeclType{}, expr.Undecided
@@ -2368,35 +2369,22 @@ func isSimpleColRef(node plansql.Node) bool {
 // its elements' common type (expr.ArrayLitElementDecl — PostgreSQL's §10.5
 // rule, the one UNION and CASE use), with that element carried so the
 // projection builds an array vector and the wire declares the element's
-// array OID. Before arc CW the constructor had no arm here, so it declared
-// the STRING fallback: the value went out as Go's `[1 2 3]` under OID 25,
-// and every reader above it — a subscript, ANY(), ORDER BY — read that text
-// (#1250, #1303, #1021).
+// array OID. Before arc CW it declared the STRING fallback (Go's `[1 2 3]`
+// under OID 25, read as text by a subscript, ANY(), ORDER BY: #1250, #1303,
+// #1021; ADR-0045 Context).
 //
 // An element nothing can type (a scalar subquery the caller cannot resolve)
 // declines the whole constructor. A constructor of nothing but NULLs is
 // text[], as PostgreSQL resolves `unknown`; one of NO elements has no type
 // to declare (PostgreSQL refuses it outright, 42P18) and declines.
 //
-// An INTERVAL element (nodeIsInterval) declares no column type ANYWHERE else
-// in this engine (binOpTemporalType's note: "the engine has no interval
-// column") — nodeDeclaredType has no case for it, so this loop used to hit
-// its default arm and decline the WHOLE array as Undecided, which left every
-// meeting point guessing: the projection took the STRING fallback and a
-// container box into STRING/BYTES is refused (ADR-0045 §2), and the
-// comparator's own last-resort shape reader (expr.boxShape) had no case for
-// expr.IntervalValue either and defaulted to INT64 — both #361 silent-write
-// guard panics on a shape that answered PostgreSQL's value at base (arc CW
-// round 6, B1: a projection nothing reads, `=`, `<`, GROUP BY, DISTINCT,
-// UNION, CASE). DURATION is the one element kind this engine can carry an
-// INTERVAL by: batch.Vector's DURATION vector already orders as a plain
-// int64 (kernel.CompareValuesAt groups it with INT64), and
-// expr.IntervalValue.DurationNanos writes PostgreSQL's own interval_cmp
-// metric into it (months at 30 days, plus days, plus the time of day) — the
-// number "2 days" < "10 days" on, where the two intervals' RENDERED TEXT
-// orders the other way. The wire keeps #1268's refusal (0A000): DURATION's
-// own renderer prints a plain nanosecond count, not PostgreSQL's interval
-// text, and nothing here asks it to.
+// An INTERVAL element (nodeIsInterval) declares DURATION, ordered by
+// PostgreSQL's interval_cmp metric (expr.IntervalValue.DurationNanos), so
+// "2 days" < "10 days" where the rendered text orders the other way. Declined,
+// it was a #361 guard panic at every meeting point (arc CW round 6, B1: a
+// projection nothing reads, `=`, `<`, GROUP BY, DISTINCT, UNION, CASE). The
+// wire keeps #1268's refusal (0A000). Why DURATION, and what each meeting
+// point guessed, is ADR-0045 §1 "Round 6".
 func arrayLitDeclaredType(n *plansql.ArrayLitNode, decls ColDecls) (expr.DeclType, expr.Confidence) {
 	var decided []expr.DeclType
 	for _, e := range n.Elements {
@@ -2427,9 +2415,6 @@ func arrayLitDeclaredType(n *plansql.ArrayLitNode, decls ColDecls) (expr.DeclTyp
 	return arrayOfDecl(el)
 }
 
-// arrayOfDecl is the ARRAY declaration whose element is el — its (p,s), its
-// own element or fields carried whole — or Undecided when el is not a
-// declaration a child vector can be built from (a DECIMAL with no scale).
 // multiDimTextCastOperand reports whether a `T[]` cast's TEXT operand spells a
 // multi-dimensional array: a string literal whose array text nests a brace,
 // or the text rendering of a declared multi-dimensional array.
@@ -2472,6 +2457,9 @@ func nestedArrayCastOperand(n *plansql.CastNode, decls ColDecls) (expr.DeclType,
 	return src, true
 }
 
+// arrayOfDecl is the ARRAY declaration whose element is el — its (p,s), its
+// own element or fields carried whole — or Undecided when el is not a
+// declaration a child vector can be built from (a DECIMAL with no scale).
 func arrayOfDecl(el expr.DeclType) (expr.DeclType, expr.Confidence) {
 	col, ok := declColumn(el)
 	if !ok {

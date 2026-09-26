@@ -198,7 +198,8 @@ func leafFloat64(v *batch.Vector, i int) (float64, bool) {
 }
 
 // compareListAt compares one ARRAY or MAP row: element-wise over the common
-// prefix, then by length.
+// prefix, then by length. Two arrays of arrays are multi-dimensional and order
+// by compareMultiDimAt instead.
 func compareListAt(a *batch.Vector, ai int, b *batch.Vector, bi int) int {
 	if a.Type == batch.TypeArray && b.Type == batch.TypeArray && a.Child != nil && b.Child != nil &&
 		a.Child.Type == batch.TypeArray && b.Child.Type == batch.TypeArray {

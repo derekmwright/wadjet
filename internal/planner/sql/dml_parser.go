@@ -392,9 +392,10 @@ func parseInsert(sql string, l *lexer) (*ParsedQuery, error) {
 // this same file already does for UPDATE SET.
 //
 // Every refusal about one value names that value's 1-based position in the
-// tuple. The reason alone ("VALUES accepts literals, not the expression ...")
-// told the author of `VALUES (1, 'a', <bad>, 4)` what was wrong but not which
-// entry it was, so finding it meant re-reading the tuple by hand.
+// tuple. The reason alone ("empty value") told the author of
+// `VALUES (1, 'a', , 4)` what was wrong but not which entry it was, so
+// finding it meant re-reading the tuple by hand. A lexer error inside the
+// tuple keeps the lexer's own sentence and SQLSTATE (#1307).
 func parseValuesRow(l *lexer, tableName string) ([]string, error) {
 	var row []string
 	var cur []token
@@ -485,13 +486,12 @@ func LeadingKeyword(sql string) string {
 // insertValueText renders one VALUES entry as the SOURCE TEXT the executor's
 // expression evaluator reads (#1252).
 //
-// A single token keeps its own val, which is what makes a bare string literal
-// arrive without its quotes and `NULL` arrive as the keyword, and the signed-
-// numeric and redundant-parenthesis shapes above get the same direct
-// spelling — all three are exactly what wadjet/dml.go's dmlLiteralText,
-// handed the re-parsed node, already reads back out again, so keeping them
-// as their own arms costs nothing and stays the narrowest text for the
-// common case.
+// A single token keeps its own val, which is what makes `NULL` arrive as the
+// keyword; a single string literal is re-quoted so its KIND survives (#690);
+// the signed-numeric and redundant-parenthesis shapes get the same direct
+// spelling — all are exactly what wadjet/dml.go's dmlLiteralText, handed the
+// re-parsed node, already reads back out again, so keeping them as their own
+// arms costs nothing and stays the narrowest text for the common case.
 //
 // Anything else is a general EXPRESSION — a typed literal, a function call, a
 // CAST, arithmetic — and exprTextFromTokens reconstructs its source text
@@ -503,8 +503,8 @@ func LeadingKeyword(sql string) string {
 // read.
 //
 // ordinal is the value's 1-based position in the tuple and is used only in the
-// refusals still raised here (an empty value, an unterminated row), so that a
-// rejected entry can be found without counting commas.
+// refusal still raised here (an empty value), so that a rejected entry can
+// be found without counting commas.
 func insertValueText(toks []token, tableName string, ordinal int) (string, error) {
 	toks = stripRedundantParens(toks)
 	switch {

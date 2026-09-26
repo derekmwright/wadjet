@@ -303,28 +303,22 @@ func reclaimPendingObjects(ctx context.Context, cat *catalog.Catalog, pending []
 // AssignableToColumn reports whether a query's output column may be written
 // into a target column by an `INSERT INTO … <select>`, and says why not.
 //
-// PostgreSQL 17.11 inserts an ASSIGNMENT CAST here — `transformAssignedExpr` —
-// so it accepts more pairs than this does: `INSERT INTO t (text_col) SELECT
-// bigint_col` and `INSERT INTO t (bigint_col) SELECT numeric_col` both succeed
-// there. Measured, along with the two it refuses: a boolean or a timestamp into
+// PostgreSQL 17.11 inserts an ASSIGNMENT CAST here — `transformAssignedExpr`.
+// Measured, along with the pairs it refuses: a boolean or a timestamp into
 // bigint is 42804, `column "id" is of type bigint but expression is of type
 // boolean`.
 //
-// This engine takes the LOUD side of that line wherever a conversion would have
-// to be invented at the writer, and the reason is not caution. A DECIMAL box
-// carries an unscaled integer and no scale: assigning a DECIMAL(12,3) value to
-// a DECIMAL(18,4) column without rescaling stores 1.500 as 0.1500 — a silent
-// wrong number, which is the one outcome that is never acceptable (ADR-0012).
-// The pairs below are exactly the ones where the box the query produces is a
-// box the writer already stores correctly for the target's declaration, which
-// is why they need no conversion at all:
+// Every pair accepted here has an exact conversion in assignEvaluatedValue,
+// which every cell of a query-sourced write goes through. Storing a box
+// without one is a silent wrong number — a DECIMAL(12,3) box written
+// unrescaled into a DECIMAL(18,4) column reads 1.500 as 0.1500 — the one
+// outcome that is never acceptable (ADR-0012). The pairs:
 //
 //   - the same declared type, including (p, s) for DECIMAL, the dimension for
 //     VECTOR and the whole shape for ARRAY / ROW / MAP;
-//   - any integer declaration into any other (INT32, INT64, PORT, PROTOCOL) —
-//     the writer's own leaf check refuses a value the target cannot hold, with
-//     22003;
-//   - an integer into FLOAT32, FLOAT64 or DECIMAL, and a float into a float.
+//   - any numeric declaration (INT32, INT64, PORT, PROTOCOL, FLOAT32, FLOAT64,
+//     DECIMAL) into any other, DECIMAL at a different scale included; a value
+//     the target cannot hold is refused 22003.
 //
 // Beside those, the pairs PostgreSQL's ASSIGNMENT casts cover and this
 // engine's converter (assignEvaluatedValue) renders or converts exactly

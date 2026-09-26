@@ -144,8 +144,8 @@ func (p *Planner) stampRecursiveReference(node *logical.Node) {
 
 // stampScanSchema records one relation's column list on a Scan node: the names
 // the plan resolves against, the integer sets the arithmetic rules read, the
-// declared types the aggregate result-type rules read, and the DECIMAL and ROW
-// metadata a declaration cannot be rebuilt without.
+// declared types the aggregate result-type rules read, and the DECIMAL, ROW
+// and ARRAY/MAP element metadata a declaration cannot be rebuilt without.
 //
 // One body for the two relations a Scan can be — a catalog table and a table
 // function that declares its own columns — so a column of a given type is

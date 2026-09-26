@@ -1335,16 +1335,16 @@ func appendKeyFieldsWithMeta(buf []byte, m map[string]any, meta *parquet.Column)
 
 // appendKeyElemWithMeta is appendKeyElem with the element's DECLARED type
 // available: it writes the same kind tag and payload for every type, and
-// intercepts only the two the declaration is needed for — a CIDR leaf, which
-// re-keys into PostgreSQL's inet order (#520), and a nested container, whose
-// own element/field metadata has to travel one level further down.
+// intercepts only the three the declaration is needed for — a CIDR leaf, which
+// re-keys into PostgreSQL's inet order (#520), a DECIMAL leaf, keyed by its
+// canonical digits so one value at two scales is one key, and a nested
+// container, whose own element/field metadata has to travel one level down.
 //
-// Every other type falls through to appendKeyElem, so a CIDR-free value
-// serializes BYTE-IDENTICALLY whether or not its column was declared with
-// element metadata. That equality is the property
+// Every other type falls through to appendKeyElem, so a CIDR- and DECIMAL-free
+// value serializes BYTE-IDENTICALLY whether or not its column was declared
+// with element metadata. That equality is the property
 // TestSerializedKeyMetaMatchesPlainEncoding asserts, and it is what makes the
-// meta path safe to take for a container column whose leaves happen to hold no
-// CIDR at all.
+// meta path safe to take for a container column whose leaves hold neither.
 func appendKeyElemWithMeta(buf []byte, v any, meta *parquet.Column) []byte {
 	if meta == nil || v == nil {
 		return appendKeyElem(buf, v)

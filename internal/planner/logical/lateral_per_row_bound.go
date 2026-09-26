@@ -13,8 +13,8 @@ import (
 
 // lateralBoundPerOuterRow preserves a correlated bound with a per-key
 // ROW_NUMBER and QUALIFY: rn > offset and rn <= offset+limit, saturating
-// the upper sum. Keys require an inner-only expression equal to a bare
-// outer column. ORDER BY aliases and ordinals resolve to the selected items.
+// the upper sum. Keys require an inner-only expression equal to an
+// outer-only expression. ORDER BY aliases and ordinals resolve to the selected items.
 // An uncorrelated body and a non-removing bound need no rewrite; LIMIT 0
 // stays empty. DISTINCT over exactly the keys needs no positive limit.
 // Other DISTINCT bodies, set operations, QUALIFY and unsupported correlations
@@ -361,8 +361,9 @@ func lateralBoundRemovesTheOneRow(info *plansql.SelectInfo) bool {
 }
 
 // lateralEnclosingBareStar reports whether the enclosing SELECT list writes an
-// UNQUALIFIED star — the one spelling that publishes a LATERAL join's stream
-// whole (a star over a LATERAL is not expanded into the arms' lists).
+// UNQUALIFIED star — the one spelling that can publish a LATERAL join's
+// stream whole (where the arms' lists cannot expand it; see
+// RefuseStarPublishingLiftedSlot).
 func lateralEnclosingBareStar(outer *plansql.SelectInfo) bool {
 	if outer == nil {
 		return false

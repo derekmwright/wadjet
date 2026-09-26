@@ -48,10 +48,9 @@ func fnTimeBucket(args []any) any {
 	if !ok {
 		raiseTimestampOutOfRange()
 	}
-	// batch.FormatTimestamp is what formatInstant itself calls — the ONE
-	// instant renderer. A TIMESTAMP vector materializes this text back into
-	// the epoch milliseconds it stores, exactly as date_trunc's result does
-	// (#868).
+	// The TIMESTAMP box: epoch milliseconds, the unit the RetTimestamp
+	// declaration names (producedTemporal), exactly as date_trunc's result
+	// is (#868).
 	return binned
 }
 
@@ -59,7 +58,8 @@ func fnTimeBucket(args []any) any {
 // refusals. It is a function rather than an expression because BOTH refusals
 // are part of what time_bucket MEANS: a calendar stride has no fixed width and
 // a non-positive one has no buckets, and answering either with a number would
-// be a bar nobody can check.
+// be a bar nobody can check. An interval this engine cannot hold
+// (IntervalValue.text) refuses 0A000 before either.
 func timeBucketStrideMillis(iv IntervalValue) int64 {
 	if iv.text != "" {
 		raiseIntervalNotApplicable(iv)

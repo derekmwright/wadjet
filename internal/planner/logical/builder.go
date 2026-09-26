@@ -1524,33 +1524,25 @@ func buildFromClause(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*Node, er
 				}
 				right.LateralSubtree = true
 				// THE LATERAL'S ALIAS IS WHAT THE ENCLOSING QUERY CALLS THIS
-				// ARM, and the join needs it to qualify a duplicate column
-				// (#1111). A derived table stamps it (`plan.DerivedAlias =
-				// table.Alias` above); a LATERAL never did, so a body
-				// publishing a name the enclosing relation also carries had
-				// nothing to disambiguate by — `joinOutputSchemaWithMapping`
-				// DROPS a colliding build column with no alias, and the
-				// reference then bound the OUTER relation's column:
-				//
-				//   SELECT t.dx FROM setopdecja a,
-				//     LATERAL (WITH c AS (SELECT dx FROM setopdecjb)
-				//              SELECT SUM(dx) AS dx FROM c) t
-				//   -- PostgreSQL 17.11: 51.0000; this engine: 12.75, the
-				//      OUTER row's own dx, on the single-process arms
+				// ARM, and the join qualifies a duplicate column by it (#1111,
+				// ADR-0021 §1q). A derived table stamps it (`plan.DerivedAlias =
+				// table.Alias` above); a LATERAL never did, so
+				// `joinOutputSchemaWithMapping` DROPPED a colliding build column
+				// and the reference bound the OUTER row's dx: §1q's `setopdecja`
+				// cell, 12.75 for PostgreSQL 17.11's 51.0000 (single-process arms).
 				//
 				// Only the ROOT is stamped, not the scans below it:
 				// `setSubtreeAlias` would make the body's own relations
 				// answer to the lateral's name, and the body resolves its own
 				// references against the names it wrote.
 				//
-				// It REPLACES a derived alias already on the root: a body that
-				// is `SELECT * FROM (SELECT …) i` collapses onto the derived
-				// table's own Project, which carries `i` — a name the
-				// enclosing query cannot write. Kept, the join qualified the
-				// body's duplicate columns `i.id`, the enclosing `s.id`
-				// matched nothing, and its qualifier strip bound the OUTER
-				// relation's `id` (arc JP round 4, B2: `d/b6starBare`, every
-				// arm).
+				// It REPLACES a derived alias already on the root: a body
+				// `SELECT * FROM (SELECT …) i` collapses onto the derived
+				// table's Project, which carries `i` — a name the enclosing
+				// query cannot write; kept, the join qualified the duplicates
+				// `i.id`, `s.id` matched nothing and its qualifier strip bound
+				// the OUTER `id` (arc JP round 4, B2 `d/b6starBare`, every arm;
+				// ADR-0026 §8l "Round 4").
 				if join.RightAlias != "" {
 					right.DerivedAlias = join.RightAlias
 				}
@@ -2315,18 +2307,16 @@ func buildLateralSubquery(outer *plansql.SelectInfo, left *Node, join plansql.Jo
 			// key the join on that slot. The aggregate publishes it, the projection carries it,
 			// the shuffle can name it, and the join drops it on output on every path.
 			// See docs/internals/lateral-published-key-collisions.md for the design.
-			// THE LIFTED KEY OWNS A SLOT (#1302, round 2). Where the outer side
-			// is an EXPRESSION the equality is no hash key: it is evaluated
-			// ABOVE the join, over a stream that carries BOTH sides' columns,
-			// and a reference there binds by NAME. The two shortcuts below
-			// hand the key to the join under a name the BODY publishes (its
-			// own `k`, or its alias) — a name the outer side may publish too,
-			// and then `o.k + 1 = s.k` read the OUTER `k` (every outer row
-			// matched every inner row for `- 0`, none for `+ 1`). So a lifted
-			// key never travels by name: it is always minted into its own
-			// slot, which no user name can be, whatever the body's list
-			// writes (ADR-0026 §3a; the join that mints it drops it only
-			// where it keys on it).
+			// THE LIFTED KEY OWNS A SLOT (#1302, round 2; ADR-0026 §8l, §3a).
+			// Where the outer side is an EXPRESSION the equality is no hash
+			// key: it is evaluated ABOVE the join, over both sides' columns,
+			// binding by NAME, so the shortcuts below — the key handed over
+			// under a name the BODY publishes (its own `k`, or its alias) —
+			// let `o.k + 1 = s.k` read the OUTER `k` (every outer row matched
+			// every inner row for `- 0`, none for `+ 1`). A lifted key is
+			// always minted into its own slot, which no user name can be,
+			// whatever the body's list writes; the join that mints it drops it
+			// only where it keys on it.
 			lifted := !lateralOuterSideIsColumn(cp, leftAliases)
 			collides := lifted || (aggregates && lateralKeyNameCollides(subInfo.Columns, innerCol)) ||
 				lateralKeyNamePublishedTwice(subInfo.Columns, innerCol)
@@ -2610,7 +2600,9 @@ func buildLateralSubquery(outer *plansql.SelectInfo, left *Node, join plansql.Jo
 	return right, joinCond, empty, injectedSlots, starLifted, nil
 }
 
-// collectLogicalAliases collects table names and aliases from scan nodes.
+// collectLogicalAliases collects the names a subtree's relations answer to:
+// scan table names and aliases, a CTE reference's name (or its alias alone),
+// and a derived table's alias.
 func collectLogicalAliases(n *Node) map[string]bool {
 	aliases := make(map[string]bool)
 	var walk func(n *Node)
@@ -2790,34 +2782,25 @@ func lateralKeyNameCollides(cols []plansql.SelectColumn, innerCol string) bool {
 }
 
 // lateralWindowsPerOuterRow makes every window of a correlated LATERAL body
-// read the rows ONE outer row sees, or refuses the body.
+// read the rows ONE outer row sees, or refuses the body (ADR-0021 §1s, arc JP
+// round 5).
 //
-// Decorrelation moves the correlated predicate OUT of the body and into the
-// join, so the body runs over the WHOLE inner relation and the join selects
-// rows afterwards. For a filter that is exact; a window is computed over the
-// rows the body sees, and after the move it sees every row
+// Decorrelation moves the correlated predicate OUT of the body into the join,
+// so a window computed over the rows the body sees would see every row
 // (docs/internals/decorrelated-window-frame-boundary.md). Where every
-// correlated part is a key — `<inner expression> = <outer expression>` — the
-// rows one outer row sees are exactly the inner rows whose key equals one
-// value, so a window partitioned by the keys (and then by its own PARTITION
-// BY) reads exactly those rows: the rewrite below prepends every key the
-// window's PARTITION BY does not already carry. It is the per-key partition
-// arc LT's bound mints (lateralBoundPerOuterRow), applied to the body's own
-// windows.
-//
-// The property is the WINDOW, wherever the body evaluates one: a SELECT item
-// that is a window, a window nested inside a SELECT expression, QUALIFY,
-// HAVING, ORDER BY. Only the list's bare windows were asked until arc JP
-// round 5, so `QUALIFY row_number() OVER (ORDER BY i.v DESC) = 1` numbered
-// the whole relation and answered zero rows (LEFT: every row NULL) on every
-// arm, and `row_number() OVER (…) + 0` answered the whole relation's numbers
-// (B2). A window inside a NESTED subquery of the body belongs to that
-// subquery's own block, which the decorrelation does not move.
-//
-// A correlated part that is NOT a key is evaluated above the join, after the
-// window has already numbered the rows it removes, so no partition makes the
-// window right: refused 0A000, as before, whatever the PARTITION BY says
-// (a PARTITION BY the key did not help there — measured wrong on five arms).
+// correlated part is a key — `<inner expression> = <outer expression>` — a
+// window partitioned by the keys (then by its own PARTITION BY) reads exactly
+// one outer row's rows: the rewrite prepends every key its PARTITION BY lacks,
+// arc LT's per-key partition (lateralBoundPerOuterRow) applied to the body's
+// windows. Every window counts — a SELECT item, one nested in a SELECT
+// expression, QUALIFY, HAVING, ORDER BY; bare items alone were asked until
+// round 5, so `QUALIFY row_number() OVER (ORDER BY i.v DESC) = 1` answered zero
+// rows (LEFT: every row NULL) on every arm and `row_number() OVER (…) + 0` the
+// whole relation's numbers (B2). A window in a NESTED subquery of the body
+// belongs to that subquery's block, which the decorrelation does not move. A
+// non-key correlated part is evaluated above the join, after the window
+// numbered the rows it removes: refused 0A000, as before, whatever the
+// PARTITION BY says (partitioning by the key was measured wrong on five arms).
 func lateralWindowsPerOuterRow(info *plansql.SelectInfo, correlatedParts []string, leftAliases map[string]bool,
 	aggregates, ungroupedAggregate bool, mintedKeys map[string]string) error {
 	if info == nil || len(correlatedParts) == 0 {
@@ -2952,7 +2935,7 @@ func lateralBareKeyName(innerCol string) string {
 // the slot; WHERE and GROUP BY read the INPUT and retain the source column.
 // RewriteExpr reaches references in CASE, casts and functions, stopping at aggregates.
 // Do not walk WINDOW specs: lateralWindowsPerOuterRow must read the original
-// PARTITION BY to recognize the correlation key and decide frame preservation.
+// PARTITION BY to recognize a correlation key it already carries.
 // Plant ColRef.Slot provenance to distinguish planner references from user names
 // (ADR-0025 rule 1).
 // See docs/internals/lateral-key-slot-reference-scope.md for the design.
@@ -3259,8 +3242,9 @@ func lateralSelectsColumn(cols []plansql.SelectColumn, innerCol string) bool {
 	return false
 }
 
-// extractInnerColumn extracts the inner (non-outer) column from a correlated
-// equality predicate like "order_id = o.id". Returns the unqualified inner column.
+// extractInnerColumn extracts the inner (non-outer) side from a correlated
+// equality predicate like "order_id = o.id", as written (qualified if the
+// query qualified it); "" when a parsed part is not such an equality.
 func extractInnerColumn(expr string, outerAliases map[string]bool) string {
 	// The equality's own two sides, from the parse — the first `=` of the
 	// TEXT is inside the outer side when that side is `CASE WHEN o.k = 1 …`

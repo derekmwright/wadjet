@@ -321,7 +321,7 @@ func aggIntegerOutputDecimal(fn string, in parquet.TypeID) (logical.DecimalMeta,
 	return logical.DecimalMeta{Precision: prec, Scale: scale}, true
 }
 
-// aggInputColumnType and AggInputColumnDecimal resolve both halves of a bare
+// aggInputColumnType and aggInputColumnDecimal resolve both halves of a bare
 // aggregate argument's declaration. Rename/derived-table outputs must be reachable
 // when a scan does not carry the name (#728); a type and (p,s) must describe the
 // same column. The lookup order below accounts for dispatch-respelled sources.

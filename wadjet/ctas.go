@@ -300,12 +300,13 @@ func resultRows(res *QueryResult, target []parquet.Column, sources []assignSourc
 	}}
 }
 
-// assignUnknownLiteral coerces SQL's `unknown` — a bare quoted literal in the
-// select list — with the TARGET's own input function. For the integer-domain
-// types that is a decimal number in the type's range and nothing else; every
-// other declaration keeps the assignment converter, whose text readings ARE
-// those types' input functions (parquet's accept-sets for the network and
-// temporal families, DecimalValueFromText for DECIMAL).
+// assignUnknownLiteral coerces a value read as SQL's `unknown` — a typed-text
+// call's value (assignSource.typedText; a quoted constant is read by
+// assignLiteralToColumn) — with the TARGET's own input function. For the
+// integer-domain types that is a decimal number in the type's range and
+// nothing else; every other declaration keeps the assignment converter, whose
+// text readings ARE those types' input functions (parquet's accept-sets for
+// the network and temporal families, DecimalValueFromText for DECIMAL).
 func assignUnknownLiteral(v any, col parquet.Column) (any, error) {
 	// No declared source type: an `unknown` literal has none by definition —
 	// PostgreSQL types it FROM the target, which is this whole function's
@@ -547,9 +548,9 @@ func querySourceError(err error, budget int64) error {
 // boxes reach the writer raw, and `parquet.DecimalValueFromBox` reads an
 // integer box as the already-UNSCALED carrier (ADR-0018 §4): a BIGINT 5 into a
 // DECIMAL(18,4) column stored 0.0005 where PostgreSQL 17.11 and this engine's
-// own VALUES door store 5.0000 (measured, both). That is the exact hazard
-// `ingest.AssignableToColumn`'s comment refuses DECIMAL→DECIMAL for, and its
-// integer arm has no scale either.
+// own VALUES door store 5.0000 (measured, both). That is the carrier hazard
+// `ingest.AssignableToColumn`'s comment names, and it admits DECIMAL→DECIMAL
+// and integer→DECIMAL only because this conversion runs.
 //
 // It is also the only place that narrows PORT to uint16 and PROTOCOL to uint8.
 // The writer's leaf check range-checks an int32 carrier, not the stored width,

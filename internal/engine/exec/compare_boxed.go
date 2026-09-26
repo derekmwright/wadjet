@@ -253,7 +253,8 @@ func boxedRowCompare(fields []parquet.Column) boxedCompare {
 
 // boxedListCompare compares two boxed ARRAYs (or MAPs) element-wise over the
 // common prefix, then by length — PostgreSQL's array_cmp, and compareListAt's
-// rule columnar-side.
+// rule columnar-side. An array whose element is an array is multi-dimensional
+// and orders by boxedMultiDimCompare instead.
 func boxedListCompare(elem *parquet.Column) boxedCompare {
 	if elem != nil && elem.Type == parquet.TypeArray {
 		return boxedMultiDimCompare(elem)

@@ -93,8 +93,9 @@ func (c *Coordinator) readScalarFromStageOutput(ctx context.Context, out StageOu
 // scalarFromBatches extracts the scalar value from the producer's output
 // batches. When projection contains an Expr-bearing rename (the subquery's
 // wrapped-aggregate SELECT — e.g. SUM(...) * 0.0001), compile and evaluate
-// the expression for row 0 and return its formatted literal. Otherwise fall
-// back to firstScalarLiteral on the raw first column.
+// the expression for row 0 and return its formatted literal; a computed
+// container value is refused 0A000 (noContainerLiteral). Otherwise fall back
+// to firstScalarLiteral on the raw first column.
 func scalarFromBatches(batches []*batch.RecordBatch, projection []dagplan.OutputRename) (string, bool, error) {
 	for _, r := range projection {
 		if r.Expr == nil {
@@ -188,7 +189,8 @@ func formatGoValue(v any) string {
 
 // firstScalarLiteral returns the SQL-literal rendering of the first column of
 // the first non-empty row across batches. Returns ok=false when batches have
-// no rows.
+// no rows. A MAP, a ROW, or an ARRAY arrayScalarLiteral cannot spell is
+// refused 0A000 (noContainerLiteral).
 func firstScalarLiteral(batches []*batch.RecordBatch) (string, bool, error) {
 	for _, b := range batches {
 		n := b.ActiveLen()
@@ -252,9 +254,10 @@ func markDecimalPrecision(c *parquet.Column) {
 }
 
 // formatScalar renders a column value at row index as a SQL literal suitable
-// for substitution into a filter expression. Mirrors planner.scalarToLiteral
+// for substitution into a filter expression. Mirrors dagplan.scalarToLiteral
 // so the worker's expression compiler sees the same text it would have seen
-// from an inline literal.
+// from an inline literal — except a DATE or TIMESTAMP, which substitutes as a
+// typed CAST of its text (see its case).
 func formatScalar(vec *batch.Vector, row int, typ parquet.TypeID) string {
 	switch typ {
 	case parquet.TypeBool:
