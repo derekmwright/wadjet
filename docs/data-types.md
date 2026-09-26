@@ -732,7 +732,9 @@ types differ meet at ONE common element type wherever they meet — a comparison
 `IN` / `= ANY`, a hash or sort-merge join key, `UNION` / `INTERSECT` / `EXCEPT`,
 `CASE`, `COALESCE`, `GREATEST`, `LEAST`, `ARRAY[a, b]` — PostgreSQL's numeric
 promotion over the element: `int4[]` and `bigint[]` meet at `bigint[]`, an
-integer and a `numeric` at `numeric` (exactly), anything and a float at
+integer and a `numeric` at `numeric` (exactly), an integer, a `numeric` or
+nothing wider than `real` and `real` at `real` (`int4[]` and `real[]` meet at
+`real[]`, not `double precision[]`), anything and `double precision` at
 `double precision`, two `numeric(p,s)` at their common `numeric(p,s)` (the
 larger scale, so no digit is rounded: `CASE … THEN numeric(5,2)[] ELSE
 numeric(9,4)[] END` keeps `{1.2345}`). PostgreSQL has no `int[] = float8[]`

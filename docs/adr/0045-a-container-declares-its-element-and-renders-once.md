@@ -91,6 +91,34 @@ psql).
    its element's (p,s) by the scalar cast's rule (a bare NUMERIC takes the
    operand element's scale); it declared text[], so its elements were
    compared and hashed as text.
+   **Round 6 (an element with no column type of its own).** An INTERVAL
+   literal (`INTERVAL '…'`, or a CAST to one) declares no column type
+   ANYWHERE else in this engine (`physical.binOpTemporalType`'s note: "the
+   engine has no interval column") — `nodeDeclaredType` had no case for it, so
+   an `ARRAY[…]` of them declined the WHOLE constructor as Undecided, and
+   every meeting point guessed: the projection took the STRING fallback and a
+   container box into STRING/BYTES is refused (§2 below), and the
+   comparator's own last-resort box reader (`expr.boxShape`) had no case for
+   `expr.IntervalValue` and defaulted to INT64 — both #361's guard on a shape
+   base answered PostgreSQL's value for (`count(*)` over a projection nothing
+   reads, `=`, `<`, `GROUP BY`, `DISTINCT`, `UNION`). `arrayLitDeclaredType`
+   now declares such an element DURATION — the one element kind this engine
+   already carries as a plain int64 with no (p,s) to get wrong
+   (`kernel.CompareValuesAt` groups it with INT64) — and
+   `batch.DurationNanoser` (an interface `batch` exposes so it need not import
+   `expr` to recognize `expr.IntervalValue` by name) is what a value of no
+   other column type here writes into it: `expr.IntervalValue.DurationNanos`
+   is PostgreSQL 17.11's own `interval_cmp` metric (a month is 30 days here,
+   twelve of them a year), so `ARRAY[INTERVAL '2 days'] < ARRAY[INTERVAL '10
+   days']` orders by VALUE where the two intervals' RENDERED TEXT does not,
+   and `ARRAY[INTERVAL '1 month'] = ARRAY[INTERVAL '30 days']` as
+   PostgreSQL's own `array_cmp` does. Rendering an interval element to text
+   still refuses 0A000 (§3): DURATION's own renderer prints a plain
+   nanosecond count and nothing here asks it to convert one — a bare
+   `SELECT ARRAY[INTERVAL '1 hour']` now answers that count (`[3600000000000]`)
+   rather than raising 42000, which is not PostgreSQL's value either but is
+   this type's existing, documented rendering (`docs/postgres-differences.md`
+   #125, "DURATION counts nanoseconds").
 2. **Loud, not plausible.** A container box written into a STRING or BYTES
    vector is a `*TypeMismatchError` (#361's guard), not `fmt.Sprint` text;
    a container written into an ARRAY/MAP/ROW vector allocated without its
@@ -201,6 +229,17 @@ psql).
    chosen box is moved into it before the declared vector receives it
    (`expr.containerChoice`: an integer leaf as its exact text for a DECIMAL
    element, never an unscaled carrier).
+   **Scope (round 6): scalar elements.** `batch.CommonContainerColumn` unifies
+   a SCALAR element pair at every meeting point; a ROW or MAP element's OWN
+   FIELDS keep their own per-side type instead of folding through the same
+   rule. An array of ROW whose fields differ in integer width
+   (`list<struct<x int32,…>>` beside `list<struct<x int64,…>>`) compares,
+   keys and combines by VALUE here — `=` and a join key say never equal,
+   `<` orders by value, `UNION` keeps both rows — where PostgreSQL refuses
+   the pair outright (42804, `could not convert type`, the same refusal
+   ADR-0012's "Two ROW shapes do not fold" already names for a bare ROW
+   column of two shapes): a superset, not a fold, and not this decision's
+   "one common element type" rule.
 
 ## Alternatives rejected
 
