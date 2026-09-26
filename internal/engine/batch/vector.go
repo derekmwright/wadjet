@@ -1326,6 +1326,19 @@ func (v *Vector) SetValue(i int, val any) {
 			v.Int64Data[i] = int64(tv)
 		case float64:
 			v.Int64Data[i] = int64(tv)
+		case DurationNanoser:
+			// A value from an upper layer that carries no column type of its
+			// own here — expr.IntervalValue, an INTERVAL literal's box (arc CW
+			// round 6, B1) — supplies its own nanosecond count rather than
+			// this package importing expr to recognize it by name. false is
+			// the same refusal an unmatched Go type gets: an opaque interval
+			// (a CAST of runtime text this engine cannot reduce to a value,
+			// IntervalValue.text) has no number to store.
+			if ns, ok := tv.DurationNanos(); ok {
+				v.Int64Data[i] = ns
+				break
+			}
+			v.mismatch(val)
 		default:
 			v.mismatch(val)
 		}

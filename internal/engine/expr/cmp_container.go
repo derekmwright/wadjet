@@ -102,6 +102,16 @@ func boxShape(v any) *parquet.Column {
 			el = &parquet.Column{Type: parquet.TypeString}
 		case bool:
 			el = &parquet.Column{Type: parquet.TypeBool}
+		case IntervalValue:
+			// An INTERVAL element (arc CW round 6, B1): the one box here with
+			// no numeric/string/bool Go type of its own, so it used to fall
+			// through unmatched and this function's INT64 default (below)
+			// wrote it into an Int64Data child that cannot hold it (#361).
+			// DURATION is where declared_output.go's arrayLitDeclaredType
+			// already puts a declared array of them; this is the SAME element
+			// for the rare operand that reaches this last-resort reader with
+			// no declaration at all (built outside the SQL AST).
+			el = &parquet.Column{Type: parquet.TypeDuration}
 		case []any:
 			el = boxShape(x)
 		}

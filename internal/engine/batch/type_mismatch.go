@@ -10,6 +10,16 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
+// DurationNanoser lets a value from a package this one cannot import supply
+// its own DURATION carrier (arc CW round 6, B1): expr.IntervalValue is the
+// one example today — an INTERVAL literal's element, which declares no
+// column type anywhere else in this engine — implementing it rather than
+// this package naming that type. false is the same refusal an unrecognized
+// Go type gets from Vector.SetValue's TypeDuration arm: an opaque interval
+// (a runtime CAST this engine's single-unit fields cannot hold) has no
+// number to store and is loud, not a plausible zero.
+type DurationNanoser interface{ DurationNanos() (int64, bool) }
+
 // TypeMismatchError panics when a writer's Go type has no storage conversion
 // (#361; #310, #327, #331, #333, #345, #353, #371, #372).
 // It implements FatalEvalPanic (Error + FatalEvalError): drivers, worker recover,

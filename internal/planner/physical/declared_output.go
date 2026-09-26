@@ -2377,9 +2377,33 @@ func isSimpleColRef(node plansql.Node) bool {
 // declines the whole constructor. A constructor of nothing but NULLs is
 // text[], as PostgreSQL resolves `unknown`; one of NO elements has no type
 // to declare (PostgreSQL refuses it outright, 42P18) and declines.
+//
+// An INTERVAL element (nodeIsInterval) declares no column type ANYWHERE else
+// in this engine (binOpTemporalType's note: "the engine has no interval
+// column") — nodeDeclaredType has no case for it, so this loop used to hit
+// its default arm and decline the WHOLE array as Undecided, which left every
+// meeting point guessing: the projection took the STRING fallback and a
+// container box into STRING/BYTES is refused (ADR-0045 §2), and the
+// comparator's own last-resort shape reader (expr.boxShape) had no case for
+// expr.IntervalValue either and defaulted to INT64 — both #361 silent-write
+// guard panics on a shape that answered PostgreSQL's value at base (arc CW
+// round 6, B1: a projection nothing reads, `=`, `<`, GROUP BY, DISTINCT,
+// UNION, CASE). DURATION is the one element kind this engine can carry an
+// INTERVAL by: batch.Vector's DURATION vector already orders as a plain
+// int64 (kernel.CompareValuesAt groups it with INT64), and
+// expr.IntervalValue.DurationNanos writes PostgreSQL's own interval_cmp
+// metric into it (months at 30 days, plus days, plus the time of day) — the
+// number "2 days" < "10 days" on, where the two intervals' RENDERED TEXT
+// orders the other way. The wire keeps #1268's refusal (0A000): DURATION's
+// own renderer prints a plain nanosecond count, not PostgreSQL's interval
+// text, and nothing here asks it to.
 func arrayLitDeclaredType(n *plansql.ArrayLitNode, decls ColDecls) (expr.DeclType, expr.Confidence) {
 	var decided []expr.DeclType
 	for _, e := range n.Elements {
+		if nodeIsInterval(e, decls) {
+			decided = append(decided, expr.Decl(parquet.TypeDuration))
+			continue
+		}
 		t, c := nodeDeclaredType(e, decls)
 		switch {
 		case c == expr.Decided:

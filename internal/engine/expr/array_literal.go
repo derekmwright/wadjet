@@ -125,6 +125,14 @@ func arrayElementCastName(el *parquet.Column) (string, bool) {
 			p = batch.MaxDecimalPrecision
 		}
 		return fmt.Sprintf("DECIMAL(%d,%d)", p, el.Scale), true
+	case parquet.TypeDuration:
+		// An INTERVAL element (arc CW round 6, B1) declares DURATION here —
+		// this engine's one int64-backed carrier with no column type of its
+		// own — so a DAG scalar subquery's MIN/MAX over an array of them
+		// substitutes the same way a DATE or DECIMAL array does, rather than
+		// refusing `noContainerLiteral` for a shape that is not in fact a
+		// nested array, a ROW or a MAP.
+		return "DURATION", true
 	}
 	return "", false
 }

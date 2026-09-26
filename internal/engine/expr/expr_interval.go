@@ -75,6 +75,51 @@ func addInterval(t time.Time, iv IntervalValue, subtract bool) time.Time {
 	return time.Unix(t.Unix()+int64(sign)*secs, int64(t.Nanosecond())).UTC()
 }
 
+// DurationNanos implements batch.DurationNanoser (arc CW round 6, B1): the
+// DURATION carrier a container's ARRAY(INTERVAL) element writes into —
+// this engine's one int64-backed column type with no (p,s) of its own to get
+// wrong, already ordered as a plain int64 (kernel.CompareValuesAt groups
+// DURATION with INT64). The number is PostgreSQL 17.11's interval_cmp metric
+// (interval_cmp_value): a month is 30 days here, twelve of them a year, so
+// `ARRAY[INTERVAL '1 year'] = ARRAY[INTERVAL '360 days']` and
+// `ARRAY[INTERVAL '1 month'] = ARRAY[INTERVAL '30 days']` order equal exactly
+// as PostgreSQL's own array_cmp does (measured, wadjet-pg-cw6) — converted to
+// nanoseconds and added to the time-of-day, so "2 days" orders before
+// "10 days" where the two intervals' RENDERED TEXT (the comparator's old
+// last-resort fallback) does not.
+//
+// false is an OPAQUE interval (iv.text: a runtime CAST this engine's
+// single-unit fields could not hold) or a value past int64 nanoseconds'
+// range: the checked sum addInterval already uses above, so an adversarial
+// literal refuses (the caller's #361 silent-write guard) rather than storing
+// a wrapped or truncated order.
+func (iv IntervalValue) DurationNanos() (int64, bool) {
+	if iv.text != "" {
+		return 0, false
+	}
+	months := int64(iv.Years)*12 + int64(iv.Months)
+	total, ok := int64(0), true
+	for _, f := range []struct{ n, unit int64 }{
+		{months, 30 * 86400 * 1_000_000_000},
+		{int64(iv.Days), 86400 * 1_000_000_000},
+		{int64(iv.Hours), 3600 * 1_000_000_000},
+		{int64(iv.Minutes), 60 * 1_000_000_000},
+		{int64(iv.Seconds), 1_000_000_000},
+	} {
+		p := f.n * f.unit
+		if f.n != 0 && p/f.n != f.unit {
+			ok = false
+			break
+		}
+		if (p > 0 && total > math.MaxInt64-p) || (p < 0 && total < math.MinInt64-p) {
+			ok = false
+			break
+		}
+		total += p
+	}
+	return total, ok
+}
+
 // String renders an INTERVAL as PostgreSQL's default (`postgres` style)
 // output (EncodeInterval, INTSTYLE_POSTGRES): the month count as `N year(s)
 // N mon(s)` (twelve months are a year: `INTERVAL '14 months'` is `1 year 2
