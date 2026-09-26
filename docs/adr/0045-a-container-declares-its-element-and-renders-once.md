@@ -1,6 +1,6 @@
 # ADR-0045: A container declares its element at the declared-output seam and renders through one renderer
 
-Status: Accepted (2026-09-24, arc CW: #1250, #1017, #1133, #1303, #1268, #1021)
+Status: Accepted (2026-09-24, arc CW: #1250, #1017, #1133, #1303, #1268, #1021; rounds 1–3 the same day). Amended 2026-09-25 (rounds 4–5: a subquery operand and a DECIMAL element declare and order as PostgreSQL does; one common element type for two containers; multi-dimensional arrays taken out of scope, #1337) and 2026-09-26 (round 6: an INTERVAL element through the DURATION carrier; the common-element rule's scope is scalar elements).
 
 Related: ADR-0026 (a group key/slot has one identity and one name — the
 declared output this extends), ADR-0012 (PostgreSQL decides semantics; the
@@ -140,8 +140,9 @@ psql).
    every projection spec beside the element; a VECTOR vector allocated without
    it refuses (`*ContainerShapeError`) instead of keeping the slot NULL. A function registered with a container return and no shape (no builtin
    is) refuses in every whole-value position. A container whose element has
-   no PostgreSQL text form here — an INTERVAL (this engine has no interval
-   text form) — refuses a text or JSON cast with 0A000 rather than printing
+   no PostgreSQL text form here — an INTERVAL (a scalar INTERVAL prints its
+   own text, `1 day`, but no container renderer gives an element PostgreSQL's
+   interval text) — refuses a text or JSON cast with 0A000 rather than printing
    Go's struct text (round 3). An array cast to `VECTOR(n)` whose declared
    element is not a number is 42846, pgvector's answer, whatever its box.
    **Multi-dimensional arrays are out of this decision's scope (round 5).**
@@ -161,7 +162,7 @@ psql).
    nested argument refuse 0A000 as they did. The one exception is the
    ordering (§4), where `array_cmp` stays: reverting it moved cells AWAY from
    PostgreSQL that main answered right. The semantics are a follow-up of
-   their own (postgres-differences records them).
+   their own (postgres-differences records them; #1337).
 3. **One renderer.** PostgreSQL's text output — `array_out` (`{…}`, its
    quoting, bare NULL, a nested dimension bare) and `record_out` (`(…)`, an
    empty slot for NULL), with temporal leaves in their text form — lives in
@@ -263,6 +264,16 @@ array, an array of ROW or MAP, a ROW and a MAP declare OID 25 (MAP renders
 fractional literal array is `float8[]` (ADR-0024's literal deferral);
 `current_schemas` is `text[]` (PostgreSQL `name[]`). `map_keys`, `map_values`
 and `map_entries` follow the MAP's stored order (they ranged over a Go map).
+Two supersets are kept: `ARRAY[1.5] > ARRAY[1]` compares by value where
+PostgreSQL has no `numeric[] > integer[]` operator (42883), and `CAST(ARRAY[1,2]
+AS JSON)` is `to_json`'s text where PostgreSQL has no such cast (42846). An
+INTERVAL element compares by value (§1 round 6) but a text/JSON cast of it is
+0A000 and a bare projection answers the DURATION nanosecond count; a nested
+array's multi-dimensional semantics are not PostgreSQL's (§2, #1337). Arrays
+with NO common element type (an integer array beside a text array) are not yet
+refused as PostgreSQL refuses them: `CASE`, `COALESCE` and `=` answer and a set
+operation is 42000 — a defect recorded for repair on the differences page, not
+a position of this decision.
 
 Out of scope, recorded as filing candidates: `array_agg(x ORDER BY y)`, the
 `ROW(…)` constructor (#985), `string_to_array`.

@@ -29,7 +29,7 @@ Conventions:
 | [0009](0009-worker-scratch-lifecycle.md) | Worker scratch lifecycle: adopt-into-cache, paced asynchronous purge | Accepted |
 | [0010](0010-shuffle-wire-formats.md) | WSHF/WSHC shuffle formats and where compression happens | Accepted |
 | [0011](0011-performance-measurement-methodology.md) | Performance measurement methodology at SF100 | Accepted |
-| [0012](0012-sql-semantics-authority.md) | PostgreSQL is the SQL semantics authority; DuckDB is the performance goal and an oracle | Accepted |
+| [0012](0012-sql-semantics-authority.md) | PostgreSQL is the SQL semantics authority; DuckDB is the performance goal and an oracle (amended 2026-09-24..25: one assignment table for every write, the temporal operators' types, the LATERAL refusals by property, the container closures) | Accepted |
 | [0013](0013-correctness-gates-and-their-boundaries.md) | The correctness gates, and what they deliberately do not gate (amended 2026-08-23: type-matrix gates + a per-issue, not per-pin, ratchet; amended 2026-09-24: class 7 retired for text MODE) | Accepted |
 | [0014](0014-group-index-layout-at-construction.md) | Group-index layout is decided at sink construction, not by runtime conversion | Accepted |
 | [0015](0015-decode-ahead-is-an-admission-class.md) | Decode-ahead is a CPU-token admission class, not a `TryAcquire` client behind the consumer FIFO | Accepted |
@@ -38,12 +38,12 @@ Conventions:
 | [0018](0018-parquet-file-numbers-are-input.md) | A parquet file's own numbers are input, not fact | Accepted |
 | [0019](0019-query-scoped-panic-boundary.md) | A panic fails the query, not the server — and the gate is what keeps that honest | Accepted |
 | [0020](0020-drop-table-reclaim-is-opt-in.md) | DROP TABLE's physical reclaim is guarded and opt-in; a compaction publication is one validated transaction and an object is retired only with proof (2026-09-05 amendment) | Accepted |
-| [0021](0021-subquery-name-resolution-and-set-materialization.md) | A decorrelated subquery's names are resolved from the plan, and the sets it cannot join are materialized | Accepted |
+| [0021](0021-subquery-name-resolution-and-set-materialization.md) | A decorrelated subquery's names are resolved from the plan, and the sets it cannot join are materialized (amended 2026-09-24..26, §1s: an outer expression is a LATERAL key; a routed LATERAL, #1323) | Accepted |
 | [0022](0022-a-row-field-path-is-not-a-column-reference.md) | A ROW field path is not a column reference: it is resolved from its parent's declaration and materialized like a computed expression | Accepted |
 | [0023](0023-group-key-and-group-value-are-two-encodings.md) | A group's KEY and its VALUE are two encodings; never decode one out of the other | Accepted |
-| [0024](0024-decimal-is-finite-fixed-point-with-postgres-result-types.md) | DECIMAL is a finite 128-bit fixed-point type that follows PostgreSQL's result-TYPE rules | Accepted |
-| [0025](0025-a-stage-never-carries-what-its-fragment-will-not-run.md) | A stage never carries a predicate or a projection its fragment will not run | Accepted |
-| [0026](0026-a-group-key-has-one-identity-and-one-name.md) | A GROUP BY key has one identity and one published name (§7 a derived block a star reads is a relation; §8 the DAG publishes the plan's column set and ORDER, 2026-09-08) | Accepted |
+| [0024](0024-decimal-is-finite-fixed-point-with-postgres-result-types.md) | DECIMAL is a finite 128-bit fixed-point type that follows PostgreSQL's result-TYPE rules (amended 2026-09-24: a fractional literal is numeric) | Accepted |
+| [0025](0025-a-stage-never-carries-what-its-fragment-will-not-run.md) | A stage never carries a predicate or a projection its fragment will not run (2026-09-24: a project stage types its list from the child's emitted declarations — the derived-table own-type residual closed, arc CW) | Accepted |
+| [0026](0026-a-group-key-has-one-identity-and-one-name.md) | A GROUP BY key has one identity and one published name (§7 a derived block a star reads is a relation; §8 the DAG publishes the plan's column set and ORDER, 2026-09-08; §8k/§8l a join conjunct's edge and a block's own names, 2026-09-24..25) | Accepted |
 | [0027](0027-a-spill-gate-proves-it-spilled.md) | A spill gate proves it spilled, and a clone's spill artifacts belong to the primary (amended 2026-09-03: #791's third route) | Accepted |
 | [0028](0028-operational-invariants-breaker-scope-and-query-reclamation.md) | A breaker is scoped by operation class, and every exit path of a query reclaims the same way | Accepted |
 | [0029](0029-configuration-precedence.md) | Configuration precedence: explicit flag > env > file > default, resolved once from one registry | Accepted |
@@ -60,4 +60,4 @@ Conventions:
 | [0040](0040-a-resolved-setting-belongs-to-the-instance-that-uses-it.md) | A resolved setting belongs to the instance that uses it — never package state — and rides the task to a process that re-plans the statement | Accepted |
 | [0041](0041-an-embedded-catalog-is-a-directory-opened-the-way-serve-opens-it.md) | An embedded program's catalog is a DIRECTORY, opened the way `serve` opens it: one lock, one JetStream store, one set of tables across the program, the CLI and the server | Accepted |
 | [0044](0044-the-system-catalog-is-relations-the-engine-scans.md) | pg_catalog and information_schema are relations the engine scans, materialized through the identity's view — not a canned responder over statement text | Accepted |
-| [0045](0045-a-container-declares-its-element-and-renders-once.md) | A container carries its element type through the declared-output seam to every door, and renders through one PostgreSQL text renderer | Accepted |
+| [0045](0045-a-container-declares-its-element-and-renders-once.md) | A container carries its element type through the declared-output seam to every door, and renders through one PostgreSQL text renderer (2026-09-24; amended 2026-09-25 and 2026-09-26) | Accepted |

@@ -3007,6 +3007,16 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      zero-row ARRAY result declares its array OID; the pin flipped to 1007
      as the proof. A nested array now renders bare (`{{1,2},{3,4}}`,
      `array_out`'s form) and keeps OID 25 for the raggedness above.
+     The other container differences arc CW measured (2026-09-24..26) are
+     recorded in ADR-0045's Consequences and on the differences page rather
+     than repeated here: a network-type array is `text[]`, `x::int[]` is
+     `bigint[]`, a fractional literal array `float8[]`; two supersets kept —
+     `ARRAY[1.5] > ARRAY[1]` compares by value (PostgreSQL: 42883) and
+     `CAST(ARRAY[1,2] AS JSON)` is `to_json`'s text (PostgreSQL: 42846); an INTERVAL element compares by value through the DURATION
+     carrier but has no text (0A000); a nested array's multi-dimensional
+     semantics are not PostgreSQL's (#1337); and arrays with NO common
+     element type are not refused as PostgreSQL refuses them (a defect,
+     recorded for repair, not a kept superset).
 
      The ROW half of this entry is unchanged. The VALUE is
      PostgreSQL's own composite text in DECLARED field order, byte for byte
