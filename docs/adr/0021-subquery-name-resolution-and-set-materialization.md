@@ -2667,7 +2667,7 @@ no-match row is the join's pad) is refused. `QUALIFY row_number() OVER (…) =
 1` answered zero rows on every arm. On the DAG a LEFT lateral over an arm
 that publishes a window's output routes single-process like a grouped arm
 (its pad file was a column narrower). Gate:
-`coordinator.TestArcJP5LateralBodyIsRightPerOuterRow` (1086 cells: local
+`coordinator.TestArcJP5LateralBodyIsRightPerOuterRow` (1096 cells: local
 predicate shapes × key forms × body kinds × join kinds, window positions ×
 key forms × join kinds × bounds, the property refusals).
 
