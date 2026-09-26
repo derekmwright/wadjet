@@ -739,7 +739,11 @@ nothing wider than `real` and `real` at `real` (`int4[]` and `real[]` meet at
 larger scale, so no digit is rounded: `CASE … THEN numeric(5,2)[] ELSE
 numeric(9,4)[] END` keeps `{1.2345}`). PostgreSQL has no `int[] = float8[]`
 operator without the coercion; this engine answers the comparison it would
-make after it. Arms with no common element type are `42804`. `CAST(container AS TEXT)` (and `VARCHAR(n)`) is the same
+make after it. Arms with no common element type (an integer array beside a
+text array) are not yet PostgreSQL's `42804` everywhere: a `UNION` /
+`INTERSECT` / `EXCEPT` refuses them with `42000` (`22P02` when a `numeric`
+element meets text), and `CASE`, `COALESCE` and `=` answer where PostgreSQL
+refuses (docs/postgres-differences.md). `CAST(container AS TEXT)` (and `VARCHAR(n)`) is the same
 rendering under the operand's DECLARED element, whatever expression built it —
 `CAST(ARRAY[COALESCE(ts, …)] AS TEXT)` is `{"2024-01-01 01:00:00"}` and
 `CAST(ARRAY[d] AS TEXT)` `{2024-01-02}`, and a subquery that returns the
@@ -765,6 +769,21 @@ is epoch milliseconds there, as a `TIMESTAMP` column is).
 A container value that reaches a TEXT column through some path that did not
 carry its declaration is refused with a type-mismatch error rather than
 published as text (ADR-0045 §2).
+
+**Data written before v0.25.1.** A table written by `read_json`, or by
+`CREATE TABLE AS` over a container expression, before v0.25.1 holds Go's
+rendering of its container values: in a TEXT column (`map[deep:true]`,
+`[1 2 map[z:w]]`, `[SYN ACK]`, a DATE array cast to text as its day counts
+`[19724]`) and as an ELEMENT of an array column (`{1,2,map[z:w]}`,
+`{1,"[2 3]"}`). Rows appended since hold JSON / PostgreSQL text, so one column
+can mix the two, and the JSON functions answer NULL over the old rows. Find a
+text column's old rows with `WHERE col LIKE 'map[%' OR col LIKE '[%'`, and an
+array column's with `WHERE CAST(col AS TEXT) LIKE '%map[%' OR CAST(col AS
+TEXT) ~ '\[[^],"]* [^]]*\]'` (a value that genuinely holds such text matches
+too). The old text is not converted on read — Go's rendering of a map or a
+slice cannot be inverted (a string element holding a space or a `:` has no
+delimiter) — so recover by re-running the `CREATE TABLE AS` / `read_json` over
+the source.
 
 **Array functions:** `cardinality`, `element_at`, `array_contains`, `array_join`, `array_min`, `array_max`, `array_length`
 

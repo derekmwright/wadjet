@@ -301,6 +301,7 @@ Full signatures for every function: [SQL Reference § Built-in Functions](docs/s
 Full analytical SQL via a custom recursive descent parser:
 
 - SELECT, INSERT, UPDATE, DELETE, MERGE, EXPLAIN, DESCRIBE, SHOW, ANALYZE
+- `INSERT ... VALUES` with any scalar expression in a cell (typed literals, `CAST`, `now()` / `CURRENT_DATE`, arithmetic), assigned by PostgreSQL's assignment casts — the same table `INSERT ... SELECT`, `UPDATE` and `MERGE` use
 - CREATE/DROP TABLE, CREATE/DROP FUNCTION, CREATE/ALTER/DROP ALERT
 - `CREATE TABLE [IF NOT EXISTS] t [(a, b)] AS <query> [WITH [NO] DATA]` and `INSERT INTO t [(a, b)] <query>` — a query's result becomes a table, its schema taken from the query's declared output; `IF NOT EXISTS` works on both forms of `CREATE TABLE`
 - CTEs (`WITH ... AS`, and `WITH RECURSIVE` — the recursive form is answered in-process), UNION / INTERSECT / EXCEPT (with ALL variants)
@@ -312,7 +313,7 @@ Full analytical SQL via a custom recursive descent parser:
 - CASE, CAST, `LIKE`/`ILIKE` (with `ESCAPE`), `SIMILAR TO` (the SQL standard's pattern language, with `ESCAPE`), `BETWEEN [SYMMETRIC|ASYMMETRIC]`, IN, IS NULL/TRUE/FALSE/UNKNOWN, `IS DISTINCT FROM`, `= ANY`/`= SOME`/`<> ALL`, row-value comparison `(a, b) < (c, d)`, and the `^` exponentiation and `#` integer-XOR operators — the whole predicate band at PostgreSQL's own precedence, so `5 BETWEEN 10 AND 1 = true` and `1 = 1 IS TRUE` parse and mean what they mean there
 - The SQL-standard function spellings: `SUBSTRING(s FROM n FOR m)`, `SUBSTRING(s FROM pattern)`, `OVERLAY(s PLACING r FROM n)`, `NORMALIZE(s, NFC)`, `LOCALTIMESTAMP`, and `LEFT`/`RIGHT` as function names
 - Fixed-point DECIMAL(p,s) type with Int128 arithmetic (DuckDB-style scaled integers)
-- Nested types: ARRAY, ROW/STRUCT, MAP with `person.name` dot-notation, `element_at()`, `map_keys()`
+- Nested types: ARRAY, ROW/STRUCT, MAP with `person.name` dot-notation, `element_at()`, `map_keys()` — an array declares PostgreSQL's array type (`int4[]`, `text[]`, …), renders as `{1,2,3}` over pgwire and in the CLI, and compares element-wise
 - Table functions: `read_json()`, `read_csv()`, `read_parquet()` with glob patterns and named parameters
 - VECTOR(N) type for embedding storage with cosine_similarity, l2_distance, dot_product, vector_norm, vector_dims
 - `embed()` SQL function — OpenAI, Voyage AI, and Ollama embedding providers with batched API calls (one call per record batch) and LRU cache

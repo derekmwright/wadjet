@@ -4308,6 +4308,13 @@ represent. A timestamp minus a timestamp is PostgreSQL's INTERVAL, which this
 engine cannot hold as a column value: it answers the difference in
 milliseconds.
 
+A TIMESTAMP result reaches the embedded API (`wadjet.QueryResult` rows), the
+HTTP and async query APIs and gRPC as epoch milliseconds, as a TIMESTAMP
+column always has: `DATE '1998-12-01' - INTERVAL '90' DAY` is `904694400000`
+there and `1998-09-02 00:00:00` (OID 1114) on the wire. Before v0.25.1
+`date ± interval` declared text and those doors carried the string
+`1998-09-02`.
+
 `INT_TO_IP(n)`, `IP_ADD(ip, n)`, `IP_SUBTRACT(ip, n)`, `MASK_IP(ip, bits)`,
 `IP_SUBNET(ip)`, `IP_NETMASK(cidr)`, `NETWORK_ADDRESS(cidr)`,
 `BROADCAST_ADDRESS(cidr)` and `UUID()` declare TEXT for a value
@@ -4817,7 +4824,7 @@ one listed difference):
 | TIMESTAMP | DATE | its calendar day |
 | TEXT (a column, `s \|\| ''`, `CAST(x AS TEXT)`) | anything but TEXT | 42804 — PostgreSQL has no assignment cast from text |
 | a quoted literal (`'2026-01-01'`, `'10.0.0.1'`, `'yes'`) | any type | read by the column's own input function — BOOLEAN takes `t`/`true`/`y`/`yes`/`on`/`1` and their negations, any unique prefix (22P02 / 22007 when it names no value) |
-| a numeric literal (`2.50`, `1e3`, `2.5`), bare or inside an expression | any type | read as the numeric value it spells: into TEXT its numeric text at its own scale (`2.50`, `1000`), into an integer rounded half away from zero (`2.5` → 3) |
+| a numeric literal (`2.50`, `1e3`, `2.5`), bare or inside an expression | any type | read as the numeric value it spells: into TEXT its numeric text at its own scale (`2.50`, `1000`), into an integer rounded half away from zero (`2.5` → 3, `ABS(2.5)` → 3). Not a division or `SQRT` / `POWER` / `EXP` / `LN` / `LOG`, which are double precision here (`5 / 2.0` declares `double precision`; the transcendental functions: ADR-0024): a float into an integer rounds half to even, so `5 / 2.0` and `SQRT(6.25)` store 2 where PostgreSQL's numeric stores 3 |
 | an INTERVAL | TEXT / anything else | its text (`1 day`) / 42804 |
 | `INT_TO_IP(n)`, `UUID()` and the other TEXT-declared address/UUID functions above | any type | read like a quoted literal (a superset; docs/postgres-differences.md) |
 | anything else (an integer into DATE, BOOLEAN or an address; a date into a number; a typed NULL of the wrong type) | | 42804 `column "x" is of type ... but expression is of type ...` |
