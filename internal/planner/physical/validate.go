@@ -742,7 +742,9 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 			org = make([]parquet.TypeID, len(lo))
 			for i := range lo {
 				org[i] = typeAmbiguous
-				if lo[i] != typeAmbiguous && ro[i] != typeAmbiguous && lo[i] != originQuotedLiteral &&
+				if lo[i] == originQuotedLiteral && ro[i] == originQuotedLiteral {
+					org[i] = originQuotedLiteral
+				} else if lo[i] != typeAmbiguous && ro[i] != typeAmbiguous && lo[i] != originQuotedLiteral &&
 					comparisonClass(lo[i]) == comparisonClass(ro[i]) {
 					org[i] = lo[i]
 				}

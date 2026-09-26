@@ -649,10 +649,28 @@ func (c *comparisonTyper) memberPair(left, member plansql.Node, op string, origi
 		return c.pairOf(left, member, op, true)
 	}
 	if cr == cmpText && len(origins) == 1 && origins[0] != typeAmbiguous &&
-		comparisonClass(origins[0]) == cl && textConversionAnswers(tl, true) {
+		textOriginConverts(origins[0], tl) && textConversionAnswers(tl, true) {
 		return nil
 	}
 	return sqlerr.New("42883", "operator does not exist: %s %s %s", cmpTypeName(tl), op, cmpTypeName(tr))
+}
+
+// textOriginConverts is whether the text a CAST from origin makes reads as
+// tl on every arm: same class, and never a fractional rendering (float,
+// numeric) into an integer kind, which the DAG's cast refuses (22P02) while
+// the single arms compare the text.
+func textOriginConverts(origin, tl parquet.TypeID) bool {
+	if comparisonClass(origin) != comparisonClass(tl) {
+		return false
+	}
+	integer := func(t parquet.TypeID) bool {
+		switch t {
+		case parquet.TypeInt32, parquet.TypeInt64, parquet.TypePort, parquet.TypeProtocol, parquet.TypeDuration:
+			return true
+		}
+		return false
+	}
+	return !integer(tl) || integer(origin)
 }
 
 // originQuotedLiteral is the text-cast origin of a body column that is a
