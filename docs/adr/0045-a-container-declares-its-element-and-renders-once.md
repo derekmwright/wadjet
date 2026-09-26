@@ -271,9 +271,10 @@ INTERVAL element compares by value (§1 round 6) but a text/JSON cast of it is
 0A000 and a bare projection answers the DURATION nanosecond count; a nested
 array's multi-dimensional semantics are not PostgreSQL's (§2, #1337). Arrays
 with NO common element type (an integer array beside a text array) are not yet
-refused as PostgreSQL refuses them: `CASE`, `COALESCE` and `=` answer and a set
-operation is 42000 — a defect recorded for repair on the differences page, not
-a position of this decision.
+refused as PostgreSQL refuses them: `CASE`, `COALESCE`, `=`, `INTERSECT`,
+`EXCEPT` and a text-first `UNION` answer, and an integer-first `UNION` is
+42000 — a defect recorded for repair on the differences page (#1295), not a
+position of this decision.
 
 Out of scope, recorded as filing candidates: `array_agg(x ORDER BY y)`, the
 `ROW(…)` constructor (#985), `string_to_array`.

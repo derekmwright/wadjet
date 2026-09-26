@@ -740,10 +740,12 @@ larger scale, so no digit is rounded: `CASE … THEN numeric(5,2)[] ELSE
 numeric(9,4)[] END` keeps `{1.2345}`). PostgreSQL has no `int[] = float8[]`
 operator without the coercion; this engine answers the comparison it would
 make after it. Arms with no common element type (an integer array beside a
-text array) are not yet PostgreSQL's `42804` everywhere: a `UNION` /
-`INTERSECT` / `EXCEPT` refuses them with `42000` (`22P02` when a `numeric`
-element meets text), and `CASE`, `COALESCE` and `=` answer where PostgreSQL
-refuses (docs/postgres-differences.md). `CAST(container AS TEXT)` (and `VARCHAR(n)`) is the same
+text array) are not yet PostgreSQL's `42804` everywhere: a `UNION` whose
+first arm is the integer array is `42000` (`22P02` when that arm's element is
+`numeric`); a `UNION` with the text array first, an `INTERSECT` and an
+`EXCEPT` answer (`SELECT ARRAY['a'] UNION SELECT ARRAY[1]` is `{a}`, `{1}` as
+`text[]`); and `CASE`, `COALESCE` and `=` answer where PostgreSQL refuses
+(docs/postgres-differences.md, #1295). `CAST(container AS TEXT)` (and `VARCHAR(n)`) is the same
 rendering under the operand's DECLARED element, whatever expression built it —
 `CAST(ARRAY[COALESCE(ts, …)] AS TEXT)` is `{"2024-01-01 01:00:00"}` and
 `CAST(ARRAY[d] AS TEXT)` `{2024-01-02}`, and a subquery that returns the
@@ -774,11 +776,11 @@ published as text (ADR-0045 §2).
 `CREATE TABLE AS` over a container expression, before v0.25.1 holds Go's
 rendering of its container values: in a TEXT column (`map[deep:true]`,
 `[1 2 map[z:w]]`, `[SYN ACK]`, a DATE array cast to text as its day counts
-`[19724]`) and as an ELEMENT of an array column (`{1,2,map[z:w]}`,
+`[19724]`) and as an ELEMENT of an array or ROW column (`{1,2,map[z:w]}`,
 `{1,"[2 3]"}`). Rows appended since hold JSON / PostgreSQL text, so one column
 can mix the two, and the JSON functions answer NULL over the old rows. Find a
 text column's old rows with `WHERE col LIKE 'map[%' OR col LIKE '[%'`, and an
-array column's with `WHERE CAST(col AS TEXT) LIKE '%map[%' OR CAST(col AS
+array or ROW column's with `WHERE CAST(col AS TEXT) LIKE '%map[%' OR CAST(col AS
 TEXT) ~ '\[[^],"]* [^]]*\]'` (a value that genuinely holds such text matches
 too). The old text is not converted on read — Go's rendering of a map or a
 slice cannot be inverted (a string element holding a space or a `:` has no

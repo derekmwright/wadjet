@@ -2433,8 +2433,9 @@ func datatypeMismatch(v any, col parquet.Column) error {
 // "uuid" now appear on the expression side exactly as PostgreSQL spells them.
 //
 // srcKnown == false falls back to datatypeMismatch's box-based guess
-// unchanged — the path assignDateValue / assignTimestampValue take for an
-// undecided source whose box has no DATE / TIMESTAMP reading.
+// unchanged — the path an undecided source takes (assignDateValue,
+// assignTimestampValue, the BOOL target arm) when its box has no DATE /
+// TIMESTAMP reading.
 func datatypeMismatchDeclared(v any, col parquet.Column, srcType parquet.TypeID, srcKnown bool) error {
 	if !srcKnown {
 		return datatypeMismatch(v, col)
