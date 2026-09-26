@@ -453,6 +453,56 @@ func stSetOpLiteralCells() []brArmCell {
 	return out
 }
 
+// stP2MoverCells are the review's P2 finding (REVIEW_R1_opus.md, "P2"): nine
+// shapes that answered identically on all five arms at base — rightly, in
+// the superset's sense (PostgreSQL 17.11 refuses every one 42883) — outside
+// Appendix C, and now refuse 42883 at the tip: a CTE's CAST(x AS TEXT)
+// column (the derived-table form is Appendix C's own first row; #1308's
+// origin walk does not see through either kind of subselect); an ungrouped
+// max(CAST(x AS TEXT)) body; a CAST(x AS TEXT) body of one inet type
+// against the other, both directions (different comparisonClass: cmpUUID
+// vs cmpInet); an EXISTS correlated key inside a nested AND conjunct; a
+// two-level nested EXISTS (the correlated key one level down); and an
+// EXISTS correlated key under IS [NOT] DISTINCT FROM, taken as `=` (both
+// spellings, plus the NOT EXISTS mirror of IS NOT DISTINCT FROM). Recorded
+// in the notes' Appendix C with base and tip cells; values measured against
+// the repair tree and the base tree (TestZZVerifyP2, run and discarded).
+func stP2MoverCells() []brArmCell {
+	q := func(name, sql, msg string) brArmCell {
+		return brArmCell{name: "p2Mover/" + name, sql: sql, state: "42883", msg: msg}
+	}
+	const bt = "operator does not exist: bigint = text"
+	return []brArmCell{
+		q("cteCast",
+			"WITH c AS (SELECT id, CAST(v_i64 AS TEXT) AS k FROM st_pair) SELECT count(*) AS n FROM st_pair a WHERE a.v_i64 IN (SELECT k FROM c WHERE id <= 3)",
+			bt),
+		q("maxCastUngrouped",
+			"SELECT count(*) AS n FROM st_pair a WHERE a.v_i64 IN (SELECT max(CAST(r.v_i64 AS TEXT)) FROM st_pair r WHERE r.id <= 1)",
+			bt),
+		q("uuidFromIpv6Cast",
+			"SELECT count(*) AS n FROM st_pair a WHERE a.v_uuid IN (SELECT CAST(r.v_ipv6 AS TEXT) FROM st_pair r WHERE r.id <= 3)",
+			"operator does not exist: uuid = text"),
+		q("ipv6FromUuidCast",
+			"SELECT count(*) AS n FROM st_pair a WHERE a.v_ipv6 IN (SELECT CAST(r.v_uuid AS TEXT) FROM st_pair r WHERE r.id <= 3)",
+			"operator does not exist: inet = text"),
+		q("existsNestedAnd",
+			"SELECT count(*) AS n FROM st_pair a WHERE EXISTS (SELECT 1 FROM st_pair r WHERE r.id <= 3 AND (a.v_i64 = r.s_i64 AND r.id > 0))",
+			bt),
+		q("existsTwoLevelNested",
+			"SELECT count(*) AS n FROM st_pair a WHERE EXISTS (SELECT 1 FROM st_pair r WHERE r.id <= 3 AND EXISTS (SELECT 1 FROM st_pair q WHERE q.id = r.id AND q.s_i64 = a.v_i64))",
+			"operator does not exist: text = bigint"),
+		q("existsIsNotDistinctFrom",
+			"SELECT count(*) AS n FROM st_pair a WHERE EXISTS (SELECT 1 FROM st_pair r WHERE r.id <= 3 AND a.v_i64 IS NOT DISTINCT FROM r.s_i64)",
+			bt),
+		q("existsIsDistinctFrom",
+			"SELECT count(*) AS n FROM st_pair a WHERE EXISTS (SELECT 1 FROM st_pair r WHERE r.id <= 3 AND a.v_i64 IS DISTINCT FROM r.s_i64)",
+			bt),
+		q("notExistsIsNotDistinctFrom",
+			"SELECT count(*) AS n FROM st_pair a WHERE NOT EXISTS (SELECT 1 FROM st_pair r WHERE r.id <= 3 AND a.v_i64 IS NOT DISTINCT FROM r.s_i64)",
+			bt),
+	}
+}
+
 // A TYPED IN / = ANY / NOT IN / <> ALL / EXISTS / NOT EXISTS BODY SELECTING A
 // STORED TEXT COLUMN (#1308). At v0.25.1 every such body planned a semi/anti
 // join whose key pair (typed, text) was never typed: `v IN (SELECT s …)`
@@ -490,6 +540,7 @@ func TestArcSTStoredTextMembershipEveryArmRefusesOrConverts(t *testing.T) {
 	cells = append(cells, stNeighbourCells()...)
 	cells = append(cells, stCrossCastCells()...)
 	cells = append(cells, stSetOpLiteralCells()...)
+	cells = append(cells, stP2MoverCells()...)
 	refused, answered := 0, 0
 	for _, tc := range cells {
 		if tc.state != "" {
