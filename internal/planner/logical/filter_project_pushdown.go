@@ -40,8 +40,10 @@ type projOutput struct {
 }
 
 // projectSubstitutions builds the output-name → substitution map for a
-// Project's projections.
-func projectSubstitutions(projs []Projection) map[string]projOutput {
+// Project's projections. blockSwap is splitFilterForProjectPush's own
+// context (see projRefs.blockSwap); it is false for every other caller,
+// which keeps their resolution bit-for-bit as it was.
+func projectSubstitutions(projs []Projection, blockSwap bool) map[string]projOutput {
 	outs := make(map[string]projOutput, len(projs))
 	for _, p := range projs {
 		name := strings.ToLower(p.Alias)
@@ -53,7 +55,7 @@ func projectSubstitutions(projs []Projection) map[string]projOutput {
 			// ColRef can carry; nothing to map.
 			continue
 		}
-		out := classifyProjection(p, name)
+		out := classifyProjection(p, name, blockSwap)
 		if prev, dup := outs[name]; dup {
 			// Two outputs share a name: a reference is ambiguous unless
 			// both are the same passthrough.
@@ -68,8 +70,9 @@ func projectSubstitutions(projs []Projection) map[string]projOutput {
 }
 
 // classifyProjection decides what a reference to this projection's output
-// becomes below the Project.
-func classifyProjection(p Projection, name string) projOutput {
+// becomes below the Project. blockSwap is projectSubstitutions' own context
+// argument (see projRefs.blockSwap).
+func classifyProjection(p Projection, name string, blockSwap bool) projOutput {
 	if p.IsAgg {
 		// An aggregate output has no row-wise defining expression to
 		// substitute below the Project.
@@ -77,7 +80,32 @@ func classifyProjection(p Projection, name string) projOutput {
 	}
 	if p.Column != "" {
 		if bareColumnName(p.Column) == name {
-			return projOutput{} // passthrough: same name below
+			// p.Column carries the parser's BARE ColumnRef (select_parser.go
+			// strips the qualifier into a separate field the Projection does
+			// not keep); the qualifier, when the source had one, survives
+			// only in p.ASTExpr. Within the block-swap context, a
+			// passthrough is "the same name below" only when the SOURCE was
+			// itself unqualified: a QUALIFIED source (`j.v` published under
+			// its own bare name `v`) is not the same name below once this
+			// Project draws from more than one relation — a sibling arm can
+			// carry an UNSELECTED column of that same bare name, and a bare
+			// reference pushed below would bind IT instead of the published
+			// source (arc JP #1299 P1: `d.v` over `(SELECT i.id, i.oid, j.v
+			// FROM jp_i i JOIN jp_j j ON …) d` bound `i.v`, though only `j.v`
+			// was ever published as `v`). Such a source falls through to the
+			// ordinary rename logic below. Every OTHER caller (the stage
+			// DAG's filter-through-project respelling) keeps its pre-#1299
+			// reading unchanged: only the swap's own predicate rewrite knows
+			// an unresolved qualifier can only be the block's own alias
+			// (projRefs.resolve's blockSwap branch); left unconditional here
+			// it would ALSO substitute a qualified passthrough there, for
+			// a qualifier that is not necessarily self-referential.
+			if !blockSwap {
+				return projOutput{} // passthrough: same name below
+			}
+			if ref := simpleColRef(p.ASTExpr); ref == nil || ref.Table == "" {
+				return projOutput{} // passthrough: same UNQUALIFIED name below
+			}
 		}
 		// Rename: substitute a reference to the source column. Prefer the
 		// projection's own AST (it may carry a table qualifier); fall back
@@ -272,16 +300,29 @@ type projRefs struct {
 	// FIELD PATH from an ordinary qualified reference whose qualifier happens
 	// to name one of this Project's outputs (ADR-0022, #769).
 	rowFields map[string][]parquet.Column
+	// blockSwap marks a projRefs built for pushdownPredicates' Filter-Project
+	// swap (splitFilterForProjectPush) — the ONLY context where a qualifier
+	// this Project cannot otherwise place is guaranteed to be the alias the
+	// ENCLOSING query gives this whole block (a derived table's or a
+	// LATERAL arm's own name, never visible to a reference written inside
+	// the block, and therefore never one this Project's own inScope/output
+	// checks can match). resolve's final fallback and classifyProjection's
+	// passthrough test read it; every OTHER caller (ResolveFilterThroughProjects'
+	// stage-DAG walk) leaves it false and keeps its pre-#1299 reading, since an
+	// unresolved qualifier reaching THAT walk is not guaranteed to be self
+	// (arc JP #1299 P1; N3 tracks the DAG's own, separate defect on this shape).
+	blockSwap bool
 }
 
-func newProjRefs(n *Node) projRefs {
+func newProjRefs(n *Node, blockSwap bool) projRefs {
 	return projRefs{
-		outs:      projectSubstitutions(n.Projections),
+		outs:      projectSubstitutions(n.Projections, blockSwap),
 		names:     nodeScopeNames(n),
 		overAgg:   readsAnAggregate(n),
 		groupBys:  aggregateGroupKeys(n),
 		published: aggregatePublishedKeys(n),
 		rowFields: subtreeRowFields(n),
+		blockSwap: blockSwap,
 	}
 }
 
@@ -480,6 +521,26 @@ func (p projRefs) resolve(ref *plansql.ColRef) (plansql.Node, bool) {
 	// outer scope, and nothing here may touch it.
 	container, isContainer := p.outs[strings.ToLower(ref.Table)]
 	if !p.inScope(ref.Table) && !isContainer {
+		// The qualifier names neither a relation this Project draws from nor
+		// one of its own outputs used as a ROW container. Within the
+		// block-swap context (p.blockSwap) the one thing it CAN still mean
+		// is the alias the ENCLOSING query gives this whole block (a
+		// derived table's or a LATERAL arm's own name): that name is never
+		// visible to a reference written INSIDE the block, so it can never
+		// match inScope or isContainer here. Resolve the bare column
+		// against this Project's own published list — the same lookup an
+		// unqualified reference takes — instead of leaving the
+		// now-meaningless qualifier in place for a later, scope-wide
+		// qualifier strip to bind the WRONG relation (arc JP #1299 P1).
+		// Every OTHER caller keeps the original "leave it" reading: an
+		// unresolved qualifier reaching the stage DAG's own filter-through-
+		// project walk is not guaranteed to be self (N3's separate,
+		// pre-existing DAG defect on this same shape).
+		if p.blockSwap {
+			if o, ok := p.outs[strings.ToLower(ref.Column)]; ok {
+				return p.apply(o, ref.Column, "")
+			}
+		}
 		return nil, true
 	}
 	if isContainer && p.declaresField(container, ref.Table, ref.Column) {
@@ -593,7 +654,7 @@ func splitFilterForProjectPush(preds []Predicate, project *Node) (pushed, kept [
 	if ProjectsASet(project) {
 		return nil, preds
 	}
-	p := newProjRefs(project)
+	p := newProjRefs(project, true) // blockSwap: an unresolved qualifier here is the block's own alias
 	for _, pred := range preds {
 		newAST, ok := rewritePredThroughProject(pred, p)
 		if !ok {
@@ -703,7 +764,7 @@ func resolveFilterInSubtree(ast plansql.Node, n *Node, changed bool, subst *[]st
 			// to the stage and dagplan.resolveFilterAliasSpelling picks
 			// once attachScanSelectProjections has decided (#656).
 		case NodeProject:
-			newAST, ok := rewriteASTThroughProject(ast, newProjRefs(n).withSubstitutionLog(subst))
+			newAST, ok := rewriteASTThroughProject(ast, newProjRefs(n, false).withSubstitutionLog(subst))
 			if !ok {
 				return ast, changed
 			}
