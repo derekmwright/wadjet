@@ -381,11 +381,13 @@ func TestArcBRComparisonOperandClassesMatchPostgres(t *testing.T) {
 	// The kept text pairs (ADR-0012 §5), written out from the base
 	// measurement (br_codex/corpus.json text*/): {direct / JOIN / IN list,
 	// IN (subquery)} answer where one conversion answered the same on every
-	// arm.
+	// arm. A body that selects a plain COLUMN keeps no text reading for any
+	// pair (#1308: the semi join compared the pair unconverted — 0 rows, NOT
+	// IN every row); the kept membership is the `CAST(x AS TEXT)` body below.
 	textKeep := map[string][2]bool{
-		"c_i32": {true, true}, "c_i64": {true, true}, "c_f64": {true, true}, "c_dec": {true, true},
-		"c_port": {true, true}, "c_proto": {true, true}, "c_dur": {true, true},
-		"c_uuid": {true, true}, "c_ipv6": {true, true}, "c_cidr": {true, true},
+		"c_i32": {true, false}, "c_i64": {true, false}, "c_f64": {true, false}, "c_dec": {true, false},
+		"c_port": {true, false}, "c_proto": {true, false}, "c_dur": {true, false},
+		"c_uuid": {true, false}, "c_ipv6": {true, false}, "c_cidr": {true, false},
 		"c_date": {true, false}, "c_ts": {true, false}, "c_bool": {true, false},
 	}
 	var cells []brCell
@@ -413,12 +415,14 @@ func TestArcBRComparisonOperandClassesMatchPostgres(t *testing.T) {
 	}
 	cells = append(cells,
 		// PostgreSQL's sentence, operator and operand order, verbatim.
-		// A text subquery against a number is the kept pair; with a SET
+		// A body selecting a stored TEXT column is not the kept pair: it is
+		// a semi/anti join key compared unconverted (#1308), refused in the
+		// explicit JOIN's words. The kept pair is the CAST body; with a SET
 		// OPERATION in the body it was arm-dependent at base (0 rows single,
 		// a cast error on the DAG) and is refused.
-		brCell{"SELECT o.id FROM lat_ord o WHERE o.id IN (SELECT product FROM lat_item)", "", ""},
-		brCell{"SELECT o.id FROM lat_ord o WHERE o.id NOT IN (SELECT product FROM lat_item)", "", ""},
-		brCell{"SELECT o.customer FROM lat_ord o WHERE o.customer IN (SELECT id FROM lat_item)", "", ""},
+		brCell{"SELECT o.id FROM lat_ord o WHERE o.id IN (SELECT product FROM lat_item)", "42883", "operator does not exist: bigint = text"},
+		brCell{"SELECT o.id FROM lat_ord o WHERE o.id NOT IN (SELECT product FROM lat_item)", "42883", "operator does not exist: bigint = text"},
+		brCell{"SELECT o.customer FROM lat_ord o WHERE o.customer IN (SELECT id FROM lat_item)", "42883", "operator does not exist: text = bigint"},
 		brCell{"SELECT o.id FROM lat_ord o WHERE o.id IN (SELECT CAST(id AS TEXT) FROM lat_item)", "", ""},
 		brCell{"SELECT a.c_date FROM tm a WHERE a.c_date IN (SELECT CAST(b.c_date AS TEXT) FROM tm b)", "42883", "operator does not exist: date = text"},
 		brCell{"SELECT a.c_f32 FROM tm a WHERE a.c_f32 = CAST(a.c_f32 AS TEXT)", "42883", "operator does not exist: real = text"},
@@ -431,9 +435,12 @@ func TestArcBRComparisonOperandClassesMatchPostgres(t *testing.T) {
 		brCell{"SELECT id FROM tm WHERE c_i32 IN (SELECT CAST(c_i32 AS TEXT) FROM tm EXCEPT SELECT CAST(c_i32 AS TEXT) FROM tm WHERE id < 10)", "", ""},
 		brCell{"SELECT id FROM tm WHERE c_date IN (SELECT CAST(c_date AS TEXT) FROM tm UNION SELECT CAST(c_date AS TEXT) FROM tm)", "42883", "operator does not exist: date = text"},
 		brCell{"SELECT id FROM tm WHERE c_f32 IN (SELECT CAST(c_f32 AS TEXT) FROM tm UNION ALL SELECT CAST(c_f32 AS TEXT) FROM tm)", "42883", "operator does not exist: real = text"},
-		// The kept pair in every spelling (bigint against text).
-		brCell{"SELECT o.id FROM lat_ord o WHERE o.id = ANY (SELECT product FROM lat_item)", "", ""},
-		brCell{"SELECT o.id, o.id IN (SELECT product FROM lat_item) AS v FROM lat_ord o", "", ""},
+		// The kept pair in every spelling (bigint against text), and the
+		// stored-column body refused in every spelling (#1308).
+		brCell{"SELECT o.id FROM lat_ord o WHERE o.id = ANY (SELECT CAST(id AS TEXT) FROM lat_item)", "", ""},
+		brCell{"SELECT o.id, o.id IN (SELECT CAST(id AS TEXT) FROM lat_item) AS v FROM lat_ord o", "", ""},
+		brCell{"SELECT o.id FROM lat_ord o WHERE o.id = ANY (SELECT product FROM lat_item)", "42883", "operator does not exist: bigint = text"},
+		brCell{"SELECT o.id, o.id IN (SELECT product FROM lat_item) AS v FROM lat_ord o", "42883", "operator does not exist: bigint = text"},
 		brCell{"SELECT o.id FROM lat_ord o WHERE o.id <> o.customer", "", ""},
 		// Two plain COLUMNS of the pair as a JOIN key are refused: that is
 		// the hash-join key path, broken by arm at base (#615).

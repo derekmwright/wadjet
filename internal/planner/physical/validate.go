@@ -655,6 +655,15 @@ type binder struct {
 	// operation keeps an origin only where both arms carry one of one
 	// class (comparisonTyper's set-operation membership rule).
 	textOrigin map[*plansql.SelectInfo][]parquet.TypeID
+	// bodyScopes is each validated block's own FROM scope and its resolution
+	// scope (FROM plus the enclosing levels), for the question which of a
+	// body's equalities are CORRELATED (refuseBodyKeyPairs).
+	bodyScopes map[*plansql.SelectInfo][2]*colScope
+	// bodies memoizes validatedBody: a comparison asks three questions of
+	// one subquery body (its types, its text origins, its correlated keys),
+	// and re-validating the body — and every body nested in it — per
+	// question would multiply per nesting level.
+	bodies map[bodyKey]*plansql.SelectInfo
 	// joinCond is set while a JOIN's ON clause is checked: a text/typed pair
 	// of two plain COLUMNS there is a hash-join key (comparisonTyper).
 	joinCond bool
@@ -733,7 +742,7 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 			org = make([]parquet.TypeID, len(lo))
 			for i := range lo {
 				org[i] = typeAmbiguous
-				if lo[i] != typeAmbiguous && ro[i] != typeAmbiguous &&
+				if lo[i] != typeAmbiguous && ro[i] != typeAmbiguous && lo[i] != originQuotedLiteral &&
 					comparisonClass(lo[i]) == comparisonClass(ro[i]) {
 					org[i] = lo[i]
 				}
@@ -837,6 +846,9 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 				st[i] = t
 			}
 			org[i] = textCastOrigin(col.ASTExpr, typeOf)
+			if lit, ok := plansql.Unparen(col.ASTExpr).(*plansql.Lit); ok && lit.Kind == plansql.LitString {
+				org[i] = originQuotedLiteral
+			}
 		}
 		b.structural[info] = st
 		if b.textOrigin == nil {
@@ -850,6 +862,10 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 	// item cannot reference its own output, and WHERE cannot see aliases.
 	resolve := from.clone()
 	resolve.merge(outer)
+	if b.bodyScopes == nil {
+		b.bodyScopes = map[*plansql.SelectInfo][2]*colScope{}
+	}
+	b.bodyScopes[info] = [2]*colScope{from, resolve}
 
 	// GROUP BY / HAVING / ORDER BY / QUALIFY may additionally reference SELECT
 	// output aliases.
@@ -1087,9 +1103,68 @@ func (b *binder) refuseIncomparableOperands(node plansql.Node, scope *colScope) 
 	}
 	decls := rowFieldScopeDecls(scope)
 	c := &comparisonTyper{scope: scope, typeOf: structuralTypeOf(decls), shape: foldTypeOf(decls), joinKeys: b.joinCond, decls: decls,
-		subquery:   func(sql string) []parquet.TypeID { return b.subqueryOutputTypes(sql, scope) },
-		setOrigins: func(sql string) []parquet.TypeID { return b.setOpTextOrigins(sql, scope) }}
+		subquery:    func(sql string) []parquet.TypeID { return b.subqueryOutputTypes(sql, scope) },
+		bodyOrigins: func(sql string) []parquet.TypeID { return b.subqueryTextOrigins(sql, scope) },
+		bodyKeys:    func(sql string) error { return b.refuseBodyKeyPairs(sql, scope) }}
 	return c.walk(node)
+}
+
+// refuseBodyKeyPairs applies an explicit JOIN's key rule to a membership or
+// EXISTS body's CORRELATED equalities: a top-level conjunct of the body's
+// WHERE equating a plain column of the body's own FROM with a plain column of
+// an enclosing level is what the decorrelation makes a semi/anti join KEY,
+// exactly as `ON a.x = b.y` is a hash-join key — so a text/typed pair there
+// is PostgreSQL's 42883 in the JOIN's words, never a key pair compared
+// unconverted (#1308: `EXISTS (… WHERE a.v = b.s)` answered 0 rows and NOT
+// EXISTS every row on all five arms at v0.25.1). A conjunct under OR, or one
+// whose side is an expression (`a.v = CAST(b.v AS TEXT)`), stays a filter
+// and keeps the direct comparison's text reading. A body the binder cannot
+// read decides nothing; its own validation reports it.
+func (b *binder) refuseBodyKeyPairs(sql string, outer *colScope) error {
+	sub := b.validatedBody(sql, outer)
+	if sub == nil || sub.Union != nil || sub.WhereExpr == nil {
+		return nil
+	}
+	sc, ok := b.bodyScopes[sub]
+	if !ok {
+		return nil
+	}
+	from, resolve := sc[0], sc[1]
+	local := func(n plansql.Node) (bool, bool) {
+		ref, ok := plansql.Unparen(n).(*plansql.ColRef)
+		if !ok || from == nil || from.open {
+			return false, false
+		}
+		return from.resolveRef(ref) == nil, true
+	}
+	var conj []plansql.Node
+	var flatten func(plansql.Node)
+	flatten = func(n plansql.Node) {
+		if a, ok := plansql.Unparen(n).(*plansql.AndNode); ok {
+			flatten(a.Left)
+			flatten(a.Right)
+			return
+		}
+		conj = append(conj, n)
+	}
+	flatten(sub.WhereExpr)
+	decls := rowFieldScopeDecls(resolve)
+	c := &comparisonTyper{scope: resolve, typeOf: structuralTypeOf(decls), shape: foldTypeOf(decls), joinKeys: true, decls: decls}
+	for _, n := range conj {
+		cmp, ok := plansql.Unparen(n).(*plansql.CmpExpr)
+		if !ok || pgComparisonOp(cmp.Op) != "=" {
+			continue
+		}
+		ll, lok := local(cmp.Left)
+		rl, rok := local(cmp.Right)
+		if !lok || !rok || ll == rl {
+			continue
+		}
+		if err := c.pair(cmp.Left, cmp.Right, "="); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // subqueryOutputTypes is a subquery body's output column TYPES as the
@@ -1098,33 +1173,50 @@ func (b *binder) refuseIncomparableOperands(node plansql.Node, scope *colScope) 
 // scope (it may correlate); an error is not this question's to report, and the
 // body's own validation reports it in turn.
 func (b *binder) subqueryOutputTypes(sql string, outer *colScope) []parquet.TypeID {
-	sub := parseSelect(sql)
+	sub := b.validatedBody(sql, outer)
 	if sub == nil {
-		return nil
-	}
-	ctx := b.ctx
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if err := b.validateBlock(ctx, sub, outer); err != nil {
 		return nil
 	}
 	return b.structural[sub]
 }
 
-// setOpTextOrigins is, for a SET-OPERATION subquery body, the text-cast
-// origin of each output column (binder.textOrigin), or nil when the body is
-// not a set operation or cannot be read.
-func (b *binder) setOpTextOrigins(sql string, outer *colScope) []parquet.TypeID {
+// bodyKey names one subquery body validated against one enclosing scope.
+type bodyKey struct {
+	sql   string
+	outer *colScope
+}
+
+// validatedBody is a subquery body parsed and validated against outer, or
+// nil when it does not parse or does not validate — an error that is not the
+// asking comparison's to report; the body's own validation reports it.
+func (b *binder) validatedBody(sql string, outer *colScope) *plansql.SelectInfo {
+	k := bodyKey{sql, outer}
+	if sub, ok := b.bodies[k]; ok {
+		return sub
+	}
 	sub := parseSelect(sql)
-	if sub == nil || sub.Union == nil {
-		return nil
+	if sub != nil {
+		ctx := b.ctx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		if err := b.validateBlock(ctx, sub, outer); err != nil {
+			sub = nil
+		}
 	}
-	ctx := b.ctx
-	if ctx == nil {
-		ctx = context.Background()
+	if b.bodies == nil {
+		b.bodies = map[bodyKey]*plansql.SelectInfo{}
 	}
-	if err := b.validateBlock(ctx, sub, outer); err != nil {
+	b.bodies[k] = sub
+	return sub
+}
+
+// subqueryTextOrigins is, for a subquery body — one SELECT or a set
+// operation — the text-cast origin of each output column (binder.textOrigin),
+// or nil when the body cannot be read.
+func (b *binder) subqueryTextOrigins(sql string, outer *colScope) []parquet.TypeID {
+	sub := b.validatedBody(sql, outer)
+	if sub == nil {
 		return nil
 	}
 	if o := b.textOrigin[sub]; o != nil {

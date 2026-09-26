@@ -459,12 +459,11 @@ func brComparisonCells() []brArmCell {
 				if keep[0] {
 					eq = brArmCell{name: eq.name, sql: eq.sql, same: true}
 				}
-				if keep[1] {
-					// Over arbitrary text a kept membership can fail at run
-					// time (#615's join-key path) — loud, pre-existing; the
-					// kept pair is asserted in its CAST form below.
-					in = brArmCell{}
-				}
+				// A body selecting a stored TEXT column is refused for every
+				// pair, kept or not (#1308: the semi join compared the pair
+				// unconverted — 0 rows, NOT IN every row, #615's key error
+				// on the mirror); the kept pair is asserted in its CAST form
+				// below.
 			}
 			out = append(out, eq)
 			if in.sql != "" {
@@ -542,7 +541,8 @@ func brComparisonCells() []brArmCell {
 		brArmCell{name: "cmpOk/textIdInSubquery",
 			sql:  "SELECT id FROM lat_ord WHERE id IN (SELECT CAST(id AS TEXT) FROM lat_item)",
 			want: "rows=3 1 | 2 | 3"},
-		brArmCell{name: "cmpOk/intInTextSubquery", sql: "SELECT o.id FROM lat_ord o WHERE o.id IN (SELECT product FROM lat_item)", same: true},
+		brArmCell{name: "1308/intInTextSubquery", sql: "SELECT o.id FROM lat_ord o WHERE o.id IN (SELECT product FROM lat_item)",
+			state: "42883", msg: "operator does not exist: bigint = text"},
 		brArmCell{name: "cmpOk/columnPairIntText", sql: "SELECT o.id FROM lat_ord o WHERE o.id = o.customer", same: true},
 		brArmCell{name: "cmpOk/joinIntTextExpressionKey",
 			sql:  "SELECT count(*) AS n FROM typemx a JOIN typemx b ON a.c_i32 = CAST(b.c_i32 AS TEXT) WHERE a.id < 20 AND b.id < 20",

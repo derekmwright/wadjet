@@ -14,9 +14,10 @@ import (
 // cmpClass groups structurally known operands for comparison validation.
 // Unresolved operands defer; unknown literals use the other operand type.
 // Text conversion follows textConversionAnswers per pair and context, with
-// set-operation membership additionally requiring a matching CAST origin.
-// Two typed/text column join keys refuse; recorded numeric-literal readings
-// remain accepted. Number/boolean pairs refuse 42883. Scalar function return
+// membership against ANY subquery body additionally requiring a matching CAST
+// origin (#1308). Two typed/text column join keys refuse — an explicit JOIN's
+// ON and a subquery body's correlated key alike; recorded numeric-literal
+// readings remain accepted. Number/boolean pairs refuse 42883. Scalar function return
 // labels alone do not prove a class. See ADR-0012 §5, #1073 and #1216.
 type cmpClass int
 
@@ -73,9 +74,13 @@ type comparisonTyper struct {
 	typeOf func(plansql.Node) (parquet.TypeID, bool)
 	// subquery types a subquery's output columns, or nil when it cannot.
 	subquery func(sql string) []parquet.TypeID
-	// setOrigins is a SET-OPERATION body's per-column text-cast origins
-	// (binder.textOrigin), nil when the body is not a set operation.
-	setOrigins func(sql string) []parquet.TypeID
+	// bodyOrigins is a subquery body's per-column text-cast origins
+	// (binder.textOrigin), nil when the body cannot be read.
+	bodyOrigins func(sql string) []parquet.TypeID
+	// bodyKeys applies the join-key rule to a membership or EXISTS body's
+	// CORRELATED key pairs (binder.refuseBodyKeyPairs), nil where no body
+	// can be read.
+	bodyKeys func(sql string) error
 	// shape is an operand's full declaration, for two ROWs.
 	shape func(plansql.Node) (parquet.Column, bool)
 	// joinKeys is set for a JOIN's ON clause, where two plain COLUMNS of a
@@ -154,7 +159,7 @@ func isTypedLiteral(n plansql.Node) bool {
 //	bytea, ipv4, macaddr            REFUSE: 0 of 20 directly; 0 single, 20 DAG as a subquery
 //
 // subquery is set for a membership test against a subquery body, a
-// set-operation body included; setOpMemberPair also requires the CAST origin.
+// set-operation body included; memberPair also requires the CAST origin.
 // Two plain text/typed column join keys are refused separately.
 func textConversionAnswers(t parquet.TypeID, subquery bool) bool {
 	switch t {
@@ -303,7 +308,14 @@ func pgComparisonOp(op string) string {
 // Subqueries are their own blocks and are not entered.
 func (c *comparisonTyper) walk(node plansql.Node) error {
 	switch n := node.(type) {
-	case nil, *plansql.SubqueryNode, *plansql.ExistsNode:
+	case nil, *plansql.SubqueryNode:
+		return nil
+	case *plansql.ExistsNode:
+		// The body is its own block, but its CORRELATED equalities are the
+		// semi/anti join's keys (#1308).
+		if c.bodyKeys != nil {
+			return c.bodyKeys(n.SQL)
+		}
 		return nil
 	case *plansql.WindowFuncNode:
 		if n.Func != nil {
@@ -590,30 +602,45 @@ func (c *comparisonTyper) inPair(left, member plansql.Node, op string) error {
 		return nil
 	}
 	sub, isSub := plansql.Unparen(member).(*plansql.SubqueryNode)
-	if isSub && c.setOrigins != nil {
-		if origins := c.setOrigins(sub.SQL); origins != nil {
-			return c.setOpMemberPair(left, member, op, origins)
+	if isSub && c.bodyKeys != nil {
+		if err := c.bodyKeys(sub.SQL); err != nil {
+			return err
+		}
+	}
+	if isSub && c.bodyOrigins != nil {
+		if origins := c.bodyOrigins(sub.SQL); origins != nil {
+			return c.memberPair(left, member, op, origins)
 		}
 	}
 	return c.pairOf(left, member, op, isSub)
 }
 
-// setOpMemberPair is a membership against a SET-OPERATION body. There the
-// DAG resolves the body's text to the typed side's type and CASTS every
-// value, while the single-process arms compare the text as it stands — so
-// whether the arms agree depends on the DATA, not on the type (#1073: a
-// bigint against `product` text answered 0 rows on the single arms and
-// failed the cast on the DAG; the same pair over `CAST(x AS TEXT)` text
-// answered identically everywhere, br_codex2 setin/*). The pair is kept only
+// memberPair is a membership against a SUBQUERY body — one SELECT or a set
+// operation. Its text meets the typed side by one of two routes, and neither
+// is the direct comparison's: a body that selects a COLUMN becomes the build
+// side of a semi/anti join whose key pair (typed, text) was never converted
+// (#1308: `v IN (SELECT s …)` answered 0 rows and NOT IN every row on all
+// five arms; the mirror failed with #615's key error), and any other body is
+// a filter whose DAG resolves the text to the typed side and CASTS every
+// value while the single-process arms compare the text as it stands — so
+// whether the arms agree depends on the DATA (#1073's set-operation body: 0
+// rows single, the cast failing on the DAG; a TEXT literal, `upper(s)` or a
+// LIMITed column body the same, measured at v0.25.1). The pair is kept only
 // where the text PROVABLY converts: it was made by a CAST from a value of
 // the typed side's own class in every arm of the body, and that class is a
-// kept one (textConversionAnswers). Anything else is PostgreSQL's 42883.
-func (c *comparisonTyper) setOpMemberPair(left, member plansql.Node, op string, origins []parquet.TypeID) error {
+// kept one (textConversionAnswers). Anything else is PostgreSQL's 42883, in
+// the explicit JOIN's words.
+func (c *comparisonTyper) memberPair(left, member plansql.Node, op string, origins []parquet.TypeID) error {
 	tl, ok := c.operand(left)
 	if !ok {
 		return nil
 	}
 	tr, ok := c.operand(member)
+	if (!ok || comparisonClass(tr) == cmpUnknown) && len(origins) == 1 && origins[0] == originQuotedLiteral {
+		// PostgreSQL resolves a quoted literal in a subquery's target list
+		// to text.
+		tr, ok = parquet.TypeString, true
+	}
 	if !ok {
 		return nil
 	}
@@ -627,6 +654,10 @@ func (c *comparisonTyper) setOpMemberPair(left, member plansql.Node, op string, 
 	}
 	return sqlerr.New("42883", "operator does not exist: %s %s %s", cmpTypeName(tl), op, cmpTypeName(tr))
 }
+
+// originQuotedLiteral is the text-cast origin of a body column that is a
+// quoted literal: text, made by no CAST (memberPair).
+const originQuotedLiteral = parquet.TypeID(-2)
 
 // textCastOrigin is the structural type a `CAST(x AS text)` read, or
 // typeAmbiguous when the node is not such a cast of a typed value.
@@ -667,8 +698,8 @@ func RefuseTemporalArithmetic(node plansql.Node, alias string, schema []parquet.
 	}
 	decls := rowFieldScopeDecls(scope)
 	c := &comparisonTyper{scope: scope, typeOf: structuralTypeOf(decls), shape: foldTypeOf(decls), decls: decls,
-		subquery:   func(string) []parquet.TypeID { return nil },
-		setOrigins: func(string) []parquet.TypeID { return nil }}
+		subquery:    func(string) []parquet.TypeID { return nil },
+		bodyOrigins: func(string) []parquet.TypeID { return nil }}
 	return c.walkTemporalArithmetic(node)
 }
 
