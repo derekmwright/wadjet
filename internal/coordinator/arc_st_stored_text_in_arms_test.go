@@ -347,6 +347,112 @@ func stNeighbourCells() []brArmCell {
 	}
 }
 
+// stCrossCastCells are the reviewer's B1 cells (REVIEW_R1_opus.md, "B1"): a
+// kept CAST(x AS TEXT) body must keep by the COMPARED TYPE (ADR-0012 §5:
+// "of the compared type"), not by comparisonClass, which groups every
+// cmpNumber member together. The axis: same class/different type, both
+// integer kinds (i32 and i64 share every fixture value) — kept, exactly as
+// the same-type CAST body already in the main table; same class/different
+// type, the compared side an integer kind and the origin's own rendering
+// fractional (numeric, float) — refused, since the DAG's cast of the
+// rendered text (e.g. "14.0000") back to bigint is 22P02 while the single
+// arms compared the text as it stood (the defect); and different class —
+// refused regardless, unaffected by the repair (a control). Values measured
+// against the repair tree (`go test -run TestZZVerifyCrossCast`, removed).
+func stCrossCastCells() []brArmCell {
+	pred := func(sh, outer, sub string) string {
+		switch sh {
+		case "in":
+			return outer + " IN (" + sub + ")"
+		case "notIn":
+			return outer + " NOT IN (" + sub + ")"
+		default: // eqAny
+			return outer + " = ANY (" + sub + ")"
+		}
+	}
+	q := func(sh, outerKey, sub string) string {
+		return "SELECT count(*) AS n FROM st_pair a WHERE " + pred(sh, "a.v_"+outerKey, sub)
+	}
+	castOf := func(originKey, filter string) string {
+		return "SELECT CAST(r.v_" + originKey + " AS TEXT) FROM st_pair r WHERE " + filter
+	}
+	refuse := func(name, outerKey, originKey, filter, sh, msg string) brArmCell {
+		return brArmCell{name: name, sql: q(sh, outerKey, castOf(originKey, filter)), state: "42883", msg: msg}
+	}
+	const bigintText = "operator does not exist: bigint = text"
+	var out []brArmCell
+	kept := map[string]string{"in": "rows=1 3", "notIn": "rows=1 0", "eqAny": "rows=1 3"}
+	for _, sh := range []string{"in", "notIn", "eqAny"} {
+		out = append(out, brArmCell{
+			name: "crossCast/sameClassKept/i64FromI32/" + sh,
+			sql:  q(sh, "i64", castOf("i32", "r.id <= 3")),
+			want: kept[sh],
+		})
+		out = append(out, refuse("crossCast/sameClassRefused/i64FromDec/"+sh, "i64", "dec", "r.id <= 3", sh, bigintText))
+		out = append(out, refuse("crossCast/sameClassRefused/i64FromF64/"+sh, "i64", "f64", "r.id <= 3", sh, bigintText))
+	}
+	out = append(out,
+		refuse("crossCast/reviewer/i64FromDecSingleRow", "i64", "dec", "r.id = 3", "in", bigintText),
+		brArmCell{
+			name: "crossCast/reviewer/i64FromDecUnionAll",
+			sql: q("in", "i64",
+				"SELECT CAST(r.v_dec AS TEXT) FROM st_pair r WHERE r.id = 1 UNION ALL SELECT CAST(r.v_dec AS TEXT) FROM st_pair r WHERE r.id = 2"),
+			state: "42883", msg: bigintText,
+		},
+		refuse("crossCast/named/portFromF64", "port", "f64", "r.id <= 3", "in", "operator does not exist: integer = text"),
+		refuse("crossCast/named/durFromDec", "dur", "dec", "r.id <= 3", "in", bigintText),
+		// different class: refused regardless, unaffected by the repair.
+		refuse("crossCast/differentClass/i64FromUuid", "i64", "uuid", "r.id <= 3", "in", bigintText),
+	)
+	return out
+}
+
+// stSetOpLiteralCells are the reviewer's B2 cells (REVIEW_R1_opus.md, "B2"):
+// a set-operation body of quoted literals lost its text origin through
+// validateBlock's UNION / UNION ALL / INTERSECT / EXCEPT merge (the
+// `lo[i] != originQuotedLiteral` guard excluded it), so memberPair saw
+// cr == cmpUnknown and returned at the typed side unconverted — the single
+// arms kept comparing the literal as text (a data-dependent 0 rows for a
+// value that should match) while the DAG's cast of the same literal
+// diverges (#1073's shape, reached through a set operator). The merge now
+// carries originQuotedLiteral through every set operator, so the body
+// refuses 42883 exactly as the single-SELECT literal body already does.
+// <> ALL is not repeated here: the parser normalizes it to NOT IN before
+// any rule sees it (N1), so it exercises no code this axis does not.
+func stSetOpLiteralCells() []brArmCell {
+	pred := func(sh, outer, sub string) string {
+		switch sh {
+		case "in":
+			return outer + " IN (" + sub + ")"
+		case "notIn":
+			return outer + " NOT IN (" + sub + ")"
+		default: // eqAny
+			return outer + " = ANY (" + sub + ")"
+		}
+	}
+	types := []struct{ key, msg, lit1, lit2 string }{
+		{"date", "operator does not exist: date = text", "'2024-01-02'", "'2024-03-04'"},
+		{"ts", "operator does not exist: timestamp without time zone = text", "'2024-01-02 03:04:05'", "'2024-03-04 03:04:05'"},
+		{"bool", "operator does not exist: boolean = text", "'true'", "'false'"},
+		{"i64", "operator does not exist: bigint = text", "'zz'", "'13'"},
+	}
+	var out []brArmCell
+	for _, op := range []string{"UNION", "UNION ALL", "INTERSECT", "EXCEPT"} {
+		for _, ty := range types {
+			body := "SELECT " + ty.lit1 + " FROM st_pair r WHERE r.id = 1 " + op +
+				" SELECT " + ty.lit2 + " FROM st_pair r WHERE r.id = 2"
+			for _, sh := range []string{"in", "notIn", "eqAny"} {
+				out = append(out, brArmCell{
+					name:  "setOpLiteral/" + ty.key + "/" + strings.ReplaceAll(op, " ", "") + "/" + sh,
+					sql:   "SELECT count(*) AS n FROM st_pair a WHERE " + pred(sh, "a.v_"+ty.key, body),
+					state: "42883", msg: ty.msg,
+				})
+			}
+		}
+	}
+	return out
+}
+
 // A TYPED IN / = ANY / NOT IN / <> ALL / EXISTS / NOT EXISTS BODY SELECTING A
 // STORED TEXT COLUMN (#1308). At v0.25.1 every such body planned a semi/anti
 // join whose key pair (typed, text) was never typed: `v IN (SELECT s …)`
@@ -382,6 +488,8 @@ func TestArcSTStoredTextMembershipEveryArmRefusesOrConverts(t *testing.T) {
 		}
 	}
 	cells = append(cells, stNeighbourCells()...)
+	cells = append(cells, stCrossCastCells()...)
+	cells = append(cells, stSetOpLiteralCells()...)
 	refused, answered := 0, 0
 	for _, tc := range cells {
 		if tc.state != "" {
