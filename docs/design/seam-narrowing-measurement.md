@@ -934,7 +934,9 @@ this measurement, 16/210 (arc SR, `PlanContext.PublishedOutputProjectionNode`,
 ADR-0026 §9a), 18/214 (arc JR, the outer-join residual refusal), 18/216 (arc
 BJ, the planner's bushy option and its option set) and 19/217 (arc FR,
 `ReaderSchemaReads` — the counter the door gates read to prove a refused
-identity's file was never opened, ADR-0034). The change log lives with the
+identity's file was never opened, ADR-0034) and 19/222 (arc CW, the five
+members that carry a container column's element and a VECTOR's width across
+the stage and wire specs, ADR-0045 §1). The change log lives with the
 constants because that is where the next raise is written.
 
 ## Test placement and declaration renames

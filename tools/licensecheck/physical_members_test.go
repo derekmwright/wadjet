@@ -66,13 +66,24 @@ import (
 // 216 → 217 (2026-09-20, arc FR, #1230): `ReaderSchemaReads` — the same one
 // member the reference budget above records, and for the same reason. It is
 // a package-scope counter, so it appears in both counts.
-const maxAGPLPhysicalMembers = 217
+// 217 → 222 (2026-09-26, arc CW, #1250 #1017 #1133 #1303 #1268 #1021): a
+// container column's ELEMENT rides every stage and wire spec, so the DAG reads
+// it where it reads the column's type: `ColDecls.Elems` (the element view the
+// same walk fills beside `Fields`), `PlanContext.ScanColDecls` (a scan's
+// declarations incl. elements for the stage that re-declares it),
+// `ProjectExprSpec.ElementType` and `.Dimension` (a projected container's
+// element and a VECTOR's width on the stage spec) and `SetOpColType.ElementType`
+// (a set-op arm's element, so the DAG casts an arm whose element differs). The
+// alternative was the DAG re-deriving an element from the Go value, which is
+// the fmt.Sprint text every one of those six issues came from (ADR-0045 §1).
+const maxAGPLPhysicalMembers = 222
 
 // measuredPhysicalMembers are the members reached through values. With the 16
 // package-scope names of measuredPhysicalNames they are the whole surface, and
 // the budget above is their count.
 var measuredPhysicalMembers = strings.Fields(`
 ColDecls.Dec
+ColDecls.Elems
 ColDecls.Fields
 ColDecls.PlaceholderTypes
 ColDecls.Types
@@ -179,6 +190,7 @@ PlanContext.ResolveWindowKeys
 PlanContext.RespellDerivedAliasRefs
 PlanContext.ReverseBloomInnerThreshold
 PlanContext.RewriteColRefs
+PlanContext.ScanColDecls
 PlanContext.ScopePreservingWrapper
 PlanContext.SemiAntiBuildStoreCols
 PlanContext.SemiAntiNE
@@ -242,6 +254,8 @@ Planner.SubqueryInnerColumns
 Planner.SubqueryOutputArity
 Planner.SubqueryOutputColumn
 Planner.ValidateColumns
+ProjectExprSpec.Dimension
+ProjectExprSpec.ElementType
 ProjectExprSpec.Expr
 ProjectExprSpec.Fields
 ProjectExprSpec.Name
@@ -263,6 +277,7 @@ SetOpArmPlan.Specs
 SetOpArmPlan.Types
 SetOpColType.Dec
 SetOpColType.DecKnown
+SetOpColType.ElementType
 SetOpColType.Fields
 SetOpColType.Known
 SetOpColType.Typ
