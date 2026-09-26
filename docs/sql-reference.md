@@ -4283,7 +4283,7 @@ Every date/time function and operator DECLARES the type of the value it
 produces, and produces a value of that type — a DATE is a DATE and a
 TIMESTAMP a TIMESTAMP to every consumer: a parent operator, a string or
 date-part function, a comparison, an assignment, the wire's `RowDescription`
-(arc VL round 3; a census test holds every registry entry to it).
+(a census test holds every registry entry to it).
 
 | Expression | Declares |
 |---|---|
