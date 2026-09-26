@@ -2293,6 +2293,19 @@ func buildLateralSubquery(outer *plansql.SelectInfo, left *Node, join plansql.Jo
 			if innerCol == "" {
 				continue
 			}
+			// A second correlated equality naming an inner key ALREADY
+			// published (a prior correlated part's own pass minted or
+			// recorded it) keeps that publication. Overwriting it here with
+			// the bare name — the "no collision, use its own spelling"
+			// branch below, run a second time for the SAME key — respelled
+			// EVERY correlated equality naming this key to the bare column,
+			// including the one that had already been rewritten to a minted
+			// slot: `q.qk = p.k AND q.qk = p.oid` published the key once as
+			// `__key_0` but the join still read `s.qk` for BOTH conditions
+			// (arc JP round 5 closure review B1, #1299/#1302).
+			if _, seen := keyRename[strings.ToLower(strings.TrimSpace(innerCol))]; seen {
+				continue
+			}
 			// The join keys on the name the subquery PUBLISHES for the key (#767).
 			// If the key's SOURCE is selected under an alias, record that published name and
 			// rewrite the equality. Another value ALIASED to the key name is not the key;
