@@ -63,6 +63,16 @@ func cw4Pairs() []cw4Pair {
 		{"bool", "ARRAY[true]", "ARRAY[false]", 1},
 		{"ipv4", "ARRAY[" + ip("10.0.0.10") + "]", "ARRAY[" + ip("9.255.0.1") + "]", 1},
 		{"nested", "ARRAY[ARRAY[1,2],ARRAY[3,4]]", "ARRAY[ARRAY[1,2,3]]", 1},
+		// Round 6 (B1): the INTERVAL axis — an element kind with no column
+		// type anywhere else in this engine (physical.arrayLitDeclaredType),
+		// which regressed 42000 at 3eecddf6. "2 days" < "10 days" by VALUE,
+		// where the two intervals' RENDERED TEXT orders the other way ("2
+		// days" > "10 days" lexically) — the comparator's old last-resort
+		// fallback; "1 month" = "30 days" is PostgreSQL's own 30-day month
+		// (measured, wadjet-pg-cw6), where a per-field struct equality
+		// (Months=1,Days=0 vs Months=0,Days=30) would say false.
+		{"interval", "ARRAY[INTERVAL '2 days']", "ARRAY[INTERVAL '10 days']", -1},
+		{"interval-month-days-equal", "ARRAY[INTERVAL '1 month']", "ARRAY[INTERVAL '30 days']", 0},
 		// Round 5: the MIXED-ELEMENT axis. Two element TYPES meet at
 		// batch.CommonContainerColumn's type (int ⊕ bigint = bigint, int ⊕
 		// numeric = numeric, anything ⊕ float = double), and every comparator
@@ -89,9 +99,15 @@ func cw4Pairs() []cw4Pair {
 // rule (`{10.0000}`; PostgreSQL's unconstrained numeric keeps `{10.00}`, the
 // scalar GREATEST identically at main) — so the sign formula does not apply.
 // The unification gate asserts those values directly
-// (TestArcCW5ElementTypesUnifyAtEveryMeetingPoint).
+// (TestArcCW5ElementTypesUnifyAtEveryMeetingPoint). An INTERVAL pair (round
+// 6) is excluded for a different reason: the comparator's own CAST(… AS TEXT)
+// wrapper refuses 0A000 (#1268, ADR-0045 §2) whichever side GREATEST or LEAST
+// picks — the choice itself is right (measured directly by cw4Comparators'
+// six operators and BETWEEN), only the text-equality WRAPPER this gate uses
+// to read it back cannot.
 func cw5TextComparator(pair, comparator string) bool {
-	return (strings.HasPrefix(pair, "mixed-") || strings.HasPrefix(pair, "decimal-scales")) &&
+	return (strings.HasPrefix(pair, "mixed-") || strings.HasPrefix(pair, "decimal-scales") ||
+		strings.HasPrefix(pair, "interval")) &&
 		(comparator == "greatest" || comparator == "least")
 }
 
