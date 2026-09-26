@@ -1015,13 +1015,23 @@ on PostgreSQL. A typed value (a number, PORT, PROTOCOL, DURATION, UUID, IPv6,
 CIDR) against a subquery that selects TEXT is SQLSTATE 42883 `operator does
 not exist: bigint = text` — for a stored TEXT column, a derived table's or
 CTE's column, a TEXT literal and the mirror alike — except where the body
-selects `CAST(x AS TEXT)` of a value of the compared type, which is kept and
-compares through the value's text (ADR-0012 §5, #1308):
+selects `CAST(x AS TEXT)` and the text provably converts (the same class as
+the compared value, and never a fractional rendering — numeric, float —
+into an integer kind), which is kept and compares through the value's text
+(ADR-0012 §5, #1308):
 
 ```sql
 SELECT id FROM d WHERE id IN (SELECT name FROM users)                 -- 42883
 SELECT id FROM d WHERE id IN (SELECT CAST(user_id AS TEXT) FROM users) -- answers
 ```
+
+A literal body with no `FROM` (`id IN (SELECT '12')`) is not this rule: the
+parser folds it into the plain `IN` list before any subquery is planned, so
+it answers exactly as `id IN ('12')` does — a divergence from PostgreSQL,
+which refuses both alike, 42883. The same literal WITH a `FROM` (`id IN
+(SELECT '12' FROM users)`), and a set-operation body of such literals
+(`id IN (SELECT '12' … UNION ALL SELECT '13' …)`), are real subqueries and
+take the rule above: 42883, unless the selected value is `CAST(x AS TEXT)`.
 
 ### Row Values
 

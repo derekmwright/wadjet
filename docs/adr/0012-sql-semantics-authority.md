@@ -103,8 +103,8 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
 
        | typed side | direct `=`/`<`/…, IN list | IN / = ANY / NOT IN / <> ALL (subquery) |
        |---|---|---|
-       | int4, int8, float8, numeric, port, protocol, duration | kept | kept where the body selects `CAST(x AS TEXT)` of the compared type |
-       | uuid, ipv6, cidr | kept | kept where the body selects `CAST(x AS TEXT)` of the compared type |
+       | int4, int8, float8, numeric, port, protocol, duration | kept | kept where the body selects `CAST(x AS TEXT)` and the text provably converts |
+       | uuid, ipv6, cidr | kept | kept where the body selects `CAST(x AS TEXT)` and the text provably converts |
        | date, timestamp, boolean | kept | 42883 (0 rows single, 20 DAG) |
        | real | 42883 (3 of 20 matched) | 42883 |
        | bytea, ipv4, macaddr | 42883 (0 of 20 matched) | 42883 (0 single, 20 DAG) |
@@ -123,24 +123,50 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
        the DAG for DATE/TIMESTAMP/BOOLEAN, a `'zz'` body 0 rows single and
        22P02 on the DAG. PostgreSQL refuses every one 42883; the rule is
        `physical.comparisonTyper.memberPair`, a quoted literal in the body's
-       target list reading as text, as PostgreSQL resolves it.) The body's
-       CORRELATED equalities are the semi/anti join's keys and take the
-       JOIN-key rule below: `EXISTS (… WHERE b.s = a.v)`, a correlated
-       `IN`'s key, is 42883 (`refuseBodyKeyPairs`); a correlated comparison
-       with an expression side (`a.v = CAST(b.v AS TEXT)`) or under `OR`
-       is a filter and keeps the direct reading. Two cells base answered
-       identically now refuse with the rule, recorded: a body selecting a
-       derived table's `CAST(x AS TEXT)` column (the JOIN refuses the same
-       derived-column key) and `IN (SELECT max(s) …)` without GROUP BY.
+       target list reading as text, as PostgreSQL resolves it.) "Provably
+       converts" (`physical.textOriginConverts`) is the same comparisonClass
+       AND never a fractional rendering (numeric, float) into an integer
+       kind (int4, int8, port, protocol, duration). The rule as first
+       amended kept by CLASS alone, so a body selecting `CAST(v_dec AS
+       TEXT)` against a bigint outer value was "kept" while the DAG's cast
+       of the rendered text (`'14.0000'`) back to bigint is 22P02 and the
+       single arms compared the text as it stood — an arm-dependent cell
+       inside the rule's own kept set. (Amended 2026-09-26, arc ST round 2,
+       #1308.) The body's CORRELATED equalities are the
+       semi/anti join's keys and take the JOIN-key rule below: `EXISTS (…
+       WHERE b.s = a.v)`, a correlated `IN`'s key, is 42883
+       (`refuseBodyKeyPairs`); a correlated comparison with an expression
+       side (`a.v = CAST(b.v AS TEXT)`) or under `OR` is a filter and keeps
+       the direct reading. Thirteen cells base answered identically now
+       refuse with the rule, recorded (base's own value, then 42883): a
+       derived table's `CAST(x AS TEXT)` column IN body (3; the JOIN
+       refuses the same derived-column key); the same body under EXISTS
+       (3); `IN (SELECT max(s) …)` without GROUP BY (1); a TEXT-literal
+       body against a numeric column (1); a CTE's `CAST(x AS TEXT)` column
+       IN body (3); an ungrouped `max(CAST(x AS TEXT))` body (1); `uuid IN
+       (SELECT CAST(ipv6 AS TEXT) …)` (0); the mirror, `ipv6 IN (SELECT
+       CAST(uuid AS TEXT) …)` (0); an EXISTS correlated key inside a nested
+       AND conjunct (2); a two-level nested EXISTS, the correlated key one
+       level down (2); an EXISTS correlated key under `IS NOT DISTINCT
+       FROM` (2); the same under `IS DISTINCT FROM` (4); and its `NOT
+       EXISTS` mirror (2).
 
        A SET-OPERATION subquery body (UNION ALL / UNION / INTERSECT /
        EXCEPT) is kept only where its text PROVABLY converts: every arm of
        the body is `CAST(x AS TEXT)` of a value of the typed side's own
-       (kept) class. There the DAG casts the body's text to the typed side
-       while the single arms compare the text, so any other text converts
-       data-dependently — #1073's `id IN (SELECT product … UNION ALL …)`
-       answered 0 rows on the single arms and failed the cast on the DAG —
-       and is 42883 (arc BR round 3b).
+       (kept) class, and the class rule above applies the same way. There
+       the DAG casts the body's text to the typed side while the single
+       arms compare the text, so any other text converts data-dependently
+       — #1073's `id IN (SELECT product … UNION ALL …)` answered 0 rows on
+       the single arms and failed the cast on the DAG — and is 42883 (arc
+       BR round 3b). A quoted-literal body of the set-operation kind
+       (`v_date IN (SELECT '2024-01-02' … UNION ALL SELECT '2024-03-04'
+       …)`) lost its text origin through the merge and kept the same
+       silent, data-dependent reading — 0 rows single, matching values
+       reached only on the DAG. The merge now carries the literal's origin
+       through every set operator, so the body refuses 42883 the same way
+       a single-SELECT literal body already did. (Amended 2026-09-26, arc
+       ST round 2, #1308.)
        One shape keeps no text reading for any type: two plain COLUMNS as a
        JOIN key (the hash-join key path: #615's error on three arms, 0 rows
        on the shuffled one, and 0 rows for every text/typed derived-column
