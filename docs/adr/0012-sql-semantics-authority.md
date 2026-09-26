@@ -149,7 +149,13 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
        AND conjunct (2); a two-level nested EXISTS, the correlated key one
        level down (2); an EXISTS correlated key under `IS NOT DISTINCT
        FROM` (2); the same under `IS DISTINCT FROM` (4); and its `NOT
-       EXISTS` mirror (2).
+       EXISTS` mirror (2). Two further families the same rule moves from
+       a right answer to 42883 (PostgreSQL refuses each): a set-operation
+       body of quoted literals against a kept type, with or without a
+       FROM (`v_i64 IN (SELECT '12' … UNION ALL SELECT '13' …)` answered
+       2 on every arm; 336 cells), and a fractional `CAST(x AS TEXT)` body
+       against an integer kind where nothing matched (`port IN (SELECT
+       CAST(f64 AS TEXT) …)` answered 0; 84 cells).
 
        A SET-OPERATION subquery body (UNION ALL / UNION / INTERSECT /
        EXCEPT) is kept only where its text PROVABLY converts: every arm of
@@ -161,9 +167,11 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
        the single arms and failed the cast on the DAG — and is 42883 (arc
        BR round 3b). A quoted-literal body of the set-operation kind
        (`v_date IN (SELECT '2024-01-02' … UNION ALL SELECT '2024-03-04'
-       …)`) lost its text origin through the merge and kept the same
-       silent, data-dependent reading — 0 rows single, matching values
-       reached only on the DAG. The merge now carries the literal's origin
+       …)`) lost its text origin through the merge and kept a silent,
+       data-dependent reading: for DATE, TIMESTAMP and BOOLEAN, and for a
+       literal no arm converts (`'zz'`), 0 rows on the single arms and the
+       matching values or 22P02 only on the DAG; for the ten kept types
+       every arm answered the membership (2). The merge now carries the literal's origin
        through every set operator, so the body refuses 42883 the same way
        a single-SELECT literal body already did. (Amended 2026-09-26, arc
        ST round 2, #1308.)
