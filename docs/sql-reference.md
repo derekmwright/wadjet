@@ -1010,6 +1010,19 @@ NULL follows PostgreSQL: `ANY` is TRUE if any comparison is TRUE, NULL if none
 is TRUE and any is NULL, FALSE otherwise; `ALL` is FALSE if any comparison is
 FALSE, NULL if none is FALSE and any is NULL, TRUE otherwise.
 
+The subquery's column and the compared value must be of comparable types, as
+on PostgreSQL. A typed value (a number, PORT, PROTOCOL, DURATION, UUID, IPv6,
+CIDR) against a subquery that selects TEXT is SQLSTATE 42883 `operator does
+not exist: bigint = text` — for a stored TEXT column, a derived table's or
+CTE's column, a TEXT literal and the mirror alike — except where the body
+selects `CAST(x AS TEXT)` of a value of the compared type, which is kept and
+compares through the value's text (ADR-0012 §5, #1308):
+
+```sql
+SELECT id FROM d WHERE id IN (SELECT name FROM users)                 -- 42883
+SELECT id FROM d WHERE id IN (SELECT CAST(user_id AS TEXT) FROM users) -- answers
+```
+
 ### Row Values
 
 ```sql
@@ -1063,6 +1076,13 @@ WHERE EXISTS (SELECT 1 FROM blocked_ips b WHERE b.ip = f.src_ip)
 SELECT * FROM flow_logs f
 WHERE NOT EXISTS (SELECT 1 FROM device_inventory d WHERE d.ip_address = f.src_ip)
 ```
+
+A correlated equality between an outer column and a body column is the key of
+the semi (or anti) join `EXISTS` becomes, and takes an explicit JOIN key's type
+rule: a typed column against a TEXT column there is SQLSTATE 42883, as on
+PostgreSQL (`EXISTS (SELECT 1 FROM users u WHERE u.name = d.id)`). Write the
+conversion — `d.id = CAST(u.user_id AS TEXT)` or `CAST(u.name AS BIGINT) =
+d.id` — to compare through it (#1308).
 
 ## Subqueries
 

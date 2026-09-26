@@ -101,7 +101,7 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
        base engine answered for a value against its own text rendering over
        20 rows on five arms (`physical.textConversionAnswers`):
 
-       | typed side | direct `=`/`<`/…, IN list | IN / = ANY (subquery) |
+       | typed side | direct `=`/`<`/…, IN list | IN / = ANY / NOT IN / <> ALL (subquery) |
        |---|---|---|
        | int4, int8, float8, numeric, port, protocol, duration | kept | kept where the body selects `CAST(x AS TEXT)` of the compared type |
        | uuid, ipv6, cidr | kept | kept where the body selects `CAST(x AS TEXT)` of the compared type |
@@ -109,8 +109,29 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
        | real | 42883 (3 of 20 matched) | 42883 |
        | bytea, ipv4, macaddr | 42883 (0 of 20 matched) | 42883 (0 single, 20 DAG) |
 
-       A stored-text body can answer no rows for matching values (and NOT IN
-       every row), tracked by #1308; this is not a working extension.
+       The subquery column holds for EVERY body, and "kept where the body
+       selects `CAST(x AS TEXT)`" means only there: any other text body is
+       42883 in the explicit JOIN's words (`operator does not exist: bigint
+       = text`). (Amended 2026-09-26, arc ST, #1308: a body selecting a
+       stored, derived-table or CTE TEXT column became a semi/anti join
+       whose key pair (typed, text) was never converted — 0 rows over
+       matching values, NOT IN every row, on all five arms at v0.25.1, the
+       mirror failing with #615's key error on the single arms; a TEXT
+       literal, an aggregate, `upper(s)` or a LIMITed column body is a
+       filter whose DAG casts the text while the single arms compare it, so
+       it answered data-dependently — a literal body 0 rows single and 1 on
+       the DAG for DATE/TIMESTAMP/BOOLEAN, a `'zz'` body 0 rows single and
+       22P02 on the DAG. PostgreSQL refuses every one 42883; the rule is
+       `physical.comparisonTyper.memberPair`, a quoted literal in the body's
+       target list reading as text, as PostgreSQL resolves it.) The body's
+       CORRELATED equalities are the semi/anti join's keys and take the
+       JOIN-key rule below: `EXISTS (… WHERE b.s = a.v)`, a correlated
+       `IN`'s key, is 42883 (`refuseBodyKeyPairs`); a correlated comparison
+       with an expression side (`a.v = CAST(b.v AS TEXT)`) or under `OR`
+       is a filter and keeps the direct reading. Two cells base answered
+       identically now refuse with the rule, recorded: a body selecting a
+       derived table's `CAST(x AS TEXT)` column (the JOIN refuses the same
+       derived-column key) and `IN (SELECT max(s) …)` without GROUP BY.
 
        A SET-OPERATION subquery body (UNION ALL / UNION / INTERSECT /
        EXCEPT) is kept only where its text PROVABLY converts: every arm of
@@ -126,7 +147,9 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
        pair).
      - An UNQUOTED numeric literal keeps its recorded readings: against TEXT
        its source text (#504), against a TIMESTAMP the epoch-millisecond
-       instant the carrier holds. A literal is refused only against a
+       instant the carrier holds — directly and in an IN list; as the outer
+       value of a subquery membership it takes the membership rule above
+       (`12 IN (SELECT s …)` answered 0 rows single and 4 on the DAG, #1308). A literal is refused only against a
        BOOLEAN, and a boolean literal only against a number (`1 = true`,
        `id = true`, `(id > 1) = 1`).
      - A set operation's ORDER BY takes one qualified spelling PostgreSQL
