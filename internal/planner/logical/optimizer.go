@@ -1759,13 +1759,16 @@ func innerSemiJoinKey(info *plansql.SelectInfo) (KeyRef, bool) {
 		if len(info.GroupBy) == 0 {
 			return KeyRef{}, false
 		}
-		name := cleanExpr(col.Alias)
-		if name == "" {
-			name = cleanExpr(col.Expr)
-		}
 		// An aggregate output is computed, not read from a relation: there
 		// is no qualifier for repairDecorrelatedSpelling to resolve, and the
-		// name the Aggregate node declares is the name it emits.
+		// name the Aggregate node declares is the name it emits. Only an
+		// ALIAS is a name the join-key split reads as a column: an
+		// un-aliased item's name is its expression text (`max(r.v)`), which
+		// the physical planner refused as a non-column equi-join key — an
+		// internal error for `v IN (SELECT max(r.v) … GROUP BY …)` on every
+		// arm, where the filter path answers PostgreSQL's rows. It stays a
+		// filter.
+		name := cleanExpr(col.Alias)
 		return KeyRef{Text: name}, name != ""
 	}
 	ref := plainColRef(col.ASTExpr)
