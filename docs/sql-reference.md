@@ -1040,11 +1040,19 @@ A quoted literal compared with a subquery takes the subquery's type, as on
 PostgreSQL: `'12' IN (SELECT user_id FROM users)` compares the bigint 12,
 and a literal that is no value of that type is refused before any row
 (`'zz' IN (SELECT user_id …)` is 22P02) (#1372). It is read by that type's
-own input, so every spelling the type accepts matches — `'2024-1-2'` or
-`'20240102'` against a DATE, `'2001:DB8::1'` against an IPv6 address, a
-braced uuid, `'1_2'` or `'0x0C'` against a bigint — and it takes the TYPE,
-never the column's scale: `'12.50001' IN (SELECT amount …)` over a
-NUMERIC(18,4) column compares 12.50001, not 12.5000. A literal with more
+own input and matches on every arm for every spelling this engine's input
+function reads the same way — `'2024-1-2'` or `'20240102'` against a DATE,
+`'2001:DB8::1'` against an IPv6 address, a braced uuid, `'1_2'` or `'0x0C'`
+against a bigint — and it takes the TYPE, never the column's scale, at the
+literal's own digits: `'12.50001' IN (SELECT amount …)` over a
+NUMERIC(18,4) column compares 12.50001, not 12.5000. CIDR's abbreviated
+input forms (`'10/8'`) are the documented exception: the CIDR input
+function keeps the text un-normalized, so the literal and a stored
+`10.0.0.0/8` never render alike (a pre-existing split, `CAST('10/8' AS
+CIDR) IN (…)` has the same one). A spelling the input function refuses
+outright (`'2024-001'` against DATE, 22007; `'2001:db8::1/64'` against an
+IPv6 address, 0A000) is a loud refusal, not a wrong value — PostgreSQL's
+own input function refuses the same text. A literal with more
 than millisecond precision against a TIMESTAMP is read at the stored
 millisecond precision (see postgres-differences.md). A DATE, like every
 other type, compares by value whatever the subquery's shape — a `UNION`, a
