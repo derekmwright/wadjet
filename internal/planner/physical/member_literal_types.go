@@ -40,14 +40,7 @@ func (p *Planner) typeMemberLiterals(root *logical.Node) {
 	if p == nil || root == nil {
 		return
 	}
-	// A body that reads a CTE of this statement resolves its type against
-	// the statement's WITH list (the reason SubqueryOutputColumn's caller
-	// seeds it, as declaredOutputSchemaForPlan does).
-	if len(root.CTEs) > 0 {
-		saved := p.Ctes
-		p.Ctes = root.CTEs
-		defer func() { p.Ctes = saved }()
-	}
+	ctes := root.CTEs
 	var node func(n *logical.Node)
 	node = func(n *logical.Node) {
 		if n == nil {
@@ -57,25 +50,25 @@ func (p *Planner) typeMemberLiterals(root *logical.Node) {
 			for i := range preds {
 				// The DAG reads a filter back from its TEXT (Raw), so a
 				// typed literal is written into both.
-				if preds[i].ASTExpr != nil && p.typeMemberLiteralsIn(preds[i].ASTExpr) {
+				if preds[i].ASTExpr != nil && p.typeMemberLiteralsIn(ctes, preds[i].ASTExpr) {
 					preds[i].Raw = preds[i].ASTExpr.String()
 				}
 			}
 		}
 		for i := range n.Projections {
-			p.typeMemberLiteralsIn(n.Projections[i].ASTExpr)
+			p.typeMemberLiteralsIn(ctes, n.Projections[i].ASTExpr)
 		}
 		for i := range n.LateralDualItems {
-			p.typeMemberLiteralsIn(n.LateralDualItems[i].ASTExpr)
+			p.typeMemberLiteralsIn(ctes, n.LateralDualItems[i].ASTExpr)
 		}
 		for i := range n.AggExprs {
-			p.typeMemberLiteralsIn(n.AggExprs[i].InputExpr)
+			p.typeMemberLiteralsIn(ctes, n.AggExprs[i].InputExpr)
 		}
 		for i := range n.WindowExprs {
-			p.typeMemberLiteralsIn(n.WindowExprs[i].InputExpr)
+			p.typeMemberLiteralsIn(ctes, n.WindowExprs[i].InputExpr)
 		}
 		for _, g := range n.GroupByExprs {
-			p.typeMemberLiteralsIn(g)
+			p.typeMemberLiteralsIn(ctes, g)
 		}
 		for _, c := range n.Children {
 			node(c)
@@ -86,7 +79,7 @@ func (p *Planner) typeMemberLiterals(root *logical.Node) {
 
 // typeMemberLiteralsIn types every membership's quoted-literal outer value in
 // one expression, in place, and reports whether it changed anything.
-func (p *Planner) typeMemberLiteralsIn(e plansql.Node) bool {
+func (p *Planner) typeMemberLiteralsIn(ctes []plansql.CTEDef, e plansql.Node) bool {
 	changed := false
 	var walk func(plansql.Node)
 	walk = func(n plansql.Node) {
@@ -95,14 +88,14 @@ func (p *Planner) typeMemberLiteralsIn(e plansql.Node) bool {
 		}
 		switch v := n.(type) {
 		case *plansql.InExpr:
-			if cast := p.memberLiteralCast(v.Left, v.Values); cast != nil {
+			if cast := p.memberLiteralCast(ctes, v.Left, v.Values); cast != nil {
 				v.Left, changed = cast, true
 			}
 		case *plansql.AnyAllExpr:
 			op := strings.TrimSpace(v.Op)
 			mod := strings.ToUpper(v.Modifier)
 			if (op == "=" && (mod == "ANY" || mod == "SOME")) || ((op == "<>" || op == "!=") && mod == "ALL") {
-				if cast := p.memberLiteralCast(v.Left, v.Values); cast != nil {
+				if cast := p.memberLiteralCast(ctes, v.Left, v.Values); cast != nil {
 					v.Left, changed = cast, true
 				}
 			}
@@ -119,7 +112,13 @@ func (p *Planner) typeMemberLiteralsIn(e plansql.Node) bool {
 // nil when there is nothing to type: the operand is not a quoted literal,
 // the membership is not against ONE subquery, or its declared type is not
 // one the literal takes (a TEXT set keeps the text, as PostgreSQL does).
-func (p *Planner) memberLiteralCast(left plansql.Node, values []plansql.Node) plansql.Node {
+//
+// A body that reads a CTE of the statement resolves its type against the
+// statement's WITH list, which is seeded for this one question (as
+// declaredOutputSchemaForPlan seeds it) and only when there is a literal to
+// type: a plan with no quoted-literal membership leaves the planner as it
+// found it.
+func (p *Planner) memberLiteralCast(ctes []plansql.CTEDef, left plansql.Node, values []plansql.Node) plansql.Node {
 	lit, ok := plansql.Unparen(left).(*plansql.Lit)
 	if !ok || lit.Kind != plansql.LitString || len(values) != 1 {
 		return nil
@@ -127,6 +126,11 @@ func (p *Planner) memberLiteralCast(left plansql.Node, values []plansql.Node) pl
 	sq, ok := plansql.Unparen(values[0]).(*plansql.SubqueryNode)
 	if !ok || sq.Array {
 		return nil
+	}
+	if len(ctes) > 0 {
+		saved := p.Ctes
+		p.Ctes = ctes
+		defer func() { p.Ctes = saved }()
 	}
 	col, ok := p.SubqueryOutputColumn(sq.SQL)
 	if !ok {
