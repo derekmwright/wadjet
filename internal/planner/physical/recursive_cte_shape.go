@@ -13,8 +13,9 @@ import (
 
 // refuseRecursiveTermShape checks the parsed recursive term before execution.
 // It raises 42P19 for an aggregate over the self-reference, a self-reference
-// in a subquery expression or on an outer join nullable side, or repeated
-// self-references. Nested blocks are checked at their own scope; unsupported
+// in a subquery expression or on an outer join nullable side, repeated
+// self-references, or a self-reference under INTERSECT ALL / EXCEPT ALL / the
+// right operand of EXCEPT. Nested blocks are checked at their own scope; unsupported
 // forms refuse. See ADR-0021 §1o-b.
 func refuseRecursiveTermShape(cteName string, term *plansql.SelectInfo) error {
 	name := strings.ToLower(strings.TrimSpace(cteName))
@@ -35,7 +36,76 @@ func refuseRecursiveTermShape(cteName string, term *plansql.SelectInfo) error {
 	if fromReferenceCount(term, name) > 1 {
 		return ref("more than once")
 	}
+	if within := referenceWithinSetOp(term, name, ""); within != "" {
+		return ref("within " + within)
+	}
 	return nil
+}
+
+// referenceWithinSetOp is PostgreSQL's set-operation rule for a recursive
+// term, measured on 17.11: the self-reference may not appear under INTERSECT
+// ALL (either operand), under EXCEPT ALL's left operand, or under EXCEPT's
+// right operand; a DISTINCT INTERSECT and EXCEPT's left operand keep the
+// enclosing context. It returns the operator the reference sits under ("" when
+// none), through set-operation arms and derived tables.
+//
+// The parser builds INTERSECT at a higher precedence than UNION (#1349), so
+// `seed UNION ALL SELECT … FROM r INTERSECT ALL SELECT …` reaches this term
+// as an INTERSECT ALL whose left operand reads r — which PostgreSQL refuses,
+// and which iterated here as though the reference were allowed.
+func referenceWithinSetOp(info *plansql.SelectInfo, want, within string) string {
+	if info == nil {
+		return ""
+	}
+	if u := info.Union; u != nil {
+		left, right := within, within
+		switch u.Op {
+		case plansql.SetOpIntersect:
+			if u.All {
+				left, right = "INTERSECT", "INTERSECT"
+			}
+		case plansql.SetOpExcept:
+			if u.All {
+				left = "EXCEPT"
+			}
+			right = "EXCEPT"
+		}
+		if w := referenceWithinSetOp(u.Left, want, left); w != "" {
+			return w
+		}
+		return referenceWithinSetOp(u.Right, want, right)
+	}
+	visit := func(t *plansql.TableRef) string {
+		if t == nil {
+			return ""
+		}
+		if strings.HasPrefix(t.Name, "(") {
+			sub, err := t.SubSelect()
+			if err != nil {
+				return ""
+			}
+			return referenceWithinSetOp(sub, want, within)
+		}
+		if within != "" && strings.EqualFold(strings.TrimSpace(t.Name), want) {
+			return within
+		}
+		return ""
+	}
+	for i := range info.Tables {
+		if w := visit(&info.Tables[i]); w != "" {
+			return w
+		}
+	}
+	for i := range info.Joins {
+		ref := info.Joins[i].RightTableRef
+		if ref == nil {
+			ref = &plansql.TableRef{Name: info.Joins[i].RightTable}
+		}
+		if w := visit(ref); w != "" {
+			return w
+		}
+	}
+	return ""
 }
 
 // aggregateOverTheReference is PostgreSQL's aggregate rule for a recursive
