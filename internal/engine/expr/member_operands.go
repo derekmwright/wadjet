@@ -23,9 +23,12 @@ import (
 // answer the matching rows (#1373); and a quoted literal probe stayed TEXT
 // against a typed set, so `'12' IN (SELECT bigint …)` answered 0 where
 // PostgreSQL resolves the literal to bigint and answers every row (#1372).
-// These two functions state the one reading both constructs apply, and
-// physical.comparisonTyper.memberPair — which decides the pair at plan time
-// on every arm — reads MemberLiteralCast's table for the literal's type.
+// The functions below state the one reading both constructs apply. The
+// literal's type is MemberLiteralCast's, of the set's TypeID alone:
+// physical.comparisonTyper.memberPair refuses a literal that is no value of
+// it at plan time, and MemberProbe builds the typed literal —
+// physical.typeMemberLiterals writes it into the logical plan, so every arm
+// (the DAG's inlined IN list included) compares an already-typed value.
 
 // MemberLiteralCast is the CAST an UNKNOWN-typed (quoted) literal takes on
 // the OUTER side of a membership whose set is declared t: PostgreSQL
@@ -92,19 +95,34 @@ func CheckMemberLiteral(t parquet.TypeID, text string) (err error) {
 	return nil
 }
 
-// memberProbe is the probe node a membership compiles: an unknown-typed
-// literal against a typed set is the literal CAST to the set's type
-// (MemberLiteralCast), every other operand itself.
-func memberProbe(left plansql.Node, set *parquet.Column) plansql.Node {
+// MemberProbe is a membership's outer operand read as the set's type: an
+// unknown-typed (quoted) literal against a set declared t is the literal
+// CAST to MemberLiteralCast(t), and every other operand is itself (ok false).
+// It is the ONE constructor of the typed literal: physical.typeMemberLiterals
+// writes it into the logical plan every arm consumes (the DAG's inlined IN
+// list included), and the compiler applies it to an expression that reached
+// it without a plan — a DML door's WHERE — where it finds the literal still
+// quoted. A literal the plan already typed is a CAST, not a quoted literal,
+// so the two never both apply.
+func MemberProbe(left plansql.Node, t parquet.TypeID) (plansql.Node, bool) {
 	lit, ok := plansql.Unparen(left).(*plansql.Lit)
-	if !ok || lit.Kind != plansql.LitString || set == nil {
-		return left
+	if !ok || lit.Kind != plansql.LitString {
+		return left, false
 	}
-	name, ok := MemberLiteralCast(set.Type)
+	name, ok := MemberLiteralCast(t)
 	if !ok {
+		return left, false
+	}
+	return &plansql.CastNode{Inner: lit, TypeName: name}, true
+}
+
+// memberProbe is MemberProbe for the compiler, over the set's declaration.
+func memberProbe(left plansql.Node, set *parquet.Column) plansql.Node {
+	if set == nil {
 		return left
 	}
-	return &plansql.CastNode{Inner: lit, TypeName: name}
+	n, _ := MemberProbe(left, set.Type)
+	return n
 }
 
 // memberSetBox is one set member as the probe carries a value of the set's

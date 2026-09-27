@@ -28,6 +28,9 @@ func (p *Planner) AnnotateScanColumns(ctx context.Context, node *logical.Node) {
 	// walks cannot ask for — they hold no Planner — so it is stamped on the
 	// Project that publishes it, here, once per plan (subquery_decl_annotation.go).
 	p.annotateSubqueryColumnDecls(node)
+	// A membership's quoted-literal outer value takes the subquery's type IN
+	// THE PLAN, so every arm reads one typed node (member_literal_types.go).
+	p.typeMemberLiterals(node)
 }
 
 func (p *Planner) annotateScanColumns(ctx context.Context, node *logical.Node) {

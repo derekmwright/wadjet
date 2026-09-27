@@ -482,8 +482,10 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 		}
 
 		// A subquery membership's two operands are read in ONE type
-		// (member_operands.go): the set's declaration, and a quoted literal
-		// probe CAST to it (#1372).
+		// (member_operands.go): the set's declaration. A quoted-literal
+		// probe arrives already CAST to it where a plan was built — the plan
+		// types it for every arm (physical.typeMemberLiterals, #1372) — and
+		// is typed here by the same constructor where none was.
 		probeNode := n.Left
 		var setDecl *parquet.Column
 		if len(n.Values) == 1 {
