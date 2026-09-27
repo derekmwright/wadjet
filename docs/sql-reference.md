@@ -683,8 +683,15 @@ SELECT ip_address FROM blocklist
 
 All set operations support ORDER BY and LIMIT on the combined result, including
 positional `ORDER BY` terms, which address the result columns the leftmost arm
-names — see "ORDER BY over a set operation". Operations are left-associative
-when chained (e.g., `A UNION B EXCEPT C` is `(A UNION B) EXCEPT C`).
+names — see "ORDER BY over a set operation". A chain follows PostgreSQL's
+precedence: `INTERSECT` and `INTERSECT ALL` bind tighter than `UNION`,
+`UNION ALL`, `EXCEPT` and `EXCEPT ALL`, and operators of one level are
+left-associative. `A UNION B INTERSECT C` is `A UNION (B INTERSECT C)`;
+`A UNION B EXCEPT C` is `(A UNION B) EXCEPT C`; `A INTERSECT B UNION C
+INTERSECT D` is `(A INTERSECT B) UNION (C INTERSECT D)`. Parentheses override
+both rules, and a chain-level `ORDER BY` / `LIMIT` / `OFFSET` applies to the
+whole result. Through v0.25.1 every operator was read left to right at one
+level, so `A UNION B INTERSECT C` answered `(A UNION B) INTERSECT C` (#1349).
 
 A set operation's arms always produce the operation's whole result row, whatever
 the query above it reads. Before this release a filter or an aggregate above a set
@@ -2471,7 +2478,11 @@ and sentence: an aggregate function may not appear in a query block whose own
 over a derived table that reads the CTE is answered), and the term may not name the CTE
 inside a subquery expression (`EXISTS`, `IN`, a scalar subquery), on the
 nullable side of an outer join (the right of a `LEFT JOIN`, the left of a
-`RIGHT JOIN`, either side of a `FULL JOIN`), or more than once. `r LEFT JOIN t`,
+`RIGHT JOIN`, either side of a `FULL JOIN`), more than once, under `INTERSECT
+ALL`, under `EXCEPT ALL`'s left operand or under `EXCEPT`'s right operand. A
+term that is a distinct `INTERSECT` chain — `SELECT 1 UNION ALL SELECT n + 1
+FROM r WHERE n < 5 INTERSECT SELECT 2`, where the `INTERSECT` binds first — is
+answered. `r LEFT JOIN t`,
 a `GROUP BY` with no aggregate and an aggregate inside a subquery of the term
 are answered.
 
