@@ -185,6 +185,7 @@ func (e *CorrelatedInSubquery) EvalBoolNull(b *batch.RecordBatch, row int) (bool
 				sawNull = true
 				continue
 			}
+			v = memberSetBox(v, e.setDecl)
 			eq, decided := false, false
 			if container {
 				eq, decided = containerMember(ld, e.setDecl, lv, v)

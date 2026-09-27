@@ -8,6 +8,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // Row-value comparisons and quantified ANY/SOME/ALL must compile as expressions.
@@ -245,7 +246,17 @@ func compileQuantified(n *plansql.AnyAllExpr, ctx *compileContext) (Expr, error)
 	}
 	all := n.Modifier == "ALL"
 
-	left, err := compileWithCtx(n.Left, ctx)
+	// `= ANY` / `<> ALL` over a subquery is the membership InSubquery
+	// evaluates below, its operands read in ONE type (member_operands.go).
+	probeNode := n.Left
+	var setDecl *parquet.Column
+	if len(n.Values) == 1 && ((op == CmpEq && !all) || (op == CmpNe && all)) {
+		if sq, ok := n.Values[0].(*plansql.SubqueryNode); ok && ctx.runner != nil {
+			setDecl = subquerySetDecl(sq.SQL, ctx)
+			probeNode = memberProbe(n.Left, setDecl)
+		}
+	}
+	left, err := compileWithCtx(probeNode, ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -263,7 +274,7 @@ func compileQuantified(n *plansql.AnyAllExpr, ctx *compileContext) (Expr, error)
 			if (op == CmpEq && !all) || (op == CmpNe && all) {
 				return &InSubquery{Expr: left, SQL: sq.SQL, Runner: ctx.runner, Not: all,
 					Scope: ctx.subqueryScope, Budget: ctx.budget, SetBound: ctx.setRowBound,
-					probeDecl: newOperandDecl(n.Left, ctx), setDecl: subquerySetDecl(sq.SQL, ctx)}, nil
+					probeDecl: newOperandDecl(probeNode, ctx), setDecl: setDecl}, nil
 			}
 			return nil, sqlerr.New("0A000",
 				"%s %s (subquery) is not supported; only `= ANY` and `<> ALL` over a subquery are", n.Op, n.Modifier)

@@ -77,6 +77,9 @@ type comparisonTyper struct {
 	// bodyOrigins is a subquery body's per-column text-cast origins
 	// (binder.textOrigin), nil when the body cannot be read.
 	bodyOrigins func(sql string) []parquet.TypeID
+	// bodyDeclared is a subquery body's output types by declaration
+	// (binder.declaredOut), nil when the body cannot be read.
+	bodyDeclared func(sql string) []parquet.TypeID
 	// bodyKeys applies the join-key rule to a membership or EXISTS body's
 	// CORRELATED key pairs (binder.refuseBodyKeyPairs), nil where no body
 	// can be read.
@@ -626,22 +629,40 @@ func (c *comparisonTyper) inPair(left, member plansql.Node, op string) error {
 // whether the arms agree depends on the DATA (#1073's set-operation body: 0
 // rows single, the cast failing on the DAG; a TEXT literal, `upper(s)` or a
 // LIMITed column body the same, measured at v0.25.1). The pair is kept only
-// where the text PROVABLY converts: it was made by a CAST from a value of
-// the typed side's own class in every arm of the body, and that class is a
-// kept one (textConversionAnswers). Anything else is PostgreSQL's 42883, in
-// the explicit JOIN's words.
+// where the text PROVABLY converts: it was made by a CAST from a value
+// rendered as the typed side renders it (textOriginConverts) in every arm of
+// the body, and the typed side is a kept one (textConversionAnswers).
+// Anything else is PostgreSQL's 42883, in the explicit JOIN's words.
+//
+// The rule reads the two operands WHATEVER their shape: an operand the
+// structural walk does not type is typed by its declaration for this
+// question — an expression outer (`v + 0 IN (SELECT s …)`, #1369) and an
+// expression body (`IN (SELECT upper(s) …)`, #1370) answered one reading on
+// the single arms and another, or 22P02, on the DAG. A quoted-literal OUTER
+// value takes the body's type, as PostgreSQL resolves it, and is read as
+// that type here — 22P02 / 22007 when its text is not one (#1372;
+// expr.MemberLiteralCast is the one table the compiled probe reads too).
 func (c *comparisonTyper) memberPair(left, member plansql.Node, op string, origins []parquet.TypeID) error {
-	tl, ok := c.operand(left)
-	if !ok {
-		return nil
-	}
-	tr, ok := c.operand(member)
-	if (!ok || comparisonClass(tr) == cmpUnknown) && len(origins) == 1 && origins[0] == originQuotedLiteral {
+	tl, lok := c.operand(left)
+	tr, rok := c.operand(member)
+	if (!rok || comparisonClass(tr) == cmpUnknown) && len(origins) == 1 && origins[0] == originQuotedLiteral {
 		// PostgreSQL resolves a quoted literal in a subquery's target list
 		// to text.
-		tr, ok = parquet.TypeString, true
+		tr, rok = parquet.TypeString, true
 	}
-	if !ok {
+	if !rok || comparisonClass(tr) == cmpUnknown {
+		tr, rok = c.memberDeclared(member)
+	}
+	if text, unknown := unknownOperand(left); unknown {
+		if text != nil && rok && comparisonClass(tr) != cmpText {
+			return expr.CheckMemberLiteral(tr, *text)
+		}
+		return nil
+	}
+	if !lok || comparisonClass(tl) == cmpUnknown {
+		tl, lok = c.declaredOperand(left)
+	}
+	if !lok || !rok {
 		return nil
 	}
 	cl, cr := comparisonClass(tl), comparisonClass(tr)
@@ -655,13 +676,94 @@ func (c *comparisonTyper) memberPair(left, member plansql.Node, op string, origi
 	return sqlerr.New("42883", "operator does not exist: %s %s %s", cmpTypeName(tl), op, cmpTypeName(tr))
 }
 
+// memberDeclared is a one-column subquery body's output type by
+// declaration, for memberPair.
+func (c *comparisonTyper) memberDeclared(member plansql.Node) (parquet.TypeID, bool) {
+	sub, ok := plansql.Unparen(member).(*plansql.SubqueryNode)
+	if !ok || c.bodyDeclared == nil {
+		return 0, false
+	}
+	if ds := c.bodyDeclared(sub.SQL); len(ds) == 1 && ds[0] != typeAmbiguous {
+		return ds[0], true
+	}
+	return 0, false
+}
+
+// declaredOperand types an operand the structural walk does not by its
+// declaration (nodeDeclaredType), for the membership and correlated-key
+// rules only: which of two operands is TEXT is a property of the statement
+// whatever shape the operand has. A quoted literal declares nothing.
+func (c *comparisonTyper) declaredOperand(n plansql.Node) (parquet.TypeID, bool) {
+	if _, unknown := unknownOperand(n); unknown {
+		return 0, false
+	}
+	switch plansql.Unparen(n).(type) {
+	case *plansql.SubqueryNode, *plansql.CastNode:
+		// A CAST's target is the structural walk's to read; one it does
+		// not name (DURATION) is not proved TEXT by the declaration's
+		// fallback.
+		return 0, false
+	}
+	d, conf := nodeDeclaredType(plansql.Unparen(n), c.decls)
+	if conf != expr.Decided || d.Untyped {
+		return 0, false
+	}
+	return d.ID, true
+}
+
+// keyPair is a correlated key equality with an EXPRESSION side — the outer
+// value against the body's, as refuseCorrelatedKeys finds them. It takes the
+// membership rule, so `EXISTS (… WHERE a.v = f(b.s))` answers what `a.v IN
+// (SELECT f(b.s) …)` answers: a text/typed pair is 42883 unless the text is
+// a CAST that provably converts (textOriginConverts) and the typed side's
+// DIRECT reading is a kept one — the key stays a filter there, compared as
+// the direct comparison compares. #1374: `v_dec IN (SELECT CAST(i AS TEXT)
+// …)` answered 1 and the same EXISTS 0 on every arm, `'14'` against
+// `14.0000`. A LATERAL body's key (lateral) is a JOIN key after
+// decorrelation, whose carrier compares the two vectors unconverted
+// (`a.v = CAST(b.v AS TEXT)` answered 0 rows on every arm): no text/typed
+// pair is kept there.
+func (c *comparisonTyper) keyPair(a, b plansql.Node, lateral bool) error {
+	ta, ok := c.operand(a)
+	if !ok || comparisonClass(ta) == cmpUnknown {
+		if ta, ok = c.declaredOperand(a); !ok {
+			return nil
+		}
+	}
+	tb, ok := c.operand(b)
+	if !ok || comparisonClass(tb) == cmpUnknown {
+		if tb, ok = c.declaredOperand(b); !ok {
+			return nil
+		}
+	}
+	ca, cb := comparisonClass(ta), comparisonClass(tb)
+	if ca == cmpUnknown || cb == cmpUnknown || ca == cb || (ca != cmpText && cb != cmpText) {
+		return nil
+	}
+	textSide, typed := b, ta
+	if ca == cmpText {
+		textSide, typed = a, tb
+	}
+	if !lateral && textConversionAnswers(typed, false) {
+		if origin := textCastOrigin(textSide, c.typeOf); origin != typeAmbiguous && textOriginConverts(origin, typed) {
+			return nil
+		}
+	}
+	return sqlerr.New("42883", "operator does not exist: %s = %s", cmpTypeName(ta), cmpTypeName(tb))
+}
+
 // textOriginConverts is whether the text a CAST from origin makes reads as
-// tl on every arm: same class, and never a fractional rendering (float,
-// numeric) into an integer kind, which the DAG's cast refuses (22P02) while
-// the single arms compare the text.
+// tl on every arm and in every spelling: the origin RENDERS a shared value
+// as tl does — the same type, or two integer kinds. A different type of one
+// class renders differently (`14` against numeric `14.0000`, a float's
+// shortest form against numeric's scale), so a membership that converts the
+// text and an EXISTS that compares it directly answered two different
+// values for one comparison (#1374); and a fractional rendering into an
+// integer kind is 22P02 on the DAG while the single arms compare the text
+// (#1308).
 func textOriginConverts(origin, tl parquet.TypeID) bool {
-	if comparisonClass(origin) != comparisonClass(tl) {
-		return false
+	if origin == tl {
+		return true
 	}
 	integer := func(t parquet.TypeID) bool {
 		switch t {
@@ -670,7 +772,7 @@ func textOriginConverts(origin, tl parquet.TypeID) bool {
 		}
 		return false
 	}
-	return !integer(tl) || integer(origin)
+	return integer(origin) && integer(tl)
 }
 
 // originQuotedLiteral is the text-cast origin of a body column that is a

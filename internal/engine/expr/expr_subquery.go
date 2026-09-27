@@ -497,7 +497,7 @@ func (e *InSubquery) resolveSlow() {
 			}
 			for _, v := range r {
 				if v != nil {
-					rawVals = append(rawVals, v)
+					rawVals = append(rawVals, memberSetBox(v, e.setDecl))
 				} else {
 					e.setNull = true
 				}

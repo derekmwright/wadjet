@@ -481,7 +481,18 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 			return combined, nil
 		}
 
-		left, err := compileWithCtx(n.Left, ctx)
+		// A subquery membership's two operands are read in ONE type
+		// (member_operands.go): the set's declaration, and a quoted literal
+		// probe CAST to it (#1372).
+		probeNode := n.Left
+		var setDecl *parquet.Column
+		if len(n.Values) == 1 {
+			if sq, ok := n.Values[0].(*plansql.SubqueryNode); ok && ctx.runner != nil {
+				setDecl = subquerySetDecl(sq.SQL, ctx)
+				probeNode = memberProbe(n.Left, setDecl)
+			}
+		}
+		left, err := compileWithCtx(probeNode, ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -529,8 +540,8 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 								ParsedInfo:      info,
 								UnqualOuterCols: buildUnqualOuterCols(refs, ctx.outerCols),
 								SetBound:        ctx.setRowBound,
-								probeDecl:       newOperandDecl(n.Left, ctx),
-								setDecl:         subquerySetDecl(sq.SQL, ctx),
+								probeDecl:       newOperandDecl(probeNode, ctx),
+								setDecl:         setDecl,
 							}, nil
 						}
 					}
@@ -538,7 +549,7 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 				in := &InSubquery{Expr: left, SQL: sq.SQL, Runner: ctx.runner, Not: n.Not,
 					Cols: ctx.subqueryCols, Scope: ctx.subqueryScope,
 					Budget: ctx.budget, SetBound: ctx.setRowBound}
-				in.probeDecl, in.setDecl = newOperandDecl(n.Left, ctx), subquerySetDecl(sq.SQL, ctx)
+				in.probeDecl, in.setDecl = newOperandDecl(probeNode, ctx), setDecl
 				if ctx.trackInSubquery != nil {
 					ctx.trackInSubquery(in)
 				}
