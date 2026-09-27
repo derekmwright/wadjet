@@ -348,6 +348,8 @@ func smCells() []smCell {
 	out = append(out, smTextCells()...)
 	out = append(out, smCrossCastCells()...)
 	out = append(out, smIssueCells()...)
+	out = append(out, smLiteralCells()...)
+	out = append(out, smRenderKeptCells()...)
 	return out
 }
 
@@ -430,7 +432,7 @@ func TestArcSMMembershipOperandsEveryArm(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	t.Cleanup(cancel)
-	arms := stArms(t, ctx)
+	arms := smArms(t, ctx)
 	refused, answered := 0, 0
 	for _, tc := range cells {
 		want := answers[tc.name]
@@ -515,6 +517,13 @@ func TestArcSMExplainMembershipKeyIsOneType(t *testing.T) {
 	kept := []struct{ sql, must, never string }{
 		{"EXPLAIN SELECT a.id FROM st_pair a WHERE EXISTS (SELECT 1 FROM st_pair r WHERE a.v_i64 = CAST(r.v_i64 AS TEXT))", "CAST(", "ON a.v_i64 = l."},
 		{"EXPLAIN SELECT a.id, l.rid FROM st_pair a, LATERAL (SELECT r.id AS rid FROM st_pair r WHERE r.v_i64 = a.v_i64) l", "v_i64", "s_i64"},
+		// The quoted-literal outer is typed IN THE PLAN every arm reads —
+		// the subquery's type, never its typmod — so the DAG's inlined IN
+		// list compares a typed value too (#1372).
+		{"EXPLAIN SELECT a.id FROM st_pair a WHERE '2024-1-2' IN (SELECT r.v_date FROM st_pair r)", "cast('2024-1-2' as DATE) in (", "['2024-1-2' in"},
+		{"EXPLAIN SELECT a.id FROM st_pair a WHERE '2001:DB8::1' NOT IN (SELECT r.v_ipv6 FROM st_pair r WHERE r.id <= 3)", "cast('2001:DB8::1' as IPV6) not in (", "['2001:DB8::1' not in"},
+		{"EXPLAIN SELECT a.id FROM st_pair a WHERE '1_2' = ANY (SELECT r.v_i64 FROM st_pair r)", "cast('1_2' as BIGINT)", "['1_2' ="},
+		{"EXPLAIN SELECT a.id FROM st_pair a WHERE '12.50001' IN (SELECT r.v_dec FROM st_pair r)", "cast('12.50001' as NUMERIC) in (", "NUMERIC("},
 	}
 	for _, arm := range arms {
 		for _, c := range refused {

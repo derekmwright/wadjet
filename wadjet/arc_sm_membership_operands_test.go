@@ -27,6 +27,8 @@ func TestArcSMEmbeddedMembershipOperands(t *testing.T) {
 		{name: "1372/eqAny", sql: "SELECT a.id FROM st_pair a WHERE '12' = ANY (SELECT r.v_i64 FROM st_pair r WHERE r.id <= 3) ORDER BY a.id", want: "[[1] [2] [3] [4]]"},
 		{name: "1372/notIn", sql: "SELECT a.id FROM st_pair a WHERE '12' NOT IN (SELECT r.v_i64 FROM st_pair r WHERE r.id <= 3) ORDER BY a.id", want: "[]"},
 		{name: "1372/numeric", sql: "SELECT a.id FROM st_pair a WHERE '12.5' IN (SELECT r.v_dec FROM st_pair r WHERE r.id <= 3) ORDER BY a.id", want: "[[1] [2] [3] [4]]"},
+		{name: "1372/numericScale", sql: "SELECT a.id FROM st_pair a WHERE '12.50001' IN (SELECT r.v_dec FROM st_pair r WHERE r.id <= 3) ORDER BY a.id", want: "[]"},
+		{name: "1372/dateSpelling", sql: "SELECT a.id FROM st_pair a WHERE '2024-1-2' IN (SELECT r.v_date FROM st_pair r WHERE r.id <= 3) ORDER BY a.id", want: "[[1] [2] [3] [4]]"},
 		{name: "1372/notAValue", sql: "SELECT a.id FROM st_pair a WHERE 'zz' IN (SELECT r.v_i64 FROM st_pair r WHERE r.id <= 3)",
 			state: "22P02", msg: `invalid input syntax for type bigint: "zz"`},
 		{name: "1373/unionAll", sql: n + "a.v_date IN (SELECT r.v_date FROM st_pair r WHERE r.id = 1 UNION ALL SELECT r.v_date FROM st_pair r WHERE r.id = 2)", want: "[[2]]"},
@@ -65,6 +67,35 @@ func TestArcSMEmbeddedMembershipOperands(t *testing.T) {
 		}
 		if got := stCells(res); got != c.want {
 			t.Errorf("%s: %s\n  got  %s\n  want %s (PostgreSQL 17.11)", c.name, c.sql, got, c.want)
+		}
+	}
+}
+
+// A DML door compiles its WHERE without a logical plan, and the quoted
+// literal on a membership's outer side takes the subquery's type there by
+// the same constructor the plan uses (expr.MemberProbe) — its TYPE, never the
+// column's scale. PostgreSQL 17.11's rows after each statement, rolled back
+// between them.
+func TestArcSMEmbeddedMembershipLiteralDML(t *testing.T) {
+	ctx := context.Background()
+	cases := []struct{ name, dml, want string }{
+		{"delete/bigint", "DELETE FROM st_pair WHERE '12' IN (SELECT r.v_i64 FROM st_pair r WHERE r.id <= 3) AND id = 1", "[[2 13] [3 zz] [4 <nil>]]"},
+		{"delete/dateSpelling", "DELETE FROM st_pair WHERE '2024-1-2' IN (SELECT r.v_date FROM st_pair r WHERE r.id <= 3) AND id = 2", "[[1 12] [3 zz] [4 <nil>]]"},
+		{"update/bigintSpelling", "UPDATE st_pair SET s_i64 = 'hit' WHERE '1_2' IN (SELECT r.v_i64 FROM st_pair r WHERE r.id <= 3) AND id = 3", "[[1 12] [2 13] [3 hit] [4 <nil>]]"},
+		{"delete/numericScale", "DELETE FROM st_pair WHERE '12.50001' IN (SELECT r.v_dec FROM st_pair r WHERE r.id <= 3)", "[[1 12] [2 13] [3 zz] [4 <nil>]]"},
+	}
+	for _, c := range cases {
+		db := stEmbeddedDB(t)
+		if _, err := db.Query(ctx, c.dml); err != nil {
+			t.Errorf("%s: %s\n  refused: %v", c.name, c.dml, err)
+			continue
+		}
+		res, err := db.Query(ctx, "SELECT id, s_i64 FROM st_pair ORDER BY id")
+		if err != nil {
+			t.Fatalf("%s: read back: %v", c.name, err)
+		}
+		if got := stCells(res); got != c.want {
+			t.Errorf("%s: %s\n  got  %s\n  want %s (PostgreSQL 17.11)", c.name, c.dml, got, c.want)
 		}
 	}
 }
