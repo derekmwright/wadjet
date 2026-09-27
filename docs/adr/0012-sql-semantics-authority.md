@@ -164,7 +164,20 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
        literal probe cast to it — `'12' IN (SELECT bigint …)` answered 0
        rows there and every row on the DAG (#1372), a DATE against any body
        that stays a filter (a set operation, a literal, an expression) 0
-       rows there and the matches on the DAG (#1373). Thirteen cells base answered identically now
+       rows there and the matches on the DAG (#1373). Cells base answered
+       identically on every arm that now take PostgreSQL's 42883 with the
+       rule, recorded: 116 membership bodies and 112 set-operation bodies
+       selecting `CAST(x AS TEXT)` of a type that renders differently from
+       the compared one (numeric and float8 against the integer kinds and
+       against each other, DURATION into numeric or float8, inet against
+       cidr), which answered the converted reading; 64 EXISTS keys equating
+       a value with `CAST(x AS TEXT)` of another type, which answered the
+       direct text reading (0 rows, or the NOT EXISTS complement); seven
+       text-expression bodies whose data happened to convert on every arm
+       (`coalesce(s, '0')`, `substr(s, 1, 2)`, a CASE over s, `lower(s)`
+       against uuid, `CAST(v AS TEXT) || ''`); a set operation of a quoted
+       literal and a stored text column; and a LATERAL key, comma and JOIN
+       spellings (0 rows). Thirteen cells base answered identically now
        refuse with the rule, recorded (base's own value, then 42883): a
        derived table's `CAST(x AS TEXT)` column IN body (3; the JOIN
        refuses the same derived-column key); the same body under EXISTS
