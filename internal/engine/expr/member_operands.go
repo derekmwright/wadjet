@@ -113,7 +113,34 @@ func MemberProbe(left plansql.Node, t parquet.TypeID) (plansql.Node, bool) {
 	if !ok {
 		return left, false
 	}
+	if t == parquet.TypeDecimal {
+		if s, ok := memberDecimalLiteralScale(lit.Value); ok {
+			name = s
+		}
+	}
 	return &plansql.CastNode{Inner: lit, TypeName: name}, true
+}
+
+// memberDecimalLiteralScale is NUMERIC(38, s) for a plain decimal literal
+// with s fractional digits: the literal keeps its OWN digits exactly (a bare
+// NUMERIC constant boxes as float8, ADR-0024), never the column's scale.
+func memberDecimalLiteralScale(v string) (string, bool) {
+	t := strings.TrimSpace(v)
+	t = strings.TrimLeft(t, "+-")
+	intPart, frac, _ := strings.Cut(t, ".")
+	if intPart == "" && frac == "" {
+		return "", false
+	}
+	for _, c := range intPart + frac {
+		if c < '0' || c > '9' {
+			return "", false
+		}
+	}
+	intPart = strings.TrimLeft(intPart, "0")
+	if len(intPart)+len(frac) > 38 {
+		return "", false
+	}
+	return "NUMERIC(38," + strconv.Itoa(len(frac)) + ")", true
 }
 
 // memberProbe is MemberProbe for the compiler, over the set's declaration.
