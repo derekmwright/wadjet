@@ -1407,7 +1407,6 @@ const (
 	ltKeylessLeftJoin     = "could not extract join keys"
 	ltWindowInRerun       = "holds a window function"
 	ltWindowInLateral     = "inside a LATERAL subquery correlated on"
-	ltInOverAggregate     = "cannot be represented as an equi-join key"
 )
 
 var ltRefuses = map[string]string{
@@ -1478,7 +1477,6 @@ var ltRefuses = map[string]string{
 	"LEFTLATERAL/distinctOther/shared":  ltLiftedRefCannotPublish,
 	"COMMALATERAL/distinctOther/shared": ltLiftedRefCannotPublish,
 	"LEFTLATERAL/distinctOther/none":    ltKeylessLeftJoin,
-	"IN/groupHaving/eq":                 ltInOverAggregate,
 	"LATERAL/groupHaving/ineq":          ltAggregatedLiftedRef,
 	"LEFTLATERAL/groupHaving/ineq":      ltAggregatedLiftedRef,
 	"COMMALATERAL/groupHaving/ineq":     ltAggregatedLiftedRef,
@@ -1488,8 +1486,6 @@ var ltRefuses = map[string]string{
 	"LATERAL/groupHaving/shared":        ltAggregatedLiftedRef,
 	"LEFTLATERAL/groupHaving/shared":    ltAggregatedLiftedRef,
 	"COMMALATERAL/groupHaving/shared":   ltAggregatedLiftedRef,
-	"IN/groupHaving/none":               ltInOverAggregate,
-	"NOTIN/groupHaving/none":            ltInOverAggregate,
 	"LEFTLATERAL/groupHaving/none":      ltKeylessLeftJoin,
 	"LATERAL/groupLimit/ineq":           ltAggregatedLiftedRef,
 	"LEFTLATERAL/groupLimit/ineq":       ltAggregatedLiftedRef,
