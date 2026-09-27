@@ -189,6 +189,8 @@ func (e *CorrelatedInSubquery) EvalBoolNull(b *batch.RecordBatch, row int) (bool
 			eq, decided := false, false
 			if container {
 				eq, decided = containerMember(ld, e.setDecl, lv, v)
+			} else {
+				eq, decided = memberDecimalEqual(lv, v, e.setDecl)
 			}
 			if !decided {
 				eq = compare(lv, v, CmpEq)

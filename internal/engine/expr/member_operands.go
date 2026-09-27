@@ -3,9 +3,10 @@
 package expr
 
 import (
-	"fmt"
+	"strconv"
 	"strings"
 
+	"github.com/derekmwright/wadjet/internal/engine/batch"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
@@ -27,13 +28,17 @@ import (
 // on every arm — reads MemberLiteralCast's table for the literal's type.
 
 // MemberLiteralCast is the CAST an UNKNOWN-typed (quoted) literal takes on
-// the OUTER side of a membership whose set is declared set: PostgreSQL
-// resolves the literal to the set's type (#1372) — a DECIMAL at the set's
-// own precision and scale, so the literal boxes as the set's members do.
-// ok is false where the literal keeps its own reading — a TEXT set, a
-// container, a type this engine names no input cast for.
-func MemberLiteralCast(set parquet.Column) (string, bool) {
-	switch set.Type {
+// the OUTER side of a membership whose set is declared t: PostgreSQL
+// resolves the literal to the set's TYPE (#1372) — never its typmod, so a
+// DECIMAL set reads the literal as bare NUMERIC at the literal's own
+// digits: `'12.50001' IN (SELECT numeric(18,4) …)` compares 12.50001, and
+// rounding it to the column's scale answered every row where PostgreSQL
+// answers none. It takes the TypeID alone so that no caller can hand it a
+// precision: the plan-time check (CheckMemberLiteral) and the typed probe
+// read one type. ok is false where the literal keeps its own reading — a
+// TEXT set, a container, a type this engine names no input cast for.
+func MemberLiteralCast(t parquet.TypeID) (string, bool) {
+	switch t {
 	case parquet.TypeInt32, parquet.TypePort, parquet.TypeProtocol:
 		return "INTEGER", true
 	case parquet.TypeInt64, parquet.TypeDuration:
@@ -43,9 +48,6 @@ func MemberLiteralCast(set parquet.Column) (string, bool) {
 	case parquet.TypeFloat64:
 		return "DOUBLE PRECISION", true
 	case parquet.TypeDecimal:
-		if set.Precision > 0 {
-			return fmt.Sprintf("NUMERIC(%d,%d)", set.Precision, set.Scale), true
-		}
 		return "NUMERIC", true
 	case parquet.TypeDate:
 		return "DATE", true
@@ -73,7 +75,7 @@ func MemberLiteralCast(set parquet.Column) (string, bool) {
 // while it analyses the statement, so `'zz' IN (SELECT bigint …)` is refused
 // before any row, on every arm — it answered 0 rows on all five.
 func CheckMemberLiteral(t parquet.TypeID, text string) (err error) {
-	name, ok := MemberLiteralCast(parquet.Column{Type: t})
+	name, ok := MemberLiteralCast(t)
 	if !ok {
 		return nil
 	}
@@ -98,7 +100,7 @@ func memberProbe(left plansql.Node, set *parquet.Column) plansql.Node {
 	if !ok || lit.Kind != plansql.LitString || set == nil {
 		return left
 	}
-	name, ok := MemberLiteralCast(*set)
+	name, ok := MemberLiteralCast(set.Type)
 	if !ok {
 		return left
 	}
@@ -122,4 +124,40 @@ func memberSetBox(v any, set *parquet.Column) any {
 		return v
 	}
 	return int64(days)
+}
+
+// memberDecimalEqual is the per-row membership's reading of a DECIMAL set
+// member, the rung InSubquery's decSet / fltSet take for the whole set: the
+// member is its rendered text at the set's scale, and the probe is a float
+// (a numeric constant, the bare NUMERIC a quoted literal takes against the
+// set, MemberLiteralCast), an integer, or decimal text at its OWN scale.
+// Comparing the two boxes as they stood missed every member whose rendering
+// differed — `'12.5' IN (SELECT numeric(38,10) … WHERE r.id = a.id)` and
+// `12.5 IN (…)` answered 0 rows where PostgreSQL answers the row — so a
+// float probe compares at float8 and every other one by its canonical
+// decimal value, as InSubquery does. decided is false for anything else.
+func memberDecimalEqual(lv, v any, set *parquet.Column) (eq, decided bool) {
+	if set == nil || set.Type != parquet.TypeDecimal {
+		return false, false
+	}
+	s, ok := v.(string)
+	if !ok {
+		return false, false
+	}
+	if _, isFloat := lv.(float64); isFloat {
+		mf, err := strconv.ParseFloat(s, 64)
+		if err != nil {
+			return false, false
+		}
+		return cmpFloat64Op(lv.(float64), mf, CmpEq), true
+	}
+	key, ok := batch.CanonicalDecimalText(s)
+	if !ok {
+		return false, false
+	}
+	pk, ok := inSubqueryDecimalKey(lv)
+	if !ok {
+		return false, false
+	}
+	return pk == key, true
 }
