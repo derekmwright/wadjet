@@ -349,6 +349,7 @@ func smCells() []smCell {
 	out = append(out, smCrossCastCells()...)
 	out = append(out, smIssueCells()...)
 	out = append(out, smLiteralCells()...)
+	out = append(out, smPrecisionCells()...)
 	out = append(out, smRenderKeptCells()...)
 	return out
 }
@@ -523,7 +524,10 @@ func TestArcSMExplainMembershipKeyIsOneType(t *testing.T) {
 		{"EXPLAIN SELECT a.id FROM st_pair a WHERE '2024-1-2' IN (SELECT r.v_date FROM st_pair r)", "cast('2024-1-2' as DATE) in (", "['2024-1-2' in"},
 		{"EXPLAIN SELECT a.id FROM st_pair a WHERE '2001:DB8::1' NOT IN (SELECT r.v_ipv6 FROM st_pair r WHERE r.id <= 3)", "cast('2001:DB8::1' as IPV6) not in (", "['2001:DB8::1' not in"},
 		{"EXPLAIN SELECT a.id FROM st_pair a WHERE '1_2' = ANY (SELECT r.v_i64 FROM st_pair r)", "cast('1_2' as BIGINT)", "['1_2' ="},
-		{"EXPLAIN SELECT a.id FROM st_pair a WHERE '12.50001' IN (SELECT r.v_dec FROM st_pair r)", "cast('12.50001' as NUMERIC) in (", "NUMERIC("},
+		// The literal keeps its OWN scale — NUMERIC(38,5) for 5 fractional
+		// digits, never bare NUMERIC — so the per-row comparison stays an
+		// exact decimal instead of float8's ~15-17 digits (B4, round 3).
+		{"EXPLAIN SELECT a.id FROM st_pair a WHERE '12.50001' IN (SELECT r.v_dec FROM st_pair r)", "cast('12.50001' as NUMERIC(38,5)) in (", "['12.50001' in"},
 	}
 	for _, arm := range arms {
 		for _, c := range refused {

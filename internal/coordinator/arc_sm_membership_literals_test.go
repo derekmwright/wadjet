@@ -227,6 +227,66 @@ func smLiteralCells() []smCell {
 	return out
 }
 
+// smPrecisionCells are the reviewer's B4 precision cells (review round 2,
+// Target 2): a quoted-literal probe against a NUMERIC(18,4) body computed
+// from st_pair.v_dec, at values with 14 integer digits — still inside the
+// column's own precision. Round 2's per-row memberDecimalEqual read a
+// bare-NUMERIC literal (the box MemberProbe minted for it) at float8's
+// ~15-17 significant digits, so '12500000000000.0001' matched a
+// 12500000000000.0000 member on every arm where PostgreSQL answers none —
+// the fractional digit past float8's precision never survived the box. The
+// repair gives the literal NUMERIC(38, its own scale) instead of bare
+// NUMERIC, so the comparison stays an exact decimal (MemberProbe,
+// memberDecimalLiteralScale).
+//
+// castIn/castCorr at off1 and off9 — the EXPLICIT `CAST(x AS NUMERIC) IN
+// (…)` spelling written directly in the SQL, a different operand shape
+// MemberProbe never touches — are left OUT of this table: they keep boxing
+// as float64 (ADR-0024's bare-NUMERIC carrier) whether or not this repair
+// lands, so they stay wrong after it (N2, recorded in the landing notes
+// with raw rows, not fixed this round). castIn/castCorr at exact and
+// offInt stay IN it: no precision is lost there, so they already agree
+// with PostgreSQL on both sides of the repair and are the control that
+// shows exactly where the float8 box starts losing digits.
+func smPrecisionCells() []smCell {
+	add := func(name, sql string) smCell { return smCell{name: "prec/" + name, sql: sql, pgSQL: sql} }
+	const memberExpr = "CAST(r.v_dec * 1000000000000 AS NUMERIC(18,4))"
+	body := "SELECT " + memberExpr + " FROM st_pair r"
+	bodyLE3 := body + " WHERE r.id <= 3"
+	corr := "SELECT " + memberExpr + " FROM st_pair r WHERE r.id = a.id"
+	var out []smCell
+	out = append(out, add("render", "SELECT "+memberExpr+" AS m FROM st_pair r ORDER BY 1"))
+	for _, l := range []string{"12500000000000.0001", "12500000000000.0009"} {
+		tag := map[string]string{"12500000000000.0001": "off1", "12500000000000.0009": "off9"}[l]
+		out = append(out,
+			add("in/"+tag, "SELECT a.id FROM st_pair a WHERE '"+l+"' IN ("+body+") ORDER BY a.id"),
+			add("notIn/"+tag, "SELECT a.id FROM st_pair a WHERE '"+l+"' NOT IN ("+bodyLE3+") ORDER BY a.id"),
+			add("corrIn/"+tag, "SELECT a.id FROM st_pair a WHERE '"+l+"' IN ("+corr+") ORDER BY a.id"),
+			add("select/"+tag, "SELECT a.id, '"+l+"' IN ("+bodyLE3+") AS m FROM st_pair a ORDER BY a.id"),
+			add("eqCol/"+tag, "SELECT a.id FROM st_pair a WHERE CAST(a.v_dec * 1000000000000 AS NUMERIC(18,4)) = '"+l+"' ORDER BY a.id"),
+			add("inList/"+tag, "SELECT a.id FROM st_pair a WHERE CAST(a.v_dec * 1000000000000 AS NUMERIC(18,4)) IN ('"+l+"') ORDER BY a.id"),
+		)
+	}
+	for _, l := range []string{"12500000000000.0000", "12500000000001"} {
+		tag := map[string]string{"12500000000000.0000": "exact", "12500000000001": "offInt"}[l]
+		out = append(out,
+			add("in/"+tag, "SELECT a.id FROM st_pair a WHERE '"+l+"' IN ("+body+") ORDER BY a.id"),
+			add("notIn/"+tag, "SELECT a.id FROM st_pair a WHERE '"+l+"' NOT IN ("+bodyLE3+") ORDER BY a.id"),
+			add("corrIn/"+tag, "SELECT a.id FROM st_pair a WHERE '"+l+"' IN ("+corr+") ORDER BY a.id"),
+			add("select/"+tag, "SELECT a.id, '"+l+"' IN ("+bodyLE3+") AS m FROM st_pair a ORDER BY a.id"),
+			add("castIn/"+tag, "SELECT a.id FROM st_pair a WHERE CAST('"+l+"' AS NUMERIC) IN ("+body+") ORDER BY a.id"),
+			add("castCorr/"+tag, "SELECT a.id FROM st_pair a WHERE CAST('"+l+"' AS NUMERIC) IN ("+corr+") ORDER BY a.id"),
+			add("eqCol/"+tag, "SELECT a.id FROM st_pair a WHERE CAST(a.v_dec * 1000000000000 AS NUMERIC(18,4)) = '"+l+"' ORDER BY a.id"),
+			add("inList/"+tag, "SELECT a.id FROM st_pair a WHERE CAST(a.v_dec * 1000000000000 AS NUMERIC(18,4)) IN ('"+l+"') ORDER BY a.id"),
+		)
+	}
+	out = append(out,
+		add("stored/n38_20dig", "SELECT a.id FROM st_pair a WHERE '12.5000000000000000001' IN (SELECT r.v_dec FROM st_pair r WHERE r.id = a.id) ORDER BY a.id"),
+		add("stored/dec_19dig", "SELECT a.id FROM st_pair a WHERE '12.50000000000000001' IN (SELECT r.v_dec FROM st_pair r WHERE r.id = a.id) ORDER BY a.id"),
+	)
+	return out
+}
+
 // smRenderKeptCells are the two `CAST(x AS TEXT)` pairs ADR-0012 §5 keeps
 // although their types differ: a float8 against the text of a PORT or a
 // PROTOCOL. Every value of either renders as its float8 does (an integer
