@@ -753,14 +753,16 @@ func (c *comparisonTyper) keyPair(a, b plansql.Node, lateral bool) error {
 }
 
 // textOriginConverts is whether the text a CAST from origin makes reads as
-// tl on every arm and in every spelling: the origin RENDERS a shared value
-// as tl does — the same type, or two integer kinds. A different type of one
-// class renders differently (`14` against numeric `14.0000`, a float's
-// shortest form against numeric's scale), so a membership that converts the
-// text and an EXISTS that compares it directly answered two different
-// values for one comparison (#1374); and a fractional rendering into an
-// integer kind is 22P02 on the DAG while the single arms compare the text
-// (#1308).
+// tl on every arm and in every spelling: the origin RENDERS every one of its
+// values as tl renders the same value — the same type, two integer kinds, or
+// a PORT / PROTOCOL read as float8 (every value in 0..65535 prints as its
+// float8 does). A different type of one class that renders differently
+// (`14` against numeric `14.0000`, a bigint's `10000000000000000` against
+// float8's `1e+16`, a float's shortest form against numeric's scale) made a
+// membership that converts the text and an EXISTS that compares it directly
+// answer two different values for one comparison (#1374); and a fractional
+// rendering into an integer kind is 22P02 on the DAG while the single arms
+// compare the text (#1308).
 func textOriginConverts(origin, tl parquet.TypeID) bool {
 	if origin == tl {
 		return true
@@ -771,6 +773,9 @@ func textOriginConverts(origin, tl parquet.TypeID) bool {
 			return true
 		}
 		return false
+	}
+	if tl == parquet.TypeFloat64 && (origin == parquet.TypePort || origin == parquet.TypeProtocol) {
+		return true
 	}
 	return integer(origin) && integer(tl)
 }
