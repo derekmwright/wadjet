@@ -7,9 +7,11 @@ import (
 	"context"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/derekmwright/wadjet/internal/oracle"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
@@ -441,8 +443,24 @@ func TestArcSMMembershipOperandsEveryArm(t *testing.T) {
 			answered++
 		}
 		t.Run(tc.name, func(t *testing.T) {
-			for _, arm := range arms {
-				res, err := arm.run(tc.sql)
+			// The five arms are five engines: each cell runs on all of them
+			// at once, and is asserted in arm order.
+			type result struct {
+				res *oracle.Result
+				err error
+			}
+			results := make([]result, len(arms))
+			var wg sync.WaitGroup
+			for i, arm := range arms {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					results[i].res, results[i].err = arm.run(tc.sql)
+				}()
+			}
+			wg.Wait()
+			for i, arm := range arms {
+				res, err := results[i].res, results[i].err
 				if state != "" {
 					if err == nil {
 						t.Errorf("%s\n  arm  %s\n  got  %s\n  want %s %q (PostgreSQL 17.11)", tc.sql, arm.name, brRender(res), state, msg)
