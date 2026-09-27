@@ -124,9 +124,14 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
        22P02 on the DAG. PostgreSQL refuses every one 42883; the rule is
        `physical.comparisonTyper.memberPair`, a quoted literal in the body's
        target list reading as text, as PostgreSQL resolves it.) "Provably
-       converts" (`physical.textOriginConverts`) is the same comparisonClass
-       AND never a fractional rendering (numeric, float) into an integer
-       kind (int4, int8, port, protocol, duration). The rule as first
+       converts" (`physical.textOriginConverts`) is that x RENDERS as the
+       compared value does: the same type, or two integer kinds (int4,
+       int8, port, protocol, duration). (Amended 2026-09-27, arc SM, #1374:
+       it was the same comparisonClass and never a fractional rendering
+       into an integer kind, so `v_dec IN (SELECT CAST(v_i64 AS TEXT) …)`
+       was kept and converted the text — 1 row — while the same comparison
+       as an EXISTS key compared it directly, `'14'` against `14.0000` — 0
+       rows, on every arm; both are 42883 now.) The rule as first
        amended kept by CLASS alone, so a body selecting `CAST(v_dec AS
        TEXT)` against a bigint outer value was "kept" while the DAG's cast
        of the rendered text (`'14.0000'`) back to bigint is 22P02 and the
@@ -135,9 +140,31 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
        #1308.) The body's CORRELATED equalities are the
        semi/anti join's keys and take the JOIN-key rule below: `EXISTS (…
        WHERE b.s = a.v)`, a correlated `IN`'s key, is 42883
-       (`refuseBodyKeyPairs`); a correlated comparison with an expression
-       side (`a.v = CAST(b.v AS TEXT)`) or under `OR` is a filter and keeps
-       the direct reading. Thirteen cells base answered identically now
+       (`refuseCorrelatedKeys`); a correlated comparison under `OR` is a
+       filter and keeps the direct reading.
+
+       The rule reads BOTH operands whatever their shape (amended
+       2026-09-27, arc SM, #1369 #1370 #1368 #1372 #1374), one table of
+       positions × dispositions: an operand the structural walk does not
+       type is typed by its declaration for the text/typed question, so
+       an expression outer (`v + 0 IN (SELECT s …)`: 0 rows single, 2 DAG)
+       and an expression body (`IN (SELECT upper(s) …)`: 0 rows single,
+       22P02 DAG) are 42883 like the columns; a correlated key with an
+       expression side takes the membership rule (`physical.
+       comparisonTyper.keyPair`) — a `CAST(x AS TEXT)` that provably
+       converts keeps the direct reading, any other text side is 42883; a
+       LATERAL body's correlated equality is its decorrelated JOIN key and
+       keeps no text/typed pair (`FROM a, LATERAL (… WHERE r.s = a.v)`
+       answered 0 rows on every arm, its CAST key 0 as well); and a QUOTED
+       literal outer value takes the body's type, as PostgreSQL resolves
+       it (`expr.MemberLiteralCast`), 22P02 / 22007 at plan time when its
+       text is no value of it (`'zz' IN (SELECT bigint …)` answered 0 rows
+       on every arm). The single-process membership filter compares the
+       pair in that one type: the set keyed by its declaration, the
+       literal probe cast to it — `'12' IN (SELECT bigint …)` answered 0
+       rows there and every row on the DAG (#1372), a DATE against any body
+       that stays a filter (a set operation, a literal, an expression) 0
+       rows there and the matches on the DAG (#1373). Thirteen cells base answered identically now
        refuse with the rule, recorded (base's own value, then 42883): a
        derived table's `CAST(x AS TEXT)` column IN body (3; the JOIN
        refuses the same derived-column key); the same body under EXISTS

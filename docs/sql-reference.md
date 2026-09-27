@@ -1021,16 +1021,26 @@ The subquery's column and the compared value must be of comparable types, as
 on PostgreSQL. A typed value (a number, PORT, PROTOCOL, DURATION, UUID, IPv6,
 CIDR) against a subquery that selects TEXT is SQLSTATE 42883 `operator does
 not exist: bigint = text` — for a stored TEXT column, a derived table's or
-CTE's column, a TEXT literal and the mirror alike — except where the body
-selects `CAST(x AS TEXT)` and the text provably converts (the same class as
-the compared value, and never a fractional rendering — numeric, float —
-into an integer kind), which is kept and compares through the value's text
-(ADR-0012 §5, #1308):
+CTE's column, a TEXT literal, an expression over text (`upper(name)`,
+`name || ''`) and the mirror alike, and for a typed EXPRESSION outside
+(`id + 0 IN (SELECT name …)`) as for a column — except where the body
+selects `CAST(x AS TEXT)` and the text provably converts (x renders as the
+compared value does: the same type, or two integer kinds), which is kept
+and compares through the value's text (ADR-0012 §5, #1308, #1369, #1370,
+#1374):
 
 ```sql
 SELECT id FROM d WHERE id IN (SELECT name FROM users)                 -- 42883
+SELECT id FROM d WHERE id IN (SELECT upper(name) FROM users)          -- 42883
 SELECT id FROM d WHERE id IN (SELECT CAST(user_id AS TEXT) FROM users) -- answers
 ```
+
+A quoted literal compared with a subquery takes the subquery's type, as on
+PostgreSQL: `'12' IN (SELECT user_id FROM users)` compares the bigint 12,
+and a literal that is no value of that type is refused before any row
+(`'zz' IN (SELECT user_id …)` is 22P02) (#1372). A DATE, like every other
+type, compares by value whatever the subquery's shape — a `UNION`, a
+literal body, an expression (#1373).
 
 A literal body with no `FROM` (`id IN (SELECT '12')`) is not this rule: the
 parser folds it into the plain `IN` list before any subquery is planned, so
@@ -1097,9 +1107,13 @@ WHERE NOT EXISTS (SELECT 1 FROM device_inventory d WHERE d.ip_address = f.src_ip
 A correlated equality between an outer column and a body column is the key of
 the semi (or anti) join `EXISTS` becomes, and takes an explicit JOIN key's type
 rule: a typed column against a TEXT column there is SQLSTATE 42883, as on
-PostgreSQL (`EXISTS (SELECT 1 FROM users u WHERE u.name = d.id)`). Write the
-conversion — `d.id = CAST(u.user_id AS TEXT)` or `CAST(u.name AS BIGINT) =
-d.id` — to compare through it (#1308).
+PostgreSQL (`EXISTS (SELECT 1 FROM users u WHERE u.name = d.id)`). A key
+with an expression side takes the `IN` rule above: `d.id = CAST(u.user_id AS
+TEXT)` of the compared value's own type keeps comparing through the text,
+and any other text side (`d.id + 0 = u.name`, `d.amount = CAST(u.user_id AS
+TEXT)` for a numeric amount) is 42883. Write the conversion to the typed
+side — `CAST(u.name AS BIGINT) = d.id` — to compare through it (#1308,
+#1374).
 
 ## Subqueries
 
@@ -1449,6 +1463,13 @@ JOIN LATERAL (
 
 `SELECT *` over a lateral join publishes the OUTER relation's columns first
 and the lateral's after them, which is PostgreSQL's order.
+
+A correlated equality in the body is the join's key, and takes an explicit
+JOIN key's type rule: a typed value against TEXT there is SQLSTATE 42883, as
+on PostgreSQL (`JOIN LATERAL (SELECT … FROM users u WHERE u.name = o.id) s`),
+whatever the shape of either side — a `CAST(u.user_id AS TEXT)` key
+included. Write the conversion to the typed side (`CAST(u.name AS BIGINT) =
+o.id`) (#1368).
 
 **A correlated equality's OUTER side may be any expression over the outer
 row** — `WHERE i.order_id = o.id - 0`, `= o.id + 1`, `= CAST(o.id AS integer)`,
