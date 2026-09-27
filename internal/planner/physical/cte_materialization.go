@@ -413,15 +413,22 @@ func classifyRecursiveBody(cte plansql.CTEDef) (recursiveForm, string, string, e
 	if top.Op != plansql.SetOpUnion {
 		return recursiveFormNotRecursive, "", "", notTheForm
 	}
+	// The term's SHAPE is checked before this engine's UNION-vs-UNION-ALL
+	// capability gap: PostgreSQL raises the shape's 42P19 (e.g. "within
+	// INTERSECT") whether the top-level operator carries ALL or not, and a
+	// plain UNION with an otherwise-valid term reaches the 0A000 gap below
+	// only once the term itself is confirmed well-formed (N3, round-2 review:
+	// `seed UNION rec INTERSECT ALL x` gave 0A000 before this, where
+	// PostgreSQL and the shape rule both give 42P19 "within INTERSECT").
+	if err := refuseRecursiveTermShape(cte.Name, top.Right); err != nil {
+		return recursiveFormNotRecursive, "", "", err
+	}
 	if !top.All {
 		return recursiveFormNotRecursive, "", "", sqlerr.New("0A000",
 			"a recursive CTE written with UNION rather than UNION ALL is not supported: "+
 				"PostgreSQL answers %q by removing duplicates at every step, and this "+
 				"engine has no fixed-point form for that. Write UNION ALL, or remove the "+
 				"duplicates in the query that reads it", cte.Name)
-	}
-	if err := refuseRecursiveTermShape(cte.Name, top.Right); err != nil {
-		return recursiveFormNotRecursive, "", "", err
 	}
 	anchorSQL, recursiveSQL, ok := plansql.SplitLastTopLevelUnionAll(cte.SQL)
 	if !ok ||

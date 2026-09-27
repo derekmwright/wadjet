@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/ingest"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -107,6 +108,12 @@ func TestArcSPSetOpPrecedenceOnTheEmbeddedAPI(t *testing.T) {
 // 17.11 for every cell. The left-to-right parse refused the unparenthesised
 // cells as "within its non-recursive term"; the parenthesised ones already
 // reached the term and iterated where PostgreSQL refuses.
+//
+// The last cell (N3, round-2 review) is the top-level operator itself: a
+// PLAIN `UNION` (not `UNION ALL`) whose term is `… INTERSECT ALL …`. The
+// term's shape is checked before this engine's own UNION-vs-UNION-ALL
+// capability gap (0A000), so this refuses 42P19 "within INTERSECT" — the
+// SQLSTATE and sentence PostgreSQL gives — rather than 0A000.
 func TestArcSPRecursiveTermSetOperationsFollowPostgres(t *testing.T) {
 	ctx := context.Background()
 	db, err := Open(ctx, Config{Store: objstore.NewMemStore(), Bucket: "test"})
@@ -114,29 +121,48 @@ func TestArcSPRecursiveTermSetOperationsFollowPostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	const head = "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL "
+	const defaultHead = "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL "
 	const tail = ") SELECT count(*), max(n) FROM r"
-	cases := []struct{ term, want string }{
-		{"SELECT n+1 FROM r WHERE n<5 INTERSECT SELECT 2", "2 2"},
-		{"SELECT 3 INTERSECT SELECT n+1 FROM r WHERE n<5", "1 1"},
-		{"SELECT 2 INTERSECT SELECT n+1 FROM r WHERE n<5", "2 2"},
-		{"(SELECT n+1 FROM r WHERE n<5 EXCEPT SELECT 3)", "2 2"},
-		{"(SELECT n+1 FROM r WHERE n<5 INTERSECT (SELECT 2 EXCEPT ALL SELECT 9))", "2 2"},
-		{"SELECT n+1 FROM r WHERE n<5 INTERSECT ALL SELECT 2", `ERR recursive reference to query "r" must not appear within INTERSECT`},
-		{"SELECT 2 INTERSECT ALL SELECT n+1 FROM r WHERE n<5", `ERR recursive reference to query "r" must not appear within INTERSECT`},
-		{"(SELECT n+1 FROM r WHERE n<5 INTERSECT ALL SELECT 2)", `ERR recursive reference to query "r" must not appear within INTERSECT`},
-		{"SELECT m FROM (SELECT n+1 AS m FROM r WHERE n<5 INTERSECT ALL SELECT 2) q", `ERR recursive reference to query "r" must not appear within INTERSECT`},
-		{"(SELECT n+1 FROM r WHERE n<5 EXCEPT ALL SELECT 3)", `ERR recursive reference to query "r" must not appear within EXCEPT`},
-		{"(SELECT 3 EXCEPT SELECT n+1 FROM r WHERE n<5)", `ERR recursive reference to query "r" must not appear within EXCEPT`},
-		{"SELECT n+1 FROM r WHERE n<5 INTERSECT SELECT 2 UNION ALL SELECT 7", `ERR recursive reference to query "r" must not appear within its non-recursive term`},
+	cases := []struct{ label, term, head, want, wantState string }{
+		{"", "SELECT n+1 FROM r WHERE n<5 INTERSECT SELECT 2", "", "2 2", ""},
+		{"", "SELECT 3 INTERSECT SELECT n+1 FROM r WHERE n<5", "", "1 1", ""},
+		{"", "SELECT 2 INTERSECT SELECT n+1 FROM r WHERE n<5", "", "2 2", ""},
+		{"", "(SELECT n+1 FROM r WHERE n<5 EXCEPT SELECT 3)", "", "2 2", ""},
+		{"", "(SELECT n+1 FROM r WHERE n<5 INTERSECT (SELECT 2 EXCEPT ALL SELECT 9))", "", "2 2", ""},
+		{"", "SELECT n+1 FROM r WHERE n<5 INTERSECT ALL SELECT 2", "", `ERR recursive reference to query "r" must not appear within INTERSECT`, "42P19"},
+		{"", "SELECT 2 INTERSECT ALL SELECT n+1 FROM r WHERE n<5", "", `ERR recursive reference to query "r" must not appear within INTERSECT`, "42P19"},
+		{"", "(SELECT n+1 FROM r WHERE n<5 INTERSECT ALL SELECT 2)", "", `ERR recursive reference to query "r" must not appear within INTERSECT`, "42P19"},
+		{"", "SELECT m FROM (SELECT n+1 AS m FROM r WHERE n<5 INTERSECT ALL SELECT 2) q", "", `ERR recursive reference to query "r" must not appear within INTERSECT`, "42P19"},
+		{"", "(SELECT n+1 FROM r WHERE n<5 EXCEPT ALL SELECT 3)", "", `ERR recursive reference to query "r" must not appear within EXCEPT`, "42P19"},
+		{"", "(SELECT 3 EXCEPT SELECT n+1 FROM r WHERE n<5)", "", `ERR recursive reference to query "r" must not appear within EXCEPT`, "42P19"},
+		{"", "SELECT n+1 FROM r WHERE n<5 INTERSECT SELECT 2 UNION ALL SELECT 7", "", `ERR recursive reference to query "r" must not appear within its non-recursive term`, "42P19"},
+		{
+			"N3 top-level UNION (not ALL), term INTERSECT ALL",
+			"SELECT n+1 FROM r WHERE n<5 INTERSECT ALL SELECT 2",
+			"WITH RECURSIVE r(n) AS (SELECT 1 UNION ",
+			`ERR recursive reference to query "r" must not appear within INTERSECT`, "42P19",
+		},
 	}
 	for _, tc := range cases {
+		head := tc.head
+		if head == "" {
+			head = defaultHead
+		}
 		sql := head + tc.term + tail
-		t.Run(tc.term, func(t *testing.T) {
+		name := tc.label
+		if name == "" {
+			name = tc.term
+		}
+		t.Run(name, func(t *testing.T) {
 			out, err := db.Query(ctx, sql)
 			if strings.HasPrefix(tc.want, "ERR ") {
 				if err == nil || !strings.Contains(err.Error(), strings.TrimPrefix(tc.want, "ERR ")) {
 					t.Errorf("%s\n  got  %v %v\n  want %s", sql, err, out, tc.want)
+				}
+				if tc.wantState != "" {
+					if got := sqlerr.StateOf(err); got != tc.wantState {
+						t.Errorf("%s\n  SQLSTATE got  %s\n  SQLSTATE want %s", sql, got, tc.wantState)
+					}
 				}
 				return
 			}
