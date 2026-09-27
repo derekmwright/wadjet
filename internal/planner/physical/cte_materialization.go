@@ -386,8 +386,12 @@ func classifyRecursiveBody(cte plansql.CTEDef) (recursiveForm, string, string, e
 		}
 		return recursiveFormNotRecursive, "", "", nil
 	}
-	// THE TOP NODE IS THE LAST OPERATOR, because the parse is left-associative:
-	// its Left is every earlier arm together and its Right is the last one.
+	// THE TOP NODE IS THE LAST UNION / EXCEPT (or, in a chain of INTERSECTs
+	// alone, the last INTERSECT), because the parse is left-associative within
+	// a level and INTERSECT binds tighter (#1349): its Left is every earlier
+	// operand together and its Right is the last operand of that level — an
+	// INTERSECT chain when one follows the last UNION ALL, which the
+	// recursive term then is, as in PostgreSQL.
 	top := body.Union
 	if plansql.SelectNamesRelation(top.Left, name) || plansql.SublinkNamesRelation(top.Left, name) {
 		return recursiveFormNotRecursive, "", "", inNonRecursiveTerm

@@ -179,33 +179,46 @@ func (p *selectParser) expectEndOfStatement() error {
 	}
 }
 
-// parseSelectOrUnion parses a SELECT with optional set operations (UNION, INTERSECT, EXCEPT).
+// parseSelectOrUnion parses a SELECT with optional set operations (UNION,
+// INTERSECT, EXCEPT) and the statement-level ORDER BY / LIMIT / OFFSET / FETCH
+// that apply to the whole result.
+//
+// The set-operation tree is built BY PRECEDENCE, as PostgreSQL's grammar
+// builds it: INTERSECT [ALL] binds tighter than UNION [ALL] and EXCEPT [ALL],
+// and within one level the chain is left-associative. `A UNION C INTERSECT B`
+// is `A UNION (C INTERSECT B)`; `A EXCEPT B UNION C` is `(A EXCEPT B) UNION
+// C`; `A INTERSECT B UNION C INTERSECT D` is `(A ∩ B) ∪ (C ∩ D)`. A
+// parenthesised arm (parseSetOpArm) is a leaf, so parentheses override both
+// rules. Folding every operator into the left operand as it was read — one
+// level for all three — evaluated `A UNION C INTERSECT B` as `(A UNION C)
+// INTERSECT B`, a different row set (#1349). Every consumer (the logical
+// builder, the single-process planner, the distributed set-op stages) reads
+// this tree as it stands, so the tree is the one place the precedence lives.
 func (p *selectParser) parseSelectOrUnion() (*SelectInfo, error) {
-	left, err := p.parseSetOpArm()
+	left, err := p.parseIntersectChain()
 	if err != nil {
 		return nil, err
 	}
 
-	// Check for set operations: UNION, INTERSECT, EXCEPT
+	// The lower level: UNION and EXCEPT, left-associative, each operand an
+	// INTERSECT chain.
 	for {
 		var op SetOp
 		switch {
 		case p.isKeyword(TokenKWUnion):
 			op = SetOpUnion
-		case p.isKeyword(TokenKWIntersect):
-			op = SetOpIntersect
 		case p.isKeyword(TokenKWExcept):
 			op = SetOpExcept
 		default:
 			goto done
 		}
-		p.advance() // consume UNION/INTERSECT/EXCEPT
+		p.advance() // consume UNION/EXCEPT
 		all := false
 		if p.isKeyword(TokenKWAll) {
 			p.advance()
 			all = true
 		}
-		right, err := p.parseSetOpArm()
+		right, err := p.parseIntersectChain()
 		if err != nil {
 			return nil, fmt.Errorf("parsing %s right side: %w", op, err)
 		}
@@ -294,6 +307,33 @@ limitOffset:
 		}
 	}
 
+	return left, nil
+}
+
+// parseIntersectChain parses the higher precedence level of a set-operation
+// chain: one arm, or arms joined by INTERSECT [ALL], left-associative. It
+// stops at UNION, EXCEPT or anything else and leaves that to
+// parseSelectOrUnion.
+func (p *selectParser) parseIntersectChain() (*SelectInfo, error) {
+	left, err := p.parseSetOpArm()
+	if err != nil {
+		return nil, err
+	}
+	for p.isKeyword(TokenKWIntersect) {
+		p.advance() // consume INTERSECT
+		all := false
+		if p.isKeyword(TokenKWAll) {
+			p.advance()
+			all = true
+		}
+		right, err := p.parseSetOpArm()
+		if err != nil {
+			return nil, fmt.Errorf("parsing %s right side: %w", SetOpIntersect, err)
+		}
+		left = &SelectInfo{
+			Union: &UnionInfo{Left: left, Right: right, All: all, Op: SetOpIntersect},
+		}
+	}
 	return left, nil
 }
 
