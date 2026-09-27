@@ -340,9 +340,11 @@ const (
 // set-operation tree, and returns the anchor and recursive-term TEXT the
 // fixed-point iteration re-plans.
 //
-// PostgreSQL parses `A UNION ALL B UNION ALL C` LEFT-ASSOCIATIVELY, so the
-// non-recursive term is `A UNION ALL B` and the recursive term is `C`; this
-// parser does the same. Deciding the form from the body's TEXT instead — a
+// PostgreSQL's grammar gives INTERSECT tighter precedence than UNION and
+// EXCEPT, so the recursive term is the LAST operand of the top-level
+// UNION ALL — one arm, or an INTERSECT chain, since INTERSECT binds tighter —
+// and everything to its left is the non-recursive term; this parser reads
+// the same tree. Deciding the form from the body's TEXT instead — a
 // split at the FIRST top-level UNION ALL — put an arm that names the CTE and
 // an arm that does not into one "recursive term", and the iteration re-ran the
 // constant arm every round: 1002 rows (one, then 1001 NULLs) where PostgreSQL
@@ -350,7 +352,7 @@ const (
 //
 // Three answers, and each is PostgreSQL's own:
 //
-//   - a self-reference ANYWHERE but the last arm is 42P19, "recursive
+//   - a self-reference ANYWHERE in the non-recursive term is 42P19, "recursive
 //     reference to query %q must not appear within its non-recursive term" —
 //     measured for a two-, three- and four-arm body with the reference in each
 //     position, UNION and UNION ALL alike;
