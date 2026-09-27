@@ -124,14 +124,18 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
        22P02 on the DAG. PostgreSQL refuses every one 42883; the rule is
        `physical.comparisonTyper.memberPair`, a quoted literal in the body's
        target list reading as text, as PostgreSQL resolves it.) "Provably
-       converts" (`physical.textOriginConverts`) is that x RENDERS as the
-       compared value does: the same type, or two integer kinds (int4,
-       int8, port, protocol, duration). (Amended 2026-09-27, arc SM, #1374:
-       it was the same comparisonClass and never a fractional rendering
-       into an integer kind, so `v_dec IN (SELECT CAST(v_i64 AS TEXT) …)`
-       was kept and converted the text — 1 row — while the same comparison
-       as an EXISTS key compared it directly, `'14'` against `14.0000` — 0
-       rows, on every arm; both are 42883 now.) The rule as first
+       converts" (`physical.textOriginConverts`) is that x RENDERS every
+       value as the compared type renders it: the same type, two integer
+       kinds (int4, int8, port, protocol, duration), or a port or protocol
+       against float8, which prints each of their values as they do.
+       (Amended 2026-09-27, arc SM, #1374: it was the same comparisonClass
+       and never a fractional rendering into an integer kind, so `v_dec IN
+       (SELECT CAST(v_i64 AS TEXT) …)` was kept and converted the text — 1
+       row — while the same comparison as an EXISTS key compared it
+       directly, `'14'` against `14.0000` — 0 rows, on every arm; both are
+       42883 now. A float8 against a port's or a protocol's text answers
+       one value in both spellings, PostgreSQL's `CAST(CAST(x AS TEXT) AS
+       float8)` rewrite, and stays kept.) The rule as first
        amended kept by CLASS alone, so a body selecting `CAST(v_dec AS
        TEXT)` against a bigint outer value was "kept" while the DAG's cast
        of the rendered text (`'14.0000'`) back to bigint is 22P02 and the
@@ -156,23 +160,35 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
        LATERAL body's correlated equality is its decorrelated JOIN key and
        keeps no text/typed pair (`FROM a, LATERAL (… WHERE r.s = a.v)`
        answered 0 rows on every arm, its CAST key 0 as well); and a QUOTED
-       literal outer value takes the body's type, as PostgreSQL resolves
-       it (`expr.MemberLiteralCast`), 22P02 / 22007 at plan time when its
-       text is no value of it (`'zz' IN (SELECT bigint …)` answered 0 rows
-       on every arm). The single-process membership filter compares the
-       pair in that one type: the set keyed by its declaration, the
-       literal probe cast to it — `'12' IN (SELECT bigint …)` answered 0
+       literal outer value takes the body's TYPE — never its typmod — as
+       PostgreSQL resolves it (`expr.MemberLiteralCast` over the TypeID
+       alone), 22P02 / 22007 at plan time when its text is no value of it
+       (`'zz' IN (SELECT bigint …)` answered 0 rows on every arm). The
+       typed literal is written into the logical plan every arm consumes
+       (`physical.typeMemberLiterals`, `expr.MemberProbe`), so the DAG's
+       inlined IN list compares a typed value too: `'2024-1-2'`,
+       `'2001:DB8::1'`, `'1_2'` against a DATE, inet or bigint body matched
+       only on the single-process arms while the literal was typed at
+       compile time, and a NUMERIC body's scale rounded `'12.50001'` to a
+       member while the probe took the column's typmod. The single-process
+       membership filter compares the pair in that one type: the set keyed
+       by its declaration, a NUMERIC member read on the numeric rung by
+       the per-row evaluator too — `'12' IN (SELECT bigint …)` answered 0
        rows there and every row on the DAG (#1372), a DATE against any body
        that stays a filter (a set operation, a literal, an expression) 0
        rows there and the matches on the DAG (#1373). Cells base answered
        identically on every arm that now take PostgreSQL's 42883 with the
-       rule, recorded: 116 membership bodies and 112 set-operation bodies
+       rule, recorded: 100 membership bodies and 96 set-operation bodies
        selecting `CAST(x AS TEXT)` of a type that renders differently from
-       the compared one (numeric and float8 against the integer kinds and
-       against each other, DURATION into numeric or float8, inet against
-       cidr), which answered the converted reading; 64 EXISTS keys equating
-       a value with `CAST(x AS TEXT)` of another type, which answered the
-       direct text reading (0 rows, or the NOT EXISTS complement); seven
+       the compared one — twelve pairs: numeric against bigint, integer,
+       port, protocol, duration and float8, float8 against numeric,
+       bigint, integer and duration (each IN spelling answered the
+       converted reading where the same EXISTS key compared the text as
+       written, `14` against `14.0000`, `1e+16` against
+       `10000000000000000`), and inet against cidr both ways (arm-split at
+       base) — and 60 EXISTS keys equating a value with `CAST(x AS TEXT)`
+       of another type, which answered the direct text reading (0 rows, or
+       the NOT EXISTS complement); seven
        text-expression bodies whose data happened to convert on every arm
        (`coalesce(s, '0')`, `substr(s, 1, 2)`, a CASE over s, `lower(s)`
        against uuid, `CAST(v AS TEXT) || ''`); a set operation of a quoted

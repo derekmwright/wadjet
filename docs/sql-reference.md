@@ -1024,9 +1024,10 @@ not exist: bigint = text` — for a stored TEXT column, a derived table's or
 CTE's column, a TEXT literal, an expression over text (`upper(name)`,
 `name || ''`) and the mirror alike, and for a typed EXPRESSION outside
 (`id + 0 IN (SELECT name …)`) as for a column — except where the body
-selects `CAST(x AS TEXT)` and the text provably converts (x renders as the
-compared value does: the same type, or two integer kinds), which is kept
-and compares through the value's text (ADR-0012 §5, #1308, #1369, #1370,
+selects `CAST(x AS TEXT)` and the text provably converts (x renders every
+value as the compared type does: the same type, two integer kinds, or a
+PORT or PROTOCOL against a double precision value), which is kept and
+compares through the value's text (ADR-0012 §5, #1308, #1369, #1370,
 #1374):
 
 ```sql
@@ -1038,8 +1039,15 @@ SELECT id FROM d WHERE id IN (SELECT CAST(user_id AS TEXT) FROM users) -- answer
 A quoted literal compared with a subquery takes the subquery's type, as on
 PostgreSQL: `'12' IN (SELECT user_id FROM users)` compares the bigint 12,
 and a literal that is no value of that type is refused before any row
-(`'zz' IN (SELECT user_id …)` is 22P02) (#1372). A DATE, like every other
-type, compares by value whatever the subquery's shape — a `UNION`, a
+(`'zz' IN (SELECT user_id …)` is 22P02) (#1372). It is read by that type's
+own input, so every spelling the type accepts matches — `'2024-1-2'` or
+`'20240102'` against a DATE, `'2001:DB8::1'` against an IPv6 address, a
+braced uuid, `'1_2'` or `'0x0C'` against a bigint — and it takes the TYPE,
+never the column's scale: `'12.50001' IN (SELECT amount …)` over a
+NUMERIC(18,4) column compares 12.50001, not 12.5000. A literal with more
+than millisecond precision against a TIMESTAMP is read at the stored
+millisecond precision (see postgres-differences.md). A DATE, like every
+other type, compares by value whatever the subquery's shape — a `UNION`, a
 literal body, an expression (#1373).
 
 A literal body with no `FROM` (`id IN (SELECT '12')`) is not this rule: the
