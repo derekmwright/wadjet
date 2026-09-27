@@ -1686,6 +1686,15 @@ different defect in kind.
   A set-operation anchor publishes its LEFT arm's names, which is what
   `inferCTESchema` reads for a multi-arm non-recursive term.
 
+**Amendment (2026-09-26, #1349):** arc SP's precedence fix made the tree's TOP
+node's Right an arbitrary UNION/EXCEPT-level operand, which may itself be an
+`INTERSECT` chain of several arms, since `INTERSECT` binds tighter — so "does
+any arm but the last name the CTE" above is no longer exact. The recursive
+term is the last operand of the top-level `UNION ALL` — one arm, or an
+`INTERSECT` chain — and everything to its left is the non-recursive term; a
+self-reference ANYWHERE in the non-recursive term is 42P19. Corrected wording:
+`docs/sql-reference.md`'s recursive-CTE paragraph.
+
 Two consequences fall out of asking the self-reference question at all. A
 `WITH RECURSIVE` whose body does NOT name itself is not recursive — PostgreSQL
 answers `WITH RECURSIVE r AS (SELECT 1 UNION SELECT 2)` — and keeps the ordinary

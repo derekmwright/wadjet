@@ -2411,15 +2411,16 @@ SELECT a, b FROM t ORDER BY a          -- 1,10 | 2,100 | 3,10000
 ```
 
 A recursive CTE's body must be `non-recursive-term UNION ALL recursive-term`.
-The form is read from the PARSED set operation, which is left-associative as it
-is in PostgreSQL: in `A UNION ALL B UNION ALL C` the recursive term is `C` and
-everything to its left is the non-recursive term, so a body may have any number
-of arms as long as only the LAST one names the CTE.
+The form is read from the PARSED set-operation tree: the recursive term is the
+last operand of the top-level `UNION ALL` — one arm, or an `INTERSECT` chain,
+since `INTERSECT` binds tighter — and everything to its left is the
+non-recursive term.
 
 A body that names itself in any other form is refused rather than iterated. A
-self-reference in any arm but the last — and a body with no set operation at
-all — is SQLSTATE `42P19` with PostgreSQL's own sentence. A body whose last arm
-names the CTE under a top-level `UNION` rather than `UNION ALL` is `0A000`:
+self-reference anywhere in the non-recursive term — and a body with no set
+operation at all — is SQLSTATE `42P19` with PostgreSQL's own sentence. A body
+whose last arm names the CTE under a top-level `UNION` rather than `UNION ALL`
+is `0A000`:
 PostgreSQL answers it by removing duplicates at every step, and this engine has
 no fixed-point form for that. The TOP-LEVEL operator is what decides, so
 `A UNION ALL B UNION C` is the `UNION` case and `A UNION B UNION ALL C` is the
