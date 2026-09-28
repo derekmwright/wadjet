@@ -134,6 +134,36 @@ func (p *selectParser) isKeyword(kw TokenType) bool {
 	return p.cur.typ == kw
 }
 
+// countToken reads a LIMIT, OFFSET or FETCH count or a TABLESAMPLE
+// percentage: a number, or `CAST('<number>' AS DOUBLE PRECISION | REAL)`,
+// the literal pgwire's Bind renders a float4/float8 parameter as. The cast
+// reads as the number its quoted text lexes to, so a float parameter lands in
+// these positions exactly as the bare number it stands for; text that does
+// not lex to one number token (`-1`, `NaN`) is the syntax error the bare
+// spelling is, never a count this parser invents.
+func (p *selectParser) countToken() (token, error) {
+	if p.cur.typ == TokenKWCast && p.peekN(1) == TokenLParen && p.peekN(2) == TokenString && p.peekN(3) == TokenKWAs {
+		width := 0
+		switch {
+		case p.isBareWord(4, "DOUBLE") && p.isBareWord(5, "PRECISION") && p.peekN(6) == TokenRParen:
+			width = 2
+		case p.isBareWord(4, "REAL") && p.peekN(5) == TokenRParen:
+			width = 1
+		}
+		if width > 0 {
+			l := newLexer(p.peekTok(2).val)
+			num, end := l.nextToken(), l.nextToken()
+			if num.typ == TokenNumber && end.typ == TokenEOF {
+				for i := 0; i < 5+width; i++ {
+					p.advance()
+				}
+				return num, nil
+			}
+		}
+	}
+	return p.expect(TokenNumber)
+}
+
 // atSubqueryStart reports whether the parser is sitting on the first token of a
 // SUBQUERY inside parentheses.
 //
@@ -261,14 +291,14 @@ limitOffset:
 		switch {
 		case p.isKeyword(TokenKWLimit) && left.Limit == "":
 			p.advance()
-			tok, err := p.expect(TokenNumber)
+			tok, err := p.countToken()
 			if err != nil {
 				return nil, fmt.Errorf("expected number after LIMIT")
 			}
 			left.Limit = tok.val
 		case p.isKeyword(TokenKWOffset) && left.Offset == "":
 			p.advance()
-			tok, err := p.expect(TokenNumber)
+			tok, err := p.countToken()
 			if err != nil {
 				return nil, fmt.Errorf("expected number after OFFSET")
 			}
@@ -292,7 +322,7 @@ limitOffset:
 		} else {
 			return nil, fmt.Errorf("expected FIRST or NEXT after FETCH")
 		}
-		tok, err := p.expect(TokenNumber)
+		tok, err := p.countToken()
 		if err != nil {
 			return nil, fmt.Errorf("expected number after FETCH FIRST/NEXT")
 		}
@@ -1255,7 +1285,7 @@ func (p *selectParser) parseTableRefTail() (TableRef, error) {
 		if _, err := p.expect(TokenLParen); err != nil {
 			return TableRef{}, fmt.Errorf("expected ( after TABLESAMPLE %s", tr.SampleMethod)
 		}
-		pctTok, err := p.expect(TokenNumber)
+		pctTok, err := p.countToken()
 		if err != nil {
 			return TableRef{}, fmt.Errorf("expected percentage in TABLESAMPLE")
 		}
