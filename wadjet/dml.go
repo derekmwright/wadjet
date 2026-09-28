@@ -1722,6 +1722,9 @@ func assignSourceOf(node plansql.Node, schema []parquet.Column, cat []expr.PGCat
 	if dmlTypedTextSource(node) {
 		return assignSource{typedText: true}
 	}
+	if dmlJSONAccess(node) {
+		return assignSource{declType: parquet.TypeString, declKnown: true}
+	}
 	decl, conf := physical.DeclaredTypeOfNodeWith(node, schema, cat, p)
 	if conf != expr.Decided {
 		return assignSource{declFloat: dmlSourceIsFloat(node, schema, cat, p)}
@@ -1918,6 +1921,19 @@ func refuseAggregateOrWindow(node plansql.Node, clause string) error {
 func dmlTypedTextSource(node plansql.Node) bool {
 	fc, ok := unwrapDMLParens(node).(*plansql.FuncCallNode)
 	return ok && expr.DeclaresTextForTypedValue(fc.Name)
+}
+
+// dmlJSONAccess reports a bare JSON field read — `j->>'k'` and `j->'k'`,
+// which the parser lowers to json_extract_scalar and json_extract. PostgreSQL
+// types the first text and the second json, and assigns neither to a non-text
+// column without a cast (42804). The registry declares both dynamic (the
+// value is whatever the document held), so the declaration walk left them
+// undecided, the assignment read the float box of a JSON number, and `SET n
+// = j->>'k'` over {"k": 2.5} stored 3; an INSERT … SELECT of the same read
+// was already 42804, from the text its plan declares (#1353 round 4).
+func dmlJSONAccess(node plansql.Node) bool {
+	fc, ok := unwrapDMLParens(node).(*plansql.FuncCallNode)
+	return ok && (strings.EqualFold(fc.Name, "json_extract_scalar") || strings.EqualFold(fc.Name, "json_extract"))
 }
 
 // datatypeMismatchNamed is PostgreSQL's 42804 sentence for a declared source
