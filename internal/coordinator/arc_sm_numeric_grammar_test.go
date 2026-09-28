@@ -218,6 +218,119 @@ func smNumGrammarCells() []smNumGrammarCell {
 			}
 		}
 	}
+	out = append(out, smNumWideIntCells()...)
+	return append(out, smNumConstOuterCells()...)
+}
+
+// smNumConstOuterCells are the membership's CONSTANT-VALUED outer operands
+// (review round 4, B9): an expression over numeric constants, not a
+// literal — a CASE (with a constant condition, or one that reads a column
+// but chooses among constants), COALESCE, NULLIF, GREATEST, LEAST, a unary
+// minus of an expression, a nested bare CAST, a bare CAST over text or over
+// an integer constant, a choice beside a column, arithmetic over a choice —
+// at the grammar's three values (H = 14, a member of both bodies; M = 14 +
+// 1e-19, which float8 reads AS 14; F = 12.5) × IN, NOT IN, correlated IN /
+// NOT IN and the SELECT list, against NUMERIC(18,4) and bigint bodies.
+// PostgreSQL computes each as the exact numeric its constants spell. This
+// engine evaluated the constant as a double before the membership saw it
+// (ADR-0024's choice and cast declarations), so M matched the member 14;
+// MemberProbe now folds it at plan time and types the result by the
+// literal's rule. A division of numerics, which the fold does not compute
+// (PostgreSQL's select_div_scale), is refused 0A000 where it evaluates as a
+// double; an explicit float CAST is PostgreSQL's own double and matches.
+func smNumConstOuterCells() []smNumGrammarCell {
+	shapes := []struct {
+		key string
+		x   func(v string) string
+	}{
+		{"case", func(v string) string { return "CASE WHEN a.id > 0 THEN " + v + " END" }},
+		{"caseTrue", func(v string) string { return "CASE WHEN true THEN " + v + " END" }},
+		{"caseElse", func(v string) string { return "CASE WHEN a.id > 0 THEN " + v + " ELSE 0 END" }},
+		{"caseCol", func(v string) string { return "CASE WHEN a.id > 0 THEN " + v + " ELSE a.v_dec END" }},
+		{"coalesce", func(v string) string { return "COALESCE(" + v + ", 0)" }},
+		{"coalCol", func(v string) string { return "COALESCE(" + v + ", a.v_dec)" }},
+		{"nullif", func(v string) string { return "NULLIF(" + v + ", 0)" }},
+		{"greatest", func(v string) string { return "GREATEST(" + v + ", 1)" }},
+		{"least", func(v string) string { return "LEAST(" + v + ", 20)" }},
+		{"negneg", func(v string) string { return "-(-" + v + ")" }},
+		{"colon2", func(v string) string { return "'" + v + "'::numeric::numeric" }},
+		{"castText", func(v string) string { return "CAST(CAST('" + v + "' AS TEXT) AS NUMERIC)" }},
+		{"castConst", func(v string) string { return "CAST(" + v + " AS NUMERIC)" }},
+		{"coalPlus", func(v string) string { return "COALESCE(" + v + ", 0) + 0" }},
+		{"castF8", func(v string) string { return "CAST(" + v + " AS DOUBLE PRECISION)" }},
+		{"div", func(v string) string { return v + " / 1" }},
+	}
+	vals := []struct{ tag, v string }{{"H", "14"}, {"M", "14.0000000000000000001"}, {"F", "12.5"}}
+	var out []smNumGrammarCell
+	for _, b := range []struct{ key, col string }{{"dec", "v_dec"}, {"i64", "v_i64"}} {
+		for _, sh := range shapes {
+			for _, v := range vals {
+				x := sh.x(v.v)
+				disp := ""
+				if sh.key == "div" && v.tag != "H" {
+					disp = "0A000"
+				}
+				body := "SELECT r." + b.col + " FROM st_pair r"
+				for _, op := range []struct{ key, sql string }{
+					{"in", "SELECT a.id FROM st_pair a WHERE " + x + " IN (" + body + ")"},
+					{"notIn", "SELECT a.id FROM st_pair a WHERE " + x + " NOT IN (" + body + " WHERE r.id <= 3)"},
+					{"corrIn", "SELECT a.id FROM st_pair a WHERE " + x + " IN (" + body + " WHERE r.id = a.id)"},
+					{"corrNotIn", "SELECT a.id FROM st_pair a WHERE " + x + " NOT IN (" + body + " WHERE r.id = a.id)"},
+					{"sel", "SELECT a.id, " + x + " IN (" + body + " WHERE r.id = a.id) AS m FROM st_pair a"},
+				} {
+					out = append(out, smNumGrammarCell{
+						name: "numc/" + sh.key + "/" + op.key + "/" + b.key + "/" + v.tag,
+						sql:  op.sql, disp: disp, text: x,
+					})
+				}
+			}
+		}
+	}
+	return out
+}
+
+// smNumWideIntCells are the grammar's integer-body rows past float8's exact
+// integers (review round 4, B10): a body of bigint members 2^53 + {0, 2, 4}
+// (and int members 2^24 + {0, 2, 4}, where a float4 would blur them), and an
+// outer integer text one past a member. Every spelling is numeric = bigint,
+// which PostgreSQL compares at the text's own digits. A quoted integer under
+// a bare CAST AS NUMERIC | decimal or ::numeric boxed as a double, and
+// MemberProbe's shortcut for an integer the set's own rung reads exactly let
+// it through as one: 9007199254740993 matched the member 9007199254740992.
+func smNumWideIntCells() []smNumGrammarCell {
+	type body struct{ key, col, off1, hit string }
+	bodies := []body{
+		{"i64w", "r.v_i64 * 2 + 9007199254740968", "9007199254740993", "9007199254740992"},
+		{"i32w", "r.v_i32 * 2 + 16777192", "16777217", "16777216"},
+	}
+	shapes := []struct{ key, pre, post string }{
+		{"q", "'", "'"},
+		{"cast", "CAST('", "' AS NUMERIC)"},
+		{"castDecimal", "CAST('", "' AS decimal)"},
+		{"colon", "'", "'::numeric"},
+		{"const", "", ""},
+		{"castConst", "CAST(", " AS NUMERIC)"},
+	}
+	var out []smNumGrammarCell
+	for _, b := range bodies {
+		for _, sh := range shapes {
+			for _, v := range []struct{ tag, text string }{{"off1", b.off1}, {"hit", b.hit}} {
+				x := sh.pre + v.text + sh.post
+				body := "SELECT " + b.col + " FROM st_pair r"
+				for _, op := range []struct{ key, sql string }{
+					{"in", "SELECT a.id FROM st_pair a WHERE " + x + " IN (" + body + ")"},
+					{"notIn", "SELECT a.id FROM st_pair a WHERE " + x + " NOT IN (" + body + " WHERE r.id <= 3)"},
+					{"corrIn", "SELECT a.id FROM st_pair a WHERE " + x + " IN (" + body + " WHERE r.id = a.id)"},
+					{"sel", "SELECT a.id, " + x + " = ANY (" + body + " WHERE r.id <= 3) AS m FROM st_pair a"},
+				} {
+					out = append(out, smNumGrammarCell{
+						name: "numg/" + sh.key + "/" + op.key + "/" + b.key + "/" + v.tag,
+						sql:  op.sql, text: v.text,
+					})
+				}
+			}
+		}
+	}
 	return out
 }
 

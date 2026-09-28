@@ -29,6 +29,15 @@ func TestArcSMEmbeddedMembershipOperands(t *testing.T) {
 		{name: "1372/numeric", sql: "SELECT a.id FROM st_pair a WHERE '12.5' IN (SELECT r.v_dec FROM st_pair r WHERE r.id <= 3) ORDER BY a.id", want: "[[1] [2] [3] [4]]"},
 		{name: "1372/numericScale", sql: "SELECT a.id FROM st_pair a WHERE '12.50001' IN (SELECT r.v_dec FROM st_pair r WHERE r.id <= 3) ORDER BY a.id", want: "[]"},
 		{name: "1372/dateSpelling", sql: "SELECT a.id FROM st_pair a WHERE '2024-1-2' IN (SELECT r.v_date FROM st_pair r WHERE r.id <= 3) ORDER BY a.id", want: "[[1] [2] [3] [4]]"},
+		// A constant-valued outer (review round 4, B9) is folded to its exact
+		// numeric, never read as a double; a numeric division the fold does
+		// not compute is refused where it would be one. A quoted integer
+		// under a bare NUMERIC CAST against an integer subquery (B10).
+		{name: "b9/case", sql: "SELECT a.id FROM st_pair a WHERE CASE WHEN a.id > 0 THEN 14.0000000000000000001 END IN (SELECT r.v_dec FROM st_pair r WHERE r.id = a.id) ORDER BY a.id", want: "[]"},
+		{name: "b9/coalesce", sql: "SELECT a.id FROM st_pair a WHERE COALESCE(14.0000000000000000001, 0) IN (SELECT r.v_dec FROM st_pair r) ORDER BY a.id", want: "[]"},
+		{name: "b9/division", sql: "SELECT a.id FROM st_pair a WHERE 14.0000000000000000001 / 1 IN (SELECT r.v_dec FROM st_pair r) ORDER BY a.id",
+			state: "0A000", msg: "14.0000000000000000001 / 1"},
+		{name: "b10/castInteger", sql: "SELECT a.id FROM st_pair a WHERE CAST('9007199254740993' AS NUMERIC) IN (SELECT r.v_i64 * 2 + 9007199254740968 FROM st_pair r) ORDER BY a.id", want: "[]"},
 		{name: "1372/notAValue", sql: "SELECT a.id FROM st_pair a WHERE 'zz' IN (SELECT r.v_i64 FROM st_pair r WHERE r.id <= 3)",
 			state: "22P02", msg: `invalid input syntax for type bigint: "zz"`},
 		{name: "1373/unionAll", sql: n + "a.v_date IN (SELECT r.v_date FROM st_pair r WHERE r.id = 1 UNION ALL SELECT r.v_date FROM st_pair r WHERE r.id = 2)", want: "[[2]]"},
@@ -83,6 +92,8 @@ func TestArcSMEmbeddedMembershipLiteralDML(t *testing.T) {
 		{"delete/dateSpelling", "DELETE FROM st_pair WHERE '2024-1-2' IN (SELECT r.v_date FROM st_pair r WHERE r.id <= 3) AND id = 2", "[[1 12] [3 zz] [4 <nil>]]"},
 		{"update/bigintSpelling", "UPDATE st_pair SET s_i64 = 'hit' WHERE '1_2' IN (SELECT r.v_i64 FROM st_pair r WHERE r.id <= 3) AND id = 3", "[[1 12] [2 13] [3 hit] [4 <nil>]]"},
 		{"delete/numericScale", "DELETE FROM st_pair WHERE '12.50001' IN (SELECT r.v_dec FROM st_pair r WHERE r.id <= 3)", "[[1 12] [2 13] [3 zz] [4 <nil>]]"},
+		{"delete/constantChoiceMiss", "DELETE FROM st_pair WHERE COALESCE(14.0000000000000000001, 0) IN (SELECT r.v_dec FROM st_pair r WHERE r.id <= 3)", "[[1 12] [2 13] [3 zz] [4 <nil>]]"},
+		{"delete/constantChoiceHit", "DELETE FROM st_pair WHERE COALESCE(14.0, 0) IN (SELECT r.v_dec FROM st_pair r WHERE r.id <= 3) AND id = 3", "[[1 12] [2 13] [4 <nil>]]"},
 	}
 	for _, c := range cases {
 		db := stEmbeddedDB(t)
