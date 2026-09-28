@@ -20,13 +20,13 @@ import (
 // layer cannot name (a quoted literal, a NULL, an undecided expression, a
 // non-number). Unknown never produces a numeric answer: the assignment then
 // keeps the carrier's reading, which is what it had.
-type pgCategory int
+type pgCategory = expr.PGCategory
 
 const (
-	pgCatUnknown pgCategory = iota
-	pgCatInteger
-	pgCatNumeric
-	pgCatFloat
+	pgCatUnknown = expr.PGCatUnknown
+	pgCatInteger = expr.PGCatInteger
+	pgCatNumeric = expr.PGCatNumeric
+	pgCatFloat   = expr.PGCatFloat8
 )
 
 // pgCategoryOfDecl maps one declaration onto PostgreSQL's category.
@@ -44,6 +44,9 @@ func pgCategoryOfDecl(d expr.DeclType, c expr.Confidence) pgCategory {
 		// PORT ⊕ int is int4 arithmetic (ADR-0024 item 2).
 		return pgCatInteger
 	case parquet.TypeDecimal:
+		if d.PGFloat8 {
+			return pgCatFloat
+		}
 		return pgCatNumeric
 	case parquet.TypeFloat32:
 		return pgCatFloat
@@ -83,7 +86,7 @@ func pgCategoryOf(n plansql.Node, decls ColDecls) pgCategory {
 		return pgCatNumeric
 	case *plansql.ColRef:
 		d, c := colRefDeclaredType(x, decls)
-		return pgCategoryOfDecl(withPGNumeric(d, decls.colPGNumeric(x)), c)
+		return pgCategoryOfDecl(withPGCategory(d, decls.colPGCategory(x)), c)
 	case *plansql.UnaryOp:
 		if x.Op == "-" || x.Op == "+" {
 			return pgCategoryOf(x.Inner, decls)
@@ -114,8 +117,11 @@ func pgCategoryOf(n plansql.Node, decls ColDecls) pgCategory {
 	case *plansql.SubqueryNode:
 		if decls.subqueryDecl != nil && !x.Array {
 			if col, ok := decls.subqueryDecl(x.SQL); ok {
-				numeric := decls.subqueryPGNumeric != nil && decls.subqueryPGNumeric(x.SQL)
-				return pgCategoryOfDecl(withPGNumeric(expr.Decl(col.Type), numeric), expr.Decided)
+				cat := pgCatUnknown
+				if decls.subqueryPGCategory != nil {
+					cat = decls.subqueryPGCategory(x.SQL)
+				}
+				return pgCategoryOfDecl(withPGCategory(expr.Decl(col.Type), cat), expr.Decided)
 			}
 		}
 	}
@@ -251,40 +257,43 @@ func funcPGCategory(n *plansql.FuncCallNode, decls ColDecls) pgCategory {
 	return pgCatUnknown
 }
 
-// withPGNumeric stamps the category onto a FLOAT64 declaration and clears it
-// on every other one.
-func withPGNumeric(d expr.DeclType, numeric bool) expr.DeclType {
-	d.PGNumeric = d.ID == parquet.TypeFloat64 && numeric
+// withPGCategory stamps PostgreSQL's category onto a declaration where it
+// disagrees with the carrier — a FLOAT64 that is numeric (PGNumeric), a
+// DECIMAL that is float8 (PGFloat8) — and clears both everywhere else.
+func withPGCategory(d expr.DeclType, cat pgCategory) expr.DeclType {
+	d.PGNumeric = d.ID == parquet.TypeFloat64 && cat == pgCatNumeric
+	d.PGFloat8 = d.ID == parquet.TypeDecimal && cat == pgCatFloat
 	return d
 }
 
-// colPGNumeric resolves a column reference to the category its declaration
-// carries, in the order colIntWidth resolves the width.
-func (d ColDecls) colPGNumeric(n *plansql.ColRef) bool {
-	if n == nil || len(d.pgNumeric) == 0 {
-		return false
+// colPGCategory resolves a column reference to the category its declaration
+// carries, in the order colIntWidth resolves the width; pgCatUnknown — the
+// carrier's reading — when nothing says otherwise.
+func (d ColDecls) colPGCategory(n *plansql.ColRef) pgCategory {
+	if n == nil || len(d.pgCat) == 0 {
+		return pgCatUnknown
 	}
 	if n.Table != "" {
-		if v, ok := d.pgNumeric[strings.ToLower(n.Table+"."+n.Column)]; ok {
+		if v, ok := d.pgCat[strings.ToLower(n.Table+"."+n.Column)]; ok {
 			return v
 		}
 	}
 	if d.isFieldPath(n) {
-		return false
+		return pgCatUnknown
 	}
-	return d.pgNumeric[strings.ToLower(n.Column)]
+	return d.pgCat[strings.ToLower(n.Column)]
 }
 
-// pgNumericOverNoFloat is select_common_type's answer over categories already
-// resolved (a set operation's arms): numeric when at least one is numeric,
-// none is float8 and every one is named.
-func pgNumericOverNoFloat(cats ...pgCategory) bool {
+// pgCommon is select_common_type's answer over categories already resolved
+// (a set operation's arms): float8 over everything, numeric over the
+// integers, unknown when any arm is.
+func pgCommon(cats ...pgCategory) pgCategory {
 	if len(cats) == 0 {
-		return false
+		return pgCatUnknown
 	}
 	out := cats[0]
 	for _, c := range cats[1:] {
 		out = pgArith(out, c)
 	}
-	return out == pgCatNumeric
+	return out
 }

@@ -1520,7 +1520,8 @@ func dmlSourceIsFloat(node plansql.Node, schema []parquet.Column) bool {
 	// by PostgreSQL's own operand rules (#1353).
 	decl, conf := physical.DeclaredTypeOfNode(node, schema)
 	return conf == expr.Decided &&
-		(decl.ID == parquet.TypeFloat32 || (decl.ID == parquet.TypeFloat64 && !decl.PGNumeric))
+		(decl.ID == parquet.TypeFloat32 || (decl.ID == parquet.TypeFloat64 && !decl.PGNumeric) ||
+			(decl.ID == parquet.TypeDecimal && decl.PGFloat8))
 }
 
 // sourceIsFloat reports whether an expression's DECLARED type is a FLOAT,

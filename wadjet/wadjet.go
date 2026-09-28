@@ -534,12 +534,13 @@ type QueryResult struct {
 	// nil for the introspection and synthetic results that carry no plan.
 	OutputSchema []parquet.Column
 
-	// pgNumericPos is true, positionally, at an OutputSchema FLOAT64 column
-	// whose PostgreSQL type is numeric — `SELECT 5 / 2.0`, computed in a
-	// double and published as one (ADR-0024). INSERT … SELECT reads it to
-	// round a fractional value into an integer column the way PostgreSQL
-	// rounds a numeric (#1353). nil means every float column is a float8.
-	pgNumericPos []bool
+	// pgCategoryPos is PostgreSQL's numeric category of each OutputSchema
+	// column, positionally, where the planner can name it — `SELECT 5 /
+	// 2.0` is computed in a double and published as one (ADR-0024) and is
+	// numeric in PostgreSQL. INSERT … SELECT reads it to round a fractional
+	// value into an integer column the way PostgreSQL rounds that type
+	// (#1353). nil means the carrier's reading everywhere.
+	pgCategoryPos []expr.PGCategory
 }
 
 // Cells returns row i positionally, whether or not the result needed
@@ -781,10 +782,10 @@ func (db *DB) query(ctx context.Context, sql string, gatherBytes int64) (res *Qu
 	// The POSITIONAL form of the same two answers (round-1 review B2).
 	var wireUnconstrainedPos []bool
 	var stringLengthPos []int
-	var pgNumericPos []bool
+	var pgCategoryPos []expr.PGCategory
 	if collectSink, ok := pipeline.Sink.(*exec.CollectSink); ok {
 		outSchema = collectSink.Schema()
-		pgNumericPos = collectSink.SchemaHintPGNumericPos
+		pgCategoryPos = collectSink.SchemaHintPGCategoryPos
 		// Plan-time, not row-count-dependent (FIX 2, #457/#458 fold-in) —
 		// consulted whether or not Consume ever ran.
 		wireUnconstrained = collectSink.SchemaHintWireUnconstrainedDecimal
@@ -818,13 +819,13 @@ func (db *DB) query(ctx context.Context, sql string, gatherBytes int64) (res *Qu
 	}
 
 	return &QueryResult{
-		Columns:      columns,
-		ColumnMetas:  metas,
-		Rows:         rows,
-		RowValues:    rowValues,
-		Plan:         planStr,
-		OutputSchema: outSchema,
-		pgNumericPos: pgNumericPos,
+		Columns:       columns,
+		ColumnMetas:   metas,
+		Rows:          rows,
+		RowValues:     rowValues,
+		Plan:          planStr,
+		OutputSchema:  outSchema,
+		pgCategoryPos: pgCategoryPos,
 	}, nil
 }
 

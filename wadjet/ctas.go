@@ -9,6 +9,7 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/auth"
 	"github.com/derekmwright/wadjet/internal/engine/exec"
+	"github.com/derekmwright/wadjet/internal/engine/expr"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	"github.com/derekmwright/wadjet/internal/planner/physical"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
@@ -183,7 +184,7 @@ func (db *DB) executeInsertSelect(ctx context.Context, info *plansql.InsertInfo)
 
 	// The one assignment function's source per select position — the SAME
 	// classification a VALUES cell or a SET clause gets (assignSourceOf).
-	sources := selectItemSources(info.Select, res.OutputSchema, res.pgNumericPos)
+	sources := selectItemSources(info.Select, res.OutputSchema, res.pgCategoryPos)
 	if err := checkInsertSelectShape(res.OutputSchema, cols, len(info.Columns) > 0, sources); err != nil {
 		return nil, err
 	}
@@ -243,14 +244,20 @@ func checkInsertSelectShape(declared []parquet.Column, cols []parquet.Column, ex
 // A constant reached through a UNION, a CTE or a derived table is typed by
 // that construct's own fold before it meets the target, so those positions
 // keep their declared type.
-func selectItemSources(q *plansql.ParsedQuery, declared []parquet.Column, pgNumeric []bool) []assignSource {
+func selectItemSources(q *plansql.ParsedQuery, declared []parquet.Column, pgCat []expr.PGCategory) []assignSource {
 	out := make([]assignSource, len(declared))
 	for i, c := range declared {
 		out[i] = declaredSource(c)
-		// A double PostgreSQL types numeric rounds as a numeric (#1353): the
-		// plan's category of the position, not the carrier it arrives in.
-		if len(pgNumeric) == len(declared) && pgNumeric[i] && c.Type == parquet.TypeFloat64 {
-			out[i].declFloat = false
+		// PostgreSQL's type picks the rounding, not the carrier the value
+		// arrives in (#1353): a double it types numeric rounds half away from
+		// zero, a DECIMAL it types float8 half to even.
+		if len(pgCat) == len(declared) {
+			switch {
+			case c.Type == parquet.TypeFloat64 && pgCat[i] == expr.PGCatNumeric:
+				out[i].declFloat = false
+			case c.Type == parquet.TypeDecimal && pgCat[i] == expr.PGCatFloat8:
+				out[i].declFloat = true
+			}
 		}
 	}
 	if q == nil || len(declared) == 0 {

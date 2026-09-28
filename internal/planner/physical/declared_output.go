@@ -1101,12 +1101,13 @@ type ColDecls struct {
 	// reader then falls back to the carrier, which for a base column IS the
 	// catalog's storage width.
 	intWidth map[string]intWidth
-	// pgNumeric carries PostgreSQL's NUMERIC CATEGORY of the FLOAT64 entries
-	// in types (expr.DeclType.PGNumeric): true for a column a derived table,
-	// CTE, aggregate or set operation publishes in the float64 carrier whose
-	// PostgreSQL type is numeric. The carrier cannot say it and an absent
-	// entry means float8, which for a base column IS the catalog's type.
-	pgNumeric map[string]bool
+	// pgCat carries PostgreSQL's numeric CATEGORY of the entries in types
+	// where the walk can name it (expr.DeclType.PGNumeric / PGFloat8): a
+	// derived table's `5 / 2.0` publishes a FLOAT64 that is numeric, its
+	// `NULLIF(2.5, f)` a DECIMAL that is float8. The carrier cannot say
+	// either; an absent entry is the carrier's reading, which for a base
+	// column IS the catalog's type.
+	pgCat map[string]pgCategory
 	// subqueryDecl resolves a SCALAR SUBQUERY's single declared output
 	// column, and nil means "this caller cannot ask" — which is what every
 	// construction site that has no Planner leaves it at, and what
@@ -1126,10 +1127,10 @@ type ColDecls struct {
 	// whether SUM over it is bigint or numeric. Set together with
 	// subqueryDecl (withSubqueryDecls) so the two describe one column.
 	subqueryIntWidth func(sql string) (intWidth, bool)
-	// subqueryPGNumeric is subqueryDecl's CATEGORY half: true when the
-	// subquery's FLOAT64 output is numeric in PostgreSQL. Set with the
-	// other two (withSubqueryDecls); nil reads as float8.
-	subqueryPGNumeric func(sql string) bool
+	// subqueryPGCategory is subqueryDecl's CATEGORY half: PostgreSQL's
+	// category of the subquery's output. Set with the other two
+	// (withSubqueryDecls); nil reads as the carrier's.
+	subqueryPGCategory func(sql string) pgCategory
 	// PlaceholderTypes is the declared type of each `:scalar_N` deferred
 	// literal, keyed by the placeholder's NAME.
 	//
@@ -1455,12 +1456,16 @@ func DeclaredTypeOfNode(node plansql.Node, schema []parquet.Column) (expr.DeclTy
 
 func nodeDeclaredType(node plansql.Node, decls ColDecls) (expr.DeclType, expr.Confidence) {
 	d, c := nodeDeclaredTypeOf(node, decls)
-	// PostgreSQL's CATEGORY of a double-carried value, in one place for every
-	// node kind (ADR-0024 item 2's 2026-09-28 amendment): `5 / 2.0`,
+	// PostgreSQL's CATEGORY where it disagrees with the carrier, in one place
+	// for every node kind (ADR-0024 item 2's 2026-09-28 amendment): `5 / 2.0`,
 	// `SQRT(6.25)` and `CAST(f AS NUMERIC)` are computed in float64 here and
-	// numeric there. A copied branch declaration never carries its own.
-	d.PGNumeric = d.ID == parquet.TypeFloat64 && c != expr.Undecided &&
-		pgCategoryOf(node, decls) == pgCatNumeric
+	// numeric there; `NULLIF(2.5, f)` declares its first argument's DECIMAL
+	// and is float8 there. A copied branch declaration never carries its own.
+	if c != expr.Undecided && (d.ID == parquet.TypeFloat64 || d.ID == parquet.TypeDecimal) {
+		d = withPGCategory(d, pgCategoryOf(node, decls))
+	} else {
+		d = withPGCategory(d, pgCatUnknown)
+	}
 	return d, c
 }
 

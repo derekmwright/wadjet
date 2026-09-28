@@ -116,7 +116,31 @@ type DeclType struct {
 	//
 	// Only meaningful when ID is FLOAT64; false everywhere else.
 	PGNumeric bool
+	// PGFloat8 is PGNumeric's mirror on the other carrier: a DECIMAL-CARRIED
+	// value whose PostgreSQL type is `double precision`. `NULLIF(2.5, f)`
+	// declares its first argument's DECIMAL(2,1) here, and PostgreSQL returns
+	// that argument PROMOTED by the `float8 = float8` operator its comparison
+	// resolved to, so the result is float8 and an integer assignment rounds it
+	// half to even (#1353). The declaration — and so the wire — is unchanged.
+	//
+	// Only meaningful when ID is DECIMAL; false everywhere else.
+	PGFloat8 bool
 }
+
+// PGCategory is PostgreSQL's numeric type category of a value, as far as the
+// integer assignment's rounding needs it: carried through a plan beside the
+// declaration (the planner's category walk resolves it; DeclType.PGNumeric and
+// DeclType.PGFloat8 are where it disagrees with the carrier). PGCatUnknown
+// means "this layer cannot name it", and every reader then keeps the
+// carrier's reading.
+type PGCategory uint8
+
+const (
+	PGCatUnknown PGCategory = iota
+	PGCatInteger
+	PGCatNumeric
+	PGCatFloat8
+)
 
 // DeclNumericLit builds the declaration of a numeric LITERAL from the id its
 // caller names (the planner passes INT32/INT64 for integer digits and FLOAT64

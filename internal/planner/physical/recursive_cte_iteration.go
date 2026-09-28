@@ -150,7 +150,7 @@ func (p *Planner) iterateRecursiveCTEAt(ctx context.Context, cte plansql.CTEDef,
 				cte.Name, recursiveIterationLimit))
 		}
 		// Seed the self-reference with the working table.
-		p.cteCache[cte.Name] = &cteMaterialized{schema: schema, coll: work, pgNumeric: anchorPG}
+		p.cteCache[cte.Name] = &cteMaterialized{schema: schema, coll: work, pgCat: anchorPG}
 		// An error is the STATEMENT's error (#1041): a term that fails on
 		// iteration k does not make iterations 1..k-1 the answer.
 		termBatches, _, termLits, _, err := p.runRecursiveArm(ctx, recursiveSQL)
@@ -174,7 +174,7 @@ func (p *Planner) iterateRecursiveCTEAt(ctx context.Context, cte plansql.CTEDef,
 	if err := writer.flush(ctx); err != nil {
 		return fail(err)
 	}
-	p.cteCache[cte.Name] = &cteMaterialized{schema: schema, coll: closure, pgNumeric: anchorPG}
+	p.cteCache[cte.Name] = &cteMaterialized{schema: schema, coll: closure, pgCat: anchorPG}
 	return nil
 }
 
@@ -182,10 +182,10 @@ func (p *Planner) iterateRecursiveCTEAt(ctx context.Context, cte plansql.CTEDef,
 // returning its batches and its schema: the batches' own when a row arrived —
 // the runtime saw the vectors — and the PLAN's declaration when none did,
 // because a zero-row arm still has column types. The last slice is the plan's
-// numeric category per position (declaredOutputPGNumeric), which no batch
+// numeric category per position (declaredOutputPGCategory), which no batch
 // carries: the ANCHOR's is the CTE's, as its types are (PostgreSQL types a
 // recursive CTE's columns from its non-recursive term).
-func (p *Planner) runRecursiveArm(ctx context.Context, sql string) ([]*batch.RecordBatch, []parquet.Column, recursiveArmLiterals, []bool, error) {
+func (p *Planner) runRecursiveArm(ctx context.Context, sql string) ([]*batch.RecordBatch, []parquet.Column, recursiveArmLiterals, []pgCategory, error) {
 	var lits recursiveArmLiterals
 	pq, err := plansql.Parse(sql)
 	if err != nil {
@@ -227,7 +227,7 @@ func (p *Planner) runRecursiveArm(ctx context.Context, sql string) ([]*batch.Rec
 	}
 	schema := append([]parquet.Column(nil), cs.Schema()...)
 	lits = recursiveArmLiteralsOf(plan, len(schema))
-	return cs.Batches(), schema, lits, declaredOutputPGNumeric(plan), nil
+	return cs.Batches(), schema, lits, declaredOutputPGCategory(plan), nil
 }
 
 // recursiveWorkTable holds one iteration's rows under the CTE's schema — its

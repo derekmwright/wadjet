@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/derekmwright/wadjet/internal/engine/expr"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
@@ -37,10 +38,11 @@ type SubqueryColumnDecl struct {
 	// zero-row result).
 	ElementType *parquet.Column
 	Fields      []parquet.Column
-	// PGNumeric is PostgreSQL's NUMERIC CATEGORY of a FLOAT64-carried
-	// output (expr.DeclType.PGNumeric): `(SELECT SQRT(d) FROM k)` is computed
-	// in a double here and is numeric in PostgreSQL. False everywhere else.
-	PGNumeric bool
+	// PGCategory is PostgreSQL's numeric CATEGORY of the output where the
+	// planner can name it (expr.DeclType.PGNumeric / PGFloat8): `(SELECT
+	// SQRT(d) FROM k)` is computed in a double here and is numeric in
+	// PostgreSQL. PGCatUnknown is the carrier's reading.
+	PGCategory expr.PGCategory
 }
 
 // ScanColumnStats holds aggregated column statistics from the catalog.
@@ -200,12 +202,13 @@ type Node struct {
 	// (physical/set_returning.go), and a column reference to a container
 	// declares its element from it (arc CW). Stamped with ScanColTypes.
 	ScanColElems map[string]parquet.Column
-	// ScanColPGNumeric names the FLOAT64 columns of a relation that is not a
-	// catalog table whose PostgreSQL type is numeric (expr.DeclType.PGNumeric):
-	// a recursive CTE reference whose anchor published `5 / 2.0`, an
-	// `unnest(0.5, 2.5)` over numeric literals. The carrier cannot say it; an
-	// absent entry is float8, which for a catalog column is the catalog's type.
-	ScanColPGNumeric map[string]bool
+	// ScanColPGCategory is PostgreSQL's numeric CATEGORY of the columns of a
+	// relation that is not a catalog table, where the planner can name it
+	// (expr.DeclType.PGNumeric / PGFloat8): a recursive CTE reference whose
+	// anchor published `5 / 2.0`, an `unnest(0.5, 2.5)` over numeric literals.
+	// The carrier cannot say it; an absent entry is the carrier's reading,
+	// which for a catalog column is the catalog's type.
+	ScanColPGCategory map[string]expr.PGCategory
 	// SubqueryColDecls is the declared output column of every SCALAR
 	// SUBQUERY this plan contains, keyed by the subquery's own SQL TEXT —
 	// the key nodeDeclaredType already resolves a subquery by. ONE map is

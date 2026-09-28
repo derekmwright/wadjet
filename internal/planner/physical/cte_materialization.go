@@ -305,7 +305,7 @@ func (p *Planner) materializeRecursiveCTE(ctx context.Context, cte plansql.CTEDe
 			return errNoCTESchema(cte.Name)
 		}
 		p.cteCache[cte.Name] = &cteMaterialized{schema: schema, coll: coll,
-			pgNumeric: declaredOutputPGNumeric(p.subqueryLogicalPlan(cte.SQL))}
+			pgCat: declaredOutputPGCategory(p.subqueryLogicalPlan(cte.SQL))}
 		return nil
 	}
 

@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/engine/expr"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -1124,13 +1125,15 @@ type CollectSink struct {
 	// positional and so is this.
 	SchemaHintWireUnconstrainedPos []bool
 	SchemaHintStringLengthPos      []int
-	// SchemaHintPGNumericPos is true, positionally, at a FLOAT64 output
-	// column whose PostgreSQL type is numeric (expr.DeclType.PGNumeric):
-	// `SELECT 5 / 2.0` is computed and published as a double, and an INSERT …
-	// SELECT that assigns it to an integer column must round it the way
-	// PostgreSQL rounds a numeric — half away from zero (#1353). Plan-time;
-	// nil means "every float column is a float8".
-	SchemaHintPGNumericPos []bool
+	// SchemaHintPGCategoryPos is PostgreSQL's numeric category of each
+	// output column, positionally, where the planner can name it
+	// (expr.DeclType.PGNumeric / PGFloat8): `SELECT 5 / 2.0` is computed and
+	// published as a double that PostgreSQL types numeric, `SELECT
+	// NULLIF(2.5, f)` as a DECIMAL it types float8, and an INSERT … SELECT
+	// that assigns either to an integer column must round it the way
+	// PostgreSQL rounds that type (#1353). Plan-time; nil (or PGCatUnknown)
+	// means "the carrier's reading".
+	SchemaHintPGCategoryPos []expr.PGCategory
 	// SchemaHintWireUnconstrainedDecimal names the DECIMAL output columns
 	// whose PostgreSQL wire typmod must say "unconstrained" (-1) — an
 	// aggregate function call, never a bare column reference. Unlike
