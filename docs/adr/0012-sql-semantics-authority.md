@@ -190,11 +190,14 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
        matched the member 14 on every arm (v0.25.1 answered 0 rows only
        because its box comparison missed every member). A choice with a
        column result has each constant result typed instead (beside a
-       float8 column the choice is float8, as in PostgreSQL). A form the
-       fold does not compute that evaluates as float8 while a numeric
-       constant feeds it — a division of numerics, whose scale is
-       PostgreSQL's select_div_scale — is **0A000, a recorded divergence**
-       (PostgreSQL answers). A number no DECIMAL(38,s) holds — more than 38
+       float8 column the choice is float8, as in PostgreSQL). Arithmetic
+       folds at PostgreSQL's result scales, a numeric quotient at
+       select_div_scale (`(14.0000000000000000001 / 7) * 7` is 14 there). A
+       form the fold does not compute that evaluates as float8 while a
+       numeric constant feeds it — `sqrt(12.5 * 12.5)`, exp, ln, power —
+       is **0A000, a recorded divergence** (PostgreSQL answers); a function
+       PostgreSQL defines over float8 alone (sin, degrees, cbrt) and an
+       explicit float CAST are float8 there too and answer. A number no DECIMAL(38,s) holds — more than 38
        significant digits, a digit past scale 38, NaN, ±Infinity — is
        **22003 on every arm, a recorded divergence**: PostgreSQL's numeric
        is unconstrained and answers (0 rows, NOT IN every row). The single-process
