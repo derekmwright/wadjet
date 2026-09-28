@@ -1050,9 +1050,12 @@ number its text spells, in every spelling numeric input accepts (a sign,
 leading or trailing zeros, `'.5'`, `'12.'`, an exponent, surrounding
 whitespace): `'12.50001' IN (SELECT amount …)` over a NUMERIC(18,4) column
 compares 12.50001, not 12.5000, and `'1.25000000000000001e13'` is not the
-member 12500000000000.0000. A number this engine's 38-digit DECIMAL cannot
-hold exactly — more than 38 significant digits, a digit past scale 38, NaN,
-an infinity — is refused 22003 on every arm where PostgreSQL answers (see
+member 12500000000000.0000; against an integer subquery the unquoted and
+CAST spellings compare the same way (`14.0000000000000000001 IN (SELECT
+user_id …)` matches no 14), since numeric = integer is numeric, while a
+quoted literal alone takes the integer type. A number this engine's
+38-digit DECIMAL cannot hold exactly — more than 38 significant digits, a
+digit past scale 38, NaN, an infinity — is refused 22003 on every arm where PostgreSQL answers (see
 postgres-differences.md); zeros that carry no value do not count, so
 `'12.5'` followed by forty zeros is 12.5. CIDR's abbreviated
 input forms (`'10/8'`) are the documented exception: the CIDR input

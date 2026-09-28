@@ -176,7 +176,11 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
        value's own scale) by one rule over every spelling numeric input
        accepts (`batch.DecimalValueType`): a bare NUMERIC of a literal boxes
        as float8, which matched `'1.25000000000000001e13'` to the member
-       12500000000000.0000. A number no DECIMAL(38,s) holds — more than 38
+       12500000000000.0000; the unquoted and CAST spellings take the same
+       type against an integer body, numeric = integer being numeric
+       (`14.0000000000000000001 IN (SELECT bigint …)` matched 14 at
+       float8), and the per-row evaluator meets an integer member and a
+       decimal probe by value. A number no DECIMAL(38,s) holds — more than 38
        significant digits, a digit past scale 38, NaN, ±Infinity — is
        **22003 on every arm, a recorded divergence**: PostgreSQL's numeric
        is unconstrained and answers (0 rows, NOT IN every row). The single-process
