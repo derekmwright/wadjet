@@ -101,6 +101,21 @@ type DeclType struct {
 	// decides: PostgreSQL resolves a composite whose every argument is a
 	// quoted literal to `text`, and `SELECT 'x'` is a text column.
 	Quoted bool
+	// PGNumeric marks a FLOAT64-CARRIED value whose PostgreSQL type is
+	// `numeric`: `5 / 2.0`, `SQRT(6.25)`, `POWER(d, 2)`, `EXTRACT(SECOND
+	// FROM ts)`. ADR-0024 computes division and the transcendental functions
+	// over numeric operands in float64 and declares them by that carrier —
+	// the recorded divergence, which is what the wire publishes and which
+	// this field does NOT change. It carries the one fact the carrier loses:
+	// the type PostgreSQL resolves from the operands, by its own rules
+	// (numeric ⊕ integer → numeric, numeric ⊕ float8 → float8, sqrt(numeric)
+	// → numeric, sqrt(integer) → float8). Its reader is the assignment of a
+	// fractional value to an integer column, which PostgreSQL rounds half
+	// AWAY from zero for a numeric source and half to EVEN for a float8 one
+	// (docs/internals/dml-integer-assignment-rounding.md, #1353).
+	//
+	// Only meaningful when ID is FLOAT64; false everywhere else.
+	PGNumeric bool
 }
 
 // DeclNumericLit builds the declaration of a numeric LITERAL from the id its
@@ -1001,6 +1016,14 @@ func (r Ret) Integer() bool {
 // yet.
 func (r Ret) Text() bool {
 	return r.kind == retFixed && r.typ == batch.TypeString
+}
+
+// FixedType is the one type a FIXED declaration names, and ok=false for a
+// polymorphic one (SAME, DERIVED, DYNAMIC), whose type no call site knows
+// until a batch arrives. The planner reads it for PostgreSQL's numeric
+// category of a call it has no overload rule for (#1353).
+func (r Ret) FixedType() (batch.TypeID, bool) {
+	return r.typ, r.kind == retFixed
 }
 
 // Boolean reports whether a function always returns a BOOLEAN. Only a FIXED

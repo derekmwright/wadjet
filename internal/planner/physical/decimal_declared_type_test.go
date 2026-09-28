@@ -295,10 +295,11 @@ func TestDecimalCastDeclaresItsDestination(t *testing.T) {
 		// A bare cast over an operand with no scale for the fold to take
 		// keeps inferCastType's FLOAT64 — the value the evaluator still
 		// answers for that shape, so the two agree. A documented residual:
-		// PostgreSQL says numeric.
-		{"CAST(f64 AS DECIMAL)", expr.Decl(parquet.TypeFloat64)},
-		{"CAST(txt AS NUMERIC)", expr.Decl(parquet.TypeFloat64)},
-		{"CAST(nops AS DECIMAL)", expr.Decl(parquet.TypeFloat64)},
+		// PostgreSQL says numeric, which the declaration's category carries
+		// (PGNumeric: an integer assignment rounds it as a numeric, #1353).
+		{"CAST(f64 AS DECIMAL)", expr.DeclType{ID: parquet.TypeFloat64, PGNumeric: true}},
+		{"CAST(txt AS NUMERIC)", expr.DeclType{ID: parquet.TypeFloat64, PGNumeric: true}},
+		{"CAST(nops AS DECIMAL)", expr.DeclType{ID: parquet.TypeFloat64, PGNumeric: true}},
 		// A width no Int128 can hold is not a declaration this engine makes.
 		{"CAST(a AS DECIMAL(50, 2))", expr.Decl(parquet.TypeString)},
 	} {

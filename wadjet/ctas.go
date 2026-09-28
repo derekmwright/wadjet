@@ -183,7 +183,7 @@ func (db *DB) executeInsertSelect(ctx context.Context, info *plansql.InsertInfo)
 
 	// The one assignment function's source per select position — the SAME
 	// classification a VALUES cell or a SET clause gets (assignSourceOf).
-	sources := selectItemSources(info.Select, res.OutputSchema)
+	sources := selectItemSources(info.Select, res.OutputSchema, res.pgNumericPos)
 	if err := checkInsertSelectShape(res.OutputSchema, cols, len(info.Columns) > 0, sources); err != nil {
 		return nil, err
 	}
@@ -243,10 +243,15 @@ func checkInsertSelectShape(declared []parquet.Column, cols []parquet.Column, ex
 // A constant reached through a UNION, a CTE or a derived table is typed by
 // that construct's own fold before it meets the target, so those positions
 // keep their declared type.
-func selectItemSources(q *plansql.ParsedQuery, declared []parquet.Column) []assignSource {
+func selectItemSources(q *plansql.ParsedQuery, declared []parquet.Column, pgNumeric []bool) []assignSource {
 	out := make([]assignSource, len(declared))
 	for i, c := range declared {
 		out[i] = declaredSource(c)
+		// A double PostgreSQL types numeric rounds as a numeric (#1353): the
+		// plan's category of the position, not the carrier it arrives in.
+		if len(pgNumeric) == len(declared) && pgNumeric[i] && c.Type == parquet.TypeFloat64 {
+			out[i].declFloat = false
+		}
 	}
 	if q == nil || len(declared) == 0 {
 		return out

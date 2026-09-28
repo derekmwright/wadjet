@@ -1101,6 +1101,12 @@ type ColDecls struct {
 	// reader then falls back to the carrier, which for a base column IS the
 	// catalog's storage width.
 	intWidth map[string]intWidth
+	// pgNumeric carries PostgreSQL's NUMERIC CATEGORY of the FLOAT64 entries
+	// in types (expr.DeclType.PGNumeric): true for a column a derived table,
+	// CTE, aggregate or set operation publishes in the float64 carrier whose
+	// PostgreSQL type is numeric. The carrier cannot say it and an absent
+	// entry means float8, which for a base column IS the catalog's type.
+	pgNumeric map[string]bool
 	// subqueryDecl resolves a SCALAR SUBQUERY's single declared output
 	// column, and nil means "this caller cannot ask" — which is what every
 	// construction site that has no Planner leaves it at, and what
@@ -1444,6 +1450,17 @@ func DeclaredTypeOfNode(node plansql.Node, schema []parquet.Column) (expr.DeclTy
 }
 
 func nodeDeclaredType(node plansql.Node, decls ColDecls) (expr.DeclType, expr.Confidence) {
+	d, c := nodeDeclaredTypeOf(node, decls)
+	// PostgreSQL's CATEGORY of a double-carried value, in one place for every
+	// node kind (ADR-0024 item 2's 2026-09-28 amendment): `5 / 2.0`,
+	// `SQRT(6.25)` and `CAST(f AS NUMERIC)` are computed in float64 here and
+	// numeric there. A copied branch declaration never carries its own.
+	d.PGNumeric = d.ID == parquet.TypeFloat64 && c != expr.Undecided &&
+		pgCategoryOf(node, decls) == pgCatNumeric
+	return d, c
+}
+
+func nodeDeclaredTypeOf(node plansql.Node, decls ColDecls) (expr.DeclType, expr.Confidence) {
 	switch n := node.(type) {
 	case *plansql.ColRef:
 		return colRefDeclaredType(n, decls)

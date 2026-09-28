@@ -1513,9 +1513,14 @@ func dmlSourceIsFloat(node plansql.Node, schema []parquet.Column) bool {
 		}
 		return false
 	}
+	// PostgreSQL's TYPE, not the carrier: `5 / 2.0` and `SQRT(6.25)` are
+	// computed in float64 here (ADR-0024's recorded divergence) and declare
+	// FLOAT64, while PostgreSQL types both numeric and rounds them half away
+	// from zero. The declaration carries that category (PGNumeric), resolved
+	// by PostgreSQL's own operand rules (#1353).
 	decl, conf := physical.DeclaredTypeOfNode(node, schema)
 	return conf == expr.Decided &&
-		(decl.ID == parquet.TypeFloat32 || decl.ID == parquet.TypeFloat64)
+		(decl.ID == parquet.TypeFloat32 || (decl.ID == parquet.TypeFloat64 && !decl.PGNumeric))
 }
 
 // sourceIsFloat reports whether an expression's DECLARED type is a FLOAT,
@@ -2499,8 +2504,18 @@ func assignIntegerValue(v any, col parquet.Column, srcFloat bool, srcType parque
 		return assignIntegerValue(float64(t), col, srcFloat, srcType, srcKnown)
 	case string:
 		// The box a DECIMAL column reads back as. DecimalValueFromText at
-		// scale 0 IS the rounding rule, exactly, and it refuses text that
-		// names no number (22P02) and a magnitude no int64 holds (22003).
+		// scale 0 IS the numeric rounding rule, exactly, and it refuses text
+		// that names no number (22P02) and a magnitude no int64 holds (22003).
+		//
+		// The DECLARATION still picks the rule when the box disagrees with
+		// it: `GREATEST(d, f - 1)` is double precision in PostgreSQL and
+		// rounds half to even there, but the evaluator hands back the
+		// winning DECIMAL arm's text (#1353).
+		if srcFloat {
+			if f, err := strconv.ParseFloat(strings.TrimSpace(t), 64); err == nil {
+				return assignIntegerValue(f, col, srcFloat, srcType, srcKnown)
+			}
+		}
 		d, err := parquet.DecimalValueFromText(t, parquet.MaxDecimalDigits, 0)
 		if err != nil {
 			return nil, err

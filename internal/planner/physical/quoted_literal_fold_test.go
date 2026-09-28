@@ -209,8 +209,10 @@ func TestNumericLiteralKeepsItsOwnDeclarationInAFold(t *testing.T) {
 		// two of them fold to the DECIMAL their spellings need.
 		{"two fractional literals fold to their numeric",
 			"GREATEST(0.5, 1.5)", expr.DeclDecimal(2, 1)},
+		// Float-carried, and numeric to PostgreSQL — the category rides beside
+		// the carrier (PGNumeric, #1353).
 		{"a wide literal beside a decimal stays float",
-			"GREATEST(d3810, 493827160549382.7160549350)", expr.Decl(parquet.TypeFloat64)},
+			"GREATEST(d3810, 493827160549382.7160549350)", expr.DeclType{ID: parquet.TypeFloat64, PGNumeric: true}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, c := nfdDeclared(t, tc.sql)

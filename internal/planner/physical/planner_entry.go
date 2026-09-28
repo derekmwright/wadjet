@@ -219,6 +219,9 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 		cs.SchemaHintWireUnconstrainedPos, cs.SchemaHintStringLengthPos =
 			publishedOutputDecls(p.outputProjection, rawWire, rawLens)
 		cs.SchemaHintWireUnconstrainedDecimal = republishDeclaredNames(p.outputProjection, rawWire)
+		// PostgreSQL's numeric category of each FLOAT64 output column, for the
+		// write door that assigns the result (INSERT … SELECT, #1353).
+		cs.SchemaHintPGNumericPos = declaredOutputPGNumeric(node)
 		// And the string family's modifier, which is a LENGTH rather than a
 		// (p,s) — same lifecycle, same reason (#838).
 		cs.SchemaHintStringLength = republishDeclaredNames(p.outputProjection, rawLens)

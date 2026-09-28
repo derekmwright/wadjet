@@ -533,6 +533,13 @@ type QueryResult struct {
 	//
 	// nil for the introspection and synthetic results that carry no plan.
 	OutputSchema []parquet.Column
+
+	// pgNumericPos is true, positionally, at an OutputSchema FLOAT64 column
+	// whose PostgreSQL type is numeric — `SELECT 5 / 2.0`, computed in a
+	// double and published as one (ADR-0024). INSERT … SELECT reads it to
+	// round a fractional value into an integer column the way PostgreSQL
+	// rounds a numeric (#1353). nil means every float column is a float8.
+	pgNumericPos []bool
 }
 
 // Cells returns row i positionally, whether or not the result needed
@@ -774,8 +781,10 @@ func (db *DB) query(ctx context.Context, sql string, gatherBytes int64) (res *Qu
 	// The POSITIONAL form of the same two answers (round-1 review B2).
 	var wireUnconstrainedPos []bool
 	var stringLengthPos []int
+	var pgNumericPos []bool
 	if collectSink, ok := pipeline.Sink.(*exec.CollectSink); ok {
 		outSchema = collectSink.Schema()
+		pgNumericPos = collectSink.SchemaHintPGNumericPos
 		// Plan-time, not row-count-dependent (FIX 2, #457/#458 fold-in) —
 		// consulted whether or not Consume ever ran.
 		wireUnconstrained = collectSink.SchemaHintWireUnconstrainedDecimal
@@ -815,6 +824,7 @@ func (db *DB) query(ctx context.Context, sql string, gatherBytes int64) (res *Qu
 		RowValues:    rowValues,
 		Plan:         planStr,
 		OutputSchema: outSchema,
+		pgNumericPos: pgNumericPos,
 	}, nil
 }
 

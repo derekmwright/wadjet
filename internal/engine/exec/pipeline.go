@@ -1124,6 +1124,13 @@ type CollectSink struct {
 	// positional and so is this.
 	SchemaHintWireUnconstrainedPos []bool
 	SchemaHintStringLengthPos      []int
+	// SchemaHintPGNumericPos is true, positionally, at a FLOAT64 output
+	// column whose PostgreSQL type is numeric (expr.DeclType.PGNumeric):
+	// `SELECT 5 / 2.0` is computed and published as a double, and an INSERT …
+	// SELECT that assigns it to an integer column must round it the way
+	// PostgreSQL rounds a numeric — half away from zero (#1353). Plan-time;
+	// nil means "every float column is a float8".
+	SchemaHintPGNumericPos []bool
 	// SchemaHintWireUnconstrainedDecimal names the DECIMAL output columns
 	// whose PostgreSQL wire typmod must say "unconstrained" (-1) — an
 	// aggregate function call, never a bare column reference. Unlike
