@@ -1333,6 +1333,14 @@ func (ev *mergeEvaluator) checkOnKeys(keys []onKeyPair) error {
 		}
 		k.TargetCol = ev.targetCols[ti].Name
 		if ev.sourceKnown || ev.sourceNamed {
+			// A name the subquery source publishes twice has no one column to
+			// match on. The key used to resolve over the name list, which
+			// holds both copies, and match on the merged row's last one, so
+			// the statement wrote rows PostgreSQL refuses: the ON reference
+			// is 42702 as any other reference to it is (resolveRefIn).
+			if ev.srcAmbiguous[strings.ToLower(k.SourceCol)] {
+				return sqlerr.New("42702", "column reference %q is ambiguous", k.SourceCol)
+			}
 			si := batch.ResolveSchemaIndex(ev.srcCols, k.SourceCol)
 			if si < 0 {
 				return sqlerr.New("42703", "column %s.%s does not exist", ev.sourceAlias, k.SourceCol)
