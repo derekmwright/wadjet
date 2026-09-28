@@ -4920,13 +4920,13 @@ one listed difference):
 
 | Source (declared) | Target | Answer |
 |---|---|---|
-| any numeric type | any numeric type | stored; a fractional value into an integer rounds (half away from zero, half to even from a float); out of range is 22003 |
+| any numeric type | any numeric type | stored; a fractional value into an integer rounds by the source's PostgreSQL type — half away from zero from a numeric, half to even from a float8; out of range is 22003 |
 | any scalar — number, boolean, date, timestamp, address, UUID | TEXT | stored as its text (`true`, `2026-01-02`, `10.0.0.1/32`, `1e+20`) |
 | DATE | TIMESTAMP | its midnight |
 | TIMESTAMP | DATE | its calendar day |
 | TEXT (a column, `s \|\| ''`, `CAST(x AS TEXT)`) | anything but TEXT | 42804 — PostgreSQL has no assignment cast from text |
 | a quoted literal (`'2026-01-01'`, `'10.0.0.1'`, `'yes'`) | any type | read by the column's own input function — BOOLEAN takes `t`/`true`/`y`/`yes`/`on`/`1` and their negations, any unique prefix (22P02 / 22007 when it names no value) |
-| a numeric literal (`2.50`, `1e3`, `2.5`), bare or inside an expression | any type | read as the numeric value it spells: into TEXT its numeric text at its own scale (`2.50`, `1000`), into an integer rounded half away from zero (`2.5` → 3, `ABS(2.5)` → 3). Not a division or `SQRT` / `POWER` / `EXP` / `LN` / `LOG`, which are double precision here (`5 / 2.0` declares `double precision`; the transcendental functions: ADR-0024): a float into an integer rounds half to even, so `5 / 2.0` and `SQRT(6.25)` store 2 where PostgreSQL's numeric stores 3 |
+| a numeric literal (`2.50`, `1e3`, `2.5`), bare or inside an expression | any type | read as the numeric value it spells: into TEXT its numeric text at its own scale (`2.50`, `1000`), into an integer rounded half away from zero (`2.5` → 3, `ABS(2.5)` → 3). So is a division or `SQRT` / `POWER` / `EXP` / `LN` / `LOG` / `EXTRACT` that PostgreSQL types numeric: computed and declared `double precision` here (`5 / 2.0` is OID 701; ADR-0024), but assigned to an integer as the numeric it is there, so `5 / 2.0` and `SQRT(6.25)` store 3. Over a float8 or an integer argument (`SQRT(4)`, `POWER(2, -1)`) the function is float8 in PostgreSQL too and rounds half to even |
 | an INTERVAL | TEXT / anything else | its text (`1 day`) / 42804 |
 | `INT_TO_IP(n)`, `UUID()` and the other TEXT-declared address/UUID functions above | any type | read like a quoted literal (a superset; docs/postgres-differences.md) |
 | anything else (an integer into DATE, BOOLEAN or an address; a date into a number; a typed NULL of the wrong type) | | 42804 `column "x" is of type ... but expression is of type ...` |

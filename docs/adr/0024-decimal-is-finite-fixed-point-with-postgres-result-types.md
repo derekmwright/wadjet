@@ -364,6 +364,30 @@ visible. Filed as #709 and pinned by
 `coordinator.TestAggregateOverADerivedColumnTwoPath`, each pin failing when
 the DAG starts agreeing.
 
+#### 2c. A float-carried numeric declares PostgreSQL's CATEGORY beside the carrier (2026-09-28, arc IR, #1353)
+
+Division and the transcendental functions over numeric operands are computed
+in float64 (Consequences, "The transcendental functions stay float64") and
+declared FLOAT64 — that is what the wire publishes (`SELECT 5 / 2.0` is OID
+701 where PostgreSQL says 1700), and it stays. What it lost was the one fact a
+consumer of the TYPE needs: an integer assignment rounds a numeric half away
+from zero and a float8 half to even, so `5 / 2.0`, `SQRT(6.25)` and
+`POWER(2.5, 1)` stored 2 beside `2.5 * 1` stored as 3, where PostgreSQL stores
+3 for all of them.
+
+The declaration now carries `DeclType.PGNumeric` on every FLOAT64 answer,
+stamped in one place (`nodeDeclaredType`) from PostgreSQL's own resolution:
+numeric ⊕ integer → numeric, anything ⊕ float8 → float8; a function with a
+numeric overload follows its argument (an integer resolves to float8);
+power / mod over two integers are float8 / integer; round/trunc(x, n) and
+log(b, x) are numeric; EXTRACT is numeric and date_part float8; the CASE family
+folds by select_common_type; every other double-precision function is float8.
+`ColDecls.pgNumeric` carries it through a plan the way `intWidth` carries an
+integer's width, and the assignment reads it (docs/internals/
+dml-integer-assignment-rounding.md). The carrier, the value and the OID are
+unchanged. Pinned by `wadjet.TestIntegerAssignmentRuleFollowsPgTypeof` and the
+`internal/oracle/intround` door tables.
+
 ### 3. The (p,s) of a computed result follows the finite-decimal industry rule
 
 PostgreSQL has no `(p,s)` rule — numeric is unbounded. A finite carrier needs
@@ -1135,6 +1159,9 @@ which is why the defect was invisible for as long as it was.
     answer in their argument's OWN domain (abs/ceil/floor/round/trunc/sign
     /mod) are exact. Pinned by
     `wadjet.TestTranscendentalFunctionsStayFloat64`.
+    (Amended 2026-09-28, #1353: the VALUE and the declared carrier stay
+    float64; the declaration carries PostgreSQL's numeric category beside it,
+    §2c, which is what an integer assignment rounds by.)
   - **A fractional literal IS numeric (amended 2026-09-24, arc VL round 5;
     the paragraph below is the position it replaced).** The literal
     declares the DECIMAL(p,s) of its spelling wherever it sits — a bare
