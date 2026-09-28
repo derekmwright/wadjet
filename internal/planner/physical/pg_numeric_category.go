@@ -70,6 +70,20 @@ func pgCategoryOfDecl(d expr.DeclType, c expr.Confidence) pgCategory {
 // that disagrees with an exact DECIMAL or INTEGER declaration changes
 // nothing.
 func pgCategoryOf(n plansql.Node, decls ColDecls) pgCategory {
+	if decls.pgMemo == nil || n == nil {
+		return pgCategoryOfNode(n, decls)
+	}
+	if c, ok := decls.pgMemo[n]; ok {
+		return c
+	}
+	c := pgCategoryOfNode(n, decls)
+	decls.pgMemo[n] = c
+	return c
+}
+
+// pgCategoryOfNode is pgCategoryOf's one level; the recursion goes back
+// through pgCategoryOf so a memo, where there is one, answers each node once.
+func pgCategoryOfNode(n plansql.Node, decls ColDecls) pgCategory {
 	switch x := n.(type) {
 	case *plansql.ParenNode:
 		return pgCategoryOf(x.Inner, decls)

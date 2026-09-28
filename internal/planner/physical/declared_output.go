@@ -1108,6 +1108,14 @@ type ColDecls struct {
 	// either; an absent entry is the carrier's reading, which for a base
 	// column IS the catalog's type.
 	pgCat map[string]pgCategory
+	// pgMemo holds pgCategoryOf's answer per node for ONE declaration walk
+	// (installed by nodeDeclaredType when absent, shared by every recursive
+	// call through the struct copy). The declared-type walk re-resolves each
+	// subtree at every level above it, and without the memo each of those
+	// calls walked the whole subtree again for its category: a 400-term
+	// double expression planned in 6.6 s against 3.1 s without the category.
+	// Nodes are pointers, so the key is the node's identity.
+	pgMemo map[plansql.Node]pgCategory
 	// subqueryDecl resolves a SCALAR SUBQUERY's single declared output
 	// column, and nil means "this caller cannot ask" — which is what every
 	// construction site that has no Planner leaves it at, and what
@@ -1455,6 +1463,9 @@ func DeclaredTypeOfNode(node plansql.Node, schema []parquet.Column) (expr.DeclTy
 }
 
 func nodeDeclaredType(node plansql.Node, decls ColDecls) (expr.DeclType, expr.Confidence) {
+	if decls.pgMemo == nil {
+		decls.pgMemo = map[plansql.Node]pgCategory{}
+	}
 	d, c := nodeDeclaredTypeOf(node, decls)
 	// PostgreSQL's CATEGORY where it disagrees with the carrier, in one place
 	// for every node kind (ADR-0024 item 2's 2026-09-28 amendment): `5 / 2.0`,
