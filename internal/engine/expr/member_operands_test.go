@@ -92,7 +92,7 @@ func TestMemberNumericProbeIsNeverADouble(t *testing.T) {
 		}
 	}
 	// Text that is no number keeps the CAST, whose input function refuses it.
-	for _, text := range []string{"zz", "1e", ".", "", "+NaN", "14 ", "0x0E", "1_4"} {
+	for _, text := range []string{"zz", "1e", ".", "", "+NaN", "14\u00a0", "0x0E", "1_4"} {
 		node, _ := plansql.ParseExpression("'" + text + "'")
 		if err := CheckMemberProbe(node, parquet.TypeDecimal); sqlerr.StateOf(err) != "22P02" {
 			t.Errorf("CheckMemberProbe(%q) = %v; want 22P02", text, err)
@@ -103,6 +103,38 @@ func TestMemberNumericProbeIsNeverADouble(t *testing.T) {
 		node, _ := plansql.ParseExpression(src)
 		if _, ok, err := MemberProbe(node, parquet.TypeDecimal); ok || err != nil {
 			t.Errorf("MemberProbe(%s) typed it (ok %v, err %v)", src, ok, err)
+		}
+	}
+	// numeric = integer is numeric: against a bigint set a numeric literal
+	// that is not a plain integer takes the same NUMERIC(38,s); a plain
+	// integer constant is already exact on the integer rung, and a QUOTED
+	// literal alone takes bigint (the input function refuses '14.5').
+	for _, c := range []struct{ src, want string }{
+		{"14.0000000000000000001", "cast('14.0000000000000000001' as NUMERIC(38,19))"},
+		{"CAST('14.0000000000000000001' AS NUMERIC)", "cast('14.0000000000000000001' as NUMERIC(38,19))"},
+		{"1.4e1", "cast('1.4e1' as NUMERIC(38,0))"},
+		{"14", "14"},
+		{"'14.5'", "cast('14.5' as BIGINT)"},
+	} {
+		node, _ := plansql.ParseExpression(c.src)
+		probe, _, err := MemberProbe(node, parquet.TypeInt64)
+		if err != nil || probe.String() != c.want {
+			t.Errorf("MemberProbe(%s, bigint) = %s, %v; want %s", c.src, probe, err, c.want)
+		}
+	}
+	// The per-row rung meets an integer member and a decimal probe by value.
+	set := &parquet.Column{Type: parquet.TypeInt64}
+	for _, c := range []struct {
+		probe  any
+		member any
+		eq     bool
+	}{
+		{"14.0000000000000000000", int64(14), true},
+		{"14.0000000000000000001", int64(14), false},
+		{"-14", int64(-14), true},
+	} {
+		if eq, decided := memberDecimalEqual(c.probe, c.member, set); !decided || eq != c.eq {
+			t.Errorf("memberDecimalEqual(%v, %v, bigint) = %v, %v; want %v, decided", c.probe, c.member, eq, decided, c.eq)
 		}
 	}
 }

@@ -108,8 +108,9 @@ func CheckMemberProbe(left plansql.Node, t parquet.TypeID) (err error) {
 
 // MemberProbe is a membership's outer operand read as the set's type: an
 // unknown-typed (quoted) literal against a set declared t is the literal
-// CAST to MemberLiteralCast(t), a numeric literal against a NUMERIC set is
-// the literal CAST to NUMERIC(38, its own scale) (memberNumericProbe), and
+// CAST to MemberLiteralCast(t), a numeric literal against a NUMERIC set —
+// and, one that is not a plain integer, against an integer set — is the
+// literal CAST to NUMERIC(38, its own scale) (memberNumericProbe), and
 // every other operand is itself (ok false). It is the ONE constructor of the
 // typed literal: physical.typeMemberLiterals writes it into the logical plan
 // every arm consumes (the DAG's inlined IN list included), and the compiler
@@ -119,8 +120,23 @@ func CheckMemberProbe(left plansql.Node, t parquet.TypeID) (err error) {
 // the two never both apply. err is the 22003 of a numeric literal no
 // DECIMAL(38,s) holds.
 func MemberProbe(left plansql.Node, t parquet.TypeID) (plansql.Node, bool, error) {
-	if t == parquet.TypeDecimal {
+	switch t {
+	case parquet.TypeDecimal:
 		return memberNumericProbe(left)
+	case parquet.TypeInt32, parquet.TypeInt64:
+		// numeric = integer is numeric in PostgreSQL: a numeric literal that
+		// is not already an integer the set's own rung reads exactly — a
+		// fractional, exponent or wide constant, or a quoted literal under
+		// a bare NUMERIC CAST — is typed as against a NUMERIC set. A QUOTED
+		// literal alone takes the set's integer type below (#1372).
+		if lit, ok := plansql.Unparen(left).(*plansql.Lit); !ok || lit.Kind != plansql.LitString {
+			if text, ok := memberNumericText(left); ok {
+				if _, err := strconv.ParseInt(text, 10, 64); err == nil {
+					return left, false, nil
+				}
+				return memberNumericProbe(left)
+			}
+		}
 	}
 	lit, ok := plansql.Unparen(left).(*plansql.Lit)
 	if !ok || lit.Kind != plansql.LitString {
@@ -266,7 +282,8 @@ func memberSetBox(v any, set *parquet.Column) any {
 }
 
 // memberDecimalEqual is the per-row membership's reading of a DECIMAL set
-// member, the rung InSubquery's decSet / fltSet take for the whole set: the
+// member — and of an INTEGER member against a decimal probe — the rung
+// InSubquery's decSet / fltSet take for the whole set: the
 // member is its rendered text at the set's scale, and the probe is decimal
 // text at its OWN scale or an integer — compared by canonical decimal value
 // — or a float. A float probe is an operand DECLARED float8 (a double
@@ -278,7 +295,31 @@ func memberSetBox(v any, set *parquet.Column) any {
 // numeric(38,10) … WHERE r.id = a.id)` answered 0 rows where PostgreSQL
 // answers the row. decided is false for anything else.
 func memberDecimalEqual(lv, v any, set *parquet.Column) (eq, decided bool) {
-	if set == nil || set.Type != parquet.TypeDecimal {
+	if set == nil {
+		return false, false
+	}
+	switch set.Type {
+	case parquet.TypeInt32, parquet.TypeInt64:
+		// An INTEGER member against a DECIMAL probe (its rendered text) is
+		// numeric = integer, which PostgreSQL resolves as numeric: the two
+		// meet by canonical value, as InSubquery's inSetInt set does on its
+		// decimal rung. The boxes as they stood — "14.0000" against 14 —
+		// missed every member.
+		ps, isText := lv.(string)
+		if !isText {
+			return false, false
+		}
+		pk, ok := batch.CanonicalDecimalText(ps)
+		if !ok {
+			return false, false
+		}
+		mk, ok := inSubqueryDecimalKey(v)
+		if !ok {
+			return false, false
+		}
+		return pk == mk, true
+	case parquet.TypeDecimal:
+	default:
 		return false, false
 	}
 	s, ok := v.(string)
