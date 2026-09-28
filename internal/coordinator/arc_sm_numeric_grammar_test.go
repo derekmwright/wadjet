@@ -225,7 +225,8 @@ func smNumGrammarCells() []smNumGrammarCell {
 // smNumConstOuterCells are the membership's CONSTANT-VALUED outer operands
 // (review round 4, B9): an expression over numeric constants, not a
 // literal — a CASE (with a constant condition, or one that reads a column
-// but chooses among constants), COALESCE, NULLIF, GREATEST, LEAST, a unary
+// but chooses among constants), COALESCE, NULLIF, GREATEST, LEAST (beside a
+// NUMERIC, bigint or float8 column too), a unary
 // minus of an expression, a nested bare CAST, a bare CAST over text or over
 // an integer constant, a choice beside a column, arithmetic over a choice —
 // at the grammar's three values (H = 14, a member of both bodies; M = 14 +
@@ -249,6 +250,13 @@ func smNumConstOuterCells() []smNumGrammarCell {
 		{"caseCol", func(v string) string { return "CASE WHEN a.id > 0 THEN " + v + " ELSE a.v_dec END" }},
 		{"coalesce", func(v string) string { return "COALESCE(" + v + ", 0)" }},
 		{"coalCol", func(v string) string { return "COALESCE(" + v + ", a.v_dec)" }},
+		// Beside a float8 column the choice is double precision in
+		// PostgreSQL too (numeric resolves to float8), so M matches 14 there:
+		// the typed constant must not make the choice exact.
+		{"coalF64", func(v string) string { return "COALESCE(a.v_f64, " + v + ")" }},
+		{"caseF64", func(v string) string { return "CASE WHEN a.id > 2 THEN " + v + " ELSE a.v_f64 END" }},
+		{"greatestF64", func(v string) string { return "GREATEST(a.v_f64, " + v + ")" }},
+		{"coalI64", func(v string) string { return "COALESCE(a.v_i64, " + v + ")" }},
 		{"nullif", func(v string) string { return "NULLIF(" + v + ", 0)" }},
 		{"greatest", func(v string) string { return "GREATEST(" + v + ", 1)" }},
 		{"least", func(v string) string { return "LEAST(" + v + ", 20)" }},
