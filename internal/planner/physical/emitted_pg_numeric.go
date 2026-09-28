@@ -125,8 +125,22 @@ func emittedColPGNumeric(n *logical.Node) map[string]bool {
 		if len(n.Children) != 2 {
 			return nil
 		}
-		left, right := emittedColPGNumeric(n.Children[0]), emittedColPGNumeric(n.Children[1])
-		return withJoinArmQualifiers(n, left, right, mergeJoinSides(left, right))
+		left, leftKnown := joinArmPGNumeric(n.Children[0])
+		right, rightKnown := joinArmPGNumeric(n.Children[1])
+		merged := mergeJoinSides(left, right)
+		if !leftKnown || !rightKnown {
+			// An arm whose names this walk cannot list may publish any bare
+			// name the other arm carries, so no bare entry is proven; the
+			// qualified ones below still name their side.
+			bare := make(map[string]bool, len(merged))
+			for k, v := range merged {
+				if strings.IndexByte(k, '.') >= 0 {
+					bare[k] = v
+				}
+			}
+			merged = bare
+		}
+		return withJoinArmQualifiers(n, left, right, merged)
 	case logical.NodeUnion, logical.NodeIntersect, logical.NodeExcept:
 		cols, ok := setOpDeclaredOutputSchema(n)
 		if !ok {
@@ -142,6 +156,30 @@ func emittedColPGNumeric(n *logical.Node) map[string]bool {
 		return out
 	}
 	return nil
+}
+
+// joinArmPGNumeric is one join arm's categories with an entry for EVERY
+// column the arm emits — false where PostgreSQL's type is not numeric — so
+// the join's merge sees a name both arms publish at different categories and
+// drops the bare name instead of keeping the one arm that said anything.
+//
+// emittedColPGNumeric's own answer lists only the numeric columns: a float8
+// base column contributes no entry, so `s a JOIN (SELECT id, 5 / 2.0 AS y …)
+// b` kept b's bare `y: true`, and `a.y` — which has no qualified entry when
+// the category map holds nothing for a — fell back to it and a float8 rounded
+// half away from zero (#1353 round-1 review, B1; the by-name lesson of #1177).
+// known is false for an arm whose columns this walk cannot list at all.
+func joinArmPGNumeric(arm *logical.Node) (m map[string]bool, known bool) {
+	cats := emittedColPGNumeric(arm)
+	types := emittedColTypes(arm)
+	out := make(map[string]bool, len(types)+len(cats))
+	for name := range types {
+		out[name] = false
+	}
+	for name, v := range cats {
+		out[name] = v
+	}
+	return out, types != nil || arm.Type == logical.NodeDual
 }
 
 // pgNumericInputDecls is what an expression over n's output reads: the
