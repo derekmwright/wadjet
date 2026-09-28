@@ -123,12 +123,15 @@ func smNumSpecial(s smNumSpelling) bool {
 	return false
 }
 
-// smNumBody is one NUMERIC membership body: NUMERIC(18,4), NUMERIC(38,10)
-// and a NUMERIC with no modifier.
+// smNumBody is one membership body: NUMERIC(18,4), NUMERIC(38,10), a
+// NUMERIC with no modifier, and a bigint — numeric = bigint is numeric in
+// PostgreSQL, so a numeric literal meets an integer member at its own
+// digits too (a QUOTED literal alone takes bigint there, which the
+// membership table's lit/ rows gate).
 type smNumBody struct{ key, tbl, col string }
 
 func smNumBodies() []smNumBody {
-	return []smNumBody{{"dec", "st_pair", "v_dec"}, {"n38", "sm_num", "v_n38"}, {"n", "sm_num", "v_n"}}
+	return []smNumBody{{"dec", "st_pair", "v_dec"}, {"n38", "sm_num", "v_n38"}, {"n", "sm_num", "v_n"}, {"i64", "st_pair", "v_i64"}}
 }
 
 // smNumShape is one spelling of the outer operand around the literal's text.
@@ -151,15 +154,15 @@ func smNumShapes() []smNumShape {
 		{"q", func(s smNumSpelling) (string, bool) { return quoted(s), true }, true,
 			map[string][]string{"dec": all, "n38": four, "n": four}},
 		{"cast", func(s smNumSpelling) (string, bool) { return "CAST(" + quoted(s) + " AS NUMERIC)", true }, true,
-			map[string][]string{"dec": four, "n38": two, "n": two}},
+			map[string][]string{"dec": four, "n38": two, "n": two, "i64": four}},
 		{"castDecimal", func(s smNumSpelling) (string, bool) { return "CAST(" + quoted(s) + " AS decimal)", true }, true,
-			map[string][]string{"dec": two}},
+			map[string][]string{"dec": two, "i64": two}},
 		{"colon", func(s smNumSpelling) (string, bool) { return quoted(s) + "::numeric", true }, true,
-			map[string][]string{"dec": two}},
+			map[string][]string{"dec": two, "i64": two}},
 		{"const", func(s smNumSpelling) (string, bool) { return s.constant, s.constant != "" }, true,
-			map[string][]string{"dec": four, "n38": four, "n": four}},
+			map[string][]string{"dec": four, "n38": four, "n": four, "i64": four}},
 		{"castPS", func(s smNumSpelling) (string, bool) { return "CAST(" + quoted(s) + " AS NUMERIC(18,4))", true }, false,
-			map[string][]string{"dec": two, "n38": two, "n": two}},
+			map[string][]string{"dec": two, "n38": two, "n": two, "i64": two}},
 		{"castPS38", func(s smNumSpelling) (string, bool) { return "CAST(" + quoted(s) + " AS NUMERIC(38,20))", true }, false,
 			map[string][]string{"dec": two}},
 	}
@@ -253,8 +256,8 @@ func smNumGrammarPG(t *testing.T) map[string]string {
 // the grammar, not examples: smNumSpellings × {quoted literal, CAST AS
 // NUMERIC / decimal, ::numeric, the unquoted constant, CAST AS NUMERIC(18,4)
 // and NUMERIC(38,20)} × {IN, NOT IN, = ANY, <> ALL, correlated IN, SELECT
-// list} × {NUMERIC(18,4), NUMERIC(38,10), NUMERIC} bodies, on five arms,
-// against PostgreSQL 17.11's full sorted rows.
+// list} × {NUMERIC(18,4), NUMERIC(38,10), NUMERIC, bigint} bodies, on five
+// arms, against PostgreSQL 17.11's full sorted rows.
 //
 // The literal takes NUMERIC(38, its own scale) — the value it spells, never
 // float8: a bare NUMERIC boxed the literal as a double, so 14 + 1e-19 in
@@ -345,7 +348,7 @@ func TestArcSMNumericLiteralGrammarEveryArm(t *testing.T) {
 		})
 	}
 	t.Logf("numeric-literal grammar: %d cells, %v", len(cells), counts)
-	if counts["answered"] < 1500 || counts["divergent 22003"] < 200 || counts["refused"] < 200 {
+	if counts["answered"] < 2500 || counts["divergent 22003"] < 400 || counts["refused"] < 400 {
 		t.Fatalf("%v: the table must hold answered, refused and divergent cells", counts)
 	}
 }

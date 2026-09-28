@@ -1650,6 +1650,306 @@ numg/cast/in/n/radix/underscore	rows=4 1 | 2 | 3 | 4
 numg/cast/corrIn/n/radix/underscore	rows=1 3
 numg/cast/in/n/radix/underscoreFrac	rows=0 
 numg/cast/corrIn/n/radix/underscoreFrac	rows=0 
+numg/cast/in/i64/plain/H	rows=4 1 | 2 | 3 | 4
+numg/cast/notIn/i64/plain/H	rows=0 
+numg/cast/corrIn/i64/plain/H	rows=1 3
+numg/cast/sel/i64/plain/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/cast/in/i64/plain/M	rows=0 
+numg/cast/notIn/i64/plain/M	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/i64/plain/M	rows=0 
+numg/cast/sel/i64/plain/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/i64/plain/F	rows=0 
+numg/cast/notIn/i64/plain/F	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/i64/plain/F	rows=0 
+numg/cast/sel/i64/plain/F	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/i64/plus/H	rows=4 1 | 2 | 3 | 4
+numg/cast/notIn/i64/plus/H	rows=0 
+numg/cast/corrIn/i64/plus/H	rows=1 3
+numg/cast/sel/i64/plus/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/cast/in/i64/plus/M	rows=0 
+numg/cast/notIn/i64/plus/M	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/i64/plus/M	rows=0 
+numg/cast/sel/i64/plus/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/i64/plus/F	rows=0 
+numg/cast/notIn/i64/plus/F	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/i64/plus/F	rows=0 
+numg/cast/sel/i64/plus/F	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/i64/minus/H	rows=0 
+numg/cast/notIn/i64/minus/H	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/i64/minus/H	rows=0 
+numg/cast/sel/i64/minus/H	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/i64/minus/M	rows=0 
+numg/cast/notIn/i64/minus/M	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/i64/minus/M	rows=0 
+numg/cast/sel/i64/minus/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/i64/minus/F	rows=0 
+numg/cast/notIn/i64/minus/F	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/i64/minus/F	rows=0 
+numg/cast/sel/i64/minus/F	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/i64/lead0/H	rows=4 1 | 2 | 3 | 4
+numg/cast/notIn/i64/lead0/H	rows=0 
+numg/cast/corrIn/i64/lead0/H	rows=1 3
+numg/cast/sel/i64/lead0/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/cast/in/i64/lead0/M	rows=0 
+numg/cast/notIn/i64/lead0/M	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/i64/lead0/M	rows=0 
+numg/cast/sel/i64/lead0/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/i64/lead0/F	rows=0 
+numg/cast/notIn/i64/lead0/F	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/i64/lead0/F	rows=0 
+numg/cast/sel/i64/lead0/F	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/i64/trail0/H	rows=4 1 | 2 | 3 | 4
+numg/cast/notIn/i64/trail0/H	rows=0 
+numg/cast/corrIn/i64/trail0/H	rows=1 3
+numg/cast/sel/i64/trail0/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/cast/in/i64/trail0/M	rows=0 
+numg/cast/notIn/i64/trail0/M	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/i64/trail0/M	rows=0 
+numg/cast/sel/i64/trail0/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/i64/trail0/F	rows=0 
+numg/cast/notIn/i64/trail0/F	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/i64/trail0/F	rows=0 
+numg/cast/sel/i64/trail0/F	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/i64/noFrac/H	rows=4 1 | 2 | 3 | 4
+numg/cast/notIn/i64/noFrac/H	rows=0 
+numg/cast/corrIn/i64/noFrac/H	rows=1 3
+numg/cast/sel/i64/noFrac/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/cast/in/i64/noInt/H	rows=4 1 | 2 | 3 | 4
+numg/cast/notIn/i64/noInt/H	rows=0 
+numg/cast/corrIn/i64/noInt/H	rows=1 3
+numg/cast/sel/i64/noInt/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/cast/in/i64/noInt/M	rows=0 
+numg/cast/notIn/i64/noInt/M	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/i64/noInt/M	rows=0 
+numg/cast/sel/i64/noInt/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/i64/noInt/F	rows=0 
+numg/cast/notIn/i64/noInt/F	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/i64/noInt/F	rows=0 
+numg/cast/sel/i64/noInt/F	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/i64/noInt/miss	rows=0 
+numg/cast/notIn/i64/noInt/miss	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/i64/noInt/miss	rows=0 
+numg/cast/sel/i64/noInt/miss	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/i64/exp/H	rows=4 1 | 2 | 3 | 4
+numg/cast/notIn/i64/exp/H	rows=0 
+numg/cast/corrIn/i64/exp/H	rows=1 3
+numg/cast/sel/i64/exp/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/cast/in/i64/exp/M	rows=0 
+numg/cast/notIn/i64/exp/M	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/i64/exp/M	rows=0 
+numg/cast/sel/i64/exp/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/i64/exp/F	rows=0 
+numg/cast/notIn/i64/exp/F	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/i64/exp/F	rows=0 
+numg/cast/sel/i64/exp/F	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/i64/expUpper/H	rows=4 1 | 2 | 3 | 4
+numg/cast/notIn/i64/expUpper/H	rows=0 
+numg/cast/corrIn/i64/expUpper/H	rows=1 3
+numg/cast/sel/i64/expUpper/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/cast/in/i64/expUpper/M	rows=0 
+numg/cast/notIn/i64/expUpper/M	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/i64/expUpper/M	rows=0 
+numg/cast/sel/i64/expUpper/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/i64/expUpper/F	rows=0 
+numg/cast/notIn/i64/expUpper/F	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/i64/expUpper/F	rows=0 
+numg/cast/sel/i64/expUpper/F	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/i64/expPlus/H	rows=4 1 | 2 | 3 | 4
+numg/cast/notIn/i64/expPlus/H	rows=0 
+numg/cast/corrIn/i64/expPlus/H	rows=1 3
+numg/cast/sel/i64/expPlus/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/cast/in/i64/expPlus/M	rows=0 
+numg/cast/notIn/i64/expPlus/M	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/i64/expPlus/M	rows=0 
+numg/cast/sel/i64/expPlus/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/i64/expPlus/F	rows=0 
+numg/cast/notIn/i64/expPlus/F	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/i64/expPlus/F	rows=0 
+numg/cast/sel/i64/expPlus/F	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/i64/expMinus/H	rows=4 1 | 2 | 3 | 4
+numg/cast/notIn/i64/expMinus/H	rows=0 
+numg/cast/corrIn/i64/expMinus/H	rows=1 3
+numg/cast/sel/i64/expMinus/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/cast/in/i64/expMinus/M	rows=0 
+numg/cast/notIn/i64/expMinus/M	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/i64/expMinus/M	rows=0 
+numg/cast/sel/i64/expMinus/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/i64/expMinus/F	rows=0 
+numg/cast/notIn/i64/expMinus/F	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/i64/expMinus/F	rows=0 
+numg/cast/sel/i64/expMinus/F	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/i64/expZero/H	rows=4 1 | 2 | 3 | 4
+numg/cast/notIn/i64/expZero/H	rows=0 
+numg/cast/corrIn/i64/expZero/H	rows=1 3
+numg/cast/sel/i64/expZero/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/cast/in/i64/expZero/F	rows=0 
+numg/cast/notIn/i64/expZero/F	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/i64/expZero/F	rows=0 
+numg/cast/sel/i64/expZero/F	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/i64/space/H	rows=4 1 | 2 | 3 | 4
+numg/cast/notIn/i64/space/H	rows=0 
+numg/cast/corrIn/i64/space/H	rows=1 3
+numg/cast/sel/i64/space/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/cast/in/i64/space/M	rows=0 
+numg/cast/notIn/i64/space/M	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/i64/space/M	rows=0 
+numg/cast/sel/i64/space/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/i64/space/F	rows=0 
+numg/cast/notIn/i64/space/F	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/i64/space/F	rows=0 
+numg/cast/sel/i64/space/F	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/i64/tab/H	rows=4 1 | 2 | 3 | 4
+numg/cast/notIn/i64/tab/H	rows=0 
+numg/cast/corrIn/i64/tab/H	rows=1 3
+numg/cast/sel/i64/tab/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/cast/in/i64/trail0Wide/H	rows=4 1 | 2 | 3 | 4
+numg/cast/notIn/i64/trail0Wide/H	rows=0 
+numg/cast/corrIn/i64/trail0Wide/H	rows=1 3
+numg/cast/sel/i64/trail0Wide/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/cast/in/i64/trail0Wide/F	rows=0 
+numg/cast/notIn/i64/trail0Wide/F	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/i64/trail0Wide/F	rows=0 
+numg/cast/sel/i64/trail0Wide/F	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/i64/lead0Wide/H	rows=4 1 | 2 | 3 | 4
+numg/cast/notIn/i64/lead0Wide/H	rows=0 
+numg/cast/corrIn/i64/lead0Wide/H	rows=1 3
+numg/cast/sel/i64/lead0Wide/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/cast/in/i64/lead0Wide/M	rows=0 
+numg/cast/notIn/i64/lead0Wide/M	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/i64/lead0Wide/M	rows=0 
+numg/cast/sel/i64/lead0Wide/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/i64/lead0Wide/F	rows=0 
+numg/cast/notIn/i64/lead0Wide/F	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/i64/lead0Wide/F	rows=0 
+numg/cast/sel/i64/lead0Wide/F	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/i64/expWide/H	rows=4 1 | 2 | 3 | 4
+numg/cast/notIn/i64/expWide/H	rows=0 
+numg/cast/corrIn/i64/expWide/H	rows=1 3
+numg/cast/sel/i64/expWide/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/cast/in/i64/expWide/F	rows=0 
+numg/cast/notIn/i64/expWide/F	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/i64/expWide/F	rows=0 
+numg/cast/sel/i64/expWide/F	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/i64/zeroWide/miss	rows=0 
+numg/cast/notIn/i64/zeroWide/miss	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/i64/zeroWide/miss	rows=0 
+numg/cast/sel/i64/zeroWide/miss	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/i64/width38/M	rows=0 
+numg/cast/notIn/i64/width38/M	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/i64/width38/M	rows=0 
+numg/cast/sel/i64/width38/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/i64/over38Frac	rows=0 
+numg/cast/notIn/i64/over38Frac	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/i64/over38Frac	rows=0 
+numg/cast/sel/i64/over38Frac	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/i64/over38Neg	rows=0 
+numg/cast/notIn/i64/over38Neg	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/i64/over38Neg	rows=0 
+numg/cast/sel/i64/over38Neg	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/i64/scale39	rows=0 
+numg/cast/notIn/i64/scale39	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/i64/scale39	rows=0 
+numg/cast/sel/i64/scale39	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/i64/expScale	rows=0 
+numg/cast/notIn/i64/expScale	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/i64/expScale	rows=0 
+numg/cast/sel/i64/expScale	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/i64/over38Int	rows=0 
+numg/cast/notIn/i64/over38Int	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/i64/over38Int	rows=0 
+numg/cast/sel/i64/over38Int	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/i64/expInt	rows=0 
+numg/cast/notIn/i64/expInt	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/i64/expInt	rows=0 
+numg/cast/sel/i64/expInt	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/i64/expHuge	rows=0 
+numg/cast/notIn/i64/expHuge	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/i64/expHuge	rows=0 
+numg/cast/sel/i64/expHuge	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/i64/nan	rows=0 
+numg/cast/notIn/i64/nan	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/i64/nan	rows=0 
+numg/cast/sel/i64/nan	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/i64/inf	rows=0 
+numg/cast/notIn/i64/inf	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/i64/inf	rows=0 
+numg/cast/sel/i64/inf	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/i64/negInf	rows=0 
+numg/cast/notIn/i64/negInf	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/i64/negInf	rows=0 
+numg/cast/sel/i64/negInf	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/i64/infShort	rows=0 
+numg/cast/notIn/i64/infShort	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/i64/infShort	rows=0 
+numg/cast/sel/i64/infShort	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/i64/bad/junk	ERR 22P02 invalid input syntax for type numeric: "zz"
+numg/cast/notIn/i64/bad/junk	ERR 22P02 invalid input syntax for type numeric: "zz"
+numg/cast/corrIn/i64/bad/junk	ERR 22P02 invalid input syntax for type numeric: "zz"
+numg/cast/sel/i64/bad/junk	ERR 22P02 invalid input syntax for type numeric: "zz"
+numg/cast/in/i64/bad/expEmpty	ERR 22P02 invalid input syntax for type numeric: "1e"
+numg/cast/notIn/i64/bad/expEmpty	ERR 22P02 invalid input syntax for type numeric: "1e"
+numg/cast/corrIn/i64/bad/expEmpty	ERR 22P02 invalid input syntax for type numeric: "1e"
+numg/cast/sel/i64/bad/expEmpty	ERR 22P02 invalid input syntax for type numeric: "1e"
+numg/cast/in/i64/bad/dot	ERR 22P02 invalid input syntax for type numeric: "."
+numg/cast/notIn/i64/bad/dot	ERR 22P02 invalid input syntax for type numeric: "."
+numg/cast/corrIn/i64/bad/dot	ERR 22P02 invalid input syntax for type numeric: "."
+numg/cast/sel/i64/bad/dot	ERR 22P02 invalid input syntax for type numeric: "."
+numg/cast/in/i64/bad/empty	ERR 22P02 invalid input syntax for type numeric: ""
+numg/cast/notIn/i64/bad/empty	ERR 22P02 invalid input syntax for type numeric: ""
+numg/cast/corrIn/i64/bad/empty	ERR 22P02 invalid input syntax for type numeric: ""
+numg/cast/sel/i64/bad/empty	ERR 22P02 invalid input syntax for type numeric: ""
+numg/cast/in/i64/bad/twoDots	ERR 22P02 invalid input syntax for type numeric: "1.2.3"
+numg/cast/notIn/i64/bad/twoDots	ERR 22P02 invalid input syntax for type numeric: "1.2.3"
+numg/cast/corrIn/i64/bad/twoDots	ERR 22P02 invalid input syntax for type numeric: "1.2.3"
+numg/cast/sel/i64/bad/twoDots	ERR 22P02 invalid input syntax for type numeric: "1.2.3"
+numg/cast/in/i64/bad/innerSpace	ERR 22P02 invalid input syntax for type numeric: "1 4"
+numg/cast/notIn/i64/bad/innerSpace	ERR 22P02 invalid input syntax for type numeric: "1 4"
+numg/cast/corrIn/i64/bad/innerSpace	ERR 22P02 invalid input syntax for type numeric: "1 4"
+numg/cast/sel/i64/bad/innerSpace	ERR 22P02 invalid input syntax for type numeric: "1 4"
+numg/cast/in/i64/bad/twoSigns	ERR 22P02 invalid input syntax for type numeric: "+-14"
+numg/cast/notIn/i64/bad/twoSigns	ERR 22P02 invalid input syntax for type numeric: "+-14"
+numg/cast/corrIn/i64/bad/twoSigns	ERR 22P02 invalid input syntax for type numeric: "+-14"
+numg/cast/sel/i64/bad/twoSigns	ERR 22P02 invalid input syntax for type numeric: "+-14"
+numg/cast/in/i64/bad/trailJunk	ERR 22P02 invalid input syntax for type numeric: "14x"
+numg/cast/notIn/i64/bad/trailJunk	ERR 22P02 invalid input syntax for type numeric: "14x"
+numg/cast/corrIn/i64/bad/trailJunk	ERR 22P02 invalid input syntax for type numeric: "14x"
+numg/cast/sel/i64/bad/trailJunk	ERR 22P02 invalid input syntax for type numeric: "14x"
+numg/cast/in/i64/bad/signedNaN	ERR 22P02 invalid input syntax for type numeric: "+NaN"
+numg/cast/notIn/i64/bad/signedNaN	ERR 22P02 invalid input syntax for type numeric: "+NaN"
+numg/cast/corrIn/i64/bad/signedNaN	ERR 22P02 invalid input syntax for type numeric: "+NaN"
+numg/cast/sel/i64/bad/signedNaN	ERR 22P02 invalid input syntax for type numeric: "+NaN"
+numg/cast/in/i64/bad/nbsp	ERR 22P02 invalid input syntax for type numeric: "14 "
+numg/cast/notIn/i64/bad/nbsp	ERR 22P02 invalid input syntax for type numeric: "14 "
+numg/cast/corrIn/i64/bad/nbsp	ERR 22P02 invalid input syntax for type numeric: "14 "
+numg/cast/sel/i64/bad/nbsp	ERR 22P02 invalid input syntax for type numeric: "14 "
+numg/cast/in/i64/bad/twoUnderscores	ERR 22P02 invalid input syntax for type numeric: "1__4"
+numg/cast/notIn/i64/bad/twoUnderscores	ERR 22P02 invalid input syntax for type numeric: "1__4"
+numg/cast/corrIn/i64/bad/twoUnderscores	ERR 22P02 invalid input syntax for type numeric: "1__4"
+numg/cast/sel/i64/bad/twoUnderscores	ERR 22P02 invalid input syntax for type numeric: "1__4"
+numg/cast/in/i64/bad/hexFloat	ERR 22P02 invalid input syntax for type numeric: "0x1.8p1"
+numg/cast/notIn/i64/bad/hexFloat	ERR 22P02 invalid input syntax for type numeric: "0x1.8p1"
+numg/cast/corrIn/i64/bad/hexFloat	ERR 22P02 invalid input syntax for type numeric: "0x1.8p1"
+numg/cast/sel/i64/bad/hexFloat	ERR 22P02 invalid input syntax for type numeric: "0x1.8p1"
+numg/cast/in/i64/radix/hex	rows=4 1 | 2 | 3 | 4
+numg/cast/notIn/i64/radix/hex	rows=0 
+numg/cast/corrIn/i64/radix/hex	rows=1 3
+numg/cast/sel/i64/radix/hex	rows=4 1,true | 2,true | 3,true | 4,true
+numg/cast/in/i64/radix/octal	rows=4 1 | 2 | 3 | 4
+numg/cast/notIn/i64/radix/octal	rows=0 
+numg/cast/corrIn/i64/radix/octal	rows=1 3
+numg/cast/sel/i64/radix/octal	rows=4 1,true | 2,true | 3,true | 4,true
+numg/cast/in/i64/radix/binary	rows=4 1 | 2 | 3 | 4
+numg/cast/notIn/i64/radix/binary	rows=0 
+numg/cast/corrIn/i64/radix/binary	rows=1 3
+numg/cast/sel/i64/radix/binary	rows=4 1,true | 2,true | 3,true | 4,true
+numg/cast/in/i64/radix/underscore	rows=4 1 | 2 | 3 | 4
+numg/cast/notIn/i64/radix/underscore	rows=0 
+numg/cast/corrIn/i64/radix/underscore	rows=1 3
+numg/cast/sel/i64/radix/underscore	rows=4 1,true | 2,true | 3,true | 4,true
+numg/cast/in/i64/radix/underscoreFrac	rows=0 
+numg/cast/notIn/i64/radix/underscoreFrac	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/i64/radix/underscoreFrac	rows=0 
+numg/cast/sel/i64/radix/underscoreFrac	rows=4 1,false | 2,false | 3,false | 4,false
 numg/castDecimal/in/dec/plain/H	rows=4 1 | 2 | 3 | 4
 numg/castDecimal/corrIn/dec/plain/H	rows=1 3
 numg/castDecimal/in/dec/plain/M	rows=0 
@@ -1800,6 +2100,156 @@ numg/castDecimal/in/dec/radix/underscore	rows=4 1 | 2 | 3 | 4
 numg/castDecimal/corrIn/dec/radix/underscore	rows=1 3
 numg/castDecimal/in/dec/radix/underscoreFrac	rows=4 1 | 2 | 3 | 4
 numg/castDecimal/corrIn/dec/radix/underscoreFrac	rows=1 1
+numg/castDecimal/in/i64/plain/H	rows=4 1 | 2 | 3 | 4
+numg/castDecimal/corrIn/i64/plain/H	rows=1 3
+numg/castDecimal/in/i64/plain/M	rows=0 
+numg/castDecimal/corrIn/i64/plain/M	rows=0 
+numg/castDecimal/in/i64/plain/F	rows=0 
+numg/castDecimal/corrIn/i64/plain/F	rows=0 
+numg/castDecimal/in/i64/plus/H	rows=4 1 | 2 | 3 | 4
+numg/castDecimal/corrIn/i64/plus/H	rows=1 3
+numg/castDecimal/in/i64/plus/M	rows=0 
+numg/castDecimal/corrIn/i64/plus/M	rows=0 
+numg/castDecimal/in/i64/plus/F	rows=0 
+numg/castDecimal/corrIn/i64/plus/F	rows=0 
+numg/castDecimal/in/i64/minus/H	rows=0 
+numg/castDecimal/corrIn/i64/minus/H	rows=0 
+numg/castDecimal/in/i64/minus/M	rows=0 
+numg/castDecimal/corrIn/i64/minus/M	rows=0 
+numg/castDecimal/in/i64/minus/F	rows=0 
+numg/castDecimal/corrIn/i64/minus/F	rows=0 
+numg/castDecimal/in/i64/lead0/H	rows=4 1 | 2 | 3 | 4
+numg/castDecimal/corrIn/i64/lead0/H	rows=1 3
+numg/castDecimal/in/i64/lead0/M	rows=0 
+numg/castDecimal/corrIn/i64/lead0/M	rows=0 
+numg/castDecimal/in/i64/lead0/F	rows=0 
+numg/castDecimal/corrIn/i64/lead0/F	rows=0 
+numg/castDecimal/in/i64/trail0/H	rows=4 1 | 2 | 3 | 4
+numg/castDecimal/corrIn/i64/trail0/H	rows=1 3
+numg/castDecimal/in/i64/trail0/M	rows=0 
+numg/castDecimal/corrIn/i64/trail0/M	rows=0 
+numg/castDecimal/in/i64/trail0/F	rows=0 
+numg/castDecimal/corrIn/i64/trail0/F	rows=0 
+numg/castDecimal/in/i64/noFrac/H	rows=4 1 | 2 | 3 | 4
+numg/castDecimal/corrIn/i64/noFrac/H	rows=1 3
+numg/castDecimal/in/i64/noInt/H	rows=4 1 | 2 | 3 | 4
+numg/castDecimal/corrIn/i64/noInt/H	rows=1 3
+numg/castDecimal/in/i64/noInt/M	rows=0 
+numg/castDecimal/corrIn/i64/noInt/M	rows=0 
+numg/castDecimal/in/i64/noInt/F	rows=0 
+numg/castDecimal/corrIn/i64/noInt/F	rows=0 
+numg/castDecimal/in/i64/noInt/miss	rows=0 
+numg/castDecimal/corrIn/i64/noInt/miss	rows=0 
+numg/castDecimal/in/i64/exp/H	rows=4 1 | 2 | 3 | 4
+numg/castDecimal/corrIn/i64/exp/H	rows=1 3
+numg/castDecimal/in/i64/exp/M	rows=0 
+numg/castDecimal/corrIn/i64/exp/M	rows=0 
+numg/castDecimal/in/i64/exp/F	rows=0 
+numg/castDecimal/corrIn/i64/exp/F	rows=0 
+numg/castDecimal/in/i64/expUpper/H	rows=4 1 | 2 | 3 | 4
+numg/castDecimal/corrIn/i64/expUpper/H	rows=1 3
+numg/castDecimal/in/i64/expUpper/M	rows=0 
+numg/castDecimal/corrIn/i64/expUpper/M	rows=0 
+numg/castDecimal/in/i64/expUpper/F	rows=0 
+numg/castDecimal/corrIn/i64/expUpper/F	rows=0 
+numg/castDecimal/in/i64/expPlus/H	rows=4 1 | 2 | 3 | 4
+numg/castDecimal/corrIn/i64/expPlus/H	rows=1 3
+numg/castDecimal/in/i64/expPlus/M	rows=0 
+numg/castDecimal/corrIn/i64/expPlus/M	rows=0 
+numg/castDecimal/in/i64/expPlus/F	rows=0 
+numg/castDecimal/corrIn/i64/expPlus/F	rows=0 
+numg/castDecimal/in/i64/expMinus/H	rows=4 1 | 2 | 3 | 4
+numg/castDecimal/corrIn/i64/expMinus/H	rows=1 3
+numg/castDecimal/in/i64/expMinus/M	rows=0 
+numg/castDecimal/corrIn/i64/expMinus/M	rows=0 
+numg/castDecimal/in/i64/expMinus/F	rows=0 
+numg/castDecimal/corrIn/i64/expMinus/F	rows=0 
+numg/castDecimal/in/i64/expZero/H	rows=4 1 | 2 | 3 | 4
+numg/castDecimal/corrIn/i64/expZero/H	rows=1 3
+numg/castDecimal/in/i64/expZero/F	rows=0 
+numg/castDecimal/corrIn/i64/expZero/F	rows=0 
+numg/castDecimal/in/i64/space/H	rows=4 1 | 2 | 3 | 4
+numg/castDecimal/corrIn/i64/space/H	rows=1 3
+numg/castDecimal/in/i64/space/M	rows=0 
+numg/castDecimal/corrIn/i64/space/M	rows=0 
+numg/castDecimal/in/i64/space/F	rows=0 
+numg/castDecimal/corrIn/i64/space/F	rows=0 
+numg/castDecimal/in/i64/tab/H	rows=4 1 | 2 | 3 | 4
+numg/castDecimal/corrIn/i64/tab/H	rows=1 3
+numg/castDecimal/in/i64/trail0Wide/H	rows=4 1 | 2 | 3 | 4
+numg/castDecimal/corrIn/i64/trail0Wide/H	rows=1 3
+numg/castDecimal/in/i64/trail0Wide/F	rows=0 
+numg/castDecimal/corrIn/i64/trail0Wide/F	rows=0 
+numg/castDecimal/in/i64/lead0Wide/H	rows=4 1 | 2 | 3 | 4
+numg/castDecimal/corrIn/i64/lead0Wide/H	rows=1 3
+numg/castDecimal/in/i64/lead0Wide/M	rows=0 
+numg/castDecimal/corrIn/i64/lead0Wide/M	rows=0 
+numg/castDecimal/in/i64/lead0Wide/F	rows=0 
+numg/castDecimal/corrIn/i64/lead0Wide/F	rows=0 
+numg/castDecimal/in/i64/expWide/H	rows=4 1 | 2 | 3 | 4
+numg/castDecimal/corrIn/i64/expWide/H	rows=1 3
+numg/castDecimal/in/i64/expWide/F	rows=0 
+numg/castDecimal/corrIn/i64/expWide/F	rows=0 
+numg/castDecimal/in/i64/zeroWide/miss	rows=0 
+numg/castDecimal/corrIn/i64/zeroWide/miss	rows=0 
+numg/castDecimal/in/i64/width38/M	rows=0 
+numg/castDecimal/corrIn/i64/width38/M	rows=0 
+numg/castDecimal/in/i64/over38Frac	rows=0 
+numg/castDecimal/corrIn/i64/over38Frac	rows=0 
+numg/castDecimal/in/i64/over38Neg	rows=0 
+numg/castDecimal/corrIn/i64/over38Neg	rows=0 
+numg/castDecimal/in/i64/scale39	rows=0 
+numg/castDecimal/corrIn/i64/scale39	rows=0 
+numg/castDecimal/in/i64/expScale	rows=0 
+numg/castDecimal/corrIn/i64/expScale	rows=0 
+numg/castDecimal/in/i64/over38Int	rows=0 
+numg/castDecimal/corrIn/i64/over38Int	rows=0 
+numg/castDecimal/in/i64/expInt	rows=0 
+numg/castDecimal/corrIn/i64/expInt	rows=0 
+numg/castDecimal/in/i64/expHuge	rows=0 
+numg/castDecimal/corrIn/i64/expHuge	rows=0 
+numg/castDecimal/in/i64/nan	rows=0 
+numg/castDecimal/corrIn/i64/nan	rows=0 
+numg/castDecimal/in/i64/inf	rows=0 
+numg/castDecimal/corrIn/i64/inf	rows=0 
+numg/castDecimal/in/i64/negInf	rows=0 
+numg/castDecimal/corrIn/i64/negInf	rows=0 
+numg/castDecimal/in/i64/infShort	rows=0 
+numg/castDecimal/corrIn/i64/infShort	rows=0 
+numg/castDecimal/in/i64/bad/junk	ERR 22P02 invalid input syntax for type numeric: "zz"
+numg/castDecimal/corrIn/i64/bad/junk	ERR 22P02 invalid input syntax for type numeric: "zz"
+numg/castDecimal/in/i64/bad/expEmpty	ERR 22P02 invalid input syntax for type numeric: "1e"
+numg/castDecimal/corrIn/i64/bad/expEmpty	ERR 22P02 invalid input syntax for type numeric: "1e"
+numg/castDecimal/in/i64/bad/dot	ERR 22P02 invalid input syntax for type numeric: "."
+numg/castDecimal/corrIn/i64/bad/dot	ERR 22P02 invalid input syntax for type numeric: "."
+numg/castDecimal/in/i64/bad/empty	ERR 22P02 invalid input syntax for type numeric: ""
+numg/castDecimal/corrIn/i64/bad/empty	ERR 22P02 invalid input syntax for type numeric: ""
+numg/castDecimal/in/i64/bad/twoDots	ERR 22P02 invalid input syntax for type numeric: "1.2.3"
+numg/castDecimal/corrIn/i64/bad/twoDots	ERR 22P02 invalid input syntax for type numeric: "1.2.3"
+numg/castDecimal/in/i64/bad/innerSpace	ERR 22P02 invalid input syntax for type numeric: "1 4"
+numg/castDecimal/corrIn/i64/bad/innerSpace	ERR 22P02 invalid input syntax for type numeric: "1 4"
+numg/castDecimal/in/i64/bad/twoSigns	ERR 22P02 invalid input syntax for type numeric: "+-14"
+numg/castDecimal/corrIn/i64/bad/twoSigns	ERR 22P02 invalid input syntax for type numeric: "+-14"
+numg/castDecimal/in/i64/bad/trailJunk	ERR 22P02 invalid input syntax for type numeric: "14x"
+numg/castDecimal/corrIn/i64/bad/trailJunk	ERR 22P02 invalid input syntax for type numeric: "14x"
+numg/castDecimal/in/i64/bad/signedNaN	ERR 22P02 invalid input syntax for type numeric: "+NaN"
+numg/castDecimal/corrIn/i64/bad/signedNaN	ERR 22P02 invalid input syntax for type numeric: "+NaN"
+numg/castDecimal/in/i64/bad/nbsp	ERR 22P02 invalid input syntax for type numeric: "14 "
+numg/castDecimal/corrIn/i64/bad/nbsp	ERR 22P02 invalid input syntax for type numeric: "14 "
+numg/castDecimal/in/i64/bad/twoUnderscores	ERR 22P02 invalid input syntax for type numeric: "1__4"
+numg/castDecimal/corrIn/i64/bad/twoUnderscores	ERR 22P02 invalid input syntax for type numeric: "1__4"
+numg/castDecimal/in/i64/bad/hexFloat	ERR 22P02 invalid input syntax for type numeric: "0x1.8p1"
+numg/castDecimal/corrIn/i64/bad/hexFloat	ERR 22P02 invalid input syntax for type numeric: "0x1.8p1"
+numg/castDecimal/in/i64/radix/hex	rows=4 1 | 2 | 3 | 4
+numg/castDecimal/corrIn/i64/radix/hex	rows=1 3
+numg/castDecimal/in/i64/radix/octal	rows=4 1 | 2 | 3 | 4
+numg/castDecimal/corrIn/i64/radix/octal	rows=1 3
+numg/castDecimal/in/i64/radix/binary	rows=4 1 | 2 | 3 | 4
+numg/castDecimal/corrIn/i64/radix/binary	rows=1 3
+numg/castDecimal/in/i64/radix/underscore	rows=4 1 | 2 | 3 | 4
+numg/castDecimal/corrIn/i64/radix/underscore	rows=1 3
+numg/castDecimal/in/i64/radix/underscoreFrac	rows=0 
+numg/castDecimal/corrIn/i64/radix/underscoreFrac	rows=0 
 numg/colon/in/dec/plain/H	rows=4 1 | 2 | 3 | 4
 numg/colon/corrIn/dec/plain/H	rows=1 3
 numg/colon/in/dec/plain/M	rows=0 
@@ -1950,6 +2400,156 @@ numg/colon/in/dec/radix/underscore	rows=4 1 | 2 | 3 | 4
 numg/colon/corrIn/dec/radix/underscore	rows=1 3
 numg/colon/in/dec/radix/underscoreFrac	rows=4 1 | 2 | 3 | 4
 numg/colon/corrIn/dec/radix/underscoreFrac	rows=1 1
+numg/colon/in/i64/plain/H	rows=4 1 | 2 | 3 | 4
+numg/colon/corrIn/i64/plain/H	rows=1 3
+numg/colon/in/i64/plain/M	rows=0 
+numg/colon/corrIn/i64/plain/M	rows=0 
+numg/colon/in/i64/plain/F	rows=0 
+numg/colon/corrIn/i64/plain/F	rows=0 
+numg/colon/in/i64/plus/H	rows=4 1 | 2 | 3 | 4
+numg/colon/corrIn/i64/plus/H	rows=1 3
+numg/colon/in/i64/plus/M	rows=0 
+numg/colon/corrIn/i64/plus/M	rows=0 
+numg/colon/in/i64/plus/F	rows=0 
+numg/colon/corrIn/i64/plus/F	rows=0 
+numg/colon/in/i64/minus/H	rows=0 
+numg/colon/corrIn/i64/minus/H	rows=0 
+numg/colon/in/i64/minus/M	rows=0 
+numg/colon/corrIn/i64/minus/M	rows=0 
+numg/colon/in/i64/minus/F	rows=0 
+numg/colon/corrIn/i64/minus/F	rows=0 
+numg/colon/in/i64/lead0/H	rows=4 1 | 2 | 3 | 4
+numg/colon/corrIn/i64/lead0/H	rows=1 3
+numg/colon/in/i64/lead0/M	rows=0 
+numg/colon/corrIn/i64/lead0/M	rows=0 
+numg/colon/in/i64/lead0/F	rows=0 
+numg/colon/corrIn/i64/lead0/F	rows=0 
+numg/colon/in/i64/trail0/H	rows=4 1 | 2 | 3 | 4
+numg/colon/corrIn/i64/trail0/H	rows=1 3
+numg/colon/in/i64/trail0/M	rows=0 
+numg/colon/corrIn/i64/trail0/M	rows=0 
+numg/colon/in/i64/trail0/F	rows=0 
+numg/colon/corrIn/i64/trail0/F	rows=0 
+numg/colon/in/i64/noFrac/H	rows=4 1 | 2 | 3 | 4
+numg/colon/corrIn/i64/noFrac/H	rows=1 3
+numg/colon/in/i64/noInt/H	rows=4 1 | 2 | 3 | 4
+numg/colon/corrIn/i64/noInt/H	rows=1 3
+numg/colon/in/i64/noInt/M	rows=0 
+numg/colon/corrIn/i64/noInt/M	rows=0 
+numg/colon/in/i64/noInt/F	rows=0 
+numg/colon/corrIn/i64/noInt/F	rows=0 
+numg/colon/in/i64/noInt/miss	rows=0 
+numg/colon/corrIn/i64/noInt/miss	rows=0 
+numg/colon/in/i64/exp/H	rows=4 1 | 2 | 3 | 4
+numg/colon/corrIn/i64/exp/H	rows=1 3
+numg/colon/in/i64/exp/M	rows=0 
+numg/colon/corrIn/i64/exp/M	rows=0 
+numg/colon/in/i64/exp/F	rows=0 
+numg/colon/corrIn/i64/exp/F	rows=0 
+numg/colon/in/i64/expUpper/H	rows=4 1 | 2 | 3 | 4
+numg/colon/corrIn/i64/expUpper/H	rows=1 3
+numg/colon/in/i64/expUpper/M	rows=0 
+numg/colon/corrIn/i64/expUpper/M	rows=0 
+numg/colon/in/i64/expUpper/F	rows=0 
+numg/colon/corrIn/i64/expUpper/F	rows=0 
+numg/colon/in/i64/expPlus/H	rows=4 1 | 2 | 3 | 4
+numg/colon/corrIn/i64/expPlus/H	rows=1 3
+numg/colon/in/i64/expPlus/M	rows=0 
+numg/colon/corrIn/i64/expPlus/M	rows=0 
+numg/colon/in/i64/expPlus/F	rows=0 
+numg/colon/corrIn/i64/expPlus/F	rows=0 
+numg/colon/in/i64/expMinus/H	rows=4 1 | 2 | 3 | 4
+numg/colon/corrIn/i64/expMinus/H	rows=1 3
+numg/colon/in/i64/expMinus/M	rows=0 
+numg/colon/corrIn/i64/expMinus/M	rows=0 
+numg/colon/in/i64/expMinus/F	rows=0 
+numg/colon/corrIn/i64/expMinus/F	rows=0 
+numg/colon/in/i64/expZero/H	rows=4 1 | 2 | 3 | 4
+numg/colon/corrIn/i64/expZero/H	rows=1 3
+numg/colon/in/i64/expZero/F	rows=0 
+numg/colon/corrIn/i64/expZero/F	rows=0 
+numg/colon/in/i64/space/H	rows=4 1 | 2 | 3 | 4
+numg/colon/corrIn/i64/space/H	rows=1 3
+numg/colon/in/i64/space/M	rows=0 
+numg/colon/corrIn/i64/space/M	rows=0 
+numg/colon/in/i64/space/F	rows=0 
+numg/colon/corrIn/i64/space/F	rows=0 
+numg/colon/in/i64/tab/H	rows=4 1 | 2 | 3 | 4
+numg/colon/corrIn/i64/tab/H	rows=1 3
+numg/colon/in/i64/trail0Wide/H	rows=4 1 | 2 | 3 | 4
+numg/colon/corrIn/i64/trail0Wide/H	rows=1 3
+numg/colon/in/i64/trail0Wide/F	rows=0 
+numg/colon/corrIn/i64/trail0Wide/F	rows=0 
+numg/colon/in/i64/lead0Wide/H	rows=4 1 | 2 | 3 | 4
+numg/colon/corrIn/i64/lead0Wide/H	rows=1 3
+numg/colon/in/i64/lead0Wide/M	rows=0 
+numg/colon/corrIn/i64/lead0Wide/M	rows=0 
+numg/colon/in/i64/lead0Wide/F	rows=0 
+numg/colon/corrIn/i64/lead0Wide/F	rows=0 
+numg/colon/in/i64/expWide/H	rows=4 1 | 2 | 3 | 4
+numg/colon/corrIn/i64/expWide/H	rows=1 3
+numg/colon/in/i64/expWide/F	rows=0 
+numg/colon/corrIn/i64/expWide/F	rows=0 
+numg/colon/in/i64/zeroWide/miss	rows=0 
+numg/colon/corrIn/i64/zeroWide/miss	rows=0 
+numg/colon/in/i64/width38/M	rows=0 
+numg/colon/corrIn/i64/width38/M	rows=0 
+numg/colon/in/i64/over38Frac	rows=0 
+numg/colon/corrIn/i64/over38Frac	rows=0 
+numg/colon/in/i64/over38Neg	rows=0 
+numg/colon/corrIn/i64/over38Neg	rows=0 
+numg/colon/in/i64/scale39	rows=0 
+numg/colon/corrIn/i64/scale39	rows=0 
+numg/colon/in/i64/expScale	rows=0 
+numg/colon/corrIn/i64/expScale	rows=0 
+numg/colon/in/i64/over38Int	rows=0 
+numg/colon/corrIn/i64/over38Int	rows=0 
+numg/colon/in/i64/expInt	rows=0 
+numg/colon/corrIn/i64/expInt	rows=0 
+numg/colon/in/i64/expHuge	rows=0 
+numg/colon/corrIn/i64/expHuge	rows=0 
+numg/colon/in/i64/nan	rows=0 
+numg/colon/corrIn/i64/nan	rows=0 
+numg/colon/in/i64/inf	rows=0 
+numg/colon/corrIn/i64/inf	rows=0 
+numg/colon/in/i64/negInf	rows=0 
+numg/colon/corrIn/i64/negInf	rows=0 
+numg/colon/in/i64/infShort	rows=0 
+numg/colon/corrIn/i64/infShort	rows=0 
+numg/colon/in/i64/bad/junk	ERR 22P02 invalid input syntax for type numeric: "zz"
+numg/colon/corrIn/i64/bad/junk	ERR 22P02 invalid input syntax for type numeric: "zz"
+numg/colon/in/i64/bad/expEmpty	ERR 22P02 invalid input syntax for type numeric: "1e"
+numg/colon/corrIn/i64/bad/expEmpty	ERR 22P02 invalid input syntax for type numeric: "1e"
+numg/colon/in/i64/bad/dot	ERR 22P02 invalid input syntax for type numeric: "."
+numg/colon/corrIn/i64/bad/dot	ERR 22P02 invalid input syntax for type numeric: "."
+numg/colon/in/i64/bad/empty	ERR 22P02 invalid input syntax for type numeric: ""
+numg/colon/corrIn/i64/bad/empty	ERR 22P02 invalid input syntax for type numeric: ""
+numg/colon/in/i64/bad/twoDots	ERR 22P02 invalid input syntax for type numeric: "1.2.3"
+numg/colon/corrIn/i64/bad/twoDots	ERR 22P02 invalid input syntax for type numeric: "1.2.3"
+numg/colon/in/i64/bad/innerSpace	ERR 22P02 invalid input syntax for type numeric: "1 4"
+numg/colon/corrIn/i64/bad/innerSpace	ERR 22P02 invalid input syntax for type numeric: "1 4"
+numg/colon/in/i64/bad/twoSigns	ERR 22P02 invalid input syntax for type numeric: "+-14"
+numg/colon/corrIn/i64/bad/twoSigns	ERR 22P02 invalid input syntax for type numeric: "+-14"
+numg/colon/in/i64/bad/trailJunk	ERR 22P02 invalid input syntax for type numeric: "14x"
+numg/colon/corrIn/i64/bad/trailJunk	ERR 22P02 invalid input syntax for type numeric: "14x"
+numg/colon/in/i64/bad/signedNaN	ERR 22P02 invalid input syntax for type numeric: "+NaN"
+numg/colon/corrIn/i64/bad/signedNaN	ERR 22P02 invalid input syntax for type numeric: "+NaN"
+numg/colon/in/i64/bad/nbsp	ERR 22P02 invalid input syntax for type numeric: "14 "
+numg/colon/corrIn/i64/bad/nbsp	ERR 22P02 invalid input syntax for type numeric: "14 "
+numg/colon/in/i64/bad/twoUnderscores	ERR 22P02 invalid input syntax for type numeric: "1__4"
+numg/colon/corrIn/i64/bad/twoUnderscores	ERR 22P02 invalid input syntax for type numeric: "1__4"
+numg/colon/in/i64/bad/hexFloat	ERR 22P02 invalid input syntax for type numeric: "0x1.8p1"
+numg/colon/corrIn/i64/bad/hexFloat	ERR 22P02 invalid input syntax for type numeric: "0x1.8p1"
+numg/colon/in/i64/radix/hex	rows=4 1 | 2 | 3 | 4
+numg/colon/corrIn/i64/radix/hex	rows=1 3
+numg/colon/in/i64/radix/octal	rows=4 1 | 2 | 3 | 4
+numg/colon/corrIn/i64/radix/octal	rows=1 3
+numg/colon/in/i64/radix/binary	rows=4 1 | 2 | 3 | 4
+numg/colon/corrIn/i64/radix/binary	rows=1 3
+numg/colon/in/i64/radix/underscore	rows=4 1 | 2 | 3 | 4
+numg/colon/corrIn/i64/radix/underscore	rows=1 3
+numg/colon/in/i64/radix/underscoreFrac	rows=0 
+numg/colon/corrIn/i64/radix/underscoreFrac	rows=0 
 numg/const/in/dec/plain/H	rows=4 1 | 2 | 3 | 4
 numg/const/notIn/dec/plain/H	rows=0 
 numg/const/corrIn/dec/plain/H	rows=1 3
@@ -2550,6 +3150,206 @@ numg/const/in/n/expHuge	rows=0
 numg/const/notIn/n/expHuge	rows=4 1 | 2 | 3 | 4
 numg/const/corrIn/n/expHuge	rows=0 
 numg/const/sel/n/expHuge	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/i64/plain/H	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/i64/plain/H	rows=0 
+numg/const/corrIn/i64/plain/H	rows=1 3
+numg/const/sel/i64/plain/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/i64/plain/M	rows=0 
+numg/const/notIn/i64/plain/M	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/i64/plain/M	rows=0 
+numg/const/sel/i64/plain/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/i64/plain/F	rows=0 
+numg/const/notIn/i64/plain/F	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/i64/plain/F	rows=0 
+numg/const/sel/i64/plain/F	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/i64/plus/H	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/i64/plus/H	rows=0 
+numg/const/corrIn/i64/plus/H	rows=1 3
+numg/const/sel/i64/plus/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/i64/plus/M	rows=0 
+numg/const/notIn/i64/plus/M	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/i64/plus/M	rows=0 
+numg/const/sel/i64/plus/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/i64/plus/F	rows=0 
+numg/const/notIn/i64/plus/F	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/i64/plus/F	rows=0 
+numg/const/sel/i64/plus/F	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/i64/minus/H	rows=0 
+numg/const/notIn/i64/minus/H	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/i64/minus/H	rows=0 
+numg/const/sel/i64/minus/H	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/i64/minus/M	rows=0 
+numg/const/notIn/i64/minus/M	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/i64/minus/M	rows=0 
+numg/const/sel/i64/minus/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/i64/minus/F	rows=0 
+numg/const/notIn/i64/minus/F	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/i64/minus/F	rows=0 
+numg/const/sel/i64/minus/F	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/i64/lead0/H	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/i64/lead0/H	rows=0 
+numg/const/corrIn/i64/lead0/H	rows=1 3
+numg/const/sel/i64/lead0/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/i64/lead0/M	rows=0 
+numg/const/notIn/i64/lead0/M	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/i64/lead0/M	rows=0 
+numg/const/sel/i64/lead0/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/i64/lead0/F	rows=0 
+numg/const/notIn/i64/lead0/F	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/i64/lead0/F	rows=0 
+numg/const/sel/i64/lead0/F	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/i64/trail0/H	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/i64/trail0/H	rows=0 
+numg/const/corrIn/i64/trail0/H	rows=1 3
+numg/const/sel/i64/trail0/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/i64/trail0/M	rows=0 
+numg/const/notIn/i64/trail0/M	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/i64/trail0/M	rows=0 
+numg/const/sel/i64/trail0/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/i64/trail0/F	rows=0 
+numg/const/notIn/i64/trail0/F	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/i64/trail0/F	rows=0 
+numg/const/sel/i64/trail0/F	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/i64/noFrac/H	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/i64/noFrac/H	rows=0 
+numg/const/corrIn/i64/noFrac/H	rows=1 3
+numg/const/sel/i64/noFrac/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/i64/noInt/H	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/i64/noInt/H	rows=0 
+numg/const/corrIn/i64/noInt/H	rows=1 3
+numg/const/sel/i64/noInt/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/i64/noInt/M	rows=0 
+numg/const/notIn/i64/noInt/M	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/i64/noInt/M	rows=0 
+numg/const/sel/i64/noInt/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/i64/noInt/F	rows=0 
+numg/const/notIn/i64/noInt/F	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/i64/noInt/F	rows=0 
+numg/const/sel/i64/noInt/F	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/i64/noInt/miss	rows=0 
+numg/const/notIn/i64/noInt/miss	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/i64/noInt/miss	rows=0 
+numg/const/sel/i64/noInt/miss	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/i64/exp/H	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/i64/exp/H	rows=0 
+numg/const/corrIn/i64/exp/H	rows=1 3
+numg/const/sel/i64/exp/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/i64/exp/M	rows=0 
+numg/const/notIn/i64/exp/M	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/i64/exp/M	rows=0 
+numg/const/sel/i64/exp/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/i64/exp/F	rows=0 
+numg/const/notIn/i64/exp/F	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/i64/exp/F	rows=0 
+numg/const/sel/i64/exp/F	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/i64/expUpper/H	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/i64/expUpper/H	rows=0 
+numg/const/corrIn/i64/expUpper/H	rows=1 3
+numg/const/sel/i64/expUpper/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/i64/expUpper/M	rows=0 
+numg/const/notIn/i64/expUpper/M	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/i64/expUpper/M	rows=0 
+numg/const/sel/i64/expUpper/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/i64/expUpper/F	rows=0 
+numg/const/notIn/i64/expUpper/F	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/i64/expUpper/F	rows=0 
+numg/const/sel/i64/expUpper/F	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/i64/expPlus/H	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/i64/expPlus/H	rows=0 
+numg/const/corrIn/i64/expPlus/H	rows=1 3
+numg/const/sel/i64/expPlus/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/i64/expPlus/M	rows=0 
+numg/const/notIn/i64/expPlus/M	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/i64/expPlus/M	rows=0 
+numg/const/sel/i64/expPlus/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/i64/expPlus/F	rows=0 
+numg/const/notIn/i64/expPlus/F	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/i64/expPlus/F	rows=0 
+numg/const/sel/i64/expPlus/F	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/i64/expMinus/H	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/i64/expMinus/H	rows=0 
+numg/const/corrIn/i64/expMinus/H	rows=1 3
+numg/const/sel/i64/expMinus/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/i64/expMinus/M	rows=0 
+numg/const/notIn/i64/expMinus/M	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/i64/expMinus/M	rows=0 
+numg/const/sel/i64/expMinus/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/i64/expMinus/F	rows=0 
+numg/const/notIn/i64/expMinus/F	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/i64/expMinus/F	rows=0 
+numg/const/sel/i64/expMinus/F	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/i64/expZero/H	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/i64/expZero/H	rows=0 
+numg/const/corrIn/i64/expZero/H	rows=1 3
+numg/const/sel/i64/expZero/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/i64/expZero/F	rows=0 
+numg/const/notIn/i64/expZero/F	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/i64/expZero/F	rows=0 
+numg/const/sel/i64/expZero/F	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/i64/trail0Wide/H	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/i64/trail0Wide/H	rows=0 
+numg/const/corrIn/i64/trail0Wide/H	rows=1 3
+numg/const/sel/i64/trail0Wide/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/i64/trail0Wide/F	rows=0 
+numg/const/notIn/i64/trail0Wide/F	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/i64/trail0Wide/F	rows=0 
+numg/const/sel/i64/trail0Wide/F	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/i64/lead0Wide/H	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/i64/lead0Wide/H	rows=0 
+numg/const/corrIn/i64/lead0Wide/H	rows=1 3
+numg/const/sel/i64/lead0Wide/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/i64/lead0Wide/M	rows=0 
+numg/const/notIn/i64/lead0Wide/M	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/i64/lead0Wide/M	rows=0 
+numg/const/sel/i64/lead0Wide/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/i64/lead0Wide/F	rows=0 
+numg/const/notIn/i64/lead0Wide/F	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/i64/lead0Wide/F	rows=0 
+numg/const/sel/i64/lead0Wide/F	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/i64/expWide/H	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/i64/expWide/H	rows=0 
+numg/const/corrIn/i64/expWide/H	rows=1 3
+numg/const/sel/i64/expWide/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/i64/expWide/F	rows=0 
+numg/const/notIn/i64/expWide/F	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/i64/expWide/F	rows=0 
+numg/const/sel/i64/expWide/F	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/i64/zeroWide/miss	rows=0 
+numg/const/notIn/i64/zeroWide/miss	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/i64/zeroWide/miss	rows=0 
+numg/const/sel/i64/zeroWide/miss	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/i64/width38/M	rows=0 
+numg/const/notIn/i64/width38/M	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/i64/width38/M	rows=0 
+numg/const/sel/i64/width38/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/i64/over38Frac	rows=0 
+numg/const/notIn/i64/over38Frac	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/i64/over38Frac	rows=0 
+numg/const/sel/i64/over38Frac	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/i64/over38Neg	rows=0 
+numg/const/notIn/i64/over38Neg	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/i64/over38Neg	rows=0 
+numg/const/sel/i64/over38Neg	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/i64/scale39	rows=0 
+numg/const/notIn/i64/scale39	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/i64/scale39	rows=0 
+numg/const/sel/i64/scale39	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/i64/expScale	rows=0 
+numg/const/notIn/i64/expScale	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/i64/expScale	rows=0 
+numg/const/sel/i64/expScale	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/i64/over38Int	rows=0 
+numg/const/notIn/i64/over38Int	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/i64/over38Int	rows=0 
+numg/const/sel/i64/over38Int	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/i64/expInt	rows=0 
+numg/const/notIn/i64/expInt	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/i64/expInt	rows=0 
+numg/const/sel/i64/expInt	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/i64/expHuge	rows=0 
+numg/const/notIn/i64/expHuge	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/i64/expHuge	rows=0 
+numg/const/sel/i64/expHuge	rows=4 1,false | 2,false | 3,false | 4,false
 numg/castPS/in/dec/plain/H	rows=4 1 | 2 | 3 | 4
 numg/castPS/corrIn/dec/plain/H	rows=1 3
 numg/castPS/in/dec/plain/M	rows=4 1 | 2 | 3 | 4
@@ -3000,6 +3800,156 @@ numg/castPS/in/n/radix/underscore	rows=4 1 | 2 | 3 | 4
 numg/castPS/corrIn/n/radix/underscore	rows=1 3
 numg/castPS/in/n/radix/underscoreFrac	rows=0 
 numg/castPS/corrIn/n/radix/underscoreFrac	rows=0 
+numg/castPS/in/i64/plain/H	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/i64/plain/H	rows=1 3
+numg/castPS/in/i64/plain/M	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/i64/plain/M	rows=1 3
+numg/castPS/in/i64/plain/F	rows=0 
+numg/castPS/corrIn/i64/plain/F	rows=0 
+numg/castPS/in/i64/plus/H	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/i64/plus/H	rows=1 3
+numg/castPS/in/i64/plus/M	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/i64/plus/M	rows=1 3
+numg/castPS/in/i64/plus/F	rows=0 
+numg/castPS/corrIn/i64/plus/F	rows=0 
+numg/castPS/in/i64/minus/H	rows=0 
+numg/castPS/corrIn/i64/minus/H	rows=0 
+numg/castPS/in/i64/minus/M	rows=0 
+numg/castPS/corrIn/i64/minus/M	rows=0 
+numg/castPS/in/i64/minus/F	rows=0 
+numg/castPS/corrIn/i64/minus/F	rows=0 
+numg/castPS/in/i64/lead0/H	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/i64/lead0/H	rows=1 3
+numg/castPS/in/i64/lead0/M	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/i64/lead0/M	rows=1 3
+numg/castPS/in/i64/lead0/F	rows=0 
+numg/castPS/corrIn/i64/lead0/F	rows=0 
+numg/castPS/in/i64/trail0/H	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/i64/trail0/H	rows=1 3
+numg/castPS/in/i64/trail0/M	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/i64/trail0/M	rows=1 3
+numg/castPS/in/i64/trail0/F	rows=0 
+numg/castPS/corrIn/i64/trail0/F	rows=0 
+numg/castPS/in/i64/noFrac/H	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/i64/noFrac/H	rows=1 3
+numg/castPS/in/i64/noInt/H	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/i64/noInt/H	rows=1 3
+numg/castPS/in/i64/noInt/M	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/i64/noInt/M	rows=1 3
+numg/castPS/in/i64/noInt/F	rows=0 
+numg/castPS/corrIn/i64/noInt/F	rows=0 
+numg/castPS/in/i64/noInt/miss	rows=0 
+numg/castPS/corrIn/i64/noInt/miss	rows=0 
+numg/castPS/in/i64/exp/H	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/i64/exp/H	rows=1 3
+numg/castPS/in/i64/exp/M	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/i64/exp/M	rows=1 3
+numg/castPS/in/i64/exp/F	rows=0 
+numg/castPS/corrIn/i64/exp/F	rows=0 
+numg/castPS/in/i64/expUpper/H	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/i64/expUpper/H	rows=1 3
+numg/castPS/in/i64/expUpper/M	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/i64/expUpper/M	rows=1 3
+numg/castPS/in/i64/expUpper/F	rows=0 
+numg/castPS/corrIn/i64/expUpper/F	rows=0 
+numg/castPS/in/i64/expPlus/H	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/i64/expPlus/H	rows=1 3
+numg/castPS/in/i64/expPlus/M	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/i64/expPlus/M	rows=1 3
+numg/castPS/in/i64/expPlus/F	rows=0 
+numg/castPS/corrIn/i64/expPlus/F	rows=0 
+numg/castPS/in/i64/expMinus/H	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/i64/expMinus/H	rows=1 3
+numg/castPS/in/i64/expMinus/M	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/i64/expMinus/M	rows=1 3
+numg/castPS/in/i64/expMinus/F	rows=0 
+numg/castPS/corrIn/i64/expMinus/F	rows=0 
+numg/castPS/in/i64/expZero/H	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/i64/expZero/H	rows=1 3
+numg/castPS/in/i64/expZero/F	rows=0 
+numg/castPS/corrIn/i64/expZero/F	rows=0 
+numg/castPS/in/i64/space/H	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/i64/space/H	rows=1 3
+numg/castPS/in/i64/space/M	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/i64/space/M	rows=1 3
+numg/castPS/in/i64/space/F	rows=0 
+numg/castPS/corrIn/i64/space/F	rows=0 
+numg/castPS/in/i64/tab/H	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/i64/tab/H	rows=1 3
+numg/castPS/in/i64/trail0Wide/H	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/i64/trail0Wide/H	rows=1 3
+numg/castPS/in/i64/trail0Wide/F	rows=0 
+numg/castPS/corrIn/i64/trail0Wide/F	rows=0 
+numg/castPS/in/i64/lead0Wide/H	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/i64/lead0Wide/H	rows=1 3
+numg/castPS/in/i64/lead0Wide/M	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/i64/lead0Wide/M	rows=1 3
+numg/castPS/in/i64/lead0Wide/F	rows=0 
+numg/castPS/corrIn/i64/lead0Wide/F	rows=0 
+numg/castPS/in/i64/expWide/H	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/i64/expWide/H	rows=1 3
+numg/castPS/in/i64/expWide/F	rows=0 
+numg/castPS/corrIn/i64/expWide/F	rows=0 
+numg/castPS/in/i64/zeroWide/miss	rows=0 
+numg/castPS/corrIn/i64/zeroWide/miss	rows=0 
+numg/castPS/in/i64/width38/M	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/i64/width38/M	rows=1 3
+numg/castPS/in/i64/over38Frac	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/i64/over38Frac	rows=1 3
+numg/castPS/in/i64/over38Neg	rows=0 
+numg/castPS/corrIn/i64/over38Neg	rows=0 
+numg/castPS/in/i64/scale39	rows=0 
+numg/castPS/corrIn/i64/scale39	rows=0 
+numg/castPS/in/i64/expScale	rows=0 
+numg/castPS/corrIn/i64/expScale	rows=0 
+numg/castPS/in/i64/over38Int	ERR 22003 numeric field overflow
+numg/castPS/corrIn/i64/over38Int	ERR 22003 numeric field overflow
+numg/castPS/in/i64/expInt	ERR 22003 numeric field overflow
+numg/castPS/corrIn/i64/expInt	ERR 22003 numeric field overflow
+numg/castPS/in/i64/expHuge	ERR 22003 numeric field overflow
+numg/castPS/corrIn/i64/expHuge	ERR 22003 numeric field overflow
+numg/castPS/in/i64/nan	rows=0 
+numg/castPS/corrIn/i64/nan	rows=0 
+numg/castPS/in/i64/inf	ERR 22003 numeric field overflow
+numg/castPS/corrIn/i64/inf	ERR 22003 numeric field overflow
+numg/castPS/in/i64/negInf	ERR 22003 numeric field overflow
+numg/castPS/corrIn/i64/negInf	ERR 22003 numeric field overflow
+numg/castPS/in/i64/infShort	ERR 22003 numeric field overflow
+numg/castPS/corrIn/i64/infShort	ERR 22003 numeric field overflow
+numg/castPS/in/i64/bad/junk	ERR 22P02 invalid input syntax for type numeric: "zz"
+numg/castPS/corrIn/i64/bad/junk	ERR 22P02 invalid input syntax for type numeric: "zz"
+numg/castPS/in/i64/bad/expEmpty	ERR 22P02 invalid input syntax for type numeric: "1e"
+numg/castPS/corrIn/i64/bad/expEmpty	ERR 22P02 invalid input syntax for type numeric: "1e"
+numg/castPS/in/i64/bad/dot	ERR 22P02 invalid input syntax for type numeric: "."
+numg/castPS/corrIn/i64/bad/dot	ERR 22P02 invalid input syntax for type numeric: "."
+numg/castPS/in/i64/bad/empty	ERR 22P02 invalid input syntax for type numeric: ""
+numg/castPS/corrIn/i64/bad/empty	ERR 22P02 invalid input syntax for type numeric: ""
+numg/castPS/in/i64/bad/twoDots	ERR 22P02 invalid input syntax for type numeric: "1.2.3"
+numg/castPS/corrIn/i64/bad/twoDots	ERR 22P02 invalid input syntax for type numeric: "1.2.3"
+numg/castPS/in/i64/bad/innerSpace	ERR 22P02 invalid input syntax for type numeric: "1 4"
+numg/castPS/corrIn/i64/bad/innerSpace	ERR 22P02 invalid input syntax for type numeric: "1 4"
+numg/castPS/in/i64/bad/twoSigns	ERR 22P02 invalid input syntax for type numeric: "+-14"
+numg/castPS/corrIn/i64/bad/twoSigns	ERR 22P02 invalid input syntax for type numeric: "+-14"
+numg/castPS/in/i64/bad/trailJunk	ERR 22P02 invalid input syntax for type numeric: "14x"
+numg/castPS/corrIn/i64/bad/trailJunk	ERR 22P02 invalid input syntax for type numeric: "14x"
+numg/castPS/in/i64/bad/signedNaN	ERR 22P02 invalid input syntax for type numeric: "+NaN"
+numg/castPS/corrIn/i64/bad/signedNaN	ERR 22P02 invalid input syntax for type numeric: "+NaN"
+numg/castPS/in/i64/bad/nbsp	ERR 22P02 invalid input syntax for type numeric: "14 "
+numg/castPS/corrIn/i64/bad/nbsp	ERR 22P02 invalid input syntax for type numeric: "14 "
+numg/castPS/in/i64/bad/twoUnderscores	ERR 22P02 invalid input syntax for type numeric: "1__4"
+numg/castPS/corrIn/i64/bad/twoUnderscores	ERR 22P02 invalid input syntax for type numeric: "1__4"
+numg/castPS/in/i64/bad/hexFloat	ERR 22P02 invalid input syntax for type numeric: "0x1.8p1"
+numg/castPS/corrIn/i64/bad/hexFloat	ERR 22P02 invalid input syntax for type numeric: "0x1.8p1"
+numg/castPS/in/i64/radix/hex	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/i64/radix/hex	rows=1 3
+numg/castPS/in/i64/radix/octal	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/i64/radix/octal	rows=1 3
+numg/castPS/in/i64/radix/binary	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/i64/radix/binary	rows=1 3
+numg/castPS/in/i64/radix/underscore	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/i64/radix/underscore	rows=1 3
+numg/castPS/in/i64/radix/underscoreFrac	rows=0 
+numg/castPS/corrIn/i64/radix/underscoreFrac	rows=0 
 numg/castPS38/in/dec/plain/H	rows=4 1 | 2 | 3 | 4
 numg/castPS38/corrIn/dec/plain/H	rows=1 3
 numg/castPS38/in/dec/plain/M	rows=0 
