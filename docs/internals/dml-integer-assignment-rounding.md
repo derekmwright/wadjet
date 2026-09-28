@@ -75,14 +75,39 @@ The MERGE action's expression forms are one table (intround.MergeSetCells:
 every form × float8 / numeric / integer / text source × UPDATE and INSERT
 action × catalog and subquery source, into INTEGER and BIGINT, plus
 parameters over pgwire), each cell PostgreSQL 17.11's stored rows or its
-SQLSTATE. A statement PostgreSQL refuses writes nothing here either: an
-aggregate is 42803 and a window function 42P20 on every door that evaluates
-one row (UPDATE SET, INSERT VALUES, a MERGE action, a MERGE WHEN condition);
-a subquery correlated to the target under WHEN NOT MATCHED is 42P01; text
-arithmetic against a number is 42883. An expression over a MERGE subquery
-source (anything but a reference to one of its columns) is 0A000 where
-PostgreSQL answers (#1398), and PostgreSQL's own SQLSTATE where PostgreSQL
-refuses.
+SQLSTATE. The rows PostgreSQL refuses in that table write nothing here
+either: an aggregate is 42803 and a window function 42P20 on every door that
+evaluates one row (UPDATE SET, INSERT VALUES, a MERGE action, a MERGE WHEN
+condition); a subquery correlated to the target under a WHEN NOT MATCHED
+clause that a row reaches is 42P01; arithmetic between a text COLUMN and a
+number is 42883; a JSON field read into a non-text column is 42804. An
+expression over a MERGE subquery source (anything but a reference to one of
+its columns) is 0A000 where PostgreSQL answers (#1398), and PostgreSQL's own
+SQLSTATE where PostgreSQL refuses.
+
+Two writes PostgreSQL refuses still write here, outside that table. Arithmetic
+over a text EXPRESSION rather than a bare text column is evaluated: MERGE
+`SET n = UPPER(s.x) * 1` over '12' and '7' stores 12 and 7, and `-s.x`,
+`CAST(s.i AS TEXT) * 2` and `(id || '0') * 1` likewise, where PostgreSQL
+raises 42883 (the 42883 rule reads a bare text column only). And a WHEN NOT
+MATCHED clause that no row reaches is not resolved, so its target-correlated
+subquery answers `MERGE 0` where PostgreSQL raises 42P01 at parse (#1043's
+family). Both are on the differences page.
+
+A float4 or float8 parameter bound over pgwire is a value of its own type, as
+in PostgreSQL: Bind renders it `CAST('<text>' AS DOUBLE PRECISION)` (REAL for
+float4) rather than as a bare number, which this engine reads as a numeric
+literal (ADR-0024's literal rule). So `SET n = $1` bound with 2.5 stores 2,
+`SELECT $1` declares OID 701 (700 for float4) where it declared numeric
+(1700), a CTAS column over it is double precision, `ROUND($1)` answers 2,
+`$1 / 2` over 5 answers 2.5 (it was integer division, 2), and NaN and
+Infinity bind (they were 42703). A LIMIT, OFFSET or FETCH count and a
+TABLESAMPLE percentage read that cast as the number its text lexes to, so a
+float count answers as the bare number did; a text that is not one number
+token (`-1`, `NaN`) stays the syntax error its bare spelling is. An integer
+parameter is bare only for an integer's spelling (int4in); otherwise it is
+quoted and the target's input rule raises 22P02, as PostgreSQL's parameter
+input does.
 
 A JSON field read — `j->>'k'` and `j->'k'`, which the parser lowers to
 json_extract_scalar and json_extract — is TEXT to the assignment (PostgreSQL

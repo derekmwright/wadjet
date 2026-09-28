@@ -152,6 +152,14 @@ Fields retain storage types. `(b).open` over DECIMAL(9,2) has typmod 589830; Pos
 
 Bind renders a parameter declared text (OID 25) as a quoted literal, which the integer column's input function reads, so a MERGE `SET n = $1` bound as the text `2.5` raises 22P02 where PostgreSQL raises 42804 (text is not assignable to integer without a cast); neither writes. A float8 or numeric parameter keeps its type and rounds by it. (ADR-0012 §5/#1353-param)
 
+**Arithmetic over a text expression is evaluated.**
+
+Arithmetic between a bare text column and a number is 42883, as in PostgreSQL, but a text EXPRESSION is read as its number: `UPPER(x) * 2` over `'12'` answers 24, `-x` answers -12, and `CAST(n AS TEXT) * 2`, `CASE … x END * 2` and `(x || '') * 1` answer likewise, and every write stores the same value (MERGE `SET n = UPPER(s.x) * 1` stores 12), where PostgreSQL raises 42883 for each. (ADR-0012 §5/#1353-text-expr)
+
+**A WHEN NOT MATCHED clause that no row reaches is not resolved.**
+
+`MERGE INTO t USING s ON t.id = s.id WHEN NOT MATCHED THEN INSERT (id, n) VALUES (s.id, (SELECT s2.i FROM s s2 WHERE s2.id = t.id))` answers `MERGE 0` and writes nothing when every source row matches, where PostgreSQL raises 42P01 (the target is not visible under WHEN NOT MATCHED) at parse. When a row reaches the clause it is 42P01 here too. (ADR-0012 §5/#1043)
+
 **`SUBSTRING(text SIMILAR pattern ESCAPE escape)` is refused.**
 
 The standard's capture-marker spelling raises 0A000 naming the construct, where PostgreSQL 17.11 answers the part of the string between the pattern's `#"` markers: this engine translates a SIMILAR TO pattern into a regular expression and that translation has no notion of a returned portion. `SUBSTRING(text FROM regexp)` and `REGEXP_EXTRACT(text, regexp, group)` both answer. (ADR-0012 §5/#1169-substring-similar)
