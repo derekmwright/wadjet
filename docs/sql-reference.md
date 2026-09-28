@@ -1043,16 +1043,26 @@ and a literal that is no value of that type is refused before any row
 own input and matches on every arm for every spelling this engine's input
 function reads the same way — `'2024-1-2'` or `'20240102'` against a DATE,
 `'2001:DB8::1'` against an IPv6 address, a braced uuid, `'1_2'` or `'0x0C'`
-against a bigint — and it takes the TYPE, never the column's scale, at the
-literal's own digits: `'12.50001' IN (SELECT amount …)` over a
-NUMERIC(18,4) column compares 12.50001, not 12.5000. CIDR's abbreviated
+against a bigint — and it takes the TYPE, never the column's scale.
+Against a NUMERIC subquery a numeric literal — quoted, under a bare
+`CAST(… AS NUMERIC)` or `::numeric`, or an unquoted constant — is the exact
+number its text spells, in every spelling numeric input accepts (a sign,
+leading or trailing zeros, `'.5'`, `'12.'`, an exponent, surrounding
+whitespace): `'12.50001' IN (SELECT amount …)` over a NUMERIC(18,4) column
+compares 12.50001, not 12.5000, and `'1.25000000000000001e13'` is not the
+member 12500000000000.0000. A number this engine's 38-digit DECIMAL cannot
+hold exactly — more than 38 significant digits, a digit past scale 38, NaN,
+an infinity — is refused 22003 on every arm where PostgreSQL answers (see
+postgres-differences.md); zeros that carry no value do not count, so
+`'12.5'` followed by forty zeros is 12.5. CIDR's abbreviated
 input forms (`'10/8'`) are the documented exception: the CIDR input
 function keeps the text un-normalized, so the literal and a stored
 `10.0.0.0/8` never render alike (a pre-existing split, `CAST('10/8' AS
-CIDR) IN (…)` has the same one). A spelling the input function refuses
-outright (`'2024-001'` against DATE, 22007; `'2001:db8::1/64'` against an
-IPv6 address, 0A000) is a loud refusal, not a wrong value — PostgreSQL's
-own input function refuses the same text. A literal with more
+CIDR) IN (…)` has the same one). A spelling this engine's input function
+refuses (`'2024-001'` against DATE, 22007; `'2001:db8::1/64'` against an
+IPv6 address, 0A000; PostgreSQL 16's `'0x0E'` and `'1_4'` against NUMERIC,
+22P02, #634) is a loud refusal where PostgreSQL's input function accepts
+the text and answers. A literal with more
 than millisecond precision against a TIMESTAMP is read at the stored
 millisecond precision (see postgres-differences.md). A DATE, like every
 other type, compares by value whatever the subquery's shape — a `UNION`, a

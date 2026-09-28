@@ -30,3 +30,14 @@ ok=false for text that names no number, and for one whose scale or digit
 count is past what a DECIMAL can declare — a literal with 40 fraction digits
 has no fixed-point type here, and the caller must fall back rather than
 truncate it.
+
+DecimalValueType is the same rule for a literal compared by VALUE rather than
+stored by its spelling — the outer operand of a membership against a NUMERIC
+subquery (#1372). It is DecimalTextType of the spelling when that declares a
+DECIMAL, and otherwise DecimalTextType of the value's own shortest spelling,
+so zeros that carry no value do not refuse it: `'12.5'` followed by forty
+zeros is DECIMAL(3,1), `'14'` + forty zeros + `'e-40'` is DECIMAL(2,0), and
+forty leading zeros are no digits at all. ok=false there is a number no
+DECIMAL(38,s) holds — more than 38 significant digits, a digit past scale 38,
+NaN or an infinity — which the membership refuses 22003 rather than compare
+at any other precision.

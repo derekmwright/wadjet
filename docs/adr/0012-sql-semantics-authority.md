@@ -170,7 +170,16 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
        `'2001:DB8::1'`, `'1_2'` against a DATE, inet or bigint body matched
        only on the single-process arms while the literal was typed at
        compile time, and a NUMERIC body's scale rounded `'12.50001'` to a
-       member while the probe took the column's typmod. The single-process
+       member while the probe took the column's typmod. Against a NUMERIC
+       body a numeric literal — quoted, under a bare `CAST(… AS NUMERIC)`
+       or `::numeric`, or an unquoted constant — is typed NUMERIC(38, its
+       value's own scale) by one rule over every spelling numeric input
+       accepts (`batch.DecimalValueType`): a bare NUMERIC of a literal boxes
+       as float8, which matched `'1.25000000000000001e13'` to the member
+       12500000000000.0000. A number no DECIMAL(38,s) holds — more than 38
+       significant digits, a digit past scale 38, NaN, ±Infinity — is
+       **22003 on every arm, a recorded divergence**: PostgreSQL's numeric
+       is unconstrained and answers (0 rows, NOT IN every row). The single-process
        membership filter compares the pair in that one type: the set keyed
        by its declaration, a NUMERIC member read on the numeric rung by
        the per-row evaluator too — `'12' IN (SELECT bigint …)` answered 0

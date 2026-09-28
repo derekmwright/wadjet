@@ -254,6 +254,10 @@ Finite storage raises 22003 versus unconstrained PostgreSQL numeric values. Comp
 
 An ON may name a relation an EARLIER comma-separated FROM item declares. `FROM a, b JOIN c ON a.k = c.k` answers here; PostgreSQL refuses the reference. (ADR-0012 §5/#617)
 
+**A membership's numeric literal past 38 digits is refused.**
+
+A numeric literal compared with a NUMERIC subquery — `x IN`, `= ANY`, `NOT IN`, `<> ALL (SELECT numeric …)`, the literal quoted, under a bare `CAST(… AS NUMERIC)` or unquoted — is the exact number its text spells. One this engine's DECIMAL cannot hold exactly — more than 38 significant digits (`'14.0000000000000000000000000000000000000001'`), a digit past scale 38 (`'1e-40'`), an integer past 38 digits (`'1e40'`), NaN or ±Infinity — raises 22003 `numeric field overflow` naming the literal on every arm, rather than being compared at any other precision; PostgreSQL's numeric is unconstrained and answers (0 rows for `IN`, every row for `NOT IN`, against members it cannot equal). Zeros that carry no value do not count: `'12.5'` followed by forty zeros is 12.5 and answers. (ADR-0012 §5/#1372)
+
 **Decimal arithmetic stops at 38 digits.**
 
 Precision stops at 38 while exact operators retain scale. DECIMAL(38,10) multiplication produces DECIMAL(38,20), raising 22003 beyond its range where PostgreSQL numeric answers. (ADR-0012 §5/#749)

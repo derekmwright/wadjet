@@ -21,6 +21,15 @@ everything else. Going through the binary value instead would carry the
 double's 55-digit exact expansion, which rounds differently at the target
 scale than the number the user can see.
 
+Text is read from its DIGITS, not from the DECIMAL its spelling names: the
+value is rounded once, half away from zero, by the first digit past the target
+scale (batch.DecimalTextRoundedAt), however wide it was written.
+`'14.' || 40 zeros` and a 42-digit `'14.000…0001'` are both 14.0000 as
+numeric(18,4) on PostgreSQL 17.11 and here; reading through the spelling's own
+DECIMAL first refused both 22003, since neither spelling fits 38 digits. A
+value whose rounded digits do not fit the carrier at the target scale is still
+22003 (`'1e40'::numeric(38,0)`).
+
 NaN and the infinities are 22003 with a message naming ADR-0024 item 6: a
 wadjet DECIMAL is an Int128 with no bit pattern for them, and PostgreSQL's
 numeric does store NaN — a documented divergence, refused loudly rather than
