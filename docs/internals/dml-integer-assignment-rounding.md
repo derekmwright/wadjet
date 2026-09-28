@@ -26,24 +26,42 @@ PostgreSQL computes and types them numeric. Reading the carrier stored
 
 srcFloat is therefore "PostgreSQL's type is float8", read from the
 DECLARATION: physical.DeclaredTypeOfNode, resolved once per SET clause, whose
-FLOAT64 answers carry PostgreSQL's category beside the carrier
-(expr.DeclType.PGNumeric). The category is PostgreSQL's own resolution:
+answers carry PostgreSQL's category where it disagrees with the carrier — a
+FLOAT64 that is numeric there (expr.DeclType.PGNumeric), a DECIMAL that is
+float8 there (expr.DeclType.PGFloat8). The category is PostgreSQL's own
+resolution:
 numeric ⊕ integer is numeric, anything ⊕ float8 is float8; the functions
 with a numeric overload (sqrt, exp, ln, log, log10, abs, ceil, floor, round,
 trunc, sign) follow their argument, an integer resolving to float8; power
 and mod are float8 and integer over two integers and numeric otherwise;
 round/trunc(x, n) and log(b, x) are numeric; EXTRACT is numeric and
-date_part float8; CASE, COALESCE, NULLIF, GREATEST and LEAST fold as
-select_common_type does; every other double-precision function is float8.
+date_part float8; CASE, COALESCE, GREATEST and LEAST fold as
+select_common_type does, and NULLIF returns its first argument promoted by the
+`=` its comparison resolves to, so `NULLIF(2.5, f)` over a float8 `f` is
+float8 although it declares its first argument's DECIMAL; every other
+double-precision function is float8.
+
 INSERT … SELECT reads the same fact for each select-list position from the
-plan (the collect sink's SchemaHintPGNumericPos), so it survives a derived
-table, a CTE, a join, an aggregate, a window and a set operation. An
-expression whose type the layer declines to decide keeps the numeric rule,
-which is what it had.
+plan (expr.PGCategory, the collect sink's SchemaHintPGCategoryPos), carried
+through every construct a value can reach the select list by: a derived
+table, a CTE, a recursive CTE (its anchor's category, as its types are), a
+scalar subquery (its own plan's), a join, an aggregate, a window, a set
+operation, LATERAL, a VALUES list and unnest over numeric literals. A join
+carries each arm's category for every column it emits, so a name two arms
+publish at different categories — a float8 base column beside a derived
+numeric of the same name — is read through its qualifier, never through the
+other arm. An expression whose type the layer declines to decide keeps the
+carrier's rule, which is what it had.
 
 The declaration picks the rule whatever box the value arrives in: a DECIMAL
 text box under a float8 declaration (GREATEST over a numeric and a float8,
-the numeric arm winning) rounds half to even.
+the numeric arm winning; NULLIF(2.5, f)) rounds half to even.
+
+An explicit `CAST(x AS INTEGER)` is not an assignment and does not read this
+declaration: the cast kernel sees only its compiled operand and the batch, so
+a float-carried numeric (`CAST(5 / 2.0 AS INTEGER)`) rounds half to even, 2,
+where PostgreSQL's numeric-to-integer cast answers 3. A numeric literal
+operand is recognized there and rounds half away.
 
 The range check reaches PORT (uint16) and PROTOCOL (uint8) too, because
 nothing below this line re-checks either — convertValue does, but only for

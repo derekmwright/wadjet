@@ -382,11 +382,25 @@ numeric overload follows its argument (an integer resolves to float8);
 power / mod over two integers are float8 / integer; round/trunc(x, n) and
 log(b, x) are numeric; EXTRACT is numeric and date_part float8; the CASE family
 folds by select_common_type; every other double-precision function is float8.
-`ColDecls.pgNumeric` carries it through a plan the way `intWidth` carries an
+`ColDecls.pgCat` carries it through a plan the way `intWidth` carries an
 integer's width, and the assignment reads it (docs/internals/
 dml-integer-assignment-rounding.md). The carrier, the value and the OID are
 unchanged. Pinned by `wadjet.TestIntegerAssignmentRuleFollowsPgTypeof` and the
 `internal/oracle/intround` door tables.
+
+Amended 2026-09-28 (#1353): the category is carried as
+PostgreSQL's category itself (`expr.PGCategory`), not a numeric flag, so it
+also says where a DECIMAL declaration is float8 in PostgreSQL
+(`DeclType.PGFloat8`: `NULLIF(2.5, f)` returns its first argument promoted to
+float8). It rides every construct that hands a value on — a join carries each
+arm's category for every column it emits, so a name two arms publish at
+different categories is never read through the wrong arm; a scalar
+subquery's stamped declaration, a recursive CTE's materialization (its
+anchor's) and unnest over numeric literals carry it beside the parquet.Column
+that cannot. An explicit integer CAST does not read it: the cast kernel sees
+only the compiled operand and the batch, and a DAG stage boundary carries no
+category, so `CAST(5 / 2.0 AS INTEGER)` still rounds the double half to even
+(recorded for filing).
 
 ### 3. The (p,s) of a computed result follows the finite-decimal industry rule
 
