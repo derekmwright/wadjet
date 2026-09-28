@@ -404,6 +404,9 @@ func (c *comparisonTyper) walk(node plansql.Node) error {
 			}
 		}
 	case *plansql.BinaryOp:
+		if err := c.textArithmetic(n); err != nil {
+			return err
+		}
 		return c.temporalArithmetic(n)
 	}
 	return nil
@@ -453,6 +456,38 @@ func (c *comparisonTyper) temporalArithmetic(n *plansql.BinaryOp) error {
 		return nil
 	}
 	return sqlerr.New("42883", "operator does not exist: %s %s %s", pgTypeName(lt), n.Op, pgTypeName(rt))
+}
+
+// textArithmetic refuses arithmetic between a TEXT column and a number:
+// PostgreSQL has no `text * integer` (nor + - / %) and raises 42883. The
+// evaluator answered NULL for every row, so `SELECT x * 1` over a text x read
+// NULL, and `MERGE … SET n = s.x * 1` (UPDATE and VALUES alike) overwrote
+// the column with NULL where PostgreSQL writes nothing (#1353 round 4). A
+// quoted literal is SQL's unknown and is typed from the other side
+// (`'2' * 1` answers), and a text column beside a DATE or TIMESTAMP is
+// temporalArithmetic's concession, not this rule's.
+func (c *comparisonTyper) textArithmetic(n *plansql.BinaryOp) error {
+	switch n.Op {
+	case "+", "-", "*", "/", "%":
+	default:
+		return nil
+	}
+	lText, rText := isTextColRef(n.Left, c.decls), isTextColRef(n.Right, c.decls)
+	if lText == rText {
+		return nil
+	}
+	other := n.Right
+	if rText {
+		other = n.Left
+	}
+	ot, ok := c.arithOperand(other)
+	if !ok || comparisonClass(ot) != cmpNumber {
+		return nil
+	}
+	if lText {
+		return sqlerr.New("42883", "operator does not exist: text %s %s", n.Op, pgTypeName(ot))
+	}
+	return sqlerr.New("42883", "operator does not exist: %s %s text", pgTypeName(ot), n.Op)
 }
 
 // unknownTemporal is the unknown-literal branch of temporalArithmetic: a
@@ -864,6 +899,9 @@ func (c *comparisonTyper) walkTemporalArithmetic(node plansql.Node) error {
 		}
 	}
 	if b, ok := node.(*plansql.BinaryOp); ok {
+		if err := c.textArithmetic(b); err != nil {
+			return err
+		}
 		return c.temporalArithmetic(b)
 	}
 	return nil
