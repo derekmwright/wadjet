@@ -46,6 +46,9 @@ var typeofTSV string
 //go:embed testdata/merge_cells.json
 var mergeCellsJSON []byte
 
+//go:embed testdata/mergeset_cells.json
+var mergeSetCellsJSON []byte
+
 // TypeCell is one expression and the type pg_typeof() names for it on
 // PostgreSQL 17.11, over m(i integer, b bigint, d numeric(10,2), f float8).
 type TypeCell struct {
@@ -98,6 +101,9 @@ type Cell struct {
 	Stmts []string
 	Read  string
 	Want  string
+	// WantErr is the SQLSTATE PostgreSQL raises for the cell, which writes
+	// nothing (MergeSetCells); Want is empty then.
+	WantErr string
 }
 
 type template struct {
@@ -224,6 +230,77 @@ func MergeSourceRefusal(name string) (string, bool) {
 		return "has no declared schema to resolve it against", true
 	}
 	return "", false
+}
+
+// MergeSetFixture is the engine's spelling of the tables MergeSetCells were
+// measured over (testdata/gen_mergeset_cells.py spells DOUBLE PRECISION where
+// this engine's DDL spells DOUBLE): a source s whose float8 f, numeric d,
+// integer i and text x hold 2.5, 0.5, -2.5, -0.5 (i: 5, 1, -5, -1) with a
+// one-element array of each, and a target t whose INTEGER n4 and BIGINT n8
+// take the value, beside a copy of each source column (tf, td, ti, tx).
+var MergeSetFixture = []string{
+	"CREATE TABLE s0 (id INTEGER, f DOUBLE, d NUMERIC(10,2), i INTEGER, x TEXT)",
+	"INSERT INTO s0 VALUES (1, 2.5, 2.50, 5, '2.5'), (2, 0.5, 0.50, 1, '0.5'), " +
+		"(3, -2.5, -2.50, -5, '-2.5'), (4, -0.5, -0.50, -1, '-0.5')",
+	"CREATE TABLE s AS SELECT id, f, d, i, x, ARRAY[f] AS af, ARRAY[d] AS ad, ARRAY[i] AS ai, ARRAY[x] AS ax FROM s0",
+	"CREATE TABLE t (id INTEGER, n4 INTEGER, n8 BIGINT, tf DOUBLE, td NUMERIC(10,2), ti INTEGER, tx TEXT)",
+	"INSERT INTO t SELECT id, 0, 0, f, d, i, x FROM s0",
+}
+
+// MergeSetCells is the MERGE action's expression table, enumerated once:
+// every expression FORM a WHEN MATCHED UPDATE SET or a WHEN NOT MATCHED
+// INSERT VALUES assigns (a bare target column, a bare and a qualified source
+// column, arithmetic, a scalar subquery uncorrelated / correlated on the
+// source / correlated on the target / over an aggregate / over a CAST / over
+// a literal, CASE, COALESCE, NULLIF, an array element, a CAST to float8 and to
+// numeric, a literal, an aggregate, a window function) × the source's type
+// (float8, numeric, integer, text) × the action × the source relation (the
+// catalog table, a subquery over it), into an INTEGER and a BIGINT at once.
+// Each cell is PostgreSQL 17.11's stored rows (Want) or its SQLSTATE
+// (WantErr) — a statement PostgreSQL refuses writes nothing, and neither may
+// this engine. testdata/mergeset_cells.json is generated and measured by
+// testdata/gen_mergeset_cells.py; the read-back is t's id, n4, n8.
+func MergeSetCells() []Cell {
+	var ms []struct {
+		Name  string   `json:"n"`
+		Stmts []string `json:"s"`
+		Want  string   `json:"w"`
+		Err   string   `json:"e"`
+	}
+	if err := json.Unmarshal(mergeSetCellsJSON, &ms); err != nil {
+		panic(fmt.Sprintf("intround: %v", err))
+	}
+	out := make([]Cell, 0, len(ms))
+	for _, m := range ms {
+		door := m.Name[strings.LastIndexByte(m.Name, '/')+1:]
+		out = append(out, Cell{Name: m.Name, Door: "merge-" + door, Stmts: m.Stmts,
+			Read: readOf("t"), Want: m.Want, WantErr: m.Err})
+	}
+	return out
+}
+
+// MergeSetRefusal is the SQLSTATE a MERGE SET cell refuses with where
+// PostgreSQL answers: an expression OVER a subquery source — anything but a
+// bare or qualified reference to one of its columns — is 0A000 ("MERGE
+// cannot evaluate …: the source has no declared schema to resolve it
+// against", #1398): MERGE evaluates an expression only over a catalog
+// source's rows. Loud, never a value; a cell PostgreSQL refuses is not pinned
+// (this engine raises PostgreSQL's SQLSTATE there, before the 0A000). A pin
+// that starts answering fails: delete it.
+func MergeSetRefusal(c Cell) (string, bool) {
+	parts := strings.Split(c.Name, "/") // merge-set/<form>/<type>/<relation>/<action>
+	if len(parts) != 5 || parts[3] != "subquery" || c.WantErr != "" {
+		return "", false
+	}
+	switch parts[1] {
+	case "bare-target", "bare-source", "qualified":
+		return "", false
+	case "literal":
+		// a bare constant is not an expression over the source; float8's
+		// literal is a CAST, and is
+		return "0A000", parts[2] == "f8"
+	}
+	return "0A000", true
 }
 
 func doorName(d rune) string {
