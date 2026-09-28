@@ -397,7 +397,10 @@ arm's category for every column it emits, so a name two arms publish at
 different categories is never read through the wrong arm; a scalar
 subquery's stamped declaration, a recursive CTE's materialization (its
 anchor's) and unnest over numeric literals carry it beside the parquet.Column
-that cannot. An explicit integer CAST does not read it: the cast kernel sees
+that cannot; a MERGE whose source is a subquery reads its source columns'
+declarations and categories from that query's own plan, as INSERT … SELECT
+does, and the DML layer carries a container column's element, so a
+subscript of a float8[] decides float8. An explicit integer CAST does not read it: the cast kernel sees
 only the compiled operand and the batch, and a DAG stage boundary carries no
 category, so `CAST(5 / 2.0 AS INTEGER)` still rounds the double half to even
 (recorded for filing).

@@ -50,8 +50,29 @@ operation, LATERAL, a VALUES list and unnest over numeric literals. A join
 carries each arm's category for every column it emits, so a name two arms
 publish at different categories — a float8 base column beside a derived
 numeric of the same name — is read through its qualifier, never through the
-other arm. An expression whose type the layer declines to decide keeps the
-carrier's rule, which is what it had.
+other arm.
+
+A MERGE whose source is a subquery reads the same fact: the source query's
+declared output and its category per position (the pair INSERT … SELECT
+reads) are the merged namespace's declarations for the source's columns
+(physical.DeclaredTypeOfNodeIn loads the category into ColDecls.pgCat), so
+`USING (SELECT id, y FROM s) src … SET n = src.y` over a float8 `y` rounds
+half to even, as it does over `USING s`. A name such a source publishes twice
+is 42702 where it is referenced, as in PostgreSQL. The layer also carries a
+container column's element (ColDecls.Elems), so `SET n = af[1]` over a
+float8[] column decides float8.
+
+An expression whose type the layer declines to decide keeps the NUMERIC
+rule — a float64 box rounds half away from zero — which is what it had.
+What the layer still declines on an assignment door: a DECIMAL computed
+without a declared precision (its value is a numeric, whose rule this is),
+a VECTOR or a container with no element, and the functions whose type
+follows the runtime value (`json_extract`, `json_extract_scalar`, which have
+no PostgreSQL spelling: a JSON number of 2.5 stores 3). A scalar subquery is
+refused before assignment on the UPDATE, MERGE and VALUES doors, an
+expression over a MERGE subquery source is refused 0A000, and INSERT …
+SELECT reads every position's declaration from the plan, so none of those
+reaches the undecided rule.
 
 The declaration picks the rule whatever box the value arrives in: a DECIMAL
 text box under a float8 declaration (GREATEST over a numeric and a float8,
@@ -70,5 +91,7 @@ real port can be.
 
 The coverage table is internal/oracle/intround: the operator and function
 grammar over every operand category, the CASE family and the plan
-constructs, on VALUES, INSERT … SELECT, UPDATE and MERGE, measured on
+constructs, on VALUES, INSERT … SELECT, UPDATE and MERGE, the MERGE source
+constructs (a derived table, a nested one, a CTE inside the source, UNION
+ALL, a join, a VALUES list) and a container column's element, measured on
 PostgreSQL 17.11.

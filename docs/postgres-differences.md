@@ -60,6 +60,10 @@ Declared CREATE/DROP TABLE uses row results; PostgreSQL sends DDL tags without r
 
 PostgreSQL answers the statement's start time for every row, so `WHERE LOCALTIMESTAMP >= LOCALTIMESTAMP` selects every row. Here the clock is read where the expression is evaluated, so a row that straddles a millisecond can answer FALSE. (ADR-0012 §5/#1169-per-row-clock)
 
+**An explicit integer CAST of a float-carried numeric rounds half to even.**
+
+`CAST(5 / 2.0 AS INTEGER)`, `CAST(SQRT(6.25) AS INTEGER)` and `CAST(POWER(2.5, 1) AS INTEGER)` answer 2 where PostgreSQL answers 3 (SMALLINT and BIGINT alike; negated, -2 where PostgreSQL answers -3): the cast kernel rounds the float64 carrier by float8's rule, and a numeric literal operand (`CAST(2.5 AS INTEGER)`, `CAST(2.5 * 1 AS INTEGER)`) rounds half away as PostgreSQL does. Not a deliberate difference: an assignment of the same values rounds as PostgreSQL does (see "Division and the transcendental functions over numeric declare double precision"); the cast is #<filing>. (ADR-0024 §2c)
+
 ## Declared types
 
 **Some address and UUID functions declare text; assigned to a typed column, their text is read as a literal.**
@@ -89,6 +93,10 @@ An array cast's element follows the scalar cast of the same spelling, and `CAST(
 **Grouped MIN/MAX over REAL declares float8.**
 
 The grouped aggregate's accumulator is the wider type, so `MIN(c_real) … GROUP BY g` declares `double precision` where PostgreSQL declares `real`; the window spelling `MIN(c_real) OVER (…)` keeps `real`. Over `integer` both spellings declare `integer`, as PostgreSQL does. (ADR-0012 §5/#569)
+
+**Division and the transcendental functions over numeric declare double precision.**
+
+`5 / 2.0`, `SQRT(6.25)`, `POWER(2.5, 1)`, `EXP`, `LN`, `LOG` and `EXTRACT` over numeric operands are computed in float64 and declared `double precision` (OID 701) where PostgreSQL computes and declares `numeric` (OID 1700); `2.5 * 1` and `ABS(2.5)` are numeric on both. The value agrees to float64's precision. Assigned to an integer column by any write, such a value rounds as the numeric it is in PostgreSQL — half away from zero, `5 / 2.0` stores 3 — because the declaration carries PostgreSQL's category beside the carrier. (ADR-0024 §2c, #1353)
 
 **Integer expressions declare bigint.**
 
