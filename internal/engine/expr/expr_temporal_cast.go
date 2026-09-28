@@ -151,12 +151,13 @@ func epochDaysOf(t time.Time) int64 {
 func (e *BinOp) dateArith(b *batch.RecordBatch, row int, lv, rv any) (any, bool) {
 	ld, lok := temporalOperand(b, row, e.Left, lv)
 	if !lok {
-		// `n + date`, the one reversed shape that means anything.
+		// `n + date`, the one reversed shape that means anything. The DATE
+		// on the right is established FIRST: plainDayCount refuses a whole
+		// float no DATE can be shifted by with 22008, so reading the left as
+		// a day count before a date was seen made `CAST('Infinity' AS DOUBLE
+		// PRECISION) + 1` (and a binary Infinity parameter, which binds as
+		// that cast) `date out of range` where it is plain float addition.
 		if e.Op != "+" {
-			return nil, false
-		}
-		n, nok := plainDayCount(lv)
-		if !nok {
 			return nil, false
 		}
 		rd, rok := temporalOperand(b, row, e.Right, rv)
@@ -165,6 +166,10 @@ func (e *BinOp) dateArith(b *batch.RecordBatch, row int, lv, rv any) (any, bool)
 		}
 		rt, dateOnly, parsed := parseDateArg(rd)
 		if !parsed || !dateOnly {
+			return nil, false
+		}
+		n, nok := plainDayCount(lv)
+		if !nok {
 			return nil, false
 		}
 		return shiftDays(epochDaysOf(rt), n), true
