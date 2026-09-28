@@ -1053,7 +1053,15 @@ compares 12.50001, not 12.5000, and `'1.25000000000000001e13'` is not the
 member 12500000000000.0000; against an integer subquery the unquoted and
 CAST spellings compare the same way (`14.0000000000000000001 IN (SELECT
 user_id …)` matches no 14), since numeric = integer is numeric, while a
-quoted literal alone takes the integer type. A number this engine's
+quoted literal alone takes the integer type. An outer value computed from
+numeric constants rather than written as one is compared the same way: a
+CASE, COALESCE, NULLIF, GREATEST or LEAST whose results are constants
+(whatever its conditions read), `-(-14.0000000000000000001)`,
+`'…'::numeric::numeric`, `CAST(CAST('…' AS TEXT) AS NUMERIC)` or
+`CAST(14 AS NUMERIC)` is folded when the statement is planned and compared
+as the exact number it computes; one that divides numerics
+(`14.0000000000000000001 / 1`) is refused 0A000 where PostgreSQL answers
+(see postgres-differences.md). A number this engine's
 38-digit DECIMAL cannot hold exactly — more than 38 significant digits, a
 digit past scale 38, NaN, an infinity — is refused 22003 on every arm where PostgreSQL answers (see
 postgres-differences.md); zeros that carry no value do not count, so

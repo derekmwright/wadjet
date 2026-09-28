@@ -180,7 +180,21 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
        type against an integer body, numeric = integer being numeric
        (`14.0000000000000000001 IN (SELECT bigint …)` matched 14 at
        float8), and the per-row evaluator meets an integer member and a
-       decimal probe by value. A number no DECIMAL(38,s) holds — more than 38
+       decimal probe by value. An outer operand computed from numeric
+       constants — a choice (CASE / COALESCE / NULLIF / GREATEST / LEAST)
+       over constant results, a unary minus of an expression, a bare
+       NUMERIC CAST of anything but a quoted literal — is typed by the same
+       rule after `expr.MemberProbe` folds it exactly at plan time: ADR-0024
+       evaluates those forms as float8, so `CASE WHEN a.id > 0 THEN
+       14.0000000000000000001 END IN (SELECT numeric … WHERE r.id = a.id)`
+       matched the member 14 on every arm (v0.25.1 answered 0 rows only
+       because its box comparison missed every member). A choice with a
+       column result has each constant result typed instead (beside a
+       float8 column the choice is float8, as in PostgreSQL). A form the
+       fold does not compute that evaluates as float8 while a numeric
+       constant feeds it — a division of numerics, whose scale is
+       PostgreSQL's select_div_scale — is **0A000, a recorded divergence**
+       (PostgreSQL answers). A number no DECIMAL(38,s) holds — more than 38
        significant digits, a digit past scale 38, NaN, ±Infinity — is
        **22003 on every arm, a recorded divergence**: PostgreSQL's numeric
        is unconstrained and answers (0 rows, NOT IN every row). The single-process

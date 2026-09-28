@@ -258,6 +258,10 @@ An ON may name a relation an EARLIER comma-separated FROM item declares. `FROM a
 
 A numeric literal compared with a NUMERIC subquery — `x IN`, `= ANY`, `NOT IN`, `<> ALL (SELECT numeric …)`, the literal quoted, under a bare `CAST(… AS NUMERIC)` or unquoted — is the exact number its text spells, and so is one under a bare CAST or unquoted against an integer subquery (numeric = integer is numeric). One this engine's DECIMAL cannot hold exactly — more than 38 significant digits (`'14.0000000000000000000000000000000000000001'`), a digit past scale 38 (`'1e-40'`), an integer past 38 digits (`'1e40'`), NaN or ±Infinity — raises 22003 `numeric field overflow` naming the literal on every arm, rather than being compared at any other precision; PostgreSQL's numeric is unconstrained and answers (0 rows for `IN`, every row for `NOT IN`, against members it cannot equal). Zeros that carry no value do not count: `'12.5'` followed by forty zeros is 12.5 and answers. (ADR-0012 §5/#1372)
 
+**A membership's outer computed by numeric division is refused.**
+
+An outer operand computed from numeric constants — `CASE … THEN 14.0000000000000000001 END`, `COALESCE(…)`, `-(-…)`, `CAST(CAST('…' AS TEXT) AS NUMERIC)` — is folded to the exact number it computes before it is compared with a NUMERIC or integer subquery. One that divides numerics (`14.0000000000000000001 / 1 IN (SELECT numeric …)`) is not folded — its scale is PostgreSQL's division-scale rule — and this engine would compute it in double precision, so it raises 0A000 naming the operand on every arm; PostgreSQL answers (0 rows here). An explicit float CAST (`CAST(… AS DOUBLE PRECISION)`) is a double in PostgreSQL too and answers. (ADR-0012 §5/#1372)
+
 **Decimal arithmetic stops at 38 digits.**
 
 Precision stops at 38 while exact operators retain scale. DECIMAL(38,10) multiplication produces DECIMAL(38,20), raising 22003 beyond its range where PostgreSQL numeric answers. (ADR-0012 §5/#749)

@@ -41,3 +41,13 @@ forty leading zeros are no digits at all. ok=false there is a number no
 DECIMAL(38,s) holds — more than 38 significant digits, a digit past scale 38,
 NaN or an infinity — which the membership refuses 22003 rather than compare
 at any other precision.
+
+The same rule types an outer operand COMPUTED from numeric constants
+(`expr.memberConstantProbe`, member_constant_fold.go): a choice over constant
+results, a unary minus of an expression, or a bare NUMERIC CAST of anything
+but a quoted literal is evaluated as a double by ADR-0024, so MemberProbe
+folds it exactly at plan time (math/big, PostgreSQL's common-type resolution)
+and hands the RESULT's text to DecimalValueType. A choice with a column result
+has each constant result typed at one NUMERIC(38,S); a form the fold does not
+compute that evaluates as a double while a numeric constant feeds it (a
+numeric division) is refused 0A000.
