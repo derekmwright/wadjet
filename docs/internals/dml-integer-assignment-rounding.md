@@ -101,10 +101,14 @@ literal (ADR-0024's literal rule). So `SET n = $1` bound with 2.5 stores 2,
 `SELECT $1` declares OID 701 (700 for float4) where it declared numeric
 (1700), a CTAS column over it is double precision, `ROUND($1)` answers 2,
 `$1 / 2` over 5 answers 2.5 (it was integer division, 2), and NaN and
-Infinity bind (they were 42703). A LIMIT, OFFSET or FETCH count and a
-TABLESAMPLE percentage read that cast as the number its text lexes to, so a
-float count answers as the bare number did; a text that is not one number
-token (`-1`, `NaN`) stays the syntax error its bare spelling is. An integer
+Infinity bind (in the text format they were 42703; a binary one was read as
+text). A LIMIT, OFFSET or FETCH count and a TABLESAMPLE percentage read that
+cast as the number its text stands for, so a float count answers as the bare
+number did. The text must be PostgreSQL's float input (surrounding
+whitespace and a leading `+` allowed) that lexes to one unsigned number
+token: `-1`, `NaN`, and the spellings the SQL lexer reads as a number but
+the float input refuses (`0b11`, `0o7`, `1_0`, `1--`; PostgreSQL 22P02)
+stay the syntax error their bare spelling is. An integer
 parameter is bare only for an integer's spelling (int4in); otherwise it is
 quoted and the target's input rule raises 22P02, as PostgreSQL's parameter
 input does.

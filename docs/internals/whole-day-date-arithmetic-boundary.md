@@ -24,3 +24,10 @@ is intervalShift, which keeps the rendered-string result #322 pinned for it.
 ok=false means "not date arithmetic" and leaves the caller's numeric path
 untouched — including the case where an operand is a string that does not
 parse as a date, which is how `'BUILDING' - 1` keeps its old answer.
+
+The reversed shape `n + date` looks at the right operand FIRST and reads the
+left as a day count only once a date is there. The day count refuses a whole
+number no DATE can be shifted by with 22008, so reading it before the date
+was seen made `CAST('Infinity' AS DOUBLE PRECISION) + 1` — and `+ 1` over a
+binary Infinity parameter, which Bind renders as that cast — `date out of
+range` where it is ordinary float addition (PostgreSQL: Infinity).
