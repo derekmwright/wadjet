@@ -1456,6 +1456,19 @@ func DeclaredTypeOfNode(node plansql.Node, schema []parquet.Column) (expr.DeclTy
 // float8 (#1353). A nil or mismatched cat is the carrier's reading, which for
 // a catalog column IS its type.
 func DeclaredTypeOfNodeIn(node plansql.Node, schema []parquet.Column, cat []expr.PGCategory) (expr.DeclType, expr.Confidence) {
+	return DeclaredTypeOfNodeWith(node, schema, cat, nil)
+}
+
+// DeclaredTypeOfNodeWith is DeclaredTypeOfNodeIn with a Planner to answer a
+// SCALAR SUBQUERY from its own plan — its declared column and its PostgreSQL
+// category, through the same memoized scalarSubqueryColumnDecl a query's
+// annotateSubqueryColumnDecls stamps — so a write door that evaluates an
+// expression outside any plan declares `(SELECT MAX(f) FROM s)` as the float8
+// it is. Without it the subquery arm was undecided and the undecided path is
+// the numeric rule: a MERGE's `SET n = (SELECT MAX(y) FROM s)` over a float8
+// 2.5 stored 3 where PostgreSQL stores 2 (#1353). A nil p is
+// DeclaredTypeOfNodeIn.
+func DeclaredTypeOfNodeWith(node plansql.Node, schema []parquet.Column, cat []expr.PGCategory, p *Planner) (expr.DeclType, expr.Confidence) {
 	decls := ColDecls{
 		Types:  make(map[string]parquet.TypeID, len(schema)),
 		Fields: map[string][]parquet.Column{},
@@ -1490,6 +1503,9 @@ func DeclaredTypeOfNodeIn(node plansql.Node, schema []parquet.Column, cat []expr
 				decls.pgCat[strings.ToLower(c.Name)] = cat[i]
 			}
 		}
+	}
+	if p != nil {
+		decls.subqueryDecl, decls.subqueryIntWidth, decls.subqueryPGCategory = subqueryResolvers(p.scalarSubqueryColumnDecl)
 	}
 	return nodeDeclaredType(node, decls)
 }

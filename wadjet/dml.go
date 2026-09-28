@@ -1191,6 +1191,11 @@ type mergeEvaluator struct {
 	// subquery correlated to either side compiles as correlated. nil keeps
 	// the 0A000.
 	sub *DMLSubqueryEnv
+	// planner answers a SCALAR SUBQUERY's declaration from the subquery's
+	// own plan, category included (physical.DeclaredTypeOfNodeWith) — the
+	// same declaration a query plan stamps for it, so `SET n = (SELECT
+	// MAX(f) FROM s)` over a float8 rounds half to even (#1353).
+	planner *physical.Planner
 }
 
 // buildMergeEvaluator assembles the merged namespace from the two tables'
@@ -1214,6 +1219,7 @@ func (db *DB) buildMergeEvaluator(ctx context.Context, info *plansql.MergeInfo,
 		srcByName:    map[string]parquet.Column{},
 		mergedByName: map[string]parquet.Column{},
 		sub:          db.dmlSubqueryEnv(ctx),
+		planner:      db.newPlanner(ctx),
 	}
 	ev.targetCols = targetCols
 	for _, c := range targetCols {
@@ -1562,7 +1568,7 @@ func (ev *mergeEvaluator) targetColumn(name string) (parquet.Column, error) {
 // cat is PostgreSQL's category of each schema column where the schema is a
 // plan's declared output (a MERGE's subquery source); nil for a catalog
 // schema, whose columns ARE their types.
-func dmlSourceIsFloat(node plansql.Node, schema []parquet.Column, cat []expr.PGCategory) bool {
+func dmlSourceIsFloat(node plansql.Node, schema []parquet.Column, cat []expr.PGCategory, p *physical.Planner) bool {
 	if c, ok := unwrapDMLParens(node).(*plansql.CastNode); ok {
 		switch strings.ToLower(strings.TrimSpace(c.TypeName)) {
 		case "float", "float4", "float8", "real", "double precision", "double",
@@ -1576,7 +1582,7 @@ func dmlSourceIsFloat(node plansql.Node, schema []parquet.Column, cat []expr.PGC
 	// FLOAT64, while PostgreSQL types both numeric and rounds them half away
 	// from zero. The declaration carries that category (PGNumeric), resolved
 	// by PostgreSQL's own operand rules (#1353).
-	decl, conf := physical.DeclaredTypeOfNodeIn(node, schema, cat)
+	decl, conf := physical.DeclaredTypeOfNodeWith(node, schema, cat, p)
 	return conf == expr.Decided &&
 		(decl.ID == parquet.TypeFloat32 || (decl.ID == parquet.TypeFloat64 && !decl.PGNumeric) ||
 			(decl.ID == parquet.TypeDecimal && decl.PGFloat8))
@@ -1587,7 +1593,7 @@ func dmlSourceIsFloat(node plansql.Node, schema []parquet.Column, cat []expr.PGC
 // namespace is the merged one, so `s.f` resolves to the source's declaration
 // exactly as the expression evaluator resolves it.
 func (ev *mergeEvaluator) sourceIsFloat(node plansql.Node) bool {
-	return dmlSourceIsFloat(node, ev.mergedCols, ev.mergedCat)
+	return dmlSourceIsFloat(node, ev.mergedCols, ev.mergedCat, ev.planner)
 }
 
 // dmlSourceDeclaredType is the OTHER fact a computed assignment needs beside
@@ -1612,8 +1618,8 @@ func (ev *mergeEvaluator) sourceIsFloat(node plansql.Node) bool {
 // all), and every caller's contract for that case is to fall back to the
 // pre-arc box-shape reading rather than refuse: declining to refuse is safer
 // than guessing wrong on a shape this fix cannot yet name.
-func dmlSourceDeclaredType(node plansql.Node, schema []parquet.Column, cat []expr.PGCategory) (parquet.TypeID, bool) {
-	decl, conf := physical.DeclaredTypeOfNodeIn(node, schema, cat)
+func dmlSourceDeclaredType(node plansql.Node, schema []parquet.Column, cat []expr.PGCategory, p *physical.Planner) (parquet.TypeID, bool) {
+	decl, conf := physical.DeclaredTypeOfNodeWith(node, schema, cat, p)
 	if conf != expr.Decided {
 		return 0, false
 	}
@@ -1660,7 +1666,7 @@ type assignSource struct {
 // references (nil for a VALUES cell, which has none); cat is PostgreSQL's
 // category of each schema column where the schema is a plan's declared output
 // (nil for a catalog schema — see dmlSourceIsFloat).
-func assignSourceOf(node plansql.Node, schema []parquet.Column, cat []expr.PGCategory) assignSource {
+func assignSourceOf(node plansql.Node, schema []parquet.Column, cat []expr.PGCategory, p *physical.Planner) assignSource {
 	if lit, ok := dmlLiteralText(node); ok {
 		src := assignSource{literal: lit, isLiteral: true}
 		src.declType, src.declKnown = literalDeclaredType(node)
@@ -1669,11 +1675,11 @@ func assignSourceOf(node plansql.Node, schema []parquet.Column, cat []expr.PGCat
 	if dmlTypedTextSource(node) {
 		return assignSource{typedText: true}
 	}
-	decl, conf := physical.DeclaredTypeOfNodeIn(node, schema, cat)
+	decl, conf := physical.DeclaredTypeOfNodeWith(node, schema, cat, p)
 	if conf != expr.Decided {
-		return assignSource{declFloat: dmlSourceIsFloat(node, schema, cat)}
+		return assignSource{declFloat: dmlSourceIsFloat(node, schema, cat, p)}
 	}
-	return assignSource{declType: decl.ID, declKnown: true, declFloat: dmlSourceIsFloat(node, schema, cat),
+	return assignSource{declType: decl.ID, declKnown: true, declFloat: dmlSourceIsFloat(node, schema, cat, p),
 		declScale: decl.Scale}
 }
 
@@ -1858,7 +1864,7 @@ func datatypeMismatchNamed(col parquet.Column, src parquet.TypeID) error {
 // sourceDeclaredType is dmlSourceDeclaredType resolved against MERGE's merged
 // namespace, the same split sourceIsFloat keeps for the same reason.
 func (ev *mergeEvaluator) sourceDeclaredType(node plansql.Node) (parquet.TypeID, bool) {
-	return dmlSourceDeclaredType(node, ev.mergedCols, ev.mergedCat)
+	return dmlSourceDeclaredType(node, ev.mergedCols, ev.mergedCat, ev.planner)
 }
 
 // value resolves one SET / VALUES expression against the merged row.
@@ -1879,7 +1885,7 @@ func (ev *mergeEvaluator) value(text string, merged map[string]any, col parquet.
 	if err := dmlExpressionTyping(node, "", ev.mergedCols); err != nil {
 		return nil, err
 	}
-	src := assignSourceOf(node, ev.mergedCols, ev.mergedCat)
+	src := assignSourceOf(node, ev.mergedCols, ev.mergedCat, ev.planner)
 	if err := src.check(col); err != nil {
 		return nil, err
 	}
@@ -2863,7 +2869,7 @@ func assignInsertValue(text string, col parquet.Column) (any, error) {
 	if err := dmlExpressionTyping(node, "", nil); err != nil {
 		return nil, err
 	}
-	src := assignSourceOf(node, nil, nil)
+	src := assignSourceOf(node, nil, nil, nil)
 	if err := src.check(col); err != nil {
 		return nil, err
 	}
@@ -3653,7 +3659,7 @@ func ResolveDMLSetClauses(clauses []plansql.SetClause, target plansql.DMLTarget,
 		if err != nil {
 			return nil, sqlerr.Wrap("42601", fmt.Errorf("SET %s: parsing %q: %w", name, sc.Value, err))
 		}
-		if src := assignSourceOf(node, schema, nil); src.isLiteral {
+		if src := assignSourceOf(node, schema, nil, nil); src.isLiteral {
 			if err := src.check(col); err != nil {
 				return nil, fmt.Errorf("SET %s: %w", name, err)
 			}
@@ -3673,7 +3679,7 @@ func ResolveDMLSetClauses(clauses []plansql.SetClause, target plansql.DMLTarget,
 		// The one assignment table, asked once per clause before any row —
 		// which is also PostgreSQL's order: a type mismatch refuses the
 		// statement even when no row matches.
-		src := assignSourceOf(node, schema, nil)
+		src := assignSourceOf(node, schema, nil, nil)
 		if err := src.check(col); err != nil {
 			return nil, fmt.Errorf("SET %s: %w", name, err)
 		}

@@ -140,15 +140,26 @@ func subqueryDeclsOf(n *logical.Node) (func(string) (parquet.Column, bool), func
 		return nil, nil, nil
 	}
 	m := n.SubqueryColDecls
+	return subqueryResolvers(func(sql string) (logical.SubqueryColumnDecl, bool) {
+		d, ok := m[sql]
+		return d, ok
+	})
+}
+
+// subqueryResolvers is the three ColDecls resolvers over one lookup of a
+// subquery's declaration: a plan's stamped map (subqueryDeclsOf), or a
+// Planner's memoized scalarSubqueryColumnDecl for a caller that evaluates an
+// expression outside any plan (DeclaredTypeOfNodeWith).
+func subqueryResolvers(lookup func(string) (logical.SubqueryColumnDecl, bool)) (func(string) (parquet.Column, bool), func(string) (intWidth, bool), func(string) pgCategory) {
 	return func(sql string) (parquet.Column, bool) {
-			d, ok := m[sql]
+			d, ok := lookup(sql)
 			if !ok {
 				return parquet.Column{}, false
 			}
 			return parquet.Column{Type: d.Type, Precision: d.Precision, Scale: d.Scale,
 				ElementType: d.ElementType, Fields: d.Fields}, true
 		}, func(sql string) (intWidth, bool) {
-			d, ok := m[sql]
+			d, ok := lookup(sql)
 			if !ok {
 				return intWidthUnknown, false
 			}
@@ -160,7 +171,8 @@ func subqueryDeclsOf(n *logical.Node) (func(string) (parquet.Column, bool), func
 			}
 			return intWidthUnknown, false
 		}, func(sql string) pgCategory {
-			return m[sql].PGCategory
+			d, _ := lookup(sql)
+			return d.PGCategory
 		}
 }
 

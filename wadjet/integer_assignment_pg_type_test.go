@@ -194,7 +194,7 @@ func TestIntegerAssignmentRuleFollowsPgTypeof(t *testing.T) {
 			continue
 		}
 		asked++
-		if got := dmlSourceIsFloat(node, schema, nil); got != wantFloat {
+		if got := dmlSourceIsFloat(node, schema, nil, nil); got != wantFloat {
 			wrong++
 			rule := map[bool]string{true: "half to even (float8)", false: "half away from zero (numeric)"}
 			t.Errorf("%s: the assignment rounds %s; pg_typeof is %s", c.Expr, rule[got], c.PGType)
