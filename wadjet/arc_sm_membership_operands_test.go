@@ -30,13 +30,15 @@ func TestArcSMEmbeddedMembershipOperands(t *testing.T) {
 		{name: "1372/numericScale", sql: "SELECT a.id FROM st_pair a WHERE '12.50001' IN (SELECT r.v_dec FROM st_pair r WHERE r.id <= 3) ORDER BY a.id", want: "[]"},
 		{name: "1372/dateSpelling", sql: "SELECT a.id FROM st_pair a WHERE '2024-1-2' IN (SELECT r.v_date FROM st_pair r WHERE r.id <= 3) ORDER BY a.id", want: "[[1] [2] [3] [4]]"},
 		// A constant-valued outer (review round 4, B9) is folded to its exact
-		// numeric, never read as a double; a numeric division the fold does
-		// not compute is refused where it would be one. A quoted integer
+		// numeric (a division at PostgreSQL's select_div_scale), never read
+		// as a double; a function the fold does not compute is refused where
+		// it would be one (PostgreSQL answers). A quoted integer
 		// under a bare NUMERIC CAST against an integer subquery (B10).
 		{name: "b9/case", sql: "SELECT a.id FROM st_pair a WHERE CASE WHEN a.id > 0 THEN 14.0000000000000000001 END IN (SELECT r.v_dec FROM st_pair r WHERE r.id = a.id) ORDER BY a.id", want: "[]"},
 		{name: "b9/coalesce", sql: "SELECT a.id FROM st_pair a WHERE COALESCE(14.0000000000000000001, 0) IN (SELECT r.v_dec FROM st_pair r) ORDER BY a.id", want: "[]"},
-		{name: "b9/division", sql: "SELECT a.id FROM st_pair a WHERE 14.0000000000000000001 / 1 IN (SELECT r.v_dec FROM st_pair r) ORDER BY a.id",
-			state: "0A000", msg: "14.0000000000000000001 / 1"},
+		{name: "b9/division", sql: "SELECT a.id FROM st_pair a WHERE (14.0000000000000000001 / 7) * 7 IN (SELECT r.v_dec FROM st_pair r WHERE r.id <= 3) ORDER BY a.id", want: "[[1] [2] [3] [4]]"},
+		{name: "b9/functionRefused", sql: "SELECT a.id FROM st_pair a WHERE sqrt(12.5 * 12.5) IN (SELECT r.v_dec FROM st_pair r) ORDER BY a.id",
+			state: "0A000", msg: "sqrt(12.5 * 12.5)"},
 		{name: "b10/castInteger", sql: "SELECT a.id FROM st_pair a WHERE CAST('9007199254740993' AS NUMERIC) IN (SELECT r.v_i64 * 2 + 9007199254740968 FROM st_pair r) ORDER BY a.id", want: "[]"},
 		{name: "1372/notAValue", sql: "SELECT a.id FROM st_pair a WHERE 'zz' IN (SELECT r.v_i64 FROM st_pair r WHERE r.id <= 3)",
 			state: "22P02", msg: `invalid input syntax for type bigint: "zz"`},

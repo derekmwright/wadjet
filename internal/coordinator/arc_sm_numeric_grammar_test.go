@@ -236,9 +236,10 @@ func smNumGrammarCells() []smNumGrammarCell {
 // engine evaluated the constant as a double before the membership saw it
 // (ADR-0024's choice and cast declarations), so M matched the member 14;
 // MemberProbe now folds it at plan time and types the result by the
-// literal's rule. A division of numerics, which the fold does not compute
-// (PostgreSQL's select_div_scale), is refused 0A000 where it evaluates as a
-// double; an explicit float CAST is PostgreSQL's own double and matches.
+// literal's rule, a division at PostgreSQL's select_div_scale. A function
+// the fold does not compute that evaluates as a double while a numeric
+// constant feeds it (sqrt) is refused 0A000; an explicit float CAST is
+// PostgreSQL's own double and matches.
 func smNumConstOuterCells() []smNumGrammarCell {
 	shapes := []struct {
 		key string
@@ -267,6 +268,16 @@ func smNumConstOuterCells() []smNumGrammarCell {
 		{"coalPlus", func(v string) string { return "COALESCE(" + v + ", 0) + 0" }},
 		{"castF8", func(v string) string { return "CAST(" + v + " AS DOUBLE PRECISION)" }},
 		{"div", func(v string) string { return v + " / 1" }},
+		// A division of numerics keeps PostgreSQL's select_div_scale
+		// digits: (M / 7) * 7 is 14.0000000000000000000 (a match) and
+		// (12.5 / 3.0) * 3 is 12.5000000000000001 (none), where exact
+		// rationals and float8 each answer the other way.
+		{"divMul7", func(v string) string { return "(" + v + " / 7) * 7" }},
+		{"div3", func(v string) string { return "(" + v + " / 3.0) * 3" }},
+		// A function the fold does not compute, over a numeric constant,
+		// evaluated as a double: refused (PostgreSQL's sqrt(numeric)
+		// answers); over integers it is PostgreSQL's sqrt(float8) too.
+		{"sqrt", func(v string) string { return "sqrt(" + v + ") * sqrt(" + v + ")" }},
 	}
 	vals := []struct{ tag, v string }{{"H", "14"}, {"M", "14.0000000000000000001"}, {"F", "12.5"}}
 	var out []smNumGrammarCell
@@ -275,7 +286,7 @@ func smNumConstOuterCells() []smNumGrammarCell {
 			for _, v := range vals {
 				x := sh.x(v.v)
 				disp := ""
-				if sh.key == "div" && v.tag != "H" {
+				if sh.key == "sqrt" && v.tag != "H" {
 					disp = "0A000"
 				}
 				body := "SELECT r." + b.col + " FROM st_pair r"
