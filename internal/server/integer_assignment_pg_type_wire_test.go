@@ -59,12 +59,16 @@ func TestIntegerAssignmentRoundsByPostgresTypeOverPgwire(t *testing.T) {
 		"fold/NULLIF(div_numcol,f8col+9) [select]":   "cannot store string into FLOAT64 vector",
 		"fold/NULLIF(div_numcol,f8lit) [select]":     "cannot store string into FLOAT64 vector",
 	}
-	cells := append(intround.Cells(), intround.DialectCells()...)
+	cells := append(append(intround.Cells(), intround.DialectCells()...), intround.MergeSourceCells()...)
 	failed := 0
 	for _, c := range cells {
 		key := c.Name + " [" + c.Door + "]"
 		got, err := wireIntRoundCell(ctx, conn, c)
-		if pin, ok := pinned[key]; ok {
+		pin, ok := pinned[key]
+		if !ok {
+			pin, ok = intround.MergeSourceRefusal(c.Name)
+		}
+		if ok {
 			if err == nil || !strings.Contains(err.Error(), pin) {
 				failed++
 				t.Errorf("%s: the pinned refusal moved (stored %s, err %v); if it now stores %s, delete the pin",

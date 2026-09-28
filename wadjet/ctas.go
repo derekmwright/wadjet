@@ -274,7 +274,7 @@ func selectItemSources(q *plansql.ParsedQuery, declared []parquet.Column, pgCat 
 	}
 	for i, c := range info.Columns {
 		if _, isConst := dmlLiteralText(c.ASTExpr); isConst || dmlTypedTextSource(c.ASTExpr) {
-			out[i] = assignSourceOf(c.ASTExpr, nil)
+			out[i] = assignSourceOf(c.ASTExpr, nil, nil)
 		}
 	}
 	return out

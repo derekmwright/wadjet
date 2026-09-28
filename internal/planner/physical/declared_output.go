@@ -1444,6 +1444,18 @@ func inferProjectionType(node plansql.Node, fallback parquet.TypeID) parquet.Typ
 // Nested function callers must keep looking past a guessed type for a
 // decided candidate (expr.Confidence, #331).
 func DeclaredTypeOfNode(node plansql.Node, schema []parquet.Column) (expr.DeclType, expr.Confidence) {
+	return DeclaredTypeOfNodeIn(node, schema, nil)
+}
+
+// DeclaredTypeOfNodeIn is DeclaredTypeOfNode over a schema that is a plan's
+// declared OUTPUT rather than a catalog table's: cat[i] is PostgreSQL's
+// numeric category of schema[i] as the plan emitted it (a collect sink's
+// SchemaHintPGCategoryPos), carried into ColDecls.pgCat exactly as a derived
+// table's emitted category is carried to the query above it — so a column
+// reference to a derived `5 / 2.0` is numeric and to a derived float8 column
+// float8 (#1353). A nil or mismatched cat is the carrier's reading, which for
+// a catalog column IS its type.
+func DeclaredTypeOfNodeIn(node plansql.Node, schema []parquet.Column, cat []expr.PGCategory) (expr.DeclType, expr.Confidence) {
 	decls := ColDecls{
 		Types:  make(map[string]parquet.TypeID, len(schema)),
 		Fields: map[string][]parquet.Column{},
@@ -1457,6 +1469,16 @@ func DeclaredTypeOfNode(node plansql.Node, schema []parquet.Column) (expr.DeclTy
 		}
 		if len(c.Fields) > 0 {
 			decls.Fields[name] = c.Fields
+		}
+	}
+	if len(cat) == len(schema) {
+		for i, c := range schema {
+			if cat[i] != pgCatUnknown {
+				if decls.pgCat == nil {
+					decls.pgCat = map[string]pgCategory{}
+				}
+				decls.pgCat[strings.ToLower(c.Name)] = cat[i]
+			}
 		}
 	}
 	return nodeDeclaredType(node, decls)

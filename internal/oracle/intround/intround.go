@@ -43,6 +43,9 @@ var cellsJSON []byte
 //go:embed testdata/pg_typeof.tsv
 var typeofTSV string
 
+//go:embed testdata/merge_cells.json
+var mergeCellsJSON []byte
+
 // TypeCell is one expression and the type pg_typeof() names for it on
 // PostgreSQL 17.11, over m(i integer, b bigint, d numeric(10,2), f float8).
 type TypeCell struct {
@@ -160,6 +163,54 @@ func DialectCells() []Cell {
 		}
 	}
 	return out
+}
+
+// MergeSourceCells are MERGE cells whose value arrives through the SOURCE
+// relation rather than the target's namespace: a derived table, a derived
+// table over one, a CTE inside the source, UNION ALL, a join and a VALUES list,
+// each over float8 and numeric spellings, with UPDATE and INSERT actions and
+// qualified and bare references, into INTEGER and BIGINT. The source's
+// declaration is the one its own plan emits, category included, exactly as an
+// INSERT … SELECT reads it. testdata/merge_cells.json is generated and
+// measured on PostgreSQL 17.11 by testdata/gen_merge_cells.py.
+func MergeSourceCells() []Cell {
+	var ms []struct {
+		Name  string   `json:"n"`
+		Stmts []string `json:"s"`
+		Want  string   `json:"w"`
+	}
+	if err := json.Unmarshal(mergeCellsJSON, &ms); err != nil {
+		panic(fmt.Sprintf("intround: %v", err))
+	}
+	out := make([]Cell, 0, len(ms))
+	for _, m := range ms {
+		out = append(out, Cell{Name: m.Name, Door: "merge", Stmts: m.Stmts, Read: readOf("t_m"), Want: m.Want})
+	}
+	return out
+}
+
+// MergeSourceRefusal names the error a MERGE-source cell refuses with before
+// any value is assigned, where PostgreSQL answers — none of them about the
+// rounding, each recorded for filing:
+//
+//   - a CTE the statement itself names (`WITH c AS (…) MERGE INTO t USING c
+//     …`) and a VALUES list aliased with a column list (`USING (VALUES …) AS
+//     s2(id, v)`) do not parse here; the same sources spelled inside a
+//     subquery are asserted;
+//   - an expression OVER a subquery source (`SET n4 = s2.v * 1`) is 0A000:
+//     MERGE evaluates an expression only over a catalog source's rows.
+//
+// A pin that starts answering fails: delete it.
+func MergeSourceRefusal(name string) (string, bool) {
+	switch {
+	case strings.HasPrefix(name, "merge-source/with-merge/"):
+		return `syntax error at or near "MERGE"`, true
+	case strings.HasPrefix(name, "merge-source/values/"):
+		return "expected ON", true
+	case strings.HasSuffix(name, "/update-computed"):
+		return "has no declared schema to resolve it against", true
+	}
+	return "", false
 }
 
 func doorName(d rune) string {

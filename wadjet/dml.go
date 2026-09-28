@@ -607,7 +607,8 @@ func (db *DB) mergeOnce(ctx context.Context, info *plansql.MergeInfo) (*ExecResu
 	for _, cm := range sourceResult.ColumnMetas {
 		sourceColNames = append(sourceColNames, cm.Name)
 	}
-	ev := db.buildMergeEvaluator(ctx, info, targetMeta.Schema.Columns, targetAlias, sourceAlias, sourceColNames)
+	ev := db.buildMergeEvaluator(ctx, info, targetMeta.Schema.Columns, targetAlias, sourceAlias, sourceColNames,
+		sourceResult.OutputSchema, sourceResult.pgCategoryPos)
 
 	// Parse ON condition into equality key pairs for row matching
 	onKeys, err := parseOnKeys(info.OnCondition, targetAlias, sourceAlias)
@@ -1160,18 +1161,30 @@ type mergeEvaluator struct {
 	// folded reference from a delimited one, because building it threw the
 	// distinction away; batch.ResolveSchemaIndex decides that from the
 	// reference and the schema, so it needs the schema.
-	targetCols   []parquet.Column
-	srcCols      []parquet.Column
-	mergedCols   []parquet.Column          // the merged row's batch schema
+	targetCols []parquet.Column
+	srcCols    []parquet.Column
+	mergedCols []parquet.Column // the merged row's batch schema
+	// mergedCat is PostgreSQL's category of each mergedCols entry, positional,
+	// where the source is a subquery whose declaration is its plan's OUTPUT
+	// (a derived `5 / 2.0` is FLOAT64 and numeric); nil when the source is a
+	// catalog table, whose columns ARE their types.
+	mergedCat    []expr.PGCategory
 	mergedByName map[string]parquet.Column // the same, by the spelling it is keyed on
 	sourceKnown  bool                      // false when the source's declared schema is unavailable
-	// sourceNamed is true when the source's COLUMN NAMES are known even
-	// though its declared TYPES are not — a subquery source, whose rows the
-	// statement has already read. It gates name RESOLUTION (checkOnKeys) and
-	// nothing else: every use that needs a declared type stays behind
-	// sourceKnown, because inferring a type from a boxed value is how a
-	// DECIMAL or a DATE (both boxed as strings) gets silently mistyped.
+	// sourceNamed is true for a SUBQUERY source, whose rows the statement has
+	// already read: its column NAMES are known, and so is each column's
+	// DECLARATION — the one its own plan emitted, category included, which is
+	// what an INSERT … SELECT reads for the same query (selectItemSources).
+	// That declaration is what a bare reference to the source is ASSIGNED by.
+	// EVALUATING an expression over the source stays behind sourceKnown (a
+	// catalog source): it refuses 0A000 rather than compile over the boxed
+	// row, which is a separate door from this one.
 	sourceNamed bool
+	// srcAmbiguous holds the names a subquery source publishes more than
+	// once (`USING (SELECT a.y, b.y …) s`). A reference to one is 42702 in
+	// PostgreSQL; it used to read whichever copy the merged row held last,
+	// with no declaration, so a float8 pair rounded by the numeric rule.
+	srcAmbiguous map[string]bool
 	// sub is what a WHEN condition needs to ANSWER a subquery inside it
 	// rather than refuse one (#688). Its outer scope is the MERGED row —
 	// target and source together, which is what a WHEN condition names — so a
@@ -1190,7 +1203,7 @@ type mergeEvaluator struct {
 // target's names first and the source's over them.
 func (db *DB) buildMergeEvaluator(ctx context.Context, info *plansql.MergeInfo,
 	targetCols []parquet.Column, targetAlias, sourceAlias string,
-	sourceColNames []string) *mergeEvaluator {
+	sourceColNames []string, sourceDecl []parquet.Column, sourceCat []expr.PGCategory) *mergeEvaluator {
 
 	ev := &mergeEvaluator{
 		target:       info.Target,
@@ -1208,6 +1221,7 @@ func (db *DB) buildMergeEvaluator(ctx context.Context, info *plansql.MergeInfo,
 	}
 
 	var sourceCols []parquet.Column
+	var srcCat []expr.PGCategory // parallel to sourceCols, a subquery source only
 	info.Source = db.catalog.ResolveTableName(info.Source)
 	if srcMeta, err := db.catalog.GetTable(ctx, info.Source); err == nil {
 		sourceCols = srcMeta.Schema.Columns
@@ -1224,36 +1238,73 @@ func (db *DB) buildMergeEvaluator(ctx context.Context, info *plansql.MergeInfo,
 		// PostgreSQL raises 42703 (#689 part 2's residual).
 		//
 		// The statement has ALREADY RUN the subquery by the time this is
-		// built, so its output column NAMES are known even though no
-		// declaration exists for their types. Only the names are recorded,
-		// and only in srcByName: the merged namespace below stays built from
-		// `sourceCols`, so no untyped column can reach the value resolution
-		// that judges a literal against a declaration.
+		// built, so its output column NAMES are known — and so is each
+		// column's DECLARATION: the plan's declared output and its
+		// PostgreSQL category, the same layer an INSERT … SELECT of the same
+		// query reads (selectItemSources). The merged namespace carries those
+		// declared columns, so a bare `SET n = s.y` resolves its declaration
+		// exactly as it does over a catalog source. Without them the
+		// reference was undecided and a float8 source rounded by the numeric
+		// rule: `USING (SELECT id, y FROM s) src … SET n = src.y` over 2.5
+		// stored 3 where PostgreSQL stores 2 (#1353 round 2, B3).
+		//
+		// A name the source publishes twice has no one declaration, and a
+		// reference to it is ambiguous (resolveRefIn).
 		ev.sourceNamed = true
 		for _, n := range sourceColNames {
 			ev.srcByName[strings.ToLower(n)] = parquet.Column{Name: n}
 			ev.srcCols = append(ev.srcCols, parquet.Column{Name: n})
 		}
+		if len(sourceDecl) == len(sourceColNames) {
+			seen := make(map[string]int, len(sourceColNames))
+			for _, n := range sourceColNames {
+				seen[strings.ToLower(n)]++
+			}
+			for i, n := range sourceColNames {
+				if seen[strings.ToLower(n)] != 1 {
+					if ev.srcAmbiguous == nil {
+						ev.srcAmbiguous = map[string]bool{}
+					}
+					ev.srcAmbiguous[strings.ToLower(n)] = true
+					continue
+				}
+				c := sourceDecl[i]
+				c.Name = n
+				sourceCols = append(sourceCols, c)
+				if len(sourceCat) == len(sourceDecl) {
+					srcCat = append(srcCat, sourceCat[i])
+				} else {
+					srcCat = append(srcCat, expr.PGCatUnknown)
+				}
+			}
+		}
 	}
 
 	plain := make(map[string]bool, len(targetCols)+len(sourceCols))
-	add := func(c parquet.Column, name string) {
+	add := func(c parquet.Column, name string, cat expr.PGCategory) {
 		c.Name = name
 		ev.mergedCols = append(ev.mergedCols, c)
+		if srcCat != nil {
+			ev.mergedCat = append(ev.mergedCat, cat)
+		}
 		if _, seen := ev.mergedByName[name]; !seen {
 			ev.mergedByName[name] = c
 		}
 	}
-	for _, c := range sourceCols {
-		add(c, strings.ToLower(c.Name))
-		add(c, ev.sourceAlias+"."+strings.ToLower(c.Name))
+	for i, c := range sourceCols {
+		cat := expr.PGCatUnknown
+		if srcCat != nil {
+			cat = srcCat[i]
+		}
+		add(c, strings.ToLower(c.Name), cat)
+		add(c, ev.sourceAlias+"."+strings.ToLower(c.Name), cat)
 		plain[strings.ToLower(c.Name)] = true
 	}
 	for _, c := range targetCols {
 		if !plain[strings.ToLower(c.Name)] {
-			add(c, strings.ToLower(c.Name))
+			add(c, strings.ToLower(c.Name), expr.PGCatUnknown)
 		}
-		add(c, ev.targetAlias+"."+strings.ToLower(c.Name))
+		add(c, ev.targetAlias+"."+strings.ToLower(c.Name), expr.PGCatUnknown)
 	}
 	return ev
 }
@@ -1318,6 +1369,9 @@ func (ev *mergeEvaluator) resolveRef(ref *plansql.ColRef) (parquet.Column, strin
 // is per clause kind, not per statement.
 func (ev *mergeEvaluator) resolveRefIn(ref *plansql.ColRef, matched bool) (parquet.Column, string, error) {
 	col := strings.ToLower(ref.Column)
+	if ev.srcAmbiguous[col] && (ref.Table == "" || strings.EqualFold(ref.Table, ev.sourceAlias)) {
+		return parquet.Column{}, "", sqlerr.New("42702", "column reference %q is ambiguous", ref.Column)
+	}
 	if !matched {
 		// Source-only scope.
 		if ref.Table != "" && strings.EqualFold(ref.Table, ev.targetAlias) {
@@ -1504,7 +1558,11 @@ func (ev *mergeEvaluator) targetColumn(name string) (parquet.Column, error) {
 // and answers FLOAT, so the half-to-even rule was applied to an expression
 // whose PostgreSQL source type is numeric and 5 of 8 rows differed from
 // PostgreSQL (review P5). A cast is the user saying which family this is.
-func dmlSourceIsFloat(node plansql.Node, schema []parquet.Column) bool {
+//
+// cat is PostgreSQL's category of each schema column where the schema is a
+// plan's declared output (a MERGE's subquery source); nil for a catalog
+// schema, whose columns ARE their types.
+func dmlSourceIsFloat(node plansql.Node, schema []parquet.Column, cat []expr.PGCategory) bool {
 	if c, ok := unwrapDMLParens(node).(*plansql.CastNode); ok {
 		switch strings.ToLower(strings.TrimSpace(c.TypeName)) {
 		case "float", "float4", "float8", "real", "double precision", "double",
@@ -1518,7 +1576,7 @@ func dmlSourceIsFloat(node plansql.Node, schema []parquet.Column) bool {
 	// FLOAT64, while PostgreSQL types both numeric and rounds them half away
 	// from zero. The declaration carries that category (PGNumeric), resolved
 	// by PostgreSQL's own operand rules (#1353).
-	decl, conf := physical.DeclaredTypeOfNode(node, schema)
+	decl, conf := physical.DeclaredTypeOfNodeIn(node, schema, cat)
 	return conf == expr.Decided &&
 		(decl.ID == parquet.TypeFloat32 || (decl.ID == parquet.TypeFloat64 && !decl.PGNumeric) ||
 			(decl.ID == parquet.TypeDecimal && decl.PGFloat8))
@@ -1529,7 +1587,7 @@ func dmlSourceIsFloat(node plansql.Node, schema []parquet.Column) bool {
 // namespace is the merged one, so `s.f` resolves to the source's declaration
 // exactly as the expression evaluator resolves it.
 func (ev *mergeEvaluator) sourceIsFloat(node plansql.Node) bool {
-	return dmlSourceIsFloat(node, ev.mergedCols)
+	return dmlSourceIsFloat(node, ev.mergedCols, ev.mergedCat)
 }
 
 // dmlSourceDeclaredType is the OTHER fact a computed assignment needs beside
@@ -1554,8 +1612,8 @@ func (ev *mergeEvaluator) sourceIsFloat(node plansql.Node) bool {
 // all), and every caller's contract for that case is to fall back to the
 // pre-arc box-shape reading rather than refuse: declining to refuse is safer
 // than guessing wrong on a shape this fix cannot yet name.
-func dmlSourceDeclaredType(node plansql.Node, schema []parquet.Column) (parquet.TypeID, bool) {
-	decl, conf := physical.DeclaredTypeOfNode(node, schema)
+func dmlSourceDeclaredType(node plansql.Node, schema []parquet.Column, cat []expr.PGCategory) (parquet.TypeID, bool) {
+	decl, conf := physical.DeclaredTypeOfNodeIn(node, schema, cat)
 	if conf != expr.Decided {
 		return 0, false
 	}
@@ -1599,8 +1657,10 @@ type assignSource struct {
 }
 
 // assignSourceOf classifies a source expression. schema resolves column
-// references (nil for a VALUES cell, which has none).
-func assignSourceOf(node plansql.Node, schema []parquet.Column) assignSource {
+// references (nil for a VALUES cell, which has none); cat is PostgreSQL's
+// category of each schema column where the schema is a plan's declared output
+// (nil for a catalog schema — see dmlSourceIsFloat).
+func assignSourceOf(node plansql.Node, schema []parquet.Column, cat []expr.PGCategory) assignSource {
 	if lit, ok := dmlLiteralText(node); ok {
 		src := assignSource{literal: lit, isLiteral: true}
 		src.declType, src.declKnown = literalDeclaredType(node)
@@ -1609,11 +1669,11 @@ func assignSourceOf(node plansql.Node, schema []parquet.Column) assignSource {
 	if dmlTypedTextSource(node) {
 		return assignSource{typedText: true}
 	}
-	decl, conf := physical.DeclaredTypeOfNode(node, schema)
+	decl, conf := physical.DeclaredTypeOfNodeIn(node, schema, cat)
 	if conf != expr.Decided {
-		return assignSource{declFloat: dmlSourceIsFloat(node, schema)}
+		return assignSource{declFloat: dmlSourceIsFloat(node, schema, cat)}
 	}
-	return assignSource{declType: decl.ID, declKnown: true, declFloat: dmlSourceIsFloat(node, schema),
+	return assignSource{declType: decl.ID, declKnown: true, declFloat: dmlSourceIsFloat(node, schema, cat),
 		declScale: decl.Scale}
 }
 
@@ -1798,7 +1858,7 @@ func datatypeMismatchNamed(col parquet.Column, src parquet.TypeID) error {
 // sourceDeclaredType is dmlSourceDeclaredType resolved against MERGE's merged
 // namespace, the same split sourceIsFloat keeps for the same reason.
 func (ev *mergeEvaluator) sourceDeclaredType(node plansql.Node) (parquet.TypeID, bool) {
-	return dmlSourceDeclaredType(node, ev.mergedCols)
+	return dmlSourceDeclaredType(node, ev.mergedCols, ev.mergedCat)
 }
 
 // value resolves one SET / VALUES expression against the merged row.
@@ -1819,7 +1879,7 @@ func (ev *mergeEvaluator) value(text string, merged map[string]any, col parquet.
 	if err := dmlExpressionTyping(node, "", ev.mergedCols); err != nil {
 		return nil, err
 	}
-	src := assignSourceOf(node, ev.mergedCols)
+	src := assignSourceOf(node, ev.mergedCols, ev.mergedCat)
 	if err := src.check(col); err != nil {
 		return nil, err
 	}
@@ -2803,7 +2863,7 @@ func assignInsertValue(text string, col parquet.Column) (any, error) {
 	if err := dmlExpressionTyping(node, "", nil); err != nil {
 		return nil, err
 	}
-	src := assignSourceOf(node, nil)
+	src := assignSourceOf(node, nil, nil)
 	if err := src.check(col); err != nil {
 		return nil, err
 	}
@@ -3593,7 +3653,7 @@ func ResolveDMLSetClauses(clauses []plansql.SetClause, target plansql.DMLTarget,
 		if err != nil {
 			return nil, sqlerr.Wrap("42601", fmt.Errorf("SET %s: parsing %q: %w", name, sc.Value, err))
 		}
-		if src := assignSourceOf(node, schema); src.isLiteral {
+		if src := assignSourceOf(node, schema, nil); src.isLiteral {
 			if err := src.check(col); err != nil {
 				return nil, fmt.Errorf("SET %s: %w", name, err)
 			}
@@ -3613,7 +3673,7 @@ func ResolveDMLSetClauses(clauses []plansql.SetClause, target plansql.DMLTarget,
 		// The one assignment table, asked once per clause before any row —
 		// which is also PostgreSQL's order: a type mismatch refuses the
 		// statement even when no row matches.
-		src := assignSourceOf(node, schema)
+		src := assignSourceOf(node, schema, nil)
 		if err := src.check(col); err != nil {
 			return nil, fmt.Errorf("SET %s: %w", name, err)
 		}

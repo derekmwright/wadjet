@@ -28,14 +28,18 @@ import (
 // answers measured on PostgreSQL.
 func TestIntegerAssignmentRoundsByPostgresTypeOnEveryDoor(t *testing.T) {
 	ctx := context.Background()
-	cells := append(intround.Cells(), intround.DialectCells()...)
+	cells := append(append(intround.Cells(), intround.DialectCells()...), intround.MergeSourceCells()...)
 	failed := 0
 	for _, c := range cells {
 		// A fresh fixture per cell: a table rewritten thousands of times over
 		// grows a file per statement, and the cells are independent.
 		got, err := intRoundCell(ctx, c)
 		key := c.Name + " [" + c.Door + "]"
-		if pin, pinned := intRoundKnownRefusals[key]; pinned {
+		pin, pinned := intRoundKnownRefusals[key]
+		if !pinned {
+			pin, pinned = intround.MergeSourceRefusal(c.Name)
+		}
+		if pinned {
 			if err == nil || !strings.Contains(err.Error(), pin) {
 				failed++
 				t.Errorf("%s: the pinned refusal moved (stored %s, err %v); if it now stores %s, "+
@@ -190,7 +194,7 @@ func TestIntegerAssignmentRuleFollowsPgTypeof(t *testing.T) {
 			continue
 		}
 		asked++
-		if got := dmlSourceIsFloat(node, schema); got != wantFloat {
+		if got := dmlSourceIsFloat(node, schema, nil); got != wantFloat {
 			wrong++
 			rule := map[bool]string{true: "half to even (float8)", false: "half away from zero (numeric)"}
 			t.Errorf("%s: the assignment rounds %s; pg_typeof is %s", c.Expr, rule[got], c.PGType)
@@ -198,5 +202,58 @@ func TestIntegerAssignmentRuleFollowsPgTypeof(t *testing.T) {
 	}
 	if wrong > 0 {
 		t.Logf("%d of %d expressions round by a rule their PostgreSQL type does not", wrong, asked)
+	}
+}
+
+// A MERGE subquery source that publishes one name twice has no one
+// declaration for it, and PostgreSQL 17.11 refuses a reference to that name
+// 42702 on every clause kind, qualified or bare. This engine read whichever
+// copy the merged row held, undeclared, so a float8 pair rounded by the
+// numeric rule: `SET n = src.y` over 2.5, 0.5, -2.5, -0.5 stored 3, 1, -3, -1.
+// An unreferenced duplicate does not stop the statement (PostgreSQL answers
+// 2, 0, -2, 0 there too).
+func TestMergeSubquerySourceNamePublishedTwiceIsAmbiguous(t *testing.T) {
+	ctx := context.Background()
+	const src = "(SELECT a.id, a.y AS v, a.y, b.y FROM s a JOIN s b ON a.id = b.id) src ON t.id = src.id"
+	for _, c := range []struct {
+		name, merge, want string
+	}{
+		{"qualified", "MERGE INTO t USING " + src + " WHEN MATCHED THEN UPDATE SET n = src.y", "42702"},
+		{"bare", "MERGE INTO t USING " + src + " WHEN MATCHED THEN UPDATE SET n = y", "42702"},
+		{"insert", "MERGE INTO t USING " + src + " WHEN NOT MATCHED THEN INSERT (id, n) VALUES (src.id, src.y)", "42702"},
+		{"condition", "MERGE INTO t USING " + src + " WHEN MATCHED AND src.y > 0 THEN UPDATE SET n = src.v", "42702"},
+		{"unreferenced", "MERGE INTO t USING " + src + " WHEN MATCHED THEN UPDATE SET n = src.v", "1:2 2:0 3:-2 4:0"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			db, err := Open(ctx, Config{Store: objstore.NewMemStore(), Bucket: "test"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			for _, s := range []string{
+				"CREATE TABLE s (id INTEGER, y DOUBLE)",
+				"INSERT INTO s VALUES (1, 2.5), (2, 0.5), (3, -2.5), (4, -0.5)",
+				"CREATE TABLE t (id INTEGER, n INTEGER)",
+				"INSERT INTO t SELECT id, 0 FROM s",
+			} {
+				if err := intRoundExec(ctx, db, s); err != nil {
+					t.Fatalf("%s: %v", s, err)
+				}
+			}
+			stmts := []string{c.merge}
+			if c.name == "insert" {
+				stmts = []string{"DELETE FROM t", c.merge}
+			}
+			got, err := intRoundRun(ctx, db, intround.Cell{Stmts: stmts, Read: "SELECT id, n FROM t ORDER BY id"})
+			if err != nil {
+				got = err.Error()
+				if strings.Contains(got, "is ambiguous") {
+					got = "42702"
+				}
+			}
+			if got != c.want {
+				t.Fatalf("got %s, PostgreSQL 17.11: %s", got, c.want)
+			}
+		})
 	}
 }
