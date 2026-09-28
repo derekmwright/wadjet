@@ -121,6 +121,15 @@ func CheckMemberProbe(left plansql.Node, t parquet.TypeID) (err error) {
 // DECIMAL(38,s) holds.
 func MemberProbe(left plansql.Node, t parquet.TypeID) (plansql.Node, bool, error) {
 	switch t {
+	case parquet.TypeDecimal, parquet.TypeInt32, parquet.TypeInt64:
+		// A constant-valued operand that is not itself a literal is folded
+		// to the number its constants spell and typed as one (B9;
+		// member_constant_fold.go), or refused where it cannot be.
+		if memberConstantCandidate(left) {
+			return memberConstantProbe(left, t)
+		}
+	}
+	switch t {
 	case parquet.TypeDecimal:
 		return memberNumericProbe(left)
 	case parquet.TypeInt32, parquet.TypeInt64:
@@ -162,8 +171,10 @@ func MemberProbeCandidate(left plansql.Node) bool {
 	if lit, ok := plansql.Unparen(left).(*plansql.Lit); ok && lit.Kind == plansql.LitString {
 		return true
 	}
-	_, ok := memberNumericText(left)
-	return ok
+	if _, ok := memberNumericText(left); ok {
+		return true
+	}
+	return memberConstantCandidate(left)
 }
 
 // memberNumericProbe is the outer operand of a membership against a NUMERIC
