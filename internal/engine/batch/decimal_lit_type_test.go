@@ -2,7 +2,10 @@
 
 package batch
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // TestDecimalTextTypeIsTheLiteralsSpelling is ADR-0024 item 3's rule for a
 // numeric literal: its (p,s) is what the user WROTE, not the range of a type
@@ -86,6 +89,76 @@ func TestDecimalTextTypeHoldsItsOwnValue(t *testing.T) {
 		}
 		if !DecimalFitsPrecision(d.Unscaled, typ.Precision) {
 			t.Errorf("%q does not fit its own precision %d", text, typ.Precision)
+		}
+	}
+}
+
+// TestDecimalValueTypeIsTheValuesOwnSpelling: a literal compared by VALUE
+// (a membership's outer operand, #1372) is typed by DecimalTextType of the
+// value's shortest spelling when its written spelling is wider than a
+// DECIMAL only by zeros; a value no DECIMAL(38,s) holds is refused.
+func TestDecimalValueTypeIsTheValuesOwnSpelling(t *testing.T) {
+	z := strings.Repeat
+	for _, tc := range []struct {
+		text string
+		want DecimalType
+		ok   bool
+	}{
+		{"12.5", DecimalType{Precision: 3, Scale: 1}, true},
+		{"12.50", DecimalType{Precision: 4, Scale: 2}, true}, // the spelling, when it fits
+		{"12.5" + z("0", 40), DecimalType{Precision: 3, Scale: 1}, true},
+		{z("0", 40) + "12.5", DecimalType{Precision: 3, Scale: 1}, true},
+		{"14" + z("0", 40) + "e-40", DecimalType{Precision: 2}, true},
+		{"0." + z("0", 45), DecimalType{Precision: 1}, true},
+		{"1.25000000000000001e13", DecimalType{Precision: 18, Scale: 4}, true},
+		{"14." + z("0", 39) + "1", DecimalType{}, false},
+		{"0." + z("0", 38) + "1", DecimalType{}, false},
+		{"1e40", DecimalType{}, false},
+		{"NaN", DecimalType{}, false},
+		{"zz", DecimalType{}, false},
+	} {
+		got, ok := DecimalValueType(tc.text)
+		if ok != tc.ok || got != tc.want {
+			t.Errorf("DecimalValueType(%q) = (%+v, %v), want (%+v, %v)", tc.text, got, ok, tc.want, tc.ok)
+		}
+	}
+}
+
+// TestDecimalTextRoundedAtRoundsOnceFromTheDigits: the value at a target
+// scale, rounded half away from zero by the first digit past it, whatever
+// width the text was written in — PostgreSQL's numeric(p,s) input.
+func TestDecimalTextRoundedAtRoundsOnceFromTheDigits(t *testing.T) {
+	z := strings.Repeat
+	for _, tc := range []struct {
+		text      string
+		scale     int
+		want      string
+		sat, isOK bool
+	}{
+		{"12.755", 2, "12.76", false, true},
+		{"-12.755", 2, "-12.76", false, true},
+		{"12.754999", 2, "12.75", false, true},
+		{"14." + z("0", 39) + "1", 4, "14.0000", false, true},
+		{"14." + z("0", 4) + "5" + z("0", 40), 4, "14.0001", false, true},
+		{"9.99995", 4, "10.0000", false, true},
+		{"1e-40", 4, "0.0000", false, true},
+		{"0.00005", 4, "0.0001", false, true},
+		{"0.00004", 4, "0.0000", false, true},
+		{"1e40", 0, "", true, true},
+		{"1e1000", 4, "", true, true},
+		{"0e1000", 4, "0.0000", false, true},
+		{"zz", 2, "", false, false},
+		{"NaN", 2, "", false, false},
+	} {
+		v, sat, ok := DecimalTextRoundedAt(tc.text, tc.scale)
+		if ok != tc.isOK || sat != tc.sat {
+			t.Errorf("DecimalTextRoundedAt(%q, %d): sat %v ok %v, want sat %v ok %v", tc.text, tc.scale, sat, ok, tc.sat, tc.isOK)
+			continue
+		}
+		if ok && !sat {
+			if got := v.FormatDecimal(tc.scale); got != tc.want {
+				t.Errorf("DecimalTextRoundedAt(%q, %d) = %s, want %s", tc.text, tc.scale, got, tc.want)
+			}
 		}
 	}
 }

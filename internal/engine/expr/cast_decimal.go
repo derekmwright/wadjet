@@ -254,56 +254,47 @@ func castDecimalValue(v any, scale int) (batch.Int128, bool) {
 }
 
 // castDecimalFromText is the one conversion every source family funnels
-// through: read the text at ITS OWN scale, then rescale ONCE to the target.
+// through: the text's value rounded ONCE, half away from zero, at the target
+// scale (batch.DecimalTextRoundedAt).
 //
-// Reading at the natural scale first is what makes the rounding single.
-// batch.DecimalTextAt at the TARGET scale truncates and reports a residual
+// batch.DecimalTextAt at the target scale truncates and reports a residual
 // instead, which is right for its own caller — a comparison bound, where a
 // literal finer than the column still has a place in the order (#462) — and
 // wrong for a value: `12.755::numeric(9,2)` is 12.76 in PostgreSQL, not 12.75.
+// The value is read from the digits, never from a DECIMAL named by the
+// SPELLING: a text written wider than 38 digits still has a value at the
+// target scale — `CAST('14.' || 40 zeros AS numeric(18,4))` is 14.0000 in
+// PostgreSQL, and so is a 42-digit '14.000…0001', which the target's scale
+// rounds; reading through the spelling's own DECIMAL refused both 22003.
 func castDecimalFromText(text string, scale int) batch.Int128 {
-	nat, ok := batch.DecimalTextType(text)
+	// NaN and the infinities: PostgreSQL's numeric DOES hold them and an
+	// Int128 has no bit pattern for either, so they are refused as a VALUE
+	// with the SQLSTATE that says the range is the problem (ADR-0024 item 6).
+	if isNonFiniteNumericText(text) {
+		panic(fatalEval{nonFiniteDecimalError(text)})
+	}
+	out, sat, ok := batch.DecimalTextRoundedAt(text, scale)
 	if !ok {
-		// Not a number this carrier can name. NaN and the infinities are the
-		// interesting half: PostgreSQL's numeric DOES hold them and an Int128
-		// has no bit pattern for either, so they are refused as a VALUE with
-		// the SQLSTATE that says the range is the problem (ADR-0024 item 6).
-		if isNonFiniteNumericText(text) {
-			panic(fatalEval{nonFiniteDecimalError(text)})
-		}
-		// A well-formed number that is simply TOO WIDE is a range condition,
-		// not a syntax one: PostgreSQL answers `CAST('1e40' AS numeric(38,0))`
-		// with 22003 numeric field overflow, and reporting 22P02 sends a
-		// client hunting a typo in a number it read correctly (#555 review,
-		// S1).
-		if _, isNumber := batch.CanonicalDecimalText(text); isNumber {
-			raiseNumericFieldOverflow(0, scale)
-		}
 		raiseInvalidTextRepresentation("numeric", text)
 	}
-	d, ok := batch.DecimalTextAt(text, nat.Scale)
-	if !ok || d.Residual != 0 {
-		raiseInvalidTextRepresentation("numeric", text)
-	}
-	if d.Sat != 0 {
-		// The value has no Int128 even at its own scale: 10^39 written out.
-		raiseNumericFieldOverflow(0, nat.Scale)
-	}
-	out, ok := batch.Rescale(d.Unscaled, nat.Scale, scale)
-	if !ok {
+	if sat {
+		// A well-formed number too wide for the carrier at this scale is a
+		// range condition, not a syntax one: PostgreSQL answers
+		// `CAST('1e40' AS numeric(38,0))` with 22003 numeric field overflow,
+		// and reporting 22P02 sends a client hunting a typo in a number it
+		// read correctly (#555 review, S1).
 		raiseNumericFieldOverflow(0, scale)
 	}
 	return out
 }
 
 // isNonFiniteNumericText reports whether text names NaN or an infinity in one
-// of PostgreSQL's spellings for numeric input.
+// of PostgreSQL's spellings for numeric input — the classifier the
+// comparison bound reads too (batch.DecimalSpecialText). A SIGNED NaN is no
+// such spelling: PostgreSQL refuses '+NaN' and '-NaN' as input syntax
+// (22P02), which the cast's own input function then raises.
 func isNonFiniteNumericText(text string) bool {
-	switch strings.ToLower(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(text), "+"))) {
-	case "nan", "inf", "-inf", "infinity", "-infinity":
-		return true
-	}
-	return false
+	return batch.DecimalSpecialText(text) != batch.DecimalFinite
 }
 
 // --- The cast as an arithmetic operand --------------------------------------

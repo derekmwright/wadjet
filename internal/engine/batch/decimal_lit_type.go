@@ -33,6 +33,42 @@ func DecimalTextType(s string) (DecimalType, bool) {
 	return decLitType(max(len(digits), scale), scale)
 }
 
+// DecimalValueType is the DECIMAL(p,s) of the VALUE numeric text names, for a
+// literal that is compared rather than stored by its spelling — the outer
+// operand of a membership (#1372). It is DecimalTextType's rule, applied to
+// the spelling first and, where that spelling declares no DECIMAL only
+// because of zeros that carry no value — leading zeros, trailing fraction
+// zeros, zeros an exponent shifts past the point — to the value's own
+// shortest spelling: '12.5' followed by forty zeros is 12.5, DECIMAL(3,1),
+// as PostgreSQL's numeric reads it.
+//
+// ok=false is text that names no finite number, or a number no DECIMAL(38,s)
+// holds exactly: more than 38 significant digits, or a digit past scale 38.
+// The caller refuses such a value; it never reaches a double.
+func DecimalValueType(s string) (DecimalType, bool) {
+	if t, ok := DecimalTextType(s); ok {
+		return t, true
+	}
+	_, digits, exp, ok := decimalParts(s)
+	if !ok {
+		return DecimalType{}, false
+	}
+	digits = strings.TrimLeft(digits, "0")
+	if digits == "" {
+		return DecimalType{Precision: 1}, true // zero, whatever was written
+	}
+	trimmed := strings.TrimRight(digits, "0")
+	exp += len(digits) - len(trimmed)
+	if exp >= 0 {
+		return decLitType(len(trimmed)+exp, 0)
+	}
+	scale := -exp
+	if scale > MaxDecimalScale {
+		return DecimalType{}, false
+	}
+	return decLitType(max(len(trimmed), scale), scale)
+}
+
 // decimalLitParts splits numeric text into its SIGNIFICANT digits and the
 // power of ten they must be multiplied by, keeping the trailing zeros the user
 // wrote as digits rather than folding them into the exponent.

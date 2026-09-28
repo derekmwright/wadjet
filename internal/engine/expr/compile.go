@@ -491,7 +491,10 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 		if len(n.Values) == 1 {
 			if sq, ok := n.Values[0].(*plansql.SubqueryNode); ok && ctx.runner != nil {
 				setDecl = subquerySetDecl(sq.SQL, ctx)
-				probeNode = memberProbe(n.Left, setDecl)
+				var err error
+				if probeNode, err = memberProbe(n.Left, setDecl); err != nil {
+					return nil, err
+				}
 			}
 		}
 		left, err := compileWithCtx(probeNode, ctx)

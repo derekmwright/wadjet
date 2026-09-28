@@ -109,7 +109,9 @@ func (p *Planner) typeMemberLiteralsIn(ctes []plansql.CTEDef, e plansql.Node) bo
 }
 
 // memberLiteralCast is the typed node for a membership's outer operand, or
-// nil when there is nothing to type: the operand is not a quoted literal,
+// nil when there is nothing to type: the operand is not a literal
+// expr.MemberProbe types (a quoted literal; against a NUMERIC body also a
+// numeric constant or a quoted literal under a bare NUMERIC CAST),
 // the membership is not against ONE subquery, or its declared type is not
 // one the literal takes (a TEXT set keeps the text, as PostgreSQL does).
 //
@@ -119,8 +121,7 @@ func (p *Planner) typeMemberLiteralsIn(ctes []plansql.CTEDef, e plansql.Node) bo
 // type: a plan with no quoted-literal membership leaves the planner as it
 // found it.
 func (p *Planner) memberLiteralCast(ctes []plansql.CTEDef, left plansql.Node, values []plansql.Node) plansql.Node {
-	lit, ok := plansql.Unparen(left).(*plansql.Lit)
-	if !ok || lit.Kind != plansql.LitString || len(values) != 1 {
+	if !expr.MemberProbeCandidate(left) || len(values) != 1 {
 		return nil
 	}
 	sq, ok := plansql.Unparen(values[0]).(*plansql.SubqueryNode)
@@ -136,8 +137,12 @@ func (p *Planner) memberLiteralCast(ctes []plansql.CTEDef, left plansql.Node, va
 	if !ok {
 		return nil
 	}
-	typed, ok := expr.MemberProbe(lit, col.Type)
-	if !ok {
+	// A literal the type refuses (22P02, or the 22003 of a NUMERIC literal
+	// no DECIMAL(38,s) holds) is left as written: the binder refuses the
+	// statement with the same error before any plan runs, and the compiler's
+	// memberProbe refuses a plan-less one.
+	typed, ok, err := expr.MemberProbe(left, col.Type)
+	if !ok || err != nil {
 		return nil
 	}
 	return typed

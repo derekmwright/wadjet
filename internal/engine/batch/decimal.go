@@ -574,6 +574,69 @@ func DecimalTextAt(text string, scale int) (ScaledDecimal, bool) {
 	return ScaledDecimal{Unscaled: v, Residual: residual}, true
 }
 
+// DecimalTextRoundedAt reads numeric TEXT as an exact unscaled value at
+// `scale`, rounding half away from zero exactly once, as PostgreSQL's numeric
+// input rounds a value into a numeric(p,s): the first digit past the scale
+// decides, so a text written wider than the carrier ('14.' then thirty-nine
+// zeros then '1', into scale 4) still has its value there, 14.0000.
+//
+// ok=false is text that names no number (NaN and the infinities included —
+// they have no DECIMAL value, ADR-0024 item 6); sat is a number whose rounded
+// value has no Int128 at this scale.
+func DecimalTextRoundedAt(text string, scale int) (v Int128, sat, ok bool) {
+	neg, digits, exp, ok := decimalParts(text)
+	if !ok || scale < 0 {
+		return Int128{}, false, false
+	}
+	digits = strings.TrimLeft(digits, "0")
+	if digits == "" {
+		return Int128{}, false, true // zero, at every scale
+	}
+	// The unscaled value at `scale` is digits x 10^(exp+scale).
+	if shift := exp + scale; shift >= 0 {
+		if len(digits)+shift > maxInt128Digits {
+			return Int128{}, true, true
+		}
+		digits += strings.Repeat("0", shift)
+	} else {
+		drop := -shift
+		up := false
+		if drop <= len(digits) {
+			up = digits[len(digits)-drop] >= '5'
+			digits = digits[:len(digits)-drop]
+		} else {
+			digits = ""
+		}
+		if up {
+			digits = incrementDigits(digits)
+		}
+		if digits == "" {
+			return Int128{}, false, true
+		}
+	}
+	if len(digits) > maxInt128Digits {
+		return Int128{}, true, true
+	}
+	out, fits := int128FromDigits(digits, neg)
+	if !fits {
+		return Int128{}, true, true
+	}
+	return out, false, true
+}
+
+// incrementDigits adds one to a base-10 magnitude ("" is zero).
+func incrementDigits(d string) string {
+	b := []byte(d)
+	for i := len(b) - 1; i >= 0; i-- {
+		if b[i] < '9' {
+			b[i]++
+			return string(b)
+		}
+		b[i] = '0'
+	}
+	return "1" + string(b)
+}
+
 // CanonicalDecimalText is AppendDecimalKey's rule for a value that is already
 // TEXT: the minimal-scale spelling of the number it names, so two renderings
 // of one value produce one key.

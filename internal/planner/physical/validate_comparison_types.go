@@ -641,7 +641,9 @@ func (c *comparisonTyper) inPair(left, member plansql.Node, op string) error {
 // the single arms and another, or 22P02, on the DAG. A quoted-literal OUTER
 // value takes the body's type, as PostgreSQL resolves it, and is read as
 // that type here — 22P02 / 22007 when its text is not one (#1372;
-// expr.MemberLiteralCast is the one table the compiled probe reads too).
+// expr.MemberProbe builds the one typed literal the compiled probe reads
+// too) — and a numeric literal against a NUMERIC body is typed by its own
+// digits, or refused 22003 where no DECIMAL(38,s) holds it.
 func (c *comparisonTyper) memberPair(left, member plansql.Node, op string, origins []parquet.TypeID) error {
 	tl, lok := c.operand(left)
 	tr, rok := c.operand(member)
@@ -653,10 +655,15 @@ func (c *comparisonTyper) memberPair(left, member plansql.Node, op string, origi
 	if !rok || comparisonClass(tr) == cmpUnknown {
 		tr, rok = c.memberDeclared(member)
 	}
-	if text, unknown := unknownOperand(left); unknown {
-		if text != nil && rok && comparisonClass(tr) != cmpText {
-			return expr.CheckMemberLiteral(tr, *text)
+	if rok && comparisonClass(tr) != cmpText {
+		// The literal the plan types (expr.MemberProbe) is read here first:
+		// its input function's refusal, and a NUMERIC literal no
+		// DECIMAL(38,s) holds (22003), are the statement's own.
+		if err := expr.CheckMemberProbe(left, tr); err != nil {
+			return err
 		}
+	}
+	if _, unknown := unknownOperand(left); unknown {
 		return nil
 	}
 	if !lok || comparisonClass(tl) == cmpUnknown {
