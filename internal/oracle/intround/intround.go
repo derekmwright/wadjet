@@ -79,6 +79,9 @@ var Fixture = []string{
 	"INSERT INTO t_u (id, k, i, d, f) SELECT id, k, i, d, f FROM src",
 	"CREATE TABLE t_m (id INTEGER, n4 INTEGER, n8 BIGINT)",
 	"INSERT INTO t_m (id) SELECT id FROM src",
+	// The array-element cells' table (MergeSourceCells): a float8[] and a
+	// numeric[] column holding f + k and d + k.
+	"CREATE TABLE t_a AS SELECT id, ARRAY[f + k] AS af, ARRAY[d + k] AS ad, id * 0 AS n4, id * 0 AS n8 FROM src",
 }
 
 const srcRows = "(1, -3, 2, 0.50, 0.5), (2, -1, 2, 0.50, 0.5), (3, 0, 2, 0.50, 0.5), (4, 1, 2, 0.50, 0.5), " +
@@ -171,20 +174,29 @@ func DialectCells() []Cell {
 // each over float8 and numeric spellings, with UPDATE and INSERT actions and
 // qualified and bare references, into INTEGER and BIGINT. The source's
 // declaration is the one its own plan emits, category included, exactly as an
-// INSERT … SELECT reads it. testdata/merge_cells.json is generated and
+// INSERT … SELECT reads it. Beside them, the array-element cells read a
+// float8[] and a numeric[] column's element by subscript on UPDATE, MERGE
+// (catalog and subquery source) and INSERT … SELECT: the element's type is
+// the column's declared element. testdata/merge_cells.json is generated and
 // measured on PostgreSQL 17.11 by testdata/gen_merge_cells.py.
 func MergeSourceCells() []Cell {
 	var ms []struct {
 		Name  string   `json:"n"`
 		Stmts []string `json:"s"`
 		Want  string   `json:"w"`
+		Read  string   `json:"r"`
 	}
 	if err := json.Unmarshal(mergeCellsJSON, &ms); err != nil {
 		panic(fmt.Sprintf("intround: %v", err))
 	}
 	out := make([]Cell, 0, len(ms))
 	for _, m := range ms {
-		out = append(out, Cell{Name: m.Name, Door: "merge", Stmts: m.Stmts, Read: readOf("t_m"), Want: m.Want})
+		door, table := "merge", "t_m"
+		if m.Read != "" {
+			// an array-element cell: its door is the name's last segment
+			door, table = m.Name[strings.LastIndexByte(m.Name, '/')+1:], m.Read
+		}
+		out = append(out, Cell{Name: m.Name, Door: door, Stmts: m.Stmts, Read: readOf(table), Want: m.Want})
 	}
 	return out
 }
@@ -197,8 +209,9 @@ func MergeSourceCells() []Cell {
 //     …`) and a VALUES list aliased with a column list (`USING (VALUES …) AS
 //     s2(id, v)`) do not parse here; the same sources spelled inside a
 //     subquery are asserted;
-//   - an expression OVER a subquery source (`SET n4 = s2.v * 1`) is 0A000:
-//     MERGE evaluates an expression only over a catalog source's rows.
+//   - an expression OVER a subquery source (`SET n4 = s2.v * 1`, a
+//     subscript `s2.af[1]`) is 0A000: MERGE evaluates an expression only
+//     over a catalog source's rows.
 //
 // A pin that starts answering fails: delete it.
 func MergeSourceRefusal(name string) (string, bool) {
@@ -207,7 +220,7 @@ func MergeSourceRefusal(name string) (string, bool) {
 		return `syntax error at or near "MERGE"`, true
 	case strings.HasPrefix(name, "merge-source/values/"):
 		return "expected ON", true
-	case strings.HasSuffix(name, "/update-computed"):
+	case strings.HasSuffix(name, "/update-computed"), strings.HasSuffix(name, "/merge-derived"):
 		return "has no declared schema to resolve it against", true
 	}
 	return "", false

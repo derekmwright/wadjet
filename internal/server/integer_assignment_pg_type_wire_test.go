@@ -95,7 +95,7 @@ func TestIntegerAssignmentRoundsByPostgresTypeOverPgwire(t *testing.T) {
 // over grows a file per statement, and the cells are independent — runs the
 // cell and reads the target back as the wire delivers it.
 func wireIntRoundCell(ctx context.Context, conn *pgx.Conn, c intround.Cell) (string, error) {
-	for _, tbl := range []string{"src", "t_v", "t_s", "t_u", "t_m"} {
+	for _, tbl := range []string{"src", "t_v", "t_s", "t_u", "t_m", "t_a"} {
 		if _, err := conn.Exec(ctx, "DROP TABLE IF EXISTS "+tbl); err != nil {
 			return "", fmt.Errorf("drop %s: %w", tbl, err)
 		}

@@ -83,14 +83,36 @@ def cells():
         for an, reset, act in ACTIONS:
             out.append({"n": f"merge-source/{rn}/{an}",
                         "s": [reset, f"{prefix}MERGE INTO t_m USING {rel} ON t_m.id = s2.id {act}"]})
+    return out + array_cells()
+
+# An ARRAY column's element read by a subscript, on every door that reads a
+# column: t_a holds ARRAY[f + k] (float8[]) and ARRAY[d + k] (numeric[]).
+# (intround.Fixture creates it the same way)
+ARRAY_TABLE = "CREATE TABLE t_a AS SELECT id, ARRAY[f + k] AS af, ARRAY[d + k] AS ad, id * 0 AS n4, id * 0 AS n8 FROM src"
+
+def array_cells():
+    out = []
+    for an in ("af", "ad"):
+        for door, stmts, read in [
+            ("update", ["UPDATE t_a SET n4 = NULL, n8 = NULL", f"UPDATE t_a SET n4 = {an}[1], n8 = {an}[1]"], "t_a"),
+            ("merge", ["UPDATE t_m SET n4 = NULL, n8 = NULL",
+                       f"MERGE INTO t_m USING t_a ON t_m.id = t_a.id WHEN MATCHED THEN UPDATE SET n4 = t_a.{an}[1], n8 = t_a.{an}[1]"], "t_m"),
+            ("merge-derived", ["UPDATE t_m SET n4 = NULL, n8 = NULL",
+                               f"MERGE INTO t_m USING (SELECT id, {an} FROM t_a) s2 ON t_m.id = s2.id "
+                               f"WHEN MATCHED THEN UPDATE SET n4 = s2.{an}[1], n8 = s2.{an}[1]"], "t_m"),
+            ("select", ["DELETE FROM t_s", f"INSERT INTO t_s (id, n4, n8) SELECT id, {an}[1], {an}[1] FROM t_a"], "t_s"),
+        ]:
+            out.append({"n": f"array-element/{an}/{door}", "s": stmts, "r": read})
     return out
 
 def pg_run(cs):
     lines = ["SET statement_timeout='30s';", "\\set ON_ERROR_STOP off",
-             "DROP TABLE IF EXISTS src, t_m;",
+             "DROP TABLE IF EXISTS src, t_m, t_s, t_a;",
              "CREATE TABLE src (id INTEGER, k INTEGER, i INTEGER, d NUMERIC(10,2), f DOUBLE PRECISION);",
              f"INSERT INTO src VALUES {SRC_ROWS};",
-             "CREATE TABLE t_m (id INTEGER, n4 INTEGER, n8 BIGINT);"]
+             "CREATE TABLE t_m (id INTEGER, n4 INTEGER, n8 BIGINT);",
+             "CREATE TABLE t_s (id INTEGER, n4 INTEGER, n8 BIGINT);",
+             ARRAY_TABLE + ";"]
     for n, c in enumerate(cs):
         lines.append("DELETE FROM t_m;")
         lines.append("INSERT INTO t_m (id) SELECT id FROM src;")
@@ -99,7 +121,7 @@ def pg_run(cs):
             lines.append(s + ";")
             lines.append(f"\\if :ERROR\n\\echo @@ERR {n} :LAST_ERROR_SQLSTATE :LAST_ERROR_MESSAGE\n\\endif")
         lines.append(f"SELECT '@@ROWS {n}', string_agg(id || ':' || coalesce(n4::text, 'NULL') || ':' || "
-                     f"coalesce(n8::text, 'NULL'), ' ' ORDER BY id) FROM t_m;")
+                     f"coalesce(n8::text, 'NULL'), ' ' ORDER BY id) FROM {c.get('r', 't_m')};")
     p = subprocess.run(["docker", "exec", "-i", os.environ.get("PG_CONTAINER", "wadjet-pg-ir3"), "psql",
                         "-U", "wadjet", "-d", "wadjet_oracle", "-At", "-F", "\t", "-v", "VERBOSITY=terse"],
                        input="\n".join(lines), capture_output=True, text=True)

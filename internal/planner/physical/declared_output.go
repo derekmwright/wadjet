@@ -1470,6 +1470,16 @@ func DeclaredTypeOfNodeIn(node plansql.Node, schema []parquet.Column, cat []expr
 		if len(c.Fields) > 0 {
 			decls.Fields[name] = c.Fields
 		}
+		// An ARRAY's or MAP's element, as operandDecls carries it: without
+		// it a column reference to a container declined, and so did its
+		// subscript — `SET n = a[1]` over a float8 array was undecided and
+		// rounded by the numeric rule (#1353 round 3).
+		if (c.Type == parquet.TypeArray || c.Type == parquet.TypeMap) && c.ElementType != nil {
+			if decls.Elems == nil {
+				decls.Elems = map[string]parquet.Column{}
+			}
+			decls.Elems[name] = c
+		}
 	}
 	if len(cat) == len(schema) {
 		for i, c := range schema {
