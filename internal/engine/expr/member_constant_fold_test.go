@@ -17,9 +17,10 @@ import (
 // read as 14 matched the member 14. MemberProbe folds the operand exactly and
 // types the result by the literal's one rule, NUMERIC(38, its own scale); a
 // choice whose conditions read a column has each constant result typed at
-// one NUMERIC(38,S); a form the fold does not read and that evaluates to a
-// double is 0A000; PostgreSQL's own float (an explicit float CAST) keeps its
-// reading.
+// one NUMERIC(38,S); a division keeps PostgreSQL's select_div_scale digits;
+// a form the fold does not read and that evaluates to a double while a
+// numeric constant feeds it is 0A000; PostgreSQL's own float (an explicit
+// float CAST, a float-only function) keeps its reading.
 func TestMemberConstantOuterIsFolded(t *testing.T) {
 	const m = "14.0000000000000000001"
 	typedM := "cast('" + m + "' as NUMERIC(38,19))"
@@ -66,10 +67,27 @@ func TestMemberConstantOuterIsFolded(t *testing.T) {
 		{"CASE WHEN a.id > 0 THEN 14 END", parquet.TypeDecimal, "", ""},
 		{"abs(" + m + ")", parquet.TypeDecimal, "", ""},
 		{"a.v_f64 + 0", parquet.TypeDecimal, "", ""},
-		// Not folded, evaluated as a double: refused.
-		{m + " / 1", parquet.TypeDecimal, "", "0A000"},
-		{m + " / 1", parquet.TypeInt64, "", "0A000"},
-		{"CASE WHEN a.id > 0 THEN " + m + " / 1 END", parquet.TypeDecimal, "", "0A000"},
+		// A division at PostgreSQL's select_div_scale: (M / 7) * 7 rounds
+		// M / 7 at scale 19 and is 14 again; 14 / 3.0 keeps 16 digits.
+		{m + " / 1", parquet.TypeDecimal, typedM, ""},
+		{"(" + m + " / 7) * 7", parquet.TypeInt64, "14", ""},
+		{"(14 / 3.0) * 3", parquet.TypeDecimal, "cast('14.0000000000000001' as NUMERIC(38,16))", ""},
+		{"(1 / 3.0) * 42", parquet.TypeDecimal, "cast('13.99999999999999999986' as NUMERIC(38,20))", ""},
+		{"(1 / 30000.0) * 420000", parquet.TypeDecimal, "cast('13.99999999999999999986' as NUMERIC(38,20))", ""},
+		{"CAST(CAST(14.50 AS TEXT) AS NUMERIC) / 1.0", parquet.TypeDecimal, "cast('14.5' as NUMERIC(38,1))", ""},
+		{"7 / 2", parquet.TypeInt64, "3", ""},
+		{"CASE WHEN a.id > 0 THEN " + m + " / 1 END", parquet.TypeDecimal, "case when a.id > 0 then " + typedM + " end", ""},
+		// Not folded, evaluated as a double while a numeric constant feeds
+		// it: refused. PostgreSQL's float-only functions and integer
+		// arguments are its own double: left as written.
+		{"sqrt(12.5 * 12.5)", parquet.TypeDecimal, "", "0A000"},
+		{"sqrt(" + m + ")", parquet.TypeInt64, "", "0A000"},
+		{"CASE WHEN a.id > 0 THEN sqrt(" + m + ") END", parquet.TypeDecimal, "", "0A000"},
+		{"sqrt(14 * 14)", parquet.TypeDecimal, "", ""},
+		{"sin(" + m + ") * 0 + 14", parquet.TypeDecimal, "", ""},
+		// A division by zero is PostgreSQL's 22012 and the engine's own
+		// run-time error: left as written.
+		{m + " / 0", parquet.TypeDecimal, "", ""},
 		// A folded value no DECIMAL(38,s) holds: the literal's 22003.
 		{"-(-1e-40)", parquet.TypeDecimal, "", "22003"},
 	} {

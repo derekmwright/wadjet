@@ -35,13 +35,14 @@ import (
 // column has no single value to fold; each CONSTANT result is folded instead
 // and all of them take one NUMERIC(38,S) (S the widest result scale), which
 // this engine's choice evaluates exactly — and beside a float8 column as a
-// double, as PostgreSQL does. A form the fold does
-// not read — a function, a division of numerics, a scalar subquery — is left
-// to the engine when its value box is not a double; when it is, and a
-// constant PostgreSQL types numeric feeds it, the membership is refused
+// double, as PostgreSQL does. A division of numerics keeps PostgreSQL's
+// select_div_scale digits, rounded half away from zero, as div_var does. A
+// form the fold does not read — a function such as sqrt / exp / ln / power —
+// is left to the engine when its value box is not a double; when it is, and
+// a constant PostgreSQL types numeric feeds it, the membership is refused
 // 0A000 naming the operand, never compared at float8. An operand PostgreSQL
-// itself types double precision (an explicit float CAST) keeps its float
-// reading, as there.
+// itself types double precision (an explicit float CAST, a float-only
+// function such as sin) keeps its float reading, as there.
 
 // mcKind is the type category PostgreSQL resolves a folded constant to.
 type mcKind int
@@ -57,13 +58,15 @@ const (
 	mcBool
 )
 
-// mcVal is a folded constant: r for mcInt / mcNum, s for mcUnknown / mcText,
+// mcVal is a folded constant: r for mcInt / mcNum (with scale, PostgreSQL's
+// display scale, which a numeric division reads), s for mcUnknown / mcText,
 // b for mcBool.
 type mcVal struct {
-	kind mcKind
-	r    *big.Rat
-	s    string
-	b    bool
+	kind  mcKind
+	r     *big.Rat
+	scale int
+	s     string
+	b     bool
 }
 
 var mcNo = mcVal{kind: mcUnsupported}
@@ -160,8 +163,8 @@ func mcTypedNumber(r *big.Rat, t parquet.TypeID) (plansql.Node, error) {
 }
 
 // mcRatText is r's exact decimal text and its scale: the fewest fraction
-// digits that spell it (a folded value has no division of numerics, so its
-// denominator is a product of 2s and 5s).
+// digits that spell it (a folded division is rounded at its scale, so every
+// folded denominator is a product of 2s and 5s).
 func mcRatText(r *big.Rat) (string, int) {
 	d := new(big.Int).Set(r.Denom())
 	two, five := big.NewInt(2), big.NewInt(5)
@@ -459,7 +462,8 @@ func mcHasNumeric(n plansql.Node) bool {
 // mcHasNumericOutsideFloat reports whether a constant PostgreSQL types
 // numeric — a non-integer (or wider than bigint) numeric constant, or a
 // quoted literal under a NUMERIC CAST — feeds the expression other than
-// through an explicit float CAST (where PostgreSQL's value is a double too).
+// through an explicit float CAST or a function PostgreSQL defines over
+// double precision alone (where PostgreSQL's value is a double too).
 func mcHasNumericOutsideFloat(n plansql.Node) bool {
 	found := false
 	mcWalk(n, func(x plansql.Node) bool {
@@ -469,6 +473,10 @@ func mcHasNumericOutsideFloat(n plansql.Node) bool {
 				if _, err := strconv.ParseInt(v.Value, 10, 64); err != nil {
 					found = true
 				}
+			}
+		case *plansql.FuncCallNode:
+			if mcFloatOnlyFunc(v.Name) {
+				return false // PostgreSQL's own double precision
 			}
 		case *plansql.CastNode:
 			k, _, _ := mcCastTarget(v.TypeName)
@@ -482,6 +490,18 @@ func mcHasNumericOutsideFloat(n plansql.Node) bool {
 		return !found
 	})
 	return found
+}
+
+// mcFloatOnlyFunc names the functions PostgreSQL defines over double
+// precision alone, so a numeric argument reaches them as a float8 there too.
+func mcFloatOnlyFunc(name string) bool {
+	switch strings.ToLower(name) {
+	case "sin", "cos", "tan", "cot", "asin", "acos", "atan", "atan2",
+		"sind", "cosd", "tand", "cotd", "asind", "acosd", "atand", "atan2d",
+		"sinh", "cosh", "tanh", "asinh", "acosh", "atanh", "degrees", "radians", "cbrt":
+		return true
+	}
+	return false
 }
 
 // mcWalk visits an expression's constant-bearing nodes; visit returns false
@@ -616,7 +636,7 @@ func mcFold(n plansql.Node) (mcVal, error) {
 			if err != nil || !ok {
 				return mcNo, err
 			}
-			return mcVal{kind: mcNum, r: r}, nil
+			return mcVal{kind: mcNum, r: r, scale: mcTextScale(v.Value)}, nil
 		}
 	case *plansql.UnaryOp:
 		x, err := mcFold(v.Inner)
@@ -628,7 +648,7 @@ func mcFold(n plansql.Node) (mcVal, error) {
 			return x, nil
 		case mcInt, mcNum:
 			if v.Op == "-" {
-				return mcNumber(x.kind, new(big.Rat).Neg(x.r)), nil
+				return mcNumber(x.kind, new(big.Rat).Neg(x.r), x.scale), nil
 			}
 			if v.Op == "+" {
 				return x, nil
@@ -683,15 +703,40 @@ func mcFold(n plansql.Node) (mcVal, error) {
 	return mcNo, nil
 }
 
-func mcNumber(k mcKind, r *big.Rat) mcVal {
+func mcNumber(k mcKind, r *big.Rat, scale int) mcVal {
 	if k == mcInt && (!r.IsInt() || !r.Num().IsInt64()) {
 		return mcNo // PostgreSQL raises integer out of range
 	}
-	return mcVal{kind: k, r: r}
+	if k == mcInt {
+		scale = 0
+	}
+	return mcVal{kind: k, r: r, scale: scale}
 }
 
-// mcFoldArith is + - * over numbers (and an integer division); a float
-// operand makes PostgreSQL's value a double, which is left as one.
+// mcTextScale is the display scale PostgreSQL's numeric input gives a
+// spelling: its fraction digits less its exponent, never below zero.
+func mcTextScale(text string) int {
+	t := strings.TrimLeft(strings.TrimSpace(text), "+-")
+	mant, exp := t, 0
+	if i := strings.IndexAny(t, "eE"); i >= 0 {
+		mant = t[:i]
+		e, err := strconv.Atoi(t[i+1:])
+		if err != nil {
+			return 0
+		}
+		exp = e
+	}
+	frac := 0
+	if _, f, ok := strings.Cut(mant, "."); ok {
+		frac = len(f)
+	}
+	return max(0, frac-exp)
+}
+
+// mcFoldArith is + - * / over numbers, at PostgreSQL's result scales (a
+// sum or difference the wider operand's, a product the sum of both, a
+// numeric quotient select_div_scale's, an integer quotient truncated); a
+// float operand makes PostgreSQL's value a double, which is left as one.
 func mcFoldArith(v *plansql.BinaryOp) (mcVal, error) {
 	a, err := mcFold(v.Left)
 	if err != nil {
@@ -727,23 +772,75 @@ func mcFoldArith(v *plansql.BinaryOp) (mcVal, error) {
 	}
 	switch v.Op {
 	case "+":
-		return mcNumber(k, new(big.Rat).Add(a.r, b.r)), nil
+		return mcNumber(k, new(big.Rat).Add(a.r, b.r), max(a.scale, b.scale)), nil
 	case "-":
-		return mcNumber(k, new(big.Rat).Sub(a.r, b.r)), nil
+		return mcNumber(k, new(big.Rat).Sub(a.r, b.r), max(a.scale, b.scale)), nil
 	case "*":
-		return mcNumber(k, new(big.Rat).Mul(a.r, b.r)), nil
+		return mcNumber(k, new(big.Rat).Mul(a.r, b.r), a.scale+b.scale), nil
 	case "/":
-		if k != mcInt || b.r.Sign() == 0 {
-			// A numeric division's result scale is PostgreSQL's
-			// select_div_scale, which the fold does not compute.
+		if b.r.Sign() == 0 {
+			return mcNo, nil // PostgreSQL's 22012; the engine raises its own
+		}
+		if k == mcInt {
+			return mcNumber(mcInt, new(big.Rat).SetInt(new(big.Int).Quo(a.r.Num(), b.r.Num())), 0), nil
+		}
+		rscale, ok := mcDivScale(a, b)
+		if !ok {
 			return mcNo, nil
 		}
-		return mcNumber(mcInt, new(big.Rat).SetInt(new(big.Int).Quo(a.r.Num(), b.r.Num()))), nil
+		return mcNumber(mcNum, mcRoundHalfAway(new(big.Rat).Quo(a.r, b.r), rscale), rscale), nil
 	}
 	return mcNo, nil
 }
 
 func mcNumeric(k mcKind) bool { return k == mcInt || k == mcNum || k == mcNull }
+
+// mcDivScale is PostgreSQL's select_div_scale: the quotient keeps at least
+// NUMERIC_MIN_SIG_DIGITS (16) significant digits, counted from the weight of
+// the first base-10000 digit of each operand, and never fewer fraction
+// digits than either operand displays; div_var rounds it there, half away
+// from zero.
+func mcDivScale(a, b mcVal) (int, bool) {
+	w1, d1, ok1 := mcBase10000Lead(a.r)
+	w2, d2, ok2 := mcBase10000Lead(b.r)
+	if !ok1 || !ok2 {
+		return 0, false
+	}
+	qweight := w1 - w2
+	if d1 <= d2 {
+		qweight--
+	}
+	rscale := 16 - qweight*4
+	rscale = max(rscale, a.scale, b.scale, 0)
+	return min(rscale, 1000), true
+}
+
+// mcBase10000Lead is the weight and value of the first non-zero base-10000
+// digit of |r| (weight 0, digit 0 for zero), as PostgreSQL's NumericVar
+// stores it.
+func mcBase10000Lead(r *big.Rat) (weight int, digit int64, ok bool) {
+	v := new(big.Rat).Abs(r)
+	if v.Sign() == 0 {
+		return 0, 0, true
+	}
+	base := big.NewRat(10000, 1)
+	one := big.NewRat(1, 1)
+	for weight = 0; v.Cmp(base) >= 0; weight++ {
+		v.Quo(v, base)
+		if weight > 300 {
+			return 0, 0, false
+		}
+	}
+	for v.Cmp(one) < 0 {
+		v.Mul(v, base)
+		weight--
+		if weight < -300 {
+			return 0, 0, false
+		}
+	}
+	q := new(big.Int).Quo(v.Num(), v.Denom())
+	return weight, q.Int64(), true
+}
 
 // mcCommon resolves the values of a choice (or the two sides of a
 // comparison) to one category as PostgreSQL's select_common_type does for
@@ -801,7 +898,7 @@ func mcCommon(vals []mcVal) ([]mcVal, mcKind, bool, error) {
 				if err != nil || !ok {
 					return nil, 0, false, err
 				}
-				out[i] = mcVal{kind: mcNum, r: r}
+				out[i] = mcVal{kind: mcNum, r: r, scale: mcTextScale(v.s)}
 				continue
 			}
 			out[i].kind = cat
@@ -915,13 +1012,15 @@ func mcFoldCast(c *plansql.CastNode) (mcVal, error) {
 		case mcUnknown, mcText:
 			return mcVal{kind: mcText, s: x.s}, nil
 		case mcInt, mcNum:
-			t, _ := mcRatText(x.r)
-			return mcVal{kind: mcText, s: t}, nil
+			// PostgreSQL renders a numeric at its display scale.
+			_, minScale := mcRatText(x.r)
+			return mcVal{kind: mcText, s: x.r.FloatString(max(x.scale, minScale))}, nil
 		}
 		return mcNo, nil
 	}
 	// A number.
 	var r *big.Rat
+	scale := x.scale
 	switch x.kind {
 	case mcInt, mcNum:
 		r = x.r
@@ -938,6 +1037,7 @@ func mcFoldCast(c *plansql.CastNode) (mcVal, error) {
 				return mcNo, err
 			}
 			r = pr
+			scale = mcTextScale(x.s)
 		}
 	default:
 		return mcNo, nil
@@ -955,13 +1055,14 @@ func mcFoldCast(c *plansql.CastNode) (mcVal, error) {
 			return mcNo, nil
 		}
 		r = mcRoundHalfAway(r, s)
+		scale = s
 		t, _ := mcRatText(new(big.Rat).Abs(r))
 		ip, _, _ := strings.Cut(t, ".")
 		if len(strings.TrimLeft(ip, "0")) > p-s {
 			return mcNo, nil // PostgreSQL's 22003; the engine raises its own
 		}
 	}
-	return mcVal{kind: mcNum, r: r}, nil
+	return mcVal{kind: mcNum, r: r, scale: scale}, nil
 }
 
 // mcRoundHalfAway rounds r to s fraction digits, half away from zero.
