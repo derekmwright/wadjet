@@ -1,0 +1,3152 @@
+# PostgreSQL 17.11 (postgres:17-alpine) answers for TestArcSMNumericLiteralGrammarEveryArm's generated cells over the st_pair and sm_num fixtures:
+# name<TAB>rows=N <sorted rows> | ERR <SQLSTATE> <message>. Regenerate: SM_NUMG_GEN=<path> dumps the cells' SQL; each is run once.
+numg/q/in/dec/plain/H	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/dec/plain/H	rows=0 
+numg/q/eqAny/dec/plain/H	rows=4 1 | 2 | 3 | 4
+numg/q/neAll/dec/plain/H	rows=0 
+numg/q/corrIn/dec/plain/H	rows=1 3
+numg/q/sel/dec/plain/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/dec/plain/M	rows=0 
+numg/q/notIn/dec/plain/M	rows=4 1 | 2 | 3 | 4
+numg/q/eqAny/dec/plain/M	rows=0 
+numg/q/neAll/dec/plain/M	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/dec/plain/M	rows=0 
+numg/q/sel/dec/plain/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/dec/plain/F	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/dec/plain/F	rows=0 
+numg/q/eqAny/dec/plain/F	rows=4 1 | 2 | 3 | 4
+numg/q/neAll/dec/plain/F	rows=0 
+numg/q/corrIn/dec/plain/F	rows=1 1
+numg/q/sel/dec/plain/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/dec/plus/H	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/dec/plus/H	rows=0 
+numg/q/eqAny/dec/plus/H	rows=4 1 | 2 | 3 | 4
+numg/q/neAll/dec/plus/H	rows=0 
+numg/q/corrIn/dec/plus/H	rows=1 3
+numg/q/sel/dec/plus/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/dec/plus/M	rows=0 
+numg/q/notIn/dec/plus/M	rows=4 1 | 2 | 3 | 4
+numg/q/eqAny/dec/plus/M	rows=0 
+numg/q/neAll/dec/plus/M	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/dec/plus/M	rows=0 
+numg/q/sel/dec/plus/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/dec/plus/F	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/dec/plus/F	rows=0 
+numg/q/eqAny/dec/plus/F	rows=4 1 | 2 | 3 | 4
+numg/q/neAll/dec/plus/F	rows=0 
+numg/q/corrIn/dec/plus/F	rows=1 1
+numg/q/sel/dec/plus/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/dec/minus/H	rows=0 
+numg/q/notIn/dec/minus/H	rows=4 1 | 2 | 3 | 4
+numg/q/eqAny/dec/minus/H	rows=0 
+numg/q/neAll/dec/minus/H	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/dec/minus/H	rows=0 
+numg/q/sel/dec/minus/H	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/dec/minus/M	rows=0 
+numg/q/notIn/dec/minus/M	rows=4 1 | 2 | 3 | 4
+numg/q/eqAny/dec/minus/M	rows=0 
+numg/q/neAll/dec/minus/M	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/dec/minus/M	rows=0 
+numg/q/sel/dec/minus/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/dec/minus/F	rows=0 
+numg/q/notIn/dec/minus/F	rows=4 1 | 2 | 3 | 4
+numg/q/eqAny/dec/minus/F	rows=0 
+numg/q/neAll/dec/minus/F	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/dec/minus/F	rows=0 
+numg/q/sel/dec/minus/F	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/dec/lead0/H	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/dec/lead0/H	rows=0 
+numg/q/eqAny/dec/lead0/H	rows=4 1 | 2 | 3 | 4
+numg/q/neAll/dec/lead0/H	rows=0 
+numg/q/corrIn/dec/lead0/H	rows=1 3
+numg/q/sel/dec/lead0/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/dec/lead0/M	rows=0 
+numg/q/notIn/dec/lead0/M	rows=4 1 | 2 | 3 | 4
+numg/q/eqAny/dec/lead0/M	rows=0 
+numg/q/neAll/dec/lead0/M	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/dec/lead0/M	rows=0 
+numg/q/sel/dec/lead0/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/dec/lead0/F	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/dec/lead0/F	rows=0 
+numg/q/eqAny/dec/lead0/F	rows=4 1 | 2 | 3 | 4
+numg/q/neAll/dec/lead0/F	rows=0 
+numg/q/corrIn/dec/lead0/F	rows=1 1
+numg/q/sel/dec/lead0/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/dec/trail0/H	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/dec/trail0/H	rows=0 
+numg/q/eqAny/dec/trail0/H	rows=4 1 | 2 | 3 | 4
+numg/q/neAll/dec/trail0/H	rows=0 
+numg/q/corrIn/dec/trail0/H	rows=1 3
+numg/q/sel/dec/trail0/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/dec/trail0/M	rows=0 
+numg/q/notIn/dec/trail0/M	rows=4 1 | 2 | 3 | 4
+numg/q/eqAny/dec/trail0/M	rows=0 
+numg/q/neAll/dec/trail0/M	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/dec/trail0/M	rows=0 
+numg/q/sel/dec/trail0/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/dec/trail0/F	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/dec/trail0/F	rows=0 
+numg/q/eqAny/dec/trail0/F	rows=4 1 | 2 | 3 | 4
+numg/q/neAll/dec/trail0/F	rows=0 
+numg/q/corrIn/dec/trail0/F	rows=1 1
+numg/q/sel/dec/trail0/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/dec/noFrac/H	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/dec/noFrac/H	rows=0 
+numg/q/eqAny/dec/noFrac/H	rows=4 1 | 2 | 3 | 4
+numg/q/neAll/dec/noFrac/H	rows=0 
+numg/q/corrIn/dec/noFrac/H	rows=1 3
+numg/q/sel/dec/noFrac/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/dec/noInt/H	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/dec/noInt/H	rows=0 
+numg/q/eqAny/dec/noInt/H	rows=4 1 | 2 | 3 | 4
+numg/q/neAll/dec/noInt/H	rows=0 
+numg/q/corrIn/dec/noInt/H	rows=1 3
+numg/q/sel/dec/noInt/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/dec/noInt/M	rows=0 
+numg/q/notIn/dec/noInt/M	rows=4 1 | 2 | 3 | 4
+numg/q/eqAny/dec/noInt/M	rows=0 
+numg/q/neAll/dec/noInt/M	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/dec/noInt/M	rows=0 
+numg/q/sel/dec/noInt/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/dec/noInt/F	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/dec/noInt/F	rows=0 
+numg/q/eqAny/dec/noInt/F	rows=4 1 | 2 | 3 | 4
+numg/q/neAll/dec/noInt/F	rows=0 
+numg/q/corrIn/dec/noInt/F	rows=1 1
+numg/q/sel/dec/noInt/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/dec/noInt/miss	rows=0 
+numg/q/notIn/dec/noInt/miss	rows=4 1 | 2 | 3 | 4
+numg/q/eqAny/dec/noInt/miss	rows=0 
+numg/q/neAll/dec/noInt/miss	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/dec/noInt/miss	rows=0 
+numg/q/sel/dec/noInt/miss	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/dec/exp/H	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/dec/exp/H	rows=0 
+numg/q/eqAny/dec/exp/H	rows=4 1 | 2 | 3 | 4
+numg/q/neAll/dec/exp/H	rows=0 
+numg/q/corrIn/dec/exp/H	rows=1 3
+numg/q/sel/dec/exp/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/dec/exp/M	rows=0 
+numg/q/notIn/dec/exp/M	rows=4 1 | 2 | 3 | 4
+numg/q/eqAny/dec/exp/M	rows=0 
+numg/q/neAll/dec/exp/M	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/dec/exp/M	rows=0 
+numg/q/sel/dec/exp/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/dec/exp/F	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/dec/exp/F	rows=0 
+numg/q/eqAny/dec/exp/F	rows=4 1 | 2 | 3 | 4
+numg/q/neAll/dec/exp/F	rows=0 
+numg/q/corrIn/dec/exp/F	rows=1 1
+numg/q/sel/dec/exp/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/dec/expUpper/H	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/dec/expUpper/H	rows=0 
+numg/q/eqAny/dec/expUpper/H	rows=4 1 | 2 | 3 | 4
+numg/q/neAll/dec/expUpper/H	rows=0 
+numg/q/corrIn/dec/expUpper/H	rows=1 3
+numg/q/sel/dec/expUpper/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/dec/expUpper/M	rows=0 
+numg/q/notIn/dec/expUpper/M	rows=4 1 | 2 | 3 | 4
+numg/q/eqAny/dec/expUpper/M	rows=0 
+numg/q/neAll/dec/expUpper/M	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/dec/expUpper/M	rows=0 
+numg/q/sel/dec/expUpper/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/dec/expUpper/F	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/dec/expUpper/F	rows=0 
+numg/q/eqAny/dec/expUpper/F	rows=4 1 | 2 | 3 | 4
+numg/q/neAll/dec/expUpper/F	rows=0 
+numg/q/corrIn/dec/expUpper/F	rows=1 1
+numg/q/sel/dec/expUpper/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/dec/expPlus/H	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/dec/expPlus/H	rows=0 
+numg/q/eqAny/dec/expPlus/H	rows=4 1 | 2 | 3 | 4
+numg/q/neAll/dec/expPlus/H	rows=0 
+numg/q/corrIn/dec/expPlus/H	rows=1 3
+numg/q/sel/dec/expPlus/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/dec/expPlus/M	rows=0 
+numg/q/notIn/dec/expPlus/M	rows=4 1 | 2 | 3 | 4
+numg/q/eqAny/dec/expPlus/M	rows=0 
+numg/q/neAll/dec/expPlus/M	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/dec/expPlus/M	rows=0 
+numg/q/sel/dec/expPlus/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/dec/expPlus/F	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/dec/expPlus/F	rows=0 
+numg/q/eqAny/dec/expPlus/F	rows=4 1 | 2 | 3 | 4
+numg/q/neAll/dec/expPlus/F	rows=0 
+numg/q/corrIn/dec/expPlus/F	rows=1 1
+numg/q/sel/dec/expPlus/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/dec/expMinus/H	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/dec/expMinus/H	rows=0 
+numg/q/eqAny/dec/expMinus/H	rows=4 1 | 2 | 3 | 4
+numg/q/neAll/dec/expMinus/H	rows=0 
+numg/q/corrIn/dec/expMinus/H	rows=1 3
+numg/q/sel/dec/expMinus/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/dec/expMinus/M	rows=0 
+numg/q/notIn/dec/expMinus/M	rows=4 1 | 2 | 3 | 4
+numg/q/eqAny/dec/expMinus/M	rows=0 
+numg/q/neAll/dec/expMinus/M	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/dec/expMinus/M	rows=0 
+numg/q/sel/dec/expMinus/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/dec/expMinus/F	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/dec/expMinus/F	rows=0 
+numg/q/eqAny/dec/expMinus/F	rows=4 1 | 2 | 3 | 4
+numg/q/neAll/dec/expMinus/F	rows=0 
+numg/q/corrIn/dec/expMinus/F	rows=1 1
+numg/q/sel/dec/expMinus/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/dec/expZero/H	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/dec/expZero/H	rows=0 
+numg/q/eqAny/dec/expZero/H	rows=4 1 | 2 | 3 | 4
+numg/q/neAll/dec/expZero/H	rows=0 
+numg/q/corrIn/dec/expZero/H	rows=1 3
+numg/q/sel/dec/expZero/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/dec/expZero/F	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/dec/expZero/F	rows=0 
+numg/q/eqAny/dec/expZero/F	rows=4 1 | 2 | 3 | 4
+numg/q/neAll/dec/expZero/F	rows=0 
+numg/q/corrIn/dec/expZero/F	rows=1 1
+numg/q/sel/dec/expZero/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/dec/space/H	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/dec/space/H	rows=0 
+numg/q/eqAny/dec/space/H	rows=4 1 | 2 | 3 | 4
+numg/q/neAll/dec/space/H	rows=0 
+numg/q/corrIn/dec/space/H	rows=1 3
+numg/q/sel/dec/space/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/dec/space/M	rows=0 
+numg/q/notIn/dec/space/M	rows=4 1 | 2 | 3 | 4
+numg/q/eqAny/dec/space/M	rows=0 
+numg/q/neAll/dec/space/M	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/dec/space/M	rows=0 
+numg/q/sel/dec/space/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/dec/space/F	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/dec/space/F	rows=0 
+numg/q/eqAny/dec/space/F	rows=4 1 | 2 | 3 | 4
+numg/q/neAll/dec/space/F	rows=0 
+numg/q/corrIn/dec/space/F	rows=1 1
+numg/q/sel/dec/space/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/dec/tab/H	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/dec/tab/H	rows=0 
+numg/q/eqAny/dec/tab/H	rows=4 1 | 2 | 3 | 4
+numg/q/neAll/dec/tab/H	rows=0 
+numg/q/corrIn/dec/tab/H	rows=1 3
+numg/q/sel/dec/tab/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/dec/trail0Wide/H	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/dec/trail0Wide/H	rows=0 
+numg/q/eqAny/dec/trail0Wide/H	rows=4 1 | 2 | 3 | 4
+numg/q/neAll/dec/trail0Wide/H	rows=0 
+numg/q/corrIn/dec/trail0Wide/H	rows=1 3
+numg/q/sel/dec/trail0Wide/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/dec/trail0Wide/F	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/dec/trail0Wide/F	rows=0 
+numg/q/eqAny/dec/trail0Wide/F	rows=4 1 | 2 | 3 | 4
+numg/q/neAll/dec/trail0Wide/F	rows=0 
+numg/q/corrIn/dec/trail0Wide/F	rows=1 1
+numg/q/sel/dec/trail0Wide/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/dec/lead0Wide/H	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/dec/lead0Wide/H	rows=0 
+numg/q/eqAny/dec/lead0Wide/H	rows=4 1 | 2 | 3 | 4
+numg/q/neAll/dec/lead0Wide/H	rows=0 
+numg/q/corrIn/dec/lead0Wide/H	rows=1 3
+numg/q/sel/dec/lead0Wide/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/dec/lead0Wide/M	rows=0 
+numg/q/notIn/dec/lead0Wide/M	rows=4 1 | 2 | 3 | 4
+numg/q/eqAny/dec/lead0Wide/M	rows=0 
+numg/q/neAll/dec/lead0Wide/M	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/dec/lead0Wide/M	rows=0 
+numg/q/sel/dec/lead0Wide/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/dec/lead0Wide/F	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/dec/lead0Wide/F	rows=0 
+numg/q/eqAny/dec/lead0Wide/F	rows=4 1 | 2 | 3 | 4
+numg/q/neAll/dec/lead0Wide/F	rows=0 
+numg/q/corrIn/dec/lead0Wide/F	rows=1 1
+numg/q/sel/dec/lead0Wide/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/dec/expWide/H	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/dec/expWide/H	rows=0 
+numg/q/eqAny/dec/expWide/H	rows=4 1 | 2 | 3 | 4
+numg/q/neAll/dec/expWide/H	rows=0 
+numg/q/corrIn/dec/expWide/H	rows=1 3
+numg/q/sel/dec/expWide/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/dec/expWide/F	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/dec/expWide/F	rows=0 
+numg/q/eqAny/dec/expWide/F	rows=4 1 | 2 | 3 | 4
+numg/q/neAll/dec/expWide/F	rows=0 
+numg/q/corrIn/dec/expWide/F	rows=1 1
+numg/q/sel/dec/expWide/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/dec/zeroWide/miss	rows=0 
+numg/q/notIn/dec/zeroWide/miss	rows=4 1 | 2 | 3 | 4
+numg/q/eqAny/dec/zeroWide/miss	rows=0 
+numg/q/neAll/dec/zeroWide/miss	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/dec/zeroWide/miss	rows=0 
+numg/q/sel/dec/zeroWide/miss	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/dec/width38/M	rows=0 
+numg/q/notIn/dec/width38/M	rows=4 1 | 2 | 3 | 4
+numg/q/eqAny/dec/width38/M	rows=0 
+numg/q/neAll/dec/width38/M	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/dec/width38/M	rows=0 
+numg/q/sel/dec/width38/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/dec/over38Frac	rows=0 
+numg/q/notIn/dec/over38Frac	rows=4 1 | 2 | 3 | 4
+numg/q/eqAny/dec/over38Frac	rows=0 
+numg/q/neAll/dec/over38Frac	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/dec/over38Frac	rows=0 
+numg/q/sel/dec/over38Frac	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/dec/over38Neg	rows=0 
+numg/q/notIn/dec/over38Neg	rows=4 1 | 2 | 3 | 4
+numg/q/eqAny/dec/over38Neg	rows=0 
+numg/q/neAll/dec/over38Neg	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/dec/over38Neg	rows=0 
+numg/q/sel/dec/over38Neg	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/dec/scale39	rows=0 
+numg/q/notIn/dec/scale39	rows=4 1 | 2 | 3 | 4
+numg/q/eqAny/dec/scale39	rows=0 
+numg/q/neAll/dec/scale39	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/dec/scale39	rows=0 
+numg/q/sel/dec/scale39	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/dec/expScale	rows=0 
+numg/q/notIn/dec/expScale	rows=4 1 | 2 | 3 | 4
+numg/q/eqAny/dec/expScale	rows=0 
+numg/q/neAll/dec/expScale	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/dec/expScale	rows=0 
+numg/q/sel/dec/expScale	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/dec/over38Int	rows=0 
+numg/q/notIn/dec/over38Int	rows=4 1 | 2 | 3 | 4
+numg/q/eqAny/dec/over38Int	rows=0 
+numg/q/neAll/dec/over38Int	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/dec/over38Int	rows=0 
+numg/q/sel/dec/over38Int	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/dec/expInt	rows=0 
+numg/q/notIn/dec/expInt	rows=4 1 | 2 | 3 | 4
+numg/q/eqAny/dec/expInt	rows=0 
+numg/q/neAll/dec/expInt	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/dec/expInt	rows=0 
+numg/q/sel/dec/expInt	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/dec/expHuge	rows=0 
+numg/q/notIn/dec/expHuge	rows=4 1 | 2 | 3 | 4
+numg/q/eqAny/dec/expHuge	rows=0 
+numg/q/neAll/dec/expHuge	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/dec/expHuge	rows=0 
+numg/q/sel/dec/expHuge	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/dec/nan	rows=0 
+numg/q/notIn/dec/nan	rows=4 1 | 2 | 3 | 4
+numg/q/eqAny/dec/nan	rows=0 
+numg/q/neAll/dec/nan	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/dec/nan	rows=0 
+numg/q/sel/dec/nan	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/dec/inf	rows=0 
+numg/q/notIn/dec/inf	rows=4 1 | 2 | 3 | 4
+numg/q/eqAny/dec/inf	rows=0 
+numg/q/neAll/dec/inf	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/dec/inf	rows=0 
+numg/q/sel/dec/inf	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/dec/negInf	rows=0 
+numg/q/notIn/dec/negInf	rows=4 1 | 2 | 3 | 4
+numg/q/eqAny/dec/negInf	rows=0 
+numg/q/neAll/dec/negInf	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/dec/negInf	rows=0 
+numg/q/sel/dec/negInf	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/dec/infShort	rows=0 
+numg/q/notIn/dec/infShort	rows=4 1 | 2 | 3 | 4
+numg/q/eqAny/dec/infShort	rows=0 
+numg/q/neAll/dec/infShort	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/dec/infShort	rows=0 
+numg/q/sel/dec/infShort	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/dec/bad/junk	ERR 22P02 invalid input syntax for type numeric: "zz"
+numg/q/notIn/dec/bad/junk	ERR 22P02 invalid input syntax for type numeric: "zz"
+numg/q/eqAny/dec/bad/junk	ERR 22P02 invalid input syntax for type numeric: "zz"
+numg/q/neAll/dec/bad/junk	ERR 22P02 invalid input syntax for type numeric: "zz"
+numg/q/corrIn/dec/bad/junk	ERR 22P02 invalid input syntax for type numeric: "zz"
+numg/q/sel/dec/bad/junk	ERR 22P02 invalid input syntax for type numeric: "zz"
+numg/q/in/dec/bad/expEmpty	ERR 22P02 invalid input syntax for type numeric: "1e"
+numg/q/notIn/dec/bad/expEmpty	ERR 22P02 invalid input syntax for type numeric: "1e"
+numg/q/eqAny/dec/bad/expEmpty	ERR 22P02 invalid input syntax for type numeric: "1e"
+numg/q/neAll/dec/bad/expEmpty	ERR 22P02 invalid input syntax for type numeric: "1e"
+numg/q/corrIn/dec/bad/expEmpty	ERR 22P02 invalid input syntax for type numeric: "1e"
+numg/q/sel/dec/bad/expEmpty	ERR 22P02 invalid input syntax for type numeric: "1e"
+numg/q/in/dec/bad/dot	ERR 22P02 invalid input syntax for type numeric: "."
+numg/q/notIn/dec/bad/dot	ERR 22P02 invalid input syntax for type numeric: "."
+numg/q/eqAny/dec/bad/dot	ERR 22P02 invalid input syntax for type numeric: "."
+numg/q/neAll/dec/bad/dot	ERR 22P02 invalid input syntax for type numeric: "."
+numg/q/corrIn/dec/bad/dot	ERR 22P02 invalid input syntax for type numeric: "."
+numg/q/sel/dec/bad/dot	ERR 22P02 invalid input syntax for type numeric: "."
+numg/q/in/dec/bad/empty	ERR 22P02 invalid input syntax for type numeric: ""
+numg/q/notIn/dec/bad/empty	ERR 22P02 invalid input syntax for type numeric: ""
+numg/q/eqAny/dec/bad/empty	ERR 22P02 invalid input syntax for type numeric: ""
+numg/q/neAll/dec/bad/empty	ERR 22P02 invalid input syntax for type numeric: ""
+numg/q/corrIn/dec/bad/empty	ERR 22P02 invalid input syntax for type numeric: ""
+numg/q/sel/dec/bad/empty	ERR 22P02 invalid input syntax for type numeric: ""
+numg/q/in/dec/bad/twoDots	ERR 22P02 invalid input syntax for type numeric: "1.2.3"
+numg/q/notIn/dec/bad/twoDots	ERR 22P02 invalid input syntax for type numeric: "1.2.3"
+numg/q/eqAny/dec/bad/twoDots	ERR 22P02 invalid input syntax for type numeric: "1.2.3"
+numg/q/neAll/dec/bad/twoDots	ERR 22P02 invalid input syntax for type numeric: "1.2.3"
+numg/q/corrIn/dec/bad/twoDots	ERR 22P02 invalid input syntax for type numeric: "1.2.3"
+numg/q/sel/dec/bad/twoDots	ERR 22P02 invalid input syntax for type numeric: "1.2.3"
+numg/q/in/dec/bad/innerSpace	ERR 22P02 invalid input syntax for type numeric: "1 4"
+numg/q/notIn/dec/bad/innerSpace	ERR 22P02 invalid input syntax for type numeric: "1 4"
+numg/q/eqAny/dec/bad/innerSpace	ERR 22P02 invalid input syntax for type numeric: "1 4"
+numg/q/neAll/dec/bad/innerSpace	ERR 22P02 invalid input syntax for type numeric: "1 4"
+numg/q/corrIn/dec/bad/innerSpace	ERR 22P02 invalid input syntax for type numeric: "1 4"
+numg/q/sel/dec/bad/innerSpace	ERR 22P02 invalid input syntax for type numeric: "1 4"
+numg/q/in/dec/bad/twoSigns	ERR 22P02 invalid input syntax for type numeric: "+-14"
+numg/q/notIn/dec/bad/twoSigns	ERR 22P02 invalid input syntax for type numeric: "+-14"
+numg/q/eqAny/dec/bad/twoSigns	ERR 22P02 invalid input syntax for type numeric: "+-14"
+numg/q/neAll/dec/bad/twoSigns	ERR 22P02 invalid input syntax for type numeric: "+-14"
+numg/q/corrIn/dec/bad/twoSigns	ERR 22P02 invalid input syntax for type numeric: "+-14"
+numg/q/sel/dec/bad/twoSigns	ERR 22P02 invalid input syntax for type numeric: "+-14"
+numg/q/in/dec/bad/trailJunk	ERR 22P02 invalid input syntax for type numeric: "14x"
+numg/q/notIn/dec/bad/trailJunk	ERR 22P02 invalid input syntax for type numeric: "14x"
+numg/q/eqAny/dec/bad/trailJunk	ERR 22P02 invalid input syntax for type numeric: "14x"
+numg/q/neAll/dec/bad/trailJunk	ERR 22P02 invalid input syntax for type numeric: "14x"
+numg/q/corrIn/dec/bad/trailJunk	ERR 22P02 invalid input syntax for type numeric: "14x"
+numg/q/sel/dec/bad/trailJunk	ERR 22P02 invalid input syntax for type numeric: "14x"
+numg/q/in/dec/bad/signedNaN	ERR 22P02 invalid input syntax for type numeric: "+NaN"
+numg/q/notIn/dec/bad/signedNaN	ERR 22P02 invalid input syntax for type numeric: "+NaN"
+numg/q/eqAny/dec/bad/signedNaN	ERR 22P02 invalid input syntax for type numeric: "+NaN"
+numg/q/neAll/dec/bad/signedNaN	ERR 22P02 invalid input syntax for type numeric: "+NaN"
+numg/q/corrIn/dec/bad/signedNaN	ERR 22P02 invalid input syntax for type numeric: "+NaN"
+numg/q/sel/dec/bad/signedNaN	ERR 22P02 invalid input syntax for type numeric: "+NaN"
+numg/q/in/dec/bad/nbsp	ERR 22P02 invalid input syntax for type numeric: "14 "
+numg/q/notIn/dec/bad/nbsp	ERR 22P02 invalid input syntax for type numeric: "14 "
+numg/q/eqAny/dec/bad/nbsp	ERR 22P02 invalid input syntax for type numeric: "14 "
+numg/q/neAll/dec/bad/nbsp	ERR 22P02 invalid input syntax for type numeric: "14 "
+numg/q/corrIn/dec/bad/nbsp	ERR 22P02 invalid input syntax for type numeric: "14 "
+numg/q/sel/dec/bad/nbsp	ERR 22P02 invalid input syntax for type numeric: "14 "
+numg/q/in/dec/bad/twoUnderscores	ERR 22P02 invalid input syntax for type numeric: "1__4"
+numg/q/notIn/dec/bad/twoUnderscores	ERR 22P02 invalid input syntax for type numeric: "1__4"
+numg/q/eqAny/dec/bad/twoUnderscores	ERR 22P02 invalid input syntax for type numeric: "1__4"
+numg/q/neAll/dec/bad/twoUnderscores	ERR 22P02 invalid input syntax for type numeric: "1__4"
+numg/q/corrIn/dec/bad/twoUnderscores	ERR 22P02 invalid input syntax for type numeric: "1__4"
+numg/q/sel/dec/bad/twoUnderscores	ERR 22P02 invalid input syntax for type numeric: "1__4"
+numg/q/in/dec/bad/hexFloat	ERR 22P02 invalid input syntax for type numeric: "0x1.8p1"
+numg/q/notIn/dec/bad/hexFloat	ERR 22P02 invalid input syntax for type numeric: "0x1.8p1"
+numg/q/eqAny/dec/bad/hexFloat	ERR 22P02 invalid input syntax for type numeric: "0x1.8p1"
+numg/q/neAll/dec/bad/hexFloat	ERR 22P02 invalid input syntax for type numeric: "0x1.8p1"
+numg/q/corrIn/dec/bad/hexFloat	ERR 22P02 invalid input syntax for type numeric: "0x1.8p1"
+numg/q/sel/dec/bad/hexFloat	ERR 22P02 invalid input syntax for type numeric: "0x1.8p1"
+numg/q/in/dec/radix/hex	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/dec/radix/hex	rows=0 
+numg/q/eqAny/dec/radix/hex	rows=4 1 | 2 | 3 | 4
+numg/q/neAll/dec/radix/hex	rows=0 
+numg/q/corrIn/dec/radix/hex	rows=1 3
+numg/q/sel/dec/radix/hex	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/dec/radix/octal	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/dec/radix/octal	rows=0 
+numg/q/eqAny/dec/radix/octal	rows=4 1 | 2 | 3 | 4
+numg/q/neAll/dec/radix/octal	rows=0 
+numg/q/corrIn/dec/radix/octal	rows=1 3
+numg/q/sel/dec/radix/octal	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/dec/radix/binary	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/dec/radix/binary	rows=0 
+numg/q/eqAny/dec/radix/binary	rows=4 1 | 2 | 3 | 4
+numg/q/neAll/dec/radix/binary	rows=0 
+numg/q/corrIn/dec/radix/binary	rows=1 3
+numg/q/sel/dec/radix/binary	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/dec/radix/underscore	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/dec/radix/underscore	rows=0 
+numg/q/eqAny/dec/radix/underscore	rows=4 1 | 2 | 3 | 4
+numg/q/neAll/dec/radix/underscore	rows=0 
+numg/q/corrIn/dec/radix/underscore	rows=1 3
+numg/q/sel/dec/radix/underscore	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/dec/radix/underscoreFrac	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/dec/radix/underscoreFrac	rows=0 
+numg/q/eqAny/dec/radix/underscoreFrac	rows=4 1 | 2 | 3 | 4
+numg/q/neAll/dec/radix/underscoreFrac	rows=0 
+numg/q/corrIn/dec/radix/underscoreFrac	rows=1 1
+numg/q/sel/dec/radix/underscoreFrac	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/n38/plain/H	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/n38/plain/H	rows=0 
+numg/q/corrIn/n38/plain/H	rows=1 3
+numg/q/sel/n38/plain/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/n38/plain/M	rows=0 
+numg/q/notIn/n38/plain/M	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n38/plain/M	rows=0 
+numg/q/sel/n38/plain/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n38/plain/F	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/n38/plain/F	rows=0 
+numg/q/corrIn/n38/plain/F	rows=1 1
+numg/q/sel/n38/plain/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/n38/plus/H	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/n38/plus/H	rows=0 
+numg/q/corrIn/n38/plus/H	rows=1 3
+numg/q/sel/n38/plus/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/n38/plus/M	rows=0 
+numg/q/notIn/n38/plus/M	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n38/plus/M	rows=0 
+numg/q/sel/n38/plus/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n38/plus/F	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/n38/plus/F	rows=0 
+numg/q/corrIn/n38/plus/F	rows=1 1
+numg/q/sel/n38/plus/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/n38/minus/H	rows=0 
+numg/q/notIn/n38/minus/H	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n38/minus/H	rows=0 
+numg/q/sel/n38/minus/H	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n38/minus/M	rows=0 
+numg/q/notIn/n38/minus/M	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n38/minus/M	rows=0 
+numg/q/sel/n38/minus/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n38/minus/F	rows=0 
+numg/q/notIn/n38/minus/F	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n38/minus/F	rows=0 
+numg/q/sel/n38/minus/F	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n38/lead0/H	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/n38/lead0/H	rows=0 
+numg/q/corrIn/n38/lead0/H	rows=1 3
+numg/q/sel/n38/lead0/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/n38/lead0/M	rows=0 
+numg/q/notIn/n38/lead0/M	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n38/lead0/M	rows=0 
+numg/q/sel/n38/lead0/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n38/lead0/F	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/n38/lead0/F	rows=0 
+numg/q/corrIn/n38/lead0/F	rows=1 1
+numg/q/sel/n38/lead0/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/n38/trail0/H	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/n38/trail0/H	rows=0 
+numg/q/corrIn/n38/trail0/H	rows=1 3
+numg/q/sel/n38/trail0/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/n38/trail0/M	rows=0 
+numg/q/notIn/n38/trail0/M	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n38/trail0/M	rows=0 
+numg/q/sel/n38/trail0/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n38/trail0/F	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/n38/trail0/F	rows=0 
+numg/q/corrIn/n38/trail0/F	rows=1 1
+numg/q/sel/n38/trail0/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/n38/noFrac/H	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/n38/noFrac/H	rows=0 
+numg/q/corrIn/n38/noFrac/H	rows=1 3
+numg/q/sel/n38/noFrac/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/n38/noInt/H	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/n38/noInt/H	rows=0 
+numg/q/corrIn/n38/noInt/H	rows=1 3
+numg/q/sel/n38/noInt/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/n38/noInt/M	rows=0 
+numg/q/notIn/n38/noInt/M	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n38/noInt/M	rows=0 
+numg/q/sel/n38/noInt/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n38/noInt/F	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/n38/noInt/F	rows=0 
+numg/q/corrIn/n38/noInt/F	rows=1 1
+numg/q/sel/n38/noInt/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/n38/noInt/miss	rows=0 
+numg/q/notIn/n38/noInt/miss	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n38/noInt/miss	rows=0 
+numg/q/sel/n38/noInt/miss	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n38/exp/H	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/n38/exp/H	rows=0 
+numg/q/corrIn/n38/exp/H	rows=1 3
+numg/q/sel/n38/exp/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/n38/exp/M	rows=0 
+numg/q/notIn/n38/exp/M	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n38/exp/M	rows=0 
+numg/q/sel/n38/exp/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n38/exp/F	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/n38/exp/F	rows=0 
+numg/q/corrIn/n38/exp/F	rows=1 1
+numg/q/sel/n38/exp/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/n38/expUpper/H	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/n38/expUpper/H	rows=0 
+numg/q/corrIn/n38/expUpper/H	rows=1 3
+numg/q/sel/n38/expUpper/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/n38/expUpper/M	rows=0 
+numg/q/notIn/n38/expUpper/M	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n38/expUpper/M	rows=0 
+numg/q/sel/n38/expUpper/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n38/expUpper/F	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/n38/expUpper/F	rows=0 
+numg/q/corrIn/n38/expUpper/F	rows=1 1
+numg/q/sel/n38/expUpper/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/n38/expPlus/H	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/n38/expPlus/H	rows=0 
+numg/q/corrIn/n38/expPlus/H	rows=1 3
+numg/q/sel/n38/expPlus/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/n38/expPlus/M	rows=0 
+numg/q/notIn/n38/expPlus/M	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n38/expPlus/M	rows=0 
+numg/q/sel/n38/expPlus/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n38/expPlus/F	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/n38/expPlus/F	rows=0 
+numg/q/corrIn/n38/expPlus/F	rows=1 1
+numg/q/sel/n38/expPlus/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/n38/expMinus/H	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/n38/expMinus/H	rows=0 
+numg/q/corrIn/n38/expMinus/H	rows=1 3
+numg/q/sel/n38/expMinus/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/n38/expMinus/M	rows=0 
+numg/q/notIn/n38/expMinus/M	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n38/expMinus/M	rows=0 
+numg/q/sel/n38/expMinus/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n38/expMinus/F	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/n38/expMinus/F	rows=0 
+numg/q/corrIn/n38/expMinus/F	rows=1 1
+numg/q/sel/n38/expMinus/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/n38/expZero/H	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/n38/expZero/H	rows=0 
+numg/q/corrIn/n38/expZero/H	rows=1 3
+numg/q/sel/n38/expZero/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/n38/expZero/F	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/n38/expZero/F	rows=0 
+numg/q/corrIn/n38/expZero/F	rows=1 1
+numg/q/sel/n38/expZero/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/n38/space/H	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/n38/space/H	rows=0 
+numg/q/corrIn/n38/space/H	rows=1 3
+numg/q/sel/n38/space/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/n38/space/M	rows=0 
+numg/q/notIn/n38/space/M	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n38/space/M	rows=0 
+numg/q/sel/n38/space/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n38/space/F	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/n38/space/F	rows=0 
+numg/q/corrIn/n38/space/F	rows=1 1
+numg/q/sel/n38/space/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/n38/tab/H	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/n38/tab/H	rows=0 
+numg/q/corrIn/n38/tab/H	rows=1 3
+numg/q/sel/n38/tab/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/n38/trail0Wide/H	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/n38/trail0Wide/H	rows=0 
+numg/q/corrIn/n38/trail0Wide/H	rows=1 3
+numg/q/sel/n38/trail0Wide/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/n38/trail0Wide/F	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/n38/trail0Wide/F	rows=0 
+numg/q/corrIn/n38/trail0Wide/F	rows=1 1
+numg/q/sel/n38/trail0Wide/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/n38/lead0Wide/H	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/n38/lead0Wide/H	rows=0 
+numg/q/corrIn/n38/lead0Wide/H	rows=1 3
+numg/q/sel/n38/lead0Wide/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/n38/lead0Wide/M	rows=0 
+numg/q/notIn/n38/lead0Wide/M	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n38/lead0Wide/M	rows=0 
+numg/q/sel/n38/lead0Wide/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n38/lead0Wide/F	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/n38/lead0Wide/F	rows=0 
+numg/q/corrIn/n38/lead0Wide/F	rows=1 1
+numg/q/sel/n38/lead0Wide/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/n38/expWide/H	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/n38/expWide/H	rows=0 
+numg/q/corrIn/n38/expWide/H	rows=1 3
+numg/q/sel/n38/expWide/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/n38/expWide/F	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/n38/expWide/F	rows=0 
+numg/q/corrIn/n38/expWide/F	rows=1 1
+numg/q/sel/n38/expWide/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/n38/zeroWide/miss	rows=0 
+numg/q/notIn/n38/zeroWide/miss	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n38/zeroWide/miss	rows=0 
+numg/q/sel/n38/zeroWide/miss	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n38/width38/M	rows=0 
+numg/q/notIn/n38/width38/M	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n38/width38/M	rows=0 
+numg/q/sel/n38/width38/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n38/over38Frac	rows=0 
+numg/q/notIn/n38/over38Frac	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n38/over38Frac	rows=0 
+numg/q/sel/n38/over38Frac	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n38/over38Neg	rows=0 
+numg/q/notIn/n38/over38Neg	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n38/over38Neg	rows=0 
+numg/q/sel/n38/over38Neg	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n38/scale39	rows=0 
+numg/q/notIn/n38/scale39	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n38/scale39	rows=0 
+numg/q/sel/n38/scale39	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n38/expScale	rows=0 
+numg/q/notIn/n38/expScale	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n38/expScale	rows=0 
+numg/q/sel/n38/expScale	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n38/over38Int	rows=0 
+numg/q/notIn/n38/over38Int	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n38/over38Int	rows=0 
+numg/q/sel/n38/over38Int	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n38/expInt	rows=0 
+numg/q/notIn/n38/expInt	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n38/expInt	rows=0 
+numg/q/sel/n38/expInt	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n38/expHuge	rows=0 
+numg/q/notIn/n38/expHuge	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n38/expHuge	rows=0 
+numg/q/sel/n38/expHuge	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n38/nan	rows=0 
+numg/q/notIn/n38/nan	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n38/nan	rows=0 
+numg/q/sel/n38/nan	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n38/inf	rows=0 
+numg/q/notIn/n38/inf	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n38/inf	rows=0 
+numg/q/sel/n38/inf	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n38/negInf	rows=0 
+numg/q/notIn/n38/negInf	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n38/negInf	rows=0 
+numg/q/sel/n38/negInf	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n38/infShort	rows=0 
+numg/q/notIn/n38/infShort	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n38/infShort	rows=0 
+numg/q/sel/n38/infShort	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n38/bad/junk	ERR 22P02 invalid input syntax for type numeric: "zz"
+numg/q/notIn/n38/bad/junk	ERR 22P02 invalid input syntax for type numeric: "zz"
+numg/q/corrIn/n38/bad/junk	ERR 22P02 invalid input syntax for type numeric: "zz"
+numg/q/sel/n38/bad/junk	ERR 22P02 invalid input syntax for type numeric: "zz"
+numg/q/in/n38/bad/expEmpty	ERR 22P02 invalid input syntax for type numeric: "1e"
+numg/q/notIn/n38/bad/expEmpty	ERR 22P02 invalid input syntax for type numeric: "1e"
+numg/q/corrIn/n38/bad/expEmpty	ERR 22P02 invalid input syntax for type numeric: "1e"
+numg/q/sel/n38/bad/expEmpty	ERR 22P02 invalid input syntax for type numeric: "1e"
+numg/q/in/n38/bad/dot	ERR 22P02 invalid input syntax for type numeric: "."
+numg/q/notIn/n38/bad/dot	ERR 22P02 invalid input syntax for type numeric: "."
+numg/q/corrIn/n38/bad/dot	ERR 22P02 invalid input syntax for type numeric: "."
+numg/q/sel/n38/bad/dot	ERR 22P02 invalid input syntax for type numeric: "."
+numg/q/in/n38/bad/empty	ERR 22P02 invalid input syntax for type numeric: ""
+numg/q/notIn/n38/bad/empty	ERR 22P02 invalid input syntax for type numeric: ""
+numg/q/corrIn/n38/bad/empty	ERR 22P02 invalid input syntax for type numeric: ""
+numg/q/sel/n38/bad/empty	ERR 22P02 invalid input syntax for type numeric: ""
+numg/q/in/n38/bad/twoDots	ERR 22P02 invalid input syntax for type numeric: "1.2.3"
+numg/q/notIn/n38/bad/twoDots	ERR 22P02 invalid input syntax for type numeric: "1.2.3"
+numg/q/corrIn/n38/bad/twoDots	ERR 22P02 invalid input syntax for type numeric: "1.2.3"
+numg/q/sel/n38/bad/twoDots	ERR 22P02 invalid input syntax for type numeric: "1.2.3"
+numg/q/in/n38/bad/innerSpace	ERR 22P02 invalid input syntax for type numeric: "1 4"
+numg/q/notIn/n38/bad/innerSpace	ERR 22P02 invalid input syntax for type numeric: "1 4"
+numg/q/corrIn/n38/bad/innerSpace	ERR 22P02 invalid input syntax for type numeric: "1 4"
+numg/q/sel/n38/bad/innerSpace	ERR 22P02 invalid input syntax for type numeric: "1 4"
+numg/q/in/n38/bad/twoSigns	ERR 22P02 invalid input syntax for type numeric: "+-14"
+numg/q/notIn/n38/bad/twoSigns	ERR 22P02 invalid input syntax for type numeric: "+-14"
+numg/q/corrIn/n38/bad/twoSigns	ERR 22P02 invalid input syntax for type numeric: "+-14"
+numg/q/sel/n38/bad/twoSigns	ERR 22P02 invalid input syntax for type numeric: "+-14"
+numg/q/in/n38/bad/trailJunk	ERR 22P02 invalid input syntax for type numeric: "14x"
+numg/q/notIn/n38/bad/trailJunk	ERR 22P02 invalid input syntax for type numeric: "14x"
+numg/q/corrIn/n38/bad/trailJunk	ERR 22P02 invalid input syntax for type numeric: "14x"
+numg/q/sel/n38/bad/trailJunk	ERR 22P02 invalid input syntax for type numeric: "14x"
+numg/q/in/n38/bad/signedNaN	ERR 22P02 invalid input syntax for type numeric: "+NaN"
+numg/q/notIn/n38/bad/signedNaN	ERR 22P02 invalid input syntax for type numeric: "+NaN"
+numg/q/corrIn/n38/bad/signedNaN	ERR 22P02 invalid input syntax for type numeric: "+NaN"
+numg/q/sel/n38/bad/signedNaN	ERR 22P02 invalid input syntax for type numeric: "+NaN"
+numg/q/in/n38/bad/nbsp	ERR 22P02 invalid input syntax for type numeric: "14 "
+numg/q/notIn/n38/bad/nbsp	ERR 22P02 invalid input syntax for type numeric: "14 "
+numg/q/corrIn/n38/bad/nbsp	ERR 22P02 invalid input syntax for type numeric: "14 "
+numg/q/sel/n38/bad/nbsp	ERR 22P02 invalid input syntax for type numeric: "14 "
+numg/q/in/n38/bad/twoUnderscores	ERR 22P02 invalid input syntax for type numeric: "1__4"
+numg/q/notIn/n38/bad/twoUnderscores	ERR 22P02 invalid input syntax for type numeric: "1__4"
+numg/q/corrIn/n38/bad/twoUnderscores	ERR 22P02 invalid input syntax for type numeric: "1__4"
+numg/q/sel/n38/bad/twoUnderscores	ERR 22P02 invalid input syntax for type numeric: "1__4"
+numg/q/in/n38/bad/hexFloat	ERR 22P02 invalid input syntax for type numeric: "0x1.8p1"
+numg/q/notIn/n38/bad/hexFloat	ERR 22P02 invalid input syntax for type numeric: "0x1.8p1"
+numg/q/corrIn/n38/bad/hexFloat	ERR 22P02 invalid input syntax for type numeric: "0x1.8p1"
+numg/q/sel/n38/bad/hexFloat	ERR 22P02 invalid input syntax for type numeric: "0x1.8p1"
+numg/q/in/n38/radix/hex	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/n38/radix/hex	rows=0 
+numg/q/corrIn/n38/radix/hex	rows=1 3
+numg/q/sel/n38/radix/hex	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/n38/radix/octal	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/n38/radix/octal	rows=0 
+numg/q/corrIn/n38/radix/octal	rows=1 3
+numg/q/sel/n38/radix/octal	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/n38/radix/binary	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/n38/radix/binary	rows=0 
+numg/q/corrIn/n38/radix/binary	rows=1 3
+numg/q/sel/n38/radix/binary	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/n38/radix/underscore	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/n38/radix/underscore	rows=0 
+numg/q/corrIn/n38/radix/underscore	rows=1 3
+numg/q/sel/n38/radix/underscore	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/n38/radix/underscoreFrac	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/n38/radix/underscoreFrac	rows=0 
+numg/q/corrIn/n38/radix/underscoreFrac	rows=1 1
+numg/q/sel/n38/radix/underscoreFrac	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/n/plain/H	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/n/plain/H	rows=0 
+numg/q/corrIn/n/plain/H	rows=1 3
+numg/q/sel/n/plain/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/n/plain/M	rows=0 
+numg/q/notIn/n/plain/M	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n/plain/M	rows=0 
+numg/q/sel/n/plain/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n/plain/F	rows=0 
+numg/q/notIn/n/plain/F	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n/plain/F	rows=0 
+numg/q/sel/n/plain/F	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n/plus/H	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/n/plus/H	rows=0 
+numg/q/corrIn/n/plus/H	rows=1 3
+numg/q/sel/n/plus/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/n/plus/M	rows=0 
+numg/q/notIn/n/plus/M	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n/plus/M	rows=0 
+numg/q/sel/n/plus/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n/plus/F	rows=0 
+numg/q/notIn/n/plus/F	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n/plus/F	rows=0 
+numg/q/sel/n/plus/F	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n/minus/H	rows=0 
+numg/q/notIn/n/minus/H	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n/minus/H	rows=0 
+numg/q/sel/n/minus/H	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n/minus/M	rows=0 
+numg/q/notIn/n/minus/M	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n/minus/M	rows=0 
+numg/q/sel/n/minus/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n/minus/F	rows=0 
+numg/q/notIn/n/minus/F	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n/minus/F	rows=0 
+numg/q/sel/n/minus/F	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n/lead0/H	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/n/lead0/H	rows=0 
+numg/q/corrIn/n/lead0/H	rows=1 3
+numg/q/sel/n/lead0/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/n/lead0/M	rows=0 
+numg/q/notIn/n/lead0/M	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n/lead0/M	rows=0 
+numg/q/sel/n/lead0/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n/lead0/F	rows=0 
+numg/q/notIn/n/lead0/F	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n/lead0/F	rows=0 
+numg/q/sel/n/lead0/F	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n/trail0/H	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/n/trail0/H	rows=0 
+numg/q/corrIn/n/trail0/H	rows=1 3
+numg/q/sel/n/trail0/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/n/trail0/M	rows=0 
+numg/q/notIn/n/trail0/M	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n/trail0/M	rows=0 
+numg/q/sel/n/trail0/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n/trail0/F	rows=0 
+numg/q/notIn/n/trail0/F	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n/trail0/F	rows=0 
+numg/q/sel/n/trail0/F	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n/noFrac/H	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/n/noFrac/H	rows=0 
+numg/q/corrIn/n/noFrac/H	rows=1 3
+numg/q/sel/n/noFrac/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/n/noInt/H	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/n/noInt/H	rows=0 
+numg/q/corrIn/n/noInt/H	rows=1 3
+numg/q/sel/n/noInt/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/n/noInt/M	rows=0 
+numg/q/notIn/n/noInt/M	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n/noInt/M	rows=0 
+numg/q/sel/n/noInt/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n/noInt/F	rows=0 
+numg/q/notIn/n/noInt/F	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n/noInt/F	rows=0 
+numg/q/sel/n/noInt/F	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n/noInt/miss	rows=0 
+numg/q/notIn/n/noInt/miss	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n/noInt/miss	rows=0 
+numg/q/sel/n/noInt/miss	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n/exp/H	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/n/exp/H	rows=0 
+numg/q/corrIn/n/exp/H	rows=1 3
+numg/q/sel/n/exp/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/n/exp/M	rows=0 
+numg/q/notIn/n/exp/M	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n/exp/M	rows=0 
+numg/q/sel/n/exp/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n/exp/F	rows=0 
+numg/q/notIn/n/exp/F	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n/exp/F	rows=0 
+numg/q/sel/n/exp/F	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n/expUpper/H	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/n/expUpper/H	rows=0 
+numg/q/corrIn/n/expUpper/H	rows=1 3
+numg/q/sel/n/expUpper/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/n/expUpper/M	rows=0 
+numg/q/notIn/n/expUpper/M	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n/expUpper/M	rows=0 
+numg/q/sel/n/expUpper/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n/expUpper/F	rows=0 
+numg/q/notIn/n/expUpper/F	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n/expUpper/F	rows=0 
+numg/q/sel/n/expUpper/F	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n/expPlus/H	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/n/expPlus/H	rows=0 
+numg/q/corrIn/n/expPlus/H	rows=1 3
+numg/q/sel/n/expPlus/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/n/expPlus/M	rows=0 
+numg/q/notIn/n/expPlus/M	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n/expPlus/M	rows=0 
+numg/q/sel/n/expPlus/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n/expPlus/F	rows=0 
+numg/q/notIn/n/expPlus/F	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n/expPlus/F	rows=0 
+numg/q/sel/n/expPlus/F	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n/expMinus/H	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/n/expMinus/H	rows=0 
+numg/q/corrIn/n/expMinus/H	rows=1 3
+numg/q/sel/n/expMinus/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/n/expMinus/M	rows=0 
+numg/q/notIn/n/expMinus/M	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n/expMinus/M	rows=0 
+numg/q/sel/n/expMinus/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n/expMinus/F	rows=0 
+numg/q/notIn/n/expMinus/F	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n/expMinus/F	rows=0 
+numg/q/sel/n/expMinus/F	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n/expZero/H	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/n/expZero/H	rows=0 
+numg/q/corrIn/n/expZero/H	rows=1 3
+numg/q/sel/n/expZero/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/n/expZero/F	rows=0 
+numg/q/notIn/n/expZero/F	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n/expZero/F	rows=0 
+numg/q/sel/n/expZero/F	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n/space/H	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/n/space/H	rows=0 
+numg/q/corrIn/n/space/H	rows=1 3
+numg/q/sel/n/space/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/n/space/M	rows=0 
+numg/q/notIn/n/space/M	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n/space/M	rows=0 
+numg/q/sel/n/space/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n/space/F	rows=0 
+numg/q/notIn/n/space/F	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n/space/F	rows=0 
+numg/q/sel/n/space/F	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n/tab/H	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/n/tab/H	rows=0 
+numg/q/corrIn/n/tab/H	rows=1 3
+numg/q/sel/n/tab/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/n/trail0Wide/H	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/n/trail0Wide/H	rows=0 
+numg/q/corrIn/n/trail0Wide/H	rows=1 3
+numg/q/sel/n/trail0Wide/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/n/trail0Wide/F	rows=0 
+numg/q/notIn/n/trail0Wide/F	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n/trail0Wide/F	rows=0 
+numg/q/sel/n/trail0Wide/F	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n/lead0Wide/H	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/n/lead0Wide/H	rows=0 
+numg/q/corrIn/n/lead0Wide/H	rows=1 3
+numg/q/sel/n/lead0Wide/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/n/lead0Wide/M	rows=0 
+numg/q/notIn/n/lead0Wide/M	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n/lead0Wide/M	rows=0 
+numg/q/sel/n/lead0Wide/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n/lead0Wide/F	rows=0 
+numg/q/notIn/n/lead0Wide/F	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n/lead0Wide/F	rows=0 
+numg/q/sel/n/lead0Wide/F	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n/expWide/H	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/n/expWide/H	rows=0 
+numg/q/corrIn/n/expWide/H	rows=1 3
+numg/q/sel/n/expWide/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/n/expWide/F	rows=0 
+numg/q/notIn/n/expWide/F	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n/expWide/F	rows=0 
+numg/q/sel/n/expWide/F	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n/zeroWide/miss	rows=0 
+numg/q/notIn/n/zeroWide/miss	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n/zeroWide/miss	rows=0 
+numg/q/sel/n/zeroWide/miss	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n/width38/M	rows=0 
+numg/q/notIn/n/width38/M	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n/width38/M	rows=0 
+numg/q/sel/n/width38/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n/over38Frac	rows=0 
+numg/q/notIn/n/over38Frac	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n/over38Frac	rows=0 
+numg/q/sel/n/over38Frac	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n/over38Neg	rows=0 
+numg/q/notIn/n/over38Neg	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n/over38Neg	rows=0 
+numg/q/sel/n/over38Neg	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n/scale39	rows=0 
+numg/q/notIn/n/scale39	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n/scale39	rows=0 
+numg/q/sel/n/scale39	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n/expScale	rows=0 
+numg/q/notIn/n/expScale	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n/expScale	rows=0 
+numg/q/sel/n/expScale	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n/over38Int	rows=0 
+numg/q/notIn/n/over38Int	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n/over38Int	rows=0 
+numg/q/sel/n/over38Int	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n/expInt	rows=0 
+numg/q/notIn/n/expInt	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n/expInt	rows=0 
+numg/q/sel/n/expInt	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n/expHuge	rows=0 
+numg/q/notIn/n/expHuge	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n/expHuge	rows=0 
+numg/q/sel/n/expHuge	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n/nan	rows=0 
+numg/q/notIn/n/nan	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n/nan	rows=0 
+numg/q/sel/n/nan	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n/inf	rows=0 
+numg/q/notIn/n/inf	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n/inf	rows=0 
+numg/q/sel/n/inf	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n/negInf	rows=0 
+numg/q/notIn/n/negInf	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n/negInf	rows=0 
+numg/q/sel/n/negInf	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n/infShort	rows=0 
+numg/q/notIn/n/infShort	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n/infShort	rows=0 
+numg/q/sel/n/infShort	rows=4 1,false | 2,false | 3,false | 4,false
+numg/q/in/n/bad/junk	ERR 22P02 invalid input syntax for type numeric: "zz"
+numg/q/notIn/n/bad/junk	ERR 22P02 invalid input syntax for type numeric: "zz"
+numg/q/corrIn/n/bad/junk	ERR 22P02 invalid input syntax for type numeric: "zz"
+numg/q/sel/n/bad/junk	ERR 22P02 invalid input syntax for type numeric: "zz"
+numg/q/in/n/bad/expEmpty	ERR 22P02 invalid input syntax for type numeric: "1e"
+numg/q/notIn/n/bad/expEmpty	ERR 22P02 invalid input syntax for type numeric: "1e"
+numg/q/corrIn/n/bad/expEmpty	ERR 22P02 invalid input syntax for type numeric: "1e"
+numg/q/sel/n/bad/expEmpty	ERR 22P02 invalid input syntax for type numeric: "1e"
+numg/q/in/n/bad/dot	ERR 22P02 invalid input syntax for type numeric: "."
+numg/q/notIn/n/bad/dot	ERR 22P02 invalid input syntax for type numeric: "."
+numg/q/corrIn/n/bad/dot	ERR 22P02 invalid input syntax for type numeric: "."
+numg/q/sel/n/bad/dot	ERR 22P02 invalid input syntax for type numeric: "."
+numg/q/in/n/bad/empty	ERR 22P02 invalid input syntax for type numeric: ""
+numg/q/notIn/n/bad/empty	ERR 22P02 invalid input syntax for type numeric: ""
+numg/q/corrIn/n/bad/empty	ERR 22P02 invalid input syntax for type numeric: ""
+numg/q/sel/n/bad/empty	ERR 22P02 invalid input syntax for type numeric: ""
+numg/q/in/n/bad/twoDots	ERR 22P02 invalid input syntax for type numeric: "1.2.3"
+numg/q/notIn/n/bad/twoDots	ERR 22P02 invalid input syntax for type numeric: "1.2.3"
+numg/q/corrIn/n/bad/twoDots	ERR 22P02 invalid input syntax for type numeric: "1.2.3"
+numg/q/sel/n/bad/twoDots	ERR 22P02 invalid input syntax for type numeric: "1.2.3"
+numg/q/in/n/bad/innerSpace	ERR 22P02 invalid input syntax for type numeric: "1 4"
+numg/q/notIn/n/bad/innerSpace	ERR 22P02 invalid input syntax for type numeric: "1 4"
+numg/q/corrIn/n/bad/innerSpace	ERR 22P02 invalid input syntax for type numeric: "1 4"
+numg/q/sel/n/bad/innerSpace	ERR 22P02 invalid input syntax for type numeric: "1 4"
+numg/q/in/n/bad/twoSigns	ERR 22P02 invalid input syntax for type numeric: "+-14"
+numg/q/notIn/n/bad/twoSigns	ERR 22P02 invalid input syntax for type numeric: "+-14"
+numg/q/corrIn/n/bad/twoSigns	ERR 22P02 invalid input syntax for type numeric: "+-14"
+numg/q/sel/n/bad/twoSigns	ERR 22P02 invalid input syntax for type numeric: "+-14"
+numg/q/in/n/bad/trailJunk	ERR 22P02 invalid input syntax for type numeric: "14x"
+numg/q/notIn/n/bad/trailJunk	ERR 22P02 invalid input syntax for type numeric: "14x"
+numg/q/corrIn/n/bad/trailJunk	ERR 22P02 invalid input syntax for type numeric: "14x"
+numg/q/sel/n/bad/trailJunk	ERR 22P02 invalid input syntax for type numeric: "14x"
+numg/q/in/n/bad/signedNaN	ERR 22P02 invalid input syntax for type numeric: "+NaN"
+numg/q/notIn/n/bad/signedNaN	ERR 22P02 invalid input syntax for type numeric: "+NaN"
+numg/q/corrIn/n/bad/signedNaN	ERR 22P02 invalid input syntax for type numeric: "+NaN"
+numg/q/sel/n/bad/signedNaN	ERR 22P02 invalid input syntax for type numeric: "+NaN"
+numg/q/in/n/bad/nbsp	ERR 22P02 invalid input syntax for type numeric: "14 "
+numg/q/notIn/n/bad/nbsp	ERR 22P02 invalid input syntax for type numeric: "14 "
+numg/q/corrIn/n/bad/nbsp	ERR 22P02 invalid input syntax for type numeric: "14 "
+numg/q/sel/n/bad/nbsp	ERR 22P02 invalid input syntax for type numeric: "14 "
+numg/q/in/n/bad/twoUnderscores	ERR 22P02 invalid input syntax for type numeric: "1__4"
+numg/q/notIn/n/bad/twoUnderscores	ERR 22P02 invalid input syntax for type numeric: "1__4"
+numg/q/corrIn/n/bad/twoUnderscores	ERR 22P02 invalid input syntax for type numeric: "1__4"
+numg/q/sel/n/bad/twoUnderscores	ERR 22P02 invalid input syntax for type numeric: "1__4"
+numg/q/in/n/bad/hexFloat	ERR 22P02 invalid input syntax for type numeric: "0x1.8p1"
+numg/q/notIn/n/bad/hexFloat	ERR 22P02 invalid input syntax for type numeric: "0x1.8p1"
+numg/q/corrIn/n/bad/hexFloat	ERR 22P02 invalid input syntax for type numeric: "0x1.8p1"
+numg/q/sel/n/bad/hexFloat	ERR 22P02 invalid input syntax for type numeric: "0x1.8p1"
+numg/q/in/n/radix/hex	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/n/radix/hex	rows=0 
+numg/q/corrIn/n/radix/hex	rows=1 3
+numg/q/sel/n/radix/hex	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/n/radix/octal	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/n/radix/octal	rows=0 
+numg/q/corrIn/n/radix/octal	rows=1 3
+numg/q/sel/n/radix/octal	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/n/radix/binary	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/n/radix/binary	rows=0 
+numg/q/corrIn/n/radix/binary	rows=1 3
+numg/q/sel/n/radix/binary	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/n/radix/underscore	rows=4 1 | 2 | 3 | 4
+numg/q/notIn/n/radix/underscore	rows=0 
+numg/q/corrIn/n/radix/underscore	rows=1 3
+numg/q/sel/n/radix/underscore	rows=4 1,true | 2,true | 3,true | 4,true
+numg/q/in/n/radix/underscoreFrac	rows=0 
+numg/q/notIn/n/radix/underscoreFrac	rows=4 1 | 2 | 3 | 4
+numg/q/corrIn/n/radix/underscoreFrac	rows=0 
+numg/q/sel/n/radix/underscoreFrac	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/dec/plain/H	rows=4 1 | 2 | 3 | 4
+numg/cast/notIn/dec/plain/H	rows=0 
+numg/cast/corrIn/dec/plain/H	rows=1 3
+numg/cast/sel/dec/plain/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/cast/in/dec/plain/M	rows=0 
+numg/cast/notIn/dec/plain/M	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/dec/plain/M	rows=0 
+numg/cast/sel/dec/plain/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/dec/plain/F	rows=4 1 | 2 | 3 | 4
+numg/cast/notIn/dec/plain/F	rows=0 
+numg/cast/corrIn/dec/plain/F	rows=1 1
+numg/cast/sel/dec/plain/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/cast/in/dec/plus/H	rows=4 1 | 2 | 3 | 4
+numg/cast/notIn/dec/plus/H	rows=0 
+numg/cast/corrIn/dec/plus/H	rows=1 3
+numg/cast/sel/dec/plus/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/cast/in/dec/plus/M	rows=0 
+numg/cast/notIn/dec/plus/M	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/dec/plus/M	rows=0 
+numg/cast/sel/dec/plus/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/dec/plus/F	rows=4 1 | 2 | 3 | 4
+numg/cast/notIn/dec/plus/F	rows=0 
+numg/cast/corrIn/dec/plus/F	rows=1 1
+numg/cast/sel/dec/plus/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/cast/in/dec/minus/H	rows=0 
+numg/cast/notIn/dec/minus/H	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/dec/minus/H	rows=0 
+numg/cast/sel/dec/minus/H	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/dec/minus/M	rows=0 
+numg/cast/notIn/dec/minus/M	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/dec/minus/M	rows=0 
+numg/cast/sel/dec/minus/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/dec/minus/F	rows=0 
+numg/cast/notIn/dec/minus/F	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/dec/minus/F	rows=0 
+numg/cast/sel/dec/minus/F	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/dec/lead0/H	rows=4 1 | 2 | 3 | 4
+numg/cast/notIn/dec/lead0/H	rows=0 
+numg/cast/corrIn/dec/lead0/H	rows=1 3
+numg/cast/sel/dec/lead0/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/cast/in/dec/lead0/M	rows=0 
+numg/cast/notIn/dec/lead0/M	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/dec/lead0/M	rows=0 
+numg/cast/sel/dec/lead0/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/dec/lead0/F	rows=4 1 | 2 | 3 | 4
+numg/cast/notIn/dec/lead0/F	rows=0 
+numg/cast/corrIn/dec/lead0/F	rows=1 1
+numg/cast/sel/dec/lead0/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/cast/in/dec/trail0/H	rows=4 1 | 2 | 3 | 4
+numg/cast/notIn/dec/trail0/H	rows=0 
+numg/cast/corrIn/dec/trail0/H	rows=1 3
+numg/cast/sel/dec/trail0/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/cast/in/dec/trail0/M	rows=0 
+numg/cast/notIn/dec/trail0/M	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/dec/trail0/M	rows=0 
+numg/cast/sel/dec/trail0/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/dec/trail0/F	rows=4 1 | 2 | 3 | 4
+numg/cast/notIn/dec/trail0/F	rows=0 
+numg/cast/corrIn/dec/trail0/F	rows=1 1
+numg/cast/sel/dec/trail0/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/cast/in/dec/noFrac/H	rows=4 1 | 2 | 3 | 4
+numg/cast/notIn/dec/noFrac/H	rows=0 
+numg/cast/corrIn/dec/noFrac/H	rows=1 3
+numg/cast/sel/dec/noFrac/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/cast/in/dec/noInt/H	rows=4 1 | 2 | 3 | 4
+numg/cast/notIn/dec/noInt/H	rows=0 
+numg/cast/corrIn/dec/noInt/H	rows=1 3
+numg/cast/sel/dec/noInt/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/cast/in/dec/noInt/M	rows=0 
+numg/cast/notIn/dec/noInt/M	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/dec/noInt/M	rows=0 
+numg/cast/sel/dec/noInt/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/dec/noInt/F	rows=4 1 | 2 | 3 | 4
+numg/cast/notIn/dec/noInt/F	rows=0 
+numg/cast/corrIn/dec/noInt/F	rows=1 1
+numg/cast/sel/dec/noInt/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/cast/in/dec/noInt/miss	rows=0 
+numg/cast/notIn/dec/noInt/miss	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/dec/noInt/miss	rows=0 
+numg/cast/sel/dec/noInt/miss	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/dec/exp/H	rows=4 1 | 2 | 3 | 4
+numg/cast/notIn/dec/exp/H	rows=0 
+numg/cast/corrIn/dec/exp/H	rows=1 3
+numg/cast/sel/dec/exp/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/cast/in/dec/exp/M	rows=0 
+numg/cast/notIn/dec/exp/M	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/dec/exp/M	rows=0 
+numg/cast/sel/dec/exp/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/dec/exp/F	rows=4 1 | 2 | 3 | 4
+numg/cast/notIn/dec/exp/F	rows=0 
+numg/cast/corrIn/dec/exp/F	rows=1 1
+numg/cast/sel/dec/exp/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/cast/in/dec/expUpper/H	rows=4 1 | 2 | 3 | 4
+numg/cast/notIn/dec/expUpper/H	rows=0 
+numg/cast/corrIn/dec/expUpper/H	rows=1 3
+numg/cast/sel/dec/expUpper/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/cast/in/dec/expUpper/M	rows=0 
+numg/cast/notIn/dec/expUpper/M	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/dec/expUpper/M	rows=0 
+numg/cast/sel/dec/expUpper/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/dec/expUpper/F	rows=4 1 | 2 | 3 | 4
+numg/cast/notIn/dec/expUpper/F	rows=0 
+numg/cast/corrIn/dec/expUpper/F	rows=1 1
+numg/cast/sel/dec/expUpper/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/cast/in/dec/expPlus/H	rows=4 1 | 2 | 3 | 4
+numg/cast/notIn/dec/expPlus/H	rows=0 
+numg/cast/corrIn/dec/expPlus/H	rows=1 3
+numg/cast/sel/dec/expPlus/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/cast/in/dec/expPlus/M	rows=0 
+numg/cast/notIn/dec/expPlus/M	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/dec/expPlus/M	rows=0 
+numg/cast/sel/dec/expPlus/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/dec/expPlus/F	rows=4 1 | 2 | 3 | 4
+numg/cast/notIn/dec/expPlus/F	rows=0 
+numg/cast/corrIn/dec/expPlus/F	rows=1 1
+numg/cast/sel/dec/expPlus/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/cast/in/dec/expMinus/H	rows=4 1 | 2 | 3 | 4
+numg/cast/notIn/dec/expMinus/H	rows=0 
+numg/cast/corrIn/dec/expMinus/H	rows=1 3
+numg/cast/sel/dec/expMinus/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/cast/in/dec/expMinus/M	rows=0 
+numg/cast/notIn/dec/expMinus/M	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/dec/expMinus/M	rows=0 
+numg/cast/sel/dec/expMinus/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/dec/expMinus/F	rows=4 1 | 2 | 3 | 4
+numg/cast/notIn/dec/expMinus/F	rows=0 
+numg/cast/corrIn/dec/expMinus/F	rows=1 1
+numg/cast/sel/dec/expMinus/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/cast/in/dec/expZero/H	rows=4 1 | 2 | 3 | 4
+numg/cast/notIn/dec/expZero/H	rows=0 
+numg/cast/corrIn/dec/expZero/H	rows=1 3
+numg/cast/sel/dec/expZero/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/cast/in/dec/expZero/F	rows=4 1 | 2 | 3 | 4
+numg/cast/notIn/dec/expZero/F	rows=0 
+numg/cast/corrIn/dec/expZero/F	rows=1 1
+numg/cast/sel/dec/expZero/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/cast/in/dec/space/H	rows=4 1 | 2 | 3 | 4
+numg/cast/notIn/dec/space/H	rows=0 
+numg/cast/corrIn/dec/space/H	rows=1 3
+numg/cast/sel/dec/space/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/cast/in/dec/space/M	rows=0 
+numg/cast/notIn/dec/space/M	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/dec/space/M	rows=0 
+numg/cast/sel/dec/space/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/dec/space/F	rows=4 1 | 2 | 3 | 4
+numg/cast/notIn/dec/space/F	rows=0 
+numg/cast/corrIn/dec/space/F	rows=1 1
+numg/cast/sel/dec/space/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/cast/in/dec/tab/H	rows=4 1 | 2 | 3 | 4
+numg/cast/notIn/dec/tab/H	rows=0 
+numg/cast/corrIn/dec/tab/H	rows=1 3
+numg/cast/sel/dec/tab/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/cast/in/dec/trail0Wide/H	rows=4 1 | 2 | 3 | 4
+numg/cast/notIn/dec/trail0Wide/H	rows=0 
+numg/cast/corrIn/dec/trail0Wide/H	rows=1 3
+numg/cast/sel/dec/trail0Wide/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/cast/in/dec/trail0Wide/F	rows=4 1 | 2 | 3 | 4
+numg/cast/notIn/dec/trail0Wide/F	rows=0 
+numg/cast/corrIn/dec/trail0Wide/F	rows=1 1
+numg/cast/sel/dec/trail0Wide/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/cast/in/dec/lead0Wide/H	rows=4 1 | 2 | 3 | 4
+numg/cast/notIn/dec/lead0Wide/H	rows=0 
+numg/cast/corrIn/dec/lead0Wide/H	rows=1 3
+numg/cast/sel/dec/lead0Wide/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/cast/in/dec/lead0Wide/M	rows=0 
+numg/cast/notIn/dec/lead0Wide/M	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/dec/lead0Wide/M	rows=0 
+numg/cast/sel/dec/lead0Wide/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/dec/lead0Wide/F	rows=4 1 | 2 | 3 | 4
+numg/cast/notIn/dec/lead0Wide/F	rows=0 
+numg/cast/corrIn/dec/lead0Wide/F	rows=1 1
+numg/cast/sel/dec/lead0Wide/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/cast/in/dec/expWide/H	rows=4 1 | 2 | 3 | 4
+numg/cast/notIn/dec/expWide/H	rows=0 
+numg/cast/corrIn/dec/expWide/H	rows=1 3
+numg/cast/sel/dec/expWide/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/cast/in/dec/expWide/F	rows=4 1 | 2 | 3 | 4
+numg/cast/notIn/dec/expWide/F	rows=0 
+numg/cast/corrIn/dec/expWide/F	rows=1 1
+numg/cast/sel/dec/expWide/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/cast/in/dec/zeroWide/miss	rows=0 
+numg/cast/notIn/dec/zeroWide/miss	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/dec/zeroWide/miss	rows=0 
+numg/cast/sel/dec/zeroWide/miss	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/dec/width38/M	rows=0 
+numg/cast/notIn/dec/width38/M	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/dec/width38/M	rows=0 
+numg/cast/sel/dec/width38/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/dec/over38Frac	rows=0 
+numg/cast/notIn/dec/over38Frac	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/dec/over38Frac	rows=0 
+numg/cast/sel/dec/over38Frac	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/dec/over38Neg	rows=0 
+numg/cast/notIn/dec/over38Neg	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/dec/over38Neg	rows=0 
+numg/cast/sel/dec/over38Neg	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/dec/scale39	rows=0 
+numg/cast/notIn/dec/scale39	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/dec/scale39	rows=0 
+numg/cast/sel/dec/scale39	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/dec/expScale	rows=0 
+numg/cast/notIn/dec/expScale	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/dec/expScale	rows=0 
+numg/cast/sel/dec/expScale	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/dec/over38Int	rows=0 
+numg/cast/notIn/dec/over38Int	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/dec/over38Int	rows=0 
+numg/cast/sel/dec/over38Int	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/dec/expInt	rows=0 
+numg/cast/notIn/dec/expInt	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/dec/expInt	rows=0 
+numg/cast/sel/dec/expInt	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/dec/expHuge	rows=0 
+numg/cast/notIn/dec/expHuge	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/dec/expHuge	rows=0 
+numg/cast/sel/dec/expHuge	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/dec/nan	rows=0 
+numg/cast/notIn/dec/nan	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/dec/nan	rows=0 
+numg/cast/sel/dec/nan	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/dec/inf	rows=0 
+numg/cast/notIn/dec/inf	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/dec/inf	rows=0 
+numg/cast/sel/dec/inf	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/dec/negInf	rows=0 
+numg/cast/notIn/dec/negInf	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/dec/negInf	rows=0 
+numg/cast/sel/dec/negInf	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/dec/infShort	rows=0 
+numg/cast/notIn/dec/infShort	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/dec/infShort	rows=0 
+numg/cast/sel/dec/infShort	rows=4 1,false | 2,false | 3,false | 4,false
+numg/cast/in/dec/bad/junk	ERR 22P02 invalid input syntax for type numeric: "zz"
+numg/cast/notIn/dec/bad/junk	ERR 22P02 invalid input syntax for type numeric: "zz"
+numg/cast/corrIn/dec/bad/junk	ERR 22P02 invalid input syntax for type numeric: "zz"
+numg/cast/sel/dec/bad/junk	ERR 22P02 invalid input syntax for type numeric: "zz"
+numg/cast/in/dec/bad/expEmpty	ERR 22P02 invalid input syntax for type numeric: "1e"
+numg/cast/notIn/dec/bad/expEmpty	ERR 22P02 invalid input syntax for type numeric: "1e"
+numg/cast/corrIn/dec/bad/expEmpty	ERR 22P02 invalid input syntax for type numeric: "1e"
+numg/cast/sel/dec/bad/expEmpty	ERR 22P02 invalid input syntax for type numeric: "1e"
+numg/cast/in/dec/bad/dot	ERR 22P02 invalid input syntax for type numeric: "."
+numg/cast/notIn/dec/bad/dot	ERR 22P02 invalid input syntax for type numeric: "."
+numg/cast/corrIn/dec/bad/dot	ERR 22P02 invalid input syntax for type numeric: "."
+numg/cast/sel/dec/bad/dot	ERR 22P02 invalid input syntax for type numeric: "."
+numg/cast/in/dec/bad/empty	ERR 22P02 invalid input syntax for type numeric: ""
+numg/cast/notIn/dec/bad/empty	ERR 22P02 invalid input syntax for type numeric: ""
+numg/cast/corrIn/dec/bad/empty	ERR 22P02 invalid input syntax for type numeric: ""
+numg/cast/sel/dec/bad/empty	ERR 22P02 invalid input syntax for type numeric: ""
+numg/cast/in/dec/bad/twoDots	ERR 22P02 invalid input syntax for type numeric: "1.2.3"
+numg/cast/notIn/dec/bad/twoDots	ERR 22P02 invalid input syntax for type numeric: "1.2.3"
+numg/cast/corrIn/dec/bad/twoDots	ERR 22P02 invalid input syntax for type numeric: "1.2.3"
+numg/cast/sel/dec/bad/twoDots	ERR 22P02 invalid input syntax for type numeric: "1.2.3"
+numg/cast/in/dec/bad/innerSpace	ERR 22P02 invalid input syntax for type numeric: "1 4"
+numg/cast/notIn/dec/bad/innerSpace	ERR 22P02 invalid input syntax for type numeric: "1 4"
+numg/cast/corrIn/dec/bad/innerSpace	ERR 22P02 invalid input syntax for type numeric: "1 4"
+numg/cast/sel/dec/bad/innerSpace	ERR 22P02 invalid input syntax for type numeric: "1 4"
+numg/cast/in/dec/bad/twoSigns	ERR 22P02 invalid input syntax for type numeric: "+-14"
+numg/cast/notIn/dec/bad/twoSigns	ERR 22P02 invalid input syntax for type numeric: "+-14"
+numg/cast/corrIn/dec/bad/twoSigns	ERR 22P02 invalid input syntax for type numeric: "+-14"
+numg/cast/sel/dec/bad/twoSigns	ERR 22P02 invalid input syntax for type numeric: "+-14"
+numg/cast/in/dec/bad/trailJunk	ERR 22P02 invalid input syntax for type numeric: "14x"
+numg/cast/notIn/dec/bad/trailJunk	ERR 22P02 invalid input syntax for type numeric: "14x"
+numg/cast/corrIn/dec/bad/trailJunk	ERR 22P02 invalid input syntax for type numeric: "14x"
+numg/cast/sel/dec/bad/trailJunk	ERR 22P02 invalid input syntax for type numeric: "14x"
+numg/cast/in/dec/bad/signedNaN	ERR 22P02 invalid input syntax for type numeric: "+NaN"
+numg/cast/notIn/dec/bad/signedNaN	ERR 22P02 invalid input syntax for type numeric: "+NaN"
+numg/cast/corrIn/dec/bad/signedNaN	ERR 22P02 invalid input syntax for type numeric: "+NaN"
+numg/cast/sel/dec/bad/signedNaN	ERR 22P02 invalid input syntax for type numeric: "+NaN"
+numg/cast/in/dec/bad/nbsp	ERR 22P02 invalid input syntax for type numeric: "14 "
+numg/cast/notIn/dec/bad/nbsp	ERR 22P02 invalid input syntax for type numeric: "14 "
+numg/cast/corrIn/dec/bad/nbsp	ERR 22P02 invalid input syntax for type numeric: "14 "
+numg/cast/sel/dec/bad/nbsp	ERR 22P02 invalid input syntax for type numeric: "14 "
+numg/cast/in/dec/bad/twoUnderscores	ERR 22P02 invalid input syntax for type numeric: "1__4"
+numg/cast/notIn/dec/bad/twoUnderscores	ERR 22P02 invalid input syntax for type numeric: "1__4"
+numg/cast/corrIn/dec/bad/twoUnderscores	ERR 22P02 invalid input syntax for type numeric: "1__4"
+numg/cast/sel/dec/bad/twoUnderscores	ERR 22P02 invalid input syntax for type numeric: "1__4"
+numg/cast/in/dec/bad/hexFloat	ERR 22P02 invalid input syntax for type numeric: "0x1.8p1"
+numg/cast/notIn/dec/bad/hexFloat	ERR 22P02 invalid input syntax for type numeric: "0x1.8p1"
+numg/cast/corrIn/dec/bad/hexFloat	ERR 22P02 invalid input syntax for type numeric: "0x1.8p1"
+numg/cast/sel/dec/bad/hexFloat	ERR 22P02 invalid input syntax for type numeric: "0x1.8p1"
+numg/cast/in/dec/radix/hex	rows=4 1 | 2 | 3 | 4
+numg/cast/notIn/dec/radix/hex	rows=0 
+numg/cast/corrIn/dec/radix/hex	rows=1 3
+numg/cast/sel/dec/radix/hex	rows=4 1,true | 2,true | 3,true | 4,true
+numg/cast/in/dec/radix/octal	rows=4 1 | 2 | 3 | 4
+numg/cast/notIn/dec/radix/octal	rows=0 
+numg/cast/corrIn/dec/radix/octal	rows=1 3
+numg/cast/sel/dec/radix/octal	rows=4 1,true | 2,true | 3,true | 4,true
+numg/cast/in/dec/radix/binary	rows=4 1 | 2 | 3 | 4
+numg/cast/notIn/dec/radix/binary	rows=0 
+numg/cast/corrIn/dec/radix/binary	rows=1 3
+numg/cast/sel/dec/radix/binary	rows=4 1,true | 2,true | 3,true | 4,true
+numg/cast/in/dec/radix/underscore	rows=4 1 | 2 | 3 | 4
+numg/cast/notIn/dec/radix/underscore	rows=0 
+numg/cast/corrIn/dec/radix/underscore	rows=1 3
+numg/cast/sel/dec/radix/underscore	rows=4 1,true | 2,true | 3,true | 4,true
+numg/cast/in/dec/radix/underscoreFrac	rows=4 1 | 2 | 3 | 4
+numg/cast/notIn/dec/radix/underscoreFrac	rows=0 
+numg/cast/corrIn/dec/radix/underscoreFrac	rows=1 1
+numg/cast/sel/dec/radix/underscoreFrac	rows=4 1,true | 2,true | 3,true | 4,true
+numg/cast/in/n38/plain/H	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/n38/plain/H	rows=1 3
+numg/cast/in/n38/plain/M	rows=0 
+numg/cast/corrIn/n38/plain/M	rows=0 
+numg/cast/in/n38/plain/F	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/n38/plain/F	rows=1 1
+numg/cast/in/n38/plus/H	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/n38/plus/H	rows=1 3
+numg/cast/in/n38/plus/M	rows=0 
+numg/cast/corrIn/n38/plus/M	rows=0 
+numg/cast/in/n38/plus/F	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/n38/plus/F	rows=1 1
+numg/cast/in/n38/minus/H	rows=0 
+numg/cast/corrIn/n38/minus/H	rows=0 
+numg/cast/in/n38/minus/M	rows=0 
+numg/cast/corrIn/n38/minus/M	rows=0 
+numg/cast/in/n38/minus/F	rows=0 
+numg/cast/corrIn/n38/minus/F	rows=0 
+numg/cast/in/n38/lead0/H	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/n38/lead0/H	rows=1 3
+numg/cast/in/n38/lead0/M	rows=0 
+numg/cast/corrIn/n38/lead0/M	rows=0 
+numg/cast/in/n38/lead0/F	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/n38/lead0/F	rows=1 1
+numg/cast/in/n38/trail0/H	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/n38/trail0/H	rows=1 3
+numg/cast/in/n38/trail0/M	rows=0 
+numg/cast/corrIn/n38/trail0/M	rows=0 
+numg/cast/in/n38/trail0/F	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/n38/trail0/F	rows=1 1
+numg/cast/in/n38/noFrac/H	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/n38/noFrac/H	rows=1 3
+numg/cast/in/n38/noInt/H	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/n38/noInt/H	rows=1 3
+numg/cast/in/n38/noInt/M	rows=0 
+numg/cast/corrIn/n38/noInt/M	rows=0 
+numg/cast/in/n38/noInt/F	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/n38/noInt/F	rows=1 1
+numg/cast/in/n38/noInt/miss	rows=0 
+numg/cast/corrIn/n38/noInt/miss	rows=0 
+numg/cast/in/n38/exp/H	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/n38/exp/H	rows=1 3
+numg/cast/in/n38/exp/M	rows=0 
+numg/cast/corrIn/n38/exp/M	rows=0 
+numg/cast/in/n38/exp/F	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/n38/exp/F	rows=1 1
+numg/cast/in/n38/expUpper/H	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/n38/expUpper/H	rows=1 3
+numg/cast/in/n38/expUpper/M	rows=0 
+numg/cast/corrIn/n38/expUpper/M	rows=0 
+numg/cast/in/n38/expUpper/F	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/n38/expUpper/F	rows=1 1
+numg/cast/in/n38/expPlus/H	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/n38/expPlus/H	rows=1 3
+numg/cast/in/n38/expPlus/M	rows=0 
+numg/cast/corrIn/n38/expPlus/M	rows=0 
+numg/cast/in/n38/expPlus/F	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/n38/expPlus/F	rows=1 1
+numg/cast/in/n38/expMinus/H	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/n38/expMinus/H	rows=1 3
+numg/cast/in/n38/expMinus/M	rows=0 
+numg/cast/corrIn/n38/expMinus/M	rows=0 
+numg/cast/in/n38/expMinus/F	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/n38/expMinus/F	rows=1 1
+numg/cast/in/n38/expZero/H	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/n38/expZero/H	rows=1 3
+numg/cast/in/n38/expZero/F	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/n38/expZero/F	rows=1 1
+numg/cast/in/n38/space/H	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/n38/space/H	rows=1 3
+numg/cast/in/n38/space/M	rows=0 
+numg/cast/corrIn/n38/space/M	rows=0 
+numg/cast/in/n38/space/F	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/n38/space/F	rows=1 1
+numg/cast/in/n38/tab/H	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/n38/tab/H	rows=1 3
+numg/cast/in/n38/trail0Wide/H	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/n38/trail0Wide/H	rows=1 3
+numg/cast/in/n38/trail0Wide/F	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/n38/trail0Wide/F	rows=1 1
+numg/cast/in/n38/lead0Wide/H	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/n38/lead0Wide/H	rows=1 3
+numg/cast/in/n38/lead0Wide/M	rows=0 
+numg/cast/corrIn/n38/lead0Wide/M	rows=0 
+numg/cast/in/n38/lead0Wide/F	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/n38/lead0Wide/F	rows=1 1
+numg/cast/in/n38/expWide/H	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/n38/expWide/H	rows=1 3
+numg/cast/in/n38/expWide/F	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/n38/expWide/F	rows=1 1
+numg/cast/in/n38/zeroWide/miss	rows=0 
+numg/cast/corrIn/n38/zeroWide/miss	rows=0 
+numg/cast/in/n38/width38/M	rows=0 
+numg/cast/corrIn/n38/width38/M	rows=0 
+numg/cast/in/n38/over38Frac	rows=0 
+numg/cast/corrIn/n38/over38Frac	rows=0 
+numg/cast/in/n38/over38Neg	rows=0 
+numg/cast/corrIn/n38/over38Neg	rows=0 
+numg/cast/in/n38/scale39	rows=0 
+numg/cast/corrIn/n38/scale39	rows=0 
+numg/cast/in/n38/expScale	rows=0 
+numg/cast/corrIn/n38/expScale	rows=0 
+numg/cast/in/n38/over38Int	rows=0 
+numg/cast/corrIn/n38/over38Int	rows=0 
+numg/cast/in/n38/expInt	rows=0 
+numg/cast/corrIn/n38/expInt	rows=0 
+numg/cast/in/n38/expHuge	rows=0 
+numg/cast/corrIn/n38/expHuge	rows=0 
+numg/cast/in/n38/nan	rows=0 
+numg/cast/corrIn/n38/nan	rows=0 
+numg/cast/in/n38/inf	rows=0 
+numg/cast/corrIn/n38/inf	rows=0 
+numg/cast/in/n38/negInf	rows=0 
+numg/cast/corrIn/n38/negInf	rows=0 
+numg/cast/in/n38/infShort	rows=0 
+numg/cast/corrIn/n38/infShort	rows=0 
+numg/cast/in/n38/bad/junk	ERR 22P02 invalid input syntax for type numeric: "zz"
+numg/cast/corrIn/n38/bad/junk	ERR 22P02 invalid input syntax for type numeric: "zz"
+numg/cast/in/n38/bad/expEmpty	ERR 22P02 invalid input syntax for type numeric: "1e"
+numg/cast/corrIn/n38/bad/expEmpty	ERR 22P02 invalid input syntax for type numeric: "1e"
+numg/cast/in/n38/bad/dot	ERR 22P02 invalid input syntax for type numeric: "."
+numg/cast/corrIn/n38/bad/dot	ERR 22P02 invalid input syntax for type numeric: "."
+numg/cast/in/n38/bad/empty	ERR 22P02 invalid input syntax for type numeric: ""
+numg/cast/corrIn/n38/bad/empty	ERR 22P02 invalid input syntax for type numeric: ""
+numg/cast/in/n38/bad/twoDots	ERR 22P02 invalid input syntax for type numeric: "1.2.3"
+numg/cast/corrIn/n38/bad/twoDots	ERR 22P02 invalid input syntax for type numeric: "1.2.3"
+numg/cast/in/n38/bad/innerSpace	ERR 22P02 invalid input syntax for type numeric: "1 4"
+numg/cast/corrIn/n38/bad/innerSpace	ERR 22P02 invalid input syntax for type numeric: "1 4"
+numg/cast/in/n38/bad/twoSigns	ERR 22P02 invalid input syntax for type numeric: "+-14"
+numg/cast/corrIn/n38/bad/twoSigns	ERR 22P02 invalid input syntax for type numeric: "+-14"
+numg/cast/in/n38/bad/trailJunk	ERR 22P02 invalid input syntax for type numeric: "14x"
+numg/cast/corrIn/n38/bad/trailJunk	ERR 22P02 invalid input syntax for type numeric: "14x"
+numg/cast/in/n38/bad/signedNaN	ERR 22P02 invalid input syntax for type numeric: "+NaN"
+numg/cast/corrIn/n38/bad/signedNaN	ERR 22P02 invalid input syntax for type numeric: "+NaN"
+numg/cast/in/n38/bad/nbsp	ERR 22P02 invalid input syntax for type numeric: "14 "
+numg/cast/corrIn/n38/bad/nbsp	ERR 22P02 invalid input syntax for type numeric: "14 "
+numg/cast/in/n38/bad/twoUnderscores	ERR 22P02 invalid input syntax for type numeric: "1__4"
+numg/cast/corrIn/n38/bad/twoUnderscores	ERR 22P02 invalid input syntax for type numeric: "1__4"
+numg/cast/in/n38/bad/hexFloat	ERR 22P02 invalid input syntax for type numeric: "0x1.8p1"
+numg/cast/corrIn/n38/bad/hexFloat	ERR 22P02 invalid input syntax for type numeric: "0x1.8p1"
+numg/cast/in/n38/radix/hex	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/n38/radix/hex	rows=1 3
+numg/cast/in/n38/radix/octal	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/n38/radix/octal	rows=1 3
+numg/cast/in/n38/radix/binary	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/n38/radix/binary	rows=1 3
+numg/cast/in/n38/radix/underscore	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/n38/radix/underscore	rows=1 3
+numg/cast/in/n38/radix/underscoreFrac	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/n38/radix/underscoreFrac	rows=1 1
+numg/cast/in/n/plain/H	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/n/plain/H	rows=1 3
+numg/cast/in/n/plain/M	rows=0 
+numg/cast/corrIn/n/plain/M	rows=0 
+numg/cast/in/n/plain/F	rows=0 
+numg/cast/corrIn/n/plain/F	rows=0 
+numg/cast/in/n/plus/H	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/n/plus/H	rows=1 3
+numg/cast/in/n/plus/M	rows=0 
+numg/cast/corrIn/n/plus/M	rows=0 
+numg/cast/in/n/plus/F	rows=0 
+numg/cast/corrIn/n/plus/F	rows=0 
+numg/cast/in/n/minus/H	rows=0 
+numg/cast/corrIn/n/minus/H	rows=0 
+numg/cast/in/n/minus/M	rows=0 
+numg/cast/corrIn/n/minus/M	rows=0 
+numg/cast/in/n/minus/F	rows=0 
+numg/cast/corrIn/n/minus/F	rows=0 
+numg/cast/in/n/lead0/H	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/n/lead0/H	rows=1 3
+numg/cast/in/n/lead0/M	rows=0 
+numg/cast/corrIn/n/lead0/M	rows=0 
+numg/cast/in/n/lead0/F	rows=0 
+numg/cast/corrIn/n/lead0/F	rows=0 
+numg/cast/in/n/trail0/H	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/n/trail0/H	rows=1 3
+numg/cast/in/n/trail0/M	rows=0 
+numg/cast/corrIn/n/trail0/M	rows=0 
+numg/cast/in/n/trail0/F	rows=0 
+numg/cast/corrIn/n/trail0/F	rows=0 
+numg/cast/in/n/noFrac/H	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/n/noFrac/H	rows=1 3
+numg/cast/in/n/noInt/H	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/n/noInt/H	rows=1 3
+numg/cast/in/n/noInt/M	rows=0 
+numg/cast/corrIn/n/noInt/M	rows=0 
+numg/cast/in/n/noInt/F	rows=0 
+numg/cast/corrIn/n/noInt/F	rows=0 
+numg/cast/in/n/noInt/miss	rows=0 
+numg/cast/corrIn/n/noInt/miss	rows=0 
+numg/cast/in/n/exp/H	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/n/exp/H	rows=1 3
+numg/cast/in/n/exp/M	rows=0 
+numg/cast/corrIn/n/exp/M	rows=0 
+numg/cast/in/n/exp/F	rows=0 
+numg/cast/corrIn/n/exp/F	rows=0 
+numg/cast/in/n/expUpper/H	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/n/expUpper/H	rows=1 3
+numg/cast/in/n/expUpper/M	rows=0 
+numg/cast/corrIn/n/expUpper/M	rows=0 
+numg/cast/in/n/expUpper/F	rows=0 
+numg/cast/corrIn/n/expUpper/F	rows=0 
+numg/cast/in/n/expPlus/H	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/n/expPlus/H	rows=1 3
+numg/cast/in/n/expPlus/M	rows=0 
+numg/cast/corrIn/n/expPlus/M	rows=0 
+numg/cast/in/n/expPlus/F	rows=0 
+numg/cast/corrIn/n/expPlus/F	rows=0 
+numg/cast/in/n/expMinus/H	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/n/expMinus/H	rows=1 3
+numg/cast/in/n/expMinus/M	rows=0 
+numg/cast/corrIn/n/expMinus/M	rows=0 
+numg/cast/in/n/expMinus/F	rows=0 
+numg/cast/corrIn/n/expMinus/F	rows=0 
+numg/cast/in/n/expZero/H	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/n/expZero/H	rows=1 3
+numg/cast/in/n/expZero/F	rows=0 
+numg/cast/corrIn/n/expZero/F	rows=0 
+numg/cast/in/n/space/H	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/n/space/H	rows=1 3
+numg/cast/in/n/space/M	rows=0 
+numg/cast/corrIn/n/space/M	rows=0 
+numg/cast/in/n/space/F	rows=0 
+numg/cast/corrIn/n/space/F	rows=0 
+numg/cast/in/n/tab/H	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/n/tab/H	rows=1 3
+numg/cast/in/n/trail0Wide/H	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/n/trail0Wide/H	rows=1 3
+numg/cast/in/n/trail0Wide/F	rows=0 
+numg/cast/corrIn/n/trail0Wide/F	rows=0 
+numg/cast/in/n/lead0Wide/H	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/n/lead0Wide/H	rows=1 3
+numg/cast/in/n/lead0Wide/M	rows=0 
+numg/cast/corrIn/n/lead0Wide/M	rows=0 
+numg/cast/in/n/lead0Wide/F	rows=0 
+numg/cast/corrIn/n/lead0Wide/F	rows=0 
+numg/cast/in/n/expWide/H	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/n/expWide/H	rows=1 3
+numg/cast/in/n/expWide/F	rows=0 
+numg/cast/corrIn/n/expWide/F	rows=0 
+numg/cast/in/n/zeroWide/miss	rows=0 
+numg/cast/corrIn/n/zeroWide/miss	rows=0 
+numg/cast/in/n/width38/M	rows=0 
+numg/cast/corrIn/n/width38/M	rows=0 
+numg/cast/in/n/over38Frac	rows=0 
+numg/cast/corrIn/n/over38Frac	rows=0 
+numg/cast/in/n/over38Neg	rows=0 
+numg/cast/corrIn/n/over38Neg	rows=0 
+numg/cast/in/n/scale39	rows=0 
+numg/cast/corrIn/n/scale39	rows=0 
+numg/cast/in/n/expScale	rows=0 
+numg/cast/corrIn/n/expScale	rows=0 
+numg/cast/in/n/over38Int	rows=0 
+numg/cast/corrIn/n/over38Int	rows=0 
+numg/cast/in/n/expInt	rows=0 
+numg/cast/corrIn/n/expInt	rows=0 
+numg/cast/in/n/expHuge	rows=0 
+numg/cast/corrIn/n/expHuge	rows=0 
+numg/cast/in/n/nan	rows=0 
+numg/cast/corrIn/n/nan	rows=0 
+numg/cast/in/n/inf	rows=0 
+numg/cast/corrIn/n/inf	rows=0 
+numg/cast/in/n/negInf	rows=0 
+numg/cast/corrIn/n/negInf	rows=0 
+numg/cast/in/n/infShort	rows=0 
+numg/cast/corrIn/n/infShort	rows=0 
+numg/cast/in/n/bad/junk	ERR 22P02 invalid input syntax for type numeric: "zz"
+numg/cast/corrIn/n/bad/junk	ERR 22P02 invalid input syntax for type numeric: "zz"
+numg/cast/in/n/bad/expEmpty	ERR 22P02 invalid input syntax for type numeric: "1e"
+numg/cast/corrIn/n/bad/expEmpty	ERR 22P02 invalid input syntax for type numeric: "1e"
+numg/cast/in/n/bad/dot	ERR 22P02 invalid input syntax for type numeric: "."
+numg/cast/corrIn/n/bad/dot	ERR 22P02 invalid input syntax for type numeric: "."
+numg/cast/in/n/bad/empty	ERR 22P02 invalid input syntax for type numeric: ""
+numg/cast/corrIn/n/bad/empty	ERR 22P02 invalid input syntax for type numeric: ""
+numg/cast/in/n/bad/twoDots	ERR 22P02 invalid input syntax for type numeric: "1.2.3"
+numg/cast/corrIn/n/bad/twoDots	ERR 22P02 invalid input syntax for type numeric: "1.2.3"
+numg/cast/in/n/bad/innerSpace	ERR 22P02 invalid input syntax for type numeric: "1 4"
+numg/cast/corrIn/n/bad/innerSpace	ERR 22P02 invalid input syntax for type numeric: "1 4"
+numg/cast/in/n/bad/twoSigns	ERR 22P02 invalid input syntax for type numeric: "+-14"
+numg/cast/corrIn/n/bad/twoSigns	ERR 22P02 invalid input syntax for type numeric: "+-14"
+numg/cast/in/n/bad/trailJunk	ERR 22P02 invalid input syntax for type numeric: "14x"
+numg/cast/corrIn/n/bad/trailJunk	ERR 22P02 invalid input syntax for type numeric: "14x"
+numg/cast/in/n/bad/signedNaN	ERR 22P02 invalid input syntax for type numeric: "+NaN"
+numg/cast/corrIn/n/bad/signedNaN	ERR 22P02 invalid input syntax for type numeric: "+NaN"
+numg/cast/in/n/bad/nbsp	ERR 22P02 invalid input syntax for type numeric: "14 "
+numg/cast/corrIn/n/bad/nbsp	ERR 22P02 invalid input syntax for type numeric: "14 "
+numg/cast/in/n/bad/twoUnderscores	ERR 22P02 invalid input syntax for type numeric: "1__4"
+numg/cast/corrIn/n/bad/twoUnderscores	ERR 22P02 invalid input syntax for type numeric: "1__4"
+numg/cast/in/n/bad/hexFloat	ERR 22P02 invalid input syntax for type numeric: "0x1.8p1"
+numg/cast/corrIn/n/bad/hexFloat	ERR 22P02 invalid input syntax for type numeric: "0x1.8p1"
+numg/cast/in/n/radix/hex	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/n/radix/hex	rows=1 3
+numg/cast/in/n/radix/octal	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/n/radix/octal	rows=1 3
+numg/cast/in/n/radix/binary	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/n/radix/binary	rows=1 3
+numg/cast/in/n/radix/underscore	rows=4 1 | 2 | 3 | 4
+numg/cast/corrIn/n/radix/underscore	rows=1 3
+numg/cast/in/n/radix/underscoreFrac	rows=0 
+numg/cast/corrIn/n/radix/underscoreFrac	rows=0 
+numg/castDecimal/in/dec/plain/H	rows=4 1 | 2 | 3 | 4
+numg/castDecimal/corrIn/dec/plain/H	rows=1 3
+numg/castDecimal/in/dec/plain/M	rows=0 
+numg/castDecimal/corrIn/dec/plain/M	rows=0 
+numg/castDecimal/in/dec/plain/F	rows=4 1 | 2 | 3 | 4
+numg/castDecimal/corrIn/dec/plain/F	rows=1 1
+numg/castDecimal/in/dec/plus/H	rows=4 1 | 2 | 3 | 4
+numg/castDecimal/corrIn/dec/plus/H	rows=1 3
+numg/castDecimal/in/dec/plus/M	rows=0 
+numg/castDecimal/corrIn/dec/plus/M	rows=0 
+numg/castDecimal/in/dec/plus/F	rows=4 1 | 2 | 3 | 4
+numg/castDecimal/corrIn/dec/plus/F	rows=1 1
+numg/castDecimal/in/dec/minus/H	rows=0 
+numg/castDecimal/corrIn/dec/minus/H	rows=0 
+numg/castDecimal/in/dec/minus/M	rows=0 
+numg/castDecimal/corrIn/dec/minus/M	rows=0 
+numg/castDecimal/in/dec/minus/F	rows=0 
+numg/castDecimal/corrIn/dec/minus/F	rows=0 
+numg/castDecimal/in/dec/lead0/H	rows=4 1 | 2 | 3 | 4
+numg/castDecimal/corrIn/dec/lead0/H	rows=1 3
+numg/castDecimal/in/dec/lead0/M	rows=0 
+numg/castDecimal/corrIn/dec/lead0/M	rows=0 
+numg/castDecimal/in/dec/lead0/F	rows=4 1 | 2 | 3 | 4
+numg/castDecimal/corrIn/dec/lead0/F	rows=1 1
+numg/castDecimal/in/dec/trail0/H	rows=4 1 | 2 | 3 | 4
+numg/castDecimal/corrIn/dec/trail0/H	rows=1 3
+numg/castDecimal/in/dec/trail0/M	rows=0 
+numg/castDecimal/corrIn/dec/trail0/M	rows=0 
+numg/castDecimal/in/dec/trail0/F	rows=4 1 | 2 | 3 | 4
+numg/castDecimal/corrIn/dec/trail0/F	rows=1 1
+numg/castDecimal/in/dec/noFrac/H	rows=4 1 | 2 | 3 | 4
+numg/castDecimal/corrIn/dec/noFrac/H	rows=1 3
+numg/castDecimal/in/dec/noInt/H	rows=4 1 | 2 | 3 | 4
+numg/castDecimal/corrIn/dec/noInt/H	rows=1 3
+numg/castDecimal/in/dec/noInt/M	rows=0 
+numg/castDecimal/corrIn/dec/noInt/M	rows=0 
+numg/castDecimal/in/dec/noInt/F	rows=4 1 | 2 | 3 | 4
+numg/castDecimal/corrIn/dec/noInt/F	rows=1 1
+numg/castDecimal/in/dec/noInt/miss	rows=0 
+numg/castDecimal/corrIn/dec/noInt/miss	rows=0 
+numg/castDecimal/in/dec/exp/H	rows=4 1 | 2 | 3 | 4
+numg/castDecimal/corrIn/dec/exp/H	rows=1 3
+numg/castDecimal/in/dec/exp/M	rows=0 
+numg/castDecimal/corrIn/dec/exp/M	rows=0 
+numg/castDecimal/in/dec/exp/F	rows=4 1 | 2 | 3 | 4
+numg/castDecimal/corrIn/dec/exp/F	rows=1 1
+numg/castDecimal/in/dec/expUpper/H	rows=4 1 | 2 | 3 | 4
+numg/castDecimal/corrIn/dec/expUpper/H	rows=1 3
+numg/castDecimal/in/dec/expUpper/M	rows=0 
+numg/castDecimal/corrIn/dec/expUpper/M	rows=0 
+numg/castDecimal/in/dec/expUpper/F	rows=4 1 | 2 | 3 | 4
+numg/castDecimal/corrIn/dec/expUpper/F	rows=1 1
+numg/castDecimal/in/dec/expPlus/H	rows=4 1 | 2 | 3 | 4
+numg/castDecimal/corrIn/dec/expPlus/H	rows=1 3
+numg/castDecimal/in/dec/expPlus/M	rows=0 
+numg/castDecimal/corrIn/dec/expPlus/M	rows=0 
+numg/castDecimal/in/dec/expPlus/F	rows=4 1 | 2 | 3 | 4
+numg/castDecimal/corrIn/dec/expPlus/F	rows=1 1
+numg/castDecimal/in/dec/expMinus/H	rows=4 1 | 2 | 3 | 4
+numg/castDecimal/corrIn/dec/expMinus/H	rows=1 3
+numg/castDecimal/in/dec/expMinus/M	rows=0 
+numg/castDecimal/corrIn/dec/expMinus/M	rows=0 
+numg/castDecimal/in/dec/expMinus/F	rows=4 1 | 2 | 3 | 4
+numg/castDecimal/corrIn/dec/expMinus/F	rows=1 1
+numg/castDecimal/in/dec/expZero/H	rows=4 1 | 2 | 3 | 4
+numg/castDecimal/corrIn/dec/expZero/H	rows=1 3
+numg/castDecimal/in/dec/expZero/F	rows=4 1 | 2 | 3 | 4
+numg/castDecimal/corrIn/dec/expZero/F	rows=1 1
+numg/castDecimal/in/dec/space/H	rows=4 1 | 2 | 3 | 4
+numg/castDecimal/corrIn/dec/space/H	rows=1 3
+numg/castDecimal/in/dec/space/M	rows=0 
+numg/castDecimal/corrIn/dec/space/M	rows=0 
+numg/castDecimal/in/dec/space/F	rows=4 1 | 2 | 3 | 4
+numg/castDecimal/corrIn/dec/space/F	rows=1 1
+numg/castDecimal/in/dec/tab/H	rows=4 1 | 2 | 3 | 4
+numg/castDecimal/corrIn/dec/tab/H	rows=1 3
+numg/castDecimal/in/dec/trail0Wide/H	rows=4 1 | 2 | 3 | 4
+numg/castDecimal/corrIn/dec/trail0Wide/H	rows=1 3
+numg/castDecimal/in/dec/trail0Wide/F	rows=4 1 | 2 | 3 | 4
+numg/castDecimal/corrIn/dec/trail0Wide/F	rows=1 1
+numg/castDecimal/in/dec/lead0Wide/H	rows=4 1 | 2 | 3 | 4
+numg/castDecimal/corrIn/dec/lead0Wide/H	rows=1 3
+numg/castDecimal/in/dec/lead0Wide/M	rows=0 
+numg/castDecimal/corrIn/dec/lead0Wide/M	rows=0 
+numg/castDecimal/in/dec/lead0Wide/F	rows=4 1 | 2 | 3 | 4
+numg/castDecimal/corrIn/dec/lead0Wide/F	rows=1 1
+numg/castDecimal/in/dec/expWide/H	rows=4 1 | 2 | 3 | 4
+numg/castDecimal/corrIn/dec/expWide/H	rows=1 3
+numg/castDecimal/in/dec/expWide/F	rows=4 1 | 2 | 3 | 4
+numg/castDecimal/corrIn/dec/expWide/F	rows=1 1
+numg/castDecimal/in/dec/zeroWide/miss	rows=0 
+numg/castDecimal/corrIn/dec/zeroWide/miss	rows=0 
+numg/castDecimal/in/dec/width38/M	rows=0 
+numg/castDecimal/corrIn/dec/width38/M	rows=0 
+numg/castDecimal/in/dec/over38Frac	rows=0 
+numg/castDecimal/corrIn/dec/over38Frac	rows=0 
+numg/castDecimal/in/dec/over38Neg	rows=0 
+numg/castDecimal/corrIn/dec/over38Neg	rows=0 
+numg/castDecimal/in/dec/scale39	rows=0 
+numg/castDecimal/corrIn/dec/scale39	rows=0 
+numg/castDecimal/in/dec/expScale	rows=0 
+numg/castDecimal/corrIn/dec/expScale	rows=0 
+numg/castDecimal/in/dec/over38Int	rows=0 
+numg/castDecimal/corrIn/dec/over38Int	rows=0 
+numg/castDecimal/in/dec/expInt	rows=0 
+numg/castDecimal/corrIn/dec/expInt	rows=0 
+numg/castDecimal/in/dec/expHuge	rows=0 
+numg/castDecimal/corrIn/dec/expHuge	rows=0 
+numg/castDecimal/in/dec/nan	rows=0 
+numg/castDecimal/corrIn/dec/nan	rows=0 
+numg/castDecimal/in/dec/inf	rows=0 
+numg/castDecimal/corrIn/dec/inf	rows=0 
+numg/castDecimal/in/dec/negInf	rows=0 
+numg/castDecimal/corrIn/dec/negInf	rows=0 
+numg/castDecimal/in/dec/infShort	rows=0 
+numg/castDecimal/corrIn/dec/infShort	rows=0 
+numg/castDecimal/in/dec/bad/junk	ERR 22P02 invalid input syntax for type numeric: "zz"
+numg/castDecimal/corrIn/dec/bad/junk	ERR 22P02 invalid input syntax for type numeric: "zz"
+numg/castDecimal/in/dec/bad/expEmpty	ERR 22P02 invalid input syntax for type numeric: "1e"
+numg/castDecimal/corrIn/dec/bad/expEmpty	ERR 22P02 invalid input syntax for type numeric: "1e"
+numg/castDecimal/in/dec/bad/dot	ERR 22P02 invalid input syntax for type numeric: "."
+numg/castDecimal/corrIn/dec/bad/dot	ERR 22P02 invalid input syntax for type numeric: "."
+numg/castDecimal/in/dec/bad/empty	ERR 22P02 invalid input syntax for type numeric: ""
+numg/castDecimal/corrIn/dec/bad/empty	ERR 22P02 invalid input syntax for type numeric: ""
+numg/castDecimal/in/dec/bad/twoDots	ERR 22P02 invalid input syntax for type numeric: "1.2.3"
+numg/castDecimal/corrIn/dec/bad/twoDots	ERR 22P02 invalid input syntax for type numeric: "1.2.3"
+numg/castDecimal/in/dec/bad/innerSpace	ERR 22P02 invalid input syntax for type numeric: "1 4"
+numg/castDecimal/corrIn/dec/bad/innerSpace	ERR 22P02 invalid input syntax for type numeric: "1 4"
+numg/castDecimal/in/dec/bad/twoSigns	ERR 22P02 invalid input syntax for type numeric: "+-14"
+numg/castDecimal/corrIn/dec/bad/twoSigns	ERR 22P02 invalid input syntax for type numeric: "+-14"
+numg/castDecimal/in/dec/bad/trailJunk	ERR 22P02 invalid input syntax for type numeric: "14x"
+numg/castDecimal/corrIn/dec/bad/trailJunk	ERR 22P02 invalid input syntax for type numeric: "14x"
+numg/castDecimal/in/dec/bad/signedNaN	ERR 22P02 invalid input syntax for type numeric: "+NaN"
+numg/castDecimal/corrIn/dec/bad/signedNaN	ERR 22P02 invalid input syntax for type numeric: "+NaN"
+numg/castDecimal/in/dec/bad/nbsp	ERR 22P02 invalid input syntax for type numeric: "14 "
+numg/castDecimal/corrIn/dec/bad/nbsp	ERR 22P02 invalid input syntax for type numeric: "14 "
+numg/castDecimal/in/dec/bad/twoUnderscores	ERR 22P02 invalid input syntax for type numeric: "1__4"
+numg/castDecimal/corrIn/dec/bad/twoUnderscores	ERR 22P02 invalid input syntax for type numeric: "1__4"
+numg/castDecimal/in/dec/bad/hexFloat	ERR 22P02 invalid input syntax for type numeric: "0x1.8p1"
+numg/castDecimal/corrIn/dec/bad/hexFloat	ERR 22P02 invalid input syntax for type numeric: "0x1.8p1"
+numg/castDecimal/in/dec/radix/hex	rows=4 1 | 2 | 3 | 4
+numg/castDecimal/corrIn/dec/radix/hex	rows=1 3
+numg/castDecimal/in/dec/radix/octal	rows=4 1 | 2 | 3 | 4
+numg/castDecimal/corrIn/dec/radix/octal	rows=1 3
+numg/castDecimal/in/dec/radix/binary	rows=4 1 | 2 | 3 | 4
+numg/castDecimal/corrIn/dec/radix/binary	rows=1 3
+numg/castDecimal/in/dec/radix/underscore	rows=4 1 | 2 | 3 | 4
+numg/castDecimal/corrIn/dec/radix/underscore	rows=1 3
+numg/castDecimal/in/dec/radix/underscoreFrac	rows=4 1 | 2 | 3 | 4
+numg/castDecimal/corrIn/dec/radix/underscoreFrac	rows=1 1
+numg/colon/in/dec/plain/H	rows=4 1 | 2 | 3 | 4
+numg/colon/corrIn/dec/plain/H	rows=1 3
+numg/colon/in/dec/plain/M	rows=0 
+numg/colon/corrIn/dec/plain/M	rows=0 
+numg/colon/in/dec/plain/F	rows=4 1 | 2 | 3 | 4
+numg/colon/corrIn/dec/plain/F	rows=1 1
+numg/colon/in/dec/plus/H	rows=4 1 | 2 | 3 | 4
+numg/colon/corrIn/dec/plus/H	rows=1 3
+numg/colon/in/dec/plus/M	rows=0 
+numg/colon/corrIn/dec/plus/M	rows=0 
+numg/colon/in/dec/plus/F	rows=4 1 | 2 | 3 | 4
+numg/colon/corrIn/dec/plus/F	rows=1 1
+numg/colon/in/dec/minus/H	rows=0 
+numg/colon/corrIn/dec/minus/H	rows=0 
+numg/colon/in/dec/minus/M	rows=0 
+numg/colon/corrIn/dec/minus/M	rows=0 
+numg/colon/in/dec/minus/F	rows=0 
+numg/colon/corrIn/dec/minus/F	rows=0 
+numg/colon/in/dec/lead0/H	rows=4 1 | 2 | 3 | 4
+numg/colon/corrIn/dec/lead0/H	rows=1 3
+numg/colon/in/dec/lead0/M	rows=0 
+numg/colon/corrIn/dec/lead0/M	rows=0 
+numg/colon/in/dec/lead0/F	rows=4 1 | 2 | 3 | 4
+numg/colon/corrIn/dec/lead0/F	rows=1 1
+numg/colon/in/dec/trail0/H	rows=4 1 | 2 | 3 | 4
+numg/colon/corrIn/dec/trail0/H	rows=1 3
+numg/colon/in/dec/trail0/M	rows=0 
+numg/colon/corrIn/dec/trail0/M	rows=0 
+numg/colon/in/dec/trail0/F	rows=4 1 | 2 | 3 | 4
+numg/colon/corrIn/dec/trail0/F	rows=1 1
+numg/colon/in/dec/noFrac/H	rows=4 1 | 2 | 3 | 4
+numg/colon/corrIn/dec/noFrac/H	rows=1 3
+numg/colon/in/dec/noInt/H	rows=4 1 | 2 | 3 | 4
+numg/colon/corrIn/dec/noInt/H	rows=1 3
+numg/colon/in/dec/noInt/M	rows=0 
+numg/colon/corrIn/dec/noInt/M	rows=0 
+numg/colon/in/dec/noInt/F	rows=4 1 | 2 | 3 | 4
+numg/colon/corrIn/dec/noInt/F	rows=1 1
+numg/colon/in/dec/noInt/miss	rows=0 
+numg/colon/corrIn/dec/noInt/miss	rows=0 
+numg/colon/in/dec/exp/H	rows=4 1 | 2 | 3 | 4
+numg/colon/corrIn/dec/exp/H	rows=1 3
+numg/colon/in/dec/exp/M	rows=0 
+numg/colon/corrIn/dec/exp/M	rows=0 
+numg/colon/in/dec/exp/F	rows=4 1 | 2 | 3 | 4
+numg/colon/corrIn/dec/exp/F	rows=1 1
+numg/colon/in/dec/expUpper/H	rows=4 1 | 2 | 3 | 4
+numg/colon/corrIn/dec/expUpper/H	rows=1 3
+numg/colon/in/dec/expUpper/M	rows=0 
+numg/colon/corrIn/dec/expUpper/M	rows=0 
+numg/colon/in/dec/expUpper/F	rows=4 1 | 2 | 3 | 4
+numg/colon/corrIn/dec/expUpper/F	rows=1 1
+numg/colon/in/dec/expPlus/H	rows=4 1 | 2 | 3 | 4
+numg/colon/corrIn/dec/expPlus/H	rows=1 3
+numg/colon/in/dec/expPlus/M	rows=0 
+numg/colon/corrIn/dec/expPlus/M	rows=0 
+numg/colon/in/dec/expPlus/F	rows=4 1 | 2 | 3 | 4
+numg/colon/corrIn/dec/expPlus/F	rows=1 1
+numg/colon/in/dec/expMinus/H	rows=4 1 | 2 | 3 | 4
+numg/colon/corrIn/dec/expMinus/H	rows=1 3
+numg/colon/in/dec/expMinus/M	rows=0 
+numg/colon/corrIn/dec/expMinus/M	rows=0 
+numg/colon/in/dec/expMinus/F	rows=4 1 | 2 | 3 | 4
+numg/colon/corrIn/dec/expMinus/F	rows=1 1
+numg/colon/in/dec/expZero/H	rows=4 1 | 2 | 3 | 4
+numg/colon/corrIn/dec/expZero/H	rows=1 3
+numg/colon/in/dec/expZero/F	rows=4 1 | 2 | 3 | 4
+numg/colon/corrIn/dec/expZero/F	rows=1 1
+numg/colon/in/dec/space/H	rows=4 1 | 2 | 3 | 4
+numg/colon/corrIn/dec/space/H	rows=1 3
+numg/colon/in/dec/space/M	rows=0 
+numg/colon/corrIn/dec/space/M	rows=0 
+numg/colon/in/dec/space/F	rows=4 1 | 2 | 3 | 4
+numg/colon/corrIn/dec/space/F	rows=1 1
+numg/colon/in/dec/tab/H	rows=4 1 | 2 | 3 | 4
+numg/colon/corrIn/dec/tab/H	rows=1 3
+numg/colon/in/dec/trail0Wide/H	rows=4 1 | 2 | 3 | 4
+numg/colon/corrIn/dec/trail0Wide/H	rows=1 3
+numg/colon/in/dec/trail0Wide/F	rows=4 1 | 2 | 3 | 4
+numg/colon/corrIn/dec/trail0Wide/F	rows=1 1
+numg/colon/in/dec/lead0Wide/H	rows=4 1 | 2 | 3 | 4
+numg/colon/corrIn/dec/lead0Wide/H	rows=1 3
+numg/colon/in/dec/lead0Wide/M	rows=0 
+numg/colon/corrIn/dec/lead0Wide/M	rows=0 
+numg/colon/in/dec/lead0Wide/F	rows=4 1 | 2 | 3 | 4
+numg/colon/corrIn/dec/lead0Wide/F	rows=1 1
+numg/colon/in/dec/expWide/H	rows=4 1 | 2 | 3 | 4
+numg/colon/corrIn/dec/expWide/H	rows=1 3
+numg/colon/in/dec/expWide/F	rows=4 1 | 2 | 3 | 4
+numg/colon/corrIn/dec/expWide/F	rows=1 1
+numg/colon/in/dec/zeroWide/miss	rows=0 
+numg/colon/corrIn/dec/zeroWide/miss	rows=0 
+numg/colon/in/dec/width38/M	rows=0 
+numg/colon/corrIn/dec/width38/M	rows=0 
+numg/colon/in/dec/over38Frac	rows=0 
+numg/colon/corrIn/dec/over38Frac	rows=0 
+numg/colon/in/dec/over38Neg	rows=0 
+numg/colon/corrIn/dec/over38Neg	rows=0 
+numg/colon/in/dec/scale39	rows=0 
+numg/colon/corrIn/dec/scale39	rows=0 
+numg/colon/in/dec/expScale	rows=0 
+numg/colon/corrIn/dec/expScale	rows=0 
+numg/colon/in/dec/over38Int	rows=0 
+numg/colon/corrIn/dec/over38Int	rows=0 
+numg/colon/in/dec/expInt	rows=0 
+numg/colon/corrIn/dec/expInt	rows=0 
+numg/colon/in/dec/expHuge	rows=0 
+numg/colon/corrIn/dec/expHuge	rows=0 
+numg/colon/in/dec/nan	rows=0 
+numg/colon/corrIn/dec/nan	rows=0 
+numg/colon/in/dec/inf	rows=0 
+numg/colon/corrIn/dec/inf	rows=0 
+numg/colon/in/dec/negInf	rows=0 
+numg/colon/corrIn/dec/negInf	rows=0 
+numg/colon/in/dec/infShort	rows=0 
+numg/colon/corrIn/dec/infShort	rows=0 
+numg/colon/in/dec/bad/junk	ERR 22P02 invalid input syntax for type numeric: "zz"
+numg/colon/corrIn/dec/bad/junk	ERR 22P02 invalid input syntax for type numeric: "zz"
+numg/colon/in/dec/bad/expEmpty	ERR 22P02 invalid input syntax for type numeric: "1e"
+numg/colon/corrIn/dec/bad/expEmpty	ERR 22P02 invalid input syntax for type numeric: "1e"
+numg/colon/in/dec/bad/dot	ERR 22P02 invalid input syntax for type numeric: "."
+numg/colon/corrIn/dec/bad/dot	ERR 22P02 invalid input syntax for type numeric: "."
+numg/colon/in/dec/bad/empty	ERR 22P02 invalid input syntax for type numeric: ""
+numg/colon/corrIn/dec/bad/empty	ERR 22P02 invalid input syntax for type numeric: ""
+numg/colon/in/dec/bad/twoDots	ERR 22P02 invalid input syntax for type numeric: "1.2.3"
+numg/colon/corrIn/dec/bad/twoDots	ERR 22P02 invalid input syntax for type numeric: "1.2.3"
+numg/colon/in/dec/bad/innerSpace	ERR 22P02 invalid input syntax for type numeric: "1 4"
+numg/colon/corrIn/dec/bad/innerSpace	ERR 22P02 invalid input syntax for type numeric: "1 4"
+numg/colon/in/dec/bad/twoSigns	ERR 22P02 invalid input syntax for type numeric: "+-14"
+numg/colon/corrIn/dec/bad/twoSigns	ERR 22P02 invalid input syntax for type numeric: "+-14"
+numg/colon/in/dec/bad/trailJunk	ERR 22P02 invalid input syntax for type numeric: "14x"
+numg/colon/corrIn/dec/bad/trailJunk	ERR 22P02 invalid input syntax for type numeric: "14x"
+numg/colon/in/dec/bad/signedNaN	ERR 22P02 invalid input syntax for type numeric: "+NaN"
+numg/colon/corrIn/dec/bad/signedNaN	ERR 22P02 invalid input syntax for type numeric: "+NaN"
+numg/colon/in/dec/bad/nbsp	ERR 22P02 invalid input syntax for type numeric: "14 "
+numg/colon/corrIn/dec/bad/nbsp	ERR 22P02 invalid input syntax for type numeric: "14 "
+numg/colon/in/dec/bad/twoUnderscores	ERR 22P02 invalid input syntax for type numeric: "1__4"
+numg/colon/corrIn/dec/bad/twoUnderscores	ERR 22P02 invalid input syntax for type numeric: "1__4"
+numg/colon/in/dec/bad/hexFloat	ERR 22P02 invalid input syntax for type numeric: "0x1.8p1"
+numg/colon/corrIn/dec/bad/hexFloat	ERR 22P02 invalid input syntax for type numeric: "0x1.8p1"
+numg/colon/in/dec/radix/hex	rows=4 1 | 2 | 3 | 4
+numg/colon/corrIn/dec/radix/hex	rows=1 3
+numg/colon/in/dec/radix/octal	rows=4 1 | 2 | 3 | 4
+numg/colon/corrIn/dec/radix/octal	rows=1 3
+numg/colon/in/dec/radix/binary	rows=4 1 | 2 | 3 | 4
+numg/colon/corrIn/dec/radix/binary	rows=1 3
+numg/colon/in/dec/radix/underscore	rows=4 1 | 2 | 3 | 4
+numg/colon/corrIn/dec/radix/underscore	rows=1 3
+numg/colon/in/dec/radix/underscoreFrac	rows=4 1 | 2 | 3 | 4
+numg/colon/corrIn/dec/radix/underscoreFrac	rows=1 1
+numg/const/in/dec/plain/H	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/dec/plain/H	rows=0 
+numg/const/corrIn/dec/plain/H	rows=1 3
+numg/const/sel/dec/plain/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/dec/plain/M	rows=0 
+numg/const/notIn/dec/plain/M	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/dec/plain/M	rows=0 
+numg/const/sel/dec/plain/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/dec/plain/F	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/dec/plain/F	rows=0 
+numg/const/corrIn/dec/plain/F	rows=1 1
+numg/const/sel/dec/plain/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/dec/plus/H	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/dec/plus/H	rows=0 
+numg/const/corrIn/dec/plus/H	rows=1 3
+numg/const/sel/dec/plus/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/dec/plus/M	rows=0 
+numg/const/notIn/dec/plus/M	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/dec/plus/M	rows=0 
+numg/const/sel/dec/plus/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/dec/plus/F	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/dec/plus/F	rows=0 
+numg/const/corrIn/dec/plus/F	rows=1 1
+numg/const/sel/dec/plus/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/dec/minus/H	rows=0 
+numg/const/notIn/dec/minus/H	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/dec/minus/H	rows=0 
+numg/const/sel/dec/minus/H	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/dec/minus/M	rows=0 
+numg/const/notIn/dec/minus/M	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/dec/minus/M	rows=0 
+numg/const/sel/dec/minus/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/dec/minus/F	rows=0 
+numg/const/notIn/dec/minus/F	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/dec/minus/F	rows=0 
+numg/const/sel/dec/minus/F	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/dec/lead0/H	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/dec/lead0/H	rows=0 
+numg/const/corrIn/dec/lead0/H	rows=1 3
+numg/const/sel/dec/lead0/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/dec/lead0/M	rows=0 
+numg/const/notIn/dec/lead0/M	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/dec/lead0/M	rows=0 
+numg/const/sel/dec/lead0/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/dec/lead0/F	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/dec/lead0/F	rows=0 
+numg/const/corrIn/dec/lead0/F	rows=1 1
+numg/const/sel/dec/lead0/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/dec/trail0/H	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/dec/trail0/H	rows=0 
+numg/const/corrIn/dec/trail0/H	rows=1 3
+numg/const/sel/dec/trail0/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/dec/trail0/M	rows=0 
+numg/const/notIn/dec/trail0/M	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/dec/trail0/M	rows=0 
+numg/const/sel/dec/trail0/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/dec/trail0/F	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/dec/trail0/F	rows=0 
+numg/const/corrIn/dec/trail0/F	rows=1 1
+numg/const/sel/dec/trail0/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/dec/noFrac/H	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/dec/noFrac/H	rows=0 
+numg/const/corrIn/dec/noFrac/H	rows=1 3
+numg/const/sel/dec/noFrac/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/dec/noInt/H	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/dec/noInt/H	rows=0 
+numg/const/corrIn/dec/noInt/H	rows=1 3
+numg/const/sel/dec/noInt/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/dec/noInt/M	rows=0 
+numg/const/notIn/dec/noInt/M	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/dec/noInt/M	rows=0 
+numg/const/sel/dec/noInt/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/dec/noInt/F	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/dec/noInt/F	rows=0 
+numg/const/corrIn/dec/noInt/F	rows=1 1
+numg/const/sel/dec/noInt/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/dec/noInt/miss	rows=0 
+numg/const/notIn/dec/noInt/miss	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/dec/noInt/miss	rows=0 
+numg/const/sel/dec/noInt/miss	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/dec/exp/H	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/dec/exp/H	rows=0 
+numg/const/corrIn/dec/exp/H	rows=1 3
+numg/const/sel/dec/exp/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/dec/exp/M	rows=0 
+numg/const/notIn/dec/exp/M	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/dec/exp/M	rows=0 
+numg/const/sel/dec/exp/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/dec/exp/F	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/dec/exp/F	rows=0 
+numg/const/corrIn/dec/exp/F	rows=1 1
+numg/const/sel/dec/exp/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/dec/expUpper/H	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/dec/expUpper/H	rows=0 
+numg/const/corrIn/dec/expUpper/H	rows=1 3
+numg/const/sel/dec/expUpper/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/dec/expUpper/M	rows=0 
+numg/const/notIn/dec/expUpper/M	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/dec/expUpper/M	rows=0 
+numg/const/sel/dec/expUpper/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/dec/expUpper/F	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/dec/expUpper/F	rows=0 
+numg/const/corrIn/dec/expUpper/F	rows=1 1
+numg/const/sel/dec/expUpper/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/dec/expPlus/H	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/dec/expPlus/H	rows=0 
+numg/const/corrIn/dec/expPlus/H	rows=1 3
+numg/const/sel/dec/expPlus/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/dec/expPlus/M	rows=0 
+numg/const/notIn/dec/expPlus/M	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/dec/expPlus/M	rows=0 
+numg/const/sel/dec/expPlus/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/dec/expPlus/F	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/dec/expPlus/F	rows=0 
+numg/const/corrIn/dec/expPlus/F	rows=1 1
+numg/const/sel/dec/expPlus/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/dec/expMinus/H	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/dec/expMinus/H	rows=0 
+numg/const/corrIn/dec/expMinus/H	rows=1 3
+numg/const/sel/dec/expMinus/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/dec/expMinus/M	rows=0 
+numg/const/notIn/dec/expMinus/M	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/dec/expMinus/M	rows=0 
+numg/const/sel/dec/expMinus/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/dec/expMinus/F	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/dec/expMinus/F	rows=0 
+numg/const/corrIn/dec/expMinus/F	rows=1 1
+numg/const/sel/dec/expMinus/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/dec/expZero/H	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/dec/expZero/H	rows=0 
+numg/const/corrIn/dec/expZero/H	rows=1 3
+numg/const/sel/dec/expZero/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/dec/expZero/F	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/dec/expZero/F	rows=0 
+numg/const/corrIn/dec/expZero/F	rows=1 1
+numg/const/sel/dec/expZero/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/dec/trail0Wide/H	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/dec/trail0Wide/H	rows=0 
+numg/const/corrIn/dec/trail0Wide/H	rows=1 3
+numg/const/sel/dec/trail0Wide/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/dec/trail0Wide/F	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/dec/trail0Wide/F	rows=0 
+numg/const/corrIn/dec/trail0Wide/F	rows=1 1
+numg/const/sel/dec/trail0Wide/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/dec/lead0Wide/H	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/dec/lead0Wide/H	rows=0 
+numg/const/corrIn/dec/lead0Wide/H	rows=1 3
+numg/const/sel/dec/lead0Wide/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/dec/lead0Wide/M	rows=0 
+numg/const/notIn/dec/lead0Wide/M	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/dec/lead0Wide/M	rows=0 
+numg/const/sel/dec/lead0Wide/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/dec/lead0Wide/F	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/dec/lead0Wide/F	rows=0 
+numg/const/corrIn/dec/lead0Wide/F	rows=1 1
+numg/const/sel/dec/lead0Wide/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/dec/expWide/H	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/dec/expWide/H	rows=0 
+numg/const/corrIn/dec/expWide/H	rows=1 3
+numg/const/sel/dec/expWide/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/dec/expWide/F	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/dec/expWide/F	rows=0 
+numg/const/corrIn/dec/expWide/F	rows=1 1
+numg/const/sel/dec/expWide/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/dec/zeroWide/miss	rows=0 
+numg/const/notIn/dec/zeroWide/miss	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/dec/zeroWide/miss	rows=0 
+numg/const/sel/dec/zeroWide/miss	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/dec/width38/M	rows=0 
+numg/const/notIn/dec/width38/M	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/dec/width38/M	rows=0 
+numg/const/sel/dec/width38/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/dec/over38Frac	rows=0 
+numg/const/notIn/dec/over38Frac	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/dec/over38Frac	rows=0 
+numg/const/sel/dec/over38Frac	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/dec/over38Neg	rows=0 
+numg/const/notIn/dec/over38Neg	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/dec/over38Neg	rows=0 
+numg/const/sel/dec/over38Neg	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/dec/scale39	rows=0 
+numg/const/notIn/dec/scale39	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/dec/scale39	rows=0 
+numg/const/sel/dec/scale39	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/dec/expScale	rows=0 
+numg/const/notIn/dec/expScale	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/dec/expScale	rows=0 
+numg/const/sel/dec/expScale	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/dec/over38Int	rows=0 
+numg/const/notIn/dec/over38Int	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/dec/over38Int	rows=0 
+numg/const/sel/dec/over38Int	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/dec/expInt	rows=0 
+numg/const/notIn/dec/expInt	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/dec/expInt	rows=0 
+numg/const/sel/dec/expInt	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/dec/expHuge	rows=0 
+numg/const/notIn/dec/expHuge	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/dec/expHuge	rows=0 
+numg/const/sel/dec/expHuge	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/n38/plain/H	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/n38/plain/H	rows=0 
+numg/const/corrIn/n38/plain/H	rows=1 3
+numg/const/sel/n38/plain/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/n38/plain/M	rows=0 
+numg/const/notIn/n38/plain/M	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/n38/plain/M	rows=0 
+numg/const/sel/n38/plain/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/n38/plain/F	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/n38/plain/F	rows=0 
+numg/const/corrIn/n38/plain/F	rows=1 1
+numg/const/sel/n38/plain/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/n38/plus/H	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/n38/plus/H	rows=0 
+numg/const/corrIn/n38/plus/H	rows=1 3
+numg/const/sel/n38/plus/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/n38/plus/M	rows=0 
+numg/const/notIn/n38/plus/M	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/n38/plus/M	rows=0 
+numg/const/sel/n38/plus/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/n38/plus/F	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/n38/plus/F	rows=0 
+numg/const/corrIn/n38/plus/F	rows=1 1
+numg/const/sel/n38/plus/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/n38/minus/H	rows=0 
+numg/const/notIn/n38/minus/H	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/n38/minus/H	rows=0 
+numg/const/sel/n38/minus/H	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/n38/minus/M	rows=0 
+numg/const/notIn/n38/minus/M	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/n38/minus/M	rows=0 
+numg/const/sel/n38/minus/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/n38/minus/F	rows=0 
+numg/const/notIn/n38/minus/F	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/n38/minus/F	rows=0 
+numg/const/sel/n38/minus/F	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/n38/lead0/H	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/n38/lead0/H	rows=0 
+numg/const/corrIn/n38/lead0/H	rows=1 3
+numg/const/sel/n38/lead0/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/n38/lead0/M	rows=0 
+numg/const/notIn/n38/lead0/M	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/n38/lead0/M	rows=0 
+numg/const/sel/n38/lead0/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/n38/lead0/F	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/n38/lead0/F	rows=0 
+numg/const/corrIn/n38/lead0/F	rows=1 1
+numg/const/sel/n38/lead0/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/n38/trail0/H	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/n38/trail0/H	rows=0 
+numg/const/corrIn/n38/trail0/H	rows=1 3
+numg/const/sel/n38/trail0/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/n38/trail0/M	rows=0 
+numg/const/notIn/n38/trail0/M	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/n38/trail0/M	rows=0 
+numg/const/sel/n38/trail0/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/n38/trail0/F	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/n38/trail0/F	rows=0 
+numg/const/corrIn/n38/trail0/F	rows=1 1
+numg/const/sel/n38/trail0/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/n38/noFrac/H	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/n38/noFrac/H	rows=0 
+numg/const/corrIn/n38/noFrac/H	rows=1 3
+numg/const/sel/n38/noFrac/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/n38/noInt/H	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/n38/noInt/H	rows=0 
+numg/const/corrIn/n38/noInt/H	rows=1 3
+numg/const/sel/n38/noInt/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/n38/noInt/M	rows=0 
+numg/const/notIn/n38/noInt/M	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/n38/noInt/M	rows=0 
+numg/const/sel/n38/noInt/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/n38/noInt/F	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/n38/noInt/F	rows=0 
+numg/const/corrIn/n38/noInt/F	rows=1 1
+numg/const/sel/n38/noInt/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/n38/noInt/miss	rows=0 
+numg/const/notIn/n38/noInt/miss	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/n38/noInt/miss	rows=0 
+numg/const/sel/n38/noInt/miss	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/n38/exp/H	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/n38/exp/H	rows=0 
+numg/const/corrIn/n38/exp/H	rows=1 3
+numg/const/sel/n38/exp/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/n38/exp/M	rows=0 
+numg/const/notIn/n38/exp/M	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/n38/exp/M	rows=0 
+numg/const/sel/n38/exp/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/n38/exp/F	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/n38/exp/F	rows=0 
+numg/const/corrIn/n38/exp/F	rows=1 1
+numg/const/sel/n38/exp/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/n38/expUpper/H	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/n38/expUpper/H	rows=0 
+numg/const/corrIn/n38/expUpper/H	rows=1 3
+numg/const/sel/n38/expUpper/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/n38/expUpper/M	rows=0 
+numg/const/notIn/n38/expUpper/M	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/n38/expUpper/M	rows=0 
+numg/const/sel/n38/expUpper/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/n38/expUpper/F	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/n38/expUpper/F	rows=0 
+numg/const/corrIn/n38/expUpper/F	rows=1 1
+numg/const/sel/n38/expUpper/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/n38/expPlus/H	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/n38/expPlus/H	rows=0 
+numg/const/corrIn/n38/expPlus/H	rows=1 3
+numg/const/sel/n38/expPlus/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/n38/expPlus/M	rows=0 
+numg/const/notIn/n38/expPlus/M	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/n38/expPlus/M	rows=0 
+numg/const/sel/n38/expPlus/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/n38/expPlus/F	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/n38/expPlus/F	rows=0 
+numg/const/corrIn/n38/expPlus/F	rows=1 1
+numg/const/sel/n38/expPlus/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/n38/expMinus/H	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/n38/expMinus/H	rows=0 
+numg/const/corrIn/n38/expMinus/H	rows=1 3
+numg/const/sel/n38/expMinus/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/n38/expMinus/M	rows=0 
+numg/const/notIn/n38/expMinus/M	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/n38/expMinus/M	rows=0 
+numg/const/sel/n38/expMinus/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/n38/expMinus/F	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/n38/expMinus/F	rows=0 
+numg/const/corrIn/n38/expMinus/F	rows=1 1
+numg/const/sel/n38/expMinus/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/n38/expZero/H	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/n38/expZero/H	rows=0 
+numg/const/corrIn/n38/expZero/H	rows=1 3
+numg/const/sel/n38/expZero/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/n38/expZero/F	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/n38/expZero/F	rows=0 
+numg/const/corrIn/n38/expZero/F	rows=1 1
+numg/const/sel/n38/expZero/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/n38/trail0Wide/H	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/n38/trail0Wide/H	rows=0 
+numg/const/corrIn/n38/trail0Wide/H	rows=1 3
+numg/const/sel/n38/trail0Wide/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/n38/trail0Wide/F	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/n38/trail0Wide/F	rows=0 
+numg/const/corrIn/n38/trail0Wide/F	rows=1 1
+numg/const/sel/n38/trail0Wide/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/n38/lead0Wide/H	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/n38/lead0Wide/H	rows=0 
+numg/const/corrIn/n38/lead0Wide/H	rows=1 3
+numg/const/sel/n38/lead0Wide/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/n38/lead0Wide/M	rows=0 
+numg/const/notIn/n38/lead0Wide/M	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/n38/lead0Wide/M	rows=0 
+numg/const/sel/n38/lead0Wide/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/n38/lead0Wide/F	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/n38/lead0Wide/F	rows=0 
+numg/const/corrIn/n38/lead0Wide/F	rows=1 1
+numg/const/sel/n38/lead0Wide/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/n38/expWide/H	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/n38/expWide/H	rows=0 
+numg/const/corrIn/n38/expWide/H	rows=1 3
+numg/const/sel/n38/expWide/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/n38/expWide/F	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/n38/expWide/F	rows=0 
+numg/const/corrIn/n38/expWide/F	rows=1 1
+numg/const/sel/n38/expWide/F	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/n38/zeroWide/miss	rows=0 
+numg/const/notIn/n38/zeroWide/miss	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/n38/zeroWide/miss	rows=0 
+numg/const/sel/n38/zeroWide/miss	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/n38/width38/M	rows=0 
+numg/const/notIn/n38/width38/M	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/n38/width38/M	rows=0 
+numg/const/sel/n38/width38/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/n38/over38Frac	rows=0 
+numg/const/notIn/n38/over38Frac	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/n38/over38Frac	rows=0 
+numg/const/sel/n38/over38Frac	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/n38/over38Neg	rows=0 
+numg/const/notIn/n38/over38Neg	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/n38/over38Neg	rows=0 
+numg/const/sel/n38/over38Neg	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/n38/scale39	rows=0 
+numg/const/notIn/n38/scale39	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/n38/scale39	rows=0 
+numg/const/sel/n38/scale39	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/n38/expScale	rows=0 
+numg/const/notIn/n38/expScale	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/n38/expScale	rows=0 
+numg/const/sel/n38/expScale	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/n38/over38Int	rows=0 
+numg/const/notIn/n38/over38Int	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/n38/over38Int	rows=0 
+numg/const/sel/n38/over38Int	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/n38/expInt	rows=0 
+numg/const/notIn/n38/expInt	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/n38/expInt	rows=0 
+numg/const/sel/n38/expInt	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/n38/expHuge	rows=0 
+numg/const/notIn/n38/expHuge	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/n38/expHuge	rows=0 
+numg/const/sel/n38/expHuge	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/n/plain/H	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/n/plain/H	rows=0 
+numg/const/corrIn/n/plain/H	rows=1 3
+numg/const/sel/n/plain/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/n/plain/M	rows=0 
+numg/const/notIn/n/plain/M	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/n/plain/M	rows=0 
+numg/const/sel/n/plain/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/n/plain/F	rows=0 
+numg/const/notIn/n/plain/F	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/n/plain/F	rows=0 
+numg/const/sel/n/plain/F	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/n/plus/H	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/n/plus/H	rows=0 
+numg/const/corrIn/n/plus/H	rows=1 3
+numg/const/sel/n/plus/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/n/plus/M	rows=0 
+numg/const/notIn/n/plus/M	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/n/plus/M	rows=0 
+numg/const/sel/n/plus/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/n/plus/F	rows=0 
+numg/const/notIn/n/plus/F	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/n/plus/F	rows=0 
+numg/const/sel/n/plus/F	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/n/minus/H	rows=0 
+numg/const/notIn/n/minus/H	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/n/minus/H	rows=0 
+numg/const/sel/n/minus/H	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/n/minus/M	rows=0 
+numg/const/notIn/n/minus/M	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/n/minus/M	rows=0 
+numg/const/sel/n/minus/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/n/minus/F	rows=0 
+numg/const/notIn/n/minus/F	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/n/minus/F	rows=0 
+numg/const/sel/n/minus/F	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/n/lead0/H	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/n/lead0/H	rows=0 
+numg/const/corrIn/n/lead0/H	rows=1 3
+numg/const/sel/n/lead0/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/n/lead0/M	rows=0 
+numg/const/notIn/n/lead0/M	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/n/lead0/M	rows=0 
+numg/const/sel/n/lead0/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/n/lead0/F	rows=0 
+numg/const/notIn/n/lead0/F	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/n/lead0/F	rows=0 
+numg/const/sel/n/lead0/F	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/n/trail0/H	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/n/trail0/H	rows=0 
+numg/const/corrIn/n/trail0/H	rows=1 3
+numg/const/sel/n/trail0/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/n/trail0/M	rows=0 
+numg/const/notIn/n/trail0/M	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/n/trail0/M	rows=0 
+numg/const/sel/n/trail0/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/n/trail0/F	rows=0 
+numg/const/notIn/n/trail0/F	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/n/trail0/F	rows=0 
+numg/const/sel/n/trail0/F	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/n/noFrac/H	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/n/noFrac/H	rows=0 
+numg/const/corrIn/n/noFrac/H	rows=1 3
+numg/const/sel/n/noFrac/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/n/noInt/H	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/n/noInt/H	rows=0 
+numg/const/corrIn/n/noInt/H	rows=1 3
+numg/const/sel/n/noInt/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/n/noInt/M	rows=0 
+numg/const/notIn/n/noInt/M	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/n/noInt/M	rows=0 
+numg/const/sel/n/noInt/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/n/noInt/F	rows=0 
+numg/const/notIn/n/noInt/F	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/n/noInt/F	rows=0 
+numg/const/sel/n/noInt/F	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/n/noInt/miss	rows=0 
+numg/const/notIn/n/noInt/miss	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/n/noInt/miss	rows=0 
+numg/const/sel/n/noInt/miss	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/n/exp/H	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/n/exp/H	rows=0 
+numg/const/corrIn/n/exp/H	rows=1 3
+numg/const/sel/n/exp/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/n/exp/M	rows=0 
+numg/const/notIn/n/exp/M	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/n/exp/M	rows=0 
+numg/const/sel/n/exp/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/n/exp/F	rows=0 
+numg/const/notIn/n/exp/F	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/n/exp/F	rows=0 
+numg/const/sel/n/exp/F	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/n/expUpper/H	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/n/expUpper/H	rows=0 
+numg/const/corrIn/n/expUpper/H	rows=1 3
+numg/const/sel/n/expUpper/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/n/expUpper/M	rows=0 
+numg/const/notIn/n/expUpper/M	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/n/expUpper/M	rows=0 
+numg/const/sel/n/expUpper/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/n/expUpper/F	rows=0 
+numg/const/notIn/n/expUpper/F	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/n/expUpper/F	rows=0 
+numg/const/sel/n/expUpper/F	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/n/expPlus/H	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/n/expPlus/H	rows=0 
+numg/const/corrIn/n/expPlus/H	rows=1 3
+numg/const/sel/n/expPlus/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/n/expPlus/M	rows=0 
+numg/const/notIn/n/expPlus/M	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/n/expPlus/M	rows=0 
+numg/const/sel/n/expPlus/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/n/expPlus/F	rows=0 
+numg/const/notIn/n/expPlus/F	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/n/expPlus/F	rows=0 
+numg/const/sel/n/expPlus/F	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/n/expMinus/H	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/n/expMinus/H	rows=0 
+numg/const/corrIn/n/expMinus/H	rows=1 3
+numg/const/sel/n/expMinus/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/n/expMinus/M	rows=0 
+numg/const/notIn/n/expMinus/M	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/n/expMinus/M	rows=0 
+numg/const/sel/n/expMinus/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/n/expMinus/F	rows=0 
+numg/const/notIn/n/expMinus/F	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/n/expMinus/F	rows=0 
+numg/const/sel/n/expMinus/F	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/n/expZero/H	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/n/expZero/H	rows=0 
+numg/const/corrIn/n/expZero/H	rows=1 3
+numg/const/sel/n/expZero/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/n/expZero/F	rows=0 
+numg/const/notIn/n/expZero/F	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/n/expZero/F	rows=0 
+numg/const/sel/n/expZero/F	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/n/trail0Wide/H	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/n/trail0Wide/H	rows=0 
+numg/const/corrIn/n/trail0Wide/H	rows=1 3
+numg/const/sel/n/trail0Wide/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/n/trail0Wide/F	rows=0 
+numg/const/notIn/n/trail0Wide/F	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/n/trail0Wide/F	rows=0 
+numg/const/sel/n/trail0Wide/F	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/n/lead0Wide/H	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/n/lead0Wide/H	rows=0 
+numg/const/corrIn/n/lead0Wide/H	rows=1 3
+numg/const/sel/n/lead0Wide/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/n/lead0Wide/M	rows=0 
+numg/const/notIn/n/lead0Wide/M	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/n/lead0Wide/M	rows=0 
+numg/const/sel/n/lead0Wide/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/n/lead0Wide/F	rows=0 
+numg/const/notIn/n/lead0Wide/F	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/n/lead0Wide/F	rows=0 
+numg/const/sel/n/lead0Wide/F	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/n/expWide/H	rows=4 1 | 2 | 3 | 4
+numg/const/notIn/n/expWide/H	rows=0 
+numg/const/corrIn/n/expWide/H	rows=1 3
+numg/const/sel/n/expWide/H	rows=4 1,true | 2,true | 3,true | 4,true
+numg/const/in/n/expWide/F	rows=0 
+numg/const/notIn/n/expWide/F	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/n/expWide/F	rows=0 
+numg/const/sel/n/expWide/F	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/n/zeroWide/miss	rows=0 
+numg/const/notIn/n/zeroWide/miss	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/n/zeroWide/miss	rows=0 
+numg/const/sel/n/zeroWide/miss	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/n/width38/M	rows=0 
+numg/const/notIn/n/width38/M	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/n/width38/M	rows=0 
+numg/const/sel/n/width38/M	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/n/over38Frac	rows=0 
+numg/const/notIn/n/over38Frac	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/n/over38Frac	rows=0 
+numg/const/sel/n/over38Frac	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/n/over38Neg	rows=0 
+numg/const/notIn/n/over38Neg	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/n/over38Neg	rows=0 
+numg/const/sel/n/over38Neg	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/n/scale39	rows=0 
+numg/const/notIn/n/scale39	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/n/scale39	rows=0 
+numg/const/sel/n/scale39	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/n/expScale	rows=0 
+numg/const/notIn/n/expScale	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/n/expScale	rows=0 
+numg/const/sel/n/expScale	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/n/over38Int	rows=0 
+numg/const/notIn/n/over38Int	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/n/over38Int	rows=0 
+numg/const/sel/n/over38Int	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/n/expInt	rows=0 
+numg/const/notIn/n/expInt	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/n/expInt	rows=0 
+numg/const/sel/n/expInt	rows=4 1,false | 2,false | 3,false | 4,false
+numg/const/in/n/expHuge	rows=0 
+numg/const/notIn/n/expHuge	rows=4 1 | 2 | 3 | 4
+numg/const/corrIn/n/expHuge	rows=0 
+numg/const/sel/n/expHuge	rows=4 1,false | 2,false | 3,false | 4,false
+numg/castPS/in/dec/plain/H	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/dec/plain/H	rows=1 3
+numg/castPS/in/dec/plain/M	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/dec/plain/M	rows=1 3
+numg/castPS/in/dec/plain/F	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/dec/plain/F	rows=1 1
+numg/castPS/in/dec/plus/H	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/dec/plus/H	rows=1 3
+numg/castPS/in/dec/plus/M	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/dec/plus/M	rows=1 3
+numg/castPS/in/dec/plus/F	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/dec/plus/F	rows=1 1
+numg/castPS/in/dec/minus/H	rows=0 
+numg/castPS/corrIn/dec/minus/H	rows=0 
+numg/castPS/in/dec/minus/M	rows=0 
+numg/castPS/corrIn/dec/minus/M	rows=0 
+numg/castPS/in/dec/minus/F	rows=0 
+numg/castPS/corrIn/dec/minus/F	rows=0 
+numg/castPS/in/dec/lead0/H	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/dec/lead0/H	rows=1 3
+numg/castPS/in/dec/lead0/M	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/dec/lead0/M	rows=1 3
+numg/castPS/in/dec/lead0/F	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/dec/lead0/F	rows=1 1
+numg/castPS/in/dec/trail0/H	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/dec/trail0/H	rows=1 3
+numg/castPS/in/dec/trail0/M	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/dec/trail0/M	rows=1 3
+numg/castPS/in/dec/trail0/F	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/dec/trail0/F	rows=1 1
+numg/castPS/in/dec/noFrac/H	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/dec/noFrac/H	rows=1 3
+numg/castPS/in/dec/noInt/H	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/dec/noInt/H	rows=1 3
+numg/castPS/in/dec/noInt/M	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/dec/noInt/M	rows=1 3
+numg/castPS/in/dec/noInt/F	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/dec/noInt/F	rows=1 1
+numg/castPS/in/dec/noInt/miss	rows=0 
+numg/castPS/corrIn/dec/noInt/miss	rows=0 
+numg/castPS/in/dec/exp/H	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/dec/exp/H	rows=1 3
+numg/castPS/in/dec/exp/M	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/dec/exp/M	rows=1 3
+numg/castPS/in/dec/exp/F	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/dec/exp/F	rows=1 1
+numg/castPS/in/dec/expUpper/H	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/dec/expUpper/H	rows=1 3
+numg/castPS/in/dec/expUpper/M	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/dec/expUpper/M	rows=1 3
+numg/castPS/in/dec/expUpper/F	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/dec/expUpper/F	rows=1 1
+numg/castPS/in/dec/expPlus/H	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/dec/expPlus/H	rows=1 3
+numg/castPS/in/dec/expPlus/M	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/dec/expPlus/M	rows=1 3
+numg/castPS/in/dec/expPlus/F	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/dec/expPlus/F	rows=1 1
+numg/castPS/in/dec/expMinus/H	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/dec/expMinus/H	rows=1 3
+numg/castPS/in/dec/expMinus/M	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/dec/expMinus/M	rows=1 3
+numg/castPS/in/dec/expMinus/F	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/dec/expMinus/F	rows=1 1
+numg/castPS/in/dec/expZero/H	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/dec/expZero/H	rows=1 3
+numg/castPS/in/dec/expZero/F	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/dec/expZero/F	rows=1 1
+numg/castPS/in/dec/space/H	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/dec/space/H	rows=1 3
+numg/castPS/in/dec/space/M	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/dec/space/M	rows=1 3
+numg/castPS/in/dec/space/F	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/dec/space/F	rows=1 1
+numg/castPS/in/dec/tab/H	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/dec/tab/H	rows=1 3
+numg/castPS/in/dec/trail0Wide/H	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/dec/trail0Wide/H	rows=1 3
+numg/castPS/in/dec/trail0Wide/F	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/dec/trail0Wide/F	rows=1 1
+numg/castPS/in/dec/lead0Wide/H	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/dec/lead0Wide/H	rows=1 3
+numg/castPS/in/dec/lead0Wide/M	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/dec/lead0Wide/M	rows=1 3
+numg/castPS/in/dec/lead0Wide/F	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/dec/lead0Wide/F	rows=1 1
+numg/castPS/in/dec/expWide/H	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/dec/expWide/H	rows=1 3
+numg/castPS/in/dec/expWide/F	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/dec/expWide/F	rows=1 1
+numg/castPS/in/dec/zeroWide/miss	rows=0 
+numg/castPS/corrIn/dec/zeroWide/miss	rows=0 
+numg/castPS/in/dec/width38/M	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/dec/width38/M	rows=1 3
+numg/castPS/in/dec/over38Frac	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/dec/over38Frac	rows=1 3
+numg/castPS/in/dec/over38Neg	rows=0 
+numg/castPS/corrIn/dec/over38Neg	rows=0 
+numg/castPS/in/dec/scale39	rows=0 
+numg/castPS/corrIn/dec/scale39	rows=0 
+numg/castPS/in/dec/expScale	rows=0 
+numg/castPS/corrIn/dec/expScale	rows=0 
+numg/castPS/in/dec/over38Int	ERR 22003 numeric field overflow
+numg/castPS/corrIn/dec/over38Int	ERR 22003 numeric field overflow
+numg/castPS/in/dec/expInt	ERR 22003 numeric field overflow
+numg/castPS/corrIn/dec/expInt	ERR 22003 numeric field overflow
+numg/castPS/in/dec/expHuge	ERR 22003 numeric field overflow
+numg/castPS/corrIn/dec/expHuge	ERR 22003 numeric field overflow
+numg/castPS/in/dec/nan	rows=0 
+numg/castPS/corrIn/dec/nan	rows=0 
+numg/castPS/in/dec/inf	ERR 22003 numeric field overflow
+numg/castPS/corrIn/dec/inf	ERR 22003 numeric field overflow
+numg/castPS/in/dec/negInf	ERR 22003 numeric field overflow
+numg/castPS/corrIn/dec/negInf	ERR 22003 numeric field overflow
+numg/castPS/in/dec/infShort	ERR 22003 numeric field overflow
+numg/castPS/corrIn/dec/infShort	ERR 22003 numeric field overflow
+numg/castPS/in/dec/bad/junk	ERR 22P02 invalid input syntax for type numeric: "zz"
+numg/castPS/corrIn/dec/bad/junk	ERR 22P02 invalid input syntax for type numeric: "zz"
+numg/castPS/in/dec/bad/expEmpty	ERR 22P02 invalid input syntax for type numeric: "1e"
+numg/castPS/corrIn/dec/bad/expEmpty	ERR 22P02 invalid input syntax for type numeric: "1e"
+numg/castPS/in/dec/bad/dot	ERR 22P02 invalid input syntax for type numeric: "."
+numg/castPS/corrIn/dec/bad/dot	ERR 22P02 invalid input syntax for type numeric: "."
+numg/castPS/in/dec/bad/empty	ERR 22P02 invalid input syntax for type numeric: ""
+numg/castPS/corrIn/dec/bad/empty	ERR 22P02 invalid input syntax for type numeric: ""
+numg/castPS/in/dec/bad/twoDots	ERR 22P02 invalid input syntax for type numeric: "1.2.3"
+numg/castPS/corrIn/dec/bad/twoDots	ERR 22P02 invalid input syntax for type numeric: "1.2.3"
+numg/castPS/in/dec/bad/innerSpace	ERR 22P02 invalid input syntax for type numeric: "1 4"
+numg/castPS/corrIn/dec/bad/innerSpace	ERR 22P02 invalid input syntax for type numeric: "1 4"
+numg/castPS/in/dec/bad/twoSigns	ERR 22P02 invalid input syntax for type numeric: "+-14"
+numg/castPS/corrIn/dec/bad/twoSigns	ERR 22P02 invalid input syntax for type numeric: "+-14"
+numg/castPS/in/dec/bad/trailJunk	ERR 22P02 invalid input syntax for type numeric: "14x"
+numg/castPS/corrIn/dec/bad/trailJunk	ERR 22P02 invalid input syntax for type numeric: "14x"
+numg/castPS/in/dec/bad/signedNaN	ERR 22P02 invalid input syntax for type numeric: "+NaN"
+numg/castPS/corrIn/dec/bad/signedNaN	ERR 22P02 invalid input syntax for type numeric: "+NaN"
+numg/castPS/in/dec/bad/nbsp	ERR 22P02 invalid input syntax for type numeric: "14 "
+numg/castPS/corrIn/dec/bad/nbsp	ERR 22P02 invalid input syntax for type numeric: "14 "
+numg/castPS/in/dec/bad/twoUnderscores	ERR 22P02 invalid input syntax for type numeric: "1__4"
+numg/castPS/corrIn/dec/bad/twoUnderscores	ERR 22P02 invalid input syntax for type numeric: "1__4"
+numg/castPS/in/dec/bad/hexFloat	ERR 22P02 invalid input syntax for type numeric: "0x1.8p1"
+numg/castPS/corrIn/dec/bad/hexFloat	ERR 22P02 invalid input syntax for type numeric: "0x1.8p1"
+numg/castPS/in/dec/radix/hex	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/dec/radix/hex	rows=1 3
+numg/castPS/in/dec/radix/octal	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/dec/radix/octal	rows=1 3
+numg/castPS/in/dec/radix/binary	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/dec/radix/binary	rows=1 3
+numg/castPS/in/dec/radix/underscore	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/dec/radix/underscore	rows=1 3
+numg/castPS/in/dec/radix/underscoreFrac	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/dec/radix/underscoreFrac	rows=1 1
+numg/castPS/in/n38/plain/H	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n38/plain/H	rows=1 3
+numg/castPS/in/n38/plain/M	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n38/plain/M	rows=1 3
+numg/castPS/in/n38/plain/F	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n38/plain/F	rows=1 1
+numg/castPS/in/n38/plus/H	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n38/plus/H	rows=1 3
+numg/castPS/in/n38/plus/M	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n38/plus/M	rows=1 3
+numg/castPS/in/n38/plus/F	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n38/plus/F	rows=1 1
+numg/castPS/in/n38/minus/H	rows=0 
+numg/castPS/corrIn/n38/minus/H	rows=0 
+numg/castPS/in/n38/minus/M	rows=0 
+numg/castPS/corrIn/n38/minus/M	rows=0 
+numg/castPS/in/n38/minus/F	rows=0 
+numg/castPS/corrIn/n38/minus/F	rows=0 
+numg/castPS/in/n38/lead0/H	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n38/lead0/H	rows=1 3
+numg/castPS/in/n38/lead0/M	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n38/lead0/M	rows=1 3
+numg/castPS/in/n38/lead0/F	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n38/lead0/F	rows=1 1
+numg/castPS/in/n38/trail0/H	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n38/trail0/H	rows=1 3
+numg/castPS/in/n38/trail0/M	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n38/trail0/M	rows=1 3
+numg/castPS/in/n38/trail0/F	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n38/trail0/F	rows=1 1
+numg/castPS/in/n38/noFrac/H	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n38/noFrac/H	rows=1 3
+numg/castPS/in/n38/noInt/H	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n38/noInt/H	rows=1 3
+numg/castPS/in/n38/noInt/M	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n38/noInt/M	rows=1 3
+numg/castPS/in/n38/noInt/F	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n38/noInt/F	rows=1 1
+numg/castPS/in/n38/noInt/miss	rows=0 
+numg/castPS/corrIn/n38/noInt/miss	rows=0 
+numg/castPS/in/n38/exp/H	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n38/exp/H	rows=1 3
+numg/castPS/in/n38/exp/M	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n38/exp/M	rows=1 3
+numg/castPS/in/n38/exp/F	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n38/exp/F	rows=1 1
+numg/castPS/in/n38/expUpper/H	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n38/expUpper/H	rows=1 3
+numg/castPS/in/n38/expUpper/M	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n38/expUpper/M	rows=1 3
+numg/castPS/in/n38/expUpper/F	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n38/expUpper/F	rows=1 1
+numg/castPS/in/n38/expPlus/H	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n38/expPlus/H	rows=1 3
+numg/castPS/in/n38/expPlus/M	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n38/expPlus/M	rows=1 3
+numg/castPS/in/n38/expPlus/F	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n38/expPlus/F	rows=1 1
+numg/castPS/in/n38/expMinus/H	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n38/expMinus/H	rows=1 3
+numg/castPS/in/n38/expMinus/M	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n38/expMinus/M	rows=1 3
+numg/castPS/in/n38/expMinus/F	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n38/expMinus/F	rows=1 1
+numg/castPS/in/n38/expZero/H	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n38/expZero/H	rows=1 3
+numg/castPS/in/n38/expZero/F	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n38/expZero/F	rows=1 1
+numg/castPS/in/n38/space/H	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n38/space/H	rows=1 3
+numg/castPS/in/n38/space/M	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n38/space/M	rows=1 3
+numg/castPS/in/n38/space/F	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n38/space/F	rows=1 1
+numg/castPS/in/n38/tab/H	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n38/tab/H	rows=1 3
+numg/castPS/in/n38/trail0Wide/H	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n38/trail0Wide/H	rows=1 3
+numg/castPS/in/n38/trail0Wide/F	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n38/trail0Wide/F	rows=1 1
+numg/castPS/in/n38/lead0Wide/H	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n38/lead0Wide/H	rows=1 3
+numg/castPS/in/n38/lead0Wide/M	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n38/lead0Wide/M	rows=1 3
+numg/castPS/in/n38/lead0Wide/F	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n38/lead0Wide/F	rows=1 1
+numg/castPS/in/n38/expWide/H	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n38/expWide/H	rows=1 3
+numg/castPS/in/n38/expWide/F	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n38/expWide/F	rows=1 1
+numg/castPS/in/n38/zeroWide/miss	rows=0 
+numg/castPS/corrIn/n38/zeroWide/miss	rows=0 
+numg/castPS/in/n38/width38/M	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n38/width38/M	rows=1 3
+numg/castPS/in/n38/over38Frac	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n38/over38Frac	rows=1 3
+numg/castPS/in/n38/over38Neg	rows=0 
+numg/castPS/corrIn/n38/over38Neg	rows=0 
+numg/castPS/in/n38/scale39	rows=0 
+numg/castPS/corrIn/n38/scale39	rows=0 
+numg/castPS/in/n38/expScale	rows=0 
+numg/castPS/corrIn/n38/expScale	rows=0 
+numg/castPS/in/n38/over38Int	ERR 22003 numeric field overflow
+numg/castPS/corrIn/n38/over38Int	ERR 22003 numeric field overflow
+numg/castPS/in/n38/expInt	ERR 22003 numeric field overflow
+numg/castPS/corrIn/n38/expInt	ERR 22003 numeric field overflow
+numg/castPS/in/n38/expHuge	ERR 22003 numeric field overflow
+numg/castPS/corrIn/n38/expHuge	ERR 22003 numeric field overflow
+numg/castPS/in/n38/nan	rows=0 
+numg/castPS/corrIn/n38/nan	rows=0 
+numg/castPS/in/n38/inf	ERR 22003 numeric field overflow
+numg/castPS/corrIn/n38/inf	ERR 22003 numeric field overflow
+numg/castPS/in/n38/negInf	ERR 22003 numeric field overflow
+numg/castPS/corrIn/n38/negInf	ERR 22003 numeric field overflow
+numg/castPS/in/n38/infShort	ERR 22003 numeric field overflow
+numg/castPS/corrIn/n38/infShort	ERR 22003 numeric field overflow
+numg/castPS/in/n38/bad/junk	ERR 22P02 invalid input syntax for type numeric: "zz"
+numg/castPS/corrIn/n38/bad/junk	ERR 22P02 invalid input syntax for type numeric: "zz"
+numg/castPS/in/n38/bad/expEmpty	ERR 22P02 invalid input syntax for type numeric: "1e"
+numg/castPS/corrIn/n38/bad/expEmpty	ERR 22P02 invalid input syntax for type numeric: "1e"
+numg/castPS/in/n38/bad/dot	ERR 22P02 invalid input syntax for type numeric: "."
+numg/castPS/corrIn/n38/bad/dot	ERR 22P02 invalid input syntax for type numeric: "."
+numg/castPS/in/n38/bad/empty	ERR 22P02 invalid input syntax for type numeric: ""
+numg/castPS/corrIn/n38/bad/empty	ERR 22P02 invalid input syntax for type numeric: ""
+numg/castPS/in/n38/bad/twoDots	ERR 22P02 invalid input syntax for type numeric: "1.2.3"
+numg/castPS/corrIn/n38/bad/twoDots	ERR 22P02 invalid input syntax for type numeric: "1.2.3"
+numg/castPS/in/n38/bad/innerSpace	ERR 22P02 invalid input syntax for type numeric: "1 4"
+numg/castPS/corrIn/n38/bad/innerSpace	ERR 22P02 invalid input syntax for type numeric: "1 4"
+numg/castPS/in/n38/bad/twoSigns	ERR 22P02 invalid input syntax for type numeric: "+-14"
+numg/castPS/corrIn/n38/bad/twoSigns	ERR 22P02 invalid input syntax for type numeric: "+-14"
+numg/castPS/in/n38/bad/trailJunk	ERR 22P02 invalid input syntax for type numeric: "14x"
+numg/castPS/corrIn/n38/bad/trailJunk	ERR 22P02 invalid input syntax for type numeric: "14x"
+numg/castPS/in/n38/bad/signedNaN	ERR 22P02 invalid input syntax for type numeric: "+NaN"
+numg/castPS/corrIn/n38/bad/signedNaN	ERR 22P02 invalid input syntax for type numeric: "+NaN"
+numg/castPS/in/n38/bad/nbsp	ERR 22P02 invalid input syntax for type numeric: "14 "
+numg/castPS/corrIn/n38/bad/nbsp	ERR 22P02 invalid input syntax for type numeric: "14 "
+numg/castPS/in/n38/bad/twoUnderscores	ERR 22P02 invalid input syntax for type numeric: "1__4"
+numg/castPS/corrIn/n38/bad/twoUnderscores	ERR 22P02 invalid input syntax for type numeric: "1__4"
+numg/castPS/in/n38/bad/hexFloat	ERR 22P02 invalid input syntax for type numeric: "0x1.8p1"
+numg/castPS/corrIn/n38/bad/hexFloat	ERR 22P02 invalid input syntax for type numeric: "0x1.8p1"
+numg/castPS/in/n38/radix/hex	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n38/radix/hex	rows=1 3
+numg/castPS/in/n38/radix/octal	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n38/radix/octal	rows=1 3
+numg/castPS/in/n38/radix/binary	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n38/radix/binary	rows=1 3
+numg/castPS/in/n38/radix/underscore	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n38/radix/underscore	rows=1 3
+numg/castPS/in/n38/radix/underscoreFrac	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n38/radix/underscoreFrac	rows=1 1
+numg/castPS/in/n/plain/H	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n/plain/H	rows=1 3
+numg/castPS/in/n/plain/M	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n/plain/M	rows=1 3
+numg/castPS/in/n/plain/F	rows=0 
+numg/castPS/corrIn/n/plain/F	rows=0 
+numg/castPS/in/n/plus/H	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n/plus/H	rows=1 3
+numg/castPS/in/n/plus/M	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n/plus/M	rows=1 3
+numg/castPS/in/n/plus/F	rows=0 
+numg/castPS/corrIn/n/plus/F	rows=0 
+numg/castPS/in/n/minus/H	rows=0 
+numg/castPS/corrIn/n/minus/H	rows=0 
+numg/castPS/in/n/minus/M	rows=0 
+numg/castPS/corrIn/n/minus/M	rows=0 
+numg/castPS/in/n/minus/F	rows=0 
+numg/castPS/corrIn/n/minus/F	rows=0 
+numg/castPS/in/n/lead0/H	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n/lead0/H	rows=1 3
+numg/castPS/in/n/lead0/M	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n/lead0/M	rows=1 3
+numg/castPS/in/n/lead0/F	rows=0 
+numg/castPS/corrIn/n/lead0/F	rows=0 
+numg/castPS/in/n/trail0/H	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n/trail0/H	rows=1 3
+numg/castPS/in/n/trail0/M	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n/trail0/M	rows=1 3
+numg/castPS/in/n/trail0/F	rows=0 
+numg/castPS/corrIn/n/trail0/F	rows=0 
+numg/castPS/in/n/noFrac/H	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n/noFrac/H	rows=1 3
+numg/castPS/in/n/noInt/H	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n/noInt/H	rows=1 3
+numg/castPS/in/n/noInt/M	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n/noInt/M	rows=1 3
+numg/castPS/in/n/noInt/F	rows=0 
+numg/castPS/corrIn/n/noInt/F	rows=0 
+numg/castPS/in/n/noInt/miss	rows=0 
+numg/castPS/corrIn/n/noInt/miss	rows=0 
+numg/castPS/in/n/exp/H	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n/exp/H	rows=1 3
+numg/castPS/in/n/exp/M	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n/exp/M	rows=1 3
+numg/castPS/in/n/exp/F	rows=0 
+numg/castPS/corrIn/n/exp/F	rows=0 
+numg/castPS/in/n/expUpper/H	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n/expUpper/H	rows=1 3
+numg/castPS/in/n/expUpper/M	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n/expUpper/M	rows=1 3
+numg/castPS/in/n/expUpper/F	rows=0 
+numg/castPS/corrIn/n/expUpper/F	rows=0 
+numg/castPS/in/n/expPlus/H	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n/expPlus/H	rows=1 3
+numg/castPS/in/n/expPlus/M	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n/expPlus/M	rows=1 3
+numg/castPS/in/n/expPlus/F	rows=0 
+numg/castPS/corrIn/n/expPlus/F	rows=0 
+numg/castPS/in/n/expMinus/H	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n/expMinus/H	rows=1 3
+numg/castPS/in/n/expMinus/M	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n/expMinus/M	rows=1 3
+numg/castPS/in/n/expMinus/F	rows=0 
+numg/castPS/corrIn/n/expMinus/F	rows=0 
+numg/castPS/in/n/expZero/H	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n/expZero/H	rows=1 3
+numg/castPS/in/n/expZero/F	rows=0 
+numg/castPS/corrIn/n/expZero/F	rows=0 
+numg/castPS/in/n/space/H	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n/space/H	rows=1 3
+numg/castPS/in/n/space/M	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n/space/M	rows=1 3
+numg/castPS/in/n/space/F	rows=0 
+numg/castPS/corrIn/n/space/F	rows=0 
+numg/castPS/in/n/tab/H	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n/tab/H	rows=1 3
+numg/castPS/in/n/trail0Wide/H	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n/trail0Wide/H	rows=1 3
+numg/castPS/in/n/trail0Wide/F	rows=0 
+numg/castPS/corrIn/n/trail0Wide/F	rows=0 
+numg/castPS/in/n/lead0Wide/H	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n/lead0Wide/H	rows=1 3
+numg/castPS/in/n/lead0Wide/M	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n/lead0Wide/M	rows=1 3
+numg/castPS/in/n/lead0Wide/F	rows=0 
+numg/castPS/corrIn/n/lead0Wide/F	rows=0 
+numg/castPS/in/n/expWide/H	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n/expWide/H	rows=1 3
+numg/castPS/in/n/expWide/F	rows=0 
+numg/castPS/corrIn/n/expWide/F	rows=0 
+numg/castPS/in/n/zeroWide/miss	rows=0 
+numg/castPS/corrIn/n/zeroWide/miss	rows=0 
+numg/castPS/in/n/width38/M	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n/width38/M	rows=1 3
+numg/castPS/in/n/over38Frac	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n/over38Frac	rows=1 3
+numg/castPS/in/n/over38Neg	rows=0 
+numg/castPS/corrIn/n/over38Neg	rows=0 
+numg/castPS/in/n/scale39	rows=0 
+numg/castPS/corrIn/n/scale39	rows=0 
+numg/castPS/in/n/expScale	rows=0 
+numg/castPS/corrIn/n/expScale	rows=0 
+numg/castPS/in/n/over38Int	ERR 22003 numeric field overflow
+numg/castPS/corrIn/n/over38Int	ERR 22003 numeric field overflow
+numg/castPS/in/n/expInt	ERR 22003 numeric field overflow
+numg/castPS/corrIn/n/expInt	ERR 22003 numeric field overflow
+numg/castPS/in/n/expHuge	ERR 22003 numeric field overflow
+numg/castPS/corrIn/n/expHuge	ERR 22003 numeric field overflow
+numg/castPS/in/n/nan	rows=0 
+numg/castPS/corrIn/n/nan	rows=0 
+numg/castPS/in/n/inf	ERR 22003 numeric field overflow
+numg/castPS/corrIn/n/inf	ERR 22003 numeric field overflow
+numg/castPS/in/n/negInf	ERR 22003 numeric field overflow
+numg/castPS/corrIn/n/negInf	ERR 22003 numeric field overflow
+numg/castPS/in/n/infShort	ERR 22003 numeric field overflow
+numg/castPS/corrIn/n/infShort	ERR 22003 numeric field overflow
+numg/castPS/in/n/bad/junk	ERR 22P02 invalid input syntax for type numeric: "zz"
+numg/castPS/corrIn/n/bad/junk	ERR 22P02 invalid input syntax for type numeric: "zz"
+numg/castPS/in/n/bad/expEmpty	ERR 22P02 invalid input syntax for type numeric: "1e"
+numg/castPS/corrIn/n/bad/expEmpty	ERR 22P02 invalid input syntax for type numeric: "1e"
+numg/castPS/in/n/bad/dot	ERR 22P02 invalid input syntax for type numeric: "."
+numg/castPS/corrIn/n/bad/dot	ERR 22P02 invalid input syntax for type numeric: "."
+numg/castPS/in/n/bad/empty	ERR 22P02 invalid input syntax for type numeric: ""
+numg/castPS/corrIn/n/bad/empty	ERR 22P02 invalid input syntax for type numeric: ""
+numg/castPS/in/n/bad/twoDots	ERR 22P02 invalid input syntax for type numeric: "1.2.3"
+numg/castPS/corrIn/n/bad/twoDots	ERR 22P02 invalid input syntax for type numeric: "1.2.3"
+numg/castPS/in/n/bad/innerSpace	ERR 22P02 invalid input syntax for type numeric: "1 4"
+numg/castPS/corrIn/n/bad/innerSpace	ERR 22P02 invalid input syntax for type numeric: "1 4"
+numg/castPS/in/n/bad/twoSigns	ERR 22P02 invalid input syntax for type numeric: "+-14"
+numg/castPS/corrIn/n/bad/twoSigns	ERR 22P02 invalid input syntax for type numeric: "+-14"
+numg/castPS/in/n/bad/trailJunk	ERR 22P02 invalid input syntax for type numeric: "14x"
+numg/castPS/corrIn/n/bad/trailJunk	ERR 22P02 invalid input syntax for type numeric: "14x"
+numg/castPS/in/n/bad/signedNaN	ERR 22P02 invalid input syntax for type numeric: "+NaN"
+numg/castPS/corrIn/n/bad/signedNaN	ERR 22P02 invalid input syntax for type numeric: "+NaN"
+numg/castPS/in/n/bad/nbsp	ERR 22P02 invalid input syntax for type numeric: "14 "
+numg/castPS/corrIn/n/bad/nbsp	ERR 22P02 invalid input syntax for type numeric: "14 "
+numg/castPS/in/n/bad/twoUnderscores	ERR 22P02 invalid input syntax for type numeric: "1__4"
+numg/castPS/corrIn/n/bad/twoUnderscores	ERR 22P02 invalid input syntax for type numeric: "1__4"
+numg/castPS/in/n/bad/hexFloat	ERR 22P02 invalid input syntax for type numeric: "0x1.8p1"
+numg/castPS/corrIn/n/bad/hexFloat	ERR 22P02 invalid input syntax for type numeric: "0x1.8p1"
+numg/castPS/in/n/radix/hex	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n/radix/hex	rows=1 3
+numg/castPS/in/n/radix/octal	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n/radix/octal	rows=1 3
+numg/castPS/in/n/radix/binary	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n/radix/binary	rows=1 3
+numg/castPS/in/n/radix/underscore	rows=4 1 | 2 | 3 | 4
+numg/castPS/corrIn/n/radix/underscore	rows=1 3
+numg/castPS/in/n/radix/underscoreFrac	rows=0 
+numg/castPS/corrIn/n/radix/underscoreFrac	rows=0 
+numg/castPS38/in/dec/plain/H	rows=4 1 | 2 | 3 | 4
+numg/castPS38/corrIn/dec/plain/H	rows=1 3
+numg/castPS38/in/dec/plain/M	rows=0 
+numg/castPS38/corrIn/dec/plain/M	rows=0 
+numg/castPS38/in/dec/plain/F	rows=4 1 | 2 | 3 | 4
+numg/castPS38/corrIn/dec/plain/F	rows=1 1
+numg/castPS38/in/dec/plus/H	rows=4 1 | 2 | 3 | 4
+numg/castPS38/corrIn/dec/plus/H	rows=1 3
+numg/castPS38/in/dec/plus/M	rows=0 
+numg/castPS38/corrIn/dec/plus/M	rows=0 
+numg/castPS38/in/dec/plus/F	rows=4 1 | 2 | 3 | 4
+numg/castPS38/corrIn/dec/plus/F	rows=1 1
+numg/castPS38/in/dec/minus/H	rows=0 
+numg/castPS38/corrIn/dec/minus/H	rows=0 
+numg/castPS38/in/dec/minus/M	rows=0 
+numg/castPS38/corrIn/dec/minus/M	rows=0 
+numg/castPS38/in/dec/minus/F	rows=0 
+numg/castPS38/corrIn/dec/minus/F	rows=0 
+numg/castPS38/in/dec/lead0/H	rows=4 1 | 2 | 3 | 4
+numg/castPS38/corrIn/dec/lead0/H	rows=1 3
+numg/castPS38/in/dec/lead0/M	rows=0 
+numg/castPS38/corrIn/dec/lead0/M	rows=0 
+numg/castPS38/in/dec/lead0/F	rows=4 1 | 2 | 3 | 4
+numg/castPS38/corrIn/dec/lead0/F	rows=1 1
+numg/castPS38/in/dec/trail0/H	rows=4 1 | 2 | 3 | 4
+numg/castPS38/corrIn/dec/trail0/H	rows=1 3
+numg/castPS38/in/dec/trail0/M	rows=0 
+numg/castPS38/corrIn/dec/trail0/M	rows=0 
+numg/castPS38/in/dec/trail0/F	rows=4 1 | 2 | 3 | 4
+numg/castPS38/corrIn/dec/trail0/F	rows=1 1
+numg/castPS38/in/dec/noFrac/H	rows=4 1 | 2 | 3 | 4
+numg/castPS38/corrIn/dec/noFrac/H	rows=1 3
+numg/castPS38/in/dec/noInt/H	rows=4 1 | 2 | 3 | 4
+numg/castPS38/corrIn/dec/noInt/H	rows=1 3
+numg/castPS38/in/dec/noInt/M	rows=0 
+numg/castPS38/corrIn/dec/noInt/M	rows=0 
+numg/castPS38/in/dec/noInt/F	rows=4 1 | 2 | 3 | 4
+numg/castPS38/corrIn/dec/noInt/F	rows=1 1
+numg/castPS38/in/dec/noInt/miss	rows=0 
+numg/castPS38/corrIn/dec/noInt/miss	rows=0 
+numg/castPS38/in/dec/exp/H	rows=4 1 | 2 | 3 | 4
+numg/castPS38/corrIn/dec/exp/H	rows=1 3
+numg/castPS38/in/dec/exp/M	rows=0 
+numg/castPS38/corrIn/dec/exp/M	rows=0 
+numg/castPS38/in/dec/exp/F	rows=4 1 | 2 | 3 | 4
+numg/castPS38/corrIn/dec/exp/F	rows=1 1
+numg/castPS38/in/dec/expUpper/H	rows=4 1 | 2 | 3 | 4
+numg/castPS38/corrIn/dec/expUpper/H	rows=1 3
+numg/castPS38/in/dec/expUpper/M	rows=0 
+numg/castPS38/corrIn/dec/expUpper/M	rows=0 
+numg/castPS38/in/dec/expUpper/F	rows=4 1 | 2 | 3 | 4
+numg/castPS38/corrIn/dec/expUpper/F	rows=1 1
+numg/castPS38/in/dec/expPlus/H	rows=4 1 | 2 | 3 | 4
+numg/castPS38/corrIn/dec/expPlus/H	rows=1 3
+numg/castPS38/in/dec/expPlus/M	rows=0 
+numg/castPS38/corrIn/dec/expPlus/M	rows=0 
+numg/castPS38/in/dec/expPlus/F	rows=4 1 | 2 | 3 | 4
+numg/castPS38/corrIn/dec/expPlus/F	rows=1 1
+numg/castPS38/in/dec/expMinus/H	rows=4 1 | 2 | 3 | 4
+numg/castPS38/corrIn/dec/expMinus/H	rows=1 3
+numg/castPS38/in/dec/expMinus/M	rows=0 
+numg/castPS38/corrIn/dec/expMinus/M	rows=0 
+numg/castPS38/in/dec/expMinus/F	rows=4 1 | 2 | 3 | 4
+numg/castPS38/corrIn/dec/expMinus/F	rows=1 1
+numg/castPS38/in/dec/expZero/H	rows=4 1 | 2 | 3 | 4
+numg/castPS38/corrIn/dec/expZero/H	rows=1 3
+numg/castPS38/in/dec/expZero/F	rows=4 1 | 2 | 3 | 4
+numg/castPS38/corrIn/dec/expZero/F	rows=1 1
+numg/castPS38/in/dec/space/H	rows=4 1 | 2 | 3 | 4
+numg/castPS38/corrIn/dec/space/H	rows=1 3
+numg/castPS38/in/dec/space/M	rows=0 
+numg/castPS38/corrIn/dec/space/M	rows=0 
+numg/castPS38/in/dec/space/F	rows=4 1 | 2 | 3 | 4
+numg/castPS38/corrIn/dec/space/F	rows=1 1
+numg/castPS38/in/dec/tab/H	rows=4 1 | 2 | 3 | 4
+numg/castPS38/corrIn/dec/tab/H	rows=1 3
+numg/castPS38/in/dec/trail0Wide/H	rows=4 1 | 2 | 3 | 4
+numg/castPS38/corrIn/dec/trail0Wide/H	rows=1 3
+numg/castPS38/in/dec/trail0Wide/F	rows=4 1 | 2 | 3 | 4
+numg/castPS38/corrIn/dec/trail0Wide/F	rows=1 1
+numg/castPS38/in/dec/lead0Wide/H	rows=4 1 | 2 | 3 | 4
+numg/castPS38/corrIn/dec/lead0Wide/H	rows=1 3
+numg/castPS38/in/dec/lead0Wide/M	rows=0 
+numg/castPS38/corrIn/dec/lead0Wide/M	rows=0 
+numg/castPS38/in/dec/lead0Wide/F	rows=4 1 | 2 | 3 | 4
+numg/castPS38/corrIn/dec/lead0Wide/F	rows=1 1
+numg/castPS38/in/dec/expWide/H	rows=4 1 | 2 | 3 | 4
+numg/castPS38/corrIn/dec/expWide/H	rows=1 3
+numg/castPS38/in/dec/expWide/F	rows=4 1 | 2 | 3 | 4
+numg/castPS38/corrIn/dec/expWide/F	rows=1 1
+numg/castPS38/in/dec/zeroWide/miss	rows=0 
+numg/castPS38/corrIn/dec/zeroWide/miss	rows=0 
+numg/castPS38/in/dec/width38/M	rows=4 1 | 2 | 3 | 4
+numg/castPS38/corrIn/dec/width38/M	rows=1 3
+numg/castPS38/in/dec/over38Frac	rows=4 1 | 2 | 3 | 4
+numg/castPS38/corrIn/dec/over38Frac	rows=1 3
+numg/castPS38/in/dec/over38Neg	rows=0 
+numg/castPS38/corrIn/dec/over38Neg	rows=0 
+numg/castPS38/in/dec/scale39	rows=0 
+numg/castPS38/corrIn/dec/scale39	rows=0 
+numg/castPS38/in/dec/expScale	rows=0 
+numg/castPS38/corrIn/dec/expScale	rows=0 
+numg/castPS38/in/dec/over38Int	ERR 22003 numeric field overflow
+numg/castPS38/corrIn/dec/over38Int	ERR 22003 numeric field overflow
+numg/castPS38/in/dec/expInt	ERR 22003 numeric field overflow
+numg/castPS38/corrIn/dec/expInt	ERR 22003 numeric field overflow
+numg/castPS38/in/dec/expHuge	ERR 22003 numeric field overflow
+numg/castPS38/corrIn/dec/expHuge	ERR 22003 numeric field overflow
+numg/castPS38/in/dec/nan	rows=0 
+numg/castPS38/corrIn/dec/nan	rows=0 
+numg/castPS38/in/dec/inf	ERR 22003 numeric field overflow
+numg/castPS38/corrIn/dec/inf	ERR 22003 numeric field overflow
+numg/castPS38/in/dec/negInf	ERR 22003 numeric field overflow
+numg/castPS38/corrIn/dec/negInf	ERR 22003 numeric field overflow
+numg/castPS38/in/dec/infShort	ERR 22003 numeric field overflow
+numg/castPS38/corrIn/dec/infShort	ERR 22003 numeric field overflow
+numg/castPS38/in/dec/bad/junk	ERR 22P02 invalid input syntax for type numeric: "zz"
+numg/castPS38/corrIn/dec/bad/junk	ERR 22P02 invalid input syntax for type numeric: "zz"
+numg/castPS38/in/dec/bad/expEmpty	ERR 22P02 invalid input syntax for type numeric: "1e"
+numg/castPS38/corrIn/dec/bad/expEmpty	ERR 22P02 invalid input syntax for type numeric: "1e"
+numg/castPS38/in/dec/bad/dot	ERR 22P02 invalid input syntax for type numeric: "."
+numg/castPS38/corrIn/dec/bad/dot	ERR 22P02 invalid input syntax for type numeric: "."
+numg/castPS38/in/dec/bad/empty	ERR 22P02 invalid input syntax for type numeric: ""
+numg/castPS38/corrIn/dec/bad/empty	ERR 22P02 invalid input syntax for type numeric: ""
+numg/castPS38/in/dec/bad/twoDots	ERR 22P02 invalid input syntax for type numeric: "1.2.3"
+numg/castPS38/corrIn/dec/bad/twoDots	ERR 22P02 invalid input syntax for type numeric: "1.2.3"
+numg/castPS38/in/dec/bad/innerSpace	ERR 22P02 invalid input syntax for type numeric: "1 4"
+numg/castPS38/corrIn/dec/bad/innerSpace	ERR 22P02 invalid input syntax for type numeric: "1 4"
+numg/castPS38/in/dec/bad/twoSigns	ERR 22P02 invalid input syntax for type numeric: "+-14"
+numg/castPS38/corrIn/dec/bad/twoSigns	ERR 22P02 invalid input syntax for type numeric: "+-14"
+numg/castPS38/in/dec/bad/trailJunk	ERR 22P02 invalid input syntax for type numeric: "14x"
+numg/castPS38/corrIn/dec/bad/trailJunk	ERR 22P02 invalid input syntax for type numeric: "14x"
+numg/castPS38/in/dec/bad/signedNaN	ERR 22P02 invalid input syntax for type numeric: "+NaN"
+numg/castPS38/corrIn/dec/bad/signedNaN	ERR 22P02 invalid input syntax for type numeric: "+NaN"
+numg/castPS38/in/dec/bad/nbsp	ERR 22P02 invalid input syntax for type numeric: "14 "
+numg/castPS38/corrIn/dec/bad/nbsp	ERR 22P02 invalid input syntax for type numeric: "14 "
+numg/castPS38/in/dec/bad/twoUnderscores	ERR 22P02 invalid input syntax for type numeric: "1__4"
+numg/castPS38/corrIn/dec/bad/twoUnderscores	ERR 22P02 invalid input syntax for type numeric: "1__4"
+numg/castPS38/in/dec/bad/hexFloat	ERR 22P02 invalid input syntax for type numeric: "0x1.8p1"
+numg/castPS38/corrIn/dec/bad/hexFloat	ERR 22P02 invalid input syntax for type numeric: "0x1.8p1"
+numg/castPS38/in/dec/radix/hex	rows=4 1 | 2 | 3 | 4
+numg/castPS38/corrIn/dec/radix/hex	rows=1 3
+numg/castPS38/in/dec/radix/octal	rows=4 1 | 2 | 3 | 4
+numg/castPS38/corrIn/dec/radix/octal	rows=1 3
+numg/castPS38/in/dec/radix/binary	rows=4 1 | 2 | 3 | 4
+numg/castPS38/corrIn/dec/radix/binary	rows=1 3
+numg/castPS38/in/dec/radix/underscore	rows=4 1 | 2 | 3 | 4
+numg/castPS38/corrIn/dec/radix/underscore	rows=1 3
+numg/castPS38/in/dec/radix/underscoreFrac	rows=4 1 | 2 | 3 | 4
+numg/castPS38/corrIn/dec/radix/underscoreFrac	rows=1 1

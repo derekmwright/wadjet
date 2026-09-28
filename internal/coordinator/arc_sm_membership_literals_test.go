@@ -228,26 +228,16 @@ func smLiteralCells() []smCell {
 }
 
 // smPrecisionCells are the reviewer's B4 precision cells (review round 2,
-// Target 2): a quoted-literal probe against a NUMERIC(18,4) body computed
-// from st_pair.v_dec, at values with 14 integer digits — still inside the
-// column's own precision. Round 2's per-row memberDecimalEqual read a
-// bare-NUMERIC literal (the box MemberProbe minted for it) at float8's
-// ~15-17 significant digits, so '12500000000000.0001' matched a
-// 12500000000000.0000 member on every arm where PostgreSQL answers none —
-// the fractional digit past float8's precision never survived the box. The
-// repair gives the literal NUMERIC(38, its own scale) instead of bare
-// NUMERIC, so the comparison stays an exact decimal (MemberProbe,
-// memberDecimalLiteralScale).
-//
-// castIn/castCorr at off1 and off9 — the EXPLICIT `CAST(x AS NUMERIC) IN
-// (…)` spelling written directly in the SQL, a different operand shape
-// MemberProbe never touches — are left OUT of this table: they keep boxing
-// as float64 (ADR-0024's bare-NUMERIC carrier) whether or not this repair
-// lands, so they stay wrong after it (N2, recorded in the landing notes
-// with raw rows, not fixed this round). castIn/castCorr at exact and
-// offInt stay IN it: no precision is lost there, so they already agree
-// with PostgreSQL on both sides of the repair and are the control that
-// shows exactly where the float8 box starts losing digits.
+// Target 2): a literal probe against a NUMERIC(18,4) body computed from
+// st_pair.v_dec, at values with 14 integer digits — still inside the
+// column's own precision. A literal typed bare NUMERIC boxes as a double, so
+// '12500000000000.0001' matched a 12500000000000.0000 member on every arm
+// where PostgreSQL answers none — the fractional digit past float8's
+// precision never survived the box. The literal takes NUMERIC(38, its own
+// scale) instead, in every spelling — the quoted literal and the explicit
+// `CAST('…' AS NUMERIC)` alike (castIn / castCorr, which kept the bare
+// NUMERIC until round 4) — so the comparison stays an exact decimal
+// (expr.MemberProbe; the whole grammar is TestArcSMNumericLiteralGrammarEveryArm).
 func smPrecisionCells() []smCell {
 	add := func(name, sql string) smCell { return smCell{name: "prec/" + name, sql: sql, pgSQL: sql} }
 	const memberExpr = "CAST(r.v_dec * 1000000000000 AS NUMERIC(18,4))"
@@ -259,6 +249,8 @@ func smPrecisionCells() []smCell {
 	for _, l := range []string{"12500000000000.0001", "12500000000000.0009"} {
 		tag := map[string]string{"12500000000000.0001": "off1", "12500000000000.0009": "off9"}[l]
 		out = append(out,
+			add("castIn/"+tag, "SELECT a.id FROM st_pair a WHERE CAST('"+l+"' AS NUMERIC) IN ("+body+") ORDER BY a.id"),
+			add("castCorr/"+tag, "SELECT a.id FROM st_pair a WHERE CAST('"+l+"' AS NUMERIC) IN ("+corr+") ORDER BY a.id"),
 			add("in/"+tag, "SELECT a.id FROM st_pair a WHERE '"+l+"' IN ("+body+") ORDER BY a.id"),
 			add("notIn/"+tag, "SELECT a.id FROM st_pair a WHERE '"+l+"' NOT IN ("+bodyLE3+") ORDER BY a.id"),
 			add("corrIn/"+tag, "SELECT a.id FROM st_pair a WHERE '"+l+"' IN ("+corr+") ORDER BY a.id"),
