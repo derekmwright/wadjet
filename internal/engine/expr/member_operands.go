@@ -131,8 +131,14 @@ func MemberProbe(left plansql.Node, t parquet.TypeID) (plansql.Node, bool, error
 		// literal alone takes the set's integer type below (#1372).
 		if lit, ok := plansql.Unparen(left).(*plansql.Lit); !ok || lit.Kind != plansql.LitString {
 			if text, ok := memberNumericText(left); ok {
-				if _, err := strconv.ParseInt(text, 10, 64); err == nil {
-					return left, false, nil
+				// Only an UNQUOTED integer constant boxes as an int64 the
+				// integer rung reads exactly; a quoted integer under a bare
+				// NUMERIC CAST boxes as a double (ADR-0024), which reads
+				// '9007199254740993' as the member 9007199254740992.
+				if _, isCast := plansql.Unparen(left).(*plansql.CastNode); !isCast {
+					if _, err := strconv.ParseInt(text, 10, 64); err == nil {
+						return left, false, nil
+					}
 				}
 				return memberNumericProbe(left)
 			}
