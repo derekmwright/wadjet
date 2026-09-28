@@ -1394,9 +1394,13 @@ func (ev *mergeEvaluator) resolveRefIn(ref *plansql.ColRef, matched bool) (parqu
 				ref.Table)
 		}
 		if ref.Table == "" {
-			if !ev.sourceKnown {
+			if !ev.sourceKnown && !ev.sourceNamed {
 				return parquet.Column{}, col, nil
 			}
+			// A subquery source's NAMES are known (sourceNamed): a bare
+			// name it does not publish — a target column — is 42703 here
+			// as over a catalog source, not a read of a key the source-only
+			// row does not hold, which stored NULL.
 			c, ok := ev.srcByName[col]
 			if !ok {
 				return parquet.Column{}, "", sqlerr.New("42703", "column %q does not exist", ref.Column)
@@ -1503,6 +1507,41 @@ func (ev *mergeEvaluator) checkClauseColumns(node plansql.Node, matched bool) er
 	for _, ref := range refs {
 		if _, _, err := ev.resolveRefIn(ref, matched); err != nil && err != errMergeRefIsFieldPath {
 			return err
+		}
+	}
+	if !matched {
+		return ev.refuseTargetInNotMatchedSubquery(node)
+	}
+	return nil
+}
+
+// refuseTargetInNotMatchedSubquery carries the NOT MATCHED scope into the
+// subqueries a clause writes: the target is not in scope there, so a subquery
+// correlated to it is PostgreSQL's 42P01 as a direct reference is. The
+// correlated evaluator used to bind `t.id` to the absent target row's NULL,
+// so `INSERT … VALUES (s.id, (SELECT … WHERE s2.id = t.id))` stored NULL.
+func (ev *mergeEvaluator) refuseTargetInNotMatchedSubquery(node plansql.Node) error {
+	target := map[string]bool{}
+	for _, n := range []string{ev.target, ev.targetAlias} {
+		if n != "" {
+			target[strings.ToLower(n)] = true
+		}
+	}
+	var inner plansql.TableColumns
+	if ev.sub != nil {
+		inner = ev.sub.InnerCols
+	}
+	for _, sql := range dmlSubquerySQLs(node) {
+		refs, err := plansql.FindCorrelatedRefsWithScope(sql, target, nil, inner)
+		if err != nil {
+			continue // the subquery's own planning reports its parse error
+		}
+		for _, r := range refs {
+			if r.Table != "" {
+				return sqlerr.New("42P01",
+					"invalid reference to FROM-clause entry for table %q: a WHEN NOT MATCHED clause has no target row",
+					r.Table)
+			}
 		}
 	}
 	return nil
@@ -1855,6 +1894,25 @@ func dmlExpressionTyping(node plansql.Node, alias string, schema []parquet.Colum
 	return physical.RefuseTemporalArithmetic(node, alias, schema)
 }
 
+// refuseAggregateOrWindow is PostgreSQL's placement rule for an expression a
+// write door evaluates one row at a time — an UPDATE or MERGE SET value, an
+// INSERT or MERGE VALUES cell, a MERGE WHEN condition: an aggregate there is
+// 42803 and a window function 42P20, clause named as PostgreSQL names it. An
+// aggregate used to be compiled as a scalar call over the one row and answer
+// NULL, so `MERGE … UPDATE SET n = MAX(s.f)` (and `UPDATE t SET n =
+// MAX(f)`) overwrote every matched row with NULL where PostgreSQL writes
+// nothing; a window was 0A000. A subquery's own body is its own statement
+// and is not entered (the walks stop at its SQL text).
+func refuseAggregateOrWindow(node plansql.Node, clause string) error {
+	if len(plansql.FindAllWindowFuncs(node)) > 0 {
+		return sqlerr.New("42P20", "window functions are not allowed in %s", clause)
+	}
+	if len(plansql.FindAllAggregates(node)) > 0 {
+		return sqlerr.New("42803", "aggregate functions are not allowed in %s", clause)
+	}
+	return nil
+}
+
 // dmlTypedTextSource reports a bare call to a function the registry declares
 // TEXT for a network or UUID value (expr.DeclaresTextForTypedValue).
 func dmlTypedTextSource(node plansql.Node) bool {
@@ -1893,6 +1951,19 @@ func (ev *mergeEvaluator) value(text string, merged map[string]any, col parquet.
 	if err := dmlExpressionTyping(node, "", ev.mergedCols); err != nil {
 		return nil, err
 	}
+	clause := "UPDATE"
+	if !matched {
+		clause = "VALUES"
+	}
+	if err := refuseAggregateOrWindow(node, clause); err != nil {
+		return nil, err
+	}
+	// NAMES before TYPES, PostgreSQL's order: a target column named under
+	// WHEN NOT MATCHED is 42703 and a subquery correlated to the target
+	// there 42P01, whatever the expression's type would have been.
+	if err := ev.checkClauseColumns(node, matched); err != nil {
+		return nil, err
+	}
 	src := assignSourceOf(node, ev.mergedCols, ev.mergedCat, ev.planner)
 	if err := src.check(col); err != nil {
 		return nil, err
@@ -1929,9 +2000,6 @@ func (ev *mergeEvaluator) value(text string, merged map[string]any, col parquet.
 		if rerr != errMergeRefIsFieldPath {
 			return nil, rerr
 		}
-	}
-	if err := ev.checkClauseColumns(node, matched); err != nil {
-		return nil, err
 	}
 
 	if !ev.sourceKnown {
@@ -1977,6 +2045,9 @@ func (ev *mergeEvaluator) condition(text string, row map[string]any, matched boo
 	node, err := plansql.ParseExpressionComplete(text)
 	if err != nil {
 		return false, sqlerr.Wrap("42601", fmt.Errorf("parsing WHEN condition %q: %w", text, err))
+	}
+	if err := refuseAggregateOrWindow(node, "MERGE WHEN conditions"); err != nil {
+		return false, err
 	}
 	// A NOT MATCHED clause has no target row, so its condition may name the
 	// SOURCE only. Resolving it against the merged namespace let `t.n > 1`
@@ -2877,6 +2948,9 @@ func assignInsertValue(text string, col parquet.Column) (any, error) {
 	if err := dmlExpressionTyping(node, "", nil); err != nil {
 		return nil, err
 	}
+	if err := refuseAggregateOrWindow(node, "VALUES"); err != nil {
+		return nil, err
+	}
 	src := assignSourceOf(node, nil, nil, nil)
 	if err := src.check(col); err != nil {
 		return nil, err
@@ -3666,6 +3740,9 @@ func ResolveDMLSetClauses(clauses []plansql.SetClause, target plansql.DMLTarget,
 		node, err := plansql.ParseExpressionComplete(sc.Value)
 		if err != nil {
 			return nil, sqlerr.Wrap("42601", fmt.Errorf("SET %s: parsing %q: %w", name, sc.Value, err))
+		}
+		if err := refuseAggregateOrWindow(node, "UPDATE"); err != nil {
+			return nil, fmt.Errorf("SET %s: %w", name, err)
 		}
 		if src := assignSourceOf(node, schema, nil, nil); src.isLiteral {
 			if err := src.check(col); err != nil {
