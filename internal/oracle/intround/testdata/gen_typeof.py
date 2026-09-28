@@ -8,6 +8,7 @@
 #     -e POSTGRES_PASSWORD=wadjet -e POSTGRES_DB=wadjet_oracle \
 #     -p 127.0.0.1:57700:5432 postgres:17-alpine -c fsync=off
 #   python3 gen_typeof.py
+import os
 import subprocess
 
 ops = ["+", "-", "*", "/", "%"]
@@ -26,13 +27,18 @@ exprs += ["PI()", "RANDOM()", "COALESCE(5/2.0, 1)", "COALESCE(5/2.0, f)", "NULLI
           "EXTRACT(EPOCH FROM TIMESTAMP '1970-01-01 00:00:02.5')",
           "DATE_PART('second', TIMESTAMP '2020-01-01 00:00:02.5')",
           "CAST(5/2.0 AS NUMERIC)", "(5/2.0)::numeric", "CAST(f AS NUMERIC)", "5/2.0::float8"]
+# the CASE family over every pair of operand categories: NULLIF's result is its
+# first argument promoted by the `=` its comparison resolves to, so
+# NULLIF(numeric, float8) is float8 like COALESCE and CASE are
+exprs += [f"{fn}({l}, {r})" for fn in ["NULLIF", "COALESCE", "GREATEST", "LEAST"] for l in opnds for r in opnds]
+exprs += [f"CASE WHEN i > 0 THEN {l} ELSE {r} END" for l in opnds for r in opnds]
 
 sql = ["SET statement_timeout='30s';", "DROP TABLE IF EXISTS m;",
        "CREATE TABLE m(i int, b bigint, d numeric(10,2), f float8);",
        "INSERT INTO m VALUES (5, 5, 6.25, 6.25);", "\\set ON_ERROR_STOP off"]
 for e in exprs:
     sql.append(f"SELECT 'ROW', '{e.replace(chr(39), chr(39) * 2)}', pg_typeof({e})::text FROM m;")
-out = subprocess.run(["docker", "exec", "-i", "wadjet-pg-ir", "psql", "-U", "wadjet", "-d", "wadjet_oracle",
+out = subprocess.run(["docker", "exec", "-i", os.environ.get("PG_CONTAINER", "wadjet-pg-ir"), "psql", "-U", "wadjet", "-d", "wadjet_oracle",
                       "-At", "-F", "\t"], input="\n".join(sql), capture_output=True, text=True).stdout
 got = {}
 for line in out.split("\n"):

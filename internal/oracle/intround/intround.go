@@ -131,6 +131,37 @@ func Cells() []Cell {
 	return out
 }
 
+// DialectCells are INSERT … SELECT cells whose source this engine spells
+// differently from PostgreSQL, so gen_cells.py cannot run one text on both:
+// `unnest(v1, v2, …)` is this engine's variadic form of PostgreSQL's
+// `unnest(ARRAY[v1, v2, …])`. Want is what PostgreSQL 17.11 stores for the
+// ARRAY spelling — the same statement with `unnest(ARRAY[…])` in place of
+// `unnest(…)` — measured once and written here: the column is numeric there
+// (an unquoted fractional literal is), so 0.5 + k rounds half away from zero.
+func DialectCells() []Cell {
+	const want = "1:-3:-3 2:-1:-1 3:1:1 4:2:2 5:3:3 6:4:4 7:1:1"
+	var out []Cell
+	for _, u := range []struct{ name, args string }{
+		{"numlit", "0.5"}, {"numlit-exp", "5e-1"}, {"numlit-pair", "0.5, 1.5"},
+	} {
+		for _, form := range []struct{ name, from, where string }{
+			{"unnest", "unnest(" + u.args + ") AS u(x)", "x < 1"},
+			{"unnest-ordinality", "unnest(" + u.args + ") WITH ORDINALITY AS u(x, o)", "o = 1"},
+		} {
+			out = append(out, Cell{
+				Name: "shape/" + form.name + "/" + u.name,
+				Door: "select",
+				Stmts: []string{"DELETE FROM t_s",
+					"INSERT INTO t_s (id, n4, n8) SELECT id, x + k, x + k FROM src CROSS JOIN " + form.from +
+						" WHERE id <= 7 AND " + form.where},
+				Read: readOf("t_s"),
+				Want: want,
+			})
+		}
+	}
+	return out
+}
+
 func doorName(d rune) string {
 	switch d {
 	case 'v':

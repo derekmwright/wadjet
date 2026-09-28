@@ -48,13 +48,18 @@ func TestIntegerAssignmentRoundsByPostgresTypeOverPgwire(t *testing.T) {
 	}
 	defer conn.Close(ctx)
 
-	// The same pre-assignment refusal the embedded table pins (a SELECT of
-	// GREATEST(numeric, float8) whose numeric arm wins), for the same reason.
+	// The same pre-assignment refusals the embedded table pins (a SELECT of
+	// GREATEST(numeric, float8) whose numeric arm wins, a SELECT of
+	// NULLIF(numeric column, float8 expression)), for the same reason.
 	pinned := map[string]string{
 		"fold/GREATEST(numcol,f8col-1) [select]":     "cannot store string into FLOAT64 vector",
 		"fold/GREATEST(div_numcol,f8col-1) [select]": "cannot store string into FLOAT64 vector",
+		"fold/NULLIF(numcol,f8col+9) [select]":       "cannot store string into FLOAT64 vector",
+		"fold/NULLIF(numcol,f8lit) [select]":         "cannot store string into FLOAT64 vector",
+		"fold/NULLIF(div_numcol,f8col+9) [select]":   "cannot store string into FLOAT64 vector",
+		"fold/NULLIF(div_numcol,f8lit) [select]":     "cannot store string into FLOAT64 vector",
 	}
-	cells := intround.Cells()
+	cells := append(intround.Cells(), intround.DialectCells()...)
 	failed := 0
 	for _, c := range cells {
 		key := c.Name + " [" + c.Door + "]"

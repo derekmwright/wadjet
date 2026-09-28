@@ -138,6 +138,13 @@ def T():
         add(f"fold/LEAST({hn},intcol)", f"LEAST({h}, i)", True)
         add(f"fold/LEAST({hn},numlit)", f"LEAST({h}, 1.5)", hc)
         add(f"fold/CASE({hn},intlit)", f"CASE WHEN 1 = 1 THEN {h} ELSE 0 END", hc)
+        # a float8 second operand: NULLIF returns its first argument PROMOTED by
+        # the `float8 = float8` its comparison resolves to, so a numeric first
+        # argument comes back float8 (pg_typeof, 17.11)
+        add(f"fold/NULLIF({hn},f8col+9)", f"NULLIF({h}, f + 9)", True)
+        add(f"fold/NULLIF({hn},f8lit)", f"NULLIF({h}, CAST(9 AS DOUBLE PRECISION))", hc)
+        add(f"fold/LEAST({hn},f8lit)", f"LEAST({h}, CAST(9 AS DOUBLE PRECISION))", hc)
+        add(f"fold/CASE({hn},f8lit)", f"CASE WHEN 1 = 1 THEN {h} ELSE CAST(1 AS DOUBLE PRECISION) END", hc)
         add(f"fold/CASE({hn},noelse)", f"CASE WHEN 1 = 1 THEN {h} END", hc)
         add(f"fold/CASE({hn},f8col)", f"CASE WHEN 1 = 1 THEN {h} ELSE f END", True)
         add(f"fold/CASE(simple,{hn})", f"CASE i WHEN 2 THEN {h} ELSE 1 END", True)
@@ -147,9 +154,15 @@ def T():
 
 # query-shaped sources (INSERT … SELECT only): the value passes through a
 # plan construct before it meets the target.
-SHAPE_OPERANDS = [x for x in H_OPERANDS if x[0] in ("numlit", "numcol", "f8col", "div_numlit", "div_numcol", "sqrt_numcol", "sqrt_f8col", "cast_f8col_numeric", "extract_epoch")]
+SHAPE_OPERANDS = [x for x in H_OPERANDS if x[0] in ("numlit", "numcol", "f8col", "div_numlit", "div_numcol", "sqrt_numcol", "sqrt_f8col", "cast_f8col_numeric", "extract_epoch")] + [
+    # a DECIMAL-declared value PostgreSQL types float8. NULLIF(numeric
+    # column, float8 expression) is not here: its SELECT refuses on the
+    # evaluator's float8 output vector (the #361 guard) before any
+    # assignment, at base too — the fold/NULLIF(numcol, …) [select] pins.
+    ("nullif_numlit_f8lit", "NULLIF(0.5, CAST(9 AS DOUBLE PRECISION))", False),
+]
 
-import json, re, subprocess, sys
+import json, os, re, subprocess, sys
 
 
 KS = [(1, -3), (2, -1), (3, 0), (4, 1), (5, 2), (6, 3), (7, 0), (8, 0)]
@@ -220,6 +233,63 @@ def cells():
         if not hc:
             sel(f"shape/scalar-subquery/{hn}",
                 f"SELECT id, (SELECT {h}) + k, (SELECT {h}) + k FROM src WHERE id <= 7")
+    # the category through every other plan construct a source value can come
+    # through: a join whose arms publish the SAME name at different categories
+    # (the float8 base column `f` beside a derived `f`), a scalar subquery with a
+    # FROM, a recursive CTE, the other set operations, LATERAL, a VALUES list,
+    # a value window and a CTE chain
+    for hn, h, hc in SHAPE_OPERANDS:
+        der = f"(SELECT id, {h} AS f FROM src)"
+        sel(f"shape/join-samename-base/{hn}",
+            f"SELECT a.id, a.f + a.k, a.f + a.k FROM src a JOIN {der} b ON a.id = b.id WHERE a.id <= 7")
+        sel(f"shape/join-samename-derived/{hn}",
+            f"SELECT a.id, b.f + a.k, b.f + a.k FROM src a JOIN {der} b ON a.id = b.id WHERE a.id <= 7")
+        sel(f"shape/join-samename-reversed/{hn}",
+            f"SELECT b.id, b.f + b.k, b.f + b.k FROM {der} a JOIN src b ON a.id = b.id WHERE b.id <= 7")
+        sel(f"shape/join-samename-bare/{hn}",
+            f"SELECT a.id, a.f, a.f FROM src a JOIN {der} b ON a.id = b.id WHERE a.id = 7")
+        sel(f"shape/join-self-cte/{hn}",
+            f"WITH c AS (SELECT id, k, {h} AS f FROM src) SELECT a.id, b.f + a.k, b.f + a.k FROM c a JOIN c b ON a.id = b.id WHERE a.id <= 7")
+        sel(f"shape/join-self-mixed/{hn}",
+            f"WITH c AS (SELECT id, k, {h} AS f FROM src), e AS (SELECT id, k, f FROM src) SELECT a.id, b.f + a.k, b.f + a.k FROM c a JOIN e b ON a.id = b.id WHERE a.id <= 7")
+        sel(f"shape/join-using-base/{hn}",
+            f"SELECT a.id, a.f + a.k, a.f + a.k FROM src a JOIN {der} b USING (id) WHERE a.id <= 7")
+        sel(f"shape/join-using-derived/{hn}",
+            f"SELECT a.id, b.f + a.k, b.f + a.k FROM src a JOIN {der} b USING (id) WHERE a.id <= 7")
+        sel(f"shape/join-three-base/{hn}",
+            f"SELECT a.id, c.f + a.k, c.f + a.k FROM src a JOIN src c ON a.id = c.id JOIN {der} b ON a.id = b.id WHERE a.id <= 7")
+        sel(f"shape/join-three-derived/{hn}",
+            f"SELECT a.id, b.f + a.k, b.f + a.k FROM src a JOIN src c ON a.id = c.id JOIN {der} b ON a.id = b.id WHERE a.id <= 7")
+        sel(f"shape/join-three-mid/{hn}",
+            f"SELECT a.id, c.f + a.k, c.f + a.k FROM src a JOIN {der} b ON a.id = b.id JOIN src c ON a.id = c.id WHERE a.id <= 7")
+        sel(f"shape/join-left-base/{hn}",
+            f"SELECT a.id, a.f + a.k, a.f + a.k FROM src a LEFT JOIN {der} b ON a.id = b.id WHERE a.id <= 7")
+        sel(f"shape/scalar-subquery-corr/{hn}",
+            f"SELECT id, (SELECT {h} FROM src s2 WHERE s2.id = src.id) + k, (SELECT {h} FROM src s2 WHERE s2.id = src.id) + k FROM src WHERE id <= 7")
+        sel(f"shape/scalar-subquery-uncorr/{hn}",
+            f"SELECT id, (SELECT {h} FROM src s2 WHERE s2.id = 1) + k, (SELECT {h} FROM src s2 WHERE s2.id = 1) + k FROM src WHERE id <= 7")
+        sel(f"shape/scalar-subquery-agg/{hn}",
+            f"SELECT id, (SELECT MAX({h}) FROM src s2) + k, (SELECT MAX({h}) FROM src s2) + k FROM src WHERE id <= 7")
+        sel(f"shape/recursive-cte/{hn}",
+            f"WITH RECURSIVE r(n, id, k, x) AS (SELECT 1, id, k, {h} FROM src WHERE id <= 7 UNION ALL SELECT n + 1, id, k, x FROM r WHERE n < 2) SELECT id, x + k, x + k FROM r WHERE n = 2")
+        sel(f"shape/union-distinct/{hn}",
+            f"SELECT id, ({h}) + k, ({h}) + k FROM src WHERE id <= 3 UNION SELECT id, ({h}) + k, ({h}) + k FROM src WHERE id BETWEEN 4 AND 7")
+        sel(f"shape/intersect/{hn}",
+            f"SELECT id, ({h}) + k, ({h}) + k FROM src WHERE id <= 7 INTERSECT SELECT id, ({h}) + k, ({h}) + k FROM src")
+        sel(f"shape/except/{hn}",
+            f"SELECT id, ({h}) + k, ({h}) + k FROM src WHERE id <= 7 EXCEPT SELECT id, ({h}) + k, ({h}) + k FROM src WHERE id = 8")
+        sel(f"shape/lateral-from/{hn}",
+            f"SELECT a.id, l.x + a.k, l.x + a.k FROM src a CROSS JOIN LATERAL (SELECT {h} AS x FROM src s2 WHERE s2.id = a.id) l WHERE a.id <= 7")
+        sel(f"shape/lateral-nofrom/{hn}",
+            f"SELECT a.id, l.x + a.k, l.x + a.k FROM src a CROSS JOIN LATERAL (SELECT {h} AS x) l WHERE a.id <= 7")
+        sel(f"shape/window-last_value/{hn}",
+            f"SELECT id, LAST_VALUE(x) OVER (PARTITION BY id) + k, LAST_VALUE(x) OVER (PARTITION BY id) + k FROM (SELECT id, k, {h} AS x FROM src) s WHERE id <= 7")
+        sel(f"shape/cte-chain/{hn}",
+            f"WITH c AS (SELECT id, k, {h} AS x FROM src), c2 AS (SELECT id, k, x FROM c) SELECT id, x + k, x + k FROM c2 WHERE id <= 7")
+        if not hc:
+            rows = ", ".join(f"({i}, {k}, {h})" for i, k in KS[:7])
+            sel(f"shape/values-from/{hn}",
+                f"SELECT v.id, v.x + v.k, v.x + v.k FROM (VALUES {rows}) v(id, k, x)")
     # the STDDEV / VARIANCE family over {0, 1}: 0.5 is var_samp and stddev_pop
     for cat, lo, hi in [("int", "i - 2", "i - 1"), ("numeric", "d - 0.5", "d + 0.5"), ("float8", "f - 0.5", "f + 0.5")]:
         for agg in ["STDDEV_POP", "VAR_SAMP", "VARIANCE"]:
@@ -235,7 +305,7 @@ def pg_run(cells, ddl_pg):
             lines.append(s + ";")
             lines.append(f"\\if :ERROR\n\\echo @@ERR {n} :LAST_ERROR_SQLSTATE :LAST_ERROR_MESSAGE\n\\endif")
         lines.append(f"SELECT '@@ROWS {n}', string_agg(id || ':' || coalesce(n4::text, 'NULL') || ':' || coalesce(n8::text, 'NULL'), ' ' ORDER BY id) FROM ({c['read']}) r;")
-    p = subprocess.run(["docker", "exec", "-i", "wadjet-pg-ir", "psql", "-U", "wadjet", "-d", "wadjet_oracle", "-At", "-F", "\t", "-v", "VERBOSITY=terse"],
+    p = subprocess.run(["docker", "exec", "-i", os.environ.get("PG_CONTAINER", "wadjet-pg-ir"), "psql", "-U", "wadjet", "-d", "wadjet_oracle", "-At", "-F", "\t", "-v", "VERBOSITY=terse"],
                        input="\n".join(lines), capture_output=True, text=True)
     # stderr carries errors; attribute them to the cell they follow
     return p.stdout, p.stderr, "\n".join(lines)

@@ -8,7 +8,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/derekmwright/wadjet/internal/engine/expr"
 	"github.com/derekmwright/wadjet/internal/oracle/intround"
+	"github.com/derekmwright/wadjet/internal/planner/physical"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -26,7 +28,7 @@ import (
 // answers measured on PostgreSQL.
 func TestIntegerAssignmentRoundsByPostgresTypeOnEveryDoor(t *testing.T) {
 	ctx := context.Background()
-	cells := intround.Cells()
+	cells := append(intround.Cells(), intround.DialectCells()...)
 	failed := 0
 	for _, c := range cells {
 		// A fresh fixture per cell: a table rewritten thousands of times over
@@ -57,14 +59,18 @@ func TestIntegerAssignmentRoundsByPostgresTypeOnEveryDoor(t *testing.T) {
 }
 
 // intRoundKnownRefusals are cells that refuse BEFORE any assignment: SELECT
-// GREATEST(numeric, float8) whose numeric arm wins fails on the evaluator's
-// float8 output vector (the #361 guard), on any SELECT, where PostgreSQL
-// answers the double. A separate defect from the rounding, recorded for
+// GREATEST(numeric, float8) whose numeric arm wins, and SELECT NULLIF(numeric
+// column, float8 expression), fail on the evaluator's float8 output vector
+// (the #361 guard), on any SELECT, where PostgreSQL answers the double. A separate defect from the rounding, recorded for
 // filing; the UPDATE, MERGE and VALUES doors of the same spelling answer and
 // are asserted. A pin that starts agreeing fails — delete it.
 var intRoundKnownRefusals = map[string]string{
 	"fold/GREATEST(numcol,f8col-1) [select]":     "cannot store string into FLOAT64 vector",
 	"fold/GREATEST(div_numcol,f8col-1) [select]": "cannot store string into FLOAT64 vector",
+	"fold/NULLIF(numcol,f8col+9) [select]":       "cannot store string into FLOAT64 vector",
+	"fold/NULLIF(numcol,f8lit) [select]":         "cannot store string into FLOAT64 vector",
+	"fold/NULLIF(div_numcol,f8col+9) [select]":   "cannot store string into FLOAT64 vector",
+	"fold/NULLIF(div_numcol,f8lit) [select]":     "cannot store string into FLOAT64 vector",
 }
 
 func intRoundCell(ctx context.Context, c intround.Cell) (string, error) {
@@ -175,6 +181,13 @@ func TestIntegerAssignmentRuleFollowsPgTypeof(t *testing.T) {
 		node, err := plansql.ParseExpression(c.Expr)
 		if err != nil {
 			t.Fatalf("%s: %v", c.Expr, err)
+		}
+		// A value this engine carries as an integer has no fraction to
+		// round whatever PostgreSQL calls it: NULLIF(5, f) is 5 or NULL,
+		// float8 there and int4 here.
+		if d, conf := physical.DeclaredTypeOfNode(node, schema); conf == expr.Decided &&
+			(d.ID == parquet.TypeInt32 || d.ID == parquet.TypeInt64) {
+			continue
 		}
 		asked++
 		if got := dmlSourceIsFloat(node, schema); got != wantFloat {

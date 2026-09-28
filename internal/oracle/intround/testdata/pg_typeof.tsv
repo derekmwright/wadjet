@@ -628,3 +628,408 @@ CAST(5/2.0 AS NUMERIC)	numeric
 (5/2.0)::numeric	numeric
 CAST(f AS NUMERIC)	numeric
 5/2.0::float8	double precision
+NULLIF(5, 5)	integer
+NULLIF(5, i)	integer
+NULLIF(5, b)	integer
+NULLIF(5, 2.0)	numeric
+NULLIF(5, d)	numeric
+NULLIF(5, f)	double precision
+NULLIF(5, 2.0::float8)	double precision
+NULLIF(5, (5/2.0))	numeric
+NULLIF(5, SQRT(d))	numeric
+NULLIF(i, 5)	integer
+NULLIF(i, i)	integer
+NULLIF(i, b)	integer
+NULLIF(i, 2.0)	numeric
+NULLIF(i, d)	numeric
+NULLIF(i, f)	double precision
+NULLIF(i, 2.0::float8)	double precision
+NULLIF(i, (5/2.0))	numeric
+NULLIF(i, SQRT(d))	numeric
+NULLIF(b, 5)	bigint
+NULLIF(b, i)	bigint
+NULLIF(b, b)	bigint
+NULLIF(b, 2.0)	numeric
+NULLIF(b, d)	numeric
+NULLIF(b, f)	double precision
+NULLIF(b, 2.0::float8)	double precision
+NULLIF(b, (5/2.0))	numeric
+NULLIF(b, SQRT(d))	numeric
+NULLIF(2.0, 5)	numeric
+NULLIF(2.0, i)	numeric
+NULLIF(2.0, b)	numeric
+NULLIF(2.0, 2.0)	numeric
+NULLIF(2.0, d)	numeric
+NULLIF(2.0, f)	double precision
+NULLIF(2.0, 2.0::float8)	double precision
+NULLIF(2.0, (5/2.0))	numeric
+NULLIF(2.0, SQRT(d))	numeric
+NULLIF(d, 5)	numeric
+NULLIF(d, i)	numeric
+NULLIF(d, b)	numeric
+NULLIF(d, 2.0)	numeric
+NULLIF(d, d)	numeric
+NULLIF(d, f)	double precision
+NULLIF(d, 2.0::float8)	double precision
+NULLIF(d, (5/2.0))	numeric
+NULLIF(d, SQRT(d))	numeric
+NULLIF(f, 5)	double precision
+NULLIF(f, i)	double precision
+NULLIF(f, b)	double precision
+NULLIF(f, 2.0)	double precision
+NULLIF(f, d)	double precision
+NULLIF(f, f)	double precision
+NULLIF(f, 2.0::float8)	double precision
+NULLIF(f, (5/2.0))	double precision
+NULLIF(f, SQRT(d))	double precision
+NULLIF(2.0::float8, 5)	double precision
+NULLIF(2.0::float8, i)	double precision
+NULLIF(2.0::float8, b)	double precision
+NULLIF(2.0::float8, 2.0)	double precision
+NULLIF(2.0::float8, d)	double precision
+NULLIF(2.0::float8, f)	double precision
+NULLIF(2.0::float8, 2.0::float8)	double precision
+NULLIF(2.0::float8, (5/2.0))	double precision
+NULLIF(2.0::float8, SQRT(d))	double precision
+NULLIF((5/2.0), 5)	numeric
+NULLIF((5/2.0), i)	numeric
+NULLIF((5/2.0), b)	numeric
+NULLIF((5/2.0), 2.0)	numeric
+NULLIF((5/2.0), d)	numeric
+NULLIF((5/2.0), f)	double precision
+NULLIF((5/2.0), 2.0::float8)	double precision
+NULLIF((5/2.0), (5/2.0))	numeric
+NULLIF((5/2.0), SQRT(d))	numeric
+NULLIF(SQRT(d), 5)	numeric
+NULLIF(SQRT(d), i)	numeric
+NULLIF(SQRT(d), b)	numeric
+NULLIF(SQRT(d), 2.0)	numeric
+NULLIF(SQRT(d), d)	numeric
+NULLIF(SQRT(d), f)	double precision
+NULLIF(SQRT(d), 2.0::float8)	double precision
+NULLIF(SQRT(d), (5/2.0))	numeric
+NULLIF(SQRT(d), SQRT(d))	numeric
+COALESCE(5, 5)	integer
+COALESCE(5, i)	integer
+COALESCE(5, b)	bigint
+COALESCE(5, 2.0)	numeric
+COALESCE(5, d)	numeric
+COALESCE(5, f)	double precision
+COALESCE(5, 2.0::float8)	double precision
+COALESCE(5, (5/2.0))	numeric
+COALESCE(5, SQRT(d))	numeric
+COALESCE(i, 5)	integer
+COALESCE(i, i)	integer
+COALESCE(i, b)	bigint
+COALESCE(i, 2.0)	numeric
+COALESCE(i, d)	numeric
+COALESCE(i, f)	double precision
+COALESCE(i, 2.0::float8)	double precision
+COALESCE(i, (5/2.0))	numeric
+COALESCE(i, SQRT(d))	numeric
+COALESCE(b, 5)	bigint
+COALESCE(b, i)	bigint
+COALESCE(b, b)	bigint
+COALESCE(b, 2.0)	numeric
+COALESCE(b, d)	numeric
+COALESCE(b, f)	double precision
+COALESCE(b, 2.0::float8)	double precision
+COALESCE(b, (5/2.0))	numeric
+COALESCE(b, SQRT(d))	numeric
+COALESCE(2.0, 5)	numeric
+COALESCE(2.0, i)	numeric
+COALESCE(2.0, b)	numeric
+COALESCE(2.0, 2.0)	numeric
+COALESCE(2.0, d)	numeric
+COALESCE(2.0, f)	double precision
+COALESCE(2.0, 2.0::float8)	double precision
+COALESCE(2.0, (5/2.0))	numeric
+COALESCE(2.0, SQRT(d))	numeric
+COALESCE(d, 5)	numeric
+COALESCE(d, i)	numeric
+COALESCE(d, b)	numeric
+COALESCE(d, 2.0)	numeric
+COALESCE(d, d)	numeric
+COALESCE(d, f)	double precision
+COALESCE(d, 2.0::float8)	double precision
+COALESCE(d, (5/2.0))	numeric
+COALESCE(d, SQRT(d))	numeric
+COALESCE(f, 5)	double precision
+COALESCE(f, i)	double precision
+COALESCE(f, b)	double precision
+COALESCE(f, 2.0)	double precision
+COALESCE(f, d)	double precision
+COALESCE(f, f)	double precision
+COALESCE(f, 2.0::float8)	double precision
+COALESCE(f, (5/2.0))	double precision
+COALESCE(f, SQRT(d))	double precision
+COALESCE(2.0::float8, 5)	double precision
+COALESCE(2.0::float8, i)	double precision
+COALESCE(2.0::float8, b)	double precision
+COALESCE(2.0::float8, 2.0)	double precision
+COALESCE(2.0::float8, d)	double precision
+COALESCE(2.0::float8, f)	double precision
+COALESCE(2.0::float8, 2.0::float8)	double precision
+COALESCE(2.0::float8, (5/2.0))	double precision
+COALESCE(2.0::float8, SQRT(d))	double precision
+COALESCE((5/2.0), 5)	numeric
+COALESCE((5/2.0), i)	numeric
+COALESCE((5/2.0), b)	numeric
+COALESCE((5/2.0), 2.0)	numeric
+COALESCE((5/2.0), d)	numeric
+COALESCE((5/2.0), f)	double precision
+COALESCE((5/2.0), 2.0::float8)	double precision
+COALESCE((5/2.0), (5/2.0))	numeric
+COALESCE((5/2.0), SQRT(d))	numeric
+COALESCE(SQRT(d), 5)	numeric
+COALESCE(SQRT(d), i)	numeric
+COALESCE(SQRT(d), b)	numeric
+COALESCE(SQRT(d), 2.0)	numeric
+COALESCE(SQRT(d), d)	numeric
+COALESCE(SQRT(d), f)	double precision
+COALESCE(SQRT(d), 2.0::float8)	double precision
+COALESCE(SQRT(d), (5/2.0))	numeric
+COALESCE(SQRT(d), SQRT(d))	numeric
+GREATEST(5, 5)	integer
+GREATEST(5, i)	integer
+GREATEST(5, b)	bigint
+GREATEST(5, 2.0)	numeric
+GREATEST(5, d)	numeric
+GREATEST(5, f)	double precision
+GREATEST(5, 2.0::float8)	double precision
+GREATEST(5, (5/2.0))	numeric
+GREATEST(5, SQRT(d))	numeric
+GREATEST(i, 5)	integer
+GREATEST(i, i)	integer
+GREATEST(i, b)	bigint
+GREATEST(i, 2.0)	numeric
+GREATEST(i, d)	numeric
+GREATEST(i, f)	double precision
+GREATEST(i, 2.0::float8)	double precision
+GREATEST(i, (5/2.0))	numeric
+GREATEST(i, SQRT(d))	numeric
+GREATEST(b, 5)	bigint
+GREATEST(b, i)	bigint
+GREATEST(b, b)	bigint
+GREATEST(b, 2.0)	numeric
+GREATEST(b, d)	numeric
+GREATEST(b, f)	double precision
+GREATEST(b, 2.0::float8)	double precision
+GREATEST(b, (5/2.0))	numeric
+GREATEST(b, SQRT(d))	numeric
+GREATEST(2.0, 5)	numeric
+GREATEST(2.0, i)	numeric
+GREATEST(2.0, b)	numeric
+GREATEST(2.0, 2.0)	numeric
+GREATEST(2.0, d)	numeric
+GREATEST(2.0, f)	double precision
+GREATEST(2.0, 2.0::float8)	double precision
+GREATEST(2.0, (5/2.0))	numeric
+GREATEST(2.0, SQRT(d))	numeric
+GREATEST(d, 5)	numeric
+GREATEST(d, i)	numeric
+GREATEST(d, b)	numeric
+GREATEST(d, 2.0)	numeric
+GREATEST(d, d)	numeric
+GREATEST(d, f)	double precision
+GREATEST(d, 2.0::float8)	double precision
+GREATEST(d, (5/2.0))	numeric
+GREATEST(d, SQRT(d))	numeric
+GREATEST(f, 5)	double precision
+GREATEST(f, i)	double precision
+GREATEST(f, b)	double precision
+GREATEST(f, 2.0)	double precision
+GREATEST(f, d)	double precision
+GREATEST(f, f)	double precision
+GREATEST(f, 2.0::float8)	double precision
+GREATEST(f, (5/2.0))	double precision
+GREATEST(f, SQRT(d))	double precision
+GREATEST(2.0::float8, 5)	double precision
+GREATEST(2.0::float8, i)	double precision
+GREATEST(2.0::float8, b)	double precision
+GREATEST(2.0::float8, 2.0)	double precision
+GREATEST(2.0::float8, d)	double precision
+GREATEST(2.0::float8, f)	double precision
+GREATEST(2.0::float8, 2.0::float8)	double precision
+GREATEST(2.0::float8, (5/2.0))	double precision
+GREATEST(2.0::float8, SQRT(d))	double precision
+GREATEST((5/2.0), 5)	numeric
+GREATEST((5/2.0), i)	numeric
+GREATEST((5/2.0), b)	numeric
+GREATEST((5/2.0), 2.0)	numeric
+GREATEST((5/2.0), d)	numeric
+GREATEST((5/2.0), f)	double precision
+GREATEST((5/2.0), 2.0::float8)	double precision
+GREATEST((5/2.0), (5/2.0))	numeric
+GREATEST((5/2.0), SQRT(d))	numeric
+GREATEST(SQRT(d), 5)	numeric
+GREATEST(SQRT(d), i)	numeric
+GREATEST(SQRT(d), b)	numeric
+GREATEST(SQRT(d), 2.0)	numeric
+GREATEST(SQRT(d), d)	numeric
+GREATEST(SQRT(d), f)	double precision
+GREATEST(SQRT(d), 2.0::float8)	double precision
+GREATEST(SQRT(d), (5/2.0))	numeric
+GREATEST(SQRT(d), SQRT(d))	numeric
+LEAST(5, 5)	integer
+LEAST(5, i)	integer
+LEAST(5, b)	bigint
+LEAST(5, 2.0)	numeric
+LEAST(5, d)	numeric
+LEAST(5, f)	double precision
+LEAST(5, 2.0::float8)	double precision
+LEAST(5, (5/2.0))	numeric
+LEAST(5, SQRT(d))	numeric
+LEAST(i, 5)	integer
+LEAST(i, i)	integer
+LEAST(i, b)	bigint
+LEAST(i, 2.0)	numeric
+LEAST(i, d)	numeric
+LEAST(i, f)	double precision
+LEAST(i, 2.0::float8)	double precision
+LEAST(i, (5/2.0))	numeric
+LEAST(i, SQRT(d))	numeric
+LEAST(b, 5)	bigint
+LEAST(b, i)	bigint
+LEAST(b, b)	bigint
+LEAST(b, 2.0)	numeric
+LEAST(b, d)	numeric
+LEAST(b, f)	double precision
+LEAST(b, 2.0::float8)	double precision
+LEAST(b, (5/2.0))	numeric
+LEAST(b, SQRT(d))	numeric
+LEAST(2.0, 5)	numeric
+LEAST(2.0, i)	numeric
+LEAST(2.0, b)	numeric
+LEAST(2.0, 2.0)	numeric
+LEAST(2.0, d)	numeric
+LEAST(2.0, f)	double precision
+LEAST(2.0, 2.0::float8)	double precision
+LEAST(2.0, (5/2.0))	numeric
+LEAST(2.0, SQRT(d))	numeric
+LEAST(d, 5)	numeric
+LEAST(d, i)	numeric
+LEAST(d, b)	numeric
+LEAST(d, 2.0)	numeric
+LEAST(d, d)	numeric
+LEAST(d, f)	double precision
+LEAST(d, 2.0::float8)	double precision
+LEAST(d, (5/2.0))	numeric
+LEAST(d, SQRT(d))	numeric
+LEAST(f, 5)	double precision
+LEAST(f, i)	double precision
+LEAST(f, b)	double precision
+LEAST(f, 2.0)	double precision
+LEAST(f, d)	double precision
+LEAST(f, f)	double precision
+LEAST(f, 2.0::float8)	double precision
+LEAST(f, (5/2.0))	double precision
+LEAST(f, SQRT(d))	double precision
+LEAST(2.0::float8, 5)	double precision
+LEAST(2.0::float8, i)	double precision
+LEAST(2.0::float8, b)	double precision
+LEAST(2.0::float8, 2.0)	double precision
+LEAST(2.0::float8, d)	double precision
+LEAST(2.0::float8, f)	double precision
+LEAST(2.0::float8, 2.0::float8)	double precision
+LEAST(2.0::float8, (5/2.0))	double precision
+LEAST(2.0::float8, SQRT(d))	double precision
+LEAST((5/2.0), 5)	numeric
+LEAST((5/2.0), i)	numeric
+LEAST((5/2.0), b)	numeric
+LEAST((5/2.0), 2.0)	numeric
+LEAST((5/2.0), d)	numeric
+LEAST((5/2.0), f)	double precision
+LEAST((5/2.0), 2.0::float8)	double precision
+LEAST((5/2.0), (5/2.0))	numeric
+LEAST((5/2.0), SQRT(d))	numeric
+LEAST(SQRT(d), 5)	numeric
+LEAST(SQRT(d), i)	numeric
+LEAST(SQRT(d), b)	numeric
+LEAST(SQRT(d), 2.0)	numeric
+LEAST(SQRT(d), d)	numeric
+LEAST(SQRT(d), f)	double precision
+LEAST(SQRT(d), 2.0::float8)	double precision
+LEAST(SQRT(d), (5/2.0))	numeric
+LEAST(SQRT(d), SQRT(d))	numeric
+CASE WHEN i > 0 THEN 5 ELSE 5 END	integer
+CASE WHEN i > 0 THEN 5 ELSE i END	integer
+CASE WHEN i > 0 THEN 5 ELSE b END	bigint
+CASE WHEN i > 0 THEN 5 ELSE 2.0 END	numeric
+CASE WHEN i > 0 THEN 5 ELSE d END	numeric
+CASE WHEN i > 0 THEN 5 ELSE f END	double precision
+CASE WHEN i > 0 THEN 5 ELSE 2.0::float8 END	double precision
+CASE WHEN i > 0 THEN 5 ELSE (5/2.0) END	numeric
+CASE WHEN i > 0 THEN 5 ELSE SQRT(d) END	numeric
+CASE WHEN i > 0 THEN i ELSE 5 END	integer
+CASE WHEN i > 0 THEN i ELSE i END	integer
+CASE WHEN i > 0 THEN i ELSE b END	bigint
+CASE WHEN i > 0 THEN i ELSE 2.0 END	numeric
+CASE WHEN i > 0 THEN i ELSE d END	numeric
+CASE WHEN i > 0 THEN i ELSE f END	double precision
+CASE WHEN i > 0 THEN i ELSE 2.0::float8 END	double precision
+CASE WHEN i > 0 THEN i ELSE (5/2.0) END	numeric
+CASE WHEN i > 0 THEN i ELSE SQRT(d) END	numeric
+CASE WHEN i > 0 THEN b ELSE 5 END	bigint
+CASE WHEN i > 0 THEN b ELSE i END	bigint
+CASE WHEN i > 0 THEN b ELSE b END	bigint
+CASE WHEN i > 0 THEN b ELSE 2.0 END	numeric
+CASE WHEN i > 0 THEN b ELSE d END	numeric
+CASE WHEN i > 0 THEN b ELSE f END	double precision
+CASE WHEN i > 0 THEN b ELSE 2.0::float8 END	double precision
+CASE WHEN i > 0 THEN b ELSE (5/2.0) END	numeric
+CASE WHEN i > 0 THEN b ELSE SQRT(d) END	numeric
+CASE WHEN i > 0 THEN 2.0 ELSE 5 END	numeric
+CASE WHEN i > 0 THEN 2.0 ELSE i END	numeric
+CASE WHEN i > 0 THEN 2.0 ELSE b END	numeric
+CASE WHEN i > 0 THEN 2.0 ELSE 2.0 END	numeric
+CASE WHEN i > 0 THEN 2.0 ELSE d END	numeric
+CASE WHEN i > 0 THEN 2.0 ELSE f END	double precision
+CASE WHEN i > 0 THEN 2.0 ELSE 2.0::float8 END	double precision
+CASE WHEN i > 0 THEN 2.0 ELSE (5/2.0) END	numeric
+CASE WHEN i > 0 THEN 2.0 ELSE SQRT(d) END	numeric
+CASE WHEN i > 0 THEN d ELSE 5 END	numeric
+CASE WHEN i > 0 THEN d ELSE i END	numeric
+CASE WHEN i > 0 THEN d ELSE b END	numeric
+CASE WHEN i > 0 THEN d ELSE 2.0 END	numeric
+CASE WHEN i > 0 THEN d ELSE d END	numeric
+CASE WHEN i > 0 THEN d ELSE f END	double precision
+CASE WHEN i > 0 THEN d ELSE 2.0::float8 END	double precision
+CASE WHEN i > 0 THEN d ELSE (5/2.0) END	numeric
+CASE WHEN i > 0 THEN d ELSE SQRT(d) END	numeric
+CASE WHEN i > 0 THEN f ELSE 5 END	double precision
+CASE WHEN i > 0 THEN f ELSE i END	double precision
+CASE WHEN i > 0 THEN f ELSE b END	double precision
+CASE WHEN i > 0 THEN f ELSE 2.0 END	double precision
+CASE WHEN i > 0 THEN f ELSE d END	double precision
+CASE WHEN i > 0 THEN f ELSE f END	double precision
+CASE WHEN i > 0 THEN f ELSE 2.0::float8 END	double precision
+CASE WHEN i > 0 THEN f ELSE (5/2.0) END	double precision
+CASE WHEN i > 0 THEN f ELSE SQRT(d) END	double precision
+CASE WHEN i > 0 THEN 2.0::float8 ELSE 5 END	double precision
+CASE WHEN i > 0 THEN 2.0::float8 ELSE i END	double precision
+CASE WHEN i > 0 THEN 2.0::float8 ELSE b END	double precision
+CASE WHEN i > 0 THEN 2.0::float8 ELSE 2.0 END	double precision
+CASE WHEN i > 0 THEN 2.0::float8 ELSE d END	double precision
+CASE WHEN i > 0 THEN 2.0::float8 ELSE f END	double precision
+CASE WHEN i > 0 THEN 2.0::float8 ELSE 2.0::float8 END	double precision
+CASE WHEN i > 0 THEN 2.0::float8 ELSE (5/2.0) END	double precision
+CASE WHEN i > 0 THEN 2.0::float8 ELSE SQRT(d) END	double precision
+CASE WHEN i > 0 THEN (5/2.0) ELSE 5 END	numeric
+CASE WHEN i > 0 THEN (5/2.0) ELSE i END	numeric
+CASE WHEN i > 0 THEN (5/2.0) ELSE b END	numeric
+CASE WHEN i > 0 THEN (5/2.0) ELSE 2.0 END	numeric
+CASE WHEN i > 0 THEN (5/2.0) ELSE d END	numeric
+CASE WHEN i > 0 THEN (5/2.0) ELSE f END	double precision
+CASE WHEN i > 0 THEN (5/2.0) ELSE 2.0::float8 END	double precision
+CASE WHEN i > 0 THEN (5/2.0) ELSE (5/2.0) END	numeric
+CASE WHEN i > 0 THEN (5/2.0) ELSE SQRT(d) END	numeric
+CASE WHEN i > 0 THEN SQRT(d) ELSE 5 END	numeric
+CASE WHEN i > 0 THEN SQRT(d) ELSE i END	numeric
+CASE WHEN i > 0 THEN SQRT(d) ELSE b END	numeric
+CASE WHEN i > 0 THEN SQRT(d) ELSE 2.0 END	numeric
+CASE WHEN i > 0 THEN SQRT(d) ELSE d END	numeric
+CASE WHEN i > 0 THEN SQRT(d) ELSE f END	double precision
+CASE WHEN i > 0 THEN SQRT(d) ELSE 2.0::float8 END	double precision
+CASE WHEN i > 0 THEN SQRT(d) ELSE (5/2.0) END	numeric
+CASE WHEN i > 0 THEN SQRT(d) ELSE SQRT(d) END	numeric
