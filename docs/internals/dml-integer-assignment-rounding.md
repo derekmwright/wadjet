@@ -58,21 +58,44 @@ reads) are the merged namespace's declarations for the source's columns
 (physical.DeclaredTypeOfNodeIn loads the category into ColDecls.pgCat), so
 `USING (SELECT id, y FROM s) src … SET n = src.y` over a float8 `y` rounds
 half to even, as it does over `USING s`. A name such a source publishes twice
-is 42702 where it is referenced, as in PostgreSQL. The layer also carries a
+is 42702 wherever it is referenced — the ON clause, a SET or VALUES
+expression, a WHEN condition — as in PostgreSQL. The layer also carries a
 container column's element (ColDecls.Elems), so `SET n = af[1]` over a
 float8[] column decides float8.
+
+A scalar subquery in a MERGE action (UPDATE SET or INSERT VALUES) declares
+the column its own plan declares, category included:
+physical.DeclaredTypeOfNodeWith installs the Planner's memoized
+scalarSubqueryColumnDecl as the ColDecls subquery resolvers, the same answer
+annotateSubqueryColumnDecls stamps on a query plan. `SET n = (SELECT MAX(y)
+FROM s)` over a float8 2.5 stores 2; a text-typed one is 42804. UPDATE SET
+and INSERT … VALUES refuse a subquery before assignment (0A000).
+
+The MERGE action's expression forms are one table (intround.MergeSetCells:
+every form × float8 / numeric / integer / text source × UPDATE and INSERT
+action × catalog and subquery source, into INTEGER and BIGINT, plus
+parameters over pgwire), each cell PostgreSQL 17.11's stored rows or its
+SQLSTATE. A statement PostgreSQL refuses writes nothing here either: an
+aggregate is 42803 and a window function 42P20 on every door that evaluates
+one row (UPDATE SET, INSERT VALUES, a MERGE action, a MERGE WHEN condition);
+a subquery correlated to the target under WHEN NOT MATCHED is 42P01; text
+arithmetic against a number is 42883. An expression over a MERGE subquery
+source (anything but a reference to one of its columns) is 0A000 where
+PostgreSQL answers (#1398), and PostgreSQL's own SQLSTATE where PostgreSQL
+refuses.
+
+A JSON field read — `j->>'k'` and `j->'k'`, which the parser lowers to
+json_extract_scalar and json_extract — is TEXT to the assignment (PostgreSQL
+types them text and json), so it is 42804 into a non-text column on every
+write door, as INSERT … SELECT's plan already declared it; the registry
+declares both dynamic, which the declaration walk leaves undecided.
 
 An expression whose type the layer declines to decide keeps the NUMERIC
 rule — a float64 box rounds half away from zero — which is what it had.
 What the layer still declines on an assignment door: a DECIMAL computed
-without a declared precision (its value is a numeric, whose rule this is),
-a VECTOR or a container with no element, and the functions whose type
-follows the runtime value (`json_extract`, `json_extract_scalar`, which have
-no PostgreSQL spelling: a JSON number of 2.5 stores 3). A scalar subquery is
-refused before assignment on the UPDATE, MERGE and VALUES doors, an
-expression over a MERGE subquery source is refused 0A000, and INSERT …
-SELECT reads every position's declaration from the plan, so none of those
-reaches the undecided rule.
+without a declared precision (its value is a numeric, whose rule this is)
+and a VECTOR or a container with no element (refused before any rounding
+matters).
 
 The declaration picks the rule whatever box the value arrives in: a DECIMAL
 text box under a float8 declaration (GREATEST over a numeric and a float8,

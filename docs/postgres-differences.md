@@ -64,6 +64,10 @@ PostgreSQL answers the statement's start time for every row, so `WHERE LOCALTIME
 
 `CAST(5 / 2.0 AS INTEGER)`, `CAST(SQRT(6.25) AS INTEGER)` and `CAST(POWER(2.5, 1) AS INTEGER)` answer 2 where PostgreSQL answers 3 (SMALLINT and BIGINT alike; negated, -2 where PostgreSQL answers -3): the cast kernel rounds the float64 carrier by float8's rule, and a numeric literal operand (`CAST(2.5 AS INTEGER)`, `CAST(2.5 * 1 AS INTEGER)`) rounds half away as PostgreSQL does. Not a deliberate difference: an assignment of the same values rounds as PostgreSQL does (see "Division and the transcendental functions over numeric declare double precision"); the cast is #1392. (ADR-0024 §2c)
 
+**An integer CAST of a JSON field read reads the JSON number.**
+
+`CAST(j->>'k' AS INTEGER)` over `{"k": 2.5}` answers 2 where PostgreSQL raises 22P02 (`->>` is text there, and `2.5` is not an integer's text); assigning `j->>'k'` or `j->'k'` itself to an integer column is 42804 on every write door, as in PostgreSQL. (ADR-0012 §5/#1353-json)
+
 ## Declared types
 
 **Some address and UUID functions declare text; assigned to a typed column, their text is read as a literal.**
@@ -143,6 +147,10 @@ Fields retain storage types. `(b).open` over DECIMAL(9,2) has typmod 589830; Pos
 `SELECT * FROM lt_o o JOIN LATERAL (SELECT * FROM lt_i i WHERE i.k = o.k) s ON true` names the body's `id` and `k` `s.id` and `s.k` on every execution path, where PostgreSQL names them `id` and `k`. A star over a LATERAL is expanded into the FROM items' own lists, but a body whose own list is a star is not enumerated there, so that arm is read off the join's stream, which qualifies a duplicate name by its owning alias. Values, types and positions agree. A body that names its columns publishes PostgreSQL's names. (ADR-0012 §5/#1126)
 
 ## Errors and refusals
+
+**A text-typed parameter assigned to an integer column is 22P02.**
+
+Bind renders a parameter declared text (OID 25) as a quoted literal, which the integer column's input function reads, so a MERGE `SET n = $1` bound as the text `2.5` raises 22P02 where PostgreSQL raises 42804 (text is not assignable to integer without a cast); neither writes. A float8 or numeric parameter keeps its type and rounds by it. (ADR-0012 §5/#1353-param)
 
 **`SUBSTRING(text SIMILAR pattern ESCAPE escape)` is refused.**
 
@@ -426,6 +434,10 @@ PostgreSQL has none. SemVer 2.0.0 defines precedence; node-semver defines ranges
 
 ## Not supported
 
+**A SMALLINT / INT2 column.**
+
+`CREATE TABLE t (n SMALLINT)` and `(n INT2)` raise 42704 (`type "SMALLINT" does not exist`) where PostgreSQL creates an int2 column: there is no int16 storage. `CAST(x AS SMALLINT)` answers, declared bigint (see "Integer expressions declare bigint"). (ADR-0012 §5/#1353-int2)
+
 **The system catalog describes one database, one role and this server's objects.**
 
 `pg_database` lists one database and `pg_roles` one role, the connection's identity, which is not a superuser; PostgreSQL also lists its templates and bootstrap superuser. `pg_class.relam` is 0 and `pg_am` is empty (a stored table has no PostgreSQL access method), `pg_type` lists the types the wire declares and their arrays but no DOMAIN types, `pg_proc` lists no functions, and the relations for objects this server does not have (indexes, triggers, rules, policies, publications, sequences) are empty. A column is typed by the engine type that carries it — an OID column declares `int8`, and `current_schemas()` is `text[]` where PostgreSQL's is `name[]`. A masked column's definition is listed and its values arrive masked; a denied column is absent. A string literal cast to `regclass` is read to its OID and prints as the OID where PostgreSQL prints the name. The server reports PostgreSQL 17 (`server_version` 17.0, `server_version_num` 170000), the major whose catalog it models, so psql and pgJDBC send the catalog spellings this catalog has. (ADR-0044, #1251)
@@ -598,7 +610,7 @@ No executor exists: 0A000 versus PostgreSQL dropping the view. (ADR-0012 §5—u
 
 **UPDATE SET cannot contain a subquery.**
 
-`SET n = (SELECT max(n) FROM s)` raises 0A000 where PostgreSQL answers; assignment subqueries are unsupported. (ADR-0012 §5—unlocated)
+`SET n = (SELECT max(n) FROM s)` raises 0A000 where PostgreSQL answers; assignment subqueries are unsupported, and so is one in `INSERT … VALUES`. A MERGE action's `SET` and `INSERT … VALUES` answer one, declared from the subquery's own plan. (ADR-0012 §5—unlocated)
 
 **DML RETURNING is refused.**
 
