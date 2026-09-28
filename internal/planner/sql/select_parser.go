@@ -1083,19 +1083,26 @@ func (p *selectParser) parseValuesTableRef() (TableRef, error) {
 	p.advance() // consume (
 	p.advance() // consume VALUES
 
-	var rows [][]Node
+	// Each cell's SOURCE TEXT, which is what the desugared body is spelled
+	// from: a rendering of the parsed node is not the same expression for
+	// every node — `EXTRACT(EPOCH FROM ts)` renders as the engine's own
+	// `epoch(ts)`, which PostgreSQL has no spelling of and which is double
+	// precision where EXTRACT is numeric, so a VALUES list re-parsed from its
+	// rendering changed the type of what it held (#1353). A derived table is
+	// re-parsed from its source text too (consumeBalancedParens).
+	var rows [][]string
 	ncols := -1
 	for {
 		if _, err := p.expect(TokenLParen); err != nil {
 			return TableRef{}, fmt.Errorf("expected ( to start a VALUES row")
 		}
-		var row []Node
+		var row []string
 		for {
-			expr, err := p.parseExpr()
-			if err != nil {
+			start := p.cur.pos
+			if _, err := p.parseExpr(); err != nil {
 				return TableRef{}, fmt.Errorf("parsing VALUES row: %w", err)
 			}
-			row = append(row, expr)
+			row = append(row, strings.TrimSpace(p.lex.input[start:p.cur.pos]))
 			if p.peek() != TokenComma {
 				break
 			}
@@ -1171,11 +1178,11 @@ func (p *selectParser) parseValuesTableRef() (TableRef, error) {
 			sb.WriteString(" UNION ALL ")
 		}
 		sb.WriteString("SELECT ")
-		for j, expr := range row {
+		for j, text := range row {
 			if j > 0 {
 				sb.WriteString(", ")
 			}
-			sb.WriteString(expr.String())
+			sb.WriteString(text)
 			sb.WriteString(" AS ")
 			sb.WriteString(colNames[j])
 		}
