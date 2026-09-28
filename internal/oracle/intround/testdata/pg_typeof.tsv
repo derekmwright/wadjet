@@ -1,0 +1,630 @@
+5 + 5	integer
+5 + i	integer
+5 + b	bigint
+5 + 2.0	numeric
+5 + d	numeric
+5 + f	double precision
+5 + 2.0::float8	double precision
+5 + (5/2.0)	numeric
+5 + SQRT(d)	numeric
+i + 5	integer
+i + i	integer
+i + b	bigint
+i + 2.0	numeric
+i + d	numeric
+i + f	double precision
+i + 2.0::float8	double precision
+i + (5/2.0)	numeric
+i + SQRT(d)	numeric
+b + 5	bigint
+b + i	bigint
+b + b	bigint
+b + 2.0	numeric
+b + d	numeric
+b + f	double precision
+b + 2.0::float8	double precision
+b + (5/2.0)	numeric
+b + SQRT(d)	numeric
+2.0 + 5	numeric
+2.0 + i	numeric
+2.0 + b	numeric
+2.0 + 2.0	numeric
+2.0 + d	numeric
+2.0 + f	double precision
+2.0 + 2.0::float8	double precision
+2.0 + (5/2.0)	numeric
+2.0 + SQRT(d)	numeric
+d + 5	numeric
+d + i	numeric
+d + b	numeric
+d + 2.0	numeric
+d + d	numeric
+d + f	double precision
+d + 2.0::float8	double precision
+d + (5/2.0)	numeric
+d + SQRT(d)	numeric
+f + 5	double precision
+f + i	double precision
+f + b	double precision
+f + 2.0	double precision
+f + d	double precision
+f + f	double precision
+f + 2.0::float8	double precision
+f + (5/2.0)	double precision
+f + SQRT(d)	double precision
+2.0::float8 + 5	double precision
+2.0::float8 + i	double precision
+2.0::float8 + b	double precision
+2.0::float8 + 2.0	double precision
+2.0::float8 + d	double precision
+2.0::float8 + f	double precision
+2.0::float8 + 2.0::float8	double precision
+2.0::float8 + (5/2.0)	double precision
+2.0::float8 + SQRT(d)	double precision
+(5/2.0) + 5	numeric
+(5/2.0) + i	numeric
+(5/2.0) + b	numeric
+(5/2.0) + 2.0	numeric
+(5/2.0) + d	numeric
+(5/2.0) + f	double precision
+(5/2.0) + 2.0::float8	double precision
+(5/2.0) + (5/2.0)	numeric
+(5/2.0) + SQRT(d)	numeric
+SQRT(d) + 5	numeric
+SQRT(d) + i	numeric
+SQRT(d) + b	numeric
+SQRT(d) + 2.0	numeric
+SQRT(d) + d	numeric
+SQRT(d) + f	double precision
+SQRT(d) + 2.0::float8	double precision
+SQRT(d) + (5/2.0)	numeric
+SQRT(d) + SQRT(d)	numeric
+5 - 5	integer
+5 - i	integer
+5 - b	bigint
+5 - 2.0	numeric
+5 - d	numeric
+5 - f	double precision
+5 - 2.0::float8	double precision
+5 - (5/2.0)	numeric
+5 - SQRT(d)	numeric
+i - 5	integer
+i - i	integer
+i - b	bigint
+i - 2.0	numeric
+i - d	numeric
+i - f	double precision
+i - 2.0::float8	double precision
+i - (5/2.0)	numeric
+i - SQRT(d)	numeric
+b - 5	bigint
+b - i	bigint
+b - b	bigint
+b - 2.0	numeric
+b - d	numeric
+b - f	double precision
+b - 2.0::float8	double precision
+b - (5/2.0)	numeric
+b - SQRT(d)	numeric
+2.0 - 5	numeric
+2.0 - i	numeric
+2.0 - b	numeric
+2.0 - 2.0	numeric
+2.0 - d	numeric
+2.0 - f	double precision
+2.0 - 2.0::float8	double precision
+2.0 - (5/2.0)	numeric
+2.0 - SQRT(d)	numeric
+d - 5	numeric
+d - i	numeric
+d - b	numeric
+d - 2.0	numeric
+d - d	numeric
+d - f	double precision
+d - 2.0::float8	double precision
+d - (5/2.0)	numeric
+d - SQRT(d)	numeric
+f - 5	double precision
+f - i	double precision
+f - b	double precision
+f - 2.0	double precision
+f - d	double precision
+f - f	double precision
+f - 2.0::float8	double precision
+f - (5/2.0)	double precision
+f - SQRT(d)	double precision
+2.0::float8 - 5	double precision
+2.0::float8 - i	double precision
+2.0::float8 - b	double precision
+2.0::float8 - 2.0	double precision
+2.0::float8 - d	double precision
+2.0::float8 - f	double precision
+2.0::float8 - 2.0::float8	double precision
+2.0::float8 - (5/2.0)	double precision
+2.0::float8 - SQRT(d)	double precision
+(5/2.0) - 5	numeric
+(5/2.0) - i	numeric
+(5/2.0) - b	numeric
+(5/2.0) - 2.0	numeric
+(5/2.0) - d	numeric
+(5/2.0) - f	double precision
+(5/2.0) - 2.0::float8	double precision
+(5/2.0) - (5/2.0)	numeric
+(5/2.0) - SQRT(d)	numeric
+SQRT(d) - 5	numeric
+SQRT(d) - i	numeric
+SQRT(d) - b	numeric
+SQRT(d) - 2.0	numeric
+SQRT(d) - d	numeric
+SQRT(d) - f	double precision
+SQRT(d) - 2.0::float8	double precision
+SQRT(d) - (5/2.0)	numeric
+SQRT(d) - SQRT(d)	numeric
+5 * 5	integer
+5 * i	integer
+5 * b	bigint
+5 * 2.0	numeric
+5 * d	numeric
+5 * f	double precision
+5 * 2.0::float8	double precision
+5 * (5/2.0)	numeric
+5 * SQRT(d)	numeric
+i * 5	integer
+i * i	integer
+i * b	bigint
+i * 2.0	numeric
+i * d	numeric
+i * f	double precision
+i * 2.0::float8	double precision
+i * (5/2.0)	numeric
+i * SQRT(d)	numeric
+b * 5	bigint
+b * i	bigint
+b * b	bigint
+b * 2.0	numeric
+b * d	numeric
+b * f	double precision
+b * 2.0::float8	double precision
+b * (5/2.0)	numeric
+b * SQRT(d)	numeric
+2.0 * 5	numeric
+2.0 * i	numeric
+2.0 * b	numeric
+2.0 * 2.0	numeric
+2.0 * d	numeric
+2.0 * f	double precision
+2.0 * 2.0::float8	double precision
+2.0 * (5/2.0)	numeric
+2.0 * SQRT(d)	numeric
+d * 5	numeric
+d * i	numeric
+d * b	numeric
+d * 2.0	numeric
+d * d	numeric
+d * f	double precision
+d * 2.0::float8	double precision
+d * (5/2.0)	numeric
+d * SQRT(d)	numeric
+f * 5	double precision
+f * i	double precision
+f * b	double precision
+f * 2.0	double precision
+f * d	double precision
+f * f	double precision
+f * 2.0::float8	double precision
+f * (5/2.0)	double precision
+f * SQRT(d)	double precision
+2.0::float8 * 5	double precision
+2.0::float8 * i	double precision
+2.0::float8 * b	double precision
+2.0::float8 * 2.0	double precision
+2.0::float8 * d	double precision
+2.0::float8 * f	double precision
+2.0::float8 * 2.0::float8	double precision
+2.0::float8 * (5/2.0)	double precision
+2.0::float8 * SQRT(d)	double precision
+(5/2.0) * 5	numeric
+(5/2.0) * i	numeric
+(5/2.0) * b	numeric
+(5/2.0) * 2.0	numeric
+(5/2.0) * d	numeric
+(5/2.0) * f	double precision
+(5/2.0) * 2.0::float8	double precision
+(5/2.0) * (5/2.0)	numeric
+(5/2.0) * SQRT(d)	numeric
+SQRT(d) * 5	numeric
+SQRT(d) * i	numeric
+SQRT(d) * b	numeric
+SQRT(d) * 2.0	numeric
+SQRT(d) * d	numeric
+SQRT(d) * f	double precision
+SQRT(d) * 2.0::float8	double precision
+SQRT(d) * (5/2.0)	numeric
+SQRT(d) * SQRT(d)	numeric
+5 / 5	integer
+5 / i	integer
+5 / b	bigint
+5 / 2.0	numeric
+5 / d	numeric
+5 / f	double precision
+5 / 2.0::float8	double precision
+5 / (5/2.0)	numeric
+5 / SQRT(d)	numeric
+i / 5	integer
+i / i	integer
+i / b	bigint
+i / 2.0	numeric
+i / d	numeric
+i / f	double precision
+i / 2.0::float8	double precision
+i / (5/2.0)	numeric
+i / SQRT(d)	numeric
+b / 5	bigint
+b / i	bigint
+b / b	bigint
+b / 2.0	numeric
+b / d	numeric
+b / f	double precision
+b / 2.0::float8	double precision
+b / (5/2.0)	numeric
+b / SQRT(d)	numeric
+2.0 / 5	numeric
+2.0 / i	numeric
+2.0 / b	numeric
+2.0 / 2.0	numeric
+2.0 / d	numeric
+2.0 / f	double precision
+2.0 / 2.0::float8	double precision
+2.0 / (5/2.0)	numeric
+2.0 / SQRT(d)	numeric
+d / 5	numeric
+d / i	numeric
+d / b	numeric
+d / 2.0	numeric
+d / d	numeric
+d / f	double precision
+d / 2.0::float8	double precision
+d / (5/2.0)	numeric
+d / SQRT(d)	numeric
+f / 5	double precision
+f / i	double precision
+f / b	double precision
+f / 2.0	double precision
+f / d	double precision
+f / f	double precision
+f / 2.0::float8	double precision
+f / (5/2.0)	double precision
+f / SQRT(d)	double precision
+2.0::float8 / 5	double precision
+2.0::float8 / i	double precision
+2.0::float8 / b	double precision
+2.0::float8 / 2.0	double precision
+2.0::float8 / d	double precision
+2.0::float8 / f	double precision
+2.0::float8 / 2.0::float8	double precision
+2.0::float8 / (5/2.0)	double precision
+2.0::float8 / SQRT(d)	double precision
+(5/2.0) / 5	numeric
+(5/2.0) / i	numeric
+(5/2.0) / b	numeric
+(5/2.0) / 2.0	numeric
+(5/2.0) / d	numeric
+(5/2.0) / f	double precision
+(5/2.0) / 2.0::float8	double precision
+(5/2.0) / (5/2.0)	numeric
+(5/2.0) / SQRT(d)	numeric
+SQRT(d) / 5	numeric
+SQRT(d) / i	numeric
+SQRT(d) / b	numeric
+SQRT(d) / 2.0	numeric
+SQRT(d) / d	numeric
+SQRT(d) / f	double precision
+SQRT(d) / 2.0::float8	double precision
+SQRT(d) / (5/2.0)	numeric
+SQRT(d) / SQRT(d)	numeric
+5 % 5	integer
+5 % i	integer
+5 % b	bigint
+5 % 2.0	numeric
+5 % d	numeric
+5 % (5/2.0)	numeric
+5 % SQRT(d)	numeric
+i % 5	integer
+i % i	integer
+i % b	bigint
+i % 2.0	numeric
+i % d	numeric
+i % (5/2.0)	numeric
+i % SQRT(d)	numeric
+b % 5	bigint
+b % i	bigint
+b % b	bigint
+b % 2.0	numeric
+b % d	numeric
+b % (5/2.0)	numeric
+b % SQRT(d)	numeric
+2.0 % 5	numeric
+2.0 % i	numeric
+2.0 % b	numeric
+2.0 % 2.0	numeric
+2.0 % d	numeric
+2.0 % (5/2.0)	numeric
+2.0 % SQRT(d)	numeric
+d % 5	numeric
+d % i	numeric
+d % b	numeric
+d % 2.0	numeric
+d % d	numeric
+d % (5/2.0)	numeric
+d % SQRT(d)	numeric
+(5/2.0) % 5	numeric
+(5/2.0) % i	numeric
+(5/2.0) % b	numeric
+(5/2.0) % 2.0	numeric
+(5/2.0) % d	numeric
+(5/2.0) % (5/2.0)	numeric
+(5/2.0) % SQRT(d)	numeric
+SQRT(d) % 5	numeric
+SQRT(d) % i	numeric
+SQRT(d) % b	numeric
+SQRT(d) % 2.0	numeric
+SQRT(d) % d	numeric
+SQRT(d) % (5/2.0)	numeric
+SQRT(d) % SQRT(d)	numeric
+-(5)	integer
+-i	integer
+-b	bigint
+-(2.0)	numeric
+-d	numeric
+-f	double precision
+-(2.0::float8)	double precision
+-(5/2.0)	numeric
+-SQRT(d)	numeric
+ABS(5)	integer
+ABS(i)	integer
+ABS(2.0)	numeric
+ABS(d)	numeric
+ABS(f)	double precision
+ABS((5/2.0))	numeric
+ABS(SQRT(d))	numeric
+CEIL(5)	double precision
+CEIL(i)	double precision
+CEIL(2.0)	numeric
+CEIL(d)	numeric
+CEIL(f)	double precision
+CEIL((5/2.0))	numeric
+CEIL(SQRT(d))	numeric
+CEILING(5)	double precision
+CEILING(i)	double precision
+CEILING(2.0)	numeric
+CEILING(d)	numeric
+CEILING(f)	double precision
+CEILING((5/2.0))	numeric
+CEILING(SQRT(d))	numeric
+FLOOR(5)	double precision
+FLOOR(i)	double precision
+FLOOR(2.0)	numeric
+FLOOR(d)	numeric
+FLOOR(f)	double precision
+FLOOR((5/2.0))	numeric
+FLOOR(SQRT(d))	numeric
+ROUND(5)	double precision
+ROUND(i)	double precision
+ROUND(2.0)	numeric
+ROUND(d)	numeric
+ROUND(f)	double precision
+ROUND((5/2.0))	numeric
+ROUND(SQRT(d))	numeric
+TRUNC(5)	double precision
+TRUNC(i)	double precision
+TRUNC(2.0)	numeric
+TRUNC(d)	numeric
+TRUNC(f)	double precision
+TRUNC((5/2.0))	numeric
+TRUNC(SQRT(d))	numeric
+SIGN(5)	double precision
+SIGN(i)	double precision
+SIGN(2.0)	numeric
+SIGN(d)	numeric
+SIGN(f)	double precision
+SIGN((5/2.0))	numeric
+SIGN(SQRT(d))	numeric
+SQRT(5)	double precision
+SQRT(i)	double precision
+SQRT(2.0)	numeric
+SQRT(d)	numeric
+SQRT(f)	double precision
+SQRT((5/2.0))	numeric
+SQRT(SQRT(d))	numeric
+EXP(5)	double precision
+EXP(i)	double precision
+EXP(2.0)	numeric
+EXP(d)	numeric
+EXP(f)	double precision
+EXP((5/2.0))	numeric
+EXP(SQRT(d))	numeric
+LN(5)	double precision
+LN(i)	double precision
+LN(2.0)	numeric
+LN(d)	numeric
+LN(f)	double precision
+LN((5/2.0))	numeric
+LN(SQRT(d))	numeric
+LOG(5)	double precision
+LOG(i)	double precision
+LOG(2.0)	numeric
+LOG(d)	numeric
+LOG(f)	double precision
+LOG((5/2.0))	numeric
+LOG(SQRT(d))	numeric
+LOG10(5)	double precision
+LOG10(i)	double precision
+LOG10(2.0)	numeric
+LOG10(d)	numeric
+LOG10(f)	double precision
+LOG10((5/2.0))	numeric
+LOG10(SQRT(d))	numeric
+CBRT(5)	double precision
+CBRT(i)	double precision
+CBRT(2.0)	double precision
+CBRT(d)	double precision
+CBRT(f)	double precision
+CBRT((5/2.0))	double precision
+CBRT(SQRT(d))	double precision
+DEGREES(5)	double precision
+DEGREES(i)	double precision
+DEGREES(2.0)	double precision
+DEGREES(d)	double precision
+DEGREES(f)	double precision
+DEGREES((5/2.0))	double precision
+DEGREES(SQRT(d))	double precision
+RADIANS(5)	double precision
+RADIANS(i)	double precision
+RADIANS(2.0)	double precision
+RADIANS(d)	double precision
+RADIANS(f)	double precision
+RADIANS((5/2.0))	double precision
+RADIANS(SQRT(d))	double precision
+SIN(5)	double precision
+SIN(i)	double precision
+SIN(2.0)	double precision
+SIN(d)	double precision
+SIN(f)	double precision
+SIN((5/2.0))	double precision
+SIN(SQRT(d))	double precision
+COS(5)	double precision
+COS(i)	double precision
+COS(2.0)	double precision
+COS(d)	double precision
+COS(f)	double precision
+COS((5/2.0))	double precision
+COS(SQRT(d))	double precision
+TAN(5)	double precision
+TAN(i)	double precision
+TAN(2.0)	double precision
+TAN(d)	double precision
+TAN(f)	double precision
+TAN((5/2.0))	double precision
+TAN(SQRT(d))	double precision
+ATAN(5)	double precision
+ATAN(i)	double precision
+ATAN(2.0)	double precision
+ATAN(d)	double precision
+ATAN(f)	double precision
+ATAN((5/2.0))	double precision
+ATAN(SQRT(d))	double precision
+POWER(5, 2)	double precision
+POWER(5, 1.0)	numeric
+POWER(5, f)	double precision
+POWER(i, 2)	double precision
+POWER(i, 1.0)	numeric
+POWER(i, f)	double precision
+POWER(2.0, 2)	numeric
+POWER(2.0, 1.0)	numeric
+POWER(2.0, f)	double precision
+POWER(d, 2)	numeric
+POWER(d, 1.0)	numeric
+POWER(d, f)	double precision
+POWER(f, 2)	double precision
+POWER(f, 1.0)	double precision
+POWER(f, f)	double precision
+POWER((5/2.0), 2)	numeric
+POWER((5/2.0), 1.0)	numeric
+POWER((5/2.0), f)	double precision
+POWER(SQRT(d), 2)	numeric
+POWER(SQRT(d), 1.0)	numeric
+POWER(SQRT(d), f)	double precision
+POW(5, 2)	double precision
+POW(5, 1.0)	numeric
+POW(5, f)	double precision
+POW(i, 2)	double precision
+POW(i, 1.0)	numeric
+POW(i, f)	double precision
+POW(2.0, 2)	numeric
+POW(2.0, 1.0)	numeric
+POW(2.0, f)	double precision
+POW(d, 2)	numeric
+POW(d, 1.0)	numeric
+POW(d, f)	double precision
+POW(f, 2)	double precision
+POW(f, 1.0)	double precision
+POW(f, f)	double precision
+POW((5/2.0), 2)	numeric
+POW((5/2.0), 1.0)	numeric
+POW((5/2.0), f)	double precision
+POW(SQRT(d), 2)	numeric
+POW(SQRT(d), 1.0)	numeric
+POW(SQRT(d), f)	double precision
+MOD(5, 2)	integer
+MOD(5, 1.0)	numeric
+MOD(i, 2)	integer
+MOD(i, 1.0)	numeric
+MOD(2.0, 2)	numeric
+MOD(2.0, 1.0)	numeric
+MOD(d, 2)	numeric
+MOD(d, 1.0)	numeric
+MOD((5/2.0), 2)	numeric
+MOD((5/2.0), 1.0)	numeric
+MOD(SQRT(d), 2)	numeric
+MOD(SQRT(d), 1.0)	numeric
+LOG(5, 2)	numeric
+LOG(5, 1.0)	numeric
+LOG(i, 2)	numeric
+LOG(i, 1.0)	numeric
+LOG(2.0, 2)	numeric
+LOG(2.0, 1.0)	numeric
+LOG(d, 2)	numeric
+LOG(d, 1.0)	numeric
+LOG((5/2.0), 2)	numeric
+LOG((5/2.0), 1.0)	numeric
+LOG(SQRT(d), 2)	numeric
+LOG(SQRT(d), 1.0)	numeric
+ROUND(5, 2)	numeric
+ROUND(i, 2)	numeric
+ROUND(2.0, 2)	numeric
+ROUND(d, 2)	numeric
+ROUND((5/2.0), 2)	numeric
+ROUND(SQRT(d), 2)	numeric
+TRUNC(5, 2)	numeric
+TRUNC(i, 2)	numeric
+TRUNC(2.0, 2)	numeric
+TRUNC(d, 2)	numeric
+TRUNC((5/2.0), 2)	numeric
+TRUNC(SQRT(d), 2)	numeric
+ATAN2(5, 2)	double precision
+ATAN2(5, 1.0)	double precision
+ATAN2(5, f)	double precision
+ATAN2(i, 2)	double precision
+ATAN2(i, 1.0)	double precision
+ATAN2(i, f)	double precision
+ATAN2(2.0, 2)	double precision
+ATAN2(2.0, 1.0)	double precision
+ATAN2(2.0, f)	double precision
+ATAN2(d, 2)	double precision
+ATAN2(d, 1.0)	double precision
+ATAN2(d, f)	double precision
+ATAN2(f, 2)	double precision
+ATAN2(f, 1.0)	double precision
+ATAN2(f, f)	double precision
+ATAN2((5/2.0), 2)	double precision
+ATAN2((5/2.0), 1.0)	double precision
+ATAN2((5/2.0), f)	double precision
+ATAN2(SQRT(d), 2)	double precision
+ATAN2(SQRT(d), 1.0)	double precision
+ATAN2(SQRT(d), f)	double precision
+PI()	double precision
+RANDOM()	double precision
+COALESCE(5/2.0, 1)	numeric
+COALESCE(5/2.0, f)	double precision
+NULLIF(5/2.0, 1)	numeric
+GREATEST(5/2.0, 1)	numeric
+LEAST(5/2.0, d)	numeric
+CASE WHEN true THEN 5/2.0 ELSE 1 END	numeric
+CASE WHEN true THEN SQRT(d) ELSE f END	double precision
+EXTRACT(SECOND FROM TIMESTAMP '2020-01-01 00:00:02.5')	numeric
+EXTRACT(EPOCH FROM TIMESTAMP '1970-01-01 00:00:02.5')	numeric
+DATE_PART('second', TIMESTAMP '2020-01-01 00:00:02.5')	double precision
+CAST(5/2.0 AS NUMERIC)	numeric
+(5/2.0)::numeric	numeric
+CAST(f AS NUMERIC)	numeric
+5/2.0::float8	double precision
