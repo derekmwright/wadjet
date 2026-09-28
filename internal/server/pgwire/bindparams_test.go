@@ -26,9 +26,15 @@ func TestRenderParamText(t *testing.T) {
 		{"int8", "9007199254740993", oidInt8, "9007199254740993"},
 		{"int2", "300", oidInt2, "300"},
 		{"oid", "16384", oidOID, "16384"},
-		{"float8", "90.5", oidFloat8, "90.5"},
-		{"float4", "1.5", oidFloat4, "1.5"},
-		{"float exponent", "1e3", oidFloat8, "1e3"},
+		// A float is its own type, not the numeric a bare number reads as
+		// (#1353 round 4).
+		{"float8", "90.5", oidFloat8, "CAST('90.5' AS DOUBLE PRECISION)"},
+		{"float4", "1.5", oidFloat4, "CAST('1.5' AS REAL)"},
+		{"float exponent", "1e3", oidFloat8, "CAST('1e3' AS DOUBLE PRECISION)"},
+		// An integer parameter's input is an integer's spelling (int4in): a
+		// fraction goes to the target's input rule quoted, which is 22P02.
+		{"int4 fraction stays quoted", "2.5", oidInt4, "'2.5'"},
+		{"int8 exponent stays quoted", "1e3", oidInt8, "'1e3'"},
 		{"numeric", "12345.6789", oidNumeric, "12345.6789"},
 		// FIX 5: ParseFloat("1e400") fails with strconv.ErrRange — the
 		// grammar accepted it, only float64's exponent range (overflow to
@@ -118,8 +124,8 @@ func TestRenderParamBinary(t *testing.T) {
 		{"int8", be64(9007199254740993), oidInt8, "9007199254740993"},
 		{"int8 min", be64(math.MinInt64), oidInt8, "-9223372036854775808"},
 		{"oid", be32(-1), oidOID, "4294967295"}, // oid is unsigned
-		{"float8", be64(int64(math.Float64bits(90.5))), oidFloat8, "90.5"},
-		{"float4", be32(int32(math.Float32bits(1.5))), oidFloat4, "1.5"},
+		{"float8", be64(int64(math.Float64bits(90.5))), oidFloat8, "CAST('90.5' AS DOUBLE PRECISION)"},
+		{"float4", be32(int32(math.Float32bits(1.5))), oidFloat4, "CAST('1.5' AS REAL)"},
 		{"bool true", []byte{1}, oidBool, "true"},
 		{"bool false", []byte{0}, oidBool, "false"},
 		// Binary date/time count from 2000-01-01 UTC, days for date and
@@ -486,7 +492,8 @@ func TestRenderBinaryNumericResourceExhaustionShape(t *testing.T) {
 }
 
 // TestRenderParamFloatSpecials keeps Inf and NaN, which have no unquoted SQL
-// spelling, from being spliced in bare.
+// spelling, from being spliced in bare: they go out as a quoted float8
+// literal's text.
 func TestRenderParamFloatSpecials(t *testing.T) {
 	for _, v := range []float64{math.Inf(1), math.Inf(-1), math.NaN()} {
 		raw := binary.BigEndian.AppendUint64(nil, math.Float64bits(v))
@@ -494,7 +501,7 @@ func TestRenderParamFloatSpecials(t *testing.T) {
 		if err != nil {
 			t.Fatalf("renderParam(%v): %v", v, err)
 		}
-		if !strings.HasPrefix(got, "'") {
+		if !strings.HasPrefix(got, "CAST('") {
 			t.Fatalf("renderParam(%v) = %s, want a quoted literal", v, got)
 		}
 	}

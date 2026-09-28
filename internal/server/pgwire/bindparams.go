@@ -69,6 +69,27 @@ func numericOID(oid uint32) bool {
 	return false
 }
 
+// integerOID reports the integer parameter types, whose text input is an
+// integer's spelling only (PostgreSQL's int2in/int4in/int8in/oidin).
+func integerOID(oid uint32) bool {
+	switch oid {
+	case oidInt2, oidInt4, oidInt8, oidOID:
+		return true
+	}
+	return false
+}
+
+// floatParamLiteral is a float parameter's text as a literal of its own type:
+// `CAST('2.5' AS DOUBLE PRECISION)` (REAL for float4). The type is the
+// parameter's, and a bare number is not one — it is a numeric literal here as
+// in PostgreSQL.
+func floatParamLiteral(text string, oid uint32) string {
+	if oid == oidFloat4 {
+		return "CAST(" + quoteLiteral(text) + " AS REAL)"
+	}
+	return "CAST(" + quoteLiteral(text) + " AS DOUBLE PRECISION)"
+}
+
 // quoteLiteral renders s as a single-quoted SQL string literal. Doubling the
 // single quotes is the whole escape: this lexer reads ” inside a literal as
 // one quote and treats a backslash as an ordinary character (the
@@ -142,6 +163,27 @@ func renderParam(raw []byte, binaryFmt bool, oid uint32) (string, error) {
 // own text representation of the value.
 func renderTextParam(s string, oid uint32) (string, error) {
 	switch {
+	case oid == oidFloat4 || oid == oidFloat8:
+		// A float parameter is a float wherever it lands. Spliced bare, its
+		// text read as a NUMERIC literal (ADR-0024's literal rule), so a
+		// float8 2.5 assigned to an integer column rounded half away from
+		// zero where PostgreSQL rounds a float8 half to even (#1353 round 4:
+		// a MERGE `SET n = $1` bound float8 2.5 stored 3, PostgreSQL 2).
+		if _, err := strconv.ParseFloat(strings.TrimSpace(s), 64); err != nil && !errors.Is(err, strconv.ErrRange) {
+			return quoteLiteral(s), nil
+		}
+		return floatParamLiteral(s, oid), nil
+	case integerOID(oid):
+		// int2in / int4in / int8in: an integer's spelling and nothing else.
+		// A fraction or an exponent went out bare and was read as a
+		// numeric literal, so `SET n = $1` (inferred int4) bound with the
+		// text 2.5 stored 3 where PostgreSQL raises 22P02 at the
+		// parameter's input function; quoted, the target's input rule
+		// raises it here too.
+		if _, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64); err == nil || errors.Is(err, strconv.ErrRange) {
+			return s, nil
+		}
+		return quoteLiteral(s), nil
 	case numericOID(oid):
 		// Confirm it really is a number before writing it unquoted. A range
 		// error (1e400 overflowing to +Inf) still names a syntactically
@@ -274,13 +316,13 @@ func renderBinaryParam(raw []byte, oid uint32) (string, error) {
 		if len(raw) != 4 {
 			return "", fmt.Errorf("float4 parameter has %d bytes, want 4", len(raw))
 		}
-		return formatFloat(float64(math.Float32frombits(binary.BigEndian.Uint32(raw))), 32)
+		return floatParamLiteral(strconv.FormatFloat(float64(math.Float32frombits(binary.BigEndian.Uint32(raw))), 'g', -1, 32), oidFloat4), nil
 
 	case oidFloat8:
 		if len(raw) != 8 {
 			return "", fmt.Errorf("float8 parameter has %d bytes, want 8", len(raw))
 		}
-		return formatFloat(math.Float64frombits(binary.BigEndian.Uint64(raw)), 64)
+		return floatParamLiteral(strconv.FormatFloat(math.Float64frombits(binary.BigEndian.Uint64(raw)), 'g', -1, 64), oidFloat8), nil
 
 	case oidDate:
 		if len(raw) != 4 {
@@ -472,15 +514,6 @@ func renderBinaryNumeric(raw []byte) (string, error) {
 	}
 
 	return renderTextParam(b.String(), oidNumeric)
-}
-
-// formatFloat renders a float as an unquoted SQL numeric literal. Infinities
-// and NaN have no unquoted spelling, so they go out quoted.
-func formatFloat(v float64, bits int) (string, error) {
-	if math.IsInf(v, 0) || math.IsNaN(v) {
-		return quoteLiteral(strconv.FormatFloat(v, 'g', -1, bits)), nil
-	}
-	return strconv.FormatFloat(v, 'g', -1, bits), nil
 }
 
 // paramRef is one $N placeholder: its byte range in the statement and the
