@@ -3,6 +3,7 @@
 package sql
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -137,10 +138,14 @@ func (p *selectParser) isKeyword(kw TokenType) bool {
 // countToken reads a LIMIT, OFFSET or FETCH count or a TABLESAMPLE
 // percentage: a number, or `CAST('<number>' AS DOUBLE PRECISION | REAL)`,
 // the literal pgwire's Bind renders a float4/float8 parameter as. The cast
-// reads as the number its quoted text lexes to, so a float parameter lands in
-// these positions exactly as the bare number it stands for; text that does
-// not lex to one number token (`-1`, `NaN`) is the syntax error the bare
-// spelling is, never a count this parser invents.
+// reads as the number its quoted text stands for, so a float parameter lands
+// in these positions exactly as the bare number it stands for. The text must
+// be PostgreSQL's float input (float8in: surrounding whitespace and one
+// leading `+` allowed) AND lex to one unsigned number token: the SQL lexer's
+// number grammar alone is wider than the float input (`0b11`, `0o7`, `1_0`)
+// and it skips a comment (`1--`, `1/*x*/`), each of which PostgreSQL's cast
+// refuses with 22P02. Anything else (`-1`, `NaN`, those spellings) is the
+// syntax error the bare spelling is, never a count this parser invents.
 func (p *selectParser) countToken() (token, error) {
 	if p.cur.typ == TokenKWCast && p.peekN(1) == TokenLParen && p.peekN(2) == TokenString && p.peekN(3) == TokenKWAs {
 		width := 0
@@ -151,9 +156,14 @@ func (p *selectParser) countToken() (token, error) {
 			width = 1
 		}
 		if width > 0 {
-			l := newLexer(p.peekTok(2).val)
+			text := strings.Trim(p.peekTok(2).val, " \t\n\v\f\r")
+			// ParseFloat's range error is still a number (the bare spelling's
+			// downstream answer); its Go-only `_` digit separator is not.
+			_, perr := strconv.ParseFloat(text, 64)
+			isFloat := (perr == nil || errors.Is(perr, strconv.ErrRange)) && !strings.Contains(text, "_")
+			l := newLexer(strings.TrimPrefix(text, "+"))
 			num, end := l.nextToken(), l.nextToken()
-			if num.typ == TokenNumber && end.typ == TokenEOF {
+			if isFloat && num.typ == TokenNumber && end.typ == TokenEOF {
 				for i := 0; i < 5+width; i++ {
 					p.advance()
 				}
