@@ -59,7 +59,7 @@ func (p *Planner) iterateRecursiveCTE(ctx context.Context, cte plansql.CTEDef, a
 
 func (p *Planner) iterateRecursiveCTEAt(ctx context.Context, cte plansql.CTEDef, anchorSQL, recursiveSQL string,
 	widen map[int]int) error {
-	anchorBatches, schema, anchorLits, err := p.runRecursiveArm(ctx, anchorSQL)
+	anchorBatches, schema, anchorLits, anchorPG, err := p.runRecursiveArm(ctx, anchorSQL)
 	if err != nil {
 		return err
 	}
@@ -150,10 +150,10 @@ func (p *Planner) iterateRecursiveCTEAt(ctx context.Context, cte plansql.CTEDef,
 				cte.Name, recursiveIterationLimit))
 		}
 		// Seed the self-reference with the working table.
-		p.cteCache[cte.Name] = &cteMaterialized{schema: schema, coll: work}
+		p.cteCache[cte.Name] = &cteMaterialized{schema: schema, coll: work, pgNumeric: anchorPG}
 		// An error is the STATEMENT's error (#1041): a term that fails on
 		// iteration k does not make iterations 1..k-1 the answer.
-		termBatches, _, termLits, err := p.runRecursiveArm(ctx, recursiveSQL)
+		termBatches, _, termLits, _, err := p.runRecursiveArm(ctx, recursiveSQL)
 		if err != nil {
 			work.Release()
 			return fail(err)
@@ -174,23 +174,26 @@ func (p *Planner) iterateRecursiveCTEAt(ctx context.Context, cte plansql.CTEDef,
 	if err := writer.flush(ctx); err != nil {
 		return fail(err)
 	}
-	p.cteCache[cte.Name] = &cteMaterialized{schema: schema, coll: closure}
+	p.cteCache[cte.Name] = &cteMaterialized{schema: schema, coll: closure, pgNumeric: anchorPG}
 	return nil
 }
 
 // runRecursiveArm plans one arm of a recursive CTE as a statement and runs it,
 // returning its batches and its schema: the batches' own when a row arrived —
 // the runtime saw the vectors — and the PLAN's declaration when none did,
-// because a zero-row arm still has column types.
-func (p *Planner) runRecursiveArm(ctx context.Context, sql string) ([]*batch.RecordBatch, []parquet.Column, recursiveArmLiterals, error) {
+// because a zero-row arm still has column types. The last slice is the plan's
+// numeric category per position (declaredOutputPGNumeric), which no batch
+// carries: the ANCHOR's is the CTE's, as its types are (PostgreSQL types a
+// recursive CTE's columns from its non-recursive term).
+func (p *Planner) runRecursiveArm(ctx context.Context, sql string) ([]*batch.RecordBatch, []parquet.Column, recursiveArmLiterals, []bool, error) {
 	var lits recursiveArmLiterals
 	pq, err := plansql.Parse(sql)
 	if err != nil {
-		return nil, nil, lits, fmt.Errorf("subquery parse error: %w", err)
+		return nil, nil, lits, nil, fmt.Errorf("subquery parse error: %w", err)
 	}
 	info, err := plansql.ExtractSelect(pq)
 	if err != nil {
-		return nil, nil, lits, fmt.Errorf("subquery extract error: %w", err)
+		return nil, nil, lits, nil, fmt.Errorf("subquery extract error: %w", err)
 	}
 	// What this ONE run builds is released when it ends. The plan's Cleanup
 	// is the owner of a join's build reservation and of an IN-set's charge,
@@ -210,7 +213,7 @@ func (p *Planner) runRecursiveArm(ctx context.Context, sql string) ([]*batch.Rec
 	}()
 	source, ops, sink, plan, err := p.buildSubqueryPipelineForPlan(ctx, info)
 	if err != nil {
-		return nil, nil, lits, err
+		return nil, nil, lits, nil, err
 	}
 	cs, ok := sink.(*exec.CollectSink)
 	if !ok {
@@ -220,11 +223,11 @@ func (p *Planner) runRecursiveArm(ctx context.Context, sql string) ([]*batch.Rec
 	cs.SchemaHint = declaredOutputSchema(plan, p.SubqueryOutputColumn)
 	cs.OutputNames = publishedNamesOfProjection(publishedOutputProjectionNode(plan))
 	if err := (&exec.Pipeline{Source: source, Ops: ops, Sink: cs}).Run(ctx); err != nil {
-		return nil, nil, lits, fmt.Errorf("subquery execution error: %w", err)
+		return nil, nil, lits, nil, fmt.Errorf("subquery execution error: %w", err)
 	}
 	schema := append([]parquet.Column(nil), cs.Schema()...)
 	lits = recursiveArmLiteralsOf(plan, len(schema))
-	return cs.Batches(), schema, lits, nil
+	return cs.Batches(), schema, lits, declaredOutputPGNumeric(plan), nil
 }
 
 // recursiveWorkTable holds one iteration's rows under the CTE's schema — its

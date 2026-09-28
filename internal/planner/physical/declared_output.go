@@ -1126,6 +1126,10 @@ type ColDecls struct {
 	// whether SUM over it is bigint or numeric. Set together with
 	// subqueryDecl (withSubqueryDecls) so the two describe one column.
 	subqueryIntWidth func(sql string) (intWidth, bool)
+	// subqueryPGNumeric is subqueryDecl's CATEGORY half: true when the
+	// subquery's FLOAT64 output is numeric in PostgreSQL. Set with the
+	// other two (withSubqueryDecls); nil reads as float8.
+	subqueryPGNumeric func(sql string) bool
 	// PlaceholderTypes is the declared type of each `:scalar_N` deferred
 	// literal, keyed by the placeholder's NAME.
 	//

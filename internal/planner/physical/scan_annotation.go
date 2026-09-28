@@ -5,6 +5,7 @@ package physical
 
 import (
 	"context"
+	"strconv"
 	"strings"
 
 	"github.com/derekmwright/wadjet/internal/planner/logical"
@@ -67,6 +68,7 @@ func (p *Planner) annotateScanColumns(ctx context.Context, node *logical.Node) {
 		if known {
 			if renamed, err := applyFuncColumnAliases(cols, node.FuncColAliases, node.TableAlias); err == nil {
 				stampScanSchema(node, renamed)
+				node.ScanColPGNumeric = tableFuncPGNumeric(node.FuncName, node.FuncArgs, renamed)
 			}
 		}
 	}
@@ -127,6 +129,32 @@ func (p *Planner) annotateScanColumns(ctx context.Context, node *logical.Node) {
 	}
 }
 
+// tableFuncPGNumeric is PostgreSQL's numeric category of a declared table
+// function's columns. `unnest(0.5, 2.5)` publishes the double its literals
+// parse to (inferUnnestType), and the same values as PostgreSQL spells them —
+// `unnest(ARRAY[0.5, 2.5])` — are numeric there: every unquoted literal with a
+// fraction or an exponent is. nil for every other call.
+func tableFuncPGNumeric(funcName string, args []string, cols []parquet.Column) map[string]bool {
+	if !strings.EqualFold(funcName, "unnest") || len(cols) == 0 || cols[0].Type != parquet.TypeFloat64 ||
+		len(args) == 0 || !isNumericLiteralText(args[0]) {
+		return nil
+	}
+	return map[string]bool{strings.ToLower(cols[0].Name): true}
+}
+
+// isNumericLiteralText reports whether s is a number as PostgreSQL's lexer
+// reads one — digits, a point, an exponent, a sign — and not a word
+// strconv.ParseFloat also accepts (`Inf`, `NaN`), which PostgreSQL reads as
+// an identifier.
+func isNumericLiteralText(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" || strings.Trim(s, "0123456789.eE+-") != "" {
+		return false
+	}
+	_, err := strconv.ParseFloat(s, 64)
+	return err == nil
+}
+
 // stampRecursiveReference types a recursive CTE reference from the
 // materialization the planner holds for it — the working table while the
 // fixed point iterates, the closure afterwards — and leaves it untouched when
@@ -143,6 +171,18 @@ func (p *Planner) stampRecursiveReference(node *logical.Node) {
 		return
 	}
 	stampScanSchema(node, mat.schema)
+	// The category the materialization's parquet.Column cannot carry:
+	// `WITH RECURSIVE r(v) AS (SELECT 5 / 2.0 …)` publishes a double that
+	// PostgreSQL types numeric (#1353 round-1 review, B2).
+	node.ScanColPGNumeric = nil
+	for i, c := range mat.schema {
+		if i < len(mat.pgNumeric) && mat.pgNumeric[i] && c.Type == parquet.TypeFloat64 {
+			if node.ScanColPGNumeric == nil {
+				node.ScanColPGNumeric = map[string]bool{}
+			}
+			node.ScanColPGNumeric[strings.ToLower(c.Name)] = true
+		}
+	}
 }
 
 // stampScanSchema records one relation's column list on a Scan node: the names

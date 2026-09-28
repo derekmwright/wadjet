@@ -342,8 +342,13 @@ func (p *Planner) spillManagerIfSet() *memory.SpillManager {
 // one iteration's delta, re-seeded into the cache each fixed-point step.
 type cteMaterialized struct {
 	schema []parquet.Column
-	rows   []map[string]any              // boxed form; nil when coll is set
-	coll   *exec.SpillableBatchCollector // columnar form; nil when rows is set
+	// pgNumeric is PostgreSQL's numeric category per schema position
+	// (declaredOutputPGNumeric of the body that declared it), which a
+	// parquet.Column cannot carry: a recursive reference is stamped from it
+	// (stampRecursiveReference). nil reads as float8.
+	pgNumeric []bool
+	rows      []map[string]any              // boxed form; nil when coll is set
+	coll      *exec.SpillableBatchCollector // columnar form; nil when rows is set
 }
 
 // scanCached stores columnar scan results for a table that is scanned multiple

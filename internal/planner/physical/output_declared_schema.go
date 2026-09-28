@@ -28,7 +28,7 @@ func declaredOutputSchema(root *logical.Node,
 	// scalar subquery was declared TEXT beside a bigint arm and the query was
 	// refused 42804 where PostgreSQL answers (#1018 round 5 review, P2).
 	if subqueryDecl == nil {
-		subqueryDecl, _ = subqueryDeclsOf(root)
+		subqueryDecl, _, _ = subqueryDeclsOf(root)
 	}
 	if cols, ok := setOpDeclaredOutputSchema(root); ok {
 		return cols

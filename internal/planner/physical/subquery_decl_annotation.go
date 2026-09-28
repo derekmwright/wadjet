@@ -130,13 +130,14 @@ func collectSubquerySQL(e plansql.Node, out *[]string) {
 	}
 }
 
-// subqueryDeclsOf turns a node's stamped map into the two resolvers ColDecls
-// carries: the declared COLUMN and its PostgreSQL integer WIDTH. Both are nil
+// subqueryDeclsOf turns a node's stamped map into the three resolvers ColDecls
+// carries: the declared COLUMN, its PostgreSQL integer WIDTH and its numeric
+// CATEGORY (a FLOAT64 PostgreSQL types numeric). All are nil
 // when nothing was stamped, which is the "this caller cannot ask" the
 // SubqueryNode arms already decline on.
-func subqueryDeclsOf(n *logical.Node) (func(string) (parquet.Column, bool), func(string) (intWidth, bool)) {
+func subqueryDeclsOf(n *logical.Node) (func(string) (parquet.Column, bool), func(string) (intWidth, bool), func(string) bool) {
 	if n == nil || len(n.SubqueryColDecls) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	m := n.SubqueryColDecls
 	return func(sql string) (parquet.Column, bool) {
@@ -158,18 +159,21 @@ func subqueryDeclsOf(n *logical.Node) (func(string) (parquet.Column, bool), func
 				return intWidth8, true
 			}
 			return intWidthUnknown, false
+		}, func(sql string) bool {
+			return m[sql].PGNumeric
 		}
 }
 
 // withSubqueryDecls is decls plus whatever node carries the stamp — the one
 // line every walk needs so a subquery's declaration reaches it.
 func withSubqueryDecls(decls ColDecls, n *logical.Node) ColDecls {
-	d, w := subqueryDeclsOf(n)
+	d, w, pg := subqueryDeclsOf(n)
 	if d == nil {
 		return decls
 	}
 	decls.subqueryDecl = d
 	decls.subqueryIntWidth = w
+	decls.subqueryPGNumeric = pg
 	return decls
 }
 
@@ -210,6 +214,7 @@ func (p *Planner) scalarSubqueryColumnDecl(sql string) (decl logical.SubqueryCol
 			Type: col.Type, Precision: col.Precision, Scale: col.Scale,
 			IntWidth:    p.subqueryOutputIntWidth(sql, col.Type),
 			ElementType: col.ElementType, Fields: col.Fields,
+			PGNumeric: p.subqueryOutputPGNumeric(sql, col.Type),
 		}
 		// A DECIMAL without its scale is not a declaration: a vector built
 		// from it reads every value at the wrong power of ten, which is why
@@ -226,6 +231,22 @@ func (p *Planner) scalarSubqueryColumnDecl(sql string) (decl logical.SubqueryCol
 type subqueryDeclEntry struct {
 	decl logical.SubqueryColumnDecl
 	ok   bool
+}
+
+// subqueryOutputPGNumeric is PostgreSQL's numeric CATEGORY of a scalar
+// subquery's single FLOAT64 output column, read off the subquery's own plan
+// with the declaredOutputPGNumeric every INSERT … SELECT reads: `(SELECT
+// SQRT(k2.d) FROM k k2 WHERE …)` is computed in a double and is numeric in
+// PostgreSQL. The bare parquet.Column the type half returns cannot say it, so
+// a subquery with a FROM rounded as a float8 into an integer column (#1353
+// round-1 review, B2). false — float8, the answer it had — for any other
+// carrier and for a plan the walk cannot read.
+func (p *Planner) subqueryOutputPGNumeric(sql string, carrier parquet.TypeID) bool {
+	if carrier != parquet.TypeFloat64 {
+		return false
+	}
+	pg := declaredOutputPGNumeric(p.subqueryLogicalPlan(sql))
+	return len(pg) == 1 && pg[0]
 }
 
 // subqueryOutputIntWidth is the declared INTEGER WIDTH of a scalar subquery's

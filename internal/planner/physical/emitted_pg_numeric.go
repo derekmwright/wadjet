@@ -27,6 +27,11 @@ func emittedColPGNumeric(n *logical.Node) map[string]bool {
 		return nil
 	}
 	switch n.Type {
+	case logical.NodeScan:
+		// A catalog table's float column is float8; a relation the planner
+		// types itself — a recursive CTE reference, unnest over numeric
+		// literals — says otherwise here (annotateScanColumns).
+		return n.ScanColPGNumeric
 	case logical.NodeProject:
 		if len(n.Children) != 1 {
 			return nil
