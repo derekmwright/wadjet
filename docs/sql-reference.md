@@ -1027,7 +1027,8 @@ CTE's column, a TEXT literal, an expression over text (`upper(name)`,
 selects `CAST(x AS TEXT)` and the text provably converts (x renders every
 value as the compared type does: the same type, two integer kinds, or a
 PORT or PROTOCOL against a double precision value), which is kept and
-compares through the value's text (ADR-0012 §5, #1308, #1369, #1370,
+compares through the value's text (ADR-0012 catalog,
+[comparison-membership](adr/0012-divergences/comparison-membership.md), #1308, #1369, #1370,
 #1374):
 
 ```sql
@@ -2952,7 +2953,8 @@ See **Limitations** for the `USING` and `NATURAL JOIN` shapes that are refused.
 An `ON` clause may name any relation the `FROM` clause has ALREADY DECLARED at
 the point it is written — that item's own table, every join of that item up
 to and including this one, and (a deliberate DuckDB-matching superset
-PostgreSQL does not share, ADR-0012 §5 #617) an EARLIER comma-separated `FROM`
+PostgreSQL does not share, ADR-0012 catalog
+[names-scopes](adr/0012-divergences/names-scopes.md), #617) an EARLIER comma-separated `FROM`
 item. Only a relation the FROM clause has not reached YET — a later join, or a
 later comma item — is out of scope:
 

@@ -18,7 +18,7 @@ import (
 // origin (#1308). Two typed/text column join keys refuse — an explicit JOIN's
 // ON and a subquery body's correlated key alike; recorded numeric-literal
 // readings remain accepted. Number/boolean pairs refuse 42883. Scalar function return
-// labels alone do not prove a class. See ADR-0012 §5, #1073 and #1216.
+// labels alone do not prove a class. See docs/adr/0012-divergences/comparison-membership.md, #1073 and #1216.
 type cmpClass int
 
 const (
@@ -660,13 +660,13 @@ func (c *comparisonTyper) inPair(left, member plansql.Node, op string) error {
 // operation. A column body becomes the build side of a semi/anti join whose
 // (typed, text) key is never converted, and any other body is a filter whose
 // DAG casts the text to the typed side while the single-process arms compare
-// it as it stands (ADR-0012 §5, #1308, #1073). So the pair is kept only where
+// it as it stands (docs/adr/0012-divergences/comparison-membership.md, #1308, #1073). So the pair is kept only where
 // the text PROVABLY converts: made by a CAST from a value rendered as the
 // typed side renders it (textOriginConverts), the typed side a kept one
 // (textConversionAnswers). A set-operation body carries the origin
 // validateBlock's merge kept — the LEFT arm's when both arms share a
 // comparisonClass — so a later arm of that class is not judged on its own
-// (a recorded gap, ADR-0012 §5). Anything else is PostgreSQL's 42883, in the
+// (a recorded gap, docs/adr/0012-divergences/comparison-membership.md). Anything else is PostgreSQL's 42883, in the
 // explicit JOIN's words.
 //
 // Both operands are read WHATEVER their shape: one the structural walk does

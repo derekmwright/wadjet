@@ -3122,7 +3122,7 @@ func postgresSemanticsCases() []pgCase {
 	// aggregate for — `numeric` and the three that map onto `inet`. It has
 	// none for `uuid`, `macaddr`, `bytea` or `boolean` (verified live on
 	// postgres:17-alpine: each errors with "function min(...) does not
-	// exist"), so those are Wadjet extensions in the sense ADR-0012 §5
+	// exist"), so those are Wadjet extensions in the sense docs/adr/0012-divergences/aggregates-windows.md
 	// already records for BOOL, and the type-matrix corpus gates them
 	// instead.
 	//

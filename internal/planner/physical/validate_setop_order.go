@@ -16,7 +16,7 @@ import (
 // first-arm selected qualified-column extension. Other qualifiers raise
 // 42P01, unknown output names 42703, and expressions their transform error
 // or 0A000. Output names come from the first arm; an unenumerable output
-// permits only qualifier checking here. See ADR-0012 §5, #1236.
+// permits only qualifier checking here. See docs/adr/0012-divergences/set-operations.md, #1236.
 func (b *binder) refuseSetOpOrderBy(ctx context.Context, info *plansql.SelectInfo) error {
 	if info == nil || info.Union == nil || len(info.OrderBy) == 0 {
 		return nil
@@ -126,7 +126,7 @@ func (r setOpResult) name(ref *plansql.ColRef) bool {
 
 // qualified reports whether `q.col` names a result column the FIRST arm
 // selected as `q.col` under its own name — the one qualified spelling kept as
-// a superset (ADR-0012 §5): PostgreSQL raises 42P01 for every qualifier here,
+// a superset (docs/adr/0012-divergences/set-operations.md): PostgreSQL raises 42P01 for every qualifier here,
 // and the base engine answered this one correctly, identically on all five
 // arms (`SELECT a.id … UNION ALL … ORDER BY a.id DESC`, arc BR round 2). A
 // qualifier naming anything else — nothing, an alias-hidden table, a right

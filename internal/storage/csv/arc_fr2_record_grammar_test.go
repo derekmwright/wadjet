@@ -16,7 +16,7 @@ const pgNull = "\x00NULL"
 // This table compares CSV records with PostgreSQL 17.11 COPY measurements.
 // It covers quoting, whitespace, delimiters, empty fields and record widths.
 // Blank lines, mixed endings and extra trailing empty fields retain the
-// reader extensions recorded in ADR-0012 §5; malformed records carry 22P04.
+// reader extensions recorded in docs/adr/0012-divergences/table-functions.md; malformed records carry 22P04.
 func TestArcFR2CSVRecordGrammarIsPostgreSQLs(t *testing.T) {
 	cells := []struct {
 		name string

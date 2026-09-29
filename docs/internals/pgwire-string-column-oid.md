@@ -23,4 +23,5 @@ for length(), for `||` and for every comparison; this engine has one
 TypeString and none of that, so declaring 1042 would name a type whose three
 defining behaviours it does not implement. `character varying(n)` states
 exactly what the value IS — at most n characters, compared by bytes — and
-the padding residual is recorded in ADR-0012 item 5.
+the padding residual is recorded in the ADR-0012 catalog
+([text, bytes and collation](../adr/0012-divergences/text-collation.md)).

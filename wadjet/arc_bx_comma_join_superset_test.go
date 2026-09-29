@@ -68,7 +68,7 @@ func bxRunRows(t *testing.T, db *DB, sql string) []string {
 
 // A JOIN's ON condition can reference a comma-join sibling: a deliberate
 // DuckDB-matching superset over PostgreSQL, which refuses the reference with
-// 42P01 `invalid reference to FROM-clause entry` (ADR-0012 §5 #617, ruled on
+// 42P01 `invalid reference to FROM-clause entry` (docs/adr/0012-divergences/names-scopes.md #617, ruled on
 // #617). `benchmarks/tpch/duckdb_compare_test.go`'s
 // `CommaJoinOnReferencesEarlierItem` gates the same shape over the TPC-H
 // fixture, live against DuckDB; this is its DuckDB-FREE twin — small

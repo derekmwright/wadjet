@@ -11,7 +11,7 @@ matches the lowered type name exactly, and `varchar(4)` matches no case
 label, so the whole cast fell to `default: return v` and returned its
 operand untouched. A client casting to bound a column's width got a longer
 string than PostgreSQL gives it — a wrong VALUE, not just wrong metadata,
-and ADR-0012 item 5 fixes the order: the length is ENFORCED before it is
+and the ADR-0012 catalog ([text, bytes and collation](../adr/0012-divergences/text-collation.md)) fixes the order: the length is ENFORCED before it is
 DECLARED, because declaring a bound nothing enforces is the first of two
 lies rather than the end of one.
 

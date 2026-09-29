@@ -1371,7 +1371,7 @@ func wireCorpus() []wireCase {
 		// can see what OID it carries — a value oracle reads a right address
 		// under a wrong type and cannot tell. PostgreSQL has min(inet), so
 		// this is gated against a real reference, unlike the four types it has
-		// no aggregate for (ADR-0012 §5).
+		// no aggregate for (docs/adr/0012-divergences/aggregates-windows.md).
 		//
 		// wadjet declares OID 25 (text) for every network column — the
 		// standing network-as-text choice, the same one VECTOR takes — where

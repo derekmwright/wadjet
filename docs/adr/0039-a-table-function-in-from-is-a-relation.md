@@ -15,8 +15,9 @@ plan-time refusal of an input that cannot be opened — #1262 / #1240 / #1260 /
 #1261 / #1245 / #1248 / #1259)
 
 Related: ADR-0034 (the authorization ordering §3 rests on), ADR-0024 (§5's
-declared width and §7's key widening), ADR-0012 §5 (the divergences this
-position leaves, each on the differences page).
+declared width and §7's key widening), ADR-0012 §5 and its catalog
+([table functions and readers](0012-divergences/table-functions.md): the
+divergences this position leaves, each on the differences page).
 
 ## Context
 
@@ -131,7 +132,7 @@ refused**, and the line is drawn by AUTHORIZATION, not by convenience.
    is the empty string, as COPY reads it (arc FR2, #1259, which reads CSV
    with COPY's record grammar and refuses an unterminated quote and a record
    of the wrong width with 22P04, #1248; blank lines and mixed line endings
-   stay answered, ADR-0012 §5). COUNT(*) refuses when the reader reaches the row; a LIMIT that
+   stay answered, [table-functions](0012-divergences/table-functions.md) in the ADR-0012 catalog). COUNT(*) refuses when the reader reaches the row; a LIMIT that
    stops reading before it need not refuse. A key first seen past the sample
    remains absent from the inferred column list.
 

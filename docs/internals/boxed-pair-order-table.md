@@ -22,7 +22,7 @@ The rules, each PostgreSQL's:
     does not exist: text = numeric" — but that is an OVERLOAD RESOLUTION
     failure, and wadjet has one generic comparison operator with no
     overload set to fail resolution against, exactly the situation
-    ADR-0012 item 5 already records for unary minus over a quoted string.
+    the ADR-0012 catalog ([numbers and DECIMAL](../adr/0012-divergences/numeric-decimal.md)) already records for unary minus over a quoted string.
     So the pair gets the STRING column's own rule instead of a reading of
     its digits, which is also what the vectorized kernel answers (#504).
   - A NUMBER against a QUOTED literal: the NUMBER's rule, because

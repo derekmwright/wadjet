@@ -13,7 +13,7 @@ import (
 // calls, returning the first error. A window in HAVING is 42P20 before its
 // OVER clause is resolved; an aggregate in WHERE is 42803. An aggregate
 // belongs to the level of its variables, with no-variable calls owned here.
-// No matching construct returns nil. See ADR-0012 §5, #1205 and #1216.
+// No matching construct returns nil. See docs/adr/0012-divergences/comparison-membership.md, #1205 and #1216.
 func refuseMisplacedCallInOrder(node plansql.Node, scope *colScope, clause string, own *colScope) error {
 	if node == nil {
 		return nil

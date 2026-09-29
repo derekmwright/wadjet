@@ -642,7 +642,7 @@ const pgRealTable = "real_probe"
 // against a real reference. It has NO min/max over `uuid`, `macaddr`, `bytea`
 // or `boolean` (all four error with "function min(...) does not exist"), which
 // is why those four of #569's eight types are gated by the type-matrix corpus
-// and ADR-0012 §5 instead, not here.
+// and docs/adr/0012-divergences/aggregates-windows.md instead, not here.
 const (
 	pgNetTable    = "net_probe"
 	pgNetRows_    = 200

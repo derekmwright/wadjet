@@ -216,7 +216,7 @@ func smKeyOps() []smKeyOp {
 	}
 }
 
-// smTextKept is whether ADR-0012 §5 keeps a `CAST(v AS TEXT)` body of the
+// smTextKept is whether docs/adr/0012-divergences/comparison-membership.md keeps a `CAST(v AS TEXT)` body of the
 // compared value's own type: in a membership (IN family) for the ten kept
 // types, and as a correlated key (EXISTS / LATERAL, the direct comparison's
 // reading) for every type.

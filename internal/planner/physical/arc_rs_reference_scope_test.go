@@ -23,7 +23,7 @@ import (
 // reachable only through an alias, named by its own hidden name; `specified
 // more than once` (42712) — one name, two relations. An ON may additionally
 // name any relation an EARLIER comma-separated FROM item declares — a
-// deliberate DuckDB-matching superset PostgreSQL does not share (ADR-0012 §5
+// deliberate DuckDB-matching superset PostgreSQL does not share (docs/adr/0012-divergences/names-scopes.md
 // #617), marked `onOk/*CommaSibling*` below since PostgreSQL has no answer to
 // assert. Plan-time only, needing no storage; the five-arm table is
 // `coordinator.TestArcRSAQualifiedReferenceNamesOneRelationOnEveryArm`.
@@ -58,7 +58,7 @@ func rsCells() []rsCell {
 		// one edit away from a cell above.
 		//
 		// An ON reaching back to an EARLIER comma-separated FROM item is the
-		// #617 DuckDB-matching superset (ADR-0012 §5), not PostgreSQL-legal —
+		// #617 DuckDB-matching superset (docs/adr/0012-divergences/names-scopes.md), not PostgreSQL-legal —
 		// these three are controls against DuckDB, not PostgreSQL, and stay
 		// here rather than in `state: ""` above only because that field means
 		// "PostgreSQL answers this too." Arc RS (#1220) refused all three
@@ -126,7 +126,7 @@ func rsCells() []rsCell {
 		// A `JOIN … USING` MERGES the joined column into one, so the bare name
 		// is not ambiguous — PostgreSQL answers, and a sort or window key is
 		// the one place this engine already bound it rather than refusing it
-		// (ADR-0012 §5 #655). Resolving a window item's names must not undo
+		// (docs/adr/0012-divergences/names-scopes.md #655). Resolving a window item's names must not undo
 		// that; the contested cell below is the discriminator, where the two
 		// `w` are NOT a merge and 42702 is PostgreSQL's own answer.
 		{"winOk/usingMergedArgument",

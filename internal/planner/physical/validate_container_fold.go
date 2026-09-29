@@ -16,7 +16,7 @@ import (
 // CASE reads ELSE first; the first incompatible arm names the error pair.
 // Different container kinds raise 42804 and differing ROW shapes 42846.
 // Malformed ROW/ARRAY text raises 22P02; valid container text raises 0A000
-// until this fold can convert it. Unknown arm types defer (ADR-0012 §5).
+// until this fold can convert it. Unknown arm types defer (docs/adr/0012-divergences/comparison-membership.md).
 func refuseContainerFold(node plansql.Node, typeOf func(plansql.Node) (parquet.Column, bool)) error {
 	switch n := node.(type) {
 	case nil, *plansql.SubqueryNode, *plansql.ExistsNode:

@@ -21,7 +21,7 @@ import (
 // InSubquery / CorrelatedInSubquery, and the DAG inlines the set as an IN list
 // of the members' spellings (dagplan.materializeInSubquery), so a literal typed
 // only where the single-process arm compiled it met the members as TEXT on the
-// DAG (ADR-0012 §5 names the spellings that missed there). As a CAST in the
+// DAG (docs/adr/0012-divergences/comparison-membership.md names the spellings that missed there). As a CAST in the
 // plan it reaches every carrier typed, read by the type's own input function.
 //
 // It runs from AnnotateScanColumns, which every entry calls and the optimizer

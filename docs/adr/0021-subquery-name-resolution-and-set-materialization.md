@@ -2387,8 +2387,8 @@ are still open, rather than a claim over all of them:
 - Still open, filed: a name supplied by a table function's alias is read as
   outer; a `HAVING` or `LIMIT` inside an `EXISTS` body is ignored; a `LATERAL`
   item in the body answers no rows; a column-alias list over a catalog table
-  and a `USING`-merged column refuse; the case concession of ADR-0012 §5
-  applies to mixed-case names.
+  and a `USING`-merged column refuse; the case concession of the ADR-0012 catalog
+  ([names-scopes](0012-divergences/names-scopes.md)) applies to mixed-case names.
 
 **WHAT MOVES AND WHAT DOES NOT.** The optimized logical plans of all 22
 TPC-H queries, under the catalog annotator, are byte-identical to the ones at
@@ -2562,7 +2562,7 @@ i.k = o.k - 0` does, a cross product filtered, so one predicate shape has one
 answer in both spellings. The bound partitions by the INNER side, which is
 right for any outer-only expression: the inner rows one outer row may match
 are those whose key equals ONE value. A BARE enclosing star is refused, 0A000
-(ADR-0012 §5): a star over a LATERAL is not expanded and would publish the
+([lateral-subqueries](0012-divergences/lateral-subqueries.md) in the ADR-0012 catalog): a star over a LATERAL is not expanded and would publish the
 emitted slot. Projecting the outer expression into a slot of its own so the
 pair becomes a hash key was considered and not taken: it needs a pass-through
 projection over an arbitrary outer subtree on both paths, for a shape the

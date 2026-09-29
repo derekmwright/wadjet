@@ -20,7 +20,7 @@ import (
 // differed by execution arm, not because the value lacked a row ordering.
 // The check belongs in the binder: a DAG fragment compiles only when a task
 // runs, too late for a planning refusal.
-// Untyped operands defer; see ADR-0012 §5 for the exact accepted types and codes.
+// Untyped operands defer; see docs/adr/0012-divergences/comparison-membership.md for the exact accepted types and codes.
 type aggArgClass int
 
 const (
@@ -191,7 +191,7 @@ func refuseAggregateArgument(fc *plansql.FuncCallNode, typeOf func(plansql.Node)
 
 // aggOrderedSet are PostgreSQL's ORDERED-SET aggregates, which this engine
 // also takes in DuckDB's plain call form. Over a number the plain form answers
-// (a kept extension, ADR-0012 §5); where it is refused the state is the one
+// (a kept extension, docs/adr/0012-divergences/comparison-membership.md); where it is refused the state is the one
 // PostgreSQL gives the plain form, 42809 (measured on 17.11: `mode(c_str)`,
 // `percentile_disc(0.5, c_str)`).
 //

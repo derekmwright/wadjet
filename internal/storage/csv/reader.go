@@ -209,7 +209,7 @@ func (r *Reader) nextRecord() (record, error) {
 		// relation has exactly one column, where it is that column's NULL as
 		// COPY reads it. COPY refuses it with 22P04 in a wider file; this
 		// reader skipped it on every path through v0.24.0 — a trailing empty
-		// line ends nearly every exported file — and keeps that (ADR-0012 §5).
+		// line ends nearly every exported file — and keeps that (docs/adr/0012-divergences/table-functions.md).
 		if len(fields) == 1 && nulls != nil && r.width != 1 {
 			continue
 		}
@@ -251,7 +251,7 @@ func (r *Reader) nextRecord() (record, error) {
 		if len(fields) > r.width && emptyTail(fields, nulls, r.width) {
 			// A trailing delimiter (`x,y,`): the extra fields are empty and
 			// unquoted, no value is lost, and exporters write it — kept as
-			// base read it (ADR-0012 §5). COPY refuses it with 22P04.
+			// base read it (docs/adr/0012-divergences/table-functions.md). COPY refuses it with 22P04.
 			fields = fields[:r.width]
 			if nulls != nil {
 				nulls = nulls[:r.width]

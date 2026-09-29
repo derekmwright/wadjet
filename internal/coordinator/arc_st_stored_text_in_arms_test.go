@@ -277,7 +277,7 @@ func stQueries() []stQuery {
 	return out
 }
 
-// stKept is the typed side of a pair ADR-0012 §5 keeps for a membership
+// stKept is the typed side of a pair docs/adr/0012-divergences/comparison-membership.md keeps for a membership
 // against a `CAST(x AS TEXT)` body (textConversionAnswers); DATE, TIMESTAMP
 // and BOOLEAN are 42883 there.
 func stKept(key string) bool { return key != "date" && key != "ts" && key != "bool" }
@@ -348,7 +348,7 @@ func stNeighbourCells() []brArmCell {
 }
 
 // stCrossCastCells are the cross-CAST cells: a
-// kept CAST(x AS TEXT) body must keep by the COMPARED TYPE (ADR-0012 §5:
+// kept CAST(x AS TEXT) body must keep by the COMPARED TYPE (docs/adr/0012-divergences/comparison-membership.md:
 // "of the compared type"), not by comparisonClass, which groups every
 // cmpNumber member together. The axis: same class/different type, both
 // integer kinds (i32 and i64 share every fixture value) — kept, exactly as

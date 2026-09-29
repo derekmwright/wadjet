@@ -2275,7 +2275,7 @@ func (p *selectParser) finishComparison(left Node, op string) (Node, error) {
 // parseBitwise parses PostgreSQL's other-operator band, left associative,
 // below addition and above BETWEEN, IN, LIKE and comparisons. The # operator
 // lowers to bitwise_xor; expression result-width rules retain integer for
-// int4 operands and bigint when an operand is bigint. See ADR-0012 §5/#1179.
+// int4 operands and bigint when an operand is bigint. See docs/adr/0012-divergences/numeric-decimal.md, #1179.
 func (p *selectParser) parseBitwise() (Node, error) {
 	left, err := p.parseAddition()
 	if err != nil {

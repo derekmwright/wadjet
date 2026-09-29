@@ -278,7 +278,7 @@ func smPrecisionCells() []smCell {
 	return out
 }
 
-// smRenderKeptCells are the two `CAST(x AS TEXT)` pairs ADR-0012 §5 keeps
+// smRenderKeptCells are the two `CAST(x AS TEXT)` pairs docs/adr/0012-divergences/comparison-membership.md keeps
 // although their types differ: a float8 against the text of a PORT or a
 // PROTOCOL. Every value of either renders as its float8 does (an integer
 // in 0..65535), so the membership that converts the text and the EXISTS

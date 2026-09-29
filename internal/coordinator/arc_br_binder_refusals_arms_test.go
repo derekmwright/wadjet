@@ -84,7 +84,7 @@ func brArmCells() []brArmCell {
 		{name: "1236/qualifierNamesNothing",
 			sql:   "SELECT a.id FROM lat_ord a UNION ALL SELECT b.id FROM lat_item b ORDER BY zz.id",
 			state: "42P01", msg: `missing FROM-clause entry for table "zz"`},
-		// Kept superset (ADR-0012 §5): the FIRST arm's selected `a.id`, in
+		// Kept superset (docs/adr/0012-divergences/set-operations.md): the FIRST arm's selected `a.id`, in
 		// ORDER — base answered this, correctly, on all five arms.
 		{name: "1236ok/qualifierNamesFirstArmsColumnDesc",
 			sql:     "SELECT a.id FROM lat_ord a UNION ALL SELECT b.id FROM lat_item b ORDER BY a.id DESC",
@@ -269,7 +269,7 @@ func brArmCells() []brArmCell {
 // brAggregateCells is the aggregate seam x the 22-type matrix on five arms
 // (#1249, #1061): every aggregate the parser knows over every column type,
 // refused where PostgreSQL 17.11 has no overload and answered — identically
-// on every arm — where it has one (or where ADR-0012 §5 records the wider
+// on every arm — where it has one (or where docs/adr/0012-divergences/comparison-membership.md records the wider
 // set: MIN/MAX over BOOL, UUID, MACADDR, BYTEA, MAP and VECTOR). The accepted
 // sets are written out from the measurement, not derived from the rule.
 func brAggregateCells() []brArmCell {
@@ -294,7 +294,7 @@ func brAggregateCells() []brArmCell {
 		case "bool_and", "bool_or", "every":
 			return c == "c_bool"
 		case "string_agg":
-			// Text, and the renderings kept per type (ADR-0012 §5).
+			// Text, and the renderings kept per type (docs/adr/0012-divergences/comparison-membership.md).
 			switch c {
 			case "c_ts", "c_bytes", "c_arr", "c_row", "c_rownest", "c_map", "c_vec":
 				return false
@@ -424,7 +424,7 @@ func brComparisonCells() []brArmCell {
 		{"c_ipv6", "inet"}, {"c_cidr", "inet"}, {"c_mac", "mac"}, {"c_port", "n"},
 		{"c_proto", "n"}, {"c_dur", "n"}, {"c_uuid", "uuid"}, {"c_date", "time"}, {"c_dec", "n"},
 	}
-	// The kept text pairs (ADR-0012 §5), from the base measurement:
+	// The kept text pairs (docs/adr/0012-divergences/comparison-membership.md), from the base measurement:
 	// {direct, IN (subquery)}.
 	textKeep := map[string][2]bool{
 		"c_i32": {true, true}, "c_i64": {true, true}, "c_f64": {true, true}, "c_dec": {true, true},
@@ -563,7 +563,7 @@ func brComparisonCells() []brArmCell {
 			want: "rows=2 1 | 2"},
 		brArmCell{name: "cmpOk/floatAgainstInteger", sql: "SELECT o.id FROM lat_ord o WHERE o.total = o.id", want: "rows=0 "},
 		brArmCell{name: "cmpOk/unknownLiteral", sql: "SELECT o.id FROM lat_ord o WHERE o.customer = 'Bob'", want: "rows=1 2"},
-		// The recorded literal superset (ADR-0012 §5): an unquoted number
+		// The recorded literal superset (docs/adr/0012-divergences/comparison-membership.md): an unquoted number
 		// against text reads the number's text, which is PostgreSQL's reading
 		// of the QUOTED literal — `customer IN ('1', '2')` is 0 rows there.
 		brArmCell{name: "cmpOk/textInNumberLiteralList", sql: "SELECT o.id FROM lat_ord o WHERE o.customer IN (1, 2)",

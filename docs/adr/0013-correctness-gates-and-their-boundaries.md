@@ -88,7 +88,8 @@ named mechanism.
 7. **Retired 2026-09-24 (arc BR).** A plain `MODE(text_column)` is now
    refused with `42809` (`WITHIN GROUP is required`); it is no longer a NULL
    result or an accepted difference between execution paths. Plain numeric
-   calls remain a recorded extension (ADR-0012 §5).
+   calls remain a recorded extension (ADR-0012 catalog,
+   [comparison-membership](0012-divergences/comparison-membership.md)).
 8. **Concurrent load produces false failures.** Coordinator tests fail with
    `workers failed to register within 15s` and `context deadline exceeded`
    under heavy parallel load — never a wrong row. Test output from a busy

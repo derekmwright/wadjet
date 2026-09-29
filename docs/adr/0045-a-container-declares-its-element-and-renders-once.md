@@ -257,7 +257,8 @@ psql).
 
 ## Consequences
 
-Recorded divergences (docs/postgres-differences.md, ADR-0012 §5): a nested
+Recorded divergences (docs/postgres-differences.md, the ADR-0012 catalog's
+[containers](0012-divergences/containers.md) family): a nested
 array, an array of ROW or MAP, a ROW and a MAP declare OID 25 (MAP renders
 `{a: 1, b: 2}`; PostgreSQL has no MAP); a network-type array is `text[]`
 (PostgreSQL `inet[]`); `x::int[]` is `bigint[]` (ADR-0012 item 12); a

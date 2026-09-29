@@ -13,7 +13,7 @@ import (
 // An ON clause sees relations declared so far, including an earlier comma
 // sibling, but not a later join or comma item. Alias-hidden, duplicate and
 // unknown qualifiers keep their named refusals. The earlier-comma extension
-// is recorded in ADR-0012 §5 (#617); #1220 retains the later-reference rule.
+// is recorded in docs/adr/0012-divergences/names-scopes.md (#617); #1220 retains the later-reference rule.
 // The 42P01 DETAIL/HINT text is verbatim because clients, including
 // SQLancer's getCommonFetchErrors, match it.
 
@@ -113,7 +113,7 @@ func (c *relationCensus) noteAliasedTable(name, alias string) {
 	// SQLancer's expected-error list carries that one and not this (measured:
 	// 178 of 200 generated databases stopped on it). The motivating example,
 	// `FROM t0, t3, t1 JOIN t2 ON t3.c4`, is itself an EARLIER comma sibling
-	// of `t2`'s join now (ADR-0012 §5 #617, the BX hotfix) and so answers —
+	// of `t2`'s join now (docs/adr/0012-divergences/names-scopes.md #617, the BX hotfix) and so answers —
 	// this guard's remaining reach is WHERE/SELECT/etc. positions and a
 	// relation a later join or comma item introduces, where an unaliased name
 	// stays genuinely out of scope.
@@ -149,7 +149,7 @@ func (c *relationCensus) declaredAt(qual string) (int, bool) {
 // clause has already declared by the point it is written — the item's own
 // table, every join of that item up to and including this one, AND an
 // earlier comma-separated FROM item. That last part is a deliberate
-// DuckDB-matching superset PostgreSQL does not share (ADR-0012 §5 #617):
+// DuckDB-matching superset PostgreSQL does not share (docs/adr/0012-divergences/names-scopes.md #617):
 // `FROM a, b JOIN c ON a.k = c.k` answers here. Only what is written LATER —
 // a relation a later join or a later comma item introduces — is out of
 // scope, because the parser has not read it yet.

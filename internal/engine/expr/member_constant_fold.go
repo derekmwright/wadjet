@@ -19,7 +19,7 @@ import (
 // `CAST(CAST('…' AS TEXT) AS NUMERIC)`, `CAST(14 AS NUMERIC)` — is the seam's
 // "unquoted constant" row: PostgreSQL computes the exact numeric its constants
 // spell, while ADR-0024 evaluates these forms as a double here, so the digits
-// were gone before the membership saw them (ADR-0012 §5, #1372).
+// were gone before the membership saw them (docs/adr/0012-divergences/comparison-membership.md, #1372).
 //
 // memberConstantProbe folds such an operand at plan time, exactly (math/big),
 // and types the RESULT by memberNumericType (batch.DecimalValueType): `CASE

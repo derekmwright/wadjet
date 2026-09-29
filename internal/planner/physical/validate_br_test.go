@@ -168,7 +168,7 @@ func TestArcBRSetOperationOrderByNamesAResultColumn(t *testing.T) {
 	runBRCells(t, []brCell{
 		{u + "zz.id", "42P01", `missing FROM-clause entry for table "zz"`},
 		{u + "lat_ord.id", "42P01", `missing FROM-clause entry for table "lat_ord"`},
-		// Kept superset: the first arm's selected `a.id` (ADR-0012 §5).
+		// Kept superset: the first arm's selected `a.id` (docs/adr/0012-divergences/set-operations.md).
 		{u + "a.id", "", ""},
 		{u + "a.id DESC", "", ""},
 		{`SELECT a.id AS v FROM lat_ord a UNION ALL SELECT b.id FROM lat_item b ORDER BY a.id`,
@@ -378,7 +378,7 @@ func TestArcBRComparisonOperandClassesMatchPostgres(t *testing.T) {
 		"c_ts": "time", "c_date": "time", "c_ipv4": "inet", "c_ipv6": "inet", "c_cidr": "inet",
 		"c_mac": "mac", "c_uuid": "uuid",
 	}
-	// The kept text pairs (ADR-0012 §5), written out from the base
+	// The kept text pairs (docs/adr/0012-divergences/comparison-membership.md), written out from the base
 	// measurement (br_codex/corpus.json text*/): {direct / JOIN / IN list,
 	// IN (subquery)} answer where one conversion answered the same on every
 	// arm. A body that selects a plain COLUMN keeps no text reading for any
@@ -488,7 +488,7 @@ func TestArcBRComparisonOperandClassesMatchPostgres(t *testing.T) {
 		brCell{"SELECT c_arr[1] = c_str AS v FROM tm", "", ""},
 		brCell{"SELECT c_map['k'] = c_i64 AS v FROM tm", "", ""},
 		brCell{"SELECT o.id FROM lat_ord o WHERE o.total > 0 AND o.customer LIKE 'A%'", "", ""},
-		// The recorded literal supersets (ADR-0012 §5): an unquoted number
+		// The recorded literal supersets (docs/adr/0012-divergences/comparison-membership.md): an unquoted number
 		// against text reads the number's text, against a timestamp the epoch
 		// instant; a function whose registered return is text is not a type
 		// this rule reads.

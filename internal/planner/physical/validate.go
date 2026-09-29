@@ -654,7 +654,7 @@ type binder struct {
 	// structural type the cast read, originQuotedLiteral for a quoted
 	// literal, typeAmbiguous otherwise. A set operation keeps the LEFT arm's
 	// origin where both arms carry one of one class — so a right arm of that
-	// class is not judged by memberPair on its own, ADR-0012 §5's recorded
+	// class is not judged by memberPair on its own, the recorded (docs/adr/0012-divergences/comparison-membership.md)
 	// gap — originQuotedLiteral where both arms are quoted literals, and
 	// typeAmbiguous otherwise.
 	textOrigin map[*plansql.SelectInfo][]parquet.TypeID
@@ -1320,7 +1320,7 @@ func resolveExprNames(expr plansql.Node, scope *colScope) error {
 // this block's `JOIN … USING` merge list: USING merges the joined column into
 // ONE, so the bare name is not ambiguous in PostgreSQL, and a SORT or WINDOW
 // key is the one place this engine already bound it rather than refusing it
-// (ADR-0012 §5 #655, whose entry states that exception). Resolving a window
+// (docs/adr/0012-divergences/names-scopes.md #655, whose entry states that exception). Resolving a window
 // item's names must not undo that — `SELECT c, SUM(id) OVER (PARTITION BY c)
 // FROM psb LEFT JOIN psc USING (id)` answers PostgreSQL's rows and must keep
 // answering them. A QUALIFIED reference is never exempt: both arms remain

@@ -59,7 +59,7 @@ func rsArmCells() []rsArmCell {
 			sql:    "SELECT a.id AS v FROM lat_ord a JOIN lat_item b ON lat_ord.id = b.order_id",
 			refuse: `invalid reference to FROM-clause entry for table "lat_ord"`},
 		// An ON reaching back to an EARLIER comma-separated FROM item is the
-		// #617 DuckDB-matching superset (ADR-0012 §5), not PostgreSQL-legal —
+		// #617 DuckDB-matching superset (docs/adr/0012-divergences/names-scopes.md), not PostgreSQL-legal —
 		// `want` here is wadjet's own answer, measured on this fixture, not a
 		// live PostgreSQL row set the way every other `want` in this table is.
 		// Arc RS (#1220) refused this alongside the genuinely out-of-scope
