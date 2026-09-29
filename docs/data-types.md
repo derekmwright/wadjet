@@ -146,6 +146,18 @@ SELECT CAST(1.0/3 AS FLOAT(25));   -- 0.3333333333333333  (double precision)
 CREATE TABLE t (f FLOAT(1));       -- a Float32 column
 ```
 
+**A float parameter is a value of its own type.** A `float8` (OID 701) or
+`float4` (OID 700) parameter bound over pgwire, in the text or the binary
+format, is that type, as in PostgreSQL: `SELECT $1` declares 701 (700 for
+`float4`), `ROUND($1)` over 2.5 is 2, `$1 / 2` over 5 is 2.5, `NaN` and
+`Infinity` bind, a `CREATE TABLE … AS SELECT $1` column is `double precision`,
+and an integer column assigned it rounds half to even (`SET n = $1` with 2.5
+stores 2). Through v0.25.1 a float parameter was read as a numeric literal:
+`SELECT $1` declared `numeric` (1700), `ROUND($1)` answered 3, `$1 / 2` was
+integer division (2), a text-format `NaN` or `Infinity` was 42703, and the
+assignment stored 3 (#1353). A `numeric` (1700) parameter declares `numeric`
+on both.
+
 **Arithmetic over two REALs is real, and a value SELECTed from it computes at
 float4's width.** `r + CAST(1.0 AS REAL)` over a real holding 2^24 is
 16777216, not 16777217 — in a SELECT list, a GROUP BY key, an ORDER BY key, an

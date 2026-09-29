@@ -1597,8 +1597,8 @@ than applied to the whole relation: a correlated predicate that is not
 an equality beside one, or `i.k = o.k + i.id`, whose side mixes the two),
 a `DISTINCT` (other than over exactly the key) or set-operation body under a
 bound, a body carrying its own `QUALIFY`, or a `LIMIT`/`OFFSET` that is not
-an integer literal (a parameter or an expression there is a parse error
-today, as before). PostgreSQL evaluates those
+a number (an expression there is a parse error, as it is everywhere; a
+bound parameter counts — see "LIMIT and OFFSET"). PostgreSQL evaluates those
 per outer row and this engine has no per-row runner for a relation-valued
 body yet; correlate on an equality, or move the bound outside the `LATERAL`.
 
@@ -2879,6 +2879,19 @@ SELECT * FROM flow_logs LIMIT 100
 -- Pagination: skip 200, return next 100
 SELECT * FROM flow_logs ORDER BY timestamp DESC LIMIT 100 OFFSET 200
 ```
+
+A count — `LIMIT`, `OFFSET`, `FETCH FIRST|NEXT … ROWS ONLY` and a
+`TABLESAMPLE` percentage — is a number, not an expression (`LIMIT 1 + 1` is a
+syntax error, 42601). A bound parameter counts: an integer parameter, and a
+float4 or float8 one, which binds as `CAST('<text>' AS DOUBLE PRECISION)`
+(`REAL`) and counts as the number its text spells when that text is
+PostgreSQL's float input (surrounding whitespace and a leading `+` allowed)
+and lexes to one unsigned number, so a float8 `1` is `LIMIT 1`. Such a cast
+written in the statement counts the same way. A negative or `NaN` count, and a
+fractional or exponent `LIMIT` / `OFFSET` / `FETCH` count (`-1`, `1.5`, `1e0`),
+is refused (42601 or 42000) as its bare spelling is, and a cast text PostgreSQL's float input refuses (`'0b11'`,
+`'1_0'`) is 42601 where PostgreSQL raises 22P02, although the bare spelling
+counts (`OFFSET 0b11` skips three rows) (#1353, #1412).
 
 ## JOIN
 
@@ -5032,6 +5045,21 @@ something else (`MERGE INTO t AS x USING s AS t`).
 
 A target row may be affected at most once. Two source rows matching one target
 row is SQLSTATE `21000` (`MERGE command cannot affect row a second time`).
+
+An action's expressions are refused where PostgreSQL refuses them, before any
+row is written: an aggregate is `42803` and a window function `42P20` (in a
+MERGE action, a MERGE `WHEN` condition, an `UPDATE`'s `SET` and an
+`INSERT … VALUES` alike); a subquery correlated to the target under a
+`WHEN NOT MATCHED` clause that a row reaches is `42P01`; an `ON` key naming a
+column the subquery source publishes twice is `42702`; a JSON field read
+(`s.j->>'k'`) assigned to a non-text column is `42804`. A scalar subquery in
+an action's `SET` or `INSERT … VALUES` is answered and declared from its own
+plan (`SET n = (SELECT MAX(y) FROM s)` over a float8 2.5 stores 2); an
+`UPDATE`'s `SET` list and a plain `INSERT … VALUES` refuse one (`0A000`). An
+expression over a subquery source's column, other than the bare column, is
+`0A000` where PostgreSQL answers (#1398). An integer target rounds a
+fractional value by the value's PostgreSQL type, as every write does (see
+"One assignment function for every write" under INSERT) (#1353).
 
 ### Several statements in one message
 

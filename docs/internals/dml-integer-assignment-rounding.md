@@ -113,7 +113,8 @@ the spellings the SQL lexer reads as a number but the float input refuses
 0b11` skips three rows). An integer
 parameter is bare only for an integer's spelling (int4in); otherwise it is
 quoted and the target's input rule raises 22P02, as PostgreSQL's parameter
-input does.
+input does. With no target to read it (`SELECT $1` bound as int8 `2.5`) the
+quoted text answers as text (OID 25), where PostgreSQL raises 22P02 at Bind.
 
 A JSON field read — `j->>'k'` and `j->'k'`, which the parser lowers to
 json_extract_scalar and json_extract — is TEXT to the assignment (PostgreSQL
