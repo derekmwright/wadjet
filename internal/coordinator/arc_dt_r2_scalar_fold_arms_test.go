@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -42,6 +43,8 @@ func dtr2MS(s string) int64 {
 //     the controls.
 //   - dr_d / dr_t, round 1's review fixture: pre-1970, 1000-01-01,
 //     9999-12-31, duplicates and NULLs on both sides.
+//   - dt_arr, round 3's ARRAY column ({1,2}, NULL, {5}) for #1060's
+//     neighbours (ctl3/container/*).
 func dtr2Tables() []tmdTable {
 	idTS := parquet.Schema{Columns: []parquet.Column{
 		{Name: "id", Type: parquet.TypeInt64},
@@ -68,7 +71,16 @@ func dtr2Tables() []tmdTable {
 		}
 		rt = append(rt, map[string]any{"id": int64(i + 1), "ts": v})
 	}
-	return []tmdTable{dtTable(), {"dtb_t", idTS, bt}, {"dtb_d", idD, bd}, {"dr_t", idTS, rt}, {"dr_d", idD, rd}}
+	arrSchema := parquet.Schema{Columns: []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+		{Name: "arr", Type: parquet.TypeArray, Nullable: true, ElementType: &parquet.Column{Name: "element", Type: parquet.TypeInt64, Nullable: true}},
+	}}
+	arr := []map[string]any{
+		{"id": int64(1), "arr": []any{int64(1), int64(2)}},
+		{"id": int64(2), "arr": nil},
+		{"id": int64(3), "arr": []any{int64(5)}},
+	}
+	return []tmdTable{dtTable(), {"dtb_t", idTS, bt}, {"dtb_d", idD, bd}, {"dr_t", idTS, rt}, {"dr_d", idD, rd}, {"dt_arr", arrSchema, arr}}
 }
 
 var (
@@ -106,6 +118,8 @@ func dtr2PGFixture() string {
 			fmt.Fprintf(&b, "INSERT INTO dr_t VALUES (%d, '%s');\n", i+1, s)
 		}
 	}
+	b.WriteString("DROP TABLE IF EXISTS dt_arr; CREATE TABLE dt_arr (id bigint, arr bigint[]);\n")
+	b.WriteString("INSERT INTO dt_arr VALUES (1, '{1,2}'), (2, NULL), (3, '{5}');\n")
 	return b.String()
 }
 
@@ -304,7 +318,111 @@ func dtr2NoRunner(name string) bool {
 	return strings.HasPrefix(name, "b1/between/")
 }
 
-func dtr2Cells() []dtCell { return append(dtr2ScalarCells(), dtr2FoldCells()...) }
+// dtr3RecursiveDAG names the answered cells over a recursive CTE, which the
+// stage DAG does not carry (c1RecDAGRefusal, pinned by arc C1): PINNED on
+// the three DAG arms.
+func dtr3RecursiveDAG(name string) bool { return name == "ctl3/origin/recursive" }
+
+// dtr3PGArray spells the harness's `[1 2]` rendering of an ARRAY cell as
+// PostgreSQL's `{1,2}`.
+func dtr3PGArray(s string) string {
+	return dtr3ArrayRE.ReplaceAllStringFunc(s, func(m string) string {
+		return "{" + strings.Join(strings.Fields(m[1:len(m)-1]), ",") + "}"
+	})
+}
+
+var dtr3ArrayRE = regexp.MustCompile(`\[[0-9 ]*\]`)
+
+func dtr2Cells() []dtCell {
+	return append(append(dtr2ScalarCells(), dtr2FoldCells()...), dtr3Cells()...)
+}
+
+// dtr3Cells is round 3's family: the choice refusal over a COLUMN whose
+// declaration comes from the relation that publishes it — every origin a
+// choice arm's column can have (a base table, a derived table, a CTE, a
+// recursive CTE, a join's output with a USING-merged key, a set operation's
+// output, VALUES, a LATERAL output; this engine has no views) — when that
+// column is a scalar subquery or a window call. b3/origin/* are refused
+// 0A000; ctl3/origin/* are the same origins meeting a column of the SAME
+// type, which answer; ctl3/container/* are #1060's neighbours, a window arm
+// beside a quoted ARRAY literal, which answer (round 2 refused them).
+func dtr3Cells() []dtCell {
+	const (
+		tsSub  = "(SELECT max(r.ts) FROM dt_pair r)"
+		dSub   = "(SELECT max(r.d) FROM dt_pair r)"
+		tsCorr = "(SELECT r.ts FROM dt_pair r WHERE r.id = a.id)"
+		// A TIMESTAMP control is read through a filter on its value: the
+		// harness renders a TIMESTAMP output cell as its epoch number.
+		noon = "TIMESTAMP '2024-03-04 12:00:00'"
+	)
+	dTs := func(mt string) string { // a DATE column beside a TIMESTAMP column mt
+		return fmt.Sprintf("(SELECT a.id, a.d, %s AS mt FROM dt_pair a) s", mt)
+	}
+	tsD := func(md string) string { // a TIMESTAMP column beside a DATE column md
+		return fmt.Sprintf("(SELECT a.id, a.ts AS t, %s AS md FROM dt_pair a) s", md)
+	}
+	c := func(name, sql string) dtCell { return dtCell{name, sql} }
+	return []dtCell{
+		// A base-table column (round 1's cond/*, one row here for the table).
+		c("b3/origin/base/coalesce", "SELECT a.id, COALESCE(a.d, a.ts) FROM dt_pair a"),
+		// A derived table's column.
+		c("b3/origin/derived/dColTsSub", "SELECT s.id, COALESCE(s.d, s.mt) FROM "+dTs(tsSub)),
+		c("b3/origin/derived/dColTsCorr", "SELECT s.id, COALESCE(s.d, s.mt) FROM "+dTs(tsCorr)),
+		c("b3/origin/derived/dColTsWin", "SELECT s.id, COALESCE(s.d, s.mt) FROM "+dTs("max(a.ts) OVER ()")),
+		c("b3/origin/derived/dColTsLag", "SELECT s.id, COALESCE(s.d, s.mt) FROM "+dTs("lag(a.ts) OVER (ORDER BY a.id)")),
+		c("b3/origin/derived/dColTsFnOfSub", "SELECT s.id, COALESCE(s.d, s.mt) FROM "+dTs("date_trunc('day', "+tsSub+")")),
+		c("b3/origin/derived/tsColDSub", "SELECT s.id, COALESCE(s.t, s.md) FROM "+tsD(dSub)),
+		c("b3/origin/derived/tsColDWin", "SELECT s.id, COALESCE(s.t, s.md) FROM "+tsD("max(a.d) OVER ()")),
+		c("b3/origin/derived/tsColDSubInterval", "SELECT s.id, COALESCE(s.t, s.md) + INTERVAL '1 hour' FROM "+tsD(dSub)),
+		c("b3/origin/derived/case", "SELECT s.id, CASE WHEN s.d IS NOT NULL THEN s.d ELSE s.mt END FROM "+dTs(tsSub)),
+		c("b3/origin/derived/greatest", "SELECT s.id, GREATEST(s.d, s.mt) FROM "+dTs(tsCorr)),
+		c("b3/origin/derived/least", "SELECT s.id, LEAST(s.mt, s.d) FROM "+dTs(tsSub)),
+		c("b3/origin/derived/where", "SELECT s.id FROM "+dTs(tsSub)+" WHERE COALESCE(s.d, s.mt) < DATE '2024-04-01'"),
+		c("b3/origin/derived/unqualified", "SELECT id, COALESCE(d, mt) FROM "+dTs(tsSub)),
+		c("b3/origin/derived/aliasList", "SELECT s.id, COALESCE(s.d, s.mt) FROM (SELECT a.id, a.d, "+tsSub+" FROM dt_pair a) s(id, d, mt)"),
+		c("b3/origin/derived/nested", "SELECT s.id, COALESCE(s.d, s.mt) FROM (SELECT * FROM "+dTs(tsSub)+") s"),
+		c("b3/origin/derived/aggregate", "SELECT a.id, COALESCE(a.d, m.mt) FROM dt_pair a, (SELECT max(ts) AS mt FROM dt_pair) m"),
+		c("b3/origin/derived/outerRef", "SELECT s.id, (SELECT COALESCE(s.d, s.mt)) FROM "+dTs(tsSub)),
+		// A CTE's column, and a recursive CTE's.
+		c("b3/origin/cte/dColTsSub", "WITH s AS (SELECT a.id, a.d, "+tsSub+" AS mt FROM dt_pair a) SELECT s.id, COALESCE(s.d, s.mt) FROM s"),
+		c("b3/origin/cte/tsColDWin", "WITH s AS (SELECT a.id, a.ts AS t, max(a.d) OVER () AS md FROM dt_pair a) SELECT s.id, COALESCE(s.t, s.md) FROM s"),
+		c("b3/origin/cte/colList", "WITH s(id, d, mt) AS (SELECT a.id, a.d, "+tsCorr+" FROM dt_pair a) SELECT s.id, COALESCE(s.d, s.mt) FROM s"),
+		c("b3/origin/recursiveBase", "WITH RECURSIVE s(n, d, t) AS (SELECT a.id, a.d, a.ts FROM dt_pair a UNION ALL SELECT n + 10, d, t FROM s WHERE n < 10) SELECT s.n, COALESCE(s.d, s.t) FROM s"),
+		c("b3/origin/recursive", "WITH RECURSIVE s(n, d, mt) AS (SELECT 1, CAST(NULL AS DATE), "+tsSub+" UNION ALL SELECT n + 1, d, mt FROM s WHERE n < 2) SELECT s.n, COALESCE(s.d, s.mt) FROM s"),
+		// A join's output: a derived side, an outer join, a USING-merged key.
+		c("b3/origin/join/inner", "SELECT a.id, COALESCE(a.d, y.mt) FROM dt_pair a JOIN (SELECT b.id, (SELECT max(r.ts) FROM dt_pair r) AS mt FROM dt_pair b) y ON y.id = a.id"),
+		c("b3/origin/join/left", "SELECT a.id, COALESCE(a.d, y.mt) FROM dt_pair a LEFT JOIN (SELECT b.id, (SELECT max(r.ts) FROM dt_pair r) AS mt FROM dt_pair b WHERE b.id < 3) y ON y.id = a.id"),
+		// A bare reference to a USING-merged key is 42702 here outside a sort
+		// or window key (names-scopes#r16, #655), and inside an ORDER BY
+		// expression too: the qualified side is the reachable spelling.
+		c("b3/origin/join/usingQualified", "SELECT x.id, COALESCE(x.k, x.ts) FROM (SELECT a.id, a.ts, "+dSub+" AS k FROM dt_pair a) x JOIN (SELECT "+dSub+" AS k) y USING (k)"),
+		// A set operation's output, and VALUES (a UNION ALL of rows).
+		c("b3/origin/setop/union", "SELECT s.id, COALESCE(s.d, s.mt) FROM (SELECT a.id, a.d, "+tsSub+" AS mt FROM dt_pair a UNION ALL SELECT 9, CAST(NULL AS DATE), (SELECT min(r.ts) FROM dt_pair r)) s"),
+		c("b3/origin/values", "SELECT v.id, COALESCE(v.d, v.mt) FROM (VALUES (1, DATE '2024-01-02', "+tsSub+"), (2, CAST(NULL AS DATE), "+tsSub+")) v(id, d, mt)"),
+		// A LATERAL output.
+		c("b3/origin/lateral", "SELECT a.id, COALESCE(a.d, l.mt) FROM dt_pair a, LATERAL (SELECT "+tsCorr+" AS mt) l"),
+		c("b3/origin/lateralSub", "SELECT a.id, COALESCE(a.d, l.mt) FROM dt_pair a, LATERAL (SELECT "+tsSub+" AS mt FROM dt_pair b WHERE b.id = a.id) l"),
+		c("b3/origin/lateralJoin", "SELECT a.id, COALESCE(l.mt, a.d) FROM dt_pair a CROSS JOIN LATERAL (SELECT max(r.ts) OVER () AS mt FROM dt_pair r WHERE r.id = a.id) l"),
+		// Controls: each origin meeting a column of the SAME type answers.
+		c("ctl3/origin/derived/dd", "SELECT s.id, COALESCE(s.d, s.md) FROM (SELECT a.id, a.d, "+dSub+" AS md FROM dt_pair a) s"),
+		c("ctl3/origin/derived/tsWin", "SELECT s.id FROM (SELECT a.id, a.ts AS t, max(a.ts) OVER () AS mt FROM dt_pair a) s WHERE COALESCE(s.t, s.mt) = "+noon),
+		c("ctl3/origin/derived/castDate", "SELECT s.id FROM "+dTs(tsSub)+" WHERE COALESCE(CAST(s.d AS TIMESTAMP), s.mt) = "+noon),
+		c("ctl3/origin/derived/greatestTs", "SELECT s.id FROM (SELECT a.id, a.ts AS t, "+tsCorr+" AS mt FROM dt_pair a) s WHERE GREATEST(s.t, s.mt) = "+noon),
+		c("ctl3/origin/cte/dd", "WITH s AS (SELECT a.id, a.d, max(a.d) OVER () AS md FROM dt_pair a) SELECT s.id, COALESCE(s.d, s.md) FROM s"),
+		c("ctl3/origin/recursive", "WITH RECURSIVE s(n, t, mt) AS (SELECT 1, CAST(NULL AS TIMESTAMP), "+tsSub+" UNION ALL SELECT n + 1, t, mt FROM s WHERE n < 2) SELECT s.n FROM s WHERE COALESCE(s.t, s.mt) = "+noon),
+		c("ctl3/origin/join/usingQualified", "SELECT x.id, COALESCE(x.k, x.d) FROM (SELECT a.id, a.d, "+dSub+" AS k FROM dt_pair a) x JOIN (SELECT "+dSub+" AS k) y USING (k)"),
+		c("ctl3/origin/setop/union", "SELECT s.id FROM (SELECT a.id, a.ts AS t, "+tsSub+" AS mt FROM dt_pair a UNION ALL SELECT 9, CAST(NULL AS TIMESTAMP), (SELECT min(r.ts) FROM dt_pair r)) s WHERE COALESCE(s.t, s.mt) = "+noon),
+		c("ctl3/origin/values", "SELECT v.id FROM (VALUES (1, TIMESTAMP '2024-01-02 06:00:00', "+tsSub+"), (2, CAST(NULL AS TIMESTAMP), "+tsSub+")) v(id, t, mt) WHERE COALESCE(v.t, v.mt) = "+noon),
+		c("ctl3/origin/lateral", "SELECT a.id FROM dt_pair a, LATERAL (SELECT "+tsSub+" AS mt FROM dt_pair b WHERE b.id = a.id) l WHERE COALESCE(a.ts, l.mt) = "+noon),
+		// The DATE column the refusal now reads, in a comparison: answers.
+		c("ctl3/origin/compare/dateLit", "SELECT s.id FROM (SELECT a.id, "+dSub+" AS md FROM dt_pair a) s WHERE s.md = '2024-05-06'"),
+		c("ctl3/origin/compare/tsCol", "SELECT s.id FROM (SELECT a.id, a.ts, "+dSub+" AS md FROM dt_pair a) s WHERE s.md > s.ts"),
+		// #1060's neighbours: a window arm beside a quoted ARRAY literal.
+		c("ctl3/container/firstValue", "SELECT a.id, COALESCE(first_value(a.arr) OVER (ORDER BY a.id DESC), '{9}') FROM dt_arr a"),
+		c("ctl3/container/cast", "SELECT a.id, CAST(COALESCE(first_value(a.arr) OVER (ORDER BY a.id), '{9}') AS VARCHAR) FROM dt_arr a"),
+		c("ctl3/container/cardinality", "SELECT a.id, cardinality(COALESCE(first_value(a.arr) OVER (ORDER BY a.id), '{9}')) FROM dt_arr a"),
+	}
+}
 
 // dtr2PGAnswers reads testdata/arc_dt_r2_pg17.tsv (name<TAB>answer).
 func dtr2PGAnswers(t *testing.T) map[string]string {
@@ -374,6 +492,15 @@ func TestArcDTR2Generate(t *testing.T) {
 // where PostgreSQL answers timestamps. The refusal now types every arm by
 // its declaration; each refused cell asserts 0A000 and the one message on
 // every arm.
+//
+// Round 3: a COLUMN arm is typed by the relation that publishes it, and a
+// derived table's, a CTE's, a recursive CTE's, a set operation's, a VALUES
+// list's or a LATERAL output's column that is a scalar subquery or a window
+// call carried no declaration — b3/origin/* answered day counts read as
+// milliseconds or the reverse on every arm, and are refused now; the
+// same-type ctl3/origin/* answer. The widened arm typing reads only a DATE or
+// a TIMESTAMP, so #1060's container rules keep the untyped window arm:
+// ctl3/container/* (a window arm beside a quoted ARRAY literal) answer.
 func TestArcDTR2ScalarAndFoldArmsEveryArm(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: five arms over the DATE / TIMESTAMP scalar and fold table")
@@ -421,10 +548,19 @@ func TestArcDTR2ScalarAndFoldArmsEveryArm(t *testing.T) {
 						t.Errorf("%s\n  arm  %s\n  got  %s %v\n  PINNED %q (#1364 / #1384): a DAG arm that answers deletes this pin (PostgreSQL 17.11: %s)",
 							tc.sql, arm.name, brRenderOrNil(res), err, runnerMsg, want)
 					}
+				case dtr3RecursiveDAG(tc.name) && strings.HasPrefix(arm.name, "dag"):
+					if err == nil || !strings.Contains(err.Error(), "has no dependencies and no ScanFiles") {
+						t.Errorf("%s\n  arm  %s\n  got  %s %v\n  PINNED the recursive-CTE DAG refusal (arc C1): a DAG arm that answers deletes this pin (PostgreSQL 17.11: %s)",
+							tc.sql, arm.name, brRenderOrNil(res), err, want)
+					}
 				case err != nil:
 					t.Errorf("%s\n  arm  %s\n  refused: %v\n  want %s (PostgreSQL 17.11)", tc.sql, arm.name, err, want)
 				default:
-					if got := brRender(res); strings.TrimSpace(got) != strings.TrimSpace(want) {
+					got := brRender(res)
+					if strings.HasPrefix(tc.name, "ctl3/container/") {
+						got = dtr3PGArray(got)
+					}
+					if strings.TrimSpace(got) != strings.TrimSpace(want) {
 						t.Errorf("%s\n  arm  %s\n  got  %s\n  want %s (PostgreSQL 17.11)", tc.sql, arm.name, got, want)
 					}
 				}
