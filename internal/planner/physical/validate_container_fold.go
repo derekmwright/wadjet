@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/expr"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
@@ -84,6 +85,9 @@ func refuseFoldArms(kind string, arms []plansql.Node, typeOf func(plansql.Node) 
 			common, have = col, true
 			continue
 		}
+		if _, ok := batch.TemporalCommonType(common.Type, col.Type); ok {
+			return temporalFoldGap(kind, common, col)
+		}
 		if !isContainerType(common.Type) && !isContainerType(col.Type) {
 			continue
 		}
@@ -121,6 +125,21 @@ func refuseFoldArms(kind string, arms []plansql.Node, typeOf func(plansql.Node) 
 		}
 	}
 	return nil
+}
+
+// temporalFoldGap refuses a CASE / COALESCE / GREATEST / LEAST whose arms
+// mix DATE and TIMESTAMP. PostgreSQL resolves the pair to timestamp
+// (batch.TemporalCommonType) and answers; here the result was declared by the
+// first arm (expr.CommonDeclType names no temporal rung) and the winning
+// arm's box was handed on as it stood (choiceBox has no temporal mode), so a
+// DATE arm's day count landed in a TIMESTAMP vector (`19786` for 2024-03-04)
+// or a TIMESTAMP's milliseconds overflowed a DATE one (22003) — never
+// PostgreSQL's instant (#1378). Loud until the choice fold carries the rung.
+func temporalFoldGap(kind string, a, b parquet.Column) error {
+	return sqlerr.New("0A000", "%s types %s and %s are not supported together: PostgreSQL "+
+		"resolves them to timestamp without time zone, and this engine does not yet carry a "+
+		"DATE arm into a TIMESTAMP result; CAST the DATE arm to TIMESTAMP",
+		kind, pgTypeName(a.Type), pgTypeName(b.Type))
 }
 
 // foldCompatible reports whether two arms fold to one container type: the same
