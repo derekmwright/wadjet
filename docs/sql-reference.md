@@ -4419,8 +4419,9 @@ TIMESTAMP compares its midnight, as in PostgreSQL — directly, against a
 scalar subquery, in an `IN` / `= ANY` / `NOT IN` / `<> ALL` membership, an
 `EXISTS` or `LATERAL` correlation and a join key alike. A `CASE`,
 `COALESCE`, `GREATEST` or `LEAST` whose arms mix the two — whatever an arm
-is: a column, a scalar subquery, a window call, an aggregate — and a set
-operation that does, are refused `0A000`: `CAST` the DATE side to
+is: a column (of a table, a derived table, a CTE, a join, a set operation or
+a LATERAL output, whatever produced it there), a scalar subquery, a window
+call, an aggregate — and a set operation that does, are refused `0A000`: `CAST` the DATE side to
 TIMESTAMP. A bind parameter typed TIMESTAMP against a DATE column is read
 at DATE (a known defect, #1426); `CAST($1 AS TIMESTAMP)` compares as
 PostgreSQL does. `NOW()` and its siblings
