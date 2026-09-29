@@ -191,6 +191,11 @@ func foldTypeName(c parquet.Column) string {
 // max(ts) …))` and `COALESCE(d, max(ts) OVER ())` kept the first arm's DATE
 // declaration and answered day counts on every arm where PostgreSQL answers
 // timestamps (#1378 round 2).
+//
+// The widened typing answers only a DATE or a TIMESTAMP: the #1060 container
+// rules share this walk and keep the untyped subquery / window arm they had,
+// so `COALESCE(first_value(arr) OVER (…), '{9}')` is not refused as a quoted
+// ARRAY literal beside an ARRAY arm (#1378 round 3).
 func (b *binder) foldArmTypeOf(scope *colScope) func(plansql.Node) (parquet.Column, bool) {
 	decls := rowFieldScopeDecls(scope)
 	decls.subqueryDecl = func(sql string) (parquet.Column, bool) {
@@ -202,7 +207,7 @@ func (b *binder) foldArmTypeOf(scope *colScope) func(plansql.Node) (parquet.Colu
 			return parquet.Column{}, false
 		}
 		ds := b.outputDecls[sub]
-		if len(ds) != 1 || ds[0].Untyped {
+		if len(ds) != 1 || ds[0].Untyped || !foldTemporal(ds[0].ID) {
 			return parquet.Column{}, false
 		}
 		return parquet.Column{Type: ds[0].ID}, true
@@ -216,14 +221,29 @@ func (b *binder) foldArmTypeOf(scope *colScope) func(plansql.Node) (parquet.Colu
 			}
 			// A value function (lag, first_value, …) lifts its first
 			// argument's value, and is declared by it (windowValueFunc).
+			var c parquet.Column
+			var ok bool
 			if fc := w.Func; windowValueFunc(strings.ToLower(fc.Name)) && len(fc.Args) > 0 {
-				return typeOf(fc.Args[0])
+				c, ok = typeOf(fc.Args[0])
+			} else {
+				c, ok = typeOf(w.Func)
 			}
-			return typeOf(w.Func)
+			// Only the DATE / TIMESTAMP rule reads a window arm's type; the
+			// #1060 container rules keep the untyped window arm they had.
+			if !ok || !foldTemporal(c.Type) {
+				return parquet.Column{}, false
+			}
+			return c, true
 		}
 		return shape(n)
 	}
 	return typeOf
+}
+
+// foldTemporal reports whether a widened arm type is one the DATE / TIMESTAMP
+// refusal reads.
+func foldTemporal(t parquet.TypeID) bool {
+	return t == parquet.TypeDate || t == parquet.TypeTimestamp
 }
 
 // foldTypeOf types one fold arm with its SHAPE where the scope carries it: a
