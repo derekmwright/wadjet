@@ -397,21 +397,12 @@ func memberTemporalProbeSides(pd *operandDecl, set *parquet.Column, b *batch.Rec
 
 // memberDateMillis is a DATE side's box — its day count, or a set member's
 // ISO text (memberSetBox's input) — as the TIMESTAMP of its midnight, the
-// box a TIMESTAMP evaluates to. Any other box is returned as it is.
+// box a TIMESTAMP evaluates to: dateBoxDays reads it, batch.DateMidnightMillis
+// converts it (the comparison kernel's reading, dateTimestampOrder). Any other
+// box is returned as it is.
 func memberDateMillis(v any) any {
-	switch d := v.(type) {
-	case int64:
-		return d * batch.MillisPerDay
-	case int32:
-		return int64(d) * batch.MillisPerDay
-	case int:
-		return int64(d) * batch.MillisPerDay
-	case string:
-		days, err := parquet.ParseDateDays(d)
-		if err != nil {
-			return v
-		}
-		return int64(days) * batch.MillisPerDay
+	if days, ok := dateBoxDays(v); ok {
+		return batch.DateMidnightMillis(days)
 	}
 	return v
 }

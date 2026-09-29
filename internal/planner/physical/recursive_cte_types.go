@@ -245,7 +245,7 @@ func recursiveTermConversion(name string, pos int, seed, term parquet.Column, li
 		})
 	case seed.Type == parquet.TypeTimestamp && term.Type == parquet.TypeDate:
 		return conv(func(src *batch.Vector, row int, dst *batch.Vector, at int) error {
-			dst.Int64Data[at] = int64(src.Int32Data[row]) * 86_400_000
+			dst.Int64Data[at] = batch.DateMidnightMillis(int64(src.Int32Data[row]))
 			return nil
 		})
 	}

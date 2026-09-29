@@ -15,14 +15,27 @@ const MillisPerDay = 86_400_000
 // equal TIMESTAMP '2024-01-02 12:00:00'. ok is false for every other pair,
 // the same-type pairs included.
 //
-// It is the ONE statement of the rule: the direct comparison's kernel
-// already reads the pair this way, and every carrier that turns the pair
-// into a KEY asks here — the equi-join key ladder
-// (physical.joinKeyCommonType, whose rung exec.AppendWidenedKeyValue
-// encodes) and the membership set (expr.memberTemporalProbe) (#1378).
+// It is the ONE statement of the rule, and DateMidnightMillis is its one
+// conversion. Every site where the pair meets asks here: the direct and
+// scalar-subquery comparison's kernel (expr.dateTimestampOrder), the
+// equi-join key ladder (physical.joinKeyCommonType, whose rung
+// exec.AppendWidenedKeyValue encodes), the membership set
+// (expr.memberTemporalSides), the stage DAG's inlined set, and the
+// choice-fold refusal (physical.refuseFoldArms) (#1378).
 func TemporalCommonType(a, b TypeID) (TypeID, bool) {
 	if (a == TypeDate && b == TypeTimestamp) || (a == TypeTimestamp && b == TypeDate) {
 		return TypeTimestamp, true
 	}
 	return 0, false
+}
+
+// DateMidnightMillis is the rule's one conversion: a DATE's epoch-day count
+// as the TIMESTAMP of its midnight, in epoch milliseconds. It is exact on
+// both sides of 1970 — day -1 (1969-12-31) is -86 400 000, that day's
+// midnight, never a truncation toward zero — and it takes no floor because
+// the promotion only ever goes this way: a TIMESTAMP is never read at DATE
+// by the pair (a DATE parsed from text is floored to its day by its own
+// input function before it arrives here).
+func DateMidnightMillis(days int64) int64 {
+	return days * MillisPerDay
 }

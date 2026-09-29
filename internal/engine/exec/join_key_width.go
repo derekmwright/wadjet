@@ -94,7 +94,7 @@ func appendCoercedKeyValue(buf []byte, v *batch.Vector, row int, target batch.Ty
 		// keys as itself — so DATE '2024-01-02' and TIMESTAMP '2024-01-02
 		// 00:00:00' are one key and 12:00 that day is another (#1378).
 		if v.Type == batch.TypeDate {
-			val := int64(v.Int32Data[row]) * batch.MillisPerDay
+			val := batch.DateMidnightMillis(int64(v.Int32Data[row]))
 			return append(buf,
 				byte(val), byte(val>>8), byte(val>>16), byte(val>>24),
 				byte(val>>32), byte(val>>40), byte(val>>48), byte(val>>56))

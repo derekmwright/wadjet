@@ -1064,19 +1064,94 @@ func pairApplies(lk, rk boxKind, lText, rText string) bool {
 	return false
 }
 
-// dateTimestampOrder orders a DATE box against a TIMESTAMP box in the
-// TIMESTAMP domain — the date's midnight, PostgreSQL's date→timestamp
-// promotion.
-func dateTimestampOrder(lk boxKind, lv, rv any) (int, bool) {
-	l, lok := lv.(int64)
-	r, rok := rv.(int64)
-	if !lok || !rok {
+// dateTimestampOrder orders a DATE box against a TIMESTAMP box the way
+// batch.TemporalCommonType states the pair: both at TIMESTAMP, the DATE at
+// its midnight (batch.DateMidnightMillis) — PostgreSQL's date→timestamp
+// promotion. It decides nothing itself: the kinds name each side's declared
+// type, the rule names the common type, and temporalBoxAt reads each box in
+// its own declaration's unit and converts it there.
+//
+// Each side is read in EVERY spelling its declaration arrives in, because a
+// side it could not read used to fall through to compare(), whose
+// magnitude guess reads an int64 inside +/-500 000 as a DAY count: a DATE
+// scalar subquery hands its value over as ISO text, so `ts = (SELECT d …)`
+// read the TIMESTAMP 1969-12-31 23:59:59.999 (epoch ms -1) as day -1 and
+// matched DATE 1969-12-31 (#1378 round 2). A non-NULL box neither spelling
+// reads is an internal error, raised, never that guess.
+func dateTimestampOrder(lk, rk boxKind, lv, rv any) (int, bool) {
+	lt, lok := temporalKindType(lk)
+	rt, rok := temporalKindType(rk)
+	if !lok || !rok || lv == nil || rv == nil {
 		return 0, false
 	}
-	if lk == boxDate {
-		return cmpInt64(l*86_400_000, r), true
+	common, ok := batch.TemporalCommonType(lt, rt)
+	if !ok {
+		return 0, false
 	}
-	return cmpInt64(l, r*86_400_000), true
+	l, lok := temporalBoxAt(lt, common, lv)
+	r, rok := temporalBoxAt(rt, common, rv)
+	if !lok || !rok {
+		panic(fatalEval{fmt.Errorf("internal: a DATE / TIMESTAMP pair reached the comparison "+
+			"with a box its declaration does not read (values %T / %T) — comparing it by "+
+			"magnitude would guess its unit", lv, rv)})
+	}
+	return cmpInt64(l, r), true
+}
+
+// temporalKindType is a temporal box kind's declared type.
+func temporalKindType(k boxKind) (batch.TypeID, bool) {
+	switch k {
+	case boxDate:
+		return batch.TypeDate, true
+	case boxTimestamp:
+		return batch.TypeTimestamp, true
+	}
+	return 0, false
+}
+
+// temporalBoxAt reads v, a box of declared type t, at the pair's common type:
+// a TIMESTAMP as its epoch milliseconds (an int64, or its text), a DATE as its
+// day count (dateBoxDays) converted by batch.DateMidnightMillis.
+func temporalBoxAt(t, common batch.TypeID, v any) (int64, bool) {
+	switch t {
+	case batch.TypeTimestamp:
+		switch x := v.(type) {
+		case int64:
+			return x, true
+		case string:
+			return parseTimestampToEpochMsCachedOK(x)
+		}
+		return 0, false
+	case batch.TypeDate:
+		days, ok := dateBoxDays(v)
+		if !ok {
+			return 0, false
+		}
+		if common == batch.TypeTimestamp {
+			return batch.DateMidnightMillis(days), true
+		}
+		return days, true
+	}
+	return 0, false
+}
+
+// dateBoxDays is a DATE box's epoch-day count in every spelling a DATE
+// arrives in: the day count ColRef.Eval hands out (int64, or int32/int from
+// a vector or a literal), or the "YYYY-MM-DD" text a scalar subquery's row,
+// a CAST or a membership set member carries — read by the DATE input
+// function, which floors a pre-1970 instant to its own day.
+func dateBoxDays(v any) (int64, bool) {
+	switch d := v.(type) {
+	case int64:
+		return d, true
+	case int32:
+		return int64(d), true
+	case int:
+		return int64(d), true
+	case string:
+		return parseDateToEpochDaysCachedOK(d)
+	}
+	return 0, false
 }
 
 // temporalTextOrder compares a TEMPORAL operand against a text one in the
@@ -1544,7 +1619,7 @@ func orderByKindsFold(lk, rk, lFold, rFold boxKind, lv, rv any, lText, rText str
 			return -c, true, false
 		}
 	case (lk == boxDate && rk == boxTimestamp) || (lk == boxTimestamp && rk == boxDate):
-		if c, ok := dateTimestampOrder(lk, lv, rv); ok {
+		if c, ok := dateTimestampOrder(lk, rk, lv, rv); ok {
 			return c, true, false
 		}
 	}
