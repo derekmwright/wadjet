@@ -174,6 +174,27 @@ func cpCells() []cpCell {
 		cpCell{"nojoin/unionAll", "SELECT u.id FROM (SELECT id FROM cp_t UNION ALL SELECT id FROM cp_t) u WHERE EXISTS (SELECT 1 FROM cp_t q WHERE q.v = 12)"},
 		cpCell{"nojoin/selectList", "SELECT a.id, (SELECT min(q.v) FROM cp_t q WHERE q.v > 12) FROM cp_t a JOIN cp_t b ON a.id = b.id"},
 	)
+	// sel/<form>/<match|miss>: the predicate as a SELECT-list VALUE over the
+	// self-join. At v0.25.2 the single-process arms and the DAG's local
+	// fallback for a SELECT list no stage computes both replayed the cache:
+	// IN / NOT IN answered NULL and CASE-over-IN 'n' on every arm (silent
+	// wrong values), EXISTS and the filtered scalar failed.
+	const selList = "SELECT a.id, X FROM cp_t a JOIN cp_t b ON a.id = b.id"
+	for _, f := range []struct{ name, x, match string }{
+		{"in", "P IN (SELECT q.v FROM cp_t q)", "12"},
+		{"notIn", "P NOT IN (SELECT q.v FROM cp_t q)", "12"},
+		{"caseIn", "CASE WHEN P IN (SELECT q.v FROM cp_t q) THEN 'y' ELSE 'n' END", "12"},
+		{"exists", "EXISTS (SELECT 1 FROM cp_t q WHERE q.v = P)", "12"},
+		{"scalarEq", "P = (SELECT min(q.v) FROM cp_t q WHERE q.v >= 12)", "12"},
+		// cp_u's NULL member: NOT IN answers NULL where no member matches;
+		// 13 is a member of cp_t only, so a body that lost cp_t's v answers
+		// NULL where PostgreSQL answers false.
+		{"nullNotIn", "P NOT IN (SELECT q.v FROM cp_t q UNION ALL SELECT u.w FROM cp_u u)", "13"},
+	} {
+		out = append(out,
+			cpCell{"sel/" + f.name + "/match", at(selList, strings.ReplaceAll(f.x, "P", f.match))},
+			cpCell{"sel/" + f.name + "/miss", at(selList, strings.ReplaceAll(f.x, "P", "99"))})
+	}
 	return out
 }
 

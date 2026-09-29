@@ -1,5 +1,5 @@
 # PostgreSQL 17.11 (postgres:17-alpine) answers for TestArcCPConstantProbeEveryArm's generated cells over cp_t / cp_u:
-# name<TAB>rows=N <sorted rows> | ERR <SQLSTATE> <message>. Regenerate: CP_GEN=<path> dumps name<TAB>sql; each is run once.
+# name<TAB>rows=N <sorted rows> | ERR <SQLSTATE> <message>. Regenerate: CP_GEN=<path> dumps name<TAB>sql; each is run once. Booleans render as brRender does (true/false; psql prints t/f).
 op/in/int/match	rows=4 1,1 | 2,2 | 3,3 | 4,4
 op/in/int/miss	rows=0 
 op/in/quoted/match	rows=4 1,1 | 2,2 | 3,3 | 4,4
@@ -389,3 +389,15 @@ issue/1418	rows=4 1,1 | 2,2 | 3,3 | 4,4
 nojoin/semi	rows=4 1 | 2 | 3 | 4
 nojoin/unionAll	rows=8 1 | 1 | 2 | 2 | 3 | 3 | 4 | 4
 nojoin/selectList	rows=4 1,13 | 2,13 | 3,13 | 4,13
+sel/in/match	rows=4 1,true | 2,true | 3,true | 4,true
+sel/in/miss	rows=4 1,false | 2,false | 3,false | 4,false
+sel/notIn/match	rows=4 1,false | 2,false | 3,false | 4,false
+sel/notIn/miss	rows=4 1,true | 2,true | 3,true | 4,true
+sel/caseIn/match	rows=4 1,y | 2,y | 3,y | 4,y
+sel/caseIn/miss	rows=4 1,n | 2,n | 3,n | 4,n
+sel/exists/match	rows=4 1,true | 2,true | 3,true | 4,true
+sel/exists/miss	rows=4 1,false | 2,false | 3,false | 4,false
+sel/scalarEq/match	rows=4 1,true | 2,true | 3,true | 4,true
+sel/scalarEq/miss	rows=4 1,false | 2,false | 3,false | 4,false
+sel/nullNotIn/match	rows=4 1,false | 2,false | 3,false | 4,false
+sel/nullNotIn/miss	rows=4 1,NULL | 2,NULL | 3,NULL | 4,NULL
