@@ -419,9 +419,10 @@ func TestScalarSubqueryOverTheSameTableAsAnEnclosingBuildAnswers(t *testing.T) {
 // What this does NOT fix, and the difference is worth stating: a claiming scan
 // that is still RUNNING, blocked on a build that is itself blocked on that
 // scan's output, is a genuine CYCLE. Releasing on exit cannot help — nothing
-// has exited. That is #616's deadlock and
-// TestScalarSubqueryOverTheSameTableAsAnEnclosingBuildHangs still pins it,
-// still hanging, deliberately.
+// has exited. That was #616's deadlock: the claim the build held was the
+// duplicate-scan cache's, and a scan the entry never counted no longer
+// attaches to it (ADR-0021 §2c), so the shape answers and
+// TestScalarSubqueryOverTheSameTableAsAnEnclosingBuildAnswers gates it.
 func TestAFailedSharedScanDoesNotStrandItsOtherReaders(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	t.Cleanup(cancel)
