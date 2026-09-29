@@ -161,6 +161,11 @@ func (e *CorrelatedInSubquery) EvalBoolNull(b *batch.RecordBatch, row int) (bool
 	if lv == nil {
 		return false, true
 	}
+	// A DATE meeting a TIMESTAMP compares at TIMESTAMP (#1378).
+	promoteProbe, promoteSet := memberTemporalProbeSides(e.probeDecl, e.setDecl, b, row, e.Expr)
+	if promoteProbe {
+		lv = memberDateMillis(lv)
+	}
 
 	var ld *parquet.Column
 	container := isContainerBox(lv)
@@ -186,6 +191,9 @@ func (e *CorrelatedInSubquery) EvalBoolNull(b *batch.RecordBatch, row int) (bool
 				continue
 			}
 			v = memberSetBox(v, e.setDecl)
+			if promoteSet {
+				v = memberDateMillis(v)
+			}
 			eq, decided := false, false
 			if container {
 				eq, decided = containerMember(ld, e.setDecl, lv, v)

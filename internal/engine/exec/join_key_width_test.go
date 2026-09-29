@@ -645,7 +645,7 @@ func TestCanEncodeKeyAtIsTheEncodersOwnTable(t *testing.T) {
 		batch.TypeDecimal, batch.TypeString, batch.TypeBool, batch.TypeDate,
 		batch.TypeIPv4, batch.TypeUUID,
 	}
-	targets := []batch.TypeID{batch.TypeInt64, batch.TypeFloat64, batch.TypeDecimal}
+	targets := []batch.TypeID{batch.TypeInt64, batch.TypeFloat64, batch.TypeDecimal, batch.TypeTimestamp}
 	for _, vt := range vecs {
 		for _, target := range targets {
 			admitted := canEncodeKeyAt(vt, target)

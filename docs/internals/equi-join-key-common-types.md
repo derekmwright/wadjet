@@ -26,6 +26,7 @@ Source: internal/planner/physical/join_key_types.go — joinKeyCommonType, moved
 //	numeric = float4   ->  float4 = ((numeric)::float8)  -> float8
 //	numeric = float8   ->  float8 = ((numeric)::float8)  -> float8
 //	numeric = numeric  ->  numeric, exact, at either declared scale
+//	date    = timestamp ->  date_eq_timestamp: the date at its midnight (#1378)
 //
 // so float4 is NOT a rung: everything that meets it except another float4
 // goes to float8. (A set operation over the same pair narrows to real
@@ -39,3 +40,11 @@ Source: internal/planner/physical/join_key_types.go — joinKeyCommonType, moved
 // also why nothing here can overflow: a key is the value's digits, not a
 // column.
 ```
+
+The one rung outside the numeric ladder is a DATE against a TIMESTAMP
+(#1378): `batch.TemporalCommonType` resolves the pair to TIMESTAMP, and
+`exec.AppendWidenedKeyValue` keys the DATE side as its midnight's epoch
+milliseconds — the eight bytes the TIMESTAMP side keys as itself — so the
+build, the probe, the bloom filter and the shuffle partition hash agree.
+`exec.joinKeyUsesIntPath` keeps the pair off the integer fast path, which
+reads each side's raw integer (a day count against milliseconds).

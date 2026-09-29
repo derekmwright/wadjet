@@ -241,8 +241,11 @@ func (e *InSubquery) EvalBool(b *batch.RecordBatch, row int) bool {
 }
 
 func (e *InSubquery) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool) {
+	// A DATE meeting a TIMESTAMP compares at TIMESTAMP (#1378): the DATE
+	// side — probe or set — is read as its midnight.
+	promoteProbe, promoteSet := memberTemporalProbeSides(e.probeDecl, e.setDecl, b, row, e.Expr)
 	if !e.resolved.Load() {
-		e.resolveSlow()
+		e.resolveSlow(promoteSet)
 	}
 	// An EMPTY set is a real answer and not an absence, and it is checked
 	// BEFORE the probe's own NULL because the NULL-keyed row is exactly the
@@ -258,6 +261,9 @@ func (e *InSubquery) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool) {
 	lv := e.Expr.Eval(b, row)
 	if lv == nil {
 		return false, true
+	}
+	if promoteProbe {
+		lv = memberDateMillis(lv)
 	}
 	// The RUNG first: `x IN (SELECT y …)` is `x = y` quantified, so it is
 	// resolved by PostgreSQL's operator ladder over (probe, set) — not by
@@ -454,7 +460,9 @@ func toInt64SafeStrict(lv any) (int64, bool) {
 }
 
 // resolveSlow runs the subquery once and builds the probe set. Idempotent.
-func (e *InSubquery) resolveSlow() {
+// promoteSet reads every member as the TIMESTAMP of a DATE set's midnight
+// (memberTemporalSides).
+func (e *InSubquery) resolveSlow(promoteSet bool) {
 	e.resolveMu.Lock()
 	defer e.resolveMu.Unlock()
 	if e.resolved.Load() {
@@ -497,7 +505,11 @@ func (e *InSubquery) resolveSlow() {
 			}
 			for _, v := range r {
 				if v != nil {
-					rawVals = append(rawVals, memberSetBox(v, e.setDecl))
+					v = memberSetBox(v, e.setDecl)
+					if promoteSet {
+						v = memberDateMillis(v)
+					}
+					rawVals = append(rawVals, v)
 				} else {
 					e.setNull = true
 				}

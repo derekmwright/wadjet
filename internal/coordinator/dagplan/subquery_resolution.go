@@ -12,6 +12,7 @@ import (
 
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 
+	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/expr"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	"github.com/derekmwright/wadjet/internal/planner/physical"
@@ -554,9 +555,23 @@ func (p *StagePlanner) emitScalarProducerStagesTyped(stages *[]Stage, subquerySQ
 // read it, which is 22P02 for a query PostgreSQL answers as numeric. A DECIMAL
 // is spelled as the NUMBER it is, carrying its exact digits (item 6's carrier
 // rule); every other string-boxed type keeps the quoted spelling.
+//
+// A TIMESTAMP arrives as its epoch milliseconds, and a bare number beside a
+// DATE operand was read as a day count: `d = (SELECT ts …)` matched nothing
+// and `d < (SELECT ts …)` every row, where the single-process arms compare
+// PostgreSQL's `date = timestamp` (#1378). A TIMESTAMP is spelled as the typed
+// instant it is — `CAST('<instant>' AS TIMESTAMP)`, the rendering its own
+// input function reads back to the same millisecond (checked, and the number
+// kept where it would not be).
 func scalarToLiteral(v any, typ parquet.TypeID, typed bool) plansql.Node {
 	if s, ok := v.(string); ok && typed && typ == parquet.TypeDecimal {
 		return &plansql.Lit{Value: s, Kind: plansql.LitNumber}
+	}
+	if ms, ok := v.(int64); ok && typed && typ == parquet.TypeTimestamp {
+		text := batch.FormatTimestamp(ms)
+		if back, err := parquet.ParseTimestampMillis(text); err == nil && back == ms {
+			return &plansql.CastNode{Inner: &plansql.Lit{Value: text, Kind: plansql.LitString}, TypeName: "TIMESTAMP"}
+		}
 	}
 	switch val := v.(type) {
 	case float64:

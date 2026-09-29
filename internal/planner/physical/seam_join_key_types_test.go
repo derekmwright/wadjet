@@ -58,13 +58,13 @@ func TestJoinKeyLadderMatchesPostgresOperatorResolution(t *testing.T) {
 		{f32, dec, f64, true}, {dec, f32, f64, true},
 		{f64, dec, f64, true}, {dec, f64, f64, true},
 
-		// Off the ladder entirely: a STRING key, a DATE against a TIMESTAMP,
-		// an IPv4 against a BIGINT. Declining leaves the encoding exactly
-		// where it was — widening them is a different question with a
-		// different authority, and there is no PostgreSQL transcript here to
-		// answer it with.
+		// Off the ladder entirely: a STRING key, an IPv4 against a BIGINT.
+		// Declining leaves the encoding exactly where it was — widening them
+		// is a different question with a different authority, and there is no
+		// PostgreSQL transcript here to answer it with. (A DATE against a
+		// TIMESTAMP was pinned here as declined until #1378 gave it
+		// PostgreSQL's rung: TestArcDTJoinKeyLadderPromotesDateToTimestamp.)
 		{parquet.TypeString, parquet.TypeString, 0, false},
-		{parquet.TypeDate, parquet.TypeTimestamp, 0, false},
 		{parquet.TypeIPv4, i64, 0, false},
 		{i64, parquet.TypeIPv4, 0, false},
 		{parquet.TypeBool, i32, 0, false},

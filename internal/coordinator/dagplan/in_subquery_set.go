@@ -15,6 +15,7 @@ import (
 
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 
+	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/expr"
 	"github.com/derekmwright/wadjet/internal/planner/physical"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -157,7 +158,28 @@ func (p *StagePlanner) materializeInSubquery(ctx context.Context, in *plansql.In
 			values = append(values, lit)
 		}
 	}
-	return &plansql.InExpr{Left: in.Left, Not: in.Not, Values: values}, true
+	return &plansql.InExpr{Left: p.temporalMemberProbe(in.Left, setType, setTyped, decls), Not: in.Not, Values: values}, true
+}
+
+// temporalMemberProbe is the probe of an inlined set read at the pair's
+// common type: a DATE probe against a TIMESTAMP set is CAST to TIMESTAMP
+// (batch.TemporalCommonType, PostgreSQL's `date = timestamp`), because the
+// inlined members are the set's epoch milliseconds and the IN list compared
+// the probe's day count with them — 0 rows, and NOT IN every row (#1378).
+// The mirror pair needs nothing here: a DATE member inlines as its ISO text,
+// which the TIMESTAMP probe's own input reads as the midnight it is.
+func (p *StagePlanner) temporalMemberProbe(left plansql.Node, setType parquet.TypeID, setTyped bool, decls physical.ColDecls) plansql.Node {
+	if !setTyped || setType != parquet.TypeTimestamp {
+		return left
+	}
+	t, c := p.PlanContext.NodeDeclaredType(left, decls)
+	if c != expr.Decided {
+		return left
+	}
+	if common, ok := batch.TemporalCommonType(t.ID, setType); ok && t.ID != common {
+		return &plansql.CastNode{Inner: left, TypeName: "TIMESTAMP"}
+	}
+	return left
 }
 
 // emptyInSetPredicate is the constant `x IN ()` / `x NOT IN ()` evaluates to.

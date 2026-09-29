@@ -24,11 +24,20 @@ import (
 //
 // ok=false means "leave this pair alone", which is the answer for every pair
 // that already agrees and for every pair the ladder does not describe — a
-// STRING key, a DATE against a TIMESTAMP, an IPv4 against a BIGINT. Those
-// keep exactly the encoding they had; widening them is a different question
-// with a different authority, and guessing here would move rows under a rule
-// nobody stated.
+// STRING key, an IPv4 against a BIGINT. Those keep exactly the encoding they
+// had; widening them is a different question with a different authority, and
+// guessing here would move rows under a rule nobody stated.
+//
+// The one rung outside the numeric ladder is a DATE against a TIMESTAMP,
+// whose rule PostgreSQL states (batch.TemporalCommonType): the pair keys at
+// TIMESTAMP, the DATE side at its midnight. Left alone it keyed a day count
+// against milliseconds, so `a.d = r.ts` as a join, semi or anti join key —
+// an IN / EXISTS decorrelated to one included — matched nothing while the
+// same comparison as a filter matched (#1378).
 func joinKeyCommonType(a, b parquet.TypeID) (parquet.TypeID, bool) {
+	if t, ok := batch.TemporalCommonType(a, b); ok {
+		return t, true
+	}
 	if a == b || !joinKeyNumeric(a) || !joinKeyNumeric(b) {
 		return 0, false
 	}

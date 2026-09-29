@@ -27,8 +27,10 @@ Two conditions, and only these two:
 	   the other, matching only where the byte strings coincide by accident.
 
 A pair the ladder does not describe is left where it was only when NEITHER
-fast path is engaged: a DATE against a TIMESTAMP still answers no matches,
-as it always has. An INTEGER build against a STRING, BOOL, UUID or CIDR
+fast path is engaged. (A DATE against a TIMESTAMP was the example here: it
+answered no matches until #1378 gave it the ladder's TIMESTAMP rung, which
+keys the DATE side at its midnight through the widened byte encoder and
+keeps the pair off the integer fast path.) An INTEGER build against a STRING, BOOL, UUID or CIDR
 probe does NOT — R1 catches it, because the integer fast path is on and the
 probe has no integer storage. That shape used to PANIC on a nil typed
 slice, so the change there is a query error where there was a recovered

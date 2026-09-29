@@ -88,6 +88,17 @@ func appendCoercedKeyValue(buf []byte, v *batch.Vector, row int, target batch.Ty
 		return append(buf,
 			byte(val), byte(val>>8), byte(val>>16), byte(val>>24),
 			byte(val>>32), byte(val>>40), byte(val>>48), byte(val>>56))
+	case batch.TypeTimestamp:
+		// DATE ⊕ TIMESTAMP → TIMESTAMP (batch.TemporalCommonType): the day
+		// becomes its midnight's milliseconds, the eight bytes a TIMESTAMP
+		// keys as itself — so DATE '2024-01-02' and TIMESTAMP '2024-01-02
+		// 00:00:00' are one key and 12:00 that day is another (#1378).
+		if v.Type == batch.TypeDate {
+			val := int64(v.Int32Data[row]) * batch.MillisPerDay
+			return append(buf,
+				byte(val), byte(val>>8), byte(val>>16), byte(val>>24),
+				byte(val>>32), byte(val>>40), byte(val>>48), byte(val>>56))
+		}
 	case batch.TypeDecimal:
 		// DECIMAL ⊕ INTEGER → DECIMAL. AppendDecimalKey is scale-normalized
 		// (it strips trailing zero digits), so an integer keyed as its own
@@ -100,7 +111,8 @@ func appendCoercedKeyValue(buf []byte, v *batch.Vector, row int, target batch.Ty
 		}
 	}
 	// A pair the ladder does not describe cannot reach here: physical
-	// .joinKeyCommonType answers only INT64, FLOAT64 and DECIMAL, and each
+	// .joinKeyCommonType answers only INT64, FLOAT64, DECIMAL and (for a
+	// DATE) TIMESTAMP, and each
 	// arm above accepts every source type that can resolve to it. Arriving
 	// anyway means the plan-time ladder and this encoder have parted company,
 	// and the pre-#615 answer — the narrow side's own encoding — is the
@@ -170,6 +182,12 @@ func widenKeyFloat64(v *batch.Vector, row int) float64 {
 // integer-class columns by construction, so every one of those loops is
 // reading a slice that exists.
 func joinKeyUsesIntPath(types []batch.TypeID, i int, own batch.TypeID) bool {
+	if i < len(types) && types[i] == batch.TypeTimestamp {
+		// The DATE ⊕ TIMESTAMP rung: the int path reads each side's raw
+		// integer — a day count on one side, milliseconds on the other —
+		// so the pair keys through the widened byte encoder instead.
+		return false
+	}
 	t := KeyTypeAt(types, i, own)
 	if t != own && !isIntKeyColumn(t) {
 		return false
@@ -471,6 +489,8 @@ func canEncodeKeyAt(vec, target batch.TypeID) bool {
 		return isIntKeyColumn(vec)
 	case batch.TypeDecimal:
 		return vec == batch.TypeDecimal || isIntKeyColumn(vec)
+	case batch.TypeTimestamp:
+		return vec == batch.TypeDate
 	}
 	return false
 }

@@ -364,3 +364,54 @@ func memberDecimalEqual(lv, v any, set *parquet.Column) (eq, decided bool) {
 	}
 	return pk == key, true
 }
+
+// memberTemporalSides is the DATE ⊕ TIMESTAMP rung of a membership: which of
+// its two sides is the DATE that batch.TemporalCommonType promotes to its
+// midnight, given the probe's and the set's declarations. PostgreSQL reads
+// `d IN (SELECT ts …)` as `d = ANY`, whose operator is `date = timestamp`;
+// here the probe boxed its day count and the set its milliseconds (or the
+// set its ISO date text and the probe its milliseconds), and the membership
+// missed every member on the single-process arms — NOT IN kept every row
+// (#1378). Both false for every other pair, and when a declaration is
+// unknown.
+func memberTemporalSides(probe, set *parquet.Column) (promoteProbe, promoteSet bool) {
+	if probe == nil || set == nil {
+		return false, false
+	}
+	t, ok := batch.TemporalCommonType(probe.Type, set.Type)
+	if !ok {
+		return false, false
+	}
+	return probe.Type != t, set.Type != t
+}
+
+// memberTemporalProbeSides is memberTemporalSides for an evaluator holding a
+// probe's declaration source: the probe's shape is asked for only when the
+// set is temporal at all, so every other membership pays one comparison.
+func memberTemporalProbeSides(pd *operandDecl, set *parquet.Column, b *batch.RecordBatch, row int, probe Expr) (bool, bool) {
+	if set == nil || (set.Type != parquet.TypeDate && set.Type != parquet.TypeTimestamp) {
+		return false, false
+	}
+	return memberTemporalSides(pd.shape(b, row, probe), set)
+}
+
+// memberDateMillis is a DATE side's box — its day count, or a set member's
+// ISO text (memberSetBox's input) — as the TIMESTAMP of its midnight, the
+// box a TIMESTAMP evaluates to. Any other box is returned as it is.
+func memberDateMillis(v any) any {
+	switch d := v.(type) {
+	case int64:
+		return d * batch.MillisPerDay
+	case int32:
+		return int64(d) * batch.MillisPerDay
+	case int:
+		return int64(d) * batch.MillisPerDay
+	case string:
+		days, err := parquet.ParseDateDays(d)
+		if err != nil {
+			return v
+		}
+		return int64(days) * batch.MillisPerDay
+	}
+	return v
+}
