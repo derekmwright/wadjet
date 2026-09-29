@@ -276,7 +276,8 @@ func (b *binder) declareTemporalArmColumns(info *plansql.SelectInfo, scope *colS
 // and refuses 42804 when the recursive term disagrees), DATE and TIMESTAMP
 // only. A recursive CTE published no declaration at all, so `COALESCE(s.d,
 // s.t)` over one skipped the refusal whatever its columns were (#1378 round
-// 3); the other types stay undeclared as they were.
+// 3); the other types stay undeclared as they were, and the recursive term's
+// own references are validated before the declarations are published.
 func recursiveTemporalDecls(outputDecls map[*plansql.SelectInfo][]expr.DeclType, body *plansql.SelectInfo) []expr.DeclType {
 	anchor := body
 	for anchor != nil && anchor.Union != nil {

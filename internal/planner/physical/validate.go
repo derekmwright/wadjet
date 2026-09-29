@@ -1706,11 +1706,16 @@ func (b *binder) registerCTE(ctx context.Context, cte *plansql.CTEDef) error {
 		// under the closed scope so the recursive term's own reference to a
 		// name the CTE does not publish is refused the same way.
 		if known {
-			b.ctes[name] = cteEntry{cols: plansql.OverlayColumnAliases(cte.Columns, names),
-				decls: recursiveTemporalDecls(b.outputDecls, body)}
+			b.ctes[name] = cteEntry{cols: plansql.OverlayColumnAliases(cte.Columns, names)}
 			if err := b.validateBlock(ctx, body, nil); err != nil {
 				return err
 			}
+			// The statement that READS the CTE sees its DATE / TIMESTAMP
+			// columns declared; the recursive term's own references keep
+			// the undeclared entry it was validated under.
+			e := b.ctes[name]
+			e.decls = recursiveTemporalDecls(b.outputDecls, body)
+			b.ctes[name] = e
 		}
 		return nil
 	}
