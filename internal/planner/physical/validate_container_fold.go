@@ -180,6 +180,52 @@ func foldTypeName(c parquet.Column) string {
 	return pgTypeName(c.Type)
 }
 
+// foldArmTypeOf is the choice-fold refusal's arm typing: an arm's DECLARED
+// type, whatever the arm's shape. foldTypeOf's walk (nodeDeclaredType, the
+// one the projection declares its column by) is handed the binder's answer
+// for a SCALAR SUBQUERY — the body validated against this scope, correlated
+// or not, and its one declared output column — and a WINDOW call is typed as
+// the function it windows, `max(ts) OVER ()` the timestamp `max(ts)` is and
+// `lag(ts) OVER (…)` the timestamp its argument is. An
+// arm left untyped was skipped by refuseFoldArms, so `COALESCE(d, (SELECT
+// max(ts) …))` and `COALESCE(d, max(ts) OVER ())` kept the first arm's DATE
+// declaration and answered day counts on every arm where PostgreSQL answers
+// timestamps (#1378 round 2).
+func (b *binder) foldArmTypeOf(scope *colScope) func(plansql.Node) (parquet.Column, bool) {
+	decls := rowFieldScopeDecls(scope)
+	decls.subqueryDecl = func(sql string) (parquet.Column, bool) {
+		// The body's own output declaration (binder.outputDecls: the
+		// aggregate-aware walk the body's SELECT list is declared by, so
+		// `max(ts)` is the timestamp it is).
+		sub := b.validatedBody(sql, scope)
+		if sub == nil {
+			return parquet.Column{}, false
+		}
+		ds := b.outputDecls[sub]
+		if len(ds) != 1 || ds[0].Untyped {
+			return parquet.Column{}, false
+		}
+		return parquet.Column{Type: ds[0].ID}, true
+	}
+	shape := foldTypeOf(decls)
+	var typeOf func(plansql.Node) (parquet.Column, bool)
+	typeOf = func(n plansql.Node) (parquet.Column, bool) {
+		if w, ok := plansql.Unparen(n).(*plansql.WindowFuncNode); ok {
+			if w.Func == nil {
+				return parquet.Column{}, false
+			}
+			// A value function (lag, first_value, …) lifts its first
+			// argument's value, and is declared by it (windowValueFunc).
+			if fc := w.Func; windowValueFunc(strings.ToLower(fc.Name)) && len(fc.Args) > 0 {
+				return typeOf(fc.Args[0])
+			}
+			return typeOf(w.Func)
+		}
+		return shape(n)
+	}
+	return typeOf
+}
+
 // foldTypeOf types one fold arm with its SHAPE where the scope carries it: a
 // column's full declaration (a ROW's fields), else the arm's declared type.
 func foldTypeOf(decls ColDecls) func(plansql.Node) (parquet.Column, bool) {

@@ -1124,7 +1124,7 @@ func (b *binder) checkExpr(expr plansql.Node, scope *colScope) error {
 	}
 	// A container folded with something it cannot be (validate_container_fold.go,
 	// #1060).
-	if err := refuseContainerFold(expr, foldTypeOf(rowFieldScopeDecls(scope))); err != nil {
+	if err := refuseContainerFold(expr, b.foldArmTypeOf(scope)); err != nil {
 		return err
 	}
 	if scope == nil || scope.open {
