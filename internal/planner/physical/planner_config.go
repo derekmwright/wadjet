@@ -386,6 +386,16 @@ type scanCached struct {
 	// unionCols is the union of every consumer's RequiredColumns, in
 	// first-seen order. nil = full schema (some consumer needs all).
 	unionCols []string
+	// consumers are the scan nodes mergeDuplicateScans counted — the ONLY
+	// scans that may attach to this entry. The entry is keyed by table name,
+	// so a scan of the same table planned from ANOTHER tree (an uncorrelated
+	// subquery's own plan, built at run time by a child planner that shares
+	// this map) finds it too; its columns and predicates are in neither
+	// unionCols nor the incompatibility check, and replaying for it answered
+	// from a cache without its columns: `12 IN (SELECT q.v FROM t q)` above
+	// `t a JOIN t b` read no v and answered 0 rows, the EXISTS spelling
+	// failed with `filter column "q.v" does not exist` (#1382 #1418).
+	consumers map[*logical.Node]bool
 }
 
 // NewPlanner creates a new physical planner.

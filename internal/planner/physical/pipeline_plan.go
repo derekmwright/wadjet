@@ -196,7 +196,7 @@ func (p *Planner) buildScan(ctx context.Context, node *logical.Node) (exec.Sourc
 		}
 		return source, nil, &exec.CollectSink{}, nil
 	}
-	scanner := p.newScanner(ctx, node.TableName, node.PartitionFilter, node.RequiredColumns, node.ScanPredicates)
+	scanner := p.newScanner(ctx, node)
 
 	// Lengths-only decode for columns the logical analysis proved are
 	// consumed for their SHAPE only (logical/shape_only_columns.go). Skipped

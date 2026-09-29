@@ -79,7 +79,11 @@ func (p *Planner) mergeDuplicateScans(node *logical.Node) {
 		if p.scanCache == nil {
 			p.scanCache = make(map[string]*scanCached)
 		}
-		p.scanCache[table] = &scanCached{unionCols: merged}
+		consumers := make(map[*logical.Node]bool, len(scans))
+		for _, s := range scans {
+			consumers[s] = true
+		}
+		p.scanCache[table] = &scanCached{unionCols: merged, consumers: consumers}
 	}
 }
 

@@ -19,7 +19,8 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-func (p *Planner) newScanner(ctx context.Context, tableName string, partFilter map[string]string, requiredCols []string, scanPreds []logical.Predicate) exec.Source {
+func (p *Planner) newScanner(ctx context.Context, node *logical.Node) exec.Source {
+	tableName, partFilter, requiredCols, scanPreds := node.TableName, node.PartitionFilter, node.RequiredColumns, node.ScanPredicates
 	// Get table schema
 	tableMeta, err := p.Catalog.GetTable(ctx, tableName)
 	if err != nil {
@@ -36,9 +37,11 @@ func (p *Planner) newScanner(ctx context.Context, tableName string, partFilter m
 		scanPreds:        scanPreds,
 		manifestSnapshot: p.ManifestSnapshot,
 	}
-	// Attach scan cache if this table is scanned multiple times in this query.
+	// Attach scan cache if this table is scanned multiple times in this query
+	// and THIS scan is one of the scans the cache was sized for (see
+	// scanCached.consumers). Any other scan of the table reads storage.
 	if p.scanCache != nil {
-		if cached, ok := p.scanCache[tableName]; ok {
+		if cached, ok := p.scanCache[tableName]; ok && cached.consumers[node] {
 			src.cache = cached
 		}
 	}

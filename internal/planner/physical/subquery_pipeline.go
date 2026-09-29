@@ -39,7 +39,10 @@ func (p *Planner) makeSubqueryRunner() expr.SubqueryRunner {
 // Share catalog, CTE definitions/materialization, scan cache, memory/spill
 // resources and configuration: one query budget, spill directory and CTE cache.
 // Plan populates shared cteCache/scanCache before execution; they are read-only
-// here, and scanCached synchronizes concurrent replay with its own mutex.
+// here, and scanCached synchronizes concurrent replay with its own mutex. The
+// subquery's OWN scans are not among a scanCache entry's consumers (its tree
+// is parsed here, after the entry was sized), so they never attach to it and
+// read storage (#1382 #1418).
 // Drop MaterializedInputs, StreamingSources and ScanFileFilter: those aliases
 // and file slices belong to the enclosing fragment; subqueries read the whole table.
 // See docs/internals/subquery-planner-resource-ownership.md for the design.
