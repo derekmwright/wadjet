@@ -117,7 +117,7 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 		return nil, err
 	}
 	// A lifted predicate whose column the enclosing relation also publishes
-	// (arc LT, #1130): decided on the ANNOTATED plan, the same door as the two
+	// (#1130): decided on the ANNOTATED plan, the same door as the two
 	// refusals above.
 	if err := logical.RefuseContestedLiftedRefs(node, false); err != nil {
 		return nil, err
@@ -219,8 +219,8 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 		cs.SchemaHintWireUnconstrainedPos, cs.SchemaHintStringLengthPos =
 			publishedOutputDecls(p.outputProjection, rawWire, rawLens)
 		cs.SchemaHintWireUnconstrainedDecimal = republishDeclaredNames(p.outputProjection, rawWire)
-		// PostgreSQL's numeric category of each FLOAT64 output column, for the
-		// write door that assigns the result (INSERT … SELECT, #1353).
+		// PostgreSQL's numeric category of each output column, for the write
+		// door that assigns the result (INSERT … SELECT, #1353).
 		cs.SchemaHintPGCategoryPos = declaredOutputPGCategory(node)
 		// And the string family's modifier, which is a LENGTH rather than a
 		// (p,s) — same lifecycle, same reason (#838).

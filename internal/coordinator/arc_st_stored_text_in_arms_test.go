@@ -347,7 +347,7 @@ func stNeighbourCells() []brArmCell {
 	}
 }
 
-// stCrossCastCells are the reviewer's B1 cells (REVIEW_R1_opus.md, "B1"): a
+// stCrossCastCells are the cross-CAST cells: a
 // kept CAST(x AS TEXT) body must keep by the COMPARED TYPE (ADR-0012 §5:
 // "of the compared type"), not by comparisonClass, which groups every
 // cmpNumber member together. The axis: same class/different type, both
@@ -407,7 +407,7 @@ func stCrossCastCells() []brArmCell {
 	return out
 }
 
-// stSetOpLiteralCells are the reviewer's B2 cells (REVIEW_R1_opus.md, "B2"):
+// stSetOpLiteralCells are the set-operation literal cells:
 // a set-operation body of quoted literals lost its text origin through
 // validateBlock's UNION / UNION ALL / INTERSECT / EXCEPT merge (the
 // `lo[i] != originQuotedLiteral` guard excluded it), so memberPair saw
@@ -418,7 +418,7 @@ func stCrossCastCells() []brArmCell {
 // carries originQuotedLiteral through every set operator, so the body
 // refuses 42883 exactly as the single-SELECT literal body already does.
 // <> ALL is not repeated here: the parser normalizes it to NOT IN before
-// any rule sees it (N1), so it exercises no code this axis does not.
+// any rule sees it, so it exercises no code this axis does not.
 func stSetOpLiteralCells() []brArmCell {
 	pred := func(sh, outer, sub string) string {
 		switch sh {
@@ -453,7 +453,7 @@ func stSetOpLiteralCells() []brArmCell {
 	return out
 }
 
-// stP2MoverCells are the review's P2 finding (REVIEW_R1_opus.md, "P2"): nine
+// stP2MoverCells are nine
 // shapes that answered identically on all five arms at base — rightly, in
 // the superset's sense (PostgreSQL 17.11 refuses every one 42883) — outside
 // Appendix C, and now refuse 42883 at the tip: a CTE's CAST(x AS TEXT)

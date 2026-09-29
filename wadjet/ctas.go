@@ -230,14 +230,16 @@ func checkInsertSelectShape(declared []parquet.Column, cols []parquet.Column, ex
 
 // selectItemSources is the one assignment function's source for every
 // position of an INSERT … SELECT's select list: the plan's DECLARED output
-// type by default, and — for an item the statement wrote as a CONSTANT (a
+// type by default, rounded by PostgreSQL's category of it where the plan
+// names one (pgCat: a FLOAT64 `5 / 2.0` is numeric, a DECIMAL `GREATEST(d,
+// f)` float8), and — for an item the statement wrote as a CONSTANT (a
 // number, a quoted literal, TRUE/FALSE, NULL, a signed number) or as a
 // typed-text call — assignSourceOf over the item's own AST, exactly the
 // classification a VALUES cell gets. So `SELECT 2.50` into TEXT stores
 // `2.50`, `SELECT 2.5` into INTEGER stores 3 and `SELECT 't'` into BOOLEAN
 // stores true, as `VALUES (…)` and PostgreSQL do; the evaluated value of a
 // numeric literal is a float here and carried neither its scale nor
-// PostgreSQL's numeric rounding (round-3 review B2 / P2).
+// PostgreSQL's numeric rounding.
 //
 // The AST is read only for the shape it can PROVE: a single SELECT block whose
 // item count matches the declared output, with no star and no set operation.

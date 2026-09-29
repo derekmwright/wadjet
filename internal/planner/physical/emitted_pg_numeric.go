@@ -3,7 +3,7 @@
 // This file carries PostgreSQL's NUMERIC CATEGORY (expr.DeclType.PGNumeric)
 // through a plan: the companion to emittedColTypes (the carrier),
 // emittedColDecimal (the (p,s)) and emittedColIntWidth (the integer width).
-// Governed by ADR-0024 item 2 (its 2026-09-28 amendment).
+// Governed by ADR-0024 §2c.
 package physical
 
 import (
@@ -176,7 +176,7 @@ func emittedColPGCategory(n *logical.Node) map[string]pgCategory {
 // column contributes no entry, so `s a JOIN (SELECT id, 5 / 2.0 AS y …) b`
 // kept b's bare `y: numeric`, and `a.y` — which has no qualified entry when
 // the map holds nothing for a — fell back to it and a float8 rounded half away
-// from zero (#1353 round-1 review, B1; the by-name lesson of #1177). known is
+// from zero (#1353; the by-name lesson of #1177). known is
 // false for an arm whose columns this walk cannot list at all.
 func joinArmPGCategory(arm *logical.Node) (m map[string]pgCategory, known bool) {
 	cats := emittedColPGCategory(arm)

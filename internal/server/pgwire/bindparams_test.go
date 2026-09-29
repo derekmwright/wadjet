@@ -27,7 +27,7 @@ func TestRenderParamText(t *testing.T) {
 		{"int2", "300", oidInt2, "300"},
 		{"oid", "16384", oidOID, "16384"},
 		// A float is its own type, not the numeric a bare number reads as
-		// (#1353 round 4).
+		// (#1353).
 		{"float8", "90.5", oidFloat8, "CAST('90.5' AS DOUBLE PRECISION)"},
 		{"float4", "1.5", oidFloat4, "CAST('1.5' AS REAL)"},
 		{"float exponent", "1e3", oidFloat8, "CAST('1e3' AS DOUBLE PRECISION)"},

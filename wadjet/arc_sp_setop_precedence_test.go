@@ -109,7 +109,7 @@ func TestArcSPSetOpPrecedenceOnTheEmbeddedAPI(t *testing.T) {
 // cells as "within its non-recursive term"; the parenthesised ones already
 // reached the term and iterated where PostgreSQL refuses.
 //
-// The last cell (N3, round-2 review) is the top-level operator itself: a
+// The last cell is the top-level operator itself: a
 // PLAIN `UNION` (not `UNION ALL`) whose term is `… INTERSECT ALL …`. The
 // term's shape is checked before this engine's own UNION-vs-UNION-ALL
 // capability gap (0A000), so this refuses 42P19 "within INTERSECT" — the

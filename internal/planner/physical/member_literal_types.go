@@ -10,31 +10,25 @@ import (
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
 
-// typeMemberLiterals gives the quoted literal on the OUTER side of a
-// membership against a subquery — `'2024-1-2' IN (SELECT d …)`, `= ANY`,
-// NOT IN, `<> ALL` — the subquery's type IN THE PLAN, as the CAST
-// expr.MemberLiteralCast names: PostgreSQL resolves the unknown constant to
-// the set's type while it analyses the statement (#1372).
+// typeMemberLiterals gives the literal on the OUTER side of a membership
+// against a subquery — `'2024-1-2' IN (SELECT d …)`, `= ANY`, NOT IN,
+// `<> ALL` — the subquery's type IN THE PLAN, as the CAST expr.MemberProbe
+// builds (a quoted literal; against a NUMERIC or integer set also a numeric
+// constant or a constant numeric expression): PostgreSQL resolves the unknown
+// constant to the set's type while it analyses the statement (#1372).
 //
-// WHY THE PLAN AND NOT THE EXECUTOR. Both arms consume this one logical plan,
-// and they meet the membership in two different carriers: the single-process
-// arm evaluates it as InSubquery / CorrelatedInSubquery, and the DAG
-// materializes the set at plan time into an IN LIST of the members' literal
-// spellings (dagplan.materializeInSubquery). The literal was typed only where
-// the single-process arm COMPILED it, so on the DAG an unknown literal met
-// unknown literals and compared as TEXT: `'2024-1-2'`, `'20240102'`,
-// `'2001:DB8::1'`, a braced uuid, `'1_2'`, `'0x0C'` answered 0 rows there
-// (NOT IN every row) where the single-process arms and PostgreSQL match —
-// only a literal spelled exactly as a member renders matched. Written into
-// the plan as a CAST, the literal reaches every carrier already typed, and the
-// type's own input function reads it on every arm.
+// Why the plan: the single-process arm evaluates the membership as
+// InSubquery / CorrelatedInSubquery, and the DAG inlines the set as an IN list
+// of the members' spellings (dagplan.materializeInSubquery), so a literal typed
+// only where the single-process arm compiled it met the members as TEXT on the
+// DAG (ADR-0012 §5 names the spellings that missed there). As a CAST in the
+// plan it reaches every carrier typed, read by the type's own input function.
 //
-// It runs from AnnotateScanColumns, which every entry calls on the plan it
-// built and the optimizer calls again on the plan its decorrelations extend,
-// so a membership in a decorrelated body is typed too. A typed literal is no
-// longer a quoted one, so a second run changes nothing. A literal the type
-// cannot read is the binder's plan-time 22P02 / 22007 on a statement it
-// validated (expr.CheckMemberLiteral), and the CAST's own at run time
+// It runs from AnnotateScanColumns, which every entry calls and the optimizer
+// calls again after its decorrelations, so a decorrelated body is typed too; a
+// typed literal is a CAST no rule of expr.MemberProbe matches, so a second run
+// changes nothing. A literal the type cannot read is the binder's plan-time
+// 22P02 / 22007 (expr.CheckMemberProbe), and the CAST's own at run time
 // anywhere else — the same refusal.
 func (p *Planner) typeMemberLiterals(root *logical.Node) {
 	if p == nil || root == nil {
@@ -109,11 +103,11 @@ func (p *Planner) typeMemberLiteralsIn(ctes []plansql.CTEDef, e plansql.Node) bo
 }
 
 // memberLiteralCast is the typed node for a membership's outer operand, or
-// nil when there is nothing to type: the operand is not a literal
-// expr.MemberProbe types (a quoted literal; against a NUMERIC body also a
-// numeric constant or a quoted literal under a bare NUMERIC CAST),
-// the membership is not against ONE subquery, or its declared type is not
-// one the literal takes (a TEXT set keeps the text, as PostgreSQL does).
+// nil when there is nothing to type: the operand is not one
+// expr.MemberProbeCandidate accepts (a quoted literal, a numeric constant, a
+// constant numeric expression), the membership is not against ONE subquery,
+// or expr.MemberProbe does not type it for the body's declared type (a TEXT
+// set keeps the text, as PostgreSQL does).
 //
 // A body that reads a CTE of the statement resolves its type against the
 // statement's WITH list, which is seeded for this one question (as
@@ -137,10 +131,11 @@ func (p *Planner) memberLiteralCast(ctes []plansql.CTEDef, left plansql.Node, va
 	if !ok {
 		return nil
 	}
-	// A literal the type refuses (22P02, or the 22003 of a NUMERIC literal
-	// no DECIMAL(38,s) holds) is left as written: the binder refuses the
+	// A literal MemberProbe refuses (the 22003 of a NUMERIC literal no
+	// DECIMAL(38,s) holds) is left as written: the binder refuses the
 	// statement with the same error before any plan runs, and the compiler's
-	// memberProbe refuses a plan-less one.
+	// memberProbe refuses a plan-less one. Text the type cannot read (22P02)
+	// is still CAST, and the CAST's input function refuses it.
 	typed, ok, err := expr.MemberProbe(left, col.Type)
 	if !ok || err != nil {
 		return nil

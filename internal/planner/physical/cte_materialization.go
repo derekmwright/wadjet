@@ -252,8 +252,10 @@ func (p *Planner) inferCTESchema(sql string) []parquet.Column {
 }
 
 // materializeRecursiveCTE executes a recursive CTE using fixed-point iteration.
-// The CTE body must contain UNION ALL separating the anchor query from the
-// recursive query. The recursive query references the CTE name itself.
+// classifyRecursiveBody decides the form: `non-recursive-term UNION ALL
+// recursive-term` iterates, a body that never names itself is materialized as
+// the ordinary query it is (with its PostgreSQL numeric category, pgCat), and
+// every other form refuses.
 //
 // IT MARKS THE NAME IN PROGRESS FOR THE WHOLE MATERIALIZATION, and that marker
 // is the termination guarantee. Everything below PLANS the body, and the body's
@@ -262,7 +264,7 @@ func (p *Planner) inferCTESchema(sql string) []parquet.Column {
 // re-materialized the SAME definition from inside its own materialization,
 // without bound: `WITH RECURSIVE r AS (SELECT 1 AS v UNION SELECT v+1 FROM r
 // WHERE v<3)` never returned and took 25 GB of RSS in 45 seconds, reachable by
-// any client at the statement ROOT (the round-2 review's B3). The builder's own
+// any client at the statement ROOT. The builder's own
 // comment says why the body is not expanded there; this is the same door one
 // layer down.
 //
@@ -339,35 +341,23 @@ const (
 
 // classifyRecursiveBody decides a recursive CTE's FORM from the PARSED
 // set-operation tree, and returns the anchor and recursive-term TEXT the
-// fixed-point iteration re-plans.
+// fixed-point iteration re-plans (ADR-0021 §1o-a).
 //
-// PostgreSQL's grammar gives INTERSECT tighter precedence than UNION and
-// EXCEPT, so the recursive term is the LAST operand of the top-level
-// UNION ALL — one arm, or an INTERSECT chain, since INTERSECT binds tighter —
-// and everything to its left is the non-recursive term; this parser reads
-// the same tree. Deciding the form from the body's TEXT instead — a
-// split at the FIRST top-level UNION ALL — put an arm that names the CTE and
-// an arm that does not into one "recursive term", and the iteration re-ran the
-// constant arm every round: 1002 rows (one, then 1001 NULLs) where PostgreSQL
-// answers five (round-2 review, B3).
-//
-// Three answers, and each is PostgreSQL's own:
-//
-//   - a self-reference ANYWHERE in the non-recursive term is 42P19, "recursive
-//     reference to query %q must not appear within its non-recursive term" —
-//     measured for a two-, three- and four-arm body with the reference in each
-//     position, UNION and UNION ALL alike;
-//   - the last arm names the CTE and the TOP operator is UNION without ALL:
-//     PostgreSQL iterates and removes duplicates at every step, which this
-//     engine has no fixed-point form for, so 0A000 (a feature gap, not a
-//     syntax class — ADR-0012);
-//   - no arm names the CTE: not recursive, and answered as the ordinary set
-//     operation it is.
-//
-// The TEXT split is verified against the parse rather than trusted: the two
-// halves are re-parsed and must name the CTE exactly as the tree said, or the
-// body is refused. A split that disagrees with the form is what produced the
-// 1002 rows.
+// INTERSECT binds tighter than UNION and EXCEPT, so the recursive term is the
+// LAST operand of the top-level UNION ALL — one arm, or an INTERSECT chain —
+// and everything to its left is the non-recursive term. Each answer is
+// PostgreSQL's own: a self-reference ANYWHERE in the non-recursive term is
+// 42P19 "…within its non-recursive term" (measured for two- to four-arm
+// bodies, the reference in each position); a last operand
+// that names the CTE only inside a subquery expression is 42P19 "…within a
+// subquery"; no reference at all is not recursive; a top operator other than
+// UNION, or a body with no set operation that names itself, does "not have
+// the form"; the term's own shape (refuseRecursiveTermShape: INTERSECT ALL,
+// EXCEPT ALL's left, EXCEPT's right) is 42P19 "…within INTERSECT|EXCEPT"; and
+// only then a top-level UNION without ALL is 0A000, a feature gap (ADR-0012).
+// The TEXT split is re-parsed and must name the CTE as the tree said, or the
+// body is refused: a split at the FIRST top-level UNION ALL re-ran a constant
+// arm every round (1002 rows where PostgreSQL answers five).
 func classifyRecursiveBody(cte plansql.CTEDef) (recursiveForm, string, string, error) {
 	name := strings.ToLower(strings.TrimSpace(cte.Name))
 	body, err := cte.BodySelect()
@@ -418,9 +408,9 @@ func classifyRecursiveBody(cte plansql.CTEDef) (recursiveForm, string, string, e
 	// capability gap: PostgreSQL raises the shape's 42P19 (e.g. "within
 	// INTERSECT") whether the top-level operator carries ALL or not, and a
 	// plain UNION with an otherwise-valid term reaches the 0A000 gap below
-	// only once the term itself is confirmed well-formed (N3, round-2 review:
+	// only once the term itself is confirmed well-formed:
 	// `seed UNION rec INTERSECT ALL x` gave 0A000 before this, where
-	// PostgreSQL and the shape rule both give 42P19 "within INTERSECT").
+	// PostgreSQL and the shape rule both give 42P19 "within INTERSECT".
 	if err := refuseRecursiveTermShape(cte.Name, top.Right); err != nil {
 		return recursiveFormNotRecursive, "", "", err
 	}

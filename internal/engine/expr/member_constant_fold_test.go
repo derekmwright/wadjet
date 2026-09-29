@@ -10,8 +10,8 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// A CONSTANT-VALUED OUTER OPERAND IS FOLDED, NEVER A DOUBLE (review round 4,
-// B9). Every form below is computed from numeric constants that this engine
+// A CONSTANT-VALUED OUTER OPERAND IS FOLDED, NEVER A DOUBLE (#1372). Every
+// form below is computed from numeric constants that this engine
 // evaluates as a double — a choice, a unary minus of an expression, a bare
 // NUMERIC CAST of anything but a quoted literal — and 14.0000000000000000001
 // read as 14 matched the member 14. MemberProbe folds the operand exactly and

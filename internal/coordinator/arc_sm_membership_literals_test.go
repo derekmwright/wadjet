@@ -227,16 +227,15 @@ func smLiteralCells() []smCell {
 	return out
 }
 
-// smPrecisionCells are the reviewer's B4 precision cells (review round 2,
-// Target 2): a literal probe against a NUMERIC(18,4) body computed from
+// smPrecisionCells are the precision cells: a literal probe against a NUMERIC(18,4) body computed from
 // st_pair.v_dec, at values with 14 integer digits — still inside the
 // column's own precision. A literal typed bare NUMERIC boxes as a double, so
 // '12500000000000.0001' matched a 12500000000000.0000 member on every arm
 // where PostgreSQL answers none — the fractional digit past float8's
 // precision never survived the box. The literal takes NUMERIC(38, its own
 // scale) instead, in every spelling — the quoted literal and the explicit
-// `CAST('…' AS NUMERIC)` alike (castIn / castCorr, which kept the bare
-// NUMERIC until round 4) — so the comparison stays an exact decimal
+// `CAST('…' AS NUMERIC)` alike (castIn / castCorr, which once kept the bare
+// NUMERIC) — so the comparison stays an exact decimal
 // (expr.MemberProbe; the whole grammar is TestArcSMNumericLiteralGrammarEveryArm).
 func smPrecisionCells() []smCell {
 	add := func(name, sql string) smCell { return smCell{name: "prec/" + name, sql: sql, pgSQL: sql} }

@@ -76,7 +76,8 @@ func MemberLiteralCast(t parquet.TypeID) (string, bool) {
 // CheckMemberProbe reads a membership's outer operand as the set's type, at
 // plan time, and reports the typed literal's own refusal of its text (22P02
 // / 22007 in PostgreSQL's words) or — against a NUMERIC set — the 22003 of a
-// number no DECIMAL(38,s) holds: PostgreSQL coerces the constant while it
+// number no DECIMAL(38,s) holds (or MemberProbe's 0A000 for a constant
+// operand it cannot fold exactly): PostgreSQL coerces the constant while it
 // analyses the statement, so `'zz' IN (SELECT bigint …)` is refused before
 // any row, on every arm — it answered 0 rows on all five. An operand
 // MemberProbe does not type is not checked here.
@@ -108,23 +109,26 @@ func CheckMemberProbe(left plansql.Node, t parquet.TypeID) (err error) {
 
 // MemberProbe is a membership's outer operand read as the set's type: an
 // unknown-typed (quoted) literal against a set declared t is the literal
-// CAST to MemberLiteralCast(t), a numeric literal against a NUMERIC set —
+// CAST to MemberLiteralCast(t); a numeric literal against a NUMERIC set —
 // and, one that is not a plain integer, against an integer set — is the
-// literal CAST to NUMERIC(38, its own scale) (memberNumericProbe), and
-// every other operand is itself (ok false). It is the ONE constructor of the
-// typed literal: physical.typeMemberLiterals writes it into the logical plan
-// every arm consumes (the DAG's inlined IN list included), and the compiler
-// applies it to an expression that reached it without a plan — a DML door's
-// WHERE — where it finds the literal still untyped. A literal the plan
-// already typed is a CAST with a precision, which no rule here matches, so
-// the two never both apply. err is the 22003 of a numeric literal no
-// DECIMAL(38,s) holds.
+// literal CAST to NUMERIC(38, its value's scale) (memberNumericProbe); a
+// constant-valued operand that is no literal, against a NUMERIC or integer
+// set, is folded to the number its constants spell and typed the same way
+// (memberConstantProbe); every other operand is itself (ok false). It is the
+// ONE constructor of the typed literal: physical.typeMemberLiterals writes it
+// into the logical plan every arm consumes (the DAG's inlined IN list
+// included), and the compiler applies it to an expression that reached it
+// without a plan — a DML door's WHERE — where it finds the literal still
+// untyped. A literal the plan already typed is a CAST with a precision (or a
+// plain integer), which no rule here retypes, so the two never both apply. err is the 22003 of a number no DECIMAL(38,s)
+// holds, or memberConstantProbe's 0A000 for a constant operand it cannot
+// fold exactly.
 func MemberProbe(left plansql.Node, t parquet.TypeID) (plansql.Node, bool, error) {
 	switch t {
 	case parquet.TypeDecimal, parquet.TypeInt32, parquet.TypeInt64:
 		// A constant-valued operand that is not itself a literal is folded
-		// to the number its constants spell and typed as one (B9;
-		// member_constant_fold.go), or refused where it cannot be.
+		// to the number its constants spell and typed as one
+		// (member_constant_fold.go), or refused where it cannot be.
 		if memberConstantCandidate(left) {
 			return memberConstantProbe(left, t)
 		}

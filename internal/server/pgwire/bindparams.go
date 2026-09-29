@@ -167,7 +167,7 @@ func renderTextParam(s string, oid uint32) (string, error) {
 		// A float parameter is a float wherever it lands. Spliced bare, its
 		// text read as a NUMERIC literal (ADR-0024's literal rule), so a
 		// float8 2.5 assigned to an integer column rounded half away from
-		// zero where PostgreSQL rounds a float8 half to even (#1353 round 4:
+		// zero where PostgreSQL rounds a float8 half to even (#1353:
 		// a MERGE `SET n = $1` bound float8 2.5 stored 3, PostgreSQL 2).
 		if _, err := strconv.ParseFloat(strings.TrimSpace(s), 64); err != nil && !errors.Is(err, strconv.ErrRange) {
 			return quoteLiteral(s), nil

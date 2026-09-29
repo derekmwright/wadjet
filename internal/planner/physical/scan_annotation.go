@@ -29,7 +29,7 @@ func (p *Planner) AnnotateScanColumns(ctx context.Context, node *logical.Node) {
 	// walks cannot ask for — they hold no Planner — so it is stamped on the
 	// Project that publishes it, here, once per plan (subquery_decl_annotation.go).
 	p.annotateSubqueryColumnDecls(node)
-	// A membership's quoted-literal outer value takes the subquery's type IN
+	// A membership's literal outer value takes the subquery's type IN
 	// THE PLAN, so every arm reads one typed node (member_literal_types.go).
 	p.typeMemberLiterals(node)
 }
@@ -173,7 +173,7 @@ func (p *Planner) stampRecursiveReference(node *logical.Node) {
 	stampScanSchema(node, mat.schema)
 	// The category the materialization's parquet.Column cannot carry:
 	// `WITH RECURSIVE r(v) AS (SELECT 5 / 2.0 …)` publishes a double that
-	// PostgreSQL types numeric (#1353 round-1 review, B2).
+	// PostgreSQL types numeric (#1353).
 	node.ScanColPGCategory = nil
 	for i, c := range mat.schema {
 		if i < len(mat.pgCat) && mat.pgCat[i] != pgCatUnknown {

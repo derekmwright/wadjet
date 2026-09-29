@@ -167,9 +167,12 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
        typed literal is written into the logical plan every arm consumes
        (`physical.typeMemberLiterals`, `expr.MemberProbe`), so the DAG's
        inlined IN list compares a typed value too: `'2024-1-2'`,
-       `'2001:DB8::1'`, `'1_2'` against a DATE, inet or bigint body matched
-       only on the single-process arms while the literal was typed at
-       compile time, and a NUMERIC body's scale rounded `'12.50001'` to a
+       `'20240102'`, `'2001:DB8::1'`, a braced uuid, `'1_2'` and `'0x0C'`
+       against a DATE, inet, uuid or bigint body matched only on the
+       single-process arms while the literal was typed at compile time —
+       the DAG compared the text, 0 rows and NOT IN every row, matching only
+       a literal spelled as a member renders — and a NUMERIC body's scale
+       rounded `'12.50001'` to a
        member while the probe took the column's typmod. Against a NUMERIC
        body a numeric literal — quoted, under a bare `CAST(… AS NUMERIC)`
        or `::numeric`, or an unquoted constant — is typed NUMERIC(38, its
@@ -192,7 +195,11 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
        column result has each constant result typed instead (beside a
        float8 column the choice is float8, as in PostgreSQL). Arithmetic
        folds at PostgreSQL's result scales, a numeric quotient at
-       select_div_scale (`(14.0000000000000000001 / 7) * 7` is 14 there). A
+       select_div_scale rounded half away from zero as div_var rounds
+       (`(14.0000000000000000001 / 7) * 7` is 14 there), and a bare
+       `CAST(16777216 AS NUMERIC)` — a double that the integer set's rung
+       never matched (0 rows single-process, every row on the DAG at
+       v0.25.1) — folds to the integer. A
        form the fold does not compute that evaluates as float8 while a
        numeric constant feeds it — `sqrt(12.5 * 12.5)`, exp, ln, power —
        is **0A000, a recorded divergence** (PostgreSQL answers); a function

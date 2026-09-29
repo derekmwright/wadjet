@@ -503,9 +503,9 @@ func declShape(d expr.DeclType) parquet.Column {
 // halves: the ROW fields a field path is typed from (#568) and the ARRAY/MAP
 // element a column reference to a container is declared with, which is what
 // a derived table, a CTE, a set operation and a zero-row result carry an
-// array's element type through (arc CW; before it the element had no map at
-// all and a container column reference declined to the STRING fallback —
-// #1133, #1303). A name present with the zero Column is SHADOWED: something
+// array's element type through (without it a container column reference
+// declined to the STRING fallback — #1133, #1303). A name present with the
+// zero Column is SHADOWED: something
 // above rebinds it, and the shapes below no longer describe it.
 func inputColShapes(n *logical.Node) map[string]parquet.Column {
 	if n == nil {
@@ -1486,7 +1486,7 @@ func DeclaredTypeOfNodeWith(node plansql.Node, schema []parquet.Column, cat []ex
 		// An ARRAY's or MAP's element, as operandDecls carries it: without
 		// it a column reference to a container declined, and so did its
 		// subscript — `SET n = a[1]` over a float8 array was undecided and
-		// rounded by the numeric rule (#1353 round 3).
+		// rounded by the numeric rule (#1353).
 		if (c.Type == parquet.TypeArray || c.Type == parquet.TypeMap) && c.ElementType != nil {
 			if decls.Elems == nil {
 				decls.Elems = map[string]parquet.Column{}
@@ -1510,13 +1510,17 @@ func DeclaredTypeOfNodeWith(node plansql.Node, schema []parquet.Column, cat []ex
 	return nodeDeclaredType(node, decls)
 }
 
+// nodeDeclaredType is the declared-type walk's entry, and every recursive call
+// goes through it: nodeDeclaredTypeOf answers the node's kind, and this layer
+// stamps PostgreSQL's numeric category on a decided FLOAT64 or DECIMAL
+// (pgCategoryOf, memoized per walk in decls.pgMemo) and clears it elsewhere.
 func nodeDeclaredType(node plansql.Node, decls ColDecls) (expr.DeclType, expr.Confidence) {
 	if decls.pgMemo == nil {
 		decls.pgMemo = map[plansql.Node]pgCategory{}
 	}
 	d, c := nodeDeclaredTypeOf(node, decls)
 	// PostgreSQL's CATEGORY where it disagrees with the carrier, in one place
-	// for every node kind (ADR-0024 item 2's 2026-09-28 amendment): `5 / 2.0`,
+	// for every node kind (ADR-0024 §2c): `5 / 2.0`,
 	// `SQRT(6.25)` and `CAST(f AS NUMERIC)` are computed in float64 here and
 	// numeric there; `NULLIF(2.5, f)` declares its first argument's DECIMAL
 	// and is float8 there. A copied branch declaration never carries its own.
@@ -1528,6 +1532,8 @@ func nodeDeclaredType(node plansql.Node, decls ColDecls) (expr.DeclType, expr.Co
 	return d, c
 }
 
+// nodeDeclaredTypeOf declares one node by its kind; it recurses through
+// nodeDeclaredType, never itself, so every subtree carries its category.
 func nodeDeclaredTypeOf(node plansql.Node, decls ColDecls) (expr.DeclType, expr.Confidence) {
 	switch n := node.(type) {
 	case *plansql.ColRef:

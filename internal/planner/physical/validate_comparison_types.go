@@ -305,10 +305,11 @@ func pgComparisonOp(op string) string {
 	return op
 }
 
-// walk visits every comparison — and every `+` / `-` (temporalArithmetic) —
-// in node, CHILDREN FIRST — PostgreSQL analyses inside-out, so `(id > 1) = 1`
-// names the outer `boolean = integer`.
-// Subqueries are their own blocks and are not entered.
+// walk visits every comparison — and every arithmetic operator
+// (textArithmetic, temporalArithmetic) — in node, CHILDREN FIRST — PostgreSQL
+// analyses inside-out, so `(id > 1) = 1` names the outer `boolean = integer`.
+// Subqueries are their own blocks and are not entered; an EXISTS body is
+// asked only for its correlated keys (bodyKeys, #1308).
 func (c *comparisonTyper) walk(node plansql.Node) error {
 	switch n := node.(type) {
 	case nil, *plansql.SubqueryNode:
@@ -462,7 +463,7 @@ func (c *comparisonTyper) temporalArithmetic(n *plansql.BinaryOp) error {
 // PostgreSQL has no `text * integer` (nor + - / %) and raises 42883. The
 // evaluator answered NULL for every row, so `SELECT x * 1` over a text x read
 // NULL, and `MERGE … SET n = s.x * 1` (UPDATE and VALUES alike) overwrote
-// the column with NULL where PostgreSQL writes nothing (#1353 round 4). A
+// the column with NULL where PostgreSQL writes nothing (#1353). A
 // quoted literal is SQL's unknown and is typed from the other side
 // (`'2' * 1` answers), and a text column beside a DATE or TIMESTAMP is
 // temporalArithmetic's concession, not this rule's.
@@ -616,7 +617,9 @@ func (c *comparisonTyper) arrayElement(arr plansql.Node) (parquet.TypeID, bool) 
 }
 
 // inPair is one IN / ANY / ALL member: a row constructor against a
-// multi-column subquery compares column by column.
+// multi-column subquery compares column by column, and a subquery member has
+// its correlated keys checked (bodyKeys) and, where its body's text origins
+// can be read, is judged by memberPair.
 func (c *comparisonTyper) inPair(left, member plansql.Node, op string) error {
 	if tup, ok := plansql.Unparen(left).(*plansql.TupleNode); ok {
 		sub, isSub := plansql.Unparen(member).(*plansql.SubqueryNode)
@@ -654,31 +657,25 @@ func (c *comparisonTyper) inPair(left, member plansql.Node, op string) error {
 }
 
 // memberPair is a membership against a SUBQUERY body — one SELECT or a set
-// operation. Its text meets the typed side by one of two routes, and neither
-// is the direct comparison's: a body that selects a COLUMN becomes the build
-// side of a semi/anti join whose key pair (typed, text) was never converted
-// (#1308: `v IN (SELECT s …)` answered 0 rows and NOT IN every row on all
-// five arms; the mirror failed with #615's key error), and any other body is
-// a filter whose DAG resolves the text to the typed side and CASTS every
-// value while the single-process arms compare the text as it stands — so
-// whether the arms agree depends on the DATA (#1073's set-operation body: 0
-// rows single, the cast failing on the DAG; a TEXT literal, `upper(s)` or a
-// LIMITed column body the same, measured at v0.25.1). The pair is kept only
-// where the text PROVABLY converts: it was made by a CAST from a value
-// rendered as the typed side renders it (textOriginConverts) in every arm of
-// the body, and the typed side is a kept one (textConversionAnswers).
-// Anything else is PostgreSQL's 42883, in the explicit JOIN's words.
+// operation. A column body becomes the build side of a semi/anti join whose
+// (typed, text) key is never converted, and any other body is a filter whose
+// DAG casts the text to the typed side while the single-process arms compare
+// it as it stands (ADR-0012 §5, #1308, #1073). So the pair is kept only where
+// the text PROVABLY converts: made by a CAST from a value rendered as the
+// typed side renders it (textOriginConverts), the typed side a kept one
+// (textConversionAnswers). A set-operation body carries the origin
+// validateBlock's merge kept — the LEFT arm's when both arms share a
+// comparisonClass — so a later arm of that class is not judged on its own
+// (a recorded gap, ADR-0012 §5). Anything else is PostgreSQL's 42883, in the
+// explicit JOIN's words.
 //
-// The rule reads the two operands WHATEVER their shape: an operand the
-// structural walk does not type is typed by its declaration for this
-// question — an expression outer (`v + 0 IN (SELECT s …)`, #1369) and an
-// expression body (`IN (SELECT upper(s) …)`, #1370) answered one reading on
-// the single arms and another, or 22P02, on the DAG. A quoted-literal OUTER
-// value takes the body's type, as PostgreSQL resolves it, and is read as
-// that type here — 22P02 / 22007 when its text is not one (#1372;
-// expr.MemberProbe builds the one typed literal the compiled probe reads
-// too) — and a numeric literal against a NUMERIC body is typed by its own
-// digits, or refused 22003 where no DECIMAL(38,s) holds it.
+// Both operands are read WHATEVER their shape: one the structural walk does
+// not type is typed by its declaration (an expression outer, #1369; an
+// expression body, #1370). A quoted-literal OUTER value takes the body's type
+// as PostgreSQL resolves it — 22P02 / 22007 when its text is not one (#1372;
+// expr.MemberProbe builds the typed literal the compiled probe reads too) —
+// and a numeric literal against a NUMERIC body is typed by its own digits, or
+// refused 22003 where no DECIMAL(38,s) holds it.
 func (c *comparisonTyper) memberPair(left, member plansql.Node, op string, origins []parquet.TypeID) error {
 	tl, lok := c.operand(left)
 	tr, rok := c.operand(member)
@@ -796,8 +793,8 @@ func (c *comparisonTyper) keyPair(a, b plansql.Node, lateral bool) error {
 
 // textOriginConverts is whether the text a CAST from origin makes reads as
 // tl on every arm and in every spelling: the origin RENDERS every one of its
-// values as tl renders the same value — the same type, two integer kinds, or
-// a PORT / PROTOCOL read as float8 (every value in 0..65535 prints as its
+// values as tl renders the same value — the same type, two integer kinds
+// (DURATION among them), or a PORT / PROTOCOL read as float8 (every value in 0..65535 prints as its
 // float8 does). A different type of one class that renders differently
 // (`14` against numeric `14.0000`, a bigint's `10000000000000000` against
 // float8's `1e+16`, a float's shortest form against numeric's scale) made a
@@ -843,16 +840,16 @@ func textCastOrigin(n plansql.Node, typeOf func(plansql.Node) (parquet.TypeID, b
 }
 
 // RefuseTemporalArithmetic is the expression-typing rule temporalArithmetic
-// states, for an expression a DML door evaluates with no SELECT around it: an
-// INSERT … VALUES cell, an UPDATE SET value, an UPDATE / DELETE WHERE, a
-// MERGE clause. Every `+` / `-` in the tree is typed exactly as the SELECT
-// binder types it (comparisonTyper.arithOperand over the target's declared
-// columns — the structure first, then nodeDeclaredType), so `ts + 0`,
-// `d + 1.5`, `1 - d` and `d + ts` are 42883 on every statement, not only on
-// the ones the binder's clause walk reaches (round-3 review B3: VALUES stored
-// the epoch-count number, UPDATE SET stored it, and UPDATE / DELETE WHERE
-// compared it). alias is the name the target answers to ("" for none); a
-// subquery's body is its own statement and is not entered.
+// and textArithmetic state, for an expression a DML door evaluates with no
+// SELECT around it: an INSERT … VALUES cell, an UPDATE SET value, an UPDATE /
+// DELETE WHERE, a MERGE clause. Every arithmetic operator in the tree is typed
+// exactly as the SELECT binder types it (comparisonTyper.arithOperand over the
+// target's declared columns — the structure first, then nodeDeclaredType), so
+// `ts + 0`, `d + 1.5`, `1 - d`, `d + ts` and a text column `* 1` are 42883 on
+// every statement, not only on the ones the binder's clause walk reaches
+// (otherwise VALUES and UPDATE SET stored the computed number, and UPDATE /
+// DELETE WHERE compared it). alias is the name the target answers to ("" for
+// none); a subquery's body is its own statement and is not entered.
 func RefuseTemporalArithmetic(node plansql.Node, alias string, schema []parquet.Column) error {
 	if node == nil {
 		return nil
@@ -872,7 +869,8 @@ func RefuseTemporalArithmetic(node plansql.Node, alias string, schema []parquet.
 
 // walkTemporalArithmetic visits every operand the comparison walk visits
 // (exprOperands, a window's argument / PARTITION BY / ORDER BY) and applies
-// temporalArithmetic to each `+` / `-`, innermost first.
+// textArithmetic and temporalArithmetic to each arithmetic operator,
+// innermost first; an EXISTS body, like any subquery, is not entered.
 func (c *comparisonTyper) walkTemporalArithmetic(node plansql.Node) error {
 	switch n := node.(type) {
 	case nil, *plansql.SubqueryNode, *plansql.ExistsNode:

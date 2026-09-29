@@ -14,35 +14,25 @@ import (
 )
 
 // A membership's outer operand that is not a literal but whose VALUE is made
-// of constants — `COALESCE(14.0000000000000000001, 0)`, `NULLIF(…)`,
-// `GREATEST(…)`, `-(-14.0000000000000000001)`, `'…'::numeric::numeric`,
-// `CAST(CAST('…' AS TEXT) AS NUMERIC)`, `CAST(14 AS NUMERIC)`, or a CASE
-// whose results are constants (`CASE WHEN a.id > 0 THEN 14.0…1 END`) —
-// is the seam's "unquoted constant" row: PostgreSQL computes it as the exact
-// numeric its constants spell and compares that with the set. This engine
-// evaluates a numeric constant inside a choice, a unary minus of an
-// expression, or a bare NUMERIC CAST of anything but a quoted literal as a
-// double (ADR-0024), so the constant lost its digits BEFORE the membership
-// saw it: 14.0000000000000000001 arrived as 14 and matched the member 14
-// (review round 4, B9), and `CAST(16777216 AS NUMERIC)` arrived as a double
-// the integer set's rung never matched.
+// of constants — a choice (CASE / COALESCE / NULLIF / GREATEST / LEAST) over
+// constant results, `-(-14.0000000000000000001)`, `'…'::numeric::numeric`,
+// `CAST(CAST('…' AS TEXT) AS NUMERIC)`, `CAST(14 AS NUMERIC)` — is the seam's
+// "unquoted constant" row: PostgreSQL computes the exact numeric its constants
+// spell, while ADR-0024 evaluates these forms as a double here, so the digits
+// were gone before the membership saw them (ADR-0012 §5, #1372).
 //
 // memberConstantProbe folds such an operand at plan time, exactly (math/big),
-// and types the RESULT with the literal's one rule — memberNumericType, i.e.
-// batch.DecimalValueType — so `CASE WHEN true THEN 14.0000000000000000001
-// END` is the NUMERIC(38,19) 14.0000000000000000001. A CASE / COALESCE /
-// NULLIF / GREATEST / LEAST whose conditions (or other results) read a
-// column has no single value to fold; each CONSTANT result is folded instead
-// and all of them take one NUMERIC(38,S) (S the widest result scale), which
-// this engine's choice evaluates exactly — and beside a float8 column as a
-// double, as PostgreSQL does. A division of numerics keeps PostgreSQL's
-// select_div_scale digits, rounded half away from zero, as div_var does. A
-// form the fold does not read — a function such as sqrt / exp / ln / power —
-// is left to the engine when its value box is not a double; when it is, and
-// a constant PostgreSQL types numeric feeds it, the membership is refused
-// 0A000 naming the operand, never compared at float8. An operand PostgreSQL
-// itself types double precision (an explicit float CAST, a float-only
-// function such as sin) keeps its float reading, as there.
+// and types the RESULT by memberNumericType (batch.DecimalValueType): `CASE
+// WHEN true THEN 14.0000000000000000001 END` is the NUMERIC(38,19) value. A
+// choice whose conditions or other results read a column has each CONSTANT
+// result typed at one NUMERIC(38,S), S the widest result scale, which the
+// choice then evaluates exactly (a double beside a float8 column, as in
+// PostgreSQL). A numeric quotient
+// keeps select_div_scale digits, rounded half away from zero as div_var does.
+// A function the fold does not read (sqrt, exp, ln, power) is left to the
+// engine unless its value box is a double fed by a constant PostgreSQL types
+// numeric: then the membership is 0A000 naming the operand. An explicit float
+// CAST or a float-only function (sin) keeps its float reading, as there.
 
 // mcKind is the type category PostgreSQL resolves a folded constant to.
 type mcKind int
@@ -76,8 +66,9 @@ var mcNo = mcVal{kind: mcUnsupported}
 // to type: a literal (memberNumericProbe's and MemberLiteralCast's rows), an
 // operand that reads a column other than as a choice's condition or result,
 // no numeric constant, a folded value that is NULL, text or PostgreSQL's own
-// float. err is the literal rule's 22003, or the 0A000 of a form the fold
-// does not read that this engine evaluates as a double.
+// float. err is the literal rule's 22003, or a 0A000: a form the fold does
+// not read that this engine evaluates as a double, or a choice whose constant
+// results share no DECIMAL(38,S).
 func memberConstantProbe(left plansql.Node, t parquet.TypeID) (plansql.Node, bool, error) {
 	if !memberConstantCandidate(left) {
 		return left, false, nil
@@ -379,8 +370,9 @@ func mcChoiceFunc(f *plansql.FuncCallNode) bool {
 
 // mcConstantOnly reports whether an expression reads nothing but constants:
 // literals under the operators, casts, CASE and the choice functions the
-// fold reads, and any other function over constants (which the fold may
-// not read, but whose value is still fixed at plan time).
+// fold reads, and any other deterministic function (mcDeterministicFunc)
+// over constants (which the fold may not read, but whose value is still
+// fixed at plan time).
 func mcConstantOnly(n plansql.Node) bool {
 	switch v := plansql.Unparen(n).(type) {
 	case *plansql.Lit:
@@ -617,7 +609,9 @@ func mcParseNumeric(text string) (*big.Rat, bool, error) {
 
 // mcFold computes a constant-only expression exactly, as PostgreSQL types
 // and computes it; mcUnsupported where it does not read the form or where
-// PostgreSQL would raise (the engine then answers for itself).
+// PostgreSQL would raise (the engine then answers for itself). err is the
+// literal rule's 22003 for a numeric constant no DECIMAL(38,s) holds
+// (mcParseNumeric), which PostgreSQL's unconstrained numeric would compare.
 func mcFold(n plansql.Node) (mcVal, error) {
 	switch v := plansql.Unparen(n).(type) {
 	case *plansql.Lit:

@@ -1206,6 +1206,10 @@ type mergeEvaluator struct {
 // The plain (unqualified) name of a column present in both resolves to the
 // SOURCE, because that is what buildMergedRow's map holds: it writes the
 // target's names first and the source's over them.
+//
+// A SUBQUERY source's declared schema is its plan's output (sourceDecl) with
+// PostgreSQL's category of each column (sourceCat → mergedCat); a name it
+// publishes twice gets no declaration and is recorded in srcAmbiguous.
 func (db *DB) buildMergeEvaluator(ctx context.Context, info *plansql.MergeInfo,
 	targetCols []parquet.Column, targetAlias, sourceAlias string,
 	sourceColNames []string, sourceDecl []parquet.Column, sourceCat []expr.PGCategory) *mergeEvaluator {
@@ -1252,7 +1256,7 @@ func (db *DB) buildMergeEvaluator(ctx context.Context, info *plansql.MergeInfo,
 		// exactly as it does over a catalog source. Without them the
 		// reference was undecided and a float8 source rounded by the numeric
 		// rule: `USING (SELECT id, y FROM s) src … SET n = src.y` over 2.5
-		// stored 3 where PostgreSQL stores 2 (#1353 round 2, B3).
+		// stored 3 where PostgreSQL stores 2 (#1353).
 		//
 		// A name the source publishes twice has no one declaration, and a
 		// reference to it is ambiguous (resolveRefIn).
@@ -1321,7 +1325,8 @@ func (db *DB) buildMergeEvaluator(ctx context.Context, info *plansql.MergeInfo,
 // Use batch.ResolveSchemaIndex, never a fold-keyed map: unquoted references
 // arrive folded (#731), delimited references retain their bytes.
 // Resolve target keys always; resolve source keys when sourceKnown or
-// sourceNamed, preserving a nonempty published source spelling.
+// sourceNamed, preserving a nonempty published source spelling. A source key
+// the subquery publishes twice (srcAmbiguous) is 42702.
 // See batch/schema.go items 1–4 for the name-resolution rule.
 // See docs/internals/merge-on-key-schema-resolution.md for the design.
 func (ev *mergeEvaluator) checkOnKeys(keys []onKeyPair) error {
@@ -1373,14 +1378,15 @@ func (ev *mergeEvaluator) resolveRef(ref *plansql.ColRef) (parquet.Column, strin
 // first implementation missed: it rejected `t.n` and then still resolved
 // against the merged namespace, so a bare `n` that both tables spell came
 // back 42702 "ambiguous" where PostgreSQL resolves it to the SOURCE and runs
-// the statement (#686 R3-1).
+// the statement (#686).
 //
 //	MERGE INTO pr USING src ON pr.id = src.id
 //	  WHEN NOT MATCHED AND n > 1 THEN INSERT (id, n) VALUES (src.id, src.n)
 //
 // is MERGE 1 in PostgreSQL 17.11. Under a MATCHED clause the same bare `n` IS
 // ambiguous (42702), because there both relations are in scope — so the rule
-// is per clause kind, not per statement.
+// is per clause kind, not per statement. A name a subquery source publishes
+// twice (srcAmbiguous), bare or source-qualified, is 42702 in either scope.
 func (ev *mergeEvaluator) resolveRefIn(ref *plansql.ColRef, matched bool) (parquet.Column, string, error) {
 	col := strings.ToLower(ref.Column)
 	if ev.srcAmbiguous[col] && (ref.Table == "" || strings.EqualFold(ref.Table, ev.sourceAlias)) {
@@ -1490,11 +1496,12 @@ func (ev *mergeEvaluator) checkMergeColumns(node plansql.Node) error {
 // A WHEN NOT MATCHED clause has no target row — that is what "not matched"
 // means — so it may name the SOURCE only, and PostgreSQL raises 42P01
 // ("invalid reference to FROM-clause entry for table t") for a target
-// reference in its condition or in its INSERT values. Resolving both clause
+// reference in its condition or in its INSERT values — and in a subquery
+// either one holds (refuseTargetInNotMatchedSubquery). Resolving both clause
 // kinds against the merged namespace instead let `t.n` resolve and then
 // evaluate to NULL against the source-only row, so the condition quietly came
 // out false and the clause did not fire: a silent skip on a statement
-// PostgreSQL refuses (#686 R2-2).
+// PostgreSQL refuses (#686).
 func (ev *mergeEvaluator) checkClauseColumns(node plansql.Node, matched bool) error {
 	// OUTSIDE the subqueries. A subquery's own names are resolved by its own
 	// planning, and a reference to the merged row from inside one is resolved
@@ -1603,18 +1610,21 @@ func (ev *mergeEvaluator) targetColumn(name string) (parquet.Column, error) {
 	return ev.targetCols[idx], nil
 }
 
-// dmlSourceIsFloat reports whether a SET expression's DECLARED family is a
-// FLOAT, which is what decides PostgreSQL's assignment-cast rounding (#699).
+// dmlSourceIsFloat reports whether PostgreSQL types a SET expression as a
+// FLOAT, which is what decides its assignment-cast rounding (#699): a FLOAT64
+// declaration PostgreSQL types numeric is not one, a DECIMAL it types float8
+// is (#1353).
 //
 // An explicit CAST decides it outright, before the declared-type layer is
 // asked. That layer resolves `f::numeric` from the OPERAND — a float8 column —
 // and answers FLOAT, so the half-to-even rule was applied to an expression
 // whose PostgreSQL source type is numeric and 5 of 8 rows differed from
-// PostgreSQL (review P5). A cast is the user saying which family this is.
+// PostgreSQL. A cast is the user saying which family this is.
 //
 // cat is PostgreSQL's category of each schema column where the schema is a
 // plan's declared output (a MERGE's subquery source); nil for a catalog
-// schema, whose columns ARE their types.
+// schema, whose columns ARE their types. p, when non-nil, declares a scalar
+// subquery from its own plan (physical.DeclaredTypeOfNodeWith).
 func dmlSourceIsFloat(node plansql.Node, schema []parquet.Column, cat []expr.PGCategory, p *physical.Planner) bool {
 	if c, ok := unwrapDMLParens(node).(*plansql.CastNode); ok {
 		switch strings.ToLower(strings.TrimSpace(c.TypeName)) {
@@ -1635,8 +1645,8 @@ func dmlSourceIsFloat(node plansql.Node, schema []parquet.Column, cat []expr.PGC
 			(decl.ID == parquet.TypeDecimal && decl.PGFloat8))
 }
 
-// sourceIsFloat reports whether an expression's DECLARED type is a FLOAT,
-// which is what decides PostgreSQL's assignment-cast rounding (#699). The
+// sourceIsFloat reports whether PostgreSQL types an expression as a FLOAT
+// (dmlSourceIsFloat), which decides the assignment-cast rounding (#699). The
 // namespace is the merged one, so `s.f` resolves to the source's declaration
 // exactly as the expression evaluator resolves it.
 func (ev *mergeEvaluator) sourceIsFloat(node plansql.Node) bool {
@@ -1647,13 +1657,13 @@ func (ev *mergeEvaluator) sourceIsFloat(node plansql.Node) bool {
 // srcFloat: not "is this a float" but WHAT the source declares outright, so
 // assignEvaluatedValue can pick DATE, TIMESTAMP, BOOL and the network/UUID
 // arms' RULE from the expression's type rather than guess it from the Go box
-// shape (round-2 review B1/P2). The box alone cannot tell a DATE-declared
+// shape. The box alone cannot tell a DATE-declared
 // expression's int32/int64 day count from a plain INTEGER expression that
 // boxes the identical shape — `DATE '1970-01-06'` and `2 + 3` both carry
 // int64(5) — which is exactly how `(d date) VALUES (2 + 3)` stored a date
 // instead of raising PostgreSQL's 42804.
 //
-// physical.DeclaredTypeOfNode already resolves an explicit CAST from its own
+// physical.DeclaredTypeOfNodeWith resolves an explicit CAST from its own
 // destination type NAME (declared_output.go's CastNode case) rather than the
 // operand it casts, which is the rule assignment wants here too:
 // `CAST(x AS DATE)` declares DATE even when x itself cannot be typed. No
@@ -1663,8 +1673,9 @@ func (ev *mergeEvaluator) sourceIsFloat(node plansql.Node) bool {
 //
 // ok is false for an UNDECIDED source (a shape this layer cannot type at
 // all), and every caller's contract for that case is to fall back to the
-// pre-arc box-shape reading rather than refuse: declining to refuse is safer
-// than guessing wrong on a shape this fix cannot yet name.
+// box-shape reading rather than refuse: declining to refuse is safer than
+// guessing wrong on a shape this layer cannot yet name. cat and p are
+// dmlSourceIsFloat's.
 func dmlSourceDeclaredType(node plansql.Node, schema []parquet.Column, cat []expr.PGCategory, p *physical.Planner) (parquet.TypeID, bool) {
 	decl, conf := physical.DeclaredTypeOfNodeWith(node, schema, cat, p)
 	if conf != expr.Decided {
@@ -1712,7 +1723,8 @@ type assignSource struct {
 // assignSourceOf classifies a source expression. schema resolves column
 // references (nil for a VALUES cell, which has none); cat is PostgreSQL's
 // category of each schema column where the schema is a plan's declared output
-// (nil for a catalog schema — see dmlSourceIsFloat).
+// (nil for a catalog schema) and p declares a scalar subquery from its own
+// plan — see dmlSourceIsFloat. A JSON field read declares TEXT (dmlJSONAccess).
 func assignSourceOf(node plansql.Node, schema []parquet.Column, cat []expr.PGCategory, p *physical.Planner) assignSource {
 	if lit, ok := dmlLiteralText(node); ok {
 		src := assignSource{literal: lit, isLiteral: true}
@@ -1930,7 +1942,7 @@ func dmlTypedTextSource(node plansql.Node) bool {
 // value is whatever the document held), so the declaration walk left them
 // undecided, the assignment read the float box of a JSON number, and `SET n
 // = j->>'k'` over {"k": 2.5} stored 3; an INSERT … SELECT of the same read
-// was already 42804, from the text its plan declares (#1353 round 4).
+// was already 42804, from the text its plan declares (#1353).
 func dmlJSONAccess(node plansql.Node) bool {
 	fc, ok := unwrapDMLParens(node).(*plansql.FuncCallNode)
 	return ok && (strings.EqualFold(fc.Name, "json_extract_scalar") || strings.EqualFold(fc.Name, "json_extract"))
@@ -1954,12 +1966,16 @@ func (ev *mergeEvaluator) sourceDeclaredType(node plansql.Node) (parquet.TypeID,
 // A column REFERENCE is checked as well as converted: its box comes from the
 // source table and may be a DECIMAL at another scale or past the target's
 // precision, which is exactly the shape a MERGE exists to move (#647).
+//
+// Refusals come in PostgreSQL's order, before any conversion: an aggregate or
+// window function (refuseAggregateOrWindow), then the clause's NAMES
+// (checkClauseColumns), then the assignment's TYPE (assignSource.check).
 func (ev *mergeEvaluator) value(text string, merged map[string]any, col parquet.Column, matched bool) (any, error) {
 	text = strings.TrimSpace(text)
 
 	// COMPLETE, for the reason BuildDMLPredicate gives: `SET n = s.n garbage`
 	// parsed to `s.n`, stored it and reported MERGE 1 where PostgreSQL raises
-	// 42601 (#686 review F3a).
+	// 42601 (#686).
 	node, err := plansql.ParseExpressionComplete(text)
 	if err != nil {
 		return nil, sqlerr.Wrap("42601", fmt.Errorf("parsing %q: %w", text, err))
@@ -2048,11 +2064,12 @@ func (ev *mergeEvaluator) value(text string, merged map[string]any, col parquet.
 // clause and executeMerge fired the first clause of the right kind whatever it
 // said. `WHEN MATCHED AND s.n > 1000 THEN DELETE` deleted the row for a
 // condition that is false, reporting MERGE 1 where PostgreSQL reports MERGE 0
-// (#686 review F2) — a silent wrong answer on ordinary MERGE syntax.
+// (#686) — a silent wrong answer on ordinary MERGE syntax.
 //
 // An empty condition is an unconditional clause and always holds. Anything
 // that is not TRUE — false, and NULL, which PostgreSQL also declines to fire
-// on — does not.
+// on — does not. An aggregate or window function in it is 42803 / 42P20
+// (refuseAggregateOrWindow).
 func (ev *mergeEvaluator) condition(text string, row map[string]any, matched bool) (bool, error) {
 	text = strings.TrimSpace(text)
 	if text == "" {
@@ -2068,7 +2085,7 @@ func (ev *mergeEvaluator) condition(text string, row map[string]any, matched boo
 	// A NOT MATCHED clause has no target row, so its condition may name the
 	// SOURCE only. Resolving it against the merged namespace let `t.n > 1`
 	// resolve and then evaluate to NULL against a source-only row, so the
-	// clause silently did not fire; PostgreSQL raises 42P01 (#686 R2-2).
+	// clause silently did not fire; PostgreSQL raises 42P01 (#686).
 	if err := ev.checkClauseColumns(node, matched); err != nil {
 		return false, err
 	}
@@ -2627,15 +2644,17 @@ func dmlBoxTypeName(v any) string {
 
 // assignIntegerValue rounds, range-checks and narrows to the target integer.
 // Float sources round half to EVEN, numeric sources half AWAY FROM ZERO
-// (#699); srcFloat is the declaration from physical.DeclaredTypeOfNode,
-// not a guess from the Go box. Undecided sources retain numeric rounding.
+// (#699); srcFloat is PostgreSQL's type of the source (dmlSourceIsFloat:
+// the declaration and its category, #1353), not the carrier or the Go box —
+// it picks the rule even when a float8 source arrives as a DECIMAL's text.
+// Undecided sources retain numeric rounding.
 // Out-of-range values, NaN and infinities must raise 22003.
 // Enforce PORT uint16 and PROTOCOL uint8 ranges here too: computed values
 // bypass the literal converter and no later writer rechecks those widths.
 //
 // A DECIDED source nonNumericAssignmentSource names is refused 42804 before
-// any box is read (round-2 review B1's `(n bigint) VALUES (DATE …)` cell,
-// which stored the day count as a plain integer).
+// any box is read (`(n bigint) VALUES (DATE …)` used to store the day count
+// as a plain integer).
 // See docs/internals/dml-integer-assignment-rounding.md for the design.
 func assignIntegerValue(v any, col parquet.Column, srcFloat bool, srcType parquet.TypeID, srcKnown bool) (any, error) {
 	if srcKnown && nonNumericAssignmentSource(srcType) {
@@ -2934,7 +2953,7 @@ func assignLiteralToColumn(text string, col parquet.Column) (any, error) {
 // only a bare literal's — because VALUES accepts any scalar expression
 // PostgreSQL's does: a typed literal (`TIMESTAMP '...'`), a function call
 // (`now()`), arithmetic (`1 + 1`), a CAST. It is evaluated through the SAME
-// expression compiler SELECT uses (expr.Compile), no second evaluator. Every
+// expression compiler SELECT uses (expr.Compile). Every
 // cell is first classified and checked by the one assignment table
 // (assignSourceOf, assignSource.check); a bare literal (including a signed
 // number) is then read from its SQL text (assignSource.assign →
@@ -2950,7 +2969,8 @@ func assignLiteralToColumn(text string, col parquet.Column) (any, error) {
 // no FROM to resolve either against, and PostgreSQL raises 42703 for the
 // first for the same reason. The second it DOES accept (a scalar subquery is
 // a constant to it), a query environment this evaluator has none of, so it
-// names the gap with 0A000 instead of silently answering NULL.
+// names the gap with 0A000 instead of silently answering NULL. An aggregate
+// or window function is 42803 / 42P20 (refuseAggregateOrWindow).
 func assignInsertValue(text string, col parquet.Column) (any, error) {
 	trimmed := strings.TrimSpace(text)
 	if strings.EqualFold(trimmed, "default") {
@@ -3729,6 +3749,7 @@ type DMLAssignment struct {
 // Compile other values against the file batch's declared types.
 // SET expressions use the same target/alias scope as WHERE: under alias a,
 // a.n resolves and the hidden relation name does not (42P01; #686).
+// An aggregate or window function in a SET value is 42803 / 42P20.
 // See docs/internals/update-set-resolution-and-evaluation.md for the design.
 func ResolveDMLSetClauses(clauses []plansql.SetClause, target plansql.DMLTarget, schema []parquet.Column) ([]DMLAssignment, error) {
 	out := make([]DMLAssignment, 0, len(clauses))

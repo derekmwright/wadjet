@@ -132,9 +132,8 @@ func collectSubquerySQL(e plansql.Node, out *[]string) {
 
 // subqueryDeclsOf turns a node's stamped map into the three resolvers ColDecls
 // carries: the declared COLUMN, its PostgreSQL integer WIDTH and its numeric
-// CATEGORY. All are nil
-// when nothing was stamped, which is the "this caller cannot ask" the
-// SubqueryNode arms already decline on.
+// CATEGORY. All are nil when nothing was stamped, which is the "this caller
+// cannot ask" the SubqueryNode arms already decline on.
 func subqueryDeclsOf(n *logical.Node) (func(string) (parquet.Column, bool), func(string) (intWidth, bool), func(string) pgCategory) {
 	if n == nil || len(n.SubqueryColDecls) == 0 {
 		return nil, nil, nil
@@ -189,9 +188,10 @@ func withSubqueryDecls(decls ColDecls, n *logical.Node) ColDecls {
 	return decls
 }
 
-// scalarSubqueryColumnDecl is subqueryOutputColumn plus the fact a bare
+// scalarSubqueryColumnDecl is subqueryOutputColumn plus the facts a bare
 // parquet.Column cannot carry: PostgreSQL's INTEGER WIDTH, which decides
-// whether SUM over the column is bigint or numeric.
+// whether SUM over the column is bigint or numeric, and its numeric CATEGORY
+// (subqueryOutputPGCategory).
 //
 // MEMOIZED per Planner, keyed by the subquery's SQL. subqueryOutputColumn
 // parses, builds and annotates a whole second plan, and that annotation runs
@@ -250,9 +250,8 @@ type subqueryDeclEntry struct {
 // declaredOutputPGCategory every INSERT … SELECT reads: `(SELECT SQRT(k2.d)
 // FROM k k2 WHERE …)` is computed in a double and is numeric in PostgreSQL.
 // The bare parquet.Column the type half returns cannot say it, so a subquery
-// with a FROM rounded as a float8 into an integer column (#1353 round-1
-// review, B2). Unknown — the carrier's reading, the answer it had — for a
-// plan the walk cannot read.
+// with a FROM rounded as a float8 into an integer column (#1353). Unknown —
+// the carrier's reading — for a plan the walk cannot read.
 func (p *Planner) subqueryOutputPGCategory(sql string) pgCategory {
 	pg := declaredOutputPGCategory(p.subqueryLogicalPlan(sql))
 	if len(pg) != 1 {

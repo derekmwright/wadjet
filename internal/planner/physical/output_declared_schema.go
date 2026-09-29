@@ -26,7 +26,7 @@ func declaredOutputSchema(root *logical.Node,
 	// declaration the Planner resolved, already on the tree
 	// (subquery_decl_annotation.go). Without it a set-operation arm holding a
 	// scalar subquery was declared TEXT beside a bigint arm and the query was
-	// refused 42804 where PostgreSQL answers (#1018 round 5 review, P2).
+	// refused 42804 where PostgreSQL answers (#1018).
 	if subqueryDecl == nil {
 		subqueryDecl, _, _ = subqueryDeclsOf(root)
 	}

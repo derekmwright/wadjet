@@ -651,9 +651,12 @@ type binder struct {
 	// may read them (structuralTypeOf), typeAmbiguous where it cannot.
 	structural map[*plansql.SelectInfo][]parquet.TypeID
 	// textOrigin is, per output column that is TEXT made by a CAST, the
-	// structural type the cast read — typeAmbiguous otherwise. A set
-	// operation keeps an origin only where both arms carry one of one
-	// class (comparisonTyper's set-operation membership rule).
+	// structural type the cast read, originQuotedLiteral for a quoted
+	// literal, typeAmbiguous otherwise. A set operation keeps the LEFT arm's
+	// origin where both arms carry one of one class — so a right arm of that
+	// class is not judged by memberPair on its own, ADR-0012 §5's recorded
+	// gap — originQuotedLiteral where both arms are quoted literals, and
+	// typeAmbiguous otherwise.
 	textOrigin map[*plansql.SelectInfo][]parquet.TypeID
 	// declaredOut is each block's output column types by DECLARATION
 	// (nodeDeclaredType), typeAmbiguous where undecided: the membership
@@ -1131,7 +1134,9 @@ func (b *binder) checkExpr(expr plansql.Node, scope *colScope) error {
 }
 
 // refuseIncomparableOperands runs the comparison-class rule over one clause,
-// typing a subquery operand by validating its body against this scope.
+// typing a subquery operand by validating its body against this scope, and
+// applies the correlated-key rule to a membership or EXISTS body
+// (refuseBodyKeyPairs).
 func (b *binder) refuseIncomparableOperands(node plansql.Node, scope *colScope) error {
 	if node == nil || scope == nil {
 		return nil
@@ -1161,8 +1166,9 @@ func (b *binder) refuseBodyKeyPairs(sql string, outer *colScope) error {
 // `EXISTS (… WHERE a.v = b.s)` answered 0 rows and NOT EXISTS every row on
 // all five arms at v0.25.1); a side that is an expression takes
 // comparisonTyper.keyPair (#1368, #1374). A conjunct under OR stays a filter
-// and keeps the direct comparison's reading. A body the binder cannot read
-// decides nothing; its own validation reports it.
+// and keeps the direct comparison's reading. A set-operation body, and a body
+// the binder cannot read, decide nothing here; its own validation reports the
+// latter.
 func (b *binder) refuseCorrelatedKeys(sub *plansql.SelectInfo, lateral bool) error {
 	if sub == nil || sub.Union != nil || sub.WhereExpr == nil {
 		return nil
@@ -1230,8 +1236,9 @@ func (b *binder) refuseCorrelatedKeys(sub *plansql.SelectInfo, lateral bool) err
 
 // subqueryOutputTypes is a subquery body's output column TYPES as the
 // comparison rule reads them (structuralTypeOf), in order, with typeAmbiguous
-// for a column it cannot type — or nil when the body cannot be read at all. The body is validated here against the enclosing
-// scope (it may correlate); an error is not this question's to report, and the
+// for a column it cannot type — or nil when the body cannot be read at all.
+// The body is validated against the enclosing scope (it may correlate) by the
+// memoized validatedBody; an error is not this question's to report, and the
 // body's own validation reports it in turn.
 func (b *binder) subqueryOutputTypes(sql string, outer *colScope) []parquet.TypeID {
 	sub := b.validatedBody(sql, outer)
@@ -1284,7 +1291,7 @@ func (b *binder) subqueryDeclaredTypes(sql string, outer *colScope) []parquet.Ty
 
 // subqueryTextOrigins is, for a subquery body — one SELECT or a set
 // operation — the text-cast origin of each output column (binder.textOrigin),
-// or nil when the body cannot be read.
+// empty when the body recorded none, or nil when the body cannot be read.
 func (b *binder) subqueryTextOrigins(sql string, outer *colScope) []parquet.TypeID {
 	sub := b.validatedBody(sql, outer)
 	if sub == nil {
@@ -1359,8 +1366,9 @@ func mergedUsingNames(info *plansql.SelectInfo) map[string]bool {
 }
 
 // resolveSource resolves one FROM source into `into`. lateralOuter is the scope a
-// LATERAL derived table may reference (nil otherwise). It returns an error only
-// when a confirmed miss is found while validating a derived table's internals.
+// LATERAL derived table may reference (nil otherwise). It returns the error
+// validating a derived table's internals raises, and for a LATERAL body the
+// correlated-key refusal (refuseCorrelatedKeys, #1368).
 func (b *binder) resolveSource(ctx context.Context, tr *plansql.TableRef, lateralOuter *colScope, into *colScope) error {
 	qual := tr.Alias
 	if qual == "" {

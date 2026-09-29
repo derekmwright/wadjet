@@ -1746,10 +1746,10 @@ func findInSubqueryNode(node plansql.Node) (*plansql.InExpr, *plansql.SubqueryNo
 // nothing and `WHERE a.x IN (SELECT b.x FROM t b …)` answers zero rows where
 // PostgreSQL answers every one of them (#516).
 //
-// Two spellings the caller used to produce and nothing emits: the item's
-// ALIAS (`SELECT b.id AS bid` — no Project materializes `bid`) and a
-// qualifier on the subquery's own leading relation (`b.id`, where the Scan
-// under it emits `id`).
+// So a column item is never keyed by its ALIAS (no Project materializes
+// `bid` in `b.id AS bid`) nor by its leading relation's qualifier (`b.id`;
+// the Scan emits `id`). An aggregate item is keyed ONLY by its alias (the
+// Aggregate emits it), only under a GROUP BY; un-aliased it stays a filter.
 func innerSemiJoinKey(info *plansql.SelectInfo) (KeyRef, bool) {
 	col := info.Columns[0]
 	if col.IsAgg {

@@ -222,8 +222,8 @@ func smNumGrammarCells() []smNumGrammarCell {
 	return append(out, smNumConstOuterCells()...)
 }
 
-// smNumConstOuterCells are the membership's CONSTANT-VALUED outer operands
-// (review round 4, B9): an expression over numeric constants, not a
+// smNumConstOuterCells are the membership's CONSTANT-VALUED outer operands:
+// an expression over numeric constants, not a
 // literal — a CASE (with a constant condition, or one that reads a column
 // but chooses among constants), COALESCE, NULLIF, GREATEST, LEAST (beside a
 // NUMERIC, bigint or float8 column too), a unary
@@ -309,7 +309,7 @@ func smNumConstOuterCells() []smNumGrammarCell {
 }
 
 // smNumWideIntCells are the grammar's integer-body rows past float8's exact
-// integers (review round 4, B10): a body of bigint members 2^53 + {0, 2, 4}
+// integers: a body of bigint members 2^53 + {0, 2, 4}
 // (and int members 2^24 + {0, 2, 4}, where a float4 would blur them), and an
 // outer integer text one past a member. Every spelling is numeric = bigint,
 // which PostgreSQL compares at the text's own digits. A quoted integer under

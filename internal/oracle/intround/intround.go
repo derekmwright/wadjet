@@ -281,7 +281,8 @@ func MergeSetCells() []Cell {
 
 // MergeSetRefusal is the SQLSTATE a MERGE SET cell refuses with where
 // PostgreSQL answers: an expression OVER a subquery source — anything but a
-// bare or qualified reference to one of its columns — is 0A000 ("MERGE
+// bare target column, a bare or qualified reference to one of the source's
+// columns, or a literal that is no CAST (float8's is one) — is 0A000 ("MERGE
 // cannot evaluate …: the source has no declared schema to resolve it
 // against", #1398): MERGE evaluates an expression only over a catalog
 // source's rows. Loud, never a value; a cell PostgreSQL refuses is not pinned

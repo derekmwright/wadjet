@@ -779,19 +779,19 @@ func (db *DB) query(ctx context.Context, sql string, gatherBytes int64) (res *Qu
 	var outSchema []parquet.Column
 	var wireUnconstrained map[string]bool
 	var stringLength map[string]int
-	// The POSITIONAL form of the same two answers (round-1 review B2).
+	// The POSITIONAL form of the same two answers.
 	var wireUnconstrainedPos []bool
 	var stringLengthPos []int
 	var pgCategoryPos []expr.PGCategory
 	if collectSink, ok := pipeline.Sink.(*exec.CollectSink); ok {
 		outSchema = collectSink.Schema()
 		pgCategoryPos = collectSink.SchemaHintPGCategoryPos
-		// Plan-time, not row-count-dependent (FIX 2, #457/#458 fold-in) —
-		// consulted whether or not Consume ever ran.
+		// Plan-time, not row-count-dependent (#457/#458) — consulted
+		// whether or not Consume ever ran.
 		wireUnconstrained = collectSink.SchemaHintWireUnconstrainedDecimal
 		stringLength = collectSink.SchemaHintStringLength
 		// The POSITIONAL form of the same two answers, which is the authority:
-		// two output columns may publish one name (round-1 review B2).
+		// two output columns may publish one name.
 		wireUnconstrainedPos = collectSink.SchemaHintWireUnconstrainedPos
 		stringLengthPos = collectSink.SchemaHintStringLengthPos
 	}
@@ -1210,8 +1210,8 @@ func reconcileColumnName(name string, rows []map[string]any) string {
 // wireUnconstrainedDecimal names the DECIMAL columns (by output name) whose
 // wire typmod must say "unconstrained" (-1) regardless of what Precision/
 // Scale this function resolves for them below — an aggregate function
-// call, on live PostgreSQL, never keeps its argument's typmod (FIX 2,
-// #457/#458 fold-in). May be nil.
+// call, on live PostgreSQL, never keeps its argument's typmod (#457/#458).
+// May be nil.
 func deriveColumnMetas(columns []string, rows []map[string]any, outSchema []parquet.Column, cat *catalog.Catalog, wireUnconstrainedDecimal map[string]bool, stringLength map[string]int, wireUnconstrainedPos []bool, stringLengthPos []int) []ColumnMeta {
 	metas := make([]ColumnMeta, len(columns))
 

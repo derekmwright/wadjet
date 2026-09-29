@@ -3,7 +3,7 @@
 // This file holds PostgreSQL's NUMERIC CATEGORY of a float64-carried
 // expression: the half of a declaration that says whether the value the
 // engine computes in a double is, to PostgreSQL, a `numeric` or a `double
-// precision`. Governed by ADR-0024 item 2 (its 2026-09-28 amendment).
+// precision`. Governed by ADR-0024 §2c.
 package physical
 
 import (
@@ -34,7 +34,8 @@ const (
 // A FLOAT64 is a float8 unless something says otherwise: PGNumeric (a value
 // PostgreSQL computes in numeric) or a numeric LITERAL too wide for the
 // DECIMAL carrier, which keeps the FLOAT64 declaration (DeclNumericLit) while
-// PostgreSQL types every fractional or out-of-bigint literal numeric.
+// PostgreSQL types every fractional or out-of-bigint literal numeric. A
+// DECIMAL is numeric unless PGFloat8 says PostgreSQL computes it in float8.
 func pgCategoryOfDecl(d expr.DeclType, c expr.Confidence) pgCategory {
 	if c != expr.Decided || d.Untyped || d.Quoted {
 		return pgCatUnknown
@@ -66,9 +67,8 @@ func pgCategoryOfDecl(d expr.DeclType, c expr.Confidence) pgCategory {
 // arm made a 20-term sum take a second. This walk visits each node once.
 //
 // The engine's declaration still decides WHERE the answer is read — only a
-// FLOAT64-declared node carries PGNumeric (withPGNumeric) — so a category
-// that disagrees with an exact DECIMAL or INTEGER declaration changes
-// nothing.
+// FLOAT64 or DECIMAL node carries it (withPGCategory: PGNumeric, PGFloat8) —
+// so a category that disagrees with an INTEGER declaration changes nothing.
 func pgCategoryOf(n plansql.Node, decls ColDecls) pgCategory {
 	if decls.pgMemo == nil || n == nil {
 		return pgCategoryOfNode(n, decls)
@@ -143,7 +143,8 @@ func pgCategoryOfNode(n plansql.Node, decls ColDecls) pgCategory {
 }
 
 // pgArith is the binary operators' resolution: float8 over everything,
-// numeric over the integers, integer only between integers.
+// numeric over the integers, integer only between integers, unknown when
+// either operand is.
 func pgArith(a, b pgCategory) pgCategory {
 	switch {
 	case a == pgCatUnknown || b == pgCatUnknown:

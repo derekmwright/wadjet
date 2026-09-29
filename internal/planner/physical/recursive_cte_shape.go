@@ -14,9 +14,9 @@ import (
 // refuseRecursiveTermShape checks the parsed recursive term before execution.
 // It raises 42P19 for an aggregate over the self-reference, a self-reference
 // in a subquery expression or on an outer join nullable side, repeated
-// self-references, or a self-reference under INTERSECT ALL / EXCEPT ALL / the
-// right operand of EXCEPT. Nested blocks are checked at their own scope; unsupported
-// forms refuse. See ADR-0021 §1o-b.
+// self-references, or a self-reference under INTERSECT ALL / EXCEPT ALL's left
+// / EXCEPT's right operand. Nested blocks are checked at their own scope;
+// unsupported forms refuse. See ADR-0021 §1o-a (the set operators) and §1o-b.
 func refuseRecursiveTermShape(cteName string, term *plansql.SelectInfo) error {
 	name := strings.ToLower(strings.TrimSpace(cteName))
 	if aggregateOverTheReference(term, name) {
@@ -52,7 +52,7 @@ func refuseRecursiveTermShape(cteName string, term *plansql.SelectInfo) error {
 // The parser builds INTERSECT at a higher precedence than UNION (#1349), so
 // `seed UNION ALL SELECT … FROM r INTERSECT ALL SELECT …` reaches this term
 // as an INTERSECT ALL whose left operand reads r — which PostgreSQL refuses,
-// and which iterated here as though the reference were allowed.
+// and this rule with it.
 func referenceWithinSetOp(info *plansql.SelectInfo, want, within string) string {
 	if info == nil {
 		return ""

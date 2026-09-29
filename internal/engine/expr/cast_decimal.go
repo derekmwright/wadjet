@@ -282,7 +282,7 @@ func castDecimalFromText(text string, scale int) batch.Int128 {
 		// range condition, not a syntax one: PostgreSQL answers
 		// `CAST('1e40' AS numeric(38,0))` with 22003 numeric field overflow,
 		// and reporting 22P02 sends a client hunting a typo in a number it
-		// read correctly (#555 review, S1).
+		// read correctly (#555).
 		raiseNumericFieldOverflow(0, scale)
 	}
 	return out

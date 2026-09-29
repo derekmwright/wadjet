@@ -11,8 +11,8 @@ import (
 )
 
 // The embedded arm of the membership operand rule (`DB.Query`, the raw
-// positional `Result.RowValues` via QueryResult.Cells), over arc ST's
-// `st_pair` fixture (stEmbeddedDB), for the six issues' own statements. At
+// positional `Result.RowValues` via QueryResult.Cells), over the stored-text
+// membership suite's `st_pair` fixture (stEmbeddedDB), for the six issues' own statements. At
 // v0.25.1 the first two families were WRONG VALUES on this arm: a quoted
 // literal against a typed body answered no rows (#1372) and a DATE against a
 // set-operation or literal body answered 0 (#1373), where PostgreSQL 17.11
@@ -29,11 +29,11 @@ func TestArcSMEmbeddedMembershipOperands(t *testing.T) {
 		{name: "1372/numeric", sql: "SELECT a.id FROM st_pair a WHERE '12.5' IN (SELECT r.v_dec FROM st_pair r WHERE r.id <= 3) ORDER BY a.id", want: "[[1] [2] [3] [4]]"},
 		{name: "1372/numericScale", sql: "SELECT a.id FROM st_pair a WHERE '12.50001' IN (SELECT r.v_dec FROM st_pair r WHERE r.id <= 3) ORDER BY a.id", want: "[]"},
 		{name: "1372/dateSpelling", sql: "SELECT a.id FROM st_pair a WHERE '2024-1-2' IN (SELECT r.v_date FROM st_pair r WHERE r.id <= 3) ORDER BY a.id", want: "[[1] [2] [3] [4]]"},
-		// A constant-valued outer (review round 4, B9) is folded to its exact
+		// A constant-valued outer is folded to its exact
 		// numeric (a division at PostgreSQL's select_div_scale), never read
 		// as a double; a function the fold does not compute is refused where
 		// it would be one (PostgreSQL answers). A quoted integer
-		// under a bare NUMERIC CAST against an integer subquery (B10).
+		// under a bare NUMERIC CAST against an integer subquery.
 		{name: "b9/case", sql: "SELECT a.id FROM st_pair a WHERE CASE WHEN a.id > 0 THEN 14.0000000000000000001 END IN (SELECT r.v_dec FROM st_pair r WHERE r.id = a.id) ORDER BY a.id", want: "[]"},
 		{name: "b9/coalesce", sql: "SELECT a.id FROM st_pair a WHERE COALESCE(14.0000000000000000001, 0) IN (SELECT r.v_dec FROM st_pair r) ORDER BY a.id", want: "[]"},
 		{name: "b9/division", sql: "SELECT a.id FROM st_pair a WHERE (14.0000000000000000001 / 7) * 7 IN (SELECT r.v_dec FROM st_pair r WHERE r.id <= 3) ORDER BY a.id", want: "[[1] [2] [3] [4]]"},

@@ -460,7 +460,10 @@ func (p *Pipeline) flushSpilledOps(ctx context.Context, ops []UnaryOperator, con
 }
 
 // runParallel processes batches through cloned operator chains in parallel.
-// The source and sink are shared; each worker gets its own cloned operators.
+// The source is shared and each worker gets its own cloned operators. A
+// MergeableSink is cloned per worker and the clones merged into p.Sink at the
+// end (a grouped HashAggregate may instead split its key space across them,
+// partitioned_agg.go); any other sink is shared.
 func (p *Pipeline) runParallel(ctx context.Context) error {
 	// The first-error slot is a FirstError, not a bare atomic.Value: the
 	// panic boundary and the ordinary return paths below store errors of
