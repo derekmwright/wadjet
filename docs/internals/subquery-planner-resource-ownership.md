@@ -29,7 +29,11 @@ leak spill directories that Plan's Cleanup never sees.
 
 The shared maps (cteCache, scanCache) are populated by Plan before execution
 begins and are read-only from here on; scanCached carries its own mutex for
-the concurrent-replay case.
+the concurrent-replay case. A scanCache entry serves only the scan nodes
+mergeDuplicateScans counted in the statement's tree (`scanCached.consumers`):
+the subquery's own scans were never counted — their columns and predicates
+are not in the entry — so they never attach and read storage instead
+(ADR-0021 §2c, #1382 #1418).
 
 The scan-alias injections (MaterializedInputs, StreamingSources,
 ScanFileFilter) are dropped. They describe the ENCLOSING fragment's scans —

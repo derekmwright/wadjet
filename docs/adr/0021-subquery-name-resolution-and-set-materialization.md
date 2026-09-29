@@ -37,6 +37,11 @@ rewrite finds. A body's JOIN ON was never read, and a condition naming only
 the outer row was stripped or dropped — so the outer references are now a SET
 collected over the whole body, each one carried or declined (#1232, #1104).
 
+§2c (2026-09-28, #1382 #1418) states where the single-process engine
+evaluates an uncorrelated subquery the optimizer leaves in a filter: its own
+plan, reading storage — never a cache sized for the enclosing
+statement's scans.
+
 ## Context
 
 `IN (SELECT …)`, `NOT IN (SELECT …)` and correlated `EXISTS` are all lowered
@@ -2829,6 +2834,42 @@ turned `permission denied for table "…"` into a task failure — the sentence 
 scalar and IN siblings hand back at the same site. A 42501 is not a routing
 refusal but the query's answer on every path, so it is PARKED the way a
 cardinality violation is (ADR-0034 item 6).
+
+### 2c. An uncorrelated subquery left in a filter runs its OWN plan against storage
+
+(Added 2026-09-28, #1382 #1418.)
+
+A subquery predicate whose probe names no outer column — `12 IN (SELECT q.v
+FROM t q)`, `EXISTS (SELECT 1 FROM t q WHERE q.v = 12)`, a scalar comparison
+or `IS NOT NULL` over one — is not decorrelated: it stays in the filter, and
+the single-process engine builds and runs the subquery's own plan at
+run time, through a child planner (`forSubquery`). The DAG resolves the same
+predicate before dispatch (§2, §2b). EXPLAIN shows the filter above the join
+on every arm.
+
+The child planner shares the statement's duplicate-scan cache, which
+`mergeDuplicateScans` sizes from the scans of the statement's OWN tree — the
+union of their columns, and only when none carries a predicate. The entry is
+keyed by table name, so the subquery's scan of a table the statement also
+scans twice found it and replayed batches holding only the statement's
+columns: over `t a JOIN t b` the body read no `v`, the membership answered 0
+rows and the EXISTS failed `filter column "q.v" does not exist`. A column
+probe was decorrelated into the tree and counted, so it answered; so did the
+DAG.
+
+**Decision.** A cache entry records the scan nodes it counted, and only those
+attach to it. Every other scan of the table — a run-time subquery's, whatever
+its spelling or position — reads storage with its own columns and predicates.
+This is a statement about the cache, not about subquery placement: the
+predicate is evaluated where it was before, and no plan changes (the
+TPC-H plans are byte-identical, and every scan that shared a cache before
+still does).
+
+Two refusals remain outside this rule, both loud: an uncorrelated subquery in
+an OUTER join's ON (docs/postgres-differences.md, #1153) and, on the DAG
+arms, a subquery predicate §2's resolution does not reach (under `IS NOT
+NULL`, `OR` or `NOT`), which fails in the worker's filter with no subquery
+runner.
 
 ### 3. A build-side narrowing is all-or-nothing, and the condition is read STRUCTURALLY
 
