@@ -1706,16 +1706,19 @@ func (b *binder) registerCTE(ctx context.Context, cte *plansql.CTEDef) error {
 		// under the closed scope so the recursive term's own reference to a
 		// name the CTE does not publish is refused the same way.
 		if known {
-			b.ctes[name] = cteEntry{cols: plansql.OverlayColumnAliases(cte.Columns, names)}
+			//
+			// The non-recursive term's DATE / TIMESTAMP declarations are
+			// published BEFORE that second validation, so the recursive
+			// term's own reference to them is typed as the statement reading
+			// the CTE sees it: `COALESCE(ts, d)` inside the term is refused
+			// 0A000 (it answered the DATE's day count as milliseconds, #1378
+			// round 4), and `ts + 1` over a TIMESTAMP seed is PostgreSQL's
+			// own 42883 instead of this engine's 42804.
+			b.ctes[name] = cteEntry{cols: plansql.OverlayColumnAliases(cte.Columns, names),
+				decls: recursiveTemporalDecls(b.outputDecls, body)}
 			if err := b.validateBlock(ctx, body, nil); err != nil {
 				return err
 			}
-			// The statement that READS the CTE sees its DATE / TIMESTAMP
-			// columns declared; the recursive term's own references keep
-			// the undeclared entry it was validated under.
-			e := b.ctes[name]
-			e.decls = recursiveTemporalDecls(b.outputDecls, body)
-			b.ctes[name] = e
 		}
 		return nil
 	}
