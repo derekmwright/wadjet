@@ -203,8 +203,10 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
        form the fold does not compute that evaluates as float8 while a
        numeric constant feeds it — `sqrt(12.5 * 12.5)`, exp, ln, power —
        is **0A000, a recorded divergence** (PostgreSQL answers); a function
-       PostgreSQL defines over float8 alone (sin, degrees, cbrt) and an
-       explicit float CAST are float8 there too and answer. A number no DECIMAL(38,s) holds — more than 38
+       PostgreSQL defines over float8 alone (sin, degrees, cbrt) called
+       alone, and an explicit float CAST, are float8 there too and answer;
+       combined with a numeric constant (`sin(0.0) + 12.5`) the operand is
+       refused 0A000 as well, where PostgreSQL answers (#1420). A number no DECIMAL(38,s) holds — more than 38
        significant digits, a digit past scale 38, NaN, ±Infinity — is
        **22003 on every arm, a recorded divergence**: PostgreSQL's numeric
        is unconstrained and answers (0 rows, NOT IN every row). The single-process
@@ -252,8 +254,7 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
 
        A SET-OPERATION subquery body (UNION ALL / UNION / INTERSECT /
        EXCEPT) is kept only where its text PROVABLY converts: every arm of
-       the body is `CAST(x AS TEXT)` of a value of the typed side's own
-       (kept) class, and the class rule above applies the same way. There
+       the body is `CAST(x AS TEXT)` of a value of the typed side's own (kept) class whose text provably converts (the rendering rule above) applies the same way. There
        the DAG casts the body's text to the typed side while the single
        arms compare the text, so any other text converts data-dependently
        — #1073's `id IN (SELECT product … UNION ALL …)` answered 0 rows on
@@ -4309,7 +4310,7 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
 
    - **An integer assignment rounds by the source's PostgreSQL type; the
      writes PostgreSQL refuses are refused before a row is written, with
-     five recorded exceptions.** (Added 2026-09-28, arc IR, #1353.) The
+     six recorded exceptions.** (Added 2026-09-28, arc IR, #1353.) The
      position is ADR-0024 §2c: a float-carried numeric (`5 / 2.0`,
      `SQRT(6.25)`, EXTRACT) keeps its FLOAT64 carrier and OID 701 and
      declares PostgreSQL's category beside it, and every write door —
