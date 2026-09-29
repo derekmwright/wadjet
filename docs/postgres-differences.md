@@ -618,7 +618,7 @@ Missing representations cause 0A000 versus PostgreSQL values: DATE/TIMESTAMP, di
 
 **CASE, COALESCE, GREATEST and LEAST over a DATE and a TIMESTAMP are refused.**
 
-PostgreSQL resolves the arms to timestamp, a DATE arm at its midnight; here the choice has no carrier for a DATE arm in a TIMESTAMP result and raises 0A000 — `CAST` the DATE arm to TIMESTAMP. A comparison, an IN / EXISTS membership and a join key between the two answer PostgreSQL's rows. (catalog: [temporal#r24](adr/0012-divergences/temporal.md#catalog); #1378)
+PostgreSQL resolves the arms to timestamp, a DATE arm at its midnight; here the choice has no carrier for a DATE arm in a TIMESTAMP result and raises 0A000 — `CAST` the DATE arm to TIMESTAMP. The refusal holds whatever the arm is: a column, a literal, an expression, a scalar subquery (correlated or not), a window call such as `max(ts) OVER ()` or `lag(ts) OVER (…)`, or an aggregate. `NULLIF(d, ts)` is declared by its first argument and answers. A comparison (a scalar-subquery operand included), an IN / EXISTS membership and a join key between the two answer PostgreSQL's rows. One known wrong value remains: a bind parameter typed TIMESTAMP (OID 1114) against a DATE column is read at DATE, so `d = $1` with `'1969-12-31 23:59:59.999'` matches 1969-12-31 where PostgreSQL matches nothing (#1426) — `CAST($1 AS TIMESTAMP)` answers PostgreSQL's rows. (catalog: [temporal#r24](adr/0012-divergences/temporal.md#catalog); #1378)
 
 **Some set-operation literals are refused.**
 

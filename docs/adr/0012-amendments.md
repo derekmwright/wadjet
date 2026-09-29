@@ -836,11 +836,11 @@ Rows retired by the measurement (the divergence is gone on the embedded arm; a r
 
 ## 2026-09-29: a DATE against a TIMESTAMP (arc DT, #1378)
 
-PostgreSQL's `date = timestamp` promotes the DATE to its midnight; this engine's direct comparison already did, and every carrier that turns the pair into a KEY did not — a membership answered 0 rows on every arm, NOT IN kept every row, and an EXISTS, LATERAL or JOIN key matched nothing. The pair now keys at TIMESTAMP (`batch.TemporalCommonType`: the equi-join key ladder, the membership set, the stage DAG's inlined set and scalar), which closes those cells without a catalog row. Two rows record what stays refused:
+PostgreSQL's `date = timestamp` promotes the DATE to its midnight; this engine's direct comparison did so for column and literal operands, and every carrier that turns the pair into a KEY did not — a membership answered 0 rows on every arm, NOT IN kept every row, and an EXISTS, LATERAL or JOIN key matched nothing. A DATE scalar subquery against a TIMESTAMP was read by a magnitude guess (an integer inside ±500 000 taken as a day count), so `ts = (SELECT d …)` for 1969-12-31 also matched 1969-12-31 23:59:59.999 on the single-process arms, and on all five when correlated. The pair now meets at TIMESTAMP through one rule and one conversion (`batch.TemporalCommonType`, `batch.DateMidnightMillis`) in the comparison kernel, the equi-join key ladder, the membership set and the stage DAG's inlined set and scalar, which closes those cells without a catalog row. A TIMESTAMP-typed bind parameter against a DATE is still read at DATE (#1426, a defect, not a divergence). Two rows record what stays refused:
 
 | family | row | change | gate |
 |---|---|---|---|
-| temporal | [r24](0012-divergences/temporal.md#catalog) | Added: CASE / COALESCE / GREATEST / LEAST mixing DATE and TIMESTAMP arms is refused 0A000; at v0.25.2 it answered a day count in a TIMESTAMP column or raised 22003 | `coordinator.TestArcDTDateTimestampEveryArm` |
+| temporal | [r24](0012-divergences/temporal.md#catalog) | Added: CASE / COALESCE / GREATEST / LEAST mixing DATE and TIMESTAMP arms is refused 0A000 whatever the arm's shape (a column, literal, expression, scalar subquery, window call or aggregate); at v0.25.2 it answered a day count in a TIMESTAMP column, epoch milliseconds in a DATE one, or raised 22003 | `coordinator.TestArcDTDateTimestampEveryArm`, `coordinator.TestArcDTR2ScalarAndFoldArmsEveryArm` |
 | set-operations | [r7](0012-divergences/set-operations.md#catalog) | Amended: gated, with INTERSECT, EXCEPT and a mixed membership body named | `coordinator.TestArcDTDateTimestampEveryArm` |
 
 ## Dated markers inside the entries

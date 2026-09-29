@@ -4415,11 +4415,15 @@ The integer operand of `date ± n` is judged by its declared type, never its
 spelling: `DATE '2026-01-01' + CAST(1 AS INTEGER)`, `(d + 1) + 1`, `d + i`
 over an INTEGER column and `CURRENT_DATE + 1 - 1` are all DATE, and
 `CURRENT_DATE + 1 - 1 - CURRENT_DATE` is `0`. A DATE compared with a
-TIMESTAMP compares its midnight, as in PostgreSQL — directly, in an `IN` /
-`= ANY` / `NOT IN` / `<> ALL` membership, an `EXISTS` or `LATERAL`
-correlation and a join key alike. A `CASE`, `COALESCE`, `GREATEST` or `LEAST`
-whose arms mix the two, and a set operation that does, are refused `0A000`:
-`CAST` the DATE side to TIMESTAMP. `NOW()` and its siblings
+TIMESTAMP compares its midnight, as in PostgreSQL — directly, against a
+scalar subquery, in an `IN` / `= ANY` / `NOT IN` / `<> ALL` membership, an
+`EXISTS` or `LATERAL` correlation and a join key alike. A `CASE`,
+`COALESCE`, `GREATEST` or `LEAST` whose arms mix the two — whatever an arm
+is: a column, a scalar subquery, a window call, an aggregate — and a set
+operation that does, are refused `0A000`: `CAST` the DATE side to
+TIMESTAMP. A bind parameter typed TIMESTAMP against a DATE column is read
+at DATE (a known defect, #1426); `CAST($1 AS TIMESTAMP)` compares as
+PostgreSQL does. `NOW()` and its siblings
 declare `timestamp without time zone` where PostgreSQL declares
 `timestamptz` (docs/postgres-differences.md). `CURRENT_TIME` has no
 declaration at all: this engine has no TIME type among its 22, so the
