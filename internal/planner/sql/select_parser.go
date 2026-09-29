@@ -144,8 +144,9 @@ func (p *selectParser) isKeyword(kw TokenType) bool {
 // leading `+` allowed) AND lex to one unsigned number token: the SQL lexer's
 // number grammar alone is wider than the float input (`0b11`, `0o7`, `1_0`)
 // and it skips a comment (`1--`, `1/*x*/`), each of which PostgreSQL's cast
-// refuses with 22P02. Anything else (`-1`, `NaN`, those spellings) is the
-// syntax error the bare spelling is, never a count this parser invents.
+// refuses with 22P02. Anything else is a syntax error, never a count this
+// parser invents: `-1` and `NaN` as their bare spelling is, and those
+// spellings although their bare spelling is a number (`OFFSET 0b11`).
 func (p *selectParser) countToken() (token, error) {
 	if p.cur.typ == TokenKWCast && p.peekN(1) == TokenLParen && p.peekN(2) == TokenString && p.peekN(3) == TokenKWAs {
 		width := 0

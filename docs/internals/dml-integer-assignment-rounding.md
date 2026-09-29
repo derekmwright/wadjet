@@ -106,9 +106,11 @@ text). A LIMIT, OFFSET or FETCH count and a TABLESAMPLE percentage read that
 cast as the number its text stands for, so a float count answers as the bare
 number did. The text must be PostgreSQL's float input (surrounding
 whitespace and a leading `+` allowed) that lexes to one unsigned number
-token: `-1`, `NaN`, and the spellings the SQL lexer reads as a number but
-the float input refuses (`0b11`, `0o7`, `1_0`, `1--`; PostgreSQL 22P02)
-stay the syntax error their bare spelling is. An integer
+token: `-1` and `NaN` stay the syntax error their bare spelling is, and
+the spellings the SQL lexer reads as a number but the float input refuses
+(`0b11`, `0o7`, `1_0`, `1--`; PostgreSQL 22P02) stay a syntax error
+(42601), although their bare spellings count as PostgreSQL's do (`OFFSET
+0b11` skips three rows). An integer
 parameter is bare only for an integer's spelling (int4in); otherwise it is
 quoted and the target's input rule raises 22P02, as PostgreSQL's parameter
 input does.
