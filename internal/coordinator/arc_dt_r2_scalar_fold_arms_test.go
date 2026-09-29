@@ -321,7 +321,9 @@ func dtr2NoRunner(name string) bool {
 // dtr3RecursiveDAG names the answered cells over a recursive CTE, which the
 // stage DAG does not carry (c1RecDAGRefusal, pinned by arc C1): PINNED on
 // the three DAG arms.
-func dtr3RecursiveDAG(name string) bool { return name == "ctl3/origin/recursive" }
+func dtr3RecursiveDAG(name string) bool {
+	return name == "ctl3/origin/recursive" || strings.HasPrefix(name, "ctl4/recterm/")
+}
 
 // dtr3PGArray spells the harness's `[1 2]` rendering of an ARRAY cell as
 // PostgreSQL's `{1,2}`.
@@ -334,7 +336,46 @@ func dtr3PGArray(s string) string {
 var dtr3ArrayRE = regexp.MustCompile(`\[[0-9 ]*\]`)
 
 func dtr2Cells() []dtCell {
-	return append(append(dtr2ScalarCells(), dtr2FoldCells()...), dtr3Cells()...)
+	return append(append(append(dtr2ScalarCells(), dtr2FoldCells()...), dtr3Cells()...), dtr4Cells()...)
+}
+
+// dtr4Cells is round 4's family: the choice refusal over a recursive CTE's
+// own DATE and TIMESTAMP columns read INSIDE its recursive term. Round 3
+// published the non-recursive term's declarations only after the recursive
+// term was validated, so the term's own `COALESCE(ts, d)` saw two untyped
+// columns and answered the DATE's day count read as milliseconds
+// (`1970-01-01 00:00:19.912` for 2024-07-08) on the single-process arms, and
+// a WHERE fold lost or gained rows. They are published before that
+// validation now: b3/recterm/* are refused 0A000 on five arms (intoDate is
+// PostgreSQL's 42804 there, a refusal on both). ctl4/recterm/* answer: the
+// CAST repair spelling, a same-type fold, the date and timestamp series a
+// recursive term is usually written for, a DATE = TIMESTAMP comparison and
+// DATE - DATE in the term's WHERE (the stage DAG keeps arc C1's
+// recursive-CTE refusal for them).
+func dtr4Cells() []dtCell {
+	const (
+		lit   = "WITH RECURSIVE r(n, d, ts, c) AS (SELECT 1, DATE '2024-07-08', TIMESTAMP '2024-01-01 10:00:00', CAST(NULL AS TIMESTAMP) UNION ALL SELECT n + 1, d, ts, %s FROM r WHERE n < 3) SELECT r.n, r.c FROM r"
+		nullT = "WITH RECURSIVE r(n, d, ts, c) AS (SELECT 1, DATE '2024-07-08', CAST(NULL AS TIMESTAMP), CAST(NULL AS TIMESTAMP) UNION ALL SELECT n + 1, d, ts, %s FROM r WHERE n < 3) "
+	)
+	c := func(name, sql string) dtCell { return dtCell{name, sql} }
+	return []dtCell{
+		c("b3/recterm/coalesceTsD", fmt.Sprintf(nullT, "COALESCE(ts, d)")+"SELECT r.n, r.c FROM r"),
+		c("b3/recterm/coalesceDTs", fmt.Sprintf(lit, "COALESCE(d, ts)")),
+		c("b3/recterm/caseDArm", fmt.Sprintf(lit, "CASE WHEN n > 100 THEN ts ELSE d END")),
+		c("b3/recterm/caseTsArm", fmt.Sprintf(lit, "CASE WHEN n > 100 THEN d ELSE ts END")),
+		c("b3/recterm/greatest", fmt.Sprintf(lit, "GREATEST(d, ts)")),
+		c("b3/recterm/least", fmt.Sprintf(lit, "LEAST(ts, d)")),
+		c("b3/recterm/tableSeed", "WITH RECURSIVE r(n, id, d, ts, c) AS (SELECT CAST(1 AS BIGINT), a.id, a.d, a.ts, CAST(NULL AS TIMESTAMP) FROM dt_pair a UNION ALL SELECT n + 1, id, d, ts, COALESCE(ts, d) FROM r WHERE n < 2) SELECT r.n, r.id, r.c FROM r"),
+		c("b3/recterm/where", "WITH RECURSIVE r(n, d, ts) AS (SELECT 1, DATE '2024-07-08', TIMESTAMP '2024-01-01 10:00:00' UNION ALL SELECT n + 1, d, ts FROM r WHERE n < 3 AND COALESCE(d, ts) > TIMESTAMP '2024-07-07 00:00:00') SELECT r.n FROM r"),
+		c("b3/recterm/whereTable", "WITH RECURSIVE r(n, id, d, ts) AS (SELECT CAST(1 AS BIGINT), a.id, a.d, a.ts FROM dt_pair a UNION ALL SELECT n + 1, id, d, ts FROM r WHERE n < 2 AND COALESCE(ts, d) < TIMESTAMP '2024-03-01 00:00:00') SELECT r.n, r.id FROM r"),
+		c("b3/recterm/intoDate", "WITH RECURSIVE r(n, d, ts) AS (SELECT 1, DATE '2024-07-08', TIMESTAMP '2024-01-01 10:00:00' UNION ALL SELECT n + 1, COALESCE(d, ts), ts FROM r WHERE n < 3) SELECT r.n FROM r"),
+		c("ctl4/recterm/castDate", fmt.Sprintf(nullT, "COALESCE(ts, CAST(d AS TIMESTAMP))")+"SELECT r.n FROM r WHERE r.c = TIMESTAMP '2024-07-08 00:00:00'"),
+		c("ctl4/recterm/tsTs", "WITH RECURSIVE r(n, ts, t2, c) AS (SELECT 1, CAST(NULL AS TIMESTAMP), TIMESTAMP '2024-03-04 12:00:00', CAST(NULL AS TIMESTAMP) UNION ALL SELECT n + 1, ts, t2, COALESCE(ts, t2) FROM r WHERE n < 3) SELECT r.n FROM r WHERE r.c = TIMESTAMP '2024-03-04 12:00:00'"),
+		c("ctl4/recterm/dateSeries", "WITH RECURSIVE r(n, d) AS (SELECT 1, DATE '2024-01-01' UNION ALL SELECT n + 1, d + 1 FROM r WHERE d < DATE '2024-01-05') SELECT r.n FROM r WHERE r.d = DATE '2024-01-04'"),
+		c("ctl4/recterm/tsSeries", "WITH RECURSIVE r(n, ts) AS (SELECT 1, TIMESTAMP '2024-01-01 06:00:00' UNION ALL SELECT n + 1, ts + INTERVAL '1 day' FROM r WHERE ts < TIMESTAMP '2024-01-05 00:00:00') SELECT r.n FROM r WHERE r.ts = TIMESTAMP '2024-01-03 06:00:00'"),
+		c("ctl4/recterm/compare", "WITH RECURSIVE r(n, d, ts) AS (SELECT 1, DATE '2024-07-08', TIMESTAMP '2024-07-08 00:00:00' UNION ALL SELECT n + 1, d, ts FROM r WHERE n < 3 AND ts = d) SELECT r.n FROM r"),
+		c("ctl4/recterm/dateMinusDate", "WITH RECURSIVE r(n, d) AS (SELECT 1, DATE '2024-01-01' UNION ALL SELECT n + 1, d + 1 FROM r WHERE d - DATE '2024-01-01' < 3) SELECT r.n FROM r WHERE r.d = DATE '2024-01-04'"),
+	}
 }
 
 // dtr3Cells is round 3's family: the choice refusal over a COLUMN whose

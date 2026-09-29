@@ -1,4 +1,4 @@
-# PostgreSQL 17.11 (postgres:17-alpine) answers for TestArcDTR2ScalarAndFoldArmsEveryArm's cells over dtr2PGFixture (dt_pair, dtb_t, dtb_d, dr_t, dr_d, dt_arr); round 3 appended the b3/origin/* and ctl3/* rows.
+# PostgreSQL 17.11 (postgres:17-alpine) answers for TestArcDTR2ScalarAndFoldArmsEveryArm's cells over dtr2PGFixture (dt_pair, dtb_t, dtb_d, dr_t, dr_d, dt_arr); round 3 appended the b3/origin/* and ctl3/* rows, round 4 the b3/recterm/* and ctl4/recterm/* rows (an ERR row is PostgreSQL's own refusal, SQLSTATE and message).
 # name<TAB>rows=N <sorted rows>. Regenerate: DT_R2_GEN=<dir> dumps cells.tsv + fixture.sql; each cell is run once (IF cells have no PostgreSQL spelling and are not listed).
 b1/band/right/eq/d1	rows=1 8
 b1/band/left/eq/d1	rows=1 8
@@ -211,3 +211,19 @@ ctl3/origin/compare/tsCol	rows=3 1 | 2 | 3
 ctl3/container/firstValue	rows=3 1,{5} | 2,{5} | 3,{5}
 ctl3/container/cast	rows=3 1,{1,2} | 2,{1,2} | 3,{1,2}
 ctl3/container/cardinality	rows=3 1,2 | 2,2 | 3,2
+b3/recterm/coalesceTsD	rows=3 1,NULL | 2,2024-07-08 00:00:00 | 3,2024-07-08 00:00:00
+b3/recterm/coalesceDTs	rows=3 1,NULL | 2,2024-07-08 00:00:00 | 3,2024-07-08 00:00:00
+b3/recterm/caseDArm	rows=3 1,NULL | 2,2024-07-08 00:00:00 | 3,2024-07-08 00:00:00
+b3/recterm/caseTsArm	rows=3 1,NULL | 2,2024-01-01 10:00:00 | 3,2024-01-01 10:00:00
+b3/recterm/greatest	rows=3 1,NULL | 2,2024-07-08 00:00:00 | 3,2024-07-08 00:00:00
+b3/recterm/least	rows=3 1,NULL | 2,2024-01-01 10:00:00 | 3,2024-01-01 10:00:00
+b3/recterm/tableSeed	rows=8 1,1,NULL | 1,2,NULL | 1,3,NULL | 1,4,NULL | 2,1,2024-01-02 00:00:00 | 2,2,2024-03-04 12:00:00 | 2,3,2024-01-02 00:00:00 | 2,4,NULL
+b3/recterm/where	rows=3 1 | 2 | 3
+b3/recterm/whereTable	rows=6 1,1 | 1,2 | 1,3 | 1,4 | 2,1 | 2,3
+b3/recterm/intoDate	ERR 42804: recursive query "r" column 2 has type date in non-recursive term but type timestamp without time zone overall
+ctl4/recterm/castDate	rows=2 2 | 3
+ctl4/recterm/tsTs	rows=2 2 | 3
+ctl4/recterm/dateSeries	rows=1 4
+ctl4/recterm/tsSeries	rows=1 3
+ctl4/recterm/compare	rows=3 1 | 2 | 3
+ctl4/recterm/dateMinusDate	rows=1 4
