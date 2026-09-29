@@ -2859,17 +2859,21 @@ union of their columns, and only when none carries a predicate. The entry is
 keyed by table name, so the subquery's scan of a table the statement also
 scans twice found it and replayed batches holding only the statement's
 columns: over `t a JOIN t b` the body read no `v`, the membership answered 0
-rows and the EXISTS failed `filter column "q.v" does not exist`. A column
-probe was decorrelated into the tree and counted, so it answered; so did the
-DAG.
+rows (`NOT IN` and `<> ALL` too, where PostgreSQL answers every row) and the
+EXISTS failed `filter column "q.v" does not exist`. As a SELECT-list value the
+membership answered NULL (`IN`, `NOT IN`) and a CASE over it took its ELSE arm
+on EVERY arm: the DAG computes a SELECT list no stage computes through the
+same local planner. A column probe was decorrelated into the tree and counted,
+so it answered; so did the DAG in a WHERE clause.
 
 **Decision.** A cache entry records the scan nodes it counted, and only those
 attach to it. Every other scan of the table — a run-time subquery's, whatever
 its spelling or position — reads storage with its own columns and predicates.
 This is a statement about the cache, not about subquery placement: the
 predicate is evaluated where it was before, and no plan changes (the
-TPC-H plans are byte-identical, and every scan that shared a cache before
-still does). The same attachment was the hang §1i pinned: a scalar subquery
+TPC-H plans are identical modulo the IN-list print order and the last float
+digit, which vary run to run at base, and every scan that shared a cache
+before still does). The same attachment was the hang §1i pinned: a scalar subquery
 over the table an enclosing semi join was building from waited on that
 build's claim on the entry; it now reads storage and answers.
 
