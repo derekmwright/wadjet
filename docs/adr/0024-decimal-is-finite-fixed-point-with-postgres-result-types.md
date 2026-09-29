@@ -11,6 +11,10 @@ divergence — see "The second of those two, measured 2026-09-03". Amended
 2026-09-12 (arc A2) with §2a: how an INTEGER expression's PostgreSQL width is
 DECIDED, which the `SUM(int2/int4) → bigint ; SUM(int8) → numeric` line above
 assumes and never states.
+Amended 2026-09-28 (arc IR, #1353) with §2c: a float-carried numeric (a
+division, a transcendental function, EXTRACT) keeps its FLOAT64 carrier and
+OID and declares PostgreSQL's CATEGORY beside it, which is what an integer
+assignment rounds by.
 
 ## Context
 
@@ -406,7 +410,7 @@ own resolver for it (physical.DeclaredTypeOfNodeWith), the same declaration
 a plan stamps. An explicit integer CAST does not read it: the cast kernel sees
 only the compiled operand and the batch, and a DAG stage boundary carries no
 category, so `CAST(5 / 2.0 AS INTEGER)` still rounds the double half to even
-(recorded for filing).
+(#1392).
 
 ### 3. The (p,s) of a computed result follows the finite-decimal industry rule
 

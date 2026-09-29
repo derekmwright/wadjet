@@ -261,6 +261,13 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
        through every set operator, so the body refuses 42883 the same way
        a single-SELECT literal body already did. (Amended 2026-09-26, arc
        ST round 2, #1308.)
+       The merge still keeps the LEFT arm's origin when the two arms'
+       origins share a comparisonClass, so a later arm whose CAST does not
+       provably convert is never judged: `v IN (SELECT CAST(v AS TEXT) …
+       UNION SELECT CAST(d AS TEXT) …)`, a bigint against a numeric `d`'s
+       text, answers (and did at v0.25.1) where the same arms in the other
+       order are 42883 and PostgreSQL refuses both. A recorded gap, not a
+       kept superset. (Recorded 2026-09-28.)
        One shape keeps no text reading for any type: two plain COLUMNS as a
        JOIN key (the hash-join key path: #615's error on three arms, 0 rows
        on the shuffled one, and 0 rows for every text/typed derived-column
@@ -4293,6 +4300,47 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      `wadjet.TestArcRCRecursiveCTEAnswersItsWholeClosureOrFails` and, cell by
      cell against PostgreSQL, `…SeedTypeDecidesAgainstEveryTermType`.
 
+   - **An integer assignment rounds by the source's PostgreSQL type; the
+     writes PostgreSQL refuses are refused before a row is written, with
+     five recorded exceptions.** (Added 2026-09-28, arc IR, #1353.) The
+     position is ADR-0024 §2c: a float-carried numeric (`5 / 2.0`,
+     `SQRT(6.25)`, EXTRACT) keeps its FLOAT64 carrier and OID 701 and
+     declares PostgreSQL's category beside it, and every write door —
+     VALUES, INSERT … SELECT, UPDATE, MERGE — rounds an integer target by
+     that category (half away from zero from a numeric, half to even from a
+     float8; `5 / 2.0` stores 3). A MERGE action's expression forms are one
+     table measured on PostgreSQL 17.11 (`intround.MergeSetCells`): an
+     aggregate is 42803 and a window function 42P20 on every door that
+     evaluates one row, a target-correlated subquery under a WHEN NOT
+     MATCHED clause a row reaches is 42P01, an `ON` key naming a name a
+     subquery source publishes twice is 42702, arithmetic between a text
+     COLUMN and a number is 42883 (`SELECT x * 2` too), and a JSON field
+     read (`j->>'k'`, `j->'k'`) into a non-text column is 42804 — the
+     assignment half of this section's "no text→integer superset" (arc VL).
+     A float4/float8 parameter binds as its own type (OID 700/701), as in
+     PostgreSQL, where v0.25.1 read it as a numeric literal. Recorded, each
+     with its differences-page entry:
+     - `#1353-cast` — an explicit `CAST(<float-carried numeric> AS INTEGER)`
+       rounds the double half to even (`CAST(5 / 2.0 AS INTEGER)` is 2,
+       PostgreSQL 3): the cast kernel sees only its compiled operand and a
+       DAG stage boundary carries no category (ADR-0024 §2c, #1392).
+     - `#1353-json` — `CAST(j->>'k' AS INTEGER)` over `{"k": 2.5}` answers 2
+       where PostgreSQL raises 22P02: the cast reads the JSON number, not
+       `->>`'s text (#1406).
+     - `#1353-param` — a text-typed (OID 25) parameter assigned to an
+       integer column is 22P02 where PostgreSQL raises 42804: Bind renders
+       it as a quoted literal, which the column's input function reads.
+       Neither writes (#1408).
+     - `#1353-text-expr` — arithmetic over a text EXPRESSION (`UPPER(x) *
+       2`, `-x`, `CAST(n AS TEXT) * 2`, `(x || '') * 1`) is evaluated as its
+       number, and every write stores it, where PostgreSQL raises 42883: the
+       42883 rule reads a bare text column only (#1409).
+     - `#1043` — a WHEN NOT MATCHED clause no row reaches is not resolved,
+       so its target-correlated subquery answers `MERGE 0` where PostgreSQL
+       raises 42P01 at parse; reached, it is 42P01 here too.
+     - `#1353-int2` — `SMALLINT` / `INT2` columns are 42704: there is no
+       int16 storage; `CAST(x AS SMALLINT)` answers, declared bigint (#1407).
+
 6. **A numeric literal's carrier is its TEXT, not a float64.** (Added
    2026-08-23, from #452.) PostgreSQL types an unsuffixed decimal literal as
    `numeric` and compares it at full precision, so `WHERE d = 493827160549382.7160549350`
@@ -5838,7 +5886,7 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
         '3.1'     22P02             3.1                 3.1
         '1_000'   1000              22P02               1000  (wadjet 22P02, #634)
         '0x1A'    26                26                  26    (wadjet 22P02, #634)
-        '0o17'    15                22P02               22P02
+        '0o17'    15                22P02               15    (wadjet 22P02, #634)
         '0x1p3'   22P02             8                   22P02 (wadjet 22P02)
         'NaN'     22P02             NaN                 a BOUND (ADR-0024 item 6)
         '+NaN'    22P02             NaN                 22P02
@@ -5846,6 +5894,9 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
         '1e39'    22P02             22003               a number
         '7e-46'   22P02             22003 (underflow)   a number
         ''        22P02             22P02               22P02
+
+    (Corrected 2026-09-28: the `'0o17'` numeric cell read 22P02; PostgreSQL
+    17.11 answers 15, `'0o14'::numeric` 12, measured by arc SM.)
 
     - **INTEGER** is PostgreSQL 16's `pg_strtoint*`: C whitespace trimmed, an
       optional sign, `0x`/`0o`/`0b` radix prefixes, underscore separators

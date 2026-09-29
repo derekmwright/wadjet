@@ -28,6 +28,10 @@ reference the column list a join key needs (#1098, #1067, #1072, #1066).
 §1o-b (2026-09-22, arc RC) settles how a recursive CTE's fixed point ENDS — at
 the fixed point or with an error, never with the rows so far — and what types
 and names it publishes (#1246, #1041, #1074, #1193).
+§1o-a was amended (2026-09-26, arc SP, #1349) when `INTERSECT` came to bind
+tighter than `UNION` and `EXCEPT`: the recursive term is the top-level
+`UNION ALL`'s last operand, and a self-reference inside it follows
+PostgreSQL's set-operation rule.
 §1r (2026-09-20) is the half those sections assumed: WHICH references the
 rewrite finds. A body's JOIN ON was never read, and a condition naming only
 the outer row was stripped or dropped — so the outer references are now a SET
@@ -1693,7 +1697,17 @@ any arm but the last name the CTE" above is no longer exact. The recursive
 term is the last operand of the top-level `UNION ALL` — one arm, or an
 `INTERSECT` chain — and everything to its left is the non-recursive term; a
 self-reference ANYWHERE in the non-recursive term is 42P19. Corrected wording:
-`docs/sql-reference.md`'s recursive-CTE paragraph.
+`docs/sql-reference.md`'s recursive-CTE paragraph. The recursive term also
+takes PostgreSQL's set-operation rule, through a parenthesised or
+derived-table term too: a self-reference under `INTERSECT ALL` (either
+operand), under `EXCEPT ALL`'s left operand or under `EXCEPT`'s right operand
+is 42P19 "recursive reference to query %q must not appear within INTERSECT"
+(or EXCEPT) — v0.25.1 answered twelve such parenthesised and derived-table
+spellings and ran one to the iteration cap — while a distinct `INTERSECT`
+chain and `EXCEPT`'s distinct left operand answer, as in PostgreSQL. That
+shape question is asked BEFORE the top operator's ALL-ness, so
+`seed UNION rec INTERSECT ALL x` is PostgreSQL's 42P19, not 0A000
+(`classifyRecursiveBody`, `refuseRecursiveTermShape`).
 
 Two consequences fall out of asking the self-reference question at all. A
 `WITH RECURSIVE` whose body does NOT name itself is not recursive — PostgreSQL

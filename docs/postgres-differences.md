@@ -62,7 +62,7 @@ PostgreSQL answers the statement's start time for every row, so `WHERE LOCALTIME
 
 **An explicit integer CAST of a float-carried numeric rounds half to even.**
 
-`CAST(5 / 2.0 AS INTEGER)`, `CAST(SQRT(6.25) AS INTEGER)` and `CAST(POWER(2.5, 1) AS INTEGER)` answer 2 where PostgreSQL answers 3 (SMALLINT and BIGINT alike; negated, -2 where PostgreSQL answers -3): the cast kernel rounds the float64 carrier by float8's rule, and a numeric literal operand (`CAST(2.5 AS INTEGER)`, `CAST(2.5 * 1 AS INTEGER)`) rounds half away as PostgreSQL does. Not a deliberate difference: an assignment of the same values rounds as PostgreSQL does (see "Division and the transcendental functions over numeric declare double precision"); the cast is #1392. (ADR-0024 §2c)
+`CAST(5 / 2.0 AS INTEGER)`, `CAST(SQRT(6.25) AS INTEGER)` and `CAST(POWER(2.5, 1) AS INTEGER)` answer 2 where PostgreSQL answers 3 (SMALLINT and BIGINT alike; negated, -2 where PostgreSQL answers -3): the cast kernel rounds the float64 carrier by float8's rule, and a numeric literal operand (`CAST(2.5 AS INTEGER)`, `CAST(2.5 * 1 AS INTEGER)`) rounds half away as PostgreSQL does. Not a deliberate difference: an assignment of the same values rounds as PostgreSQL does (see "Division and the transcendental functions over numeric declare double precision"); the cast is #1392. (ADR-0012 §5/#1353-cast, ADR-0024 §2c)
 
 **An integer CAST of a JSON field read reads the JSON number.**
 
