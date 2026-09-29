@@ -240,6 +240,59 @@ func (b *binder) foldArmTypeOf(scope *colScope) func(plansql.Node) (parquet.Colu
 	return typeOf
 }
 
+// declareTemporalArmColumns completes a block's output declarations
+// (binder.outputDecls) for the columns whose value is a scalar subquery or a
+// window call — or an expression over one — that is a DATE or a TIMESTAMP.
+// The declaration walk that fills outputDecls types neither, so a derived
+// table's, a CTE's, a set operation's or a LATERAL output's column carrying
+// one reached the scope untyped, and `COALESCE(s.d, s.mt)` over `(SELECT
+// a.d, (SELECT max(ts) …) AS mt …) s` skipped the refusal and answered a
+// TIMESTAMP's milliseconds read as days (`3338-12-14`), or a DATE's day
+// count as milliseconds, on every arm (#1378 round 3). The column is typed
+// by the same arm walk the refusal types a subquery or window arm with, and
+// only a DATE or a TIMESTAMP is recorded — the one pair that walk is for.
+func (b *binder) declareTemporalArmColumns(info *plansql.SelectInfo, scope *colScope) {
+	ds := b.outputDecls[info]
+	if len(ds) != len(info.Columns) {
+		return
+	}
+	var typeOf func(plansql.Node) (parquet.Column, bool)
+	for i, col := range info.Columns {
+		if !ds[i].Untyped || col.Star || col.ASTExpr == nil {
+			continue
+		}
+		if typeOf == nil {
+			typeOf = b.foldArmTypeOf(scope)
+		}
+		if c, ok := typeOf(col.ASTExpr); ok && foldTemporal(c.Type) {
+			ds[i] = expr.DeclType{ID: c.Type}
+		}
+	}
+}
+
+// recursiveTemporalDecls is a recursive CTE's published declarations as the
+// choice refusal reads them: the NON-RECURSIVE term's (the left-most arm of
+// the body's set operation — PostgreSQL types a recursive CTE's column by it,
+// and refuses 42804 when the recursive term disagrees), DATE and TIMESTAMP
+// only. A recursive CTE published no declaration at all, so `COALESCE(s.d,
+// s.t)` over one skipped the refusal whatever its columns were (#1378 round
+// 3); the other types stay undeclared as they were.
+func recursiveTemporalDecls(outputDecls map[*plansql.SelectInfo][]expr.DeclType, body *plansql.SelectInfo) []expr.DeclType {
+	anchor := body
+	for anchor != nil && anchor.Union != nil {
+		anchor = anchor.Union.Left
+	}
+	src := outputDecls[anchor]
+	out := make([]expr.DeclType, len(src))
+	for i, d := range src {
+		out[i] = expr.DeclType{Untyped: true}
+		if !d.Untyped && foldTemporal(d.ID) {
+			out[i] = expr.DeclType{ID: d.ID}
+		}
+	}
+	return out
+}
+
 // foldTemporal reports whether a widened arm type is one the DATE / TIMESTAMP
 // refusal reads.
 func foldTemporal(t parquet.TypeID) bool {

@@ -1003,6 +1003,10 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 			return err
 		}
 	}
+	// A DATE or TIMESTAMP column this block publishes from a scalar subquery
+	// or a window call is declared, so the choice refusal reads it through a
+	// derived table, a CTE or a set operation (validate_container_fold.go).
+	b.declareTemporalArmColumns(info, resolve)
 	// PostgreSQL's precedence for a bare GROUP BY name: an INPUT COLUMN wins
 	// over a SELECT alias. The parser substituted the alias's expression
 	// unconditionally — it has no schema — and this is the layer that does,
@@ -1702,7 +1706,8 @@ func (b *binder) registerCTE(ctx context.Context, cte *plansql.CTEDef) error {
 		// under the closed scope so the recursive term's own reference to a
 		// name the CTE does not publish is refused the same way.
 		if known {
-			b.ctes[name] = cteEntry{cols: plansql.OverlayColumnAliases(cte.Columns, names)}
+			b.ctes[name] = cteEntry{cols: plansql.OverlayColumnAliases(cte.Columns, names),
+				decls: recursiveTemporalDecls(b.outputDecls, body)}
 			if err := b.validateBlock(ctx, body, nil); err != nil {
 				return err
 			}
