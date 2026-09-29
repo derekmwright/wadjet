@@ -108,9 +108,8 @@ func (e *Cmp) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool) {
 // date-parse memo's sync.Map.Load (interface-key hashing dominated;
 // 2026-07-25 re-rank). The literal is parsed once into BOTH temporal
 // units at compile time; the unit is chosen from the column's resolved
-// type per batch. Every non-fast sub-case (non-temporal column, the
-// epoch-zero literal guard) delegates to the generic compare() with the
-// original operand order, keeping semantics bit-identical with Cmp.
+// type per batch. A non-temporal column delegates to the generic compare()
+// with the original operand order, keeping semantics bit-identical with Cmp.
 type CmpTemporalLit struct {
 	Col  *ColRef
 	Lit  string // original literal text (generic-fallback operand)
@@ -146,12 +145,15 @@ func (e *CmpTemporalLit) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool
 	if !ok {
 		return false, true // NULL / unresolved — a comparison against NULL is UNKNOWN
 	}
-	if lit == 0 && v != 0 {
-		// The generic guard (`bi != 0 || ai == 0`) treats an epoch-zero
-		// literal against a nonzero column as a parse failure and falls
-		// through to stringified comparison. Preserve that bit-exactly.
-		return e.genericFallback(b, row)
-	}
+	// No epoch-zero special case: the literal is read in the column's
+	// DECLARED unit, 0 included. The one that stood here sent an epoch-zero
+	// literal against a nonzero value to compare(), whose magnitude guess
+	// reads an int64 inside +/-500 000 as a DAY count — so a DATE scalar
+	// subquery inlined by the stage DAG as '1970-01-01' beside a TIMESTAMP
+	// column met a unit guess (#1378 round 2), and a DATE past 500 000 epoch
+	// days against '1970-01-01 12:00' read the literal as milliseconds. The
+	// generic Cmp reads the pair by its declaration (temporalTextOrder), and
+	// this node answers what it answers.
 	a, bv := v, lit
 	if e.Flip {
 		a, bv = lit, v

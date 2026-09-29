@@ -48,8 +48,8 @@ func TestCmpTemporalLitCompiles(t *testing.T) {
 // TestCmpTemporalLitMatchesGeneric is the semantics gate: for every
 // (column type, column value, literal, op, operand order) cell the
 // specialized node must return exactly what the generic Cmp returns —
-// including the epoch-zero literal guard, NULLs, string columns, and
-// non-temporal columns falling back.
+// including an epoch-zero literal, NULLs, string columns, and non-temporal
+// columns falling back.
 func TestCmpTemporalLitMatchesGeneric(t *testing.T) {
 	lits := []string{"1998-09-02", "1970-01-01", "1995-01-01T00:00:00", "2049-12-31"}
 	ops := []CmpOp{CmpEq, CmpNe, CmpLt, CmpLe, CmpGt, CmpGe}
@@ -92,6 +92,41 @@ func TestCmpTemporalLitMatchesGeneric(t *testing.T) {
 						}
 					}
 				}
+			}
+		}
+	}
+}
+
+// AN EPOCH-ZERO LITERAL IS READ IN THE COLUMN'S DECLARED UNIT (#1378 round
+// 2). The node sent a literal whose value in the column's unit is 0 against
+// a nonzero row to compare(), whose magnitude guess reads an int64 inside
+// +/-500 000 as a day count and any other as milliseconds: DATE 3612-09-08
+// (day 600 000) against '1970-01-01 12:00:00' (day 0) was compared with
+// 43 200 000 "milliseconds" and answered `<`. On the stage DAG a DATE scalar
+// subquery is inlined as such a quoted literal beside a TIMESTAMP column.
+func TestCmpTemporalLitEpochZeroTakesTheDeclaredUnit(t *testing.T) {
+	b := tempLitBatch(3)
+	for i, d := range []int32{600000, -600000, 0} {
+		b.Columns[0].SetValue(i, d)
+	}
+	for i, ts := range []int64{-1, 1, 0} {
+		b.Columns[1].SetValue(i, ts)
+	}
+	cases := []struct {
+		col, lit string
+		op       CmpOp
+		want     []bool
+	}{
+		{"d", "1970-01-01 12:00:00", CmpGt, []bool{true, false, false}},
+		{"d", "1970-01-01 12:00:00", CmpEq, []bool{false, false, true}},
+		{"ts", "1970-01-01", CmpLt, []bool{true, false, false}},
+		{"ts", "1970-01-01", CmpEq, []bool{false, false, true}},
+	}
+	for _, c := range cases {
+		e := compileCmp(&ColRef{Name: c.col}, &Lit{Val: c.lit}, c.op).(*CmpTemporalLit)
+		for row, want := range c.want {
+			if got := e.EvalBool(b, row); got != want {
+				t.Errorf("%s %v %q row %d: got %v, want %v", c.col, c.op, c.lit, row, got, want)
 			}
 		}
 	}
