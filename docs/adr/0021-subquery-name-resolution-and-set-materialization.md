@@ -737,6 +737,12 @@ the record is a fixture rather than a memory.
   feeding: the build waits on the scan, the scan's slot is held for the build,
   and `source init` never returns. Pinned with a three-second deadline and its
   control in `coordinator.TestScalarSubqueryOverTheSameTableAsAnEnclosingBuildHangs`.
+  *Amended 2026-09-28 (§2c):* the slot the build held was the duplicate-scan
+  cache's claim, and the scalar subquery's scan — planned at run time, not one
+  of the scans the entry counted — waited on it. A cache entry now serves only
+  the scans it counted, so this shape answers (5, as PostgreSQL does) and the
+  pin is a gate: `coordinator.TestScalarSubqueryOverTheSameTableAsAnEnclosingBuildAnswers`.
+  TPC-H Q2's comma spelling was not re-measured here.
 
 - **#614 — a derived table in a subquery's FROM referencing the enclosing
   query.** MEASURED, because the question was open: it is LEGAL WITHOUT
@@ -2863,7 +2869,9 @@ its spelling or position — reads storage with its own columns and predicates.
 This is a statement about the cache, not about subquery placement: the
 predicate is evaluated where it was before, and no plan changes (the
 TPC-H plans are byte-identical, and every scan that shared a cache before
-still does).
+still does). The same attachment was the hang §1i pinned: a scalar subquery
+over the table an enclosing semi join was building from waited on that
+build's claim on the entry; it now reads storage and answers.
 
 Two refusals remain outside this rule, both loud: an uncorrelated subquery in
 an OUTER join's ON (docs/postgres-differences.md, #1153) and, on the DAG
