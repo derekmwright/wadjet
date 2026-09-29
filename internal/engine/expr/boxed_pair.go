@@ -40,7 +40,7 @@ const (
 	// matters.
 	boxNumber
 	// boxText: a genuine text value, which compares AS TEXT — bytewise,
-	// wadjet's collation (ADR-0012 item 5) — whatever its digits look like.
+	// wadjet's collation (ADR-0012 §5 (catalog: docs/adr/0012-divergences/)) — whatever its digits look like.
 	boxText
 	// boxQuoted: a QUOTED string literal, which is a different thing from a
 	// text value. PostgreSQL types such a literal as `unknown` and resolves
@@ -949,7 +949,7 @@ func netIntKindType(k boxKind) batch.TypeID {
 // identically — and the operand's KIND is what tells the two apart where it
 // matters (a quoted literal is unknown-typed and takes the column's type; a
 // numeric literal is already `numeric` and so makes a TEXT column's
-// comparison a text one, per ADR-0012 item 5).
+// comparison a text one, per ADR-0012 §5 (catalog: docs/adr/0012-divergences/)).
 func operandLitText(e Expr) string {
 	lit, ok := e.(*Lit)
 	if !ok {
@@ -1347,7 +1347,7 @@ func ipv4Order(lv, rv any) (c int, ok, unknown bool) {
 // DECIMAL/numeric literal uses exact source text (#452, #465).
 // DECIMAL/integer is exact; DECIMAL/float casts to float64 (#476).
 // TEXT/numeric literal compares source text bytewise on both paths (#504),
-// a supported pair PostgreSQL refuses (ADR-0012 item 5).
+// a supported pair PostgreSQL refuses (ADR-0012 §5 (catalog: docs/adr/0012-divergences/)).
 // NUMBER/quoted literal resolves the unknown literal from the NUMBER's type.
 // See docs/internals/boxed-pair-order-table.md for the design.
 func (p *boxedPair) order(b *batch.RecordBatch, lv, rv any) (c int, ok, unknown bool) {

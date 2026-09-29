@@ -185,7 +185,7 @@ func TestCastToBooleanTruthTable(t *testing.T) {
 
 	// INT64 / INT32: 0 is FALSE, everything else TRUE, NULL is NULL. This is
 	// PostgreSQL's int4::bool rule, extended to the whole integer family as
-	// a deliberate divergence (ADR-0012 item 5): PostgreSQL has no
+	// a deliberate divergence (ADR-0012 §5 (catalog: docs/adr/0012-divergences/)): PostgreSQL has no
 	// int8::boolean cast, and refusing BIGINT while INTEGER answered would
 	// split one rule across two column widths for no semantic reason.
 	for _, col := range []string{"c", "i"} {

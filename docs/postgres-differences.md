@@ -722,7 +722,7 @@ A subquery’s derived table cannot evaluate enclosing-query references: 0A000 v
 
 **Some correlated values cannot be substituted.**
 
-A correlated subquery this engine re-runs per outer row substitutes the outer values as literals, and a value with no literal that reads back as itself stops the query: `(SELECT c.f + x.v FROM x WHERE x.id = 1)` raises 0A000 when a row of `c.f` is a non-finite `DOUBLE`, and so does a `BYTES` value that is not text, where PostgreSQL answers per row. An `ARRAY` outer value is substituted and answers. Where the correlation can be written as a join, write it as one. (catalog: [lateral-subqueries#r12](adr/0012-divergences/lateral-subqueries.md#catalog))
+A correlated subquery this engine re-runs per outer row substitutes the outer values as literals, and a value with no literal that reads back as itself stops the query: `(SELECT c.f + x.v FROM x WHERE x.id = 1)` raises 0A000 when a row of `c.f` is a non-finite `DOUBLE`, and so does a `BYTES` value that is not text, where PostgreSQL answers per row. An `ARRAY` outer value is substituted and its expressions answer (`c.arr[1]`, `c.arr = ARRAY[…]`); a subquery that returns the array itself, `(SELECT c.arr …)`, is 42000 where PostgreSQL answers. Where the correlation can be written as a join, write it as one. (catalog: [lateral-subqueries#r12](adr/0012-divergences/lateral-subqueries.md#catalog))
 
 **Recursive UNION without ALL is refused.**
 

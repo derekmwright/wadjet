@@ -89,7 +89,7 @@ func ntInetShape(canonical string) (family, bits int) {
 //   - PostgreSQL accepts and the column can hold it → a value.
 //   - PostgreSQL accepts and the column cannot hold it → 0A000, one class for
 //     both of its reasons (a NETWORK where the type holds a bare address, and
-//     an address of the other family). ADR-0012 item 5.
+//     an address of the other family). ADR-0012 §5 (catalog: docs/adr/0012-divergences/).
 func ntExpect(typ parquet.TypeID, c ntPgCell) string {
 	if c.state != "" {
 		return c.state

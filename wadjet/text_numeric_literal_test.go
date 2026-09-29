@@ -32,7 +32,7 @@ import (
 //
 // PostgreSQL cannot be asked this pair directly — it refuses `text = numeric`
 // with 42883 "operator does not exist", an OVERLOAD RESOLUTION failure wadjet
-// has no overload set to reproduce (ADR-0012 item 5). It CAN be asked the
+// has no overload set to reproduce (ADR-0012 §5 (catalog: docs/adr/0012-divergences/)). It CAN be asked the
 // quoted form, and that is what pins these numbers: every expectation below is
 // what live postgres:17-alpine answers for the same predicate with the literal
 // QUOTED, over the same five rows in a `text COLLATE "C"` column — `s = '1.5'`

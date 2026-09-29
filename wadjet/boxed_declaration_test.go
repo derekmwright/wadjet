@@ -59,7 +59,7 @@ func bxOpen(t *testing.T) *DB {
 // TestNumberColumnAgainstQuotedNumericLiteral: PostgreSQL types an
 // unknown-typed literal FROM the operand it meets, so `k > '2'` over a BIGINT
 // column is the integer comparison `k > 2`. That is the opposite direction
-// from the TEXT-column rule in the same bullet of ADR-0012 item 5, and
+// from the TEXT-column rule in the same bullet of ADR-0012 §5 (catalog: docs/adr/0012-divergences/), and
 // deleting the box-sniffing branch took it out along with the rest.
 //
 // It came back wrong in two ways at once, which is why the equality shapes

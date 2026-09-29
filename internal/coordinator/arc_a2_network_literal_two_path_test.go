@@ -77,7 +77,7 @@ func a2NetSites(col, lit string) []struct{ name, sql string } {
 // the other five — a literal refused in a WHERE and answered inside a CASE, a
 // GREATEST or a scan no row survives. That is closed for CIDR, MAC and UUID,
 // which are the three types whose parser is now a superset of PostgreSQL's;
-// IPv4 and IPv6 are not in this list for that reason (ADR-0012 item 5).
+// IPv4 and IPv6 are not in this list for that reason (ADR-0012 §5 (catalog: docs/adr/0012-divergences/)).
 func a2AllNetSites() map[string]bool {
 	return map[string]bool{
 		"eq": true, "in": true, "case": true, "is_distinct": true,

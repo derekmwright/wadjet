@@ -26,7 +26,7 @@ import (
 // BOX, and the int32 branch below is NOT reachable from a column: a column's
 // value arrives here widened to int64, so `to_hex(int4_col)` over a negative
 // renders sixteen sign-extended digits where PostgreSQL renders eight. That is
-// a recorded divergence (ADR-0012 item 5, the bitwise-family entry), measured
+// a recorded divergence (ADR-0012 §5 (catalog: docs/adr/0012-divergences/), the bitwise-family entry), measured
 // on all five arms in `coordinator.…/to_hex_of_an_int32_column_*` and stated
 // again in `bitwise_family_test.go`. The branch stays for a caller that boxes
 // an int32 itself.

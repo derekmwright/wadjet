@@ -180,7 +180,7 @@ func TestAVectorLiteralIsExactlyTheDeclaredWidthAtEveryDoor(t *testing.T) {
 // date. Round-2 review B1.
 //
 // PostgreSQL has no int-to-date cast at all (42846, "cannot cast type bigint to
-// date"), so wadjet's cast is a deliberate superset (ADR-0012 item 5); inside a
+// date"), so wadjet's cast is a deliberate superset (ADR-0012 §5 (catalog: docs/adr/0012-divergences/)); inside a
 // superset the rule is that a value it cannot represent is LOUD with the class
 // PostgreSQL uses for the same magnitude reaching an int4, and never a
 // different number. The four-arm version of this is arc S1's
@@ -347,7 +347,7 @@ func TestAnOutOfRangeCastRefusesAtTheDoor(t *testing.T) {
 // comparison operators are documented to RAISE on differing dimensions rather
 // than compare unequal — which would make it error where this engine answers.
 // The cells below assert THIS engine's behaviour only. Round-2 review P1,
-// round-3 review P4; ADR-0012 item 5 carries the same caveat.
+// round-3 review P4; ADR-0012 §5 (catalog: docs/adr/0012-divergences/) carries the same caveat.
 func TestASetOperationOverTwoVectorWidths(t *testing.T) {
 	ctx := context.Background()
 	db, err := Open(ctx, Config{Store: objstore.NewMemStore(), Bucket: "s4"})

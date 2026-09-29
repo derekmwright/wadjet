@@ -3996,7 +3996,7 @@ func postgresSemanticsCases() []pgCase {
 	//
 	// PostgreSQL cannot be asked the shape that broke (`s = 1.5` is 42883,
 	// "operator does not exist: text = numeric" — an overload-resolution
-	// failure wadjet has no overload set to reproduce; ADR-0012 item 5). It
+	// failure wadjet has no overload set to reproduce; ADR-0012 §5 (catalog: docs/adr/0012-divergences/)). It
 	// CAN be asked the QUOTED form, which is the same comparison once the
 	// literal is typed, and that is what these gate: the byte order where
 	// "1.50" and "1.5" are two values and "9" sorts ABOVE "10".
@@ -4413,7 +4413,7 @@ func postgresSemanticsCases() []pgCase {
 	// nations, so the FALSE arm is not empty. Wadjet extends the same rule to
 	// BIGINT, which PostgreSQL cannot be asked at all ("cannot cast type
 	// bigint to boolean") — that half is a deliberate divergence recorded in
-	// ADR-0012 item 5 and gated in wadjet.TestCastToBooleanTruthTable, not
+	// ADR-0012 §5 (catalog: docs/adr/0012-divergences/) and gated in wadjet.TestCastToBooleanTruthTable, not
 	// here, because an entry PostgreSQL refuses is not a question about
 	// wadjet.
 	out = append(out,

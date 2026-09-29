@@ -100,7 +100,7 @@ func TestNetworkTextGrammarAnswersTheSameOnEveryArm(t *testing.T) {
 
 		// And the two refusal classes, which must also be the same everywhere:
 		// text naming no value is 22P02, PostgreSQL-valid text naming a NETWORK
-		// is 0A000 (ADR-0012 item 5).
+		// is 0A000 (ADR-0012 §5 (catalog: docs/adr/0012-divergences/)).
 		{"ipv4 garbage", `SELECT CAST('abc' AS IPV4) AS v FROM typemx WHERE id = 1`, "", "22P02"},
 		{"mac regrouped", `SELECT CAST('aabb:ccdd:eeff' AS MACADDR) AS v FROM typemx WHERE id = 1`,
 			"", "22P02"},

@@ -489,7 +489,7 @@ func TestCastToANetworkTypeParsesItsOperand(t *testing.T) {
 	}
 	// A PostgreSQL-valid literal naming a NETWORK is the OTHER answer and it is
 	// 0A000: the text is valid inet and this engine's bare-address type is the
-	// limit, not the grammar (ADR-0012 item 5).
+	// limit, not the grammar (ADR-0012 §5 (catalog: docs/adr/0012-divergences/)).
 	for _, c := range []struct{ dest, in string }{{"ipv4", "10/8"}, {"ipv6", "2001:db8::1/64"}} {
 		t.Run(c.dest+"/"+c.in, func(t *testing.T) {
 			_, err := evalCastForTest(&Cast{Operand: &Lit{Val: c.in}, DestType: c.dest}, b)

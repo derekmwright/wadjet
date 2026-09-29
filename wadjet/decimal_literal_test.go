@@ -585,7 +585,7 @@ func TestDecimalUnaryMinusOverQuotedStringLiteral(t *testing.T) {
 // PostgreSQL refuses every `-'…'` form with 42725 ("operator is not unique:
 // - unknown") — verified live — rather than 22P02; wadjet has one generic
 // unary-minus operator and no overload ambiguity to report, so it reports what
-// it actually found. ADR-0012 item 5 records that difference.
+// it actually found. ADR-0012 §5 (catalog: docs/adr/0012-divergences/) records that difference.
 func TestRefusedLiteralReachesTheClientAsItsOwnError(t *testing.T) {
 	ctx := context.Background()
 	db := declitOpen(t)

@@ -190,7 +190,7 @@ func TestUUIDTextGrammarIsPostgresUUID(t *testing.T) {
 // the same table the comparison sites read: a literal this engine stores is a
 // literal PostgreSQL stores, and a literal it refuses is one PostgreSQL
 // refuses. IPv4/IPv6 keep the one recorded divergence — a NETWORK is 0A000
-// rather than a value, because the type holds a bare address (ADR-0012 item 5).
+// rather than a value, because the type holds a bare address (ADR-0012 §5 (catalog: docs/adr/0012-divergences/)).
 func TestNetworkTextValueIsOneGrammarPerType(t *testing.T) {
 	for _, c := range []struct {
 		typ TypeID
@@ -207,7 +207,7 @@ func TestNetworkTextValueIsOneGrammarPerType(t *testing.T) {
 		{TypeIPv4, "zzz", NetTextSyntax},
 		// A PostgreSQL-valid inet literal of the OTHER FAMILY is the SAME
 		// class as a network: the text is fine and this column has no room
-		// for it, which is 0A000 (review NT P2, ADR-0012 item 5).
+		// for it, which is 0A000 (review NT P2, ADR-0012 §5 (catalog: docs/adr/0012-divergences/)).
 		{TypeIPv4, "::1", NetTextPrefix},
 		{TypeIPv4, "2001:db8::1", NetTextPrefix},
 		{TypeIPv4, "::ffff:1.2.3.4", NetTextPrefix},

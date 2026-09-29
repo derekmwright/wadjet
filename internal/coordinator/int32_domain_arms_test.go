@@ -28,7 +28,7 @@ import (
 //
 // PostgreSQL has no int-to-date cast at all: `SELECT 3000000000::date` is
 // 42846, `cannot cast type bigint to date`. Wadjet's cast is a deliberate
-// SUPERSET (ADR-0012 item 5), and inside a superset the rule is that a value
+// SUPERSET (ADR-0012 §5 (catalog: docs/adr/0012-divergences/)), and inside a superset the rule is that a value
 // it cannot represent is LOUD — 22003, the class PostgreSQL uses for the same
 // magnitude reaching an int4 — and never a different number.
 //

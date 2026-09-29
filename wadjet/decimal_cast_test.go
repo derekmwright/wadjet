@@ -122,7 +122,7 @@ func TestDecimalCastDeclaresItsDestination(t *testing.T) {
 }
 
 // TestStringCastEnforcesItsLengthAndStillDropsTheDeclaration is #838, and both
-// halves are closed now — in the ORDER ADR-0012 item 5 sets down, because
+// halves are closed now — in the ORDER ADR-0012 §5 (catalog: docs/adr/0012-divergences/) sets down, because
 // declaring `character varying(4)` while returning six characters would have
 // been a worse lie than declaring nothing.
 //
@@ -202,7 +202,7 @@ func TestStringCastEnforcesItsLengthAndStillDropsTheDeclaration(t *testing.T) {
 		// A bare COLUMN of a VARCHAR(n) type carries none either: the catalog
 		// does not store the length (parquet.ParseTypeID drops it), so the
 		// engine is unconstrained there and says so. PostgreSQL keeps it, and
-		// ADR-0012 item 5 records the divergence.
+		// ADR-0012 §5 (catalog: docs/adr/0012-divergences/) records the divergence.
 		{"ctl_bare_column", `SELECT s AS v FROM decdecl WHERE id = 3`,
 			"abc", "abc", 0, "character varying(16) on the server"},
 		// The bpchar RESIDUAL, pinned: PostgreSQL pads a short CHAR(n) to n on

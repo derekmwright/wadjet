@@ -31,7 +31,7 @@ func stringColBatch(values ...string) *batch.RecordBatch {
 // combine with boxText in pairApplies and so PERMANENTLY disarms itself and
 // falls through to compare()'s plain string equality; 1.50 is an UNQUOTED
 // numeric literal (boxNumber), which DOES apply against a TEXT column
-// (ADR-0012 item 5) — the column's bytes compare against the literal's exact
+// (ADR-0012 §5 (catalog: docs/adr/0012-divergences/)) — the column's bytes compare against the literal's exact
 // SOURCE TEXT, not its parsed float64. A bug that let one settled pair's
 // disarmed answer leak into a per-NODE "every pair is disarmed" cache would
 // compare the column's "1.50" against fmt.Sprint(1.5) == "1.5" instead of

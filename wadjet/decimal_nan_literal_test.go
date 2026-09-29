@@ -222,7 +222,7 @@ func TestNonNumericDecimalLiteralIsStillRefused(t *testing.T) {
 // PostgreSQL's numeric input refuses outright. So the fold keeps the narrow
 // reader (kernel.FiniteDecimalText) and this stays the compile-time refusal
 // #505 made it, exactly as `-'abc'` does. The SQLSTATE difference from
-// PostgreSQL's 42725 is ADR-0012 item 5's recorded one, unchanged here.
+// PostgreSQL's 42725 is ADR-0012 §5 (catalog: docs/adr/0012-divergences/)'s recorded one, unchanged here.
 func TestUnaryMinusOverANaNLiteralIsStillRefused(t *testing.T) {
 	ctx := context.Background()
 	db := declitOpen(t)
@@ -472,7 +472,7 @@ func fnegRows(t *testing.T, ctx context.Context, db *DB, pred string, want []int
 
 // TestStringColumnAgainstNaNIsStillATextComparison is the other control: a
 // genuine STRING column compares its BYTES, whatever the literal looks like
-// (ADR-0012 item 5's TEXT-against-a-number bullet). The DECIMAL widening is
+// (ADR-0012 §5 (catalog: docs/adr/0012-divergences/)'s TEXT-against-a-number bullet). The DECIMAL widening is
 // selected from the column's DECLARATION, so a text column must not acquire a
 // numeric bound because its literal happens to spell one of the three.
 func TestStringColumnAgainstNaNIsStillATextComparison(t *testing.T) {
