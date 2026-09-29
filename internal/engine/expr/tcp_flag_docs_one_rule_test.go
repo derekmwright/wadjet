@@ -69,7 +69,7 @@ func TestTheTCPFlagDocsStateOneRefusalRule(t *testing.T) {
 			},
 		},
 		{
-			file: "docs/adr/0012-sql-semantics-authority.md",
+			file: "docs/adr/0012-divergences/extensions.md",
 			absent: []string{
 				// The claim round 5 made and round 6 measured false: one site
 				// at compilation is NOT one rule everywhere, because a DAG
