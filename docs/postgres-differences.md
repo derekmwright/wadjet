@@ -616,6 +616,10 @@ A value PostgreSQL inet holds can exceed IPV4/IPV6’s representation: `CAST('10
 
 Missing representations cause 0A000 versus PostgreSQL values: DATE/TIMESTAMP, different address types, or PORT/PROTOCOL/DURATION with DECIMAL, in either order. (catalog: [set-operations#r7](adr/0012-divergences/set-operations.md#catalog); ADR-0012 §12/carrier-pairs)
 
+**CASE, COALESCE, GREATEST and LEAST over a DATE and a TIMESTAMP are refused.**
+
+PostgreSQL resolves the arms to timestamp, a DATE arm at its midnight; here the choice has no carrier for a DATE arm in a TIMESTAMP result and raises 0A000 — `CAST` the DATE arm to TIMESTAMP. A comparison, an IN / EXISTS membership and a join key between the two answer PostgreSQL's rows. (catalog: [temporal#r24](adr/0012-divergences/temporal.md#catalog); #1378)
+
 **Some set-operation literals are refused.**
 
 Text cannot initialize BOOL/integer/float/TIMESTAMP/PORT/PROTOCOL/DURATION vectors: 0A000 versus PostgreSQL values. NULL works. (catalog: [set-operations#r8](adr/0012-divergences/set-operations.md#catalog); ADR-0012 §12/quoted-literals)

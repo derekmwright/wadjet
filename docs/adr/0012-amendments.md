@@ -834,6 +834,15 @@ Rows retired by the measurement (the divergence is gone on the embedded arm; a r
 - aggregates-windows r12 (sources E16, P023): grouped and window MIN/MAX over REAL and INTEGER declare real and integer on the tip, as PostgreSQL does; the page entry P023 is removed.
 - lateral-subqueries r6 (sources E75): SUM(decimal) + (SELECT 1) in a correlated body declares numeric with PostgreSQL values on the tip; E75 recorded FLOAT64.
 
+## 2026-09-29: a DATE against a TIMESTAMP (arc DT, #1378)
+
+PostgreSQL's `date = timestamp` promotes the DATE to its midnight; this engine's direct comparison already did, and every carrier that turns the pair into a KEY did not — a membership answered 0 rows on every arm, NOT IN kept every row, and an EXISTS, LATERAL or JOIN key matched nothing. The pair now keys at TIMESTAMP (`batch.TemporalCommonType`: the equi-join key ladder, the membership set, the stage DAG's inlined set and scalar), which closes those cells without a catalog row. Two rows record what stays refused:
+
+| family | row | change | gate |
+|---|---|---|---|
+| temporal | [r24](0012-divergences/temporal.md#catalog) | Added: CASE / COALESCE / GREATEST / LEAST mixing DATE and TIMESTAMP arms is refused 0A000; at v0.25.2 it answered a day count in a TIMESTAMP column or raised 22003 | `coordinator.TestArcDTDateTimestampEveryArm` |
+| set-operations | [r7](0012-divergences/set-operations.md#catalog) | Amended: gated, with INTERSECT, EXCEPT and a mixed membership body named | `coordinator.TestArcDTDateTimestampEveryArm` |
+
 ## Dated markers inside the entries
 
 Every `Added` / `Amended` / `CLOSED` / `Corrected` / `narrowed` marker still inside an entry's verbatim text, in date order, with the entry that carries it.

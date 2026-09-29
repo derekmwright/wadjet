@@ -54,6 +54,7 @@ The engine has one TIMESTAMP type, an instant with no zone, so `NOW`, `CURRENT_T
 | **r21** `SELECT CAST('2020-01-01' AS DATE) + CAST('1 day 02:00:00' AS INTERVAL)` | 2020-01-02 02:00:00 | ERROR 0A000 only a single-unit interval is supported in arithmetic (measured) | 0A000 | refusal | — · P092 | — | — |
 | **r22** `SELECT ts + INTERVAL '100000000000 hours' FROM t` | ERROR 22015 at the literal | ERROR 22008 when the interval is applied | 22008 | value divergence | — · P092 | — | — |
 | **r23** `SELECT CURRENT_TIME` | the current time, time with time zone | ERROR 42883 unknown function: current_time (measured); there is no TIME type | 42883 | documented gap | — · P109 | #1254 | — |
+| **r24** `SELECT COALESCE(d, ts) FROM t` | the first non-null arm as timestamp without time zone, a DATE arm at its midnight | ERROR 0A000 COALESCE types date and timestamp without time zone are not supported together (measured, every arm); CASE, GREATEST and LEAST the same. A comparison, an IN / = ANY / NOT IN / <> ALL membership, an EXISTS or LATERAL key and a JOIN key between the two answer PostgreSQL's rows (the DATE at its midnight) | 0A000 | refusal | 2026-09-29 · — | #1378 | `coordinator.TestArcDTDateTimestampEveryArm` |
 
 ## Source entries
 
