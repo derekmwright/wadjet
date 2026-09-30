@@ -37,6 +37,16 @@ Two rules, and the second is the one that keeps this honest:
     bytes. Rendering them anyway is exactly the trade — a plausible wrong
     answer for a loud one — that protocol item 8 forbids.
 
+Every CAST spelling here — an INTEGER and a BIGINT are one too — is
+COLUMN-TYPED (`plansql.CastNode.Column`, written
+`__column_value(cast(<literal> as <type>))` so the rebuilt text carries it):
+the literal is the value of an outer column of that type, and the planner's
+typing walks type it as that column (`physical.columnValueRef`) — an int4's
+width and DECIMAL(10,0), a DECIMAL's declared (p,s), an int4[]'s element —
+never by a CAST expression's own rules. The subquery's declaration is made
+from the same spelling with the value left out (`outerStandIn`), so the
+declaration and the per-row value describe one expression.
+
 A NULL is a NULL of the column's type where the value is a CAST or a typed
 literal (outerNull), and the bare `null` where it is a quoted string; it is
 the value the outer row holds, and

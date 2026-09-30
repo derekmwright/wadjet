@@ -1184,9 +1184,11 @@ scalar-subquery bounds is refused on the distributed arms. An `integer`
 expression is `integer`: `(SELECT x.v + x.v …)` declares `integer` and a
 result past its range is 22003, as on PostgreSQL. A subquery that
 reads the outer row is declared with each outer column at that column's own
-type, so `(SELECT c.f + x.v FROM x …)` over a `double precision` `c.f` and an
+type — its width, its precision and scale, an array's element — so
+`(SELECT c.f + x.v FROM x …)` over a `double precision` `c.f` and an
 `integer` `x.v` is `double precision`, in either operand order, and stores 8
-for 7.5 into an `integer` column as PostgreSQL does. Arithmetic and `abs` over
+for 7.5 into an `integer` column as PostgreSQL does, and
+`(SELECT coalesce(c.i, x.v) …)` over an `integer` `c.i` is `integer`. Arithmetic and `abs` over
 a `NUMERIC` subquery are computed and declared `double precision` where
 PostgreSQL's are `numeric`: `(SELECT n …) * 2` over 2.25 is `4.5` here and
 `4.50` there.
