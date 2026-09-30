@@ -109,9 +109,6 @@ func aggArgTypeOf(decls ColDecls) func(plansql.Node) (parquet.TypeID, bool) {
 			c, ok := decls.colDecl(v)
 			return c.Type, ok
 		case *plansql.CastNode:
-			if ref, d, ok := columnValueRef(v); ok {
-				return aggArgTypeOf(d)(ref)
-			}
 			// A cast to a name this layer does not recognise is not TEXT
 			// (structuralCastType).
 			return structuralCastType(v.TypeName)

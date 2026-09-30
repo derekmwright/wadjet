@@ -453,10 +453,11 @@ type CastNode struct {
 	Inner    Node
 	TypeName string
 	// Column marks a correlated re-run's OUTER VALUE: a literal that is the
-	// value of an outer column of this type, and that every typing walk
-	// types as that COLUMN — its width, its (p,s), its element — rather than
-	// by the rules a CAST expression has (an integer CAST declares bigint, an
-	// integer cast's element bigint, and neither is a fixed-point operand).
+	// value of an outer column of this type, and that the planner and the
+	// evaluator type as that COLUMN — its width, its (p,s), its element —
+	// rather than by the rules a CAST expression has (an integer CAST
+	// declares bigint, an integer cast's element bigint, and neither is a
+	// fixed-point operand).
 	// It is spelled `__column_value(cast(<literal> as <type>))` so the
 	// re-run's text carries it (ColumnValueFunc); the parser accepts that
 	// spelling over a literal only.

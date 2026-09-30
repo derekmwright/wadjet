@@ -111,9 +111,6 @@ func pgCategoryOfNode(n plansql.Node, decls ColDecls) pgCategory {
 			return pgArith(pgCategoryOf(x.Left, decls), pgCategoryOf(x.Right, decls))
 		}
 	case *plansql.CastNode:
-		if ref, d, ok := columnValueRef(x); ok {
-			return pgCategoryOfNode(ref, d)
-		}
 		if _, _, _, ok := expr.DecimalCastDest(x.TypeName); ok {
 			return pgCatNumeric
 		}

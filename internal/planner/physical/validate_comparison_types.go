@@ -225,9 +225,6 @@ func structuralTypeOf(decls ColDecls) func(plansql.Node) (parquet.TypeID, bool) 
 			col, ok := decls.colDecl(v)
 			return col.Type, ok
 		case *plansql.CastNode:
-			if ref, d, ok := columnValueRef(v); ok {
-				return structuralTypeOf(d)(ref)
-			}
 			return structuralCastType(v.TypeName)
 		case *plansql.CmpExpr, *plansql.AndNode, *plansql.OrNode, *plansql.NotNode,
 			*plansql.IsExpr, *plansql.LikeExpr, *plansql.BetweenExpr, *plansql.InExpr,
@@ -667,13 +664,6 @@ func (c *comparisonTyper) arrayElement(arr plansql.Node) (parquet.TypeID, bool) 
 	case *plansql.ColRef:
 		return c.scope.provableElementType(v)
 	case *plansql.CastNode:
-		if v.Column {
-			// An outer value: its array COLUMN's element.
-			if col, ok := expr.ColumnOfCastName(v.TypeName); ok && col.Type == parquet.TypeArray {
-				return col.ElementType.Type, true
-			}
-			return 0, false
-		}
 		// The parser spells `T[]` as `array(T)`; a nested array's element
 		// is itself an array, which this layer does not type.
 		name := strings.TrimSpace(v.TypeName)

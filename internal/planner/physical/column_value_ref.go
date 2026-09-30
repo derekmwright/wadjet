@@ -15,13 +15,17 @@ const columnValueName = "__column_value"
 // columnValueRef answers a COLUMN-TYPED cast — a correlated re-run's outer
 // value, or the value-free stand-in its declaration is made from
 // (plansql.CastNode.Column) — as the column reference it stands for, with the
-// one-column scope that declares it. A typing walk that meets one types that
-// reference instead, so the outer value is typed exactly as the outer column
-// is — `coalesce(o.i, x.v)` over an int4 `o.i` is integer, `x.m / o.i`
-// divides at DECIMAL(10,0), `coalesce(o.a, x.a)` over an int4[] is int4[] —
-// and never by a CAST expression's own rules (an integer CAST declares
-// bigint and is not a fixed-point operand; ADR-0012 item 12). ok=false for
-// any other cast.
+// one-column scope that declares it. The two walks where a column's type and
+// a cast's differ — the declared type (nodeDeclaredTypeOf) and the
+// fixed-point operand (decimalArithOperand) — type that reference instead,
+// so the outer value is typed exactly as the outer column is:
+// `coalesce(o.i, x.v)` over an int4 `o.i` is integer, `coalesce(o.a, x.a)`
+// over an int4[] is int4[], `x.m / o.i` divides at DECIMAL(10,0) — never by
+// a CAST expression's own rules (an integer CAST declares bigint, its array
+// element bigint, and is not a fixed-point operand; ADR-0012 item 12). The
+// other walks (width, category, typmod, operator applicability) answer the
+// same for the column and for the cast of its type. ok=false for any other
+// cast.
 func columnValueRef(n *plansql.CastNode) (*plansql.ColRef, ColDecls, bool) {
 	if n == nil || !n.Column {
 		return nil, ColDecls{}, false

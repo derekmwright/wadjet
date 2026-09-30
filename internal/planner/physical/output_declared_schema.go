@@ -357,9 +357,6 @@ func declaredTypmod(node plansql.Node, decls ColDecls, computed map[string]bool)
 	case *plansql.ParenNode:
 		return declaredTypmod(n.Inner, decls, computed)
 	case *plansql.CastNode:
-		if ref, d, ok := columnValueRef(n); ok {
-			return declaredTypmod(ref, d, nil)
-		}
 		// The destination's OWN modifier, and only when it names one.
 		// DecimalCastDest reports hasParams=false for a bare NUMERIC /
 		// DECIMAL, which is the spelling PostgreSQL describes as plain
@@ -438,9 +435,6 @@ func declaredStringLength(node plansql.Node, decls ColDecls, computed map[string
 	case *plansql.ParenNode:
 		return declaredStringLength(n.Inner, decls, computed)
 	case *plansql.CastNode:
-		if ref, d, ok := columnValueRef(n); ok {
-			return declaredStringLength(ref, d, nil)
-		}
 		n2, err, ok := parquet.StringTypeLength(n.TypeName)
 		if ok && err == nil {
 			return n2, true
