@@ -1,0 +1,820 @@
+# PostgreSQL 17.11 (postgres:17-alpine) answers for TestArcWAWindowArgumentsEveryArm's generated cells over wa_t:
+# name<TAB>rows=N <sorted rows> | ERR <SQLSTATE> <message>. Regenerate: WA_GEN=<path> dumps name<TAB>sql; each is run once. Booleans render as brRender does (true/false; psql prints t/f).
+arg/sum/col/all	rows=6 1,180 | 2,180 | 3,180 | 4,180 | 5,180 | 6,180
+arg/sum/col/part	rows=6 1,30 | 2,30 | 3,30 | 4,90 | 5,90 | 6,60
+arg/sum/col/ord	rows=6 1,10 | 2,30 | 3,30 | 4,70 | 5,120 | 6,180
+arg/sum/col/both	rows=6 1,10 | 2,30 | 3,30 | 4,40 | 5,90 | 6,60
+arg/sum/col/frame	rows=6 1,10 | 2,30 | 3,20 | 4,40 | 5,90 | 6,110
+arg/sum/int/all	rows=6 1,12 | 2,12 | 3,12 | 4,12 | 5,12 | 6,12
+arg/sum/int/part	rows=6 1,6 | 2,6 | 3,6 | 4,4 | 5,4 | 6,2
+arg/sum/int/ord	rows=6 1,2 | 2,4 | 3,6 | 4,8 | 5,10 | 6,12
+arg/sum/int/both	rows=6 1,2 | 2,4 | 3,6 | 4,2 | 5,4 | 6,2
+arg/sum/int/frame	rows=6 1,2 | 2,4 | 3,4 | 4,4 | 5,4 | 6,4
+arg/sum/dec/all	rows=6 1,15.0 | 2,15.0 | 3,15.0 | 4,15.0 | 5,15.0 | 6,15.0
+arg/sum/dec/part	rows=6 1,7.5 | 2,7.5 | 3,7.5 | 4,5.0 | 5,5.0 | 6,2.5
+arg/sum/dec/ord	rows=6 1,2.5 | 2,5.0 | 3,7.5 | 4,10.0 | 5,12.5 | 6,15.0
+arg/sum/dec/both	rows=6 1,2.5 | 2,5.0 | 3,7.5 | 4,2.5 | 5,5.0 | 6,2.5
+arg/sum/dec/frame	rows=6 1,2.5 | 2,5.0 | 3,5.0 | 4,5.0 | 5,5.0 | 6,5.0
+arg/sum/neg/all	rows=6 1,-15.0 | 2,-15.0 | 3,-15.0 | 4,-15.0 | 5,-15.0 | 6,-15.0
+arg/sum/neg/part	rows=6 1,-7.5 | 2,-7.5 | 3,-7.5 | 4,-5.0 | 5,-5.0 | 6,-2.5
+arg/sum/neg/ord	rows=6 1,-2.5 | 2,-5.0 | 3,-7.5 | 4,-10.0 | 5,-12.5 | 6,-15.0
+arg/sum/neg/both	rows=6 1,-2.5 | 2,-5.0 | 3,-7.5 | 4,-2.5 | 5,-5.0 | 6,-2.5
+arg/sum/neg/frame	rows=6 1,-2.5 | 2,-5.0 | 3,-5.0 | 4,-5.0 | 5,-5.0 | 6,-5.0
+arg/sum/text/all	ERR 42725 function sum(unknown) is not unique
+arg/sum/text/part	ERR 42725 function sum(unknown) is not unique
+arg/sum/text/ord	ERR 42725 function sum(unknown) is not unique
+arg/sum/text/both	ERR 42725 function sum(unknown) is not unique
+arg/sum/text/frame	ERR 42725 function sum(unknown) is not unique
+arg/sum/null/all	ERR 42725 function sum(unknown) is not unique
+arg/sum/null/part	ERR 42725 function sum(unknown) is not unique
+arg/sum/null/ord	ERR 42725 function sum(unknown) is not unique
+arg/sum/null/both	ERR 42725 function sum(unknown) is not unique
+arg/sum/null/frame	ERR 42725 function sum(unknown) is not unique
+arg/sum/date/all	ERR 42883 function sum(date) does not exist
+arg/sum/date/part	ERR 42883 function sum(date) does not exist
+arg/sum/date/ord	ERR 42883 function sum(date) does not exist
+arg/sum/date/both	ERR 42883 function sum(date) does not exist
+arg/sum/date/frame	ERR 42883 function sum(date) does not exist
+arg/sum/arith/all	rows=6 1,15.0 | 2,15.0 | 3,15.0 | 4,15.0 | 5,15.0 | 6,15.0
+arg/sum/arith/part	rows=6 1,7.5 | 2,7.5 | 3,7.5 | 4,5.0 | 5,5.0 | 6,2.5
+arg/sum/arith/ord	rows=6 1,2.5 | 2,5.0 | 3,7.5 | 4,10.0 | 5,12.5 | 6,15.0
+arg/sum/arith/both	rows=6 1,2.5 | 2,5.0 | 3,7.5 | 4,2.5 | 5,5.0 | 6,2.5
+arg/sum/arith/frame	rows=6 1,2.5 | 2,5.0 | 3,5.0 | 4,5.0 | 5,5.0 | 6,5.0
+arg/sum/colexpr/all	rows=6 1,185 | 2,185 | 3,185 | 4,185 | 5,185 | 6,185
+arg/sum/colexpr/part	rows=6 1,32 | 2,32 | 3,32 | 4,92 | 5,92 | 6,61
+arg/sum/colexpr/ord	rows=6 1,11 | 2,32 | 3,32 | 4,73 | 5,124 | 6,185
+arg/sum/colexpr/both	rows=6 1,11 | 2,32 | 3,32 | 4,41 | 5,92 | 6,61
+arg/sum/colexpr/frame	rows=6 1,11 | 2,32 | 3,21 | 4,41 | 5,92 | 6,112
+arg/sum/cast/all	rows=6 1,12 | 2,12 | 3,12 | 4,12 | 5,12 | 6,12
+arg/sum/cast/part	rows=6 1,6 | 2,6 | 3,6 | 4,4 | 5,4 | 6,2
+arg/sum/cast/ord	rows=6 1,2 | 2,4 | 3,6 | 4,8 | 5,10 | 6,12
+arg/sum/cast/both	rows=6 1,2 | 2,4 | 3,6 | 4,2 | 5,4 | 6,2
+arg/sum/cast/frame	rows=6 1,2 | 2,4 | 3,4 | 4,4 | 5,4 | 6,4
+arg/avg/col/all	rows=6 1,36.0000000000000000 | 2,36.0000000000000000 | 3,36.0000000000000000 | 4,36.0000000000000000 | 5,36.0000000000000000 | 6,36.0000000000000000
+arg/avg/col/part	rows=6 1,15.0000000000000000 | 2,15.0000000000000000 | 3,15.0000000000000000 | 4,45.0000000000000000 | 5,45.0000000000000000 | 6,60.0000000000000000
+arg/avg/col/ord	rows=6 1,10.0000000000000000 | 2,15.0000000000000000 | 3,15.0000000000000000 | 4,23.3333333333333333 | 5,30.0000000000000000 | 6,36.0000000000000000
+arg/avg/col/both	rows=6 1,10.0000000000000000 | 2,15.0000000000000000 | 3,15.0000000000000000 | 4,40.0000000000000000 | 5,45.0000000000000000 | 6,60.0000000000000000
+arg/avg/col/frame	rows=6 1,10.0000000000000000 | 2,15.0000000000000000 | 3,20.0000000000000000 | 4,40.0000000000000000 | 5,45.0000000000000000 | 6,55.0000000000000000
+arg/avg/int/all	rows=6 1,2.0000000000000000 | 2,2.0000000000000000 | 3,2.0000000000000000 | 4,2.0000000000000000 | 5,2.0000000000000000 | 6,2.0000000000000000
+arg/avg/int/part	rows=6 1,2.0000000000000000 | 2,2.0000000000000000 | 3,2.0000000000000000 | 4,2.0000000000000000 | 5,2.0000000000000000 | 6,2.0000000000000000
+arg/avg/int/ord	rows=6 1,2.0000000000000000 | 2,2.0000000000000000 | 3,2.0000000000000000 | 4,2.0000000000000000 | 5,2.0000000000000000 | 6,2.0000000000000000
+arg/avg/int/both	rows=6 1,2.0000000000000000 | 2,2.0000000000000000 | 3,2.0000000000000000 | 4,2.0000000000000000 | 5,2.0000000000000000 | 6,2.0000000000000000
+arg/avg/int/frame	rows=6 1,2.0000000000000000 | 2,2.0000000000000000 | 3,2.0000000000000000 | 4,2.0000000000000000 | 5,2.0000000000000000 | 6,2.0000000000000000
+arg/avg/dec/all	rows=6 1,2.5000000000000000 | 2,2.5000000000000000 | 3,2.5000000000000000 | 4,2.5000000000000000 | 5,2.5000000000000000 | 6,2.5000000000000000
+arg/avg/dec/part	rows=6 1,2.5000000000000000 | 2,2.5000000000000000 | 3,2.5000000000000000 | 4,2.5000000000000000 | 5,2.5000000000000000 | 6,2.5000000000000000
+arg/avg/dec/ord	rows=6 1,2.5000000000000000 | 2,2.5000000000000000 | 3,2.5000000000000000 | 4,2.5000000000000000 | 5,2.5000000000000000 | 6,2.5000000000000000
+arg/avg/dec/both	rows=6 1,2.5000000000000000 | 2,2.5000000000000000 | 3,2.5000000000000000 | 4,2.5000000000000000 | 5,2.5000000000000000 | 6,2.5000000000000000
+arg/avg/dec/frame	rows=6 1,2.5000000000000000 | 2,2.5000000000000000 | 3,2.5000000000000000 | 4,2.5000000000000000 | 5,2.5000000000000000 | 6,2.5000000000000000
+arg/avg/neg/all	rows=6 1,-2.5000000000000000 | 2,-2.5000000000000000 | 3,-2.5000000000000000 | 4,-2.5000000000000000 | 5,-2.5000000000000000 | 6,-2.5000000000000000
+arg/avg/neg/part	rows=6 1,-2.5000000000000000 | 2,-2.5000000000000000 | 3,-2.5000000000000000 | 4,-2.5000000000000000 | 5,-2.5000000000000000 | 6,-2.5000000000000000
+arg/avg/neg/ord	rows=6 1,-2.5000000000000000 | 2,-2.5000000000000000 | 3,-2.5000000000000000 | 4,-2.5000000000000000 | 5,-2.5000000000000000 | 6,-2.5000000000000000
+arg/avg/neg/both	rows=6 1,-2.5000000000000000 | 2,-2.5000000000000000 | 3,-2.5000000000000000 | 4,-2.5000000000000000 | 5,-2.5000000000000000 | 6,-2.5000000000000000
+arg/avg/neg/frame	rows=6 1,-2.5000000000000000 | 2,-2.5000000000000000 | 3,-2.5000000000000000 | 4,-2.5000000000000000 | 5,-2.5000000000000000 | 6,-2.5000000000000000
+arg/avg/text/all	ERR 42725 function avg(unknown) is not unique
+arg/avg/text/part	ERR 42725 function avg(unknown) is not unique
+arg/avg/text/ord	ERR 42725 function avg(unknown) is not unique
+arg/avg/text/both	ERR 42725 function avg(unknown) is not unique
+arg/avg/text/frame	ERR 42725 function avg(unknown) is not unique
+arg/avg/null/all	ERR 42725 function avg(unknown) is not unique
+arg/avg/null/part	ERR 42725 function avg(unknown) is not unique
+arg/avg/null/ord	ERR 42725 function avg(unknown) is not unique
+arg/avg/null/both	ERR 42725 function avg(unknown) is not unique
+arg/avg/null/frame	ERR 42725 function avg(unknown) is not unique
+arg/avg/date/all	ERR 42883 function avg(date) does not exist
+arg/avg/date/part	ERR 42883 function avg(date) does not exist
+arg/avg/date/ord	ERR 42883 function avg(date) does not exist
+arg/avg/date/both	ERR 42883 function avg(date) does not exist
+arg/avg/date/frame	ERR 42883 function avg(date) does not exist
+arg/avg/arith/all	rows=6 1,2.5000000000000000 | 2,2.5000000000000000 | 3,2.5000000000000000 | 4,2.5000000000000000 | 5,2.5000000000000000 | 6,2.5000000000000000
+arg/avg/arith/part	rows=6 1,2.5000000000000000 | 2,2.5000000000000000 | 3,2.5000000000000000 | 4,2.5000000000000000 | 5,2.5000000000000000 | 6,2.5000000000000000
+arg/avg/arith/ord	rows=6 1,2.5000000000000000 | 2,2.5000000000000000 | 3,2.5000000000000000 | 4,2.5000000000000000 | 5,2.5000000000000000 | 6,2.5000000000000000
+arg/avg/arith/both	rows=6 1,2.5000000000000000 | 2,2.5000000000000000 | 3,2.5000000000000000 | 4,2.5000000000000000 | 5,2.5000000000000000 | 6,2.5000000000000000
+arg/avg/arith/frame	rows=6 1,2.5000000000000000 | 2,2.5000000000000000 | 3,2.5000000000000000 | 4,2.5000000000000000 | 5,2.5000000000000000 | 6,2.5000000000000000
+arg/avg/colexpr/all	rows=6 1,37.0000000000000000 | 2,37.0000000000000000 | 3,37.0000000000000000 | 4,37.0000000000000000 | 5,37.0000000000000000 | 6,37.0000000000000000
+arg/avg/colexpr/part	rows=6 1,16.0000000000000000 | 2,16.0000000000000000 | 3,16.0000000000000000 | 4,46.0000000000000000 | 5,46.0000000000000000 | 6,61.0000000000000000
+arg/avg/colexpr/ord	rows=6 1,11.0000000000000000 | 2,16.0000000000000000 | 3,16.0000000000000000 | 4,24.3333333333333333 | 5,31.0000000000000000 | 6,37.0000000000000000
+arg/avg/colexpr/both	rows=6 1,11.0000000000000000 | 2,16.0000000000000000 | 3,16.0000000000000000 | 4,41.0000000000000000 | 5,46.0000000000000000 | 6,61.0000000000000000
+arg/avg/colexpr/frame	rows=6 1,11.0000000000000000 | 2,16.0000000000000000 | 3,21.0000000000000000 | 4,41.0000000000000000 | 5,46.0000000000000000 | 6,56.0000000000000000
+arg/avg/cast/all	rows=6 1,2.0000000000000000 | 2,2.0000000000000000 | 3,2.0000000000000000 | 4,2.0000000000000000 | 5,2.0000000000000000 | 6,2.0000000000000000
+arg/avg/cast/part	rows=6 1,2.0000000000000000 | 2,2.0000000000000000 | 3,2.0000000000000000 | 4,2.0000000000000000 | 5,2.0000000000000000 | 6,2.0000000000000000
+arg/avg/cast/ord	rows=6 1,2.0000000000000000 | 2,2.0000000000000000 | 3,2.0000000000000000 | 4,2.0000000000000000 | 5,2.0000000000000000 | 6,2.0000000000000000
+arg/avg/cast/both	rows=6 1,2.0000000000000000 | 2,2.0000000000000000 | 3,2.0000000000000000 | 4,2.0000000000000000 | 5,2.0000000000000000 | 6,2.0000000000000000
+arg/avg/cast/frame	rows=6 1,2.0000000000000000 | 2,2.0000000000000000 | 3,2.0000000000000000 | 4,2.0000000000000000 | 5,2.0000000000000000 | 6,2.0000000000000000
+arg/min/col/all	rows=6 1,10 | 2,10 | 3,10 | 4,10 | 5,10 | 6,10
+arg/min/col/part	rows=6 1,10 | 2,10 | 3,10 | 4,40 | 5,40 | 6,60
+arg/min/col/ord	rows=6 1,10 | 2,10 | 3,10 | 4,10 | 5,10 | 6,10
+arg/min/col/both	rows=6 1,10 | 2,10 | 3,10 | 4,40 | 5,40 | 6,60
+arg/min/col/frame	rows=6 1,10 | 2,10 | 3,20 | 4,40 | 5,40 | 6,50
+arg/min/int/all	rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+arg/min/int/part	rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+arg/min/int/ord	rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+arg/min/int/both	rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+arg/min/int/frame	rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+arg/min/dec/all	rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+arg/min/dec/part	rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+arg/min/dec/ord	rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+arg/min/dec/both	rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+arg/min/dec/frame	rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+arg/min/neg/all	rows=6 1,-2.5 | 2,-2.5 | 3,-2.5 | 4,-2.5 | 5,-2.5 | 6,-2.5
+arg/min/neg/part	rows=6 1,-2.5 | 2,-2.5 | 3,-2.5 | 4,-2.5 | 5,-2.5 | 6,-2.5
+arg/min/neg/ord	rows=6 1,-2.5 | 2,-2.5 | 3,-2.5 | 4,-2.5 | 5,-2.5 | 6,-2.5
+arg/min/neg/both	rows=6 1,-2.5 | 2,-2.5 | 3,-2.5 | 4,-2.5 | 5,-2.5 | 6,-2.5
+arg/min/neg/frame	rows=6 1,-2.5 | 2,-2.5 | 3,-2.5 | 4,-2.5 | 5,-2.5 | 6,-2.5
+arg/min/text/all	rows=6 1,b | 2,b | 3,b | 4,b | 5,b | 6,b
+arg/min/text/part	rows=6 1,b | 2,b | 3,b | 4,b | 5,b | 6,b
+arg/min/text/ord	rows=6 1,b | 2,b | 3,b | 4,b | 5,b | 6,b
+arg/min/text/both	rows=6 1,b | 2,b | 3,b | 4,b | 5,b | 6,b
+arg/min/text/frame	rows=6 1,b | 2,b | 3,b | 4,b | 5,b | 6,b
+arg/min/null/all	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+arg/min/null/part	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+arg/min/null/ord	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+arg/min/null/both	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+arg/min/null/frame	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+arg/min/date/all	rows=6 1,2020-01-02 | 2,2020-01-02 | 3,2020-01-02 | 4,2020-01-02 | 5,2020-01-02 | 6,2020-01-02
+arg/min/date/part	rows=6 1,2020-01-02 | 2,2020-01-02 | 3,2020-01-02 | 4,2020-01-02 | 5,2020-01-02 | 6,2020-01-02
+arg/min/date/ord	rows=6 1,2020-01-02 | 2,2020-01-02 | 3,2020-01-02 | 4,2020-01-02 | 5,2020-01-02 | 6,2020-01-02
+arg/min/date/both	rows=6 1,2020-01-02 | 2,2020-01-02 | 3,2020-01-02 | 4,2020-01-02 | 5,2020-01-02 | 6,2020-01-02
+arg/min/date/frame	rows=6 1,2020-01-02 | 2,2020-01-02 | 3,2020-01-02 | 4,2020-01-02 | 5,2020-01-02 | 6,2020-01-02
+arg/min/arith/all	rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+arg/min/arith/part	rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+arg/min/arith/ord	rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+arg/min/arith/both	rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+arg/min/arith/frame	rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+arg/min/colexpr/all	rows=6 1,11 | 2,11 | 3,11 | 4,11 | 5,11 | 6,11
+arg/min/colexpr/part	rows=6 1,11 | 2,11 | 3,11 | 4,41 | 5,41 | 6,61
+arg/min/colexpr/ord	rows=6 1,11 | 2,11 | 3,11 | 4,11 | 5,11 | 6,11
+arg/min/colexpr/both	rows=6 1,11 | 2,11 | 3,11 | 4,41 | 5,41 | 6,61
+arg/min/colexpr/frame	rows=6 1,11 | 2,11 | 3,21 | 4,41 | 5,41 | 6,51
+arg/min/cast/all	rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+arg/min/cast/part	rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+arg/min/cast/ord	rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+arg/min/cast/both	rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+arg/min/cast/frame	rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+arg/max/col/all	rows=6 1,60 | 2,60 | 3,60 | 4,60 | 5,60 | 6,60
+arg/max/col/part	rows=6 1,20 | 2,20 | 3,20 | 4,50 | 5,50 | 6,60
+arg/max/col/ord	rows=6 1,10 | 2,20 | 3,20 | 4,40 | 5,50 | 6,60
+arg/max/col/both	rows=6 1,10 | 2,20 | 3,20 | 4,40 | 5,50 | 6,60
+arg/max/col/frame	rows=6 1,10 | 2,20 | 3,20 | 4,40 | 5,50 | 6,60
+arg/max/int/all	rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+arg/max/int/part	rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+arg/max/int/ord	rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+arg/max/int/both	rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+arg/max/int/frame	rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+arg/max/dec/all	rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+arg/max/dec/part	rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+arg/max/dec/ord	rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+arg/max/dec/both	rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+arg/max/dec/frame	rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+arg/max/neg/all	rows=6 1,-2.5 | 2,-2.5 | 3,-2.5 | 4,-2.5 | 5,-2.5 | 6,-2.5
+arg/max/neg/part	rows=6 1,-2.5 | 2,-2.5 | 3,-2.5 | 4,-2.5 | 5,-2.5 | 6,-2.5
+arg/max/neg/ord	rows=6 1,-2.5 | 2,-2.5 | 3,-2.5 | 4,-2.5 | 5,-2.5 | 6,-2.5
+arg/max/neg/both	rows=6 1,-2.5 | 2,-2.5 | 3,-2.5 | 4,-2.5 | 5,-2.5 | 6,-2.5
+arg/max/neg/frame	rows=6 1,-2.5 | 2,-2.5 | 3,-2.5 | 4,-2.5 | 5,-2.5 | 6,-2.5
+arg/max/text/all	rows=6 1,b | 2,b | 3,b | 4,b | 5,b | 6,b
+arg/max/text/part	rows=6 1,b | 2,b | 3,b | 4,b | 5,b | 6,b
+arg/max/text/ord	rows=6 1,b | 2,b | 3,b | 4,b | 5,b | 6,b
+arg/max/text/both	rows=6 1,b | 2,b | 3,b | 4,b | 5,b | 6,b
+arg/max/text/frame	rows=6 1,b | 2,b | 3,b | 4,b | 5,b | 6,b
+arg/max/null/all	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+arg/max/null/part	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+arg/max/null/ord	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+arg/max/null/both	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+arg/max/null/frame	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+arg/max/date/all	rows=6 1,2020-01-02 | 2,2020-01-02 | 3,2020-01-02 | 4,2020-01-02 | 5,2020-01-02 | 6,2020-01-02
+arg/max/date/part	rows=6 1,2020-01-02 | 2,2020-01-02 | 3,2020-01-02 | 4,2020-01-02 | 5,2020-01-02 | 6,2020-01-02
+arg/max/date/ord	rows=6 1,2020-01-02 | 2,2020-01-02 | 3,2020-01-02 | 4,2020-01-02 | 5,2020-01-02 | 6,2020-01-02
+arg/max/date/both	rows=6 1,2020-01-02 | 2,2020-01-02 | 3,2020-01-02 | 4,2020-01-02 | 5,2020-01-02 | 6,2020-01-02
+arg/max/date/frame	rows=6 1,2020-01-02 | 2,2020-01-02 | 3,2020-01-02 | 4,2020-01-02 | 5,2020-01-02 | 6,2020-01-02
+arg/max/arith/all	rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+arg/max/arith/part	rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+arg/max/arith/ord	rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+arg/max/arith/both	rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+arg/max/arith/frame	rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+arg/max/colexpr/all	rows=6 1,61 | 2,61 | 3,61 | 4,61 | 5,61 | 6,61
+arg/max/colexpr/part	rows=6 1,21 | 2,21 | 3,21 | 4,51 | 5,51 | 6,61
+arg/max/colexpr/ord	rows=6 1,11 | 2,21 | 3,21 | 4,41 | 5,51 | 6,61
+arg/max/colexpr/both	rows=6 1,11 | 2,21 | 3,21 | 4,41 | 5,51 | 6,61
+arg/max/colexpr/frame	rows=6 1,11 | 2,21 | 3,21 | 4,41 | 5,51 | 6,61
+arg/max/cast/all	rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+arg/max/cast/part	rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+arg/max/cast/ord	rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+arg/max/cast/both	rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+arg/max/cast/frame	rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+arg/count/col/all	rows=6 1,5 | 2,5 | 3,5 | 4,5 | 5,5 | 6,5
+arg/count/col/part	rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,1
+arg/count/col/ord	rows=6 1,1 | 2,2 | 3,2 | 4,3 | 5,4 | 6,5
+arg/count/col/both	rows=6 1,1 | 2,2 | 3,2 | 4,1 | 5,2 | 6,1
+arg/count/col/frame	rows=6 1,1 | 2,2 | 3,1 | 4,1 | 5,2 | 6,2
+arg/count/int/all	rows=6 1,6 | 2,6 | 3,6 | 4,6 | 5,6 | 6,6
+arg/count/int/part	rows=6 1,3 | 2,3 | 3,3 | 4,2 | 5,2 | 6,1
+arg/count/int/ord	rows=6 1,1 | 2,2 | 3,3 | 4,4 | 5,5 | 6,6
+arg/count/int/both	rows=6 1,1 | 2,2 | 3,3 | 4,1 | 5,2 | 6,1
+arg/count/int/frame	rows=6 1,1 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+arg/count/dec/all	rows=6 1,6 | 2,6 | 3,6 | 4,6 | 5,6 | 6,6
+arg/count/dec/part	rows=6 1,3 | 2,3 | 3,3 | 4,2 | 5,2 | 6,1
+arg/count/dec/ord	rows=6 1,1 | 2,2 | 3,3 | 4,4 | 5,5 | 6,6
+arg/count/dec/both	rows=6 1,1 | 2,2 | 3,3 | 4,1 | 5,2 | 6,1
+arg/count/dec/frame	rows=6 1,1 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+arg/count/neg/all	rows=6 1,6 | 2,6 | 3,6 | 4,6 | 5,6 | 6,6
+arg/count/neg/part	rows=6 1,3 | 2,3 | 3,3 | 4,2 | 5,2 | 6,1
+arg/count/neg/ord	rows=6 1,1 | 2,2 | 3,3 | 4,4 | 5,5 | 6,6
+arg/count/neg/both	rows=6 1,1 | 2,2 | 3,3 | 4,1 | 5,2 | 6,1
+arg/count/neg/frame	rows=6 1,1 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+arg/count/text/all	rows=6 1,6 | 2,6 | 3,6 | 4,6 | 5,6 | 6,6
+arg/count/text/part	rows=6 1,3 | 2,3 | 3,3 | 4,2 | 5,2 | 6,1
+arg/count/text/ord	rows=6 1,1 | 2,2 | 3,3 | 4,4 | 5,5 | 6,6
+arg/count/text/both	rows=6 1,1 | 2,2 | 3,3 | 4,1 | 5,2 | 6,1
+arg/count/text/frame	rows=6 1,1 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+arg/count/null/all	rows=6 1,0 | 2,0 | 3,0 | 4,0 | 5,0 | 6,0
+arg/count/null/part	rows=6 1,0 | 2,0 | 3,0 | 4,0 | 5,0 | 6,0
+arg/count/null/ord	rows=6 1,0 | 2,0 | 3,0 | 4,0 | 5,0 | 6,0
+arg/count/null/both	rows=6 1,0 | 2,0 | 3,0 | 4,0 | 5,0 | 6,0
+arg/count/null/frame	rows=6 1,0 | 2,0 | 3,0 | 4,0 | 5,0 | 6,0
+arg/count/date/all	rows=6 1,6 | 2,6 | 3,6 | 4,6 | 5,6 | 6,6
+arg/count/date/part	rows=6 1,3 | 2,3 | 3,3 | 4,2 | 5,2 | 6,1
+arg/count/date/ord	rows=6 1,1 | 2,2 | 3,3 | 4,4 | 5,5 | 6,6
+arg/count/date/both	rows=6 1,1 | 2,2 | 3,3 | 4,1 | 5,2 | 6,1
+arg/count/date/frame	rows=6 1,1 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+arg/count/arith/all	rows=6 1,6 | 2,6 | 3,6 | 4,6 | 5,6 | 6,6
+arg/count/arith/part	rows=6 1,3 | 2,3 | 3,3 | 4,2 | 5,2 | 6,1
+arg/count/arith/ord	rows=6 1,1 | 2,2 | 3,3 | 4,4 | 5,5 | 6,6
+arg/count/arith/both	rows=6 1,1 | 2,2 | 3,3 | 4,1 | 5,2 | 6,1
+arg/count/arith/frame	rows=6 1,1 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+arg/count/colexpr/all	rows=6 1,5 | 2,5 | 3,5 | 4,5 | 5,5 | 6,5
+arg/count/colexpr/part	rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,1
+arg/count/colexpr/ord	rows=6 1,1 | 2,2 | 3,2 | 4,3 | 5,4 | 6,5
+arg/count/colexpr/both	rows=6 1,1 | 2,2 | 3,2 | 4,1 | 5,2 | 6,1
+arg/count/colexpr/frame	rows=6 1,1 | 2,2 | 3,1 | 4,1 | 5,2 | 6,2
+arg/count/cast/all	rows=6 1,6 | 2,6 | 3,6 | 4,6 | 5,6 | 6,6
+arg/count/cast/part	rows=6 1,3 | 2,3 | 3,3 | 4,2 | 5,2 | 6,1
+arg/count/cast/ord	rows=6 1,1 | 2,2 | 3,3 | 4,4 | 5,5 | 6,6
+arg/count/cast/both	rows=6 1,1 | 2,2 | 3,3 | 4,1 | 5,2 | 6,1
+arg/count/cast/frame	rows=6 1,1 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+arg/first_value/col/ord	rows=6 1,10 | 2,10 | 3,10 | 4,10 | 5,10 | 6,10
+arg/first_value/col/both	rows=6 1,10 | 2,10 | 3,10 | 4,40 | 5,40 | 6,60
+arg/first_value/col/frame	rows=6 1,10 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+arg/first_value/int/all	rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+arg/first_value/int/part	rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+arg/first_value/int/ord	rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+arg/first_value/int/both	rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+arg/first_value/int/frame	rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+arg/first_value/dec/all	rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+arg/first_value/dec/part	rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+arg/first_value/dec/ord	rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+arg/first_value/dec/both	rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+arg/first_value/dec/frame	rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+arg/first_value/neg/all	rows=6 1,-2.5 | 2,-2.5 | 3,-2.5 | 4,-2.5 | 5,-2.5 | 6,-2.5
+arg/first_value/neg/part	rows=6 1,-2.5 | 2,-2.5 | 3,-2.5 | 4,-2.5 | 5,-2.5 | 6,-2.5
+arg/first_value/neg/ord	rows=6 1,-2.5 | 2,-2.5 | 3,-2.5 | 4,-2.5 | 5,-2.5 | 6,-2.5
+arg/first_value/neg/both	rows=6 1,-2.5 | 2,-2.5 | 3,-2.5 | 4,-2.5 | 5,-2.5 | 6,-2.5
+arg/first_value/neg/frame	rows=6 1,-2.5 | 2,-2.5 | 3,-2.5 | 4,-2.5 | 5,-2.5 | 6,-2.5
+arg/first_value/text/all	ERR 42804 could not determine polymorphic type because input has type unknown
+arg/first_value/text/part	ERR 42804 could not determine polymorphic type because input has type unknown
+arg/first_value/text/ord	ERR 42804 could not determine polymorphic type because input has type unknown
+arg/first_value/text/both	ERR 42804 could not determine polymorphic type because input has type unknown
+arg/first_value/text/frame	ERR 42804 could not determine polymorphic type because input has type unknown
+arg/first_value/null/all	ERR 42804 could not determine polymorphic type because input has type unknown
+arg/first_value/null/part	ERR 42804 could not determine polymorphic type because input has type unknown
+arg/first_value/null/ord	ERR 42804 could not determine polymorphic type because input has type unknown
+arg/first_value/null/both	ERR 42804 could not determine polymorphic type because input has type unknown
+arg/first_value/null/frame	ERR 42804 could not determine polymorphic type because input has type unknown
+arg/first_value/date/all	rows=6 1,2020-01-02 | 2,2020-01-02 | 3,2020-01-02 | 4,2020-01-02 | 5,2020-01-02 | 6,2020-01-02
+arg/first_value/date/part	rows=6 1,2020-01-02 | 2,2020-01-02 | 3,2020-01-02 | 4,2020-01-02 | 5,2020-01-02 | 6,2020-01-02
+arg/first_value/date/ord	rows=6 1,2020-01-02 | 2,2020-01-02 | 3,2020-01-02 | 4,2020-01-02 | 5,2020-01-02 | 6,2020-01-02
+arg/first_value/date/both	rows=6 1,2020-01-02 | 2,2020-01-02 | 3,2020-01-02 | 4,2020-01-02 | 5,2020-01-02 | 6,2020-01-02
+arg/first_value/date/frame	rows=6 1,2020-01-02 | 2,2020-01-02 | 3,2020-01-02 | 4,2020-01-02 | 5,2020-01-02 | 6,2020-01-02
+arg/first_value/arith/all	rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+arg/first_value/arith/part	rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+arg/first_value/arith/ord	rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+arg/first_value/arith/both	rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+arg/first_value/arith/frame	rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+arg/first_value/colexpr/ord	rows=6 1,11 | 2,11 | 3,11 | 4,11 | 5,11 | 6,11
+arg/first_value/colexpr/both	rows=6 1,11 | 2,11 | 3,11 | 4,41 | 5,41 | 6,61
+arg/first_value/colexpr/frame	rows=6 1,11 | 2,11 | 3,21 | 4,NULL | 5,41 | 6,51
+arg/first_value/cast/all	rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+arg/first_value/cast/part	rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+arg/first_value/cast/ord	rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+arg/first_value/cast/both	rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+arg/first_value/cast/frame	rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+arg/last_value/col/ord	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+arg/last_value/col/both	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+arg/last_value/col/frame	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+arg/last_value/int/all	rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+arg/last_value/int/part	rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+arg/last_value/int/ord	rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+arg/last_value/int/both	rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+arg/last_value/int/frame	rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+arg/last_value/dec/all	rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+arg/last_value/dec/part	rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+arg/last_value/dec/ord	rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+arg/last_value/dec/both	rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+arg/last_value/dec/frame	rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+arg/last_value/neg/all	rows=6 1,-2.5 | 2,-2.5 | 3,-2.5 | 4,-2.5 | 5,-2.5 | 6,-2.5
+arg/last_value/neg/part	rows=6 1,-2.5 | 2,-2.5 | 3,-2.5 | 4,-2.5 | 5,-2.5 | 6,-2.5
+arg/last_value/neg/ord	rows=6 1,-2.5 | 2,-2.5 | 3,-2.5 | 4,-2.5 | 5,-2.5 | 6,-2.5
+arg/last_value/neg/both	rows=6 1,-2.5 | 2,-2.5 | 3,-2.5 | 4,-2.5 | 5,-2.5 | 6,-2.5
+arg/last_value/neg/frame	rows=6 1,-2.5 | 2,-2.5 | 3,-2.5 | 4,-2.5 | 5,-2.5 | 6,-2.5
+arg/last_value/text/all	ERR 42804 could not determine polymorphic type because input has type unknown
+arg/last_value/text/part	ERR 42804 could not determine polymorphic type because input has type unknown
+arg/last_value/text/ord	ERR 42804 could not determine polymorphic type because input has type unknown
+arg/last_value/text/both	ERR 42804 could not determine polymorphic type because input has type unknown
+arg/last_value/text/frame	ERR 42804 could not determine polymorphic type because input has type unknown
+arg/last_value/null/all	ERR 42804 could not determine polymorphic type because input has type unknown
+arg/last_value/null/part	ERR 42804 could not determine polymorphic type because input has type unknown
+arg/last_value/null/ord	ERR 42804 could not determine polymorphic type because input has type unknown
+arg/last_value/null/both	ERR 42804 could not determine polymorphic type because input has type unknown
+arg/last_value/null/frame	ERR 42804 could not determine polymorphic type because input has type unknown
+arg/last_value/date/all	rows=6 1,2020-01-02 | 2,2020-01-02 | 3,2020-01-02 | 4,2020-01-02 | 5,2020-01-02 | 6,2020-01-02
+arg/last_value/date/part	rows=6 1,2020-01-02 | 2,2020-01-02 | 3,2020-01-02 | 4,2020-01-02 | 5,2020-01-02 | 6,2020-01-02
+arg/last_value/date/ord	rows=6 1,2020-01-02 | 2,2020-01-02 | 3,2020-01-02 | 4,2020-01-02 | 5,2020-01-02 | 6,2020-01-02
+arg/last_value/date/both	rows=6 1,2020-01-02 | 2,2020-01-02 | 3,2020-01-02 | 4,2020-01-02 | 5,2020-01-02 | 6,2020-01-02
+arg/last_value/date/frame	rows=6 1,2020-01-02 | 2,2020-01-02 | 3,2020-01-02 | 4,2020-01-02 | 5,2020-01-02 | 6,2020-01-02
+arg/last_value/arith/all	rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+arg/last_value/arith/part	rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+arg/last_value/arith/ord	rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+arg/last_value/arith/both	rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+arg/last_value/arith/frame	rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+arg/last_value/colexpr/ord	rows=6 1,11 | 2,21 | 3,NULL | 4,41 | 5,51 | 6,61
+arg/last_value/colexpr/both	rows=6 1,11 | 2,21 | 3,NULL | 4,41 | 5,51 | 6,61
+arg/last_value/colexpr/frame	rows=6 1,11 | 2,21 | 3,NULL | 4,41 | 5,51 | 6,61
+arg/last_value/cast/all	rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+arg/last_value/cast/part	rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+arg/last_value/cast/ord	rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+arg/last_value/cast/both	rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+arg/last_value/cast/frame	rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+arg/nth_value/col/ord	rows=6 1,NULL | 2,20 | 3,20 | 4,20 | 5,20 | 6,20
+arg/nth_value/col/both	rows=6 1,NULL | 2,20 | 3,20 | 4,NULL | 5,50 | 6,NULL
+arg/nth_value/col/frame	rows=6 1,NULL | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+arg/nth_value/int/all	rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+arg/nth_value/int/part	rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,NULL
+arg/nth_value/int/ord	rows=6 1,NULL | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+arg/nth_value/int/both	rows=6 1,NULL | 2,2 | 3,2 | 4,NULL | 5,2 | 6,NULL
+arg/nth_value/int/frame	rows=6 1,NULL | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+arg/nth_value/dec/all	rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+arg/nth_value/dec/part	rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,NULL
+arg/nth_value/dec/ord	rows=6 1,NULL | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+arg/nth_value/dec/both	rows=6 1,NULL | 2,2.5 | 3,2.5 | 4,NULL | 5,2.5 | 6,NULL
+arg/nth_value/dec/frame	rows=6 1,NULL | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+arg/nth_value/neg/all	rows=6 1,-2.5 | 2,-2.5 | 3,-2.5 | 4,-2.5 | 5,-2.5 | 6,-2.5
+arg/nth_value/neg/part	rows=6 1,-2.5 | 2,-2.5 | 3,-2.5 | 4,-2.5 | 5,-2.5 | 6,NULL
+arg/nth_value/neg/ord	rows=6 1,NULL | 2,-2.5 | 3,-2.5 | 4,-2.5 | 5,-2.5 | 6,-2.5
+arg/nth_value/neg/both	rows=6 1,NULL | 2,-2.5 | 3,-2.5 | 4,NULL | 5,-2.5 | 6,NULL
+arg/nth_value/neg/frame	rows=6 1,NULL | 2,-2.5 | 3,-2.5 | 4,-2.5 | 5,-2.5 | 6,-2.5
+arg/nth_value/text/all	ERR 42804 could not determine polymorphic type because input has type unknown
+arg/nth_value/text/part	ERR 42804 could not determine polymorphic type because input has type unknown
+arg/nth_value/text/ord	ERR 42804 could not determine polymorphic type because input has type unknown
+arg/nth_value/text/both	ERR 42804 could not determine polymorphic type because input has type unknown
+arg/nth_value/text/frame	ERR 42804 could not determine polymorphic type because input has type unknown
+arg/nth_value/null/all	ERR 42804 could not determine polymorphic type because input has type unknown
+arg/nth_value/null/part	ERR 42804 could not determine polymorphic type because input has type unknown
+arg/nth_value/null/ord	ERR 42804 could not determine polymorphic type because input has type unknown
+arg/nth_value/null/both	ERR 42804 could not determine polymorphic type because input has type unknown
+arg/nth_value/null/frame	ERR 42804 could not determine polymorphic type because input has type unknown
+arg/nth_value/date/all	rows=6 1,2020-01-02 | 2,2020-01-02 | 3,2020-01-02 | 4,2020-01-02 | 5,2020-01-02 | 6,2020-01-02
+arg/nth_value/date/part	rows=6 1,2020-01-02 | 2,2020-01-02 | 3,2020-01-02 | 4,2020-01-02 | 5,2020-01-02 | 6,NULL
+arg/nth_value/date/ord	rows=6 1,NULL | 2,2020-01-02 | 3,2020-01-02 | 4,2020-01-02 | 5,2020-01-02 | 6,2020-01-02
+arg/nth_value/date/both	rows=6 1,NULL | 2,2020-01-02 | 3,2020-01-02 | 4,NULL | 5,2020-01-02 | 6,NULL
+arg/nth_value/date/frame	rows=6 1,NULL | 2,2020-01-02 | 3,2020-01-02 | 4,2020-01-02 | 5,2020-01-02 | 6,2020-01-02
+arg/nth_value/arith/all	rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+arg/nth_value/arith/part	rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,NULL
+arg/nth_value/arith/ord	rows=6 1,NULL | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+arg/nth_value/arith/both	rows=6 1,NULL | 2,2.5 | 3,2.5 | 4,NULL | 5,2.5 | 6,NULL
+arg/nth_value/arith/frame	rows=6 1,NULL | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+arg/nth_value/colexpr/ord	rows=6 1,NULL | 2,21 | 3,21 | 4,21 | 5,21 | 6,21
+arg/nth_value/colexpr/both	rows=6 1,NULL | 2,21 | 3,21 | 4,NULL | 5,51 | 6,NULL
+arg/nth_value/colexpr/frame	rows=6 1,NULL | 2,21 | 3,NULL | 4,41 | 5,51 | 6,61
+arg/nth_value/cast/all	rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+arg/nth_value/cast/part	rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,NULL
+arg/nth_value/cast/ord	rows=6 1,NULL | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+arg/nth_value/cast/both	rows=6 1,NULL | 2,2 | 3,2 | 4,NULL | 5,2 | 6,NULL
+arg/nth_value/cast/frame	rows=6 1,NULL | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+arg/lag/col/ord	rows=6 1,NULL | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+arg/lag/col/both	rows=6 1,NULL | 2,10 | 3,20 | 4,NULL | 5,40 | 6,NULL
+arg/lag/col/frame	rows=6 1,NULL | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+arg/lag/int/ord	rows=6 1,NULL | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+arg/lag/int/both	rows=6 1,NULL | 2,2 | 3,2 | 4,NULL | 5,2 | 6,NULL
+arg/lag/int/frame	rows=6 1,NULL | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+arg/lag/dec/ord	rows=6 1,NULL | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+arg/lag/dec/both	rows=6 1,NULL | 2,2.5 | 3,2.5 | 4,NULL | 5,2.5 | 6,NULL
+arg/lag/dec/frame	rows=6 1,NULL | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+arg/lag/neg/ord	rows=6 1,NULL | 2,-2.5 | 3,-2.5 | 4,-2.5 | 5,-2.5 | 6,-2.5
+arg/lag/neg/both	rows=6 1,NULL | 2,-2.5 | 3,-2.5 | 4,NULL | 5,-2.5 | 6,NULL
+arg/lag/neg/frame	rows=6 1,NULL | 2,-2.5 | 3,-2.5 | 4,-2.5 | 5,-2.5 | 6,-2.5
+arg/lag/text/ord	ERR 42804 could not determine polymorphic type because input has type unknown
+arg/lag/text/both	ERR 42804 could not determine polymorphic type because input has type unknown
+arg/lag/text/frame	ERR 42804 could not determine polymorphic type because input has type unknown
+arg/lag/null/ord	ERR 42804 could not determine polymorphic type because input has type unknown
+arg/lag/null/both	ERR 42804 could not determine polymorphic type because input has type unknown
+arg/lag/null/frame	ERR 42804 could not determine polymorphic type because input has type unknown
+arg/lag/date/ord	rows=6 1,NULL | 2,2020-01-02 | 3,2020-01-02 | 4,2020-01-02 | 5,2020-01-02 | 6,2020-01-02
+arg/lag/date/both	rows=6 1,NULL | 2,2020-01-02 | 3,2020-01-02 | 4,NULL | 5,2020-01-02 | 6,NULL
+arg/lag/date/frame	rows=6 1,NULL | 2,2020-01-02 | 3,2020-01-02 | 4,2020-01-02 | 5,2020-01-02 | 6,2020-01-02
+arg/lag/arith/ord	rows=6 1,NULL | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+arg/lag/arith/both	rows=6 1,NULL | 2,2.5 | 3,2.5 | 4,NULL | 5,2.5 | 6,NULL
+arg/lag/arith/frame	rows=6 1,NULL | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+arg/lag/colexpr/ord	rows=6 1,NULL | 2,11 | 3,21 | 4,NULL | 5,41 | 6,51
+arg/lag/colexpr/both	rows=6 1,NULL | 2,11 | 3,21 | 4,NULL | 5,41 | 6,NULL
+arg/lag/colexpr/frame	rows=6 1,NULL | 2,11 | 3,21 | 4,NULL | 5,41 | 6,51
+arg/lag/cast/ord	rows=6 1,NULL | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+arg/lag/cast/both	rows=6 1,NULL | 2,2 | 3,2 | 4,NULL | 5,2 | 6,NULL
+arg/lag/cast/frame	rows=6 1,NULL | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+arg/lead/col/ord	rows=6 1,20 | 2,NULL | 3,40 | 4,50 | 5,60 | 6,NULL
+arg/lead/col/both	rows=6 1,20 | 2,NULL | 3,NULL | 4,50 | 5,NULL | 6,NULL
+arg/lead/col/frame	rows=6 1,20 | 2,NULL | 3,40 | 4,50 | 5,60 | 6,NULL
+arg/lead/int/ord	rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,NULL
+arg/lead/int/both	rows=6 1,2 | 2,2 | 3,NULL | 4,2 | 5,NULL | 6,NULL
+arg/lead/int/frame	rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,NULL
+arg/lead/dec/ord	rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,NULL
+arg/lead/dec/both	rows=6 1,2.5 | 2,2.5 | 3,NULL | 4,2.5 | 5,NULL | 6,NULL
+arg/lead/dec/frame	rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,NULL
+arg/lead/neg/ord	rows=6 1,-2.5 | 2,-2.5 | 3,-2.5 | 4,-2.5 | 5,-2.5 | 6,NULL
+arg/lead/neg/both	rows=6 1,-2.5 | 2,-2.5 | 3,NULL | 4,-2.5 | 5,NULL | 6,NULL
+arg/lead/neg/frame	rows=6 1,-2.5 | 2,-2.5 | 3,-2.5 | 4,-2.5 | 5,-2.5 | 6,NULL
+arg/lead/text/ord	ERR 42804 could not determine polymorphic type because input has type unknown
+arg/lead/text/both	ERR 42804 could not determine polymorphic type because input has type unknown
+arg/lead/text/frame	ERR 42804 could not determine polymorphic type because input has type unknown
+arg/lead/null/ord	ERR 42804 could not determine polymorphic type because input has type unknown
+arg/lead/null/both	ERR 42804 could not determine polymorphic type because input has type unknown
+arg/lead/null/frame	ERR 42804 could not determine polymorphic type because input has type unknown
+arg/lead/date/ord	rows=6 1,2020-01-02 | 2,2020-01-02 | 3,2020-01-02 | 4,2020-01-02 | 5,2020-01-02 | 6,NULL
+arg/lead/date/both	rows=6 1,2020-01-02 | 2,2020-01-02 | 3,NULL | 4,2020-01-02 | 5,NULL | 6,NULL
+arg/lead/date/frame	rows=6 1,2020-01-02 | 2,2020-01-02 | 3,2020-01-02 | 4,2020-01-02 | 5,2020-01-02 | 6,NULL
+arg/lead/arith/ord	rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,NULL
+arg/lead/arith/both	rows=6 1,2.5 | 2,2.5 | 3,NULL | 4,2.5 | 5,NULL | 6,NULL
+arg/lead/arith/frame	rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,NULL
+arg/lead/colexpr/ord	rows=6 1,21 | 2,NULL | 3,41 | 4,51 | 5,61 | 6,NULL
+arg/lead/colexpr/both	rows=6 1,21 | 2,NULL | 3,NULL | 4,51 | 5,NULL | 6,NULL
+arg/lead/colexpr/frame	rows=6 1,21 | 2,NULL | 3,41 | 4,51 | 5,61 | 6,NULL
+arg/lead/cast/ord	rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,NULL
+arg/lead/cast/both	rows=6 1,2 | 2,2 | 3,NULL | 4,2 | 5,NULL | 6,NULL
+arg/lead/cast/frame	rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,NULL
+off/lag/omit/ord	rows=6 1,NULL | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+off/lag/omit/both	rows=6 1,NULL | 2,10 | 3,20 | 4,NULL | 5,40 | 6,NULL
+off/lag/omit/frame	rows=6 1,NULL | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+off/lag/0/all	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+off/lag/0/part	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+off/lag/0/ord	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+off/lag/0/both	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+off/lag/0/frame	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+off/lag/1/ord	rows=6 1,NULL | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+off/lag/1/both	rows=6 1,NULL | 2,10 | 3,20 | 4,NULL | 5,40 | 6,NULL
+off/lag/1/frame	rows=6 1,NULL | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+off/lag/2/ord	rows=6 1,NULL | 2,NULL | 3,10 | 4,20 | 5,NULL | 6,40
+off/lag/2/both	rows=6 1,NULL | 2,NULL | 3,10 | 4,NULL | 5,NULL | 6,NULL
+off/lag/2/frame	rows=6 1,NULL | 2,NULL | 3,10 | 4,20 | 5,NULL | 6,40
+off/lag/10/ord	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+off/lag/10/both	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+off/lag/10/frame	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+off/lag/neg1/ord	rows=6 1,20 | 2,NULL | 3,40 | 4,50 | 5,60 | 6,NULL
+off/lag/neg1/both	rows=6 1,20 | 2,NULL | 3,NULL | 4,50 | 5,NULL | 6,NULL
+off/lag/neg1/frame	rows=6 1,20 | 2,NULL | 3,40 | 4,50 | 5,60 | 6,NULL
+off/lag/neg2/ord	rows=6 1,NULL | 2,40 | 3,50 | 4,60 | 5,NULL | 6,NULL
+off/lag/neg2/both	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+off/lag/neg2/frame	rows=6 1,NULL | 2,40 | 3,50 | 4,60 | 5,NULL | 6,NULL
+off/lag/paren_neg1/ord	rows=6 1,20 | 2,NULL | 3,40 | 4,50 | 5,60 | 6,NULL
+off/lag/paren_neg1/both	rows=6 1,20 | 2,NULL | 3,NULL | 4,50 | 5,NULL | 6,NULL
+off/lag/paren_neg1/frame	rows=6 1,20 | 2,NULL | 3,40 | 4,50 | 5,60 | 6,NULL
+off/lag/null/all	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+off/lag/null/part	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+off/lag/null/ord	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+off/lag/null/both	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+off/lag/null/frame	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+off/lag/null_int/ord	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+off/lag/null_int/both	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+off/lag/null_int/frame	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+off/lag/q0/all	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+off/lag/q0/part	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+off/lag/q0/ord	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+off/lag/q0/both	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+off/lag/q0/frame	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+off/lag/q_sp2/ord	rows=6 1,NULL | 2,NULL | 3,10 | 4,20 | 5,NULL | 6,40
+off/lag/q_sp2/both	rows=6 1,NULL | 2,NULL | 3,10 | 4,NULL | 5,NULL | 6,NULL
+off/lag/q_sp2/frame	rows=6 1,NULL | 2,NULL | 3,10 | 4,20 | 5,NULL | 6,40
+off/lag/cast_int0/all	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+off/lag/cast_int0/part	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+off/lag/cast_int0/ord	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+off/lag/cast_int0/both	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+off/lag/cast_int0/frame	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+off/lag/dec/ord	ERR 42883 function lag(bigint, numeric) does not exist
+off/lag/dec/both	ERR 42883 function lag(bigint, numeric) does not exist
+off/lag/dec/frame	ERR 42883 function lag(bigint, numeric) does not exist
+off/lag/big/ord	ERR 42883 function lag(bigint, bigint) does not exist
+off/lag/big/both	ERR 42883 function lag(bigint, bigint) does not exist
+off/lag/big/frame	ERR 42883 function lag(bigint, bigint) does not exist
+off/lag/q_dec/ord	ERR 22P02 invalid input syntax for type integer: "1.5"
+off/lag/q_dec/both	ERR 22P02 invalid input syntax for type integer: "1.5"
+off/lag/q_dec/frame	ERR 22P02 invalid input syntax for type integer: "1.5"
+off/lag/q_bad/ord	ERR 22P02 invalid input syntax for type integer: "a"
+off/lag/q_bad/both	ERR 22P02 invalid input syntax for type integer: "a"
+off/lag/q_bad/frame	ERR 22P02 invalid input syntax for type integer: "a"
+off/lag/expr/ord	rows=6 1,NULL | 2,NULL | 3,10 | 4,20 | 5,NULL | 6,40
+off/lag/expr/both	rows=6 1,NULL | 2,NULL | 3,10 | 4,NULL | 5,NULL | 6,NULL
+off/lag/expr/frame	rows=6 1,NULL | 2,NULL | 3,10 | 4,20 | 5,NULL | 6,40
+off/lag/col/ord	rows=6 1,10 | 2,10 | 3,10 | 4,NULL | 5,NULL | 6,NULL
+off/lag/col/both	rows=6 1,10 | 2,10 | 3,10 | 4,NULL | 5,NULL | 6,NULL
+off/lag/col/frame	rows=6 1,10 | 2,10 | 3,10 | 4,NULL | 5,NULL | 6,NULL
+off/lag/cast_big/ord	ERR 42883 function lag(bigint, bigint) does not exist
+off/lag/cast_big/both	ERR 42883 function lag(bigint, bigint) does not exist
+off/lag/cast_big/frame	ERR 42883 function lag(bigint, bigint) does not exist
+off/lag/0/literal	rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+off/lead/omit/ord	rows=6 1,20 | 2,NULL | 3,40 | 4,50 | 5,60 | 6,NULL
+off/lead/omit/both	rows=6 1,20 | 2,NULL | 3,NULL | 4,50 | 5,NULL | 6,NULL
+off/lead/omit/frame	rows=6 1,20 | 2,NULL | 3,40 | 4,50 | 5,60 | 6,NULL
+off/lead/0/all	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+off/lead/0/part	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+off/lead/0/ord	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+off/lead/0/both	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+off/lead/0/frame	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+off/lead/1/ord	rows=6 1,20 | 2,NULL | 3,40 | 4,50 | 5,60 | 6,NULL
+off/lead/1/both	rows=6 1,20 | 2,NULL | 3,NULL | 4,50 | 5,NULL | 6,NULL
+off/lead/1/frame	rows=6 1,20 | 2,NULL | 3,40 | 4,50 | 5,60 | 6,NULL
+off/lead/2/ord	rows=6 1,NULL | 2,40 | 3,50 | 4,60 | 5,NULL | 6,NULL
+off/lead/2/both	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+off/lead/2/frame	rows=6 1,NULL | 2,40 | 3,50 | 4,60 | 5,NULL | 6,NULL
+off/lead/10/ord	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+off/lead/10/both	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+off/lead/10/frame	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+off/lead/neg1/ord	rows=6 1,NULL | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+off/lead/neg1/both	rows=6 1,NULL | 2,10 | 3,20 | 4,NULL | 5,40 | 6,NULL
+off/lead/neg1/frame	rows=6 1,NULL | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+off/lead/neg2/ord	rows=6 1,NULL | 2,NULL | 3,10 | 4,20 | 5,NULL | 6,40
+off/lead/neg2/both	rows=6 1,NULL | 2,NULL | 3,10 | 4,NULL | 5,NULL | 6,NULL
+off/lead/neg2/frame	rows=6 1,NULL | 2,NULL | 3,10 | 4,20 | 5,NULL | 6,40
+off/lead/paren_neg1/ord	rows=6 1,NULL | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+off/lead/paren_neg1/both	rows=6 1,NULL | 2,10 | 3,20 | 4,NULL | 5,40 | 6,NULL
+off/lead/paren_neg1/frame	rows=6 1,NULL | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+off/lead/null/all	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+off/lead/null/part	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+off/lead/null/ord	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+off/lead/null/both	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+off/lead/null/frame	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+off/lead/null_int/ord	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+off/lead/null_int/both	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+off/lead/null_int/frame	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+off/lead/q0/all	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+off/lead/q0/part	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+off/lead/q0/ord	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+off/lead/q0/both	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+off/lead/q0/frame	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+off/lead/q_sp2/ord	rows=6 1,NULL | 2,40 | 3,50 | 4,60 | 5,NULL | 6,NULL
+off/lead/q_sp2/both	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+off/lead/q_sp2/frame	rows=6 1,NULL | 2,40 | 3,50 | 4,60 | 5,NULL | 6,NULL
+off/lead/cast_int0/all	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+off/lead/cast_int0/part	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+off/lead/cast_int0/ord	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+off/lead/cast_int0/both	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+off/lead/cast_int0/frame	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+off/lead/dec/ord	ERR 42883 function lead(bigint, numeric) does not exist
+off/lead/dec/both	ERR 42883 function lead(bigint, numeric) does not exist
+off/lead/dec/frame	ERR 42883 function lead(bigint, numeric) does not exist
+off/lead/big/ord	ERR 42883 function lead(bigint, bigint) does not exist
+off/lead/big/both	ERR 42883 function lead(bigint, bigint) does not exist
+off/lead/big/frame	ERR 42883 function lead(bigint, bigint) does not exist
+off/lead/q_dec/ord	ERR 22P02 invalid input syntax for type integer: "1.5"
+off/lead/q_dec/both	ERR 22P02 invalid input syntax for type integer: "1.5"
+off/lead/q_dec/frame	ERR 22P02 invalid input syntax for type integer: "1.5"
+off/lead/q_bad/ord	ERR 22P02 invalid input syntax for type integer: "a"
+off/lead/q_bad/both	ERR 22P02 invalid input syntax for type integer: "a"
+off/lead/q_bad/frame	ERR 22P02 invalid input syntax for type integer: "a"
+off/lead/expr/ord	rows=6 1,NULL | 2,40 | 3,50 | 4,60 | 5,NULL | 6,NULL
+off/lead/expr/both	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+off/lead/expr/frame	rows=6 1,NULL | 2,40 | 3,50 | 4,60 | 5,NULL | 6,NULL
+off/lead/col/ord	rows=6 1,10 | 2,NULL | 3,50 | 4,50 | 5,NULL | 6,50
+off/lead/col/both	rows=6 1,10 | 2,NULL | 3,NULL | 4,50 | 5,NULL | 6,NULL
+off/lead/col/frame	rows=6 1,10 | 2,NULL | 3,50 | 4,50 | 5,NULL | 6,50
+off/lead/cast_big/ord	ERR 42883 function lead(bigint, bigint) does not exist
+off/lead/cast_big/both	ERR 42883 function lead(bigint, bigint) does not exist
+off/lead/cast_big/frame	ERR 42883 function lead(bigint, bigint) does not exist
+off/lead/0/literal	rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+def/lag/1/int/ord	rows=6 1,99 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+def/lag/1/int/both	rows=6 1,99 | 2,10 | 3,20 | 4,99 | 5,40 | 6,99
+def/lag/1/neg/ord	rows=6 1,-5 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+def/lag/1/neg/both	rows=6 1,-5 | 2,10 | 3,20 | 4,-5 | 5,40 | 6,-5
+def/lag/1/null/ord	rows=6 1,NULL | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+def/lag/1/null/both	rows=6 1,NULL | 2,10 | 3,20 | 4,NULL | 5,40 | 6,NULL
+def/lag/1/dec/ord	rows=6 1,2.5 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+def/lag/1/dec/both	rows=6 1,2.5 | 2,10 | 3,20 | 4,2.5 | 5,40 | 6,2.5
+def/lag/1/text/ord	ERR 22P02 invalid input syntax for type bigint: "a"
+def/lag/1/text/both	ERR 22P02 invalid input syntax for type bigint: "a"
+def/lag/1/q_num/ord	rows=6 1,7 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+def/lag/1/q_num/both	rows=6 1,7 | 2,10 | 3,20 | 4,7 | 5,40 | 6,7
+def/lag/1/col/ord	rows=6 1,1 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+def/lag/1/col/both	rows=6 1,1 | 2,10 | 3,20 | 4,4 | 5,40 | 6,6
+def/lag/1/cast/ord	rows=6 1,7 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+def/lag/1/cast/both	rows=6 1,7 | 2,10 | 3,20 | 4,7 | 5,40 | 6,7
+def/lag/1/colexpr/ord	rows=6 1,100 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+def/lag/1/colexpr/both	rows=6 1,100 | 2,10 | 3,20 | 4,400 | 5,40 | 6,600
+def/lag/0/int/ord	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+def/lag/0/int/both	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+def/lag/0/neg/ord	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+def/lag/0/neg/both	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+def/lag/0/null/ord	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+def/lag/0/null/both	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+def/lag/0/dec/ord	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+def/lag/0/dec/both	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+def/lag/0/text/ord	ERR 22P02 invalid input syntax for type bigint: "a"
+def/lag/0/text/both	ERR 22P02 invalid input syntax for type bigint: "a"
+def/lag/0/q_num/ord	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+def/lag/0/q_num/both	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+def/lag/0/col/ord	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+def/lag/0/col/both	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+def/lag/0/cast/ord	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+def/lag/0/cast/both	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+def/lag/0/colexpr/ord	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+def/lag/0/colexpr/both	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+def/lag/10/int/ord	rows=6 1,99 | 2,99 | 3,99 | 4,99 | 5,99 | 6,99
+def/lag/10/int/both	rows=6 1,99 | 2,99 | 3,99 | 4,99 | 5,99 | 6,99
+def/lag/10/neg/ord	rows=6 1,-5 | 2,-5 | 3,-5 | 4,-5 | 5,-5 | 6,-5
+def/lag/10/neg/both	rows=6 1,-5 | 2,-5 | 3,-5 | 4,-5 | 5,-5 | 6,-5
+def/lag/10/null/ord	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+def/lag/10/null/both	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+def/lag/10/dec/ord	rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+def/lag/10/dec/both	rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+def/lag/10/text/ord	ERR 22P02 invalid input syntax for type bigint: "a"
+def/lag/10/text/both	ERR 22P02 invalid input syntax for type bigint: "a"
+def/lag/10/q_num/ord	rows=6 1,7 | 2,7 | 3,7 | 4,7 | 5,7 | 6,7
+def/lag/10/q_num/both	rows=6 1,7 | 2,7 | 3,7 | 4,7 | 5,7 | 6,7
+def/lag/10/col/ord	rows=6 1,1 | 2,2 | 3,3 | 4,4 | 5,5 | 6,6
+def/lag/10/col/both	rows=6 1,1 | 2,2 | 3,3 | 4,4 | 5,5 | 6,6
+def/lag/10/cast/ord	rows=6 1,7 | 2,7 | 3,7 | 4,7 | 5,7 | 6,7
+def/lag/10/cast/both	rows=6 1,7 | 2,7 | 3,7 | 4,7 | 5,7 | 6,7
+def/lag/10/colexpr/ord	rows=6 1,100 | 2,200 | 3,300 | 4,400 | 5,500 | 6,600
+def/lag/10/colexpr/both	rows=6 1,100 | 2,200 | 3,300 | 4,400 | 5,500 | 6,600
+def/lead/1/int/ord	rows=6 1,20 | 2,NULL | 3,40 | 4,50 | 5,60 | 6,99
+def/lead/1/int/both	rows=6 1,20 | 2,NULL | 3,99 | 4,50 | 5,99 | 6,99
+def/lead/1/neg/ord	rows=6 1,20 | 2,NULL | 3,40 | 4,50 | 5,60 | 6,-5
+def/lead/1/neg/both	rows=6 1,20 | 2,NULL | 3,-5 | 4,50 | 5,-5 | 6,-5
+def/lead/1/null/ord	rows=6 1,20 | 2,NULL | 3,40 | 4,50 | 5,60 | 6,NULL
+def/lead/1/null/both	rows=6 1,20 | 2,NULL | 3,NULL | 4,50 | 5,NULL | 6,NULL
+def/lead/1/dec/ord	rows=6 1,20 | 2,NULL | 3,40 | 4,50 | 5,60 | 6,2.5
+def/lead/1/dec/both	rows=6 1,20 | 2,NULL | 3,2.5 | 4,50 | 5,2.5 | 6,2.5
+def/lead/1/text/ord	ERR 22P02 invalid input syntax for type bigint: "a"
+def/lead/1/text/both	ERR 22P02 invalid input syntax for type bigint: "a"
+def/lead/1/q_num/ord	rows=6 1,20 | 2,NULL | 3,40 | 4,50 | 5,60 | 6,7
+def/lead/1/q_num/both	rows=6 1,20 | 2,NULL | 3,7 | 4,50 | 5,7 | 6,7
+def/lead/1/col/ord	rows=6 1,20 | 2,NULL | 3,40 | 4,50 | 5,60 | 6,6
+def/lead/1/col/both	rows=6 1,20 | 2,NULL | 3,3 | 4,50 | 5,5 | 6,6
+def/lead/1/cast/ord	rows=6 1,20 | 2,NULL | 3,40 | 4,50 | 5,60 | 6,7
+def/lead/1/cast/both	rows=6 1,20 | 2,NULL | 3,7 | 4,50 | 5,7 | 6,7
+def/lead/1/colexpr/ord	rows=6 1,20 | 2,NULL | 3,40 | 4,50 | 5,60 | 6,600
+def/lead/1/colexpr/both	rows=6 1,20 | 2,NULL | 3,300 | 4,50 | 5,500 | 6,600
+def/lead/0/int/ord	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+def/lead/0/int/both	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+def/lead/0/neg/ord	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+def/lead/0/neg/both	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+def/lead/0/null/ord	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+def/lead/0/null/both	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+def/lead/0/dec/ord	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+def/lead/0/dec/both	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+def/lead/0/text/ord	ERR 22P02 invalid input syntax for type bigint: "a"
+def/lead/0/text/both	ERR 22P02 invalid input syntax for type bigint: "a"
+def/lead/0/q_num/ord	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+def/lead/0/q_num/both	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+def/lead/0/col/ord	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+def/lead/0/col/both	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+def/lead/0/cast/ord	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+def/lead/0/cast/both	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+def/lead/0/colexpr/ord	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+def/lead/0/colexpr/both	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+def/lead/10/int/ord	rows=6 1,99 | 2,99 | 3,99 | 4,99 | 5,99 | 6,99
+def/lead/10/int/both	rows=6 1,99 | 2,99 | 3,99 | 4,99 | 5,99 | 6,99
+def/lead/10/neg/ord	rows=6 1,-5 | 2,-5 | 3,-5 | 4,-5 | 5,-5 | 6,-5
+def/lead/10/neg/both	rows=6 1,-5 | 2,-5 | 3,-5 | 4,-5 | 5,-5 | 6,-5
+def/lead/10/null/ord	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+def/lead/10/null/both	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+def/lead/10/dec/ord	rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+def/lead/10/dec/both	rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+def/lead/10/text/ord	ERR 22P02 invalid input syntax for type bigint: "a"
+def/lead/10/text/both	ERR 22P02 invalid input syntax for type bigint: "a"
+def/lead/10/q_num/ord	rows=6 1,7 | 2,7 | 3,7 | 4,7 | 5,7 | 6,7
+def/lead/10/q_num/both	rows=6 1,7 | 2,7 | 3,7 | 4,7 | 5,7 | 6,7
+def/lead/10/col/ord	rows=6 1,1 | 2,2 | 3,3 | 4,4 | 5,5 | 6,6
+def/lead/10/col/both	rows=6 1,1 | 2,2 | 3,3 | 4,4 | 5,5 | 6,6
+def/lead/10/cast/ord	rows=6 1,7 | 2,7 | 3,7 | 4,7 | 5,7 | 6,7
+def/lead/10/cast/both	rows=6 1,7 | 2,7 | 3,7 | 4,7 | 5,7 | 6,7
+def/lead/10/colexpr/ord	rows=6 1,100 | 2,200 | 3,300 | 4,400 | 5,500 | 6,600
+def/lead/10/colexpr/both	rows=6 1,100 | 2,200 | 3,300 | 4,400 | 5,500 | 6,600
+n/ntile/1/ord	rows=6 1,1 | 2,1 | 3,1 | 4,1 | 5,1 | 6,1
+n/nth_value/1/ord	rows=6 1,10 | 2,10 | 3,10 | 4,10 | 5,10 | 6,10
+n/nth_literal/1/ord	rows=6 1,7 | 2,7 | 3,7 | 4,7 | 5,7 | 6,7
+n/ntile/1/both	rows=6 1,1 | 2,1 | 3,1 | 4,1 | 5,1 | 6,1
+n/nth_value/1/both	rows=6 1,10 | 2,10 | 3,10 | 4,40 | 5,40 | 6,60
+n/nth_literal/1/both	rows=6 1,7 | 2,7 | 3,7 | 4,7 | 5,7 | 6,7
+n/ntile/1/frame	rows=6 1,1 | 2,1 | 3,1 | 4,1 | 5,1 | 6,1
+n/nth_value/1/frame	rows=6 1,10 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+n/nth_literal/1/frame	rows=6 1,7 | 2,7 | 3,7 | 4,7 | 5,7 | 6,7
+n/ntile/2/ord	rows=6 1,1 | 2,1 | 3,1 | 4,2 | 5,2 | 6,2
+n/nth_value/2/ord	rows=6 1,NULL | 2,20 | 3,20 | 4,20 | 5,20 | 6,20
+n/nth_literal/2/ord	rows=6 1,NULL | 2,7 | 3,7 | 4,7 | 5,7 | 6,7
+n/ntile/2/both	rows=6 1,1 | 2,1 | 3,2 | 4,1 | 5,2 | 6,1
+n/nth_value/2/both	rows=6 1,NULL | 2,20 | 3,20 | 4,NULL | 5,50 | 6,NULL
+n/nth_literal/2/both	rows=6 1,NULL | 2,7 | 3,7 | 4,NULL | 5,7 | 6,NULL
+n/ntile/2/frame	rows=6 1,1 | 2,1 | 3,1 | 4,2 | 5,2 | 6,2
+n/nth_value/2/frame	rows=6 1,NULL | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+n/nth_literal/2/frame	rows=6 1,NULL | 2,7 | 3,7 | 4,7 | 5,7 | 6,7
+n/ntile/4/ord	rows=6 1,1 | 2,1 | 3,2 | 4,2 | 5,3 | 6,4
+n/nth_value/4/ord	rows=6 1,NULL | 2,NULL | 3,NULL | 4,40 | 5,40 | 6,40
+n/nth_literal/4/ord	rows=6 1,NULL | 2,NULL | 3,NULL | 4,7 | 5,7 | 6,7
+n/ntile/4/both	rows=6 1,1 | 2,2 | 3,3 | 4,1 | 5,2 | 6,1
+n/nth_value/4/both	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+n/nth_literal/4/both	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+n/ntile/4/frame	rows=6 1,1 | 2,1 | 3,2 | 4,2 | 5,3 | 6,4
+n/nth_value/4/frame	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+n/nth_literal/4/frame	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+n/ntile/10/ord	rows=6 1,1 | 2,2 | 3,3 | 4,4 | 5,5 | 6,6
+n/nth_value/10/ord	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+n/nth_literal/10/ord	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+n/ntile/10/both	rows=6 1,1 | 2,2 | 3,3 | 4,1 | 5,2 | 6,1
+n/nth_value/10/both	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+n/nth_literal/10/both	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+n/ntile/10/frame	rows=6 1,1 | 2,2 | 3,3 | 4,4 | 5,5 | 6,6
+n/nth_value/10/frame	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+n/nth_literal/10/frame	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+n/ntile/0/ord	ERR 22014 argument of ntile must be greater than zero
+n/nth_value/0/ord	ERR 22016 argument of nth_value must be greater than zero
+n/nth_literal/0/ord	ERR 22016 argument of nth_value must be greater than zero
+n/ntile/0/both	ERR 22014 argument of ntile must be greater than zero
+n/nth_value/0/both	ERR 22016 argument of nth_value must be greater than zero
+n/nth_literal/0/both	ERR 22016 argument of nth_value must be greater than zero
+n/ntile/0/frame	ERR 22014 argument of ntile must be greater than zero
+n/nth_value/0/frame	ERR 22016 argument of nth_value must be greater than zero
+n/nth_literal/0/frame	ERR 22016 argument of nth_value must be greater than zero
+n/ntile/neg1/ord	ERR 22014 argument of ntile must be greater than zero
+n/nth_value/neg1/ord	ERR 22016 argument of nth_value must be greater than zero
+n/nth_literal/neg1/ord	ERR 22016 argument of nth_value must be greater than zero
+n/ntile/neg1/both	ERR 22014 argument of ntile must be greater than zero
+n/nth_value/neg1/both	ERR 22016 argument of nth_value must be greater than zero
+n/nth_literal/neg1/both	ERR 22016 argument of nth_value must be greater than zero
+n/ntile/neg1/frame	ERR 22014 argument of ntile must be greater than zero
+n/nth_value/neg1/frame	ERR 22016 argument of nth_value must be greater than zero
+n/nth_literal/neg1/frame	ERR 22016 argument of nth_value must be greater than zero
+n/ntile/null/ord	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+n/nth_value/null/ord	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+n/nth_literal/null/ord	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+n/ntile/null/both	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+n/nth_value/null/both	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+n/nth_literal/null/both	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+n/ntile/null/frame	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+n/nth_value/null/frame	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+n/nth_literal/null/frame	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+n/ntile/q2/ord	rows=6 1,1 | 2,1 | 3,1 | 4,2 | 5,2 | 6,2
+n/nth_value/q2/ord	rows=6 1,NULL | 2,20 | 3,20 | 4,20 | 5,20 | 6,20
+n/nth_literal/q2/ord	rows=6 1,NULL | 2,7 | 3,7 | 4,7 | 5,7 | 6,7
+n/ntile/q2/both	rows=6 1,1 | 2,1 | 3,2 | 4,1 | 5,2 | 6,1
+n/nth_value/q2/both	rows=6 1,NULL | 2,20 | 3,20 | 4,NULL | 5,50 | 6,NULL
+n/nth_literal/q2/both	rows=6 1,NULL | 2,7 | 3,7 | 4,NULL | 5,7 | 6,NULL
+n/ntile/q2/frame	rows=6 1,1 | 2,1 | 3,1 | 4,2 | 5,2 | 6,2
+n/nth_value/q2/frame	rows=6 1,NULL | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+n/nth_literal/q2/frame	rows=6 1,NULL | 2,7 | 3,7 | 4,7 | 5,7 | 6,7
+n/ntile/dec/ord	ERR 42883 function ntile(numeric) does not exist
+n/nth_value/dec/ord	ERR 42883 function nth_value(bigint, numeric) does not exist
+n/nth_literal/dec/ord	ERR 42883 function nth_value(integer, numeric) does not exist
+n/ntile/dec/both	ERR 42883 function ntile(numeric) does not exist
+n/nth_value/dec/both	ERR 42883 function nth_value(bigint, numeric) does not exist
+n/nth_literal/dec/both	ERR 42883 function nth_value(integer, numeric) does not exist
+n/ntile/dec/frame	ERR 42883 function ntile(numeric) does not exist
+n/nth_value/dec/frame	ERR 42883 function nth_value(bigint, numeric) does not exist
+n/nth_literal/dec/frame	ERR 42883 function nth_value(integer, numeric) does not exist
+n/ntile/expr/ord	rows=6 1,1 | 2,1 | 3,1 | 4,2 | 5,2 | 6,2
+n/nth_value/expr/ord	rows=6 1,NULL | 2,20 | 3,20 | 4,20 | 5,20 | 6,20
+n/nth_literal/expr/ord	rows=6 1,NULL | 2,7 | 3,7 | 4,7 | 5,7 | 6,7
+n/ntile/expr/both	rows=6 1,1 | 2,1 | 3,2 | 4,1 | 5,2 | 6,1
+n/nth_value/expr/both	rows=6 1,NULL | 2,20 | 3,20 | 4,NULL | 5,50 | 6,NULL
+n/nth_literal/expr/both	rows=6 1,NULL | 2,7 | 3,7 | 4,NULL | 5,7 | 6,NULL
+n/ntile/expr/frame	rows=6 1,1 | 2,1 | 3,1 | 4,2 | 5,2 | 6,2
+n/nth_value/expr/frame	rows=6 1,NULL | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+n/nth_literal/expr/frame	rows=6 1,NULL | 2,7 | 3,7 | 4,7 | 5,7 | 6,7
+n/ntile/col/ord	ERR 22014 argument of ntile must be greater than zero
+n/nth_value/col/ord	ERR 22016 argument of nth_value must be greater than zero
+n/nth_literal/col/ord	ERR 22016 argument of nth_value must be greater than zero
+n/ntile/col/both	ERR 22014 argument of ntile must be greater than zero
+n/nth_value/col/both	ERR 22016 argument of nth_value must be greater than zero
+n/nth_literal/col/both	ERR 22016 argument of nth_value must be greater than zero
+n/ntile/col/frame	ERR 22014 argument of ntile must be greater than zero
+n/nth_value/col/frame	ERR 22016 argument of nth_value must be greater than zero
+n/nth_literal/col/frame	ERR 22016 argument of nth_value must be greater than zero
+n/ntile/cast/ord	rows=6 1,1 | 2,1 | 3,1 | 4,2 | 5,2 | 6,2
+n/nth_value/cast/ord	rows=6 1,NULL | 2,20 | 3,20 | 4,20 | 5,20 | 6,20
+n/nth_literal/cast/ord	rows=6 1,NULL | 2,7 | 3,7 | 4,7 | 5,7 | 6,7
+n/ntile/cast/both	rows=6 1,1 | 2,1 | 3,2 | 4,1 | 5,2 | 6,1
+n/nth_value/cast/both	rows=6 1,NULL | 2,20 | 3,20 | 4,NULL | 5,50 | 6,NULL
+n/nth_literal/cast/both	rows=6 1,NULL | 2,7 | 3,7 | 4,NULL | 5,7 | 6,NULL
+n/ntile/cast/frame	rows=6 1,1 | 2,1 | 3,1 | 4,2 | 5,2 | 6,2
+n/nth_value/cast/frame	rows=6 1,NULL | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+n/nth_literal/cast/frame	rows=6 1,NULL | 2,7 | 3,7 | 4,7 | 5,7 | 6,7
+n/ntile/0/empty	rows=0 
+n/nth_value/0/empty	rows=0 
+n/ntile/-1/empty	rows=0 
+n/nth_value/-1/empty	rows=0 
+ctl/count_star/all	rows=6 1,6 | 2,6 | 3,6 | 4,6 | 5,6 | 6,6
+ctl/count_star/part	rows=6 1,3 | 2,3 | 3,3 | 4,2 | 5,2 | 6,1
+ctl/count_star/ord	rows=6 1,1 | 2,2 | 3,3 | 4,4 | 5,5 | 6,6
+ctl/ranks/ord	rows=6 1,1,1,1 | 2,2,1,1 | 3,3,1,1 | 4,4,4,2 | 5,5,4,2 | 6,6,6,3
+ctl/count_star/both	rows=6 1,1 | 2,2 | 3,3 | 4,1 | 5,2 | 6,1
+ctl/ranks/both	rows=6 1,1,1,1 | 2,2,1,1 | 3,3,1,1 | 4,1,4,2 | 5,2,4,2 | 6,1,6,3
+ctl/count_star/frame	rows=6 1,1 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+ctl/ranks/frame	rows=6 1,1,1,1 | 2,2,1,1 | 3,3,1,1 | 4,4,4,2 | 5,5,4,2 | 6,6,6,3
+issue/1394	rows=6 1,15.0,2.5,2.5,12,15.0 | 2,15.0,2.5,2.5,12,15.0 | 3,15.0,2.5,2.5,12,15.0 | 4,15.0,2.5,2.5,12,15.0 | 5,15.0,2.5,2.5,12,15.0 | 6,15.0,2.5,2.5,12,15.0
+issue/1399/lag	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+issue/1399/lead	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+issue/1399/partitioned	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
