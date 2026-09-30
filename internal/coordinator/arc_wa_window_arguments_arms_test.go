@@ -125,6 +125,15 @@ func waCells() []waCell {
 		{"q0", "'0'"}, {"q_sp2", "' 2 '"}, {"cast_int0", "CAST(0 AS INTEGER)"},
 		{"dec", "1.5"}, {"big", "2147483648"}, {"q_dec", "'1.5'"}, {"q_bad", "'a'"},
 		{"expr", "1 + 1"}, {"col", "o"}, {"cast_big", "CAST(0 AS BIGINT)"},
+		// Round 2: a CONSTANT expression is folded at plan time (P1) — only
+		// a per-row argument is refused — and the int4 minimum is one signed
+		// literal (P3).
+		{"sub", "2 - 1"}, {"abs", "abs(-1)"}, {"cast_expr", "CAST(1 + 0 AS INTEGER)"},
+		{"expr_neg", "-(1 + 1)"}, {"expr_null", "NULL + 1"}, {"expr_ovf", "2147483647 + 1"},
+		{"expr_bigint", "2147483648 - 1"}, {"expr_num", "1.5 + 0.5"}, {"div0", "1 / 0"},
+		{"div", "7 / 4"}, {"pow", "2 ^ 0"}, {"len", "length('a')"}, {"q_plus", "'1' + 1"},
+		{"colexpr", "o + 1"}, {"subq", "(SELECT 1)"},
+		{"int4min", "-2147483648"}, {"paren_int4min", "-(2147483648)"}, {"neg_int4min", "-(-2147483648)"},
 	}
 	for _, f := range []string{"lag", "lead"} {
 		for _, o := range offsets {
@@ -142,6 +151,20 @@ func waCells() []waCell {
 				out = append(out, waCell{"off/" + f + "/" + o.name + "/" + w.name,
 					"SELECT id, " + strings.ToUpper(f) + "(" + arg + ") OVER " + w.over + " FROM wa_t"})
 			}
+		}
+		// An offset at and past the input's edge (wa_t has 6 rows): every
+		// row answers the default. The spilled streamer used to size a ring
+		// by the offset, so ±2147483647 allocated 16 GiB and aborted (B1).
+		for _, o := range []struct{ name, v string }{
+			{"max", "2147483647"}, {"negmax", "-2147483647"}, {"rows_p1", "7"}, {"neg_rows_p1", "-7"},
+			{"rows", "6"}, {"neg_rows", "-6"}, {"rows_m1", "5"}, {"neg_rows_m1", "-5"},
+		} {
+			for _, w := range waWindows[2:4] {
+				out = append(out, waCell{"ring/" + f + "/" + o.name + "/" + w.name,
+					"SELECT id, " + strings.ToUpper(f) + "(x, " + o.v + ") OVER " + w.over + " FROM wa_t"})
+			}
+			out = append(out, waCell{"ring/" + f + "/" + o.name + "/def",
+				"SELECT id, " + strings.ToUpper(f) + "(x, " + o.v + ", 99) OVER (ORDER BY id) FROM wa_t"})
 		}
 		// A LITERAL value at offset 0 — the two issues in one cell.
 		out = append(out, waCell{"off/" + f + "/0/literal",
@@ -165,6 +188,8 @@ func waCells() []waCell {
 		{"1", "1"}, {"2", "2"}, {"4", "4"}, {"10", "10"}, {"0", "0"}, {"neg1", "-1"},
 		{"null", "NULL"}, {"q2", "'2'"}, {"dec", "2.5"}, {"expr", "1 + 1"}, {"col", "o"},
 		{"cast", "CAST(2 AS INTEGER)"},
+		{"expr0", "1 + 0"}, {"sub", "2 - 1"}, {"abs", "abs(-2)"}, {"zero_expr", "1 - 1"},
+		{"int4min", "-2147483648"}, {"colexpr", "o + 1"},
 	}
 	for _, n := range ns {
 		for _, w := range waWindows[2:] {
@@ -191,6 +216,8 @@ func waCells() []waCell {
 	out = append(out,
 		waCell{"issue/1394", "SELECT id, SUM(2.5) OVER (), FIRST_VALUE(2.5) OVER (ORDER BY id), MAX(2.5) OVER (), " +
 			"SUM(2) OVER (), SUM(2.5 * 1) OVER () FROM wa_t"},
+		// A folded offset in a column the outer query reads by count only.
+		waCell{"fold/count_lag_expr", "SELECT count(*) FROM (SELECT LAG(x, 1 + 1) OVER (ORDER BY id) l FROM wa_t) s"},
 		waCell{"issue/1399/lag", "SELECT id, LAG(x, 0) OVER (ORDER BY id) FROM wa_t"},
 		waCell{"issue/1399/lead", "SELECT id, LEAD(x, 0) OVER (ORDER BY id) FROM wa_t"},
 		waCell{"issue/1399/partitioned", "SELECT id, LAG(x, 0) OVER (PARTITION BY id ORDER BY id) FROM wa_t"},
@@ -317,10 +344,16 @@ func waKeptCells() map[string]waKept {
 			(parts[1] == "first_value" || parts[1] == "last_value" || parts[1] == "nth_value" ||
 				parts[1] == "lag" || parts[1] == "lead"):
 			kept[c.name] = waKept{"", "kept superset: an unknown-typed literal argument is read as text / NULL (aggregates-windows.md)"}
-		// A per-row or computed integer argument is refused, loudly: the
-		// operator takes the offset / N as one constant.
-		case (parts[0] == "off" || parts[0] == "n") && (parts[2] == "expr" || parts[2] == "col"):
-			kept[c.name] = waKept{"ERR 0A000 must be a constant here", "refusal: a computed or per-row integer argument (aggregates-windows.md)"}
+		// A per-row integer argument (a column, a column expression, a
+		// subquery) is refused, loudly: the operator takes the offset / N as
+		// one constant. A constant expression is folded and agrees.
+		case (parts[0] == "off" || parts[0] == "n") && (parts[2] == "col" || parts[2] == "colexpr" || parts[2] == "subq"):
+			kept[c.name] = waKept{"ERR 0A000 must be a constant here", "refusal: a per-row integer argument (aggregates-windows.md)"}
+		// The planner's constant fold types `'1' + 1` (an unknown literal
+		// plus an integer) as a numeric where PostgreSQL resolves the
+		// unknown to int4: the folded argument is refused 42883, loudly.
+		case parts[0] == "off" && parts[2] == "q_plus":
+			kept[c.name] = waKept{"ERR 42883 does not exist", "filing candidate: the constant fold types an unknown literal plus an integer as numeric"}
 		// FILING CANDIDATES, base-identical, outside #1394 / #1399: the
 		// LAG / LEAD DEFAULT is carried as a float or as SQL text, so a
 		// default that needs the result type widened (2.5 into bigint) is

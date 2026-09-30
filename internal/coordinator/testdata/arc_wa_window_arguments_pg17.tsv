@@ -818,3 +818,214 @@ issue/1394	rows=6 1,15.0,2.5,2.5,12,15.0 | 2,15.0,2.5,2.5,12,15.0 | 3,15.0,2.5,2
 issue/1399/lag	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
 issue/1399/lead	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
 issue/1399/partitioned	rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+off/lag/sub/ord	rows=6 1,NULL | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+off/lag/sub/both	rows=6 1,NULL | 2,10 | 3,20 | 4,NULL | 5,40 | 6,NULL
+off/lag/sub/frame	rows=6 1,NULL | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+off/lag/abs/ord	rows=6 1,NULL | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+off/lag/abs/both	rows=6 1,NULL | 2,10 | 3,20 | 4,NULL | 5,40 | 6,NULL
+off/lag/abs/frame	rows=6 1,NULL | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+off/lag/cast_expr/ord	rows=6 1,NULL | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+off/lag/cast_expr/both	rows=6 1,NULL | 2,10 | 3,20 | 4,NULL | 5,40 | 6,NULL
+off/lag/cast_expr/frame	rows=6 1,NULL | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+off/lag/expr_neg/ord	rows=6 1,NULL | 2,40 | 3,50 | 4,60 | 5,NULL | 6,NULL
+off/lag/expr_neg/both	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+off/lag/expr_neg/frame	rows=6 1,NULL | 2,40 | 3,50 | 4,60 | 5,NULL | 6,NULL
+off/lag/expr_null/ord	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+off/lag/expr_null/both	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+off/lag/expr_null/frame	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+off/lag/expr_ovf/ord	ERR 22003 integer out of range
+off/lag/expr_ovf/both	ERR 22003 integer out of range
+off/lag/expr_ovf/frame	ERR 22003 integer out of range
+off/lag/expr_bigint/ord	ERR 42883 function lag(bigint, bigint) does not exist
+off/lag/expr_bigint/both	ERR 42883 function lag(bigint, bigint) does not exist
+off/lag/expr_bigint/frame	ERR 42883 function lag(bigint, bigint) does not exist
+off/lag/expr_num/ord	ERR 42883 function lag(bigint, numeric) does not exist
+off/lag/expr_num/both	ERR 42883 function lag(bigint, numeric) does not exist
+off/lag/expr_num/frame	ERR 42883 function lag(bigint, numeric) does not exist
+off/lag/div0/ord	ERR 22012 division by zero
+off/lag/div0/both	ERR 22012 division by zero
+off/lag/div0/frame	ERR 22012 division by zero
+off/lag/colexpr/ord	rows=6 1,NULL | 2,NULL | 3,NULL | 4,20 | 5,NULL | 6,60
+off/lag/colexpr/both	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,60
+off/lag/colexpr/frame	rows=6 1,NULL | 2,NULL | 3,NULL | 4,20 | 5,NULL | 6,60
+off/lag/subq/ord	rows=6 1,NULL | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+off/lag/subq/both	rows=6 1,NULL | 2,10 | 3,20 | 4,NULL | 5,40 | 6,NULL
+off/lag/subq/frame	rows=6 1,NULL | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+off/lag/int4min/ord	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+off/lag/int4min/both	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+off/lag/int4min/frame	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+off/lag/paren_int4min/ord	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+off/lag/paren_int4min/both	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+off/lag/paren_int4min/frame	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+off/lag/neg_int4min/ord	ERR 42883 function lag(bigint, bigint) does not exist
+off/lag/neg_int4min/both	ERR 42883 function lag(bigint, bigint) does not exist
+off/lag/neg_int4min/frame	ERR 42883 function lag(bigint, bigint) does not exist
+ring/lag/max/ord	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+ring/lag/max/both	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+ring/lag/max/def	rows=6 1,99 | 2,99 | 3,99 | 4,99 | 5,99 | 6,99
+ring/lag/negmax/ord	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+ring/lag/negmax/both	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+ring/lag/negmax/def	rows=6 1,99 | 2,99 | 3,99 | 4,99 | 5,99 | 6,99
+ring/lag/rows_p1/ord	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+ring/lag/rows_p1/both	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+ring/lag/rows_p1/def	rows=6 1,99 | 2,99 | 3,99 | 4,99 | 5,99 | 6,99
+ring/lag/neg_rows_p1/ord	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+ring/lag/neg_rows_p1/both	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+ring/lag/neg_rows_p1/def	rows=6 1,99 | 2,99 | 3,99 | 4,99 | 5,99 | 6,99
+ring/lag/rows/ord	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+ring/lag/rows/both	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+ring/lag/rows/def	rows=6 1,99 | 2,99 | 3,99 | 4,99 | 5,99 | 6,99
+ring/lag/neg_rows/ord	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+ring/lag/neg_rows/both	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+ring/lag/neg_rows/def	rows=6 1,99 | 2,99 | 3,99 | 4,99 | 5,99 | 6,99
+ring/lag/rows_m1/ord	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,10
+ring/lag/rows_m1/both	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+ring/lag/rows_m1/def	rows=6 1,99 | 2,99 | 3,99 | 4,99 | 5,99 | 6,10
+ring/lag/neg_rows_m1/ord	rows=6 1,60 | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+ring/lag/neg_rows_m1/both	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+ring/lag/neg_rows_m1/def	rows=6 1,60 | 2,99 | 3,99 | 4,99 | 5,99 | 6,99
+off/lead/sub/ord	rows=6 1,20 | 2,NULL | 3,40 | 4,50 | 5,60 | 6,NULL
+off/lead/sub/both	rows=6 1,20 | 2,NULL | 3,NULL | 4,50 | 5,NULL | 6,NULL
+off/lead/sub/frame	rows=6 1,20 | 2,NULL | 3,40 | 4,50 | 5,60 | 6,NULL
+off/lead/abs/ord	rows=6 1,20 | 2,NULL | 3,40 | 4,50 | 5,60 | 6,NULL
+off/lead/abs/both	rows=6 1,20 | 2,NULL | 3,NULL | 4,50 | 5,NULL | 6,NULL
+off/lead/abs/frame	rows=6 1,20 | 2,NULL | 3,40 | 4,50 | 5,60 | 6,NULL
+off/lead/cast_expr/ord	rows=6 1,20 | 2,NULL | 3,40 | 4,50 | 5,60 | 6,NULL
+off/lead/cast_expr/both	rows=6 1,20 | 2,NULL | 3,NULL | 4,50 | 5,NULL | 6,NULL
+off/lead/cast_expr/frame	rows=6 1,20 | 2,NULL | 3,40 | 4,50 | 5,60 | 6,NULL
+off/lead/expr_neg/ord	rows=6 1,NULL | 2,NULL | 3,10 | 4,20 | 5,NULL | 6,40
+off/lead/expr_neg/both	rows=6 1,NULL | 2,NULL | 3,10 | 4,NULL | 5,NULL | 6,NULL
+off/lead/expr_neg/frame	rows=6 1,NULL | 2,NULL | 3,10 | 4,20 | 5,NULL | 6,40
+off/lead/expr_null/ord	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+off/lead/expr_null/both	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+off/lead/expr_null/frame	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+off/lead/expr_ovf/ord	ERR 22003 integer out of range
+off/lead/expr_ovf/both	ERR 22003 integer out of range
+off/lead/expr_ovf/frame	ERR 22003 integer out of range
+off/lead/expr_bigint/ord	ERR 42883 function lead(bigint, bigint) does not exist
+off/lead/expr_bigint/both	ERR 42883 function lead(bigint, bigint) does not exist
+off/lead/expr_bigint/frame	ERR 42883 function lead(bigint, bigint) does not exist
+off/lead/expr_num/ord	ERR 42883 function lead(bigint, numeric) does not exist
+off/lead/expr_num/both	ERR 42883 function lead(bigint, numeric) does not exist
+off/lead/expr_num/frame	ERR 42883 function lead(bigint, numeric) does not exist
+off/lead/div0/ord	ERR 22012 division by zero
+off/lead/div0/both	ERR 22012 division by zero
+off/lead/div0/frame	ERR 22012 division by zero
+off/lead/colexpr/ord	rows=6 1,20 | 2,40 | 3,60 | 4,60 | 5,NULL | 6,60
+off/lead/colexpr/both	rows=6 1,20 | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,60
+off/lead/colexpr/frame	rows=6 1,20 | 2,40 | 3,60 | 4,60 | 5,NULL | 6,60
+off/lead/subq/ord	rows=6 1,20 | 2,NULL | 3,40 | 4,50 | 5,60 | 6,NULL
+off/lead/subq/both	rows=6 1,20 | 2,NULL | 3,NULL | 4,50 | 5,NULL | 6,NULL
+off/lead/subq/frame	rows=6 1,20 | 2,NULL | 3,40 | 4,50 | 5,60 | 6,NULL
+off/lead/int4min/ord	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+off/lead/int4min/both	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+off/lead/int4min/frame	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+off/lead/paren_int4min/ord	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+off/lead/paren_int4min/both	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+off/lead/paren_int4min/frame	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+off/lead/neg_int4min/ord	ERR 42883 function lead(bigint, bigint) does not exist
+off/lead/neg_int4min/both	ERR 42883 function lead(bigint, bigint) does not exist
+off/lead/neg_int4min/frame	ERR 42883 function lead(bigint, bigint) does not exist
+ring/lead/max/ord	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+ring/lead/max/both	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+ring/lead/max/def	rows=6 1,99 | 2,99 | 3,99 | 4,99 | 5,99 | 6,99
+ring/lead/negmax/ord	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+ring/lead/negmax/both	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+ring/lead/negmax/def	rows=6 1,99 | 2,99 | 3,99 | 4,99 | 5,99 | 6,99
+ring/lead/rows_p1/ord	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+ring/lead/rows_p1/both	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+ring/lead/rows_p1/def	rows=6 1,99 | 2,99 | 3,99 | 4,99 | 5,99 | 6,99
+ring/lead/neg_rows_p1/ord	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+ring/lead/neg_rows_p1/both	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+ring/lead/neg_rows_p1/def	rows=6 1,99 | 2,99 | 3,99 | 4,99 | 5,99 | 6,99
+ring/lead/rows/ord	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+ring/lead/rows/both	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+ring/lead/rows/def	rows=6 1,99 | 2,99 | 3,99 | 4,99 | 5,99 | 6,99
+ring/lead/neg_rows/ord	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+ring/lead/neg_rows/both	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+ring/lead/neg_rows/def	rows=6 1,99 | 2,99 | 3,99 | 4,99 | 5,99 | 6,99
+ring/lead/rows_m1/ord	rows=6 1,60 | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+ring/lead/rows_m1/both	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+ring/lead/rows_m1/def	rows=6 1,60 | 2,99 | 3,99 | 4,99 | 5,99 | 6,99
+ring/lead/neg_rows_m1/ord	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,10
+ring/lead/neg_rows_m1/both	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+ring/lead/neg_rows_m1/def	rows=6 1,99 | 2,99 | 3,99 | 4,99 | 5,99 | 6,10
+n/ntile/expr0/ord	rows=6 1,1 | 2,1 | 3,1 | 4,1 | 5,1 | 6,1
+n/nth_value/expr0/ord	rows=6 1,10 | 2,10 | 3,10 | 4,10 | 5,10 | 6,10
+n/nth_literal/expr0/ord	rows=6 1,7 | 2,7 | 3,7 | 4,7 | 5,7 | 6,7
+n/ntile/expr0/both	rows=6 1,1 | 2,1 | 3,1 | 4,1 | 5,1 | 6,1
+n/nth_value/expr0/both	rows=6 1,10 | 2,10 | 3,10 | 4,40 | 5,40 | 6,60
+n/nth_literal/expr0/both	rows=6 1,7 | 2,7 | 3,7 | 4,7 | 5,7 | 6,7
+n/ntile/expr0/frame	rows=6 1,1 | 2,1 | 3,1 | 4,1 | 5,1 | 6,1
+n/nth_value/expr0/frame	rows=6 1,10 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+n/nth_literal/expr0/frame	rows=6 1,7 | 2,7 | 3,7 | 4,7 | 5,7 | 6,7
+n/ntile/sub/ord	rows=6 1,1 | 2,1 | 3,1 | 4,1 | 5,1 | 6,1
+n/nth_value/sub/ord	rows=6 1,10 | 2,10 | 3,10 | 4,10 | 5,10 | 6,10
+n/nth_literal/sub/ord	rows=6 1,7 | 2,7 | 3,7 | 4,7 | 5,7 | 6,7
+n/ntile/sub/both	rows=6 1,1 | 2,1 | 3,1 | 4,1 | 5,1 | 6,1
+n/nth_value/sub/both	rows=6 1,10 | 2,10 | 3,10 | 4,40 | 5,40 | 6,60
+n/nth_literal/sub/both	rows=6 1,7 | 2,7 | 3,7 | 4,7 | 5,7 | 6,7
+n/ntile/sub/frame	rows=6 1,1 | 2,1 | 3,1 | 4,1 | 5,1 | 6,1
+n/nth_value/sub/frame	rows=6 1,10 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+n/nth_literal/sub/frame	rows=6 1,7 | 2,7 | 3,7 | 4,7 | 5,7 | 6,7
+n/ntile/abs/ord	rows=6 1,1 | 2,1 | 3,1 | 4,2 | 5,2 | 6,2
+n/nth_value/abs/ord	rows=6 1,NULL | 2,20 | 3,20 | 4,20 | 5,20 | 6,20
+n/nth_literal/abs/ord	rows=6 1,NULL | 2,7 | 3,7 | 4,7 | 5,7 | 6,7
+n/ntile/abs/both	rows=6 1,1 | 2,1 | 3,2 | 4,1 | 5,2 | 6,1
+n/nth_value/abs/both	rows=6 1,NULL | 2,20 | 3,20 | 4,NULL | 5,50 | 6,NULL
+n/nth_literal/abs/both	rows=6 1,NULL | 2,7 | 3,7 | 4,NULL | 5,7 | 6,NULL
+n/ntile/abs/frame	rows=6 1,1 | 2,1 | 3,1 | 4,2 | 5,2 | 6,2
+n/nth_value/abs/frame	rows=6 1,NULL | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+n/nth_literal/abs/frame	rows=6 1,NULL | 2,7 | 3,7 | 4,7 | 5,7 | 6,7
+n/ntile/zero_expr/ord	ERR 22014 argument of ntile must be greater than zero
+n/nth_value/zero_expr/ord	ERR 22016 argument of nth_value must be greater than zero
+n/nth_literal/zero_expr/ord	ERR 22016 argument of nth_value must be greater than zero
+n/ntile/zero_expr/both	ERR 22014 argument of ntile must be greater than zero
+n/nth_value/zero_expr/both	ERR 22016 argument of nth_value must be greater than zero
+n/nth_literal/zero_expr/both	ERR 22016 argument of nth_value must be greater than zero
+n/ntile/zero_expr/frame	ERR 22014 argument of ntile must be greater than zero
+n/nth_value/zero_expr/frame	ERR 22016 argument of nth_value must be greater than zero
+n/nth_literal/zero_expr/frame	ERR 22016 argument of nth_value must be greater than zero
+n/ntile/int4min/ord	ERR 22014 argument of ntile must be greater than zero
+n/nth_value/int4min/ord	ERR 22016 argument of nth_value must be greater than zero
+n/nth_literal/int4min/ord	ERR 22016 argument of nth_value must be greater than zero
+n/ntile/int4min/both	ERR 22014 argument of ntile must be greater than zero
+n/nth_value/int4min/both	ERR 22016 argument of nth_value must be greater than zero
+n/nth_literal/int4min/both	ERR 22016 argument of nth_value must be greater than zero
+n/ntile/int4min/frame	ERR 22014 argument of ntile must be greater than zero
+n/nth_value/int4min/frame	ERR 22016 argument of nth_value must be greater than zero
+n/nth_literal/int4min/frame	ERR 22016 argument of nth_value must be greater than zero
+n/ntile/colexpr/ord	rows=6 1,1 | 2,1 | 3,1 | 4,1 | 5,1 | 6,1
+n/nth_value/colexpr/ord	ERR 22016 argument of nth_value must be greater than zero
+n/nth_literal/colexpr/ord	ERR 22016 argument of nth_value must be greater than zero
+n/ntile/colexpr/both	ERR 22014 argument of ntile must be greater than zero
+n/nth_value/colexpr/both	ERR 22016 argument of nth_value must be greater than zero
+n/nth_literal/colexpr/both	ERR 22016 argument of nth_value must be greater than zero
+n/ntile/colexpr/frame	rows=6 1,1 | 2,1 | 3,1 | 4,1 | 5,1 | 6,1
+n/nth_value/colexpr/frame	ERR 22016 argument of nth_value must be greater than zero
+n/nth_literal/colexpr/frame	ERR 22016 argument of nth_value must be greater than zero
+fold/count_lag_expr	rows=1 6
+off/lag/div/ord	rows=6 1,NULL | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+off/lag/div/both	rows=6 1,NULL | 2,10 | 3,20 | 4,NULL | 5,40 | 6,NULL
+off/lag/div/frame	rows=6 1,NULL | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+off/lag/pow/ord	ERR 42883 function lag(bigint, double precision) does not exist
+off/lag/pow/both	ERR 42883 function lag(bigint, double precision) does not exist
+off/lag/pow/frame	ERR 42883 function lag(bigint, double precision) does not exist
+off/lag/len/ord	rows=6 1,NULL | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+off/lag/len/both	rows=6 1,NULL | 2,10 | 3,20 | 4,NULL | 5,40 | 6,NULL
+off/lag/len/frame	rows=6 1,NULL | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+off/lag/q_plus/ord	rows=6 1,NULL | 2,NULL | 3,10 | 4,20 | 5,NULL | 6,40
+off/lag/q_plus/both	rows=6 1,NULL | 2,NULL | 3,10 | 4,NULL | 5,NULL | 6,NULL
+off/lag/q_plus/frame	rows=6 1,NULL | 2,NULL | 3,10 | 4,20 | 5,NULL | 6,40
+off/lead/div/ord	rows=6 1,20 | 2,NULL | 3,40 | 4,50 | 5,60 | 6,NULL
+off/lead/div/both	rows=6 1,20 | 2,NULL | 3,NULL | 4,50 | 5,NULL | 6,NULL
+off/lead/div/frame	rows=6 1,20 | 2,NULL | 3,40 | 4,50 | 5,60 | 6,NULL
+off/lead/pow/ord	ERR 42883 function lead(bigint, double precision) does not exist
+off/lead/pow/both	ERR 42883 function lead(bigint, double precision) does not exist
+off/lead/pow/frame	ERR 42883 function lead(bigint, double precision) does not exist
+off/lead/len/ord	rows=6 1,20 | 2,NULL | 3,40 | 4,50 | 5,60 | 6,NULL
+off/lead/len/both	rows=6 1,20 | 2,NULL | 3,NULL | 4,50 | 5,NULL | 6,NULL
+off/lead/len/frame	rows=6 1,20 | 2,NULL | 3,40 | 4,50 | 5,60 | 6,NULL
+off/lead/q_plus/ord	rows=6 1,NULL | 2,40 | 3,50 | 4,60 | 5,NULL | 6,NULL
+off/lead/q_plus/both	rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+off/lead/q_plus/frame	rows=6 1,NULL | 2,40 | 3,50 | 4,60 | 5,NULL | 6,NULL
