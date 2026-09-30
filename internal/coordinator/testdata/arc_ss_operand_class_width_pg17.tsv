@@ -1,0 +1,244 @@
+# PostgreSQL 17.11 (postgres:17-alpine) over ssPGFixture: name<TAB>ordered<TAB>sql<TAB>answer ({type classes} rows=N <rows, sorted unless ordered> | ERR <SQLSTATE> <message>).
+ovf/of	false	WITH o AS (SELECT CAST(2147483647 AS INT) AS i) SELECT (SELECT o.i + x.v FROM ss_i x WHERE x.id = 1) AS x FROM o	ERR 22003 integer out of range
+ovf/if	false	WITH o AS (SELECT CAST(2147483647 AS INT) AS i) SELECT (SELECT x.v + o.i FROM ss_i x WHERE x.id = 1) AS x FROM o	ERR 22003 integer out of range
+ovf/tbl	false	SELECT (SELECT o.i * x.v * 1000000000 FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id = 1	ERR 22003 integer out of range
+ovf/tbl2	false	SELECT (SELECT o.i * 1000000000 FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id = 1	ERR 22003 integer out of range
+plain/ii	false	SELECT o.i * 1000000000 AS x FROM ss_t o WHERE o.id = 1	ERR 22003 integer out of range
+corr/ionly	false	SELECT (SELECT o.i FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id = 1	{int} rows=1 3
+corr/iPlus1	false	SELECT (SELECT o.i + 1 FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id = 1	{int} rows=1 4
+corr/iPlusI	false	SELECT (SELECT o.i + o.i FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id = 1	{int} rows=1 6
+corr/vPlusV	false	SELECT (SELECT x.v + x.v FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id = 1	{int} rows=1 10
+corr/sumNull	false	SELECT o.id, (SELECT sum(x.v + o.i) FROM ss_i x) AS x FROM ss_t o WHERE o.id = 6	{int,int} rows=1 6,NULL
+corr/sumNullF	false	SELECT o.id, (SELECT sum(x.g + o.f) FROM ss_i x) AS x FROM ss_t o WHERE o.id = 6	{int,float} rows=1 6,NULL
+corr/maxNull	false	SELECT o.id, (SELECT max(x.v + o.i) FROM ss_i x) AS x FROM ss_t o WHERE o.id = 6	{int,int} rows=1 6,NULL
+corr/cntNull	false	SELECT o.id, (SELECT count(x.v + o.i) FROM ss_i x) AS x FROM ss_t o WHERE o.id = 6	{int,int} rows=1 6,0
+corr/plainNull	false	SELECT o.id, (SELECT x.v + o.i FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id = 6	{int,int} rows=1 6,NULL
+vv/bare	false	SELECT (SELECT x.v + x.v FROM ss_i x WHERE x.id = 1) AS x	{int} rows=1 10
+vv/from	false	SELECT (SELECT x.v + x.v FROM ss_i x WHERE x.id = 1) AS x FROM ss_t WHERE id = 1	{int} rows=1 10
+vv/unq	false	SELECT (SELECT v + v FROM ss_i WHERE id = 1) AS x	{int} rows=1 10
+vv/times2	false	SELECT (SELECT x.v * 2 FROM ss_i x WHERE x.id = 1) AS x	{int} rows=1 10
+vv/plain	false	SELECT x.v + x.v AS x FROM ss_i x WHERE x.id = 1	{int} rows=1 10
+vv/plainZero	false	SELECT x.v + x.v AS x FROM ss_i x WHERE x.id = 99	{int} rows=0 
+vv/plainUnq	false	SELECT v + v AS x FROM ss_i WHERE id = 1	{int} rows=1 10
+vv/plainUnqZero	false	SELECT v + v AS x FROM ss_i WHERE id = 99	{int} rows=0 
+ii/plainZero	false	SELECT t.i - t.i AS x FROM ss_t t WHERE t.id = 99	{int} rows=0 
+ii/plainTimes	false	SELECT t.i * t.i AS x FROM ss_t t WHERE t.id = 1	{int} rows=1 9
+ii/plainTimesZero	false	SELECT t.i * t.i AS x FROM ss_t t WHERE t.id = 99	{int} rows=0 
+vv/ovf	false	SELECT (SELECT x.v * 1000000000 FROM ss_i x WHERE x.id = 1) AS x	ERR 22003 integer out of range
+vv/ovfPlain	false	SELECT x.v * 1000000000 AS x FROM ss_i x WHERE x.id = 1	ERR 22003 integer out of range
+vv/ovfPlain2	false	SELECT x.v * x.v * 100000000 AS x FROM ss_i x WHERE x.id = 1	ERR 22003 integer out of range
+vv/ovfSq2	false	SELECT (SELECT x.v * x.v * 100000000 FROM ss_i x WHERE x.id = 1) AS x	ERR 22003 integer out of range
+vv/ovfSq3	false	SELECT (SELECT x.v * x.v * x.v * x.v * x.v * x.v * x.v * x.v * x.v * x.v * x.v * x.v * x.v * x.v FROM ss_i x WHERE x.id = 1) AS x	ERR 22003 integer out of range
+vv/ovfPlain3	false	SELECT x.v * x.v * x.v * x.v * x.v * x.v * x.v * x.v * x.v * x.v * x.v * x.v * x.v * x.v AS x FROM ss_i x WHERE x.id = 1	ERR 22003 integer out of range
+plain/fCatV	false	SELECT o.id, o.f || x.v AS x FROM ss_t o, ss_i x WHERE x.id = 1 AND o.id IN (1,2)	ERR 42883 operator does not exist: double precision || integer
+plain/dTimesI	false	SELECT id, d * i AS x FROM ss_t WHERE id IN (1,2)	ERR 42883 operator does not exist: date * integer
+plain/tsDivI	false	SELECT id, ts / i AS x FROM ss_t WHERE id IN (1,2)	ERR 42883 operator does not exist: timestamp without time zone / integer
+plain/iCatI	false	SELECT id, i || i AS x FROM ss_t WHERE id IN (1,2)	ERR 42883 operator does not exist: integer || integer
+unc/dTimes5	false	SELECT (SELECT d * 5 FROM ss_t WHERE id = 1) AS x	ERR 42883 operator does not exist: date * integer
+unc/dTimesV	false	SELECT (SELECT t.d * x.v FROM ss_t t, ss_i x WHERE t.id = 1 AND x.id = 1) AS x	ERR 42883 operator does not exist: date * integer
+unc/fCatV	false	SELECT (SELECT t.f || x.v FROM ss_t t, ss_i x WHERE t.id = 1 AND x.id = 1) AS x	ERR 42883 operator does not exist: double precision || integer
+unc/iCatV	false	SELECT (SELECT t.i || x.v FROM ss_t t, ss_i x WHERE t.id = 1 AND x.id = 1) AS x	ERR 42883 operator does not exist: integer || integer
+corr/mDivI	false	SELECT o.id, (SELECT x.m / o.i FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1,2,5)	{int,numeric} rows=3 1,0.41666666666666666667 | 2,-0.17857142857142857143 | 5,1.25000000000000000000
+plain/mDivI	false	SELECT o.id, x.m / o.i AS x FROM ss_t o, ss_i x WHERE x.id = 1 AND o.id IN (1,2,5)	{int,numeric} rows=3 1,0.41666666666666666667 | 2,-0.17857142857142857143 | 5,1.25000000000000000000
+unc/mDivI	false	SELECT (SELECT x.m / t.i FROM ss_t t, ss_i x WHERE t.id = 1 AND x.id = 1) AS x	{numeric} rows=1 0.41666666666666666667
+unc/mDiv3	false	SELECT (SELECT x.m / 3 FROM ss_i x WHERE x.id = 1) AS x	{numeric} rows=1 0.41666666666666666667
+corr/mDivIlit	false	SELECT o.id, (SELECT x.m / 3 FROM ss_i x WHERE x.id = 1 AND o.id > 0) AS x FROM ss_t o WHERE o.id IN (1)	{int,numeric} rows=1 1,0.41666666666666666667
+corr/iDivM	false	SELECT o.id, (SELECT o.i / x.m FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1,2,5)	{int,numeric} rows=3 1,2.4000000000000000 | 2,-5.6000000000000000 | 5,0.80000000000000000000
+corr/nDivV	false	SELECT o.id, (SELECT o.n / x.v FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1,2,5)	{int,numeric} rows=3 1,0.45000000000000000000 | 2,-0.70000000000000000000 | 5,0.00200000000000000000
+corr/vDivN	false	SELECT o.id, (SELECT x.v / o.n FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1,2,5)	{int,numeric} rows=3 1,2.2222222222222222 | 2,-1.4285714285714286 | 5,500.0000000000000000
+b3/maxDplusNo3	false	SELECT (SELECT max(d + 1) FROM ss_t WHERE id <> 3) AS x	{date} rows=1 2024-03-05
+b3/dPlus1id3	false	SELECT (SELECT d + 1 FROM ss_t WHERE id = 3) AS x	{date} rows=1 10000-01-01
+b3/maxD	false	SELECT (SELECT max(d) FROM ss_t) + 1 AS x	{date} rows=1 10000-01-01
+b3/maxDplusCast	false	SELECT CAST((SELECT max(d + 1) FROM ss_t) AS VARCHAR) AS x	{text} rows=1 10000-01-01
+b3/dPlus1id3cmp	false	SELECT id FROM ss_t WHERE d < (SELECT d + 1 FROM ss_t WHERE id = 3)	{int} rows=5 1 | 2 | 3 | 4 | 5
+b3/tsYear10000	false	SELECT (SELECT ts + INTERVAL '1 day' FROM ss_t WHERE id = 3) AS x	{timestamp} rows=1 10000-01-01 23:59:59.999
+b3/tsMaxYear10000	false	SELECT (SELECT max(ts + INTERVAL '1 day') FROM ss_t) AS x	{timestamp} rows=1 10000-01-01 23:59:59.999
+b3/dPlus1id4	false	SELECT (SELECT max(d - 1) FROM ss_t WHERE id = 4) AS x	{date} rows=1 0999-12-31
+b3/dBC	false	SELECT (SELECT max(d - 400000) FROM ss_t WHERE id = 4) AS x	{date} rows=1 0097-11-03 BC
+b3/maxDplusPerRow	false	SELECT id, (SELECT max(d + 1) FROM ss_t) AS x FROM ss_t WHERE id = 1	{int,date} rows=1 1,10000-01-01
+b3/maxDplusPlainAgg	false	SELECT max(d + 1) AS x FROM ss_t	{date} rows=1 10000-01-01
+b3/tsCast10000	false	SELECT (SELECT CAST(d AS TIMESTAMP) + INTERVAL '1 day' FROM ss_t WHERE id = 3) AS x	{timestamp} rows=1 10000-01-01 00:00:00
+b3/tsLit10000	false	SELECT (SELECT TIMESTAMP '9999-12-31 23:00:00' + INTERVAL '2 hour') AS x	{timestamp} rows=1 10000-01-01 01:00:00
+b3/dLit10000	false	SELECT (SELECT DATE '9999-12-31' + 1) AS x	{date} rows=1 10000-01-01
+b3/dCorr10000	false	SELECT o.id, (SELECT o.d + 1 FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id = 3	{int,date} rows=1 3,10000-01-01
+b3/dCorrMax	false	SELECT o.id, (SELECT max(o.d + x.v) FROM ss_i x) AS x FROM ss_t o WHERE o.id = 3	{int,date} rows=1 3,10000-01-06
+b3/dUnion	false	SELECT (SELECT d + 1 FROM ss_t WHERE id = 3 UNION ALL SELECT d FROM ss_t WHERE id = 99) AS x	{date} rows=1 10000-01-01
+new/dMod2	false	SELECT id, d % 2 AS x FROM ss_t WHERE id IN (1,2)	ERR 42883 operator does not exist: date % integer
+new/tsTimesF	false	SELECT id, ts * f AS x FROM ss_t WHERE id IN (1,2)	ERR 42883 operator does not exist: timestamp without time zone * double precision
+new/oCatV	false	SELECT o.id, (SELECT o.o || x.v FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1,2)	ERR 42883 operator does not exist: boolean || integer
+new/sCatV	false	SELECT o.id, (SELECT o.s || x.v FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1,2)	{int,text} rows=2 1,abc5 | 2,Hello5
+new/litCatI	false	SELECT id, 'n' || i AS x FROM ss_t WHERE id IN (1,2)	{int,text} rows=2 1,n3 | 2,n-7
+new/dPlusI	false	SELECT o.id, (SELECT o.d + x.v FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1,3)	{int,date} rows=2 1,2024-03-09 | 3,10000-01-05
+new/dCase3	false	SELECT (SELECT CASE WHEN id = 3 THEN d + 1 END FROM ss_t WHERE id = 3) AS x	{date} rows=1 10000-01-01
+new/dCoalesce3	false	SELECT (SELECT coalesce(d + 1, d) FROM ss_t WHERE id = 3) AS x	{date} rows=1 10000-01-01
+new/dCorrPlus1	false	SELECT o.id, (SELECT o.d + 1 FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id = 3	{int,date} rows=1 3,10000-01-01
+new/iPlusM	false	SELECT o.id, (SELECT o.i + x.m FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1,2,5)	{int,numeric} rows=3 1,4.25 | 2,-5.75 | 5,2.25
+new/mDivB	false	SELECT o.id, (SELECT x.m / o.b FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1,2,5)	{int,numeric} rows=3 1,0.04166666666666666667 | 2,-0.01785714285714285714 | 5,1.25000000000000000000
+new/castIntPlusM	false	SELECT CAST(t.i AS INTEGER) + x.m AS x FROM ss_t t, ss_i x WHERE t.id = 1 AND x.id = 1	{numeric} rows=1 4.25
+new/castIntDivM	false	SELECT x.m / CAST(t.i AS INTEGER) AS x FROM ss_t t, ss_i x WHERE t.id = 1 AND x.id = 1	{numeric} rows=1 0.41666666666666666667
+new/nullOuterDate	false	SELECT o.id, (SELECT max(o.d + x.v) FROM ss_i x) AS x FROM ss_t o WHERE o.id = 6	{int,date} rows=1 6,NULL
+new/nullOuterCmp	false	SELECT o.id, (SELECT count(*) FROM ss_i x WHERE x.v = o.i) AS x FROM ss_t o WHERE o.id IN (1,6)	{int,int} rows=2 1,0 | 6,0
+new/nullOuterText	false	SELECT o.id, (SELECT count(*) FROM ss_i x WHERE o.s IS NULL) AS x FROM ss_t o WHERE o.id IN (1,6)	{int,int} rows=2 1,0 | 6,2
+census/zero/fPlusI	false	SELECT t.f + t.i AS x FROM ss_t t WHERE t.id = 99	{float} rows=0 
+census/zero/iPlusF	false	SELECT t.i + t.f AS x FROM ss_t t WHERE t.id = 99	{float} rows=0 
+census/zero/nPlusI	false	SELECT t.n + t.i AS x FROM ss_t t WHERE t.id = 99	{numeric} rows=0 
+census/zero/iPlusN	false	SELECT t.i + t.n AS x FROM ss_t t WHERE t.id = 99	{numeric} rows=0 
+census/zero/dPlusI	false	SELECT t.d + t.i AS x FROM ss_t t WHERE t.id = 99	{date} rows=0 
+census/zero/iEqB	false	SELECT t.i = t.b AS x FROM ss_t t WHERE t.id = 99	{bool} rows=0 
+census/zero/iGtF	false	SELECT t.i > t.f AS x FROM ss_t t WHERE t.id = 99	{bool} rows=0 
+census/zero/sCatI	false	SELECT t.s || t.i AS x FROM ss_t t WHERE t.id = 99	{text} rows=0 
+census/zero/fTimesB	false	SELECT t.f * t.b AS x FROM ss_t t WHERE t.id = 99	{float} rows=0 
+census/zero/bMinusI	false	SELECT t.b - t.i AS x FROM ss_t t WHERE t.id = 99	{int} rows=0 
+census/zero/nTimesF	false	SELECT t.n * t.f AS x FROM ss_t t WHERE t.id = 99	{float} rows=0 
+census/zero/tsMinusTs	false	SELECT t.ts - t.ts AS x FROM ss_t t WHERE t.id = 99	{interval} rows=0 
+census/zero/dMinusD	false	SELECT t.d - t.d AS x FROM ss_t t WHERE t.id = 99	{int} rows=0 
+census/zero/iDivF	false	SELECT t.i / t.f AS x FROM ss_t t WHERE t.id = 99	{float} rows=0 
+census/zero/negF	false	SELECT -t.f AS x FROM ss_t t WHERE t.id = 99	{float} rows=0 
+census/zero/caseEndCol	false	SELECT CASE WHEN t.o THEN t.f ELSE t.i END AS x FROM ss_t t WHERE t.id = 99	{float} rows=0 
+census/zero/coalesceFI	false	SELECT coalesce(t.f, t.i) AS x FROM ss_t t WHERE t.id = 99	{float} rows=0 
+census/zero/oAndO	false	SELECT t.o AND t.o AS x FROM ss_t t WHERE t.id = 99	{bool} rows=0 
+census/agg/corrMaxD	false	SELECT o.id, (SELECT max(o.d + x.v) FROM ss_i x) AS x FROM ss_t o	{int,date} rows=6 1,2024-03-10 | 2,1970-01-07 | 3,10000-01-06 | 4,1000-01-07 | 5,1970-01-06 | 6,NULL
+i1422/f/v/times/of	false	SELECT o.id, (SELECT o.f * x.v FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	{int,float} rows=4 1,7.5 | 2,-12.5 | 5,500.625 | 6,NULL
+i1422/f/v/times/if	false	SELECT o.id, (SELECT x.v * o.f FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	{int,float} rows=4 1,7.5 | 2,-12.5 | 5,500.625 | 6,NULL
+i1422/f/v/div/of	false	SELECT o.id, (SELECT o.f / x.v FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	{int,float} rows=4 1,0.3 | 2,-0.5 | 5,20.025 | 6,NULL
+i1422/f/v/div/if	false	SELECT o.id, (SELECT x.v / o.f FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	{int,float} rows=4 1,3.3333333333333335 | 2,-2 | 5,0.049937578027465665 | 6,NULL
+i1422/f/v/cat/of	false	SELECT o.id, (SELECT o.f || x.v FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: double precision || integer
+i1422/f/v/cat/if	false	SELECT o.id, (SELECT x.v || o.f FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: integer || double precision
+i1422/f/g/times/of	false	SELECT o.id, (SELECT o.f * x.g FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	{int,float} rows=4 1,0.75 | 2,-1.25 | 5,50.0625 | 6,NULL
+i1422/f/g/times/if	false	SELECT o.id, (SELECT x.g * o.f FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	{int,float} rows=4 1,0.75 | 2,-1.25 | 5,50.0625 | 6,NULL
+i1422/f/g/div/of	false	SELECT o.id, (SELECT o.f / x.g FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	{int,float} rows=4 1,3 | 2,-5 | 5,200.25 | 6,NULL
+i1422/f/g/div/if	false	SELECT o.id, (SELECT x.g / o.f FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	{int,float} rows=4 1,0.3333333333333333 | 2,-0.2 | 5,0.004993757802746567 | 6,NULL
+i1422/f/g/cat/of	false	SELECT o.id, (SELECT o.f || x.g FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: double precision || double precision
+i1422/f/g/cat/if	false	SELECT o.id, (SELECT x.g || o.f FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: double precision || double precision
+i1422/f/m/times/of	false	SELECT o.id, (SELECT o.f * x.m FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	{int,float} rows=4 1,1.875 | 2,-3.125 | 5,125.15625 | 6,NULL
+i1422/f/m/times/if	false	SELECT o.id, (SELECT x.m * o.f FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	{int,float} rows=4 1,1.875 | 2,-3.125 | 5,125.15625 | 6,NULL
+i1422/f/m/div/of	false	SELECT o.id, (SELECT o.f / x.m FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	{int,float} rows=4 1,1.2 | 2,-2 | 5,80.1 | 6,NULL
+i1422/f/m/div/if	false	SELECT o.id, (SELECT x.m / o.f FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	{int,float} rows=4 1,0.8333333333333334 | 2,-0.5 | 5,0.012484394506866416 | 6,NULL
+i1422/f/m/cat/of	false	SELECT o.id, (SELECT o.f || x.m FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: double precision || numeric
+i1422/f/m/cat/if	false	SELECT o.id, (SELECT x.m || o.f FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: numeric || double precision
+i1422/i/v/times/of	false	SELECT o.id, (SELECT o.i * x.v FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	{int,int} rows=4 1,15 | 2,-35 | 5,5 | 6,NULL
+i1422/i/v/times/if	false	SELECT o.id, (SELECT x.v * o.i FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	{int,int} rows=4 1,15 | 2,-35 | 5,5 | 6,NULL
+i1422/i/v/div/of	false	SELECT o.id, (SELECT o.i / x.v FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	{int,int} rows=4 1,0 | 2,-1 | 5,0 | 6,NULL
+i1422/i/v/div/if	false	SELECT o.id, (SELECT x.v / o.i FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	{int,int} rows=4 1,1 | 2,0 | 5,5 | 6,NULL
+i1422/i/v/cat/of	false	SELECT o.id, (SELECT o.i || x.v FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: integer || integer
+i1422/i/v/cat/if	false	SELECT o.id, (SELECT x.v || o.i FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: integer || integer
+i1422/i/g/times/of	false	SELECT o.id, (SELECT o.i * x.g FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	{int,float} rows=4 1,1.5 | 2,-3.5 | 5,0.5 | 6,NULL
+i1422/i/g/times/if	false	SELECT o.id, (SELECT x.g * o.i FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	{int,float} rows=4 1,1.5 | 2,-3.5 | 5,0.5 | 6,NULL
+i1422/i/g/div/of	false	SELECT o.id, (SELECT o.i / x.g FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	{int,float} rows=4 1,6 | 2,-14 | 5,2 | 6,NULL
+i1422/i/g/div/if	false	SELECT o.id, (SELECT x.g / o.i FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	{int,float} rows=4 1,0.16666666666666666 | 2,-0.07142857142857142 | 5,0.5 | 6,NULL
+i1422/i/g/cat/of	false	SELECT o.id, (SELECT o.i || x.g FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: integer || double precision
+i1422/i/g/cat/if	false	SELECT o.id, (SELECT x.g || o.i FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: double precision || integer
+i1422/i/m/times/of	false	SELECT o.id, (SELECT o.i * x.m FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	{int,numeric} rows=4 1,3.75 | 2,-8.75 | 5,1.25 | 6,NULL
+i1422/i/m/times/if	false	SELECT o.id, (SELECT x.m * o.i FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	{int,numeric} rows=4 1,3.75 | 2,-8.75 | 5,1.25 | 6,NULL
+i1422/i/m/div/of	false	SELECT o.id, (SELECT o.i / x.m FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	{int,numeric} rows=4 1,2.4000000000000000 | 2,-5.6000000000000000 | 5,0.80000000000000000000 | 6,NULL
+i1422/i/m/div/if	false	SELECT o.id, (SELECT x.m / o.i FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	{int,numeric} rows=4 1,0.41666666666666666667 | 2,-0.17857142857142857143 | 5,1.25000000000000000000 | 6,NULL
+i1422/i/m/cat/of	false	SELECT o.id, (SELECT o.i || x.m FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: integer || numeric
+i1422/i/m/cat/if	false	SELECT o.id, (SELECT x.m || o.i FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: numeric || integer
+i1422/b/v/times/of	false	SELECT o.id, (SELECT o.b * x.v FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	{int,int} rows=4 1,150 | 2,-350 | 5,5 | 6,NULL
+i1422/b/v/times/if	false	SELECT o.id, (SELECT x.v * o.b FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	{int,int} rows=4 1,150 | 2,-350 | 5,5 | 6,NULL
+i1422/b/v/div/of	false	SELECT o.id, (SELECT o.b / x.v FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	{int,int} rows=4 1,6 | 2,-14 | 5,0 | 6,NULL
+i1422/b/v/div/if	false	SELECT o.id, (SELECT x.v / o.b FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	{int,int} rows=4 1,0 | 2,0 | 5,5 | 6,NULL
+i1422/b/v/cat/of	false	SELECT o.id, (SELECT o.b || x.v FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: bigint || integer
+i1422/b/v/cat/if	false	SELECT o.id, (SELECT x.v || o.b FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: integer || bigint
+i1422/b/g/times/of	false	SELECT o.id, (SELECT o.b * x.g FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	{int,float} rows=4 1,15 | 2,-35 | 5,0.5 | 6,NULL
+i1422/b/g/times/if	false	SELECT o.id, (SELECT x.g * o.b FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	{int,float} rows=4 1,15 | 2,-35 | 5,0.5 | 6,NULL
+i1422/b/g/div/of	false	SELECT o.id, (SELECT o.b / x.g FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	{int,float} rows=4 1,60 | 2,-140 | 5,2 | 6,NULL
+i1422/b/g/div/if	false	SELECT o.id, (SELECT x.g / o.b FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	{int,float} rows=4 1,0.016666666666666666 | 2,-0.007142857142857143 | 5,0.5 | 6,NULL
+i1422/b/g/cat/of	false	SELECT o.id, (SELECT o.b || x.g FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: bigint || double precision
+i1422/b/g/cat/if	false	SELECT o.id, (SELECT x.g || o.b FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: double precision || bigint
+i1422/b/m/times/of	false	SELECT o.id, (SELECT o.b * x.m FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	{int,numeric} rows=4 1,37.50 | 2,-87.50 | 5,1.25 | 6,NULL
+i1422/b/m/times/if	false	SELECT o.id, (SELECT x.m * o.b FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	{int,numeric} rows=4 1,37.50 | 2,-87.50 | 5,1.25 | 6,NULL
+i1422/b/m/div/of	false	SELECT o.id, (SELECT o.b / x.m FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	{int,numeric} rows=4 1,24.0000000000000000 | 2,-56.0000000000000000 | 5,0.80000000000000000000 | 6,NULL
+i1422/b/m/div/if	false	SELECT o.id, (SELECT x.m / o.b FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	{int,numeric} rows=4 1,0.04166666666666666667 | 2,-0.01785714285714285714 | 5,1.25000000000000000000 | 6,NULL
+i1422/b/m/cat/of	false	SELECT o.id, (SELECT o.b || x.m FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: bigint || numeric
+i1422/b/m/cat/if	false	SELECT o.id, (SELECT x.m || o.b FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: numeric || bigint
+i1422/n/v/times/of	false	SELECT o.id, (SELECT o.n * x.v FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	{int,numeric} rows=4 1,11.25 | 2,-17.50 | 5,0.05 | 6,NULL
+i1422/n/v/times/if	false	SELECT o.id, (SELECT x.v * o.n FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	{int,numeric} rows=4 1,11.25 | 2,-17.50 | 5,0.05 | 6,NULL
+i1422/n/v/div/of	false	SELECT o.id, (SELECT o.n / x.v FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	{int,numeric} rows=4 1,0.45000000000000000000 | 2,-0.70000000000000000000 | 5,0.00200000000000000000 | 6,NULL
+i1422/n/v/div/if	false	SELECT o.id, (SELECT x.v / o.n FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	{int,numeric} rows=4 1,2.2222222222222222 | 2,-1.4285714285714286 | 5,500.0000000000000000 | 6,NULL
+i1422/n/v/cat/of	false	SELECT o.id, (SELECT o.n || x.v FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: numeric || integer
+i1422/n/v/cat/if	false	SELECT o.id, (SELECT x.v || o.n FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: integer || numeric
+i1422/n/g/times/of	false	SELECT o.id, (SELECT o.n * x.g FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	{int,float} rows=4 1,1.125 | 2,-1.75 | 5,0.005 | 6,NULL
+i1422/n/g/times/if	false	SELECT o.id, (SELECT x.g * o.n FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	{int,float} rows=4 1,1.125 | 2,-1.75 | 5,0.005 | 6,NULL
+i1422/n/g/div/of	false	SELECT o.id, (SELECT o.n / x.g FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	{int,float} rows=4 1,4.5 | 2,-7 | 5,0.02 | 6,NULL
+i1422/n/g/div/if	false	SELECT o.id, (SELECT x.g / o.n FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	{int,float} rows=4 1,0.2222222222222222 | 2,-0.14285714285714285 | 5,50 | 6,NULL
+i1422/n/g/cat/of	false	SELECT o.id, (SELECT o.n || x.g FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: numeric || double precision
+i1422/n/g/cat/if	false	SELECT o.id, (SELECT x.g || o.n FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: double precision || numeric
+i1422/n/m/times/of	false	SELECT o.id, (SELECT o.n * x.m FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	{int,numeric} rows=4 1,2.8125 | 2,-4.3750 | 5,0.0125 | 6,NULL
+i1422/n/m/times/if	false	SELECT o.id, (SELECT x.m * o.n FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	{int,numeric} rows=4 1,2.8125 | 2,-4.3750 | 5,0.0125 | 6,NULL
+i1422/n/m/div/of	false	SELECT o.id, (SELECT o.n / x.m FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	{int,numeric} rows=4 1,1.8000000000000000 | 2,-2.8000000000000000 | 5,0.00800000000000000000 | 6,NULL
+i1422/n/m/div/if	false	SELECT o.id, (SELECT x.m / o.n FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	{int,numeric} rows=4 1,0.55555555555555555556 | 2,-0.35714285714285714286 | 5,125.0000000000000000 | 6,NULL
+i1422/n/m/cat/of	false	SELECT o.id, (SELECT o.n || x.m FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: numeric || numeric
+i1422/n/m/cat/if	false	SELECT o.id, (SELECT x.m || o.n FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: numeric || numeric
+i1422/s/v/times/of	false	SELECT o.id, (SELECT o.s * x.v FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: text * integer
+i1422/s/v/times/if	false	SELECT o.id, (SELECT x.v * o.s FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: integer * text
+i1422/s/v/div/of	false	SELECT o.id, (SELECT o.s / x.v FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: text / integer
+i1422/s/v/div/if	false	SELECT o.id, (SELECT x.v / o.s FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: integer / text
+i1422/s/v/cat/of	false	SELECT o.id, (SELECT o.s || x.v FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	{int,text} rows=4 1,abc5 | 2,Hello5 | 5,x5 | 6,NULL
+i1422/s/v/cat/if	false	SELECT o.id, (SELECT x.v || o.s FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	{int,text} rows=4 1,5abc | 2,5Hello | 5,5x | 6,NULL
+i1422/s/g/times/of	false	SELECT o.id, (SELECT o.s * x.g FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: text * double precision
+i1422/s/g/times/if	false	SELECT o.id, (SELECT x.g * o.s FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: double precision * text
+i1422/s/g/div/of	false	SELECT o.id, (SELECT o.s / x.g FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: text / double precision
+i1422/s/g/div/if	false	SELECT o.id, (SELECT x.g / o.s FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: double precision / text
+i1422/s/g/cat/of	false	SELECT o.id, (SELECT o.s || x.g FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	{int,text} rows=4 1,abc0.5 | 2,Hello0.5 | 5,x0.5 | 6,NULL
+i1422/s/g/cat/if	false	SELECT o.id, (SELECT x.g || o.s FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	{int,text} rows=4 1,0.5abc | 2,0.5Hello | 5,0.5x | 6,NULL
+i1422/s/m/times/of	false	SELECT o.id, (SELECT o.s * x.m FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: text * numeric
+i1422/s/m/times/if	false	SELECT o.id, (SELECT x.m * o.s FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: numeric * text
+i1422/s/m/div/of	false	SELECT o.id, (SELECT o.s / x.m FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: text / numeric
+i1422/s/m/div/if	false	SELECT o.id, (SELECT x.m / o.s FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: numeric / text
+i1422/s/m/cat/of	false	SELECT o.id, (SELECT o.s || x.m FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	{int,text} rows=4 1,abc1.25 | 2,Hello1.25 | 5,x1.25 | 6,NULL
+i1422/s/m/cat/if	false	SELECT o.id, (SELECT x.m || o.s FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	{int,text} rows=4 1,1.25abc | 2,1.25Hello | 5,1.25x | 6,NULL
+i1422/d/v/times/of	false	SELECT o.id, (SELECT o.d * x.v FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: date * integer
+i1422/d/v/times/if	false	SELECT o.id, (SELECT x.v * o.d FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: integer * date
+i1422/d/v/div/of	false	SELECT o.id, (SELECT o.d / x.v FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: date / integer
+i1422/d/v/div/if	false	SELECT o.id, (SELECT x.v / o.d FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: integer / date
+i1422/d/v/cat/of	false	SELECT o.id, (SELECT o.d || x.v FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: date || integer
+i1422/d/v/cat/if	false	SELECT o.id, (SELECT x.v || o.d FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: integer || date
+i1422/d/g/times/of	false	SELECT o.id, (SELECT o.d * x.g FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: date * double precision
+i1422/d/g/times/if	false	SELECT o.id, (SELECT x.g * o.d FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: double precision * date
+i1422/d/g/div/of	false	SELECT o.id, (SELECT o.d / x.g FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: date / double precision
+i1422/d/g/div/if	false	SELECT o.id, (SELECT x.g / o.d FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: double precision / date
+i1422/d/g/cat/of	false	SELECT o.id, (SELECT o.d || x.g FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: date || double precision
+i1422/d/g/cat/if	false	SELECT o.id, (SELECT x.g || o.d FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: double precision || date
+i1422/d/m/times/of	false	SELECT o.id, (SELECT o.d * x.m FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: date * numeric
+i1422/d/m/times/if	false	SELECT o.id, (SELECT x.m * o.d FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: numeric * date
+i1422/d/m/div/of	false	SELECT o.id, (SELECT o.d / x.m FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: date / numeric
+i1422/d/m/div/if	false	SELECT o.id, (SELECT x.m / o.d FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: numeric / date
+i1422/d/m/cat/of	false	SELECT o.id, (SELECT o.d || x.m FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: date || numeric
+i1422/d/m/cat/if	false	SELECT o.id, (SELECT x.m || o.d FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: numeric || date
+i1422/ts/v/times/of	false	SELECT o.id, (SELECT o.ts * x.v FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: timestamp without time zone * integer
+i1422/ts/v/times/if	false	SELECT o.id, (SELECT x.v * o.ts FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: integer * timestamp without time zone
+i1422/ts/v/div/of	false	SELECT o.id, (SELECT o.ts / x.v FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: timestamp without time zone / integer
+i1422/ts/v/div/if	false	SELECT o.id, (SELECT x.v / o.ts FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: integer / timestamp without time zone
+i1422/ts/v/cat/of	false	SELECT o.id, (SELECT o.ts || x.v FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: timestamp without time zone || integer
+i1422/ts/v/cat/if	false	SELECT o.id, (SELECT x.v || o.ts FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: integer || timestamp without time zone
+i1422/ts/g/times/of	false	SELECT o.id, (SELECT o.ts * x.g FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: timestamp without time zone * double precision
+i1422/ts/g/times/if	false	SELECT o.id, (SELECT x.g * o.ts FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: double precision * timestamp without time zone
+i1422/ts/g/div/of	false	SELECT o.id, (SELECT o.ts / x.g FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: timestamp without time zone / double precision
+i1422/ts/g/div/if	false	SELECT o.id, (SELECT x.g / o.ts FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: double precision / timestamp without time zone
+i1422/ts/g/cat/of	false	SELECT o.id, (SELECT o.ts || x.g FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: timestamp without time zone || double precision
+i1422/ts/g/cat/if	false	SELECT o.id, (SELECT x.g || o.ts FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: double precision || timestamp without time zone
+i1422/ts/m/times/of	false	SELECT o.id, (SELECT o.ts * x.m FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: timestamp without time zone * numeric
+i1422/ts/m/times/if	false	SELECT o.id, (SELECT x.m * o.ts FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: numeric * timestamp without time zone
+i1422/ts/m/div/of	false	SELECT o.id, (SELECT o.ts / x.m FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: timestamp without time zone / numeric
+i1422/ts/m/div/if	false	SELECT o.id, (SELECT x.m / o.ts FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: numeric / timestamp without time zone
+i1422/ts/m/cat/of	false	SELECT o.id, (SELECT o.ts || x.m FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: timestamp without time zone || numeric
+i1422/ts/m/cat/if	false	SELECT o.id, (SELECT x.m || o.ts FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: numeric || timestamp without time zone
+i1422/o/v/times/of	false	SELECT o.id, (SELECT o.o * x.v FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: boolean * integer
+i1422/o/v/times/if	false	SELECT o.id, (SELECT x.v * o.o FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: integer * boolean
+i1422/o/v/div/of	false	SELECT o.id, (SELECT o.o / x.v FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: boolean / integer
+i1422/o/v/div/if	false	SELECT o.id, (SELECT x.v / o.o FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: integer / boolean
+i1422/o/v/cat/of	false	SELECT o.id, (SELECT o.o || x.v FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: boolean || integer
+i1422/o/v/cat/if	false	SELECT o.id, (SELECT x.v || o.o FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: integer || boolean
+i1422/o/g/times/of	false	SELECT o.id, (SELECT o.o * x.g FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: boolean * double precision
+i1422/o/g/times/if	false	SELECT o.id, (SELECT x.g * o.o FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: double precision * boolean
+i1422/o/g/div/of	false	SELECT o.id, (SELECT o.o / x.g FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: boolean / double precision
+i1422/o/g/div/if	false	SELECT o.id, (SELECT x.g / o.o FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: double precision / boolean
+i1422/o/g/cat/of	false	SELECT o.id, (SELECT o.o || x.g FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: boolean || double precision
+i1422/o/g/cat/if	false	SELECT o.id, (SELECT x.g || o.o FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: double precision || boolean
+i1422/o/m/times/of	false	SELECT o.id, (SELECT o.o * x.m FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: boolean * numeric
+i1422/o/m/times/if	false	SELECT o.id, (SELECT x.m * o.o FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: numeric * boolean
+i1422/o/m/div/of	false	SELECT o.id, (SELECT o.o / x.m FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: boolean / numeric
+i1422/o/m/div/if	false	SELECT o.id, (SELECT x.m / o.o FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: numeric / boolean
+i1422/o/m/cat/of	false	SELECT o.id, (SELECT o.o || x.m FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: boolean || numeric
+i1422/o/m/cat/if	false	SELECT o.id, (SELECT x.m || o.o FROM ss_i x WHERE x.id = 1) AS x FROM ss_t o WHERE o.id IN (1, 2, 5, 6)	ERR 42883 operator does not exist: numeric || boolean

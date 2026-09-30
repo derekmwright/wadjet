@@ -3,7 +3,7 @@
 package pgwire
 
 // A SCALAR SUBQUERY'S ANSWER IS DECLARED AND SENT AS THE TYPE ITS SELECT LIST
-// DECLARES — arc SS (#1428 #1431 #1427 #1422), the wire arm.
+// DECLARES (#1428 #1431 #1427 #1422), over the wire.
 //
 // One cell per result type, uncorrelated and correlated over the OUTER
 // column itself, plus the issues' operand shapes: the OID in RowDescription
@@ -96,6 +96,12 @@ func TestArcSSScalarSubqueryTypedOnTheWire(t *testing.T) {
 		{"corrFPlusV", `SELECT (SELECT o.f + x.v FROM ss_i x WHERE x.id = 1) AS v FROM ss_t o WHERE o.id = 1`, 701, "6.5"},
 		{"corrNPlusV", `SELECT (SELECT o.n + x.v FROM ss_i x WHERE x.id = 1) AS v FROM ss_t o WHERE o.id = 1`, 1700, "7.25"},
 		{"corrIPlusG", `SELECT (SELECT o.i + x.g FROM ss_i x WHERE x.id = 1) AS v FROM ss_t o WHERE o.id = 1`, 701, "3.5"},
+		// int4 arithmetic inside a scalar subquery is int4, correlated over
+		// an int4 outer column or not; v0.25.3 declared both 23 as well.
+		{"corrIPlusV", `SELECT (SELECT o.i + x.v FROM ss_i x WHERE x.id = 1) AS v FROM ss_t o WHERE o.id = 1`, 23, "8"},
+		{"innerVPlusV", `SELECT (SELECT x.v + x.v FROM ss_i x WHERE x.id = 1) AS v`, 23, "10"},
+		// A DATE answer past 9999-12-31 is read back as the date it is.
+		{"datePast9999", `SELECT (SELECT d + 1 FROM ss_t WHERE id = 3) AS v`, 1082, "10000-01-01"},
 		{"innerGPlusV", `SELECT (SELECT x.g + x.v FROM ss_i x WHERE x.id = 1) AS v`, 701, "5.5"},
 		{"innerGPlusVZero", `SELECT x.g + x.v AS v FROM ss_i x WHERE x.id = 99`, 701, "<none>"},
 		{"groupByKey", `SELECT (SELECT i FROM ss_t WHERE id = 1) AS v FROM ss_t GROUP BY 1`, 23, "3"},
