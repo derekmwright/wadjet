@@ -1171,6 +1171,20 @@ arithmetic above it, exactly as the plain `SELECT MAX(bigint_col) FROM t` is —
 the two spellings answer the same value at the same type. An `ORDER BY` term
 the SELECT list does not carry is engine scaffolding and is never the value.
 
+The answer **is a value of that type wherever it is read**, as a column of the
+type is. A `DATE` or `TIMESTAMP` subquery is an instant to `CAST`, `extract`,
+`date_trunc`, `± INTERVAL`, a comparison with a column of its own type and an
+`INSERT … SELECT` target: `CAST((SELECT ts …) AS VARCHAR)` is the timestamp's
+text, `(SELECT max(ts) …) + INTERVAL '1 hour'` is an hour later, and
+`d = (SELECT d …)` finds 9999-12-31 as it finds any other date. A subquery that
+reads the outer row is declared with each outer column at that column's own
+type, so `(SELECT c.f + x.v FROM x …)` over a `double precision` `c.f` and an
+`integer` `x.v` is `double precision`, in either operand order, and stores 8
+for 7.5 into an `integer` column as PostgreSQL does. Arithmetic and `abs` over
+a `NUMERIC` subquery are computed and declared `double precision` where
+PostgreSQL's are `numeric`: `(SELECT n …) * 2` over 2.25 is `4.5` here and
+`4.50` there.
+
 A scalar subquery with **no `FROM` clause is its SELECT expression**, evaluated
 in the enclosing query's scope — which is what lets it read the row around it:
 
