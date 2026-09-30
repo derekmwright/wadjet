@@ -41,12 +41,25 @@ func WindowIntegerArgument(fn string, n Node) (v int64, isNull bool, err error) 
 		if e.Op != "-" && e.Op != "+" {
 			break
 		}
+		// `-2147483648` is ONE signed literal, as PostgreSQL's grammar
+		// folds a minus into the constant it precedes (parenthesized too):
+		// read apart, its magnitude is past int4 and was refused 42883.
+		if lit, ok := Unparen(e.Inner).(*Lit); ok && e.Op == "-" && lit.Kind == LitNumber &&
+			!strings.HasPrefix(lit.Value, "-") {
+			return WindowIntegerArgument(fn, &Lit{Kind: LitNumber, Value: "-" + lit.Value})
+		}
 		inner, null, err := WindowIntegerArgument(fn, e.Inner)
 		if err != nil || null {
 			return 0, null, err
 		}
 		if e.Op == "-" {
 			inner = -inner
+		}
+		if inner < math.MinInt32 || inner > math.MaxInt32 {
+			// -(-2147483648): PostgreSQL negates the literal's text, and
+			// 2147483648 is a bigint.
+			return 0, false, sqlerr.New("42883",
+				"function %s with a bigint argument does not exist: the argument is an integer", fn)
 		}
 		return inner, false, nil
 	case *Lit:
@@ -181,6 +194,10 @@ func windowArgumentOperands(fn string, n Node) error {
 	case *ParenNode:
 		return windowArgumentOperands(fn, e.Inner)
 	case *UnaryOp:
+		if lit, ok := Unparen(e.Inner).(*Lit); ok && e.Op == "-" && lit.Kind == LitNumber {
+			_, _, err := WindowIntegerArgument(fn, e) // one signed literal
+			return err
+		}
 		return windowArgumentOperands(fn, e.Inner)
 	case *BinaryOp:
 		if err := windowArgumentOperands(fn, e.Left); err != nil {
