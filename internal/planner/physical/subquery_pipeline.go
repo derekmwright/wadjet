@@ -149,9 +149,7 @@ func outerDeclsOf(scope *logical.Node) expr.OuterDeclFunc {
 			// A derived relation's integer column is carried in an int64
 			// whatever its width; the WIDTH it publishes is the declared type
 			// (`WITH o AS (SELECT CAST(… AS INT) AS i)` is int4).
-			if t == parquet.TypeInt64 && widths[name] == intWidth4 {
-				t = parquet.TypeInt32
-			}
+			t = publishedIntegerType(t, widths[name])
 			col := parquet.Column{Name: ref.Column, Type: t}
 			switch t {
 			case parquet.TypeDecimal:
@@ -293,68 +291,34 @@ func (p *Planner) SubqueryOutputColumn(sql string) (col parquet.Column, ok bool)
 		// than picking none (ADR-0012 item 8).
 		return parquet.Column{}, false
 	}
+	// The answer is the plan's one output column exactly as any relation
+	// publishes it — the SELECT-list declaration (declaredOutputSchema) at
+	// the integer width the same plan publishes for it (emittedColIntWidth),
+	// the pair a derived table's or a CTE's column is read as (outerDeclsOf).
 	col = schema[0]
-	if col.Type == parquet.TypeInt64 && subqueryAnswerIsInt4(plan, col.Name) {
-		col.Type = parquet.TypeInt32
-	}
+	w, _ := lookupColIntWidth(emittedColIntWidth(plan), col.Name)
+	col.Type = publishedIntegerType(col.Type, w)
 	return col, true
 }
 
-// subqueryAnswerIsInt4 reports whether a scalar subquery's integer answer is
-// PostgreSQL's int4: its single output projection is integer arithmetic whose
-// every leaf names a width of its own and whose widest is int4 — `x.v + x.v`,
-// `o.i * x.v` with the outer column's stand-in (typed as the int4 column).
+// publishedIntegerType is the type a reader STORES a relation's integer
+// output column at: the carrier the declaration walk names, narrowed to
+// INT32 where the relation publishes PostgreSQL's int4 width for it.
 //
-// This engine computes int4 arithmetic in an int64 and declares it bigint
-// (numeric-decimal#r1); a scalar subquery's answer is the one place the value
-// is STORED at its declared type before anything reads it, so declaring the
-// int4 PostgreSQL declares is what makes a result past its range raise 22003
-// there as it does on PostgreSQL, and the wire say integer (OID 23). The
-// subquery is declared from its own plan on one path, so the stage arms'
-// coarser slot typing (E78) never meets this declaration.
-//
-// An operand the width walk cannot type declines (intWidthFullyKnown): a
-// narrowing over `(SELECT MAX(c_i64) …) + 1` would declare int4 for a bigint.
-func subqueryAnswerIsInt4(plan *logical.Node, name string) bool {
-	n := plan
-	for n != nil && len(n.Children) == 1 {
-		switch n.Type {
-		case logical.NodeFilter, logical.NodeLimit, logical.NodeSort, logical.NodeDistinct:
-			n = n.Children[0]
-			continue
-		}
-		break
+// This engine computes every integer expression in an int64 and declares a
+// projection of one bigint (numeric-decimal#r1); the width it publishes
+// beside that carrier is PostgreSQL's (`x.v + x.v` over int4 is int4,
+// `x.b - x.i` is int8). A value read from a relation into a typed slot — a
+// scalar subquery's answer, a derived relation's column read as a correlated
+// outer value — is stored at the published width, so a result past the int4
+// range raises 22003 there as it does on PostgreSQL and the wire says
+// integer (OID 23). Both are declared from one plan on one path, so the stage
+// arms' coarser slot typing (E78) never meets this narrowing.
+func publishedIntegerType(t parquet.TypeID, w intWidth) parquet.TypeID {
+	if t == parquet.TypeInt64 && w == intWidth4 {
+		return parquet.TypeInt32
 	}
-	if n == nil || n.Type != logical.NodeProject || len(n.Children) != 1 {
-		return false
-	}
-	var proj *logical.Projection
-	for i := range n.Projections {
-		if strings.EqualFold(declaredProjectionName(n.Projections[i]), name) {
-			proj = &n.Projections[i]
-			break
-		}
-	}
-	if proj == nil || proj.IsAgg || proj.ASTExpr == nil || isSimpleColRefForRename(proj.ASTExpr) {
-		return false
-	}
-	switch plansql.Unparen(proj.ASTExpr).(type) {
-	case *plansql.BinaryOp, *plansql.UnaryOp:
-	default:
-		return false
-	}
-	w, ok := lookupColIntWidth(emittedColIntWidth(n), name)
-	if !ok || w != intWidth4 {
-		return false
-	}
-	child := n.Children[0]
-	decls := withSubqueryDecls(ColDecls{
-		Types:    emittedColTypes(child),
-		Fields:   inputColFields(child),
-		Dec:      emittedColDecimal(child),
-		intWidth: emittedColIntWidth(child),
-	}, n)
-	return intWidthFullyKnown(proj.ASTExpr, decls)
+	return t
 }
 
 // subqueryLogicalPlan is the parse-build-annotate half of subqueryOutputColumn,

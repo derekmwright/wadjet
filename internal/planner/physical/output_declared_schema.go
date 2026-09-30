@@ -838,6 +838,20 @@ func declaredProjectionName(proj logical.Projection) string {
 	return cleanExpr(proj.Expr)
 }
 
+// publishedExprName is the column a producer below publishes a computed
+// projection under — its WHOLE expression text, lowercased (ADR-0026 §2c) —
+// when decls declares one. Both halves of a projection's declaration, the
+// type (declaredProjectionDecl) and the integer width
+// (declaredProjectionIntWidth), read the producer's column through it.
+func publishedExprName(proj logical.Projection, decls ColDecls) (string, bool) {
+	name := strings.ToLower(strings.TrimSpace(proj.Expr))
+	if name == "" {
+		return "", false
+	}
+	_, ok := decls.Types[name]
+	return name, ok
+}
+
 // declaredProjectionType answers what exec.Project will emit for one
 // projection, which is NOT the type the planner puts on ProjectColumn: that
 // declaration is a placeholder for a bare column reference and the operator
@@ -908,20 +922,17 @@ func declaredProjectionDecl(proj logical.Projection, decls ColDecls, strictInt m
 		// #361's silent-write guard failed the task after three attempts
 		// (#949).
 		//
-		// The name must be the expression's WHOLE text. namedDecl also
-		// answers a qualified name by its bare suffix (`x.g` → `g`), and
-		// an expression's text is not a qualified name: `x.g + x.v` ended
-		// in `.v`, so the DOUBLE sum was declared INT32 — the vector a
-		// scalar subquery's answer is written into (`(SELECT x.g + x.v …)`
-		// and the correlated `(SELECT c.f + x.v …)`, whose outer value
-		// re-runs as a CAST: 6 for 6.5, #1422) and the zero-row
-		// RowDescription alike, while the operands in the other order
-		// were right.
-		if name := strings.TrimSpace(proj.Expr); name != "" {
-			if _, whole := decls.Types[strings.ToLower(name)]; whole {
-				if d, ok := decls.namedDecl(name); ok {
-					return d
-				}
+		// The name must be the expression's WHOLE text (publishedExprName).
+		// namedDecl also answers a qualified name by its bare suffix (`x.g`
+		// → `g`), and an expression's text is not a qualified name:
+		// `x.g + x.v` ended in `.v`, so the DOUBLE sum was declared INT32 —
+		// the vector a scalar subquery's answer is written into
+		// (`(SELECT c.f + x.v …)`: 6 for 6.5, #1422) and the zero-row
+		// RowDescription alike, while the operands in the other order were
+		// right; the width half answered `t.b - t.i` with `i`'s int4.
+		if name, ok := publishedExprName(proj, decls); ok {
+			if d, ok := decls.namedDecl(name); ok {
+				return d
 			}
 		}
 		return inferProjectionDeclType(proj.ASTExpr, parquet.TypeString, strictInt, decls)
