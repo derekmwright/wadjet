@@ -66,8 +66,10 @@ func TestIntegerDomainDeclinesADecimalOperand(t *testing.T) {
 		{"case_over_a_decimal_literal", "(CASE WHEN i > 0 THEN 1.5 ELSE 1 END) * 2", 3.0},
 		{"greatest_over_a_decimal_literal", "GREATEST(1.5, 1) * 2", 3.0},
 		// A fractional literal on the OTHER side of the operator, which is the
-		// #841 boundary reached from here.
-		{"cast_times_a_fractional_literal", "CAST(i AS BIGINT) * 2.5", 1.0e10},
+		// #841 boundary reached from here. numeric on the server, and exact
+		// here: a cast to BIGINT contributes DECIMAL(19,0), as a bigint column
+		// does (IntegerCastDecimalDigits).
+		{"cast_times_a_fractional_literal", "CAST(i AS BIGINT) * 2.5", "10000000000.0"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			got := intDomainCompile(t, c.sql).Eval(b, 0)

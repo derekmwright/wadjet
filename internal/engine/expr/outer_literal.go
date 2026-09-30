@@ -22,7 +22,9 @@ import (
 // VECTOR, an ARRAY whose element has no exact cast spelling, and BYTES
 // containing invalid UTF-8 or NUL: this substitution path has no faithful
 // literal spelling for them.
-// NULL renders as null for every type and comparisons remain UNKNOWN.
+// NULL renders as a NULL of the column's type where the value is a CAST or a
+// typed literal (outerNull), and as the bare null where it is a quoted string;
+// comparisons remain UNKNOWN.
 // See docs/internals/correlated-outer-literal-roundtrip.md for the design.
 
 // outerLiteral renders one outer-row value as the literal node the re-run's
@@ -30,7 +32,7 @@ import (
 func outerLiteral(v *batch.Vector, row int) (plansql.Node, error) {
 	val := v.GetValue(row)
 	if val == nil {
-		return &plansql.Lit{Value: "null", Kind: plansql.LitNull}, nil
+		return outerNull(v), nil
 	}
 	num := func(s string) plansql.Node { return &plansql.Lit{Value: s, Kind: plansql.LitNumber} }
 	str := func(s string) plansql.Node { return &plansql.Lit{Value: s, Kind: plansql.LitString} }
@@ -50,18 +52,33 @@ func outerLiteral(v *batch.Vector, row int) (plansql.Node, error) {
 		return &plansql.Lit{Value: "false", Kind: plansql.LitBool}, nil
 
 	case batch.TypeInt32, batch.TypeInt64, batch.TypePort, batch.TypeProtocol, batch.TypeDuration:
-		// PORT and PROTOCOL box as int32 and DURATION as int64, and an
-		// integer literal IS their type — no cast can narrow or widen the
-		// comparison away from where an equality already lands.
+		var text string
 		switch n := val.(type) {
 		case int32:
-			return num(strconv.FormatInt(int64(n), 10)), nil
+			text = strconv.FormatInt(int64(n), 10)
 		case int64:
-			return num(strconv.FormatInt(n, 10)), nil
+			text = strconv.FormatInt(n, 10)
 		case int:
-			return num(strconv.FormatInt(int64(n), 10)), nil
+			text = strconv.FormatInt(int64(n), 10)
+		default:
+			return nil, unrenderableOuterValue(v.Type, val)
 		}
-		return nil, unrenderableOuterValue(v.Type, val)
+		// An INTEGER or a BIGINT is CAST to its type: a bare literal's type
+		// is read off its digits, and in DECIMAL arithmetic that is a
+		// DECIMAL(1,0) for a 3 where the int4 column is DECIMAL(10,0) — so
+		// `x.m / o.i` re-ran as `x.m / 3` at a six-digit scale while the
+		// subquery was declared at the column's thirteen (0.4166670000000).
+		// The cast carries the column's type into every operator, and it is
+		// the stand-in the declaration is made from (outerStandIn). PORT and
+		// PROTOCOL box as int32 and DURATION as int64; no cast spelling names
+		// those types here, so they stay the bare literal.
+		switch v.Type {
+		case batch.TypeInt32:
+			return &plansql.CastNode{Inner: num(text), TypeName: "integer"}, nil
+		case batch.TypeInt64:
+			return &plansql.CastNode{Inner: num(text), TypeName: "bigint"}, nil
+		}
+		return num(text), nil
 
 	case batch.TypeFloat64:
 		f, ok := val.(float64)
@@ -166,6 +183,35 @@ func outerLiteral(v *batch.Vector, row int) (plansql.Node, error) {
 	// ROW, MAP, VECTOR (and an ARRAY whose element has no exact cast
 	// spelling): no literal spelling at all.
 	return nil, unrenderableOuterValue(v.Type, val)
+}
+
+// outerNull is a NULL outer value's spelling: a NULL of the column's type
+// wherever the value's own spelling is a CAST or a typed literal (an
+// integer, a float, a DECIMAL, a DATE, a TIMESTAMP, a boolean, an ARRAY) —
+// outerStandIn's spelling, so a NULL row re-runs the expression the
+// subquery was declared from. The bare `null` is SQL's unknown, and it typed
+// the expression around it by the other operand: `sum(x.v + null)` over an
+// INTEGER outer column answered the sum of x.v where PostgreSQL answers NULL,
+// and `max(null + x.v)` under a DATE declaration answered a number. A type
+// whose value is spelled as a quoted string (text, UUID, the network types,
+// bytes) keeps the bare `null`, the twin of that unknown-typed literal.
+func outerNull(v *batch.Vector) plansql.Node {
+	untyped := &plansql.Lit{Value: "null", Kind: plansql.LitNull}
+	base := v
+	for base.Base != nil {
+		base = base.Base
+	}
+	col := batch.VectorDecl("", base)
+	switch col.Type {
+	case batch.TypeBool:
+		return &plansql.CastNode{Inner: untyped, TypeName: "boolean"}
+	case batch.TypeInt32, batch.TypeInt64, batch.TypeFloat64, batch.TypeFloat32, batch.TypeDecimal,
+		batch.TypeDate, batch.TypeTimestamp, batch.TypeArray:
+		if n, ok := outerStandIn(col); ok {
+			return n
+		}
+	}
+	return untyped
 }
 
 // outerDecimalScale is the column's DECIMAL scale, resolved through a view —
@@ -296,13 +342,12 @@ func outerTypedSQL(info *plansql.SelectInfo, refs []plansql.OuterRef, outerTable
 
 // outerStandIn is the value-free twin of outerLiteral's spelling for a column
 // of this declared type, so the subquery is declared from the expression the
-// re-run evaluates: an integer is a bare integer literal there — and a
-// literal meets a DECIMAL at DECIMAL where a cast integer meets it at float8,
-// so a cast here declared `o.i + x.m` float8 over the re-run's exact sum — a
-// boolean its bare literal, an ARRAY a cast to its element's array type, and
-// every other type a CAST to the name the re-run casts to. ok=false for a type the re-run has no spelling for, or
-// that this does not name (the declaration is then made from the text as
-// written).
+// re-run evaluates: a NULL CAST to the name the re-run casts the value to — an
+// INTEGER column's `CAST(null AS integer)`, whose int4 width and DECIMAL(10,0)
+// contribution are the column's own — a boolean its bare literal, and an
+// ARRAY a cast to its element's array type. ok=false for a type the re-run
+// has no spelling for, or that this does not name (the declaration is then
+// made from the text as written).
 func outerStandIn(col parquet.Column) (plansql.Node, bool) {
 	cast := func(name string) plansql.Node {
 		return &plansql.CastNode{Inner: &plansql.Lit{Value: "null", Kind: plansql.LitNull}, TypeName: name}
@@ -311,14 +356,9 @@ func outerStandIn(col parquet.Column) (plansql.Node, bool) {
 	case batch.TypeBool:
 		return &plansql.Lit{Value: "false", Kind: plansql.LitBool}, true
 	case batch.TypeInt32:
-		// The WIDEST value of the type, so everything the declaration derives
-		// from the literal holds every row's: its integer width, and the
-		// precision a DECIMAL sum takes from its digit count.
-		return &plansql.Lit{Value: "2147483647", Kind: plansql.LitNumber}, true
+		return cast("integer"), true
 	case batch.TypeInt64:
-		// A BIGINT outer value can be any int8, and a stand-in the literal
-		// rule types integer declared a vector 9000000000 does not fit.
-		return &plansql.Lit{Value: "9223372036854775807", Kind: plansql.LitNumber}, true
+		return cast("bigint"), true
 	case batch.TypeFloat64:
 		return cast("double precision"), true
 	case batch.TypeFloat32:

@@ -41,11 +41,11 @@ func correlatedBatch() *batch.RecordBatch {
 func correlatedRunner() SubqueryRunner {
 	return func(sql string) ([]map[string]any, error) {
 		lower := strings.ToLower(sql)
-		// Check for customer_id = 10 or customer_id = 20
-		if strings.Contains(lower, "customer_id = 10") {
+		// Check for customer_id = cast(10 as bigint) or cast(20 as bigint)
+		if strings.Contains(lower, "customer_id = cast(10 as bigint)") {
 			return []map[string]any{{"avg_amount": 75.0}}, nil
 		}
-		if strings.Contains(lower, "customer_id = 20") {
+		if strings.Contains(lower, "customer_id = cast(20 as bigint)") {
 			return []map[string]any{{"avg_amount": 200.0}}, nil
 		}
 		return nil, fmt.Errorf("unexpected SQL: %s", sql)
@@ -116,10 +116,10 @@ func TestCorrelatedExistsSubquery(t *testing.T) {
 
 	// EXISTS: customer_id=10 has rows, customer_id=20 has rows
 	runner := func(sql string) ([]map[string]any, error) {
-		if strings.Contains(sql, "customer_id = 10") {
+		if strings.Contains(sql, "customer_id = cast(10 as bigint)") {
 			return []map[string]any{{"1": 1}}, nil
 		}
-		if strings.Contains(sql, "customer_id = 20") {
+		if strings.Contains(sql, "customer_id = cast(20 as bigint)") {
 			return nil, nil // no rows for customer 20
 		}
 		return nil, fmt.Errorf("unexpected: %s", sql)
@@ -159,7 +159,7 @@ func TestCorrelatedExistsNotSubquery(t *testing.T) {
 	outerRefs := []plansql.OuterRef{{Table: "o", Column: "customer_id"}}
 
 	runner := func(sql string) ([]map[string]any, error) {
-		if strings.Contains(sql, "customer_id = 10") {
+		if strings.Contains(sql, "customer_id = cast(10 as bigint)") {
 			return []map[string]any{{"1": 1}}, nil
 		}
 		return nil, nil
@@ -200,7 +200,7 @@ func TestCorrelatedInSubquery(t *testing.T) {
 	outerRefs := []plansql.OuterRef{{Table: "o", Column: "customer_id"}}
 
 	runner := func(sql string) ([]map[string]any, error) {
-		if strings.Contains(sql, "customer_id = 10") {
+		if strings.Contains(sql, "customer_id = cast(10 as bigint)") {
 			return []map[string]any{
 				{"order_id": int64(1)},
 				{"order_id": int64(3)},
@@ -236,7 +236,7 @@ func TestCompileCorrelatedSubquery(t *testing.T) {
 
 	// Create a runner that echoes back the parameterized SQL for verification
 	runner := func(sql string) ([]map[string]any, error) {
-		if strings.Contains(sql, "customer_id = 42") {
+		if strings.Contains(sql, "customer_id = cast(42 as bigint)") {
 			return []map[string]any{{"avg": 100.0}}, nil
 		}
 		return nil, fmt.Errorf("expected parameterized SQL, got: %s", sql)

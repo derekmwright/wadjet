@@ -37,5 +37,7 @@ Two rules, and the second is the one that keeps this honest:
     bytes. Rendering them anyway is exactly the trade — a plausible wrong
     answer for a loud one — that protocol item 8 forbids.
 
-A NULL is `null` for every type: it is the value the outer row holds, and
+A NULL is a NULL of the column's type where the value is a CAST or a typed
+literal (outerNull), and the bare `null` where it is a quoted string; it is
+the value the outer row holds, and
 every comparison over it is UNKNOWN, which is what PostgreSQL answers.

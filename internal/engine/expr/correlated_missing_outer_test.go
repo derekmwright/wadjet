@@ -52,7 +52,7 @@ func TestReadOuterValuesMissingColumnErrors(t *testing.T) {
 		{
 			name: "present",
 			refs: []plansql.OuterRef{{Table: "c1", Column: "c_nationkey"}},
-			want: map[string]string{"c1.c_nationkey": "7"},
+			want: map[string]string{"c1.c_nationkey": "cast(7 as bigint)"},
 		},
 		{
 			// ColumnByName is case-sensitive and correlation analysis
@@ -131,8 +131,8 @@ func TestReadOuterValuesPresentNullIsNotAnError(t *testing.T) {
 	if !ok {
 		t.Fatalf("vals = %v, want the key present with a rendered literal", vals)
 	}
-	if got := lit.String(); got != "null" {
-		t.Errorf("vals[%q] renders %q, want the NULL literal", "c1.c_nationkey", got)
+	if got := lit.String(); got != "cast(null as bigint)" {
+		t.Errorf("vals[%q] renders %q, want the column's typed NULL", "c1.c_nationkey", got)
 	}
 }
 

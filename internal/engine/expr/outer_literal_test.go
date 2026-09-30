@@ -37,8 +37,8 @@ func TestOuterLiteralRendersEveryTypeAsItsOwnType(t *testing.T) {
 	}{
 		{"bool_true", batch.TypeBool, 0, true, "true"},
 		{"bool_false", batch.TypeBool, 0, false, "false"},
-		{"int32", batch.TypeInt32, 0, int32(-7), "-7"},
-		{"int64", batch.TypeInt64, 0, int64(9007199254740993), "9007199254740993"},
+		{"int32", batch.TypeInt32, 0, int32(-7), "cast(-7 as integer)"},
+		{"int64", batch.TypeInt64, 0, int64(9007199254740993), "cast(9007199254740993 as bigint)"},
 		{"port", batch.TypePort, 0, int32(1025), "1025"},
 		{"protocol", batch.TypeProtocol, 0, int32(6), "6"},
 		{"duration", batch.TypeDuration, 0, int64(1000000), "1000000"},
@@ -91,27 +91,42 @@ func TestOuterLiteralRendersEveryTypeAsItsOwnType(t *testing.T) {
 	}
 }
 
-// A NULL is `null` for every type: it is the value the outer row holds, and
-// every comparison over it is UNKNOWN, which is what PostgreSQL answers. This
-// is the one arm that must NOT depend on the type at all.
+// A NULL is a NULL OF THE COLUMN'S TYPE wherever the value's own spelling is a
+// CAST or a typed literal, and the bare `null` where the value is a quoted
+// string (SQL's unknown) or has no spelling: the outer row holds a typed NULL,
+// every comparison over it is UNKNOWN, and the arithmetic around it keeps its
+// type — `sum(x.v + o.i)` over a NULL int4 is NULL on PostgreSQL, where an
+// untyped null answered the sum of x.v (outerNull).
 func TestOuterLiteralRendersNullForEveryType(t *testing.T) {
-	for _, typ := range []batch.TypeID{
-		batch.TypeBool, batch.TypeInt32, batch.TypeInt64, batch.TypeFloat32,
-		batch.TypeFloat64, batch.TypeString, batch.TypeBytes, batch.TypeTimestamp,
-		batch.TypeIPv4, batch.TypeIPv6, batch.TypeCIDR, batch.TypeMAC,
-		batch.TypePort, batch.TypeProtocol, batch.TypeDuration, batch.TypeUUID,
-		batch.TypeDate, batch.TypeDecimal, batch.TypeArray, batch.TypeRow,
-		batch.TypeMap, batch.TypeVector,
+	for _, c := range []struct {
+		typ  batch.TypeID
+		want string
+	}{
+		{batch.TypeBool, "cast(null as boolean)"},
+		{batch.TypeInt32, "cast(null as integer)"},
+		{batch.TypeInt64, "cast(null as bigint)"},
+		{batch.TypeFloat32, "cast(null as real)"},
+		{batch.TypeFloat64, "cast(null as double precision)"},
+		{batch.TypeTimestamp, "cast(null as timestamp)"},
+		{batch.TypeDate, "cast(null as date)"},
+		{batch.TypeDecimal, "cast(null as decimal(38, 0))"},
+		// An ARRAY vector with no element declaration has no cast spelling.
+		{batch.TypeArray, "null"},
+		{batch.TypeString, "null"}, {batch.TypeBytes, "null"}, {batch.TypeUUID, "null"},
+		{batch.TypeIPv4, "null"}, {batch.TypeIPv6, "null"}, {batch.TypeCIDR, "null"},
+		{batch.TypeMAC, "null"}, {batch.TypePort, "null"}, {batch.TypeProtocol, "null"},
+		{batch.TypeDuration, "null"}, {batch.TypeRow, "null"}, {batch.TypeMap, "null"},
+		{batch.TypeVector, "null"},
 	} {
-		t.Run(typ.String(), func(t *testing.T) {
-			v := batch.NewVector(typ, 1)
+		t.Run(c.typ.String(), func(t *testing.T) {
+			v := batch.NewVector(c.typ, 1)
 			v.Nulls.SetNull(0)
 			lit, err := outerLiteral(v, 0)
 			if err != nil {
 				t.Fatalf("a NULL outer value must render, whatever its type: %v", err)
 			}
-			if got := lit.String(); got != "null" {
-				t.Errorf("outerLiteral = %q, want %q", got, "null")
+			if got := lit.String(); got != c.want {
+				t.Errorf("outerLiteral = %q, want %q", got, c.want)
 			}
 		})
 	}

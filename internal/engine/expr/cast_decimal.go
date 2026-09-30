@@ -306,6 +306,9 @@ func isNonFiniteNumericText(text string) bool {
 // expression stays where it was.
 
 func (e *Cast) decimalType(b *batch.RecordBatch) (batch.DecimalType, bool) {
+	if digits, ok := IntegerCastDecimalDigits(e.DestType); ok {
+		return batch.DecimalType{Precision: digits}, true
+	}
 	d, ok := e.decimalDestination()
 	if !ok || !d.params {
 		return batch.DecimalType{}, false
@@ -315,6 +318,10 @@ func (e *Cast) decimalType(b *batch.RecordBatch) (batch.DecimalType, bool) {
 }
 
 func (e *Cast) evalDecimal(b *batch.RecordBatch, row int) (batch.Int128, bool) {
+	if _, ok := IntegerCastDecimalDigits(e.DestType); ok {
+		// The cast's own integer, range-checked by its destination.
+		return castDecimalValue(e.Eval(b, row), 0)
+	}
 	d, ok := e.decimalDestination()
 	if !ok || !d.params {
 		return batch.Int128{}, false
@@ -337,6 +344,24 @@ func (e *Cast) decimalVec(_ *batch.RecordBatch) (kernel.DecimalOperandVec, bool)
 	// No materialized column of its own; the caller reads it per row through
 	// evalDecimal, unboxed.
 	return kernel.DecimalOperandVec{}, false
+}
+
+// IntegerCastDecimalDigits is the fixed-point contribution of a cast to an
+// INTEGER or a BIGINT: the whole range of the type at scale 0, as an integer
+// column contributes (batch.DecimalTypeOf, ADR-0024 item 2). So
+// `x.m / CAST(3 AS INTEGER)` is exact at the scale `x.m / i` over an int4
+// column has, and not a float8 quotient: the cast names its type, and a type
+// is what the result's (p,s) is a function of. It is NOT decimal-typed
+// (castIsExactDecimal): `CAST(3 AS INTEGER) + x.v` stays integer arithmetic.
+// The planner's declaration reads the same table (decimalArithOperand).
+func IntegerCastDecimalDigits(typeName string) (int, bool) {
+	switch strings.ToLower(strings.TrimSpace(typeName)) {
+	case "int", "integer", "int4", "int32":
+		return batch.Int32DecimalDigits, true
+	case "bigint", "int8", "int64":
+		return batch.Int64DecimalDigits, true
+	}
+	return 0, false
 }
 
 // castIsExactDecimal reports whether this cast produces a DECIMAL at a type it
