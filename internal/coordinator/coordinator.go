@@ -1027,6 +1027,9 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 	}
 
 	// Parse
+	if err := plansql.RefuseColumnValueCall(sql); err != nil {
+		return nil, err
+	}
 	parsed, err := plansql.Parse(sql)
 	if err != nil {
 		// The parser's error is coded (42601, or the refusal's own class)
@@ -3646,6 +3649,9 @@ func (c *Coordinator) SubmitSQL(ctx context.Context, sql string) (queryID string
 	ctx = dagplan.WithManifestSnapshot(ctx, physical.NewManifestSnapshot())
 
 	// Parse
+	if err := plansql.RefuseColumnValueCall(sql); err != nil {
+		return "", "", err
+	}
 	parsed, err := plansql.Parse(sql)
 	if err != nil {
 		return "", "", err

@@ -71,6 +71,9 @@ func CommandTag(command string, rows int64) string {
 // Execute runs a DML statement (INSERT/UPDATE/DELETE/MERGE) and returns the
 // result.
 func (db *DB) Execute(ctx context.Context, sql string) (*ExecResult, error) {
+	if err := plansql.RefuseColumnValueCall(sql); err != nil {
+		return nil, err
+	}
 	parsed, err := plansql.Parse(sql)
 	if err != nil {
 		return nil, stageError("parsing SQL", err)
@@ -4317,9 +4320,12 @@ func (db *DB) dmlSubqueryEnv(ctx context.Context) *DMLSubqueryEnv {
 // which one asked (dmlSubqueryEnv, expr.WithSetRowBound).
 func (db *DB) dmlSubqueryRunner(ctx context.Context) expr.SubqueryRunner {
 	return func(sql string) ([]map[string]any, error) {
-		res, err := db.Query(ctx, sql)
+		// db.query, not the Query door: a correlated re-run spells its outer
+		// values as column-typed casts, which the door refuses from a client
+		// (plansql.RefuseColumnValueCall).
+		res, err := db.query(ctx, sql, 0)
 		if err != nil {
-			return nil, err
+			return nil, sqlerr.Sentence(err)
 		}
 		return res.Rows, nil
 	}

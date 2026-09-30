@@ -583,6 +583,9 @@ func stageError(stage string, err error) error {
 
 // Query executes a SQL query and returns the results.
 func (db *DB) Query(ctx context.Context, sql string) (*QueryResult, error) {
+	if err := plansql.RefuseColumnValueCall(sql); err != nil {
+		return nil, err
+	}
 	res, err := db.query(ctx, sql, 0)
 	// The door's boundary: a refusal is its own sentence, whatever layer
 	// labelled it on the way out (sqlerr.Sentence, #1145).

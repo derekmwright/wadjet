@@ -4375,3 +4375,29 @@ func isTypedLiteralType(name string) bool {
 	}
 	return false
 }
+
+// RefuseColumnValueCall is the client doors' refusal of the column-typed
+// value's spelling (ColumnValueFunc): a correlated re-run's text is the one
+// statement that spells an outer value that way, and it never arrives through
+// a door. A client's statement calling it is PostgreSQL's 42883 — no such
+// function exists there, and none did here before the spelling did. A string
+// literal or a comment holding the text is not a call.
+func RefuseColumnValueCall(sql string) error {
+	if !strings.Contains(strings.ToLower(sql), ColumnValueFunc) {
+		return nil
+	}
+	lx := newLexer(sql)
+	named := false
+	for {
+		t := lx.nextToken()
+		switch t.typ {
+		case TokenEOF, TokenError:
+			return nil
+		case TokenLParen:
+			if named {
+				return sqlerr.New("42883", "unknown function: %s", ColumnValueFunc)
+			}
+		}
+		named = t.typ == TokenIdent && strings.EqualFold(t.val, ColumnValueFunc)
+	}
+}
