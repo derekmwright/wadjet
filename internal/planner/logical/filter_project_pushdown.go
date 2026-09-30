@@ -879,7 +879,7 @@ func substituteColRefs(n plansql.Node, p projRefs) (plansql.Node, bool) {
 		if in == e.Inner {
 			return n, true
 		}
-		return &plansql.CastNode{Inner: in, TypeName: e.TypeName, Column: e.Column}, true
+		return &plansql.CastNode{Inner: in, TypeName: e.TypeName, Column: e.Column, Answer: e.Answer}, true
 	case *plansql.FuncCallNode:
 		newArgs := make([]plansql.Node, len(e.Args))
 		changed := false

@@ -280,7 +280,7 @@ func (p *Planner) SubqueryOutputColumn(sql string) (col parquet.Column, ok bool)
 			col, ok = parquet.Column{}, false
 		}
 	}()
-	plan := p.subqueryLogicalPlan(sql)
+	plan := p.scalarAnswerPlan(sql)
 	if plan == nil {
 		return parquet.Column{}, false
 	}
@@ -324,6 +324,14 @@ func publishedIntegerType(t parquet.TypeID, w intWidth) parquet.TypeID {
 // subqueryLogicalPlan is the parse-build-annotate half of subqueryOutputColumn,
 // named so the WIDTH half (subqueryOutputIntWidth) asks the same tree the TYPE
 // half does rather than building a second one that could differ.
+// scalarAnswerPlan is subqueryLogicalPlan for the DECLARATION of a scalar
+// subquery's answer, marked by markScalarAnswer.
+func (p *Planner) scalarAnswerPlan(sql string) *logical.Node {
+	plan := p.subqueryLogicalPlan(sql)
+	markScalarAnswer(plan)
+	return plan
+}
+
 func (p *Planner) subqueryLogicalPlan(sql string) *logical.Node {
 	ctx := p.PlanCtx
 	if ctx == nil {
@@ -472,6 +480,13 @@ func (p *Planner) buildSubqueryPipelineForPlan(ctx context.Context, info *plansq
 		}
 	}
 
+	// A scalar subquery's BODY computes its integer CASTs and integral
+	// EXTRACT fields as the answer's declaration reads them
+	// (markScalarAnswer): as integer operands of numeric arithmetic.
+	if p.scalarBody {
+		markScalarAnswer(logicalPlan)
+	}
+
 	// Build physical pipeline
 	source, ops, sink, err := p.buildPipeline(ctx, logicalPlan)
 	if err != nil {
@@ -523,7 +538,13 @@ func (p *Planner) executeSubquery(ctx context.Context, sql string) ([]map[string
 // declaration to tell them apart. That is ADR-0012 item 8's rule applied to
 // the one place the boxing happens on the PLANNER's side of the wire.
 func (p *Planner) ExecuteSubquerySchema(ctx context.Context, sql string) ([]map[string]any, []parquet.Column, error) {
+	// The text is a subquery's body, computed as its answer is declared
+	// (markScalarAnswer); a CTE body this planner materializes on the way is
+	// not, and the flag is this call's alone.
+	saved := p.scalarBody
+	p.scalarBody = true
 	source, ops, sink, err := p.buildSubqueryPipeline(ctx, sql)
+	p.scalarBody = saved
 	if err != nil {
 		return nil, nil, err
 	}

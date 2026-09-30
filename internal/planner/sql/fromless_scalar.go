@@ -295,7 +295,7 @@ func unfoldIn(n Node, scope map[string]bool, hasFrom bool) Node {
 		}
 		return out
 	case *CastNode:
-		return &CastNode{Inner: unfoldIn(e.Inner, scope, hasFrom), TypeName: e.TypeName, Column: e.Column}
+		return &CastNode{Inner: unfoldIn(e.Inner, scope, hasFrom), TypeName: e.TypeName, Column: e.Column, Answer: e.Answer}
 	case *ArrayLitNode:
 		out := &ArrayLitNode{Elements: make([]Node, len(e.Elements))}
 		for i, el := range e.Elements {

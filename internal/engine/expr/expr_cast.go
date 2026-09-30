@@ -37,6 +37,10 @@ type Cast struct {
 	// planner's walk gives it, never under what its box looks like (arc CW
 	// round 3). Nil for a Cast built outside the compiler.
 	opDecl *operandDecl
+	// answer marks an integer CAST in a scalar subquery's body
+	// (plansql.CastNode.Answer): an integer operand of numeric arithmetic
+	// there (integerOperand), as the plan declares it.
+	answer bool
 	// Column marks a correlated re-run's outer value (plansql.CastNode.Column):
 	// the value of an outer column of DestType, which contributes to
 	// fixed-point arithmetic as that column does. columnDec is that

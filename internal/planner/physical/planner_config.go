@@ -24,9 +24,12 @@ import (
 type Planner struct {
 	Catalog        *catalog.Catalog
 	subqueryRunner expr.SubqueryRunner
-	PlanCtx        context.Context // context from the current Plan() call, used by subquery runner
-	catResolver    *sysrows.Resolver
-	Ctes           []plansql.CTEDef // CTE definitions from the current query, for subquery resolution
+	// scalarBody is set while ExecuteSubquerySchema plans a subquery's body:
+	// the plan is marked as its answer is declared (markScalarAnswer).
+	scalarBody  bool
+	PlanCtx     context.Context // context from the current Plan() call, used by subquery runner
+	catResolver *sysrows.Resolver
+	Ctes        []plansql.CTEDef // CTE definitions from the current query, for subquery resolution
 	// outputProjection is the Project whose names LEAVE the engine, resolved
 	// once per Plan() call. Only that projection publishes PostgreSQL's
 	// FigureColname (Projection.PublishedName, #732): a nested block's names

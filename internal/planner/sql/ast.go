@@ -388,6 +388,11 @@ type FuncCallNode struct {
 	// PostgreSQL still labels the column `extract`. Empty means Name is the
 	// label, which is the ordinary case (OutputColumnName, #732).
 	OutputLabel string
+	// Answer marks a call inside a SCALAR SUBQUERY's body as the planner
+	// DECLARES the subquery's answer (physical.markScalarAnswer): an
+	// integral EXTRACT field there is an integer operand of numeric
+	// arithmetic. It is not part of the text and the evaluator ignores it.
+	Answer bool
 }
 
 func (*FuncCallNode) nodeTag() {}
@@ -462,6 +467,12 @@ type CastNode struct {
 	// re-run's text carries it (ColumnValueFunc); the parser accepts that
 	// spelling over a literal only.
 	Column bool
+	// Answer marks an integer CAST inside a SCALAR SUBQUERY's body as the
+	// planner DECLARES the subquery's answer (physical.markScalarAnswer):
+	// there it is an integer operand of numeric arithmetic, PostgreSQL's
+	// type for the answer. It is not part of the text and the evaluator
+	// ignores it.
+	Answer bool
 }
 
 // ColumnValueFunc is the spelling of a column-typed cast (CastNode.Column).
@@ -917,7 +928,7 @@ func ReplaceAllAggregates(node Node, replacements map[string]string) Node {
 		if inner == n.Inner {
 			return node
 		}
-		return &CastNode{Inner: inner, TypeName: n.TypeName, Column: n.Column}
+		return &CastNode{Inner: inner, TypeName: n.TypeName, Column: n.Column, Answer: n.Answer}
 	case *CmpExpr:
 		left := ReplaceAllAggregates(n.Left, replacements)
 		right := ReplaceAllAggregates(n.Right, replacements)
@@ -1228,7 +1239,7 @@ func ReplaceWindowFuncs(node Node, replacements map[*WindowFuncNode]string) Node
 		if inner == n.Inner {
 			return node
 		}
-		return &CastNode{Inner: inner, TypeName: n.TypeName, Column: n.Column}
+		return &CastNode{Inner: inner, TypeName: n.TypeName, Column: n.Column, Answer: n.Answer}
 	case *CmpExpr:
 		left := ReplaceWindowFuncs(n.Left, replacements)
 		right := ReplaceWindowFuncs(n.Right, replacements)

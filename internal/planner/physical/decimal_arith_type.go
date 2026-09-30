@@ -144,6 +144,9 @@ func decimalArithOperand(node plansql.Node, decls ColDecls) (batch.DecimalType, 
 		}
 		return integerValuedOperand(n, decls)
 	case *plansql.FuncCallNode:
+		if t, ok := answerIntegerOperand(n, decls); ok {
+			return t, false, true
+		}
 		// A scalar math function over a DECIMAL answers a DECIMAL, so it can
 		// be an operand of exact arithmetic: `ROUND(d, 1) * 2` is numeric in
 		// PostgreSQL and exact here (#668).
@@ -169,6 +172,9 @@ func decimalArithOperand(node plansql.Node, decls ColDecls) (batch.DecimalType, 
 		if ref, d, ok := columnValueRef(n); ok {
 			return decimalArithOperand(ref, d)
 		}
+		if t, ok := answerIntegerOperand(n, decls); ok {
+			return t, false, true
+		}
 		p, s, hasParams, ok := expr.DecimalCastDest(n.TypeName)
 		if !ok || !hasParams {
 			return batch.DecimalType{}, false, false
@@ -191,6 +197,33 @@ func decimalArithOperand(node plansql.Node, decls ColDecls) (batch.DecimalType, 
 		return t, err != nil, true
 	}
 	return batch.DecimalType{}, false, false
+}
+
+// answerIntegerOperand is an integer CAST (`CAST(o.b AS INTEGER)`) or an
+// integral EXTRACT field (`extract(year FROM o.d)`) marked in a SCALAR
+// SUBQUERY's body (markScalarAnswer), as an integer operand of numeric
+// arithmetic: `(SELECT CAST(o.b AS INTEGER) * x.m …)` and
+// `(SELECT extract(year FROM o.d) * x.m …)` are numeric on PostgreSQL and
+// were at v0.25.3, over a derived table or a CTE inside the subquery too; the
+// body computes them so (expr.integerOperand reads the same marks). The same
+// expressions in a query's own SELECT list keep their rules — an integer CAST
+// beside a NUMERIC takes the float rung (N-10), EXTRACT declares double
+// precision (ADR-0024 §2c).
+func answerIntegerOperand(node plansql.Node, _ ColDecls) (batch.DecimalType, bool) {
+	switch n := node.(type) {
+	case *plansql.CastNode:
+		if !n.Answer || n.Column {
+			return batch.DecimalType{}, false
+		}
+		if expr.IsIntegerCastDest(n.TypeName) {
+			return batch.DecimalType{Precision: batch.Int64DecimalDigits}, true
+		}
+	case *plansql.FuncCallNode:
+		if n.Answer && len(n.Args) == 1 && expr.IntegralExtractField(n.Name) {
+			return batch.DecimalType{Precision: batch.Int64DecimalDigits}, true
+		}
+	}
+	return batch.DecimalType{}, false
 }
 
 // integerValuedOperand is a function call or a CASE whose declared type is an

@@ -687,7 +687,7 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 			return nil, err
 		}
 		c := &Cast{Operand: operand, DestType: strings.ToLower(n.TypeName),
-			opDecl: newOperandDecl(n.Inner, ctx), Column: n.Column}
+			opDecl: newOperandDecl(n.Inner, ctx), Column: n.Column, answer: n.Answer}
 		if n.Column {
 			c.columnDec, c.columnDecOK = columnIntegerDecimal(n.TypeName)
 		}
@@ -1397,7 +1397,7 @@ func compileFuncCallNamed(n *plansql.FuncCallNode, ctx *compileContext, checked 
 		return e, err
 	}
 
-	fc := &FuncCall{Name: name, Args: args}
+	fc := &FuncCall{Name: name, Args: args, answer: n.Answer && IntegralExtractField(name)}
 	if len(args) == len(n.Args) {
 		// GREATEST / LEAST / NULLIF order their arguments through the one
 		// container comparator under each argument's declaration.

@@ -4,6 +4,8 @@ package expr
 
 import (
 	"fmt"
+	"math"
+	"strings"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
@@ -61,6 +63,8 @@ func (o integerBoxOperand) evalDecimal(b *batch.RecordBatch, row int) (batch.Int
 // its box from argument 0 while the plan declares the common type of both.
 func integerOperand(e Expr, b *batch.RecordBatch) bool {
 	switch v := e.(type) {
+	case *Cast:
+		return v.answer && castIsInt(v)
 	case *ColRef:
 		v.resolve(b)
 		if v.idx < 0 {
@@ -137,6 +141,9 @@ func integerOperand(e Expr, b *batch.RecordBatch) bool {
 // (the plan keeps `ABS(-1)` on the float path), or a choosing function
 // (GREATEST, LEAST, NULLIF, IFNULL) every argument of which is an integer.
 func integerCall(fc *FuncCall, b *batch.RecordBatch) bool {
+	if fc.answer {
+		return true
+	}
 	r := DefaultRegistry.ReturnType(fc.Name)
 	if r.Integer() {
 		return true
@@ -217,10 +224,30 @@ func integerOperandValue(e Expr, b *batch.RecordBatch, row int) (int64, bool) {
 		return 0, false
 	}
 	v, ok := toInt64Safe(box)
+	if f, isFloat := box.(float64); !ok && isFloat && f == math.Trunc(f) && math.Abs(f) < 1<<62 {
+		// An integral EXTRACT field is carried in a double: its value is
+		// the whole number the double holds.
+		v, ok = int64(f), true
+	}
 	if !ok {
 		// integerOperand said integer and the node answered something
 		// else: reading it as a number would be a guess.
 		panic(fatalEval{fmt.Errorf("integer operand %T answered a %T value", e, box)})
 	}
 	return v, true
+}
+
+// IntegralExtractField reports whether an EXTRACT field (as the parser names
+// the call it rewrites EXTRACT into) is a whole number: YEAR, MONTH, DAY,
+// HOUR, MINUTE, QUARTER, WEEK, DOW, DOY, ISODOW, ISOYEAR, DECADE, CENTURY,
+// MILLENNIUM. SECOND, EPOCH, JULIAN and the sub-second fields carry a
+// fraction.
+func IntegralExtractField(name string) bool {
+	return integralExtractFields[strings.ToLower(name)]
+}
+
+var integralExtractFields = map[string]bool{
+	"year": true, "month": true, "day": true, "hour": true, "minute": true,
+	"quarter": true, "week": true, "day_of_week": true, "day_of_year": true,
+	"isodow": true, "isoyear": true, "decade": true, "century": true, "millennium": true,
 }

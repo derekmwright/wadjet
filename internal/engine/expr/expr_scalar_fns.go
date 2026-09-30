@@ -51,6 +51,10 @@ func (e *ArrayLitExpr) Eval(b *batch.RecordBatch, row int) any {
 type FuncCall struct {
 	Name string
 	Args []Expr
+	// answer marks an integral EXTRACT field in a scalar subquery's body
+	// (plansql.FuncCallNode.Answer): an integer operand of numeric
+	// arithmetic there (integerOperand), as the plan declares it.
+	answer bool
 
 	// fnReady publishes fn and the argument-family flags below it: set last
 	// under fnMu, read first (and alone) by Eval.
