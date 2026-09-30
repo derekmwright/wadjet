@@ -18,6 +18,7 @@ package pgwire
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -230,5 +231,98 @@ func TestArcSSOuterValueStoresAsItsColumn(t *testing.T) {
 		if got := strings.Join(rows, "|"); got != c.rows {
 			t.Errorf("%s\n  sent %q, PostgreSQL 17.11 sends %q", c.sql, got, c.rows)
 		}
+	}
+}
+
+// A SCALAR SUBQUERY IS DECLARED BY THE SELECT-LIST WALK: its type is the one
+// the planner declares for any SELECT-list expression, at the integer width
+// the subquery's plan publishes for it — the pair a derived table's column is
+// read as. A subscript of an int4[] is int4, a day count and ascii() are
+// int4, a bigint beside an int4 is int8, and SUM over a derived or CTE int4
+// column is bigint, as on PostgreSQL 17.11. v0.25.3 answered each of these
+// right only where its declaration looked an expression up by the last column
+// name in its text; `__column_value(…)` — the re-run's own spelling of an
+// outer value — is 42883 from a client, as on PostgreSQL and v0.25.3.
+func TestArcSSDeclaredByTheSelectListWalk(t *testing.T) {
+	srv := setupSSWireDB(t)
+	setup := connectPgconn(t, srv.Addr())
+	ctx := context.Background()
+	for _, sql := range []string{
+		"CREATE TABLE ss_r4a AS SELECT o.id, (SELECT (o.d - DATE '2024-01-01') + x.v FROM ss_i x WHERE x.id = 1) AS k, " +
+			"(SELECT ascii(o.s) + x.v FROM ss_i x WHERE x.id = 1) AS ka, " +
+			"(SELECT o.a[1] + x.v FROM ss_i x WHERE x.id = 1) AS ki FROM ss_t o",
+		"CREATE TABLE ss_r4b AS SELECT sum(s.k) AS tot FROM (SELECT t.i + t.i AS k FROM ss_t t) s",
+	} {
+		if _, err := setup.Exec(ctx, sql).ReadAll(); err != nil {
+			t.Fatalf("%s: %v", sql, err)
+		}
+	}
+	for _, c := range []struct {
+		name, sql string
+		oid       uint32
+		value     string // "<none>" for a zero-row result; "ERR <SQLSTATE>" for a refusal
+	}{
+		{"idxPlusV", `SELECT (SELECT o.a[1] + x.v FROM ss_i x WHERE x.id = 1) AS v FROM ss_t o WHERE o.id = 1`, 23, "6"},
+		{"vPlusIdx", `SELECT (SELECT x.v + o.a[2] FROM ss_i x WHERE x.id = 1) AS v FROM ss_t o WHERE o.id = 1`, 23, "7"},
+		{"idxOvf", `SELECT (SELECT o.a[1] + 2147483647 FROM ss_i x WHERE x.id = 1) AS v FROM ss_t o WHERE o.id = 1`, 0, "ERR 22003"},
+		{"uncIdxPlus", `SELECT (SELECT x.a[1] + 1 FROM ss_t x WHERE x.id = 1) AS v`, 23, "2"},
+		{"uncIdxOvf", `SELECT (SELECT x.a[1] + 2147483647 FROM ss_t x WHERE x.id = 1) AS v`, 0, "ERR 22003"},
+		{"dDiffPlusV", `SELECT (SELECT (o.d - DATE '2024-01-01') + x.v FROM ss_i x WHERE x.id = 1) AS v FROM ss_t o WHERE o.id = 1`, 23, "68"},
+		{"dDiffDivV", `SELECT (SELECT (o.d - DATE '2024-01-01') / x.v FROM ss_i x WHERE x.id = 1) AS v FROM ss_t o WHERE o.id = 1`, 23, "12"},
+		{"ddPlusV", `SELECT (SELECT (o.d - o.d) + x.v FROM ss_i x WHERE x.id = 1) AS v FROM ss_t o WHERE o.id = 1`, 23, "5"},
+		{"asciiPlusV", `SELECT (SELECT ascii(o.s) + x.v FROM ss_i x WHERE x.id = 1) AS v FROM ss_t o WHERE o.id = 1`, 23, "102"},
+		{"uncAscii", `SELECT (SELECT ascii(x.s) FROM ss_t x WHERE x.id = 1) AS v`, 23, "97"},
+		{"plainAscii", `SELECT ascii(s) AS v FROM ss_t WHERE id = 1`, 23, "97"},
+		{"plainAsciiZero", `SELECT ascii(s) AS v FROM ss_t WHERE id = 99`, 23, "<none>"},
+		{"sumDerived", `SELECT sum(s.k) AS v FROM (SELECT t.i + t.i AS k FROM ss_t t) s`, 20, "18"},
+		{"sumCte", `WITH q AS (SELECT t.i + t.i AS k FROM ss_t t) SELECT sum(q.k) AS v FROM q`, 20, "18"},
+		{"sumDerivedTimes2", `SELECT sum(s.k) AS v FROM (SELECT t.i * 2 AS k FROM ss_t t) s`, 20, "18"},
+		{"sumDerivedBMinusI", `SELECT sum(s.k) AS v FROM (SELECT t.b - t.i AS k FROM ss_t t) s`, 1700, "9000000022"},
+		{"keepBMinusI", `SELECT (SELECT x.b - x.i FROM ss_t x WHERE x.id = 3) AS v`, 20, "8999999995"},
+		{"ctasDayCount", `SELECT k FROM ss_r4a WHERE id = 1`, 23, "68"},
+		{"ctasAscii", `SELECT ka FROM ss_r4a WHERE id = 1`, 23, "102"},
+		{"ctasSubscript", `SELECT ki FROM ss_r4a WHERE id = 1`, 23, "6"},
+		{"ctasSum", `SELECT tot FROM ss_r4b`, 20, "18"},
+		{"spelling", `SELECT __column_value(cast(5 as integer)) AS v`, 0, "ERR 42883"},
+		{"spellingInSub", `SELECT (SELECT __column_value(cast(5 as integer)) + x.v FROM ss_i x WHERE x.id = 1) AS v`, 0, "ERR 42883"},
+	} {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			conn := connectPgconn(t, srv.Addr())
+			if want, isErr := strings.CutPrefix(c.value, "ERR "); isErr {
+				_, extErr := conn.ExecParams(ctx, c.sql, nil, nil, nil, []int16{0}).Close()
+				_, simpleErr := conn.Exec(ctx, c.sql).ReadAll()
+				for proto, err := range map[string]error{"extended": extErr, "simple": simpleErr} {
+					var pe *pgconn.PgError
+					if !errors.As(err, &pe) || pe.Code != want {
+						t.Errorf("%s: %s\n  got %v, PostgreSQL 17.11 raises %s", proto, c.sql, err, want)
+					}
+				}
+				return
+			}
+			ext := ssWireRead(t, conn.ExecParams(ctx, c.sql, nil, nil, nil, []int16{0}), c.sql)
+			mrr := conn.Exec(ctx, c.sql)
+			if !mrr.NextResult() {
+				t.Fatalf("simple: no result\n  SQL: %s", c.sql)
+			}
+			simple := ssWireRead(t, mrr.ResultReader(), c.sql)
+			if err := mrr.Close(); err != nil {
+				t.Fatalf("simple: %v\n  SQL: %s", err, c.sql)
+			}
+			for proto, r := range map[string]ssWireResult{"extended": ext, "simple": simple} {
+				if r.oid != c.oid {
+					t.Errorf("%s: %s\n  OID %d, PostgreSQL 17.11 declares %d", proto, c.sql, r.oid, c.oid)
+				}
+				got := "<none>"
+				if len(r.rows) == 1 {
+					got = string(r.rows[0])
+				} else if len(r.rows) > 1 {
+					got = "<many>"
+				}
+				if got != c.value {
+					t.Errorf("%s: %s\n  sent %q, PostgreSQL 17.11 sends %q", proto, c.sql, got, c.value)
+				}
+			}
+		})
 	}
 }

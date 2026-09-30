@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
@@ -142,4 +143,64 @@ func ssEmbeddedRender(res *QueryResult) string {
 		rows = append(rows, strings.Join(parts, ","))
 	}
 	return "{" + strings.Join(classes, ",") + "} " + strings.Join(rows, " | ")
+}
+
+// A CORRELATED RE-RUN'S SPELLING IS NOT A CLIENT FUNCTION. The re-run spells
+// each outer value as `__column_value(cast(<literal> as <type>))`, and the
+// embedded doors — Query and Execute — refuse that call from a client with
+// PostgreSQL's 42883 (no such function exists there, and none did here before
+// the spelling), in a SELECT list, a WHERE, a subquery and a DML statement,
+// while a string holding the text is a string. A correlated DML subquery —
+// whose per-row re-run is that spelling, run by the embedded door's own
+// runner — still deletes the row PostgreSQL 17.11 deletes.
+func TestArcSSColumnValueSpellingIsNotAClientFunction(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, Config{Store: objstore.NewMemStore(), Bucket: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	for _, ddl := range []string{
+		"CREATE TABLE ss_d (id BIGINT, i INT)",
+		"INSERT INTO ss_d VALUES (1, 3), (2, 10)",
+		"CREATE TABLE ss_di (id BIGINT, v INT)",
+		"INSERT INTO ss_di VALUES (1, 5)",
+	} {
+		if _, err := db.Query(ctx, ddl); err != nil {
+			t.Fatalf("%s: %v", ddl, err)
+		}
+	}
+	for _, q := range []string{
+		"SELECT __column_value(cast(5 as integer))",
+		"SELECT __COLUMN_VALUE(cast(5 as integer)) + 1",
+		`SELECT "__column_value"(cast('abc' as text))`,
+		"SELECT id FROM ss_d WHERE i = __column_value(cast(3 as integer))",
+		"SELECT (SELECT __column_value(cast(5 as integer)) + x.v FROM ss_di x)",
+	} {
+		if _, err := db.Query(ctx, q); sqlerr.StateOf(err) != "42883" {
+			t.Errorf("Query %s\n  got %v, PostgreSQL 17.11 raises 42883", q, err)
+		}
+	}
+	for _, q := range []string{
+		"UPDATE ss_d SET i = __column_value(cast(7 as integer)) WHERE id = 1",
+		"DELETE FROM ss_d WHERE i = __column_value(cast(3 as integer))",
+	} {
+		if _, err := db.Execute(ctx, q); sqlerr.StateOf(err) != "42883" {
+			t.Errorf("Execute %s\n  got %v, PostgreSQL 17.11 raises 42883", q, err)
+		}
+	}
+	res, err := db.Query(ctx, "SELECT '__column_value(cast(5 as integer))' AS s")
+	if err != nil || ssEmbeddedRender(res) != "{text} __column_value(cast(5 as integer))" {
+		t.Errorf("a string holding the spelling: %v %v", err, res)
+	}
+	if _, err := db.Execute(ctx, "DELETE FROM ss_d WHERE i < (SELECT x.v + ss_d.id FROM ss_di x WHERE x.id = 1)"); err != nil {
+		t.Fatalf("correlated DELETE: %v", err)
+	}
+	res, err = db.Query(ctx, "SELECT id, i FROM ss_d ORDER BY id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := ssEmbeddedRender(res); got != "{int,int} 2,10" {
+		t.Errorf("after the correlated DELETE: %s, PostgreSQL 17.11 keeps {int,int} 2,10", got)
+	}
 }

@@ -22,7 +22,15 @@ package coordinator
 //     value and row count); a NULL outer value is a NULL of its column's
 //     type (`sum(x.v + o.i)` over a NULL is NULL); `(SELECT x.b - x.i …)`
 //     is bigint, not the int4 of its last operand;
-//   - a DATE answer past 9999-12-31 is read back (10000-01-01).
+//   - a DATE answer past 9999-12-31 is read back (10000-01-01);
+//   - a scalar subquery is declared as any SELECT-list expression is, at
+//     the integer width its plan publishes (shared/*): a subscript of an
+//     int4[], a day count and ascii() are int4 (`(SELECT o.a[1] +
+//     2147483647 …)` is 22003, `(SELECT (o.d - DATE …) + x.v …)` integer),
+//     `(SELECT x.b - x.i …)` stays bigint, and SUM over a derived or CTE
+//     int4 column is bigint, with no subquery at all;
+//   - the re-run's spelling of an outer value, `__column_value(…)`, is
+//     42883 from a client on every arm (spelling/*), as on PostgreSQL.
 //
 // Every want is PostgreSQL 17.11's, measured over ssPGFixture
 // (testdata/arc_ss_operand_class_width_pg17.tsv: name, ordered, sql,
