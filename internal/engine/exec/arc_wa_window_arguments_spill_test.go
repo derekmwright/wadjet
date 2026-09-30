@@ -11,7 +11,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// ARC WA's SPILLED arm (#1394 #1399): the window-argument cells over the two
+// The spilled arm of the window-argument gates (#1394 #1399): the window-argument cells over the two
 // evaluators a window takes past its memory budget — the partition-at-a-time
 // walker over sorted runs (PARTITION BY) and the empty-PARTITION-BY streamer
 // (window_global.go), each of which read LAG / LEAD's offset on its own. A

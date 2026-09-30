@@ -782,7 +782,7 @@ func TestWindowNtileZeroBuckets(t *testing.T) {
 	})
 
 	// PostgreSQL 17.11 raises 22014 for a bucket count that is not
-	// positive; it used to be read as 1 here (arc WA). The planner writes
+	// positive; it used to be read as 1 here (#1399). The planner writes
 	// the argument as the query spelled it, so 0 is 0.
 	source := NewSliceSource(schema, rows)
 	pipe := &Pipeline{Source: source, Ops: nil, Sink: win}
@@ -1008,7 +1008,7 @@ func TestWindowNthValueZero(t *testing.T) {
 	})
 
 	// PostgreSQL 17.11 raises 22016 for an n that is not positive; it used
-	// to be read as 1 here (arc WA).
+	// to be read as 1 here (#1399).
 	source := NewSliceSource(schema, rows)
 	pipe := &Pipeline{Source: source, Ops: nil, Sink: win}
 	err := pipe.Run(context.Background())

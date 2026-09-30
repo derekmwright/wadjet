@@ -319,7 +319,7 @@ func dtr2NoRunner(name string) bool {
 }
 
 // dtr3RecursiveDAG names the answered cells over a recursive CTE, which the
-// stage DAG does not carry (c1RecDAGRefusal, pinned by arc C1): PINNED on
+// stage DAG does not carry (c1RecDAGRefusal, the #1042 pin): PINNED on
 // the three DAG arms.
 func dtr3RecursiveDAG(name string) bool {
 	return name == "ctl3/origin/recursive" || strings.HasPrefix(name, "ctl4/recterm/")

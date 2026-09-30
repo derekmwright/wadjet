@@ -11,7 +11,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 )
 
-// THE EMBEDDED ARM OF ARC WA (#1394 #1399): the two issues' own statements,
+// The embedded arm of the window-argument gates (#1394 #1399): the two issues' own statements,
 // and what an INSERT … SELECT of one stores, on the engine an embedded user
 // opens. Every `want` is live PostgreSQL 17.11's answer over the same rows.
 //
