@@ -351,11 +351,15 @@ func declaredProjectionIntWidth(proj logical.Projection, decls ColDecls, strictI
 		// producer the expression is a NAME, and its width is the one the
 		// producer declared — re-deriving it as structure would look for
 		// columns the producer no longer emits (ADR-0026 §2c).
-		if name := strings.TrimSpace(proj.Expr); name != "" {
-			if w, ok := lookupColIntWidth(decls.intWidth, name); ok {
+		//
+		// By its WHOLE text only, as declaredProjectionDecl reads it: an
+		// expression's text is not a qualified name, and the bare-suffix
+		// fallback answered `t.b - t.i` with `i`'s int4.
+		if name := strings.ToLower(strings.TrimSpace(proj.Expr)); name != "" {
+			if w, ok := decls.intWidth[name]; ok {
 				return w
 			}
-			if t, ok := lookupColType(decls.Types, name); ok {
+			if t, ok := decls.Types[name]; ok {
 				return catalogIntWidth(t)
 			}
 		}
