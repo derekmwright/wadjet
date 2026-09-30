@@ -408,9 +408,50 @@ func (c *comparisonTyper) walk(node plansql.Node) error {
 		if err := c.textArithmetic(n); err != nil {
 			return err
 		}
+		if err := c.concatOperands(n); err != nil {
+			return err
+		}
 		return c.temporalArithmetic(n)
 	}
 	return nil
+}
+
+// pgScalarNumber is a number type PostgreSQL has an operator table for: the
+// engine's own PORT, PROTOCOL and DURATION are not, and the operator checks
+// below name only types whose PostgreSQL answer is measured.
+func pgScalarNumber(t parquet.TypeID) bool {
+	switch t {
+	case parquet.TypeInt32, parquet.TypeInt64, parquet.TypeFloat32, parquet.TypeFloat64, parquet.TypeDecimal:
+		return true
+	}
+	return false
+}
+
+// concatOperands refuses `||` between two operands neither of which is text:
+// PostgreSQL's concatenation is text || anything, anything || text, and the
+// array, bytea and json families, so `1.5 || 5`, `d || 5` and `true || 5`
+// have no operator and raise 42883. Each answered the two renderings spliced
+// together here, and the correlated re-run, which types its outer value as
+// the column's own, answered the same (`(SELECT o.f || x.v …)` = 1.55). Only
+// numbers, booleans, dates and timestamps are named; an operand this layer
+// cannot type, a quoted literal (SQL's unknown) and every other type keep
+// their answer.
+func (c *comparisonTyper) concatOperands(n *plansql.BinaryOp) error {
+	if n.Op != "||" {
+		return nil
+	}
+	lt, lok := c.arithOperand(n.Left)
+	rt, rok := c.arithOperand(n.Right)
+	if !lok || !rok {
+		return nil
+	}
+	named := func(t parquet.TypeID) bool {
+		return pgScalarNumber(t) || t == parquet.TypeBool || t == parquet.TypeDate || t == parquet.TypeTimestamp
+	}
+	if !named(lt) || !named(rt) {
+		return nil
+	}
+	return sqlerr.New("42883", "operator does not exist: %s || %s", pgTypeName(lt), pgTypeName(rt))
 }
 
 // temporalArithmetic refuses the `+` / `-` pairs PostgreSQL has no operator
@@ -425,7 +466,11 @@ func (c *comparisonTyper) walk(node plansql.Node) error {
 // meaning (binOpTemporalType). A side typed by neither the statement's
 // structure nor its declarations is never refused.
 func (c *comparisonTyper) temporalArithmetic(n *plansql.BinaryOp) error {
-	if n.Op != "+" && n.Op != "-" {
+	switch n.Op {
+	case "*", "/", "%":
+		return c.temporalScaling(n)
+	case "+", "-":
+	default:
 		return nil
 	}
 	if nodeIsInterval(n.Left, c.decls) || nodeIsInterval(n.Right, c.decls) {
@@ -457,6 +502,29 @@ func (c *comparisonTyper) temporalArithmetic(n *plansql.BinaryOp) error {
 		return nil
 	}
 	return sqlerr.New("42883", "operator does not exist: %s %s %s", pgTypeName(lt), n.Op, pgTypeName(rt))
+}
+
+// temporalScaling refuses `*`, `/` and `%` with a DATE or a TIMESTAMP operand
+// beside a number or another date or timestamp: PostgreSQL has none of those
+// operators (`date * integer`, `timestamp / integer` are 42883). Each
+// answered the epoch count scaled — `d * 5` = 98930, a number no consumer
+// reads as anything — and the correlated re-run answered the same through
+// the outer column's typed spelling (`(SELECT o.d * x.v …)`). An operand
+// this layer cannot type is never refused.
+func (c *comparisonTyper) temporalScaling(n *plansql.BinaryOp) error {
+	lt, lok := c.arithOperand(n.Left)
+	rt, rok := c.arithOperand(n.Right)
+	if !lok || !rok {
+		return nil
+	}
+	temporal := func(t parquet.TypeID) bool { return t == parquet.TypeDate || t == parquet.TypeTimestamp }
+	if !temporal(lt) && !temporal(rt) {
+		return nil
+	}
+	if (temporal(lt) || pgScalarNumber(lt)) && (temporal(rt) || pgScalarNumber(rt)) {
+		return sqlerr.New("42883", "operator does not exist: %s %s %s", pgTypeName(lt), n.Op, pgTypeName(rt))
+	}
+	return nil
 }
 
 // textArithmetic refuses arithmetic between a TEXT column and a number:
