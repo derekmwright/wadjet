@@ -48,12 +48,12 @@ func TestWindowValueFunctionsRetypeFromInput(t *testing.T) {
 	}{
 		{
 			name: "lag over a string column",
-			col:  WindowColumn{Func: WinLag, InputCol: "s", OutputCol: "w", OutputType: parquet.TypeFloat64, OrderBy: order},
+			col:  WindowColumn{Func: WinLag, LagLeadOffset: 1, InputCol: "s", OutputCol: "w", OutputType: parquet.TypeFloat64, OrderBy: order},
 			want: []any{nil, "alpha", "bravo"},
 		},
 		{
 			name: "lead over a string column",
-			col:  WindowColumn{Func: WinLead, InputCol: "s", OutputCol: "w", OutputType: parquet.TypeFloat64, OrderBy: order},
+			col:  WindowColumn{Func: WinLead, LagLeadOffset: 1, InputCol: "s", OutputCol: "w", OutputType: parquet.TypeFloat64, OrderBy: order},
 			want: []any{"bravo", "charlie", nil},
 		},
 		{
@@ -92,13 +92,13 @@ func TestWindowValueFunctionsRetypeFromInput(t *testing.T) {
 			// The numeric control. Float64.SetValue has no int32 case either,
 			// so a narrow int was dropped exactly like a string.
 			name: "lag over an INT32 column",
-			col:  WindowColumn{Func: WinLag, InputCol: "i", OutputCol: "w", OutputType: parquet.TypeFloat64, OrderBy: order},
+			col:  WindowColumn{Func: WinLag, LagLeadOffset: 1, InputCol: "i", OutputCol: "w", OutputType: parquet.TypeFloat64, OrderBy: order},
 			want: []any{nil, int32(10), int32(20)},
 		},
 		{
 			// A declaration that is already right is left alone.
 			name: "lag over an INT64 column declared correctly",
-			col:  WindowColumn{Func: WinLag, InputCol: "k", OutputCol: "w", OutputType: parquet.TypeInt64, OrderBy: order},
+			col:  WindowColumn{Func: WinLag, LagLeadOffset: 1, InputCol: "k", OutputCol: "w", OutputType: parquet.TypeInt64, OrderBy: order},
 			want: []any{nil, int64(1), int64(2)},
 		},
 		{
@@ -176,7 +176,7 @@ func TestWindowValueFunctionNullsAdvanceBytesOffsets(t *testing.T) {
 	want := map[int64]any{1: nil, 2: "alpha", 3: nil, 4: "charlie", 5: nil, 6: "echo"}
 
 	win := NewWindow([]WindowColumn{
-		{Func: WinLag, InputCol: "s", OutputCol: "prev", OutputType: parquet.TypeString,
+		{Func: WinLag, LagLeadOffset: 1, InputCol: "s", OutputCol: "prev", OutputType: parquet.TypeString,
 			PartitionBy: []string{"g"}, OrderBy: []SortKey{{Column: "k", Order: Ascending}}},
 	})
 	ctx := context.Background()
@@ -223,7 +223,7 @@ func TestWindowValueFunctionsRetypeUnderSpill(t *testing.T) {
 	// Declared float64 on purpose: the whole point is that the operator no
 	// longer takes the declaration's word for it.
 	w := newWindowSpillHarness(t, []WindowColumn{
-		{Func: WinLag, InputCol: "s", OutputCol: "prev", OutputType: parquet.TypeFloat64,
+		{Func: WinLag, LagLeadOffset: 1, InputCol: "s", OutputCol: "prev", OutputType: parquet.TypeFloat64,
 			PartitionBy: []string{"grp"}, OrderBy: []SortKey{{Column: "k", Order: Ascending}}},
 	}, 512)
 

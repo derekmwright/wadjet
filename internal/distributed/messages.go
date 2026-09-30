@@ -1067,6 +1067,9 @@ type WindowColSpec struct {
 	LagLeadDefault any `json:"lag_lead_default,omitempty"`
 	NtileBuckets   int `json:"ntile_buckets,omitempty"`
 	NthValueN      int `json:"nth_value_n,omitempty"`
+	// NullArg says the offset / N argument is NULL: every row answers NULL
+	// (exec.WindowColumn.NullArg).
+	NullArg bool `json:"null_arg,omitempty"`
 }
 
 // WindowTypePtr returns a pointer suitable for the pointer-typed TypeID

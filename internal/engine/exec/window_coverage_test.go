@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -775,25 +776,19 @@ func TestWindowNtileZeroBuckets(t *testing.T) {
 			Func:         WinNtile,
 			OutputCol:    "ntile",
 			OutputType:   parquet.TypeInt64,
-			NtileBuckets: 0, // defaults to 1
+			NtileBuckets: 0,
 			OrderBy:      []SortKey{{Column: "val", Order: Ascending}},
 		},
 	})
 
+	// PostgreSQL 17.11 raises 22014 for a bucket count that is not
+	// positive; it used to be read as 1 here (arc WA). The planner writes
+	// the argument as the query spelled it, so 0 is 0.
 	source := NewSliceSource(schema, rows)
 	pipe := &Pipeline{Source: source, Ops: nil, Sink: win}
-	ctx := context.Background()
-	if err := pipe.Run(ctx); err != nil {
-		t.Fatal(err)
-	}
-
-	b, _ := win.Next(ctx)
-	result := b.ToRows()
-	for _, row := range result {
-		ntile := row["ntile"].(int64)
-		if ntile != 1 {
-			t.Errorf("expected ntile=1 with default 1 bucket, got %d", ntile)
-		}
+	err := pipe.Run(context.Background())
+	if err == nil || sqlerr.StateOf(err) != "22014" {
+		t.Fatalf("NTILE(0): got %v, want 22014 argument of ntile must be greater than zero", err)
 	}
 }
 
@@ -1008,21 +1003,17 @@ func TestWindowNthValueZero(t *testing.T) {
 			InputCol:   "val",
 			OutputCol:  "nth",
 			OutputType: parquet.TypeFloat64,
-			NthValueN:  0, // defaults to 1
+			NthValueN:  0,
 		},
 	})
 
+	// PostgreSQL 17.11 raises 22016 for an n that is not positive; it used
+	// to be read as 1 here (arc WA).
 	source := NewSliceSource(schema, rows)
 	pipe := &Pipeline{Source: source, Ops: nil, Sink: win}
-	ctx := context.Background()
-	if err := pipe.Run(ctx); err != nil {
-		t.Fatal(err)
-	}
-
-	b, _ := win.Next(ctx)
-	result := b.ToRows()
-	if result[0]["nth"].(float64) != 10.0 {
-		t.Errorf("expected 10.0, got %v", result[0]["nth"])
+	err := pipe.Run(context.Background())
+	if err == nil || sqlerr.StateOf(err) != "22016" {
+		t.Fatalf("NTH_VALUE(val, 0): got %v, want 22016 argument of nth_value must be greater than zero", err)
 	}
 }
 

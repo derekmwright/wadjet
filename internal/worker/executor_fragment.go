@@ -2377,6 +2377,7 @@ func (e *Executor) buildFragmentWindow(ctx context.Context, spec distributed.OpS
 			LagLeadDefault: wc.LagLeadDefault,
 			NtileBuckets:   wc.NtileBuckets,
 			NthValueN:      wc.NthValueN,
+			NullArg:        wc.NullArg,
 		}
 		if wc.Frame != nil {
 			cols[i].Frame = &exec.WindowFrameSpec{

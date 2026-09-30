@@ -786,6 +786,35 @@ func firstWindowArg(args string) string {
 	return args
 }
 
+// Arguments returns every argument of a window function's argument list,
+// split on TOP-LEVEL commas as firstWindowArg splits the first one off, each
+// trimmed. The physical planner reads LAG / LEAD's offset and default and
+// NTILE / NTH_VALUE's n from here; a plain SplitN on "," cut a default such
+// as `'a,b'` or `COALESCE(y, 0)` in two.
+func (w WindowExpr) Arguments() []string {
+	args := w.InputCol
+	var out []string
+	depth, inStr, from := 0, false, 0
+	for i := 0; i < len(args); i++ {
+		switch c := args[i]; {
+		case c == '\'':
+			inStr = !inStr
+		case inStr:
+		case c == '(' || c == '[':
+			depth++
+		case c == ')' || c == ']':
+			depth--
+		case c == ',' && depth == 0:
+			out = append(out, strings.TrimSpace(args[from:i]))
+			from = i + 1
+		}
+	}
+	if rest := strings.TrimSpace(args[from:]); rest != "" || len(out) > 0 {
+		out = append(out, rest)
+	}
+	return out
+}
+
 // OrderExpr is a sort expression.
 type OrderExpr struct {
 	Column     string

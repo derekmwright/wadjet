@@ -362,27 +362,63 @@ func windowExecColumn(node *logical.Node, we logical.WindowExpr, keys map[string
 			End:   exec.WindowBound{Type: we.Frame.End.Type, Offset: we.Frame.End.Offset},
 		}
 	}
-	// Parse the function-specific arguments out of the rest of the
-	// argument string (WindowExpr.InputCol carries the whole list verbatim).
-	if fn == "ntile" {
-		if n, err := strconv.Atoi(strings.TrimSpace(we.InputCol)); err == nil {
+	// The function-specific arguments: LAG / LEAD's offset and default and
+	// NTILE's / NTH_VALUE's n, each read from its own AST. Every value is
+	// written EXPLICITLY — the omitted offset as 1 — because the operator
+	// honors what it is given: an offset of 0 is the current row, a negative
+	// one reads the other way, as on PostgreSQL. It used to read an unset
+	// offset (0) as the default, and the planner left it unset for anything
+	// strconv.Atoi could not read, so `LAG(x, 0)` answered the previous row
+	// and `LAG(x, NULL)` answered as `LAG(x)` (#1399). The parser has already
+	// refused every spelling WindowIntegerArgument does not read
+	// (refuseWindowArguments), so an error here cannot happen on a parsed
+	// query; one that does keeps the argument unset rather than guessing.
+	args := we.Arguments()
+	intArg := func(i int) (int, bool) {
+		if i >= len(args) {
+			return 0, false
+		}
+		ast, err := plansql.ParseExpression(args[i])
+		if err != nil {
+			return 0, false
+		}
+		v, isNull, err := plansql.WindowIntegerArgument(fn, ast)
+		if err != nil {
+			return 0, false
+		}
+		if isNull {
+			wc.NullArg = true
+		}
+		return int(v), true
+	}
+	switch fn {
+	case "ntile":
+		if n, ok := intArg(0); ok {
 			wc.NtileBuckets = n
 		}
-	} else if fn == "nth_value" {
-		if parts := strings.SplitN(we.InputCol, ",", 2); len(parts) >= 2 {
-			if n, err := strconv.Atoi(strings.TrimSpace(parts[1])); err == nil {
-				wc.NthValueN = n
-			}
+	case "nth_value":
+		if n, ok := intArg(1); ok {
+			wc.NthValueN = n
 		}
-	} else if fn == "lag" || fn == "lead" {
-		parts := strings.SplitN(we.InputCol, ",", 3)
-		if len(parts) >= 2 {
-			if offset, err := strconv.Atoi(strings.TrimSpace(parts[1])); err == nil {
+	case "lag", "lead":
+		wc.LagLeadOffset = 1
+		if len(args) >= 2 {
+			if offset, ok := intArg(1); ok {
 				wc.LagLeadOffset = offset
 			}
 		}
-		if len(parts) >= 3 {
-			defStr := strings.TrimSpace(parts[2])
+		if len(args) >= 3 {
+			defStr := args[2]
+			if ast, err := plansql.ParseExpression(defStr); err == nil {
+				if lit, ok := ast.(*plansql.Lit); ok && lit.Kind == plansql.LitNull {
+					// A NULL default is no default: the rows past the
+					// partition's edge answer NULL either way. Carried as
+					// its text it was the STRING "null", which the
+					// operator refused to store into the argument's
+					// numeric column.
+					break
+				}
+			}
 			if v, err := strconv.ParseFloat(defStr, 64); err == nil {
 				wc.LagLeadDefault = v
 			} else {

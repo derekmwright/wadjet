@@ -596,6 +596,7 @@ type WindowColSpec struct {
 	LagLeadDefault any
 	NtileBuckets   int
 	NthValueN      int
+	NullArg        bool // the offset / N argument is NULL (exec.WindowColumn.NullArg)
 	// InputRefs is AggSpec.InputRefs for a WINDOW argument: the planner-only
 	// record of the candidate spellings for a reference naming a derived
 	// table's alias, settled at the end of planning by

@@ -328,9 +328,6 @@ func collectGlobalWindowStats(m *runMerger, schema []parquet.Column, g windowSpe
 					}
 				case WinNthValue:
 					nth := wc.NthValueN
-					if nth <= 0 {
-						nth = 1
-					}
 					if rowIdx == int64(nth-1) {
 						st.nth[i] = b.Columns[ii].GetValue(r)
 					}
@@ -452,16 +449,11 @@ func newGlobalWindowStreamer(m *runMerger, schema []parquet.Column, g windowSpec
 	for i, wc := range g.cols {
 		switch wc.Func {
 		case WinLag:
-			off := wc.LagLeadOffset
-			if off <= 0 {
-				off = 1
-			}
-			s.lagRings[i] = make([]any, off)
+			// The offset as written (NewWindow made it non-negative); 0 is
+			// the current row and needs no ring.
+			s.lagRings[i] = make([]any, wc.LagLeadOffset)
 		case WinLead:
 			off := wc.LagLeadOffset
-			if off <= 0 {
-				off = 1
-			}
 			if off > s.maxLead {
 				s.maxLead = off
 			}
@@ -662,6 +654,19 @@ func (s *globalWindowStreamer) ingest(nb *batch.RecordBatch) error {
 // computeImmediate writes row r's value for every function that needs no
 // lookahead. Lead and cume_dist rows are left for their resolvers.
 func (s *globalWindowStreamer) computeImmediate(wc WindowColumn, i int, vec *batch.Vector, r int, rowIdx, n int64, inVec *batch.Vector, nb *batch.RecordBatch) error {
+	// The integer argument, as computePartitionColumnar reads it: the one
+	// partition's first row raises a non-positive N, and a NULL argument
+	// answers NULL on every row (resolveLeads and backfillPeerFrame leave
+	// such a column alone).
+	if rowIdx == 0 {
+		if err := windowArgumentError(wc); err != nil {
+			return err
+		}
+	}
+	if windowNullArgFunc(wc) {
+		vec.SetValue(r, nil)
+		return nil
+	}
 	switch wc.Func {
 	case WinRowNumber:
 		vec.Int64Data[r] = rowIdx + 1
@@ -754,8 +759,14 @@ func (s *globalWindowStreamer) computeImmediate(wc WindowColumn, i int, vec *bat
 
 	case WinLag:
 		off := wc.LagLeadOffset
-		if off <= 0 {
-			off = 1
+		if off == 0 {
+			// LAG(x, 0) is the current row (#1399).
+			var cur any
+			if inVec != nil {
+				cur = inVec.GetValue(r)
+			}
+			vec.SetValue(r, cur)
+			return nil
 		}
 		ring := s.lagRings[i]
 		if rowIdx >= int64(off) {
@@ -786,10 +797,7 @@ func (s *globalWindowStreamer) computeImmediate(wc WindowColumn, i int, vec *bat
 		vec.SetValue(r, s.stats.last[i])
 
 	case WinNtile:
-		buckets := wc.NtileBuckets
-		if buckets <= 0 {
-			buckets = 1
-		}
+		buckets := wc.NtileBuckets // positive: rowIdx 0 raised otherwise
 		if !s.ntileInit[i] {
 			s.ntileBucket[i] = 1
 			s.ntileCount[i] = 0
@@ -821,11 +829,7 @@ func (s *globalWindowStreamer) computeImmediate(wc WindowColumn, i int, vec *bat
 		if len(wc.OrderBy) > 0 {
 			return nil // backfillPeerFrame: NULL until the frame reaches n rows
 		}
-		nth := wc.NthValueN
-		if nth <= 0 {
-			nth = 1
-		}
-		if int64(nth) <= n {
+		if nth := wc.NthValueN; int64(nth) <= n {
 			vec.SetValue(r, s.stats.nth[i])
 		} else {
 			vec.SetValue(r, nil)
@@ -935,11 +939,9 @@ func (s *globalWindowStreamer) backfillPeerFrame(end int64) error {
 				}
 			}
 		case WinNthValue:
-			nth := wc.NthValueN
-			if nth <= 0 {
-				nth = 1
-			}
-			if int64(nth) <= end {
+			// A NULL n answers NULL (windowNullArgFunc); a non-positive
+			// one raised at the first row (computeImmediate).
+			if nth := wc.NthValueN; !wc.NullArg && nth > 0 && int64(nth) <= end {
 				val = s.stats.nth[i]
 			}
 		case WinMin:
@@ -999,10 +1001,12 @@ func (s *globalWindowStreamer) resolveLeads() {
 		if wc.Func != WinLead {
 			continue
 		}
-		off := int64(wc.LagLeadOffset)
-		if off <= 0 {
-			off = 1
+		if wc.NullArg {
+			// Every row already answered NULL (computeImmediate).
+			s.leadCursor[i] = s.rowIdx
+			continue
 		}
+		off := int64(wc.LagLeadOffset)
 		for s.leadCursor[i]+off < s.rowIdx {
 			row := s.leadCursor[i]
 			pb, lr := s.locate(row)
@@ -1056,10 +1060,12 @@ func (s *globalWindowStreamer) finishEOF() error {
 		if wc.Func != WinLead {
 			continue
 		}
-		off := int64(wc.LagLeadOffset)
-		if off <= 0 {
-			off = 1
+		if wc.NullArg {
+			// Every row already answered NULL (computeImmediate).
+			s.leadCursor[i] = s.rowIdx
+			continue
 		}
+		off := int64(wc.LagLeadOffset)
 		// Resolve in-range targets first, then defaults for the tail.
 		for s.leadCursor[i] < s.rowIdx {
 			row := s.leadCursor[i]

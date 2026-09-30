@@ -103,17 +103,67 @@ type WindowBound struct {
 
 // WindowColumn defines a window function computation.
 type WindowColumn struct {
-	Func           WindowFunc
-	InputCol       string // for aggregate window functions (empty for ranking funcs)
-	OutputCol      string
-	OutputType     parquet.TypeID
-	PartitionBy    []string
-	OrderBy        []SortKey
-	Frame          *WindowFrameSpec // optional frame specification
-	LagLeadOffset  int              // offset for LAG/LEAD (default 1)
-	LagLeadDefault any              // default value for LAG/LEAD (default NULL)
-	NtileBuckets   int              // number of buckets for NTILE
-	NthValueN      int              // N for NTH_VALUE (1-based)
+	Func        WindowFunc
+	InputCol    string // for aggregate window functions (empty for ranking funcs)
+	OutputCol   string
+	OutputType  parquet.TypeID
+	PartitionBy []string
+	OrderBy     []SortKey
+	Frame       *WindowFrameSpec // optional frame specification
+	// LagLeadOffset is LAG / LEAD's offset AS WRITTEN: 0 is the current
+	// row and a negative offset reads the other way, as on PostgreSQL. The
+	// planner writes the omitted offset as 1; nothing here defaults it.
+	LagLeadOffset  int
+	LagLeadDefault any // default value for LAG/LEAD (default NULL)
+	// NtileBuckets / NthValueN are the argument as written; one that is not
+	// positive raises PostgreSQL's 22014 / 22016 when a partition is
+	// evaluated (windowArgumentError).
+	NtileBuckets int
+	NthValueN    int
+	// NullArg says the offset / bucket count / N argument is NULL, which
+	// PostgreSQL answers with NULL on every row.
+	NullArg bool
+}
+
+// windowArgumentError is what PostgreSQL 17.11 raises for a non-positive
+// NTILE bucket count or NTH_VALUE n — when a row is evaluated, so a window
+// over no rows answers no rows. A NULL argument answers NULL instead.
+func windowArgumentError(wc WindowColumn) error {
+	if wc.NullArg {
+		return nil
+	}
+	switch {
+	case wc.Func == WinNtile && wc.NtileBuckets <= 0:
+		return sqlerr.New("22014", "argument of ntile must be greater than zero")
+	case wc.Func == WinNthValue && wc.NthValueN <= 0:
+		return sqlerr.New("22016", "argument of nth_value must be greater than zero")
+	}
+	return nil
+}
+
+// windowNullArgFunc says wc answers NULL on every row because its integer
+// argument is NULL.
+func windowNullArgFunc(wc WindowColumn) bool {
+	switch wc.Func {
+	case WinLag, WinLead, WinNtile, WinNthValue:
+		return wc.NullArg
+	}
+	return false
+}
+
+// normalizeLagLead turns a NEGATIVE LAG offset into the LEAD it reads (and
+// the other way round), so every evaluator sees a non-negative offset:
+// PostgreSQL's `LAG(x, -1)` is `LEAD(x, 1)`, measured on 17.11.
+func normalizeLagLead(wc WindowColumn) WindowColumn {
+	if wc.LagLeadOffset < 0 {
+		switch wc.Func {
+		case WinLag:
+			wc.Func, wc.LagLeadOffset = WinLead, -wc.LagLeadOffset
+		case WinLead:
+			wc.Func, wc.LagLeadOffset = WinLag, -wc.LagLeadOffset
+		}
+	}
+	return wc
 }
 
 // windowValueFunc reports whether f returns a value lifted out of its input
@@ -378,7 +428,9 @@ type Window struct {
 // for an ARRAY value and raise the #361 guard on the write.
 func NewWindow(cols []WindowColumn) *Window {
 	own := make([]WindowColumn, len(cols))
-	copy(own, cols)
+	for i, c := range cols {
+		own[i] = normalizeLagLead(c)
+	}
 	return &Window{Columns: own}
 }
 
@@ -1496,6 +1548,19 @@ func (d *frameMinMaxDeque) value(lo, hi int) any {
 // a missing column, which is answered with NULLs rather than a failure.
 func computePartitionColumnar(combined *batch.RecordBatch, winVec *batch.Vector, start, end int, wc WindowColumn, inputIdx int, orderIdxs []int) error {
 	n := end - start
+	// The integer argument first, per partition, as PostgreSQL evaluates it:
+	// a non-positive N raises, a NULL one answers NULL on every row.
+	if n > 0 {
+		if err := windowArgumentError(wc); err != nil {
+			return err
+		}
+	}
+	if windowNullArgFunc(wc) {
+		for i := 0; i < n; i++ {
+			winVec.WriteNullAt(start + i)
+		}
+		return nil
+	}
 	var inputVec *batch.Vector
 	if inputIdx >= 0 {
 		inputVec = combined.Columns[inputIdx]
@@ -1645,11 +1710,8 @@ func computePartitionColumnar(combined *batch.RecordBatch, winVec *batch.Vector,
 	// and range-copy helpers above already advance on null for this reason.
 	case WinLag:
 		offset := wc.LagLeadOffset
-		if offset <= 0 {
-			offset = 1
-		}
 		for i := 0; i < n; i++ {
-			if i-offset >= 0 {
+			if i-offset >= 0 && i-offset < n {
 				winVec.SetValue(start+i, inputVec.GetValue(start+i-offset))
 			} else if wc.LagLeadDefault != nil {
 				winVec.SetValue(start+i, wc.LagLeadDefault)
@@ -1660,11 +1722,8 @@ func computePartitionColumnar(combined *batch.RecordBatch, winVec *batch.Vector,
 
 	case WinLead:
 		offset := wc.LagLeadOffset
-		if offset <= 0 {
-			offset = 1
-		}
 		for i := 0; i < n; i++ {
-			if i+offset < n {
+			if i+offset < n && i+offset >= 0 {
 				winVec.SetValue(start+i, inputVec.GetValue(start+i+offset))
 			} else if wc.LagLeadDefault != nil {
 				winVec.SetValue(start+i, wc.LagLeadDefault)
@@ -1769,9 +1828,6 @@ func computePartitionColumnar(combined *batch.RecordBatch, winVec *batch.Vector,
 
 	case WinNthValue:
 		nth := wc.NthValueN
-		if nth <= 0 {
-			nth = 1
-		}
 		for i := 0; i < n; i++ {
 			lo, hi := fr.bounds(i)
 			var v any

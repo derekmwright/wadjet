@@ -1456,6 +1456,7 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 				LagLeadDefault: ec.LagLeadDefault,
 				NtileBuckets:   ec.NtileBuckets,
 				NthValueN:      ec.NthValueN,
+				NullArg:        ec.NullArg,
 			})
 		}
 		stage := Stage{

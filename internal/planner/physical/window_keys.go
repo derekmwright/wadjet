@@ -233,9 +233,17 @@ func resolveWindowKeys(node *logical.Node) map[string]windowKey {
 		// name, exactly as a computed PARTITION BY term is.
 		//
 		// A bare or qualified column keeps today's route (exec.Window's
-		// qualified-to-bare fallback settles it), and `*` and a literal are
-		// not arguments to materialize at all: COUNT(*) counts rows, and a
-		// constant is one the operator already has.
+		// qualified-to-bare fallback settles it), and `*` is not an argument
+		// at all: COUNT(*) counts rows.
+		//
+		// A LITERAL is an argument like any expression. It used to be
+		// skipped here as "a constant the operator already has" — but the
+		// operator has nothing except columns, so `SUM(2.5) OVER ()`,
+		// `FIRST_VALUE(2.5) OVER (…)`, `LAG(5) OVER (…)` and even
+		// `SUM(2) OVER ()` read a column named `5` or `2`, found none, and
+		// answered NULL on every row and every arm, while `SUM(2.5 * 1)`
+		// was computed and answered (#1394). A literal is materialized as
+		// __winkey_N and typed by the same inference as any expression.
 		if col := strings.TrimSpace(we.InputColumn()); col != "" {
 			if ast, err := plansql.ParseExpression(col); err == nil {
 				switch e := ast.(type) {
@@ -243,7 +251,7 @@ func resolveWindowKeys(node *logical.Node) map[string]windowKey {
 					if fieldOf(colFields, e) != nil {
 						add(col, false)
 					}
-				case *plansql.StarNode, *plansql.Lit, *plansql.IntervalLit:
+				case *plansql.StarNode:
 					// Nothing to compute.
 				default:
 					add(col, false)

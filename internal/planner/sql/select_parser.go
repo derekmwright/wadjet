@@ -3369,6 +3369,11 @@ func (p *selectParser) parseWindowFunc(fn *FuncCallNode) (Node, error) {
 		return nil, sqlerr.New("0A000",
 			"DISTINCT is not implemented for window functions (%s)", name)
 	}
+	// The integer argument (LAG / LEAD's offset, NTILE's and NTH_VALUE's n)
+	// is refused here for the same reason: this site covers every door.
+	if err := refuseWindowArguments(fn); err != nil {
+		return nil, err
+	}
 
 	wfn := &WindowFuncNode{Func: fn}
 

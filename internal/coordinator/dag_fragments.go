@@ -268,6 +268,7 @@ func buildWindowFragment(stage dagplan.Stage, t *distributed.Task, taskInputs ma
 			LagLeadDefault: wc.LagLeadDefault,
 			NtileBuckets:   wc.NtileBuckets,
 			NthValueN:      wc.NthValueN,
+			NullArg:        wc.NullArg,
 		}
 		if wc.Frame != nil {
 			winCols[i].Frame = &distributed.WindowFrameSpec{

@@ -23,7 +23,7 @@ func TestWindowLag(t *testing.T) {
 
 	win := NewWindow([]WindowColumn{
 		{
-			Func:       WinLag,
+			Func: WinLag, LagLeadOffset: 1,
 			InputCol:   "value",
 			OutputCol:  "prev_value",
 			OutputType: parquet.TypeFloat64,
@@ -127,7 +127,7 @@ func TestWindowLead(t *testing.T) {
 
 	win := NewWindow([]WindowColumn{
 		{
-			Func:       WinLead,
+			Func: WinLead, LagLeadOffset: 1,
 			InputCol:   "value",
 			OutputCol:  "next_value",
 			OutputType: parquet.TypeFloat64,
