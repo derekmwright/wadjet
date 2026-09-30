@@ -83,6 +83,10 @@ type BinOpNumeric struct {
 	// sides as numbers. Resolved with the mode, from the same column types,
 	// and nil for every other operand pair — see BinOp.dateArith (#340).
 	dateNode *BinOp
+	// dayCount marks `date - date` over two DATE operands: the node answers
+	// an integer day count (dateNode's answer), so it is an integer operand
+	// and its typed evaluators answer that count, as Eval does.
+	dayCount bool
 }
 
 // operandIsInt reports whether one operand is integer-preserving against
@@ -203,6 +207,8 @@ func (e *BinOpNumeric) resolveModeSlow(b *batch.RecordBatch) {
 		(temporalColOperand(e.Left, b) || temporalColOperand(e.Right, b) ||
 			producedTemporal(e.Left, b) != castNotTemporal || producedTemporal(e.Right, b) != castNotTemporal) {
 		e.dateNode = &BinOp{Left: e.Left, Right: e.Right, Op: e.Op}
+		e.dayCount = e.Op == "-" && !e.isInt &&
+			producedTemporal(e.Left, b) == castToDateKind && producedTemporal(e.Right, b) == castToDateKind
 	}
 	e.opCode = resolveArithOp(e.Op)
 	e.modeReady.Store(true)
@@ -210,7 +216,23 @@ func (e *BinOpNumeric) resolveModeSlow(b *batch.RecordBatch) {
 
 func (e *BinOpNumeric) intMode(b *batch.RecordBatch) bool {
 	e.resolveMode(b)
-	return e.isInt
+	return e.isInt || e.dayCount
+}
+
+// dayCountValue is a day count node's answer as an int64: dateNode's, which
+// Eval hands out. A typed consumer — an aggregate's integer input, the int
+// arithmetic above it — read NULL for every row here, because the node's
+// operands are dates and not integers (`sum(d - d)` was NULL).
+func (e *BinOpNumeric) dayCountValue(b *batch.RecordBatch, row int) (int64, bool) {
+	switch v := e.Eval(b, row).(type) {
+	case int64:
+		return v, true
+	case int32:
+		return int64(v), true
+	case int:
+		return int64(v), true
+	}
+	return 0, false
 }
 
 func (e *BinOpNumeric) Eval(b *batch.RecordBatch, row int) any {
@@ -260,6 +282,9 @@ func (e *BinOpNumeric) Eval(b *batch.RecordBatch, row int) any {
 // reports not-ok so callers fall back to EvalFloat64/Eval.
 func (e *BinOpNumeric) EvalInt64(b *batch.RecordBatch, row int) (int64, bool) {
 	e.resolveMode(b)
+	if e.dayCount {
+		return e.dayCountValue(b, row)
+	}
 	if !e.isInt {
 		// Decimal mode reports not-ok too. A DECIMAL result is not an int64
 		// and answering one would truncate the fraction silently — the caller
@@ -308,6 +333,10 @@ func (e *BinOpNumeric) intArith(b *batch.RecordBatch, row int) (int64, bool) {
 // EvalFloat64 implements Float64Expr for consumers on the float protocol.
 func (e *BinOpNumeric) EvalFloat64(b *batch.RecordBatch, row int) (float64, bool) {
 	e.resolveMode(b)
+	if e.dayCount {
+		v, ok := e.dayCountValue(b, row)
+		return float64(v), ok
+	}
 	if e.isInt {
 		v, ok := e.intArith(b, row)
 		return float64(v), ok
