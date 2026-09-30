@@ -768,7 +768,7 @@ func (w WindowExpr) InputColumn() string {
 // nothing could compile, which is one more way a window over an expression
 // answered NULL (#672) — and cut a default such as `'a,b'` in two. Commas
 // inside parentheses and inside string literals belong to the argument, not
-// to the list ('' inside a literal toggles the state twice, leaving it
+// to the list (” inside a literal toggles the state twice, leaving it
 // right).
 func (w WindowExpr) Arguments() []string {
 	args := w.InputCol
