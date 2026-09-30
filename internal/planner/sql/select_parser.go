@@ -3244,6 +3244,11 @@ func (p *selectParser) parseFuncCall(name string) (Node, error) {
 		fn.Distinct = true
 	}
 
+	// The column-typed cast's spelling is `__column_value(cast(…))` with the
+	// CAST keyword and nothing else — the text CastNode.String renders and
+	// the one shape the client doors refuse (RefuseColumnValueCall).
+	castKeyword := p.peek() == TokenKWCast
+
 	// Parse arguments
 	for {
 		arg, err := p.parseExpr()
@@ -3260,7 +3265,7 @@ func (p *selectParser) parseFuncCall(name string) (Node, error) {
 	if _, err := p.expect(TokenRParen); err != nil {
 		return nil, fmt.Errorf("expected ) after function arguments")
 	}
-	if c, ok := columnValueCast(fn); ok {
+	if c, ok := columnValueCast(fn, castKeyword); ok {
 		return c, nil
 	}
 
@@ -3269,10 +3274,11 @@ func (p *selectParser) parseFuncCall(name string) (Node, error) {
 
 // columnValueCast reads `__column_value(cast(<literal> as <type>))` back as
 // the column-typed cast it renders (CastNode.Column): a correlated re-run's
-// outer value. Over anything but a literal it is not that spelling, and the
+// outer value. Over anything but a literal, or with its argument spelled any
+// way but the CAST keyword (`5::integer`), it is not that spelling, and the
 // call stays a call to a function nobody defines.
-func columnValueCast(fn *FuncCallNode) (*CastNode, bool) {
-	if fn.Name != ColumnValueFunc || len(fn.Args) != 1 || fn.Distinct || fn.Star {
+func columnValueCast(fn *FuncCallNode, castKeyword bool) (*CastNode, bool) {
+	if !castKeyword || fn.Name != ColumnValueFunc || len(fn.Args) != 1 || fn.Distinct || fn.Star {
 		return nil, false
 	}
 	c, ok := fn.Args[0].(*CastNode)
@@ -4386,18 +4392,28 @@ func RefuseColumnValueCall(sql string) error {
 	if !strings.Contains(strings.ToLower(sql), ColumnValueFunc) {
 		return nil
 	}
+	// The spelling is `__column_value(cast(…))` and nothing else — the
+	// parser accepts only the CAST keyword as its argument (columnValueCast)
+	// — so a call is the name, `(`, and CAST; a relation, a CTE or an alias
+	// NAMED __column_value is followed by its column list, not by a cast, and
+	// stays a name. Any other argument is a call to a function nobody
+	// defines, which the parse refuses with the same 42883.
 	lx := newLexer(sql)
-	named := false
+	state := 0 // 1 = after the name, 2 = after the name and `(`
 	for {
 		t := lx.nextToken()
-		switch t.typ {
-		case TokenEOF, TokenError:
+		if t.typ == TokenEOF || t.typ == TokenError {
 			return nil
-		case TokenLParen:
-			if named {
-				return sqlerr.New("42883", "unknown function: %s", ColumnValueFunc)
-			}
 		}
-		named = t.typ == TokenIdent && strings.EqualFold(t.val, ColumnValueFunc)
+		switch {
+		case state == 2 && t.typ == TokenKWCast:
+			return sqlerr.New("42883", "unknown function: %s", ColumnValueFunc)
+		case state == 1 && t.typ == TokenLParen:
+			state = 2
+		case t.typ == TokenIdent && strings.EqualFold(t.val, ColumnValueFunc):
+			state = 1
+		default:
+			state = 0
+		}
 	}
 }
