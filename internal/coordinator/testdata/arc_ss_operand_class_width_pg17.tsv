@@ -449,3 +449,26 @@ intop/dayCountModZero	false	SELECT (t.d - DATE '2024-01-01') % (t.d - t.d) AS x 
 intop/plainAbsConstN	false	SELECT t.id, ABS(-1) * t.n AS x FROM ss_t t	{int,numeric} rows=6 1,2.25 | 2,-3.50 | 3,10.00 | 4,0.00 | 5,0.01 | 6,NULL
 intop/plainAbsConstMinusHalf	false	SELECT t.id, ABS(-1) - 0.5 AS x FROM ss_t t WHERE t.id = 1	{int,numeric} rows=1 1,0.5
 intop/plainNullifIN	false	SELECT t.id, (NULLIF(t.i - 1, t.n) - 0.5) + t.n AS x FROM ss_t t	{int,numeric} rows=6 1,3.75 | 2,-12.00 | 3,13.50 | 4,-1.50 | 5,-0.49 | 6,NULL
+# A scalar subquery's answer is PostgreSQL's type for its SELECT list where the body reads an integer CAST or an integral
+# EXTRACT field in numeric arithmetic (answer/*): numeric, as v0.25.3 declared it, over a derived table, a CTE or a UNION inside
+# the subquery too, computed exactly; the same expressions in a query's own SELECT list keep N-10 / ADR-0024 §2c (kept).
+answer/uncCastM	false	SELECT (SELECT CAST(t.b AS INTEGER) * t.n FROM ss_t t WHERE t.id = 1)	{numeric} rows=1 67.50
+answer/uncExtractN	false	SELECT (SELECT extract(month FROM t.d) * t.n FROM ss_t t WHERE t.id = 1)	{numeric} rows=1 6.75
+answer/subCastPlusM	false	SELECT o.id, (SELECT CAST(o.i AS INTEGER) + x.m FROM ss_i x WHERE x.id = 1) FROM ss_t o	{int,numeric} rows=6 1,4.25 | 2,-5.75 | 3,6.25 | 4,1.25 | 5,2.25 | 6,NULL
+answer/subCastBigM	false	SELECT o.id, (SELECT CAST(o.i AS BIGINT) * x.m FROM ss_i x WHERE x.id = 1) FROM ss_t o	{int,numeric} rows=6 1,3.75 | 2,-8.75 | 3,6.25 | 4,0.00 | 5,1.25 | 6,NULL
+answer/subExtractDowM	false	SELECT o.id, (SELECT extract(dow FROM o.d) * x.m FROM ss_i x WHERE x.id = 1) FROM ss_t o	{int,numeric} rows=6 1,1.25 | 2,5.00 | 3,6.25 | 4,3.75 | 5,3.75 | 6,NULL
+answer/subCastMSum	false	SELECT sum((SELECT CAST(o.b AS INTEGER) * x.m FROM ss_i x WHERE x.id = 1)) FROM ss_t o WHERE o.id IN (1,2,6)	{numeric} rows=1 -50.00
+answer/subCastMDerived	false	SELECT q.k FROM (SELECT (SELECT CAST(o.b AS INTEGER) * x.m FROM ss_i x WHERE x.id = 1) AS k FROM ss_t o WHERE o.id IN (1,2,6)) q	{numeric} rows=3 -87.50 | 37.50 | NULL
+answer/subCastMZero	false	SELECT (SELECT CAST(o.b AS INTEGER) * x.m FROM ss_i x WHERE x.id = 1) FROM ss_t o WHERE o.id = 99	{numeric} rows=0 
+answer/subDerivedCastM	false	SELECT (SELECT q.k FROM (SELECT CAST(t.b AS INTEGER) * t.n AS k FROM ss_t t WHERE t.id = 1) q)	{numeric} rows=1 67.50
+answer/subDerivedExtractN	false	SELECT (SELECT q.k FROM (SELECT extract(year FROM t.d) * t.n AS k FROM ss_t t WHERE t.id = 1) q)	{numeric} rows=1 4554.00
+answer/subCteCastM	false	SELECT (WITH q AS (SELECT CAST(t.b AS INTEGER) * t.n AS k FROM ss_t t WHERE t.id = 1) SELECT k FROM q)	{numeric} rows=1 67.50
+answer/subCastMAlias	false	SELECT (SELECT CAST(t.b AS INTEGER) * t.n AS k FROM ss_t t WHERE t.id = 1)	{numeric} rows=1 67.50
+answer/subUnionCastM	false	SELECT (SELECT CAST(t.b AS INTEGER) * t.n FROM ss_t t WHERE t.id = 1 UNION ALL SELECT CAST(t.b AS INTEGER) * t.n FROM ss_t t WHERE t.id = 99)	{numeric} rows=1 67.50
+answer/subMDivCast	false	SELECT o.id, (SELECT x.m / CAST(o.i AS INTEGER) FROM ss_i x WHERE x.id = 1) FROM ss_t o WHERE o.id IN (1,2)	{int,numeric} rows=2 1,0.41666666666666666667 | 2,-0.17857142857142857143
+answer/subCastDivM	false	SELECT o.id, (SELECT CAST(o.i AS INTEGER) / x.m FROM ss_i x WHERE x.id = 1) FROM ss_t o	{int,numeric} rows=6 1,2.4000000000000000 | 2,-5.6000000000000000 | 3,4.0000000000000000 | 4,0.00000000000000000000 | 5,0.80000000000000000000 | 6,NULL
+answer/subExtractSecM	false	SELECT o.id, (SELECT extract(second FROM o.ts) * x.m FROM ss_i x WHERE x.id = 1) FROM ss_t o	{int,numeric} rows=6 1,0.00000000 | 2,0.00000000 | 3,74.99875000 | 4,0.00000000 | 5,74.99875000 | 6,NULL
+answer/plainExtractN	false	SELECT extract(year FROM t.d) * t.n FROM ss_t t WHERE t.id IN (1,2,6)	{numeric} rows=3 -6895.00 | 4554.00 | NULL
+answer/derivedCastM	false	SELECT q.k FROM (SELECT CAST(t.b AS INTEGER) * t.n AS k FROM ss_t t WHERE t.id = 1) q	{numeric} rows=1 67.50
+answer/cteCastM	false	WITH q AS (SELECT CAST(t.b AS INTEGER) * t.n AS k FROM ss_t t WHERE t.id = 1) SELECT k FROM q	{numeric} rows=1 67.50
+answer/derivedExtractN	false	SELECT q.k FROM (SELECT extract(year FROM t.d) * t.n AS k FROM ss_t t WHERE t.id = 1) q	{numeric} rows=1 4554.00

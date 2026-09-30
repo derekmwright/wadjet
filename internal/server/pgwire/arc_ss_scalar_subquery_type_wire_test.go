@@ -338,7 +338,10 @@ func TestArcSSDeclaredByTheSelectListWalk(t *testing.T) {
 // NUMERIC are numeric arithmetic, inside a scalar subquery and outside one,
 // and CREATE TABLE AS stores numeric. A zero-row result declares a correlated
 // subquery over an int4[] outer column as the rows would (integer, numeric,
-// integer[]). A relation, a CTE or an alias NAMED
+// integer[]). A subquery whose answer multiplies an integer CAST or an
+// integral EXTRACT field by a NUMERIC is numeric, computed exactly, as v0.25.3
+// and PostgreSQL declare it; the same expression in the query's own SELECT
+// list keeps its recorded double precision. A relation, a CTE or an alias NAMED
 // __column_value answers; only the re-run's spelling `__column_value(cast(…))`
 // — and any other call of that name — is 42883.
 func TestArcSSScopeAndIntegerOperandsOnTheWire(t *testing.T) {
@@ -350,6 +353,8 @@ func TestArcSSScopeAndIntegerOperandsOnTheWire(t *testing.T) {
 			"(SELECT (t.d - DATE '2024-01-01') * t.n FROM ss_t t WHERE t.id = 1) AS kn, " +
 			"(SELECT ascii(o.s) * x.m FROM ss_i x, ss_t o WHERE x.id = 1 AND o.id = 1) AS ka",
 		"CREATE TABLE ss_r5b AS SELECT sum(q.k) AS tot FROM (SELECT i + i AS k FROM (SELECT t.b AS i, i + i FROM ss_t t WHERE t.id = 3) t) q",
+		"CREATE TABLE ss_r5c AS SELECT (SELECT CAST(t.b AS INTEGER) * t.n FROM ss_t t WHERE t.id = 1) AS kc, " +
+			"(SELECT extract(year FROM t.d) * t.n FROM ss_t t WHERE t.id = 1) AS ke",
 		"CREATE TABLE __column_value (k integer)",
 		"INSERT INTO __column_value (k) VALUES (4)",
 	} {
@@ -391,6 +396,16 @@ func TestArcSSScopeAndIntegerOperandsOnTheWire(t *testing.T) {
 		{"zeroIdxV", `SELECT (SELECT o.a[1] + x.v FROM ss_i x WHERE x.id = 1) AS v FROM ss_t o WHERE o.id = 99`, 23, "<none>", ""},
 		{"zeroIdxM", `SELECT (SELECT o.a[1] * x.m FROM ss_i x WHERE x.id = 1) AS v FROM ss_t o WHERE o.id = 99`, 1700, "<none>", ""},
 		{"zeroArr", `SELECT (SELECT o.a FROM ss_i x WHERE x.id = 1) AS v FROM ss_t o WHERE o.id = 99`, 1007, "<none>", ""},
+		{"subCastM", `SELECT (SELECT CAST(o.b AS INTEGER) * x.m FROM ss_i x WHERE x.id = 1) AS v FROM ss_t o WHERE o.id = 1`, 1700, "37.50", ""},
+		{"subExtractM", `SELECT (SELECT extract(year FROM o.d) * x.m FROM ss_i x WHERE x.id = 1) AS v FROM ss_t o WHERE o.id = 1`, 1700, "2530.00", ""},
+		{"uncCastN", `SELECT (SELECT CAST(t.b AS INTEGER) * t.n FROM ss_t t WHERE t.id = 1) AS v`, 1700, "67.50", ""},
+		{"subDerivedCastN", `SELECT (SELECT q.k FROM (SELECT CAST(t.b AS INTEGER) * t.n AS k FROM ss_t t WHERE t.id = 1) q) AS v`, 1700, "67.50", ""},
+		{"subMDivCast", `SELECT (SELECT x.m / CAST(o.i AS INTEGER) FROM ss_i x WHERE x.id = 1) AS v FROM ss_t o WHERE o.id = 1`, 1700, "0.4166666666666666666667", "numeric-decimal#r19: the quotient keeps max(6, s1 + p2 + 1) fraction digits (PostgreSQL: 0.41666666666666666667)"},
+		{"zeroCastM", `SELECT (SELECT CAST(o.b AS INTEGER) * x.m FROM ss_i x WHERE x.id = 1) AS v FROM ss_t o WHERE o.id = 99`, 1700, "<none>", ""},
+		{"ctasCastN", `SELECT kc FROM ss_r5c`, 1700, "67.50", ""},
+		{"ctasExtractN", `SELECT ke FROM ss_r5c`, 1700, "4554.00", ""},
+		{"plainCastN", `SELECT CAST(t.b AS INTEGER) * t.n AS v FROM ss_t t WHERE t.id = 1`, 701, "67.5", "N-10: an integer CAST beside a NUMERIC takes the float8 rung in a query's own SELECT list (PostgreSQL: numeric 67.50)"},
+		{"plainExtractN", `SELECT extract(year FROM t.d) * t.n AS v FROM ss_t t WHERE t.id = 1`, 701, "4554", "ADR-0024 §2c: extract() declares double precision in a query's own SELECT list (PostgreSQL: numeric 4554.00)"},
 		{"tableNamed", `SELECT k AS v FROM __column_value`, 23, "4", ""},
 		{"aliasNamed", `SELECT __column_value.k AS v FROM (SELECT 1 AS k) AS __column_value (k)`, 23, "1", ""},
 		{"cteNamed", `WITH __column_value (k) AS (SELECT 1) SELECT k AS v FROM __column_value`, 23, "1", ""},
