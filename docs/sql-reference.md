@@ -1188,7 +1188,13 @@ subscript of an `integer[]`, a day count `date - date`, `ascii`) is
 `integer` — `(SELECT x.v + x.v …)`, `(SELECT (x.d - DATE '2024-01-01') + 1 …)`,
 `(SELECT ascii(x.s) …)` — and a result past its range is 22003, as on
 PostgreSQL: `(SELECT x.v * 1000000000 …)`, `(SELECT x.a[1] + 2147483647 …)`;
-a `bigint` operand makes it `bigint` (`(SELECT x.b - x.i …)` is 8999999995). A subquery that
+a `bigint` operand makes it `bigint` (`(SELECT x.b - x.i …)` is 8999999995). An
+integer expression beside a `numeric` — a day count, `ascii`, `length`, a
+subscript of an `integer[]`, `COALESCE` over integers — is `numeric`
+arithmetic, as an `integer` column's is: `(SELECT (x.d - DATE '2024-01-01') * x.n …)`
+is `numeric`. An expression is read in its own scope: over a derived table that
+publishes `t.b AS i` and its own unaliased `i + i`, the query's `i + i` is the
+`bigint` sum of the `bigint` `i`. A subquery that
 reads the outer row is declared with each outer column at that column's own
 type — its width, its precision and scale, an array's element — so
 `(SELECT c.f + x.v FROM x …)` over a `double precision` `c.f` and an
