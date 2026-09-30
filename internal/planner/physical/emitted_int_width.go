@@ -103,9 +103,13 @@ func emittedColIntWidth(n *logical.Node) map[string]intWidth {
 		}
 		child := n.Children[0]
 		strictInt := strictIntArithCols(child)
+		// The ARRAY elements too: the width reads the element the declared-
+		// type walk names for a subscript (`a[1] + 1` over an int4[] is int4),
+		// and without them that walk could not type the projection at all.
 		decls := withSubqueryDecls(ColDecls{
 			Types:    emittedColTypes(child),
 			Fields:   inputColFields(child),
+			Elems:    shapeElems(inputColShapes(child)),
 			Dec:      emittedColDecimal(child),
 			intWidth: emittedColIntWidth(child),
 		}, n)

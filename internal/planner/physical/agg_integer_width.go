@@ -128,6 +128,15 @@ func declaredIntWidth(node plansql.Node, decls ColDecls) intWidth {
 		}
 		return w
 	case *plansql.FuncCallNode:
+		// A SUBSCRIPT is one element of its container, as wide as the
+		// element type the declared-type walk names for it: an int4[]'s
+		// element is int4 and an int8[]'s int8, as on PostgreSQL.
+		if strings.EqualFold(n.Name, "element_at") {
+			if d, c := nodeDeclaredType(n, decls); c == expr.Decided {
+				return catalogIntWidth(d.ID)
+			}
+			return intWidthUnknown
+		}
 		if strings.EqualFold(n.Name, "row_field") {
 			d, c := funcReturnType(n, decls)
 			if c == expr.Decided {
