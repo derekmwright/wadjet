@@ -388,7 +388,7 @@ PostgreSQL has no QUALIFY. It filters after windows, can read unprojected inputs
 
 **A bound bigint, text or numeric parameter is a window integer argument.**
 
-`LAG(x, $1)` with `$1` declared `int8`, `text` or `numeric` and bound `1` answers `LAG(x, 1)`; PostgreSQL raises `42883` (`lag(bigint, bigint)` does not exist). A parameter reaches the engine as the literal it renders to, so its declared type is not read; an `integer` or untyped parameter is read as PostgreSQL reads it. (catalog: [aggregates-windows#r20](adr/0012-divergences/aggregates-windows.md#catalog); #1399)
+`LAG(x, $1)` with `$1` declared `int8`, `text` or `numeric` and bound `1` answers `LAG(x, 1)`; PostgreSQL raises `42883` (`lag(bigint, bigint)` does not exist). A parameter reaches the engine as the literal it renders to, so its declared type is not read; an `integer` or untyped parameter is read as PostgreSQL reads it. (catalog: [aggregates-windows#r20](adr/0012-divergences/aggregates-windows.md#catalog); #1399, #1439)
 
 **Network-native types have separate storage domains.**
 
@@ -598,7 +598,7 @@ It raises 0A000 where PostgreSQL answers: the merged value is a COALESCE and a w
 
 **A per-row window integer argument is refused.**
 
-`LAG(x, o)`, `LAG(x, o + 1)`, `NTILE(o)` and `LAG(x, (SELECT 1))` raise `0A000`; PostgreSQL evaluates the argument (LAG / LEAD per row, NTILE / NTH_VALUE once per partition). A constant expression (`LAG(x, 2 - 1)`, `NTILE(abs(-2))`) is folded when the query is planned and answers as on PostgreSQL, except `'1' + 1`, which the fold types numeric (`42883`; PostgreSQL reads 2). An integer literal (the int4 minimum included), a quoted or cast integer, NULL and a bound `integer` or untyped parameter are read as PostgreSQL reads them. (catalog: [aggregates-windows#r19](adr/0012-divergences/aggregates-windows.md#catalog); #1399)
+`LAG(x, o)`, `LAG(x, o + 1)`, `NTILE(o)` and `LAG(x, (SELECT 1))` raise `0A000`; PostgreSQL evaluates the argument (LAG / LEAD per row, NTILE / NTH_VALUE once per partition). A constant expression (`LAG(x, 2 - 1)`, `NTILE(abs(-2))`) is folded when the query is planned and answers as on PostgreSQL, except `'1' + 1`, which the fold types numeric (`42883`; PostgreSQL reads 2). An integer literal (the int4 minimum included), a quoted or cast integer, NULL and a bound `integer` or untyped parameter are read as PostgreSQL reads them. (catalog: [aggregates-windows#r19](adr/0012-divergences/aggregates-windows.md#catalog); #1399, #1440)
 
 **NATURAL JOIN is refused.**
 
@@ -626,11 +626,11 @@ A value PostgreSQL inet holds can exceed IPV4/IPV6’s representation: `CAST('10
 
 **Some set-operation type pairs are refused.**
 
-Missing representations cause 0A000 versus PostgreSQL values: DATE/TIMESTAMP, different address types, or PORT/PROTOCOL/DURATION with DECIMAL, in either order. (catalog: [set-operations#r7](adr/0012-divergences/set-operations.md#catalog); ADR-0012 §12/carrier-pairs)
+Missing representations cause 0A000 versus PostgreSQL values: DATE/TIMESTAMP, different address types, or PORT/PROTOCOL/DURATION with DECIMAL, in either order. (catalog: [set-operations#r7](adr/0012-divergences/set-operations.md#catalog); ADR-0012 §12/carrier-pairs; DATE/TIMESTAMP #1430)
 
 **CASE, COALESCE, GREATEST and LEAST over a DATE and a TIMESTAMP are refused.**
 
-PostgreSQL resolves the arms to timestamp, a DATE arm at its midnight; here the choice has no carrier for a DATE arm in a TIMESTAMP result and raises 0A000 — `CAST` the DATE arm to TIMESTAMP. The refusal holds whatever the arm is: a column (of a table, a derived table, a CTE or recursive CTE — inside the recursive CTE's own recursive term too — a join, a set operation, VALUES or a LATERAL output, whatever produced it there), a literal, an expression, a scalar subquery (correlated or not), a window call such as `max(ts) OVER ()` or `lag(ts) OVER (…)`, or an aggregate. `NULLIF(d, ts)` is declared by its first argument and answers. A comparison (a scalar-subquery operand included), an IN / EXISTS membership and a join key between the two answer PostgreSQL's rows. One known wrong value remains: a bind parameter typed TIMESTAMP (OID 1114) against a DATE column is read at DATE, so `d = $1` with `'1969-12-31 23:59:59.999'` matches 1969-12-31 where PostgreSQL matches nothing (#1426) — `CAST($1 AS TIMESTAMP)` answers PostgreSQL's rows. (catalog: [temporal#r24](adr/0012-divergences/temporal.md#catalog); #1378)
+PostgreSQL resolves the arms to timestamp, a DATE arm at its midnight; here the choice has no carrier for a DATE arm in a TIMESTAMP result and raises 0A000 — `CAST` the DATE arm to TIMESTAMP. The refusal holds whatever the arm is: a column (of a table, a derived table, a CTE or recursive CTE — inside the recursive CTE's own recursive term too — a join, a set operation, VALUES or a LATERAL output, whatever produced it there), a literal, an expression, a scalar subquery (correlated or not), a window call such as `max(ts) OVER ()` or `lag(ts) OVER (…)`, or an aggregate. `NULLIF(d, ts)` is declared by its first argument and answers. A comparison (a scalar-subquery operand included), an IN / EXISTS membership and a join key between the two answer PostgreSQL's rows. One known wrong value remains: a bind parameter typed TIMESTAMP (OID 1114) against a DATE column is read at DATE, so `d = $1` with `'1969-12-31 23:59:59.999'` matches 1969-12-31 where PostgreSQL matches nothing (#1426) — `CAST($1 AS TIMESTAMP)` answers PostgreSQL's rows. (catalog: [temporal#r24](adr/0012-divergences/temporal.md#catalog); #1378, #1316)
 
 **Some set-operation literals are refused.**
 

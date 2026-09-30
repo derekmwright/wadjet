@@ -3397,7 +3397,7 @@ The INTEGER argument — `LAG` / `LEAD`'s offset, `NTILE`'s bucket count,
 signed one (`-2147483648` included), a quoted one (`'2'`), `CAST(… AS
 INTEGER)`, `NULL`, a constant expression (`2 - 1`, `abs(-1)`), or a bound
 `integer` or untyped parameter. A parameter declared `bigint`, `text` or
-`numeric` is read by its value, where PostgreSQL raises `42883`.
+`numeric` is read by its value, where PostgreSQL raises `42883` (#1439).
 
 ```sql
 SELECT id, LAG(x, 0) OVER (ORDER BY id) FROM t;    -- the current row's x
@@ -3409,8 +3409,11 @@ SELECT id, NTILE(0) OVER (ORDER BY id) FROM t;     -- ERROR 22014
 An offset of 0 is the current row and a negative offset reads the other way.
 A NULL argument answers NULL on every row. An `NTILE` or `NTH_VALUE` n that is
 not positive raises `22014` / `22016` when a row is evaluated, so over no rows
-the query answers no rows. An offset past the partition's edge, however
-large, answers the default on every row. A numeric or bigint argument (`1.5`,
+the query answers no rows; the column is evaluated even when an enclosing
+query does not read it (`SELECT count(*) FROM (SELECT NTILE(0) OVER (ORDER BY
+id) AS a FROM t) s` raises `22014` where PostgreSQL answers the count,
+#1437). An offset past the partition's edge, however large, answers the
+default on every row. A numeric or bigint argument (`1.5`,
 `2147483648`, `CAST(0 AS BIGINT)`, `2147483648 - 1`, `2 ^ 0`) is `42883`, a
 quoted one that is not an integer is `22P02`, and an integer expression past
 int4 (`2147483647 + 1`) is `22003`. A constant expression is folded when the
@@ -3419,14 +3422,14 @@ adds an untyped quoted literal to an integer (`LAG(x, '1' + 1)`) is folded to a
 numeric and raises `42883`, where PostgreSQL reads 2. **A per-row argument — a
 column (`LAG(x, o)`, `NTILE(o)`), an expression over one (`LAG(x, o + 1)`) or
 a subquery — is refused, SQLSTATE `0A000`**, where PostgreSQL evaluates it
-(ADR-0012 catalog, aggregates-windows r19); write a constant.
+(ADR-0012 catalog, aggregates-windows r19; #1440); write a constant.
 
 A `LAG` / `LEAD` default may be an integer literal, a negative one or NULL.
 A default of another type is not coerced to the argument's type: a decimal
 default into an integer column is truncated (`LAG(x, 1, 2.5)` answers 2 where
-PostgreSQL answers 2.5), and a default that is not a numeric literal or NULL
-— text, a column, a cast, a boolean (`LAG(FALSE, 1, TRUE)`) — fails the query
-when a row reads it.
+PostgreSQL answers 2.5, #1435), and a default that is not a numeric literal or
+NULL — text, a column, a cast, a boolean (`LAG(FALSE, 1, TRUE)`) — fails the query
+when a row reads it (#1436).
 
 ### Which relation a window key names
 
@@ -4475,9 +4478,9 @@ scalar subquery, in an `IN` / `= ANY` / `NOT IN` / `<> ALL` membership, an
 is: a column (of a table, a derived table, a CTE or recursive CTE, its own
 recursive term included, a join, a set operation or a LATERAL output,
 whatever produced it there), a scalar subquery, a window
-call, an aggregate — and a set operation that does, are refused `0A000`: `CAST` the DATE side to
-TIMESTAMP. A bind parameter typed TIMESTAMP against a DATE column is read
-at DATE (a known defect, #1426); `CAST($1 AS TIMESTAMP)` compares as
+call, an aggregate — and a set operation that does, are refused `0A000`
+(#1316, #1430): `CAST` the DATE side to TIMESTAMP. A bind parameter typed
+TIMESTAMP against a DATE column is read at DATE (a known defect, #1426); `CAST($1 AS TIMESTAMP)` compares as
 PostgreSQL does. `NOW()` and its siblings
 declare `timestamp without time zone` where PostgreSQL declares
 `timestamptz` (docs/postgres-differences.md). `CURRENT_TIME` has no
