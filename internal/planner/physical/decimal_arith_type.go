@@ -58,6 +58,12 @@ func binOpDecimalType(n *plansql.BinaryOp, decls ColDecls) (expr.DeclType, bool)
 // scale 0, exactly as a bare integer column does. expr.BinOpNumeric answers
 // the same for its int mode, which is what keeps the two in step.
 func binOpDecimalOperand(n *plansql.BinaryOp, decls ColDecls) (batch.DecimalType, bool, bool) {
+	if dayCountDifference(n, decls) {
+		// A DAY COUNT is an integer operand, as integer arithmetic over
+		// columns is: `(d - DATE '2024-01-01') * n` is numeric on PostgreSQL.
+		// expr.integerOperand reads the same node (dateDifference).
+		return batch.DecimalType{Precision: batch.Int64DecimalDigits}, false, true
+	}
 	if _, _, ok := batch.DecimalResultType(n.Op, 1, 0, 1, 0); !ok {
 		return batch.DecimalType{}, false, false // not one of + - * / %
 	}
@@ -133,7 +139,10 @@ func decimalArithOperand(node plansql.Node, decls ColDecls) (batch.DecimalType, 
 		}
 		return batch.DecimalType{}, false, false
 	case *plansql.CaseNode:
-		return choiceDecimalArithOperand(n, decls)
+		if t, isDec, ok := choiceDecimalArithOperand(n, decls); ok {
+			return t, isDec, ok
+		}
+		return integerValuedOperand(n, decls)
 	case *plansql.FuncCallNode:
 		// A scalar math function over a DECIMAL answers a DECIMAL, so it can
 		// be an operand of exact arithmetic: `ROUND(d, 1) * 2` is numeric in
@@ -146,9 +155,11 @@ func decimalArithOperand(node plansql.Node, decls ColDecls) (batch.DecimalType, 
 		// GREATEST/LEAST/COALESCE/IFNULL mirror every argument, NULLIF
 		// argument 0, IF its two branches.
 		if _, poly := expr.DefaultRegistry.ReturnType(n.Name).SameAsArgs(len(n.Args)); poly {
-			return choiceDecimalArithOperand(n, decls)
+			if t, isDec, ok := choiceDecimalArithOperand(n, decls); ok {
+				return t, isDec, ok
+			}
 		}
-		return batch.DecimalType{}, false, false
+		return integerValuedOperand(n, decls)
 	case *plansql.CastNode:
 		// A CAST that NAMES a (p,s) produces an exact DECIMAL and can be an
 		// operand of exact arithmetic — `CAST(x AS DECIMAL(10,2)) * 2` is
@@ -180,6 +191,22 @@ func decimalArithOperand(node plansql.Node, decls ColDecls) (batch.DecimalType, 
 		return t, err != nil, true
 	}
 	return batch.DecimalType{}, false, false
+}
+
+// integerValuedOperand is a function call or a CASE whose declared type is an
+// INTEGER — `ascii(s)`, `length(s)`, `abs(i)`, a subscript of an int4[],
+// `COALESCE(i, 0)` — as an operand of exact arithmetic: an integer at scale 0
+// contributing the int64 range, as integer arithmetic over columns does, so
+// `ascii(s) * n` is numeric as on PostgreSQL rather than double precision.
+// expr.integerOperand is the runtime mirror (integerBoxOperand reads the
+// node's own integer box). A CAST is not one: a CAST the user wrote keeps its
+// own rule, and the CastNode arm above answers for it.
+func integerValuedOperand(node plansql.Node, decls ColDecls) (batch.DecimalType, bool, bool) {
+	t, c := nodeDeclaredType(node, decls)
+	if c != expr.Decided || (t.ID != parquet.TypeInt32 && t.ID != parquet.TypeInt64) {
+		return batch.DecimalType{}, false, false
+	}
+	return batch.DecimalType{Precision: batch.Int64DecimalDigits}, false, true
 }
 
 // choiceDecimalArithOperand is a CASE/COALESCE/GREATEST/LEAST/NULLIF/IF as an

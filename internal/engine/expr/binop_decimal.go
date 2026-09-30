@@ -409,19 +409,32 @@ func (o boxedDecimalOperand) evalDecimal(b *batch.RecordBatch, row int) (batch.I
 // decimalOperandOf resolves an operand's exact accessor: the interface when the
 // node implements it, and the boxed adapter for a choosing construct whose
 // arms fold to a DECIMAL.
+//
+// An integer-valued operand whose own accessor has no fixed-point form — a day
+// count, an integer function, a subscript, a choice over integers — answers
+// through integerBoxOperand, as an integer column does (integer_decimal_operand.go);
+// a nested generic BinOp in its own decimal mode through its exact box.
 func decimalOperandOf(e Expr, b *batch.RecordBatch) (decimalOperand, bool) {
 	if o, ok := e.(decimalOperand); ok {
+		if _, typed := o.decimalType(b); !typed && integerOperand(e, b) {
+			return integerBoxOperand{e: e}, true
+		}
 		return o, true
 	}
-	arms, isChoice := choiceDecimalArms(e)
-	if !isChoice {
-		return nil, false
+	if bo, ok := e.(*BinOp); ok {
+		if m, on := bo.dec.resolve(bo.Op, bo.Left, bo.Right, b); on {
+			return boxedDecimalOperand{e: e, t: m.out}, true
+		}
 	}
-	p, sc, ok := decimalArmFold(arms, b)
-	if !ok {
-		return nil, false
+	if arms, isChoice := choiceDecimalArms(e); isChoice {
+		if p, sc, ok := decimalArmFold(arms, b); ok {
+			return boxedDecimalOperand{e: e, t: batch.DecimalType{Precision: p, Scale: sc}}, true
+		}
 	}
-	return boxedDecimalOperand{e: e, t: batch.DecimalType{Precision: p, Scale: sc}}, true
+	if integerOperand(e, b) {
+		return integerBoxOperand{e: e}, true
+	}
+	return nil, false
 }
 
 // resolveDecimalMode decides whether this node computes in exact fixed point,
