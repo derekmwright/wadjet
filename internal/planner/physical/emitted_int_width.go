@@ -57,6 +57,18 @@ func emittedColIntWidth(n *logical.Node) map[string]intWidth {
 			if name == "" {
 				continue
 			}
+			// A key whose columns are all columns of the input is that
+			// expression over them, read as publishedExprName reads a
+			// projection: an input column that carries the key's TEXT (a
+			// derived table's unaliased `i + i` over ITS `i`) is a different
+			// expression, and its width made `(SELECT i + i … GROUP BY i + i)`
+			// over a bigint `i` int4 and 22003.
+			if ast, ok := groupKeyAST(child, g); ok && len(collectColRefs(ast)) > 0 && declsCoverEveryColRef(ast, in) {
+				if w := declaredIntWidth(ast, in); w != intWidthUnknown {
+					out[name] = w
+				}
+				continue
+			}
 			if w, ok := lookupColIntWidth(in.intWidth, g); ok {
 				out[name] = w
 				continue

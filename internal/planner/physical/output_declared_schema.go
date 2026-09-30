@@ -840,12 +840,27 @@ func declaredProjectionName(proj logical.Projection) string {
 
 // publishedExprName is the column a producer below publishes a computed
 // projection under — its WHOLE expression text, lowercased (ADR-0026 §2c) —
-// when decls declares one. Both halves of a projection's declaration, the
-// type (declaredProjectionDecl) and the integer width
+// when decls declares one AND this scope cannot read the expression itself.
+// Both halves of a projection's declaration, the type
+// (declaredProjectionDecl) and the integer width
 // (declaredProjectionIntWidth), read the producer's column through it.
+//
+// The text is a name only in the producer's own scope: an aggregate that
+// grouped by `a * 2`, or the DISTINCT lowering, emits the expression and no
+// longer emits `a`, so above it `a * 2` can be read only as that column.
+// Where every column the expression references IS a column of this scope,
+// the expression is arithmetic over those columns, and a producer column that
+// carries the same text is a different expression: a derived table's
+// unaliased `i + i` over ITS `i` (int4) beside `t.b AS i` (bigint) made the
+// query's `i + i` over the bigint `i` int4 — a scalar subquery over it
+// raised 22003 and `sum(q.k)` over a column derived from it overflowed its
+// accumulator, where PostgreSQL answers 18000000000.
 func publishedExprName(proj logical.Projection, decls ColDecls) (string, bool) {
 	name := strings.ToLower(strings.TrimSpace(proj.Expr))
 	if name == "" {
+		return "", false
+	}
+	if proj.ASTExpr != nil && len(collectColRefs(proj.ASTExpr)) > 0 && declsCoverEveryColRef(proj.ASTExpr, decls) {
 		return "", false
 	}
 	_, ok := decls.Types[name]
