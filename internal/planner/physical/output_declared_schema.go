@@ -27,8 +27,25 @@ func declaredOutputSchema(root *logical.Node,
 	// (subquery_decl_annotation.go). Without it a set-operation arm holding a
 	// scalar subquery was declared TEXT beside a bigint arm and the query was
 	// refused 42804 where PostgreSQL answers (#1018).
-	if subqueryDecl == nil {
-		subqueryDecl, _, _ = subqueryDeclsOf(root)
+	//
+	// Where the tree is stamped, the stamp answers FIRST: it declared each
+	// subquery from the text a correlated one is declared from — its outer
+	// references typed as the columns of the relation it sits over
+	// (annotateSubqueryColumnDecls) — while a Planner's resolver plans the
+	// text as written, outer names unresolved. `(SELECT o.a[1] + x.v …)`
+	// over an int4[] `o.a` was integer on every row the wire sent and
+	// double precision in a zero-row result's RowDescription.
+	if stamp, _, _ := subqueryDeclsOf(root); stamp != nil {
+		if planned := subqueryDecl; planned != nil {
+			subqueryDecl = func(sql string) (parquet.Column, bool) {
+				if c, ok := stamp(sql); ok {
+					return c, true
+				}
+				return planned(sql)
+			}
+		} else {
+			subqueryDecl = stamp
+		}
 	}
 	if cols, ok := setOpDeclaredOutputSchema(root); ok {
 		return cols
