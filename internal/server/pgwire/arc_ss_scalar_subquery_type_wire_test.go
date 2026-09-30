@@ -18,6 +18,8 @@ package pgwire
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -103,6 +105,20 @@ func TestArcSSScalarSubqueryTypedOnTheWire(t *testing.T) {
 		{"innerGPlusV", `SELECT (SELECT x.g + x.v FROM ss_i x WHERE x.id = 1) AS v`, 701, "5.5"},
 		{"innerGPlusVZero", `SELECT x.g + x.v AS v FROM ss_i x WHERE x.id = 99`, 701, "<none>"},
 		{"groupByKey", `SELECT (SELECT i FROM ss_t WHERE id = 1) AS v FROM ss_t GROUP BY 1`, 23, "3"},
+		// A correlated outer value is typed as its COLUMN, not as the cast
+		// that spells it in the re-run: a choice over an int4 outer column
+		// is integer and over an int4[] one integer[] (v0.25.3 declared each
+		// as PostgreSQL does; a CAST-typed outer value declared 20 and 1016).
+		{"coalesceOuterInt", `SELECT (SELECT coalesce(o.i, x.v) FROM ss_i x WHERE x.id = 1) AS v FROM ss_t o WHERE o.id = 1`, 23, "3"},
+		{"coalesceInnerFirst", `SELECT (SELECT coalesce(x.v, o.i) FROM ss_i x WHERE x.id = 1) AS v FROM ss_t o WHERE o.id = 1`, 23, "5"},
+		{"coalesceOuterZero", `SELECT (SELECT coalesce(o.i, 0) FROM ss_i x WHERE x.id = 1) AS v FROM ss_t o WHERE o.id = 1`, 23, "3"},
+		{"caseOuterInt", `SELECT (SELECT CASE WHEN x.v > 0 THEN o.i ELSE x.v END FROM ss_i x WHERE x.id = 1) AS v FROM ss_t o WHERE o.id = 1`, 23, "3"},
+		{"greatestOuterInt", `SELECT (SELECT greatest(o.i, x.v) FROM ss_i x WHERE x.id = 1) AS v FROM ss_t o WHERE o.id = 1`, 23, "5"},
+		{"leastOuterInt", `SELECT (SELECT least(o.i, 3) FROM ss_i x WHERE x.id = 1) AS v FROM ss_t o WHERE o.id = 5`, 23, "1"},
+		{"nullifOuterInt", `SELECT (SELECT nullif(o.i, x.v) FROM ss_i x WHERE x.id = 1) AS v FROM ss_t o WHERE o.id = 1`, 23, "3"},
+		{"absOuterInt", `SELECT (SELECT abs(o.i) FROM ss_i x WHERE x.id = 1) AS v FROM ss_t o WHERE o.id = 1`, 23, "3"},
+		{"coalesceOuterArray", `SELECT (SELECT coalesce(o.a, x.a) FROM ss_t x WHERE x.id = 1) AS v FROM ss_t o WHERE o.id = 5`, 1007, "{8}"},
+		{"coalesceInnerArray", `SELECT (SELECT coalesce(x.a, o.a) FROM ss_t x WHERE x.id = 1) AS v FROM ss_t o WHERE o.id = 5`, 1007, "{1,2}"},
 	} {
 		c := c
 		t.Run(c.name, func(t *testing.T) {
@@ -157,4 +173,62 @@ func ssWireRead(t *testing.T, rr *pgconn.ResultReader, sql string) ssWireResult 
 		t.Fatalf("%v\n  SQL: %s", err, sql)
 	}
 	return out
+}
+
+// WHAT A CORRELATED OUTER VALUE STORES, and what an integer CAST the user
+// writes still answers. CREATE TABLE AS over `(SELECT coalesce(o.i, x.v) …)`
+// makes an integer column and over `(SELECT coalesce(o.a, x.a) …)` an
+// integer[] one, as PostgreSQL 17.11 does; and `CAST(t.i AS INTEGER) / t.n`
+// — no subquery — stores 1.33333333333333330000 into a numeric(30,20) and
+// finds rows 1 and 5 above 1.333333333331, PostgreSQL's (and v0.25.3's)
+// answers, where an integer cast read as a fixed-point operand truncated the
+// quotient at eleven digits (1.33333333333000000000; row 5 only).
+func TestArcSSOuterValueStoresAsItsColumn(t *testing.T) {
+	srv := setupSSWireDB(t)
+	conn := connectPgconn(t, srv.Addr())
+	ctx := context.Background()
+	for _, sql := range []string{
+		"CREATE TABLE ss_ctas AS SELECT o.id, (SELECT coalesce(o.i, x.v) FROM ss_i x WHERE x.id = 1) AS k, " +
+			"(SELECT coalesce(o.a, x.a) FROM ss_t x WHERE x.id = 1) AS ka, " +
+			"(SELECT CASE WHEN x.v > 0 THEN o.i ELSE x.v END FROM ss_i x WHERE x.id = 1) AS kc FROM ss_t o",
+		"CREATE TABLE ss_q (id BIGINT, x NUMERIC(30,20))",
+		"INSERT INTO ss_q SELECT t.id, CAST(t.i AS INTEGER) / t.n FROM ss_t t",
+	} {
+		if _, err := conn.Exec(ctx, sql).ReadAll(); err != nil {
+			t.Fatalf("%s: %v", sql, err)
+		}
+	}
+	for _, c := range []struct {
+		sql  string
+		oids []uint32
+		rows string
+	}{
+		{"SELECT k, ka, kc FROM ss_ctas WHERE id = 5", []uint32{23, 1007, 23}, "1;{8};1"},
+		{"SELECT x FROM ss_q ORDER BY id", []uint32{1700},
+			"1.33333333333333330000|0.50000000000000000000|100.00000000000000000000"},
+		{"SELECT id FROM ss_t t WHERE CAST(t.i AS INTEGER) / t.n > 1.333333333331 ORDER BY id", []uint32{20}, "1|5"},
+	} {
+		rr := conn.ExecParams(ctx, c.sql, nil, nil, nil, nil)
+		var oids []uint32
+		for _, fd := range rr.FieldDescriptions() {
+			oids = append(oids, fd.DataTypeOID)
+		}
+		var rows []string
+		for rr.NextRow() {
+			var cells []string
+			for _, v := range rr.Values() {
+				cells = append(cells, string(v))
+			}
+			rows = append(rows, strings.Join(cells, ";"))
+		}
+		if _, err := rr.Close(); err != nil {
+			t.Fatalf("%s: %v", c.sql, err)
+		}
+		if fmt.Sprint(oids) != fmt.Sprint(c.oids) {
+			t.Errorf("%s\n  OIDs %v, PostgreSQL 17.11 declares %v", c.sql, oids, c.oids)
+		}
+		if got := strings.Join(rows, "|"); got != c.rows {
+			t.Errorf("%s\n  sent %q, PostgreSQL 17.11 sends %q", c.sql, got, c.rows)
+		}
+	}
 }

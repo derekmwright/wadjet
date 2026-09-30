@@ -14,9 +14,14 @@ package coordinator
 //     whatever spelling reaches it: `||` between two non-text operands and
 //     `*`, `/`, `%` beside a DATE or a TIMESTAMP, outside a subquery, inside
 //     one, and correlated through the outer column's typed spelling;
-//   - a correlated integer outer value is its column's type in DECIMAL
-//     arithmetic (`x.m / o.i` is `x.m / i`), and a NULL outer value is a
-//     NULL of its column's type (`sum(x.v + o.i)` over a NULL is NULL);
+//   - a correlated outer value is typed as its COLUMN in DECIMAL
+//     arithmetic — `x.m / o.i` answers `x.m / i`'s digits and `x.v / o.n`
+//     `v / n`'s, the plain/* cells beside them — while an integer CAST the
+//     user writes keeps its own rule, with no subquery anywhere
+//     (`CAST(t.i AS INTEGER) / t.n`, castI/*: v0.25.3's digits, stored
+//     value and row count); a NULL outer value is a NULL of its column's
+//     type (`sum(x.v + o.i)` over a NULL is NULL); `(SELECT x.b - x.i …)`
+//     is bigint, not the int4 of its last operand;
 //   - a DATE answer past 9999-12-31 is read back (10000-01-01).
 //
 // Every want is PostgreSQL 17.11's, measured over ssPGFixture
