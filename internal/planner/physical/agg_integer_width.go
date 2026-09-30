@@ -115,6 +115,11 @@ func declaredIntWidth(node plansql.Node, decls ColDecls) intWidth {
 	case *plansql.UnaryOp:
 		return declaredIntWidth(n.Inner, decls)
 	case *plansql.BinaryOp:
+		// A DAY COUNT — `date - date`, the declared-type walk's integer
+		// answer for two DATEs — is integer on PostgreSQL.
+		if dayCountDifference(n, decls) {
+			return intWidth4
+		}
 		return widerIntWidth(declaredIntWidth(n.Left, decls), declaredIntWidth(n.Right, decls))
 	case *plansql.CaseNode:
 		// A choice is as wide as its widest arm, which is what PostgreSQL's

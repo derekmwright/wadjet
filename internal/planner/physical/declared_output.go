@@ -218,6 +218,12 @@ func intArithColumnType(t parquet.TypeID) bool {
 func intArithAllInt(node plansql.Node, strictInt map[string]bool, decls ColDecls) bool {
 	switch n := node.(type) {
 	case *plansql.BinaryOp:
+		// A day count is an integer operand: `(d - DATE '2024-01-01') + 1`
+		// is integer arithmetic on PostgreSQL, and the kernel computes it in
+		// its integer mode (`(d - d) / 7` divides as integers).
+		if dayCountDifference(n, decls) {
+			return true
+		}
 		switch n.Op {
 		case "+", "-", "*", "%", "/":
 		default:
@@ -2283,6 +2289,18 @@ func binOpTemporalType(n *plansql.BinaryOp, decls ColDecls) (expr.DeclType, expr
 		return expr.Decl(parquet.TypeDate), expr.Decided
 	}
 	return expr.DeclType{}, expr.Undecided
+}
+
+// dayCountDifference reports whether n is a DAY COUNT — the difference of
+// two dates, which binOpTemporalType declares an integer: `d - d`,
+// `d - DATE '…'`, `d - '…'`. A text COLUMN is not a date here, though that
+// walk reads one as a day.
+func dayCountDifference(n *plansql.BinaryOp, decls ColDecls) bool {
+	if n.Op != "-" || isTextColRef(n.Left, decls) || isTextColRef(n.Right, decls) {
+		return false
+	}
+	t, c := binOpTemporalType(n, decls)
+	return c == expr.Decided && t.ID == parquet.TypeInt64
 }
 
 // strictTemporalKind is an operand's temporal kind with a VARCHAR column
