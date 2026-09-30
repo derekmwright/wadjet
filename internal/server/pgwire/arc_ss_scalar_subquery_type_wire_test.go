@@ -353,8 +353,11 @@ func TestArcSSScopeAndIntegerOperandsOnTheWire(t *testing.T) {
 		"CREATE TABLE __column_value (k integer)",
 		"INSERT INTO __column_value (k) VALUES (4)",
 	} {
+		// A setup statement PostgreSQL 17.11 answers is a cell too: its
+		// refusal is reported and the cells after it still run (the ones
+		// reading its table then fail by name).
 		if _, err := setup.Exec(ctx, sql).ReadAll(); err != nil {
-			t.Fatalf("%s: %v", sql, err)
+			t.Errorf("%s: %v, PostgreSQL 17.11 answers", sql, err)
 		}
 	}
 	for _, c := range []struct {
