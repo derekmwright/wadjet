@@ -34,7 +34,7 @@ PostgreSQL's unconstrained numeric carries a per-value scale; `batch.DecimalColu
 
 | cell | PostgreSQL 17.11 | this engine | SQLSTATE | disposition | since | issue | gate |
 |---|---|---|---|---|---|---|---|
-| **r1** `SELECT CAST(SUM(a) OVER () AS INTEGER) FROM ni` | integer (OID 23) | bigint (OID 20) (measured; MAX(c_i32) + 0 and c_i32 + 1 also bigint) | — | value divergence | 2026-09-15 · [E78](#e78), P025 | #1070 | — |
+| **r1** `SELECT CAST(SUM(a) OVER () AS INTEGER) FROM ni` | integer (OID 23) | bigint (OID 20) (measured; MAX(c_i32) + 0 and c_i32 + 1 also bigint, with rows or none: `SELECT t.i - t.i FROM t WHERE t.id = 99` (no row) declares 20; inside a scalar subquery int4 arithmetic declares integer and raises 22003 past its range, as on PostgreSQL) | — | value divergence | 2026-09-15 · [E78](#e78), P025 | #1070 | — |
 | **r2** `SELECT CAST(a AS SMALLINT) FROM ni` | smallint | bigint (measured; no int16 carrier); CAST(99999 AS SMALLINT) is 22003 on both | — | value divergence | 2026-09-15 · [E78](#e78), P025 | #1070, #901 | — |
 | **r3** `SELECT 2147483647 + 1` | ERROR 22003 integer out of range | 2147483648 (measured) | PG 22003 | kept superset | 2026-09-15 · [E78](#e78), P073 | #1070 | — |
 | **r4** `SELECT -c_i32, c_i32 * 2 FROM intmin -- c_i32 = -2147483648` | ERROR 22003 integer out of range | 2147483648, -4294967296 in int64 | PG 22003 | kept superset | 2026-09-04 · [E57](#e57), P073 | — | `coordinator.TestIntegerMinimumIsLoudOnEveryArm` |
@@ -52,6 +52,7 @@ PostgreSQL's unconstrained numeric carries a per-value scale; `batch.DecimalColu
 | **r16** `SELECT CAST('NaN' AS DECIMAL(9,2))` | NaN | ERROR 22003 "NaN" has no DECIMAL value (measured) | 22003 | refusal | 2026-08-29 · [E47](#e47), P064 | #534, #555 | — |
 | **r17** `SELECT a * b FROM t -- a, b DECIMAL(38,10), product past 10^18` | numeric value | ERROR 22003 (result type DECIMAL(38,20)) | 22003 | refusal | 2026-09-02 · [E50](#e50), P068 | #749 | `WideDecimalSquaredRowCount (PostgreSQL corpus`, `kind pgDivergenceCarrier)` |
 | **r18** `SELECT COALESCE(d152, 12.3456789012345) FROM t -- d152 numeric(15,2)` | 12.75 | 12.7500000000000 (one scale per column; wire typmod -1) | — | value divergence | 2026-09-05 · [E64](#e64), [A13](../0012-amendments.md#a13), P007 | #764 | `coordinator.TestLiteralScaleInADecimalFold` |
+| **r19** `SELECT m / i FROM t -- m numeric(10,2) = 1.25, i integer = 3` | 0.41666666666666666667 | 0.4166666666667 (measured): a DECIMAL quotient keeps max(6, s1 + p2 + 1) fraction digits, the divisor's precision its type's (an integer column, `CAST(… AS INTEGER)` and a correlated subquery's integer outer value alike: DECIMAL(10,0)); an integer LITERAL divisor is its digit count, so `m / 3` keeps 6 (0.416667) | — | value divergence | 2026-09-30 · ADR-0024 §3 | #1422 | `coordinator.TestArcSSOperandClassAndWidthEveryArm` |
 
 ## Source entries
 

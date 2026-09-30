@@ -1175,8 +1175,14 @@ The answer **is a value of that type wherever it is read**, as a column of the
 type is. A `DATE` or `TIMESTAMP` subquery is an instant to `CAST`, `extract`,
 `date_trunc`, `± INTERVAL`, a comparison with a column of its own type and an
 `INSERT … SELECT` target: `CAST((SELECT ts …) AS VARCHAR)` is the timestamp's
-text, `(SELECT max(ts) …) + INTERVAL '1 hour'` is an hour later, and
-`d = (SELECT d …)` finds 9999-12-31 as it finds any other date. A subquery that
+text, `(SELECT max(ts) …) + INTERVAL '1 hour'` is an hour later,
+`d = (SELECT d …)` finds 9999-12-31 as it finds any other date, and
+`(SELECT d + 1 …)` over 9999-12-31 is 10000-01-01. Two exceptions are the
+engine's, not the subquery's: `± INTERVAL '1 month'` at a month's end answers
+the day arithmetic's date for any timestamp (#1321), and `BETWEEN` with
+scalar-subquery bounds is refused on the distributed arms. An `integer`
+expression is `integer`: `(SELECT x.v + x.v …)` declares `integer` and a
+result past its range is 22003, as on PostgreSQL. A subquery that
 reads the outer row is declared with each outer column at that column's own
 type, so `(SELECT c.f + x.v FROM x …)` over a `double precision` `c.f` and an
 `integer` `x.v` is `double precision`, in either operand order, and stores 8
@@ -3730,8 +3736,11 @@ SELECT SUBSTR('abc');     -- ERROR: function substr(unknown) does not exist
 
 A **numeric literal in a text position** is the same refusal, because no
 overload takes it — `UPPER(1)`, `LPAD(1, 3, '0')` and `REPLACE(name, 1, 'x')`
-are each 42883. `CONCAT`, `CONCAT_WS` and `||` are the exception and render any
-argument, exactly as PostgreSQL does: `CONCAT(1, name)` is `1<name>`.
+are each 42883. `CONCAT` and `CONCAT_WS` are the exception and render any
+argument, exactly as PostgreSQL does: `CONCAT(1, name)` is `1<name>`; so does
+`||` when one operand is text (`1 || name`). `||` between two numbers,
+booleans, dates or timestamps — `1 || 2`, `d || 5` — is 42883, as on
+PostgreSQL.
 
 A **COLUMN** of a non-text type is not refused: a `DATE`, a `TIMESTAMP`, an
 `IPV4`, a `MAC` or an integer column is rendered as its text before a string
@@ -4480,6 +4489,9 @@ date-part function, a comparison, an assignment, the wire's `RowDescription`
 | `date - date` | BIGINT, a count of days |
 | `date ± interval`, `timestamp ± interval`, `'text' ± interval` | TIMESTAMP |
 | `DATE_ADD(x, n)` / `DATE_SUB(x, n)` | DATE when `x` is a DATE and `n` a whole number of days; TIMESTAMP otherwise (a TIMESTAMP, text, or an INTERVAL shift) |
+
+No other operator takes a DATE or a TIMESTAMP beside a number: `ts + 1`,
+`d * 5`, `ts / i` and `d % 2` are 42883, as on PostgreSQL.
 
 The integer operand of `date ± n` is judged by its declared type, never its
 spelling: `DATE '2026-01-01' + CAST(1 AS INTEGER)`, `(d + 1) + 1`, `d + i`
