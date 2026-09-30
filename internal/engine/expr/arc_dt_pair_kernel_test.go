@@ -7,7 +7,7 @@ import (
 )
 
 // THE PAIR'S KERNEL READS EVERY SPELLING OF A DATE AND ASKS THE ONE RULE
-// (#1378 round 2). A DATE scalar subquery hands its value over as ISO text;
+// (#1378). A DATE scalar subquery hands its value over as ISO text;
 // the kernel read a DATE side only as an int64, so `ts = (SELECT d …)` fell
 // through to compare()'s magnitude guess, which read the TIMESTAMP epoch
 // ms -1 (1969-12-31 23:59:59.999) as day -1 and called it equal to DATE

@@ -417,7 +417,7 @@ func numericBoxRepair(lk, rk boxKind, lv, rv any) (int, bool) {
 // numericPairKinds reports whether both operands' kinds say "a number", which
 // is what makes a byte ordering of them wrong rather than merely unusual. A
 // boxText operand is excluded by name: a genuine STRING column compares AS
-// TEXT whatever its digits look like (ADR-0012 §5 (catalog: docs/adr/0012-divergences/)).
+// TEXT whatever its digits look like (docs/adr/0012-divergences/comparison-membership.md).
 func numericPairKinds(lk, rk boxKind) bool {
 	ok := func(k boxKind) bool { return isNumericFoldKind(k) || k == boxQuoted }
 	return ok(lk) && ok(rk)

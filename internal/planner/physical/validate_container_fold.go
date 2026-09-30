@@ -190,12 +190,12 @@ func foldTypeName(c parquet.Column) string {
 // arm left untyped was skipped by refuseFoldArms, so `COALESCE(d, (SELECT
 // max(ts) …))` and `COALESCE(d, max(ts) OVER ())` kept the first arm's DATE
 // declaration and answered day counts on every arm where PostgreSQL answers
-// timestamps (#1378 round 2).
+// timestamps (#1378).
 //
 // The widened typing answers only a DATE or a TIMESTAMP: the #1060 container
 // rules share this walk and keep the untyped subquery / window arm they had,
 // so `COALESCE(first_value(arr) OVER (…), '{9}')` is not refused as a quoted
-// ARRAY literal beside an ARRAY arm (#1378 round 3).
+// ARRAY literal beside an ARRAY arm (#1378).
 func (b *binder) foldArmTypeOf(scope *colScope) func(plansql.Node) (parquet.Column, bool) {
 	decls := rowFieldScopeDecls(scope)
 	decls.subqueryDecl = func(sql string) (parquet.Column, bool) {
@@ -248,9 +248,12 @@ func (b *binder) foldArmTypeOf(scope *colScope) func(plansql.Node) (parquet.Colu
 // one reached the scope untyped, and `COALESCE(s.d, s.mt)` over `(SELECT
 // a.d, (SELECT max(ts) …) AS mt …) s` skipped the refusal and answered a
 // TIMESTAMP's milliseconds read as days (`3338-12-14`), or a DATE's day
-// count as milliseconds, on every arm (#1378 round 3). The column is typed
+// count as milliseconds, on every arm (#1378). The column is typed
 // by the same arm walk the refusal types a subquery or window arm with, and
 // only a DATE or a TIMESTAMP is recorded — the one pair that walk is for.
+// Every reader of the scope sees the declaration, not only the refusal:
+// arithmetic, sum / avg and an integer key over such a column raise 42883 as
+// over a stored column (temporal#r24).
 func (b *binder) declareTemporalArmColumns(info *plansql.SelectInfo, scope *colScope) {
 	ds := b.outputDecls[info]
 	if len(ds) != len(info.Columns) {

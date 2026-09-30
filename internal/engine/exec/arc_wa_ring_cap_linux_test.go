@@ -15,7 +15,7 @@ import (
 )
 
 // A LAG / LEAD OFFSET AT AND PAST THE INPUT'S EDGE ALLOCATES NOTHING BY THE
-// OFFSET (arc WA round 2, B1). The spilled empty-PARTITION-BY streamer
+// OFFSET (#1399). The spilled empty-PARTITION-BY streamer
 // (newGlobalWindowStreamer) kept LAG's look-back in a ring of `offset` slots,
 // so `LAG(x, 2147483647)` — and, once a negative offset read the other way,
 // `LEAD(x, -2147483647)` — asked for a 2^31-slot []any: a 32 GiB allocation,

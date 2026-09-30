@@ -32,7 +32,7 @@ func dtr2MS(s string) int64 {
 	panic(s)
 }
 
-// dtr2Tables is round 2's fixture beside dt_pair (dtTable):
+// dtr2Tables is the scalar-subquery and fold fixture beside dt_pair (dtTable):
 //
 //   - dtb_t / dtb_d, the EPOCH BAND: TIMESTAMPs at -500 001, -500 000, -1,
 //     0, 1, 499 999 and 500 000 epoch milliseconds and 1969-12-31 00:00, the
@@ -41,9 +41,9 @@ func dtr2MS(s string) int64 {
 //     band except 0 names a different day under that reading (-1 ms is day
 //     -1, 1969-12-31; 1 ms is day 1, 1970-01-02), and the two outside it are
 //     the controls.
-//   - dr_d / dr_t, round 1's review fixture: pre-1970, 1000-01-01,
+//   - dr_d / dr_t, the wide-range fixture: pre-1970, 1000-01-01,
 //     9999-12-31, duplicates and NULLs on both sides.
-//   - dt_arr, round 3's ARRAY column ({1,2}, NULL, {5}) for #1060's
+//   - dt_arr, an ARRAY column ({1,2}, NULL, {5}) for #1060's
 //     neighbours (ctl3/container/*).
 func dtr2Tables() []tmdTable {
 	idTS := parquet.Schema{Columns: []parquet.Column{
@@ -192,8 +192,8 @@ var dtr2Ops = []struct{ name, op string }{
 // left, and correlated (dtb_t row id reads DATE (id+1)%2+1: an odd id —
 // epoch ms -1 among them — meets 1969-12-31) — for each of the six
 // operators and both DATEs; the mirror (a TIMESTAMP scalar subquery against the DATE column) at
-// the band's edges; BETWEEN with a subquery bound; and round 1's review
-// cells over dr_t / dr_d verbatim.
+// the band's edges; BETWEEN with a subquery bound; and the b1/review/*
+// cells over dr_t / dr_d.
 func dtr2ScalarCells() []dtCell {
 	var out []dtCell
 	add := func(name, sql string) { out = append(out, dtCell{name, sql}) }
@@ -339,10 +339,10 @@ func dtr2Cells() []dtCell {
 	return append(append(append(dtr2ScalarCells(), dtr2FoldCells()...), dtr3Cells()...), dtr4Cells()...)
 }
 
-// dtr4Cells is round 4's family: the choice refusal over a recursive CTE's
-// own DATE and TIMESTAMP columns read INSIDE its recursive term. Round 3
-// published the non-recursive term's declarations only after the recursive
-// term was validated, so the term's own `COALESCE(ts, d)` saw two untyped
+// dtr4Cells is the recursive-term family: the choice refusal over a recursive
+// CTE's own DATE and TIMESTAMP columns read INSIDE its recursive term. The
+// binder once published the non-recursive term's declarations only after the
+// recursive term was validated, so the term's own `COALESCE(ts, d)` saw two untyped
 // columns and answered the DATE's day count read as milliseconds
 // (`1970-01-01 00:00:19.912` for 2024-07-08) on the single-process arms, and
 // a WHERE fold lost or gained rows. They are published before that
@@ -378,7 +378,7 @@ func dtr4Cells() []dtCell {
 	}
 }
 
-// dtr3Cells is round 3's family: the choice refusal over a COLUMN whose
+// dtr3Cells is the column-origin family: the choice refusal over a COLUMN whose
 // declaration comes from the relation that publishes it — every origin a
 // choice arm's column can have (a base table, a derived table, a CTE, a
 // recursive CTE, a join's output with a USING-merged key, a set operation's
@@ -386,7 +386,7 @@ func dtr4Cells() []dtCell {
 // column is a scalar subquery or a window call. b3/origin/* are refused
 // 0A000; ctl3/origin/* are the same origins meeting a column of the SAME
 // type, which answer; ctl3/container/* are #1060's neighbours, a window arm
-// beside a quoted ARRAY literal, which answer (round 2 refused them).
+// beside a quoted ARRAY literal, which answer (a wider arm typing once refused them).
 func dtr3Cells() []dtCell {
 	const (
 		tsSub  = "(SELECT max(r.ts) FROM dt_pair r)"
@@ -404,7 +404,7 @@ func dtr3Cells() []dtCell {
 	}
 	c := func(name, sql string) dtCell { return dtCell{name, sql} }
 	return []dtCell{
-		// A base-table column (round 1's cond/*, one row here for the table).
+		// A base-table column (the first gate's cond/*, one row here for the table).
 		c("b3/origin/base/coalesce", "SELECT a.id, COALESCE(a.d, a.ts) FROM dt_pair a"),
 		// A derived table's column.
 		c("b3/origin/derived/dColTsSub", "SELECT s.id, COALESCE(s.d, s.mt) FROM "+dTs(tsSub)),
@@ -515,7 +515,7 @@ func TestArcDTR2Generate(t *testing.T) {
 }
 
 // A DATE SCALAR SUBQUERY AGAINST A TIMESTAMP, AND A CHOICE WHOSE ARM IS NOT A
-// COLUMN, ON FIVE ARMS (#1378 round 2).
+// COLUMN, ON FIVE ARMS (#1378).
 //
 // Item 1: the comparison's kernel read a DATE side only as an int64 box; a
 // DATE scalar subquery hands its value over as ISO text, so the pair fell
@@ -534,7 +534,7 @@ func TestArcDTR2Generate(t *testing.T) {
 // its declaration; each refused cell asserts 0A000 and the one message on
 // every arm.
 //
-// Round 3: a COLUMN arm is typed by the relation that publishes it, and a
+// Item 3: a COLUMN arm is typed by the relation that publishes it, and a
 // derived table's, a CTE's, a recursive CTE's, a set operation's, a VALUES
 // list's or a LATERAL output's column that is a scalar subquery or a window
 // call carried no declaration — b3/origin/* answered day counts read as

@@ -10,7 +10,7 @@ import (
 )
 
 // CAST AS VARCHAR(n) / CHAR(n) truncates the rendered value to n CHARACTERS,
-// not bytes; enforce the bound before declaring it (#838, ADR-0012 §5 (catalog: docs/adr/0012-divergences/)).
+// not bytes; enforce the bound before declaring it (#838, docs/adr/0012-divergences/text-collation.md).
 // The shared type parser rejects n < 1 with 22023.
 // CHAR(n) truncates without padding: TypeString has no bpchar semantics,
 // and padding would leak blanks into grouping, join keys and equality.

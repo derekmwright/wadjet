@@ -2402,7 +2402,7 @@ func (c *pgConn) sendSynthRows(ans *synthAnswer, fmtCodes []int16) {
 // unconstrained varchar; zero is text. OID follows destination, not length presence.
 // Do not send CHAR/bpchar1042: this engine does not implement its padding and
 // trailing-blank rules. Varchar states the implemented bounded-character value;
-// the padding residual is ADR-0012 §5 (catalog: docs/adr/0012-divergences/).
+// the padding residual is docs/adr/0012-divergences/text-collation.md.
 // See docs/internals/pgwire-string-column-oid.md for the design.
 func pgColumnOID(m wadjet.ColumnMeta) int {
 	if m.TypeID == parquet.TypeString && m.StringLength != 0 {

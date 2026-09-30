@@ -351,7 +351,7 @@ func projectionKeepsTypmod(proj logical.Projection, decls ColDecls, computed map
 // numeric CAST drops typmod (#708, ADR-0024 item 5). Other operations/calls and
 // casts whose modifiers wadjet does not send carry -1, which poisons the fold;
 // unsupported modifiers diverge from PostgreSQL. declaredStringLength handles
-// string CAST lengths, enforced before declaration (#838, ADR-0012 §5 (catalog: docs/adr/0012-divergences/)).
+// string CAST lengths, enforced before declaration (#838, docs/adr/0012-divergences/text-collation.md).
 func declaredTypmod(node plansql.Node, decls ColDecls, computed map[string]bool) (int, int, bool) {
 	switch n := node.(type) {
 	case *plansql.ParenNode:

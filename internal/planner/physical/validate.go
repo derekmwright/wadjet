@@ -654,8 +654,9 @@ type binder struct {
 	// structural type the cast read, originQuotedLiteral for a quoted
 	// literal, typeAmbiguous otherwise. A set operation keeps the LEFT arm's
 	// origin where both arms carry one of one class — so a right arm of that
-	// class is not judged by memberPair on its own, the recorded (docs/adr/0012-divergences/comparison-membership.md)
-	// gap — originQuotedLiteral where both arms are quoted literals, and
+	// class is not judged by memberPair on its own, the recorded gap
+	// (docs/adr/0012-divergences/comparison-membership.md, #1415) —
+	// originQuotedLiteral where both arms are quoted literals, and
 	// typeAmbiguous otherwise.
 	textOrigin map[*plansql.SelectInfo][]parquet.TypeID
 	// declaredOut is each block's output column types by DECLARATION
@@ -1004,8 +1005,9 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 		}
 	}
 	// A DATE or TIMESTAMP column this block publishes from a scalar subquery
-	// or a window call is declared, so the choice refusal reads it through a
-	// derived table, a CTE or a set operation (validate_container_fold.go).
+	// or a window call is declared, so the choice refusal — and every other
+	// reader of the scope — reads it through a derived table, a CTE or a set
+	// operation (validate_container_fold.go).
 	b.declareTemporalArmColumns(info, resolve)
 	// PostgreSQL's precedence for a bare GROUP BY name: an INPUT COLUMN wins
 	// over a SELECT alias. The parser substituted the alias's expression
@@ -1711,9 +1713,9 @@ func (b *binder) registerCTE(ctx context.Context, cte *plansql.CTEDef) error {
 			// published BEFORE that second validation, so the recursive
 			// term's own reference to them is typed as the statement reading
 			// the CTE sees it: `COALESCE(ts, d)` inside the term is refused
-			// 0A000 (it answered the DATE's day count as milliseconds, #1378
-			// round 4), and `ts + 1` over a TIMESTAMP seed is PostgreSQL's
-			// own 42883 instead of this engine's 42804.
+			// 0A000 (it answered the DATE's day count as milliseconds, #1378),
+			// and `ts + 1` over a TIMESTAMP seed is PostgreSQL's own 42883
+			// instead of this engine's 42804.
 			b.ctes[name] = cteEntry{cols: plansql.OverlayColumnAliases(cte.Columns, names),
 				decls: recursiveTemporalDecls(b.outputDecls, body)}
 			if err := b.validateBlock(ctx, body, nil); err != nil {

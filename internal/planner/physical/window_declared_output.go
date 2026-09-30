@@ -263,17 +263,6 @@ func windowSpecOutputType(node *logical.Node, we logical.WindowExpr) expr.DeclTy
 	return t
 }
 
-// windowExecColumn resolves one logical WindowExpr into the executable
-// column spec, over the Window node that owns it.
-//
-// It is the single place window arguments are read: the column out of the
-// argument list, the offset/default/N that share it, the frame, and the
-// output type. Both consumers go through it — the single-process pipeline
-// (buildWindow) builds exec.WindowColumn directly, and dagplan's stage emission copies the
-// resolved values into the stage spec the DAG ships to workers. A worker has
-// no catalog and no logical plan, so a second implementation there would be a
-// second answer; the arguments are parsed once, here, where the types resolve
-// (#345's shape, and #329/#333's).
 // windowInputCol is the name a window function's ARGUMENT reaches the operator
 // under. It is `CleanExpr`'s bare spelling everywhere except where dropping the
 // qualifier would leave a name more than one arm of the window's input
@@ -288,6 +277,18 @@ func windowInputCol(node *logical.Node, we logical.WindowExpr) string {
 	return cleanExpr(arg)
 }
 
+// windowExecColumn resolves one logical WindowExpr into the executable
+// column spec, over the Window node that owns it.
+//
+// It is the single place window arguments are read: the column out of the
+// argument list, the offset/default/N that share it, the frame, and the
+// output type; the integer argument through sql.WindowIntegerArgument, the
+// parser's own reading. Both consumers go through it — the single-process pipeline
+// (buildWindow) builds exec.WindowColumn directly, and dagplan's stage emission copies the
+// resolved values into the stage spec the DAG ships to workers. A worker has
+// no catalog and no logical plan, so a second implementation there would be a
+// second answer; the arguments are parsed once, here, where the types resolve
+// (#345's shape, and #329/#333's).
 func windowExecColumn(node *logical.Node, we logical.WindowExpr, keys map[string]windowKey) exec.WindowColumn {
 	// ResolveWindowKeys binds a qualified reference to the input column and
 	// renames an expression to the column the pre-window projection computes
@@ -372,7 +373,8 @@ func windowExecColumn(node *logical.Node, we logical.WindowExpr, keys map[string
 	// and `LAG(x, NULL)` answered as `LAG(x)` (#1399). The parser has already
 	// refused every spelling WindowIntegerArgument does not read
 	// (refuseWindowArguments), so an error here cannot happen on a parsed
-	// query; one that does keeps the argument unset rather than guessing.
+	// query; one that does leaves the value as it stands (1 for an offset,
+	// unset for an n, which then raises 22014 / 22016) rather than guessing.
 	args := we.Arguments()
 	intArg := func(i int) (int, bool) {
 		if i >= len(args) {

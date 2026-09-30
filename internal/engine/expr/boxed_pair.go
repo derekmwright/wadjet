@@ -40,7 +40,7 @@ const (
 	// matters.
 	boxNumber
 	// boxText: a genuine text value, which compares AS TEXT — bytewise,
-	// wadjet's collation (ADR-0012 §5 (catalog: docs/adr/0012-divergences/)) — whatever its digits look like.
+	// wadjet's collation (docs/adr/0012-divergences/text-collation.md) — whatever its digits look like.
 	boxText
 	// boxQuoted: a QUOTED string literal, which is a different thing from a
 	// text value. PostgreSQL types such a literal as `unknown` and resolves
@@ -949,7 +949,7 @@ func netIntKindType(k boxKind) batch.TypeID {
 // identically — and the operand's KIND is what tells the two apart where it
 // matters (a quoted literal is unknown-typed and takes the column's type; a
 // numeric literal is already `numeric` and so makes a TEXT column's
-// comparison a text one, per ADR-0012 §5 (catalog: docs/adr/0012-divergences/)).
+// comparison a text one, per docs/adr/0012-divergences/comparison-membership.md).
 func operandLitText(e Expr) string {
 	lit, ok := e.(*Lit)
 	if !ok {
@@ -1076,7 +1076,7 @@ func pairApplies(lk, rk boxKind, lText, rText string) bool {
 // magnitude guess reads an int64 inside +/-500 000 as a DAY count: a DATE
 // scalar subquery hands its value over as ISO text, so `ts = (SELECT d …)`
 // read the TIMESTAMP 1969-12-31 23:59:59.999 (epoch ms -1) as day -1 and
-// matched DATE 1969-12-31 (#1378 round 2). A non-NULL box neither spelling
+// matched DATE 1969-12-31 (#1378). A non-NULL box neither spelling
 // reads is an internal error, raised, never that guess.
 func dateTimestampOrder(lk, rk boxKind, lv, rv any) (int, bool) {
 	lt, lok := temporalKindType(lk)
@@ -1422,7 +1422,7 @@ func ipv4Order(lv, rv any) (c int, ok, unknown bool) {
 // DECIMAL/numeric literal uses exact source text (#452, #465).
 // DECIMAL/integer is exact; DECIMAL/float casts to float64 (#476).
 // TEXT/numeric literal compares source text bytewise on both paths (#504),
-// a supported pair PostgreSQL refuses (ADR-0012 §5 (catalog: docs/adr/0012-divergences/)).
+// a supported pair PostgreSQL refuses (docs/adr/0012-divergences/comparison-membership.md).
 // NUMBER/quoted literal resolves the unknown literal from the NUMBER's type.
 // See docs/internals/boxed-pair-order-table.md for the design.
 func (p *boxedPair) order(b *batch.RecordBatch, lv, rv any) (c int, ok, unknown bool) {

@@ -735,11 +735,12 @@ type WindowExpr struct {
 	InputExpr plansql.Node
 }
 
-// InputColumn returns the COLUMN argument of a window expression.
+// InputColumn returns the VALUE argument of a window expression: a column,
+// an expression over one, or a literal (materialized like an expression).
 //
 // InputCol carries the whole argument list as one string, so LAG, LEAD and
-// NTH_VALUE spell their column alongside an offset, a default or an N —
-// "l_quantity, 2, 0". The column is everything before the first comma;
+// NTH_VALUE spell their value alongside an offset, a default or an N —
+// "l_quantity, 2, 0". The value is the first top-level argument (Arguments);
 // everything after belongs to the function, not to any table. NTILE's single
 // argument is a bucket count and names no column at all.
 //
@@ -768,8 +769,8 @@ func (w WindowExpr) InputColumn() string {
 // nothing could compile, which is one more way a window over an expression
 // answered NULL (#672) — and cut a default such as `'a,b'` in two. Commas
 // inside parentheses and inside string literals belong to the argument, not
-// to the list (” inside a literal toggles the state twice, leaving it
-// right).
+// to the list (a doubled quote inside a literal toggles the state twice,
+// leaving it right).
 func (w WindowExpr) Arguments() []string {
 	args := w.InputCol
 	var out []string

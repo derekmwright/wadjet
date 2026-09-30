@@ -61,7 +61,7 @@ func TestAWindowArgumentParameterAnswers(t *testing.T) {
 		{"offset/int4/neg1", "LAG(x, $1) OVER (ORDER BY id)", oidInt4, 0, []byte("-1"), "1,20;2,30;3,NULL"},
 		{"offset/int4/null", "LAG(x, $1) OVER (ORDER BY id)", oidInt4, 0, nil, "1,NULL;2,NULL;3,NULL"},
 		{"offset/int4/2", "LAG(x, $1) OVER (ORDER BY id)", oidInt4, 0, []byte("2"), "1,NULL;2,NULL;3,10"},
-		// The int4 minimum is one signed int4 (round 2, P3).
+		// The int4 minimum is one signed int4.
 		{"offset/int4/int4min", "LAG(x, $1) OVER (ORDER BY id)", oidInt4, 0, []byte("-2147483648"), "1,NULL;2,NULL;3,NULL"},
 		{"offset/int4binary/int4min", "LEAD(x, $1) OVER (ORDER BY id)", oidInt4, 1, i4(-2147483648), "1,NULL;2,NULL;3,NULL"},
 		// KEPT SUPERSET (catalog aggregates-windows r20): a parameter

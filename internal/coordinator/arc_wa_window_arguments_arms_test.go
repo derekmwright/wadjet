@@ -125,9 +125,9 @@ func waCells() []waCell {
 		{"q0", "'0'"}, {"q_sp2", "' 2 '"}, {"cast_int0", "CAST(0 AS INTEGER)"},
 		{"dec", "1.5"}, {"big", "2147483648"}, {"q_dec", "'1.5'"}, {"q_bad", "'a'"},
 		{"expr", "1 + 1"}, {"col", "o"}, {"cast_big", "CAST(0 AS BIGINT)"},
-		// Round 2: a CONSTANT expression is folded at plan time (P1) — only
-		// a per-row argument is refused — and the int4 minimum is one signed
-		// literal (P3).
+		// A CONSTANT expression is folded at plan time — only a per-row
+		// argument is refused — and the int4 minimum is one signed
+		// literal.
 		{"sub", "2 - 1"}, {"abs", "abs(-1)"}, {"cast_expr", "CAST(1 + 0 AS INTEGER)"},
 		{"expr_neg", "-(1 + 1)"}, {"expr_null", "NULL + 1"}, {"expr_ovf", "2147483647 + 1"},
 		{"expr_bigint", "2147483648 - 1"}, {"expr_num", "1.5 + 0.5"}, {"div0", "1 / 0"},
@@ -154,7 +154,7 @@ func waCells() []waCell {
 		}
 		// An offset at and past the input's edge (wa_t has 6 rows): every
 		// row answers the default. The spilled streamer used to size a ring
-		// by the offset, so ±2147483647 allocated 16 GiB and aborted (B1).
+		// by the offset, so ±2147483647 asked for 32 GiB and aborted.
 		for _, o := range []struct{ name, v string }{
 			{"max", "2147483647"}, {"negmax", "-2147483647"}, {"rows_p1", "7"}, {"neg_rows_p1", "-7"},
 			{"rows", "6"}, {"neg_rows", "-6"}, {"rows_m1", "5"}, {"neg_rows_m1", "-5"},

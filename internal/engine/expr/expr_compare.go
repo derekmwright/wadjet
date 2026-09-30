@@ -150,7 +150,7 @@ func (e *CmpTemporalLit) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool
 	// literal against a nonzero value to compare(), whose magnitude guess
 	// reads an int64 inside +/-500 000 as a DAY count — so a DATE scalar
 	// subquery inlined by the stage DAG as '1970-01-01' beside a TIMESTAMP
-	// column met a unit guess (#1378 round 2), and a DATE past 500 000 epoch
+	// column met a unit guess (#1378), and a DATE past 500 000 epoch
 	// days against '1970-01-01 12:00' read the literal as milliseconds. The
 	// generic Cmp reads the pair by its declaration (temporalTextOrder), and
 	// this node answers what it answers.

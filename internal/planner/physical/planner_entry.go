@@ -12,8 +12,10 @@ import (
 
 // mergeDuplicateScans detects tables scanned multiple times in a query
 // (e.g., from decorrelated subqueries) and merges their required columns.
-// When duplicates are found, a scanCache entry is created so the first scan
-// caches its results and subsequent scans replay from memory.
+// When duplicates are found, a scanCache entry is created so the first of the
+// scans it counted caches its results and the others replay from memory. The
+// entry records those scan nodes as its consumers; no other scan of the table
+// (a run-time subquery's own plan) attaches to it (ADR-0021 §2c).
 func (p *Planner) mergeDuplicateScans(node *logical.Node) {
 	// Collect all scan nodes grouped by table name.
 	scansByTable := map[string][]*logical.Node{}
