@@ -325,3 +325,127 @@ shared/groupSumDayCount	false	SELECT t.id, sum(t.d - t.d) AS x FROM ss_t t GROUP
 shared/sumDayCountJoin	false	SELECT sum(t.d - t2.d) AS x FROM ss_t t JOIN ss_t t2 ON t.id = t2.id + 1	{int} rows=1 -19787
 shared/winSumDayCount	false	SELECT t.id, sum(t.d - t.d) OVER () AS x FROM ss_t t WHERE t.id IN (1,2)	{int,int} rows=2 1,0 | 2,0
 shared/corrMaxDayCount	false	SELECT o.id, (SELECT max(o.d - x.d) FROM ss_t x WHERE x.id IN (1,2)) AS x FROM ss_t o WHERE o.id IN (1,3)	{int,int} rows=2 1,19786 | 3,2932896
+# A scalar subquery reads an expression in its OWN scope (scope/*): a derived table that publishes both
+# `t.b AS i` and its own unaliased `i + i` does not make the query's `i + i` (over the bigint `i`) that column,
+# in a SELECT list or a GROUP BY key, and SUM over a column derived from it neither overflows nor narrows.
+# An integer-valued operand is an integer in DECIMAL arithmetic (intop/*): a day count, ascii(), length(), a
+# subscript, COALESCE/CASE/abs over integers beside a NUMERIC are numeric, in a scalar subquery and outside one.
+# A relation, a CTE or an alias NAMED __column_value is a name (spelling/*Named); any call of it is 42883.
+scope/shadowSub	false	SELECT (SELECT i + i FROM (SELECT t.b AS i, i + i FROM ss_t t WHERE t.id = 3) t)	{int} rows=1 18000000000
+scope/shadowSubNoWs	false	SELECT (SELECT i+i FROM (SELECT t.b AS i, i + i FROM ss_t t WHERE t.id = 3) t)	{int} rows=1 18000000000
+scope/shadowSubUpper	false	SELECT (SELECT I + I FROM (SELECT t.b AS i, i + i FROM ss_t t WHERE t.id = 3) t)	{int} rows=1 18000000000
+scope/shadowSubTimes	false	SELECT (SELECT i * 2 FROM (SELECT t.b AS i, i * 2 FROM ss_t t WHERE t.id = 3) t)	{int} rows=1 18000000000
+scope/shadowSubCte	false	WITH t AS (SELECT s.b AS i, i + i FROM ss_t s WHERE s.id = 3) SELECT (SELECT i + i FROM t)	{int} rows=1 18000000000
+scope/shadowSubIn4	false	SELECT (SELECT i + i FROM (SELECT t.b AS i, i + i FROM ss_t t WHERE t.id = 1) t)	{int} rows=1 60
+scope/shadowSubQual	false	SELECT (SELECT t.i + t.i FROM (SELECT t.b AS i, t.i + t.i FROM ss_t t WHERE t.id = 3) t)	{int} rows=1 18000000000
+scope/shadowSubQualWs	false	SELECT (SELECT t.i+t.i FROM (SELECT t.b AS i, t.i + t.i FROM ss_t t WHERE t.id = 3) t)	{int} rows=1 18000000000
+scope/shadowRevSub	false	SELECT (SELECT t.b + t.b FROM (SELECT 2147483647 AS b, t.b + t.b FROM ss_t t WHERE t.id = 1) t)	ERR 22003 integer out of range
+scope/shadowDerivedSum	false	SELECT sum(q.k) FROM (SELECT i + i AS k FROM (SELECT t.b AS i, i + i FROM ss_t t WHERE t.id = 3) t) q	{numeric} rows=1 18000000000
+scope/shadowSumOvf	false	SELECT sum(q.k) FROM (SELECT i + 0 AS k FROM (SELECT t.b * 1000000000 AS i, i + 0 FROM ss_t t, ss_i x WHERE t.id = 3) t) q	{numeric} rows=1 18000000000000000000
+scope/shadowSumOvfCte	false	WITH t AS (SELECT s.b * 1000000000 AS i, i + 0 FROM ss_t s, ss_i x WHERE s.id = 3), q AS (SELECT i + 0 AS k FROM t) SELECT sum(q.k) FROM q	{numeric} rows=1 18000000000000000000
+scope/shadowSumGroup	false	SELECT q.g, sum(q.k) FROM (SELECT 1 AS g, i + 0 AS k FROM (SELECT t.b * 1000000000 AS i, i + 0 FROM ss_t t, ss_i x WHERE t.id = 3) t) q GROUP BY q.g	{int,numeric} rows=1 1,18000000000000000000
+scope/shadowSumOvfBare	false	SELECT sum(k) FROM (SELECT i + 0 AS k FROM (SELECT t.b * 1000000000 AS i, i + 0 FROM ss_t t, ss_i x WHERE t.id = 3) t) q	{numeric} rows=1 18000000000000000000
+scope/shadowSumQual	false	SELECT sum(q.k) FROM (SELECT t.i + t.i AS k FROM (SELECT t.b AS i, t.i + t.i FROM ss_t t WHERE t.id = 3) t) q	{numeric} rows=1 18000000000
+scope/shadowOuterDecl	true	SELECT o.id, (SELECT q.k + x.v FROM ss_i x WHERE x.id = 1) FROM (SELECT id, i + i AS k FROM (SELECT t.id, t.b AS i, i + i FROM ss_t t WHERE t.id = 3) t) q, ss_t o WHERE o.id = q.id	{int,int} rows=1 3,18000000005
+scope/controlAliased	false	SELECT (SELECT i + i FROM (SELECT t.b AS i, i + i AS k FROM ss_t t WHERE t.id = 3) t)	{int} rows=1 18000000000
+scope/controlQualOuter	false	SELECT (SELECT t.i + t.i FROM (SELECT t.b AS i, i + i FROM ss_t t WHERE t.id = 3) t)	{int} rows=1 18000000000
+scope/controlPlain	false	SELECT i + i FROM (SELECT t.b AS i, i + i FROM ss_t t WHERE t.id = 3) t	{int} rows=1 18000000000
+scope/shadowGroupSub	false	SELECT (SELECT i + i FROM (SELECT t.b AS i, i + i FROM ss_t t WHERE t.id = 3) t GROUP BY i + i)	{int} rows=1 18000000000
+scope/shadowGroupSum	false	SELECT sum(k) FROM (SELECT i + i AS k FROM (SELECT t.b AS i, i + i FROM ss_t t WHERE t.id = 3) t GROUP BY i + i) q	{numeric} rows=1 18000000000
+scope/controlDistinct	false	SELECT DISTINCT t.n * 2 AS v FROM ss_t t	{numeric} rows=6 -7.00 | 0.00 | 0.02 | 20.00 | 4.50 | NULL
+scope/controlGroupN	false	SELECT t.n * 2 FROM ss_t t GROUP BY t.n * 2	{numeric} rows=6 -7.00 | 0.00 | 0.02 | 20.00 | 4.50 | NULL
+intop/subTimesN	false	SELECT (SELECT (t.d - DATE '2024-01-01') * t.n FROM ss_t t WHERE t.id = 2)	{numeric} rows=1 69030.50
+intop/subPlusN	false	SELECT (SELECT (t.d - DATE '2024-01-01') + t.n FROM ss_t t WHERE t.id = 2)	{numeric} rows=1 -19726.50
+intop/subDmdTimesM	false	SELECT (SELECT (t.d - t.d) * x.m FROM ss_t t, ss_i x WHERE t.id = 2 AND x.id = 1)	{numeric} rows=1 0.00
+intop/corrTimesN	true	SELECT o.id, (SELECT (o.d - DATE '2024-01-01') * x.m FROM ss_i x WHERE x.id = 1) FROM ss_t o ORDER BY o.id	{int,numeric} rows=6 1,78.75 | 2,-24653.75 | 3,3641466.25 | 4,-467510.00 | 5,-24655.00 | 6,NULL
+intop/subAsciiTimesN	false	SELECT (SELECT ascii(t.s) * t.n FROM ss_t t WHERE t.id = 2)	{numeric} rows=1 -252.00
+intop/sumSubTimesN	false	SELECT sum(q.k) FROM (SELECT (t.d - DATE '2024-01-01') * t.n AS k FROM ss_t t) q	{numeric} rows=1 29200705.01
+intop/plainTimesN	false	SELECT (t.d - DATE '2024-01-01') * t.n FROM ss_t t WHERE t.id = 2	{numeric} rows=1 69030.50
+intop/plainTimes15	false	SELECT (t.d - DATE '2024-01-01') * 1.5 FROM ss_t t WHERE t.id = 2	{numeric} rows=1 -29584.5
+intop/subItimesN	false	SELECT (SELECT t.i * t.n FROM ss_t t WHERE t.id = 2)	{numeric} rows=1 24.50
+intop/corrAsciiM	true	SELECT o.id, (SELECT ascii(o.s) * x.m FROM ss_i x WHERE x.id = 1) FROM ss_t o WHERE o.id IN (1,2) ORDER BY o.id	{int,numeric} rows=2 1,121.25 | 2,90.00
+intop/corrLenM	true	SELECT o.id, (SELECT length(o.s) * x.m FROM ss_i x WHERE x.id = 1) FROM ss_t o WHERE o.id IN (1,2) ORDER BY o.id	{int,numeric} rows=2 1,3.75 | 2,6.25
+intop/corrIdxM	true	SELECT o.id, (SELECT o.a[1] * x.m FROM ss_i x WHERE x.id = 1) FROM ss_t o WHERE o.id IN (1,2) ORDER BY o.id	{int,numeric} rows=2 1,1.25 | 2,3.75
+intop/subLenN	false	SELECT (SELECT length(t.s) * t.n FROM ss_t t WHERE t.id = 2)	{numeric} rows=1 -17.50
+intop/subIdxN	false	SELECT (SELECT t.a[1] * t.n FROM ss_t t WHERE t.id = 2)	{numeric} rows=1 -10.50
+intop/plainLenN	false	SELECT length(t.s) * t.n FROM ss_t t WHERE t.id = 2	{numeric} rows=1 -17.50
+intop/plainIdxN	false	SELECT t.a[1] * t.n FROM ss_t t WHERE t.id = 2	{numeric} rows=1 -10.50
+intop/subIdxP1M	false	SELECT o.id, (SELECT (o.a[1] + 1) * x.m FROM ss_i x WHERE x.id = 1) FROM ss_t o	{int,numeric} rows=6 1,2.50 | 2,5.00 | 3,6.25 | 4,10.00 | 5,11.25 | 6,NULL
+intop/subAsciiP1M	false	SELECT o.id, (SELECT (ascii(o.s) + 1) * x.m FROM ss_i x WHERE x.id = 1) FROM ss_t o	{int,numeric} rows=6 1,122.50 | 2,91.25 | 3,153.75 | 4,1.25 | 5,151.25 | 6,NULL
+intop/subLenP1M	false	SELECT o.id, (SELECT (length(o.s) + 1) * x.m FROM ss_i x WHERE x.id = 1) FROM ss_t o	{int,numeric} rows=6 1,5.00 | 2,7.50 | 3,3.75 | 4,1.25 | 5,2.50 | 6,NULL
+intop/subDcP1M	false	SELECT o.id, (SELECT ((o.d - DATE '2024-01-01') + 1) * x.m FROM ss_i x WHERE x.id = 1) FROM ss_t o	{int,numeric} rows=6 1,80.00 | 2,-24652.50 | 3,3641467.50 | 4,-467508.75 | 5,-24653.75 | 6,NULL
+intop/subNegAsciiM	false	SELECT o.id, (SELECT -ascii(o.s) * x.m FROM ss_i x WHERE x.id = 1) FROM ss_t o	{int,numeric} rows=6 1,-121.25 | 2,-90.00 | 3,-152.50 | 4,0.00 | 5,-150.00 | 6,NULL
+intop/subDdM	false	SELECT o.id, (SELECT (o.d - o.d) * x.m FROM ss_i x WHERE x.id = 1) FROM ss_t o	{int,numeric} rows=6 1,0.00 | 2,0.00 | 3,0.00 | 4,0.00 | 5,0.00 | 6,NULL
+intop/subIdxDivM	false	SELECT o.id, (SELECT o.a[1] / x.m FROM ss_i x WHERE x.id = 1) FROM ss_t o	{int,numeric} rows=6 1,0.80000000000000000000 | 2,2.4000000000000000 | 3,3.2000000000000000 | 4,5.6000000000000000 | 5,6.4000000000000000 | 6,NULL
+intop/subMTimesDc	false	SELECT o.id, (SELECT x.m * (o.d - DATE '2024-01-01') FROM ss_i x WHERE x.id = 1) FROM ss_t o	{int,numeric} rows=6 1,78.75 | 2,-24653.75 | 3,3641466.25 | 4,-467510.00 | 5,-24655.00 | 6,NULL
+intop/subAbsAsciiM	false	SELECT o.id, (SELECT abs(ascii(o.s)) * x.m FROM ss_i x WHERE x.id = 1) FROM ss_t o	{int,numeric} rows=6 1,121.25 | 2,90.00 | 3,152.50 | 4,0.00 | 5,150.00 | 6,NULL
+intop/subLenPlusM	false	SELECT o.id, (SELECT length(o.s) + x.m FROM ss_i x WHERE x.id = 1) FROM ss_t o	{int,numeric} rows=6 1,4.25 | 2,6.25 | 3,3.25 | 4,1.25 | 5,2.25 | 6,NULL
+intop/subIdxModM	false	SELECT o.id, (SELECT o.a[1] % x.m FROM ss_i x WHERE x.id = 1) FROM ss_t o	{int,numeric} rows=6 1,1.00 | 2,0.50 | 3,0.25 | 4,0.75 | 5,0.50 | 6,NULL
+intop/subCoalesceM	false	SELECT o.id, (SELECT COALESCE(o.i, 0) * x.m FROM ss_i x WHERE x.id = 1) FROM ss_t o WHERE o.id IN (1,2,6)	{int,numeric} rows=3 1,3.75 | 2,-8.75 | 6,0.00
+intop/subCaseM	false	SELECT o.id, (SELECT CASE WHEN o.o THEN o.i ELSE 0 END * x.m FROM ss_i x WHERE x.id = 1) FROM ss_t o WHERE o.id IN (1,2,6)	{int,numeric} rows=3 1,3.75 | 2,0.00 | 6,0.00
+intop/subNullifM	false	SELECT o.id, (SELECT NULLIF(o.i, 3) * x.m FROM ss_i x WHERE x.id = 1) FROM ss_t o WHERE o.id IN (1,2,6)	{int,numeric} rows=3 1,NULL | 2,-8.75 | 6,NULL
+intop/subGreatestM	false	SELECT o.id, (SELECT GREATEST(o.i, 1) * x.m FROM ss_i x WHERE x.id = 1) FROM ss_t o WHERE o.id IN (1,2,6)	{int,numeric} rows=3 1,3.75 | 2,1.25 | 6,1.25
+intop/subAbsM	false	SELECT o.id, (SELECT abs(o.i) * x.m FROM ss_i x WHERE x.id = 1) FROM ss_t o WHERE o.id IN (1,2,6)	{int,numeric} rows=3 1,3.75 | 2,8.75 | 6,NULL
+intop/subModM	false	SELECT o.id, (SELECT mod(o.i, 2) * x.m FROM ss_i x WHERE x.id = 1) FROM ss_t o WHERE o.id IN (1,2,6)	{int,numeric} rows=3 1,1.25 | 2,-1.25 | 6,NULL
+intop/subCastM	false	SELECT o.id, (SELECT CAST(o.b AS INTEGER) * x.m FROM ss_i x WHERE x.id = 1) FROM ss_t o WHERE o.id IN (1,2,6)	{int,numeric} rows=3 1,37.50 | 2,-87.50 | 6,NULL
+intop/subOctetM	false	SELECT o.id, (SELECT octet_length(o.s) * x.m FROM ss_i x WHERE x.id = 1) FROM ss_t o WHERE o.id IN (1,2,6)	{int,numeric} rows=3 1,3.75 | 2,6.25 | 6,NULL
+intop/subStrposM	false	SELECT o.id, (SELECT strpos(o.s, 'l') * x.m FROM ss_i x WHERE x.id = 1) FROM ss_t o WHERE o.id IN (1,2,6)	{int,numeric} rows=3 1,0.00 | 2,3.75 | 6,NULL
+intop/subArrLenM	false	SELECT o.id, (SELECT array_length(o.a, 1) * x.m FROM ss_i x WHERE x.id = 1) FROM ss_t o WHERE o.id IN (1,2,6)	{int,numeric} rows=3 1,2.50 | 2,1.25 | 6,NULL
+intop/subCardM	false	SELECT o.id, (SELECT cardinality(o.a) * x.m FROM ss_i x WHERE x.id = 1) FROM ss_t o WHERE o.id IN (1,2,6)	{int,numeric} rows=3 1,2.50 | 2,1.25 | 6,NULL
+intop/subSignM	false	SELECT o.id, (SELECT sign(o.i) * x.m FROM ss_i x WHERE x.id = 1) FROM ss_t o WHERE o.id IN (1,2,6)	{int,float} rows=3 1,1.25 | 2,-1.25 | 6,NULL
+intop/subExtractM	false	SELECT o.id, (SELECT extract(year FROM o.d) * x.m FROM ss_i x WHERE x.id = 1) FROM ss_t o WHERE o.id IN (1,2,6)	{int,numeric} rows=3 1,2530.00 | 2,2462.50 | 6,NULL
+intop/subIPlusBM	false	SELECT o.id, (SELECT (o.i + o.b) * x.m FROM ss_i x WHERE x.id = 1) FROM ss_t o WHERE o.id IN (1,2,6)	{int,numeric} rows=3 1,41.25 | 2,-96.25 | 6,NULL
+intop/subIM	false	SELECT o.id, (SELECT o.i * x.m FROM ss_i x WHERE x.id = 1) FROM ss_t o WHERE o.id IN (1,2,6)	{int,numeric} rows=3 1,3.75 | 2,-8.75 | 6,NULL
+intop/subITimes2M	false	SELECT o.id, (SELECT (o.i * 2) * x.m FROM ss_i x WHERE x.id = 1) FROM ss_t o WHERE o.id IN (1,2,6)	{int,numeric} rows=3 1,7.50 | 2,-17.50 | 6,NULL
+intop/plainCaseNullN	false	SELECT t.id, CASE WHEN t.o THEN ascii(t.s) ELSE NULL END * t.n FROM ss_t t	{int,numeric} rows=6 1,218.25 | 2,NULL | 3,1220.00 | 4,NULL | 5,1.20 | 6,NULL
+intop/plainCoalesceNullN	false	SELECT t.id, COALESCE(t.a[1], NULL) * t.n FROM ss_t t	{int,numeric} rows=6 1,2.25 | 2,-10.50 | 3,40.00 | 4,0.00 | 5,0.08 | 6,NULL
+intop/plainRoundIdxN	false	SELECT t.id, round(t.a[1] * t.n, 1) FROM ss_t t	{int,numeric} rows=6 1,2.3 | 2,-10.5 | 3,40.0 | 4,0.0 | 5,0.1 | 6,NULL
+intop/plainCastAsciiNNumeric	false	SELECT t.id, CAST(ascii(t.s) * t.n AS NUMERIC) FROM ss_t t	{int,numeric} rows=6 1,218.25 | 2,-252.00 | 3,1220.00 | 4,0.00 | 5,1.20 | 6,NULL
+intop/plainCastIdxNumeric	false	SELECT t.id, CAST(t.a[1] AS NUMERIC) FROM ss_t t	{int,numeric} rows=6 1,1 | 2,3 | 3,4 | 4,7 | 5,8 | 6,NULL
+intop/plainAggsN	false	SELECT sum(ascii(t.s) * t.n), avg(t.a[1] * t.n), max((t.d - DATE '2024-01-01') * t.n) FROM ss_t t	{numeric,numeric,numeric} rows=1 1187.45,6.3660000000000000,29131730.00
+intop/plainGroupByN	false	SELECT ascii(t.s) * t.n AS k, count(*) FROM ss_t t GROUP BY ascii(t.s) * t.n	{numeric,int} rows=6 -252.00,1 | 0.00,1 | 1.20,1 | 1220.00,1 | 218.25,1 | NULL,1
+intop/plainWhereN	false	SELECT t.id FROM ss_t t WHERE ascii(t.s) * t.n > 100 ORDER BY t.id	{int} rows=2 1 | 3
+intop/plainAsciiF	false	SELECT t.id, ascii(t.s) * t.f FROM ss_t t	{int,float} rows=6 1,145.5 | 2,-180 | 3,30.5 | 4,0 | 5,12015 | 6,NULL
+intop/plainAscii15	false	SELECT t.id, ascii(t.s) * 1.5 FROM ss_t t	{int,numeric} rows=6 1,145.5 | 2,108.0 | 3,183.0 | 4,0.0 | 5,180.0 | 6,NULL
+intop/plainNegIdxN	false	SELECT t.id, -(t.a[1]) * t.n FROM ss_t t	{int,numeric} rows=6 1,-2.25 | 2,10.50 | 3,-40.00 | 4,0.00 | 5,-0.08 | 6,NULL
+intop/plainIdxPlus15N	false	SELECT t.id, (t.a[1] + 1.5) * t.n FROM ss_t t	{int,numeric} rows=6 1,5.625 | 2,-15.750 | 3,55.000 | 4,0.000 | 5,0.095 | 6,NULL
+intop/plainAbsIdxN	false	SELECT t.id, abs(t.a[1]) * t.n FROM ss_t t	{int,numeric} rows=6 1,2.25 | 2,-10.50 | 3,40.00 | 4,0.00 | 5,0.08 | 6,NULL
+intop/plainNullifAsciiN	false	SELECT t.id, NULLIF(ascii(t.s), 97) * t.n FROM ss_t t	{int,numeric} rows=6 1,NULL | 2,-252.00 | 3,1220.00 | 4,0.00 | 5,1.20 | 6,NULL
+intop/plainGreatestN	false	SELECT t.id, greatest(ascii(t.s), length(t.s)) * t.n FROM ss_t t	{int,numeric} rows=6 1,218.25 | 2,-252.00 | 3,1220.00 | 4,0.00 | 5,1.20 | 6,NULL
+intop/plainModNAscii	false	SELECT t.id, mod(t.n, ascii(t.s)) FROM ss_t t WHERE t.id <> 4	{int,numeric} rows=5 1,2.25 | 2,-3.50 | 3,10.00 | 5,0.01 | 6,NULL
+intop/plainNModAscii	false	SELECT t.id, t.n % ascii(t.s) FROM ss_t t WHERE t.id <> 4	{int,numeric} rows=5 1,2.25 | 2,-3.50 | 3,10.00 | 5,0.01 | 6,NULL
+intop/plainAsciiModN	false	SELECT t.id, ascii(t.s) % t.n FROM ss_t t WHERE t.id NOT IN (4)	{int,numeric} rows=5 1,0.25 | 2,2.00 | 3,2.00 | 5,0.00 | 6,NULL
+intop/plainNDivDayCountZero	false	SELECT t.id, t.n / (t.d - t.d) FROM ss_t t WHERE t.id = 1	ERR 22012 division by zero
+intop/plainNDivAscii	false	SELECT t.id, t.n / ascii(t.s) FROM ss_t t WHERE t.id = 1	{int,numeric} rows=1 1,0.02319587628865979381
+intop/plainOrderByN	false	SELECT t.id, ascii(t.s) + t.n FROM ss_t t ORDER BY ascii(t.s) + t.n NULLS LAST, t.id	{int,numeric} rows=6 1,99.25 | 2,68.50 | 3,132.00 | 4,0.00 | 5,120.01 | 6,NULL
+intop/plainIdxTimes2N	false	SELECT t.id, (t.a[1] * 2) * t.n FROM ss_t t	{int,numeric} rows=6 1,4.50 | 2,-21.00 | 3,80.00 | 4,0.00 | 5,0.16 | 6,NULL
+intop/plainIdxDiv2N	false	SELECT t.id, (t.a[1] / 2) * t.n FROM ss_t t	{int,numeric} rows=6 1,0.00 | 2,-3.50 | 3,20.00 | 4,0.00 | 5,0.04 | 6,NULL
+intop/plainLenP1N	false	SELECT t.id, (length(t.s) + 1) * t.n FROM ss_t t	{int,numeric} rows=6 1,9.00 | 2,-21.00 | 3,30.00 | 4,0.00 | 5,0.02 | 6,NULL
+intop/plainIPlusAsciiN	false	SELECT t.id, (t.i + ascii(t.s)) * t.n FROM ss_t t	{int,numeric} rows=6 1,225.00 | 2,-227.50 | 3,1270.00 | 4,0.00 | 5,1.21 | 6,NULL
+intop/plainNTimesDayCount	false	SELECT t.id, t.n * (t.d - DATE '2024-03-01') FROM ss_t t	{int,numeric} rows=6 1,6.75 | 2,69240.50 | 3,29131130.00 | 4,0.00 | 5,-197.84 | 6,NULL
+intop/plainDayCountRevN	false	SELECT t.id, (DATE '2024-03-01' - t.d) * t.n FROM ss_t t	{int,numeric} rows=6 1,-6.75 | 2,-69240.50 | 3,-29131130.00 | 4,0.00 | 5,197.84 | 6,NULL
+intop/plainCastIN	false	SELECT t.id, CAST(t.i AS INTEGER) * t.n FROM ss_t t	{int,numeric} rows=6 1,6.75 | 2,24.50 | 3,50.00 | 4,0.00 | 5,0.01 | 6,NULL
+intop/plainCoalesceIN	false	SELECT t.id, COALESCE(t.i, 0) * t.n FROM ss_t t	{int,numeric} rows=6 1,6.75 | 2,24.50 | 3,50.00 | 4,0.00 | 5,0.01 | 6,NULL
+intop/plainCaseLitN	false	SELECT t.id, (CASE WHEN t.o THEN 1 ELSE 2 END) * t.n FROM ss_t t	{int,numeric} rows=6 1,2.25 | 2,-7.00 | 3,10.00 | 4,0.00 | 5,0.01 | 6,NULL
+intop/plainIdxNPlusI	false	SELECT t.id, t.a[1] * t.n + t.i FROM ss_t t	{int,numeric} rows=6 1,5.25 | 2,-17.50 | 3,45.00 | 4,0.00 | 5,1.08 | 6,NULL
+intop/plainIdxPlusBN	false	SELECT t.id, (t.a[1] + t.b) * t.n FROM ss_t t	{int,numeric} rows=6 1,69.75 | 2,234.50 | 3,90000000040.00 | 4,0.00 | 5,0.09 | 6,NULL
+intop/plainIdxPlusMaxN	false	SELECT t.id, (t.a[1] + 2147483647) * t.n FROM ss_t t	ERR 22003 integer out of range
+intop/plainIdxOutOfRangeN	false	SELECT t.id, t.a[5] * t.n FROM ss_t t	{int,numeric} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+intop/zeroIdxM	false	SELECT (SELECT o.a[1] * x.m FROM ss_i x WHERE x.id = 1) AS v FROM ss_t o WHERE o.id = 99	{numeric} rows=0 
+intop/zeroIdxV	false	SELECT (SELECT o.a[1] + x.v FROM ss_i x WHERE x.id = 1) AS v FROM ss_t o WHERE o.id = 99	{int} rows=0 
+intop/zeroIdx	false	SELECT (SELECT o.a[1] FROM ss_i x WHERE x.id = 1) AS v FROM ss_t o WHERE o.id = 99	{int} rows=0 
+intop/zeroArr	false	SELECT (SELECT o.a FROM ss_i x WHERE x.id = 1) AS v FROM ss_t o WHERE o.id = 99	{int[]} rows=0 
+intop/zeroAsciiM	false	SELECT (SELECT ascii(o.s) * x.m FROM ss_i x WHERE x.id = 1) AS v FROM ss_t o WHERE o.id = 99	{numeric} rows=0 
+intop/zeroIdxP1M	false	SELECT (SELECT (o.a[1] + 1) * x.m FROM ss_i x WHERE x.id = 1) AS v FROM ss_t o WHERE o.id = 99	{numeric} rows=0 
+intop/zeroPlainIdxN	false	SELECT t.a[1] * t.n AS v FROM ss_t t WHERE t.id = 99	{numeric} rows=0 
+spelling/aliasNamed	false	SELECT __column_value.k AS x FROM (SELECT 1 AS k) AS __column_value (k)	{int} rows=1 1
+spelling/cteNamed	false	WITH __column_value (k) AS (SELECT 1) SELECT k AS x FROM __column_value	{int} rows=1 1
+spelling/joinAliasNamed	false	SELECT __column_value.k AS x FROM ss_i x JOIN (SELECT 1 AS k) AS __column_value (k) ON true WHERE x.id = 1	{int} rows=1 1
+spelling/colon	false	SELECT __column_value(5::integer) AS x	ERR 42883 __column_value
+spelling/paren	false	SELECT __column_value((cast(5 as integer))) AS x	ERR 42883 __column_value
+intop/dayCountDivZero	false	SELECT (t.d - DATE '2024-01-01') / (t.d - t.d) AS x FROM ss_t t WHERE t.id = 1	ERR 22012 division by zero
+intop/dayCountDivLitZero	false	SELECT (t.d - DATE '2024-01-01') / 0 AS x FROM ss_t t WHERE t.id = 1	ERR 22012 division by zero
+intop/dayCountModZero	false	SELECT (t.d - DATE '2024-01-01') % (t.d - t.d) AS x FROM ss_t t WHERE t.id = 1	ERR 22012 division by zero
+intop/plainAbsConstN	false	SELECT t.id, ABS(-1) * t.n AS x FROM ss_t t	{int,numeric} rows=6 1,2.25 | 2,-3.50 | 3,10.00 | 4,0.00 | 5,0.01 | 6,NULL
+intop/plainAbsConstMinusHalf	false	SELECT t.id, ABS(-1) - 0.5 AS x FROM ss_t t WHERE t.id = 1	{int,numeric} rows=1 1,0.5
+intop/plainNullifIN	false	SELECT t.id, (NULLIF(t.i - 1, t.n) - 0.5) + t.n AS x FROM ss_t t	{int,numeric} rows=6 1,3.75 | 2,-12.00 | 3,13.50 | 4,-1.50 | 5,-0.49 | 6,NULL

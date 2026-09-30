@@ -32,7 +32,17 @@ package coordinator
 //     an aggregate or by the integer arithmetic above it is the count
 //     (`sum(d - d)` is 0, not NULL);
 //   - the re-run's spelling of an outer value, `__column_value(…)`, is
-//     42883 from a client on every arm (spelling/*), as on PostgreSQL.
+//     42883 from a client on every arm (spelling/*), as on PostgreSQL, and
+//     an alias or a CTE NAMED __column_value answers;
+//   - an expression is read in its own scope (scope/*): over a derived table
+//     that publishes `t.b AS i` and its own unaliased `i + i`, the query's
+//     `i + i` is arithmetic over the bigint `i`, in a SELECT list and a
+//     GROUP BY key, and SUM over a column derived from it is numeric;
+//   - an integer-valued operand — a day count, ascii(), length(), a
+//     subscript, COALESCE/CASE/abs over integers — beside a NUMERIC is
+//     numeric arithmetic, in a scalar subquery and outside one, and a
+//     zero-row result declares a correlated subquery as its rows do
+//     (intop/*).
 //
 // Every want is PostgreSQL 17.11's, measured over ssPGFixture
 // (testdata/arc_ss_operand_class_width_pg17.tsv: name, ordered, sql,

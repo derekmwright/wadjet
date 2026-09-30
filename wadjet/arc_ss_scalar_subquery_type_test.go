@@ -152,7 +152,9 @@ func ssEmbeddedRender(res *QueryResult) string {
 // the spelling), in a SELECT list, a WHERE, a subquery and a DML statement,
 // while a string holding the text is a string. A correlated DML subquery —
 // whose per-row re-run is that spelling, run by the embedded door's own
-// runner — still deletes the row PostgreSQL 17.11 deletes.
+// runner — still deletes the row PostgreSQL 17.11 deletes. Any other call of
+// the name is 42883 too, and a table, a CTE or an alias NAMED __column_value
+// answers, as on PostgreSQL.
 func TestArcSSColumnValueSpellingIsNotAClientFunction(t *testing.T) {
 	ctx := context.Background()
 	db, err := Open(ctx, Config{Store: objstore.NewMemStore(), Bucket: "test"})
@@ -202,5 +204,31 @@ func TestArcSSColumnValueSpellingIsNotAClientFunction(t *testing.T) {
 	}
 	if got := ssEmbeddedRender(res); got != "{int,int} 2,10" {
 		t.Errorf("after the correlated DELETE: %s, PostgreSQL 17.11 keeps {int,int} 2,10", got)
+	}
+	// Any other call of the name is a call to a function nobody defines.
+	if _, err := db.Query(ctx, "SELECT __column_value(5::integer)"); sqlerr.StateOf(err) != "42883" {
+		t.Errorf("Query SELECT __column_value(5::integer)\n  got %v, PostgreSQL 17.11 raises 42883", err)
+	}
+	// A RELATION, a CTE or an alias NAMED __column_value is a name: its
+	// column list follows it, not a cast, and PostgreSQL 17.11 answers.
+	if _, err := db.Query(ctx, "CREATE TABLE __column_value (k INT)"); err != nil {
+		t.Fatalf("Query CREATE TABLE __column_value (k INT): %v, PostgreSQL 17.11 answers", err)
+	}
+	if _, err := db.Execute(ctx, "INSERT INTO __column_value (k) VALUES (4)"); err != nil {
+		t.Fatalf("Execute INSERT INTO __column_value (k) VALUES (4): %v, PostgreSQL 17.11 answers", err)
+	}
+	for q, want := range map[string]string{
+		"SELECT k FROM __column_value":                                       "{int} 4",
+		"SELECT __column_value.k FROM (SELECT 1 AS k) AS __column_value (k)": "{int} 1",
+		"WITH __column_value (k) AS (SELECT 1) SELECT k FROM __column_value": "{int} 1",
+	} {
+		res, err := db.Query(ctx, q)
+		if err != nil {
+			t.Errorf("Query %s: %v, PostgreSQL 17.11 answers %s", q, err, want)
+			continue
+		}
+		if got := ssEmbeddedRender(res); got != want {
+			t.Errorf("Query %s: %s, PostgreSQL 17.11 answers %s", q, got, want)
+		}
 	}
 }
