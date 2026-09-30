@@ -314,3 +314,14 @@ spelling/where	false	SELECT t.id FROM ss_t t WHERE t.i = __column_value(cast(3 a
 spelling/inSub	false	SELECT (SELECT __column_value(cast(5 as integer)) + x.v FROM ss_i x WHERE x.id = 1) AS x	ERR 42883 __column_value
 spelling/literal	false	SELECT '__column_value(cast(5 as integer))' AS x	{text} rows=1 __column_value(cast(5 as integer))
 spelling/comment	false	SELECT 1 AS x -- __column_value(cast(5 as integer))	{int} rows=1 1
+# A day count read by a typed consumer (an aggregate input, integer arithmetic above it) is the count, not NULL.
+shared/sumDayCount	false	SELECT sum(t.d - t.d) AS x FROM ss_t t	{int} rows=1 0
+shared/sumDayCountPlus	false	SELECT sum(t.d - t.d + 0) AS x FROM ss_t t	{int} rows=1 0
+shared/minDayCountPlus	false	SELECT min(t.d - t.d + 0) AS x FROM ss_t t	{int} rows=1 0
+shared/maxDayCountTimes	false	SELECT max((t.d - t.d) * 2) AS x FROM ss_t t	{int} rows=1 0
+shared/countDayCount	false	SELECT count(t.d - t.d) AS x FROM ss_t t	{int} rows=1 5
+shared/avgDayCount	false	SELECT avg(t.d - t.d) AS x FROM ss_t t	{numeric} rows=1 0.00000000000000000000
+shared/groupSumDayCount	false	SELECT t.id, sum(t.d - t.d) AS x FROM ss_t t GROUP BY t.id	{int,int} rows=6 1,0 | 2,0 | 3,0 | 4,0 | 5,0 | 6,NULL
+shared/sumDayCountJoin	false	SELECT sum(t.d - t2.d) AS x FROM ss_t t JOIN ss_t t2 ON t.id = t2.id + 1	{int} rows=1 -19787
+shared/winSumDayCount	false	SELECT t.id, sum(t.d - t.d) OVER () AS x FROM ss_t t WHERE t.id IN (1,2)	{int,int} rows=2 1,0 | 2,0
+shared/corrMaxDayCount	false	SELECT o.id, (SELECT max(o.d - x.d) FROM ss_t x WHERE x.id IN (1,2)) AS x FROM ss_t o WHERE o.id IN (1,3)	{int,int} rows=2 1,19786 | 3,2932896

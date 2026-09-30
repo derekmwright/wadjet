@@ -28,7 +28,9 @@ package coordinator
 //     int4[], a day count and ascii() are int4 (`(SELECT o.a[1] +
 //     2147483647 …)` is 22003, `(SELECT (o.d - DATE …) + x.v …)` integer),
 //     `(SELECT x.b - x.i …)` stays bigint, and SUM over a derived or CTE
-//     int4 column is bigint, with no subquery at all;
+//     int4 column is bigint, with no subquery at all; a day count read by
+//     an aggregate or by the integer arithmetic above it is the count
+//     (`sum(d - d)` is 0, not NULL);
 //   - the re-run's spelling of an outer value, `__column_value(…)`, is
 //     42883 from a client on every arm (spelling/*), as on PostgreSQL.
 //
