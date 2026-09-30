@@ -498,7 +498,7 @@ func c2Cells() []c2Cell {
 		{name: "59_the_aggregate_ARGUMENT_spelling_is_the_residual",
 			sql: `SELECT SUM((SELECT u.x FROM c2users y WHERE y.id = 1)) AS v ` +
 				`FROM (SELECT id AS x FROM c2users) u`,
-			// PostgreSQL's 6 since arc SS (#1422): the aggregate argument is
+			// PostgreSQL's 6 (#1422): the aggregate argument is
 			// declared from the subquery with its outer reference typed as
 			// the derived table's column, where it was declared text and
 			// summed to NULL.

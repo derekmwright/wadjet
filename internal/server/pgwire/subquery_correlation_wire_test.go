@@ -112,8 +112,8 @@ func TestASubqueryReadsTheRowItIsCorrelatedOnOnTheWire(t *testing.T) {
 		// NULL is what the wire must carry — not the empty string that made
 		// #1044 silent.
 		{name: "boundary_a_false_where_is_null",
-			sql:  `SELECT (SELECT u.id WHERE 1=0) AS v FROM users u ORDER BY 1`,
-			// integer (23) since arc SS: the subquery is declared with its
+			sql: `SELECT (SELECT u.id WHERE 1=0) AS v FROM users u ORDER BY 1`,
+			// integer (23): the subquery is declared with its
 			// outer reference typed as the enclosing column (#1422).
 			oids: []uint32{23}, text: `<null>|<null>|<null>`},
 		{name: "boundary_two_columns_is_refused",

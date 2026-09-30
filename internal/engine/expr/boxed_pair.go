@@ -1054,16 +1054,18 @@ func pairApplies(lk, rk boxKind, lText, rText string) bool {
 		return true
 	case isTemporalKind(rk) && (lk == boxQuoted || lk == boxText):
 		return true
+	// A DATE against a DATE, a TIMESTAMP against a TIMESTAMP: the rule below,
+	// the pair already at its common type. Left out, the same-type pair fell
+	// to compare(), whose magnitude guess read DATE 9999-12-31's day count
+	// (2 932 896) as milliseconds beside the same date's ISO text, and `d =
+	// (SELECT d …)` answered 0 rows (#1427).
+	case (lk == boxDate && rk == boxDate) || (lk == boxTimestamp && rk == boxTimestamp):
+		return true
 	// A DATE against a TIMESTAMP: two domains, epoch DAYS and epoch
 	// MILLISECONDS. PostgreSQL promotes the date to its midnight; compare()
 	// read the two numbers as one unit, so `DATE '2026-01-02' > TIMESTAMP
-	// '2026-01-01 10:00:00'` answered false (arc VL round 3). And a DATE
-	// against a DATE, a TIMESTAMP against a TIMESTAMP: the same rule, the pair
-	// already at its common type. Left out, the same-type pair fell to
-	// compare(), whose magnitude guess read DATE 9999-12-31's day count
-	// (2 932 896) as milliseconds beside the same date's ISO text, and `d =
-	// (SELECT d …)` answered 0 rows (#1427).
-	case isTemporalKind(lk) && isTemporalKind(rk):
+	// '2026-01-01 10:00:00'` answered false (arc VL round 3).
+	case (lk == boxDate && rk == boxTimestamp) || (lk == boxTimestamp && rk == boxDate):
 		return true
 	}
 	return false

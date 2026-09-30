@@ -14,7 +14,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// The embedded arm of arc SS (#1428 #1431 #1427 #1422): `DB.Query` over the
+// The embedded engine (#1428 #1431 #1427 #1422): `DB.Query` over the
 // issues' own statements, each result read positionally (QueryResult.Cells)
 // by its DECLARED type — a TIMESTAMP cell is its epoch milliseconds, rendered
 // here as the instant — with the declared type beside it, and the values an
