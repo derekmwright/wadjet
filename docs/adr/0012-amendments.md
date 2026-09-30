@@ -843,6 +843,15 @@ PostgreSQL's `date = timestamp` promotes the DATE to its midnight; this engine's
 | temporal | [r24](0012-divergences/temporal.md#catalog) | Added: CASE / COALESCE / GREATEST / LEAST mixing DATE and TIMESTAMP arms is refused 0A000 whatever the arm's shape (a column — of a table, a derived table, a CTE or recursive CTE (inside its own recursive term too), a join, a set operation, VALUES or a LATERAL output, whatever produced it — a literal, expression, scalar subquery, window call or aggregate); at v0.25.2 it answered a day count in a TIMESTAMP column, epoch milliseconds in a DATE one, or raised 22003 — or, for a TIMESTAMP-first fold whose DATE arm is a scalar subquery, an instant a bare projection printed as PostgreSQL does but that CAST, extract and + INTERVAL then read wrongly (`CAST(COALESCE(ts, (SELECT max(d) …)) AS VARCHAR)` answered epoch milliseconds); 13 such folds measured right in a bare projection at v0.25.2 are refused now | `coordinator.TestArcDTDateTimestampEveryArm`, `coordinator.TestArcDTR2ScalarAndFoldArmsEveryArm` |
 | set-operations | [r7](0012-divergences/set-operations.md#catalog) | Amended: gated, with INTERSECT, EXCEPT and a mixed membership body named | `coordinator.TestArcDTDateTimestampEveryArm` |
 
+## 2026-09-29: a window function's argument list (arc WA, #1394 #1399)
+
+A bare literal VALUE argument to a window function was never materialized as an input column, so `SUM(2.5) OVER ()`, `FIRST_VALUE(2.5) OVER (…)`, `LAG(5) OVER (…)` and `SUM(2) OVER ()` answered NULL on every row and arm, and an INSERT … SELECT of one stored NULL; it is now materialized like any expression. The INTEGER argument (LAG / LEAD's offset, NTILE's and NTH_VALUE's n) was read by `strconv.Atoi` over its text, and every evaluator read an offset or n <= 0 as 1, so `LAG(x, 0)` answered the previous row, `LAG(x, -1)` the previous instead of the next, `LAG(x, NULL)`, `LAG(x, 1 + 1)` and `LAG(x, o)` answered as `LAG(x)`, and `NTILE(0)` answered 1. It is now typed as PostgreSQL types it; a computed or per-row integer argument is refused.
+
+| family | row | change | gate |
+|---|---|---|---|
+| aggregates-windows | [r18](0012-divergences/aggregates-windows.md#catalog) | Added: a text or NULL literal to FIRST_VALUE / LAST_VALUE / NTH_VALUE / LAG / LEAD answers where PostgreSQL raises 42804 (at v0.25.2 it answered NULL) | `coordinator.TestArcWAWindowArgumentsEveryArm` |
+| aggregates-windows | [r19](0012-divergences/aggregates-windows.md#catalog) | Added: a computed or per-row LAG / LEAD offset or NTILE / NTH_VALUE n is refused 0A000 (at v0.25.2 it was read as the default 1) | `coordinator.TestArcWAWindowArgumentsEveryArm` |
+
 ## Dated markers inside the entries
 
 Every `Added` / `Amended` / `CLOSED` / `Corrected` / `narrowed` marker still inside an entry's verbatim text, in date order, with the entry that carries it.

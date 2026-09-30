@@ -3375,6 +3375,44 @@ the query with an internal error instead of saying what was wrong.
 The workaround is the grouped spelling with a join back, or a self-join on the
 frame's bounds.
 
+### A window function's arguments
+
+The VALUE argument of `SUM`, `AVG`, `MIN`, `MAX`, `COUNT`, `FIRST_VALUE`,
+`LAST_VALUE`, `NTH_VALUE`, `LAG` and `LEAD` may be a column, any expression
+over one, or a bare literal: `SUM(2.5) OVER ()` is the frame's row count times
+2.5, `FIRST_VALUE(2.5) OVER (ORDER BY id)` is 2.5 on every row, and
+`LAG(5) OVER (ORDER BY id)` is NULL on the first row and 5 after it, as on
+PostgreSQL; a bound parameter is read the same way. A text or NULL literal
+given to `FIRST_VALUE`, `LAST_VALUE`, `NTH_VALUE`, `LAG` or `LEAD` answers
+the text, or NULL, where PostgreSQL raises `42804 could not determine
+polymorphic type` (ADR-0012 catalog, aggregates-windows r18).
+
+The INTEGER argument — `LAG` / `LEAD`'s offset, `NTILE`'s bucket count,
+`NTH_VALUE`'s n — is an `integer`, as on PostgreSQL: an integer literal, a
+signed one, a quoted one (`'2'`), `CAST(… AS INTEGER)`, `NULL`, or a bound
+parameter.
+
+```sql
+SELECT id, LAG(x, 0) OVER (ORDER BY id) FROM t;    -- the current row's x
+SELECT id, LAG(x, -1) OVER (ORDER BY id) FROM t;   -- the NEXT row's x: LEAD(x, 1)
+SELECT id, LEAD(x, NULL) OVER (ORDER BY id) FROM t; -- NULL on every row
+SELECT id, NTILE(0) OVER (ORDER BY id) FROM t;     -- ERROR 22014
+```
+
+An offset of 0 is the current row and a negative offset reads the other way.
+A NULL argument answers NULL on every row. An `NTILE` or `NTH_VALUE` n that is
+not positive raises `22014` / `22016` when a row is evaluated, so over no rows
+the query answers no rows. A numeric or bigint argument (`1.5`, `2147483648`,
+`CAST(0 AS BIGINT)`) is `42883`, and a quoted one that is not an integer is
+`22P02`. **A computed or per-row argument — `LAG(x, 1 + 1)`, `LAG(x, o)`,
+`NTILE(o)` — is refused, SQLSTATE `0A000`**, where PostgreSQL evaluates it
+(ADR-0012 catalog, aggregates-windows r19); write the integer.
+
+A `LAG` / `LEAD` default may be an integer literal, a negative one or NULL.
+A default of another type is not coerced to the argument's type: a decimal
+default into an integer column is truncated (`LAG(x, 1, 2.5)` answers 2 where
+PostgreSQL answers 2.5), and a text, column or cast default fails the query.
+
 ### Which relation a window key names
 
 A window's `PARTITION BY` term, its `ORDER BY` term and its function argument
