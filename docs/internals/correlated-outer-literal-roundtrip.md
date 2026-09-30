@@ -46,7 +46,17 @@ declared-type and fixed-point walks type it as that column
 width and DECIMAL(10,0), a DECIMAL's declared (p,s), an int4[]'s element —
 never by a CAST expression's own rules. The subquery's declaration is made
 from the same spelling with the value left out (`outerStandIn`), so the
-declaration and the per-row value describe one expression.
+declaration and the per-row value describe one expression: the declaration
+is the one the planner makes for any SELECT-list expression over that scope
+(`declaredOutputSchema`), at the integer width the plan publishes for it
+(`emittedColIntWidth`, `physical.publishedIntegerType`).
+
+The spelling is the re-run's own. The client doors — `wadjet.DB.Query` and
+`Execute`, the coordinator's `ExecuteSQL` and `SubmitSQL`, which every
+protocol reaches — refuse a statement that calls `__column_value`
+(`plansql.RefuseColumnValueCall`) with PostgreSQL's 42883; the planner's
+subquery runner and the embedded door's DML runner parse a re-run's text
+below those doors.
 
 A NULL is a NULL of the column's type where the value is a CAST or a typed
 literal (outerNull), and the bare `null` where it is a quoted string; it is

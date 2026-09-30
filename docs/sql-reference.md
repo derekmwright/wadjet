@@ -1180,15 +1180,22 @@ text, `(SELECT max(ts) …) + INTERVAL '1 hour'` is an hour later,
 `(SELECT d + 1 …)` over 9999-12-31 is 10000-01-01. Two exceptions are the
 engine's, not the subquery's: `± INTERVAL '1 month'` at a month's end answers
 the day arithmetic's date for any timestamp (#1321), and `BETWEEN` with
-scalar-subquery bounds is refused on the distributed arms. An `integer`
-expression is `integer`: `(SELECT x.v + x.v …)` declares `integer` and a
-result past its range is 22003, as on PostgreSQL. A subquery that
+scalar-subquery bounds is refused on the distributed arms. The answer is
+declared as any SELECT-list expression is, at the integer width the
+subquery's plan publishes for it — the pair a derived table's column is read
+as — so an expression over `integer` operands (an `integer` column, a
+subscript of an `integer[]`, a day count `date - date`, `ascii`) is
+`integer` — `(SELECT x.v + x.v …)`, `(SELECT (x.d - DATE '2024-01-01') + 1 …)`,
+`(SELECT ascii(x.s) …)` — and a result past its range is 22003, as on
+PostgreSQL: `(SELECT x.v * 1000000000 …)`, `(SELECT x.a[1] + 2147483647 …)`;
+a `bigint` operand makes it `bigint` (`(SELECT x.b - x.i …)` is 8999999995). A subquery that
 reads the outer row is declared with each outer column at that column's own
 type — its width, its precision and scale, an array's element — so
 `(SELECT c.f + x.v FROM x …)` over a `double precision` `c.f` and an
 `integer` `x.v` is `double precision`, in either operand order, and stores 8
-for 7.5 into an `integer` column as PostgreSQL does, and
-`(SELECT coalesce(c.i, x.v) …)` over an `integer` `c.i` is `integer`. Arithmetic and `abs` over
+for 7.5 into an `integer` column as PostgreSQL does,
+`(SELECT coalesce(c.i, x.v) …)` over an `integer` `c.i` is `integer`, and
+`(SELECT c.a[1] + x.v …)` over an `integer[]` `c.a` is `integer`. Arithmetic and `abs` over
 a `NUMERIC` subquery are computed and declared `double precision` where
 PostgreSQL's are `numeric`: `(SELECT n …) * 2` over 2.25 is `4.5` here and
 `4.50` there.
