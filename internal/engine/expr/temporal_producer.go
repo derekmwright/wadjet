@@ -66,6 +66,25 @@ func producedTemporal(e Expr, b *batch.RecordBatch) castTemporalKindT {
 		return commonProducedTemporal(arms, b)
 	case *Coalesce:
 		return commonProducedTemporal(v.Args, b)
+	case *ScalarSubquery:
+		// The subquery's declared output type, which typedScalarAnswer boxes
+		// its answer in (#1428, #1431).
+		return declaredTemporal(v.Decl, v.DeclKnown)
+	case *CorrelatedScalarSubquery:
+		return declaredTemporal(v.Decl, v.DeclKnown)
+	}
+	return castNotTemporal
+}
+
+// declaredTemporal is the unit a DECLARED type carries on the row path.
+func declaredTemporal(t batch.TypeID, known bool) castTemporalKindT {
+	if known {
+		switch t {
+		case batch.TypeDate:
+			return castToDateKind
+		case batch.TypeTimestamp:
+			return castToTimestampKind
+		}
 	}
 	return castNotTemporal
 }

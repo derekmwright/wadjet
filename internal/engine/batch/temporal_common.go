@@ -29,6 +29,20 @@ func TemporalCommonType(a, b TypeID) (TypeID, bool) {
 	return 0, false
 }
 
+// TemporalPairType is TemporalCommonType for a COMPARISON's two operands,
+// where a same-type pair is part of the rule too: a DATE meets a DATE at DATE
+// and a TIMESTAMP a TIMESTAMP at TIMESTAMP, each box read in its own
+// declaration's unit and never by its magnitude (#1427). It is a separate
+// name because TemporalCommonType's ok=false for a same-type pair is what
+// the join-key ladder and the choice-fold refusal read as "leave this pair
+// alone".
+func TemporalPairType(a, b TypeID) (TypeID, bool) {
+	if a == b && (a == TypeDate || a == TypeTimestamp) {
+		return a, true
+	}
+	return TemporalCommonType(a, b)
+}
+
 // DateMidnightMillis is the rule's one conversion: a DATE's epoch-day count
 // as the TIMESTAMP of its midnight, in epoch milliseconds. It is exact on
 // both sides of 1970 — day -1 (1969-12-31) is -86 400 000, that day's

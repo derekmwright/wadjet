@@ -106,7 +106,51 @@ func (e *ScalarSubquery) resolveSlow() {
 	if cardErr != nil {
 		failEval(cardErr)
 	}
-	e.val = v
+	e.val = typedScalarAnswer(e.SQL, v, e.Decl, e.DeclKnown)
+}
+
+// typedScalarAnswer is the ONE place a scalar subquery's answer becomes the
+// typed operand its consumers read: the box the subquery's DECLARED type has
+// on the row path (temporal_producer.go) — for a DATE its epoch-day count and
+// for a TIMESTAMP its epoch milliseconds, the boxes ColRef.Eval hands out for
+// a column of that type. producedTemporal reads the same declaration, so a
+// CAST, extract, date_trunc, date arithmetic, the renderer and the comparison
+// kernel read the instant the subquery answered and not a number.
+//
+// Before it the runner's row box travelled as it came: a DATE as its ISO
+// text and a TIMESTAMP as a bare int64 no consumer knew the unit of —
+// `CAST((SELECT ts …) AS VARCHAR)` printed the epoch milliseconds (-1),
+// `extract(year FROM (SELECT min(ts) …))` answered -968030,
+// `(SELECT max(ts) …) + INTERVAL '1 hour'` dropped the hour (#1428, #1431),
+// and `d = (SELECT d …)` compared a day count with text through compare()'s
+// magnitude guess (#1427). Every other type's box already says what it is
+// (a DECIMAL's is read by its declaration in the kernel, #696), so only the
+// temporal boxes are rewritten. A box the declaration cannot read is an
+// internal error, raised: re-reading it by magnitude is the guess this
+// removes.
+func typedScalarAnswer(sql string, v any, decl batch.TypeID, known bool) any {
+	if v == nil || !known {
+		return v
+	}
+	switch decl {
+	case batch.TypeDate:
+		if d, ok := dateBoxDays(v); ok {
+			return d
+		}
+	case batch.TypeTimestamp:
+		switch x := v.(type) {
+		case int64:
+			return x
+		case string:
+			if ms, ok := parseTimestampToEpochMsCachedOK(x); ok {
+				return ms
+			}
+		}
+	default:
+		return v
+	}
+	panic(fatalEval{fmt.Errorf("internal: scalar subquery %q declared %s answered a %T its "+
+		"declaration does not read", sql, decl, v)})
 }
 
 // MemoryAccountant is the minimal per-task memory-budget hook InSubquery

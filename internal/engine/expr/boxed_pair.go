@@ -1057,19 +1057,25 @@ func pairApplies(lk, rk boxKind, lText, rText string) bool {
 	// A DATE against a TIMESTAMP: two domains, epoch DAYS and epoch
 	// MILLISECONDS. PostgreSQL promotes the date to its midnight; compare()
 	// read the two numbers as one unit, so `DATE '2026-01-02' > TIMESTAMP
-	// '2026-01-01 10:00:00'` answered false (arc VL round 3).
-	case (lk == boxDate && rk == boxTimestamp) || (lk == boxTimestamp && rk == boxDate):
+	// '2026-01-01 10:00:00'` answered false (arc VL round 3). And a DATE
+	// against a DATE, a TIMESTAMP against a TIMESTAMP: the same rule, the pair
+	// already at its common type. Left out, the same-type pair fell to
+	// compare(), whose magnitude guess read DATE 9999-12-31's day count
+	// (2 932 896) as milliseconds beside the same date's ISO text, and `d =
+	// (SELECT d …)` answered 0 rows (#1427).
+	case isTemporalKind(lk) && isTemporalKind(rk):
 		return true
 	}
 	return false
 }
 
-// dateTimestampOrder orders a DATE box against a TIMESTAMP box the way
-// batch.TemporalCommonType states the pair: both at TIMESTAMP, the DATE at
-// its midnight (batch.DateMidnightMillis) — PostgreSQL's date→timestamp
-// promotion. It decides nothing itself: the kinds name each side's declared
-// type, the rule names the common type, and temporalBoxAt reads each box in
-// its own declaration's unit and converts it there.
+// dateTimestampOrder orders two temporal boxes the way
+// batch.TemporalPairType states the pair: a DATE against a TIMESTAMP both at
+// TIMESTAMP, the DATE at its midnight (batch.DateMidnightMillis) —
+// PostgreSQL's date→timestamp promotion — and a same-type pair at its own
+// type. It decides nothing itself: the kinds name each side's declared type,
+// the rule names the common type, and temporalBoxAt reads each box in its own
+// declaration's unit and converts it there.
 //
 // Each side is read in EVERY spelling its declaration arrives in, because a
 // side it could not read used to fall through to compare(), whose
@@ -1084,7 +1090,7 @@ func dateTimestampOrder(lk, rk boxKind, lv, rv any) (int, bool) {
 	if !lok || !rok || lv == nil || rv == nil {
 		return 0, false
 	}
-	common, ok := batch.TemporalCommonType(lt, rt)
+	common, ok := batch.TemporalPairType(lt, rt)
 	if !ok {
 		return 0, false
 	}
@@ -1618,7 +1624,7 @@ func orderByKindsFold(lk, rk, lFold, rFold boxKind, lv, rv any, lText, rText str
 		if c, ok := temporalTextOrder(rk, rv, lv, lText); ok {
 			return -c, true, false
 		}
-	case (lk == boxDate && rk == boxTimestamp) || (lk == boxTimestamp && rk == boxDate):
+	case isTemporalKind(lk) && isTemporalKind(rk):
 		if c, ok := dateTimestampOrder(lk, rk, lv, rv); ok {
 			return c, true, false
 		}

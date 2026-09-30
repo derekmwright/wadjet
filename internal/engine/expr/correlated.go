@@ -76,7 +76,7 @@ func (e *CorrelatedScalarSubquery) Eval(b *batch.RecordBatch, row int) any {
 	if err != nil {
 		failEval(err)
 	}
-	return v
+	return typedScalarAnswer(sql, v, e.Decl, e.DeclKnown)
 }
 
 func (e *CorrelatedScalarSubquery) buildSQL(b *batch.RecordBatch, row int) (string, error) {
