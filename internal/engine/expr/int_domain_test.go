@@ -171,9 +171,8 @@ func TestIntegerDomainDeclinesWhatIsNotAnIntegerExpression(t *testing.T) {
 		{"cast_to_real", "CAST(r AS REAL) * 2", 5.0},
 		// A NON-INTEGER literal makes the pair numeric in PostgreSQL, which
 		// never refuses: `SELECT CAST(a AS BIGINT) * 2.0` answers
-		// 8000000000.0 on the server rather than raising — exact here too
-		// (IntegerCastDecimalDigits).
-		{"cast_times_a_non_integer_literal", "CAST(i AS BIGINT) * 2.0", "8000000000.0"},
+		// 8000000000 on the server rather than raising.
+		{"cast_times_a_non_integer_literal", "CAST(i AS BIGINT) * 2.0", 8000000000.0},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			got := intDomainCompile(t, c.sql).Eval(b, 0)

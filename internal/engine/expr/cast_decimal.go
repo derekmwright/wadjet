@@ -306,8 +306,8 @@ func isNonFiniteNumericText(text string) bool {
 // expression stays where it was.
 
 func (e *Cast) decimalType(b *batch.RecordBatch) (batch.DecimalType, bool) {
-	if digits, ok := IntegerCastDecimalDigits(e.DestType); ok {
-		return batch.DecimalType{Precision: digits}, true
+	if e.columnDecOK {
+		return e.columnDec, true
 	}
 	d, ok := e.decimalDestination()
 	if !ok || !d.params {
@@ -318,8 +318,8 @@ func (e *Cast) decimalType(b *batch.RecordBatch) (batch.DecimalType, bool) {
 }
 
 func (e *Cast) evalDecimal(b *batch.RecordBatch, row int) (batch.Int128, bool) {
-	if _, ok := IntegerCastDecimalDigits(e.DestType); ok {
-		// The cast's own integer, range-checked by its destination.
+	if e.columnDecOK {
+		// The outer column's own integer, range-checked by its type.
 		return castDecimalValue(e.Eval(b, row), 0)
 	}
 	d, ok := e.decimalDestination()
@@ -346,22 +346,23 @@ func (e *Cast) decimalVec(_ *batch.RecordBatch) (kernel.DecimalOperandVec, bool)
 	return kernel.DecimalOperandVec{}, false
 }
 
-// IntegerCastDecimalDigits is the fixed-point contribution of a cast to an
-// INTEGER or a BIGINT: the whole range of the type at scale 0, as an integer
-// column contributes (batch.DecimalTypeOf, ADR-0024 item 2). So
-// `x.m / CAST(3 AS INTEGER)` is exact at the scale `x.m / i` over an int4
-// column has, and not a float8 quotient: the cast names its type, and a type
-// is what the result's (p,s) is a function of. It is NOT decimal-typed
-// (castIsExactDecimal): `CAST(3 AS INTEGER) + x.v` stays integer arithmetic.
-// The planner's declaration reads the same table (decimalArithOperand).
-func IntegerCastDecimalDigits(typeName string) (int, bool) {
-	switch strings.ToLower(strings.TrimSpace(typeName)) {
-	case "int", "integer", "int4", "int32":
-		return batch.Int32DecimalDigits, true
-	case "bigint", "int8", "int64":
-		return batch.Int64DecimalDigits, true
+// columnIntegerDecimal is the fixed-point contribution of a correlated
+// re-run's INTEGER or BIGINT outer value (Cast.Column): the whole range of the
+// column's type at scale 0, exactly as that column contributes
+// (vectorDecimalType). A cast the user wrote is an expression, not a column,
+// and keeps its own rule — an integer cast is not a fixed-point operand.
+func columnIntegerDecimal(typeName string) (batch.DecimalType, bool) {
+	col, ok := ColumnOfCastName(typeName)
+	if !ok {
+		return batch.DecimalType{}, false
 	}
-	return 0, false
+	switch col.Type {
+	case parquet.TypeInt32:
+		return batch.DecimalType{Precision: batch.Int32DecimalDigits}, true
+	case parquet.TypeInt64:
+		return batch.DecimalType{Precision: batch.Int64DecimalDigits}, true
+	}
+	return batch.DecimalType{}, false
 }
 
 // castIsExactDecimal reports whether this cast produces a DECIMAL at a type it

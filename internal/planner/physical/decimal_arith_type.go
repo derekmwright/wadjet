@@ -158,13 +158,6 @@ func decimalArithOperand(node plansql.Node, decls ColDecls) (batch.DecimalType, 
 		if ref, d, ok := columnValueRef(n); ok {
 			return decimalArithOperand(ref, d)
 		}
-		//
-		// A cast to INTEGER or BIGINT contributes its type's whole range at
-		// scale 0, as a column of that type does — the runtime reads the same
-		// table (expr.IntegerCastDecimalDigits).
-		if digits, ok := expr.IntegerCastDecimalDigits(n.TypeName); ok {
-			return batch.DecimalType{Precision: digits}, false, true
-		}
 		p, s, hasParams, ok := expr.DecimalCastDest(n.TypeName)
 		if !ok || !hasParams {
 			return batch.DecimalType{}, false, false

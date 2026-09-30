@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/engine/expr"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
@@ -339,16 +338,8 @@ func subqueryAnswerIsInt4(plan *logical.Node, name string) bool {
 	if proj == nil || proj.IsAgg || proj.ASTExpr == nil || isSimpleColRefForRename(proj.ASTExpr) {
 		return false
 	}
-	switch e := plansql.Unparen(proj.ASTExpr).(type) {
+	switch plansql.Unparen(proj.ASTExpr).(type) {
 	case *plansql.BinaryOp, *plansql.UnaryOp:
-	case *plansql.CastNode:
-		// A cast to INTEGER — an outer int4 column's stand-in
-		// (`(SELECT o.i …)`) or the user's own spelling — is int4 and its
-		// value is range-checked by the cast. SMALLINT is not narrowed: it
-		// has no carrier of its own (numeric-decimal#r2).
-		if d, ok := expr.IntegerCastDecimalDigits(e.TypeName); !ok || d != batch.Int32DecimalDigits {
-			return false
-		}
 	default:
 		return false
 	}

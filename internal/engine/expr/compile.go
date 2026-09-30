@@ -686,8 +686,12 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 		if err != nil {
 			return nil, err
 		}
-		return &Cast{Operand: operand, DestType: strings.ToLower(n.TypeName),
-			opDecl: newOperandDecl(n.Inner, ctx)}, nil
+		c := &Cast{Operand: operand, DestType: strings.ToLower(n.TypeName),
+			opDecl: newOperandDecl(n.Inner, ctx), Column: n.Column}
+		if n.Column {
+			c.columnDec, c.columnDecOK = columnIntegerDecimal(n.TypeName)
+		}
+		return c, nil
 
 	case *plansql.SubqueryNode:
 		// Scalar subquery: (SELECT ...)

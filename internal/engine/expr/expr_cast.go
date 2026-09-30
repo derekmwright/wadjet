@@ -37,6 +37,14 @@ type Cast struct {
 	// planner's walk gives it, never under what its box looks like (arc CW
 	// round 3). Nil for a Cast built outside the compiler.
 	opDecl *operandDecl
+	// Column marks a correlated re-run's outer value (plansql.CastNode.Column):
+	// the value of an outer column of DestType, which contributes to
+	// fixed-point arithmetic as that column does. columnDec is that
+	// contribution for an INTEGER or BIGINT column, resolved once at compile
+	// (columnIntegerDecimal); columnDecOK is false for any other.
+	Column      bool
+	columnDec   batch.DecimalType
+	columnDecOK bool
 }
 
 // operandShape is the operand's declared shape against b (operand_decl.go).
