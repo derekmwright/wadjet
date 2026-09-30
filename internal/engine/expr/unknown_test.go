@@ -143,7 +143,7 @@ func TestIssueFunctionValues(t *testing.T) {
 		t.Errorf("date_part year: got %v want 1996", got)
 	}
 	// ascii('ALGERIA') → 65.
-	if got := fnASCII([]any{"ALGERIA"}); got != 65.0 {
+	if got := fnASCII([]any{"ALGERIA"}); got != int32(65) {
 		t.Errorf("ascii: got %v want 65", got)
 	}
 	// ceiling(901.0) → 901, and it must round UP, not truncate.
@@ -155,10 +155,10 @@ func TestIssueFunctionValues(t *testing.T) {
 	}
 	// ascii of a multi-byte leading character is its code point, not its
 	// first byte: PostgreSQL answers 233 for 'é', never 195.
-	if got := fnASCII([]any{"é"}); got != 233.0 {
+	if got := fnASCII([]any{"é"}); got != int32(233) {
 		t.Errorf("ascii(é): got %v want 233", got)
 	}
-	if got := fnASCII([]any{""}); got != 0.0 {
+	if got := fnASCII([]any{""}); got != int32(0) {
 		t.Errorf("ascii(empty): got %v want 0", got)
 	}
 }

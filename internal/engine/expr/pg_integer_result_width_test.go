@@ -119,6 +119,7 @@ func TestThePostgresResultWidthTableMatchesTheMeasuredTranscript(t *testing.T) {
 		{fn: "array_length", want: PGIntWidth4},
 		{fn: "cardinality", want: PGIntWidth4},
 		{fn: "width_bucket", want: PGIntWidth4},
+		{fn: "ascii", want: PGIntWidth4},
 		{fn: "codepoint", want: PGIntWidth4},
 		{fn: "regexp_count", want: PGIntWidth4},
 		{fn: "prefix_length", want: PGIntWidth4},

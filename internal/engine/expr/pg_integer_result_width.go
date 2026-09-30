@@ -128,6 +128,7 @@ var pgIntegerResultWidths = map[string]PGIntegerResult{
 	"cardinality":      {Width: PGIntWidth4},
 	"width_bucket":     {Width: PGIntWidth4},
 	// codepoint is ascii(): a code point is 0..0x10FFFF.
+	"ascii":        {Width: PGIntWidth4},
 	"codepoint":    {Width: PGIntWidth4},
 	"regexp_count": {Width: PGIntWidth4},
 	// get_byte is one BYTE as a number, 0..255. `pg_typeof(get_byte('hi'::bytea,0))`

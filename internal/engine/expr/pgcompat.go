@@ -85,7 +85,7 @@ func init() {
 		"ceiling":   {fnCeil, RetFloat64},
 		"trunc":     {fnTruncate, RetFloat64},
 		"strlen":    {fnLength, RetFloat64},
-		"ascii":     {fnASCII, RetFloat64},
+		"ascii":     {fnASCII, RetInt32},
 	}
 	for name, b := range pgBuiltins {
 		DefaultRegistry.Register(name, b.fn, b.ret)
@@ -258,13 +258,10 @@ func fnASCII(args []any) any {
 		return nil
 	}
 	s := toString(args[0])
-	if s == "" {
-		return float64(0)
-	}
 	for _, r := range s {
-		return float64(r)
+		return int32(r)
 	}
-	return float64(0)
+	return int32(0)
 }
 
 // QuoteIdent is quote_ident(): an identifier that would not survive as
