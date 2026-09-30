@@ -38,15 +38,38 @@ func (p *Planner) annotateSubqueryColumnDecls(node *logical.Node) {
 		return
 	}
 	decls := map[string]logical.SubqueryColumnDecl{}
-	for _, sql := range collectPlanSubquerySQL(node) {
-		if _, done := decls[sql]; done {
+	respelled := map[string]bool{}
+	for _, sq := range collectPlanSubqueries(node) {
+		declSQL := p.subqueryDeclSQLIn(sq.sql, sq.scope)
+		// One text can be met twice: `SUM((SELECT c.i …))` is written in the
+		// Project ABOVE the aggregate, whose input has no `c.i`, and again as
+		// the aggregate's argument, over the relation that does. The reading
+		// that could type the outer references wins.
+		if _, done := decls[sq.sql]; done && (respelled[sq.sql] || declSQL == sq.sql) {
 			continue
 		}
-		d, ok := p.scalarSubqueryColumnDecl(sql)
+		// A CORRELATED subquery is declared with its outer references typed
+		// as the columns of the relation it sits over — the compile site's
+		// own reading (subqueryDeclOptionFor), so the vector a projection
+		// allocates and the operand the kernels classify are one type
+		// (#1422). The stamp stays keyed by the text as written.
+		d, ok := p.scalarSubqueryColumnDecl(declSQL)
 		if !ok {
 			continue
 		}
-		decls[sql] = d
+		// PostgreSQL's numeric CATEGORY is read off the text AS WRITTEN
+		// wherever that text can answer it: the rebuild spells a construct
+		// by the function it evaluates — EXTRACT(EPOCH FROM …) as epoch(…),
+		// a float — and the category is the SQL type the user's spelling
+		// has (numeric), which an INTEGER assignment rounds by (#1353). The
+		// respelled text answers only what the written one cannot.
+		if declSQL != sq.sql {
+			if cat := p.subqueryOutputPGCategory(sq.sql); cat != pgCatUnknown {
+				d.PGCategory = cat
+			}
+		}
+		decls[sq.sql] = d
+		respelled[sq.sql] = declSQL != sq.sql
 	}
 	if len(decls) == 0 {
 		return
@@ -64,28 +87,37 @@ func shareSubqueryColDecls(n *logical.Node, decls map[string]logical.SubqueryCol
 	}
 }
 
-// collectPlanSubquerySQL is every scalar subquery written anywhere in a plan's
+// collectPlanSubqueries is every scalar subquery written anywhere in a plan's
 // expressions. A subquery BURIED in arithmetic counts as much as one that is a
 // whole SELECT item: the arithmetic rule types itself from its operands, and an
 // operand nobody declared is what sends the whole expression to the float rule.
-func collectPlanSubquerySQL(n *logical.Node) []string {
-	var out []string
+//
+// Each comes with its SCOPE — the one input of the node whose expression
+// holds it, which is the relation a correlated subquery's outer references
+// read — or nil where the node has no single input.
+func collectPlanSubqueries(n *logical.Node) []planSubquery {
+	var out []planSubquery
 	var walk func(*logical.Node)
-	add := func(e plansql.Node) {
-		collectSubquerySQL(e, &out)
-	}
 	walk = func(n *logical.Node) {
 		if n == nil {
 			return
 		}
+		var scope *logical.Node
+		if len(n.Children) == 1 {
+			scope = n.Children[0]
+		}
+		var texts []string
 		for _, proj := range n.Projections {
-			add(proj.ASTExpr)
+			collectSubquerySQL(proj.ASTExpr, &texts)
 		}
 		for _, agg := range n.AggExprs {
-			add(agg.InputExpr)
+			collectSubquerySQL(agg.InputExpr, &texts)
 		}
 		for _, we := range n.WindowExprs {
-			add(we.InputExpr)
+			collectSubquerySQL(we.InputExpr, &texts)
+		}
+		for _, sql := range texts {
+			out = append(out, planSubquery{sql: sql, scope: scope})
 		}
 		for _, c := range n.Children {
 			walk(c)
@@ -93,6 +125,12 @@ func collectPlanSubquerySQL(n *logical.Node) []string {
 	}
 	walk(n)
 	return out
+}
+
+// planSubquery is one scalar subquery text and the relation it sits over.
+type planSubquery struct {
+	sql   string
+	scope *logical.Node
 }
 
 // collectSubquerySQL descends an expression for SubqueryNode texts. It is the

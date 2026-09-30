@@ -113,14 +113,9 @@ func TestASubqueryReadsTheRowItIsCorrelatedOnOnTheWire(t *testing.T) {
 		// #1044 silent.
 		{name: "boundary_a_false_where_is_null",
 			sql:  `SELECT (SELECT u.id WHERE 1=0) AS v FROM users u ORDER BY 1`,
-			oids: []uint32{23}, text: `<null>|<null>|<null>`,
-			pinOIDs: []uint32{25},
-			pinWhy: "a WHERE clause keeps this a subquery (#1044's boundary), and a " +
-				"subquery whose body names only the OUTER query cannot be planned " +
-				"standalone, so its declaration falls to the TEXT fallback. The VALUE " +
-				"is right on every arm; only the OID diverges, as it did before #1044. " +
-				"Closing it needs the declaration walk to type a subquery against the " +
-				"enclosing scope"},
+			// integer (23) since arc SS: the subquery is declared with its
+			// outer reference typed as the enclosing column (#1422).
+			oids: []uint32{23}, text: `<null>|<null>|<null>`},
 		{name: "boundary_two_columns_is_refused",
 			sql:     `SELECT (SELECT u.id, u.visits) AS v FROM users u`,
 			wantErr: `only one column`},

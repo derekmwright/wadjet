@@ -498,14 +498,11 @@ func c2Cells() []c2Cell {
 		{name: "59_the_aggregate_ARGUMENT_spelling_is_the_residual",
 			sql: `SELECT SUM((SELECT u.x FROM c2users y WHERE y.id = 1)) AS v ` +
 				`FROM (SELECT id AS x FROM c2users) u`,
-			want: `v | 6`,
-			pin:  `v | NULL`,
-			pinWhy: "the AGGREGATE-ARGUMENT compile site resolves its outer scope from the " +
-				"scan aliases below it (physical.collectTableAliases), which do not carry a " +
-				"DERIVED TABLE's alias, so this subquery is planned UNCORRELATED and the " +
-				"qualifier strip finds no `x` — ADR-0021 §1c's named gap, unchanged by this " +
-				"arc and identical at bf99c56c. The same subquery one position out, in the " +
-				"SELECT list, is cell 55",
+			// PostgreSQL's 6 since arc SS (#1422): the aggregate argument is
+			// declared from the subquery with its outer reference typed as
+			// the derived table's column, where it was declared text and
+			// summed to NULL.
+			want:   `v | 6`,
 			routes: a2Routes{Correlated: 1}},
 
 		// --- an aggregate belongs to the level of the deepest variable in

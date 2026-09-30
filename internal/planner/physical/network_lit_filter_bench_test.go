@@ -41,7 +41,7 @@ func BenchmarkIPv4LiteralFilterPushdown(b *testing.B) {
 		b.Fatal(err)
 	}
 	p := &Planner{}
-	op, err := p.buildFilterOp(logical.Predicate{ASTExpr: node}, nil, nil)
+	op, err := p.buildFilterOp(logical.Predicate{ASTExpr: node}, nil, nil, nil)
 	if err != nil {
 		b.Fatal(err)
 	}

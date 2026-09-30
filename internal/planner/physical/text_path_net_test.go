@@ -40,7 +40,7 @@ func TestTheTextPathReadsOnlyAColumnAgainstConstants(t *testing.T) {
 		if !rawTextPathReads(raw) {
 			t.Errorf("%q: the text path reads this shape, but the net refuses it", raw)
 		}
-		op, err := (&Planner{}).buildFilterOp(logical.Predicate{Raw: raw}, nil, nil)
+		op, err := (&Planner{}).buildFilterOp(logical.Predicate{Raw: raw}, nil, nil, nil)
 		if err != nil || op == nil {
 			t.Errorf("%q: want a text-path filter, got %v / %v", raw, op, err)
 		}
@@ -49,7 +49,7 @@ func TestTheTextPathReadsOnlyAColumnAgainstConstants(t *testing.T) {
 		if rawTextPathReads(raw) {
 			t.Errorf("%q: the text path would read this as a column against a literal", raw)
 		}
-		if _, err := (&Planner{}).buildFilterOp(logical.Predicate{Raw: raw}, nil, nil); err == nil {
+		if _, err := (&Planner{}).buildFilterOp(logical.Predicate{Raw: raw}, nil, nil, nil); err == nil {
 			t.Errorf("%q: planned through the text path; want a refusal", raw)
 		}
 	}

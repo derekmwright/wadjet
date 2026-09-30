@@ -10,6 +10,7 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // Correlated reruns substitute typed literals that this parser reads back
@@ -218,4 +219,127 @@ func (e *UnrenderableOuterValueError) FatalEvalError() error { return e }
 
 func unrenderableOuterValue(t batch.TypeID, _ any) error {
 	return &UnrenderableOuterValueError{Type: t}
+}
+
+// OuterDeclFunc answers the declared column an outer reference reads.
+type OuterDeclFunc func(ref plansql.OuterRef) (parquet.Column, bool)
+
+// OuterTypedSubquerySQL is a correlated subquery's text with every OUTER
+// reference spelled as a NULL of the outer column's DECLARED type —
+// `CAST(null AS double precision)` for a DOUBLE column — for the planner to
+// DECLARE the subquery from. It is the per-row re-run's spelling
+// (outerLiteral) with the value left out: the re-run substitutes a typed
+// literal, so the text the subquery is declared from must type its outer
+// operands the same way, or the declaration and the value describe two
+// different expressions. Planned with its outer names left in, `(SELECT c.f
+// + x.v …)` resolved `c.f` to nothing and the sum was declared by the
+// operand it could read — INT32 — so 6.5 was written into an integer vector
+// as 6 (#1422).
+//
+// ok=false — declare from sql as written — when the text has no outer
+// reference, when a reference's declaration is unknown, or when its type has
+// no exact cast spelling here (outerCastName).
+func OuterTypedSubquerySQL(sql string, outerTables map[string]bool, outerCols map[string]string,
+	innerCols plansql.TableColumns, outerDecl OuterDeclFunc) (string, bool) {
+	if outerDecl == nil || len(outerTables) == 0 {
+		return "", false
+	}
+	var refs []plansql.OuterRef
+	var err error
+	if len(outerCols) > 0 {
+		refs, err = plansql.FindCorrelatedRefsWithScope(sql, outerTables, outerCols, innerCols)
+	} else {
+		refs, err = plansql.FindCorrelatedRefs(sql, outerTables)
+	}
+	if err != nil || len(refs) == 0 {
+		return "", false
+	}
+	parsed, err := plansql.Parse(sql)
+	if err != nil {
+		return "", false
+	}
+	info, err := plansql.ExtractSelect(parsed)
+	if err != nil {
+		return "", false
+	}
+	return outerTypedSQL(info, refs, outerTables, buildUnqualOuterCols(refs, outerCols), outerDecl)
+}
+
+// outerTypedSQL is OuterTypedSubquerySQL over an already-parsed subquery,
+// substituted exactly as rerunSQL substitutes the per-row values.
+func outerTypedSQL(info *plansql.SelectInfo, refs []plansql.OuterRef, outerTables map[string]bool,
+	unqual map[string]string, outerDecl OuterDeclFunc) (string, bool) {
+	if info == nil || outerDecl == nil || len(refs) == 0 {
+		return "", false
+	}
+	vals := make(map[string]any, len(refs))
+	for _, ref := range refs {
+		col, ok := outerDecl(ref)
+		if !ok {
+			return "", false
+		}
+		stand, ok := outerStandIn(col)
+		if !ok {
+			return "", false
+		}
+		vals[ref.Table+"."+ref.Column] = stand
+	}
+	rewrite := func(n plansql.Node) plansql.Node {
+		out := plansql.RewriteOuterRefs(n, outerTables, vals)
+		if len(unqual) > 0 {
+			out = plansql.RewriteUnqualifiedOuterRefs(out, unqual, vals)
+		}
+		return out
+	}
+	return plansql.RebuildSQLForRerun(info, rewrite)
+}
+
+// outerStandIn is the value-free twin of outerLiteral's spelling for a column
+// of this declared type, so the subquery is declared from the expression the
+// re-run evaluates: an integer is a bare integer literal there — and a
+// literal meets a DECIMAL at DECIMAL where a cast integer meets it at float8,
+// so a cast here declared `o.i + x.m` float8 over the re-run's exact sum — a
+// boolean its bare literal, an ARRAY a cast to its element's array type, and
+// every other type a CAST to the name the re-run casts to. ok=false for a type the re-run has no spelling for, or
+// that this does not name (the declaration is then made from the text as
+// written).
+func outerStandIn(col parquet.Column) (plansql.Node, bool) {
+	cast := func(name string) plansql.Node {
+		return &plansql.CastNode{Inner: &plansql.Lit{Value: "null", Kind: plansql.LitNull}, TypeName: name}
+	}
+	switch col.Type {
+	case batch.TypeBool:
+		return &plansql.Lit{Value: "false", Kind: plansql.LitBool}, true
+	case batch.TypeInt32:
+		// The WIDEST value of the type, so everything the declaration derives
+		// from the literal holds every row's: its integer width, and the
+		// precision a DECIMAL sum takes from its digit count.
+		return &plansql.Lit{Value: "2147483647", Kind: plansql.LitNumber}, true
+	case batch.TypeInt64:
+		// A BIGINT outer value can be any int8, and a stand-in the literal
+		// rule types integer declared a vector 9000000000 does not fit.
+		return &plansql.Lit{Value: "9223372036854775807", Kind: plansql.LitNumber}, true
+	case batch.TypeFloat64:
+		return cast("double precision"), true
+	case batch.TypeFloat32:
+		return cast("real"), true
+	case batch.TypeDecimal:
+		return cast(fmt.Sprintf("decimal(38, %d)", col.Scale)), true
+	case batch.TypeString:
+		return cast("text"), true
+	case batch.TypeDate:
+		return cast("date"), true
+	case batch.TypeTimestamp:
+		return cast("timestamp"), true
+	case batch.TypeUUID:
+		return cast("uuid"), true
+	case batch.TypeArray:
+		// One dimension of a scalar element: ArrayValueLiteral's own cast.
+		if col.ElementType != nil && col.ElementType.Type != batch.TypeArray {
+			if el, ok := arrayElementCastName(col.ElementType); ok {
+				return cast(el + "[]"), true
+			}
+		}
+	}
+	return nil, false
 }

@@ -90,6 +90,82 @@ func (p *Planner) subqueryDeclOption() expr.CompileOption {
 		expr.WithEnclosingCTEs(names))
 }
 
+// subqueryDeclOptionFor is subqueryDeclOption for a compile site whose outer
+// scope is the relation scope reads: a correlated scalar subquery there is
+// declared with its outer references typed as scope's columns
+// (expr.OuterTypedSubquerySQL, #1422).
+func (p *Planner) subqueryDeclOptionFor(scope *logical.Node) expr.CompileOption {
+	return expr.Options(p.subqueryDeclOption(), expr.WithSubqueryDeclTypes(p.subqueryOutputColumnIn(scope)))
+}
+
+// subqueryOutputColumnIn is SubqueryOutputColumn for a subquery that sits over
+// scope: the one resolver the compile sites, the projection builder and the
+// plan stamp (annotateSubqueryColumnDecls) declare a scalar subquery with.
+func (p *Planner) subqueryOutputColumnIn(scope *logical.Node) func(string) (parquet.Column, bool) {
+	return func(sql string) (parquet.Column, bool) {
+		return p.SubqueryOutputColumn(p.subqueryDeclSQLIn(sql, scope))
+	}
+}
+
+// subqueryDeclSQLIn is the text a scalar subquery over scope is DECLARED from:
+// a correlated one with its outer references spelled as typed NULLs of the
+// columns scope emits (expr.OuterTypedSubquerySQL) — the per-row re-run's own
+// typing — and any other as written. Planned with the outer names left in,
+// the declaration typed an outer operand as nothing: `(SELECT c.f + x.v …)`
+// was declared by the operand it could read (#1422), and `(SELECT c.ts …)`
+// as text.
+func (p *Planner) subqueryDeclSQLIn(sql string, scope *logical.Node) string {
+	if scope == nil {
+		return sql
+	}
+	if typed, ok := expr.OuterTypedSubquerySQL(sql, collectTableAliases(scope),
+		collectOuterColumns(scope), p.SubqueryInnerColumns(), outerDeclsOf(scope)); ok {
+		return typed
+	}
+	return sql
+}
+
+// outerDeclsOf answers an outer reference's declared column from the columns
+// scope EMITS, looked up by the names readOuterValues reads the value under at
+// run time — `t.c`, `t_c`, then the bare `c` — so the declaration and the
+// value come from one column. A DECIMAL whose (p,s) the walk cannot state is
+// not a declaration (ADR-0024 item 2).
+func outerDeclsOf(scope *logical.Node) expr.OuterDeclFunc {
+	if scope == nil {
+		return nil
+	}
+	decls := emittedColDecls(scope)
+	if len(decls.Types) == 0 {
+		return nil
+	}
+	return func(ref plansql.OuterRef) (parquet.Column, bool) {
+		for _, name := range []string{ref.Table + "." + ref.Column, ref.Table + "_" + ref.Column, ref.Column} {
+			name = strings.ToLower(name)
+			t, ok := decls.Types[name]
+			if !ok {
+				continue
+			}
+			col := parquet.Column{Name: ref.Column, Type: t}
+			switch t {
+			case parquet.TypeDecimal:
+				m, ok := decls.Dec[name]
+				if !ok || m.Precision <= 0 {
+					return parquet.Column{}, false
+				}
+				col.Precision, col.Scale = m.Precision, m.Scale
+			case parquet.TypeArray:
+				e, ok := decls.Elems[name]
+				if !ok || e.ElementType == nil {
+					return parquet.Column{}, false
+				}
+				col.ElementType = e.ElementType
+			}
+			return col, true
+		}
+		return parquet.Column{}, false
+	}
+}
+
 // SubqueryOutputArity is how many columns a subquery's SELECT list has, from
 // the subquery's OWN PLAN.
 //

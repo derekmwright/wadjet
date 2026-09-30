@@ -58,7 +58,7 @@ func (p *Planner) buildFilter(ctx context.Context, node *logical.Node) (exec.Sou
 	}
 
 	for _, pred := range preds {
-		filter, err := p.buildFilterOp(pred, outerTables, outerCols)
+		filter, err := p.buildFilterOp(pred, node.Children[0], outerTables, outerCols)
 		if err != nil {
 			return nil, nil, nil, err
 		}
@@ -187,11 +187,13 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 	childColTypes := emittedColDecls(child)
 	// A SELECT-list scalar subquery types against its OWN plan, not against
 	// this projection's input columns (#874).
-	childColTypes.subqueryDecl = p.SubqueryOutputColumn
+	// A CORRELATED one types its outer references as child's columns
+	// (subqueryOutputColumnIn, #1422).
+	childColTypes.subqueryDecl = p.subqueryOutputColumnIn(child)
 	var aggInputColTypes ColDecls
 	if isOverAggregate && len(aggNode.Children) > 0 {
 		aggInputColTypes = inputColDecls(aggNode.Children[0])
-		aggInputColTypes.subqueryDecl = p.SubqueryOutputColumn
+		aggInputColTypes.subqueryDecl = p.subqueryOutputColumnIn(aggNode.Children[0])
 
 	}
 
@@ -361,9 +363,9 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 			var compErr error
 			if len(outerTables) > 0 {
 				if len(outerCols) > 0 {
-					compiled, compErr = expr.CompileWithScopeResolver(astExpr, p.subqueryRunner, outerTables, outerCols, p.SubqueryInnerColumns(), p.subqueryDeclOption(), p.subqueryBudgetOption(), p.catalogOption())
+					compiled, compErr = expr.CompileWithScopeResolver(astExpr, p.subqueryRunner, outerTables, outerCols, p.SubqueryInnerColumns(), p.subqueryDeclOptionFor(child), p.subqueryBudgetOption(), p.catalogOption())
 				} else {
-					compiled, compErr = expr.CompileWithScope(astExpr, p.subqueryRunner, outerTables, p.subqueryDeclOption(), p.subqueryBudgetOption(), p.catalogOption())
+					compiled, compErr = expr.CompileWithScope(astExpr, p.subqueryRunner, outerTables, p.subqueryDeclOptionFor(child), p.subqueryBudgetOption(), p.catalogOption())
 				}
 			} else {
 				// With the child's DECLARED column types in hand, so a pair

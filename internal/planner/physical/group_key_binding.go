@@ -144,14 +144,18 @@ func derivedGroupKeyDecl(key string, node plansql.Node, child *logical.Node) exp
 		}
 	}
 	// The scope that can NAME the key's columns is the one that types it.
+	// A SCALAR SUBQUERY key is typed by its own declaration, the stamp every
+	// other reader of one takes (withSubqueryDecls): without it `GROUP BY
+	// (SELECT i FROM …)` published its key as TEXT where the SELECT list, and
+	// PostgreSQL, declare the subquery's integer.
 	if decls, scope, ok := namingScopeDecls(typed, child); ok {
 		return inferProjectionDeclType(typed, parquet.TypeString,
-			strictIntArithCols(scope), decls)
+			strictIntArithCols(scope), withSubqueryDecls(decls, child))
 	}
 	// No level of the chain names them: keep the answer this had before, which
 	// is the float rule over the aggregate's input decls.
 	return inferProjectionDeclType(node, parquet.TypeString,
-		strictIntArithCols(child), inputColDecls(child))
+		strictIntArithCols(child), withSubqueryDecls(inputColDecls(child), child))
 }
 
 // namingScopeDecls finds the first emitted scope covering EVERY reference in

@@ -21,7 +21,7 @@ type recordBatch = batch.RecordBatch
 // subquery options. A classified compile refusal is returned unchanged;
 // other compile failures may use the vectorized or raw-expression fallbacks.
 // A refusal must never become an omitted filter (ADR-0021).
-func (p *Planner) buildFilterOp(pred logical.Predicate, outerTables map[string]bool, outerCols map[string]string) (exec.UnaryOperator, error) {
+func (p *Planner) buildFilterOp(pred logical.Predicate, scope *logical.Node, outerTables map[string]bool, outerCols map[string]string) (exec.UnaryOperator, error) {
 	// A CONSTANT predicate that arrived as text alone (`WHERE 1=1`, `WHERE
 	// true`, `WHERE 3 > 2` in a LATERAL body over no table) is compiled like
 	// any other: the text path reads it as a column called `1` (loud) or
@@ -40,9 +40,9 @@ func (p *Planner) buildFilterOp(pred logical.Predicate, outerTables map[string]b
 		var err error
 		if len(outerTables) > 0 {
 			if len(outerCols) > 0 {
-				compiled, err = expr.CompileWithScopeResolver(pred.ASTExpr, p.subqueryRunner, outerTables, outerCols, p.SubqueryInnerColumns(), p.subqueryDeclOption(), p.subqueryBudgetOption(), p.catalogOption())
+				compiled, err = expr.CompileWithScopeResolver(pred.ASTExpr, p.subqueryRunner, outerTables, outerCols, p.SubqueryInnerColumns(), p.subqueryDeclOptionFor(scope), p.subqueryBudgetOption(), p.catalogOption())
 			} else {
-				compiled, err = expr.CompileWithScope(pred.ASTExpr, p.subqueryRunner, outerTables, p.subqueryDeclOption(), p.subqueryBudgetOption(), p.catalogOption())
+				compiled, err = expr.CompileWithScope(pred.ASTExpr, p.subqueryRunner, outerTables, p.subqueryDeclOptionFor(scope), p.subqueryBudgetOption(), p.catalogOption())
 			}
 		} else {
 			compiled, err = expr.CompileWithRunner(pred.ASTExpr, p.subqueryRunner, p.subqueryDeclOption(), p.subqueryBudgetOption(), p.catalogOption())

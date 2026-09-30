@@ -103,7 +103,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 			if len(aggOuterTables) > 0 {
 				compiled, compErr = expr.CompileWithScopeResolver(agg.InputExpr, p.subqueryRunner,
 					aggOuterTables, aggOuterCols, p.SubqueryInnerColumns(),
-					p.subqueryDeclOption(), p.subqueryBudgetOption(), p.catalogOption())
+					p.subqueryDeclOptionFor(node.Children[0]), p.subqueryBudgetOption(), p.catalogOption())
 			} else {
 				compiled, compErr = expr.CompileWithRunner(agg.InputExpr, p.subqueryRunner,
 					p.subqueryDeclOption(), p.subqueryBudgetOption(), p.catalogOption())

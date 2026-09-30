@@ -907,9 +907,21 @@ func declaredProjectionDecl(proj logical.Projection, decls ColDecls, strictInt m
 		// projection then allocated a float vector for a DECIMAL value and
 		// #361's silent-write guard failed the task after three attempts
 		// (#949).
+		//
+		// The name must be the expression's WHOLE text. namedDecl also
+		// answers a qualified name by its bare suffix (`x.g` → `g`), and
+		// an expression's text is not a qualified name: `x.g + x.v` ended
+		// in `.v`, so the DOUBLE sum was declared INT32 — the vector a
+		// scalar subquery's answer is written into (`(SELECT x.g + x.v …)`
+		// and the correlated `(SELECT c.f + x.v …)`, whose outer value
+		// re-runs as a CAST: 6 for 6.5, #1422) and the zero-row
+		// RowDescription alike, while the operands in the other order
+		// were right.
 		if name := strings.TrimSpace(proj.Expr); name != "" {
-			if d, ok := decls.namedDecl(name); ok {
-				return d
+			if _, whole := decls.Types[strings.ToLower(name)]; whole {
+				if d, ok := decls.namedDecl(name); ok {
+					return d
+				}
 			}
 		}
 		return inferProjectionDeclType(proj.ASTExpr, parquet.TypeString, strictInt, decls)
