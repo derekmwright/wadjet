@@ -137,6 +137,16 @@ func typedScalarAnswer(sql string, v any, decl batch.TypeID, known bool) any {
 		if d, ok := dateBoxDays(v); ok {
 			return d
 		}
+		// The runner renders a DATE with the stored-value writer
+		// (parquet.FormatDateDays), whose year past 9999 has five digits —
+		// a spelling the literal accept-set declines. The stored-value
+		// parser is that writer's own inverse, so `(SELECT d + 1 …)` over
+		// 9999-12-31 reads 10000-01-01 back.
+		if s, ok := v.(string); ok {
+			if d, err := parquet.ParseDateDays(s); err == nil {
+				return int64(d)
+			}
+		}
 	case batch.TypeTimestamp:
 		switch x := v.(type) {
 		case int64:
