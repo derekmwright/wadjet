@@ -105,3 +105,19 @@ func constantArg(e plansql.Node) bool {
 	}
 	return false
 }
+
+// The window functions' integer argument (plansql.WindowIntegerArgument)
+// folds a constant expression with this same fold.
+func init() {
+	plansql.SetConstantFolder(func(n plansql.Node) (any, bool, error) {
+		if !constantArg(n) {
+			return nil, false, nil
+		}
+		c, err := expr.Compile(n)
+		if err != nil {
+			return nil, true, err
+		}
+		v, err := evalConstant(c)
+		return v, true, err
+	})
+}

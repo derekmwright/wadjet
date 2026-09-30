@@ -24,6 +24,14 @@ import (
 // `LAG(x, NULL)` and `NTILE(o)` all ran with the zero value, which the
 // operator then read as the default (#1399's mechanism).
 //
+// Any other CONSTANT expression — `2 - 1`, `abs(-1)`, `CAST(1 + 0 AS
+// INTEGER)` — is folded at plan time by the planner's constant fold (the one
+// table-function arguments use, installed by package logical: this package
+// cannot import the expression compiler), and its value read as an integer
+// argument. What is refused 0A000 is only an argument that needs a ROW — a
+// column reference, a subquery: PostgreSQL evaluates it per row, and the
+// operator takes the offset / n as one constant.
+//
 // fn is the function's lower-case name, for the messages.
 func WindowIntegerArgument(fn string, n Node) (v int64, isNull bool, err error) {
 	switch e := n.(type) {
@@ -88,9 +96,105 @@ func WindowIntegerArgument(fn string, n Node) (v int64, isNull bool, err error) 
 				"function %s with a %s argument does not exist: the argument is an integer", fn, t)
 		}
 	}
-	return 0, false, sqlerr.New("0A000",
-		"the integer argument of %s must be a constant here: %s is not supported "+
-			"(PostgreSQL evaluates it per row; write an integer literal)", fn, n.String())
+	return foldWindowIntegerArgument(fn, n)
+}
+
+// constantFolder is the planner's constant fold (package logical installs it
+// with SetConstantFolder): constant reports whether n reads no row, and v is
+// its value when it does not.
+var constantFolder func(n Node) (v any, constant bool, err error)
+
+// SetConstantFolder installs the planner's constant fold for
+// WindowIntegerArgument. Package logical calls it once, at init.
+func SetConstantFolder(f func(n Node) (v any, constant bool, err error)) { constantFolder = f }
+
+// foldWindowIntegerArgument reads a constant EXPRESSION as the integer
+// argument, typed as PostgreSQL types it: a number literal inside it that is
+// past int4 or has a fraction makes the expression a bigint / numeric, which
+// no window function takes (42883, `LAG(x, 2147483648 - 1)`), and an int4
+// result past int4 is PostgreSQL's integer overflow (22003,
+// `LAG(x, 2147483647 + 1)`).
+func foldWindowIntegerArgument(fn string, n Node) (int64, bool, error) {
+	var v any
+	constant := false
+	var err error
+	if constantFolder != nil {
+		v, constant, err = constantFolder(n)
+	}
+	if !constant {
+		return 0, false, sqlerr.New("0A000",
+			"the integer argument of %s must be a constant here: %s is not supported "+
+				"(PostgreSQL evaluates it per row; write a constant)", fn, n.String())
+	}
+	if err := windowArgumentOperands(fn, n); err != nil {
+		return 0, false, err
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	var i int64
+	switch x := v.(type) {
+	case nil:
+		return 0, true, nil
+	case int64:
+		i = x
+	case int32:
+		i = int64(x)
+	case int16:
+		i = int64(x)
+	case int8:
+		i = int64(x)
+	default:
+		argType := "numeric"
+		switch v.(type) {
+		case string:
+			argType = "text"
+		case bool:
+			argType = "boolean"
+		}
+		return 0, false, sqlerr.New("42883",
+			"function %s with a %s argument does not exist: the argument is an integer", fn, argType)
+	}
+	if i < math.MinInt32 || i > math.MaxInt32 {
+		return 0, false, sqlerr.New("22003", "integer out of range")
+	}
+	return i, false, nil
+}
+
+// windowArgumentOperands raises the reader's typing error for a number
+// literal (or a cast to a type other than an integer) inside a constant
+// expression: PostgreSQL types the expression by its operands.
+func windowArgumentOperands(fn string, n Node) error {
+	switch e := n.(type) {
+	case *Lit:
+		if e.Kind == LitNumber {
+			_, _, err := WindowIntegerArgument(fn, e)
+			return err
+		}
+	case *CastNode:
+		switch strings.ToLower(strings.TrimSpace(e.TypeName)) {
+		case "int", "integer", "int4", "smallint", "int2":
+			return nil // an integer whatever its operand
+		}
+		_, _, err := WindowIntegerArgument(fn, e)
+		return err
+	case *ParenNode:
+		return windowArgumentOperands(fn, e.Inner)
+	case *UnaryOp:
+		return windowArgumentOperands(fn, e.Inner)
+	case *BinaryOp:
+		if err := windowArgumentOperands(fn, e.Left); err != nil {
+			return err
+		}
+		return windowArgumentOperands(fn, e.Right)
+	case *FuncCallNode:
+		for _, a := range e.Args {
+			if err := windowArgumentOperands(fn, a); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // refuseWindowArguments raises, at the one site where a call becomes a window
