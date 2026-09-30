@@ -455,13 +455,20 @@ func aggInputColumnIntWidth(node *logical.Node, col string) (intWidth, bool) {
 	if t, ok := scanColumnType(node, col); ok {
 		return catalogIntWidth(t), true
 	}
+	// Every spelling aggInputColumnType asks under, in its order: asked only
+	// as the one-part name `s.k`, a qualified column of a derived table or a
+	// CTE found no scope, the width read nothing, and SUM over an int4 column
+	// `(SELECT t.i + t.i AS k …) s` fell to its INT64 carrier — numeric where
+	// PostgreSQL declares bigint.
 	if node != nil && len(node.Children) == 1 {
-		if decls, _, ok := namingScopeDecls(&plansql.ColRef{Column: col}, node.Children[0]); ok {
-			if w, ok := decls.colIntWidth(&plansql.ColRef{Column: col}); ok {
-				return w, true
-			}
-			if t, c := colRefDeclaredType(&plansql.ColRef{Column: col}, decls); c == expr.Decided {
-				return catalogIntWidth(t.ID), true
+		for _, ref := range aggInputRefs(col) {
+			if decls, _, ok := namingScopeDecls(ref, node.Children[0]); ok {
+				if w, ok := decls.colIntWidth(ref); ok {
+					return w, true
+				}
+				if t, c := colRefDeclaredType(ref, decls); c == expr.Decided {
+					return catalogIntWidth(t.ID), true
+				}
 			}
 		}
 	}
