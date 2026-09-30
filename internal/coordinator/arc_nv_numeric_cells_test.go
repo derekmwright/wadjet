@@ -281,7 +281,7 @@ func nvCells() []nvCell {
 			want: "g=1<i4>|v=130<i8>;g=2<i4>|v=8<i8>"},
 		{name: "1000/the_truncating_division_through_a_subquery",
 			sql:  "SELECT (SELECT pr / 2 FROM " + nvEdg + " WHERE id=1) AS v FROM " + nvEdg + " WHERE id=4",
-			want: "v=127<i8>"},
+			want: "v=127<i4>", why: "a scalar subquery's int4 arithmetic is declared int4, the width the wire gives a PROTOCOL"},
 
 		// ------------------------------------------------------------------
 		// #1037 — a wide DECIMAL literal under a CAST. 9007199254740993.25 is
