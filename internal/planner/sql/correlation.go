@@ -1007,7 +1007,7 @@ func RewriteOuterRefs(node Node, outerTables map[string]bool, vals map[string]an
 		}
 		return cn
 	case *CastNode:
-		return &CastNode{Inner: RewriteOuterRefs(n.Inner, outerTables, vals), TypeName: n.TypeName}
+		return &CastNode{Inner: RewriteOuterRefs(n.Inner, outerTables, vals), TypeName: n.TypeName, Column: n.Column}
 	// The substitution has to reach references two levels down, or the SQL
 	// handed to the runner still names the outermost table (see
 	// walkNestedForOuterRefs).
@@ -1097,7 +1097,7 @@ func RewriteUnqualifiedOuterRefs(node Node, unqualOuter map[string]string, vals 
 			High: RewriteUnqualifiedOuterRefs(n.High, unqualOuter, vals),
 		}
 	case *CastNode:
-		return &CastNode{Inner: RewriteUnqualifiedOuterRefs(n.Inner, unqualOuter, vals), TypeName: n.TypeName}
+		return &CastNode{Inner: RewriteUnqualifiedOuterRefs(n.Inner, unqualOuter, vals), TypeName: n.TypeName, Column: n.Column}
 	case *SubqueryNode:
 		if sql, ok := rewriteNestedSubquery(n.SQL, func(inner Node) Node {
 			return RewriteUnqualifiedOuterRefs(inner, unqualOuter, vals)

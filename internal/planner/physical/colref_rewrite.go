@@ -57,7 +57,7 @@ func rewriteColRefs(n plansql.Node, sub func(*plansql.ColRef) (plansql.Node, boo
 		if !c {
 			return n, false, ok
 		}
-		return &plansql.CastNode{Inner: in, TypeName: e.TypeName}, true, ok
+		return &plansql.CastNode{Inner: in, TypeName: e.TypeName, Column: e.Column}, true, ok
 
 	case *plansql.NotNode:
 		in, c, ok := rewriteColRefs(e.Inner, sub)

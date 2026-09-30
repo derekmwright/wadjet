@@ -3260,8 +3260,42 @@ func (p *selectParser) parseFuncCall(name string) (Node, error) {
 	if _, err := p.expect(TokenRParen); err != nil {
 		return nil, fmt.Errorf("expected ) after function arguments")
 	}
+	if c, ok := columnValueCast(fn); ok {
+		return c, nil
+	}
 
 	return p.maybeParseOver(fn)
+}
+
+// columnValueCast reads `__column_value(cast(<literal> as <type>))` back as
+// the column-typed cast it renders (CastNode.Column): a correlated re-run's
+// outer value. Over anything but a literal it is not that spelling, and the
+// call stays a call to a function nobody defines.
+func columnValueCast(fn *FuncCallNode) (*CastNode, bool) {
+	if fn.Name != ColumnValueFunc || len(fn.Args) != 1 || fn.Distinct || fn.Star {
+		return nil, false
+	}
+	c, ok := fn.Args[0].(*CastNode)
+	if !ok || c.Column {
+		return nil, false
+	}
+	if !columnValueLiteral(c.Inner) {
+		return nil, false
+	}
+	return &CastNode{Inner: c.Inner, TypeName: c.TypeName, Column: true}, true
+}
+
+// columnValueLiteral reports a literal a column-typed cast may hold: a
+// constant, or a signed number (`-7` parses as its negation).
+func columnValueLiteral(n Node) bool {
+	switch v := n.(type) {
+	case *Lit:
+		return true
+	case *UnaryOp:
+		lit, ok := v.Inner.(*Lit)
+		return ok && lit.Kind == LitNumber && (v.Op == "-" || v.Op == "+")
+	}
+	return false
 }
 
 // maybeParseFilterAndOver checks for FILTER (WHERE ...) and OVER (...) after

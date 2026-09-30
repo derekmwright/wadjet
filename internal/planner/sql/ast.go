@@ -452,10 +452,25 @@ func (c *CaseNode) String() string {
 type CastNode struct {
 	Inner    Node
 	TypeName string
+	// Column marks a correlated re-run's OUTER VALUE: a literal that is the
+	// value of an outer column of this type, and that every typing walk
+	// types as that COLUMN — its width, its (p,s), its element — rather than
+	// by the rules a CAST expression has (an integer CAST declares bigint, an
+	// integer cast's element bigint, and neither is a fixed-point operand).
+	// It is spelled `__column_value(cast(<literal> as <type>))` so the
+	// re-run's text carries it (ColumnValueFunc); the parser accepts that
+	// spelling over a literal only.
+	Column bool
 }
+
+// ColumnValueFunc is the spelling of a column-typed cast (CastNode.Column).
+const ColumnValueFunc = "__column_value"
 
 func (*CastNode) nodeTag() {}
 func (c *CastNode) String() string {
+	if c.Column {
+		return fmt.Sprintf("%s(cast(%s as %s))", ColumnValueFunc, c.Inner.String(), c.TypeName)
+	}
 	return fmt.Sprintf("cast(%s as %s)", c.Inner.String(), c.TypeName)
 }
 
@@ -901,7 +916,7 @@ func ReplaceAllAggregates(node Node, replacements map[string]string) Node {
 		if inner == n.Inner {
 			return node
 		}
-		return &CastNode{Inner: inner, TypeName: n.TypeName}
+		return &CastNode{Inner: inner, TypeName: n.TypeName, Column: n.Column}
 	case *CmpExpr:
 		left := ReplaceAllAggregates(n.Left, replacements)
 		right := ReplaceAllAggregates(n.Right, replacements)
@@ -1068,6 +1083,7 @@ func ReplaceAggregate(node Node, aggName string) Node {
 		return &CastNode{
 			Inner:    ReplaceAggregate(n.Inner, aggName),
 			TypeName: n.TypeName,
+			Column:   n.Column,
 		}
 	default:
 		return node
@@ -1211,7 +1227,7 @@ func ReplaceWindowFuncs(node Node, replacements map[*WindowFuncNode]string) Node
 		if inner == n.Inner {
 			return node
 		}
-		return &CastNode{Inner: inner, TypeName: n.TypeName}
+		return &CastNode{Inner: inner, TypeName: n.TypeName, Column: n.Column}
 	case *CmpExpr:
 		left := ReplaceWindowFuncs(n.Left, replacements)
 		right := ReplaceWindowFuncs(n.Right, replacements)

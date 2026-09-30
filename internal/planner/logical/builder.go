@@ -1011,6 +1011,7 @@ func rewriteExpr(node plansql.Node, cols []plansql.SelectColumn) plansql.Node {
 		return &plansql.CastNode{
 			Inner:    rewriteExpr(n.Inner, cols),
 			TypeName: n.TypeName,
+			Column:   n.Column,
 		}
 	default:
 		// Literals, ColRef, etc. — pass through unchanged

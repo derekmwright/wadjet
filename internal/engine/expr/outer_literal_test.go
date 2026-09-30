@@ -37,30 +37,30 @@ func TestOuterLiteralRendersEveryTypeAsItsOwnType(t *testing.T) {
 	}{
 		{"bool_true", batch.TypeBool, 0, true, "true"},
 		{"bool_false", batch.TypeBool, 0, false, "false"},
-		{"int32", batch.TypeInt32, 0, int32(-7), "cast(-7 as integer)"},
-		{"int64", batch.TypeInt64, 0, int64(9007199254740993), "cast(9007199254740993 as bigint)"},
+		{"int32", batch.TypeInt32, 0, int32(-7), "__column_value(cast(-7 as integer))"},
+		{"int64", batch.TypeInt64, 0, int64(9007199254740993), "__column_value(cast(9007199254740993 as bigint))"},
 		{"port", batch.TypePort, 0, int32(1025), "1025"},
 		{"protocol", batch.TypeProtocol, 0, int32(6), "6"},
 		{"duration", batch.TypeDuration, 0, int64(1000000), "1000000"},
 		// FormatFloat with -1 precision, which is the shortest text that
 		// reads back as the SAME float64. `%g`'s default would round.
 		{"float64", batch.TypeFloat64, 0, 0.3333333333333333,
-			"cast('0.3333333333333333' as double precision)"},
+			"__column_value(cast('0.3333333333333333' as double precision))"},
 		{"float64_negative", batch.TypeFloat64, 0, -1e-20,
-			"cast('-1e-20' as double precision)"},
+			"__column_value(cast('-1e-20' as double precision))"},
 		{"float32", batch.TypeFloat32, 0, float32(0.14285715),
-			"cast('0.14285715' as real)"},
+			"__column_value(cast('0.14285715' as real))"},
 		{"string", batch.TypeString, 0, "s-000001", "'s-000001'"},
 		{"string_with_a_quote", batch.TypeString, 0, "o'brien", "'o''brien'"},
 		{"bytes", batch.TypeBytes, 0, []byte("bytes-000001-x"), "'bytes-000001-x'"},
 		{"timestamp", batch.TypeTimestamp, 0, int64(1699999999000),
-			"cast('2023-11-14 22:13:19' as timestamp)"},
+			"__column_value(cast('2023-11-14 22:13:19' as timestamp))"},
 		// Sub-second precision has to survive: batch.FormatTimestamp keeps
 		// three fractional digits only when there are any, and a rendering
 		// that dropped them would compare a different instant.
 		{"timestamp_with_millis", batch.TypeTimestamp, 0, int64(1699999999123),
-			"cast('2023-11-14 22:13:19.123' as timestamp)"},
-		{"date", batch.TypeDate, 0, int32(15007), "cast('2011-02-02' as date)"},
+			"__column_value(cast('2023-11-14 22:13:19.123' as timestamp))"},
+		{"date", batch.TypeDate, 0, int32(15007), "__column_value(cast('2011-02-02' as date))"},
 		{"ipv4", batch.TypeIPv4, 0, "10.0.0.1", "'10.0.0.1'"},
 		{"ipv6", batch.TypeIPv6, 0, "2001:db8::1", "'2001:db8::1'"},
 		{"cidr", batch.TypeCIDR, 0, "192.168.0.2/24", "'192.168.0.2/24'"},
@@ -71,11 +71,11 @@ func TestOuterLiteralRendersEveryTypeAsItsOwnType(t *testing.T) {
 		// comparison is exact. Precision 38 is the Int128 carrier's width, so
 		// it never narrows a value the column could hold.
 		{"decimal_scale_4", batch.TypeDecimal, 4, "1.0001",
-			"cast('1.0001' as decimal(38, 4))"},
+			"__column_value(cast('1.0001' as decimal(38, 4)))"},
 		{"decimal_scale_2", batch.TypeDecimal, 2, "2.00",
-			"cast('2.00' as decimal(38, 2))"},
+			"__column_value(cast('2.00' as decimal(38, 2)))"},
 		{"decimal_negative", batch.TypeDecimal, 2, "-0.01",
-			"cast('-0.01' as decimal(38, 2))"},
+			"__column_value(cast('-0.01' as decimal(38, 2)))"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			v := batch.NewVectorWithScale(tc.typ, 1, tc.scale)
@@ -102,14 +102,14 @@ func TestOuterLiteralRendersNullForEveryType(t *testing.T) {
 		typ  batch.TypeID
 		want string
 	}{
-		{batch.TypeBool, "cast(null as boolean)"},
-		{batch.TypeInt32, "cast(null as integer)"},
-		{batch.TypeInt64, "cast(null as bigint)"},
-		{batch.TypeFloat32, "cast(null as real)"},
-		{batch.TypeFloat64, "cast(null as double precision)"},
-		{batch.TypeTimestamp, "cast(null as timestamp)"},
-		{batch.TypeDate, "cast(null as date)"},
-		{batch.TypeDecimal, "cast(null as decimal(38, 0))"},
+		{batch.TypeBool, "__column_value(cast(null as boolean))"},
+		{batch.TypeInt32, "__column_value(cast(null as integer))"},
+		{batch.TypeInt64, "__column_value(cast(null as bigint))"},
+		{batch.TypeFloat32, "__column_value(cast(null as real))"},
+		{batch.TypeFloat64, "__column_value(cast(null as double precision))"},
+		{batch.TypeTimestamp, "__column_value(cast(null as timestamp))"},
+		{batch.TypeDate, "__column_value(cast(null as date))"},
+		{batch.TypeDecimal, "__column_value(cast(null as decimal(38, 0)))"},
 		// An ARRAY vector with no element declaration has no cast spelling.
 		{batch.TypeArray, "null"},
 		{batch.TypeString, "null"}, {batch.TypeBytes, "null"}, {batch.TypeUUID, "null"},
@@ -195,8 +195,8 @@ func TestOuterLiteralRefusesValuesWithNoLiteralSpelling(t *testing.T) {
 			if schema[i].Type == parquet.TypeArray {
 				t.Run(schema[i].Name, func(t *testing.T) {
 					lit, err := outerLiteral(col, 0)
-					if err != nil || lit.String() != "cast('{}' as TEXT[])" {
-						t.Fatalf("outerLiteral(empty text[]) = %v, %v; want the typed literal cast('{}' as TEXT[])", lit, err)
+					if err != nil || lit.String() != "__column_value(cast('{}' as TEXT[]))" {
+						t.Fatalf("outerLiteral(empty text[]) = %v, %v; want the typed literal __column_value(cast('{}' as TEXT[]))", lit, err)
 					}
 				})
 				continue

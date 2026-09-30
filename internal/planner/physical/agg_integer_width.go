@@ -204,6 +204,9 @@ func declaredIntWidth(node plansql.Node, decls ColDecls) intWidth {
 		}
 		return widestArgIntWidth(n.Args, nil, decls)
 	case *plansql.CastNode:
+		if ref, d, ok := columnValueRef(n); ok {
+			return declaredIntWidth(ref, d)
+		}
 		// A CAST's TARGET NAME decides its domain, independently of the operand.
 		// Do not use NodeDeclaredType: inferCastType declares every integer cast
 		// INT64 and cannot distinguish ::int4 from ::bigint (ADR-0012 item 12).

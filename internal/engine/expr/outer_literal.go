@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"strconv"
+	"strings"
 	"unicode/utf8"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
@@ -22,6 +23,10 @@ import (
 // VECTOR, an ARRAY whose element has no exact cast spelling, and BYTES
 // containing invalid UTF-8 or NUL: this substitution path has no faithful
 // literal spelling for them.
+// Every CAST spelling here is COLUMN-TYPED (plansql.CastNode.Column): the
+// literal is the value of an outer column of that type, and the re-run types
+// it as that column — an int4's width and DECIMAL(10,0), a NUMERIC(10,2)'s
+// (p,s), an int4[]'s element — not by the rules a CAST expression has.
 // NULL renders as a NULL of the column's type where the value is a CAST or a
 // typed literal (outerNull), and as the bare null where it is a quoted string;
 // comparisons remain UNKNOWN.
@@ -30,14 +35,21 @@ import (
 // outerLiteral renders one outer-row value as the literal node the re-run's
 // SQL carries in place of the correlated column reference.
 func outerLiteral(v *batch.Vector, row int) (plansql.Node, error) {
+	return outerColumnLiteral(v, 0, row)
+}
+
+// outerColumnLiteral is outerLiteral for a column whose declared DECIMAL
+// precision is known (0 = not carried: the Int128 carrier's 38, as a column
+// reference reads it — colRefDecimalType).
+func outerColumnLiteral(v *batch.Vector, precision, row int) (plansql.Node, error) {
 	val := v.GetValue(row)
 	if val == nil {
-		return outerNull(v), nil
+		return outerNull(v, precision), nil
 	}
 	num := func(s string) plansql.Node { return &plansql.Lit{Value: s, Kind: plansql.LitNumber} }
 	str := func(s string) plansql.Node { return &plansql.Lit{Value: s, Kind: plansql.LitString} }
 	cast := func(s, typeName string) plansql.Node {
-		return &plansql.CastNode{Inner: str(s), TypeName: typeName}
+		return &plansql.CastNode{Inner: str(s), TypeName: typeName, Column: true}
 	}
 
 	switch v.Type {
@@ -63,20 +75,20 @@ func outerLiteral(v *batch.Vector, row int) (plansql.Node, error) {
 		default:
 			return nil, unrenderableOuterValue(v.Type, val)
 		}
-		// An INTEGER or a BIGINT is CAST to its type: a bare literal's type
-		// is read off its digits, and in DECIMAL arithmetic that is a
-		// DECIMAL(1,0) for a 3 where the int4 column is DECIMAL(10,0) — so
-		// `x.m / o.i` re-ran as `x.m / 3` at a six-digit scale while the
-		// subquery was declared at the column's thirteen (0.4166670000000).
-		// The cast carries the column's type into every operator, and it is
-		// the stand-in the declaration is made from (outerStandIn). PORT and
-		// PROTOCOL box as int32 and DURATION as int64; no cast spelling names
-		// those types here, so they stay the bare literal.
+		// An INTEGER or a BIGINT is a column-typed value of its type: a bare
+		// literal's type is read off its digits, and in DECIMAL arithmetic
+		// that is a DECIMAL(1,0) for a 3 where the int4 column is
+		// DECIMAL(10,0) — so `x.m / o.i` re-ran as `x.m / 3` at a six-digit
+		// scale while the subquery was declared at the column's thirteen
+		// (0.4166670000000). It is the stand-in the declaration is made from
+		// (outerStandIn). PORT and PROTOCOL box as int32 and DURATION as
+		// int64; no cast spelling names those types here, so they stay the
+		// bare literal.
 		switch v.Type {
 		case batch.TypeInt32:
-			return &plansql.CastNode{Inner: num(text), TypeName: "integer"}, nil
+			return &plansql.CastNode{Inner: num(text), TypeName: "integer", Column: true}, nil
 		case batch.TypeInt64:
-			return &plansql.CastNode{Inner: num(text), TypeName: "bigint"}, nil
+			return &plansql.CastNode{Inner: num(text), TypeName: "bigint", Column: true}, nil
 		}
 		return num(text), nil
 
@@ -121,12 +133,12 @@ func outerLiteral(v *batch.Vector, row int) (plansql.Node, error) {
 		if !ok {
 			return nil, unrenderableOuterValue(v.Type, val)
 		}
-		// DECIMAL(38, scale): 38 is the Int128 carrier's own width, so it
-		// never narrows a value the column could hold, and the SCALE is the
-		// column's — which is what decides the comparison's exactness. The
-		// bare spelling would make this a float8 literal and compare the
-		// column's exact digits against a double.
-		return cast(s, fmt.Sprintf("decimal(38, %d)", outerDecimalScale(v))), nil
+		// The column's DECIMAL(p, s): the SCALE decides the comparison's
+		// exactness, and the PRECISION the (p,s) arithmetic over the value
+		// takes, as the column's own does (`x.v / o.n` divides at the scale
+		// `v / n` has). The bare spelling would make this a float8 literal
+		// and compare the column's exact digits against a double.
+		return cast(s, outerDecimalName(precision, outerDecimalScale(v))), nil
 
 	case batch.TypeTimestamp:
 		ms, ok := val.(int64)
@@ -176,6 +188,10 @@ func outerLiteral(v *batch.Vector, row int) (plansql.Node, error) {
 			base = base.Base
 		}
 		if n, ok := ArrayValueLiteral(val, batch.VectorDecl("", base)); ok {
+			if c, ok := n.(*plansql.CastNode); ok {
+				// A one-dimensional value is a value of its array column.
+				return &plansql.CastNode{Inner: c.Inner, TypeName: c.TypeName, Column: true}, nil
+			}
 			return n, nil
 		}
 	}
@@ -195,16 +211,19 @@ func outerLiteral(v *batch.Vector, row int) (plansql.Node, error) {
 // and `max(null + x.v)` under a DATE declaration answered a number. A type
 // whose value is spelled as a quoted string (text, UUID, the network types,
 // bytes) keeps the bare `null`, the twin of that unknown-typed literal.
-func outerNull(v *batch.Vector) plansql.Node {
+func outerNull(v *batch.Vector, precision int) plansql.Node {
 	untyped := &plansql.Lit{Value: "null", Kind: plansql.LitNull}
 	base := v
 	for base.Base != nil {
 		base = base.Base
 	}
 	col := batch.VectorDecl("", base)
+	if col.Type == batch.TypeDecimal && col.Precision <= 0 {
+		col.Precision = precision
+	}
 	switch col.Type {
 	case batch.TypeBool:
-		return &plansql.CastNode{Inner: untyped, TypeName: "boolean"}
+		return &plansql.CastNode{Inner: untyped, TypeName: "boolean", Column: true}
 	case batch.TypeInt32, batch.TypeInt64, batch.TypeFloat64, batch.TypeFloat32, batch.TypeDecimal,
 		batch.TypeDate, batch.TypeTimestamp, batch.TypeArray:
 		if n, ok := outerStandIn(col); ok {
@@ -212,6 +231,16 @@ func outerNull(v *batch.Vector) plansql.Node {
 		}
 	}
 	return untyped
+}
+
+// outerDecimalName is a DECIMAL column's cast spelling: its declared
+// precision, or the Int128 carrier's 38 where the declaration carries none —
+// the width a column reference reads it at then (colRefDecimalType).
+func outerDecimalName(precision, scale int) string {
+	if precision <= 0 {
+		precision = batch.MaxDecimalPrecision
+	}
+	return fmt.Sprintf("decimal(%d, %d)", precision, scale)
 }
 
 // outerDecimalScale is the column's DECIMAL scale, resolved through a view —
@@ -271,9 +300,9 @@ func unrenderableOuterValue(t batch.TypeID, _ any) error {
 type OuterDeclFunc func(ref plansql.OuterRef) (parquet.Column, bool)
 
 // OuterTypedSubquerySQL is a correlated subquery's text with every OUTER
-// reference spelled as a NULL of the outer column's DECLARED type —
-// `CAST(null AS double precision)` for a DOUBLE column — for the planner to
-// DECLARE the subquery from. It is the per-row re-run's spelling
+// reference spelled as a column-typed NULL of the outer column's DECLARED
+// type — `__column_value(cast(null as double precision))` for a DOUBLE column
+// (outerStandIn) — for the planner to DECLARE the subquery from. It is the per-row re-run's spelling
 // (outerLiteral) with the value left out: the re-run substitutes a typed
 // literal, so the text the subquery is declared from must type its outer
 // operands the same way, or the declaration and the value describe two
@@ -342,15 +371,15 @@ func outerTypedSQL(info *plansql.SelectInfo, refs []plansql.OuterRef, outerTable
 
 // outerStandIn is the value-free twin of outerLiteral's spelling for a column
 // of this declared type, so the subquery is declared from the expression the
-// re-run evaluates: a NULL CAST to the name the re-run casts the value to — an
-// INTEGER column's `CAST(null AS integer)`, whose int4 width and DECIMAL(10,0)
-// contribution are the column's own — a boolean its bare literal, and an
-// ARRAY a cast to its element's array type. ok=false for a type the re-run
-// has no spelling for, or that this does not name (the declaration is then
-// made from the text as written).
+// re-run evaluates: a column-typed NULL of the column's type
+// (plansql.CastNode.Column) — typed as the outer COLUMN is, its int4 width,
+// its DECIMAL (p,s), its array element, by every walk that types a column
+// reference — a boolean its bare literal. ok=false for a type the re-run has
+// no spelling for, or that this does not name (the declaration is then made
+// from the text as written).
 func outerStandIn(col parquet.Column) (plansql.Node, bool) {
 	cast := func(name string) plansql.Node {
-		return &plansql.CastNode{Inner: &plansql.Lit{Value: "null", Kind: plansql.LitNull}, TypeName: name}
+		return &plansql.CastNode{Inner: &plansql.Lit{Value: "null", Kind: plansql.LitNull}, TypeName: name, Column: true}
 	}
 	switch col.Type {
 	case batch.TypeBool:
@@ -364,7 +393,7 @@ func outerStandIn(col parquet.Column) (plansql.Node, bool) {
 	case batch.TypeFloat32:
 		return cast("real"), true
 	case batch.TypeDecimal:
-		return cast(fmt.Sprintf("decimal(38, %d)", col.Scale)), true
+		return cast(outerDecimalName(col.Precision, col.Scale)), true
 	case batch.TypeString:
 		return cast("text"), true
 	case batch.TypeDate:
@@ -382,4 +411,57 @@ func outerStandIn(col parquet.Column) (plansql.Node, bool) {
 		}
 	}
 	return nil, false
+}
+
+// ColumnOfCastName is the column a column-typed cast's type name declares
+// (plansql.CastNode.Column): the spellings outerLiteral and outerStandIn
+// write, an INTEGER an int4 column, a DECIMAL(p, s) that (p,s), an `el[]` /
+// ARRAY(el) the array of that element. ok=false for any other name, and for a
+// bare DECIMAL (no (p,s) to be a column of).
+func ColumnOfCastName(name string) (parquet.Column, bool) {
+	t := strings.ToLower(strings.TrimSpace(name))
+	elem, isArray := ArrayCastElement(t)
+	if !isArray && strings.HasSuffix(t, "[]") {
+		elem, isArray = strings.TrimSuffix(t, "[]"), true
+	}
+	if isArray {
+		el, ok := ColumnOfCastName(elem)
+		if !ok || el.Type == parquet.TypeArray {
+			return parquet.Column{}, false
+		}
+		el.Nullable = true
+		return parquet.Column{Type: parquet.TypeArray, Nullable: true, ElementType: &el}, true
+	}
+	if p, sc, hasParams, ok := DecimalCastDest(t); ok {
+		if !hasParams {
+			return parquet.Column{}, false
+		}
+		return parquet.Column{Type: parquet.TypeDecimal, Nullable: true, Precision: p, Scale: sc}, true
+	}
+	var typ parquet.TypeID
+	switch t {
+	case "integer", "int", "int4":
+		typ = parquet.TypeInt32
+	case "bigint", "int8":
+		typ = parquet.TypeInt64
+	case "double precision", "double", "float8":
+		typ = parquet.TypeFloat64
+	case "real", "float4":
+		typ = parquet.TypeFloat32
+	case "text":
+		typ = parquet.TypeString
+	case "boolean", "bool":
+		typ = parquet.TypeBool
+	case "date":
+		typ = parquet.TypeDate
+	case "timestamp":
+		typ = parquet.TypeTimestamp
+	case "uuid":
+		typ = parquet.TypeUUID
+	case "ipv4":
+		typ = parquet.TypeIPv4
+	default:
+		return parquet.Column{}, false
+	}
+	return parquet.Column{Type: typ, Nullable: true}, true
 }

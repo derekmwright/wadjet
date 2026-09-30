@@ -436,7 +436,7 @@ func substituteNestedRenameRefs(expr plansql.Node, child *logical.Node) (plansql
 		if in == e.Inner {
 			return expr, true
 		}
-		return &plansql.CastNode{Inner: in, TypeName: e.TypeName}, true
+		return &plansql.CastNode{Inner: in, TypeName: e.TypeName, Column: e.Column}, true
 	case *plansql.FuncCallNode:
 		newArgs, changed, ok := substituteNestedRenameList(e.Args, child)
 		if !ok {

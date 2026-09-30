@@ -89,7 +89,7 @@ func stripQualifiers(n Node) Node {
 	case *UnaryOp:
 		return &UnaryOp{Op: e.Op, Inner: stripQualifiers(e.Inner)}
 	case *CastNode:
-		return &CastNode{Inner: stripQualifiers(e.Inner), TypeName: e.TypeName}
+		return &CastNode{Inner: stripQualifiers(e.Inner), TypeName: e.TypeName, Column: e.Column}
 	case *FuncCallNode:
 		args := make([]Node, len(e.Args))
 		for i, a := range e.Args {
@@ -211,7 +211,7 @@ func canonicalExpr(n Node, fold bool) Node {
 		}
 		return out
 	case *CastNode:
-		return &CastNode{Inner: canonicalExpr(e.Inner, fold), TypeName: canonicalTypeName(e.TypeName)}
+		return &CastNode{Inner: canonicalExpr(e.Inner, fold), TypeName: canonicalTypeName(e.TypeName), Column: e.Column}
 	case *CaseNode:
 		out := &CaseNode{Subject: canonicalExpr(e.Subject, fold), Else: canonicalExpr(e.Else, fold),
 			Whens: make([]WhenClause, len(e.Whens))}
@@ -438,7 +438,7 @@ func RewriteExpr(node Node, fn func(Node) (Node, bool)) Node {
 		}
 		return out
 	case *CastNode:
-		return &CastNode{Inner: RewriteExpr(n.Inner, fn), TypeName: n.TypeName}
+		return &CastNode{Inner: RewriteExpr(n.Inner, fn), TypeName: n.TypeName, Column: n.Column}
 	case *FuncCallNode:
 		if IsAggregate(n.Name) {
 			return node

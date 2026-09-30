@@ -155,6 +155,9 @@ func decimalArithOperand(node plansql.Node, decls ColDecls) (batch.DecimalType, 
 		// numeric in PostgreSQL and exact here. A BARE cast cannot: its (p,s)
 		// is the operand's, resolved per VALUE at runtime, so the declaration
 		// this layer would have to commit to does not exist yet.
+		if ref, d, ok := columnValueRef(n); ok {
+			return decimalArithOperand(ref, d)
+		}
 		//
 		// A cast to INTEGER or BIGINT contributes its type's whole range at
 		// scale 0, as a column of that type does — the runtime reads the same

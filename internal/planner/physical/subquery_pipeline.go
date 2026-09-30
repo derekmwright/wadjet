@@ -304,7 +304,7 @@ func (p *Planner) SubqueryOutputColumn(sql string) (col parquet.Column, ok bool)
 // subqueryAnswerIsInt4 reports whether a scalar subquery's integer answer is
 // PostgreSQL's int4: its single output projection is integer arithmetic whose
 // every leaf names a width of its own and whose widest is int4 — `x.v + x.v`,
-// `o.i * x.v` with the outer column's stand-in (CAST(null AS integer)).
+// `o.i * x.v` with the outer column's stand-in (typed as the int4 column).
 //
 // This engine computes int4 arithmetic in an int64 and declares it bigint
 // (numeric-decimal#r1); a scalar subquery's answer is the one place the value

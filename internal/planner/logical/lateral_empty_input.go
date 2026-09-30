@@ -206,7 +206,7 @@ func coalesceLateralCountRefs(node plansql.Node, alias string, names map[string]
 		case *plansql.BetweenExpr:
 			return &plansql.BetweenExpr{Left: walk(e.Left), Not: e.Not, Low: walk(e.Low), High: walk(e.High)}
 		case *plansql.CastNode:
-			return &plansql.CastNode{Inner: walk(e.Inner), TypeName: e.TypeName}
+			return &plansql.CastNode{Inner: walk(e.Inner), TypeName: e.TypeName, Column: e.Column}
 		case *plansql.FuncCallNode:
 			args := make([]plansql.Node, len(e.Args))
 			for i, a := range e.Args {

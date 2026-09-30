@@ -321,13 +321,25 @@ func readOuterValues(b *batch.RecordBatch, row int, refs []plansql.OuterRef) (ma
 		// renderer that reads the box re-types the value by what it looks
 		// like: `a.w_d2 = b.k` became `'2.00' = b.k` and raised 22P02 for a
 		// query PostgreSQL answers (#679). See outer_literal.go.
-		lit, err := outerLiteral(v, row)
+		lit, err := outerColumnLiteral(v, schemaPrecisionOf(b, v), row)
 		if err != nil {
 			return nil, err
 		}
 		vals[key] = lit
 	}
 	return vals, nil
+}
+
+// schemaPrecisionOf is the declared DECIMAL precision the batch schema carries
+// for the vector v (0 when it carries none) — the precision a column reference
+// to it reads (colRefSchemaPrecision).
+func schemaPrecisionOf(b *batch.RecordBatch, v *batch.Vector) int {
+	for i, c := range b.Columns {
+		if c == v {
+			return colRefSchemaPrecision(b.Schema, i)
+		}
+	}
+	return 0
 }
 
 // columnByNameFold is ColumnByName with ASCII case folding.

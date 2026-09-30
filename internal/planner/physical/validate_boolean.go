@@ -233,6 +233,13 @@ func provableNonBooleanType(node plansql.Node, scope *colScope) (parquet.TypeID,
 		}
 		return 0, "", false
 	case *plansql.CastNode:
+		// A correlated re-run's outer value is a value of its COLUMN's type.
+		if col, ok := expr.ColumnOfCastName(n.TypeName); ok && n.Column {
+			if col.Type == parquet.TypeBool {
+				return 0, "", false
+			}
+			return col.Type, pgTypeName(col.Type), true
+		}
 		// A CAST DECLARES its result type, which is the strongest declaration
 		// in the language: `WHERE CAST(n AS BIGINT)` is 42804 bigint on
 		// 17.11 and removed three of four rows here through a DELETE.

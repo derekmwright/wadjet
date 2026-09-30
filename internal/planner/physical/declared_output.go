@@ -1726,6 +1726,10 @@ func nodeDeclaredTypeOf(node plansql.Node, decls ColDecls) (expr.DeclType, expr.
 	case *plansql.ArrayLitNode:
 		return arrayLitDeclaredType(n, decls)
 	case *plansql.CastNode:
+		// A correlated re-run's outer value is typed as its COLUMN is.
+		if ref, d, ok := columnValueRef(n); ok {
+			return nodeDeclaredTypeOf(ref, d)
+		}
 		// A DECIMAL destination carries its own (p,s), and a BARE one takes
 		// the operand's — neither of which a plain TypeID can express, which
 		// is why `CAST(x AS DECIMAL(10,2))` used to declare STRING and

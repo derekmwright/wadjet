@@ -320,7 +320,7 @@ func requoteAggOutputRefsIdx(n plansql.Node, emitted, byIdentity map[string]stri
 		if !ok {
 			return nil, false
 		}
-		return &plansql.CastNode{Inner: in, TypeName: e.TypeName}, true
+		return &plansql.CastNode{Inner: in, TypeName: e.TypeName, Column: e.Column}, true
 	}
 	// Every other node kind — a function call, a CASE, a subquery — is left
 	// alone rather than guessed at, which keeps the plan exactly as it was.

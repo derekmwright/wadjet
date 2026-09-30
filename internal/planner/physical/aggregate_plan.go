@@ -626,7 +626,7 @@ func replaceAggWithColRef(node plansql.Node, target *plansql.FuncCallNode, colNa
 	case *plansql.ParenNode:
 		return &plansql.ParenNode{Inner: replaceAggWithColRef(n.Inner, target, colName)}
 	case *plansql.CastNode:
-		return &plansql.CastNode{Inner: replaceAggWithColRef(n.Inner, target, colName), TypeName: n.TypeName}
+		return &plansql.CastNode{Inner: replaceAggWithColRef(n.Inner, target, colName), TypeName: n.TypeName, Column: n.Column}
 	default:
 		return node
 	}

@@ -88,11 +88,9 @@ func TestArcSSScalarSubqueryTypedOnTheWire(t *testing.T) {
 		{"corrDate", `SELECT (SELECT o.d FROM ss_i x WHERE x.id = 1) AS v FROM ss_t o WHERE o.id = 3`, 1082, "9999-12-31"},
 		{"corrTimestamp", `SELECT (SELECT o.ts FROM ss_i x WHERE x.id = 1) AS v FROM ss_t o WHERE o.id = 5`, 1114, "1969-12-31 23:59:59.999"},
 		{"corrUuid", `SELECT (SELECT o.u FROM ss_i x WHERE x.id = 1) AS v FROM ss_t o WHERE o.id = 1`, 2950, "00000000-0000-4000-8000-000000000001"},
-		// PostgreSQL declares integer[] (1007). The re-run spells the outer
-		// array as CAST('{1,2}' AS INT[]), and every integer CAST spelling
-		// declares bigint here (numeric-decimal#r1), so the element is int8:
-		// 1016, the re-run's own type. v0.25.3 declared text (25).
-		{"corrArray", `SELECT (SELECT o.a FROM ss_i x WHERE x.id = 1) AS v FROM ss_t o WHERE o.id = 1`, 1016, "{1,2}"},
+		// The outer array is typed as its column: integer[] (1007), not the
+		// bigint[] an INT[] CAST declares. v0.25.3 declared text (25).
+		{"corrArray", `SELECT (SELECT o.a FROM ss_i x WHERE x.id = 1) AS v FROM ss_t o WHERE o.id = 1`, 1007, "{1,2}"},
 		{"corrFPlusV", `SELECT (SELECT o.f + x.v FROM ss_i x WHERE x.id = 1) AS v FROM ss_t o WHERE o.id = 1`, 701, "6.5"},
 		{"corrNPlusV", `SELECT (SELECT o.n + x.v FROM ss_i x WHERE x.id = 1) AS v FROM ss_t o WHERE o.id = 1`, 1700, "7.25"},
 		{"corrIPlusG", `SELECT (SELECT o.i + x.g FROM ss_i x WHERE x.id = 1) AS v FROM ss_t o WHERE o.id = 1`, 701, "3.5"},
