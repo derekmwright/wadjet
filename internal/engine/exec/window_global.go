@@ -450,8 +450,11 @@ func newGlobalWindowStreamer(m *runMerger, schema []parquet.Column, g windowSpec
 		switch wc.Func {
 		case WinLag:
 			// The offset as written (NewWindow made it non-negative); 0 is
-			// the current row and needs no ring.
-			s.lagRings[i] = make([]any, wc.LagLeadOffset)
+			// the current row and needs no ring, and neither does one past
+			// the input's row count: no row reads that far back.
+			if int64(wc.LagLeadOffset) <= stats.n {
+				s.lagRings[i] = make([]any, wc.LagLeadOffset)
+			}
 		case WinLead:
 			off := wc.LagLeadOffset
 			if off > s.maxLead {
@@ -769,6 +772,11 @@ func (s *globalWindowStreamer) computeImmediate(wc WindowColumn, i int, vec *bat
 			return nil
 		}
 		ring := s.lagRings[i]
+		if ring == nil {
+			// Past the input's edge on every row (newGlobalWindowStreamer).
+			vec.SetValue(r, wc.LagLeadDefault)
+			return nil
+		}
 		if rowIdx >= int64(off) {
 			// SetValue is nil-safe: a nil lagged value writes NULL while
 			// still advancing bytes offsets (sequential-write contract).
