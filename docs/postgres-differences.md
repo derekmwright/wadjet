@@ -386,6 +386,10 @@ PostgreSQL has no QUALIFY. It filters after windows, can read unprojected inputs
 
 `FIRST_VALUE('b')`, `LAST_VALUE('b')`, `NTH_VALUE('b', 2)`, `LAG('b')` and `LEAD('b')` answer the text, and the same with `NULL` answer NULL; PostgreSQL cannot resolve the polymorphic type of an unknown literal there and raises `42804`. (catalog: [aggregates-windows#r18](adr/0012-divergences/aggregates-windows.md#catalog); #1394)
 
+**A bound bigint, text or numeric parameter is a window integer argument.**
+
+`LAG(x, $1)` with `$1` declared `int8`, `text` or `numeric` and bound `1` answers `LAG(x, 1)`; PostgreSQL raises `42883` (`lag(bigint, bigint)` does not exist). A parameter reaches the engine as the literal it renders to, so its declared type is not read; an `integer` or untyped parameter is read as PostgreSQL reads it. (catalog: [aggregates-windows#r20](adr/0012-divergences/aggregates-windows.md#catalog); #1399)
+
 **Network-native types have separate storage domains.**
 
 `IPV4`, `IPV6`, `CIDR` and `MAC` are native column types with PostgreSQL's `inet` and `macaddr` input grammar at every boundary — the writer, `CAST`, and a literal — but they declare `text` (OID 25) on the wire; `UUID` declares `uuid` (2950); `PORT` and `PROTOCOL` declare `integer` (23). A `CIDR` reads `inet`'s grammar, not `cidr`'s: it keeps host bits an `inet` would keep, where PostgreSQL's `cidr` refuses them, and `CAST('10' AS CIDR)` is 22P02 where PostgreSQL's classful reading answers `10.0.0.0/8`. See the [input grammar table](data-types.md#network-types). (catalog: [network#r1, r2, r3](adr/0012-divergences/network.md#catalog))
@@ -592,9 +596,9 @@ It raises 0A000 where PostgreSQL answers: the merged value is COALESCE of the tw
 
 It raises 0A000 where PostgreSQL answers: the merged value is a COALESCE and a window PARTITION BY / ORDER BY key here is a column name. Write the expression. A window ARGUMENT is an expression and binds the merge on RIGHT and FULL alike. The refusal is drawn on the SHAPE, so on data where the merged and left-arm partitionings coincide it withdraws an answer that would have been right. (catalog: [names-scopes#r18](adr/0012-divergences/names-scopes.md#catalog); #655)
 
-**A computed or per-row window integer argument is refused.**
+**A per-row window integer argument is refused.**
 
-`LAG(x, 1 + 1)`, `LAG(x, o)` and `NTILE(o)` raise `0A000`; PostgreSQL evaluates the argument (LAG / LEAD per row, NTILE / NTH_VALUE once per partition). An integer literal, a quoted or cast integer, NULL and a bound parameter are read as PostgreSQL reads them. (catalog: [aggregates-windows#r19](adr/0012-divergences/aggregates-windows.md#catalog); #1399)
+`LAG(x, o)`, `LAG(x, o + 1)`, `NTILE(o)` and `LAG(x, (SELECT 1))` raise `0A000`; PostgreSQL evaluates the argument (LAG / LEAD per row, NTILE / NTH_VALUE once per partition). A constant expression (`LAG(x, 2 - 1)`, `NTILE(abs(-2))`) is folded when the query is planned and answers as on PostgreSQL, except `'1' + 1`, which the fold types numeric (`42883`; PostgreSQL reads 2). An integer literal (the int4 minimum included), a quoted or cast integer, NULL and a bound `integer` or untyped parameter are read as PostgreSQL reads them. (catalog: [aggregates-windows#r19](adr/0012-divergences/aggregates-windows.md#catalog); #1399)
 
 **NATURAL JOIN is refused.**
 
