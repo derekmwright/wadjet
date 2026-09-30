@@ -10,19 +10,18 @@ import (
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
-// WindowIntegerArgument reads the INTEGER argument of a window function —
-// LAG / LEAD's offset, NTILE's bucket count, NTH_VALUE's n — the way
-// PostgreSQL 17.11 types it: the argument is an `integer`, so an integer
-// literal, a signed one, a quoted literal (an `unknown` PostgreSQL coerces
-// through int4in), a CAST to a 4-byte integer, or NULL. isNull reports the
-// NULL spelling, which PostgreSQL answers with NULL on every row.
+// WindowIntegerArgument reads the INTEGER argument of a window function fn
+// (lower-case, for the messages) — LAG / LEAD's offset, NTILE's bucket count,
+// NTH_VALUE's n — the way PostgreSQL 17.11 types it: the argument is an
+// `integer`, so an integer literal, a signed one, a quoted literal (an
+// `unknown` PostgreSQL coerces through int4in), a CAST to integer or
+// smallint, or NULL. isNull reports the NULL spelling, which PostgreSQL
+// answers with NULL on every row.
 //
-// It is the one reading of that argument. The parser asks it to refuse what
-// the window operator cannot honor (refuseWindowArguments), and the physical
-// planner asks it again for the value — before it, the planner ran strconv.Atoi
-// over the argument's text and dropped whatever failed, so `LAG(x, 1 + 1)`,
-// `LAG(x, NULL)` and `NTILE(o)` all ran with the zero value, which the
-// operator then read as the default (#1399's mechanism).
+// It is the one reading of that argument: the parser asks it to refuse what
+// the window operator cannot honor (refuseWindowArguments), the physical
+// planner for the value (it replaced a strconv.Atoi reading that dropped what
+// it could not parse, #1399's mechanism: ADR-0012 amendment log, 2026-09-29).
 //
 // Any other CONSTANT expression — `2 - 1`, `abs(-1)`, `CAST(1 + 0 AS
 // INTEGER)` — is folded at plan time by the planner's constant fold (the one
@@ -31,8 +30,6 @@ import (
 // argument. What is refused 0A000 is only an argument that needs a ROW — a
 // column reference, a subquery: PostgreSQL evaluates it per row, and the
 // operator takes the offset / n as one constant.
-//
-// fn is the function's lower-case name, for the messages.
 func WindowIntegerArgument(fn string, n Node) (v int64, isNull bool, err error) {
 	switch e := n.(type) {
 	case *ParenNode:

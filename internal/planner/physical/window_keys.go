@@ -53,7 +53,9 @@ type windowKey struct {
 }
 
 // resolveWindowKeys resolves the PARTITION BY / ORDER BY terms of the window
-// expressions on node, keyed by the term's original text.
+// expressions on node, and every argument the operator must read as a
+// computed column (a row field path, an expression, a literal), keyed by the
+// term's original text.
 //
 // The map is keyed by text and not by position because one window stage
 // carries several OVER clauses that routinely share terms, and a shared term
@@ -236,14 +238,9 @@ func resolveWindowKeys(node *logical.Node) map[string]windowKey {
 		// qualified-to-bare fallback settles it), and `*` is not an argument
 		// at all: COUNT(*) counts rows.
 		//
-		// A LITERAL is an argument like any expression. It used to be
-		// skipped here as "a constant the operator already has" — but the
-		// operator has nothing except columns, so `SUM(2.5) OVER ()`,
-		// `FIRST_VALUE(2.5) OVER (…)`, `LAG(5) OVER (…)` and even
-		// `SUM(2) OVER ()` read a column named `5` or `2`, found none, and
-		// answered NULL on every row and every arm, while `SUM(2.5 * 1)`
-		// was computed and answered (#1394). A literal is materialized as
-		// __winkey_N and typed by the same inference as any expression.
+		// A LITERAL is materialized and typed like any expression (#1394:
+		// skipped, `SUM(2.5) OVER ()` read a column named `2.5` and answered
+		// NULL while `SUM(2.5 * 1)` answered; ADR-0012 catalog, aggregates-windows).
 		if col := strings.TrimSpace(we.InputColumn()); col != "" {
 			if ast, err := plansql.ParseExpression(col); err == nil {
 				switch e := ast.(type) {
