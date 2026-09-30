@@ -41,7 +41,8 @@ Every CAST spelling here — an INTEGER and a BIGINT are one too — is
 COLUMN-TYPED (`plansql.CastNode.Column`, written
 `__column_value(cast(<literal> as <type>))` so the rebuilt text carries it):
 the literal is the value of an outer column of that type, and the planner's
-typing walks type it as that column (`physical.columnValueRef`) — an int4's
+declared-type and fixed-point walks type it as that column
+(`physical.columnValueRef`) — an int4's
 width and DECIMAL(10,0), a DECIMAL's declared (p,s), an int4[]'s element —
 never by a CAST expression's own rules. The subquery's declaration is made
 from the same spelling with the value left out (`outerStandIn`), so the
