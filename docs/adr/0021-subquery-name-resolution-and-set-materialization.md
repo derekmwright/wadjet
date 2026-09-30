@@ -37,7 +37,7 @@ rewrite finds. A body's JOIN ON was never read, and a condition naming only
 the outer row was stripped or dropped — so the outer references are now a SET
 collected over the whole body, each one carried or declined (#1232, #1104).
 
-§2c (2026-09-28, #1382 #1418) states where the single-process engine
+§2c (2026-09-28..29, #1382 #1418) states where the single-process engine
 evaluates an uncorrelated subquery the optimizer leaves in a filter: its own
 plan, reading storage — never a cache sized for the enclosing
 statement's scans.
@@ -2843,7 +2843,8 @@ cardinality violation is (ADR-0034 item 6).
 
 ### 2c. An uncorrelated subquery left in a filter runs its OWN plan against storage
 
-(Added 2026-09-28, #1382 #1418.)
+(Added 2026-09-28, #1382 #1418; amended 2026-09-29: the SELECT-list reading and
+the TPC-H plan comparison.)
 
 A subquery predicate whose probe names no outer column — `12 IN (SELECT q.v
 FROM t q)`, `EXISTS (SELECT 1 FROM t q WHERE q.v = 12)`, a scalar comparison
@@ -2881,7 +2882,7 @@ Two refusals remain outside this rule, both loud: an uncorrelated subquery in
 an OUTER join's ON (docs/postgres-differences.md, #1153) and, on the DAG
 arms, a subquery predicate §2's resolution does not reach (under `IS NOT
 NULL`, `OR` or `NOT`), which fails in the worker's filter with no subquery
-runner.
+runner (#1384, #1364).
 
 ### 3. A build-side narrowing is all-or-nothing, and the condition is read STRUCTURALLY
 

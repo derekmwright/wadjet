@@ -89,7 +89,8 @@ named mechanism.
    refused with `42809` (`WITHIN GROUP is required`); it is no longer a NULL
    result or an accepted difference between execution paths. Plain numeric
    calls remain a recorded extension (ADR-0012 catalog,
-   [comparison-membership](0012-divergences/comparison-membership.md)).
+   [aggregates-windows#r7](0012-divergences/aggregates-windows.md#catalog) and
+   [comparison-membership#r12](0012-divergences/comparison-membership.md#catalog)).
 8. **Concurrent load produces false failures.** Coordinator tests fail with
    `workers failed to register within 15s` and `context deadline exceeded`
    under heavy parallel load — never a wrong row. Test output from a busy
