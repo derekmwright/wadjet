@@ -752,45 +752,24 @@ func (w WindowExpr) InputColumn() string {
 	if strings.EqualFold(strings.TrimSpace(w.Func), "ntile") {
 		return ""
 	}
-	return strings.TrimSpace(firstWindowArg(w.InputCol))
+	if args := w.Arguments(); len(args) > 0 {
+		return args[0]
+	}
+	return ""
 }
 
-// firstWindowArg returns the first argument of a window function's argument
-// list — the VALUE argument, dropping LAG/LEAD's offset and default and
-// NTH_VALUE's n.
+// Arguments returns every argument of a window function's argument list,
+// each trimmed — the one splitter over it: InputColumn takes the first (the
+// VALUE argument), and the physical planner reads LAG / LEAD's offset and
+// default and NTILE / NTH_VALUE's n from the rest.
 //
 // The split is on a TOP-LEVEL comma. A plain SplitN cut at the first comma
 // anywhere, so `COALESCE(c, 0) * 2` came back as `COALESCE(c` — an argument
 // nothing could compile, which is one more way a window over an expression
-// answered NULL (#672). Commas inside parentheses and inside string literals
-// belong to the argument, not to the list.
-func firstWindowArg(args string) string {
-	depth := 0
-	inStr := false
-	for i := 0; i < len(args); i++ {
-		switch c := args[i]; {
-		case c == '\'':
-			// '' inside a literal is an escaped quote; toggling twice on it
-			// leaves the state right either way.
-			inStr = !inStr
-		case inStr:
-			// Nothing else is punctuation inside a string literal.
-		case c == '(' || c == '[':
-			depth++
-		case c == ')' || c == ']':
-			depth--
-		case c == ',' && depth == 0:
-			return args[:i]
-		}
-	}
-	return args
-}
-
-// Arguments returns every argument of a window function's argument list,
-// split on TOP-LEVEL commas as firstWindowArg splits the first one off, each
-// trimmed. The physical planner reads LAG / LEAD's offset and default and
-// NTILE / NTH_VALUE's n from here; a plain SplitN on "," cut a default such
-// as `'a,b'` or `COALESCE(y, 0)` in two.
+// answered NULL (#672) — and cut a default such as `'a,b'` in two. Commas
+// inside parentheses and inside string literals belong to the argument, not
+// to the list ('' inside a literal toggles the state twice, leaving it
+// right).
 func (w WindowExpr) Arguments() []string {
 	args := w.InputCol
 	var out []string

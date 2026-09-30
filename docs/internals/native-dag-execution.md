@@ -1693,9 +1693,11 @@ and its DECLARED type is what makes the value exact.
 `WindowColumn.InputCol` named a column the batch did not carry and
 `SUM(d * 2) OVER ()` answered NULL on every row, on BOTH paths, for every
 input type (#672). It is materialized as `__winkey_N` exactly as a computed
-partition key is; `*` and a literal are excluded (COUNT(*) counts rows), and a
-bare or qualified column keeps `exec.Window`'s name lookup. The argument list
-splits on a TOP-LEVEL comma (`logical.firstWindowArg`) — the old
+partition key is, and so is a bare literal (`SUM(2.5) OVER ()` read a column
+named `2.5`, found none and answered NULL, #1394); `*` is excluded (COUNT(*)
+counts rows), and a bare or qualified column keeps `exec.Window`'s name
+lookup. The argument list splits on a TOP-LEVEL comma
+(`logical.WindowExpr.Arguments`, the one splitter) — the old
 `SplitN(…, ",", 2)` cut `COALESCE(c, 0) * 2` into `COALESCE(c`.
 
 The materialized column's **declaration** is inferred from the expression
