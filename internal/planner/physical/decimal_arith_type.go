@@ -73,6 +73,12 @@ func binOpDecimalOperand(n *plansql.BinaryOp, decls ColDecls) (batch.DecimalType
 		return batch.DecimalType{}, false, false
 	}
 	if !lDec && !rDec {
+		if n.Op == "/" && (answerExtractIn(n.Left) || answerExtractIn(n.Right)) {
+			// A marked EXTRACT is a whole number carried in a double: its
+			// quotient is the double's (expr computes it so), not an integer
+			// division, so the node has no exact form.
+			return batch.DecimalType{}, false, false
+		}
 		return batch.DecimalType{Precision: batch.Int64DecimalDigits}, false, true
 	}
 	if n.Op == "/" && isConstNumericLitNode(n.Left) && isConstNumericLitNode(n.Right) {
@@ -520,4 +526,20 @@ func arrayCastDecimalElement(n *plansql.CastNode, el string, decls ColDecls) (ex
 		return expr.DeclDecimal(batch.MaxDecimalPrecision, 0), true
 	}
 	return expr.DeclType{}, false
+}
+
+// answerExtractIn reports whether an integer operand is, or is integer
+// arithmetic over, a marked integral EXTRACT field.
+func answerExtractIn(node plansql.Node) bool {
+	switch n := node.(type) {
+	case *plansql.ParenNode:
+		return answerExtractIn(n.Inner)
+	case *plansql.UnaryOp:
+		return answerExtractIn(n.Inner)
+	case *plansql.BinaryOp:
+		return answerExtractIn(n.Left) || answerExtractIn(n.Right)
+	case *plansql.FuncCallNode:
+		return n.Answer && expr.IntegralExtractField(n.Name)
+	}
+	return false
 }

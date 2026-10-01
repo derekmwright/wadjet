@@ -88,8 +88,14 @@ func integerOperand(e Expr, b *batch.RecordBatch) bool {
 			return true
 		}
 		switch v.Op {
-		case "+", "-", "*", "/", "%":
+		case "+", "-", "*", "%":
 			return integerOperand(v.Left, b) && integerOperand(v.Right, b)
+		case "/":
+			// A marked EXTRACT is a whole number carried in a double: its
+			// quotient is the double's, not an integer division, and the plan
+			// declares that node double precision too (binOpDecimalOperand).
+			return !answerExtract(v.Left) && !answerExtract(v.Right) &&
+				integerOperand(v.Left, b) && integerOperand(v.Right, b)
 		}
 		return false
 	case *BinOpNumeric:
@@ -250,4 +256,23 @@ var integralExtractFields = map[string]bool{
 	"year": true, "month": true, "day": true, "hour": true, "minute": true,
 	"quarter": true, "week": true, "day_of_week": true, "day_of_year": true,
 	"isodow": true, "isoyear": true, "decade": true, "century": true, "millennium": true,
+}
+
+// answerExtract reports whether e is, or is arithmetic over, a marked
+// integral EXTRACT field (FuncCall.answer) — physical.answerExtractIn's
+// mirror.
+func answerExtract(e Expr) bool {
+	switch v := e.(type) {
+	case *FuncCall:
+		return v.answer
+	case *numericFuncCall:
+		return v.answer
+	case *UnaryOp:
+		return answerExtract(v.Operand)
+	case *BinOp:
+		return answerExtract(v.Left) || answerExtract(v.Right)
+	case *BinOpNumeric:
+		return answerExtract(v.Left) || answerExtract(v.Right)
+	}
+	return false
 }
