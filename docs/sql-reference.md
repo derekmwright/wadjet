@@ -1200,7 +1200,9 @@ answering an integer or an integral EXTRACT field,
 `(SELECT (SELECT z.v …) * y.m …)`. Over them `*`, `+`, `-`, `%`, unary
 minus, `abs`, `round`, `trunc`, `mod` and a `CASE`, `COALESCE`, `GREATEST` or
 `NULLIF` arm keep the exact value past 2^53 (`-((SELECT x.b * 10000000 …) * t.n - 3) % 1000`
-is -997.00); a quotient keeps numeric's division scale, and a quotient over an
+is -997.00), as a window function's input as well
+(`sum((SELECT x.b * 10000000 …) * t.n + 3) OVER (ORDER BY t.id)` is
+202500000000000003.00); a quotient keeps numeric's division scale, and a quotient over an
 EXTRACT (`extract(year …) / 7 * x.m`) is the `double precision` it is divided
 in. The same expressions in a query's own
 SELECT list keep `double precision` (see the differences page). An expression is read in its own scope: over a derived table that
