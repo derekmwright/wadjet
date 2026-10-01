@@ -96,8 +96,9 @@ func TestANestedScalarSubqueryPlansConcurrentlyThroughChildPlanners(t *testing.T
 // re-plan annotates the nested subquery that text holds into the build's
 // memo. Before the lock, `-race` reported the memo inside
 // scalarSubqueryColumnDecl on `SELECT t.id, (SELECT (SELECT extract(year FROM
-// t.d) …) + q.m FROM ss_i q …) FROM ss_t t` (arc SS round 12, r12/c31_outerValue_year),
-// and a five-arm run died of `fatal error: concurrent map read and map write`.
+// t.d) …) + q.m FROM ss_i q …) FROM ss_t t` (#1422's per-row re-run; the
+// coordinator cell r12/c31_outerValue_year), and a five-arm run died of
+// `fatal error: concurrent map read and map write`.
 //
 // RUN IT WITH -race, as the tests above.
 func TestTheBuildsDeclarationMemoIsLockedForConcurrentReruns(t *testing.T) {
