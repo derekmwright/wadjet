@@ -50,6 +50,17 @@ package coordinator
 // (`CASE … (SELECT q.m …) … (SELECT q.m …) + 1`, `ARRAY[t.n, 1]`, a recursion
 // over `t.i * t.n`).
 //
+// The r13/* cells are eight more: c36 json_build_object's value, c37 the
+// text renderers (format, lpad and split_part over CAST AS TEXT, md5,
+// array_to_string), c38 ARRAY(subquery), c39 an aggregate's FILTER and
+// HAVING, c40 GROUPING SETS keys, c41 INTERSECT / EXCEPT ALL output under a
+// window max, c42 round / trunc / sign at a negative scale and c45 a NOT
+// EXISTS anti-join beside IN over VALUES; UPDATE … SET and INSERT … VALUES
+// are the wire gate's. The r13/b4 cells are json_build_object over the small
+// exact operands (a subscript, ascii, length, a day count, a scalar
+// subquery) and over the forms v0.25.3 already quoted (a numeric column,
+// `t.i * t.n`, a CAST to numeric(12,3), a numeric literal).
+//
 // Every want is PostgreSQL 17.11's over ssPGFixture
 // (testdata/arc_ss_audit_consumers_pg17.tsv: name, ordered, sql, answer),
 // except the cells in testdata/arc_ss_audit_consumers_kept.tsv, each a

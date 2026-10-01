@@ -13,7 +13,11 @@ package pgwire
 // outer expression and a window key holding a scalar subquery. The r12/*
 // cells are the kinds stored by CTAS inside an ARRAY constructor and read
 // through a view, and the wire forms of the choice-arm, array-element and
-// recursive-seed cells.
+// recursive-seed cells. The r13/* cells are the kinds written by UPDATE … SET
+// and INSERT … VALUES into numeric(38,2) / double precision / text columns,
+// and json_build_object over the small exact operands (r13/b4); the
+// r13/seed cells are recursive CTEs seeded by a scalar subquery over a
+// numeric(p,s) column and by a numeric(38,s) (recursion#r11, r12).
 //
 // Every want is PostgreSQL 17.11's, measured over the same DDL with the same
 // client (pgx, default_query_exec_mode simple_protocol / exec /
