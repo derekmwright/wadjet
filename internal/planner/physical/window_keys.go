@@ -93,7 +93,18 @@ func resolveWindowKeys(node *logical.Node) map[string]windowKey {
 	// aggregate's own output name, after which it is indistinguishable from
 	// `OVER (ORDER BY a)` where `a` is that aggregate's alias — and the two
 	// bind DIFFERENT columns (ADR-0026 §4, #968's own flag).
-	add := func(term string, namesAgg bool) {
+	// parsed is the term's tree: the window ARGUMENT's own when the node
+	// carries one for the same text (it holds the scalar-answer marks a
+	// subquery body's plan stamps, which the text does not spell, so a
+	// re-parse computed a marked integral EXTRACT or CAST as the double the
+	// declaration — read off that same tree — does not say), else a parse.
+	parsed := func(term string, arg plansql.Node) (plansql.Node, error) {
+		if arg != nil && cleanExpr(arg.String()) == cleanExpr(term) {
+			return arg, nil
+		}
+		return plansql.ParseExpression(term)
+	}
+	add := func(term string, namesAgg bool, arg plansql.Node) {
 		term = strings.TrimSpace(term)
 		if term == "" {
 			return
@@ -107,7 +118,7 @@ func resolveWindowKeys(node *logical.Node) map[string]windowKey {
 		// join made two columns share that bare name. The cases below only
 		// ever narrow it further.
 		k := windowKey{Name: cleanExpr(term)}
-		if ast, err := plansql.ParseExpression(term); err == nil {
+		if ast, err := parsed(term, arg); err == nil {
 			ref, isCol := ast.(*plansql.ColRef)
 			switch {
 			case !isCol:
@@ -252,20 +263,20 @@ func resolveWindowKeys(node *logical.Node) map[string]windowKey {
 				switch e := ast.(type) {
 				case *plansql.ColRef:
 					if fieldOf(colFields, e) != nil {
-						add(col, false)
+						add(col, false, nil)
 					}
 				case *plansql.StarNode:
 					// Nothing to compute.
 				default:
-					add(col, false)
+					add(col, false, we.InputExpr)
 				}
 			}
 		}
 		for _, pb := range we.PartitionBy {
-			add(pb, false)
+			add(pb, false, nil)
 		}
 		for _, ob := range we.OrderBy {
-			add(ob.Column, ob.NamesAggregateOutput)
+			add(ob.Column, ob.NamesAggregateOutput, nil)
 		}
 	}
 	return out
