@@ -1222,18 +1222,20 @@ func arcD5MeasuredCells() []arcD5Cell {
 		// pipeline for a SELECT-list subquery it no longer has (#659's route,
 		// hence wantScalarProjRoutes 0).
 		//
-		// The cell one line down is the boundary and keeps BOTH divergences:
-		// its subquery has a FROM clause, so it stays a subquery, stays
-		// FLOAT8, and stays routed.
+		// The cell one line down is the boundary: its subquery has a FROM
+		// clause, so it stays a subquery and stays routed — and its integer
+		// answer is an integer operand of `a`'s numeric arithmetic, so the sum
+		// is exact numeric, as PostgreSQL 17.11 answers (FLOAT8 115.99 at
+		// v0.25.3: the pin started agreeing and its float want is gone).
 		{issue: "#714", name: "scalar_subquery_in_an_aggregate_argument_answers",
 			sql:    `SELECT SUM(a + (SELECT 1)) AS s FROM decpair`,
 			want:   []string{"s=59.99"},
 			pgSays: "numeric 59.99 — the VALUE and the TYPE agree since #1044"},
 		{issue: "#714", name: "scalar_aggregate_subquery_in_an_aggregate_argument_answers",
 			sql:                  `SELECT SUM(a + (SELECT MAX(id) FROM decpair)) AS s FROM decpair`,
-			want:                 []string{"s=float:115.99"},
+			want:                 []string{"s=115.99"},
 			wantScalarProjRoutes: 1,
-			pgSays:               "numeric 115.99"},
+			pgSays:               "numeric 115.99 — the VALUE and the TYPE agree"},
 		{issue: "#714", name: "control_the_same_sum_without_a_subquery_stays_exact",
 			sql:  `SELECT SUM(a) AS s FROM decpair`,
 			want: []string{"s=52.99"},
