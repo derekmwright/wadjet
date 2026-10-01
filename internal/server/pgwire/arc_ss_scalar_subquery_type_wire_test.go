@@ -341,7 +341,8 @@ func TestArcSSDeclaredByTheSelectListWalk(t *testing.T) {
 // integer[]). A subquery whose answer multiplies an integer CAST or an
 // integral EXTRACT field by a NUMERIC is numeric, computed exactly, as v0.25.3
 // and PostgreSQL declare it; the same expression in the query's own SELECT
-// list keeps its recorded double precision. A relation, a CTE or an alias NAMED
+// list keeps its recorded double precision. An integer subquery times a
+// NUMERIC stays exact through the operators after it, past 2^53. A relation, a CTE or an alias NAMED
 // __column_value answers; only the re-run's spelling `__column_value(cast(…))`
 // — and any other call of that name — is 42883.
 func TestArcSSScopeAndIntegerOperandsOnTheWire(t *testing.T) {
@@ -356,6 +357,7 @@ func TestArcSSScopeAndIntegerOperandsOnTheWire(t *testing.T) {
 		"CREATE TABLE ss_r5c AS SELECT (SELECT CAST(t.b AS INTEGER) * t.n FROM ss_t t WHERE t.id = 1) AS kc, " +
 			"(SELECT extract(year FROM t.d) * t.n FROM ss_t t WHERE t.id = 1) AS ke",
 		"CREATE TABLE ss_r6n AS SELECT (SELECT (SELECT z.v FROM ss_i z WHERE z.id = 1) * y.m FROM ss_i y WHERE y.id = 1) AS k",
+		"CREATE TABLE ss_r7z AS SELECT (SELECT x.b * 10000000 FROM ss_t x WHERE x.id = 3) * t.n + 3 AS k FROM ss_t t WHERE t.id = 1",
 		"CREATE TABLE __column_value (k integer)",
 		"INSERT INTO __column_value (k) VALUES (4)",
 	} {
@@ -414,6 +416,10 @@ func TestArcSSScopeAndIntegerOperandsOnTheWire(t *testing.T) {
 		{"ctasSubV", `SELECT k FROM ss_r6n`, 1700, "6.25", ""},
 		{"mTimesYearDiv7", `SELECT (SELECT x.m * (extract(year FROM o.d) / 7) FROM ss_i x WHERE x.id = 1) AS v FROM ss_t o WHERE o.id = 1`, 701, "361.42857142857144", "ADR-0024 §2c: a quotient over EXTRACT is the double the kernel divides, as at v0.25.3 (PostgreSQL: numeric 361.428571428571428625)"},
 		{"yearDiv7Times15", `SELECT (SELECT extract(year FROM o.d) / 7 * 1.5 FROM ss_i x WHERE x.id = 1) AS v FROM ss_t o WHERE o.id = 1`, 701, "433.7142857142858", "ADR-0024 §2c: a quotient over EXTRACT is the double the kernel divides, as at v0.25.3 (PostgreSQL: numeric 433.71428571428571435)"},
+		{"bigTimesNPlus3", `SELECT (SELECT x.b * 10000000 FROM ss_t x WHERE x.id = 3) * t.n + 3 AS v FROM ss_t t WHERE t.id = 1`, 1700, "202500000000000003.00", ""},
+		{"corrBig", `SELECT (SELECT x.b * 10000000 + t.i FROM ss_t x WHERE x.id = 3) * t.n + 3 AS v FROM ss_t t WHERE t.id = 1`, 1700, "202500000000000009.75", ""},
+		{"subSubBig", `SELECT (SELECT (SELECT x.b * 10000000 FROM ss_t x WHERE x.id = 3) * y.m + 3 FROM ss_i y WHERE y.id = 1) AS v`, 1700, "112500000000000003.00", ""},
+		{"ctasBig", `SELECT k FROM ss_r7z`, 1700, "202500000000000003.00", ""},
 		{"tableNamed", `SELECT k AS v FROM __column_value`, 23, "4", ""},
 		{"aliasNamed", `SELECT __column_value.k AS v FROM (SELECT 1 AS k) AS __column_value (k)`, 23, "1", ""},
 		{"cteNamed", `WITH __column_value (k) AS (SELECT 1) SELECT k AS v FROM __column_value`, 23, "1", ""},
