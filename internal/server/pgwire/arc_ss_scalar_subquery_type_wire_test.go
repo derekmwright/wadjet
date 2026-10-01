@@ -344,7 +344,8 @@ func TestArcSSDeclaredByTheSelectListWalk(t *testing.T) {
 // list keeps its recorded double precision. An integer subquery times a
 // NUMERIC stays exact through the operators after it, past 2^53, and so does
 // every consumer of an exact operand: unary minus, abs, round, %, a CASE or
-// COALESCE arm, over a subquery, an integer call or a marked EXTRACT. A relation, a CTE or an alias NAMED
+// COALESCE arm, over a subquery, an integer call or a marked EXTRACT — and a
+// window function's input over the same operands. A relation, a CTE or an alias NAMED
 // __column_value answers; only the re-run's spelling `__column_value(cast(…))`
 // — and any other call of that name — is 42883.
 func TestArcSSScopeAndIntegerOperandsOnTheWire(t *testing.T) {
@@ -361,6 +362,7 @@ func TestArcSSScopeAndIntegerOperandsOnTheWire(t *testing.T) {
 		"CREATE TABLE ss_r6n AS SELECT (SELECT (SELECT z.v FROM ss_i z WHERE z.id = 1) * y.m FROM ss_i y WHERE y.id = 1) AS k",
 		"CREATE TABLE ss_r7z AS SELECT (SELECT x.b * 10000000 FROM ss_t x WHERE x.id = 3) * t.n + 3 AS k FROM ss_t t WHERE t.id = 1",
 		"CREATE TABLE ss_r8n AS SELECT -((SELECT x.b * 10000000 FROM ss_t x WHERE x.id = 3) * t.n - 3) AS k FROM ss_t t WHERE t.id = 1",
+		"CREATE TABLE ss_r9w AS SELECT t.id, sum((SELECT x.b * 10000000 FROM ss_t x WHERE x.id = 3) * t.n + 3) OVER (ORDER BY t.id) AS k FROM ss_t t WHERE t.id = 1",
 		"CREATE TABLE __column_value (k integer)",
 		"INSERT INTO __column_value (k) VALUES (4)",
 	} {
@@ -432,6 +434,11 @@ func TestArcSSScopeAndIntegerOperandsOnTheWire(t *testing.T) {
 		{"subCaseYear", `SELECT (SELECT CASE WHEN o.o THEN extract(year FROM o.d) ELSE 0 END * y.m FROM ss_i y, ss_t o WHERE y.id = 1 AND o.id = 1) AS v`, 1700, "2530.00", ""},
 		{"subNegYear", `SELECT (SELECT -(extract(year FROM o.d) * 100000000000000 * y.m - 3) FROM ss_i y, ss_t o WHERE y.id = 1 AND o.id = 1) AS v`, 1700, "-252999999999999997.00", ""},
 		{"ctasNeg", `SELECT k FROM ss_r8n`, 1700, "-202499999999999997.00", ""},
+		{"windowSubSum", `SELECT sum((SELECT x.b * 10000000 FROM ss_t x WHERE x.id = 3) * t.n + 3) OVER (ORDER BY t.id) AS v FROM ss_t t WHERE t.id = 1`, 1700, "202500000000000003.00", ""},
+		{"windowSubMax", `SELECT max((SELECT x.b * 10000000 FROM ss_t x WHERE x.id = 3) * t.n + 3) OVER () AS v FROM ss_t t WHERE t.id = 1`, 1700, "202500000000000003.00", ""},
+		{"windowSubLag", `SELECT lag((SELECT x.b * 10000000 FROM ss_t x WHERE x.id = 3) * t.n + 3, 0) OVER (ORDER BY t.id) AS v FROM ss_t t WHERE t.id = 1`, 1700, "202500000000000003.00", ""},
+		{"windowIdx", `SELECT sum(t.a[1] * t.n) OVER (ORDER BY t.id) AS v FROM ss_t t WHERE t.id = 1`, 1700, "2.25", ""},
+		{"ctasWindow", `SELECT k FROM ss_r9w`, 1700, "202500000000000003.00", ""},
 		{"tableNamed", `SELECT k AS v FROM __column_value`, 23, "4", ""},
 		{"aliasNamed", `SELECT __column_value.k AS v FROM (SELECT 1 AS k) AS __column_value (k)`, 23, "1", ""},
 		{"cteNamed", `WITH __column_value (k) AS (SELECT 1) SELECT k AS v FROM __column_value`, 23, "1", ""},
