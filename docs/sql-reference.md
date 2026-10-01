@@ -1200,12 +1200,26 @@ answering an integer or an integral EXTRACT field,
 `(SELECT (SELECT z.v …) * y.m …)`. Over them `*`, `+`, `-`, `%`, unary
 minus, `abs`, `round`, `trunc`, `mod` and a `CASE`, `COALESCE`, `GREATEST` or
 `NULLIF` arm keep the exact value past 2^53 (`-((SELECT x.b * 10000000 …) * t.n - 3) % 1000`
-is -997.00), and so does the argument of a window `sum`, `avg`, `min`, `max`,
+is -997.00), and every operator that reads the value keeps it: a
+projection, `WHERE`, a join's keys and its condition, `IN (subquery)`, an
+aggregate's argument, `HAVING`, a `GROUP BY` key, `DISTINCT`, `UNION`,
+`ORDER BY` and `LIMIT`, a `CASE` arm, `CAST` to `text` or `bigint`,
+`string_agg`, a correlated subquery's answer, a derived table's or a CTE's
+column read by an outer expression (`d.v + 1` over `t.a[1] * t.n AS v` is
+`numeric`), the argument of a window `sum`, `avg`, `min`, `max`,
 `first_value`, `last_value`, `lag` or `lead` in the query's own SELECT list
 (`sum((SELECT x.b * 10000000 …) * t.n + 3) OVER (ORDER BY t.id)` is
-202500000000000003.00) and of a window `sum`, `avg` or `max` inside the
-subquery's body (`(SELECT sum(o.a[1] * y.m) OVER () …)` is `numeric` 1.25;
-`avg` at its input's scale + 4); a quotient keeps numeric's division scale, and a quotient over an
+202500000000000003.00) and that window's `PARTITION BY` and `ORDER BY` keys
+(`OVER (PARTITION BY (SELECT z.v …) * t.n)`), the argument of a window
+`sum`, `avg` or `max` inside the subquery's body (`(SELECT sum(o.a[1] * y.m) OVER () …)`
+is `numeric` 1.25; `avg` at its input's scale + 4), what `CREATE TABLE … AS`
+and `INSERT … SELECT` store and `UPDATE … WHERE` and `DELETE … WHERE`
+compare, both wire formats, and an aggregate, a `GROUP BY` key, a window and
+a sort that spill. Refused instead are a `FROM`-less `LATERAL` body holding
+a scalar subquery (0A000, #1298) and, on the distributed arms, a `WHERE` or
+join condition holding a scalar subquery under `CAST`, `abs` or `COALESCE`,
+and an `IN (subquery)` whose left operand holds a scalar subquery (the
+`BETWEEN` refusal above). A quotient keeps numeric's division scale, and a quotient over an
 EXTRACT (`extract(year …) / 7 * x.m`) is the `double precision` it is divided
 in. The same expressions in a query's own
 SELECT list keep `double precision` (see the differences page). An expression is read in its own scope: over a derived table that
