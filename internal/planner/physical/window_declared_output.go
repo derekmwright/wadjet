@@ -144,6 +144,17 @@ func windowSpecOutputType(node *logical.Node, we logical.WindowExpr) expr.DeclTy
 					}
 					return expr.Decl(out)
 				}
+				if d.ID == parquet.TypeDecimal && d.DecKnown {
+					// The computed-argument twin of the bare DECIMAL column's
+					// arm below. `SUM(o.i * y.m) OVER ()` accumulates the
+					// exact product, and exec.Window re-types its output to
+					// DECIMAL at runtime; a declaration left at the float
+					// fallback is what a scalar subquery's answer column was
+					// built from, so the body's exact sum met #361's guard in
+					// the outer projection.
+					prec, scale := exec.WindowDecimalAggMeta(parseWindowFunc(fn), d.Scale)
+					return expr.DeclDecimal(prec, scale)
+				}
 				if fn == "sum" && d.ID == parquet.TypeFloat32 {
 					// The computed-argument twin of the bare column's real
 					// arm below: `SUM(r * 1) OVER ()` is real on the server
