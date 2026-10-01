@@ -317,8 +317,54 @@ func classifyOperandFold(e Expr, b *batch.RecordBatch) (boxKind, bool) {
 		return joinFoldKinds(arms, b)
 	case *Coalesce:
 		return joinFoldKinds(v.Args, b)
+	case *BinOp:
+		return binOpFold(v, b)
 	}
 	return classifyOperand(e, b)
+}
+
+// binOpFold is the generic BinOp's TYPE answer. classifyOperand names its
+// exact, integer and temporal modes and leaves every other mode unclassified,
+// since this node also evaluates date and interval shifts. One of those is
+// the DOUBLE mode, and its box is a real float64: `+`, `-`, `*` and `%` over
+// numeric operands that are neither both exact (the decimal arm) nor both
+// integers (intMode) — `(SELECT q.m …) + 1` over a NUMERIC scalar subquery's
+// answer, which takes the float8 rung, is the shape. Unclassified, it took a
+// choice's fold to nothing, so `CASE … THEN (SELECT q.m …) ELSE (SELECT q.m
+// …) + 1 END` handed the bare arm's NUMERIC text to the double precision
+// vector the plan declares for it, and #361's guard refused the store; every
+// exact operand kind (a marked EXTRACT, a subscript, a day count, ascii,
+// length or an integer CAST beside a numeric) met the same arm. `/` is not
+// here: over two integer boxes it divides as integers row by row.
+func binOpFold(v *BinOp, b *batch.RecordBatch) (boxKind, bool) {
+	k, settled := classifyOperand(v, b)
+	if k != boxUnknown || !settled {
+		return k, settled
+	}
+	switch v.Op {
+	case "+", "-", "*", "%":
+	default:
+		return boxUnknown, true
+	}
+	lk, ls := classifyOperandFold(v.Left, b)
+	rk, rs := classifyOperandFold(v.Right, b)
+	if !ls || !rs {
+		return boxUnknown, false
+	}
+	number := func(k boxKind) bool {
+		switch k {
+		case boxDecimal, boxNumber, boxInt32, boxInt64, boxFloat32, boxFloat64:
+			return true
+		}
+		return false
+	}
+	fractional := func(k boxKind) bool {
+		return k == boxDecimal || k == boxFloat32 || k == boxFloat64
+	}
+	if number(lk) && number(rk) && (fractional(lk) || fractional(rk)) {
+		return boxFloat64, true
+	}
+	return boxUnknown, true
 }
 
 // joinFoldKinds is joinOperandKinds with the pure ladder — no DECIMAL
