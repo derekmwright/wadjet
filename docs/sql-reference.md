@@ -1188,15 +1188,19 @@ subscript of an `integer[]`, a day count `date - date`, `ascii`) is
 `integer` — `(SELECT x.v + x.v …)`, `(SELECT (x.d - DATE '2024-01-01') + 1 …)`,
 `(SELECT ascii(x.s) …)` — and a result past its range is 22003, as on
 PostgreSQL: `(SELECT x.v * 1000000000 …)`, `(SELECT x.a[1] + 2147483647 …)`;
-a `bigint` operand makes it `bigint` (`(SELECT x.b - x.i …)` is 8999999995). An
+a `bigint` operand makes it `bigint` (`(SELECT x.b - x.i …)` is 8999999995; a
+`GROUP BY` over the same mixed pair still raises 22003, as at v0.25.3). An
 integer expression beside a `numeric` — a day count, `ascii`, `length`, a
 subscript of an `integer[]`, `COALESCE` over integers — is `numeric`
 arithmetic, as an `integer` column's is: `(SELECT (x.d - DATE '2024-01-01') * x.n …)`
 is `numeric`, and so is an integer CAST or an integral EXTRACT field beside a
 `numeric` inside a subquery — `(SELECT CAST(o.b AS INTEGER) * x.m …)`,
-`(SELECT extract(year FROM o.d) * x.m …)` — computed exactly, while the same
-expressions in a query's own SELECT list keep `double precision` (see the
-differences page). An expression is read in its own scope: over a derived table that
+`(SELECT extract(year FROM o.d) * x.m …)` — and so is a nested scalar subquery
+answering an integer or an integral EXTRACT field,
+`(SELECT (SELECT z.v …) * y.m …)`; `*`, `+`, `-` and `%` over them are exact,
+while a quotient over an EXTRACT (`extract(year …) / 7 * x.m`) is the
+`double precision` it is divided in. The same expressions in a query's own
+SELECT list keep `double precision` (see the differences page). An expression is read in its own scope: over a derived table that
 publishes `t.b AS i` and its own unaliased `i + i`, the query's `i + i` is the
 `bigint` sum of the `bigint` `i`. A subquery that
 reads the outer row is declared with each outer column at that column's own
