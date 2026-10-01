@@ -509,3 +509,62 @@ r7/z_colBigTimesNPlus3	true	SELECT t.id, 90000000000000000 * t.n + 3 FROM ss_t t
 r7/z_subSubBig	false	SELECT (SELECT (SELECT x.b * 10000000 FROM ss_t x WHERE x.id = 3) * y.m + 3 FROM ss_i y WHERE y.id = 1)	{numeric} rows=1 112500000000000003.00
 r7/z_corrBig	true	SELECT t.id, (SELECT x.b * 10000000 + t.i FROM ss_t x WHERE x.id = 3) * t.n + 3 FROM ss_t t WHERE t.id < 3 ORDER BY t.id	{int,numeric} rows=2 1,202500000000000009.75 | 2,-314999999999999972.50
 r7/z_sumBig	false	SELECT sum((SELECT x.b * 10000000 FROM ss_t x WHERE x.id = 3) * t.n + 3) FROM ss_t t WHERE t.id < 3	{numeric} rows=1 -112499999999999994.00
+# Every consumer of an exact operand (unary ±, abs/round/trunc/mod, %, CAST, a choice arm) reads it exactly, whatever node the
+# operand is (r8/*: the generic arithmetic node, a choice, an integer-valued call, a subscript, a day count, a marked EXTRACT).
+r8/d_deepModNeg	true	SELECT t.id, -((SELECT x.b * 10000000 FROM ss_t x WHERE x.id = 3) * t.n - 3) % 1000 FROM ss_t t WHERE t.id <> 4 ORDER BY t.id	{int,numeric} rows=5 1,-997.00 | 2,3.00 | 3,-997.00 | 5,-997.00 | 6,NULL
+r8/d_deepAbs	true	SELECT t.id, abs((SELECT x.b * 10000000 FROM ss_t x WHERE x.id = 3) * t.n + 3) + 1 FROM ss_t t ORDER BY t.id	{int,numeric} rows=6 1,202500000000000004.00 | 2,314999999999999998.00 | 3,900000000000000004.00 | 4,4.00 | 5,900000000000004.00 | 6,NULL
+r8/d_deepRound	true	SELECT t.id, round((SELECT x.b * 10000000 FROM ss_t x WHERE x.id = 3) * t.n + 3, 1) + 1 FROM ss_t t ORDER BY t.id	{int,numeric} rows=6 1,202500000000000004.0 | 2,-314999999999999996.0 | 3,900000000000000004.0 | 4,4.0 | 5,900000000000004.0 | 6,NULL
+r8/c_colIdxModNeg	true	SELECT t.id, -(t.a[1] * 100000000000000000 * t.n - 3) % 1000 FROM ss_t t WHERE t.id < 4 ORDER BY t.id	{int,numeric} rows=3 1,-997.00 | 2,3.00 | 3,-997.00
+r8/s_negSub	true	SELECT t.id, -((SELECT x.b * 10000000 FROM ss_t x WHERE x.id = 3) * t.n - 3) FROM ss_t t WHERE t.id < 3 ORDER BY t.id	{int,numeric} rows=2 1,-202499999999999997.00 | 2,315000000000000003.00
+r8/s_negSubPlus	true	SELECT t.id, -((SELECT x.b * 10000000 FROM ss_t x WHERE x.id = 3) * t.n - 3) + 1 FROM ss_t t WHERE t.id < 3 ORDER BY t.id	{int,numeric} rows=2 1,-202499999999999996.00 | 2,315000000000000004.00
+r8/s_subAbs	true	SELECT t.id, abs((SELECT x.b * 10000000 FROM ss_t x WHERE x.id = 3) * t.n + 3) FROM ss_t t WHERE t.id < 3 ORDER BY t.id	{int,numeric} rows=2 1,202500000000000003.00 | 2,314999999999999997.00
+r8/s_subRound	true	SELECT t.id, round((SELECT x.b * 10000000 FROM ss_t x WHERE x.id = 3) * t.n + 3, 1) FROM ss_t t WHERE t.id < 3 ORDER BY t.id	{int,numeric} rows=2 1,202500000000000003.0 | 2,-314999999999999997.0
+r8/s_dcAbs	true	SELECT t.id, abs((t.d - DATE '0001-01-01') * t.n * 1000000000000 + 3) + 1 FROM ss_t t WHERE t.id < 3 ORDER BY t.id	{int,numeric} rows=2 1,1662633000000000004.00 | 2,2517066999999999998.00
+r8/s_dcNeg	true	SELECT t.id, -((t.d - DATE '0001-01-01') * t.n * 1000000000000 + 3) + 1 FROM ss_t t WHERE t.id < 3 ORDER BY t.id	{int,numeric} rows=2 1,-1662633000000000002.00 | 2,2517066999999999998.00
+r8/au_negSub	true	SELECT t.id, -((SELECT x.b * 10000000 FROM ss_t x WHERE x.id = 3) * t.n - 3) FROM ss_t t WHERE t.id < 3 ORDER BY t.id	{int,numeric} rows=2 1,-202499999999999997.00 | 2,315000000000000003.00
+r8/au_negCoal	true	SELECT t.id, -COALESCE((SELECT x.b * 10000000 FROM ss_t x WHERE x.id = 3) * t.n - 3, 0) % 1000 FROM ss_t t WHERE t.id < 3 ORDER BY t.id	{int,numeric} rows=2 1,-997.00 | 2,3.00
+r8/au_negCase	true	SELECT t.id, -(CASE WHEN t.o THEN (SELECT x.b * 10000000 FROM ss_t x WHERE x.id = 3) * t.n - 3 ELSE 1 END) % 1000 FROM ss_t t WHERE t.id < 3 ORDER BY t.id	{int,numeric} rows=2 1,-997.00 | 2,-1
+r8/au_negGreatest	true	SELECT t.id, -GREATEST((SELECT x.b * 10000000 FROM ss_t x WHERE x.id = 3) * t.n - 3, 0) % 1000 FROM ss_t t WHERE t.id < 3 ORDER BY t.id	{int,numeric} rows=2 1,-997.00 | 2,0
+r8/au_negNegSub	true	SELECT t.id, -(-((SELECT x.b * 10000000 FROM ss_t x WHERE x.id = 3) * t.n - 3)) % 1000 FROM ss_t t WHERE t.id < 3 ORDER BY t.id	{int,numeric} rows=2 1,997.00 | 2,-3.00
+r8/au_absSub	true	SELECT t.id, abs((SELECT x.b * 10000000 FROM ss_t x WHERE x.id = 3) * t.n + 3) + 1 FROM ss_t t WHERE t.id < 3 ORDER BY t.id	{int,numeric} rows=2 1,202500000000000004.00 | 2,314999999999999998.00
+r8/au_absCoal	true	SELECT t.id, abs(COALESCE((SELECT x.b * 10000000 FROM ss_t x WHERE x.id = 3) * t.n + 3, 0)) % 1000 FROM ss_t t WHERE t.id < 3 ORDER BY t.id	{int,numeric} rows=2 1,3.00 | 2,997.00
+r8/au_absNeg	true	SELECT t.id, abs(-((SELECT x.b * 10000000 FROM ss_t x WHERE x.id = 3) * t.n + 3)) % 1000 FROM ss_t t WHERE t.id < 3 ORDER BY t.id	{int,numeric} rows=2 1,3.00 | 2,997.00
+r8/au_roundSub	true	SELECT t.id, round((SELECT x.b * 10000000 FROM ss_t x WHERE x.id = 3) * t.n + 3, 1) + 1 FROM ss_t t WHERE t.id < 3 ORDER BY t.id	{int,numeric} rows=2 1,202500000000000004.0 | 2,-314999999999999996.0
+r8/au_roundCoal	true	SELECT t.id, round(COALESCE((SELECT x.b * 10000000 FROM ss_t x WHERE x.id = 3) * t.n + 3, 0), 1) % 1000 FROM ss_t t WHERE t.id < 3 ORDER BY t.id	{int,numeric} rows=2 1,3.0 | 2,-997.0
+r8/au_truncSub	true	SELECT t.id, trunc((SELECT x.b * 10000000 FROM ss_t x WHERE x.id = 3) * t.n + 3, 1) % 1000 FROM ss_t t WHERE t.id < 3 ORDER BY t.id	{int,numeric} rows=2 1,3.0 | 2,-997.0
+r8/au_modFnSub	true	SELECT t.id, mod((SELECT x.b * 10000000 FROM ss_t x WHERE x.id = 3) * t.n - 3, 1000) FROM ss_t t WHERE t.id < 3 ORDER BY t.id	{int,numeric} rows=2 1,997.00 | 2,-3.00
+r8/au_modFnCoal	true	SELECT t.id, mod(COALESCE((SELECT x.b * 10000000 FROM ss_t x WHERE x.id = 3) * t.n - 3, 0), 1000) FROM ss_t t WHERE t.id < 3 ORDER BY t.id	{int,numeric} rows=2 1,997.00 | 2,-3.00
+r8/au_castBareSub	true	SELECT t.id, CAST((SELECT x.b * 10000000 FROM ss_t x WHERE x.id = 3) * t.n - 3 AS NUMERIC) % 1000 FROM ss_t t WHERE t.id < 3 ORDER BY t.id	{int,numeric} rows=2 1,997.00 | 2,-3.00
+r8/au_castBareCoal	true	SELECT t.id, CAST(COALESCE((SELECT x.b * 10000000 FROM ss_t x WHERE x.id = 3) * t.n - 3, 0) AS NUMERIC) % 1000 FROM ss_t t WHERE t.id < 3 ORDER BY t.id	{int,numeric} rows=2 1,997.00 | 2,-3.00
+r8/au_castPSSub	true	SELECT t.id, CAST((SELECT x.b * 10000000 FROM ss_t x WHERE x.id = 3) * t.n - 3 AS NUMERIC(30,2)) % 1000 FROM ss_t t WHERE t.id < 3 ORDER BY t.id	{int,numeric} rows=2 1,997.00 | 2,-3.00
+r8/au_coalNeg	true	SELECT t.id, COALESCE(-((SELECT x.b * 10000000 FROM ss_t x WHERE x.id = 3) * t.n - 3), 0) % 1000 FROM ss_t t WHERE t.id < 3 ORDER BY t.id	{int,numeric} rows=2 1,-997.00 | 2,3.00
+r8/au_caseAbs	true	SELECT t.id, (CASE WHEN t.o THEN abs((SELECT x.b * 10000000 FROM ss_t x WHERE x.id = 3) * t.n - 3) ELSE t.n END) % 1000 FROM ss_t t WHERE t.id < 3 ORDER BY t.id	{int,numeric} rows=2 1,997.00 | 2,-3.50
+r8/au_greatestRound	true	SELECT t.id, GREATEST(round((SELECT x.b * 10000000 FROM ss_t x WHERE x.id = 3) * t.n - 3, 1), t.n) % 1000 FROM ss_t t WHERE t.id < 3 ORDER BY t.id	{int,numeric} rows=2 1,997.0 | 2,-3.50
+r8/au_nullifSub	true	SELECT t.id, NULLIF((SELECT x.b * 10000000 FROM ss_t x WHERE x.id = 3) * t.n - 3, 0) % 1000 FROM ss_t t WHERE t.id < 3 ORDER BY t.id	{int,numeric} rows=2 1,997.00 | 2,-3.00
+r8/au_coalCoal	true	SELECT t.id, COALESCE(COALESCE((SELECT x.b * 10000000 FROM ss_t x WHERE x.id = 3) * t.n - 3, 0), t.n) % 1000 FROM ss_t t WHERE t.id < 3 ORDER BY t.id	{int,numeric} rows=2 1,997.00 | 2,-3.00
+r8/au_negIntSub	true	SELECT t.id, -(SELECT x.b * 10000000 FROM ss_t x WHERE x.id = 3) * t.n % 1000 FROM ss_t t WHERE t.id < 3 ORDER BY t.id	{int,numeric} rows=2 1,0.00 | 2,0.00
+r8/au_absIntSub	true	SELECT t.id, abs((SELECT x.b * 10000000 FROM ss_t x WHERE x.id = 3)) * t.n % 1000 + 3 FROM ss_t t WHERE t.id < 3 ORDER BY t.id	{int,numeric} rows=2 1,3.00 | 2,3.00
+r8/au_negAscii	true	SELECT t.id, -(ascii(t.s) * 10000000000000000 * t.n - 3) % 1000 FROM ss_t t WHERE t.id < 3 ORDER BY t.id	{int,numeric} rows=2 1,-997.00 | 2,3.00
+r8/au_negIdx	true	SELECT t.id, -(t.a[1] * 100000000000000000 * t.n - 3) % 1000 FROM ss_t t WHERE t.id < 3 ORDER BY t.id	{int,numeric} rows=2 1,-997.00 | 2,3.00
+r8/au_negDc	true	SELECT t.id, -((t.d - DATE '0001-01-01') * t.n * 1000000000000 + 3) % 1000 FROM ss_t t WHERE t.id < 3 ORDER BY t.id	{int,numeric} rows=2 1,-3.00 | 2,997.00
+r8/au_negCastInt	true	SELECT t.id, -(CAST(t.b AS BIGINT) * 10000000 * t.n - 3) % 1000 FROM ss_t t WHERE t.id < 3 ORDER BY t.id	{int,numeric} rows=2 1,-997.00 | 2,-997.00
+r8/au_subNeg	false	SELECT (SELECT -((SELECT x.b * 10000000 FROM ss_t x WHERE x.id = 3) * y.m - 3) % 1000 FROM ss_i y WHERE y.id = 1)	{numeric} rows=1 -997.00
+r8/au_subAbsCast	false	SELECT (SELECT abs(CAST(o.b AS INTEGER) * y.m - 3) FROM ss_i y, ss_t o WHERE y.id = 1 AND o.id = 1)	{numeric} rows=1 34.50
+r8/au_subNegExtract	false	SELECT (SELECT -(extract(year FROM o.d) * y.m * 100000000000000 - 3) % 1000 FROM ss_i y, ss_t o WHERE y.id = 1 AND o.id = 1)	{numeric} rows=1 -997.00
+r8/au_colNeg	true	SELECT t.id, -(t.b * 10000000 * t.n - 3) % 1000 FROM ss_t t WHERE t.id < 3 ORDER BY t.id	{int,numeric} rows=2 1,-997.00 | 2,-997.00
+r8/a2_e1	false	SELECT (SELECT (extract(year FROM o.d) * y.m * 100000000000000 - 3) % 1000 FROM ss_i y, ss_t o WHERE y.id = 1 AND o.id = 1)	{numeric} rows=1 997.00
+r8/a2_e2	false	SELECT (SELECT extract(year FROM o.d) * y.m * 100000000000000 - 3 FROM ss_i y, ss_t o WHERE y.id = 1 AND o.id = 1)	{numeric} rows=1 252999999999999997.00
+r8/a2_ascii15	true	SELECT t.id, ascii(t.s) * 10000000000000000 * 1.5 + 3 FROM ss_t t WHERE t.id < 3 ORDER BY t.id	{int,numeric} rows=2 1,1455000000000000003.0 | 2,1080000000000000003.0
+r8/a2_len15	true	SELECT t.id, length(t.s) * 100000000000000000 * 1.5 - 3 FROM ss_t t WHERE t.id < 3 ORDER BY t.id	{int,numeric} rows=2 1,449999999999999997.0 | 2,749999999999999997.0
+r8/a2_subYear15	false	SELECT (SELECT extract(year FROM o.d) * 100000000000000 * 1.5 - 3 FROM ss_t o WHERE o.id = 1)	{numeric} rows=1 303599999999999997.0
+r8/a2_subNegYear	false	SELECT (SELECT -(extract(year FROM o.d) * 100000000000000 * y.m - 3) FROM ss_i y, ss_t o WHERE y.id = 1 AND o.id = 1)	{numeric} rows=1 -252999999999999997.00
+r8/a2_subYearDiv7	false	SELECT (SELECT extract(year FROM o.d) / 7 * y.m FROM ss_i y, ss_t o WHERE y.id = 1 AND o.id = 1)	{numeric} rows=1 361.428571428571428625
+r8/a2_subCaseYear	false	SELECT (SELECT CASE WHEN o.o THEN extract(year FROM o.d) ELSE 0 END * y.m FROM ss_i y, ss_t o WHERE y.id = 1 AND o.id = 1)	{numeric} rows=1 2530.00
+r8/a2_subCoalYear	false	SELECT (SELECT COALESCE(extract(year FROM o.d), 0) * y.m FROM ss_i y, ss_t o WHERE y.id = 1 AND o.id = 1)	{numeric} rows=1 2530.00
+r8/a2_subGreatestYear	false	SELECT (SELECT GREATEST(extract(year FROM o.d), extract(month FROM o.d)) * y.m FROM ss_i y, ss_t o WHERE y.id = 1 AND o.id = 1)	{numeric} rows=1 2530.00
+r8/a2_subAbsYear	false	SELECT (SELECT abs(extract(year FROM o.d)) * y.m FROM ss_i y, ss_t o WHERE y.id = 1 AND o.id = 1)	{numeric} rows=1 2530.00
+r8/a2_subAbsYearDiv7	false	SELECT (SELECT abs(extract(year FROM o.d)) / 7 * y.m FROM ss_i y, ss_t o WHERE y.id = 1 AND o.id = 1)	{numeric} rows=1 361.428571428571428625
+r8/a2_subNullifYear	false	SELECT (SELECT NULLIF(extract(year FROM o.d), 0) * y.m FROM ss_i y, ss_t o WHERE y.id = 1 AND o.id = 1)	{numeric} rows=1 2530.00
+r8/a2_subCaseCaseYear	false	SELECT (SELECT CASE WHEN o.o THEN CASE WHEN o.id > 0 THEN extract(year FROM o.d) END ELSE 0 END * y.m FROM ss_i y, ss_t o WHERE y.id = 1 AND o.id = 1)	{numeric} rows=1 2530.00
+r8/a2_subCaseYearBig	false	SELECT (SELECT -(CASE WHEN o.o THEN extract(year FROM o.d) ELSE 0 END * y.m * 100000000000000 - 3) % 1000 FROM ss_i y, ss_t o WHERE y.id = 1 AND o.id = 1)	{numeric} rows=1 -997.00
+r8/a2_subModYear	false	SELECT (SELECT mod(extract(year FROM o.d), 7) * y.m FROM ss_i y, ss_t o WHERE y.id = 1 AND o.id = 1)	{numeric} rows=1 1.25

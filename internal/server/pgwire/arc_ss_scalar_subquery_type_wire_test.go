@@ -342,7 +342,9 @@ func TestArcSSDeclaredByTheSelectListWalk(t *testing.T) {
 // integral EXTRACT field by a NUMERIC is numeric, computed exactly, as v0.25.3
 // and PostgreSQL declare it; the same expression in the query's own SELECT
 // list keeps its recorded double precision. An integer subquery times a
-// NUMERIC stays exact through the operators after it, past 2^53. A relation, a CTE or an alias NAMED
+// NUMERIC stays exact through the operators after it, past 2^53, and so does
+// every consumer of an exact operand: unary minus, abs, round, %, a CASE or
+// COALESCE arm, over a subquery, an integer call or a marked EXTRACT. A relation, a CTE or an alias NAMED
 // __column_value answers; only the re-run's spelling `__column_value(cast(…))`
 // — and any other call of that name — is 42883.
 func TestArcSSScopeAndIntegerOperandsOnTheWire(t *testing.T) {
@@ -358,6 +360,7 @@ func TestArcSSScopeAndIntegerOperandsOnTheWire(t *testing.T) {
 			"(SELECT extract(year FROM t.d) * t.n FROM ss_t t WHERE t.id = 1) AS ke",
 		"CREATE TABLE ss_r6n AS SELECT (SELECT (SELECT z.v FROM ss_i z WHERE z.id = 1) * y.m FROM ss_i y WHERE y.id = 1) AS k",
 		"CREATE TABLE ss_r7z AS SELECT (SELECT x.b * 10000000 FROM ss_t x WHERE x.id = 3) * t.n + 3 AS k FROM ss_t t WHERE t.id = 1",
+		"CREATE TABLE ss_r8n AS SELECT -((SELECT x.b * 10000000 FROM ss_t x WHERE x.id = 3) * t.n - 3) AS k FROM ss_t t WHERE t.id = 1",
 		"CREATE TABLE __column_value (k integer)",
 		"INSERT INTO __column_value (k) VALUES (4)",
 	} {
@@ -420,6 +423,15 @@ func TestArcSSScopeAndIntegerOperandsOnTheWire(t *testing.T) {
 		{"corrBig", `SELECT (SELECT x.b * 10000000 + t.i FROM ss_t x WHERE x.id = 3) * t.n + 3 AS v FROM ss_t t WHERE t.id = 1`, 1700, "202500000000000009.75", ""},
 		{"subSubBig", `SELECT (SELECT (SELECT x.b * 10000000 FROM ss_t x WHERE x.id = 3) * y.m + 3 FROM ss_i y WHERE y.id = 1) AS v`, 1700, "112500000000000003.00", ""},
 		{"ctasBig", `SELECT k FROM ss_r7z`, 1700, "202500000000000003.00", ""},
+		{"negSub", `SELECT -((SELECT x.b * 10000000 FROM ss_t x WHERE x.id = 3) * t.n - 3) AS v FROM ss_t t WHERE t.id = 1`, 1700, "-202499999999999997.00", ""},
+		{"negSubMod", `SELECT -((SELECT x.b * 10000000 FROM ss_t x WHERE x.id = 3) * t.n - 3) % 1000 AS v FROM ss_t t WHERE t.id = 1`, 1700, "-997.00", ""},
+		{"absSub", `SELECT abs((SELECT x.b * 10000000 FROM ss_t x WHERE x.id = 3) * t.n + 3) + 1 AS v FROM ss_t t WHERE t.id = 1`, 1700, "202500000000000004.00", ""},
+		{"roundSub", `SELECT round((SELECT x.b * 10000000 FROM ss_t x WHERE x.id = 3) * t.n + 3, 1) + 1 AS v FROM ss_t t WHERE t.id = 1`, 1700, "202500000000000004.0", ""},
+		{"coalNegMod", `SELECT -COALESCE((SELECT x.b * 10000000 FROM ss_t x WHERE x.id = 3) * t.n - 3, 0) % 1000 AS v FROM ss_t t WHERE t.id = 1`, 1700, "-997.00", ""},
+		{"ascii15", `SELECT ascii(t.s) * 10000000000000000 * 1.5 + 3 AS v FROM ss_t t WHERE t.id = 1`, 1700, "1455000000000000003.0", ""},
+		{"subCaseYear", `SELECT (SELECT CASE WHEN o.o THEN extract(year FROM o.d) ELSE 0 END * y.m FROM ss_i y, ss_t o WHERE y.id = 1 AND o.id = 1) AS v`, 1700, "2530.00", ""},
+		{"subNegYear", `SELECT (SELECT -(extract(year FROM o.d) * 100000000000000 * y.m - 3) FROM ss_i y, ss_t o WHERE y.id = 1 AND o.id = 1) AS v`, 1700, "-252999999999999997.00", ""},
+		{"ctasNeg", `SELECT k FROM ss_r8n`, 1700, "-202499999999999997.00", ""},
 		{"tableNamed", `SELECT k AS v FROM __column_value`, 23, "4", ""},
 		{"aliasNamed", `SELECT __column_value.k AS v FROM (SELECT 1 AS k) AS __column_value (k)`, 23, "1", ""},
 		{"cteNamed", `WITH __column_value (k) AS (SELECT 1) SELECT k AS v FROM __column_value`, 23, "1", ""},
