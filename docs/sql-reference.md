@@ -1197,9 +1197,12 @@ is `numeric`, and so is an integer CAST or an integral EXTRACT field beside a
 `numeric` inside a subquery — `(SELECT CAST(o.b AS INTEGER) * x.m …)`,
 `(SELECT extract(year FROM o.d) * x.m …)` — and so is a nested scalar subquery
 answering an integer or an integral EXTRACT field,
-`(SELECT (SELECT z.v …) * y.m …)`; `*`, `+`, `-` and `%` over them are exact,
-while a quotient over an EXTRACT (`extract(year …) / 7 * x.m`) is the
-`double precision` it is divided in. The same expressions in a query's own
+`(SELECT (SELECT z.v …) * y.m …)`. Over them `*`, `+`, `-`, `%`, unary
+minus, `abs`, `round`, `trunc`, `mod` and a `CASE`, `COALESCE`, `GREATEST` or
+`NULLIF` arm keep the exact value past 2^53 (`-((SELECT x.b * 10000000 …) * t.n - 3) % 1000`
+is -997.00); a quotient keeps numeric's division scale, and a quotient over an
+EXTRACT (`extract(year …) / 7 * x.m`) is the `double precision` it is divided
+in. The same expressions in a query's own
 SELECT list keep `double precision` (see the differences page). An expression is read in its own scope: over a derived table that
 publishes `t.b AS i` and its own unaliased `i + i`, the query's `i + i` is the
 `bigint` sum of the `bigint` `i`. A subquery that
