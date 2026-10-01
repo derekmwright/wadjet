@@ -29,6 +29,8 @@ type decimalScalarFn struct {
 	digits   Expr
 	modArg   Expr
 	fallback *FuncCall
+	// argOp is arg's exact accessor (decimalOperandOf), settled with the mode.
+	argOp decimalOperand
 
 	// mode is resolved once against the first batch: the argument's (p,s),
 	// the result's, and whether the exact path applies at all.
@@ -131,10 +133,11 @@ func (e *decimalScalarFn) resolveMode(b *batch.RecordBatch) bool {
 	if !decimalScalarArg(e.arg, b) {
 		return false
 	}
-	o, ok := e.arg.(decimalOperand)
+	o, ok := decimalOperandOf(e.arg, b)
 	if !ok {
 		return false
 	}
+	e.argOp = o
 	in, ok := o.decimalType(b)
 	if !ok {
 		return false
@@ -264,7 +267,7 @@ func (e *decimalScalarFn) evalDecimal(b *batch.RecordBatch, row int) (batch.Int1
 	if !e.resolve(b) {
 		return batch.Int128{}, false
 	}
-	lv, ok := e.arg.(decimalOperand).evalDecimal(b, row)
+	lv, ok := e.argOp.evalDecimal(b, row)
 	if !ok {
 		return batch.Int128{}, false
 	}
@@ -320,7 +323,7 @@ func (e *decimalScalarFn) EvalDecimalVec(b *batch.RecordBatch, out *batch.Vector
 		e.evalDecimalRows(b, out, n)
 		return true
 	}
-	src, ok := e.arg.(decimalOperand).decimalVec(b)
+	src, ok := e.argOp.decimalVec(b)
 	if !ok || src.Data == nil {
 		e.evalDecimalRows(b, out, n)
 		return true

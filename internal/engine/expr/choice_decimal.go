@@ -359,7 +359,7 @@ func integerArmDecimalType(e Expr, b *batch.RecordBatch) (batch.DecimalType, boo
 	}
 	// A bare integer column, an integer literal, int-mode arithmetic: they
 	// implement decimalOperand and answer their own range at scale 0.
-	o, isOperand := e.(decimalOperand)
+	o, isOperand := decimalOperandOf(e, b)
 	if !isOperand {
 		return batch.DecimalType{}, false
 	}

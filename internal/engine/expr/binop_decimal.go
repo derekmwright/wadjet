@@ -829,6 +829,38 @@ func (e *BinOp) binOpDecimalBox(b *batch.RecordBatch, row int) (any, bool) {
 	return e.dec.evalDecimalBox(e.Op, e.Left, e.Right, b, row)
 }
 
+// The generic BinOp in its own exact mode is a decimalOperand, as
+// BinOpNumeric is: unary minus, abs/round/trunc/mod and a CAST over it read
+// its exact value rather than its box's double.
+func (e *BinOp) decimalType(b *batch.RecordBatch) (batch.DecimalType, bool) {
+	m, on := e.dec.resolve(e.Op, e.Left, e.Right, b)
+	if !on {
+		return batch.DecimalType{}, false
+	}
+	return m.out, true
+}
+
+func (e *BinOp) evalDecimal(b *batch.RecordBatch, row int) (batch.Int128, bool) {
+	m, on := e.dec.resolve(e.Op, e.Left, e.Right, b)
+	if !on {
+		return batch.Int128{}, false
+	}
+	lv, lok := e.dec.ops.l.evalDecimal(b, row)
+	if !lok {
+		return batch.Int128{}, false
+	}
+	rv, rok := e.dec.ops.r.evalDecimal(b, row)
+	if !rok {
+		return batch.Int128{}, false
+	}
+	v, _ := decApplyChecked(m, lv, rv)
+	return v, true
+}
+
+func (e *BinOp) decimalVec(_ *batch.RecordBatch) (kernel.DecimalOperandVec, bool) {
+	return kernel.DecimalOperandVec{}, false
+}
+
 // --- UnaryOp ----------------------------------------------------------------
 
 // Unary ± over a DECIMAL is exact and moves no digit, so -d is a value the
@@ -840,7 +872,7 @@ func (e *UnaryOp) decimalType(b *batch.RecordBatch) (batch.DecimalType, bool) {
 	if e.Op != "-" && e.Op != "+" {
 		return batch.DecimalType{}, false
 	}
-	o, ok := e.Operand.(decimalOperand)
+	o, ok := e.dop.get(e.Operand, b)
 	if !ok {
 		return batch.DecimalType{}, false
 	}
@@ -848,7 +880,7 @@ func (e *UnaryOp) decimalType(b *batch.RecordBatch) (batch.DecimalType, bool) {
 }
 
 func (e *UnaryOp) evalDecimal(b *batch.RecordBatch, row int) (batch.Int128, bool) {
-	o, ok := e.Operand.(decimalOperand)
+	o, ok := e.dop.get(e.Operand, b)
 	if !ok {
 		return batch.Int128{}, false
 	}
@@ -1168,7 +1200,11 @@ func DecimalResultOf(e Expr, b *batch.RecordBatch) (precision, scale int, ok boo
 // reports that this expression produced NULL. The caller owns the null bit for
 // the false case, the way every other vector writer here does.
 func EvalDecimalInto(e Expr, b *batch.RecordBatch, row int, dst *batch.Vector, at int) bool {
-	if o, isDec := e.(decimalOperand); isDec {
+	// Only a node whose exact form RESOLVED answers through the interface: a
+	// generic BinOp or a BinOpNumeric off its exact mode answers nothing
+	// exact, and reading "no value" there would store NULL for a value its
+	// box holds.
+	if o, isDec := e.(decimalOperand); isDec && decimalTyped(o, b) {
 		v, ok := o.evalDecimal(b, row)
 		if !ok {
 			return false
@@ -1282,4 +1318,40 @@ func decimalArmFold(arms []Expr, b *batch.RecordBatch) (int, int, bool) {
 		return 0, 0, false
 	}
 	return m.Precision, m.Scale, true
+}
+
+// decimalTyped reports whether an operand's exact form resolved for b.
+func decimalTyped(o decimalOperand, b *batch.RecordBatch) bool {
+	_, ok := o.decimalType(b)
+	return ok
+}
+
+// operandCache is a node's operand's exact accessor (decimalOperandOf),
+// resolved once against the first batch that can answer it — the lifecycle
+// decArm and BinOpNumeric's mode have. Every node that reads an operand's
+// exact value reads it through decimalOperandOf, so a consumer (unary ±,
+// abs/round/trunc/mod, a CAST, a choice) sees the same operands the
+// arithmetic nodes see: a generic BinOp, a choosing construct, an integer
+// operand.
+type operandCache struct {
+	ready atomic.Bool
+	mu    sync.Mutex
+	op    decimalOperand
+	ok    bool
+}
+
+func (c *operandCache) get(e Expr, b *batch.RecordBatch) (decimalOperand, bool) {
+	if c.ready.Load() {
+		return c.op, c.ok
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.ready.Load() {
+		return c.op, c.ok
+	}
+	c.op, c.ok = decimalOperandOf(e, b)
+	if b != nil {
+		c.ready.Store(true)
+	}
+	return c.op, c.ok
 }

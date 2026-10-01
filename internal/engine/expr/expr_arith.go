@@ -561,6 +561,8 @@ func (e *BinOpInt64) EvalFloat64(b *batch.RecordBatch, row int) (float64, bool) 
 type UnaryOp struct {
 	Operand Expr
 	Op      string // -, +
+	// dop is the operand's exact accessor (operandCache).
+	dop operandCache
 }
 
 func (e *UnaryOp) Eval(b *batch.RecordBatch, row int) any {

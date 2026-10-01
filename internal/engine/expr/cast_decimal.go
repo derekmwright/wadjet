@@ -191,7 +191,7 @@ func (e *Cast) castDecimalTarget(b *batch.RecordBatch, row int, v any, litText s
 		return d.typ, true
 	}
 	// A bare DECIMAL over an operand with an exact form keeps that form.
-	if o, ok := e.Operand.(decimalOperand); ok {
+	if o, ok := decimalOperandOf(e.Operand, b); ok {
 		if t, ok := o.decimalType(b); ok {
 			return batch.DecimalType{Precision: batch.MaxDecimalPrecision, Scale: t.Scale}, true
 		}
