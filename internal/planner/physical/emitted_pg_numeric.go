@@ -194,12 +194,9 @@ func joinArmPGCategory(arm *logical.Node) (m map[string]pgCategory, known bool) 
 // pgCategoryInputDecls is what an expression over n's output reads: the
 // carrier, the shape, the (p,s) and the category, from one set of walks.
 func pgCategoryInputDecls(n *logical.Node) ColDecls {
-	return ColDecls{
-		Types:  emittedColTypes(n),
-		Fields: inputColFields(n),
-		Dec:    emittedColDecimal(n),
-		pgCat:  emittedColPGCategory(n),
-	}
+	d := childDecls(n)
+	d.pgCat = emittedColPGCategory(n)
+	return d
 }
 
 // pgAggregateCategory is PostgreSQL's category of an aggregate's result over

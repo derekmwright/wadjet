@@ -40,12 +40,9 @@ func emittedColIntWidth(n *logical.Node) map[string]intWidth {
 			return nil
 		}
 		child := n.Children[0]
-		in := withSubqueryDecls(ColDecls{
-			Types:    emittedColTypes(child),
-			Fields:   inputColFields(child),
-			Dec:      emittedColDecimal(child),
-			intWidth: emittedColIntWidth(child),
-		}, n)
+		in := childDecls(child)
+		in.intWidth = emittedColIntWidth(child)
+		in = withSubqueryDecls(in, n)
 		out := make(map[string]intWidth, len(n.GroupBy)+len(n.AggExprs))
 		// A GROUP KEY is the value the input carried, so it keeps the input's
 		// width — including a DERIVED key, which is emitted under its
@@ -115,16 +112,13 @@ func emittedColIntWidth(n *logical.Node) map[string]intWidth {
 		}
 		child := n.Children[0]
 		strictInt := strictIntArithCols(child)
-		// The ARRAY elements too: the width reads the element the declared-
-		// type walk names for a subscript (`a[1] + 1` over an int4[] is int4),
-		// and without them that walk could not type the projection at all.
-		decls := withSubqueryDecls(ColDecls{
-			Types:    emittedColTypes(child),
-			Fields:   inputColFields(child),
-			Elems:    shapeElems(inputColShapes(child)),
-			Dec:      emittedColDecimal(child),
-			intWidth: emittedColIntWidth(child),
-		}, n)
+		// The ARRAY elements too (childDecls): the width reads the element
+		// the declared-type walk names for a subscript (`a[1] + 1` over an
+		// int4[] is int4), and without them that walk could not type the
+		// projection at all.
+		decls := childDecls(child)
+		decls.intWidth = emittedColIntWidth(child)
+		decls = withSubqueryDecls(decls, n)
 		out := make(map[string]intWidth, len(n.Projections))
 		for _, proj := range n.Projections {
 			name := declaredProjectionName(proj)
@@ -191,12 +185,8 @@ func emittedColIntWidth(n *logical.Node) map[string]intWidth {
 			return nil
 		}
 		child := n.Children[0]
-		in := ColDecls{
-			Types:    emittedColTypes(child),
-			Fields:   inputColFields(child),
-			Dec:      emittedColDecimal(child),
-			intWidth: emittedColIntWidth(child),
-		}
+		in := childDecls(child)
+		in.intWidth = emittedColIntWidth(child)
 		out := make(map[string]intWidth, len(in.intWidth)+len(n.WindowExprs))
 		for k, v := range in.intWidth {
 			out[k] = v

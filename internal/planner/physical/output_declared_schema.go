@@ -818,21 +818,16 @@ func declaredProjectionInputs(root *logical.Node) (projs []logical.Projection, c
 		return nil, ColDecls{}, nil, false
 	}
 	if len(pn.Children) == 1 {
-		// The ROW fields come from inputColFields rather than an emitted-
+		// The ROW fields come from inputColShapes rather than an emitted-
 		// column walk of its own: the nodes EmittedColTypes adds — an
 		// Aggregate and a Project — rebind names, and a field path over
 		// either resolves against nothing anyway. Everything else passes
-		// its input through, which is exactly inputColFields' walk (#568).
-		shapes := inputColShapes(pn.Children[0])
-		childTypes = ColDecls{
-			Types:  emittedColTypes(pn.Children[0]),
-			Fields: shapeFields(shapes),
-			Elems:  shapeElems(shapes),
-			// The (p,s) beside the TypeIDs, so a DECIMAL projection is
-			// resolved by ONE walk instead of two hand-mirrored ones
-			// (declaredProjectionDecl, ADR-0024 item 2).
-			Dec: emittedColDecimal(pn.Children[0]),
-		}
+		// its input through, which is exactly inputColShapes' walk (#568).
+		//
+		// The (p,s) rides beside the TypeIDs, so a DECIMAL projection is
+		// resolved by ONE walk instead of two hand-mirrored ones
+		// (declaredProjectionDecl, ADR-0024 item 2).
+		childTypes = childDecls(pn.Children[0])
 		// The same integer-preserving-arithmetic hint the projection builder
 		// passes: without it `id + 1` declares FLOAT64 here where the
 		// operator emits INT64 (#297's rule), so an empty result would
@@ -1170,14 +1165,12 @@ func emittedColTypes(n *logical.Node) map[string]parquet.TypeID {
 		if len(n.Children) != 1 {
 			return nil
 		}
-		in := emittedColTypes(n.Children[0])
 		strictInt := strictIntArithCols(n.Children[0])
 		// A SCALAR SUBQUERY's type is a CATALOG fact this walk cannot ask
 		// for — it holds no Planner — so it is stamped on the plan's nodes
 		// by annotateSubqueryColumnDecls and installed here as the resolver
 		// NodeDeclaredType's SubqueryNode arm already reads.
-		decls := withSubqueryDecls(
-			ColDecls{Types: in, Dec: emittedColDecimal(n.Children[0])}, n)
+		decls := withSubqueryDecls(childDecls(n.Children[0]), n)
 		out := make(map[string]parquet.TypeID, len(n.Projections))
 		for _, proj := range n.Projections {
 			name := declaredProjectionName(proj)
@@ -1448,8 +1441,7 @@ func emittedColDecimal(n *logical.Node) map[string]logical.DecimalMeta {
 			return nil
 		}
 		in := emittedColDecimal(n.Children[0])
-		fieldDecls := withSubqueryDecls(ColDecls{Types: emittedColTypes(n.Children[0]),
-			Fields: inputColFields(n.Children[0]), Dec: in}, n)
+		fieldDecls := withSubqueryDecls(childDecls(n.Children[0]), n)
 		out := make(map[string]logical.DecimalMeta, len(n.Projections))
 		for _, proj := range n.Projections {
 			name := declaredProjectionName(proj)

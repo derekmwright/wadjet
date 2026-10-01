@@ -444,11 +444,27 @@ func aggregateProjectionFields(project *logical.Node, p logical.Projection) ([]p
 	return nil, false
 }
 
-// inputColFields is the ROW view of inputColShapes: each name's declared
-// FIELDS (nil for a name whose shape is not a ROW, or that a computed item
-// shadows).
-func inputColFields(n *logical.Node) map[string][]parquet.Column {
-	return shapeFields(inputColShapes(n))
+// childDecls is what an expression over child's output reads: the carrier
+// (emittedColTypes), the container SHAPES — a ROW's fields and an ARRAY's or
+// MAP's element (inputColShapes) — and a DECIMAL's (p,s) (emittedColDecimal).
+// Every walk that declares an expression over a node's input builds its
+// declarations here, so the walk that publishes a derived table's or a CTE's
+// column and the one that declares the query's own SELECT list read the same
+// operand types. They did not: the publishing walks carried no array
+// elements, so a subscript inside `SELECT t.a[1] * t.n AS v` had no type
+// there, the product was published FLOAT64, and the outer `d.v + 1` was
+// declared double precision on the single-process arms while the DAG kernel
+// computed PostgreSQL's numeric into that double vector and #361's guard
+// raised — where the same expression as the query's own item declared
+// numeric. emittedColDecls is the same declarations with the integer width.
+func childDecls(child *logical.Node) ColDecls {
+	shapes := inputColShapes(child)
+	return ColDecls{
+		Types:  emittedColTypes(child),
+		Fields: shapeFields(shapes),
+		Elems:  shapeElems(shapes),
+		Dec:    emittedColDecimal(child),
+	}
 }
 
 // inputColElems is the ARRAY/MAP view of inputColShapes: each container
@@ -1069,7 +1085,7 @@ func strictIntArithColsThroughRenames(n *logical.Node) map[string]bool {
 
 // ColDecls is what a node's output columns declare, as far as the planner can
 // know it: the flat catalog types (inputColTypes) plus, for the ROW columns
-// among them, the FIELDS a field path can name (inputColFields).
+// among them, the FIELDS a field path can name (inputColShapes).
 //
 // The second map exists because the first cannot answer the question. It is
 // keyed by column name, and the `c` in `rw.c` is not a column of anything —
@@ -1424,14 +1440,9 @@ func declTypeParts(d expr.DeclType) parquet.Column {
 // declaredOutputSchema already resolves the OUTPUT projection against, so the
 // SELECT list and the plan-declared schema now answer from one map.
 func emittedColDecls(n *logical.Node) ColDecls {
-	shapes := inputColShapes(n)
-	return ColDecls{
-		Types:    emittedColTypes(n),
-		Fields:   shapeFields(shapes),
-		Elems:    shapeElems(shapes),
-		Dec:      emittedColDecimal(n),
-		intWidth: emittedColIntWidth(n),
-	}
+	d := childDecls(n)
+	d.intWidth = emittedColIntWidth(n)
+	return d
 }
 
 // inferProjectionType infers the output parquet type from an AST expression
