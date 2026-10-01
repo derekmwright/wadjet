@@ -525,6 +525,12 @@ func operandIsDecimalTyped(e Expr, b *batch.RecordBatch) bool {
 	case *BinOpNumeric:
 		v.resolveMode(b)
 		return v.isDec
+	case *BinOp:
+		// A generic node in its own exact mode (an integer-valued operand
+		// beside a DECIMAL, e.g. a scalar subquery's integer answer times a
+		// numeric) is a DECIMAL, as decimalOperandOf reads it.
+		_, on := v.dec.resolve(v.Op, v.Left, v.Right, b)
+		return on
 	case *UnaryOp:
 		return (v.Op == "-" || v.Op == "+") && operandIsDecimalTyped(v.Operand, b)
 	case *Cast:
