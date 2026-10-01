@@ -157,6 +157,9 @@ func decimalArithOperand(node plansql.Node, decls ColDecls) (batch.DecimalType, 
 		if t, isDec, ok := choiceDecimalArithOperand(n, decls); ok {
 			return t, isDec, ok
 		}
+		if t, ok := answerIntegerChoice(n, decls); ok {
+			return t, false, true
+		}
 		return integerValuedOperand(n, decls)
 	case *plansql.FuncCallNode:
 		if t, ok := answerIntegerOperand(n, decls); ok {
@@ -176,6 +179,9 @@ func decimalArithOperand(node plansql.Node, decls ColDecls) (batch.DecimalType, 
 			if t, isDec, ok := choiceDecimalArithOperand(n, decls); ok {
 				return t, isDec, ok
 			}
+		}
+		if t, ok := answerIntegerChoice(n, decls); ok {
+			return t, false, true
 		}
 		return integerValuedOperand(n, decls)
 	case *plansql.CastNode:
@@ -239,6 +245,56 @@ func answerIntegerOperand(node plansql.Node, _ ColDecls) (batch.DecimalType, boo
 		}
 	}
 	return batch.DecimalType{}, false
+}
+
+// answerIntegerChoice is a CASE, a choosing function (GREATEST, LEAST,
+// NULLIF, IFNULL, COALESCE) or abs/mod whose every value arm is itself an
+// integer operand of exact arithmetic by this walk's own rule and at least one
+// of which carries a scalar-answer mark (a marked EXTRACT field or a nested
+// subquery answering one): `CASE WHEN o THEN extract(year FROM o.d) ELSE 0
+// END * y.m` inside a scalar subquery is numeric, as on PostgreSQL. The
+// declared-type walk types such an arm by EXTRACT's double and so cannot say
+// it; expr.integerOperandIn reads the same arms with their marks.
+func answerIntegerChoice(node plansql.Node, decls ColDecls) (batch.DecimalType, bool) {
+	var arms []plansql.Node
+	switch n := node.(type) {
+	case *plansql.CaseNode:
+		for _, w := range n.Whens {
+			arms = append(arms, w.Result)
+		}
+		if n.Else != nil {
+			arms = append(arms, n.Else)
+		}
+	case *plansql.FuncCallNode:
+		name := strings.ToLower(n.Name)
+		_, poly := expr.DefaultRegistry.ReturnType(name).SameAsArgs(len(n.Args))
+		if want, ok := expr.NumericDomainScalarFn(name); ok {
+			if want != len(n.Args) || isConstNumericLitNode(n.Args[0]) {
+				return batch.DecimalType{}, false
+			}
+		} else if !poly && name != "coalesce" {
+			return batch.DecimalType{}, false
+		}
+		arms = n.Args
+	default:
+		return batch.DecimalType{}, false
+	}
+	marked, seen := false, false
+	for _, a := range arms {
+		if l, ok := a.(*plansql.Lit); ok && l.Kind == plansql.LitNull {
+			continue
+		}
+		_, isDec, ok := decimalArithOperand(a, decls)
+		if !ok || isDec {
+			return batch.DecimalType{}, false
+		}
+		seen = true
+		marked = marked || answerExtractIn(a)
+	}
+	if !seen || !marked {
+		return batch.DecimalType{}, false
+	}
+	return batch.DecimalType{Precision: batch.Int64DecimalDigits}, true
 }
 
 // integerValuedOperand is a function call or a CASE whose declared type is an
@@ -548,7 +604,22 @@ func answerExtractIn(node plansql.Node) bool {
 	case *plansql.BinaryOp:
 		return answerExtractIn(n.Left) || answerExtractIn(n.Right)
 	case *plansql.FuncCallNode:
-		return n.Answer && expr.IntegralExtractField(n.Name)
+		if n.Answer && expr.IntegralExtractField(n.Name) {
+			return true
+		}
+		for _, a := range n.Args {
+			if answerExtractIn(a) {
+				return true
+			}
+		}
+		return false
+	case *plansql.CaseNode:
+		for _, w := range n.Whens {
+			if answerExtractIn(w.Result) {
+				return true
+			}
+		}
+		return n.Else != nil && answerExtractIn(n.Else)
 	case *plansql.SubqueryNode:
 		return n.Answer
 	}

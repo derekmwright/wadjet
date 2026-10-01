@@ -192,11 +192,15 @@ func (e *BinOpNumeric) resolveModeSlow(b *batch.RecordBatch) {
 	// one — a float operand does not implement decimalOperand at all, which
 	// is what makes that fall through to float mode (ADR-0024 item 2).
 	e.dec, e.decOps, e.isDec = resolveDecimalMode(e.Op, e.Left, e.Right, b)
-	e.isInt = !e.isDec && intArithToggle.On() && operandIsInt(e.Left, b) && operandIsInt(e.Right, b)
+	e.isInt = !e.isDec && intArithToggle.On() && operandIsInt(e.Left, b) && operandIsInt(e.Right, b) &&
+		// A quotient over a marked EXTRACT is the double, as the plan
+		// declares it (binOpDecimalOperand), not an integer division.
+		!(e.Op == "/" && (answerExtract(e.Left) || answerExtract(e.Right)))
 	if !e.isInt && !e.isDec {
 		e.flt = &BinOpFloat64{Left: e.Left, Right: e.Right, Op: e.Op}
 		e.divTrunc = e.Op == "/" &&
-			operandIsIntStructural(e.Left, b) && operandIsIntStructural(e.Right, b)
+			operandIsIntStructural(e.Left, b) && operandIsIntStructural(e.Right, b) &&
+			!answerExtract(e.Left) && !answerExtract(e.Right)
 	}
 	// A temporal operand — a column, or any producer of a DATE / TIMESTAMP
 	// box (producedTemporal: `(d + 1) + 1`'s inner node is one) — makes this

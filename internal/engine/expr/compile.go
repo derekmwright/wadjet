@@ -1152,7 +1152,7 @@ func possiblyIntAtRuntime(e Expr) bool {
 	case *BinOpNumeric:
 		return true
 	default:
-		return isIntNative(e)
+		return isIntNative(e) || answerExtract(e)
 	}
 }
 
@@ -1203,7 +1203,13 @@ func possiblyDecimalAtRuntime(e Expr, ctx *compileContext) bool {
 	case *UnaryOp:
 		return (v.Op == "-" || v.Op == "+") && possiblyDecimalAtRuntime(v.Operand, ctx)
 	}
-	return false
+	// An integer operand joins a decimal expression as DECIMAL(19,0) (the
+	// integer operand of exact arithmetic, integer_decimal_operand.go): an
+	// integer-declared call, integer arithmetic over those, or a marked
+	// EXTRACT field. Pinning it to the float node beside a fractional literal
+	// put a double's digits under the plan's numeric declaration
+	// (`ascii(s) * 10000000000000000 * 1.5 + 3`).
+	return isIntNative(e) || answerExtract(e)
 }
 
 // CompileWithColumnTypes compiles with the input's DECLARED column types in

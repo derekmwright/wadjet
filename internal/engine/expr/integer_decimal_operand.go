@@ -63,6 +63,16 @@ func (o integerBoxOperand) evalDecimal(b *batch.RecordBatch, row int) (batch.Int
 // box that the plan declares double precision, and `NULLIF(i - 1, d)` takes
 // its box from argument 0 while the plan declares the common type of both.
 func integerOperand(e Expr, b *batch.RecordBatch) bool {
+	return integerOperandIn(e, b, true)
+}
+
+// integerOperandIn is integerOperand with marks: whether a marked EXTRACT (or
+// a nested subquery answering one) counts. Every position reached from an
+// operand of numeric arithmetic counts it, as the plan's walk does — the
+// operands of arithmetic, unary ±, and the arms of a CASE / COALESCE /
+// GREATEST / LEAST / NULLIF and the arguments of abs / mod over such an
+// operand (physical.answerIntegerChoice).
+func integerOperandIn(e Expr, b *batch.RecordBatch, marks bool) bool {
 	switch v := e.(type) {
 	case *Cast:
 		return v.answer && castIsInt(v)
@@ -83,20 +93,20 @@ func integerOperand(e Expr, b *batch.RecordBatch) bool {
 		}
 		return false
 	case *UnaryOp:
-		return (v.Op == "-" || v.Op == "+") && integerOperand(v.Operand, b)
+		return (v.Op == "-" || v.Op == "+") && integerOperandIn(v.Operand, b, marks)
 	case *BinOp:
 		if dateDifference(v, b) {
 			return true
 		}
 		switch v.Op {
 		case "+", "-", "*", "%":
-			return integerOperand(v.Left, b) && integerOperand(v.Right, b)
+			return integerOperandIn(v.Left, b, marks) && integerOperandIn(v.Right, b, marks)
 		case "/":
 			// A marked EXTRACT is a whole number carried in a double: its
 			// quotient is the double's, not an integer division, and the plan
 			// declares that node double precision too (binOpDecimalOperand).
 			return !answerExtract(v.Left) && !answerExtract(v.Right) &&
-				integerOperand(v.Left, b) && integerOperand(v.Right, b)
+				integerOperandIn(v.Left, b, marks) && integerOperandIn(v.Right, b, marks)
 		}
 		return false
 	case *BinOpNumeric:
@@ -104,7 +114,7 @@ func integerOperand(e Expr, b *batch.RecordBatch) bool {
 	case *BinOpInt64:
 		l, lok := v.Left.(Expr)
 		r, rok := v.Right.(Expr)
-		return lok && rok && integerOperand(l, b) && integerOperand(r, b)
+		return lok && rok && integerOperandIn(l, b, marks) && integerOperandIn(r, b, marks)
 	case *ColShapeLen:
 		return DefaultRegistry.ReturnType(v.Fallback.Name).Integer()
 	case *catalogCall:
@@ -130,22 +140,22 @@ func integerOperand(e Expr, b *batch.RecordBatch) bool {
 		if v.Else != nil {
 			arms = append(arms, v.Else)
 		}
-		return integerArms(arms, b)
+		return integerArms(arms, b, marks)
 	case *Coalesce:
-		return integerArms(v.Args, b)
+		return integerArms(v.Args, b, marks)
 	case *ScalarSubquery:
 		// A scalar subquery whose declared answer is an integer is an integer
 		// operand, as the plan reads its declaration (decimalArithOperand);
 		// so is a marked one answering an integral EXTRACT field.
-		return v.answer || v.DeclKnown && (v.Decl == batch.TypeInt32 || v.Decl == batch.TypeInt64)
+		return marks && v.answer || v.DeclKnown && (v.Decl == batch.TypeInt32 || v.Decl == batch.TypeInt64)
 	case *CorrelatedScalarSubquery:
-		return v.answer || v.DeclKnown && (v.Decl == batch.TypeInt32 || v.Decl == batch.TypeInt64)
+		return marks && v.answer || v.DeclKnown && (v.Decl == batch.TypeInt32 || v.Decl == batch.TypeInt64)
 	case *decimalScalarFn:
-		return v.fallback != nil && integerCall(v.fallback, b)
+		return v.fallback != nil && integerCall(v.fallback, b, marks)
 	case *numericFuncCall:
-		return integerCall(v.FuncCall, b)
+		return integerCall(v.FuncCall, b, marks)
 	case *FuncCall:
-		return integerCall(v, b)
+		return integerCall(v, b, marks)
 	}
 	return false
 }
@@ -154,32 +164,32 @@ func integerOperand(e Expr, b *batch.RecordBatch) bool {
 // strpos …), abs or mod over integers whose first argument is not a constant
 // (the plan keeps `ABS(-1)` on the float path), or a choosing function
 // (GREATEST, LEAST, NULLIF, IFNULL) every argument of which is an integer.
-func integerCall(fc *FuncCall, b *batch.RecordBatch) bool {
+func integerCall(fc *FuncCall, b *batch.RecordBatch, marks bool) bool {
 	if fc.answer {
-		return true
+		return marks
 	}
 	r := DefaultRegistry.ReturnType(fc.Name)
 	if r.Integer() {
 		return true
 	}
 	if n, ok := NumericDomainScalarFn(fc.Name); ok {
-		return n == len(fc.Args) && !isConstNumericLit(fc.Args[0]) && integerArms(fc.Args, b)
+		return n == len(fc.Args) && !isConstNumericLit(fc.Args[0]) && integerArms(fc.Args, b, marks)
 	}
 	if _, poly := r.SameAsArgs(len(fc.Args)); poly {
-		return integerArms(fc.Args, b)
+		return integerArms(fc.Args, b, marks)
 	}
 	return false
 }
 
 // integerArms reports whether every arm of a choice is an integer operand or
 // a NULL, and at least one is an integer.
-func integerArms(arms []Expr, b *batch.RecordBatch) bool {
+func integerArms(arms []Expr, b *batch.RecordBatch, marks bool) bool {
 	seen := false
 	for _, a := range arms {
 		if isNullLit(a) {
 			continue
 		}
-		if !integerOperand(a, b) {
+		if !integerOperandIn(a, b, marks) {
 			return false
 		}
 		seen = true
@@ -272,19 +282,39 @@ var integralExtractFields = map[string]bool{
 func answerExtract(e Expr) bool {
 	switch v := e.(type) {
 	case *FuncCall:
-		return v.answer
+		return v.answer || anyAnswerExtract(v.Args)
 	case *numericFuncCall:
-		return v.answer
+		return v.answer || anyAnswerExtract(v.Args)
+	case *decimalScalarFn:
+		return answerExtract(v.arg) || (v.modArg != nil && answerExtract(v.modArg))
 	case *ScalarSubquery:
 		return v.answer
 	case *CorrelatedScalarSubquery:
 		return v.answer
+	case *Case:
+		for _, w := range v.Whens {
+			if answerExtract(w.Result) {
+				return true
+			}
+		}
+		return v.Else != nil && answerExtract(v.Else)
+	case *Coalesce:
+		return anyAnswerExtract(v.Args)
 	case *UnaryOp:
 		return answerExtract(v.Operand)
 	case *BinOp:
 		return answerExtract(v.Left) || answerExtract(v.Right)
 	case *BinOpNumeric:
 		return answerExtract(v.Left) || answerExtract(v.Right)
+	}
+	return false
+}
+
+func anyAnswerExtract(es []Expr) bool {
+	for _, a := range es {
+		if answerExtract(a) {
+			return true
+		}
 	}
 	return false
 }

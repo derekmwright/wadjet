@@ -88,6 +88,13 @@ func funcCallIsInt(fc *FuncCall, b *batch.RecordBatch) bool {
 	if fc == nil {
 		return false
 	}
+	if fc.answer {
+		// A marked integral EXTRACT field in a scalar subquery's body is a
+		// whole number (physical.markScalarAnswer); integer arithmetic over it
+		// is integer arithmetic, as the plan reads it. Its quotient is not
+		// (BinOpNumeric.resolveModeSlow).
+		return true
+	}
 	r := DefaultRegistry.ReturnType(fc.Name)
 	if r.Integer() {
 		return true
