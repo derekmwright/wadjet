@@ -39,6 +39,17 @@ package coordinator
 // outer expression and a window key holding a scalar subquery beside a
 // NUMERIC — the two consumers whose declaration and kernel disagreed.
 //
+// The r12/* cells are seven more consumers over the same kinds: c29 the
+// ARRAY constructor beside an integer element, c30 WITH RECURSIVE seeded by
+// the kind, c31 the outer value spelled into a correlated re-run, c32
+// implicit text conversion (`||`, concat), c33 a LEFT JOIN's null extension,
+// c34 a LATERAL body with a FROM clause, and c20b a CASE / COALESCE whose
+// arms are the kind as a bare correlated answer and that answer + 1. The
+// r12/b1, b2 and b3 cells are the choice arm, the array element and the
+// recursive seed, each beside the form v0.25.3 already got wrong
+// (`CASE … (SELECT q.m …) … (SELECT q.m …) + 1`, `ARRAY[t.n, 1]`, a recursion
+// over `t.i * t.n`).
+//
 // Every want is PostgreSQL 17.11's over ssPGFixture
 // (testdata/arc_ss_audit_consumers_pg17.tsv: name, ordered, sql, answer),
 // except the cells in testdata/arc_ss_audit_consumers_kept.tsv, each a

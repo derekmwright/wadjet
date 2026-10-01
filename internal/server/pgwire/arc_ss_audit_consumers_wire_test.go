@@ -10,7 +10,10 @@ package pgwire
 // coordinator.TestArcSSOperandKindTimesConsumerEveryArm's (its header names
 // them), over the same six-row fixture; that test holds the five-arm
 // consumers. The dv/* and wk/* cells are a derived table's column read by an
-// outer expression and a window key holding a scalar subquery.
+// outer expression and a window key holding a scalar subquery. The r12/*
+// cells are the kinds stored by CTAS inside an ARRAY constructor and read
+// through a view, and the wire forms of the choice-arm, array-element and
+// recursive-seed cells.
 //
 // Every want is PostgreSQL 17.11's, measured over the same DDL with the same
 // client (pgx, default_query_exec_mode simple_protocol / exec /
