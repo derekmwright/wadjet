@@ -30,7 +30,7 @@ No blank-padded type exists. `CAST('ab' AS CHAR(4))`: wadjet `ab`; PostgreSQL `a
 
 **Decimal choices print one scale.**
 
-Storage has one scale per column. `COALESCE(numeric(15,2), 12.3456789012345)`: the ADR’s column value prints `12.7500000000000` versus `12.75`. (catalog: [numeric-decimal#r18](adr/0012-divergences/numeric-decimal.md#catalog); #764)
+Storage has one scale per column. `COALESCE(numeric(15,2), 12.3456789012345)`: the ADR’s column value prints `12.7500000000000` versus `12.75`, and the elements of a numeric[] array share one scale too: `ARRAY[n, 1]` over a numeric(10,2) prints `{2.25,1.00}` versus `{2.25,1}`. (catalog: [numeric-decimal#r18](adr/0012-divergences/numeric-decimal.md#catalog); #764)
 
 **Multi-statement strings are not transactions.**
 
