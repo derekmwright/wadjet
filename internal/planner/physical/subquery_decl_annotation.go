@@ -115,6 +115,22 @@ func collectPlanSubqueries(n *logical.Node) []planSubquery {
 		}
 		for _, we := range n.WindowExprs {
 			collectSubquerySQL(we.InputExpr, &texts)
+			// The PARTITION BY / ORDER BY terms are materialized keys too,
+			// compiled with these declarations (windowKeyProjections) from
+			// the same parse of their text; a subquery in one that was
+			// never stamped was declared FLOAT64 while the kernel computed
+			// `(SELECT z.v …) * t.n` as the exact numeric, and #361's guard
+			// failed the key's store on every arm.
+			for _, term := range we.PartitionBy {
+				if ast, err := plansql.ParseExpression(term); err == nil {
+					collectSubquerySQL(ast, &texts)
+				}
+			}
+			for _, ob := range we.OrderBy {
+				if ast, err := plansql.ParseExpression(ob.Column); err == nil {
+					collectSubquerySQL(ast, &texts)
+				}
+			}
 		}
 		for _, sql := range texts {
 			out = append(out, planSubquery{sql: sql, scope: scope})
