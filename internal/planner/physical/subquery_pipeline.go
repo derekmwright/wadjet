@@ -61,7 +61,7 @@ func (p *Planner) forSubquery() *Planner {
 	// turn into a fatal concurrent map write no recover() can catch (#1018
 	// round 6 review, B2). A child gets its own; memoization is a
 	// within-one-build economy, never a promise across builds.
-	sub.subqueryDeclCache = nil
+	sub.subqueryDeclCache = &subqueryDeclMemo{}
 	sub.MaterializedInputs = nil
 	sub.StreamingSources = nil
 	sub.ScanFileFilter = nil

@@ -87,3 +87,46 @@ func TestANestedScalarSubqueryPlansConcurrentlyThroughChildPlanners(t *testing.T
 	close(start)
 	wg.Wait()
 }
+
+// TestTheBuildsDeclarationMemoIsLockedForConcurrentReruns is the path the two
+// tests above do not take: a correlated scalar subquery's re-run asks the
+// BUILD'S OWN planner — not a child — for the arity and the declaration of
+// its per-row text (CorrelatedScalarSubquery.Eval → SubqueryOutputArity /
+// SubqueryOutputColumn), from every parallel pipeline goroutine, and each
+// re-plan annotates the nested subquery that text holds into the build's
+// memo. Before the lock, `-race` reported the memo inside
+// scalarSubqueryColumnDecl on `SELECT t.id, (SELECT (SELECT extract(year FROM
+// t.d) …) + q.m FROM ss_i q …) FROM ss_t t` (arc SS round 12, r12/c31_outerValue_year),
+// and a five-arm run died of `fatal error: concurrent map read and map write`.
+//
+// RUN IT WITH -race, as the tests above.
+func TestTheBuildsDeclarationMemoIsLockedForConcurrentReruns(t *testing.T) {
+	ctx := context.Background()
+	cat := ScanCacheFixture(t, 20)
+	p := NewPlanner(cat)
+	p.PlanCtx = ctx
+	plan := planWithPlanner(t, p, "SELECT (SELECT MAX(id) FROM items) AS v FROM items")
+	defer plan.Pipeline.Close()
+
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			for k := 0; k < 4; k++ {
+				// Distinct per-row texts, as a re-run spells each outer value.
+				q := fmt.Sprintf("SELECT (SELECT MAX(id) + %d FROM items) + %d FROM items WHERE id = 0", i, k)
+				if n, ok := p.SubqueryOutputArity(q); !ok || n != 1 {
+					t.Errorf("arity %d/%d: %d %v", i, k, n, ok)
+				}
+				if _, ok := p.SubqueryOutputColumn(q); !ok {
+					t.Errorf("declaration %d/%d: not declared", i, k)
+				}
+			}
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+}

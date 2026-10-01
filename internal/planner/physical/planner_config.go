@@ -69,7 +69,16 @@ type Planner struct {
 	// B2). Sharing it across builds bought nothing the memo promises: the
 	// saving it exists for is a subquery text written TWICE IN ONE PLAN, and
 	// that is a within-build question.
-	subqueryDeclCache map[string]*subqueryDeclEntry
+	//
+	// And LOCKED within one build. A correlated scalar subquery's re-run
+	// asks this planner, from every parallel pipeline goroutine at once,
+	// for the arity and the declaration of the per-row text
+	// (SubqueryOutputArity / SubqueryOutputColumn re-plan and re-annotate
+	// it), so the build's own memo is written concurrently whenever that
+	// text holds a nested subquery: the race detector reports it, and the
+	// runtime turned it into `fatal error: concurrent map read and map
+	// write` (subqueryDeclMemo).
+	subqueryDeclCache *subqueryDeclMemo
 	cteCache          map[string]*cteMaterialized // materialized CTE results
 	// nestedCTECache is a recursive CTE declared in a NESTED block, keyed by
 	// the DEFINITION rather than by the name. Two sibling blocks may each
@@ -403,7 +412,8 @@ type scanCached struct {
 
 // NewPlanner creates a new physical planner.
 func NewPlanner(cat *catalog.Catalog) *Planner {
-	p := &Planner{Catalog: cat, res: &queryResources{}, ManifestSnapshot: NewManifestSnapshot()}
+	p := &Planner{Catalog: cat, res: &queryResources{}, ManifestSnapshot: NewManifestSnapshot(),
+		subqueryDeclCache: &subqueryDeclMemo{}}
 	// Create a subquery runner that re-uses this planner for nested queries
 	p.subqueryRunner = p.makeSubqueryRunner()
 	return p

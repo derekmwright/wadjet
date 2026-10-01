@@ -3,6 +3,8 @@
 package physical
 
 import (
+	"sync"
+
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -264,15 +266,17 @@ func (p *Planner) scalarSubqueryColumnDecl(sql string) (decl logical.SubqueryCol
 		}
 	}()
 	if p.subqueryDeclCache == nil {
-		p.subqueryDeclCache = map[string]*subqueryDeclEntry{}
+		// A Planner built without NewPlanner (a test's literal) gets its memo
+		// on first use, which is at plan time, on the planning goroutine.
+		p.subqueryDeclCache = &subqueryDeclMemo{}
 	}
-	if e, seen := p.subqueryDeclCache[sql]; seen {
+	memo := p.subqueryDeclCache
+	if e, seen := memo.claim(sql); seen {
 		if e == nil {
 			return logical.SubqueryColumnDecl{}, false // in flight
 		}
 		return e.decl, e.ok
 	}
-	p.subqueryDeclCache[sql] = nil
 	col, ok := p.SubqueryOutputColumn(sql)
 	d := logical.SubqueryColumnDecl{}
 	if ok {
@@ -289,7 +293,7 @@ func (p *Planner) scalarSubqueryColumnDecl(sql string) (decl logical.SubqueryCol
 			ok = false
 		}
 	}
-	p.subqueryDeclCache[sql] = &subqueryDeclEntry{decl: d, ok: ok}
+	memo.store(sql, &subqueryDeclEntry{decl: d, ok: ok})
 	return d, ok
 }
 
@@ -297,6 +301,39 @@ func (p *Planner) scalarSubqueryColumnDecl(sql string) (decl logical.SubqueryCol
 type subqueryDeclEntry struct {
 	decl logical.SubqueryColumnDecl
 	ok   bool
+}
+
+// subqueryDeclMemo is the per-build declaration memo, locked: it is read and
+// written from every pipeline goroutine that re-plans a correlated subquery's
+// per-row text (Planner.subqueryDeclCache). The lock is held for the map
+// operations only, never across the planning between claim and store, which
+// re-enters this memo for the nested texts; a text another goroutine has in
+// flight answers "not declared" exactly as a self-reference does, as the
+// unlocked map answered it.
+type subqueryDeclMemo struct {
+	mu sync.Mutex
+	m  map[string]*subqueryDeclEntry
+}
+
+// claim returns the slot for sql if one exists; otherwise it marks sql in
+// flight and reports seen=false, and the caller must store its answer.
+func (m *subqueryDeclMemo) claim(sql string) (e *subqueryDeclEntry, seen bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if e, seen = m.m[sql]; seen {
+		return e, true
+	}
+	if m.m == nil {
+		m.m = map[string]*subqueryDeclEntry{}
+	}
+	m.m[sql] = nil
+	return nil, false
+}
+
+func (m *subqueryDeclMemo) store(sql string, e *subqueryDeclEntry) {
+	m.mu.Lock()
+	m.m[sql] = e
+	m.mu.Unlock()
 }
 
 // subqueryOutputPGCategory is PostgreSQL's numeric CATEGORY of a scalar
