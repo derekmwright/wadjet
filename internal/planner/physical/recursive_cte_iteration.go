@@ -71,8 +71,18 @@ func (p *Planner) iterateRecursiveCTEAt(ctx context.Context, cte plansql.CTEDef,
 	// 2::int` is numeric overall, not numeric(2,1). The literal declares its
 	// spelling's DECIMAL(p,s) (arc VL round 5); the CTE column takes its
 	// scale and the unconstrained precision.
+	//
+	// So does every other numeric PostgreSQL types without a modifier: a
+	// product, a sum, a call. This engine declares `t.i * t.n` at the (p,s)
+	// it computes, and the recursive term's `v + 1` at another, so the
+	// seed's (p,s) read as a typmod refused every such recursion 42804 —
+	// `numeric in non-recursive term but type numeric overall` — where
+	// PostgreSQL answers. The anchor's wire declaration says which (the same
+	// typmod walk that types its outputs on the wire); only a bare
+	// numeric(p,s) column, or a construct that keeps its modifier, seeds a
+	// constrained column.
 	for i := range schema {
-		if schema[i].Type == parquet.TypeDecimal && anchorLits.isNumericLiteral(i) {
+		if schema[i].Type == parquet.TypeDecimal && anchorLits.unconstrained(i) {
 			schema[i].Precision = parquet.MaxDecimalDigits
 		}
 	}

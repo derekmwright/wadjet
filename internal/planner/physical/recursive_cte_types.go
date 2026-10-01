@@ -27,6 +27,11 @@ import (
 type recursiveArmLiterals struct {
 	unknown []bool
 	numeric []*setOpLitDecimal
+	// untyped marks a DECIMAL output that carries no PostgreSQL type
+	// modifier (declaredWireUnconstrainedDecimal, positionally): arithmetic,
+	// a call, an aggregate — everything but a bare numeric(p,s) column and
+	// the constructs that keep its modifier.
+	untyped []bool
 }
 
 func recursiveArmLiteralsOf(plan *logical.Node, cols int) recursiveArmLiterals {
@@ -38,10 +43,20 @@ func recursiveArmLiteralsOf(plan *logical.Node, cols int) recursiveArmLiterals {
 	if lits := setOpArmLiterals(plan); len(lits) == cols {
 		out.numeric = lits
 	}
+	if w, _ := publishedOutputDecls(publishedOutputProjectionNode(plan),
+		declaredWireUnconstrainedDecimal(plan), nil); len(w) == cols {
+		out.untyped = w
+	}
 	return out
 }
 
 func (l recursiveArmLiterals) isUnknown(i int) bool { return i < len(l.unknown) && l.unknown[i] }
+
+// unconstrained reports whether output i is a numeric PostgreSQL gives typmod
+// -1: a numeric constant, or any DECIMAL the wire declares without a modifier.
+func (l recursiveArmLiterals) unconstrained(i int) bool {
+	return l.isNumericLiteral(i) || (i < len(l.untyped) && l.untyped[i])
+}
 
 func (l recursiveArmLiterals) numericText(i int) (string, bool) {
 	if i < len(l.numeric) && l.numeric[i] != nil {
