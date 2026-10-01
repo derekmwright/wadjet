@@ -355,6 +355,7 @@ func TestArcSSScopeAndIntegerOperandsOnTheWire(t *testing.T) {
 		"CREATE TABLE ss_r5b AS SELECT sum(q.k) AS tot FROM (SELECT i + i AS k FROM (SELECT t.b AS i, i + i FROM ss_t t WHERE t.id = 3) t) q",
 		"CREATE TABLE ss_r5c AS SELECT (SELECT CAST(t.b AS INTEGER) * t.n FROM ss_t t WHERE t.id = 1) AS kc, " +
 			"(SELECT extract(year FROM t.d) * t.n FROM ss_t t WHERE t.id = 1) AS ke",
+		"CREATE TABLE ss_r6n AS SELECT (SELECT (SELECT z.v FROM ss_i z WHERE z.id = 1) * y.m FROM ss_i y WHERE y.id = 1) AS k",
 		"CREATE TABLE __column_value (k integer)",
 		"INSERT INTO __column_value (k) VALUES (4)",
 	} {
@@ -406,6 +407,13 @@ func TestArcSSScopeAndIntegerOperandsOnTheWire(t *testing.T) {
 		{"ctasExtractN", `SELECT ke FROM ss_r5c`, 1700, "4554.00", ""},
 		{"plainCastN", `SELECT CAST(t.b AS INTEGER) * t.n AS v FROM ss_t t WHERE t.id = 1`, 701, "67.5", "N-10: an integer CAST beside a NUMERIC takes the float8 rung in a query's own SELECT list (PostgreSQL: numeric 67.50)"},
 		{"plainExtractN", `SELECT extract(year FROM t.d) * t.n AS v FROM ss_t t WHERE t.id = 1`, 701, "4554", "ADR-0024 §2c: extract() declares double precision in a query's own SELECT list (PostgreSQL: numeric 4554.00)"},
+		{"subVtimesM", `SELECT (SELECT (SELECT z.v FROM ss_i z WHERE z.id = 1) * y.m FROM ss_i y WHERE y.id = 1) AS v`, 1700, "6.25", ""},
+		{"subMaxVtimesM", `SELECT (SELECT (SELECT max(z.v) FROM ss_i z) * y.m FROM ss_i y WHERE y.id = 1) AS v`, 1700, "7.50", ""},
+		{"subOuterVtimesM", `SELECT (SELECT (SELECT o.i FROM ss_i z WHERE z.id = 1) * y.m FROM ss_i y WHERE y.id = 1) AS v FROM ss_t o WHERE o.id = 1`, 1700, "3.75", ""},
+		{"subYearTimesM", `SELECT (SELECT (SELECT extract(year FROM o.d) FROM ss_i z WHERE z.id = 1) * y.m FROM ss_i y WHERE y.id = 1) AS v FROM ss_t o WHERE o.id = 1`, 1700, "2530.00", ""},
+		{"ctasSubV", `SELECT k FROM ss_r6n`, 1700, "6.25", ""},
+		{"mTimesYearDiv7", `SELECT (SELECT x.m * (extract(year FROM o.d) / 7) FROM ss_i x WHERE x.id = 1) AS v FROM ss_t o WHERE o.id = 1`, 701, "361.42857142857144", "ADR-0024 §2c: a quotient over EXTRACT is the double the kernel divides, as at v0.25.3 (PostgreSQL: numeric 361.428571428571428625)"},
+		{"yearDiv7Times15", `SELECT (SELECT extract(year FROM o.d) / 7 * 1.5 FROM ss_i x WHERE x.id = 1) AS v FROM ss_t o WHERE o.id = 1`, 701, "433.7142857142858", "ADR-0024 §2c: a quotient over EXTRACT is the double the kernel divides, as at v0.25.3 (PostgreSQL: numeric 433.71428571428571435)"},
 		{"tableNamed", `SELECT k AS v FROM __column_value`, 23, "4", ""},
 		{"aliasNamed", `SELECT __column_value.k AS v FROM (SELECT 1 AS k) AS __column_value (k)`, 23, "1", ""},
 		{"cteNamed", `WITH __column_value (k) AS (SELECT 1) SELECT k AS v FROM __column_value`, 23, "1", ""},
