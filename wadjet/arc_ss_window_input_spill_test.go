@@ -17,7 +17,8 @@ import (
 // integer array (the element was not in the declaration's columns), so the
 // kernel's exact product met #361's guard, and it compiled a scalar subquery
 // without its declaration, so `(SELECT max(b) …) * n + 3` was an exact numeric
-// computed in a double. Every want is PostgreSQL 17.11's over the same
+// computed in a double; inside a scalar subquery's body the window's
+// declaration was the float fallback the answer column is built from. Every want is PostgreSQL 17.11's over the same
 // generate_series fixture.
 func TestArcSSWindowInputExactUnderSpill(t *testing.T) {
 	ctx := context.Background()
@@ -62,6 +63,15 @@ func TestArcSSWindowInputExactUnderSpill(t *testing.T) {
 			`SELECT id, sum((SELECT max(b) FROM ssb) * n + 3) OVER (PARTITION BY g ORDER BY id) AS v ` +
 				`FROM ssw ORDER BY id DESC LIMIT 2`,
 			[]string{"20000|4275000000000000012000.00", "19999|4635000000000000012000.00"}},
+		// The same windows INSIDE a scalar subquery's body: the answer
+		// column is built from the window's declaration, which left a
+		// computed DECIMAL argument at the float fallback (#361).
+		{"bodySubscriptTimesN",
+			`SELECT 1 AS id, (SELECT sum(a[1] * n) OVER () FROM ssw ORDER BY id LIMIT 1) AS v`,
+			[]string{"1|742474.75"}},
+		{"bodySubqueryTimesNPlus3",
+			`SELECT 1 AS id, (SELECT sum((SELECT max(b) FROM ssb) * n + 3) OVER () FROM ssw ORDER BY id LIMIT 1) AS v`,
+			[]string{"1|22275000000000000060000.00"}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			for arm, db := range map[string]*DB{"plain": plain, "spilled": spilled} {

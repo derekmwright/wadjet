@@ -614,3 +614,41 @@ r9/wi_caseInt	true	SELECT t.id, sum(CASE WHEN t.id > 0 THEN t.b * 10000000 ELSE 
 r9/wi_decSub	true	SELECT t.id, sum((SELECT y.m FROM ss_i y WHERE y.id = 1) * t.n * 100000000000000000 + 3) OVER (ORDER BY t.id) FROM ss_t t WHERE t.id < 3 ORDER BY t.id	{int,numeric} rows=2 1,281250000000000003.0000 | 2,-156249999999999994.0000
 r9/wi_float	true	SELECT t.id, sum(t.f * t.n + 3) OVER (ORDER BY t.id) FROM ss_t t WHERE t.id < 3 ORDER BY t.id	{int,float} rows=2 1,6.375 | 2,18.125
 r9/wi_dcFn	true	SELECT t.id, sum(abs(t.d - DATE '0001-01-01') * t.n * 1000000000000 + 3) OVER (ORDER BY t.id) FROM ss_t t WHERE t.id < 3 ORDER BY t.id	{int,numeric} rows=2 1,1662633000000000003.00 | 2,-854433999999999994.00
+# A window SUM / AVG inside a scalar subquery's body over every operand kind beside a NUMERIC (r10/*): the body's answer
+# column is built from the window's declaration, which a computed DECIMAL argument left at the float fallback (#361).
+r10/x_subBodyYear	false	SELECT (SELECT max(s) FROM (SELECT sum(extract(year FROM o.d) * 100000000000000 * y.m - 3) OVER (ORDER BY o.id) AS s FROM ss_t o, ss_i y WHERE y.id = 1 AND o.id < 4) w)	{numeric} rows=1 1749124999999999991.00
+r10/x_subBodyYearWin	false	SELECT (SELECT sum(extract(year FROM o.d) * 100000000000000 * y.m - 3) OVER () FROM ss_t o, ss_i y WHERE y.id = 1 AND o.id = 1)	{numeric} rows=1 252999999999999997.00
+r10/x_subBodyCastWin	false	SELECT (SELECT sum(CAST(o.b AS BIGINT) * 10000000 * y.m - 3) OVER () FROM ss_t o, ss_i y WHERE y.id = 1 AND o.id = 3)	{numeric} rows=1 112499999999999997.00
+r10/x_subBodySubWin	false	SELECT (SELECT sum((SELECT x.b * 10000000 FROM ss_t x WHERE x.id = 3) * y.m + 3) OVER () FROM ss_i y WHERE y.id = 1)	{numeric} rows=1 112500000000000003.00
+r10/x_winPlusOuter	true	SELECT t.id, sum((SELECT x.b * 10000000 FROM ss_t x WHERE x.id = 3) * t.n + 3) OVER (ORDER BY t.id) + 1 FROM ss_t t WHERE t.id < 4 ORDER BY t.id	{int,numeric} rows=3 1,202500000000000004.00 | 2,-112499999999999993.00 | 3,787500000000000010.00
+r10/x_winTimesN	true	SELECT t.id, sum((SELECT z.v FROM ss_i z WHERE z.id = 1) * t.n) OVER (ORDER BY t.id) * t.n FROM ss_t t WHERE t.id < 4 ORDER BY t.id	{int,numeric} rows=3 1,25.3125 | 2,21.8750 | 3,437.5000
+r10/y_subBodySubWin	false	SELECT (SELECT sum((SELECT x.b * 10000000 FROM ss_t x WHERE x.id = 3) * y.m + 3) OVER () FROM ss_i y WHERE y.id = 1)	{numeric} rows=1 112500000000000003.00
+r10/y_subBodySubWinSmall	false	SELECT (SELECT sum((SELECT z.v FROM ss_i z WHERE z.id = 1) * y.m) OVER () FROM ss_i y WHERE y.id = 1)	{numeric} rows=1 6.25
+r10/y_subBodyIdxWin	false	SELECT (SELECT sum(o.a[1] * y.m) OVER () FROM ss_t o, ss_i y WHERE y.id = 1 AND o.id = 1)	{numeric} rows=1 1.25
+r10/y_subBodyAsciiWin	false	SELECT (SELECT sum(ascii(o.s) * y.m) OVER () FROM ss_t o, ss_i y WHERE y.id = 1 AND o.id = 1)	{numeric} rows=1 121.25
+r10/y_corrOuterSubBodySubWin	true	SELECT o.id, (SELECT sum((SELECT z.v FROM ss_i z WHERE z.id = 1) * y.m) OVER () FROM ss_i y WHERE y.id = 1) + o.i FROM ss_t o WHERE o.id < 3 ORDER BY o.id	{int,numeric} rows=2 1,9.25 | 2,-0.75
+r10/z_subBodyColWin	false	SELECT (SELECT sum(o.i * y.m) OVER () FROM ss_t o, ss_i y WHERE y.id = 1 AND o.id = 1)	{numeric} rows=1 3.75
+r10/z_subBodyAsciiAvg	false	SELECT (SELECT avg(ascii(o.s) * y.m) OVER () FROM ss_t o, ss_i y WHERE y.id = 1 AND o.id = 1)	{numeric} rows=1 121.2500000000000000
+r10/z_subBodyAsciiSumOrd	false	SELECT (SELECT sum(ascii(o.s) * y.m) OVER (ORDER BY o.id) FROM ss_t o, ss_i y WHERE y.id = 1 AND o.id = 1)	{numeric} rows=1 121.25
+r10/z_subBodyAsciiSumPlus	false	SELECT (SELECT sum(ascii(o.s) * y.m) OVER () + 1 FROM ss_t o, ss_i y WHERE y.id = 1 AND o.id = 1)	{numeric} rows=1 122.25
+r10/z_subBodyDcWin	false	SELECT (SELECT sum((o.d - DATE '2024-01-01') * y.m) OVER () FROM ss_t o, ss_i y WHERE y.id = 1 AND o.id = 1)	{numeric} rows=1 78.75
+r10/bw_col	false	SELECT (SELECT sum(o.b * 10000000 * y.m + 3) OVER () FROM ss_t o, ss_i y WHERE y.id = 1 AND o.id = 1)	{numeric} rows=1 375000003.00
+r10/bw_lit	false	SELECT (SELECT sum(y.m * 100000000000000000 + 3) OVER () FROM ss_t o, ss_i y WHERE y.id = 1 AND o.id = 1)	{numeric} rows=1 125000000000000003.00
+r10/bw_binNum	false	SELECT (SELECT avg(o.b * 10000000 * y.m - 3) OVER () FROM ss_t o, ss_i y WHERE y.id = 1 AND o.id = 1)	{numeric} rows=1 374999997.00000000
+r10/bw_sub	false	SELECT (SELECT sum((SELECT x.b * 10000000 FROM ss_t x WHERE x.id = 3) * y.m + 3) OVER () FROM ss_t o, ss_i y WHERE y.id = 1 AND o.id = 1)	{numeric} rows=1 112500000000000003.00
+r10/bw_neg	false	SELECT (SELECT sum(-((SELECT x.b * 10000000 FROM ss_t x WHERE x.id = 3) * y.m - 3)) OVER () FROM ss_t o, ss_i y WHERE y.id = 1 AND o.id = 1)	{numeric} rows=1 -112499999999999997.00
+r10/bw_castPS	false	SELECT (SELECT sum(CAST((SELECT x.b * 10000000 FROM ss_t x WHERE x.id = 3) * y.m + 3 AS NUMERIC(30,2))) OVER () FROM ss_t o, ss_i y WHERE y.id = 1 AND o.id = 1)	{numeric} rows=1 112500000000000003.00
+r10/bw_castBare	false	SELECT (SELECT sum(CAST((SELECT x.b * 10000000 FROM ss_t x WHERE x.id = 3) * y.m AS NUMERIC) + 3) OVER () FROM ss_t o, ss_i y WHERE y.id = 1 AND o.id = 1)	{numeric} rows=1 112500000000000003.00
+r10/bw_abs	false	SELECT (SELECT sum(abs((SELECT x.b * 10000000 FROM ss_t x WHERE x.id = 3) * y.m + 3)) OVER () FROM ss_t o, ss_i y WHERE y.id = 1 AND o.id = 1)	{numeric} rows=1 112500000000000003.00
+r10/bw_coal	false	SELECT (SELECT sum(COALESCE((SELECT x.b * 10000000 FROM ss_t x WHERE x.id = 3) * y.m, 0) + 3) OVER () FROM ss_t o, ss_i y WHERE y.id = 1 AND o.id = 1)	{numeric} rows=1 112500000000000003.00
+r10/bw_caseInt	false	SELECT (SELECT sum(CASE WHEN o.id > 0 THEN o.b * 10000000 ELSE 0 END * y.m + 3) OVER () FROM ss_t o, ss_i y WHERE y.id = 1 AND o.id = 1)	{numeric} rows=1 375000003.00
+r10/bw_ascii	false	SELECT (SELECT sum(ascii(o.s) * 10000000000000000 * y.m + 3) OVER () FROM ss_t o, ss_i y WHERE y.id = 1 AND o.id = 1)	{numeric} rows=1 1212500000000000003.00
+r10/bw_int64	false	SELECT (SELECT avg((ascii(o.s) + 1) * 10000000000000000 * y.m + 3) OVER () FROM ss_t o, ss_i y WHERE y.id = 1 AND o.id = 1)	{numeric} rows=1 1225000000000000003.00
+r10/bw_idx	false	SELECT (SELECT sum(o.a[1] * 100000000000000000 * y.m - 3) OVER () FROM ss_t o, ss_i y WHERE y.id = 1 AND o.id = 1)	{numeric} rows=1 124999999999999997.00
+r10/bw_dc	false	SELECT (SELECT sum((o.d - DATE '0001-01-01') * y.m * 1000000000000 + 3) OVER () FROM ss_t o, ss_i y WHERE y.id = 1 AND o.id = 1)	{numeric} rows=1 923685000000000003.00
+r10/bw_year	false	SELECT (SELECT sum(extract(year FROM o.d) * 100000000000000 * y.m - 3) OVER () FROM ss_t o, ss_i y WHERE y.id = 1 AND o.id = 1)	{numeric} rows=1 252999999999999997.00
+r10/bw_castInt	false	SELECT (SELECT sum(CAST(o.b AS INTEGER) * y.m) OVER () FROM ss_t o, ss_i y WHERE y.id = 1 AND o.id = 1)	{numeric} rows=1 37.50
+r10/bw_nested	false	SELECT (SELECT sum((SELECT z.v FROM ss_i z WHERE z.id = 1) * y.m) OVER () FROM ss_t o, ss_i y WHERE y.id = 1 AND o.id = 1)	{numeric} rows=1 6.25
+r10/bw_decSub	false	SELECT (SELECT sum((SELECT w.m FROM ss_i w WHERE w.id = 1) * y.m * 100000000000000000 + 3) OVER () FROM ss_t o, ss_i y WHERE y.id = 1 AND o.id = 1)	{numeric} rows=1 156250000000000003.0000
+r10/bw_float	false	SELECT (SELECT sum(o.f * y.m + 3) OVER () FROM ss_t o, ss_i y WHERE y.id = 1 AND o.id = 1)	{float} rows=1 4.875
+r10/bw_avgIdxOrd	false	SELECT (SELECT avg(o.a[1] * y.m) OVER (ORDER BY o.id) FROM ss_t o, ss_i y WHERE y.id = 1 AND o.id = 1)	{numeric} rows=1 1.25000000000000000000
