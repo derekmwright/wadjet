@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // --- Scalar functions ---
@@ -22,14 +23,58 @@ type ArrayLitExpr struct {
 	// shape (choice_container.go, arc CW round 5): `ARRAY[a, b]` of a
 	// numeric(5,2)[] and a numeric(9,4)[] declares numeric(9,4) leaves.
 	cc *containerChoice
+	// decl is the constructor's own declaration (operand_decl.go), and elem
+	// its scalar element once resolved: see elementDecl.
+	decl *operandDecl
+	elem atomic.Pointer[resolvedDecl]
 }
 
 func (e *ArrayLitExpr) Eval(b *batch.RecordBatch, row int) any {
+	el := e.elementDecl(b)
 	result := make([]any, len(e.Elements))
 	for i, elem := range e.Elements {
-		result[i] = e.cc.conform(b, elem.Eval(b, row))
+		v := e.cc.conform(b, elem.Eval(b, row))
+		if el != nil {
+			v = conformBox(v, el)
+		}
+		result[i] = v
 	}
 	return result
+}
+
+// elementDecl is the constructor's declared SCALAR element when it is one a
+// box has to be moved into — a DECIMAL or a float — and nil otherwise.
+//
+// Every element is written into one vector of the element type the plan
+// declares: select_common_type over the elements, as PostgreSQL's ARRAY[]
+// coerces each to it. A box is not that type by itself. An integer box
+// written into a DECIMAL leaf is read as an UNSCALED carrier (ADR-0018 §4),
+// so `ARRAY[t.n, 1]` over a numeric(10,2) stored {2.25,0.01} — and so did
+// every element beside an exact numeric operand (`ARRAY[t.a[1] * t.n, 1]`, a
+// day count, ascii, a scalar subquery's integer answer); a DECIMAL's text
+// beside a double precision element is a string a float leaf refuses. The
+// element is moved into the declared type exactly as a container choice's
+// leaves are (conformBox): an integer becomes its exact text, a DECIMAL's
+// text a double. A container element is cc's.
+func (e *ArrayLitExpr) elementDecl(b *batch.RecordBatch) *parquet.Column {
+	if e.decl == nil {
+		return nil
+	}
+	r := e.elem.Load()
+	if r == nil {
+		r = &resolvedDecl{}
+		if s := e.decl.shape(b, 0, nil); s != nil && s.Type == parquet.TypeArray && s.ElementType != nil {
+			switch s.ElementType.Type {
+			case parquet.TypeDecimal, parquet.TypeFloat64, parquet.TypeFloat32:
+				c := *s.ElementType
+				r.col = &c
+			}
+		}
+		if b != nil {
+			e.elem.Store(r)
+		}
+	}
+	return r.col
 }
 
 // FuncCall represents a scalar function call.

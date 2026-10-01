@@ -839,7 +839,7 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 		for i, e := range n.Elements {
 			decls[i] = newOperandDecl(e, ctx)
 		}
-		return &ArrayLitExpr{Elements: elems, cc: newContainerChoice(decls)}, nil
+		return &ArrayLitExpr{Elements: elems, cc: newContainerChoice(decls), decl: newOperandDecl(n, ctx)}, nil
 
 	case *plansql.WindowFuncNode:
 		// A window call must be extracted into a NodeWindow output column by
