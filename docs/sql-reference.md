@@ -1212,9 +1212,11 @@ aggregate's argument, `HAVING`, a `GROUP BY` key, `DISTINCT`, `UNION`,
 `json_build_object('v', t.a[1] * t.n)` is `{"v" : 2.25}`, and so is a
 `numeric` column's), `ARRAY(subquery)`, an aggregate's `FILTER`, a
 `GROUPING SETS` key, `INTERSECT` and `EXCEPT ALL`, `round` and `trunc` at a
-negative scale and `sign`, a `NOT EXISTS` anti-join and `IN` over `VALUES`,
+negative scale and `sign`, a `NOT EXISTS` anti-join whose predicate pairs
+the same expression over the inner and the outer row
+(`u.b * 10000000 * u.n - 3 = t.b * 10000000 * t.n - 3`) and `IN` over `VALUES`,
 a correlated subquery's answer and the outer value
-spelled into one (`(SELECT t.b * 10000000 * t.n - 3 + q.m …)`), a `LEFT
+spelled into its SELECT list (`(SELECT t.b * 10000000 * t.n - 3 + q.m …)`), a `LEFT
 JOIN`'s null-extended column, an element of an `ARRAY[…]` beside an integer
 element (`ARRAY[t.a[1] * t.n, 1]` is `{2.25,1.00}`: the elements share one
 scale, so the integer renders at it), a `WITH RECURSIVE` column the value
@@ -1232,7 +1234,14 @@ argument of a window `sum`, `avg`, `min`, `max`,
 is `numeric` 1.25; `avg` at its input's scale + 4), what `CREATE TABLE … AS`,
 `INSERT … SELECT`, `INSERT … VALUES` and `UPDATE … SET` store and
 `UPDATE … WHERE` and `DELETE … WHERE` compare, both wire formats, and an aggregate, a `GROUP BY` key, a window and
-a sort that spill. A `CASE` or `COALESCE` that has the bare answer of a
+a sort that spill. Not so the outer value in a correlated subquery's own
+`WHERE`, `EXISTS` or `NOT EXISTS` predicate: the re-run spells an outer
+`integer` or `bigint` column as `CAST(v AS BIGINT)`, and an integer `CAST`
+beside a `numeric` outside a subquery's SELECT list is `double precision`
+(`CAST(9000000000 AS BIGINT) * 10000000 * CAST(10.00 AS NUMERIC(10,2)) - 3`
+is 9e+17 where PostgreSQL answers `numeric` 899999999999999997.00), so
+`NOT EXISTS (SELECT 1 FROM ss_t u WHERE u.id = t.id AND u.b * 10000000 * u.n - 3 = t.b * 10000000 * t.n)`
+answers 5 rows where PostgreSQL answers 6 — a recorded gap, as at v0.25.3. A `CASE` or `COALESCE` that has the bare answer of a
 correlated or `NUMERIC` subquery as one arm and arithmetic over that answer
 as another is `double precision`, because that arithmetic is (below):
 `CASE WHEN … THEN (SELECT extract(year FROM t.d) * y.m …) ELSE (SELECT …) + 1 END`
