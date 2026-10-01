@@ -308,7 +308,7 @@ func (p *Planner) buildWindow(ctx context.Context, node *logical.Node) (exec.Sou
 	}
 
 	winKeys := resolveWindowKeys(node)
-	keyProjections, keyMeta, err := p.windowKeyProjections(winKeys)
+	keyProjections, keyMeta, err := p.windowKeyProjections(winKeys, node.Children[0])
 	if err != nil {
 		return nil, nil, nil, err
 	}

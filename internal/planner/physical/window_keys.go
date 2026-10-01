@@ -77,6 +77,7 @@ func resolveWindowKeys(node *logical.Node) map[string]windowKey {
 	// built from this declaration, and one without a scale reads every value
 	// back at 10^0 (ADR-0024 item 2).
 	typeDec := windowKeyInputDecimal(child)
+	typeElems := shapeElems(inputColShapes(child))
 	colFields := inputColRowFields(child)
 	out := map[string]windowKey{}
 	// One allocator for this window stage's keys, seeded with the names its
@@ -212,9 +213,14 @@ func resolveWindowKeys(node *logical.Node) map[string]windowKey {
 				// every row where PostgreSQL answers 9 — while `MAX` of the
 				// same argument answered the right digits under OID 25
 				// (#1018 round 7, B3's window half).
+				// The ARRAY elements too: a subscript is declared by its
+				// element (`t.a[1] * t.n` over an int4[] is numeric), and
+				// without them the key was declared double while the kernel
+				// computes the exact product the plan declares everywhere
+				// else — #361's guard refused the store.
 				materialized := declTypeParts(
 					inferProjectionDeclType(typed, parquet.TypeString, strictInt,
-						withSubqueryDecls(ColDecls{Types: typeCols, Dec: typeDec}, node)))
+						withSubqueryDecls(ColDecls{Types: typeCols, Dec: typeDec, Elems: typeElems}, node)))
 				k.Type, k.Precision, k.Scale, k.Fields, k.ElementType = materialized.Type, materialized.Precision, materialized.Scale, materialized.Fields, materialized.ElementType
 			}
 		}
@@ -564,7 +570,7 @@ func windowKeySpecs(keys map[string]windowKey) []ProjectExprSpec {
 // room for a container's Fields / ElementType or a VECTOR's dimension, and the
 // pre-window operator builds its output vector from whichever of the two it is
 // given (#568's `meta`, plan.go's aggPreProject).
-func (p *Planner) windowKeyProjections(keys map[string]windowKey) ([]exec.ProjectColumn, []parquet.Column, error) {
+func (p *Planner) windowKeyProjections(keys map[string]windowKey, scope *logical.Node) ([]exec.ProjectColumn, []parquet.Column, error) {
 	specs := windowKeySpecs(keys)
 	if len(specs) == 0 {
 		return nil, nil, nil
@@ -579,7 +585,12 @@ func (p *Planner) windowKeyProjections(keys map[string]windowKey) ([]exec.Projec
 	meta := make([]parquet.Column, 0, len(specs))
 	for _, spec := range specs {
 		k := byName[spec.Name]
-		compiled, err := expr.CompileWithRunner(k.Expr, p.subqueryRunner, p.subqueryBudgetOption(), p.catalogOption())
+		// The scalar-subquery declarations the key was DECLARED with
+		// (resolveWindowKeys reads the plan's stamp): without them a subquery
+		// operand compiled undeclared, so `(SELECT x.b …) * t.n + 3` was an
+		// exact numeric key computed in a double.
+		compiled, err := expr.CompileWithRunner(k.Expr, p.subqueryRunner, p.subqueryDeclOptionFor(scope),
+			p.subqueryBudgetOption(), p.catalogOption())
 		if err != nil {
 			return nil, nil, windowKeyCompileError(k.Text, err)
 		}
