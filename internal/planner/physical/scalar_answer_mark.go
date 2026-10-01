@@ -47,6 +47,12 @@ func markAnswerExpr(e plansql.Node) plansql.Node {
 		case *plansql.CastNode:
 			return &plansql.CastNode{Inner: plansql.RewriteExpr(v.Inner, fn), TypeName: v.TypeName,
 				Column: v.Column, Answer: true}, true
+		case *plansql.SubqueryNode:
+			if !v.Array && expr.SubqueryAnswersIntegralExtract(v.SQL) {
+				c := *v
+				c.Answer = true
+				return &c, true
+			}
 		case *plansql.FuncCallNode:
 			if expr.IntegralExtractField(v.Name) && len(v.Args) == 1 && !v.Distinct && !v.Star {
 				c := *v

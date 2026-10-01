@@ -1015,7 +1015,7 @@ func RewriteOuterRefs(node Node, outerTables map[string]bool, vals map[string]an
 		if sql, ok := rewriteNestedSubquery(n.SQL, func(inner Node) Node {
 			return RewriteOuterRefs(inner, outerTables, vals)
 		}); ok {
-			return &SubqueryNode{SQL: sql, Array: n.Array}
+			return &SubqueryNode{SQL: sql, Array: n.Array, Answer: n.Answer}
 		}
 		return n
 	case *ExistsNode:
@@ -1102,7 +1102,7 @@ func RewriteUnqualifiedOuterRefs(node Node, unqualOuter map[string]string, vals 
 		if sql, ok := rewriteNestedSubquery(n.SQL, func(inner Node) Node {
 			return RewriteUnqualifiedOuterRefs(inner, unqualOuter, vals)
 		}); ok {
-			return &SubqueryNode{SQL: sql, Array: n.Array}
+			return &SubqueryNode{SQL: sql, Array: n.Array, Answer: n.Answer}
 		}
 		return n
 	case *ExistsNode:

@@ -54,8 +54,11 @@ type ScalarSubquery struct {
 	// LEXICOGRAPHIC rule, and answered 0 rows for PostgreSQL's 4 because
 	// "12.75" sorts below "7.570000". DecPrecision/DecScale go with a DECIMAL
 	// Decl for the same reason every other declaration carries them.
-	Decl                   batch.TypeID
-	DeclKnown              bool
+	Decl      batch.TypeID
+	DeclKnown bool
+	// answer marks a nested subquery whose answer is a bare integral EXTRACT
+	// field inside a scalar subquery's body (plansql.SubqueryNode.Answer).
+	answer                 bool
 	DecPrecision, DecScale int
 	// resolved publishes val: stored last under resolveMu, and the only
 	// thing an evaluating goroutine reads before using val.

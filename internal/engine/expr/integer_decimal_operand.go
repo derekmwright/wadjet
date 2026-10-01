@@ -9,6 +9,7 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
+	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
 
 // An INTEGER-valued operand with no exact accessor of its own — a day count
@@ -132,6 +133,13 @@ func integerOperand(e Expr, b *batch.RecordBatch) bool {
 		return integerArms(arms, b)
 	case *Coalesce:
 		return integerArms(v.Args, b)
+	case *ScalarSubquery:
+		// A scalar subquery whose declared answer is an integer is an integer
+		// operand, as the plan reads its declaration (decimalArithOperand);
+		// so is a marked one answering an integral EXTRACT field.
+		return v.answer || v.DeclKnown && (v.Decl == batch.TypeInt32 || v.Decl == batch.TypeInt64)
+	case *CorrelatedScalarSubquery:
+		return v.answer || v.DeclKnown && (v.Decl == batch.TypeInt32 || v.Decl == batch.TypeInt64)
 	case *decimalScalarFn:
 		return v.fallback != nil && integerCall(v.fallback, b)
 	case *numericFuncCall:
@@ -267,6 +275,10 @@ func answerExtract(e Expr) bool {
 		return v.answer
 	case *numericFuncCall:
 		return v.answer
+	case *ScalarSubquery:
+		return v.answer
+	case *CorrelatedScalarSubquery:
+		return v.answer
 	case *UnaryOp:
 		return answerExtract(v.Operand)
 	case *BinOp:
@@ -275,4 +287,29 @@ func answerExtract(e Expr) bool {
 		return answerExtract(v.Left) || answerExtract(v.Right)
 	}
 	return false
+}
+
+// SubqueryAnswersIntegralExtract reports whether a scalar subquery's text
+// answers a bare integral EXTRACT field (`SELECT extract(year FROM o.d) …`,
+// or its rebuilt spelling `year(…)`): the one SELECT item, a call of one
+// argument whose name IntegralExtractField accepts.
+func SubqueryAnswersIntegralExtract(sql string) bool {
+	q, err := plansql.Parse(sql)
+	if err != nil {
+		return false
+	}
+	info, err := plansql.ExtractSelect(q)
+	if err != nil || info == nil || len(info.Columns) != 1 {
+		return false
+	}
+	n := info.Columns[0].ASTExpr
+	for {
+		p, ok := n.(*plansql.ParenNode)
+		if !ok {
+			break
+		}
+		n = p.Inner
+	}
+	fc, ok := n.(*plansql.FuncCallNode)
+	return ok && len(fc.Args) == 1 && IntegralExtractField(fc.Name)
 }

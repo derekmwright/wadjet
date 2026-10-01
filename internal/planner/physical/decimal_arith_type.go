@@ -144,6 +144,15 @@ func decimalArithOperand(node plansql.Node, decls ColDecls) (batch.DecimalType, 
 			return batch.DecimalType{Precision: batch.Int64DecimalDigits}, false, true
 		}
 		return batch.DecimalType{}, false, false
+	case *plansql.SubqueryNode:
+		// A scalar subquery whose declared answer is an integer is an integer
+		// operand, as an integer column is: `(SELECT (SELECT z.v …) * y.m …)`
+		// is numeric on PostgreSQL. expr.integerOperand reads the same
+		// declaration (ScalarSubquery.Decl).
+		if n.Answer {
+			return batch.DecimalType{Precision: batch.Int64DecimalDigits}, false, true
+		}
+		return integerValuedOperand(n, decls)
 	case *plansql.CaseNode:
 		if t, isDec, ok := choiceDecimalArithOperand(n, decls); ok {
 			return t, isDec, ok
@@ -540,6 +549,8 @@ func answerExtractIn(node plansql.Node) bool {
 		return answerExtractIn(n.Left) || answerExtractIn(n.Right)
 	case *plansql.FuncCallNode:
 		return n.Answer && expr.IntegralExtractField(n.Name)
+	case *plansql.SubqueryNode:
+		return n.Answer
 	}
 	return false
 }

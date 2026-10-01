@@ -561,6 +561,12 @@ type SubqueryNode struct {
 	// treats a scalar subquery as an opaque, possibly correlated body treats
 	// this one the same way; what differs is only how its value is formed.
 	Array bool
+	// Answer marks, inside a SCALAR SUBQUERY's body (physical.
+	// markScalarAnswer), a nested scalar subquery whose answer is a bare
+	// integral EXTRACT field: an integer operand of the body's numeric
+	// arithmetic, as the EXTRACT itself would be there. It is not part of
+	// the text.
+	Answer bool
 }
 
 func (*SubqueryNode) nodeTag() {}

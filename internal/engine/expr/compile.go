@@ -746,6 +746,7 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 						OuterTables:     ctx.outerTables,
 						ParsedInfo:      info,
 						UnqualOuterCols: buildUnqualOuterCols(refs, ctx.outerCols),
+						answer:          n.Answer,
 					}
 					// The same declaration the uncorrelated form carries
 					// (#696, #666). The resolver plans the subquery's SQL,
@@ -766,7 +767,8 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 			return &ArraySubquery{SQL: n.SQL, Runner: ctx.runner, Cols: ctx.subqueryCols,
 				Scope: ctx.subqueryScope}, nil
 		}
-		sq := &ScalarSubquery{SQL: n.SQL, Runner: ctx.runner, Cols: ctx.subqueryCols, Scope: ctx.subqueryScope}
+		sq := &ScalarSubquery{SQL: n.SQL, Runner: ctx.runner, Cols: ctx.subqueryCols, Scope: ctx.subqueryScope,
+			answer: n.Answer}
 		// The subquery's OUTPUT declaration, so the boxed comparison can read
 		// this operand as the number it is rather than as the text it boxes
 		// to (#696). Resolved once, at compile time, from the plan — never

@@ -41,6 +41,8 @@ type CorrelatedScalarSubquery struct {
 	Decl                   batch.TypeID
 	DeclKnown              bool
 	DecPrecision, DecScale int
+	// answer: ScalarSubquery.answer's twin.
+	answer bool
 }
 
 func (e *CorrelatedScalarSubquery) Eval(b *batch.RecordBatch, row int) any {
