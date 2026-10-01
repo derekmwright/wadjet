@@ -1199,14 +1199,21 @@ is `numeric`, and so is an integer CAST or an integral EXTRACT field beside a
 answering an integer or an integral EXTRACT field,
 `(SELECT (SELECT z.v …) * y.m …)` — but not a subscript of the OUTER row's
 array inside a correlated body (`(SELECT t.a[1] * 100000000000000000 * t.n - 3 + q.m …)`
-carries the double's digits). Over them `*`, `+`, `-`, `%`, unary
+carries the double's digits), nor a subscript of an `ARRAY[…]` constructor
+(`(ARRAY[2, 1])[1] * 100000000000000000 * n - 3` does too). Over them `*`, `+`, `-`, `%`, unary
 minus, `abs`, `round`, `trunc`, `mod` and a `CASE`, `COALESCE`, `GREATEST` or
 `NULLIF` arm keep the exact value past 2^53 (`-((SELECT x.b * 10000000 …) * t.n - 3) % 1000`
 is -997.00), and every operator that reads the value keeps it: a
 projection, `WHERE`, a join's keys and its condition, `IN (subquery)`, an
 aggregate's argument, `HAVING`, a `GROUP BY` key, `DISTINCT`, `UNION`,
 `ORDER BY` and `LIMIT`, a `CASE` arm, `CAST` to `text` or `bigint`, `||` and
-`concat`, `string_agg`, a correlated subquery's answer and the outer value
+`concat`, `string_agg`, `format`, `lpad`, `split_part`, `md5` and
+`array_to_string` over its text, `json_build_object`'s value (a JSON number:
+`json_build_object('v', t.a[1] * t.n)` is `{"v" : 2.25}`, and so is a
+`numeric` column's), `ARRAY(subquery)`, an aggregate's `FILTER`, a
+`GROUPING SETS` key, `INTERSECT` and `EXCEPT ALL`, `round` and `trunc` at a
+negative scale and `sign`, a `NOT EXISTS` anti-join and `IN` over `VALUES`,
+a correlated subquery's answer and the outer value
 spelled into one (`(SELECT t.b * 10000000 * t.n - 3 + q.m …)`), a `LEFT
 JOIN`'s null-extended column, an element of an `ARRAY[…]` beside an integer
 element (`ARRAY[t.a[1] * t.n, 1]` is `{2.25,1.00}`: the elements share one
@@ -1222,9 +1229,9 @@ argument of a window `sum`, `avg`, `min`, `max`,
 202500000000000003.00) and that window's `PARTITION BY` and `ORDER BY` keys
 (`OVER (PARTITION BY (SELECT z.v …) * t.n)`), the argument of a window
 `sum`, `avg` or `max` inside the subquery's body (`(SELECT sum(o.a[1] * y.m) OVER () …)`
-is `numeric` 1.25; `avg` at its input's scale + 4), what `CREATE TABLE … AS`
-and `INSERT … SELECT` store and `UPDATE … WHERE` and `DELETE … WHERE`
-compare, both wire formats, and an aggregate, a `GROUP BY` key, a window and
+is `numeric` 1.25; `avg` at its input's scale + 4), what `CREATE TABLE … AS`,
+`INSERT … SELECT`, `INSERT … VALUES` and `UPDATE … SET` store and
+`UPDATE … WHERE` and `DELETE … WHERE` compare, both wire formats, and an aggregate, a `GROUP BY` key, a window and
 a sort that spill. A `CASE` or `COALESCE` that has the bare answer of a
 correlated or `NUMERIC` subquery as one arm and arithmetic over that answer
 as another is `double precision`, because that arithmetic is (below):
@@ -1232,6 +1239,8 @@ as another is `double precision`, because that arithmetic is (below):
 answers 2531, 2462.5 where PostgreSQL answers `numeric` 2531.00, 2462.50.
 Refused instead are a `LATERAL` body that holds a scalar subquery with no
 `FROM` clause, or whose SELECT list reads the outer row (0A000, #1298), a
+scalar subquery in an `UPDATE … SET` list or an `INSERT … VALUES` row (0A000,
+as any subquery there is), a
 `WITH RECURSIVE` on the distributed arms (#1042), and, on the distributed arms, a `WHERE` or
 join condition holding a scalar subquery under `CAST`, `abs` or `COALESCE`,
 and an `IN (subquery)` whose left operand holds a scalar subquery (the
@@ -2603,7 +2612,7 @@ seed first:
 |---|---|
 | `integer`, `bigint` | `integer`, `bigint` (range-checked into the seed: `22003`) |
 | `numeric` | `integer`, `bigint`, `numeric`, a numeric literal |
-| `numeric(p,s)` (a bare `numeric(p,s)` column, or a `CAST` naming one) | `numeric(p,s)` only |
+| `numeric(p,s)` with p below 38 (a bare `numeric(p,s)` column, or a `CAST` naming one) | `numeric(p,s)` only |
 | `real` | `integer`, `bigint`, `numeric`, a numeric literal |
 | `double precision` | `integer`, `bigint`, `numeric`, `real` |
 | `timestamp` | `date`, `timestamp` |
@@ -2616,6 +2625,14 @@ modifier — a numeric literal, and any arithmetic or call over a `numeric`:
 `SELECT t.id, t.i * t.n … UNION ALL SELECT k + 1, v + 1 FROM r …` over a
 `numeric(10,2)` `t.n` answers `6.75, 7.75, 8.75` (a seed of the bare `t.n`
 is `numeric(10,2)` and the same term is `42804`, as on PostgreSQL).
+Two seeds PostgreSQL types `numeric(p,s)` seed an unconstrained column here,
+so their recursions answer where PostgreSQL raises `42804`: a scalar subquery
+over a `numeric(p,s)` column (`SELECT 1, (SELECT x.n FROM t x WHERE x.id = 1)
+UNION ALL SELECT k + 1, v + 1 FROM r …` answers `2.25, 3.25, 4.25`; this
+engine declares the subquery's answer without the column's modifier), and a
+`numeric(38,s)` column or `CAST` (`CAST(1.5 AS NUMERIC(38,2))` answers
+`1.50, 2.50, 3.50`; precision 38 is the widest this engine holds and reads as
+unconstrained).
 An unconstrained `numeric` seed carries one scale for the whole column: a term
 value with more digits after the point widens the column to them
 (`SELECT 1::numeric UNION ALL SELECT n + 0.5 …` answers `1.0, 1.5, 2.0, …`).

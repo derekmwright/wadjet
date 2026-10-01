@@ -13,7 +13,7 @@ Every place this engine deliberately answers differently from PostgreSQL 17.11, 
 | [Parameters and the wire](parameters-pgwire.md) | 4 | The wire protocol: multi-statement strings without transactions, PORT/PROTOCOL/DURATION wire types, and syntax errors without a POSITION field. |
 | [Names, scopes, joins and stars](names-scopes.md) | 27 | Name resolution and scoping: identifier case folding, storable names, published output names, column-alias lists, USING merges, star expansion and duplicate-name handling. |
 | [LATERAL and subqueries](lateral-subqueries.md) | 21 | Correlated subqueries and LATERAL joins: shapes the per-row re-run or the join decorrelation cannot express are refused loudly; star naming over laterals. |
-| [Recursion](recursion.md) | 10 | Recursive CTEs: an iteration-bounded eager fixed point, WITH RECURSIVE list ordering, and the seed-typed recursive terms PostgreSQL refuses. |
+| [Recursion](recursion.md) | 12 | Recursive CTEs: an iteration-bounded eager fixed point, WITH RECURSIVE list ordering, and the seed-typed recursive terms PostgreSQL refuses. |
 | [Aggregates and windows](aggregates-windows.md) | 19 | Aggregate and window-function divergences: accepted extra types and argument types, declared result types, and refusals of window forms PostgreSQL answers. |
 | [Text, bytes and collation](text-collation.md) | 22 | String collation, pattern matching, VARCHAR/CHAR length and declaration, the missing blank-padded type, and text functions over bytes. |
 | [Network types](network.md) | 16 | Network-native types (IPV4, IPV6, CIDR, MAC, PORT, PROTOCOL): PostgreSQL inet/macaddr/uuid input grammar, storage-domain refusals, text wire declarations. |
