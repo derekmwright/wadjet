@@ -132,7 +132,7 @@ These casts pass text through. `CAST('12:34:56' AS time)` returns `12:34:56` on 
 
 **json_build_object declares text.**
 
-`json_build_object` writes PostgreSQL's object text but declares text (OID 25) where PostgreSQL declares json (114). A json value that reaches it declared text — a derived table's, a CTE's or a stored column, a scalar subquery's answer — is therefore written as a JSON string (`{"o" : "{\"a\" : 1}"}`), where PostgreSQL nests the object; a `json_build_object` or a `CAST(… AS JSON)` in the argument itself nests. Being text, the object can be compared and grouped, where PostgreSQL raises 42883 for json. (catalog: [other#r16](adr/0012-divergences/other.md#catalog); #1470)
+`json_build_object` writes PostgreSQL's object text but declares text (OID 25) where PostgreSQL declares json (114). A json value that reaches it declared text — a derived table's, a CTE's or a stored column, a scalar subquery over a table — is therefore written as a JSON string (`{"o" : "{\"a\" : 1}"}`), where PostgreSQL nests the object; a `json_build_object` or a `CAST(… AS JSON)` in the argument itself nests. Being text, the object can be compared and grouped, where PostgreSQL raises 42883 for json. (catalog: [other#r16](adr/0012-divergences/other.md#catalog); #1470)
 
 Comparing arrays whose element types differ within the numeric family (`ARRAY[1.5] > ARRAY[1]`) answers by the numbers, where PostgreSQL has no `numeric[] > integer[]` operator and raises 42883. (ADR-0045)
 

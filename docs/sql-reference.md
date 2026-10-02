@@ -4737,7 +4737,7 @@ PostgreSQL DOES have over `bytea` keep working over `BYTES`: `LENGTH`,
 | `JSON_EXTRACT_SCALAR(json, path)` | Extract scalar value (returns NULL for objects/arrays) | `JSON_EXTRACT_SCALAR(data, '$.id')` |
 | `JSON_ARRAY_LENGTH(json)` | Length of a JSON array | `JSON_ARRAY_LENGTH('[1,2,3]')` → `3` |
 | `JSON_VALID(s)` | Test if string is valid JSON | `JSON_VALID(payload)` |
-| `JSON_BUILD_OBJECT(k1, v1, ...)` | A JSON object in PostgreSQL's spelling (`{"a" : 1}`): each value as its type's JSON — a number or boolean bare, a `numeric` at its own scale, a DATE `"2024-03-04"`, a TIMESTAMP `"2024-03-04T12:00:00"`, an array `[1,2]`, a ROW `{"f1":1}`, a nested `json_build_object` or a CAST to json as the object it is; each key as its value's JSON text, quoted. The result is declared text where PostgreSQL declares json (#1470), so a json value read back through a column or a scalar subquery's answer nests as a JSON string | `JSON_BUILD_OBJECT('o', JSON_BUILD_OBJECT('d', d))` |
+| `JSON_BUILD_OBJECT(k1, v1 [, k2, v2])` | A JSON object in PostgreSQL's spelling (`{"a" : 1}`), from zero to 50 key/value pairs (100 arguments, PostgreSQL's limit; a 101st argument is 42883 where PostgreSQL raises 54023): each value as its type's JSON — a number or boolean bare, a `numeric` at its own scale, a DATE `"2024-03-04"`, a TIMESTAMP `"2024-03-04T12:00:00"`, an array `[1,2]`, a ROW `{"f1":1}`, a nested `json_build_object` or a CAST to json as the object it is; each key as its value's JSON text, quoted. The result is declared text where PostgreSQL declares json (#1470), so a json value read back through a column or a scalar subquery over a table nests as a JSON string | `JSON_BUILD_OBJECT('o', JSON_BUILD_OBJECT('d', d))` |
 
 ### URL Functions
 
