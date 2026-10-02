@@ -18,7 +18,9 @@ There are exactly two commands. Neither takes a variable, a flag file or an envi
 
 ## Before the first request: `gaterun.sh --check`
 
-Prints one line per prerequisite and launches nothing. A `FAIL` line names the command that fixes it;
+Prints one line per prerequisite and launches nothing. Before the one-time setup it prints FAIL
+for the launch template, the bucket and the gate reaper (the template-tag line appears only once
+the template exists). A `FAIL` line names the command that fixes it;
 `WARN` lines do not block. Exit 0 = ready.
 
 ```
@@ -85,7 +87,8 @@ default-VPC subnet on a spot capacity refusal); polls every 30 s with a 45-minut
 lane table; exits with the worst lane's effective exit (3 = the instance vanished without a summary,
 for example a spot interruption; 124 = the wait cap, after terminating the instance).
 
-`--dry-run` shows what a request would do and does nothing (no push, no AWS call):
+`--dry-run` shows what a request would do and does nothing (no push, no AWS call, so it works
+before the one-time setup and whatever `--check` says):
 
 ```
 $ gaterun.sh --dry-run e9abe974 gofmt,A
