@@ -1234,14 +1234,13 @@ argument of a window `sum`, `avg`, `min`, `max`,
 is `numeric` 1.25; `avg` at its input's scale + 4), what `CREATE TABLE … AS`,
 `INSERT … SELECT`, `INSERT … VALUES` and `UPDATE … SET` store and
 `UPDATE … WHERE` and `DELETE … WHERE` compare, both wire formats, and an aggregate, a `GROUP BY` key, a window and
-a sort that spill. Not so the outer value in a correlated subquery's own
+a sort that spill, and the outer value in a correlated subquery's own
 `WHERE`, `EXISTS` or `NOT EXISTS` predicate: the re-run spells an outer
-`integer` or `bigint` column as `CAST(v AS BIGINT)`, and an integer `CAST`
-beside a `numeric` outside a subquery's SELECT list is `double precision`
-(`CAST(9000000000 AS BIGINT) * 10000000 * CAST(10.00 AS NUMERIC(10,2)) - 3`
-is 9e+17 where PostgreSQL answers `numeric` 899999999999999997.00), so
+`integer` or `bigint` column as `CAST(v AS BIGINT)`, an integer operand of
+exact arithmetic like any integer `CAST` (see "Integers, constants and the
+integer CAST" below), so
 `NOT EXISTS (SELECT 1 FROM ss_t u WHERE u.id = t.id AND u.b * 10000000 * u.n - 3 = t.b * 10000000 * t.n)`
-answers 5 rows where PostgreSQL answers 6 — a recorded gap, as at v0.25.3. A `CASE` or `COALESCE` that has the bare answer of a
+answers PostgreSQL's 6 rows (5 at v0.25.3). A `CASE` or `COALESCE` that has the bare answer of a
 correlated or `NUMERIC` subquery as one arm and arithmetic over that answer
 as another is `double precision`, because that arithmetic is (below):
 `CASE WHEN … THEN (SELECT extract(year FROM t.d) * y.m …) ELSE (SELECT …) + 1 END`
@@ -3194,6 +3193,38 @@ FROM flow_logs
 | `#` | Integer bitwise XOR. `5 # 3` is 6. It is PostgreSQL's spelling of the operator — `^` is exponentiation on both engines — at PostgreSQL's precedence: LOOSER than `+` and `-`, tighter than every comparison, and LEFT associative. It is `BITWISE_XOR(a, b)` under another spelling and its result follows its operands' width. A non-integer operand answers here where PostgreSQL raises — see [PostgreSQL differences](postgres-differences.md) |
 | `\|\|` | String concatenation — NULL in either operand makes the result NULL (use `CONCAT` to ignore NULLs) |
 
+### Integers, constants and the integer CAST
+
+An integer operand beside a `numeric` is numeric arithmetic, exact at any
+magnitude the 38-digit carrier holds, whether it is a column, an
+integer-valued expression or a `CAST` to `INTEGER`, `SMALLINT` or `BIGINT`:
+`CAST(i AS INTEGER) * 0.1` over 3 is 0.3, `CAST(i AS INTEGER) % n` over 1 and
+0.01 is 0.00, and `CAST(b AS BIGINT) * 10000000 * n - 3` over 9000000000 and
+10.00 is 899999999999999997.00, as on PostgreSQL. A quotient with an integer
+`CAST` as an operand is the exception: `CAST(i AS INTEGER) / n` is the double
+precision quotient (1.3333333333333333), where PostgreSQL answers numeric,
+because a decimal quotient keeps one scale per column
+([numeric-decimal#r19](adr/0012-divergences/numeric-decimal.md#catalog)).
+
+A numeric constant keeps its digits wherever it is handed on — bare, inside
+`CASE`, `COALESCE`, `NULLIF`, `GREATEST` or `LEAST`, under unary minus, as a
+scalar subquery's answer, under a bare `CAST(… AS NUMERIC)`, in a window's
+argument: `COALESCE(14.0000000000000000001, 0)` is 14.0000000000000000001 and
+does not equal 14, as on PostgreSQL. A choice over it and a column prints one
+scale for the column ([numeric-decimal#r18](adr/0012-divergences/numeric-decimal.md#catalog)).
+
+An explicit integer `CAST` rounds by its operand's PostgreSQL type: a
+`numeric` half away from zero, a `double precision` half to even.
+`CAST(5 / 2.0 AS INTEGER)`, `CAST(SQRT(6.25) AS INTEGER)` and
+`CAST(POWER(2.5, 1) AS INTEGER)` are 3 (negated, -3), as on PostgreSQL, though
+the operands are computed in double precision (ADR-0024 §2c);
+`CAST(CAST(2.5 AS DOUBLE PRECISION) AS INTEGER)` is 2. A column that a derived
+table, a `DISTINCT`, an aggregate, a CTE, a set operation, `VALUES`, a window
+or a join produced from such a value is a double in the result and rounds
+half to even under a `CAST` (2 where PostgreSQL answers 3,
+[dml-assignment#r2](adr/0012-divergences/dml-assignment.md#catalog)), while an
+`INSERT … SELECT` of it into an integer column rounds 3.
+
 ## DISTINCT
 
 Deduplicate result rows:
@@ -3499,11 +3530,9 @@ over one, or a bare literal: `SUM(2.5) OVER ()` is the frame's row count times
 2.5, `FIRST_VALUE(2.5) OVER (ORDER BY id)` is 2.5 on every row, and
 `LAG(5) OVER (ORDER BY id)` is NULL on the first row and 5 after it, as on
 PostgreSQL; a bound parameter is read the same way. A numeric literal of more
-than a double's ~17 significant digits answers rounded, as the same literal
-does in a SELECT list or a grouped aggregate (`SUM(99999999999999999999.5)
-OVER ()` over six rows is `6e+20`; PostgreSQL answers the exact
-`599999999999999999997.0`); write it as a cast to `NUMERIC(p, s)` for the
-exact value. A text or NULL literal
+than a double's ~17 significant digits keeps every digit, as the same literal
+does in a SELECT list or a grouped aggregate: `SUM(99999999999999999999.5)
+OVER ()` over six rows is `599999999999999999997.0`, as on PostgreSQL. A text or NULL literal
 given to `FIRST_VALUE`, `LAST_VALUE`, `NTH_VALUE`, `LAG` or `LEAD` answers
 the text, or NULL, where PostgreSQL raises `42804 could not determine
 polymorphic type` (ADR-0012 catalog, aggregates-windows r18).

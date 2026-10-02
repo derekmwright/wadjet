@@ -17,7 +17,7 @@ A MERGE action's expression forms are one table measured on 17.11 (`intround.Mer
 | cell | PostgreSQL 17.11 | this engine | SQLSTATE | disposition | since | issue | gate |
 |---|---|---|---|---|---|---|---|
 | **r1** `SELECT 5 / 2.0` | 2.5000000000000000, declared numeric (OID 1700) | 2.5, declared double precision (OID 701) (measured); INSERT INTO t VALUES (1, 5 / 2.0) stores 3 on both (measured) | — | value divergence | 2026-09-28 · [E93](#e93), P024 | #1353 | — |
-| **r2** `SELECT CAST(5 / 2.0 AS INTEGER)` | 3 (negated, -3) | 2 (negated, -2) (measured): the cast rounds the float64 carrier half to even; CAST(2.5 AS INTEGER) is 3 on both | — | value divergence | 2026-09-28 · [E93](#e93), P015 | #1353, #1392 | — |
+| **r2** `SELECT CAST(s.x AS INTEGER) FROM (SELECT DISTINCT 5 / 2.0 + t.id * 0 AS x FROM ss_t t) s` | 3 | 2 (measured 2026-10-02 on every arm, roundOrigin/distinct; the same at c39858f3): a column a previous operator materialized is a float64 with no PostgreSQL category in the batch, so the cast rounds it half to even; the integer ASSIGNMENT of the same column rounds 3 (roundOrigin/insertDistinct). NARROWED 2026-10-02 (#1392): a cast whose operand computes the float-carried numeric itself rounds half away — `CAST(5 / 2.0 AS INTEGER)`, `CAST(SQRT(6.25) AS INTEGER)`, `CAST(POWER(2.5, 1) AS INTEGER)` are 3, negated -3, SMALLINT and BIGINT alike (2 and -2 at v0.25.3, issue/1392/*) | — | value divergence | 2026-09-28 · [E93](#e93), P015 | #1353, #1392 | `coordinator.TestArcNXNumericCarrierEveryArm` (kept roundOrigin/*) |
 | **r3** `SELECT CAST(CAST('{"k": 2.5}' AS JSON)->>'k' AS INTEGER)` | ERROR 22P02 invalid input syntax for type integer: "2.5" | 2 (measured): the cast reads the JSON number; assigning j->>'k' to an integer column is 42804 on both (measured) | — | documented gap | 2026-09-28 · [E93](#e93), P016 | #1353, #1406 | — |
 | **r4** `MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN UPDATE SET n = $1 -- $1 bound as text '2.5'` | ERROR 42804 (text is not assignable to integer without a cast) | ERROR 22P02: Bind renders the parameter as a quoted literal the column's input function reads; neither writes | 22P02 | value divergence | 2026-09-28 · [E93](#e93), P034 | #1353, #1408 | — |
 | **r5** `SELECT UPPER(x) * 2 FROM s` | ERROR 42883 operator does not exist: text * integer | 24 over '12' (measured); -x answers -12; a bare text column, x * 2, is 42883 on both (measured) | — | documented gap | 2026-09-28 · [E93](#e93), P035 | #1353, #1409 | — |
@@ -67,10 +67,15 @@ ADR lines 4311-4351. Catalog rows: r1, r2, r3, r4, r5, r6, r7, r8, r9. Stated in
   A float4/float8 parameter binds as its own type (OID 700/701), as in
   PostgreSQL, where v0.25.1 read it as a numeric literal. Recorded, each
   with its differences-page entry:
-  - `#1353-cast` — an explicit `CAST(<float-carried numeric> AS INTEGER)`
-    rounds the double half to even (`CAST(5 / 2.0 AS INTEGER)` is 2,
-    PostgreSQL 3): the cast kernel sees only its compiled operand and a
-    DAG stage boundary carries no category (ADR-0024 §2c, #1392).
+  - `#1353-cast` — an explicit `CAST(<column> AS INTEGER)` over a column
+    a previous operator materialized from a float-carried numeric (a
+    derived table, DISTINCT, an aggregate, a CTE, a set operation,
+    VALUES, a window, a join) rounds the double half to even (2 where
+    PostgreSQL answers 3): the cast reads its operand's category from the
+    operand's own expression over the input batch's columns, and a
+    materialized float64 carries none (ADR-0024 §2c). A cast whose
+    operand computes the value itself — `CAST(5 / 2.0 AS INTEGER)` —
+    rounds half away, as PostgreSQL does, on every arm (#1392).
   - `#1353-json` — `CAST(j->>'k' AS INTEGER)` over `{"k": 2.5}` answers 2
     where PostgreSQL raises 22P02: the cast reads the JSON number, not
     `->>`'s text (#1406).
