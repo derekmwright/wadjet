@@ -32,7 +32,7 @@ var preparedRegexpToggle = optswitch.Register("prepared-regexp", "WADJET_PREPARE
 // or a capture-group backreference.
 type replSeg struct {
 	lit   string
-	group int // 1-9 for a backreference, -1 for a literal segment
+	group int // 0 for the whole match (\\&), 1-9 for a backreference, -1 for a literal segment
 }
 
 // preparedRegexp is the compile-once state for a regexp_replace call with
@@ -43,6 +43,126 @@ type preparedRegexp struct {
 	segs     []replSeg
 	anchored bool // every match must start at offset 0 → at most one match
 	ok       bool
+	// global: every match is replaced (the 'g' flag); otherwise the first.
+	global bool
+	// emptyAt, when set, makes replaceAll take PostgreSQL's matches rather
+	// than Go's: an empty match right after a non-empty one is a match
+	// there (regexp_replace('q"b', 'q*', '-', 'g') is `--"-b-`), where Go's
+	// FindAll drops it (`-"-b-`). It reports whether the pattern matches the
+	// empty string at offset e of src.
+	emptyAt func(src string, e int) bool
+}
+
+// withAbuttingEmpty is matches (Go's, leftmost-first) with the empty match
+// PostgreSQL also takes at the end e of every non-empty match: Go's search
+// from e found a match there and dropped it only because it was empty and
+// abutted the previous one — so when Go's next match does not start at e,
+// the preferred match at e was empty exactly when the pattern can match the
+// empty string at e. Its groups are empty or unset, which expand alike.
+func (p *preparedRegexp) withAbuttingEmpty(src string, matches [][]int) [][]int {
+	var out [][]int // nil until the first insertion
+	for i, m := range matches {
+		e := m[1]
+		insert := m[0] != e && (i+1 == len(matches) || matches[i+1][0] != e) && p.emptyAt(src, e)
+		if insert && out == nil {
+			out = append(make([][]int, 0, len(matches)+1), matches[:i]...)
+		}
+		if out != nil {
+			out = append(out, m)
+		}
+		if insert {
+			em := make([]int, len(m))
+			for j := range em {
+				em[j] = -1
+			}
+			em[0], em[1] = e, e
+			out = append(out, em)
+		}
+	}
+	if out == nil {
+		return matches
+	}
+	return out
+}
+
+// emptyMatcher is emptyAt for a Go pattern: whether it matches the empty
+// string at an offset, given the zero-width assertions true there.
+func emptyMatcher(pattern string) func(string, int) bool {
+	re, err := syntax.Parse(pattern, syntax.Perl)
+	if err != nil {
+		return nil
+	}
+	re = re.Simplify()
+	return func(src string, e int) bool {
+		return canMatchEmpty(re, src, e)
+	}
+}
+
+func canMatchEmpty(re *syntax.Regexp, src string, e int) bool {
+	switch re.Op {
+	case syntax.OpEmptyMatch, syntax.OpStar, syntax.OpQuest:
+		return true
+	case syntax.OpLiteral:
+		return len(re.Rune) == 0
+	case syntax.OpCapture, syntax.OpPlus:
+		return canMatchEmpty(re.Sub[0], src, e)
+	case syntax.OpRepeat:
+		return re.Min == 0 || canMatchEmpty(re.Sub[0], src, e)
+	case syntax.OpConcat:
+		for _, sub := range re.Sub {
+			if !canMatchEmpty(sub, src, e) {
+				return false
+			}
+		}
+		return true
+	case syntax.OpAlternate:
+		for _, sub := range re.Sub {
+			if canMatchEmpty(sub, src, e) {
+				return true
+			}
+		}
+		return false
+	case syntax.OpBeginText:
+		return e == 0
+	case syntax.OpEndText:
+		return e == len(src)
+	case syntax.OpBeginLine:
+		return e == 0 || src[e-1] == '\n'
+	case syntax.OpEndLine:
+		return e == len(src) || src[e] == '\n'
+	case syntax.OpWordBoundary, syntax.OpNoWordBoundary:
+		isWord := func(i int) bool {
+			if i < 0 || i >= len(src) {
+				return false
+			}
+			c := src[i]
+			return c == '_' || c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
+		}
+		boundary := isWord(e-1) != isWord(e)
+		return boundary == (re.Op == syntax.OpWordBoundary)
+	}
+	return false
+}
+
+// withTemplate is p with replacement template repl, sharing p's compiled
+// pattern.
+func (p *preparedRegexp) withTemplate(repl string) *preparedRegexp {
+	q := *p
+	q.segs = parseSQLReplacement(repl)
+	return &q
+}
+
+// replace is regexp_replace's answer for src: the first match replaced, or
+// every match under the 'g' flag.
+func (p *preparedRegexp) replace(src string) string {
+	if p.global {
+		return p.replaceAll(src)
+	}
+	m := p.re.FindStringSubmatchIndex(src)
+	if m == nil {
+		return src
+	}
+	return p.spliceOne(src, m)
 }
 
 // parseSQLReplacement splits a SQL-convention replacement string into
@@ -70,6 +190,13 @@ func parseSQLReplacement(repl string) []replSeg {
 			}
 			if next == '\\' {
 				lit.WriteByte('\\')
+				i++
+				continue
+			}
+			if next == '&' {
+				// \& is the whole match (PostgreSQL's replacement syntax).
+				flush()
+				segs = append(segs, replSeg{group: 0})
 				i++
 				continue
 			}
@@ -168,6 +295,9 @@ func (p *preparedRegexp) replaceAll(src string) string {
 		return p.spliceOne(src, m)
 	}
 	matches := p.re.FindAllStringSubmatchIndex(src, -1)
+	if p.emptyAt != nil {
+		matches = p.withAbuttingEmpty(src, matches)
+	}
 	if len(matches) == 0 {
 		return src
 	}
@@ -253,7 +383,25 @@ func (e *FuncCall) preparedReplace() *preparedRegexp {
 		if !okP || !okR || pat.Val == nil || rep.Val == nil {
 			return
 		}
-		e.prepared = prepareRegexpReplace(toString(pat.Val), toString(rep.Val))
+		flags := ""
+		if len(e.Args) >= 4 {
+			fl, okF := e.Args[3].(*Lit)
+			if !okF || len(e.Args) > 4 {
+				return
+			}
+			f, isText := fl.Val.(string)
+			if !isText {
+				return
+			}
+			flags = f
+		}
+		// A pattern or flags the generic path refuses leaves e.prepared nil,
+		// and the per-row path raises the refusal.
+		p, err := cachedRegexpReplace(toString(pat.Val), flags)
+		if err != nil {
+			return
+		}
+		e.prepared = p.withTemplate(toString(rep.Val))
 	})
 	if e.prepared == nil || !e.prepared.ok {
 		return nil

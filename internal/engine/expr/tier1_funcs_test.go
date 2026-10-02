@@ -120,7 +120,10 @@ func TestRegexpReplace(t *testing.T) {
 		args []any
 		want any
 	}{
-		{[]any{"192.168.1.1", `\d+`, "X"}, "X.X.X.X"},
+		// The first match only, every match under 'g' — PostgreSQL 17.11
+		// (#1481: X.X.X.X without the flag was the defect).
+		{[]any{"192.168.1.1", `\d+`, "X"}, "X.168.1.1"},
+		{[]any{"192.168.1.1", `\d+`, "X", "g"}, "X.X.X.X"},
 		{[]any{"hello world", `\s+`, "-"}, "hello-world"},
 		{[]any{nil, `.*`, ""}, nil},
 	}

@@ -887,7 +887,7 @@ func (e *FuncCall) tryEvalMemoized(b *batch.RecordBatch, out *batch.Vector, n in
 		}
 		var v any
 		if prep != nil {
-			v = prep.replaceAll(s)
+			v = prep.replace(s)
 		} else {
 			v = e.Eval(b, i)
 		}
@@ -939,7 +939,7 @@ func (e *FuncCall) evalMemoizedStrings(b *batch.RecordBatch, vec, out *batch.Vec
 		mv, hit := memo[s]
 		if !hit {
 			if prep != nil {
-				mv = memoStr{s: prep.replaceAll(s)}
+				mv = memoStr{s: prep.replace(s)}
 			} else {
 				switch tv := e.Eval(b, i).(type) {
 				case string:
