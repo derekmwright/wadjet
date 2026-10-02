@@ -18,12 +18,36 @@ import (
 // expression's projection output — asked against the input batch's executed
 // columns. The expression package sits below this one, so the walk is
 // registered with it here; every binary that compiles SQL links this package.
-func init() { expr.SetShapeResolver(declaredShapeOf) }
+func init() {
+	expr.SetShapeResolver(declaredShapeOf)
+	expr.SetCategoryResolver(declaredCategoryOf)
+}
 
 // declaredShapeOf is node's declared type over schema as the column a vector
 // of it is allocated from, or nil when the walk declines (or declares a type
 // with no allocatable shape: a DECIMAL without its scale).
 func declaredShapeOf(node plansql.Node, schema []parquet.Column, sub expr.SubqueryDeclFunc) *parquet.Column {
+	d, c := nodeDeclaredType(node, schemaColDecls(schema, sub))
+	if c == expr.Undecided {
+		return nil
+	}
+	col, ok := declColumn(d)
+	if !ok {
+		return nil
+	}
+	return &col
+}
+
+// declaredCategoryOf is PostgreSQL's numeric category of node over schema
+// (ADR-0024 §2c): the category the same declaration carries, read by an
+// explicit integer CAST to choose its rounding (#1392).
+func declaredCategoryOf(node plansql.Node, schema []parquet.Column, sub expr.SubqueryDeclFunc) expr.PGCategory {
+	return pgCategoryOfDecl(nodeDeclaredType(node, schemaColDecls(schema, sub)))
+}
+
+// schemaColDecls is the declaration context an expression over the given
+// input columns resolves against.
+func schemaColDecls(schema []parquet.Column, sub expr.SubqueryDeclFunc) ColDecls {
 	decls := ColDecls{
 		Types:  make(map[string]parquet.TypeID, len(schema)),
 		Fields: map[string][]parquet.Column{},
@@ -53,13 +77,5 @@ func declaredShapeOf(node plansql.Node, schema []parquet.Column, sub expr.Subque
 		// projection of that subquery does (round 4, B1/B4).
 		decls.subqueryDecl = sub
 	}
-	d, c := nodeDeclaredType(node, decls)
-	if c == expr.Undecided {
-		return nil
-	}
-	col, ok := declColumn(d)
-	if !ok {
-		return nil
-	}
-	return &col
+	return decls
 }

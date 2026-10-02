@@ -66,8 +66,10 @@ func TestIntegerDomainDeclinesADecimalOperand(t *testing.T) {
 		{"case_over_a_decimal_literal", "(CASE WHEN i > 0 THEN 1.5 ELSE 1 END) * 2", 3.0},
 		{"greatest_over_a_decimal_literal", "GREATEST(1.5, 1) * 2", 3.0},
 		// A fractional literal on the OTHER side of the operator, which is the
-		// #841 boundary reached from here.
-		{"cast_times_a_fractional_literal", "CAST(i AS BIGINT) * 2.5", 1.0e10},
+		// #841 boundary reached from here. The integer CAST is an integer
+		// operand of exact arithmetic (#1450), so the product is PostgreSQL's
+		// numeric 10000000000.0 — exact, and never an integer claim.
+		{"cast_times_a_fractional_literal", "CAST(i AS BIGINT) * 2.5", "10000000000.0"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			got := intDomainCompile(t, c.sql).Eval(b, 0)

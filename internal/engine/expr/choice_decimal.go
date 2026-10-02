@@ -441,23 +441,20 @@ func constArmDecimalType(e Expr) (batch.DecimalType, bool) {
 }
 
 // LiteralChoiceDecimalType is the fixed-point type a numeric LITERAL
-// contributes to a CHOICE construct's DECIMAL fold: its spelling's (p,s) —
-// ADR-0024 item 3 — but only when the BOX compileLit built for it carries that
+// contributes to a CHOICE construct's DECIMAL fold — and to every other
+// declaration of the literal (DeclNumericLit): its spelling's (p,s), ADR-0024
+// item 3 — but only when the BOX compileLit built for it carries that
 // spelling exactly.
 //
-// The box is the qualification, and it is what separates a choice from
-// arithmetic. Exact arithmetic reads a literal through its source TEXT
-// (litDecimal, ADR-0012 item 6) and is exact for any spelling; a choice
-// construct CHOOSES a value and hands over whatever box the winning arm
-// produced, which for a literal past a double's ~17 significant digits is
-// already rounded. Declaring DECIMAL for
-// `GREATEST(d_wide, 493827160549382.7160549350)` would therefore store a
-// number nobody wrote on the rows the literal wins. Declining leaves that
-// shape exactly where it was — a FLOAT64 declaration and the #361 store
-// refusal — which is loud rather than quietly short of digits.
-//
-// An INTEGER spelling is exact whenever strconv.ParseInt took it, which is
-// exactly when compileLit put an int64 in the box.
+// A choice CHOOSES a value and hands over whatever box the winning arm
+// produced, so the declaration is only as good as the box. An integer
+// spelling is exact whenever strconv.ParseInt took it (an int64 box); a
+// fractional or exponent spelling is exact either way — a float64 that reads
+// back as it, or, where a double cannot carry it, the spelling's own DECIMAL
+// (WideNumericLiteral, #1386), so `GREATEST(d_wide,
+// 493827160549382.7160549350)` and `COALESCE(14.0000000000000000001, 0)` keep
+// every digit, as on PostgreSQL. An integer spelling past int64 keeps the
+// float64 box it always had, and so declines here.
 func LiteralChoiceDecimalType(text string) (batch.DecimalType, bool) {
 	t, v, ok := litDecimal(text)
 	if !ok {
@@ -465,6 +462,9 @@ func LiteralChoiceDecimalType(text string) (batch.DecimalType, bool) {
 	}
 	trimmed := strings.TrimSpace(text)
 	if _, err := strconv.ParseInt(trimmed, 10, 64); err == nil {
+		return t, true
+	}
+	if _, _, wide := WideNumericLiteral(trimmed); wide {
 		return t, true
 	}
 	f, err := strconv.ParseFloat(trimmed, 64)
@@ -476,4 +476,38 @@ func LiteralChoiceDecimalType(text string) (batch.DecimalType, bool) {
 		return batch.DecimalType{}, false
 	}
 	return t, true
+}
+
+// WideNumericLiteral reports whether a FRACTIONAL or EXPONENT numeric
+// literal's spelling is one a float64 box cannot carry — more significant
+// digits than a double reads back — while the DECIMAL carrier holds it
+// exactly: `14.0000000000000000001`, `493827160549382.7160549350`.
+// PostgreSQL types every such literal numeric and keeps its digits wherever
+// it is handed on; compileLit compiles it to the exact DECIMAL its spelling
+// names rather than to a rounded double, and the planner's walk reads the
+// same predicate (physical.isConstNumericLitNode: such a literal is an exact
+// DECIMAL operand, not the float-path constant a narrow literal is), so the
+// declaration and the box cannot disagree. It is a function of the spelling
+// alone, so every arm — and a DAG stage that re-parses the text — decides it
+// identically. An integer spelling past int64 is not one: it keeps its float64
+// box, which the integer-domain casts read (`9223372036854775808::DATE` is
+// 22003 out of range, never a parse of the digits as a date).
+func WideNumericLiteral(text string) (batch.DecimalType, string, bool) {
+	trimmed := strings.TrimSpace(text)
+	if !strings.ContainsAny(trimmed, ".eE") {
+		return batch.DecimalType{}, "", false
+	}
+	t, v, ok := litDecimal(trimmed)
+	if !ok {
+		return batch.DecimalType{}, "", false
+	}
+	f, err := strconv.ParseFloat(trimmed, 64)
+	if err != nil {
+		return batch.DecimalType{}, "", false
+	}
+	d, ok := batch.DecimalTextAt(strconv.FormatFloat(f, 'f', -1, 64), t.Scale)
+	if ok && d.Residual == 0 && d.Sat == 0 && d.Unscaled == v {
+		return batch.DecimalType{}, "", false // the double reads back exactly
+	}
+	return t, v.FormatDecimal(t.Scale), true
 }

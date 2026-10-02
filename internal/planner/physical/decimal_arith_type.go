@@ -24,11 +24,12 @@ import (
 // #361's silent-write guard. Both are loud today, and neither is an answer.
 //
 // The shapes it accepts are therefore precisely the ones whose compiled node
-// implements expr's decimalOperand: a plain column reference, a numeric
-// literal, unary ±, and nested arithmetic over those. A CASE, a COALESCE, a
-// scalar function or a CAST that declares DECIMAL is NOT accepted — those
-// compile to nodes with no exact fixed-point form, so they stay on the float
-// declaration they had, which is what the runtime still does with them.
+// reaches expr's decimalOperandOf: a column reference, a numeric literal (a
+// wide one compiles to the exact DECIMAL its spelling names), unary ±, nested
+// arithmetic, a CAST to an integer type or to a DECIMAL — named (p,s), or bare
+// over an operand with an exact type — and the choices, functions and
+// integer-valued operands the arms below name. Anything else stays on the
+// float declaration it had, which is what the runtime does with it.
 
 // binOpDecimalType returns the DECIMAL type an arithmetic expression declares,
 // per batch.DecimalResultType. ok=false means this pair has no fixed-point
@@ -85,6 +86,12 @@ func binOpDecimalOperand(n *plansql.BinaryOp, decls ColDecls) (batch.DecimalType
 		// A division between two CONSTANTS keeps the float declaration it has
 		// always had — expr.resolveDecimalMode declines the same pair, for the
 		// reason spelled out there.
+		return batch.DecimalType{}, false, false
+	}
+	if n.Op == "/" && (userIntegerCastNode(n.Left) || userIntegerCastNode(n.Right)) {
+		// A quotient over an integer CAST keeps its float declaration, as
+		// expr.resolveDecimalMode keeps its float rung (the one-scale
+		// quotient would drop the digits the double carries, r19).
 		return batch.DecimalType{}, false, false
 	}
 	p, s, ok := batch.DecimalResultType(n.Op, lt.Precision, lt.Scale, rt.Precision, rt.Scale)
@@ -193,14 +200,24 @@ func decimalArithOperand(node plansql.Node, decls ColDecls) (batch.DecimalType, 
 		if ref, d, ok := columnValueRef(n); ok {
 			return decimalArithOperand(ref, d)
 		}
-		if t, ok := answerIntegerOperand(n, decls); ok {
+		// A CAST to an integer type is an integer operand at its target's
+		// width, as a column of that type is: `CAST(i AS INTEGER) / n` and
+		// `CAST(b AS BIGINT) * 10000000 * n` are numeric on PostgreSQL
+		// (#1450). expr.Cast.decimalType answers the same width
+		// (expr.IntegerCastDecimal); a cast marked in a scalar subquery's
+		// body (n.Answer) is one of these too.
+		if t, ok := expr.IntegerCastDecimal(n.TypeName); ok {
 			return t, false, true
 		}
-		p, s, hasParams, ok := expr.DecimalCastDest(n.TypeName)
-		if !ok || !hasParams {
-			return batch.DecimalType{}, false, false
+		// A BARE NUMERIC cast is its operand's exact type at the carrier's
+		// full width when the operand has one (castDeclaredDecimal, the
+		// projection's declaration of the same cast): `CAST(14.0000000000000000001
+		// AS NUMERIC) + n` is exact numeric on PostgreSQL (#1386).
+		// expr.Cast.bareDecimalType answers the same type.
+		if d, ok := castDeclaredDecimal(n, decls); ok && d.DecKnown {
+			return d.Dec(), true, true
 		}
-		return batch.DecimalType{Precision: p, Scale: s}, true, true
+		return batch.DecimalType{}, false, false
 	case *plansql.Lit:
 		if n.Kind != plansql.LitNumber {
 			return batch.DecimalType{}, false, false
@@ -220,29 +237,17 @@ func decimalArithOperand(node plansql.Node, decls ColDecls) (batch.DecimalType, 
 	return batch.DecimalType{}, false, false
 }
 
-// answerIntegerOperand is an integer CAST (`CAST(o.b AS INTEGER)`) or an
-// integral EXTRACT field (`extract(year FROM o.d)`) marked in a SCALAR
-// SUBQUERY's body (markScalarAnswer), as an integer operand of numeric
-// arithmetic: `(SELECT CAST(o.b AS INTEGER) * x.m …)` and
-// `(SELECT extract(year FROM o.d) * x.m …)` are numeric on PostgreSQL and
-// were at v0.25.3, over a derived table or a CTE inside the subquery too; the
-// body computes them so (expr.integerOperand reads the same marks). The same
-// expressions in a query's own SELECT list keep their rules — an integer CAST
-// beside a NUMERIC takes the float rung (N-10), EXTRACT declares double
-// precision (ADR-0024 §2c).
+// answerIntegerOperand is an integral EXTRACT field (`extract(year FROM
+// o.d)`) marked in a SCALAR SUBQUERY's body (markScalarAnswer), as an integer
+// operand of numeric arithmetic: `(SELECT extract(year FROM o.d) * x.m …)` is
+// numeric on PostgreSQL and was at v0.25.3, over a derived table or a CTE
+// inside the subquery too; the body computes it so (expr.integerOperand reads
+// the same marks). The same expression in a query's own SELECT list keeps
+// EXTRACT's rule — it declares double precision (ADR-0024 §2c). An integer
+// CAST, marked or not, is an integer operand by the CastNode arm above.
 func answerIntegerOperand(node plansql.Node, _ ColDecls) (batch.DecimalType, bool) {
-	switch n := node.(type) {
-	case *plansql.CastNode:
-		if !n.Answer || n.Column {
-			return batch.DecimalType{}, false
-		}
-		if expr.IsIntegerCastDest(n.TypeName) {
-			return batch.DecimalType{Precision: batch.Int64DecimalDigits}, true
-		}
-	case *plansql.FuncCallNode:
-		if n.Answer && len(n.Args) == 1 && expr.IntegralExtractField(n.Name) {
-			return batch.DecimalType{Precision: batch.Int64DecimalDigits}, true
-		}
+	if n, ok := node.(*plansql.FuncCallNode); ok && n.Answer && len(n.Args) == 1 && expr.IntegralExtractField(n.Name) {
+		return batch.DecimalType{Precision: batch.Int64DecimalDigits}, true
 	}
 	return batch.DecimalType{}, false
 }
@@ -303,8 +308,8 @@ func answerIntegerChoice(node plansql.Node, decls ColDecls) (batch.DecimalType, 
 // contributing the int64 range, as integer arithmetic over columns does, so
 // `ascii(s) * n` is numeric as on PostgreSQL rather than double precision.
 // expr.integerOperand is the runtime mirror (integerBoxOperand reads the
-// node's own integer box). A CAST is not one: a CAST the user wrote keeps its
-// own rule, and the CastNode arm above answers for it.
+// node's own integer box). A CAST is not read here: decimalArithOperand's
+// CastNode arm answers for it (an integer CAST at expr.IntegerCastDecimal).
 func integerValuedOperand(node plansql.Node, decls ColDecls) (batch.DecimalType, bool, bool) {
 	t, c := nodeDeclaredType(node, decls)
 	if c != expr.Decided || (t.ID != parquet.TypeInt32 && t.ID != parquet.TypeInt64) {
@@ -468,6 +473,14 @@ func scalarFnDeclaredDecimal(n *plansql.FuncCallNode, decls ColDecls) (expr.Decl
 func isConstNumericLitNode(node plansql.Node) bool {
 	switch n := node.(type) {
 	case *plansql.Lit:
+		// A WIDE numeric literal compiles to the exact DECIMAL its spelling
+		// names (expr.WideNumericLiteral), an exact operand like a typed
+		// NUMERIC cast — not the float-path constant a narrow one is.
+		if n.Kind == plansql.LitNumber {
+			if _, _, wide := expr.WideNumericLiteral(n.Value); wide {
+				return false
+			}
+		}
 		return true
 	case *plansql.UnaryOp:
 		return (n.Op == "-" || n.Op == "+") && isConstNumericLitNode(n.Inner)
@@ -475,6 +488,14 @@ func isConstNumericLitNode(node plansql.Node) bool {
 		return isConstNumericLitNode(n.Inner)
 	}
 	return false
+}
+
+// userIntegerCastNode is an integer CAST a query wrote: not a correlated
+// re-run's column stand-in and not one markScalarAnswer marked — the AST twin
+// of expr.userIntegerCast.
+func userIntegerCastNode(node plansql.Node) bool {
+	c, ok := plansql.Unparen(node).(*plansql.CastNode)
+	return ok && !c.Column && !c.Answer && expr.IsIntegerCastDest(c.TypeName)
 }
 
 // constIntArg reads a compile-time integer literal, the only shape a result
@@ -523,6 +544,13 @@ func castDeclaredDecimal(n *plansql.CastNode, decls ColDecls) (expr.DeclType, bo
 	}
 	if hasParams {
 		return expr.DeclDecimal(p, s), true
+	}
+	// A QUOTED literal is its spelling's DECIMAL (expr.quotedLitBareDecimal).
+	if l, ok := plansql.Unparen(n.Inner).(*plansql.Lit); ok && l.Kind == plansql.LitString {
+		if t, ok := expr.QuotedLitDecimalType(l.Value); ok {
+			return expr.DeclDecimal(batch.MaxDecimalPrecision, t.Scale), true
+		}
+		return expr.DeclType{}, false
 	}
 	t, isDec, ok := decimalArithOperand(n.Inner, decls)
 	if !ok {

@@ -413,7 +413,7 @@ func TestArcSSScopeAndIntegerOperandsOnTheWire(t *testing.T) {
 		{"zeroCastM", `SELECT (SELECT CAST(o.b AS INTEGER) * x.m FROM ss_i x WHERE x.id = 1) AS v FROM ss_t o WHERE o.id = 99`, 1700, "<none>", ""},
 		{"ctasCastN", `SELECT kc FROM ss_r5c`, 1700, "67.50", ""},
 		{"ctasExtractN", `SELECT ke FROM ss_r5c`, 1700, "4554.00", ""},
-		{"plainCastN", `SELECT CAST(t.b AS INTEGER) * t.n AS v FROM ss_t t WHERE t.id = 1`, 701, "67.5", "N-10: an integer CAST beside a NUMERIC takes the float8 rung in a query's own SELECT list (PostgreSQL: numeric 67.50)"},
+		{"plainCastN", `SELECT CAST(t.b AS INTEGER) * t.n AS v FROM ss_t t WHERE t.id = 1`, 1700, "67.50", ""},
 		{"plainExtractN", `SELECT extract(year FROM t.d) * t.n AS v FROM ss_t t WHERE t.id = 1`, 701, "4554", "ADR-0024 §2c: extract() declares double precision in a query's own SELECT list (PostgreSQL: numeric 4554.00)"},
 		{"subVtimesM", `SELECT (SELECT (SELECT z.v FROM ss_i z WHERE z.id = 1) * y.m FROM ss_i y WHERE y.id = 1) AS v`, 1700, "6.25", ""},
 		{"subMaxVtimesM", `SELECT (SELECT (SELECT max(z.v) FROM ss_i z) * y.m FROM ss_i y WHERE y.id = 1) AS v`, 1700, "7.50", ""},
