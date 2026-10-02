@@ -103,20 +103,36 @@ func DecimalCastDest(dest string) (prec, scale int, hasParams, ok bool) {
 // once. It rides beside boolSrc for the same reason: the destination is fixed
 // for the query, and re-parsing the type name per row cost a string walk on
 // every value.
+//
+// The resolution is published as ONE pointer to an immutable value. One
+// compiled Cast is evaluated from many goroutines at once (a parallel filter,
+// a DAG worker, a parallel correlated re-run), and the lazy path wrote two
+// plain fields and then stored an atomic.Bool: two first evaluations wrote the
+// fields concurrently, and a reader that saw the flag from one writer read
+// fields the other was still writing — a data race. A pointer store publishes
+// the whole value, and every racing first evaluation parses the same string to
+// the same value, so whichever store lands last is equally correct.
+//
+// The Cast is not resolved at construction because it is built as a struct
+// literal at several sites (the compiler, the UDF body compiler, array and
+// membership element casts); a constructor-time field one of them missed
+// would read as "not a DECIMAL destination" and answer a wrong value.
 type castDecimalState struct {
-	ready atomic.Bool
-	dest  decimalDest
-	is    bool
+	res atomic.Pointer[castDecimalResolved]
+}
+
+type castDecimalResolved struct {
+	dest decimalDest
+	is   bool
 }
 
 // decimalDestination resolves this cast's DECIMAL destination once.
 func (e *Cast) decimalDestination() (decimalDest, bool) {
-	if e.decDest.ready.Load() {
-		return e.decDest.dest, e.decDest.is
+	if r := e.decDest.res.Load(); r != nil {
+		return r.dest, r.is
 	}
 	d, ok := parseDecimalDest(e.DestType)
-	e.decDest.dest, e.decDest.is = d, ok
-	e.decDest.ready.Store(true)
+	e.decDest.res.Store(&castDecimalResolved{dest: d, is: ok})
 	return d, ok
 }
 

@@ -20,9 +20,14 @@ import (
 
 // castStringState caches the parsed string destination, for the reason
 // castDecimalState exists: `varchar(4)` is fixed for the query and re-parsing
-// the type name per row costs a string walk on every value.
+// the type name per row costs a string walk on every value. It is published as
+// one pointer to an immutable value for the reason castDecimalState is: one
+// compiled Cast is evaluated from many goroutines at once.
 type castStringState struct {
-	ready atomic.Bool
+	res atomic.Pointer[castStringResolved]
+}
+
+type castStringResolved struct {
 	limit int
 	is    bool
 }
@@ -31,12 +36,11 @@ type castStringState struct {
 // once. ok=false for every other destination, including the unparameterized
 // CHAR / VARCHAR / TEXT / STRING spellings, which impose nothing.
 func (e *Cast) stringDestination() (int, bool) {
-	if e.strDest.ready.Load() {
-		return e.strDest.limit, e.strDest.is
+	if r := e.strDest.res.Load(); r != nil {
+		return r.limit, r.is
 	}
 	n, ok := parseStringDest(e.DestType)
-	e.strDest.limit, e.strDest.is = n, ok
-	e.strDest.ready.Store(true)
+	e.strDest.res.Store(&castStringResolved{limit: n, is: ok})
 	return n, ok
 }
 
