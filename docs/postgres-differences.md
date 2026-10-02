@@ -32,6 +32,10 @@ No blank-padded type exists. `CAST('ab' AS CHAR(4))`: wadjet `ab`; PostgreSQL `a
 
 Storage has one scale per column. `COALESCE(numeric(15,2), 12.3456789012345)`: the ADR’s column value prints `12.7500000000000` versus `12.75`, and the elements of a numeric[] array share one scale too: `ARRAY[n, 1]` over a numeric(10,2) prints `{2.25,1.00}` versus `{2.25,1}`. (catalog: [numeric-decimal#r18](adr/0012-divergences/numeric-decimal.md#catalog); #764)
 
+**A decimal quotient keeps one scale.**
+
+`m / i` over a numeric(10,2) 1.25 and an integer 3 prints `0.4166666666667` (max(6, s1 + p2 + 1) fraction digits, one scale per column) where PostgreSQL prints `0.41666666666666666667` (at least sixteen significant digits per value). A quotient with an integer CAST as an operand, `CAST(i AS INTEGER) / n`, keeps the double precision quotient (OID 701, `1.3333333333333333`) where PostgreSQL answers numeric `1.3333333333333333`, because the one-scale quotient would drop digits the double carries. (catalog: [numeric-decimal#r19](adr/0012-divergences/numeric-decimal.md#catalog); #1422, #1450)
+
 **Multi-statement strings are not transactions.**
 
 No transactions exist; BEGIN/COMMIT are ignored. `INSERT …; SELECT 1/0`: wadjet retains the insert; PostgreSQL rolls it back. (catalog: [parameters-pgwire#r1, r2](adr/0012-divergences/parameters-pgwire.md#catalog); #711)
@@ -60,9 +64,9 @@ Declared CREATE/DROP TABLE uses row results; PostgreSQL sends DDL tags without r
 
 PostgreSQL answers the statement's start time for every row, so `WHERE LOCALTIMESTAMP >= LOCALTIMESTAMP` selects every row. Here the clock is read where the expression is evaluated, so a row that straddles a millisecond can answer FALSE. (catalog: [temporal#r13](adr/0012-divergences/temporal.md#catalog); #1169-per-row-clock)
 
-**An explicit integer CAST of a float-carried numeric rounds half to even.**
+**An explicit integer CAST of a materialized float-carried numeric rounds half to even.**
 
-`CAST(5 / 2.0 AS INTEGER)`, `CAST(SQRT(6.25) AS INTEGER)` and `CAST(POWER(2.5, 1) AS INTEGER)` answer 2 where PostgreSQL answers 3 (SMALLINT and BIGINT alike; negated, -2 where PostgreSQL answers -3): the cast kernel rounds the float64 carrier by float8's rule, and a numeric literal operand (`CAST(2.5 AS INTEGER)`, `CAST(2.5 * 1 AS INTEGER)`) rounds half away as PostgreSQL does. Not a deliberate difference: an assignment of the same values rounds as PostgreSQL does (see "Division and the transcendental functions over numeric declare double precision"); the cast is #1392. (catalog: [dml-assignment#r2](adr/0012-divergences/dml-assignment.md#catalog); #1353-cast, ADR-0024 §2c)
+`CAST(s.x AS INTEGER)` over `(SELECT DISTINCT 5 / 2.0 + t.id * 0 AS x FROM t) s` answers 2 where PostgreSQL answers 3, and so does the same column read from a derived table, an aggregate, a CTE, a set operation, VALUES, a window or a join: the column is a float64 in the batch and carries no PostgreSQL category, so the cast rounds it by float8's rule. A cast whose operand computes the value — `CAST(5 / 2.0 AS INTEGER)`, `CAST(SQRT(6.25) AS INTEGER)`, `CAST(POWER(2.5, 1) AS INTEGER)`, negated, SMALLINT and BIGINT alike — rounds half away from zero, 3, as PostgreSQL does, and an assignment of the materialized column rounds 3 too (see "Division and the transcendental functions over numeric declare double precision"). (catalog: [dml-assignment#r2](adr/0012-divergences/dml-assignment.md#catalog); #1353-cast, ADR-0024 §2c)
 
 **An integer CAST of a JSON field read reads the JSON number.**
 
