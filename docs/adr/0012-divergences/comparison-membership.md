@@ -177,7 +177,9 @@ ADR lines 62-305. Catalog rows: r2, r3, r4, r5, r7, r8, r9, r10, r11, r12, r13, 
     over constant results, a unary minus of an expression, a bare
     NUMERIC CAST of anything but a quoted literal — is typed by the same
     rule after `expr.MemberProbe` folds it exactly at plan time: ADR-0024
-    evaluates those forms as float8, so `CASE WHEN a.id > 0 THEN
+    evaluated those forms as float8 (outside a membership they are exact
+    since 2026-10-02: a constant a double cannot carry compiles to its own
+    DECIMAL, #1386), so `CASE WHEN a.id > 0 THEN
     14.0000000000000000001 END IN (SELECT numeric … WHERE r.id = a.id)`
     matched the member 14 on every arm (v0.25.1 answered 0 rows only
     because its box comparison missed every member). A choice with a

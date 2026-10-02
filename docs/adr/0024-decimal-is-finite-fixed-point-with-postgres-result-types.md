@@ -15,6 +15,14 @@ Amended 2026-09-28 (arc IR, #1353) with §2c: a float-carried numeric (a
 division, a transcendental function, EXTRACT) keeps its FLOAT64 carrier and
 OID and declares PostgreSQL's CATEGORY beside it, which is what an integer
 assignment rounds by.
+Amended 2026-10-02 (arc NX, #1386 #1392 #1450): an integer CAST is an
+integer operand of exact arithmetic wherever it sits (DECIMAL(19,0), as
+every integer expression), except as an operand of a quotient, which keeps
+the float rung (§3's one-scale quotient would drop the double's digits); a
+fractional numeric literal a double cannot carry compiles to the DECIMAL its spelling
+names; a bare NUMERIC cast over an exact operand is that operand's type;
+and an explicit integer CAST reads §2c's category of its operand and
+rounds a numeric half away from zero.
 
 ## Context
 
@@ -215,7 +223,13 @@ choice hands over whatever box the winning arm produced. Arithmetic over the
 same literal is exact because it reads `Lit.Text` (ADR-0012 item 6); giving the
 choice constructs the same exact-text path is what would close it. Recorded as
 a silent loss of digits rather than described as something safer, and pinned by
-`wadjet.TestWideNumericLiteralInAChoiceStaysFloat`.
+`wadjet.TestWideNumericLiteralInAChoiceStaysFloat`. **Closed 2026-10-02 (arc
+NX, #1386)** by the box rather than by a per-construct text path: a spelling
+a double cannot carry compiles to the exact DECIMAL it names
+(`expr.WideNumericLiteral`, a function of the spelling, so every arm and a
+re-parsed DAG stage agree), and every construct that hands the value on reads
+its digits; the expression answers 493827160549382.7160549350, pinned by
+`wadjet.TestWideNumericLiteralInAChoiceKeepsItsDigits`.
 
 A DECIMAL beside a FLOAT declares double precision, which is right, and used to
 FAIL at the #361 store guard on the rows the decimal wins: the box was that
@@ -407,10 +421,19 @@ does, and the DML layer carries a container column's element, so a
 subscript of a float8[] decides float8; a scalar subquery a write door
 evaluates outside any plan (a MERGE action's) is declared by the Planner's
 own resolver for it (physical.DeclaredTypeOfNodeWith), the same declaration
-a plan stamps. An explicit integer CAST does not read it: the cast kernel sees
-only the compiled operand and the batch, and a DAG stage boundary carries no
-category, so `CAST(5 / 2.0 AS INTEGER)` still rounds the double half to even
-(#1392).
+a plan stamps.
+
+Amended 2026-10-02 (arc NX, #1392): an explicit integer CAST reads the
+category too. The cast kernel asks the same walk about its operand's AST
+against the input batch's columns (expr.SetCategoryResolver, registered by
+the planner beside the shape resolver), so every arm — a DAG stage included
+— decides it from the same expression and the same input types:
+`CAST(5 / 2.0 AS INTEGER)`, `CAST(SQRT(6.25) AS INTEGER)` and
+`CAST(POWER(2.5, 1) AS INTEGER)` are 3, negated -3, as on PostgreSQL. A
+column a previous operator materialized is a float64 in the batch and
+carries no category there (a parquet.Column, a batch.Vector and a `.wshf`
+schema have no field for it), so `CAST(s.x AS INTEGER)` over a DISTINCT
+`5 / 2.0` still rounds half to even (dml-assignment#r2, candidate NX-C1).
 
 ### 3. The (p,s) of a computed result follows the finite-decimal industry rule
 
