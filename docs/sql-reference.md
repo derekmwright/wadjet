@@ -3868,7 +3868,7 @@ see the Encoding Functions section.
 | `NORMALIZE(s [, NFC \| NFD \| NFKC \| NFKD])` | Unicode normalization; the form is a bare keyword and defaults to NFC | `NORMALIZE(name, NFD)` |
 | `REGEXP_LIKE(s, pattern)` | Test if string matches regex | `REGEXP_LIKE(src_ip, '^\d+\.\d+')` |
 | `REGEXP_EXTRACT(s, pattern [, group])` | Extract regex match or capture group | `REGEXP_EXTRACT(url, '(\w+)://(\w+)', 2)` |
-| `REGEXP_REPLACE(s, pattern, repl)` | Replace regex matches | `REGEXP_REPLACE(message, '\s+', ' ')` |
+| `REGEXP_REPLACE(s, pattern, repl [, flags])` | Replace the FIRST match, or every match under the `g` flag, as PostgreSQL does. The pattern is read as the `~` operators read it (PostgreSQL's ARE translated form by form, ADR-0044: `.` matches a newline, `\b` is a backspace, a back reference is refused 0A000), and an RE whose quantifiers are all greedy takes the longest match. In `repl`, `\1`…`\9` are groups and `\&` the whole match. Flags: `g`, `i` (ASCII letters fold) / `c`, `q` (literal pattern), `s` and `t` (the defaults); `n`, `m`, `p`, `w`, `x`, `b` and `e` are refused 0A000, as is an integer start position, and any other letter is 22023 | `REGEXP_REPLACE(message, '\s+', ' ', 'g')` |
 | `REGEXP_COUNT(s, pattern)` | Count regex matches | `REGEXP_COUNT(path, '/')` → `3` |
 | `REGEXP_EXTRACT_ALL(s, pattern)` | Extract all regex matches (JSON array) | `REGEXP_EXTRACT_ALL(log, '\d+')` → `'["123","456"]'` |
 | `REGEXP_SPLIT(s, pattern)` | Split by regex (JSON array) | `REGEXP_SPLIT(csv, ',\s*')` |
@@ -3884,7 +3884,7 @@ see the Encoding Functions section.
 | `LEVENSHTEIN_DISTANCE(a, b)` | Edit distance between strings | `LEVENSHTEIN_DISTANCE('kitten', 'sitting')` → `3` |
 | `HAMMING_DISTANCE(a, b)` | Number of differing characters | `HAMMING_DISTANCE('abc', 'axc')` → `1` |
 | `NORMALIZE(s)` | Unicode NFC normalization | `NORMALIZE(text)` |
-| `FORMAT(fmt, args...)` | Go-style sprintf formatting | `FORMAT('%s:%d', host, port)` |
+| `FORMAT(fmt, args...)` | PostgreSQL's `format`: `%[n$][-][width]type` with type `s` (the value's text), `I` (`quote_ident`) or `L` (`quote_literal`, NULL unquoted); width is a number, `*` or `*n$`; `%%` is a percent. Each value is its type's text output — `6.375`, `t`, `{1,2}`, `2024-03-04` — and a NULL is the empty string under `%s`. Any other type letter (`%d`, `%5.2s`) is 22023 | `FORMAT('%s:%s', host, port)` |
 | `LCASE(s)` / `UCASE(s)` | Aliases for LOWER/UPPER | `LCASE(name)` |
 | `TO_UTF8(s)` | String to its raw UTF-8 bytes (BYTES) | `TO_UTF8('hello')` |
 | `FROM_UTF8(b)` | BYTES back to a string; NULL when the bytes are not valid UTF-8 | `FROM_UTF8(data)` |
@@ -4737,6 +4737,7 @@ PostgreSQL DOES have over `bytea` keep working over `BYTES`: `LENGTH`,
 | `JSON_EXTRACT_SCALAR(json, path)` | Extract scalar value (returns NULL for objects/arrays) | `JSON_EXTRACT_SCALAR(data, '$.id')` |
 | `JSON_ARRAY_LENGTH(json)` | Length of a JSON array | `JSON_ARRAY_LENGTH('[1,2,3]')` → `3` |
 | `JSON_VALID(s)` | Test if string is valid JSON | `JSON_VALID(payload)` |
+| `JSON_BUILD_OBJECT(k1, v1, ...)` | A JSON object in PostgreSQL's spelling (`{"a" : 1}`): each value as its type's JSON — a number or boolean bare, a `numeric` at its own scale, a DATE `"2024-03-04"`, a TIMESTAMP `"2024-03-04T12:00:00"`, an array `[1,2]`, a ROW `{"f1":1}`, a nested `json_build_object` or a CAST to json as the object it is; each key as its value's JSON text, quoted. The result is declared text where PostgreSQL declares json (#1470), so a json value read back through a column or a scalar subquery's answer nests as a JSON string | `JSON_BUILD_OBJECT('o', JSON_BUILD_OBJECT('d', d))` |
 
 ### URL Functions
 

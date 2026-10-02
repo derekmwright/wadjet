@@ -37,6 +37,7 @@ The planner materializes hidden columns (`__win_N`, `__sortkey_N`, `__gb_expr_N`
 | **r13** `SELECT datname FROM pg_database` | postgres, template0, template1 and user databases | one row, wadjet (measured); pg_roles one non-superuser role | — | documented gap | — · P105 | #1251 | — |
 | **r14** `SELECT CAST('rs' AS regclass)` | rs | the OID, 1314170258 (measured) | — | value divergence | — · P105 | #1251 | — |
 | **r15** `SELECT current_schemas(false)` | declared name[] | declared text[] (measured); OID columns declare int8 | — | value divergence | — · P105 | #1251 | — |
+| **r16** `SELECT json_build_object('o', x) FROM (SELECT json_build_object('a', 1) AS x) s` | {"o" : {"a" : 1}}, declared json (OID 114) | {"o" : "{\"a\" : 1}"} (measured): json_build_object declares text (OID 25), so a json value that reaches it declared text — a derived table's, a CTE's or a stored column, a scalar subquery's answer, a COALESCE with a text arm — is written as a JSON string; one its own argument expression produces (json_build_object, a CAST to json, a COALESCE or CASE of those) nests as an object. Being text, the object is also compared, grouped and md5'd where PostgreSQL raises 42883 for json | — | value divergence | 2026-10-02 · [RN](../0012-amendments.md#2026-10-02-the-scalar-renderers-write-a-value-as-its-declared-types-text-arc-rn-1474-1466-1467-1481) | #1470 | `pgwire.TestArcRNRenderersOnTheWire`, `coordinator.TestArcRNRendererTableEveryArm` jx/* |
 
 ## Source entries
 

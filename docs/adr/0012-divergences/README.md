@@ -15,11 +15,11 @@ Every place this engine deliberately answers differently from PostgreSQL 17.11, 
 | [LATERAL and subqueries](lateral-subqueries.md) | 21 | Correlated subqueries and LATERAL joins: shapes the per-row re-run or the join decorrelation cannot express are refused loudly; star naming over laterals. |
 | [Recursion](recursion.md) | 12 | Recursive CTEs: an iteration-bounded eager fixed point, WITH RECURSIVE list ordering, and the seed-typed recursive terms PostgreSQL refuses. |
 | [Aggregates and windows](aggregates-windows.md) | 19 | Aggregate and window-function divergences: accepted extra types and argument types, declared result types, and refusals of window forms PostgreSQL answers. |
-| [Text, bytes and collation](text-collation.md) | 22 | String collation, pattern matching, VARCHAR/CHAR length and declaration, the missing blank-padded type, and text functions over bytes. |
+| [Text, bytes and collation](text-collation.md) | 24 | String collation, pattern matching, VARCHAR/CHAR length and declaration, the missing blank-padded type, and text functions over bytes. |
 | [Network types](network.md) | 16 | Network-native types (IPV4, IPV6, CIDR, MAC, PORT, PROTOCOL): PostgreSQL inet/macaddr/uuid input grammar, storage-domain refusals, text wire declarations. |
 | [Extension functions](extensions.md) | 33 | Functions PostgreSQL lacks (TIME_BUCKET, OHLCV, TCP flags, bitwise helpers, semver): each names its PostgreSQL spelling or its external authority, and where it departs. |
 | [Table functions and readers](table-functions.md) | 15 | File, database and series readers in FROM, and set-returning functions in SELECT: when their columns are known, what they refuse, and COPY's grammar. |
-| [Access control, catalog and other](other.md) | 15 | Casts to unknown or unconverted types, array casts and comparisons, reserved column names, catalog contents and access-filtered metadata. |
+| [Access control, catalog and other](other.md) | 16 | Casts to unknown or unconverted types, array casts and comparisons, reserved column names, catalog contents and access-filtered metadata. |
 
 ## Conservation
 

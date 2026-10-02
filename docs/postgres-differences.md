@@ -130,6 +130,10 @@ Nested arrays and ROW/MAP elements use OID 25; ordinary arrays — stored, const
 
 These casts pass text through. `CAST('12:34:56' AS time)` returns `12:34:56` on both engines, but wadjet declares OID 25. (#652)
 
+**json_build_object declares text.**
+
+`json_build_object` writes PostgreSQL's object text but declares text (OID 25) where PostgreSQL declares json (114). A json value that reaches it declared text — a derived table's, a CTE's or a stored column, a scalar subquery's answer — is therefore written as a JSON string (`{"o" : "{\"a\" : 1}"}`), where PostgreSQL nests the object; a `json_build_object` or a `CAST(… AS JSON)` in the argument itself nests. Being text, the object can be compared and grouped, where PostgreSQL raises 42883 for json. (catalog: [other#r16](adr/0012-divergences/other.md#catalog); #1470)
+
 Comparing arrays whose element types differ within the numeric family (`ARRAY[1.5] > ARRAY[1]`) answers by the numbers, where PostgreSQL has no `numeric[] > integer[]` operator and raises 42883. (ADR-0045)
 
 Arrays whose element types have NO common type — an integer array beside a text array — are not yet refused as PostgreSQL refuses them (42804 for `CASE`, `COALESCE` and `UNION`; 42883 for `=`): `CASE WHEN true THEN ARRAY[1] ELSE ARRAY['a'] END` and `COALESCE(ARRAY[1], ARRAY['a'])` answer `{1}` as `integer[]`, `ARRAY[1] = ARRAY['a']` answers false, and `SELECT ARRAY[1] UNION SELECT ARRAY['a']` is 42000 (`cannot store string into INT32 vector`) — 22P02 for a `numeric` array beside the text one. At v0.25.0 the `CASE` and the `UNION` answered Go-rendered text (`[1]`, `[a]`) and the `COALESCE` was 42000. Recorded for repair, not a kept superset.
@@ -552,7 +556,7 @@ This engine has no TIME type among its 22 (`Type System`), so `CURRENT_TIME`'s S
 
 **The pattern-match operators match with RE2.**
 
-`~ ~* !~ !~*` translate PostgreSQL's ARE form by form; a back reference, lookahead/lookbehind, `\m`/`\M`, `[[:<:]]`, a collating element and the `b e n p w x` embedded options are refused 0A000. Case-insensitive matching folds ASCII letters only, as PostgreSQL does under the C collation. (catalog: [text-collation#r3, r4](adr/0012-divergences/text-collation.md#catalog); ADR-0044)
+`~ ~* !~ !~*` translate PostgreSQL's ARE form by form; a back reference, lookahead/lookbehind, `\m`/`\M`, `[[:<:]]`, a collating element and the `b e n p w x` embedded options are refused 0A000. Case-insensitive matching folds ASCII letters only, as PostgreSQL does under the C collation. `regexp_replace` reads its pattern through the same translation; its `n`, `m`, `p`, `w`, `x`, `b` and `e` flags and an integer start position are refused 0A000, and an RE holding a non-greedy quantifier is matched leftmost-first rather than shortest-first (`regexp_replace('Hello', 'x*?H*', '#')` is `#ello`; PostgreSQL `#Hello`). (catalog: [text-collation#r3, r4, r23, r24](adr/0012-divergences/text-collation.md#catalog); ADR-0044)
 
 **COLLATE accepts the byte-order collations only.**
 
