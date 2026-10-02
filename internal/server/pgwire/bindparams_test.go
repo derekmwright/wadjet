@@ -23,7 +23,7 @@ func TestRenderParamText(t *testing.T) {
 		// quoted string compares a number to a string and matches nothing.
 		{"int4", "2", oidInt4, "2"},
 		{"int4 negative", "-7", oidInt4, "-7"},
-		{"int8", "9007199254740993", oidInt8, "9007199254740993"},
+		{"int8", "9007199254740993", oidInt8, "CAST(9007199254740993 AS BIGINT)"},
 		{"int2", "300", oidInt2, "300"},
 		{"oid", "16384", oidOID, "16384"},
 		// A float is its own type, not the numeric a bare number reads as
@@ -63,10 +63,10 @@ func TestRenderParamText(t *testing.T) {
 		{"varchar", "bob", oidVarchar, "'bob'"},
 		{"unknown oid", "bob", oidUnknown, "'bob'"},
 		{"unknown oid numeric text", "2", oidUnknown, "'2'"},
-		{"timestamp", "2026-01-02 03:04:05", oidTimestamp, "'2026-01-02 03:04:05'"},
-		{"date", "2026-01-02", oidDate, "'2026-01-02'"},
+		{"timestamp", "2026-01-02 03:04:05", oidTimestamp, "CAST('2026-01-02 03:04:05' AS TIMESTAMP)"},
+		{"date", "2026-01-02", oidDate, "CAST('2026-01-02' AS DATE)"},
 		{"uuid", "0f8fad5b-d9cb-469f-a165-70867728950e", oidUUID,
-			"'0f8fad5b-d9cb-469f-a165-70867728950e'"},
+			"CAST('0f8fad5b-d9cb-469f-a165-70867728950e' AS UUID)"},
 
 		// bytea in TEXT format: byteain's two spellings, both denoting the
 		// same BYTES. The literal carries the value's bytes, not the
@@ -121,8 +121,8 @@ func TestRenderParamBinary(t *testing.T) {
 		{"int2 negative", be16(-300), oidInt2, "-300"},
 		{"int4", be32(2), oidInt4, "2"},
 		{"int4 negative", be32(-2147483648), oidInt4, "-2147483648"},
-		{"int8", be64(9007199254740993), oidInt8, "9007199254740993"},
-		{"int8 min", be64(math.MinInt64), oidInt8, "-9223372036854775808"},
+		{"int8", be64(9007199254740993), oidInt8, "CAST(9007199254740993 AS BIGINT)"},
+		{"int8 min", be64(math.MinInt64), oidInt8, "CAST(-9223372036854775808 AS BIGINT)"},
 		{"oid", be32(-1), oidOID, "4294967295"}, // oid is unsigned
 		{"float8", be64(int64(math.Float64bits(90.5))), oidFloat8, "CAST('90.5' AS DOUBLE PRECISION)"},
 		{"float4", be32(int32(math.Float32bits(1.5))), oidFloat4, "CAST('1.5' AS REAL)"},
@@ -130,13 +130,13 @@ func TestRenderParamBinary(t *testing.T) {
 		{"bool false", []byte{0}, oidBool, "false"},
 		// Binary date/time count from 2000-01-01 UTC, days for date and
 		// microseconds for timestamp.
-		{"date", be32(9498), oidDate, "'2026-01-02'"},
-		{"timestamp", be64(820638245000000), oidTimestamp, "'2026-01-02T03:04:05Z'"},
-		{"timestamptz", be64(820638245000000), oidTimestampTZ, "'2026-01-02T03:04:05Z'"},
+		{"date", be32(9498), oidDate, "CAST('2026-01-02' AS DATE)"},
+		{"timestamp", be64(820638245000000), oidTimestamp, "CAST('2026-01-02 03:04:05' AS TIMESTAMP)"},
+		{"timestamptz", be64(820638245000000), oidTimestampTZ, "CAST('2026-01-02 03:04:05' AS TIMESTAMP)"},
 		{"uuid", []byte{
 			0x0f, 0x8f, 0xad, 0x5b, 0xd9, 0xcb, 0x46, 0x9f,
 			0xa1, 0x65, 0x70, 0x86, 0x77, 0x28, 0x95, 0x0e,
-		}, oidUUID, "'0f8fad5b-d9cb-469f-a165-70867728950e'"},
+		}, oidUUID, "CAST('0f8fad5b-d9cb-469f-a165-70867728950e' AS UUID)"},
 		// bytea's binary form IS the value's bytes, and the literal has to
 		// carry those bytes — not their `\x` SPELLING, which is a
 		// ten-character STRING that matches nothing against a BYTES column
@@ -595,7 +595,13 @@ func TestSubstituteParams(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := substituteParams(tt.sql, tt.literals); got != tt.want {
+			got := substituteRefs(tt.sql, scanParamRefs(tt.sql), func(r paramRef) (string, bool) {
+				if r.n > len(tt.literals) {
+					return "", false
+				}
+				return tt.literals[r.n-1], true
+			})
+			if got != tt.want {
 				t.Fatalf("got  %q\nwant %q", got, tt.want)
 			}
 		})
@@ -626,7 +632,8 @@ func TestCountParamPlaceholders(t *testing.T) {
 	}
 }
 
-// TestSubstituteNullParams covers Describe's stand-in substitution, which now
+// TestSubstituteNullParams covers Describe's stand-in substitution (an
+// undeclared parameter's stand-in is the untyped NULL), which now
 // shares the placeholder scanner and so also leaves literals alone.
 func TestSubstituteNullParams(t *testing.T) {
 	tests := []struct {
@@ -649,7 +656,7 @@ func TestSubstituteNullParams(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.sql, func(t *testing.T) {
-			got, found := substituteNullParams(tt.sql)
+			got, found := substituteStandIns(tt.sql, nil)
 			if got != tt.want || found != tt.wantFound {
 				t.Fatalf("got (%q, %v), want (%q, %v)", got, found, tt.want, tt.wantFound)
 			}

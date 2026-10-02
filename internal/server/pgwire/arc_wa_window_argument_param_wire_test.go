@@ -19,8 +19,8 @@ import (
 // Describe runs the statement with NULL standing in for each parameter, so the
 // NULL offset is also what the extended protocol's own Describe reads. Every
 // want is PostgreSQL 17.11 through `PREPARE p(int4 | numeric) AS …; EXECUTE`
-// (and an untyped parameter, `PREPARE p AS …`, bound '0'), except the three
-// kept-superset rows that pin r20.
+// (and an untyped parameter, `PREPARE p AS …`, bound '0'), except the
+// kept-superset row that pins r20.
 func TestAWindowArgumentParameterAnswers(t *testing.T) {
 	ctx := context.Background()
 	db, err := wadjet.Open(ctx, wadjet.Config{Store: objstore.NewMemStore(), Bucket: "waparam"})
@@ -65,12 +65,12 @@ func TestAWindowArgumentParameterAnswers(t *testing.T) {
 		{"offset/int4/int4min", "LAG(x, $1) OVER (ORDER BY id)", oidInt4, 0, []byte("-2147483648"), "1,NULL;2,NULL;3,NULL"},
 		{"offset/int4binary/int4min", "LEAD(x, $1) OVER (ORDER BY id)", oidInt4, 1, i4(-2147483648), "1,NULL;2,NULL;3,NULL"},
 		// KEPT SUPERSET (catalog aggregates-windows r20): a parameter
-		// declared int8 / text / numeric reaches the engine as the literal
-		// it renders to and is read by its value; PostgreSQL raises 42883
-		// (lag(bigint, bigint) does not exist). The same at v0.25.2.
-		{"offset/int8/1", "LAG(x, $1) OVER (ORDER BY id)", oidInt8, 0, []byte("1"), "1,NULL;2,10;3,20"},
+		// declared text reaches the engine as SQL's unknown literal and is
+		// read by its value; PostgreSQL raises 42883 (lag(bigint, text) does
+		// not exist). The same at v0.25.2. (The int8 and numeric rows this
+		// pinned beside it agree with PostgreSQL since arc PW binds them as
+		// typed literals — 42883, TestArcPWParameterTypesMatchPostgres.)
 		{"offset/text/1", "LAG(x, $1) OVER (ORDER BY id)", oidText, 0, []byte("1"), "1,NULL;2,10;3,20"},
-		{"offset/numeric/1", "LAG(x, $1) OVER (ORDER BY id)", oidNumeric, 0, []byte("1"), "1,NULL;2,10;3,20"},
 		{"value/numeric/sum", "SUM($1) OVER ()", oidNumeric, 0, []byte("2.5"), "1,7.5;2,7.5;3,7.5"},
 		{"value/int4/lag", "LAG($1) OVER (ORDER BY id)", oidInt4, 0, []byte("5"), "1,NULL;2,5;3,5"},
 		{"value/int4/first_value", "FIRST_VALUE($1) OVER (ORDER BY id)", oidInt4, 0, []byte("5"), "1,5;2,5;3,5"},

@@ -1399,6 +1399,7 @@ func (c *pgConn) handleBind(payload []byte) {
 	// parameter's text bytes used to render as a quoted string, so an int
 	// column compared against '7' matched the wrong row (#365). Inference
 	// gives renderParam the same OID ParameterDescription reports.
+	declared := oids
 	if inferred := c.inferParamOIDs(sql, oids); len(inferred) >= len(oids) {
 		oids = inferred
 	}
@@ -1424,15 +1425,23 @@ func (c *pgConn) handleBind(payload []byte) {
 			numParams := int(binary.BigEndian.Uint16(payload[:2]))
 			payload = payload[2:]
 			literals := make([]string, numParams)
+			counts := make([]string, numParams)
+			nulls := make([]bool, numParams)
 			for i := 0; i < numParams; i++ {
-				literals[i] = "NULL"
+				var oid uint32
+				if i < len(oids) {
+					oid = oids[i]
+				}
+				// A NULL parameter is a NULL of its type (paramNullLiteral),
+				// the stand-in Describe declared the statement's shape by.
+				literals[i], counts[i], nulls[i] = paramNullLiteral(oid), "NULL", true
 				if len(payload) < 4 {
 					break
 				}
 				paramLen := int(int32(binary.BigEndian.Uint32(payload[:4])))
 				payload = payload[4:]
 				if paramLen < 0 {
-					continue // NULL parameter — the literal is already NULL
+					continue
 				}
 				if len(payload) < paramLen {
 					break
@@ -1447,12 +1456,11 @@ func (c *pgConn) handleBind(payload []byte) {
 				case i < len(fmtCodes):
 					binaryFmt = fmtCodes[i] == 1
 				}
-				var oid uint32
-				if i < len(oids) {
-					oid = oids[i]
-				}
-
+				nulls[i] = false
 				lit, err := renderParam(raw, binaryFmt, oid)
+				if err == nil {
+					counts[i], err = renderCountParam(raw, binaryFmt, oid)
+				}
 				if err != nil {
 					c.sendError("ERROR", "22023", fmt.Sprintf("binding parameter $%d: %v", i+1, err))
 					// The extended protocol's error state, as for every other
@@ -1465,7 +1473,37 @@ func (c *pgConn) handleBind(payload []byte) {
 				}
 				literals[i] = lit
 			}
-			sql = substituteParams(sql, literals)
+			// A placeholder takes its typed literal, except where the
+			// grammar reads a constant only (paramPositions): a count takes
+			// renderCountParam's spelling, NULL is the NULL constant there,
+			// and LAG / LEAD's default and a MERGE action's whole value take
+			// the untyped literal.
+			stmt := sql
+			refs := scanParamRefs(stmt)
+			positions := paramPositions(stmt, refs)
+			ri := 0
+			sql = substituteRefs(stmt, refs, func(r paramRef) (string, bool) {
+				pos := positions[ri]
+				ri++
+				if r.n > len(literals) {
+					return "", false
+				}
+				switch {
+				case pos == posCount:
+					return counts[r.n-1], true
+				case nulls[r.n-1] && pos != posValue:
+					return "NULL", true
+				case pos == posWindowDefault:
+					return untypedLiteral(literals[r.n-1]), true
+				case pos == posMergeValue && !declaredFloat(declared, r.n):
+					// The target column's input reads the value, as an
+					// assignment does; a float the client declared keeps
+					// its CAST, which rounds into an integer column as
+					// PostgreSQL's assignment does (#1353).
+					return untypedLiteral(literals[r.n-1]), true
+				}
+				return literals[r.n-1], true
+			})
 		}
 	}
 
@@ -1488,6 +1526,12 @@ func (c *pgConn) handleBind(payload []byte) {
 
 	// Send BindComplete ('2')
 	c.sendMsg('2', nil)
+}
+
+// declaredFloat reports whether the client declared parameter n float4 or
+// float8 at Parse.
+func declaredFloat(declared []uint32, n int) bool {
+	return n <= len(declared) && (declared[n-1] == oidFloat4 || declared[n-1] == oidFloat8)
 }
 
 // closePortal destroys the connection's portal (see portalOpen).
@@ -1544,7 +1588,7 @@ func (c *pgConn) handleDescribe(payload []byte) {
 
 		// A statement Describe is unconditionally text — only a PORTAL
 		// carries the Bind's result format codes (#362).
-		c.describeSQL(sql, nil)
+		c.describeStatementSQL(sql, oids)
 	} else {
 		if c.refuseMissingPortal(readCString(payload[1:])) {
 			return
@@ -1591,6 +1635,16 @@ func analysisRefusal(err error, parameterized bool) bool {
 // Execute-time path; analysisRefusal defines the parameter and 42501 exceptions.
 // fmtCodes supplies each field format (ADR-0044).
 func (c *pgConn) describeSQL(sql string, fmtCodes []int16) {
+	c.describeSQLWith(sql, fmtCodes, nil)
+}
+
+// describeStatementSQL describes a prepared statement whose parameters have
+// the OIDs oids (declared or inferred): each stands in as a NULL of its type.
+func (c *pgConn) describeStatementSQL(sql string, oids []uint32) {
+	c.describeSQLWith(sql, nil, oids)
+}
+
+func (c *pgConn) describeSQLWith(sql string, fmtCodes []int16, paramOIDs []uint32) {
 	sql = strings.TrimSpace(sql)
 	sql = strings.TrimRight(sql, ";")
 	sql = strings.TrimSpace(sql)
@@ -1649,7 +1703,7 @@ func (c *pgConn) describeSQL(sql string, fmtCodes []int16) {
 	// pick up a later one. So the shape is discovered from the statement with
 	// NULL standing in for the parameters. The rows that run produces are the
 	// wrong rows for any portal, so nothing is cached from it.
-	shapeSQL, parameterized := substituteNullParams(sql)
+	shapeSQL, parameterized := substituteStandIns(sql, paramOIDs)
 
 	// Execute the real query to get typed column metadata.
 	// Cache the result so Execute can reuse it instead of re-executing,

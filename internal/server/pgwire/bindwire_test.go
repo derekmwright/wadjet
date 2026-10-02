@@ -539,15 +539,21 @@ func TestBindTimestampParam(t *testing.T) {
 		})
 	}
 
-	// A date parameter in binary format: days since 2000-01-01.
+	// A date parameter in binary format (days since 2000-01-01) is the DATE
+	// it names, and answers what the DATE literal of that day answers beside
+	// the same column. (PostgreSQL refuses `text > date` with 42883; until
+	// #1426 the parameter was spliced as SQL's unknown and compared as TEXT,
+	// so it answered both rows where the DATE literal answers one.)
+	_, _, want, wantTag := client.paramQuery(
+		"SELECT id FROM stamps WHERE at > DATE '2026-01-02' ORDER BY id", nil)
 	_, _, rows, tag := client.paramQuery(
 		"SELECT id FROM stamps WHERE at > $1 ORDER BY id",
 		[]boundParam{binaryParam(oidDate, be32(9498))}) // 2026-01-02
-	if strings.HasPrefix(tag, "ERROR") {
-		t.Fatalf("date parameter: %s", tag)
+	if strings.HasPrefix(tag, "ERROR") || strings.HasPrefix(wantTag, "ERROR") {
+		t.Fatalf("date parameter: %s / literal: %s", tag, wantTag)
 	}
-	if len(rows) != 2 {
-		t.Fatalf("got %v, want both rows after 2026-01-02", rows)
+	if fmt.Sprint(rows) != fmt.Sprint(want) {
+		t.Fatalf("date parameter answered %v, the DATE literal %v", rows, want)
 	}
 }
 

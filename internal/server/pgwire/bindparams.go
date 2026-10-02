@@ -181,6 +181,13 @@ func renderTextParam(s string, oid uint32) (string, error) {
 		// parameter's input function; quoted, the target's input rule
 		// raises it here too.
 		if _, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64); err == nil || errors.Is(err, strconv.ErrRange) {
+			if oid == oidInt8 {
+				// A bare integer that fits int4 is an int4 literal, so a
+				// bigint parameter spliced bare declared integer (`SELECT
+				// $1` answered OID 23 where PostgreSQL answers 20, #1410).
+				// A bigint CAST is bigint whatever the value.
+				return "CAST(" + strings.TrimSpace(s) + " AS BIGINT)", nil
+			}
 			return s, nil
 		}
 		return quoteLiteral(s), nil
@@ -198,6 +205,9 @@ func renderTextParam(s string, oid uint32) (string, error) {
 		// this path: ParseFloat("1e-400") returns 0, nil — no ErrRange —
 		// so it was already handled by the err == nil arm.)
 		if _, err := strconv.ParseFloat(s, 64); err == nil || errors.Is(err, strconv.ErrRange) {
+			if oid == oidNumeric {
+				return numericParamLiteral(s), nil
+			}
 			return s, nil
 		}
 		if _, err := strconv.ParseInt(s, 10, 64); err == nil {
@@ -234,12 +244,149 @@ func renderTextParam(s string, oid uint32) (string, error) {
 			return "false", nil
 		}
 		return quoteLiteral(s), nil
+	case oid == oidDate:
+		return "CAST(" + quoteLiteral(s) + " AS DATE)", nil
+	case oid == oidTimestamp:
+		// A timestamp parameter is a TIMESTAMP wherever it lands. Spliced
+		// as a bare quoted literal it was SQL's unknown, which a DATE
+		// operand reads with the DATE input function — dropping the time
+		// of day, so `d = $1` bound '1969-12-31 23:59:59.999' matched
+		// 1969-12-31 where PostgreSQL matches nothing (#1426). Typed, it
+		// reaches the DATE ↔ TIMESTAMP pair rule a TIMESTAMP literal does.
+		return "CAST(" + quoteLiteral(s) + " AS TIMESTAMP)", nil
+	case oid == oidTimestampTZ:
+		return timestamptzParamLiteral(s), nil
+	case oid == oidUUID:
+		return "CAST(" + quoteLiteral(s) + " AS UUID)", nil
 	default:
-		// Text family, temporal types, uuid, and unknown. A quoted literal is
-		// what these are, and unknown-OID-plus-text is the case the old
-		// unconditional quoting was already right about.
+		// Text family and unknown: SQL's unknown literal, which the
+		// position it lands in reads by its own input function — the
+		// text-typed parameter's recorded divergence (ADR-0012
+		// dml-assignment#r4): a text parameter beside an integer column
+		// is read as an integer where PostgreSQL refuses the operator.
 		return quoteLiteral(s), nil
 	}
+}
+
+// numericParamLiteral is a numeric parameter's text as a NUMERIC value. A
+// spelling with a fraction or an exponent is a numeric literal as it stands;
+// an integer spelling is not — `7` is an integer literal, so `SELECT $1`
+// declared int4 — and is written `7.`, the numeric literal of the same value
+// (`SELECT 7.` is numeric 7 here as in PostgreSQL). A spelling of more
+// significant digits than a double carries is written as a DECIMAL CAST of
+// exactly its digits, because this engine reads such a literal as a double.
+func numericParamLiteral(s string) string {
+	t := strings.TrimSpace(s)
+	t = strings.TrimPrefix(t, "+")
+	digits, scale, plain := numericSpellingDigits(t)
+	if !plain {
+		return s
+	}
+	if digits > 15 {
+		precision := digits
+		if precision < scale {
+			precision = scale
+		}
+		if precision <= 38 {
+			return fmt.Sprintf("CAST(%s AS DECIMAL(%d,%d))", quoteLiteral(t), precision, scale)
+		}
+		return t
+	}
+	if !strings.ContainsAny(t, ".eE") {
+		return t + "."
+	}
+	return t
+}
+
+// numericSpellingDigits counts the significant digits and the fraction
+// digits of a plain decimal spelling ([-]digits[.digits]); plain is false
+// for an exponent or any other shape, which is left as the client wrote it.
+func numericSpellingDigits(t string) (digits, scale int, plain bool) {
+	t = strings.TrimPrefix(t, "-")
+	if t == "" || strings.ContainsAny(t, "eE") {
+		return 0, 0, false
+	}
+	intPart, frac, _ := strings.Cut(t, ".")
+	for _, part := range []string{intPart, frac} {
+		for i := 0; i < len(part); i++ {
+			if part[i] < '0' || part[i] > '9' {
+				return 0, 0, false
+			}
+		}
+	}
+	if intPart == "" && frac == "" {
+		return 0, 0, false
+	}
+	intPart = strings.TrimLeft(intPart, "0")
+	return len(intPart) + len(frac), len(frac), true
+}
+
+// timestamptzParamLiteral is a timestamptz parameter's text as the TIMESTAMP
+// of the instant it names. This engine has no time zone type: an instant is a
+// TIMESTAMP read at UTC, the session TimeZone the server reports. A spelling
+// with no zone is that wall clock at UTC, as PostgreSQL reads it under
+// TimeZone=UTC; a spelling with an offset names an instant, which is
+// converted to UTC here — TIMESTAMP input DISCARDS an offset (PostgreSQL's
+// timestamp rule), so splicing the text as it stands would have moved the
+// instant by the offset.
+func timestamptzParamLiteral(s string) string {
+	t := strings.TrimSpace(s)
+	for _, layout := range timestamptzOffsetLayouts {
+		if at, err := time.Parse(layout, t); err == nil {
+			return "CAST(" + quoteLiteral(at.UTC().Format("2006-01-02 15:04:05.999999999")) + " AS TIMESTAMP)"
+		}
+	}
+	return "CAST(" + quoteLiteral(s) + " AS TIMESTAMP)"
+}
+
+// timestamptzOffsetLayouts are the zone-bearing spellings of this engine's
+// timestamp accept-set (parquet.ParseTimestampWallClock's list), each read
+// WITH its offset.
+var timestamptzOffsetLayouts = []string{
+	time.RFC3339Nano,
+	"2006-01-02 15:04:05.999999999Z07:00",
+	"2006-01-02 15:04:05.999999999-07",
+	"2006-01-02T15:04:05.999999999-07",
+}
+
+// paramNullLiteral is a NULL parameter of type oid: a NULL of that type, so a
+// statement's Describe (which stands NULL in for every parameter) and a Bind
+// of NULL declare what the bound value declares. A client that reads its rows
+// by the statement's Describe (pgx's prepared statements, pgJDBC's
+// server-prepared ones) decodes binary results by those declarations, so a
+// stand-in that declares another type than the value is a wrong value, not a
+// cosmetic one: `SELECT $1 + 1` with an untyped NULL standing in for an
+// integer parameter described float8, the value 2 executed as an integer,
+// and pgx decoded its eight bytes as the double 1.5e-323.
+//
+// An integer is NULLIF(0, 0), the int4 NULL — the type every non-negative
+// int4 literal declares. (A NEGATIVE integer literal declares bigint in this
+// engine; that residual is recorded in the arc notes.) Text and unknown stay
+// the untyped NULL, which is SQL's unknown as their values are.
+func paramNullLiteral(oid uint32) string {
+	switch oid {
+	case oidInt2, oidInt4:
+		return "NULLIF(0, 0)"
+	case oidBool:
+		return "CAST(NULL AS BOOLEAN)"
+	case oidInt8:
+		return "CAST(NULL AS BIGINT)"
+	case oidFloat4:
+		return "CAST(NULL AS REAL)"
+	case oidFloat8:
+		return "CAST(NULL AS DOUBLE PRECISION)"
+	case oidNumeric:
+		// CAST(NULL AS NUMERIC) is a double here (an unconstrained NUMERIC
+		// is carried as one); a numeric literal's NULLIF is numeric.
+		return "NULLIF(0.0, 0.0)"
+	case oidDate:
+		return "CAST(NULL AS DATE)"
+	case oidTimestamp, oidTimestampTZ:
+		return "CAST(NULL AS TIMESTAMP)"
+	case oidUUID:
+		return "CAST(NULL AS UUID)"
+	}
+	return "NULL"
 }
 
 // binaryTimestampInstant reads a binary timestamp/timestamptz parameter —
@@ -310,7 +457,7 @@ func renderBinaryParam(raw []byte, oid uint32) (string, error) {
 		if len(raw) != 8 {
 			return "", fmt.Errorf("int8 parameter has %d bytes, want 8", len(raw))
 		}
-		return strconv.FormatInt(int64(binary.BigEndian.Uint64(raw)), 10), nil
+		return "CAST(" + strconv.FormatInt(int64(binary.BigEndian.Uint64(raw)), 10) + " AS BIGINT)", nil
 
 	case oidFloat4:
 		if len(raw) != 4 {
@@ -329,7 +476,7 @@ func renderBinaryParam(raw []byte, oid uint32) (string, error) {
 			return "", fmt.Errorf("date parameter has %d bytes, want 4", len(raw))
 		}
 		days := int32(binary.BigEndian.Uint32(raw))
-		return quoteLiteral(pgEpoch.AddDate(0, 0, int(days)).Format("2006-01-02")), nil
+		return renderTextParam(pgEpoch.AddDate(0, 0, int(days)).Format("2006-01-02"), oidDate)
 
 	case oidTimestamp, oidTimestampTZ:
 		if len(raw) != 8 {
@@ -340,7 +487,9 @@ func renderBinaryParam(raw []byte, oid uint32) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		return quoteLiteral(t.Format("2006-01-02T15:04:05.999999Z07:00")), nil
+		// The instant at UTC, which is what both types name here: a
+		// timestamp's wall clock and a timestamptz's instant.
+		return renderTextParam(t.Format("2006-01-02 15:04:05.999999"), oidTimestamp)
 
 	case oidTime:
 		if len(raw) != 8 {
@@ -355,7 +504,7 @@ func renderBinaryParam(raw []byte, oid uint32) (string, error) {
 			return "", fmt.Errorf("uuid parameter has %d bytes, want 16", len(raw))
 		}
 		h := hex.EncodeToString(raw)
-		return quoteLiteral(h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:]), nil
+		return renderTextParam(h[0:8]+"-"+h[8:12]+"-"+h[12:16]+"-"+h[16:20]+"-"+h[20:], oidUUID)
 
 	case oidBytea:
 		// The binary form of a bytea parameter IS the value's bytes
@@ -367,7 +516,11 @@ func renderBinaryParam(raw []byte, oid uint32) (string, error) {
 		return quoteLiteral(string(raw)), nil
 
 	case oidNumeric:
-		return renderBinaryNumeric(raw)
+		text, err := renderBinaryNumeric(raw)
+		if err != nil {
+			return "", err
+		}
+		return renderTextParam(text, oidNumeric)
 
 	case oidText, oidVarchar, oidBPChar:
 		// PostgreSQL's binary form for these is the same bytes as the text
@@ -396,8 +549,8 @@ const (
 // and base-10000 digits into exact decimal text (#464).
 // Only weight is signed; value is sum(digit[i]*10000^(weight-i)) with sign,
 // while dscale controls displayed fractional digits.
-// Pass text through renderTextParam so text/binary numeric literal emission
-// shares one validation path. appendBinaryNumeric/pgNumericDigits encode the
+// The text is the value's exact decimal spelling; renderBinaryParam passes it
+// through renderTextParam so text and binary numeric literals share one path. appendBinaryNumeric/pgNumericDigits encode the
 // other direction independently; their self-consistency cannot prove this decoder.
 // See docs/internals/pgwire-binary-numeric-input.md for the design.
 func renderBinaryNumeric(raw []byte) (string, error) {
@@ -513,7 +666,7 @@ func renderBinaryNumeric(raw []byte) (string, error) {
 		}
 	}
 
-	return renderTextParam(b.String(), oidNumeric)
+	return b.String(), nil
 }
 
 // paramRef is one $N placeholder: its byte range in the statement and the
@@ -593,42 +746,111 @@ func countParamPlaceholders(sql string) int {
 	return max
 }
 
-// substituteParams replaces every $N in sql with literals[N-1]. A placeholder
-// numbered past the literals it was given is left as written — the statement
-// then fails to parse, which is the honest outcome for a Bind that supplied
-// fewer parameters than the statement uses.
-func substituteParams(sql string, literals []string) string {
+// substituteStandIns replaces every $N placeholder with a stand-in and reports
+// whether the statement had any. Describe answers a statement's result shape
+// before Bind has supplied values, so it runs the statement with a NULL of each
+// parameter's type standing in for it (paramNullLiteral) — and, in a LIMIT,
+// OFFSET or FETCH count, where the count grammar reads a number and no NULL,
+// with 0, which changes no column's type.
+func substituteStandIns(sql string, oids []uint32) (string, bool) {
 	refs := scanParamRefs(sql)
 	if len(refs) == 0 {
-		return sql
+		return sql, false
 	}
+	positions := paramPositions(sql, refs)
+	i := 0
+	return substituteRefs(sql, refs, func(r paramRef) (string, bool) {
+		pos := positions[i]
+		i++
+		switch pos {
+		case posCount:
+			return "0", true
+		case posWindowInt, posWindowDefault:
+			// The window argument grammar reads a constant: NULL is one.
+			return "NULL", true
+		}
+		var oid uint32
+		if r.n <= len(oids) {
+			oid = oids[r.n-1]
+		}
+		return paramNullLiteral(oid), true
+	}), true
+}
+
+// untypedLiteral is a typed literal without its type's CAST: `CAST('2024-03-04'
+// AS DATE)` is `'2024-03-04'`. It is the spelling for LAG / LEAD's default,
+// which this engine evaluates only as a literal: a CAST there is stored as its
+// text and refused at execution (a window-argument defect recorded in the arc
+// notes), so the default takes the value's literal and is read by the column's
+// type, as it was before parameters were typed.
+func untypedLiteral(lit string) string {
+	if !strings.HasPrefix(lit, "CAST(") || !strings.HasSuffix(lit, ")") {
+		return lit
+	}
+	if i := strings.LastIndex(lit, " AS "); i > len("CAST(") {
+		return lit[len("CAST("):i]
+	}
+	return lit
+}
+
+// substituteRefs replaces each placeholder in refs with lit(ref); a ref for
+// which lit answers false is left as written.
+func substituteRefs(sql string, refs []paramRef, lit func(paramRef) (string, bool)) string {
 	var b strings.Builder
 	b.Grow(len(sql))
 	prev := 0
 	for _, r := range refs {
-		if r.n > len(literals) {
+		text, ok := lit(r)
+		if !ok {
 			continue
 		}
 		b.WriteString(sql[prev:r.start])
-		b.WriteString(literals[r.n-1])
+		b.WriteString(text)
 		prev = r.end
 	}
 	b.WriteString(sql[prev:])
 	return b.String()
 }
 
-// substituteNullParams replaces every $N placeholder with NULL and reports
-// whether the statement had any. Describe answers a statement's result shape
-// before Bind has supplied values, so it runs the statement with NULL standing
-// in for each parameter.
-func substituteNullParams(sql string) (string, bool) {
-	refs := scanParamRefs(sql)
-	if len(refs) == 0 {
-		return sql, false
+// renderCountParam renders a parameter standing in a LIMIT, OFFSET or FETCH
+// count or a TABLESAMPLE percentage. The count grammar reads a number token
+// (or a float parameter's CAST, which it reads as its number), so an integer
+// or numeric parameter is its number there rather than its typed literal; any
+// other type renders as everywhere.
+func renderCountParam(raw []byte, binaryFmt bool, oid uint32) (string, error) {
+	if oid == oidNumeric {
+		// A numeric count is the number as the client spelled it (an
+		// integer spelling is the count; a fraction is the bare
+		// spelling's refusal) — not the `7.` that types it numeric.
+		text := string(raw)
+		if binaryFmt {
+			var err error
+			if text, err = renderBinaryNumeric(raw); err != nil {
+				return "", err
+			}
+		}
+		if _, err := strconv.ParseFloat(strings.TrimSpace(text), 64); err == nil {
+			return strings.TrimSpace(text), nil
+		}
+		return quoteLiteral(text), nil
 	}
-	nulls := make([]string, countParamPlaceholders(sql))
-	for i := range nulls {
-		nulls[i] = "NULL"
+	if !integerOID(oid) {
+		return renderParam(raw, binaryFmt, oid)
 	}
-	return substituteParams(sql, nulls), true
+	if binaryFmt {
+		switch {
+		case oid == oidInt2 && len(raw) == 2:
+			return strconv.FormatInt(int64(int16(binary.BigEndian.Uint16(raw))), 10), nil
+		case oid == oidInt4 && len(raw) == 4:
+			return strconv.FormatInt(int64(int32(binary.BigEndian.Uint32(raw))), 10), nil
+		case oid == oidInt8 && len(raw) == 8:
+			return strconv.FormatInt(int64(binary.BigEndian.Uint64(raw)), 10), nil
+		}
+		return renderParam(raw, binaryFmt, oid)
+	}
+	t := strings.TrimSpace(string(raw))
+	if _, err := strconv.ParseInt(t, 10, 64); err == nil || errors.Is(err, strconv.ErrRange) {
+		return t, nil
+	}
+	return quoteLiteral(string(raw)), nil
 }
