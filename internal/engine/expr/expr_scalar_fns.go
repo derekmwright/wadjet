@@ -204,58 +204,6 @@ func (e *FuncCall) formatTemporalArgs(b *batch.RecordBatch, args []any) {
 	}
 }
 
-// typeJSONArgs marks each json_build_object VALUE whose declaration is
-// numeric (jsonNumeric), so the object writes it as a JSON number.
-//
-// A DECIMAL boxes as its rendered text, and json_build_object receives only
-// the boxes: a numeric value — a numeric column, `t.a[1] * t.n`, a scalar
-// subquery's numeric answer — reached jsonValue as a Go string and was
-// written as a JSON STRING (`{"v" : "2.25"}`), where PostgreSQL writes the
-// number (`{"v" : 2.25}`). The argument's declaration is the one the
-// projection's output vector is typed by (argDecls, operand_decl.go); a bare
-// numeric literal is read at its own scale (decimalLitText), as PostgreSQL
-// writes 1.50. An array value's numeric elements are marked the same way.
-// The keys (even positions) are text in every case and are left alone.
-func (e *FuncCall) typeJSONArgs(b *batch.RecordBatch, row int, args []any) {
-	for i := 1; i < len(args); i += 2 {
-		if args[i] == nil {
-			continue
-		}
-		if s, ok := decimalLitText(e.Args[i], b, row); ok {
-			args[i] = jsonNumeric(s)
-			continue
-		}
-		if i < len(e.argDecls) {
-			args[i] = jsonDeclared(args[i], e.argDecls[i].shape(b, row, e.Args[i]))
-		}
-	}
-}
-
-// jsonDeclared is v with every value its declaration names a DECIMAL — the
-// value itself, or an array's elements — marked jsonNumeric.
-func jsonDeclared(v any, col *parquet.Column) any {
-	if col == nil {
-		return v
-	}
-	switch col.Type {
-	case parquet.TypeDecimal:
-		if s, ok := v.(string); ok {
-			return jsonNumeric(s)
-		}
-	case parquet.TypeArray:
-		arr, ok := v.([]any)
-		if !ok || col.ElementType == nil {
-			return v
-		}
-		out := make([]any, len(arr))
-		for i, el := range arr {
-			out[i] = jsonDeclared(el, col.ElementType)
-		}
-		return out
-	}
-	return v
-}
-
 // formatNetworkArgs renders TypeIPv4/TypeMAC ColRef arguments canonically as
 // dotted-quad/colon-hex for BOTH networkTextFuncs and stringInputFuncs (#484, #500).
 // Read the column through Vector.GetValue's exported rendering boundary because

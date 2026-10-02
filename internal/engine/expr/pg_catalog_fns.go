@@ -3,10 +3,8 @@
 package expr
 
 import (
-	"encoding/json"
 	"fmt"
 	"math"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -515,126 +513,6 @@ func fnPgGetExpr(args []any) any {
 // constraints, indexes, statistics objects, functions, triggers, rules and
 // views: NULL, which is what PostgreSQL answers for an OID that names none.
 func fnNullForUnknownObject(args []any) any { return nil }
-
-// json_build_object(variadic "any"): a JSON object of alternating keys and
-// values, rendered the way PostgreSQL renders one — `{"a" : 1, "b" : "x"}`.
-func fnJSONBuildObject(args []any) any {
-	if len(args)%2 != 0 {
-		panic(fatalEval{sqlerr.New("22023",
-			"argument list must have even number of elements")})
-	}
-	var b strings.Builder
-	b.WriteByte('{')
-	for i := 0; i < len(args); i += 2 {
-		if args[i] == nil {
-			panic(fatalEval{sqlerr.New("22004", "null value not allowed for object key")})
-		}
-		if i > 0 {
-			b.WriteString(", ")
-		}
-		k, _ := json.Marshal(toString(args[i]))
-		b.Write(k)
-		b.WriteString(" : ")
-		b.WriteString(jsonValue(args[i+1]))
-	}
-	b.WriteByte('}')
-	return b.String()
-}
-
-// jsonNumeric is a DECIMAL argument's text on its way into a JSON value. A
-// DECIMAL boxes as its rendered text — a Go string, which jsonValue alone
-// would quote — so the call marks the argument it DECLARES numeric
-// (FuncCall.typeJSONArgs) and jsonValue writes it as PostgreSQL writes a
-// numeric: the digits, unquoted, when they spell a JSON number.
-type jsonNumeric string
-
-func jsonValue(v any) string {
-	switch x := v.(type) {
-	case nil:
-		return "null"
-	case jsonNumeric:
-		// PostgreSQL's datum_to_json: a numeric whose text is a valid JSON
-		// number is written as that text (its own scale: 2.25, -10.50,
-		// 0.0); any other (NaN) is a JSON string.
-		if isJSONNumber(string(x)) {
-			return string(x)
-		}
-		q, _ := json.Marshal(string(x))
-		return string(q)
-	case bool:
-		return strconv.FormatBool(x)
-	case int64, int32, int:
-		return fmt.Sprint(x)
-	case float64:
-		if math.IsInf(x, 0) || math.IsNaN(x) {
-			q, _ := json.Marshal(strconv.FormatFloat(x, 'g', -1, 64))
-			return string(q)
-		}
-		return strconv.FormatFloat(x, 'g', -1, 64)
-	case float32:
-		return strconv.FormatFloat(float64(x), 'g', -1, 32)
-	case []any:
-		// An array is array_to_json's spelling: its elements joined by a
-		// bare comma.
-		parts := make([]string, len(x))
-		for i, e := range x {
-			parts[i] = jsonValue(e)
-		}
-		return "[" + strings.Join(parts, ",") + "]"
-	case map[string]any:
-		keys := make([]string, 0, len(x))
-		for k := range x {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		parts := make([]string, len(keys))
-		for i, k := range keys {
-			q, _ := json.Marshal(k)
-			parts[i] = string(q) + " : " + jsonValue(x[k])
-		}
-		return "{" + strings.Join(parts, ", ") + "}"
-	}
-	q, _ := json.Marshal(toString(v))
-	return string(q)
-}
-
-// isJSONNumber reports whether s is a JSON number literal (RFC 8259 §6):
-// an optional minus, an integer part without a leading zero, an optional
-// fraction and an optional exponent.
-func isJSONNumber(s string) bool {
-	i := 0
-	if i < len(s) && s[i] == '-' {
-		i++
-	}
-	digits := func() int {
-		n := 0
-		for i < len(s) && s[i] >= '0' && s[i] <= '9' {
-			i++
-			n++
-		}
-		return n
-	}
-	start := i
-	if n := digits(); n == 0 || (n > 1 && s[start] == '0') {
-		return false
-	}
-	if i < len(s) && s[i] == '.' {
-		i++
-		if digits() == 0 {
-			return false
-		}
-	}
-	if i < len(s) && (s[i] == 'e' || s[i] == 'E') {
-		i++
-		if i < len(s) && (s[i] == '+' || s[i] == '-') {
-			i++
-		}
-		if digits() == 0 {
-			return false
-		}
-	}
-	return i == len(s)
-}
 
 // array_upper / array_lower (anyarray, dimension): the bounds of a
 // one-dimensional array, whose lower bound is 1. An empty array, a NULL

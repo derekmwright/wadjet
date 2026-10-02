@@ -3,8 +3,6 @@
 package batch
 
 import (
-	"bytes"
-	"encoding/json"
 	"math"
 	"strings"
 
@@ -56,7 +54,7 @@ func appendPGJSON(b *strings.Builder, val any, col *parquet.Column) {
 			if i > 0 {
 				b.WriteByte(',')
 			}
-			writeJSONString(b, n)
+			WriteJSONString(b, n)
 			b.WriteByte(':')
 			appendPGJSON(b, tv[n], fields[i])
 		}
@@ -72,7 +70,7 @@ func appendPGJSON(b *strings.Builder, val any, col *parquet.Column) {
 	}
 	if col != nil && col.Type == parquet.TypeTimestamp {
 		if ms, ok := val.(int64); ok {
-			writeJSONString(b, strings.Replace(FormatTimestamp(ms), " ", "T", 1))
+			WriteJSONString(b, strings.Replace(FormatTimestamp(ms), " ", "T", 1))
 			return
 		}
 	}
@@ -81,7 +79,7 @@ func appendPGJSON(b *strings.Builder, val any, col *parquet.Column) {
 	if col != nil && col.Type == parquet.TypeDate {
 		switch val.(type) {
 		case int32, int64:
-			writeJSONString(b, FormatPGText(val, col))
+			WriteJSONString(b, FormatPGText(val, col))
 			return
 		}
 	}
@@ -100,12 +98,15 @@ func appendPGJSON(b *strings.Builder, val any, col *parquet.Column) {
 			return
 		}
 	case string:
-		if col != nil && col.Type == parquet.TypeDecimal {
+		// A numeric is written as its digits when they spell a JSON number
+		// (its own scale: 2.25, -10.50, 0.0) and as a JSON string otherwise
+		// (NaN), as datum_to_json writes one.
+		if col != nil && col.Type == parquet.TypeDecimal && isJSONNumber(tv) {
 			b.WriteString(tv)
 			return
 		}
 	}
-	writeJSONString(b, FormatPGText(val, col))
+	WriteJSONString(b, FormatPGText(val, col))
 }
 
 // appendPGJSONMap writes a MAP's entries — one {key, value} ROW each, in the
@@ -123,19 +124,85 @@ func appendPGJSONMap(b *strings.Builder, entries []any, col *parquet.Column) {
 			b.WriteByte(',')
 		}
 		entry, _ := e.(map[string]any)
-		writeJSONString(b, FormatPGText(entry[keyName], keyCol))
+		WriteJSONString(b, FormatPGText(entry[keyName], keyCol))
 		b.WriteByte(':')
 		appendPGJSON(b, entry[valName], valCol)
 	}
 	b.WriteByte('}')
 }
 
-// writeJSONString is a JSON string literal without encoding/json's HTML
-// escaping: PostgreSQL's escape_json leaves `<`, `>` and `&` as they are.
-func writeJSONString(b *strings.Builder, s string) {
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	_ = enc.Encode(s)
-	b.Write(bytes.TrimSuffix(buf.Bytes(), []byte("\n")))
+// WriteJSONString writes s as a JSON string literal the way PostgreSQL's
+// escape_json does: `"` and `\` escaped, \b \f \n \r \t by name, every other
+// control character below U+0020 as \u00XX, and everything else as itself —
+// encoding/json's HTML escaping of `<`, `>`, `&` and its \u2028 / \u2029 are
+// not PostgreSQL's.
+func WriteJSONString(b *strings.Builder, s string) {
+	const hexDigits = "0123456789abcdef"
+	b.WriteByte('"')
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch c {
+		case '"':
+			b.WriteString(`\"`)
+		case '\\':
+			b.WriteString(`\\`)
+		case '\b':
+			b.WriteString(`\b`)
+		case '\f':
+			b.WriteString(`\f`)
+		case '\n':
+			b.WriteString(`\n`)
+		case '\r':
+			b.WriteString(`\r`)
+		case '\t':
+			b.WriteString(`\t`)
+		default:
+			if c < 0x20 {
+				b.WriteString(`\u00`)
+				b.WriteByte(hexDigits[c>>4])
+				b.WriteByte(hexDigits[c&0xf])
+				continue
+			}
+			b.WriteByte(c)
+		}
+	}
+	b.WriteByte('"')
+}
+
+// isJSONNumber reports whether s is a JSON number literal (RFC 8259 §6):
+// an optional minus, an integer part without a leading zero, an optional
+// fraction and an optional exponent.
+func isJSONNumber(s string) bool {
+	i := 0
+	if i < len(s) && s[i] == '-' {
+		i++
+	}
+	digits := func() int {
+		n := 0
+		for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+			i++
+			n++
+		}
+		return n
+	}
+	start := i
+	if n := digits(); n == 0 || (n > 1 && s[start] == '0') {
+		return false
+	}
+	if i < len(s) && s[i] == '.' {
+		i++
+		if digits() == 0 {
+			return false
+		}
+	}
+	if i < len(s) && (s[i] == 'e' || s[i] == 'E') {
+		i++
+		if i < len(s) && (s[i] == '+' || s[i] == '-') {
+			i++
+		}
+		if digits() == 0 {
+			return false
+		}
+	}
+	return i == len(s)
 }
