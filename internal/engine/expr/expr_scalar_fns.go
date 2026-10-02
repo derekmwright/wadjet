@@ -165,6 +165,9 @@ type FuncCall struct {
 	// jsonArgs marks json_build_object, whose values are written by their
 	// DECLARED type (typeJSONArgs).
 	jsonArgs bool
+	// formatArgs marks format(), whose values are written as their DECLARED
+	// type's text (renderFormatArgs).
+	formatArgs bool
 
 	vecOnce sync.Once
 	vecFn   VecScalarFunc
@@ -407,6 +410,7 @@ func (e *FuncCall) resolveFnSlow() {
 		}
 	}
 	e.jsonArgs = lower == "json_build_object"
+	e.formatArgs = lower == "format"
 	switch lower {
 	case "greatest":
 		e.extremum, e.extremumOp = true, CmpGt
@@ -480,6 +484,9 @@ func (e *FuncCall) Eval(b *batch.RecordBatch, row int) any {
 	}
 	if e.jsonArgs {
 		e.typeJSONArgs(b, row, args)
+	}
+	if e.formatArgs {
+		e.renderFormatArgs(b, row, args)
 	}
 	var out any
 	switch {

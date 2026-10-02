@@ -173,15 +173,22 @@ func fnNull(args []any) any  { return nil }
 func fnZero(args []any) any  { return int64(0) }
 func fnOne(args []any) any   { return int64(1) }
 
-// fnQuoteIdent double-quotes an identifier only when it needs it: an
-// identifier that is already lowercase, alphanumeric and does not lead with a
-// digit is returned bare, which is what PostgreSQL does.
+// fnQuoteIdent is PostgreSQL's quote_ident: the identifier bare when it
+// needs no quoting, double-quoted (embedded quotes doubled) otherwise.
 func fnQuoteIdent(args []any) any {
 	if len(args) < 1 || args[0] == nil {
 		return nil
 	}
-	s := toString(args[0])
-	if s != "" && !needsQuoting(s) {
+	return quoteIdent(toString(args[0]))
+}
+
+// quoteIdent is quote_ident's rule, which format()'s %I shares: an identifier
+// is left bare only when it starts with a lowercase ASCII letter or an
+// underscore, holds only lowercase ASCII letters, digits and underscores, and
+// is not a keyword PostgreSQL reserves in any category but UNRESERVED
+// (`select` is "select"; measured on 17.11, pg_get_keywords catcode <> 'U').
+func quoteIdent(s string) string {
+	if s != "" && !needsQuoting(s) && !pgQuotedKeywords[s] {
 		return s
 	}
 	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
@@ -217,8 +224,16 @@ func fnQuoteNullable(args []any) any {
 	return quoteLiteral(toString(args[0]))
 }
 
+// quoteLiteral is quote_literal's rule, which format()'s %L shares: single
+// quotes doubled, and a value holding a backslash written as an escape string
+// with every backslash doubled (`E'a\\b'`), as PostgreSQL's quote_literal
+// writes it.
 func quoteLiteral(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
+	q := "'" + strings.ReplaceAll(s, "'", "''") + "'"
+	if strings.Contains(s, `\`) {
+		return "E" + strings.ReplaceAll(q, `\`, `\\`)
+	}
+	return q
 }
 
 // fnArrayToString joins an array with a separator, dropping NULL elements

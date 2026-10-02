@@ -13,6 +13,8 @@ import (
 	"math"
 	"strings"
 	"testing"
+
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
 // --- String: distance and utility ---
@@ -102,8 +104,8 @@ func TestTier3Format(t *testing.T) {
 		want any
 	}{
 		{[]any{"hello %s", "world"}, "hello world"},
-		{[]any{"%d items", 42}, "42 items"},
-		{[]any{"%.2f", 3.14159}, "3.14"},
+		{[]any{"%s items", int64(42)}, "42 items"},
+		{[]any{"%s|%s", 6.375, nil}, "6.375|"},
 		{[]any{nil}, nil},
 	}
 	for _, tt := range tests {
@@ -111,6 +113,19 @@ func TestTier3Format(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("format(%v) = %v, want %v", tt.args, got, tt.want)
 		}
+	}
+	// %d and %.2f are Go's grammar, not PostgreSQL's: 22023 there (#1467).
+	for _, f := range []string{"%d items", "%.2f"} {
+		func() {
+			defer func() {
+				r := recover()
+				fe, ok := r.(fatalEval)
+				if !ok || sqlerr.StateOf(fe.err) != "22023" {
+					t.Errorf("format(%q) = %v, want 22023", f, r)
+				}
+			}()
+			fn([]any{f, int64(42)})
+		}()
 	}
 }
 

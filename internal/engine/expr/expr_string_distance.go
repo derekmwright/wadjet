@@ -155,18 +155,6 @@ func fnNormalize(args []any) any {
 	return f.String(toString(args[0]))
 }
 
-func fnFormat(args []any) any {
-	if len(args) < 1 || args[0] == nil {
-		return nil
-	}
-	format := toString(args[0])
-	fmtArgs := make([]any, 0, len(args)-1)
-	for _, a := range args[1:] {
-		fmtArgs = append(fmtArgs, a)
-	}
-	return fmt.Sprintf(format, fmtArgs...)
-}
-
 func fnToUTF8(args []any) any {
 	if len(args) < 1 || args[0] == nil {
 		return nil
