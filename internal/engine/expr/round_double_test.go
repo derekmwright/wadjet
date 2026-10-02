@@ -50,9 +50,9 @@ func TestRoundDoublePrecisionHalfToEven(t *testing.T) {
 // wherever it sits, and round 7's B1 fix moved scalarFnDeclaredDecimal's own
 // declaration with it, so `ROUND(2.5)` now answers a decimal "3" the way
 // PostgreSQL's numeric does (review r5 B1, #1252). A bare, unparameterized
-// `CAST(x AS numeric/decimal)` still declines the exact path — its (p,s) is
-// resolved per VALUE at runtime, not a declaration this layer can name — so
-// it is unchanged, still float64.
+// `CAST(x AS numeric/decimal)` over an operand with an exact type is that
+// type at the carrier's width (#1386, Cast.bareDecimalType), so it answers
+// the same decimal text.
 func TestRoundNumericStillHalfAwayFromZero(t *testing.T) {
 	b := testBatch()
 	cases := []struct {
@@ -64,8 +64,8 @@ func TestRoundNumericStillHalfAwayFromZero(t *testing.T) {
 		{"ROUND(2.5)", "3"},
 		{"ROUND(-0.5)", "-1"},
 		{"ROUND(-1.5)", "-2"},
-		{"ROUND(CAST(0.5 AS numeric))", 1.0},
-		{"ROUND(CAST(2.5 AS decimal))", 3.0},
+		{"ROUND(CAST(0.5 AS numeric))", "1"},
+		{"ROUND(CAST(2.5 AS decimal))", "3"},
 	}
 	for _, c := range cases {
 		t.Run(c.sql, func(t *testing.T) {

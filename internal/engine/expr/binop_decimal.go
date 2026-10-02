@@ -478,6 +478,18 @@ func resolveDecimalMode(op string, left, right Expr, b *batch.RecordBatch) (decM
 		// since #369).
 		return decMode{}, decOperands{}, false
 	}
+	if op == "/" && (userIntegerCast(left) || userIntegerCast(right)) {
+		// A QUOTIENT over an integer CAST keeps the float rung it had, for
+		// the constant division's reason above: item 3's one-scale quotient
+		// keeps max(6, s1 + p2 + 1) fraction digits — 11 for
+		// `CAST(i AS INTEGER) / n` over a numeric(10,2) — where the double
+		// it replaces carries PostgreSQL's 16 significant digits
+		// (1.3333333333333333). Every other operator over the cast is exact
+		// (#1450); the quotient waits on a per-value division scale
+		// (numeric-decimal r19). physical.binOpDecimalOperand declines the
+		// same pair.
+		return decMode{}, decOperands{}, false
+	}
 	p, s, ok := batch.DecimalResultType(op, lt.Precision, lt.Scale, rt.Precision, rt.Scale)
 	if !ok {
 		return decMode{}, decOperands{}, false
@@ -534,10 +546,17 @@ func operandIsDecimalTyped(e Expr, b *batch.RecordBatch) bool {
 	case *UnaryOp:
 		return (v.Op == "-" || v.Op == "+") && operandIsDecimalTyped(v.Operand, b)
 	case *Cast:
-		// A cast that NAMES a (p,s) produces an exact DECIMAL; a bare one's
-		// type is the operand's, resolved per value, so it is not a
-		// declaration this layer can compute an arithmetic result from.
-		return castIsExactDecimal(v)
+		// A cast that NAMES a (p,s) produces an exact DECIMAL; so does a bare
+		// one over an operand with an exact type, at that operand's scale
+		// (Cast.bareDecimalType) — over a float or text operand it does not.
+		if castIsExactDecimal(v) {
+			return true
+		}
+		if d, ok := v.decimalDestination(); ok && !d.params {
+			_, ok := v.bareDecimalType(b)
+			return ok
+		}
+		return false
 	case *decimalScalarFn:
 		return v.resolve(b)
 	}

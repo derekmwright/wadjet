@@ -40,6 +40,19 @@ var shapeResolver atomic.Pointer[ShapeResolver]
 // SetShapeResolver installs the planner's declared-output walk.
 func SetShapeResolver(f ShapeResolver) { shapeResolver.Store(&f) }
 
+// CategoryResolver answers PostgreSQL's numeric CATEGORY of node over the
+// given input columns (ADR-0024 §2c): whether a value this engine carries in
+// a double is, to PostgreSQL, a numeric or a float8. It is the same walk that
+// stamps DeclType.PGNumeric on the projection's declaration, asked of the
+// operand's AST against the input batch's executed columns — so every arm,
+// a DAG stage included, reads it from what that arm actually has.
+type CategoryResolver func(node plansql.Node, schema []parquet.Column, sub SubqueryDeclFunc) PGCategory
+
+var categoryResolver atomic.Pointer[CategoryResolver]
+
+// SetCategoryResolver installs the planner's numeric-category walk.
+func SetCategoryResolver(f CategoryResolver) { categoryResolver.Store(&f) }
+
 // operandDecl is one operand's declaration source: its AST, resolved once
 // against the first input batch that reaches it (an operator's input keeps
 // one schema for the life of the compiled expression).
@@ -47,6 +60,29 @@ type operandDecl struct {
 	node plansql.Node
 	sub  SubqueryDeclFunc
 	res  atomic.Pointer[resolvedDecl]
+	// cat is the resolved category plus one (0 = not resolved yet).
+	cat atomic.Int32
+}
+
+// category is the operand's PostgreSQL numeric category against b
+// (CategoryResolver), resolved once; PGCatUnknown without an AST or a
+// resolver.
+func (d *operandDecl) category(b *batch.RecordBatch) PGCategory {
+	if d == nil {
+		return PGCatUnknown
+	}
+	if c := d.cat.Load(); c != 0 {
+		return PGCategory(c - 1)
+	}
+	f := categoryResolver.Load()
+	if f == nil {
+		return PGCatUnknown
+	}
+	c := (*f)(d.node, batchSchema(b), d.sub)
+	if b != nil {
+		d.cat.Store(int32(c) + 1)
+	}
+	return c
 }
 
 type resolvedDecl struct{ col *parquet.Column }

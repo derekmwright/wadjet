@@ -203,9 +203,12 @@ func ndCells() []ndCell {
 			want: "v:FLOAT32 | 2<f4>"},
 		{name: "1119/bare_wide_integer_literal", sql: `SELECT 9007199254740993 AS v`,
 			want: "v:INT64 | 9007199254740993<i8>"},
+		// PostgreSQL 17.11 declares numeric and answers 9007199254740993.25;
+		// the pin of the rounded double this cell held started agreeing
+		// with arc NX (#1386: a spelling a double cannot carry compiles to
+		// its own DECIMAL) and was deleted.
 		{name: "1119/bare_wide_fractional_literal", sql: `SELECT 9007199254740993.25 AS v`,
-			want: "v:FLOAT64 | 9.007199254740994e+15<f8>",
-			why:  "PostgreSQL 17.11 declares numeric and answers 9007199254740993.25. A BARE numeric literal with a fractional part still goes through compileLit's float64 box here — ADR-0024's recorded literal deferral. The INTEGER spelling beside it agrees (bare_wide_integer_literal), and a CAST of the same literal has been exact since #1037."},
+			want: "v:DECIMAL(18,2) | 9007199254740993.25"},
 		{name: "1119/bare_int4_boundary_literal", sql: `SELECT 2147483648 AS v`,
 			want: "v:INT64 | 2147483648<i8>"},
 	}

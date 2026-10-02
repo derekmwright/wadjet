@@ -1345,33 +1345,24 @@ func TestNullifTypesOverBothArgumentsWhenOnlyTheSecondIsDecimal(t *testing.T) {
 	}
 }
 
-// TestWideNumericLiteralInAChoiceStaysFloat corrects a record. #695's first
-// pass described the wide-literal deferral as "a FLOAT64 declaration and the
-// #361 store refusal", i.e. loud. It is not loud: the whole expression declares
-// FLOAT64 and ANSWERS a rounded double, so
-// `GREATEST(numeric(18,4), 493827160549382.7160549350)` comes back as
-// 4.938271605493827e+14 where PostgreSQL answers the literal exactly.
-//
-// The cause is the box: compileLit puts a float64 in it past a double's ~17
-// significant digits, and a choice hands over whatever box the winning arm
-// produced. Arithmetic is exact for the same literal because it reads Lit.Text
-// (ADR-0012 item 6). Closing it means giving the choice constructs an
-// exact-text path for a constant arm; until then the deferral is a SILENT loss
-// of digits, recorded here rather than described as something safer.
-// TODO(#555): this pin flips when the choice path reads the literal's text.
-func TestWideNumericLiteralInAChoiceStaysFloat(t *testing.T) {
+// TestWideNumericLiteralInAChoiceKeepsItsDigits is the deferral #695's pass
+// recorded and arc NX closed (#1386). A literal past a double's ~17
+// significant digits compiled to a float64 box, and a choice hands over the
+// box its winning arm produced, so `GREATEST(numeric(18,4),
+// 493827160549382.7160549350)` declared FLOAT64 and answered the rounded
+// double 4.938271605493827e+14 (v0.25.3). Such a literal now compiles to the
+// exact DECIMAL its spelling names (expr.WideNumericLiteral), so the choice
+// declares numeric and answers the literal exactly, as PostgreSQL does.
+func TestWideNumericLiteralInAChoiceKeepsItsDigits(t *testing.T) {
 	db := ddrOpen(t)
 	res := ddrQuery(t, db,
 		"SELECT GREATEST(b, 493827160549382.7160549350) AS v FROM "+ddrTable+" WHERE id = 1")
 	m := res.ColumnMetas[0]
-	if m.TypeID == parquet.TypeDecimal {
-		t.Fatalf("GREATEST over a wide literal declared %s(%d,%d) — the exact-text path has "+
-			"landed, so delete this pin and assert 493827160549382.7160549350",
-			m.TypeID, m.Precision, m.Scale)
+	if m.TypeID != parquet.TypeDecimal {
+		t.Fatalf("GREATEST over a wide literal declared %s, want DECIMAL (PostgreSQL: numeric)", m.TypeID)
 	}
-	if got := fmt.Sprintf("%v", res.Rows[0]["v"]); got != "4.938271605493827e+14" {
-		t.Errorf("value = %q, want the rounded double 4.938271605493827e+14 "+
-			"(PostgreSQL answers 493827160549382.7160549350)", got)
+	if got := fmt.Sprintf("%v", res.Rows[0]["v"]); got != "493827160549382.7160549350" {
+		t.Errorf("value = %q, want 493827160549382.7160549350 (PostgreSQL 17.11)", got)
 	}
 }
 

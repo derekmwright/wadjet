@@ -690,6 +690,8 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 			opDecl: newOperandDecl(n.Inner, ctx), Column: n.Column, answer: n.Answer}
 		if n.Column {
 			c.columnDec, c.columnDecOK = columnIntegerDecimal(n.TypeName)
+		} else {
+			c.columnDec, c.columnDecOK = IntegerCastDecimal(n.TypeName)
 		}
 		return c, nil
 
@@ -1267,6 +1269,14 @@ func compileLit(n *plansql.Lit) (Expr, error) {
 		// Try integer first
 		if i, err := strconv.ParseInt(n.Value, 10, 64); err == nil {
 			return &Lit{Val: i, Text: n.Value}, nil
+		}
+		// A spelling a double cannot carry is the exact DECIMAL it names —
+		// the same compiled node `CAST('<digits>' AS NUMERIC(p,s))` is — so
+		// every construct that hands the value on (a projection, a choice,
+		// unary minus, a scalar subquery's answer, a comparison) reads its
+		// digits rather than the nearest double (#1386, WideNumericLiteral).
+		if t, text, ok := WideNumericLiteral(n.Value); ok {
+			return &Cast{Operand: &Lit{Val: text}, DestType: fmt.Sprintf("numeric(%d,%d)", t.Precision, t.Scale)}, nil
 		}
 		// Try float
 		if f, err := strconv.ParseFloat(n.Value, 64); err == nil {
