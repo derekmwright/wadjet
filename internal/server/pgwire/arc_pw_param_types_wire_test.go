@@ -804,3 +804,40 @@ type pwPin struct {
 	pg   string // PostgreSQL 17.11's, where it differs
 	row  string // the catalog row recording the difference
 }
+
+// TestArcPWPositionTypingDepthBound bounds the position typing's walk: a
+// parameter at the bottom of sixteen nested derived tables or sixteen nested
+// EXISTS, and of twelve nested IN subqueries, is typed (integer, from `n`)
+// within two seconds. The walk parses each nested block's text once and
+// describes each FROM item once; a walk that re-entered every enclosing
+// block per level would be exponential in the depth. (Nested IN is bounded
+// at twelve because the parser's own cost for it grows exponentially: one
+// Parse of the sixteen-deep statement takes about 1.4 s, at c39858f3 too,
+// and its Prepare about 49 s there, the planning of the statement itself.)
+func TestArcPWPositionTypingDepthBound(t *testing.T) {
+	ctx := context.Background()
+	engine := pwEngine(t, ctx)
+	c := &pgConn{db: engine.db}
+	derived := "SELECT id, n FROM p WHERE n = $1"
+	exists := "n = $1"
+	in := "SELECT n FROM p WHERE n = $1"
+	for i := 0; i < 16; i++ {
+		derived = fmt.Sprintf("SELECT id, n FROM (%s) d%d", derived, i)
+		exists = fmt.Sprintf("EXISTS (SELECT 1 FROM p x%d WHERE x%d.id = 1 AND %s)", i, i, exists)
+		if i < 12 {
+			in = fmt.Sprintf("SELECT n FROM p WHERE n IN (%s)", in)
+		}
+	}
+	for name, sql := range map[string]string{
+		"derived/16": derived, "exists/16": "SELECT id FROM p WHERE " + exists, "in/12": in,
+	} {
+		start := time.Now()
+		got := c.inferParamOIDs(sql, nil)
+		if el := time.Since(start); el > 2*time.Second {
+			t.Errorf("%s: typed in %v, want under 2s", name, el)
+		}
+		if fmt.Sprint(got) != "[23]" {
+			t.Errorf("%s: typed %v, want [23]", name, got)
+		}
+	}
+}
