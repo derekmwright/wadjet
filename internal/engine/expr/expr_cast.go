@@ -44,8 +44,11 @@ type Cast struct {
 	// Column marks a correlated re-run's outer value (plansql.CastNode.Column):
 	// the value of an outer column of DestType, which contributes to
 	// fixed-point arithmetic as that column does. columnDec is that
-	// contribution for an INTEGER or BIGINT column, resolved once at compile
-	// (columnIntegerDecimal); columnDecOK is false for any other.
+	// contribution for an INTEGER or BIGINT column (columnIntegerDecimal), and
+	// for every cast to an integer type the user wrote (IntegerCastDecimal):
+	// `CAST(i AS INTEGER) / n` is int4 promoted to numeric on PostgreSQL, the
+	// value the bare integer column gives (#1450). Resolved once at compile;
+	// columnDecOK is false for any other.
 	Column      bool
 	columnDec   batch.DecimalType
 	columnDecOK bool
@@ -213,15 +216,27 @@ func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
 		// numeric, and its numeric-to-integer cast rounds HALF AWAY FROM ZERO
 		// (`CAST(-0.5 AS int)` is -1 there, `CAST(2.5 AS int)` is 3). The two
 		// sources round differently on the same server and so must these. The
-		// operand's box cannot tell them apart — a bare numeric literal is a
-		// float64 here, which is ADR-0024's recorded literal-typing deferral
-		// — so the distinction is made from the EXPRESSION: a literal, or a
+		// operand's box cannot tell them apart — a narrow numeric literal's
+		// box is a float64 (a wide one compiles to its exact DECIMAL, which
+		// castDecimalToInt above rounds) — so the distinction is made from
+		// the EXPRESSION: a literal, or a
 		// unary sign over one, is a constant. That is the same test
 		// physical.isConstNumericLitNode makes for the same reason, and it
 		// covers both spellings because `-0.5` parses as a UnaryOp and `0.5`
 		// as a Lit, and covering only one made the two halves of one query
 		// disagree about their own type (#668's note).
-		if isConstNumericOperand(e.Operand) {
+		//
+		// The constant is one case of the general rule, which is PostgreSQL's
+		// own: the cast's SOURCE TYPE decides. Every value PostgreSQL types
+		// numeric that this engine carries in a double — `5 / 2.0`,
+		// `SQRT(6.25)`, `POWER(2.5, 1)`, ADR-0024 §2c's float-carried numeric —
+		// rounds half away from zero, as the integer assignment of the same
+		// value does (docs/internals/dml-integer-assignment-rounding.md):
+		// `CAST(5 / 2.0 AS INTEGER)` is 3 there (#1392). The category is the
+		// planner's walk over the operand's AST against this batch's columns
+		// (operandDecl.category), so a DAG stage decides it from the same
+		// expression and the same input types the single-process arm has.
+		if isConstNumericOperand(e.Operand) || e.opDecl.category(b) == PGCatNumeric {
 			return castIntInRange(castFloatToInt64(ToFloat64(v), dest), dest)
 		}
 		return castIntInRange(castFloatToInt64Even(ToFloat64(v), dest), dest)

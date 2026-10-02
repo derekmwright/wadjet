@@ -135,16 +135,13 @@ func setOpLitCells() []setOpLitCell {
 			// answers for a double precision union too.
 			want: flt("123456789012345680000000000000000000000")},
 
-		// --- what this fix does NOT reach --------------------------------
-		{issue: "#683", name: "a_literal_inside_a_derived_table_arm_is_still_float8",
+		// A literal a double cannot carry inside a derived table's arm: the
+		// derived table's own projection declares its DECIMAL (arc NX,
+		// #1386; the pin of the rounded double 1234567890123456.8 this cell
+		// held until then started agreeing and was deleted).
+		{issue: "#683", name: "a_wide_literal_inside_a_derived_table_arm",
 			sql:  `SELECT a AS v FROM decpair UNION ALL SELECT y FROM (SELECT 1234567890123456.78 AS y FROM decpair WHERE id = 1) d`,
 			want: dec("1234567890123456.78"),
-			pin:  dec("1234567890123456.8"),
-			pinWhy: "the literal is typed by the DERIVED TABLE's own projection, not by the " +
-				"set-operation arm, and the declared-type layer answers float8 for a fractional " +
-				"literal everywhere outside an arm (ADR-0012 item 12: that rule is being decided " +
-				"alongside ADR-0024 item 3's decimal arithmetic). Both paths agree on it, which " +
-				"is why it is a pin and not a split",
 		},
 	}
 }

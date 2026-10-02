@@ -152,14 +152,13 @@ func DeclNumericLit(id batch.TypeID, text string) DeclType {
 	if t, ok := LiteralChoiceDecimalType(text); ok {
 		d.Exact, d.ExactSet = t, true
 		// FoldID rides on the SAME qualification as Exact, deliberately: it
-		// can put the fold on the DECIMAL rung, and a spelling whose box
-		// already lost digits must not do that. `GREATEST(numeric(18,4),
-		// 493827160549382.7160549350)` would then declare DECIMAL(18,4) and
-		// store the ROUNDED double as if it were exact — a plausible wrong
-		// number in place of a recorded one, which the deferral pinned by
-		// TestWideNumericLiteralInAChoiceStaysFloat exists to keep visible.
-		// Without a rung the literal folds at its own FLOAT64 declaration,
-		// which is where that shape was.
+		// puts the fold on the DECIMAL rung, which is right only for a
+		// spelling whose box carries it exactly — and every spelling
+		// LiteralChoiceDecimalType answers for does: a narrow one's float64
+		// reads back as it, a wide one compiles to its own DECIMAL
+		// (WideNumericLiteral, #1386), so `GREATEST(numeric(18,4),
+		// 493827160549382.7160549350)` keeps every digit
+		// (TestWideNumericLiteralInAChoiceKeepsItsDigits).
 		if t, ok := NumericConstTypeOfText(text); ok {
 			d.FoldID = t
 		}

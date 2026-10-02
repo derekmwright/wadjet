@@ -206,6 +206,10 @@ func (e *Cast) castDecimalTarget(b *batch.RecordBatch, row int, v any, litText s
 	if d.params {
 		return d.typ, true
 	}
+	// A bare DECIMAL over a quoted literal is its spelling's (#1386).
+	if t, ok := quotedLitBareDecimal(e.Operand); ok {
+		return t, true
+	}
 	// A bare DECIMAL over an operand with an exact form keeps that form.
 	if o, ok := decimalOperandOf(e.Operand, b); ok {
 		if t, ok := o.decimalType(b); ok {
@@ -326,11 +330,52 @@ func (e *Cast) decimalType(b *batch.RecordBatch) (batch.DecimalType, bool) {
 		return e.columnDec, true
 	}
 	d, ok := e.decimalDestination()
-	if !ok || !d.params {
+	if !ok {
 		return batch.DecimalType{}, false
 	}
-	_ = b
+	if !d.params {
+		return e.bareDecimalType(b)
+	}
 	return d.typ, true
+}
+
+// bareDecimalType is the type a BARE NUMERIC cast produces when its operand
+// has one exactly: the operand's scale at the carrier's full width, (38,0)
+// for an integer (castDecimalTarget's rule, per batch rather than per value).
+// PostgreSQL's unconstrained numeric keeps the operand's value, so
+// `CAST(14.0000000000000000001 AS NUMERIC) + n` and `CAST(i AS NUMERIC) * 0.1`
+// are exact numeric there (#1386); a QUOTED literal operand is its spelling's
+// DECIMAL, as a choice reads it (QuotedLitDecimalType). A float or text
+// operand has no such type and declines — physical.castDeclaredDecimal draws
+// the same line over the AST.
+func (e *Cast) bareDecimalType(b *batch.RecordBatch) (batch.DecimalType, bool) {
+	if t, ok := quotedLitBareDecimal(e.Operand); ok {
+		return t, true
+	}
+	if o, ok := decimalOperandOf(e.Operand, b); ok {
+		if t, ok := o.decimalType(b); ok {
+			return batch.DecimalType{Precision: batch.MaxDecimalPrecision, Scale: t.Scale}, true
+		}
+	}
+	return batch.DecimalType{}, false
+}
+
+// quotedLitBareDecimal is a QUOTED literal's spelling as the bare NUMERIC
+// cast over it produces it: its scale at the carrier's full width.
+func quotedLitBareDecimal(op Expr) (batch.DecimalType, bool) {
+	lit, ok := op.(*Lit)
+	if !ok || lit.Text != "" {
+		return batch.DecimalType{}, false
+	}
+	s, ok := lit.Val.(string)
+	if !ok {
+		return batch.DecimalType{}, false
+	}
+	t, ok := QuotedLitDecimalType(s)
+	if !ok {
+		return batch.DecimalType{}, false
+	}
+	return batch.DecimalType{Precision: batch.MaxDecimalPrecision, Scale: t.Scale}, true
 }
 
 func (e *Cast) evalDecimal(b *batch.RecordBatch, row int) (batch.Int128, bool) {
@@ -339,8 +384,17 @@ func (e *Cast) evalDecimal(b *batch.RecordBatch, row int) (batch.Int128, bool) {
 		return castDecimalValue(e.Eval(b, row), 0)
 	}
 	d, ok := e.decimalDestination()
-	if !ok || !d.params {
+	if !ok {
 		return batch.Int128{}, false
+	}
+	if !d.params {
+		// The cast's own box is the operand's value at bareDecimalType's
+		// scale (castToDecimal); read it back.
+		t, ok := e.bareDecimalType(b)
+		if !ok {
+			return batch.Int128{}, false
+		}
+		return castDecimalValue(e.Eval(b, row), t.Scale)
 	}
 	v := e.Operand.Eval(b, row)
 	if v == nil {
@@ -379,6 +433,30 @@ func columnIntegerDecimal(typeName string) (batch.DecimalType, bool) {
 		return batch.DecimalType{Precision: batch.Int64DecimalDigits}, true
 	}
 	return batch.DecimalType{}, false
+}
+
+// IntegerCastDecimal is the fixed-point contribution of a CAST to an integer
+// type: the int64 range at scale 0, DECIMAL(19,0), which is what every integer
+// EXPRESSION contributes to exact arithmetic (integerBoxOperand; a scalar
+// subquery's marked cast has contributed it since arc SS). PostgreSQL promotes
+// the int2 / int4 / int8 the cast produces to numeric beside a numeric
+// operand, so the cast is an integer operand of exact arithmetic wherever it
+// sits (#1450): `CAST(i AS INTEGER) * 0.1` is 0.3 and `CAST(b AS BIGINT) *
+// 10000000 * n - 3` keeps every digit past 2^53. The plan's mirror is
+// physical.decimalArithOperand's CastNode arm, which reads this function.
+func IntegerCastDecimal(typeName string) (batch.DecimalType, bool) {
+	if !IsIntegerCastDest(typeName) {
+		return batch.DecimalType{}, false
+	}
+	return batch.DecimalType{Precision: batch.Int64DecimalDigits}, true
+}
+
+// userIntegerCast reports whether e is an integer CAST a query wrote — not a
+// correlated re-run's column stand-in (Column) and not one a scalar
+// subquery's body marks (answer), which keep the rules arc SS gave them.
+func userIntegerCast(e Expr) bool {
+	c, ok := e.(*Cast)
+	return ok && !c.Column && !c.answer && castIsInt(c)
 }
 
 // castIsExactDecimal reports whether this cast produces a DECIMAL at a type it

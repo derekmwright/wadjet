@@ -1823,10 +1823,13 @@ func nodeDeclaredTypeOf(node plansql.Node, decls ColDecls) (expr.DeclType, expr.
 			// so `SELECT 2.50` is 2.50 (OID 1700) and so is the value it
 			// assigns to a text column through any of them (arc VL round 5;
 			// round-4 review B2: `CASE WHEN true THEN 2.50 END` stored `2.5`).
-			// It closes ADR-0024's recorded literal deferral. A spelling past
-			// what the DECIMAL carrier holds exactly (DeclNumericLit sets no
-			// Exact) keeps FLOAT64: the box has already lost digits, and a
-			// DECIMAL declaration would present the rounded double as exact.
+			// It closes ADR-0024's recorded literal deferral. A spelling a
+			// double cannot carry compiles to the exact DECIMAL it names
+			// (expr.WideNumericLiteral, #1386), so it declares that DECIMAL
+			// too; one past what the DECIMAL carrier holds at all
+			// (DeclNumericLit sets no Exact) keeps FLOAT64: the box has lost
+			// digits, and a DECIMAL declaration would present the rounded
+			// double as exact.
 			d := expr.DeclNumericLit(parquet.TypeFloat64, n.Value)
 			if d.ExactSet {
 				d.ID, d.Precision, d.Scale, d.DecKnown = parquet.TypeDecimal, d.Exact.Precision, d.Exact.Scale, true

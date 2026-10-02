@@ -28,9 +28,9 @@ import (
 // stored a double).
 //
 // physical.decimalArithOperand is the plan's mirror and accepts the same
-// shapes: an operand whose declared type is an integer, except a CAST the
-// user wrote, which keeps its own arithmetic rule (a Cast declines here and
-// there).
+// shapes: an operand whose declared type is an integer, and a CAST to an
+// integer type (#1450), which Cast.decimalType answers first at
+// IntegerCastDecimal's width.
 
 // integerBoxOperand reads an integer operand's value as an exact decimal at
 // scale 0.
@@ -75,7 +75,10 @@ func integerOperand(e Expr, b *batch.RecordBatch) bool {
 func integerOperandIn(e Expr, b *batch.RecordBatch, marks bool) bool {
 	switch v := e.(type) {
 	case *Cast:
-		return v.answer && castIsInt(v)
+		// Every integer CAST, as the plan's walk reads it
+		// (physical.decimalArithOperand); its width is its target's
+		// (IntegerCastDecimal), which Cast.decimalType answers first.
+		return castIsInt(v)
 	case *ColRef:
 		v.resolve(b)
 		if v.idx < 0 {
