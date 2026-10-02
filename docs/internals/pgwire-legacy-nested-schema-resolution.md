@@ -6,7 +6,8 @@ Superseded: The legacy path now prefers exact result declarations from nestedSch
 nestedColumnSchemas resolves the declared structure of every ROW/ARRAY/MAP
 output column for the LEGACY (non-coord) query path, by matching it, by
 name, against a column of the same name in a catalog table the statement
-references — columnParamOIDs' technique, applied to a different question:
+references — the technique the lexical parameter inference used until #1410
+replaced it (columnParamOIDs), applied to a different question:
 not which wire OID a BOUND PARAMETER should decode as, but which field
 order and element type an OUTPUT VALUE should render with. The coord path
 has an exact answer instead (queryViaCoord reads it straight off the
@@ -14,7 +15,7 @@ query's own output schema, which also covers a computed expression); this
 is the best this layer can do without that.
 
 A column two tables carry under the same name but a DIFFERENT top-level
-type is dropped, the same conflict rule columnParamOIDs applies — a wrong
+type is dropped, the conflict rule columnParamOIDs applied — a wrong
 confident structure would silently drop fields formatPgComposite cannot
 find under it, which is worse than the order-agnostic fallback.
 

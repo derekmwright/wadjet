@@ -2995,8 +2995,11 @@ SELECT * FROM flow_logs ORDER BY timestamp DESC LIMIT 100 OFFSET 200
 
 A count — `LIMIT`, `OFFSET`, `FETCH FIRST|NEXT … ROWS ONLY` and a
 `TABLESAMPLE` percentage — is a number, not an expression (`LIMIT 1 + 1` is a
-syntax error, 42601). A bound parameter counts: an integer parameter, and a
-float4 or float8 one, which binds as `CAST('<text>' AS DOUBLE PRECISION)`
+syntax error, 42601). A bound parameter counts: an integer parameter (an
+undeclared one is typed `bigint` in a `LIMIT`, `OFFSET` or `FETCH` count and
+`real` in a `TABLESAMPLE` percentage, PostgreSQL's types there), a numeric one
+spelling an integer, and a float4 or float8 one, which binds as
+`CAST('<text>' AS DOUBLE PRECISION)`
 (`REAL`) and counts as the number its text spells when that text is
 PostgreSQL's float input (surrounding whitespace and a leading `+` allowed)
 and lexes to one unsigned number, so a float8 `1` is `LIMIT 1`. Such a cast
@@ -3508,8 +3511,9 @@ The INTEGER argument — `LAG` / `LEAD`'s offset, `NTILE`'s bucket count,
 `NTH_VALUE`'s n — is an `integer`, as on PostgreSQL: an integer literal, a
 signed one (`-2147483648` included), a quoted one (`'2'`), `CAST(… AS
 INTEGER)`, `NULL`, a constant expression (`2 - 1`, `abs(-1)`), or a bound
-`integer` or untyped parameter. A parameter declared `bigint`, `text` or
-`numeric` is read by its value, where PostgreSQL raises `42883` (#1439).
+`integer` or untyped parameter. A parameter declared `bigint` or `numeric`
+raises `42883`, as on PostgreSQL; one declared `text` is read by its value,
+where PostgreSQL raises `42883` (#1439).
 
 ```sql
 SELECT id, LAG(x, 0) OVER (ORDER BY id) FROM t;    -- the current row's x
@@ -4598,8 +4602,8 @@ recursive term included, a join, a set operation or a LATERAL output,
 whatever produced it there), a scalar subquery, a window
 call, an aggregate — and a set operation that does, are refused `0A000`
 (#1316, #1430): `CAST` the DATE side to TIMESTAMP. A bind parameter typed
-TIMESTAMP against a DATE column is read at DATE (a known defect, #1426); `CAST($1 AS TIMESTAMP)` compares as
-PostgreSQL does. `NOW()` and its siblings
+TIMESTAMP against a DATE column compares as a TIMESTAMP, as PostgreSQL's does
+(#1426; see "Bound parameters"). `NOW()` and its siblings
 declare `timestamp without time zone` where PostgreSQL declares
 `timestamptz` (docs/postgres-differences.md). `CURRENT_TIME` has no
 declaration at all: this engine has no TIME type among its 22, so the
@@ -5247,6 +5251,28 @@ expression over a subquery source's column, other than the bare column, is
 `0A000` where PostgreSQL answers (#1398). An integer target rounds a
 fractional value by the value's PostgreSQL type, as every write does (see
 "One assignment function for every write" under INSERT) (#1353).
+
+### Bound parameters
+
+Over the PostgreSQL wire protocol's extended query (pgx, JDBC, psycopg,
+every ORM), a parameter's type is the OID the client declared at Parse, or —
+when it declared none (OID 0) — the type of the position the parameter
+occupies, as PostgreSQL decides it: the other operand's type in a
+comparison, an arithmetic, an `IN` list, `BETWEEN`, a `CASE` arm or a
+`COALESCE` / `NULLIF` / `GREATEST` / `LEAST` argument (`$1 = n + d` takes
+the type of `n + d`); the target column's in `INSERT`, `UPDATE` and `MERGE`;
+`bigint` in `LIMIT` / `OFFSET` / `FETCH`; `integer` as a window function's
+offset; the target type in `CAST($1 AS …)`; `boolean` as a predicate; and
+`text` where nothing requires a type (`SELECT $1`). The ParameterDescription
+reports it, and the value is used as a value OF that type: a `timestamp`
+parameter against a `DATE` column is compared as a timestamp, a `bigint` one
+in `SELECT $1` is declared `bigint`, and a statement's Describe declares
+each column as the bound value will. A position this engine cannot type
+stays OID 0, and its value is read by the position as an untyped literal is.
+A `text`, `varchar`, `bytea` or array parameter is such an untyped literal
+too. The ADR-0012 catalog family
+[parameters-pgwire](adr/0012-divergences/parameters-pgwire.md#catalog)
+records every difference from PostgreSQL (#1410, #1426).
 
 ### Several statements in one message
 

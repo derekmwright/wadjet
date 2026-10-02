@@ -174,11 +174,23 @@ Fields retain storage types. `(b).open` over DECIMAL(9,2) has typmod 589830; Pos
 
 `SELECT p, pr, d FROM np` over PORT, PROTOCOL and DURATION columns declares `integer`, `integer` and `bigint` and prints `443`, `6`, `1500000000`; PostgreSQL has none of these types. A DURATION counts nanoseconds and is not declared `interval`, whose text and unit differ. A quoted value that is no number, `p = 'abc'`, is 22P02 `invalid input syntax for type integer`. (catalog: [parameters-pgwire#r3](adr/0012-divergences/parameters-pgwire.md#catalog); #834)
 
+**A parameter whose type this engine lacks declares the nearest one.**
+
+A parameter declared `smallint` declares `integer` (no smallint type); one declared `timestamptz` is the instant at UTC, the session TimeZone the server reports, and declares `timestamp` (`'2024-03-04 17:00:00+05'` is `2024-03-04 12:00:00`, compared as PostgreSQL compares it); one declared `bytea`, `integer[]` or `text[]` declares `text`, and an array parameter in binary format is refused 22023. (catalog: [parameters-pgwire#r8, r9, r10](adr/0012-divergences/parameters-pgwire.md#catalog); #1410, #1426)
+
+**The expression around a parameter keeps this engine's declaration.**
+
+A parameter takes PostgreSQL's type for its position — `SELECT $1 + 1` types `$1` integer — but integer arithmetic, an integer `CAST` and `NTILE` declare `bigint` here, so that result is `bigint` where PostgreSQL's is `integer`, and `WHERE m = $1` over a derived `n * 2 AS m` types the parameter `bigint`. `SELECT $1` declared integer and bound a negative value executes as `bigint` while the statement's Describe declared `integer`; a client that decodes binary rows by that Describe refuses the value. A parameter beside an aggregate (`HAVING SUM(f) > $1`) or among a table function's arguments (`generate_series(1, $1)`) is left undetermined (OID 0), and the Describe of that table function over a parameter answers no columns. (catalog: [parameters-pgwire#r12, r13](adr/0012-divergences/parameters-pgwire.md#catalog); #1410)
+
 ## Errors and refusals
 
 **A text-typed parameter assigned to an integer column is 22P02.**
 
 Bind renders a parameter declared text (OID 25) as a quoted literal, which the integer column's input function reads, so a MERGE `SET n = $1` bound as the text `2.5` raises 22P02 where PostgreSQL raises 42804 (text is not assignable to integer without a cast); neither writes. A float8 or numeric parameter keeps its type and rounds by it. (catalog: [dml-assignment#r4](adr/0012-divergences/dml-assignment.md#catalog); #1353-param, #1408)
+
+**A binary bytea parameter holding a backslash is 22P02.**
+
+`WHERE bt = $1` with `$1` declared `bytea` and bound in binary as the bytes `00 ff 5c` raises 22P02: the bytes are spliced into a literal that the BYTES comparison reads through bytea input again. PostgreSQL matches the row. (catalog: [parameters-pgwire#r11](adr/0012-divergences/parameters-pgwire.md#catalog); #1410)
 
 **Arithmetic over a text expression is evaluated.**
 
@@ -390,9 +402,9 @@ PostgreSQL has no QUALIFY. It filters after windows, can read unprojected inputs
 
 `FIRST_VALUE('b')`, `LAST_VALUE('b')`, `NTH_VALUE('b', 2)`, `LAG('b')` and `LEAD('b')` answer the text, and the same with `NULL` answer NULL; PostgreSQL cannot resolve the polymorphic type of an unknown literal there and raises `42804`. (catalog: [aggregates-windows#r18](adr/0012-divergences/aggregates-windows.md#catalog); #1394)
 
-**A bound bigint, text or numeric parameter is a window integer argument.**
+**A bound text parameter is a window integer argument.**
 
-`LAG(x, $1)` with `$1` declared `int8`, `text` or `numeric` and bound `1` answers `LAG(x, 1)`; PostgreSQL raises `42883` (`lag(bigint, bigint)` does not exist). A parameter reaches the engine as the literal it renders to, so its declared type is not read; an `integer` or untyped parameter is read as PostgreSQL reads it. (catalog: [aggregates-windows#r20](adr/0012-divergences/aggregates-windows.md#catalog); #1399, #1439)
+`LAG(x, $1)` with `$1` declared `text` and bound `'1'` answers `LAG(x, 1)`; PostgreSQL raises `42883` (`lag(bigint, text)` does not exist). A text parameter is spliced as SQL's unknown literal and read by its value. One declared `int8` or `numeric` raises `42883` as on PostgreSQL. (catalog: [aggregates-windows#r20](adr/0012-divergences/aggregates-windows.md#catalog); #1399, #1439)
 
 **Network-native types have separate storage domains.**
 
@@ -528,6 +540,14 @@ SUM, AVG, STDDEV, VARIANCE, CORR and COVAR read PORT and PROTOCOL as int4 and DU
 
 `SELECT TO_ISO8601(CAST('2023-11-14 05:06:07' AS TIMESTAMP))` answers `2023-11-14T05:06:07Z`; PostgreSQL has no such function and spells it with `to_char`. Every other timestamp-valued function renders PostgreSQL's `2023-11-14 05:06:07` and declares `timestamp`. `AT_TIMEZONE` keeps the ISO rendering because its result is a wall clock in another zone, which a zoneless rendering would publish as UTC. (catalog: [temporal#r8](adr/0012-divergences/temporal.md#catalog))
 
+**A text parameter is SQL's unknown literal.**
+
+A parameter declared `text` or `varchar` is read by the position it lands in, as an untyped literal is: `WHERE n = $1` with `$1` text `'7'` over an integer `n` answers the row where PostgreSQL raises 42883 (`integer = text`). `SELECT $1` declared `varchar` declares `text`, and an undeclared parameter beside a VARCHAR column is typed `text`, as such a column declares here. (catalog: [parameters-pgwire#r5](adr/0012-divergences/parameters-pgwire.md#catalog); #1410)
+
+**An undetermined parameter answers.**
+
+An undeclared parameter in a FROM-less subquery — `n IN (SELECT $1)`, `n = (SELECT $1)` — takes the comparison's type and answers, where PostgreSQL types it text and raises 42883; `SELECT $1 IS NULL, $1` declares the parameter `text` and `WHERE $1 IS NULL` leaves it undetermined (OID 0), both answering where PostgreSQL raises 42P08 / 42P18. (catalog: [parameters-pgwire#r6, r7](adr/0012-divergences/parameters-pgwire.md#catalog); #1410)
+
 ## Not supported
 
 **A SMALLINT / INT2 column.**
@@ -634,7 +654,7 @@ Missing representations cause 0A000 versus PostgreSQL values: DATE/TIMESTAMP, di
 
 **CASE, COALESCE, GREATEST and LEAST over a DATE and a TIMESTAMP are refused.**
 
-PostgreSQL resolves the arms to timestamp, a DATE arm at its midnight; here the choice has no carrier for a DATE arm in a TIMESTAMP result and raises 0A000 — `CAST` the DATE arm to TIMESTAMP. The refusal holds whatever the arm is: a column (of a table, a derived table, a CTE or recursive CTE — inside the recursive CTE's own recursive term too — a join, a set operation, VALUES or a LATERAL output, whatever produced it there), a literal, an expression, a scalar subquery (correlated or not), a window call such as `max(ts) OVER ()` or `lag(ts) OVER (…)`, or an aggregate. `NULLIF(d, ts)` is declared by its first argument and answers. A comparison (a scalar-subquery operand included), an IN / EXISTS membership and a join key between the two answer PostgreSQL's rows. One known wrong value remains: a bind parameter typed TIMESTAMP (OID 1114) against a DATE column is read at DATE, so `d = $1` with `'1969-12-31 23:59:59.999'` matches 1969-12-31 where PostgreSQL matches nothing (#1426) — `CAST($1 AS TIMESTAMP)` answers PostgreSQL's rows. (catalog: [temporal#r24](adr/0012-divergences/temporal.md#catalog); #1378, #1316)
+PostgreSQL resolves the arms to timestamp, a DATE arm at its midnight; here the choice has no carrier for a DATE arm in a TIMESTAMP result and raises 0A000 — `CAST` the DATE arm to TIMESTAMP. The refusal holds whatever the arm is: a column (of a table, a derived table, a CTE or recursive CTE — inside the recursive CTE's own recursive term too — a join, a set operation, VALUES or a LATERAL output, whatever produced it there), a literal, an expression, a scalar subquery (correlated or not), a window call such as `max(ts) OVER ()` or `lag(ts) OVER (…)`, or an aggregate. `NULLIF(d, ts)` is declared by its first argument and answers. A comparison (a scalar-subquery operand included), an IN / EXISTS membership and a join key between the two answer PostgreSQL's rows. A bind parameter typed TIMESTAMP (OID 1114) against a DATE column answers PostgreSQL's rows as well: `d = $1` with `'1969-12-31 23:59:59.999'` matches nothing (#1426). (catalog: [temporal#r24](adr/0012-divergences/temporal.md#catalog); #1378, #1316)
 
 **Some set-operation literals are refused.**
 
