@@ -19,7 +19,7 @@ import (
 // Names match projection building: alias, unqualified column, then cleaned text.
 // subqueryDecl resolves scalar-subquery output declarations; nil means unavailable.
 // Zero-row and non-empty scalar-subquery columns must agree (#416, #874).
-func declaredOutputSchema(root *logical.Node,
+func (w *declWalk) declaredOutputSchema(root *logical.Node,
 	subqueryDecl func(string) (parquet.Column, bool)) []parquet.Column {
 	// A caller with no Planner passes nil — the set-operation arm walk and
 	// emittedColIntWidth's do. The STAMP answers for them: it is the same
@@ -47,13 +47,13 @@ func declaredOutputSchema(root *logical.Node,
 			subqueryDecl = stamp
 		}
 	}
-	if cols, ok := setOpDeclaredOutputSchema(root); ok {
+	if cols, ok := w.setOpDeclaredOutputSchema(root); ok {
 		return cols
 	}
-	if cols, ok := starOnlyDeclaredOutputSchema(root, subqueryDecl); ok {
+	if cols, ok := w.starOnlyDeclaredOutputSchema(root, subqueryDecl); ok {
 		return cols
 	}
-	projs, childTypes, strictInt, ok := declaredProjectionInputs(root)
+	projs, childTypes, strictInt, ok := w.declaredProjectionInputs(root)
 	childTypes.subqueryDecl = subqueryDecl
 	if !ok {
 		return nil
@@ -105,12 +105,12 @@ func declaredOutputSchema(root *logical.Node,
 //
 // ok=false means "not a set operation, or one this walk cannot type", and the
 // ordinary projection walk answers.
-func setOpDeclaredOutputSchema(root *logical.Node) ([]parquet.Column, bool) {
+func (w *declWalk) setOpDeclaredOutputSchema(root *logical.Node) ([]parquet.Column, bool) {
 	n := setOpRoot(root)
 	if n == nil {
 		return nil, false
 	}
-	arms := setOpArmSchemas(n)
+	arms := w.setOpArmSchemas(n)
 	if len(arms) < 2 {
 		return nil, false
 	}
@@ -243,20 +243,20 @@ func allTrue(b []bool) bool {
 // A nil entry anywhere makes the whole answer empty: a partially-typed set
 // operation is worse than none, for the reason DeclaredOutputSchema returns
 // nil on a column it cannot name.
-func setOpArmSchemas(n *logical.Node) [][]parquet.Column {
-	out, _ := setOpArmSchemasAndTypmods(n)
+func (w *declWalk) setOpArmSchemas(n *logical.Node) [][]parquet.Column {
+	out, _ := w.setOpArmSchemasAndTypmods(n)
 	return out
 }
 
 // setOpArmSchemasAndTypmods is setOpArmSchemas with each arm's own
 // unconstrained-DECIMAL set alongside, so the reconciliation can tell an arm
 // that carries a real typmod from one that carries none.
-func setOpArmSchemasAndTypmods(n *logical.Node) ([][]parquet.Column, []map[string]bool) {
+func (w *declWalk) setOpArmSchemasAndTypmods(n *logical.Node) ([][]parquet.Column, []map[string]bool) {
 	var out [][]parquet.Column
 	var mods []map[string]bool
 	for _, c := range n.Children {
 		if inner := setOpRoot(c); inner != nil {
-			nested, nestedMods := setOpArmSchemasAndTypmods(inner)
+			nested, nestedMods := w.setOpArmSchemasAndTypmods(inner)
 			if len(nested) == 0 {
 				return nil, nil
 			}
@@ -266,12 +266,12 @@ func setOpArmSchemasAndTypmods(n *logical.Node) ([][]parquet.Column, []map[strin
 		}
 		// nil: this walk has no planner to ask, so a scalar subquery in a
 		// SET-OPERATION ARM declares what it always did.
-		schema := declaredOutputSchema(c, nil)
+		schema := w.declaredOutputSchema(c, nil)
 		if len(schema) == 0 {
 			return nil, nil
 		}
 		out = append(out, schema)
-		mods = append(mods, declaredWireUnconstrainedDecimal(c))
+		mods = append(mods, w.declaredWireUnconstrainedDecimal(c))
 	}
 	return out, mods
 }
@@ -284,17 +284,17 @@ func setOpArmSchemasAndTypmods(n *logical.Node) ([][]parquet.Column, []map[strin
 // Aggregates, windows, arithmetic and other calls lose typmod (#587, #542).
 // See declaredTypmod for CAST handling and ADR-0024 item 5 for the rule.
 // See docs/internals/decimal-wire-and-carrier-modifiers.md for the design.
-func declaredWireUnconstrainedDecimal(root *logical.Node) map[string]bool {
-	if out := setOpWireUnconstrainedDecimal(root); out != nil {
+func (w *declWalk) declaredWireUnconstrainedDecimal(root *logical.Node) map[string]bool {
+	if out := w.setOpWireUnconstrainedDecimal(root); out != nil {
 		return out
 	}
-	projs, childTypes, strictInt, ok := declaredProjectionInputs(root)
+	projs, childTypes, strictInt, ok := w.declaredProjectionInputs(root)
 	if !ok {
 		return nil
 	}
 	var computed map[string]bool
 	if pn := findOutputProjectionNode(root); pn != nil && len(pn.Children) == 1 {
-		computed = emittedComputedCols(pn.Children[0])
+		computed = w.emittedComputedCols(pn.Children[0])
 	}
 	var out map[string]bool
 	for _, proj := range projs {
@@ -598,7 +598,7 @@ func sourceRefName(proj logical.Projection) string {
 // Project's computed items. A projection that merely REFERENCES one of these
 // is not a bare column reference in PostgreSQL's sense, however bare it looks
 // in the SELECT list — which is the whole of #587.
-func emittedComputedCols(n *logical.Node) map[string]bool {
+func (w *declWalk) emittedComputedCols(n *logical.Node) map[string]bool {
 	if n == nil {
 		return nil
 	}
@@ -607,7 +607,7 @@ func emittedComputedCols(n *logical.Node) map[string]bool {
 		if len(n.Children) != 1 {
 			return nil
 		}
-		out := emittedComputedCols(n.Children[0])
+		out := w.emittedComputedCols(n.Children[0])
 		for _, we := range n.WindowExprs {
 			if we.OutputCol == "" {
 				continue
@@ -637,7 +637,7 @@ func emittedComputedCols(n *logical.Node) map[string]bool {
 		if len(n.Children) != 1 {
 			return nil
 		}
-		below := emittedComputedCols(n.Children[0])
+		below := w.emittedComputedCols(n.Children[0])
 		var out map[string]bool
 		for _, proj := range n.Projections {
 			name := declaredProjectionName(proj)
@@ -660,7 +660,7 @@ func emittedComputedCols(n *logical.Node) map[string]bool {
 		// Use the same disagreements as setOpWireUnconstrainedDecimal so output and
 		// nested spellings agree. Mark only disagreeing columns: equal arm modifiers
 		// remain valid; being under a set operation alone does not make one computed.
-		dis := setOpArmDecimalDisagreements(n)
+		dis := w.setOpArmDecimalDisagreements(n)
 		if len(dis) == 0 {
 			return nil
 		}
@@ -673,7 +673,7 @@ func emittedComputedCols(n *logical.Node) map[string]bool {
 		if len(n.Children) != 1 {
 			return nil
 		}
-		return emittedComputedCols(n.Children[0])
+		return w.emittedComputedCols(n.Children[0])
 	case logical.NodeJoin:
 		// The UNION of the two sides. This arm is not optional beside the two
 		// above it: without them the whole type map was nil and EVERY column
@@ -691,7 +691,7 @@ func emittedComputedCols(n *logical.Node) map[string]bool {
 		if len(n.Children) != 2 {
 			return nil
 		}
-		left, right := emittedComputedCols(n.Children[0]), emittedComputedCols(n.Children[1])
+		left, right := w.emittedComputedCols(n.Children[0]), w.emittedComputedCols(n.Children[1])
 		if left == nil {
 			return right
 		}
@@ -718,12 +718,12 @@ func emittedComputedCols(n *logical.Node) map[string]bool {
 // agreeing pair still has to keep its typmod.
 //
 // nil means "not a set operation" and the ordinary projection walk answers.
-func setOpWireUnconstrainedDecimal(root *logical.Node) map[string]bool {
+func (w *declWalk) setOpWireUnconstrainedDecimal(root *logical.Node) map[string]bool {
 	n := root
 	for n != nil {
 		switch n.Type {
 		case logical.NodeUnion, logical.NodeIntersect, logical.NodeExcept:
-			return setOpArmDecimalDisagreements(n)
+			return w.setOpArmDecimalDisagreements(n)
 		case logical.NodeSort, logical.NodeLimit, logical.NodeDistinct:
 			if len(n.Children) != 1 {
 				return nil
@@ -739,8 +739,8 @@ func setOpWireUnconstrainedDecimal(root *logical.Node) map[string]bool {
 // setOpArmDecimalDisagreements names the DECIMAL result columns of a set
 // operation whose arms do not all declare the same (p,s). The result's column
 // NAMES come from the first arm, exactly as the executed schema does.
-func setOpArmDecimalDisagreements(n *logical.Node) map[string]bool {
-	arms, armUnconstrained := setOpArmSchemasAndTypmods(n)
+func (w *declWalk) setOpArmDecimalDisagreements(n *logical.Node) map[string]bool {
+	arms, armUnconstrained := w.setOpArmSchemasAndTypmods(n)
 	if len(arms) < 2 {
 		// An arm this walk cannot type says nothing about agreement.
 		// Declaring every DECIMAL unconstrained is the safe answer: it is
@@ -808,7 +808,7 @@ func setOpAllDecimalUnconstrained(arms [][]parquet.Column) map[string]bool {
 // list plus the child's declarations each projection is resolved against. ok is false when there is nothing to declare (no output
 // projection node, or an empty SELECT list) — callers return their own
 // empty answer in that case rather than proceeding with nil maps.
-func declaredProjectionInputs(root *logical.Node) (projs []logical.Projection, childTypes ColDecls, strictInt map[string]bool, ok bool) {
+func (w *declWalk) declaredProjectionInputs(root *logical.Node) (projs []logical.Projection, childTypes ColDecls, strictInt map[string]bool, ok bool) {
 	pn := findOutputProjectionNode(root)
 	if pn == nil {
 		return nil, ColDecls{}, nil, false
@@ -827,7 +827,7 @@ func declaredProjectionInputs(root *logical.Node) (projs []logical.Projection, c
 		// The (p,s) rides beside the TypeIDs, so a DECIMAL projection is
 		// resolved by ONE walk instead of two hand-mirrored ones
 		// (declaredProjectionDecl, ADR-0024 item 2).
-		childTypes = childDecls(pn.Children[0])
+		childTypes = w.childDecls(pn.Children[0])
 		// The same integer-preserving-arithmetic hint the projection builder
 		// passes: without it `id + 1` declares FLOAT64 here where the
 		// operator emits INT64 (#297's rule), so an empty result would
@@ -1122,7 +1122,7 @@ func lookupColType(colTypes map[string]parquet.TypeID, name string) (parquet.Typ
 // aggSpecOutputType declares, and a Project emits its own projections.
 // Everything else still answers nil, and a nil map means every column falls
 // back to STRING rather than to a guess.
-func emittedColTypes(n *logical.Node) map[string]parquet.TypeID {
+func (w *declWalk) emittedColTypesUncached(n *logical.Node) map[string]parquet.TypeID {
 	if n == nil {
 		return nil
 	}
@@ -1131,7 +1131,7 @@ func emittedColTypes(n *logical.Node) map[string]parquet.TypeID {
 		if len(n.Children) != 1 {
 			return nil
 		}
-		in := emittedColTypes(n.Children[0])
+		in := w.emittedColTypes(n.Children[0])
 		out := make(map[string]parquet.TypeID, len(n.GroupBy)+len(n.AggExprs))
 		// A DERIVED key is emitted under its expression TEXT, which is not a
 		// name the input carries, so the bare lookup finds nothing and the
@@ -1141,7 +1141,7 @@ func emittedColTypes(n *logical.Node) map[string]parquet.TypeID {
 		// falls to the float rule — which reconciled a set operation to
 		// double where PostgreSQL resolves bigint (#656 R4). It is the same
 		// inference derivedGroupKeyTypes already puts on the wire.
-		derivedTypes, _ := derivedGroupKeyTypes(n.GroupBy, n.Children[0])
+		derivedTypes, _ := w.derivedGroupKeyTypes(n.GroupBy, n.Children[0])
 		for _, g := range n.GroupBy {
 			if t, ok := lookupColType(in, g); ok {
 				out[strings.ToLower(g)] = t
@@ -1156,7 +1156,7 @@ func emittedColTypes(n *logical.Node) map[string]parquet.TypeID {
 			if name == "" {
 				continue
 			}
-			if t, known := aggSpecOutputType(n, agg); known {
+			if t, known := w.aggSpecOutputType(n, agg); known {
 				out[name] = t
 			}
 		}
@@ -1170,7 +1170,7 @@ func emittedColTypes(n *logical.Node) map[string]parquet.TypeID {
 		// for — it holds no Planner — so it is stamped on the plan's nodes
 		// by annotateSubqueryColumnDecls and installed here as the resolver
 		// NodeDeclaredType's SubqueryNode arm already reads.
-		decls := withSubqueryDecls(childDecls(n.Children[0]), n)
+		decls := withSubqueryDecls(w.childDecls(n.Children[0]), n)
 		out := make(map[string]parquet.TypeID, len(n.Projections))
 		for _, proj := range n.Projections {
 			name := declaredProjectionName(proj)
@@ -1184,18 +1184,18 @@ func emittedColTypes(n *logical.Node) map[string]parquet.TypeID {
 		if len(n.Children) != 1 {
 			return nil
 		}
-		return emittedColTypes(n.Children[0])
+		return w.emittedColTypes(n.Children[0])
 	case logical.NodeUnion, logical.NodeIntersect, logical.NodeExcept:
 		// Use setOpDeclaredOutputSchema's common types above a set operation (#867):
 		// leaving differing arm declarations untyped makes arithmetic fall to FLOAT64
 		// and can lose exact values (#884). Skip UNKNOWN literal arms, widen typed arms
 		// through SetOpWiden, and reconcile DECIMAL (p,s) through batch.DecimalCommon.
 		// Keep arms[0]'s names; reconciliation contributes types only.
-		arms := setOpArmSchemas(n)
+		arms := w.setOpArmSchemas(n)
 		if len(arms) == 0 {
 			return nil
 		}
-		cols, ok := setOpDeclaredOutputSchema(n)
+		cols, ok := w.setOpDeclaredOutputSchema(n)
 		if !ok || len(cols) != len(arms[0]) {
 			return nil
 		}
@@ -1218,7 +1218,7 @@ func emittedColTypes(n *logical.Node) map[string]parquet.TypeID {
 		if len(n.Children) != 1 {
 			return nil
 		}
-		in := emittedColTypes(n.Children[0])
+		in := w.emittedColTypes(n.Children[0])
 		out := make(map[string]parquet.TypeID, len(in)+len(n.WindowExprs))
 		for k, t := range in {
 			out[k] = t
@@ -1228,7 +1228,7 @@ func emittedColTypes(n *logical.Node) map[string]parquet.TypeID {
 			if name == "" {
 				continue
 			}
-			out[name] = windowSpecOutputType(n, we).ID
+			out[name] = w.windowSpecOutputType(n, we).ID
 		}
 		return out
 	case logical.NodeJoin:
@@ -1242,10 +1242,10 @@ func emittedColTypes(n *logical.Node) map[string]parquet.TypeID {
 			return nil
 		}
 		return withJoinArmQualifiers(n,
-			emittedColTypes(n.Children[0]), emittedColTypes(n.Children[1]),
-			mergeJoinSides(emittedColTypes(n.Children[0]), emittedColTypes(n.Children[1])))
+			w.emittedColTypes(n.Children[0]), w.emittedColTypes(n.Children[1]),
+			mergeJoinSides(w.emittedColTypes(n.Children[0]), w.emittedColTypes(n.Children[1])))
 	}
-	return inputColTypes(n)
+	return w.inputColTypes(n)
 }
 
 // withJoinArmQualifiers adds `<arm>.<column>` entries beside the merged bare
@@ -1398,7 +1398,7 @@ func mergeJoinSides[V comparable](left, right map[string]V) map[string]V {
 // MIN/MAX and the value functions carry their argument's own (p,s), and
 // SUM/AVG carry the accumulator's (38,s) and (38,min(s+4,38)) — see the
 // NodeWindow arm below.
-func emittedColDecimal(n *logical.Node) map[string]logical.DecimalMeta {
+func (w *declWalk) emittedColDecimalUncached(n *logical.Node) map[string]logical.DecimalMeta {
 	if n == nil {
 		return nil
 	}
@@ -1407,7 +1407,7 @@ func emittedColDecimal(n *logical.Node) map[string]logical.DecimalMeta {
 		if len(n.Children) != 1 {
 			return nil
 		}
-		in := emittedColDecimal(n.Children[0])
+		in := w.emittedColDecimal(n.Children[0])
 		out := make(map[string]logical.DecimalMeta, len(n.GroupBy)+len(n.AggExprs))
 		// The DERIVED keys' (p,s), the companion EmittedColTypes already
 		// takes from the same place. A derived key is emitted under its
@@ -1416,7 +1416,7 @@ func emittedColDecimal(n *logical.Node) map[string]logical.DecimalMeta {
 		// and an expression written OVER it above the aggregate then falls
 		// to the float rule, which renders exact fixed point through a
 		// float64 (ADR-0024 item 2, ADR-0026).
-		_, derivedDec := derivedGroupKeyTypes(n.GroupBy, n.Children[0])
+		_, derivedDec := w.derivedGroupKeyTypes(n.GroupBy, n.Children[0])
 		for _, g := range n.GroupBy {
 			if m, ok := lookupColDecimal(in, g); ok {
 				out[strings.ToLower(g)] = m
@@ -1431,7 +1431,7 @@ func emittedColDecimal(n *logical.Node) map[string]logical.DecimalMeta {
 			if name == "" {
 				continue
 			}
-			if m, known := aggSpecOutputDecimal(n, agg); known {
+			if m, known := w.aggSpecOutputDecimal(n, agg); known {
 				out[name] = m
 			}
 		}
@@ -1440,8 +1440,8 @@ func emittedColDecimal(n *logical.Node) map[string]logical.DecimalMeta {
 		if len(n.Children) != 1 {
 			return nil
 		}
-		in := emittedColDecimal(n.Children[0])
-		fieldDecls := withSubqueryDecls(childDecls(n.Children[0]), n)
+		in := w.emittedColDecimal(n.Children[0])
+		fieldDecls := withSubqueryDecls(w.childDecls(n.Children[0]), n)
 		out := make(map[string]logical.DecimalMeta, len(n.Projections))
 		for _, proj := range n.Projections {
 			name := declaredProjectionName(proj)
@@ -1457,7 +1457,7 @@ func emittedColDecimal(n *logical.Node) map[string]logical.DecimalMeta {
 		if len(n.Children) != 1 {
 			return nil
 		}
-		return emittedColDecimal(n.Children[0])
+		return w.emittedColDecimal(n.Children[0])
 	case logical.NodeUnion, logical.NodeIntersect, logical.NodeExcept:
 		// Resolve carrier (p,s) through setOpDeclaredOutputSchema/DecimalCommon over
 		// typed arms, including differing widths (#884); exact arithmetic needs a scale.
@@ -1466,11 +1466,11 @@ func emittedColDecimal(n *logical.Node) map[string]logical.DecimalMeta {
 		// ADR-0012 item 12); its numeric typmod -1 differs from a vector's one fixed scale
 		// (ADR-0012 item 12). This map describes the carrier, not wire agreement.
 		// See docs/internals/set-operation-carrier-scale.md for the design.
-		arms := setOpArmSchemas(n)
+		arms := w.setOpArmSchemas(n)
 		if len(arms) == 0 {
 			return nil
 		}
-		cols, ok := setOpDeclaredOutputSchema(n)
+		cols, ok := w.setOpDeclaredOutputSchema(n)
 		if !ok || len(cols) != len(arms[0]) {
 			return nil
 		}
@@ -1488,7 +1488,7 @@ func emittedColDecimal(n *logical.Node) map[string]logical.DecimalMeta {
 		if len(n.Children) != 1 {
 			return nil
 		}
-		in := emittedColDecimal(n.Children[0])
+		in := w.emittedColDecimal(n.Children[0])
 		// A window's OWN outputs can be DECIMAL now: MIN/MAX and the value
 		// functions over a DECIMAL column answer that column's type, (p,s)
 		// and all, and SUM/AVG answer the accumulator's DECIMAL(38,s) /
@@ -1504,7 +1504,7 @@ func emittedColDecimal(n *logical.Node) map[string]logical.DecimalMeta {
 			if name == "" {
 				continue
 			}
-			d := windowSpecOutputType(n, we)
+			d := w.windowSpecOutputType(n, we)
 			if d.ID != parquet.TypeDecimal || !d.DecKnown {
 				continue
 			}
@@ -1529,8 +1529,8 @@ func emittedColDecimal(n *logical.Node) map[string]logical.DecimalMeta {
 		if len(n.Children) != 2 {
 			return nil
 		}
-		left, right := emittedColDecimal(n.Children[0]), emittedColDecimal(n.Children[1])
+		left, right := w.emittedColDecimal(n.Children[0]), w.emittedColDecimal(n.Children[1])
 		return withJoinArmQualifiers(n, left, right, mergeJoinSides(left, right))
 	}
-	return inputColDecimal(n)
+	return w.inputColDecimal(n)
 }

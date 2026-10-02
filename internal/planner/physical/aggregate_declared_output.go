@@ -39,18 +39,18 @@ func aggOutputType(funcName string, distinct bool) parquet.TypeID {
 // aggSpecOutputType likewise distinguishes unknown from TypeBool's zero TypeID;
 // callers must use its bool, not treat BOOL as undeclared (#354, #371).
 // See docs/internals/aggregate-output-declaration-contracts.md for the design.
-func aggOhlcvOutputFields(node *logical.Node, agg logical.AggExpr) ([]parquet.Column, bool) {
+func (w *declWalk) aggOhlcvOutputFields(node *logical.Node, agg logical.AggExpr) ([]parquet.Column, bool) {
 	if strings.ToLower(strings.TrimSpace(agg.Func)) != "ohlcv" {
 		return nil, false
 	}
 	col := func(name string) (parquet.Column, bool) {
-		t, ok := aggInputColumnType(node, name)
+		t, ok := w.aggInputColumnType(node, name)
 		if !ok {
 			return parquet.Column{}, false
 		}
 		c := parquet.Column{Name: name, Type: t}
 		if t == parquet.TypeDecimal {
-			m, known := aggInputColumnDecimal(node, name)
+			m, known := w.aggInputColumnDecimal(node, name)
 			if !known {
 				return parquet.Column{}, false
 			}
@@ -67,7 +67,7 @@ func aggOhlcvOutputFields(node *logical.Node, agg logical.AggExpr) ([]parquet.Co
 	// declare two things (#965 round 2, B1).
 	price, ok := col(agg.InputCol)
 	if !ok {
-		t, prec, scale, known := aggComputedInputExprDecl(node, agg)
+		t, prec, scale, known := w.aggComputedInputExprDecl(node, agg)
 		if !known {
 			return nil, false
 		}
@@ -84,7 +84,7 @@ func aggOhlcvOutputFields(node *logical.Node, agg logical.AggExpr) ([]parquet.Co
 	return exec.OhlcvOutputFields(price, vol)
 }
 
-func aggSpecOutputType(node *logical.Node, agg logical.AggExpr) (parquet.TypeID, bool) {
+func (w *declWalk) aggSpecOutputType(node *logical.Node, agg logical.AggExpr) (parquet.TypeID, bool) {
 	fn := strings.ToLower(strings.TrimSpace(agg.Func))
 	// SUM and AVG join the input-dependent list for ONE input type: over a
 	// DECIMAL column they answer in DECIMAL, exactly (#455). Over everything
@@ -125,13 +125,13 @@ func aggSpecOutputType(node *logical.Node, agg logical.AggExpr) (parquet.TypeID,
 			// A float64 cannot hold 36280278840510000001, so the `+ 1`
 			// vanished and the answer came back BELOW the sum it was added to
 			// (#867).
-			if t, known := aggComputedInputOutputType(node, agg); known {
+			if t, known := w.aggComputedInputOutputType(node, agg); known {
 				return t, true
 			}
 			return unresolved()
 		}
 	}
-	in, ok := aggInputColumnType(node, agg.InputCol)
+	in, ok := w.aggInputColumnType(node, agg.InputCol)
 	if !ok {
 		return unresolved()
 	}
@@ -142,7 +142,7 @@ func aggSpecOutputType(node *logical.Node, agg logical.AggExpr) (parquet.TypeID,
 			// agree between the two paths at plan time.
 			return parquet.TypeDecimal, true
 		}
-		if t, ok := aggIntegerOutputType(fn, aggIntegerInputWidth(node, agg.InputCol, in)); ok {
+		if t, ok := aggIntegerOutputType(fn, w.aggIntegerInputWidth(node, agg.InputCol, in)); ok {
 			return t, true
 		}
 		if fn == "sum" && in == parquet.TypeFloat32 {
@@ -177,13 +177,13 @@ func aggSpecOutputType(node *logical.Node, agg logical.AggExpr) (parquet.TypeID,
 // ok=false when the aggregate has no input node to type, when the child is
 // missing, or when the argument's own type is undecided — the caller then
 // keeps whatever it declared before.
-func aggComputedInputDecl(node *logical.Node, agg logical.AggExpr) (parquet.TypeID, int, int, bool) {
+func (w *declWalk) aggComputedInputDecl(node *logical.Node, agg logical.AggExpr) (parquet.TypeID, int, int, bool) {
 	if agg.InputExpr == nil || node == nil || len(node.Children) == 0 {
 		return 0, 0, 0, false
 	}
-	decls := inputColDecls(node.Children[0])
+	decls := w.inputColDecls(node.Children[0])
 	if len(decls.Types) == 0 {
-		decls = emittedColDecls(node.Children[0])
+		decls = w.emittedColDecls(node.Children[0])
 	}
 	// A SCALAR SUBQUERY written AS the aggregate's argument — `SUM((SELECT
 	// … ))` — has no column for the walk to read; its declaration is the
@@ -207,13 +207,13 @@ func aggComputedInputDecl(node *logical.Node, agg logical.AggExpr) (parquet.Type
 // `price*2`'s DECIMAL(20,4), the way MIN of that expression would. Without it
 // the plan declined a computed bar entirely, and a declaration the plan
 // declines is one every consumer invents differently (#965 round 2, B1).
-func aggComputedInputExprDecl(node *logical.Node, agg logical.AggExpr) (parquet.TypeID, int, int, bool) {
+func (w *declWalk) aggComputedInputExprDecl(node *logical.Node, agg logical.AggExpr) (parquet.TypeID, int, int, bool) {
 	if agg.InputExpr == nil || node == nil || len(node.Children) == 0 {
 		return 0, 0, 0, false
 	}
-	decls := inputColDecls(node.Children[0])
+	decls := w.inputColDecls(node.Children[0])
 	if len(decls.Types) == 0 {
-		decls = emittedColDecls(node.Children[0])
+		decls = w.emittedColDecls(node.Children[0])
 	}
 	// A SCALAR SUBQUERY written AS the aggregate's argument — `SUM((SELECT
 	// … ))` — has no column for the walk to read; its declaration is the
@@ -227,8 +227,8 @@ func aggComputedInputExprDecl(node *logical.Node, agg logical.AggExpr) (parquet.
 }
 
 // aggComputedInputOutputType is aggComputedInputDecl's TypeID-only face.
-func aggComputedInputOutputType(node *logical.Node, agg logical.AggExpr) (parquet.TypeID, bool) {
-	t, _, _, ok := aggComputedInputDecl(node, agg)
+func (w *declWalk) aggComputedInputOutputType(node *logical.Node, agg logical.AggExpr) (parquet.TypeID, bool) {
+	t, _, _, ok := w.aggComputedInputDecl(node, agg)
 	return t, ok
 }
 
@@ -252,7 +252,7 @@ func aggComputedInputOutputType(node *logical.Node, agg logical.AggExpr) (parque
 // The WIRE typmod for these is a separate question, answered unconditionally
 // -1 for every aggregate regardless of this function's answer — see
 // declaredWireUnconstrainedDecimal.
-func aggSpecOutputDecimal(node *logical.Node, agg logical.AggExpr) (logical.DecimalMeta, bool) {
+func (w *declWalk) aggSpecOutputDecimal(node *logical.Node, agg logical.AggExpr) (logical.DecimalMeta, bool) {
 	fn := strings.ToLower(strings.TrimSpace(agg.Func))
 	switch fn {
 	case "min", "max", "min_by", "max_by", "sum", "avg":
@@ -263,7 +263,7 @@ func aggSpecOutputDecimal(node *logical.Node, agg logical.AggExpr) (logical.Deci
 		if _, bare := agg.InputExpr.(*plansql.ColRef); !bare {
 			// AggSpecOutputType's rule, for the (p,s) half: a computed
 			// argument declares what its own expression declares (#867).
-			if t, prec, scale, known := aggComputedInputDecl(node, agg); known && t == parquet.TypeDecimal {
+			if t, prec, scale, known := w.aggComputedInputDecl(node, agg); known && t == parquet.TypeDecimal {
 				return logical.DecimalMeta{Precision: prec, Scale: scale}, true
 			}
 			return logical.DecimalMeta{}, false
@@ -273,12 +273,12 @@ func aggSpecOutputDecimal(node *logical.Node, agg logical.AggExpr) (logical.Deci
 	// carrier's full precision at scale 0 (SUM) or batch.AvgScale(0) (AVG) —
 	// #784. It is asked BEFORE the DECIMAL lookup because the input is not a
 	// DECIMAL column at all and AggInputColumnDecimal would decline it.
-	if t, ok := aggInputColumnType(node, agg.InputCol); ok {
-		if m, ok := aggIntegerOutputDecimal(fn, aggIntegerInputWidth(node, agg.InputCol, t)); ok {
+	if t, ok := w.aggInputColumnType(node, agg.InputCol); ok {
+		if m, ok := aggIntegerOutputDecimal(fn, w.aggIntegerInputWidth(node, agg.InputCol, t)); ok {
 			return m, true
 		}
 	}
-	in, ok := aggInputColumnDecimal(node, agg.InputCol)
+	in, ok := w.aggInputColumnDecimal(node, agg.InputCol)
 	if !ok {
 		return logical.DecimalMeta{}, false
 	}
@@ -326,7 +326,7 @@ func aggIntegerOutputDecimal(fn string, in parquet.TypeID) (logical.DecimalMeta,
 // when a scan does not carry the name (#728); a type and (p,s) must describe the
 // same column. The lookup order below accounts for dispatch-respelled sources.
 // See docs/internals/aggregate-argument-declaration-scope.md for the design.
-func aggInputColumnType(node *logical.Node, col string) (parquet.TypeID, bool) {
+func (w *declWalk) aggInputColumnType(node *logical.Node, col string) (parquet.TypeID, bool) {
 	// The SCANS first; the emitted walk only for a name they do not carry.
 	//
 	// The ORDER is load-bearing, and it is ADR-0026's own rule: a name the DAG
@@ -362,7 +362,7 @@ func aggInputColumnType(node *logical.Node, col string) (parquet.TypeID, bool) {
 	// rebinding is read past.
 	if node != nil && len(node.Children) == 1 {
 		for _, ref := range aggInputRefs(col) {
-			if decls, _, ok := namingScopeDecls(ref, node.Children[0]); ok {
+			if decls, _, ok := w.namingScopeDecls(ref, node.Children[0]); ok {
 				if t, c := colRefDeclaredType(ref, decls); c == expr.Decided {
 					return t.ID, true
 				}
@@ -386,7 +386,7 @@ func aggInputRefs(col string) []*plansql.ColRef {
 	return refs
 }
 
-func aggInputColumnDecimal(node *logical.Node, col string) (logical.DecimalMeta, bool) {
+func (w *declWalk) aggInputColumnDecimal(node *logical.Node, col string) (logical.DecimalMeta, bool) {
 	// The same order as aggInputColumnType, for the same reason: the two answer
 	// one question about one column and a disagreement between them is a
 	// DECIMAL declared with someone else's scale.
@@ -404,7 +404,7 @@ func aggInputColumnDecimal(node *logical.Node, col string) (logical.DecimalMeta,
 	// disagreement between them is a DECIMAL declared with someone else's scale.
 	if node != nil && len(node.Children) == 1 {
 		for _, ref := range aggInputRefs(col) {
-			if decls, _, ok := namingScopeDecls(ref, node.Children[0]); ok {
+			if decls, _, ok := w.namingScopeDecls(ref, node.Children[0]); ok {
 				if t, c := colRefDeclaredType(ref, decls); c == expr.Decided {
 					if t.ID == parquet.TypeDecimal && t.DecKnown {
 						return logical.DecimalMeta{Precision: t.Precision, Scale: t.Scale}, true
@@ -433,11 +433,11 @@ func aggInputColumnDecimal(node *logical.Node, col string) (logical.DecimalMeta,
 // deliberately narrow: only an INT64 carrier can be hiding an int4 width, and
 // only a declaration that SAYS int4 narrows it. Silence leaves the carrier
 // alone.
-func aggIntegerInputWidth(node *logical.Node, col string, carrier parquet.TypeID) parquet.TypeID {
+func (w *declWalk) aggIntegerInputWidth(node *logical.Node, col string, carrier parquet.TypeID) parquet.TypeID {
 	if carrier != parquet.TypeInt64 {
 		return carrier
 	}
-	if w, ok := aggInputColumnIntWidth(node, col); ok && w == intWidth4 {
+	if w, ok := w.aggInputColumnIntWidth(node, col); ok && w == intWidth4 {
 		return parquet.TypeInt32
 	}
 	return carrier
@@ -451,7 +451,7 @@ func aggIntegerInputWidth(node *logical.Node, col string, carrier parquet.TypeID
 // A name a SCAN carries is answered from the catalog and never from a derived
 // table that shadows it, which is the same ADR-0026 rule that ordering exists
 // for: the worker reads the scan's column.
-func aggInputColumnIntWidth(node *logical.Node, col string) (intWidth, bool) {
+func (w *declWalk) aggInputColumnIntWidth(node *logical.Node, col string) (intWidth, bool) {
 	if t, ok := scanColumnType(node, col); ok {
 		return catalogIntWidth(t), true
 	}
@@ -462,7 +462,7 @@ func aggInputColumnIntWidth(node *logical.Node, col string) (intWidth, bool) {
 	// PostgreSQL declares bigint.
 	if node != nil && len(node.Children) == 1 {
 		for _, ref := range aggInputRefs(col) {
-			if decls, _, ok := namingScopeDecls(ref, node.Children[0]); ok {
+			if decls, _, ok := w.namingScopeDecls(ref, node.Children[0]); ok {
 				if w, ok := decls.colIntWidth(ref); ok {
 					return w, true
 				}

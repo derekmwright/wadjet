@@ -71,8 +71,8 @@ func (r GroupKeyResolution) Deferred() bool { return r.Alias != "" }
 // key published under the text the query wrote. Publishing it under the
 // single path's slot name would name a column the DAG's own consumers do not
 // ask for.
-func groupKeyNames(agg, child *logical.Node) (published []string, resolve []GroupKeyResolution) {
-	keys := groupKeyOutputs(agg)
+func (w *declWalk) groupKeyNames(agg, child *logical.Node) (published []string, resolve []GroupKeyResolution) {
+	keys := w.groupKeyOutputs(agg)
 	published = make([]string, len(agg.GroupBy))
 	resolve = make([]GroupKeyResolution, len(agg.GroupBy))
 	// execRule[i] marks a key whose two names are the SAME string, so the
@@ -112,7 +112,7 @@ func groupKeyNames(agg, child *logical.Node) (published []string, resolve []Grou
 			// differed from the published name only by them would make every
 			// reader that compares the two say "these are two names".
 			expr := k.Name
-			if respelled, ok := aggDerivedGroupKey(k.Name, child); ok {
+			if respelled, ok := w.aggDerivedGroupKey(k.Name, child); ok {
 				expr = respelled
 			}
 			resolve[i] = GroupKeyResolution{Expr: expr, Computed: true}
@@ -129,7 +129,7 @@ func groupKeyNames(agg, child *logical.Node) (published []string, resolve []Grou
 			// to a fragment that has no column of that name.
 			published[i] = k.Name
 			resolve[i] = GroupKeyResolution{Expr: k.Slot}
-			resolved, def, defScope, renamed := resolveAggInputName(gb, child)
+			resolved, def, defScope, renamed := w.resolveAggInputName(gb, child)
 			if !renamed {
 				execRule[i] = agg.LateralAggregate && !k.Minted && !k.Delimited
 				break
@@ -154,7 +154,7 @@ func groupKeyNames(agg, child *logical.Node) (published []string, resolve []Grou
 				// columns. Typing it against the aggregate's own child leaves
 				// a DECIMAL key on the FLOAT rule, and the exact value then
 				// meets the #361 store guard on both DAG arms.
-				Decl: derivedGroupKeyDecl(def.String(), def, defScope),
+				Decl: w.derivedGroupKeyDecl(def.String(), def, defScope),
 			}
 		}
 	}

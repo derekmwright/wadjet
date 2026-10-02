@@ -80,7 +80,7 @@ func blockPublishedColumns(p *logical.Node, published map[*logical.Node]bool,
 // published its array as the STRING fallback on the single path (arc CW
 // round 3, B2), where the DAG's walk — and the same side with rows — declared
 // the array.
-func blockColumnsOf(p *logical.Node, published map[*logical.Node]bool,
+func (w *declWalk) blockColumnsOf(p *logical.Node, published map[*logical.Node]bool,
 	subqueryDecl func(string) (parquet.Column, bool), aggFromStream bool) ([]blockColumn, bool) {
 	if p == nil || len(p.Children) != 1 || len(p.Projections) == 0 {
 		return nil, false
@@ -90,7 +90,7 @@ func blockColumnsOf(p *logical.Node, published map[*logical.Node]bool,
 	// the scan arm reads the catalog annotation. A minted correlation slot and
 	// an `__agg_N` have a type only their producer can state, and a second
 	// rule for them is the disagreement ADR-0026 exists to prevent.
-	stream := declaredJoinSchema(p.Children[0], nil, published, subqueryDecl)
+	stream := w.declaredJoinSchema(p.Children[0], nil, published, subqueryDecl)
 	byName := make(map[string]parquet.Column, len(stream))
 	for _, col := range stream {
 		byName[strings.ToLower(blockBareName(col.Name))] = col
@@ -99,7 +99,7 @@ func blockColumnsOf(p *logical.Node, published map[*logical.Node]bool,
 	// against what the block's child reads: above an aggregate the operands
 	// are `__agg_N` and a minted slot, and typing `COUNT(*) + 1` against the
 	// scan's columns answers nothing at all.
-	decls := inputColDecls(p.Children[0])
+	decls := w.inputColDecls(p.Children[0])
 	// THE SCALAR-SUBQUERY RESOLVER IS PART OF THE INFERENCE, not an extra.
 	// `DeclaredOutputSchema` hands it to the same walk for the statement's own
 	// SELECT list, and without it here `(SELECT MAX(amount) FROM lat_item) AS
@@ -240,9 +240,9 @@ func blockColumnsOf(p *logical.Node, published map[*logical.Node]bool,
 // `names column 3 "n" where an earlier file ... named it "__agg_0"`. That is
 // #980's own sentence, and it is what the shape does the moment the lateral
 // route stops standing in front of it.
-func declaredBlockSchema(p *logical.Node, wantSet map[string]bool,
+func (w *declWalk) declaredBlockSchema(p *logical.Node, wantSet map[string]bool,
 	published map[*logical.Node]bool, subqueryDecl func(string) (parquet.Column, bool)) []parquet.Column {
-	cols, ok := blockColumnsOf(p, published, subqueryDecl, true)
+	cols, ok := w.blockColumnsOf(p, published, subqueryDecl, true)
 	if !ok {
 		return nil
 	}

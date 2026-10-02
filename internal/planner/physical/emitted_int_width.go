@@ -30,7 +30,7 @@ import (
 // An ABSENT entry means the declaration says nothing, and every reader falls
 // back to the carrier — which for a base column IS the catalog's storage
 // width, so a scan needs no entries at all.
-func emittedColIntWidth(n *logical.Node) map[string]intWidth {
+func (w *declWalk) emittedColIntWidthUncached(n *logical.Node) map[string]intWidth {
 	if n == nil {
 		return nil
 	}
@@ -40,8 +40,8 @@ func emittedColIntWidth(n *logical.Node) map[string]intWidth {
 			return nil
 		}
 		child := n.Children[0]
-		in := childDecls(child)
-		in.intWidth = emittedColIntWidth(child)
+		in := w.childDecls(child)
+		in.intWidth = w.emittedColIntWidth(child)
 		in = withSubqueryDecls(in, n)
 		out := make(map[string]intWidth, len(n.GroupBy)+len(n.AggExprs))
 		// A GROUP KEY is the value the input carried, so it keeps the input's
@@ -87,7 +87,7 @@ func emittedColIntWidth(n *logical.Node) map[string]intWidth {
 			if name == "" {
 				continue
 			}
-			t, known := aggSpecOutputType(n, agg)
+			t, known := w.aggSpecOutputType(n, agg)
 			if !known || !carriesIntWidth(t) {
 				continue
 			}
@@ -116,8 +116,8 @@ func emittedColIntWidth(n *logical.Node) map[string]intWidth {
 		// the declared-type walk names for a subscript (`a[1] + 1` over an
 		// int4[] is int4), and without them that walk could not type the
 		// projection at all.
-		decls := childDecls(child)
-		decls.intWidth = emittedColIntWidth(child)
+		decls := w.childDecls(child)
+		decls.intWidth = w.emittedColIntWidth(child)
 		decls = withSubqueryDecls(decls, n)
 		out := make(map[string]intWidth, len(n.Projections))
 		for _, proj := range n.Projections {
@@ -134,7 +134,7 @@ func emittedColIntWidth(n *logical.Node) map[string]intWidth {
 		if len(n.Children) != 1 {
 			return nil
 		}
-		return emittedColIntWidth(n.Children[0])
+		return w.emittedColIntWidth(n.Children[0])
 	case logical.NodeUnion, logical.NodeIntersect, logical.NodeExcept:
 		// PostgreSQL resolves a set operation's column to the COMMON type of
 		// its arms, and for two integers that is the WIDER one: a UNION ALL
@@ -146,15 +146,15 @@ func emittedColIntWidth(n *logical.Node) map[string]intWidth {
 		// declaration is silent could be the int8 one, and narrowing on
 		// incomplete information is how a SUM that should be numeric would
 		// come back as a bigint that can overflow.
-		arms := setOpArmIntWidths(n)
+		arms := w.setOpArmIntWidths(n)
 		if len(arms) == 0 {
 			return nil
 		}
-		cols, ok := setOpDeclaredOutputSchema(n)
+		cols, ok := w.setOpDeclaredOutputSchema(n)
 		if !ok {
 			return nil
 		}
-		names := setOpArmSchemas(n)
+		names := w.setOpArmSchemas(n)
 		if len(names) == 0 || len(cols) != len(names[0]) {
 			return nil
 		}
@@ -185,8 +185,8 @@ func emittedColIntWidth(n *logical.Node) map[string]intWidth {
 			return nil
 		}
 		child := n.Children[0]
-		in := childDecls(child)
-		in.intWidth = emittedColIntWidth(child)
+		in := w.childDecls(child)
+		in.intWidth = w.emittedColIntWidth(child)
 		out := make(map[string]intWidth, len(in.intWidth)+len(n.WindowExprs))
 		for k, v := range in.intWidth {
 			out[k] = v
@@ -196,7 +196,7 @@ func emittedColIntWidth(n *logical.Node) map[string]intWidth {
 			if name == "" {
 				continue
 			}
-			d := windowSpecOutputType(n, we)
+			d := w.windowSpecOutputType(n, we)
 			if !carriesIntWidth(d.ID) {
 				delete(out, name)
 				continue
@@ -242,7 +242,7 @@ func emittedColIntWidth(n *logical.Node) map[string]intWidth {
 		if len(n.Children) != 2 {
 			return nil
 		}
-		left, right := emittedColIntWidth(n.Children[0]), emittedColIntWidth(n.Children[1])
+		left, right := w.emittedColIntWidth(n.Children[0]), w.emittedColIntWidth(n.Children[1])
 		return withJoinArmQualifiers(n, left, right, mergeJoinSides(left, right))
 	}
 	return nil
@@ -250,22 +250,22 @@ func emittedColIntWidth(n *logical.Node) map[string]intWidth {
 
 // setOpArmIntWidths is setOpArmSchemasAndTypmods' width companion: one slice
 // per arm, POSITIONAL, aligned with that arm's declared output schema.
-func setOpArmIntWidths(n *logical.Node) [][]intWidth {
+func (w *declWalk) setOpArmIntWidths(n *logical.Node) [][]intWidth {
 	var out [][]intWidth
 	for _, c := range n.Children {
 		if inner := setOpRoot(c); inner != nil {
-			nested := setOpArmIntWidths(inner)
+			nested := w.setOpArmIntWidths(inner)
 			if len(nested) == 0 {
 				return nil
 			}
 			out = append(out, nested...)
 			continue
 		}
-		schema := declaredOutputSchema(c, nil)
+		schema := w.declaredOutputSchema(c, nil)
 		if len(schema) == 0 {
 			return nil
 		}
-		widths := emittedColIntWidth(c)
+		widths := w.emittedColIntWidth(c)
 		arm := make([]intWidth, len(schema))
 		for i, col := range schema {
 			if w, ok := lookupColIntWidth(widths, col.Name); ok {

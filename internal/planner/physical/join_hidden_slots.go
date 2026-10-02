@@ -149,7 +149,7 @@ func lateralSideOf(node *logical.Node) int {
 // for a Project is its projections in order. The distributed path computes its
 // own against the STAGE's stream, because a Project emits no stage there
 // (stageHiddenPositions).
-func joinHiddenPositions(node *logical.Node) (probe, build map[int]string) {
+func (w *declWalk) joinHiddenPositions(node *logical.Node) (probe, build map[int]string) {
 	if node == nil || len(node.HiddenJoinCols) == 0 || len(node.Children) < 2 {
 		return nil, nil
 	}
@@ -157,7 +157,7 @@ func joinHiddenPositions(node *logical.Node) (probe, build map[int]string) {
 	if side < 0 {
 		return nil, nil
 	}
-	names := emittedColumnNames(node.Children[side])
+	names := w.emittedColumnNames(node.Children[side])
 	if len(names) == 0 {
 		return nil, nil
 	}
@@ -188,7 +188,7 @@ func joinHiddenPositions(node *logical.Node) (probe, build map[int]string) {
 // Aggregate its published keys then its aggregates, a Scan its columns. A
 // shape it cannot state returns nil, and a position nobody can compute drops
 // nothing.
-func emittedColumnNames(n *logical.Node) []string {
+func (w *declWalk) emittedColumnNames(n *logical.Node) []string {
 	for cur := n; cur != nil; {
 		switch cur.Type {
 		case logical.NodeProject:
@@ -205,7 +205,7 @@ func emittedColumnNames(n *logical.Node) []string {
 			}
 			return out
 		case logical.NodeAggregate:
-			published, resolve := groupKeyNames(cur, aggInput(cur))
+			published, resolve := w.groupKeyNames(cur, aggInput(cur))
 			out := append([]string(nil), emittedKeyNames(published, resolve, logicalAggOutNames(cur))...)
 			for _, agg := range cur.AggExprs {
 				out = append(out, agg.OutputCol)

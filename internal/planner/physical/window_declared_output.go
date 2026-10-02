@@ -56,7 +56,7 @@ func windowValueFunc(fn string) bool {
 // schema; rebinding and unavailable parameter metadata bound lookup (#345).
 // Undecidable arguments keep windowOutputType's fallback.
 // See docs/internals/computed-window-argument-declarations.md for the design.
-func windowComputedArgDecl(node *logical.Node, we logical.WindowExpr) (expr.DeclType, bool, bool) {
+func (w *declWalk) windowComputedArgDecl(node *logical.Node, we logical.WindowExpr) (expr.DeclType, bool, bool) {
 	if we.InputExpr == nil || node == nil || len(node.Children) == 0 {
 		return expr.DeclType{}, false, false
 	}
@@ -66,9 +66,9 @@ func windowComputedArgDecl(node *logical.Node, we logical.WindowExpr) (expr.Decl
 	if cleanExpr(we.InputExpr.String()) != cleanExpr(we.InputCol) {
 		return expr.DeclType{}, false, false
 	}
-	decls := withSubqueryDecls(inputColDecls(node.Children[0]), node)
+	decls := withSubqueryDecls(w.inputColDecls(node.Children[0]), node)
 	if len(decls.Types) == 0 {
-		decls = withSubqueryDecls(emittedColDecls(node.Children[0]), node)
+		decls = withSubqueryDecls(w.emittedColDecls(node.Children[0]), node)
 	}
 	d, c := nodeDeclaredType(we.InputExpr, decls)
 	if c == expr.Undecided {
@@ -102,7 +102,7 @@ func windowBareArgWidth(decls ColDecls, col string, carrier parquet.TypeID) parq
 	return carrier
 }
 
-func windowSpecOutputType(node *logical.Node, we logical.WindowExpr) expr.DeclType {
+func (w *declWalk) windowSpecOutputType(node *logical.Node, we logical.WindowExpr) expr.DeclType {
 	fn := strings.ToLower(strings.TrimSpace(we.Func))
 	minMax := fn == "min" || fn == "max"
 	sumAvg := fn == "sum" || fn == "avg"
@@ -123,7 +123,7 @@ func windowSpecOutputType(node *logical.Node, we logical.WindowExpr) expr.DeclTy
 	// Zero-row results have no vector and depend solely on this declaration (#587);
 	// projection callers cannot rely on window runtime correction.
 	// See docs/internals/window-input-declaration-through-derived-plans.md for the design.
-	inDecls := emittedColDecls(node.Children[0])
+	inDecls := w.emittedColDecls(node.Children[0])
 	t, conf := colRefDeclaredType(&plansql.ColRef{Column: col}, inDecls)
 	if conf != expr.Decided {
 		// A COMPUTED argument has no column declaration to read: the
@@ -136,7 +136,7 @@ func windowSpecOutputType(node *logical.Node, we logical.WindowExpr) expr.DeclTy
 		// runtime, while its grouped twin declared bigint, which is
 		// PostgreSQL's type.
 		if sumAvg {
-			if d, wide, ok := windowComputedArgDecl(node, we); ok {
+			if d, wide, ok := w.windowComputedArgDecl(node, we); ok {
 				if out, prec, scale, iok := exec.IntegerAccOutputType(
 					fn == "avg", integerAccArgWidth(d.ID, wide)); iok {
 					if out == parquet.TypeDecimal {
@@ -176,7 +176,7 @@ func windowSpecOutputType(node *logical.Node, we logical.WindowExpr) expr.DeclTy
 			// round 5 review, P1). exec.WindowMinMaxType is asked rather than
 			// assumed, exactly as the decided-column arm below asks it, so
 			// the planner and the operator cannot disagree about a type.
-			if d, _, ok := windowComputedArgDecl(node, we); ok {
+			if d, _, ok := w.windowComputedArgDecl(node, we); ok {
 				if out, vetted := exec.WindowMinMaxType(d.ID); vetted {
 					if out == parquet.TypeDecimal && d.DecKnown {
 						return d
@@ -197,7 +197,7 @@ func windowSpecOutputType(node *logical.Node, we logical.WindowExpr) expr.DeclTy
 		// fell to float8 on a zero-row result, which is described from this
 		// declaration alone (arc CW round 2, B1).
 		if windowValueFunc(fn) {
-			if d, _, ok := windowComputedArgDecl(node, we); ok {
+			if d, _, ok := w.windowComputedArgDecl(node, we); ok {
 				return d
 			}
 		}

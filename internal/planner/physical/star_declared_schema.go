@@ -19,11 +19,11 @@ import (
 // and table-function outputs are not catalog columns. ok=false leaves the
 // ordinary projection walk to answer. #846, #416, #696; ADR-0026.
 // See docs/internals/bare-star-output-declaration.md for the design.
-func starOnlyDeclaredOutputSchema(root *logical.Node,
+func (w *declWalk) starOnlyDeclaredOutputSchema(root *logical.Node,
 	subqueryDecl func(string) (parquet.Column, bool)) ([]parquet.Column, bool) {
 	scan, names := starOnlySourceScan(root)
 	if scan == nil || len(scan.ScanColumns) == 0 {
-		return starJoinDeclaredOutputSchema(root, subqueryDecl)
+		return w.starJoinDeclaredOutputSchema(root, subqueryDecl)
 	}
 	if names == nil {
 		names = scan.ScanColumns
@@ -141,7 +141,7 @@ func starOnlySourceScan(n *logical.Node) (*logical.Node, []string) {
 // QualifyAllBuildCols is false; it is a stage property for co-pathing joins.
 // Decline the whole schema if either side cannot be typed.
 // See docs/internals/join-star-output-declaration.md for the design.
-func starJoinDeclaredOutputSchema(root *logical.Node,
+func (w *declWalk) starJoinDeclaredOutputSchema(root *logical.Node,
 	subqueryDecl func(string) (parquet.Column, bool)) ([]parquet.Column, bool) {
 	join := starOnlySourceJoin(root)
 	if join == nil {
@@ -156,12 +156,12 @@ func starJoinDeclaredOutputSchema(root *logical.Node,
 	// `s.id`, `product` and `qty` invented and a rename's alias missing
 	// (round-1 B3). That is #984's own defect living inside #978's answer.
 	published := sideBlockProjections(join)
-	probe := declaredJoinSchema(join.Children[0], nil, published, subqueryDecl)
-	build := declaredJoinSchema(join.Children[1], nil, published, subqueryDecl)
+	probe := w.declaredJoinSchema(join.Children[0], nil, published, subqueryDecl)
+	build := w.declaredJoinSchema(join.Children[1], nil, published, subqueryDecl)
 	if len(probe) == 0 || len(build) == 0 {
 		return nil, false
 	}
-	excludeProbe, excludeBuild := joinHiddenPositions(join)
+	excludeProbe, excludeBuild := w.joinHiddenPositions(join)
 	out := exec.JoinOutputSchema(mapExecJoinType(strings.ToLower(join.JoinType)),
 		probe, build, joinArmAlias(join.Children[1]),
 		subtreeNamingOf(join.Children[1]).MaterializedBuildColOrigins(),

@@ -336,7 +336,7 @@ func strictIntArithCols(n *logical.Node) map[string]bool {
 // Do not search every underlying scan as scanColumnType does. An unannotated
 // scan makes the whole answer nil: a partial map cannot distinguish an unknown
 // column from a name that is not a column.
-func inputColTypes(n *logical.Node) map[string]parquet.TypeID {
+func (w *declWalk) inputColTypes(n *logical.Node) map[string]parquet.TypeID {
 	if n == nil {
 		return nil
 	}
@@ -347,12 +347,12 @@ func inputColTypes(n *logical.Node) map[string]parquet.TypeID {
 		// The row a table-less LATERAL body sees IS the outer row, so the
 		// columns its SELECT list may name are the outer subtree's (#1033).
 		// Nil on every other Dual, which names nothing.
-		return inputColTypes(n.LateralOuterScope)
+		return w.inputColTypes(n.LateralOuterScope)
 	case logical.NodeFilter, logical.NodeLimit, logical.NodeSort, logical.NodeDistinct:
 		if len(n.Children) != 1 {
 			return nil
 		}
-		return inputColTypes(n.Children[0])
+		return w.inputColTypes(n.Children[0])
 	case logical.NodeWindow:
 		// A window APPENDS its outputs to its input and renames nothing, so
 		// its input's names survive and the SLOTS join them. Their type is
@@ -369,17 +369,17 @@ func inputColTypes(n *logical.Node) map[string]parquet.TypeID {
 		if len(n.Children) != 1 {
 			return nil
 		}
-		return windowOutputColTypes(n, inputColTypes(n.Children[0]))
+		return w.windowOutputColTypes(n, w.inputColTypes(n.Children[0]))
 	case logical.NodeJoin:
 		if len(n.Children) != 2 {
 			return nil
 		}
-		if items := lateralDualItemDecls(n); items != nil {
+		if items := w.lateralDualItemDecls(n); items != nil {
 			// A table-less LATERAL body publishes its items and nothing else,
 			// and its Project over the Dual is a stop this walk cannot see
 			// through (#1033). Answer from the ONE derivation instead.
 			merged := make(map[string]parquet.TypeID, len(items))
-			for c, t := range inputColTypes(n.Children[0]) {
+			for c, t := range w.inputColTypes(n.Children[0]) {
 				merged[c] = t
 			}
 			for name, d := range items {
@@ -387,7 +387,7 @@ func inputColTypes(n *logical.Node) map[string]parquet.TypeID {
 			}
 			return merged
 		}
-		left, right := inputColTypes(n.Children[0]), inputColTypes(n.Children[1])
+		left, right := w.inputColTypes(n.Children[0]), w.inputColTypes(n.Children[1])
 		if left == nil || right == nil {
 			return nil
 		}
@@ -426,7 +426,7 @@ func inputColTypes(n *logical.Node) map[string]parquet.TypeID {
 // derivation ADR-0035 item 5 names. A second one here is how a bar comes to be
 // declared one thing by the projection above it and another by the stage that
 // produces it.
-func aggregateProjectionFields(project *logical.Node, p logical.Projection) ([]parquet.Column, bool) {
+func (w *declWalk) aggregateProjectionFields(project *logical.Node, p logical.Projection) ([]parquet.Column, bool) {
 	agg := logical.AggregateBelowProject(project)
 	if agg == nil {
 		return nil, false
@@ -439,7 +439,7 @@ func aggregateProjectionFields(project *logical.Node, p logical.Projection) ([]p
 		if strings.ToLower(cleanExpr(a.OutputCol)) != want {
 			continue
 		}
-		return aggOhlcvOutputFields(agg, a)
+		return w.aggOhlcvOutputFields(agg, a)
 	}
 	return nil, false
 }
@@ -457,13 +457,13 @@ func aggregateProjectionFields(project *logical.Node, p logical.Projection) ([]p
 // computed PostgreSQL's numeric into that double vector and #361's guard
 // raised — where the same expression as the query's own item declared
 // numeric. emittedColDecls is the same declarations with the integer width.
-func childDecls(child *logical.Node) ColDecls {
-	shapes := inputColShapes(child)
+func (w *declWalk) childDecls(child *logical.Node) ColDecls {
+	shapes := w.inputColShapes(child)
 	return ColDecls{
-		Types:  emittedColTypes(child),
+		Types:  w.emittedColTypes(child),
 		Fields: shapeFields(shapes),
 		Elems:  shapeElems(shapes),
-		Dec:    emittedColDecimal(child),
+		Dec:    w.emittedColDecimal(child),
 	}
 }
 
@@ -529,7 +529,7 @@ func declShape(d expr.DeclType) parquet.Column {
 // declined to the STRING fallback — #1133, #1303). A name present with the
 // zero Column is SHADOWED: something
 // above rebinds it, and the shapes below no longer describe it.
-func inputColShapes(n *logical.Node) map[string]parquet.Column {
+func (w *declWalk) inputColShapesUncached(n *logical.Node) map[string]parquet.Column {
 	if n == nil {
 		return nil
 	}
@@ -555,15 +555,15 @@ func inputColShapes(n *logical.Node) map[string]parquet.Column {
 		}
 		return out
 	case logical.NodeDual:
-		return inputColShapes(n.LateralOuterScope)
+		return w.inputColShapes(n.LateralOuterScope)
 	case logical.NodeFilter, logical.NodeLimit, logical.NodeSort, logical.NodeDistinct:
 		if len(n.Children) != 1 {
 			return nil
 		}
-		return inputColShapes(n.Children[0])
+		return w.inputColShapes(n.Children[0])
 
 	case logical.NodeUnion, logical.NodeIntersect, logical.NodeExcept:
-		cols, ok := setOpDeclaredOutputSchema(n)
+		cols, ok := w.setOpDeclaredOutputSchema(n)
 		if !ok {
 			return nil
 		}
@@ -602,7 +602,7 @@ func inputColShapes(n *logical.Node) map[string]parquet.Column {
 		if len(n.Children) != 1 {
 			return nil
 		}
-		below := inputColShapes(n.Children[0])
+		below := w.inputColShapes(n.Children[0])
 		var out map[string]parquet.Column
 		for _, p := range n.Projections {
 			if p.IsAgg {
@@ -628,7 +628,7 @@ func inputColShapes(n *logical.Node) map[string]parquet.Column {
 				if out == nil {
 					out = make(map[string]parquet.Column)
 				}
-				if f, ok := aggregateProjectionFields(n, p); ok {
+				if f, ok := w.aggregateProjectionFields(n, p); ok {
 					out[name] = parquet.Column{Type: parquet.TypeRow, Fields: f}
 				} else if sh, ok := aggOutputShapeBelow(below, p); ok {
 					// The aggregate's OWN output shape, which the Aggregate
@@ -659,8 +659,8 @@ func inputColShapes(n *logical.Node) map[string]parquet.Column {
 				if out == nil {
 					out = make(map[string]parquet.Column)
 				}
-				d, _ := nodeDeclaredType(p.ASTExpr, ColDecls{Types: inputColTypes(n.Children[0]),
-					Fields: shapeFields(below), Elems: shapeElems(below), Dec: inputColDecimal(n.Children[0])})
+				d, _ := nodeDeclaredType(p.ASTExpr, ColDecls{Types: w.inputColTypes(n.Children[0]),
+					Fields: shapeFields(below), Elems: shapeElems(below), Dec: w.inputColDecimal(n.Children[0])})
 				out[name] = declShape(d)
 				continue
 			}
@@ -687,7 +687,7 @@ func inputColShapes(n *logical.Node) map[string]parquet.Column {
 		var out map[string]parquet.Column
 		var childShapes map[string]parquet.Column
 		if len(n.Children) == 1 {
-			for i, k := range groupKeyOutputs(n) {
+			for i, k := range w.groupKeyOutputs(n) {
 				var ast plansql.Node
 				if i < len(n.GroupByExprs) {
 					ast = n.GroupByExprs[i]
@@ -695,7 +695,7 @@ func inputColShapes(n *logical.Node) map[string]parquet.Column {
 				if ast == nil {
 					ast, _ = plansql.ParseExpression(n.GroupBy[i])
 				}
-				d := derivedGroupKeyDecl(n.GroupBy[i], ast, n.Children[0])
+				d := w.derivedGroupKeyDecl(n.GroupBy[i], ast, n.Children[0])
 				sh := declShape(d)
 				// A BARE column key forwards the column: derivedGroupKeyDecl
 				// withholds a bare reference's declaration (exec.Project types
@@ -706,7 +706,7 @@ func inputColShapes(n *logical.Node) map[string]parquet.Column {
 				if sh.Fields == nil && sh.ElementType == nil {
 					if cr, ok := plansql.Unparen(ast).(*plansql.ColRef); ok {
 						if childShapes == nil {
-							childShapes = inputColShapes(n.Children[0])
+							childShapes = w.inputColShapes(n.Children[0])
 						}
 						// The qualified spelling first, then the bare one — a
 						// join's walk drops a bare name its two sides declare
@@ -735,7 +735,7 @@ func inputColShapes(n *logical.Node) map[string]parquet.Column {
 		var childDecls *ColDecls
 		for i := range n.AggExprs {
 			a := n.AggExprs[i]
-			if f, ok := aggOhlcvOutputFields(n, a); ok {
+			if f, ok := w.aggOhlcvOutputFields(n, a); ok {
 				if out == nil {
 					out = make(map[string]parquet.Column)
 				}
@@ -755,7 +755,7 @@ func inputColShapes(n *logical.Node) map[string]parquet.Column {
 				continue
 			}
 			if childDecls == nil {
-				d := emittedColDecls(n.Children[0])
+				d := w.emittedColDecls(n.Children[0])
 				childDecls = &d
 			}
 			arg := a.InputExpr
@@ -794,13 +794,13 @@ func inputColShapes(n *logical.Node) map[string]parquet.Column {
 		if len(n.Children) != 1 {
 			return nil
 		}
-		out := inputColShapes(n.Children[0])
+		out := w.inputColShapes(n.Children[0])
 		for _, we := range n.WindowExprs {
 			name := strings.ToLower(strings.TrimSpace(we.OutputCol))
 			if name == "" {
 				continue
 			}
-			sh := declShape(windowSpecOutputType(n, we))
+			sh := declShape(w.windowSpecOutputType(n, we))
 			if sh.Fields == nil && sh.ElementType == nil {
 				delete(out, name)
 				continue
@@ -815,9 +815,9 @@ func inputColShapes(n *logical.Node) map[string]parquet.Column {
 		if len(n.Children) != 2 {
 			return nil
 		}
-		if items := lateralDualItemDecls(n); items != nil {
+		if items := w.lateralDualItemDecls(n); items != nil {
 			merged := make(map[string]parquet.Column, len(items))
-			for c, f := range inputColShapes(n.Children[0]) {
+			for c, f := range w.inputColShapes(n.Children[0]) {
 				merged[c] = f
 			}
 			for name, d := range items {
@@ -829,7 +829,7 @@ func inputColShapes(n *logical.Node) map[string]parquet.Column {
 			}
 			return merged
 		}
-		left, right := inputColShapes(n.Children[0]), inputColShapes(n.Children[1])
+		left, right := w.inputColShapes(n.Children[0]), w.inputColShapes(n.Children[1])
 		if left == nil {
 			return right
 		}
@@ -906,15 +906,15 @@ func sameRowFields(a, b []parquet.Column) bool {
 // output columns declare, ready to hand to NodeDeclaredType. Callers that
 // hold the logical node an expression reads should build the context here
 // rather than passing inputColTypes alone, which cannot type a field path.
-func inputColDecls(n *logical.Node) ColDecls {
-	shapes := inputColShapes(n)
-	return ColDecls{Types: inputColTypes(n), Fields: shapeFields(shapes), Elems: shapeElems(shapes), Dec: inputColDecimal(n)}
+func (w *declWalk) inputColDecls(n *logical.Node) ColDecls {
+	shapes := w.inputColShapes(n)
+	return ColDecls{Types: w.inputColTypes(n), Fields: shapeFields(shapes), Elems: shapeElems(shapes), Dec: w.inputColDecimal(n)}
 }
 
 // windowOutputColTypes adds a Window node's own output SLOTS to the types its
 // input carries. Shared by the two walks so the flat type and its (p,s) can
 // never come from different rules.
-func windowOutputColTypes(n *logical.Node, in map[string]parquet.TypeID) map[string]parquet.TypeID {
+func (w *declWalk) windowOutputColTypes(n *logical.Node, in map[string]parquet.TypeID) map[string]parquet.TypeID {
 	var out map[string]parquet.TypeID
 	for _, we := range n.WindowExprs {
 		name := strings.ToLower(strings.TrimSpace(we.OutputCol))
@@ -927,7 +927,7 @@ func windowOutputColTypes(n *logical.Node, in map[string]parquet.TypeID) map[str
 				out[k] = v
 			}
 		}
-		out[name] = windowSpecOutputType(n, we).ID
+		out[name] = w.windowSpecOutputType(n, we).ID
 	}
 	if out == nil {
 		return in
@@ -938,14 +938,14 @@ func windowOutputColTypes(n *logical.Node, in map[string]parquet.TypeID) map[str
 // windowOutputColDecimal is windowOutputColTypes' (p,s) companion: a slot whose
 // declaration is a DECIMAL with a KNOWN scale carries it, and every other slot
 // contributes nothing, exactly as emittedColDecimal has it.
-func windowOutputColDecimal(n *logical.Node, in map[string]logical.DecimalMeta) map[string]logical.DecimalMeta {
+func (w *declWalk) windowOutputColDecimal(n *logical.Node, in map[string]logical.DecimalMeta) map[string]logical.DecimalMeta {
 	var out map[string]logical.DecimalMeta
 	for _, we := range n.WindowExprs {
 		name := strings.ToLower(strings.TrimSpace(we.OutputCol))
 		if name == "" {
 			continue
 		}
-		d := windowSpecOutputType(n, we)
+		d := w.windowSpecOutputType(n, we)
 		if d.ID != parquet.TypeDecimal || !d.DecKnown {
 			continue
 		}
@@ -968,7 +968,7 @@ func windowOutputColDecimal(n *logical.Node, in map[string]logical.DecimalMeta) 
 // ScanColTypes, and holding only entries a DECIMAL column has. A name two
 // scans disagree on (different (p,s), same as a type disagreement above) is
 // dropped rather than picking a side.
-func inputColDecimal(n *logical.Node) map[string]logical.DecimalMeta {
+func (w *declWalk) inputColDecimal(n *logical.Node) map[string]logical.DecimalMeta {
 	if n == nil {
 		return nil
 	}
@@ -976,12 +976,12 @@ func inputColDecimal(n *logical.Node) map[string]logical.DecimalMeta {
 	case logical.NodeScan:
 		return n.ScanColDecimal
 	case logical.NodeDual:
-		return inputColDecimal(n.LateralOuterScope)
+		return w.inputColDecimal(n.LateralOuterScope)
 	case logical.NodeFilter, logical.NodeLimit, logical.NodeSort, logical.NodeDistinct:
 		if len(n.Children) != 1 {
 			return nil
 		}
-		return inputColDecimal(n.Children[0])
+		return w.inputColDecimal(n.Children[0])
 	case logical.NodeWindow:
 		// The (p,s) half of the window arm in inputColTypes, and it has to
 		// move with it: a slot typed DECIMAL there and carrying no scale here
@@ -991,14 +991,14 @@ func inputColDecimal(n *logical.Node) map[string]logical.DecimalMeta {
 		if len(n.Children) != 1 {
 			return nil
 		}
-		return windowOutputColDecimal(n, inputColDecimal(n.Children[0]))
+		return w.windowOutputColDecimal(n, w.inputColDecimal(n.Children[0]))
 	case logical.NodeJoin:
 		if len(n.Children) != 2 {
 			return nil
 		}
-		if items := lateralDualItemDecls(n); items != nil {
+		if items := w.lateralDualItemDecls(n); items != nil {
 			merged := make(map[string]logical.DecimalMeta, len(items))
-			for c, m := range inputColDecimal(n.Children[0]) {
+			for c, m := range w.inputColDecimal(n.Children[0]) {
 				merged[c] = m
 			}
 			for name, d := range items {
@@ -1010,7 +1010,7 @@ func inputColDecimal(n *logical.Node) map[string]logical.DecimalMeta {
 			}
 			return merged
 		}
-		left, right := inputColDecimal(n.Children[0]), inputColDecimal(n.Children[1])
+		left, right := w.inputColDecimal(n.Children[0]), w.inputColDecimal(n.Children[1])
 		if left == nil || right == nil {
 			return nil
 		}
@@ -1439,9 +1439,9 @@ func declTypeParts(d expr.DeclType) parquet.Column {
 // query that names its DECIMAL through a subquery. It is the same walk
 // declaredOutputSchema already resolves the OUTPUT projection against, so the
 // SELECT list and the plan-declared schema now answer from one map.
-func emittedColDecls(n *logical.Node) ColDecls {
-	d := childDecls(n)
-	d.intWidth = emittedColIntWidth(n)
+func (w *declWalk) emittedColDecls(n *logical.Node) ColDecls {
+	d := w.childDecls(n)
+	d.intWidth = w.emittedColIntWidth(n)
 	return d
 }
 

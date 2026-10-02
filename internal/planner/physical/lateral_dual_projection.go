@@ -126,12 +126,12 @@ func lateralDualItemDecl(item logical.Projection, decls ColDecls,
 // and with the join's right side answering nothing the merged map was nil —
 // so `SUM(l.v)` over the lateral declared float8 where PostgreSQL declares
 // numeric, and a SECOND lateral reading the first one's column declared STRING.
-func lateralDualItemDecls(join *logical.Node) map[string]expr.DeclType {
+func (w *declWalk) lateralDualItemDecls(join *logical.Node) map[string]expr.DeclType {
 	if join == nil || len(join.LateralDualItems) == 0 || len(join.Children) != 2 {
 		return nil
 	}
 	outer := join.Children[0]
-	decls := lateralOuterDecls(outer)
+	decls := w.lateralOuterDecls(outer)
 	strictInt := strictIntArithCols(outer)
 	out := make(map[string]expr.DeclType, len(join.LateralDualItems))
 	for _, item := range join.LateralDualItems {
@@ -171,9 +171,9 @@ func lateralDualItemDecls(join *logical.Node) map[string]expr.DeclType {
 // so the emitted answer is preferred and the input walk is the fallback for
 // the shapes it does not cover. Merged rather than chosen so neither can lose a
 // name the other has.
-func lateralOuterDecls(outer *logical.Node) ColDecls {
-	in := inputColDecls(outer)
-	emitted := emittedColDecls(outer)
+func (w *declWalk) lateralOuterDecls(outer *logical.Node) ColDecls {
+	in := w.inputColDecls(outer)
+	emitted := w.emittedColDecls(outer)
 	if len(emitted.Types) == 0 {
 		return in
 	}

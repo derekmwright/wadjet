@@ -16,7 +16,7 @@ import (
 // advisory schema only when the side produces no batch, so approximations for
 // untypable subtrees do not affect non-empty joins. Empty outer-join sides
 // must have present NULL columns, not absent columns (#348, #352).
-func declaredJoinSchema(n *logical.Node, want []string, published map[*logical.Node]bool,
+func (w *declWalk) declaredJoinSchema(n *logical.Node, want []string, published map[*logical.Node]bool,
 	subqueryDecl func(string) (parquet.Column, bool)) []parquet.Column {
 	if n == nil {
 		return nil
@@ -68,7 +68,7 @@ func declaredJoinSchema(n *logical.Node, want []string, published map[*logical.N
 			for k := range seen {
 				before[k] = true
 			}
-			for _, col := range declaredBlockSchema(cur, wantSet, published, subqueryDecl) {
+			for _, col := range w.declaredBlockSchema(cur, wantSet, published, subqueryDecl) {
 				lc := strings.ToLower(blockBareName(col.Name))
 				if before[lc] {
 					continue
@@ -99,7 +99,7 @@ func declaredJoinSchema(n *logical.Node, want []string, published map[*logical.N
 					continue
 				}
 				if !haveTypes && len(cur.Children) == 1 {
-					colTypes = inputColDecls(cur.Children[0])
+					colTypes = w.inputColDecls(cur.Children[0])
 					// Same integer-preserving-arithmetic hint
 					// absorbComputedSubqueryProjection passes when it
 					// materializes this same computed column into the scan
@@ -173,17 +173,17 @@ func declaredJoinSchema(n *logical.Node, want []string, published map[*logical.N
 			// Declare keys first using GroupKeyNames and EmittedKeyNames
 			// (exec.PublishedGroupKeyNames), then each aggregate under its OutputCol,
 			// in the operator's emission order.
-			in := emittedColTypes(cur.Children[0])
+			in := w.emittedColTypes(cur.Children[0])
 			// A container key or aggregate output carries its element / fields
 			// from the shape walk the aggregate's own output is declared by
 			// (arc CW round 3, B2): declared from its TypeID alone, the
 			// null-padded side of an OUTER join or a LATERAL whose body
 			// produced no rows declared `ARRAY` with no element, which the wire
 			// sends as text, where the same side with rows declared the array.
-			shapes := inputColShapes(cur)
-			published, resolve := groupKeyNames(cur, cur.Children[0])
+			shapes := w.inputColShapes(cur)
+			published, resolve := w.groupKeyNames(cur, cur.Children[0])
 			emitted := emittedKeyNames(published, resolve, logicalAggOutNames(cur))
-			keyTypes, _ := derivedGroupKeyTypes(cur.GroupBy, cur.Children[0])
+			keyTypes, _ := w.derivedGroupKeyTypes(cur.GroupBy, cur.Children[0])
 			for i, name := range emitted {
 				lc := strings.ToLower(name)
 				if seen[lc] || (len(wantSet) > 0 && !wantSet[lc]) {
@@ -208,7 +208,7 @@ func declaredJoinSchema(n *logical.Node, want []string, published map[*logical.N
 				if agg.OutputCol == "" || seen[lc] || (len(wantSet) > 0 && !wantSet[lc]) {
 					continue
 				}
-				t, known := aggSpecOutputType(cur, agg)
+				t, known := w.aggSpecOutputType(cur, agg)
 				if !known {
 					continue
 				}
@@ -220,7 +220,7 @@ func declaredJoinSchema(n *logical.Node, want []string, published map[*logical.N
 					// exactly the disagreement the shuffle guard refuses, so a
 					// DECIMAL aggregate whose (p,s) is not known at plan time
 					// is left out rather than declared at scale 0.
-					m, known := aggSpecOutputDecimal(cur, agg)
+					m, known := w.aggSpecOutputDecimal(cur, agg)
 					if !known {
 						continue
 					}

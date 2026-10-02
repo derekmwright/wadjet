@@ -94,21 +94,21 @@ type groupKeyOut struct {
 // groupKeyOutputs describes an Aggregate node's GROUP BY keys. The rules are
 // buildAggregate's own, stated once so AggregateOutputNames, the projection
 // above the aggregate and the pre-aggregate projection cannot drift apart.
-func groupKeyOutputs(agg *logical.Node) []groupKeyOut {
+func (w *declWalk) groupKeyOutputs(agg *logical.Node) []groupKeyOut {
 	if agg == nil || agg.Type != logical.NodeAggregate {
 		return nil
 	}
 	var decls, emitted ColDecls
 	var below map[string]string
 	if len(agg.Children) == 1 {
-		decls = inputColDecls(agg.Children[0])
+		decls = w.inputColDecls(agg.Children[0])
 		// The names already in scope, for MINTING: a slot is only hidden if
 		// nothing else answers to it, and a stored column named `__gb_expr_0`
 		// is a legal column that must keep working. The reservation refuses
 		// user-minted names at the query and DDL doors; minting skips what
 		// is in scope regardless, so the two do not have to agree for the
 		// slot to be safe.
-		emitted = emittedColDecls(agg.Children[0])
+		emitted = w.emittedColDecls(agg.Children[0])
 		// The keys an aggregate DIRECTLY BELOW this one already publishes,
 		// by identity. `SELECT DISTINCT g + 1 AS k … GROUP BY g + 1` lowers
 		// to two aggregates keyed alike, and the outer one reads the inner
@@ -122,7 +122,7 @@ func groupKeyOutputs(agg *logical.Node) []groupKeyOut {
 		// column SPELLED like the key carries a DIFFERENT value under that
 		// name, and re-using it would group by the wrong column — which is
 		// the collision the slot exists for.
-		below = groupKeysPublishedBelow(agg.Children[0])
+		below = w.groupKeysPublishedBelow(agg.Children[0])
 	}
 	haveExprs := len(agg.GroupByExprs) == len(agg.GroupBy)
 	// A literal key is elided only when a non-literal key remains: GROUP BY
@@ -370,12 +370,12 @@ func (d ColDecls) has(name string) bool {
 //
 // The walk descends only through nodes that pass an aggregate's own output
 // rows through unchanged.
-func groupKeysPublishedBelow(n *logical.Node) map[string]string {
+func (w *declWalk) groupKeysPublishedBelow(n *logical.Node) map[string]string {
 	for n != nil {
 		switch n.Type {
 		case logical.NodeAggregate:
 			out := map[string]string{}
-			for _, k := range groupKeyOutputs(n) {
+			for _, k := range w.groupKeyOutputs(n) {
 				if k.Identity != "" && !k.Literal {
 					out[k.Identity] = k.Name
 				}
