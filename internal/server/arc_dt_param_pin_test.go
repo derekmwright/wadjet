@@ -49,20 +49,20 @@ func dtParamRows(ctx context.Context, c *pgconn.PgConn, sql string, vals []strin
 	return strings.Join(rows, " | ")
 }
 
-// A TIMESTAMP-TYPED PARAMETER AGAINST A DATE COLUMN IS READ AT DATE — PINNED
-// (#1426). The wire splices a bound parameter into the statement as a bare
-// quoted literal, so the DATE operand reads it with its own input function,
-// which drops the time: the parameter's declared OID (1114, timestamp) never
-// reaches the DATE / TIMESTAMP rule (batch.TemporalCommonType). PostgreSQL
-// 17.11 compares `date = timestamp` at the DATE's midnight and answers 0 rows
-// for each pinned cell below (measured through pgconn.ExecParams, text
-// format, OID 1114).
+// A TIMESTAMP-TYPED PARAMETER AGAINST A DATE COLUMN (#1426). The wire spliced
+// a bound parameter into the statement as a bare quoted literal, so the DATE
+// operand read it with its own input function, which dropped the time: the
+// parameter's declared OID (1114, timestamp) never reached the DATE /
+// TIMESTAMP rule (batch.TemporalCommonType). PostgreSQL 17.11 compares
+// `date = timestamp` at the DATE's midnight (measured through
+// pgconn.ExecParams, text format, OID 1114).
 //
-// These cells record TODAY'S WRONG ANSWER. A pin that starts agreeing with
-// PostgreSQL fails: that is #1426's fix, and the fix deletes the pin and
-// moves the cells to PostgreSQL's answer. The controls (an untyped and a
-// DATE-typed parameter, and an explicit CAST) agree with PostgreSQL today.
-func TestArcDTTimestampParameterAgainstDatePinned(t *testing.T) {
+// These cells were pinned at today's wrong answer (eq/nonMidnight 3,
+// in/nonMidnight 2 | 3, lt/afterMidnight none) until arc PW spliced every
+// parameter as a literal of its type; they now assert PostgreSQL's answer.
+// The controls (a midnight, an untyped and a DATE-typed parameter, and an
+// explicit CAST) agreed with PostgreSQL before and after.
+func TestArcDTTimestampParameterAgainstDate(t *testing.T) {
 	ctx := context.Background()
 	db, err := wadjet.Open(ctx, wadjet.Config{Store: objstore.NewMemStore(), Bucket: "test"})
 	if err != nil {
@@ -108,11 +108,11 @@ func TestArcDTTimestampParameterAgainstDatePinned(t *testing.T) {
 		pinned string // today's answer when it differs (#1426)
 	}{
 		{"eq/nonMidnight", "SELECT id FROM dt_param_d WHERE d = $1",
-			[]string{"1969-12-31 23:59:59.999"}, []uint32{ts}, "<0 rows>", "3"},
+			[]string{"1969-12-31 23:59:59.999"}, []uint32{ts}, "<0 rows>", ""},
 		{"in/nonMidnight", "SELECT id FROM dt_param_d WHERE d IN ($1, $2)",
-			[]string{"1969-12-31 00:00:00.001", "2024-03-04 12:00:00"}, []uint32{ts, ts}, "<0 rows>", "2 | 3"},
+			[]string{"1969-12-31 00:00:00.001", "2024-03-04 12:00:00"}, []uint32{ts, ts}, "<0 rows>", ""},
 		{"lt/afterMidnight", "SELECT id FROM dt_param_d WHERE d < $1",
-			[]string{"1969-12-31 00:00:00.001"}, []uint32{ts}, "3", "<0 rows>"},
+			[]string{"1969-12-31 00:00:00.001"}, []uint32{ts}, "3", ""},
 		{"ctrl/midnight", "SELECT id FROM dt_param_d WHERE d = $1",
 			[]string{"1969-12-31 00:00:00"}, []uint32{ts}, "3", ""},
 		{"ctrl/untyped", "SELECT id FROM dt_param_d WHERE d IN ($1, $2)",
