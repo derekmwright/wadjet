@@ -281,6 +281,7 @@ func nxCells() []nxCell {
 	add("negLit/pastInt64Quot", "SELECT 9223372036854775808 / 2 AS x")
 	add("negLit/pastInt64QuotCmp", "SELECT 9223372036854775808 / 7 = 1317624576693539401 AS x")
 	add("negLit/pastInt64QuotCol", "SELECT t.id, 9223372036854775808 / NULLIF(t.n, 0) AS x FROM ss_t t WHERE t.id < 3")
+	add("negLit/colOverPastInt64", "SELECT t.id, t.n / 9223372036854775808 AS x FROM ss_t t WHERE t.id < 3")
 	add("bareCast/floatOperand", "SELECT t.id, CAST(t.f AS NUMERIC) * 0.1 AS x FROM ss_t t WHERE t.id IN (1, 5)")
 	add("bareCast/intOperand", "SELECT t.id, CAST(t.i AS NUMERIC) * 0.1 AS x FROM ss_t t WHERE t.id IN (1, 5)")
 	add("bareCast/numOperand", "SELECT t.id, CAST(t.n AS NUMERIC) / 3 AS x FROM ss_t t WHERE t.id IN (1, 5)")
