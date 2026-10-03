@@ -633,9 +633,19 @@ func armIsOneRelationsColumns(arm *logical.Node) bool {
 		}
 		switch n.Type {
 		case logical.NodeAggregate, logical.NodeUnion, logical.NodeIntersect,
-			logical.NodeExcept, logical.NodeWindow:
+			logical.NodeExcept:
 			computes = true
 			return
+		case logical.NodeWindow:
+			// A window over a derived table that shadows a column of its own
+			// input streams that table's DECLARED columns under their own
+			// names beside its window columns — the one relation's columns
+			// still — and the join qualifies the duplicates by that relation's
+			// name like any other arm's.
+			if logical.WindowShadowedInput(n) == nil {
+				computes = true
+				return
+			}
 		}
 		for _, c := range n.Children {
 			walk(c)
