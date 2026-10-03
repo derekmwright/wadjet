@@ -285,3 +285,79 @@ func names(s []parquet.Column) string {
 	}
 	return strings.Join(out, ",")
 }
+
+// THE PARTITION REPLAY NAMES THE BUILD COLUMNS AS THE JOIN DOES (#1359, the
+// same rule for the build half). The replay's temporary join is built from
+// the main join's settings; it carried BuildTableAlias but not
+// BuildColOrigins (a multi-table build's per-column owning alias) nor
+// QualifyAllBuildCols, so an evicted partition's rows named their build
+// columns differently from the in-memory partitions' rows of the same join —
+// at the arc's base the replayed rows (about 255 of 5 000 per cell) named a
+// build column `v` where the join declares `b.v` (QualifyAllBuildCols) and
+// `b.k` where it declares `x.k` (BuildColOrigins). Both cells force an
+// eviction and assert it; every output row must carry the declared schema.
+func TestArcSJReplayNamesBuildColumnsAsTheJoinDoes(t *testing.T) {
+	ctx := context.Background()
+	probeSchema := []parquet.Column{{Name: "k", Type: parquet.TypeInt64}, {Name: "w", Type: parquet.TypeInt64}}
+	buildSchema := []parquet.Column{{Name: "k", Type: parquet.TypeInt64}, {Name: "v", Type: parquet.TypeInt64}}
+	for _, c := range []struct {
+		name       string
+		qualifyAll bool
+		origins    map[string]string
+	}{
+		{"qualifyAll", true, nil},
+		{"origins", false, map[string]string{"k": "x", "v": "y"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			rows := make([]map[string]any, 5000)
+			probeRows := make([]map[string]any, 1000)
+			for i := range rows {
+				rows[i] = map[string]any{"k": int64(i), "v": int64(i * 10)}
+				if i < len(probeRows) {
+					probeRows[i] = map[string]any{"k": int64(i), "w": int64(i)}
+				}
+			}
+			var bb []*batch.RecordBatch
+			for lo := 0; lo < len(rows); lo += batch.DefaultBatchSize {
+				bb = append(bb, batch.FromRows(buildSchema, rows[lo:min(lo+batch.DefaultBatchSize, len(rows))]))
+			}
+			hj := NewHashJoin(RightJoin, []string{"k"}, []string{"k"})
+			hj.BuildTableAlias, hj.QualifyAllBuildCols, hj.BuildColOrigins = "b", c.qualifyAll, c.origins
+			hj.ProbeSchemaHint, hj.BuildSchemaHint = probeSchema, buildSchema
+			tracker := memory.NewTracker("sj", 64<<20)
+			sm, err := memory.NewSpillManager(t.TempDir(), tracker)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer sm.Cleanup()
+			hj.Spill, hj.MemTracker = sm, tracker
+			prev := ForceJoinPartitionEvictEvery(1)
+			before := JoinPartitionsEvicted.Load()
+			err = hj.Build(ctx, &testBatchSource{batches: bb})
+			ForceJoinPartitionEvictEvery(prev)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer hj.Close()
+			if JoinPartitionsEvicted.Load() == before {
+				t.Fatal("no build partition was evicted — the cell compares two in-memory runs")
+			}
+			declared := names(JoinOutputSchema(RightJoin, probeSchema, buildSchema, "b", c.origins, c.qualifyAll, nil, nil, nil))
+			sink := &CollectSink{SkipFinalizeToRows: true}
+			pipe := &Pipeline{Source: &testBatchSource{batches: []*batch.RecordBatch{batch.FromRows(probeSchema, probeRows)}},
+				Ops: []UnaryOperator{hj.Probe()}, Sink: sink}
+			if err := pipe.Run(ctx); err != nil {
+				t.Fatal(err)
+			}
+			byShape := map[string]int{}
+			total := 0
+			for _, b := range sink.batches {
+				byShape[names(b.Schema)] += b.ActiveLen()
+				total += b.ActiveLen()
+			}
+			if total != len(rows) || len(byShape) != 1 || byShape[declared] != len(rows) {
+				t.Errorf("rows by output columns %v, want all %d as [%s]", byShape, len(rows), declared)
+			}
+		})
+	}
+}
