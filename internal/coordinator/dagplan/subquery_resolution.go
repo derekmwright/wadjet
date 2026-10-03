@@ -259,13 +259,17 @@ func (p *StagePlanner) resolveSubqueryAST(ctx context.Context, node plansql.Node
 		}
 		rows, _, err := p.ExecuteSubquerySchema(ctx, n.SQL)
 		if err != nil {
-			// An AUTHORIZATION refusal is the decision's own sentence, not a
-			// planning narrative, and it is the query's answer on every path
-			// (ADR-0034 item 6). Swallowing it shipped the filter and the
-			// task failed with "EXISTS subquery requires a SubqueryRunner"
-			// where the scalar and IN siblings say `permission denied for
-			// table "…"` (round-1 review P1).
-			if sqlerr.StateOf(err) == "42501" {
+			// A refusal with a SQLSTATE is the query's answer on every path:
+			// an AUTHORIZATION refusal is the decision's own sentence
+			// (ADR-0034 item 6, round-1 review P1), and a sample's 2202H, a
+			// 22003 its argument cannot hold or a 22012 is what every path
+			// that runs the subquery raises. Swallowing one shipped the
+			// filter, and every task failed with "EXISTS subquery requires a
+			// SubqueryRunner" and no SQLSTATE, as the scalar arm above did
+			// before it parked the same rule (#1411 review r2 B1). A subquery
+			// a constant short-circuits never reaches here: the logical plan
+			// folded it away.
+			if sqlerr.StateOf(err) != "" {
 				p.refusePlanTimeAnswer(err)
 			}
 			return node
