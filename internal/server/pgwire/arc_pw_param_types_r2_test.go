@@ -225,6 +225,24 @@ func pwR2Cells() []pwR2Cell {
 	add("b2/value $1 = n / 2 with 3", func(ctx context.Context, s pwR2Side) string {
 		return pwR2Prep(ctx, s.a, "", "SELECT id FROM p WHERE $1 = n / 2 ORDER BY id", nil, []*string{pwStr("3")}, 0)
 	})
+	// An integer parameter's text that is no integer is 22P02 at the
+	// parameter (int4in), wherever it lands — beside an expression too.
+	for _, c := range []struct {
+		name, sql string
+		oid       uint32
+		v         string
+	}{
+		{"$1 = n * 2 with 14.5", "SELECT id FROM p WHERE $1 = n * 2 ORDER BY id", 0, "14.5"},
+		{"$1 = n + 1 int4 2.5", "SELECT id FROM p WHERE $1 = n + 1 ORDER BY id", oidInt4, "2.5"},
+		{"$1 = b8 + 1 int8 2.5", "SELECT id FROM p WHERE $1 = b8 + 1 ORDER BY id", oidInt8, "2.5"},
+		{"$1 = n int4 x", "SELECT id FROM p WHERE $1 = n ORDER BY id", oidInt4, "x"},
+		{"SELECT $1 int4 ' 7 '", "SELECT $1", oidInt4, " 7 "},
+	} {
+		c := c
+		add("b2/value "+c.name, func(ctx context.Context, s pwR2Side) string {
+			return pwR2Prep(ctx, s.a, "", c.sql, []uint32{c.oid}, []*string{pwStr(c.v)}, 0)
+		})
+	}
 
 	// B3: the date/time text grammar per spelling.
 	for _, sp := range pwR2Spellings {
