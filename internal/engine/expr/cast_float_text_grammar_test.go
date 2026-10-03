@@ -29,6 +29,11 @@ func TestCastTextToFloatTakesPostgresGrammar(t *testing.T) {
 		{"real", " 1e-46 ", "22003", `"1e-46" is out of range for type real`},
 		{"real", " 1e400 ", "22003", `"1e400" is out of range for type real`},
 		{"double precision", "1e-400", "22003", `"1e-400" is out of range for type double precision`},
+		// a hexadecimal mantissa's digits include letters, and `e` is one
+		{"real", "0xAp-2000", "22003", `"0xAp-2000" is out of range for type real`},
+		{"real", "-0x1p-200", "22003", `"-0x1p-200" is out of range for type real`},
+		{"real", "0xep-2000", "22003", `"0xep-2000" is out of range for type real`},
+		{"double precision", "0xAp-2000", "22003", `"0xAp-2000" is out of range for type double precision`},
 	} {
 		state, msg := recoverFatalEvalForTest(t, func() {
 			(&Cast{Operand: &Lit{Val: c.in}, DestType: c.dest}).Eval(b, 0)
@@ -48,6 +53,9 @@ func TestCastTextToFloatTakesPostgresGrammar(t *testing.T) {
 		{"real", "0.000e-999", true},
 		{"double precision", "0e-500", true},
 		{"real", "-0", true},
+		{"real", "0x0p-2000", true},
+		{"real", "0x1p-149", false},
+		{"real", "0x1.8p1", false},
 	} {
 		got := (&Cast{Operand: &Lit{Val: c.in}, DestType: c.dest}).Eval(b, 0)
 		f, ok := got.(float64)

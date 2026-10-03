@@ -99,12 +99,22 @@ func castFloatText(v any, destType string, bitSize int) (float64, bool) {
 // floatTextNonzero reports whether a float's text that ParseFloat accepted
 // names a nonzero value: a nonzero digit before its exponent. A text that
 // parsed to zero but says this underflowed.
+//
+// A hexadecimal mantissa (`0xAp-2000`, which strtod reads as PostgreSQL does)
+// has letter digits and its exponent after `p`, so `e` is a digit there:
+// `CAST('0xAp-2000' AS REAL)` answered 0 where PostgreSQL raises 22003.
 func floatTextNonzero(s string) bool {
+	s = strings.TrimLeft(s, "+-")
+	hex := len(s) > 1 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')
+	if hex {
+		s = s[2:]
+	}
 	for i := 0; i < len(s); i++ {
-		switch c := s[i]; {
-		case c == 'e' || c == 'E' || c == 'p' || c == 'P':
+		c := s[i]
+		switch {
+		case c == 'p' || c == 'P', !hex && (c == 'e' || c == 'E'):
 			return false
-		case c >= '1' && c <= '9':
+		case c >= '1' && c <= '9', hex && (c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F'):
 			return true
 		}
 	}
