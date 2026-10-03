@@ -484,13 +484,18 @@ type temporalText struct {
 //	         `-` `/` `.` separators, one or more digits a field; YYYYMMDD)
 //	sep    = one or more spaces | `T` | `t`
 //	clock  = H[H] `:` M[M] [ `:` S[S] [ `.` digits* ] ]
-//	zone   = `Z` | `z` | (`+`|`-`) ( H[H] [ `:` MM [ `:` SS ] ] | HHMM | HHMMSS )
+//	zone   = `Z` | `z` | (`+`|`-`) digits [ `:` [digits] [ `:` [digits] ] ]
+//	         (readZone: PostgreSQL's DecodeTimezone digit rule)
 //
-// Every accepted spelling was measured on PostgreSQL 17.11 (arc PW round 2,
-// the B3 table). PostgreSQL also reads month names, `epoch` / `infinity` /
-// `now` / `today`, BC years, AM / PM, Julian days, zone NAMES, and a leading
-// one-to-three-digit field as MDY; this grammar does not, and each is 22007
-// here (docs/adr/0012-divergences/temporal.md) — refused, never guessed.
+// The accepted forms are PostgreSQL 17.11's, measured per spelling (gated by
+// pgwire.TestArcPWRound2MatchesPostgres and the zone table of
+// coordinator.TestArcPWZoneSpellingsEveryArm). PostgreSQL also reads month
+// names, `epoch` / `infinity` / `now` / `today`, BC years, AM / PM, Julian
+// days, zone NAMES — a POSIX zone spec among them: `…12:00:00Z+05` is the
+// zone `Z+05`, five hours WEST of UTC (17:00 UTC as a timestamptz), not `Z`
+// and then an offset — and a leading one-to-three-digit field as MDY; this
+// grammar does not, and each is 22007 here
+// (docs/adr/0012-divergences/temporal.md) — refused, never guessed.
 //
 // The calendar rule is ParseDateDays' (no year zero, month 1–12, the day
 // existing in its month); the clock's is PostgreSQL's: hour 0–24 with `24`
@@ -596,7 +601,18 @@ func (tt *temporalText) readClock(s string) dateFieldsKind {
 	return dateFieldsOK
 }
 
-// readZone reads the zone suffix ("" is none).
+// readZone reads the zone suffix ("" is none). A numeric offset is read as
+// PostgreSQL 17.11's DecodeTimezone reads it: the digits after the sign are
+// ONE integer, the hour; `:` then the minute, `:` then the second (each
+// strtoint's reading: an optional `-`, any number of digits, none being 0);
+// with no `:` and more than two digits, the last two digits are the minute
+// and the rest the hour — there is no run-together seconds form. So `+5`,
+// `+05`, `+530`, `+0530`, `+00130` and `+00000000130` read (the last three
+// as 01:30), `+000130` is 01:30 and `+001500` 15:00, `+05:` is +05, while
+// `+053000` (hour 530) and `+0530:00` (hour 530) are 22009. The range check
+// (hour ≤ 15, minute and second 0–59; a field past int32 overflows) comes
+// before the check for trailing text, PostgreSQL's order: `+16.5` is 22009,
+// `+05.5` 22007.
 func (tt *temporalText) readZone(z string) dateFieldsKind {
 	switch {
 	case z == "":
@@ -611,49 +627,60 @@ func (tt *temporalText) readZone(z string) dateFieldsKind {
 	if z[0] == '-' {
 		sign = -1
 	}
-	var parts []string
-	if strings.Contains(body, ":") {
-		parts = strings.Split(body, ":")
-		if len(parts) > 3 || len(parts[0]) > 2 {
-			return dateFieldsNone
-		}
-		for _, p := range parts[1:] {
-			if len(p) < 1 || len(p) > 2 {
-				return dateFieldsNone
-			}
-		}
-	} else {
-		switch len(body) {
-		case 1, 2:
-			parts = []string{body}
-		case 3:
-			parts = []string{body[:1], body[1:]}
-		case 4:
-			parts = []string{body[:2], body[2:]}
-		case 6:
-			parts = []string{body[:2], body[2:4], body[4:]}
-		default:
-			return dateFieldsNone
-		}
+	if body == "" || body[0] < '0' || body[0] > '9' {
+		return dateFieldsNone
 	}
-	units := []int{3600, 60, 1}
-	off := 0
-	for k, p := range parts {
-		if !allDigits(p) {
-			return dateFieldsNone
+	// num is strtoint(t, &rest, 10): an optional '-' then digits; with no
+	// digit it reads 0 and consumes nothing; ok is false on int32 overflow.
+	num := func(t string) (v int, rest string, ok bool) {
+		j := 0
+		if j < len(t) && t[j] == '-' {
+			j++
 		}
-		v := atoiN(p)
-		if k > 0 && v > 59 {
-			return dateFieldsZone
+		k := j
+		for k < len(t) && t[k] >= '0' && t[k] <= '9' {
+			k++
 		}
-		off += v * units[k]
+		if k == j {
+			return 0, t, true
+		}
+		n, err := strconv.ParseInt(t[:k], 10, 32)
+		return int(n), t[k:], err == nil
 	}
-	// PostgreSQL's displacement limit (17.11: `+15:59` and `-15:59:59`
-	// read, `+16` and `+99` are 22009).
-	if off > 15*3600+59*60+59 {
+	hr, rest, ok := num(body)
+	if !ok {
 		return dateFieldsZone
 	}
-	tt.hasZone, tt.offsetSeconds = true, sign*off
+	mn, sec := 0, 0
+	switch {
+	case strings.HasPrefix(rest, ":"):
+		if mn, rest, ok = num(rest[1:]); !ok {
+			return dateFieldsZone
+		}
+		if strings.HasPrefix(rest, ":") {
+			if sec, rest, ok = num(rest[1:]); !ok {
+				return dateFieldsZone
+			}
+		}
+	case rest == "" && len(body) > 2:
+		mn, hr = hr%100, hr/100
+	}
+	if hr > 15 || mn < 0 || mn > 59 || sec < 0 || sec > 59 {
+		return dateFieldsZone
+	}
+	if rest != "" {
+		// PostgreSQL's lexer ends a zone field at a `+`, or at whitespace,
+		// and decodes what follows as a field of its own before refusing a
+		// second zone: `+05+16` and `+05 -16` are 22009 there, `+05+05` 22007.
+		if next := strings.TrimLeft(rest, " \t"); next != "" && (next[0] == '+' || (next[0] == '-' && len(next) < len(rest))) {
+			var other temporalText
+			if other.readZone(next) == dateFieldsZone {
+				return dateFieldsZone
+			}
+		}
+		return dateFieldsNone
+	}
+	tt.hasZone, tt.offsetSeconds = true, sign*(hr*3600+mn*60+sec)
 	return dateFieldsOK
 }
 
