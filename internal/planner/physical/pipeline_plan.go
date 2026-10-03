@@ -158,6 +158,7 @@ func (p *Planner) buildScan(ctx context.Context, node *logical.Node) (exec.Sourc
 				if len(cols) == 0 {
 					return nil, nil, nil, emptyReaderRefusal(node.FuncName, node.FuncArgs)
 				}
+				withPlannedSchema(ts, cols)
 				source = withPlanTimeSchema(source, cols, relName)
 				readerSchema = cols
 			}

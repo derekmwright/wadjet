@@ -105,6 +105,10 @@ type jsonScanner struct {
 	// row past sampled is checked against its column before it is written.
 	fileRow int
 	sampled int
+	// whole is non-zero for a whole-input inference (`sample_size = -1`),
+	// which checks every row (sampled is 0) and says so in a refusal: the
+	// rows it read, or -1 when the plan read them; 0 for a sample.
+	whole int
 	// file and fileRowBase name the input file the row sits in when the
 	// input is several files read as one stream (a glob): the message's row
 	// is fileRow-fileRowBase of that file. Empty for a single input.
@@ -458,6 +462,15 @@ func scanObjectInto(sc *jsonScanner, rb *batch.RecordBatch, row int, schema []pa
 
 		colI, exists := colIdx[key]
 		if !exists {
+			// A key the inference never saw. Inside the sample that cannot
+			// happen (every sampled key is a column). Past it, a non-NULL
+			// value under it has no column to land in, and skipping it read
+			// the row without the value: SELECT * and a CTAS stored the row
+			// as if the key were absent (#1242). A JSON null there is the
+			// NULL the column would have held for the row, and is read.
+			if sc.fileRow > sc.sampled && sc.peek() != 'n' {
+				return sc.absentKey(key)
+			}
 			sc.skipValue()
 			continue
 		}
@@ -590,7 +603,29 @@ func (sc *jsonScanner) refuseString(col parquet.Column) error {
 // refusal is the 22P02 (or 22003/22007) for m in column name of the
 // scanner's row, naming the file and its own row across a glob.
 func (sc *jsonScanner) refusal(m *mismatch, name string) error {
-	return m.refusal(name, sc.fileRow-sc.fileRowBase, sc.sampled, sc.file)
+	return m.refusal(name, sc.fileRow-sc.fileRowBase, sc.sample(), sc.file)
+}
+
+// sample is what the scanner's columns were inferred from.
+func (sc *jsonScanner) sample() inferredFrom {
+	if sc.whole != 0 {
+		return inferredFrom{rows: max(sc.whole, 0), whole: true}
+	}
+	return inferredFrom{rows: sc.sampled}
+}
+
+// absentKey is the refusal of a non-NULL value under a key that is not a
+// column of the relation: 22P04, the class of COPY's refusal of a record
+// with a field past the relation's last column. The relation's columns are
+// the keys the inference saw, so the key is first seen past the sample.
+func (sc *jsonScanner) absentKey(key string) error {
+	where := fmt.Sprintf("row %d", sc.fileRow-sc.fileRowBase)
+	if sc.file != "" {
+		where = sc.file + " " + where
+	}
+	from := sc.sample()
+	return sqlerr.New("22P04", "%s: key %q is not a column of the relation (the columns were inferred from %s)%s",
+		where, key, from.text(sc.file != ""), from.hint())
 }
 
 // checkNested runs checkRaw over raw with the scanner itself pointed at it
@@ -672,8 +707,14 @@ func checkRaw(s *jsonScanner, col parquet.Column) *mismatch {
 			}
 			field := fieldNamed(col.Fields, key)
 			if field == nil {
+				// A field the inference never saw under this record: only a
+				// JSON null is the value the record already reads for it.
 				s.skipWhitespace()
-				s.readRawValue()
+				null := s.peek() == 'n'
+				raw := s.readRawValue()
+				if !null {
+					return &mismatch{value: string(raw), path: fmt.Sprintf(" field %q", key), absent: true, want: col.Type}
+				}
 				continue
 			}
 			if m := checkRaw(s, *field); m != nil {
@@ -971,24 +1012,46 @@ func writeBoolFalse(vec *batch.Vector, row int, colType parquet.TypeID) {
 // ---------------------------------------------------------------------------
 
 func inferSchemaTokens(data []byte, isArray bool, sampleSize int) ([]parquet.Column, error) {
+	var inf inference
+	if _, err := inf.addObjects(data, isArray, sampleSize); err != nil {
+		return nil, err
+	}
+	return inf.schema(), nil
+}
+
+// inference is the shape of every top-level key the objects added so far
+// hold, keys in order of first appearance. The default sample adds its
+// buffered objects once; a whole-input pass (`sample_size = -1`) adds the
+// input's objects a chunk at a time, merging them by the same rules, so the
+// two infer one type from the same rows.
+type inference struct {
+	order []string
+	cols  map[string]*shape
+}
+
+// addObjects merges up to max objects of data — a JSON array when isArray,
+// else objects one after another — and answers how many it read.
+func (inf *inference) addObjects(data []byte, isArray bool, max int) (int, error) {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.UseNumber()
 
 	if isArray {
 		tok, err := dec.Token()
 		if err != nil {
-			return nil, err
+			return 0, err
 		}
 		if d, ok := tok.(json.Delim); !ok || d != '[' {
-			return nil, fmt.Errorf("expected '[', got %v", tok)
+			return 0, fmt.Errorf("expected '[', got %v", tok)
 		}
 	}
 
-	var colOrder []string
-	cols := make(map[string]*shape)
+	if inf.cols == nil {
+		inf.cols = make(map[string]*shape)
+	}
+	cols := inf.cols
 	count := 0
 
-	for count < sampleSize && dec.More() {
+	for count < max && dec.More() {
 		tok, err := dec.Token()
 		if err != nil {
 			break
@@ -1010,7 +1073,7 @@ func inferSchemaTokens(data []byte, isArray bool, sampleSize int) ([]parquet.Col
 			if !exists {
 				sh = &shape{}
 				cols[key] = sh
-				colOrder = append(colOrder, key)
+				inf.order = append(inf.order, key)
 			}
 			valTok, err := dec.Token()
 			if err != nil {
@@ -1022,12 +1085,16 @@ func inferSchemaTokens(data []byte, isArray bool, sampleSize int) ([]parquet.Col
 		dec.Token() // closing '}'
 		count++
 	}
+	return count, nil
+}
 
-	schema := make([]parquet.Column, len(colOrder))
-	for i, name := range colOrder {
-		schema[i] = cols[name].column(name)
+// schema is the columns the added objects declare.
+func (inf *inference) schema() []parquet.Column {
+	schema := make([]parquet.Column, len(inf.order))
+	for i, name := range inf.order {
+		schema[i] = inf.cols[name].column(name)
 	}
-	return schema, nil
+	return schema
 }
 
 // shape is what the inference sample has shown of one value position — a

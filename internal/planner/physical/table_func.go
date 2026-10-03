@@ -152,7 +152,7 @@ func buildTableFunctionSource(funcName string, args []string, namedArgs map[stri
 		if len(args) < 1 {
 			return nil, fmt.Errorf("read_json requires at least 1 argument (path or URL)")
 		}
-		return &jsonTableFuncSource{path: expandHome(args[0])}, nil
+		return &jsonTableFuncSource{path: expandHome(args[0]), namedArgs: namedArgs}, nil
 	case "read_parquet":
 		if len(args) < 1 {
 			return nil, fmt.Errorf("read_parquet requires at least 1 argument (path or URL)")
@@ -214,17 +214,28 @@ func expandHome(path string) string {
 // front — a second full-size columnar copy held while the raw bytes were
 // still live, ~2-3× the input resident for any pgwire user (issue #130).
 type jsonTableFuncSource struct {
-	path   string
-	reader *jsonreader.StreamReader
+	path      string
+	namedArgs map[string]string
+	reader    *jsonreader.StreamReader
+	// planned is the schema the plan read published (withPlannedSchema).
+	planned []parquet.Column
 }
 
 func (s *jsonTableFuncSource) Init(_ context.Context) error {
+	n, err := readerSampleSize("read_json", s.path, s.namedArgs)
+	if err != nil {
+		return err
+	}
 	// A glob is a SEQUENCE of files, each its own JSON document (fileinput).
 	inputs, err := readerInputs(s.path)
 	if err != nil {
 		return fmt.Errorf("read_json: %w", err)
 	}
-	r, err := jsonreader.NewFilesReader(inputs)
+	if n == jsonreader.WholeInput && s.planned != nil {
+		s.reader = jsonreader.NewFilesReaderWithSchema(inputs, s.planned)
+		return nil
+	}
+	r, err := jsonreader.NewFilesReaderSampled(inputs, n)
 	if err != nil {
 		return readerInitError("read_json", s.path, err)
 	}
@@ -482,6 +493,8 @@ type csvTableFuncSource struct {
 	path      string
 	NamedArgs map[string]string
 	reader    *csvreader.Reader
+	// planned is the schema the plan read published (withPlannedSchema).
+	planned []parquet.Column
 }
 
 func (s *csvTableFuncSource) Init(_ context.Context) error {
@@ -496,6 +509,11 @@ func (s *csvTableFuncSource) Init(_ context.Context) error {
 	if hdr, ok := s.NamedArgs["header"]; ok {
 		cfg.HasHeader = hdr == "true" || hdr == "TRUE" || hdr == "1"
 	}
+	n, err := readerSampleSize("read_csv", s.path, s.NamedArgs)
+	if err != nil {
+		return err
+	}
+	cfg.SampleSize = n
 
 	// Every source shape streams, and a glob is a SEQUENCE of files the
 	// reader decodes one at a time — each with its own header and its own
@@ -503,6 +521,10 @@ func (s *csvTableFuncSource) Init(_ context.Context) error {
 	inputs, err := readerInputs(s.path)
 	if err != nil {
 		return fmt.Errorf("read_csv: %w", err)
+	}
+	if n == csvreader.WholeInput && s.planned != nil {
+		s.reader = csvreader.NewFilesReaderWithSchema(inputs, cfg, s.planned)
+		return nil
 	}
 	r, err := csvreader.NewFilesReader(inputs, cfg)
 	if err != nil {
@@ -525,6 +547,48 @@ func (s *csvTableFuncSource) Close() error {
 		return s.reader.Close()
 	}
 	return nil
+}
+
+// withPlannedSchema hands a CSV or JSON reader the columns the plan read of
+// its input published, so a whole-input inference (`sample_size = -1`) runs
+// once per statement — at plan time — rather than again at execution: the
+// execution reads the input against those columns and checks every row, so
+// an input that changed in between is refused, as withPlanTimeSchema
+// refuses a changed batch schema. A sampled reader infers again, cheaply,
+// as it always has.
+func withPlannedSchema(src exec.Source, cols []parquet.Column) {
+	switch s := src.(type) {
+	case *csvTableFuncSource:
+		s.planned = cols
+	case *jsonTableFuncSource:
+		s.planned = cols
+	}
+}
+
+// readerSampleSize is a reader's `sample_size` named argument: how many
+// leading rows its column types are inferred from — 0 when absent (the
+// readers' default, 100), a positive count, or -1 for EVERY row, which reads
+// the input twice (a first pass that infers, then the read). A count that is
+// not a whole number of at least 1, or -1, is 22023. -1 over an input that
+// cannot be read twice — a FIFO, a device, a socket, anywhere in a glob — is
+// 0A000: its second open would read a different stream or block. An http(s)
+// input is fetched twice. (ADR-0039 §3.)
+func readerSampleSize(fn, path string, namedArgs map[string]string) (int, error) {
+	text, ok := namedArgs["sample_size"]
+	if !ok {
+		return 0, nil
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(text))
+	if err != nil || n == 0 || n < -1 {
+		return 0, sqlerr.New("22023", "%s: sample_size must be a number of rows (1 or more) or -1 for every row, not %q", fn, text)
+	}
+	if n == -1 && !isURL(path) && !readerInputIsRereadable(path) {
+		if err := readerInputReachable(path); err != nil {
+			return 0, fmt.Errorf("%s: %w", fn, err)
+		}
+		return 0, sqlerr.New("0A000", "%s: sample_size = -1 reads the input twice, and %q is not a regular file", fn, path)
+	}
+	return n, nil
 }
 
 // openHTTP returns the response body as a stream — no io.ReadAll, so a

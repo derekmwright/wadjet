@@ -24,10 +24,17 @@ import (
 const defaultBatchSize = 2048
 
 // sampleSize is the number of leading data rows a column's type is
-// inferred from. A value in a later row that does not parse as that type is
-// a 22P02 — 22003 for a number out of range, 22007 for a timestamp (see
-// buildBatch).
+// inferred from by default. A value in a later row that does not parse as
+// that type is a 22P02 — 22003 for a number out of range, 22007 for a
+// timestamp (see buildBatch). ReaderConfig.SampleSize changes it, and
+// WholeInput infers from every row (ADR-0039 §3).
 const sampleSize = 100
+
+// WholeInput is the ReaderConfig.SampleSize that infers each column's type
+// from EVERY row of the input — read_csv's `sample_size = -1` — in a first
+// pass over the input before the pass that reads it, so the input is opened
+// twice.
+const WholeInput = -1
 
 // errNotType and errOutOfRange are writeCSVValue's answers for a field that
 // does not parse as the column's type, and for a number that parses but lies
@@ -52,6 +59,9 @@ var (
 type ReaderConfig struct {
 	Delimiter rune // field delimiter (default: ',')
 	HasHeader bool // whether the first row is a header (default: true)
+	// SampleSize is the number of leading data rows the column types are
+	// inferred from: 0 is the default (100), WholeInput every row.
+	SampleSize int
 }
 
 // DefaultConfig returns sensible defaults for CSV reading.
@@ -91,6 +101,10 @@ type Reader struct {
 	offset   int
 	readRows int // data rows already built into batches
 	named    bool
+	// sampled is the number of leading data rows the types were inferred
+	// from, and whole whether that was every row (a refusal says which).
+	sampled int
+	whole   bool
 
 	cfg     ReaderConfig
 	inputs  []fileinput.Input
@@ -139,12 +153,19 @@ func NewStreamReader(r io.Reader, cfg ReaderConfig) (*Reader, error) {
 // streams the rest on demand via Next(). Memory is O(batch size) plus one
 // open file. Close releases the file it holds.
 func NewFilesReader(inputs []fileinput.Input, cfg ReaderConfig) (*Reader, error) {
-	r := &Reader{cfg: cfg, inputs: inputs, named: len(inputs) > 1}
+	if cfg.SampleSize == WholeInput {
+		return newWholeInputReader(inputs, cfg)
+	}
+	limit := cfg.SampleSize
+	if limit <= 0 {
+		limit = sampleSize
+	}
+	r := &Reader{cfg: cfg, inputs: inputs, named: len(inputs) > 1, sampled: limit}
 	for _, in := range inputs {
 		r.named = r.named || in.Name != ""
 	}
 	var sample []record
-	for len(sample) < sampleSize {
+	for len(sample) < limit {
 		rec, err := r.nextRecord()
 		if err == io.EOF {
 			break
@@ -173,10 +194,71 @@ func NewFilesReader(inputs []fileinput.Input, cfg ReaderConfig) (*Reader, error)
 		r.schema, r.colIdx = schema, makeColIdx(schema)
 		return r, nil
 	}
-	r.schema = inferCSVSchema(header, sample)
+	var inf inference
+	for _, rec := range sample {
+		inf.add(rec)
+	}
+	r.schema = inf.columns(header)
 	r.colIdx = makeColIdx(r.schema)
 	r.rows = sample
 	return r, nil
+}
+
+// newWholeInputReader infers the column types from EVERY row of the input
+// in a first pass that keeps no row — memory is one record and the per-
+// column state — and then returns a reader over the inputs opened again from
+// the start. Its types therefore read every value of the input, and no row
+// is past the sample: a refusal in the second pass means the input changed
+// between the two. The caller guarantees the inputs read the same bytes
+// when opened twice (read_csv refuses `sample_size = -1` over a FIFO or a
+// device). An input with a header and no row is all text, as the default
+// reader answers it.
+func newWholeInputReader(inputs []fileinput.Input, cfg ReaderConfig) (*Reader, error) {
+	first := &Reader{cfg: cfg, inputs: inputs}
+	var inf inference
+	n := 0
+	for {
+		rec, err := first.nextRecord()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			first.Close()
+			return nil, err
+		}
+		inf.add(rec)
+		n++
+	}
+	first.Close()
+	header := first.header
+	if !cfg.HasHeader && first.width > 0 {
+		header = make([]string, first.width)
+		for i := range header {
+			header[i] = fmt.Sprintf("col%d", i)
+		}
+	}
+	if len(header) == 0 {
+		r := &Reader{cfg: cfg, inputs: inputs, done: true}
+		return r, nil // an input with no record: no columns
+	}
+	r := NewFilesReaderWithSchema(inputs, cfg, inf.columns(header))
+	r.sampled = n
+	return r, nil
+}
+
+// NewFilesReaderWithSchema reads the inputs as columns a whole-input
+// inference over them already decided — read_csv's `sample_size = -1`,
+// whose plan read the input once to publish them — without inferring again.
+// Every row is checked against them, so an input that changed since is
+// refused, not read into them.
+func NewFilesReaderWithSchema(inputs []fileinput.Input, cfg ReaderConfig, schema []parquet.Column) *Reader {
+	r := &Reader{cfg: cfg, inputs: inputs, named: len(inputs) > 1, whole: true}
+	for _, in := range inputs {
+		r.named = r.named || in.Name != ""
+	}
+	r.schema = schema
+	r.colIdx = makeColIdx(schema)
+	return r
 }
 
 // nextRecord is the next data record of the sequence, opening the next file
@@ -454,22 +536,30 @@ func (r *Reader) buildBatch(chunk []record) (*batch.RecordBatch, error) {
 // prefixes the reader and the input.
 func (r *Reader) refusal(err error, rec record, sc parquet.Column, val string) error {
 	where := fmt.Sprintf("row %d column %q", rec.row, sc.Name)
-	sample := fmt.Sprintf("the file's first %d rows", sampleSize)
+	sample := fmt.Sprintf("the file's first %d rows", r.sampled)
 	if r.named {
 		if rec.file != "" {
 			where = rec.file + " " + where
 		}
-		sample = fmt.Sprintf("the first %d rows of the input", sampleSize)
+		sample = fmt.Sprintf("the first %d rows of the input", r.sampled)
+	}
+	hint := "; sample_size = -1 infers it from every row"
+	if r.whole {
+		sample = "every row of the input"
+		if r.sampled > 0 {
+			sample = fmt.Sprintf("all %d rows of the input", r.sampled)
+		}
+		hint = ""
 	}
 	if errors.Is(err, errOutOfRange) {
-		return sqlerr.New("22003", "%s: value %q is out of range for type %s", where, val, sqlTypeName(sc.Type))
+		return sqlerr.New("22003", "%s: value %q is out of range for type %s (the column's type was inferred from %s)%s", where, val, sqlTypeName(sc.Type), sample, hint)
 	}
 	code := "22P02"
 	if sc.Type == parquet.TypeTimestamp {
 		code = "22007" // PostgreSQL's invalid_datetime_format
 	}
-	return sqlerr.New(code, "%s: value %q (%s) is not of type %s (the column's type was inferred from %s)",
-		where, val, sqlTypeName(detectStringType(val)), sqlTypeName(sc.Type), sample)
+	return sqlerr.New(code, "%s: value %q (%s) is not of type %s (the column's type was inferred from %s)%s",
+		where, val, sqlTypeName(detectStringType(val)), sqlTypeName(sc.Type), sample, hint)
 }
 
 // writeCSVValue parses val as typ into vec at row. A field that cannot parse
@@ -614,31 +704,43 @@ func numStatusError(st kernel.NumConstStatus) error {
 	return errNotType
 }
 
-func inferCSVSchema(header []string, rows []record) []parquet.Column {
-	sample := rows[:min(sampleSize, len(rows))]
+// inference is the column types the rows added so far show: per column,
+// the promotion (promoteType) of every non-NULL field's detected type. A
+// quoted empty field is a value (the empty string), and it is text. A column
+// that is already text stays text whatever follows, so its later fields are
+// not detected at all — which is what keeps a whole-input pass affordable
+// over text-heavy files. A column with no non-NULL field is text.
+type inference struct {
+	types []parquet.TypeID
+	seen  []bool
+}
 
+func (inf *inference) add(rec record) {
+	if len(inf.types) < len(rec.fields) {
+		inf.types = append(inf.types, make([]parquet.TypeID, len(rec.fields)-len(inf.types))...)
+		inf.seen = append(inf.seen, make([]bool, len(rec.fields)-len(inf.seen))...)
+	}
+	for i, f := range rec.fields {
+		if rec.nulls != nil && rec.nulls[i] {
+			continue
+		}
+		if !inf.seen[i] {
+			inf.types[i], inf.seen[i] = detectStringType(f), true
+			continue
+		}
+		if inf.types[i] == parquet.TypeString {
+			continue
+		}
+		inf.types[i] = promoteType(inf.types[i], detectStringType(f))
+	}
+}
+
+func (inf *inference) columns(header []string) []parquet.Column {
 	cols := make([]parquet.Column, len(header))
 	for i, name := range header {
 		cols[i] = parquet.Column{Name: name, Type: parquet.TypeString, Nullable: true}
-
-		// Detect the type from the sample's non-NULL values. A quoted empty
-		// field is a value (the empty string), and it is text.
-		var detected parquet.TypeID
-		first := true
-		for _, row := range sample {
-			if i >= len(row.fields) || (row.nulls != nil && row.nulls[i]) {
-				continue
-			}
-			t := detectStringType(row.fields[i])
-			if first {
-				detected = t
-				first = false
-			} else {
-				detected = promoteType(detected, t)
-			}
-		}
-		if !first {
-			cols[i].Type = detected
+		if i < len(inf.seen) && inf.seen[i] {
+			cols[i].Type = inf.types[i]
 		}
 	}
 	return cols

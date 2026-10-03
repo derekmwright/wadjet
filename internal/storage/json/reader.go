@@ -12,6 +12,7 @@ import (
 	"math"
 	"net"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -91,8 +92,13 @@ func (r *Reader) Next() (*batch.RecordBatch, error) {
 		}
 		for _, col := range r.schema {
 			if m := checkValue(values[col.Name], col); m != nil {
-				return nil, m.refusal(col.Name, r.offset+i+1, defaultSampleSize, "")
+				return nil, m.refusal(col.Name, r.offset+i+1, inferredFrom{rows: defaultSampleSize}, "")
 			}
+		}
+		if key := absentKey(values, r.schema); key != "" {
+			from := inferredFrom{rows: defaultSampleSize}
+			return nil, sqlerr.New("22P04", "row %d: key %q is not a column of the relation (the columns were inferred from %s)%s",
+				r.offset+i+1, key, from.text(false), from.hint())
 		}
 	}
 	r.offset = end
@@ -419,8 +425,13 @@ func NewReaderFromBytesWithCoercion(data []byte) (*Reader, error) {
 	for i := defaultSampleSize; i < len(rows); i++ {
 		for _, col := range schema {
 			if m := checkValue(rows[i][col.Name], col); m != nil {
-				return nil, m.refusal(col.Name, i+1, defaultSampleSize, "")
+				return nil, m.refusal(col.Name, i+1, inferredFrom{rows: defaultSampleSize}, "")
 			}
+		}
+		if key := absentKey(rows[i], schema); key != "" {
+			from := inferredFrom{rows: defaultSampleSize}
+			return nil, sqlerr.New("22P04", "row %d: key %q is not a column of the relation (the columns were inferred from %s)%s",
+				i+1, key, from.text(false), from.hint())
 		}
 	}
 	rows = coerceRows(rows, schema)
@@ -476,6 +487,9 @@ func checkValue(v any, col parquet.Column) *mismatch {
 				return m
 			}
 		}
+		if key := absentKey(value, col.Fields); key != "" {
+			return &mismatch{value: displayValue(value[key]), path: fmt.Sprintf(" field %q", key), absent: true, want: col.Type}
+		}
 		return nil
 	default:
 		observed = detectType(v)
@@ -493,6 +507,35 @@ func checkValue(v any, col parquet.Column) *mismatch {
 	return m
 }
 
+// absentKey is the first key, in name order, of an object past the sample
+// that holds a non-NULL value and is not one of cols — a key the inference
+// never saw; "" when there is none.
+func absentKey(object map[string]any, cols []parquet.Column) string {
+	if allNamed(object, cols) {
+		return ""
+	}
+	var keys []string
+	for k, v := range object {
+		if v != nil && fieldNamed(cols, k) == nil {
+			keys = append(keys, k)
+		}
+	}
+	if len(keys) == 0 {
+		return ""
+	}
+	sort.Strings(keys)
+	return keys[0]
+}
+
+func allNamed(object map[string]any, cols []parquet.Column) bool {
+	for k := range object {
+		if fieldNamed(cols, k) == nil {
+			return false
+		}
+	}
+	return true
+}
+
 // mismatch is a value that does not fit its column: the value as the input
 // spelled it, its own type, the column's, and — inside an ARRAY or ROW
 // column — the element or field it sits at. code is the SQLSTATE
@@ -500,32 +543,68 @@ func checkValue(v any, col parquet.Column) *mismatch {
 // text: 22P02 (invalid_text_representation) unless set — 22003 for a
 // number outside the type's range, 22007 for a timestamp that does not
 // parse.
+//
+// absent marks a non-NULL value under an object field the column's record
+// type does not have — a field the inference never saw; path names it.
 type mismatch struct {
 	value, observed string
 	want            parquet.TypeID
 	path            string
 	code            string
+	absent          bool
+}
+
+// inferredFrom is what a reader's columns were inferred from: its leading
+// rows, or every row of the input (`sample_size = -1`).
+type inferredFrom struct {
+	rows  int
+	whole bool
+}
+
+// text describes it in a refusal; named is whether the input is several
+// files (or a named one), when "the file" would be ambiguous.
+func (f inferredFrom) text(named bool) string {
+	switch {
+	case f.whole && f.rows > 0:
+		return fmt.Sprintf("all %d rows of the input", f.rows)
+	case f.whole:
+		return "every row of the input"
+	case named:
+		return fmt.Sprintf("the first %d rows of the input", f.rows)
+	}
+	return fmt.Sprintf("the file's first %d rows", f.rows)
+}
+
+// hint is how a caller infers from every row instead, when it did not.
+func (f inferredFrom) hint() string {
+	if f.whole {
+		return ""
+	}
+	return "; sample_size = -1 infers it from every row"
 }
 
 // refusal is the error for a mismatch in column `name` of 1-based row `row`
 // of `file` (empty for a single input, whose name the caller supplies: it
 // prefixes the reader and the input).
-func (m *mismatch) refusal(name string, row, sampled int, file string) error {
+func (m *mismatch) refusal(name string, row int, from inferredFrom, file string) error {
 	where := fmt.Sprintf("row %d column %q%s", row, name, m.path)
-	sample := fmt.Sprintf("the file's first %d rows", sampled)
 	if file != "" {
 		where = file + " " + where
-		sample = fmt.Sprintf("the first %d rows of the input", sampled)
+	}
+	sample := from.text(file != "")
+	if m.absent {
+		return sqlerr.New("22P02", "%s: value %s is under a field the column's type (%s) does not have (the column's type was inferred from %s)%s",
+			where, m.value, sqlTypeName(m.want), sample, from.hint())
 	}
 	if m.code == "22003" {
-		return sqlerr.New("22003", "%s: value %s is out of range for type %s", where, m.value, sqlTypeName(m.want))
+		return sqlerr.New("22003", "%s: value %s is out of range for type %s (the column's type was inferred from %s)%s", where, m.value, sqlTypeName(m.want), sample, from.hint())
 	}
 	code := m.code
 	if code == "" {
 		code = "22P02"
 	}
-	return sqlerr.New(code, "%s: value %s (%s) is not of type %s (the column's type was inferred from %s)",
-		where, m.value, m.observed, sqlTypeName(m.want), sample)
+	return sqlerr.New(code, "%s: value %s (%s) is not of type %s (the column's type was inferred from %s)%s",
+		where, m.value, m.observed, sqlTypeName(m.want), sample, from.hint())
 }
 
 // displayValue renders a JSON value the way it appears in the input: a

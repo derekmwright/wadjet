@@ -10,72 +10,55 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
+// TestColumnarReaderSkipValue: keys first seen past the 100-row sample.
+// Through v0.25.3 every one of them was skipped and the row read without
+// its value (#1242, arc RD); a non-NULL value under such a key is now 22P04
+// naming the key and the row, and a JSON null under one — the NULL the
+// column would have held — is still skipped.
 func TestColumnarReaderSkipValue(t *testing.T) {
-	// Schema inference samples up to 100 rows (defaultSampleSize=100).
-	// To exercise skipValue, new columns must appear AFTER the sample window.
-	// Generate 101 rows with column "a", then row 102 introduces unknown columns.
-	var sb strings.Builder
-	for i := 0; i < 101; i++ {
-		sb.WriteString(fmt.Sprintf(`{"a":%d}`, i))
+	read := func(extra string) (int, error) {
+		var sb strings.Builder
+		for i := 0; i < 101; i++ {
+			sb.WriteString(fmt.Sprintf(`{"a":%d}`, i))
+			sb.WriteByte('\n')
+		}
+		sb.WriteString(`{"a":999` + extra + `}`)
 		sb.WriteByte('\n')
-	}
-	// Row 102: extra columns of various types that should all be skipped
-	sb.WriteString(`{"a":999,"extra_str":"hello","extra_num":42,"extra_bool":true,"extra_null":null,"extra_obj":{"x":1},"extra_arr":[1,2]}`)
-	sb.WriteByte('\n')
-
-	r, err := NewColumnarReader([]byte(sb.String()))
-	if err != nil {
-		t.Fatal(err)
-	}
-	schema := r.Schema()
-	if len(schema) != 1 || schema[0].Name != "a" {
-		t.Fatalf("expected schema with just 'a', got %v", schema)
-	}
-	// Consume all batches
-	total := 0
-	for {
-		b, err := r.Next()
+		r, err := NewColumnarReader([]byte(sb.String()))
 		if err != nil {
-			t.Fatal(err)
+			return 0, err
 		}
-		if b == nil {
-			break
+		if schema := r.Schema(); len(schema) != 1 || schema[0].Name != "a" {
+			t.Fatalf("expected schema with just 'a', got %v", schema)
 		}
-		total += b.Len
-	}
-	if total != 102 {
-		t.Fatalf("expected 102 rows, got %d", total)
-	}
-}
-
-func TestColumnarReaderSkipValueEscapedStrings(t *testing.T) {
-	// Exercise skipValue with escaped strings in both objects and arrays
-	var sb strings.Builder
-	for i := 0; i < 101; i++ {
-		sb.WriteString(fmt.Sprintf(`{"a":%d}`, i))
-		sb.WriteByte('\n')
-	}
-	// Row with extra object containing escaped string
-	sb.WriteString(`{"a":999,"extra_obj":{"key":"val\"ue"},"extra_arr":["str\"with\\escape"]}`)
-	sb.WriteByte('\n')
-
-	r, err := NewColumnarReader([]byte(sb.String()))
-	if err != nil {
-		t.Fatal(err)
-	}
-	total := 0
-	for {
-		b, err := r.Next()
-		if err != nil {
-			t.Fatal(err)
+		total := 0
+		for {
+			b, err := r.Next()
+			if err != nil {
+				return total, err
+			}
+			if b == nil {
+				return total, nil
+			}
+			total += b.Len
 		}
-		if b == nil {
-			break
-		}
-		total += b.Len
 	}
-	if total != 102 {
-		t.Fatalf("expected 102 rows, got %d", total)
+	if total, err := read(`,"extra_null":null,"other_null": null`); err != nil || total != 102 {
+		t.Fatalf("null-valued keys past the sample: %d rows, %v", total, err)
+	}
+	for _, c := range []struct{ extra, key string }{
+		{`,"extra_null":null,"extra_str":"hello","extra_num":42`, "extra_str"},
+		{`,"extra_num":42`, "extra_num"},
+		{`,"extra_bool":true`, "extra_bool"},
+		{`,"extra_obj":{"key":"val\"ue"}`, "extra_obj"},
+		{`,"extra_arr":["str\"with\\escape"]`, "extra_arr"},
+		{`,"extra_empty":""`, "extra_empty"},
+	} {
+		_, err := read(c.extra)
+		want := fmt.Sprintf(`row 102: key %q is not a column of the relation`, c.key)
+		if err == nil || !strings.Contains(err.Error(), want) || !strings.Contains(err.Error(), "sample_size = -1") {
+			t.Errorf("%s: want %q, got %v", c.extra, want, err)
+		}
 	}
 }
 

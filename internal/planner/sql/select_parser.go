@@ -1522,7 +1522,16 @@ func (p *selectParser) parseTableFunction(name string) (TableRef, error) {
 			if p.cur.typ == TokenEq {
 				key := tok.val
 				p.advance() // consume =
-				namedArgs[key] = p.cur.val
+				// A signed number is ONE value here too: `sample_size=-1`
+				// read the sign as the value and the 1 as a positional
+				// argument.
+				if (p.cur.typ == TokenMinus || p.cur.typ == TokenPlus) && p.peekN(1) == TokenNumber {
+					sign := p.cur.val
+					p.advance()
+					namedArgs[key] = sign + p.cur.val
+				} else {
+					namedArgs[key] = p.cur.val
+				}
 				p.advance() // consume value
 			} else {
 				argVal := tok.val

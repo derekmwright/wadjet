@@ -50,6 +50,7 @@ type StreamReader struct {
 	fileRow     int  // 1-based row, within the current file, of the last object
 	rows        int  // rows scanned from the whole sequence
 	sampled     int  // leading rows the schema was inferred from
+	whole       int  // a whole-input inference's rows (-1: the plan's); 0 for a sample
 	done        bool
 
 	// The sample: the leading objects, copied out of their files.
@@ -74,22 +75,141 @@ func NewStreamReader(r io.Reader) (*StreamReader, error) {
 	return newStreamReaderSized(fileinput.Reader(r), streamChunkBytes)
 }
 
+// WholeInput is the sample size that infers the schema from EVERY object of
+// the input — read_json's `sample_size = -1` — in a first pass before the
+// pass that reads it, so the input is opened twice.
+const WholeInput = -1
+
 // NewFilesReader reads a sequence of files, each its own JSON document.
 // Close releases the file it holds.
 func NewFilesReader(inputs []fileinput.Input) (*StreamReader, error) {
 	return newStreamReaderSized(inputs, streamChunkBytes)
 }
 
+// NewFilesReaderSampled is NewFilesReader inferring the schema from the
+// first sampleSize objects (still bounded by maxSampleBytes), or from every
+// object with WholeInput.
+func NewFilesReaderSampled(inputs []fileinput.Input, sampleSize int) (*StreamReader, error) {
+	if sampleSize == WholeInput {
+		return newWholeInputReader(inputs, streamChunkBytes)
+	}
+	if sampleSize <= 0 {
+		sampleSize = defaultSampleSize
+	}
+	return newStreamReaderSampled(inputs, streamChunkBytes, sampleSize)
+}
+
+// wholeInputChunk is how many bytes of objects a whole-input pass hands the
+// inference at a time.
+const wholeInputChunk = 1 << 20
+
+// newWholeInputReader infers the schema from EVERY object in a first pass
+// that keeps none of them — memory is one chunk of objects and the merged
+// shapes — and then returns a reader over the inputs opened again from the
+// start, which checks every row against that schema (none is past a sample;
+// a refusal means the input changed between the passes). A malformed object
+// ends the first pass there, and the second reports it when it reaches it,
+// after the rows before it, as the sampled reader does. The caller
+// guarantees the inputs read the same bytes when opened twice (read_json
+// refuses `sample_size = -1` over a FIFO or a device).
+func newWholeInputReader(inputs []fileinput.Input, chunkSize int) (*StreamReader, error) {
+	first := &StreamReader{inputs: inputs, chunkSize: chunkSize}
+	var inf inference
+	var chunk []byte
+	n := 0
+	flush := func() error {
+		if len(chunk) == 0 {
+			return nil
+		}
+		if _, err := inf.addObjects(chunk, false, len(chunk)); err != nil {
+			return sqlerr.New("22P02", "schema inference: %v", err)
+		}
+		chunk = chunk[:0]
+		return nil
+	}
+	for {
+		objStart, objEnd, err := first.nextObject()
+		if err != nil || objStart < 0 {
+			break
+		}
+		chunk = append(chunk, first.buf[objStart:objEnd]...)
+		chunk = append(chunk, '\n')
+		first.start = objEnd
+		n++
+		if len(chunk) >= wholeInputChunk {
+			if err := flush(); err != nil {
+				first.Close()
+				return nil, err
+			}
+		}
+	}
+	first.Close()
+	if err := flush(); err != nil {
+		return nil, err
+	}
+	schema := inf.schema()
+	sr := newSchemaReader(inputs, chunkSize, schema)
+	sr.whole = n
+	if len(schema) == 0 {
+		// No object at all, or objects with no key: the input declares no
+		// column. A malformed first object is the read's answer, as it is
+		// the sampled reader's.
+		if n == 0 {
+			if _, _, err := sr.nextObject(); err != nil {
+				sr.Close()
+				return nil, err
+			}
+		}
+		sr.Close()
+		sr.done = true
+	}
+	return sr, nil
+}
+
+// NewFilesReaderWithSchema reads the inputs as columns a whole-input
+// inference over them already decided — read_json's `sample_size = -1`,
+// whose plan read the input once to publish them — without inferring again.
+// Every row is checked against them, so an input that changed since is
+// refused, not read into them.
+func NewFilesReaderWithSchema(inputs []fileinput.Input, schema []parquet.Column) *StreamReader {
+	sr := newSchemaReader(inputs, streamChunkBytes, schema)
+	if len(schema) == 0 {
+		sr.done = true
+	}
+	return sr
+}
+
+func newSchemaReader(inputs []fileinput.Input, chunkSize int, schema []parquet.Column) *StreamReader {
+	sr := &StreamReader{inputs: inputs, chunkSize: chunkSize, named: len(inputs) > 1, whole: -1}
+	for _, in := range inputs {
+		sr.named = sr.named || in.Name != ""
+	}
+	if len(schema) == 0 {
+		return sr
+	}
+	sr.schema = schema
+	sr.colIdx = make(map[string]int, len(schema))
+	for i, col := range schema {
+		sr.colIdx[col.Name] = i
+	}
+	sr.seen = make([]bool, len(schema))
+	return sr
+}
+
 func newStreamReaderSized(inputs []fileinput.Input, chunkSize int) (*StreamReader, error) {
+	return newStreamReaderSampled(inputs, chunkSize, defaultSampleSize)
+}
+
+func newStreamReaderSampled(inputs []fileinput.Input, chunkSize, sampleSize int) (*StreamReader, error) {
 	sr := &StreamReader{inputs: inputs, chunkSize: chunkSize, named: len(inputs) > 1}
 	for _, in := range inputs {
 		sr.named = sr.named || in.Name != ""
 	}
 
-	// The sample: up to defaultSampleSize complete objects that fit in
+	// The sample: up to sampleSize complete objects that fit in
 	// maxSampleBytes, across files. A malformed input met here is reported
 	// after the rows before it, as it would be past the sample.
-	for len(sr.sample) < defaultSampleSize {
+	for len(sr.sample) < sampleSize {
 		objStart, objEnd, err := sr.nextObject()
 		if err != nil {
 			sr.sampleErr = err
@@ -121,7 +241,7 @@ func newStreamReaderSized(inputs []fileinput.Input, chunkSize int) (*StreamReade
 		sr.done = true // empty input → zero-column reader, like the eager path
 		return sr, nil
 	}
-	schema, err := inferSchemaTokens(sr.sampleBuf, false, defaultSampleSize)
+	schema, err := inferSchemaTokens(sr.sampleBuf, false, sampleSize)
 	if err != nil {
 		sr.Close()
 		return nil, sqlerr.New("22P02", "schema inference: %v", err)
@@ -199,7 +319,7 @@ func (sr *StreamReader) Next() (*batch.RecordBatch, error) {
 			sr.start = objEnd
 		}
 		sr.rows++
-		sc.fileRow, sc.sampled = sr.rows, sr.sampled
+		sc.fileRow, sc.sampled, sc.whole = sr.rows, sr.sampled, sr.whole
 		sc.fileRowBase = sr.rows - fileRow
 		if sr.named {
 			sc.file = file
