@@ -1900,14 +1900,20 @@ column of its own input (`SELECT b * 2 AS b, b AS ob`,
 `logical.WindowShadowedInput`) reads that table's DECLARED columns: the
 producer below the window emits them under their own names
 (`dagplan.materializeWindowDeclaredInput`, each definition composed down to
-the producer), so the shadowed source column is not on the stream, and every
+the producer through every derived table between them — an aliased item or a
+bare pass-through column, so a chain of derived tables or CTEs above the
+shadowing one plans as a stage DAG too), so the shadowed source column is not
+on the stream, and every
 name walk that resolves a reference from above stops at such a window instead
 of respelling it into the table's definitions — the rename sources, the
 aggregate inputs, a set operation's arm, a pushed-down filter, a shuffle key,
 the window key ladder and a join side's declared schema. A producer that
-cannot compute every declared column refuses the plan with
-`ErrUnreachableGatherOutput`, which routes it to the coordinator-local
-pipeline.
+cannot compute every declared column — an aggregate, a window, a set
+operation or a DISTINCT below the table —
+refuses the plan with `ErrUnreachableGatherOutput`, which routes it to the
+coordinator-local pipeline. On a join's BUILD side such a window arm is one
+relation's columns (`physical.armIsOneRelationsColumns`), so the gather reads
+its duplicate columns under the build alias the join qualified them with.
 
 **Not covered:** frames are carried end to end but `exec.Window` never reads
 `WindowColumn.Frame` at all (#350) — an operator defect both paths share.
