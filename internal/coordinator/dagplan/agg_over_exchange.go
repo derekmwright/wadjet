@@ -72,7 +72,9 @@ func rewireAggOverRawExchange(stages []Stage) []Stage {
 		if len(b.Exchange.ComputedCols) > 0 {
 			continue
 		}
-		if len(scanB.FusedAggGroupBy) == 0 || len(scanB.FusedAggSpecs) == 0 ||
+		// A sampled scan is a relation of its own (Stage.Sample): it is
+		// never read in place of, or served by, another scan (#1411).
+		if len(scanB.FusedAggGroupBy) == 0 || len(scanB.FusedAggSpecs) == 0 || scanB.Sample != nil ||
 			len(scanB.FilterExprs) > 0 || len(scanB.SecurityProjectExprs) > 0 ||
 			len(scanB.PartitionFilter) > 0 || scanB.Exchange != nil {
 			continue
@@ -89,7 +91,7 @@ func rewireAggOverRawExchange(stages []Stage) []Stage {
 				continue
 			}
 			scanA := scanOf(a)
-			if scanA == nil || scanA.TableName != scanB.TableName ||
+			if scanA == nil || scanA.TableName != scanB.TableName || scanA.Sample != nil ||
 				len(scanA.FilterExprs) > 0 || len(scanA.SecurityProjectExprs) > 0 ||
 				len(scanA.PartitionFilter) > 0 ||
 				len(scanA.FusedAggGroupBy) > 0 || len(scanA.FusedAggSpecs) > 0 {

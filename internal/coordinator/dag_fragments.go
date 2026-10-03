@@ -498,6 +498,9 @@ func buildScanAggregateFragment(stage dagplan.Stage, t *distributed.Task, files 
 		// over one of the nine inexpressible types needs the catalog's
 		// type here as well (#423).
 		ColumnTypes: wireColumnSpecs(stage.ScanSchema),
+		// The fused partial aggregate reads a sample of the table when the
+		// scan is sampled: the sampler runs in this OpScan (#1411).
+		Sample: wireTableSample(stage.Sample),
 	}
 	if shardCount > 1 {
 		scanOp.ScanShardIndex = shardIdx
