@@ -71,7 +71,8 @@ ADR lines 4311-4351. Catalog rows: r1, r2, r3, r4, r5, r6, r7, r8, r9. Stated in
     a previous operator materialized from a float-carried numeric (a
     derived table, DISTINCT, an aggregate, a CTE, a set operation,
     VALUES, a window, a join) rounds the double half to even (2 where
-    PostgreSQL answers 3): the cast reads its operand's category from the
+    PostgreSQL answers 3; on the stage DAG a derived table's such column
+    reads NULL, recorded separately): the cast reads its operand's category from the
     operand's own expression over the input batch's columns, and a
     materialized float64 carries none (ADR-0024 §2c). A cast whose
     operand computes the value itself — `CAST(5 / 2.0 AS INTEGER)` —
