@@ -3000,11 +3000,11 @@ SELECT * FROM flow_logs LIMIT 100
 SELECT * FROM flow_logs ORDER BY timestamp DESC LIMIT 100 OFFSET 200
 ```
 
-A count — `LIMIT`, `OFFSET`, `FETCH FIRST|NEXT … ROWS ONLY` and a
-`TABLESAMPLE` percentage — is a number, not an expression (`LIMIT 1 + 1` is a
-syntax error, 42601). A bound parameter counts: an integer parameter (an
-undeclared one is typed `bigint` in a `LIMIT`, `OFFSET` or `FETCH` count and
-`real` in a `TABLESAMPLE` percentage, PostgreSQL's types there), a numeric one
+A count — `LIMIT`, `OFFSET` and `FETCH FIRST|NEXT … ROWS ONLY` — is a
+number, not an expression (`LIMIT 1 + 1` is a syntax error, 42601). (A
+`TABLESAMPLE` argument is an expression: see [TABLESAMPLE](#tablesample).) A
+bound parameter counts: an integer parameter (an undeclared one is typed
+`bigint`, PostgreSQL's type there), a numeric one
 spelling an integer, and a float4 or float8 one, which binds as
 `CAST('<text>' AS DOUBLE PRECISION)`
 (`REAL`) and counts as the number its text spells when that text is
@@ -3015,6 +3015,37 @@ fractional or exponent `LIMIT` / `OFFSET` / `FETCH` count (`-1`, `1.5`, `1e0`),
 is refused (42601 or 42000) as its bare spelling is, and a cast text PostgreSQL's float input refuses (`'0b11'`,
 `'1_0'`) is 42601 where PostgreSQL raises 22P02, although the bare spelling
 counts (`OFFSET 0b11` skips three rows) (#1353, #1412).
+
+## TABLESAMPLE
+
+```sql
+-- About 10 % of the rows, each row kept independently
+SELECT COUNT(*) FROM flow_logs TABLESAMPLE BERNOULLI (10)
+
+-- About half of the rows, kept or dropped a batch at a time
+SELECT * FROM flow_logs TABLESAMPLE SYSTEM (50)
+```
+
+`BERNOULLI` keeps each row with the given probability; `SYSTEM` keeps or
+drops each batch of up to 2048 rows as a whole (PostgreSQL samples heap
+pages). The clause follows the table name, before its alias's column list.
+
+The argument is one expression, read as PostgreSQL 17.11 reads it: any
+expression that reads no row — `50`, `'50'`, `25 * 2`, `CAST(50 AS NUMERIC)`,
+a bound parameter (described as `real`) — coerced to `real` once, when the
+statement is planned. A value `real` cannot hold is 22003 (`1e39`, a bare
+`1e400`, `CAST('1e400' AS DOUBLE PRECISION)`, a nonzero `1e-46`), and real's
+rounding applies (`100.000001` is 100). Text, boolean or date is 42804, a
+column reference 42703, an aggregate 42803, a subquery 0A000, and an argument
+count other than one 2202H. When the scan begins, the percentage must be
+between 0 and 100: `NULL`, `NaN`, `Infinity`, `-1` and `101` are 2202H —
+over a table with no rows too. `0` samples no row and `100` every row.
+
+`REPEATABLE (seed)` is not supported (42601), and a sampled scan whose rows
+nothing reads (`… LIMIT 0`, `… WHERE false`) still checks its percentage:
+2202H where PostgreSQL answers no rows. On a cluster, a statement with a
+sampled scan runs on the coordinator's local pipeline. (#1411; catalog:
+[other#r17–r20](adr/0012-divergences/other.md#catalog))
 
 ## JOIN
 
