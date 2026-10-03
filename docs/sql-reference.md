@@ -3640,10 +3640,13 @@ where PostgreSQL prints `10` (ADR-0012 catalog, numeric-decimal r18). The
 default is computed for every row before the window runs, so a default that
 raises on a row it does not fill raises the query (`LAG(b, 1, 10 / (id - 2))`
 is `22012`; PostgreSQL answers), and a quoted one that does not coerce raises
-only when a row is read (aggregates-windows r21, r22). A wide or
-exponent-form numeric literal default (`14.0000000000000000001`, `1e300`) is
-declared double precision as the literal is elsewhere, so the result is double
-precision where PostgreSQL's is numeric.
+only when a row is read (aggregates-windows r21, r22). A typed NULL default
+is its type: `CAST(NULL AS NUMERIC)` is numeric, so a bigint value past 2^53
+keeps its digits. An exponent-form literal no DECIMAL(38,s) holds (`1e300`) is
+double precision here as it is elsewhere, so the result is double precision
+where PostgreSQL's is numeric, and a bigint value past 2^53 is rounded under it
+(`LAG(b * 1000000000000000 + 1, 1, 1e300)` answers 1e+16 for
+10000000000000001).
 
 ### Which relation a window key names
 
