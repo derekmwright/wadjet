@@ -961,6 +961,17 @@ subsumption, the aggregate-over-raw-exchange rewire); the dispatched-shape
 tests count it (`fuseScanShuffle`, dynamic-filter attachment); and the two
 paths that re-plan a table as `SELECT cols FROM t` skip it (the async door's
 build-cache pre-scan, `LargeBuildScans`; the aggregate-shuffle pre-compute).
+The async door does not probe-split a statement with a TABLESAMPLE clause
+(`plansql.HasTablesample` in `SubmitSQL`): its tasks re-plan the statement's
+text, and each would draw its own sample of every relation it reads whole
+(gate `coordinator.TestArcTBAsyncProbeSplitDrawsEachSampleOnce`).
+
+A filter's subqueries are resolved at plan time (`resolveFilterSubqueries`)
+AFTER the optimizer's `foldShortCircuitedSubqueries` has folded away the ones
+a constant decides (`false AND EXISTS (…)`, `true OR …`), so a sampled
+subquery PostgreSQL never runs is never executed here either; the EXISTS arm
+parks any coded refusal of its subquery as the statement's answer, as the
+scalar arm does.
 Gate: `coordinator.TestArcTBTablesampleArgumentOnEveryArm` (big/\*,
 delete/\*, subquery/\*, bigjoin/\*: each FROM-item cell must run on the DAG,
 not the coordinator-local route).
