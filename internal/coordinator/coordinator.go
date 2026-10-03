@@ -3783,6 +3783,14 @@ func (c *Coordinator) SubmitSQL(ctx context.Context, sql string) (queryID string
 	// Route to probe-split or single-worker pipeline (same as ExecuteSQL)
 	var probeSplitMergeInfo *logical.MergeInfo
 	probeAlias, probeFiles, canProbeSplit := dagplan.CanProbeSplit(physStages, c.workers.Count())
+	// Every probe-split task re-plans this statement's TEXT over its share of
+	// the probe's files and reads every other relation whole, so a sampled
+	// relation would be drawn once PER TASK — a build side, an IN / EXISTS /
+	// scalar subquery — and the tasks' answers would join different samples
+	// of one table (#1411 review r2 P1). One task draws each sample once.
+	if canProbeSplit && plansql.HasTablesample(sql) {
+		canProbeSplit = false
+	}
 	mergeInfo := logical.ExtractMergeInfo(logicalPlan)
 
 	if canProbeSplit && mergeInfo != nil {
