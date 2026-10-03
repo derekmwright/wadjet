@@ -153,3 +153,32 @@ func TestArcFTAColumnDeclaredFloatBeforeTheChangeStaysReal(t *testing.T) {
 		t.Errorf("a column declared FLOAT is recorded as %s, want type 4 (FLOAT64)", b)
 	}
 }
+
+// A CONTAINER'S ELEMENT TYPE IS READ BY THE SAME TABLE (#1464): ARRAY, ROW
+// and MAP element spellings resolve through the one float table, so an
+// `ARRAY(FLOAT)` element is double precision exactly as a FLOAT column is
+// (PostgreSQL 17.11: `float[]` is double precision[]). At v0.25.3 the FLOAT
+// element was float4 and REAL / FLOAT8 / DOUBLE PRECISION elements refused
+// the CREATE TABLE.
+func TestArcFTContainerElementFloatNames(t *testing.T) {
+	db, ctx := ftOpen(t)
+	if _, err := db.Query(ctx, "CREATE TABLE ft_box (a ARRAY(FLOAT), b ARRAY(DOUBLE PRECISION), r ROW(x FLOAT, y REAL), m MAP(STRING, FLOAT8))"); err != nil {
+		t.Fatalf("CREATE TABLE with float element spellings: %v", err)
+	}
+	meta, err := db.Catalog().GetTable(ctx, "ft_box")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cols := meta.Schema.Columns
+	got := []parquet.TypeID{
+		cols[0].ElementType.Type, cols[1].ElementType.Type,
+		cols[2].Fields[0].Type, cols[2].Fields[1].Type,
+		cols[3].ElementType.Fields[1].Type,
+	}
+	want := []parquet.TypeID{parquet.TypeFloat64, parquet.TypeFloat64, parquet.TypeFloat64, parquet.TypeFloat32, parquet.TypeFloat64}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("element %d is %s, want %s", i, got[i], want[i])
+		}
+	}
+}
