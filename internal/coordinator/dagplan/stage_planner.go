@@ -54,6 +54,11 @@ type StagePlanner struct {
 	// referencing subqueries for late coordinator-side substitution.
 	scalarPlaceholderSeq int
 
+	// windowAliasSeq numbers the `__winkey_alias_N` slots a window stage
+	// materializes a computed derived alias under (windowAliasSlots), across
+	// the whole query, so two window stages never mint one name.
+	windowAliasSeq int
+
 	// projScalarProducers maps a SELECT-list placeholder to the producer
 	// stage that computes it and the type that producer declares (#659).
 	// The predicate path records its edges directly on the filter-carrying
