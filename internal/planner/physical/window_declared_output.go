@@ -4,7 +4,6 @@
 package physical
 
 import (
-	"strconv"
 	"strings"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
@@ -103,6 +102,17 @@ func windowBareArgWidth(decls ColDecls, col string, carrier parquet.TypeID) parq
 }
 
 func (w *declWalk) windowSpecOutputType(node *logical.Node, we logical.WindowExpr) expr.DeclType {
+	// LAG / LEAD with a default: the common type of the value and the default
+	// (window_lag_default.go, #1435).
+	if r, ok := w.lagLeadWidening(node, we); ok && r.coerced {
+		return r.out
+	}
+	return w.windowArgOutputType(node, we)
+}
+
+// windowArgOutputType is the declaration read off the function and its
+// argument alone.
+func (w *declWalk) windowArgOutputType(node *logical.Node, we logical.WindowExpr) expr.DeclType {
 	fn := strings.ToLower(strings.TrimSpace(we.Func))
 	minMax := fn == "min" || fn == "max"
 	sumAvg := fn == "sum" || fn == "avg"
@@ -420,28 +430,17 @@ func windowExecColumn(node *logical.Node, we logical.WindowExpr, keys map[string
 				wc.LagLeadOffset = offset
 			}
 		}
-		if len(args) >= 3 {
-			defStr := args[2]
-			if ast, err := plansql.ParseExpression(defStr); err == nil {
-				if lit, ok := ast.(*plansql.Lit); ok && lit.Kind == plansql.LitNull {
-					// A NULL default is no default: the rows past the
-					// partition's edge answer NULL either way. Carried as
-					// its text it was the STRING "null", which the
-					// operator refused to store into the argument's
-					// numeric column.
-					break
+		// The default is a COLUMN the window's input carries, the value and
+		// the default both of the result's type (window_lag_default.go,
+		// #1435): resolveWindowKeys materialized them under these terms.
+		if r, ok := lagLeadWideningOf(node, we); ok {
+			if r.value != nil {
+				if k, ok := keys[r.value.String()]; ok {
+					wc.InputCol = k.Name
 				}
 			}
-			if v, err := strconv.ParseFloat(defStr, 64); err == nil {
-				wc.LagLeadDefault = v
-			} else {
-				// A string default arrives as SQL source, quotes and
-				// all; passing it through wrote 'none' — with the
-				// quotes — into the result column.
-				if len(defStr) >= 2 && strings.HasPrefix(defStr, "'") && strings.HasSuffix(defStr, "'") {
-					defStr = strings.ReplaceAll(defStr[1:len(defStr)-1], "''", "'")
-				}
-				wc.LagLeadDefault = defStr
+			if k, ok := keys[r.def.String()]; ok {
+				wc.LagLeadDefaultCol = k.Name
 			}
 		}
 	}

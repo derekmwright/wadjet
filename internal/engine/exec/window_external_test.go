@@ -331,6 +331,7 @@ func TestWindowGlobal_AllFunctions(t *testing.T) {
 		{Name: "ts", Type: parquet.TypeInt64},
 		{Name: "v", Type: parquet.TypeFloat64},
 		{Name: "s", Type: parquet.TypeString, Nullable: true},
+		{Name: "dflt", Type: parquet.TypeString},
 	}
 	ob := []SortKey{{Column: "ts", Order: Ascending}}
 	cols := []WindowColumn{
@@ -344,8 +345,8 @@ func TestWindowGlobal_AllFunctions(t *testing.T) {
 		{Func: WinAvg, InputCol: "v", OutputCol: "ravg", OutputType: parquet.TypeFloat64, OrderBy: ob},
 		{Func: WinMin, InputCol: "v", OutputCol: "rmin", OutputType: parquet.TypeFloat64, OrderBy: ob},
 		{Func: WinMax, InputCol: "v", OutputCol: "rmax", OutputType: parquet.TypeFloat64, OrderBy: ob},
-		{Func: WinLag, InputCol: "s", OutputCol: "lag2", OutputType: parquet.TypeString, OrderBy: ob, LagLeadOffset: 2, LagLeadDefault: "DFLT"},
-		{Func: WinLead, InputCol: "s", OutputCol: "lead3", OutputType: parquet.TypeString, OrderBy: ob, LagLeadOffset: 3},
+		{Func: WinLag, InputCol: "s", OutputCol: "lag2", OutputType: parquet.TypeString, OrderBy: ob, LagLeadOffset: 2, LagLeadDefaultCol: "dflt"},
+		{Func: WinLead, InputCol: "s", OutputCol: "lead3", OutputType: parquet.TypeString, OrderBy: ob, LagLeadOffset: 3, LagLeadDefaultCol: "dflt"},
 		{Func: WinFirstValue, InputCol: "s", OutputCol: "fv", OutputType: parquet.TypeString, OrderBy: ob},
 		{Func: WinLastValue, InputCol: "s", OutputCol: "lv", OutputType: parquet.TypeString, OrderBy: ob},
 		{Func: WinNthValue, InputCol: "s", OutputCol: "nth5", OutputType: parquet.TypeString, OrderBy: ob, NthValueN: 5},
@@ -364,10 +365,12 @@ func TestWindowGlobal_AllFunctions(t *testing.T) {
 			"ts": int64(i / 3), // duplicates → 3-row peer groups
 			"v":  float64(rng.Intn(1000)),
 			"s":  sv,
+			// The default is read at the row it fills (#1435).
+			"dflt": fmt.Sprintf("d%d", i),
 		})
 	}
 	runWindowBothPaths(t, schema, cols, rows, 16, []string{
-		"ts", "v", "s", "rn", "rk", "drk", "prk", "cd", "rsum", "rcnt",
+		"ts", "v", "s", "dflt", "rn", "rk", "drk", "prk", "cd", "rsum", "rcnt",
 		"ravg", "rmin", "rmax", "lag2", "lead3", "fv", "lv", "nth5", "nt"})
 }
 

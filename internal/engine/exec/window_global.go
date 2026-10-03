@@ -193,20 +193,40 @@ func writeGlobalDecAgg(vec *batch.Vector, r int, wc WindowColumn, da globalDecAg
 // globalInputIdxs resolves each group column's input column index in schema
 // (-1 when the function takes no input).
 func globalInputIdxs(schema []parquet.Column, g windowSpecGroup) []int {
+	return globalColIdxs(schema, g, func(wc WindowColumn) string { return wc.InputCol })
+}
+
+// globalDefaultIdxs resolves each group column's LAG / LEAD default column
+// (-1 for no default).
+func globalDefaultIdxs(schema []parquet.Column, g windowSpecGroup) []int {
+	return globalColIdxs(schema, g, func(wc WindowColumn) string { return wc.LagLeadDefaultCol })
+}
+
+func globalColIdxs(schema []parquet.Column, g windowSpecGroup, name func(WindowColumn) string) []int {
 	idxs := make([]int, len(g.cols))
 	for i, wc := range g.cols {
 		idxs[i] = -1
-		if wc.InputCol == "" {
+		n := name(wc)
+		if n == "" {
 			continue
 		}
 		for j, c := range schema {
-			if c.Name == wc.InputCol {
+			if c.Name == n {
 				idxs[i] = j
 				break
 			}
 		}
 	}
 	return idxs
+}
+
+// defaultAt is LAG / LEAD's default for row r of b: the current row's value
+// of the default column, nil (NULL) when there is no default (#1435).
+func (s *globalWindowStreamer) defaultAt(i int, b *batch.RecordBatch, r int) any {
+	if di := s.defaultIdxs[i]; di >= 0 && di < len(b.Columns) {
+		return b.Columns[di].GetValue(r)
+	}
+	return nil
 }
 
 // globalInputCompares resolves one boxed comparator per group column, from
@@ -354,9 +374,10 @@ type globalWindowStreamer struct {
 	stats  *globalWindowStats
 	charge func(int64)
 
-	inputIdxs []int
-	orderIdxs []int
-	compare   []kernel.SortCompareKernel
+	inputIdxs   []int
+	defaultIdxs []int
+	orderIdxs   []int
+	compare     []kernel.SortCompareKernel
 	// inputCmp[i] orders two BOXED values of group column i's input column,
 	// resolved from the declaration (see globalInputCompares). The running
 	// MIN/MAX below outlive the vector, so this is the boxed twin of
@@ -426,6 +447,7 @@ func newGlobalWindowStreamer(m *runMerger, schema []parquet.Column, g windowSpec
 	s := &globalWindowStreamer{
 		m: m, schema: schema, g: g, stats: stats, charge: charge,
 		inputIdxs:   globalInputIdxs(schema, g),
+		defaultIdxs: globalDefaultIdxs(schema, g),
 		rank:        1,
 		denseRank:   1,
 		runSum:      make([]float64, nc),
@@ -774,17 +796,15 @@ func (s *globalWindowStreamer) computeImmediate(wc WindowColumn, i int, vec *bat
 		ring := s.lagRings[i]
 		if ring == nil {
 			// Past the input's edge on every row (newGlobalWindowStreamer).
-			vec.SetValue(r, wc.LagLeadDefault)
+			vec.SetValue(r, s.defaultAt(i, nb, r))
 			return nil
 		}
 		if rowIdx >= int64(off) {
 			// SetValue is nil-safe: a nil lagged value writes NULL while
 			// still advancing bytes offsets (sequential-write contract).
 			vec.SetValue(r, ring[rowIdx%int64(off)])
-		} else if wc.LagLeadDefault != nil {
-			vec.SetValue(r, wc.LagLeadDefault)
 		} else {
-			vec.SetValue(r, nil)
+			vec.SetValue(r, s.defaultAt(i, nb, r))
 		}
 		var cur any
 		if inVec != nil {
@@ -1092,10 +1112,8 @@ func (s *globalWindowStreamer) finishEOF() error {
 					}
 				}
 				vec.SetValue(lr, v)
-			} else if wc.LagLeadDefault != nil {
-				vec.SetValue(lr, wc.LagLeadDefault)
 			} else {
-				vec.SetValue(lr, nil)
+				vec.SetValue(lr, s.defaultAt(i, pb.b, lr))
 			}
 			s.leadCursor[i]++
 		}
