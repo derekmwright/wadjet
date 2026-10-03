@@ -68,6 +68,22 @@ func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
 	// runs per row, and a WHERE over a typed date literal evaluates it once
 	// per row of the scan.
 	dest := strings.ToLower(e.DestType)
+	// A DECIMAL is boxed as its text, the same Go string a text value is, so
+	// the arms below — each reading a string box by its destination's INPUT
+	// grammar — would parse the digits as a date, a boolean, an interval, a
+	// uuid or an array literal. PostgreSQL has no cast from numeric to any of
+	// these and refuses the type pair, 42846; the operand's DECLARATION says
+	// which of the two the box is (castOperandDeclaresDecimal). So
+	// `CAST(14.0000000000000000001 AS BOOLEAN)` — a wide literal, compiled to
+	// its exact DECIMAL (WideNumericLiteral) — refuses as the float-carried
+	// literal did, and so does `CAST(n AS DATE)` over a numeric column,
+	// rather than answering 22007 / 22P02 or an interval's text; so does a
+	// scalar subquery answering a numeric.
+	if _, isText := v.(string); isText {
+		if to, refuses := numericCastRefusal(strings.TrimSpace(dest)); refuses && castOperandDeclaresDecimal(e.Operand, b) {
+			panic(fatalEval{sqlerr.New("42846", "cannot cast type numeric to %s", to)})
+		}
+	}
 	if elem, ok := ArrayCastElement(dest); ok {
 		return castToArray(v, elem, e.containerShape(b, row, v))
 	}
@@ -509,4 +525,42 @@ func intervalSourceName(v any) string {
 		return "boolean"
 	}
 	return "numeric"
+}
+
+// numericCastRefusal names, as PostgreSQL's 42846 message does, a cast
+// destination that has no conversion from numeric and whose arm reads a string
+// box by the destination's input grammar (Cast.Eval's guard).
+func numericCastRefusal(dest string) (string, bool) {
+	switch dest {
+	case "bool", "boolean":
+		return "boolean", true
+	case "date":
+		return "date", true
+	case "timestamp", "datetime":
+		return "timestamp without time zone", true
+	case "timestamptz":
+		return "timestamp with time zone", true
+	case "interval":
+		return "interval", true
+	case "uuid":
+		return "uuid", true
+	}
+	if elem, ok := ArrayCastElement(dest); ok {
+		return elem + "[]", true
+	}
+	return "", false
+}
+
+// castOperandDeclaresDecimal reports whether a cast's operand is declared
+// numeric — an exact DECIMAL operand (operandIsDecimalTyped) or a scalar
+// subquery whose declared answer is one — so a string box it produced is a
+// DECIMAL's text, not text.
+func castOperandDeclaresDecimal(e Expr, b *batch.RecordBatch) bool {
+	switch v := e.(type) {
+	case *ScalarSubquery:
+		return v.DeclKnown && v.Decl == batch.TypeDecimal
+	case *CorrelatedScalarSubquery:
+		return v.DeclKnown && v.Decl == batch.TypeDecimal
+	}
+	return operandIsDecimalTyped(e, b)
 }
