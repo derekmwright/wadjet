@@ -498,7 +498,18 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 		}
 		// For column renames (e.g., l_suppkey AS supplier_no), record the
 		// source column so Project.Execute can resolve the correct type.
-		if name != colRef {
+		//
+		// Only a RENAME has a source column. A computed item's colRef is its
+		// expression text, and Project resolves a source through
+		// columnIndexFallback, which strips everything up to the first dot:
+		// `7 / t.n AS x` resolved to the column `n` and the quotient was
+		// typed numeric(10,2) — 3.11 where the same item without its alias
+		// is 3.11111111111, and a 22003 refusal where the value is an exact
+		// DECIMAL the store will not round (`9223372036854775808 / t.n AS
+		// x`). An alias names the output; it does not change its type, so a
+		// computed item is typed as it is without one (from Expr and the
+		// planner's declaration).
+		if name != colRef && !isComputedProjection(proj.ASTExpr) {
 			pc.SourceCol = colRef
 		}
 		// A QUALIFIED reference names ONE SIDE, and the DECLARATION has to be
