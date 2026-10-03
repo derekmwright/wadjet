@@ -3207,17 +3207,24 @@ magnitude the 38-digit carrier holds, whether it is a column, an
 integer-valued expression or a `CAST` to `INTEGER`, `SMALLINT` or `BIGINT`:
 `CAST(i AS INTEGER) * 0.1` over 3 is 0.3, `CAST(i AS INTEGER) % n` over 1 and
 0.01 is 0.00, and `CAST(b AS BIGINT) * 10000000 * n - 3` over 9000000000 and
-10.00 is 899999999999999997.00, as on PostgreSQL. A quotient with an integer
-`CAST` as an operand is the exception: `CAST(i AS INTEGER) / n` is the double
-precision quotient (1.3333333333333333), where PostgreSQL answers numeric,
-because a decimal quotient keeps one scale per column
-([numeric-decimal#r19](adr/0012-divergences/numeric-decimal.md#catalog)).
+10.00 is 899999999999999997.00, as on PostgreSQL. A quotient whose integer
+operand takes its value from an integer `CAST` is the exception, whether the
+cast is the operand itself or sits under `NULLIF`, `COALESCE`, `CASE`,
+`GREATEST`, `LEAST`, `abs`, unary minus or integer arithmetic:
+`CAST(i AS INTEGER) / n` and `n / NULLIF(CAST(b AS BIGINT), 0)` are the
+double precision quotient (1.3333333333333333, 1.111111111111111e-09), where
+PostgreSQL answers numeric, because a decimal quotient keeps one scale per
+column ([numeric-decimal#r19](adr/0012-divergences/numeric-decimal.md#catalog)).
+A `numeric` value cast to `BOOLEAN`, `DATE`, `TIMESTAMP`, `INTERVAL`, `UUID`
+or an array type is refused (42846), as on PostgreSQL.
 
-A numeric constant keeps its digits wherever it is handed on — bare, inside
-`CASE`, `COALESCE`, `NULLIF`, `GREATEST` or `LEAST`, under unary minus, as a
-scalar subquery's answer, under a bare `CAST(… AS NUMERIC)`, in a window's
-argument: `COALESCE(14.0000000000000000001, 0)` is 14.0000000000000000001 and
-does not equal 14, as on PostgreSQL. A choice over it and a column prints one
+A numeric constant keeps its digits bare, inside `CASE`, `COALESCE`,
+`NULLIF`, `GREATEST` or `LEAST`, under unary minus, as a scalar subquery's
+answer, under a bare `CAST(… AS NUMERIC)` and in a window's argument:
+`COALESCE(14.0000000000000000001, 0)` is 14.0000000000000000001 and does not
+equal 14, as on PostgreSQL. An `ARRAY[…]` constructor does not keep them:
+`ARRAY[14.0000000000000000001, 1]` is `{14,1}` where PostgreSQL answers
+`{14.0000000000000000001,1}`. A choice over it and a column prints one
 scale for the column ([numeric-decimal#r18](adr/0012-divergences/numeric-decimal.md#catalog)).
 
 An explicit integer `CAST` rounds by its operand's PostgreSQL type: a
@@ -3225,7 +3232,12 @@ An explicit integer `CAST` rounds by its operand's PostgreSQL type: a
 `CAST(5 / 2.0 AS INTEGER)`, `CAST(SQRT(6.25) AS INTEGER)` and
 `CAST(POWER(2.5, 1) AS INTEGER)` are 3 (negated, -3), as on PostgreSQL, though
 the operands are computed in double precision (ADR-0024 §2c);
-`CAST(CAST(2.5 AS DOUBLE PRECISION) AS INTEGER)` is 2. A column that a derived
+`CAST(CAST(2.5 AS DOUBLE PRECISION) AS INTEGER)` is 2, and an `EXTRACT`
+inside the operand is numeric, so `CAST(extract(year FROM d) * 0 + 2.5 AS INTEGER)`
+is 3. `extract(second FROM …)` answers whole seconds here
+(`extract(second FROM TIMESTAMP '2024-01-01 00:00:02.5')` is 2 where
+PostgreSQL answers 2.500000), so its `CAST` is 2 where PostgreSQL's is 3 —
+the value the cast reads differs, not its rounding. A column that a derived
 table, a `DISTINCT`, an aggregate, a CTE, a set operation, `VALUES`, a window
 or a join produced from such a value is a double in the result and rounds
 half to even under a `CAST` (2 where PostgreSQL answers 3,
