@@ -88,6 +88,14 @@ With `t = 'hi'` and `b = '\x6869'`, `t || b` answers `hihi` (length 4) and `b ||
 
 `b || '\x41'` appends the four characters `\`, `x`, `4`, `1` here (`\x68695c783431`), where PostgreSQL reads the unknown literal as bytea and appends one byte (`\x686941`). Write `b || DECODE('41', 'hex')` to append the byte. (catalog: [text-collation#r14](adr/0012-divergences/text-collation.md#catalog))
 
+**`TABLESAMPLE SYSTEM` samples batches, not pages.**
+
+`SYSTEM (50)` keeps or drops each batch of up to 2048 rows as a whole; PostgreSQL keeps or drops heap pages. Both answer a random subset; `SYSTEM (0)` and `SYSTEM (100)` answer no row and every row on both. (catalog: [other#r20](adr/0012-divergences/other.md#catalog); #1411)
+
+**A text-typed parameter is a `TABLESAMPLE` percentage.**
+
+`TABLESAMPLE BERNOULLI ($1)` with `$1` declared text (OID 25) and bound `'100'` answers every row here; PostgreSQL raises 42804 (the argument must be real). Bind renders a text parameter as an untyped literal, which the argument reads through real's input. (catalog: [parameters-pgwire#r16](adr/0012-divergences/parameters-pgwire.md#catalog); #1411)
+
 ## Declared types
 
 **Some address and UUID functions declare text; assigned to a typed column, their text is read as a literal.**
@@ -389,6 +397,14 @@ Overflow remains recorded even after cancellation: `+9e37, +9e37, -9e37` fails h
 **An invalid string modifier in DDL echoes the upper-cased token.**
 
 `CREATE TABLE vt2 (v VARCHAR(abc))` raises 42601 as PostgreSQL does, but the message is `column "v": syntax error at or near "ABC"`: the DDL lexer folds an unquoted identifier to upper case before the type is read, while `CAST(x AS VARCHAR(abc))` echoes `"abc"`. The code and the rule are the same on both doors. (catalog: [text-collation#r10](adr/0012-divergences/text-collation.md#catalog))
+
+**A `TABLESAMPLE` percentage is checked even where no row is read.**
+
+`SELECT id FROM t TABLESAMPLE BERNOULLI (101) LIMIT 0` (or `… WHERE false`) raises 2202H here; PostgreSQL answers no rows, because its scan never begins and the range is checked when it does. This pipeline pulls the sampled scan's first batch in both shapes. Over a table with no rows both raise. (catalog: [other#r19](adr/0012-divergences/other.md#catalog); #1411)
+
+**A subquery as a `TABLESAMPLE` argument is refused.**
+
+`TABLESAMPLE BERNOULLI ((SELECT 50))` raises 0A000: the argument is evaluated once when the statement is planned, before any row exists. PostgreSQL runs the subquery first and samples at its answer. Write the constant. (catalog: [other#r18](adr/0012-divergences/other.md#catalog); #1411)
 
 ## Ordering and collation
 
@@ -795,6 +811,10 @@ PostgreSQL lets any item of a `WITH RECURSIVE` list name a LATER item; this engi
 **Some recursive terms PostgreSQL refuses are answered.**
 
 An `ORDER BY` or `LIMIT` on the whole recursive body (0A000 there), a term whose integer width differs from the seed's (`SELECT 1 UNION ALL SELECT (n + 1)::bigint …`, 42804 there — the value is range-checked into the seed's width here), a `text` term under a `varchar(n)` seed (one carrier here), and a term of the wrong type that never produces a row (42804 there at parse time; this engine checks the values the term produces) are answered here. A quoted seed (`SELECT '5' UNION ALL SELECT 2 …`) is text here and resolved from the term there, so a non-text term under it is 42804 here. The measured table is `wadjet.TestArcRCRecursiveCTESeedTypeDecidesAgainstEveryTermType`. Two seeds PostgreSQL types `numeric(p,s)` seed an unconstrained `numeric` here, so a term such as `v + 1` answers where PostgreSQL raises 42804: a scalar subquery over a `numeric(p,s)` column (`SELECT 1, (SELECT x.n FROM t x WHERE x.id = 1) UNION ALL …`; this engine declares the subquery's answer without the column's modifier), and a `numeric(38,s)` column or CAST (38 digits is the widest this engine holds). Superset, kept: none of them answers a value PostgreSQL would answer differently. (catalog: [recursion#r6, r7, r8, r9, r10, r11, r12](adr/0012-divergences/recursion.md#catalog); arc RC, arc SS)
+
+**`TABLESAMPLE … REPEATABLE (seed)`.**
+
+The repeatable-seed clause is not parsed (42601); PostgreSQL samples with the seed's sequence, so the same seed answers the same rows. (catalog: [other#r17](adr/0012-divergences/other.md#catalog); #1411)
 
 ## What is NOT on this list
 
