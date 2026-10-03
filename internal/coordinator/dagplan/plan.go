@@ -424,6 +424,14 @@ func (p *StagePlanner) PlanDistributed(ctx context.Context, node *logical.Node) 
 			}
 		}
 		for i := range renames {
+			// A computed derived alias that rides the stream in a window's
+			// slot: the column of its own name is the SOURCE it shadows.
+			if renames[i].Expr == nil {
+				if slot := p.windowAliasSlotFor(renames[i].From, renameChild); slot != "" {
+					renames[i].From = slot
+					continue
+				}
+			}
 			if materialized[strings.ToLower(renames[i].From)] {
 				continue
 			}
