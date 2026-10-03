@@ -44,18 +44,19 @@ func respellWindowKeyExprs(specs []physical.ProjectExprSpec, child *logical.Node
 
 // windowAliasSlots binds every computed derived alias one window stage reads —
 // a PARTITION BY / ORDER BY key, the argument, a reference inside a key
-// EXPRESSION — to a SYNTHETIC column the producer materializes for it.
+// EXPRESSION — to a SYNTHETIC slot, and materializes it on the producer.
 //
-// The column is never the alias's own name. The producer's stream already has
-// a column of every name it forwards, and a derived table may give an alias the
-// name of a column it also reads (`SELECT b * 2 AS b, b AS ob`): materializing
-// the alias under `b` REPLACED the forwarded `b`, so the sibling `ob` — a
-// rename of the source `b` the gather reads off the same stream — read the
-// doubled value on the DAG arms. A `__winkey_alias_N` name collides with
-// nothing a query can write (the `__winkey_` namespace is reserved,
-// sql.RefuseReservedSlotName) and with nothing the stream forwards, so the
-// window reads the alias's value and every other consumer reads what it read
-// before.
+// A materialized alias never takes the name of a column the producer already
+// forwards. A derived table may give an alias the name of a column it also
+// reads (`SELECT b * 2 AS b, b AS ob`): materializing the alias under `b`
+// REPLACED the forwarded `b`, so the sibling `ob` — a rename of the source `b`
+// the gather reads off the same stream — read the doubled value on the DAG
+// arms. Such an alias stays in its `__winkey_alias_N` slot, a name that
+// collides with nothing a query can write (the `__winkey_` namespace is
+// reserved, sql.RefuseReservedSlotName) and with nothing the stream forwards,
+// so the window reads the alias's value and every other consumer reads what
+// it read before. An alias whose name the producer does not forward is
+// materialized under that name (materialize says why).
 type windowAliasSlots struct {
 	p      *StagePlanner
 	byKey  map[string]string // lower(alias) + "\x00" + definition → slot
@@ -114,16 +115,45 @@ func (w *windowAliasSlots) bindKeyExprs(specs []physical.ProjectExprSpec, child 
 	return specs
 }
 
-// materialize projects every slot onto the producer below the window. When
-// the producer declines (it already carries a projection another pass wrote,
-// or there is none), every slot the stage names is put back to its alias's own
-// name — the spelling the stage read before slots existed.
+// materialize projects every alias onto the producer below the window.
+//
+// The slot is needed only where the alias's name is a column the producer
+// already forwards — the overwrite above. Every other alias is materialized
+// under its OWN name, once, as it was before slots existed: the stream then
+// carries the alias for every consumer above the window (the SELECT list's
+// own `z.gk`, which the DAG otherwise cannot reach and hands to the
+// coordinator-local pipeline), and the key reads the very column the query
+// projects, so an expression evaluated twice (a volatile one) cannot give the
+// key one value and the projected column another. When the producer declines
+// the projection, every alias is read under its own name.
 func (w *windowAliasSlots) materialize(stages []Stage, stage *Stage, child *logical.Node) {
-	if len(w.cols) == 0 || materializeWindowAliasKeys(stages, w.cols) {
+	if len(w.cols) == 0 {
+		return
+	}
+	producer := windowAliasProducer(stages)
+	own := map[string]string{} // slot → alias, for an alias the producer does not forward
+	for i := range w.cols {
+		slot := strings.ToLower(w.cols[i].Name)
+		if alias := w.toName[slot]; !forwardsColumn(producer, alias) {
+			own[slot] = alias
+			w.cols[i].Name = alias
+		}
+	}
+	if materializeAliasColumns(producer, w.cols) {
+		w.rename(stage, child, own)
+		return
+	}
+	w.rename(stage, child, w.toName)
+}
+
+// rename respells every slot in m (lower-cased slot → name) the stage's
+// window columns and key expressions name.
+func (w *windowAliasSlots) rename(stage *Stage, child *logical.Node, m map[string]string) {
+	if len(m) == 0 {
 		return
 	}
 	back := func(name string) string {
-		if n, ok := w.toName[strings.ToLower(name)]; ok {
+		if n, ok := m[strings.ToLower(name)]; ok {
 			return n
 		}
 		return name
@@ -147,7 +177,7 @@ func (w *windowAliasSlots) materialize(stages []Stage, stage *Stage, child *logi
 			continue
 		}
 		out, changed, complete := localPlanFacts.RewriteColRefs(ast, func(ref *plansql.ColRef) (plansql.Node, bool) {
-			if n, ok := w.toName[strings.ToLower(ref.Column)]; ok && ref.Table == "" {
+			if n, ok := m[strings.ToLower(ref.Column)]; ok && ref.Table == "" {
 				return &plansql.ColRef{Column: n}, true
 			}
 			return nil, false
