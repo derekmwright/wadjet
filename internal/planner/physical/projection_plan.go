@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"unicode"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec"
@@ -498,7 +499,19 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 		}
 		// For column renames (e.g., l_suppkey AS supplier_no), record the
 		// source column so Project.Execute can resolve the correct type.
-		if name != colRef {
+		//
+		// A COMPUTED item is not a rename: its type is the declaration walk's
+		// answer for its expression (outDecl above), as it is without the
+		// alias. Its text is recorded only for the one consumer that needs
+		// it, a GROUP BY key's identity — `typemx.g + 1 AS k` over `GROUP BY
+		// g + 1` names the aggregate's key column `g + 1` once its qualifier
+		// is erased (#738), which Project's columnIndexFallback does. Recording
+		// every aliased expression's text let that same fallback strip `7 /
+		// t.n` to its first dot and type the quotient from the column `n`:
+		// numeric(10,2), so `7 / t.n AS x` printed 3.11 and the exact
+		// quotient of a literal past int64 refused 22003, where the item
+		// without its alias and every DAG arm answer the walk's type.
+		if name != colRef && (!isComputedProjection(proj.ASTExpr) || isOverAggregate && qualifiedKeyText(colRef)) {
 			pc.SourceCol = colRef
 		}
 		// A QUALIFIED reference names ONE SIDE, and the DECLARATION has to be
@@ -629,4 +642,30 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 	}
 
 	return source, ops, sink, nil
+}
+
+// qualifiedKeyText reports whether an expression's text begins with a
+// QUALIFIER — an identifier, or a quoted name, before its first dot — so that
+// erasing it leaves the rest of the expression whole: `typemx.g + 1` is the
+// key `g + 1`. A text whose first dot sits inside the expression (`7 / t.n`,
+// `ABS(-1) * t.n`, `1.5 * g`) has no qualifier to erase, and the fallback's
+// strip would leave a fragment naming one of its operands.
+func qualifiedKeyText(text string) bool {
+	dot := strings.IndexByte(text, '.')
+	if dot <= 0 {
+		return false
+	}
+	q := text[:dot]
+	if len(q) >= 2 && q[0] == '"' && q[len(q)-1] == '"' {
+		return !strings.Contains(q[1:len(q)-1], `"`)
+	}
+	for i, r := range q {
+		switch {
+		case r == '_' || unicode.IsLetter(r):
+		case i > 0 && (unicode.IsDigit(r) || r == '$'):
+		default:
+			return false
+		}
+	}
+	return true
 }
