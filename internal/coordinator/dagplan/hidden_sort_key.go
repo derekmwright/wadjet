@@ -823,14 +823,38 @@ func derivedAliasColumnFor(name string, child *logical.Node) aliasColumn {
 // the same question: which fragments append an OpProject for
 // `Stage.ProjectExprs`.
 func materializeWindowAliasKeys(stages []Stage, cols []aliasColumn) bool {
+	return materializeAliasColumns(windowAliasProducer(stages), cols)
+}
+
+// windowAliasProducer is the stage materializeWindowAliasKeys projects onto:
+// the last projectable stage of the window's subtree, or nil.
+func windowAliasProducer(stages []Stage) *Stage {
 	var producer *Stage
 	for i := range stages {
 		if projectableProducer(stages[i].Type) {
 			producer = &stages[i]
 		}
 	}
+	return producer
+}
+
+// forwardsColumn reports whether the producer's stream already carries a
+// column of this name — the pass-through set materializeAliasColumns builds,
+// where an alias of the same name would REPLACE the forwarded column.
+func forwardsColumn(producer *Stage, name string) bool {
 	if producer == nil {
 		return false
 	}
-	return materializeAliasColumns(producer, cols)
+	source := producer.OutputColumns
+	if len(source) == 0 {
+		source = producer.Columns
+	}
+	emitted := stageEmittedColumns(producer)
+	for _, c := range source {
+		if strings.EqualFold(c, name) {
+			_, ok := emitted[strings.ToLower(c)]
+			return ok
+		}
+	}
+	return false
 }
