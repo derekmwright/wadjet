@@ -3622,7 +3622,8 @@ COMMON type of the value and the default, as on PostgreSQL
 a DATE beside a TIMESTAMP resolved to timestamp. The value may be a column or
 an expression (`LAG(b * 2, 1, d)` is double precision). A constant scalar
 subquery default (`(SELECT 9)`) answers; one that reads a table
-(`LAG(b, 1, (SELECT max(d) FROM t))`) is refused.
+(`LAG(b, 1, (SELECT max(d) FROM t))`) fails the query, with no SQLSTATE
+(ADR-0012 catalog, aggregates-windows r23).
 
 ```sql
 SELECT id, LAG(b, 1, 2.5) OVER (ORDER BY id) FROM t;   -- numeric: 2.5 on the first row, b after it
