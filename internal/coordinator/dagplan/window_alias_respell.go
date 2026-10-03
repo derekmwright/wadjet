@@ -130,6 +130,28 @@ func (w *windowAliasSlots) materialize(stages []Stage, stage *Stage, child *logi
 	if len(w.cols) == 0 {
 		return
 	}
+	for i := range w.cols {
+		alias := w.toName[strings.ToLower(w.cols[i].Name)]
+		if aliasOriginReadsAggregate(alias, child) {
+			// The producer this pass projects onto is BELOW the aggregate,
+			// where the alias cannot be computed; the fragment refused the
+			// stage at dispatch (`carries projections … that its fragment
+			// does not evaluate`). Routed to the coordinator-local pipeline
+			// — except an alias whose definition reads a window over the
+			// group rows (`MAX(b) * 2 + ROW_NUMBER() OVER (…)`), which the
+			// single-process pipeline answers NULL (filing candidate G):
+			// that one keeps the loud refusal.
+			if def, _ := derivedAliasDefinition(alias, child); def != nil && referencesSyntheticWindow(def) {
+				continue
+			}
+			if w.p.windowRouteErr == nil {
+				w.p.windowRouteErr = fmt.Errorf("%w: a window key or argument names %q, which a derived "+
+					"table computes over an aggregate's group rows and no stage below the aggregate can compute",
+					ErrUnreachableGatherOutput, alias)
+			}
+			return
+		}
+	}
 	producer := windowAliasProducer(stages)
 	own := map[string]string{} // slot → alias, for an alias the producer does not forward
 	for i := range w.cols {
