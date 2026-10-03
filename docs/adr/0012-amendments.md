@@ -938,6 +938,14 @@ Three operand kinds PostgreSQL types `numeric` rode this engine's float8 rung. A
 | numeric-decimal | [r19](0012-divergences/numeric-decimal.md#catalog) | Amended (2026-10-03): a quotient over MOD with a numeric argument keeps one scale per column as the `%` spelling does, `MOD(8, 2.5) / t.n` over 2.25 is 0.222222222222 as `(8 % 2.5) / t.n` is (9420d256: the double 0.2222222222222222 for MOD, 0.222222222222 for `%`; m/modLitFracDiv) | `coordinator.TestArcNXNumericCarrierEveryArm` (kept m/modLitFracDiv) |
 | — | — | Closed without a row (PostgreSQL's answer now, 2026-10-03): MOD with a numeric argument is mod(numeric, numeric), the exact remainder `%` computes — `MOD(t.b, 0.7)` over a bigint 30, -70, 9000000000 is 0.6, 0.0, 0.1 (9420d256: the integer 0 on every row, m/modColFracB), `MOD(t.b, 2.5)` over -70 prints 0.0 (9420d256: the integer 0, w/modBigFracCol), `MOD(8, 2.5)` is numeric 0.5 (9420d256: the double 0.5, m/modLitFrac) and `MOD(9223372036854775807, 2.5)` is 2.0 (9420d256: the double 0.5, m/modLitBigFrac) | `coordinator.TestArcNXNumericCarrierEveryArm` (m/*), `pgwire.TestArcNXNumericCarrierOnTheWire` (w/modColFracB, w/modBigFracCol), `wadjet.TestArcNXEmbeddedNumericCarrier` mod/numericDivisorExact |
 
+## 2026-10-03: the readers past the inference sample (arc RD, #1242)
+
+`read_json` read a non-NULL value under a key first seen past its 100-row sample, or under a field of a nested object first seen past it, by skipping it: at 9420d256 `SELECT * FROM read_json(f)` over 2 199 objects `{"id","a"}` and a 2 200th holding `"k": 7` answered the row as `[2200 2200]`, and `CREATE TABLE … AS` stored it so; `{"m":{"x":2200,"y":2}}` past a sample of `{"m":{"x":…}}` stored `m = {x: 2200}` (`wadjet.TestArcRDReaderPastSampleCoverage` key/\*, nested_field/\*). Both are refused now, and the readers take `sample_size` (a count, or -1 for every row), which reads such a file widened (ADR-0039 §3). PostgreSQL has no reader; COPY declares its columns.
+
+| family | row | change | gate |
+|---|---|---|---|
+| table-functions | [mechanism](0012-divergences/table-functions.md#mechanisms) | Amended: a key first seen past the sample is 22P04, a nested field 22P02; `sample_size = -1` / `N` | `wadjet.TestArcRDReaderPastSampleCoverage`, `pgwire.TestArcRDReaderPastSampleWire`, `coordinator.TestArcRDReaderPastSampleOnEveryArm` |
+
 ## Dated markers inside the entries
 
 Every `Added` / `Amended` / `CLOSED` / `Corrected` / `narrowed` marker still inside an entry's verbatim text, in date order, with the entry that carries it.

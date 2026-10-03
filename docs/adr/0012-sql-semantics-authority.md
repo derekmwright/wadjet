@@ -2156,7 +2156,9 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     PostgreSQL's bigint/float8/bool input functions. Divergences: a timestamp
     column takes only the sample's spellings and an inet column no prefix
     length (both on the differences page). A key first
-    seen past the sample remains absent. With a column list the reader is
+    seen past the sample is refused too (`22P04`, a nested field `22P02`),
+    and `sample_size = -1` types the columns from every row (ADR-0039 §3,
+    arc RD, 2026-10-03). With a column list the reader is
     an ordinary relation: an unknown column is `42703` at plan time through
     ANY path, `f.*` expands, and `SUM` over a whole-number column is `numeric`
     and `MIN`/`MAX` keep its width, which is what PostgreSQL declares for the

@@ -303,14 +303,14 @@ PAST the sample:
   value and both types:
 
   ```
-  read_json: /data/f.json: row 101 column "a": value 0.75 (double precision) is not of type bigint (the column's type was inferred from the file's first 100 rows)
+  read_json: /data/f.json: row 101 column "a": value 0.75 (double precision) is not of type bigint (the column's type was inferred from the file's first 100 rows); sample_size = -1 infers it from every row
   ```
 
   Over a glob it names the matched FILE and the row within that file (the
   sample is the first 100 rows of the files read in name order):
 
   ```
-  read_csv: /data/*.csv: /data/g2.csv row 5 column "a": value "0.75" (double precision) is not of type bigint (the column's type was inferred from the first 100 rows of the input)
+  read_csv: /data/*.csv: /data/g2.csv row 5 column "a": value "0.75" (double precision) is not of type bigint (the column's type was inferred from the first 100 rows of the input); sample_size = -1 infers it from every row
   ```
 
   A `read_csv` field is read with PostgreSQL's input function for the
@@ -326,8 +326,45 @@ PAST the sample:
 - a JSON `null` and an UNQUOTED empty CSV field are NULL; a quoted empty
   field (`""`) is the empty string, as `COPY` reads it, and a column of any
   type but `text` refuses it;
-- a key that first appears past the sample is not a column of the relation at
-  all, and a reference to it is `42703`.
+- a `read_json` KEY that first appears past the sample, holding a non-NULL
+  value, refuses the statement with `22P04` (`COPY`'s class for a record
+  with a field past the relation's last column), and so does — with
+  `22P02` — a FIELD of a nested object first seen past the sample:
+
+  ```
+  read_json: /data/f.json: row 2200: key "k" is not a column of the relation (the columns were inferred from the file's first 100 rows); sample_size = -1 infers it from every row
+  read_json: /data/f.json: row 130 column "m" field "y": value 2 is under a field the column's type (record) does not have (the column's type was inferred from the file's first 100 rows); sample_size = -1 infers it from every row
+  ```
+
+  Through v0.25.3 both were skipped and the row read without them — a
+  `CREATE TABLE AS` stored the row as if the key were absent. A JSON `null`
+  under such a key or field is read (it is the NULL the relation already
+  answers there), and a reference to a key the relation does not have is
+  `42703`.
+
+**Reading every row: `sample_size`.** Both readers take a `sample_size`
+named argument. A positive count types the columns from that many leading
+rows, held in memory as the 100-row sample is (`read_json`'s sample is still
+bounded by 8 MiB); `-1` types them from
+EVERY row, so a file whose later rows widen a column, or add a key or a
+nested field, reads with the widened type and the extra column instead of
+refusing:
+
+```sql
+SELECT SUM(a) FROM read_csv('/data/f.csv', sample_size = -1);   -- 5050.75: a is double precision
+SELECT k FROM read_json('/data/f.json', sample_size = -1);       -- k is a column; NULL before its first row
+```
+
+The types widen by the same rules the sample uses (an integer column meeting
+`0.75` is `double precision`, meeting `abc` or `true` is `text`; a column
+whose first rows are all NULL takes its first value's type). `-1` reads the
+input TWICE — a first pass that types every row and keeps none of them, then
+the read — so it costs about 2× a plain read for CSV and about 5× for JSON
+(100 MB measured: 1.5–2.0 s → 3.7–4.0 s, and 1.2 s → 5.7–6.4 s; memory is
+unchanged), and an `http(s)` input is fetched twice. Over an input that can
+be read only once — a FIFO, `/dev/stdin`, a socket, or a glob matching one —
+`-1` is `0A000`. A `sample_size` that is not a whole number of at least 1,
+or `-1`, is `22023`.
 
 A `LIMIT` answers rows when the reader never reaches the disagreeing row. The
 reader is read in batches, and a `LIMIT` reads one batch past the batch that
