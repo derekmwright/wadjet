@@ -371,11 +371,16 @@ func scalarFnDeclaredNumericDomain(n *plansql.FuncCallNode, decls ColDecls) (exp
 	if !ok || len(n.Args) != want {
 		return expr.DeclType{}, false
 	}
-	if isConstNumericLitNode(n.Args[0]) {
-		// A CONSTANT VALUE argument stays on the float path, exactly as
-		// scalarFnDeclaredDecimal keeps it there: `ABS(-1)` is a
-		// constant-folded expression and making it change type by what
-		// wrapped it is the inconsistency that arm avoids.
+	if isConstNumericLitNode(n.Args[0]) && !integerConstNode(n.Args[0]) {
+		// A fractional CONSTANT argument stays where scalarFnDeclaredDecimal
+		// puts it. An INTEGER constant is an integer argument like any
+		// other: `ABS(-1)` and `MOD(7, 3)` are integer on PostgreSQL, the
+		// kernel already answers them in the integer box (expr.absKeepsDomain,
+		// expr.funcCallIsInt), and declaring double precision for them made
+		// `ABS(-1) * t.n` a double where PostgreSQL answers numeric — right
+		// on the single-process arms only while an alias let the projection
+		// type the item from the column its text named (arc NX round 5).
+		// expr.integerCall reads the same line.
 		//
 		// Only argument 0. MOD's DIVISOR is a literal in almost every real
 		// query — `MOD(id, 3)` — and gating on it would have left the whole
@@ -494,6 +499,29 @@ func constQuotientOperandNode(node plansql.Node) bool {
 		return constQuotientOperandNode(n.Inner)
 	}
 	return isConstNumericLitNode(node)
+}
+
+// integerConstNode reports whether a numeric constant is an INTEGER one — a
+// literal int64 holds, under any unary ± — which an integer-domain function
+// (ABS, MOD) takes as an integer argument. expr.integerConstOperand is the
+// compiled twin.
+func integerConstNode(node plansql.Node) bool {
+	switch n := node.(type) {
+	case *plansql.Lit:
+		if n.Kind != plansql.LitNumber {
+			return false
+		}
+		_, err := strconv.ParseInt(strings.TrimSpace(n.Value), 10, 64)
+		return err == nil
+	case *plansql.UnaryOp:
+		if l, ok := expr.FoldedNegatedLiteral(n); ok {
+			return integerConstNode(l)
+		}
+		return (n.Op == "-" || n.Op == "+") && integerConstNode(n.Inner)
+	case *plansql.ParenNode:
+		return integerConstNode(n.Inner)
+	}
+	return false
 }
 
 func isConstNumericLitNode(node plansql.Node) bool {
