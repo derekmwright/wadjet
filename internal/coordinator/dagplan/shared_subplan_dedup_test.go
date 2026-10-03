@@ -378,6 +378,9 @@ func TestSharedSubplanDedup_StageFieldCoverage(t *testing.T) {
 		"OutputStringLength":    "refused",
 		"EmitDynamicFilters":    "refused",
 		"PreComputedAggregates": "refused", "BuildCachePreScans": "refused",
+		// Two sampled scans of one table are two independent draws (#1411):
+		// a stage carrying a TABLESAMPLE is never fingerprinted.
+		"Sample": "refused",
 		// Everything else is hashed structurally via the JSON serialization.
 		"Type": "hashed", "ClusterID": "hashed", "Tasks": "hashed",
 		"TableName": "hashed", "PartitionFilter": "hashed", "ScanFiles": "hashed",
