@@ -3222,6 +3222,11 @@ A quotient of two constants is the double too, an integer literal past the
 `bigint` range among them (`9223372036854775808 / 2` is
 4.611686018427388e+18); the same literal over a column is the one-scale
 numeric (`n / 9223372036854775808` is 0.0000000000000000002439).
+`ABS` and `MOD` over an integer constant are integer, so `ABS(-1) * n` is
+numeric. A bare `CAST(… AS NUMERIC)` is compared and chosen as the number
+it is: `LEAST(CAST(i AS NUMERIC), 100)` is 3 for 3 and `CAST(3 AS NUMERIC) >
+25` is false. An alias never changes an item's type: `7 / n AS x` is the
+same quotient as `7 / n`.
 An integer literal past the `bigint` range is `numeric`, as on PostgreSQL:
 `SELECT 9223372036854775808` keeps every digit, `-9223372036854775808` is the
 `bigint` minimum and `CAST((-9223372036854775809) AS BIGINT)` is refused
