@@ -239,6 +239,9 @@ func intArithAllInt(node plansql.Node, strictInt map[string]bool, decls ColDecls
 		default:
 			return false
 		}
+		if l, ok := expr.FoldedNegatedLiteral(n); ok {
+			return intArithAllInt(l, strictInt, decls) // the constant doNegate makes
+		}
 		return intArithAllInt(n.Inner, strictInt, decls)
 	case *plansql.ParenNode:
 		return intArithAllInt(n.Inner, strictInt, decls)
@@ -1619,6 +1622,14 @@ func nodeDeclaredTypeOf(node plansql.Node, decls ColDecls) (expr.DeclType, expr.
 		// the hidden key materializes into a typed vector rather than into
 		// text, where "-0" vs "0" rendering used to decide the order.
 		if n.Op == "-" || n.Op == "+" {
+			if l, ok := expr.FoldedNegatedLiteral(n); ok {
+				// `-9223372036854775808` is bigint and
+				// `-(-9223372036854775808)` the numeric 9223372036854775808,
+				// the minus folded into the constant as PostgreSQL's doNegate
+				// folds it (expr.FoldedNegatedLiteral, which the compile reads
+				// too).
+				return nodeDeclaredType(l, decls)
+			}
 			t, c := nodeDeclaredType(n.Inner, decls)
 			if c != expr.Undecided {
 				// A negated numeric LITERAL keeps the exact fixed-point

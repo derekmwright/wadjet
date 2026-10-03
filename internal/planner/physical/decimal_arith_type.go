@@ -82,7 +82,7 @@ func binOpDecimalOperand(n *plansql.BinaryOp, decls ColDecls) (batch.DecimalType
 		}
 		return batch.DecimalType{Precision: batch.Int64DecimalDigits}, false, true
 	}
-	if n.Op == "/" && isConstNumericLitNode(n.Left) && isConstNumericLitNode(n.Right) {
+	if n.Op == "/" && constQuotientOperandNode(n.Left) && constQuotientOperandNode(n.Right) {
 		// A division between two CONSTANTS keeps the float declaration it has
 		// always had — expr.resolveDecimalMode declines the same pair, for the
 		// reason spelled out there.
@@ -119,6 +119,9 @@ func decimalArithOperand(node plansql.Node, decls ColDecls) (batch.DecimalType, 
 	case *plansql.UnaryOp:
 		if n.Op != "-" && n.Op != "+" {
 			return batch.DecimalType{}, false, false
+		}
+		if l, ok := expr.FoldedNegatedLiteral(n); ok {
+			return decimalArithOperand(l, decls) // the constant doNegate makes
 		}
 		return decimalArithOperand(n.Inner, decls)
 	case *plansql.BinaryOp:
@@ -471,6 +474,28 @@ func scalarFnDeclaredDecimal(n *plansql.FuncCallNode, decls ColDecls) (expr.Decl
 // isConstNumericLitNode reports whether an AST node is a numeric CONSTANT — a
 // literal, or unary ± over one. expr.isConstNumericLit makes the same test one
 // layer down, over the compiled node.
+// constQuotientOperandNode is expr.constQuotientOperand over the AST: a
+// numeric literal (isConstNumericLitNode) or an INTEGER literal past int64,
+// whose quotient with another constant keeps the float declaration.
+func constQuotientOperandNode(node plansql.Node) bool {
+	switch n := node.(type) {
+	case *plansql.Lit:
+		if n.Kind == plansql.LitNumber && !strings.ContainsAny(n.Value, ".eE") {
+			return true
+		}
+	case *plansql.UnaryOp:
+		if l, ok := expr.FoldedNegatedLiteral(n); ok {
+			return constQuotientOperandNode(l)
+		}
+		if n.Op == "-" || n.Op == "+" {
+			return constQuotientOperandNode(n.Inner)
+		}
+	case *plansql.ParenNode:
+		return constQuotientOperandNode(n.Inner)
+	}
+	return isConstNumericLitNode(node)
+}
+
 func isConstNumericLitNode(node plansql.Node) bool {
 	switch n := node.(type) {
 	case *plansql.Lit:
@@ -507,6 +532,9 @@ func castMadeExactIn(node plansql.Node) bool {
 	case *plansql.ParenNode:
 		return castMadeExactIn(n.Inner)
 	case *plansql.UnaryOp:
+		if l, ok := expr.FoldedNegatedLiteral(n); ok {
+			return castMadeExactIn(l) // the constant doNegate makes
+		}
 		return (n.Op == "-" || n.Op == "+") && castMadeExactIn(n.Inner)
 	case *plansql.CastNode:
 		if n.Column || n.Answer {

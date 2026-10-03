@@ -10,6 +10,7 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
+	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
 
 // CASE/COALESCE/NULLIF/IFNULL/IF/GREATEST/LEAST must box a DECIMAL choice consistently
@@ -443,58 +444,86 @@ func constArmDecimalType(e Expr) (batch.DecimalType, bool) {
 // LiteralChoiceDecimalType is the fixed-point type a numeric LITERAL
 // contributes to a CHOICE construct's DECIMAL fold — and to every other
 // declaration of the literal (DeclNumericLit): its spelling's (p,s), ADR-0024
-// item 3 — but only when the BOX compileLit built for it carries that
-// spelling exactly.
+// item 3, whenever the DECIMAL carrier holds the spelling exactly.
 //
 // A choice CHOOSES a value and hands over whatever box the winning arm
-// produced, so the declaration is only as good as the box. An integer
-// spelling is exact whenever strconv.ParseInt took it (an int64 box); a
-// fractional or exponent spelling is exact either way — a float64 that reads
-// back as it, or, where a double cannot carry it, the spelling's own DECIMAL
-// (WideNumericLiteral, #1386), so `GREATEST(d_wide,
-// 493827160549382.7160549350)` and `COALESCE(14.0000000000000000001, 0)` keep
-// every digit, as on PostgreSQL. An integer spelling past int64 keeps the
-// float64 box it always had, and so declines here.
+// produced, so the declaration is only as good as the box. compileLit makes
+// the box exact for every spelling this answers for: a float64 where the
+// double reads back as the spelling, and the spelling's own DECIMAL — the
+// compiled CAST of its text to NUMERIC(p,s) — where it does not
+// (WideNumericLiteral, #1386). `GREATEST(d_wide, 493827160549382.7160549350)`
+// and `COALESCE(14.0000000000000000001, 0)` therefore keep every digit, as on
+// PostgreSQL.
+//
+// An INTEGER spelling is exact whenever strconv.ParseInt took it, which is
+// exactly when compileLit put an int64 in the box.
 func LiteralChoiceDecimalType(text string) (batch.DecimalType, bool) {
-	t, v, ok := litDecimal(text)
-	if !ok {
-		return batch.DecimalType{}, false
-	}
-	trimmed := strings.TrimSpace(text)
-	if _, err := strconv.ParseInt(trimmed, 10, 64); err == nil {
-		return t, true
-	}
-	if _, _, wide := WideNumericLiteral(trimmed); wide {
-		return t, true
-	}
-	f, err := strconv.ParseFloat(trimmed, 64)
-	if err != nil {
-		return batch.DecimalType{}, false
-	}
-	d, ok := batch.DecimalTextAt(strconv.FormatFloat(f, 'f', -1, 64), t.Scale)
-	if !ok || d.Residual != 0 || d.Sat != 0 || d.Unscaled != v {
-		return batch.DecimalType{}, false
-	}
-	return t, true
+	t, _, ok := litDecimal(text)
+	return t, ok
 }
 
-// WideNumericLiteral reports whether a FRACTIONAL or EXPONENT numeric
-// literal's spelling is one a float64 box cannot carry — more significant
-// digits than a double reads back — while the DECIMAL carrier holds it
-// exactly: `14.0000000000000000001`, `493827160549382.7160549350`.
-// PostgreSQL types every such literal numeric and keeps its digits wherever
-// it is handed on; compileLit compiles it to the exact DECIMAL its spelling
-// names rather than to a rounded double, and the planner's walk reads the
-// same predicate (physical.isConstNumericLitNode: such a literal is an exact
-// DECIMAL operand, not the float-path constant a narrow literal is), so the
-// declaration and the box cannot disagree. It is a function of the spelling
-// alone, so every arm — and a DAG stage that re-parses the text — decides it
-// identically. An integer spelling past int64 is not one: it keeps its float64
-// box, which the integer-domain casts read (`9223372036854775808::DATE` is
-// 22003 out of range, never a parse of the digits as a date).
+// NegatedInt64Literal is PostgreSQL's doNegate for the one spelling it
+// changes the TYPE of: an integer literal past int64 whose negation is not —
+// `-9223372036854775808` is bigint there, the minus folded into the constant
+// before it is typed. The positive spelling alone is a wide literal
+// (WideNumericLiteral), so without this the negation would be the numeric
+// -9223372036854775808. FoldedNegatedLiteral reads it for the compile and
+// the planner's UnaryOp arms.
+func NegatedInt64Literal(text string) (int64, bool) {
+	trimmed := strings.TrimSpace(text)
+	if _, err := strconv.ParseInt(trimmed, 10, 64); err == nil {
+		return 0, false
+	}
+	v, err := strconv.ParseInt("-"+trimmed, 10, 64)
+	return v, err == nil
+}
+
+// FoldedNegatedLiteral is the constant PostgreSQL's grammar makes of a unary
+// minus over the int64-minimum spelling, which it folds into the literal
+// before typing it (doNegate; parentheses make no node there, so `-(…)` folds
+// as `-…` does): `-9223372036854775808` is the bigint minimum, and
+// `-(-9223372036854775808)` strips the first minus again — the numeric
+// 9223372036854775808, never the bigint minimum negated, which has no bigint
+// (the int64 fold in compileWithCtx would wrap it to -9223372036854775808).
+// It answers the literal to compile or declare in the UnaryOp's place; every
+// other unary minus answers false and keeps its own path. The compile and the
+// planner's UnaryOp arms (physical.intArithAllInt, decimalArithOperand,
+// nodeDeclaredTypeOf) call it first, so the box and the declaration agree.
+func FoldedNegatedLiteral(n *plansql.UnaryOp) (*plansql.Lit, bool) {
+	if n.Op != "-" {
+		return nil, false
+	}
+	switch in := plansql.Unparen(n.Inner).(type) {
+	case *plansql.Lit:
+		if in.Kind != plansql.LitNumber {
+			return nil, false
+		}
+		if _, ok := NegatedInt64Literal(in.Value); ok {
+			return &plansql.Lit{Kind: plansql.LitNumber, Value: "-" + strings.TrimSpace(in.Value)}, true
+		}
+	case *plansql.UnaryOp:
+		if l, ok := FoldedNegatedLiteral(in); ok && strings.HasPrefix(l.Value, "-") {
+			return &plansql.Lit{Kind: plansql.LitNumber, Value: strings.TrimPrefix(l.Value, "-")}, true
+		}
+	}
+	return nil, false
+}
+
+// WideNumericLiteral reports whether a numeric literal's spelling is one a
+// float64 box cannot carry — more significant digits than a double reads
+// back, or an integer past int64 — while the DECIMAL carrier holds it
+// exactly: `14.0000000000000000001`, `493827160549382.7160549350`,
+// `99999999999999999999`. PostgreSQL types every such literal numeric and
+// keeps its digits wherever it is handed on; compileLit compiles it to the
+// exact DECIMAL its spelling names rather than to a rounded double, and the
+// planner's walk reads the same predicate (physical.isConstNumericLitNode:
+// such a literal is an exact DECIMAL operand, not the float-path constant a
+// narrow literal is), so the declaration and the box cannot disagree. It is a
+// function of the spelling alone, so every arm — and a DAG stage that
+// re-parses the text — decides it identically.
 func WideNumericLiteral(text string) (batch.DecimalType, string, bool) {
 	trimmed := strings.TrimSpace(text)
-	if !strings.ContainsAny(trimmed, ".eE") {
+	if _, err := strconv.ParseInt(trimmed, 10, 64); err == nil {
 		return batch.DecimalType{}, "", false
 	}
 	t, v, ok := litDecimal(trimmed)
