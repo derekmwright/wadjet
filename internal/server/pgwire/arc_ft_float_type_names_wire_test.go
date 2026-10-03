@@ -18,11 +18,13 @@ import (
 // A FLOAT COLUMN IS DOUBLE PRECISION ON THE WIRE (#1464): the RowDescription
 // OID, psql's `\d` column type (format_type, the statement psql 17 sends),
 // information_schema's data_type, the stored value read back as text, and a
-// float4 / float8 PARAMETER bound into the column — for every float spelling a
-// CREATE TABLE sent over pgwire can carry. The want lines are PostgreSQL
-// 17.11's, measured by TestArcFTWireMeasure against the same statements.
-// At v0.25.3 `c FLOAT` described as real (700, 6.75e+08) and the other
-// spellings refused the CREATE TABLE.
+// float4 / float8 PARAMETER bound into the column, and the parameter type the
+// server DESCRIBES for `$1::<spelling>` with the value bound as it — for every
+// float spelling a CREATE TABLE sent over pgwire can carry. The want lines are
+// PostgreSQL 17.11's, measured by TestArcFTWireMeasure against the same
+// statements. At v0.25.3 `c FLOAT` described as real (700, 6.75e+08), the
+// other spellings refused the CREATE TABLE, `$1::FLOAT` described its
+// parameter as 700 and `$1::FLOAT4`, `REAL`, `FLOAT8` as 0.
 
 var ftWireSpellings = []struct{ key, spell string }{
 	{"float", "FLOAT"},
@@ -40,30 +42,37 @@ var ftWireWant = []string{
 	"float: \\d c|double precision|f",
 	"float: information_schema double precision",
 	"float: CAST($1 AS FLOAT) oid=701 [674999997]",
+	"float: PREPARE $1::FLOAT params=[701] oid=701 [674999997]",
 	"float1: select oid=700 rows=[6.75e+08 6.75e+08 6.75e+08]",
 	"float1: \\d c|real|f",
 	"float1: information_schema real",
 	"float1: CAST($1 AS FLOAT(1)) oid=700 [6.75e+08]",
+	"float1: PREPARE $1::FLOAT(1) params=[700] oid=700 [6.75e+08]",
 	"float25: select oid=701 rows=[675000000 674999997 674999997]",
 	"float25: \\d c|double precision|f",
 	"float25: information_schema double precision",
 	"float25: CAST($1 AS float(25)) oid=701 [674999997]",
+	"float25: PREPARE $1::float(25) params=[701] oid=701 [674999997]",
 	"float4: select oid=700 rows=[6.75e+08 6.75e+08 6.75e+08]",
 	"float4: \\d c|real|f",
 	"float4: information_schema real",
 	"float4: CAST($1 AS FLOAT4) oid=700 [6.75e+08]",
+	"float4: PREPARE $1::FLOAT4 params=[700] oid=700 [6.75e+08]",
 	"float8: select oid=701 rows=[675000000 674999997 674999997]",
 	"float8: \\d c|double precision|f",
 	"float8: information_schema double precision",
 	"float8: CAST($1 AS FLOAT8) oid=701 [674999997]",
+	"float8: PREPARE $1::FLOAT8 params=[701] oid=701 [674999997]",
 	"real: select oid=700 rows=[6.75e+08 6.75e+08 6.75e+08]",
 	"real: \\d c|real|f",
 	"real: information_schema real",
 	"real: CAST($1 AS REAL) oid=700 [6.75e+08]",
+	"real: PREPARE $1::REAL params=[700] oid=700 [6.75e+08]",
 	"dp: select oid=701 rows=[675000000 674999997 674999997]",
 	"dp: \\d c|double precision|f",
 	"dp: information_schema double precision",
 	"dp: CAST($1 AS DOUBLE PRECISION) oid=701 [674999997]",
+	"dp: PREPARE $1::DOUBLE PRECISION params=[701] oid=701 [674999997]",
 }
 
 // ftWireRun sends every statement over conn and renders what came back.
@@ -121,6 +130,22 @@ func ftWireRun(t *testing.T, conn *pgconn.PgConn) []string {
 		}
 		cast := must("SELECT CAST($1 AS "+s.spell+")", [][]byte{[]byte("674999997")}, []uint32{701})
 		out = append(out, fmt.Sprintf("%s: CAST($1 AS %s) oid=%d %v", s.key, s.spell, cast.FieldDescriptions[0].DataTypeOID, texts(cast)))
+
+		// The SERVER's parameter type: a client that sends no OID reads the
+		// ParameterDescription and binds the value as that type (pgx does), so
+		// the described OID decides the value. At v0.25.3 `$1::FLOAT` described
+		// 700 and a bound 674999997 came back 6.75e+08; FLOAT4/REAL/FLOAT8
+		// described 0.
+		sd, err := conn.Prepare(ctx, "ftw_"+s.key, "SELECT $1::"+s.spell, nil)
+		if err != nil {
+			t.Fatalf("PREPARE $1::%s: %v", s.spell, err)
+		}
+		bound := conn.ExecPrepared(ctx, "ftw_"+s.key, [][]byte{[]byte("674999997")}, nil, nil).Read()
+		if bound.Err != nil {
+			t.Fatalf("EXECUTE $1::%s: %v", s.spell, bound.Err)
+		}
+		out = append(out, fmt.Sprintf("%s: PREPARE $1::%s params=%v oid=%d %v", s.key, s.spell, sd.ParamOIDs, bound.FieldDescriptions[0].DataTypeOID, texts(bound)))
+		conn.Exec(ctx, "DEALLOCATE ftw_"+s.key).ReadAll()
 		exec("DROP TABLE IF EXISTS "+tbl, nil, nil)
 	}
 	return out
@@ -147,8 +172,8 @@ func TestArcFTFloatTypeNamesOnTheWire(t *testing.T) {
 		t.Errorf("the wire answers differ from PostgreSQL 17.11's (with the pinned real text)\n got:\n  %s\n want:\n  %s",
 			strings.Join(got, "\n  "), strings.Join(want, "\n  "))
 	}
-	if pinned != 6 {
-		t.Fatalf("%d pinned lines, want 6", pinned)
+	if pinned != 9 {
+		t.Fatalf("%d pinned lines, want 9", pinned)
 	}
 }
 
