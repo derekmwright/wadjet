@@ -202,6 +202,119 @@ func wdCells() []wdCell {
 		wdCell{"issue/lag10part", "SELECT id, LAG(b, 10, 2.5) OVER (PARTITION BY g ORDER BY id) AS w FROM wd_t"},
 		wdCell{"issue/lead10", "SELECT id, LEAD(b, 10, 2.5) OVER (ORDER BY id) AS w FROM wd_t"},
 	)
+	return append(append(out, wdComputedValueCells()...), wdNodeKindCells()...)
+}
+
+// wdComputedValueCells: a COMPUTED value (an expression, a function, a CAST)
+// beside a default. The value's declaration is typed from its own tree, so
+// the default widens it: `LAG(b * 2, 1, d)` is double precision 1.5 where it
+// answered bigint 1, and `LEAD(CAST(d AS REAL), 1, 2.5)` answers instead of
+// failing the write.
+func wdComputedValueCells() []wdCell {
+	values := []struct{ name, v string }{
+		{"bmul", "b * 2"}, {"bplus", "b + 1"}, {"abs", "abs(b)"}, {"castbig", "CAST(b AS BIGINT)"},
+		{"iplus", "i + 0"}, {"dmul", "d * 2"}, {"real", "CAST(d AS REAL)"}, {"num37", "CAST(b AS NUMERIC(37,0))"},
+		{"num362", "CAST(b AS NUMERIC(36,2))"}, {"numu", "CAST(b AS NUMERIC)"}, {"nmul", "n * 1"},
+		{"upper", "upper(s)"}, {"castdate", "CAST(dt AS DATE)"}, {"case", "CASE WHEN b > 20 THEN b ELSE 0 END"},
+	}
+	defaults := []struct{ name, v string }{
+		{"dec", "2.5"}, {"half", "0.5"}, {"dec3", "0.125"}, {"int", "7"}, {"dcol", "d"}, {"ncol", "n"},
+		{"null", "NULL"}, {"ts", "TIMESTAMP '2020-01-01 00:00:00'"}, {"tscol", "ts"}, {"text", "'q'"},
+	}
+	var out []wdCell
+	for _, v := range values {
+		for _, d := range defaults {
+			out = append(out, wdCell{"cv/lag/" + v.name + "/" + d.name,
+				"SELECT id, LAG(" + v.v + ", 1, " + d.v + ") OVER (ORDER BY id) AS w FROM wd_t"})
+		}
+		for _, d := range defaults[:5:5] {
+			if d.name == "half" || d.name == "dec3" {
+				continue
+			}
+			out = append(out, wdCell{"cv/lead/" + v.name + "/" + d.name,
+				"SELECT id, LEAD(" + v.v + ", 1, " + d.v + ") OVER (PARTITION BY g ORDER BY id) AS w FROM wd_t"})
+		}
+	}
+	return out
+}
+
+// wdNodeKindCells: the node kinds between a window and the derived column its
+// value, default or key expression reads. LAG / LEAD materialize the widened
+// value (`cast(v as …)`) and the default as window key expressions, and on
+// the DAG arms a key expression over a COMPUTED derived alias read NULL unless
+// the window's input reached a Scan through Projects and Filters alone — a
+// JOIN (either side), a semi join, a LIMIT / OFFSET, a sort or a window
+// below answered NULL for every shifted value.
+func wdNodeKindCells() []wdCell {
+	cols := "id, g, b, b * 2 AS v, d * 2 AS e"
+	rels := []struct{ name, from string }{
+		{"project", "(SELECT " + cols + " FROM wd_t) s"},
+		{"filter", "(SELECT " + cols + " FROM wd_t WHERE id > 1) s"},
+		{"join_lcomp", "(SELECT t.id, t.g, t.b, t.b * 2 AS v, t.d * 2 AS e FROM wd_t t JOIN wd_t u ON u.id = t.id + 1) s"},
+		{"join_rcomp", "(SELECT t.id, t.g, t.b, u.b * 2 AS v, u.d * 2 AS e FROM wd_t t JOIN wd_t u ON u.id = t.id + 1) s"},
+		{"left_join", "(SELECT t.id, t.g, t.b, u.b * 2 AS v, u.d * 2 AS e FROM wd_t t LEFT JOIN wd_t u ON u.id = t.id + 1) s"},
+		{"semi_join", "(SELECT " + cols + " FROM wd_t WHERE id IN (SELECT id FROM wd_t WHERE g < 3)) s"},
+		{"limit", "(SELECT " + cols + " FROM wd_t ORDER BY id LIMIT 5) s"},
+		{"offset", "(SELECT " + cols + " FROM wd_t ORDER BY id LIMIT 10 OFFSET 1) s"},
+		{"sort", "(SELECT " + cols + " FROM wd_t ORDER BY id DESC) s"},
+		{"window", "(SELECT id, g, b, b * 2 + ROW_NUMBER() OVER (ORDER BY id) AS v, d * 2 + ROW_NUMBER() OVER (ORDER BY id) AS e FROM wd_t) s"},
+		{"aggregate", "(SELECT g AS id, g, MAX(b) AS b, MAX(b) * 2 AS v, MAX(d) * 2 AS e FROM wd_t GROUP BY g) s"},
+		{"distinct", "(SELECT DISTINCT " + cols + " FROM wd_t) s"},
+		{"union_all", "(SELECT " + cols + " FROM wd_t UNION ALL SELECT 7, 3, 70, 140, 1.5) s"},
+		{"union", "(SELECT " + cols + " FROM wd_t UNION SELECT 7, 3, 70, 140, 1.5) s"},
+		{"intersect", "(SELECT " + cols + " FROM wd_t INTERSECT SELECT " + cols + " FROM wd_t WHERE id < 5) s"},
+		{"except", "(SELECT " + cols + " FROM wd_t EXCEPT SELECT " + cols + " FROM wd_t WHERE id = 2) s"},
+		{"values", "(SELECT id, g, b, b * 2 AS v, d * 2 AS e FROM (VALUES (CAST(1 AS BIGINT), CAST(1 AS BIGINT), CAST(10 AS BIGINT), CAST(1.5 AS DOUBLE PRECISION)), (2, 1, 20, 2.5), (3, 1, NULL, NULL), (4, 2, 40, 4.5)) x(id, g, b, d)) s"},
+		{"lateral", "(SELECT t.id, t.g, t.b, l.v, l.e FROM wd_t t, LATERAL (SELECT t.b * 2 AS v, t.d * 2 AS e) l) s"},
+		{"nested", "(SELECT id, g, b, v + 1 AS v, e + 1 AS e FROM (SELECT " + cols + " FROM wd_t) s1) s"},
+		// A recursive CTE is the embedded gate's: this harness's DAG arms
+		// refuse one at base too (`stage scan-0 has no dependencies`).
+	}
+	fns := []struct{ name, f string }{
+		{"val", "LAG(v, 1, 2.5) OVER (ORDER BY id)"},
+		{"def", "LAG(b, 1, e) OVER (ORDER BY id)"},
+		{"sum", "SUM(v + 0) OVER (ORDER BY id)"},
+		{"lead", "LEAD(v, 1, e) OVER (PARTITION BY g ORDER BY id)"},
+	}
+	var out []wdCell
+	for _, r := range rels {
+		for _, f := range fns {
+			out = append(out, wdCell{"nk/" + r.name + "/" + f.name, "SELECT id, " + f.f + " AS w FROM " + r.from})
+		}
+	}
+	cte := "WITH c AS (SELECT " + cols + " FROM wd_t) SELECT id, %s AS w FROM c"
+	cteJoin := "WITH c AS (SELECT " + cols + " FROM wd_t) SELECT c.id, %s AS w FROM c JOIN wd_t u ON u.id = c.id"
+	qualified := strings.NewReplacer("(v", "(c.v", "(b", "(c.b", ", e)", ", c.e)", "BY g", "BY c.g", "BY id", "BY c.id")
+	for _, f := range fns {
+		out = append(out,
+			wdCell{"nk/cte/" + f.name, fmt.Sprintf(cte, f.f)},
+			wdCell{"nk/cte_join/" + f.name, fmt.Sprintf(cteJoin, qualified.Replace(f.f))})
+	}
+	arms := "FROM (SELECT id, g, b * 2 AS w, d * 2 AS e FROM wd_t) x JOIN (SELECT id, b * 3 AS w, d * 3 AS e FROM wd_t) y ON x.id = y.id"
+	derivedOver := func(f, from string) string { return "SELECT id, " + f + " AS w FROM " + from }
+	out = append(out,
+		wdCell{"nk/armjoin_x/val", "SELECT x.id, LAG(x.w, 1, 2.5) OVER (ORDER BY x.id) AS w " + arms},
+		wdCell{"nk/armjoin_y/val", "SELECT x.id, LAG(y.w, 1, 2.5) OVER (ORDER BY x.id) AS w " + arms},
+		wdCell{"nk/armjoin_y/def", "SELECT x.id, LAG(x.w, 1, y.e) OVER (ORDER BY x.id) AS w " + arms},
+		wdCell{"nk/armjoin_x/sum", "SELECT x.id, SUM(x.w + 0) OVER (ORDER BY x.id) AS w " + arms},
+		wdCell{"nk/armjoin_y/sum", "SELECT x.id, SUM(y.w + 0) OVER (ORDER BY x.id) AS w " + arms},
+		wdCell{"nk/armjoin_y/lead", "SELECT x.id, LEAD(y.w, 1, x.e) OVER (PARTITION BY x.g ORDER BY x.id) AS w " + arms},
+		wdCell{"nk/leftarm_y/val", "SELECT x.id, LAG(y.w, 1, 2.5) OVER (ORDER BY x.id) AS w FROM (SELECT id, g, b * 2 AS w FROM wd_t) x LEFT JOIN (SELECT id, b * 3 AS w FROM wd_t) y ON y.id = x.id + 1"},
+		wdCell{"nk/scalar_sub/val", derivedOver("LAG(v, 1, 2.5) OVER (ORDER BY id)", "(SELECT id, b * (SELECT 2) AS v FROM wd_t) s")},
+		wdCell{"nk/two_windows/val", "SELECT id, LAG(v, 1, 2.5) OVER (ORDER BY id) AS w, SUM(e + 0) OVER (ORDER BY id) AS w2 FROM (SELECT t.id, t.b * 2 AS v, t.d * 2 AS e FROM wd_t t JOIN wd_t u ON u.id = t.id + 1) s"},
+		wdCell{"nk/window_slot/sum", "SELECT id, SUM(w + 0) OVER (ORDER BY id) AS w2 FROM (SELECT id, SUM(b) OVER (PARTITION BY g) AS w FROM wd_t) s"},
+		wdCell{"nk/window_slot/val", "SELECT id, LAG(w, 1, 2.5) OVER (ORDER BY id) AS w2 FROM (SELECT id, SUM(b) OVER (PARTITION BY g) AS w FROM wd_t) s"},
+		wdCell{"nk/window_slot/part", "SELECT id, ROW_NUMBER() OVER (PARTITION BY w + 0 ORDER BY id) AS w2 FROM (SELECT id, SUM(b) OVER (PARTITION BY g) AS w FROM wd_t) s"},
+		wdCell{"nk/project/part", derivedOver("ROW_NUMBER() OVER (PARTITION BY v + 0 ORDER BY id)", "(SELECT id, b * 2 AS v FROM wd_t) s")},
+		wdCell{"nk/join_lcomp/part", derivedOver("ROW_NUMBER() OVER (PARTITION BY v % 3 ORDER BY id)", "(SELECT t.id, t.b * 2 AS v FROM wd_t t JOIN wd_t u ON u.id = t.id + 1) s")},
+		wdCell{"nk/limit/order", derivedOver("RANK() OVER (ORDER BY v * -1, id)", "(SELECT id, b * 2 AS v FROM wd_t ORDER BY id LIMIT 5) s")},
+		// A computed alias over an AGGREGATE's outputs is published by the
+		// aggregate stage itself; materializing it below the aggregate is
+		// refused, so the key reads the published alias.
+		wdCell{"nk/aggregate_comp/val", "SELECT g, LAG(v, 1, 2.5) OVER (ORDER BY g) AS w FROM (SELECT g, MAX(b) * 2 AS v FROM wd_t GROUP BY g) s"},
+		wdCell{"nk/aggregate_comp/def", "SELECT g, LAG(m, 1, e) OVER (ORDER BY g) AS w FROM (SELECT g, MAX(b) AS m, MAX(d) * 2 AS e FROM wd_t GROUP BY g) s"},
+		wdCell{"nk/nested_join/val", derivedOver("LAG(v, 1, 2.5) OVER (ORDER BY id)", "(SELECT id, v + 1 AS v FROM (SELECT t.id, t.b * 2 AS v FROM wd_t t JOIN wd_t u ON u.id = t.id + 1) s1) s2")},
+	)
 	return out
 }
 
@@ -507,6 +620,21 @@ func wdKeptCells() map[string]wdKept {
 	kept["gap/default_every_row"] = wdKept{"ERR 22012 division by zero",
 		"documented gap r21: the default is materialized as a column, evaluated on every row"}
 	kept["gap/no_rows_text"] = wdKept{"", "kept superset r22: a constant default is coerced when a row is read"}
+	// `i + 0` over an integer is declared bigint here, integer in PostgreSQL —
+	// the integer arithmetic's own width, identical in `SELECT i + 0` and
+	// `COALESCE(i + 0, 7)` at base (filing candidate 2's class).
+	for _, n := range []string{"cv/lag/iplus/int", "cv/lag/iplus/null", "cv/lead/iplus/int"} {
+		kept[n] = wdKept{"", "filing candidate: `i + 0` is declared bigint (PostgreSQL integer), as in a projection"}
+	}
+	kept["cv/lag/iplus/text"] = wdKept{"ERR 22P02 invalid input syntax for type bigint",
+		"filing candidate: `i + 0` is declared bigint, so the quoted default is read as one"}
+	// SUM over `v + 0` where v is a derived aggregate's or DISTINCT's column
+	// declares double precision here, numeric in PostgreSQL; the values agree
+	// and 978cd0e5 declared the same (a window accumulator's typing, outside
+	// the default's seam).
+	for _, n := range []string{"nk/aggregate/sum", "nk/distinct/sum"} {
+		kept[n] = wdKept{"", "filing candidate: SUM(v + 0) OVER over a derived aggregate / DISTINCT column declares double precision"}
+	}
 	for name, rows := range wdKeptRows {
 		k := kept[name]
 		k.want = rows
@@ -521,7 +649,9 @@ func wdKeptCells() map[string]wdKept {
 // v0.25.3 the default was carried as a float64 or as its SQL text and written
 // into a vector of the VALUE's type: `LAG(b, 1, 2.5)` over a bigint answered
 // 2 where PostgreSQL answers 2.5 (numeric), a text / column / CAST / `1 + 1`
-// default failed the write, and a DATE value's default answered NULL.
+// default failed the write, and a DATE value's default answered NULL. A
+// COMPUTED value (cv/) is typed from its own tree, and the widened value and
+// default read a derived column through every node kind (nk/) on the DAG arms.
 func TestArcWDWindowDefaultEveryArm(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: five arms over the LAG / LEAD default table")
@@ -586,7 +716,7 @@ func TestArcWDWindowDefaultEveryArm(t *testing.T) {
 			}
 		})
 	}
-	if len(cells) < 450 || agreeing < 400 || keptSeen != len(kept) {
+	if len(cells) < 800 || agreeing < 760 || keptSeen != len(kept) {
 		t.Fatalf("%d cells, %d agreeing with PostgreSQL, %d kept of %d: the table must discriminate",
 			len(cells), agreeing, keptSeen, len(kept))
 	}
@@ -610,4 +740,9 @@ var wdKeptRows = map[string]string{
 	"type/lead/numeric/dbl":  "type=double precision rows=6 1,2.25 | 2,NULL | 3,1e+300 | 4,5.25 | 5,1e+300 | 6,1e+300",
 	"type/lead/numeric/wide": "type=double precision rows=6 1,2.25 | 2,NULL | 3,14 | 4,5.25 | 5,14 | 6,14",
 	"gap/no_rows_text":       "type=bigint rows=0 ",
+	"cv/lag/iplus/int":       "type=bigint rows=6 1,7 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50",
+	"cv/lag/iplus/null":      "type=bigint rows=6 1,NULL | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50",
+	"cv/lead/iplus/int":      "type=bigint rows=6 1,20 | 2,NULL | 3,7 | 4,50 | 5,7 | 6,7",
+	"nk/aggregate/sum":       "type=double precision rows=3 1,40 | 2,140 | 3,260",
+	"nk/distinct/sum":        "type=double precision rows=6 1,20 | 2,60 | 3,60 | 4,140 | 5,240 | 6,360",
 }
