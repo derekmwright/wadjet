@@ -22,9 +22,9 @@ import (
 // server DESCRIBES for `$1::<spelling>` with the value bound as it — for every
 // float spelling a CREATE TABLE sent over pgwire can carry. The want lines are
 // PostgreSQL 17.11's, measured by TestArcFTWireMeasure against the same
-// statements. At v0.25.3 `c FLOAT` described as real (700, 6.75e+08), the
-// other spellings refused the CREATE TABLE, `$1::FLOAT` described its
-// parameter as 700 and `$1::FLOAT4`, `REAL`, `FLOAT8` as 0.
+// statements. At v0.25.3 `c FLOAT` described as real (700, 6.75e+08) and the
+// other spellings refused the CREATE TABLE; at 48fcdcbb `$1::FLOAT` described
+// its parameter as 700 (v0.25.3: 0).
 
 var ftWireSpellings = []struct{ key, spell string }{
 	{"float", "FLOAT"},
@@ -133,9 +133,8 @@ func ftWireRun(t *testing.T, conn *pgconn.PgConn) []string {
 
 		// The SERVER's parameter type: a client that sends no OID reads the
 		// ParameterDescription and binds the value as that type (pgx does), so
-		// the described OID decides the value. At v0.25.3 `$1::FLOAT` described
-		// 700 and a bound 674999997 came back 6.75e+08; FLOAT4/REAL/FLOAT8
-		// described 0.
+		// the described OID decides the value. At 48fcdcbb `$1::FLOAT` described
+		// 700 and a bound 674999997 came back 675000000.
 		sd, err := conn.Prepare(ctx, "ftw_"+s.key, "SELECT $1::"+s.spell, nil)
 		if err != nil {
 			t.Fatalf("PREPARE $1::%s: %v", s.spell, err)
