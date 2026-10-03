@@ -818,73 +818,6 @@ nk/limit/order	type=bigint rows=5 1,4 | 2,3 | 3,5 | 4,2 | 5,1
 nk/nested_join/val	type=numeric rows=5 1,2.5 | 2,21 | 3,41 | 4,NULL | 5,81
 nk/aggregate_comp/val	type=bigint;numeric rows=3 1,2.5 | 2,40 | 3,100
 nk/aggregate_comp/def	type=bigint;double precision rows=3 1,5 | 2,20 | 3,50
-shadow/proj/order_expr	type=bigint;bigint rows=6 1,1,10 | 2,2,20 | 3,6,NULL | 4,3,40 | 5,4,50 | 6,5,60
-shadow/proj/part_expr	type=bigint;bigint rows=6 1,2,10 | 2,2,20 | 3,1,NULL | 4,2,40 | 5,2,50 | 6,1,60
-shadow/proj/lag_def	type=numeric;bigint rows=6 1,2.5,10 | 2,20,20 | 3,40,NULL | 4,NULL,40 | 5,80,50 | 6,100,60
-shadow/proj/sum_expr	type=numeric;bigint rows=6 1,20,10 | 2,60,20 | 3,60,NULL | 4,140,40 | 5,240,50 | 6,360,60
-shadow/proj/bare_sum	type=numeric;bigint rows=6 1,20,10 | 2,60,20 | 3,60,NULL | 4,140,40 | 5,240,50 | 6,360,60
-shadow/proj/bare_part	type=bigint;bigint rows=6 1,1,10 | 2,1,20 | 3,1,NULL | 4,1,40 | 5,1,50 | 6,1,60
-shadow/proj/bare_order	type=bigint;bigint rows=6 1,1,10 | 2,2,20 | 3,6,NULL | 4,3,40 | 5,4,50 | 6,5,60
-shadow/proj/lag_nodef	type=bigint;bigint rows=6 1,NULL,10 | 2,20,20 | 3,40,NULL | 4,NULL,40 | 5,80,50 | 6,100,60
-shadow/proj/two	type=numeric;bigint rows=6 1,22,10 | 2,62,20 | 3,61,NULL | 4,142,40 | 5,242,50 | 6,361,60
-shadow/filter/order_expr	type=bigint;bigint rows=5 2,1,20 | 3,5,NULL | 4,2,40 | 5,3,50 | 6,4,60
-shadow/filter/part_expr	type=bigint;bigint rows=5 2,2,20 | 3,1,NULL | 4,1,40 | 5,2,50 | 6,1,60
-shadow/filter/lag_def	type=numeric;bigint rows=5 2,2.5,20 | 3,40,NULL | 4,NULL,40 | 5,80,50 | 6,100,60
-shadow/filter/sum_expr	type=numeric;bigint rows=5 2,40,20 | 3,40,NULL | 4,120,40 | 5,220,50 | 6,340,60
-shadow/filter/bare_sum	type=numeric;bigint rows=5 2,40,20 | 3,40,NULL | 4,120,40 | 5,220,50 | 6,340,60
-shadow/filter/bare_part	type=bigint;bigint rows=5 2,1,20 | 3,1,NULL | 4,1,40 | 5,1,50 | 6,1,60
-shadow/filter/bare_order	type=bigint;bigint rows=5 2,1,20 | 3,5,NULL | 4,2,40 | 5,3,50 | 6,4,60
-shadow/filter/lag_nodef	type=bigint;bigint rows=5 2,NULL,20 | 3,40,NULL | 4,NULL,40 | 5,80,50 | 6,100,60
-shadow/filter/two	type=numeric;bigint rows=5 2,42,20 | 3,41,NULL | 4,121,40 | 5,222,50 | 6,341,60
-shadow/sort/order_expr	type=bigint;bigint rows=6 1,1,10 | 2,2,20 | 3,6,NULL | 4,3,40 | 5,4,50 | 6,5,60
-shadow/sort/part_expr	type=bigint;bigint rows=6 1,2,10 | 2,2,20 | 3,1,NULL | 4,2,40 | 5,2,50 | 6,1,60
-shadow/sort/lag_def	type=numeric;bigint rows=6 1,2.5,10 | 2,20,20 | 3,40,NULL | 4,NULL,40 | 5,80,50 | 6,100,60
-shadow/sort/sum_expr	type=numeric;bigint rows=6 1,20,10 | 2,60,20 | 3,60,NULL | 4,140,40 | 5,240,50 | 6,360,60
-shadow/sort/bare_sum	type=numeric;bigint rows=6 1,20,10 | 2,60,20 | 3,60,NULL | 4,140,40 | 5,240,50 | 6,360,60
-shadow/sort/bare_part	type=bigint;bigint rows=6 1,1,10 | 2,1,20 | 3,1,NULL | 4,1,40 | 5,1,50 | 6,1,60
-shadow/sort/bare_order	type=bigint;bigint rows=6 1,1,10 | 2,2,20 | 3,6,NULL | 4,3,40 | 5,4,50 | 6,5,60
-shadow/sort/lag_nodef	type=bigint;bigint rows=6 1,NULL,10 | 2,20,20 | 3,40,NULL | 4,NULL,40 | 5,80,50 | 6,100,60
-shadow/sort/two	type=numeric;bigint rows=6 1,22,10 | 2,62,20 | 3,61,NULL | 4,142,40 | 5,242,50 | 6,361,60
-shadow/limit/order_expr	type=bigint;bigint rows=5 1,1,10 | 2,2,20 | 3,5,NULL | 4,3,40 | 5,4,50
-shadow/limit/part_expr	type=bigint;bigint rows=5 1,2,10 | 2,2,20 | 3,1,NULL | 4,2,40 | 5,2,50
-shadow/limit/lag_def	type=numeric;bigint rows=5 1,2.5,10 | 2,20,20 | 3,40,NULL | 4,NULL,40 | 5,80,50
-shadow/limit/sum_expr	type=numeric;bigint rows=5 1,20,10 | 2,60,20 | 3,60,NULL | 4,140,40 | 5,240,50
-shadow/limit/bare_sum	type=numeric;bigint rows=5 1,20,10 | 2,60,20 | 3,60,NULL | 4,140,40 | 5,240,50
-shadow/limit/bare_part	type=bigint;bigint rows=5 1,1,10 | 2,1,20 | 3,1,NULL | 4,1,40 | 5,1,50
-shadow/limit/bare_order	type=bigint;bigint rows=5 1,1,10 | 2,2,20 | 3,5,NULL | 4,3,40 | 5,4,50
-shadow/limit/lag_nodef	type=bigint;bigint rows=5 1,NULL,10 | 2,20,20 | 3,40,NULL | 4,NULL,40 | 5,80,50
-shadow/limit/two	type=numeric;bigint rows=5 1,22,10 | 2,62,20 | 3,61,NULL | 4,142,40 | 5,242,50
-shadow/cte/order_expr	type=bigint;bigint rows=6 1,1,10 | 2,2,20 | 3,6,NULL | 4,3,40 | 5,4,50 | 6,5,60
-shadow/cte/part_expr	type=bigint;bigint rows=6 1,2,10 | 2,2,20 | 3,1,NULL | 4,2,40 | 5,2,50 | 6,1,60
-shadow/cte/lag_def	type=numeric;bigint rows=6 1,2.5,10 | 2,20,20 | 3,40,NULL | 4,NULL,40 | 5,80,50 | 6,100,60
-shadow/cte/sum_expr	type=numeric;bigint rows=6 1,20,10 | 2,60,20 | 3,60,NULL | 4,140,40 | 5,240,50 | 6,360,60
-shadow/cte/bare_sum	type=numeric;bigint rows=6 1,20,10 | 2,60,20 | 3,60,NULL | 4,140,40 | 5,240,50 | 6,360,60
-shadow/cte/bare_part	type=bigint;bigint rows=6 1,1,10 | 2,1,20 | 3,1,NULL | 4,1,40 | 5,1,50 | 6,1,60
-shadow/cte/bare_order	type=bigint;bigint rows=6 1,1,10 | 2,2,20 | 3,6,NULL | 4,3,40 | 5,4,50 | 6,5,60
-shadow/cte/lag_nodef	type=bigint;bigint rows=6 1,NULL,10 | 2,20,20 | 3,40,NULL | 4,NULL,40 | 5,80,50 | 6,100,60
-shadow/cte/two	type=numeric;bigint rows=6 1,22,10 | 2,62,20 | 3,61,NULL | 4,142,40 | 5,242,50 | 6,361,60
-shadow/join/order_expr	type=bigint;bigint rows=6 1,1,10 | 2,2,20 | 3,6,NULL | 4,3,40 | 5,4,50 | 6,5,60
-shadow/join/part_expr	type=bigint;bigint rows=6 1,2,10 | 2,2,20 | 3,1,NULL | 4,2,40 | 5,2,50 | 6,1,60
-shadow/join/lag_def	type=numeric;bigint rows=6 1,2.5,10 | 2,20,20 | 3,40,NULL | 4,NULL,40 | 5,80,50 | 6,100,60
-shadow/join/sum_expr	type=numeric;bigint rows=6 1,20,10 | 2,60,20 | 3,60,NULL | 4,140,40 | 5,240,50 | 6,360,60
-shadow/join/bare_sum	type=numeric;bigint rows=6 1,20,10 | 2,60,20 | 3,60,NULL | 4,140,40 | 5,240,50 | 6,360,60
-shadow/join/bare_part	type=bigint;bigint rows=6 1,1,10 | 2,1,20 | 3,1,NULL | 4,1,40 | 5,1,50 | 6,1,60
-shadow/join/bare_order	type=bigint;bigint rows=6 1,1,10 | 2,2,20 | 3,6,NULL | 4,3,40 | 5,4,50 | 6,5,60
-shadow/join/lag_nodef	type=bigint;bigint rows=6 1,NULL,10 | 2,20,20 | 3,40,NULL | 4,NULL,40 | 5,80,50 | 6,100,60
-shadow/join/two	type=numeric;bigint rows=6 1,22,10 | 2,62,20 | 3,61,NULL | 4,142,40 | 5,242,50 | 6,361,60
-shadow/winbelow/order_expr	type=bigint;bigint rows=6 1,1,10 | 2,2,20 | 3,6,NULL | 4,3,40 | 5,4,50 | 6,5,60
-shadow/winbelow/part_expr	type=bigint;bigint rows=6 1,2,10 | 2,2,20 | 3,1,NULL | 4,2,40 | 5,2,50 | 6,1,60
-shadow/winbelow/lag_def	type=numeric;bigint rows=6 1,2.5,10 | 2,20,20 | 3,40,NULL | 4,NULL,40 | 5,80,50 | 6,100,60
-shadow/winbelow/sum_expr	type=numeric;bigint rows=6 1,20,10 | 2,60,20 | 3,60,NULL | 4,140,40 | 5,240,50 | 6,360,60
-shadow/winbelow/bare_sum	type=numeric;bigint rows=6 1,20,10 | 2,60,20 | 3,60,NULL | 4,140,40 | 5,240,50 | 6,360,60
-shadow/winbelow/bare_part	type=bigint;bigint rows=6 1,1,10 | 2,1,20 | 3,1,NULL | 4,1,40 | 5,1,50 | 6,1,60
-shadow/winbelow/bare_order	type=bigint;bigint rows=6 1,1,10 | 2,2,20 | 3,6,NULL | 4,3,40 | 5,4,50 | 6,5,60
-shadow/winbelow/lag_nodef	type=bigint;bigint rows=6 1,NULL,10 | 2,20,20 | 3,40,NULL | 4,NULL,40 | 5,80,50 | 6,100,60
-shadow/winbelow/two	type=numeric;bigint rows=6 1,22,10 | 2,62,20 | 3,61,NULL | 4,142,40 | 5,242,50 | 6,361,60
-shadow/proj/sum_both	type=numeric rows=6 1,30 | 2,90 | 3,90 | 4,210 | 5,360 | 6,540
-shadow/proj/lag_ob_def	type=numeric;bigint rows=6 1,2.5,10 | 2,10,20 | 3,20,NULL | 4,NULL,40 | 5,40,50 | 6,50,60
-shadow/proj/rank_part	type=bigint;bigint rows=6 1,1,10 | 2,2,20 | 3,3,NULL | 4,1,40 | 5,2,50 | 6,1,60
-shadow/d_from_b/sum_expr	type=numeric;double precision rows=6 1,10,1.5 | 2,30,2.5 | 3,30,NULL | 4,70,4.5 | 5,120,5.5 | 6,180,6.5
 aggorigin/rename/sumkey	type=bigint;numeric rows=3 1,40 | 2,140 | 3,260
 aggorigin/rename/lagdef	type=bigint;numeric rows=3 1,2.5 | 2,40 | 3,100
 aggorigin/rename/partexpr	type=bigint;bigint rows=3 1,2 | 2,2 | 3,1
@@ -930,3 +863,186 @@ aggorigin/ctl_rename2/lagdef	type=bigint;numeric rows=6 1,2.5 | 2,21 | 3,41 | 4,
 aggorigin/ctl_rename2/partexpr	type=bigint;bigint rows=6 1,2 | 2,2 | 3,1 | 4,2 | 5,2 | 6,1
 aggorigin/ctl_rename2/orderexpr	type=bigint;bigint rows=6 1,1 | 2,2 | 3,6 | 4,3 | 5,4 | 6,5
 aggorigin/win_over_agg/orderexpr	type=bigint;bigint rows=3 1,1 | 2,2 | 3,3
+shadow/proj/order_expr	type=bigint;bigint;bigint rows=6 1,1,20,10 | 2,2,40,20 | 3,6,NULL,NULL | 4,3,80,40 | 5,4,100,50 | 6,5,120,60
+shadow/proj/part_expr	type=bigint;bigint;bigint rows=6 1,2,20,10 | 2,2,40,20 | 3,1,NULL,NULL | 4,2,80,40 | 5,2,100,50 | 6,1,120,60
+shadow/proj/lag_def	type=numeric;bigint;bigint rows=6 1,2.5,20,10 | 2,20,40,20 | 3,40,NULL,NULL | 4,NULL,80,40 | 5,80,100,50 | 6,100,120,60
+shadow/proj/sum_expr	type=numeric;bigint;bigint rows=6 1,20,20,10 | 2,60,40,20 | 3,60,NULL,NULL | 4,140,80,40 | 5,240,100,50 | 6,360,120,60
+shadow/proj/bare_sum	type=numeric;bigint;bigint rows=6 1,20,20,10 | 2,60,40,20 | 3,60,NULL,NULL | 4,140,80,40 | 5,240,100,50 | 6,360,120,60
+shadow/proj/bare_part	type=bigint;bigint;bigint rows=6 1,1,20,10 | 2,1,40,20 | 3,1,NULL,NULL | 4,1,80,40 | 5,1,100,50 | 6,1,120,60
+shadow/proj/bare_order	type=bigint;bigint;bigint rows=6 1,1,20,10 | 2,2,40,20 | 3,6,NULL,NULL | 4,3,80,40 | 5,4,100,50 | 6,5,120,60
+shadow/proj/lag_nodef	type=bigint;bigint;bigint rows=6 1,NULL,20,10 | 2,20,40,20 | 3,40,NULL,NULL | 4,NULL,80,40 | 5,80,100,50 | 6,100,120,60
+shadow/proj/two	type=numeric;bigint;bigint rows=6 1,22,20,10 | 2,62,40,20 | 3,61,NULL,NULL | 4,142,80,40 | 5,242,100,50 | 6,361,120,60
+shadow/proj/rn	type=bigint;bigint;bigint rows=6 1,1,20,10 | 2,2,40,20 | 3,3,NULL,NULL | 4,4,80,40 | 5,5,100,50 | 6,6,120,60
+shadow/filter/order_expr	type=bigint;bigint;bigint rows=5 2,1,40,20 | 3,5,NULL,NULL | 4,2,80,40 | 5,3,100,50 | 6,4,120,60
+shadow/filter/part_expr	type=bigint;bigint;bigint rows=5 2,2,40,20 | 3,1,NULL,NULL | 4,1,80,40 | 5,2,100,50 | 6,1,120,60
+shadow/filter/lag_def	type=numeric;bigint;bigint rows=5 2,2.5,40,20 | 3,40,NULL,NULL | 4,NULL,80,40 | 5,80,100,50 | 6,100,120,60
+shadow/filter/sum_expr	type=numeric;bigint;bigint rows=5 2,40,40,20 | 3,40,NULL,NULL | 4,120,80,40 | 5,220,100,50 | 6,340,120,60
+shadow/filter/bare_sum	type=numeric;bigint;bigint rows=5 2,40,40,20 | 3,40,NULL,NULL | 4,120,80,40 | 5,220,100,50 | 6,340,120,60
+shadow/filter/bare_part	type=bigint;bigint;bigint rows=5 2,1,40,20 | 3,1,NULL,NULL | 4,1,80,40 | 5,1,100,50 | 6,1,120,60
+shadow/filter/bare_order	type=bigint;bigint;bigint rows=5 2,1,40,20 | 3,5,NULL,NULL | 4,2,80,40 | 5,3,100,50 | 6,4,120,60
+shadow/filter/lag_nodef	type=bigint;bigint;bigint rows=5 2,NULL,40,20 | 3,40,NULL,NULL | 4,NULL,80,40 | 5,80,100,50 | 6,100,120,60
+shadow/filter/two	type=numeric;bigint;bigint rows=5 2,42,40,20 | 3,41,NULL,NULL | 4,121,80,40 | 5,222,100,50 | 6,341,120,60
+shadow/filter/rn	type=bigint;bigint;bigint rows=5 2,1,40,20 | 3,2,NULL,NULL | 4,3,80,40 | 5,4,100,50 | 6,5,120,60
+shadow/sort/order_expr	type=bigint;bigint;bigint rows=6 1,1,20,10 | 2,2,40,20 | 3,6,NULL,NULL | 4,3,80,40 | 5,4,100,50 | 6,5,120,60
+shadow/sort/part_expr	type=bigint;bigint;bigint rows=6 1,2,20,10 | 2,2,40,20 | 3,1,NULL,NULL | 4,2,80,40 | 5,2,100,50 | 6,1,120,60
+shadow/sort/lag_def	type=numeric;bigint;bigint rows=6 1,2.5,20,10 | 2,20,40,20 | 3,40,NULL,NULL | 4,NULL,80,40 | 5,80,100,50 | 6,100,120,60
+shadow/sort/sum_expr	type=numeric;bigint;bigint rows=6 1,20,20,10 | 2,60,40,20 | 3,60,NULL,NULL | 4,140,80,40 | 5,240,100,50 | 6,360,120,60
+shadow/sort/bare_sum	type=numeric;bigint;bigint rows=6 1,20,20,10 | 2,60,40,20 | 3,60,NULL,NULL | 4,140,80,40 | 5,240,100,50 | 6,360,120,60
+shadow/sort/bare_part	type=bigint;bigint;bigint rows=6 1,1,20,10 | 2,1,40,20 | 3,1,NULL,NULL | 4,1,80,40 | 5,1,100,50 | 6,1,120,60
+shadow/sort/bare_order	type=bigint;bigint;bigint rows=6 1,1,20,10 | 2,2,40,20 | 3,6,NULL,NULL | 4,3,80,40 | 5,4,100,50 | 6,5,120,60
+shadow/sort/lag_nodef	type=bigint;bigint;bigint rows=6 1,NULL,20,10 | 2,20,40,20 | 3,40,NULL,NULL | 4,NULL,80,40 | 5,80,100,50 | 6,100,120,60
+shadow/sort/two	type=numeric;bigint;bigint rows=6 1,22,20,10 | 2,62,40,20 | 3,61,NULL,NULL | 4,142,80,40 | 5,242,100,50 | 6,361,120,60
+shadow/sort/rn	type=bigint;bigint;bigint rows=6 1,1,20,10 | 2,2,40,20 | 3,3,NULL,NULL | 4,4,80,40 | 5,5,100,50 | 6,6,120,60
+shadow/limit/order_expr	type=bigint;bigint;bigint rows=5 1,1,20,10 | 2,2,40,20 | 3,5,NULL,NULL | 4,3,80,40 | 5,4,100,50
+shadow/limit/part_expr	type=bigint;bigint;bigint rows=5 1,2,20,10 | 2,2,40,20 | 3,1,NULL,NULL | 4,2,80,40 | 5,2,100,50
+shadow/limit/lag_def	type=numeric;bigint;bigint rows=5 1,2.5,20,10 | 2,20,40,20 | 3,40,NULL,NULL | 4,NULL,80,40 | 5,80,100,50
+shadow/limit/sum_expr	type=numeric;bigint;bigint rows=5 1,20,20,10 | 2,60,40,20 | 3,60,NULL,NULL | 4,140,80,40 | 5,240,100,50
+shadow/limit/bare_sum	type=numeric;bigint;bigint rows=5 1,20,20,10 | 2,60,40,20 | 3,60,NULL,NULL | 4,140,80,40 | 5,240,100,50
+shadow/limit/bare_part	type=bigint;bigint;bigint rows=5 1,1,20,10 | 2,1,40,20 | 3,1,NULL,NULL | 4,1,80,40 | 5,1,100,50
+shadow/limit/bare_order	type=bigint;bigint;bigint rows=5 1,1,20,10 | 2,2,40,20 | 3,5,NULL,NULL | 4,3,80,40 | 5,4,100,50
+shadow/limit/lag_nodef	type=bigint;bigint;bigint rows=5 1,NULL,20,10 | 2,20,40,20 | 3,40,NULL,NULL | 4,NULL,80,40 | 5,80,100,50
+shadow/limit/two	type=numeric;bigint;bigint rows=5 1,22,20,10 | 2,62,40,20 | 3,61,NULL,NULL | 4,142,80,40 | 5,242,100,50
+shadow/limit/rn	type=bigint;bigint;bigint rows=5 1,1,20,10 | 2,2,40,20 | 3,3,NULL,NULL | 4,4,80,40 | 5,5,100,50
+shadow/cte/order_expr	type=bigint;bigint;bigint rows=6 1,1,20,10 | 2,2,40,20 | 3,6,NULL,NULL | 4,3,80,40 | 5,4,100,50 | 6,5,120,60
+shadow/cte/part_expr	type=bigint;bigint;bigint rows=6 1,2,20,10 | 2,2,40,20 | 3,1,NULL,NULL | 4,2,80,40 | 5,2,100,50 | 6,1,120,60
+shadow/cte/lag_def	type=numeric;bigint;bigint rows=6 1,2.5,20,10 | 2,20,40,20 | 3,40,NULL,NULL | 4,NULL,80,40 | 5,80,100,50 | 6,100,120,60
+shadow/cte/sum_expr	type=numeric;bigint;bigint rows=6 1,20,20,10 | 2,60,40,20 | 3,60,NULL,NULL | 4,140,80,40 | 5,240,100,50 | 6,360,120,60
+shadow/cte/bare_sum	type=numeric;bigint;bigint rows=6 1,20,20,10 | 2,60,40,20 | 3,60,NULL,NULL | 4,140,80,40 | 5,240,100,50 | 6,360,120,60
+shadow/cte/bare_part	type=bigint;bigint;bigint rows=6 1,1,20,10 | 2,1,40,20 | 3,1,NULL,NULL | 4,1,80,40 | 5,1,100,50 | 6,1,120,60
+shadow/cte/bare_order	type=bigint;bigint;bigint rows=6 1,1,20,10 | 2,2,40,20 | 3,6,NULL,NULL | 4,3,80,40 | 5,4,100,50 | 6,5,120,60
+shadow/cte/lag_nodef	type=bigint;bigint;bigint rows=6 1,NULL,20,10 | 2,20,40,20 | 3,40,NULL,NULL | 4,NULL,80,40 | 5,80,100,50 | 6,100,120,60
+shadow/cte/two	type=numeric;bigint;bigint rows=6 1,22,20,10 | 2,62,40,20 | 3,61,NULL,NULL | 4,142,80,40 | 5,242,100,50 | 6,361,120,60
+shadow/cte/rn	type=bigint;bigint;bigint rows=6 1,1,20,10 | 2,2,40,20 | 3,3,NULL,NULL | 4,4,80,40 | 5,5,100,50 | 6,6,120,60
+shadow/join/order_expr	type=bigint;bigint;bigint rows=6 1,1,20,10 | 2,2,40,20 | 3,6,NULL,NULL | 4,3,80,40 | 5,4,100,50 | 6,5,120,60
+shadow/join/part_expr	type=bigint;bigint;bigint rows=6 1,2,20,10 | 2,2,40,20 | 3,1,NULL,NULL | 4,2,80,40 | 5,2,100,50 | 6,1,120,60
+shadow/join/lag_def	type=numeric;bigint;bigint rows=6 1,2.5,20,10 | 2,20,40,20 | 3,40,NULL,NULL | 4,NULL,80,40 | 5,80,100,50 | 6,100,120,60
+shadow/join/sum_expr	type=numeric;bigint;bigint rows=6 1,20,20,10 | 2,60,40,20 | 3,60,NULL,NULL | 4,140,80,40 | 5,240,100,50 | 6,360,120,60
+shadow/join/bare_sum	type=numeric;bigint;bigint rows=6 1,20,20,10 | 2,60,40,20 | 3,60,NULL,NULL | 4,140,80,40 | 5,240,100,50 | 6,360,120,60
+shadow/join/bare_part	type=bigint;bigint;bigint rows=6 1,1,20,10 | 2,1,40,20 | 3,1,NULL,NULL | 4,1,80,40 | 5,1,100,50 | 6,1,120,60
+shadow/join/bare_order	type=bigint;bigint;bigint rows=6 1,1,20,10 | 2,2,40,20 | 3,6,NULL,NULL | 4,3,80,40 | 5,4,100,50 | 6,5,120,60
+shadow/join/lag_nodef	type=bigint;bigint;bigint rows=6 1,NULL,20,10 | 2,20,40,20 | 3,40,NULL,NULL | 4,NULL,80,40 | 5,80,100,50 | 6,100,120,60
+shadow/join/two	type=numeric;bigint;bigint rows=6 1,22,20,10 | 2,62,40,20 | 3,61,NULL,NULL | 4,142,80,40 | 5,242,100,50 | 6,361,120,60
+shadow/join/rn	type=bigint;bigint;bigint rows=6 1,1,20,10 | 2,2,40,20 | 3,3,NULL,NULL | 4,4,80,40 | 5,5,100,50 | 6,6,120,60
+shadow/winbelow/order_expr	type=bigint;bigint;bigint rows=6 1,1,20,10 | 2,2,40,20 | 3,6,NULL,NULL | 4,3,80,40 | 5,4,100,50 | 6,5,120,60
+shadow/winbelow/part_expr	type=bigint;bigint;bigint rows=6 1,2,20,10 | 2,2,40,20 | 3,1,NULL,NULL | 4,2,80,40 | 5,2,100,50 | 6,1,120,60
+shadow/winbelow/lag_def	type=numeric;bigint;bigint rows=6 1,2.5,20,10 | 2,20,40,20 | 3,40,NULL,NULL | 4,NULL,80,40 | 5,80,100,50 | 6,100,120,60
+shadow/winbelow/sum_expr	type=numeric;bigint;bigint rows=6 1,20,20,10 | 2,60,40,20 | 3,60,NULL,NULL | 4,140,80,40 | 5,240,100,50 | 6,360,120,60
+shadow/winbelow/bare_sum	type=numeric;bigint;bigint rows=6 1,20,20,10 | 2,60,40,20 | 3,60,NULL,NULL | 4,140,80,40 | 5,240,100,50 | 6,360,120,60
+shadow/winbelow/bare_part	type=bigint;bigint;bigint rows=6 1,1,20,10 | 2,1,40,20 | 3,1,NULL,NULL | 4,1,80,40 | 5,1,100,50 | 6,1,120,60
+shadow/winbelow/bare_order	type=bigint;bigint;bigint rows=6 1,1,20,10 | 2,2,40,20 | 3,6,NULL,NULL | 4,3,80,40 | 5,4,100,50 | 6,5,120,60
+shadow/winbelow/lag_nodef	type=bigint;bigint;bigint rows=6 1,NULL,20,10 | 2,20,40,20 | 3,40,NULL,NULL | 4,NULL,80,40 | 5,80,100,50 | 6,100,120,60
+shadow/winbelow/two	type=numeric;bigint;bigint rows=6 1,22,20,10 | 2,62,40,20 | 3,61,NULL,NULL | 4,142,80,40 | 5,242,100,50 | 6,361,120,60
+shadow/winbelow/rn	type=bigint;bigint;bigint rows=6 1,1,20,10 | 2,2,40,20 | 3,3,NULL,NULL | 4,4,80,40 | 5,5,100,50 | 6,6,120,60
+shadow/proj/sum_both	type=numeric rows=6 1,30 | 2,90 | 3,90 | 4,210 | 5,360 | 6,540
+shadow/proj/lag_ob_def	type=numeric;bigint rows=6 1,2.5,10 | 2,10,20 | 3,20,NULL | 4,NULL,40 | 5,40,50 | 6,50,60
+shadow/proj/rank_part	type=bigint;bigint rows=6 1,1,10 | 2,2,20 | 3,3,NULL | 4,1,40 | 5,2,50 | 6,1,60
+shadow/d_from_b/sum_expr	type=numeric;double precision rows=6 1,10,1.5 | 2,30,2.5 | 3,30,NULL | 4,70,4.5 | 5,120,5.5 | 6,180,6.5
+shadow_a/proj/issue	type=numeric;bigint rows=6 1,2.5,20 | 2,20,40 | 3,40,NULL | 4,NULL,80 | 5,80,100 | 6,100,120
+shadow_a/proj/bare_sum	type=numeric;bigint rows=6 1,20,20 | 2,60,40 | 3,60,NULL | 4,140,80 | 5,240,100 | 6,360,120
+shadow_a/proj/bare_part	type=bigint;bigint rows=6 1,1,20 | 2,1,40 | 3,1,NULL | 4,1,80 | 5,1,100 | 6,1,120
+shadow_a/proj/bare_order	type=bigint;bigint rows=6 1,1,20 | 2,2,40 | 3,6,NULL | 4,3,80 | 5,4,100 | 6,5,120
+shadow_a/proj/first	type=bigint;bigint rows=6 1,20,20 | 2,20,40 | 3,20,NULL | 4,20,80 | 5,20,100 | 6,20,120
+shadow_a/proj/lag_nodef	type=bigint;bigint rows=6 1,NULL,20 | 2,20,40 | 3,40,NULL | 4,NULL,80 | 5,80,100 | 6,100,120
+shadow_a/proj/sum_expr	type=numeric;bigint rows=6 1,20,20 | 2,60,40 | 3,60,NULL | 4,140,80 | 5,240,100 | 6,360,120
+shadow_a/proj/rn	type=bigint;bigint rows=6 1,1,20 | 2,2,40 | 3,3,NULL | 4,4,80 | 5,5,100 | 6,6,120
+shadow_a/filter/issue	type=numeric;bigint rows=5 2,2.5,40 | 3,40,NULL | 4,NULL,80 | 5,80,100 | 6,100,120
+shadow_a/filter/bare_sum	type=numeric;bigint rows=5 2,40,40 | 3,40,NULL | 4,120,80 | 5,220,100 | 6,340,120
+shadow_a/filter/bare_part	type=bigint;bigint rows=5 2,1,40 | 3,1,NULL | 4,1,80 | 5,1,100 | 6,1,120
+shadow_a/filter/bare_order	type=bigint;bigint rows=5 2,1,40 | 3,5,NULL | 4,2,80 | 5,3,100 | 6,4,120
+shadow_a/filter/first	type=bigint;bigint rows=5 2,40,40 | 3,40,NULL | 4,40,80 | 5,40,100 | 6,40,120
+shadow_a/filter/lag_nodef	type=bigint;bigint rows=5 2,NULL,40 | 3,40,NULL | 4,NULL,80 | 5,80,100 | 6,100,120
+shadow_a/filter/sum_expr	type=numeric;bigint rows=5 2,40,40 | 3,40,NULL | 4,120,80 | 5,220,100 | 6,340,120
+shadow_a/filter/rn	type=bigint;bigint rows=5 2,1,40 | 3,2,NULL | 4,3,80 | 5,4,100 | 6,5,120
+shadow_a/sort/issue	type=numeric;bigint rows=6 1,2.5,20 | 2,20,40 | 3,40,NULL | 4,NULL,80 | 5,80,100 | 6,100,120
+shadow_a/sort/bare_sum	type=numeric;bigint rows=6 1,20,20 | 2,60,40 | 3,60,NULL | 4,140,80 | 5,240,100 | 6,360,120
+shadow_a/sort/bare_part	type=bigint;bigint rows=6 1,1,20 | 2,1,40 | 3,1,NULL | 4,1,80 | 5,1,100 | 6,1,120
+shadow_a/sort/bare_order	type=bigint;bigint rows=6 1,1,20 | 2,2,40 | 3,6,NULL | 4,3,80 | 5,4,100 | 6,5,120
+shadow_a/sort/first	type=bigint;bigint rows=6 1,20,20 | 2,20,40 | 3,20,NULL | 4,20,80 | 5,20,100 | 6,20,120
+shadow_a/sort/lag_nodef	type=bigint;bigint rows=6 1,NULL,20 | 2,20,40 | 3,40,NULL | 4,NULL,80 | 5,80,100 | 6,100,120
+shadow_a/sort/sum_expr	type=numeric;bigint rows=6 1,20,20 | 2,60,40 | 3,60,NULL | 4,140,80 | 5,240,100 | 6,360,120
+shadow_a/sort/rn	type=bigint;bigint rows=6 1,1,20 | 2,2,40 | 3,3,NULL | 4,4,80 | 5,5,100 | 6,6,120
+shadow_a/limit/issue	type=numeric;bigint rows=5 1,2.5,20 | 2,20,40 | 3,40,NULL | 4,NULL,80 | 5,80,100
+shadow_a/limit/bare_sum	type=numeric;bigint rows=5 1,20,20 | 2,60,40 | 3,60,NULL | 4,140,80 | 5,240,100
+shadow_a/limit/bare_part	type=bigint;bigint rows=5 1,1,20 | 2,1,40 | 3,1,NULL | 4,1,80 | 5,1,100
+shadow_a/limit/bare_order	type=bigint;bigint rows=5 1,1,20 | 2,2,40 | 3,5,NULL | 4,3,80 | 5,4,100
+shadow_a/limit/first	type=bigint;bigint rows=5 1,20,20 | 2,20,40 | 3,20,NULL | 4,20,80 | 5,20,100
+shadow_a/limit/lag_nodef	type=bigint;bigint rows=5 1,NULL,20 | 2,20,40 | 3,40,NULL | 4,NULL,80 | 5,80,100
+shadow_a/limit/sum_expr	type=numeric;bigint rows=5 1,20,20 | 2,60,40 | 3,60,NULL | 4,140,80 | 5,240,100
+shadow_a/limit/rn	type=bigint;bigint rows=5 1,1,20 | 2,2,40 | 3,3,NULL | 4,4,80 | 5,5,100
+shadow_a/cte/issue	type=numeric;bigint rows=6 1,2.5,20 | 2,20,40 | 3,40,NULL | 4,NULL,80 | 5,80,100 | 6,100,120
+shadow_a/cte/bare_sum	type=numeric;bigint rows=6 1,20,20 | 2,60,40 | 3,60,NULL | 4,140,80 | 5,240,100 | 6,360,120
+shadow_a/cte/bare_part	type=bigint;bigint rows=6 1,1,20 | 2,1,40 | 3,1,NULL | 4,1,80 | 5,1,100 | 6,1,120
+shadow_a/cte/bare_order	type=bigint;bigint rows=6 1,1,20 | 2,2,40 | 3,6,NULL | 4,3,80 | 5,4,100 | 6,5,120
+shadow_a/cte/first	type=bigint;bigint rows=6 1,20,20 | 2,20,40 | 3,20,NULL | 4,20,80 | 5,20,100 | 6,20,120
+shadow_a/cte/lag_nodef	type=bigint;bigint rows=6 1,NULL,20 | 2,20,40 | 3,40,NULL | 4,NULL,80 | 5,80,100 | 6,100,120
+shadow_a/cte/sum_expr	type=numeric;bigint rows=6 1,20,20 | 2,60,40 | 3,60,NULL | 4,140,80 | 5,240,100 | 6,360,120
+shadow_a/cte/rn	type=bigint;bigint rows=6 1,1,20 | 2,2,40 | 3,3,NULL | 4,4,80 | 5,5,100 | 6,6,120
+shadow_a/join/issue	type=numeric;bigint rows=6 1,2.5,20 | 2,20,40 | 3,40,NULL | 4,NULL,80 | 5,80,100 | 6,100,120
+shadow_a/join/bare_sum	type=numeric;bigint rows=6 1,20,20 | 2,60,40 | 3,60,NULL | 4,140,80 | 5,240,100 | 6,360,120
+shadow_a/join/bare_part	type=bigint;bigint rows=6 1,1,20 | 2,1,40 | 3,1,NULL | 4,1,80 | 5,1,100 | 6,1,120
+shadow_a/join/bare_order	type=bigint;bigint rows=6 1,1,20 | 2,2,40 | 3,6,NULL | 4,3,80 | 5,4,100 | 6,5,120
+shadow_a/join/first	type=bigint;bigint rows=6 1,20,20 | 2,20,40 | 3,20,NULL | 4,20,80 | 5,20,100 | 6,20,120
+shadow_a/join/lag_nodef	type=bigint;bigint rows=6 1,NULL,20 | 2,20,40 | 3,40,NULL | 4,NULL,80 | 5,80,100 | 6,100,120
+shadow_a/join/sum_expr	type=numeric;bigint rows=6 1,20,20 | 2,60,40 | 3,60,NULL | 4,140,80 | 5,240,100 | 6,360,120
+shadow_a/join/rn	type=bigint;bigint rows=6 1,1,20 | 2,2,40 | 3,3,NULL | 4,4,80 | 5,5,100 | 6,6,120
+shadow_a/winbelow/issue	type=numeric;bigint rows=6 1,2.5,20 | 2,20,40 | 3,40,NULL | 4,NULL,80 | 5,80,100 | 6,100,120
+shadow_a/winbelow/bare_sum	type=numeric;bigint rows=6 1,20,20 | 2,60,40 | 3,60,NULL | 4,140,80 | 5,240,100 | 6,360,120
+shadow_a/winbelow/bare_part	type=bigint;bigint rows=6 1,1,20 | 2,1,40 | 3,1,NULL | 4,1,80 | 5,1,100 | 6,1,120
+shadow_a/winbelow/bare_order	type=bigint;bigint rows=6 1,1,20 | 2,2,40 | 3,6,NULL | 4,3,80 | 5,4,100 | 6,5,120
+shadow_a/winbelow/first	type=bigint;bigint rows=6 1,20,20 | 2,20,40 | 3,20,NULL | 4,20,80 | 5,20,100 | 6,20,120
+shadow_a/winbelow/lag_nodef	type=bigint;bigint rows=6 1,NULL,20 | 2,20,40 | 3,40,NULL | 4,NULL,80 | 5,80,100 | 6,100,120
+shadow_a/winbelow/sum_expr	type=numeric;bigint rows=6 1,20,20 | 2,60,40 | 3,60,NULL | 4,140,80 | 5,240,100 | 6,360,120
+shadow_a/winbelow/rn	type=bigint;bigint rows=6 1,1,20 | 2,2,40 | 3,3,NULL | 4,4,80 | 5,5,100 | 6,6,120
+shadow_a/upper/issue	type=numeric;bigint rows=6 1,2.5,20 | 2,20,40 | 3,40,NULL | 4,NULL,80 | 5,80,100 | 6,100,120
+shadow_a/upper/bare_sum	type=numeric;bigint rows=6 1,20,20 | 2,60,40 | 3,60,NULL | 4,140,80 | 5,240,100 | 6,360,120
+shadow_a/upper/bare_part	type=bigint;bigint rows=6 1,1,20 | 2,1,40 | 3,1,NULL | 4,1,80 | 5,1,100 | 6,1,120
+shadow_a/upper/bare_order	type=bigint;bigint rows=6 1,1,20 | 2,2,40 | 3,6,NULL | 4,3,80 | 5,4,100 | 6,5,120
+shadow_a/upper/first	type=bigint;bigint rows=6 1,20,20 | 2,20,40 | 3,20,NULL | 4,20,80 | 5,20,100 | 6,20,120
+shadow_a/upper/lag_nodef	type=bigint;bigint rows=6 1,NULL,20 | 2,20,40 | 3,40,NULL | 4,NULL,80 | 5,80,100 | 6,100,120
+shadow_a/upper/sum_expr	type=numeric;bigint rows=6 1,20,20 | 2,60,40 | 3,60,NULL | 4,140,80 | 5,240,100 | 6,360,120
+shadow_a/upper/rn	type=bigint;bigint rows=6 1,1,20 | 2,2,40 | 3,3,NULL | 4,4,80 | 5,5,100 | 6,6,120
+shadow_c/qualified/sum	type=numeric;bigint;bigint rows=6 1,20,20,10 | 2,60,40,20 | 3,60,NULL,NULL | 4,140,80,40 | 5,240,100,50 | 6,360,120,60
+shadow_c/qualified/lag_ob	type=numeric;bigint;bigint rows=6 1,2.5,20,10 | 2,10,40,20 | 3,20,NULL,NULL | 4,NULL,80,40 | 5,40,100,50 | 6,50,120,60
+shadow_c/qualified/rn	type=bigint;bigint;bigint rows=6 1,1,20,10 | 2,2,40,20 | 3,3,NULL,NULL | 4,4,80,40 | 5,5,100,50 | 6,6,120,60
+shadow_c/unaliased/sum	type=numeric;bigint;bigint rows=6 1,20,20,10 | 2,60,40,20 | 3,60,NULL,NULL | 4,140,80,40 | 5,240,100,50 | 6,360,120,60
+shadow_c/unaliased/lag_ob	type=numeric;bigint;bigint rows=6 1,2.5,20,10 | 2,10,40,20 | 3,20,NULL,NULL | 4,NULL,80,40 | 5,40,100,50 | 6,50,120,60
+shadow_c/unaliased/rn	type=bigint;bigint;bigint rows=6 1,1,20,10 | 2,2,40,20 | 3,3,NULL,NULL | 4,4,80,40 | 5,5,100,50 | 6,6,120,60
+shadow_c/expr/sum	type=numeric;bigint rows=6 1,20,21 | 2,60,41 | 3,60,NULL | 4,140,81 | 5,240,101 | 6,360,121
+shadow_c/expr/lag_ob	type=numeric;bigint rows=6 1,2.5,21 | 2,10,41 | 3,20,NULL | 4,NULL,81 | 5,40,101 | 6,50,121
+shadow_c/expr/rn	type=bigint;bigint rows=6 1,1,21 | 2,2,41 | 3,3,NULL | 4,4,81 | 5,5,101 | 6,6,121
+shadow_c/order_alias/sum	type=numeric;bigint;bigint rows=3 4,140,80,40 | 5,240,100,50 | 6,360,120,60
+shadow_c/order_alias/lag_ob	type=numeric;bigint;bigint rows=3 4,NULL,80,40 | 5,40,100,50 | 6,50,120,60
+shadow_c/order_alias/rn	type=bigint;bigint;bigint rows=3 4,4,80,40 | 5,5,100,50 | 6,6,120,60
+shadow_c/order_rename/sum	type=numeric;bigint;bigint rows=3 4,140,80,40 | 5,240,100,50 | 6,360,120,60
+shadow_c/order_rename/lag_ob	type=numeric;bigint;bigint rows=3 4,NULL,80,40 | 5,40,100,50 | 6,50,120,60
+shadow_c/order_rename/rn	type=bigint;bigint;bigint rows=3 4,4,80,40 | 5,5,100,50 | 6,6,120,60
+shadow_c/where/sum	type=numeric;bigint;bigint rows=3 4,140,80,40 | 5,240,100,50 | 6,360,120,60
+shadow_c/where/lag_ob	type=numeric;bigint;bigint rows=3 4,NULL,80,40 | 5,40,100,50 | 6,50,120,60
+shadow_c/where/rn	type=bigint;bigint;bigint rows=3 4,4,80,40 | 5,5,100,50 | 6,6,120,60
+shadow_c/where_bare/sum	type=numeric;bigint rows=4 1,20,20 | 2,60,40 | 4,140,80 | 5,240,100
+shadow_c/where_bare/lag_ob	type=numeric;bigint rows=4 1,2.5,20 | 2,10,40 | 4,NULL,80 | 5,40,100
+shadow_c/where_bare/rn	type=bigint;bigint rows=4 1,1,20 | 2,2,40 | 4,4,80 | 5,5,100
+shadow_c/aggregate/sum	type=numeric;numeric;bigint rows=1 180,360,6
+shadow_c/aggregate/lag_ob	type=numeric;numeric;bigint rows=1 180,360,5
+shadow_c/aggregate/rn	type=numeric;numeric;bigint rows=1 180,360,6
+shadow_c/group/sum	type=bigint;bigint;bigint rows=6 10,1,20 | 20,1,40 | 40,1,80 | 50,1,100 | 60,1,120 | NULL,1,NULL
+shadow_c/group/lag_ob	type=bigint;bigint;bigint rows=6 10,1,20 | 20,1,40 | 40,1,80 | 50,1,100 | 60,1,120 | NULL,1,NULL
+shadow_c/group/rn	type=bigint;bigint;bigint rows=6 10,1,20 | 20,1,40 | 40,1,80 | 50,1,100 | 60,1,120 | NULL,1,NULL
+shadow_c/distinct/sum	type=bigint;bigint rows=6 10,20 | 20,40 | 40,80 | 50,100 | 60,120 | NULL,NULL
+shadow_c/distinct/lag_ob	type=bigint;bigint rows=6 10,20 | 20,40 | 40,80 | 50,100 | 60,120 | NULL,NULL
+shadow_c/distinct/rn	type=bigint;bigint rows=6 10,20 | 20,40 | 40,80 | 50,100 | 60,120 | NULL,NULL
+shadow_c/union/sum	type=bigint;bigint rows=7 1,10,10 | 1,10,20 | 2,20,40 | 3,NULL,NULL | 4,40,80 | 5,50,100 | 6,60,120
+shadow_c/union/lag_ob	type=bigint;bigint rows=7 1,10,10 | 1,10,20 | 2,20,40 | 3,NULL,NULL | 4,40,80 | 5,50,100 | 6,60,120
+shadow_c/union/rn	type=bigint;bigint rows=7 1,10,10 | 1,10,20 | 2,20,40 | 3,NULL,NULL | 4,40,80 | 5,50,100 | 6,60,120
+shadow_c/outer_qual/sum	type=bigint;bigint rows=6 1,10,20 | 2,20,40 | 3,NULL,NULL | 4,40,80 | 5,50,100 | 6,60,120
+shadow_c/outer_qual/lag_ob	type=bigint;bigint rows=6 1,10,20 | 2,20,40 | 3,NULL,NULL | 4,40,80 | 5,50,100 | 6,60,120
+shadow_c/outer_qual/rn	type=bigint;bigint rows=6 1,10,20 | 2,20,40 | 3,NULL,NULL | 4,40,80 | 5,50,100 | 6,60,120
+shadow_c/win_arg/sum	type=numeric;numeric rows=6 1,10,20 | 2,30,60 | 3,30,60 | 4,70,140 | 5,120,240 | 6,180,360
+shadow_c/win_arg/lag_ob	type=numeric;numeric rows=6 1,10,20 | 2,30,60 | 3,30,60 | 4,70,140 | 5,120,240 | 6,180,360
+shadow_c/win_arg/rn	type=numeric;numeric rows=6 1,10,20 | 2,30,60 | 3,30,60 | 4,70,140 | 5,120,240 | 6,180,360
+shadow_c/win_part/sum	type=bigint;bigint rows=6 1,1,20 | 2,1,40 | 3,1,NULL | 4,1,80 | 5,1,100 | 6,1,120
+shadow_c/win_part/lag_ob	type=bigint;bigint rows=6 1,1,20 | 2,1,40 | 3,1,NULL | 4,1,80 | 5,1,100 | 6,1,120
+shadow_c/win_part/rn	type=bigint;bigint rows=6 1,1,20 | 2,1,40 | 3,1,NULL | 4,1,80 | 5,1,100 | 6,1,120
+shadow_c/win_order/sum	type=bigint;bigint rows=6 1,5,20 | 2,4,40 | 3,6,NULL | 4,3,80 | 5,2,100 | 6,1,120
+shadow_c/win_order/lag_ob	type=bigint;bigint rows=6 1,5,20 | 2,4,40 | 3,6,NULL | 4,3,80 | 5,2,100 | 6,1,120
+shadow_c/win_order/rn	type=bigint;bigint rows=6 1,5,20 | 2,4,40 | 3,6,NULL | 4,3,80 | 5,2,100 | 6,1,120
