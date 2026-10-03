@@ -66,6 +66,12 @@ func TestArcNXEmbeddedNumericCarrier(t *testing.T) {
 				"CAST(3 AS NUMERIC) > 25 AS g, GREATEST(CAST(a.i + 20 AS NUMERIC), 100) AS h FROM nx_e a ORDER BY a.id",
 			"{int,numeric,numeric,bool,numeric} 1,3,3,false,100 | 3,5,3,false,100 | 5,1,3,false,100 | 6,100,3,false,100"},
 		{"b1/bareCastCoalesceWhere", "SELECT count(*) AS c FROM nx_e a WHERE COALESCE(CAST(a.i AS NUMERIC), 100) > 25", "{int} 1"},
+		// An aliased computed item is typed as it is without its alias, never
+		// by the column its text names after the first dot; ABS over an
+		// integer constant is integer (round 5, B2).
+		{"b2/aliasedComputedItem",
+			"SELECT a.id, ABS(-1) * a.n AS x, SQRT(4) * a.n AS s FROM nx_e a ORDER BY a.id",
+			"{int,numeric,float} 1,2.25,4.5 | 3,10.00,20 | 5,0.01,0.02 | 6,NULL,NULL"},
 	}
 	for _, c := range cases {
 		res, err := db.Query(ctx, c.sql)
