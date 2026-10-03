@@ -202,7 +202,97 @@ func wdCells() []wdCell {
 		wdCell{"issue/lag10part", "SELECT id, LAG(b, 10, 2.5) OVER (PARTITION BY g ORDER BY id) AS w FROM wd_t"},
 		wdCell{"issue/lead10", "SELECT id, LEAD(b, 10, 2.5) OVER (ORDER BY id) AS w FROM wd_t"},
 	)
-	return append(append(out, wdComputedValueCells()...), wdNodeKindCells()...)
+	out = append(append(out, wdComputedValueCells()...), wdNodeKindCells()...)
+	return append(append(out, wdShadowCells()...), wdAggregateOriginCells()...)
+}
+
+// wdShadowCells: a derived table that gives a computed alias the name of a
+// column it also forwards under another name (`SELECT b * 2 AS b, b AS ob`).
+// On the DAG arms a computed alias a window reads is materialized on the stage
+// that feeds the window; materialized under the alias's own name it REPLACED
+// the forwarded `b`, so `ob` — a rename of the source `b` — read the doubled
+// value. It is materialized under a `__winkey_alias_N` slot instead. Every
+// source node kind × every way a window reads the alias (a key expression, a
+// bare key, the argument, LAG's widened value, two OVER clauses).
+func wdShadowCells() []wdCell {
+	srcs := []struct{ name, from string }{
+		{"proj", "FROM (SELECT id, g, b * 2 AS b, b AS ob FROM wd_t) s"},
+		{"filter", "FROM (SELECT id, g, b * 2 AS b, b AS ob FROM wd_t WHERE id > 1) s"},
+		{"sort", "FROM (SELECT id, g, b * 2 AS b, b AS ob FROM wd_t ORDER BY id DESC) s"},
+		{"limit", "FROM (SELECT id, g, b * 2 AS b, b AS ob FROM wd_t ORDER BY id LIMIT 5) s"},
+		{"cte", "FROM c"},
+		{"join", "FROM (SELECT t.id, t.g, t.b * 2 AS b, t.b AS ob FROM wd_t t JOIN wd_t u ON u.id = t.id) s"},
+		{"winbelow", "FROM (SELECT id, g, b * 2 AS b, b AS ob, ROW_NUMBER() OVER (ORDER BY id) AS rn FROM wd_t) s"},
+	}
+	wins := []struct{ name, w string }{
+		{"order_expr", "ROW_NUMBER() OVER (ORDER BY b + 0, id)"},
+		{"part_expr", "COUNT(*) OVER (PARTITION BY b % 3)"},
+		{"lag_def", "LAG(b, 1, 2.5) OVER (ORDER BY id)"},
+		{"sum_expr", "SUM(b + 0) OVER (ORDER BY id)"},
+		{"bare_sum", "SUM(b) OVER (ORDER BY id)"},
+		{"bare_part", "ROW_NUMBER() OVER (PARTITION BY b ORDER BY id)"},
+		{"bare_order", "RANK() OVER (ORDER BY b, id)"},
+		{"lag_nodef", "LAG(b, 1) OVER (ORDER BY id)"},
+		{"two", "SUM(b) OVER (ORDER BY id) + COUNT(*) OVER (PARTITION BY b % 3)"},
+	}
+	var out []wdCell
+	for _, src := range srcs {
+		for _, w := range wins {
+			q := "SELECT id, " + w.w + " AS w, ob AS w2 " + src.from
+			if src.name == "cte" {
+				q = "WITH c AS (SELECT id, g, b * 2 AS b, b AS ob FROM wd_t) " + q
+			}
+			out = append(out, wdCell{"shadow/" + src.name + "/" + w.name, q})
+		}
+	}
+	proj := "FROM (SELECT id, g, b * 2 AS b, b AS ob FROM wd_t) s"
+	return append(out,
+		// The rename is respelled to its source AFTER the alias is bound to
+		// its slot; the other order read `b + ob` as the alias twice.
+		wdCell{"shadow/proj/sum_both", "SELECT id, SUM(b + ob) OVER (ORDER BY id) AS w " + proj},
+		wdCell{"shadow/proj/lag_ob_def", "SELECT id, LAG(ob, 1, 2.5) OVER (ORDER BY id) AS w, ob AS w2 " + proj},
+		wdCell{"shadow/proj/rank_part", "SELECT id, RANK() OVER (PARTITION BY g ORDER BY b + 1) AS w, ob AS w2 " + proj},
+		wdCell{"shadow/d_from_b/sum_expr", "SELECT id, SUM(d + 0) OVER (ORDER BY id) AS w, od AS w2 FROM (SELECT id, b + 0 AS d, d AS od FROM wd_t) s"},
+	)
+}
+
+// wdAggregateOriginCells: a computed alias whose origin is an AGGREGATE's
+// group rows, at any depth — a rename over a derived GROUP BY, two of them, a
+// window, a HAVING or a LIMIT between, a CTE — beside the direct shape, a JOIN
+// of an aggregate-derived side (the join stage computes it) and two controls
+// over a plain relation. No stage below the aggregate can compute it, so it is
+// not materialized there (that refused the stage on the DAG arms); an alias
+// directly over the group rows is published by the aggregate stage, and one
+// further up is spelled in the aggregate's published names and computed by
+// the window's key projection.
+func wdAggregateOriginCells() []wdCell {
+	shapes := []struct{ name, from, with string }{
+		{"rename", "FROM (SELECT a.g AS k, a.mb * 2 AS v FROM (SELECT g, MAX(b) AS mb FROM wd_t GROUP BY g) a) s", ""},
+		{"rename2", "FROM (SELECT x.k, x.v2 + 1 AS v FROM (SELECT a.g AS k, a.mb * 2 AS v2 FROM (SELECT g, MAX(b) AS mb FROM wd_t GROUP BY g) a) x) s", ""},
+		{"win_rename", "FROM (SELECT w.g AS k, w.mb * 2 AS v FROM (SELECT g, MAX(b) AS mb, ROW_NUMBER() OVER (ORDER BY g) AS rn FROM wd_t GROUP BY g) w) s", ""},
+		{"having_rename", "FROM (SELECT a.g AS k, a.mb * 2 AS v FROM (SELECT g, MAX(b) AS mb FROM wd_t GROUP BY g HAVING COUNT(*) > 0) a WHERE a.g > 0) s", ""},
+		{"limit_rename", "FROM (SELECT a.g AS k, a.mb * 2 AS v FROM (SELECT g, MAX(b) AS mb FROM wd_t GROUP BY g ORDER BY g LIMIT 3) a) s", ""},
+		{"cte_rename", "FROM (SELECT c.g AS k, c.mb * 2 AS v FROM c) s", "WITH c AS (SELECT g, MAX(b) AS mb FROM wd_t GROUP BY g) "},
+		{"cte_direct", "FROM (SELECT g AS k, v FROM c2) s", "WITH c2 AS (SELECT g, MAX(b) * 2 AS v FROM wd_t GROUP BY g) "},
+		{"join_agg", "FROM (SELECT a.g AS k, a.mb * 2 AS v FROM (SELECT g, MAX(b) AS mb FROM wd_t GROUP BY g) a JOIN wd_t u ON u.id = a.g) s", ""},
+		{"direct", "FROM (SELECT g AS k, MAX(b) * 2 AS v FROM wd_t GROUP BY g) s", ""},
+		{"ctl_rename", "FROM (SELECT a.id AS k, a.mb * 2 AS v FROM (SELECT id, b AS mb FROM wd_t) a) s", ""},
+		{"ctl_rename2", "FROM (SELECT x.k, x.v2 + 1 AS v FROM (SELECT a.id AS k, a.mb * 2 AS v2 FROM (SELECT id, b AS mb FROM wd_t) a) x) s", ""},
+	}
+	wins := []struct{ name, w string }{
+		{"sumkey", "SUM(v + 0) OVER (ORDER BY k)"},
+		{"lagdef", "LAG(v, 1, 2.5) OVER (ORDER BY k)"},
+		{"partexpr", "COUNT(*) OVER (PARTITION BY v % 3)"},
+		{"orderexpr", "ROW_NUMBER() OVER (ORDER BY v + 0, k)"},
+	}
+	var out []wdCell
+	for _, sh := range shapes {
+		for _, w := range wins {
+			out = append(out, wdCell{"aggorigin/" + sh.name + "/" + w.name, sh.with + "SELECT k, " + w.w + " AS w " + sh.from})
+		}
+	}
+	return append(out, wdCell{"aggorigin/win_over_agg/orderexpr",
+		"SELECT g, ROW_NUMBER() OVER (ORDER BY v + 0, g) AS w FROM (SELECT g, MAX(b) * 2 + ROW_NUMBER() OVER (ORDER BY g) AS v FROM wd_t GROUP BY g) s"})
 }
 
 // wdComputedValueCells: a COMPUTED value (an expression, a function, a CAST)
@@ -635,6 +725,10 @@ func wdKeptCells() map[string]wdKept {
 	for _, n := range []string{"nk/aggregate/sum", "nk/distinct/sum"} {
 		kept[n] = wdKept{"", "filing candidate: SUM(v + 0) OVER over a derived aggregate / DISTINCT column declares double precision"}
 	}
+	// The same accumulator typing over an aggregate-derived alias at any depth.
+	for _, sh := range []string{"rename", "rename2", "having_rename", "limit_rename", "cte_rename", "direct", "cte_direct"} {
+		kept["aggorigin/"+sh+"/sumkey"] = wdKept{"", "filing candidate: SUM(v + 0) OVER over an aggregate-derived alias declares double precision"}
+	}
 	for name, rows := range wdKeptRows {
 		k := kept[name]
 		k.want = rows
@@ -725,24 +819,31 @@ func TestArcWDWindowDefaultEveryArm(t *testing.T) {
 // wdKeptRows is this engine's answer for each ANSWERED kept cell, measured
 // on all five arms at the arc's tip.
 var wdKeptRows = map[string]string{
-	"type/lag/bigint/dbl":    "type=double precision rows=6 1,1e+300 | 2,1e+300 | 3,1e+300 | 4,1e+300 | 5,1e+300 | 6,1e+300",
-	"type/lag/bigint/wide":   "type=double precision rows=6 1,14 | 2,14 | 3,14 | 4,14 | 5,14 | 6,14",
-	"type/lag/int/dbl":       "type=double precision rows=6 1,1e+300 | 2,1e+300 | 3,1e+300 | 4,1e+300 | 5,1e+300 | 6,1e+300",
-	"type/lag/int/expr":      "type=bigint rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2",
-	"type/lag/int/wide":      "type=double precision rows=6 1,14 | 2,14 | 3,14 | 4,14 | 5,14 | 6,14",
-	"type/lag/numeric/dbl":   "type=double precision rows=6 1,1e+300 | 2,1e+300 | 3,1e+300 | 4,1e+300 | 5,1e+300 | 6,1e+300",
-	"type/lag/numeric/wide":  "type=double precision rows=6 1,14 | 2,14 | 3,14 | 4,14 | 5,14 | 6,14",
-	"type/lead/bigint/dbl":   "type=double precision rows=6 1,20 | 2,NULL | 3,1e+300 | 4,50 | 5,1e+300 | 6,1e+300",
-	"type/lead/bigint/wide":  "type=double precision rows=6 1,20 | 2,NULL | 3,14 | 4,50 | 5,14 | 6,14",
-	"type/lead/int/dbl":      "type=double precision rows=6 1,20 | 2,NULL | 3,1e+300 | 4,50 | 5,1e+300 | 6,1e+300",
-	"type/lead/int/expr":     "type=bigint rows=6 1,20 | 2,NULL | 3,2 | 4,50 | 5,2 | 6,2",
-	"type/lead/int/wide":     "type=double precision rows=6 1,20 | 2,NULL | 3,14 | 4,50 | 5,14 | 6,14",
-	"type/lead/numeric/dbl":  "type=double precision rows=6 1,2.25 | 2,NULL | 3,1e+300 | 4,5.25 | 5,1e+300 | 6,1e+300",
-	"type/lead/numeric/wide": "type=double precision rows=6 1,2.25 | 2,NULL | 3,14 | 4,5.25 | 5,14 | 6,14",
-	"gap/no_rows_text":       "type=bigint rows=0 ",
-	"cv/lag/iplus/int":       "type=bigint rows=6 1,7 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50",
-	"cv/lag/iplus/null":      "type=bigint rows=6 1,NULL | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50",
-	"cv/lead/iplus/int":      "type=bigint rows=6 1,20 | 2,NULL | 3,7 | 4,50 | 5,7 | 6,7",
-	"nk/aggregate/sum":       "type=double precision rows=3 1,40 | 2,140 | 3,260",
-	"nk/distinct/sum":        "type=double precision rows=6 1,20 | 2,60 | 3,60 | 4,140 | 5,240 | 6,360",
+	"type/lag/bigint/dbl":            "type=double precision rows=6 1,1e+300 | 2,1e+300 | 3,1e+300 | 4,1e+300 | 5,1e+300 | 6,1e+300",
+	"type/lag/bigint/wide":           "type=double precision rows=6 1,14 | 2,14 | 3,14 | 4,14 | 5,14 | 6,14",
+	"type/lag/int/dbl":               "type=double precision rows=6 1,1e+300 | 2,1e+300 | 3,1e+300 | 4,1e+300 | 5,1e+300 | 6,1e+300",
+	"type/lag/int/expr":              "type=bigint rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2",
+	"type/lag/int/wide":              "type=double precision rows=6 1,14 | 2,14 | 3,14 | 4,14 | 5,14 | 6,14",
+	"type/lag/numeric/dbl":           "type=double precision rows=6 1,1e+300 | 2,1e+300 | 3,1e+300 | 4,1e+300 | 5,1e+300 | 6,1e+300",
+	"type/lag/numeric/wide":          "type=double precision rows=6 1,14 | 2,14 | 3,14 | 4,14 | 5,14 | 6,14",
+	"type/lead/bigint/dbl":           "type=double precision rows=6 1,20 | 2,NULL | 3,1e+300 | 4,50 | 5,1e+300 | 6,1e+300",
+	"type/lead/bigint/wide":          "type=double precision rows=6 1,20 | 2,NULL | 3,14 | 4,50 | 5,14 | 6,14",
+	"type/lead/int/dbl":              "type=double precision rows=6 1,20 | 2,NULL | 3,1e+300 | 4,50 | 5,1e+300 | 6,1e+300",
+	"type/lead/int/expr":             "type=bigint rows=6 1,20 | 2,NULL | 3,2 | 4,50 | 5,2 | 6,2",
+	"type/lead/int/wide":             "type=double precision rows=6 1,20 | 2,NULL | 3,14 | 4,50 | 5,14 | 6,14",
+	"type/lead/numeric/dbl":          "type=double precision rows=6 1,2.25 | 2,NULL | 3,1e+300 | 4,5.25 | 5,1e+300 | 6,1e+300",
+	"type/lead/numeric/wide":         "type=double precision rows=6 1,2.25 | 2,NULL | 3,14 | 4,5.25 | 5,14 | 6,14",
+	"gap/no_rows_text":               "type=bigint rows=0 ",
+	"cv/lag/iplus/int":               "type=bigint rows=6 1,7 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50",
+	"cv/lag/iplus/null":              "type=bigint rows=6 1,NULL | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50",
+	"cv/lead/iplus/int":              "type=bigint rows=6 1,20 | 2,NULL | 3,7 | 4,50 | 5,7 | 6,7",
+	"nk/aggregate/sum":               "type=double precision rows=3 1,40 | 2,140 | 3,260",
+	"nk/distinct/sum":                "type=double precision rows=6 1,20 | 2,60 | 3,60 | 4,140 | 5,240 | 6,360",
+	"aggorigin/rename/sumkey":        "type=bigint;double precision rows=3 1,40 | 2,140 | 3,260",
+	"aggorigin/rename2/sumkey":       "type=bigint;double precision rows=3 1,41 | 2,142 | 3,263",
+	"aggorigin/having_rename/sumkey": "type=bigint;double precision rows=3 1,40 | 2,140 | 3,260",
+	"aggorigin/limit_rename/sumkey":  "type=bigint;double precision rows=3 1,40 | 2,140 | 3,260",
+	"aggorigin/cte_rename/sumkey":    "type=bigint;double precision rows=3 1,40 | 2,140 | 3,260",
+	"aggorigin/direct/sumkey":        "type=bigint;double precision rows=3 1,40 | 2,140 | 3,260",
+	"aggorigin/cte_direct/sumkey":    "type=bigint;double precision rows=3 1,40 | 2,140 | 3,260",
 }
