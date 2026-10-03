@@ -190,6 +190,18 @@ func renderTextParam(s string, oid uint32) (string, error) {
 				// A bigint CAST is bigint whatever the value.
 				return "CAST(" + strings.TrimSpace(s) + " AS BIGINT)", nil
 			}
+			// int2in / int4in refuse a value past their width (22003:
+			// PostgreSQL 17.11 raises it for `SELECT $1` int4 bound
+			// '99999999999'). Spliced bare, the value was a bigint literal
+			// and answered under the parameter's OID; cast to the
+			// parameter's own type, the engine's range check raises it.
+			bits, name := 32, "INTEGER"
+			if oid == oidInt2 {
+				bits, name = 16, "SMALLINT"
+			}
+			if _, err := strconv.ParseInt(strings.TrimSpace(s), 10, bits); err != nil && oid != oidOID {
+				return "CAST(" + strings.TrimSpace(s) + " AS " + name + ")", nil
+			}
 			return s, nil
 		}
 		return quoteLiteral(s), nil
