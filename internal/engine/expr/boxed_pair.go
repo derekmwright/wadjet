@@ -662,11 +662,28 @@ func classifyOperand(e Expr, b *batch.RecordBatch) (boxKind, bool) {
 		}
 		return boxUnknown, true
 	case *Cast:
-		// A cast that NAMES a (p,s) produces a DECIMAL and boxes as its text,
-		// so `WHERE CAST(x AS DECIMAL(10,2)) > 10` compares numerically
-		// rather than by the bytes of "12.75".
-		if castIsExactDecimal(v) {
+		// A cast that produces a DECIMAL boxes as its text, so `WHERE CAST(x
+		// AS DECIMAL(10,2)) > 10` compares numerically rather than by the
+		// bytes of "12.75". That is one that NAMES a (p,s), and a BARE
+		// NUMERIC cast over an operand with an exact type — the same test
+		// exact arithmetic makes of it (operandIsDecimalTyped, through
+		// Cast.bareDecimalType), so a choice and a comparison read the cast
+		// by the type it declares and never by its rendered text: with only
+		// the named form here, `least(CAST('3' AS NUMERIC), 100)` ordered
+		// "3" against 100 by BYTES and answered 100, and `CAST(3 AS
+		// NUMERIC) > 25` was true. A bare cast over a float or text operand
+		// has no exact type and falls through to the arms below.
+		if operandIsDecimalTyped(v, b) {
 			return boxDecimal, true
+		}
+		if d, ok := v.decimalDestination(); ok && !d.params {
+			if col, isCol := v.Operand.(*ColRef); isCol {
+				if col.resolve(b); col.idx < 0 || col.idx >= len(b.Columns) {
+					// A column no batch has resolved yet says nothing about
+					// the next one, ColRef's own reason above.
+					return boxUnknown, false
+				}
+			}
 		}
 		if k, ok := temporalBoxKind(v, b); ok {
 			return k, true
