@@ -333,6 +333,9 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 		return compileBinOp(left, right, n.Op, ctx), nil
 
 	case *plansql.UnaryOp:
+		if l, ok := FoldedNegatedLiteral(n); ok {
+			return compileLit(l)
+		}
 		operand, err := compileWithCtx(n.Inner, ctx)
 		if err != nil {
 			return nil, err
@@ -1276,7 +1279,8 @@ func compileLit(n *plansql.Lit) (Expr, error) {
 		// unary minus, a scalar subquery's answer, a comparison) reads its
 		// digits rather than the nearest double (#1386, WideNumericLiteral).
 		if t, text, ok := WideNumericLiteral(n.Value); ok {
-			return &Cast{Operand: &Lit{Val: text}, DestType: fmt.Sprintf("numeric(%d,%d)", t.Precision, t.Scale)}, nil
+			return &Cast{Operand: &Lit{Val: text}, DestType: fmt.Sprintf("numeric(%d,%d)", t.Precision, t.Scale),
+				intLit: !strings.ContainsAny(n.Value, ".eE")}, nil
 		}
 		// Try float
 		if f, err := strconv.ParseFloat(n.Value, 64); err == nil {

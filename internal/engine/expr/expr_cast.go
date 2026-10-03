@@ -52,6 +52,10 @@ type Cast struct {
 	Column      bool
 	columnDec   batch.DecimalType
 	columnDecOK bool
+	// intLit marks the cast compileLit builds for an INTEGER literal past
+	// int64 (WideNumericLiteral): a constant whose quotient with another
+	// constant keeps the double (constQuotientOperand).
+	intLit bool
 }
 
 // operandShape is the operand's declared shape against b (operand_decl.go).
