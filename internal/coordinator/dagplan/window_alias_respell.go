@@ -35,6 +35,18 @@ func respellWindowKeyExprs(specs []physical.ProjectExprSpec, child *logical.Node
 			continue
 		}
 		if rewritten, changed := localPlanFacts.RespellDerivedAliasRefs(ast, child); changed {
+			ast = rewritten
+			specs[i].Expr = rewritten.String()
+		}
+		// A COMPUTED alias has no source column to rename to: the key
+		// `v + 0` over `SELECT b * 2 AS v` evaluated `v` to NULL in the
+		// fragment, so `SUM(v + 0) OVER (…)` answered NULL and `PARTITION BY
+		// v + 0` put every row in its own partition on the DAG arms, and
+		// LAG / LEAD's materialized value and default (`cast(v as …)`,
+		// #1435) read NULL the same way. Where the window's input reaches a
+		// Scan through Projects and Filters alone, the alias is replaced by
+		// its definition — the aggregate argument's rule (#702).
+		if rewritten, changed := respellAggInputExpr(ast, child); changed {
 			specs[i].Expr = rewritten.String()
 		}
 	}
