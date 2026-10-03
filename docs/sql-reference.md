@@ -3210,13 +3210,18 @@ integer-valued expression or a `CAST` to `INTEGER`, `SMALLINT` or `BIGINT`:
 10.00 is 899999999999999997.00, as on PostgreSQL. A quotient over an
 operand such a cast made exact is the exception — an integer `CAST`, whether
 it is the operand itself or sits under `NULLIF`, `COALESCE`, `CASE`,
-`GREATEST`, `LEAST`, `abs`, unary minus, integer or numeric arithmetic; a bare
-`CAST(… AS NUMERIC)`; an integer literal past the `bigint` range:
-`CAST(i AS INTEGER) / n`, `(CAST(i AS INTEGER) * 1.0) / n`,
-`CAST(i AS NUMERIC) / n` and `n / NULLIF(CAST(b AS BIGINT), 0)` are the
+`GREATEST`, `LEAST`, unary minus, integer or numeric arithmetic; a bare
+`CAST(… AS NUMERIC)`; either under `abs`, `mod`, `round`, `ceil`, `ceiling`,
+`floor`, `trunc` or `sign`: `CAST(i AS INTEGER) / n`,
+`(CAST(i AS INTEGER) * 1.0) / n`, `CAST(i AS NUMERIC) / n`,
+`ceil(CAST(i AS NUMERIC)) / n` and `n / NULLIF(CAST(b AS BIGINT), 0)` are the
 double precision quotient (1.3333333333333333, 1.111111111111111e-09), where
 PostgreSQL answers numeric, because a decimal quotient keeps one scale per
 column ([numeric-decimal#r19](adr/0012-divergences/numeric-decimal.md#catalog)).
+A quotient of two constants is the double too, an integer literal past the
+`bigint` range among them (`9223372036854775808 / 2` is
+4.611686018427388e+18); the same literal over a column is the one-scale
+numeric (`n / 9223372036854775808` is 0.0000000000000000002439).
 An integer literal past the `bigint` range is `numeric`, as on PostgreSQL:
 `SELECT 9223372036854775808` keeps every digit, `-9223372036854775808` is the
 `bigint` minimum and `CAST((-9223372036854775809) AS BIGINT)` is refused
