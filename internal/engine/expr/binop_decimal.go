@@ -478,8 +478,12 @@ func resolveDecimalMode(op string, left, right Expr, b *batch.RecordBatch) (decM
 		// since #369).
 		return decMode{}, decOperands{}, false
 	}
-	if op == "/" && (userIntegerCast(left) || userIntegerCast(right)) {
-		// A QUOTIENT over an integer CAST keeps the float rung it had, for
+	if op == "/" && (!operandIsDecimalTyped(left, b) && integerCastIn(left) ||
+		!operandIsDecimalTyped(right, b) && integerCastIn(right)) {
+		// A QUOTIENT whose integer operand takes its value from an integer
+		// CAST — bare, or under NULLIF / COALESCE / CASE / GREATEST / LEAST /
+		// abs / unary minus / integer arithmetic (integerCastIn), at any
+		// depth — keeps the float rung it had, for
 		// the constant division's reason above: item 3's one-scale quotient
 		// keeps max(6, s1 + p2 + 1) fraction digits — 11 for
 		// `CAST(i AS INTEGER) / n` over a numeric(10,2) — where the double

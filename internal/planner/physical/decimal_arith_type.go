@@ -88,10 +88,11 @@ func binOpDecimalOperand(n *plansql.BinaryOp, decls ColDecls) (batch.DecimalType
 		// reason spelled out there.
 		return batch.DecimalType{}, false, false
 	}
-	if n.Op == "/" && (userIntegerCastNode(n.Left) || userIntegerCastNode(n.Right)) {
-		// A quotient over an integer CAST keeps its float declaration, as
-		// expr.resolveDecimalMode keeps its float rung (the one-scale
-		// quotient would drop the digits the double carries, r19).
+	if n.Op == "/" && (!lDec && integerCastIn(n.Left) || !rDec && integerCastIn(n.Right)) {
+		// A quotient whose INTEGER operand takes its value from an integer
+		// CAST — bare or under any integer-valued construct — keeps its float
+		// declaration, as expr.resolveDecimalMode keeps its float rung (the
+		// one-scale quotient would drop the digits the double carries, r19).
 		return batch.DecimalType{}, false, false
 	}
 	p, s, ok := batch.DecimalResultType(n.Op, lt.Precision, lt.Scale, rt.Precision, rt.Scale)
@@ -490,12 +491,56 @@ func isConstNumericLitNode(node plansql.Node) bool {
 	return false
 }
 
-// userIntegerCastNode is an integer CAST a query wrote: not a correlated
-// re-run's column stand-in and not one markScalarAnswer marked — the AST twin
-// of expr.userIntegerCast.
-func userIntegerCastNode(node plansql.Node) bool {
-	c, ok := plansql.Unparen(node).(*plansql.CastNode)
-	return ok && !c.Column && !c.Answer && expr.IsIntegerCastDest(c.TypeName)
+// integerCastIn reports whether an INTEGER operand of exact arithmetic takes
+// its value from an integer CAST a query wrote (not a correlated re-run's
+// column stand-in, not one markScalarAnswer marked), at any depth of the
+// constructs an integer's type passes through unchanged: parentheses, unary
+// ±, integer arithmetic, the value arms of a CASE / COALESCE / GREATEST /
+// LEAST / NULLIF / IFNULL, and abs / mod. PostgreSQL types `CAST(b AS BIGINT)`,
+// `NULLIF(CAST(b AS BIGINT), 0)` and `CAST(b AS BIGINT) + 0` alike, so the
+// quotient's decision over them is one decision: binOpDecimalOperand keeps
+// every one of them on the float declaration. It is asked only of an operand
+// decimalArithOperand already answered as an integer, so every construct it
+// descends is integer-valued. expr.integerCastIn is the runtime twin.
+func integerCastIn(node plansql.Node) bool {
+	switch n := node.(type) {
+	case *plansql.ParenNode:
+		return integerCastIn(n.Inner)
+	case *plansql.UnaryOp:
+		return (n.Op == "-" || n.Op == "+") && integerCastIn(n.Inner)
+	case *plansql.CastNode:
+		return !n.Column && !n.Answer && expr.IsIntegerCastDest(n.TypeName)
+	case *plansql.BinaryOp:
+		return integerCastIn(n.Left) || integerCastIn(n.Right)
+	case *plansql.CaseNode:
+		for _, w := range n.Whens {
+			if integerCastIn(w.Result) {
+				return true
+			}
+		}
+		return n.Else != nil && integerCastIn(n.Else)
+	case *plansql.FuncCallNode:
+		name := strings.ToLower(n.Name)
+		args := n.Args
+		if _, ok := expr.NumericDomainScalarFn(name); !ok && name != "coalesce" {
+			idx, poly := expr.DefaultRegistry.ReturnType(name).SameAsArgs(len(n.Args))
+			if !poly {
+				return false
+			}
+			args = make([]plansql.Node, 0, len(idx))
+			for _, i := range idx {
+				if i >= 0 && i < len(n.Args) {
+					args = append(args, n.Args[i])
+				}
+			}
+		}
+		for _, a := range args {
+			if integerCastIn(a) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // constIntArg reads a compile-time integer literal, the only shape a result

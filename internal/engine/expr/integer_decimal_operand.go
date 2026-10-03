@@ -346,3 +346,51 @@ func SubqueryAnswersIntegralExtract(sql string) bool {
 	fc, ok := n.(*plansql.FuncCallNode)
 	return ok && len(fc.Args) == 1 && IntegralExtractField(fc.Name)
 }
+
+// integerCastIn reports whether an integer operand of exact arithmetic takes
+// its value from an integer CAST a query wrote (userIntegerCast), at any
+// depth of the constructs an integer's type passes through unchanged: unary
+// ±, integer arithmetic, the value arms of a CASE / COALESCE / GREATEST /
+// LEAST / NULLIF / IFNULL, and abs / mod. resolveDecimalMode asks it of a
+// quotient's non-DECIMAL operand, so `t.n / NULLIF(CAST(t.b AS BIGINT), 0)`
+// and `(CAST(t.i AS INTEGER) + 0) / t.n` make the decision the bare cast
+// makes. physical.integerCastIn is the plan's twin over the AST.
+func integerCastIn(e Expr) bool {
+	switch v := e.(type) {
+	case *Cast:
+		return userIntegerCast(v)
+	case *UnaryOp:
+		return (v.Op == "-" || v.Op == "+") && integerCastIn(v.Operand)
+	case *BinOp:
+		return integerCastIn(v.Left) || integerCastIn(v.Right)
+	case *BinOpInt64:
+		l, lok := v.Left.(Expr)
+		r, rok := v.Right.(Expr)
+		return lok && integerCastIn(l) || rok && integerCastIn(r)
+	case *BinOpNumeric:
+		l, lok := v.Left.(Expr)
+		r, rok := v.Right.(Expr)
+		return lok && integerCastIn(l) || rok && integerCastIn(r)
+	case *decimalScalarFn:
+		return v.fallback != nil && integerCastIn(v.fallback)
+	case *numericFuncCall:
+		return integerCastIn(v.FuncCall)
+	case *FuncCall:
+		if _, ok := NumericDomainScalarFn(v.Name); ok {
+			return anyIntegerCastIn(v.Args)
+		}
+	}
+	if arms, isChoice := choiceDecimalArms(e); isChoice {
+		return anyIntegerCastIn(arms)
+	}
+	return false
+}
+
+func anyIntegerCastIn(es []Expr) bool {
+	for _, a := range es {
+		if integerCastIn(a) {
+			return true
+		}
+	}
+	return false
+}
