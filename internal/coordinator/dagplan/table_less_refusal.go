@@ -32,9 +32,6 @@ var ErrTableLessSelectDistributed = errors.New(
 // statement failed three task attempts later with `stage scan-0 has no
 // dependencies and no ScanFiles` on every DAG door. It is the #806 shape
 // through a second source kind, refused at the same seam.
-//
-// A TABLESAMPLE scan routes the same way: its sampler is a local-pipeline
-// operator no stage fragment carries (#1411).
 func refuseTableLessSelect(n *logical.Node) error {
 	if n == nil {
 		return nil
@@ -49,16 +46,6 @@ func refuseTableLessSelect(n *logical.Node) error {
 		return fmt.Errorf("%w: the table function %s reads no stored table, so its"+
 			" scan stage has no files the dispatcher can build task inputs from",
 			ErrTableLessSelectDistributed, n.FuncName)
-	}
-	if n.Type == logical.NodeScan && n.SampleMethod != "" {
-		// A TABLESAMPLE scan is sampled by the local pipeline's sampler
-		// (physical.sampleRangeSource + sampleOperator), which no stage
-		// fragment carries: on the DAG every file was read whole, so
-		// BERNOULLI (0) and (50) answered every row and an out-of-range
-		// percentage was never checked (#1411). The statement runs on the
-		// coordinator-local pipeline, as a table function does.
-		return fmt.Errorf("%w: TABLESAMPLE %s is sampled by the local pipeline",
-			ErrTableLessSelectDistributed, n.SampleMethod)
 	}
 	if logical.ProjectsASet(n) {
 		// A set-returning SELECT item is expanded by the local planner's
