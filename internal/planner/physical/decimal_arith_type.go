@@ -660,7 +660,7 @@ func constIntArg(node plansql.Node) (int, bool) {
 
 // castDeclaredDecimal is a CAST's DECIMAL declaration — ADR-0024 item 3's
 // "CAST(x AS DECIMAL(p,s)): exactly (p,s); CAST(x AS DECIMAL): the operand's
-// own (p,s), (38,0) from an integer".
+// own (p,s), (38,0) from an integer" — and from the NULL literal.
 //
 // A BARE cast over an operand this layer cannot type declines, and the caller
 // keeps inferCastType's FLOAT64 — which is what the evaluator still answers
@@ -682,6 +682,15 @@ func castDeclaredDecimal(n *plansql.CastNode, decls ColDecls) (expr.DeclType, bo
 			return expr.DeclDecimal(batch.MaxDecimalPrecision, t.Scale), true
 		}
 		return expr.DeclType{}, false
+	}
+	// The NULL literal has no digits to lose: a bare NUMERIC cast of it is
+	// numeric, (38,0) as an integer operand's, not the float rung an
+	// untypable operand keeps. Declared FLOAT64, it made every common type
+	// it took part in a double — `COALESCE(v, CAST(NULL AS NUMERIC))`,
+	// `LAG(v, 1, CAST(NULL AS NUMERIC))` — and rounded a bigint past 2^53
+	// (10000000000000001 answered 1e+16) where PostgreSQL's result is numeric.
+	if l, ok := plansql.Unparen(n.Inner).(*plansql.Lit); ok && l.Kind == plansql.LitNull {
+		return expr.DeclDecimal(batch.MaxDecimalPrecision, 0), true
 	}
 	t, isDec, ok := decimalArithOperand(n.Inner, decls)
 	if !ok {
