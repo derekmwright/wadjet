@@ -102,8 +102,8 @@ func TestArcWALagLeadOffsetPastTheInputAllocatesNoRing(t *testing.T) {
 	// A default answers on every row past the edge, spilled.
 	t.Run("spilled/lag_default/max", func(t *testing.T) {
 		got := waRunSpilled(t, []WindowColumn{{Func: WinLag, InputCol: "v", OutputCol: "o", OutputType: i64,
-			OrderBy: byTS, LagLeadOffset: 2147483647, LagLeadDefault: float64(7)}}, rows)
-		waCheck(t, got, "o", func(int64) any { return int64(7) })
+			OrderBy: byTS, LagLeadOffset: 2147483647, LagLeadDefaultCol: "c"}}, rows)
+		waCheck(t, got, "o", func(int64) any { return int64(2) })
 	})
 }
 

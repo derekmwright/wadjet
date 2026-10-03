@@ -2367,17 +2367,17 @@ func (e *Executor) buildFragmentWindow(ctx context.Context, spec distributed.OpS
 			outType = parquet.TypeID(*wc.OutputType)
 		}
 		cols[i] = exec.WindowColumn{
-			Func:           fn,
-			InputCol:       wc.InputCol,
-			OutputCol:      wc.OutputCol,
-			OutputType:     outType,
-			PartitionBy:    append([]string(nil), wc.PartitionBy...),
-			OrderBy:        orderBy,
-			LagLeadOffset:  wc.LagLeadOffset,
-			LagLeadDefault: wc.LagLeadDefault,
-			NtileBuckets:   wc.NtileBuckets,
-			NthValueN:      wc.NthValueN,
-			NullArg:        wc.NullArg,
+			Func:              fn,
+			InputCol:          wc.InputCol,
+			OutputCol:         wc.OutputCol,
+			OutputType:        outType,
+			PartitionBy:       append([]string(nil), wc.PartitionBy...),
+			OrderBy:           orderBy,
+			LagLeadOffset:     wc.LagLeadOffset,
+			LagLeadDefaultCol: wc.LagLeadDefaultCol,
+			NtileBuckets:      wc.NtileBuckets,
+			NthValueN:         wc.NthValueN,
+			NullArg:           wc.NullArg,
 		}
 		if wc.Frame != nil {
 			cols[i].Frame = &exec.WindowFrameSpec{

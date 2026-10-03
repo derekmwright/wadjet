@@ -214,8 +214,8 @@ func TestBuildFragmentWindow_Translation(t *testing.T) {
 					Start: distributed.WindowBoundSpec{Type: "preceding", Offset: 3},
 					End:   distributed.WindowBoundSpec{Type: "current_row"},
 				},
-				LagLeadOffset:  2,
-				LagLeadDefault: "none",
+				LagLeadOffset:     2,
+				LagLeadDefaultCol: "__winkey_0",
 			}},
 		})
 		if err != nil {
@@ -251,8 +251,8 @@ func TestBuildFragmentWindow_Translation(t *testing.T) {
 		if c.LagLeadOffset != 2 {
 			t.Errorf("LagLeadOffset = %d, want 2", c.LagLeadOffset)
 		}
-		if c.LagLeadDefault != "none" {
-			t.Errorf("LagLeadDefault = %v, want \"none\"", c.LagLeadDefault)
+		if c.LagLeadDefaultCol != "__winkey_0" {
+			t.Errorf("LagLeadDefaultCol = %q, want __winkey_0", c.LagLeadDefaultCol)
 		}
 	})
 
