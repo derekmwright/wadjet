@@ -213,9 +213,8 @@ func TestTaskWithAllTypesRoundTrip(t *testing.T) {
 								OutputType:    WindowTypePtr(9),
 								OrderBy:       []SortKeySpec{{Column: "hire_date"}},
 								LagLeadOffset: 2,
-								// A string default: it round-trips through
-								// `any`, which is the field's whole risk.
-								LagLeadDefault: "none",
+								// The default's materialized column.
+								LagLeadDefaultCol: "__winkey_0",
 							},
 							{
 								Func:         "nth_value",

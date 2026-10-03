@@ -984,6 +984,9 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 			if err := b.refuseIncomparableOperands(col.ASTExpr, resolve); err != nil {
 				return err
 			}
+			if err := refuseLagLeadDefaultType(col.ASTExpr, rowFieldScopeDecls(resolve)); err != nil {
+				return err
+			}
 		}
 		if col.Star {
 			if err := resolve.resolveStarQualifier(col.TableRef); err != nil {
@@ -1131,6 +1134,11 @@ func (b *binder) checkExpr(expr plansql.Node, scope *colScope) error {
 	// A container folded with something it cannot be (validate_container_fold.go,
 	// #1060).
 	if err := refuseContainerFold(expr, b.foldArmTypeOf(scope)); err != nil {
+		return err
+	}
+	// A LAG / LEAD default of a type the value has no common type with
+	// (window_lag_default.go, #1435).
+	if err := refuseLagLeadDefaultType(expr, rowFieldScopeDecls(scope)); err != nil {
 		return err
 	}
 	if scope == nil || scope.open {

@@ -1065,10 +1065,12 @@ type WindowColSpec struct {
 	Frame *WindowFrameSpec `json:"frame,omitempty"`
 	// Function-specific arguments, parsed out of the SQL argument list by
 	// the planner (see InputCol).
-	LagLeadOffset  int `json:"lag_lead_offset,omitempty"`
-	LagLeadDefault any `json:"lag_lead_default,omitempty"`
-	NtileBuckets   int `json:"ntile_buckets,omitempty"`
-	NthValueN      int `json:"nth_value_n,omitempty"`
+	LagLeadOffset int `json:"lag_lead_offset,omitempty"`
+	// LagLeadDefaultCol is the input column LAG / LEAD's default is read
+	// from at the row it fills (exec.WindowColumn.LagLeadDefaultCol).
+	LagLeadDefaultCol string `json:"lag_lead_default_col,omitempty"`
+	NtileBuckets      int    `json:"ntile_buckets,omitempty"`
+	NthValueN         int    `json:"nth_value_n,omitempty"`
 	// NullArg says the offset / N argument is NULL: every row answers NULL
 	// (exec.WindowColumn.NullArg).
 	NullArg bool `json:"null_arg,omitempty"`

@@ -258,17 +258,17 @@ func buildWindowFragment(stage dagplan.Stage, t *distributed.Task, taskInputs ma
 			})
 		}
 		winCols[i] = distributed.WindowColSpec{
-			Func:           wc.Func,
-			InputCol:       wc.InputCol,
-			OutputCol:      wc.OutputCol,
-			OutputType:     distributed.WindowTypePtr(int(wc.OutputType)),
-			PartitionBy:    append([]string(nil), wc.PartitionBy...),
-			OrderBy:        orderBy,
-			LagLeadOffset:  wc.LagLeadOffset,
-			LagLeadDefault: wc.LagLeadDefault,
-			NtileBuckets:   wc.NtileBuckets,
-			NthValueN:      wc.NthValueN,
-			NullArg:        wc.NullArg,
+			Func:              wc.Func,
+			InputCol:          wc.InputCol,
+			OutputCol:         wc.OutputCol,
+			OutputType:        distributed.WindowTypePtr(int(wc.OutputType)),
+			PartitionBy:       append([]string(nil), wc.PartitionBy...),
+			OrderBy:           orderBy,
+			LagLeadOffset:     wc.LagLeadOffset,
+			LagLeadDefaultCol: wc.LagLeadDefaultCol,
+			NtileBuckets:      wc.NtileBuckets,
+			NthValueN:         wc.NthValueN,
+			NullArg:           wc.NullArg,
 		}
 		if wc.Frame != nil {
 			winCols[i].Frame = &distributed.WindowFrameSpec{

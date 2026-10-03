@@ -604,11 +604,13 @@ type WindowColSpec struct {
 	OrderBy     []SortKeySpec
 	Frame       *logical.WindowFrameSpec
 	// Function-specific arguments (see InputCol).
-	LagLeadOffset  int
-	LagLeadDefault any
-	NtileBuckets   int
-	NthValueN      int
-	NullArg        bool // the offset / N argument is NULL (exec.WindowColumn.NullArg)
+	LagLeadOffset int
+	// LagLeadDefaultCol is the materialized key LAG / LEAD's default is
+	// read from (exec.WindowColumn.LagLeadDefaultCol), "" for none.
+	LagLeadDefaultCol string
+	NtileBuckets      int
+	NthValueN         int
+	NullArg           bool // the offset / N argument is NULL (exec.WindowColumn.NullArg)
 	// InputRefs is AggSpec.InputRefs for a WINDOW argument: the planner-only
 	// record of the candidate spellings for a reference naming a derived
 	// table's alias, settled at the end of planning by

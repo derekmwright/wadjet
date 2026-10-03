@@ -526,31 +526,33 @@ func TestWindowMinMaxRunning(t *testing.T) {
 func TestWindowLagLeadDefault(t *testing.T) {
 	schema := []parquet.Column{
 		{Name: "val", Type: parquet.TypeFloat64},
+		{Name: "dflt", Type: parquet.TypeFloat64},
 	}
+	// The default is a COLUMN read at the row it fills (#1435).
 	rows := []map[string]any{
-		{"val": 1.0},
-		{"val": 2.0},
-		{"val": 3.0},
+		{"val": 1.0, "dflt": -1.0},
+		{"val": 2.0, "dflt": -2.0},
+		{"val": 3.0, "dflt": -3.0},
 	}
 
 	win := NewWindow([]WindowColumn{
 		{
-			Func:           WinLag,
-			InputCol:       "val",
-			OutputCol:      "lag_val",
-			OutputType:     parquet.TypeFloat64,
-			OrderBy:        []SortKey{{Column: "val", Order: Ascending}},
-			LagLeadOffset:  1,
-			LagLeadDefault: -1.0,
+			Func:              WinLag,
+			InputCol:          "val",
+			OutputCol:         "lag_val",
+			OutputType:        parquet.TypeFloat64,
+			OrderBy:           []SortKey{{Column: "val", Order: Ascending}},
+			LagLeadOffset:     1,
+			LagLeadDefaultCol: "dflt",
 		},
 		{
-			Func:           WinLead,
-			InputCol:       "val",
-			OutputCol:      "lead_val",
-			OutputType:     parquet.TypeFloat64,
-			OrderBy:        []SortKey{{Column: "val", Order: Ascending}},
-			LagLeadOffset:  1,
-			LagLeadDefault: -1.0,
+			Func:              WinLead,
+			InputCol:          "val",
+			OutputCol:         "lead_val",
+			OutputType:        parquet.TypeFloat64,
+			OrderBy:           []SortKey{{Column: "val", Order: Ascending}},
+			LagLeadOffset:     1,
+			LagLeadDefaultCol: "dflt",
 		},
 	})
 
@@ -572,8 +574,8 @@ func TestWindowLagLeadDefault(t *testing.T) {
 	if result[0]["lag_val"].(float64) != -1.0 {
 		t.Errorf("expected first lag=-1.0, got %v", result[0]["lag_val"])
 	}
-	// Last row lead should be -1.0 (default)
-	if result[2]["lead_val"].(float64) != -1.0 {
+	// Last row lead should be its own row's default, -3.0
+	if result[2]["lead_val"].(float64) != -3.0 {
 		t.Errorf("expected last lead=-1.0, got %v", result[2]["lead_val"])
 	}
 }
