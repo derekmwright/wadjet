@@ -946,6 +946,17 @@ Three operand kinds PostgreSQL types `numeric` rode this engine's float8 rung. A
 |---|---|---|---|
 | table-functions | [mechanism](0012-divergences/table-functions.md#mechanisms) | Amended: a key first seen past the sample is 22P04, a nested field 22P02; `sample_size = -1` / `N` | `wadjet.TestArcRDReaderPastSampleCoverage`, `pgwire.TestArcRDReaderPastSampleWire`, `coordinator.TestArcRDReaderPastSampleOnEveryArm` |
 
+## 2026-10-03: the TABLESAMPLE argument (arc TB, #1411)
+
+The TABLESAMPLE argument was one number token (or a float parameter's CAST spelling) read with `strconv.ParseFloat` and no range check, and the sampler was installed only for a percentage above 0. At 6184761c, on all five arms, `BERNOULLI (0)` and `SYSTEM (0)` answered every row of tb_p (3), and `101`, `1e20`, `99999999999999999999`, `CAST('1e20' AS DOUBLE PRECISION)`, `CAST('1e400' AS DOUBLE PRECISION)` and a bare `1e400` answered 3; `-1`, `NULL`, `'50'`, `25 * 2`, `CAST(50 AS NUMERIC)` and `CAST('NaN' AS DOUBLE PRECISION)` were 42601. On the three DAG arms no stage fragment carried the sampler: `BERNOULLI (50)` over tb_big (20 000 rows) answered 20000. The argument is now PostgreSQL's: an expression coerced to real at plan time (`physical.TablesampleArgument`: 22003 / 42804 / 42703 / 0A000 there, EXPLAIN too), the range checked at the sampled scan's first batch (2202H), and a sampled scan runs on the coordinator-local pipeline.
+
+| family | row | change | gate |
+|---|---|---|---|
+| other | [r17–r20](0012-divergences/other.md#catalog) | Added: REPEATABLE is refused 42601 (r17); a subquery argument 0A000 (r18); a sampled scan nothing reads (`LIMIT 0`, `WHERE false`) raises 2202H for an out-of-range percentage where PostgreSQL answers no rows (r19); SYSTEM samples batches, not pages (r20) | `coordinator.TestArcTBTablesampleArgumentOnEveryArm` |
+| parameters-pgwire | [r16](0012-divergences/parameters-pgwire.md#catalog) | Added: a text-typed parameter in the percentage answers as the untyped literal it is rendered as, where PostgreSQL raises 42804 | `pgwire.TestArcTBTablesampleParameterMatchesPostgres` |
+| extensions | [E81 coverage residuals](0012-divergences/extensions.md#e81) | Narrowed: the TABLESAMPLE cell of the empty-input coverage census is 22023 on every door (it was 42601 before binding); its pin in `tcpflagcases.ResidualState` is deleted as the proof | `pgwire.TestTCPFlagASTCoverage`, `coordinator.TestTCPFlagASTCoverage` |
+| — | — | Closed without a row (PostgreSQL's answer now): 0 % samples nothing, a percentage outside 0–100, NaN or NULL is 2202H, a value real cannot hold is 22003, every argument expression PostgreSQL takes is read (#1411) | `coordinator.TestArcTBTablesampleArgumentOnEveryArm`, `test.TestTablesampleArgumentIsPostgresReal`, `sql.TestTablesampleArgumentIsAnExpression`, `server.TestArcTBASampledPolicedRelationPublishesOnlyThePolicysRows` |
+
 ## Dated markers inside the entries
 
 Every `Added` / `Amended` / `CLOSED` / `Corrected` / `narrowed` marker still inside an entry's verbatim text, in date order, with the entry that carries it.
