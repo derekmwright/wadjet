@@ -116,6 +116,10 @@ func resolveRenameSource(name string, child *logical.Node, forGather bool) strin
 			}
 		case n.Type == logical.NodeAggregate:
 			return resolved
+		case logical.WindowShadowedInput(n) != nil:
+			// The window's input carries the derived table's declared
+			// columns under their own names (logical.WindowShadowedInput).
+			return resolved
 		case n.Type == logical.NodeJoin && len(n.Children) == 2:
 			jt := strings.ToLower(n.JoinType)
 			// A QUALIFIED reference names ONE relation, so it resolves
@@ -319,7 +323,10 @@ func relationScopeSubtree(n *logical.Node, name string) *logical.Node {
 //
 // Window is in the list because it APPENDS its output columns to its child's
 // schema: it renames nothing, and every relation below it keeps the name the
-// enclosing query calls it. Aggregate is deliberately NOT, and that is not a
+// enclosing query calls it — except a window over a derived table that
+// computes a column under the name of a column of its own input, whose input
+// is that table's declared columns (logical.WindowShadowedInput); both walks
+// stop there. Aggregate is deliberately NOT, and that is not a
 // gap — its output schema is its own GROUP BY keys and aggregate output names,
 // so the child's columns are no longer addressable and resolving a bare name
 // below it would answer from a schema the stream does not carry.
@@ -329,8 +336,10 @@ func scopePreservingWrapper(n *logical.Node) bool {
 	}
 	switch n.Type {
 	case logical.NodeFilter, logical.NodeSort, logical.NodeLimit,
-		logical.NodeDistinct, logical.NodeWindow:
+		logical.NodeDistinct:
 		return true
+	case logical.NodeWindow:
+		return logical.WindowShadowedInput(n) == nil
 	}
 	return false
 }

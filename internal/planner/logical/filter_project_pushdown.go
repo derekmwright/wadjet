@@ -748,6 +748,11 @@ func resolveFilterInSubtree(ast plansql.Node, n *Node, changed bool, subst *[]st
 			ast, changed = resolveFilterInSubtree(ast, n.Children[1], changed, subst)
 			return ast, changed
 		case NodeDistinct, NodeSort, NodeLimit, NodeWindow:
+			if WindowShadowedInput(n) != nil {
+				// The window's input carries the derived table's declared
+				// columns under their own names (WindowShadowedInput).
+				return ast, changed
+			}
 			// None of the four renames anything, so the walk continues
 			// through them. A WINDOW forwards every input column and appends
 			// its own outputs, so a predicate above one still names the

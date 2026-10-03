@@ -131,7 +131,7 @@ func (p *StagePlanner) generateStages(node *logical.Node) []Stage {
 	p.limitStageRoot = node
 	p.setOpErr = nil
 	p.windowAliasSeq = 0
-	p.windowAliasStream = map[*logical.Node]map[string]string{}
+	p.windowRouteErr = nil
 	p.joinCondErr = nil
 	p.correlatedErr = nil
 	p.scalarRowsErr = nil

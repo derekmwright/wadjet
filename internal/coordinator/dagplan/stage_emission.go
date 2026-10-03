@@ -1164,26 +1164,9 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 				// its spelling changes. pred is the loop's own copy, so this
 				// never writes to the logical plan the single-process path
 				// shares.
-				written := pred.ASTExpr
 				if len(node.Children) == 1 {
-					// A computed alias riding the stream in a window's slot
-					// is read from the slot: the column of its own name is the
-					// source it shadows (windowAliasSlotFor).
-					slotted := false
-					if pred.ASTExpr != nil {
-						if out, changed, complete := p.PlanContext.RewriteColRefs(pred.ASTExpr, func(ref *plansql.ColRef) (plansql.Node, bool) {
-							if slot := p.windowAliasSlotFor(ref.String(), node.Children[0]); slot != "" {
-								return &plansql.ColRef{Column: slot}, true
-							}
-							return nil, false
-						}); changed && complete {
-							pred.ASTExpr, slotted = out, true
-						}
-					}
 					if ast, names, ok := logical.ResolveFilterThroughProjects(pred, node.Children[0]); ok {
 						exprStr, aliasNames = ast.String(), names
-					} else if slotted {
-						exprStr = pred.ASTExpr.String()
 					}
 				}
 				// The spelling the query wrote, kept alongside the resolved
@@ -1192,8 +1175,8 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 				switch {
 				case pred.Raw != "":
 					aliasStr = pred.Raw
-				case written != nil:
-					aliasStr = written.String()
+				case pred.ASTExpr != nil:
+					aliasStr = pred.ASTExpr.String()
 				}
 				if exprStr == "" {
 					exprStr = aliasStr
@@ -1341,6 +1324,11 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 		// producer to its projection, so a second call for a second OVER
 		// clause found the list set and added nothing.
 		winAliases := newWindowAliasSlots(p)
+		// Over a derived table that shadows a column of its own input the
+		// producer emits the table's DECLARED columns under their own names,
+		// and the window's keys, argument and key expressions read them by
+		// name (materializeWindowDeclaredInput).
+		declared := p.materializeWindowDeclaredInput((*stages)[preCount:], node)
 		for _, we := range node.WindowExprs {
 			// Resolved by the same helper buildWindow uses, so the stage
 			// spec and the single-process operator describe one computation
@@ -1379,10 +1367,8 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 			// arm (#742); unscoped lookup can bind a sibling's same-named alias (#975).
 			// The window key and its stage distribution key must name the same stream value.
 			for i, pb := range partitionBy {
-				// An alias a window BELOW already carries in its slot
-				// (windowAliasSlotFor): the column of its name is the source.
-				if slot := p.windowAliasSlotFor(pb, winChild); slot != "" {
-					partitionBy[i] = slot
+				if d := declared.name(pb); d != "" {
+					partitionBy[i] = d
 					continue
 				}
 				// Scoped with a SOURCE column: that arm's column is the key.
@@ -1404,8 +1390,8 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 				}
 			}
 			for i := range orderBy {
-				if slot := p.windowAliasSlotFor(orderBy[i].Column, winChild); slot != "" {
-					orderBy[i].Column = slot
+				if d := declared.name(orderBy[i].Column); d != "" {
+					orderBy[i].Column = d
 					continue
 				}
 				if src, scoped := windowArgSourceInScope(orderBy[i].Column, winChild); scoped && src != "" {
@@ -1441,8 +1427,8 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 			// key cannot wait — it is also the stage's DISTRIBUTION, consumed
 			// by EnsureDistribution (docs/design/window-key-ownership.md §(c)).
 			inputCol := ec.InputCol
-			if slot := p.windowAliasSlotFor(inputCol, winChild); slot != "" {
-				inputCol = slot
+			if d := declared.name(inputCol); d != "" {
+				inputCol = d
 			} else if src, scoped := windowArgSourceInScope(inputCol, winChild); scoped {
 				if src != "" {
 					inputCol = p.PlanContext.CleanExpr(src)
@@ -1501,8 +1487,9 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 			// BEFORE a rename is respelled to its source: `ob` in
 			// `SUM(b + ob)` over `SELECT b * 2 AS b, b AS ob` respells to the
 			// source `b`, which is then indistinguishable from the alias `b`.
-			WindowKeyExprs: respellWindowKeyExprs(
-				winAliases.bindKeyExprs(p.PlanContext.WindowKeySpecs(winKeys), winChild), winChild),
+			WindowKeyExprs: declared.keyExprs(p.PlanContext.WindowKeySpecs(winKeys), func(specs []physical.ProjectExprSpec) []physical.ProjectExprSpec {
+				return respellWindowKeyExprs(winAliases.bindKeyExprs(specs, winChild), winChild)
+			}),
 			WindowCols: winCols,
 		}
 		// A key EXPRESSION is evaluated over the window's input exactly as a
@@ -1513,8 +1500,11 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 		// `SELECT t.b * 2 AS v FROM t JOIN u …` read NULL on the DAG arms —
 		// a JOIN, a LIMIT, a sort or a window below emits no stage for the
 		// Project that defines `v`.
-		winAliases.bindShadowing((*stages)[preCount:], winChild)
-		winAliases.materialize((*stages)[preCount:], &stage, winChild)
+		if declared == nil {
+			// Over declared columns there is nothing to materialize: every
+			// name the window reads is one the producer already emits.
+			winAliases.materialize((*stages)[preCount:], &stage, winChild)
+		}
 		// Only depend on leaf stages from subtree (not transitive deps like scan).
 		stage.Dependencies = leafStages((*stages)[preCount:])
 		*stages = append(*stages, stage)
