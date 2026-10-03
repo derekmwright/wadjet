@@ -72,6 +72,13 @@ func TestArcNXEmbeddedNumericCarrier(t *testing.T) {
 		{"b2/aliasedComputedItem",
 			"SELECT a.id, ABS(-1) * a.n AS x, SQRT(4) * a.n AS s FROM nx_e a ORDER BY a.id",
 			"{int,numeric,float} 1,2.25,4.5 | 3,10.00,20 | 5,0.01,0.02 | 6,NULL,NULL"},
+		// MOD with a fractional divisor after an integer argument is not
+		// integer: 0.5, never an integer store's 0, constant or column.
+		{"mod/fractionalDivisor",
+			"SELECT q.id, q.m = 0.5 AS a, q.c > 0 AS b, q.d = 0.5 AS c, q.e > 1 AS d FROM (SELECT a.id, " +
+				"MOD(8, 2.5) AS m, MOD(a.i, 2.5) AS c, MOD(8, -(2.5)) AS d, MOD(8, 2.5) * a.n AS e FROM nx_e a) q ORDER BY q.id",
+			"{int,bool,bool,bool,bool} 1,true,true,true,true | 3,true,false,true,true | 5,true,true,true,false | " +
+				"6,true,NULL,true,NULL"},
 	}
 	for _, c := range cases {
 		res, err := db.Query(ctx, c.sql)

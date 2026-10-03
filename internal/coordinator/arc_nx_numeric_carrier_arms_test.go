@@ -600,6 +600,36 @@ func nxCells() []nxCell {
 			add(c[0], c[2])
 		}
 	}
+	// MOD WITH A FRACTIONAL ARGUMENT AFTER AN INTEGER ONE: a fractional
+	// constant divisor is a numeric argument, so the call is not integer
+	// (`MOD(8, 2.5)` is 0.5, never an integer store's 0), spelled bare,
+	// negated, parenthesized, over a column, as a GROUP BY key, under `*`
+	// and `/`; and the integer controls that stay integer (`MOD(8, t.i)`,
+	// `MOD(t.i, '3')`, `MOD(8, 3)`).
+	for _, c := range [][2]string{
+		{"m/modLitFrac", "SELECT MOD(8, 2.5), MOD(-7, 2.5), MOD(7, 3.5)"},
+		{"m/modLitFracTbl", "SELECT t.id, MOD(8, 2.5) FROM ss_t t WHERE t.id = 1"},
+		{"m/modLitFracMulN", "SELECT t.id, MOD(8, 2.5) * t.n FROM ss_t t ORDER BY t.id"},
+		{"m/modLitFracCmp", "SELECT t.id FROM ss_t t WHERE MOD(8, 2.5) = 0.5 ORDER BY t.id"},
+		{"m/modLitFracGroup", "SELECT MOD(8, 2.5) AS k, count(*) FROM ss_t t GROUP BY 1"},
+		{"m/modColFrac", "SELECT t.id, MOD(t.i, 2.5) FROM ss_t t ORDER BY t.id"},
+		{"m/modColFracB", "SELECT t.id, MOD(t.b, 0.7) FROM ss_t t ORDER BY t.id"},
+		{"m/modLitColN", "SELECT t.id, MOD(8, t.n) FROM ss_t t WHERE t.n <> 0 ORDER BY t.id"},
+		{"m/modLitColI", "SELECT t.id, MOD(8, t.i) FROM ss_t t WHERE t.i <> 0 ORDER BY t.id"},
+		{"m/modLitColB", "SELECT t.id, MOD(9000000001, t.b) FROM ss_t t WHERE t.b <> 0 ORDER BY t.id"},
+		{"m/modLitBigFrac", "SELECT MOD(9223372036854775807, 2.5)"},
+		{"m/absLitIntMulF", "SELECT t.id, ABS(-2) * t.f FROM ss_t t ORDER BY t.id"},
+		{"m/modLitCastNum", "SELECT MOD(8, CAST(2.5 AS NUMERIC)), MOD(8, CAST('2.5' AS NUMERIC(3,1)))"},
+		{"m/modNegFracParen", "SELECT MOD(8, -2.5), MOD(8, (2.5)), MOD(8, -(2.5))"},
+		{"m/modColQuoted", "SELECT t.id, MOD(t.i, '3') FROM ss_t t ORDER BY t.id"},
+		{"m/modLitExp", "SELECT MOD(8, 1e3), MOD(8, 3)"},
+		{"m/modColFracCmp", "SELECT t.id FROM ss_t t WHERE MOD(t.i, 2.5) = 0.5 ORDER BY t.id"},
+		{"m/modFracFirst", "SELECT MOD(2.5, 8), MOD(-2.5, 3)"},
+		{"m/modLitFracDiv", "SELECT t.id, MOD(8, 2.5) / t.n FROM ss_t t WHERE t.n <> 0 ORDER BY t.id"},
+		{"m/modBigFracCol", "SELECT t.id, MOD(t.b, 2.5) FROM ss_t t ORDER BY t.id"},
+	} {
+		addOrd(c[0], c[1])
+	}
 	// A NUMERIC OPERAND OF A CAST WITH NO CONVERSION FROM NUMERIC: a
 	// wide literal is an exact DECIMAL now, boxed as its text, and the
 	// BOOLEAN / DATE / TIMESTAMP / INTERVAL / UUID / array arms read a string

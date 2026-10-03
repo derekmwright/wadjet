@@ -177,3 +177,12 @@ w/b2PastInt64Alias	b	true	SELECT t.id, 9223372036854775808 / t.n AS x FROM ss_t 
 w/b2SqrtAlias	s	true	SELECT t.id, SQRT(4) * t.n AS x FROM ss_t t ORDER BY t.id	{20,701} rows=6 1,4.5 | 2,-7 | 3,20 | 4,0 | 5,0.02 | 6,NULL
 w/b2SqrtAlias	e	true	SELECT t.id, SQRT(4) * t.n AS x FROM ss_t t ORDER BY t.id	{20,701} rows=6 1,4.5 | 2,-7 | 3,20 | 4,0 | 5,0.02 | 6,NULL
 w/b2SqrtAlias	b	true	SELECT t.id, SQRT(4) * t.n AS x FROM ss_t t ORDER BY t.id	{20,701} rows=6 0000000000000001,4012000000000000 | 0000000000000002,c01c000000000000 | 0000000000000003,4034000000000000 | 0000000000000004,0000000000000000 | 0000000000000005,3f947ae147ae147b | 0000000000000006,NULL
+w/modLitFracTbl	s	true	SELECT t.id, MOD(8, 2.5) FROM ss_t t WHERE t.id = 1	{20,1700} rows=1 1,0.5
+w/modLitFracTbl	e	true	SELECT t.id, MOD(8, 2.5) FROM ss_t t WHERE t.id = 1	{20,1700} rows=1 1,0.5
+w/modLitFracTbl	b	true	SELECT t.id, MOD(8, 2.5) FROM ss_t t WHERE t.id = 1	{20,1700} rows=1 0000000000000001,0001ffff000000011388
+w/modLitFracGroup	s	true	SELECT MOD(8, 2.5) AS k, count(*) FROM ss_t t GROUP BY 1	{1700,20} rows=1 0.5,6
+w/modLitFracGroup	e	true	SELECT MOD(8, 2.5) AS k, count(*) FROM ss_t t GROUP BY 1	{1700,20} rows=1 0.5,6
+w/modLitFracGroup	b	true	SELECT MOD(8, 2.5) AS k, count(*) FROM ss_t t GROUP BY 1	{1700,20} rows=1 0001ffff000000011388,0000000000000006
+w/modColFrac	s	true	SELECT t.id, MOD(t.i, 2.5) FROM ss_t t ORDER BY t.id	{20,1700} rows=6 1,0.5 | 2,-2.0 | 3,0.0 | 4,0.0 | 5,1.0 | 6,NULL
+w/modColFrac	e	true	SELECT t.id, MOD(t.i, 2.5) FROM ss_t t ORDER BY t.id	{20,1700} rows=6 1,0.5 | 2,-2.0 | 3,0.0 | 4,0.0 | 5,1.0 | 6,NULL
+w/modColFrac	b	true	SELECT t.id, MOD(t.i, 2.5) FROM ss_t t ORDER BY t.id	{20,1700} rows=6 0000000000000001,0001ffff000000011388 | 0000000000000002,00010000400000010002 | 0000000000000003,0000000000000001 | 0000000000000004,0000000000000001 | 0000000000000005,00010000000000010001 | 0000000000000006,NULL
