@@ -222,12 +222,13 @@ func (p *Planner) buildScan(ctx context.Context, node *logical.Node) (exec.Sourc
 		}
 	}
 
-	if ts, ok := ScanTableSample(node); ok {
+	if node.SampleMethod != "" {
 		// The sample is drawn where the scan reads, from the rows the scan's
 		// batch selects (a DELETE's markers narrow Sel), and its range is
 		// checked when the scan begins — the same kernel a worker's scan
 		// fragment applies (#1411).
-		scanner = exec.NewSampledSource(scanner, ts)
+		scanner = exec.NewSampledSource(scanner, exec.TableSample{
+			Method: node.SampleMethod, Percent: node.SamplePercent, Null: node.SampleNull})
 	}
 	return scanner, nil, &exec.CollectSink{}, nil
 }

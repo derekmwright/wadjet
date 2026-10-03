@@ -11,6 +11,7 @@ import (
 
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 
+	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/engine/expr"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	"github.com/derekmwright/wadjet/internal/planner/physical"
@@ -160,8 +161,10 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 			EstimatedBytes:  estBytes,
 			EstimatedRows:   estRows,
 		}
-		if ts, ok := physical.ScanTableSample(node); ok {
-			stage.Sample = &ts
+		if node.SampleMethod != "" {
+			// The scan's TABLESAMPLE, the argument's real value as the
+			// logical build coerced it (#1411).
+			stage.Sample = &exec.TableSample{Method: node.SampleMethod, Percent: node.SamplePercent, Null: node.SampleNull}
 		}
 		*stages = append(*stages, stage)
 		if parentID != nil {
