@@ -111,7 +111,7 @@ func nxOperands() []nxOperand {
 		{"rcColDiv", "CAST(t.n / 0.9 AS INTEGER)", "3"},
 		{"rcCoalesce", "CAST(COALESCE(2.5, 0) AS INTEGER)", "3"},
 		// A QUOTIENT whose integer operand is an integer CAST under a
-		// construct an integer's type passes through (round 2, B1): NULLIF,
+		// construct an integer's type passes through: NULLIF,
 		// COALESCE, CASE, GREATEST, abs, unary minus, `+ 0`, `* 1`. Each makes
 		// the decision the bare cast makes (icColDiv, icBigDiv): PostgreSQL
 		// types all of them alike.
@@ -125,7 +125,7 @@ func nxOperands() []nxOperand {
 		{"wqColCase", "CASE WHEN t.id > 0 THEN CAST(t.i AS INTEGER) END / NULLIF(t.n, 0)", "1.3333333333333333"},
 		{"wqColGreatest", "GREATEST(CAST(t.i AS INTEGER), -100) / NULLIF(t.n, 0)", "1.3333333333333333"},
 		// A QUOTIENT over an operand a CAST made exact through a NUMERIC
-		// construct (round 3, B1): the integer CAST under numeric arithmetic,
+		// construct: the integer CAST under numeric arithmetic,
 		// a bare NUMERIC cast of the cast, of an integer column and of a
 		// numeric column. Each keeps the double the quotient computed before
 		// the cast was exact (expr.castMadeExactIn), as the bare integer CAST
@@ -243,7 +243,7 @@ func nxCells() []nxCell {
 		{"subquery", "SELECT CAST((SELECT 5 / 2.0) AS INTEGER) AS y"},
 		{"join", "SELECT t.id, CAST(s.x AS INTEGER) AS y FROM ss_t t JOIN (SELECT u.id, 5 / 2.0 + u.id * 0 AS x FROM ss_t u) s ON s.id = t.id WHERE t.id < 3"},
 		// EXTRACT over a temporal column inside the operand: a DAG stage
-		// re-parses `EXTRACT(year FROM t.d)` as `year(t.d)` (round 2).
+		// re-parses `EXTRACT(year FROM t.d)` as `year(t.d)`.
 		{"extractDate", "SELECT t.id, CAST(extract(year FROM t.d) * 0 + 2.5 AS INTEGER) AS y FROM ss_t t WHERE t.id < 3"},
 		{"extractTs", "SELECT t.id, CAST(5 / 2.0 + extract(second FROM t.ts) * 0 AS INTEGER) AS y FROM ss_t t WHERE t.id < 3"},
 	} {
@@ -285,8 +285,8 @@ func nxCells() []nxCell {
 	add("bareCast/floatOperand", "SELECT t.id, CAST(t.f AS NUMERIC) * 0.1 AS x FROM ss_t t WHERE t.id IN (1, 5)")
 	add("bareCast/intOperand", "SELECT t.id, CAST(t.i AS NUMERIC) * 0.1 AS x FROM ss_t t WHERE t.id IN (1, 5)")
 	add("bareCast/numOperand", "SELECT t.id, CAST(t.n AS NUMERIC) / 3 AS x FROM ss_t t WHERE t.id IN (1, 5)")
-	// Round 2's review cells for the quotient over a NUMERIC-wrapped integer
-	// CAST or a bare NUMERIC cast, verbatim (a Ctl row has the integer
+	// The quotient over a NUMERIC-wrapped integer
+	// CAST or a bare NUMERIC cast (a Ctl row has the integer
 	// COLUMN where the cell has the CAST: the one-scale quotient, r19).
 	for _, q := range [][2]string{
 		{"mul10", "(CAST(t.i AS INTEGER) * 1.0) / t.n"}, {"mul10Ctl", "(t.i * 1.0) / t.n"},
@@ -348,7 +348,7 @@ func nxCells() []nxCell {
 	addOrd("qf/floorIcCtl/cmp", "SELECT t.id FROM ss_t t WHERE t.n <> 0 AND floor(CAST(t.i AS INTEGER)) / t.n = 1.3333333333333333 ORDER BY t.id")
 	addOrd("qf/sqrtCtl/cmp", "SELECT t.id FROM ss_t t WHERE t.n <> 0 AND sqrt(CAST(t.i AS NUMERIC) * CAST(t.i AS NUMERIC)) / t.n = 1.3333333333333333 ORDER BY t.id")
 	addOrd("qf/roundNumScaleCtl/cmp", "SELECT t.id FROM ss_t t WHERE t.n <> 0 AND round(CAST(t.i AS NUMERIC(10,0))) / t.n = 1.3333333333333333 ORDER BY t.id")
-	// A BARE NUMERIC CAST AS A CHOICE'S ARM (round 5, B1): the cast is
+	// A BARE NUMERIC CAST AS A CHOICE'S ARM: the cast is
 	// classified by the type it declares — a DECIMAL when its operand has an
 	// exact type, as exact arithmetic reads it — so a choice and a comparison
 	// order it as a number and never by its rendered text. Four operand kinds
@@ -387,8 +387,8 @@ func nxCells() []nxCell {
 			addOrd(base+"between", "SELECT t.id FROM ss_t t WHERE "+e+" BETWEEN 25 AND 1000 ORDER BY t.id")
 		}
 	}
-	// The round-4 review's LEAST / GREATEST statements, verbatim: the bare
-	// NUMERIC cast's arm chosen by byte order (B1) and its controls.
+	// LEAST / GREATEST over a bare NUMERIC cast's arm, which a choice once
+	// chose by byte order, and its controls.
 	for _, c := range [][2]string{
 		{"lg/least100/proj", "SELECT t.id, least(CAST(t.i AS NUMERIC), 100) FROM ss_t t ORDER BY t.id"},
 		{"lg/greatest100/proj", "SELECT t.id, greatest(CAST(t.i AS NUMERIC), 100) FROM ss_t t ORDER BY t.id"},
@@ -414,22 +414,19 @@ func nxCells() []nxCell {
 	} {
 		addOrd(c[0], c[1])
 	}
-	// AN ALIASED INTEGER-LITERAL QUOTIENT OVER A NUMERIC COLUMN (candidate
-	// NX-C14, deferred): on the single-process arms a computed item with an
-	// alias records its expression text as its source column, and Project
-	// resolves `7 / t.n` through columnIndexFallback's strip-to-the-first-dot
-	// to the column `n`, so the item is typed numeric(10,2): the integer
-	// literal's quotient prints at scale 2 and the literal past int64's exact
-	// quotient refuses 22003. The DAG arms and the unaliased item answer the
-	// one-scale quotient. Pinned as it stands, per arm.
+	// AN ALIASED INTEGER-LITERAL QUOTIENT OVER A NUMERIC COLUMN and the same
+	// quotient without its alias: both answer the one-scale quotient on every
+	// arm. The aliased item is not typed from the column `n` its text names
+	// after the first dot (that typed `7 / t.n AS x` numeric(10,2) and made
+	// the literal past int64's exact quotient refuse 22003).
 	for _, a := range [][2]string{
 		{"pastInt64", "9223372036854775808"}, {"int64", "9223372036854775807"}, {"small", "7"},
 	} {
 		addOrd("alias/"+a[0]+"Quot", "SELECT t.id, "+a[1]+" / t.n AS x FROM ss_t t WHERE t.n <> 0 ORDER BY t.id")
 		addOrd("alias/"+a[0]+"QuotNoAlias", "SELECT t.id, "+a[1]+" / t.n FROM ss_t t WHERE t.n <> 0 ORDER BY t.id")
 	}
-	// AN ALIASED COMPUTED ITEM IS TYPED AS IT IS WITHOUT ITS ALIAS (round 5,
-	// B2, NX-C14): each expression aliased, bare and unqualified, so the
+	// AN ALIASED COMPUTED ITEM IS TYPED AS IT IS WITHOUT ITS ALIAS: each
+	// expression aliased, bare and unqualified, so the
 	// projection's type comes from the declaration walk of the expression and
 	// never from the column its text names after the first dot (`7 / t.n`
 	// is not the column `n`); and the GROUP BY key identity that text match
@@ -552,9 +549,9 @@ func nxCells() []nxCell {
 			add(c[0], c[2])
 		}
 	}
-	// ABS and MOD over an INTEGER constant answer in the integer domain
-	// (round 5, B2): `ABS(-1)` is integer and `ABS(-1) * t.n` numeric on
-	// PostgreSQL, bare and aliased.
+	// ABS and MOD over an INTEGER constant answer in the integer domain:
+	// `ABS(-1)` is integer and `ABS(-1) * t.n` numeric on PostgreSQL, bare
+	// and aliased.
 	for _, c := range [][3]string{
 		{"ac/abs", "true", "SELECT t.id, ABS(-1) FROM ss_t t ORDER BY t.id"},
 		{"ac/absA", "true", "SELECT t.id, ABS(-1) AS x FROM ss_t t ORDER BY t.id"},
@@ -603,8 +600,8 @@ func nxCells() []nxCell {
 			add(c[0], c[2])
 		}
 	}
-	// A NUMERIC OPERAND OF A CAST WITH NO CONVERSION FROM NUMERIC (round 2,
-	// B2): a wide literal is an exact DECIMAL now, boxed as its text, and the
+	// A NUMERIC OPERAND OF A CAST WITH NO CONVERSION FROM NUMERIC: a
+	// wide literal is an exact DECIMAL now, boxed as its text, and the
 	// BOOLEAN / DATE / TIMESTAMP / INTERVAL / UUID / array arms read a string
 	// box by their input grammar. PostgreSQL refuses each type pair, 42846;
 	// the narrow literal (a double here) and the integer literal past int64
