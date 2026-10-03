@@ -22,9 +22,14 @@ fractional spelling, or an integer past int64 — compiles to the DECIMAL its
 spelling names; a bare NUMERIC cast over an exact operand is that operand's
 type. A quotient over an operand one of these casts made exact — an integer
 CAST at any depth of the numeric constructs (NULLIF, COALESCE, CASE,
-GREATEST, LEAST, abs, unary minus, integer or numeric arithmetic), a bare
-NUMERIC cast, an integer literal past int64 — keeps the float rung, because
-§3's one-scale quotient would drop the double's digits. A CAST of a numeric
+GREATEST, LEAST, unary minus, integer or numeric arithmetic, and the
+functions whose result is their argument's exact type — abs, mod, round,
+ceil, ceiling, floor, trunc, sign — one list the plan's walk and the
+kernel's read), or a bare NUMERIC cast — keeps the float rung, because §3's
+one-scale quotient would drop the double's digits. A quotient of two
+constants keeps it too, an integer literal past int64 among them
+(`9223372036854775808 / 2`); the literal over a column is §3's one-scale
+quotient (`t.n / 9223372036854775808`). A CAST of a numeric
 the engine carries exactly (a column, a typed or bare NUMERIC cast, a wide
 literal, a numeric expression or scalar subquery) to BOOLEAN, DATE,
 TIMESTAMP, INTERVAL, UUID, an array or a vector refuses the type pair,
