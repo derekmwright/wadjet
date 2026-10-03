@@ -74,11 +74,24 @@ func (c *pgConn) inferParamOIDs(sql string, declared []uint32) []uint32 {
 		return oids
 	}
 
-	// One resolution per statement text per connection: Bind runs per
-	// execution, and the scope probes behind it are queries.
-	key := paramCacheKey(sql, declared)
-	if cached, ok := c.paramOIDCache[key]; ok {
-		return cached
+	// One resolution per statement text per connection AND per catalog
+	// generation: pgx and pgJDBC re-Parse one text per execution, and the
+	// scope probes behind a resolution are queries. The generation advances
+	// on every catalog write (catalog.Generation — a DROP / CREATE, an ALTER,
+	// a function, a commit's manifest), from this connection or any other, so
+	// a type resolved against a table that has since been recreated is never
+	// reused (round-2 B1: keyed by the text alone, '2.5' bound for
+	// `INSERT … VALUES (1, $1)` was spliced as the numeric the dropped table's
+	// column was and stored 3 in the recreated INTEGER, where PostgreSQL
+	// raises 22P02). The generation is read BEFORE the walk, so an entry can
+	// only be newer than its key, never older; a store without one caches
+	// nothing.
+	gen, cacheable := c.db.Catalog().Generation()
+	key := paramCacheKey(gen, sql, declared)
+	if cacheable {
+		if cached, ok := c.paramOIDCache[key]; ok {
+			return append([]uint32(nil), cached...)
+		}
 	}
 
 	ctx, cancel := c.inferenceContext()
@@ -89,19 +102,25 @@ func (c *pgConn) inferParamOIDs(sql string, declared []uint32) []uint32 {
 	}
 	pt.statement(sql)
 
-	if c.paramOIDCache == nil {
-		c.paramOIDCache = make(map[string][]uint32)
+	if cacheable {
+		// Entries of an older generation can never be read again.
+		if c.paramOIDCache == nil || c.paramOIDCacheGen != gen {
+			c.paramOIDCache = make(map[string][]uint32)
+			c.paramOIDCacheGen = gen
+		}
+		c.paramOIDCache[key] = append([]uint32(nil), oids...)
 	}
-	c.paramOIDCache[key] = oids
 	return oids
 }
 
-// paramCacheKey keys the cache by the statement AND the declared OIDs: one
-// text prepared twice with different declarations types its undeclared
-// positions the same way, but the declared ones differ, and a cached slice is
-// returned whole.
-func paramCacheKey(sql string, declared []uint32) string {
+// paramCacheKey keys the cache by the catalog generation, the statement AND
+// the declared OIDs: one text prepared twice with different declarations
+// types its undeclared positions the same way, but the declared ones differ,
+// and a cached slice is returned whole.
+func paramCacheKey(gen uint64, sql string, declared []uint32) string {
 	var b strings.Builder
+	b.WriteString(strconv.FormatUint(gen, 10))
+	b.WriteByte(0)
 	b.WriteString(sql)
 	b.WriteByte(0)
 	for _, oid := range declared {

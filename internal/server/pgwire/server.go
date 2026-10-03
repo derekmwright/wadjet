@@ -227,6 +227,7 @@ func (s *Server) handleConn(conn net.Conn) {
 		queryTimeout: s.queryTimeout,
 		stmts:        make(map[string]string),
 		stmtOIDs:     make(map[string][]uint32),
+		stmtTyped:    make(map[string][]uint32),
 		sessionVars:  make(map[string]string),
 		txState:      'I',
 		authProvider: s.authProvider,
@@ -262,7 +263,13 @@ type pgConn struct {
 	// Extended Query protocol state
 	preparedSQL  string   // last parsed statement SQL
 	preparedOIDs []uint32 // parameter type OIDs Parse declared for it
-	portalSQL    string   // last bound portal SQL
+	// preparedTyped is preparedOIDs with every parameter the client left to
+	// the server typed, decided ONCE at Parse (paramtypes.go): Describe
+	// reports it and Bind splices by it, so a DDL between them cannot make
+	// the two disagree, and a later Parse types against the catalog as it
+	// then stands.
+	preparedTyped []uint32
+	portalSQL     string // last bound portal SQL
 	// portalOpen / portalName are whether a portal EXISTS and what it is
 	// called. This connection holds one portal; PostgreSQL destroys it at the
 	// Sync that ends an implicit transaction, at a simple Query (the unnamed
@@ -274,6 +281,7 @@ type pgConn struct {
 	portalName      string
 	stmts           map[string]string   // named prepared statements
 	stmtOIDs        map[string][]uint32 // their declared parameter type OIDs
+	stmtTyped       map[string][]uint32 // their parameter types as Parse decided them (preparedTyped)
 	described       bool                // true if Describe was sent for current portal
 	describedFields int                 // field count of the RowDescription Describe sent
 	resultFmtCodes  []int16             // result format codes from Bind (0=text, 1=binary)
@@ -290,7 +298,8 @@ type pgConn struct {
 	describeCancel       string              // set when that failure was a cancellation: the 57014 message to replay
 	describeSynth        *synthAnswer        // cached Describe-time introspection answer
 	describedSQL         string              // statement the three caches above belong to
-	paramOIDCache        map[string][]uint32 // per-statement inferred parameter OIDs (see paraminfer.go)
+	paramOIDCache        map[string][]uint32 // inferred parameter OIDs by text, of one catalog generation (paramtypes.go)
+	paramOIDCacheGen     uint64              // the catalog generation paramOIDCache's entries were typed against
 
 	// Transaction state: 'I' = idle, 'T' = in transaction, 'E' = failed
 	txState byte
@@ -1358,12 +1367,24 @@ func (c *pgConn) handleParse(payload []byte) {
 		return
 	}
 
+	// The parameters' types are decided HERE, as PostgreSQL decides them at
+	// parse analysis: the statement keeps them until it is closed or parsed
+	// again, whatever DDL runs in between (on this connection or another),
+	// and a new Parse of the same text types it against the catalog as it
+	// stands then (round-2 B1: a type kept per statement TEXT outlived a
+	// DROP / CREATE and spliced '2.5' as a numeric into a recreated INTEGER).
+	typed := oids
+	if inferred := c.inferParamOIDs(sql, oids); len(inferred) >= len(oids) {
+		typed = inferred
+	}
 	if name == "" {
 		c.preparedSQL = sql
 		c.preparedOIDs = oids
+		c.preparedTyped = typed
 	} else {
 		c.stmts[name] = sql
 		c.stmtOIDs[name] = oids
+		c.stmtTyped[name] = typed
 	}
 	if c.logger != nil {
 		c.logger.Debug("pgwire parse", "stmt", name, "sql", sql)
@@ -1387,22 +1408,18 @@ func (c *pgConn) handleBind(payload []byte) {
 	c.closePortal()
 
 	sql := c.preparedSQL
-	oids := c.preparedOIDs
+	declared, oids := c.preparedOIDs, c.preparedTyped
 	if stmtName != "" {
 		if s, ok := c.stmts[stmtName]; ok {
 			sql = s
-			oids = c.stmtOIDs[stmtName]
+			declared, oids = c.stmtOIDs[stmtName], c.stmtTyped[stmtName]
 		}
 	}
-
-	// Fill in the parameter types the client left to the server. An OID-0
-	// parameter's text bytes used to render as a quoted string, so an int
-	// column compared against '7' matched the wrong row (#365). Inference
-	// gives renderParam the same OID ParameterDescription reports.
-	declared := oids
-	if inferred := c.inferParamOIDs(sql, oids); len(inferred) >= len(oids) {
-		oids = inferred
-	}
+	// oids carries the parameter types the client left to the server, as
+	// Parse decided them: an OID-0 parameter's text bytes used to render as a
+	// quoted string, so an int column compared against '7' matched the wrong
+	// row (#365). renderParam reads the same OID ParameterDescription
+	// reports.
 
 	// Read the parameters and render each as the SQL literal that stands in
 	// for it. The planner takes SQL text, not bound values, so substitution
@@ -1559,11 +1576,11 @@ func (c *pgConn) handleDescribe(payload []byte) {
 
 	if descType == 'S' {
 		sql := c.preparedSQL
-		oids := c.preparedOIDs
+		oids := c.preparedTyped
 		if name := readCString(payload[1:]); name != "" {
 			if s, ok := c.stmts[name]; ok {
 				sql = s
-				oids = c.stmtOIDs[name]
+				oids = c.stmtTyped[name]
 			}
 		}
 
@@ -1575,10 +1592,8 @@ func (c *pgConn) handleDescribe(payload []byte) {
 		// A placeholder inference cannot type stays OID 0, "unknown", which
 		// every driver understands; claiming zero parameters for a statement
 		// that has three was not honest, and pgJDBC reads the count to size
-		// its parameter list.
-		if inferred := c.inferParamOIDs(sql, oids); len(inferred) >= len(oids) {
-			oids = inferred
-		}
+		// its parameter list. The types are the ones Parse decided
+		// (preparedTyped).
 		c.buf = c.buf[:0]
 		c.buf = appendInt16(c.buf, int16(len(oids)))
 		for _, oid := range oids {
@@ -2100,6 +2115,7 @@ func (c *pgConn) handleClose(payload []byte) {
 		name := readCString(payload[1:])
 		delete(c.stmts, name)
 		delete(c.stmtOIDs, name)
+		delete(c.stmtTyped, name)
 	}
 	if len(payload) >= 1 && payload[0] == 'P' && c.portalOpen && readCString(payload[1:]) == c.portalName {
 		c.closePortal()
