@@ -75,7 +75,9 @@ func TestArcTBTablesampleArgumentOnEveryArm(t *testing.T) {
 				want, why := c.want, ""
 				switch {
 				case arm.dag && c.dagPin != "":
-					want, why = c.dagPin, " (#1190's answer on the DAG arms: re-measure it)"
+					want, why = c.dagPin, " (the DAG arms' pinned answer: re-measure it)"
+				case arm.coord == nil && c.localPin != "":
+					want, why = c.localPin, " (the embedded arms' pinned answer, other r21: re-measure it)"
 				case c.pinned:
 					why = " (a pinned divergence: re-measure it)"
 				}
@@ -105,6 +107,9 @@ type tbCell struct {
 	// onDAG: on the three DAG arms the statement runs on the stage DAG —
 	// no table-less route to the coordinator-local pipeline is taken.
 	onDAG bool
+	// localPin is the answer on the two embedded arms where it is a kept
+	// divergence (other r21), and want is PostgreSQL's everywhere else.
+	localPin string
 }
 
 // tbMatches compares an answer with a want: the exact rendering, or `RANGE
@@ -364,6 +369,59 @@ func tbCells() []tbCell {
 	add("never_scanned/big_where_false", "SELECT count(*) FROM tb_big TABLESAMPLE BERNOULLI (101) WHERE false", "0")
 	empty1190("never_scanned/empty_limit_zero", "SELECT count(*) FROM tb_e TABLESAMPLE BERNOULLI (101) LIMIT 0", "(0 rows)")
 	add("scanned/where_id_negative", "SELECT id FROM tb_p TABLESAMPLE BERNOULLI (101) WHERE id < 0", "ERR 2202H")
+	// A subquery a constant short-circuits is never planned or run, as on
+	// PostgreSQL, which folds `false AND …` / `true OR …` and a top-level
+	// NULL conjunct before it plans a sublink (review r2 B1: the DAG arms
+	// failed uncoded, or raised the subquery's 2202H, where base and
+	// PostgreSQL answered; the reversed spellings raised on the embedded arms
+	// too). A connective the constant does not decide keeps its subquery.
+	sc := func(where string) string { return "SELECT count(*) FROM tb_p WHERE " + where }
+	const ex101 = "EXISTS (SELECT 1 FROM tb_big TABLESAMPLE BERNOULLI (101))"
+	const lt101 = "id < (SELECT count(*) FROM tb_big TABLESAMPLE BERNOULLI (101))"
+	add("short_circuit/false_and_exists", sc("false AND "+ex101), "0")
+	add("short_circuit/true_or_exists", sc("true OR "+ex101), "3")
+	add("short_circuit/false_and_exists_e400", sc("false AND EXISTS (SELECT 1 FROM tb_big TABLESAMPLE BERNOULLI (1e400))"), "0")
+	add("short_circuit/false_and_exists_null", sc("false AND EXISTS (SELECT 1 FROM tb_big TABLESAMPLE BERNOULLI (NULL))"), "0")
+	add("short_circuit/false_and_scalar", sc("false AND "+lt101), "0")
+	add("short_circuit/exists_and_false", sc(ex101+" AND false"), "0")
+	add("short_circuit/scalar_and_false", sc(lt101+" AND false"), "0")
+	add("short_circuit/null_and_exists", sc("NULL AND "+ex101), "0")
+	add("short_circuit/null_and_scalar", sc("NULL AND "+lt101), "0")
+	add("short_circuit/one_is_two_and_scalar", sc("(1 = 2) AND "+lt101), "0")
+	add("short_circuit/true_or_scalar", sc("true OR "+lt101), "3")
+	add("short_circuit/not_true_or_exists", sc("NOT (true OR "+ex101+")"), "0")
+	add("short_circuit/nested_false_and", sc("id > 0 AND (false AND "+ex101+")"), "0")
+	add("short_circuit/nested_true_or", sc("id > 0 OR (true OR "+ex101+")"), "3")
+	add("short_circuit/having_false_and_exists", "SELECT id % 2, count(*) FROM tb_p GROUP BY 1 HAVING false AND "+ex101, "(0 rows)")
+	add("short_circuit/false_and_in", sc("false AND id IN (SELECT id FROM tb_big TABLESAMPLE BERNOULLI (101))"), "0")
+	add("short_circuit/false_and_exists_div_zero_control", sc("false AND EXISTS (SELECT 1 FROM tb_big WHERE id < 1/0)"), "0")
+	add("short_circuit/false_and_exists_unsampled_control", sc("false AND EXISTS (SELECT 1 FROM tb_big)"), "0")
+	add("short_circuit/false_or_exists", sc("false OR "+ex101), "ERR 2202H")
+	add("short_circuit/null_or_exists", sc("NULL OR "+ex101), "ERR 2202H")
+	add("short_circuit/true_and_exists", sc("true AND "+ex101), "ERR 2202H")
+	// The DAG's EXISTS arm answers the subquery's SQLSTATE, as the scalar
+	// arm does (review r2 B1: every coded refusal but 42501 was swallowed
+	// and the task failed uncoded).
+	add("exists_coded/exists_101", sc(ex101), "ERR 2202H")
+	add("exists_coded/not_exists_101", sc("NOT "+ex101), "ERR 2202H")
+	add("exists_coded/exists_e400", sc("EXISTS (SELECT 1 FROM tb_big TABLESAMPLE BERNOULLI (1e400))"), "ERR 22003")
+	add("exists_coded/exists_null", sc("EXISTS (SELECT 1 FROM tb_big TABLESAMPLE BERNOULLI (NULL))"), "ERR 2202H")
+	// An uncorrelated EXISTS beside a filter no row passes: PostgreSQL runs
+	// it once as an InitPlan and raises; the embedded pipeline evaluates the
+	// conjunction per row and never reaches it (other r21).
+	cells = append(cells, tbCell{name: "exists_coded/id_negative_and_exists", sql: sc("id < 0 AND " + ex101),
+		want: "ERR 2202H", localPin: "0"})
+	// A sampled scan beside an empty join input: PostgreSQL begins it only
+	// when its plan reads the sampled side first, so its answer follows its
+	// join order (other r21); here the sample begins in either order. The
+	// embedded arms raise 2202H; every coordinator arm raises it or #1190's
+	// refusal of the empty relation (the fast path's local 2202H falls back
+	// to the DAG, which meets #1190), so they are held to "an error".
+	cells = append(cells, tbCell{name: "empty_join/empty_first", sql: "SELECT count(*) FROM tb_e JOIN tb_p TABLESAMPLE BERNOULLI (101) ON tb_e.id = tb_p.id",
+		want: "CONTAINS ERR ", localPin: "ERR 2202H", pinned: true})
+	cells = append(cells, tbCell{name: "empty_join/sampled_first", sql: "SELECT count(*) FROM tb_p TABLESAMPLE BERNOULLI (101) JOIN tb_e ON tb_e.id = tb_p.id",
+		want: "CONTAINS ERR ", localPin: "ERR 2202H"})
+
 	// EXPLAIN plans without scanning, shows the sample on the scan line
 	// (review r1 N3), and raises the coercion's own failure.
 	add("explain/fifty", "EXPLAIN SELECT * FROM tb_p TABLESAMPLE BERNOULLI (50)", "CONTAINS TABLESAMPLE BERNOULLI (50)")
