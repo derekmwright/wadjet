@@ -49,7 +49,7 @@ func TestSetOpWidenLadder(t *testing.T) {
 		// holding 0.1 renders 0.1, and the same value under a double
 		// precision result renders 0.10000000149011612 — the float32 spelled
 		// to float64 precision, which is a number neither engine holds.
-		// `CREATE TABLE t (x FLOAT)` declares a FLOAT32 column here, so a
+		// `CREATE TABLE t (x REAL)` declares a FLOAT32 column here, so a
 		// plain DDL table reaches it.
 		{d, f32, f32, true},
 		{f32, d, f32, true},

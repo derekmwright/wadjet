@@ -1053,7 +1053,8 @@ func setOpNodeResultTypes(n *logical.Node) []SetOpColType {
 // setOpWiden resolves INT32 → INT64 → DECIMAL → FLOAT32 → FLOAT64,
 // independent of arm order. Both float types beat exact numeric types; only
 // FLOAT64 beats FLOAT32. Keep REAL's separate rung: widening its stored value
-// to double changes its rendering as well as its OID. FLOAT in DDL is FLOAT32.
+// to double changes its rendering as well as its OID. REAL, FLOAT4 and
+// FLOAT(1..24) in DDL are FLOAT32; a bare FLOAT is FLOAT64 (#1464).
 // See docs/internals/set-operation-numeric-widening.md for the design.
 func setOpWiden(a, b parquet.TypeID) (parquet.TypeID, bool) {
 	if a == b {

@@ -394,6 +394,10 @@ Neither type exists in PostgreSQL core; wadjet defines their total orders. (cata
 
 ## Extensions
 
+**`DOUBLE` and the quoted keywords `"float"` / `"real"` name float types.**
+
+`CREATE TABLE t (c DOUBLE)` is a double precision column and `CAST(1 AS "float")` / `CAST(1 AS "real")` are double precision / real; PostgreSQL has no type `double` and resolves a quoted name against its catalog (`"float4"` and `"float8"` are the types on both), so it raises 42704. `FLOAT32` and `FLOAT64` are this engine's own names for real and double precision. Every PostgreSQL spelling — `FLOAT`, `FLOAT(n)`, `FLOAT4`, `FLOAT8`, `REAL`, `DOUBLE PRECISION` — means what it means there. (catalog: [numeric-decimal#r20](adr/0012-divergences/numeric-decimal.md#catalog); #1464)
+
 **QUALIFY follows DuckDB 1.1.3.**
 
 PostgreSQL has no QUALIFY. It filters after windows, can read unprojected inputs, resolves inputs before output aliases, and requires a window function. (catalog: [aggregates-windows#r17](adr/0012-divergences/aggregates-windows.md#catalog); ADR-0012 §13/#1076)

@@ -6,7 +6,7 @@ Every place this engine deliberately answers differently from PostgreSQL 17.11, 
 |---|---|---|
 | [Comparisons and membership](comparison-membership.md) | 17 | Comparisons and IN/ANY/EXISTS memberships across text and typed values, numeric literals in memberships, and bind-time type refusals. |
 | [Temporal types](temporal.md) | 25 | Timestamp resolution, infinity, clock zone, integer and text casts to DATE/TIMESTAMP, date/time arithmetic and the INTERVAL declaration. |
-| [Numbers and DECIMAL](numeric-decimal.md) | 18 | Numeric and DECIMAL divergences: integer widening, float4 rounding positions, decimal carrier limits, casts and operator spellings PostgreSQL declines. |
+| [Numbers and DECIMAL](numeric-decimal.md) | 20 | Numeric and DECIMAL divergences: integer widening, float4 rounding positions, decimal carrier limits, casts and operator spellings PostgreSQL declines. |
 | [Set operations](set-operations.md) | 9 | UNION, INTERSECT and EXCEPT: VECTOR widths, declared decimal and integer carriers, refused type pairs and literals, and ORDER BY qualification. |
 | [Containers (ARRAY, ROW, MAP, VECTOR)](containers.md) | 23 | ROW, ARRAY and MAP containers: field-path spellings, declared OIDs, nested-array semantics, container ordering and array casts. |
 | [DML, DDL and assignment](dml-assignment.md) | 22 | Assignment rounding and typing on every write door, DDL and CTAS result forms, and the DML and DDL statements that are refused. |

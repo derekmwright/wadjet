@@ -788,6 +788,13 @@ both forms of `CREATE TABLE`. The existing table is left exactly as it is —
 including its schema, which the skipped statement may declare differently — and
 the query of a `CREATE TABLE IF NOT EXISTS … AS SELECT` is not run.
 
+A column's type takes PostgreSQL's spellings as well as this engine's own: a
+bare `FLOAT` and `FLOAT8` / `DOUBLE PRECISION` / `FLOAT(25..53)` are double
+precision, `REAL` / `FLOAT4` / `FLOAT(1..24)` real — the same table `CAST`
+reads (see [the floating-point type names](data-types.md#the-floating-point-type-names)).
+Through v0.25.3 a column declared `FLOAT` was real; tables created then keep
+their real columns.
+
 ## CREATE TABLE AS SELECT
 
 ```sql
@@ -2313,8 +2320,8 @@ whitespace are spelling, and so are two more:
 SELECT flow_logs.bytes_in + 1, COUNT(*) FROM flow_logs GROUP BY bytes_in + 1
 
 -- A CAST type synonym: INT/INTEGER/INT4, BIGINT/INT8, SMALLINT/INT2,
--- REAL/FLOAT4, DOUBLE PRECISION/FLOAT8, DEC/DECIMAL/NUMERIC, BOOL/BOOLEAN,
--- VARCHAR/CHARACTER VARYING
+-- REAL/FLOAT4/FLOAT(1..24), DOUBLE PRECISION/FLOAT8/FLOAT/FLOAT(25..53),
+-- DEC/DECIMAL/NUMERIC, BOOL/BOOLEAN, VARCHAR/CHARACTER VARYING
 SELECT CAST(b AS DEC(9,2)), COUNT(*) FROM t GROUP BY CAST(b AS DECIMAL(9,2))
 ```
 

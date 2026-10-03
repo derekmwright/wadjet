@@ -126,25 +126,49 @@ Three divergences remain and are recorded in ADR-0012's list:
   text and this engine splices the raw bytes — with `b = '\x6869'`,
   `'hi' || b` is `hi\x6869` there and `hihi` here.
 
-#### `FLOAT(n)`
+#### The floating-point type names
 
+Every floating-point spelling resolves as PostgreSQL resolves it, and to the
+same type at every door — a `CREATE TABLE` column, an `ARRAY`/`ROW`/`MAP`
+element, `CAST`, `::`, `CREATE TABLE … AS`, the label a cast publishes and the
+GROUP BY identity of a cast (`parquet.FloatTypeID` is the one table).
 `FLOAT(n)` is the SQL-standard spelling of "a binary float with at least n bits
-of mantissa", and it resolves by WIDTH exactly as PostgreSQL does:
+of mantissa" and resolves by width:
 
 | Spelling | Type |
 |---|---|
-| `FLOAT(1)` … `FLOAT(24)` | `Float32` (real, OID 700) |
+| `FLOAT` (bare) | `Float64` (double precision, OID 701) — PostgreSQL's unqualified `float` is double precision |
+| `FLOAT8`, `DOUBLE PRECISION` | `Float64` (double precision, OID 701) |
 | `FLOAT(25)` … `FLOAT(53)` | `Float64` (double precision, OID 701) |
-| `FLOAT` (bare) | `Float64` — PostgreSQL's unqualified `float` is double precision |
-| `REAL`, `FLOAT4` | `Float32` |
-| `DOUBLE PRECISION`, `FLOAT8` | `Float64` |
+| `REAL`, `FLOAT4` | `Float32` (real, OID 700) |
+| `FLOAT(1)` … `FLOAT(24)` | `Float32` (real, OID 700) |
 | `FLOAT(0)`, `FLOAT(54)` | `ERROR 22023` — the same message PostgreSQL gives |
+| `DOUBLE`, `FLOAT64` / `FLOAT32` | this engine's own spellings of `Float64` / `Float32` (PostgreSQL: 42704) |
+
+Case does not matter, and whitespace inside the name and the parentheses is
+free (`double  precision`, `float ( 25 )`). The quoted catalog names `"float4"`
+and `"float8"` are the types, as on PostgreSQL; the quoted keywords `"float"`
+and `"real"` read as the keywords here, where PostgreSQL answers 42704.
 
 ```sql
 SELECT CAST(1.0/3 AS FLOAT(1));    -- 0.33333334          (real)
 SELECT CAST(1.0/3 AS FLOAT(25));   -- 0.3333333333333333  (double precision)
-CREATE TABLE t (f FLOAT(1));       -- a Float32 column
+CREATE TABLE t (f FLOAT);          -- a Float64 column: 674999997 stores 674999997
+CREATE TABLE u (f REAL);           -- a Float32 column: 674999997 stores 6.75e+08
 ```
+
+**Upgrading from v0.25.3 or earlier.** Through v0.25.3 a `CREATE TABLE` column
+declared `FLOAT` (any case, no precision) was a `Float32` — `real`, 24 bits of
+mantissa, so 674999997 was stored as 675000000 — and `REAL`, `FLOAT4`,
+`FLOAT8` and `DOUBLE PRECISION` were refused (42704, and 42601 for `DOUBLE
+PRECISION`). The catalog records a column's type, never the spelling that
+declared it, so a table created then keeps its `Float32` columns: they still
+declare `real` (OID 700), store float4 values and refuse values past float4's
+range (22003). Only tables created from now on get `double precision` for
+`FLOAT`. To widen an existing column, create the table again with `FLOAT` (or
+`DOUBLE PRECISION`) and copy the rows in (`CREATE TABLE t2 (f FLOAT); INSERT
+INTO t2 SELECT f FROM t`); values already stored in a float4 column keep the
+float4 digits they were stored with.
 
 **A float parameter is a value of its own type.** A `float8` (OID 701) or
 `float4` (OID 700) parameter bound over pgwire, in the text or the binary
