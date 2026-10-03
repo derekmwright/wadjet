@@ -1,0 +1,536 @@
+# PostgreSQL 17.11 (postgres:17-alpine) answers for TestArcWDWindowDefaultEveryArm's generated cells over wd_t:
+# name<TAB>type=<declared types after id> rows=N <sorted rows> | ERR <SQLSTATE> <message>. Regenerate: WD_GEN=<path> dumps name<TAB>sql; each is run once (\gdesc, then the rows). Booleans render true/false.
+type/lag/int/omit	type=integer rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+type/lead/int/omit	type=integer rows=6 1,20 | 2,NULL | 3,NULL | 4,50 | 5,NULL | 6,NULL
+type/lag/int/null	type=integer rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+type/lead/int/null	type=integer rows=6 1,20 | 2,NULL | 3,NULL | 4,50 | 5,NULL | 6,NULL
+type/lag/int/int	type=integer rows=6 1,7 | 2,7 | 3,7 | 4,7 | 5,7 | 6,7
+type/lead/int/int	type=integer rows=6 1,20 | 2,NULL | 3,7 | 4,50 | 5,7 | 6,7
+type/lag/int/dec	type=numeric rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+type/lead/int/dec	type=numeric rows=6 1,20 | 2,NULL | 3,2.5 | 4,50 | 5,2.5 | 6,2.5
+type/lag/int/wide	type=numeric rows=6 1,14.0000000000000000001 | 2,14.0000000000000000001 | 3,14.0000000000000000001 | 4,14.0000000000000000001 | 5,14.0000000000000000001 | 6,14.0000000000000000001
+type/lead/int/wide	type=numeric rows=6 1,20 | 2,NULL | 3,14.0000000000000000001 | 4,50 | 5,14.0000000000000000001 | 6,14.0000000000000000001
+type/lag/int/dbl	type=numeric rows=6 1,1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000 | 2,1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000 | 3,1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000 | 4,1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000 | 5,1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000 | 6,1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+type/lead/int/dbl	type=numeric rows=6 1,20 | 2,NULL | 3,1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000 | 4,50 | 5,1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000 | 6,1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+type/lag/int/text	ERR 22P02 invalid input syntax for type integer: "z"
+type/lead/int/text	ERR 22P02 invalid input syntax for type integer: "z"
+type/lag/int/qnum	type=integer rows=6 1,7 | 2,7 | 3,7 | 4,7 | 5,7 | 6,7
+type/lead/int/qnum	type=integer rows=6 1,20 | 2,NULL | 3,7 | 4,50 | 5,7 | 6,7
+type/lag/int/bool	ERR 42883 function lag(integer, integer, boolean) does not exist
+type/lead/int/bool	ERR 42883 function lead(integer, integer, boolean) does not exist
+type/lag/int/date	ERR 42883 function lag(integer, integer, date) does not exist
+type/lead/int/date	ERR 42883 function lead(integer, integer, date) does not exist
+type/lag/int/ts	ERR 42883 function lag(integer, integer, timestamp without time zone) does not exist
+type/lead/int/ts	ERR 42883 function lead(integer, integer, timestamp without time zone) does not exist
+type/lag/int/same	type=integer rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+type/lead/int/same	type=integer rows=6 1,20 | 2,NULL | 3,NULL | 4,50 | 5,50 | 6,60
+type/lag/int/colwide	type=double precision rows=6 1,1.5 | 2,2.5 | 3,NULL | 4,4.5 | 5,5.5 | 6,6.5
+type/lead/int/colwide	type=double precision rows=6 1,20 | 2,NULL | 3,NULL | 4,50 | 5,5.5 | 6,6.5
+type/lag/int/cast	type=bigint rows=6 1,7 | 2,7 | 3,7 | 4,7 | 5,7 | 6,7
+type/lead/int/cast	type=bigint rows=6 1,20 | 2,NULL | 3,7 | 4,50 | 5,7 | 6,7
+type/lag/int/expr	type=integer rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+type/lead/int/expr	type=integer rows=6 1,20 | 2,NULL | 3,2 | 4,50 | 5,2 | 6,2
+type/lag/int/sub	type=integer rows=6 1,9 | 2,9 | 3,9 | 4,9 | 5,9 | 6,9
+type/lead/int/sub	type=integer rows=6 1,20 | 2,NULL | 3,9 | 4,50 | 5,9 | 6,9
+type/lag/int/arr	ERR 42883 function lag(integer, integer, integer[]) does not exist
+type/lead/int/arr	ERR 42883 function lead(integer, integer, integer[]) does not exist
+type/lag/bigint/omit	type=bigint rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+type/lead/bigint/omit	type=bigint rows=6 1,20 | 2,NULL | 3,NULL | 4,50 | 5,NULL | 6,NULL
+type/lag/bigint/null	type=bigint rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+type/lead/bigint/null	type=bigint rows=6 1,20 | 2,NULL | 3,NULL | 4,50 | 5,NULL | 6,NULL
+type/lag/bigint/int	type=bigint rows=6 1,7 | 2,7 | 3,7 | 4,7 | 5,7 | 6,7
+type/lead/bigint/int	type=bigint rows=6 1,20 | 2,NULL | 3,7 | 4,50 | 5,7 | 6,7
+type/lag/bigint/dec	type=numeric rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+type/lead/bigint/dec	type=numeric rows=6 1,20 | 2,NULL | 3,2.5 | 4,50 | 5,2.5 | 6,2.5
+type/lag/bigint/wide	type=numeric rows=6 1,14.0000000000000000001 | 2,14.0000000000000000001 | 3,14.0000000000000000001 | 4,14.0000000000000000001 | 5,14.0000000000000000001 | 6,14.0000000000000000001
+type/lead/bigint/wide	type=numeric rows=6 1,20 | 2,NULL | 3,14.0000000000000000001 | 4,50 | 5,14.0000000000000000001 | 6,14.0000000000000000001
+type/lag/bigint/dbl	type=numeric rows=6 1,1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000 | 2,1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000 | 3,1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000 | 4,1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000 | 5,1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000 | 6,1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+type/lead/bigint/dbl	type=numeric rows=6 1,20 | 2,NULL | 3,1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000 | 4,50 | 5,1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000 | 6,1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+type/lag/bigint/text	ERR 22P02 invalid input syntax for type bigint: "z"
+type/lead/bigint/text	ERR 22P02 invalid input syntax for type bigint: "z"
+type/lag/bigint/qnum	type=bigint rows=6 1,7 | 2,7 | 3,7 | 4,7 | 5,7 | 6,7
+type/lead/bigint/qnum	type=bigint rows=6 1,20 | 2,NULL | 3,7 | 4,50 | 5,7 | 6,7
+type/lag/bigint/bool	ERR 42883 function lag(bigint, integer, boolean) does not exist
+type/lead/bigint/bool	ERR 42883 function lead(bigint, integer, boolean) does not exist
+type/lag/bigint/date	ERR 42883 function lag(bigint, integer, date) does not exist
+type/lead/bigint/date	ERR 42883 function lead(bigint, integer, date) does not exist
+type/lag/bigint/ts	ERR 42883 function lag(bigint, integer, timestamp without time zone) does not exist
+type/lead/bigint/ts	ERR 42883 function lead(bigint, integer, timestamp without time zone) does not exist
+type/lag/bigint/same	type=bigint rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+type/lead/bigint/same	type=bigint rows=6 1,20 | 2,NULL | 3,NULL | 4,50 | 5,50 | 6,60
+type/lag/bigint/colwide	type=double precision rows=6 1,1.5 | 2,2.5 | 3,NULL | 4,4.5 | 5,5.5 | 6,6.5
+type/lead/bigint/colwide	type=double precision rows=6 1,20 | 2,NULL | 3,NULL | 4,50 | 5,5.5 | 6,6.5
+type/lag/bigint/cast	type=bigint rows=6 1,7 | 2,7 | 3,7 | 4,7 | 5,7 | 6,7
+type/lead/bigint/cast	type=bigint rows=6 1,20 | 2,NULL | 3,7 | 4,50 | 5,7 | 6,7
+type/lag/bigint/expr	type=bigint rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+type/lead/bigint/expr	type=bigint rows=6 1,20 | 2,NULL | 3,2 | 4,50 | 5,2 | 6,2
+type/lag/bigint/sub	type=bigint rows=6 1,9 | 2,9 | 3,9 | 4,9 | 5,9 | 6,9
+type/lead/bigint/sub	type=bigint rows=6 1,20 | 2,NULL | 3,9 | 4,50 | 5,9 | 6,9
+type/lag/bigint/arr	ERR 42883 function lag(bigint, integer, integer[]) does not exist
+type/lead/bigint/arr	ERR 42883 function lead(bigint, integer, integer[]) does not exist
+type/lag/double/omit	type=double precision rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+type/lead/double/omit	type=double precision rows=6 1,2.5 | 2,NULL | 3,NULL | 4,5.5 | 5,NULL | 6,NULL
+type/lag/double/null	type=double precision rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+type/lead/double/null	type=double precision rows=6 1,2.5 | 2,NULL | 3,NULL | 4,5.5 | 5,NULL | 6,NULL
+type/lag/double/int	type=double precision rows=6 1,7 | 2,7 | 3,7 | 4,7 | 5,7 | 6,7
+type/lead/double/int	type=double precision rows=6 1,2.5 | 2,NULL | 3,7 | 4,5.5 | 5,7 | 6,7
+type/lag/double/dec	type=double precision rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+type/lead/double/dec	type=double precision rows=6 1,2.5 | 2,NULL | 3,2.5 | 4,5.5 | 5,2.5 | 6,2.5
+type/lag/double/wide	type=double precision rows=6 1,14 | 2,14 | 3,14 | 4,14 | 5,14 | 6,14
+type/lead/double/wide	type=double precision rows=6 1,2.5 | 2,NULL | 3,14 | 4,5.5 | 5,14 | 6,14
+type/lag/double/dbl	type=double precision rows=6 1,1e+300 | 2,1e+300 | 3,1e+300 | 4,1e+300 | 5,1e+300 | 6,1e+300
+type/lead/double/dbl	type=double precision rows=6 1,2.5 | 2,NULL | 3,1e+300 | 4,5.5 | 5,1e+300 | 6,1e+300
+type/lag/double/text	ERR 22P02 invalid input syntax for type double precision: "z"
+type/lead/double/text	ERR 22P02 invalid input syntax for type double precision: "z"
+type/lag/double/qnum	type=double precision rows=6 1,7 | 2,7 | 3,7 | 4,7 | 5,7 | 6,7
+type/lead/double/qnum	type=double precision rows=6 1,2.5 | 2,NULL | 3,7 | 4,5.5 | 5,7 | 6,7
+type/lag/double/bool	ERR 42883 function lag(double precision, integer, boolean) does not exist
+type/lead/double/bool	ERR 42883 function lead(double precision, integer, boolean) does not exist
+type/lag/double/date	ERR 42883 function lag(double precision, integer, date) does not exist
+type/lead/double/date	ERR 42883 function lead(double precision, integer, date) does not exist
+type/lag/double/ts	ERR 42883 function lag(double precision, integer, timestamp without time zone) does not exist
+type/lead/double/ts	ERR 42883 function lead(double precision, integer, timestamp without time zone) does not exist
+type/lag/double/same	type=double precision rows=6 1,1.5 | 2,2.5 | 3,NULL | 4,4.5 | 5,5.5 | 6,6.5
+type/lead/double/same	type=double precision rows=6 1,2.5 | 2,NULL | 3,NULL | 4,5.5 | 5,5.5 | 6,6.5
+type/lag/double/colwide	type=double precision rows=6 1,1.5 | 2,2.5 | 3,NULL | 4,4.5 | 5,5.5 | 6,6.5
+type/lead/double/colwide	type=double precision rows=6 1,2.5 | 2,NULL | 3,NULL | 4,5.5 | 5,5.5 | 6,6.5
+type/lag/double/cast	type=double precision rows=6 1,7 | 2,7 | 3,7 | 4,7 | 5,7 | 6,7
+type/lead/double/cast	type=double precision rows=6 1,2.5 | 2,NULL | 3,7 | 4,5.5 | 5,7 | 6,7
+type/lag/double/expr	type=double precision rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+type/lead/double/expr	type=double precision rows=6 1,2.5 | 2,NULL | 3,2 | 4,5.5 | 5,2 | 6,2
+type/lag/double/sub	type=double precision rows=6 1,9 | 2,9 | 3,9 | 4,9 | 5,9 | 6,9
+type/lead/double/sub	type=double precision rows=6 1,2.5 | 2,NULL | 3,9 | 4,5.5 | 5,9 | 6,9
+type/lag/double/arr	ERR 42883 function lag(double precision, integer, integer[]) does not exist
+type/lead/double/arr	ERR 42883 function lead(double precision, integer, integer[]) does not exist
+type/lag/numeric/omit	type=numeric rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+type/lead/numeric/omit	type=numeric rows=6 1,2.25 | 2,NULL | 3,NULL | 4,5.25 | 5,NULL | 6,NULL
+type/lag/numeric/null	type=numeric rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+type/lead/numeric/null	type=numeric rows=6 1,2.25 | 2,NULL | 3,NULL | 4,5.25 | 5,NULL | 6,NULL
+type/lag/numeric/int	type=numeric rows=6 1,7 | 2,7 | 3,7 | 4,7 | 5,7 | 6,7
+type/lead/numeric/int	type=numeric rows=6 1,2.25 | 2,NULL | 3,7 | 4,5.25 | 5,7 | 6,7
+type/lag/numeric/dec	type=numeric rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+type/lead/numeric/dec	type=numeric rows=6 1,2.25 | 2,NULL | 3,2.5 | 4,5.25 | 5,2.5 | 6,2.5
+type/lag/numeric/wide	type=numeric rows=6 1,14.0000000000000000001 | 2,14.0000000000000000001 | 3,14.0000000000000000001 | 4,14.0000000000000000001 | 5,14.0000000000000000001 | 6,14.0000000000000000001
+type/lead/numeric/wide	type=numeric rows=6 1,2.25 | 2,NULL | 3,14.0000000000000000001 | 4,5.25 | 5,14.0000000000000000001 | 6,14.0000000000000000001
+type/lag/numeric/dbl	type=numeric rows=6 1,1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000 | 2,1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000 | 3,1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000 | 4,1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000 | 5,1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000 | 6,1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+type/lead/numeric/dbl	type=numeric rows=6 1,2.25 | 2,NULL | 3,1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000 | 4,5.25 | 5,1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000 | 6,1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+type/lag/numeric/text	ERR 22P02 invalid input syntax for type numeric: "z"
+type/lead/numeric/text	ERR 22P02 invalid input syntax for type numeric: "z"
+type/lag/numeric/qnum	type=numeric rows=6 1,7 | 2,7 | 3,7 | 4,7 | 5,7 | 6,7
+type/lead/numeric/qnum	type=numeric rows=6 1,2.25 | 2,NULL | 3,7 | 4,5.25 | 5,7 | 6,7
+type/lag/numeric/bool	ERR 42883 function lag(numeric, integer, boolean) does not exist
+type/lead/numeric/bool	ERR 42883 function lead(numeric, integer, boolean) does not exist
+type/lag/numeric/date	ERR 42883 function lag(numeric, integer, date) does not exist
+type/lead/numeric/date	ERR 42883 function lead(numeric, integer, date) does not exist
+type/lag/numeric/ts	ERR 42883 function lag(numeric, integer, timestamp without time zone) does not exist
+type/lead/numeric/ts	ERR 42883 function lead(numeric, integer, timestamp without time zone) does not exist
+type/lag/numeric/same	type=numeric rows=6 1,1.25 | 2,2.25 | 3,NULL | 4,4.25 | 5,5.25 | 6,6.25
+type/lead/numeric/same	type=numeric rows=6 1,2.25 | 2,NULL | 3,NULL | 4,5.25 | 5,5.25 | 6,6.25
+type/lag/numeric/colwide	type=double precision rows=6 1,1.5 | 2,2.5 | 3,NULL | 4,4.5 | 5,5.5 | 6,6.5
+type/lead/numeric/colwide	type=double precision rows=6 1,2.25 | 2,NULL | 3,NULL | 4,5.25 | 5,5.5 | 6,6.5
+type/lag/numeric/cast	type=numeric rows=6 1,7 | 2,7 | 3,7 | 4,7 | 5,7 | 6,7
+type/lead/numeric/cast	type=numeric rows=6 1,2.25 | 2,NULL | 3,7 | 4,5.25 | 5,7 | 6,7
+type/lag/numeric/expr	type=numeric rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+type/lead/numeric/expr	type=numeric rows=6 1,2.25 | 2,NULL | 3,2 | 4,5.25 | 5,2 | 6,2
+type/lag/numeric/sub	type=numeric rows=6 1,9 | 2,9 | 3,9 | 4,9 | 5,9 | 6,9
+type/lead/numeric/sub	type=numeric rows=6 1,2.25 | 2,NULL | 3,9 | 4,5.25 | 5,9 | 6,9
+type/lag/numeric/arr	ERR 42883 function lag(numeric, integer, integer[]) does not exist
+type/lead/numeric/arr	ERR 42883 function lead(numeric, integer, integer[]) does not exist
+type/lag/text/omit	type=text rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+type/lead/text/omit	type=text rows=6 1,b | 2,NULL | 3,NULL | 4,e | 5,NULL | 6,NULL
+type/lag/text/null	type=text rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+type/lead/text/null	type=text rows=6 1,b | 2,NULL | 3,NULL | 4,e | 5,NULL | 6,NULL
+type/lag/text/int	ERR 42883 function lag(text, integer, integer) does not exist
+type/lead/text/int	ERR 42883 function lead(text, integer, integer) does not exist
+type/lag/text/dec	ERR 42883 function lag(text, integer, numeric) does not exist
+type/lead/text/dec	ERR 42883 function lead(text, integer, numeric) does not exist
+type/lag/text/wide	ERR 42883 function lag(text, integer, numeric) does not exist
+type/lead/text/wide	ERR 42883 function lead(text, integer, numeric) does not exist
+type/lag/text/dbl	ERR 42883 function lag(text, integer, numeric) does not exist
+type/lead/text/dbl	ERR 42883 function lead(text, integer, numeric) does not exist
+type/lag/text/text	type=text rows=6 1,z | 2,z | 3,z | 4,z | 5,z | 6,z
+type/lead/text/text	type=text rows=6 1,b | 2,NULL | 3,z | 4,e | 5,z | 6,z
+type/lag/text/qnum	type=text rows=6 1,7 | 2,7 | 3,7 | 4,7 | 5,7 | 6,7
+type/lead/text/qnum	type=text rows=6 1,b | 2,NULL | 3,7 | 4,e | 5,7 | 6,7
+type/lag/text/bool	ERR 42883 function lag(text, integer, boolean) does not exist
+type/lead/text/bool	ERR 42883 function lead(text, integer, boolean) does not exist
+type/lag/text/date	ERR 42883 function lag(text, integer, date) does not exist
+type/lead/text/date	ERR 42883 function lead(text, integer, date) does not exist
+type/lag/text/ts	ERR 42883 function lag(text, integer, timestamp without time zone) does not exist
+type/lead/text/ts	ERR 42883 function lead(text, integer, timestamp without time zone) does not exist
+type/lag/text/same	type=text rows=6 1,a | 2,b | 3,NULL | 4,d | 5,e | 6,f
+type/lead/text/same	type=text rows=6 1,b | 2,NULL | 3,NULL | 4,e | 5,e | 6,f
+type/lag/text/colwide	ERR 42883 function lag(text, integer, double precision) does not exist
+type/lead/text/colwide	ERR 42883 function lead(text, integer, double precision) does not exist
+type/lag/text/cast	ERR 42883 function lag(text, integer, bigint) does not exist
+type/lead/text/cast	ERR 42883 function lead(text, integer, bigint) does not exist
+type/lag/text/expr	ERR 42883 function lag(text, integer, integer) does not exist
+type/lead/text/expr	ERR 42883 function lead(text, integer, integer) does not exist
+type/lag/text/sub	ERR 42883 function lag(text, integer, integer) does not exist
+type/lead/text/sub	ERR 42883 function lead(text, integer, integer) does not exist
+type/lag/text/arr	ERR 42883 function lag(text, integer, integer[]) does not exist
+type/lead/text/arr	ERR 42883 function lead(text, integer, integer[]) does not exist
+type/lag/bool/omit	type=boolean rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+type/lead/bool/omit	type=boolean rows=6 1,false | 2,NULL | 3,NULL | 4,false | 5,NULL | 6,NULL
+type/lag/bool/null	type=boolean rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+type/lead/bool/null	type=boolean rows=6 1,false | 2,NULL | 3,NULL | 4,false | 5,NULL | 6,NULL
+type/lag/bool/int	ERR 42883 function lag(boolean, integer, integer) does not exist
+type/lead/bool/int	ERR 42883 function lead(boolean, integer, integer) does not exist
+type/lag/bool/dec	ERR 42883 function lag(boolean, integer, numeric) does not exist
+type/lead/bool/dec	ERR 42883 function lead(boolean, integer, numeric) does not exist
+type/lag/bool/wide	ERR 42883 function lag(boolean, integer, numeric) does not exist
+type/lead/bool/wide	ERR 42883 function lead(boolean, integer, numeric) does not exist
+type/lag/bool/dbl	ERR 42883 function lag(boolean, integer, numeric) does not exist
+type/lead/bool/dbl	ERR 42883 function lead(boolean, integer, numeric) does not exist
+type/lag/bool/text	ERR 22P02 invalid input syntax for type boolean: "z"
+type/lead/bool/text	ERR 22P02 invalid input syntax for type boolean: "z"
+type/lag/bool/qnum	ERR 22P02 invalid input syntax for type boolean: "7"
+type/lead/bool/qnum	ERR 22P02 invalid input syntax for type boolean: "7"
+type/lag/bool/bool	type=boolean rows=6 1,true | 2,true | 3,true | 4,true | 5,true | 6,true
+type/lead/bool/bool	type=boolean rows=6 1,false | 2,NULL | 3,true | 4,false | 5,true | 6,true
+type/lag/bool/date	ERR 42883 function lag(boolean, integer, date) does not exist
+type/lead/bool/date	ERR 42883 function lead(boolean, integer, date) does not exist
+type/lag/bool/ts	ERR 42883 function lag(boolean, integer, timestamp without time zone) does not exist
+type/lead/bool/ts	ERR 42883 function lead(boolean, integer, timestamp without time zone) does not exist
+type/lag/bool/same	type=boolean rows=6 1,true | 2,false | 3,NULL | 4,true | 5,false | 6,true
+type/lead/bool/same	type=boolean rows=6 1,false | 2,NULL | 3,NULL | 4,false | 5,false | 6,true
+type/lag/bool/colwide	ERR 42883 function lag(boolean, integer, double precision) does not exist
+type/lead/bool/colwide	ERR 42883 function lead(boolean, integer, double precision) does not exist
+type/lag/bool/cast	ERR 42883 function lag(boolean, integer, bigint) does not exist
+type/lead/bool/cast	ERR 42883 function lead(boolean, integer, bigint) does not exist
+type/lag/bool/expr	ERR 42883 function lag(boolean, integer, integer) does not exist
+type/lead/bool/expr	ERR 42883 function lead(boolean, integer, integer) does not exist
+type/lag/bool/sub	ERR 42883 function lag(boolean, integer, integer) does not exist
+type/lead/bool/sub	ERR 42883 function lead(boolean, integer, integer) does not exist
+type/lag/bool/arr	ERR 42883 function lag(boolean, integer, integer[]) does not exist
+type/lead/bool/arr	ERR 42883 function lead(boolean, integer, integer[]) does not exist
+type/lag/date/omit	type=date rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+type/lead/date/omit	type=date rows=6 1,2024-01-02 | 2,NULL | 3,NULL | 4,2024-01-05 | 5,NULL | 6,NULL
+type/lag/date/null	type=date rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+type/lead/date/null	type=date rows=6 1,2024-01-02 | 2,NULL | 3,NULL | 4,2024-01-05 | 5,NULL | 6,NULL
+type/lag/date/int	ERR 42883 function lag(date, integer, integer) does not exist
+type/lead/date/int	ERR 42883 function lead(date, integer, integer) does not exist
+type/lag/date/dec	ERR 42883 function lag(date, integer, numeric) does not exist
+type/lead/date/dec	ERR 42883 function lead(date, integer, numeric) does not exist
+type/lag/date/wide	ERR 42883 function lag(date, integer, numeric) does not exist
+type/lead/date/wide	ERR 42883 function lead(date, integer, numeric) does not exist
+type/lag/date/dbl	ERR 42883 function lag(date, integer, numeric) does not exist
+type/lead/date/dbl	ERR 42883 function lead(date, integer, numeric) does not exist
+type/lag/date/text	ERR 22007 invalid input syntax for type date: "z"
+type/lead/date/text	ERR 22007 invalid input syntax for type date: "z"
+type/lag/date/qnum	ERR 22007 invalid input syntax for type date: "7"
+type/lead/date/qnum	ERR 22007 invalid input syntax for type date: "7"
+type/lag/date/bool	ERR 42883 function lag(date, integer, boolean) does not exist
+type/lead/date/bool	ERR 42883 function lead(date, integer, boolean) does not exist
+type/lag/date/date	type=date rows=6 1,2020-01-01 | 2,2020-01-01 | 3,2020-01-01 | 4,2020-01-01 | 5,2020-01-01 | 6,2020-01-01
+type/lead/date/date	type=date rows=6 1,2024-01-02 | 2,NULL | 3,2020-01-01 | 4,2024-01-05 | 5,2020-01-01 | 6,2020-01-01
+type/lag/date/ts	type=timestamp without time zone rows=6 1,2020-01-01 00:00:00 | 2,2020-01-01 00:00:00 | 3,2020-01-01 00:00:00 | 4,2020-01-01 00:00:00 | 5,2020-01-01 00:00:00 | 6,2020-01-01 00:00:00
+type/lead/date/ts	type=timestamp without time zone rows=6 1,2024-01-02 00:00:00 | 2,NULL | 3,2020-01-01 00:00:00 | 4,2024-01-05 00:00:00 | 5,2020-01-01 00:00:00 | 6,2020-01-01 00:00:00
+type/lag/date/same	type=date rows=6 1,2024-01-01 | 2,2024-01-02 | 3,NULL | 4,2024-01-04 | 5,2024-01-05 | 6,2024-01-06
+type/lead/date/same	type=date rows=6 1,2024-01-02 | 2,NULL | 3,NULL | 4,2024-01-05 | 5,2024-01-05 | 6,2024-01-06
+type/lag/date/colwide	ERR 42883 function lag(date, integer, double precision) does not exist
+type/lead/date/colwide	ERR 42883 function lead(date, integer, double precision) does not exist
+type/lag/date/cast	ERR 42883 function lag(date, integer, bigint) does not exist
+type/lead/date/cast	ERR 42883 function lead(date, integer, bigint) does not exist
+type/lag/date/expr	ERR 42883 function lag(date, integer, integer) does not exist
+type/lead/date/expr	ERR 42883 function lead(date, integer, integer) does not exist
+type/lag/date/sub	ERR 42883 function lag(date, integer, integer) does not exist
+type/lead/date/sub	ERR 42883 function lead(date, integer, integer) does not exist
+type/lag/date/arr	ERR 42883 function lag(date, integer, integer[]) does not exist
+type/lead/date/arr	ERR 42883 function lead(date, integer, integer[]) does not exist
+type/lag/timestamp/omit	type=timestamp without time zone rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+type/lead/timestamp/omit	type=timestamp without time zone rows=6 1,2024-01-02 10:00:00 | 2,NULL | 3,NULL | 4,2024-01-05 10:00:00 | 5,NULL | 6,NULL
+type/lag/timestamp/null	type=timestamp without time zone rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+type/lead/timestamp/null	type=timestamp without time zone rows=6 1,2024-01-02 10:00:00 | 2,NULL | 3,NULL | 4,2024-01-05 10:00:00 | 5,NULL | 6,NULL
+type/lag/timestamp/int	ERR 42883 function lag(timestamp without time zone, integer, integer) does not exist
+type/lead/timestamp/int	ERR 42883 function lead(timestamp without time zone, integer, integer) does not exist
+type/lag/timestamp/dec	ERR 42883 function lag(timestamp without time zone, integer, numeric) does not exist
+type/lead/timestamp/dec	ERR 42883 function lead(timestamp without time zone, integer, numeric) does not exist
+type/lag/timestamp/wide	ERR 42883 function lag(timestamp without time zone, integer, numeric) does not exist
+type/lead/timestamp/wide	ERR 42883 function lead(timestamp without time zone, integer, numeric) does not exist
+type/lag/timestamp/dbl	ERR 42883 function lag(timestamp without time zone, integer, numeric) does not exist
+type/lead/timestamp/dbl	ERR 42883 function lead(timestamp without time zone, integer, numeric) does not exist
+type/lag/timestamp/text	ERR 22007 invalid input syntax for type timestamp: "z"
+type/lead/timestamp/text	ERR 22007 invalid input syntax for type timestamp: "z"
+type/lag/timestamp/qnum	ERR 22007 invalid input syntax for type timestamp: "7"
+type/lead/timestamp/qnum	ERR 22007 invalid input syntax for type timestamp: "7"
+type/lag/timestamp/bool	ERR 42883 function lag(timestamp without time zone, integer, boolean) does not exist
+type/lead/timestamp/bool	ERR 42883 function lead(timestamp without time zone, integer, boolean) does not exist
+type/lag/timestamp/date	type=timestamp without time zone rows=6 1,2020-01-01 00:00:00 | 2,2020-01-01 00:00:00 | 3,2020-01-01 00:00:00 | 4,2020-01-01 00:00:00 | 5,2020-01-01 00:00:00 | 6,2020-01-01 00:00:00
+type/lead/timestamp/date	type=timestamp without time zone rows=6 1,2024-01-02 10:00:00 | 2,NULL | 3,2020-01-01 00:00:00 | 4,2024-01-05 10:00:00 | 5,2020-01-01 00:00:00 | 6,2020-01-01 00:00:00
+type/lag/timestamp/ts	type=timestamp without time zone rows=6 1,2020-01-01 00:00:00 | 2,2020-01-01 00:00:00 | 3,2020-01-01 00:00:00 | 4,2020-01-01 00:00:00 | 5,2020-01-01 00:00:00 | 6,2020-01-01 00:00:00
+type/lead/timestamp/ts	type=timestamp without time zone rows=6 1,2024-01-02 10:00:00 | 2,NULL | 3,2020-01-01 00:00:00 | 4,2024-01-05 10:00:00 | 5,2020-01-01 00:00:00 | 6,2020-01-01 00:00:00
+type/lag/timestamp/same	type=timestamp without time zone rows=6 1,2024-01-01 10:00:00 | 2,2024-01-02 10:00:00 | 3,NULL | 4,2024-01-04 10:00:00 | 5,2024-01-05 10:00:00 | 6,2024-01-06 10:00:00
+type/lead/timestamp/same	type=timestamp without time zone rows=6 1,2024-01-02 10:00:00 | 2,NULL | 3,NULL | 4,2024-01-05 10:00:00 | 5,2024-01-05 10:00:00 | 6,2024-01-06 10:00:00
+type/lag/timestamp/colwide	ERR 42883 function lag(timestamp without time zone, integer, double precision) does not exist
+type/lead/timestamp/colwide	ERR 42883 function lead(timestamp without time zone, integer, double precision) does not exist
+type/lag/timestamp/cast	ERR 42883 function lag(timestamp without time zone, integer, bigint) does not exist
+type/lead/timestamp/cast	ERR 42883 function lead(timestamp without time zone, integer, bigint) does not exist
+type/lag/timestamp/expr	ERR 42883 function lag(timestamp without time zone, integer, integer) does not exist
+type/lead/timestamp/expr	ERR 42883 function lead(timestamp without time zone, integer, integer) does not exist
+type/lag/timestamp/sub	ERR 42883 function lag(timestamp without time zone, integer, integer) does not exist
+type/lead/timestamp/sub	ERR 42883 function lead(timestamp without time zone, integer, integer) does not exist
+type/lag/timestamp/arr	ERR 42883 function lag(timestamp without time zone, integer, integer[]) does not exist
+type/lead/timestamp/arr	ERR 42883 function lead(timestamp without time zone, integer, integer[]) does not exist
+type/lag/array/omit	type=integer[] rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+type/lead/array/omit	type=integer[] rows=6 1,{20} | 2,{NULL} | 3,NULL | 4,{50} | 5,NULL | 6,NULL
+type/lag/array/null	type=integer[] rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+type/lead/array/null	type=integer[] rows=6 1,{20} | 2,{NULL} | 3,NULL | 4,{50} | 5,NULL | 6,NULL
+type/lag/array/int	ERR 42883 function lag(integer[], integer, integer) does not exist
+type/lead/array/int	ERR 42883 function lead(integer[], integer, integer) does not exist
+type/lag/array/dec	ERR 42883 function lag(integer[], integer, numeric) does not exist
+type/lead/array/dec	ERR 42883 function lead(integer[], integer, numeric) does not exist
+type/lag/array/wide	ERR 42883 function lag(integer[], integer, numeric) does not exist
+type/lead/array/wide	ERR 42883 function lead(integer[], integer, numeric) does not exist
+type/lag/array/dbl	ERR 42883 function lag(integer[], integer, numeric) does not exist
+type/lead/array/dbl	ERR 42883 function lead(integer[], integer, numeric) does not exist
+type/lag/array/text	ERR 22P02 malformed array literal: "z"
+type/lead/array/text	ERR 22P02 malformed array literal: "z"
+type/lag/array/qnum	ERR 22P02 malformed array literal: "7"
+type/lead/array/qnum	ERR 22P02 malformed array literal: "7"
+type/lag/array/bool	ERR 42883 function lag(integer[], integer, boolean) does not exist
+type/lead/array/bool	ERR 42883 function lead(integer[], integer, boolean) does not exist
+type/lag/array/date	ERR 42883 function lag(integer[], integer, date) does not exist
+type/lead/array/date	ERR 42883 function lead(integer[], integer, date) does not exist
+type/lag/array/ts	ERR 42883 function lag(integer[], integer, timestamp without time zone) does not exist
+type/lead/array/ts	ERR 42883 function lead(integer[], integer, timestamp without time zone) does not exist
+type/lag/array/same	type=integer[] rows=6 1,{10} | 2,{20} | 3,{NULL} | 4,{40} | 5,{50} | 6,{60}
+type/lead/array/same	type=integer[] rows=6 1,{20} | 2,{NULL} | 3,{NULL} | 4,{50} | 5,{50} | 6,{60}
+type/lag/array/colwide	ERR 42883 function lag(integer[], integer, double precision) does not exist
+type/lead/array/colwide	ERR 42883 function lead(integer[], integer, double precision) does not exist
+type/lag/array/cast	ERR 42883 function lag(integer[], integer, bigint) does not exist
+type/lead/array/cast	ERR 42883 function lead(integer[], integer, bigint) does not exist
+type/lag/array/expr	ERR 42883 function lag(integer[], integer, integer) does not exist
+type/lead/array/expr	ERR 42883 function lead(integer[], integer, integer) does not exist
+type/lag/array/sub	ERR 42883 function lag(integer[], integer, integer) does not exist
+type/lead/array/sub	ERR 42883 function lead(integer[], integer, integer) does not exist
+type/lag/array/arr	type=integer[] rows=6 1,{9} | 2,{9} | 3,{9} | 4,{9} | 5,{9} | 6,{9}
+type/lead/array/arr	type=integer[] rows=6 1,{20} | 2,{NULL} | 3,{9} | 4,{50} | 5,{9} | 6,{9}
+shape/lag/1/ord/bigint/dec	type=numeric rows=6 1,2.5 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+shape/lag/1/ord/int/dec	type=numeric rows=6 1,2.5 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+shape/lag/1/ord/bigint/colwide	type=double precision rows=6 1,1.5 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+shape/lag/1/ord/numeric/dec3	type=numeric rows=6 1,0.125 | 2,1.25 | 3,2.25 | 4,NULL | 5,4.25 | 6,5.25
+shape/lag/1/ord/numeric/colwide	type=double precision rows=6 1,1.5 | 2,1.25 | 3,2.25 | 4,NULL | 5,4.25 | 6,5.25
+shape/lag/1/ord/int/cast	type=bigint rows=6 1,7 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+shape/lag/1/ord/bigint/qnum	type=bigint rows=6 1,7 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+shape/lag/1/ord/date/colts	type=timestamp without time zone rows=6 1,2024-01-01 10:00:00 | 2,2024-01-01 00:00:00 | 3,2024-01-02 00:00:00 | 4,NULL | 5,2024-01-04 00:00:00 | 6,2024-01-05 00:00:00
+shape/lag/1/ord/date/ts	type=timestamp without time zone rows=6 1,2020-01-01 00:00:00 | 2,2024-01-01 00:00:00 | 3,2024-01-02 00:00:00 | 4,NULL | 5,2024-01-04 00:00:00 | 6,2024-01-05 00:00:00
+shape/lag/1/ord/bigint/colsame	type=bigint rows=6 1,1 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+shape/lag/1/ord/bigint/text	ERR 22P02 invalid input syntax for type bigint: "a"
+shape/lag/1/both/bigint/dec	type=numeric rows=6 1,2.5 | 2,10 | 3,20 | 4,2.5 | 5,40 | 6,2.5
+shape/lag/1/both/int/dec	type=numeric rows=6 1,2.5 | 2,10 | 3,20 | 4,2.5 | 5,40 | 6,2.5
+shape/lag/1/both/bigint/colwide	type=double precision rows=6 1,1.5 | 2,10 | 3,20 | 4,4.5 | 5,40 | 6,6.5
+shape/lag/1/both/numeric/dec3	type=numeric rows=6 1,0.125 | 2,1.25 | 3,2.25 | 4,0.125 | 5,4.25 | 6,0.125
+shape/lag/1/both/numeric/colwide	type=double precision rows=6 1,1.5 | 2,1.25 | 3,2.25 | 4,4.5 | 5,4.25 | 6,6.5
+shape/lag/1/both/int/cast	type=bigint rows=6 1,7 | 2,10 | 3,20 | 4,7 | 5,40 | 6,7
+shape/lag/1/both/bigint/qnum	type=bigint rows=6 1,7 | 2,10 | 3,20 | 4,7 | 5,40 | 6,7
+shape/lag/1/both/date/colts	type=timestamp without time zone rows=6 1,2024-01-01 10:00:00 | 2,2024-01-01 00:00:00 | 3,2024-01-02 00:00:00 | 4,2024-01-04 10:00:00 | 5,2024-01-04 00:00:00 | 6,2024-01-06 10:00:00
+shape/lag/1/both/date/ts	type=timestamp without time zone rows=6 1,2020-01-01 00:00:00 | 2,2024-01-01 00:00:00 | 3,2024-01-02 00:00:00 | 4,2020-01-01 00:00:00 | 5,2024-01-04 00:00:00 | 6,2020-01-01 00:00:00
+shape/lag/1/both/bigint/colsame	type=bigint rows=6 1,1 | 2,10 | 3,20 | 4,4 | 5,40 | 6,6
+shape/lag/1/both/bigint/text	ERR 22P02 invalid input syntax for type bigint: "a"
+shape/lag/1/frame/bigint/dec	type=numeric rows=6 1,2.5 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+shape/lag/1/frame/int/dec	type=numeric rows=6 1,2.5 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+shape/lag/1/frame/bigint/colwide	type=double precision rows=6 1,1.5 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+shape/lag/1/frame/numeric/dec3	type=numeric rows=6 1,0.125 | 2,1.25 | 3,2.25 | 4,NULL | 5,4.25 | 6,5.25
+shape/lag/1/frame/numeric/colwide	type=double precision rows=6 1,1.5 | 2,1.25 | 3,2.25 | 4,NULL | 5,4.25 | 6,5.25
+shape/lag/1/frame/int/cast	type=bigint rows=6 1,7 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+shape/lag/1/frame/bigint/qnum	type=bigint rows=6 1,7 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+shape/lag/1/frame/date/colts	type=timestamp without time zone rows=6 1,2024-01-01 10:00:00 | 2,2024-01-01 00:00:00 | 3,2024-01-02 00:00:00 | 4,NULL | 5,2024-01-04 00:00:00 | 6,2024-01-05 00:00:00
+shape/lag/1/frame/date/ts	type=timestamp without time zone rows=6 1,2020-01-01 00:00:00 | 2,2024-01-01 00:00:00 | 3,2024-01-02 00:00:00 | 4,NULL | 5,2024-01-04 00:00:00 | 6,2024-01-05 00:00:00
+shape/lag/1/frame/bigint/colsame	type=bigint rows=6 1,1 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+shape/lag/1/frame/bigint/text	ERR 22P02 invalid input syntax for type bigint: "a"
+shape/lag/10/ord/bigint/dec	type=numeric rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+shape/lag/10/ord/int/dec	type=numeric rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+shape/lag/10/ord/bigint/colwide	type=double precision rows=6 1,1.5 | 2,2.5 | 3,NULL | 4,4.5 | 5,5.5 | 6,6.5
+shape/lag/10/ord/numeric/dec3	type=numeric rows=6 1,0.125 | 2,0.125 | 3,0.125 | 4,0.125 | 5,0.125 | 6,0.125
+shape/lag/10/ord/numeric/colwide	type=double precision rows=6 1,1.5 | 2,2.5 | 3,NULL | 4,4.5 | 5,5.5 | 6,6.5
+shape/lag/10/ord/int/cast	type=bigint rows=6 1,7 | 2,7 | 3,7 | 4,7 | 5,7 | 6,7
+shape/lag/10/ord/bigint/qnum	type=bigint rows=6 1,7 | 2,7 | 3,7 | 4,7 | 5,7 | 6,7
+shape/lag/10/ord/date/colts	type=timestamp without time zone rows=6 1,2024-01-01 10:00:00 | 2,2024-01-02 10:00:00 | 3,NULL | 4,2024-01-04 10:00:00 | 5,2024-01-05 10:00:00 | 6,2024-01-06 10:00:00
+shape/lag/10/ord/date/ts	type=timestamp without time zone rows=6 1,2020-01-01 00:00:00 | 2,2020-01-01 00:00:00 | 3,2020-01-01 00:00:00 | 4,2020-01-01 00:00:00 | 5,2020-01-01 00:00:00 | 6,2020-01-01 00:00:00
+shape/lag/10/ord/bigint/colsame	type=bigint rows=6 1,1 | 2,2 | 3,3 | 4,4 | 5,5 | 6,6
+shape/lag/10/ord/bigint/text	ERR 22P02 invalid input syntax for type bigint: "a"
+shape/lag/10/both/bigint/dec	type=numeric rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+shape/lag/10/both/int/dec	type=numeric rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+shape/lag/10/both/bigint/colwide	type=double precision rows=6 1,1.5 | 2,2.5 | 3,NULL | 4,4.5 | 5,5.5 | 6,6.5
+shape/lag/10/both/numeric/dec3	type=numeric rows=6 1,0.125 | 2,0.125 | 3,0.125 | 4,0.125 | 5,0.125 | 6,0.125
+shape/lag/10/both/numeric/colwide	type=double precision rows=6 1,1.5 | 2,2.5 | 3,NULL | 4,4.5 | 5,5.5 | 6,6.5
+shape/lag/10/both/int/cast	type=bigint rows=6 1,7 | 2,7 | 3,7 | 4,7 | 5,7 | 6,7
+shape/lag/10/both/bigint/qnum	type=bigint rows=6 1,7 | 2,7 | 3,7 | 4,7 | 5,7 | 6,7
+shape/lag/10/both/date/colts	type=timestamp without time zone rows=6 1,2024-01-01 10:00:00 | 2,2024-01-02 10:00:00 | 3,NULL | 4,2024-01-04 10:00:00 | 5,2024-01-05 10:00:00 | 6,2024-01-06 10:00:00
+shape/lag/10/both/date/ts	type=timestamp without time zone rows=6 1,2020-01-01 00:00:00 | 2,2020-01-01 00:00:00 | 3,2020-01-01 00:00:00 | 4,2020-01-01 00:00:00 | 5,2020-01-01 00:00:00 | 6,2020-01-01 00:00:00
+shape/lag/10/both/bigint/colsame	type=bigint rows=6 1,1 | 2,2 | 3,3 | 4,4 | 5,5 | 6,6
+shape/lag/10/both/bigint/text	ERR 22P02 invalid input syntax for type bigint: "a"
+shape/lag/10/frame/bigint/dec	type=numeric rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+shape/lag/10/frame/int/dec	type=numeric rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+shape/lag/10/frame/bigint/colwide	type=double precision rows=6 1,1.5 | 2,2.5 | 3,NULL | 4,4.5 | 5,5.5 | 6,6.5
+shape/lag/10/frame/numeric/dec3	type=numeric rows=6 1,0.125 | 2,0.125 | 3,0.125 | 4,0.125 | 5,0.125 | 6,0.125
+shape/lag/10/frame/numeric/colwide	type=double precision rows=6 1,1.5 | 2,2.5 | 3,NULL | 4,4.5 | 5,5.5 | 6,6.5
+shape/lag/10/frame/int/cast	type=bigint rows=6 1,7 | 2,7 | 3,7 | 4,7 | 5,7 | 6,7
+shape/lag/10/frame/bigint/qnum	type=bigint rows=6 1,7 | 2,7 | 3,7 | 4,7 | 5,7 | 6,7
+shape/lag/10/frame/date/colts	type=timestamp without time zone rows=6 1,2024-01-01 10:00:00 | 2,2024-01-02 10:00:00 | 3,NULL | 4,2024-01-04 10:00:00 | 5,2024-01-05 10:00:00 | 6,2024-01-06 10:00:00
+shape/lag/10/frame/date/ts	type=timestamp without time zone rows=6 1,2020-01-01 00:00:00 | 2,2020-01-01 00:00:00 | 3,2020-01-01 00:00:00 | 4,2020-01-01 00:00:00 | 5,2020-01-01 00:00:00 | 6,2020-01-01 00:00:00
+shape/lag/10/frame/bigint/colsame	type=bigint rows=6 1,1 | 2,2 | 3,3 | 4,4 | 5,5 | 6,6
+shape/lag/10/frame/bigint/text	ERR 22P02 invalid input syntax for type bigint: "a"
+shape/lag/0/ord/bigint/dec	type=numeric rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+shape/lag/0/ord/int/dec	type=numeric rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+shape/lag/0/ord/bigint/colwide	type=double precision rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+shape/lag/0/ord/numeric/dec3	type=numeric rows=6 1,1.25 | 2,2.25 | 3,NULL | 4,4.25 | 5,5.25 | 6,6.25
+shape/lag/0/ord/numeric/colwide	type=double precision rows=6 1,1.25 | 2,2.25 | 3,NULL | 4,4.25 | 5,5.25 | 6,6.25
+shape/lag/0/ord/int/cast	type=bigint rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+shape/lag/0/ord/bigint/qnum	type=bigint rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+shape/lag/0/ord/date/colts	type=timestamp without time zone rows=6 1,2024-01-01 00:00:00 | 2,2024-01-02 00:00:00 | 3,NULL | 4,2024-01-04 00:00:00 | 5,2024-01-05 00:00:00 | 6,2024-01-06 00:00:00
+shape/lag/0/ord/date/ts	type=timestamp without time zone rows=6 1,2024-01-01 00:00:00 | 2,2024-01-02 00:00:00 | 3,NULL | 4,2024-01-04 00:00:00 | 5,2024-01-05 00:00:00 | 6,2024-01-06 00:00:00
+shape/lag/0/ord/bigint/colsame	type=bigint rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+shape/lag/0/ord/bigint/text	ERR 22P02 invalid input syntax for type bigint: "a"
+shape/lag/0/both/bigint/dec	type=numeric rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+shape/lag/0/both/int/dec	type=numeric rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+shape/lag/0/both/bigint/colwide	type=double precision rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+shape/lag/0/both/numeric/dec3	type=numeric rows=6 1,1.25 | 2,2.25 | 3,NULL | 4,4.25 | 5,5.25 | 6,6.25
+shape/lag/0/both/numeric/colwide	type=double precision rows=6 1,1.25 | 2,2.25 | 3,NULL | 4,4.25 | 5,5.25 | 6,6.25
+shape/lag/0/both/int/cast	type=bigint rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+shape/lag/0/both/bigint/qnum	type=bigint rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+shape/lag/0/both/date/colts	type=timestamp without time zone rows=6 1,2024-01-01 00:00:00 | 2,2024-01-02 00:00:00 | 3,NULL | 4,2024-01-04 00:00:00 | 5,2024-01-05 00:00:00 | 6,2024-01-06 00:00:00
+shape/lag/0/both/date/ts	type=timestamp without time zone rows=6 1,2024-01-01 00:00:00 | 2,2024-01-02 00:00:00 | 3,NULL | 4,2024-01-04 00:00:00 | 5,2024-01-05 00:00:00 | 6,2024-01-06 00:00:00
+shape/lag/0/both/bigint/colsame	type=bigint rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+shape/lag/0/both/bigint/text	ERR 22P02 invalid input syntax for type bigint: "a"
+shape/lag/0/frame/bigint/dec	type=numeric rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+shape/lag/0/frame/int/dec	type=numeric rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+shape/lag/0/frame/bigint/colwide	type=double precision rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+shape/lag/0/frame/numeric/dec3	type=numeric rows=6 1,1.25 | 2,2.25 | 3,NULL | 4,4.25 | 5,5.25 | 6,6.25
+shape/lag/0/frame/numeric/colwide	type=double precision rows=6 1,1.25 | 2,2.25 | 3,NULL | 4,4.25 | 5,5.25 | 6,6.25
+shape/lag/0/frame/int/cast	type=bigint rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+shape/lag/0/frame/bigint/qnum	type=bigint rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+shape/lag/0/frame/date/colts	type=timestamp without time zone rows=6 1,2024-01-01 00:00:00 | 2,2024-01-02 00:00:00 | 3,NULL | 4,2024-01-04 00:00:00 | 5,2024-01-05 00:00:00 | 6,2024-01-06 00:00:00
+shape/lag/0/frame/date/ts	type=timestamp without time zone rows=6 1,2024-01-01 00:00:00 | 2,2024-01-02 00:00:00 | 3,NULL | 4,2024-01-04 00:00:00 | 5,2024-01-05 00:00:00 | 6,2024-01-06 00:00:00
+shape/lag/0/frame/bigint/colsame	type=bigint rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+shape/lag/0/frame/bigint/text	ERR 22P02 invalid input syntax for type bigint: "a"
+shape/lead/1/ord/bigint/dec	type=numeric rows=6 1,20 | 2,NULL | 3,40 | 4,50 | 5,60 | 6,2.5
+shape/lead/1/ord/int/dec	type=numeric rows=6 1,20 | 2,NULL | 3,40 | 4,50 | 5,60 | 6,2.5
+shape/lead/1/ord/bigint/colwide	type=double precision rows=6 1,20 | 2,NULL | 3,40 | 4,50 | 5,60 | 6,6.5
+shape/lead/1/ord/numeric/dec3	type=numeric rows=6 1,2.25 | 2,NULL | 3,4.25 | 4,5.25 | 5,6.25 | 6,0.125
+shape/lead/1/ord/numeric/colwide	type=double precision rows=6 1,2.25 | 2,NULL | 3,4.25 | 4,5.25 | 5,6.25 | 6,6.5
+shape/lead/1/ord/int/cast	type=bigint rows=6 1,20 | 2,NULL | 3,40 | 4,50 | 5,60 | 6,7
+shape/lead/1/ord/bigint/qnum	type=bigint rows=6 1,20 | 2,NULL | 3,40 | 4,50 | 5,60 | 6,7
+shape/lead/1/ord/date/colts	type=timestamp without time zone rows=6 1,2024-01-02 00:00:00 | 2,NULL | 3,2024-01-04 00:00:00 | 4,2024-01-05 00:00:00 | 5,2024-01-06 00:00:00 | 6,2024-01-06 10:00:00
+shape/lead/1/ord/date/ts	type=timestamp without time zone rows=6 1,2024-01-02 00:00:00 | 2,NULL | 3,2024-01-04 00:00:00 | 4,2024-01-05 00:00:00 | 5,2024-01-06 00:00:00 | 6,2020-01-01 00:00:00
+shape/lead/1/ord/bigint/colsame	type=bigint rows=6 1,20 | 2,NULL | 3,40 | 4,50 | 5,60 | 6,6
+shape/lead/1/ord/bigint/text	ERR 22P02 invalid input syntax for type bigint: "a"
+shape/lead/1/both/bigint/dec	type=numeric rows=6 1,20 | 2,NULL | 3,2.5 | 4,50 | 5,2.5 | 6,2.5
+shape/lead/1/both/int/dec	type=numeric rows=6 1,20 | 2,NULL | 3,2.5 | 4,50 | 5,2.5 | 6,2.5
+shape/lead/1/both/bigint/colwide	type=double precision rows=6 1,20 | 2,NULL | 3,NULL | 4,50 | 5,5.5 | 6,6.5
+shape/lead/1/both/numeric/dec3	type=numeric rows=6 1,2.25 | 2,NULL | 3,0.125 | 4,5.25 | 5,0.125 | 6,0.125
+shape/lead/1/both/numeric/colwide	type=double precision rows=6 1,2.25 | 2,NULL | 3,NULL | 4,5.25 | 5,5.5 | 6,6.5
+shape/lead/1/both/int/cast	type=bigint rows=6 1,20 | 2,NULL | 3,7 | 4,50 | 5,7 | 6,7
+shape/lead/1/both/bigint/qnum	type=bigint rows=6 1,20 | 2,NULL | 3,7 | 4,50 | 5,7 | 6,7
+shape/lead/1/both/date/colts	type=timestamp without time zone rows=6 1,2024-01-02 00:00:00 | 2,NULL | 3,NULL | 4,2024-01-05 00:00:00 | 5,2024-01-05 10:00:00 | 6,2024-01-06 10:00:00
+shape/lead/1/both/date/ts	type=timestamp without time zone rows=6 1,2024-01-02 00:00:00 | 2,NULL | 3,2020-01-01 00:00:00 | 4,2024-01-05 00:00:00 | 5,2020-01-01 00:00:00 | 6,2020-01-01 00:00:00
+shape/lead/1/both/bigint/colsame	type=bigint rows=6 1,20 | 2,NULL | 3,3 | 4,50 | 5,5 | 6,6
+shape/lead/1/both/bigint/text	ERR 22P02 invalid input syntax for type bigint: "a"
+shape/lead/1/frame/bigint/dec	type=numeric rows=6 1,20 | 2,NULL | 3,40 | 4,50 | 5,60 | 6,2.5
+shape/lead/1/frame/int/dec	type=numeric rows=6 1,20 | 2,NULL | 3,40 | 4,50 | 5,60 | 6,2.5
+shape/lead/1/frame/bigint/colwide	type=double precision rows=6 1,20 | 2,NULL | 3,40 | 4,50 | 5,60 | 6,6.5
+shape/lead/1/frame/numeric/dec3	type=numeric rows=6 1,2.25 | 2,NULL | 3,4.25 | 4,5.25 | 5,6.25 | 6,0.125
+shape/lead/1/frame/numeric/colwide	type=double precision rows=6 1,2.25 | 2,NULL | 3,4.25 | 4,5.25 | 5,6.25 | 6,6.5
+shape/lead/1/frame/int/cast	type=bigint rows=6 1,20 | 2,NULL | 3,40 | 4,50 | 5,60 | 6,7
+shape/lead/1/frame/bigint/qnum	type=bigint rows=6 1,20 | 2,NULL | 3,40 | 4,50 | 5,60 | 6,7
+shape/lead/1/frame/date/colts	type=timestamp without time zone rows=6 1,2024-01-02 00:00:00 | 2,NULL | 3,2024-01-04 00:00:00 | 4,2024-01-05 00:00:00 | 5,2024-01-06 00:00:00 | 6,2024-01-06 10:00:00
+shape/lead/1/frame/date/ts	type=timestamp without time zone rows=6 1,2024-01-02 00:00:00 | 2,NULL | 3,2024-01-04 00:00:00 | 4,2024-01-05 00:00:00 | 5,2024-01-06 00:00:00 | 6,2020-01-01 00:00:00
+shape/lead/1/frame/bigint/colsame	type=bigint rows=6 1,20 | 2,NULL | 3,40 | 4,50 | 5,60 | 6,6
+shape/lead/1/frame/bigint/text	ERR 22P02 invalid input syntax for type bigint: "a"
+shape/lead/10/ord/bigint/dec	type=numeric rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+shape/lead/10/ord/int/dec	type=numeric rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+shape/lead/10/ord/bigint/colwide	type=double precision rows=6 1,1.5 | 2,2.5 | 3,NULL | 4,4.5 | 5,5.5 | 6,6.5
+shape/lead/10/ord/numeric/dec3	type=numeric rows=6 1,0.125 | 2,0.125 | 3,0.125 | 4,0.125 | 5,0.125 | 6,0.125
+shape/lead/10/ord/numeric/colwide	type=double precision rows=6 1,1.5 | 2,2.5 | 3,NULL | 4,4.5 | 5,5.5 | 6,6.5
+shape/lead/10/ord/int/cast	type=bigint rows=6 1,7 | 2,7 | 3,7 | 4,7 | 5,7 | 6,7
+shape/lead/10/ord/bigint/qnum	type=bigint rows=6 1,7 | 2,7 | 3,7 | 4,7 | 5,7 | 6,7
+shape/lead/10/ord/date/colts	type=timestamp without time zone rows=6 1,2024-01-01 10:00:00 | 2,2024-01-02 10:00:00 | 3,NULL | 4,2024-01-04 10:00:00 | 5,2024-01-05 10:00:00 | 6,2024-01-06 10:00:00
+shape/lead/10/ord/date/ts	type=timestamp without time zone rows=6 1,2020-01-01 00:00:00 | 2,2020-01-01 00:00:00 | 3,2020-01-01 00:00:00 | 4,2020-01-01 00:00:00 | 5,2020-01-01 00:00:00 | 6,2020-01-01 00:00:00
+shape/lead/10/ord/bigint/colsame	type=bigint rows=6 1,1 | 2,2 | 3,3 | 4,4 | 5,5 | 6,6
+shape/lead/10/ord/bigint/text	ERR 22P02 invalid input syntax for type bigint: "a"
+shape/lead/10/both/bigint/dec	type=numeric rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+shape/lead/10/both/int/dec	type=numeric rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+shape/lead/10/both/bigint/colwide	type=double precision rows=6 1,1.5 | 2,2.5 | 3,NULL | 4,4.5 | 5,5.5 | 6,6.5
+shape/lead/10/both/numeric/dec3	type=numeric rows=6 1,0.125 | 2,0.125 | 3,0.125 | 4,0.125 | 5,0.125 | 6,0.125
+shape/lead/10/both/numeric/colwide	type=double precision rows=6 1,1.5 | 2,2.5 | 3,NULL | 4,4.5 | 5,5.5 | 6,6.5
+shape/lead/10/both/int/cast	type=bigint rows=6 1,7 | 2,7 | 3,7 | 4,7 | 5,7 | 6,7
+shape/lead/10/both/bigint/qnum	type=bigint rows=6 1,7 | 2,7 | 3,7 | 4,7 | 5,7 | 6,7
+shape/lead/10/both/date/colts	type=timestamp without time zone rows=6 1,2024-01-01 10:00:00 | 2,2024-01-02 10:00:00 | 3,NULL | 4,2024-01-04 10:00:00 | 5,2024-01-05 10:00:00 | 6,2024-01-06 10:00:00
+shape/lead/10/both/date/ts	type=timestamp without time zone rows=6 1,2020-01-01 00:00:00 | 2,2020-01-01 00:00:00 | 3,2020-01-01 00:00:00 | 4,2020-01-01 00:00:00 | 5,2020-01-01 00:00:00 | 6,2020-01-01 00:00:00
+shape/lead/10/both/bigint/colsame	type=bigint rows=6 1,1 | 2,2 | 3,3 | 4,4 | 5,5 | 6,6
+shape/lead/10/both/bigint/text	ERR 22P02 invalid input syntax for type bigint: "a"
+shape/lead/10/frame/bigint/dec	type=numeric rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+shape/lead/10/frame/int/dec	type=numeric rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+shape/lead/10/frame/bigint/colwide	type=double precision rows=6 1,1.5 | 2,2.5 | 3,NULL | 4,4.5 | 5,5.5 | 6,6.5
+shape/lead/10/frame/numeric/dec3	type=numeric rows=6 1,0.125 | 2,0.125 | 3,0.125 | 4,0.125 | 5,0.125 | 6,0.125
+shape/lead/10/frame/numeric/colwide	type=double precision rows=6 1,1.5 | 2,2.5 | 3,NULL | 4,4.5 | 5,5.5 | 6,6.5
+shape/lead/10/frame/int/cast	type=bigint rows=6 1,7 | 2,7 | 3,7 | 4,7 | 5,7 | 6,7
+shape/lead/10/frame/bigint/qnum	type=bigint rows=6 1,7 | 2,7 | 3,7 | 4,7 | 5,7 | 6,7
+shape/lead/10/frame/date/colts	type=timestamp without time zone rows=6 1,2024-01-01 10:00:00 | 2,2024-01-02 10:00:00 | 3,NULL | 4,2024-01-04 10:00:00 | 5,2024-01-05 10:00:00 | 6,2024-01-06 10:00:00
+shape/lead/10/frame/date/ts	type=timestamp without time zone rows=6 1,2020-01-01 00:00:00 | 2,2020-01-01 00:00:00 | 3,2020-01-01 00:00:00 | 4,2020-01-01 00:00:00 | 5,2020-01-01 00:00:00 | 6,2020-01-01 00:00:00
+shape/lead/10/frame/bigint/colsame	type=bigint rows=6 1,1 | 2,2 | 3,3 | 4,4 | 5,5 | 6,6
+shape/lead/10/frame/bigint/text	ERR 22P02 invalid input syntax for type bigint: "a"
+shape/lead/0/ord/bigint/dec	type=numeric rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+shape/lead/0/ord/int/dec	type=numeric rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+shape/lead/0/ord/bigint/colwide	type=double precision rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+shape/lead/0/ord/numeric/dec3	type=numeric rows=6 1,1.25 | 2,2.25 | 3,NULL | 4,4.25 | 5,5.25 | 6,6.25
+shape/lead/0/ord/numeric/colwide	type=double precision rows=6 1,1.25 | 2,2.25 | 3,NULL | 4,4.25 | 5,5.25 | 6,6.25
+shape/lead/0/ord/int/cast	type=bigint rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+shape/lead/0/ord/bigint/qnum	type=bigint rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+shape/lead/0/ord/date/colts	type=timestamp without time zone rows=6 1,2024-01-01 00:00:00 | 2,2024-01-02 00:00:00 | 3,NULL | 4,2024-01-04 00:00:00 | 5,2024-01-05 00:00:00 | 6,2024-01-06 00:00:00
+shape/lead/0/ord/date/ts	type=timestamp without time zone rows=6 1,2024-01-01 00:00:00 | 2,2024-01-02 00:00:00 | 3,NULL | 4,2024-01-04 00:00:00 | 5,2024-01-05 00:00:00 | 6,2024-01-06 00:00:00
+shape/lead/0/ord/bigint/colsame	type=bigint rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+shape/lead/0/ord/bigint/text	ERR 22P02 invalid input syntax for type bigint: "a"
+shape/lead/0/both/bigint/dec	type=numeric rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+shape/lead/0/both/int/dec	type=numeric rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+shape/lead/0/both/bigint/colwide	type=double precision rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+shape/lead/0/both/numeric/dec3	type=numeric rows=6 1,1.25 | 2,2.25 | 3,NULL | 4,4.25 | 5,5.25 | 6,6.25
+shape/lead/0/both/numeric/colwide	type=double precision rows=6 1,1.25 | 2,2.25 | 3,NULL | 4,4.25 | 5,5.25 | 6,6.25
+shape/lead/0/both/int/cast	type=bigint rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+shape/lead/0/both/bigint/qnum	type=bigint rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+shape/lead/0/both/date/colts	type=timestamp without time zone rows=6 1,2024-01-01 00:00:00 | 2,2024-01-02 00:00:00 | 3,NULL | 4,2024-01-04 00:00:00 | 5,2024-01-05 00:00:00 | 6,2024-01-06 00:00:00
+shape/lead/0/both/date/ts	type=timestamp without time zone rows=6 1,2024-01-01 00:00:00 | 2,2024-01-02 00:00:00 | 3,NULL | 4,2024-01-04 00:00:00 | 5,2024-01-05 00:00:00 | 6,2024-01-06 00:00:00
+shape/lead/0/both/bigint/colsame	type=bigint rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+shape/lead/0/both/bigint/text	ERR 22P02 invalid input syntax for type bigint: "a"
+shape/lead/0/frame/bigint/dec	type=numeric rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+shape/lead/0/frame/int/dec	type=numeric rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+shape/lead/0/frame/bigint/colwide	type=double precision rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+shape/lead/0/frame/numeric/dec3	type=numeric rows=6 1,1.25 | 2,2.25 | 3,NULL | 4,4.25 | 5,5.25 | 6,6.25
+shape/lead/0/frame/numeric/colwide	type=double precision rows=6 1,1.25 | 2,2.25 | 3,NULL | 4,4.25 | 5,5.25 | 6,6.25
+shape/lead/0/frame/int/cast	type=bigint rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+shape/lead/0/frame/bigint/qnum	type=bigint rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+shape/lead/0/frame/date/colts	type=timestamp without time zone rows=6 1,2024-01-01 00:00:00 | 2,2024-01-02 00:00:00 | 3,NULL | 4,2024-01-04 00:00:00 | 5,2024-01-05 00:00:00 | 6,2024-01-06 00:00:00
+shape/lead/0/frame/date/ts	type=timestamp without time zone rows=6 1,2024-01-01 00:00:00 | 2,2024-01-02 00:00:00 | 3,NULL | 4,2024-01-04 00:00:00 | 5,2024-01-05 00:00:00 | 6,2024-01-06 00:00:00
+shape/lead/0/frame/bigint/colsame	type=bigint rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60
+shape/lead/0/frame/bigint/text	ERR 22P02 invalid input syntax for type bigint: "a"
+use/eq	type=boolean rows=6 1,true | 2,false | 3,false | 4,NULL | 5,false | 6,false
+use/arith	type=numeric rows=6 1,3.5 | 2,11 | 3,21 | 4,NULL | 5,41 | 6,51
+use/mul	type=numeric rows=6 1,5.0 | 2,20 | 3,40 | 4,NULL | 5,80 | 6,100
+use/case	type=numeric rows=6 1,2.5 | 2,0 | 3,0 | 4,0 | 5,0 | 6,0
+use/coalesce	type=numeric rows=6 1,2.5 | 2,10 | 3,20 | 4,0 | 5,40 | 6,50
+use/derived	type=numeric rows=5 1,2.5 | 2,10 | 3,20 | 5,40 | 6,50
+use/group	type=numeric;bigint rows=6 10,1 | 2.5,1 | 20,1 | 40,1 | 50,1 | NULL,1
+use/sum	type=numeric rows=1 122.5
+use/order	type=numeric rows=6 1,2.5 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+use/two	type=numeric;double precision rows=6 1,2.5,20 | 2,10,NULL | 3,20,40 | 4,NULL,50 | 5,40,60 | 6,50,6.5
+use/derived_value	type=numeric rows=6 1,2.5 | 2,20 | 3,40 | 4,NULL | 5,80 | 6,100
+use/derived_default	type=double precision rows=6 1,3 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+use/aggregate_value	type=bigint;numeric rows=3 1,2.5 | 2,30 | 3,90
+use/cte	type=numeric rows=6 1,2.5 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+use/subquery_body	type=numeric rows=1 2.5
+use/union	type=numeric rows=7 0,0.5 | 1,2.5 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+gap/default_every_row	type=bigint rows=6 1,-10 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+gap/no_rows_text	ERR 22P02 invalid input syntax for type bigint: "a"
+issue/lag1	type=numeric rows=6 1,2.5 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+issue/lag10part	type=numeric rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+issue/lead10	type=numeric rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+origin/values	type=numeric rows=2 1,2.5 | 2,10
+origin/lateral	type=numeric rows=6 1,2.5 | 2,20 | 3,40 | 4,NULL | 5,80 | 6,100
+agg/offset	type=bigint;numeric rows=3 1,NULL | 2,NULL | 3,30
+agg/nth	type=bigint;numeric rows=3 1,NULL | 2,90 | 3,90
+agg/default_aggregate	type=bigint;double precision rows=3 1,90 | 2,60 | 3,6.5
+agg/default_key	type=bigint;numeric rows=3 1,1 | 2,30 | 3,90
+derived/sum_key_expr	type=numeric rows=6 1,20 | 2,60 | 3,60 | 4,140 | 5,240 | 6,360
+derived/partition_key_expr	type=bigint rows=6 1,1 | 2,1 | 3,1 | 4,1 | 5,1 | 6,1
+derived/lag_offset_default	type=double precision rows=6 1,NULL | 2,5 | 3,NULL | 4,9 | 5,11 | 6,13
