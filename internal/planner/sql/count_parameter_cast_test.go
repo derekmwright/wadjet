@@ -6,11 +6,13 @@ import "testing"
 
 // pgwire's Bind renders a float4/float8 parameter as
 // CAST('<text>' AS DOUBLE PRECISION | REAL). In a LIMIT, OFFSET or FETCH count
-// and a TABLESAMPLE percentage that spelling reads as the number its text lexes
-// to — the bare number Bind rendered before it kept the parameter's type — and
+// that spelling reads as the number its text lexes to — the bare number Bind rendered before it kept the parameter's type — and
 // a text that is not one number token stays the syntax error its bare spelling
 // is: `LIMIT CAST('-1' …)` must not become a count of -1, which the plan reads
 // as "no limit" (PostgreSQL raises 2201W; the bare `LIMIT -1` is 42601 here).
+// A TABLESAMPLE argument is an expression, not a count, since #1411: its
+// cells are tablesample_argument_test.go's and the coordinator's
+// TestArcTBTablesampleArgumentOnEveryArm.
 func TestCountPositionReadsAFloatParameterAsItsNumber(t *testing.T) {
 	for _, tc := range []struct {
 		name, sql, limit, offset, pct string
@@ -23,8 +25,6 @@ func TestCountPositionReadsAFloatParameterAsItsNumber(t *testing.T) {
 		{"offset float4 then limit", "SELECT id FROM p ORDER BY id OFFSET CAST('1' AS REAL) LIMIT CAST('1' AS REAL)", "1", "1", ""},
 		{"fetch first float8", "SELECT id FROM p ORDER BY id FETCH FIRST CAST('1' AS DOUBLE PRECISION) ROWS ONLY", "1", "", ""},
 		{"fetch next float4", "SELECT id FROM p ORDER BY id FETCH NEXT CAST('1' AS REAL) ROWS ONLY", "1", "", ""},
-		{"tablesample float8", "SELECT COUNT(*) FROM p TABLESAMPLE BERNOULLI (CAST('100' AS DOUBLE PRECISION))", "", "", "100"},
-		{"tablesample float4", "SELECT COUNT(*) FROM p TABLESAMPLE BERNOULLI (CAST('50.5' AS REAL))", "", "", "50.5"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			parsed, err := Parse(tc.sql)
@@ -52,7 +52,6 @@ func TestCountPositionReadsAFloatParameterAsItsNumber(t *testing.T) {
 		"SELECT id FROM p LIMIT CAST('1' AS INTEGER)",
 		"SELECT id FROM p LIMIT CAST('1' AS DOUBLE)",
 		"SELECT id FROM p OFFSET CAST('-1' AS REAL)",
-		"SELECT COUNT(*) FROM p TABLESAMPLE BERNOULLI (CAST('-5' AS DOUBLE PRECISION))",
 	} {
 		parsed, err := Parse(sql)
 		if err != nil {

@@ -670,7 +670,10 @@ type TableRef struct {
 	SystemShadowable bool
 	ColumnAliases    []string // AS alias(col1, col2, ...)
 	SampleMethod     string   // TABLESAMPLE method: BERNOULLI, SYSTEM
-	SamplePercent    string   // percentage for TABLESAMPLE
+	SamplePercent    string   // TABLESAMPLE argument's source text
+	// SampleArg is the TABLESAMPLE argument as parsed: any expression, which
+	// the planner types and evaluates once as real (physical.TablesampleArgument).
+	SampleArg Node
 	// ColumnAliasSource is the relation this derived body was LOWERED from,
 	// for the one rewrite that builds a derived table out of a named
 	// relation: `FROM t [AS] a (c1, …)` becomes `FROM (SELECT * FROM t) AS a
