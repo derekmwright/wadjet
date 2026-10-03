@@ -59,6 +59,14 @@ type StagePlanner struct {
 	// the whole query, so two window stages never mint one name.
 	windowAliasSeq int
 
+	// windowAliasStream maps a computed derived alias that rides the stream
+	// in a window's `__winkey_alias_N` slot — its defining Project, then the
+	// definition's text — to that slot. The alias's own name is a column of
+	// the stream that carries the SOURCE it shadows, so a consumer above the
+	// window that reads the alias by name reads the slot instead
+	// (windowAliasSlotFor).
+	windowAliasStream map[*logical.Node]map[string]string
+
 	// projScalarProducers maps a SELECT-list placeholder to the producer
 	// stage that computes it and the type that producer declares (#659).
 	// The predicate path records its edges directly on the filter-carrying
