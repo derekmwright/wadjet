@@ -1,0 +1,1181 @@
+# PostgreSQL 17.11 (postgres:17-alpine) answers for TestArcWDWindowConsumersEveryArm's cells over wd_t: name<TAB>type=<declared types after id> rows=N <sorted rows> | ERR <SQLSTATE> <message>.
+cons/p1/bare/one/proj	type=numeric;bigint rows=6 1,20,20 | 2,60,40 | 3,60,NULL | 4,140,80 | 5,240,100 | 6,360,120
+cons/p1/bare/one/expr	type=bigint rows=6 1,21 | 2,41 | 3,NULL | 4,81 | 5,101 | 6,121
+cons/p1/bare/one/filter	type=bigint rows=4 2,40 | 4,80 | 5,100 | 6,120
+cons/p1/bare/one/join	type=bigint;bigint rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p1/bare/one/join_r	type=bigint rows=6 1,20 | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p1/bare/one/join_key	type=bigint;bigint rows=5 1,20,1 | 2,40,2 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p1/bare/one/left	type=bigint;bigint rows=6 1,20,4 | 2,40,5 | 3,NULL,6 | 4,80,NULL | 5,100,NULL | 6,120,NULL
+cons/p1/bare/one/cross	type=bigint;bigint rows=6 1,20,1 | 2,40,1 | 3,NULL,1 | 4,80,1 | 5,100,1 | 6,120,1
+cons/p1/bare/one/semi	type=bigint rows=4 1,20 | 2,40 | 3,NULL | 4,80
+cons/p1/bare/one/anti	type=bigint rows=4 1,20 | 2,40 | 3,NULL | 4,80
+cons/p1/bare/one/agg	type=numeric rows=1 360
+cons/p1/bare/one/group	type=bigint;numeric rows=3 1,60 | 2,180 | 3,120
+cons/p1/bare/one/having	type=bigint;numeric rows=3 1,60 | 2,180 | 3,120
+cons/p1/bare/one/distinct	type=bigint rows=6 100 | 120 | 20 | 40 | 80 | NULL
+cons/p1/bare/one/sortlimit	type=bigint rows=3 4,80 | 5,100 | 6,120
+cons/p1/bare/one/union	type=bigint rows=7 1,10 | 1,20 | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p1/bare/one/win2	type=bigint;numeric rows=6 1,20,20 | 2,40,60 | 3,NULL,60 | 4,80,140 | 5,100,240 | 6,120,360
+cons/p1/bare/one/cte_self	type=bigint;bigint rows=6 1,20,20 | 2,40,40 | 3,NULL,NULL | 4,80,80 | 5,100,100 | 6,120,120
+cons/p1/bare/one/subq	type=bigint rows=5 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p1/bare/one/scalar	type=bigint;bigint rows=6 1,10,20 | 2,20,40 | 3,NULL,NULL | 4,40,80 | 5,50,100 | 6,60,120
+cons/p1/bare/one/join_col	type=bigint;bigint rows=5 1,20,1 | 2,40,2 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p1/bare/one/group_w3	type=bigint;bigint rows=6 100,1 | 120,1 | 20,1 | 40,1 | 80,1 | NULL,1
+cons/p1/bare/one/semi_w3	type=bigint rows=3 1,20 | 2,40 | 4,80
+cons/p1/bare/one/win_part	type=bigint;numeric rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p1/bare/side/proj	type=numeric;bigint rows=6 1,20,20 | 2,60,40 | 3,60,NULL | 4,140,80 | 5,240,100 | 6,360,120
+cons/p1/bare/side/expr	type=bigint rows=6 1,21 | 2,41 | 3,NULL | 4,81 | 5,101 | 6,121
+cons/p1/bare/side/filter	type=bigint rows=4 2,40 | 4,80 | 5,100 | 6,120
+cons/p1/bare/side/join	type=bigint;bigint rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p1/bare/side/join_r	type=bigint rows=6 1,20 | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p1/bare/side/join_key	type=bigint;bigint rows=5 1,20,1 | 2,40,2 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p1/bare/side/left	type=bigint;bigint rows=6 1,20,4 | 2,40,5 | 3,NULL,6 | 4,80,NULL | 5,100,NULL | 6,120,NULL
+cons/p1/bare/side/cross	type=bigint;bigint rows=6 1,20,1 | 2,40,1 | 3,NULL,1 | 4,80,1 | 5,100,1 | 6,120,1
+cons/p1/bare/side/semi	type=bigint rows=4 1,20 | 2,40 | 3,NULL | 4,80
+cons/p1/bare/side/anti	type=bigint rows=4 1,20 | 2,40 | 3,NULL | 4,80
+cons/p1/bare/side/agg	type=numeric rows=1 360
+cons/p1/bare/side/group	type=bigint;numeric rows=3 1,60 | 2,180 | 3,120
+cons/p1/bare/side/having	type=bigint;numeric rows=3 1,60 | 2,180 | 3,120
+cons/p1/bare/side/distinct	type=bigint rows=6 100 | 120 | 20 | 40 | 80 | NULL
+cons/p1/bare/side/sortlimit	type=bigint rows=3 4,80 | 5,100 | 6,120
+cons/p1/bare/side/union	type=bigint rows=7 1,10 | 1,20 | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p1/bare/side/win2	type=bigint;numeric rows=6 1,20,20 | 2,40,60 | 3,NULL,60 | 4,80,140 | 5,100,240 | 6,120,360
+cons/p1/bare/side/cte_self	type=bigint;bigint rows=6 1,20,20 | 2,40,40 | 3,NULL,NULL | 4,80,80 | 5,100,100 | 6,120,120
+cons/p1/bare/side/subq	type=bigint rows=5 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p1/bare/side/scalar	type=bigint;bigint rows=6 1,10,20 | 2,20,40 | 3,NULL,NULL | 4,40,80 | 5,50,100 | 6,60,120
+cons/p1/bare/side/join_col	type=bigint;bigint rows=5 1,20,1 | 2,40,2 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p1/bare/side/group_w3	type=bigint;bigint rows=6 100,1 | 120,1 | 20,1 | 40,1 | 80,1 | NULL,1
+cons/p1/bare/side/semi_w3	type=bigint rows=3 1,20 | 2,40 | 4,80
+cons/p1/bare/side/win_part	type=bigint;numeric rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p1/bare/stack/proj	type=numeric;bigint rows=6 1,20,20 | 2,60,40 | 3,60,NULL | 4,140,80 | 5,240,100 | 6,360,120
+cons/p1/bare/stack/expr	type=bigint rows=6 1,21 | 2,41 | 3,NULL | 4,81 | 5,101 | 6,121
+cons/p1/bare/stack/filter	type=bigint rows=4 2,40 | 4,80 | 5,100 | 6,120
+cons/p1/bare/stack/join	type=bigint;bigint rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p1/bare/stack/join_r	type=bigint rows=6 1,20 | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p1/bare/stack/join_key	type=bigint;bigint rows=5 1,20,1 | 2,40,2 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p1/bare/stack/left	type=bigint;bigint rows=6 1,20,4 | 2,40,5 | 3,NULL,6 | 4,80,NULL | 5,100,NULL | 6,120,NULL
+cons/p1/bare/stack/cross	type=bigint;bigint rows=6 1,20,1 | 2,40,1 | 3,NULL,1 | 4,80,1 | 5,100,1 | 6,120,1
+cons/p1/bare/stack/semi	type=bigint rows=4 1,20 | 2,40 | 3,NULL | 4,80
+cons/p1/bare/stack/anti	type=bigint rows=4 1,20 | 2,40 | 3,NULL | 4,80
+cons/p1/bare/stack/agg	type=numeric rows=1 360
+cons/p1/bare/stack/group	type=bigint;numeric rows=3 1,60 | 2,180 | 3,120
+cons/p1/bare/stack/having	type=bigint;numeric rows=3 1,60 | 2,180 | 3,120
+cons/p1/bare/stack/distinct	type=bigint rows=6 100 | 120 | 20 | 40 | 80 | NULL
+cons/p1/bare/stack/sortlimit	type=bigint rows=3 4,80 | 5,100 | 6,120
+cons/p1/bare/stack/union	type=bigint rows=7 1,10 | 1,20 | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p1/bare/stack/win2	type=bigint;numeric rows=6 1,20,20 | 2,40,60 | 3,NULL,60 | 4,80,140 | 5,100,240 | 6,120,360
+cons/p1/bare/stack/cte_self	type=bigint;bigint rows=6 1,20,20 | 2,40,40 | 3,NULL,NULL | 4,80,80 | 5,100,100 | 6,120,120
+cons/p1/bare/stack/subq	type=bigint rows=5 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p1/bare/stack/scalar	type=bigint;bigint rows=6 1,10,20 | 2,20,40 | 3,NULL,NULL | 4,40,80 | 5,50,100 | 6,60,120
+cons/p1/bare/stack/join_col	type=bigint;bigint rows=5 1,20,1 | 2,40,2 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p1/bare/stack/group_w3	type=bigint;bigint rows=6 100,1 | 120,1 | 20,1 | 40,1 | 80,1 | NULL,1
+cons/p1/bare/stack/semi_w3	type=bigint rows=3 1,20 | 2,40 | 4,80
+cons/p1/bare/stack/win_part	type=bigint;numeric rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p1/issue/one/proj	type=numeric;bigint rows=6 1,2.5,20 | 2,20,40 | 3,40,NULL | 4,NULL,80 | 5,80,100 | 6,100,120
+cons/p1/issue/one/expr	type=bigint rows=6 1,21 | 2,41 | 3,NULL | 4,81 | 5,101 | 6,121
+cons/p1/issue/one/filter	type=bigint rows=4 2,40 | 4,80 | 5,100 | 6,120
+cons/p1/issue/one/join	type=bigint;bigint rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p1/issue/one/join_r	type=bigint rows=6 1,20 | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p1/issue/one/join_key	type=bigint;bigint rows=5 1,20,1 | 2,40,2 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p1/issue/one/left	type=bigint;bigint rows=6 1,20,4 | 2,40,5 | 3,NULL,6 | 4,80,NULL | 5,100,NULL | 6,120,NULL
+cons/p1/issue/one/cross	type=bigint;bigint rows=6 1,20,1 | 2,40,1 | 3,NULL,1 | 4,80,1 | 5,100,1 | 6,120,1
+cons/p1/issue/one/semi	type=bigint rows=4 1,20 | 2,40 | 3,NULL | 4,80
+cons/p1/issue/one/anti	type=bigint rows=4 1,20 | 2,40 | 3,NULL | 4,80
+cons/p1/issue/one/agg	type=numeric rows=1 360
+cons/p1/issue/one/group	type=bigint;numeric rows=3 1,60 | 2,180 | 3,120
+cons/p1/issue/one/having	type=bigint;numeric rows=3 1,60 | 2,180 | 3,120
+cons/p1/issue/one/distinct	type=bigint rows=6 100 | 120 | 20 | 40 | 80 | NULL
+cons/p1/issue/one/sortlimit	type=bigint rows=3 4,80 | 5,100 | 6,120
+cons/p1/issue/one/union	type=bigint rows=7 1,10 | 1,20 | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p1/issue/one/win2	type=bigint;numeric rows=6 1,20,20 | 2,40,60 | 3,NULL,60 | 4,80,140 | 5,100,240 | 6,120,360
+cons/p1/issue/one/cte_self	type=bigint;bigint rows=6 1,20,20 | 2,40,40 | 3,NULL,NULL | 4,80,80 | 5,100,100 | 6,120,120
+cons/p1/issue/one/subq	type=bigint rows=5 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p1/issue/one/scalar	type=bigint;bigint rows=6 1,10,20 | 2,20,40 | 3,NULL,NULL | 4,40,80 | 5,50,100 | 6,60,120
+cons/p1/issue/one/join_col	type=bigint;bigint rows=5 1,20,1 | 2,40,2 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p1/issue/one/group_w3	type=bigint;bigint rows=6 100,1 | 120,1 | 20,1 | 40,1 | 80,1 | NULL,1
+cons/p1/issue/one/semi_w3	type=bigint rows=3 1,20 | 2,40 | 4,80
+cons/p1/issue/one/win_part	type=bigint;numeric rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p1/issue/side/proj	type=numeric;bigint rows=6 1,2.5,20 | 2,20,40 | 3,40,NULL | 4,NULL,80 | 5,80,100 | 6,100,120
+cons/p1/issue/side/expr	type=bigint rows=6 1,21 | 2,41 | 3,NULL | 4,81 | 5,101 | 6,121
+cons/p1/issue/side/filter	type=bigint rows=4 2,40 | 4,80 | 5,100 | 6,120
+cons/p1/issue/side/join	type=bigint;bigint rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p1/issue/side/join_r	type=bigint rows=6 1,20 | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p1/issue/side/join_key	type=bigint;bigint rows=5 1,20,1 | 2,40,2 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p1/issue/side/left	type=bigint;bigint rows=6 1,20,4 | 2,40,5 | 3,NULL,6 | 4,80,NULL | 5,100,NULL | 6,120,NULL
+cons/p1/issue/side/cross	type=bigint;bigint rows=6 1,20,1 | 2,40,1 | 3,NULL,1 | 4,80,1 | 5,100,1 | 6,120,1
+cons/p1/issue/side/semi	type=bigint rows=4 1,20 | 2,40 | 3,NULL | 4,80
+cons/p1/issue/side/anti	type=bigint rows=4 1,20 | 2,40 | 3,NULL | 4,80
+cons/p1/issue/side/agg	type=numeric rows=1 360
+cons/p1/issue/side/group	type=bigint;numeric rows=3 1,60 | 2,180 | 3,120
+cons/p1/issue/side/having	type=bigint;numeric rows=3 1,60 | 2,180 | 3,120
+cons/p1/issue/side/distinct	type=bigint rows=6 100 | 120 | 20 | 40 | 80 | NULL
+cons/p1/issue/side/sortlimit	type=bigint rows=3 4,80 | 5,100 | 6,120
+cons/p1/issue/side/union	type=bigint rows=7 1,10 | 1,20 | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p1/issue/side/win2	type=bigint;numeric rows=6 1,20,20 | 2,40,60 | 3,NULL,60 | 4,80,140 | 5,100,240 | 6,120,360
+cons/p1/issue/side/cte_self	type=bigint;bigint rows=6 1,20,20 | 2,40,40 | 3,NULL,NULL | 4,80,80 | 5,100,100 | 6,120,120
+cons/p1/issue/side/subq	type=bigint rows=5 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p1/issue/side/scalar	type=bigint;bigint rows=6 1,10,20 | 2,20,40 | 3,NULL,NULL | 4,40,80 | 5,50,100 | 6,60,120
+cons/p1/issue/side/join_col	type=bigint;bigint rows=5 1,20,1 | 2,40,2 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p1/issue/side/group_w3	type=bigint;bigint rows=6 100,1 | 120,1 | 20,1 | 40,1 | 80,1 | NULL,1
+cons/p1/issue/side/semi_w3	type=bigint rows=3 1,20 | 2,40 | 4,80
+cons/p1/issue/side/win_part	type=bigint;numeric rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p1/issue/stack/proj	type=numeric;bigint rows=6 1,2.5,20 | 2,20,40 | 3,40,NULL | 4,NULL,80 | 5,80,100 | 6,100,120
+cons/p1/issue/stack/expr	type=bigint rows=6 1,21 | 2,41 | 3,NULL | 4,81 | 5,101 | 6,121
+cons/p1/issue/stack/filter	type=bigint rows=4 2,40 | 4,80 | 5,100 | 6,120
+cons/p1/issue/stack/join	type=bigint;bigint rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p1/issue/stack/join_r	type=bigint rows=6 1,20 | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p1/issue/stack/join_key	type=bigint;bigint rows=5 1,20,1 | 2,40,2 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p1/issue/stack/left	type=bigint;bigint rows=6 1,20,4 | 2,40,5 | 3,NULL,6 | 4,80,NULL | 5,100,NULL | 6,120,NULL
+cons/p1/issue/stack/cross	type=bigint;bigint rows=6 1,20,1 | 2,40,1 | 3,NULL,1 | 4,80,1 | 5,100,1 | 6,120,1
+cons/p1/issue/stack/semi	type=bigint rows=4 1,20 | 2,40 | 3,NULL | 4,80
+cons/p1/issue/stack/anti	type=bigint rows=4 1,20 | 2,40 | 3,NULL | 4,80
+cons/p1/issue/stack/agg	type=numeric rows=1 360
+cons/p1/issue/stack/group	type=bigint;numeric rows=3 1,60 | 2,180 | 3,120
+cons/p1/issue/stack/having	type=bigint;numeric rows=3 1,60 | 2,180 | 3,120
+cons/p1/issue/stack/distinct	type=bigint rows=6 100 | 120 | 20 | 40 | 80 | NULL
+cons/p1/issue/stack/sortlimit	type=bigint rows=3 4,80 | 5,100 | 6,120
+cons/p1/issue/stack/union	type=bigint rows=7 1,10 | 1,20 | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p1/issue/stack/win2	type=bigint;numeric rows=6 1,20,20 | 2,40,60 | 3,NULL,60 | 4,80,140 | 5,100,240 | 6,120,360
+cons/p1/issue/stack/cte_self	type=bigint;bigint rows=6 1,20,20 | 2,40,40 | 3,NULL,NULL | 4,80,80 | 5,100,100 | 6,120,120
+cons/p1/issue/stack/subq	type=bigint rows=5 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p1/issue/stack/scalar	type=bigint;bigint rows=6 1,10,20 | 2,20,40 | 3,NULL,NULL | 4,40,80 | 5,50,100 | 6,60,120
+cons/p1/issue/stack/join_col	type=bigint;bigint rows=5 1,20,1 | 2,40,2 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p1/issue/stack/group_w3	type=bigint;bigint rows=6 100,1 | 120,1 | 20,1 | 40,1 | 80,1 | NULL,1
+cons/p1/issue/stack/semi_w3	type=bigint rows=3 1,20 | 2,40 | 4,80
+cons/p1/issue/stack/win_part	type=bigint;numeric rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p1/dflt/one/proj	type=bigint;bigint rows=6 1,20,20 | 2,1,40 | 3,2,NULL | 4,3,80 | 5,4,100 | 6,5,120
+cons/p1/dflt/one/expr	type=bigint rows=6 1,21 | 2,41 | 3,NULL | 4,81 | 5,101 | 6,121
+cons/p1/dflt/one/filter	type=bigint rows=4 2,40 | 4,80 | 5,100 | 6,120
+cons/p1/dflt/one/join	type=bigint;bigint rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p1/dflt/one/join_r	type=bigint rows=6 1,20 | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p1/dflt/one/join_key	type=bigint;bigint rows=5 1,20,1 | 2,40,2 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p1/dflt/one/left	type=bigint;bigint rows=6 1,20,4 | 2,40,5 | 3,NULL,6 | 4,80,NULL | 5,100,NULL | 6,120,NULL
+cons/p1/dflt/one/cross	type=bigint;bigint rows=6 1,20,1 | 2,40,1 | 3,NULL,1 | 4,80,1 | 5,100,1 | 6,120,1
+cons/p1/dflt/one/semi	type=bigint rows=4 1,20 | 2,40 | 3,NULL | 4,80
+cons/p1/dflt/one/anti	type=bigint rows=4 1,20 | 2,40 | 3,NULL | 4,80
+cons/p1/dflt/one/agg	type=numeric rows=1 360
+cons/p1/dflt/one/group	type=bigint;numeric rows=3 1,60 | 2,180 | 3,120
+cons/p1/dflt/one/having	type=bigint;numeric rows=3 1,60 | 2,180 | 3,120
+cons/p1/dflt/one/distinct	type=bigint rows=6 100 | 120 | 20 | 40 | 80 | NULL
+cons/p1/dflt/one/sortlimit	type=bigint rows=3 4,80 | 5,100 | 6,120
+cons/p1/dflt/one/union	type=bigint rows=7 1,10 | 1,20 | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p1/dflt/one/win2	type=bigint;numeric rows=6 1,20,20 | 2,40,60 | 3,NULL,60 | 4,80,140 | 5,100,240 | 6,120,360
+cons/p1/dflt/one/cte_self	type=bigint;bigint rows=6 1,20,20 | 2,40,40 | 3,NULL,NULL | 4,80,80 | 5,100,100 | 6,120,120
+cons/p1/dflt/one/subq	type=bigint rows=5 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p1/dflt/one/scalar	type=bigint;bigint rows=6 1,10,20 | 2,20,40 | 3,NULL,NULL | 4,40,80 | 5,50,100 | 6,60,120
+cons/p1/dflt/one/join_col	type=bigint;bigint rows=5 1,20,1 | 2,40,2 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p1/dflt/one/group_w3	type=bigint;bigint rows=6 100,1 | 120,1 | 20,1 | 40,1 | 80,1 | NULL,1
+cons/p1/dflt/one/semi_w3	type=bigint rows=3 1,20 | 2,40 | 4,80
+cons/p1/dflt/one/win_part	type=bigint;numeric rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p1/dflt/side/proj	type=bigint;bigint rows=6 1,20,20 | 2,1,40 | 3,2,NULL | 4,3,80 | 5,4,100 | 6,5,120
+cons/p1/dflt/side/expr	type=bigint rows=6 1,21 | 2,41 | 3,NULL | 4,81 | 5,101 | 6,121
+cons/p1/dflt/side/filter	type=bigint rows=4 2,40 | 4,80 | 5,100 | 6,120
+cons/p1/dflt/side/join	type=bigint;bigint rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p1/dflt/side/join_r	type=bigint rows=6 1,20 | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p1/dflt/side/join_key	type=bigint;bigint rows=5 1,20,1 | 2,40,2 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p1/dflt/side/left	type=bigint;bigint rows=6 1,20,4 | 2,40,5 | 3,NULL,6 | 4,80,NULL | 5,100,NULL | 6,120,NULL
+cons/p1/dflt/side/cross	type=bigint;bigint rows=6 1,20,1 | 2,40,1 | 3,NULL,1 | 4,80,1 | 5,100,1 | 6,120,1
+cons/p1/dflt/side/semi	type=bigint rows=4 1,20 | 2,40 | 3,NULL | 4,80
+cons/p1/dflt/side/anti	type=bigint rows=4 1,20 | 2,40 | 3,NULL | 4,80
+cons/p1/dflt/side/agg	type=numeric rows=1 360
+cons/p1/dflt/side/group	type=bigint;numeric rows=3 1,60 | 2,180 | 3,120
+cons/p1/dflt/side/having	type=bigint;numeric rows=3 1,60 | 2,180 | 3,120
+cons/p1/dflt/side/distinct	type=bigint rows=6 100 | 120 | 20 | 40 | 80 | NULL
+cons/p1/dflt/side/sortlimit	type=bigint rows=3 4,80 | 5,100 | 6,120
+cons/p1/dflt/side/union	type=bigint rows=7 1,10 | 1,20 | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p1/dflt/side/win2	type=bigint;numeric rows=6 1,20,20 | 2,40,60 | 3,NULL,60 | 4,80,140 | 5,100,240 | 6,120,360
+cons/p1/dflt/side/cte_self	type=bigint;bigint rows=6 1,20,20 | 2,40,40 | 3,NULL,NULL | 4,80,80 | 5,100,100 | 6,120,120
+cons/p1/dflt/side/subq	type=bigint rows=5 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p1/dflt/side/scalar	type=bigint;bigint rows=6 1,10,20 | 2,20,40 | 3,NULL,NULL | 4,40,80 | 5,50,100 | 6,60,120
+cons/p1/dflt/side/join_col	type=bigint;bigint rows=5 1,20,1 | 2,40,2 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p1/dflt/side/group_w3	type=bigint;bigint rows=6 100,1 | 120,1 | 20,1 | 40,1 | 80,1 | NULL,1
+cons/p1/dflt/side/semi_w3	type=bigint rows=3 1,20 | 2,40 | 4,80
+cons/p1/dflt/side/win_part	type=bigint;numeric rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p1/dflt/stack/proj	type=bigint;bigint rows=6 1,20,20 | 2,1,40 | 3,2,NULL | 4,3,80 | 5,4,100 | 6,5,120
+cons/p1/dflt/stack/expr	type=bigint rows=6 1,21 | 2,41 | 3,NULL | 4,81 | 5,101 | 6,121
+cons/p1/dflt/stack/filter	type=bigint rows=4 2,40 | 4,80 | 5,100 | 6,120
+cons/p1/dflt/stack/join	type=bigint;bigint rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p1/dflt/stack/join_r	type=bigint rows=6 1,20 | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p1/dflt/stack/join_key	type=bigint;bigint rows=5 1,20,1 | 2,40,2 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p1/dflt/stack/left	type=bigint;bigint rows=6 1,20,4 | 2,40,5 | 3,NULL,6 | 4,80,NULL | 5,100,NULL | 6,120,NULL
+cons/p1/dflt/stack/cross	type=bigint;bigint rows=6 1,20,1 | 2,40,1 | 3,NULL,1 | 4,80,1 | 5,100,1 | 6,120,1
+cons/p1/dflt/stack/semi	type=bigint rows=4 1,20 | 2,40 | 3,NULL | 4,80
+cons/p1/dflt/stack/anti	type=bigint rows=4 1,20 | 2,40 | 3,NULL | 4,80
+cons/p1/dflt/stack/agg	type=numeric rows=1 360
+cons/p1/dflt/stack/group	type=bigint;numeric rows=3 1,60 | 2,180 | 3,120
+cons/p1/dflt/stack/having	type=bigint;numeric rows=3 1,60 | 2,180 | 3,120
+cons/p1/dflt/stack/distinct	type=bigint rows=6 100 | 120 | 20 | 40 | 80 | NULL
+cons/p1/dflt/stack/sortlimit	type=bigint rows=3 4,80 | 5,100 | 6,120
+cons/p1/dflt/stack/union	type=bigint rows=7 1,10 | 1,20 | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p1/dflt/stack/win2	type=bigint;numeric rows=6 1,20,20 | 2,40,60 | 3,NULL,60 | 4,80,140 | 5,100,240 | 6,120,360
+cons/p1/dflt/stack/cte_self	type=bigint;bigint rows=6 1,20,20 | 2,40,40 | 3,NULL,NULL | 4,80,80 | 5,100,100 | 6,120,120
+cons/p1/dflt/stack/subq	type=bigint rows=5 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p1/dflt/stack/scalar	type=bigint;bigint rows=6 1,10,20 | 2,20,40 | 3,NULL,NULL | 4,40,80 | 5,50,100 | 6,60,120
+cons/p1/dflt/stack/join_col	type=bigint;bigint rows=5 1,20,1 | 2,40,2 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p1/dflt/stack/group_w3	type=bigint;bigint rows=6 100,1 | 120,1 | 20,1 | 40,1 | 80,1 | NULL,1
+cons/p1/dflt/stack/semi_w3	type=bigint rows=3 1,20 | 2,40 | 4,80
+cons/p1/dflt/stack/win_part	type=bigint;numeric rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p1/part/one/proj	type=bigint;bigint rows=6 1,1,20 | 2,1,40 | 3,1,NULL | 4,1,80 | 5,1,100 | 6,1,120
+cons/p1/part/one/expr	type=bigint rows=6 1,21 | 2,41 | 3,NULL | 4,81 | 5,101 | 6,121
+cons/p1/part/one/filter	type=bigint rows=4 2,40 | 4,80 | 5,100 | 6,120
+cons/p1/part/one/join	type=bigint;bigint rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p1/part/one/join_r	type=bigint rows=6 1,20 | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p1/part/one/join_key	type=bigint;bigint rows=5 1,20,1 | 2,40,2 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p1/part/one/left	type=bigint;bigint rows=6 1,20,4 | 2,40,5 | 3,NULL,6 | 4,80,NULL | 5,100,NULL | 6,120,NULL
+cons/p1/part/one/cross	type=bigint;bigint rows=6 1,20,1 | 2,40,1 | 3,NULL,1 | 4,80,1 | 5,100,1 | 6,120,1
+cons/p1/part/one/semi	type=bigint rows=4 1,20 | 2,40 | 3,NULL | 4,80
+cons/p1/part/one/anti	type=bigint rows=4 1,20 | 2,40 | 3,NULL | 4,80
+cons/p1/part/one/agg	type=numeric rows=1 360
+cons/p1/part/one/group	type=bigint;numeric rows=3 1,60 | 2,180 | 3,120
+cons/p1/part/one/having	type=bigint;numeric rows=3 1,60 | 2,180 | 3,120
+cons/p1/part/one/distinct	type=bigint rows=6 100 | 120 | 20 | 40 | 80 | NULL
+cons/p1/part/one/sortlimit	type=bigint rows=3 4,80 | 5,100 | 6,120
+cons/p1/part/one/union	type=bigint rows=7 1,10 | 1,20 | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p1/part/one/win2	type=bigint;numeric rows=6 1,20,20 | 2,40,60 | 3,NULL,60 | 4,80,140 | 5,100,240 | 6,120,360
+cons/p1/part/one/cte_self	type=bigint;bigint rows=6 1,20,20 | 2,40,40 | 3,NULL,NULL | 4,80,80 | 5,100,100 | 6,120,120
+cons/p1/part/one/subq	type=bigint rows=5 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p1/part/one/scalar	type=bigint;bigint rows=6 1,10,20 | 2,20,40 | 3,NULL,NULL | 4,40,80 | 5,50,100 | 6,60,120
+cons/p1/part/one/join_col	type=bigint;bigint rows=5 1,20,1 | 2,40,2 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p1/part/one/group_w3	type=bigint;bigint rows=6 100,1 | 120,1 | 20,1 | 40,1 | 80,1 | NULL,1
+cons/p1/part/one/semi_w3	type=bigint rows=3 1,20 | 2,40 | 4,80
+cons/p1/part/one/win_part	type=bigint;numeric rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p1/part/side/proj	type=bigint;bigint rows=6 1,1,20 | 2,1,40 | 3,1,NULL | 4,1,80 | 5,1,100 | 6,1,120
+cons/p1/part/side/expr	type=bigint rows=6 1,21 | 2,41 | 3,NULL | 4,81 | 5,101 | 6,121
+cons/p1/part/side/filter	type=bigint rows=4 2,40 | 4,80 | 5,100 | 6,120
+cons/p1/part/side/join	type=bigint;bigint rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p1/part/side/join_r	type=bigint rows=6 1,20 | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p1/part/side/join_key	type=bigint;bigint rows=5 1,20,1 | 2,40,2 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p1/part/side/left	type=bigint;bigint rows=6 1,20,4 | 2,40,5 | 3,NULL,6 | 4,80,NULL | 5,100,NULL | 6,120,NULL
+cons/p1/part/side/cross	type=bigint;bigint rows=6 1,20,1 | 2,40,1 | 3,NULL,1 | 4,80,1 | 5,100,1 | 6,120,1
+cons/p1/part/side/semi	type=bigint rows=4 1,20 | 2,40 | 3,NULL | 4,80
+cons/p1/part/side/anti	type=bigint rows=4 1,20 | 2,40 | 3,NULL | 4,80
+cons/p1/part/side/agg	type=numeric rows=1 360
+cons/p1/part/side/group	type=bigint;numeric rows=3 1,60 | 2,180 | 3,120
+cons/p1/part/side/having	type=bigint;numeric rows=3 1,60 | 2,180 | 3,120
+cons/p1/part/side/distinct	type=bigint rows=6 100 | 120 | 20 | 40 | 80 | NULL
+cons/p1/part/side/sortlimit	type=bigint rows=3 4,80 | 5,100 | 6,120
+cons/p1/part/side/union	type=bigint rows=7 1,10 | 1,20 | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p1/part/side/win2	type=bigint;numeric rows=6 1,20,20 | 2,40,60 | 3,NULL,60 | 4,80,140 | 5,100,240 | 6,120,360
+cons/p1/part/side/cte_self	type=bigint;bigint rows=6 1,20,20 | 2,40,40 | 3,NULL,NULL | 4,80,80 | 5,100,100 | 6,120,120
+cons/p1/part/side/subq	type=bigint rows=5 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p1/part/side/scalar	type=bigint;bigint rows=6 1,10,20 | 2,20,40 | 3,NULL,NULL | 4,40,80 | 5,50,100 | 6,60,120
+cons/p1/part/side/join_col	type=bigint;bigint rows=5 1,20,1 | 2,40,2 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p1/part/side/group_w3	type=bigint;bigint rows=6 100,1 | 120,1 | 20,1 | 40,1 | 80,1 | NULL,1
+cons/p1/part/side/semi_w3	type=bigint rows=3 1,20 | 2,40 | 4,80
+cons/p1/part/side/win_part	type=bigint;numeric rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p1/part/stack/proj	type=bigint;bigint rows=6 1,1,20 | 2,1,40 | 3,1,NULL | 4,1,80 | 5,1,100 | 6,1,120
+cons/p1/part/stack/expr	type=bigint rows=6 1,21 | 2,41 | 3,NULL | 4,81 | 5,101 | 6,121
+cons/p1/part/stack/filter	type=bigint rows=4 2,40 | 4,80 | 5,100 | 6,120
+cons/p1/part/stack/join	type=bigint;bigint rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p1/part/stack/join_r	type=bigint rows=6 1,20 | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p1/part/stack/join_key	type=bigint;bigint rows=5 1,20,1 | 2,40,2 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p1/part/stack/left	type=bigint;bigint rows=6 1,20,4 | 2,40,5 | 3,NULL,6 | 4,80,NULL | 5,100,NULL | 6,120,NULL
+cons/p1/part/stack/cross	type=bigint;bigint rows=6 1,20,1 | 2,40,1 | 3,NULL,1 | 4,80,1 | 5,100,1 | 6,120,1
+cons/p1/part/stack/semi	type=bigint rows=4 1,20 | 2,40 | 3,NULL | 4,80
+cons/p1/part/stack/anti	type=bigint rows=4 1,20 | 2,40 | 3,NULL | 4,80
+cons/p1/part/stack/agg	type=numeric rows=1 360
+cons/p1/part/stack/group	type=bigint;numeric rows=3 1,60 | 2,180 | 3,120
+cons/p1/part/stack/having	type=bigint;numeric rows=3 1,60 | 2,180 | 3,120
+cons/p1/part/stack/distinct	type=bigint rows=6 100 | 120 | 20 | 40 | 80 | NULL
+cons/p1/part/stack/sortlimit	type=bigint rows=3 4,80 | 5,100 | 6,120
+cons/p1/part/stack/union	type=bigint rows=7 1,10 | 1,20 | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p1/part/stack/win2	type=bigint;numeric rows=6 1,20,20 | 2,40,60 | 3,NULL,60 | 4,80,140 | 5,100,240 | 6,120,360
+cons/p1/part/stack/cte_self	type=bigint;bigint rows=6 1,20,20 | 2,40,40 | 3,NULL,NULL | 4,80,80 | 5,100,100 | 6,120,120
+cons/p1/part/stack/subq	type=bigint rows=5 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p1/part/stack/scalar	type=bigint;bigint rows=6 1,10,20 | 2,20,40 | 3,NULL,NULL | 4,40,80 | 5,50,100 | 6,60,120
+cons/p1/part/stack/join_col	type=bigint;bigint rows=5 1,20,1 | 2,40,2 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p1/part/stack/group_w3	type=bigint;bigint rows=6 100,1 | 120,1 | 20,1 | 40,1 | 80,1 | NULL,1
+cons/p1/part/stack/semi_w3	type=bigint rows=3 1,20 | 2,40 | 4,80
+cons/p1/part/stack/win_part	type=bigint;numeric rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p1/noread/one/proj	type=bigint;bigint rows=6 1,1,20 | 2,2,40 | 3,3,NULL | 4,4,80 | 5,5,100 | 6,6,120
+cons/p1/noread/one/expr	type=bigint rows=6 1,21 | 2,41 | 3,NULL | 4,81 | 5,101 | 6,121
+cons/p1/noread/one/filter	type=bigint rows=4 2,40 | 4,80 | 5,100 | 6,120
+cons/p1/noread/one/join	type=bigint;bigint rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p1/noread/one/join_r	type=bigint rows=6 1,20 | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p1/noread/one/join_key	type=bigint;bigint rows=5 1,20,1 | 2,40,2 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p1/noread/one/left	type=bigint;bigint rows=6 1,20,4 | 2,40,5 | 3,NULL,6 | 4,80,NULL | 5,100,NULL | 6,120,NULL
+cons/p1/noread/one/cross	type=bigint;bigint rows=6 1,20,1 | 2,40,1 | 3,NULL,1 | 4,80,1 | 5,100,1 | 6,120,1
+cons/p1/noread/one/semi	type=bigint rows=4 1,20 | 2,40 | 3,NULL | 4,80
+cons/p1/noread/one/anti	type=bigint rows=4 1,20 | 2,40 | 3,NULL | 4,80
+cons/p1/noread/one/agg	type=numeric rows=1 360
+cons/p1/noread/one/group	type=bigint;numeric rows=3 1,60 | 2,180 | 3,120
+cons/p1/noread/one/having	type=bigint;numeric rows=3 1,60 | 2,180 | 3,120
+cons/p1/noread/one/distinct	type=bigint rows=6 100 | 120 | 20 | 40 | 80 | NULL
+cons/p1/noread/one/sortlimit	type=bigint rows=3 4,80 | 5,100 | 6,120
+cons/p1/noread/one/union	type=bigint rows=7 1,10 | 1,20 | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p1/noread/one/win2	type=bigint;numeric rows=6 1,20,20 | 2,40,60 | 3,NULL,60 | 4,80,140 | 5,100,240 | 6,120,360
+cons/p1/noread/one/cte_self	type=bigint;bigint rows=6 1,20,20 | 2,40,40 | 3,NULL,NULL | 4,80,80 | 5,100,100 | 6,120,120
+cons/p1/noread/one/subq	type=bigint rows=5 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p1/noread/one/scalar	type=bigint;bigint rows=6 1,10,20 | 2,20,40 | 3,NULL,NULL | 4,40,80 | 5,50,100 | 6,60,120
+cons/p1/noread/one/join_col	type=bigint;bigint rows=5 1,20,1 | 2,40,2 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p1/noread/one/group_w3	type=bigint;bigint rows=6 100,1 | 120,1 | 20,1 | 40,1 | 80,1 | NULL,1
+cons/p1/noread/one/semi_w3	type=bigint rows=3 1,20 | 2,40 | 4,80
+cons/p1/noread/one/win_part	type=bigint;numeric rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p1/noread/side/proj	type=bigint;bigint rows=6 1,1,20 | 2,2,40 | 3,3,NULL | 4,4,80 | 5,5,100 | 6,6,120
+cons/p1/noread/side/expr	type=bigint rows=6 1,21 | 2,41 | 3,NULL | 4,81 | 5,101 | 6,121
+cons/p1/noread/side/filter	type=bigint rows=4 2,40 | 4,80 | 5,100 | 6,120
+cons/p1/noread/side/join	type=bigint;bigint rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p1/noread/side/join_r	type=bigint rows=6 1,20 | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p1/noread/side/join_key	type=bigint;bigint rows=5 1,20,1 | 2,40,2 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p1/noread/side/left	type=bigint;bigint rows=6 1,20,4 | 2,40,5 | 3,NULL,6 | 4,80,NULL | 5,100,NULL | 6,120,NULL
+cons/p1/noread/side/cross	type=bigint;bigint rows=6 1,20,1 | 2,40,1 | 3,NULL,1 | 4,80,1 | 5,100,1 | 6,120,1
+cons/p1/noread/side/semi	type=bigint rows=4 1,20 | 2,40 | 3,NULL | 4,80
+cons/p1/noread/side/anti	type=bigint rows=4 1,20 | 2,40 | 3,NULL | 4,80
+cons/p1/noread/side/agg	type=numeric rows=1 360
+cons/p1/noread/side/group	type=bigint;numeric rows=3 1,60 | 2,180 | 3,120
+cons/p1/noread/side/having	type=bigint;numeric rows=3 1,60 | 2,180 | 3,120
+cons/p1/noread/side/distinct	type=bigint rows=6 100 | 120 | 20 | 40 | 80 | NULL
+cons/p1/noread/side/sortlimit	type=bigint rows=3 4,80 | 5,100 | 6,120
+cons/p1/noread/side/union	type=bigint rows=7 1,10 | 1,20 | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p1/noread/side/win2	type=bigint;numeric rows=6 1,20,20 | 2,40,60 | 3,NULL,60 | 4,80,140 | 5,100,240 | 6,120,360
+cons/p1/noread/side/cte_self	type=bigint;bigint rows=6 1,20,20 | 2,40,40 | 3,NULL,NULL | 4,80,80 | 5,100,100 | 6,120,120
+cons/p1/noread/side/subq	type=bigint rows=5 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p1/noread/side/scalar	type=bigint;bigint rows=6 1,10,20 | 2,20,40 | 3,NULL,NULL | 4,40,80 | 5,50,100 | 6,60,120
+cons/p1/noread/side/join_col	type=bigint;bigint rows=5 1,20,1 | 2,40,2 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p1/noread/side/group_w3	type=bigint;bigint rows=6 100,1 | 120,1 | 20,1 | 40,1 | 80,1 | NULL,1
+cons/p1/noread/side/semi_w3	type=bigint rows=3 1,20 | 2,40 | 4,80
+cons/p1/noread/side/win_part	type=bigint;numeric rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p1/noread/stack/proj	type=bigint;bigint rows=6 1,1,20 | 2,2,40 | 3,3,NULL | 4,4,80 | 5,5,100 | 6,6,120
+cons/p1/noread/stack/expr	type=bigint rows=6 1,21 | 2,41 | 3,NULL | 4,81 | 5,101 | 6,121
+cons/p1/noread/stack/filter	type=bigint rows=4 2,40 | 4,80 | 5,100 | 6,120
+cons/p1/noread/stack/join	type=bigint;bigint rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p1/noread/stack/join_r	type=bigint rows=6 1,20 | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p1/noread/stack/join_key	type=bigint;bigint rows=5 1,20,1 | 2,40,2 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p1/noread/stack/left	type=bigint;bigint rows=6 1,20,4 | 2,40,5 | 3,NULL,6 | 4,80,NULL | 5,100,NULL | 6,120,NULL
+cons/p1/noread/stack/cross	type=bigint;bigint rows=6 1,20,1 | 2,40,1 | 3,NULL,1 | 4,80,1 | 5,100,1 | 6,120,1
+cons/p1/noread/stack/semi	type=bigint rows=4 1,20 | 2,40 | 3,NULL | 4,80
+cons/p1/noread/stack/anti	type=bigint rows=4 1,20 | 2,40 | 3,NULL | 4,80
+cons/p1/noread/stack/agg	type=numeric rows=1 360
+cons/p1/noread/stack/group	type=bigint;numeric rows=3 1,60 | 2,180 | 3,120
+cons/p1/noread/stack/having	type=bigint;numeric rows=3 1,60 | 2,180 | 3,120
+cons/p1/noread/stack/distinct	type=bigint rows=6 100 | 120 | 20 | 40 | 80 | NULL
+cons/p1/noread/stack/sortlimit	type=bigint rows=3 4,80 | 5,100 | 6,120
+cons/p1/noread/stack/union	type=bigint rows=7 1,10 | 1,20 | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p1/noread/stack/win2	type=bigint;numeric rows=6 1,20,20 | 2,40,60 | 3,NULL,60 | 4,80,140 | 5,100,240 | 6,120,360
+cons/p1/noread/stack/cte_self	type=bigint;bigint rows=6 1,20,20 | 2,40,40 | 3,NULL,NULL | 4,80,80 | 5,100,100 | 6,120,120
+cons/p1/noread/stack/subq	type=bigint rows=5 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p1/noread/stack/scalar	type=bigint;bigint rows=6 1,10,20 | 2,20,40 | 3,NULL,NULL | 4,40,80 | 5,50,100 | 6,60,120
+cons/p1/noread/stack/join_col	type=bigint;bigint rows=5 1,20,1 | 2,40,2 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p1/noread/stack/group_w3	type=bigint;bigint rows=6 100,1 | 120,1 | 20,1 | 40,1 | 80,1 | NULL,1
+cons/p1/noread/stack/semi_w3	type=bigint rows=3 1,20 | 2,40 | 4,80
+cons/p1/noread/stack/win_part	type=bigint;numeric rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p2/bare/one/proj	type=numeric;bigint;bigint rows=6 1,20,20,10 | 2,60,40,20 | 3,60,NULL,NULL | 4,140,80,40 | 5,240,100,50 | 6,360,120,60
+cons/p2/bare/one/expr	type=bigint;bigint rows=6 1,21,10 | 2,41,20 | 3,NULL,NULL | 4,81,40 | 5,101,50 | 6,121,60
+cons/p2/bare/one/filter	type=bigint;bigint rows=4 2,40,20 | 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/bare/one/join	type=bigint;bigint;bigint rows=6 1,20,10,1 | 2,40,20,2 | 3,NULL,NULL,3 | 4,80,40,4 | 5,100,50,5 | 6,120,60,6
+cons/p2/bare/one/join_r	type=bigint;bigint rows=6 1,20,10 | 2,40,20 | 3,NULL,NULL | 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/bare/one/join_key	type=bigint;bigint;bigint rows=5 1,20,10,1 | 2,40,20,2 | 4,80,40,4 | 5,100,50,5 | 6,120,60,6
+cons/p2/bare/one/left	type=bigint;bigint;bigint rows=6 1,20,10,4 | 2,40,20,5 | 3,NULL,NULL,6 | 4,80,40,NULL | 5,100,50,NULL | 6,120,60,NULL
+cons/p2/bare/one/cross	type=bigint;bigint;bigint rows=6 1,20,10,1 | 2,40,20,1 | 3,NULL,NULL,1 | 4,80,40,1 | 5,100,50,1 | 6,120,60,1
+cons/p2/bare/one/semi	type=bigint;bigint rows=4 1,20,10 | 2,40,20 | 3,NULL,NULL | 4,80,40
+cons/p2/bare/one/anti	type=bigint;bigint rows=4 1,20,10 | 2,40,20 | 3,NULL,NULL | 4,80,40
+cons/p2/bare/one/agg	type=numeric;numeric rows=1 360,180
+cons/p2/bare/one/group	type=bigint;numeric;numeric rows=3 1,60,30 | 2,180,90 | 3,120,60
+cons/p2/bare/one/having	type=bigint;numeric rows=3 1,60 | 2,180 | 3,120
+cons/p2/bare/one/distinct	type=bigint;bigint rows=6 100,50 | 120,60 | 20,10 | 40,20 | 80,40 | NULL,NULL
+cons/p2/bare/one/sortlimit	type=bigint;bigint rows=3 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/bare/one/union	type=bigint rows=7 1,10 | 1,20 | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p2/bare/one/win2	type=bigint;numeric;bigint rows=6 1,20,20,10 | 2,40,60,20 | 3,NULL,60,NULL | 4,80,140,40 | 5,100,240,50 | 6,120,360,60
+cons/p2/bare/one/cte_self	type=bigint;bigint rows=6 1,20,20 | 2,40,40 | 3,NULL,NULL | 4,80,80 | 5,100,100 | 6,120,120
+cons/p2/bare/one/subq	type=bigint rows=5 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p2/bare/one/scalar	type=bigint;bigint rows=6 1,10,20 | 2,20,40 | 3,NULL,NULL | 4,40,80 | 5,50,100 | 6,60,120
+cons/p2/bare/one/join_col	type=bigint;bigint;bigint rows=5 1,20,10,1 | 2,40,20,2 | 4,80,40,4 | 5,100,50,5 | 6,120,60,6
+cons/p2/bare/one/group_w3	type=bigint;bigint rows=6 100,1 | 120,1 | 20,1 | 40,1 | 80,1 | NULL,1
+cons/p2/bare/one/semi_w3	type=bigint rows=3 1,20 | 2,40 | 4,80
+cons/p2/bare/one/win_part	type=bigint;numeric rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p2/bare/one/join_rn	type=bigint;bigint;bigint rows=5 1,20,10,1 | 2,40,20,2 | 4,80,40,4 | 5,100,50,5 | 6,120,60,6
+cons/p2/bare/one/group_w2	type=bigint;bigint;numeric rows=6 10,1,20 | 20,1,40 | 40,1,80 | 50,1,100 | 60,1,120 | NULL,1,NULL
+cons/p2/bare/one/sort_w2	type=bigint;bigint rows=3 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/bare/one/filter_w2	type=bigint;bigint rows=4 2,40,20 | 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/bare/one/win_part2	type=bigint;numeric rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p2/bare/side/proj	type=numeric;bigint;bigint rows=6 1,20,20,10 | 2,60,40,20 | 3,60,NULL,NULL | 4,140,80,40 | 5,240,100,50 | 6,360,120,60
+cons/p2/bare/side/expr	type=bigint;bigint rows=6 1,21,10 | 2,41,20 | 3,NULL,NULL | 4,81,40 | 5,101,50 | 6,121,60
+cons/p2/bare/side/filter	type=bigint;bigint rows=4 2,40,20 | 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/bare/side/join	type=bigint;bigint;bigint rows=6 1,20,10,1 | 2,40,20,2 | 3,NULL,NULL,3 | 4,80,40,4 | 5,100,50,5 | 6,120,60,6
+cons/p2/bare/side/join_r	type=bigint;bigint rows=6 1,20,10 | 2,40,20 | 3,NULL,NULL | 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/bare/side/join_key	type=bigint;bigint;bigint rows=5 1,20,10,1 | 2,40,20,2 | 4,80,40,4 | 5,100,50,5 | 6,120,60,6
+cons/p2/bare/side/left	type=bigint;bigint;bigint rows=6 1,20,10,4 | 2,40,20,5 | 3,NULL,NULL,6 | 4,80,40,NULL | 5,100,50,NULL | 6,120,60,NULL
+cons/p2/bare/side/cross	type=bigint;bigint;bigint rows=6 1,20,10,1 | 2,40,20,1 | 3,NULL,NULL,1 | 4,80,40,1 | 5,100,50,1 | 6,120,60,1
+cons/p2/bare/side/semi	type=bigint;bigint rows=4 1,20,10 | 2,40,20 | 3,NULL,NULL | 4,80,40
+cons/p2/bare/side/anti	type=bigint;bigint rows=4 1,20,10 | 2,40,20 | 3,NULL,NULL | 4,80,40
+cons/p2/bare/side/agg	type=numeric;numeric rows=1 360,180
+cons/p2/bare/side/group	type=bigint;numeric;numeric rows=3 1,60,30 | 2,180,90 | 3,120,60
+cons/p2/bare/side/having	type=bigint;numeric rows=3 1,60 | 2,180 | 3,120
+cons/p2/bare/side/distinct	type=bigint;bigint rows=6 100,50 | 120,60 | 20,10 | 40,20 | 80,40 | NULL,NULL
+cons/p2/bare/side/sortlimit	type=bigint;bigint rows=3 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/bare/side/union	type=bigint rows=7 1,10 | 1,20 | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p2/bare/side/win2	type=bigint;numeric;bigint rows=6 1,20,20,10 | 2,40,60,20 | 3,NULL,60,NULL | 4,80,140,40 | 5,100,240,50 | 6,120,360,60
+cons/p2/bare/side/cte_self	type=bigint;bigint rows=6 1,20,20 | 2,40,40 | 3,NULL,NULL | 4,80,80 | 5,100,100 | 6,120,120
+cons/p2/bare/side/subq	type=bigint rows=5 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p2/bare/side/scalar	type=bigint;bigint rows=6 1,10,20 | 2,20,40 | 3,NULL,NULL | 4,40,80 | 5,50,100 | 6,60,120
+cons/p2/bare/side/join_col	type=bigint;bigint;bigint rows=5 1,20,10,1 | 2,40,20,2 | 4,80,40,4 | 5,100,50,5 | 6,120,60,6
+cons/p2/bare/side/group_w3	type=bigint;bigint rows=6 100,1 | 120,1 | 20,1 | 40,1 | 80,1 | NULL,1
+cons/p2/bare/side/semi_w3	type=bigint rows=3 1,20 | 2,40 | 4,80
+cons/p2/bare/side/win_part	type=bigint;numeric rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p2/bare/side/join_rn	type=bigint;bigint;bigint rows=5 1,20,10,1 | 2,40,20,2 | 4,80,40,4 | 5,100,50,5 | 6,120,60,6
+cons/p2/bare/side/group_w2	type=bigint;bigint;numeric rows=6 10,1,20 | 20,1,40 | 40,1,80 | 50,1,100 | 60,1,120 | NULL,1,NULL
+cons/p2/bare/side/sort_w2	type=bigint;bigint rows=3 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/bare/side/filter_w2	type=bigint;bigint rows=4 2,40,20 | 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/bare/side/win_part2	type=bigint;numeric rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p2/bare/stack/proj	type=numeric;bigint;bigint rows=6 1,20,20,10 | 2,60,40,20 | 3,60,NULL,NULL | 4,140,80,40 | 5,240,100,50 | 6,360,120,60
+cons/p2/bare/stack/expr	type=bigint;bigint rows=6 1,21,10 | 2,41,20 | 3,NULL,NULL | 4,81,40 | 5,101,50 | 6,121,60
+cons/p2/bare/stack/filter	type=bigint;bigint rows=4 2,40,20 | 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/bare/stack/join	type=bigint;bigint;bigint rows=6 1,20,10,1 | 2,40,20,2 | 3,NULL,NULL,3 | 4,80,40,4 | 5,100,50,5 | 6,120,60,6
+cons/p2/bare/stack/join_r	type=bigint;bigint rows=6 1,20,10 | 2,40,20 | 3,NULL,NULL | 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/bare/stack/join_key	type=bigint;bigint;bigint rows=5 1,20,10,1 | 2,40,20,2 | 4,80,40,4 | 5,100,50,5 | 6,120,60,6
+cons/p2/bare/stack/left	type=bigint;bigint;bigint rows=6 1,20,10,4 | 2,40,20,5 | 3,NULL,NULL,6 | 4,80,40,NULL | 5,100,50,NULL | 6,120,60,NULL
+cons/p2/bare/stack/cross	type=bigint;bigint;bigint rows=6 1,20,10,1 | 2,40,20,1 | 3,NULL,NULL,1 | 4,80,40,1 | 5,100,50,1 | 6,120,60,1
+cons/p2/bare/stack/semi	type=bigint;bigint rows=4 1,20,10 | 2,40,20 | 3,NULL,NULL | 4,80,40
+cons/p2/bare/stack/anti	type=bigint;bigint rows=4 1,20,10 | 2,40,20 | 3,NULL,NULL | 4,80,40
+cons/p2/bare/stack/agg	type=numeric;numeric rows=1 360,180
+cons/p2/bare/stack/group	type=bigint;numeric;numeric rows=3 1,60,30 | 2,180,90 | 3,120,60
+cons/p2/bare/stack/having	type=bigint;numeric rows=3 1,60 | 2,180 | 3,120
+cons/p2/bare/stack/distinct	type=bigint;bigint rows=6 100,50 | 120,60 | 20,10 | 40,20 | 80,40 | NULL,NULL
+cons/p2/bare/stack/sortlimit	type=bigint;bigint rows=3 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/bare/stack/union	type=bigint rows=7 1,10 | 1,20 | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p2/bare/stack/win2	type=bigint;numeric;bigint rows=6 1,20,20,10 | 2,40,60,20 | 3,NULL,60,NULL | 4,80,140,40 | 5,100,240,50 | 6,120,360,60
+cons/p2/bare/stack/cte_self	type=bigint;bigint rows=6 1,20,20 | 2,40,40 | 3,NULL,NULL | 4,80,80 | 5,100,100 | 6,120,120
+cons/p2/bare/stack/subq	type=bigint rows=5 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p2/bare/stack/scalar	type=bigint;bigint rows=6 1,10,20 | 2,20,40 | 3,NULL,NULL | 4,40,80 | 5,50,100 | 6,60,120
+cons/p2/bare/stack/join_col	type=bigint;bigint;bigint rows=5 1,20,10,1 | 2,40,20,2 | 4,80,40,4 | 5,100,50,5 | 6,120,60,6
+cons/p2/bare/stack/group_w3	type=bigint;bigint rows=6 100,1 | 120,1 | 20,1 | 40,1 | 80,1 | NULL,1
+cons/p2/bare/stack/semi_w3	type=bigint rows=3 1,20 | 2,40 | 4,80
+cons/p2/bare/stack/win_part	type=bigint;numeric rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p2/bare/stack/join_rn	type=bigint;bigint;bigint rows=5 1,20,10,1 | 2,40,20,2 | 4,80,40,4 | 5,100,50,5 | 6,120,60,6
+cons/p2/bare/stack/group_w2	type=bigint;bigint;numeric rows=6 10,1,20 | 20,1,40 | 40,1,80 | 50,1,100 | 60,1,120 | NULL,1,NULL
+cons/p2/bare/stack/sort_w2	type=bigint;bigint rows=3 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/bare/stack/filter_w2	type=bigint;bigint rows=4 2,40,20 | 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/bare/stack/win_part2	type=bigint;numeric rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p2/issue/one/proj	type=numeric;bigint;bigint rows=6 1,2.5,20,10 | 2,20,40,20 | 3,40,NULL,NULL | 4,NULL,80,40 | 5,80,100,50 | 6,100,120,60
+cons/p2/issue/one/expr	type=bigint;bigint rows=6 1,21,10 | 2,41,20 | 3,NULL,NULL | 4,81,40 | 5,101,50 | 6,121,60
+cons/p2/issue/one/filter	type=bigint;bigint rows=4 2,40,20 | 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/issue/one/join	type=bigint;bigint;bigint rows=6 1,20,10,1 | 2,40,20,2 | 3,NULL,NULL,3 | 4,80,40,4 | 5,100,50,5 | 6,120,60,6
+cons/p2/issue/one/join_r	type=bigint;bigint rows=6 1,20,10 | 2,40,20 | 3,NULL,NULL | 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/issue/one/join_key	type=bigint;bigint;bigint rows=5 1,20,10,1 | 2,40,20,2 | 4,80,40,4 | 5,100,50,5 | 6,120,60,6
+cons/p2/issue/one/left	type=bigint;bigint;bigint rows=6 1,20,10,4 | 2,40,20,5 | 3,NULL,NULL,6 | 4,80,40,NULL | 5,100,50,NULL | 6,120,60,NULL
+cons/p2/issue/one/cross	type=bigint;bigint;bigint rows=6 1,20,10,1 | 2,40,20,1 | 3,NULL,NULL,1 | 4,80,40,1 | 5,100,50,1 | 6,120,60,1
+cons/p2/issue/one/semi	type=bigint;bigint rows=4 1,20,10 | 2,40,20 | 3,NULL,NULL | 4,80,40
+cons/p2/issue/one/anti	type=bigint;bigint rows=4 1,20,10 | 2,40,20 | 3,NULL,NULL | 4,80,40
+cons/p2/issue/one/agg	type=numeric;numeric rows=1 360,180
+cons/p2/issue/one/group	type=bigint;numeric;numeric rows=3 1,60,30 | 2,180,90 | 3,120,60
+cons/p2/issue/one/having	type=bigint;numeric rows=3 1,60 | 2,180 | 3,120
+cons/p2/issue/one/distinct	type=bigint;bigint rows=6 100,50 | 120,60 | 20,10 | 40,20 | 80,40 | NULL,NULL
+cons/p2/issue/one/sortlimit	type=bigint;bigint rows=3 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/issue/one/union	type=bigint rows=7 1,10 | 1,20 | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p2/issue/one/win2	type=bigint;numeric;bigint rows=6 1,20,20,10 | 2,40,60,20 | 3,NULL,60,NULL | 4,80,140,40 | 5,100,240,50 | 6,120,360,60
+cons/p2/issue/one/cte_self	type=bigint;bigint rows=6 1,20,20 | 2,40,40 | 3,NULL,NULL | 4,80,80 | 5,100,100 | 6,120,120
+cons/p2/issue/one/subq	type=bigint rows=5 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p2/issue/one/scalar	type=bigint;bigint rows=6 1,10,20 | 2,20,40 | 3,NULL,NULL | 4,40,80 | 5,50,100 | 6,60,120
+cons/p2/issue/one/join_col	type=bigint;bigint;bigint rows=5 1,20,10,1 | 2,40,20,2 | 4,80,40,4 | 5,100,50,5 | 6,120,60,6
+cons/p2/issue/one/group_w3	type=bigint;bigint rows=6 100,1 | 120,1 | 20,1 | 40,1 | 80,1 | NULL,1
+cons/p2/issue/one/semi_w3	type=bigint rows=3 1,20 | 2,40 | 4,80
+cons/p2/issue/one/win_part	type=bigint;numeric rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p2/issue/one/join_rn	type=bigint;bigint;bigint rows=5 1,20,10,1 | 2,40,20,2 | 4,80,40,4 | 5,100,50,5 | 6,120,60,6
+cons/p2/issue/one/group_w2	type=bigint;bigint;numeric rows=6 10,1,20 | 20,1,40 | 40,1,80 | 50,1,100 | 60,1,120 | NULL,1,NULL
+cons/p2/issue/one/sort_w2	type=bigint;bigint rows=3 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/issue/one/filter_w2	type=bigint;bigint rows=4 2,40,20 | 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/issue/one/win_part2	type=bigint;numeric rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p2/issue/side/proj	type=numeric;bigint;bigint rows=6 1,2.5,20,10 | 2,20,40,20 | 3,40,NULL,NULL | 4,NULL,80,40 | 5,80,100,50 | 6,100,120,60
+cons/p2/issue/side/expr	type=bigint;bigint rows=6 1,21,10 | 2,41,20 | 3,NULL,NULL | 4,81,40 | 5,101,50 | 6,121,60
+cons/p2/issue/side/filter	type=bigint;bigint rows=4 2,40,20 | 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/issue/side/join	type=bigint;bigint;bigint rows=6 1,20,10,1 | 2,40,20,2 | 3,NULL,NULL,3 | 4,80,40,4 | 5,100,50,5 | 6,120,60,6
+cons/p2/issue/side/join_r	type=bigint;bigint rows=6 1,20,10 | 2,40,20 | 3,NULL,NULL | 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/issue/side/join_key	type=bigint;bigint;bigint rows=5 1,20,10,1 | 2,40,20,2 | 4,80,40,4 | 5,100,50,5 | 6,120,60,6
+cons/p2/issue/side/left	type=bigint;bigint;bigint rows=6 1,20,10,4 | 2,40,20,5 | 3,NULL,NULL,6 | 4,80,40,NULL | 5,100,50,NULL | 6,120,60,NULL
+cons/p2/issue/side/cross	type=bigint;bigint;bigint rows=6 1,20,10,1 | 2,40,20,1 | 3,NULL,NULL,1 | 4,80,40,1 | 5,100,50,1 | 6,120,60,1
+cons/p2/issue/side/semi	type=bigint;bigint rows=4 1,20,10 | 2,40,20 | 3,NULL,NULL | 4,80,40
+cons/p2/issue/side/anti	type=bigint;bigint rows=4 1,20,10 | 2,40,20 | 3,NULL,NULL | 4,80,40
+cons/p2/issue/side/agg	type=numeric;numeric rows=1 360,180
+cons/p2/issue/side/group	type=bigint;numeric;numeric rows=3 1,60,30 | 2,180,90 | 3,120,60
+cons/p2/issue/side/having	type=bigint;numeric rows=3 1,60 | 2,180 | 3,120
+cons/p2/issue/side/distinct	type=bigint;bigint rows=6 100,50 | 120,60 | 20,10 | 40,20 | 80,40 | NULL,NULL
+cons/p2/issue/side/sortlimit	type=bigint;bigint rows=3 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/issue/side/union	type=bigint rows=7 1,10 | 1,20 | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p2/issue/side/win2	type=bigint;numeric;bigint rows=6 1,20,20,10 | 2,40,60,20 | 3,NULL,60,NULL | 4,80,140,40 | 5,100,240,50 | 6,120,360,60
+cons/p2/issue/side/cte_self	type=bigint;bigint rows=6 1,20,20 | 2,40,40 | 3,NULL,NULL | 4,80,80 | 5,100,100 | 6,120,120
+cons/p2/issue/side/subq	type=bigint rows=5 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p2/issue/side/scalar	type=bigint;bigint rows=6 1,10,20 | 2,20,40 | 3,NULL,NULL | 4,40,80 | 5,50,100 | 6,60,120
+cons/p2/issue/side/join_col	type=bigint;bigint;bigint rows=5 1,20,10,1 | 2,40,20,2 | 4,80,40,4 | 5,100,50,5 | 6,120,60,6
+cons/p2/issue/side/group_w3	type=bigint;bigint rows=6 100,1 | 120,1 | 20,1 | 40,1 | 80,1 | NULL,1
+cons/p2/issue/side/semi_w3	type=bigint rows=3 1,20 | 2,40 | 4,80
+cons/p2/issue/side/win_part	type=bigint;numeric rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p2/issue/side/join_rn	type=bigint;bigint;bigint rows=5 1,20,10,1 | 2,40,20,2 | 4,80,40,4 | 5,100,50,5 | 6,120,60,6
+cons/p2/issue/side/group_w2	type=bigint;bigint;numeric rows=6 10,1,20 | 20,1,40 | 40,1,80 | 50,1,100 | 60,1,120 | NULL,1,NULL
+cons/p2/issue/side/sort_w2	type=bigint;bigint rows=3 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/issue/side/filter_w2	type=bigint;bigint rows=4 2,40,20 | 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/issue/side/win_part2	type=bigint;numeric rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p2/issue/stack/proj	type=numeric;bigint;bigint rows=6 1,2.5,20,10 | 2,20,40,20 | 3,40,NULL,NULL | 4,NULL,80,40 | 5,80,100,50 | 6,100,120,60
+cons/p2/issue/stack/expr	type=bigint;bigint rows=6 1,21,10 | 2,41,20 | 3,NULL,NULL | 4,81,40 | 5,101,50 | 6,121,60
+cons/p2/issue/stack/filter	type=bigint;bigint rows=4 2,40,20 | 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/issue/stack/join	type=bigint;bigint;bigint rows=6 1,20,10,1 | 2,40,20,2 | 3,NULL,NULL,3 | 4,80,40,4 | 5,100,50,5 | 6,120,60,6
+cons/p2/issue/stack/join_r	type=bigint;bigint rows=6 1,20,10 | 2,40,20 | 3,NULL,NULL | 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/issue/stack/join_key	type=bigint;bigint;bigint rows=5 1,20,10,1 | 2,40,20,2 | 4,80,40,4 | 5,100,50,5 | 6,120,60,6
+cons/p2/issue/stack/left	type=bigint;bigint;bigint rows=6 1,20,10,4 | 2,40,20,5 | 3,NULL,NULL,6 | 4,80,40,NULL | 5,100,50,NULL | 6,120,60,NULL
+cons/p2/issue/stack/cross	type=bigint;bigint;bigint rows=6 1,20,10,1 | 2,40,20,1 | 3,NULL,NULL,1 | 4,80,40,1 | 5,100,50,1 | 6,120,60,1
+cons/p2/issue/stack/semi	type=bigint;bigint rows=4 1,20,10 | 2,40,20 | 3,NULL,NULL | 4,80,40
+cons/p2/issue/stack/anti	type=bigint;bigint rows=4 1,20,10 | 2,40,20 | 3,NULL,NULL | 4,80,40
+cons/p2/issue/stack/agg	type=numeric;numeric rows=1 360,180
+cons/p2/issue/stack/group	type=bigint;numeric;numeric rows=3 1,60,30 | 2,180,90 | 3,120,60
+cons/p2/issue/stack/having	type=bigint;numeric rows=3 1,60 | 2,180 | 3,120
+cons/p2/issue/stack/distinct	type=bigint;bigint rows=6 100,50 | 120,60 | 20,10 | 40,20 | 80,40 | NULL,NULL
+cons/p2/issue/stack/sortlimit	type=bigint;bigint rows=3 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/issue/stack/union	type=bigint rows=7 1,10 | 1,20 | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p2/issue/stack/win2	type=bigint;numeric;bigint rows=6 1,20,20,10 | 2,40,60,20 | 3,NULL,60,NULL | 4,80,140,40 | 5,100,240,50 | 6,120,360,60
+cons/p2/issue/stack/cte_self	type=bigint;bigint rows=6 1,20,20 | 2,40,40 | 3,NULL,NULL | 4,80,80 | 5,100,100 | 6,120,120
+cons/p2/issue/stack/subq	type=bigint rows=5 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p2/issue/stack/scalar	type=bigint;bigint rows=6 1,10,20 | 2,20,40 | 3,NULL,NULL | 4,40,80 | 5,50,100 | 6,60,120
+cons/p2/issue/stack/join_col	type=bigint;bigint;bigint rows=5 1,20,10,1 | 2,40,20,2 | 4,80,40,4 | 5,100,50,5 | 6,120,60,6
+cons/p2/issue/stack/group_w3	type=bigint;bigint rows=6 100,1 | 120,1 | 20,1 | 40,1 | 80,1 | NULL,1
+cons/p2/issue/stack/semi_w3	type=bigint rows=3 1,20 | 2,40 | 4,80
+cons/p2/issue/stack/win_part	type=bigint;numeric rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p2/issue/stack/join_rn	type=bigint;bigint;bigint rows=5 1,20,10,1 | 2,40,20,2 | 4,80,40,4 | 5,100,50,5 | 6,120,60,6
+cons/p2/issue/stack/group_w2	type=bigint;bigint;numeric rows=6 10,1,20 | 20,1,40 | 40,1,80 | 50,1,100 | 60,1,120 | NULL,1,NULL
+cons/p2/issue/stack/sort_w2	type=bigint;bigint rows=3 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/issue/stack/filter_w2	type=bigint;bigint rows=4 2,40,20 | 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/issue/stack/win_part2	type=bigint;numeric rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p2/dflt/one/proj	type=bigint;bigint;bigint rows=6 1,20,20,10 | 2,1,40,20 | 3,2,NULL,NULL | 4,3,80,40 | 5,4,100,50 | 6,5,120,60
+cons/p2/dflt/one/expr	type=bigint;bigint rows=6 1,21,10 | 2,41,20 | 3,NULL,NULL | 4,81,40 | 5,101,50 | 6,121,60
+cons/p2/dflt/one/filter	type=bigint;bigint rows=4 2,40,20 | 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/dflt/one/join	type=bigint;bigint;bigint rows=6 1,20,10,1 | 2,40,20,2 | 3,NULL,NULL,3 | 4,80,40,4 | 5,100,50,5 | 6,120,60,6
+cons/p2/dflt/one/join_r	type=bigint;bigint rows=6 1,20,10 | 2,40,20 | 3,NULL,NULL | 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/dflt/one/join_key	type=bigint;bigint;bigint rows=5 1,20,10,1 | 2,40,20,2 | 4,80,40,4 | 5,100,50,5 | 6,120,60,6
+cons/p2/dflt/one/left	type=bigint;bigint;bigint rows=6 1,20,10,4 | 2,40,20,5 | 3,NULL,NULL,6 | 4,80,40,NULL | 5,100,50,NULL | 6,120,60,NULL
+cons/p2/dflt/one/cross	type=bigint;bigint;bigint rows=6 1,20,10,1 | 2,40,20,1 | 3,NULL,NULL,1 | 4,80,40,1 | 5,100,50,1 | 6,120,60,1
+cons/p2/dflt/one/semi	type=bigint;bigint rows=4 1,20,10 | 2,40,20 | 3,NULL,NULL | 4,80,40
+cons/p2/dflt/one/anti	type=bigint;bigint rows=4 1,20,10 | 2,40,20 | 3,NULL,NULL | 4,80,40
+cons/p2/dflt/one/agg	type=numeric;numeric rows=1 360,180
+cons/p2/dflt/one/group	type=bigint;numeric;numeric rows=3 1,60,30 | 2,180,90 | 3,120,60
+cons/p2/dflt/one/having	type=bigint;numeric rows=3 1,60 | 2,180 | 3,120
+cons/p2/dflt/one/distinct	type=bigint;bigint rows=6 100,50 | 120,60 | 20,10 | 40,20 | 80,40 | NULL,NULL
+cons/p2/dflt/one/sortlimit	type=bigint;bigint rows=3 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/dflt/one/union	type=bigint rows=7 1,10 | 1,20 | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p2/dflt/one/win2	type=bigint;numeric;bigint rows=6 1,20,20,10 | 2,40,60,20 | 3,NULL,60,NULL | 4,80,140,40 | 5,100,240,50 | 6,120,360,60
+cons/p2/dflt/one/cte_self	type=bigint;bigint rows=6 1,20,20 | 2,40,40 | 3,NULL,NULL | 4,80,80 | 5,100,100 | 6,120,120
+cons/p2/dflt/one/subq	type=bigint rows=5 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p2/dflt/one/scalar	type=bigint;bigint rows=6 1,10,20 | 2,20,40 | 3,NULL,NULL | 4,40,80 | 5,50,100 | 6,60,120
+cons/p2/dflt/one/join_col	type=bigint;bigint;bigint rows=5 1,20,10,1 | 2,40,20,2 | 4,80,40,4 | 5,100,50,5 | 6,120,60,6
+cons/p2/dflt/one/group_w3	type=bigint;bigint rows=6 100,1 | 120,1 | 20,1 | 40,1 | 80,1 | NULL,1
+cons/p2/dflt/one/semi_w3	type=bigint rows=3 1,20 | 2,40 | 4,80
+cons/p2/dflt/one/win_part	type=bigint;numeric rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p2/dflt/one/join_rn	type=bigint;bigint;bigint rows=5 1,20,10,1 | 2,40,20,2 | 4,80,40,4 | 5,100,50,5 | 6,120,60,6
+cons/p2/dflt/one/group_w2	type=bigint;bigint;numeric rows=6 10,1,20 | 20,1,40 | 40,1,80 | 50,1,100 | 60,1,120 | NULL,1,NULL
+cons/p2/dflt/one/sort_w2	type=bigint;bigint rows=3 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/dflt/one/filter_w2	type=bigint;bigint rows=4 2,40,20 | 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/dflt/one/win_part2	type=bigint;numeric rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p2/dflt/side/proj	type=bigint;bigint;bigint rows=6 1,20,20,10 | 2,1,40,20 | 3,2,NULL,NULL | 4,3,80,40 | 5,4,100,50 | 6,5,120,60
+cons/p2/dflt/side/expr	type=bigint;bigint rows=6 1,21,10 | 2,41,20 | 3,NULL,NULL | 4,81,40 | 5,101,50 | 6,121,60
+cons/p2/dflt/side/filter	type=bigint;bigint rows=4 2,40,20 | 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/dflt/side/join	type=bigint;bigint;bigint rows=6 1,20,10,1 | 2,40,20,2 | 3,NULL,NULL,3 | 4,80,40,4 | 5,100,50,5 | 6,120,60,6
+cons/p2/dflt/side/join_r	type=bigint;bigint rows=6 1,20,10 | 2,40,20 | 3,NULL,NULL | 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/dflt/side/join_key	type=bigint;bigint;bigint rows=5 1,20,10,1 | 2,40,20,2 | 4,80,40,4 | 5,100,50,5 | 6,120,60,6
+cons/p2/dflt/side/left	type=bigint;bigint;bigint rows=6 1,20,10,4 | 2,40,20,5 | 3,NULL,NULL,6 | 4,80,40,NULL | 5,100,50,NULL | 6,120,60,NULL
+cons/p2/dflt/side/cross	type=bigint;bigint;bigint rows=6 1,20,10,1 | 2,40,20,1 | 3,NULL,NULL,1 | 4,80,40,1 | 5,100,50,1 | 6,120,60,1
+cons/p2/dflt/side/semi	type=bigint;bigint rows=4 1,20,10 | 2,40,20 | 3,NULL,NULL | 4,80,40
+cons/p2/dflt/side/anti	type=bigint;bigint rows=4 1,20,10 | 2,40,20 | 3,NULL,NULL | 4,80,40
+cons/p2/dflt/side/agg	type=numeric;numeric rows=1 360,180
+cons/p2/dflt/side/group	type=bigint;numeric;numeric rows=3 1,60,30 | 2,180,90 | 3,120,60
+cons/p2/dflt/side/having	type=bigint;numeric rows=3 1,60 | 2,180 | 3,120
+cons/p2/dflt/side/distinct	type=bigint;bigint rows=6 100,50 | 120,60 | 20,10 | 40,20 | 80,40 | NULL,NULL
+cons/p2/dflt/side/sortlimit	type=bigint;bigint rows=3 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/dflt/side/union	type=bigint rows=7 1,10 | 1,20 | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p2/dflt/side/win2	type=bigint;numeric;bigint rows=6 1,20,20,10 | 2,40,60,20 | 3,NULL,60,NULL | 4,80,140,40 | 5,100,240,50 | 6,120,360,60
+cons/p2/dflt/side/cte_self	type=bigint;bigint rows=6 1,20,20 | 2,40,40 | 3,NULL,NULL | 4,80,80 | 5,100,100 | 6,120,120
+cons/p2/dflt/side/subq	type=bigint rows=5 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p2/dflt/side/scalar	type=bigint;bigint rows=6 1,10,20 | 2,20,40 | 3,NULL,NULL | 4,40,80 | 5,50,100 | 6,60,120
+cons/p2/dflt/side/join_col	type=bigint;bigint;bigint rows=5 1,20,10,1 | 2,40,20,2 | 4,80,40,4 | 5,100,50,5 | 6,120,60,6
+cons/p2/dflt/side/group_w3	type=bigint;bigint rows=6 100,1 | 120,1 | 20,1 | 40,1 | 80,1 | NULL,1
+cons/p2/dflt/side/semi_w3	type=bigint rows=3 1,20 | 2,40 | 4,80
+cons/p2/dflt/side/win_part	type=bigint;numeric rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p2/dflt/side/join_rn	type=bigint;bigint;bigint rows=5 1,20,10,1 | 2,40,20,2 | 4,80,40,4 | 5,100,50,5 | 6,120,60,6
+cons/p2/dflt/side/group_w2	type=bigint;bigint;numeric rows=6 10,1,20 | 20,1,40 | 40,1,80 | 50,1,100 | 60,1,120 | NULL,1,NULL
+cons/p2/dflt/side/sort_w2	type=bigint;bigint rows=3 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/dflt/side/filter_w2	type=bigint;bigint rows=4 2,40,20 | 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/dflt/side/win_part2	type=bigint;numeric rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p2/dflt/stack/proj	type=bigint;bigint;bigint rows=6 1,20,20,10 | 2,1,40,20 | 3,2,NULL,NULL | 4,3,80,40 | 5,4,100,50 | 6,5,120,60
+cons/p2/dflt/stack/expr	type=bigint;bigint rows=6 1,21,10 | 2,41,20 | 3,NULL,NULL | 4,81,40 | 5,101,50 | 6,121,60
+cons/p2/dflt/stack/filter	type=bigint;bigint rows=4 2,40,20 | 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/dflt/stack/join	type=bigint;bigint;bigint rows=6 1,20,10,1 | 2,40,20,2 | 3,NULL,NULL,3 | 4,80,40,4 | 5,100,50,5 | 6,120,60,6
+cons/p2/dflt/stack/join_r	type=bigint;bigint rows=6 1,20,10 | 2,40,20 | 3,NULL,NULL | 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/dflt/stack/join_key	type=bigint;bigint;bigint rows=5 1,20,10,1 | 2,40,20,2 | 4,80,40,4 | 5,100,50,5 | 6,120,60,6
+cons/p2/dflt/stack/left	type=bigint;bigint;bigint rows=6 1,20,10,4 | 2,40,20,5 | 3,NULL,NULL,6 | 4,80,40,NULL | 5,100,50,NULL | 6,120,60,NULL
+cons/p2/dflt/stack/cross	type=bigint;bigint;bigint rows=6 1,20,10,1 | 2,40,20,1 | 3,NULL,NULL,1 | 4,80,40,1 | 5,100,50,1 | 6,120,60,1
+cons/p2/dflt/stack/semi	type=bigint;bigint rows=4 1,20,10 | 2,40,20 | 3,NULL,NULL | 4,80,40
+cons/p2/dflt/stack/anti	type=bigint;bigint rows=4 1,20,10 | 2,40,20 | 3,NULL,NULL | 4,80,40
+cons/p2/dflt/stack/agg	type=numeric;numeric rows=1 360,180
+cons/p2/dflt/stack/group	type=bigint;numeric;numeric rows=3 1,60,30 | 2,180,90 | 3,120,60
+cons/p2/dflt/stack/having	type=bigint;numeric rows=3 1,60 | 2,180 | 3,120
+cons/p2/dflt/stack/distinct	type=bigint;bigint rows=6 100,50 | 120,60 | 20,10 | 40,20 | 80,40 | NULL,NULL
+cons/p2/dflt/stack/sortlimit	type=bigint;bigint rows=3 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/dflt/stack/union	type=bigint rows=7 1,10 | 1,20 | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p2/dflt/stack/win2	type=bigint;numeric;bigint rows=6 1,20,20,10 | 2,40,60,20 | 3,NULL,60,NULL | 4,80,140,40 | 5,100,240,50 | 6,120,360,60
+cons/p2/dflt/stack/cte_self	type=bigint;bigint rows=6 1,20,20 | 2,40,40 | 3,NULL,NULL | 4,80,80 | 5,100,100 | 6,120,120
+cons/p2/dflt/stack/subq	type=bigint rows=5 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p2/dflt/stack/scalar	type=bigint;bigint rows=6 1,10,20 | 2,20,40 | 3,NULL,NULL | 4,40,80 | 5,50,100 | 6,60,120
+cons/p2/dflt/stack/join_col	type=bigint;bigint;bigint rows=5 1,20,10,1 | 2,40,20,2 | 4,80,40,4 | 5,100,50,5 | 6,120,60,6
+cons/p2/dflt/stack/group_w3	type=bigint;bigint rows=6 100,1 | 120,1 | 20,1 | 40,1 | 80,1 | NULL,1
+cons/p2/dflt/stack/semi_w3	type=bigint rows=3 1,20 | 2,40 | 4,80
+cons/p2/dflt/stack/win_part	type=bigint;numeric rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p2/dflt/stack/join_rn	type=bigint;bigint;bigint rows=5 1,20,10,1 | 2,40,20,2 | 4,80,40,4 | 5,100,50,5 | 6,120,60,6
+cons/p2/dflt/stack/group_w2	type=bigint;bigint;numeric rows=6 10,1,20 | 20,1,40 | 40,1,80 | 50,1,100 | 60,1,120 | NULL,1,NULL
+cons/p2/dflt/stack/sort_w2	type=bigint;bigint rows=3 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/dflt/stack/filter_w2	type=bigint;bigint rows=4 2,40,20 | 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/dflt/stack/win_part2	type=bigint;numeric rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p2/part/one/proj	type=bigint;bigint;bigint rows=6 1,1,20,10 | 2,1,40,20 | 3,1,NULL,NULL | 4,1,80,40 | 5,1,100,50 | 6,1,120,60
+cons/p2/part/one/expr	type=bigint;bigint rows=6 1,21,10 | 2,41,20 | 3,NULL,NULL | 4,81,40 | 5,101,50 | 6,121,60
+cons/p2/part/one/filter	type=bigint;bigint rows=4 2,40,20 | 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/part/one/join	type=bigint;bigint;bigint rows=6 1,20,10,1 | 2,40,20,2 | 3,NULL,NULL,3 | 4,80,40,4 | 5,100,50,5 | 6,120,60,6
+cons/p2/part/one/join_r	type=bigint;bigint rows=6 1,20,10 | 2,40,20 | 3,NULL,NULL | 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/part/one/join_key	type=bigint;bigint;bigint rows=5 1,20,10,1 | 2,40,20,2 | 4,80,40,4 | 5,100,50,5 | 6,120,60,6
+cons/p2/part/one/left	type=bigint;bigint;bigint rows=6 1,20,10,4 | 2,40,20,5 | 3,NULL,NULL,6 | 4,80,40,NULL | 5,100,50,NULL | 6,120,60,NULL
+cons/p2/part/one/cross	type=bigint;bigint;bigint rows=6 1,20,10,1 | 2,40,20,1 | 3,NULL,NULL,1 | 4,80,40,1 | 5,100,50,1 | 6,120,60,1
+cons/p2/part/one/semi	type=bigint;bigint rows=4 1,20,10 | 2,40,20 | 3,NULL,NULL | 4,80,40
+cons/p2/part/one/anti	type=bigint;bigint rows=4 1,20,10 | 2,40,20 | 3,NULL,NULL | 4,80,40
+cons/p2/part/one/agg	type=numeric;numeric rows=1 360,180
+cons/p2/part/one/group	type=bigint;numeric;numeric rows=3 1,60,30 | 2,180,90 | 3,120,60
+cons/p2/part/one/having	type=bigint;numeric rows=3 1,60 | 2,180 | 3,120
+cons/p2/part/one/distinct	type=bigint;bigint rows=6 100,50 | 120,60 | 20,10 | 40,20 | 80,40 | NULL,NULL
+cons/p2/part/one/sortlimit	type=bigint;bigint rows=3 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/part/one/union	type=bigint rows=7 1,10 | 1,20 | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p2/part/one/win2	type=bigint;numeric;bigint rows=6 1,20,20,10 | 2,40,60,20 | 3,NULL,60,NULL | 4,80,140,40 | 5,100,240,50 | 6,120,360,60
+cons/p2/part/one/cte_self	type=bigint;bigint rows=6 1,20,20 | 2,40,40 | 3,NULL,NULL | 4,80,80 | 5,100,100 | 6,120,120
+cons/p2/part/one/subq	type=bigint rows=5 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p2/part/one/scalar	type=bigint;bigint rows=6 1,10,20 | 2,20,40 | 3,NULL,NULL | 4,40,80 | 5,50,100 | 6,60,120
+cons/p2/part/one/join_col	type=bigint;bigint;bigint rows=5 1,20,10,1 | 2,40,20,2 | 4,80,40,4 | 5,100,50,5 | 6,120,60,6
+cons/p2/part/one/group_w3	type=bigint;bigint rows=6 100,1 | 120,1 | 20,1 | 40,1 | 80,1 | NULL,1
+cons/p2/part/one/semi_w3	type=bigint rows=3 1,20 | 2,40 | 4,80
+cons/p2/part/one/win_part	type=bigint;numeric rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p2/part/one/join_rn	type=bigint;bigint;bigint rows=5 1,20,10,1 | 2,40,20,2 | 4,80,40,4 | 5,100,50,5 | 6,120,60,6
+cons/p2/part/one/group_w2	type=bigint;bigint;numeric rows=6 10,1,20 | 20,1,40 | 40,1,80 | 50,1,100 | 60,1,120 | NULL,1,NULL
+cons/p2/part/one/sort_w2	type=bigint;bigint rows=3 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/part/one/filter_w2	type=bigint;bigint rows=4 2,40,20 | 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/part/one/win_part2	type=bigint;numeric rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p2/part/side/proj	type=bigint;bigint;bigint rows=6 1,1,20,10 | 2,1,40,20 | 3,1,NULL,NULL | 4,1,80,40 | 5,1,100,50 | 6,1,120,60
+cons/p2/part/side/expr	type=bigint;bigint rows=6 1,21,10 | 2,41,20 | 3,NULL,NULL | 4,81,40 | 5,101,50 | 6,121,60
+cons/p2/part/side/filter	type=bigint;bigint rows=4 2,40,20 | 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/part/side/join	type=bigint;bigint;bigint rows=6 1,20,10,1 | 2,40,20,2 | 3,NULL,NULL,3 | 4,80,40,4 | 5,100,50,5 | 6,120,60,6
+cons/p2/part/side/join_r	type=bigint;bigint rows=6 1,20,10 | 2,40,20 | 3,NULL,NULL | 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/part/side/join_key	type=bigint;bigint;bigint rows=5 1,20,10,1 | 2,40,20,2 | 4,80,40,4 | 5,100,50,5 | 6,120,60,6
+cons/p2/part/side/left	type=bigint;bigint;bigint rows=6 1,20,10,4 | 2,40,20,5 | 3,NULL,NULL,6 | 4,80,40,NULL | 5,100,50,NULL | 6,120,60,NULL
+cons/p2/part/side/cross	type=bigint;bigint;bigint rows=6 1,20,10,1 | 2,40,20,1 | 3,NULL,NULL,1 | 4,80,40,1 | 5,100,50,1 | 6,120,60,1
+cons/p2/part/side/semi	type=bigint;bigint rows=4 1,20,10 | 2,40,20 | 3,NULL,NULL | 4,80,40
+cons/p2/part/side/anti	type=bigint;bigint rows=4 1,20,10 | 2,40,20 | 3,NULL,NULL | 4,80,40
+cons/p2/part/side/agg	type=numeric;numeric rows=1 360,180
+cons/p2/part/side/group	type=bigint;numeric;numeric rows=3 1,60,30 | 2,180,90 | 3,120,60
+cons/p2/part/side/having	type=bigint;numeric rows=3 1,60 | 2,180 | 3,120
+cons/p2/part/side/distinct	type=bigint;bigint rows=6 100,50 | 120,60 | 20,10 | 40,20 | 80,40 | NULL,NULL
+cons/p2/part/side/sortlimit	type=bigint;bigint rows=3 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/part/side/union	type=bigint rows=7 1,10 | 1,20 | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p2/part/side/win2	type=bigint;numeric;bigint rows=6 1,20,20,10 | 2,40,60,20 | 3,NULL,60,NULL | 4,80,140,40 | 5,100,240,50 | 6,120,360,60
+cons/p2/part/side/cte_self	type=bigint;bigint rows=6 1,20,20 | 2,40,40 | 3,NULL,NULL | 4,80,80 | 5,100,100 | 6,120,120
+cons/p2/part/side/subq	type=bigint rows=5 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p2/part/side/scalar	type=bigint;bigint rows=6 1,10,20 | 2,20,40 | 3,NULL,NULL | 4,40,80 | 5,50,100 | 6,60,120
+cons/p2/part/side/join_col	type=bigint;bigint;bigint rows=5 1,20,10,1 | 2,40,20,2 | 4,80,40,4 | 5,100,50,5 | 6,120,60,6
+cons/p2/part/side/group_w3	type=bigint;bigint rows=6 100,1 | 120,1 | 20,1 | 40,1 | 80,1 | NULL,1
+cons/p2/part/side/semi_w3	type=bigint rows=3 1,20 | 2,40 | 4,80
+cons/p2/part/side/win_part	type=bigint;numeric rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p2/part/side/join_rn	type=bigint;bigint;bigint rows=5 1,20,10,1 | 2,40,20,2 | 4,80,40,4 | 5,100,50,5 | 6,120,60,6
+cons/p2/part/side/group_w2	type=bigint;bigint;numeric rows=6 10,1,20 | 20,1,40 | 40,1,80 | 50,1,100 | 60,1,120 | NULL,1,NULL
+cons/p2/part/side/sort_w2	type=bigint;bigint rows=3 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/part/side/filter_w2	type=bigint;bigint rows=4 2,40,20 | 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/part/side/win_part2	type=bigint;numeric rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p2/part/stack/proj	type=bigint;bigint;bigint rows=6 1,1,20,10 | 2,1,40,20 | 3,1,NULL,NULL | 4,1,80,40 | 5,1,100,50 | 6,1,120,60
+cons/p2/part/stack/expr	type=bigint;bigint rows=6 1,21,10 | 2,41,20 | 3,NULL,NULL | 4,81,40 | 5,101,50 | 6,121,60
+cons/p2/part/stack/filter	type=bigint;bigint rows=4 2,40,20 | 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/part/stack/join	type=bigint;bigint;bigint rows=6 1,20,10,1 | 2,40,20,2 | 3,NULL,NULL,3 | 4,80,40,4 | 5,100,50,5 | 6,120,60,6
+cons/p2/part/stack/join_r	type=bigint;bigint rows=6 1,20,10 | 2,40,20 | 3,NULL,NULL | 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/part/stack/join_key	type=bigint;bigint;bigint rows=5 1,20,10,1 | 2,40,20,2 | 4,80,40,4 | 5,100,50,5 | 6,120,60,6
+cons/p2/part/stack/left	type=bigint;bigint;bigint rows=6 1,20,10,4 | 2,40,20,5 | 3,NULL,NULL,6 | 4,80,40,NULL | 5,100,50,NULL | 6,120,60,NULL
+cons/p2/part/stack/cross	type=bigint;bigint;bigint rows=6 1,20,10,1 | 2,40,20,1 | 3,NULL,NULL,1 | 4,80,40,1 | 5,100,50,1 | 6,120,60,1
+cons/p2/part/stack/semi	type=bigint;bigint rows=4 1,20,10 | 2,40,20 | 3,NULL,NULL | 4,80,40
+cons/p2/part/stack/anti	type=bigint;bigint rows=4 1,20,10 | 2,40,20 | 3,NULL,NULL | 4,80,40
+cons/p2/part/stack/agg	type=numeric;numeric rows=1 360,180
+cons/p2/part/stack/group	type=bigint;numeric;numeric rows=3 1,60,30 | 2,180,90 | 3,120,60
+cons/p2/part/stack/having	type=bigint;numeric rows=3 1,60 | 2,180 | 3,120
+cons/p2/part/stack/distinct	type=bigint;bigint rows=6 100,50 | 120,60 | 20,10 | 40,20 | 80,40 | NULL,NULL
+cons/p2/part/stack/sortlimit	type=bigint;bigint rows=3 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/part/stack/union	type=bigint rows=7 1,10 | 1,20 | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p2/part/stack/win2	type=bigint;numeric;bigint rows=6 1,20,20,10 | 2,40,60,20 | 3,NULL,60,NULL | 4,80,140,40 | 5,100,240,50 | 6,120,360,60
+cons/p2/part/stack/cte_self	type=bigint;bigint rows=6 1,20,20 | 2,40,40 | 3,NULL,NULL | 4,80,80 | 5,100,100 | 6,120,120
+cons/p2/part/stack/subq	type=bigint rows=5 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p2/part/stack/scalar	type=bigint;bigint rows=6 1,10,20 | 2,20,40 | 3,NULL,NULL | 4,40,80 | 5,50,100 | 6,60,120
+cons/p2/part/stack/join_col	type=bigint;bigint;bigint rows=5 1,20,10,1 | 2,40,20,2 | 4,80,40,4 | 5,100,50,5 | 6,120,60,6
+cons/p2/part/stack/group_w3	type=bigint;bigint rows=6 100,1 | 120,1 | 20,1 | 40,1 | 80,1 | NULL,1
+cons/p2/part/stack/semi_w3	type=bigint rows=3 1,20 | 2,40 | 4,80
+cons/p2/part/stack/win_part	type=bigint;numeric rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p2/part/stack/join_rn	type=bigint;bigint;bigint rows=5 1,20,10,1 | 2,40,20,2 | 4,80,40,4 | 5,100,50,5 | 6,120,60,6
+cons/p2/part/stack/group_w2	type=bigint;bigint;numeric rows=6 10,1,20 | 20,1,40 | 40,1,80 | 50,1,100 | 60,1,120 | NULL,1,NULL
+cons/p2/part/stack/sort_w2	type=bigint;bigint rows=3 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/part/stack/filter_w2	type=bigint;bigint rows=4 2,40,20 | 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/part/stack/win_part2	type=bigint;numeric rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p2/noread/one/proj	type=bigint;bigint;bigint rows=6 1,1,20,10 | 2,2,40,20 | 3,3,NULL,NULL | 4,4,80,40 | 5,5,100,50 | 6,6,120,60
+cons/p2/noread/one/expr	type=bigint;bigint rows=6 1,21,10 | 2,41,20 | 3,NULL,NULL | 4,81,40 | 5,101,50 | 6,121,60
+cons/p2/noread/one/filter	type=bigint;bigint rows=4 2,40,20 | 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/noread/one/join	type=bigint;bigint;bigint rows=6 1,20,10,1 | 2,40,20,2 | 3,NULL,NULL,3 | 4,80,40,4 | 5,100,50,5 | 6,120,60,6
+cons/p2/noread/one/join_r	type=bigint;bigint rows=6 1,20,10 | 2,40,20 | 3,NULL,NULL | 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/noread/one/join_key	type=bigint;bigint;bigint rows=5 1,20,10,1 | 2,40,20,2 | 4,80,40,4 | 5,100,50,5 | 6,120,60,6
+cons/p2/noread/one/left	type=bigint;bigint;bigint rows=6 1,20,10,4 | 2,40,20,5 | 3,NULL,NULL,6 | 4,80,40,NULL | 5,100,50,NULL | 6,120,60,NULL
+cons/p2/noread/one/cross	type=bigint;bigint;bigint rows=6 1,20,10,1 | 2,40,20,1 | 3,NULL,NULL,1 | 4,80,40,1 | 5,100,50,1 | 6,120,60,1
+cons/p2/noread/one/semi	type=bigint;bigint rows=4 1,20,10 | 2,40,20 | 3,NULL,NULL | 4,80,40
+cons/p2/noread/one/anti	type=bigint;bigint rows=4 1,20,10 | 2,40,20 | 3,NULL,NULL | 4,80,40
+cons/p2/noread/one/agg	type=numeric;numeric rows=1 360,180
+cons/p2/noread/one/group	type=bigint;numeric;numeric rows=3 1,60,30 | 2,180,90 | 3,120,60
+cons/p2/noread/one/having	type=bigint;numeric rows=3 1,60 | 2,180 | 3,120
+cons/p2/noread/one/distinct	type=bigint;bigint rows=6 100,50 | 120,60 | 20,10 | 40,20 | 80,40 | NULL,NULL
+cons/p2/noread/one/sortlimit	type=bigint;bigint rows=3 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/noread/one/union	type=bigint rows=7 1,10 | 1,20 | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p2/noread/one/win2	type=bigint;numeric;bigint rows=6 1,20,20,10 | 2,40,60,20 | 3,NULL,60,NULL | 4,80,140,40 | 5,100,240,50 | 6,120,360,60
+cons/p2/noread/one/cte_self	type=bigint;bigint rows=6 1,20,20 | 2,40,40 | 3,NULL,NULL | 4,80,80 | 5,100,100 | 6,120,120
+cons/p2/noread/one/subq	type=bigint rows=5 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p2/noread/one/scalar	type=bigint;bigint rows=6 1,10,20 | 2,20,40 | 3,NULL,NULL | 4,40,80 | 5,50,100 | 6,60,120
+cons/p2/noread/one/join_col	type=bigint;bigint;bigint rows=5 1,20,10,1 | 2,40,20,2 | 4,80,40,4 | 5,100,50,5 | 6,120,60,6
+cons/p2/noread/one/group_w3	type=bigint;bigint rows=6 100,1 | 120,1 | 20,1 | 40,1 | 80,1 | NULL,1
+cons/p2/noread/one/semi_w3	type=bigint rows=3 1,20 | 2,40 | 4,80
+cons/p2/noread/one/win_part	type=bigint;numeric rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p2/noread/one/join_rn	type=bigint;bigint;bigint rows=5 1,20,10,1 | 2,40,20,2 | 4,80,40,4 | 5,100,50,5 | 6,120,60,6
+cons/p2/noread/one/group_w2	type=bigint;bigint;numeric rows=6 10,1,20 | 20,1,40 | 40,1,80 | 50,1,100 | 60,1,120 | NULL,1,NULL
+cons/p2/noread/one/sort_w2	type=bigint;bigint rows=3 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/noread/one/filter_w2	type=bigint;bigint rows=4 2,40,20 | 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/noread/one/win_part2	type=bigint;numeric rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p2/noread/side/proj	type=bigint;bigint;bigint rows=6 1,1,20,10 | 2,2,40,20 | 3,3,NULL,NULL | 4,4,80,40 | 5,5,100,50 | 6,6,120,60
+cons/p2/noread/side/expr	type=bigint;bigint rows=6 1,21,10 | 2,41,20 | 3,NULL,NULL | 4,81,40 | 5,101,50 | 6,121,60
+cons/p2/noread/side/filter	type=bigint;bigint rows=4 2,40,20 | 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/noread/side/join	type=bigint;bigint;bigint rows=6 1,20,10,1 | 2,40,20,2 | 3,NULL,NULL,3 | 4,80,40,4 | 5,100,50,5 | 6,120,60,6
+cons/p2/noread/side/join_r	type=bigint;bigint rows=6 1,20,10 | 2,40,20 | 3,NULL,NULL | 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/noread/side/join_key	type=bigint;bigint;bigint rows=5 1,20,10,1 | 2,40,20,2 | 4,80,40,4 | 5,100,50,5 | 6,120,60,6
+cons/p2/noread/side/left	type=bigint;bigint;bigint rows=6 1,20,10,4 | 2,40,20,5 | 3,NULL,NULL,6 | 4,80,40,NULL | 5,100,50,NULL | 6,120,60,NULL
+cons/p2/noread/side/cross	type=bigint;bigint;bigint rows=6 1,20,10,1 | 2,40,20,1 | 3,NULL,NULL,1 | 4,80,40,1 | 5,100,50,1 | 6,120,60,1
+cons/p2/noread/side/semi	type=bigint;bigint rows=4 1,20,10 | 2,40,20 | 3,NULL,NULL | 4,80,40
+cons/p2/noread/side/anti	type=bigint;bigint rows=4 1,20,10 | 2,40,20 | 3,NULL,NULL | 4,80,40
+cons/p2/noread/side/agg	type=numeric;numeric rows=1 360,180
+cons/p2/noread/side/group	type=bigint;numeric;numeric rows=3 1,60,30 | 2,180,90 | 3,120,60
+cons/p2/noread/side/having	type=bigint;numeric rows=3 1,60 | 2,180 | 3,120
+cons/p2/noread/side/distinct	type=bigint;bigint rows=6 100,50 | 120,60 | 20,10 | 40,20 | 80,40 | NULL,NULL
+cons/p2/noread/side/sortlimit	type=bigint;bigint rows=3 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/noread/side/union	type=bigint rows=7 1,10 | 1,20 | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p2/noread/side/win2	type=bigint;numeric;bigint rows=6 1,20,20,10 | 2,40,60,20 | 3,NULL,60,NULL | 4,80,140,40 | 5,100,240,50 | 6,120,360,60
+cons/p2/noread/side/cte_self	type=bigint;bigint rows=6 1,20,20 | 2,40,40 | 3,NULL,NULL | 4,80,80 | 5,100,100 | 6,120,120
+cons/p2/noread/side/subq	type=bigint rows=5 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p2/noread/side/scalar	type=bigint;bigint rows=6 1,10,20 | 2,20,40 | 3,NULL,NULL | 4,40,80 | 5,50,100 | 6,60,120
+cons/p2/noread/side/join_col	type=bigint;bigint;bigint rows=5 1,20,10,1 | 2,40,20,2 | 4,80,40,4 | 5,100,50,5 | 6,120,60,6
+cons/p2/noread/side/group_w3	type=bigint;bigint rows=6 100,1 | 120,1 | 20,1 | 40,1 | 80,1 | NULL,1
+cons/p2/noread/side/semi_w3	type=bigint rows=3 1,20 | 2,40 | 4,80
+cons/p2/noread/side/win_part	type=bigint;numeric rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p2/noread/side/join_rn	type=bigint;bigint;bigint rows=5 1,20,10,1 | 2,40,20,2 | 4,80,40,4 | 5,100,50,5 | 6,120,60,6
+cons/p2/noread/side/group_w2	type=bigint;bigint;numeric rows=6 10,1,20 | 20,1,40 | 40,1,80 | 50,1,100 | 60,1,120 | NULL,1,NULL
+cons/p2/noread/side/sort_w2	type=bigint;bigint rows=3 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/noread/side/filter_w2	type=bigint;bigint rows=4 2,40,20 | 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/noread/side/win_part2	type=bigint;numeric rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p2/noread/stack/proj	type=bigint;bigint;bigint rows=6 1,1,20,10 | 2,2,40,20 | 3,3,NULL,NULL | 4,4,80,40 | 5,5,100,50 | 6,6,120,60
+cons/p2/noread/stack/expr	type=bigint;bigint rows=6 1,21,10 | 2,41,20 | 3,NULL,NULL | 4,81,40 | 5,101,50 | 6,121,60
+cons/p2/noread/stack/filter	type=bigint;bigint rows=4 2,40,20 | 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/noread/stack/join	type=bigint;bigint;bigint rows=6 1,20,10,1 | 2,40,20,2 | 3,NULL,NULL,3 | 4,80,40,4 | 5,100,50,5 | 6,120,60,6
+cons/p2/noread/stack/join_r	type=bigint;bigint rows=6 1,20,10 | 2,40,20 | 3,NULL,NULL | 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/noread/stack/join_key	type=bigint;bigint;bigint rows=5 1,20,10,1 | 2,40,20,2 | 4,80,40,4 | 5,100,50,5 | 6,120,60,6
+cons/p2/noread/stack/left	type=bigint;bigint;bigint rows=6 1,20,10,4 | 2,40,20,5 | 3,NULL,NULL,6 | 4,80,40,NULL | 5,100,50,NULL | 6,120,60,NULL
+cons/p2/noread/stack/cross	type=bigint;bigint;bigint rows=6 1,20,10,1 | 2,40,20,1 | 3,NULL,NULL,1 | 4,80,40,1 | 5,100,50,1 | 6,120,60,1
+cons/p2/noread/stack/semi	type=bigint;bigint rows=4 1,20,10 | 2,40,20 | 3,NULL,NULL | 4,80,40
+cons/p2/noread/stack/anti	type=bigint;bigint rows=4 1,20,10 | 2,40,20 | 3,NULL,NULL | 4,80,40
+cons/p2/noread/stack/agg	type=numeric;numeric rows=1 360,180
+cons/p2/noread/stack/group	type=bigint;numeric;numeric rows=3 1,60,30 | 2,180,90 | 3,120,60
+cons/p2/noread/stack/having	type=bigint;numeric rows=3 1,60 | 2,180 | 3,120
+cons/p2/noread/stack/distinct	type=bigint;bigint rows=6 100,50 | 120,60 | 20,10 | 40,20 | 80,40 | NULL,NULL
+cons/p2/noread/stack/sortlimit	type=bigint;bigint rows=3 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/noread/stack/union	type=bigint rows=7 1,10 | 1,20 | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p2/noread/stack/win2	type=bigint;numeric;bigint rows=6 1,20,20,10 | 2,40,60,20 | 3,NULL,60,NULL | 4,80,140,40 | 5,100,240,50 | 6,120,360,60
+cons/p2/noread/stack/cte_self	type=bigint;bigint rows=6 1,20,20 | 2,40,40 | 3,NULL,NULL | 4,80,80 | 5,100,100 | 6,120,120
+cons/p2/noread/stack/subq	type=bigint rows=5 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+cons/p2/noread/stack/scalar	type=bigint;bigint rows=6 1,10,20 | 2,20,40 | 3,NULL,NULL | 4,40,80 | 5,50,100 | 6,60,120
+cons/p2/noread/stack/join_col	type=bigint;bigint;bigint rows=5 1,20,10,1 | 2,40,20,2 | 4,80,40,4 | 5,100,50,5 | 6,120,60,6
+cons/p2/noread/stack/group_w3	type=bigint;bigint rows=6 100,1 | 120,1 | 20,1 | 40,1 | 80,1 | NULL,1
+cons/p2/noread/stack/semi_w3	type=bigint rows=3 1,20 | 2,40 | 4,80
+cons/p2/noread/stack/win_part	type=bigint;numeric rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+cons/p2/noread/stack/join_rn	type=bigint;bigint;bigint rows=5 1,20,10,1 | 2,40,20,2 | 4,80,40,4 | 5,100,50,5 | 6,120,60,6
+cons/p2/noread/stack/group_w2	type=bigint;bigint;numeric rows=6 10,1,20 | 20,1,40 | 40,1,80 | 50,1,100 | 60,1,120 | NULL,1,NULL
+cons/p2/noread/stack/sort_w2	type=bigint;bigint rows=3 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/noread/stack/filter_w2	type=bigint;bigint rows=4 2,40,20 | 4,80,40 | 5,100,50 | 6,120,60
+cons/p2/noread/stack/win_part2	type=bigint;numeric rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+h2/same_dflt	type=bigint;bigint rows=6 1,7,0 | 2,10,10 | 3,20,20 | 4,NULL,NULL | 5,40,40 | 6,50,50
+h2/col_dflt	type=bigint;bigint rows=6 1,1,0 | 2,10,10 | 3,20,20 | 4,NULL,NULL | 5,40,40 | 6,50,50
+h2/num_shift	type=numeric;numeric rows=6 1,2.5,2.5 | 2,10,1010 | 3,20,1020 | 4,NULL,NULL | 5,40,1040 | 6,50,1050
+h2/n_val	type=numeric;numeric rows=6 1,2.5,2.5 | 2,10,1.25 | 3,20,2.25 | 4,NULL,NULL | 5,40,4.25 | 6,50,5.25
+h2/lead_same	type=bigint;bigint rows=6 1,20,20 | 2,NULL,NULL | 3,40,40 | 4,50,50 | 5,60,60 | 6,7,0
+h2/part_then_dflt	type=bigint;bigint rows=6 1,7,1 | 2,10,2 | 3,20,3 | 4,NULL,1 | 5,40,2 | 6,50,1
+h2/cte_same	type=bigint;bigint rows=6 1,7,0 | 2,10,10 | 3,20,20 | 4,NULL,NULL | 5,40,40 | 6,50,50
+h2/desc_same	type=bigint;bigint rows=6 1,20,0 | 2,NULL,10 | 3,40,20 | 4,50,NULL | 5,60,40 | 6,7,50
+h2/int_same	type=integer;integer rows=6 1,7,0 | 2,10,10 | 3,20,20 | 4,NULL,NULL | 5,40,40 | 6,50,50
+h2/date_same	type=date;date rows=6 1,1999-01-01,2000-01-01 | 2,2024-01-01,2024-01-01 | 3,2024-01-02,2024-01-02 | 4,NULL,NULL | 5,2024-01-04,2024-01-04 | 6,2024-01-05,2024-01-05
+h2/text_same	type=text;text rows=6 1,zz,aa | 2,a,a | 3,b,b | 4,NULL,NULL | 5,d,d | 6,e,e
+h2/samelevel	type=bigint;bigint rows=6 1,0,20 | 2,10,NULL | 3,20,40 | 4,NULL,50 | 5,40,60 | 6,50,7
+h2/samelevel_part	type=bigint;bigint rows=6 1,0,7 | 2,10,10 | 3,20,20 | 4,NULL,7 | 5,40,40 | 6,50,7
+h2/nodflt_inner	type=bigint;bigint rows=6 1,7,NULL | 2,10,10 | 3,20,20 | 4,NULL,NULL | 5,40,40 | 6,50,50
+h2/sum_over_lag	type=numeric;bigint rows=6 1,0,0 | 2,10,10 | 3,30,20 | 4,30,NULL | 5,70,40 | 6,120,50
+h2/lag_over_lagw	type=bigint;bigint rows=6 1,7,0 | 2,0,10 | 3,10,20 | 4,20,NULL | 5,NULL,40 | 6,40,50
+j/sh/issue/join_l	type=bigint;bigint rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+j/sh/issue/join_r	type=bigint rows=6 1,20 | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+j/sh/issue/cte_self	type=bigint;bigint rows=6 1,20,20 | 2,40,40 | 3,NULL,NULL | 4,80,80 | 5,100,100 | 6,120,120
+j/sh/issue/cross	type=bigint;bigint rows=6 1,20,1 | 2,40,1 | 3,NULL,1 | 4,80,1 | 5,100,1 | 6,120,1
+j/sh/issue/semi	type=bigint rows=4 1,20 | 2,40 | 3,NULL | 4,80
+j/sh/issue/cte_join_t	type=bigint;double precision rows=6 1,20,1.5 | 2,40,2.5 | 3,NULL,NULL | 4,80,4.5 | 5,100,5.5 | 6,120,6.5
+j/sh/issue/w_in_join	type=numeric;bigint rows=6 1,2.5,1 | 2,20,2 | 3,40,3 | 4,NULL,4 | 5,80,5 | 6,100,6
+j/sh/part/join_l	type=bigint;bigint rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+j/sh/part/join_r	type=bigint rows=6 1,20 | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+j/sh/part/cte_self	type=bigint;bigint rows=6 1,20,20 | 2,40,40 | 3,NULL,NULL | 4,80,80 | 5,100,100 | 6,120,120
+j/sh/part/cross	type=bigint;bigint rows=6 1,20,1 | 2,40,1 | 3,NULL,1 | 4,80,1 | 5,100,1 | 6,120,1
+j/sh/part/semi	type=bigint rows=4 1,20 | 2,40 | 3,NULL | 4,80
+j/sh/part/cte_join_t	type=bigint;double precision rows=6 1,20,1.5 | 2,40,2.5 | 3,NULL,NULL | 4,80,4.5 | 5,100,5.5 | 6,120,6.5
+j/sh/part/w_in_join	type=bigint;bigint rows=6 1,1,1 | 2,1,2 | 3,1,3 | 4,1,4 | 5,1,5 | 6,1,6
+j/sh/lagnd/join_l	type=bigint;bigint rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+j/sh/lagnd/join_r	type=bigint rows=6 1,20 | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+j/sh/lagnd/cte_self	type=bigint;bigint rows=6 1,20,20 | 2,40,40 | 3,NULL,NULL | 4,80,80 | 5,100,100 | 6,120,120
+j/sh/lagnd/cross	type=bigint;bigint rows=6 1,20,1 | 2,40,1 | 3,NULL,1 | 4,80,1 | 5,100,1 | 6,120,1
+j/sh/lagnd/semi	type=bigint rows=4 1,20 | 2,40 | 3,NULL | 4,80
+j/sh/lagnd/cte_join_t	type=bigint;double precision rows=6 1,20,1.5 | 2,40,2.5 | 3,NULL,NULL | 4,80,4.5 | 5,100,5.5 | 6,120,6.5
+j/sh/lagnd/w_in_join	type=bigint;bigint rows=6 1,NULL,1 | 2,20,2 | 3,40,3 | 4,NULL,4 | 5,80,5 | 6,100,6
+j/sh/first/join_l	type=bigint;bigint rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+j/sh/first/join_r	type=bigint rows=6 1,20 | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+j/sh/first/cte_self	type=bigint;bigint rows=6 1,20,20 | 2,40,40 | 3,NULL,NULL | 4,80,80 | 5,100,100 | 6,120,120
+j/sh/first/cross	type=bigint;bigint rows=6 1,20,1 | 2,40,1 | 3,NULL,1 | 4,80,1 | 5,100,1 | 6,120,1
+j/sh/first/semi	type=bigint rows=4 1,20 | 2,40 | 3,NULL | 4,80
+j/sh/first/cte_join_t	type=bigint;double precision rows=6 1,20,1.5 | 2,40,2.5 | 3,NULL,NULL | 4,80,4.5 | 5,100,5.5 | 6,120,6.5
+j/sh/first/w_in_join	type=bigint;bigint rows=6 1,20,1 | 2,20,2 | 3,20,3 | 4,20,4 | 5,20,5 | 6,20,6
+j/sh/sum/join_l	type=bigint;bigint rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+j/sh/sum/join_r	type=bigint rows=6 1,20 | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+j/sh/sum/cte_self	type=bigint;bigint rows=6 1,20,20 | 2,40,40 | 3,NULL,NULL | 4,80,80 | 5,100,100 | 6,120,120
+j/sh/sum/cross	type=bigint;bigint rows=6 1,20,1 | 2,40,1 | 3,NULL,1 | 4,80,1 | 5,100,1 | 6,120,1
+j/sh/sum/semi	type=bigint rows=4 1,20 | 2,40 | 3,NULL | 4,80
+j/sh/sum/cte_join_t	type=bigint;double precision rows=6 1,20,1.5 | 2,40,2.5 | 3,NULL,NULL | 4,80,4.5 | 5,100,5.5 | 6,120,6.5
+j/sh/sum/w_in_join	type=numeric;bigint rows=6 1,20,1 | 2,60,2 | 3,60,3 | 4,140,4 | 5,240,5 | 6,360,6
+j/sh/rn/join_l	type=bigint;bigint rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+j/sh/rn/join_r	type=bigint rows=6 1,20 | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+j/sh/rn/cte_self	type=bigint;bigint rows=6 1,20,20 | 2,40,40 | 3,NULL,NULL | 4,80,80 | 5,100,100 | 6,120,120
+j/sh/rn/cross	type=bigint;bigint rows=6 1,20,1 | 2,40,1 | 3,NULL,1 | 4,80,1 | 5,100,1 | 6,120,1
+j/sh/rn/semi	type=bigint rows=4 1,20 | 2,40 | 3,NULL | 4,80
+j/sh/rn/cte_join_t	type=bigint;double precision rows=6 1,20,1.5 | 2,40,2.5 | 3,NULL,NULL | 4,80,4.5 | 5,100,5.5 | 6,120,6.5
+j/sh/rn/w_in_join	type=bigint;bigint rows=6 1,1,1 | 2,2,2 | 3,3,3 | 4,4,4 | 5,5,5 | 6,6,6
+j/ns/issue/join_l	type=bigint;bigint rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+j/ns/issue/join_r	type=bigint rows=6 1,20 | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+j/ns/issue/cte_self	type=bigint;bigint rows=6 1,20,20 | 2,40,40 | 3,NULL,NULL | 4,80,80 | 5,100,100 | 6,120,120
+j/ns/issue/cross	type=bigint;bigint rows=6 1,20,1 | 2,40,1 | 3,NULL,1 | 4,80,1 | 5,100,1 | 6,120,1
+j/ns/issue/semi	type=bigint rows=4 1,20 | 2,40 | 3,NULL | 4,80
+j/ns/issue/cte_join_t	type=bigint;double precision rows=6 1,20,1.5 | 2,40,2.5 | 3,NULL,NULL | 4,80,4.5 | 5,100,5.5 | 6,120,6.5
+j/ns/issue/w_in_join	type=numeric;bigint rows=6 1,2.5,1 | 2,20,2 | 3,40,3 | 4,NULL,4 | 5,80,5 | 6,100,6
+j/ns/part/join_l	type=bigint;bigint rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+j/ns/part/join_r	type=bigint rows=6 1,20 | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+j/ns/part/cte_self	type=bigint;bigint rows=6 1,20,20 | 2,40,40 | 3,NULL,NULL | 4,80,80 | 5,100,100 | 6,120,120
+j/ns/part/cross	type=bigint;bigint rows=6 1,20,1 | 2,40,1 | 3,NULL,1 | 4,80,1 | 5,100,1 | 6,120,1
+j/ns/part/semi	type=bigint rows=4 1,20 | 2,40 | 3,NULL | 4,80
+j/ns/part/cte_join_t	type=bigint;double precision rows=6 1,20,1.5 | 2,40,2.5 | 3,NULL,NULL | 4,80,4.5 | 5,100,5.5 | 6,120,6.5
+j/ns/part/w_in_join	type=bigint;bigint rows=6 1,1,1 | 2,1,2 | 3,1,3 | 4,1,4 | 5,1,5 | 6,1,6
+j/ns/lagnd/join_l	type=bigint;bigint rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+j/ns/lagnd/join_r	type=bigint rows=6 1,20 | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+j/ns/lagnd/cte_self	type=bigint;bigint rows=6 1,20,20 | 2,40,40 | 3,NULL,NULL | 4,80,80 | 5,100,100 | 6,120,120
+j/ns/lagnd/cross	type=bigint;bigint rows=6 1,20,1 | 2,40,1 | 3,NULL,1 | 4,80,1 | 5,100,1 | 6,120,1
+j/ns/lagnd/semi	type=bigint rows=4 1,20 | 2,40 | 3,NULL | 4,80
+j/ns/lagnd/cte_join_t	type=bigint;double precision rows=6 1,20,1.5 | 2,40,2.5 | 3,NULL,NULL | 4,80,4.5 | 5,100,5.5 | 6,120,6.5
+j/ns/lagnd/w_in_join	type=bigint;bigint rows=6 1,NULL,1 | 2,20,2 | 3,40,3 | 4,NULL,4 | 5,80,5 | 6,100,6
+j/ns/first/join_l	type=bigint;bigint rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+j/ns/first/join_r	type=bigint rows=6 1,20 | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+j/ns/first/cte_self	type=bigint;bigint rows=6 1,20,20 | 2,40,40 | 3,NULL,NULL | 4,80,80 | 5,100,100 | 6,120,120
+j/ns/first/cross	type=bigint;bigint rows=6 1,20,1 | 2,40,1 | 3,NULL,1 | 4,80,1 | 5,100,1 | 6,120,1
+j/ns/first/semi	type=bigint rows=4 1,20 | 2,40 | 3,NULL | 4,80
+j/ns/first/cte_join_t	type=bigint;double precision rows=6 1,20,1.5 | 2,40,2.5 | 3,NULL,NULL | 4,80,4.5 | 5,100,5.5 | 6,120,6.5
+j/ns/first/w_in_join	type=bigint;bigint rows=6 1,20,1 | 2,20,2 | 3,20,3 | 4,20,4 | 5,20,5 | 6,20,6
+j/ns/sum/join_l	type=bigint;bigint rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+j/ns/sum/join_r	type=bigint rows=6 1,20 | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+j/ns/sum/cte_self	type=bigint;bigint rows=6 1,20,20 | 2,40,40 | 3,NULL,NULL | 4,80,80 | 5,100,100 | 6,120,120
+j/ns/sum/cross	type=bigint;bigint rows=6 1,20,1 | 2,40,1 | 3,NULL,1 | 4,80,1 | 5,100,1 | 6,120,1
+j/ns/sum/semi	type=bigint rows=4 1,20 | 2,40 | 3,NULL | 4,80
+j/ns/sum/cte_join_t	type=bigint;double precision rows=6 1,20,1.5 | 2,40,2.5 | 3,NULL,NULL | 4,80,4.5 | 5,100,5.5 | 6,120,6.5
+j/ns/sum/w_in_join	type=numeric;bigint rows=6 1,20,1 | 2,60,2 | 3,60,3 | 4,140,4 | 5,240,5 | 6,360,6
+j/ns/rn/join_l	type=bigint;bigint rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+j/ns/rn/join_r	type=bigint rows=6 1,20 | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+j/ns/rn/cte_self	type=bigint;bigint rows=6 1,20,20 | 2,40,40 | 3,NULL,NULL | 4,80,80 | 5,100,100 | 6,120,120
+j/ns/rn/cross	type=bigint;bigint rows=6 1,20,1 | 2,40,1 | 3,NULL,1 | 4,80,1 | 5,100,1 | 6,120,1
+j/ns/rn/semi	type=bigint rows=4 1,20 | 2,40 | 3,NULL | 4,80
+j/ns/rn/cte_join_t	type=bigint;double precision rows=6 1,20,1.5 | 2,40,2.5 | 3,NULL,NULL | 4,80,4.5 | 5,100,5.5 | 6,120,6.5
+j/ns/rn/w_in_join	type=bigint;bigint rows=6 1,1,1 | 2,2,2 | 3,3,3 | 4,4,4 | 5,5,5 | 6,6,6
+r4v/bare/same_proj	type=bigint;numeric;bigint;bigint rows=6 1,1,20,20,10 | 2,1,60,40,20 | 3,1,60,NULL,NULL | 4,2,140,80,40 | 5,2,240,100,50 | 6,3,360,120,60
+r4v/bare/same_order	type=bigint;numeric;bigint;bigint rows=3 4,2,140,80,40 | 5,2,240,100,50 | 6,3,360,120,60
+r4v/bare/same_distinct	type=numeric;bigint rows=6 140,80 | 20,20 | 240,100 | 360,120 | 60,40 | 60,NULL
+r4v/bare/proj	type=numeric;bigint;bigint rows=6 1,20,20,10 | 2,60,40,20 | 3,60,NULL,NULL | 4,140,80,40 | 5,240,100,50 | 6,360,120,60
+r4v/bare/proj_expr	type=bigint;bigint rows=6 1,21,10 | 2,41,20 | 3,NULL,NULL | 4,81,40 | 5,101,50 | 6,121,60
+r4v/bare/filter	type=bigint;bigint rows=4 2,40,20 | 4,80,40 | 5,100,50 | 6,120,60
+r4v/bare/join_l	type=bigint;bigint;bigint rows=6 1,20,10,1 | 2,40,20,2 | 3,NULL,NULL,3 | 4,80,40,4 | 5,100,50,5 | 6,120,60,6
+r4v/bare/join_key	type=bigint;bigint rows=5 1,20,1 | 2,40,2 | 4,80,4 | 5,100,5 | 6,120,6
+r4v/bare/join_r	type=bigint;bigint;bigint rows=6 1,1,20,10 | 2,2,40,20 | 3,3,NULL,NULL | 4,4,80,40 | 5,5,100,50 | 6,6,120,60
+r4v/bare/left_join	type=bigint rows=6 1,NULL | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+r4v/bare/group	type=bigint;bigint rows=6 100,1 | 120,1 | 20,1 | 40,1 | 80,1 | NULL,1
+r4v/bare/agg_sum	type=numeric;bigint rows=1 360,120
+r4v/bare/having	type=numeric rows=3 1,60 | 2,180 | 3,120
+r4v/bare/distinct	type=bigint rows=6 100 | 120 | 20 | 40 | 80 | NULL
+r4v/bare/order_lim	type=bigint rows=3 4,80 | 5,100 | 6,120
+r4v/bare/union	type=bigint rows=12 1,10 | 1,20 | 2,20 | 2,40 | 3,NULL | 3,NULL | 4,40 | 4,80 | 5,100 | 5,50 | 6,120 | 6,60
+r4v/bare/win2_sum	type=numeric;bigint rows=6 1,20,20 | 2,60,40 | 3,60,NULL | 4,140,80 | 5,240,100 | 6,360,120
+r4v/bare/win2_part	type=bigint;bigint rows=6 1,1,20 | 2,1,40 | 3,1,NULL | 4,1,80 | 5,1,100 | 6,1,120
+r4v/bare/win2_lag	type=numeric;bigint rows=6 1,2.5,20 | 2,20,40 | 3,40,NULL | 4,NULL,80 | 5,80,100 | 6,100,120
+r4v/bare/cte	type=bigint;bigint rows=5 2,40,20 | 3,NULL,NULL | 4,80,40 | 5,100,50 | 6,120,60
+r4v/bare/cte_self	type=bigint;bigint rows=6 1,20,20 | 2,40,40 | 3,NULL,NULL | 4,80,80 | 5,100,100 | 6,120,120
+r4v/bare/from2	type=bigint rows=5 1,20 | 2,40 | 3,NULL | 4,80 | 5,100
+r4v/bare/in_sub	type=bigint rows=5 1,10 | 2,20 | 4,40 | 5,50 | 6,60
+r4v/bare/scalar_sub	type=bigint rows=1 1,120
+r4v/bare/u_proj	type=numeric;bigint;bigint rows=6 1,20,20,10 | 2,60,40,20 | 3,60,NULL,NULL | 4,140,80,40 | 5,240,100,50 | 6,360,120,60
+r4v/bare/u_filter	type=bigint;bigint rows=4 2,40,20 | 4,80,40 | 5,100,50 | 6,120,60
+r4v/bare/u_join_key	type=bigint;bigint rows=5 1,20,1 | 2,40,2 | 4,80,4 | 5,100,5 | 6,120,6
+r4v/bare/u_group	type=bigint;bigint rows=6 100,1 | 120,1 | 20,1 | 40,1 | 80,1 | NULL,1
+r4v/bare/u_agg_sum	type=numeric;bigint rows=1 360,120
+r4v/bare/u_order_lim	type=bigint rows=3 4,80 | 5,100 | 6,120
+r4v/bare/u_win2_sum	type=numeric;bigint rows=6 1,20,20 | 2,60,40 | 3,60,NULL | 4,140,80 | 5,240,100 | 6,360,120
+r4v/bare/u_win2_lag	type=numeric;bigint rows=6 1,2.5,20 | 2,20,40 | 3,40,NULL | 4,NULL,80 | 5,80,100 | 6,100,120
+r4v/bare/u_cte	type=bigint;bigint rows=5 2,40,20 | 3,NULL,NULL | 4,80,40 | 5,100,50 | 6,120,60
+r4v/part/same_proj	type=bigint;bigint;bigint;bigint rows=6 1,1,1,20,10 | 2,1,1,40,20 | 3,1,1,NULL,NULL | 4,2,1,80,40 | 5,2,1,100,50 | 6,3,1,120,60
+r4v/part/same_order	type=bigint;bigint;bigint;bigint rows=3 4,2,1,80,40 | 5,2,1,100,50 | 6,3,1,120,60
+r4v/part/same_distinct	type=bigint;bigint rows=6 1,100 | 1,120 | 1,20 | 1,40 | 1,80 | 1,NULL
+r4v/part/proj	type=bigint;bigint;bigint rows=6 1,1,20,10 | 2,1,40,20 | 3,1,NULL,NULL | 4,1,80,40 | 5,1,100,50 | 6,1,120,60
+r4v/part/proj_expr	type=bigint;bigint rows=6 1,21,10 | 2,41,20 | 3,NULL,NULL | 4,81,40 | 5,101,50 | 6,121,60
+r4v/part/filter	type=bigint;bigint rows=4 2,40,20 | 4,80,40 | 5,100,50 | 6,120,60
+r4v/part/join_l	type=bigint;bigint;bigint rows=6 1,20,10,1 | 2,40,20,2 | 3,NULL,NULL,3 | 4,80,40,4 | 5,100,50,5 | 6,120,60,6
+r4v/part/join_key	type=bigint;bigint rows=5 1,20,1 | 2,40,2 | 4,80,4 | 5,100,5 | 6,120,6
+r4v/part/join_r	type=bigint;bigint;bigint rows=6 1,1,20,10 | 2,2,40,20 | 3,3,NULL,NULL | 4,4,80,40 | 5,5,100,50 | 6,6,120,60
+r4v/part/left_join	type=bigint rows=6 1,NULL | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+r4v/part/group	type=bigint;bigint rows=6 100,1 | 120,1 | 20,1 | 40,1 | 80,1 | NULL,1
+r4v/part/agg_sum	type=numeric;bigint rows=1 360,120
+r4v/part/having	type=numeric rows=3 1,60 | 2,180 | 3,120
+r4v/part/distinct	type=bigint rows=6 100 | 120 | 20 | 40 | 80 | NULL
+r4v/part/order_lim	type=bigint rows=3 4,80 | 5,100 | 6,120
+r4v/part/union	type=bigint rows=12 1,10 | 1,20 | 2,20 | 2,40 | 3,NULL | 3,NULL | 4,40 | 4,80 | 5,100 | 5,50 | 6,120 | 6,60
+r4v/part/win2_sum	type=numeric;bigint rows=6 1,20,20 | 2,60,40 | 3,60,NULL | 4,140,80 | 5,240,100 | 6,360,120
+r4v/part/win2_part	type=bigint;bigint rows=6 1,1,20 | 2,1,40 | 3,1,NULL | 4,1,80 | 5,1,100 | 6,1,120
+r4v/part/win2_lag	type=numeric;bigint rows=6 1,2.5,20 | 2,20,40 | 3,40,NULL | 4,NULL,80 | 5,80,100 | 6,100,120
+r4v/part/cte	type=bigint;bigint rows=5 2,40,20 | 3,NULL,NULL | 4,80,40 | 5,100,50 | 6,120,60
+r4v/part/cte_self	type=bigint;bigint rows=6 1,20,20 | 2,40,40 | 3,NULL,NULL | 4,80,80 | 5,100,100 | 6,120,120
+r4v/part/from2	type=bigint rows=5 1,20 | 2,40 | 3,NULL | 4,80 | 5,100
+r4v/part/in_sub	type=bigint rows=5 1,10 | 2,20 | 4,40 | 5,50 | 6,60
+r4v/part/scalar_sub	type=bigint rows=1 1,120
+r4v/part/u_proj	type=bigint;bigint;bigint rows=6 1,1,20,10 | 2,1,40,20 | 3,1,NULL,NULL | 4,1,80,40 | 5,1,100,50 | 6,1,120,60
+r4v/part/u_filter	type=bigint;bigint rows=4 2,40,20 | 4,80,40 | 5,100,50 | 6,120,60
+r4v/part/u_join_key	type=bigint;bigint rows=5 1,20,1 | 2,40,2 | 4,80,4 | 5,100,5 | 6,120,6
+r4v/part/u_group	type=bigint;bigint rows=6 100,1 | 120,1 | 20,1 | 40,1 | 80,1 | NULL,1
+r4v/part/u_agg_sum	type=numeric;bigint rows=1 360,120
+r4v/part/u_order_lim	type=bigint rows=3 4,80 | 5,100 | 6,120
+r4v/part/u_win2_sum	type=numeric;bigint rows=6 1,20,20 | 2,60,40 | 3,60,NULL | 4,140,80 | 5,240,100 | 6,360,120
+r4v/part/u_win2_lag	type=numeric;bigint rows=6 1,2.5,20 | 2,20,40 | 3,40,NULL | 4,NULL,80 | 5,80,100 | 6,100,120
+r4v/part/u_cte	type=bigint;bigint rows=5 2,40,20 | 3,NULL,NULL | 4,80,40 | 5,100,50 | 6,120,60
+r4v/dflt/same_proj	type=bigint;bigint;bigint;bigint rows=6 1,1,20,20,10 | 2,1,10,40,20 | 3,1,20,NULL,NULL | 4,2,NULL,80,40 | 5,2,40,100,50 | 6,3,50,120,60
+r4v/dflt/same_order	type=bigint;bigint;bigint;bigint rows=3 4,2,NULL,80,40 | 5,2,40,100,50 | 6,3,50,120,60
+r4v/dflt/same_distinct	type=bigint;bigint rows=6 10,40 | 20,20 | 20,NULL | 40,100 | 50,120 | NULL,80
+r4v/dflt/proj	type=bigint;bigint;bigint rows=6 1,20,20,10 | 2,10,40,20 | 3,20,NULL,NULL | 4,NULL,80,40 | 5,40,100,50 | 6,50,120,60
+r4v/dflt/proj_expr	type=bigint;bigint rows=6 1,21,10 | 2,41,20 | 3,NULL,NULL | 4,81,40 | 5,101,50 | 6,121,60
+r4v/dflt/filter	type=bigint;bigint rows=4 2,40,20 | 4,80,40 | 5,100,50 | 6,120,60
+r4v/dflt/join_l	type=bigint;bigint;bigint rows=6 1,20,10,1 | 2,40,20,2 | 3,NULL,NULL,3 | 4,80,40,4 | 5,100,50,5 | 6,120,60,6
+r4v/dflt/join_key	type=bigint;bigint rows=5 1,20,1 | 2,40,2 | 4,80,4 | 5,100,5 | 6,120,6
+r4v/dflt/join_r	type=bigint;bigint;bigint rows=6 1,1,20,10 | 2,2,40,20 | 3,3,NULL,NULL | 4,4,80,40 | 5,5,100,50 | 6,6,120,60
+r4v/dflt/left_join	type=bigint rows=6 1,NULL | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+r4v/dflt/group	type=bigint;bigint rows=6 100,1 | 120,1 | 20,1 | 40,1 | 80,1 | NULL,1
+r4v/dflt/agg_sum	type=numeric;bigint rows=1 360,120
+r4v/dflt/having	type=numeric rows=3 1,60 | 2,180 | 3,120
+r4v/dflt/distinct	type=bigint rows=6 100 | 120 | 20 | 40 | 80 | NULL
+r4v/dflt/order_lim	type=bigint rows=3 4,80 | 5,100 | 6,120
+r4v/dflt/union	type=bigint rows=12 1,10 | 1,20 | 2,20 | 2,40 | 3,NULL | 3,NULL | 4,40 | 4,80 | 5,100 | 5,50 | 6,120 | 6,60
+r4v/dflt/win2_sum	type=numeric;bigint rows=6 1,20,20 | 2,60,40 | 3,60,NULL | 4,140,80 | 5,240,100 | 6,360,120
+r4v/dflt/win2_part	type=bigint;bigint rows=6 1,1,20 | 2,1,40 | 3,1,NULL | 4,1,80 | 5,1,100 | 6,1,120
+r4v/dflt/win2_lag	type=numeric;bigint rows=6 1,2.5,20 | 2,20,40 | 3,40,NULL | 4,NULL,80 | 5,80,100 | 6,100,120
+r4v/dflt/cte	type=bigint;bigint rows=5 2,40,20 | 3,NULL,NULL | 4,80,40 | 5,100,50 | 6,120,60
+r4v/dflt/cte_self	type=bigint;bigint rows=6 1,20,20 | 2,40,40 | 3,NULL,NULL | 4,80,80 | 5,100,100 | 6,120,120
+r4v/dflt/from2	type=bigint rows=5 1,20 | 2,40 | 3,NULL | 4,80 | 5,100
+r4v/dflt/in_sub	type=bigint rows=5 1,10 | 2,20 | 4,40 | 5,50 | 6,60
+r4v/dflt/scalar_sub	type=bigint rows=1 1,120
+r4v/dflt/u_proj	type=bigint;bigint;bigint rows=6 1,20,20,10 | 2,10,40,20 | 3,20,NULL,NULL | 4,NULL,80,40 | 5,40,100,50 | 6,50,120,60
+r4v/dflt/u_filter	type=bigint;bigint rows=4 2,40,20 | 4,80,40 | 5,100,50 | 6,120,60
+r4v/dflt/u_join_key	type=bigint;bigint rows=5 1,20,1 | 2,40,2 | 4,80,4 | 5,100,5 | 6,120,6
+r4v/dflt/u_group	type=bigint;bigint rows=6 100,1 | 120,1 | 20,1 | 40,1 | 80,1 | NULL,1
+r4v/dflt/u_agg_sum	type=numeric;bigint rows=1 360,120
+r4v/dflt/u_order_lim	type=bigint rows=3 4,80 | 5,100 | 6,120
+r4v/dflt/u_win2_sum	type=numeric;bigint rows=6 1,20,20 | 2,60,40 | 3,60,NULL | 4,140,80 | 5,240,100 | 6,360,120
+r4v/dflt/u_win2_lag	type=numeric;bigint rows=6 1,2.5,20 | 2,20,40 | 3,40,NULL | 4,NULL,80 | 5,80,100 | 6,100,120
+r4v/dflt/u_cte	type=bigint;bigint rows=5 2,40,20 | 3,NULL,NULL | 4,80,40 | 5,100,50 | 6,120,60
+r4v/issue/same_proj	type=bigint;numeric;bigint;bigint rows=6 1,1,2.5,20,10 | 2,1,20,40,20 | 3,1,40,NULL,NULL | 4,2,NULL,80,40 | 5,2,80,100,50 | 6,3,100,120,60
+r4v/issue/same_order	type=bigint;numeric;bigint;bigint rows=3 4,2,NULL,80,40 | 5,2,80,100,50 | 6,3,100,120,60
+r4v/issue/same_distinct	type=numeric;bigint rows=6 100,120 | 2.5,20 | 20,40 | 40,NULL | 80,100 | NULL,80
+r4v/issue/proj	type=numeric;bigint;bigint rows=6 1,2.5,20,10 | 2,20,40,20 | 3,40,NULL,NULL | 4,NULL,80,40 | 5,80,100,50 | 6,100,120,60
+r4v/issue/proj_expr	type=bigint;bigint rows=6 1,21,10 | 2,41,20 | 3,NULL,NULL | 4,81,40 | 5,101,50 | 6,121,60
+r4v/issue/filter	type=bigint;bigint rows=4 2,40,20 | 4,80,40 | 5,100,50 | 6,120,60
+r4v/issue/join_l	type=bigint;bigint;bigint rows=6 1,20,10,1 | 2,40,20,2 | 3,NULL,NULL,3 | 4,80,40,4 | 5,100,50,5 | 6,120,60,6
+r4v/issue/join_key	type=bigint;bigint rows=5 1,20,1 | 2,40,2 | 4,80,4 | 5,100,5 | 6,120,6
+r4v/issue/join_r	type=bigint;bigint;bigint rows=6 1,1,20,10 | 2,2,40,20 | 3,3,NULL,NULL | 4,4,80,40 | 5,5,100,50 | 6,6,120,60
+r4v/issue/left_join	type=bigint rows=6 1,NULL | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+r4v/issue/group	type=bigint;bigint rows=6 100,1 | 120,1 | 20,1 | 40,1 | 80,1 | NULL,1
+r4v/issue/agg_sum	type=numeric;bigint rows=1 360,120
+r4v/issue/having	type=numeric rows=3 1,60 | 2,180 | 3,120
+r4v/issue/distinct	type=bigint rows=6 100 | 120 | 20 | 40 | 80 | NULL
+r4v/issue/order_lim	type=bigint rows=3 4,80 | 5,100 | 6,120
+r4v/issue/union	type=bigint rows=12 1,10 | 1,20 | 2,20 | 2,40 | 3,NULL | 3,NULL | 4,40 | 4,80 | 5,100 | 5,50 | 6,120 | 6,60
+r4v/issue/win2_sum	type=numeric;bigint rows=6 1,20,20 | 2,60,40 | 3,60,NULL | 4,140,80 | 5,240,100 | 6,360,120
+r4v/issue/win2_part	type=bigint;bigint rows=6 1,1,20 | 2,1,40 | 3,1,NULL | 4,1,80 | 5,1,100 | 6,1,120
+r4v/issue/win2_lag	type=numeric;bigint rows=6 1,2.5,20 | 2,20,40 | 3,40,NULL | 4,NULL,80 | 5,80,100 | 6,100,120
+r4v/issue/cte	type=bigint;bigint rows=5 2,40,20 | 3,NULL,NULL | 4,80,40 | 5,100,50 | 6,120,60
+r4v/issue/cte_self	type=bigint;bigint rows=6 1,20,20 | 2,40,40 | 3,NULL,NULL | 4,80,80 | 5,100,100 | 6,120,120
+r4v/issue/from2	type=bigint rows=5 1,20 | 2,40 | 3,NULL | 4,80 | 5,100
+r4v/issue/in_sub	type=bigint rows=5 1,10 | 2,20 | 4,40 | 5,50 | 6,60
+r4v/issue/scalar_sub	type=bigint rows=1 1,120
+r4v/issue/u_proj	type=numeric;bigint;bigint rows=6 1,2.5,20,10 | 2,20,40,20 | 3,40,NULL,NULL | 4,NULL,80,40 | 5,80,100,50 | 6,100,120,60
+r4v/issue/u_filter	type=bigint;bigint rows=4 2,40,20 | 4,80,40 | 5,100,50 | 6,120,60
+r4v/issue/u_join_key	type=bigint;bigint rows=5 1,20,1 | 2,40,2 | 4,80,4 | 5,100,5 | 6,120,6
+r4v/issue/u_group	type=bigint;bigint rows=6 100,1 | 120,1 | 20,1 | 40,1 | 80,1 | NULL,1
+r4v/issue/u_agg_sum	type=numeric;bigint rows=1 360,120
+r4v/issue/u_order_lim	type=bigint rows=3 4,80 | 5,100 | 6,120
+r4v/issue/u_win2_sum	type=numeric;bigint rows=6 1,20,20 | 2,60,40 | 3,60,NULL | 4,140,80 | 5,240,100 | 6,360,120
+r4v/issue/u_win2_lag	type=numeric;bigint rows=6 1,2.5,20 | 2,20,40 | 3,40,NULL | 4,NULL,80 | 5,80,100 | 6,100,120
+r4v/issue/u_cte	type=bigint;bigint rows=5 2,40,20 | 3,NULL,NULL | 4,80,40 | 5,100,50 | 6,120,60
+r4v/noread/same_proj	type=bigint;bigint;bigint;bigint rows=6 1,1,1,20,10 | 2,1,2,40,20 | 3,1,3,NULL,NULL | 4,2,4,80,40 | 5,2,5,100,50 | 6,3,6,120,60
+r4v/noread/same_order	type=bigint;bigint;bigint;bigint rows=3 4,2,4,80,40 | 5,2,5,100,50 | 6,3,6,120,60
+r4v/noread/same_distinct	type=bigint;bigint rows=6 1,20 | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+r4v/noread/proj	type=bigint;bigint;bigint rows=6 1,1,20,10 | 2,2,40,20 | 3,3,NULL,NULL | 4,4,80,40 | 5,5,100,50 | 6,6,120,60
+r4v/noread/proj_expr	type=bigint;bigint rows=6 1,21,10 | 2,41,20 | 3,NULL,NULL | 4,81,40 | 5,101,50 | 6,121,60
+r4v/noread/filter	type=bigint;bigint rows=4 2,40,20 | 4,80,40 | 5,100,50 | 6,120,60
+r4v/noread/join_l	type=bigint;bigint;bigint rows=6 1,20,10,1 | 2,40,20,2 | 3,NULL,NULL,3 | 4,80,40,4 | 5,100,50,5 | 6,120,60,6
+r4v/noread/join_key	type=bigint;bigint rows=5 1,20,1 | 2,40,2 | 4,80,4 | 5,100,5 | 6,120,6
+r4v/noread/join_r	type=bigint;bigint;bigint rows=6 1,1,20,10 | 2,2,40,20 | 3,3,NULL,NULL | 4,4,80,40 | 5,5,100,50 | 6,6,120,60
+r4v/noread/left_join	type=bigint rows=6 1,NULL | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+r4v/noread/group	type=bigint;bigint rows=6 100,1 | 120,1 | 20,1 | 40,1 | 80,1 | NULL,1
+r4v/noread/agg_sum	type=numeric;bigint rows=1 360,120
+r4v/noread/having	type=numeric rows=3 1,60 | 2,180 | 3,120
+r4v/noread/distinct	type=bigint rows=6 100 | 120 | 20 | 40 | 80 | NULL
+r4v/noread/order_lim	type=bigint rows=3 4,80 | 5,100 | 6,120
+r4v/noread/union	type=bigint rows=12 1,10 | 1,20 | 2,20 | 2,40 | 3,NULL | 3,NULL | 4,40 | 4,80 | 5,100 | 5,50 | 6,120 | 6,60
+r4v/noread/win2_sum	type=numeric;bigint rows=6 1,20,20 | 2,60,40 | 3,60,NULL | 4,140,80 | 5,240,100 | 6,360,120
+r4v/noread/win2_part	type=bigint;bigint rows=6 1,1,20 | 2,1,40 | 3,1,NULL | 4,1,80 | 5,1,100 | 6,1,120
+r4v/noread/win2_lag	type=numeric;bigint rows=6 1,2.5,20 | 2,20,40 | 3,40,NULL | 4,NULL,80 | 5,80,100 | 6,100,120
+r4v/noread/cte	type=bigint;bigint rows=5 2,40,20 | 3,NULL,NULL | 4,80,40 | 5,100,50 | 6,120,60
+r4v/noread/cte_self	type=bigint;bigint rows=6 1,20,20 | 2,40,40 | 3,NULL,NULL | 4,80,80 | 5,100,100 | 6,120,120
+r4v/noread/from2	type=bigint rows=5 1,20 | 2,40 | 3,NULL | 4,80 | 5,100
+r4v/noread/in_sub	type=bigint rows=5 1,10 | 2,20 | 4,40 | 5,50 | 6,60
+r4v/noread/scalar_sub	type=bigint rows=1 1,120
+r4v/noread/u_proj	type=bigint;bigint;bigint rows=6 1,1,20,10 | 2,2,40,20 | 3,3,NULL,NULL | 4,4,80,40 | 5,5,100,50 | 6,6,120,60
+r4v/noread/u_filter	type=bigint;bigint rows=4 2,40,20 | 4,80,40 | 5,100,50 | 6,120,60
+r4v/noread/u_join_key	type=bigint;bigint rows=5 1,20,1 | 2,40,2 | 4,80,4 | 5,100,5 | 6,120,6
+r4v/noread/u_group	type=bigint;bigint rows=6 100,1 | 120,1 | 20,1 | 40,1 | 80,1 | NULL,1
+r4v/noread/u_agg_sum	type=numeric;bigint rows=1 360,120
+r4v/noread/u_order_lim	type=bigint rows=3 4,80 | 5,100 | 6,120
+r4v/noread/u_win2_sum	type=numeric;bigint rows=6 1,20,20 | 2,60,40 | 3,60,NULL | 4,140,80 | 5,240,100 | 6,360,120
+r4v/noread/u_win2_lag	type=numeric;bigint rows=6 1,2.5,20 | 2,20,40 | 3,40,NULL | 4,NULL,80 | 5,80,100 | 6,100,120
+r4v/noread/u_cte	type=bigint;bigint rows=5 2,40,20 | 3,NULL,NULL | 4,80,40 | 5,100,50 | 6,120,60
+r4v/nf_bare/same_proj	type=bigint;numeric;bigint rows=6 1,1,20,20 | 2,1,60,40 | 3,1,60,NULL | 4,2,140,80 | 5,2,240,100 | 6,3,360,120
+r4v/nf_bare/same_order	type=bigint;numeric;bigint rows=3 4,2,140,80 | 5,2,240,100 | 6,3,360,120
+r4v/nf_bare/same_distinct	type=numeric;bigint rows=6 140,80 | 20,20 | 240,100 | 360,120 | 60,40 | 60,NULL
+r4v/nf_bare/proj	type=numeric;bigint rows=6 1,20,20 | 2,60,40 | 3,60,NULL | 4,140,80 | 5,240,100 | 6,360,120
+r4v/nf_bare/proj_expr	type=bigint rows=6 1,21 | 2,41 | 3,NULL | 4,81 | 5,101 | 6,121
+r4v/nf_bare/filter	type=bigint rows=4 2,40 | 4,80 | 5,100 | 6,120
+r4v/nf_bare/join_l	type=bigint;bigint rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+r4v/nf_bare/join_key	type=bigint;bigint rows=5 1,20,1 | 2,40,2 | 4,80,4 | 5,100,5 | 6,120,6
+r4v/nf_bare/join_r	type=bigint;bigint rows=6 1,1,20 | 2,2,40 | 3,3,NULL | 4,4,80 | 5,5,100 | 6,6,120
+r4v/nf_bare/left_join	type=bigint rows=6 1,NULL | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+r4v/nf_bare/group	type=bigint;bigint rows=6 100,1 | 120,1 | 20,1 | 40,1 | 80,1 | NULL,1
+r4v/nf_bare/agg_sum	type=numeric;bigint rows=1 360,120
+r4v/nf_bare/having	type=numeric rows=3 1,60 | 2,180 | 3,120
+r4v/nf_bare/distinct	type=bigint rows=6 100 | 120 | 20 | 40 | 80 | NULL
+r4v/nf_bare/order_lim	type=bigint rows=3 4,80 | 5,100 | 6,120
+r4v/nf_bare/union	type=bigint rows=12 1,10 | 1,20 | 2,20 | 2,40 | 3,NULL | 3,NULL | 4,40 | 4,80 | 5,100 | 5,50 | 6,120 | 6,60
+r4v/nf_bare/win2_sum	type=numeric;bigint rows=6 1,20,20 | 2,60,40 | 3,60,NULL | 4,140,80 | 5,240,100 | 6,360,120
+r4v/nf_bare/win2_part	type=bigint;bigint rows=6 1,1,20 | 2,1,40 | 3,1,NULL | 4,1,80 | 5,1,100 | 6,1,120
+r4v/nf_bare/win2_lag	type=numeric;bigint rows=6 1,2.5,20 | 2,20,40 | 3,40,NULL | 4,NULL,80 | 5,80,100 | 6,100,120
+r4v/nf_bare/cte	type=bigint rows=5 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+r4v/nf_bare/cte_self	type=bigint;bigint rows=6 1,20,20 | 2,40,40 | 3,NULL,NULL | 4,80,80 | 5,100,100 | 6,120,120
+r4v/nf_bare/from2	type=bigint rows=5 1,20 | 2,40 | 3,NULL | 4,80 | 5,100
+r4v/nf_bare/in_sub	type=bigint rows=5 1,10 | 2,20 | 4,40 | 5,50 | 6,60
+r4v/nf_bare/scalar_sub	type=bigint rows=1 1,120
+r4v/nf_bare/u_proj	type=numeric;bigint rows=6 1,20,20 | 2,60,40 | 3,60,NULL | 4,140,80 | 5,240,100 | 6,360,120
+r4v/nf_bare/u_filter	type=bigint rows=4 2,40 | 4,80 | 5,100 | 6,120
+r4v/nf_bare/u_join_key	type=bigint;bigint rows=5 1,20,1 | 2,40,2 | 4,80,4 | 5,100,5 | 6,120,6
+r4v/nf_bare/u_group	type=bigint;bigint rows=6 100,1 | 120,1 | 20,1 | 40,1 | 80,1 | NULL,1
+r4v/nf_bare/u_agg_sum	type=numeric;bigint rows=1 360,120
+r4v/nf_bare/u_order_lim	type=bigint rows=3 4,80 | 5,100 | 6,120
+r4v/nf_bare/u_win2_sum	type=numeric;bigint rows=6 1,20,20 | 2,60,40 | 3,60,NULL | 4,140,80 | 5,240,100 | 6,360,120
+r4v/nf_bare/u_win2_lag	type=numeric;bigint rows=6 1,2.5,20 | 2,20,40 | 3,40,NULL | 4,NULL,80 | 5,80,100 | 6,100,120
+r4v/nf_bare/u_cte	type=bigint rows=5 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+r4v/nf_dflt/same_proj	type=bigint;bigint;bigint rows=6 1,1,20,20 | 2,1,1,40 | 3,1,2,NULL | 4,2,3,80 | 5,2,4,100 | 6,3,5,120
+r4v/nf_dflt/same_order	type=bigint;bigint;bigint rows=3 4,2,3,80 | 5,2,4,100 | 6,3,5,120
+r4v/nf_dflt/same_distinct	type=bigint;bigint rows=6 1,40 | 2,NULL | 20,20 | 3,80 | 4,100 | 5,120
+r4v/nf_dflt/proj	type=bigint;bigint rows=6 1,20,20 | 2,1,40 | 3,2,NULL | 4,3,80 | 5,4,100 | 6,5,120
+r4v/nf_dflt/proj_expr	type=bigint rows=6 1,21 | 2,41 | 3,NULL | 4,81 | 5,101 | 6,121
+r4v/nf_dflt/filter	type=bigint rows=4 2,40 | 4,80 | 5,100 | 6,120
+r4v/nf_dflt/join_l	type=bigint;bigint rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+r4v/nf_dflt/join_key	type=bigint;bigint rows=5 1,20,1 | 2,40,2 | 4,80,4 | 5,100,5 | 6,120,6
+r4v/nf_dflt/join_r	type=bigint;bigint rows=6 1,1,20 | 2,2,40 | 3,3,NULL | 4,4,80 | 5,5,100 | 6,6,120
+r4v/nf_dflt/left_join	type=bigint rows=6 1,NULL | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+r4v/nf_dflt/group	type=bigint;bigint rows=6 100,1 | 120,1 | 20,1 | 40,1 | 80,1 | NULL,1
+r4v/nf_dflt/agg_sum	type=numeric;bigint rows=1 360,120
+r4v/nf_dflt/having	type=numeric rows=3 1,60 | 2,180 | 3,120
+r4v/nf_dflt/distinct	type=bigint rows=6 100 | 120 | 20 | 40 | 80 | NULL
+r4v/nf_dflt/order_lim	type=bigint rows=3 4,80 | 5,100 | 6,120
+r4v/nf_dflt/union	type=bigint rows=12 1,10 | 1,20 | 2,20 | 2,40 | 3,NULL | 3,NULL | 4,40 | 4,80 | 5,100 | 5,50 | 6,120 | 6,60
+r4v/nf_dflt/win2_sum	type=numeric;bigint rows=6 1,20,20 | 2,60,40 | 3,60,NULL | 4,140,80 | 5,240,100 | 6,360,120
+r4v/nf_dflt/win2_part	type=bigint;bigint rows=6 1,1,20 | 2,1,40 | 3,1,NULL | 4,1,80 | 5,1,100 | 6,1,120
+r4v/nf_dflt/win2_lag	type=numeric;bigint rows=6 1,2.5,20 | 2,20,40 | 3,40,NULL | 4,NULL,80 | 5,80,100 | 6,100,120
+r4v/nf_dflt/cte	type=bigint rows=5 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+r4v/nf_dflt/cte_self	type=bigint;bigint rows=6 1,20,20 | 2,40,40 | 3,NULL,NULL | 4,80,80 | 5,100,100 | 6,120,120
+r4v/nf_dflt/from2	type=bigint rows=5 1,20 | 2,40 | 3,NULL | 4,80 | 5,100
+r4v/nf_dflt/in_sub	type=bigint rows=5 1,10 | 2,20 | 4,40 | 5,50 | 6,60
+r4v/nf_dflt/scalar_sub	type=bigint rows=1 1,120
+r4v/nf_dflt/u_proj	type=bigint;bigint rows=6 1,20,20 | 2,1,40 | 3,2,NULL | 4,3,80 | 5,4,100 | 6,5,120
+r4v/nf_dflt/u_filter	type=bigint rows=4 2,40 | 4,80 | 5,100 | 6,120
+r4v/nf_dflt/u_join_key	type=bigint;bigint rows=5 1,20,1 | 2,40,2 | 4,80,4 | 5,100,5 | 6,120,6
+r4v/nf_dflt/u_group	type=bigint;bigint rows=6 100,1 | 120,1 | 20,1 | 40,1 | 80,1 | NULL,1
+r4v/nf_dflt/u_agg_sum	type=numeric;bigint rows=1 360,120
+r4v/nf_dflt/u_order_lim	type=bigint rows=3 4,80 | 5,100 | 6,120
+r4v/nf_dflt/u_win2_sum	type=numeric;bigint rows=6 1,20,20 | 2,60,40 | 3,60,NULL | 4,140,80 | 5,240,100 | 6,360,120
+r4v/nf_dflt/u_win2_lag	type=numeric;bigint rows=6 1,2.5,20 | 2,20,40 | 3,40,NULL | 4,NULL,80 | 5,80,100 | 6,100,120
+r4v/nf_dflt/u_cte	type=bigint rows=5 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+r4v/nf_noread/same_proj	type=bigint;bigint;bigint rows=6 1,1,1,20 | 2,1,2,40 | 3,1,3,NULL | 4,2,4,80 | 5,2,5,100 | 6,3,6,120
+r4v/nf_noread/same_order	type=bigint;bigint;bigint rows=3 4,2,4,80 | 5,2,5,100 | 6,3,6,120
+r4v/nf_noread/same_distinct	type=bigint;bigint rows=6 1,20 | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+r4v/nf_noread/proj	type=bigint;bigint rows=6 1,1,20 | 2,2,40 | 3,3,NULL | 4,4,80 | 5,5,100 | 6,6,120
+r4v/nf_noread/proj_expr	type=bigint rows=6 1,21 | 2,41 | 3,NULL | 4,81 | 5,101 | 6,121
+r4v/nf_noread/filter	type=bigint rows=4 2,40 | 4,80 | 5,100 | 6,120
+r4v/nf_noread/join_l	type=bigint;bigint rows=6 1,20,1 | 2,40,2 | 3,NULL,3 | 4,80,4 | 5,100,5 | 6,120,6
+r4v/nf_noread/join_key	type=bigint;bigint rows=5 1,20,1 | 2,40,2 | 4,80,4 | 5,100,5 | 6,120,6
+r4v/nf_noread/join_r	type=bigint;bigint rows=6 1,1,20 | 2,2,40 | 3,3,NULL | 4,4,80 | 5,5,100 | 6,6,120
+r4v/nf_noread/left_join	type=bigint rows=6 1,NULL | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+r4v/nf_noread/group	type=bigint;bigint rows=6 100,1 | 120,1 | 20,1 | 40,1 | 80,1 | NULL,1
+r4v/nf_noread/agg_sum	type=numeric;bigint rows=1 360,120
+r4v/nf_noread/having	type=numeric rows=3 1,60 | 2,180 | 3,120
+r4v/nf_noread/distinct	type=bigint rows=6 100 | 120 | 20 | 40 | 80 | NULL
+r4v/nf_noread/order_lim	type=bigint rows=3 4,80 | 5,100 | 6,120
+r4v/nf_noread/union	type=bigint rows=12 1,10 | 1,20 | 2,20 | 2,40 | 3,NULL | 3,NULL | 4,40 | 4,80 | 5,100 | 5,50 | 6,120 | 6,60
+r4v/nf_noread/win2_sum	type=numeric;bigint rows=6 1,20,20 | 2,60,40 | 3,60,NULL | 4,140,80 | 5,240,100 | 6,360,120
+r4v/nf_noread/win2_part	type=bigint;bigint rows=6 1,1,20 | 2,1,40 | 3,1,NULL | 4,1,80 | 5,1,100 | 6,1,120
+r4v/nf_noread/win2_lag	type=numeric;bigint rows=6 1,2.5,20 | 2,20,40 | 3,40,NULL | 4,NULL,80 | 5,80,100 | 6,100,120
+r4v/nf_noread/cte	type=bigint rows=5 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+r4v/nf_noread/cte_self	type=bigint;bigint rows=6 1,20,20 | 2,40,40 | 3,NULL,NULL | 4,80,80 | 5,100,100 | 6,120,120
+r4v/nf_noread/from2	type=bigint rows=5 1,20 | 2,40 | 3,NULL | 4,80 | 5,100
+r4v/nf_noread/in_sub	type=bigint rows=5 1,10 | 2,20 | 4,40 | 5,50 | 6,60
+r4v/nf_noread/scalar_sub	type=bigint rows=1 1,120
+r4v/nf_noread/u_proj	type=bigint;bigint rows=6 1,1,20 | 2,2,40 | 3,3,NULL | 4,4,80 | 5,5,100 | 6,6,120
+r4v/nf_noread/u_filter	type=bigint rows=4 2,40 | 4,80 | 5,100 | 6,120
+r4v/nf_noread/u_join_key	type=bigint;bigint rows=5 1,20,1 | 2,40,2 | 4,80,4 | 5,100,5 | 6,120,6
+r4v/nf_noread/u_group	type=bigint;bigint rows=6 100,1 | 120,1 | 20,1 | 40,1 | 80,1 | NULL,1
+r4v/nf_noread/u_agg_sum	type=numeric;bigint rows=1 360,120
+r4v/nf_noread/u_order_lim	type=bigint rows=3 4,80 | 5,100 | 6,120
+r4v/nf_noread/u_win2_sum	type=numeric;bigint rows=6 1,20,20 | 2,60,40 | 3,60,NULL | 4,140,80 | 5,240,100 | 6,360,120
+r4v/nf_noread/u_win2_lag	type=numeric;bigint rows=6 1,2.5,20 | 2,20,40 | 3,40,NULL | 4,NULL,80 | 5,80,100 | 6,100,120
+r4v/nf_noread/u_cte	type=bigint rows=5 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+r4h/lagob_lagw3	type=numeric;bigint rows=6 1,2.5,20 | 2,20,40 | 3,40,NULL | 4,NULL,80 | 5,80,100 | 6,100,120
+r4h/lagob_lagw3_nodef	type=bigint;bigint rows=6 1,NULL,20 | 2,20,40 | 3,40,NULL | 4,NULL,80 | 5,80,100 | 6,100,120
+r4h/rn_lagw3	type=numeric;bigint rows=6 1,2.5,20 | 2,20,40 | 3,40,NULL | 4,NULL,80 | 5,80,100 | 6,100,120
+r4h/plain_lag_lag	type=numeric;double precision rows=6 1,2.5,2.5 | 2,10,1.5 | 3,20,2.5 | 4,NULL,NULL | 5,40,4.5 | 6,50,5.5
+r4h/plain_lag_lag_same	type=numeric;numeric rows=6 1,2.5,2.5 | 2,10,10 | 3,20,20 | 4,NULL,NULL | 5,40,40 | 6,50,50
+r4h/plain_lag_lagi	type=numeric;numeric rows=6 1,2.5,2.5 | 2,10,10 | 3,20,20 | 4,NULL,NULL | 5,40,40 | 6,50,50
+r4h/plain_sumexpr_lag	type=numeric;double precision rows=6 1,2.5,1.5 | 2,10,4 | 3,20,4 | 4,NULL,8.5 | 5,40,14 | 6,50,20.5
+r4h/plain_lag_sumexpr	type=numeric;numeric rows=6 1,10,2.5 | 2,30,10 | 3,30,20 | 4,70,NULL | 5,120,40 | 6,180,50
+r4h/plain_partexpr2	type=bigint;bigint rows=6 1,1,1 | 2,1,2 | 3,1,3 | 4,1,1 | 5,1,2 | 6,1,1
+r4h/plain_lag_lag_part	type=numeric;numeric rows=6 1,2.5,2.5 | 2,10,10 | 3,20,20 | 4,2.5,2.5 | 5,40,40 | 6,2.5,2.5
+r4h/samelevel_two	type=numeric;numeric rows=6 1,2.5,20 | 2,10,NULL | 3,20,40 | 4,NULL,50 | 5,40,60 | 6,50,2.5
+r4h/three_deep	type=numeric;numeric rows=6 1,0.5,2.5 | 2,10,10 | 3,20,20 | 4,NULL,NULL | 5,40,40 | 6,50,50
+r4h/cte_stack	type=numeric;numeric rows=6 1,2.5,2.5 | 2,10,10 | 3,20,20 | 4,NULL,NULL | 5,40,40 | 6,50,50
+ag/scalar_agg/bare	type=integer;bigint rows=1 1,NULL
+ag/scalar_agg/part	type=integer;bigint rows=1 1,1
+ag/scalar_agg/lagdef	type=integer;numeric rows=1 1,2.5
+ag/scalar_agg/orderexpr	type=integer;bigint rows=1 1,1
+c/sh/agg/sum/a	type=numeric;bigint rows=3 1,40,40 | 2,140,100 | 3,260,120
+c/sh/agg/sum/ab	type=numeric;bigint;bigint rows=3 1,40,40,20 | 2,140,100,50 | 3,260,120,60
+c/sh/agg/part/a	type=bigint;bigint rows=3 1,1,40 | 2,1,100 | 3,1,120
+c/sh/agg/part/ab	type=bigint;bigint;bigint rows=3 1,1,40,20 | 2,1,100,50 | 3,1,120,60
