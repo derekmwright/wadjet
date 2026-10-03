@@ -394,6 +394,14 @@ PostgreSQL has no QUALIFY. It filters after windows, can read unprojected inputs
 
 `LAG(x, $1)` with `$1` declared `int8`, `text` or `numeric` and bound `1` answers `LAG(x, 1)`; PostgreSQL raises `42883` (`lag(bigint, bigint)` does not exist). A parameter reaches the engine as the literal it renders to, so its declared type is not read; an `integer` or untyped parameter is read as PostgreSQL reads it. (catalog: [aggregates-windows#r20](adr/0012-divergences/aggregates-windows.md#catalog); #1399, #1439)
 
+**A LAG / LEAD default is evaluated on every row.**
+
+`LAG(b, 1, 10 / (id - 2))` raises `22012` where PostgreSQL evaluates the default only on the rows it fills and answers. The default is computed as a column before the window runs, so a default that raises on any row raises the query. (catalog: [aggregates-windows#r21](adr/0012-divergences/aggregates-windows.md#catalog); #1435)
+
+**A LAG / LEAD default is coerced when a row reads it.**
+
+`LAG(b, 1, 'a')` over a bigint raises `22P02` when the query reads a row, as on PostgreSQL, but over no rows it answers no rows where PostgreSQL raises when the query is planned. A quoted literal default of an ARRAY value raises `cannot store string into ARRAY vector` where PostgreSQL raises `22P02 malformed array literal`. (catalog: [aggregates-windows#r22](adr/0012-divergences/aggregates-windows.md#catalog); #1435)
+
 **Network-native types have separate storage domains.**
 
 `IPV4`, `IPV6`, `CIDR` and `MAC` are native column types with PostgreSQL's `inet` and `macaddr` input grammar at every boundary — the writer, `CAST`, and a literal — but they declare `text` (OID 25) on the wire; `UUID` declares `uuid` (2950); `PORT` and `PROTOCOL` declare `integer` (23). A `CIDR` reads `inet`'s grammar, not `cidr`'s: it keeps host bits an `inet` would keep, where PostgreSQL's `cidr` refuses them, and `CAST('10' AS CIDR)` is 22P02 where PostgreSQL's classful reading answers `10.0.0.0/8`. See the [input grammar table](data-types.md#network-types). (catalog: [network#r1, r2, r3](adr/0012-divergences/network.md#catalog))
