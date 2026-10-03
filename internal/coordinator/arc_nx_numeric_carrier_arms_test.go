@@ -6,7 +6,9 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"math"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -534,11 +536,80 @@ func TestArcNXNumericCarrierEveryArm(t *testing.T) {
 						want, why = k[1], "kept: "+k[2]
 					}
 				}
-				if !nxMatches(got[i], want) {
+				if !nxMatches(got[i], want) && !(strings.HasSuffix(tc.name, "/agg") && nxFloatSumClose(got[i], want)) {
 					t.Errorf("%s\n  arm  %s\n  got  %s\n  want %s (%s)", tc.sql, arm.name, got[i], want, why)
 				}
 			}
 		})
+	}
+}
+
+// nxFloatSumClose accepts an aggregate cell whose wanted answer is a
+// double (a kept line: the quotient's float8 rung) when the arm's answer
+// differs from it only in the last bits of a double: the SUM of doubles
+// depends on the order the partial states meet (ADR-0013, float aggregation
+// order), so `sum(CAST(t.n AS NUMERIC) / 3)` is -0.4133333333333334 or
+// -0.41333333333333344 run to run on the single-process arms. Classes, row
+// counts and every non-double field must match exactly; a double within four
+// units in the last place of the wanted one matches.
+func nxFloatSumClose(got, want string) bool {
+	if !strings.HasPrefix(want, "{") || !strings.Contains(want, "float") {
+		return false
+	}
+	gh, gr, gok := strings.Cut(strings.TrimSpace(got), " rows=")
+	wh, wr, wok := strings.Cut(strings.TrimSpace(want), " rows=")
+	if !gok || !wok || gh != wh {
+		return false
+	}
+	gn, gv, _ := strings.Cut(gr, " ")
+	wn, wv, _ := strings.Cut(wr, " ")
+	if gn != wn {
+		return false
+	}
+	gf := strings.FieldsFunc(gv, func(r rune) bool { return r == ',' || r == '|' || r == ' ' })
+	wf := strings.FieldsFunc(wv, func(r rune) bool { return r == ',' || r == '|' || r == ' ' })
+	if len(gf) != len(wf) {
+		return false
+	}
+	for k := range gf {
+		if gf[k] == wf[k] {
+			continue
+		}
+		a, aerr := strconv.ParseFloat(gf[k], 64)
+		b, berr := strconv.ParseFloat(wf[k], 64)
+		if aerr != nil || berr != nil || math.Signbit(a) != math.Signbit(b) {
+			return false
+		}
+		ua, ub := math.Float64bits(math.Abs(a)), math.Float64bits(math.Abs(b))
+		if ua > ub+4 || ub > ua+4 {
+			return false
+		}
+	}
+	return true
+}
+
+// TestNXFloatSumCloseIsNarrow holds the tolerance to the last bits of a
+// double: the two answers the single-process arms give for nx/wnNumBareNum/agg
+// match, an exact numeric, another row count or a digit further up do not.
+func TestNXFloatSumCloseIsNarrow(t *testing.T) {
+	want := "{float,float} rows=1 -0.4133333333333334,0.75"
+	for _, tc := range []struct {
+		got  string
+		want bool
+	}{
+		{"{float,float} rows=1 -0.41333333333333344,0.75", true},
+		{"{float,float} rows=1 -0.4133333333333334,0.75", true},
+		{"{numeric,numeric} rows=1 -0.41333333333333333334,0.75000000000000000000", false},
+		{"{float,float} rows=1 -0.4133333333333,0.75", false},
+		{"{float,float} rows=1 -0.4133333333333334,0.76", false},
+		{"{float,float} rows=2 -0.4133333333333334,0.75 | 1,1", false},
+	} {
+		if got := nxFloatSumClose(tc.got, want); got != tc.want {
+			t.Errorf("nxFloatSumClose(%q) = %v, want %v", tc.got, got, tc.want)
+		}
+	}
+	if nxFloatSumClose("{int} rows=1 3", "{int} rows=1 3") {
+		t.Error("a non-double answer must go through nxMatches, not the tolerance")
 	}
 }
 
