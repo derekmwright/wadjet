@@ -153,6 +153,17 @@ func (w *declWalk) windowValueDecl(node *logical.Node, we logical.WindowExpr) (e
 	if d, _, ok := w.windowComputedArgDecl(node, we); ok {
 		return d, true
 	}
+	// A COMPUTED value beside an offset and a default: InputCol carries the
+	// whole argument list (`b * 2, 1, d`), which windowComputedArgDecl's
+	// whole-argument test declines, so the first argument's own tree is
+	// typed. Undecided, nothing widened: `LAG(b * 2, 1, d)` answered bigint
+	// 1 where PostgreSQL answers double 1.5, and a REAL value's 2.5 default
+	// failed the write (#1435).
+	if we.InputExpr != nil && node != nil && len(node.Children) > 0 && cleanExpr(we.InputExpr.String()) == col {
+		if d, _, ok := w.windowArgExprDecl(node, we.InputExpr); ok {
+			return d, true
+		}
+	}
 	return expr.DeclType{}, false
 }
 
