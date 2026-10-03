@@ -154,7 +154,7 @@ and `"real"` read as the keywords here, where PostgreSQL answers 42704.
 SELECT CAST(1.0/3 AS FLOAT(1));    -- 0.33333334          (real)
 SELECT CAST(1.0/3 AS FLOAT(25));   -- 0.3333333333333333  (double precision)
 CREATE TABLE t (f FLOAT);          -- a Float64 column: 674999997 stores 674999997
-CREATE TABLE u (f REAL);           -- a Float32 column: 674999997 stores 6.75e+08
+CREATE TABLE u (f REAL);           -- a Float32 column: 674999997 stores 675000000 (float4)
 ```
 
 **Upgrading from v0.25.3 or earlier.** Through v0.25.3 a `CREATE TABLE` column

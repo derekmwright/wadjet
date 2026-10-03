@@ -184,7 +184,7 @@ rpc CreateTable(CreateTableRequest) returns (CreateTableResponse);
 
 Column types are resolved by the same declaration parser the SQL DDL uses, which accepts:
 
-- **Scalars and aliases**: `BOOL`/`BOOLEAN`, `INT32`/`INT`/`INTEGER`, `INT64`/`BIGINT`/`LONG`, `FLOAT32`/`FLOAT`, `FLOAT64`/`DOUBLE`, `STRING`/`VARCHAR`/`TEXT`, `BYTES`/`BINARY`/`VARBINARY`, `TIMESTAMP`/`DATETIME`, `IPV4`/`IP`, `IPV6`, `CIDR`, `MAC`/`MACADDR`, `PORT`, `PROTOCOL`/`PROTO`, `DURATION`/`INTERVAL`, `UUID`/`GUID`, `DATE`
+- **Scalars and aliases**: `BOOL`/`BOOLEAN`, `INT32`/`INT`/`INTEGER`, `INT64`/`BIGINT`/`LONG`, `FLOAT32`/`REAL`/`FLOAT4`/`FLOAT(1..24)`, `FLOAT64`/`FLOAT`/`FLOAT8`/`DOUBLE PRECISION`/`DOUBLE`/`FLOAT(25..53)` (the float names resolve as in [data types](data-types.md#the-floating-point-type-names); through v0.25.3 a `FLOAT` column was `FLOAT32`, and tables created then keep it), `STRING`/`VARCHAR`/`TEXT`, `BYTES`/`BINARY`/`VARBINARY`, `TIMESTAMP`/`DATETIME`, `IPV4`/`IP`, `IPV6`, `CIDR`, `MAC`/`MACADDR`, `PORT`, `PROTOCOL`/`PROTO`, `DURATION`/`INTERVAL`, `UUID`/`GUID`, `DATE`
 - **Parameterized**: `DECIMAL(p,s)` / `NUMERIC(p,s)` (1 <= p <= 38, 0 <= s <= p), `VECTOR(N)`
 - **Nested**: `ARRAY(T)`, `ROW(name T, ...)` / `STRUCT(...)`, `MAP(K, V)`
 
