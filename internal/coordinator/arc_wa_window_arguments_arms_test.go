@@ -354,23 +354,11 @@ func waKeptCells() map[string]waKept {
 		// unknown to int4: the folded argument is refused 42883, loudly.
 		case parts[0] == "off" && parts[2] == "q_plus":
 			kept[c.name] = waKept{"ERR 42883 does not exist", "filing candidate: the constant fold types an unknown literal plus an integer as numeric"}
-		// FILING CANDIDATES, base-identical, outside #1394 / #1399: the
-		// LAG / LEAD DEFAULT is carried as a float or as SQL text, so a
-		// default that needs the result type widened (2.5 into bigint) is
-		// truncated, and one that is text, a column or a cast fails at the
-		// write; and PostgreSQL coerces a text default even at offset 0.
-		case parts[0] == "def" && parts[3] == "dec" && parts[2] != "0":
-			kept[c.name] = waKept{"", "filing candidate: a LAG / LEAD default that widens the result type is truncated"}
-		case parts[0] == "def" && parts[2] != "0" &&
-			(parts[3] == "text" || parts[3] == "q_num" || parts[3] == "col" || parts[3] == "cast" || parts[3] == "colexpr"):
-			kept[c.name] = waKept{"ERR - cannot store string into", "filing candidate: a non-numeric-literal LAG / LEAD default fails at the write"}
 		// AVG over a column at scale 4 here, PostgreSQL's display scale
 		// there, where the digits differ past the fourth place: the
 		// catalogued value divergence r1 (aggregates-windows.md).
 		case c.name == "arg/avg/col/ord" || c.name == "arg/avg/colexpr/ord":
 			kept[c.name] = waKept{"", "value divergence r1: AVG answers at scale s+4"}
-		case parts[0] == "def" && parts[2] == "0" && parts[3] == "text":
-			kept[c.name] = waKept{"", "filing candidate: PostgreSQL coerces a text default at plan time even when no row reads it"}
 		}
 	}
 	// The ANSWERED kept cells pin this engine's rows, measured at the tip.
@@ -478,7 +466,8 @@ func waErrorAgrees(got, pgMsg string) bool {
 	return strings.Contains(got, pgMsg)
 }
 
-// waNormalize strips trailing fractional zeros from an AVG cell's rendering.
+// waNormalize strips trailing fractional zeros from an AVG cell's rendering,
+// and from a LAG / LEAD cell whose default widens it to numeric.
 // AVG over NUMERIC answers at scale s+4 here and at PostgreSQL's display scale
 // there — the catalogued value divergence r1 (aggregates-windows.md), which is
 // not this table's question; the digits are.
@@ -488,7 +477,11 @@ var (
 )
 
 func waNormalize(name, rendered string) string {
-	if !strings.HasPrefix(name, "arg/avg/") {
+	// A LAG / LEAD whose default widens the result to numeric answers at one
+	// scale per column — the same catalogued divergence (numeric-decimal r18),
+	// since #1435 made the result PostgreSQL's numeric.
+	widened := strings.HasPrefix(name, "def/") && strings.Contains(name, "/dec/")
+	if !strings.HasPrefix(name, "arg/avg/") && !widened {
 		return rendered
 	}
 	return waBareDot.ReplaceAllString(waTrailingZeros.ReplaceAllString(rendered, "$1$2"), "$1")
@@ -541,16 +534,4 @@ var waKeptRows = map[string]string{
 	"arg/nth_value/text/frame":   "rows=6 1,NULL | 2,b | 3,b | 4,b | 5,b | 6,b",
 	"arg/nth_value/text/ord":     "rows=6 1,NULL | 2,b | 3,b | 4,b | 5,b | 6,b",
 	"arg/nth_value/text/part":    "rows=6 1,b | 2,b | 3,b | 4,b | 5,b | 6,NULL",
-	"def/lag/0/text/both":        "rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60",
-	"def/lag/0/text/ord":         "rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60",
-	"def/lag/1/dec/both":         "rows=6 1,2 | 2,10 | 3,20 | 4,2 | 5,40 | 6,2",
-	"def/lag/1/dec/ord":          "rows=6 1,2 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50",
-	"def/lag/10/dec/both":        "rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2",
-	"def/lag/10/dec/ord":         "rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2",
-	"def/lead/0/text/both":       "rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60",
-	"def/lead/0/text/ord":        "rows=6 1,10 | 2,20 | 3,NULL | 4,40 | 5,50 | 6,60",
-	"def/lead/1/dec/both":        "rows=6 1,20 | 2,NULL | 3,2 | 4,50 | 5,2 | 6,2",
-	"def/lead/1/dec/ord":         "rows=6 1,20 | 2,NULL | 3,40 | 4,50 | 5,60 | 6,2",
-	"def/lead/10/dec/both":       "rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2",
-	"def/lead/10/dec/ord":        "rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2",
 }
