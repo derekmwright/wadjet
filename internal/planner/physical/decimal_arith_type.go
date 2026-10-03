@@ -521,9 +521,10 @@ func isConstNumericLitNode(node plansql.Node) bool {
 // correlated re-run's column stand-in, not one markScalarAnswer marked), at
 // any depth of the constructs a numeric value passes through: parentheses,
 // unary ±, arithmetic with any operand, the value arms of a CASE / COALESCE /
-// GREATEST / LEAST / NULLIF / IFNULL, and abs / mod / the functions whose
-// type is their argument's. A cast that names its (p,s) and every other
-// function end the walk. binOpDecimalOperand keeps every such quotient on the
+// GREATEST / LEAST / NULLIF / IFNULL, and the arguments expr.CastExactnessArgs
+// names for a function call (abs, mod, round, ceil, ceiling, floor, trunc,
+// truncate, sign, the choosing functions) — the one list both halves read. A
+// cast that names its (p,s) and every other function end the walk. binOpDecimalOperand keeps every such quotient on the
 // float declaration: the one-scale quotient (max(6, s1 + p2 + 1) per column)
 // drops the digits PostgreSQL's per-value scale keeps. expr.castMadeExactIn
 // is the runtime twin.
@@ -555,22 +556,12 @@ func castMadeExactIn(node plansql.Node) bool {
 		}
 		return n.Else != nil && castMadeExactIn(n.Else)
 	case *plansql.FuncCallNode:
-		name := strings.ToLower(n.Name)
-		args := n.Args
-		if _, ok := expr.NumericDomainScalarFn(name); !ok && name != "coalesce" {
-			idx, poly := expr.DefaultRegistry.ReturnType(name).SameAsArgs(len(n.Args))
-			if !poly {
-				return false
-			}
-			args = make([]plansql.Node, 0, len(idx))
-			for _, i := range idx {
-				if i >= 0 && i < len(n.Args) {
-					args = append(args, n.Args[i])
-				}
-			}
+		idx, ok := expr.CastExactnessArgs(n.Name, len(n.Args))
+		if !ok {
+			return false
 		}
-		for _, a := range args {
-			if castMadeExactIn(a) {
+		for _, i := range idx {
+			if i >= 0 && i < len(n.Args) && castMadeExactIn(n.Args[i]) {
 				return true
 			}
 		}
