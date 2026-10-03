@@ -58,6 +58,14 @@ func TestArcNXEmbeddedNumericCarrier(t *testing.T) {
 			"SELECT CAST(-(5 / 2.0) AS INTEGER) AS a, CAST(-SQRT(6.25) AS INTEGER) AS b, " +
 				"CAST(5 / 2.0 AS SMALLINT) AS c, CAST(SQRT(6.25) AS BIGINT) AS d",
 			"{int,int,int,int} -3,-3,3,3"},
+		// A bare NUMERIC cast is a DECIMAL operand of a choice and of a
+		// comparison, never its rendered text (round 5, B1): by byte order
+		// "3" sorts above "100" and "25".
+		{"b1/bareCastChoice",
+			"SELECT a.id, LEAST(CAST(a.i AS NUMERIC), 100) AS l, LEAST(CAST('3' AS NUMERIC), 100) AS t, " +
+				"CAST(3 AS NUMERIC) > 25 AS g, GREATEST(CAST(a.i + 20 AS NUMERIC), 100) AS h FROM nx_e a ORDER BY a.id",
+			"{int,numeric,numeric,bool,numeric} 1,3,3,false,100 | 3,5,3,false,100 | 5,1,3,false,100 | 6,100,3,false,100"},
+		{"b1/bareCastCoalesceWhere", "SELECT count(*) AS c FROM nx_e a WHERE COALESCE(CAST(a.i AS NUMERIC), 100) > 25", "{int} 1"},
 	}
 	for _, c := range cases {
 		res, err := db.Query(ctx, c.sql)

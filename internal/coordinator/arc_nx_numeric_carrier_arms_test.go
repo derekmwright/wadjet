@@ -348,6 +348,72 @@ func nxCells() []nxCell {
 	addOrd("qf/floorIcCtl/cmp", "SELECT t.id FROM ss_t t WHERE t.n <> 0 AND floor(CAST(t.i AS INTEGER)) / t.n = 1.3333333333333333 ORDER BY t.id")
 	addOrd("qf/sqrtCtl/cmp", "SELECT t.id FROM ss_t t WHERE t.n <> 0 AND sqrt(CAST(t.i AS NUMERIC) * CAST(t.i AS NUMERIC)) / t.n = 1.3333333333333333 ORDER BY t.id")
 	addOrd("qf/roundNumScaleCtl/cmp", "SELECT t.id FROM ss_t t WHERE t.n <> 0 AND round(CAST(t.i AS NUMERIC(10,0))) / t.n = 1.3333333333333333 ORDER BY t.id")
+	// A BARE NUMERIC CAST AS A CHOICE'S ARM (round 5, B1): the cast is
+	// classified by the type it declares — a DECIMAL when its operand has an
+	// exact type, as exact arithmetic reads it — so a choice and a comparison
+	// order it as a number and never by its rendered text. Four operand kinds
+	// (a quoted literal, an integer literal, an integer column and an integer
+	// expression, plus a numeric column) × the choosing constructs (the bare
+	// cast, CASE, COALESCE, LEAST, GREATEST, NULLIF) × every consumer that
+	// compares or orders the value. The fixtures discriminate: 3 sorts above
+	// 25, 100 and 10 as text and below them as a number.
+	for _, sj := range [][2]string{
+		{"bare", "{X}"},
+		{"case", "CASE WHEN t.id = 1 THEN {X} ELSE t.b END"},
+		{"coal", "COALESCE(CASE WHEN t.id <> 1 THEN t.b END, {X})"},
+		{"least", "LEAST({X}, t.b + 70)"},
+		{"greatest", "GREATEST({X}, t.i * 10)"},
+		{"nullif", "NULLIF({X}, 3)"},
+	} {
+		for _, a := range [][2]string{
+			{"lt", "CAST('3' AS NUMERIC)"}, {"il", "CAST(3 AS NUMERIC)"}, {"col", "CAST(t.i AS NUMERIC)"},
+			{"ex", "CAST(t.i + 20 AS NUMERIC)"}, {"colN", "CAST(t.n AS NUMERIC)"},
+		} {
+			e := strings.ReplaceAll(sj[1], "{X}", a[1])
+			base := "ch/" + sj[0] + "/" + a[0] + "/"
+			addOrd(base+"proj", "SELECT t.id, "+e+" FROM ss_t t ORDER BY t.id")
+			addOrd(base+"cmpGt", "SELECT t.id FROM ss_t t WHERE "+e+" > 25 ORDER BY t.id")
+			addOrd(base+"cmpEq", "SELECT t.id FROM ss_t t WHERE "+e+" = 3 ORDER BY t.id")
+			addOrd(base+"cmpNum", "SELECT t.id FROM ss_t t WHERE "+e+" < t.n * 10 ORDER BY t.id")
+			addOrd(base+"div", "SELECT t.id, "+e+" / 2.25 FROM ss_t t ORDER BY t.id")
+			addOrd(base+"plus", "SELECT t.id, "+e+" + 1 FROM ss_t t ORDER BY t.id")
+			addOrd(base+"order", "SELECT t.id FROM ss_t t ORDER BY "+e+", t.id")
+			addOrd(base+"orderDesc", "SELECT t.id FROM ss_t t ORDER BY "+e+" DESC, t.id")
+			add(base+"group", "SELECT "+e+", COUNT(*) FROM ss_t t GROUP BY 1")
+			add(base+"distinct", "SELECT DISTINCT "+e+" FROM ss_t t")
+			addOrd(base+"win", "SELECT t.id, row_number() OVER (ORDER BY "+e+", t.id) FROM ss_t t ORDER BY t.id")
+			addOrd(base+"minmax", "SELECT MIN("+e+"), MAX("+e+") FROM ss_t t")
+			addOrd(base+"inList", "SELECT t.id FROM ss_t t WHERE "+e+" IN (25, 100, 3) ORDER BY t.id")
+			addOrd(base+"between", "SELECT t.id FROM ss_t t WHERE "+e+" BETWEEN 25 AND 1000 ORDER BY t.id")
+		}
+	}
+	// The round-4 review's LEAST / GREATEST statements, verbatim: the bare
+	// NUMERIC cast's arm chosen by byte order (B1) and its controls.
+	for _, c := range [][2]string{
+		{"lg/least100/proj", "SELECT t.id, least(CAST(t.i AS NUMERIC), 100) FROM ss_t t ORDER BY t.id"},
+		{"lg/greatest100/proj", "SELECT t.id, greatest(CAST(t.i AS NUMERIC), 100) FROM ss_t t ORDER BY t.id"},
+		{"lg/greatestNeg/proj", "SELECT t.id, greatest(CAST(t.i AS NUMERIC), -100) FROM ss_t t ORDER BY t.id"},
+		{"lg/least100frac/proj", "SELECT t.id, least(CAST(t.i AS NUMERIC), 100.5) FROM ss_t t ORDER BY t.id"},
+		{"lg/leastCol/proj", "SELECT t.id, least(t.n, 100) FROM ss_t t ORDER BY t.id"},
+		{"lg/leastTyped/proj", "SELECT t.id, least(CAST(t.i AS NUMERIC(10,0)), 100) FROM ss_t t ORDER BY t.id"},
+		{"lg/leastIc/proj", "SELECT t.id, least(CAST(t.i AS INTEGER), 100) FROM ss_t t ORDER BY t.id"},
+		{"lg/leastIcMul/proj", "SELECT t.id, least(CAST(t.i AS INTEGER) * 1.0, 100) FROM ss_t t ORDER BY t.id"},
+		{"lg/leastNumB/proj", "SELECT t.id, least(CAST(t.b AS NUMERIC), 100) FROM ss_t t ORDER BY t.id"},
+		{"lg/least100/cmp", "SELECT t.id FROM ss_t t WHERE least(CAST(t.i AS NUMERIC), 100) = 3 ORDER BY t.id"},
+		{"lg/least100/plus", "SELECT t.id, least(CAST(t.i AS NUMERIC), 100) + 0 FROM ss_t t ORDER BY t.id"},
+		{"lg/least100/mul", "SELECT t.id, least(CAST(t.i AS NUMERIC), 100) * t.n FROM ss_t t ORDER BY t.id"},
+		{"lg/least100/div", "SELECT t.id, least(CAST(t.i AS NUMERIC), 100) / t.n FROM ss_t t WHERE t.n <> 0 ORDER BY t.id"},
+		{"lg/least100/order", "SELECT t.id FROM ss_t t ORDER BY least(CAST(t.i AS NUMERIC), 100), t.id"},
+		{"lg/least100/group", "SELECT least(CAST(t.i AS NUMERIC), 100) AS k, count(*) FROM ss_t t GROUP BY 1 ORDER BY 1"},
+		{"lg/greatest100/div", "SELECT t.id, greatest(CAST(t.i AS NUMERIC), 100) / t.n FROM ss_t t WHERE t.n <> 0 ORDER BY t.id"},
+		{"lg/coalesce/div", "SELECT t.id, coalesce(CAST(t.i AS NUMERIC), 100) / t.n FROM ss_t t WHERE t.n <> 0 ORDER BY t.id"},
+		{"lg/leastLit/proj", "SELECT least(CAST(3 AS NUMERIC), 100), greatest(CAST(3 AS NUMERIC), 100), least(CAST(3 AS NUMERIC), 25)"},
+		{"lg/leastLitDiv/proj", "SELECT least(CAST(3 AS NUMERIC), 100) / 2.25"},
+		{"lg/leastNumText/proj", "SELECT t.id, least(CAST('3' AS NUMERIC), 100) FROM ss_t t WHERE t.id = 1"},
+		{"lg/least100/divCmp", "SELECT t.id FROM ss_t t WHERE t.n <> 0 AND least(CAST(t.i AS NUMERIC), 100) / t.n = 1.3333333333333333 ORDER BY t.id"},
+	} {
+		addOrd(c[0], c[1])
+	}
 	// AN ALIASED INTEGER-LITERAL QUOTIENT OVER A NUMERIC COLUMN (candidate
 	// NX-C14, deferred): on the single-process arms a computed item with an
 	// alias records its expression text as its source column, and Project
