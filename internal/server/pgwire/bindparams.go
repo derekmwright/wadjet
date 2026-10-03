@@ -204,6 +204,21 @@ func renderTextParam(s string, oid uint32) (string, error) {
 			}
 			return s, nil
 		}
+		// Not an integer's spelling: int2in / int4in / int8in raise 22P02 at
+		// the parameter itself, wherever it lands. Quoted alone it was SQL's
+		// unknown, which a column or an INSERT target read through the
+		// integer input (22P02) but an expression did not: `$1 = n * 2`
+		// (typed integer) bound '14.5' answered no rows where PostgreSQL
+		// 17.11 raises 22P02, as v0.25.3 did. Cast to the parameter's type,
+		// the engine's text-to-integer input raises it in every position.
+		switch oid {
+		case oidInt2:
+			return "CAST(" + quoteLiteral(s) + " AS SMALLINT)", nil
+		case oidInt4:
+			return "CAST(" + quoteLiteral(s) + " AS INTEGER)", nil
+		case oidInt8:
+			return "CAST(" + quoteLiteral(s) + " AS BIGINT)", nil
+		}
 		return quoteLiteral(s), nil
 	case numericOID(oid):
 		// Confirm it really is a number before writing it unquoted. A range
