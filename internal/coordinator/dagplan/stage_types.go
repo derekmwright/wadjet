@@ -64,7 +64,7 @@ type Stage struct {
 	// Nil for every table with no deletes.
 	ScanDeletes map[string][]int64
 	// Sample is the scan's TABLESAMPLE (#1411): the method and the argument
-	// already read as real at plan time (physical.ScanTableSample), carried
+	// already read as real at plan time (logical.Node.SamplePercent), carried
 	// as a VALUE to the scan fragment's OpScan, whose worker applies the
 	// engine's own sampler (exec.NewSampledSource) over the rows the scan
 	// selects. Nil for an unsampled scan.

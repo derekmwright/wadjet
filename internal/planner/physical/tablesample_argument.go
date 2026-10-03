@@ -140,14 +140,3 @@ func evalTablesampleArgument(c expr.Expr) (v any, err error) {
 	}()
 	return c.Eval(&batch.RecordBatch{Len: 1}, 0), nil
 }
-
-// ScanTableSample is a logical scan's TABLESAMPLE as the sampler applies it,
-// ok=false when the scan is not sampled. Both readers of a sampled table take
-// it from here: buildScan, and the stage planner that carries it to a
-// worker's scan fragment.
-func ScanTableSample(node *logical.Node) (exec.TableSample, bool) {
-	if node == nil || node.SampleMethod == "" {
-		return exec.TableSample{}, false
-	}
-	return exec.TableSample{Method: node.SampleMethod, Percent: node.SamplePercent, Null: node.SampleNull}, true
-}
