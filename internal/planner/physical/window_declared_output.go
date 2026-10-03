@@ -65,15 +65,21 @@ func (w *declWalk) windowComputedArgDecl(node *logical.Node, we logical.WindowEx
 	if cleanExpr(we.InputExpr.String()) != cleanExpr(we.InputCol) {
 		return expr.DeclType{}, false, false
 	}
+	return w.windowArgExprDecl(node, we.InputExpr)
+}
+
+// windowArgExprDecl types a computed window argument from its AST against the
+// window's input declarations (the derived-table crossing included).
+func (w *declWalk) windowArgExprDecl(node *logical.Node, e plansql.Node) (expr.DeclType, bool, bool) {
 	decls := withSubqueryDecls(w.inputColDecls(node.Children[0]), node)
 	if len(decls.Types) == 0 {
 		decls = withSubqueryDecls(w.emittedColDecls(node.Children[0]), node)
 	}
-	d, c := nodeDeclaredType(we.InputExpr, decls)
+	d, c := nodeDeclaredType(e, decls)
 	if c == expr.Undecided {
 		return expr.DeclType{}, false, false
 	}
-	return d, aggInputIsWideInteger(we.InputExpr, decls), true
+	return d, aggInputIsWideInteger(e, decls), true
 }
 
 // integerAccArgWidth maps a computed argument's DECLARED type plus the width
