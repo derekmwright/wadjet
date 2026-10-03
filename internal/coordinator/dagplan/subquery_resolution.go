@@ -196,6 +196,14 @@ func (p *StagePlanner) resolveSubqueryAST(ctx context.Context, node plansql.Node
 			"duration", time.Since(start).Round(time.Millisecond),
 			"rows", len(rows), "error", err != nil)
 		if err != nil {
+			// A refusal with a SQLSTATE is the subquery's answer on every
+			// path (each builds and runs the same subquery): park it, rather
+			// than leave the subquery's text in a filter no worker can
+			// compile (#1411 review r1; the producer fallback in walkStages
+			// takes the same rule).
+			if sqlerr.StateOf(err) != "" {
+				p.refusePlanTimeAnswer(err)
+			}
 			return node
 		}
 		// NO rows is not "no answer": a scalar subquery over an empty input

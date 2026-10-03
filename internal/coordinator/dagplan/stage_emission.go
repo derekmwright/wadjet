@@ -14,6 +14,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/engine/expr"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	"github.com/derekmwright/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -1240,6 +1241,19 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 								resolvedExpr = strings.ReplaceAll(resolvedExpr, ":"+d.Placeholder, lit)
 								spliced = true
 							}
+						}
+						if !spliced && sErr != nil && sqlerr.StateOf(sErr) != "" {
+							// Both paths failed with a SQLSTATE: building or
+							// running the subquery refused it — its
+							// TABLESAMPLE argument real cannot hold (22003),
+							// a value that is not a number (22P02). Every path
+							// builds the same subquery and reaches the same
+							// refusal, so it is the statement's answer. Shipping
+							// the subquery's text instead failed every task with
+							// `subqueries require a SubqueryRunner` and no
+							// SQLSTATE (#1411 review r1).
+							p.refusePlanTimeAnswer(sErr)
+							continue
 						}
 						if !spliced {
 							// Both paths failed: restore the original subquery
