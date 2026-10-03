@@ -552,6 +552,11 @@ func numericCastRefusal(dest string) (string, bool) {
 	if elem, ok := ArrayCastElement(dest); ok {
 		return elem + "[]", true
 	}
+	// pgvector converts an array of numbers, never a scalar: a numeric
+	// operand's text would otherwise reach vector_in's grammar (22P02).
+	if _, _, ok := VectorCastDim(dest); ok {
+		return "vector", true
+	}
 	return "", false
 }
 
