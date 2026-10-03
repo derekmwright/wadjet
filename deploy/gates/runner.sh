@@ -121,7 +121,7 @@ die_setup() { SETUP_ERR="$*"; status "SETUP FAILED: $*"; finalize; shutdown -h n
 WD_PID=$!
 
 status "setup: packages"
-dnf install -y -q git docker tar gzip >/dev/null 2>&1 || dnf install -y git docker tar gzip || die_setup "dnf install"
+dnf install -y -q git docker tar gzip gcc >/dev/null 2>&1 || dnf install -y git docker tar gzip gcc || die_setup "dnf install"
 # Docker serves only the oracle arms; when it does not start they SKIP, and a skipped arm is recorded as a failure below.
 systemctl start docker || echo "docker did not start"
 ( docker pull -q postgres:17-alpine > "$OUT/logs/docker-pull.log" 2>&1; echo "EXIT=$?" >> "$OUT/logs/docker-pull.log" ) &
@@ -219,7 +219,7 @@ if want F1 F || want F2 F || want F3 F || want F4 F; then
   done
 fi
 want G G && lane G go test -count=1 ./internal/server/ ./internal/server/pgwire/ ./internal/auth/... -timeout 25m
-want HOOK HOOK && lane HOOK go test -race -short ./internal/... -timeout 10m
+want HOOK HOOK && lane HOOK env CGO_ENABLED=1 go test -race -short ./internal/... -timeout 10m
 wait_lanes
 T3=$(date +%s); phase lanes_s $((T3 - T2))
 

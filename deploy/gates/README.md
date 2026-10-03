@@ -131,3 +131,5 @@ its own approval (ADR-0046). The `c7a.8xlarge` spot price in us-east-2 was $0.37
 
 - Running runners: `aws --profile citc --region us-east-2 ec2 describe-instances --filters Name=tag:Name,Values=wadjet-gate-runner Name=instance-state-name,Values=pending,running --query 'Reservations[].Instances[].[InstanceId,Tags[?Key==`sha`]|[0].Value,LaunchTime]' --output text`
 - `refs/gates/*` accumulate on origin; prune with `git push origin --delete refs/gates/<sha>` (gaterun never deletes one, since a second request may be cloning it).
+
+> A change to `runner.sh` is a change to the launch template's user_data: re-run the one-time `tofu apply` after it lands, or the next runner still boots the old script.
