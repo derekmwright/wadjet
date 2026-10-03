@@ -17,16 +17,21 @@ OID and declares PostgreSQL's CATEGORY beside it, which is what an integer
 assignment rounds by.
 Amended 2026-10-02 (arc NX, #1386 #1392 #1450): an integer CAST is an
 integer operand of exact arithmetic wherever it sits (DECIMAL(19,0), as
-every integer expression), except where a quotient's integer operand takes
-its value from one — bare, or under NULLIF, COALESCE, CASE, GREATEST,
-LEAST, abs, unary minus or integer arithmetic, at any depth — which keeps
-the float rung (§3's one-scale quotient would drop the double's digits); a
-fractional numeric literal a double cannot carry compiles to the DECIMAL its spelling
-names, and a CAST of it (or of any numeric) to BOOLEAN, DATE, TIMESTAMP,
-INTERVAL, UUID or an array refuses the type pair, 42846, rather than reading
-its digits as text; a bare NUMERIC cast over an exact operand is that operand's type;
-and an explicit integer CAST reads §2c's category of its operand and
-rounds a numeric half away from zero.
+every integer expression); a numeric literal a double cannot carry — a
+fractional spelling, or an integer past int64 — compiles to the DECIMAL its
+spelling names; a bare NUMERIC cast over an exact operand is that operand's
+type. A quotient over an operand one of these casts made exact — an integer
+CAST at any depth of the numeric constructs (NULLIF, COALESCE, CASE,
+GREATEST, LEAST, abs, unary minus, integer or numeric arithmetic), a bare
+NUMERIC cast, an integer literal past int64 — keeps the float rung, because
+§3's one-scale quotient would drop the double's digits. A CAST of a numeric
+the engine carries exactly (a column, a typed or bare NUMERIC cast, a wide
+literal, a numeric expression or scalar subquery) to BOOLEAN, DATE,
+TIMESTAMP, INTERVAL, UUID, an array or a vector refuses the type pair,
+42846, rather than reading its digits as text; a narrow fractional literal
+is still a double there (`CAST(14.5 AS DATE)` the day count 1970-01-15,
+`CAST(14.5 AS UUID)` 22P02). An explicit integer CAST reads §2c's category
+of its operand and rounds a numeric half away from zero.
 
 ## Context
 
@@ -231,8 +236,11 @@ a silent loss of digits rather than described as something safer, and pinned by
 NX, #1386)** by the box rather than by a per-construct text path: a spelling
 a double cannot carry compiles to the exact DECIMAL it names
 (`expr.WideNumericLiteral`, a function of the spelling, so every arm and a
-re-parsed DAG stage agree), and every construct that hands the value on reads
-its digits; the expression answers 493827160549382.7160549350, pinned by
+re-parsed DAG stage agree), and the constructs the gate rows measure — a
+projection, a choice, unary minus, a scalar subquery's answer, a comparison,
+a window's argument — read its digits (an `ARRAY[…]` constructor does not:
+`ARRAY[14.0000000000000000001, 1]` is `{14,1}`, candidate NX-C8); the
+expression answers 493827160549382.7160549350, pinned by
 `wadjet.TestWideNumericLiteralInAChoiceKeepsItsDigits`.
 
 A DECIMAL beside a FLOAT declares double precision, which is right, and used to
