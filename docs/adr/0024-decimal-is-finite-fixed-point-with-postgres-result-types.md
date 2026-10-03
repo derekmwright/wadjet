@@ -17,10 +17,14 @@ OID and declares PostgreSQL's CATEGORY beside it, which is what an integer
 assignment rounds by.
 Amended 2026-10-02 (arc NX, #1386 #1392 #1450): an integer CAST is an
 integer operand of exact arithmetic wherever it sits (DECIMAL(19,0), as
-every integer expression), except as an operand of a quotient, which keeps
+every integer expression), except where a quotient's integer operand takes
+its value from one — bare, or under NULLIF, COALESCE, CASE, GREATEST,
+LEAST, abs, unary minus or integer arithmetic, at any depth — which keeps
 the float rung (§3's one-scale quotient would drop the double's digits); a
 fractional numeric literal a double cannot carry compiles to the DECIMAL its spelling
-names; a bare NUMERIC cast over an exact operand is that operand's type;
+names, and a CAST of it (or of any numeric) to BOOLEAN, DATE, TIMESTAMP,
+INTERVAL, UUID or an array refuses the type pair, 42846, rather than reading
+its digits as text; a bare NUMERIC cast over an exact operand is that operand's type;
 and an explicit integer CAST reads §2c's category of its operand and
 rounds a numeric half away from zero.
 
