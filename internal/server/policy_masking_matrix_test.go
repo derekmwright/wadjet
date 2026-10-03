@@ -193,9 +193,16 @@ func pmTrueValues() []string {
 
 func pmProvider(t *testing.T) *auth.Provider {
 	t.Helper()
+	return pmProviderWith(t)
+}
+
+// pmProviderWith is pmProvider with extra rules appended to its policy — a
+// gate that needs the admin to WRITE (a DELETE through every door) adds one.
+func pmProviderWith(t *testing.T, extra ...auth.PolicyRule) *auth.Provider {
+	t.Helper()
 	evaluator := auth.NewPolicyEvaluator([]auth.AccessControlPolicy{{
 		Name: "e7-policy", Version: 1, Enabled: true,
-		Rules: []auth.PolicyRule{
+		Rules: append([]auth.PolicyRule{
 			{
 				ID: "analyst-masks", EffectStr: "allow", Priority: 10,
 				Subjects:  []auth.Condition{{Attribute: "subject.role", Op: "eq", Value: "analyst"}},
@@ -249,7 +256,7 @@ func pmProvider(t *testing.T) *auth.Provider {
 				Subjects: []auth.Condition{{Attribute: "subject.role", Op: "eq", Value: "admin"}},
 				Actions:  []auth.Action{auth.ActionRead},
 			},
-		},
+		}, extra...),
 	}})
 	authn, authz := auth.New(auth.Config{
 		Enabled: true,
