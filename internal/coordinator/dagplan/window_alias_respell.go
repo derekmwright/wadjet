@@ -35,22 +35,72 @@ func respellWindowKeyExprs(specs []physical.ProjectExprSpec, child *logical.Node
 			continue
 		}
 		if rewritten, changed := localPlanFacts.RespellDerivedAliasRefs(ast, child); changed {
-			ast = rewritten
-			specs[i].Expr = rewritten.String()
-		}
-		// A COMPUTED alias has no source column to rename to: the key
-		// `v + 0` over `SELECT b * 2 AS v` evaluated `v` to NULL in the
-		// fragment, so `SUM(v + 0) OVER (…)` answered NULL and `PARTITION BY
-		// v + 0` put every row in its own partition on the DAG arms, and
-		// LAG / LEAD's materialized value and default (`cast(v as …)`,
-		// #1435) read NULL the same way. Where the window's input reaches a
-		// Scan through Projects and Filters alone, the alias is replaced by
-		// its definition — the aggregate argument's rule (#702).
-		if rewritten, changed := respellAggInputExpr(ast, child); changed {
 			specs[i].Expr = rewritten.String()
 		}
 	}
 	return specs
+}
+
+// windowKeyExprAliases is derivedAliasColumnFor over every reference inside
+// the window's key expressions: the computed derived aliases the producer has
+// to materialize under their own names for the fragment's key projection to
+// read them — the rung a PARTITION BY key and the argument already take
+// (#658, #770), so a key expression binds through whatever node kinds lie
+// between the window and the alias's Project, as they do. A reference
+// respellWindowKeyExprs rewrote to a rename's source names no alias any more
+// and contributes nothing.
+func windowKeyExprAliases(specs []physical.ProjectExprSpec, child *logical.Node) []aliasColumn {
+	var out []aliasColumn
+	seen := map[string]bool{}
+	for _, s := range specs {
+		ast, err := plansql.ParseExpression(s.Expr)
+		if err != nil {
+			continue
+		}
+		for _, ref := range localPlanFacts.CollectColRefs(ast) {
+			written := ref.String()
+			if seen[strings.ToLower(written)] {
+				continue
+			}
+			seen[strings.ToLower(written)] = true
+			// An alias computed over an AGGREGATE's outputs is published by
+			// the aggregate stage's own SELECT-list projection, and the
+			// producer materializeWindowAliasKeys would pick sits BELOW the
+			// aggregate, where `MAX(b) * 2` cannot be evaluated (the bare
+			// argument's rung refuses that shape at 978cd0e5 too). The key
+			// reads the published alias, as it did.
+			if _, owner := derivedAliasDefinition(written, child); aliasOwnerReadsAggregate(owner) {
+				continue
+			}
+			if c := derivedAliasColumnFor(written, child); c.Expr != "" {
+				out = append(out, c)
+			}
+		}
+	}
+	return out
+}
+
+// aliasOwnerReadsAggregate reports whether the Project defining a derived
+// alias reads an Aggregate's output (through Filters, a HAVING).
+func aliasOwnerReadsAggregate(owner *logical.Node) bool {
+	if owner == nil || len(owner.Children) != 1 {
+		return false
+	}
+	n := owner.Children[0]
+	for depth := 0; n != nil && depth < aggRespellDepth; depth++ {
+		switch n.Type {
+		case logical.NodeAggregate:
+			return true
+		case logical.NodeFilter:
+			if len(n.Children) != 1 {
+				return false
+			}
+			n = n.Children[0]
+		default:
+			return false
+		}
+	}
+	return false
 }
 
 // respellAggInputExpr rewrites aggregate argument references to the columns
