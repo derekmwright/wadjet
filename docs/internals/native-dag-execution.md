@@ -942,6 +942,29 @@ projection-intersection path).
 `Task.DeleteMarkers` unmarshals it away and returns the deleted rows, so a
 rolling deploy makes *some* of a stage's tasks answer wrong.
 
+### …and the third: a sampled scan draws its sample where it reads
+
+A `TABLESAMPLE` belongs to the SCAN NODE, not to the file (a self-join can
+read one file under two samples), so it rides neither the delete-marker stamp
+nor a pass-through `StageOutput` (#1411):
+
+| Where | What |
+|---|---|
+| `dagplan.Stage.Sample` | the scan's `exec.TableSample` (method, the argument's real VALUE coerced once at plan time, NULL), set where `walkStages` emits the scan stage — a scalar producer's and a CTE body's scans too |
+| `executeStage` (`dag_pipeline.go`) | checks the range when the stage is dispatched (`exec.CheckSamplePercent`, 2202H — over a table with no files too), and never passes a sampled scan's files through: it dispatches `dispatchScanFilterStage` (or the fused scan-aggregate) |
+| `OpSpec.Sample` (`distributed.TableSampleSpec`) | set by both `OpScan` builders (`dispatchScanFilterStage`, `buildScanAggregateFragment`) |
+| worker `buildFragmentSource` → `sampledFragmentSource` | wraps the source with `exec.NewSampledSource`, the single-process scan's kernel, after the source applied its delete markers — the sample is drawn from the rows the batch SELECTS |
+
+The passes that serve one scan's consumer from another scan of the same table
+decline a sampled scan (shared-subplan dedup's fingerprint, exchange
+subsumption, the aggregate-over-raw-exchange rewire); the dispatched-shape
+tests count it (`fuseScanShuffle`, dynamic-filter attachment); and the two
+paths that re-plan a table as `SELECT cols FROM t` skip it (the async door's
+build-cache pre-scan, `LargeBuildScans`; the aggregate-shuffle pre-compute).
+Gate: `coordinator.TestArcTBTablesampleArgumentOnEveryArm` (big/\*,
+delete/\*, subquery/\*, bigjoin/\*: each FROM-item cell must run on the DAG,
+not the coordinator-local route).
+
 ### Where a fragment's inputs are visible to the annotator
 
 `coordinator.annotateTaskPeerLocations` (`coordinator/peer_locations.go`) is
