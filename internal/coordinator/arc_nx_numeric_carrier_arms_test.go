@@ -122,6 +122,22 @@ func nxOperands() []nxOperand {
 		{"wqColCoalesce", "COALESCE(CAST(t.i AS INTEGER), 0) / NULLIF(t.n, 0)", "1.3333333333333333"},
 		{"wqColCase", "CASE WHEN t.id > 0 THEN CAST(t.i AS INTEGER) END / NULLIF(t.n, 0)", "1.3333333333333333"},
 		{"wqColGreatest", "GREATEST(CAST(t.i AS INTEGER), -100) / NULLIF(t.n, 0)", "1.3333333333333333"},
+		// A QUOTIENT over an operand a CAST made exact through a NUMERIC
+		// construct (round 3, B1): the integer CAST under numeric arithmetic,
+		// a bare NUMERIC cast of the cast, of an integer column and of a
+		// numeric column. Each keeps the double the quotient computed before
+		// the cast was exact (expr.castMadeExactIn), as the bare integer CAST
+		// does; the one-scale quotient answered 1.333333 and moved every
+		// comparison off PostgreSQL.
+		{"wnColMul10", "(CAST(t.i AS INTEGER) * 1.0) / NULLIF(t.n, 0)", "1.3333333333333333"},
+		{"wnColPlus00", "(CAST(t.i AS INTEGER) + 0.0) / NULLIF(t.n, 0)", "1.3333333333333333"},
+		{"wnColCastNum", "CAST(CAST(t.i AS INTEGER) AS NUMERIC) / NULLIF(t.n, 0)", "1.3333333333333333"},
+		{"wnColBareNum", "CAST(t.i AS NUMERIC) / NULLIF(t.n, 0)", "1.3333333333333333"},
+		{"wnBigMul10", "t.n / NULLIF(CAST(t.b AS BIGINT) * 1.0, 0)", "0.0000000011111111111111111111"},
+		{"wnBigCastNum", "t.n / NULLIF(CAST(CAST(t.b AS BIGINT) AS NUMERIC), 0)", "0.0000000011111111111111111111"},
+		{"wnBigBareNum", "t.n / NULLIF(CAST(t.b AS NUMERIC), 0)", "0.0000000011111111111111111111"},
+		{"wnBigPlusN", "t.n / NULLIF(CAST(t.b AS BIGINT) + t.n * 0, 0)", "0.0000000011111111111111111111"},
+		{"wnNumBareNum", "CAST(t.n AS NUMERIC) / 3", "0.00333333333333333333"},
 	}
 }
 
@@ -243,17 +259,51 @@ func nxCells() []nxCell {
 	addOrd("ssPin/notExistsBin", "SELECT t.id FROM ss_t t WHERE NOT EXISTS (SELECT 1 FROM ss_t u WHERE u.id = t.id AND u.b * 10000000 * u.n - 3 = t.b * 10000000 * t.n) ORDER BY t.id")
 	addOrd("ssPin/corrWhereBin", "SELECT t.id, (SELECT count(*) FROM ss_i q WHERE q.id = 1 AND t.b * 10000000 * t.n - 3 = 900000000000000000) FROM ss_t t WHERE t.id = 3")
 	addOrd("ssPin/constCastSelect", "SELECT CAST(9000000000 AS BIGINT) * 10000000 * CAST(10.00 AS NUMERIC(10,2)) - 3")
-	// An INTEGER literal past int64, negated: PostgreSQL types it numeric
-	// (and, folding the minus into the constant, -9223372036854775808
-	// bigint); here it keeps its float64 box — the wide-constant rule covers
-	// fractional and exponent spellings only (kept, candidate NX-C7).
+	// An INTEGER literal past int64: PostgreSQL types it numeric, and folds
+	// a minus into the constant before typing it (doNegate), so
+	// -9223372036854775808 is bigint and -(-9223372036854775808) the numeric
+	// again (expr.FoldedNegatedLiteral). Its quotient keeps the double the
+	// float64 box computed (castMadeExactIn).
 	add("negLit/int64Min", "SELECT -9223372036854775808 AS x")
 	add("negLit/int64MinPlus1", "SELECT -9223372036854775808 + 1 AS x")
 	add("negLit/int64MinTimesN", "SELECT t.id, -9223372036854775808 * t.n AS x FROM ss_t t WHERE t.id < 3")
 	add("negLit/pastInt64Min", "SELECT -9223372036854775809 AS x")
+	add("negLit/pastInt64", "SELECT 9223372036854775808 AS x")
+	add("negLit/wide20", "SELECT -99999999999999999999 AS x")
+	add("negLit/int64MinMinus1", "SELECT - 9223372036854775808 - 1 AS x")
+	add("negLit/pastInt64ToBigint", "SELECT CAST((-9223372036854775809) AS BIGINT) AS x")
+	add("negLit/int64MinTimesMinus1", "SELECT -9223372036854775808 * -1 AS x")
+	add("negLit/doubleNeg", "SELECT -(-9223372036854775808) AS x")
+	add("negLit/parenNeg", "SELECT -(9223372036854775808) AS x")
+	add("negLit/pastInt64Cmp", "SELECT 9223372036854775808 = 9223372036854775807 AS x")
+	add("negLit/pastInt64Quot", "SELECT 9223372036854775808 / 2 AS x")
+	add("negLit/pastInt64QuotCmp", "SELECT 9223372036854775808 / 7 = 1317624576693539401 AS x")
+	add("negLit/pastInt64QuotCol", "SELECT t.id, 9223372036854775808 / NULLIF(t.n, 0) AS x FROM ss_t t WHERE t.id < 3")
 	add("bareCast/floatOperand", "SELECT t.id, CAST(t.f AS NUMERIC) * 0.1 AS x FROM ss_t t WHERE t.id IN (1, 5)")
 	add("bareCast/intOperand", "SELECT t.id, CAST(t.i AS NUMERIC) * 0.1 AS x FROM ss_t t WHERE t.id IN (1, 5)")
 	add("bareCast/numOperand", "SELECT t.id, CAST(t.n AS NUMERIC) / 3 AS x FROM ss_t t WHERE t.id IN (1, 5)")
+	// Round 2's review cells for the quotient over a NUMERIC-wrapped integer
+	// CAST or a bare NUMERIC cast, verbatim (a Ctl row has the integer
+	// COLUMN where the cell has the CAST: the one-scale quotient, r19).
+	for _, q := range [][2]string{
+		{"mul10", "(CAST(t.i AS INTEGER) * 1.0) / t.n"}, {"mul10Ctl", "(t.i * 1.0) / t.n"},
+		{"plus00", "(CAST(t.i AS INTEGER) + 0.0) / t.n"}, {"plus00Ctl", "(t.i + 0.0) / t.n"},
+		{"castNum", "CAST(CAST(t.i AS INTEGER) AS NUMERIC) / t.n"}, {"castNumCtl", "CAST(t.i AS NUMERIC) / t.n"},
+	} {
+		addOrd("qn/"+q[0]+"/proj", "SELECT t.id, "+q[1]+" FROM ss_t t WHERE t.n <> 0 ORDER BY t.id")
+		addOrd("qn/"+q[0]+"/cmp", "SELECT t.id FROM ss_t t WHERE t.n <> 0 AND "+q[1]+" = 1.3333333333333333 ORDER BY t.id")
+		if !strings.HasSuffix(q[0], "Ctl") {
+			addOrd("qn/"+q[0]+"/win", "SELECT t.id, count(*) OVER (PARTITION BY "+q[1]+" = 1.3333333333333333) FROM ss_t t WHERE t.n <> 0 ORDER BY t.id")
+		}
+	}
+	for _, q := range [][2]string{
+		{"bmul10", "t.n / (CAST(t.b AS BIGINT) * 1.0)"}, {"bmul10Ctl", "t.n / (t.b * 1.0)"},
+		{"bcastNum", "t.n / CAST(CAST(t.b AS BIGINT) AS NUMERIC)"}, {"bcastNumCtl", "t.n / CAST(t.b AS NUMERIC)"},
+		{"bplusN", "t.n / (CAST(t.b AS BIGINT) + t.n * 0)"}, {"bplusNCtl", "t.n / (t.b + t.n * 0)"},
+	} {
+		addOrd("qn/"+q[0]+"/proj", "SELECT t.id, "+q[1]+" FROM ss_t t WHERE t.b <> 0 ORDER BY t.id")
+		addOrd("qn/"+q[0]+"/cmp", "SELECT t.id FROM ss_t t WHERE t.b <> 0 AND "+q[1]+" = 0.0000000011111111111111111111 ORDER BY t.id")
+	}
 	// A NUMERIC OPERAND OF A CAST WITH NO CONVERSION FROM NUMERIC (round 2,
 	// B2): a wide literal is an exact DECIMAL now, boxed as its text, and the
 	// BOOLEAN / DATE / TIMESTAMP / INTERVAL / UUID / array arms read a string
@@ -273,7 +323,7 @@ func nxCells() []nxCell {
 		{"numCol", "(SELECT t.n FROM ss_t t WHERE t.id = 1)"},
 	} {
 		for _, to := range [][2]string{{"BOOLEAN", "BOOLEAN"}, {"DATE", "DATE"}, {"TIMESTAMP", "TIMESTAMP"},
-			{"INTERVAL", "INTERVAL"}, {"UUID", "UUID"}, {"INTEGERArray", "INTEGER[]"}} {
+			{"INTERVAL", "INTERVAL"}, {"UUID", "UUID"}, {"INTEGERArray", "INTEGER[]"}, {"VECTOR", "VECTOR(1)"}} {
 			add("castRefusal/"+src[0]+"/"+to[0], "SELECT CAST("+src[1]+" AS "+to[1]+") AS x")
 		}
 	}
