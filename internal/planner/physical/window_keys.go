@@ -272,6 +272,15 @@ func resolveWindowKeys(node *logical.Node) map[string]windowKey {
 				}
 			}
 		}
+		// LAG / LEAD's default, and the value re-spelled as the result's
+		// type where the default widens it: both are read off the batch as
+		// columns of the declared type (window_lag_default.go, #1435).
+		if r, ok := lagLeadWideningOf(node, we); ok {
+			if r.value != nil {
+				add(r.value.String(), false, r.value)
+			}
+			add(r.def.String(), false, r.def)
+		}
 		for _, pb := range we.PartitionBy {
 			add(pb, false, nil)
 		}

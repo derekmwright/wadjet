@@ -433,6 +433,10 @@ func computeWindowPartition(parts []*batch.RecordBatch, schema []parquet.Column,
 		if wc.InputCol != "" {
 			inputIdx = combined.ResolveColumnIndex(wc.InputCol)
 		}
+		defaultIdx := -1
+		if wc.LagLeadDefaultCol != "" {
+			defaultIdx = combined.ResolveColumnIndex(wc.LagLeadDefaultCol)
+		}
 		// SortKey.index, for the reason the in-memory path takes it: a key the
 		// planner addressed by POSITION means the column at that position
 		// (#968). A key with no position falls back to the name.
@@ -440,7 +444,7 @@ func computeWindowPartition(parts []*batch.RecordBatch, schema []parquet.Column,
 		for j, key := range wc.OrderBy {
 			orderIdxs[j] = key.index(combined)
 		}
-		if err := computePartitionColumnar(combined, combined.Columns[base+i], 0, n, wc, inputIdx, orderIdxs); err != nil {
+		if err := computePartitionColumnar(combined, combined.Columns[base+i], 0, n, wc, inputIdx, defaultIdx, orderIdxs); err != nil {
 			return nil, err
 		}
 	}

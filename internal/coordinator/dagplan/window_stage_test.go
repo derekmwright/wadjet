@@ -3,6 +3,7 @@
 package dagplan
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -59,10 +60,24 @@ func TestWindowStageSpecIsResolved(t *testing.T) {
 		if wc.LagLeadOffset != 2 {
 			t.Errorf("LagLeadOffset = %d, want 2", wc.LagLeadOffset)
 		}
-		// Unquoted: the default arrives as SQL source, and passing it
-		// through wrote 'none' — quotes included — into the result.
-		if wc.LagLeadDefault != "none" {
-			t.Errorf("LagLeadDefault = %v, want \"none\" without its SQL quotes", wc.LagLeadDefault)
+		// The default is a column the stage computes: the quoted literal
+		// coerced to the value's type (#1435), never its SQL source.
+		if !strings.HasPrefix(wc.LagLeadDefaultCol, "__winkey_") {
+			t.Fatalf("LagLeadDefaultCol = %q, want a materialized __winkey_N", wc.LagLeadDefaultCol)
+		}
+		var found bool
+		for _, st := range stages {
+			for _, k := range st.WindowKeyExprs {
+				if k.Name == wc.LagLeadDefaultCol {
+					found = true
+					if !strings.Contains(strings.ToLower(k.Expr), "cast('none' as text)") {
+						t.Errorf("default key %s = %q, want cast('none' as TEXT)", k.Name, k.Expr)
+					}
+				}
+			}
+		}
+		if !found {
+			t.Errorf("no stage computes the default column %s", wc.LagLeadDefaultCol)
 		}
 	})
 }
