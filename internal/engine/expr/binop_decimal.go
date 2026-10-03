@@ -478,18 +478,16 @@ func resolveDecimalMode(op string, left, right Expr, b *batch.RecordBatch) (decM
 		// since #369).
 		return decMode{}, decOperands{}, false
 	}
-	if op == "/" && (!operandIsDecimalTyped(left, b) && integerCastIn(left) ||
-		!operandIsDecimalTyped(right, b) && integerCastIn(right)) {
-		// A QUOTIENT whose integer operand takes its value from an integer
-		// CAST — bare, or under NULLIF / COALESCE / CASE / GREATEST / LEAST /
-		// abs / unary minus / integer arithmetic (integerCastIn), at any
-		// depth — keeps the float rung it had, for
-		// the constant division's reason above: item 3's one-scale quotient
-		// keeps max(6, s1 + p2 + 1) fraction digits — 11 for
-		// `CAST(i AS INTEGER) / n` over a numeric(10,2) — where the double
-		// it replaces carries PostgreSQL's 16 significant digits
-		// (1.3333333333333333). Every other operator over the cast is exact
-		// (#1450); the quotient waits on a per-value division scale
+	if op == "/" && (castMadeExactIn(left) || castMadeExactIn(right)) {
+		// A QUOTIENT over an operand a CAST made exact — an integer CAST or a
+		// bare NUMERIC cast, at any depth of the numeric constructs
+		// (castMadeExactIn) — keeps the float rung it had, for the constant
+		// division's reason above: item 3's one-scale quotient keeps
+		// max(6, s1 + p2 + 1) fraction digits — 11 for `CAST(i AS INTEGER) /
+		// n` over a numeric(10,2), 6 for `CAST(n AS NUMERIC) / 3` — where the
+		// double it replaces carries PostgreSQL's 16 significant digits
+		// (1.3333333333333333). Every other operator over such an operand is
+		// exact (#1450); the quotient waits on a per-value division scale
 		// (numeric-decimal r19). physical.binOpDecimalOperand declines the
 		// same pair.
 		return decMode{}, decOperands{}, false

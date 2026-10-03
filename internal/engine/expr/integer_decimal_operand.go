@@ -347,48 +347,60 @@ func SubqueryAnswersIntegralExtract(sql string) bool {
 	return ok && len(fc.Args) == 1 && IntegralExtractField(fc.Name)
 }
 
-// integerCastIn reports whether an integer operand of exact arithmetic takes
-// its value from an integer CAST a query wrote (userIntegerCast), at any
-// depth of the constructs an integer's type passes through unchanged: unary
-// ±, integer arithmetic, the value arms of a CASE / COALESCE / GREATEST /
-// LEAST / NULLIF / IFNULL, and abs / mod. resolveDecimalMode asks it of a
-// quotient's non-DECIMAL operand, so `t.n / NULLIF(CAST(t.b AS BIGINT), 0)`
-// and `(CAST(t.i AS INTEGER) + 0) / t.n` make the decision the bare cast
-// makes. physical.integerCastIn is the plan's twin over the AST.
-func integerCastIn(e Expr) bool {
+// castMadeExactIn reports whether a quotient's operand takes its exactness
+// from a CAST: an integer CAST a query wrote (userIntegerCast) or a BARE
+// NUMERIC cast (Cast.bareDecimalType), at any depth of the constructs a
+// numeric value passes through — unary ±, arithmetic with any operand
+// (`CAST(i AS INTEGER) * 1.0`), the value arms of a CASE / COALESCE /
+// GREATEST / LEAST / NULLIF / IFNULL, and abs / mod / the decimal scalar
+// functions. A cast that NAMES its (p,s), a scalar subquery and every other
+// function end the walk: their exactness does not come from such a cast.
+//
+// resolveDecimalMode asks it of both operands of a quotient: the one-scale
+// DECIMAL quotient (ADR-0024 §3, max(6, s1 + p2 + 1) per column) drops the
+// digits PostgreSQL's per-value scale keeps, so such a quotient keeps the
+// double it computed before either cast was exact — `t.n / NULLIF(CAST(t.b
+// AS BIGINT), 0)`, `(CAST(t.i AS INTEGER) * 1.0) / t.n` and `CAST(t.i AS
+// NUMERIC) / t.n` make one decision. physical.castMadeExactIn is the plan's
+// twin over the AST.
+func castMadeExactIn(e Expr) bool {
 	switch v := e.(type) {
 	case *Cast:
-		return userIntegerCast(v)
+		if userIntegerCast(v) {
+			return true
+		}
+		d, ok := v.decimalDestination()
+		return ok && !d.params && !v.Column && !v.answer
 	case *UnaryOp:
-		return (v.Op == "-" || v.Op == "+") && integerCastIn(v.Operand)
+		return (v.Op == "-" || v.Op == "+") && castMadeExactIn(v.Operand)
 	case *BinOp:
-		return integerCastIn(v.Left) || integerCastIn(v.Right)
+		return castMadeExactIn(v.Left) || castMadeExactIn(v.Right)
 	case *BinOpInt64:
 		l, lok := v.Left.(Expr)
 		r, rok := v.Right.(Expr)
-		return lok && integerCastIn(l) || rok && integerCastIn(r)
+		return lok && castMadeExactIn(l) || rok && castMadeExactIn(r)
 	case *BinOpNumeric:
 		l, lok := v.Left.(Expr)
 		r, rok := v.Right.(Expr)
-		return lok && integerCastIn(l) || rok && integerCastIn(r)
+		return lok && castMadeExactIn(l) || rok && castMadeExactIn(r)
 	case *decimalScalarFn:
-		return v.fallback != nil && integerCastIn(v.fallback)
+		return v.fallback != nil && castMadeExactIn(v.fallback)
 	case *numericFuncCall:
-		return integerCastIn(v.FuncCall)
+		return castMadeExactIn(v.FuncCall)
 	case *FuncCall:
 		if _, ok := NumericDomainScalarFn(v.Name); ok {
-			return anyIntegerCastIn(v.Args)
+			return anyCastMadeExactIn(v.Args)
 		}
 	}
 	if arms, isChoice := choiceDecimalArms(e); isChoice {
-		return anyIntegerCastIn(arms)
+		return anyCastMadeExactIn(arms)
 	}
 	return false
 }
 
-func anyIntegerCastIn(es []Expr) bool {
+func anyCastMadeExactIn(es []Expr) bool {
 	for _, a := range es {
-		if integerCastIn(a) {
+		if castMadeExactIn(a) {
 			return true
 		}
 	}

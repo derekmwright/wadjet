@@ -88,11 +88,11 @@ func binOpDecimalOperand(n *plansql.BinaryOp, decls ColDecls) (batch.DecimalType
 		// reason spelled out there.
 		return batch.DecimalType{}, false, false
 	}
-	if n.Op == "/" && (!lDec && integerCastIn(n.Left) || !rDec && integerCastIn(n.Right)) {
-		// A quotient whose INTEGER operand takes its value from an integer
-		// CAST — bare or under any integer-valued construct — keeps its float
-		// declaration, as expr.resolveDecimalMode keeps its float rung (the
-		// one-scale quotient would drop the digits the double carries, r19).
+	if n.Op == "/" && (castMadeExactIn(n.Left) || castMadeExactIn(n.Right)) {
+		// A quotient over an operand a CAST made exact — an integer CAST or a
+		// bare NUMERIC cast, at any depth — keeps its float declaration, as
+		// expr.resolveDecimalMode keeps its float rung (the one-scale
+		// quotient would drop the digits the double carries, r19).
 		return batch.DecimalType{}, false, false
 	}
 	p, s, ok := batch.DecimalResultType(n.Op, lt.Precision, lt.Scale, rt.Precision, rt.Scale)
@@ -491,34 +491,41 @@ func isConstNumericLitNode(node plansql.Node) bool {
 	return false
 }
 
-// integerCastIn reports whether an INTEGER operand of exact arithmetic takes
-// its value from an integer CAST a query wrote (not a correlated re-run's
-// column stand-in, not one markScalarAnswer marked), at any depth of the
-// constructs an integer's type passes through unchanged: parentheses, unary
-// ±, integer arithmetic, the value arms of a CASE / COALESCE / GREATEST /
-// LEAST / NULLIF / IFNULL, and abs / mod. PostgreSQL types `CAST(b AS BIGINT)`,
-// `NULLIF(CAST(b AS BIGINT), 0)` and `CAST(b AS BIGINT) + 0` alike, so the
-// quotient's decision over them is one decision: binOpDecimalOperand keeps
-// every one of them on the float declaration. It is asked only of an operand
-// decimalArithOperand already answered as an integer, so every construct it
-// descends is integer-valued. expr.integerCastIn is the runtime twin.
-func integerCastIn(node plansql.Node) bool {
+// castMadeExactIn reports whether a quotient's operand takes its exactness
+// from a CAST: an integer CAST a query wrote or a BARE NUMERIC cast (not a
+// correlated re-run's column stand-in, not one markScalarAnswer marked), at
+// any depth of the constructs a numeric value passes through: parentheses,
+// unary ±, arithmetic with any operand, the value arms of a CASE / COALESCE /
+// GREATEST / LEAST / NULLIF / IFNULL, and abs / mod / the functions whose
+// type is their argument's. A cast that names its (p,s) and every other
+// function end the walk. binOpDecimalOperand keeps every such quotient on the
+// float declaration: the one-scale quotient (max(6, s1 + p2 + 1) per column)
+// drops the digits PostgreSQL's per-value scale keeps. expr.castMadeExactIn
+// is the runtime twin.
+func castMadeExactIn(node plansql.Node) bool {
 	switch n := node.(type) {
 	case *plansql.ParenNode:
-		return integerCastIn(n.Inner)
+		return castMadeExactIn(n.Inner)
 	case *plansql.UnaryOp:
-		return (n.Op == "-" || n.Op == "+") && integerCastIn(n.Inner)
+		return (n.Op == "-" || n.Op == "+") && castMadeExactIn(n.Inner)
 	case *plansql.CastNode:
-		return !n.Column && !n.Answer && expr.IsIntegerCastDest(n.TypeName)
+		if n.Column || n.Answer {
+			return false
+		}
+		if expr.IsIntegerCastDest(n.TypeName) {
+			return true
+		}
+		_, _, hasParams, ok := expr.DecimalCastDest(n.TypeName)
+		return ok && !hasParams
 	case *plansql.BinaryOp:
-		return integerCastIn(n.Left) || integerCastIn(n.Right)
+		return castMadeExactIn(n.Left) || castMadeExactIn(n.Right)
 	case *plansql.CaseNode:
 		for _, w := range n.Whens {
-			if integerCastIn(w.Result) {
+			if castMadeExactIn(w.Result) {
 				return true
 			}
 		}
-		return n.Else != nil && integerCastIn(n.Else)
+		return n.Else != nil && castMadeExactIn(n.Else)
 	case *plansql.FuncCallNode:
 		name := strings.ToLower(n.Name)
 		args := n.Args
@@ -535,7 +542,7 @@ func integerCastIn(node plansql.Node) bool {
 			}
 		}
 		for _, a := range args {
-			if integerCastIn(a) {
+			if castMadeExactIn(a) {
 				return true
 			}
 		}
