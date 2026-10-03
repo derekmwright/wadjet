@@ -446,6 +446,10 @@ func tbCells() []tbCell {
 	add("real_input/underscore", "SELECT CAST('1_0' AS REAL)", "ERR 22P02")
 	add("real_input/float8_underflow", "SELECT CAST('1e-400' AS DOUBLE PRECISION)", "ERR 22003")
 	add("real_input/float8_underscore", "SELECT CAST('1_0' AS DOUBLE PRECISION)", "ERR 22P02")
+	add("real_input/hex_underflow", "SELECT CAST('0xAp-2000' AS REAL)", "ERR 22003")
+	add("real_input/hex_underflow_e_digit", "SELECT CAST('0xep-2000' AS DOUBLE PRECISION)", "ERR 22003")
+	add("real_input/hex_zero", "SELECT CAST('0x0p-2000' AS REAL)", "0")
+	add("bernoulli/hex_underflow", "SELECT count(*) FROM tb_p TABLESAMPLE BERNOULLI ('0xAp-2000')", "ERR 22003")
 	return cells
 }
 
