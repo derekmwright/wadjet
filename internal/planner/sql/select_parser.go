@@ -135,9 +135,10 @@ func (p *selectParser) isKeyword(kw TokenType) bool {
 	return p.cur.typ == kw
 }
 
-// countToken reads a LIMIT, OFFSET or FETCH count or a TABLESAMPLE
-// percentage: a number, or `CAST('<number>' AS DOUBLE PRECISION | REAL)`,
-// the literal pgwire's Bind renders a float4/float8 parameter as. The cast
+// countToken reads a LIMIT, OFFSET or FETCH count: a number, or `CAST('<number>'
+// AS DOUBLE PRECISION | REAL)`, the literal pgwire's Bind renders a
+// float4/float8 parameter as. (A TABLESAMPLE argument is an expression, read
+// by parseTableRef, since #1411.) The cast
 // reads as the number its quoted text stands for, so a float parameter lands
 // in these positions exactly as the bare number it stands for. The text must
 // be PostgreSQL's float input (float8in: surrounding whitespace and one
@@ -1297,14 +1298,37 @@ func (p *selectParser) parseTableRefTail() (TableRef, error) {
 		if _, err := p.expect(TokenLParen); err != nil {
 			return TableRef{}, fmt.Errorf("expected ( after TABLESAMPLE %s", tr.SampleMethod)
 		}
-		pctTok, err := p.countToken()
+		// The argument is an EXPRESSION, as PostgreSQL's grammar has it
+		// (`TABLESAMPLE method '(' expr_list ')'`): a negative literal, NULL,
+		// '50', 25 * 2 and CAST(50 AS NUMERIC) are all arguments there. It is
+		// typed and evaluated once, as real, where the scan is built
+		// (physical.TablesampleArgument); its source text is kept for the one
+		// rewrite that writes the clause back out (lowerNamedRelationColumnAliases).
+		start := p.cur.pos
+		arg, err := p.parseExpr()
 		if err != nil {
 			return TableRef{}, fmt.Errorf("expected percentage in TABLESAMPLE")
 		}
-		tr.SamplePercent = pctTok.val
-		if _, err := p.expect(TokenRParen); err != nil {
+		// BERNOULLI and SYSTEM take ONE argument; PostgreSQL parses a list
+		// and refuses its length 2202H.
+		n := 1
+		for p.peek() == TokenComma {
+			p.advance()
+			if _, err := p.parseExpr(); err != nil {
+				return TableRef{}, fmt.Errorf("expected percentage in TABLESAMPLE")
+			}
+			n++
+		}
+		if p.peek() != TokenRParen {
 			return TableRef{}, fmt.Errorf("expected ) after TABLESAMPLE percentage")
 		}
+		if n != 1 {
+			return TableRef{}, sqlerr.New("2202H", "tablesample method %s requires 1 argument, not %d",
+				strings.ToLower(tr.SampleMethod), n)
+		}
+		tr.SampleArg = arg
+		tr.SamplePercent = strings.TrimSpace(p.lex.input[start:p.cur.pos])
+		p.advance() // consume )
 	}
 
 	// Optional alias, and the COLUMN-ALIAS LIST that may follow it.
@@ -1430,6 +1454,7 @@ func lowerNamedRelationColumnAliases(tr *TableRef) {
 	tr.Qualifier = ""
 	tr.SampleMethod = ""
 	tr.SamplePercent = ""
+	tr.SampleArg = nil
 }
 
 // tableFuncLiteralText is a table-function argument's text when the argument

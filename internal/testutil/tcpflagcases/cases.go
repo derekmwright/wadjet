@@ -97,7 +97,10 @@ var Cases = []Case{
 var ResidualState = map[string]string{
 	"window_frame_start": "42601", "window_frame_end": "42601",
 	"named_window": "42601", "limit": "42601", "offset": "42601",
-	"table_function": "42601", "table_function_named": "42601", "table_sample": "42601",
+	// table_sample was 42601 here until #1411: the TABLESAMPLE argument is an
+	// expression now, evaluated at plan time, so the bad flag name is 22023
+	// on every door and the pin is deleted as the proof.
+	"table_function": "42601", "table_function_named": "42601",
 	"merge_on": "0A000", "merge_set": "", "merge_values": "",
 }
 

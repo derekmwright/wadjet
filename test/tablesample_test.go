@@ -7,6 +7,7 @@ import (
 	"math"
 	"testing"
 
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/ingest"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -140,5 +141,65 @@ func TestTablesample_Bernoulli100Percent(t *testing.T) {
 	cnt, _ := r.Rows[0]["cnt"].(int64)
 	if cnt != 1000 {
 		t.Errorf("BERNOULLI(100) returned %d rows, want 1000", cnt)
+	}
+}
+
+// The embedded engine reads a TABLESAMPLE argument as PostgreSQL 17.11 does
+// (#1411): any constant expression coerced to real when the statement is
+// planned, the range checked when the scan begins. `data` has 1000 rows and
+// `none` none. Each want is PostgreSQL's over the same rows; a sampled count
+// is held to a range. At 6184761c BERNOULLI (0) and SYSTEM (0) answered all
+// 1000 rows, 101 / 1e20 / CAST('1e400' AS DOUBLE PRECISION) / a bare 1e400
+// answered all 1000, and -1, NULL, '50', 25 * 2 and CAST(50 AS NUMERIC) were
+// 42601.
+func TestTablesampleArgumentIsPostgresReal(t *testing.T) {
+	db := setupSampleDB(t)
+	ctx := context.Background()
+	schema := parquet.Schema{Columns: []parquet.Column{{Name: "id", Type: parquet.TypeInt64}}}
+	if err := db.CreateTable(ctx, "none", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		sql    string
+		lo, hi int64  // the count's range
+		state  string // or the SQLSTATE PostgreSQL raises
+	}{
+		{"SELECT COUNT(*) FROM data TABLESAMPLE BERNOULLI (0)", 0, 0, ""},
+		{"SELECT COUNT(*) FROM data TABLESAMPLE BERNOULLI (-0.0)", 0, 0, ""},
+		{"SELECT COUNT(*) FROM data TABLESAMPLE SYSTEM (0)", 0, 0, ""},
+		{"SELECT COUNT(*) FROM data TABLESAMPLE BERNOULLI (100.000001)", 1000, 1000, ""},
+		{"SELECT COUNT(*) FROM data TABLESAMPLE BERNOULLI ('50')", 350, 650, ""},
+		{"SELECT COUNT(*) FROM data TABLESAMPLE BERNOULLI (25 * 2)", 350, 650, ""},
+		{"SELECT COUNT(*) FROM data TABLESAMPLE BERNOULLI (CAST(50 AS NUMERIC))", 350, 650, ""},
+		{"SELECT COUNT(*) FROM data TABLESAMPLE BERNOULLI (101)", 0, 0, "2202H"},
+		{"SELECT COUNT(*) FROM data TABLESAMPLE BERNOULLI (-1)", 0, 0, "2202H"},
+		{"SELECT COUNT(*) FROM data TABLESAMPLE BERNOULLI (1e20)", 0, 0, "2202H"},
+		{"SELECT COUNT(*) FROM data TABLESAMPLE BERNOULLI (99999999999999999999)", 0, 0, "2202H"},
+		{"SELECT COUNT(*) FROM data TABLESAMPLE BERNOULLI (CAST('1e20' AS DOUBLE PRECISION))", 0, 0, "2202H"},
+		{"SELECT COUNT(*) FROM data TABLESAMPLE BERNOULLI (CAST('NaN' AS DOUBLE PRECISION))", 0, 0, "2202H"},
+		{"SELECT COUNT(*) FROM data TABLESAMPLE BERNOULLI (NULL)", 0, 0, "2202H"},
+		{"SELECT COUNT(*) FROM data TABLESAMPLE SYSTEM (101)", 0, 0, "2202H"},
+		{"SELECT COUNT(*) FROM none TABLESAMPLE BERNOULLI (101)", 0, 0, "2202H"},
+		{"SELECT COUNT(*) FROM data TABLESAMPLE BERNOULLI (1e400)", 0, 0, "22003"},
+		{"SELECT COUNT(*) FROM data TABLESAMPLE BERNOULLI (CAST('1e400' AS DOUBLE PRECISION))", 0, 0, "22003"},
+		{"SELECT COUNT(*) FROM data TABLESAMPLE BERNOULLI (1e-46)", 0, 0, "22003"},
+		{"SELECT COUNT(*) FROM data TABLESAMPLE BERNOULLI (CAST('50' AS TEXT))", 0, 0, "42804"},
+		{"SELECT COUNT(*) FROM data TABLESAMPLE BERNOULLI (id)", 0, 0, "42703"},
+	} {
+		r, err := db.Query(ctx, c.sql)
+		if c.state != "" {
+			if got := sqlerr.StateOf(err); got != c.state {
+				t.Errorf("%s: %v (%s), want %s", c.sql, err, got, c.state)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("%s: %v", c.sql, err)
+			continue
+		}
+		cnt, _ := r.Rows[0]["count"].(int64)
+		if cnt < c.lo || cnt > c.hi {
+			t.Errorf("%s: %d rows, want %d..%d", c.sql, cnt, c.lo, c.hi)
+		}
 	}
 }

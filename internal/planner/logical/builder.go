@@ -1919,8 +1919,11 @@ func resolveTableOrCTE(table *plansql.TableRef, ctes []plansql.CTEDef) (*Node, e
 	node := NewScan(table.Name, table.Alias)
 	if table.SampleMethod != "" {
 		node.SampleMethod = strings.ToUpper(table.SampleMethod)
-		pct, _ := strconv.ParseFloat(table.SamplePercent, 64)
-		node.SamplePercent = pct
+		pct, isNull, err := tablesampleArgument(table.SampleArg)
+		if err != nil {
+			return nil, err
+		}
+		node.SamplePercent, node.SampleNull = pct, isNull
 	}
 	return node, nil
 }
