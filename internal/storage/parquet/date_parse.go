@@ -25,6 +25,9 @@ type DateParseError struct {
 	// OutOfRange marks a real calendar date outside PostgreSQL's DATE range
 	// (MinDateDay … MaxDateDay): still 22008, under PostgreSQL's own words.
 	OutOfRange bool
+	// ZoneRange marks a zone offset past PostgreSQL's ±15:59:59, or a minute
+	// or second past 59 in one: 22009 (invalid_time_zone_displacement_value).
+	ZoneRange bool
 }
 
 // PostgreSQL's DATE and TIMESTAMP ranges in the carriers' units — epoch days
@@ -75,6 +78,9 @@ func timestampInstantMillis(t time.Time) (int64, error) {
 }
 
 func (e *DateParseError) Error() string {
+	if e.ZoneRange {
+		return fmt.Sprintf("time zone displacement out of range: %q", e.Text)
+	}
 	if e.OutOfRange {
 		return fmt.Sprintf("date out of range: %q", e.Text)
 	}
@@ -93,6 +99,9 @@ func (e *DateParseError) Error() string {
 // blanket 42000 even though the failure had already been classified here
 // (#673). Every consumer of ParseDateDays gets the code for free.
 func (e *DateParseError) SQLState() string {
+	if e.ZoneRange {
+		return "22009"
+	}
 	if e.FieldRange {
 		return "22008"
 	}
@@ -104,7 +113,7 @@ func (e *DateParseError) SQLState() string {
 // calendar date (22008) and every non-date error return false.
 func IsDateSyntaxError(err error) bool {
 	var e *DateParseError
-	return errors.As(err, &e) && !e.FieldRange
+	return errors.As(err, &e) && !e.FieldRange && !e.ZoneRange
 }
 
 // IsDateParseError reports whether err is any ParseDateDays failure.
@@ -124,52 +133,19 @@ func IsDateParseError(err error) bool {
 // DMY and month names; no unsupported spelling becomes epoch or wrong year.
 // See docs/internals/parquet-date-text-accept-set.md for the design.
 func ParseDateDays(s string) (int32, error) {
-	trimmed := strings.TrimSpace(s)
-	if trimmed == "" {
-		return 0, &DateParseError{Text: s}
-	}
-
-	// A year-first date, optionally followed by a time-of-day. Split the time
-	// off first so the flexible-width date spellings below do not have to
-	// carry it; the date is what a DATE column stores.
-	datePart := trimmed
-	if i := strings.IndexAny(trimmed, " T"); i >= 0 {
-		datePart = trimmed[:i]
-		if !isTimeOfDay(strings.TrimSpace(trimmed[i+1:])) {
-			return 0, &DateParseError{Text: s}
-		}
-	}
-
-	y, m, d, kind := splitDateFields(datePart)
+	tt, kind := parseTemporalText(s)
 	switch kind {
 	case dateFieldsNone:
 		return 0, &DateParseError{Text: s}
 	case dateFieldsBad:
 		return 0, &DateParseError{Text: s, FieldRange: true}
+	case dateFieldsZone:
+		return 0, &DateParseError{Text: s, ZoneRange: true}
 	}
-
-	// There is no year zero. PostgreSQL's calendar runs 4713 BC .. 5874897 AD
-	// with 1 BC immediately before 1 AD, so every spelling of year 0000 is
-	// 22008 there — '0000-01-01', '0000-1-1', '0000/01/01', '0000.01.01',
-	// '0000-12-31', '00000101' and '00001231', all measured live on
-	// postgres:17-alpine. Go's calendar is proleptic and HAS one, so this used
-	// to store day -719528 for a string PostgreSQL refuses to parse: an
-	// accepted value on the WRITE path that no PostgreSQL client could have
-	// written (#641).
-	if y == 0 {
-		return 0, &DateParseError{Text: s, FieldRange: true}
-	}
-	// Month and day ranges, then calendar existence via a UTC round-trip:
-	// time.Date normalizes an impossible day (2026-02-30 → 2026-03-02), so a
-	// mismatch after construction is a nonexistent date.
-	if m < 1 || m > 12 || d < 1 || d > 31 {
-		return 0, &DateParseError{Text: s, FieldRange: true}
-	}
-	t := time.Date(y, time.Month(m), d, 0, 0, 0, 0, time.UTC)
-	if t.Year() != y || int(t.Month()) != m || t.Day() != d {
-		return 0, &DateParseError{Text: s, FieldRange: true}
-	}
-
+	// The DATE is the date fields: a trailing time-of-day is validated and
+	// dropped, `24:00:00` included (PostgreSQL 17.11: DATE '2024-03-04
+	// 24:00:00' is 2024-03-04, the TIMESTAMP 2024-03-05 00:00:00).
+	t := time.Date(tt.year, time.Month(tt.month), tt.day, 0, 0, 0, 0, time.UTC)
 	days := civilDaysSinceEpoch(t)
 	if days < MinDateDay || days > MaxDateDay {
 		// PostgreSQL's DATE range, not the int32 carrier's: the ONE range
@@ -199,6 +175,7 @@ const (
 	dateFieldsOK   dateFieldsKind = iota // y/m/d are set and numeric
 	dateFieldsNone                       // not a recognizable numeric date shape (22007)
 	dateFieldsBad                        // numeric shape but a field is out of range (22008)
+	dateFieldsZone                       // a zone offset past ±15:59:59 (22009)
 )
 
 // splitDateFields parses a year-first date with '-' or '/' separators
@@ -230,6 +207,14 @@ func splitDateFields(s string) (y, m, d int, kind dateFieldsKind) {
 	for _, p := range parts {
 		if p == "" || !allDigits(p) {
 			return 0, 0, 0, dateFieldsNone
+		}
+	}
+	// Wider than any field PostgreSQL's calendar holds (its last year,
+	// 5874897, has seven digits), and wide enough to wrap atoiN's int: out
+	// of range, never a wrapped value that happens to land in range.
+	for _, p := range parts {
+		if len(p) > 9 {
+			return 0, 0, 0, dateFieldsBad
 		}
 	}
 	// YEAR-FIRST ONLY, and only when the leading field is an UNAMBIGUOUS
@@ -267,25 +252,6 @@ func threeDigitMonthKind(month string) dateFieldsKind {
 		return dateFieldsNone // PostgreSQL's day-of-year, then a field too many
 	}
 	return dateFieldsBad // read as a month, and out of range
-}
-
-// isTimeOfDay reports whether s is a plausible HH:MM[:SS[.fraction]] time,
-// so a trailing time-of-day on a DATE input is accepted and truncated rather
-// than being read as garbage.
-func isTimeOfDay(s string) bool {
-	if s == "" {
-		return false
-	}
-	// Strip a trailing timezone offset or 'Z'; the date is unaffected by it.
-	if i := strings.IndexAny(s, "Zz+"); i > 0 {
-		s = s[:i]
-	}
-	for _, layout := range []string{"15:04:05.999999999", "15:04:05", "15:04"} {
-		if _, err := time.Parse(layout, s); err == nil {
-			return true
-		}
-	}
-	return false
 }
 
 func allDigits(s string) bool {
@@ -495,126 +461,265 @@ func reflectInt(v any) int64 {
 	return 0
 }
 
-// timestampLayouts is the accept-set for a TIMESTAMP text literal, in the
-// order tried. It is the ONE list: the comparison kernel and the scan filter
-// reach it through ParseTimestampMillisOrZero rather than keeping copies,
-// which is what makes "a literal that STORES is a literal a predicate over
-// the same column reads the same way" a fact rather than a comment. The two
-// copies it used to describe had drifted (#692).
-var timestampLayouts = []string{
-	time.RFC3339Nano,
-	time.RFC3339,
-	// The SPACE-separated spellings with an offset, and the two-digit offset
-	// form. PostgreSQL accepts all four — `'2020-01-01 12:00:00-08:00'` and
-	// `'…-08'` are ordinary timestamp input there — and this list had none of
-	// them, so the "a literal's offset is DISCARDED on every path" rule held
-	// only for the T-separated spelling and the others were 22007 (review
-	// P10). Refusing input PostgreSQL accepts is what ADR-0012 item 1 forbids.
-	"2006-01-02 15:04:05.999999999-07:00",
-	"2006-01-02 15:04:05-07:00",
-	"2006-01-02 15:04:05-07",
-	"2006-01-02T15:04:05.999999999-07",
-	"2006-01-02T15:04:05-07",
-	"2006-01-02T15:04:05",
-	"2006-01-02T15:04:05.999999999",
-	"2006-01-02 15:04:05",
-	"2006-01-02 15:04:05.999999999",
-	"2006-01-02",
+// temporalText is a DATE or TIMESTAMP text as THE accept-set reads it: the
+// date fields, the clock when one is spelled, and the zone offset when one is
+// spelled (east of UTC, in seconds).
+type temporalText struct {
+	year, month, day         int
+	hour, minute, second, ns int
+	hasZone                  bool
+	offsetSeconds            int
+}
+
+// parseTemporalText is THE date/time text grammar, one for DATE and
+// TIMESTAMP alike (round-2 B3 of arc PW: the TIMESTAMP reader was a list of
+// Go layouts — two-digit fields, `-` separators, seconds required — so
+// `'2024/03/04'`, `'2024-3-4'` and `'2024-03-04 12:00'` were 22007 as a
+// TIMESTAMP while the DATE reader took them, and a timestamp parameter bound
+// over pgwire, spliced as `CAST('…' AS TIMESTAMP)`, was refused where
+// PostgreSQL answers):
+//
+//	text   = ws* date [ sep clock [ ws* zone ] ] ws*
+//	date   = splitDateFields' year-first shapes (a four-or-more-digit year,
+//	         `-` `/` `.` separators, one or more digits a field; YYYYMMDD)
+//	sep    = one or more spaces | `T` | `t`
+//	clock  = H[H] `:` M[M] [ `:` S[S] [ `.` digits* ] ]
+//	zone   = `Z` | `z` | (`+`|`-`) ( H[H] [ `:` MM [ `:` SS ] ] | HHMM | HHMMSS )
+//
+// Every accepted spelling was measured on PostgreSQL 17.11 (arc PW round 2,
+// the B3 table). PostgreSQL also reads month names, `epoch` / `infinity` /
+// `now` / `today`, BC years, AM / PM, Julian days, zone NAMES, and a leading
+// one-to-three-digit field as MDY; this grammar does not, and each is 22007
+// here (docs/adr/0012-divergences/temporal.md) — refused, never guessed.
+//
+// The calendar rule is ParseDateDays' (no year zero, month 1–12, the day
+// existing in its month); the clock's is PostgreSQL's: hour 0–24 with `24`
+// only as `24:00:00`, minute 0–59, second 0–60 (a leap second, no fraction).
+// A field outside its range is 22008 (dateFieldsBad), a shape outside the
+// grammar 22007 (dateFieldsNone).
+func parseTemporalText(s string) (temporalText, dateFieldsKind) {
+	var tt temporalText
+	text := strings.TrimSpace(s)
+	if text == "" {
+		return tt, dateFieldsNone
+	}
+	datePart, rest := text, ""
+	if i := strings.IndexAny(text, " \tTt"); i >= 0 {
+		datePart, rest = text[:i], strings.TrimLeft(text[i+1:], " \t")
+		if rest == "" {
+			return tt, dateFieldsNone
+		}
+	}
+	y, m, d, kind := splitDateFields(datePart)
+	if kind != dateFieldsOK {
+		return tt, kind
+	}
+	// There is no year zero. PostgreSQL's calendar runs 4713 BC .. 5874897 AD
+	// with 1 BC immediately before 1 AD, so every spelling of year 0000 is
+	// 22008 there — '0000-01-01', '0000-1-1', '0000/01/01', '0000.01.01',
+	// '0000-12-31', '00000101' and '00001231', all measured live on
+	// postgres:17-alpine. Go's calendar is proleptic and HAS one, so this used
+	// to store day -719528 for a string PostgreSQL refuses to parse (#641).
+	if y == 0 {
+		return tt, dateFieldsBad
+	}
+	// Month and day ranges, then calendar existence via a UTC round-trip:
+	// time.Date normalizes an impossible day (2026-02-30 → 2026-03-02), so a
+	// mismatch after construction is a nonexistent date.
+	if m < 1 || m > 12 || d < 1 || d > 31 {
+		return tt, dateFieldsBad
+	}
+	if t := time.Date(y, time.Month(m), d, 0, 0, 0, 0, time.UTC); t.Year() != y || int(t.Month()) != m || t.Day() != d {
+		return tt, dateFieldsBad
+	}
+	tt.year, tt.month, tt.day = y, m, d
+	if rest == "" {
+		return tt, dateFieldsOK
+	}
+	return tt, tt.readClock(rest)
+}
+
+// readClock reads `clock [ ws* zone ]` into tt.
+func (tt *temporalText) readClock(s string) dateFieldsKind {
+	i := 0
+	field := func() (int, bool) {
+		j := i
+		for i < len(s) && i-j < 2 && s[i] >= '0' && s[i] <= '9' {
+			i++
+		}
+		if i == j || (i < len(s) && s[i] >= '0' && s[i] <= '9') {
+			return 0, false
+		}
+		return atoiN(s[j:i]), true
+	}
+	var ok bool
+	if tt.hour, ok = field(); !ok || i >= len(s) || s[i] != ':' {
+		return dateFieldsNone
+	}
+	i++
+	if tt.minute, ok = field(); !ok {
+		return dateFieldsNone
+	}
+	if i < len(s) && s[i] == ':' {
+		i++
+		if tt.second, ok = field(); !ok {
+			return dateFieldsNone
+		}
+		if i < len(s) && s[i] == '.' {
+			i++
+			j := i
+			for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+				i++
+			}
+			frac := s[j:i]
+			if len(frac) > 9 {
+				frac = frac[:9]
+			}
+			ns := atoiN(frac)
+			for k := len(frac); k < 9; k++ {
+				ns *= 10
+			}
+			tt.ns = ns
+		}
+	}
+	if kind := tt.readZone(strings.TrimLeft(s[i:], " \t")); kind != dateFieldsOK {
+		return kind
+	}
+	switch {
+	case tt.hour > 24 || tt.minute > 59 || tt.second > 60:
+		return dateFieldsBad
+	case tt.hour == 24 && (tt.minute != 0 || tt.second != 0 || tt.ns != 0):
+		return dateFieldsBad
+	case tt.second == 60 && tt.ns != 0:
+		return dateFieldsBad
+	}
+	return dateFieldsOK
+}
+
+// readZone reads the zone suffix ("" is none).
+func (tt *temporalText) readZone(z string) dateFieldsKind {
+	switch {
+	case z == "":
+		return dateFieldsOK
+	case z == "Z" || z == "z":
+		tt.hasZone = true
+		return dateFieldsOK
+	case z[0] != '+' && z[0] != '-':
+		return dateFieldsNone
+	}
+	sign, body := 1, z[1:]
+	if z[0] == '-' {
+		sign = -1
+	}
+	var parts []string
+	if strings.Contains(body, ":") {
+		parts = strings.Split(body, ":")
+		if len(parts) > 3 || len(parts[0]) > 2 {
+			return dateFieldsNone
+		}
+		for _, p := range parts[1:] {
+			if len(p) < 1 || len(p) > 2 {
+				return dateFieldsNone
+			}
+		}
+	} else {
+		switch len(body) {
+		case 1, 2:
+			parts = []string{body}
+		case 3:
+			parts = []string{body[:1], body[1:]}
+		case 4:
+			parts = []string{body[:2], body[2:]}
+		case 6:
+			parts = []string{body[:2], body[2:4], body[4:]}
+		default:
+			return dateFieldsNone
+		}
+	}
+	units := []int{3600, 60, 1}
+	off := 0
+	for k, p := range parts {
+		if !allDigits(p) {
+			return dateFieldsNone
+		}
+		v := atoiN(p)
+		if k > 0 && v > 59 {
+			return dateFieldsZone
+		}
+		off += v * units[k]
+	}
+	// PostgreSQL's displacement limit (17.11: `+15:59` and `-15:59:59`
+	// read, `+16` and `+99` are 22009).
+	if off > 15*3600+59*60+59 {
+		return dateFieldsZone
+	}
+	tt.hasZone, tt.offsetSeconds = true, sign*off
+	return dateFieldsOK
+}
+
+// wallClock is tt's wall-clock fields as a UTC instant. time.Date carries
+// `24:00:00` and second 60 into the next day / minute, which is PostgreSQL's
+// reading of both (`'2020-01-01 24:00:00'::timestamp` and `'2020-01-01
+// 23:59:60'::timestamp` are both 2020-01-02 00:00:00 there).
+func (tt temporalText) wallClock() time.Time {
+	return time.Date(tt.year, time.Month(tt.month), tt.day, tt.hour, tt.minute, tt.second, tt.ns, time.UTC)
 }
 
 // ParseTimestampMillis converts a TIMESTAMP string to epoch milliseconds — the
 // unit the parquet schema declares for the column (TimestampMillis) and the
 // unit its reader hands back.
 //
-// The failure is 22007 rather than a zero. The kernel's copy of this list
-// returns 0 for an unparseable string, which is a defensible answer for a
-// COMPARISON (it cannot match) and an indefensible one for a WRITE, where 0 is
-// 1970-01-01T00:00:00Z stored under the caller's timestamp.
+// The failure is 22007 rather than a zero: 0 is 1970-01-01T00:00:00Z stored
+// under the caller's timestamp. A spelling the grammar reads whose fields name
+// no instant, or one outside PostgreSQL's TIMESTAMP range, is 22008.
 func ParseTimestampMillis(s string) (int64, error) {
-	trimmed := strings.TrimSpace(s)
-	if t, ok := ParseTimestampWallClock(trimmed); ok {
-		return t.UnixMilli(), nil
+	tt, kind := parseTemporalText(s)
+	switch kind {
+	case dateFieldsNone:
+		return 0, &TimestampParseError{Text: s}
+	case dateFieldsBad:
+		return 0, &TimestampParseError{Text: s, FieldRange: true}
+	case dateFieldsZone:
+		return 0, &TimestampParseError{Text: s, ZoneRange: true}
 	}
-	// The literal named no timestamp. Which KIND of failure it is decides the
-	// SQLSTATE, exactly as it does for DATE.
-	if timestampFieldsOutOfRange(trimmed) {
+	ms, err := timestampInstantMillis(tt.wallClock())
+	if err != nil {
 		return 0, &TimestampParseError{Text: s, FieldRange: true}
 	}
-	return 0, &TimestampParseError{Text: s}
+	return ms, nil
 }
 
-// ParseTimestampWallClock is THE timestamp accept-set: every layout this
-// engine takes, with the offset discarded, returning the instant whose UTC
-// fields are the literal's wall clock.
+// ParseTimestampWallClock is THE timestamp accept-set (parseTemporalText),
+// with the offset discarded, returning the instant whose UTC fields are the
+// literal's wall clock — PostgreSQL's `timestamp without time zone` reading.
 //
 // It is exported because there were FOUR copies of this decision and they
 // disagreed after #692 fixed two of them: the writer and the two comparison
 // kernels discarded the offset while `expr.parseTimestampToEpochMsOK` and
 // `expr.castTemporal` still applied it, so a row inserted with
 // `'2020-06-01T12:00:00+05:30'` could not be found by `WHERE t = ` that same
-// literal — right→wrong on the one invariant the commit exists to establish
-// (review B2). Every path now reads this function.
+// literal (review B2). Every path now reads this function.
 func ParseTimestampWallClock(s string) (time.Time, bool) {
-	trimmed := normalizeTimestampOverflow(strings.TrimSpace(s))
-	for _, layout := range timestampLayouts {
-		if t, err := time.Parse(layout, trimmed); err == nil {
-			return time.Date(t.Year(), t.Month(), t.Day(),
-				t.Hour(), t.Minute(), t.Second(), t.Nanosecond(), time.UTC), true
-		}
-	}
-	return time.Time{}, false
+	t, _, _, ok := ParseTimestampZone(s)
+	return t, ok
 }
 
-// normalizeTimestampOverflow rewrites the two clock spellings PostgreSQL
-// ACCEPTS and Go's time.Parse rejects: hour 24 (the end of a day, which
-// PostgreSQL reads as 00:00 of the next one) and second 60 (a leap second,
-// which it reads as the next minute). `'2020-01-01 24:00:00'::timestamp` and
-// `'2020-01-01 23:59:60'::timestamp` are both `2020-01-02 00:00:00` there —
-// measured, not remembered. This engine refused both, which is the ADR-0012
-// item 1 violation review P9 names.
-//
-// The rewrite is textual and conservative: it fires only on an exact `24:00`
-// hour with zero minutes and seconds, or an exact `:60` second, and leaves
-// everything else — hour 25, minute 60 — to the parser and the field-range
-// classifier.
-func normalizeTimestampOverflow(s string) string {
-	sep := strings.IndexAny(s, "T ")
-	if sep < 0 {
-		return s
+// ParseTimestampZone is ParseTimestampWallClock with the zone the text
+// spelled: offsetSeconds east of UTC when hasZone. A `timestamp with time
+// zone` reading of the text is the instant wall − offset (pgwire's
+// timestamptz parameter, which this engine binds as the TIMESTAMP of its UTC
+// instant). ok=false for text outside the grammar and for a wall clock
+// outside PostgreSQL's TIMESTAMP range.
+func ParseTimestampZone(s string) (wall time.Time, offsetSeconds int, hasZone bool, ok bool) {
+	tt, kind := parseTemporalText(s)
+	if kind != dateFieldsOK {
+		return time.Time{}, 0, false, false
 	}
-	date, clock := s[:sep], s[sep+1:]
-	zone := ""
-	if i := strings.IndexAny(clock, "Zz+"); i > 0 {
-		clock, zone = clock[:i], clock[i:]
-	} else if i := strings.LastIndex(clock, "-"); i > 0 {
-		clock, zone = clock[:i], clock[i:]
+	wall = tt.wallClock()
+	if _, err := timestampInstantMillis(wall); err != nil {
+		return time.Time{}, 0, false, false
 	}
-	day, err := ParseDateDays(date)
-	if err != nil {
-		return s
-	}
-	switch {
-	case clock == "24:00:00" || clock == "24:00":
-		next := time.Unix(int64(day+1)*86400, 0).UTC()
-		return next.Format("2006-01-02") + s[sep:sep+1] + "00:00:00" + zone
-	case strings.HasSuffix(clock, ":60"):
-		hm := strings.Split(strings.TrimSuffix(clock, ":60"), ":")
-		if len(hm) != 2 {
-			return s
-		}
-		h, herr := strconv.Atoi(hm[0])
-		m, merr := strconv.Atoi(hm[1])
-		if herr != nil || merr != nil || h > 23 || m > 59 {
-			return s
-		}
-		bumped := time.Date(1970, 1, 1, h, m, 0, 0, time.UTC).Add(time.Minute)
-		if bumped.Day() != 1 {
-			next := time.Unix(int64(day+1)*86400, 0).UTC()
-			return next.Format("2006-01-02") + s[sep:sep+1] + "00:00:00" + zone
-		}
-		return date + s[sep:sep+1] + bumped.Format("15:04:05") + zone
-	}
-	return s
+	return wall, tt.offsetSeconds, tt.hasZone, true
 }
 
 // ParseTimestampMillisOrZero is the COMPARISON contract: the epoch
@@ -662,56 +767,6 @@ func WallClockMillis(t time.Time) int64 {
 		t.Hour(), t.Minute(), t.Second(), t.Nanosecond(), time.UTC).UnixMilli()
 }
 
-// timestampFieldsOutOfRange reports whether text SHAPED like a timestamp names
-// field values no calendar or clock has — 2020-02-30, month 13, hour 25 —
-// which PostgreSQL answers with 22008 (datetime_field_overflow) rather than
-// 22007 (invalid_datetime_format). Text that is not a timestamp at all
-// ("not-a-timestamp") is 22007 and returns false here.
-//
-// The DATE side has carried this classification since #560; TIMESTAMP simply
-// never got it, so every bad literal was 22007 (#692).
-func timestampFieldsOutOfRange(s string) bool {
-	datePart, timePart := s, ""
-	if i := strings.IndexAny(s, "T "); i >= 0 {
-		datePart, timePart = s[:i], strings.TrimSpace(s[i+1:])
-	}
-	// The DATE parser owns the calendar rule, round trip included.
-	if _, err := ParseDateDays(datePart); err != nil {
-		var de *DateParseError
-		if errors.As(err, &de) {
-			return de.FieldRange
-		}
-		return false
-	}
-	if timePart == "" {
-		return false
-	}
-	// Strip a zone suffix before reading the clock fields.
-	if i := strings.IndexAny(timePart, "Zz+"); i > 0 {
-		timePart = timePart[:i]
-	} else if i := strings.LastIndex(timePart, "-"); i > 0 {
-		timePart = timePart[:i]
-	}
-	fields := strings.Split(timePart, ":")
-	if len(fields) < 2 || len(fields) > 3 {
-		return false
-	}
-	limits := []int{23, 59, 60} // PostgreSQL accepts second 60 (leap second)
-	for i, f := range fields {
-		if i == 2 {
-			f = strings.SplitN(f, ".", 2)[0]
-		}
-		n, err := strconv.Atoi(f)
-		if err != nil {
-			return false
-		}
-		if n < 0 || n > limits[i] {
-			return true
-		}
-	}
-	return false
-}
-
 // TimestampParseError is ParseTimestampMillis's failure. FieldRange separates
 // PostgreSQL's two classes exactly as DateParseError's does: 22008 for a
 // timestamp whose fields name no instant, 22007 for text that is not a
@@ -719,9 +774,13 @@ func timestampFieldsOutOfRange(s string) bool {
 type TimestampParseError struct {
 	Text       string
 	FieldRange bool
+	ZoneRange  bool // 22009, as DateParseError's
 }
 
 func (e *TimestampParseError) Error() string {
+	if e.ZoneRange {
+		return fmt.Sprintf("time zone displacement out of range: %q", e.Text)
+	}
 	if e.FieldRange {
 		return fmt.Sprintf("date/time field value out of range: %q", e.Text)
 	}
@@ -729,6 +788,9 @@ func (e *TimestampParseError) Error() string {
 }
 
 func (e *TimestampParseError) SQLState() string {
+	if e.ZoneRange {
+		return "22009"
+	}
 	if e.FieldRange {
 		return "22008"
 	}
