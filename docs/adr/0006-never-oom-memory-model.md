@@ -544,3 +544,51 @@ arms against PostgreSQL 17.11),
 `server.TestCJALiftedFilterOverAPolicedBuildPublishesOnlyThePolicysRows` and
 `server.TestCJARowFilterOverACrossJoinsBuildKeepsItsRowsOut` (nine doors),
 `pgwire.TestCJACrossJoinsBuildColumnDeclaresItsOwnType` (both format codes).
+
+### 2026-10-03 (arc SJ): a partition replay emits the join's own output, whatever the other side's size (#1359)
+
+The grace hash join emits an evicted build partition's rows from a REPLAY at
+the end of the probe (`HashJoinProbe.NextFlush`): a temporary join over the
+partition's build file, probed with the partition's probe file. For a RIGHT or
+FULL join, the replay is the only place an evicted partition's unmatched build
+rows — the preserved side — are emitted (the main join's own flush skips
+evicted entries).
+
+**Decision: the drain emits every preserved row of a partition exactly once,
+in the join's declared output shape, regardless of the other side's size —
+zero included — and the in-memory and replayed partitions read ONE rule for
+that shape.** The rule is the one `FlushUnmatchedRows` already read: the probe
+schema the join recorded under its lock (`recordProbeSchema`), else the
+plan-declared `ProbeSchemaHint`; the flushing probe's own output narrowing
+(`OutputFilter`, `OutputExcludeProbe/Build`, plan settings every clone carries
+from construction); and every naming input of the join's output schema
+(`BuildTableAlias`, `BuildColOrigins`, `QualifyAllBuildCols`).
+
+What it cost while it was open: the replay took the probe schema and the
+narrowing from fields the FIRST probe batch copied onto the join. A probe side
+that produced no rows copies nothing, so the replay's unmatched rows came out
+with no probe columns and every build column, which the consumer read
+positionally: under a forced eviction at 4 MiB,
+`SELECT p.id, p.k_int, p.v_dec, p.v_arr, e.k_int, e.ey FROM sj_e e FULL JOIN
+sj_p_one p ON e.k_int = p.k_int` answered `1, 1, 1.25, {1,2}, 1, NULL` (the
+preserved key read again as the empty side's) where PostgreSQL 17.11 answers
+`1, 1, 1.25, {1,2}, NULL, NULL`, and the RIGHT join over the 300-row `sj_p_nullk` with
+`ORDER BY p.id LIMIT 4` refused with `cannot store int64 into ARRAY vector`. Whether a
+partition is evicted at all is the budget's and the moment's, which is why it
+was reported as intermittent; with the eviction forced it failed every time.
+The temporary join also dropped `BuildColOrigins` and `QualifyAllBuildCols`,
+so even with probe rows the replayed rows named build columns differently from
+the in-memory partitions' rows of the same join.
+
+LEFT and INNER joins over an empty side, and RIGHT / FULL joins whose BUILD
+side is the empty one, were measured on the same grid and never differed: an
+empty build evicts nothing, and a probe-preserved row is emitted by `Execute`
+from the batch that carries it.
+
+Gates: `exec.TestArcSJGraceDrainEmitsPreservedRowsOverAnEmptySide` (1 600
+operator cells, the eviction asserted), `exec.TestArcSJReplayNamesBuildColumnsAsTheJoinDoes`,
+`wadjet.TestArcSJEmptySideJoinEveryBudget` / `…Intermittent` /
+`…BareColumnsForced` (640 cells against PostgreSQL 17.11 at four budgets, with
+and without the forcing knob), `coordinator.TestArcSJEmptySideJoinEveryArm`
+(five arms), `server.TestArcSJAnEmptySidedSpilledJoinPublishesThePolicysValueOnEveryDoor`
+(nine doors).
