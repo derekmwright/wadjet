@@ -487,11 +487,126 @@ func (pt *paramTyper) typeOf(n plansql.Node, sc *scope) uint32 {
 	if containsSentinel(inner) {
 		return 0
 	}
+	if oid, ok := pt.pgOperatorType(inner, sc); ok {
+		return oid
+	}
 	d, conf := physical.DeclaredTypeOfNode(inner, sc.schema())
 	if conf != expr.Decided {
 		return 0
 	}
 	return declOID(d)
+}
+
+// pgOperatorType is PostgreSQL's type for a numeric literal and for the
+// arithmetic over numbers, as parse analysis resolves the operator — the type
+// a parameter compared with the expression takes, which is a CLIENT contract:
+// the client encodes its value for the ParameterDescription's OID (round-2
+// B2). It is NOT the engine's declaration of the result: this engine declares
+// integer arithmetic bigint (numeric-decimal r1, a kept divergence of the
+// RESULT column), and reading the parameter's type off that declared `$1 =
+// n + 1` int8 where PostgreSQL and v0.25.3 declare int4.
+//
+// PostgreSQL 17.11, measured per operator (+ - * / %) × operand pair over
+// smallint, integer, bigint, numeric, real, double precision: two exact
+// operands take the wider of smallint < integer < bigint < numeric; real with
+// real is real; any other pair holding a float is double precision; % over a
+// float has no operator (42883). Unary minus keeps its operand's type. An
+// integer literal is integer when int4 holds it, bigint when int8 does,
+// numeric otherwise; a literal with a point or an exponent is numeric. A
+// date minus a date is integer, a date plus or minus an integer a date.
+//
+// ok=false hands the expression back to the declaration walk: an operand
+// whose type the walk does not decide, an operand that is not a number, an
+// operator PostgreSQL has none of.
+func (pt *paramTyper) pgOperatorType(n plansql.Node, sc *scope) (uint32, bool) {
+	switch e := n.(type) {
+	case *plansql.Lit:
+		if e.Kind != plansql.LitNumber {
+			return 0, false
+		}
+		return pgNumberLiteralOID(e.Value), true
+	case *plansql.UnaryOp:
+		if e.Op != "-" && e.Op != "+" {
+			return 0, false
+		}
+		t := pt.typeOf(e.Inner, sc)
+		if pgNumberRank(t) == 0 {
+			return 0, false
+		}
+		return t, true
+	case *plansql.BinaryOp:
+		switch e.Op {
+		case "+", "-", "*", "/", "%":
+		default:
+			return 0, false
+		}
+		l, r := pt.typeOf(e.Left, sc), pt.typeOf(e.Right, sc)
+		switch {
+		case l == oidDate && r == oidDate && e.Op == "-":
+			return oidInt4, true
+		case l == oidDate && (e.Op == "+" || e.Op == "-") && pgNumberRank(r) >= 1 && pgNumberRank(r) <= 2,
+			r == oidDate && e.Op == "+" && pgNumberRank(l) >= 1 && pgNumberRank(l) <= 2:
+			return oidDate, true
+		}
+		lr, rr := pgNumberRank(l), pgNumberRank(r)
+		if lr == 0 || rr == 0 {
+			return 0, false
+		}
+		if lr <= 4 && rr <= 4 {
+			if lr > rr {
+				return l, true
+			}
+			return r, true
+		}
+		if e.Op == "%" {
+			return 0, false
+		}
+		if l == oidFloat4 && r == oidFloat4 {
+			return oidFloat4, true
+		}
+		return oidFloat8, true
+	}
+	return 0, false
+}
+
+// pgNumberRank orders PostgreSQL's number types for pgOperatorType: the
+// exact ones by width (1–4), then real and double precision; 0 for any other
+// type.
+func pgNumberRank(oid uint32) int {
+	switch oid {
+	case oidInt2:
+		return 1
+	case oidInt4:
+		return 2
+	case oidInt8:
+		return 3
+	case oidNumeric:
+		return 4
+	case oidFloat4:
+		return 5
+	case oidFloat8:
+		return 6
+	}
+	return 0
+}
+
+// pgNumberLiteralOID is PostgreSQL's type for a numeric literal's text. A
+// 0x / 0o / 0b prefix names an integer in that base (PostgreSQL 16+);
+// underscores between digits are separators.
+func pgNumberLiteralOID(text string) uint32 {
+	digits, base := strings.ReplaceAll(text, "_", ""), 10
+	if u := strings.ToLower(strings.TrimLeft(digits, "+-")); len(u) > 2 && u[0] == '0' && strings.ContainsRune("xob", rune(u[1])) {
+		base = 0
+	} else if strings.ContainsAny(text, ".eE") {
+		return oidNumeric
+	}
+	if _, err := strconv.ParseInt(digits, base, 32); err == nil {
+		return oidInt4
+	}
+	if _, err := strconv.ParseInt(digits, base, 64); err == nil {
+		return oidInt8
+	}
+	return oidNumeric
 }
 
 // declOID maps a declaration onto the OID PostgreSQL names for it. A FLOAT64
