@@ -46,7 +46,11 @@ conclusions about what a key names.
     of #558: the SELECT-list projection drops it on the single-process path
     and the gather projects to the visible output on the DAG. It is never a
     sort key, so the materialize-above-a-window problem that issue names
-    does not arise.
+    does not arise. On the DAG a window stage renames the keys it computes
+    to __winkey_s<stage>_N (dagplan.ownWindowKeyNames): the stream above a
+    window still CARRIES its keys, and a window stacked over it numbers its
+    own from zero, so the two collided on __winkey_0 and the outer key read
+    the inner column.
 
 Anything this pass cannot resolve is left exactly as written and reaches
 exec.Window.bindKeyNames, which refuses it. Degrading to one partition is
