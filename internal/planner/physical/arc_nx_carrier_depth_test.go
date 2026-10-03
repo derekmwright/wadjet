@@ -30,12 +30,12 @@ func TestArcNXCarrierWalkIsLinearInDepth(t *testing.T) {
 		{"integerCastQuotient", nest("CAST(", "i64", " AS INTEGER) / d152 + 1")},
 		{"wideLiteralUnary", nest("-(", "14.0000000000000000001", ")")},
 		{"wideLiteralCoalesce", nest("COALESCE(", "14.0000000000000000001", ", d152)")},
-		// Round 2: the quotient reads an integer CAST through every integer
-		// wrapper (castMadeExactIn), one walk under one quotient and one per
+		// A quotient over an integer CAST under every integer wrapper: the walk
+		// (castMadeExactIn) reads it once under one quotient and once per
 		// quotient in a chain.
 		{"wrappedCastQuotient", "d152 / (CAST(i64 AS INTEGER)" + strings.Repeat(" + 0", depth) + ")"},
 		{"wrappedCastQuotientChain", nest("(", "d152", " / NULLIF(CAST(i64 AS INTEGER) + 0, 0)) + 1")},
-		// Round 3: a quotient over a cast under NUMERIC arithmetic or a bare
+		// A quotient over a cast under NUMERIC arithmetic or a bare
 		// NUMERIC cast (castMadeExactIn walks every numeric construct), and a
 		// chain of such quotients.
 		{"numericWrappedCastQuotient", "d152 / (CAST(i64 AS BIGINT)" + strings.Repeat(" * 1.0", depth) + ")"},
