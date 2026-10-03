@@ -12,7 +12,9 @@ in §3 is what a row past the readers' inference sample does — #1242 / #1243 /
 #1247; amended 2026-09-23 by arc FR2, whose paragraphs in §3 are the glob as
 a sequence of files, the sample's type reading every sampled value, and the
 plan-time refusal of an input that cannot be opened — #1262 / #1240 / #1260 /
-#1261 / #1245 / #1248 / #1259)
+#1261 / #1245 / #1248 / #1259; amended 2026-10-03 by arc RD, whose paragraph
+in §3 is the POSITION past the sample — loud by default, every row on
+request — and its measurement — #1242)
 
 Related: ADR-0034 (the authorization ordering §3 rests on), ADR-0024 (§5's
 declared width and §7's key widening), ADR-0012 §5 and its catalog
@@ -134,7 +136,83 @@ refused**, and the line is drawn by AUTHORIZATION, not by convenience.
    of the wrong width with 22P04, #1248; blank lines and mixed line endings
    stay answered, [table-functions](0012-divergences/table-functions.md) in the ADR-0012 catalog). COUNT(*) refuses when the reader reaches the row; a LIMIT that
    stops reading before it need not refuse. A key first seen past the sample
-   remains absent from the inferred column list.
+   is refused too (arc RD, below).
+
+   **PAST THE SAMPLE THE READER IS LOUD BY DEFAULT, AND READS EVERY ROW ON
+   REQUEST** (arc RD, #1242). This is the position, stated once for every
+   shape a later row can take, and an embedded user's default:
+
+   - the default is the 100-row sample, and a later row the relation cannot
+     carry is REFUSED, never read as a NULL and never read without its
+     value: a value of another type (the paragraph above: 22P02 / 22003 /
+     22007); a non-NULL value under a KEY the sample never saw — `22P04`,
+     COPY's class for a record with a field past the relation's last column,
+     naming the reader, the input, the row and the key; a non-NULL value
+     under a FIELD of a nested object the sample never saw — `22P02` naming
+     the column and the field. Before arc RD both were skipped and the row
+     read without them, so `SELECT *` and a `CREATE TABLE AS` STORED the row
+     as if the key were absent. A JSON `null` under such a key or field is
+     the NULL the relation already answers there, and is read. Every refusal
+     ends with how to opt out: `; sample_size = -1 infers it from every row`;
+   - the opt-out is the `sample_size` named argument of `read_csv` and
+     `read_json` (DuckDB's name and spelling): a positive count samples that
+     many rows (a `read_json` sample is still bounded by 8 MiB), and `-1`
+     infers the column list and every type from EVERY row, in a first pass
+     over the input that keeps no row (memory is one record or one 1 MiB
+     chunk of objects plus the per-column state), before the pass that reads
+     it. The whole-input inference is the SAME promotion the sample uses —
+     int then 0.75 is `double precision`, int then `abc` or `true` is `text`,
+     a key anywhere is a column, a nested field anywhere is a field, an
+     all-NULL head followed by `5` is `bigint` — so a file read with `-1`
+     answers what a sample covering the whole file would. The plan reads the
+     input once for its schema and the execution reads it against that
+     schema (`withPlannedSchema`), checking EVERY row, so an input changed
+     between the two is refused naming "every row of the input"; a run with
+     no plan-time read (an `http(s)` input, `WADJET_TEST_NO_READER_SCHEMA`)
+     infers in its own first pass. `-1` over an input that can be read ONCE
+     — a FIFO, a device, a socket, anywhere in a glob — is `0A000`, since its
+     second open reads another stream or blocks; over `http(s)` the input is
+     fetched twice. A count that is not a whole number ≥ 1, or `-1`, is
+     `22023`;
+   - CSV has no key past the sample (its header fixes the columns; a record
+     of another width is FR2's `22P04`), so the key and field rules are
+     `read_json`'s; `read_parquet` declares its schema in its footer and
+     infers nothing.
+
+   THE MEASUREMENT this was decided on (evidence under
+   `tooling/arcs/rd_reader_inference/rd_author/`). PostgreSQL 17.11's `COPY`
+   into the table a sample would declare refuses every value cell (22P02;
+   22003 past int8) at its line and reads an unquoted empty field as NULL and
+   a quoted `"5"` as 5 — `COPY` declares its columns, so it has no key past a
+   sample. DuckDB 1.5.6 samples 20 480 rows by default; with
+   `sample_size = 100` its `read_csv` refuses a later mismatch (`CSV Error on
+   Line: 2201`) — it does not widen to VARCHAR — while its `read_json`
+   ROUNDS 0.75 into a `BIGINT` column (5051 for the file summing 5050.75),
+   reads `true` as 1, drops a key first seen past the sample (a reference to
+   it is a binder error) and drops a nested field. The whole-file inference
+   pass over 100 MB costs: CSV (1.28 M rows × 8 columns) 2.5 s against a
+   1.6 s full read with the sample's own typing per field, and end to end
+   `sample_size = -1` takes 3.7–4.0 s where the default takes 1.5–2.0 s
+   (≈ 2.2×); JSON (662 k objects) 5.6–6.0 s against a 1.0 s read (the
+   sample's `encoding/json` tokenizer; framing alone is 0.18 s), end to end
+   5.7–6.4 s against 1.2 s (≈ 5×); over `http(s)` the bytes cross twice;
+   resident memory is unchanged (45 MB either way).
+
+   THE ALTERNATIVES. (B) WIDEN by default — re-infer and re-read on a
+   mismatch, or infer from every row whenever the file is local — makes
+   EVERY read of a file pay the measured 2–5× (the engine has no cached
+   schema between statements, so it is paid per statement), changes a
+   column's type under a query that already ran over the same file's first
+   rows, and still needs a second open the readers cannot take over a FIFO
+   or a once-read stream; a column that silently becomes `text` also turns
+   `SUM(a)` into `42883` without saying why. (A) alone — loud with no
+   opt-out — leaves a user whose file IS mixed no way to read it but
+   rewriting the file. (C), chosen, is (A) as the default with the opt-out
+   named in every refusal: the default costs nothing over the 100-row
+   sample, no value is ever silently changed or dropped, and the user who
+   wants the whole file typed asks for it and pays for it knowingly. A
+   larger default sample (DuckDB's 20 480) narrows how often the refusal is
+   met but changes no position, and is left for a measurement of its own.
 
    **THE SAMPLE'S TYPE READS EVERY VALUE THE SAMPLE HOLDS** (arc FR2). The
    one-grammar rule holds INSIDE the sample as well as past it: a sample
@@ -333,7 +411,10 @@ each is a consequence of where a column list comes from:
   paragraph). Through arc FR the JSON reader wrote a string past the sample
   into a numeric column's storage and the query failed as a RECOVERED PANIC
   (`XX000 index out of range`); arc RP made it `22P02` naming the file, row,
-  column and both types (#1243);
+  column and both types (#1243). A KEY or nested FIELD first seen past the
+  sample is refused as well (arc RD, `22P04` / `22P02`), and
+  `sample_size = -1` reads such a file with every row typed, at the measured
+  2–5× of a read (§3's position paragraph);
 - a table function is still not a DAG stage (`stage scan-0 has no
   dependencies and no ScanFiles`). That is `distributed` and arc PT's pin;
   the five-arm gates carry it per cell rather than chasing it. A DAG fragment
@@ -415,3 +496,25 @@ Arc FR2's, for §3's glob, sample and unopenable-input paragraphs:
 - `wadjet.TestArcFR2TheSampleReadsEveryValueItTyped`.
 - `server.TestArcFR2AnUnopenableReaderInputIsRefusedOnEveryDoor` and
   `coordinator.TestArcFR2AnUnopenableReaderInputIsRefusedOnTheCoordinator`.
+
+Arc RD's, for §3's position past the sample:
+
+- `wadjet.TestArcRDReaderPastSampleCoverage` — the coverage table: 15 cell
+  shapes (a later float, text, boolean, date, quoted empty string, `NULL`
+  text, nested object, quoted number, NULL, a number past int8, a date
+  sample then a timestamp, an all-NULL sample then a value, a key, a
+  null-valued key, a nested field) × csv / json × rows 101 / 2 049 / 2 200 ×
+  SUM, COUNT(*), COUNT(col), the row's projection, WHERE, CREATE TABLE AS
+  and what it STORED, INSERT … SELECT into a declared table × the default
+  and `sample_size = -1`; `wadjet.TestArcRDSampleSizeArgument` (counts,
+  refusals, the signed spelling, LIMIT, a FIFO);
+  `wadjet.TestArcRDWholeInputGlob`.
+- `json.TestArcRDKeyPastTheSampleOnEveryPath` (all six JSON read paths),
+  `json.TestArcRDByteCappedSampleKey`, `json.TestArcRDWholeInputInference`,
+  `json.TestArcRDPlannedSchemaChecksEveryRow`, `csv.TestArcRDSampleSize`,
+  `csv.TestArcRDWholeInputShapes`, `csv.TestArcRDPlannedSchemaChecksEveryRow`,
+  `sql.TestArcRDSignedNamedArgument`.
+- `pgwire.TestArcRDReaderPastSampleWire` and
+  `coordinator.TestArcRDReaderPastSampleOnEveryArm` (single /
+  single+budget / dag / dag-shuffled / dag+morsel4, with and without the
+  plan-time read).
