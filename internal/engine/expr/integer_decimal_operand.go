@@ -164,8 +164,9 @@ func integerOperandIn(e Expr, b *batch.RecordBatch, marks bool) bool {
 }
 
 // integerCall is a call whose FIXED declaration is an integer (ascii, length,
-// strpos …), abs or mod over integers whose first argument is not a constant
-// (the plan keeps `ABS(-1)` on the float path), or a choosing function
+// strpos …), abs or mod over integers whose first argument is not a
+// fractional constant (an integer one, `ABS(-1)`, is an integer argument as
+// the plan declares it: physical.integerConstNode), or a choosing function
 // (GREATEST, LEAST, NULLIF, IFNULL) every argument of which is an integer.
 func integerCall(fc *FuncCall, b *batch.RecordBatch, marks bool) bool {
 	if fc.answer {
@@ -176,7 +177,11 @@ func integerCall(fc *FuncCall, b *batch.RecordBatch, marks bool) bool {
 		return true
 	}
 	if n, ok := NumericDomainScalarFn(fc.Name); ok {
-		return n == len(fc.Args) && !isConstNumericLit(fc.Args[0]) && integerArms(fc.Args, b, marks)
+		if n != len(fc.Args) {
+			return false
+		}
+		first := fc.Args[0]
+		return (!isConstNumericLit(first) || integerConstOperand(first)) && integerArms(fc.Args, b, marks)
 	}
 	if _, poly := r.SameAsArgs(len(fc.Args)); poly {
 		return integerArms(fc.Args, b, marks)
@@ -446,6 +451,23 @@ func anyCastMadeExactIn(es []Expr) bool {
 		if castMadeExactIn(a) {
 			return true
 		}
+	}
+	return false
+}
+
+// integerConstOperand reports whether a compiled numeric constant is an
+// INTEGER literal, under any unary ±. physical.integerConstNode is the plan's
+// twin.
+func integerConstOperand(e Expr) bool {
+	switch v := e.(type) {
+	case *Lit:
+		switch v.Val.(type) {
+		case int64, int32, int:
+			return true
+		}
+		return false
+	case *UnaryOp:
+		return (v.Op == "-" || v.Op == "+") && integerConstOperand(v.Operand)
 	}
 	return false
 }
