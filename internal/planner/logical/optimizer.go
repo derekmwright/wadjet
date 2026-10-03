@@ -150,6 +150,9 @@ func OptimizeWith(plan *Node, opts Options, annotators ...func(*Node)) *Node {
 	// the walk: a column must be proven shape-only against EVERY predicate
 	// that survives, wherever it ended up.
 	computeShapeOnlyColumns(plan)
+	// Last: a sampled scan below a constant-false filter or LIMIT 0 is one
+	// PostgreSQL never begins, so its range is never checked (#1411).
+	dropUnbegunSamples(plan)
 	return plan
 }
 
