@@ -788,12 +788,13 @@ func wdKeptCells() map[string]wdKept {
 		}
 		v, d := p[2], p[3]
 		switch {
-		// The exponent literal 1e300 and the 22-digit 14.0000000000000000001
-		// are declared double precision here (the decimal-literal carrier,
-		// arc NX's seam), numeric in PostgreSQL: the common type follows the
-		// literal's declaration, as COALESCE's does at base.
-		case (d == "wide" || d == "dbl") && (v == "int" || v == "bigint" || v == "numeric"):
-			kept[c.name] = wdKept{"", "control: a wide or exponent numeric literal is declared double precision (NX)"}
+		// The exponent literal 1e300, which no DECIMAL(38,s) holds, is
+		// declared double precision here, numeric in PostgreSQL: the common
+		// type follows the literal's declaration, as COALESCE's does. (The
+		// 22-digit 14.0000000000000000001 is numeric since the numeric-carrier
+		// arc and answers PostgreSQL's rows.)
+		case d == "dbl" && (v == "int" || v == "bigint" || v == "numeric"):
+			kept[c.name] = wdKept{"", "control: an exponent numeric literal past DECIMAL(38,s) is declared double precision"}
 		// A TEXT or BOOLEAN / DATE / TIMESTAMP value beside one of them: the
 		// refusal agrees, the message names the literal's declaration.
 		// `1 + 1` is declared bigint here, integer in PostgreSQL — the
@@ -920,19 +921,13 @@ func TestArcWDWindowDefaultEveryArm(t *testing.T) {
 // on all five arms at the arc's tip.
 var wdKeptRows = map[string]string{
 	"type/lag/bigint/dbl":            "type=double precision rows=6 1,1e+300 | 2,1e+300 | 3,1e+300 | 4,1e+300 | 5,1e+300 | 6,1e+300",
-	"type/lag/bigint/wide":           "type=double precision rows=6 1,14 | 2,14 | 3,14 | 4,14 | 5,14 | 6,14",
 	"type/lag/int/dbl":               "type=double precision rows=6 1,1e+300 | 2,1e+300 | 3,1e+300 | 4,1e+300 | 5,1e+300 | 6,1e+300",
 	"type/lag/int/expr":              "type=bigint rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2",
-	"type/lag/int/wide":              "type=double precision rows=6 1,14 | 2,14 | 3,14 | 4,14 | 5,14 | 6,14",
 	"type/lag/numeric/dbl":           "type=double precision rows=6 1,1e+300 | 2,1e+300 | 3,1e+300 | 4,1e+300 | 5,1e+300 | 6,1e+300",
-	"type/lag/numeric/wide":          "type=double precision rows=6 1,14 | 2,14 | 3,14 | 4,14 | 5,14 | 6,14",
 	"type/lead/bigint/dbl":           "type=double precision rows=6 1,20 | 2,NULL | 3,1e+300 | 4,50 | 5,1e+300 | 6,1e+300",
-	"type/lead/bigint/wide":          "type=double precision rows=6 1,20 | 2,NULL | 3,14 | 4,50 | 5,14 | 6,14",
 	"type/lead/int/dbl":              "type=double precision rows=6 1,20 | 2,NULL | 3,1e+300 | 4,50 | 5,1e+300 | 6,1e+300",
 	"type/lead/int/expr":             "type=bigint rows=6 1,20 | 2,NULL | 3,2 | 4,50 | 5,2 | 6,2",
-	"type/lead/int/wide":             "type=double precision rows=6 1,20 | 2,NULL | 3,14 | 4,50 | 5,14 | 6,14",
 	"type/lead/numeric/dbl":          "type=double precision rows=6 1,2.25 | 2,NULL | 3,1e+300 | 4,5.25 | 5,1e+300 | 6,1e+300",
-	"type/lead/numeric/wide":         "type=double precision rows=6 1,2.25 | 2,NULL | 3,14 | 4,5.25 | 5,14 | 6,14",
 	"gap/no_rows_text":               "type=bigint rows=0 ",
 	"cv/lag/iplus/int":               "type=bigint rows=6 1,7 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50",
 	"cv/lag/iplus/null":              "type=bigint rows=6 1,NULL | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50",
