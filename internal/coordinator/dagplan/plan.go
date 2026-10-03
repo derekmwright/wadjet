@@ -192,6 +192,9 @@ func (p *StagePlanner) PlanDistributed(ctx context.Context, node *logical.Node) 
 	if p.scalarRowsErr != nil {
 		return nil, p.scalarRowsErr
 	}
+	if p.windowRouteErr != nil {
+		return nil, p.windowRouteErr
+	}
 	// A STAR OVER A BLOCK NO STAGE COULD PUBLISH (#984). Asked AFTER stage
 	// generation, because the answer is what the pass DID: every block a star
 	// reads whose projection differs from its stream is materialized onto a
@@ -424,14 +427,6 @@ func (p *StagePlanner) PlanDistributed(ctx context.Context, node *logical.Node) 
 			}
 		}
 		for i := range renames {
-			// A computed derived alias that rides the stream in a window's
-			// slot: the column of its own name is the SOURCE it shadows.
-			if renames[i].Expr == nil {
-				if slot := p.windowAliasSlotFor(renames[i].From, renameChild); slot != "" {
-					renames[i].From = slot
-					continue
-				}
-			}
 			if materialized[strings.ToLower(renames[i].From)] {
 				continue
 			}

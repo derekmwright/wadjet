@@ -67,6 +67,15 @@ func derivedAliasSourceColumn(name string, child *logical.Node) string {
 			resolved = next
 		case logical.NodeFilter, logical.NodeLimit, logical.NodeSort, logical.NodeDistinct:
 			// Order/cardinality-preserving passthroughs: keep descending.
+		case logical.NodeWindow:
+			// A window forwards its input's names and appends its own, so
+			// the walk descends through it — except a window over a derived
+			// table that shadows its input, whose input carries that
+			// table's declared columns (logical.WindowShadowedInput).
+			if logical.WindowShadowedInput(n) != nil {
+				n = nil
+				continue
+			}
 		default:
 			// A producer this walk cannot reason about (Aggregate, Join,
 			// Scan, Window, a set operation): stop, and keep whatever the
