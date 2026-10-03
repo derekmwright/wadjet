@@ -411,6 +411,11 @@ func tbCells() []tbCell {
 	// conjunction per row and never reaches it (other r21).
 	cells = append(cells, tbCell{name: "exists_coded/id_negative_and_exists", sql: sc("id < 0 AND " + ex101),
 		want: "ERR 2202H", localPin: "0"})
+	// Two failures in one statement: PostgreSQL folds the constant 1/0 when
+	// it plans the statement and raises 22012 before any subquery runs; here
+	// the conjunct is evaluated after the sample's range check (other r23).
+	cells = append(cells, tbCell{name: "exists_coded/exists_and_division_by_zero",
+		sql: sc(ex101 + " AND 1/0 = 1"), want: "ERR 2202H", pinned: true})
 	// A sampled scan beside an empty join input: PostgreSQL begins it only
 	// when its plan reads the sampled side first, so its answer follows its
 	// join order (other r21); here the sample begins in either order. The
