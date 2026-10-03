@@ -18,36 +18,45 @@ import (
 	"github.com/derekmwright/wadjet/wadjet"
 )
 
-// THE TABLESAMPLE ARGUMENT IS PostgreSQL's REAL, RANGE-CHECKED (#1411), on
-// five arms.
+// THE TABLESAMPLE ARGUMENT IS PostgreSQL's REAL, RANGE-CHECKED WHERE THE
+// SCAN BEGINS, AND THE SAMPLE IS DRAWN WHERE THE SCAN RUNS (#1411), on six
+// arms.
 //
 // PostgreSQL 17.11 reads the argument of BERNOULLI / SYSTEM as ANY constant
 // expression coerced to real (float4: tsm_bernoulli / tsm_system declare a
 // FLOAT4 parameter). The coercion happens when the statement is planned — a
 // value float4 cannot hold (1e39, 1e400, a nonzero 1e-46) is 22003, text is
-// 42804 — and the RANGE is checked when the scan begins: NULL, NaN, below 0
-// or above 100 is 2202H. 0 samples no row and 100 every row. Because the
-// range is a scan-time check, a scan that never begins (WHERE false, LIMIT
-// 0) answers, and EXPLAIN shows the plan.
+// 42804, text real's input refuses is 22P02 — and the RANGE is checked when
+// the scan begins: NULL, NaN, below 0 or above 100 is 2202H. 0 samples no row
+// and 100 every row. A scan PostgreSQL never begins (under WHERE false, a
+// constant-false HAVING, LIMIT 0) answers, and EXPLAIN shows the plan.
 //
-// At 6184761c the argument was a number token (or a float parameter's CAST
-// spelling) read with strconv.ParseFloat and no check: BERNOULLI (0) and
-// SYSTEM (0) answered every row (the sampler was only installed for a
-// percentage above 0), every percentage over 100 — 101, 1e20,
-// 99999999999999999999, CAST('1e400' AS DOUBLE PRECISION), a bare 1e400 —
-// answered every row, and every other expression PostgreSQL takes (a
-// negative literal, NULL, '50', 25 * 2, CAST(50 AS NUMERIC)) was 42601.
+// At 6184761c the argument was a number token read with strconv.ParseFloat
+// and no check: BERNOULLI (0) and SYSTEM (0) answered every row, every
+// percentage over 100 answered every row, and every other expression
+// PostgreSQL takes was 42601. On the DAG arms no stage fragment carried the
+// sampler at all: every file was read whole, so BERNOULLI (50) over 20 000
+// rows answered 20 000 — in a FROM item, a CTE body, and a WHERE / HAVING /
+// ON / SELECT-list scalar subquery alike. Round 1 (a38dba67) routed every
+// sampled statement to the coordinator-local pipeline instead, which kept
+// the DAG scan unsampled for an expression subquery, refused a 100 %
+// sampled 20 000-row join under a 64 KiB fast path, and — with the local
+// sampler discarding the scan's selection vector — returned DELETEd rows.
+// Round 2 reverts that route: the worker's scan fragment applies the same
+// sampler kernel the single-process scan does (exec.NewSampledSource), over
+// the rows the scan selects.
 //
-// On the three DAG arms no stage fragment carried the sampler at all: every
-// file was read whole, so BERNOULLI (50) over 20 000 rows answered 20 000.
-// A sampled scan now runs on the coordinator-local pipeline.
-//
-// The fixture is tb_p (3 rows), tb_e (no rows) and tb_big (20 000 rows).
-// Every want is PostgreSQL 17.11 over the same rows (tb_author/pg/pg.txt). A
-// cell PostgreSQL answers with a random count asserts the count's range
-// (`RANGE lo hi`); 0 % and 100 % are exact. A cell pinned on every arm is a
-// kept divergence named in docs/adr/0012-divergences/table-functions.md: the
-// engine must answer the pin, and a pin that starts agreeing FAILS.
+// The fixture is tb_p (3 rows), tb_e (no rows), tb_big (20 000 rows), tb_d
+// (8 rows, the even ids DELETEd) and tb_bd (20 000 rows, the even ids
+// DELETEd) — on the DAG arms four files each, so every DELETE is a marker
+// on a file that is still read. Every want is PostgreSQL 17.11 over the same
+// rows (tb_author/pg.txt, tb_author/r2/pg_newcells.txt). A cell PostgreSQL
+// answers with a random count asserts the count's range (`RANGE lo hi`); 0 %
+// and 100 % are exact. A cell pinned on every arm is a kept divergence named
+// in docs/adr/0012-divergences/other.md: the engine must answer the pin, and
+// a pin that starts agreeing FAILS. dagPin is the three DAG arms' answer
+// where it is a separate open defect's (#1190: a relation with no files has
+// no distributed scan stage), not this arc's.
 func TestArcTBTablesampleArgumentOnEveryArm(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: three DAG arms stand up an embedded NATS cluster")
@@ -58,25 +67,29 @@ func TestArcTBTablesampleArgumentOnEveryArm(t *testing.T) {
 	for _, c := range tbCells() {
 		t.Run(c.name, func(t *testing.T) {
 			for _, arm := range arms {
+				var routesBefore int64
+				if arm.coord != nil {
+					routesBefore = arm.coord.TableLessLocalRoutes()
+				}
 				got := arm.run(c.sql)
-				if !tbMatches(got, c.want) {
-					why := ""
-					if c.pinned {
-						why = " (a pinned divergence: re-measure it)"
-					}
-					t.Errorf("%s: %s\n  got  %s\n  want %s%s", arm.name, c.sql, got, c.want, why)
+				want, why := c.want, ""
+				switch {
+				case arm.dag && c.dagPin != "":
+					want, why = c.dagPin, " (#1190's answer on the DAG arms: re-measure it)"
+				case c.pinned:
+					why = " (a pinned divergence: re-measure it)"
+				}
+				if !tbMatches(got, want) {
+					t.Errorf("%s: %s\n  got  %s\n  want %s%s", arm.name, c.sql, got, want, why)
+				}
+				// A sampled scan runs ON THE DAG (round 2): the statement is
+				// never routed to the coordinator-local pipeline for it.
+				if c.onDAG && arm.dag && arm.coord.TableLessLocalRoutes() != routesBefore {
+					t.Errorf("%s: %s was routed to the coordinator-local pipeline; the DAG's scan fragment samples it",
+						arm.name, c.sql)
 				}
 			}
 		})
-	}
-	// The DAG arms answered through the coordinator-local pipeline: a stage
-	// fragment carries no sampler, so a sampled scan is routed there
-	// (dagplan.refuseTableLessSelect). At 6184761c every DAG arm read every
-	// file whole — big/bernoulli_fifty answered 20000.
-	for _, arm := range arms {
-		if arm.coord != nil && arm.coord.TableLessLocalRoutes() == 0 {
-			t.Errorf("%s: no sampled scan was routed to the local pipeline", arm.name)
-		}
 	}
 }
 
@@ -85,13 +98,22 @@ type tbCell struct {
 	// pinned marks a kept divergence: want is the ENGINE's answer, and
 	// PostgreSQL answers otherwise (the catalog row names both).
 	pinned bool
+	// dagPin is the answer on the three DAG arms (LocalFastPathBytes 0)
+	// where another open defect decides it (#1190), and want is
+	// PostgreSQL's everywhere else.
+	dagPin string
+	// onDAG: on the three DAG arms the statement runs on the stage DAG —
+	// no table-less route to the coordinator-local pipeline is taken.
+	onDAG bool
 }
 
 // tbMatches compares an answer with a want: the exact rendering, or `RANGE
 // lo hi` — one integer row within [lo, hi] — or PLAN, any answer that is not
-// an error.
+// an error, or `CONTAINS s`, an answer whose rendering contains s.
 func tbMatches(got, want string) bool {
 	switch {
+	case strings.HasPrefix(want, "CONTAINS "):
+		return strings.Contains(got, strings.TrimPrefix(want, "CONTAINS "))
 	case want == "PLAN":
 		return !strings.HasPrefix(got, "ERR ") && !strings.HasPrefix(got, "PANIC ")
 	case strings.HasPrefix(want, "RANGE "):
@@ -109,6 +131,17 @@ func tbCells() []tbCell {
 	add := func(name, sql, want string) { cells = append(cells, tbCell{name: name, sql: sql, want: want}) }
 	pin := func(name, sql, want string) {
 		cells = append(cells, tbCell{name: name, sql: sql, want: want, pinned: true})
+	}
+	// dag: a cell whose statement must run on the stage DAG on the DAG arms.
+	dag := func(name, sql, want string) {
+		cells = append(cells, tbCell{name: name, sql: sql, want: want, onDAG: true})
+	}
+	// empty1190: a cell over the empty table, which the three DAG arms
+	// answer with #1190's refusal whatever the sample (base-identical).
+	empty1190 := func(name, sql, want string) {
+		cells = append(cells, tbCell{name: name, sql: sql, want: want,
+			dagPin: "ERR (uncoded) native DAG: stage scan-0 (scan): stage scan-0 worker 0: " +
+				"stage scan-0 has no dependencies and no ScanFiles"})
 	}
 	count := func(method, arg string) string {
 		return "SELECT count(*) FROM tb_p TABLESAMPLE " + method + " (" + arg + ")"
@@ -177,6 +210,16 @@ func tbCells() []tbCell {
 		{"e39_real", "CAST('1e39' AS REAL)", "ERR 22003"},
 		{"e400_text", "'1e400'", "ERR 22003"},
 		{"e39_text", "'1e39'", "ERR 22003"},
+		// real's input refuses what float4in refuses (review r1 B3): a `_`
+		// digit separator and a nonzero value real rounds to zero (base 9420d256
+		// refused these 42601; round 1 answered a 10 % and a 0 % sample)
+		{"text_underflow", "'1e-46'", "ERR 22003"},
+		{"text_underflow_negative", "'-1e-46'", "ERR 22003"},
+		{"text_subnormal", "'1e-45'", "RANGE 0 3"},
+		{"text_underscore", "'1_0'", "ERR 22P02"},
+		{"text_underscore_exponent", "'1e1_0'", "ERR 22P02"},
+		{"float8_underscore", "CAST('1_0' AS DOUBLE PRECISION)", "ERR 22P02"},
+		{"float8_underflow", "CAST('1e-400' AS DOUBLE PRECISION)", "ERR 22003"},
 		// the argument's own failure
 		{"text_abc", "'abc'", "ERR 22P02"},
 		{"text_empty", "''", "ERR 22P02"},
@@ -216,20 +259,78 @@ func tbCells() []tbCell {
 
 	// The table: no rows (the range is still checked — the scan begins) and
 	// 20 000 rows (0 % none, 100 % all, 50 % a count within bounds).
+	// On the DAG arms the range is checked when the coordinator dispatches the
+	// scan stage — over a table with no files too.
 	add("empty/bernoulli_101", "SELECT count(*) FROM tb_e TABLESAMPLE BERNOULLI (101)", "ERR 2202H")
 	add("empty/bernoulli_minus_one", "SELECT count(*) FROM tb_e TABLESAMPLE BERNOULLI (-1)", "ERR 2202H")
 	add("empty/bernoulli_null", "SELECT count(*) FROM tb_e TABLESAMPLE BERNOULLI (NULL)", "ERR 2202H")
-	add("empty/bernoulli_zero", "SELECT count(*) FROM tb_e TABLESAMPLE BERNOULLI (0)", "0")
+	empty1190("empty/bernoulli_zero", "SELECT count(*) FROM tb_e TABLESAMPLE BERNOULLI (0)", "0")
 	add("empty/bernoulli_e400", "SELECT count(*) FROM tb_e TABLESAMPLE BERNOULLI (CAST('1e400' AS DOUBLE PRECISION))", "ERR 22003")
 	add("empty/system_101", "SELECT count(*) FROM tb_e TABLESAMPLE SYSTEM (101)", "ERR 2202H")
-	add("empty/system_zero", "SELECT count(*) FROM tb_e TABLESAMPLE SYSTEM (0)", "0")
-	add("big/bernoulli_zero", "SELECT count(*) FROM tb_big TABLESAMPLE BERNOULLI (0)", "0")
-	add("big/bernoulli_hundred", "SELECT count(*) FROM tb_big TABLESAMPLE BERNOULLI (100)", "20000")
-	add("big/bernoulli_fifty", "SELECT count(*) FROM tb_big TABLESAMPLE BERNOULLI (50)", "RANGE 9000 11000")
-	add("big/bernoulli_101", "SELECT count(*) FROM tb_big TABLESAMPLE BERNOULLI (101)", "ERR 2202H")
-	add("big/system_zero", "SELECT count(*) FROM tb_big TABLESAMPLE SYSTEM (0)", "0")
-	add("big/system_hundred", "SELECT count(*) FROM tb_big TABLESAMPLE SYSTEM (100)", "20000")
-	add("big/system_fifty", "SELECT count(*) FROM tb_big TABLESAMPLE SYSTEM (50)", "RANGE 0 20000")
+	empty1190("empty/system_zero", "SELECT count(*) FROM tb_e TABLESAMPLE SYSTEM (0)", "0")
+	empty1190("empty/unsampled_control", "SELECT count(*) FROM tb_e", "0")
+	dag("big/bernoulli_zero", "SELECT count(*) FROM tb_big TABLESAMPLE BERNOULLI (0)", "0")
+	dag("big/bernoulli_hundred", "SELECT count(*) FROM tb_big TABLESAMPLE BERNOULLI (100)", "20000")
+	dag("big/bernoulli_fifty", "SELECT count(*) FROM tb_big TABLESAMPLE BERNOULLI (50)", "RANGE 9000 11000")
+	dag("big/bernoulli_fifty_rows", "SELECT count(*) FROM (SELECT id, v FROM tb_big TABLESAMPLE BERNOULLI (50)) s", "RANGE 9000 11000")
+	dag("big/bernoulli_zero_grouped", "SELECT count(*) FROM (SELECT id % 4 AS k, count(*) AS c FROM tb_big TABLESAMPLE BERNOULLI (0) GROUP BY id % 4) s", "0")
+	dag("big/bernoulli_101", "SELECT count(*) FROM tb_big TABLESAMPLE BERNOULLI (101)", "ERR 2202H")
+	dag("big/system_zero", "SELECT count(*) FROM tb_big TABLESAMPLE SYSTEM (0)", "0")
+	dag("big/system_hundred", "SELECT count(*) FROM tb_big TABLESAMPLE SYSTEM (100)", "20000")
+	// SYSTEM keeps or drops 2048-row blocks (r20), on every arm: a count
+	// is a sum of whole blocks.
+	dag("big/system_fifty", "SELECT count(*) FROM tb_big TABLESAMPLE SYSTEM (50)", "RANGE 0 20000")
+
+	// A DELETE narrows the scan's selection, and the sample is drawn from
+	// what is left (review r1 B1: round 1 returned the deleted rows under
+	// BERNOULLI (100) on every arm — on the DAG arms, where base answered
+	// PostgreSQL's rows — and SYSTEM (0) answered every selected row).
+	dag("delete/bernoulli_hundred_rows", "SELECT id FROM tb_d TABLESAMPLE BERNOULLI (100) ORDER BY id", "1; 3; 5; 7")
+	dag("delete/bernoulli_hundred", "SELECT count(*) FROM tb_d TABLESAMPLE BERNOULLI (100)", "4")
+	dag("delete/system_hundred_rows", "SELECT id FROM tb_d TABLESAMPLE SYSTEM (100) ORDER BY id", "1; 3; 5; 7")
+	dag("delete/system_zero", "SELECT count(*) FROM tb_d TABLESAMPLE SYSTEM (0)", "0")
+	dag("delete/bernoulli_zero", "SELECT count(*) FROM tb_d TABLESAMPLE BERNOULLI (0)", "0")
+	dag("delete/big_bernoulli_hundred", "SELECT count(*) FROM tb_bd TABLESAMPLE BERNOULLI (100)", "10000")
+	// half of the 10 000 surviving rows; half of all 20 000 would be the
+	// deleted rows coming back
+	dag("delete/big_bernoulli_fifty", "SELECT count(*) FROM tb_bd TABLESAMPLE BERNOULLI (50)", "RANGE 4500 5500")
+	dag("delete/big_system_hundred", "SELECT count(*) FROM tb_bd TABLESAMPLE SYSTEM (100)", "10000")
+	dag("delete/big_system_zero", "SELECT count(*) FROM tb_bd TABLESAMPLE SYSTEM (0)", "0")
+	dag("delete/big_deleted_ids", "SELECT count(*) FROM tb_bd TABLESAMPLE BERNOULLI (100) WHERE id % 2 = 0", "0")
+	dag("delete/big_join", "SELECT count(*) FROM tb_bd TABLESAMPLE BERNOULLI (100) JOIN tb_big ON tb_bd.id = tb_big.id", "10000")
+
+	// A sampled scan inside an expression subquery is sampled where it runs —
+	// a producer stage on the DAG — not routed (review r1 B2: round 1 read it
+	// whole on the DAG arms, where base read it whole on every arm).
+	add("subquery/where_zero", "SELECT count(*) FROM tb_big WHERE id < (SELECT count(*) FROM tb_p TABLESAMPLE BERNOULLI (0))", "0")
+	add("subquery/where_101", "SELECT count(*) FROM tb_big WHERE id < (SELECT count(*) FROM tb_p TABLESAMPLE BERNOULLI (101))", "ERR 2202H")
+	add("subquery/where_system_zero", "SELECT count(*) FROM tb_big WHERE id < (SELECT count(*) FROM tb_p TABLESAMPLE SYSTEM (0))", "0")
+	add("subquery/where_max_zero", "SELECT count(*) FROM tb_big WHERE id <= (SELECT max(id) FROM tb_p TABLESAMPLE BERNOULLI (0))", "0")
+	add("subquery/where_big_fifty", "SELECT count(*) FROM tb_p WHERE 15000 < (SELECT count(*) FROM tb_big TABLESAMPLE BERNOULLI (50))", "0")
+	add("subquery/where_e400", "SELECT count(*) FROM tb_big WHERE id < (SELECT count(*) FROM tb_p TABLESAMPLE BERNOULLI (1e400))", "ERR 22003")
+	add("subquery/where_text", "SELECT count(*) FROM tb_big WHERE id < (SELECT count(*) FROM tb_p TABLESAMPLE BERNOULLI ('abc'))", "ERR 22P02")
+	add("subquery/where_in_zero", "SELECT count(*) FROM tb_big WHERE id IN (SELECT id FROM tb_p TABLESAMPLE BERNOULLI (0))", "0")
+	add("subquery/where_exists_zero", "SELECT count(*) FROM tb_big WHERE EXISTS (SELECT 1 FROM tb_p TABLESAMPLE BERNOULLI (0))", "0")
+	add("subquery/having_zero", "SELECT id % 2 AS k, count(*) FROM tb_big GROUP BY 1 HAVING count(*) > (SELECT count(*) FROM tb_p TABLESAMPLE BERNOULLI (0)) * 5000 ORDER BY 1", "0,10000; 1,10000")
+	add("subquery/select_list_zero", "SELECT (SELECT count(*) FROM tb_p TABLESAMPLE BERNOULLI (0)) AS c FROM tb_big LIMIT 1", "0")
+	add("subquery/select_list_101", "SELECT (SELECT count(*) FROM tb_p TABLESAMPLE BERNOULLI (101)) AS c FROM tb_big LIMIT 1", "ERR 2202H")
+	add("subquery/select_list_e400", "SELECT (SELECT count(*) FROM tb_p TABLESAMPLE BERNOULLI (1e400)) AS c FROM tb_big LIMIT 1", "ERR 22003")
+	add("subquery/cte_body_zero", "WITH s AS (SELECT * FROM tb_p TABLESAMPLE BERNOULLI (0)) SELECT count(*) FROM tb_big WHERE id < (SELECT count(*) FROM s)", "0")
+	add("subquery/join_on_zero", "SELECT count(*) FROM tb_p a JOIN tb_big b ON a.id = b.id AND b.id > (SELECT count(*) FROM tb_p TABLESAMPLE BERNOULLI (0))", "3")
+
+	// A 20 000-row sampled join runs on the DAG (review r1 P2: under a 64 KiB
+	// fast path round 1 refused the 100 % join on the local budget, where
+	// base answered it), and two samples of one table are two draws.
+	dag("bigjoin/hundred", "SELECT count(*) FROM tb_big TABLESAMPLE BERNOULLI (100) JOIN tb_big b2 ON tb_big.id = b2.id", "20000")
+	dag("bigjoin/hundred_rows", "SELECT count(*) FROM (SELECT tb_big.id, b2.v FROM tb_big TABLESAMPLE BERNOULLI (100) JOIN tb_big b2 ON tb_big.id = b2.id) s", "20000")
+	dag("bigjoin/fifty", "SELECT count(*) FROM tb_big TABLESAMPLE BERNOULLI (50) JOIN tb_big b2 ON tb_big.id = b2.id", "RANGE 9000 11000")
+	dag("bigjoin/zero", "SELECT count(*) FROM tb_big TABLESAMPLE BERNOULLI (0) JOIN tb_big b2 ON tb_big.id = b2.id", "0")
+	dag("bigjoin/system_hundred", "SELECT count(*) FROM tb_big TABLESAMPLE SYSTEM (100) JOIN tb_big b2 ON tb_big.id = b2.id", "20000")
+	// The engine's alias position (other r19): PostgreSQL's spelling is
+	// `tb_big a TABLESAMPLE …`, which answers the same.
+	dag("bigjoin/two_samples_one_table", "SELECT count(*) FROM tb_big TABLESAMPLE BERNOULLI (100) a JOIN tb_big TABLESAMPLE BERNOULLI (0) b ON a.id = b.id", "0")
+	dag("bigjoin/grouped", "SELECT k, count(*) FROM (SELECT id % 4 AS k FROM tb_big TABLESAMPLE BERNOULLI (100)) s GROUP BY k ORDER BY k", "0,5000; 1,5000; 2,5000; 3,5000")
+	dag("bigjoin/union_all", "SELECT count(*) FROM (SELECT id FROM tb_big TABLESAMPLE BERNOULLI (50) UNION ALL SELECT id FROM tb_big TABLESAMPLE BERNOULLI (0)) s", "RANGE 9000 11000")
 
 	// The consumers above a sampled scan.
 	add("projection/zero", "SELECT id FROM tb_p TABLESAMPLE BERNOULLI (0) ORDER BY id", "(0 rows)")
@@ -246,13 +347,26 @@ func tbCells() []tbCell {
 	add("subquery/exists_101", "SELECT 1 WHERE EXISTS (SELECT 1 FROM tb_p TABLESAMPLE BERNOULLI (101))", "ERR 2202H")
 	add("subquery/scalar_101", "SELECT (SELECT count(*) FROM tb_p TABLESAMPLE BERNOULLI (101))", "ERR 2202H")
 	add("union/101", "SELECT count(*) FROM tb_p TABLESAMPLE BERNOULLI (101) UNION ALL SELECT 1", "ERR 2202H")
-	// The range is a scan-time check, and PostgreSQL never begins a scan
-	// under WHERE false or LIMIT 0, so it answers zero rows. This engine's
-	// pipeline pulls the scan's first batch in both shapes, so the check runs
-	// (kept refusal: loud where PostgreSQL answers nothing).
-	pin("never_scanned/where_false", "SELECT id FROM tb_p TABLESAMPLE BERNOULLI (101) WHERE false", "ERR 2202H")
-	pin("never_scanned/limit_zero", "SELECT id FROM tb_p TABLESAMPLE BERNOULLI (101) LIMIT 0", "ERR 2202H")
-	// EXPLAIN plans without scanning; the coercion's own failure is raised.
+	// The range is a scan-time check, and PostgreSQL never begins a scan under
+	// a constant-false WHERE or HAVING or a LIMIT 0, so it answers (review r1
+	// B4: base 9420d256 answered these; round 1 raised 2202H on every arm).
+	// A filter that reads a row begins the scan on PostgreSQL too.
+	add("never_scanned/where_false", "SELECT id FROM tb_p TABLESAMPLE BERNOULLI (101) WHERE false", "(0 rows)")
+	add("never_scanned/where_false_count", "SELECT count(*) FROM tb_p TABLESAMPLE BERNOULLI (101) WHERE false", "0")
+	add("never_scanned/where_one_is_two", "SELECT id FROM tb_p TABLESAMPLE BERNOULLI (101) WHERE 1 = 2", "(0 rows)")
+	add("never_scanned/where_null", "SELECT id FROM tb_p TABLESAMPLE BERNOULLI (101) WHERE NULL", "(0 rows)")
+	add("never_scanned/limit_zero", "SELECT id FROM tb_p TABLESAMPLE BERNOULLI (101) LIMIT 0", "(0 rows)")
+	add("never_scanned/having_false", "SELECT count(*) FROM tb_p TABLESAMPLE BERNOULLI (101) HAVING false", "(0 rows)")
+	add("never_scanned/derived_limit_zero", "SELECT count(*) FROM (SELECT * FROM tb_p TABLESAMPLE BERNOULLI (101) LIMIT 0) s", "0")
+	add("never_scanned/cte_where_false", "WITH c AS (SELECT * FROM tb_p TABLESAMPLE BERNOULLI (101)) SELECT count(*) FROM c WHERE false", "0")
+	add("never_scanned/null_where_false", "SELECT id FROM tb_p TABLESAMPLE BERNOULLI (NULL) WHERE false", "(0 rows)")
+	add("never_scanned/system_minus_one_limit_zero", "SELECT id FROM tb_p TABLESAMPLE SYSTEM (-1) LIMIT 0", "(0 rows)")
+	add("never_scanned/big_where_false", "SELECT count(*) FROM tb_big TABLESAMPLE BERNOULLI (101) WHERE false", "0")
+	empty1190("never_scanned/empty_limit_zero", "SELECT count(*) FROM tb_e TABLESAMPLE BERNOULLI (101) LIMIT 0", "(0 rows)")
+	add("scanned/where_id_negative", "SELECT id FROM tb_p TABLESAMPLE BERNOULLI (101) WHERE id < 0", "ERR 2202H")
+	// EXPLAIN plans without scanning, shows the sample on the scan line
+	// (review r1 N3), and raises the coercion's own failure.
+	add("explain/fifty", "EXPLAIN SELECT * FROM tb_p TABLESAMPLE BERNOULLI (50)", "CONTAINS TABLESAMPLE BERNOULLI (50)")
 	add("explain/101", "EXPLAIN SELECT * FROM tb_p TABLESAMPLE BERNOULLI (101)", "PLAN")
 	add("explain/null", "EXPLAIN SELECT * FROM tb_p TABLESAMPLE BERNOULLI (NULL)", "PLAN")
 	add("explain/minus_one", "EXPLAIN SELECT * FROM tb_p TABLESAMPLE BERNOULLI (-1)", "PLAN")
@@ -264,6 +378,16 @@ func tbCells() []tbCell {
 	for _, s := range []string{"1", "0", "-1", "1e400", "NULL"} {
 		pin("repeatable/"+s, "SELECT count(*) FROM tb_p TABLESAMPLE BERNOULLI (100) REPEATABLE ("+s+")", "ERR 42601")
 	}
+	// The alias position (other r19, review r1 N4): PostgreSQL takes the
+	// alias BEFORE the clause and refuses it after; this parser the reverse.
+	pin("alias/before_clause", "SELECT count(*) FROM tb_p x TABLESAMPLE BERNOULLI (100)", "ERR 42601")
+	pin("alias/after_clause", "SELECT count(*) FROM tb_p TABLESAMPLE BERNOULLI (100) x", "3")
+
+	// real's input function, outside TABLESAMPLE (review r1 B3).
+	add("real_input/underflow", "SELECT CAST('1e-46' AS REAL)", "ERR 22003")
+	add("real_input/underscore", "SELECT CAST('1_0' AS REAL)", "ERR 22P02")
+	add("real_input/float8_underflow", "SELECT CAST('1e-400' AS DOUBLE PRECISION)", "ERR 22003")
+	add("real_input/float8_underscore", "SELECT CAST('1_0' AS DOUBLE PRECISION)", "ERR 22P02")
 	return cells
 }
 
@@ -287,6 +411,25 @@ func tbTables() []tmdTable {
 		{"tb_p", tbSchema(), tbRows(3)},
 		{"tb_e", tbSchema(), nil},
 		{"tb_big", tbSchema(), tbRows(20000)},
+		{"tb_d", tbSchema(), tbRows(8)},
+		{"tb_bd", tbSchema(), tbRows(20000)},
+	}
+}
+
+// tbDeletes leave every odd id of tb_d and tb_bd. Each file of either table
+// keeps rows, so the DELETE is a marker the scan applies (a narrowed
+// selection), never a dropped file.
+var tbDeletes = []string{
+	"DELETE FROM tb_d WHERE id % 2 = 0",
+	"DELETE FROM tb_bd WHERE id % 2 = 0",
+}
+
+func tbDelete(t *testing.T, ctx context.Context, db *wadjet.DB) {
+	t.Helper()
+	for _, d := range tbDeletes {
+		if _, err := db.Execute(ctx, d); err != nil {
+			t.Fatalf("%s: %v", d, err)
+		}
 	}
 }
 
@@ -317,6 +460,7 @@ func tbStandalone(t *testing.T, ctx context.Context, budget int64) *wadjet.DB {
 			t.Fatalf("flush %s: %v", tb.name, err)
 		}
 	}
+	tbDelete(t, ctx, db)
 	return db
 }
 
@@ -324,6 +468,8 @@ type tbArm struct {
 	name  string
 	run   func(sql string) string
 	coord *Coordinator // nil for an embedded arm
+	// dag: every statement takes the stage DAG (LocalFastPathBytes 0).
+	dag bool
 }
 
 func tbArms(t *testing.T, ctx context.Context) []tbArm {
@@ -333,17 +479,32 @@ func tbArms(t *testing.T, ctx context.Context) []tbArm {
 	stand := func(wcfg func(*worker.Config), opts ...func(*Config)) *Coordinator {
 		infra := tmdInfra(t, ctx)
 		tmdWriteTableList(t, ctx, infra, nil, tbTables())
+		// The DELETEs go through a DB over the coordinator's own catalog, so
+		// the markers are the ones the stage planner reads.
+		db, err := wadjet.Open(ctx, wadjet.Config{
+			Store: infra.store, Bucket: "test", MetaKV: infra.kv, Logger: infra.logger,
+		})
+		if err != nil {
+			t.Fatalf("open DB over the coordinator's KV: %v", err)
+		}
+		t.Cleanup(func() { db.Close() })
+		tbDelete(t, ctx, db)
 		return tmdCoordinatorWithWorkers(t, ctx, infra, wcfg, opts...)
 	}
 	coord := stand(nil)
 	coordB := stand(nil, func(c *Config) { c.BroadcastBytesOverride = 1 })
 	coordM := stand(func(w *worker.Config) { w.MorselWorkers = 4 })
+	// A small fast path: tb_p and tb_d run on the coordinator's local
+	// pipeline, tb_big and tb_bd (past 64 KiB) on the DAG — and a sampled
+	// 20 000-row join is answered there, not refused on a local budget.
+	coordS := stand(nil, func(c *Config) { c.LocalFastPathBytes = 64 << 10 })
 	return []tbArm{
-		{"single", func(s string) string { return tbRunSingle(ctx, single, s) }, nil},
-		{"spilled512k", func(s string) string { return tbRunSingle(ctx, spilled, s) }, nil},
-		{"dag", func(s string) string { return tbRunDAG(ctx, coord, s) }, coord},
-		{"dag-shuffled", func(s string) string { return tbRunDAG(ctx, coordB, s) }, coordB},
-		{"dag-morsel4", func(s string) string { return tbRunDAG(ctx, coordM, s) }, coordM},
+		{"single", func(s string) string { return tbRunSingle(ctx, single, s) }, nil, false},
+		{"spilled512k", func(s string) string { return tbRunSingle(ctx, spilled, s) }, nil, false},
+		{"dag", func(s string) string { return tbRunDAG(ctx, coord, s) }, coord, true},
+		{"dag-shuffled", func(s string) string { return tbRunDAG(ctx, coordB, s) }, coordB, true},
+		{"dag-morsel4", func(s string) string { return tbRunDAG(ctx, coordM, s) }, coordM, true},
+		{"dag-fastpath64k", func(s string) string { return tbRunDAG(ctx, coordS, s) }, coordS, false},
 	}
 }
 
