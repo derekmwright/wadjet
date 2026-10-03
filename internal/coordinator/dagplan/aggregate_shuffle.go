@@ -137,7 +137,9 @@ func PickAggregateShuffleCandidateDiag(stages []Stage, thresholdBytes int64) Agg
 			})
 			continue
 		}
-		if len(scan.FilterExprs) > 0 {
+		// A TABLESAMPLE is a filter too: the pre-compute SQL re-reads the
+		// base table and carries neither (#1411).
+		if len(scan.FilterExprs) > 0 || scan.Sample != nil {
 			setBest(AggShuffleRejectScanHasFilters, AggregateShuffleDiag{
 				JoinStageID:       j.ID,
 				InputScanAlias:    scan.ScanAlias,

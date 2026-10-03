@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
+	"github.com/derekmwright/wadjet/internal/engine/exec"
 )
 
 // dispatchPipelineStage executes a compute stage (scan/join/aggregate/etc.)
@@ -37,6 +38,15 @@ func (c *Coordinator) dispatchPipelineStage(
 	scalars scalarResolver,
 ) (StageOutput, error) {
 	_ = sql
+	// A sampled scan begins HERE, when its stage is dispatched: the
+	// percentage's range is checked now — over a table with no files too,
+	// which dispatches no task — as PostgreSQL checks it when a sample scan
+	// begins (#1411). Each task's sampler checks it again; it cannot differ.
+	if stage.Type == dagplan.StageScan && stage.Sample != nil {
+		if err := exec.CheckSamplePercent(stage.Sample.Percent, stage.Sample.Null); err != nil {
+			return StageOutput{}, err
+		}
+	}
 	// Leaf scan stage.
 	//
 	// The `inputs` map may be non-empty when a stat-dep edge is present
@@ -81,7 +91,12 @@ func (c *Coordinator) dispatchPipelineStage(
 		// the gather — raw-parquet passthrough would hand the gather
 		// un-projected scan columns, and applyOutputRenames can only
 		// rename/drop.
-		if len(stage.FilterExprs) > 0 || len(stage.ProjectExprs) > 0 || len(stage.SecurityProjectExprs) > 0 {
+		//
+		// A TABLESAMPLE forces it too (#1411): the sampler runs in the scan
+		// fragment (OpScan.Sample), and a raw-parquet pass-through would hand
+		// every consumer the whole table.
+		if len(stage.FilterExprs) > 0 || len(stage.ProjectExprs) > 0 || len(stage.SecurityProjectExprs) > 0 ||
+			stage.Sample != nil {
 			return c.dispatchScanFilterStage(ctx, queryID, stage, inputs, workerCount)
 		}
 		// A fused shuffle payload (fuseScanShuffle) means downstream

@@ -523,6 +523,8 @@ type OpSpec struct {
 	// retypeFromCatalog), so a declaration the file's bytes cannot carry
 	// fails the task by name instead of decoding one type as another.
 	ColumnTypes []ColumnSpec `json:"column_types,omitempty"`
+	// Sample is a base-table OpScan's TABLESAMPLE (#1411); see TableSampleSpec.
+	Sample *TableSampleSpec `json:"sample,omitempty"`
 
 	// OpFilter.
 	Predicates []string `json:"predicates,omitempty"`

@@ -8,6 +8,7 @@ import (
 
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 
+	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	"github.com/derekmwright/wadjet/internal/planner/physical"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -62,6 +63,17 @@ type Stage struct {
 	// two tasks of one stage cannot disagree about which rows exist (#491).
 	// Nil for every table with no deletes.
 	ScanDeletes map[string][]int64
+	// Sample is the scan's TABLESAMPLE (#1411): the method and the argument
+	// already read as real at plan time (physical.ScanTableSample), carried
+	// as a VALUE to the scan fragment's OpScan, whose worker applies the
+	// engine's own sampler (exec.NewSampledSource) over the rows the scan
+	// selects. Nil for an unsampled scan.
+	//
+	// A sampled scan is never a pass-through: a consumer that read the
+	// table's files directly would read every row (dag_pipeline.go). It is a
+	// relation of its own, never interchangeable with another scan of the
+	// same table — shared-subplan dedup and exchange subsumption decline it.
+	Sample *exec.TableSample
 	// OutputColumns, when non-empty, narrows the stage's EMITTED columns
 	// to this set (worker inserts a zero-copy ColumnPrune before the
 	// sink). Columns stays the READ set — a scan must read its pushed

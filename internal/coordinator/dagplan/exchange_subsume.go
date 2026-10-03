@@ -57,7 +57,9 @@ func dedupeSubsumedScanExchanges(stages []Stage) []Stage {
 	for bi := range stages {
 		b := &stages[bi]
 		scanB := scanOf(b)
-		if scanB == nil || len(scanB.FilterExprs) == 0 || len(consumers[scanB.ID]) != 1 {
+		// A sampled scan is a relation of its own (Stage.Sample): neither
+		// side of a subsumption may be one (#1411).
+		if scanB == nil || len(scanB.FilterExprs) == 0 || scanB.Sample != nil || len(consumers[scanB.ID]) != 1 {
 			continue
 		}
 		// Sole consumer of B must use it as the build side.
@@ -75,7 +77,7 @@ func dedupeSubsumedScanExchanges(stages []Stage) []Stage {
 				continue
 			}
 			scanA := scanOf(a)
-			if scanA == nil || len(scanA.FilterExprs) > 0 || scanA.TableName != scanB.TableName {
+			if scanA == nil || len(scanA.FilterExprs) > 0 || scanA.Sample != nil || scanA.TableName != scanB.TableName {
 				continue
 			}
 			if !keysEqual(a.Exchange.Keys, b.Exchange.Keys) || a.Exchange.Count != b.Exchange.Count {
