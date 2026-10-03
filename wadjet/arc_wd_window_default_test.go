@@ -96,6 +96,14 @@ func TestArcWDWindowDefaultOnTheEmbeddedEngine(t *testing.T) {
 			t.Errorf("#1435: %s\n  got  %s\n  want %s (PostgreSQL 17.11)", c.sql, got, c.want)
 		}
 	}
+	// A scalar-subquery default that READS A TABLE is refused, where
+	// PostgreSQL answers 60, 10, 20, NULL, 40, 50 (978cd0e5 refused it the
+	// same way; a recorded candidate). A constant one, `(SELECT 9)`, folds
+	// and answers (the five-arm table's type/*/sub). A pin: when this
+	// starts answering, delete it and gate the rows.
+	if _, err := db.Query(ctx, "SELECT id, LAG(x, 1, (SELECT max(x) FROM wa_t)) OVER (ORDER BY id) FROM wa_t"); err == nil {
+		t.Errorf("a table-reading scalar-subquery default answers now: delete this pin and gate PostgreSQL's rows")
+	}
 	// The DECLARED type: numeric for the projection and for the table a CTAS
 	// of it creates (PostgreSQL: `numeric`).
 	for _, q := range []string{"SELECT id, " + lag + " AS w FROM wa_t", "SELECT * FROM wd_ctas"} {
