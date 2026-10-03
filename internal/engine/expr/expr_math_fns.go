@@ -133,7 +133,14 @@ func fnMod(args []any) any {
 	if d == 0 {
 		raiseDivisionByZero()
 	}
-	return math.Mod(ToFloat64(args[0]), d)
+	// A zero remainder is an unsigned zero. math.Mod keeps the dividend's
+	// sign, so `MOD(t.b, '2.5')` over -70 printed `-0` on the wire where
+	// the integer remainder it replaced printed 0, and so does the exact
+	// remainder of the same pair (`MOD(t.b, 2.5)`, numeric 0.0).
+	if r := math.Mod(ToFloat64(args[0]), d); r != 0 {
+		return r
+	}
+	return float64(0)
 }
 
 func fnLog(args []any) any {
