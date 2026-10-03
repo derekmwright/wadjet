@@ -108,3 +108,24 @@ w/pastInt64ToBigint	b	false	SELECT CAST((-9223372036854775809) AS BIGINT) AS x	E
 w/castRefusalPastInt64Date	s	false	SELECT 9223372036854775808::DATE AS x	ERR 42846 cannot cast type numeric to date
 w/castRefusalPastInt64Date	e	false	SELECT 9223372036854775808::DATE AS x	ERR 42846 cannot cast type numeric to date
 w/castRefusalPastInt64Date	b	false	SELECT 9223372036854775808::DATE AS x	ERR 42846 cannot cast type numeric to date
+w/qfCeilCmp	s	true	SELECT t.id FROM ss_t t WHERE t.n <> 0 AND ceil(CAST(t.i AS NUMERIC)) / t.n = 1.3333333333333333 ORDER BY t.id	{20} rows=1 1
+w/qfRoundIcMulCmp	s	true	SELECT t.id FROM ss_t t WHERE t.n <> 0 AND round(CAST(t.i AS INTEGER) * 1.0) / t.n = 1.3333333333333333 ORDER BY t.id	{20} rows=1 1
+w/qfTruncInList	s	true	SELECT t.id FROM ss_t t WHERE t.n <> 0 AND trunc(CAST(t.i AS NUMERIC)) / t.n IN (1.3333333333333333, -999) ORDER BY t.id	{20} rows=1 1
+w/qfRoundBCmp	s	true	SELECT t.id FROM ss_t t WHERE t.b <> 0 AND t.n / round(CAST(t.b AS NUMERIC)) = 0.0000000011111111111111111111 ORDER BY t.id	{20} rows=1 3
+w/qfFloorWin	s	true	SELECT t.id, count(*) OVER (PARTITION BY floor(CAST(t.i AS NUMERIC)) / t.n = 1.3333333333333333) AS x FROM ss_t t WHERE t.n <> 0 ORDER BY t.id	{20,20} rows=4 1,1 | 2,3 | 3,3 | 5,3
+w/qfRoundGroup	s	true	SELECT round(CAST(t.i AS NUMERIC)) / t.n = 1.3333333333333333 AS k, count(*) AS c FROM ss_t t WHERE t.n <> 0 GROUP BY 1 ORDER BY 1	{16,20} rows=2 f,3 | t,1
+w/qfCeilProj	s	true	SELECT t.id, ceil(CAST(t.i AS NUMERIC)) / t.n AS x FROM ss_t t WHERE t.n <> 0 ORDER BY t.id	{20,1700} rows=4 1,1.3333333333333333 | 2,2.0000000000000000 | 3,0.50000000000000000000 | 5,100.0000000000000000
+w/qfCeilCmp	e	true	SELECT t.id FROM ss_t t WHERE t.n <> 0 AND ceil(CAST(t.i AS NUMERIC)) / t.n = 1.3333333333333333 ORDER BY t.id	{20} rows=1 1
+w/qfRoundIcMulCmp	e	true	SELECT t.id FROM ss_t t WHERE t.n <> 0 AND round(CAST(t.i AS INTEGER) * 1.0) / t.n = 1.3333333333333333 ORDER BY t.id	{20} rows=1 1
+w/qfTruncInList	e	true	SELECT t.id FROM ss_t t WHERE t.n <> 0 AND trunc(CAST(t.i AS NUMERIC)) / t.n IN (1.3333333333333333, -999) ORDER BY t.id	{20} rows=1 1
+w/qfRoundBCmp	e	true	SELECT t.id FROM ss_t t WHERE t.b <> 0 AND t.n / round(CAST(t.b AS NUMERIC)) = 0.0000000011111111111111111111 ORDER BY t.id	{20} rows=1 3
+w/qfFloorWin	e	true	SELECT t.id, count(*) OVER (PARTITION BY floor(CAST(t.i AS NUMERIC)) / t.n = 1.3333333333333333) AS x FROM ss_t t WHERE t.n <> 0 ORDER BY t.id	{20,20} rows=4 1,1 | 2,3 | 3,3 | 5,3
+w/qfRoundGroup	e	true	SELECT round(CAST(t.i AS NUMERIC)) / t.n = 1.3333333333333333 AS k, count(*) AS c FROM ss_t t WHERE t.n <> 0 GROUP BY 1 ORDER BY 1	{16,20} rows=2 f,3 | t,1
+w/qfCeilProj	e	true	SELECT t.id, ceil(CAST(t.i AS NUMERIC)) / t.n AS x FROM ss_t t WHERE t.n <> 0 ORDER BY t.id	{20,1700} rows=4 1,1.3333333333333333 | 2,2.0000000000000000 | 3,0.50000000000000000000 | 5,100.0000000000000000
+w/qfCeilCmp	b	true	SELECT t.id FROM ss_t t WHERE t.n <> 0 AND ceil(CAST(t.i AS NUMERIC)) / t.n = 1.3333333333333333 ORDER BY t.id	{20} rows=1 0000000000000001
+w/qfRoundIcMulCmp	b	true	SELECT t.id FROM ss_t t WHERE t.n <> 0 AND round(CAST(t.i AS INTEGER) * 1.0) / t.n = 1.3333333333333333 ORDER BY t.id	{20} rows=1 0000000000000001
+w/qfTruncInList	b	true	SELECT t.id FROM ss_t t WHERE t.n <> 0 AND trunc(CAST(t.i AS NUMERIC)) / t.n IN (1.3333333333333333, -999) ORDER BY t.id	{20} rows=1 0000000000000001
+w/qfRoundBCmp	b	true	SELECT t.id FROM ss_t t WHERE t.b <> 0 AND t.n / round(CAST(t.b AS NUMERIC)) = 0.0000000011111111111111111111 ORDER BY t.id	{20} rows=1 0000000000000003
+w/qfFloorWin	b	true	SELECT t.id, count(*) OVER (PARTITION BY floor(CAST(t.i AS NUMERIC)) / t.n = 1.3333333333333333) AS x FROM ss_t t WHERE t.n <> 0 ORDER BY t.id	{20,20} rows=4 0000000000000001,0000000000000001 | 0000000000000002,0000000000000003 | 0000000000000003,0000000000000003 | 0000000000000005,0000000000000003
+w/qfRoundGroup	b	true	SELECT round(CAST(t.i AS NUMERIC)) / t.n = 1.3333333333333333 AS k, count(*) AS c FROM ss_t t WHERE t.n <> 0 GROUP BY 1 ORDER BY 1	{16,20} rows=2 00,0000000000000003 | 01,0000000000000001
+w/qfCeilProj	b	true	SELECT t.id, ceil(CAST(t.i AS NUMERIC)) / t.n AS x FROM ss_t t WHERE t.n <> 0 ORDER BY t.id	{20,1700} rows=4 0000000000000001,000500000000001000010d050d050d050d05 | 0000000000000002,00010000000000100002 | 0000000000000003,0001ffff000000141388 | 0000000000000005,00010000000000100064
