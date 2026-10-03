@@ -32,9 +32,10 @@ func TestRenderParamText(t *testing.T) {
 		{"float4", "1.5", oidFloat4, "CAST('1.5' AS REAL)"},
 		{"float exponent", "1e3", oidFloat8, "CAST('1e3' AS DOUBLE PRECISION)"},
 		// An integer parameter's input is an integer's spelling (int4in): a
-		// fraction goes to the target's input rule quoted, which is 22P02.
-		{"int4 fraction stays quoted", "2.5", oidInt4, "'2.5'"},
-		{"int8 exponent stays quoted", "1e3", oidInt8, "'1e3'"},
+		// fraction or junk is cast, quoted, to the parameter's type, whose
+		// text input raises 22P02 wherever the parameter lands.
+		{"int4 fraction is cast to its type", "2.5", oidInt4, "CAST('2.5' AS INTEGER)"},
+		{"int8 exponent is cast to its type", "1e3", oidInt8, "CAST('1e3' AS BIGINT)"},
 		{"numeric", "12345.6789", oidNumeric, "12345.6789"},
 		// FIX 5: ParseFloat("1e400") fails with strconv.ErrRange — the
 		// grammar accepted it, only float64's exponent range (overflow to
@@ -49,8 +50,8 @@ func TestRenderParamText(t *testing.T) {
 		{"numeric past float64 range negative", "-1e400", oidNumeric, "-1e400"},
 		// A value that is not a number does not go out bare, whatever the
 		// declared type says.
-		{"int4 with junk stays quoted", "2; DROP TABLE users", oidInt4, "'2; DROP TABLE users'"},
-		{"int4 empty stays quoted", "", oidInt4, "''"},
+		{"int4 with junk is a quoted cast", "2; DROP TABLE users", oidInt4, "CAST('2; DROP TABLE users' AS INTEGER)"},
+		{"int4 empty is a quoted cast", "", oidInt4, "CAST('' AS INTEGER)"},
 
 		{"bool true", "t", oidBool, "true"},
 		{"bool true word", "true", oidBool, "true"},
