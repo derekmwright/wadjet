@@ -379,7 +379,7 @@ func scalarFnDeclaredNumericDomain(n *plansql.FuncCallNode, decls ColDecls) (exp
 		// expr.funcCallIsInt), and declaring double precision for them made
 		// `ABS(-1) * t.n` a double where PostgreSQL answers numeric — right
 		// on the single-process arms only while an alias let the projection
-		// type the item from the column its text named (arc NX round 5).
+		// type the item from the column its text named.
 		// expr.integerCall reads the same line.
 		//
 		// Only argument 0. MOD's DIVISOR is a literal in almost every real
@@ -393,7 +393,12 @@ func scalarFnDeclaredNumericDomain(n *plansql.FuncCallNode, decls ColDecls) (exp
 		if c != expr.Decided {
 			return expr.DeclType{}, false
 		}
-		if i > 0 && isConstNumericLitNode(a) {
+		if i > 0 && isConstNumericLitNode(a) && t.ID != batch.TypeDecimal {
+			// A FRACTIONAL constant (`MOD(8, 2.5)`, `MOD(t.i, -(2.5))`) is
+			// typed by its own declaration, DECIMAL, which no integer domain
+			// admits: PostgreSQL resolves `mod(numeric, numeric)` there, and
+			// an integer declaration would store fmod's 0.5 as 0.
+			//
 			// A constant integer literal contributes NO rung to the WIDTH,
 			// which is CommonDeclType's rule for a quoted literal and
 			// PostgreSQL's for an untyped one: `MOD(int4_col, 3)` is integer
