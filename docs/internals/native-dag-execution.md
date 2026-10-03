@@ -1695,6 +1695,33 @@ bound: the query must still ANSWER, and answer the same thing),
 the one that turns a set into a different set — refusal for what it cannot
 spell, and the empty-set constants).
 
+## A plan-time subquery's failure (deferred to the row that evaluates it)
+
+`resolveSubqueryAST` runs an uncorrelated `EXISTS`, and a scalar subquery it
+cannot defer to a producer stage, on the coordinator while the stages are
+emitted. When that run FAILS with a SQLSTATE of class 22 or 21 (a sample's
+2202H, a 22003, 22012, 22P02, the one-row rule's 21000), the failure stands
+where the answer would have — `dagplan.deferredFailure` returns a
+`plansql.DeferredErrorNode` (cast to boolean for an EXISTS), spelled
+`__deferred_error('<sqlstate>', '<sentence>')` in the stage's filter text; the
+worker compiles it to `expr.DeferredError`, which raises the failure for the
+row that evaluates it and for no other. That is PostgreSQL's InitPlan rule: a
+CASE arm, an OR arm or an `x OR (NULL AND …)` arm no row reaches never raises.
+A conjunct that reads no row outside its subqueries is PostgreSQL's one-time
+filter, so `gateDeferredFailure` evaluates it once at plan time and parks a
+raise as the statement's answer (`WHERE EXISTS (…101)` over an empty table is
+2202H). The producer fallback in `walkStages` splices the same node. A
+statement-level refusal (42501, 42P01, 0A000) is parked as before; an
+IN-subquery whose set fails declines to the coordinator-local pipeline (above).
+The client doors refuse the spelling 42883 (`plansql.RefuseColumnValueCall`).
+Not covered: a scalar a producer stage computes fails at dispatch and ends the
+statement wherever it sits (an open distributed defect, with the scalar leaves the boolean
+walk does not resolve).
+
+Gate: `coordinator.TestArcTBDeferredSubqueryFailureOnEveryArm` (558 cells,
+seven arms), `expr.TestDeferredErrorRaisesOnlyWhereARowEvaluatesIt`,
+`sql.TestDeferredErrorSpellingRoundTrips`, `sql.TestDoorsRefuseTheDeferredErrorSpelling`.
+
 ## Window
 
 `walkStages` has always emitted a `window` stage, and until #349 nothing

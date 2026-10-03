@@ -3096,17 +3096,30 @@ and raises 2202H. A subquery a constant decides is not run either, as
 PostgreSQL folds it before planning the subquery: `WHERE false AND EXISTS
 (SELECT 1 FROM t TABLESAMPLE BERNOULLI (101))` answers no rows, `WHERE true
 OR EXISTS (…)` every row, in either operand order and under a `NULL`
-conjunct; `WHERE false OR EXISTS (…)` raises 2202H. Two cases follow this
+conjunct; `WHERE false OR EXISTS (…)` raises 2202H. A subquery's failure is
+raised when a row evaluates the subquery, as on PostgreSQL, on every arm:
+`WHERE CASE WHEN id > 5 THEN EXISTS (SELECT 1 FROM t TABLESAMPLE BERNOULLI
+(101)) ELSE true END` answers every row of a table whose ids are all below 6
+and raises 2202H over one where a row reaches the arm; `WHERE id = 1 OR
+(NULL AND EXISTS (…))` answers the row with id 1. A conjunct that reads no
+row (`WHERE EXISTS (…)`, `WHERE NOT EXISTS (…)`) is evaluated once, before
+any row, as PostgreSQL's one-time filter is. Two cases follow this
 engine's evaluation order rather than PostgreSQL's plan
 ([other#r21](adr/0012-divergences/other.md#catalog)): a sampled scan beside
 an empty join input begins here in either join order (PostgreSQL begins it
 only when its plan reads the sampled side first), and an uncorrelated
-`EXISTS` beside a filter no row passes (`WHERE id < 0 AND EXISTS (…)`) is
-not reached on the embedded engine, which answers 0 where PostgreSQL and a
-cluster raise the subquery's 2202H.
+`EXISTS` beside a filter no row passes (`WHERE id < 0 AND EXISTS (…)`), or
+over an empty table, is not reached on the embedded engine, which answers 0
+where PostgreSQL and a cluster raise the subquery's 2202H. A subquery whose
+argument `real` cannot hold, in an arm no row reaches, answers here where
+PostgreSQL raises 22003 when it plans the subquery
+([other#r22](adr/0012-divergences/other.md#catalog)); and with two failures
+in one statement, `WHERE EXISTS (… BERNOULLI (101)) AND 1/0 = 1` raises the
+sample's 2202H where PostgreSQL folds `1/0` first and raises 22012
+([other#r23](adr/0012-divergences/other.md#catalog)).
 
 `REPEATABLE (seed)` is not supported (42601). (#1411; catalog:
-[other#r17–r21](adr/0012-divergences/other.md#catalog))
+[other#r17–r23](adr/0012-divergences/other.md#catalog))
 
 ## JOIN
 

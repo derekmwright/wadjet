@@ -814,7 +814,15 @@ An `ORDER BY` or `LIMIT` on the whole recursive body (0A000 there), a term whose
 
 **A `TABLESAMPLE` beside an empty join input, or under an `EXISTS` no row reaches, follows this engine's evaluation order.**
 
-`SELECT count(*) FROM e JOIN t TABLESAMPLE BERNOULLI (101) ON e.id = t.id` with `e` empty raises 2202H here in either join order; PostgreSQL answers 0 when its plan reads `e` first and raises when it reads the sample first. `WHERE id < 0 AND EXISTS (SELECT 1 FROM big TABLESAMPLE BERNOULLI (101))` answers 0 on the embedded engine, which evaluates the conjunction per row; PostgreSQL and a cluster run the uncorrelated EXISTS once and raise 2202H. (catalog: [other#r21](adr/0012-divergences/other.md#catalog); #1411)
+`SELECT count(*) FROM e JOIN t TABLESAMPLE BERNOULLI (101) ON e.id = t.id` with `e` empty raises 2202H here in either join order; PostgreSQL answers 0 when its plan reads `e` first and raises when it reads the sample first. `WHERE id < 0 AND EXISTS (SELECT 1 FROM big TABLESAMPLE BERNOULLI (101))`, and `WHERE EXISTS (…)` over an empty table, answer 0 on the embedded engine, which evaluates the conjunction per row; PostgreSQL and a cluster evaluate a conjunct that reads no row once, before any row, and raise 2202H. (catalog: [other#r21](adr/0012-divergences/other.md#catalog); #1411)
+
+**A subquery that cannot be planned, in an arm no row reaches, answers.**
+
+`SELECT count(*) FROM t WHERE CASE WHEN id > 5 THEN EXISTS (SELECT 1 FROM big TABLESAMPLE BERNOULLI (1e400)) ELSE true END` over ids 1–3 answers 3: a subquery's failure is raised when a row evaluates it, and no row reaches the arm. PostgreSQL plans the subquery with the statement, and the argument's coercion to real raises 22003 there. Over ids 1–7, where rows reach the arm, both raise 22003. (catalog: [other#r22](adr/0012-divergences/other.md#catalog); #1411)
+
+**Two failures in one statement raise in this engine's order.**
+
+`SELECT count(*) FROM t WHERE EXISTS (SELECT 1 FROM big TABLESAMPLE BERNOULLI (101)) AND 1/0 = 1` raises 2202H; PostgreSQL folds the constant `1/0` when it plans the statement and raises 22012 first. (catalog: [other#r23](adr/0012-divergences/other.md#catalog); #1411)
 
 **`TABLESAMPLE … REPEATABLE (seed)`.**
 

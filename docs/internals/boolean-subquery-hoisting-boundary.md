@@ -21,9 +21,24 @@ raises because it IS needed. Hoisting made the first 21000 as well
 
 An EXISTS is the leaf where hoisting is sound: it reads no outer row, it is
 TRUE or FALSE rather than a value, and it cannot raise the cardinality
-violation that is the failure at issue. A SCALAR subquery in a
-short-circuitable position keeps whatever the path did before — which on the
-DAG is a loud task failure, pinned per arm beside PostgreSQL's answer in
-coordinator.TestArcI1AnUnqualifiedNameBindsTheInnerRelation, because
-answering it needs the DAG to evaluate a subquery lazily and that is not a
-scope repair.
+violation. Any OTHER failure of its run — a sample's 2202H, a 22003 its
+argument cannot hold, a 22012 — is not the statement's answer either: since
+arc TB (#1411) a failure of class 22 or 21 stands where
+the boolean would have, as `plansql.DeferredErrorNode` (spelled
+`__deferred_error('<sqlstate>', '<sentence>')` in the stage text, compiled to
+`expr.DeferredError`), and raises when a row evaluates it. The connectives
+evaluate per row and short-circuit, so `CASE WHEN id > 5 THEN EXISTS (…)
+ELSE true END` raises only if a row has id > 5, as PostgreSQL's InitPlan
+runs only on its first reference. A conjunct that reads no row outside its
+subqueries is evaluated once at plan time (`gateDeferredFailure`), which is
+PostgreSQL's one-time filter: `WHERE EXISTS (…101)` over an empty table is
+2202H there too. A statement-level refusal (42501, 42P01, 0A000) is still
+parked as the answer wherever the subquery sits.
+
+A SCALAR subquery in a short-circuitable position keeps whatever the path
+did before — which on the DAG is a loud task failure, pinned per arm beside
+PostgreSQL's answer in coordinator.TestArcI1AnUnqualifiedNameBindsTheInnerRelation
+and coordinator.TestArcTBDeferredSubqueryFailureOnEveryArm (an open distributed defect). The
+deferred failure would make resolving one sound when the coordinator runs it
+at plan time, but a one-row-provable scalar is deferred to a PRODUCER stage,
+which runs at dispatch, where its failure still ends the statement.
