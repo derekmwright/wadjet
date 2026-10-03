@@ -3548,10 +3548,14 @@ column (`LAG(x, o)`, `NTILE(o)`), an expression over one (`LAG(x, o + 1)`) or
 a subquery — is refused, SQLSTATE `0A000`**, where PostgreSQL evaluates it
 (ADR-0012 catalog, aggregates-windows r19; #1440); write a constant.
 
-A `LAG` / `LEAD` default is any expression, read at the row it fills, and
-the result's type is the COMMON type of the value and the default, as on
-PostgreSQL (`lag(anycompatible, integer, anycompatible)`): the CASE /
-COALESCE rule, with a DATE beside a TIMESTAMP resolved to timestamp.
+A `LAG` / `LEAD` default may be a literal, a column, a CAST or an expression
+over the row's columns, read at the row it fills, and the result's type is the
+COMMON type of the value and the default, as on PostgreSQL
+(`lag(anycompatible, integer, anycompatible)`): the CASE / COALESCE rule, with
+a DATE beside a TIMESTAMP resolved to timestamp. The value may be a column or
+an expression (`LAG(b * 2, 1, d)` is double precision). A constant scalar
+subquery default (`(SELECT 9)`) answers; one that reads a table
+(`LAG(b, 1, (SELECT max(d) FROM t))`) is refused.
 
 ```sql
 SELECT id, LAG(b, 1, 2.5) OVER (ORDER BY id) FROM t;   -- numeric: 2.5 on the first row, b after it
