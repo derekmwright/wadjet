@@ -520,11 +520,6 @@ use/aggregate_value	type=bigint;numeric rows=3 1,2.5 | 2,30 | 3,90
 use/cte	type=numeric rows=6 1,2.5 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
 use/subquery_body	type=numeric rows=1 2.5
 use/union	type=numeric rows=7 0,0.5 | 1,2.5 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
-gap/default_every_row	type=bigint rows=6 1,-10 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
-gap/no_rows_text	ERR 22P02 invalid input syntax for type bigint: "a"
-issue/lag1	type=numeric rows=6 1,2.5 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
-issue/lag10part	type=numeric rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
-issue/lead10	type=numeric rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
 origin/values	type=numeric rows=2 1,2.5 | 2,10
 origin/lateral	type=numeric rows=6 1,2.5 | 2,20 | 3,40 | 4,NULL | 5,80 | 6,100
 agg/offset	type=bigint;numeric rows=3 1,NULL | 2,NULL | 3,30
@@ -534,3 +529,292 @@ agg/default_key	type=bigint;numeric rows=3 1,1 | 2,30 | 3,90
 derived/sum_key_expr	type=numeric rows=6 1,20 | 2,60 | 3,60 | 4,140 | 5,240 | 6,360
 derived/partition_key_expr	type=bigint rows=6 1,1 | 2,1 | 3,1 | 4,1 | 5,1 | 6,1
 derived/lag_offset_default	type=double precision rows=6 1,NULL | 2,5 | 3,NULL | 4,9 | 5,11 | 6,13
+gap/default_every_row	type=bigint rows=6 1,-10 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+gap/no_rows_text	ERR 22P02 invalid input syntax for type bigint: "a"
+issue/lag1	type=numeric rows=6 1,2.5 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+issue/lag10part	type=numeric rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+issue/lead10	type=numeric rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+cv/lag/bmul/dec	type=numeric rows=6 1,2.5 | 2,20 | 3,40 | 4,NULL | 5,80 | 6,100
+cv/lag/bmul/half	type=numeric rows=6 1,0.5 | 2,20 | 3,40 | 4,NULL | 5,80 | 6,100
+cv/lag/bmul/dec3	type=numeric rows=6 1,0.125 | 2,20 | 3,40 | 4,NULL | 5,80 | 6,100
+cv/lag/bmul/int	type=bigint rows=6 1,7 | 2,20 | 3,40 | 4,NULL | 5,80 | 6,100
+cv/lag/bmul/dcol	type=double precision rows=6 1,1.5 | 2,20 | 3,40 | 4,NULL | 5,80 | 6,100
+cv/lag/bmul/ncol	type=numeric rows=6 1,1.25 | 2,20 | 3,40 | 4,NULL | 5,80 | 6,100
+cv/lag/bmul/null	type=bigint rows=6 1,NULL | 2,20 | 3,40 | 4,NULL | 5,80 | 6,100
+cv/lag/bmul/ts	ERR 42883 function lag(bigint, integer, timestamp without time zone) does not exist
+cv/lag/bmul/tscol	ERR 42883 function lag(bigint, integer, timestamp without time zone) does not exist
+cv/lag/bmul/text	ERR 22P02 invalid input syntax for type bigint: "q"
+cv/lead/bmul/dec	type=numeric rows=6 1,40 | 2,NULL | 3,2.5 | 4,100 | 5,2.5 | 6,2.5
+cv/lead/bmul/int	type=bigint rows=6 1,40 | 2,NULL | 3,7 | 4,100 | 5,7 | 6,7
+cv/lead/bmul/dcol	type=double precision rows=6 1,40 | 2,NULL | 3,NULL | 4,100 | 5,5.5 | 6,6.5
+cv/lag/bplus/dec	type=numeric rows=6 1,2.5 | 2,11 | 3,21 | 4,NULL | 5,41 | 6,51
+cv/lag/bplus/half	type=numeric rows=6 1,0.5 | 2,11 | 3,21 | 4,NULL | 5,41 | 6,51
+cv/lag/bplus/dec3	type=numeric rows=6 1,0.125 | 2,11 | 3,21 | 4,NULL | 5,41 | 6,51
+cv/lag/bplus/int	type=bigint rows=6 1,7 | 2,11 | 3,21 | 4,NULL | 5,41 | 6,51
+cv/lag/bplus/dcol	type=double precision rows=6 1,1.5 | 2,11 | 3,21 | 4,NULL | 5,41 | 6,51
+cv/lag/bplus/ncol	type=numeric rows=6 1,1.25 | 2,11 | 3,21 | 4,NULL | 5,41 | 6,51
+cv/lag/bplus/null	type=bigint rows=6 1,NULL | 2,11 | 3,21 | 4,NULL | 5,41 | 6,51
+cv/lag/bplus/ts	ERR 42883 function lag(bigint, integer, timestamp without time zone) does not exist
+cv/lag/bplus/tscol	ERR 42883 function lag(bigint, integer, timestamp without time zone) does not exist
+cv/lag/bplus/text	ERR 22P02 invalid input syntax for type bigint: "q"
+cv/lead/bplus/dec	type=numeric rows=6 1,21 | 2,NULL | 3,2.5 | 4,51 | 5,2.5 | 6,2.5
+cv/lead/bplus/int	type=bigint rows=6 1,21 | 2,NULL | 3,7 | 4,51 | 5,7 | 6,7
+cv/lead/bplus/dcol	type=double precision rows=6 1,21 | 2,NULL | 3,NULL | 4,51 | 5,5.5 | 6,6.5
+cv/lag/abs/dec	type=numeric rows=6 1,2.5 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+cv/lag/abs/half	type=numeric rows=6 1,0.5 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+cv/lag/abs/dec3	type=numeric rows=6 1,0.125 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+cv/lag/abs/int	type=bigint rows=6 1,7 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+cv/lag/abs/dcol	type=double precision rows=6 1,1.5 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+cv/lag/abs/ncol	type=numeric rows=6 1,1.25 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+cv/lag/abs/null	type=bigint rows=6 1,NULL | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+cv/lag/abs/ts	ERR 42883 function lag(bigint, integer, timestamp without time zone) does not exist
+cv/lag/abs/tscol	ERR 42883 function lag(bigint, integer, timestamp without time zone) does not exist
+cv/lag/abs/text	ERR 22P02 invalid input syntax for type bigint: "q"
+cv/lead/abs/dec	type=numeric rows=6 1,20 | 2,NULL | 3,2.5 | 4,50 | 5,2.5 | 6,2.5
+cv/lead/abs/int	type=bigint rows=6 1,20 | 2,NULL | 3,7 | 4,50 | 5,7 | 6,7
+cv/lead/abs/dcol	type=double precision rows=6 1,20 | 2,NULL | 3,NULL | 4,50 | 5,5.5 | 6,6.5
+cv/lag/castbig/dec	type=numeric rows=6 1,2.5 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+cv/lag/castbig/half	type=numeric rows=6 1,0.5 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+cv/lag/castbig/dec3	type=numeric rows=6 1,0.125 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+cv/lag/castbig/int	type=bigint rows=6 1,7 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+cv/lag/castbig/dcol	type=double precision rows=6 1,1.5 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+cv/lag/castbig/ncol	type=numeric rows=6 1,1.25 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+cv/lag/castbig/null	type=bigint rows=6 1,NULL | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+cv/lag/castbig/ts	ERR 42883 function lag(bigint, integer, timestamp without time zone) does not exist
+cv/lag/castbig/tscol	ERR 42883 function lag(bigint, integer, timestamp without time zone) does not exist
+cv/lag/castbig/text	ERR 22P02 invalid input syntax for type bigint: "q"
+cv/lead/castbig/dec	type=numeric rows=6 1,20 | 2,NULL | 3,2.5 | 4,50 | 5,2.5 | 6,2.5
+cv/lead/castbig/int	type=bigint rows=6 1,20 | 2,NULL | 3,7 | 4,50 | 5,7 | 6,7
+cv/lead/castbig/dcol	type=double precision rows=6 1,20 | 2,NULL | 3,NULL | 4,50 | 5,5.5 | 6,6.5
+cv/lag/iplus/dec	type=numeric rows=6 1,2.5 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+cv/lag/iplus/half	type=numeric rows=6 1,0.5 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+cv/lag/iplus/dec3	type=numeric rows=6 1,0.125 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+cv/lag/iplus/int	type=integer rows=6 1,7 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+cv/lag/iplus/dcol	type=double precision rows=6 1,1.5 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+cv/lag/iplus/ncol	type=numeric rows=6 1,1.25 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+cv/lag/iplus/null	type=integer rows=6 1,NULL | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+cv/lag/iplus/ts	ERR 42883 function lag(integer, integer, timestamp without time zone) does not exist
+cv/lag/iplus/tscol	ERR 42883 function lag(integer, integer, timestamp without time zone) does not exist
+cv/lag/iplus/text	ERR 22P02 invalid input syntax for type integer: "q"
+cv/lead/iplus/dec	type=numeric rows=6 1,20 | 2,NULL | 3,2.5 | 4,50 | 5,2.5 | 6,2.5
+cv/lead/iplus/int	type=integer rows=6 1,20 | 2,NULL | 3,7 | 4,50 | 5,7 | 6,7
+cv/lead/iplus/dcol	type=double precision rows=6 1,20 | 2,NULL | 3,NULL | 4,50 | 5,5.5 | 6,6.5
+cv/lag/dmul/dec	type=double precision rows=6 1,2.5 | 2,3 | 3,5 | 4,NULL | 5,9 | 6,11
+cv/lag/dmul/half	type=double precision rows=6 1,0.5 | 2,3 | 3,5 | 4,NULL | 5,9 | 6,11
+cv/lag/dmul/dec3	type=double precision rows=6 1,0.125 | 2,3 | 3,5 | 4,NULL | 5,9 | 6,11
+cv/lag/dmul/int	type=double precision rows=6 1,7 | 2,3 | 3,5 | 4,NULL | 5,9 | 6,11
+cv/lag/dmul/dcol	type=double precision rows=6 1,1.5 | 2,3 | 3,5 | 4,NULL | 5,9 | 6,11
+cv/lag/dmul/ncol	type=double precision rows=6 1,1.25 | 2,3 | 3,5 | 4,NULL | 5,9 | 6,11
+cv/lag/dmul/null	type=double precision rows=6 1,NULL | 2,3 | 3,5 | 4,NULL | 5,9 | 6,11
+cv/lag/dmul/ts	ERR 42883 function lag(double precision, integer, timestamp without time zone) does not exist
+cv/lag/dmul/tscol	ERR 42883 function lag(double precision, integer, timestamp without time zone) does not exist
+cv/lag/dmul/text	ERR 22P02 invalid input syntax for type double precision: "q"
+cv/lead/dmul/dec	type=double precision rows=6 1,5 | 2,NULL | 3,2.5 | 4,11 | 5,2.5 | 6,2.5
+cv/lead/dmul/int	type=double precision rows=6 1,5 | 2,NULL | 3,7 | 4,11 | 5,7 | 6,7
+cv/lead/dmul/dcol	type=double precision rows=6 1,5 | 2,NULL | 3,NULL | 4,11 | 5,5.5 | 6,6.5
+cv/lag/real/dec	type=real rows=6 1,2.5 | 2,1.5 | 3,2.5 | 4,NULL | 5,4.5 | 6,5.5
+cv/lag/real/half	type=real rows=6 1,0.5 | 2,1.5 | 3,2.5 | 4,NULL | 5,4.5 | 6,5.5
+cv/lag/real/dec3	type=real rows=6 1,0.125 | 2,1.5 | 3,2.5 | 4,NULL | 5,4.5 | 6,5.5
+cv/lag/real/int	type=real rows=6 1,7 | 2,1.5 | 3,2.5 | 4,NULL | 5,4.5 | 6,5.5
+cv/lag/real/dcol	type=double precision rows=6 1,1.5 | 2,1.5 | 3,2.5 | 4,NULL | 5,4.5 | 6,5.5
+cv/lag/real/ncol	type=real rows=6 1,1.25 | 2,1.5 | 3,2.5 | 4,NULL | 5,4.5 | 6,5.5
+cv/lag/real/null	type=real rows=6 1,NULL | 2,1.5 | 3,2.5 | 4,NULL | 5,4.5 | 6,5.5
+cv/lag/real/ts	ERR 42883 function lag(real, integer, timestamp without time zone) does not exist
+cv/lag/real/tscol	ERR 42883 function lag(real, integer, timestamp without time zone) does not exist
+cv/lag/real/text	ERR 22P02 invalid input syntax for type real: "q"
+cv/lead/real/dec	type=real rows=6 1,2.5 | 2,NULL | 3,2.5 | 4,5.5 | 5,2.5 | 6,2.5
+cv/lead/real/int	type=real rows=6 1,2.5 | 2,NULL | 3,7 | 4,5.5 | 5,7 | 6,7
+cv/lead/real/dcol	type=double precision rows=6 1,2.5 | 2,NULL | 3,NULL | 4,5.5 | 5,5.5 | 6,6.5
+cv/lag/num37/dec	type=numeric rows=6 1,2.5 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+cv/lag/num37/half	type=numeric rows=6 1,0.5 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+cv/lag/num37/dec3	type=numeric rows=6 1,0.125 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+cv/lag/num37/int	type=numeric rows=6 1,7 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+cv/lag/num37/dcol	type=double precision rows=6 1,1.5 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+cv/lag/num37/ncol	type=numeric rows=6 1,1.25 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+cv/lag/num37/null	type=numeric rows=6 1,NULL | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+cv/lag/num37/ts	ERR 42883 function lag(numeric, integer, timestamp without time zone) does not exist
+cv/lag/num37/tscol	ERR 42883 function lag(numeric, integer, timestamp without time zone) does not exist
+cv/lag/num37/text	ERR 22P02 invalid input syntax for type numeric: "q"
+cv/lead/num37/dec	type=numeric rows=6 1,20 | 2,NULL | 3,2.5 | 4,50 | 5,2.5 | 6,2.5
+cv/lead/num37/int	type=numeric rows=6 1,20 | 2,NULL | 3,7 | 4,50 | 5,7 | 6,7
+cv/lead/num37/dcol	type=double precision rows=6 1,20 | 2,NULL | 3,NULL | 4,50 | 5,5.5 | 6,6.5
+cv/lag/num362/dec	type=numeric rows=6 1,2.5 | 2,10.00 | 3,20.00 | 4,NULL | 5,40.00 | 6,50.00
+cv/lag/num362/half	type=numeric rows=6 1,0.5 | 2,10.00 | 3,20.00 | 4,NULL | 5,40.00 | 6,50.00
+cv/lag/num362/dec3	type=numeric rows=6 1,0.125 | 2,10.00 | 3,20.00 | 4,NULL | 5,40.00 | 6,50.00
+cv/lag/num362/int	type=numeric rows=6 1,7 | 2,10.00 | 3,20.00 | 4,NULL | 5,40.00 | 6,50.00
+cv/lag/num362/dcol	type=double precision rows=6 1,1.5 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+cv/lag/num362/ncol	type=numeric rows=6 1,1.25 | 2,10.00 | 3,20.00 | 4,NULL | 5,40.00 | 6,50.00
+cv/lag/num362/null	type=numeric rows=6 1,NULL | 2,10.00 | 3,20.00 | 4,NULL | 5,40.00 | 6,50.00
+cv/lag/num362/ts	ERR 42883 function lag(numeric, integer, timestamp without time zone) does not exist
+cv/lag/num362/tscol	ERR 42883 function lag(numeric, integer, timestamp without time zone) does not exist
+cv/lag/num362/text	ERR 22P02 invalid input syntax for type numeric: "q"
+cv/lead/num362/dec	type=numeric rows=6 1,20.00 | 2,NULL | 3,2.5 | 4,50.00 | 5,2.5 | 6,2.5
+cv/lead/num362/int	type=numeric rows=6 1,20.00 | 2,NULL | 3,7 | 4,50.00 | 5,7 | 6,7
+cv/lead/num362/dcol	type=double precision rows=6 1,20 | 2,NULL | 3,NULL | 4,50 | 5,5.5 | 6,6.5
+cv/lag/numu/dec	type=numeric rows=6 1,2.5 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+cv/lag/numu/half	type=numeric rows=6 1,0.5 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+cv/lag/numu/dec3	type=numeric rows=6 1,0.125 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+cv/lag/numu/int	type=numeric rows=6 1,7 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+cv/lag/numu/dcol	type=double precision rows=6 1,1.5 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+cv/lag/numu/ncol	type=numeric rows=6 1,1.25 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+cv/lag/numu/null	type=numeric rows=6 1,NULL | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+cv/lag/numu/ts	ERR 42883 function lag(numeric, integer, timestamp without time zone) does not exist
+cv/lag/numu/tscol	ERR 42883 function lag(numeric, integer, timestamp without time zone) does not exist
+cv/lag/numu/text	ERR 22P02 invalid input syntax for type numeric: "q"
+cv/lead/numu/dec	type=numeric rows=6 1,20 | 2,NULL | 3,2.5 | 4,50 | 5,2.5 | 6,2.5
+cv/lead/numu/int	type=numeric rows=6 1,20 | 2,NULL | 3,7 | 4,50 | 5,7 | 6,7
+cv/lead/numu/dcol	type=double precision rows=6 1,20 | 2,NULL | 3,NULL | 4,50 | 5,5.5 | 6,6.5
+cv/lag/nmul/dec	type=numeric rows=6 1,2.5 | 2,1.25 | 3,2.25 | 4,NULL | 5,4.25 | 6,5.25
+cv/lag/nmul/half	type=numeric rows=6 1,0.5 | 2,1.25 | 3,2.25 | 4,NULL | 5,4.25 | 6,5.25
+cv/lag/nmul/dec3	type=numeric rows=6 1,0.125 | 2,1.25 | 3,2.25 | 4,NULL | 5,4.25 | 6,5.25
+cv/lag/nmul/int	type=numeric rows=6 1,7 | 2,1.25 | 3,2.25 | 4,NULL | 5,4.25 | 6,5.25
+cv/lag/nmul/dcol	type=double precision rows=6 1,1.5 | 2,1.25 | 3,2.25 | 4,NULL | 5,4.25 | 6,5.25
+cv/lag/nmul/ncol	type=numeric rows=6 1,1.25 | 2,1.25 | 3,2.25 | 4,NULL | 5,4.25 | 6,5.25
+cv/lag/nmul/null	type=numeric rows=6 1,NULL | 2,1.25 | 3,2.25 | 4,NULL | 5,4.25 | 6,5.25
+cv/lag/nmul/ts	ERR 42883 function lag(numeric, integer, timestamp without time zone) does not exist
+cv/lag/nmul/tscol	ERR 42883 function lag(numeric, integer, timestamp without time zone) does not exist
+cv/lag/nmul/text	ERR 22P02 invalid input syntax for type numeric: "q"
+cv/lead/nmul/dec	type=numeric rows=6 1,2.25 | 2,NULL | 3,2.5 | 4,5.25 | 5,2.5 | 6,2.5
+cv/lead/nmul/int	type=numeric rows=6 1,2.25 | 2,NULL | 3,7 | 4,5.25 | 5,7 | 6,7
+cv/lead/nmul/dcol	type=double precision rows=6 1,2.25 | 2,NULL | 3,NULL | 4,5.25 | 5,5.5 | 6,6.5
+cv/lag/upper/dec	ERR 42883 function lag(text, integer, numeric) does not exist
+cv/lag/upper/half	ERR 42883 function lag(text, integer, numeric) does not exist
+cv/lag/upper/dec3	ERR 42883 function lag(text, integer, numeric) does not exist
+cv/lag/upper/int	ERR 42883 function lag(text, integer, integer) does not exist
+cv/lag/upper/dcol	ERR 42883 function lag(text, integer, double precision) does not exist
+cv/lag/upper/ncol	ERR 42883 function lag(text, integer, numeric) does not exist
+cv/lag/upper/null	type=text rows=6 1,NULL | 2,A | 3,B | 4,NULL | 5,D | 6,E
+cv/lag/upper/ts	ERR 42883 function lag(text, integer, timestamp without time zone) does not exist
+cv/lag/upper/tscol	ERR 42883 function lag(text, integer, timestamp without time zone) does not exist
+cv/lag/upper/text	type=text rows=6 1,q | 2,A | 3,B | 4,NULL | 5,D | 6,E
+cv/lead/upper/dec	ERR 42883 function lead(text, integer, numeric) does not exist
+cv/lead/upper/int	ERR 42883 function lead(text, integer, integer) does not exist
+cv/lead/upper/dcol	ERR 42883 function lead(text, integer, double precision) does not exist
+cv/lag/castdate/dec	ERR 42883 function lag(date, integer, numeric) does not exist
+cv/lag/castdate/half	ERR 42883 function lag(date, integer, numeric) does not exist
+cv/lag/castdate/dec3	ERR 42883 function lag(date, integer, numeric) does not exist
+cv/lag/castdate/int	ERR 42883 function lag(date, integer, integer) does not exist
+cv/lag/castdate/dcol	ERR 42883 function lag(date, integer, double precision) does not exist
+cv/lag/castdate/ncol	ERR 42883 function lag(date, integer, numeric) does not exist
+cv/lag/castdate/null	type=date rows=6 1,NULL | 2,2024-01-01 | 3,2024-01-02 | 4,NULL | 5,2024-01-04 | 6,2024-01-05
+cv/lag/castdate/ts	type=timestamp without time zone rows=6 1,2020-01-01 00:00:00 | 2,2024-01-01 00:00:00 | 3,2024-01-02 00:00:00 | 4,NULL | 5,2024-01-04 00:00:00 | 6,2024-01-05 00:00:00
+cv/lag/castdate/tscol	type=timestamp without time zone rows=6 1,2024-01-01 10:00:00 | 2,2024-01-01 00:00:00 | 3,2024-01-02 00:00:00 | 4,NULL | 5,2024-01-04 00:00:00 | 6,2024-01-05 00:00:00
+cv/lag/castdate/text	ERR 22007 invalid input syntax for type date: "q"
+cv/lead/castdate/dec	ERR 42883 function lead(date, integer, numeric) does not exist
+cv/lead/castdate/int	ERR 42883 function lead(date, integer, integer) does not exist
+cv/lead/castdate/dcol	ERR 42883 function lead(date, integer, double precision) does not exist
+cv/lag/case/dec	type=numeric rows=6 1,2.5 | 2,0 | 3,0 | 4,0 | 5,40 | 6,50
+cv/lag/case/half	type=numeric rows=6 1,0.5 | 2,0 | 3,0 | 4,0 | 5,40 | 6,50
+cv/lag/case/dec3	type=numeric rows=6 1,0.125 | 2,0 | 3,0 | 4,0 | 5,40 | 6,50
+cv/lag/case/int	type=bigint rows=6 1,7 | 2,0 | 3,0 | 4,0 | 5,40 | 6,50
+cv/lag/case/dcol	type=double precision rows=6 1,1.5 | 2,0 | 3,0 | 4,0 | 5,40 | 6,50
+cv/lag/case/ncol	type=numeric rows=6 1,1.25 | 2,0 | 3,0 | 4,0 | 5,40 | 6,50
+cv/lag/case/null	type=bigint rows=6 1,NULL | 2,0 | 3,0 | 4,0 | 5,40 | 6,50
+cv/lag/case/ts	ERR 42883 function lag(bigint, integer, timestamp without time zone) does not exist
+cv/lag/case/tscol	ERR 42883 function lag(bigint, integer, timestamp without time zone) does not exist
+cv/lag/case/text	ERR 22P02 invalid input syntax for type bigint: "q"
+cv/lead/case/dec	type=numeric rows=6 1,0 | 2,0 | 3,2.5 | 4,50 | 5,2.5 | 6,2.5
+cv/lead/case/int	type=bigint rows=6 1,0 | 2,0 | 3,7 | 4,50 | 5,7 | 6,7
+cv/lead/case/dcol	type=double precision rows=6 1,0 | 2,0 | 3,NULL | 4,50 | 5,5.5 | 6,6.5
+nk/project/val	type=numeric rows=6 1,2.5 | 2,20 | 3,40 | 4,NULL | 5,80 | 6,100
+nk/project/def	type=double precision rows=6 1,3 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+nk/project/sum	type=numeric rows=6 1,20 | 2,60 | 3,60 | 4,140 | 5,240 | 6,360
+nk/project/lead	type=double precision rows=6 1,40 | 2,NULL | 3,NULL | 4,100 | 5,11 | 6,13
+nk/filter/val	type=numeric rows=5 2,2.5 | 3,40 | 4,NULL | 5,80 | 6,100
+nk/filter/def	type=double precision rows=5 2,5 | 3,20 | 4,NULL | 5,40 | 6,50
+nk/filter/sum	type=numeric rows=5 2,40 | 3,40 | 4,120 | 5,220 | 6,340
+nk/filter/lead	type=double precision rows=5 2,NULL | 3,NULL | 4,100 | 5,11 | 6,13
+nk/join_lcomp/val	type=numeric rows=5 1,2.5 | 2,20 | 3,40 | 4,NULL | 5,80
+nk/join_lcomp/def	type=double precision rows=5 1,3 | 2,10 | 3,20 | 4,NULL | 5,40
+nk/join_lcomp/sum	type=numeric rows=5 1,20 | 2,60 | 3,60 | 4,140 | 5,240
+nk/join_lcomp/lead	type=double precision rows=5 1,40 | 2,NULL | 3,NULL | 4,100 | 5,11
+nk/join_rcomp/val	type=numeric rows=5 1,2.5 | 2,40 | 3,NULL | 4,80 | 5,100
+nk/join_rcomp/def	type=double precision rows=5 1,5 | 2,10 | 3,20 | 4,NULL | 5,40
+nk/join_rcomp/sum	type=numeric rows=5 1,40 | 2,40 | 3,120 | 4,220 | 5,340
+nk/join_rcomp/lead	type=double precision rows=5 1,NULL | 2,80 | 3,9 | 4,120 | 5,13
+nk/left_join/val	type=numeric rows=6 1,2.5 | 2,40 | 3,NULL | 4,80 | 5,100 | 6,120
+nk/left_join/def	type=double precision rows=6 1,5 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+nk/left_join/sum	type=numeric rows=6 1,40 | 2,40 | 3,120 | 4,220 | 5,340 | 6,340
+nk/left_join/lead	type=double precision rows=6 1,NULL | 2,80 | 3,9 | 4,120 | 5,13 | 6,NULL
+nk/semi_join/val	type=numeric rows=5 1,2.5 | 2,20 | 3,40 | 4,NULL | 5,80
+nk/semi_join/def	type=double precision rows=5 1,3 | 2,10 | 3,20 | 4,NULL | 5,40
+nk/semi_join/sum	type=numeric rows=5 1,20 | 2,60 | 3,60 | 4,140 | 5,240
+nk/semi_join/lead	type=double precision rows=5 1,40 | 2,NULL | 3,NULL | 4,100 | 5,11
+nk/limit/val	type=numeric rows=5 1,2.5 | 2,20 | 3,40 | 4,NULL | 5,80
+nk/limit/def	type=double precision rows=5 1,3 | 2,10 | 3,20 | 4,NULL | 5,40
+nk/limit/sum	type=numeric rows=5 1,20 | 2,60 | 3,60 | 4,140 | 5,240
+nk/limit/lead	type=double precision rows=5 1,40 | 2,NULL | 3,NULL | 4,100 | 5,11
+nk/offset/val	type=numeric rows=5 2,2.5 | 3,40 | 4,NULL | 5,80 | 6,100
+nk/offset/def	type=double precision rows=5 2,5 | 3,20 | 4,NULL | 5,40 | 6,50
+nk/offset/sum	type=numeric rows=5 2,40 | 3,40 | 4,120 | 5,220 | 6,340
+nk/offset/lead	type=double precision rows=5 2,NULL | 3,NULL | 4,100 | 5,11 | 6,13
+nk/sort/val	type=numeric rows=6 1,2.5 | 2,20 | 3,40 | 4,NULL | 5,80 | 6,100
+nk/sort/def	type=double precision rows=6 1,3 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+nk/sort/sum	type=numeric rows=6 1,20 | 2,60 | 3,60 | 4,140 | 5,240 | 6,360
+nk/sort/lead	type=double precision rows=6 1,40 | 2,NULL | 3,NULL | 4,100 | 5,11 | 6,13
+nk/window/val	type=numeric rows=6 1,2.5 | 2,21 | 3,42 | 4,NULL | 5,84 | 6,105
+nk/window/def	type=double precision rows=6 1,4 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+nk/window/sum	type=numeric rows=6 1,21 | 2,63 | 3,63 | 4,147 | 5,252 | 6,378
+nk/window/lead	type=double precision rows=6 1,42 | 2,NULL | 3,NULL | 4,105 | 5,16 | 6,19
+nk/aggregate/val	type=numeric rows=3 1,2.5 | 2,40 | 3,100
+nk/aggregate/def	type=double precision rows=3 1,5 | 2,20 | 3,50
+nk/aggregate/sum	type=numeric rows=3 1,40 | 2,140 | 3,260
+nk/aggregate/lead	type=double precision rows=3 1,5 | 2,11 | 3,13
+nk/distinct/val	type=numeric rows=6 1,2.5 | 2,20 | 3,40 | 4,NULL | 5,80 | 6,100
+nk/distinct/def	type=double precision rows=6 1,3 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+nk/distinct/sum	type=numeric rows=6 1,20 | 2,60 | 3,60 | 4,140 | 5,240 | 6,360
+nk/distinct/lead	type=double precision rows=6 1,40 | 2,NULL | 3,NULL | 4,100 | 5,11 | 6,13
+nk/union_all/val	type=numeric rows=7 1,2.5 | 2,20 | 3,40 | 4,NULL | 5,80 | 6,100 | 7,120
+nk/union_all/def	type=double precision rows=7 1,3 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50 | 7,60
+nk/union_all/sum	type=numeric rows=7 1,20 | 2,60 | 3,60 | 4,140 | 5,240 | 6,360 | 7,500
+nk/union_all/lead	type=double precision rows=7 1,40 | 2,NULL | 3,NULL | 4,100 | 5,11 | 6,140 | 7,1.5
+nk/union/val	type=numeric rows=7 1,2.5 | 2,20 | 3,40 | 4,NULL | 5,80 | 6,100 | 7,120
+nk/union/def	type=double precision rows=7 1,3 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50 | 7,60
+nk/union/sum	type=numeric rows=7 1,20 | 2,60 | 3,60 | 4,140 | 5,240 | 6,360 | 7,500
+nk/union/lead	type=double precision rows=7 1,40 | 2,NULL | 3,NULL | 4,100 | 5,11 | 6,140 | 7,1.5
+nk/intersect/val	type=numeric rows=4 1,2.5 | 2,20 | 3,40 | 4,NULL
+nk/intersect/def	type=double precision rows=4 1,3 | 2,10 | 3,20 | 4,NULL
+nk/intersect/sum	type=numeric rows=4 1,20 | 2,60 | 3,60 | 4,140
+nk/intersect/lead	type=double precision rows=4 1,40 | 2,NULL | 3,NULL | 4,9
+nk/except/val	type=numeric rows=5 1,2.5 | 3,20 | 4,NULL | 5,80 | 6,100
+nk/except/def	type=double precision rows=5 1,3 | 3,10 | 4,NULL | 5,40 | 6,50
+nk/except/sum	type=numeric rows=5 1,20 | 3,20 | 4,100 | 5,200 | 6,320
+nk/except/lead	type=double precision rows=5 1,NULL | 3,NULL | 4,100 | 5,11 | 6,13
+nk/values/val	type=numeric rows=4 1,2.5 | 2,20 | 3,40 | 4,NULL
+nk/values/def	type=double precision rows=4 1,3 | 2,10 | 3,20 | 4,NULL
+nk/values/sum	type=numeric rows=4 1,20 | 2,60 | 3,60 | 4,140
+nk/values/lead	type=double precision rows=4 1,40 | 2,NULL | 3,NULL | 4,9
+nk/lateral/val	type=numeric rows=6 1,2.5 | 2,20 | 3,40 | 4,NULL | 5,80 | 6,100
+nk/lateral/def	type=double precision rows=6 1,3 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+nk/lateral/sum	type=numeric rows=6 1,20 | 2,60 | 3,60 | 4,140 | 5,240 | 6,360
+nk/lateral/lead	type=double precision rows=6 1,40 | 2,NULL | 3,NULL | 4,100 | 5,11 | 6,13
+nk/nested/val	type=numeric rows=6 1,2.5 | 2,21 | 3,41 | 4,NULL | 5,81 | 6,101
+nk/nested/def	type=double precision rows=6 1,4 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+nk/nested/sum	type=numeric rows=6 1,21 | 2,62 | 3,62 | 4,143 | 5,244 | 6,365
+nk/nested/lead	type=double precision rows=6 1,41 | 2,NULL | 3,NULL | 4,101 | 5,12 | 6,14
+nk/cte/val	type=numeric rows=6 1,2.5 | 2,20 | 3,40 | 4,NULL | 5,80 | 6,100
+nk/cte_join/val	type=numeric rows=6 1,2.5 | 2,20 | 3,40 | 4,NULL | 5,80 | 6,100
+nk/cte/def	type=double precision rows=6 1,3 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+nk/cte_join/def	type=double precision rows=6 1,3 | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+nk/cte/sum	type=numeric rows=6 1,20 | 2,60 | 3,60 | 4,140 | 5,240 | 6,360
+nk/cte_join/sum	type=numeric rows=6 1,20 | 2,60 | 3,60 | 4,140 | 5,240 | 6,360
+nk/cte/lead	type=double precision rows=6 1,40 | 2,NULL | 3,NULL | 4,100 | 5,11 | 6,13
+nk/cte_join/lead	type=double precision rows=6 1,40 | 2,NULL | 3,NULL | 4,100 | 5,11 | 6,13
+nk/armjoin_x/val	type=numeric rows=6 1,2.5 | 2,20 | 3,40 | 4,NULL | 5,80 | 6,100
+nk/armjoin_y/val	type=numeric rows=6 1,2.5 | 2,30 | 3,60 | 4,NULL | 5,120 | 6,150
+nk/armjoin_y/def	type=double precision rows=6 1,4.5 | 2,20 | 3,40 | 4,NULL | 5,80 | 6,100
+nk/armjoin_x/sum	type=numeric rows=6 1,20 | 2,60 | 3,60 | 4,140 | 5,240 | 6,360
+nk/armjoin_y/sum	type=numeric rows=6 1,30 | 2,90 | 3,90 | 4,210 | 5,360 | 6,540
+nk/armjoin_y/lead	type=double precision rows=6 1,60 | 2,NULL | 3,NULL | 4,150 | 5,11 | 6,13
+nk/leftarm_y/val	type=numeric rows=6 1,2.5 | 2,60 | 3,NULL | 4,120 | 5,150 | 6,180
+nk/scalar_sub/val	type=numeric rows=6 1,2.5 | 2,20 | 3,40 | 4,NULL | 5,80 | 6,100
+nk/two_windows/val	type=numeric;double precision rows=5 1,2.5,3 | 2,20,8 | 3,40,8 | 4,NULL,17 | 5,80,28
+nk/window_slot/sum	type=numeric rows=6 1,30 | 2,60 | 3,90 | 4,180 | 5,270 | 6,330
+nk/window_slot/val	type=numeric rows=6 1,2.5 | 2,30 | 3,30 | 4,30 | 5,90 | 6,90
+nk/window_slot/part	type=bigint rows=6 1,1 | 2,2 | 3,3 | 4,1 | 5,2 | 6,1
+nk/project/part	type=bigint rows=6 1,1 | 2,1 | 3,1 | 4,1 | 5,1 | 6,1
+nk/join_lcomp/part	type=bigint rows=5 1,1 | 2,1 | 3,1 | 4,2 | 5,2
+nk/limit/order	type=bigint rows=5 1,4 | 2,3 | 3,5 | 4,2 | 5,1
+nk/nested_join/val	type=numeric rows=5 1,2.5 | 2,21 | 3,41 | 4,NULL | 5,81
+nk/aggregate_comp/val	type=bigint;numeric rows=3 1,2.5 | 2,40 | 3,100
+nk/aggregate_comp/def	type=bigint;double precision rows=3 1,5 | 2,20 | 3,50
