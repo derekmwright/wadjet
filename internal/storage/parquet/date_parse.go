@@ -482,9 +482,10 @@ type temporalText struct {
 //	text   = ws* date [ sep clock [ ws* zone ] ] ws*
 //	date   = splitDateFields' year-first shapes (a four-or-more-digit year,
 //	         `-` `/` `.` separators, one or more digits a field; YYYYMMDD)
-//	sep    = one or more spaces | `T` | `t`
+//	sep    = one or more ws | `T` | `t`
 //	clock  = H[H] `:` M[M] [ `:` S[S] [ `.` digits* ] ]
-//	zone   = `Z` | `z` | (`+`|`-`) digits [ `:` [digits] [ `:` [digits] ] ]
+//	zone   = `Z` | `z` | (`+`|`-`) ws* digits [ `:` [digits] [ `:` [digits] ] ]
+//	ws     = temporalSpace: PostgreSQL's isspace (space, tab, \n, \r, \v, \f)
 //	         (readZone: PostgreSQL's DecodeTimezone digit rule)
 //
 // The accepted forms are PostgreSQL 17.11's, measured per spelling (gated by
@@ -509,8 +510,8 @@ func parseTemporalText(s string) (temporalText, dateFieldsKind) {
 		return tt, dateFieldsNone
 	}
 	datePart, rest := text, ""
-	if i := strings.IndexAny(text, " \tTt"); i >= 0 {
-		datePart, rest = text[:i], strings.TrimLeft(text[i+1:], " \t")
+	if i := strings.IndexAny(text, temporalSpace+"Tt"); i >= 0 {
+		datePart, rest = text[:i], strings.TrimLeft(text[i+1:], temporalSpace)
 		if rest == "" {
 			return tt, dateFieldsNone
 		}
@@ -543,6 +544,12 @@ func parseTemporalText(s string) (temporalText, dateFieldsKind) {
 	}
 	return tt, tt.readClock(rest)
 }
+
+// temporalSpace is the grammar's whitespace: PostgreSQL's ParseDateTime
+// lexer skips isspace() — space, tab, \n, \r, \v, \f — between fields and
+// after a zone's sign (`'2024-03-04\n12:00:00'`, `'…12:00:00+\n05'` read
+// there, measured on PostgreSQL 17.11).
+const temporalSpace = " \t\n\r\v\f"
 
 // readClock reads `clock [ ws* zone ]` into tt.
 func (tt *temporalText) readClock(s string) dateFieldsKind {
@@ -587,7 +594,7 @@ func (tt *temporalText) readClock(s string) dateFieldsKind {
 			tt.ns = ns
 		}
 	}
-	if kind := tt.readZone(strings.TrimLeft(s[i:], " \t")); kind != dateFieldsOK {
+	if kind := tt.readZone(strings.TrimLeft(s[i:], temporalSpace)); kind != dateFieldsOK {
 		return kind
 	}
 	switch {
@@ -623,7 +630,8 @@ func (tt *temporalText) readZone(z string) dateFieldsKind {
 	case z[0] != '+' && z[0] != '-':
 		return dateFieldsNone
 	}
-	sign, body := 1, z[1:]
+	// PostgreSQL's lexer soaks whitespace after a zone's sign: `+ 05` is +05.
+	sign, body := 1, strings.TrimLeft(z[1:], temporalSpace)
 	if z[0] == '-' {
 		sign = -1
 	}
@@ -672,7 +680,7 @@ func (tt *temporalText) readZone(z string) dateFieldsKind {
 		// PostgreSQL's lexer ends a zone field at a `+`, or at whitespace,
 		// and decodes what follows as a field of its own before refusing a
 		// second zone: `+05+16` and `+05 -16` are 22009 there, `+05+05` 22007.
-		if next := strings.TrimLeft(rest, " \t"); next != "" && (next[0] == '+' || (next[0] == '-' && len(next) < len(rest))) {
+		if next := strings.TrimLeft(rest, temporalSpace); next != "" && (next[0] == '+' || (next[0] == '-' && len(next) < len(rest))) {
 			var other temporalText
 			if other.readZone(next) == dateFieldsZone {
 				return dateFieldsZone
