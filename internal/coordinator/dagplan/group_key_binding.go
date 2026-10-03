@@ -68,6 +68,11 @@ func resolveShuffleKey(key string, child *logical.Node, published map[*logical.N
 				return bare
 			}
 		}
+		if logical.WindowShadowedInput(n) != nil {
+			// The window's input carries the derived table's declared
+			// columns under their own names (logical.WindowShadowedInput).
+			return resolved
+		}
 		if n.Type == logical.NodeJoin && len(n.Children) == 2 {
 			if r := resolveShuffleKey(resolved, n.Children[0], published); r != resolved {
 				return r

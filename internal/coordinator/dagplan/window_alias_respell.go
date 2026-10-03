@@ -99,9 +99,6 @@ func (w *windowAliasSlots) bindKeyExprs(specs []physical.ProjectExprSpec, child 
 		}
 		out, changed, complete := localPlanFacts.RewriteColRefs(ast, func(ref *plansql.ColRef) (plansql.Node, bool) {
 			written := ref.String()
-			if slot := w.p.windowAliasSlotFor(written, child); slot != "" {
-				return &plansql.ColRef{Column: slot}, true
-			}
 			if aliasOriginReadsAggregate(written, child) {
 				return aggregateAliasDefinition(written, child, 0)
 			}
@@ -144,96 +141,9 @@ func (w *windowAliasSlots) materialize(stages []Stage, stage *Stage, child *logi
 	}
 	if materializeAliasColumns(producer, w.cols) {
 		w.rename(stage, child, own)
-		w.publish(child, own)
 		return
 	}
 	w.rename(stage, child, w.toName)
-}
-
-// publish records every alias that stays in its slot on the stream, by its
-// defining Project and definition, for the consumers above the window
-// (StagePlanner.windowAliasSlotFor).
-func (w *windowAliasSlots) publish(child *logical.Node, own map[string]string) {
-	for _, c := range w.cols {
-		slot := strings.ToLower(c.Name)
-		if _, renamed := own[slot]; renamed {
-			continue
-		}
-		_, owner := derivedAliasDefinition(w.toName[slot], child)
-		if owner == nil {
-			continue
-		}
-		if w.p.windowAliasStream[owner] == nil {
-			w.p.windowAliasStream[owner] = map[string]string{}
-		}
-		w.p.windowAliasStream[owner][c.Expr] = c.Name
-	}
-}
-
-// bindShadowing binds every computed alias of the Project feeding the window
-// whose name is a column of that Project's own input — `b * 2 AS b` over a
-// table with a `b` — and that the producer can compute, whether the window
-// reads it or not. The producer forwards the SOURCE under that name, which
-// the window's other readers (a rename `b AS ob`, a definition substituted
-// above) need, so the alias rides the stream in its slot, and every consumer
-// above the window that names the alias reads the slot. Without it the
-// SELECT list's `b` beside `ROW_NUMBER() OVER (…)` read the source on the DAG
-// arms.
-func (w *windowAliasSlots) bindShadowing(sub []Stage, child *logical.Node) {
-	producer := windowAliasProducer(sub)
-	proj := feedingProject(child)
-	if producer == nil || len(producer.ProjectExprs) > 0 || proj == nil {
-		return
-	}
-	for _, item := range proj.Projections {
-		name := localPlanFacts.ProjectionOutputName(item)
-		if item.IsAgg || name == "" || !forwardsColumn(producer, name) ||
-			!shadowsItsInput(name, child) || aliasOriginReadsAggregate(name, child) {
-			continue
-		}
-		if c := derivedAliasColumnFor(name, child); c.Expr != "" && producerEvaluates(producer, c.Expr) {
-			w.bind(c)
-		}
-	}
-}
-
-// feedingProject is the Project whose names the window's input carries: the
-// first one below it through the value-preserving wrappers
-// derivedAliasDefinition also looks through.
-func feedingProject(n *logical.Node) *logical.Node {
-	for n != nil {
-		switch n.Type {
-		case logical.NodeProject:
-			return n
-		case logical.NodeFilter, logical.NodeLimit, logical.NodeSort:
-		default:
-			return nil
-		}
-		if len(n.Children) != 1 {
-			return nil
-		}
-		n = n.Children[0]
-	}
-	return nil
-}
-
-// shadowsItsInput reports whether a computed alias takes the name of a column
-// of the relation its own Project reads: the column of that name a producer
-// forwards is then the SOURCE, not the alias. A producer that forwards the
-// name because a stage computed the alias (a join materializing
-// `a.mb * 2 AS v`) already carries the alias's value.
-func shadowsItsInput(name string, child *logical.Node) bool {
-	_, owner := derivedAliasDefinition(name, child)
-	if owner == nil || len(owner.Children) != 1 {
-		return false
-	}
-	bare := stripQualifier(name)
-	for col := range localPlanFacts.InputColDecls(owner.Children[0]).Types {
-		if strings.EqualFold(stripQualifier(col), bare) {
-			return true
-		}
-	}
-	return false
 }
 
 // producerEvaluates reports whether every column a definition reads is one
@@ -251,69 +161,6 @@ func producerEvaluates(producer *Stage, def string) bool {
 		return nil, false
 	})
 	return ok && complete
-}
-
-// windowAliasSlotFor returns the slot a reference above a window reads when
-// it names a computed derived alias that rides the stream in a window's slot
-// (windowAliasSlots.publish), or "". The walk passes through the windows,
-// filters, sorts and limits between the reference and the alias's Project,
-// and through every rename on the way — `x.w3` over `b AS w3` over
-// `b * 2 AS b`.
-func (p *StagePlanner) windowAliasSlotFor(ref string, child *logical.Node) string {
-	slot, _, _ := p.windowAliasSlotDef(ref, child)
-	return slot
-}
-
-// windowAliasSlotDef is windowAliasSlotFor with the alias's definition and
-// the Project that defines it, which a consumer's declaration is inferred
-// from: the slot is not a column any declaration walk can see.
-func (p *StagePlanner) windowAliasSlotDef(ref string, child *logical.Node) (string, plansql.Node, *logical.Node) {
-	if len(p.windowAliasStream) == 0 || ref == "" {
-		return "", nil, nil
-	}
-	name := ref
-	for n, depth := child, 0; n != nil && depth < 64; depth++ {
-		switch n.Type {
-		case logical.NodeWindow, logical.NodeFilter, logical.NodeLimit, logical.NodeSort:
-		case logical.NodeProject:
-			if def, owner := derivedAliasDefinition(name, n); def != nil {
-				if slot := p.windowAliasStream[owner][def.String()]; slot != "" {
-					return slot, def, owner
-				}
-				// A bare column reference written as an expression is a
-				// rename: the walk continues below its Project.
-				ref, isRef := def.(*plansql.ColRef)
-				if !isRef || owner == nil || len(owner.Children) != 1 {
-					return "", nil, nil
-				}
-				name, n = ref.String(), owner.Children[0]
-				continue
-			}
-			bare := localPlanFacts.DerivedScopeBareName(name, n)
-			proj := localPlanFacts.ProjectionForName(n.Projections, name, bare)
-			if proj == nil {
-				// An unaliased column item publishes its column's name.
-				for k := range n.Projections {
-					if n.Projections[k].Alias == "" && n.Projections[k].Column != "" &&
-						strings.EqualFold(stripQualifier(n.Projections[k].Column), stripQualifier(name)) {
-						proj = &n.Projections[k]
-						break
-					}
-				}
-			}
-			if proj == nil || proj.IsAgg || proj.Column == "" {
-				return "", nil, nil
-			}
-			name = proj.Column
-		default:
-			return "", nil, nil
-		}
-		if len(n.Children) != 1 {
-			return "", nil, nil
-		}
-		n = n.Children[0]
-	}
-	return "", nil, nil
 }
 
 // rename respells every slot in m (lower-cased slot → name) the stage's
