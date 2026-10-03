@@ -203,7 +203,7 @@ func pgFold(arms []plansql.Node, decls ColDecls) pgCategory {
 // random are float8 in PostgreSQL too, and a function PostgreSQL has no
 // spelling of is what this engine declares.
 func funcPGCategory(n *plansql.FuncCallNode, decls ColDecls) pgCategory {
-	if n.OutputLabel == "extract" {
+	if n.OutputLabel == "extract" || len(n.Args) == 1 && extractFieldFuncs[strings.ToLower(n.Name)] {
 		return pgCatNumeric
 	}
 	arg := func(i int) pgCategory {
@@ -311,4 +311,19 @@ func pgCommon(cats ...pgCategory) pgCategory {
 		out = pgArith(out, c)
 	}
 	return out
+}
+
+// extractFieldFuncs are the functions the parser rewrites EXTRACT(field FROM
+// x) into (field(x), selectParser.parseExtractExpr). A call spelled that way
+// IS the EXTRACT — the same compiled function — so it takes EXTRACT's
+// category whether or not it still carries the parser's `extract` label: a
+// DAG stage re-parses its expression from text, where `EXTRACT(year FROM d)`
+// is `year(d)` and the label is gone, and the stage's explicit integer CAST
+// must round what the single-process plan rounds (`CAST(extract(year FROM
+// d) * 0 + 2.5 AS INTEGER)` is 3 on every arm, as on PostgreSQL).
+var extractFieldFuncs = map[string]bool{
+	"year": true, "month": true, "day": true, "hour": true, "minute": true, "second": true,
+	"quarter": true, "week": true, "day_of_week": true, "day_of_year": true, "epoch": true,
+	"isodow": true, "isoyear": true, "decade": true, "century": true, "millennium": true,
+	"millisecond": true, "milliseconds": true, "microsecond": true, "microseconds": true,
 }
