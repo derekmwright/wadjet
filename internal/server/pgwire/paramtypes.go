@@ -50,6 +50,12 @@ import (
 // is not an expression this parser reads, and a column reference is valid
 // wherever an expression is, which is every position a parameter may hold
 // except the constant-only ones (paramPositions).
+//
+// It is the PREFIX statement starts from: a statement whose own text already
+// holds it (a column a client named `__pw_param_1`, round-1 review N3: it was
+// read as the placeholder and typed `__pw_param_1 = $1` text where PostgreSQL
+// types it by the column) is parsed with a longer prefix its text does not
+// hold, so a sentinel never names anything the client wrote.
 const paramSentinel = "__pw_param_"
 
 // inferParamOIDs returns declared with every OID-0 entry (and every entry past
@@ -131,10 +137,11 @@ func paramCacheKey(gen uint64, sql string, declared []uint32) string {
 }
 
 type paramTyper struct {
-	c     *pgConn
-	ctx   context.Context
-	oids  []uint32
-	fixed []bool // declared by the client: never assigned
+	sentinel string // this statement's placeholder prefix (paramSentinel)
+	c        *pgConn
+	ctx      context.Context
+	oids     []uint32
+	fixed    []bool // declared by the client: never assigned
 }
 
 // assign records oid for parameter n, unless the client declared it or an
@@ -149,6 +156,10 @@ func (pt *paramTyper) assign(n int, oid uint32) {
 
 // statement rewrites the placeholders and walks the parsed statement.
 func (pt *paramTyper) statement(sql string) {
+	pt.sentinel = paramSentinel
+	for lower := strings.ToLower(sql); strings.Contains(lower, pt.sentinel); {
+		pt.sentinel = "_" + pt.sentinel
+	}
 	refs := scanParamRefs(sql)
 	positions := paramPositions(sql, refs)
 	var b strings.Builder
@@ -174,7 +185,7 @@ func (pt *paramTyper) statement(sql string) {
 			pt.assign(r.n, oidInt4)
 			b.WriteString("1")
 		default:
-			b.WriteString(paramSentinel + strconv.Itoa(r.n))
+			b.WriteString(pt.sentinel + strconv.Itoa(r.n))
 		}
 		prev = r.end
 	}
@@ -301,7 +312,7 @@ func (pt *paramTyper) probe(t plansql.TableRef, ctes []plansql.CTEDef) []wadjet.
 		Columns: []plansql.SelectColumn{{Star: true}},
 		CTEs:    ctes,
 	}
-	text := sentinelsAsNull(plansql.RebuildSQL(si, nil)) + " LIMIT 0"
+	text := pt.sentinelsAsNull(plansql.RebuildSQL(si, nil)) + " LIMIT 0"
 	res, err := pt.c.db.Query(pt.ctx, text)
 	if err != nil || res == nil {
 		return nil
@@ -310,13 +321,13 @@ func (pt *paramTyper) probe(t plansql.TableRef, ctes []plansql.CTEDef) []wadjet.
 }
 
 // sentinelsAsNull replaces every placeholder sentinel in text with NULL.
-func sentinelsAsNull(text string) string {
+func (pt *paramTyper) sentinelsAsNull(text string) string {
 	for {
-		i := strings.Index(text, paramSentinel)
+		i := strings.Index(text, pt.sentinel)
 		if i < 0 {
 			return text
 		}
-		j := i + len(paramSentinel)
+		j := i + len(pt.sentinel)
 		for j < len(text) && text[j] >= '0' && text[j] <= '9' {
 			j++
 		}
@@ -393,7 +404,7 @@ func (pt *paramTyper) block(info *plansql.SelectInfo, outer *scope, ctes []plans
 		if node == nil && col.Expr != "" {
 			node, _ = plansql.ParseExpression(col.Expr)
 		}
-		if n := sentinelNum(node); n > 0 {
+		if n := pt.sentinelNum(node); n > 0 {
 			// A bare select-list parameter is required to be nothing:
 			// PostgreSQL resolves it as text.
 			pt.assign(n, oidText)
@@ -414,7 +425,7 @@ func (pt *paramTyper) block(info *plansql.SelectInfo, outer *scope, ctes []plans
 
 // predicate walks a boolean clause; a bare parameter there is a boolean.
 func (pt *paramTyper) predicate(n plansql.Node, sc *scope) {
-	if k := sentinelNum(n); k > 0 {
+	if k := pt.sentinelNum(n); k > 0 {
 		pt.assign(k, oidBool)
 		return
 	}
@@ -443,7 +454,7 @@ func (pt *paramTyper) subquery(text string, sc *scope) {
 }
 
 // sentinelNum is the parameter number a node stands for, or 0.
-func sentinelNum(n plansql.Node) int {
+func (pt *paramTyper) sentinelNum(n plansql.Node) int {
 	for {
 		p, ok := n.(*plansql.ParenNode)
 		if !ok {
@@ -452,10 +463,10 @@ func sentinelNum(n plansql.Node) int {
 		n = p.Inner
 	}
 	ref, ok := n.(*plansql.ColRef)
-	if !ok || ref.Table != "" || !strings.HasPrefix(ref.Column, paramSentinel) {
+	if !ok || ref.Table != "" || !strings.HasPrefix(ref.Column, pt.sentinel) {
 		return 0
 	}
-	k, err := strconv.Atoi(ref.Column[len(paramSentinel):])
+	k, err := strconv.Atoi(ref.Column[len(pt.sentinel):])
 	if err != nil {
 		return 0
 	}
@@ -467,7 +478,7 @@ func sentinelNum(n plansql.Node) int {
 // column's own declaration — the OID a RowDescription would carry for it,
 // varchar included.
 func (pt *paramTyper) typeOf(n plansql.Node, sc *scope) uint32 {
-	if n == nil || sentinelNum(n) > 0 {
+	if n == nil || pt.sentinelNum(n) > 0 {
 		return 0
 	}
 	inner := n
@@ -484,7 +495,7 @@ func (pt *paramTyper) typeOf(n plansql.Node, sc *scope) uint32 {
 		}
 		return 0
 	}
-	if containsSentinel(inner) {
+	if pt.containsSentinel(inner) {
 		return 0
 	}
 	if oid, ok := pt.pgOperatorType(inner, sc); ok {
@@ -626,10 +637,10 @@ func declOID(d expr.DeclType) uint32 {
 
 // containsSentinel reports whether any placeholder sits inside n — an
 // expression over a parameter has no declaration of its own to offer.
-func containsSentinel(n plansql.Node) bool {
+func (pt *paramTyper) containsSentinel(n plansql.Node) bool {
 	found := false
 	plansql.RewriteExpr(n, func(x plansql.Node) (plansql.Node, bool) {
-		if sentinelNum(x) > 0 {
+		if pt.sentinelNum(x) > 0 {
 			found = true
 		}
 		return nil, false
@@ -644,7 +655,7 @@ func containsSentinel(n plansql.Node) bool {
 func (pt *paramTyper) peers(sc *scope, nodes ...plansql.Node) {
 	var oid uint32
 	for _, n := range nodes {
-		if sentinelNum(n) == 0 {
+		if pt.sentinelNum(n) == 0 {
 			if oid = pt.typeOf(n, sc); oid != 0 {
 				break
 			}
@@ -652,7 +663,7 @@ func (pt *paramTyper) peers(sc *scope, nodes ...plansql.Node) {
 	}
 	allParams := true
 	for _, n := range nodes {
-		if sentinelNum(n) == 0 {
+		if pt.sentinelNum(n) == 0 {
 			allParams = false
 		}
 	}
@@ -662,7 +673,7 @@ func (pt *paramTyper) peers(sc *scope, nodes ...plansql.Node) {
 		oid = oidText
 	}
 	for _, n := range nodes {
-		if k := sentinelNum(n); k > 0 {
+		if k := pt.sentinelNum(n); k > 0 {
 			pt.assign(k, oid)
 		}
 	}
@@ -683,11 +694,11 @@ func (pt *paramTyper) expr(n plansql.Node, sc *scope) {
 	case *plansql.BinaryOp:
 		if e.Op == "||" {
 			for _, side := range []plansql.Node{e.Left, e.Right} {
-				if k := sentinelNum(side); k > 0 {
+				if k := pt.sentinelNum(side); k > 0 {
 					pt.assign(k, oidText)
 				}
 			}
-		} else if sentinelNum(e.Left) == 0 || sentinelNum(e.Right) == 0 {
+		} else if pt.sentinelNum(e.Left) == 0 || pt.sentinelNum(e.Right) == 0 {
 			pt.peers(sc, e.Left, e.Right)
 		}
 		pt.expr(e.Left, sc)
@@ -727,7 +738,7 @@ func (pt *paramTyper) expr(n plansql.Node, sc *scope) {
 		pt.expr(e.High, sc)
 	case *plansql.LikeExpr:
 		for _, side := range []plansql.Node{e.Left, e.Pattern} {
-			if k := sentinelNum(side); k > 0 {
+			if k := pt.sentinelNum(side); k > 0 {
 				pt.assign(k, oidText)
 			}
 		}
@@ -748,7 +759,7 @@ func (pt *paramTyper) expr(n plansql.Node, sc *scope) {
 	case *plansql.NotNode:
 		pt.predicate(e.Inner, sc)
 	case *plansql.CastNode:
-		if k := sentinelNum(e.Inner); k > 0 {
+		if k := pt.sentinelNum(e.Inner); k > 0 {
 			pt.assign(k, castOID(e))
 			return
 		}
@@ -776,7 +787,7 @@ func (pt *paramTyper) expr(n plansql.Node, sc *scope) {
 		if e.Else != nil {
 			results = append(results, e.Else)
 		}
-		if anyNonParam(results) {
+		if pt.anyNonParam(results) {
 			pt.peers(sc, results...)
 		}
 		for _, r := range results {
@@ -799,7 +810,7 @@ func (pt *paramTyper) expr(n plansql.Node, sc *scope) {
 			pt.expr(x, sc)
 		}
 	case *plansql.ArrayLitNode:
-		if anyNonParam(e.Elements) {
+		if pt.anyNonParam(e.Elements) {
 			pt.peers(sc, e.Elements...)
 		}
 		for _, x := range e.Elements {
@@ -812,9 +823,9 @@ func (pt *paramTyper) expr(n plansql.Node, sc *scope) {
 	}
 }
 
-func anyNonParam(nodes []plansql.Node) bool {
+func (pt *paramTyper) anyNonParam(nodes []plansql.Node) bool {
 	for _, n := range nodes {
-		if sentinelNum(n) == 0 {
+		if pt.sentinelNum(n) == 0 {
 			return true
 		}
 	}
@@ -828,7 +839,7 @@ func anyNonParam(nodes []plansql.Node) bool {
 func (pt *paramTyper) call(f *plansql.FuncCallNode, sc *scope) {
 	switch strings.ToLower(f.Name) {
 	case "coalesce", "nullif", "greatest", "least":
-		if anyNonParam(f.Args) {
+		if pt.anyNonParam(f.Args) {
 			pt.peers(sc, f.Args...)
 		}
 	case "lag", "lead", "ntile", "nth_value", "first_value", "last_value":
@@ -847,7 +858,7 @@ func (pt *paramTyper) windowCall(f *plansql.FuncCallNode, sc *scope) {
 	switch strings.ToLower(f.Name) {
 	case "lag", "lead":
 		if len(f.Args) > 1 {
-			if k := sentinelNum(f.Args[1]); k > 0 {
+			if k := pt.sentinelNum(f.Args[1]); k > 0 {
 				pt.assign(k, oidInt4)
 			}
 		}
@@ -856,13 +867,13 @@ func (pt *paramTyper) windowCall(f *plansql.FuncCallNode, sc *scope) {
 		}
 	case "ntile":
 		if len(f.Args) > 0 {
-			if k := sentinelNum(f.Args[0]); k > 0 {
+			if k := pt.sentinelNum(f.Args[0]); k > 0 {
 				pt.assign(k, oidInt4)
 			}
 		}
 	case "nth_value":
 		if len(f.Args) > 1 {
-			if k := sentinelNum(f.Args[1]); k > 0 {
+			if k := pt.sentinelNum(f.Args[1]); k > 0 {
 				pt.assign(k, oidInt4)
 			}
 		}
@@ -931,7 +942,7 @@ func (pt *paramTyper) insert(ins *plansql.InsertInfo) {
 			if err != nil {
 				continue
 			}
-			if k := sentinelNum(n); k > 0 {
+			if k := pt.sentinelNum(n); k > 0 {
 				if m, ok := target(j); ok {
 					pt.assign(k, uint32(pgColumnOID(m)))
 				}
@@ -944,7 +955,7 @@ func (pt *paramTyper) insert(ins *plansql.InsertInfo) {
 		si := ins.Select.SelectInfo
 		if si.Union == nil {
 			for j, col := range si.Columns {
-				if k := sentinelNum(col.ASTExpr); k > 0 {
+				if k := pt.sentinelNum(col.ASTExpr); k > 0 {
 					if m, ok := target(j); ok {
 						pt.assign(k, uint32(pgColumnOID(m)))
 					}
@@ -975,7 +986,7 @@ func (pt *paramTyper) setClause(column, value string, sc *scope) {
 	if err != nil {
 		return
 	}
-	if k := sentinelNum(n); k > 0 {
+	if k := pt.sentinelNum(n); k > 0 {
 		if m, ok := sc.lookup(&plansql.ColRef{Column: column}); ok {
 			pt.assign(k, uint32(pgColumnOID(m)))
 		}
@@ -1023,7 +1034,7 @@ func (pt *paramTyper) merge(m *plansql.MergeInfo) {
 				if err != nil {
 					continue
 				}
-				if k := sentinelNum(n); k > 0 {
+				if k := pt.sentinelNum(n); k > 0 {
 					if mm, ok := tsc.lookup(&plansql.ColRef{Column: col}); ok {
 						pt.assign(k, uint32(pgColumnOID(mm)))
 					}
@@ -1064,7 +1075,7 @@ func (pt *paramTyper) mergeInsert(body string, target scopeSource, sc *scope) {
 		if err != nil {
 			continue
 		}
-		if k := sentinelNum(n); k > 0 {
+		if k := pt.sentinelNum(n); k > 0 {
 			var m wadjet.ColumnMeta
 			ok := false
 			if cols == nil && j < len(target.cols) {
