@@ -196,11 +196,14 @@ func (p *StagePlanner) resolveSubqueryAST(ctx context.Context, node plansql.Node
 			"duration", time.Since(start).Round(time.Millisecond),
 			"rows", len(rows), "error", err != nil)
 		if err != nil {
-			// A refusal with a SQLSTATE is the subquery's answer on every
-			// path (each builds and runs the same subquery): park it, rather
-			// than leave the subquery's text in a filter no worker can
-			// compile (#1411 review r1; the producer fallback in walkStages
-			// takes the same rule).
+			// A failure with a SQLSTATE stands where the answer would have
+			// and is raised when a row evaluates it (deferredFailure). An
+			// authorization refusal is the statement's answer wherever the
+			// subquery sits, and is parked (#1411 review r1; the producer
+			// fallback in walkStages takes the same rule).
+			if d, ok := deferredFailure(err, false); ok {
+				return d
+			}
 			if sqlerr.StateOf(err) != "" {
 				p.refusePlanTimeAnswer(err)
 			}
@@ -222,6 +225,13 @@ func (p *StagePlanner) resolveSubqueryAST(ctx context.Context, node plansql.Node
 		// PARKED because walkStages has no error return.
 		v, cardErr := expr.ScalarSubqueryValue(n.SQL, rows)
 		if cardErr != nil {
+			// The same rule as a failed run: PostgreSQL raises 21000 when
+			// the sublink is evaluated, so over rows no one evaluates it
+			// for — an empty input, an arm no row reaches — the statement
+			// answers (deferredFailure).
+			if d, ok := deferredFailure(cardErr, false); ok {
+				return d
+			}
 			p.refuseScalarRows(cardErr)
 			return node
 		}
@@ -259,16 +269,19 @@ func (p *StagePlanner) resolveSubqueryAST(ctx context.Context, node plansql.Node
 		}
 		rows, _, err := p.ExecuteSubquerySchema(ctx, n.SQL)
 		if err != nil {
-			// A refusal with a SQLSTATE is the query's answer on every path:
-			// an AUTHORIZATION refusal is the decision's own sentence
-			// (ADR-0034 item 6, round-1 review P1), and a sample's 2202H, a
-			// 22003 its argument cannot hold or a 22012 is what every path
-			// that runs the subquery raises. Swallowing one shipped the
-			// filter, and every task failed with "EXISTS subquery requires a
-			// SubqueryRunner" and no SQLSTATE, as the scalar arm above did
-			// before it parked the same rule (#1411 review r2 B1). A subquery
-			// a constant short-circuits never reaches here: the logical plan
-			// folded it away.
+			// A sample's 2202H, a 22003 its argument cannot hold, a 22012:
+			// the failure stands where the boolean would have and is raised
+			// when a row evaluates it (deferredFailure) — never when the
+			// subquery sits in an arm no row reaches, which parking it as the
+			// statement's answer did (#1411 review r3 B1). Swallowing it
+			// shipped the filter, and every task failed with "EXISTS
+			// subquery requires a SubqueryRunner" and no SQLSTATE (review r2
+			// B1). An AUTHORIZATION refusal is the decision's own sentence
+			// wherever the subquery sits (ADR-0034 item 6, round-1 review
+			// P1) and is parked.
+			if d, ok := deferredFailure(err, true); ok {
+				return d
+			}
 			if sqlerr.StateOf(err) != "" {
 				p.refusePlanTimeAnswer(err)
 			}
@@ -383,13 +396,115 @@ func (p *StagePlanner) resolveSubqueryAST(ctx context.Context, node plansql.Node
 	}
 }
 
+// deferredFailure is the node a subquery the coordinator ran at plan time
+// stands as when the run FAILED with a SQLSTATE: the failure, raised when a
+// row evaluates it (plansql.DeferredErrorNode), cast to boolean where the
+// subquery was a predicate (EXISTS). That is PostgreSQL's rule for an
+// uncorrelated sublink — an InitPlan runs on its first reference, so
+// `CASE WHEN id > 5 THEN EXISTS (…) ELSE true END` raises the subquery's
+// error only if some row has id > 5, and an arm no row reaches never does.
+// Parking the failure as the statement's answer instead raised it from every
+// arm (#1411 review r3 B1).
+//
+// A conjunct that reads no row is PostgreSQL's one-time filter, evaluated
+// once before any row: gateDeferredFailure raises it there.
+//
+// Only a failure of EVALUATING the subquery is deferred: SQLSTATE class 22
+// (data exception — a sample's 2202H, a 22003 its argument cannot hold, a
+// 22012, a 22P02) and class 21 (a scalar subquery's 21000), the classes
+// PostgreSQL raises while it runs a sublink. Any other coded refusal is about
+// the STATEMENT and stays its answer wherever the subquery sits — an
+// authorization decision (42501; PostgreSQL checks a plan's relations when it
+// starts, not when a row reaches them), an undefined relation (42P01), a
+// feature this engine does not run (0A000) — and an uncoded failure keeps the
+// path it had (ok=false for both). An IN-subquery whose set cannot be
+// materialized declines to the coordinator-local pipeline instead, whose IN
+// evaluates per row (in_subquery_set.go).
+func deferredFailure(err error, predicate bool) (plansql.Node, bool) {
+	state := sqlerr.StateOf(err)
+	if len(state) != 5 || (state[:2] != "22" && state[:2] != "21") {
+		return nil, false
+	}
+	d := &plansql.DeferredErrorNode{State: state, Message: sqlerr.SentenceOf(err)}
+	if predicate {
+		return &plansql.CastNode{Inner: d, TypeName: "boolean"}, true
+	}
+	return d, true
+}
+
+// gateDeferredFailure is PostgreSQL's one-time filter for a conjunct that
+// carries a deferred subquery failure. A conjunct that reads no column of the
+// row outside its (uncorrelated) subqueries and calls nothing volatile is
+// pseudoconstant there: it is evaluated ONCE, before any row is read, so its
+// failure is the statement's answer even over an empty input — `WHERE EXISTS
+// (… TABLESAMPLE BERNOULLI (101))` over an empty table is 2202H. The
+// judgement is made on the conjunct as written (original), where an IN
+// still names its left operand; the evaluation is of the resolved text. A
+// conjunct that reads a row raises the failure when a row evaluates it, and
+// one whose evaluation never reaches the failure (`CASE WHEN false THEN …
+// ELSE true END`) raises nothing here either.
+func (p *StagePlanner) gateDeferredFailure(original, resolved string) {
+	if !strings.Contains(resolved, plansql.DeferredErrorFunc) {
+		return
+	}
+	written, err := plansql.ParseExpression(original)
+	if err != nil || !readsNoRow(written) {
+		return
+	}
+	node, err := plansql.ParseExpression(resolved)
+	if err != nil {
+		return
+	}
+	c, err := expr.Compile(node)
+	if err != nil {
+		return
+	}
+	if err := evalOnce(c); err != nil {
+		p.refusePlanTimeAnswer(err)
+	}
+}
+
+// readsNoRow reports whether a conjunct as written reads no column of the
+// row it filters: its uncorrelated subqueries stand for constants (a
+// correlated one never reaches a deferred failure — it is refused before
+// resolution), and the rest is logical.ConjunctIsConstant's rule.
+func readsNoRow(node plansql.Node) bool {
+	stripped := plansql.RewriteExpr(node, func(x plansql.Node) (plansql.Node, bool) {
+		switch x.(type) {
+		case *plansql.SubqueryNode, *plansql.ExistsNode:
+			return &plansql.Lit{Value: "true", Kind: plansql.LitBool}, true
+		}
+		return nil, false
+	})
+	return logical.ConjunctIsConstant(stripped)
+}
+
+// evalOnce evaluates a constant expression once and returns the error its
+// evaluation raises through the evaluator's refusal channel.
+func evalOnce(c expr.Expr) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			fe, ok := r.(interface{ FatalEvalError() error })
+			if !ok {
+				panic(r)
+			}
+			err = fe.FatalEvalError()
+		}
+	}()
+	c.Eval(nil, 0)
+	return nil
+}
+
 // resolveBooleanExists resolves EXISTS leaves under boolean connectives and
-// leaves every other leaf unchanged. Hoisting a scalar subquery defeats
-// short-circuiting and can raise 21000 where the branch is never needed.
-// An uncorrelated EXISTS reads no outer row, returns a boolean and cannot raise
-// that cardinality error. Scalar leaves retain their existing behavior, including
-// DAG task refusal until lazy subquery evaluation is supported; the boundary is
-// pinned by coordinator.TestArcI1AnUnqualifiedNameBindsTheInnerRelation.
+// leaves every other leaf unchanged. An EXISTS's failure is deferred to the
+// row that evaluates it (deferredFailure), so hoisting it out of an arm the
+// query may never evaluate changes no answer. A scalar leaf's would be too
+// when the coordinator runs it here, but a scalar the planner defers to a
+// PRODUCER stage runs at dispatch, where its failure is still the statement's
+// answer; scalar leaves therefore retain their existing behavior, including
+// DAG task refusal (an open distributed defect); the boundary is pinned by
+// coordinator.TestArcI1AnUnqualifiedNameBindsTheInnerRelation and
+// coordinator.TestArcTBDeferredSubqueryFailureOnEveryArm.
 // See docs/internals/boolean-subquery-hoisting-boundary.md for the design.
 func (p *StagePlanner) resolveBooleanExists(ctx context.Context, node plansql.Node,
 	deferred *[]deferredScalar, decls physical.ColDecls) plansql.Node {

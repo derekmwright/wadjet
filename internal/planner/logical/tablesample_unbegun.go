@@ -94,6 +94,11 @@ func evalConstantFilter(node plansql.Node) (v any, ok bool) {
 	return v, err == nil
 }
 
+// ConjunctIsConstant is conjunctIsConstant for the stage planner, which
+// evaluates a conjunct carrying a deferred subquery failure once, as
+// PostgreSQL's one-time filter does.
+func ConjunctIsConstant(node plansql.Node) bool { return conjunctIsConstant(node) }
+
 // conjunctIsConstant reports whether a conjunct reads no row and has one
 // value however often it is evaluated: no column, no subquery, no aggregate
 // or window, no placeholder a later stage substitutes, and nothing volatile

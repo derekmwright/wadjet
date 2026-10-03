@@ -867,6 +867,9 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 		// was written somewhere a row value has no meaning.
 		return nil, sqlerr.New("42601", "row expression %s is not valid here", node.String())
 
+	case *plansql.DeferredErrorNode:
+		return &DeferredError{State: n.State, Message: n.Message}, nil
+
 	case *plansql.LiteralPlaceholder:
 		// The coordinator substitutes the concrete literal into the
 		// SERIALIZED expression before a fragment compiles it. One that

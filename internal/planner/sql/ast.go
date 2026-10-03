@@ -209,6 +209,35 @@ type LiteralPlaceholder struct {
 func (*LiteralPlaceholder) nodeTag()         {}
 func (l *LiteralPlaceholder) String() string { return ":" + l.Name }
 
+// DeferredErrorNode is a subquery's FAILURE standing where the subquery
+// stood: the coordinator ran an uncorrelated subquery at plan time to splice
+// its answer in as a constant, the run raised a coded error, and the error is
+// raised when the expression is EVALUATED for a row rather than when the
+// statement is planned. That is PostgreSQL's rule for an uncorrelated
+// sublink — an InitPlan runs on its first reference, so an arm no row
+// reaches (`CASE WHEN id > 5 THEN EXISTS (…) ELSE true END` over ids 1–3)
+// never raises its error.
+//
+// It is spelled `__deferred_error('<sqlstate>', '<message>')` so a stage's
+// filter text carries it to a worker (DeferredErrorFunc); the parser reads
+// that spelling back over two string literals only, and the client doors
+// refuse it in a statement (RefuseColumnValueCall), as they refuse the
+// column-typed cast's.
+type DeferredErrorNode struct {
+	State   string
+	Message string
+}
+
+// DeferredErrorFunc is the spelling of a deferred subquery failure
+// (DeferredErrorNode).
+const DeferredErrorFunc = "__deferred_error"
+
+func (*DeferredErrorNode) nodeTag() {}
+func (d *DeferredErrorNode) String() string {
+	return DeferredErrorFunc + "(" + (&Lit{Value: d.State, Kind: LitString}).String() + ", " +
+		(&Lit{Value: d.Message, Kind: LitString}).String() + ")"
+}
+
 // StarNode represents * or table.* in SELECT.
 type StarNode struct {
 	Table string

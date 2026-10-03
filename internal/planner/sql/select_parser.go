@@ -3302,6 +3302,9 @@ func (p *selectParser) parseFuncCall(name string) (Node, error) {
 	if c, ok := columnValueCast(fn, castKeyword); ok {
 		return c, nil
 	}
+	if d, ok := deferredErrorCall(fn); ok {
+		return d, nil
+	}
 
 	return p.maybeParseOver(fn)
 }
@@ -3323,6 +3326,22 @@ func columnValueCast(fn *FuncCallNode, castKeyword bool) (*CastNode, bool) {
 		return nil, false
 	}
 	return &CastNode{Inner: c.Inner, TypeName: c.TypeName, Column: true}, true
+}
+
+// deferredErrorCall reads `__deferred_error('<sqlstate>', '<message>')` back
+// as the deferred subquery failure it renders (DeferredErrorNode). Over
+// anything but two string literals it is not that spelling, and the call
+// stays a call to a function nobody defines.
+func deferredErrorCall(fn *FuncCallNode) (*DeferredErrorNode, bool) {
+	if !strings.EqualFold(fn.Name, DeferredErrorFunc) || len(fn.Args) != 2 || fn.Distinct || fn.Star {
+		return nil, false
+	}
+	state, ok1 := fn.Args[0].(*Lit)
+	msg, ok2 := fn.Args[1].(*Lit)
+	if !ok1 || !ok2 || state.Kind != LitString || msg.Kind != LitString {
+		return nil, false
+	}
+	return &DeferredErrorNode{State: state.Value, Message: msg.Value}, true
 }
 
 // columnValueLiteral reports a literal a column-typed cast may hold: a
@@ -4416,14 +4435,17 @@ func isTypedLiteralType(name string) bool {
 	return false
 }
 
-// RefuseColumnValueCall is the client doors' refusal of the column-typed
-// value's spelling (ColumnValueFunc): a correlated re-run's text is the one
-// statement that spells an outer value that way, and it never arrives through
-// a door. A client's statement calling it is PostgreSQL's 42883 — no such
-// function exists there, and none did here before the spelling did. A string
-// literal or a comment holding the text is not a call.
+// RefuseColumnValueCall is the client doors' refusal of the planner's own
+// spellings: the column-typed value's (ColumnValueFunc) — a correlated
+// re-run's text is the one statement that spells an outer value that way —
+// and a deferred subquery failure's (DeferredErrorFunc), which only a stage's
+// filter text carries. Neither arrives through a door. A client's statement
+// calling either is PostgreSQL's 42883 — no such function exists there, and
+// none did here before the spelling did. A string literal or a comment
+// holding the text is not a call.
 func RefuseColumnValueCall(sql string) error {
-	if !strings.Contains(strings.ToLower(sql), ColumnValueFunc) {
+	lower := strings.ToLower(sql)
+	if !strings.Contains(lower, ColumnValueFunc) && !strings.Contains(lower, DeferredErrorFunc) {
 		return nil
 	}
 	// The spelling is `__column_value(cast(…))` and nothing else — the
@@ -4431,21 +4453,26 @@ func RefuseColumnValueCall(sql string) error {
 	// — so a call is the name, `(`, and CAST; a relation, a CTE or an alias
 	// NAMED __column_value is followed by its column list, not by a cast, and
 	// stays a name. Any other argument is a call to a function nobody
-	// defines, which the parse refuses with the same 42883.
+	// defines, which the parse refuses with the same 42883. A deferred
+	// failure is the name, `(` and a string literal (deferredErrorCall).
 	lx := newLexer(sql)
-	state := 0 // 1 = after the name, 2 = after the name and `(`
+	state, name := 0, "" // 1 = after a name, 2 = after the name and `(`
 	for {
 		t := lx.nextToken()
 		if t.typ == TokenEOF || t.typ == TokenError {
 			return nil
 		}
 		switch {
-		case state == 2 && t.typ == TokenKWCast:
+		case state == 2 && name == ColumnValueFunc && t.typ == TokenKWCast:
 			return sqlerr.New("42883", "unknown function: %s", ColumnValueFunc)
+		case state == 2 && name == DeferredErrorFunc && t.typ == TokenString:
+			return sqlerr.New("42883", "unknown function: %s", DeferredErrorFunc)
 		case state == 1 && t.typ == TokenLParen:
 			state = 2
 		case t.typ == TokenIdent && strings.EqualFold(t.val, ColumnValueFunc):
-			state = 1
+			state, name = 1, ColumnValueFunc
+		case t.typ == TokenIdent && strings.EqualFold(t.val, DeferredErrorFunc):
+			state, name = 1, DeferredErrorFunc
 		default:
 			state = 0
 		}
