@@ -321,14 +321,6 @@ type HashJoin struct {
 	// Grace Hash Join spill state. Non-nil when build-side data has been
 	// partitioned and spilled to disk due to memory pressure.
 	spillState *spillState
-
-	// spillOutputFilter, spillOutputExclude and spillLeftSchema are captured
-	// during the first probe Execute() so spilled partition processing can
-	// reproduce the output schema. Only set when spillState is non-nil.
-	spillOutputFilter       map[string]bool
-	spillOutputExcludeProbe map[int]string
-	spillOutputExcludeBuild map[int]string
-	spillLeftSchema         []parquet.Column
 }
 
 // BloomPushdownOp returns a UnaryOperator that pre-filters probe batches using
@@ -3033,13 +3025,12 @@ func (p *HashJoinProbe) Execute(ctx context.Context, in *batch.RecordBatch) (*ba
 	// When Grace Hash Join is active, partition probe rows and only probe
 	// in-memory partitions. Spilled-partition rows are buffered to disk.
 	if p.join.spillState != nil && len(p.join.spillState.spilledParts) > 0 {
-		// Capture probe schema for spilled partition processing
-		if p.join.spillLeftSchema == nil {
-			p.join.spillLeftSchema = in.Schema
-			p.join.spillOutputFilter = p.OutputFilter
-			p.join.spillOutputExcludeProbe = p.OutputExcludeProbe
-			p.join.spillOutputExcludeBuild = p.OutputExcludeBuild
-		}
+		// Record the probe schema BEFORE routing: a batch whose every row
+		// goes to a spilled partition returns below without reaching the
+		// first-batch record, and the partition replay names its NULL half
+		// from this record (or, when no probe batch ever arrives, from
+		// ProbeSchemaHint — buildTempJoinFromBatches).
+		p.recordProbeSchema(in.Schema)
 
 		inMemSel, err := p.partitionProbeBatch(in)
 		if err != nil {
