@@ -452,23 +452,27 @@ func scalarFnDeclaredDecimal(n *plansql.FuncCallNode, decls ColDecls) (expr.Decl
 	// same DECIMAL for `ROUND(0.5)` and `ROUND(-0.5)` that they answer for a
 	// DECIMAL column — there is no longer a second type for a constant-folded
 	// expression to disagree with itself over (review r5 B1, #1252).
-	in, isDec, ok := decimalArithOperand(n.Args[0], decls)
-	if !ok || !isDec {
-		return expr.DeclType{}, false
-	}
 	if strings.EqualFold(strings.TrimSpace(n.Name), "mod") {
+		// mod(x, y) is the `%` operator spelled as a call, so the `%` rule
+		// decides it whole: exact when EITHER argument is a DECIMAL and the
+		// other has an exact form. `MOD(t.b, 0.7)` over a bigint is
+		// mod(numeric, numeric) on PostgreSQL (0.6, 0.0, 0.1), as `t.b % 0.7`
+		// is here; gating on argument 0 alone sent it to fmod, whose binary
+		// remainder printed 0.6000000000000019 and -4.440892098500626e-15.
+		// expr.decimalScalarFn.resolveMode asks resolveDecimalMode("%") the
+		// same question.
 		if len(n.Args) != 2 {
 			return expr.DeclType{}, false
 		}
-		r, _, ok := decimalArithOperand(n.Args[1], decls)
-		if !ok {
+		t, isDec, ok := binOpDecimalOperand(&plansql.BinaryOp{Op: "%", Left: n.Args[0], Right: n.Args[1]}, decls)
+		if !ok || !isDec {
 			return expr.DeclType{}, false
 		}
-		p, s, ok := batch.DecimalResultType("%", in.Precision, in.Scale, r.Precision, r.Scale)
-		if !ok {
-			return expr.DeclType{}, false
-		}
-		return expr.DeclDecimal(p, s), true
+		return expr.DeclDecimal(t.Precision, t.Scale), true
+	}
+	in, isDec, ok := decimalArithOperand(n.Args[0], decls)
+	if !ok || !isDec {
+		return expr.DeclType{}, false
 	}
 	op, ok := expr.DecimalScalarFnOp(n.Name)
 	if !ok || len(n.Args) > 2 {

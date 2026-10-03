@@ -130,6 +130,21 @@ func (e *decimalScalarFn) resolve(b *batch.RecordBatch) bool {
 }
 
 func (e *decimalScalarFn) resolveMode(b *batch.RecordBatch) bool {
+	if e.modArg != nil {
+		// mod(x, y) is the `%` operator spelled as a call, so it takes the
+		// same rule and the same kernel — one rule, not two. The rule asks
+		// whether EITHER operand is DECIMAL-typed: `MOD(t.b, 0.7)` over a
+		// bigint is exact as `t.b % 0.7` is, where gating on argument 0
+		// alone left it to fmod's binary remainder.
+		// physical.scalarFnDeclaredDecimal declares the same pair.
+		m, ops, ok := resolveDecimalMode("%", e.arg, e.modArg, b)
+		if !ok {
+			return false
+		}
+		e.modMode, e.modOps, e.isModDec = m, ops, true
+		e.out = m.out
+		return true
+	}
 	if !decimalScalarArg(e.arg, b) {
 		return false
 	}
@@ -143,17 +158,6 @@ func (e *decimalScalarFn) resolveMode(b *batch.RecordBatch) bool {
 		return false
 	}
 	e.in = in
-	if e.modArg != nil {
-		// mod(x, y) is the `%` operator spelled as a call, so it takes the
-		// same result-type rule and the same kernel — one rule, not two.
-		m, ops, ok := resolveDecimalMode("%", e.arg, e.modArg, b)
-		if !ok {
-			return false
-		}
-		e.modMode, e.modOps, e.isModDec = m, ops, true
-		e.out = m.out
-		return true
-	}
 	// round/trunc's digit count must be a CONSTANT: the result's SCALE is a
 	// function of it, and a type that changed per row is not a type. A
 	// non-constant second argument therefore declines to the float fallback,
@@ -267,16 +271,20 @@ func (e *decimalScalarFn) evalDecimal(b *batch.RecordBatch, row int) (batch.Int1
 	if !e.resolve(b) {
 		return batch.Int128{}, false
 	}
-	lv, ok := e.argOp.evalDecimal(b, row)
-	if !ok {
-		return batch.Int128{}, false
-	}
 	if e.isModDec {
+		lv, ok := e.modOps.l.evalDecimal(b, row)
+		if !ok {
+			return batch.Int128{}, false
+		}
 		rv, ok := e.modOps.r.evalDecimal(b, row)
 		if !ok {
 			return batch.Int128{}, false
 		}
 		return decApplyChecked(e.modMode, lv, rv)
+	}
+	lv, ok := e.argOp.evalDecimal(b, row)
+	if !ok {
+		return batch.Int128{}, false
 	}
 	v, st := batch.DecimalScalar(e.op, lv, e.in.Scale, e.digitsN, e.out.Precision, e.out.Scale)
 	if st != batch.DecimalOK {
