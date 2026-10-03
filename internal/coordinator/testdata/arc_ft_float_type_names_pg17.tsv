@@ -1,0 +1,409 @@
+# PostgreSQL 17.11 answers for arc_ft_float_type_names_arms_test.go (TestArcFTMeasure).
+ddl/float/create	ok
+ddl/float/insert	ok
+ddl/float/insert1e39	ok
+ddl/float/ctas	ok
+ddl/floatLower/create	ok
+ddl/floatLower/insert	ok
+ddl/floatLower/insert1e39	ok
+ddl/floatLower/ctas	ok
+ddl/floatMixed/create	ok
+ddl/floatMixed/insert	ok
+ddl/floatMixed/insert1e39	ok
+ddl/floatMixed/ctas	ok
+ddl/float1/create	ok
+ddl/float1/insert	ok
+ddl/float1/insert1e39	ERR 22003
+ddl/float1/ctas	ok
+ddl/float24/create	ok
+ddl/float24/insert	ok
+ddl/float24/insert1e39	ERR 22003
+ddl/float24/ctas	ok
+ddl/float25/create	ok
+ddl/float25/insert	ok
+ddl/float25/insert1e39	ok
+ddl/float25/ctas	ok
+ddl/float53/create	ok
+ddl/float53/insert	ok
+ddl/float53/insert1e39	ok
+ddl/float53/ctas	ok
+ddl/floatSpaced/create	ok
+ddl/floatSpaced/insert	ok
+ddl/floatSpaced/insert1e39	ok
+ddl/floatSpaced/ctas	ok
+ddl/float4/create	ok
+ddl/float4/insert	ok
+ddl/float4/insert1e39	ERR 22003
+ddl/float4/ctas	ok
+ddl/float4Quoted/create	ok
+ddl/float4Quoted/insert	ok
+ddl/float4Quoted/insert1e39	ERR 22003
+ddl/float4Quoted/ctas	ok
+ddl/float8/create	ok
+ddl/float8/insert	ok
+ddl/float8/insert1e39	ok
+ddl/float8/ctas	ok
+ddl/float8Lower/create	ok
+ddl/float8Lower/insert	ok
+ddl/float8Lower/insert1e39	ok
+ddl/float8Lower/ctas	ok
+ddl/float8Quoted/create	ok
+ddl/float8Quoted/insert	ok
+ddl/float8Quoted/insert1e39	ok
+ddl/float8Quoted/ctas	ok
+ddl/real/create	ok
+ddl/real/insert	ok
+ddl/real/insert1e39	ERR 22003
+ddl/real/ctas	ok
+ddl/realLower/create	ok
+ddl/realLower/insert	ok
+ddl/realLower/insert1e39	ERR 22003
+ddl/realLower/ctas	ok
+ddl/dp/create	ok
+ddl/dp/insert	ok
+ddl/dp/insert1e39	ok
+ddl/dp/ctas	ok
+ddl/dpLower/create	ok
+ddl/dpLower/insert	ok
+ddl/dpLower/insert1e39	ok
+ddl/dpLower/ctas	ok
+ddl/decimal/create	ok
+ddl/decimal/insert	ok
+ddl/decimal/ctas	ok
+ddl/floatQuoted/create	ERR 42704
+ddl/floatQuoted/insert	ERR 42P01
+ddl/floatQuoted/insert1e39	ERR 42P01
+ddl/floatQuoted/ctas	ERR 42704
+ddl/realQuoted/create	ERR 42704
+ddl/realQuoted/insert	ERR 42P01
+ddl/realQuoted/insert1e39	ERR 42P01
+ddl/realQuoted/ctas	ERR 42704
+ddl/double/create	ERR 42704
+ddl/double/insert	ERR 42P01
+ddl/double/insert1e39	ERR 42P01
+ddl/double/ctas	ERR 42704
+ddl/float0/create	ERR 22023
+cast/float0/cast	ERR 22023
+cast/float0/colon	ERR 22023
+ddl/float54/create	ERR 22023
+cast/float54/cast	ERR 22023
+cast/float54/colon	ERR 22023
+read/float/stored	id:bigint,c:double precision | 1,674999997; 2,0.1; 3,1e+38; 4,-0; 5,NaN; 6,Infinity; 7,NULL; 8,1e+39
+read/float/arith	id:bigint,?column?:double precision,?column?:double precision,?column?:double precision | 1,674999998,1349999994,-674999997; 2,1.1,0.2,-0.1; 3,1e+38,2e+38,-1e+38; 4,1,-0,0; 5,NaN,NaN,NaN; 6,Infinity,Infinity,-Infinity; 7,NULL,NULL,NULL; 8,1e+39,2e+39,-1e+39
+read/float/eqInt	id:bigint | 1
+read/float/gtNumeric	id:bigint | 1; 3; 5; 6; 8
+read/float/sum	sum:double precision | 674999997.1
+read/float/minMax	min:double precision,max:double precision | -0,NaN
+read/float/groupBy	c:double precision,count:bigint | -0,1; 0.1,1; 674999997,1; 1e+38,1; 1e+39,1; Infinity,1; NaN,1; NULL,1
+read/float/orderBy	id:bigint | 4; 2; 1; 3; 8; 6; 5; 7
+read/float/orderByDesc	id:bigint | 7; 5; 6; 8; 3; 1; 2; 4
+read/float/ctasRead	c:double precision | 674999997
+read/float/cast	float8:double precision,float8:double precision | 674999997,0.1
+read/float/castLabel	float8:double precision | 1
+read/float/colon	float8:double precision | 674999997
+read/float/cast1e39	float8:double precision | 1e+39
+read/float/castColumn	float8:double precision | 674999997
+read/floatLower/stored	id:bigint,c:double precision | 1,674999997; 2,0.1; 3,1e+38; 4,-0; 5,NaN; 6,Infinity; 7,NULL; 8,1e+39
+read/floatLower/arith	id:bigint,?column?:double precision,?column?:double precision,?column?:double precision | 1,674999998,1349999994,-674999997; 2,1.1,0.2,-0.1; 3,1e+38,2e+38,-1e+38; 4,1,-0,0; 5,NaN,NaN,NaN; 6,Infinity,Infinity,-Infinity; 7,NULL,NULL,NULL; 8,1e+39,2e+39,-1e+39
+read/floatLower/eqInt	id:bigint | 1
+read/floatLower/gtNumeric	id:bigint | 1; 3; 5; 6; 8
+read/floatLower/sum	sum:double precision | 674999997.1
+read/floatLower/minMax	min:double precision,max:double precision | -0,NaN
+read/floatLower/groupBy	c:double precision,count:bigint | -0,1; 0.1,1; 674999997,1; 1e+38,1; 1e+39,1; Infinity,1; NaN,1; NULL,1
+read/floatLower/orderBy	id:bigint | 4; 2; 1; 3; 8; 6; 5; 7
+read/floatLower/orderByDesc	id:bigint | 7; 5; 6; 8; 3; 1; 2; 4
+read/floatLower/ctasRead	c:double precision | 674999997
+read/floatLower/cast	float8:double precision,float8:double precision | 674999997,0.1
+read/floatLower/castLabel	float8:double precision | 1
+read/floatLower/colon	float8:double precision | 674999997
+read/floatLower/cast1e39	float8:double precision | 1e+39
+read/floatLower/castColumn	float8:double precision | 674999997
+read/floatMixed/stored	id:bigint,c:double precision | 1,674999997; 2,0.1; 3,1e+38; 4,-0; 5,NaN; 6,Infinity; 7,NULL; 8,1e+39
+read/floatMixed/arith	id:bigint,?column?:double precision,?column?:double precision,?column?:double precision | 1,674999998,1349999994,-674999997; 2,1.1,0.2,-0.1; 3,1e+38,2e+38,-1e+38; 4,1,-0,0; 5,NaN,NaN,NaN; 6,Infinity,Infinity,-Infinity; 7,NULL,NULL,NULL; 8,1e+39,2e+39,-1e+39
+read/floatMixed/eqInt	id:bigint | 1
+read/floatMixed/gtNumeric	id:bigint | 1; 3; 5; 6; 8
+read/floatMixed/sum	sum:double precision | 674999997.1
+read/floatMixed/minMax	min:double precision,max:double precision | -0,NaN
+read/floatMixed/groupBy	c:double precision,count:bigint | -0,1; 0.1,1; 674999997,1; 1e+38,1; 1e+39,1; Infinity,1; NaN,1; NULL,1
+read/floatMixed/orderBy	id:bigint | 4; 2; 1; 3; 8; 6; 5; 7
+read/floatMixed/orderByDesc	id:bigint | 7; 5; 6; 8; 3; 1; 2; 4
+read/floatMixed/ctasRead	c:double precision | 674999997
+read/floatMixed/cast	float8:double precision,float8:double precision | 674999997,0.1
+read/floatMixed/castLabel	float8:double precision | 1
+read/floatMixed/colon	float8:double precision | 674999997
+read/floatMixed/cast1e39	float8:double precision | 1e+39
+read/floatMixed/castColumn	float8:double precision | 674999997
+read/float1/stored	id:bigint,c:real | 1,6.75e+08; 2,0.1; 3,1e+38; 4,-0; 5,NaN; 6,Infinity; 7,NULL
+read/float1/arith	id:bigint,?column?:double precision,?column?:double precision,?column?:real | 1,675000001,1350000000,-6.75e+08; 2,1.1000000014901161,0.20000000298023224,-0.1; 3,9.999999680285692e+37,1.9999999360571385e+38,-1e+38; 4,1,-0,0; 5,NaN,NaN,NaN; 6,Infinity,Infinity,-Infinity; 7,NULL,NULL,NULL
+read/float1/eqInt	(0 rows)
+read/float1/gtNumeric	id:bigint | 1; 2; 3; 5; 6
+read/float1/sum	sum:real | 6.75e+08
+read/float1/minMax	min:real,max:real | -0,NaN
+read/float1/groupBy	c:real,count:bigint | -0,1; 0.1,1; 6.75e+08,1; 1e+38,1; Infinity,1; NaN,1; NULL,1
+read/float1/orderBy	id:bigint | 4; 2; 1; 3; 6; 5; 7
+read/float1/orderByDesc	id:bigint | 7; 5; 6; 3; 1; 2; 4
+read/float1/ctasRead	c:real | 6.75e+08
+read/float1/cast	float4:real,float4:real | 6.75e+08,0.1
+read/float1/castLabel	float4:real | 1
+read/float1/colon	float4:real | 6.75e+08
+read/float1/cast1e39	ERR 22003
+read/float1/castColumn	float4:real | 6.75e+08
+read/float24/stored	id:bigint,c:real | 1,6.75e+08; 2,0.1; 3,1e+38; 4,-0; 5,NaN; 6,Infinity; 7,NULL
+read/float24/arith	id:bigint,?column?:double precision,?column?:double precision,?column?:real | 1,675000001,1350000000,-6.75e+08; 2,1.1000000014901161,0.20000000298023224,-0.1; 3,9.999999680285692e+37,1.9999999360571385e+38,-1e+38; 4,1,-0,0; 5,NaN,NaN,NaN; 6,Infinity,Infinity,-Infinity; 7,NULL,NULL,NULL
+read/float24/eqInt	(0 rows)
+read/float24/gtNumeric	id:bigint | 1; 2; 3; 5; 6
+read/float24/sum	sum:real | 6.75e+08
+read/float24/minMax	min:real,max:real | -0,NaN
+read/float24/groupBy	c:real,count:bigint | -0,1; 0.1,1; 6.75e+08,1; 1e+38,1; Infinity,1; NaN,1; NULL,1
+read/float24/orderBy	id:bigint | 4; 2; 1; 3; 6; 5; 7
+read/float24/orderByDesc	id:bigint | 7; 5; 6; 3; 1; 2; 4
+read/float24/ctasRead	c:real | 6.75e+08
+read/float24/cast	float4:real,float4:real | 6.75e+08,0.1
+read/float24/castLabel	float4:real | 1
+read/float24/colon	float4:real | 6.75e+08
+read/float24/cast1e39	ERR 22003
+read/float24/castColumn	float4:real | 6.75e+08
+read/float25/stored	id:bigint,c:double precision | 1,674999997; 2,0.1; 3,1e+38; 4,-0; 5,NaN; 6,Infinity; 7,NULL; 8,1e+39
+read/float25/arith	id:bigint,?column?:double precision,?column?:double precision,?column?:double precision | 1,674999998,1349999994,-674999997; 2,1.1,0.2,-0.1; 3,1e+38,2e+38,-1e+38; 4,1,-0,0; 5,NaN,NaN,NaN; 6,Infinity,Infinity,-Infinity; 7,NULL,NULL,NULL; 8,1e+39,2e+39,-1e+39
+read/float25/eqInt	id:bigint | 1
+read/float25/gtNumeric	id:bigint | 1; 3; 5; 6; 8
+read/float25/sum	sum:double precision | 674999997.1
+read/float25/minMax	min:double precision,max:double precision | -0,NaN
+read/float25/groupBy	c:double precision,count:bigint | -0,1; 0.1,1; 674999997,1; 1e+38,1; 1e+39,1; Infinity,1; NaN,1; NULL,1
+read/float25/orderBy	id:bigint | 4; 2; 1; 3; 8; 6; 5; 7
+read/float25/orderByDesc	id:bigint | 7; 5; 6; 8; 3; 1; 2; 4
+read/float25/ctasRead	c:double precision | 674999997
+read/float25/cast	float8:double precision,float8:double precision | 674999997,0.1
+read/float25/castLabel	float8:double precision | 1
+read/float25/colon	float8:double precision | 674999997
+read/float25/cast1e39	float8:double precision | 1e+39
+read/float25/castColumn	float8:double precision | 674999997
+read/float53/stored	id:bigint,c:double precision | 1,674999997; 2,0.1; 3,1e+38; 4,-0; 5,NaN; 6,Infinity; 7,NULL; 8,1e+39
+read/float53/arith	id:bigint,?column?:double precision,?column?:double precision,?column?:double precision | 1,674999998,1349999994,-674999997; 2,1.1,0.2,-0.1; 3,1e+38,2e+38,-1e+38; 4,1,-0,0; 5,NaN,NaN,NaN; 6,Infinity,Infinity,-Infinity; 7,NULL,NULL,NULL; 8,1e+39,2e+39,-1e+39
+read/float53/eqInt	id:bigint | 1
+read/float53/gtNumeric	id:bigint | 1; 3; 5; 6; 8
+read/float53/sum	sum:double precision | 674999997.1
+read/float53/minMax	min:double precision,max:double precision | -0,NaN
+read/float53/groupBy	c:double precision,count:bigint | -0,1; 0.1,1; 674999997,1; 1e+38,1; 1e+39,1; Infinity,1; NaN,1; NULL,1
+read/float53/orderBy	id:bigint | 4; 2; 1; 3; 8; 6; 5; 7
+read/float53/orderByDesc	id:bigint | 7; 5; 6; 8; 3; 1; 2; 4
+read/float53/ctasRead	c:double precision | 674999997
+read/float53/cast	float8:double precision,float8:double precision | 674999997,0.1
+read/float53/castLabel	float8:double precision | 1
+read/float53/colon	float8:double precision | 674999997
+read/float53/cast1e39	float8:double precision | 1e+39
+read/float53/castColumn	float8:double precision | 674999997
+read/floatSpaced/stored	id:bigint,c:double precision | 1,674999997; 2,0.1; 3,1e+38; 4,-0; 5,NaN; 6,Infinity; 7,NULL; 8,1e+39
+read/floatSpaced/arith	id:bigint,?column?:double precision,?column?:double precision,?column?:double precision | 1,674999998,1349999994,-674999997; 2,1.1,0.2,-0.1; 3,1e+38,2e+38,-1e+38; 4,1,-0,0; 5,NaN,NaN,NaN; 6,Infinity,Infinity,-Infinity; 7,NULL,NULL,NULL; 8,1e+39,2e+39,-1e+39
+read/floatSpaced/eqInt	id:bigint | 1
+read/floatSpaced/gtNumeric	id:bigint | 1; 3; 5; 6; 8
+read/floatSpaced/sum	sum:double precision | 674999997.1
+read/floatSpaced/minMax	min:double precision,max:double precision | -0,NaN
+read/floatSpaced/groupBy	c:double precision,count:bigint | -0,1; 0.1,1; 674999997,1; 1e+38,1; 1e+39,1; Infinity,1; NaN,1; NULL,1
+read/floatSpaced/orderBy	id:bigint | 4; 2; 1; 3; 8; 6; 5; 7
+read/floatSpaced/orderByDesc	id:bigint | 7; 5; 6; 8; 3; 1; 2; 4
+read/floatSpaced/ctasRead	c:double precision | 674999997
+read/floatSpaced/cast	float8:double precision,float8:double precision | 674999997,0.1
+read/floatSpaced/castLabel	float8:double precision | 1
+read/floatSpaced/colon	float8:double precision | 674999997
+read/floatSpaced/cast1e39	float8:double precision | 1e+39
+read/floatSpaced/castColumn	float8:double precision | 674999997
+read/float4/stored	id:bigint,c:real | 1,6.75e+08; 2,0.1; 3,1e+38; 4,-0; 5,NaN; 6,Infinity; 7,NULL
+read/float4/arith	id:bigint,?column?:double precision,?column?:double precision,?column?:real | 1,675000001,1350000000,-6.75e+08; 2,1.1000000014901161,0.20000000298023224,-0.1; 3,9.999999680285692e+37,1.9999999360571385e+38,-1e+38; 4,1,-0,0; 5,NaN,NaN,NaN; 6,Infinity,Infinity,-Infinity; 7,NULL,NULL,NULL
+read/float4/eqInt	(0 rows)
+read/float4/gtNumeric	id:bigint | 1; 2; 3; 5; 6
+read/float4/sum	sum:real | 6.75e+08
+read/float4/minMax	min:real,max:real | -0,NaN
+read/float4/groupBy	c:real,count:bigint | -0,1; 0.1,1; 6.75e+08,1; 1e+38,1; Infinity,1; NaN,1; NULL,1
+read/float4/orderBy	id:bigint | 4; 2; 1; 3; 6; 5; 7
+read/float4/orderByDesc	id:bigint | 7; 5; 6; 3; 1; 2; 4
+read/float4/ctasRead	c:real | 6.75e+08
+read/float4/cast	float4:real,float4:real | 6.75e+08,0.1
+read/float4/castLabel	float4:real | 1
+read/float4/colon	float4:real | 6.75e+08
+read/float4/cast1e39	ERR 22003
+read/float4/castColumn	float4:real | 6.75e+08
+read/float4Quoted/stored	id:bigint,c:real | 1,6.75e+08; 2,0.1; 3,1e+38; 4,-0; 5,NaN; 6,Infinity; 7,NULL
+read/float4Quoted/arith	id:bigint,?column?:double precision,?column?:double precision,?column?:real | 1,675000001,1350000000,-6.75e+08; 2,1.1000000014901161,0.20000000298023224,-0.1; 3,9.999999680285692e+37,1.9999999360571385e+38,-1e+38; 4,1,-0,0; 5,NaN,NaN,NaN; 6,Infinity,Infinity,-Infinity; 7,NULL,NULL,NULL
+read/float4Quoted/eqInt	(0 rows)
+read/float4Quoted/gtNumeric	id:bigint | 1; 2; 3; 5; 6
+read/float4Quoted/sum	sum:real | 6.75e+08
+read/float4Quoted/minMax	min:real,max:real | -0,NaN
+read/float4Quoted/groupBy	c:real,count:bigint | -0,1; 0.1,1; 6.75e+08,1; 1e+38,1; Infinity,1; NaN,1; NULL,1
+read/float4Quoted/orderBy	id:bigint | 4; 2; 1; 3; 6; 5; 7
+read/float4Quoted/orderByDesc	id:bigint | 7; 5; 6; 3; 1; 2; 4
+read/float4Quoted/ctasRead	c:real | 6.75e+08
+read/float4Quoted/cast	float4:real,float4:real | 6.75e+08,0.1
+read/float4Quoted/castLabel	float4:real | 1
+read/float4Quoted/colon	float4:real | 6.75e+08
+read/float4Quoted/cast1e39	ERR 22003
+read/float4Quoted/castColumn	float4:real | 6.75e+08
+read/float8/stored	id:bigint,c:double precision | 1,674999997; 2,0.1; 3,1e+38; 4,-0; 5,NaN; 6,Infinity; 7,NULL; 8,1e+39
+read/float8/arith	id:bigint,?column?:double precision,?column?:double precision,?column?:double precision | 1,674999998,1349999994,-674999997; 2,1.1,0.2,-0.1; 3,1e+38,2e+38,-1e+38; 4,1,-0,0; 5,NaN,NaN,NaN; 6,Infinity,Infinity,-Infinity; 7,NULL,NULL,NULL; 8,1e+39,2e+39,-1e+39
+read/float8/eqInt	id:bigint | 1
+read/float8/gtNumeric	id:bigint | 1; 3; 5; 6; 8
+read/float8/sum	sum:double precision | 674999997.1
+read/float8/minMax	min:double precision,max:double precision | -0,NaN
+read/float8/groupBy	c:double precision,count:bigint | -0,1; 0.1,1; 674999997,1; 1e+38,1; 1e+39,1; Infinity,1; NaN,1; NULL,1
+read/float8/orderBy	id:bigint | 4; 2; 1; 3; 8; 6; 5; 7
+read/float8/orderByDesc	id:bigint | 7; 5; 6; 8; 3; 1; 2; 4
+read/float8/ctasRead	c:double precision | 674999997
+read/float8/cast	float8:double precision,float8:double precision | 674999997,0.1
+read/float8/castLabel	float8:double precision | 1
+read/float8/colon	float8:double precision | 674999997
+read/float8/cast1e39	float8:double precision | 1e+39
+read/float8/castColumn	float8:double precision | 674999997
+read/float8Lower/stored	id:bigint,c:double precision | 1,674999997; 2,0.1; 3,1e+38; 4,-0; 5,NaN; 6,Infinity; 7,NULL; 8,1e+39
+read/float8Lower/arith	id:bigint,?column?:double precision,?column?:double precision,?column?:double precision | 1,674999998,1349999994,-674999997; 2,1.1,0.2,-0.1; 3,1e+38,2e+38,-1e+38; 4,1,-0,0; 5,NaN,NaN,NaN; 6,Infinity,Infinity,-Infinity; 7,NULL,NULL,NULL; 8,1e+39,2e+39,-1e+39
+read/float8Lower/eqInt	id:bigint | 1
+read/float8Lower/gtNumeric	id:bigint | 1; 3; 5; 6; 8
+read/float8Lower/sum	sum:double precision | 674999997.1
+read/float8Lower/minMax	min:double precision,max:double precision | -0,NaN
+read/float8Lower/groupBy	c:double precision,count:bigint | -0,1; 0.1,1; 674999997,1; 1e+38,1; 1e+39,1; Infinity,1; NaN,1; NULL,1
+read/float8Lower/orderBy	id:bigint | 4; 2; 1; 3; 8; 6; 5; 7
+read/float8Lower/orderByDesc	id:bigint | 7; 5; 6; 8; 3; 1; 2; 4
+read/float8Lower/ctasRead	c:double precision | 674999997
+read/float8Lower/cast	float8:double precision,float8:double precision | 674999997,0.1
+read/float8Lower/castLabel	float8:double precision | 1
+read/float8Lower/colon	float8:double precision | 674999997
+read/float8Lower/cast1e39	float8:double precision | 1e+39
+read/float8Lower/castColumn	float8:double precision | 674999997
+read/float8Quoted/stored	id:bigint,c:double precision | 1,674999997; 2,0.1; 3,1e+38; 4,-0; 5,NaN; 6,Infinity; 7,NULL; 8,1e+39
+read/float8Quoted/arith	id:bigint,?column?:double precision,?column?:double precision,?column?:double precision | 1,674999998,1349999994,-674999997; 2,1.1,0.2,-0.1; 3,1e+38,2e+38,-1e+38; 4,1,-0,0; 5,NaN,NaN,NaN; 6,Infinity,Infinity,-Infinity; 7,NULL,NULL,NULL; 8,1e+39,2e+39,-1e+39
+read/float8Quoted/eqInt	id:bigint | 1
+read/float8Quoted/gtNumeric	id:bigint | 1; 3; 5; 6; 8
+read/float8Quoted/sum	sum:double precision | 674999997.1
+read/float8Quoted/minMax	min:double precision,max:double precision | -0,NaN
+read/float8Quoted/groupBy	c:double precision,count:bigint | -0,1; 0.1,1; 674999997,1; 1e+38,1; 1e+39,1; Infinity,1; NaN,1; NULL,1
+read/float8Quoted/orderBy	id:bigint | 4; 2; 1; 3; 8; 6; 5; 7
+read/float8Quoted/orderByDesc	id:bigint | 7; 5; 6; 8; 3; 1; 2; 4
+read/float8Quoted/ctasRead	c:double precision | 674999997
+read/float8Quoted/cast	float8:double precision,float8:double precision | 674999997,0.1
+read/float8Quoted/castLabel	float8:double precision | 1
+read/float8Quoted/colon	float8:double precision | 674999997
+read/float8Quoted/cast1e39	float8:double precision | 1e+39
+read/float8Quoted/castColumn	float8:double precision | 674999997
+read/real/stored	id:bigint,c:real | 1,6.75e+08; 2,0.1; 3,1e+38; 4,-0; 5,NaN; 6,Infinity; 7,NULL
+read/real/arith	id:bigint,?column?:double precision,?column?:double precision,?column?:real | 1,675000001,1350000000,-6.75e+08; 2,1.1000000014901161,0.20000000298023224,-0.1; 3,9.999999680285692e+37,1.9999999360571385e+38,-1e+38; 4,1,-0,0; 5,NaN,NaN,NaN; 6,Infinity,Infinity,-Infinity; 7,NULL,NULL,NULL
+read/real/eqInt	(0 rows)
+read/real/gtNumeric	id:bigint | 1; 2; 3; 5; 6
+read/real/sum	sum:real | 6.75e+08
+read/real/minMax	min:real,max:real | -0,NaN
+read/real/groupBy	c:real,count:bigint | -0,1; 0.1,1; 6.75e+08,1; 1e+38,1; Infinity,1; NaN,1; NULL,1
+read/real/orderBy	id:bigint | 4; 2; 1; 3; 6; 5; 7
+read/real/orderByDesc	id:bigint | 7; 5; 6; 3; 1; 2; 4
+read/real/ctasRead	c:real | 6.75e+08
+read/real/cast	float4:real,float4:real | 6.75e+08,0.1
+read/real/castLabel	float4:real | 1
+read/real/colon	float4:real | 6.75e+08
+read/real/cast1e39	ERR 22003
+read/real/castColumn	float4:real | 6.75e+08
+read/realLower/stored	id:bigint,c:real | 1,6.75e+08; 2,0.1; 3,1e+38; 4,-0; 5,NaN; 6,Infinity; 7,NULL
+read/realLower/arith	id:bigint,?column?:double precision,?column?:double precision,?column?:real | 1,675000001,1350000000,-6.75e+08; 2,1.1000000014901161,0.20000000298023224,-0.1; 3,9.999999680285692e+37,1.9999999360571385e+38,-1e+38; 4,1,-0,0; 5,NaN,NaN,NaN; 6,Infinity,Infinity,-Infinity; 7,NULL,NULL,NULL
+read/realLower/eqInt	(0 rows)
+read/realLower/gtNumeric	id:bigint | 1; 2; 3; 5; 6
+read/realLower/sum	sum:real | 6.75e+08
+read/realLower/minMax	min:real,max:real | -0,NaN
+read/realLower/groupBy	c:real,count:bigint | -0,1; 0.1,1; 6.75e+08,1; 1e+38,1; Infinity,1; NaN,1; NULL,1
+read/realLower/orderBy	id:bigint | 4; 2; 1; 3; 6; 5; 7
+read/realLower/orderByDesc	id:bigint | 7; 5; 6; 3; 1; 2; 4
+read/realLower/ctasRead	c:real | 6.75e+08
+read/realLower/cast	float4:real,float4:real | 6.75e+08,0.1
+read/realLower/castLabel	float4:real | 1
+read/realLower/colon	float4:real | 6.75e+08
+read/realLower/cast1e39	ERR 22003
+read/realLower/castColumn	float4:real | 6.75e+08
+read/dp/stored	id:bigint,c:double precision | 1,674999997; 2,0.1; 3,1e+38; 4,-0; 5,NaN; 6,Infinity; 7,NULL; 8,1e+39
+read/dp/arith	id:bigint,?column?:double precision,?column?:double precision,?column?:double precision | 1,674999998,1349999994,-674999997; 2,1.1,0.2,-0.1; 3,1e+38,2e+38,-1e+38; 4,1,-0,0; 5,NaN,NaN,NaN; 6,Infinity,Infinity,-Infinity; 7,NULL,NULL,NULL; 8,1e+39,2e+39,-1e+39
+read/dp/eqInt	id:bigint | 1
+read/dp/gtNumeric	id:bigint | 1; 3; 5; 6; 8
+read/dp/sum	sum:double precision | 674999997.1
+read/dp/minMax	min:double precision,max:double precision | -0,NaN
+read/dp/groupBy	c:double precision,count:bigint | -0,1; 0.1,1; 674999997,1; 1e+38,1; 1e+39,1; Infinity,1; NaN,1; NULL,1
+read/dp/orderBy	id:bigint | 4; 2; 1; 3; 8; 6; 5; 7
+read/dp/orderByDesc	id:bigint | 7; 5; 6; 8; 3; 1; 2; 4
+read/dp/ctasRead	c:double precision | 674999997
+read/dp/cast	float8:double precision,float8:double precision | 674999997,0.1
+read/dp/castLabel	float8:double precision | 1
+read/dp/colon	float8:double precision | 674999997
+read/dp/cast1e39	float8:double precision | 1e+39
+read/dp/castColumn	float8:double precision | 674999997
+read/dpLower/stored	id:bigint,c:double precision | 1,674999997; 2,0.1; 3,1e+38; 4,-0; 5,NaN; 6,Infinity; 7,NULL; 8,1e+39
+read/dpLower/arith	id:bigint,?column?:double precision,?column?:double precision,?column?:double precision | 1,674999998,1349999994,-674999997; 2,1.1,0.2,-0.1; 3,1e+38,2e+38,-1e+38; 4,1,-0,0; 5,NaN,NaN,NaN; 6,Infinity,Infinity,-Infinity; 7,NULL,NULL,NULL; 8,1e+39,2e+39,-1e+39
+read/dpLower/eqInt	id:bigint | 1
+read/dpLower/gtNumeric	id:bigint | 1; 3; 5; 6; 8
+read/dpLower/sum	sum:double precision | 674999997.1
+read/dpLower/minMax	min:double precision,max:double precision | -0,NaN
+read/dpLower/groupBy	c:double precision,count:bigint | -0,1; 0.1,1; 674999997,1; 1e+38,1; 1e+39,1; Infinity,1; NaN,1; NULL,1
+read/dpLower/orderBy	id:bigint | 4; 2; 1; 3; 8; 6; 5; 7
+read/dpLower/orderByDesc	id:bigint | 7; 5; 6; 8; 3; 1; 2; 4
+read/dpLower/ctasRead	c:double precision | 674999997
+read/dpLower/cast	float8:double precision,float8:double precision | 674999997,0.1
+read/dpLower/castLabel	float8:double precision | 1
+read/dpLower/colon	float8:double precision | 674999997
+read/dpLower/cast1e39	float8:double precision | 1e+39
+read/dpLower/castColumn	float8:double precision | 674999997
+read/decimal/stored	id:bigint,c:numeric | 1,674999997.00; 2,0.10; 7,NULL
+read/decimal/arith	id:bigint,?column?:numeric,?column?:numeric,?column?:numeric | 1,674999998.00,1349999994.00,-674999997.00; 2,1.10,0.20,-0.10; 7,NULL,NULL,NULL
+read/decimal/eqInt	id:bigint | 1
+read/decimal/gtNumeric	id:bigint | 1
+read/decimal/sum	sum:numeric | 674999997.10
+read/decimal/minMax	min:numeric,max:numeric | 0.10,674999997.00
+read/decimal/groupBy	c:numeric,count:bigint | 0.10,1; 674999997.00,1; NULL,1
+read/decimal/orderBy	id:bigint | 2; 1; 7
+read/decimal/orderByDesc	id:bigint | 7; 1; 2
+read/decimal/ctasRead	c:numeric | 674999997.00
+read/decimal/cast	numeric:numeric,numeric:numeric | 674999997.00,0.10
+read/decimal/castLabel	numeric:numeric | 1.00
+read/decimal/colon	numeric:numeric | 674999997.00
+read/floatQuoted/stored	ERR 42P01
+read/floatQuoted/arith	ERR 42P01
+read/floatQuoted/eqInt	ERR 42P01
+read/floatQuoted/gtNumeric	ERR 42P01
+read/floatQuoted/sum	ERR 42P01
+read/floatQuoted/minMax	ERR 42P01
+read/floatQuoted/groupBy	ERR 42P01
+read/floatQuoted/orderBy	ERR 42P01
+read/floatQuoted/orderByDesc	ERR 42P01
+read/floatQuoted/ctasRead	ERR 42P01
+read/floatQuoted/cast	ERR 42704
+read/floatQuoted/castLabel	ERR 42704
+read/floatQuoted/colon	ERR 42704
+read/floatQuoted/cast1e39	ERR 42704
+read/floatQuoted/castColumn	ERR 42704
+read/realQuoted/stored	ERR 42P01
+read/realQuoted/arith	ERR 42P01
+read/realQuoted/eqInt	ERR 42P01
+read/realQuoted/gtNumeric	ERR 42P01
+read/realQuoted/sum	ERR 42P01
+read/realQuoted/minMax	ERR 42P01
+read/realQuoted/groupBy	ERR 42P01
+read/realQuoted/orderBy	ERR 42P01
+read/realQuoted/orderByDesc	ERR 42P01
+read/realQuoted/ctasRead	ERR 42P01
+read/realQuoted/cast	ERR 42704
+read/realQuoted/castLabel	ERR 42704
+read/realQuoted/colon	ERR 42704
+read/realQuoted/cast1e39	ERR 42704
+read/realQuoted/castColumn	ERR 42704
+read/double/stored	ERR 42P01
+read/double/arith	ERR 42P01
+read/double/eqInt	ERR 42P01
+read/double/gtNumeric	ERR 42P01
+read/double/sum	ERR 42P01
+read/double/minMax	ERR 42P01
+read/double/groupBy	ERR 42P01
+read/double/orderBy	ERR 42P01
+read/double/orderByDesc	ERR 42P01
+read/double/ctasRead	ERR 42P01
+read/double/cast	ERR 42704
+read/double/castLabel	ERR 42704
+read/double/colon	ERR 42704
+read/double/cast1e39	ERR 42704
+read/double/castColumn	ERR 42704
+identity/floatFloat8	id:double precision | 1; 2; 3; 4; 5; 6; 7; 8
+identity/float30Dp	id:double precision | 1; 2; 3; 4; 5; 6; 7; 8
+identity/float1Real	id:real | 1; 2; 3; 4; 5; 6; 7; 8
+identity/float24Float4	id:real | 1; 2; 3; 4; 5; 6; 7; 8
+identity/float1Float	ERR 42803
+identity/realFloat8	ERR 42803
