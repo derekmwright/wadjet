@@ -1,7 +1,7 @@
 # Parquet date text accept set
 
 Source: internal/storage/parquet/date_parse.go — func ParseDateDays(s string) (int32, error) {, moved 2026-09-11 (#1026)
-Superseded: The trailing-time validator strips Z/z or positive offsets; it does not accept a negative offset, despite the general offset wording below.
+Superseded (2026-10-02, arc PW round 2): the trailing-time validator (isTimeOfDay) and the TIMESTAMP layout list are gone. ParseDateDays and ParseTimestampMillis / ParseTimestampWallClock / ParseTimestampZone read ONE grammar, parseTemporalText: the date below, then whitespace or 'T'/'t', a clock H[H]:M[M][:S[S][.digits]], and a zone 'Z' or ±H[H][:M[M][:SS]] / ±HMM / ±HHMM / ±HHMMSS (a space before it or not; negative offsets included). DATE drops the validated clock; TIMESTAMP keeps it, rolling 24:00:00 and second 60 forward. Hour > 24 (or 24 with anything after it), minute > 59, second > 60 (or 60 with a fraction) and a field wider than nine digits are 22008; a displacement past ±15:59:59 or a zone minute past 59 is 22009 (ZoneRange). `12:00:00ZZ` and `12:00:00+`, which the old validator accepted, are 22007 as on PostgreSQL. TIMESTAMP is bounded by PostgreSQL's TIMESTAMP range (294277-01-01 is 22008). The PostgreSQL forms outside the grammar (zone names, AM/PM, special values, BC, month names, Julian days, ISO-basic clocks) are refused 22007 — catalog temporal r25.
 
 ParseDateDays converts a DATE string to days since 1970-01-01, or returns a
 classified DateParseError. It is the single string→date conversion for the

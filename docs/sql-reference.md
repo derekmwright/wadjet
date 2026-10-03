@@ -5258,16 +5258,24 @@ Over the PostgreSQL wire protocol's extended query (pgx, JDBC, psycopg,
 every ORM), a parameter's type is the OID the client declared at Parse, or —
 when it declared none (OID 0) — the type of the position the parameter
 occupies, as PostgreSQL decides it: the other operand's type in a
-comparison, an arithmetic, an `IN` list, `BETWEEN`, a `CASE` arm or a
-`COALESCE` / `NULLIF` / `GREATEST` / `LEAST` argument (`$1 = n + d` takes
-the type of `n + d`); the target column's in `INSERT`, `UPDATE` and `MERGE`;
+comparison, an `IN` list, `BETWEEN`, a `CASE` arm or a `COALESCE` /
+`NULLIF` / `GREATEST` / `LEAST` argument, and beside arithmetic
+PostgreSQL's operator result type over the operands (`$1 = n + d` takes the
+type of `n + d`: integer for two integers, double precision with a double,
+numeric with a numeric); the target column's in `INSERT`, `UPDATE` and `MERGE`;
 `bigint` in `LIMIT` / `OFFSET` / `FETCH`; `integer` as a window function's
 offset; the target type in `CAST($1 AS …)`; `boolean` as a predicate; and
-`text` where nothing requires a type (`SELECT $1`). The ParameterDescription
-reports it, and the value is used as a value OF that type: a `timestamp`
-parameter against a `DATE` column is compared as a timestamp, a `bigint` one
-in `SELECT $1` is declared `bigint`, and a statement's Describe declares
-each column as the bound value will. A position this engine cannot type
+`text` where nothing requires a type (`SELECT $1`). The types are decided
+when the statement is parsed, against the tables as they stand then; a
+statement parsed again after a `DROP` / `CREATE` is typed again. The
+ParameterDescription reports them, and the value is used as a value OF that
+type: a `timestamp` parameter against a `DATE` column is compared as a
+timestamp (its text read by the date/time input `CAST('…' AS TIMESTAMP)`
+reads), a `bigint` one in `SELECT $1` is declared `bigint`, and an
+`integer` one past its width raises 22003. A statement's Describe declares
+each column as the bound value will, except an `integer` or `smallint`
+parameter bound a negative value, which executes as `bigint` (catalog
+parameters-pgwire r12). A position this engine cannot type
 stays OID 0, and its value is read by the position as an untyped literal is.
 A `text`, `varchar`, `bytea` or array parameter is such an untyped literal
 too. The ADR-0012 catalog family

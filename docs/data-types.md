@@ -572,6 +572,18 @@ zero** — PostgreSQL's calendar puts 1 BC immediately before 1 AD, so
 four-digit month (`2026-0003-12`) and a three-digit day (`2026-01-003`) are
 accepted, as they are by PostgreSQL.
 
+`Timestamp` reads the SAME grammar — one function decides both
+(`parquet.parseTemporalText`): the date above, then whitespace or `T`, a
+clock `H[H]:M[M]` with optional `:S[S]` and fraction (`2026-01-02 9:5`,
+`2026/1/2T09:05:00.5`), and an optional zone `Z`, `±hh`, `±hh:mm`, `±hhmm`
+or `±hh:mm:ss`, which a `Timestamp` discards (it is PostgreSQL's
+`timestamp without time zone`). `24:00:00` is the next midnight and second
+60 the next minute, as on PostgreSQL; a `Date` drops the clock. A field out
+of range is 22008 and a zone past ±15:59:59 is 22009. Zone names, `AM` /
+`PM`, `epoch` / `infinity` / `now` / `today`, BC years, month names and
+Julian days, which PostgreSQL also reads, are refused 22007 here (catalog
+[temporal#r2, r25](adr/0012-divergences/temporal.md#catalog)).
+
 ### Identifier Types
 
 | Type | Go Backing | Size | Use Cases |
