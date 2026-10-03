@@ -26,6 +26,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // PostgreSQL type OIDs this layer decodes. Values from the catalog's
@@ -329,24 +331,17 @@ func numericSpellingDigits(t string) (digits, scale int, plain bool) {
 // converted to UTC here — TIMESTAMP input DISCARDS an offset (PostgreSQL's
 // timestamp rule), so splicing the text as it stands would have moved the
 // instant by the offset.
+//
+// The offset is read by the ONE timestamp grammar (parquet.ParseTimestampZone:
+// `Z`, `±hh`, `±hh:mm`, `±hhmm`, `±hh:mm:ss`, with or without a space before
+// it). A zone NAME (`UTC`, `America/New_York`) is outside that grammar and
+// is refused as the TIMESTAMP input refuses it (temporal catalog).
 func timestamptzParamLiteral(s string) string {
-	t := strings.TrimSpace(s)
-	for _, layout := range timestamptzOffsetLayouts {
-		if at, err := time.Parse(layout, t); err == nil {
-			return "CAST(" + quoteLiteral(at.UTC().Format("2006-01-02 15:04:05.999999999")) + " AS TIMESTAMP)"
-		}
+	if wall, off, zoned, ok := parquet.ParseTimestampZone(s); ok && zoned {
+		at := wall.Add(-time.Duration(off) * time.Second)
+		return "CAST(" + quoteLiteral(at.Format("2006-01-02 15:04:05.999999999")) + " AS TIMESTAMP)"
 	}
 	return "CAST(" + quoteLiteral(s) + " AS TIMESTAMP)"
-}
-
-// timestamptzOffsetLayouts are the zone-bearing spellings of this engine's
-// timestamp accept-set (parquet.ParseTimestampWallClock's list), each read
-// WITH its offset.
-var timestamptzOffsetLayouts = []string{
-	time.RFC3339Nano,
-	"2006-01-02 15:04:05.999999999Z07:00",
-	"2006-01-02 15:04:05.999999999-07",
-	"2006-01-02T15:04:05.999999999-07",
 }
 
 // paramNullLiteral is a NULL parameter of type oid: a NULL of that type, so a
