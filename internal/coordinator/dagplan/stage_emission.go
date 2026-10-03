@@ -1446,17 +1446,17 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 				// has no source column to rewrite to, so it travels as the
 				// alias and the window's input may publish it under another
 				// name or not at all (#770).
-				InputRefs:      aliasCandidatesForText(inputCol, winChild),
-				OutputCol:      ec.OutputCol,
-				OutputType:     ec.OutputType,
-				PartitionBy:    partitionBy,
-				OrderBy:        orderBy,
-				Frame:          we.Frame,
-				LagLeadOffset:  ec.LagLeadOffset,
-				LagLeadDefault: ec.LagLeadDefault,
-				NtileBuckets:   ec.NtileBuckets,
-				NthValueN:      ec.NthValueN,
-				NullArg:        ec.NullArg,
+				InputRefs:         aliasCandidatesForText(inputCol, winChild),
+				OutputCol:         ec.OutputCol,
+				OutputType:        ec.OutputType,
+				PartitionBy:       partitionBy,
+				OrderBy:           orderBy,
+				Frame:             we.Frame,
+				LagLeadOffset:     ec.LagLeadOffset,
+				LagLeadDefaultCol: ec.LagLeadDefaultCol,
+				NtileBuckets:      ec.NtileBuckets,
+				NthValueN:         ec.NthValueN,
+				NullArg:           ec.NullArg,
 			})
 		}
 		stage := Stage{
