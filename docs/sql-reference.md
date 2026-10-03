@@ -3030,7 +3030,10 @@ drops each block of 2048 rows, as the scan reads them, as a whole
 (PostgreSQL samples heap pages). The sample is drawn from the rows the scan
 reads — a deleted row is never sampled — and on a cluster it is drawn where
 the scan runs: each worker's scan task samples the files it reads, so a
-sampled table is never sent to the coordinator to be sampled. EXPLAIN shows
+sampled table is never sent to the coordinator to be sampled. A statement
+with a `TABLESAMPLE` clause is not probe-split on the asynchronous submit
+door, whose tasks would each re-plan it and draw their own sample of every
+relation they read whole; it runs as one task. EXPLAIN shows
 the sample on the scan line (`Scan: flow_logs TABLESAMPLE BERNOULLI (10)`).
 
 The clause follows the table name and the alias follows the clause
@@ -3052,10 +3055,21 @@ with no rows too. `0` samples no row and `100` every row. A scan that never
 begins checks nothing, as on PostgreSQL: under a constant-false `WHERE` or
 `HAVING` (`WHERE false`, `WHERE 1 = 2`, `WHERE NULL`) or a `LIMIT 0`,
 `TABLESAMPLE BERNOULLI (101)` answers no rows; `WHERE id < 0` reads the rows
-and raises 2202H.
+and raises 2202H. A subquery a constant decides is not run either, as
+PostgreSQL folds it before planning the subquery: `WHERE false AND EXISTS
+(SELECT 1 FROM t TABLESAMPLE BERNOULLI (101))` answers no rows, `WHERE true
+OR EXISTS (…)` every row, in either operand order and under a `NULL`
+conjunct; `WHERE false OR EXISTS (…)` raises 2202H. Two cases follow this
+engine's evaluation order rather than PostgreSQL's plan
+([other#r21](adr/0012-divergences/other.md#catalog)): a sampled scan beside
+an empty join input begins here in either join order (PostgreSQL begins it
+only when its plan reads the sampled side first), and an uncorrelated
+`EXISTS` beside a filter no row passes (`WHERE id < 0 AND EXISTS (…)`) is
+not reached on the embedded engine, which answers 0 where PostgreSQL and a
+cluster raise the subquery's 2202H.
 
 `REPEATABLE (seed)` is not supported (42601). (#1411; catalog:
-[other#r17–r20](adr/0012-divergences/other.md#catalog))
+[other#r17–r21](adr/0012-divergences/other.md#catalog))
 
 ## JOIN
 
