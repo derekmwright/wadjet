@@ -5,6 +5,7 @@ package logical
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/derekmwright/wadjet/internal/engine/expr"
@@ -1465,6 +1466,16 @@ func (n *Node) PrettyPrint(indent int) string {
 		s = fmt.Sprintf("%sScan: %s", prefix, n.TableName)
 		if n.TableAlias != "" && n.TableAlias != n.TableName {
 			s += fmt.Sprintf(" AS %s", n.TableAlias)
+		}
+		if n.SampleMethod != "" {
+			// The sample and its argument as real, the value the scan
+			// samples with (PostgreSQL's EXPLAIN: `Sampling: bernoulli
+			// ('50'::real)`).
+			pct := "NULL"
+			if !n.SampleNull {
+				pct = strconv.FormatFloat(n.SamplePercent, 'g', -1, 32)
+			}
+			s += fmt.Sprintf(" TABLESAMPLE %s (%s)", n.SampleMethod, pct)
 		}
 	case NodeFilter:
 		s = fmt.Sprintf("%sFilter: %v", prefix, n.predicateStrings())
