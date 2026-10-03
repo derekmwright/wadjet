@@ -3021,29 +3021,40 @@ counts (`OFFSET 0b11` skips three rows) (#1353, #1412).
 -- About 10 % of the rows, each row kept independently
 SELECT COUNT(*) FROM flow_logs TABLESAMPLE BERNOULLI (10)
 
--- About half of the rows, kept or dropped a batch at a time
-SELECT * FROM flow_logs TABLESAMPLE SYSTEM (50)
+-- About half of the rows, kept or dropped a block at a time
+SELECT * FROM flow_logs TABLESAMPLE SYSTEM (50) f
 ```
 
 `BERNOULLI` keeps each row with the given probability; `SYSTEM` keeps or
-drops each batch of up to 2048 rows as a whole (PostgreSQL samples heap
-pages). The clause follows the table name, before its alias's column list.
+drops each block of 2048 rows, as the scan reads them, as a whole
+(PostgreSQL samples heap pages). The sample is drawn from the rows the scan
+reads — a deleted row is never sampled — and on a cluster it is drawn where
+the scan runs: each worker's scan task samples the files it reads, so a
+sampled table is never sent to the coordinator to be sampled. EXPLAIN shows
+the sample on the scan line (`Scan: flow_logs TABLESAMPLE BERNOULLI (10)`).
+
+The clause follows the table name and the alias follows the clause
+(`FROM flow_logs TABLESAMPLE SYSTEM (50) f`); PostgreSQL takes the alias
+before it (`FROM flow_logs f TABLESAMPLE SYSTEM (50)`), and each refuses the
+other's order with 42601 (catalog: [other#r19](adr/0012-divergences/other.md#catalog)).
 
 The argument is one expression, read as PostgreSQL 17.11 reads it: any
 expression that reads no row — `50`, `'50'`, `25 * 2`, `CAST(50 AS NUMERIC)`,
 a bound parameter (described as `real`) — coerced to `real` once, when the
 statement is planned. A value `real` cannot hold is 22003 (`1e39`, a bare
-`1e400`, `CAST('1e400' AS DOUBLE PRECISION)`, a nonzero `1e-46`), and real's
-rounding applies (`100.000001` is 100). Text, boolean or date is 42804, a
-column reference 42703, an aggregate 42803, a subquery 0A000, and an argument
-count other than one 2202H. When the scan begins, the percentage must be
-between 0 and 100: `NULL`, `NaN`, `Infinity`, `-1` and `101` are 2202H —
-over a table with no rows too. `0` samples no row and `100` every row.
+`1e400`, `CAST('1e400' AS DOUBLE PRECISION)`, a nonzero `1e-46`, `'1e-46'`),
+text `real`'s input refuses is 22P02 (`'abc'`, `'1_0'`), and real's rounding
+applies (`100.000001` is 100). Text, boolean or date is 42804, a column
+reference 42703, an aggregate 42803, a subquery 0A000, and an argument count
+other than one 2202H. When the scan begins, the percentage must be between 0
+and 100: `NULL`, `NaN`, `Infinity`, `-1` and `101` are 2202H — over a table
+with no rows too. `0` samples no row and `100` every row. A scan that never
+begins checks nothing, as on PostgreSQL: under a constant-false `WHERE` or
+`HAVING` (`WHERE false`, `WHERE 1 = 2`, `WHERE NULL`) or a `LIMIT 0`,
+`TABLESAMPLE BERNOULLI (101)` answers no rows; `WHERE id < 0` reads the rows
+and raises 2202H.
 
-`REPEATABLE (seed)` is not supported (42601), and a sampled scan whose rows
-nothing reads (`… LIMIT 0`, `… WHERE false`) still checks its percentage:
-2202H where PostgreSQL answers no rows. On a cluster, a statement with a
-sampled scan runs on the coordinator's local pipeline. (#1411; catalog:
+`REPEATABLE (seed)` is not supported (42601). (#1411; catalog:
 [other#r17–r20](adr/0012-divergences/other.md#catalog))
 
 ## JOIN

@@ -88,9 +88,9 @@ With `t = 'hi'` and `b = '\x6869'`, `t || b` answers `hihi` (length 4) and `b ||
 
 `b || '\x41'` appends the four characters `\`, `x`, `4`, `1` here (`\x68695c783431`), where PostgreSQL reads the unknown literal as bytea and appends one byte (`\x686941`). Write `b || DECODE('41', 'hex')` to append the byte. (catalog: [text-collation#r14](adr/0012-divergences/text-collation.md#catalog))
 
-**`TABLESAMPLE SYSTEM` samples batches, not pages.**
+**`TABLESAMPLE SYSTEM` samples blocks of rows, not pages.**
 
-`SYSTEM (50)` keeps or drops each batch of up to 2048 rows as a whole; PostgreSQL keeps or drops heap pages. Both answer a random subset; `SYSTEM (0)` and `SYSTEM (100)` answer no row and every row on both. (catalog: [other#r20](adr/0012-divergences/other.md#catalog); #1411)
+`SYSTEM (50)` keeps or drops each block of 2048 rows, as the scan reads them, as a whole — on a cluster each worker's scan task samples its own files the same way; PostgreSQL keeps or drops heap pages. Both answer a random subset; `SYSTEM (0)` and `SYSTEM (100)` answer no row and every row on both. (catalog: [other#r20](adr/0012-divergences/other.md#catalog); #1411)
 
 **A text-typed parameter is a `TABLESAMPLE` percentage.**
 
@@ -398,9 +398,9 @@ Overflow remains recorded even after cancellation: `+9e37, +9e37, -9e37` fails h
 
 `CREATE TABLE vt2 (v VARCHAR(abc))` raises 42601 as PostgreSQL does, but the message is `column "v": syntax error at or near "ABC"`: the DDL lexer folds an unquoted identifier to upper case before the type is read, while `CAST(x AS VARCHAR(abc))` echoes `"abc"`. The code and the rule are the same on both doors. (catalog: [text-collation#r10](adr/0012-divergences/text-collation.md#catalog))
 
-**A `TABLESAMPLE` percentage is checked even where no row is read.**
+**A `TABLESAMPLE` alias follows the clause.**
 
-`SELECT id FROM t TABLESAMPLE BERNOULLI (101) LIMIT 0` (or `… WHERE false`) raises 2202H here; PostgreSQL answers no rows, because its scan never begins and the range is checked when it does. This pipeline pulls the sampled scan's first batch in both shapes. Over a table with no rows both raise. (catalog: [other#r19](adr/0012-divergences/other.md#catalog); #1411)
+`FROM t TABLESAMPLE BERNOULLI (10) s` names the sampled relation `s` here; PostgreSQL takes the alias before the clause (`FROM t s TABLESAMPLE BERNOULLI (10)`), and each refuses the other's order with 42601. (catalog: [other#r19](adr/0012-divergences/other.md#catalog); #1411)
 
 **A subquery as a `TABLESAMPLE` argument is refused.**
 
