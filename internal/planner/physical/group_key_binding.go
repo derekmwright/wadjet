@@ -92,6 +92,10 @@ func (w *declWalk) resolveAggInputName(name string, child *logical.Node) (resolv
 			}
 		case n.Type == logical.NodeAggregate:
 			return resolved, nil, nil, alias
+		case logical.WindowShadowedInput(n) != nil:
+			// The window's input carries the derived table's declared
+			// columns under their own names (logical.WindowShadowedInput).
+			return resolved, nil, nil, alias
 		case n.Type == logical.NodeJoin && len(n.Children) == 2:
 			// Mirror resolveShuffleKey: a rename can sit under either arm.
 			left, lexpr, lin, lok := w.resolveAggInputName(resolved, n.Children[0])
@@ -171,7 +175,7 @@ func (w *declWalk) namingScopeDecls(node plansql.Node, child *logical.Node) (Col
 		if declsCoverEveryColRef(node, d) {
 			return d, n, true
 		}
-		if !groupKeyScopeDescends(n.Type) || len(n.Children) != 1 {
+		if !groupKeyScopeDescends(n.Type) || len(n.Children) != 1 || logical.WindowShadowedInput(n) != nil {
 			return ColDecls{}, nil, false
 		}
 		n = n.Children[0]

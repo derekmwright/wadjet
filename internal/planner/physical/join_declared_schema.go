@@ -78,6 +78,26 @@ func (w *declWalk) declaredJoinSchema(n *logical.Node, want []string, published 
 			}
 			return
 		}
+		if top := logical.WindowShadowedInput(cur); top != nil {
+			// A WINDOW OVER A DERIVED TABLE THAT SHADOWS ITS INPUT reads
+			// that table's DECLARED columns, which the stage DAG's producer
+			// materializes under their own names (logical.WindowShadowedInput): the
+			// side publishes the table's projection, as a materialized block
+			// does, and not the scan's columns below it.
+			before := make(map[string]bool, len(seen))
+			for k := range seen {
+				before[k] = true
+			}
+			for _, col := range w.declaredBlockSchema(top, wantSet, published, subqueryDecl) {
+				lc := strings.ToLower(blockBareName(col.Name))
+				if before[lc] {
+					continue
+				}
+				seen[lc] = true
+				out = append(out, col)
+			}
+			return
+		}
 		if cur.Type == logical.NodeProject {
 			// A COMPUTED projection column exists only here — no scan
 			// carries it. Declare it under its alias with the same type the
