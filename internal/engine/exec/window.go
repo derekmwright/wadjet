@@ -113,8 +113,13 @@ type WindowColumn struct {
 	// LagLeadOffset is LAG / LEAD's offset AS WRITTEN: 0 is the current
 	// row and a negative offset reads the other way, as on PostgreSQL. The
 	// planner writes the omitted offset as 1; nothing here defaults it.
-	LagLeadOffset  int
-	LagLeadDefault any // default value for LAG/LEAD (default NULL)
+	LagLeadOffset int
+	// LagLeadDefaultCol is the input column LAG / LEAD's default is read
+	// from, at the row it fills; "" is no default (NULL). The planner
+	// materializes it — and the value, where the default widens it — as a
+	// column of OutputType, PostgreSQL's common type of the two (#1435), so
+	// every evaluator copies between vectors of one type.
+	LagLeadDefaultCol string
 	// NtileBuckets / NthValueN are the argument as written; one that is not
 	// positive raises PostgreSQL's 22014 / 22016 when a partition is
 	// evaluated (windowArgumentError).
@@ -323,6 +328,11 @@ func (w *Window) bindKeyNames(b *batch.RecordBatch) error {
 		if wc.InputCol != "" && wc.InputCol != "*" {
 			if idx := columnIndexFallback(b, wc.InputCol); idx >= 0 {
 				wc.InputCol = b.Schema[idx].Name
+			}
+		}
+		if wc.LagLeadDefaultCol != "" {
+			if idx := columnIndexFallback(b, wc.LagLeadDefaultCol); idx >= 0 {
+				wc.LagLeadDefaultCol = b.Schema[idx].Name
 			}
 		}
 		if len(wc.PartitionBy) > 0 {
@@ -1261,6 +1271,10 @@ func computeWindowColumnar(combined *batch.RecordBatch, winVecIdx int, wc Window
 	if wc.InputCol != "" {
 		inputIdx = combined.ResolveColumnIndex(wc.InputCol)
 	}
+	defaultIdx := -1
+	if wc.LagLeadDefaultCol != "" {
+		defaultIdx = combined.ResolveColumnIndex(wc.LagLeadDefaultCol)
+	}
 	partIdxs := make([]int, len(wc.PartitionBy))
 	for i, col := range wc.PartitionBy {
 		partIdxs[i] = combined.ResolveColumnIndex(col)
@@ -1277,7 +1291,7 @@ func computeWindowColumnar(combined *batch.RecordBatch, winVecIdx int, wc Window
 		for partEnd < n && sameColumnar(combined, i, partEnd, partIdxs) {
 			partEnd++
 		}
-		if err := computePartitionColumnar(combined, winVec, i, partEnd, wc, inputIdx, orderIdxs); err != nil {
+		if err := computePartitionColumnar(combined, winVec, i, partEnd, wc, inputIdx, defaultIdx, orderIdxs); err != nil {
 			return err
 		}
 		i = partEnd
@@ -1546,7 +1560,7 @@ func (d *frameMinMaxDeque) value(lo, hi int) any {
 // The error return carries ONE condition: a DECIMAL SUM/AVG with no exact
 // 128-bit answer (SQLSTATE 22003). Everything else that can go wrong here is
 // a missing column, which is answered with NULLs rather than a failure.
-func computePartitionColumnar(combined *batch.RecordBatch, winVec *batch.Vector, start, end int, wc WindowColumn, inputIdx int, orderIdxs []int) error {
+func computePartitionColumnar(combined *batch.RecordBatch, winVec *batch.Vector, start, end int, wc WindowColumn, inputIdx, defaultIdx int, orderIdxs []int) error {
 	n := end - start
 	// The integer argument first, per partition, as PostgreSQL evaluates it:
 	// a non-positive N raises, a NULL one answers NULL on every row.
@@ -1564,6 +1578,12 @@ func computePartitionColumnar(combined *batch.RecordBatch, winVec *batch.Vector,
 	var inputVec *batch.Vector
 	if inputIdx >= 0 {
 		inputVec = combined.Columns[inputIdx]
+	}
+	// LAG / LEAD's default, read at the row it fills: a vector of the
+	// output's type, sorted with the rest of the batch (#1435).
+	var defVec *batch.Vector
+	if defaultIdx >= 0 {
+		defVec = combined.Columns[defaultIdx]
 	}
 	if inputVec == nil {
 		switch wc.Func {
@@ -1713,8 +1733,8 @@ func computePartitionColumnar(combined *batch.RecordBatch, winVec *batch.Vector,
 		for i := 0; i < n; i++ {
 			if i-offset >= 0 && i-offset < n {
 				winVec.SetValue(start+i, inputVec.GetValue(start+i-offset))
-			} else if wc.LagLeadDefault != nil {
-				winVec.SetValue(start+i, wc.LagLeadDefault)
+			} else if defVec != nil {
+				winVec.SetValue(start+i, defVec.GetValue(start+i))
 			} else {
 				winVec.WriteNullAt(start + i)
 			}
@@ -1725,8 +1745,8 @@ func computePartitionColumnar(combined *batch.RecordBatch, winVec *batch.Vector,
 		for i := 0; i < n; i++ {
 			if i+offset < n && i+offset >= 0 {
 				winVec.SetValue(start+i, inputVec.GetValue(start+i+offset))
-			} else if wc.LagLeadDefault != nil {
-				winVec.SetValue(start+i, wc.LagLeadDefault)
+			} else if defVec != nil {
+				winVec.SetValue(start+i, defVec.GetValue(start+i))
 			} else {
 				winVec.WriteNullAt(start + i)
 			}

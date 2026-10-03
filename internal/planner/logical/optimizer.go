@@ -995,6 +995,13 @@ func collectNodeColumnRefs(n *Node, refs map[string]bool) {
 			for _, ob := range w.OrderBy {
 				collectWindowKeyRefs(ob.Column, refs)
 			}
+			// LAG / LEAD's DEFAULT is an expression the operator reads per
+			// row (`LAG(x, 1, id)`), materialized like a key (#1435).
+			if fn := strings.ToLower(w.Func); fn == "lag" || fn == "lead" {
+				if args := w.Arguments(); len(args) >= 3 {
+					collectWindowKeyRefs(args[2], refs)
+				}
+			}
 		}
 	}
 }

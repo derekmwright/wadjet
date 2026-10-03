@@ -66,23 +66,24 @@ func TestWindowLagWithOffset(t *testing.T) {
 	schema := []parquet.Column{
 		{Name: "ts", Type: parquet.TypeInt64},
 		{Name: "value", Type: parquet.TypeFloat64},
+		{Name: "zero", Type: parquet.TypeFloat64},
 	}
 	rows := []map[string]any{
-		{"ts": int64(1), "value": 10.0},
-		{"ts": int64(2), "value": 20.0},
-		{"ts": int64(3), "value": 30.0},
-		{"ts": int64(4), "value": 40.0},
+		{"ts": int64(1), "value": 10.0, "zero": 0.0},
+		{"ts": int64(2), "value": 20.0, "zero": 0.0},
+		{"ts": int64(3), "value": 30.0, "zero": 0.0},
+		{"ts": int64(4), "value": 40.0, "zero": 0.0},
 	}
 
 	win := NewWindow([]WindowColumn{
 		{
-			Func:           WinLag,
-			InputCol:       "value",
-			OutputCol:      "prev2",
-			OutputType:     parquet.TypeFloat64,
-			OrderBy:        []SortKey{{Column: "ts", Order: Ascending}},
-			LagLeadOffset:  2,
-			LagLeadDefault: 0.0,
+			Func:              WinLag,
+			InputCol:          "value",
+			OutputCol:         "prev2",
+			OutputType:        parquet.TypeFloat64,
+			OrderBy:           []SortKey{{Column: "ts", Order: Ascending}},
+			LagLeadOffset:     2,
+			LagLeadDefaultCol: "zero",
 		},
 	})
 
