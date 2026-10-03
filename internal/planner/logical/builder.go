@@ -577,7 +577,7 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 		// expression reads input columns the aggregate does not emit (#737).
 		// With no aggregate below, both maps are empty and this is a no-op.
 		for i := range winExprs {
-			winExprs[i].InputCol = respellOverAggregate(winExprs[i].InputCol, winAggRefs, groupKeyRefs)
+			winExprs[i].InputCol = respellWindowArguments(winExprs[i], winAggRefs, groupKeyRefs)
 			for j := range winExprs[i].PartitionBy {
 				winExprs[i].PartitionBy[j] = respellOverAggregate(
 					winExprs[i].PartitionBy[j], winAggRefs, groupKeyRefs)
@@ -1044,7 +1044,12 @@ func windowSpecTerms(col plansql.SelectColumn) []plansql.Node {
 		}
 	}
 	if col.IsWindow && col.WindowSpec != nil {
-		add(col.WindowSpec.Args)
+		// EVERY argument: Args is the whole list, and parsed as one
+		// expression it kept the first — an aggregate in LAG / LEAD's
+		// default (`LEAD(SUM(b), 1, SUM(d))`) was never computed (#1435).
+		for _, a := range (WindowExpr{InputCol: col.WindowSpec.Args}).Arguments() {
+			add(a)
+		}
 		for _, p := range col.WindowSpec.PartitionBy {
 			add(p)
 		}
@@ -1148,6 +1153,23 @@ func respellOverAggregate(term string, aggRefs, keyRefs map[string]string) strin
 		return term
 	}
 	return out.String()
+}
+
+// respellWindowArguments is respellOverAggregate over a window function's
+// argument list ONE ARGUMENT AT A TIME. InputCol carries the whole list —
+// `SUM(b), 2, 2.5` — and parsing it as one expression kept the first and
+// dropped the rest, so over a GROUP BY `LAG(SUM(b), 2, 2.5)` reached the
+// operator as `LAG(__agg_0)`: the offset read as 1, the default as none, and
+// NTH_VALUE's n as unset (arc WD, #1435).
+func respellWindowArguments(we WindowExpr, aggRefs, keyRefs map[string]string) string {
+	args := we.Arguments()
+	if len(args) < 2 {
+		return respellOverAggregate(we.InputCol, aggRefs, keyRefs)
+	}
+	for i, a := range args {
+		args[i] = respellOverAggregate(a, aggRefs, keyRefs)
+	}
+	return strings.Join(args, ", ")
 }
 
 // windowArgNode returns the AST of a window function's FIRST argument, for
