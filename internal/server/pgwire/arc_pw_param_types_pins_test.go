@@ -572,7 +572,7 @@ func pwPgxPinned(cells []pwPgxCell) []pwPgxCell {
 		"1426/d = time midnight":       {want: "fields=23 rows=[1]"},
 		"1426/d < time":                {want: "fields=23 rows=[3 ; 10]"},
 		"1426/d IN (time, time)":       {want: "fields=23 rows=[1 ; 10]"},
-		"ts = time":                    {want: "fields=23 rows=[1]", wantExec: "ERR 22007", pg: "fields=23 rows=[1]", row: "temporal (candidate): TIMESTAMP input refuses the `2024-03-04 12:00:00Z` spelling pgx sends"},
+		"ts = time":                    {want: "fields=23 rows=[1]"},
 		"lag int":                      {want: "fields=23,23 rows=[1|NULL ; 2|7 ; 3|14 ; 4|2 ; 5|3 ; 10|NULL]"},
 		"s = string":                   {want: "fields=23 rows=[1]"},
 		"num = float64":                {want: "fields=23 rows=[1]"},
