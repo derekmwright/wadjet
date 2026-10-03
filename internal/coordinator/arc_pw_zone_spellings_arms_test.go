@@ -24,8 +24,11 @@ import (
 // one integer, the last two the minute when there is no `:` — `+00130`,
 // `+0000130` and `+00000000130` are 01:30, `+000130` 01:30, `+001500` 15:00,
 // `+053000` and `+0530:00` hour 530 → 22009, `+05:` +05), the POSIX zone name
-// `Z+05` (PostgreSQL: five hours WEST; refused here, temporal r25), and the
-// shapes around them.
+// `Z+05` / `z+05` (PostgreSQL: five hours WEST; refused here, temporal r25),
+// whitespace after the sign and before the zone (PostgreSQL's lexer skips
+// isspace() there: `+ 05` is +05, `- 05` −05, `+ 16` 22009), and the shapes
+// around them. A tab or newline in a spelling is written `\t` / `\n` in the
+// cell's name.
 var pwZoneSpellings = []string{
 	"+00130", "+0000130", ",5", "+abc", " +0530", "Z+05", "+05:30:15:00", "+5:3",
 	"+05:3", ".5+05", "-00130", "+00000000130", "+1:30", "+001", " z", "+05:",
@@ -33,6 +36,10 @@ var pwZoneSpellings = []string{
 	"+", "-",
 	// the digit rule's own cells
 	"+000130", "+001500", "+053000", "+0530:00", "+16", "+15:59:59",
+	// whitespace after the sign / before the zone
+	"+ 05", "+ 5", "+   05", "+\t05", "+\n05", "+ 0530", "+  0530", "+ 05:30",
+	"+ 000130", "+ 05:", "+ 05 ", "- 05", " - 05", " + 05", "-  1559", "\n+05",
+	"+ 16", "+ 053000", "+05 - 16", "z+05",
 }
 
 // TestArcPWZoneSpellingsEveryArm: every zone spelling × {DATE / TIMESTAMP
@@ -129,17 +136,18 @@ func TestArcPWZoneSpellingsEveryArm(t *testing.T) {
 	var cells []cell
 	for k, z := range pwZoneSpellings {
 		text := "2024-03-04 12:00:00" + z
+		label := strings.NewReplacer("\t", `\t`, "\n", `\n`).Replace(text)
 		for _, typ := range []string{"DATE", "TIMESTAMP"} {
 			lit := fmt.Sprintf("SELECT id, %s '%s' AS v FROM dt_pair WHERE id = 1", typ, text)
 			cast := fmt.Sprintf("SELECT id, CAST('%s' AS %s) AS v FROM dt_pair WHERE id = 1", text, typ)
 			cells = append(cells,
-				cell{name: fmt.Sprintf("literal %s/%s", typ, text), run: func(c *pgconn.PgConn) string { return simple(c, lit) }},
-				cell{name: fmt.Sprintf("CAST AS %s/%s", typ, text), run: func(c *pgconn.PgConn) string { return simple(c, cast) }},
+				cell{name: fmt.Sprintf("literal %s/%s", typ, label), run: func(c *pgconn.PgConn) string { return simple(c, lit) }},
+				cell{name: fmt.Sprintf("CAST AS %s/%s", typ, label), run: func(c *pgconn.PgConn) string { return simple(c, cast) }},
 			)
 			tbl, id := "pwz_"+strings.ToLower(typ), k+1
 			ins := fmt.Sprintf("INSERT INTO %s VALUES (%d, '%s')", tbl, id, text)
 			back := fmt.Sprintf("SELECT v FROM %s WHERE id = %d", tbl, id)
-			cells = append(cells, cell{name: fmt.Sprintf("INSERT %s/%s", typ, text), insert: true, run: func(c *pgconn.PgConn) string {
+			cells = append(cells, cell{name: fmt.Sprintf("INSERT %s/%s", typ, label), insert: true, run: func(c *pgconn.PgConn) string {
 				if got := simple(c, ins); strings.HasPrefix(got, "ERR") {
 					return got
 				}
@@ -151,7 +159,7 @@ func TestArcPWZoneSpellingsEveryArm(t *testing.T) {
 			typ string
 		}{{1082, "DATE"}, {1114, "TIMESTAMP"}, {1184, "TIMESTAMP"}} {
 			sql := fmt.Sprintf("SELECT id, CAST($1 AS %s) AS v FROM dt_pair WHERE id = 1", p.typ)
-			cells = append(cells, cell{name: fmt.Sprintf("$1 %d AS %s/%s", p.oid, p.typ, text), run: func(c *pgconn.PgConn) string {
+			cells = append(cells, cell{name: fmt.Sprintf("$1 %d AS %s/%s", p.oid, p.typ, label), run: func(c *pgconn.PgConn) string {
 				return render(c.ExecParams(ctx, sql, [][]byte{[]byte(text)}, []uint32{p.oid}, nil, nil))
 			}})
 		}

@@ -98,3 +98,75 @@ func TestTheZoneOffsetReadsPostgresDigitRule(t *testing.T) {
 		}
 	}
 }
+
+// The grammar's whitespace is PostgreSQL's lexer's: isspace() — space, tab,
+// \n, \r, \v, \f — separates the date from the clock and the clock from the
+// zone, and is skipped after a zone's sign, so `…12:00:00+ 05` is +05 and
+// `…12:00:00- 05` −05 (DATE: 2024-03-04). The zone reader used to take the
+// text after the sign as the offset's digits and refuse `+ 05` (22007 where
+// PostgreSQL and v0.25.3's DATE reader read it), and the grammar's whitespace
+// was space and tab only. Every cell is measured on PostgreSQL 17.11 at
+// TimeZone UTC: the offset east of UTC in seconds as a timestamptz (0 with no
+// zone), DATE 2024-03-04, or the SQLSTATE both raised.
+func TestTheGrammarSkipsPostgresWhitespace(t *testing.T) {
+	cells := []struct {
+		text  string
+		east  int
+		state string
+	}{
+		{"2024-03-04 12:00:00+ 05", 18000, ""},
+		{"2024-03-04 12:00:00+ 5", 18000, ""},
+		{"2024-03-04 12:00:00+   05", 18000, ""},
+		{"2024-03-04 12:00:00+\t05", 18000, ""},
+		{"2024-03-04 12:00:00+\n05", 18000, ""},
+		{"2024-03-04 12:00:00+\r05", 18000, ""},
+		{"2024-03-04 12:00:00+\v05", 18000, ""},
+		{"2024-03-04 12:00:00+\f05", 18000, ""},
+		{"2024-03-04 12:00:00+ 0530", 19800, ""},
+		{"2024-03-04 12:00:00+  0530", 19800, ""},
+		{"2024-03-04 12:00:00+ 05:30", 19800, ""},
+		{"2024-03-04 12:00:00+ 000130", 5400, ""},
+		{"2024-03-04 12:00:00+ 05:", 18000, ""},
+		{"2024-03-04 12:00:00+ 05 ", 18000, ""},
+		{"2024-03-04 12:00:00- 05", -18000, ""},
+		{"2024-03-04 12:00:00 - 05", -18000, ""},
+		{"2024-03-04 12:00:00 + 05", 18000, ""},
+		{"2024-03-04 12:00:00-  1559", -57540, ""},
+		{"2024-03-04 12:00:00\n+05", 18000, ""},
+		{"2024-03-04 12:00:00\t-05:30", -19800, ""},
+		{"2024-03-04 12:00:00\nZ", 0, ""},
+		{"2024-03-04\n12:00:00+05", 18000, ""},
+		{"2024-03-04\r\n12:00:00", 0, ""},
+		{"2024-03-04\t12:00:00", 0, ""},
+		{"2024-03-04 \n 12:00:00", 0, ""},
+		{"2024-03-04 12:00:00+ 16", 0, "22009"},
+		{"2024-03-04 12:00:00+ 053000", 0, "22009"},
+		{"2024-03-04 12:00:00+05 - 16", 0, "22009"},
+		{"2024-03-04 12:00:00+05\n-16", 0, "22009"},
+		{"2024-03-04 12:00:00+ abc", 0, "22007"},
+		{"2024-03-04 12:00:00+ ", 0, "22007"},
+		{"2024-03-04 12:00:00+ +05", 0, "22007"},
+		{"2024-03-04 12:00:00- 05 16", 0, "22007"},
+		{"2024-03-04 12:00:00z+05", 0, "22007"}, // PostgreSQL: the POSIX zone z+05 (−5 h); refused here (temporal r25)
+	}
+	for _, c := range cells {
+		_, east, _, ok := ParseTimestampZone(c.text)
+		_, terr := ParseTimestampMillis(c.text)
+		days, derr := ParseDateDays(c.text)
+		if c.state == "" {
+			if !ok || east != c.east || terr != nil || derr != nil || days != 19786 {
+				t.Errorf("%q: offset %d ok=%v timestamp err %v date %d err %v; want offset %d, DATE 2024-03-04 (PostgreSQL 17.11)", c.text, east, ok, terr, days, derr, c.east)
+			}
+			continue
+		}
+		if ok {
+			t.Errorf("%q: read offset %d; want SQLSTATE %s (PostgreSQL 17.11)", c.text, east, c.state)
+		}
+		for _, err := range []error{terr, derr} {
+			var st interface{ SQLState() string }
+			if !errors.As(err, &st) || st.SQLState() != c.state {
+				t.Errorf("%q: %v; want SQLSTATE %s (PostgreSQL 17.11)", c.text, err, c.state)
+			}
+		}
+	}
+}
