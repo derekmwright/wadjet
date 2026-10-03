@@ -146,7 +146,11 @@ func composeThroughDerivedTables(ast plansql.Node, n *logical.Node, depth int) (
 	failed := false
 	out, _, complete := localPlanFacts.RewriteColRefs(ast, func(ref *plansql.ColRef) (plansql.Node, bool) {
 		written := ref.String()
-		proj := localPlanFacts.ProjectionForName(n.Projections, written, localPlanFacts.DerivedScopeBareName(written, n))
+		bare := localPlanFacts.DerivedScopeBareName(written, n)
+		proj := localPlanFacts.ProjectionForName(n.Projections, written, bare)
+		if proj == nil {
+			proj = passThroughItem(n.Projections, written, bare)
+		}
 		if proj == nil || proj.IsAgg {
 			failed = true
 			return nil, false
@@ -170,6 +174,26 @@ func composeThroughDerivedTables(ast plansql.Node, n *logical.Node, depth int) (
 		return nil, false
 	}
 	return out, true
+}
+
+// passThroughItem is the unaliased SELECT-list item that forwards the column
+// a reference names (`SELECT id, g, b FROM …`), or nil. ProjectionForName
+// matches aliases only, so without it a chain of derived tables whose upper
+// table forwards its columns bare composed nothing.
+func passThroughItem(projs []logical.Projection, written, bare string) *logical.Projection {
+	name := bare
+	if name == "" {
+		if strings.IndexByte(written, '.') >= 0 {
+			return nil
+		}
+		name = written
+	}
+	for i := range projs {
+		if projs[i].Alias == "" && projs[i].Column != "" && strings.EqualFold(stripQualifier(projs[i].Column), name) {
+			return &projs[i]
+		}
+	}
+	return nil
 }
 
 // keyExprs spells every column reference in the window's key expressions
