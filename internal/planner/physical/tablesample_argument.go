@@ -3,10 +3,6 @@
 package physical
 
 import (
-	"context"
-	"math"
-	"sync"
-
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/engine/expr"
@@ -39,9 +35,9 @@ func init() { logical.SetTablesampleEvaluator(TablesampleArgument) }
 //
 // The evaluation's own failure is its SQLSTATE (1/0 is 22012). The RANGE —
 // NULL, NaN, below 0 or above 100 is 2202H — is NOT checked here: PostgreSQL
-// checks it when the scan begins (checkSamplePercent, at a sampled scan's
-// first batch: sampleRangeSource), so
-// a scan that never begins answers, and EXPLAIN plans.
+// checks it when the scan begins (exec.CheckSamplePercent, at a sampled
+// scan's first batch: exec.NewSampledSource, on a worker too), so a scan that
+// never begins answers, and EXPLAIN plans.
 func TablesampleArgument(arg plansql.Node) (pct float64, isNull bool, err error) {
 	if err := tablesampleArgumentReadsNoRow(arg); err != nil {
 		return 0, false, err
@@ -145,36 +141,13 @@ func evalTablesampleArgument(c expr.Expr) (v any, err error) {
 	return c.Eval(&batch.RecordBatch{Len: 1}, 0), nil
 }
 
-// checkSamplePercent is the range PostgreSQL checks when a sample scan
-// begins (tsm_bernoulli / tsm_system's BeginSampleScan, nodeSamplescan's NULL
-// check): NULL, NaN, below 0 or above 100 is 2202H.
-func checkSamplePercent(pct float64, isNull bool) error {
-	if isNull {
-		return sqlerr.New("2202H", "TABLESAMPLE parameter cannot be null")
+// ScanTableSample is a logical scan's TABLESAMPLE as the sampler applies it,
+// ok=false when the scan is not sampled. Both readers of a sampled table take
+// it from here: buildScan, and the stage planner that carries it to a
+// worker's scan fragment.
+func ScanTableSample(node *logical.Node) (exec.TableSample, bool) {
+	if node == nil || node.SampleMethod == "" {
+		return exec.TableSample{}, false
 	}
-	if math.IsNaN(pct) || pct < 0 || pct > 100 {
-		return sqlerr.New("2202H", "sample percentage must be between 0 and 100")
-	}
-	return nil
-}
-
-// sampleRangeSource is a sampled scan: its first Next is where the scan
-// begins, and where the percentage's range is checked — over a table with no
-// rows too, and never for a scan nothing reads (LIMIT 0, WHERE false), as on
-// PostgreSQL. Next may be called from several goroutines (a parallel
-// pipeline); the check runs once and every caller sees its answer.
-type sampleRangeSource struct {
-	exec.Source
-	pct      float64
-	null     bool
-	once     sync.Once
-	rangeErr error
-}
-
-func (s *sampleRangeSource) Next(ctx context.Context) (*batch.RecordBatch, error) {
-	s.once.Do(func() { s.rangeErr = checkSamplePercent(s.pct, s.null) })
-	if s.rangeErr != nil {
-		return nil, s.rangeErr
-	}
-	return s.Source.Next(ctx)
+	return exec.TableSample{Method: node.SampleMethod, Percent: node.SamplePercent, Null: node.SampleNull}, true
 }
