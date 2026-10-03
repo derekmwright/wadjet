@@ -1350,6 +1350,12 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 			winChild = node.Children[0]
 		}
 		var winCols []WindowColSpec
+		// The computed derived aliases the stage's keys, arguments and key
+		// EXPRESSIONS read, materialized on the producer in ONE call:
+		// materializeAliasColumns narrows the producer to its projection, so
+		// a second call for a second OVER clause found the list set and
+		// added nothing.
+		var winAliases []aliasColumn
 		for _, we := range node.WindowExprs {
 			// Resolved by the same helper buildWindow uses, so the stage
 			// spec and the single-process operator describe one computation
@@ -1387,7 +1393,6 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 			// (ADR-0026 §2) and sort keys (#807). Resolve qualified keys INSIDE their named
 			// arm (#742); unscoped lookup can bind a sibling's same-named alias (#975).
 			// The window key and its stage distribution key must name the same stream value.
-			var winAliases []aliasColumn
 			for i, pb := range partitionBy {
 				// Scoped with a SOURCE column: that arm's column is the key.
 				// Scoped with NONE is a COMPUTED alias, and the walk FALLS
@@ -1467,9 +1472,6 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 				winAliases = append(winAliases, c)
 				inputCol = c.Name
 			}
-			if len(winAliases) > 0 {
-				materializeWindowAliasKeys((*stages)[preCount:], winAliases)
-			}
 			winCols = append(winCols, WindowColSpec{
 				Func:     we.Func,
 				InputCol: inputCol,
@@ -1502,6 +1504,18 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 			// columns of one name on the batch.
 			WindowKeyExprs: respellWindowKeyExprs(p.PlanContext.WindowKeySpecs(winKeys), winChild),
 			WindowCols:     winCols,
+		}
+		// A key EXPRESSION is evaluated over the window's input exactly as a
+		// key or an argument is read from it, so a reference in it to a
+		// COMPUTED derived alias takes the same rung: the alias is
+		// materialized on the producer under its own name. Without it
+		// `SUM(v + 0) OVER (…)` and LAG / LEAD's `cast(v as …)` (#1435) over
+		// `SELECT t.b * 2 AS v FROM t JOIN u …` read NULL on the DAG arms —
+		// a JOIN, a LIMIT, a sort or a window below emits no stage for the
+		// Project that defines `v`.
+		winAliases = append(winAliases, windowKeyExprAliases(stage.WindowKeyExprs, winChild)...)
+		if len(winAliases) > 0 {
+			materializeWindowAliasKeys((*stages)[preCount:], winAliases)
 		}
 		// Only depend on leaf stages from subtree (not transitive deps like scan).
 		stage.Dependencies = leafStages((*stages)[preCount:])
