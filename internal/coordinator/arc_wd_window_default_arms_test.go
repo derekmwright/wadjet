@@ -578,6 +578,9 @@ func wdStandalone(t *testing.T, ctx context.Context, budget int64) *wadjet.DB {
 type wdArm struct {
 	name string
 	run  func(string) (wdResult, error)
+	// coord is the arm's coordinator (nil on the single-process arms), for a
+	// gate that asserts where the DAG arms plan a query.
+	coord *Coordinator
 }
 
 func wdArms(t *testing.T, ctx context.Context) []wdArm {
@@ -653,12 +656,15 @@ func wdArms(t *testing.T, ctx context.Context) []wdArm {
 			return res, nil
 		}
 	}
+	dag := stand(nil)
+	shuffled := stand(nil, func(c *Config) { c.BroadcastBytesOverride = 1 })
+	morsel := stand(func(w *worker.Config) { w.MorselWorkers = 4 })
 	return []wdArm{
-		{"single", runSingle(single)},
-		{"spilled512k", runSingle(spilled)},
-		{"dag", runDAG(stand(nil))},
-		{"dag-shuffled", runDAG(stand(nil, func(c *Config) { c.BroadcastBytesOverride = 1 }))},
-		{"dag-morsel4", runDAG(stand(func(w *worker.Config) { w.MorselWorkers = 4 }))},
+		{"single", runSingle(single), nil},
+		{"spilled512k", runSingle(spilled), nil},
+		{"dag", runDAG(dag), dag},
+		{"dag-shuffled", runDAG(shuffled), shuffled},
+		{"dag-morsel4", runDAG(morsel), morsel},
 	}
 }
 

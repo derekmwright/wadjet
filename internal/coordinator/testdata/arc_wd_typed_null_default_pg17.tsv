@@ -1,0 +1,138 @@
+# PostgreSQL 17.11 (postgres:17-alpine) answers: name<TAB>type=<declared types after id> rows=N <sorted rows> | ERR <SQLSTATE> <message>.
+b2/lag/null_numeric	type=numeric rows=6 1,NULL | 2,10000000000000001 | 3,20000000000000001 | 4,NULL | 5,40000000000000001 | 6,50000000000000001
+b2/lead/null_numeric	type=numeric rows=6 1,20000000000000001 | 2,NULL | 3,NULL | 4,50000000000000001 | 5,NULL | 6,NULL
+b2/sum/null_numeric	type=numeric rows=1 120000000000000004
+b2/lag/null_numeric200	type=numeric rows=6 1,NULL | 2,10000000000000001 | 3,20000000000000001 | 4,NULL | 5,40000000000000001 | 6,50000000000000001
+b2/lead/null_numeric200	type=numeric rows=6 1,20000000000000001 | 2,NULL | 3,NULL | 4,50000000000000001 | 5,NULL | 6,NULL
+b2/sum/null_numeric200	type=numeric rows=1 120000000000000004
+b2/lag/null_numeric102	type=numeric rows=6 1,NULL | 2,10000000000000001 | 3,20000000000000001 | 4,NULL | 5,40000000000000001 | 6,50000000000000001
+b2/lead/null_numeric102	type=numeric rows=6 1,20000000000000001 | 2,NULL | 3,NULL | 4,50000000000000001 | 5,NULL | 6,NULL
+b2/sum/null_numeric102	type=numeric rows=1 120000000000000004
+b2/lag/null_bigint	type=bigint rows=6 1,NULL | 2,10000000000000001 | 3,20000000000000001 | 4,NULL | 5,40000000000000001 | 6,50000000000000001
+b2/lead/null_bigint	type=bigint rows=6 1,20000000000000001 | 2,NULL | 3,NULL | 4,50000000000000001 | 5,NULL | 6,NULL
+b2/sum/null_bigint	type=numeric rows=1 120000000000000004
+b2/lag/null_int	type=bigint rows=6 1,NULL | 2,10000000000000001 | 3,20000000000000001 | 4,NULL | 5,40000000000000001 | 6,50000000000000001
+b2/lead/null_int	type=bigint rows=6 1,20000000000000001 | 2,NULL | 3,NULL | 4,50000000000000001 | 5,NULL | 6,NULL
+b2/sum/null_int	type=numeric rows=1 120000000000000004
+b2/lag/null_double	type=double precision rows=6 1,NULL | 2,1e+16 | 3,2e+16 | 4,NULL | 5,4e+16 | 6,5e+16
+b2/lead/null_double	type=double precision rows=6 1,2e+16 | 2,NULL | 3,NULL | 4,5e+16 | 5,NULL | 6,NULL
+b2/sum/null_double	type=double precision rows=1 1.2e+17
+b2/lag/null_real	type=real rows=6 1,NULL | 2,1e+16 | 3,2e+16 | 4,NULL | 5,4e+16 | 6,5e+16
+b2/lead/null_real	type=real rows=6 1,2e+16 | 2,NULL | 3,NULL | 4,5e+16 | 5,NULL | 6,NULL
+b2/sum/null_real	type=real rows=1 1.2e+17
+b2/lag/null_text_q	ERR 42883 function lag(bigint, integer, text) does not exist
+b2/lead/null_text_q	ERR 42883 function lead(bigint, integer, text) does not exist
+b2/sum/null_text_q	ERR 42883 function lag(bigint, integer, text) does not exist
+b2/lag/null	type=bigint rows=6 1,NULL | 2,10000000000000001 | 3,20000000000000001 | 4,NULL | 5,40000000000000001 | 6,50000000000000001
+b2/lead/null	type=bigint rows=6 1,20000000000000001 | 2,NULL | 3,NULL | 4,50000000000000001 | 5,NULL | 6,NULL
+b2/lag/omitted	type=bigint rows=6 1,NULL | 2,10000000000000001 | 3,20000000000000001 | 4,NULL | 5,40000000000000001 | 6,50000000000000001
+b2/lead/omitted	type=bigint rows=6 1,20000000000000001 | 2,NULL | 3,NULL | 4,50000000000000001 | 5,NULL | 6,NULL
+b2/lag/int7	type=bigint rows=6 1,7 | 2,10000000000000001 | 3,20000000000000001 | 4,NULL | 5,40000000000000001 | 6,50000000000000001
+b2/lead/int7	type=bigint rows=6 1,20000000000000001 | 2,NULL | 3,7 | 4,50000000000000001 | 5,7 | 6,7
+b2/sum/int7	type=numeric rows=1 120000000000000011
+b2/lag/dec25	type=numeric rows=6 1,2.5 | 2,10000000000000001 | 3,20000000000000001 | 4,NULL | 5,40000000000000001 | 6,50000000000000001
+b2/lead/dec25	type=numeric rows=6 1,20000000000000001 | 2,NULL | 3,2.5 | 4,50000000000000001 | 5,2.5 | 6,2.5
+b2/sum/dec25	type=numeric rows=1 120000000000000006.5
+b2/lag/wide	type=numeric rows=6 1,14.0000000000000000001 | 2,10000000000000001 | 3,20000000000000001 | 4,NULL | 5,40000000000000001 | 6,50000000000000001
+b2/lead/wide	type=numeric rows=6 1,20000000000000001 | 2,NULL | 3,14.0000000000000000001 | 4,50000000000000001 | 5,14.0000000000000000001 | 6,14.0000000000000000001
+b2/sum/wide	type=numeric rows=1 120000000000000018.0000000000000000001
+b2/lag/e2	type=numeric rows=6 1,100 | 2,10000000000000001 | 3,20000000000000001 | 4,NULL | 5,40000000000000001 | 6,50000000000000001
+b2/lead/e2	type=numeric rows=6 1,20000000000000001 | 2,NULL | 3,100 | 4,50000000000000001 | 5,100 | 6,100
+b2/sum/e2	type=numeric rows=1 120000000000000104
+b2/lag/cast7num	type=numeric rows=6 1,7 | 2,10000000000000001 | 3,20000000000000001 | 4,NULL | 5,40000000000000001 | 6,50000000000000001
+b2/lead/cast7num	type=numeric rows=6 1,20000000000000001 | 2,NULL | 3,7 | 4,50000000000000001 | 5,7 | 6,7
+b2/sum/cast7num	type=numeric rows=1 120000000000000011
+b2/lag/cast25dbl	type=double precision rows=6 1,2.5 | 2,1e+16 | 3,2e+16 | 4,NULL | 5,4e+16 | 6,5e+16
+b2/lead/cast25dbl	type=double precision rows=6 1,2e+16 | 2,NULL | 3,2.5 | 4,5e+16 | 5,2.5 | 6,2.5
+b2/sum/cast25dbl	type=double precision rows=1 1.2e+17
+b2/lag/cast25real	type=real rows=6 1,2.5 | 2,1e+16 | 3,2e+16 | 4,NULL | 5,4e+16 | 6,5e+16
+b2/lead/cast25real	type=real rows=6 1,2e+16 | 2,NULL | 3,2.5 | 4,5e+16 | 5,2.5 | 6,2.5
+b2/sum/cast25real	type=real rows=1 1.2e+17
+b2/lag/q7	type=bigint rows=6 1,7 | 2,10000000000000001 | 3,20000000000000001 | 4,NULL | 5,40000000000000001 | 6,50000000000000001
+b2/lead/q7	type=bigint rows=6 1,20000000000000001 | 2,NULL | 3,7 | 4,50000000000000001 | 5,7 | 6,7
+b2/sum/q7	type=numeric rows=1 120000000000000011
+b2/lag/bigint_lit	type=bigint rows=6 1,9007199254740993 | 2,10000000000000001 | 3,20000000000000001 | 4,NULL | 5,40000000000000001 | 6,50000000000000001
+b2/lead/bigint_lit	type=bigint rows=6 1,20000000000000001 | 2,NULL | 3,9007199254740993 | 4,50000000000000001 | 5,9007199254740993 | 6,9007199254740993
+b2/sum/bigint_lit	type=numeric rows=1 129007199254740997
+b2/lag/col_n	type=numeric rows=6 1,1.25 | 2,10000000000000001 | 3,20000000000000001 | 4,NULL | 5,40000000000000001 | 6,50000000000000001
+b2/lead/col_n	type=numeric rows=6 1,20000000000000001 | 2,NULL | 3,NULL | 4,50000000000000001 | 5,5.25 | 6,6.25
+b2/sum/col_n	type=numeric rows=1 120000000000000005.25
+b2/lag/col_d	type=double precision rows=6 1,1.5 | 2,1e+16 | 3,2e+16 | 4,NULL | 5,4e+16 | 6,5e+16
+b2/lead/col_d	type=double precision rows=6 1,2e+16 | 2,NULL | 3,NULL | 4,5e+16 | 5,5.5 | 6,6.5
+b2/sum/col_d	type=double precision rows=1 1.2e+17
+b2/lag/col_i	type=bigint rows=6 1,10 | 2,10000000000000001 | 3,20000000000000001 | 4,NULL | 5,40000000000000001 | 6,50000000000000001
+b2/lead/col_i	type=bigint rows=6 1,20000000000000001 | 2,NULL | 3,NULL | 4,50000000000000001 | 5,50 | 6,60
+b2/sum/col_i	type=numeric rows=1 120000000000000014
+b2/lag/col_b	type=bigint rows=6 1,10 | 2,10000000000000001 | 3,20000000000000001 | 4,NULL | 5,40000000000000001 | 6,50000000000000001
+b2/lead/col_b	type=bigint rows=6 1,20000000000000001 | 2,NULL | 3,NULL | 4,50000000000000001 | 5,50 | 6,60
+b2/sum/col_b	type=numeric rows=1 120000000000000014
+b2/lag/expr_big	type=bigint rows=6 1,10000000000000003 | 2,10000000000000001 | 3,20000000000000001 | 4,NULL | 5,40000000000000001 | 6,50000000000000001
+b2/lead/expr_big	type=bigint rows=6 1,20000000000000001 | 2,NULL | 3,NULL | 4,50000000000000001 | 5,50000000000000003 | 6,60000000000000003
+b2/sum/expr_big	type=numeric rows=1 130000000000000007
+b2/lag/numexpr	type=numeric rows=6 1,2.50 | 2,10000000000000001 | 3,20000000000000001 | 4,NULL | 5,40000000000000001 | 6,50000000000000001
+b2/lead/numexpr	type=numeric rows=6 1,20000000000000001 | 2,NULL | 3,NULL | 4,50000000000000001 | 5,10.50 | 6,12.50
+b2/sum/numexpr	type=numeric rows=1 120000000000000006.50
+b2/lag/neg_null_num	type=numeric rows=6 1,NULL | 2,10000000000000001 | 3,20000000000000001 | 4,NULL | 5,40000000000000001 | 6,50000000000000001
+b2/lead/neg_null_num	type=numeric rows=6 1,20000000000000001 | 2,NULL | 3,NULL | 4,50000000000000001 | 5,NULL | 6,NULL
+b2/sum/neg_null_num	type=numeric rows=1 120000000000000004
+b2/lag/coalesce_null	type=numeric rows=6 1,NULL | 2,10000000000000001 | 3,20000000000000001 | 4,NULL | 5,40000000000000001 | 6,50000000000000001
+b2/lead/coalesce_null	type=numeric rows=6 1,20000000000000001 | 2,NULL | 3,NULL | 4,50000000000000001 | 5,NULL | 6,NULL
+b2/sum/coalesce_null	type=numeric rows=1 120000000000000004
+b2t/i_null_numeric	type=numeric rows=6 1,NULL | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+b2t/i_null_numeric/plus	type=boolean rows=6 1,true | 2,false | 3,false | 4,true | 5,false | 6,false
+b2t/i_null_bigint	type=bigint rows=6 1,NULL | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+b2t/i_null_bigint/plus	type=boolean rows=6 1,true | 2,false | 3,false | 4,true | 5,false | 6,false
+b2t/n_null_numeric	type=numeric rows=6 1,NULL | 2,1.25 | 3,2.25 | 4,NULL | 5,4.25 | 6,5.25
+b2t/n_null_numeric/plus	type=boolean rows=6 1,true | 2,false | 3,false | 4,true | 5,false | 6,false
+b2t/n_null_bigint	type=numeric rows=6 1,NULL | 2,1.25 | 3,2.25 | 4,NULL | 5,4.25 | 6,5.25
+b2t/n_null_bigint/plus	type=boolean rows=6 1,true | 2,false | 3,false | 4,true | 5,false | 6,false
+b2t/d_null_numeric	type=double precision rows=6 1,NULL | 2,1.5 | 3,2.5 | 4,NULL | 5,4.5 | 6,5.5
+b2t/d_null_numeric/plus	type=boolean rows=6 1,true | 2,false | 3,false | 4,true | 5,false | 6,false
+b2t/b_null_numeric	type=numeric rows=6 1,NULL | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+b2t/b_null_numeric/plus	type=boolean rows=6 1,true | 2,false | 3,false | 4,true | 5,false | 6,false
+b2t/s_null_text	type=text rows=6 1,NULL | 2,a | 3,b | 4,NULL | 5,d | 6,e
+b2t/s_null_text/plus	type=boolean rows=6 1,true | 2,false | 3,false | 4,true | 5,false | 6,false
+b2t/dt_null_ts	type=timestamp without time zone rows=6 1,NULL | 2,2024-01-01 00:00:00 | 3,2024-01-02 00:00:00 | 4,NULL | 5,2024-01-04 00:00:00 | 6,2024-01-05 00:00:00
+b2t/dt_null_ts/plus	type=boolean rows=6 1,true | 2,false | 3,false | 4,true | 5,false | 6,false
+b2t/ts_null_date	type=timestamp without time zone rows=6 1,NULL | 2,2024-01-01 10:00:00 | 3,2024-01-02 10:00:00 | 4,NULL | 5,2024-01-04 10:00:00 | 6,2024-01-05 10:00:00
+b2t/ts_null_date/plus	type=boolean rows=6 1,true | 2,false | 3,false | 4,true | 5,false | 6,false
+b2t/bo_null_bool	type=boolean rows=6 1,NULL | 2,true | 3,false | 4,NULL | 5,true | 6,false
+b2t/bo_null_bool/plus	type=boolean rows=6 1,true | 2,false | 3,false | 4,true | 5,false | 6,false
+b2t/s_null_int	ERR 42883 function lag(text, integer, integer) does not exist
+b2t/s_null_int/plus	ERR 42883 function lag(text, integer, integer) does not exist
+b2t/b_null_text	ERR 42883 function lag(bigint, integer, text) does not exist
+b2t/b_null_text/plus	ERR 42883 function lag(bigint, integer, text) does not exist
+b2t/d_null_real	type=double precision rows=6 1,NULL | 2,1.5 | 3,2.5 | 4,NULL | 5,4.5 | 6,5.5
+b2t/d_null_real/plus	type=boolean rows=6 1,true | 2,false | 3,false | 4,true | 5,false | 6,false
+b2t/i_null_double	type=double precision rows=6 1,NULL | 2,10 | 3,20 | 4,NULL | 5,40 | 6,50
+b2t/i_null_double/plus	type=boolean rows=6 1,true | 2,false | 3,false | 4,true | 5,false | 6,false
+b2t/bplus_null_numeric	type=numeric rows=6 1,NULL | 2,10.5 | 3,20.5 | 4,NULL | 5,40.5 | 6,50.5
+b2t/bplus_null_numeric/plus	type=boolean rows=6 1,true | 2,false | 3,false | 4,true | 5,false | 6,false
+g/cast_null_num	type=numeric rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+g/coalesce	type=numeric rows=6 1,10000000000000001 | 2,20000000000000001 | 3,NULL | 4,40000000000000001 | 5,50000000000000001 | 6,60000000000000001
+g/case	type=numeric rows=6 1,10000000000000001 | 2,20000000000000001 | 3,NULL | 4,40000000000000001 | 5,50000000000000001 | 6,60000000000000001
+g/plus	type=numeric rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+g/union	type=numeric rows=7 1,10000000000000001 | 2,20000000000000001 | 3,NULL | 4,40000000000000001 | 5,50000000000000001 | 6,60000000000000001 | 7,NULL
+g/cast_b_num	type=numeric rows=6 1,10000000000000001 | 2,20000000000000001 | 3,NULL | 4,40000000000000001 | 5,50000000000000001 | 6,60000000000000001
+g/nullif	type=numeric rows=6 1,10000000000000001 | 2,20000000000000001 | 3,NULL | 4,40000000000000001 | 5,50000000000000001 | 6,60000000000000001
+g/greatest	type=numeric rows=6 1,10000000000000001 | 2,20000000000000001 | 3,NULL | 4,40000000000000001 | 5,50000000000000001 | 6,60000000000000001
+ar/plus_dec	type=numeric rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+ar/mul_dec	type=numeric rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+ar/plus_n	type=numeric rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+ar/plus_d	type=double precision rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+ar/sum	type=numeric rows=1 NULL
+ar/avg	type=numeric rows=1 NULL
+ar/coalesce_n	type=numeric rows=6 1,1.25 | 2,2.25 | 3,NULL | 4,4.25 | 5,5.25 | 6,6.25
+ar/coalesce_d	type=double precision rows=6 1,1.5 | 2,2.5 | 3,NULL | 4,4.5 | 5,5.5 | 6,6.5
+ar/coalesce_dec	type=numeric rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+ar/case_n	type=numeric rows=6 1,NULL | 2,NULL | 3,NULL | 4,4.25 | 5,5.25 | 6,6.25
+ar/union_n	type=numeric rows=7 1,1.25 | 2,2.25 | 3,NULL | 4,4.25 | 5,5.25 | 6,6.25 | 7,NULL
+ar/cmp	type=boolean rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+ar/text	type=text rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+ar/round	type=numeric rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+ar/lag_n	type=numeric rows=6 1,NULL | 2,2.50 | 3,4.50 | 4,NULL | 5,8.50 | 6,10.50
+ar/lag_d	type=double precision rows=6 1,NULL | 2,1.5 | 3,2.5 | 4,NULL | 5,4.5 | 6,5.5
+ar/paren	type=numeric rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+ar/colon	type=numeric rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+ar/lag_colon	type=numeric rows=6 1,NULL | 2,10000000000000001 | 3,20000000000000001 | 4,NULL | 5,40000000000000001 | 6,50000000000000001
+ar/max	type=numeric rows=1 6.25
