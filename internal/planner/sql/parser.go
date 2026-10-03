@@ -1213,6 +1213,17 @@ func lexParseCreateTable(sql string, l *lexer) (*ParsedQuery, error) {
 		// reference, so the lexer's unquoted-identifier fold (#731) must not
 		// rewrite `BIGINT` to `bigint` in what SHOW COLUMNS echoes back.
 		typeName := colTypeTok.source()
+		// `DOUBLE PRECISION` is PostgreSQL's canonical two-word spelling of
+		// float8 and the only multi-word float name; it was "expected ',' or
+		// ')' between column definitions" here while CAST read it (#1405,
+		// #1464). PRECISION is not a keyword of this grammar, so it arrives
+		// as an identifier, and only an unquoted one continues the name.
+		if !colTypeTok.quoted && strings.EqualFold(colTypeTok.val, "double") {
+			if nx := l.peekToken(); nx.typ == TokenIdent && !nx.quoted && strings.EqualFold(nx.val, "precision") {
+				l.nextToken()
+				typeName += " " + nx.source()
+			}
+		}
 		// Optional type parameters: DECIMAL(10,2), VECTOR(384),
 		// ARRAY(DECIMAL(9,2)), ROW(a INT64, d DECIMAL(9,2)),
 		// MAP(STRING, INT64).

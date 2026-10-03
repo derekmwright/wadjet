@@ -2,7 +2,11 @@
 
 package sql
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
+)
 
 // UnnamedOutputColumn is the name PostgreSQL gives an output column that has
 // no natural one: an operator expression, a literal, a predicate, a scalar
@@ -147,6 +151,16 @@ func subqueryOutputName(sql string) string {
 // `CAST('x' AS varchar(4))` is `varchar`, and `AS double precision` is
 // `float8`, which is the type's real name rather than its SQL spelling.
 func castTypeOutputName(typeName string) string {
+	// A float spelling is labelled by the type it RESOLVES to, which for
+	// FLOAT(p) is decided by p: `CAST(1 AS FLOAT(1))` is `float4` and
+	// `CAST(1 AS FLOAT(30))` `float8` on PostgreSQL 17.11 — dropping the
+	// parameter first labelled both `float8` (#1464).
+	if tid, err, ok := parquet.FloatTypeID(typeName); ok && err == nil {
+		if tid == parquet.TypeFloat32 {
+			return "float4"
+		}
+		return "float8"
+	}
 	t := strings.ToLower(strings.TrimSpace(typeName))
 	if i := strings.IndexByte(t, '('); i > 0 {
 		t = strings.TrimSpace(t[:i])
@@ -161,10 +175,6 @@ func castTypeOutputName(typeName string) string {
 		return "int8"
 	case "smallint":
 		return "int2"
-	case "real":
-		return "float4"
-	case "double", "double precision", "float":
-		return "float8"
 	case "boolean":
 		return "bool"
 	case "decimal":

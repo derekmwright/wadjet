@@ -2,7 +2,11 @@
 
 package sql
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
+)
 
 // The identity of an expression, and the name a GROUP BY key is emitted
 // under.
@@ -243,8 +247,9 @@ func canonicalExpr(n Node, fold bool) Node {
 // for, and a non-pair is one it refuses with 42803:
 //
 //	INT / INTEGER / INT4          SMALLINT / INT2
-//	BIGINT / INT8                 REAL / FLOAT4
-//	DOUBLE PRECISION / FLOAT8     DEC / DECIMAL / NUMERIC
+//	BIGINT / INT8
+//	DOUBLE PRECISION / FLOAT8 / FLOAT / FLOAT(25..53)
+//	REAL / FLOAT4 / FLOAT(1..24)  DEC / DECIMAL / NUMERIC
 //	BOOL / BOOLEAN                CHARACTER VARYING / VARCHAR
 //
 // VARCHAR and TEXT are NOT a pair and are deliberately absent: PostgreSQL
@@ -256,6 +261,17 @@ func canonicalExpr(n Node, fold bool) Node {
 // one destination — because whitespace inside them is spelling and nothing
 // else, exactly as it is outside them.
 func canonicalTypeName(name string) string {
+	// A float spelling folds onto the type it RESOLVES to, the parameter
+	// included: FLOAT and FLOAT(25..53) are DOUBLE PRECISION, FLOAT(1..24) is
+	// REAL — `SELECT CAST(g AS FLOAT(1)) … GROUP BY CAST(g AS REAL)` answers on
+	// PostgreSQL 17.11 and the same against `CAST(g AS FLOAT)` is 42803
+	// (#1464). parquet.FloatTypeID is the table every door reads.
+	if tid, err, ok := parquet.FloatTypeID(name); ok && err == nil {
+		if tid == parquet.TypeFloat32 {
+			return "REAL"
+		}
+		return "DOUBLE PRECISION"
+	}
 	base, params := splitTypeParams(name)
 	if canon, ok := typeNameSynonyms[base]; ok {
 		base = canon
@@ -294,10 +310,6 @@ var typeNameSynonyms = map[string]string{
 	"BIGINT":            "BIGINT",
 	"INT2":              "SMALLINT",
 	"SMALLINT":          "SMALLINT",
-	"FLOAT4":            "REAL",
-	"REAL":              "REAL",
-	"FLOAT8":            "DOUBLE PRECISION",
-	"DOUBLE PRECISION":  "DOUBLE PRECISION",
 	"DECIMAL":           "DECIMAL",
 	"DEC":               "DECIMAL",
 	"NUMERIC":           "DECIMAL",

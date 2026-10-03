@@ -124,18 +124,10 @@ func ParseTypeID(s string) (TypeID, error) {
 		}
 		return TypeString, nil
 	}
-	// FLOAT(n) — the SQL-standard spelling of "a binary float with at least n
-	// bits of mantissa", which PostgreSQL resolves to real or double precision
-	// (#652). It failed the whole CREATE TABLE before, for the same reason
-	// VARCHAR(4) did.
-	if bits, err, ok := FloatTypePrecision(upper); ok {
-		if err != nil {
-			return 0, err
-		}
-		if bits <= 24 {
-			return TypeFloat32, nil
-		}
-		return TypeFloat64, nil
+	// Every floating-point spelling — FLOAT, FLOAT(n), REAL, FLOAT4, FLOAT8,
+	// DOUBLE PRECISION — is FloatTypeID's, the one table every door reads.
+	if tid, err, ok := FloatTypeID(upper); ok {
+		return tid, err
 	}
 	switch upper {
 	case "BOOL", "BOOLEAN":
@@ -144,10 +136,6 @@ func ParseTypeID(s string) (TypeID, error) {
 		return TypeInt32, nil
 	case "INT64", "BIGINT", "LONG":
 		return TypeInt64, nil
-	case "FLOAT32", "FLOAT":
-		return TypeFloat32, nil
-	case "FLOAT64", "DOUBLE":
-		return TypeFloat64, nil
 	case "STRING", "VARCHAR", "TEXT":
 		return TypeString, nil
 	case "BYTES", "BINARY", "VARBINARY":
@@ -313,6 +301,50 @@ func FloatTypePrecision(name string) (bits int, err error, ok bool) {
 		return 0, sqlerr.New("22023", "precision for type float must be less than 54 bits"), true
 	}
 	return n, nil, true
+}
+
+// FloatTypeID is the ONE table of floating-point type names: every door that
+// reads a type name as a float type — a CREATE TABLE column, an ARRAY / ROW /
+// MAP element inside one, KnownTypeName's accept-set for the CAST door —
+// resolves it here, so a name cannot mean float4 at one door and float8 at
+// another (#1464). ok=false means the name is not a float spelling at all.
+//
+// PostgreSQL 17.11, measured (format_type of the column / pg_typeof of the
+// cast, case-insensitive, whitespace inside the name and its parentheses
+// free):
+//
+//	FLOAT, FLOAT8, DOUBLE PRECISION, FLOAT(25..53)   double precision (701)
+//	REAL, FLOAT4, FLOAT(1..24)                       real (700)
+//	FLOAT(0), FLOAT(54)                              22023
+//
+// A bare FLOAT is double precision. Through v0.25.3 the CREATE TABLE door read
+// it as float4 — a column declared FLOAT stored 674999997 as 675000000 — and
+// refused REAL, FLOAT4, FLOAT8 and DOUBLE PRECISION with 42704, while the CAST
+// door already read all of them as PostgreSQL does.
+//
+// FLOAT32 and FLOAT64 are this engine's own names (TypeID.String, SHOW
+// COLUMNS) and DOUBLE its long-standing spelling of float8; PostgreSQL has
+// none of the three (42704) and they stay accepted, a kept superset. The
+// catalog records a column's TypeID, never the spelling that declared it,
+// so a column created FLOAT before this table changed is still float4.
+func FloatTypeID(name string) (TypeID, error, bool) {
+	upper := strings.ToUpper(strings.Join(strings.Fields(name), " "))
+	if bits, err, ok := FloatTypePrecision(upper); ok {
+		if err != nil {
+			return 0, err, true
+		}
+		if bits <= 24 {
+			return TypeFloat32, nil, true
+		}
+		return TypeFloat64, nil, true
+	}
+	switch upper {
+	case "REAL", "FLOAT4", "FLOAT32":
+		return TypeFloat32, nil, true
+	case "FLOAT", "FLOAT8", "DOUBLE PRECISION", "DOUBLE", "FLOAT64":
+		return TypeFloat64, nil, true
+	}
+	return 0, nil, false
 }
 
 // stripTypeParams reports whether upper is one of names followed by a

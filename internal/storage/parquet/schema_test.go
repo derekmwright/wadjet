@@ -65,7 +65,18 @@ func TestParseTypeID_AllTypes(t *testing.T) {
 		{"LONG", TypeInt64, false},
 		// Floats
 		{"FLOAT32", TypeFloat32, false},
-		{"FLOAT", TypeFloat32, false},
+		// PostgreSQL's bare FLOAT is double precision (#1464); REAL / FLOAT4
+		// are real and FLOAT8 / DOUBLE PRECISION double, at every door.
+		{"FLOAT", TypeFloat64, false},
+		{"float", TypeFloat64, false},
+		{"REAL", TypeFloat32, false},
+		{"float4", TypeFloat32, false},
+		{"FLOAT8", TypeFloat64, false},
+		{"DOUBLE PRECISION", TypeFloat64, false},
+		{"double   precision", TypeFloat64, false},
+		{"FLOAT ( 25 )", TypeFloat64, false},
+		{"DOUBLEPRECISION", 0, true},
+		{"FLOAT 8", 0, true},
 		{"FLOAT64", TypeFloat64, false},
 		{"DOUBLE", TypeFloat64, false},
 		// Strings
