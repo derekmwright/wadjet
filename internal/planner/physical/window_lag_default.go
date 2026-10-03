@@ -81,12 +81,16 @@ func lagLeadDefaultArg(we logical.WindowExpr) plansql.Node {
 	return ast
 }
 
-// lagLeadValueArg is the value argument's AST.
+// lagLeadValueArg is the value argument's AST: the argument's own tree where
+// it still spells the argument (it carries the marks a subquery body's plan
+// stamps), else the respelled text — over a GROUP BY `SUM(b)` is the
+// aggregate's output column, and the tree would compute the aggregate again.
 func lagLeadValueArg(we logical.WindowExpr) plansql.Node {
-	if we.InputExpr != nil {
+	text := strings.TrimSpace(we.InputColumn())
+	if we.InputExpr != nil && cleanExpr(we.InputExpr.String()) == cleanExpr(text) {
 		return we.InputExpr
 	}
-	ast, err := plansql.ParseExpression(strings.TrimSpace(we.InputColumn()))
+	ast, err := plansql.ParseExpression(text)
 	if err != nil {
 		return nil
 	}
