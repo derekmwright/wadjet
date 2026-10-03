@@ -1153,7 +1153,19 @@ func (h *HashJoin) buildTempJoinFromBatches(buildBatches []*batch.RecordBatch) (
 		NewResidual:     h.NewResidual,
 		SemiAntiKeyOnly: h.SemiAntiKeyOnly,
 		BuildTableAlias: h.BuildTableAlias,
-		keyBuf:          make([]byte, 0, 128),
+		// The replay's output schema is the main join's: every input
+		// joinOutputSchemaWithMapping reads travels with it. Without the
+		// probe-side schema, a partition whose probe file is EMPTY (the
+		// probe side produced no rows, so the replay's probe never runs
+		// Execute) named the NULL half of its unmatched build rows from a nil
+		// schema: a RIGHT/FULL join's preserved rows came out as a batch of
+		// another shape than the in-memory partitions', and the consumer read
+		// the preserved side's values as NULL (#1359). The qualification
+		// inputs are the same rule for the build half's names.
+		BuildColOrigins:     h.BuildColOrigins,
+		QualifyAllBuildCols: h.QualifyAllBuildCols,
+		ProbeSchemaHint:     h.ProbeSchemaHint,
+		keyBuf:              make([]byte, 0, 128),
 		// A NULL anywhere in the build poisons a null-aware anti join's whole
 		// answer, and grace partitioning sends every NULL key to ONE partition
 		// — so the per-partition join has to inherit what the whole build saw
@@ -1167,6 +1179,9 @@ func (h *HashJoin) buildTempJoinFromBatches(buildBatches []*batch.RecordBatch) (
 		totalRows += b.Len
 	}
 	tmpJoin.BuildRowHint = int64(totalRows)
+	h.mu.Lock()
+	tmpJoin.probeSchema = h.probeSchema
+	h.mu.Unlock()
 
 	// The replay rebuilds ONE grace partition's rows and never evicts, so it
 	// takes a single index part (join_index_parts.go).
@@ -1509,7 +1524,7 @@ func (p *HashJoinProbe) NextFlush(ctx context.Context) (*batch.RecordBatch, erro
 			var pending *batch.RecordBatch
 			switch p.spillFlushTmpJoin.JoinType {
 			case RightJoin, FullOuterJoin:
-				pending = p.spillFlushTmpProbe.FlushUnmatched(p.join.spillLeftSchema)
+				pending = p.spillFlushTmpProbe.FlushUnmatched(nil)
 			case RightAntiJoin:
 				pending = p.spillFlushTmpProbe.FlushAntiMatched()
 			case RightSemiJoin:
@@ -1569,9 +1584,13 @@ func (p *HashJoinProbe) openNextSpillPartition(ctx context.Context) error {
 		return fmt.Errorf("building hash table for spilled partition %d: %w", partID, err)
 	}
 	probe := tmpJoin.Probe()
-	probe.OutputFilter = p.join.spillOutputFilter
-	probe.OutputExcludeProbe = p.join.spillOutputExcludeProbe
-	probe.OutputExcludeBuild = p.join.spillOutputExcludeBuild
+	// The replay probe narrows its output exactly as this probe does. These
+	// are plan settings every clone carries from construction; they used to
+	// be copied off the first probe batch, so an empty probe side left the
+	// replay unnarrowed — wider than the in-memory partitions' output.
+	probe.OutputFilter = p.OutputFilter
+	probe.OutputExcludeProbe = p.OutputExcludeProbe
+	probe.OutputExcludeBuild = p.OutputExcludeBuild
 	probe.LateMaterialize = p.LateMaterialize
 	// nextSpilledProbeBatch drains NextOutput before reading the next probe
 	// batch, so the partition probe may bound its fan-out exactly like the
