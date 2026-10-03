@@ -1505,6 +1505,7 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 			// name the window reads is one the producer already emits.
 			winAliases.materialize((*stages)[preCount:], &stage, winChild)
 		}
+		ownWindowKeyNames(&stage)
 		// Only depend on leaf stages from subtree (not transitive deps like scan).
 		stage.Dependencies = leafStages((*stages)[preCount:])
 		*stages = append(*stages, stage)
