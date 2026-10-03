@@ -184,10 +184,11 @@ refused**, and the line is drawn by AUTHORIZATION, not by convenience.
    into the table a sample would declare refuses every value cell (22P02;
    22003 past int8) at its line and reads an unquoted empty field as NULL and
    a quoted `"5"` as 5 — `COPY` declares its columns, so it has no key past a
-   sample. DuckDB 1.5.6 samples 20 480 rows by default; with
-   `sample_size = 100` its `read_csv` refuses a later mismatch (`CSV Error on
-   Line: 2201`) — it does not widen to VARCHAR — while its `read_json`
-   ROUNDS 0.75 into a `BIGINT` column (5051 for the file summing 5050.75),
+   sample. DuckDB 1.5.6 samples 20 480 rows by default; with `sample_size = 100` its `read_csv` widens a column whose later values do not fit
+   (the 0.75 at row 2 200 of a BIGINT column is rounded to 1 — SUM 2 418 901 — and a bool,
+   date or text at row 101 widens the column to VARCHAR), refusing only a later value that
+   cannot be cast at all (`CSV Error on Line: 2201` for text, bool, date, quoted, empty and
+   past-int64 values in a numeric column); its `read_json` ROUNDS 0.75 into a `BIGINT` column (5051 for the file summing 5050.75),
    reads `true` as 1, drops a key first seen past the sample (a reference to
    it is a binder error) and drops a nested field. The whole-file inference
    pass over 100 MB costs: CSV (1.28 M rows × 8 columns) 2.5 s against a
@@ -195,12 +196,12 @@ refused**, and the line is drawn by AUTHORIZATION, not by convenience.
    `sample_size = -1` takes 3.7–4.0 s where the default takes 1.5–2.0 s
    (≈ 2.2×); JSON (662 k objects) 5.6–6.0 s against a 1.0 s read (the
    sample's `encoding/json` tokenizer; framing alone is 0.18 s), end to end
-   5.7–6.4 s against 1.2 s (≈ 5×); over `http(s)` the bytes cross twice;
+   5.7–6.4 s against 1.2 s (6.3–6.7×); over `http(s)` the bytes cross twice;
    resident memory is unchanged (45 MB either way).
 
    THE ALTERNATIVES. (B) WIDEN by default — re-infer and re-read on a
    mismatch, or infer from every row whenever the file is local — makes
-   EVERY read of a file pay the measured 2–5× (the engine has no cached
+   EVERY read of a file pay the measured 2.2–6.7× (the engine has no cached
    schema between statements, so it is paid per statement), changes a
    column's type under a query that already ran over the same file's first
    rows, and still needs a second open the readers cannot take over a FIFO
@@ -414,7 +415,7 @@ each is a consequence of where a column list comes from:
   column and both types (#1243). A KEY or nested FIELD first seen past the
   sample is refused as well (arc RD, `22P04` / `22P02`), and
   `sample_size = -1` reads such a file with every row typed, at the measured
-  2–5× of a read (§3's position paragraph);
+  2.2–6.7× of a read (§3's position paragraph);
 - a table function is still not a DAG stage (`stage scan-0 has no
   dependencies and no ScanFiles`). That is `distributed` and arc PT's pin;
   the five-arm gates carry it per cell rather than chasing it. A DAG fragment
