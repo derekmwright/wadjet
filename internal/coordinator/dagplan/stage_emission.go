@@ -1319,11 +1319,11 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 		}
 		var winCols []WindowColSpec
 		// The computed derived aliases the stage's keys, arguments and key
-		// EXPRESSIONS read, materialized on the producer in ONE call:
-		// materializeAliasColumns narrows the producer to its projection, so
-		// a second call for a second OVER clause found the list set and
-		// added nothing.
-		var winAliases []aliasColumn
+		// EXPRESSIONS read, each bound to a synthetic slot and materialized on
+		// the producer in ONE call: materializeAliasColumns narrows the
+		// producer to its projection, so a second call for a second OVER
+		// clause found the list set and added nothing.
+		winAliases := newWindowAliasSlots(p)
 		for _, we := range node.WindowExprs {
 			// Resolved by the same helper buildWindow uses, so the stage
 			// spec and the single-process operator describe one computation
@@ -1377,8 +1377,7 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 					continue
 				}
 				if c := derivedAliasColumnFor(pb, winChild); c.Expr != "" {
-					winAliases = append(winAliases, c)
-					partitionBy[i] = c.Name
+					partitionBy[i] = winAliases.bind(c)
 				}
 			}
 			for i := range orderBy {
@@ -1391,8 +1390,7 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 					continue
 				}
 				if c := derivedAliasColumnFor(orderBy[i].Column, winChild); c.Expr != "" {
-					winAliases = append(winAliases, c)
-					orderBy[i].Column = c.Name
+					orderBy[i].Column = winAliases.bind(c)
 				}
 			}
 			// …and the ARGUMENT, which exec.Window also reads by name off the
@@ -1437,8 +1435,7 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 				// vector that exists. Same helper, same producer, same
 				// declared type — the argument is not a different kind of
 				// thing from a key.
-				winAliases = append(winAliases, c)
-				inputCol = c.Name
+				inputCol = winAliases.bind(c)
 			}
 			winCols = append(winCols, WindowColSpec{
 				Func:     we.Func,
@@ -1470,21 +1467,24 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 			// for the whole stage: the keys are shared across its OVER
 			// clauses, and computing a shared key twice would put two
 			// columns of one name on the batch.
-			WindowKeyExprs: respellWindowKeyExprs(p.PlanContext.WindowKeySpecs(winKeys), winChild),
-			WindowCols:     winCols,
+			//
+			// A reference to a computed derived alias is bound to its slot
+			// BEFORE a rename is respelled to its source: `ob` in
+			// `SUM(b + ob)` over `SELECT b * 2 AS b, b AS ob` respells to the
+			// source `b`, which is then indistinguishable from the alias `b`.
+			WindowKeyExprs: respellWindowKeyExprs(
+				winAliases.bindKeyExprs(p.PlanContext.WindowKeySpecs(winKeys), winChild), winChild),
+			WindowCols: winCols,
 		}
 		// A key EXPRESSION is evaluated over the window's input exactly as a
 		// key or an argument is read from it, so a reference in it to a
 		// COMPUTED derived alias takes the same rung: the alias is
-		// materialized on the producer under its own name. Without it
+		// materialized on the producer, under its slot. Without it
 		// `SUM(v + 0) OVER (…)` and LAG / LEAD's `cast(v as …)` (#1435) over
 		// `SELECT t.b * 2 AS v FROM t JOIN u …` read NULL on the DAG arms —
 		// a JOIN, a LIMIT, a sort or a window below emits no stage for the
 		// Project that defines `v`.
-		winAliases = append(winAliases, windowKeyExprAliases(stage.WindowKeyExprs, winChild)...)
-		if len(winAliases) > 0 {
-			materializeWindowAliasKeys((*stages)[preCount:], winAliases)
-		}
+		winAliases.materialize((*stages)[preCount:], &stage, winChild)
 		// Only depend on leaf stages from subtree (not transitive deps like scan).
 		stage.Dependencies = leafStages((*stages)[preCount:])
 		*stages = append(*stages, stage)
