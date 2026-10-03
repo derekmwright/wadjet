@@ -1827,6 +1827,26 @@ APPENDS rather than narrowing, because a window emits every input column plus
 its own — which is also why it is not `exec.Project`. Nothing above the window
 reads `__winkey_N`, which is what keeps it clear of #558: the gather projects
 to the visible SELECT list and a consumer stage reads the window's outputs.
+Because the window APPENDS its keys, a window stacked over another sees the
+lower stage's keys on its stream, and `physical.PlanContext.ResolveWindowKeys`
+numbers each window's keys from zero over its LOGICAL input, which does not
+carry them: so the stage renames the keys it computes to `__winkey_s<stage>_N`
+at emission (`dagplan.ownWindowKeyNames`), and an outer `LAG(x.b, 1, 7)` over
+an inner `LAG(b, 1, 0)` no longer reads the inner default.
+
+A window over a derived table that computes a column under the name of a
+column of its own input (`SELECT b * 2 AS b, b AS ob`,
+`logical.WindowShadowedInput`) reads that table's DECLARED columns: the
+producer below the window emits them under their own names
+(`dagplan.materializeWindowDeclaredInput`, each definition composed down to
+the producer), so the shadowed source column is not on the stream, and every
+name walk that resolves a reference from above stops at such a window instead
+of respelling it into the table's definitions — the rename sources, the
+aggregate inputs, a set operation's arm, a pushed-down filter, a shuffle key,
+the window key ladder and a join side's declared schema. A producer that
+cannot compute every declared column refuses the plan with
+`ErrUnreachableGatherOutput`, which routes it to the coordinator-local
+pipeline.
 
 **Not covered:** frames are carried end to end but `exec.Window` never reads
 `WindowColumn.Frame` at all (#350) — an operator defect both paths share.
