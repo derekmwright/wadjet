@@ -186,3 +186,15 @@ w/modLitFracGroup	b	true	SELECT MOD(8, 2.5) AS k, count(*) FROM ss_t t GROUP BY 
 w/modColFrac	s	true	SELECT t.id, MOD(t.i, 2.5) FROM ss_t t ORDER BY t.id	{20,1700} rows=6 1,0.5 | 2,-2.0 | 3,0.0 | 4,0.0 | 5,1.0 | 6,NULL
 w/modColFrac	e	true	SELECT t.id, MOD(t.i, 2.5) FROM ss_t t ORDER BY t.id	{20,1700} rows=6 1,0.5 | 2,-2.0 | 3,0.0 | 4,0.0 | 5,1.0 | 6,NULL
 w/modColFrac	b	true	SELECT t.id, MOD(t.i, 2.5) FROM ss_t t ORDER BY t.id	{20,1700} rows=6 0000000000000001,0001ffff000000011388 | 0000000000000002,00010000400000010002 | 0000000000000003,0000000000000001 | 0000000000000004,0000000000000001 | 0000000000000005,00010000000000010001 | 0000000000000006,NULL
+w/modColFracB	s	true	SELECT t.id, MOD(t.b, 0.7) FROM ss_t t ORDER BY t.id	{20,1700} rows=6 1,0.6 | 2,0.0 | 3,0.1 | 4,0.0 | 5,0.3 | 6,NULL
+w/modColFracB	e	true	SELECT t.id, MOD(t.b, 0.7) FROM ss_t t ORDER BY t.id	{20,1700} rows=6 1,0.6 | 2,0.0 | 3,0.1 | 4,0.0 | 5,0.3 | 6,NULL
+w/modColFracB	b	true	SELECT t.id, MOD(t.b, 0.7) FROM ss_t t ORDER BY t.id	{20,1700} rows=6 0000000000000001,0001ffff000000011770 | 0000000000000002,0000000000000001 | 0000000000000003,0001ffff0000000103e8 | 0000000000000004,0000000000000001 | 0000000000000005,0001ffff000000010bb8 | 0000000000000006,NULL
+w/modBigFracCol	s	true	SELECT t.id, MOD(t.b, 2.5) FROM ss_t t ORDER BY t.id	{20,1700} rows=6 1,0.0 | 2,0.0 | 3,0.0 | 4,0.0 | 5,1.0 | 6,NULL
+w/modBigFracCol	e	true	SELECT t.id, MOD(t.b, 2.5) FROM ss_t t ORDER BY t.id	{20,1700} rows=6 1,0.0 | 2,0.0 | 3,0.0 | 4,0.0 | 5,1.0 | 6,NULL
+w/modBigFracCol	b	true	SELECT t.id, MOD(t.b, 2.5) FROM ss_t t ORDER BY t.id	{20,1700} rows=6 0000000000000001,0000000000000001 | 0000000000000002,0000000000000001 | 0000000000000003,0000000000000001 | 0000000000000004,0000000000000001 | 0000000000000005,00010000000000010001 | 0000000000000006,NULL
+w/modLitQuotedFracTbl	s	true	SELECT t.id, MOD(8, '2.5') FROM ss_t t WHERE t.id = 1	ERR 22P02 invalid input syntax for type integer: "2.5"
+w/modLitQuotedFracTbl	e	true	SELECT t.id, MOD(8, '2.5') FROM ss_t t WHERE t.id = 1	ERR 22P02 invalid input syntax for type integer: "2.5"
+w/modLitQuotedFracTbl	b	true	SELECT t.id, MOD(8, '2.5') FROM ss_t t WHERE t.id = 1	ERR 22P02 invalid input syntax for type integer: "2.5"
+w/modColQuotedFracB	s	true	SELECT t.id, MOD(t.b, '2.5') FROM ss_t t ORDER BY t.id	ERR 22P02 invalid input syntax for type bigint: "2.5"
+w/modColQuotedFracB	e	true	SELECT t.id, MOD(t.b, '2.5') FROM ss_t t ORDER BY t.id	ERR 22P02 invalid input syntax for type bigint: "2.5"
+w/modColQuotedFracB	b	true	SELECT t.id, MOD(t.b, '2.5') FROM ss_t t ORDER BY t.id	ERR 22P02 invalid input syntax for type bigint: "2.5"

@@ -2028,3 +2028,23 @@ m/modColFracCmp	{int} rows=1 1
 m/modFracFirst	{numeric,numeric} rows=1 2.5,-2.5
 m/modLitFracDiv	{int,numeric} rows=4 1,0.22222222222222222222 | 2,-0.14285714285714285714 | 3,0.05000000000000000000 | 5,50.0000000000000000
 m/modBigFracCol	{int,numeric} rows=6 1,0.0 | 2,0.0 | 3,0.0 | 4,0.0 | 5,1.0 | 6,NULL
+m/modColFracI	{int,numeric} rows=6 1,0.2 | 2,0.0 | 3,0.1 | 4,0.0 | 5,0.3 | 6,NULL
+m/modIFrac3	{int,numeric} rows=6 1,0.0 | 2,-1.0 | 3,2.0 | 4,0.0 | 5,1.0 | 6,NULL
+m/modBFracMul2	{int,numeric} rows=6 1,1.2 | 2,0.0 | 3,0.2 | 4,0.0 | 5,0.6 | 6,NULL
+m/modBFracGroup	{numeric,int} rows=5 0.0,2 | 0.1,1 | 0.3,1 | 0.6,1 | NULL,1
+m/modBFracPart	{int,int} rows=6 1,1 | 2,2 | 3,1 | 4,2 | 5,1 | 6,1
+m/modBFracCmp	{int} rows=1 3
+m/modBFracOrder	{int,numeric} rows=6 2,0.0 | 4,0.0 | 3,0.1 | 5,0.3 | 1,0.6 | 6,NULL
+m/modINeg	{int,numeric,numeric} rows=6 1,0.2,-0.6 | 2,0.0,0.0 | 3,0.1,-0.1 | 4,0.0,0.0 | 5,0.3,-0.3 | 6,NULL,NULL
+m/modBigFracDiv	{numeric,numeric} rows=1 0.0,-0.5
+m/modCastIFrac	{int,numeric} rows=6 1,0.2 | 2,0.0 | 3,0.1 | 4,0.0 | 5,0.3 | 6,NULL
+m/modSubqFrac	{int,numeric} rows=1 1,0.4
+m/modLitQuotedFrac	ERR 22P02 invalid input syntax for type integer: "2.5"
+m/modLitQuotedFracTbl	ERR 22P02 invalid input syntax for type integer: "2.5"
+m/modLitQuotedFracMulN	ERR 22P02 invalid input syntax for type integer: "2.5"
+m/modLitQuotedFracGroup	ERR 22P02 invalid input syntax for type integer: "2.5"
+m/modLitQuotedBig	ERR 22P02 invalid input syntax for type bigint: "2.5"
+m/modLitQuotedFracNeg	ERR 22P02 invalid input syntax for type integer: "2.5"
+m/modLitQuotedOther	ERR 22P02 invalid input syntax for type integer: "3.0"
+m/modColQuotedFrac	ERR 22P02 invalid input syntax for type integer: "2.5"
+m/modColQuotedFracB	ERR 22P02 invalid input syntax for type bigint: "2.5"

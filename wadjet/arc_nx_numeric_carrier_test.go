@@ -79,6 +79,11 @@ func TestArcNXEmbeddedNumericCarrier(t *testing.T) {
 				"MOD(8, 2.5) AS m, MOD(a.i, 2.5) AS c, MOD(8, -(2.5)) AS d, MOD(8, 2.5) * a.n AS e FROM nx_e a) q ORDER BY q.id",
 			"{int,bool,bool,bool,bool} 1,true,true,true,true | 3,true,false,true,true | 5,true,true,true,false | " +
 				"6,true,NULL,true,NULL"},
+		// MOD with a numeric argument is mod(numeric, numeric): the exact
+		// remainder, as `%` answers it.
+		{"mod/numericDivisorExact",
+			"SELECT a.id, MOD(a.b, 0.7) AS m, MOD(a.i, 0.7) AS r FROM nx_e a ORDER BY a.id",
+			"{int,numeric,numeric} 1,0.6,0.2 | 3,0.1,0.1 | 5,0.3,0.3 | 6,NULL,NULL"},
 	}
 	for _, c := range cases {
 		res, err := db.Query(ctx, c.sql)
