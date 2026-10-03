@@ -91,7 +91,8 @@ func pwR2Prep(ctx context.Context, c *pgconn.PgConn, name, sql string, oids []ui
 	if rr.Err != nil {
 		// Where it was raised is not part of the answer: PostgreSQL raises
 		// some refusals at Prepare that this engine raises at Execute, and a
-		// client sees the same error (the round-1 table's convention).
+		// client sees the same error (arc_pw_param_types_wire_test.go's
+		// convention).
 		return pwErr(rr.Err)
 	}
 	if resultFmt == 1 {

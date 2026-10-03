@@ -472,8 +472,8 @@ type temporalText struct {
 }
 
 // parseTemporalText is THE date/time text grammar, one for DATE and
-// TIMESTAMP alike (round-2 B3 of arc PW: the TIMESTAMP reader was a list of
-// Go layouts — two-digit fields, `-` separators, seconds required — so
+// TIMESTAMP alike (#1426's splice: when the TIMESTAMP reader was a list of
+// Go layouts — two-digit fields, `-` separators, seconds required —
 // `'2024/03/04'`, `'2024-3-4'` and `'2024-03-04 12:00'` were 22007 as a
 // TIMESTAMP while the DATE reader took them, and a timestamp parameter bound
 // over pgwire, spliced as `CAST('…' AS TIMESTAMP)`, was refused where
@@ -760,9 +760,11 @@ func ParseTimestampZone(s string) (wall time.Time, offsetSeconds int, hasZone bo
 // same column reads the same way, and one function is the only way to keep
 // that true (#692).
 //
-// Zero is a defensible answer for a comparison (it cannot match) and an
-// indefensible one for a WRITE, which is why the writer's entry point above
-// returns an error instead.
+// Zero is 1970-01-01 00:00:00, a value a TIMESTAMP column can hold: a
+// refused spelling compared with a column matches a row holding the epoch
+// (`ts = 'garbage'`), where PostgreSQL raises 22007 — a known wrong value of
+// the comparison kernels, which should raise as CAST does. A WRITE never
+// reads through here: the writer's entry point above returns the error.
 func ParseTimestampMillisOrZero(s string) int64 {
 	ms, err := ParseTimestampMillis(s)
 	if err != nil {

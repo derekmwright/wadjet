@@ -2,7 +2,7 @@
 
 package pgwire
 
-// The pinned answers of arc PW round 2's gate (arc_pw_param_types_r2_test.go),
+// The pinned answers of TestArcPWRound2MatchesPostgres (arc_pw_param_types_r2_test.go),
 // measured on PostgreSQL 17.11 and on this engine over the same pgconn calls;
 // a cell with pg answers differently on PostgreSQL, and row names the
 // divergence-catalog row that records it.

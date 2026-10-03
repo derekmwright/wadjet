@@ -52,9 +52,9 @@ import (
 // except the constant-only ones (paramPositions).
 //
 // It is the PREFIX statement starts from: a statement whose own text already
-// holds it (a column a client named `__pw_param_1`, round-1 review N3: it was
-// read as the placeholder and typed `__pw_param_1 = $1` text where PostgreSQL
-// types it by the column) is parsed with a longer prefix its text does not
+// holds it (a column a client named `__pw_param_1` would otherwise be read
+// as the placeholder, typing `__pw_param_1 = $1` text where PostgreSQL types
+// it by the column) is parsed with a longer prefix its text does not
 // hold, so a sentinel never names anything the client wrote.
 const paramSentinel = "__pw_param_"
 
@@ -86,12 +86,11 @@ func (c *pgConn) inferParamOIDs(sql string, declared []uint32) []uint32 {
 	// on every catalog write (catalog.Generation — a DROP / CREATE, an ALTER,
 	// a function, a commit's manifest), from this connection or any other, so
 	// a type resolved against a table that has since been recreated is never
-	// reused (round-2 B1: keyed by the text alone, '2.5' bound for
-	// `INSERT … VALUES (1, $1)` was spliced as the numeric the dropped table's
-	// column was and stored 3 in the recreated INTEGER, where PostgreSQL
-	// raises 22P02). The generation is read BEFORE the walk, so an entry can
-	// only be newer than its key, never older; a store without one caches
-	// nothing.
+	// reused (keyed by the text alone, '2.5' bound for `INSERT … VALUES (1,
+	// $1)` would be spliced as the numeric the dropped table's column was and
+	// store 3 in the recreated INTEGER, where PostgreSQL raises 22P02). The
+	// generation is read BEFORE the walk, so an entry can only be newer than
+	// its key, never older; a store without one caches nothing.
 	gen, cacheable := c.db.Catalog().Generation()
 	key := paramCacheKey(gen, sql, declared)
 	if cacheable {
@@ -511,11 +510,11 @@ func (pt *paramTyper) typeOf(n plansql.Node, sc *scope) uint32 {
 // pgOperatorType is PostgreSQL's type for a numeric literal and for the
 // arithmetic over numbers, as parse analysis resolves the operator — the type
 // a parameter compared with the expression takes, which is a CLIENT contract:
-// the client encodes its value for the ParameterDescription's OID (round-2
-// B2). It is NOT the engine's declaration of the result: this engine declares
-// integer arithmetic bigint (numeric-decimal r1, a kept divergence of the
-// RESULT column), and reading the parameter's type off that declared `$1 =
-// n + 1` int8 where PostgreSQL and v0.25.3 declare int4.
+// the client encodes its value for the ParameterDescription's OID. It is
+// NOT the engine's declaration of the result: this engine declares integer
+// arithmetic bigint (numeric-decimal r1, a kept divergence of the RESULT
+// column), and reading the parameter's type off that declared `$1 = n + 1`
+// int8 where PostgreSQL and v0.25.3 declare int4.
 //
 // PostgreSQL 17.11, measured per operator (+ - * / %) × operand pair over
 // smallint, integer, bigint, numeric, real, double precision: two exact

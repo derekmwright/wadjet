@@ -1371,8 +1371,8 @@ func (c *pgConn) handleParse(payload []byte) {
 	// parse analysis: the statement keeps them until it is closed or parsed
 	// again, whatever DDL runs in between (on this connection or another),
 	// and a new Parse of the same text types it against the catalog as it
-	// stands then (round-2 B1: a type kept per statement TEXT outlived a
-	// DROP / CREATE and spliced '2.5' as a numeric into a recreated INTEGER).
+	// stands then (a type kept per statement TEXT would outlive a DROP /
+	// CREATE and splice '2.5' as a numeric into a recreated INTEGER).
 	typed := oids
 	if inferred := c.inferParamOIDs(sql, oids); len(inferred) >= len(oids) {
 		typed = inferred
