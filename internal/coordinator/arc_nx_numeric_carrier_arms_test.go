@@ -304,6 +304,47 @@ func nxCells() []nxCell {
 		addOrd("qn/"+q[0]+"/proj", "SELECT t.id, "+q[1]+" FROM ss_t t WHERE t.b <> 0 ORDER BY t.id")
 		addOrd("qn/"+q[0]+"/cmp", "SELECT t.id FROM ss_t t WHERE t.b <> 0 AND "+q[1]+" = 0.0000000011111111111111111111 ORDER BY t.id")
 	}
+	// A QUOTIENT OVER A FUNCTION THE EXACTNESS WALK PASSES THROUGH
+	// (expr.CastExactnessArgs, the one list both halves read): round / ceil /
+	// ceiling / floor / trunc / abs / sign over a bare NUMERIC cast or an
+	// integer CAST under numeric arithmetic answer the argument's exact
+	// DECIMAL, so the quotient keeps the double the argument's quotient keeps.
+	// The runtime walk stopped at these five while the plan's passed some, and
+	// the one-scale quotient moved every comparison off PostgreSQL. A (p,s)
+	// cast, sqrt and an integer column are the controls.
+	for _, f := range [][3]string{
+		{"ceil", "ceil(X)", "1.3333333333333333"}, {"ceiling", "ceiling(X)", "1.3333333333333333"},
+		{"floor", "floor(X)", "1.3333333333333333"}, {"round", "round(X)", "1.3333333333333333"},
+		{"round2", "round(X, 2)", "1.3333333333333333"}, {"trunc", "trunc(X)", "1.3333333333333333"},
+		{"absRound", "abs(round(X))", "1.3333333333333333"}, {"sign", "sign(X) * 4", "1.7777777777777778"},
+	} {
+		for _, o := range [][2]string{
+			{"bareNum", "CAST(t.i AS NUMERIC)"}, {"icMul", "CAST(t.i AS INTEGER) * 1.0"}, {"icPlus", "CAST(t.i AS INTEGER) + 0.0"},
+		} {
+			e := strings.ReplaceAll(f[1], "X", o[1])
+			addOrd("qf/"+f[0]+"/"+o[0]+"/cmp", "SELECT t.id FROM ss_t t WHERE t.n <> 0 AND "+e+" / t.n = "+f[2]+" ORDER BY t.id")
+			if o[0] == "bareNum" {
+				addOrd("qf/"+f[0]+"/"+o[0]+"/proj", "SELECT t.id, "+e+" / t.n AS x FROM ss_t t WHERE t.n <> 0 ORDER BY t.id")
+			}
+		}
+	}
+	for _, f := range [][2]string{{"ceil", "ceil(CAST(t.i AS NUMERIC))"}, {"round", "round(CAST(t.i AS NUMERIC))"}} {
+		addOrd("qf/"+f[0]+"/win", "SELECT t.id, count(*) OVER (PARTITION BY "+f[1]+" / t.n = 1.3333333333333333) AS x FROM ss_t t WHERE t.n <> 0 ORDER BY t.id")
+		addOrd("qf/"+f[0]+"/group", "SELECT "+f[1]+" / t.n = 1.3333333333333333 AS k, count(*) AS c FROM ss_t t WHERE t.n <> 0 GROUP BY 1 ORDER BY 1")
+		addOrd("qf/"+f[0]+"/inList", "SELECT t.id FROM ss_t t WHERE t.n <> 0 AND "+f[1]+" / t.n IN (1.3333333333333333, -999) ORDER BY t.id")
+	}
+	for _, f := range [][2]string{
+		{"roundB", "round(CAST(t.b AS NUMERIC))"}, {"ceilB", "ceil(CAST(t.b AS NUMERIC))"},
+		{"roundBigMul", "round(CAST(t.b AS BIGINT) * 1.0)"}, {"floorBigPlus", "floor(CAST(t.b AS BIGINT) + 0.0)"},
+	} {
+		addOrd("qf/"+f[0]+"/cmp", "SELECT t.id FROM ss_t t WHERE t.b <> 0 AND t.n / "+f[1]+" = 0.0000000011111111111111111111 ORDER BY t.id")
+		addOrd("qf/"+f[0]+"/proj", "SELECT t.id, t.n / "+f[1]+" AS x FROM ss_t t WHERE t.b <> 0 ORDER BY t.id")
+	}
+	addOrd("qf/mod/bareNum/cmp", "SELECT t.id FROM ss_t t WHERE t.n <> 0 AND mod(CAST(t.i AS NUMERIC), 10) / t.n = 1.3333333333333333 ORDER BY t.id")
+	addOrd("qf/roundColCtl/cmp", "SELECT t.id FROM ss_t t WHERE t.n <> 0 AND round(t.i) / t.n = 1.3333333333333333 ORDER BY t.id")
+	addOrd("qf/floorIcCtl/cmp", "SELECT t.id FROM ss_t t WHERE t.n <> 0 AND floor(CAST(t.i AS INTEGER)) / t.n = 1.3333333333333333 ORDER BY t.id")
+	addOrd("qf/sqrtCtl/cmp", "SELECT t.id FROM ss_t t WHERE t.n <> 0 AND sqrt(CAST(t.i AS NUMERIC) * CAST(t.i AS NUMERIC)) / t.n = 1.3333333333333333 ORDER BY t.id")
+	addOrd("qf/roundNumScaleCtl/cmp", "SELECT t.id FROM ss_t t WHERE t.n <> 0 AND round(CAST(t.i AS NUMERIC(10,0))) / t.n = 1.3333333333333333 ORDER BY t.id")
 	// A NUMERIC OPERAND OF A CAST WITH NO CONVERSION FROM NUMERIC (round 2,
 	// B2): a wide literal is an exact DECIMAL now, boxed as its text, and the
 	// BOOLEAN / DATE / TIMESTAMP / INTERVAL / UUID / array arms read a string
