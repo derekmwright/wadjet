@@ -351,18 +351,20 @@ func SubqueryAnswersIntegralExtract(sql string) bool {
 // from a CAST: an integer CAST a query wrote (userIntegerCast) or a BARE
 // NUMERIC cast (Cast.bareDecimalType), at any depth of the constructs a
 // numeric value passes through — unary ±, arithmetic with any operand
-// (`CAST(i AS INTEGER) * 1.0`), the value arms of a CASE / COALESCE /
-// GREATEST / LEAST / NULLIF / IFNULL, and abs / mod / the decimal scalar
-// functions. A cast that NAMES its (p,s), a scalar subquery and every other
+// (`CAST(i AS INTEGER) * 1.0`), the value arms of a CASE / COALESCE, and the
+// arguments CastExactnessArgs names for a function call (abs, mod, round,
+// ceil, ceiling, floor, trunc, truncate, sign and the registry's choosing
+// functions). A cast that NAMES its (p,s), a scalar subquery and every other
 // function end the walk: their exactness does not come from such a cast.
 //
 // resolveDecimalMode asks it of both operands of a quotient: the one-scale
 // DECIMAL quotient (ADR-0024 §3, max(6, s1 + p2 + 1) per column) drops the
 // digits PostgreSQL's per-value scale keeps, so such a quotient keeps the
 // double it computed before either cast was exact — `t.n / NULLIF(CAST(t.b
-// AS BIGINT), 0)`, `(CAST(t.i AS INTEGER) * 1.0) / t.n` and `CAST(t.i AS
-// NUMERIC) / t.n` make one decision. physical.castMadeExactIn is the plan's
-// twin over the AST.
+// AS BIGINT), 0)`, `(CAST(t.i AS INTEGER) * 1.0) / t.n`, `CAST(t.i AS
+// NUMERIC) / t.n` and `ceil(CAST(t.i AS NUMERIC)) / t.n` make one decision.
+// physical.castMadeExactIn is the plan's twin over the AST; both read the
+// function list from CastExactnessArgs.
 func castMadeExactIn(e Expr) bool {
 	switch v := e.(type) {
 	case *Cast:
@@ -384,18 +386,59 @@ func castMadeExactIn(e Expr) bool {
 		r, rok := v.Right.(Expr)
 		return lok && castMadeExactIn(l) || rok && castMadeExactIn(r)
 	case *decimalScalarFn:
+		// The exact node keeps the call it wraps; the call's name decides.
 		return v.fallback != nil && castMadeExactIn(v.fallback)
 	case *numericFuncCall:
 		return castMadeExactIn(v.FuncCall)
 	case *FuncCall:
-		if _, ok := NumericDomainScalarFn(v.Name); ok {
-			return anyCastMadeExactIn(v.Args)
+		idx, ok := CastExactnessArgs(v.Name, len(v.Args))
+		if !ok {
+			return false
 		}
+		for _, i := range idx {
+			if i >= 0 && i < len(v.Args) && castMadeExactIn(v.Args[i]) {
+				return true
+			}
+		}
+		return false
 	}
 	if arms, isChoice := choiceDecimalArms(e); isChoice {
 		return anyCastMadeExactIn(arms)
 	}
 	return false
+}
+
+// CastExactnessArgs is the ONE list of functions a cast-made-exact numeric
+// passes through on the way to a quotient, for expr.castMadeExactIn and
+// physical.castMadeExactIn alike: the argument positions whose exactness the
+// call's result carries, and ok=false for a function that ends the walk.
+//
+// A function passes through when, over an exact DECIMAL argument, it answers
+// an exact DECIMAL of that argument — so a quotient over it takes the
+// one-scale rule exactly when a quotient over the argument would:
+//
+//   - the decimal scalar functions (decimalScalarOps: abs, ceil, ceiling,
+//     floor, round, trunc, truncate, sign) — argument 0; round's and trunc's
+//     second argument is a digit count, not a value;
+//   - mod — both arguments (decimalScalarFn's arg and modArg);
+//   - a choosing function the registry declares RetSameAsArg (coalesce,
+//     greatest, least, nullif, ifnull, if) — the arguments its result is
+//     resolved from (Ret.SameAsArgs).
+//
+// Every other function — a fixed FLOAT64 or integer declaration — ends the
+// walk: its result is not its argument's exact type. A function added to
+// decimalScalarOps or registered RetSameAsArg joins the list here, and
+// TestCastExactnessArgsEveryRegisteredNumericFunction names every registered
+// numeric function's disposition, so a new one fails until it is placed.
+func CastExactnessArgs(name string, nargs int) ([]int, bool) {
+	n := strings.ToLower(strings.TrimSpace(name))
+	if n == "mod" {
+		return []int{0, 1}, true
+	}
+	if _, ok := decimalScalarOps[n]; ok {
+		return []int{0}, true
+	}
+	return DefaultRegistry.ReturnType(n).SameAsArgs(nargs)
 }
 
 func anyCastMadeExactIn(es []Expr) bool {
