@@ -203,7 +203,97 @@ func wdCells() []wdCell {
 		wdCell{"issue/lead10", "SELECT id, LEAD(b, 10, 2.5) OVER (ORDER BY id) AS w FROM wd_t"},
 	)
 	out = append(append(out, wdComputedValueCells()...), wdNodeKindCells()...)
-	return append(append(out, wdShadowCells()...), wdAggregateOriginCells()...)
+	out = append(append(out, wdShadowCells()...), wdShadowAliasCells()...)
+	return append(out, wdAggregateOriginCells()...)
+}
+
+// wdShadowAliasCells: a shadowing alias (`SELECT b * 2 AS b`) projected
+// beside a window, read by every consumer above the window. On the DAG arms
+// the stream carries the SOURCE `b` (a rename of it, a definition substituted
+// above, reads it) and the alias in its window slot; a consumer that read the
+// alias by its name read the source (`b AS w3` 10, 20, … where PostgreSQL
+// answers 20, 40, …), with or without the window reading it.
+func wdShadowAliasCells() []wdCell {
+	srcs := []struct{ name, from string }{
+		{"proj", "FROM (SELECT id, g, b * 2 AS b FROM wd_t) s"},
+		{"filter", "FROM (SELECT id, g, b * 2 AS b FROM wd_t WHERE id > 1) s"},
+		{"sort", "FROM (SELECT id, g, b * 2 AS b FROM wd_t ORDER BY id DESC) s"},
+		{"limit", "FROM (SELECT id, g, b * 2 AS b FROM wd_t ORDER BY id LIMIT 5) s"},
+		{"cte", "FROM c"},
+		{"join", "FROM (SELECT t.id, t.g, t.b * 2 AS b FROM wd_t t JOIN wd_t u ON u.id = t.id) s"},
+		{"winbelow", "FROM (SELECT id, g, b * 2 AS b, ROW_NUMBER() OVER (ORDER BY id) AS rn FROM wd_t) s"},
+		{"upper", "FROM (SELECT id, g, upper(s) AS s, b * 2 AS b FROM wd_t) s"},
+	}
+	wins := []struct{ name, w string }{
+		{"issue", "LAG(b, 1, 2.5) OVER (ORDER BY id)"},
+		{"bare_sum", "SUM(b) OVER (ORDER BY id)"},
+		{"bare_part", "ROW_NUMBER() OVER (PARTITION BY b ORDER BY id)"},
+		{"bare_order", "RANK() OVER (ORDER BY b, id)"},
+		{"first", "FIRST_VALUE(b) OVER (ORDER BY id)"},
+		{"lag_nodef", "LAG(b, 1) OVER (ORDER BY id)"},
+		{"sum_expr", "SUM(b + 0) OVER (ORDER BY id)"},
+		{"rn", "ROW_NUMBER() OVER (ORDER BY id)"},
+	}
+	var out []wdCell
+	for _, src := range srcs {
+		for _, w := range wins {
+			q := "SELECT id, " + w.w + " AS w, b AS w3 " + src.from
+			if src.name == "cte" {
+				q = "WITH c AS (SELECT id, g, b * 2 AS b FROM wd_t) " + q
+			}
+			out = append(out, wdCell{"shadow_a/" + src.name + "/" + w.name, q})
+		}
+	}
+	// Every consumer above the window, over the alias and its rename.
+	p := "(SELECT id, g, b * 2 AS b, b AS ob FROM wd_t) s"
+	sub := func(w string) string {
+		return "(SELECT id, " + w + " AS w, b AS w3, ob AS w2 FROM " + p + ") x"
+	}
+	cons := []struct {
+		name string
+		q    func(string) string
+	}{
+		{"qualified", func(w string) string {
+			return "SELECT s.id, " + w + " AS w, s.b AS w3, s.ob AS w2 FROM " + p
+		}},
+		{"unaliased", func(w string) string { return "SELECT id, " + w + " AS w, b, ob FROM " + p }},
+		{"expr", func(w string) string { return "SELECT id, " + w + " AS w, b + 1 AS w3 FROM " + p }},
+		{"order_alias", func(w string) string {
+			return "SELECT id, " + w + " AS w, b AS w3, ob AS w2 FROM " + p + " ORDER BY b DESC NULLS LAST, id LIMIT 3"
+		}},
+		{"order_rename", func(w string) string {
+			return "SELECT id, " + w + " AS w, b AS w3, ob AS w2 FROM " + p + " ORDER BY ob DESC NULLS LAST, id LIMIT 3"
+		}},
+		{"where", func(w string) string { return "SELECT id, w, w3, w2 FROM " + sub(w) + " WHERE w2 > 15 AND w3 > 50" }},
+		{"where_bare", func(w string) string {
+			return "SELECT id, w, b FROM (SELECT id, " + w + " AS w, b FROM " + p + ") x WHERE b < 120"
+		}},
+		{"aggregate", func(w string) string { return "SELECT SUM(w2) AS a2, SUM(w3) AS a3, COUNT(w) AS c FROM " + sub(w) }},
+		{"group", func(w string) string { return "SELECT w2, COUNT(*) AS c, MAX(w3) AS m FROM " + sub(w) + " GROUP BY w2" }},
+		{"distinct", func(w string) string { return "SELECT DISTINCT w2, w3 FROM " + sub(w) }},
+		{"union", func(w string) string {
+			return "SELECT id, w2, w3 FROM " + sub(w) + " UNION ALL SELECT id, b, b FROM wd_t WHERE id = 1"
+		}},
+		{"outer_qual", func(w string) string { return "SELECT x.id, x.w2, x.w3 FROM " + sub(w) }},
+		{"win_arg", func(w string) string {
+			return "SELECT id, SUM(w2) OVER (ORDER BY id) AS v2, SUM(w3) OVER (ORDER BY id) AS v3 FROM " + sub(w)
+		}},
+		{"win_part", func(w string) string {
+			return "SELECT id, ROW_NUMBER() OVER (PARTITION BY w3 ORDER BY id) AS v, w3 FROM " + sub(w)
+		}},
+		{"win_order", func(w string) string {
+			return "SELECT id, RANK() OVER (ORDER BY w3 DESC NULLS LAST, id) AS v, w3 FROM " + sub(w)
+		}},
+	}
+	for _, c := range cons {
+		for _, w := range []struct{ name, w string }{
+			{"sum", "SUM(b) OVER (ORDER BY id)"}, {"lag_ob", "LAG(ob, 1, 2.5) OVER (ORDER BY id)"},
+			{"rn", "ROW_NUMBER() OVER (ORDER BY id)"},
+		} {
+			out = append(out, wdCell{"shadow_c/" + c.name + "/" + w.name, c.q(w.w)})
+		}
+	}
+	return out
 }
 
 // wdShadowCells: a derived table that gives a computed alias the name of a
@@ -234,11 +324,15 @@ func wdShadowCells() []wdCell {
 		{"bare_order", "RANK() OVER (ORDER BY b, id)"},
 		{"lag_nodef", "LAG(b, 1) OVER (ORDER BY id)"},
 		{"two", "SUM(b) OVER (ORDER BY id) + COUNT(*) OVER (PARTITION BY b % 3)"},
+		{"rn", "ROW_NUMBER() OVER (ORDER BY id)"},
 	}
 	var out []wdCell
 	for _, src := range srcs {
 		for _, w := range wins {
-			q := "SELECT id, " + w.w + " AS w, ob AS w2 " + src.from
+			// The alias itself beside its rename: the stream above the
+			// window carries the alias in its slot and the source under its
+			// own name, so `b` and `ob` each read their own value.
+			q := "SELECT id, " + w.w + " AS w, b AS w3, ob AS w2 " + src.from
 			if src.name == "cte" {
 				q = "WITH c AS (SELECT id, g, b * 2 AS b, b AS ob FROM wd_t) " + q
 			}
