@@ -394,6 +394,15 @@ func scalarFnDeclaredNumericDomain(n *plansql.FuncCallNode, decls ColDecls) (exp
 			return expr.DeclType{}, false
 		}
 		if i > 0 && isConstNumericLitNode(a) && t.ID != batch.TypeDecimal {
+			if quotedNonIntegerLitNode(a) {
+				// A quoted constant whose text is not an integer (`'2.5'`)
+				// is not an integer argument either: decline, as for 2.5,
+				// and the call keeps the double it answered before an
+				// integer first argument was admitted — the engine's reading
+				// of `'2.5'` as a number, where PostgreSQL resolves the
+				// unknown to int4 and raises 22P02 (numeric-decimal r21).
+				return expr.DeclType{}, false
+			}
 			// A FRACTIONAL constant (`MOD(8, 2.5)`, `MOD(t.i, -(2.5))`) is
 			// typed by its own declaration, DECIMAL, which no integer domain
 			// admits: PostgreSQL resolves `mod(numeric, numeric)` there, and
@@ -504,6 +513,20 @@ func constQuotientOperandNode(node plansql.Node) bool {
 		return constQuotientOperandNode(n.Inner)
 	}
 	return isConstNumericLitNode(node)
+}
+
+// quotedNonIntegerLitNode reports whether a node is a QUOTED literal whose
+// trimmed text is not an int64 (`'2.5'`, `'1e3'`): a constant an
+// integer-domain function cannot take as an integer argument. `'3'` and
+// `' 3 '` are integers and keep the width exemption; NULL is not a quoted
+// literal and keeps it too.
+func quotedNonIntegerLitNode(node plansql.Node) bool {
+	l, ok := node.(*plansql.Lit)
+	if !ok || l.Kind != plansql.LitString {
+		return false
+	}
+	_, err := strconv.ParseInt(strings.TrimSpace(l.Value), 10, 64)
+	return err != nil
 }
 
 // integerConstNode reports whether a numeric constant is an INTEGER one — a
