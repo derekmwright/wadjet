@@ -86,8 +86,10 @@ func (w *windowAliasSlots) bind(c aliasColumn) string {
 // that names a computed derived alias to the alias's slot. It runs BEFORE
 // respellWindowKeyExprs turns a rename into its source's name: over
 // `SELECT b * 2 AS b, b AS ob`, `ob` respells to `b`, which is then spelled
-// exactly like the alias. An alias computed over an aggregate's outputs is
-// read under its own name (aliasOwnerReadsAggregate).
+// exactly like the alias. An alias whose origin is an aggregate's group rows
+// (aliasOriginReadsAggregate) is never materialized below the aggregate: it is
+// spelled in the names the aggregate stage publishes instead
+// (aggregateAliasDefinition).
 func (w *windowAliasSlots) bindKeyExprs(specs []physical.ProjectExprSpec, child *logical.Node) []physical.ProjectExprSpec {
 	for i := range specs {
 		ast, err := plansql.ParseExpression(specs[i].Expr)
@@ -96,14 +98,8 @@ func (w *windowAliasSlots) bindKeyExprs(specs []physical.ProjectExprSpec, child 
 		}
 		out, changed, complete := localPlanFacts.RewriteColRefs(ast, func(ref *plansql.ColRef) (plansql.Node, bool) {
 			written := ref.String()
-			// An alias computed over an AGGREGATE's outputs is published by
-			// the aggregate stage's own SELECT-list projection, and the
-			// producer materializeWindowAliasKeys would pick sits BELOW the
-			// aggregate, where `MAX(b) * 2` cannot be evaluated (the bare
-			// argument's rung refuses that shape at 978cd0e5 too). The key
-			// reads the published alias, as it did.
-			if _, owner := derivedAliasDefinition(written, child); aliasOwnerReadsAggregate(owner) {
-				return nil, false
+			if aliasOriginReadsAggregate(written, child) {
+				return aggregateAliasDefinition(written, child, 0)
 			}
 			c := derivedAliasColumnFor(written, child)
 			if c.Expr == "" {
@@ -162,27 +158,79 @@ func (w *windowAliasSlots) materialize(stages []Stage, stage *Stage, child *logi
 	}
 }
 
-// aliasOwnerReadsAggregate reports whether the Project defining a derived
-// alias reads an Aggregate's output (through Filters, a HAVING).
-func aliasOwnerReadsAggregate(owner *logical.Node) bool {
-	if owner == nil || len(owner.Children) != 1 {
-		return false
-	}
-	n := owner.Children[0]
-	for depth := 0; n != nil && depth < aggRespellDepth; depth++ {
-		switch n.Type {
-		case logical.NodeAggregate:
+// aliasOriginReadsAggregate reports whether a computed derived alias is
+// defined over an AGGREGATE's group rows, at any depth: the walk that finds the
+// alias's defining Project (derivedAliasDefinition) continues below it through
+// every derived table's SELECT list and every node that keeps one row per group
+// (a HAVING, a sort, a LIMIT, a window — logical.AggregateOverGroupRows' list),
+// and answers true when it reaches an Aggregate.
+//
+// Such an alias cannot be materialized on the producer materializeWindowAliasKeys
+// picks: that producer sits BELOW the aggregate, where `MAX(b) * 2` — or
+// `a.mb * 2` over a derived `MAX(b) AS mb`, or `MAX(b) * 2 + ROW_NUMBER() OVER
+// (…)` — cannot be evaluated, and the planner refuses the stage (`carries
+// projections [b g v] that its fragment does not evaluate`). The key reads the
+// alias's own name, as it did before key expressions were materialized. A JOIN
+// ends the walk: a join stage is itself a producer above the aggregate, and it
+// computes the alias.
+func aliasOriginReadsAggregate(name string, child *logical.Node) bool {
+	_, owner := derivedAliasDefinition(name, child)
+	for depth := 0; owner != nil && depth < aggRespellDepth; depth++ {
+		if logical.AggregateOverGroupRows(owner) != nil {
 			return true
-		case logical.NodeFilter:
-			if len(n.Children) != 1 {
-				return false
-			}
-			n = n.Children[0]
-		default:
-			return false
 		}
+		var next *logical.Node
+		for n := owner; len(n.Children) == 1 && n.Children[0] != nil; {
+			n = n.Children[0]
+			if n.Type == logical.NodeProject {
+				next = n
+				break
+			}
+			if !logical.AggScopePreservingWrapper(n.Type) {
+				break
+			}
+		}
+		owner = next
 	}
 	return false
+}
+
+// aggregateAliasDefinition spells a computed derived alias defined over an
+// aggregate's group rows in the names that relation's stage publishes, so the
+// window fragment computes it from its own input. A Project directly over the
+// group rows is absorbed by the aggregate stage (absorbAggregateOutputProjection)
+// and publishes the alias itself, so the reference stays a name; an alias one
+// derived table further up (`a.mb * 2` over `SELECT g, MAX(b) AS mb … GROUP BY
+// g`) is computed by no stage, and its definition is substituted, each of its
+// own references resolved the same way against the relation its Project reads
+// — a computed alias below is substituted again, a rename is respelled to its
+// source, and a qualifier is dropped, because the stage publishes the
+// aggregate's outputs unqualified.
+func aggregateAliasDefinition(name string, child *logical.Node, depth int) (plansql.Node, bool) {
+	if depth >= aggRespellDepth {
+		return nil, false
+	}
+	def, owner := derivedAliasDefinition(name, child)
+	if def == nil || owner == nil || len(owner.Children) != 1 || logical.AggregateOverGroupRows(owner) != nil {
+		return nil, false
+	}
+	below := owner.Children[0]
+	out, _, complete := localPlanFacts.RewriteColRefs(def, func(ref *plansql.ColRef) (plansql.Node, bool) {
+		if sub, ok := aggregateAliasDefinition(ref.String(), below, depth+1); ok {
+			return sub, true
+		}
+		if src := localPlanFacts.DerivedAliasSourceColumn(ref.String(), below); src != "" {
+			return &plansql.ColRef{Column: localPlanFacts.CleanExpr(src)}, true
+		}
+		if ref.Table != "" {
+			return &plansql.ColRef{Column: ref.Column}, true
+		}
+		return nil, false
+	})
+	if !complete {
+		return nil, false
+	}
+	return &plansql.ParenNode{Inner: out}, true
 }
 
 // respellAggInputExpr rewrites aggregate argument references to the columns
