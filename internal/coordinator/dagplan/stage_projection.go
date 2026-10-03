@@ -8,7 +8,6 @@ import (
 	"github.com/derekmwright/wadjet/internal/engine/expr"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	"github.com/derekmwright/wadjet/internal/planner/physical"
-	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -271,14 +270,6 @@ func (p *StagePlanner) attachScanSelectProjections(root *logical.Node, stages []
 			// outright (#776).
 			continue
 		}
-		if slot := p.windowAliasSlotFor(specs[j].Name, renameChild); slot != "" &&
-			(proj[j].ASTExpr == nil || p.PlanContext.IsSimpleColRefForRename(proj[j].ASTExpr)) {
-			// A computed derived alias riding the stream in a window's slot
-			// (windowAliasSlotFor): the column of its own name is the source.
-			specs[j].Expr = slot
-			anyNestedRename = true
-			continue
-		}
 		if proj[j].ASTExpr != nil && (!p.PlanContext.IsSimpleColRefForRename(proj[j].ASTExpr) || p.PlanContext.AstIsFieldPath(proj[j].ASTExpr, colTypes)) {
 			// #387: an EXPRESSION referencing a nested rename (`k + 1` over
 			// `r_regionkey AS k`) was attached verbatim, so the fragment
@@ -293,39 +284,8 @@ func (p *StagePlanner) attachScanSelectProjections(root *logical.Node, stages []
 			// written against it. A declined rewrite (subquery/window
 			// bearing, unknown node) leaves the spec untouched, keeping
 			// today's loud failure over a silently different expression.
-			//
-			// A reference to a computed alias riding the stream in a
-			// window's slot reads the slot (windowAliasSlotFor), and the
-			// declaration is inferred with the alias's definition in its
-			// place, since no declaration walk sees the slot.
-			src, typed := proj[j].ASTExpr, proj[j].ASTExpr
-			var aliasOwner *logical.Node
-			if slotted, changed, complete := p.PlanContext.RewriteColRefs(src, func(ref *plansql.ColRef) (plansql.Node, bool) {
-				if slot, _, owner := p.windowAliasSlotDef(ref.String(), renameChild); slot != "" {
-					if aliasOwner == nil {
-						aliasOwner = owner
-					}
-					return &plansql.ColRef{Column: slot}, true
-				}
-				return nil, false
-			}); !changed || !complete {
-				aliasOwner = nil
-			} else {
-				src = slotted
-				typed, _, _ = p.PlanContext.RewriteColRefs(typed, func(ref *plansql.ColRef) (plansql.Node, bool) {
-					if _, def, _ := p.windowAliasSlotDef(ref.String(), renameChild); def != nil {
-						return &plansql.ParenNode{Inner: def}, true
-					}
-					return nil, false
-				})
-			}
-			if rewritten, ok := p.PlanContext.SubstituteNestedRenameRefs(src, renameChild); ok && rewritten != proj[j].ASTExpr {
+			if rewritten, ok := p.PlanContext.SubstituteNestedRenameRefs(proj[j].ASTExpr, renameChild); ok && rewritten != proj[j].ASTExpr {
 				specs[j].Expr = rewritten.String()
-				if typed != proj[j].ASTExpr {
-					if t, tok := p.PlanContext.SubstituteNestedRenameRefs(typed, renameChild); tok {
-						rewritten = t
-					}
-				}
 				// physical.PlanContext.StrictIntArithColsThroughRenames mirrors the colTypes call
 				// just below it: the rewritten expression names only SOURCE
 				// columns, so the strict-int set to check it against is the
@@ -333,14 +293,13 @@ func (p *StagePlanner) attachScanSelectProjections(root *logical.Node, stages []
 				decl, conf := p.PlanContext.InferProjectionDeclTypeConf(rewritten, parquet.TypeString,
 					p.PlanContext.StrictIntArithColsThroughRenames(renameChild),
 					p.PlanContext.SourceColDeclsThroughRenames(renameChild))
-				if aliasOwner != nil && len(aliasOwner.Children) == 1 {
-					// With a slotted alias's definition in place every
-					// reference is a column of the alias's own Project's
-					// input, which the walk above cannot see through the
-					// window and declares as an unknown float.
-					if d, dconf := p.PlanContext.InferProjectionDeclTypeConf(rewritten, parquet.TypeString,
-						p.PlanContext.StrictIntArithCols(aliasOwner.Children[0]),
-						p.PlanContext.InputColDecls(aliasOwner.Children[0])); dconf == expr.Decided {
+				if typed, input := typedOverShadowedWindow(rewritten, renameChild); input != nil {
+					// The rewrite stopped at a window over a derived table
+					// that shadows its input: the names it reads are that
+					// table's declared columns, declared from their
+					// definitions over the relation below them.
+					if d, dconf := p.PlanContext.InferProjectionDeclTypeConf(typed, parquet.TypeString,
+						p.PlanContext.StrictIntArithCols(input), p.PlanContext.InputColDecls(input)); dconf == expr.Decided {
 						decl, conf = d, dconf
 					}
 				}

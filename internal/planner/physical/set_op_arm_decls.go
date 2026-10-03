@@ -526,6 +526,10 @@ func setOpArmComputedSource(name string, n *logical.Node) (plansql.Node, bool) {
 			}
 		case n.Type == logical.NodeAggregate:
 			return nil, false
+		case logical.WindowShadowedInput(n) != nil:
+			// The window's input carries the derived table's declared
+			// columns under their own names (logical.WindowShadowedInput).
+			return nil, false
 		case n.Type == logical.NodeJoin && len(n.Children) == 2:
 			if e, ok := setOpArmComputedSource(resolved, n.Children[0]); ok {
 				return e, true
