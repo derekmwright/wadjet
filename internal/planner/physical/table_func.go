@@ -947,7 +947,7 @@ func inferUnnestType(vals []string) parquet.TypeID {
 // SYSTEM: batch-level — each batch included/excluded as a whole with probability p.
 type sampleOperator struct {
 	method string  // "BERNOULLI" or "SYSTEM"
-	pct    float64 // 0-100
+	pct    float64 // 0-100: the scan's sampleRangeSource refused any other value
 	rng    *rand.Rand
 }
 

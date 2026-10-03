@@ -234,7 +234,8 @@ type Node struct {
 	FilterOnlyColumns []string // columns needed ONLY by the filter directly above this scan (candidates for scan-level filter evaluation without materialization)
 	ShapeOnlyColumns  []string // byte-array columns whose EVERY use in the plan reads shape, not contents (LENGTH/IS NULL/= ''/COUNT) — the scan decodes them as lengths, see shape_only_columns.go
 	SampleMethod      string   // TABLESAMPLE method: BERNOULLI, SYSTEM
-	SamplePercent     float64  // percentage for TABLESAMPLE (0-100)
+	SamplePercent     float64  // TABLESAMPLE argument as real (float4), unchecked: the range is the sampler's
+	SampleNull        bool     // the TABLESAMPLE argument is NULL (2202H when the scan begins)
 
 	// Table Function (e.g., read_json, read_csv, unnest)
 	IsTableFunc    bool              // true if this scan reads from a table function

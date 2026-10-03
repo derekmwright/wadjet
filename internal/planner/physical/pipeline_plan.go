@@ -225,7 +225,10 @@ func (p *Planner) buildScan(ctx context.Context, node *logical.Node) (exec.Sourc
 
 	var ops []exec.UnaryOperator
 
-	if node.SampleMethod != "" && node.SamplePercent > 0 {
+	if node.SampleMethod != "" {
+		// The percentage's range is checked when the scan begins — its first
+		// batch — as PostgreSQL checks it (checkSamplePercent).
+		scanner = &sampleRangeSource{Source: scanner, pct: node.SamplePercent, null: node.SampleNull}
 		ops = append(ops, newSampleOperator(node.SampleMethod, node.SamplePercent))
 	}
 	return scanner, ops, &exec.CollectSink{}, nil
