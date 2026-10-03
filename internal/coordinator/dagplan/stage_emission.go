@@ -159,6 +159,9 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 			EstimatedBytes:  estBytes,
 			EstimatedRows:   estRows,
 		}
+		if ts, ok := physical.ScanTableSample(node); ok {
+			stage.Sample = &ts
+		}
 		*stages = append(*stages, stage)
 		if parentID != nil {
 			for i := range *stages {

@@ -77,8 +77,11 @@ func fuseScanShuffle(stages []Stage) []Stage {
 		// single-write. Fusing those would also break dispatch routing:
 		// the pass-through branch returns raw parquet as OutputSinglePart,
 		// which a partition-binding consumer must never receive.
+		// A sampled scan dispatches too (its sampler runs in the scan
+		// fragment, #1411).
 		if len(scan.FilterExprs) == 0 && len(scan.ProjectExprs) == 0 &&
-			len(scan.SecurityProjectExprs) == 0 && len(scan.EmitDynamicFilters) == 0 {
+			len(scan.SecurityProjectExprs) == 0 && len(scan.EmitDynamicFilters) == 0 &&
+			scan.Sample == nil {
 			continue
 		}
 		// Don't fuse if the scan already had a non-singleton output target —

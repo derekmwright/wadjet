@@ -14,6 +14,7 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/distributed"
+	"github.com/derekmwright/wadjet/internal/engine/exec"
 )
 
 // dispatchScanAggregateStage dispatches N partial-aggregate tasks, one
@@ -426,6 +427,8 @@ func (c *Coordinator) dispatchScanFilterStage(
 			// its IPv4/UUID/MAC columns are, and without this the scan reads
 			// them as the INT64/BYTE_ARRAY they are stored in (#423).
 			ColumnTypes: wireColumnSpecs(stage.ScanSchema),
+			// The sample is drawn where the rows are read (#1411).
+			Sample: wireTableSample(stage.Sample),
 		}
 		if shardCount > 1 {
 			scanOp.ScanShardIndex = shardIdx
@@ -688,4 +691,13 @@ func scanAliasForStage(stage dagplan.Stage) string {
 		return stage.TableName
 	}
 	return stage.ID
+}
+
+// wireTableSample is a sampled scan stage's TABLESAMPLE as its OpScan carries
+// it to the worker (#1411); nil for an unsampled scan.
+func wireTableSample(ts *exec.TableSample) *distributed.TableSampleSpec {
+	if ts == nil {
+		return nil
+	}
+	return &distributed.TableSampleSpec{Method: ts.Method, Percent: ts.Percent, Null: ts.Null}
 }

@@ -226,6 +226,13 @@ func LargeBuildScans(stages []Stage, probeAlias string, thresholdBytes int64) []
 		if s.ScanAlias == probeAlias {
 			continue // skip probe table
 		}
+		// A sampled build is never pre-scanned: the pre-scan re-plans
+		// `SELECT cols FROM <table>`, which reads every row, and the probe
+		// task's planner reads a pre-scanned alias as a ready source with no
+		// sampler on it. The probe task scans it itself, sampled (#1411).
+		if s.Sample != nil {
+			continue
+		}
 		if s.EstimatedBytes >= thresholdBytes {
 			large = append(large, s)
 		}

@@ -112,7 +112,7 @@ func applyAttachOnArrival(stages []Stage) []Stage {
 		// plumbing (observed: cascade mid-scans dispatch there with zero
 		// FilterExprs), so `guarded` implies the fragment path.
 		dispatched := guarded || len(c.FilterExprs) > 0 || len(c.ProjectExprs) > 0 ||
-			len(c.SecurityProjectExprs) > 0 ||
+			len(c.SecurityProjectExprs) > 0 || c.Sample != nil ||
 			(c.Exchange != nil && len(c.Exchange.Keys) > 0 && c.Exchange.Count > 0)
 		if !dispatched {
 			continue

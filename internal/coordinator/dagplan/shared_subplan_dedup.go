@@ -280,7 +280,10 @@ func (d *subplanDeduper) fingerprintAs(id, joinTypeOverride string) (string, boo
 		len(s.OutputStringLength) > 0 ||
 		len(s.EmitDynamicFilters) > 0 || len(s.ConsumeDynamicFilters) > 0 ||
 		len(s.PreComputedAggregates) > 0 || len(s.BuildCachePreScans) > 0 ||
-		len(s.UnionArms) > 0 {
+		len(s.UnionArms) > 0 ||
+		// Two sampled scans of one table are two independent draws, never
+		// one subplan read twice (#1411).
+		s.Sample != nil {
 		return "", false
 	}
 

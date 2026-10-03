@@ -2741,7 +2741,7 @@ func (e *Executor) buildFragmentSource(task distributed.Task, spec distributed.O
 			}
 		}
 	}
-	return src, nil
+	return sampledFragmentSource(src, spec.Sample), nil
 }
 
 func (e *Executor) buildFragmentUnary(ctx context.Context, task distributed.Task, spec distributed.OpSpec) ([]exec.UnaryOperator, func(), error) {
