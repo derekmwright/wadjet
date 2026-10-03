@@ -347,6 +347,20 @@ func nxCells() []nxCell {
 	addOrd("qf/floorIcCtl/cmp", "SELECT t.id FROM ss_t t WHERE t.n <> 0 AND floor(CAST(t.i AS INTEGER)) / t.n = 1.3333333333333333 ORDER BY t.id")
 	addOrd("qf/sqrtCtl/cmp", "SELECT t.id FROM ss_t t WHERE t.n <> 0 AND sqrt(CAST(t.i AS NUMERIC) * CAST(t.i AS NUMERIC)) / t.n = 1.3333333333333333 ORDER BY t.id")
 	addOrd("qf/roundNumScaleCtl/cmp", "SELECT t.id FROM ss_t t WHERE t.n <> 0 AND round(CAST(t.i AS NUMERIC(10,0))) / t.n = 1.3333333333333333 ORDER BY t.id")
+	// AN ALIASED INTEGER-LITERAL QUOTIENT OVER A NUMERIC COLUMN (candidate
+	// NX-C14, deferred): on the single-process arms a computed item with an
+	// alias records its expression text as its source column, and Project
+	// resolves `7 / t.n` through columnIndexFallback's strip-to-the-first-dot
+	// to the column `n`, so the item is typed numeric(10,2): the integer
+	// literal's quotient prints at scale 2 and the literal past int64's exact
+	// quotient refuses 22003. The DAG arms and the unaliased item answer the
+	// one-scale quotient. Pinned as it stands, per arm.
+	for _, a := range [][2]string{
+		{"pastInt64", "9223372036854775808"}, {"int64", "9223372036854775807"}, {"small", "7"},
+	} {
+		addOrd("alias/"+a[0]+"Quot", "SELECT t.id, "+a[1]+" / t.n AS x FROM ss_t t WHERE t.n <> 0 ORDER BY t.id")
+		addOrd("alias/"+a[0]+"QuotNoAlias", "SELECT t.id, "+a[1]+" / t.n FROM ss_t t WHERE t.n <> 0 ORDER BY t.id")
+	}
 	// A NUMERIC OPERAND OF A CAST WITH NO CONVERSION FROM NUMERIC (round 2,
 	// B2): a wide literal is an exact DECIMAL now, boxed as its text, and the
 	// BOOLEAN / DATE / TIMESTAMP / INTERVAL / UUID / array arms read a string
