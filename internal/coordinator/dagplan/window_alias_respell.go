@@ -3,6 +3,7 @@
 package dagplan
 
 import (
+	"fmt"
 	"strings"
 
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
@@ -41,28 +42,60 @@ func respellWindowKeyExprs(specs []physical.ProjectExprSpec, child *logical.Node
 	return specs
 }
 
-// windowKeyExprAliases is derivedAliasColumnFor over every reference inside
-// the window's key expressions: the computed derived aliases the producer has
-// to materialize under their own names for the fragment's key projection to
-// read them — the rung a PARTITION BY key and the argument already take
-// (#658, #770), so a key expression binds through whatever node kinds lie
-// between the window and the alias's Project, as they do. A reference
-// respellWindowKeyExprs rewrote to a rename's source names no alias any more
-// and contributes nothing.
-func windowKeyExprAliases(specs []physical.ProjectExprSpec, child *logical.Node) []aliasColumn {
-	var out []aliasColumn
-	seen := map[string]bool{}
-	for _, s := range specs {
-		ast, err := plansql.ParseExpression(s.Expr)
+// windowAliasSlots binds every computed derived alias one window stage reads —
+// a PARTITION BY / ORDER BY key, the argument, a reference inside a key
+// EXPRESSION — to a SYNTHETIC column the producer materializes for it.
+//
+// The column is never the alias's own name. The producer's stream already has
+// a column of every name it forwards, and a derived table may give an alias the
+// name of a column it also reads (`SELECT b * 2 AS b, b AS ob`): materializing
+// the alias under `b` REPLACED the forwarded `b`, so the sibling `ob` — a
+// rename of the source `b` the gather reads off the same stream — read the
+// doubled value on the DAG arms. A `__winkey_alias_N` name collides with
+// nothing a query can write (the `__winkey_` namespace is reserved,
+// sql.RefuseReservedSlotName) and with nothing the stream forwards, so the
+// window reads the alias's value and every other consumer reads what it read
+// before.
+type windowAliasSlots struct {
+	p      *StagePlanner
+	byKey  map[string]string // lower(alias) + "\x00" + definition → slot
+	cols   []aliasColumn     // the slots, each carrying its alias's definition
+	toName map[string]string // slot → the alias's own name (the fallback)
+}
+
+func newWindowAliasSlots(p *StagePlanner) *windowAliasSlots {
+	return &windowAliasSlots{p: p, byKey: map[string]string{}, toName: map[string]string{}}
+}
+
+// bind returns the slot column c is materialized under.
+func (w *windowAliasSlots) bind(c aliasColumn) string {
+	key := strings.ToLower(c.Name) + "\x00" + c.Expr
+	if slot, ok := w.byKey[key]; ok {
+		return slot
+	}
+	slot := fmt.Sprintf("%salias_%d", plansql.SlotWindowKey, w.p.windowAliasSeq)
+	w.p.windowAliasSeq++
+	w.byKey[key] = slot
+	w.toName[strings.ToLower(slot)] = c.Name
+	c.Name = slot
+	w.cols = append(w.cols, c)
+	return slot
+}
+
+// bindKeyExprs rewrites every reference inside the window's key expressions
+// that names a computed derived alias to the alias's slot. It runs BEFORE
+// respellWindowKeyExprs turns a rename into its source's name: over
+// `SELECT b * 2 AS b, b AS ob`, `ob` respells to `b`, which is then spelled
+// exactly like the alias. An alias computed over an aggregate's outputs is
+// read under its own name (aliasOwnerReadsAggregate).
+func (w *windowAliasSlots) bindKeyExprs(specs []physical.ProjectExprSpec, child *logical.Node) []physical.ProjectExprSpec {
+	for i := range specs {
+		ast, err := plansql.ParseExpression(specs[i].Expr)
 		if err != nil {
 			continue
 		}
-		for _, ref := range localPlanFacts.CollectColRefs(ast) {
+		out, changed, complete := localPlanFacts.RewriteColRefs(ast, func(ref *plansql.ColRef) (plansql.Node, bool) {
 			written := ref.String()
-			if seen[strings.ToLower(written)] {
-				continue
-			}
-			seen[strings.ToLower(written)] = true
 			// An alias computed over an AGGREGATE's outputs is published by
 			// the aggregate stage's own SELECT-list projection, and the
 			// producer materializeWindowAliasKeys would pick sits BELOW the
@@ -70,14 +103,63 @@ func windowKeyExprAliases(specs []physical.ProjectExprSpec, child *logical.Node)
 			// argument's rung refuses that shape at 978cd0e5 too). The key
 			// reads the published alias, as it did.
 			if _, owner := derivedAliasDefinition(written, child); aliasOwnerReadsAggregate(owner) {
-				continue
+				return nil, false
 			}
-			if c := derivedAliasColumnFor(written, child); c.Expr != "" {
-				out = append(out, c)
+			c := derivedAliasColumnFor(written, child)
+			if c.Expr == "" {
+				return nil, false
 			}
+			return &plansql.ColRef{Column: w.bind(c)}, true
+		})
+		if changed && complete {
+			specs[i].Expr = out.String()
 		}
 	}
-	return out
+	return specs
+}
+
+// materialize projects every slot onto the producer below the window. When
+// the producer declines (it already carries a projection another pass wrote,
+// or there is none), every slot the stage names is put back to its alias's own
+// name — the spelling the stage read before slots existed.
+func (w *windowAliasSlots) materialize(stages []Stage, stage *Stage, child *logical.Node) {
+	if len(w.cols) == 0 || materializeWindowAliasKeys(stages, w.cols) {
+		return
+	}
+	back := func(name string) string {
+		if n, ok := w.toName[strings.ToLower(name)]; ok {
+			return n
+		}
+		return name
+	}
+	for i := range stage.WindowCols {
+		wc := &stage.WindowCols[i]
+		if in := back(wc.InputCol); in != wc.InputCol {
+			wc.InputCol = in
+			wc.InputRefs = aliasCandidatesForText(in, child)
+		}
+		for j := range wc.PartitionBy {
+			wc.PartitionBy[j] = back(wc.PartitionBy[j])
+		}
+		for j := range wc.OrderBy {
+			wc.OrderBy[j].Column = back(wc.OrderBy[j].Column)
+		}
+	}
+	for i := range stage.WindowKeyExprs {
+		ast, err := plansql.ParseExpression(stage.WindowKeyExprs[i].Expr)
+		if err != nil {
+			continue
+		}
+		out, changed, complete := localPlanFacts.RewriteColRefs(ast, func(ref *plansql.ColRef) (plansql.Node, bool) {
+			if n, ok := w.toName[strings.ToLower(ref.Column)]; ok && ref.Table == "" {
+				return &plansql.ColRef{Column: n}, true
+			}
+			return nil, false
+		})
+		if changed && complete {
+			stage.WindowKeyExprs[i].Expr = out.String()
+		}
+	}
 }
 
 // aliasOwnerReadsAggregate reports whether the Project defining a derived
