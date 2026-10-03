@@ -465,7 +465,7 @@ func resolveDecimalMode(op string, left, right Expr, b *batch.RecordBatch) (decM
 	if !operandIsDecimalTyped(left, b) && !operandIsDecimalTyped(right, b) {
 		return decMode{}, decOperands{}, false
 	}
-	if op == "/" && isConstNumericLit(left) && isConstNumericLit(right) {
+	if op == "/" && constQuotientOperand(left) && constQuotientOperand(right) {
 		// A division between two CONSTANTS keeps the float path it has always
 		// had. Item 3's division scale is a policy FLOOR of 6 fraction digits,
 		// chosen for column operands whose own precision drives it past that;
@@ -503,6 +503,23 @@ func resolveDecimalMode(op string, left, right Expr, b *batch.RecordBatch) (decM
 		out:  batch.DecimalType{Precision: p, Scale: s},
 		text: op,
 	}, decOperands{l: lo, r: ro}, true
+}
+
+// constQuotientOperand is a constant whose quotient with another keeps the
+// float path: a numeric literal (isConstNumericLit), or an INTEGER literal
+// past int64 — compileLit compiles that to its exact DECIMAL (Cast.intLit),
+// a float64 box before, and `9223372036854775808 / 7` keeps the double that
+// box computed, as a constant division always has. A fractional literal a
+// double cannot carry is not one: its quotient is exact (#1386).
+// physical.constQuotientOperandNode is the plan's twin.
+func constQuotientOperand(e Expr) bool {
+	switch v := e.(type) {
+	case *Cast:
+		return v.intLit
+	case *UnaryOp:
+		return (v.Op == "-" || v.Op == "+") && constQuotientOperand(v.Operand)
+	}
+	return isConstNumericLit(e)
 }
 
 // decOperands is the pair of exact accessors resolveDecimalMode settled on,

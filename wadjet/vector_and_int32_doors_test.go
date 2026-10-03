@@ -218,15 +218,17 @@ func TestAnOutOfRangeCastRefusesAtTheDoor(t *testing.T) {
 		// `time.Date(1970,1,1).AddDate(0, 0, n)` and time.Date multiplies the
 		// day count by 86400 in an unmodulated uint64: 2^63−1 days came back as
 		// epoch minus one, so what reached the store was the int64 -1 and the
-		// store had nothing left to reject. The last two are not int64 values
-		// at all — they parse as float64 — and Go's float-to-int conversion is
-		// implementation-defined for them.
+		// store had nothing left to reject.
 		{`SELECT 9223372036854775807::DATE`, "22003"},
 		{`SELECT 9223372036854775806::DATE`, "22003"},
 		{`SELECT (-9223372036854775808)::DATE`, "22003"},
 		{`SELECT 4611686018427387904::DATE`, "22003"},
-		{`SELECT 9223372036854775808::DATE`, "22003"},
-		{`SELECT (-9223372036854775809)::DATE`, "22003"},
+		// Past int64 the spelling is not an integer at all: PostgreSQL types
+		// it numeric, and numeric has no cast to DATE (42846, "cannot cast
+		// type numeric to date") — the literal is the exact numeric here too
+		// (expr.WideNumericLiteral), refused by the same type pair.
+		{`SELECT 9223372036854775808::DATE`, "42846"},
+		{`SELECT (-9223372036854775809)::DATE`, "42846"},
 	} {
 		t.Run(c.sql, func(t *testing.T) {
 			r, err := db.Query(ctx, c.sql)
