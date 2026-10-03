@@ -5,12 +5,12 @@ Every place this engine deliberately answers differently from PostgreSQL 17.11, 
 | family | rows | covers |
 |---|---|---|
 | [Comparisons and membership](comparison-membership.md) | 17 | Comparisons and IN/ANY/EXISTS memberships across text and typed values, numeric literals in memberships, and bind-time type refusals. |
-| [Temporal types](temporal.md) | 24 | Timestamp resolution, infinity, clock zone, integer and text casts to DATE/TIMESTAMP, date/time arithmetic and the INTERVAL declaration. |
+| [Temporal types](temporal.md) | 25 | Timestamp resolution, infinity, clock zone, integer and text casts to DATE/TIMESTAMP, date/time arithmetic and the INTERVAL declaration. |
 | [Numbers and DECIMAL](numeric-decimal.md) | 18 | Numeric and DECIMAL divergences: integer widening, float4 rounding positions, decimal carrier limits, casts and operator spellings PostgreSQL declines. |
 | [Set operations](set-operations.md) | 9 | UNION, INTERSECT and EXCEPT: VECTOR widths, declared decimal and integer carriers, refused type pairs and literals, and ORDER BY qualification. |
 | [Containers (ARRAY, ROW, MAP, VECTOR)](containers.md) | 23 | ROW, ARRAY and MAP containers: field-path spellings, declared OIDs, nested-array semantics, container ordering and array casts. |
 | [DML, DDL and assignment](dml-assignment.md) | 22 | Assignment rounding and typing on every write door, DDL and CTAS result forms, and the DML and DDL statements that are refused. |
-| [Parameters and the wire](parameters-pgwire.md) | 4 | The wire protocol: multi-statement strings without transactions, PORT/PROTOCOL/DURATION wire types, and syntax errors without a POSITION field. |
+| [Parameters and the wire](parameters-pgwire.md) | 15 | The wire protocol: multi-statement strings without transactions, PORT/PROTOCOL/DURATION wire types, and syntax errors without a POSITION field. |
 | [Names, scopes, joins and stars](names-scopes.md) | 27 | Name resolution and scoping: identifier case folding, storable names, published output names, column-alias lists, USING merges, star expansion and duplicate-name handling. |
 | [LATERAL and subqueries](lateral-subqueries.md) | 21 | Correlated subqueries and LATERAL joins: shapes the per-row re-run or the join decorrelation cannot express are refused loudly; star naming over laterals. |
 | [Recursion](recursion.md) | 12 | Recursive CTEs: an iteration-bounded eager fixed point, WITH RECURSIVE list ordering, and the seed-typed recursive terms PostgreSQL refuses. |

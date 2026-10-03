@@ -3349,6 +3349,7 @@ are different answers — a client branches on them:
 | `CAST('1 day' AS INTERVAL)` is the INTERVAL `'1 day'` (a single-unit spelling); other interval text PostgreSQL reads is kept as written and applying it to a date or timestamp is `0A000`; text naming no interval | `22007` | invalid input syntax for type interval: … |
 | a quoted operand beside a DATE: `d + '1'`, `'1' + d`, `d + NULL` | `42725` | operator is not unique: date + unknown |
 | a quoted operand the operator reads as a DATE / TIMESTAMP / INTERVAL that is not one: `d - 'abc'`, `ts - '1 day'`, `ts + 'abc'` | `22007` | invalid input syntax for type date / timestamp / interval: … |
+| a quoted operand COMPARED with a TIMESTAMP column that is not a timestamp: `ts = 'abc'`, `ts = '2024-03-04 12:00:00+16'` — does NOT raise: it reads as `1970-01-01 00:00:00` and matches a row holding the epoch, where PostgreSQL raises 22007 / 22009 (a known wrong value; `d = 'abc'` over a DATE column raises 22007) | — | — |
 | `CAST('abc' AS UUID)` | `22P02` | invalid input syntax for type uuid: "abc" |
 | `CAST('abc' AS INTEGER \| BIGINT \| REAL \| DOUBLE PRECISION \| NUMERIC \| BOOLEAN)` | `22P02` | invalid input syntax for type … |
 | `CAST('2.5' AS INTEGER \| BIGINT \| SMALLINT \| INT32 \| INT64 \| PORT \| PROTOCOL)` — a FRACTION is not an integer spelling | `22P02` | invalid input syntax for type integer: "2.5" |

@@ -577,12 +577,19 @@ accepted, as they are by PostgreSQL.
 clock `H[H]:M[M]` with optional `:S[S]` and fraction (`2026-01-02 9:5`,
 `2026/1/2T09:05:00.5`), and an optional zone `Z`, `±hh`, `±hh:mm`, `±hhmm`
 or `±hh:mm:ss`, which a `Timestamp` discards (it is PostgreSQL's
-`timestamp without time zone`). `24:00:00` is the next midnight and second
+`timestamp without time zone`). An offset's digits are read as PostgreSQL
+reads them: with no `:`, the last two digits are the minute and the rest the
+hour (`+000130` is 01:30), so there is no run-together `±hhmmss` form
+(`+053000` is hour 530, 22009). `24:00:00` is the next midnight and second
 60 the next minute, as on PostgreSQL; a `Date` drops the clock. A field out
 of range is 22008 and a zone past ±15:59:59 is 22009. Zone names, `AM` /
 `PM`, `epoch` / `infinity` / `now` / `today`, BC years, month names and
-Julian days, which PostgreSQL also reads, are refused 22007 here (catalog
-[temporal#r2, r25](adr/0012-divergences/temporal.md#catalog)).
+Julian days, which PostgreSQL also reads, are refused 22007 here by a
+literal, `CAST`, `INSERT`, `COPY` and a bound parameter (catalog
+[temporal#r2, r25](adr/0012-divergences/temporal.md#catalog)). A quoted text
+compared with a `Timestamp` column is the exception: `ts = 'garbage'` reads
+the refused text as `1970-01-01 00:00:00` and matches a row holding it, where
+PostgreSQL raises (a known wrong value).
 
 ### Identifier Types
 
