@@ -108,6 +108,20 @@ func nxOperands() []nxOperand {
 		{"rcCol", "CAST(t.n + 0.25 AS INTEGER)", "3"},
 		{"rcColDiv", "CAST(t.n / 0.9 AS INTEGER)", "3"},
 		{"rcCoalesce", "CAST(COALESCE(2.5, 0) AS INTEGER)", "3"},
+		// A QUOTIENT whose integer operand is an integer CAST under a
+		// construct an integer's type passes through (round 2, B1): NULLIF,
+		// COALESCE, CASE, GREATEST, abs, unary minus, `+ 0`, `* 1`. Each makes
+		// the decision the bare cast makes (icColDiv, icBigDiv): PostgreSQL
+		// types all of them alike.
+		{"wqBigPlus0", "t.n / NULLIF(CAST(t.b AS BIGINT) + 0, 0)", "0.0000000011111111111111111111"},
+		{"wqBigMul1", "t.n / NULLIF(CAST(t.b AS BIGINT) * 1, 0)", "0.0000000011111111111111111111"},
+		{"wqBigCoalesce", "t.n / NULLIF(COALESCE(CAST(t.b AS BIGINT), 1), 0)", "0.0000000011111111111111111111"},
+		{"wqBigNeg", "-t.n / NULLIF(-CAST(t.b AS BIGINT), 0)", "0.0000000011111111111111111111"},
+		{"wqBigAbs", "t.n / NULLIF(ABS(CAST(t.b AS BIGINT)), 0)", "0.0000000011111111111111111111"},
+		{"wqColPlus0", "(CAST(t.i AS INTEGER) + 0) / NULLIF(t.n, 0)", "1.3333333333333333"},
+		{"wqColCoalesce", "COALESCE(CAST(t.i AS INTEGER), 0) / NULLIF(t.n, 0)", "1.3333333333333333"},
+		{"wqColCase", "CASE WHEN t.id > 0 THEN CAST(t.i AS INTEGER) END / NULLIF(t.n, 0)", "1.3333333333333333"},
+		{"wqColGreatest", "GREATEST(CAST(t.i AS INTEGER), -100) / NULLIF(t.n, 0)", "1.3333333333333333"},
 	}
 }
 
@@ -210,6 +224,10 @@ func nxCells() []nxCell {
 		{"window", "SELECT t.id, CAST(max(5 / 2.0 + t.id * 0) OVER () AS INTEGER) AS y FROM ss_t t WHERE t.id < 3"},
 		{"subquery", "SELECT CAST((SELECT 5 / 2.0) AS INTEGER) AS y"},
 		{"join", "SELECT t.id, CAST(s.x AS INTEGER) AS y FROM ss_t t JOIN (SELECT u.id, 5 / 2.0 + u.id * 0 AS x FROM ss_t u) s ON s.id = t.id WHERE t.id < 3"},
+		// EXTRACT over a temporal column inside the operand: a DAG stage
+		// re-parses `EXTRACT(year FROM t.d)` as `year(t.d)` (round 2).
+		{"extractDate", "SELECT t.id, CAST(extract(year FROM t.d) * 0 + 2.5 AS INTEGER) AS y FROM ss_t t WHERE t.id < 3"},
+		{"extractTs", "SELECT t.id, CAST(5 / 2.0 + extract(second FROM t.ts) * 0 AS INTEGER) AS y FROM ss_t t WHERE t.id < 3"},
 	} {
 		add("roundOrigin/"+og[0], og[1])
 	}
@@ -236,6 +254,33 @@ func nxCells() []nxCell {
 	add("bareCast/floatOperand", "SELECT t.id, CAST(t.f AS NUMERIC) * 0.1 AS x FROM ss_t t WHERE t.id IN (1, 5)")
 	add("bareCast/intOperand", "SELECT t.id, CAST(t.i AS NUMERIC) * 0.1 AS x FROM ss_t t WHERE t.id IN (1, 5)")
 	add("bareCast/numOperand", "SELECT t.id, CAST(t.n AS NUMERIC) / 3 AS x FROM ss_t t WHERE t.id IN (1, 5)")
+	// A NUMERIC OPERAND OF A CAST WITH NO CONVERSION FROM NUMERIC (round 2,
+	// B2): a wide literal is an exact DECIMAL now, boxed as its text, and the
+	// BOOLEAN / DATE / TIMESTAMP / INTERVAL / UUID / array arms read a string
+	// box by their input grammar. PostgreSQL refuses each type pair, 42846;
+	// the narrow literal (a double here) and the integer literal past int64
+	// are the controls, the numeric column and a typed NUMERIC cast the same
+	// box reached another way.
+	for _, src := range [][2]string{
+		{"wide", nxK},
+		{"wideNeg", "-" + nxK},
+		{"wideExp", "1.40000000000000000001e1"},
+		{"wideChoice", "COALESCE(" + nxK + ", 0)"},
+		{"pastInt64", "9223372036854775808"},
+		{"pastInt64Neg", "(-9223372036854775809)"},
+		{"narrow", "14.5"},
+		{"numCast", "CAST(1.5 AS NUMERIC(10,2))"},
+		{"numCol", "(SELECT t.n FROM ss_t t WHERE t.id = 1)"},
+	} {
+		for _, to := range [][2]string{{"BOOLEAN", "BOOLEAN"}, {"DATE", "DATE"}, {"TIMESTAMP", "TIMESTAMP"},
+			{"INTERVAL", "INTERVAL"}, {"UUID", "UUID"}, {"INTEGERArray", "INTEGER[]"}} {
+			add("castRefusal/"+src[0]+"/"+to[0], "SELECT CAST("+src[1]+" AS "+to[1]+") AS x")
+		}
+	}
+	add("castRefusal/numColWhere/DATE", "SELECT t.id, CAST(t.n AS DATE) AS x FROM ss_t t WHERE t.id = 1")
+	add("castRefusal/numColWhere/BOOLEAN", "SELECT t.id, CAST(t.n AS BOOLEAN) AS x FROM ss_t t WHERE t.id = 1")
+	add("castRefusal/wideColon/DATE", "SELECT "+nxK+"::DATE AS x")
+	add("castRefusal/pastInt64Colon/DATE", "SELECT 9223372036854775808::DATE AS x")
 	// THE WIDE CONSTANT'S ORIGIN (#1386): the literal handed on by a derived
 	// table, a CTE, a set operation, VALUES, a DISTINCT and a join.
 	for _, og := range [][2]string{

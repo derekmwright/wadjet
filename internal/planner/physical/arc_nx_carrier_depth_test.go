@@ -30,6 +30,12 @@ func TestArcNXCarrierWalkIsLinearInDepth(t *testing.T) {
 		{"integerCastQuotient", nest("CAST(", "i64", " AS INTEGER) / d152 + 1")},
 		{"wideLiteralUnary", nest("-(", "14.0000000000000000001", ")")},
 		{"wideLiteralCoalesce", nest("COALESCE(", "14.0000000000000000001", ", d152)")},
+		// Round 2: the quotient reads an integer CAST through every integer
+		// wrapper (integerCastIn), one walk under one quotient and one per
+		// quotient in a chain.
+		{"wrappedCastQuotient", "d152 / (CAST(i64 AS INTEGER)" + strings.Repeat(" + 0", depth) + ")"},
+		{"wrappedCastQuotientChain", nest("(", "d152", " / NULLIF(CAST(i64 AS INTEGER) + 0, 0)) + 1")},
+		{"extractRespelled", nest("CAST(", "year(i64) * 0 + 2.5", " AS INTEGER) * 0 + 2.5")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			node, err := plansql.ParseExpression(tc.sql)

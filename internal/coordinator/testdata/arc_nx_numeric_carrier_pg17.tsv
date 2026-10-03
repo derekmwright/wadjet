@@ -835,6 +835,177 @@ nx/rcCoalesce/insertInt	{int,int} rows=5 1,3 | 2,3 | 4,3 | 5,3 | 6,3
 nx/rcCoalesce/insertNum	{int,numeric} rows=5 1,3.00 | 2,3.00 | 4,3.00 | 5,3.00 | 6,3.00
 nx/rcCoalesce/insertDbl	{int,float} rows=5 1,3 | 2,3 | 4,3 | 5,3 | 6,3
 nx/rcCoalesce/ctas	{int,int} rows=6 1,3 | 2,3 | 3,3 | 4,3 | 5,3 | 6,3
+nx/wqBigPlus0/proj	{int,numeric} rows=6 1,0.07500000000000000000 | 2,0.05000000000000000000 | 3,0.0000000011111111111111111111 | 4,NULL | 5,0.01000000000000000000 | 6,NULL
+nx/wqBigPlus0/cmp	{int} rows=1 3
+nx/wqBigPlus0/plusN	{int,numeric} rows=6 1,2.32500000000000000000 | 2,-3.45000000000000000000 | 3,10.0000000011111111111111111111 | 4,NULL | 5,0.02000000000000000000 | 6,NULL
+nx/wqBigPlus0/castText	{int,text} rows=6 1,0.07500000000000000000 | 2,0.05000000000000000000 | 3,0.0000000011111111111111111111 | 4,NULL | 5,0.01000000000000000000 | 6,NULL
+nx/wqBigPlus0/castInt	{int,int} rows=5 1,0 | 2,0 | 4,NULL | 5,0 | 6,NULL
+nx/wqBigPlus0/agg	{numeric,numeric} rows=1 0.13500000000000000000,0.07500000000000000000
+nx/wqBigPlus0/groupBy	{numeric,int} rows=5 0.0000000011111111111111111111,1 | 0.01000000000000000000,1 | 0.05000000000000000000,1 | 0.07500000000000000000,1 | NULL,2
+nx/wqBigPlus0/orderBy	{int} rows=6 3 | 5 | 2 | 1 | 4 | 6
+nx/wqBigPlus0/winIn	{int,numeric} rows=5 1,0.07500000000000000000 | 2,0.12500000000000000000 | 4,0.12500000000000000000 | 5,0.13500000000000000000 | 6,0.13500000000000000000
+nx/wqBigPlus0/winKey	{int,int} rows=6 1,3 | 2,3 | 3,1 | 4,2 | 5,3 | 6,2
+nx/wqBigPlus0/join	{int,int} rows=1 3,3
+nx/wqBigPlus0/inList	{int} rows=1 3
+nx/wqBigPlus0/inSub	{int} rows=1 3
+nx/wqBigPlus0/derived	{int,numeric} rows=1 3,0.0000000011111111111111111111
+nx/wqBigPlus0/json	{int,text} rows=5 1,{"v" : 0.07500000000000000000} | 2,{"v" : 0.05000000000000000000} | 4,{"v" : null} | 5,{"v" : 0.01000000000000000000} | 6,{"v" : null}
+nx/wqBigPlus0/insertInt	{int,int} rows=5 1,0 | 2,0 | 4,NULL | 5,0 | 6,NULL
+nx/wqBigPlus0/insertNum	{int,numeric} rows=5 1,0.08 | 2,0.05 | 4,NULL | 5,0.01 | 6,NULL
+nx/wqBigPlus0/insertDbl	{int,float} rows=5 1,0.075 | 2,0.05 | 4,NULL | 5,0.01 | 6,NULL
+nx/wqBigPlus0/ctas	{int,numeric} rows=6 1,0.07500000000000000000 | 2,0.05000000000000000000 | 3,0.0000000011111111111111111111 | 4,NULL | 5,0.01000000000000000000 | 6,NULL
+nx/wqBigMul1/proj	{int,numeric} rows=6 1,0.07500000000000000000 | 2,0.05000000000000000000 | 3,0.0000000011111111111111111111 | 4,NULL | 5,0.01000000000000000000 | 6,NULL
+nx/wqBigMul1/cmp	{int} rows=1 3
+nx/wqBigMul1/plusN	{int,numeric} rows=6 1,2.32500000000000000000 | 2,-3.45000000000000000000 | 3,10.0000000011111111111111111111 | 4,NULL | 5,0.02000000000000000000 | 6,NULL
+nx/wqBigMul1/castText	{int,text} rows=6 1,0.07500000000000000000 | 2,0.05000000000000000000 | 3,0.0000000011111111111111111111 | 4,NULL | 5,0.01000000000000000000 | 6,NULL
+nx/wqBigMul1/castInt	{int,int} rows=5 1,0 | 2,0 | 4,NULL | 5,0 | 6,NULL
+nx/wqBigMul1/agg	{numeric,numeric} rows=1 0.13500000000000000000,0.07500000000000000000
+nx/wqBigMul1/groupBy	{numeric,int} rows=5 0.0000000011111111111111111111,1 | 0.01000000000000000000,1 | 0.05000000000000000000,1 | 0.07500000000000000000,1 | NULL,2
+nx/wqBigMul1/orderBy	{int} rows=6 3 | 5 | 2 | 1 | 4 | 6
+nx/wqBigMul1/winIn	{int,numeric} rows=5 1,0.07500000000000000000 | 2,0.12500000000000000000 | 4,0.12500000000000000000 | 5,0.13500000000000000000 | 6,0.13500000000000000000
+nx/wqBigMul1/winKey	{int,int} rows=6 1,3 | 2,3 | 3,1 | 4,2 | 5,3 | 6,2
+nx/wqBigMul1/join	{int,int} rows=1 3,3
+nx/wqBigMul1/inList	{int} rows=1 3
+nx/wqBigMul1/inSub	{int} rows=1 3
+nx/wqBigMul1/derived	{int,numeric} rows=1 3,0.0000000011111111111111111111
+nx/wqBigMul1/json	{int,text} rows=5 1,{"v" : 0.07500000000000000000} | 2,{"v" : 0.05000000000000000000} | 4,{"v" : null} | 5,{"v" : 0.01000000000000000000} | 6,{"v" : null}
+nx/wqBigMul1/insertInt	{int,int} rows=5 1,0 | 2,0 | 4,NULL | 5,0 | 6,NULL
+nx/wqBigMul1/insertNum	{int,numeric} rows=5 1,0.08 | 2,0.05 | 4,NULL | 5,0.01 | 6,NULL
+nx/wqBigMul1/insertDbl	{int,float} rows=5 1,0.075 | 2,0.05 | 4,NULL | 5,0.01 | 6,NULL
+nx/wqBigMul1/ctas	{int,numeric} rows=6 1,0.07500000000000000000 | 2,0.05000000000000000000 | 3,0.0000000011111111111111111111 | 4,NULL | 5,0.01000000000000000000 | 6,NULL
+nx/wqBigCoalesce/proj	{int,numeric} rows=6 1,0.07500000000000000000 | 2,0.05000000000000000000 | 3,0.0000000011111111111111111111 | 4,NULL | 5,0.01000000000000000000 | 6,NULL
+nx/wqBigCoalesce/cmp	{int} rows=1 3
+nx/wqBigCoalesce/plusN	{int,numeric} rows=6 1,2.32500000000000000000 | 2,-3.45000000000000000000 | 3,10.0000000011111111111111111111 | 4,NULL | 5,0.02000000000000000000 | 6,NULL
+nx/wqBigCoalesce/castText	{int,text} rows=6 1,0.07500000000000000000 | 2,0.05000000000000000000 | 3,0.0000000011111111111111111111 | 4,NULL | 5,0.01000000000000000000 | 6,NULL
+nx/wqBigCoalesce/castInt	{int,int} rows=5 1,0 | 2,0 | 4,NULL | 5,0 | 6,NULL
+nx/wqBigCoalesce/agg	{numeric,numeric} rows=1 0.13500000000000000000,0.07500000000000000000
+nx/wqBigCoalesce/groupBy	{numeric,int} rows=5 0.0000000011111111111111111111,1 | 0.01000000000000000000,1 | 0.05000000000000000000,1 | 0.07500000000000000000,1 | NULL,2
+nx/wqBigCoalesce/orderBy	{int} rows=6 3 | 5 | 2 | 1 | 4 | 6
+nx/wqBigCoalesce/winIn	{int,numeric} rows=5 1,0.07500000000000000000 | 2,0.12500000000000000000 | 4,0.12500000000000000000 | 5,0.13500000000000000000 | 6,0.13500000000000000000
+nx/wqBigCoalesce/winKey	{int,int} rows=6 1,3 | 2,3 | 3,1 | 4,2 | 5,3 | 6,2
+nx/wqBigCoalesce/join	{int,int} rows=1 3,3
+nx/wqBigCoalesce/inList	{int} rows=1 3
+nx/wqBigCoalesce/inSub	{int} rows=1 3
+nx/wqBigCoalesce/derived	{int,numeric} rows=1 3,0.0000000011111111111111111111
+nx/wqBigCoalesce/json	{int,text} rows=5 1,{"v" : 0.07500000000000000000} | 2,{"v" : 0.05000000000000000000} | 4,{"v" : null} | 5,{"v" : 0.01000000000000000000} | 6,{"v" : null}
+nx/wqBigCoalesce/insertInt	{int,int} rows=5 1,0 | 2,0 | 4,NULL | 5,0 | 6,NULL
+nx/wqBigCoalesce/insertNum	{int,numeric} rows=5 1,0.08 | 2,0.05 | 4,NULL | 5,0.01 | 6,NULL
+nx/wqBigCoalesce/insertDbl	{int,float} rows=5 1,0.075 | 2,0.05 | 4,NULL | 5,0.01 | 6,NULL
+nx/wqBigCoalesce/ctas	{int,numeric} rows=6 1,0.07500000000000000000 | 2,0.05000000000000000000 | 3,0.0000000011111111111111111111 | 4,NULL | 5,0.01000000000000000000 | 6,NULL
+nx/wqBigNeg/proj	{int,numeric} rows=6 1,0.07500000000000000000 | 2,0.05000000000000000000 | 3,0.0000000011111111111111111111 | 4,NULL | 5,0.01000000000000000000 | 6,NULL
+nx/wqBigNeg/cmp	{int} rows=1 3
+nx/wqBigNeg/plusN	{int,numeric} rows=6 1,2.32500000000000000000 | 2,-3.45000000000000000000 | 3,10.0000000011111111111111111111 | 4,NULL | 5,0.02000000000000000000 | 6,NULL
+nx/wqBigNeg/castText	{int,text} rows=6 1,0.07500000000000000000 | 2,0.05000000000000000000 | 3,0.0000000011111111111111111111 | 4,NULL | 5,0.01000000000000000000 | 6,NULL
+nx/wqBigNeg/castInt	{int,int} rows=5 1,0 | 2,0 | 4,NULL | 5,0 | 6,NULL
+nx/wqBigNeg/agg	{numeric,numeric} rows=1 0.13500000000000000000,0.07500000000000000000
+nx/wqBigNeg/groupBy	{numeric,int} rows=5 0.0000000011111111111111111111,1 | 0.01000000000000000000,1 | 0.05000000000000000000,1 | 0.07500000000000000000,1 | NULL,2
+nx/wqBigNeg/orderBy	{int} rows=6 3 | 5 | 2 | 1 | 4 | 6
+nx/wqBigNeg/winIn	{int,numeric} rows=5 1,0.07500000000000000000 | 2,0.12500000000000000000 | 4,0.12500000000000000000 | 5,0.13500000000000000000 | 6,0.13500000000000000000
+nx/wqBigNeg/winKey	{int,int} rows=6 1,3 | 2,3 | 3,1 | 4,2 | 5,3 | 6,2
+nx/wqBigNeg/join	{int,int} rows=1 3,3
+nx/wqBigNeg/inList	{int} rows=1 3
+nx/wqBigNeg/inSub	{int} rows=1 3
+nx/wqBigNeg/derived	{int,numeric} rows=1 3,0.0000000011111111111111111111
+nx/wqBigNeg/json	{int,text} rows=5 1,{"v" : 0.07500000000000000000} | 2,{"v" : 0.05000000000000000000} | 4,{"v" : null} | 5,{"v" : 0.01000000000000000000} | 6,{"v" : null}
+nx/wqBigNeg/insertInt	{int,int} rows=5 1,0 | 2,0 | 4,NULL | 5,0 | 6,NULL
+nx/wqBigNeg/insertNum	{int,numeric} rows=5 1,0.08 | 2,0.05 | 4,NULL | 5,0.01 | 6,NULL
+nx/wqBigNeg/insertDbl	{int,float} rows=5 1,0.075 | 2,0.05 | 4,NULL | 5,0.01 | 6,NULL
+nx/wqBigNeg/ctas	{int,numeric} rows=6 1,0.07500000000000000000 | 2,0.05000000000000000000 | 3,0.0000000011111111111111111111 | 4,NULL | 5,0.01000000000000000000 | 6,NULL
+nx/wqBigAbs/proj	{int,numeric} rows=6 1,0.07500000000000000000 | 2,-0.05000000000000000000 | 3,0.0000000011111111111111111111 | 4,NULL | 5,0.01000000000000000000 | 6,NULL
+nx/wqBigAbs/cmp	{int} rows=1 3
+nx/wqBigAbs/plusN	{int,numeric} rows=6 1,2.32500000000000000000 | 2,-3.55000000000000000000 | 3,10.0000000011111111111111111111 | 4,NULL | 5,0.02000000000000000000 | 6,NULL
+nx/wqBigAbs/castText	{int,text} rows=6 1,0.07500000000000000000 | 2,-0.05000000000000000000 | 3,0.0000000011111111111111111111 | 4,NULL | 5,0.01000000000000000000 | 6,NULL
+nx/wqBigAbs/castInt	{int,int} rows=5 1,0 | 2,0 | 4,NULL | 5,0 | 6,NULL
+nx/wqBigAbs/agg	{numeric,numeric} rows=1 0.03500000000000000000,0.07500000000000000000
+nx/wqBigAbs/groupBy	{numeric,int} rows=5 -0.05000000000000000000,1 | 0.0000000011111111111111111111,1 | 0.01000000000000000000,1 | 0.07500000000000000000,1 | NULL,2
+nx/wqBigAbs/orderBy	{int} rows=6 2 | 3 | 5 | 1 | 4 | 6
+nx/wqBigAbs/winIn	{int,numeric} rows=5 1,0.07500000000000000000 | 2,0.02500000000000000000 | 4,0.02500000000000000000 | 5,0.03500000000000000000 | 6,0.03500000000000000000
+nx/wqBigAbs/winKey	{int,int} rows=6 1,3 | 2,3 | 3,1 | 4,2 | 5,3 | 6,2
+nx/wqBigAbs/join	{int,int} rows=1 3,3
+nx/wqBigAbs/inList	{int} rows=1 3
+nx/wqBigAbs/inSub	{int} rows=1 3
+nx/wqBigAbs/derived	{int,numeric} rows=1 3,0.0000000011111111111111111111
+nx/wqBigAbs/json	{int,text} rows=5 1,{"v" : 0.07500000000000000000} | 2,{"v" : -0.05000000000000000000} | 4,{"v" : null} | 5,{"v" : 0.01000000000000000000} | 6,{"v" : null}
+nx/wqBigAbs/insertInt	{int,int} rows=5 1,0 | 2,0 | 4,NULL | 5,0 | 6,NULL
+nx/wqBigAbs/insertNum	{int,numeric} rows=5 1,0.08 | 2,-0.05 | 4,NULL | 5,0.01 | 6,NULL
+nx/wqBigAbs/insertDbl	{int,float} rows=5 1,0.075 | 2,-0.05 | 4,NULL | 5,0.01 | 6,NULL
+nx/wqBigAbs/ctas	{int,numeric} rows=6 1,0.07500000000000000000 | 2,-0.05000000000000000000 | 3,0.0000000011111111111111111111 | 4,NULL | 5,0.01000000000000000000 | 6,NULL
+nx/wqColPlus0/proj	{int,numeric} rows=6 1,1.3333333333333333 | 2,2.0000000000000000 | 3,0.50000000000000000000 | 4,NULL | 5,100.0000000000000000 | 6,NULL
+nx/wqColPlus0/cmp	{int} rows=1 1
+nx/wqColPlus0/plusN	{int,numeric} rows=6 1,3.5833333333333333 | 2,-1.5000000000000000 | 3,10.50000000000000000000 | 4,NULL | 5,100.0100000000000000 | 6,NULL
+nx/wqColPlus0/castText	{int,text} rows=6 1,1.3333333333333333 | 2,2.0000000000000000 | 3,0.50000000000000000000 | 4,NULL | 5,100.0000000000000000 | 6,NULL
+nx/wqColPlus0/castInt	{int,int} rows=5 1,1 | 2,2 | 4,NULL | 5,100 | 6,NULL
+nx/wqColPlus0/agg	{numeric,numeric} rows=1 103.3333333333333333,100.0000000000000000
+nx/wqColPlus0/groupBy	{numeric,int} rows=5 0.50000000000000000000,1 | 1.3333333333333333,1 | 100.0000000000000000,1 | 2.0000000000000000,1 | NULL,2
+nx/wqColPlus0/orderBy	{int} rows=6 3 | 1 | 2 | 5 | 4 | 6
+nx/wqColPlus0/winIn	{int,numeric} rows=5 1,1.3333333333333333 | 2,3.3333333333333333 | 4,3.3333333333333333 | 5,103.3333333333333333 | 6,103.3333333333333333
+nx/wqColPlus0/winKey	{int,int} rows=6 1,1 | 2,3 | 3,3 | 4,2 | 5,3 | 6,2
+nx/wqColPlus0/join	{int,int} rows=1 1,1
+nx/wqColPlus0/inList	{int} rows=1 1
+nx/wqColPlus0/inSub	{int} rows=1 1
+nx/wqColPlus0/derived	{int,numeric} rows=1 1,1.3333333333333333
+nx/wqColPlus0/json	{int,text} rows=5 1,{"v" : 1.3333333333333333} | 2,{"v" : 2.0000000000000000} | 4,{"v" : null} | 5,{"v" : 100.0000000000000000} | 6,{"v" : null}
+nx/wqColPlus0/insertInt	{int,int} rows=5 1,1 | 2,2 | 4,NULL | 5,100 | 6,NULL
+nx/wqColPlus0/insertNum	{int,numeric} rows=5 1,1.33 | 2,2.00 | 4,NULL | 5,100.00 | 6,NULL
+nx/wqColPlus0/insertDbl	{int,float} rows=5 1,1.3333333333333333 | 2,2 | 4,NULL | 5,100 | 6,NULL
+nx/wqColPlus0/ctas	{int,numeric} rows=6 1,1.3333333333333333 | 2,2.0000000000000000 | 3,0.50000000000000000000 | 4,NULL | 5,100.0000000000000000 | 6,NULL
+nx/wqColCoalesce/proj	{int,numeric} rows=6 1,1.3333333333333333 | 2,2.0000000000000000 | 3,0.50000000000000000000 | 4,NULL | 5,100.0000000000000000 | 6,NULL
+nx/wqColCoalesce/cmp	{int} rows=1 1
+nx/wqColCoalesce/plusN	{int,numeric} rows=6 1,3.5833333333333333 | 2,-1.5000000000000000 | 3,10.50000000000000000000 | 4,NULL | 5,100.0100000000000000 | 6,NULL
+nx/wqColCoalesce/castText	{int,text} rows=6 1,1.3333333333333333 | 2,2.0000000000000000 | 3,0.50000000000000000000 | 4,NULL | 5,100.0000000000000000 | 6,NULL
+nx/wqColCoalesce/castInt	{int,int} rows=5 1,1 | 2,2 | 4,NULL | 5,100 | 6,NULL
+nx/wqColCoalesce/agg	{numeric,numeric} rows=1 103.3333333333333333,100.0000000000000000
+nx/wqColCoalesce/groupBy	{numeric,int} rows=5 0.50000000000000000000,1 | 1.3333333333333333,1 | 100.0000000000000000,1 | 2.0000000000000000,1 | NULL,2
+nx/wqColCoalesce/orderBy	{int} rows=6 3 | 1 | 2 | 5 | 4 | 6
+nx/wqColCoalesce/winIn	{int,numeric} rows=5 1,1.3333333333333333 | 2,3.3333333333333333 | 4,3.3333333333333333 | 5,103.3333333333333333 | 6,103.3333333333333333
+nx/wqColCoalesce/winKey	{int,int} rows=6 1,1 | 2,3 | 3,3 | 4,2 | 5,3 | 6,2
+nx/wqColCoalesce/join	{int,int} rows=1 1,1
+nx/wqColCoalesce/inList	{int} rows=1 1
+nx/wqColCoalesce/inSub	{int} rows=1 1
+nx/wqColCoalesce/derived	{int,numeric} rows=1 1,1.3333333333333333
+nx/wqColCoalesce/json	{int,text} rows=5 1,{"v" : 1.3333333333333333} | 2,{"v" : 2.0000000000000000} | 4,{"v" : null} | 5,{"v" : 100.0000000000000000} | 6,{"v" : null}
+nx/wqColCoalesce/insertInt	{int,int} rows=5 1,1 | 2,2 | 4,NULL | 5,100 | 6,NULL
+nx/wqColCoalesce/insertNum	{int,numeric} rows=5 1,1.33 | 2,2.00 | 4,NULL | 5,100.00 | 6,NULL
+nx/wqColCoalesce/insertDbl	{int,float} rows=5 1,1.3333333333333333 | 2,2 | 4,NULL | 5,100 | 6,NULL
+nx/wqColCoalesce/ctas	{int,numeric} rows=6 1,1.3333333333333333 | 2,2.0000000000000000 | 3,0.50000000000000000000 | 4,NULL | 5,100.0000000000000000 | 6,NULL
+nx/wqColCase/proj	{int,numeric} rows=6 1,1.3333333333333333 | 2,2.0000000000000000 | 3,0.50000000000000000000 | 4,NULL | 5,100.0000000000000000 | 6,NULL
+nx/wqColCase/cmp	{int} rows=1 1
+nx/wqColCase/plusN	{int,numeric} rows=6 1,3.5833333333333333 | 2,-1.5000000000000000 | 3,10.50000000000000000000 | 4,NULL | 5,100.0100000000000000 | 6,NULL
+nx/wqColCase/castText	{int,text} rows=6 1,1.3333333333333333 | 2,2.0000000000000000 | 3,0.50000000000000000000 | 4,NULL | 5,100.0000000000000000 | 6,NULL
+nx/wqColCase/castInt	{int,int} rows=5 1,1 | 2,2 | 4,NULL | 5,100 | 6,NULL
+nx/wqColCase/agg	{numeric,numeric} rows=1 103.3333333333333333,100.0000000000000000
+nx/wqColCase/groupBy	{numeric,int} rows=5 0.50000000000000000000,1 | 1.3333333333333333,1 | 100.0000000000000000,1 | 2.0000000000000000,1 | NULL,2
+nx/wqColCase/orderBy	{int} rows=6 3 | 1 | 2 | 5 | 4 | 6
+nx/wqColCase/winIn	{int,numeric} rows=5 1,1.3333333333333333 | 2,3.3333333333333333 | 4,3.3333333333333333 | 5,103.3333333333333333 | 6,103.3333333333333333
+nx/wqColCase/winKey	{int,int} rows=6 1,1 | 2,3 | 3,3 | 4,2 | 5,3 | 6,2
+nx/wqColCase/join	{int,int} rows=1 1,1
+nx/wqColCase/inList	{int} rows=1 1
+nx/wqColCase/inSub	{int} rows=1 1
+nx/wqColCase/derived	{int,numeric} rows=1 1,1.3333333333333333
+nx/wqColCase/json	{int,text} rows=5 1,{"v" : 1.3333333333333333} | 2,{"v" : 2.0000000000000000} | 4,{"v" : null} | 5,{"v" : 100.0000000000000000} | 6,{"v" : null}
+nx/wqColCase/insertInt	{int,int} rows=5 1,1 | 2,2 | 4,NULL | 5,100 | 6,NULL
+nx/wqColCase/insertNum	{int,numeric} rows=5 1,1.33 | 2,2.00 | 4,NULL | 5,100.00 | 6,NULL
+nx/wqColCase/insertDbl	{int,float} rows=5 1,1.3333333333333333 | 2,2 | 4,NULL | 5,100 | 6,NULL
+nx/wqColCase/ctas	{int,numeric} rows=6 1,1.3333333333333333 | 2,2.0000000000000000 | 3,0.50000000000000000000 | 4,NULL | 5,100.0000000000000000 | 6,NULL
+nx/wqColGreatest/proj	{int,numeric} rows=6 1,1.3333333333333333 | 2,2.0000000000000000 | 3,0.50000000000000000000 | 4,NULL | 5,100.0000000000000000 | 6,NULL
+nx/wqColGreatest/cmp	{int} rows=1 1
+nx/wqColGreatest/plusN	{int,numeric} rows=6 1,3.5833333333333333 | 2,-1.5000000000000000 | 3,10.50000000000000000000 | 4,NULL | 5,100.0100000000000000 | 6,NULL
+nx/wqColGreatest/castText	{int,text} rows=6 1,1.3333333333333333 | 2,2.0000000000000000 | 3,0.50000000000000000000 | 4,NULL | 5,100.0000000000000000 | 6,NULL
+nx/wqColGreatest/castInt	{int,int} rows=5 1,1 | 2,2 | 4,NULL | 5,100 | 6,NULL
+nx/wqColGreatest/agg	{numeric,numeric} rows=1 103.3333333333333333,100.0000000000000000
+nx/wqColGreatest/groupBy	{numeric,int} rows=5 0.50000000000000000000,1 | 1.3333333333333333,1 | 100.0000000000000000,1 | 2.0000000000000000,1 | NULL,2
+nx/wqColGreatest/orderBy	{int} rows=6 3 | 1 | 2 | 5 | 4 | 6
+nx/wqColGreatest/winIn	{int,numeric} rows=5 1,1.3333333333333333 | 2,3.3333333333333333 | 4,3.3333333333333333 | 5,103.3333333333333333 | 6,103.3333333333333333
+nx/wqColGreatest/winKey	{int,int} rows=6 1,1 | 2,3 | 3,3 | 4,2 | 5,3 | 6,2
+nx/wqColGreatest/join	{int,int} rows=1 1,1
+nx/wqColGreatest/inList	{int} rows=1 1
+nx/wqColGreatest/inSub	{int} rows=1 1
+nx/wqColGreatest/derived	{int,numeric} rows=1 1,1.3333333333333333
+nx/wqColGreatest/json	{int,text} rows=5 1,{"v" : 1.3333333333333333} | 2,{"v" : 2.0000000000000000} | 4,{"v" : null} | 5,{"v" : 100.0000000000000000} | 6,{"v" : null}
+nx/wqColGreatest/insertInt	{int,int} rows=5 1,1 | 2,2 | 4,NULL | 5,100 | 6,NULL
+nx/wqColGreatest/insertNum	{int,numeric} rows=5 1,1.33 | 2,2.00 | 4,NULL | 5,100.00 | 6,NULL
+nx/wqColGreatest/insertDbl	{int,float} rows=5 1,1.3333333333333333 | 2,2 | 4,NULL | 5,100 | 6,NULL
+nx/wqColGreatest/ctas	{int,numeric} rows=6 1,1.3333333333333333 | 2,2.0000000000000000 | 3,0.50000000000000000000 | 4,NULL | 5,100.0000000000000000 | 6,NULL
 issue/1392/six	{int,int,int,int,int,int} rows=1 3,3,3,3,3,3
 issue/1392/sixNeg	{int,int,int,int,int,int} rows=1 -3,-3,-3,-3,-3,-3
 issue/1392/sixSmallint	{int,int,int,int,int,int} rows=1 3,3,3,3,3,3
@@ -904,9 +1075,69 @@ negLit/pastInt64Min	{numeric} rows=1 -9223372036854775809
 bareCast/floatOperand	{int,numeric} rows=2 1,0.15 | 5,10.0125
 bareCast/intOperand	{int,numeric} rows=2 1,0.3 | 5,0.1
 bareCast/numOperand	{int,numeric} rows=2 1,0.75000000000000000000 | 5,0.00333333333333333333
+castRefusal/wide/BOOLEAN	ERR 42846 cannot cast type numeric to boolean
+castRefusal/wide/DATE	ERR 42846 cannot cast type numeric to date
+castRefusal/wide/TIMESTAMP	ERR 42846 cannot cast type numeric to timestamp without time zone
+castRefusal/wide/INTERVAL	ERR 42846 cannot cast type numeric to interval
+castRefusal/wide/UUID	ERR 42846 cannot cast type numeric to uuid
+castRefusal/wide/INTEGERArray	ERR 42846 cannot cast type numeric to integer[]
+castRefusal/wideNeg/BOOLEAN	ERR 42846 cannot cast type numeric to boolean
+castRefusal/wideNeg/DATE	ERR 42846 cannot cast type numeric to date
+castRefusal/wideNeg/TIMESTAMP	ERR 42846 cannot cast type numeric to timestamp without time zone
+castRefusal/wideNeg/INTERVAL	ERR 42846 cannot cast type numeric to interval
+castRefusal/wideNeg/UUID	ERR 42846 cannot cast type numeric to uuid
+castRefusal/wideNeg/INTEGERArray	ERR 42846 cannot cast type numeric to integer[]
+castRefusal/wideExp/BOOLEAN	ERR 42846 cannot cast type numeric to boolean
+castRefusal/wideExp/DATE	ERR 42846 cannot cast type numeric to date
+castRefusal/wideExp/TIMESTAMP	ERR 42846 cannot cast type numeric to timestamp without time zone
+castRefusal/wideExp/INTERVAL	ERR 42846 cannot cast type numeric to interval
+castRefusal/wideExp/UUID	ERR 42846 cannot cast type numeric to uuid
+castRefusal/wideExp/INTEGERArray	ERR 42846 cannot cast type numeric to integer[]
+castRefusal/wideChoice/BOOLEAN	ERR 42846 cannot cast type numeric to boolean
+castRefusal/wideChoice/DATE	ERR 42846 cannot cast type numeric to date
+castRefusal/wideChoice/TIMESTAMP	ERR 42846 cannot cast type numeric to timestamp without time zone
+castRefusal/wideChoice/INTERVAL	ERR 42846 cannot cast type numeric to interval
+castRefusal/wideChoice/UUID	ERR 42846 cannot cast type numeric to uuid
+castRefusal/wideChoice/INTEGERArray	ERR 42846 cannot cast type numeric to integer[]
+castRefusal/pastInt64/BOOLEAN	ERR 42846 cannot cast type numeric to boolean
+castRefusal/pastInt64/DATE	ERR 42846 cannot cast type numeric to date
+castRefusal/pastInt64/TIMESTAMP	ERR 42846 cannot cast type numeric to timestamp without time zone
+castRefusal/pastInt64/INTERVAL	ERR 42846 cannot cast type numeric to interval
+castRefusal/pastInt64/UUID	ERR 42846 cannot cast type numeric to uuid
+castRefusal/pastInt64/INTEGERArray	ERR 42846 cannot cast type numeric to integer[]
+castRefusal/pastInt64Neg/BOOLEAN	ERR 42846 cannot cast type numeric to boolean
+castRefusal/pastInt64Neg/DATE	ERR 42846 cannot cast type numeric to date
+castRefusal/pastInt64Neg/TIMESTAMP	ERR 42846 cannot cast type numeric to timestamp without time zone
+castRefusal/pastInt64Neg/INTERVAL	ERR 42846 cannot cast type numeric to interval
+castRefusal/pastInt64Neg/UUID	ERR 42846 cannot cast type numeric to uuid
+castRefusal/pastInt64Neg/INTEGERArray	ERR 42846 cannot cast type numeric to integer[]
+castRefusal/narrow/BOOLEAN	ERR 42846 cannot cast type numeric to boolean
+castRefusal/narrow/DATE	ERR 42846 cannot cast type numeric to date
+castRefusal/narrow/TIMESTAMP	ERR 42846 cannot cast type numeric to timestamp without time zone
+castRefusal/narrow/INTERVAL	ERR 42846 cannot cast type numeric to interval
+castRefusal/narrow/UUID	ERR 42846 cannot cast type numeric to uuid
+castRefusal/narrow/INTEGERArray	ERR 42846 cannot cast type numeric to integer[]
+castRefusal/numCast/BOOLEAN	ERR 42846 cannot cast type numeric to boolean
+castRefusal/numCast/DATE	ERR 42846 cannot cast type numeric to date
+castRefusal/numCast/TIMESTAMP	ERR 42846 cannot cast type numeric to timestamp without time zone
+castRefusal/numCast/INTERVAL	ERR 42846 cannot cast type numeric to interval
+castRefusal/numCast/UUID	ERR 42846 cannot cast type numeric to uuid
+castRefusal/numCast/INTEGERArray	ERR 42846 cannot cast type numeric to integer[]
+castRefusal/numCol/BOOLEAN	ERR 42846 cannot cast type numeric to boolean
+castRefusal/numCol/DATE	ERR 42846 cannot cast type numeric to date
+castRefusal/numCol/TIMESTAMP	ERR 42846 cannot cast type numeric to timestamp without time zone
+castRefusal/numCol/INTERVAL	ERR 42846 cannot cast type numeric to interval
+castRefusal/numCol/UUID	ERR 42846 cannot cast type numeric to uuid
+castRefusal/numCol/INTEGERArray	ERR 42846 cannot cast type numeric to integer[]
+castRefusal/numColWhere/DATE	ERR 42846 cannot cast type numeric to date
+castRefusal/numColWhere/BOOLEAN	ERR 42846 cannot cast type numeric to boolean
+castRefusal/wideColon/DATE	ERR 42846 cannot cast type numeric to date
+castRefusal/pastInt64Colon/DATE	ERR 42846 cannot cast type numeric to date
 wideOrigin/derived	{bool,numeric} rows=1 f,14.0000000000000000001
 wideOrigin/cte	{bool,numeric} rows=1 f,14.0000000000000000001
 wideOrigin/union	{numeric} rows=2 13.5 | 14.0000000000000000001
 wideOrigin/values	{numeric} rows=2 13.5 | 14.0000000000000000001
 wideOrigin/distinct	{numeric} rows=1 14.0000000000000000001
 wideOrigin/join	{int,numeric} rows=2 1,14.0000000000000000001 | 2,14.0000000000000000001
+roundOrigin/extractDate	{int,int} rows=2 1,3 | 2,3
+roundOrigin/extractTs	{int,int} rows=2 1,3 | 2,3
