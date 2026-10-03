@@ -3548,12 +3548,30 @@ column (`LAG(x, o)`, `NTILE(o)`), an expression over one (`LAG(x, o + 1)`) or
 a subquery — is refused, SQLSTATE `0A000`**, where PostgreSQL evaluates it
 (ADR-0012 catalog, aggregates-windows r19; #1440); write a constant.
 
-A `LAG` / `LEAD` default may be an integer literal, a negative one or NULL.
-A default of another type is not coerced to the argument's type: a decimal
-default into an integer column is truncated (`LAG(x, 1, 2.5)` answers 2 where
-PostgreSQL answers 2.5, #1435), and a default that is not a numeric literal or
-NULL — text, a column, a cast, a boolean (`LAG(FALSE, 1, TRUE)`) — fails the query
-when a row reads it (#1436).
+A `LAG` / `LEAD` default is any expression, read at the row it fills, and
+the result's type is the COMMON type of the value and the default, as on
+PostgreSQL (`lag(anycompatible, integer, anycompatible)`): the CASE /
+COALESCE rule, with a DATE beside a TIMESTAMP resolved to timestamp.
+
+```sql
+SELECT id, LAG(b, 1, 2.5) OVER (ORDER BY id) FROM t;   -- numeric: 2.5 on the first row, b after it
+SELECT id, LAG(b, 1, d) OVER (ORDER BY id) FROM t;     -- double precision: the first row's own d
+SELECT id, LAG(dt, 1, TIMESTAMP '2020-01-01 00:00:00') OVER (ORDER BY id) FROM t;  -- timestamp
+SELECT id, LAG(b, 1, '7') OVER (ORDER BY id) FROM t;   -- bigint: a quoted literal takes the value's type
+SELECT id, LAG(s, 1, 2.5) OVER (ORDER BY id) FROM t;   -- ERROR 42883 lag(text, integer, numeric)
+```
+
+A quoted default that does not read as the value's type is `22P02`
+(`LAG(b, 1, 'a')`, at offset 0 too). A numeric result carries one scale per
+column, so the shifted bigint values print `10.0` beside the default's `2.5`
+where PostgreSQL prints `10` (ADR-0012 catalog, numeric-decimal r18). The
+default is computed for every row before the window runs, so a default that
+raises on a row it does not fill raises the query (`LAG(b, 1, 10 / (id - 2))`
+is `22012`; PostgreSQL answers), and a quoted one that does not coerce raises
+only when a row is read (aggregates-windows r21, r22). A wide or
+exponent-form numeric literal default (`14.0000000000000000001`, `1e300`) is
+declared double precision as the literal is elsewhere, so the result is double
+precision where PostgreSQL's is numeric.
 
 ### Which relation a window key names
 
