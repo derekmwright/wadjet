@@ -223,13 +223,12 @@ func (p *Planner) buildScan(ctx context.Context, node *logical.Node) (exec.Sourc
 		}
 	}
 
-	var ops []exec.UnaryOperator
-
-	if node.SampleMethod != "" {
-		// The percentage's range is checked when the scan begins — its first
-		// batch — as PostgreSQL checks it (checkSamplePercent).
-		scanner = &sampleRangeSource{Source: scanner, pct: node.SamplePercent, null: node.SampleNull}
-		ops = append(ops, newSampleOperator(node.SampleMethod, node.SamplePercent))
+	if ts, ok := ScanTableSample(node); ok {
+		// The sample is drawn where the scan reads, from the rows the scan's
+		// batch selects (a DELETE's markers narrow Sel), and its range is
+		// checked when the scan begins — the same kernel a worker's scan
+		// fragment applies (#1411).
+		scanner = exec.NewSampledSource(scanner, ts)
 	}
-	return scanner, ops, &exec.CollectSink{}, nil
+	return scanner, nil, &exec.CollectSink{}, nil
 }
