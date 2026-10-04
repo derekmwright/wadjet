@@ -1,0 +1,1797 @@
+# PostgreSQL 17.11 over the fixture of arc_ss_scalar_subquery_type_arms_test.go (ssPGFixture), one line per cell of moCells(): name<TAB>answer.
+g/proj/i_i/pct	{int,int} rows=5 1,0 | 2,0 | 3,0 | 5,0 | 6,NULL
+g/sum/i_i/pct	{int} rows=1 0
+g/proj/i_i/mod	{int,int} rows=5 1,0 | 2,0 | 3,0 | 5,0 | 6,NULL
+g/sum/i_i/mod	{int} rows=1 0
+g/proj/i_b/pct	{int,int} rows=5 1,3 | 2,-7 | 3,5 | 5,0 | 6,NULL
+g/sum/i_b/pct	{numeric} rows=1 1
+g/proj/i_b/mod	{int,int} rows=5 1,3 | 2,-7 | 3,5 | 5,0 | 6,NULL
+g/sum/i_b/mod	{numeric} rows=1 1
+g/proj/i_n/pct	{int,numeric} rows=5 1,0.75 | 2,0.00 | 3,5.00 | 5,0.00 | 6,NULL
+g/sum/i_n/pct	{numeric} rows=1 5.75
+g/proj/i_n/mod	{int,numeric} rows=5 1,0.75 | 2,0.00 | 3,5.00 | 5,0.00 | 6,NULL
+g/sum/i_n/mod	{numeric} rows=1 5.75
+g/proj/i_f/pct	ERR 42883 operator does not exist: integer % double precision
+g/sum/i_f/pct	ERR 42883 operator does not exist: integer % double precision
+g/proj/i_f/mod	ERR 42883 function mod(integer, double precision) does not exist
+g/sum/i_f/mod	ERR 42883 function mod(integer, double precision) does not exist
+g/proj/i_l3/pct	{int,int} rows=6 1,0 | 2,-1 | 3,2 | 4,0 | 5,1 | 6,NULL
+g/sum/i_l3/pct	{int} rows=1 2
+g/proj/i_l3/mod	{int,int} rows=6 1,0 | 2,-1 | 3,2 | 4,0 | 5,1 | 6,NULL
+g/sum/i_l3/mod	{int} rows=1 2
+g/proj/i_l0/pct	ERR 22012 division by zero
+g/sum/i_l0/pct	ERR 22012 division by zero
+g/proj/i_l0/mod	ERR 22012 division by zero
+g/sum/i_l0/mod	ERR 22012 division by zero
+g/proj/i_ln/pct	{int,numeric} rows=6 1,0.5 | 2,-2.0 | 3,0.0 | 4,0.0 | 5,1.0 | 6,NULL
+g/sum/i_ln/pct	{numeric} rows=1 -0.5
+g/proj/i_ln/mod	{int,numeric} rows=6 1,0.5 | 2,-2.0 | 3,0.0 | 4,0.0 | 5,1.0 | 6,NULL
+g/sum/i_ln/mod	{numeric} rows=1 -0.5
+g/proj/i_q25/pct	ERR 22P02 invalid input syntax for type integer: "2.5"
+g/sum/i_q25/pct	ERR 22P02 invalid input syntax for type integer: "2.5"
+g/proj/i_q25/mod	ERR 22P02 invalid input syntax for type integer: "2.5"
+g/sum/i_q25/mod	ERR 22P02 invalid input syntax for type integer: "2.5"
+g/proj/i_q3/pct	{int,int} rows=6 1,0 | 2,-1 | 3,2 | 4,0 | 5,1 | 6,NULL
+g/sum/i_q3/pct	{int} rows=1 2
+g/proj/i_q3/mod	{int,int} rows=6 1,0 | 2,-1 | 3,2 | 4,0 | 5,1 | 6,NULL
+g/sum/i_q3/mod	{int} rows=1 2
+g/proj/i_q0/pct	ERR 22012 division by zero
+g/sum/i_q0/pct	ERR 22012 division by zero
+g/proj/i_q0/mod	ERR 22012 division by zero
+g/sum/i_q0/mod	ERR 22012 division by zero
+g/proj/i_qabc/pct	ERR 22P02 invalid input syntax for type integer: "abc"
+g/sum/i_qabc/pct	ERR 22P02 invalid input syntax for type integer: "abc"
+g/proj/i_qabc/mod	ERR 22P02 invalid input syntax for type integer: "abc"
+g/sum/i_qabc/mod	ERR 22P02 invalid input syntax for type integer: "abc"
+g/proj/i_nul/pct	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+g/sum/i_nul/pct	{int} rows=1 NULL
+g/proj/i_nul/mod	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+g/sum/i_nul/mod	{int} rows=1 NULL
+g/proj/i_tnul/pct	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+g/sum/i_tnul/pct	{int} rows=1 NULL
+g/proj/i_tnul/mod	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+g/sum/i_tnul/mod	{int} rows=1 NULL
+g/proj/i_sqi/pct	{int,int} rows=6 1,3 | 2,-2 | 3,0 | 4,0 | 5,1 | 6,NULL
+g/sum/i_sqi/pct	{int} rows=1 2
+g/proj/i_sqi/mod	{int,int} rows=6 1,3 | 2,-2 | 3,0 | 4,0 | 5,1 | 6,NULL
+g/sum/i_sqi/mod	{int} rows=1 2
+g/proj/i_sqn/pct	{int,numeric} rows=6 1,0.50 | 2,-0.75 | 3,0.00 | 4,0.00 | 5,1.00 | 6,NULL
+g/sum/i_sqn/pct	{numeric} rows=1 0.75
+g/proj/i_sqn/mod	{int,numeric} rows=6 1,0.50 | 2,-0.75 | 3,0.00 | 4,0.00 | 5,1.00 | 6,NULL
+g/sum/i_sqn/mod	{numeric} rows=1 0.75
+g/proj/b_i/pct	{int,int} rows=5 1,0 | 2,0 | 3,0 | 5,0 | 6,NULL
+g/sum/b_i/pct	{numeric} rows=1 0
+g/proj/b_i/mod	{int,int} rows=5 1,0 | 2,0 | 3,0 | 5,0 | 6,NULL
+g/sum/b_i/mod	{numeric} rows=1 0
+g/proj/b_b/pct	{int,int} rows=5 1,0 | 2,0 | 3,0 | 5,0 | 6,NULL
+g/sum/b_b/pct	{numeric} rows=1 0
+g/proj/b_b/mod	{int,int} rows=5 1,0 | 2,0 | 3,0 | 5,0 | 6,NULL
+g/sum/b_b/mod	{numeric} rows=1 0
+g/proj/b_n/pct	{int,numeric} rows=5 1,0.75 | 2,0.00 | 3,0.00 | 5,0.00 | 6,NULL
+g/sum/b_n/pct	{numeric} rows=1 0.75
+g/proj/b_n/mod	{int,numeric} rows=5 1,0.75 | 2,0.00 | 3,0.00 | 5,0.00 | 6,NULL
+g/sum/b_n/mod	{numeric} rows=1 0.75
+g/proj/b_f/pct	ERR 42883 operator does not exist: bigint % double precision
+g/sum/b_f/pct	ERR 42883 operator does not exist: bigint % double precision
+g/proj/b_f/mod	ERR 42883 function mod(bigint, double precision) does not exist
+g/sum/b_f/mod	ERR 42883 function mod(bigint, double precision) does not exist
+g/proj/b_l3/pct	{int,int} rows=6 1,0 | 2,-1 | 3,0 | 4,0 | 5,1 | 6,NULL
+g/sum/b_l3/pct	{numeric} rows=1 0
+g/proj/b_l3/mod	{int,int} rows=6 1,0 | 2,-1 | 3,0 | 4,0 | 5,1 | 6,NULL
+g/sum/b_l3/mod	{numeric} rows=1 0
+g/proj/b_l0/pct	ERR 22012 division by zero
+g/sum/b_l0/pct	ERR 22012 division by zero
+g/proj/b_l0/mod	ERR 22012 division by zero
+g/sum/b_l0/mod	ERR 22012 division by zero
+g/proj/b_ln/pct	{int,numeric} rows=6 1,0.0 | 2,0.0 | 3,0.0 | 4,0.0 | 5,1.0 | 6,NULL
+g/sum/b_ln/pct	{numeric} rows=1 1.0
+g/proj/b_ln/mod	{int,numeric} rows=6 1,0.0 | 2,0.0 | 3,0.0 | 4,0.0 | 5,1.0 | 6,NULL
+g/sum/b_ln/mod	{numeric} rows=1 1.0
+g/proj/b_q25/pct	ERR 22P02 invalid input syntax for type bigint: "2.5"
+g/sum/b_q25/pct	ERR 22P02 invalid input syntax for type bigint: "2.5"
+g/proj/b_q25/mod	ERR 22P02 invalid input syntax for type bigint: "2.5"
+g/sum/b_q25/mod	ERR 22P02 invalid input syntax for type bigint: "2.5"
+g/proj/b_q3/pct	{int,int} rows=6 1,0 | 2,-1 | 3,0 | 4,0 | 5,1 | 6,NULL
+g/sum/b_q3/pct	{numeric} rows=1 0
+g/proj/b_q3/mod	{int,int} rows=6 1,0 | 2,-1 | 3,0 | 4,0 | 5,1 | 6,NULL
+g/sum/b_q3/mod	{numeric} rows=1 0
+g/proj/b_q0/pct	ERR 22012 division by zero
+g/sum/b_q0/pct	ERR 22012 division by zero
+g/proj/b_q0/mod	ERR 22012 division by zero
+g/sum/b_q0/mod	ERR 22012 division by zero
+g/proj/b_qabc/pct	ERR 22P02 invalid input syntax for type bigint: "abc"
+g/sum/b_qabc/pct	ERR 22P02 invalid input syntax for type bigint: "abc"
+g/proj/b_qabc/mod	ERR 22P02 invalid input syntax for type bigint: "abc"
+g/sum/b_qabc/mod	ERR 22P02 invalid input syntax for type bigint: "abc"
+g/proj/b_nul/pct	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+g/sum/b_nul/pct	{numeric} rows=1 NULL
+g/proj/b_nul/mod	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+g/sum/b_nul/mod	{numeric} rows=1 NULL
+g/proj/b_tnul/pct	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+g/sum/b_tnul/pct	{numeric} rows=1 NULL
+g/proj/b_tnul/mod	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+g/sum/b_tnul/mod	{numeric} rows=1 NULL
+g/proj/b_sqi/pct	{int,int} rows=6 1,0 | 2,0 | 3,0 | 4,0 | 5,1 | 6,NULL
+g/sum/b_sqi/pct	{numeric} rows=1 1
+g/proj/b_sqi/mod	{int,int} rows=6 1,0 | 2,0 | 3,0 | 4,0 | 5,1 | 6,NULL
+g/sum/b_sqi/mod	{numeric} rows=1 1
+g/proj/b_sqn/pct	{int,numeric} rows=6 1,0.00 | 2,0.00 | 3,0.00 | 4,0.00 | 5,1.00 | 6,NULL
+g/sum/b_sqn/pct	{numeric} rows=1 1.00
+g/proj/b_sqn/mod	{int,numeric} rows=6 1,0.00 | 2,0.00 | 3,0.00 | 4,0.00 | 5,1.00 | 6,NULL
+g/sum/b_sqn/mod	{numeric} rows=1 1.00
+g/proj/n_i/pct	{int,numeric} rows=5 1,2.25 | 2,-3.50 | 3,0.00 | 5,0.01 | 6,NULL
+g/sum/n_i/pct	{numeric} rows=1 -1.24
+g/proj/n_i/mod	{int,numeric} rows=5 1,2.25 | 2,-3.50 | 3,0.00 | 5,0.01 | 6,NULL
+g/sum/n_i/mod	{numeric} rows=1 -1.24
+g/proj/n_b/pct	{int,numeric} rows=5 1,2.25 | 2,-3.50 | 3,10.00 | 5,0.01 | 6,NULL
+g/sum/n_b/pct	{numeric} rows=1 8.76
+g/proj/n_b/mod	{int,numeric} rows=5 1,2.25 | 2,-3.50 | 3,10.00 | 5,0.01 | 6,NULL
+g/sum/n_b/mod	{numeric} rows=1 8.76
+g/proj/n_n/pct	{int,numeric} rows=5 1,0.00 | 2,0.00 | 3,0.00 | 5,0.00 | 6,NULL
+g/sum/n_n/pct	{numeric} rows=1 0.00
+g/proj/n_n/mod	{int,numeric} rows=5 1,0.00 | 2,0.00 | 3,0.00 | 5,0.00 | 6,NULL
+g/sum/n_n/mod	{numeric} rows=1 0.00
+g/proj/n_f/pct	ERR 42883 operator does not exist: numeric % double precision
+g/sum/n_f/pct	ERR 42883 operator does not exist: numeric % double precision
+g/proj/n_f/mod	ERR 42883 function mod(numeric, double precision) does not exist
+g/sum/n_f/mod	ERR 42883 function mod(numeric, double precision) does not exist
+g/proj/n_l3/pct	{int,numeric} rows=6 1,2.25 | 2,-0.50 | 3,1.00 | 4,0.00 | 5,0.01 | 6,NULL
+g/sum/n_l3/pct	{numeric} rows=1 2.76
+g/proj/n_l3/mod	{int,numeric} rows=6 1,2.25 | 2,-0.50 | 3,1.00 | 4,0.00 | 5,0.01 | 6,NULL
+g/sum/n_l3/mod	{numeric} rows=1 2.76
+g/proj/n_l0/pct	ERR 22012 division by zero
+g/sum/n_l0/pct	ERR 22012 division by zero
+g/proj/n_l0/mod	ERR 22012 division by zero
+g/sum/n_l0/mod	ERR 22012 division by zero
+g/proj/n_ln/pct	{int,numeric} rows=6 1,2.25 | 2,-1.00 | 3,0.00 | 4,0.00 | 5,0.01 | 6,NULL
+g/sum/n_ln/pct	{numeric} rows=1 1.26
+g/proj/n_ln/mod	{int,numeric} rows=6 1,2.25 | 2,-1.00 | 3,0.00 | 4,0.00 | 5,0.01 | 6,NULL
+g/sum/n_ln/mod	{numeric} rows=1 1.26
+g/proj/n_q25/pct	{int,numeric} rows=6 1,2.25 | 2,-1.00 | 3,0.00 | 4,0.00 | 5,0.01 | 6,NULL
+g/sum/n_q25/pct	{numeric} rows=1 1.26
+g/proj/n_q25/mod	{int,numeric} rows=6 1,2.25 | 2,-1.00 | 3,0.00 | 4,0.00 | 5,0.01 | 6,NULL
+g/sum/n_q25/mod	{numeric} rows=1 1.26
+g/proj/n_q3/pct	{int,numeric} rows=6 1,2.25 | 2,-0.50 | 3,1.00 | 4,0.00 | 5,0.01 | 6,NULL
+g/sum/n_q3/pct	{numeric} rows=1 2.76
+g/proj/n_q3/mod	{int,numeric} rows=6 1,2.25 | 2,-0.50 | 3,1.00 | 4,0.00 | 5,0.01 | 6,NULL
+g/sum/n_q3/mod	{numeric} rows=1 2.76
+g/proj/n_q0/pct	ERR 22012 division by zero
+g/sum/n_q0/pct	ERR 22012 division by zero
+g/proj/n_q0/mod	ERR 22012 division by zero
+g/sum/n_q0/mod	ERR 22012 division by zero
+g/proj/n_qabc/pct	ERR 22P02 invalid input syntax for type numeric: "abc"
+g/sum/n_qabc/pct	ERR 22P02 invalid input syntax for type numeric: "abc"
+g/proj/n_qabc/mod	ERR 22P02 invalid input syntax for type numeric: "abc"
+g/sum/n_qabc/mod	ERR 22P02 invalid input syntax for type numeric: "abc"
+g/proj/n_nul/pct	{int,numeric} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+g/sum/n_nul/pct	{numeric} rows=1 NULL
+g/proj/n_nul/mod	{int,numeric} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+g/sum/n_nul/mod	{numeric} rows=1 NULL
+g/proj/n_tnul/pct	{int,numeric} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+g/sum/n_tnul/pct	{numeric} rows=1 NULL
+g/proj/n_tnul/mod	{int,numeric} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+g/sum/n_tnul/mod	{numeric} rows=1 NULL
+g/proj/n_sqi/pct	{int,numeric} rows=6 1,2.25 | 2,-3.50 | 3,0.00 | 4,0.00 | 5,0.01 | 6,NULL
+g/sum/n_sqi/pct	{numeric} rows=1 -1.24
+g/proj/n_sqi/mod	{int,numeric} rows=6 1,2.25 | 2,-3.50 | 3,0.00 | 4,0.00 | 5,0.01 | 6,NULL
+g/sum/n_sqi/mod	{numeric} rows=1 -1.24
+g/proj/n_sqn/pct	{int,numeric} rows=6 1,1.00 | 2,-1.00 | 3,0.00 | 4,0.00 | 5,0.01 | 6,NULL
+g/sum/n_sqn/pct	{numeric} rows=1 0.01
+g/proj/n_sqn/mod	{int,numeric} rows=6 1,1.00 | 2,-1.00 | 3,0.00 | 4,0.00 | 5,0.01 | 6,NULL
+g/sum/n_sqn/mod	{numeric} rows=1 0.01
+g/proj/f_i/pct	ERR 42883 operator does not exist: double precision % integer
+g/sum/f_i/pct	ERR 42883 operator does not exist: double precision % integer
+g/proj/f_i/mod	ERR 42883 function mod(double precision, integer) does not exist
+g/sum/f_i/mod	ERR 42883 function mod(double precision, integer) does not exist
+g/proj/f_b/pct	ERR 42883 operator does not exist: double precision % bigint
+g/sum/f_b/pct	ERR 42883 operator does not exist: double precision % bigint
+g/proj/f_b/mod	ERR 42883 function mod(double precision, bigint) does not exist
+g/sum/f_b/mod	ERR 42883 function mod(double precision, bigint) does not exist
+g/proj/f_n/pct	ERR 42883 operator does not exist: double precision % numeric
+g/sum/f_n/pct	ERR 42883 operator does not exist: double precision % numeric
+g/proj/f_n/mod	ERR 42883 function mod(double precision, numeric) does not exist
+g/sum/f_n/mod	ERR 42883 function mod(double precision, numeric) does not exist
+g/proj/f_f/pct	ERR 42883 operator does not exist: double precision % double precision
+g/sum/f_f/pct	ERR 42883 operator does not exist: double precision % double precision
+g/proj/f_f/mod	ERR 42883 function mod(double precision, double precision) does not exist
+g/sum/f_f/mod	ERR 42883 function mod(double precision, double precision) does not exist
+g/proj/f_l3/pct	ERR 42883 operator does not exist: double precision % integer
+g/sum/f_l3/pct	ERR 42883 operator does not exist: double precision % integer
+g/proj/f_l3/mod	ERR 42883 function mod(double precision, integer) does not exist
+g/sum/f_l3/mod	ERR 42883 function mod(double precision, integer) does not exist
+g/proj/f_l0/pct	ERR 42883 operator does not exist: double precision % integer
+g/sum/f_l0/pct	ERR 42883 operator does not exist: double precision % integer
+g/proj/f_l0/mod	ERR 42883 function mod(double precision, integer) does not exist
+g/sum/f_l0/mod	ERR 42883 function mod(double precision, integer) does not exist
+g/proj/f_ln/pct	ERR 42883 operator does not exist: double precision % numeric
+g/sum/f_ln/pct	ERR 42883 operator does not exist: double precision % numeric
+g/proj/f_ln/mod	ERR 42883 function mod(double precision, numeric) does not exist
+g/sum/f_ln/mod	ERR 42883 function mod(double precision, numeric) does not exist
+g/proj/f_q25/pct	ERR 42883 operator does not exist: double precision % unknown
+g/sum/f_q25/pct	ERR 42883 operator does not exist: double precision % unknown
+g/proj/f_q25/mod	ERR 42883 function mod(double precision, unknown) does not exist
+g/sum/f_q25/mod	ERR 42883 function mod(double precision, unknown) does not exist
+g/proj/f_q3/pct	ERR 42883 operator does not exist: double precision % unknown
+g/sum/f_q3/pct	ERR 42883 operator does not exist: double precision % unknown
+g/proj/f_q3/mod	ERR 42883 function mod(double precision, unknown) does not exist
+g/sum/f_q3/mod	ERR 42883 function mod(double precision, unknown) does not exist
+g/proj/f_q0/pct	ERR 42883 operator does not exist: double precision % unknown
+g/sum/f_q0/pct	ERR 42883 operator does not exist: double precision % unknown
+g/proj/f_q0/mod	ERR 42883 function mod(double precision, unknown) does not exist
+g/sum/f_q0/mod	ERR 42883 function mod(double precision, unknown) does not exist
+g/proj/f_qabc/pct	ERR 42883 operator does not exist: double precision % unknown
+g/sum/f_qabc/pct	ERR 42883 operator does not exist: double precision % unknown
+g/proj/f_qabc/mod	ERR 42883 function mod(double precision, unknown) does not exist
+g/sum/f_qabc/mod	ERR 42883 function mod(double precision, unknown) does not exist
+g/proj/f_nul/pct	ERR 42883 operator does not exist: double precision % unknown
+g/sum/f_nul/pct	ERR 42883 operator does not exist: double precision % unknown
+g/proj/f_nul/mod	ERR 42883 function mod(double precision, unknown) does not exist
+g/sum/f_nul/mod	ERR 42883 function mod(double precision, unknown) does not exist
+g/proj/f_tnul/pct	ERR 42883 operator does not exist: double precision % integer
+g/sum/f_tnul/pct	ERR 42883 operator does not exist: double precision % integer
+g/proj/f_tnul/mod	ERR 42883 function mod(double precision, integer) does not exist
+g/sum/f_tnul/mod	ERR 42883 function mod(double precision, integer) does not exist
+g/proj/f_sqi/pct	ERR 42883 operator does not exist: double precision % integer
+g/sum/f_sqi/pct	ERR 42883 operator does not exist: double precision % integer
+g/proj/f_sqi/mod	ERR 42883 function mod(double precision, integer) does not exist
+g/sum/f_sqi/mod	ERR 42883 function mod(double precision, integer) does not exist
+g/proj/f_sqn/pct	ERR 42883 operator does not exist: double precision % numeric
+g/sum/f_sqn/pct	ERR 42883 operator does not exist: double precision % numeric
+g/proj/f_sqn/mod	ERR 42883 function mod(double precision, numeric) does not exist
+g/sum/f_sqn/mod	ERR 42883 function mod(double precision, numeric) does not exist
+g/proj/l8_i/pct	{int,int} rows=5 1,2 | 2,1 | 3,3 | 5,0 | 6,NULL
+g/sum/l8_i/pct	{int} rows=1 6
+g/proj/l8_i/mod	{int,int} rows=5 1,2 | 2,1 | 3,3 | 5,0 | 6,NULL
+g/sum/l8_i/mod	{int} rows=1 6
+g/proj/l8_b/pct	{int,int} rows=5 1,8 | 2,8 | 3,8 | 5,0 | 6,NULL
+g/sum/l8_b/pct	{numeric} rows=1 24
+g/proj/l8_b/mod	{int,int} rows=5 1,8 | 2,8 | 3,8 | 5,0 | 6,NULL
+g/sum/l8_b/mod	{numeric} rows=1 24
+g/proj/l8_n/pct	{int,numeric} rows=5 1,1.25 | 2,1.00 | 3,8.00 | 5,0.00 | 6,NULL
+g/sum/l8_n/pct	{numeric} rows=1 10.25
+g/proj/l8_n/mod	{int,numeric} rows=5 1,1.25 | 2,1.00 | 3,8.00 | 5,0.00 | 6,NULL
+g/sum/l8_n/mod	{numeric} rows=1 10.25
+g/proj/l8_f/pct	ERR 42883 operator does not exist: integer % double precision
+g/sum/l8_f/pct	ERR 42883 operator does not exist: integer % double precision
+g/proj/l8_f/mod	ERR 42883 function mod(integer, double precision) does not exist
+g/sum/l8_f/mod	ERR 42883 function mod(integer, double precision) does not exist
+g/proj/l8_l3/pct	{int,int} rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+g/sum/l8_l3/pct	{int} rows=1 12
+g/proj/l8_l3/mod	{int,int} rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+g/sum/l8_l3/mod	{int} rows=1 12
+g/proj/l8_l0/pct	ERR 22012 division by zero
+g/sum/l8_l0/pct	ERR 22012 division by zero
+g/proj/l8_l0/mod	ERR 22012 division by zero
+g/sum/l8_l0/mod	ERR 22012 division by zero
+g/proj/l8_ln/pct	{int,numeric} rows=6 1,0.5 | 2,0.5 | 3,0.5 | 4,0.5 | 5,0.5 | 6,0.5
+g/sum/l8_ln/pct	{numeric} rows=1 3.0
+g/proj/l8_ln/mod	{int,numeric} rows=6 1,0.5 | 2,0.5 | 3,0.5 | 4,0.5 | 5,0.5 | 6,0.5
+g/sum/l8_ln/mod	{numeric} rows=1 3.0
+g/proj/l8_q25/pct	ERR 22P02 invalid input syntax for type integer: "2.5"
+g/sum/l8_q25/pct	ERR 22P02 invalid input syntax for type integer: "2.5"
+g/proj/l8_q25/mod	ERR 22P02 invalid input syntax for type integer: "2.5"
+g/sum/l8_q25/mod	ERR 22P02 invalid input syntax for type integer: "2.5"
+g/proj/l8_q3/pct	{int,int} rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+g/sum/l8_q3/pct	{int} rows=1 12
+g/proj/l8_q3/mod	{int,int} rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+g/sum/l8_q3/mod	{int} rows=1 12
+g/proj/l8_q0/pct	ERR 22012 division by zero
+g/sum/l8_q0/pct	ERR 22012 division by zero
+g/proj/l8_q0/mod	ERR 22012 division by zero
+g/sum/l8_q0/mod	ERR 22012 division by zero
+g/proj/l8_qabc/pct	ERR 22P02 invalid input syntax for type integer: "abc"
+g/sum/l8_qabc/pct	ERR 22P02 invalid input syntax for type integer: "abc"
+g/proj/l8_qabc/mod	ERR 22P02 invalid input syntax for type integer: "abc"
+g/sum/l8_qabc/mod	ERR 22P02 invalid input syntax for type integer: "abc"
+g/proj/l8_nul/pct	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+g/sum/l8_nul/pct	{int} rows=1 NULL
+g/proj/l8_nul/mod	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+g/sum/l8_nul/mod	{int} rows=1 NULL
+g/proj/l8_tnul/pct	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+g/sum/l8_tnul/pct	{int} rows=1 NULL
+g/proj/l8_tnul/mod	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+g/sum/l8_tnul/mod	{int} rows=1 NULL
+g/proj/l8_sqi/pct	{int,int} rows=6 1,3 | 2,3 | 3,3 | 4,3 | 5,3 | 6,3
+g/sum/l8_sqi/pct	{int} rows=1 18
+g/proj/l8_sqi/mod	{int,int} rows=6 1,3 | 2,3 | 3,3 | 4,3 | 5,3 | 6,3
+g/sum/l8_sqi/mod	{int} rows=1 18
+g/proj/l8_sqn/pct	{int,numeric} rows=6 1,0.50 | 2,0.50 | 3,0.50 | 4,0.50 | 5,0.50 | 6,0.50
+g/sum/l8_sqn/pct	{numeric} rows=1 3.00
+g/proj/l8_sqn/mod	{int,numeric} rows=6 1,0.50 | 2,0.50 | 3,0.50 | 4,0.50 | 5,0.50 | 6,0.50
+g/sum/l8_sqn/mod	{numeric} rows=1 3.00
+g/proj/ln_i/pct	{int,numeric} rows=5 1,1.5 | 2,0.5 | 3,2.5 | 5,0.5 | 6,NULL
+g/sum/ln_i/pct	{numeric} rows=1 5.0
+g/proj/ln_i/mod	{int,numeric} rows=5 1,1.5 | 2,0.5 | 3,2.5 | 5,0.5 | 6,NULL
+g/sum/ln_i/mod	{numeric} rows=1 5.0
+g/proj/ln_b/pct	{int,numeric} rows=5 1,7.5 | 2,7.5 | 3,7.5 | 5,0.5 | 6,NULL
+g/sum/ln_b/pct	{numeric} rows=1 23.0
+g/proj/ln_b/mod	{int,numeric} rows=5 1,7.5 | 2,7.5 | 3,7.5 | 5,0.5 | 6,NULL
+g/sum/ln_b/mod	{numeric} rows=1 23.0
+g/proj/ln_n/pct	{int,numeric} rows=5 1,0.75 | 2,0.50 | 3,7.50 | 5,0.00 | 6,NULL
+g/sum/ln_n/pct	{numeric} rows=1 8.75
+g/proj/ln_n/mod	{int,numeric} rows=5 1,0.75 | 2,0.50 | 3,7.50 | 5,0.00 | 6,NULL
+g/sum/ln_n/mod	{numeric} rows=1 8.75
+g/proj/ln_f/pct	ERR 42883 operator does not exist: numeric % double precision
+g/sum/ln_f/pct	ERR 42883 operator does not exist: numeric % double precision
+g/proj/ln_f/mod	ERR 42883 function mod(numeric, double precision) does not exist
+g/sum/ln_f/mod	ERR 42883 function mod(numeric, double precision) does not exist
+g/proj/ln_l3/pct	{int,numeric} rows=6 1,1.5 | 2,1.5 | 3,1.5 | 4,1.5 | 5,1.5 | 6,1.5
+g/sum/ln_l3/pct	{numeric} rows=1 9.0
+g/proj/ln_l3/mod	{int,numeric} rows=6 1,1.5 | 2,1.5 | 3,1.5 | 4,1.5 | 5,1.5 | 6,1.5
+g/sum/ln_l3/mod	{numeric} rows=1 9.0
+g/proj/ln_l0/pct	ERR 22012 division by zero
+g/sum/ln_l0/pct	ERR 22012 division by zero
+g/proj/ln_l0/mod	ERR 22012 division by zero
+g/sum/ln_l0/mod	ERR 22012 division by zero
+g/proj/ln_ln/pct	{int,numeric} rows=6 1,0.0 | 2,0.0 | 3,0.0 | 4,0.0 | 5,0.0 | 6,0.0
+g/sum/ln_ln/pct	{numeric} rows=1 0.0
+g/proj/ln_ln/mod	{int,numeric} rows=6 1,0.0 | 2,0.0 | 3,0.0 | 4,0.0 | 5,0.0 | 6,0.0
+g/sum/ln_ln/mod	{numeric} rows=1 0.0
+g/proj/ln_q25/pct	{int,numeric} rows=6 1,0.0 | 2,0.0 | 3,0.0 | 4,0.0 | 5,0.0 | 6,0.0
+g/sum/ln_q25/pct	{numeric} rows=1 0.0
+g/proj/ln_q25/mod	{int,numeric} rows=6 1,0.0 | 2,0.0 | 3,0.0 | 4,0.0 | 5,0.0 | 6,0.0
+g/sum/ln_q25/mod	{numeric} rows=1 0.0
+g/proj/ln_q3/pct	{int,numeric} rows=6 1,1.5 | 2,1.5 | 3,1.5 | 4,1.5 | 5,1.5 | 6,1.5
+g/sum/ln_q3/pct	{numeric} rows=1 9.0
+g/proj/ln_q3/mod	{int,numeric} rows=6 1,1.5 | 2,1.5 | 3,1.5 | 4,1.5 | 5,1.5 | 6,1.5
+g/sum/ln_q3/mod	{numeric} rows=1 9.0
+g/proj/ln_q0/pct	ERR 22012 division by zero
+g/sum/ln_q0/pct	ERR 22012 division by zero
+g/proj/ln_q0/mod	ERR 22012 division by zero
+g/sum/ln_q0/mod	ERR 22012 division by zero
+g/proj/ln_qabc/pct	ERR 22P02 invalid input syntax for type numeric: "abc"
+g/sum/ln_qabc/pct	ERR 22P02 invalid input syntax for type numeric: "abc"
+g/proj/ln_qabc/mod	ERR 22P02 invalid input syntax for type numeric: "abc"
+g/sum/ln_qabc/mod	ERR 22P02 invalid input syntax for type numeric: "abc"
+g/proj/ln_nul/pct	{int,numeric} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+g/sum/ln_nul/pct	{numeric} rows=1 NULL
+g/proj/ln_nul/mod	{int,numeric} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+g/sum/ln_nul/mod	{numeric} rows=1 NULL
+g/proj/ln_tnul/pct	{int,numeric} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+g/sum/ln_tnul/pct	{numeric} rows=1 NULL
+g/proj/ln_tnul/mod	{int,numeric} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+g/sum/ln_tnul/mod	{numeric} rows=1 NULL
+g/proj/ln_sqi/pct	{int,numeric} rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+g/sum/ln_sqi/pct	{numeric} rows=1 15.0
+g/proj/ln_sqi/mod	{int,numeric} rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
+g/sum/ln_sqi/mod	{numeric} rows=1 15.0
+g/proj/ln_sqn/pct	{int,numeric} rows=6 1,0.00 | 2,0.00 | 3,0.00 | 4,0.00 | 5,0.00 | 6,0.00
+g/sum/ln_sqn/pct	{numeric} rows=1 0.00
+g/proj/ln_sqn/mod	{int,numeric} rows=6 1,0.00 | 2,0.00 | 3,0.00 | 4,0.00 | 5,0.00 | 6,0.00
+g/sum/ln_sqn/mod	{numeric} rows=1 0.00
+g/proj/q75_i/pct	ERR 22P02 invalid input syntax for type integer: "7.5"
+g/sum/q75_i/pct	ERR 22P02 invalid input syntax for type integer: "7.5"
+g/proj/q75_i/mod	ERR 22P02 invalid input syntax for type integer: "7.5"
+g/sum/q75_i/mod	ERR 22P02 invalid input syntax for type integer: "7.5"
+g/proj/q75_b/pct	ERR 22P02 invalid input syntax for type bigint: "7.5"
+g/sum/q75_b/pct	ERR 22P02 invalid input syntax for type bigint: "7.5"
+g/proj/q75_b/mod	ERR 22P02 invalid input syntax for type bigint: "7.5"
+g/sum/q75_b/mod	ERR 22P02 invalid input syntax for type bigint: "7.5"
+g/proj/q75_n/pct	{int,numeric} rows=5 1,0.75 | 2,0.50 | 3,7.50 | 5,0.00 | 6,NULL
+g/sum/q75_n/pct	{numeric} rows=1 8.75
+g/proj/q75_n/mod	{int,numeric} rows=5 1,0.75 | 2,0.50 | 3,7.50 | 5,0.00 | 6,NULL
+g/sum/q75_n/mod	{numeric} rows=1 8.75
+g/proj/q75_f/pct	ERR 42883 operator does not exist: unknown % double precision
+g/sum/q75_f/pct	ERR 42883 operator does not exist: unknown % double precision
+g/proj/q75_f/mod	ERR 42883 function mod(unknown, double precision) does not exist
+g/sum/q75_f/mod	ERR 42883 function mod(unknown, double precision) does not exist
+g/proj/q75_l3/pct	ERR 22P02 invalid input syntax for type integer: "7.5"
+g/sum/q75_l3/pct	ERR 22P02 invalid input syntax for type integer: "7.5"
+g/proj/q75_l3/mod	ERR 22P02 invalid input syntax for type integer: "7.5"
+g/sum/q75_l3/mod	ERR 22P02 invalid input syntax for type integer: "7.5"
+g/proj/q75_l0/pct	ERR 22P02 invalid input syntax for type integer: "7.5"
+g/sum/q75_l0/pct	ERR 22P02 invalid input syntax for type integer: "7.5"
+g/proj/q75_l0/mod	ERR 22P02 invalid input syntax for type integer: "7.5"
+g/sum/q75_l0/mod	ERR 22P02 invalid input syntax for type integer: "7.5"
+g/proj/q75_ln/pct	{int,numeric} rows=6 1,0.0 | 2,0.0 | 3,0.0 | 4,0.0 | 5,0.0 | 6,0.0
+g/sum/q75_ln/pct	{numeric} rows=1 0.0
+g/proj/q75_ln/mod	{int,numeric} rows=6 1,0.0 | 2,0.0 | 3,0.0 | 4,0.0 | 5,0.0 | 6,0.0
+g/sum/q75_ln/mod	{numeric} rows=1 0.0
+g/proj/q75_q25/pct	ERR 42725 operator is not unique: unknown % unknown
+g/sum/q75_q25/pct	ERR 42725 operator is not unique: unknown % unknown
+g/proj/q75_q25/mod	ERR 42725 function mod(unknown, unknown) is not unique
+g/sum/q75_q25/mod	ERR 42725 function mod(unknown, unknown) is not unique
+g/proj/q75_q3/pct	ERR 42725 operator is not unique: unknown % unknown
+g/sum/q75_q3/pct	ERR 42725 operator is not unique: unknown % unknown
+g/proj/q75_q3/mod	ERR 42725 function mod(unknown, unknown) is not unique
+g/sum/q75_q3/mod	ERR 42725 function mod(unknown, unknown) is not unique
+g/proj/q75_q0/pct	ERR 42725 operator is not unique: unknown % unknown
+g/sum/q75_q0/pct	ERR 42725 operator is not unique: unknown % unknown
+g/proj/q75_q0/mod	ERR 42725 function mod(unknown, unknown) is not unique
+g/sum/q75_q0/mod	ERR 42725 function mod(unknown, unknown) is not unique
+g/proj/q75_qabc/pct	ERR 42725 operator is not unique: unknown % unknown
+g/sum/q75_qabc/pct	ERR 42725 operator is not unique: unknown % unknown
+g/proj/q75_qabc/mod	ERR 42725 function mod(unknown, unknown) is not unique
+g/sum/q75_qabc/mod	ERR 42725 function mod(unknown, unknown) is not unique
+g/proj/q75_nul/pct	ERR 42725 operator is not unique: unknown % unknown
+g/sum/q75_nul/pct	ERR 42725 operator is not unique: unknown % unknown
+g/proj/q75_nul/mod	ERR 42725 function mod(unknown, unknown) is not unique
+g/sum/q75_nul/mod	ERR 42725 function mod(unknown, unknown) is not unique
+g/proj/q75_tnul/pct	ERR 22P02 invalid input syntax for type integer: "7.5"
+g/sum/q75_tnul/pct	ERR 22P02 invalid input syntax for type integer: "7.5"
+g/proj/q75_tnul/mod	ERR 22P02 invalid input syntax for type integer: "7.5"
+g/sum/q75_tnul/mod	ERR 22P02 invalid input syntax for type integer: "7.5"
+g/proj/q75_sqi/pct	ERR 22P02 invalid input syntax for type integer: "7.5"
+g/sum/q75_sqi/pct	ERR 22P02 invalid input syntax for type integer: "7.5"
+g/proj/q75_sqi/mod	ERR 22P02 invalid input syntax for type integer: "7.5"
+g/sum/q75_sqi/mod	ERR 22P02 invalid input syntax for type integer: "7.5"
+g/proj/q75_sqn/pct	{int,numeric} rows=6 1,0.00 | 2,0.00 | 3,0.00 | 4,0.00 | 5,0.00 | 6,0.00
+g/sum/q75_sqn/pct	{numeric} rows=1 0.00
+g/proj/q75_sqn/mod	{int,numeric} rows=6 1,0.00 | 2,0.00 | 3,0.00 | 4,0.00 | 5,0.00 | 6,0.00
+g/sum/q75_sqn/mod	{numeric} rows=1 0.00
+g/proj/q8_i/pct	{int,int} rows=5 1,2 | 2,1 | 3,3 | 5,0 | 6,NULL
+g/sum/q8_i/pct	{int} rows=1 6
+g/proj/q8_i/mod	{int,int} rows=5 1,2 | 2,1 | 3,3 | 5,0 | 6,NULL
+g/sum/q8_i/mod	{int} rows=1 6
+g/proj/q8_b/pct	{int,int} rows=5 1,8 | 2,8 | 3,8 | 5,0 | 6,NULL
+g/sum/q8_b/pct	{numeric} rows=1 24
+g/proj/q8_b/mod	{int,int} rows=5 1,8 | 2,8 | 3,8 | 5,0 | 6,NULL
+g/sum/q8_b/mod	{numeric} rows=1 24
+g/proj/q8_n/pct	{int,numeric} rows=5 1,1.25 | 2,1.00 | 3,8.00 | 5,0.00 | 6,NULL
+g/sum/q8_n/pct	{numeric} rows=1 10.25
+g/proj/q8_n/mod	{int,numeric} rows=5 1,1.25 | 2,1.00 | 3,8.00 | 5,0.00 | 6,NULL
+g/sum/q8_n/mod	{numeric} rows=1 10.25
+g/proj/q8_f/pct	ERR 42883 operator does not exist: unknown % double precision
+g/sum/q8_f/pct	ERR 42883 operator does not exist: unknown % double precision
+g/proj/q8_f/mod	ERR 42883 function mod(unknown, double precision) does not exist
+g/sum/q8_f/mod	ERR 42883 function mod(unknown, double precision) does not exist
+g/proj/q8_l3/pct	{int,int} rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+g/sum/q8_l3/pct	{int} rows=1 12
+g/proj/q8_l3/mod	{int,int} rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+g/sum/q8_l3/mod	{int} rows=1 12
+g/proj/q8_l0/pct	ERR 22012 division by zero
+g/sum/q8_l0/pct	ERR 22012 division by zero
+g/proj/q8_l0/mod	ERR 22012 division by zero
+g/sum/q8_l0/mod	ERR 22012 division by zero
+g/proj/q8_ln/pct	{int,numeric} rows=6 1,0.5 | 2,0.5 | 3,0.5 | 4,0.5 | 5,0.5 | 6,0.5
+g/sum/q8_ln/pct	{numeric} rows=1 3.0
+g/proj/q8_ln/mod	{int,numeric} rows=6 1,0.5 | 2,0.5 | 3,0.5 | 4,0.5 | 5,0.5 | 6,0.5
+g/sum/q8_ln/mod	{numeric} rows=1 3.0
+g/proj/q8_q25/pct	ERR 42725 operator is not unique: unknown % unknown
+g/sum/q8_q25/pct	ERR 42725 operator is not unique: unknown % unknown
+g/proj/q8_q25/mod	ERR 42725 function mod(unknown, unknown) is not unique
+g/sum/q8_q25/mod	ERR 42725 function mod(unknown, unknown) is not unique
+g/proj/q8_q3/pct	ERR 42725 operator is not unique: unknown % unknown
+g/sum/q8_q3/pct	ERR 42725 operator is not unique: unknown % unknown
+g/proj/q8_q3/mod	ERR 42725 function mod(unknown, unknown) is not unique
+g/sum/q8_q3/mod	ERR 42725 function mod(unknown, unknown) is not unique
+g/proj/q8_q0/pct	ERR 42725 operator is not unique: unknown % unknown
+g/sum/q8_q0/pct	ERR 42725 operator is not unique: unknown % unknown
+g/proj/q8_q0/mod	ERR 42725 function mod(unknown, unknown) is not unique
+g/sum/q8_q0/mod	ERR 42725 function mod(unknown, unknown) is not unique
+g/proj/q8_qabc/pct	ERR 42725 operator is not unique: unknown % unknown
+g/sum/q8_qabc/pct	ERR 42725 operator is not unique: unknown % unknown
+g/proj/q8_qabc/mod	ERR 42725 function mod(unknown, unknown) is not unique
+g/sum/q8_qabc/mod	ERR 42725 function mod(unknown, unknown) is not unique
+g/proj/q8_nul/pct	ERR 42725 operator is not unique: unknown % unknown
+g/sum/q8_nul/pct	ERR 42725 operator is not unique: unknown % unknown
+g/proj/q8_nul/mod	ERR 42725 function mod(unknown, unknown) is not unique
+g/sum/q8_nul/mod	ERR 42725 function mod(unknown, unknown) is not unique
+g/proj/q8_tnul/pct	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+g/sum/q8_tnul/pct	{int} rows=1 NULL
+g/proj/q8_tnul/mod	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+g/sum/q8_tnul/mod	{int} rows=1 NULL
+g/proj/q8_sqi/pct	{int,int} rows=6 1,3 | 2,3 | 3,3 | 4,3 | 5,3 | 6,3
+g/sum/q8_sqi/pct	{int} rows=1 18
+g/proj/q8_sqi/mod	{int,int} rows=6 1,3 | 2,3 | 3,3 | 4,3 | 5,3 | 6,3
+g/sum/q8_sqi/mod	{int} rows=1 18
+g/proj/q8_sqn/pct	{int,numeric} rows=6 1,0.50 | 2,0.50 | 3,0.50 | 4,0.50 | 5,0.50 | 6,0.50
+g/sum/q8_sqn/pct	{numeric} rows=1 3.00
+g/proj/q8_sqn/mod	{int,numeric} rows=6 1,0.50 | 2,0.50 | 3,0.50 | 4,0.50 | 5,0.50 | 6,0.50
+g/sum/q8_sqn/mod	{numeric} rows=1 3.00
+g/proj/q0_i/pct	{int,int} rows=5 1,0 | 2,0 | 3,0 | 5,0 | 6,NULL
+g/sum/q0_i/pct	{int} rows=1 0
+g/proj/q0_i/mod	{int,int} rows=5 1,0 | 2,0 | 3,0 | 5,0 | 6,NULL
+g/sum/q0_i/mod	{int} rows=1 0
+g/proj/q0_b/pct	{int,int} rows=5 1,0 | 2,0 | 3,0 | 5,0 | 6,NULL
+g/sum/q0_b/pct	{numeric} rows=1 0
+g/proj/q0_b/mod	{int,int} rows=5 1,0 | 2,0 | 3,0 | 5,0 | 6,NULL
+g/sum/q0_b/mod	{numeric} rows=1 0
+g/proj/q0_n/pct	{int,numeric} rows=5 1,0.00 | 2,0.00 | 3,0.00 | 5,0.00 | 6,NULL
+g/sum/q0_n/pct	{numeric} rows=1 0.00
+g/proj/q0_n/mod	{int,numeric} rows=5 1,0.00 | 2,0.00 | 3,0.00 | 5,0.00 | 6,NULL
+g/sum/q0_n/mod	{numeric} rows=1 0.00
+g/proj/q0_f/pct	ERR 42883 operator does not exist: unknown % double precision
+g/sum/q0_f/pct	ERR 42883 operator does not exist: unknown % double precision
+g/proj/q0_f/mod	ERR 42883 function mod(unknown, double precision) does not exist
+g/sum/q0_f/mod	ERR 42883 function mod(unknown, double precision) does not exist
+g/proj/q0_l3/pct	{int,int} rows=6 1,0 | 2,0 | 3,0 | 4,0 | 5,0 | 6,0
+g/sum/q0_l3/pct	{int} rows=1 0
+g/proj/q0_l3/mod	{int,int} rows=6 1,0 | 2,0 | 3,0 | 4,0 | 5,0 | 6,0
+g/sum/q0_l3/mod	{int} rows=1 0
+g/proj/q0_l0/pct	ERR 22012 division by zero
+g/sum/q0_l0/pct	ERR 22012 division by zero
+g/proj/q0_l0/mod	ERR 22012 division by zero
+g/sum/q0_l0/mod	ERR 22012 division by zero
+g/proj/q0_ln/pct	{int,numeric} rows=6 1,0.0 | 2,0.0 | 3,0.0 | 4,0.0 | 5,0.0 | 6,0.0
+g/sum/q0_ln/pct	{numeric} rows=1 0.0
+g/proj/q0_ln/mod	{int,numeric} rows=6 1,0.0 | 2,0.0 | 3,0.0 | 4,0.0 | 5,0.0 | 6,0.0
+g/sum/q0_ln/mod	{numeric} rows=1 0.0
+g/proj/q0_q25/pct	ERR 42725 operator is not unique: unknown % unknown
+g/sum/q0_q25/pct	ERR 42725 operator is not unique: unknown % unknown
+g/proj/q0_q25/mod	ERR 42725 function mod(unknown, unknown) is not unique
+g/sum/q0_q25/mod	ERR 42725 function mod(unknown, unknown) is not unique
+g/proj/q0_q3/pct	ERR 42725 operator is not unique: unknown % unknown
+g/sum/q0_q3/pct	ERR 42725 operator is not unique: unknown % unknown
+g/proj/q0_q3/mod	ERR 42725 function mod(unknown, unknown) is not unique
+g/sum/q0_q3/mod	ERR 42725 function mod(unknown, unknown) is not unique
+g/proj/q0_q0/pct	ERR 42725 operator is not unique: unknown % unknown
+g/sum/q0_q0/pct	ERR 42725 operator is not unique: unknown % unknown
+g/proj/q0_q0/mod	ERR 42725 function mod(unknown, unknown) is not unique
+g/sum/q0_q0/mod	ERR 42725 function mod(unknown, unknown) is not unique
+g/proj/q0_qabc/pct	ERR 42725 operator is not unique: unknown % unknown
+g/sum/q0_qabc/pct	ERR 42725 operator is not unique: unknown % unknown
+g/proj/q0_qabc/mod	ERR 42725 function mod(unknown, unknown) is not unique
+g/sum/q0_qabc/mod	ERR 42725 function mod(unknown, unknown) is not unique
+g/proj/q0_nul/pct	ERR 42725 operator is not unique: unknown % unknown
+g/sum/q0_nul/pct	ERR 42725 operator is not unique: unknown % unknown
+g/proj/q0_nul/mod	ERR 42725 function mod(unknown, unknown) is not unique
+g/sum/q0_nul/mod	ERR 42725 function mod(unknown, unknown) is not unique
+g/proj/q0_tnul/pct	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+g/sum/q0_tnul/pct	{int} rows=1 NULL
+g/proj/q0_tnul/mod	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+g/sum/q0_tnul/mod	{int} rows=1 NULL
+g/proj/q0_sqi/pct	{int,int} rows=6 1,0 | 2,0 | 3,0 | 4,0 | 5,0 | 6,0
+g/sum/q0_sqi/pct	{int} rows=1 0
+g/proj/q0_sqi/mod	{int,int} rows=6 1,0 | 2,0 | 3,0 | 4,0 | 5,0 | 6,0
+g/sum/q0_sqi/mod	{int} rows=1 0
+g/proj/q0_sqn/pct	{int,numeric} rows=6 1,0.00 | 2,0.00 | 3,0.00 | 4,0.00 | 5,0.00 | 6,0.00
+g/sum/q0_sqn/pct	{numeric} rows=1 0.00
+g/proj/q0_sqn/mod	{int,numeric} rows=6 1,0.00 | 2,0.00 | 3,0.00 | 4,0.00 | 5,0.00 | 6,0.00
+g/sum/q0_sqn/mod	{numeric} rows=1 0.00
+g/proj/qabc_i/pct	ERR 22P02 invalid input syntax for type integer: "abc"
+g/sum/qabc_i/pct	ERR 22P02 invalid input syntax for type integer: "abc"
+g/proj/qabc_i/mod	ERR 22P02 invalid input syntax for type integer: "abc"
+g/sum/qabc_i/mod	ERR 22P02 invalid input syntax for type integer: "abc"
+g/proj/qabc_b/pct	ERR 22P02 invalid input syntax for type bigint: "abc"
+g/sum/qabc_b/pct	ERR 22P02 invalid input syntax for type bigint: "abc"
+g/proj/qabc_b/mod	ERR 22P02 invalid input syntax for type bigint: "abc"
+g/sum/qabc_b/mod	ERR 22P02 invalid input syntax for type bigint: "abc"
+g/proj/qabc_n/pct	ERR 22P02 invalid input syntax for type numeric: "abc"
+g/sum/qabc_n/pct	ERR 22P02 invalid input syntax for type numeric: "abc"
+g/proj/qabc_n/mod	ERR 22P02 invalid input syntax for type numeric: "abc"
+g/sum/qabc_n/mod	ERR 22P02 invalid input syntax for type numeric: "abc"
+g/proj/qabc_f/pct	ERR 42883 operator does not exist: unknown % double precision
+g/sum/qabc_f/pct	ERR 42883 operator does not exist: unknown % double precision
+g/proj/qabc_f/mod	ERR 42883 function mod(unknown, double precision) does not exist
+g/sum/qabc_f/mod	ERR 42883 function mod(unknown, double precision) does not exist
+g/proj/qabc_l3/pct	ERR 22P02 invalid input syntax for type integer: "abc"
+g/sum/qabc_l3/pct	ERR 22P02 invalid input syntax for type integer: "abc"
+g/proj/qabc_l3/mod	ERR 22P02 invalid input syntax for type integer: "abc"
+g/sum/qabc_l3/mod	ERR 22P02 invalid input syntax for type integer: "abc"
+g/proj/qabc_l0/pct	ERR 22P02 invalid input syntax for type integer: "abc"
+g/sum/qabc_l0/pct	ERR 22P02 invalid input syntax for type integer: "abc"
+g/proj/qabc_l0/mod	ERR 22P02 invalid input syntax for type integer: "abc"
+g/sum/qabc_l0/mod	ERR 22P02 invalid input syntax for type integer: "abc"
+g/proj/qabc_ln/pct	ERR 22P02 invalid input syntax for type numeric: "abc"
+g/sum/qabc_ln/pct	ERR 22P02 invalid input syntax for type numeric: "abc"
+g/proj/qabc_ln/mod	ERR 22P02 invalid input syntax for type numeric: "abc"
+g/sum/qabc_ln/mod	ERR 22P02 invalid input syntax for type numeric: "abc"
+g/proj/qabc_q25/pct	ERR 42725 operator is not unique: unknown % unknown
+g/sum/qabc_q25/pct	ERR 42725 operator is not unique: unknown % unknown
+g/proj/qabc_q25/mod	ERR 42725 function mod(unknown, unknown) is not unique
+g/sum/qabc_q25/mod	ERR 42725 function mod(unknown, unknown) is not unique
+g/proj/qabc_q3/pct	ERR 42725 operator is not unique: unknown % unknown
+g/sum/qabc_q3/pct	ERR 42725 operator is not unique: unknown % unknown
+g/proj/qabc_q3/mod	ERR 42725 function mod(unknown, unknown) is not unique
+g/sum/qabc_q3/mod	ERR 42725 function mod(unknown, unknown) is not unique
+g/proj/qabc_q0/pct	ERR 42725 operator is not unique: unknown % unknown
+g/sum/qabc_q0/pct	ERR 42725 operator is not unique: unknown % unknown
+g/proj/qabc_q0/mod	ERR 42725 function mod(unknown, unknown) is not unique
+g/sum/qabc_q0/mod	ERR 42725 function mod(unknown, unknown) is not unique
+g/proj/qabc_qabc/pct	ERR 42725 operator is not unique: unknown % unknown
+g/sum/qabc_qabc/pct	ERR 42725 operator is not unique: unknown % unknown
+g/proj/qabc_qabc/mod	ERR 42725 function mod(unknown, unknown) is not unique
+g/sum/qabc_qabc/mod	ERR 42725 function mod(unknown, unknown) is not unique
+g/proj/qabc_nul/pct	ERR 42725 operator is not unique: unknown % unknown
+g/sum/qabc_nul/pct	ERR 42725 operator is not unique: unknown % unknown
+g/proj/qabc_nul/mod	ERR 42725 function mod(unknown, unknown) is not unique
+g/sum/qabc_nul/mod	ERR 42725 function mod(unknown, unknown) is not unique
+g/proj/qabc_tnul/pct	ERR 22P02 invalid input syntax for type integer: "abc"
+g/sum/qabc_tnul/pct	ERR 22P02 invalid input syntax for type integer: "abc"
+g/proj/qabc_tnul/mod	ERR 22P02 invalid input syntax for type integer: "abc"
+g/sum/qabc_tnul/mod	ERR 22P02 invalid input syntax for type integer: "abc"
+g/proj/qabc_sqi/pct	ERR 22P02 invalid input syntax for type integer: "abc"
+g/sum/qabc_sqi/pct	ERR 22P02 invalid input syntax for type integer: "abc"
+g/proj/qabc_sqi/mod	ERR 22P02 invalid input syntax for type integer: "abc"
+g/sum/qabc_sqi/mod	ERR 22P02 invalid input syntax for type integer: "abc"
+g/proj/qabc_sqn/pct	ERR 22P02 invalid input syntax for type numeric: "abc"
+g/sum/qabc_sqn/pct	ERR 22P02 invalid input syntax for type numeric: "abc"
+g/proj/qabc_sqn/mod	ERR 22P02 invalid input syntax for type numeric: "abc"
+g/sum/qabc_sqn/mod	ERR 22P02 invalid input syntax for type numeric: "abc"
+g/proj/nul_i/pct	{int,int} rows=5 1,NULL | 2,NULL | 3,NULL | 5,NULL | 6,NULL
+g/sum/nul_i/pct	{int} rows=1 NULL
+g/proj/nul_i/mod	{int,int} rows=5 1,NULL | 2,NULL | 3,NULL | 5,NULL | 6,NULL
+g/sum/nul_i/mod	{int} rows=1 NULL
+g/proj/nul_b/pct	{int,int} rows=5 1,NULL | 2,NULL | 3,NULL | 5,NULL | 6,NULL
+g/sum/nul_b/pct	{numeric} rows=1 NULL
+g/proj/nul_b/mod	{int,int} rows=5 1,NULL | 2,NULL | 3,NULL | 5,NULL | 6,NULL
+g/sum/nul_b/mod	{numeric} rows=1 NULL
+g/proj/nul_n/pct	{int,numeric} rows=5 1,NULL | 2,NULL | 3,NULL | 5,NULL | 6,NULL
+g/sum/nul_n/pct	{numeric} rows=1 NULL
+g/proj/nul_n/mod	{int,numeric} rows=5 1,NULL | 2,NULL | 3,NULL | 5,NULL | 6,NULL
+g/sum/nul_n/mod	{numeric} rows=1 NULL
+g/proj/nul_f/pct	ERR 42883 operator does not exist: unknown % double precision
+g/sum/nul_f/pct	ERR 42883 operator does not exist: unknown % double precision
+g/proj/nul_f/mod	ERR 42883 function mod(unknown, double precision) does not exist
+g/sum/nul_f/mod	ERR 42883 function mod(unknown, double precision) does not exist
+g/proj/nul_l3/pct	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+g/sum/nul_l3/pct	{int} rows=1 NULL
+g/proj/nul_l3/mod	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+g/sum/nul_l3/mod	{int} rows=1 NULL
+g/proj/nul_l0/pct	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+g/sum/nul_l0/pct	{int} rows=1 NULL
+g/proj/nul_l0/mod	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+g/sum/nul_l0/mod	{int} rows=1 NULL
+g/proj/nul_ln/pct	{int,numeric} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+g/sum/nul_ln/pct	{numeric} rows=1 NULL
+g/proj/nul_ln/mod	{int,numeric} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+g/sum/nul_ln/mod	{numeric} rows=1 NULL
+g/proj/nul_q25/pct	ERR 42725 operator is not unique: unknown % unknown
+g/sum/nul_q25/pct	ERR 42725 operator is not unique: unknown % unknown
+g/proj/nul_q25/mod	ERR 42725 function mod(unknown, unknown) is not unique
+g/sum/nul_q25/mod	ERR 42725 function mod(unknown, unknown) is not unique
+g/proj/nul_q3/pct	ERR 42725 operator is not unique: unknown % unknown
+g/sum/nul_q3/pct	ERR 42725 operator is not unique: unknown % unknown
+g/proj/nul_q3/mod	ERR 42725 function mod(unknown, unknown) is not unique
+g/sum/nul_q3/mod	ERR 42725 function mod(unknown, unknown) is not unique
+g/proj/nul_q0/pct	ERR 42725 operator is not unique: unknown % unknown
+g/sum/nul_q0/pct	ERR 42725 operator is not unique: unknown % unknown
+g/proj/nul_q0/mod	ERR 42725 function mod(unknown, unknown) is not unique
+g/sum/nul_q0/mod	ERR 42725 function mod(unknown, unknown) is not unique
+g/proj/nul_qabc/pct	ERR 42725 operator is not unique: unknown % unknown
+g/sum/nul_qabc/pct	ERR 42725 operator is not unique: unknown % unknown
+g/proj/nul_qabc/mod	ERR 42725 function mod(unknown, unknown) is not unique
+g/sum/nul_qabc/mod	ERR 42725 function mod(unknown, unknown) is not unique
+g/proj/nul_nul/pct	ERR 42725 operator is not unique: unknown % unknown
+g/sum/nul_nul/pct	ERR 42725 operator is not unique: unknown % unknown
+g/proj/nul_nul/mod	ERR 42725 function mod(unknown, unknown) is not unique
+g/sum/nul_nul/mod	ERR 42725 function mod(unknown, unknown) is not unique
+g/proj/nul_tnul/pct	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+g/sum/nul_tnul/pct	{int} rows=1 NULL
+g/proj/nul_tnul/mod	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+g/sum/nul_tnul/mod	{int} rows=1 NULL
+g/proj/nul_sqi/pct	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+g/sum/nul_sqi/pct	{int} rows=1 NULL
+g/proj/nul_sqi/mod	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+g/sum/nul_sqi/mod	{int} rows=1 NULL
+g/proj/nul_sqn/pct	{int,numeric} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+g/sum/nul_sqn/pct	{numeric} rows=1 NULL
+g/proj/nul_sqn/mod	{int,numeric} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+g/sum/nul_sqn/mod	{numeric} rows=1 NULL
+g/proj/tnul_i/pct	{int,int} rows=5 1,NULL | 2,NULL | 3,NULL | 5,NULL | 6,NULL
+g/sum/tnul_i/pct	{int} rows=1 NULL
+g/proj/tnul_i/mod	{int,int} rows=5 1,NULL | 2,NULL | 3,NULL | 5,NULL | 6,NULL
+g/sum/tnul_i/mod	{int} rows=1 NULL
+g/proj/tnul_b/pct	{int,int} rows=5 1,NULL | 2,NULL | 3,NULL | 5,NULL | 6,NULL
+g/sum/tnul_b/pct	{numeric} rows=1 NULL
+g/proj/tnul_b/mod	{int,int} rows=5 1,NULL | 2,NULL | 3,NULL | 5,NULL | 6,NULL
+g/sum/tnul_b/mod	{numeric} rows=1 NULL
+g/proj/tnul_n/pct	{int,numeric} rows=5 1,NULL | 2,NULL | 3,NULL | 5,NULL | 6,NULL
+g/sum/tnul_n/pct	{numeric} rows=1 NULL
+g/proj/tnul_n/mod	{int,numeric} rows=5 1,NULL | 2,NULL | 3,NULL | 5,NULL | 6,NULL
+g/sum/tnul_n/mod	{numeric} rows=1 NULL
+g/proj/tnul_f/pct	ERR 42883 operator does not exist: integer % double precision
+g/sum/tnul_f/pct	ERR 42883 operator does not exist: integer % double precision
+g/proj/tnul_f/mod	ERR 42883 function mod(integer, double precision) does not exist
+g/sum/tnul_f/mod	ERR 42883 function mod(integer, double precision) does not exist
+g/proj/tnul_l3/pct	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+g/sum/tnul_l3/pct	{int} rows=1 NULL
+g/proj/tnul_l3/mod	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+g/sum/tnul_l3/mod	{int} rows=1 NULL
+g/proj/tnul_l0/pct	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+g/sum/tnul_l0/pct	{int} rows=1 NULL
+g/proj/tnul_l0/mod	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+g/sum/tnul_l0/mod	{int} rows=1 NULL
+g/proj/tnul_ln/pct	{int,numeric} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+g/sum/tnul_ln/pct	{numeric} rows=1 NULL
+g/proj/tnul_ln/mod	{int,numeric} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+g/sum/tnul_ln/mod	{numeric} rows=1 NULL
+g/proj/tnul_q25/pct	ERR 22P02 invalid input syntax for type integer: "2.5"
+g/sum/tnul_q25/pct	ERR 22P02 invalid input syntax for type integer: "2.5"
+g/proj/tnul_q25/mod	ERR 22P02 invalid input syntax for type integer: "2.5"
+g/sum/tnul_q25/mod	ERR 22P02 invalid input syntax for type integer: "2.5"
+g/proj/tnul_q3/pct	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+g/sum/tnul_q3/pct	{int} rows=1 NULL
+g/proj/tnul_q3/mod	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+g/sum/tnul_q3/mod	{int} rows=1 NULL
+g/proj/tnul_q0/pct	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+g/sum/tnul_q0/pct	{int} rows=1 NULL
+g/proj/tnul_q0/mod	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+g/sum/tnul_q0/mod	{int} rows=1 NULL
+g/proj/tnul_qabc/pct	ERR 22P02 invalid input syntax for type integer: "abc"
+g/sum/tnul_qabc/pct	ERR 22P02 invalid input syntax for type integer: "abc"
+g/proj/tnul_qabc/mod	ERR 22P02 invalid input syntax for type integer: "abc"
+g/sum/tnul_qabc/mod	ERR 22P02 invalid input syntax for type integer: "abc"
+g/proj/tnul_nul/pct	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+g/sum/tnul_nul/pct	{int} rows=1 NULL
+g/proj/tnul_nul/mod	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+g/sum/tnul_nul/mod	{int} rows=1 NULL
+g/proj/tnul_tnul/pct	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+g/sum/tnul_tnul/pct	{int} rows=1 NULL
+g/proj/tnul_tnul/mod	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+g/sum/tnul_tnul/mod	{int} rows=1 NULL
+g/proj/tnul_sqi/pct	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+g/sum/tnul_sqi/pct	{int} rows=1 NULL
+g/proj/tnul_sqi/mod	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+g/sum/tnul_sqi/mod	{int} rows=1 NULL
+g/proj/tnul_sqn/pct	{int,numeric} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+g/sum/tnul_sqn/pct	{numeric} rows=1 NULL
+g/proj/tnul_sqn/mod	{int,numeric} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+g/sum/tnul_sqn/mod	{numeric} rows=1 NULL
+g/proj/sqi_i/pct	{int,int} rows=5 1,2 | 2,5 | 3,0 | 5,0 | 6,NULL
+g/sum/sqi_i/pct	{int} rows=1 7
+g/proj/sqi_i/mod	{int,int} rows=5 1,2 | 2,5 | 3,0 | 5,0 | 6,NULL
+g/sum/sqi_i/mod	{int} rows=1 7
+g/proj/sqi_b/pct	{int,int} rows=5 1,5 | 2,5 | 3,5 | 5,0 | 6,NULL
+g/sum/sqi_b/pct	{numeric} rows=1 15
+g/proj/sqi_b/mod	{int,int} rows=5 1,5 | 2,5 | 3,5 | 5,0 | 6,NULL
+g/sum/sqi_b/mod	{numeric} rows=1 15
+g/proj/sqi_n/pct	{int,numeric} rows=5 1,0.50 | 2,1.50 | 3,5.00 | 5,0.00 | 6,NULL
+g/sum/sqi_n/pct	{numeric} rows=1 7.00
+g/proj/sqi_n/mod	{int,numeric} rows=5 1,0.50 | 2,1.50 | 3,5.00 | 5,0.00 | 6,NULL
+g/sum/sqi_n/mod	{numeric} rows=1 7.00
+g/proj/sqi_f/pct	ERR 42883 operator does not exist: integer % double precision
+g/sum/sqi_f/pct	ERR 42883 operator does not exist: integer % double precision
+g/proj/sqi_f/mod	ERR 42883 function mod(integer, double precision) does not exist
+g/sum/sqi_f/mod	ERR 42883 function mod(integer, double precision) does not exist
+g/proj/sqi_l3/pct	{int,int} rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+g/sum/sqi_l3/pct	{int} rows=1 12
+g/proj/sqi_l3/mod	{int,int} rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+g/sum/sqi_l3/mod	{int} rows=1 12
+g/proj/sqi_l0/pct	ERR 22012 division by zero
+g/sum/sqi_l0/pct	ERR 22012 division by zero
+g/proj/sqi_l0/mod	ERR 22012 division by zero
+g/sum/sqi_l0/mod	ERR 22012 division by zero
+g/proj/sqi_ln/pct	{int,numeric} rows=6 1,0.0 | 2,0.0 | 3,0.0 | 4,0.0 | 5,0.0 | 6,0.0
+g/sum/sqi_ln/pct	{numeric} rows=1 0.0
+g/proj/sqi_ln/mod	{int,numeric} rows=6 1,0.0 | 2,0.0 | 3,0.0 | 4,0.0 | 5,0.0 | 6,0.0
+g/sum/sqi_ln/mod	{numeric} rows=1 0.0
+g/proj/sqi_q25/pct	ERR 22P02 invalid input syntax for type integer: "2.5"
+g/sum/sqi_q25/pct	ERR 22P02 invalid input syntax for type integer: "2.5"
+g/proj/sqi_q25/mod	ERR 22P02 invalid input syntax for type integer: "2.5"
+g/sum/sqi_q25/mod	ERR 22P02 invalid input syntax for type integer: "2.5"
+g/proj/sqi_q3/pct	{int,int} rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+g/sum/sqi_q3/pct	{int} rows=1 12
+g/proj/sqi_q3/mod	{int,int} rows=6 1,2 | 2,2 | 3,2 | 4,2 | 5,2 | 6,2
+g/sum/sqi_q3/mod	{int} rows=1 12
+g/proj/sqi_q0/pct	ERR 22012 division by zero
+g/sum/sqi_q0/pct	ERR 22012 division by zero
+g/proj/sqi_q0/mod	ERR 22012 division by zero
+g/sum/sqi_q0/mod	ERR 22012 division by zero
+g/proj/sqi_qabc/pct	ERR 22P02 invalid input syntax for type integer: "abc"
+g/sum/sqi_qabc/pct	ERR 22P02 invalid input syntax for type integer: "abc"
+g/proj/sqi_qabc/mod	ERR 22P02 invalid input syntax for type integer: "abc"
+g/sum/sqi_qabc/mod	ERR 22P02 invalid input syntax for type integer: "abc"
+g/proj/sqi_nul/pct	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+g/sum/sqi_nul/pct	{int} rows=1 NULL
+g/proj/sqi_nul/mod	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+g/sum/sqi_nul/mod	{int} rows=1 NULL
+g/proj/sqi_tnul/pct	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+g/sum/sqi_tnul/pct	{int} rows=1 NULL
+g/proj/sqi_tnul/mod	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+g/sum/sqi_tnul/mod	{int} rows=1 NULL
+g/proj/sqi_sqi/pct	{int,int} rows=6 1,0 | 2,0 | 3,0 | 4,0 | 5,0 | 6,0
+g/sum/sqi_sqi/pct	{int} rows=1 0
+g/proj/sqi_sqi/mod	{int,int} rows=6 1,0 | 2,0 | 3,0 | 4,0 | 5,0 | 6,0
+g/sum/sqi_sqi/mod	{int} rows=1 0
+g/proj/sqi_sqn/pct	{int,numeric} rows=6 1,0.00 | 2,0.00 | 3,0.00 | 4,0.00 | 5,0.00 | 6,0.00
+g/sum/sqi_sqn/pct	{numeric} rows=1 0.00
+g/proj/sqi_sqn/mod	{int,numeric} rows=6 1,0.00 | 2,0.00 | 3,0.00 | 4,0.00 | 5,0.00 | 6,0.00
+g/sum/sqi_sqn/mod	{numeric} rows=1 0.00
+g/proj/sqn_i/pct	{int,numeric} rows=5 1,1.25 | 2,1.25 | 3,1.25 | 5,0.25 | 6,NULL
+g/sum/sqn_i/pct	{numeric} rows=1 4.00
+g/proj/sqn_i/mod	{int,numeric} rows=5 1,1.25 | 2,1.25 | 3,1.25 | 5,0.25 | 6,NULL
+g/sum/sqn_i/mod	{numeric} rows=1 4.00
+g/proj/sqn_b/pct	{int,numeric} rows=5 1,1.25 | 2,1.25 | 3,1.25 | 5,0.25 | 6,NULL
+g/sum/sqn_b/pct	{numeric} rows=1 4.00
+g/proj/sqn_b/mod	{int,numeric} rows=5 1,1.25 | 2,1.25 | 3,1.25 | 5,0.25 | 6,NULL
+g/sum/sqn_b/mod	{numeric} rows=1 4.00
+g/proj/sqn_n/pct	{int,numeric} rows=5 1,1.25 | 2,1.25 | 3,1.25 | 5,0.00 | 6,NULL
+g/sum/sqn_n/pct	{numeric} rows=1 3.75
+g/proj/sqn_n/mod	{int,numeric} rows=5 1,1.25 | 2,1.25 | 3,1.25 | 5,0.00 | 6,NULL
+g/sum/sqn_n/mod	{numeric} rows=1 3.75
+g/proj/sqn_f/pct	ERR 42883 operator does not exist: numeric % double precision
+g/sum/sqn_f/pct	ERR 42883 operator does not exist: numeric % double precision
+g/proj/sqn_f/mod	ERR 42883 function mod(numeric, double precision) does not exist
+g/sum/sqn_f/mod	ERR 42883 function mod(numeric, double precision) does not exist
+g/proj/sqn_l3/pct	{int,numeric} rows=6 1,1.25 | 2,1.25 | 3,1.25 | 4,1.25 | 5,1.25 | 6,1.25
+g/sum/sqn_l3/pct	{numeric} rows=1 7.50
+g/proj/sqn_l3/mod	{int,numeric} rows=6 1,1.25 | 2,1.25 | 3,1.25 | 4,1.25 | 5,1.25 | 6,1.25
+g/sum/sqn_l3/mod	{numeric} rows=1 7.50
+g/proj/sqn_l0/pct	ERR 22012 division by zero
+g/sum/sqn_l0/pct	ERR 22012 division by zero
+g/proj/sqn_l0/mod	ERR 22012 division by zero
+g/sum/sqn_l0/mod	ERR 22012 division by zero
+g/proj/sqn_ln/pct	{int,numeric} rows=6 1,1.25 | 2,1.25 | 3,1.25 | 4,1.25 | 5,1.25 | 6,1.25
+g/sum/sqn_ln/pct	{numeric} rows=1 7.50
+g/proj/sqn_ln/mod	{int,numeric} rows=6 1,1.25 | 2,1.25 | 3,1.25 | 4,1.25 | 5,1.25 | 6,1.25
+g/sum/sqn_ln/mod	{numeric} rows=1 7.50
+g/proj/sqn_q25/pct	{int,numeric} rows=6 1,1.25 | 2,1.25 | 3,1.25 | 4,1.25 | 5,1.25 | 6,1.25
+g/sum/sqn_q25/pct	{numeric} rows=1 7.50
+g/proj/sqn_q25/mod	{int,numeric} rows=6 1,1.25 | 2,1.25 | 3,1.25 | 4,1.25 | 5,1.25 | 6,1.25
+g/sum/sqn_q25/mod	{numeric} rows=1 7.50
+g/proj/sqn_q3/pct	{int,numeric} rows=6 1,1.25 | 2,1.25 | 3,1.25 | 4,1.25 | 5,1.25 | 6,1.25
+g/sum/sqn_q3/pct	{numeric} rows=1 7.50
+g/proj/sqn_q3/mod	{int,numeric} rows=6 1,1.25 | 2,1.25 | 3,1.25 | 4,1.25 | 5,1.25 | 6,1.25
+g/sum/sqn_q3/mod	{numeric} rows=1 7.50
+g/proj/sqn_q0/pct	ERR 22012 division by zero
+g/sum/sqn_q0/pct	ERR 22012 division by zero
+g/proj/sqn_q0/mod	ERR 22012 division by zero
+g/sum/sqn_q0/mod	ERR 22012 division by zero
+g/proj/sqn_qabc/pct	ERR 22P02 invalid input syntax for type numeric: "abc"
+g/sum/sqn_qabc/pct	ERR 22P02 invalid input syntax for type numeric: "abc"
+g/proj/sqn_qabc/mod	ERR 22P02 invalid input syntax for type numeric: "abc"
+g/sum/sqn_qabc/mod	ERR 22P02 invalid input syntax for type numeric: "abc"
+g/proj/sqn_nul/pct	{int,numeric} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+g/sum/sqn_nul/pct	{numeric} rows=1 NULL
+g/proj/sqn_nul/mod	{int,numeric} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+g/sum/sqn_nul/mod	{numeric} rows=1 NULL
+g/proj/sqn_tnul/pct	{int,numeric} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+g/sum/sqn_tnul/pct	{numeric} rows=1 NULL
+g/proj/sqn_tnul/mod	{int,numeric} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+g/sum/sqn_tnul/mod	{numeric} rows=1 NULL
+g/proj/sqn_sqi/pct	{int,numeric} rows=6 1,1.25 | 2,1.25 | 3,1.25 | 4,1.25 | 5,1.25 | 6,1.25
+g/sum/sqn_sqi/pct	{numeric} rows=1 7.50
+g/proj/sqn_sqi/mod	{int,numeric} rows=6 1,1.25 | 2,1.25 | 3,1.25 | 4,1.25 | 5,1.25 | 6,1.25
+g/sum/sqn_sqi/mod	{numeric} rows=1 7.50
+g/proj/sqn_sqn/pct	{int,numeric} rows=6 1,0.00 | 2,0.00 | 3,0.00 | 4,0.00 | 5,0.00 | 6,0.00
+g/sum/sqn_sqn/pct	{numeric} rows=1 0.00
+g/proj/sqn_sqn/mod	{int,numeric} rows=6 1,0.00 | 2,0.00 | 3,0.00 | 4,0.00 | 5,0.00 | 6,0.00
+g/sum/sqn_sqn/mod	{numeric} rows=1 0.00
+c/avg/n_q25/pct	{numeric} rows=1 0.25200000000000000000
+c/minmax/n_q25/pct	{numeric,numeric} rows=1 -1.00,2.25
+c/where/n_q25/pct	{int} rows=2 1 | 5
+c/group/n_q25/pct	{numeric,int} rows=5 -1.00,1 | 0.00,2 | 0.01,1 | 2.25,1 | NULL,1
+c/order/n_q25/pct	{int} rows=6 2 | 3 | 4 | 5 | 1 | 6
+c/ctas/n_q25/pct	{int,numeric} rows=6 1,2.25 | 2,-1.00 | 3,0.00 | 4,0.00 | 5,0.01 | 6,NULL
+c/insint/n_q25/pct	{int,int} rows=6 1,2 | 2,-1 | 3,0 | 4,0 | 5,0 | 6,NULL
+c/insnum/n_q25/pct	{int,numeric} rows=6 1,2.25 | 2,-1.00 | 3,0.00 | 4,0.00 | 5,0.01 | 6,NULL
+c/insdbl/n_q25/pct	{int,float} rows=6 1,2.25 | 2,-1 | 3,0 | 4,0 | 5,0.01 | 6,NULL
+c/win/n_q25/pct	{int,numeric} rows=6 1,2.25 | 2,1.25 | 3,1.25 | 4,1.25 | 5,1.26 | 6,1.26
+c/case/n_q25/pct	{int,numeric} rows=6 1,NULL | 2,NULL | 3,0.00 | 4,0.00 | 5,0.01 | 6,NULL
+c/avg/n_q25/mod	{numeric} rows=1 0.25200000000000000000
+c/minmax/n_q25/mod	{numeric,numeric} rows=1 -1.00,2.25
+c/where/n_q25/mod	{int} rows=2 1 | 5
+c/group/n_q25/mod	{numeric,int} rows=5 -1.00,1 | 0.00,2 | 0.01,1 | 2.25,1 | NULL,1
+c/order/n_q25/mod	{int} rows=6 2 | 3 | 4 | 5 | 1 | 6
+c/ctas/n_q25/mod	{int,numeric} rows=6 1,2.25 | 2,-1.00 | 3,0.00 | 4,0.00 | 5,0.01 | 6,NULL
+c/insint/n_q25/mod	{int,int} rows=6 1,2 | 2,-1 | 3,0 | 4,0 | 5,0 | 6,NULL
+c/insnum/n_q25/mod	{int,numeric} rows=6 1,2.25 | 2,-1.00 | 3,0.00 | 4,0.00 | 5,0.01 | 6,NULL
+c/insdbl/n_q25/mod	{int,float} rows=6 1,2.25 | 2,-1 | 3,0 | 4,0 | 5,0.01 | 6,NULL
+c/win/n_q25/mod	{int,numeric} rows=6 1,2.25 | 2,1.25 | 3,1.25 | 4,1.25 | 5,1.26 | 6,1.26
+c/case/n_q25/mod	{int,numeric} rows=6 1,NULL | 2,NULL | 3,0.00 | 4,0.00 | 5,0.01 | 6,NULL
+c/avg/i_q25/pct	ERR 22P02 invalid input syntax for type integer: "2.5"
+c/minmax/i_q25/pct	ERR 22P02 invalid input syntax for type integer: "2.5"
+c/where/i_q25/pct	ERR 22P02 invalid input syntax for type integer: "2.5"
+c/group/i_q25/pct	ERR 22P02 invalid input syntax for type integer: "2.5"
+c/order/i_q25/pct	ERR 22P02 invalid input syntax for type integer: "2.5"
+c/ctas/i_q25/pct	ERR 22P02 invalid input syntax for type integer: "2.5"
+c/insint/i_q25/pct	ERR 22P02 invalid input syntax for type integer: "2.5"
+c/insnum/i_q25/pct	ERR 22P02 invalid input syntax for type integer: "2.5"
+c/insdbl/i_q25/pct	ERR 22P02 invalid input syntax for type integer: "2.5"
+c/win/i_q25/pct	ERR 22P02 invalid input syntax for type integer: "2.5"
+c/case/i_q25/pct	ERR 22P02 invalid input syntax for type integer: "2.5"
+c/avg/i_q25/mod	ERR 22P02 invalid input syntax for type integer: "2.5"
+c/minmax/i_q25/mod	ERR 22P02 invalid input syntax for type integer: "2.5"
+c/where/i_q25/mod	ERR 22P02 invalid input syntax for type integer: "2.5"
+c/group/i_q25/mod	ERR 22P02 invalid input syntax for type integer: "2.5"
+c/order/i_q25/mod	ERR 22P02 invalid input syntax for type integer: "2.5"
+c/ctas/i_q25/mod	ERR 22P02 invalid input syntax for type integer: "2.5"
+c/insint/i_q25/mod	ERR 22P02 invalid input syntax for type integer: "2.5"
+c/insnum/i_q25/mod	ERR 22P02 invalid input syntax for type integer: "2.5"
+c/insdbl/i_q25/mod	ERR 22P02 invalid input syntax for type integer: "2.5"
+c/win/i_q25/mod	ERR 22P02 invalid input syntax for type integer: "2.5"
+c/case/i_q25/mod	ERR 22P02 invalid input syntax for type integer: "2.5"
+c/avg/l8_q25/pct	ERR 22P02 invalid input syntax for type integer: "2.5"
+c/minmax/l8_q25/pct	ERR 22P02 invalid input syntax for type integer: "2.5"
+c/where/l8_q25/pct	ERR 22P02 invalid input syntax for type integer: "2.5"
+c/group/l8_q25/pct	ERR 22P02 invalid input syntax for type integer: "2.5"
+c/order/l8_q25/pct	ERR 22P02 invalid input syntax for type integer: "2.5"
+c/ctas/l8_q25/pct	ERR 22P02 invalid input syntax for type integer: "2.5"
+c/insint/l8_q25/pct	ERR 22P02 invalid input syntax for type integer: "2.5"
+c/insnum/l8_q25/pct	ERR 22P02 invalid input syntax for type integer: "2.5"
+c/insdbl/l8_q25/pct	ERR 22P02 invalid input syntax for type integer: "2.5"
+c/win/l8_q25/pct	ERR 22P02 invalid input syntax for type integer: "2.5"
+c/case/l8_q25/pct	ERR 22P02 invalid input syntax for type integer: "2.5"
+c/avg/l8_q25/mod	ERR 22P02 invalid input syntax for type integer: "2.5"
+c/minmax/l8_q25/mod	ERR 22P02 invalid input syntax for type integer: "2.5"
+c/where/l8_q25/mod	ERR 22P02 invalid input syntax for type integer: "2.5"
+c/group/l8_q25/mod	ERR 22P02 invalid input syntax for type integer: "2.5"
+c/order/l8_q25/mod	ERR 22P02 invalid input syntax for type integer: "2.5"
+c/ctas/l8_q25/mod	ERR 22P02 invalid input syntax for type integer: "2.5"
+c/insint/l8_q25/mod	ERR 22P02 invalid input syntax for type integer: "2.5"
+c/insnum/l8_q25/mod	ERR 22P02 invalid input syntax for type integer: "2.5"
+c/insdbl/l8_q25/mod	ERR 22P02 invalid input syntax for type integer: "2.5"
+c/win/l8_q25/mod	ERR 22P02 invalid input syntax for type integer: "2.5"
+c/case/l8_q25/mod	ERR 22P02 invalid input syntax for type integer: "2.5"
+c/avg/i_q3/pct	{numeric} rows=1 0.40000000000000000000
+c/minmax/i_q3/pct	{int,int} rows=1 -1,2
+c/where/i_q3/pct	{int} rows=2 3 | 5
+c/group/i_q3/pct	{int,int} rows=5 -1,1 | 0,2 | 1,1 | 2,1 | NULL,1
+c/order/i_q3/pct	{int} rows=6 2 | 1 | 4 | 5 | 3 | 6
+c/ctas/i_q3/pct	{int,int} rows=6 1,0 | 2,-1 | 3,2 | 4,0 | 5,1 | 6,NULL
+c/insint/i_q3/pct	{int,int} rows=6 1,0 | 2,-1 | 3,2 | 4,0 | 5,1 | 6,NULL
+c/insnum/i_q3/pct	{int,numeric} rows=6 1,0.00 | 2,-1.00 | 3,2.00 | 4,0.00 | 5,1.00 | 6,NULL
+c/insdbl/i_q3/pct	{int,float} rows=6 1,0 | 2,-1 | 3,2 | 4,0 | 5,1 | 6,NULL
+c/win/i_q3/pct	{int,int} rows=6 1,0 | 2,-1 | 3,1 | 4,1 | 5,2 | 6,2
+c/case/i_q3/pct	{int,int} rows=6 1,NULL | 2,NULL | 3,2 | 4,0 | 5,1 | 6,NULL
+c/avg/i_q3/mod	{numeric} rows=1 0.40000000000000000000
+c/minmax/i_q3/mod	{int,int} rows=1 -1,2
+c/where/i_q3/mod	{int} rows=2 3 | 5
+c/group/i_q3/mod	{int,int} rows=5 -1,1 | 0,2 | 1,1 | 2,1 | NULL,1
+c/order/i_q3/mod	{int} rows=6 2 | 1 | 4 | 5 | 3 | 6
+c/ctas/i_q3/mod	{int,int} rows=6 1,0 | 2,-1 | 3,2 | 4,0 | 5,1 | 6,NULL
+c/insint/i_q3/mod	{int,int} rows=6 1,0 | 2,-1 | 3,2 | 4,0 | 5,1 | 6,NULL
+c/insnum/i_q3/mod	{int,numeric} rows=6 1,0.00 | 2,-1.00 | 3,2.00 | 4,0.00 | 5,1.00 | 6,NULL
+c/insdbl/i_q3/mod	{int,float} rows=6 1,0 | 2,-1 | 3,2 | 4,0 | 5,1 | 6,NULL
+c/win/i_q3/mod	{int,int} rows=6 1,0 | 2,-1 | 3,1 | 4,1 | 5,2 | 6,2
+c/case/i_q3/mod	{int,int} rows=6 1,NULL | 2,NULL | 3,2 | 4,0 | 5,1 | 6,NULL
+c/avg/nul_n/pct	{numeric} rows=1 NULL
+c/minmax/nul_n/pct	{numeric,numeric} rows=1 NULL,NULL
+c/where/nul_n/pct	{int} rows=0 
+c/group/nul_n/pct	{numeric,int} rows=1 NULL,5
+c/order/nul_n/pct	{int} rows=5 1 | 2 | 3 | 5 | 6
+c/ctas/nul_n/pct	{int,numeric} rows=5 1,NULL | 2,NULL | 3,NULL | 5,NULL | 6,NULL
+c/insint/nul_n/pct	{int,int} rows=5 1,NULL | 2,NULL | 3,NULL | 5,NULL | 6,NULL
+c/insnum/nul_n/pct	{int,numeric} rows=5 1,NULL | 2,NULL | 3,NULL | 5,NULL | 6,NULL
+c/insdbl/nul_n/pct	{int,float} rows=5 1,NULL | 2,NULL | 3,NULL | 5,NULL | 6,NULL
+c/win/nul_n/pct	{int,numeric} rows=5 1,NULL | 2,NULL | 3,NULL | 5,NULL | 6,NULL
+c/case/nul_n/pct	{int,numeric} rows=5 1,NULL | 2,NULL | 3,NULL | 5,NULL | 6,NULL
+c/avg/nul_n/mod	{numeric} rows=1 NULL
+c/minmax/nul_n/mod	{numeric,numeric} rows=1 NULL,NULL
+c/where/nul_n/mod	{int} rows=0 
+c/group/nul_n/mod	{numeric,int} rows=1 NULL,5
+c/order/nul_n/mod	{int} rows=5 1 | 2 | 3 | 5 | 6
+c/ctas/nul_n/mod	{int,numeric} rows=5 1,NULL | 2,NULL | 3,NULL | 5,NULL | 6,NULL
+c/insint/nul_n/mod	{int,int} rows=5 1,NULL | 2,NULL | 3,NULL | 5,NULL | 6,NULL
+c/insnum/nul_n/mod	{int,numeric} rows=5 1,NULL | 2,NULL | 3,NULL | 5,NULL | 6,NULL
+c/insdbl/nul_n/mod	{int,float} rows=5 1,NULL | 2,NULL | 3,NULL | 5,NULL | 6,NULL
+c/win/nul_n/mod	{int,numeric} rows=5 1,NULL | 2,NULL | 3,NULL | 5,NULL | 6,NULL
+c/case/nul_n/mod	{int,numeric} rows=5 1,NULL | 2,NULL | 3,NULL | 5,NULL | 6,NULL
+c/avg/nul_i/pct	{numeric} rows=1 NULL
+c/minmax/nul_i/pct	{int,int} rows=1 NULL,NULL
+c/where/nul_i/pct	{int} rows=0 
+c/group/nul_i/pct	{int,int} rows=1 NULL,5
+c/order/nul_i/pct	{int} rows=5 1 | 2 | 3 | 5 | 6
+c/ctas/nul_i/pct	{int,int} rows=5 1,NULL | 2,NULL | 3,NULL | 5,NULL | 6,NULL
+c/insint/nul_i/pct	{int,int} rows=5 1,NULL | 2,NULL | 3,NULL | 5,NULL | 6,NULL
+c/insnum/nul_i/pct	{int,numeric} rows=5 1,NULL | 2,NULL | 3,NULL | 5,NULL | 6,NULL
+c/insdbl/nul_i/pct	{int,float} rows=5 1,NULL | 2,NULL | 3,NULL | 5,NULL | 6,NULL
+c/win/nul_i/pct	{int,int} rows=5 1,NULL | 2,NULL | 3,NULL | 5,NULL | 6,NULL
+c/case/nul_i/pct	{int,int} rows=5 1,NULL | 2,NULL | 3,NULL | 5,NULL | 6,NULL
+c/avg/nul_i/mod	{numeric} rows=1 NULL
+c/minmax/nul_i/mod	{int,int} rows=1 NULL,NULL
+c/where/nul_i/mod	{int} rows=0 
+c/group/nul_i/mod	{int,int} rows=1 NULL,5
+c/order/nul_i/mod	{int} rows=5 1 | 2 | 3 | 5 | 6
+c/ctas/nul_i/mod	{int,int} rows=5 1,NULL | 2,NULL | 3,NULL | 5,NULL | 6,NULL
+c/insint/nul_i/mod	{int,int} rows=5 1,NULL | 2,NULL | 3,NULL | 5,NULL | 6,NULL
+c/insnum/nul_i/mod	{int,numeric} rows=5 1,NULL | 2,NULL | 3,NULL | 5,NULL | 6,NULL
+c/insdbl/nul_i/mod	{int,float} rows=5 1,NULL | 2,NULL | 3,NULL | 5,NULL | 6,NULL
+c/win/nul_i/mod	{int,int} rows=5 1,NULL | 2,NULL | 3,NULL | 5,NULL | 6,NULL
+c/case/nul_i/mod	{int,int} rows=5 1,NULL | 2,NULL | 3,NULL | 5,NULL | 6,NULL
+c/avg/i_nul/pct	{numeric} rows=1 NULL
+c/minmax/i_nul/pct	{int,int} rows=1 NULL,NULL
+c/where/i_nul/pct	{int} rows=0 
+c/group/i_nul/pct	{int,int} rows=1 NULL,6
+c/order/i_nul/pct	{int} rows=6 1 | 2 | 3 | 4 | 5 | 6
+c/ctas/i_nul/pct	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+c/insint/i_nul/pct	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+c/insnum/i_nul/pct	{int,numeric} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+c/insdbl/i_nul/pct	{int,float} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+c/win/i_nul/pct	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+c/case/i_nul/pct	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+c/avg/i_nul/mod	{numeric} rows=1 NULL
+c/minmax/i_nul/mod	{int,int} rows=1 NULL,NULL
+c/where/i_nul/mod	{int} rows=0 
+c/group/i_nul/mod	{int,int} rows=1 NULL,6
+c/order/i_nul/mod	{int} rows=6 1 | 2 | 3 | 4 | 5 | 6
+c/ctas/i_nul/mod	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+c/insint/i_nul/mod	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+c/insnum/i_nul/mod	{int,numeric} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+c/insdbl/i_nul/mod	{int,float} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+c/win/i_nul/mod	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+c/case/i_nul/mod	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+c/avg/n_nul/pct	{numeric} rows=1 NULL
+c/minmax/n_nul/pct	{numeric,numeric} rows=1 NULL,NULL
+c/where/n_nul/pct	{int} rows=0 
+c/group/n_nul/pct	{numeric,int} rows=1 NULL,6
+c/order/n_nul/pct	{int} rows=6 1 | 2 | 3 | 4 | 5 | 6
+c/ctas/n_nul/pct	{int,numeric} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+c/insint/n_nul/pct	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+c/insnum/n_nul/pct	{int,numeric} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+c/insdbl/n_nul/pct	{int,float} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+c/win/n_nul/pct	{int,numeric} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+c/case/n_nul/pct	{int,numeric} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+c/avg/n_nul/mod	{numeric} rows=1 NULL
+c/minmax/n_nul/mod	{numeric,numeric} rows=1 NULL,NULL
+c/where/n_nul/mod	{int} rows=0 
+c/group/n_nul/mod	{numeric,int} rows=1 NULL,6
+c/order/n_nul/mod	{int} rows=6 1 | 2 | 3 | 4 | 5 | 6
+c/ctas/n_nul/mod	{int,numeric} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+c/insint/n_nul/mod	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+c/insnum/n_nul/mod	{int,numeric} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+c/insdbl/n_nul/mod	{int,float} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+c/win/n_nul/mod	{int,numeric} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+c/case/n_nul/mod	{int,numeric} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+c/avg/ln_nul/pct	{numeric} rows=1 NULL
+c/minmax/ln_nul/pct	{numeric,numeric} rows=1 NULL,NULL
+c/where/ln_nul/pct	{int} rows=0 
+c/group/ln_nul/pct	{numeric,int} rows=1 NULL,6
+c/order/ln_nul/pct	{int} rows=6 1 | 2 | 3 | 4 | 5 | 6
+c/ctas/ln_nul/pct	{int,numeric} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+c/insint/ln_nul/pct	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+c/insnum/ln_nul/pct	{int,numeric} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+c/insdbl/ln_nul/pct	{int,float} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+c/win/ln_nul/pct	{int,numeric} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+c/case/ln_nul/pct	{int,numeric} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+c/avg/ln_nul/mod	{numeric} rows=1 NULL
+c/minmax/ln_nul/mod	{numeric,numeric} rows=1 NULL,NULL
+c/where/ln_nul/mod	{int} rows=0 
+c/group/ln_nul/mod	{numeric,int} rows=1 NULL,6
+c/order/ln_nul/mod	{int} rows=6 1 | 2 | 3 | 4 | 5 | 6
+c/ctas/ln_nul/mod	{int,numeric} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+c/insint/ln_nul/mod	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+c/insnum/ln_nul/mod	{int,numeric} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+c/insdbl/ln_nul/mod	{int,float} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+c/win/ln_nul/mod	{int,numeric} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+c/case/ln_nul/mod	{int,numeric} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+c/avg/n_q0/pct	ERR 22012 division by zero
+c/minmax/n_q0/pct	ERR 22012 division by zero
+c/where/n_q0/pct	ERR 22012 division by zero
+c/group/n_q0/pct	ERR 22012 division by zero
+c/order/n_q0/pct	ERR 22012 division by zero
+c/ctas/n_q0/pct	ERR 22012 division by zero
+c/insint/n_q0/pct	ERR 22012 division by zero
+c/insnum/n_q0/pct	ERR 22012 division by zero
+c/insdbl/n_q0/pct	ERR 22012 division by zero
+c/win/n_q0/pct	ERR 22012 division by zero
+c/case/n_q0/pct	ERR 22012 division by zero
+c/avg/n_q0/mod	ERR 22012 division by zero
+c/minmax/n_q0/mod	ERR 22012 division by zero
+c/where/n_q0/mod	ERR 22012 division by zero
+c/group/n_q0/mod	ERR 22012 division by zero
+c/order/n_q0/mod	ERR 22012 division by zero
+c/ctas/n_q0/mod	ERR 22012 division by zero
+c/insint/n_q0/mod	ERR 22012 division by zero
+c/insnum/n_q0/mod	ERR 22012 division by zero
+c/insdbl/n_q0/mod	ERR 22012 division by zero
+c/win/n_q0/mod	ERR 22012 division by zero
+c/case/n_q0/mod	ERR 22012 division by zero
+c/avg/q8_n/pct	{numeric} rows=1 2.5625000000000000
+c/minmax/q8_n/pct	{numeric,numeric} rows=1 0.00,8.00
+c/where/q8_n/pct	{int} rows=3 1 | 2 | 3
+c/group/q8_n/pct	{numeric,int} rows=5 0.00,1 | 1.00,1 | 1.25,1 | 8.00,1 | NULL,1
+c/order/q8_n/pct	{int} rows=5 5 | 2 | 1 | 3 | 6
+c/ctas/q8_n/pct	{int,numeric} rows=5 1,1.25 | 2,1.00 | 3,8.00 | 5,0.00 | 6,NULL
+c/insint/q8_n/pct	{int,int} rows=5 1,1 | 2,1 | 3,8 | 5,0 | 6,NULL
+c/insnum/q8_n/pct	{int,numeric} rows=5 1,1.25 | 2,1.00 | 3,8.00 | 5,0.00 | 6,NULL
+c/insdbl/q8_n/pct	{int,float} rows=5 1,1.25 | 2,1 | 3,8 | 5,0 | 6,NULL
+c/win/q8_n/pct	{int,numeric} rows=5 1,1.25 | 2,2.25 | 3,10.25 | 5,10.25 | 6,10.25
+c/case/q8_n/pct	{int,numeric} rows=5 1,NULL | 2,NULL | 3,8.00 | 5,0.00 | 6,NULL
+c/avg/q8_n/mod	{numeric} rows=1 2.5625000000000000
+c/minmax/q8_n/mod	{numeric,numeric} rows=1 0.00,8.00
+c/where/q8_n/mod	{int} rows=3 1 | 2 | 3
+c/group/q8_n/mod	{numeric,int} rows=5 0.00,1 | 1.00,1 | 1.25,1 | 8.00,1 | NULL,1
+c/order/q8_n/mod	{int} rows=5 5 | 2 | 1 | 3 | 6
+c/ctas/q8_n/mod	{int,numeric} rows=5 1,1.25 | 2,1.00 | 3,8.00 | 5,0.00 | 6,NULL
+c/insint/q8_n/mod	{int,int} rows=5 1,1 | 2,1 | 3,8 | 5,0 | 6,NULL
+c/insnum/q8_n/mod	{int,numeric} rows=5 1,1.25 | 2,1.00 | 3,8.00 | 5,0.00 | 6,NULL
+c/insdbl/q8_n/mod	{int,float} rows=5 1,1.25 | 2,1 | 3,8 | 5,0 | 6,NULL
+c/win/q8_n/mod	{int,numeric} rows=5 1,1.25 | 2,2.25 | 3,10.25 | 5,10.25 | 6,10.25
+c/case/q8_n/mod	{int,numeric} rows=5 1,NULL | 2,NULL | 3,8.00 | 5,0.00 | 6,NULL
+c/avg/i_l3/pct	{numeric} rows=1 0.40000000000000000000
+c/minmax/i_l3/pct	{int,int} rows=1 -1,2
+c/where/i_l3/pct	{int} rows=2 3 | 5
+c/group/i_l3/pct	{int,int} rows=5 -1,1 | 0,2 | 1,1 | 2,1 | NULL,1
+c/order/i_l3/pct	{int} rows=6 2 | 1 | 4 | 5 | 3 | 6
+c/ctas/i_l3/pct	{int,int} rows=6 1,0 | 2,-1 | 3,2 | 4,0 | 5,1 | 6,NULL
+c/insint/i_l3/pct	{int,int} rows=6 1,0 | 2,-1 | 3,2 | 4,0 | 5,1 | 6,NULL
+c/insnum/i_l3/pct	{int,numeric} rows=6 1,0.00 | 2,-1.00 | 3,2.00 | 4,0.00 | 5,1.00 | 6,NULL
+c/insdbl/i_l3/pct	{int,float} rows=6 1,0 | 2,-1 | 3,2 | 4,0 | 5,1 | 6,NULL
+c/win/i_l3/pct	{int,int} rows=6 1,0 | 2,-1 | 3,1 | 4,1 | 5,2 | 6,2
+c/case/i_l3/pct	{int,int} rows=6 1,NULL | 2,NULL | 3,2 | 4,0 | 5,1 | 6,NULL
+c/avg/i_l3/mod	{numeric} rows=1 0.40000000000000000000
+c/minmax/i_l3/mod	{int,int} rows=1 -1,2
+c/where/i_l3/mod	{int} rows=2 3 | 5
+c/group/i_l3/mod	{int,int} rows=5 -1,1 | 0,2 | 1,1 | 2,1 | NULL,1
+c/order/i_l3/mod	{int} rows=6 2 | 1 | 4 | 5 | 3 | 6
+c/ctas/i_l3/mod	{int,int} rows=6 1,0 | 2,-1 | 3,2 | 4,0 | 5,1 | 6,NULL
+c/insint/i_l3/mod	{int,int} rows=6 1,0 | 2,-1 | 3,2 | 4,0 | 5,1 | 6,NULL
+c/insnum/i_l3/mod	{int,numeric} rows=6 1,0.00 | 2,-1.00 | 3,2.00 | 4,0.00 | 5,1.00 | 6,NULL
+c/insdbl/i_l3/mod	{int,float} rows=6 1,0 | 2,-1 | 3,2 | 4,0 | 5,1 | 6,NULL
+c/win/i_l3/mod	{int,int} rows=6 1,0 | 2,-1 | 3,1 | 4,1 | 5,2 | 6,2
+c/case/i_l3/mod	{int,int} rows=6 1,NULL | 2,NULL | 3,2 | 4,0 | 5,1 | 6,NULL
+c/avg/b_l3/pct	{numeric} rows=1 0.00000000000000000000
+c/minmax/b_l3/pct	{int,int} rows=1 -1,1
+c/where/b_l3/pct	{int} rows=1 5
+c/group/b_l3/pct	{int,int} rows=4 -1,1 | 0,3 | 1,1 | NULL,1
+c/order/b_l3/pct	{int} rows=6 2 | 1 | 3 | 4 | 5 | 6
+c/ctas/b_l3/pct	{int,int} rows=6 1,0 | 2,-1 | 3,0 | 4,0 | 5,1 | 6,NULL
+c/insint/b_l3/pct	{int,int} rows=6 1,0 | 2,-1 | 3,0 | 4,0 | 5,1 | 6,NULL
+c/insnum/b_l3/pct	{int,numeric} rows=6 1,0.00 | 2,-1.00 | 3,0.00 | 4,0.00 | 5,1.00 | 6,NULL
+c/insdbl/b_l3/pct	{int,float} rows=6 1,0 | 2,-1 | 3,0 | 4,0 | 5,1 | 6,NULL
+c/win/b_l3/pct	{int,numeric} rows=6 1,0 | 2,-1 | 3,-1 | 4,-1 | 5,0 | 6,0
+c/case/b_l3/pct	{int,int} rows=6 1,NULL | 2,NULL | 3,0 | 4,0 | 5,1 | 6,NULL
+c/avg/b_l3/mod	{numeric} rows=1 0.00000000000000000000
+c/minmax/b_l3/mod	{int,int} rows=1 -1,1
+c/where/b_l3/mod	{int} rows=1 5
+c/group/b_l3/mod	{int,int} rows=4 -1,1 | 0,3 | 1,1 | NULL,1
+c/order/b_l3/mod	{int} rows=6 2 | 1 | 3 | 4 | 5 | 6
+c/ctas/b_l3/mod	{int,int} rows=6 1,0 | 2,-1 | 3,0 | 4,0 | 5,1 | 6,NULL
+c/insint/b_l3/mod	{int,int} rows=6 1,0 | 2,-1 | 3,0 | 4,0 | 5,1 | 6,NULL
+c/insnum/b_l3/mod	{int,numeric} rows=6 1,0.00 | 2,-1.00 | 3,0.00 | 4,0.00 | 5,1.00 | 6,NULL
+c/insdbl/b_l3/mod	{int,float} rows=6 1,0 | 2,-1 | 3,0 | 4,0 | 5,1 | 6,NULL
+c/win/b_l3/mod	{int,numeric} rows=6 1,0 | 2,-1 | 3,-1 | 4,-1 | 5,0 | 6,0
+c/case/b_l3/mod	{int,int} rows=6 1,NULL | 2,NULL | 3,0 | 4,0 | 5,1 | 6,NULL
+c/avg/n_ln/pct	{numeric} rows=1 0.25200000000000000000
+c/minmax/n_ln/pct	{numeric,numeric} rows=1 -1.00,2.25
+c/where/n_ln/pct	{int} rows=2 1 | 5
+c/group/n_ln/pct	{numeric,int} rows=5 -1.00,1 | 0.00,2 | 0.01,1 | 2.25,1 | NULL,1
+c/order/n_ln/pct	{int} rows=6 2 | 3 | 4 | 5 | 1 | 6
+c/ctas/n_ln/pct	{int,numeric} rows=6 1,2.25 | 2,-1.00 | 3,0.00 | 4,0.00 | 5,0.01 | 6,NULL
+c/insint/n_ln/pct	{int,int} rows=6 1,2 | 2,-1 | 3,0 | 4,0 | 5,0 | 6,NULL
+c/insnum/n_ln/pct	{int,numeric} rows=6 1,2.25 | 2,-1.00 | 3,0.00 | 4,0.00 | 5,0.01 | 6,NULL
+c/insdbl/n_ln/pct	{int,float} rows=6 1,2.25 | 2,-1 | 3,0 | 4,0 | 5,0.01 | 6,NULL
+c/win/n_ln/pct	{int,numeric} rows=6 1,2.25 | 2,1.25 | 3,1.25 | 4,1.25 | 5,1.26 | 6,1.26
+c/case/n_ln/pct	{int,numeric} rows=6 1,NULL | 2,NULL | 3,0.00 | 4,0.00 | 5,0.01 | 6,NULL
+c/avg/n_ln/mod	{numeric} rows=1 0.25200000000000000000
+c/minmax/n_ln/mod	{numeric,numeric} rows=1 -1.00,2.25
+c/where/n_ln/mod	{int} rows=2 1 | 5
+c/group/n_ln/mod	{numeric,int} rows=5 -1.00,1 | 0.00,2 | 0.01,1 | 2.25,1 | NULL,1
+c/order/n_ln/mod	{int} rows=6 2 | 3 | 4 | 5 | 1 | 6
+c/ctas/n_ln/mod	{int,numeric} rows=6 1,2.25 | 2,-1.00 | 3,0.00 | 4,0.00 | 5,0.01 | 6,NULL
+c/insint/n_ln/mod	{int,int} rows=6 1,2 | 2,-1 | 3,0 | 4,0 | 5,0 | 6,NULL
+c/insnum/n_ln/mod	{int,numeric} rows=6 1,2.25 | 2,-1.00 | 3,0.00 | 4,0.00 | 5,0.01 | 6,NULL
+c/insdbl/n_ln/mod	{int,float} rows=6 1,2.25 | 2,-1 | 3,0 | 4,0 | 5,0.01 | 6,NULL
+c/win/n_ln/mod	{int,numeric} rows=6 1,2.25 | 2,1.25 | 3,1.25 | 4,1.25 | 5,1.26 | 6,1.26
+c/case/n_ln/mod	{int,numeric} rows=6 1,NULL | 2,NULL | 3,0.00 | 4,0.00 | 5,0.01 | 6,NULL
+c/avg/i_ln/pct	{numeric} rows=1 -0.10000000000000000000
+c/minmax/i_ln/pct	{numeric,numeric} rows=1 -2.0,1.0
+c/where/i_ln/pct	{int} rows=2 1 | 5
+c/group/i_ln/pct	{numeric,int} rows=5 -2.0,1 | 0.0,2 | 0.5,1 | 1.0,1 | NULL,1
+c/order/i_ln/pct	{int} rows=6 2 | 3 | 4 | 1 | 5 | 6
+c/ctas/i_ln/pct	{int,numeric} rows=6 1,0.5 | 2,-2.0 | 3,0.0 | 4,0.0 | 5,1.0 | 6,NULL
+c/insint/i_ln/pct	{int,int} rows=6 1,1 | 2,-2 | 3,0 | 4,0 | 5,1 | 6,NULL
+c/insnum/i_ln/pct	{int,numeric} rows=6 1,0.50 | 2,-2.00 | 3,0.00 | 4,0.00 | 5,1.00 | 6,NULL
+c/insdbl/i_ln/pct	{int,float} rows=6 1,0.5 | 2,-2 | 3,0 | 4,0 | 5,1 | 6,NULL
+c/win/i_ln/pct	{int,numeric} rows=6 1,0.5 | 2,-1.5 | 3,-1.5 | 4,-1.5 | 5,-0.5 | 6,-0.5
+c/case/i_ln/pct	{int,numeric} rows=6 1,NULL | 2,NULL | 3,0.0 | 4,0.0 | 5,1.0 | 6,NULL
+c/avg/i_ln/mod	{numeric} rows=1 -0.10000000000000000000
+c/minmax/i_ln/mod	{numeric,numeric} rows=1 -2.0,1.0
+c/where/i_ln/mod	{int} rows=2 1 | 5
+c/group/i_ln/mod	{numeric,int} rows=5 -2.0,1 | 0.0,2 | 0.5,1 | 1.0,1 | NULL,1
+c/order/i_ln/mod	{int} rows=6 2 | 3 | 4 | 1 | 5 | 6
+c/ctas/i_ln/mod	{int,numeric} rows=6 1,0.5 | 2,-2.0 | 3,0.0 | 4,0.0 | 5,1.0 | 6,NULL
+c/insint/i_ln/mod	{int,int} rows=6 1,1 | 2,-2 | 3,0 | 4,0 | 5,1 | 6,NULL
+c/insnum/i_ln/mod	{int,numeric} rows=6 1,0.50 | 2,-2.00 | 3,0.00 | 4,0.00 | 5,1.00 | 6,NULL
+c/insdbl/i_ln/mod	{int,float} rows=6 1,0.5 | 2,-2 | 3,0 | 4,0 | 5,1 | 6,NULL
+c/win/i_ln/mod	{int,numeric} rows=6 1,0.5 | 2,-1.5 | 3,-1.5 | 4,-1.5 | 5,-0.5 | 6,-0.5
+c/case/i_ln/mod	{int,numeric} rows=6 1,NULL | 2,NULL | 3,0.0 | 4,0.0 | 5,1.0 | 6,NULL
+c/avg/b_ln/pct	{numeric} rows=1 0.20000000000000000000
+c/minmax/b_ln/pct	{numeric,numeric} rows=1 0.0,1.0
+c/where/b_ln/pct	{int} rows=1 5
+c/group/b_ln/pct	{numeric,int} rows=3 0.0,4 | 1.0,1 | NULL,1
+c/order/b_ln/pct	{int} rows=6 1 | 2 | 3 | 4 | 5 | 6
+c/ctas/b_ln/pct	{int,numeric} rows=6 1,0.0 | 2,0.0 | 3,0.0 | 4,0.0 | 5,1.0 | 6,NULL
+c/insint/b_ln/pct	{int,int} rows=6 1,0 | 2,0 | 3,0 | 4,0 | 5,1 | 6,NULL
+c/insnum/b_ln/pct	{int,numeric} rows=6 1,0.00 | 2,0.00 | 3,0.00 | 4,0.00 | 5,1.00 | 6,NULL
+c/insdbl/b_ln/pct	{int,float} rows=6 1,0 | 2,0 | 3,0 | 4,0 | 5,1 | 6,NULL
+c/win/b_ln/pct	{int,numeric} rows=6 1,0.0 | 2,0.0 | 3,0.0 | 4,0.0 | 5,1.0 | 6,1.0
+c/case/b_ln/pct	{int,numeric} rows=6 1,NULL | 2,NULL | 3,0.0 | 4,0.0 | 5,1.0 | 6,NULL
+c/avg/b_ln/mod	{numeric} rows=1 0.20000000000000000000
+c/minmax/b_ln/mod	{numeric,numeric} rows=1 0.0,1.0
+c/where/b_ln/mod	{int} rows=1 5
+c/group/b_ln/mod	{numeric,int} rows=3 0.0,4 | 1.0,1 | NULL,1
+c/order/b_ln/mod	{int} rows=6 1 | 2 | 3 | 4 | 5 | 6
+c/ctas/b_ln/mod	{int,numeric} rows=6 1,0.0 | 2,0.0 | 3,0.0 | 4,0.0 | 5,1.0 | 6,NULL
+c/insint/b_ln/mod	{int,int} rows=6 1,0 | 2,0 | 3,0 | 4,0 | 5,1 | 6,NULL
+c/insnum/b_ln/mod	{int,numeric} rows=6 1,0.00 | 2,0.00 | 3,0.00 | 4,0.00 | 5,1.00 | 6,NULL
+c/insdbl/b_ln/mod	{int,float} rows=6 1,0 | 2,0 | 3,0 | 4,0 | 5,1 | 6,NULL
+c/win/b_ln/mod	{int,numeric} rows=6 1,0.0 | 2,0.0 | 3,0.0 | 4,0.0 | 5,1.0 | 6,1.0
+c/case/b_ln/mod	{int,numeric} rows=6 1,NULL | 2,NULL | 3,0.0 | 4,0.0 | 5,1.0 | 6,NULL
+c/avg/tnul_i/pct	{numeric} rows=1 NULL
+c/minmax/tnul_i/pct	{int,int} rows=1 NULL,NULL
+c/where/tnul_i/pct	{int} rows=0 
+c/group/tnul_i/pct	{int,int} rows=1 NULL,5
+c/order/tnul_i/pct	{int} rows=5 1 | 2 | 3 | 5 | 6
+c/ctas/tnul_i/pct	{int,int} rows=5 1,NULL | 2,NULL | 3,NULL | 5,NULL | 6,NULL
+c/insint/tnul_i/pct	{int,int} rows=5 1,NULL | 2,NULL | 3,NULL | 5,NULL | 6,NULL
+c/insnum/tnul_i/pct	{int,numeric} rows=5 1,NULL | 2,NULL | 3,NULL | 5,NULL | 6,NULL
+c/insdbl/tnul_i/pct	{int,float} rows=5 1,NULL | 2,NULL | 3,NULL | 5,NULL | 6,NULL
+c/win/tnul_i/pct	{int,int} rows=5 1,NULL | 2,NULL | 3,NULL | 5,NULL | 6,NULL
+c/case/tnul_i/pct	{int,int} rows=5 1,NULL | 2,NULL | 3,NULL | 5,NULL | 6,NULL
+c/avg/tnul_i/mod	{numeric} rows=1 NULL
+c/minmax/tnul_i/mod	{int,int} rows=1 NULL,NULL
+c/where/tnul_i/mod	{int} rows=0 
+c/group/tnul_i/mod	{int,int} rows=1 NULL,5
+c/order/tnul_i/mod	{int} rows=5 1 | 2 | 3 | 5 | 6
+c/ctas/tnul_i/mod	{int,int} rows=5 1,NULL | 2,NULL | 3,NULL | 5,NULL | 6,NULL
+c/insint/tnul_i/mod	{int,int} rows=5 1,NULL | 2,NULL | 3,NULL | 5,NULL | 6,NULL
+c/insnum/tnul_i/mod	{int,numeric} rows=5 1,NULL | 2,NULL | 3,NULL | 5,NULL | 6,NULL
+c/insdbl/tnul_i/mod	{int,float} rows=5 1,NULL | 2,NULL | 3,NULL | 5,NULL | 6,NULL
+c/win/tnul_i/mod	{int,int} rows=5 1,NULL | 2,NULL | 3,NULL | 5,NULL | 6,NULL
+c/case/tnul_i/mod	{int,int} rows=5 1,NULL | 2,NULL | 3,NULL | 5,NULL | 6,NULL
+c/avg/i_tnul/pct	{numeric} rows=1 NULL
+c/minmax/i_tnul/pct	{int,int} rows=1 NULL,NULL
+c/where/i_tnul/pct	{int} rows=0 
+c/group/i_tnul/pct	{int,int} rows=1 NULL,6
+c/order/i_tnul/pct	{int} rows=6 1 | 2 | 3 | 4 | 5 | 6
+c/ctas/i_tnul/pct	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+c/insint/i_tnul/pct	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+c/insnum/i_tnul/pct	{int,numeric} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+c/insdbl/i_tnul/pct	{int,float} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+c/win/i_tnul/pct	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+c/case/i_tnul/pct	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+c/avg/i_tnul/mod	{numeric} rows=1 NULL
+c/minmax/i_tnul/mod	{int,int} rows=1 NULL,NULL
+c/where/i_tnul/mod	{int} rows=0 
+c/group/i_tnul/mod	{int,int} rows=1 NULL,6
+c/order/i_tnul/mod	{int} rows=6 1 | 2 | 3 | 4 | 5 | 6
+c/ctas/i_tnul/mod	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+c/insint/i_tnul/mod	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+c/insnum/i_tnul/mod	{int,numeric} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+c/insdbl/i_tnul/mod	{int,float} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+c/win/i_tnul/mod	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+c/case/i_tnul/mod	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+c/avg/sqi_i/pct	{numeric} rows=1 1.7500000000000000
+c/minmax/sqi_i/pct	{int,int} rows=1 0,5
+c/where/sqi_i/pct	{int} rows=2 1 | 2
+c/group/sqi_i/pct	{int,int} rows=4 0,2 | 2,1 | 5,1 | NULL,1
+c/order/sqi_i/pct	{int} rows=5 3 | 5 | 1 | 2 | 6
+c/ctas/sqi_i/pct	{int,int} rows=5 1,2 | 2,5 | 3,0 | 5,0 | 6,NULL
+c/insint/sqi_i/pct	{int,int} rows=5 1,2 | 2,5 | 3,0 | 5,0 | 6,NULL
+c/insnum/sqi_i/pct	{int,numeric} rows=5 1,2.00 | 2,5.00 | 3,0.00 | 5,0.00 | 6,NULL
+c/insdbl/sqi_i/pct	{int,float} rows=5 1,2 | 2,5 | 3,0 | 5,0 | 6,NULL
+c/win/sqi_i/pct	{int,int} rows=5 1,2 | 2,7 | 3,7 | 5,7 | 6,7
+c/case/sqi_i/pct	{int,int} rows=5 1,NULL | 2,NULL | 3,0 | 5,0 | 6,NULL
+c/avg/sqi_i/mod	{numeric} rows=1 1.7500000000000000
+c/minmax/sqi_i/mod	{int,int} rows=1 0,5
+c/where/sqi_i/mod	{int} rows=2 1 | 2
+c/group/sqi_i/mod	{int,int} rows=4 0,2 | 2,1 | 5,1 | NULL,1
+c/order/sqi_i/mod	{int} rows=5 3 | 5 | 1 | 2 | 6
+c/ctas/sqi_i/mod	{int,int} rows=5 1,2 | 2,5 | 3,0 | 5,0 | 6,NULL
+c/insint/sqi_i/mod	{int,int} rows=5 1,2 | 2,5 | 3,0 | 5,0 | 6,NULL
+c/insnum/sqi_i/mod	{int,numeric} rows=5 1,2.00 | 2,5.00 | 3,0.00 | 5,0.00 | 6,NULL
+c/insdbl/sqi_i/mod	{int,float} rows=5 1,2 | 2,5 | 3,0 | 5,0 | 6,NULL
+c/win/sqi_i/mod	{int,int} rows=5 1,2 | 2,7 | 3,7 | 5,7 | 6,7
+c/case/sqi_i/mod	{int,int} rows=5 1,NULL | 2,NULL | 3,0 | 5,0 | 6,NULL
+c/avg/n_sqn/pct	{numeric} rows=1 0.00200000000000000000
+c/minmax/n_sqn/pct	{numeric,numeric} rows=1 -1.00,1.00
+c/where/n_sqn/pct	{int} rows=2 1 | 5
+c/group/n_sqn/pct	{numeric,int} rows=5 -1.00,1 | 0.00,2 | 0.01,1 | 1.00,1 | NULL,1
+c/order/n_sqn/pct	{int} rows=6 2 | 3 | 4 | 5 | 1 | 6
+c/ctas/n_sqn/pct	{int,numeric} rows=6 1,1.00 | 2,-1.00 | 3,0.00 | 4,0.00 | 5,0.01 | 6,NULL
+c/insint/n_sqn/pct	{int,int} rows=6 1,1 | 2,-1 | 3,0 | 4,0 | 5,0 | 6,NULL
+c/insnum/n_sqn/pct	{int,numeric} rows=6 1,1.00 | 2,-1.00 | 3,0.00 | 4,0.00 | 5,0.01 | 6,NULL
+c/insdbl/n_sqn/pct	{int,float} rows=6 1,1 | 2,-1 | 3,0 | 4,0 | 5,0.01 | 6,NULL
+c/win/n_sqn/pct	{int,numeric} rows=6 1,1.00 | 2,0.00 | 3,0.00 | 4,0.00 | 5,0.01 | 6,0.01
+c/case/n_sqn/pct	{int,numeric} rows=6 1,NULL | 2,NULL | 3,0.00 | 4,0.00 | 5,0.01 | 6,NULL
+c/avg/n_sqn/mod	{numeric} rows=1 0.00200000000000000000
+c/minmax/n_sqn/mod	{numeric,numeric} rows=1 -1.00,1.00
+c/where/n_sqn/mod	{int} rows=2 1 | 5
+c/group/n_sqn/mod	{numeric,int} rows=5 -1.00,1 | 0.00,2 | 0.01,1 | 1.00,1 | NULL,1
+c/order/n_sqn/mod	{int} rows=6 2 | 3 | 4 | 5 | 1 | 6
+c/ctas/n_sqn/mod	{int,numeric} rows=6 1,1.00 | 2,-1.00 | 3,0.00 | 4,0.00 | 5,0.01 | 6,NULL
+c/insint/n_sqn/mod	{int,int} rows=6 1,1 | 2,-1 | 3,0 | 4,0 | 5,0 | 6,NULL
+c/insnum/n_sqn/mod	{int,numeric} rows=6 1,1.00 | 2,-1.00 | 3,0.00 | 4,0.00 | 5,0.01 | 6,NULL
+c/insdbl/n_sqn/mod	{int,float} rows=6 1,1 | 2,-1 | 3,0 | 4,0 | 5,0.01 | 6,NULL
+c/win/n_sqn/mod	{int,numeric} rows=6 1,1.00 | 2,0.00 | 3,0.00 | 4,0.00 | 5,0.01 | 6,0.01
+c/case/n_sqn/mod	{int,numeric} rows=6 1,NULL | 2,NULL | 3,0.00 | 4,0.00 | 5,0.01 | 6,NULL
+c/avg/i_i/pct	{numeric} rows=1 0.00000000000000000000
+c/minmax/i_i/pct	{int,int} rows=1 0,0
+c/where/i_i/pct	{int} rows=0 
+c/group/i_i/pct	{int,int} rows=2 0,4 | NULL,1
+c/order/i_i/pct	{int} rows=5 1 | 2 | 3 | 5 | 6
+c/ctas/i_i/pct	{int,int} rows=5 1,0 | 2,0 | 3,0 | 5,0 | 6,NULL
+c/insint/i_i/pct	{int,int} rows=5 1,0 | 2,0 | 3,0 | 5,0 | 6,NULL
+c/insnum/i_i/pct	{int,numeric} rows=5 1,0.00 | 2,0.00 | 3,0.00 | 5,0.00 | 6,NULL
+c/insdbl/i_i/pct	{int,float} rows=5 1,0 | 2,0 | 3,0 | 5,0 | 6,NULL
+c/win/i_i/pct	{int,int} rows=5 1,0 | 2,0 | 3,0 | 5,0 | 6,0
+c/case/i_i/pct	{int,int} rows=5 1,NULL | 2,NULL | 3,0 | 5,0 | 6,NULL
+c/avg/i_i/mod	{numeric} rows=1 0.00000000000000000000
+c/minmax/i_i/mod	{int,int} rows=1 0,0
+c/where/i_i/mod	{int} rows=0 
+c/group/i_i/mod	{int,int} rows=2 0,4 | NULL,1
+c/order/i_i/mod	{int} rows=5 1 | 2 | 3 | 5 | 6
+c/ctas/i_i/mod	{int,int} rows=5 1,0 | 2,0 | 3,0 | 5,0 | 6,NULL
+c/insint/i_i/mod	{int,int} rows=5 1,0 | 2,0 | 3,0 | 5,0 | 6,NULL
+c/insnum/i_i/mod	{int,numeric} rows=5 1,0.00 | 2,0.00 | 3,0.00 | 5,0.00 | 6,NULL
+c/insdbl/i_i/mod	{int,float} rows=5 1,0 | 2,0 | 3,0 | 5,0 | 6,NULL
+c/win/i_i/mod	{int,int} rows=5 1,0 | 2,0 | 3,0 | 5,0 | 6,0
+c/case/i_i/mod	{int,int} rows=5 1,NULL | 2,NULL | 3,0 | 5,0 | 6,NULL
+c/avg/q75_i/pct	ERR 22P02 invalid input syntax for type integer: "7.5"
+c/minmax/q75_i/pct	ERR 22P02 invalid input syntax for type integer: "7.5"
+c/where/q75_i/pct	ERR 22P02 invalid input syntax for type integer: "7.5"
+c/group/q75_i/pct	ERR 22P02 invalid input syntax for type integer: "7.5"
+c/order/q75_i/pct	ERR 22P02 invalid input syntax for type integer: "7.5"
+c/ctas/q75_i/pct	ERR 22P02 invalid input syntax for type integer: "7.5"
+c/insint/q75_i/pct	ERR 22P02 invalid input syntax for type integer: "7.5"
+c/insnum/q75_i/pct	ERR 22P02 invalid input syntax for type integer: "7.5"
+c/insdbl/q75_i/pct	ERR 22P02 invalid input syntax for type integer: "7.5"
+c/win/q75_i/pct	ERR 22P02 invalid input syntax for type integer: "7.5"
+c/case/q75_i/pct	ERR 22P02 invalid input syntax for type integer: "7.5"
+c/avg/q75_i/mod	ERR 22P02 invalid input syntax for type integer: "7.5"
+c/minmax/q75_i/mod	ERR 22P02 invalid input syntax for type integer: "7.5"
+c/where/q75_i/mod	ERR 22P02 invalid input syntax for type integer: "7.5"
+c/group/q75_i/mod	ERR 22P02 invalid input syntax for type integer: "7.5"
+c/order/q75_i/mod	ERR 22P02 invalid input syntax for type integer: "7.5"
+c/ctas/q75_i/mod	ERR 22P02 invalid input syntax for type integer: "7.5"
+c/insint/q75_i/mod	ERR 22P02 invalid input syntax for type integer: "7.5"
+c/insnum/q75_i/mod	ERR 22P02 invalid input syntax for type integer: "7.5"
+c/insdbl/q75_i/mod	ERR 22P02 invalid input syntax for type integer: "7.5"
+c/win/q75_i/mod	ERR 22P02 invalid input syntax for type integer: "7.5"
+c/case/q75_i/mod	ERR 22P02 invalid input syntax for type integer: "7.5"
+c/avg/f_ln/pct	ERR 42883 operator does not exist: double precision % numeric
+c/minmax/f_ln/pct	ERR 42883 operator does not exist: double precision % numeric
+c/where/f_ln/pct	ERR 42883 operator does not exist: double precision % numeric
+c/group/f_ln/pct	ERR 42883 operator does not exist: double precision % numeric
+c/order/f_ln/pct	ERR 42883 operator does not exist: double precision % numeric
+c/ctas/f_ln/pct	ERR 42883 operator does not exist: double precision % numeric
+c/insint/f_ln/pct	ERR 42883 operator does not exist: double precision % numeric
+c/insnum/f_ln/pct	ERR 42883 operator does not exist: double precision % numeric
+c/insdbl/f_ln/pct	ERR 42883 operator does not exist: double precision % numeric
+c/win/f_ln/pct	ERR 42883 operator does not exist: double precision % numeric
+c/case/f_ln/pct	ERR 42883 operator does not exist: double precision % numeric
+c/avg/f_ln/mod	ERR 42883 function mod(double precision, numeric) does not exist
+c/minmax/f_ln/mod	ERR 42883 function mod(double precision, numeric) does not exist
+c/where/f_ln/mod	ERR 42883 function mod(double precision, numeric) does not exist
+c/group/f_ln/mod	ERR 42883 function mod(double precision, numeric) does not exist
+c/order/f_ln/mod	ERR 42883 function mod(double precision, numeric) does not exist
+c/ctas/f_ln/mod	ERR 42883 function mod(double precision, numeric) does not exist
+c/insint/f_ln/mod	ERR 42883 function mod(double precision, numeric) does not exist
+c/insnum/f_ln/mod	ERR 42883 function mod(double precision, numeric) does not exist
+c/insdbl/f_ln/mod	ERR 42883 function mod(double precision, numeric) does not exist
+c/win/f_ln/mod	ERR 42883 function mod(double precision, numeric) does not exist
+c/case/f_ln/mod	ERR 42883 function mod(double precision, numeric) does not exist
+o/dt/n_q25/pct	{int,numeric} rows=6 1,2.25 | 2,-1.00 | 3,0.00 | 4,0.00 | 5,0.01 | 6,NULL
+o/dt/n_q25/sum/pct	{numeric} rows=1 1.26
+o/dt/n_q25/mod	{int,numeric} rows=6 1,2.25 | 2,-1.00 | 3,0.00 | 4,0.00 | 5,0.01 | 6,NULL
+o/dt/n_q25/sum/mod	{numeric} rows=1 1.26
+o/dt/i_q25/pct	ERR 22P02 invalid input syntax for type integer: "2.5"
+o/dt/i_q25/sum/pct	ERR 22P02 invalid input syntax for type integer: "2.5"
+o/dt/i_q25/mod	ERR 22P02 invalid input syntax for type integer: "2.5"
+o/dt/i_q25/sum/mod	ERR 22P02 invalid input syntax for type integer: "2.5"
+o/dt/nul_n/pct	{int,numeric} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+o/dt/nul_n/sum/pct	{numeric} rows=1 NULL
+o/dt/nul_n/mod	{int,numeric} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+o/dt/nul_n/sum/mod	{numeric} rows=1 NULL
+o/dt/i_nul/pct	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+o/dt/i_nul/sum/pct	{int} rows=1 NULL
+o/dt/i_nul/mod	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+o/dt/i_nul/sum/mod	{int} rows=1 NULL
+o/dt/n_q0/pct	ERR 22012 division by zero
+o/dt/n_q0/sum/pct	ERR 22012 division by zero
+o/dt/n_q0/mod	ERR 22012 division by zero
+o/dt/n_q0/sum/mod	ERR 22012 division by zero
+o/cte/n_q25/pct	{int,numeric} rows=6 1,2.25 | 2,-1.00 | 3,0.00 | 4,0.00 | 5,0.01 | 6,NULL
+o/cte/n_q25/sum/pct	{numeric} rows=1 1.26
+o/cte/n_q25/mod	{int,numeric} rows=6 1,2.25 | 2,-1.00 | 3,0.00 | 4,0.00 | 5,0.01 | 6,NULL
+o/cte/n_q25/sum/mod	{numeric} rows=1 1.26
+o/cte/i_q25/pct	ERR 22P02 invalid input syntax for type integer: "2.5"
+o/cte/i_q25/sum/pct	ERR 22P02 invalid input syntax for type integer: "2.5"
+o/cte/i_q25/mod	ERR 22P02 invalid input syntax for type integer: "2.5"
+o/cte/i_q25/sum/mod	ERR 22P02 invalid input syntax for type integer: "2.5"
+o/cte/nul_n/pct	{int,numeric} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+o/cte/nul_n/sum/pct	{numeric} rows=1 NULL
+o/cte/nul_n/mod	{int,numeric} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+o/cte/nul_n/sum/mod	{numeric} rows=1 NULL
+o/cte/i_nul/pct	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+o/cte/i_nul/sum/pct	{int} rows=1 NULL
+o/cte/i_nul/mod	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+o/cte/i_nul/sum/mod	{int} rows=1 NULL
+o/cte/n_q0/pct	ERR 22012 division by zero
+o/cte/n_q0/sum/pct	ERR 22012 division by zero
+o/cte/n_q0/mod	ERR 22012 division by zero
+o/cte/n_q0/sum/mod	ERR 22012 division by zero
+o/vals/n_q25/pct	{int,numeric} rows=3 1,2.25 | 2,-1.0 | 3,NULL
+o/vals/n_q25/sum/pct	{numeric} rows=1 1.25
+o/vals/n_q25/mod	{int,numeric} rows=3 1,2.25 | 2,-1.0 | 3,NULL
+o/vals/n_q25/sum/mod	{numeric} rows=1 1.25
+o/vals/i_q25/pct	ERR 22P02 invalid input syntax for type integer: "2.5"
+o/vals/i_q25/sum/pct	ERR 22P02 invalid input syntax for type integer: "2.5"
+o/vals/i_q25/mod	ERR 22P02 invalid input syntax for type integer: "2.5"
+o/vals/i_q25/sum/mod	ERR 22P02 invalid input syntax for type integer: "2.5"
+o/vals/nul_n/pct	{int,numeric} rows=3 1,NULL | 2,NULL | 3,NULL
+o/vals/nul_n/sum/pct	{numeric} rows=1 NULL
+o/vals/nul_n/mod	{int,numeric} rows=3 1,NULL | 2,NULL | 3,NULL
+o/vals/nul_n/sum/mod	{numeric} rows=1 NULL
+o/vals/i_nul/pct	{int,int} rows=3 1,NULL | 2,NULL | 3,NULL
+o/vals/i_nul/sum/pct	{int} rows=1 NULL
+o/vals/i_nul/mod	{int,int} rows=3 1,NULL | 2,NULL | 3,NULL
+o/vals/i_nul/sum/mod	{int} rows=1 NULL
+o/vals/n_q0/pct	ERR 22012 division by zero
+o/vals/n_q0/sum/pct	ERR 22012 division by zero
+o/vals/n_q0/mod	ERR 22012 division by zero
+o/vals/n_q0/sum/mod	ERR 22012 division by zero
+o/union/n_q25/pct	{int,numeric} rows=6 1,2.25 | 2,-1.00 | 3,0.00 | 4,0.00 | 5,0.01 | 6,NULL
+o/union/n_q25/sum/pct	{numeric} rows=1 1.26
+o/union/n_q25/mod	{int,numeric} rows=6 1,2.25 | 2,-1.00 | 3,0.00 | 4,0.00 | 5,0.01 | 6,NULL
+o/union/n_q25/sum/mod	{numeric} rows=1 1.26
+o/union/i_q25/pct	ERR 22P02 invalid input syntax for type integer: "2.5"
+o/union/i_q25/sum/pct	ERR 22P02 invalid input syntax for type integer: "2.5"
+o/union/i_q25/mod	ERR 22P02 invalid input syntax for type integer: "2.5"
+o/union/i_q25/sum/mod	ERR 22P02 invalid input syntax for type integer: "2.5"
+o/union/nul_n/pct	{int,numeric} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+o/union/nul_n/sum/pct	{numeric} rows=1 NULL
+o/union/nul_n/mod	{int,numeric} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+o/union/nul_n/sum/mod	{numeric} rows=1 NULL
+o/union/i_nul/pct	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+o/union/i_nul/sum/pct	{int} rows=1 NULL
+o/union/i_nul/mod	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+o/union/i_nul/sum/mod	{int} rows=1 NULL
+o/union/n_q0/pct	ERR 22012 division by zero
+o/union/n_q0/sum/pct	ERR 22012 division by zero
+o/union/n_q0/mod	ERR 22012 division by zero
+o/union/n_q0/sum/mod	ERR 22012 division by zero
+o/win/n_q25/pct	{int,numeric} rows=6 1,2.25 | 2,-1.00 | 3,0.00 | 4,0.00 | 5,0.01 | 6,NULL
+o/win/n_q25/sum/pct	{numeric} rows=1 1.26
+o/win/n_q25/mod	{int,numeric} rows=6 1,2.25 | 2,-1.00 | 3,0.00 | 4,0.00 | 5,0.01 | 6,NULL
+o/win/n_q25/sum/mod	{numeric} rows=1 1.26
+o/win/i_q25/pct	ERR 22P02 invalid input syntax for type bigint: "2.5"
+o/win/i_q25/sum/pct	ERR 22P02 invalid input syntax for type bigint: "2.5"
+o/win/i_q25/mod	ERR 22P02 invalid input syntax for type bigint: "2.5"
+o/win/i_q25/sum/mod	ERR 22P02 invalid input syntax for type bigint: "2.5"
+o/win/nul_n/pct	{int,numeric} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+o/win/nul_n/sum/pct	{numeric} rows=1 NULL
+o/win/nul_n/mod	{int,numeric} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+o/win/nul_n/sum/mod	{numeric} rows=1 NULL
+o/win/i_nul/pct	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+o/win/i_nul/sum/pct	{numeric} rows=1 NULL
+o/win/i_nul/mod	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+o/win/i_nul/sum/mod	{numeric} rows=1 NULL
+o/win/n_q0/pct	ERR 22012 division by zero
+o/win/n_q0/sum/pct	ERR 22012 division by zero
+o/win/n_q0/mod	ERR 22012 division by zero
+o/win/n_q0/sum/mod	ERR 22012 division by zero
+e/z_ii/pct	ERR 22012 division by zero
+e/z_ii/mod	ERR 22012 division by zero
+e/z_ni/pct	ERR 22012 division by zero
+e/z_ni/mod	ERR 22012 division by zero
+e/z_nn/pct	ERR 22012 division by zero
+e/z_nn/mod	ERR 22012 division by zero
+e/z_bi/pct	ERR 22012 division by zero
+e/z_bi/mod	ERR 22012 division by zero
+e/z_ln/pct	ERR 22012 division by zero
+e/z_ln/mod	ERR 22012 division by zero
+e/z_li/pct	ERR 22012 division by zero
+e/z_li/mod	ERR 22012 division by zero
+e/z_ii0/pct	ERR 22012 division by zero
+e/z_ii0/mod	ERR 22012 division by zero
+e/z_nq/pct	ERR 22012 division by zero
+e/z_nq/mod	ERR 22012 division by zero
+e/z_qn/pct	ERR 22012 division by zero
+e/z_qn/mod	ERR 22012 division by zero
+e/z_lq0/pct	ERR 22012 division by zero
+e/z_lq0/mod	ERR 22012 division by zero
+e/z_fl/pct	ERR 42883 operator does not exist: double precision % integer
+e/z_fl/mod	ERR 42883 function mod(double precision, integer) does not exist
+e/s_nl/pct	{int} rows=1 -1
+e/s_nl/mod	{int} rows=1 -1
+e/s_ln/pct	{int} rows=1 1
+e/s_ln/mod	{int} rows=1 1
+e/s_nn/pct	{int} rows=1 -1
+e/s_nn/mod	{int} rows=1 -1
+e/s_ci/pct	{int,int} rows=6 1,0 | 2,-1 | 3,2 | 4,0 | 5,1 | 6,NULL
+e/s_ci/mod	{int,int} rows=6 1,0 | 2,-1 | 3,2 | 4,0 | 5,1 | 6,NULL
+e/s_fn/pct	{numeric} rows=1 -1.5
+e/s_fn/mod	{numeric} rows=1 -1.5
+e/s_cn/pct	{int,numeric} rows=6 1,2.25 | 2,-1.00 | 3,0.00 | 4,0.00 | 5,0.01 | 6,NULL
+e/s_cn/mod	{int,numeric} rows=6 1,2.25 | 2,-1.00 | 3,0.00 | 4,0.00 | 5,0.01 | 6,NULL
+e/s_bn/pct	{int,int} rows=6 1,2 | 2,0 | 3,5 | 4,0 | 5,1 | 6,NULL
+e/s_bn/mod	{int,int} rows=6 1,2 | 2,0 | 3,5 | 4,0 | 5,1 | 6,NULL
+e/m_i8/pct	{int} rows=1 0
+e/m_i8/mod	{int} rows=1 0
+e/m_cb/pct	{int} rows=1 0
+e/m_cb/mod	{int} rows=1 0
+e/m_i4/pct	{int} rows=1 0
+e/m_i4/mod	{int} rows=1 0
+e/m_i2/pct	{int} rows=1 0
+e/m_i2/mod	{int} rows=1 0
+e/m_i4c/pct	{int} rows=1 0
+e/m_i4c/mod	{int} rows=1 0
+e/m_bigq/pct	{int} rows=1 1
+e/m_bigq/mod	{int} rows=1 1
+e/x_fnan/pct	ERR 42883 operator does not exist: double precision % integer
+e/x_fnan/mod	ERR 42883 function mod(double precision, integer) does not exist
+e/x_finf/pct	ERR 42883 operator does not exist: double precision % integer
+e/x_finf/mod	ERR 42883 function mod(double precision, integer) does not exist
+e/x_nnan/pct	{numeric} rows=1 NaN
+e/x_nnan/mod	{numeric} rows=1 NaN
+e/x_ninf/pct	{numeric} rows=1 NaN
+e/x_ninf/mod	{numeric} rows=1 NaN
+e/x_rninf/pct	{numeric} rows=1 5
+e/x_rninf/mod	{numeric} rows=1 5
+e/x_rfinf/pct	ERR 42883 operator does not exist: integer % double precision
+e/x_rfinf/mod	ERR 42883 function mod(integer, double precision) does not exist
+e/x_ff/pct	ERR 42883 operator does not exist: double precision % double precision
+e/x_ff/mod	ERR 42883 function mod(double precision, double precision) does not exist
+u/proj/i_i/pct	ERR 22012 division by zero
+u/sum/i_i/pct	ERR 22012 division by zero
+u/ctas/i_i/pct	ERR 22012 division by zero
+u/proj/i_i/mod	ERR 22012 division by zero
+u/sum/i_i/mod	ERR 22012 division by zero
+u/ctas/i_i/mod	ERR 22012 division by zero
+u/proj/i_b/pct	ERR 22012 division by zero
+u/sum/i_b/pct	ERR 22012 division by zero
+u/ctas/i_b/pct	ERR 22012 division by zero
+u/proj/i_b/mod	ERR 22012 division by zero
+u/sum/i_b/mod	ERR 22012 division by zero
+u/ctas/i_b/mod	ERR 22012 division by zero
+u/proj/i_n/pct	ERR 22012 division by zero
+u/sum/i_n/pct	ERR 22012 division by zero
+u/ctas/i_n/pct	ERR 22012 division by zero
+u/proj/i_n/mod	ERR 22012 division by zero
+u/sum/i_n/mod	ERR 22012 division by zero
+u/ctas/i_n/mod	ERR 22012 division by zero
+u/proj/b_i/pct	ERR 22012 division by zero
+u/sum/b_i/pct	ERR 22012 division by zero
+u/ctas/b_i/pct	ERR 22012 division by zero
+u/proj/b_i/mod	ERR 22012 division by zero
+u/sum/b_i/mod	ERR 22012 division by zero
+u/ctas/b_i/mod	ERR 22012 division by zero
+u/proj/b_b/pct	ERR 22012 division by zero
+u/sum/b_b/pct	ERR 22012 division by zero
+u/ctas/b_b/pct	ERR 22012 division by zero
+u/proj/b_b/mod	ERR 22012 division by zero
+u/sum/b_b/mod	ERR 22012 division by zero
+u/ctas/b_b/mod	ERR 22012 division by zero
+u/proj/b_n/pct	ERR 22012 division by zero
+u/sum/b_n/pct	ERR 22012 division by zero
+u/ctas/b_n/pct	ERR 22012 division by zero
+u/proj/b_n/mod	ERR 22012 division by zero
+u/sum/b_n/mod	ERR 22012 division by zero
+u/ctas/b_n/mod	ERR 22012 division by zero
+u/proj/n_i/pct	ERR 22012 division by zero
+u/sum/n_i/pct	ERR 22012 division by zero
+u/ctas/n_i/pct	ERR 22012 division by zero
+u/proj/n_i/mod	ERR 22012 division by zero
+u/sum/n_i/mod	ERR 22012 division by zero
+u/ctas/n_i/mod	ERR 22012 division by zero
+u/proj/n_b/pct	ERR 22012 division by zero
+u/sum/n_b/pct	ERR 22012 division by zero
+u/ctas/n_b/pct	ERR 22012 division by zero
+u/proj/n_b/mod	ERR 22012 division by zero
+u/sum/n_b/mod	ERR 22012 division by zero
+u/ctas/n_b/mod	ERR 22012 division by zero
+u/proj/n_n/pct	ERR 22012 division by zero
+u/sum/n_n/pct	ERR 22012 division by zero
+u/ctas/n_n/pct	ERR 22012 division by zero
+u/proj/n_n/mod	ERR 22012 division by zero
+u/sum/n_n/mod	ERR 22012 division by zero
+u/ctas/n_n/mod	ERR 22012 division by zero
+u/proj/f_i/pct	ERR 42883 operator does not exist: double precision % integer
+u/sum/f_i/pct	ERR 42883 operator does not exist: double precision % integer
+u/ctas/f_i/pct	ERR 42883 operator does not exist: double precision % integer
+u/proj/f_i/mod	ERR 42883 function mod(double precision, integer) does not exist
+u/sum/f_i/mod	ERR 42883 function mod(double precision, integer) does not exist
+u/ctas/f_i/mod	ERR 42883 function mod(double precision, integer) does not exist
+u/proj/f_b/pct	ERR 42883 operator does not exist: double precision % bigint
+u/sum/f_b/pct	ERR 42883 operator does not exist: double precision % bigint
+u/ctas/f_b/pct	ERR 42883 operator does not exist: double precision % bigint
+u/proj/f_b/mod	ERR 42883 function mod(double precision, bigint) does not exist
+u/sum/f_b/mod	ERR 42883 function mod(double precision, bigint) does not exist
+u/ctas/f_b/mod	ERR 42883 function mod(double precision, bigint) does not exist
+u/proj/f_n/pct	ERR 42883 operator does not exist: double precision % numeric
+u/sum/f_n/pct	ERR 42883 operator does not exist: double precision % numeric
+u/ctas/f_n/pct	ERR 42883 operator does not exist: double precision % numeric
+u/proj/f_n/mod	ERR 42883 function mod(double precision, numeric) does not exist
+u/sum/f_n/mod	ERR 42883 function mod(double precision, numeric) does not exist
+u/ctas/f_n/mod	ERR 42883 function mod(double precision, numeric) does not exist
+u/proj/l8_i/pct	ERR 22012 division by zero
+u/sum/l8_i/pct	ERR 22012 division by zero
+u/ctas/l8_i/pct	ERR 22012 division by zero
+u/proj/l8_i/mod	ERR 22012 division by zero
+u/sum/l8_i/mod	ERR 22012 division by zero
+u/ctas/l8_i/mod	ERR 22012 division by zero
+u/proj/l8_b/pct	ERR 22012 division by zero
+u/sum/l8_b/pct	ERR 22012 division by zero
+u/ctas/l8_b/pct	ERR 22012 division by zero
+u/proj/l8_b/mod	ERR 22012 division by zero
+u/sum/l8_b/mod	ERR 22012 division by zero
+u/ctas/l8_b/mod	ERR 22012 division by zero
+u/proj/l8_n/pct	ERR 22012 division by zero
+u/sum/l8_n/pct	ERR 22012 division by zero
+u/ctas/l8_n/pct	ERR 22012 division by zero
+u/proj/l8_n/mod	ERR 22012 division by zero
+u/sum/l8_n/mod	ERR 22012 division by zero
+u/ctas/l8_n/mod	ERR 22012 division by zero
+u/proj/ln_i/pct	ERR 22012 division by zero
+u/sum/ln_i/pct	ERR 22012 division by zero
+u/ctas/ln_i/pct	ERR 22012 division by zero
+u/proj/ln_i/mod	ERR 22012 division by zero
+u/sum/ln_i/mod	ERR 22012 division by zero
+u/ctas/ln_i/mod	ERR 22012 division by zero
+u/proj/ln_b/pct	ERR 22012 division by zero
+u/sum/ln_b/pct	ERR 22012 division by zero
+u/ctas/ln_b/pct	ERR 22012 division by zero
+u/proj/ln_b/mod	ERR 22012 division by zero
+u/sum/ln_b/mod	ERR 22012 division by zero
+u/ctas/ln_b/mod	ERR 22012 division by zero
+u/proj/ln_n/pct	ERR 22012 division by zero
+u/sum/ln_n/pct	ERR 22012 division by zero
+u/ctas/ln_n/pct	ERR 22012 division by zero
+u/proj/ln_n/mod	ERR 22012 division by zero
+u/sum/ln_n/mod	ERR 22012 division by zero
+u/ctas/ln_n/mod	ERR 22012 division by zero
+u/proj/q75_i/pct	ERR 22P02 invalid input syntax for type integer: "7.5"
+u/sum/q75_i/pct	ERR 22P02 invalid input syntax for type integer: "7.5"
+u/ctas/q75_i/pct	ERR 22P02 invalid input syntax for type integer: "7.5"
+u/proj/q75_i/mod	ERR 22P02 invalid input syntax for type integer: "7.5"
+u/sum/q75_i/mod	ERR 22P02 invalid input syntax for type integer: "7.5"
+u/ctas/q75_i/mod	ERR 22P02 invalid input syntax for type integer: "7.5"
+u/proj/q75_b/pct	ERR 22P02 invalid input syntax for type bigint: "7.5"
+u/sum/q75_b/pct	ERR 22P02 invalid input syntax for type bigint: "7.5"
+u/ctas/q75_b/pct	ERR 22P02 invalid input syntax for type bigint: "7.5"
+u/proj/q75_b/mod	ERR 22P02 invalid input syntax for type bigint: "7.5"
+u/sum/q75_b/mod	ERR 22P02 invalid input syntax for type bigint: "7.5"
+u/ctas/q75_b/mod	ERR 22P02 invalid input syntax for type bigint: "7.5"
+u/proj/q75_n/pct	ERR 22012 division by zero
+u/sum/q75_n/pct	ERR 22012 division by zero
+u/ctas/q75_n/pct	ERR 22012 division by zero
+u/proj/q75_n/mod	ERR 22012 division by zero
+u/sum/q75_n/mod	ERR 22012 division by zero
+u/ctas/q75_n/mod	ERR 22012 division by zero
+u/proj/q8_i/pct	ERR 22012 division by zero
+u/sum/q8_i/pct	ERR 22012 division by zero
+u/ctas/q8_i/pct	ERR 22012 division by zero
+u/proj/q8_i/mod	ERR 22012 division by zero
+u/sum/q8_i/mod	ERR 22012 division by zero
+u/ctas/q8_i/mod	ERR 22012 division by zero
+u/proj/q8_b/pct	ERR 22012 division by zero
+u/sum/q8_b/pct	ERR 22012 division by zero
+u/ctas/q8_b/pct	ERR 22012 division by zero
+u/proj/q8_b/mod	ERR 22012 division by zero
+u/sum/q8_b/mod	ERR 22012 division by zero
+u/ctas/q8_b/mod	ERR 22012 division by zero
+u/proj/q8_n/pct	ERR 22012 division by zero
+u/sum/q8_n/pct	ERR 22012 division by zero
+u/ctas/q8_n/pct	ERR 22012 division by zero
+u/proj/q8_n/mod	ERR 22012 division by zero
+u/sum/q8_n/mod	ERR 22012 division by zero
+u/ctas/q8_n/mod	ERR 22012 division by zero
+u/proj/q0_i/pct	ERR 22012 division by zero
+u/sum/q0_i/pct	ERR 22012 division by zero
+u/ctas/q0_i/pct	ERR 22012 division by zero
+u/proj/q0_i/mod	ERR 22012 division by zero
+u/sum/q0_i/mod	ERR 22012 division by zero
+u/ctas/q0_i/mod	ERR 22012 division by zero
+u/proj/q0_b/pct	ERR 22012 division by zero
+u/sum/q0_b/pct	ERR 22012 division by zero
+u/ctas/q0_b/pct	ERR 22012 division by zero
+u/proj/q0_b/mod	ERR 22012 division by zero
+u/sum/q0_b/mod	ERR 22012 division by zero
+u/ctas/q0_b/mod	ERR 22012 division by zero
+u/proj/q0_n/pct	ERR 22012 division by zero
+u/sum/q0_n/pct	ERR 22012 division by zero
+u/ctas/q0_n/pct	ERR 22012 division by zero
+u/proj/q0_n/mod	ERR 22012 division by zero
+u/sum/q0_n/mod	ERR 22012 division by zero
+u/ctas/q0_n/mod	ERR 22012 division by zero
+u/proj/qabc_i/pct	ERR 22P02 invalid input syntax for type integer: "abc"
+u/sum/qabc_i/pct	ERR 22P02 invalid input syntax for type integer: "abc"
+u/ctas/qabc_i/pct	ERR 22P02 invalid input syntax for type integer: "abc"
+u/proj/qabc_i/mod	ERR 22P02 invalid input syntax for type integer: "abc"
+u/sum/qabc_i/mod	ERR 22P02 invalid input syntax for type integer: "abc"
+u/ctas/qabc_i/mod	ERR 22P02 invalid input syntax for type integer: "abc"
+u/proj/qabc_b/pct	ERR 22P02 invalid input syntax for type bigint: "abc"
+u/sum/qabc_b/pct	ERR 22P02 invalid input syntax for type bigint: "abc"
+u/ctas/qabc_b/pct	ERR 22P02 invalid input syntax for type bigint: "abc"
+u/proj/qabc_b/mod	ERR 22P02 invalid input syntax for type bigint: "abc"
+u/sum/qabc_b/mod	ERR 22P02 invalid input syntax for type bigint: "abc"
+u/ctas/qabc_b/mod	ERR 22P02 invalid input syntax for type bigint: "abc"
+u/proj/qabc_n/pct	ERR 22P02 invalid input syntax for type numeric: "abc"
+u/sum/qabc_n/pct	ERR 22P02 invalid input syntax for type numeric: "abc"
+u/ctas/qabc_n/pct	ERR 22P02 invalid input syntax for type numeric: "abc"
+u/proj/qabc_n/mod	ERR 22P02 invalid input syntax for type numeric: "abc"
+u/sum/qabc_n/mod	ERR 22P02 invalid input syntax for type numeric: "abc"
+u/ctas/qabc_n/mod	ERR 22P02 invalid input syntax for type numeric: "abc"
+u/proj/nul_i/pct	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+u/sum/nul_i/pct	{int} rows=1 NULL
+u/ctas/nul_i/pct	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+u/proj/nul_i/mod	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+u/sum/nul_i/mod	{int} rows=1 NULL
+u/ctas/nul_i/mod	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+u/proj/nul_b/pct	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+u/sum/nul_b/pct	{numeric} rows=1 NULL
+u/ctas/nul_b/pct	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+u/proj/nul_b/mod	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+u/sum/nul_b/mod	{numeric} rows=1 NULL
+u/ctas/nul_b/mod	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+u/proj/nul_n/pct	{int,numeric} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+u/sum/nul_n/pct	{numeric} rows=1 NULL
+u/ctas/nul_n/pct	{int,numeric} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+u/proj/nul_n/mod	{int,numeric} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+u/sum/nul_n/mod	{numeric} rows=1 NULL
+u/ctas/nul_n/mod	{int,numeric} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+u/proj/tnul_i/pct	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+u/sum/tnul_i/pct	{int} rows=1 NULL
+u/ctas/tnul_i/pct	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+u/proj/tnul_i/mod	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+u/sum/tnul_i/mod	{int} rows=1 NULL
+u/ctas/tnul_i/mod	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+u/proj/tnul_b/pct	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+u/sum/tnul_b/pct	{numeric} rows=1 NULL
+u/ctas/tnul_b/pct	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+u/proj/tnul_b/mod	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+u/sum/tnul_b/mod	{numeric} rows=1 NULL
+u/ctas/tnul_b/mod	{int,int} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+u/proj/tnul_n/pct	{int,numeric} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+u/sum/tnul_n/pct	{numeric} rows=1 NULL
+u/ctas/tnul_n/pct	{int,numeric} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+u/proj/tnul_n/mod	{int,numeric} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+u/sum/tnul_n/mod	{numeric} rows=1 NULL
+u/ctas/tnul_n/mod	{int,numeric} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+u/proj/sqi_i/pct	ERR 22012 division by zero
+u/sum/sqi_i/pct	ERR 22012 division by zero
+u/ctas/sqi_i/pct	ERR 22012 division by zero
+u/proj/sqi_i/mod	ERR 22012 division by zero
+u/sum/sqi_i/mod	ERR 22012 division by zero
+u/ctas/sqi_i/mod	ERR 22012 division by zero
+u/proj/sqi_b/pct	ERR 22012 division by zero
+u/sum/sqi_b/pct	ERR 22012 division by zero
+u/ctas/sqi_b/pct	ERR 22012 division by zero
+u/proj/sqi_b/mod	ERR 22012 division by zero
+u/sum/sqi_b/mod	ERR 22012 division by zero
+u/ctas/sqi_b/mod	ERR 22012 division by zero
+u/proj/sqi_n/pct	ERR 22012 division by zero
+u/sum/sqi_n/pct	ERR 22012 division by zero
+u/ctas/sqi_n/pct	ERR 22012 division by zero
+u/proj/sqi_n/mod	ERR 22012 division by zero
+u/sum/sqi_n/mod	ERR 22012 division by zero
+u/ctas/sqi_n/mod	ERR 22012 division by zero
+u/proj/sqn_i/pct	ERR 22012 division by zero
+u/sum/sqn_i/pct	ERR 22012 division by zero
+u/ctas/sqn_i/pct	ERR 22012 division by zero
+u/proj/sqn_i/mod	ERR 22012 division by zero
+u/sum/sqn_i/mod	ERR 22012 division by zero
+u/ctas/sqn_i/mod	ERR 22012 division by zero
+u/proj/sqn_b/pct	ERR 22012 division by zero
+u/sum/sqn_b/pct	ERR 22012 division by zero
+u/ctas/sqn_b/pct	ERR 22012 division by zero
+u/proj/sqn_b/mod	ERR 22012 division by zero
+u/sum/sqn_b/mod	ERR 22012 division by zero
+u/ctas/sqn_b/mod	ERR 22012 division by zero
+u/proj/sqn_n/pct	ERR 22012 division by zero
+u/sum/sqn_n/pct	ERR 22012 division by zero
+u/ctas/sqn_n/pct	ERR 22012 division by zero
+u/proj/sqn_n/mod	ERR 22012 division by zero
+u/sum/sqn_n/mod	ERR 22012 division by zero
+u/ctas/sqn_n/mod	ERR 22012 division by zero
+x/ci2/pct	{int,int} rows=5 1,0 | 2,-1 | 3,2 | 5,1 | 6,NULL
+x/ci2/mod	{int,int} rows=5 1,0 | 2,-1 | 3,2 | 5,1 | 6,NULL
+x/cl8/pct	{int,int} rows=5 1,2 | 2,2 | 3,2 | 5,2 | 6,2
+x/cl8/mod	{int,int} rows=5 1,2 | 2,2 | 3,2 | 5,2 | 6,2
+x/cb/pct	{int,int} rows=5 1,0 | 2,-1 | 3,2 | 5,1 | 6,NULL
+x/cb/mod	{int,int} rows=5 1,0 | 2,-1 | 3,2 | 5,1 | 6,NULL
+x/neg/pct	{int,int} rows=5 1,0 | 2,1 | 3,-2 | 5,-1 | 6,NULL
+x/neg/mod	{int,int} rows=5 1,0 | 2,1 | 3,-2 | 5,-1 | 6,NULL
+x/add/pct	{int,int} rows=5 1,1 | 2,0 | 3,0 | 5,2 | 6,NULL
+x/add/mod	{int,int} rows=5 1,1 | 2,0 | 3,0 | 5,2 | 6,NULL
+x/abs/pct	{int,int} rows=5 1,0 | 2,1 | 3,2 | 5,1 | 6,NULL
+x/abs/mod	{int,int} rows=5 1,0 | 2,1 | 3,2 | 5,1 | 6,NULL
+x/cn/pct	{int,numeric} rows=5 1,0 | 2,-1 | 3,2 | 5,1 | 6,NULL
+x/cn/mod	{int,numeric} rows=5 1,0 | 2,-1 | 3,2 | 5,1 | 6,NULL
+x/nn/pct	{int,numeric} rows=5 1,0.00 | 2,0.00 | 3,0.00 | 5,0.00 | 6,NULL
+x/nn/mod	{int,numeric} rows=5 1,0.00 | 2,0.00 | 3,0.00 | 5,0.00 | 6,NULL
+x/ib/pct	{int,int} rows=5 1,3 | 2,-7 | 3,5 | 5,0 | 6,NULL
+x/ib/mod	{int,int} rows=5 1,3 | 2,-7 | 3,5 | 5,0 | 6,NULL
+x/bi/pct	{int,int} rows=5 1,0 | 2,0 | 3,0 | 5,0 | 6,NULL
+x/bi/mod	{int,int} rows=5 1,0 | 2,0 | 3,0 | 5,0 | 6,NULL
+x/in/pct	{int,numeric} rows=5 1,0.75 | 2,0.00 | 3,5.00 | 5,0.00 | 6,NULL
+x/in/mod	{int,numeric} rows=5 1,0.75 | 2,0.00 | 3,5.00 | 5,0.00 | 6,NULL
+x/ni/pct	{int,numeric} rows=5 1,2.25 | 2,-3.50 | 3,0.00 | 5,0.01 | 6,NULL
+x/ni/mod	{int,numeric} rows=5 1,2.25 | 2,-3.50 | 3,0.00 | 5,0.01 | 6,NULL
+x/pctpct/pct	{int,int} rows=5 1,0 | 2,-1 | 3,0 | 5,1 | 6,NULL
+x/pctpct/mod	{int,int} rows=5 1,0 | 2,-1 | 3,0 | 5,1 | 6,NULL
+x/nest/pct	{int,int} rows=5 1,0 | 2,-1 | 3,0 | 5,1 | 6,NULL
+x/nest/mod	{int,int} rows=5 1,0 | 2,-1 | 3,0 | 5,1 | 6,NULL
+x/l8neg/pct	{int,int} rows=5 1,2 | 2,2 | 3,2 | 5,2 | 6,2
+x/l8neg/mod	{int,int} rows=5 1,2 | 2,2 | 3,2 | 5,2 | 6,2
+x/q2i/pct	{int,int} rows=5 1,0 | 2,-1 | 3,2 | 5,1 | 6,NULL
+x/q2i/mod	{int,int} rows=5 1,0 | 2,-1 | 3,2 | 5,1 | 6,NULL
+x/qsp/pct	{int,int} rows=5 1,0 | 2,-1 | 3,2 | 5,1 | 6,NULL
+x/qsp/mod	{int,int} rows=5 1,0 | 2,-1 | 3,2 | 5,1 | 6,NULL
+x/qe/pct	{int,numeric} rows=5 1,2.25 | 2,-3.50 | 3,0.00 | 5,0.01 | 6,NULL
+x/qe/mod	{int,numeric} rows=5 1,2.25 | 2,-3.50 | 3,0.00 | 5,0.01 | 6,NULL

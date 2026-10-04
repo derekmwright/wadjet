@@ -1,0 +1,70 @@
+# PostgreSQL 17.11 over the ss_t / ss_i fixture: a statement prepared with no parameter types, bound with text (t) or binary (b, results binary as hex) values;
+# name<TAB>mode<TAB>sql<TAB>values (| separated, \N NULL)<TAB>params={ParameterDescription OIDs} {declared OIDs} rows=N values. A refusal matches by SQLSTATE.
+p/lit_p3/pct	t	SELECT $1 % 3	8	params={23} {23} rows=1 2
+p/lit_p3/pct	b	SELECT $1 % 3	8	params={23} {23} rows=1 00000002
+p/lit_p3/mod	t	SELECT MOD($1, 3)	8	params={23} {23} rows=1 2
+p/lit_p3/mod	b	SELECT MOD($1, 3)	8	params={23} {23} rows=1 00000002
+p/i_p/pct	t	SELECT t.id, t.i % $1 FROM ss_t t ORDER BY t.id	3	params={23} {20,23} rows=6 1,0 | 2,-1 | 3,2 | 4,0 | 5,1 | 6,NULL
+p/i_p/pct	b	SELECT t.id, t.i % $1 FROM ss_t t ORDER BY t.id	3	params={23} {20,23} rows=6 0000000000000001,00000000 | 0000000000000002,ffffffff | 0000000000000003,00000002 | 0000000000000004,00000000 | 0000000000000005,00000001 | 0000000000000006,NULL
+p/i_p/mod	t	SELECT t.id, MOD(t.i, $1) FROM ss_t t ORDER BY t.id	3	params={23} {20,23} rows=6 1,0 | 2,-1 | 3,2 | 4,0 | 5,1 | 6,NULL
+p/i_p/mod	b	SELECT t.id, MOD(t.i, $1) FROM ss_t t ORDER BY t.id	3	params={23} {20,23} rows=6 0000000000000001,00000000 | 0000000000000002,ffffffff | 0000000000000003,00000002 | 0000000000000004,00000000 | 0000000000000005,00000001 | 0000000000000006,NULL
+p/i_p25/pct	t	SELECT t.id, t.i % $1 FROM ss_t t ORDER BY t.id	2.5	params={23} ERR 22P02 invalid input syntax for type integer: "2.5"
+p/i_p25/pct	b	SELECT t.id, t.i % $1 FROM ss_t t ORDER BY t.id	2.5	params={23} ENC strconv.ParseInt: parsing "2.5": invalid syntax
+p/i_p25/mod	t	SELECT t.id, MOD(t.i, $1) FROM ss_t t ORDER BY t.id	2.5	params={23} ERR 22P02 invalid input syntax for type integer: "2.5"
+p/i_p25/mod	b	SELECT t.id, MOD(t.i, $1) FROM ss_t t ORDER BY t.id	2.5	params={23} ENC strconv.ParseInt: parsing "2.5": invalid syntax
+p/i_p0/pct	t	SELECT t.id, t.i % $1 FROM ss_t t ORDER BY t.id	0	params={23} ERR 22012 division by zero
+p/i_p0/pct	b	SELECT t.id, t.i % $1 FROM ss_t t ORDER BY t.id	0	params={23} ERR 22012 division by zero
+p/i_p0/mod	t	SELECT t.id, MOD(t.i, $1) FROM ss_t t ORDER BY t.id	0	params={23} ERR 22012 division by zero
+p/i_p0/mod	b	SELECT t.id, MOD(t.i, $1) FROM ss_t t ORDER BY t.id	0	params={23} ERR 22012 division by zero
+p/p_n/pct	t	SELECT t.id, $1 % t.n FROM ss_t t WHERE t.id <> 4 ORDER BY t.id	8	params={1700} {20,1700} rows=5 1,1.25 | 2,1.00 | 3,8.00 | 5,0.00 | 6,NULL
+p/p_n/pct	b	SELECT t.id, $1 % t.n FROM ss_t t WHERE t.id <> 4 ORDER BY t.id	8	params={1700} {20,1700} rows=5 0000000000000001,0002000000000002000109c4 | 0000000000000002,00010000000000020001 | 0000000000000003,00010000000000020008 | 0000000000000005,0000000000000002 | 0000000000000006,NULL
+p/p_n/mod	t	SELECT t.id, MOD($1, t.n) FROM ss_t t WHERE t.id <> 4 ORDER BY t.id	8	params={1700} {20,1700} rows=5 1,1.25 | 2,1.00 | 3,8.00 | 5,0.00 | 6,NULL
+p/p_n/mod	b	SELECT t.id, MOD($1, t.n) FROM ss_t t WHERE t.id <> 4 ORDER BY t.id	8	params={1700} {20,1700} rows=5 0000000000000001,0002000000000002000109c4 | 0000000000000002,00010000000000020001 | 0000000000000003,00010000000000020008 | 0000000000000005,0000000000000002 | 0000000000000006,NULL
+p/n_p25/pct	t	SELECT t.id, t.n % $1 FROM ss_t t ORDER BY t.id	2.5	params={1700} {20,1700} rows=6 1,2.25 | 2,-1.00 | 3,0.00 | 4,0.00 | 5,0.01 | 6,NULL
+p/n_p25/pct	b	SELECT t.id, t.n % $1 FROM ss_t t ORDER BY t.id	2.5	params={1700} {20,1700} rows=6 0000000000000001,0002000000000002000209c4 | 0000000000000002,00010000400000020001 | 0000000000000003,0000000000000002 | 0000000000000004,0000000000000002 | 0000000000000005,0001ffff000000020064 | 0000000000000006,NULL
+p/n_p25/mod	t	SELECT t.id, MOD(t.n, $1) FROM ss_t t ORDER BY t.id	2.5	params={1700} {20,1700} rows=6 1,2.25 | 2,-1.00 | 3,0.00 | 4,0.00 | 5,0.01 | 6,NULL
+p/n_p25/mod	b	SELECT t.id, MOD(t.n, $1) FROM ss_t t ORDER BY t.id	2.5	params={1700} {20,1700} rows=6 0000000000000001,0002000000000002000209c4 | 0000000000000002,00010000400000020001 | 0000000000000003,0000000000000002 | 0000000000000004,0000000000000002 | 0000000000000005,0001ffff000000020064 | 0000000000000006,NULL
+p/n_p0/pct	t	SELECT t.id, t.n % $1 FROM ss_t t ORDER BY t.id	0	params={1700} ERR 22012 division by zero
+p/n_p0/pct	b	SELECT t.id, t.n % $1 FROM ss_t t ORDER BY t.id	0	params={1700} ERR 22012 division by zero
+p/n_p0/mod	t	SELECT t.id, MOD(t.n, $1) FROM ss_t t ORDER BY t.id	0	params={1700} ERR 22012 division by zero
+p/n_p0/mod	b	SELECT t.id, MOD(t.n, $1) FROM ss_t t ORDER BY t.id	0	params={1700} ERR 22012 division by zero
+p/n_pnull/pct	t	SELECT t.id, t.n % $1 FROM ss_t t ORDER BY t.id	\N	params={1700} {20,1700} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+p/n_pnull/pct	b	SELECT t.id, t.n % $1 FROM ss_t t ORDER BY t.id	\N	params={1700} {20,1700} rows=6 0000000000000001,NULL | 0000000000000002,NULL | 0000000000000003,NULL | 0000000000000004,NULL | 0000000000000005,NULL | 0000000000000006,NULL
+p/n_pnull/mod	t	SELECT t.id, MOD(t.n, $1) FROM ss_t t ORDER BY t.id	\N	params={1700} {20,1700} rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
+p/n_pnull/mod	b	SELECT t.id, MOD(t.n, $1) FROM ss_t t ORDER BY t.id	\N	params={1700} {20,1700} rows=6 0000000000000001,NULL | 0000000000000002,NULL | 0000000000000003,NULL | 0000000000000004,NULL | 0000000000000005,NULL | 0000000000000006,NULL
+p/b_p/pct	t	SELECT t.id, t.b % $1 FROM ss_t t ORDER BY t.id	7	params={20} {20,20} rows=6 1,2 | 2,0 | 3,5 | 4,0 | 5,1 | 6,NULL
+p/b_p/pct	b	SELECT t.id, t.b % $1 FROM ss_t t ORDER BY t.id	7	params={20} {20,20} rows=6 0000000000000001,0000000000000002 | 0000000000000002,0000000000000000 | 0000000000000003,0000000000000005 | 0000000000000004,0000000000000000 | 0000000000000005,0000000000000001 | 0000000000000006,NULL
+p/b_p/mod	t	SELECT t.id, MOD(t.b, $1) FROM ss_t t ORDER BY t.id	7	params={20} {20,20} rows=6 1,2 | 2,0 | 3,5 | 4,0 | 5,1 | 6,NULL
+p/b_p/mod	b	SELECT t.id, MOD(t.b, $1) FROM ss_t t ORDER BY t.id	7	params={20} {20,20} rows=6 0000000000000001,0000000000000002 | 0000000000000002,0000000000000000 | 0000000000000003,0000000000000005 | 0000000000000004,0000000000000000 | 0000000000000005,0000000000000001 | 0000000000000006,NULL
+p/sum_i_p/pct	t	SELECT SUM(t.i % $1) FROM ss_t t	3	params={23} {20} rows=1 2
+p/sum_i_p/pct	b	SELECT SUM(t.i % $1) FROM ss_t t	3	params={23} {20} rows=1 0000000000000002
+p/sum_i_p/mod	t	SELECT SUM(MOD(t.i, $1)) FROM ss_t t	3	params={23} {20} rows=1 2
+p/sum_i_p/mod	b	SELECT SUM(MOD(t.i, $1)) FROM ss_t t	3	params={23} {20} rows=1 0000000000000002
+p/sum_n_p/pct	t	SELECT SUM(t.n % $1) FROM ss_t t	2.5	params={1700} {1700} rows=1 1.26
+p/sum_n_p/pct	b	SELECT SUM(t.n % $1) FROM ss_t t	2.5	params={1700} {1700} rows=1 000200000000000200010a28
+p/sum_n_p/mod	t	SELECT SUM(MOD(t.n, $1)) FROM ss_t t	2.5	params={1700} {1700} rows=1 1.26
+p/sum_n_p/mod	b	SELECT SUM(MOD(t.n, $1)) FROM ss_t t	2.5	params={1700} {1700} rows=1 000200000000000200010a28
+p/pp/pct	t	SELECT $1 % $2	8|3	ERR 42725 operator is not unique: unknown % unknown
+p/pp/pct	b	SELECT $1 % $2	8|3	ERR 42725 operator is not unique: unknown % unknown
+p/pp/mod	t	SELECT MOD($1, $2)	8|3	ERR 42725 function mod(unknown, unknown) is not unique
+p/pp/mod	b	SELECT MOD($1, $2)	8|3	ERR 42725 function mod(unknown, unknown) is not unique
+p/where_i_p/pct	t	SELECT t.id FROM ss_t t WHERE t.i % $1 = 1 ORDER BY t.id	2	params={23} {20} rows=3 1 | 3 | 5
+p/where_i_p/pct	b	SELECT t.id FROM ss_t t WHERE t.i % $1 = 1 ORDER BY t.id	2	params={23} {20} rows=3 0000000000000001 | 0000000000000003 | 0000000000000005
+p/where_i_p/mod	t	SELECT t.id FROM ss_t t WHERE MOD(t.i, $1) = 1 ORDER BY t.id	2	params={23} {20} rows=3 1 | 3 | 5
+p/where_i_p/mod	b	SELECT t.id FROM ss_t t WHERE MOD(t.i, $1) = 1 ORDER BY t.id	2	params={23} {20} rows=3 0000000000000001 | 0000000000000003 | 0000000000000005
+p/cmp_p/pct	t	SELECT t.id FROM ss_t t WHERE $2 = t.i % $1 ORDER BY t.id	2|1	params={23,23} {20} rows=3 1 | 3 | 5
+p/cmp_p/pct	b	SELECT t.id FROM ss_t t WHERE $2 = t.i % $1 ORDER BY t.id	2|1	params={23,23} {20} rows=3 0000000000000001 | 0000000000000003 | 0000000000000005
+p/cmp_p/mod	t	SELECT t.id FROM ss_t t WHERE $2 = MOD(t.i, $1) ORDER BY t.id	2|1	params={23,23} {20} rows=3 1 | 3 | 5
+p/cmp_p/mod	b	SELECT t.id FROM ss_t t WHERE $2 = MOD(t.i, $1) ORDER BY t.id	2|1	params={23,23} {20} rows=3 0000000000000001 | 0000000000000003 | 0000000000000005
+p/cast_p/pct	t	SELECT CAST($1 AS INT) % 3	8	params={23} {23} rows=1 2
+p/cast_p/pct	b	SELECT CAST($1 AS INT) % 3	8	params={23} {23} rows=1 00000002
+p/cast_p/mod	t	SELECT MOD(CAST($1 AS INT), 3)	8	params={23} {23} rows=1 2
+p/cast_p/mod	b	SELECT MOD(CAST($1 AS INT), 3)	8	params={23} {23} rows=1 00000002
+p/f_p/pct	t	SELECT t.id, t.f % $1 FROM ss_t t ORDER BY t.id	2	ERR 42883 operator does not exist: double precision % unknown
+p/f_p/pct	b	SELECT t.id, t.f % $1 FROM ss_t t ORDER BY t.id	2	ERR 42883 operator does not exist: double precision % unknown
+p/f_p/mod	t	SELECT t.id, MOD(t.f, $1) FROM ss_t t ORDER BY t.id	2	ERR 42883 function mod(double precision, unknown) does not exist
+p/f_p/mod	b	SELECT t.id, MOD(t.f, $1) FROM ss_t t ORDER BY t.id	2	ERR 42883 function mod(double precision, unknown) does not exist
+p/nul_p/pct	t	SELECT NULL % $1	3	ERR 42725 operator is not unique: unknown % unknown
+p/nul_p/pct	b	SELECT NULL % $1	3	ERR 42725 operator is not unique: unknown % unknown
+p/nul_p/mod	t	SELECT MOD(NULL, $1)	3	ERR 42725 function mod(unknown, unknown) is not unique
+p/nul_p/mod	b	SELECT MOD(NULL, $1)	3	ERR 42725 function mod(unknown, unknown) is not unique
