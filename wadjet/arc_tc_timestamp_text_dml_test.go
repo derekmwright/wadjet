@@ -191,30 +191,54 @@ func TestArcTCPrunedScanStillRaises(t *testing.T) {
 	}
 }
 
-// TestArcTCDMLSpecialWordsAnswerAsPostgres: PostgreSQL's special date/time
-// words in a DML WHERE (#1512 round 2) — 'epoch' read by the grammar,
-// 'now' / 'today' resolved and '±infinity' folded where the comparison meets
-// a DATE / TIMESTAMP column. Each want is PostgreSQL 17.11's over the same
-// four rows (tc_author/r2/pg_dml2.txt); NULL row 3 stays.
-func TestArcTCDMLSpecialWordsAnswerAsPostgres(t *testing.T) {
+// TestArcTCDMLSpecialWordsRefuseAsCastDoes: PostgreSQL's special date/time
+// words in a DML WHERE (#1512). The comparison coerces its text exactly as
+// CAST does: 'epoch' is read by the grammar and deletes / updates
+// PostgreSQL's rows; every other word ('infinity', '-infinity', 'now',
+// 'today', …) is refused 22007 as `CAST('…' AS TIMESTAMP)` is (ADR-0012
+// temporal r2 / r25) and the statement changes NOTHING. PostgreSQL 17.11
+// answers each refused statement (tc_author/r3/pg_dml3.txt); the refusal is
+// the kept divergence.
+func TestArcTCDMLSpecialWordsRefuseAsCastDoes(t *testing.T) {
 	ctx := context.Background()
 	for _, c := range []struct {
 		sql  string
-		n    int64
+		n    int64 // PostgreSQL 17.11's count (and the engine's, for 'epoch')
 		left string
+		word string // "" = answered as PostgreSQL; else the refused text
 	}{
-		{`DELETE FROM dm WHERE ts < 'infinity'`, 3, "3"},
-		{`DELETE FROM dm WHERE ts = 'now'`, 0, "1,2,3,4"},
-		{`DELETE FROM dm WHERE ts = 'epoch'`, 1, "2,3,4"},
-		{`DELETE FROM dm WHERE d > '-infinity'`, 3, "3"},
-		{`DELETE FROM dm WHERE ts NOT IN ('infinity')`, 3, "3"},
-		{`DELETE FROM dm WHERE d < 'today'`, 3, "3"},
-		{`UPDATE dm SET id = id + 100 WHERE ts = 'infinity'`, 0, "1,2,3,4"},
-		{`UPDATE dm SET id = id + 100 WHERE ts BETWEEN '-infinity' AND 'epoch'`, 1, "2,3,4,101"},
+		{`DELETE FROM dm WHERE ts = 'epoch'`, 1, "2,3,4", ""},
+		{`UPDATE dm SET id = id + 100 WHERE d = ' EPOCH '`, 1, "2,3,4,101", ""},
+		{`DELETE FROM dm WHERE ts < 'infinity'`, 3, "3", "timestamp: \"infinity\""},
+		{`DELETE FROM dm WHERE ts = 'now'`, 0, "1,2,3,4", "timestamp: \"now\""},
+		{`DELETE FROM dm WHERE d > '-infinity'`, 3, "3", "date: \"-infinity\""},
+		{`DELETE FROM dm WHERE ts NOT IN ('infinity')`, 3, "3", "timestamp: \"infinity\""},
+		{`DELETE FROM dm WHERE d < 'today'`, 3, "3", "date: \"today\""},
+		{`DELETE FROM dm WHERE id > 100 AND ts < 'tomorrow'`, 0, "1,2,3,4", "timestamp: \"tomorrow\""},
+		{`UPDATE dm SET id = id + 100 WHERE ts = 'infinity'`, 0, "1,2,3,4", "timestamp: \"infinity\""},
+		{`UPDATE dm SET id = id + 100 WHERE ts BETWEEN '-infinity' AND 'epoch'`, 1, "2,3,4,101", "timestamp: \"-infinity\""},
+		{`UPDATE dm SET id = id + 100 WHERE d >= 'yesterday'`, 0, "1,2,3,4", "date: \"yesterday\""},
 	} {
 		t.Run(c.sql, func(t *testing.T) {
 			db := tcOpenFixture(t, ctx, "dm", tcDMLRows(), 2, 1)
+			before := tcDump(t, ctx, db, "dm")
 			res, err := db.Execute(ctx, c.sql)
+			if c.word != "" {
+				if err == nil {
+					t.Fatalf("answered %s %d (PostgreSQL 17.11: %d; CAST of the text raises 22007); dm is now %s",
+						res.Command, res.RowsAffected, c.n, tcDump(t, ctx, db, "dm"))
+				}
+				if st := sqlerr.StateOf(err); st != "22007" {
+					t.Errorf("SQLSTATE %q, want 22007: %v", st, err)
+				}
+				if want := "invalid input syntax for type " + c.word; !strings.Contains(err.Error(), want) {
+					t.Errorf("message\n  got  %v\n  want %q", err, want)
+				}
+				if after := tcDump(t, ctx, db, "dm"); after != before {
+					t.Errorf("the refused statement changed dm:\n  %s\n  %s", before, after)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("%v (PostgreSQL 17.11: %d rows)", err, c.n)
 			}

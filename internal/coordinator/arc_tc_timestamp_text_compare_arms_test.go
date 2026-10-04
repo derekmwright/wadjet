@@ -274,10 +274,11 @@ func tcCells() []tcCell {
 			}
 		}
 	}
-	// PostgreSQL's special date/time input words (round 2): 'epoch' is read
-	// by the grammar; 'now' / 'today' / 'tomorrow' / 'yesterday' are resolved
-	// and '±infinity' folded where the planner types the operand; a BC date
-	// and 'allballs' (a time word, refused by both types) stay refused.
+	// PostgreSQL's special date/time input words. The comparison coerces its
+	// text exactly as CAST does: 'epoch' is read by the grammar and answers
+	// PostgreSQL's rows; every other word ('infinity', 'now', 'today', …, a
+	// BC date) is refused 22007 as `CAST('…' AS TIMESTAMP)` is (temporal r2 /
+	// r25); 'allballs' is a time word both systems refuse.
 	spOps := []struct{ name, tmpl string }{
 		{"eq", "SELECT id FROM tc_t WHERE {C} = {L} ORDER BY id"},
 		{"ne", "SELECT id FROM tc_t WHERE {C} <> {L} ORDER BY id"},
@@ -324,6 +325,9 @@ func tcCells() []tcCell {
 		"b3/date_trunc_empty": "SELECT id FROM tc_e WHERE date_trunc('day', ts) = '2024-02-30'",
 		"b3/cte_d_norow":      "WITH x AS (SELECT id, d FROM tc_t) SELECT id FROM x WHERE id > 100 AND d = '0000-01-01'",
 		"b3/cast_norow":       "SELECT id FROM tc_t WHERE id > 100 AND CAST(ts AS TIMESTAMP) = 'garbage'",
+		// date_trunc over a DATE answers a TIMESTAMP (review r2 P1).
+		"b3/date_trunc_d_empty": "SELECT id FROM tc_e WHERE date_trunc('day', d) = 'garbage'",
+		"b3/date_trunc_d_norow": "SELECT id FROM tc_t WHERE id > 100 AND date_trunc('day', d) = '2024-02-30'",
 	} {
 		cells = append(cells, tcCell{name: name, sql: sql})
 	}
@@ -338,8 +342,62 @@ func tcCells() []tcCell {
 		"spclock/today_row":    "SELECT id FROM tc_t WHERE d = 'today' AND ts = 'today' ORDER BY id",
 		"spclock/cast_epoch_t": "SELECT CAST('epoch' AS TIMESTAMP)",
 		"spclock/cast_epoch_d": "SELECT CAST('epoch' AS DATE)",
+		// The CAST of the same words: the comparison's refusal is the CAST's.
+		"spclock/cast_now_t":          "SELECT CAST('now' AS TIMESTAMP) IS NOT NULL",
+		"spclock/cast_today_d":        "SELECT CAST('today' AS DATE) IS NOT NULL",
+		"spclock/cast_infinity_t":     "SELECT CAST('infinity' AS TIMESTAMP)",
+		"spclock/cast_neg_infinity_d": "SELECT CAST('-infinity' AS DATE)",
 	} {
 		cells = append(cells, tcCell{name: name, sql: sql})
+	}
+	// The special words in the positions outside a WHERE / select-item /
+	// HAVING / JOIN ON comparison: ORDER BY, GROUP BY, a window's PARTITION
+	// BY, a simple CASE, NULLIF, `< ALL`, and a subquery's body (IN, EXISTS,
+	// NOT EXISTS). One rule in every position: 'epoch' answers PostgreSQL's
+	// rows, every other word raises 22007 (at 89cea148 several of these
+	// answered PostgreSQL's rows by reading the word as text or as no match;
+	// at c161f596 a plan-time rewrite answered some and raised 42803 / 42000
+	// on others).
+	posOps := []struct{ name, tmpl string }{
+		{"order_by", "SELECT id FROM tc_t ORDER BY {C} < {L}, id"},
+		{"group_by", "SELECT {C} < {L}, count(*) FROM tc_t GROUP BY {C} < {L} ORDER BY 1"},
+		{"partition_by", "SELECT id, count(*) OVER (PARTITION BY {C} < {L}) FROM tc_t ORDER BY id"},
+		{"simple_case", "SELECT id, CASE {C} WHEN {L} THEN 1 ELSE 0 END FROM tc_t ORDER BY id"},
+		{"nullif", "SELECT id, NULLIF({C}, {L}) IS NULL FROM tc_t ORDER BY id"},
+		{"lt_all", "SELECT id FROM tc_t WHERE {C} < ALL ({A}) ORDER BY id"},
+		{"lt_all_one", "SELECT id FROM tc_t WHERE {C} < ALL ({A1}) ORDER BY id"},
+		{"in_subquery", "SELECT id FROM tc_t WHERE id IN (SELECT id FROM tc_t WHERE {C} < {L}) ORDER BY id"},
+		{"exists", "SELECT k FROM tc_k WHERE EXISTS (SELECT 1 FROM tc_t WHERE id = k AND {C} = {L}) ORDER BY k"},
+		{"not_exists", "SELECT k FROM tc_k WHERE NOT EXISTS (SELECT 1 FROM tc_t i WHERE i.id = k AND i.{C} < {L}) ORDER BY k"},
+	}
+	for _, c := range cols {
+		for _, o := range posOps {
+			for _, x := range []string{"epoch", "infinity", "-infinity", "now", "today", "2024-01-15 BC"} {
+				q := strings.ReplaceAll(o.tmpl, "{A1}", tcQuote(`{"`+x+`"}`))
+				cells = append(cells, tcCell{name: fmt.Sprintf("pos/%s/%s/%q", o.name, c, x), sql: expand(q, c, x)})
+			}
+		}
+	}
+	// The same positions over the empty table: where the walk reaches the
+	// clause the refusal comes before any row (PostgreSQL coerces the
+	// constant while it analyses the statement).
+	for _, o := range posOps {
+		for _, x := range []string{"garbage", "infinity"} {
+			q := strings.ReplaceAll(o.tmpl, "{A1}", tcQuote(`{"`+x+`"}`))
+			q = strings.ReplaceAll(strings.ReplaceAll(expand(q, "ts", x), "FROM tc_t", "FROM tc_e"), "FROM tc_k", "FROM tc_e")
+			q = strings.ReplaceAll(strings.ReplaceAll(q, "SELECT k ", "SELECT id "), "ORDER BY k", "ORDER BY id")
+			q = strings.ReplaceAll(q, "id = k", "id = tc_e.id")
+			cells = append(cells, tcCell{name: fmt.Sprintf("empty/pos_%s/ts/%q", o.name, x), sql: q})
+		}
+	}
+	// A volatile operand beside a special word, over 4096 rows (review r2
+	// B3): the operand is evaluated once per row and the word refused before
+	// any row; PostgreSQL answers 4096. Eight runs, one cell each.
+	for i := 1; i <= 8; i++ {
+		cells = append(cells, tcCell{
+			name: fmt.Sprintf("vol/now_lt_infinity/%d", i),
+			sql:  "SELECT count(*) FROM tc_k a, tc_k b, tc_k c, tc_k e WHERE CAST(now() AS TIMESTAMP) < 'infinity'",
+		})
 	}
 	// A bound parameter: unknown-typed (OID 0), text (25), and the column's
 	// own type (1114 / 1082), text format.
