@@ -40,7 +40,7 @@ between/d/"2024-01-15 10:30:00+16"	ERR 22009
 between/d/"2024-02-30"	ERR 22008
 between/d/"epoch"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 9]
 between/d/"garbage"	ERR 22007
-between/d/"infinity"	rows=[]	ERR 22007	temporal r2
+between/d/"infinity"	rows=[]
 between/ts/""	ERR 22007
 between/ts/"0000-01-01"	ERR 22008
 between/ts/"1970-01-01 00:00:00"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 9]
@@ -50,7 +50,7 @@ between/ts/"2024-01-15 10:30:00+16"	ERR 22009
 between/ts/"2024-02-30"	ERR 22008
 between/ts/"epoch"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 9]
 between/ts/"garbage"	ERR 22007
-between/ts/"infinity"	rows=[]	ERR 22007	temporal r2
+between/ts/"infinity"	rows=[]
 between_hi/d/""	ERR 22007
 between_hi/d/"0000-01-01"	ERR 22008
 between_hi/d/"1970-01-01 00:00:00"	rows=[1 ; 8]
@@ -60,7 +60,7 @@ between_hi/d/"2024-01-15 10:30:00+16"	ERR 22009
 between_hi/d/"2024-02-30"	ERR 22008
 between_hi/d/"epoch"	rows=[1 ; 8]
 between_hi/d/"garbage"	ERR 22007
-between_hi/d/"infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r2
+between_hi/d/"infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
 between_hi/ts/""	ERR 22007
 between_hi/ts/"0000-01-01"	ERR 22008
 between_hi/ts/"1970-01-01 00:00:00"	rows=[1 ; 8]
@@ -70,7 +70,7 @@ between_hi/ts/"2024-01-15 10:30:00+16"	ERR 22009
 between_hi/ts/"2024-02-30"	ERR 22008
 between_hi/ts/"epoch"	rows=[1 ; 8]
 between_hi/ts/"garbage"	ERR 22007
-between_hi/ts/"infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r2
+between_hi/ts/"infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
 case/d/""	ERR 22007
 case/d/"0000-01-01"	ERR 22008
 case/d/"1970-01-01 00:00:00"	rows=[1|1 ; 2|0 ; 3|0 ; 4|0 ; 5|0 ; 6|0 ; 7|0 ; 8|0 ; 9|0]
@@ -80,7 +80,7 @@ case/d/"2024-01-15 10:30:00+16"	ERR 22009
 case/d/"2024-02-30"	ERR 22008
 case/d/"epoch"	rows=[1|1 ; 2|0 ; 3|0 ; 4|0 ; 5|0 ; 6|0 ; 7|0 ; 8|0 ; 9|0]
 case/d/"garbage"	ERR 22007
-case/d/"infinity"	rows=[1|0 ; 2|0 ; 3|0 ; 4|0 ; 5|0 ; 6|0 ; 7|0 ; 8|0 ; 9|0]	ERR 22007	temporal r2
+case/d/"infinity"	rows=[1|0 ; 2|0 ; 3|0 ; 4|0 ; 5|0 ; 6|0 ; 7|0 ; 8|0 ; 9|0]
 case/ts/""	ERR 22007
 case/ts/"0000-01-01"	ERR 22008
 case/ts/"1970-01-01 00:00:00"	rows=[1|1 ; 2|0 ; 3|0 ; 4|0 ; 5|0 ; 6|0 ; 7|0 ; 8|0 ; 9|0]
@@ -90,7 +90,7 @@ case/ts/"2024-01-15 10:30:00+16"	ERR 22009
 case/ts/"2024-02-30"	ERR 22008
 case/ts/"epoch"	rows=[1|1 ; 2|0 ; 3|0 ; 4|0 ; 5|0 ; 6|0 ; 7|0 ; 8|0 ; 9|0]
 case/ts/"garbage"	ERR 22007
-case/ts/"infinity"	rows=[1|0 ; 2|0 ; 3|0 ; 4|0 ; 5|0 ; 6|0 ; 7|0 ; 8|0 ; 9|0]	ERR 22007	temporal r2
+case/ts/"infinity"	rows=[1|0 ; 2|0 ; 3|0 ; 4|0 ; 5|0 ; 6|0 ; 7|0 ; 8|0 ; 9|0]
 cast/d/""	ERR 22007
 cast/d/"0000-01-01"	ERR 22008
 cast/d/"1970-01-01 00:00:00"	rows=[1]
@@ -100,7 +100,7 @@ cast/d/"2024-01-15 10:30:00+16"	ERR 22009
 cast/d/"2024-02-30"	ERR 22008
 cast/d/"epoch"	rows=[1]
 cast/d/"garbage"	ERR 22007
-cast/d/"infinity"	rows=[]	ERR 22007	temporal r2
+cast/d/"infinity"	rows=[]
 cast/ts/""	ERR 22007
 cast/ts/"0000-01-01"	ERR 22008
 cast/ts/"1970-01-01 00:00:00"	rows=[1]
@@ -110,7 +110,7 @@ cast/ts/"2024-01-15 10:30:00+16"	ERR 22009
 cast/ts/"2024-02-30"	ERR 22008
 cast/ts/"epoch"	rows=[1]
 cast/ts/"garbage"	ERR 22007
-cast/ts/"infinity"	rows=[]	ERR 22007	temporal r2
+cast/ts/"infinity"	rows=[]
 count/d/""	ERR 22007
 count/d/"0000-01-01"	ERR 22008
 count/d/"1970-01-01 00:00:00"	rows=[1]
@@ -120,7 +120,7 @@ count/d/"2024-01-15 10:30:00+16"	ERR 22009
 count/d/"2024-02-30"	ERR 22008
 count/d/"epoch"	rows=[1]
 count/d/"garbage"	ERR 22007
-count/d/"infinity"	rows=[0]	ERR 22007	temporal r2
+count/d/"infinity"	rows=[0]
 count/ts/""	ERR 22007
 count/ts/"0000-01-01"	ERR 22008
 count/ts/"1970-01-01 00:00:00"	rows=[1]
@@ -130,7 +130,7 @@ count/ts/"2024-01-15 10:30:00+16"	ERR 22009
 count/ts/"2024-02-30"	ERR 22008
 count/ts/"epoch"	rows=[1]
 count/ts/"garbage"	ERR 22007
-count/ts/"infinity"	rows=[0]	ERR 22007	temporal r2
+count/ts/"infinity"	rows=[0]
 cte/d/""	ERR 22007
 cte/d/"0000-01-01"	ERR 22008
 cte/d/"1970-01-01 00:00:00"	rows=[1]
@@ -140,7 +140,7 @@ cte/d/"2024-01-15 10:30:00+16"	ERR 22009
 cte/d/"2024-02-30"	ERR 22008
 cte/d/"epoch"	rows=[1]
 cte/d/"garbage"	ERR 22007
-cte/d/"infinity"	rows=[]	ERR 22007	temporal r2
+cte/d/"infinity"	rows=[]
 cte/ts/""	ERR 22007
 cte/ts/"0000-01-01"	ERR 22008
 cte/ts/"1970-01-01 00:00:00"	rows=[1]
@@ -150,7 +150,7 @@ cte/ts/"2024-01-15 10:30:00+16"	ERR 22009
 cte/ts/"2024-02-30"	ERR 22008
 cte/ts/"epoch"	rows=[1]
 cte/ts/"garbage"	ERR 22007
-cte/ts/"infinity"	rows=[]	ERR 22007	temporal r2
+cte/ts/"infinity"	rows=[]
 derived/d/""	ERR 22007
 derived/d/"0000-01-01"	ERR 22008
 derived/d/"1970-01-01 00:00:00"	rows=[1]
@@ -160,7 +160,7 @@ derived/d/"2024-01-15 10:30:00+16"	ERR 22009
 derived/d/"2024-02-30"	ERR 22008
 derived/d/"epoch"	rows=[1]
 derived/d/"garbage"	ERR 22007
-derived/d/"infinity"	rows=[]	ERR 22007	temporal r2
+derived/d/"infinity"	rows=[]
 derived/ts/""	ERR 22007
 derived/ts/"0000-01-01"	ERR 22008
 derived/ts/"1970-01-01 00:00:00"	rows=[1]
@@ -170,7 +170,7 @@ derived/ts/"2024-01-15 10:30:00+16"	ERR 22009
 derived/ts/"2024-02-30"	ERR 22008
 derived/ts/"epoch"	rows=[1]
 derived/ts/"garbage"	ERR 22007
-derived/ts/"infinity"	rows=[]	ERR 22007	temporal r2
+derived/ts/"infinity"	rows=[]
 empty/d/""	ERR 22007
 empty/d/"0000-01-01"	ERR 22008
 empty/d/"1970-01-01 00:00:00"	rows=[]
@@ -180,27 +180,27 @@ empty/d/"2024-01-15 10:30:00+16"	ERR 22009
 empty/d/"2024-02-30"	ERR 22008
 empty/d/"epoch"	rows=[]
 empty/d/"garbage"	ERR 22007
-empty/d/"infinity"	rows=[]	ERR 22007	temporal r2
+empty/d/"infinity"	rows=[]
 empty/pos_exists/ts/"garbage"	ERR 22007
-empty/pos_exists/ts/"infinity"	rows=[]	ERR 22007	temporal r2
+empty/pos_exists/ts/"infinity"	rows=[]
 empty/pos_group_by/ts/"garbage"	ERR 22007
-empty/pos_group_by/ts/"infinity"	rows=[]	ERR 22007	temporal r2
+empty/pos_group_by/ts/"infinity"	rows=[]
 empty/pos_in_subquery/ts/"garbage"	ERR 22007
-empty/pos_in_subquery/ts/"infinity"	rows=[]	ERR 22007	temporal r2
+empty/pos_in_subquery/ts/"infinity"	rows=[]
 empty/pos_lt_all/ts/"garbage"	ERR 22007	rows=[]	open: filing candidate TC-F1 (= ANY of a quoted array literal reads the literal as one scalar)
 empty/pos_lt_all/ts/"infinity"	rows=[]
 empty/pos_lt_all_one/ts/"garbage"	ERR 22007	rows=[]	open: filing candidate TC-F1 (= ANY of a quoted array literal reads the literal as one scalar)
 empty/pos_lt_all_one/ts/"infinity"	rows=[]
 empty/pos_not_exists/ts/"garbage"	ERR 22007
-empty/pos_not_exists/ts/"infinity"	rows=[]	ERR 22007	temporal r2
+empty/pos_not_exists/ts/"infinity"	rows=[]
 empty/pos_nullif/ts/"garbage"	ERR 22007
-empty/pos_nullif/ts/"infinity"	rows=[]	ERR 22007	temporal r2
+empty/pos_nullif/ts/"infinity"	rows=[]
 empty/pos_order_by/ts/"garbage"	ERR 22007
-empty/pos_order_by/ts/"infinity"	rows=[]	ERR 22007	temporal r2
+empty/pos_order_by/ts/"infinity"	rows=[]
 empty/pos_partition_by/ts/"garbage"	ERR 22007	rows=[]	open: filing candidate TC-F12 (a window PARTITION BY / ORDER BY comparison is read per row: a relation with no rows answers none)
 empty/pos_partition_by/ts/"infinity"	rows=[]
 empty/pos_simple_case/ts/"garbage"	ERR 22007
-empty/pos_simple_case/ts/"infinity"	rows=[]	ERR 22007	temporal r2
+empty/pos_simple_case/ts/"infinity"	rows=[]
 empty/ts/""	ERR 22007
 empty/ts/"0000-01-01"	ERR 22008
 empty/ts/"1970-01-01 00:00:00"	rows=[]
@@ -210,11 +210,11 @@ empty/ts/"2024-01-15 10:30:00+16"	ERR 22009
 empty/ts/"2024-02-30"	ERR 22008
 empty/ts/"epoch"	rows=[]
 empty/ts/"garbage"	ERR 22007
-empty/ts/"infinity"	rows=[]	ERR 22007	temporal r2
+empty/ts/"infinity"	rows=[]
 eq/d/"   "	ERR 22007
 eq/d/"  2024-01-15 10:30:00  "	rows=[2 ; 5]
 eq/d/""	ERR 22007
-eq/d/"-infinity"	rows=[]	ERR 22007	temporal r2
+eq/d/"-infinity"	rows=[]
 eq/d/"0000-01-01"	ERR 22008
 eq/d/"10000-01-01"	rows=[]
 eq/d/"1969-12-31 23:59:59.999"	rows=[8]
@@ -251,13 +251,13 @@ eq/d/"Jan 15 2024"	rows=[2 ; 5]	ERR 22007	temporal r25
 eq/d/"allballs"	ERR 22007
 eq/d/"epoch"	rows=[1]
 eq/d/"garbage"	ERR 22007
-eq/d/"infinity"	rows=[]	ERR 22007	temporal r2
+eq/d/"infinity"	rows=[]
 eq/d/"now"	rows=[9]	ERR 22007	temporal r25
 eq/d/"today"	rows=[9]	ERR 22007	temporal r25
 eq/ts/"   "	ERR 22007
 eq/ts/"  2024-01-15 10:30:00  "	rows=[2]
 eq/ts/""	ERR 22007
-eq/ts/"-infinity"	rows=[]	ERR 22007	temporal r2
+eq/ts/"-infinity"	rows=[]
 eq/ts/"0000-01-01"	ERR 22008
 eq/ts/"10000-01-01"	rows=[]
 eq/ts/"1969-12-31 23:59:59.999"	rows=[8]
@@ -294,7 +294,7 @@ eq/ts/"Jan 15 2024"	rows=[5]	ERR 22007	temporal r25
 eq/ts/"allballs"	ERR 22007
 eq/ts/"epoch"	rows=[1]
 eq/ts/"garbage"	ERR 22007
-eq/ts/"infinity"	rows=[]	ERR 22007	temporal r2
+eq/ts/"infinity"	rows=[]
 eq/ts/"now"	rows=[]	ERR 22007	temporal r25
 eq/ts/"today"	rows=[9]	ERR 22007	temporal r25
 ge/d/""	ERR 22007
@@ -306,7 +306,7 @@ ge/d/"2024-01-15 10:30:00+16"	ERR 22009
 ge/d/"2024-02-30"	ERR 22008
 ge/d/"epoch"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 9]
 ge/d/"garbage"	ERR 22007
-ge/d/"infinity"	rows=[]	ERR 22007	temporal r2
+ge/d/"infinity"	rows=[]
 ge/ts/""	ERR 22007
 ge/ts/"0000-01-01"	ERR 22008
 ge/ts/"1970-01-01 00:00:00"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 9]
@@ -316,7 +316,7 @@ ge/ts/"2024-01-15 10:30:00+16"	ERR 22009
 ge/ts/"2024-02-30"	ERR 22008
 ge/ts/"epoch"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 9]
 ge/ts/"garbage"	ERR 22007
-ge/ts/"infinity"	rows=[]	ERR 22007	temporal r2
+ge/ts/"infinity"	rows=[]
 gt/d/""	ERR 22007
 gt/d/"0000-01-01"	ERR 22008
 gt/d/"1970-01-01 00:00:00"	rows=[2 ; 3 ; 4 ; 5 ; 7 ; 9]
@@ -326,7 +326,7 @@ gt/d/"2024-01-15 10:30:00+16"	ERR 22009
 gt/d/"2024-02-30"	ERR 22008
 gt/d/"epoch"	rows=[2 ; 3 ; 4 ; 5 ; 7 ; 9]
 gt/d/"garbage"	ERR 22007
-gt/d/"infinity"	rows=[]	ERR 22007	temporal r2
+gt/d/"infinity"	rows=[]
 gt/ts/""	ERR 22007
 gt/ts/"0000-01-01"	ERR 22008
 gt/ts/"1970-01-01 00:00:00"	rows=[2 ; 3 ; 4 ; 5 ; 7 ; 9]
@@ -336,7 +336,7 @@ gt/ts/"2024-01-15 10:30:00+16"	ERR 22009
 gt/ts/"2024-02-30"	ERR 22008
 gt/ts/"epoch"	rows=[2 ; 3 ; 4 ; 5 ; 7 ; 9]
 gt/ts/"garbage"	ERR 22007
-gt/ts/"infinity"	rows=[]	ERR 22007	temporal r2
+gt/ts/"infinity"	rows=[]
 having/d/""	ERR 22007
 having/d/"0000-01-01"	ERR 22008
 having/d/"1970-01-01 00:00:00"	rows=[]
@@ -346,7 +346,7 @@ having/d/"2024-01-15 10:30:00+16"	ERR 22009
 having/d/"2024-02-30"	ERR 22008
 having/d/"epoch"	rows=[]
 having/d/"garbage"	ERR 22007
-having/d/"infinity"	rows=[]	ERR 22007	temporal r2
+having/d/"infinity"	rows=[]
 having/ts/""	ERR 22007
 having/ts/"0000-01-01"	ERR 22008
 having/ts/"1970-01-01 00:00:00"	rows=[]
@@ -356,7 +356,7 @@ having/ts/"2024-01-15 10:30:00+16"	ERR 22009
 having/ts/"2024-02-30"	ERR 22008
 having/ts/"epoch"	rows=[]
 having/ts/"garbage"	ERR 22007
-having/ts/"infinity"	rows=[]	ERR 22007	temporal r2
+having/ts/"infinity"	rows=[]
 in/d/""	ERR 22007
 in/d/"0000-01-01"	ERR 22008
 in/d/"1970-01-01 00:00:00"	rows=[1 ; 4]
@@ -366,7 +366,7 @@ in/d/"2024-01-15 10:30:00+16"	ERR 22009
 in/d/"2024-02-30"	ERR 22008
 in/d/"epoch"	rows=[1 ; 4]
 in/d/"garbage"	ERR 22007
-in/d/"infinity"	rows=[4]	ERR 22007	temporal r2
+in/d/"infinity"	rows=[4]
 in/ts/""	ERR 22007
 in/ts/"0000-01-01"	ERR 22008
 in/ts/"1970-01-01 00:00:00"	rows=[1 ; 4]
@@ -376,7 +376,7 @@ in/ts/"2024-01-15 10:30:00+16"	ERR 22009
 in/ts/"2024-02-30"	ERR 22008
 in/ts/"epoch"	rows=[1 ; 4]
 in/ts/"garbage"	ERR 22007
-in/ts/"infinity"	rows=[4]	ERR 22007	temporal r2
+in/ts/"infinity"	rows=[4]
 in_one/d/""	ERR 22007
 in_one/d/"0000-01-01"	ERR 22008
 in_one/d/"1970-01-01 00:00:00"	rows=[1]
@@ -386,7 +386,7 @@ in_one/d/"2024-01-15 10:30:00+16"	ERR 22009
 in_one/d/"2024-02-30"	ERR 22008
 in_one/d/"epoch"	rows=[1]
 in_one/d/"garbage"	ERR 22007
-in_one/d/"infinity"	rows=[]	ERR 22007	temporal r2
+in_one/d/"infinity"	rows=[]
 in_one/ts/""	ERR 22007
 in_one/ts/"0000-01-01"	ERR 22008
 in_one/ts/"1970-01-01 00:00:00"	rows=[1]
@@ -396,7 +396,7 @@ in_one/ts/"2024-01-15 10:30:00+16"	ERR 22009
 in_one/ts/"2024-02-30"	ERR 22008
 in_one/ts/"epoch"	rows=[1]
 in_one/ts/"garbage"	ERR 22007
-in_one/ts/"infinity"	rows=[]	ERR 22007	temporal r2
+in_one/ts/"infinity"	rows=[]
 join_on/d/""	ERR 22007
 join_on/d/"0000-01-01"	ERR 22008
 join_on/d/"1970-01-01 00:00:00"	rows=[1]
@@ -406,7 +406,7 @@ join_on/d/"2024-01-15 10:30:00+16"	ERR 22009
 join_on/d/"2024-02-30"	ERR 22008
 join_on/d/"epoch"	rows=[1]
 join_on/d/"garbage"	ERR 22007
-join_on/d/"infinity"	rows=[]	ERR 22007	temporal r2
+join_on/d/"infinity"	rows=[]
 join_on/ts/""	ERR 22007
 join_on/ts/"0000-01-01"	ERR 22008
 join_on/ts/"1970-01-01 00:00:00"	rows=[1]
@@ -416,7 +416,7 @@ join_on/ts/"2024-01-15 10:30:00+16"	ERR 22009
 join_on/ts/"2024-02-30"	ERR 22008
 join_on/ts/"epoch"	rows=[1]
 join_on/ts/"garbage"	ERR 22007
-join_on/ts/"infinity"	rows=[]	ERR 22007	temporal r2
+join_on/ts/"infinity"	rows=[]
 le/d/""	ERR 22007
 le/d/"0000-01-01"	ERR 22008
 le/d/"1970-01-01 00:00:00"	rows=[1 ; 8]
@@ -426,7 +426,7 @@ le/d/"2024-01-15 10:30:00+16"	ERR 22009
 le/d/"2024-02-30"	ERR 22008
 le/d/"epoch"	rows=[1 ; 8]
 le/d/"garbage"	ERR 22007
-le/d/"infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r2
+le/d/"infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
 le/ts/""	ERR 22007
 le/ts/"0000-01-01"	ERR 22008
 le/ts/"1970-01-01 00:00:00"	rows=[1 ; 8]
@@ -436,7 +436,7 @@ le/ts/"2024-01-15 10:30:00+16"	ERR 22009
 le/ts/"2024-02-30"	ERR 22008
 le/ts/"epoch"	rows=[1 ; 8]
 le/ts/"garbage"	ERR 22007
-le/ts/"infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r2
+le/ts/"infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
 left_join_on/d/""	ERR 22007
 left_join_on/d/"0000-01-01"	ERR 22008
 left_join_on/d/"1970-01-01 00:00:00"	rows=[1|1 ; 2|NULL ; 3|NULL ; 4|NULL ; 5|NULL ; 6|NULL ; 7|NULL ; 8|NULL]
@@ -446,7 +446,7 @@ left_join_on/d/"2024-01-15 10:30:00+16"	ERR 22009
 left_join_on/d/"2024-02-30"	ERR 22008
 left_join_on/d/"epoch"	rows=[1|1 ; 2|NULL ; 3|NULL ; 4|NULL ; 5|NULL ; 6|NULL ; 7|NULL ; 8|NULL]
 left_join_on/d/"garbage"	ERR 22007
-left_join_on/d/"infinity"	rows=[1|NULL ; 2|NULL ; 3|NULL ; 4|NULL ; 5|NULL ; 6|NULL ; 7|NULL ; 8|NULL]	ERR 22007	temporal r2
+left_join_on/d/"infinity"	rows=[1|NULL ; 2|NULL ; 3|NULL ; 4|NULL ; 5|NULL ; 6|NULL ; 7|NULL ; 8|NULL]
 left_join_on/ts/""	ERR 22007
 left_join_on/ts/"0000-01-01"	ERR 22008
 left_join_on/ts/"1970-01-01 00:00:00"	rows=[1|1 ; 2|NULL ; 3|NULL ; 4|NULL ; 5|NULL ; 6|NULL ; 7|NULL ; 8|NULL]
@@ -456,7 +456,7 @@ left_join_on/ts/"2024-01-15 10:30:00+16"	ERR 22009
 left_join_on/ts/"2024-02-30"	ERR 22008
 left_join_on/ts/"epoch"	rows=[1|1 ; 2|NULL ; 3|NULL ; 4|NULL ; 5|NULL ; 6|NULL ; 7|NULL ; 8|NULL]
 left_join_on/ts/"garbage"	ERR 22007
-left_join_on/ts/"infinity"	rows=[1|NULL ; 2|NULL ; 3|NULL ; 4|NULL ; 5|NULL ; 6|NULL ; 7|NULL ; 8|NULL]	ERR 22007	temporal r2
+left_join_on/ts/"infinity"	rows=[1|NULL ; 2|NULL ; 3|NULL ; 4|NULL ; 5|NULL ; 6|NULL ; 7|NULL ; 8|NULL]
 lit_left/d/""	ERR 22007
 lit_left/d/"0000-01-01"	ERR 22008
 lit_left/d/"1970-01-01 00:00:00"	rows=[1]
@@ -466,7 +466,7 @@ lit_left/d/"2024-01-15 10:30:00+16"	ERR 22009
 lit_left/d/"2024-02-30"	ERR 22008
 lit_left/d/"epoch"	rows=[1]
 lit_left/d/"garbage"	ERR 22007
-lit_left/d/"infinity"	rows=[]	ERR 22007	temporal r2
+lit_left/d/"infinity"	rows=[]
 lit_left/ts/""	ERR 22007
 lit_left/ts/"0000-01-01"	ERR 22008
 lit_left/ts/"1970-01-01 00:00:00"	rows=[1]
@@ -476,7 +476,7 @@ lit_left/ts/"2024-01-15 10:30:00+16"	ERR 22009
 lit_left/ts/"2024-02-30"	ERR 22008
 lit_left/ts/"epoch"	rows=[1]
 lit_left/ts/"garbage"	ERR 22007
-lit_left/ts/"infinity"	rows=[]	ERR 22007	temporal r2
+lit_left/ts/"infinity"	rows=[]
 lt/d/""	ERR 22007
 lt/d/"0000-01-01"	ERR 22008
 lt/d/"1970-01-01 00:00:00"	rows=[8]
@@ -486,7 +486,7 @@ lt/d/"2024-01-15 10:30:00+16"	ERR 22009
 lt/d/"2024-02-30"	ERR 22008
 lt/d/"epoch"	rows=[8]
 lt/d/"garbage"	ERR 22007
-lt/d/"infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r2
+lt/d/"infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
 lt/ts/""	ERR 22007
 lt/ts/"0000-01-01"	ERR 22008
 lt/ts/"1970-01-01 00:00:00"	rows=[8]
@@ -496,7 +496,7 @@ lt/ts/"2024-01-15 10:30:00+16"	ERR 22009
 lt/ts/"2024-02-30"	ERR 22008
 lt/ts/"epoch"	rows=[8]
 lt/ts/"garbage"	ERR 22007
-lt/ts/"infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r2
+lt/ts/"infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
 ne/d/""	ERR 22007
 ne/d/"0000-01-01"	ERR 22008
 ne/d/"1970-01-01 00:00:00"	rows=[2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
@@ -506,7 +506,7 @@ ne/d/"2024-01-15 10:30:00+16"	ERR 22009
 ne/d/"2024-02-30"	ERR 22008
 ne/d/"epoch"	rows=[2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
 ne/d/"garbage"	ERR 22007
-ne/d/"infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r2
+ne/d/"infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
 ne/ts/""	ERR 22007
 ne/ts/"0000-01-01"	ERR 22008
 ne/ts/"1970-01-01 00:00:00"	rows=[2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
@@ -516,7 +516,7 @@ ne/ts/"2024-01-15 10:30:00+16"	ERR 22009
 ne/ts/"2024-02-30"	ERR 22008
 ne/ts/"epoch"	rows=[2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
 ne/ts/"garbage"	ERR 22007
-ne/ts/"infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r2
+ne/ts/"infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
 no_row_reaches/d/""	ERR 22007
 no_row_reaches/d/"0000-01-01"	ERR 22008
 no_row_reaches/d/"1970-01-01 00:00:00"	rows=[]
@@ -526,7 +526,7 @@ no_row_reaches/d/"2024-01-15 10:30:00+16"	ERR 22009
 no_row_reaches/d/"2024-02-30"	ERR 22008
 no_row_reaches/d/"epoch"	rows=[]
 no_row_reaches/d/"garbage"	ERR 22007
-no_row_reaches/d/"infinity"	rows=[]	ERR 22007	temporal r2
+no_row_reaches/d/"infinity"	rows=[]
 no_row_reaches/ts/""	ERR 22007
 no_row_reaches/ts/"0000-01-01"	ERR 22008
 no_row_reaches/ts/"1970-01-01 00:00:00"	rows=[]
@@ -536,7 +536,7 @@ no_row_reaches/ts/"2024-01-15 10:30:00+16"	ERR 22009
 no_row_reaches/ts/"2024-02-30"	ERR 22008
 no_row_reaches/ts/"epoch"	rows=[]
 no_row_reaches/ts/"garbage"	ERR 22007
-no_row_reaches/ts/"infinity"	rows=[]	ERR 22007	temporal r2
+no_row_reaches/ts/"infinity"	rows=[]
 not/d/""	ERR 22007
 not/d/"0000-01-01"	ERR 22008
 not/d/"1970-01-01 00:00:00"	rows=[2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
@@ -546,7 +546,7 @@ not/d/"2024-01-15 10:30:00+16"	ERR 22009
 not/d/"2024-02-30"	ERR 22008
 not/d/"epoch"	rows=[2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
 not/d/"garbage"	ERR 22007
-not/d/"infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r2
+not/d/"infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
 not/ts/""	ERR 22007
 not/ts/"0000-01-01"	ERR 22008
 not/ts/"1970-01-01 00:00:00"	rows=[2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
@@ -556,7 +556,7 @@ not/ts/"2024-01-15 10:30:00+16"	ERR 22009
 not/ts/"2024-02-30"	ERR 22008
 not/ts/"epoch"	rows=[2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
 not/ts/"garbage"	ERR 22007
-not/ts/"infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r2
+not/ts/"infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
 not_distinct/d/""	ERR 22007
 not_distinct/d/"0000-01-01"	ERR 22008
 not_distinct/d/"1970-01-01 00:00:00"	rows=[1]
@@ -566,7 +566,7 @@ not_distinct/d/"2024-01-15 10:30:00+16"	ERR 22009
 not_distinct/d/"2024-02-30"	ERR 22008
 not_distinct/d/"epoch"	rows=[1]
 not_distinct/d/"garbage"	ERR 22007
-not_distinct/d/"infinity"	rows=[]	ERR 22007	temporal r2
+not_distinct/d/"infinity"	rows=[]
 not_distinct/ts/""	ERR 22007
 not_distinct/ts/"0000-01-01"	ERR 22008
 not_distinct/ts/"1970-01-01 00:00:00"	rows=[1]
@@ -576,7 +576,7 @@ not_distinct/ts/"2024-01-15 10:30:00+16"	ERR 22009
 not_distinct/ts/"2024-02-30"	ERR 22008
 not_distinct/ts/"epoch"	rows=[1]
 not_distinct/ts/"garbage"	ERR 22007
-not_distinct/ts/"infinity"	rows=[]	ERR 22007	temporal r2
+not_distinct/ts/"infinity"	rows=[]
 not_in/d/""	ERR 22007
 not_in/d/"0000-01-01"	ERR 22008
 not_in/d/"1970-01-01 00:00:00"	rows=[2 ; 3 ; 5 ; 7 ; 8 ; 9]
@@ -586,7 +586,7 @@ not_in/d/"2024-01-15 10:30:00+16"	ERR 22009
 not_in/d/"2024-02-30"	ERR 22008
 not_in/d/"epoch"	rows=[2 ; 3 ; 5 ; 7 ; 8 ; 9]
 not_in/d/"garbage"	ERR 22007
-not_in/d/"infinity"	rows=[1 ; 2 ; 3 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r2
+not_in/d/"infinity"	rows=[1 ; 2 ; 3 ; 5 ; 7 ; 8 ; 9]
 not_in/ts/""	ERR 22007
 not_in/ts/"0000-01-01"	ERR 22008
 not_in/ts/"1970-01-01 00:00:00"	rows=[2 ; 3 ; 5 ; 7 ; 8 ; 9]
@@ -596,7 +596,7 @@ not_in/ts/"2024-01-15 10:30:00+16"	ERR 22009
 not_in/ts/"2024-02-30"	ERR 22008
 not_in/ts/"epoch"	rows=[2 ; 3 ; 5 ; 7 ; 8 ; 9]
 not_in/ts/"garbage"	ERR 22007
-not_in/ts/"infinity"	rows=[1 ; 2 ; 3 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r2
+not_in/ts/"infinity"	rows=[1 ; 2 ; 3 ; 5 ; 7 ; 8 ; 9]
 or/d/""	ERR 22007
 or/d/"0000-01-01"	ERR 22008
 or/d/"1970-01-01 00:00:00"	rows=[1 ; 4]
@@ -606,7 +606,7 @@ or/d/"2024-01-15 10:30:00+16"	ERR 22009
 or/d/"2024-02-30"	ERR 22008
 or/d/"epoch"	rows=[1 ; 4]
 or/d/"garbage"	ERR 22007
-or/d/"infinity"	rows=[4]	ERR 22007	temporal r2
+or/d/"infinity"	rows=[4]
 or/ts/""	ERR 22007
 or/ts/"0000-01-01"	ERR 22008
 or/ts/"1970-01-01 00:00:00"	rows=[1 ; 4]
@@ -616,7 +616,7 @@ or/ts/"2024-01-15 10:30:00+16"	ERR 22009
 or/ts/"2024-02-30"	ERR 22008
 or/ts/"epoch"	rows=[1 ; 4]
 or/ts/"garbage"	ERR 22007
-or/ts/"infinity"	rows=[4]	ERR 22007	temporal r2
+or/ts/"infinity"	rows=[4]
 param0/d/""	ERR 22007
 param0/d/"0000-01-01"	ERR 22008
 param0/d/"1970-01-01 00:00:00"	rows=[1]
@@ -626,7 +626,7 @@ param0/d/"2024-01-15 10:30:00+16"	ERR 22009
 param0/d/"2024-02-30"	ERR 22008
 param0/d/"epoch"	rows=[1]
 param0/d/"garbage"	ERR 22007
-param0/d/"infinity"	rows=[]	ERR 22007	temporal r2
+param0/d/"infinity"	rows=[]
 param0/ts/""	ERR 22007
 param0/ts/"0000-01-01"	ERR 22008
 param0/ts/"1970-01-01 00:00:00"	rows=[1]
@@ -636,7 +636,7 @@ param0/ts/"2024-01-15 10:30:00+16"	ERR 22009
 param0/ts/"2024-02-30"	ERR 22008
 param0/ts/"epoch"	rows=[1]
 param0/ts/"garbage"	ERR 22007
-param0/ts/"infinity"	rows=[]	ERR 22007	temporal r2
+param0/ts/"infinity"	rows=[]
 param1082/d/""	ERR 22007
 param1082/d/"0000-01-01"	ERR 22008
 param1082/d/"1970-01-01 00:00:00"	rows=[1]
@@ -646,7 +646,7 @@ param1082/d/"2024-01-15 10:30:00+16"	ERR 22009
 param1082/d/"2024-02-30"	ERR 22008
 param1082/d/"epoch"	rows=[1]
 param1082/d/"garbage"	ERR 22007
-param1082/d/"infinity"	rows=[]	ERR 22007	temporal r2
+param1082/d/"infinity"	rows=[]
 param1114/ts/""	ERR 22007
 param1114/ts/"0000-01-01"	ERR 22008
 param1114/ts/"1970-01-01 00:00:00"	rows=[1]
@@ -656,7 +656,7 @@ param1114/ts/"2024-01-15 10:30:00+16"	ERR 22009
 param1114/ts/"2024-02-30"	ERR 22008
 param1114/ts/"epoch"	rows=[1]
 param1114/ts/"garbage"	ERR 22007
-param1114/ts/"infinity"	rows=[]	ERR 22007	temporal r2
+param1114/ts/"infinity"	rows=[]
 param25/d/""	ERR 42883	ERR 22007	comparison-membership r4 (a text-declared parameter is spliced as the quoted literal)
 param25/d/"0000-01-01"	ERR 42883	ERR 22008	comparison-membership r4 (a text-declared parameter is spliced as the quoted literal)
 param25/d/"1970-01-01 00:00:00"	ERR 42883	rows=[1]	comparison-membership r4 (a text-declared parameter is spliced as the quoted literal)
@@ -666,7 +666,7 @@ param25/d/"2024-01-15 10:30:00+16"	ERR 42883	ERR 22009	comparison-membership r4 
 param25/d/"2024-02-30"	ERR 42883	ERR 22008	comparison-membership r4 (a text-declared parameter is spliced as the quoted literal)
 param25/d/"epoch"	ERR 42883	rows=[1]	comparison-membership r4 (a text-declared parameter is spliced as the quoted literal)
 param25/d/"garbage"	ERR 42883	ERR 22007	comparison-membership r4 (a text-declared parameter is spliced as the quoted literal)
-param25/d/"infinity"	ERR 42883	ERR 22007	comparison-membership r4 (a text-declared parameter is spliced as the quoted literal)
+param25/d/"infinity"	ERR 42883	rows=[]	comparison-membership r4 (a text-declared parameter is spliced as the quoted literal)
 param25/ts/""	ERR 42883	ERR 22007	comparison-membership r4 (a text-declared parameter is spliced as the quoted literal)
 param25/ts/"0000-01-01"	ERR 42883	ERR 22008	comparison-membership r4 (a text-declared parameter is spliced as the quoted literal)
 param25/ts/"1970-01-01 00:00:00"	ERR 42883	rows=[1]	comparison-membership r4 (a text-declared parameter is spliced as the quoted literal)
@@ -676,125 +676,125 @@ param25/ts/"2024-01-15 10:30:00+16"	ERR 42883	ERR 22009	comparison-membership r4
 param25/ts/"2024-02-30"	ERR 42883	ERR 22008	comparison-membership r4 (a text-declared parameter is spliced as the quoted literal)
 param25/ts/"epoch"	ERR 42883	rows=[1]	comparison-membership r4 (a text-declared parameter is spliced as the quoted literal)
 param25/ts/"garbage"	ERR 42883	ERR 22007	comparison-membership r4 (a text-declared parameter is spliced as the quoted literal)
-param25/ts/"infinity"	ERR 42883	ERR 22007	comparison-membership r4 (a text-declared parameter is spliced as the quoted literal)
-pos/exists/d/"-infinity"	rows=[]	ERR 22007	temporal r2
+param25/ts/"infinity"	ERR 42883	rows=[]	comparison-membership r4 (a text-declared parameter is spliced as the quoted literal)
+pos/exists/d/"-infinity"	rows=[]
 pos/exists/d/"2024-01-15 BC"	rows=[]	ERR 22007	temporal r25
 pos/exists/d/"epoch"	rows=[1]
-pos/exists/d/"infinity"	rows=[]	ERR 22007	temporal r2
+pos/exists/d/"infinity"	rows=[]
 pos/exists/d/"now"	rows=[]	ERR 22007	temporal r25
 pos/exists/d/"today"	rows=[]	ERR 22007	temporal r25
-pos/exists/ts/"-infinity"	rows=[]	ERR 22007	temporal r2
+pos/exists/ts/"-infinity"	rows=[]
 pos/exists/ts/"2024-01-15 BC"	rows=[]	ERR 22007	temporal r25
 pos/exists/ts/"epoch"	rows=[1]
-pos/exists/ts/"infinity"	rows=[]	ERR 22007	temporal r2
+pos/exists/ts/"infinity"	rows=[]
 pos/exists/ts/"now"	rows=[]	ERR 22007	temporal r25
 pos/exists/ts/"today"	rows=[]	ERR 22007	temporal r25
-pos/group_by/d/"-infinity"	rows=[f|8 ; NULL|1]	ERR 22007	temporal r2
+pos/group_by/d/"-infinity"	rows=[f|8 ; NULL|1]
 pos/group_by/d/"2024-01-15 BC"	rows=[f|8 ; NULL|1]	ERR 22007	temporal r25
 pos/group_by/d/"epoch"	rows=[f|7 ; t|1 ; NULL|1]
-pos/group_by/d/"infinity"	rows=[t|8 ; NULL|1]	ERR 22007	temporal r2
+pos/group_by/d/"infinity"	rows=[t|8 ; NULL|1]
 pos/group_by/d/"now"	rows=[f|2 ; t|6 ; NULL|1]	ERR 22007	temporal r25
 pos/group_by/d/"today"	rows=[f|2 ; t|6 ; NULL|1]	ERR 22007	temporal r25
-pos/group_by/ts/"-infinity"	rows=[f|8 ; NULL|1]	ERR 22007	temporal r2
+pos/group_by/ts/"-infinity"	rows=[f|8 ; NULL|1]
 pos/group_by/ts/"2024-01-15 BC"	rows=[f|8 ; NULL|1]	ERR 22007	temporal r25
 pos/group_by/ts/"epoch"	rows=[f|7 ; t|1 ; NULL|1]
-pos/group_by/ts/"infinity"	rows=[t|8 ; NULL|1]	ERR 22007	temporal r2
+pos/group_by/ts/"infinity"	rows=[t|8 ; NULL|1]
 pos/group_by/ts/"now"	rows=[f|1 ; t|7 ; NULL|1]	ERR 22007	temporal r25
 pos/group_by/ts/"today"	rows=[f|2 ; t|6 ; NULL|1]	ERR 22007	temporal r25
-pos/in_subquery/d/"-infinity"	rows=[]	ERR 22007	temporal r2
+pos/in_subquery/d/"-infinity"	rows=[]
 pos/in_subquery/d/"2024-01-15 BC"	rows=[]	ERR 22007	temporal r25
 pos/in_subquery/d/"epoch"	rows=[8]
-pos/in_subquery/d/"infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r2
+pos/in_subquery/d/"infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
 pos/in_subquery/d/"now"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 8]	ERR 22007	temporal r25
 pos/in_subquery/d/"today"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 8]	ERR 22007	temporal r25
-pos/in_subquery/ts/"-infinity"	rows=[]	ERR 22007	temporal r2
+pos/in_subquery/ts/"-infinity"	rows=[]
 pos/in_subquery/ts/"2024-01-15 BC"	rows=[]	ERR 22007	temporal r25
 pos/in_subquery/ts/"epoch"	rows=[8]
-pos/in_subquery/ts/"infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r2
+pos/in_subquery/ts/"infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
 pos/in_subquery/ts/"now"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 8 ; 9]	ERR 22007	temporal r25
 pos/in_subquery/ts/"today"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 8]	ERR 22007	temporal r25
-pos/lt_all/d/"-infinity"	rows=[]	ERR 22007	temporal r2
+pos/lt_all/d/"-infinity"	rows=[]	ERR 22007	open: filing candidate TC-F1 (< ALL of a quoted array literal reads the literal as one scalar)
 pos/lt_all/d/"2024-01-15 BC"	rows=[]	ERR 22007	temporal r25
 pos/lt_all/d/"epoch"	rows=[8]	ERR 22007	open: filing candidate TC-F1 (= ANY of a quoted array literal reads the literal as one scalar)
-pos/lt_all/d/"infinity"	rows=[1 ; 8]	ERR 22007	temporal r2
+pos/lt_all/d/"infinity"	rows=[1 ; 8]	ERR 22007	open: filing candidate TC-F1 (< ALL of a quoted array literal reads the literal as one scalar)
 pos/lt_all/d/"now"	rows=[1 ; 8]	ERR 22007	temporal r25
 pos/lt_all/d/"today"	rows=[1 ; 8]	ERR 22007	temporal r25
-pos/lt_all/ts/"-infinity"	rows=[]	ERR 22007	temporal r2
+pos/lt_all/ts/"-infinity"	rows=[]	ERR 22007	open: filing candidate TC-F1 (< ALL of a quoted array literal reads the literal as one scalar)
 pos/lt_all/ts/"2024-01-15 BC"	rows=[]	ERR 22007	temporal r25
 pos/lt_all/ts/"epoch"	rows=[8]	ERR 22007	open: filing candidate TC-F1 (= ANY of a quoted array literal reads the literal as one scalar)
-pos/lt_all/ts/"infinity"	rows=[1 ; 8]	ERR 22007	temporal r2
+pos/lt_all/ts/"infinity"	rows=[1 ; 8]	ERR 22007	open: filing candidate TC-F1 (< ALL of a quoted array literal reads the literal as one scalar)
 pos/lt_all/ts/"now"	rows=[1 ; 8]	ERR 22007	temporal r25
 pos/lt_all/ts/"today"	rows=[1 ; 8]	ERR 22007	temporal r25
-pos/lt_all_one/d/"-infinity"	rows=[]	ERR 22007	temporal r2
+pos/lt_all_one/d/"-infinity"	rows=[]	ERR 22007	open: filing candidate TC-F1 (< ALL of a quoted array literal reads the literal as one scalar)
 pos/lt_all_one/d/"2024-01-15 BC"	rows=[]	ERR 22007	temporal r25
 pos/lt_all_one/d/"epoch"	rows=[8]	ERR 22007	open: filing candidate TC-F1 (= ANY of a quoted array literal reads the literal as one scalar)
-pos/lt_all_one/d/"infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r2
+pos/lt_all_one/d/"infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	open: filing candidate TC-F1 (< ALL of a quoted array literal reads the literal as one scalar)
 pos/lt_all_one/d/"now"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 8]	ERR 22007	temporal r25
 pos/lt_all_one/d/"today"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 8]	ERR 22007	temporal r25
-pos/lt_all_one/ts/"-infinity"	rows=[]	ERR 22007	temporal r2
+pos/lt_all_one/ts/"-infinity"	rows=[]	ERR 22007	open: filing candidate TC-F1 (< ALL of a quoted array literal reads the literal as one scalar)
 pos/lt_all_one/ts/"2024-01-15 BC"	rows=[]	ERR 22007	temporal r25
 pos/lt_all_one/ts/"epoch"	rows=[8]	ERR 22007	open: filing candidate TC-F1 (= ANY of a quoted array literal reads the literal as one scalar)
-pos/lt_all_one/ts/"infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r2
+pos/lt_all_one/ts/"infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	open: filing candidate TC-F1 (< ALL of a quoted array literal reads the literal as one scalar)
 pos/lt_all_one/ts/"now"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 8 ; 9]	ERR 22007	temporal r25
 pos/lt_all_one/ts/"today"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 8]	ERR 22007	temporal r25
-pos/not_exists/d/"-infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 6 ; 7 ; 8]	ERR 22007	temporal r2
+pos/not_exists/d/"-infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 6 ; 7 ; 8]
 pos/not_exists/d/"2024-01-15 BC"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 6 ; 7 ; 8]	ERR 22007	temporal r25
 pos/not_exists/d/"epoch"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 6 ; 7]
-pos/not_exists/d/"infinity"	rows=[6]	ERR 22007	temporal r2
+pos/not_exists/d/"infinity"	rows=[6]
 pos/not_exists/d/"now"	rows=[6 ; 7]	ERR 22007	temporal r25
 pos/not_exists/d/"today"	rows=[6 ; 7]	ERR 22007	temporal r25
-pos/not_exists/ts/"-infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 6 ; 7 ; 8]	ERR 22007	temporal r2
+pos/not_exists/ts/"-infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 6 ; 7 ; 8]
 pos/not_exists/ts/"2024-01-15 BC"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 6 ; 7 ; 8]	ERR 22007	temporal r25
 pos/not_exists/ts/"epoch"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 6 ; 7]
-pos/not_exists/ts/"infinity"	rows=[6]	ERR 22007	temporal r2
+pos/not_exists/ts/"infinity"	rows=[6]
 pos/not_exists/ts/"now"	rows=[6 ; 7]	ERR 22007	temporal r25
 pos/not_exists/ts/"today"	rows=[6 ; 7]	ERR 22007	temporal r25
-pos/nullif/d/"-infinity"	rows=[1|f ; 2|f ; 3|f ; 4|f ; 5|f ; 6|t ; 7|f ; 8|f ; 9|f]	ERR 22007	temporal r2
+pos/nullif/d/"-infinity"	rows=[1|f ; 2|f ; 3|f ; 4|f ; 5|f ; 6|t ; 7|f ; 8|f ; 9|f]
 pos/nullif/d/"2024-01-15 BC"	rows=[1|f ; 2|f ; 3|f ; 4|f ; 5|f ; 6|t ; 7|f ; 8|f ; 9|f]	ERR 22007	temporal r25
 pos/nullif/d/"epoch"	rows=[1|t ; 2|f ; 3|f ; 4|f ; 5|f ; 6|t ; 7|f ; 8|f ; 9|f]
-pos/nullif/d/"infinity"	rows=[1|f ; 2|f ; 3|f ; 4|f ; 5|f ; 6|t ; 7|f ; 8|f ; 9|f]	ERR 22007	temporal r2
+pos/nullif/d/"infinity"	rows=[1|f ; 2|f ; 3|f ; 4|f ; 5|f ; 6|t ; 7|f ; 8|f ; 9|f]
 pos/nullif/d/"now"	rows=[1|f ; 2|f ; 3|f ; 4|f ; 5|f ; 6|t ; 7|f ; 8|f ; 9|t]	ERR 22007	temporal r25
 pos/nullif/d/"today"	rows=[1|f ; 2|f ; 3|f ; 4|f ; 5|f ; 6|t ; 7|f ; 8|f ; 9|t]	ERR 22007	temporal r25
-pos/nullif/ts/"-infinity"	rows=[1|f ; 2|f ; 3|f ; 4|f ; 5|f ; 6|t ; 7|f ; 8|f ; 9|f]	ERR 22007	temporal r2
+pos/nullif/ts/"-infinity"	rows=[1|f ; 2|f ; 3|f ; 4|f ; 5|f ; 6|t ; 7|f ; 8|f ; 9|f]
 pos/nullif/ts/"2024-01-15 BC"	rows=[1|f ; 2|f ; 3|f ; 4|f ; 5|f ; 6|t ; 7|f ; 8|f ; 9|f]	ERR 22007	temporal r25
 pos/nullif/ts/"epoch"	rows=[1|t ; 2|f ; 3|f ; 4|f ; 5|f ; 6|t ; 7|f ; 8|f ; 9|f]
-pos/nullif/ts/"infinity"	rows=[1|f ; 2|f ; 3|f ; 4|f ; 5|f ; 6|t ; 7|f ; 8|f ; 9|f]	ERR 22007	temporal r2
+pos/nullif/ts/"infinity"	rows=[1|f ; 2|f ; 3|f ; 4|f ; 5|f ; 6|t ; 7|f ; 8|f ; 9|f]
 pos/nullif/ts/"now"	rows=[1|f ; 2|f ; 3|f ; 4|f ; 5|f ; 6|t ; 7|f ; 8|f ; 9|f]	ERR 22007	temporal r25
 pos/nullif/ts/"today"	rows=[1|f ; 2|f ; 3|f ; 4|f ; 5|f ; 6|t ; 7|f ; 8|f ; 9|t]	ERR 22007	temporal r25
-pos/order_by/d/"-infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9 ; 6]	ERR 22007	temporal r2
+pos/order_by/d/"-infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9 ; 6]
 pos/order_by/d/"2024-01-15 BC"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9 ; 6]	ERR 22007	temporal r25
 pos/order_by/d/"epoch"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 9 ; 8 ; 6]
-pos/order_by/d/"infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9 ; 6]	ERR 22007	temporal r2
+pos/order_by/d/"infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9 ; 6]
 pos/order_by/d/"now"	rows=[7 ; 9 ; 1 ; 2 ; 3 ; 4 ; 5 ; 8 ; 6]	ERR 22007	temporal r25
 pos/order_by/d/"today"	rows=[7 ; 9 ; 1 ; 2 ; 3 ; 4 ; 5 ; 8 ; 6]	ERR 22007	temporal r25
-pos/order_by/ts/"-infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9 ; 6]	ERR 22007	temporal r2
+pos/order_by/ts/"-infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9 ; 6]
 pos/order_by/ts/"2024-01-15 BC"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9 ; 6]	ERR 22007	temporal r25
 pos/order_by/ts/"epoch"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 9 ; 8 ; 6]
-pos/order_by/ts/"infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9 ; 6]	ERR 22007	temporal r2
+pos/order_by/ts/"infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9 ; 6]
 pos/order_by/ts/"now"	rows=[7 ; 1 ; 2 ; 3 ; 4 ; 5 ; 8 ; 9 ; 6]	ERR 22007	temporal r25
 pos/order_by/ts/"today"	rows=[7 ; 9 ; 1 ; 2 ; 3 ; 4 ; 5 ; 8 ; 6]	ERR 22007	temporal r25
-pos/partition_by/d/"-infinity"	rows=[1|8 ; 2|8 ; 3|8 ; 4|8 ; 5|8 ; 6|1 ; 7|8 ; 8|8 ; 9|8]	ERR 22007	temporal r2
+pos/partition_by/d/"-infinity"	rows=[1|8 ; 2|8 ; 3|8 ; 4|8 ; 5|8 ; 6|1 ; 7|8 ; 8|8 ; 9|8]
 pos/partition_by/d/"2024-01-15 BC"	rows=[1|8 ; 2|8 ; 3|8 ; 4|8 ; 5|8 ; 6|1 ; 7|8 ; 8|8 ; 9|8]	ERR 22007	temporal r25
 pos/partition_by/d/"epoch"	rows=[1|7 ; 2|7 ; 3|7 ; 4|7 ; 5|7 ; 6|1 ; 7|7 ; 8|1 ; 9|7]
-pos/partition_by/d/"infinity"	rows=[1|8 ; 2|8 ; 3|8 ; 4|8 ; 5|8 ; 6|1 ; 7|8 ; 8|8 ; 9|8]	ERR 22007	temporal r2
+pos/partition_by/d/"infinity"	rows=[1|8 ; 2|8 ; 3|8 ; 4|8 ; 5|8 ; 6|1 ; 7|8 ; 8|8 ; 9|8]
 pos/partition_by/d/"now"	rows=[1|6 ; 2|6 ; 3|6 ; 4|6 ; 5|6 ; 6|1 ; 7|2 ; 8|6 ; 9|2]	ERR 22007	temporal r25
 pos/partition_by/d/"today"	rows=[1|6 ; 2|6 ; 3|6 ; 4|6 ; 5|6 ; 6|1 ; 7|2 ; 8|6 ; 9|2]	ERR 22007	temporal r25
-pos/partition_by/ts/"-infinity"	rows=[1|8 ; 2|8 ; 3|8 ; 4|8 ; 5|8 ; 6|1 ; 7|8 ; 8|8 ; 9|8]	ERR 22007	temporal r2
+pos/partition_by/ts/"-infinity"	rows=[1|8 ; 2|8 ; 3|8 ; 4|8 ; 5|8 ; 6|1 ; 7|8 ; 8|8 ; 9|8]
 pos/partition_by/ts/"2024-01-15 BC"	rows=[1|8 ; 2|8 ; 3|8 ; 4|8 ; 5|8 ; 6|1 ; 7|8 ; 8|8 ; 9|8]	ERR 22007	temporal r25
 pos/partition_by/ts/"epoch"	rows=[1|7 ; 2|7 ; 3|7 ; 4|7 ; 5|7 ; 6|1 ; 7|7 ; 8|1 ; 9|7]
-pos/partition_by/ts/"infinity"	rows=[1|8 ; 2|8 ; 3|8 ; 4|8 ; 5|8 ; 6|1 ; 7|8 ; 8|8 ; 9|8]	ERR 22007	temporal r2
+pos/partition_by/ts/"infinity"	rows=[1|8 ; 2|8 ; 3|8 ; 4|8 ; 5|8 ; 6|1 ; 7|8 ; 8|8 ; 9|8]
 pos/partition_by/ts/"now"	rows=[1|7 ; 2|7 ; 3|7 ; 4|7 ; 5|7 ; 6|1 ; 7|1 ; 8|7 ; 9|7]	ERR 22007	temporal r25
 pos/partition_by/ts/"today"	rows=[1|6 ; 2|6 ; 3|6 ; 4|6 ; 5|6 ; 6|1 ; 7|2 ; 8|6 ; 9|2]	ERR 22007	temporal r25
-pos/simple_case/d/"-infinity"	rows=[1|0 ; 2|0 ; 3|0 ; 4|0 ; 5|0 ; 6|0 ; 7|0 ; 8|0 ; 9|0]	ERR 22007	temporal r2
+pos/simple_case/d/"-infinity"	rows=[1|0 ; 2|0 ; 3|0 ; 4|0 ; 5|0 ; 6|0 ; 7|0 ; 8|0 ; 9|0]
 pos/simple_case/d/"2024-01-15 BC"	rows=[1|0 ; 2|0 ; 3|0 ; 4|0 ; 5|0 ; 6|0 ; 7|0 ; 8|0 ; 9|0]	ERR 22007	temporal r25
 pos/simple_case/d/"epoch"	rows=[1|1 ; 2|0 ; 3|0 ; 4|0 ; 5|0 ; 6|0 ; 7|0 ; 8|0 ; 9|0]
-pos/simple_case/d/"infinity"	rows=[1|0 ; 2|0 ; 3|0 ; 4|0 ; 5|0 ; 6|0 ; 7|0 ; 8|0 ; 9|0]	ERR 22007	temporal r2
+pos/simple_case/d/"infinity"	rows=[1|0 ; 2|0 ; 3|0 ; 4|0 ; 5|0 ; 6|0 ; 7|0 ; 8|0 ; 9|0]
 pos/simple_case/d/"now"	rows=[1|0 ; 2|0 ; 3|0 ; 4|0 ; 5|0 ; 6|0 ; 7|0 ; 8|0 ; 9|1]	ERR 22007	temporal r25
 pos/simple_case/d/"today"	rows=[1|0 ; 2|0 ; 3|0 ; 4|0 ; 5|0 ; 6|0 ; 7|0 ; 8|0 ; 9|1]	ERR 22007	temporal r25
-pos/simple_case/ts/"-infinity"	rows=[1|0 ; 2|0 ; 3|0 ; 4|0 ; 5|0 ; 6|0 ; 7|0 ; 8|0 ; 9|0]	ERR 22007	temporal r2
+pos/simple_case/ts/"-infinity"	rows=[1|0 ; 2|0 ; 3|0 ; 4|0 ; 5|0 ; 6|0 ; 7|0 ; 8|0 ; 9|0]
 pos/simple_case/ts/"2024-01-15 BC"	rows=[1|0 ; 2|0 ; 3|0 ; 4|0 ; 5|0 ; 6|0 ; 7|0 ; 8|0 ; 9|0]	ERR 22007	temporal r25
 pos/simple_case/ts/"epoch"	rows=[1|1 ; 2|0 ; 3|0 ; 4|0 ; 5|0 ; 6|0 ; 7|0 ; 8|0 ; 9|0]
-pos/simple_case/ts/"infinity"	rows=[1|0 ; 2|0 ; 3|0 ; 4|0 ; 5|0 ; 6|0 ; 7|0 ; 8|0 ; 9|0]	ERR 22007	temporal r2
+pos/simple_case/ts/"infinity"	rows=[1|0 ; 2|0 ; 3|0 ; 4|0 ; 5|0 ; 6|0 ; 7|0 ; 8|0 ; 9|0]
 pos/simple_case/ts/"now"	rows=[1|0 ; 2|0 ; 3|0 ; 4|0 ; 5|0 ; 6|0 ; 7|0 ; 8|0 ; 9|0]	ERR 22007	temporal r25
 pos/simple_case/ts/"today"	rows=[1|0 ; 2|0 ; 3|0 ; 4|0 ; 5|0 ; 6|0 ; 7|0 ; 8|0 ; 9|1]	ERR 22007	temporal r25
 scalar_subquery/d/""	ERR 22007
@@ -806,7 +806,7 @@ scalar_subquery/d/"2024-01-15 10:30:00+16"	ERR 22009
 scalar_subquery/d/"2024-02-30"	ERR 22008
 scalar_subquery/d/"epoch"	rows=[]
 scalar_subquery/d/"garbage"	ERR 22007
-scalar_subquery/d/"infinity"	rows=[]	ERR 22007	temporal r2
+scalar_subquery/d/"infinity"	rows=[]
 scalar_subquery/ts/""	ERR 22007
 scalar_subquery/ts/"0000-01-01"	ERR 22008
 scalar_subquery/ts/"1970-01-01 00:00:00"	rows=[]
@@ -816,7 +816,7 @@ scalar_subquery/ts/"2024-01-15 10:30:00+16"	ERR 22009
 scalar_subquery/ts/"2024-02-30"	ERR 22008
 scalar_subquery/ts/"epoch"	rows=[]
 scalar_subquery/ts/"garbage"	ERR 22007
-scalar_subquery/ts/"infinity"	rows=[]	ERR 22007	temporal r2
+scalar_subquery/ts/"infinity"	rows=[]
 select/d/""	ERR 22007
 select/d/"0000-01-01"	ERR 22008
 select/d/"1970-01-01 00:00:00"	rows=[1|t ; 2|f ; 3|f ; 4|f ; 5|f ; 6|NULL ; 7|f ; 8|f ; 9|f]
@@ -826,7 +826,7 @@ select/d/"2024-01-15 10:30:00+16"	ERR 22009
 select/d/"2024-02-30"	ERR 22008
 select/d/"epoch"	rows=[1|t ; 2|f ; 3|f ; 4|f ; 5|f ; 6|NULL ; 7|f ; 8|f ; 9|f]
 select/d/"garbage"	ERR 22007
-select/d/"infinity"	rows=[1|f ; 2|f ; 3|f ; 4|f ; 5|f ; 6|NULL ; 7|f ; 8|f ; 9|f]	ERR 22007	temporal r2
+select/d/"infinity"	rows=[1|f ; 2|f ; 3|f ; 4|f ; 5|f ; 6|NULL ; 7|f ; 8|f ; 9|f]
 select/ts/""	ERR 22007
 select/ts/"0000-01-01"	ERR 22008
 select/ts/"1970-01-01 00:00:00"	rows=[1|t ; 2|f ; 3|f ; 4|f ; 5|f ; 6|NULL ; 7|f ; 8|f ; 9|f]
@@ -836,495 +836,495 @@ select/ts/"2024-01-15 10:30:00+16"	ERR 22009
 select/ts/"2024-02-30"	ERR 22008
 select/ts/"epoch"	rows=[1|t ; 2|f ; 3|f ; 4|f ; 5|f ; 6|NULL ; 7|f ; 8|f ; 9|f]
 select/ts/"garbage"	ERR 22007
-select/ts/"infinity"	rows=[1|f ; 2|f ; 3|f ; 4|f ; 5|f ; 6|NULL ; 7|f ; 8|f ; 9|f]	ERR 22007	temporal r2
+select/ts/"infinity"	rows=[1|f ; 2|f ; 3|f ; 4|f ; 5|f ; 6|NULL ; 7|f ; 8|f ; 9|f]
 sp/between/d/" EPOCH "	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 9]
-sp/between/d/"+infinity"	rows=[]	ERR 22007	temporal r2
-sp/between/d/"-infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 8 ; 9]	ERR 22007	temporal r2
+sp/between/d/"+infinity"	rows=[]
+sp/between/d/"-infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 8 ; 9]
 sp/between/d/"2024-01-15 BC"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 8 ; 9]	ERR 22007	temporal r25
 sp/between/d/"allballs"	ERR 22007
 sp/between/d/"epoch"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 9]
-sp/between/d/"infinity"	rows=[]	ERR 22007	temporal r2
+sp/between/d/"infinity"	rows=[]
 sp/between/d/"now"	rows=[9]	ERR 22007	temporal r25
 sp/between/d/"today"	rows=[9]	ERR 22007	temporal r25
 sp/between/d/"tomorrow"	rows=[]	ERR 22007	temporal r25
 sp/between/d/"yesterday"	rows=[9]	ERR 22007	temporal r25
 sp/between/ts/" EPOCH "	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 9]
-sp/between/ts/"+infinity"	rows=[]	ERR 22007	temporal r2
-sp/between/ts/"-infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 8 ; 9]	ERR 22007	temporal r2
+sp/between/ts/"+infinity"	rows=[]
+sp/between/ts/"-infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 8 ; 9]
 sp/between/ts/"2024-01-15 BC"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 8 ; 9]	ERR 22007	temporal r25
 sp/between/ts/"allballs"	ERR 22007
 sp/between/ts/"epoch"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 9]
-sp/between/ts/"infinity"	rows=[]	ERR 22007	temporal r2
+sp/between/ts/"infinity"	rows=[]
 sp/between/ts/"now"	rows=[]	ERR 22007	temporal r25
 sp/between/ts/"today"	rows=[9]	ERR 22007	temporal r25
 sp/between/ts/"tomorrow"	rows=[]	ERR 22007	temporal r25
 sp/between/ts/"yesterday"	rows=[9]	ERR 22007	temporal r25
 sp/between_hi/d/" EPOCH "	rows=[1 ; 8]
-sp/between_hi/d/"+infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r2
-sp/between_hi/d/"-infinity"	rows=[]	ERR 22007	temporal r2
+sp/between_hi/d/"+infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
+sp/between_hi/d/"-infinity"	rows=[]
 sp/between_hi/d/"2024-01-15 BC"	rows=[]	ERR 22007	temporal r25
 sp/between_hi/d/"allballs"	ERR 22007
 sp/between_hi/d/"epoch"	rows=[1 ; 8]
-sp/between_hi/d/"infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r2
+sp/between_hi/d/"infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
 sp/between_hi/d/"now"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 8 ; 9]	ERR 22007	temporal r25
 sp/between_hi/d/"today"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 8 ; 9]	ERR 22007	temporal r25
 sp/between_hi/d/"tomorrow"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 8 ; 9]	ERR 22007	temporal r25
 sp/between_hi/d/"yesterday"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 8]	ERR 22007	temporal r25
 sp/between_hi/ts/" EPOCH "	rows=[1 ; 8]
-sp/between_hi/ts/"+infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r2
-sp/between_hi/ts/"-infinity"	rows=[]	ERR 22007	temporal r2
+sp/between_hi/ts/"+infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
+sp/between_hi/ts/"-infinity"	rows=[]
 sp/between_hi/ts/"2024-01-15 BC"	rows=[]	ERR 22007	temporal r25
 sp/between_hi/ts/"allballs"	ERR 22007
 sp/between_hi/ts/"epoch"	rows=[1 ; 8]
-sp/between_hi/ts/"infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r2
+sp/between_hi/ts/"infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
 sp/between_hi/ts/"now"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 8 ; 9]	ERR 22007	temporal r25
 sp/between_hi/ts/"today"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 8 ; 9]	ERR 22007	temporal r25
 sp/between_hi/ts/"tomorrow"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 8 ; 9]	ERR 22007	temporal r25
 sp/between_hi/ts/"yesterday"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 8]	ERR 22007	temporal r25
 sp/case/d/" EPOCH "	rows=[1|0 ; 2|0 ; 3|0 ; 4|0 ; 5|0 ; 6|0 ; 7|0 ; 8|1 ; 9|0]
-sp/case/d/"+infinity"	rows=[1|1 ; 2|1 ; 3|1 ; 4|1 ; 5|1 ; 6|0 ; 7|1 ; 8|1 ; 9|1]	ERR 22007	temporal r2
-sp/case/d/"-infinity"	rows=[1|0 ; 2|0 ; 3|0 ; 4|0 ; 5|0 ; 6|0 ; 7|0 ; 8|0 ; 9|0]	ERR 22007	temporal r2
+sp/case/d/"+infinity"	rows=[1|1 ; 2|1 ; 3|1 ; 4|1 ; 5|1 ; 6|0 ; 7|1 ; 8|1 ; 9|1]
+sp/case/d/"-infinity"	rows=[1|0 ; 2|0 ; 3|0 ; 4|0 ; 5|0 ; 6|0 ; 7|0 ; 8|0 ; 9|0]
 sp/case/d/"2024-01-15 BC"	rows=[1|0 ; 2|0 ; 3|0 ; 4|0 ; 5|0 ; 6|0 ; 7|0 ; 8|0 ; 9|0]	ERR 22007	temporal r25
 sp/case/d/"allballs"	ERR 22007
 sp/case/d/"epoch"	rows=[1|0 ; 2|0 ; 3|0 ; 4|0 ; 5|0 ; 6|0 ; 7|0 ; 8|1 ; 9|0]
-sp/case/d/"infinity"	rows=[1|1 ; 2|1 ; 3|1 ; 4|1 ; 5|1 ; 6|0 ; 7|1 ; 8|1 ; 9|1]	ERR 22007	temporal r2
+sp/case/d/"infinity"	rows=[1|1 ; 2|1 ; 3|1 ; 4|1 ; 5|1 ; 6|0 ; 7|1 ; 8|1 ; 9|1]
 sp/case/d/"now"	rows=[1|1 ; 2|1 ; 3|1 ; 4|1 ; 5|1 ; 6|0 ; 7|0 ; 8|1 ; 9|0]	ERR 22007	temporal r25
 sp/case/d/"today"	rows=[1|1 ; 2|1 ; 3|1 ; 4|1 ; 5|1 ; 6|0 ; 7|0 ; 8|1 ; 9|0]	ERR 22007	temporal r25
 sp/case/d/"tomorrow"	rows=[1|1 ; 2|1 ; 3|1 ; 4|1 ; 5|1 ; 6|0 ; 7|0 ; 8|1 ; 9|1]	ERR 22007	temporal r25
 sp/case/d/"yesterday"	rows=[1|1 ; 2|1 ; 3|1 ; 4|1 ; 5|1 ; 6|0 ; 7|0 ; 8|1 ; 9|0]	ERR 22007	temporal r25
 sp/case/ts/" EPOCH "	rows=[1|0 ; 2|0 ; 3|0 ; 4|0 ; 5|0 ; 6|0 ; 7|0 ; 8|1 ; 9|0]
-sp/case/ts/"+infinity"	rows=[1|1 ; 2|1 ; 3|1 ; 4|1 ; 5|1 ; 6|0 ; 7|1 ; 8|1 ; 9|1]	ERR 22007	temporal r2
-sp/case/ts/"-infinity"	rows=[1|0 ; 2|0 ; 3|0 ; 4|0 ; 5|0 ; 6|0 ; 7|0 ; 8|0 ; 9|0]	ERR 22007	temporal r2
+sp/case/ts/"+infinity"	rows=[1|1 ; 2|1 ; 3|1 ; 4|1 ; 5|1 ; 6|0 ; 7|1 ; 8|1 ; 9|1]
+sp/case/ts/"-infinity"	rows=[1|0 ; 2|0 ; 3|0 ; 4|0 ; 5|0 ; 6|0 ; 7|0 ; 8|0 ; 9|0]
 sp/case/ts/"2024-01-15 BC"	rows=[1|0 ; 2|0 ; 3|0 ; 4|0 ; 5|0 ; 6|0 ; 7|0 ; 8|0 ; 9|0]	ERR 22007	temporal r25
 sp/case/ts/"allballs"	ERR 22007
 sp/case/ts/"epoch"	rows=[1|0 ; 2|0 ; 3|0 ; 4|0 ; 5|0 ; 6|0 ; 7|0 ; 8|1 ; 9|0]
-sp/case/ts/"infinity"	rows=[1|1 ; 2|1 ; 3|1 ; 4|1 ; 5|1 ; 6|0 ; 7|1 ; 8|1 ; 9|1]	ERR 22007	temporal r2
+sp/case/ts/"infinity"	rows=[1|1 ; 2|1 ; 3|1 ; 4|1 ; 5|1 ; 6|0 ; 7|1 ; 8|1 ; 9|1]
 sp/case/ts/"now"	rows=[1|1 ; 2|1 ; 3|1 ; 4|1 ; 5|1 ; 6|0 ; 7|0 ; 8|1 ; 9|1]	ERR 22007	temporal r25
 sp/case/ts/"today"	rows=[1|1 ; 2|1 ; 3|1 ; 4|1 ; 5|1 ; 6|0 ; 7|0 ; 8|1 ; 9|0]	ERR 22007	temporal r25
 sp/case/ts/"tomorrow"	rows=[1|1 ; 2|1 ; 3|1 ; 4|1 ; 5|1 ; 6|0 ; 7|0 ; 8|1 ; 9|1]	ERR 22007	temporal r25
 sp/case/ts/"yesterday"	rows=[1|1 ; 2|1 ; 3|1 ; 4|1 ; 5|1 ; 6|0 ; 7|0 ; 8|1 ; 9|0]	ERR 22007	temporal r25
 sp/distinct/d/" EPOCH "	rows=[2 ; 3 ; 4 ; 5 ; 6 ; 7 ; 8 ; 9]
-sp/distinct/d/"+infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 6 ; 7 ; 8 ; 9]	ERR 22007	temporal r2
-sp/distinct/d/"-infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 6 ; 7 ; 8 ; 9]	ERR 22007	temporal r2
+sp/distinct/d/"+infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 6 ; 7 ; 8 ; 9]
+sp/distinct/d/"-infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 6 ; 7 ; 8 ; 9]
 sp/distinct/d/"2024-01-15 BC"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 6 ; 7 ; 8 ; 9]	ERR 22007	temporal r25
 sp/distinct/d/"allballs"	ERR 22007
 sp/distinct/d/"epoch"	rows=[2 ; 3 ; 4 ; 5 ; 6 ; 7 ; 8 ; 9]
-sp/distinct/d/"infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 6 ; 7 ; 8 ; 9]	ERR 22007	temporal r2
+sp/distinct/d/"infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 6 ; 7 ; 8 ; 9]
 sp/distinct/d/"now"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 6 ; 7 ; 8]	ERR 22007	temporal r25
 sp/distinct/d/"today"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 6 ; 7 ; 8]	ERR 22007	temporal r25
 sp/distinct/d/"tomorrow"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 6 ; 7 ; 8 ; 9]	ERR 22007	temporal r25
 sp/distinct/d/"yesterday"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 6 ; 7 ; 8 ; 9]	ERR 22007	temporal r25
 sp/distinct/ts/" EPOCH "	rows=[2 ; 3 ; 4 ; 5 ; 6 ; 7 ; 8 ; 9]
-sp/distinct/ts/"+infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 6 ; 7 ; 8 ; 9]	ERR 22007	temporal r2
-sp/distinct/ts/"-infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 6 ; 7 ; 8 ; 9]	ERR 22007	temporal r2
+sp/distinct/ts/"+infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 6 ; 7 ; 8 ; 9]
+sp/distinct/ts/"-infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 6 ; 7 ; 8 ; 9]
 sp/distinct/ts/"2024-01-15 BC"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 6 ; 7 ; 8 ; 9]	ERR 22007	temporal r25
 sp/distinct/ts/"allballs"	ERR 22007
 sp/distinct/ts/"epoch"	rows=[2 ; 3 ; 4 ; 5 ; 6 ; 7 ; 8 ; 9]
-sp/distinct/ts/"infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 6 ; 7 ; 8 ; 9]	ERR 22007	temporal r2
+sp/distinct/ts/"infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 6 ; 7 ; 8 ; 9]
 sp/distinct/ts/"now"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 6 ; 7 ; 8 ; 9]	ERR 22007	temporal r25
 sp/distinct/ts/"today"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 6 ; 7 ; 8]	ERR 22007	temporal r25
 sp/distinct/ts/"tomorrow"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 6 ; 7 ; 8 ; 9]	ERR 22007	temporal r25
 sp/distinct/ts/"yesterday"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 6 ; 7 ; 8 ; 9]	ERR 22007	temporal r25
 sp/eq/d/" EPOCH "	rows=[1]
-sp/eq/d/"+infinity"	rows=[]	ERR 22007	temporal r2
-sp/eq/d/"-infinity"	rows=[]	ERR 22007	temporal r2
+sp/eq/d/"+infinity"	rows=[]
+sp/eq/d/"-infinity"	rows=[]
 sp/eq/d/"2024-01-15 BC"	rows=[]	ERR 22007	temporal r25
 sp/eq/d/"allballs"	ERR 22007
 sp/eq/d/"epoch"	rows=[1]
-sp/eq/d/"infinity"	rows=[]	ERR 22007	temporal r2
+sp/eq/d/"infinity"	rows=[]
 sp/eq/d/"now"	rows=[9]	ERR 22007	temporal r25
 sp/eq/d/"today"	rows=[9]	ERR 22007	temporal r25
 sp/eq/d/"tomorrow"	rows=[]	ERR 22007	temporal r25
 sp/eq/d/"yesterday"	rows=[]	ERR 22007	temporal r25
 sp/eq/ts/" EPOCH "	rows=[1]
-sp/eq/ts/"+infinity"	rows=[]	ERR 22007	temporal r2
-sp/eq/ts/"-infinity"	rows=[]	ERR 22007	temporal r2
+sp/eq/ts/"+infinity"	rows=[]
+sp/eq/ts/"-infinity"	rows=[]
 sp/eq/ts/"2024-01-15 BC"	rows=[]	ERR 22007	temporal r25
 sp/eq/ts/"allballs"	ERR 22007
 sp/eq/ts/"epoch"	rows=[1]
-sp/eq/ts/"infinity"	rows=[]	ERR 22007	temporal r2
+sp/eq/ts/"infinity"	rows=[]
 sp/eq/ts/"now"	rows=[]	ERR 22007	temporal r25
 sp/eq/ts/"today"	rows=[9]	ERR 22007	temporal r25
 sp/eq/ts/"tomorrow"	rows=[]	ERR 22007	temporal r25
 sp/eq/ts/"yesterday"	rows=[]	ERR 22007	temporal r25
 sp/ge/d/" EPOCH "	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 9]
-sp/ge/d/"+infinity"	rows=[]	ERR 22007	temporal r2
-sp/ge/d/"-infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r2
+sp/ge/d/"+infinity"	rows=[]
+sp/ge/d/"-infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
 sp/ge/d/"2024-01-15 BC"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r25
 sp/ge/d/"allballs"	ERR 22007
 sp/ge/d/"epoch"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 9]
-sp/ge/d/"infinity"	rows=[]	ERR 22007	temporal r2
+sp/ge/d/"infinity"	rows=[]
 sp/ge/d/"now"	rows=[7 ; 9]	ERR 22007	temporal r25
 sp/ge/d/"today"	rows=[7 ; 9]	ERR 22007	temporal r25
 sp/ge/d/"tomorrow"	rows=[7]	ERR 22007	temporal r25
 sp/ge/d/"yesterday"	rows=[7 ; 9]	ERR 22007	temporal r25
 sp/ge/ts/" EPOCH "	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 9]
-sp/ge/ts/"+infinity"	rows=[]	ERR 22007	temporal r2
-sp/ge/ts/"-infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r2
+sp/ge/ts/"+infinity"	rows=[]
+sp/ge/ts/"-infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
 sp/ge/ts/"2024-01-15 BC"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r25
 sp/ge/ts/"allballs"	ERR 22007
 sp/ge/ts/"epoch"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 9]
-sp/ge/ts/"infinity"	rows=[]	ERR 22007	temporal r2
+sp/ge/ts/"infinity"	rows=[]
 sp/ge/ts/"now"	rows=[7]	ERR 22007	temporal r25
 sp/ge/ts/"today"	rows=[7 ; 9]	ERR 22007	temporal r25
 sp/ge/ts/"tomorrow"	rows=[7]	ERR 22007	temporal r25
 sp/ge/ts/"yesterday"	rows=[7 ; 9]	ERR 22007	temporal r25
 sp/gt/d/" EPOCH "	rows=[2 ; 3 ; 4 ; 5 ; 7 ; 9]
-sp/gt/d/"+infinity"	rows=[]	ERR 22007	temporal r2
-sp/gt/d/"-infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r2
+sp/gt/d/"+infinity"	rows=[]
+sp/gt/d/"-infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
 sp/gt/d/"2024-01-15 BC"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r25
 sp/gt/d/"allballs"	ERR 22007
 sp/gt/d/"epoch"	rows=[2 ; 3 ; 4 ; 5 ; 7 ; 9]
-sp/gt/d/"infinity"	rows=[]	ERR 22007	temporal r2
+sp/gt/d/"infinity"	rows=[]
 sp/gt/d/"now"	rows=[7]	ERR 22007	temporal r25
 sp/gt/d/"today"	rows=[7]	ERR 22007	temporal r25
 sp/gt/d/"tomorrow"	rows=[7]	ERR 22007	temporal r25
 sp/gt/d/"yesterday"	rows=[7 ; 9]	ERR 22007	temporal r25
 sp/gt/ts/" EPOCH "	rows=[2 ; 3 ; 4 ; 5 ; 7 ; 9]
-sp/gt/ts/"+infinity"	rows=[]	ERR 22007	temporal r2
-sp/gt/ts/"-infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r2
+sp/gt/ts/"+infinity"	rows=[]
+sp/gt/ts/"-infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
 sp/gt/ts/"2024-01-15 BC"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r25
 sp/gt/ts/"allballs"	ERR 22007
 sp/gt/ts/"epoch"	rows=[2 ; 3 ; 4 ; 5 ; 7 ; 9]
-sp/gt/ts/"infinity"	rows=[]	ERR 22007	temporal r2
+sp/gt/ts/"infinity"	rows=[]
 sp/gt/ts/"now"	rows=[7]	ERR 22007	temporal r25
 sp/gt/ts/"today"	rows=[7]	ERR 22007	temporal r25
 sp/gt/ts/"tomorrow"	rows=[7]	ERR 22007	temporal r25
 sp/gt/ts/"yesterday"	rows=[7 ; 9]	ERR 22007	temporal r25
 sp/having/d/" EPOCH "	rows=[0|4 ; 1|5]
-sp/having/d/"+infinity"	rows=[]	ERR 22007	temporal r2
-sp/having/d/"-infinity"	rows=[0|4 ; 1|5]	ERR 22007	temporal r2
+sp/having/d/"+infinity"	rows=[]
+sp/having/d/"-infinity"	rows=[0|4 ; 1|5]
 sp/having/d/"2024-01-15 BC"	rows=[0|4 ; 1|5]	ERR 22007	temporal r25
 sp/having/d/"allballs"	ERR 22007
 sp/having/d/"epoch"	rows=[0|4 ; 1|5]
-sp/having/d/"infinity"	rows=[]	ERR 22007	temporal r2
+sp/having/d/"infinity"	rows=[]
 sp/having/d/"now"	rows=[1|5]	ERR 22007	temporal r25
 sp/having/d/"today"	rows=[1|5]	ERR 22007	temporal r25
 sp/having/d/"tomorrow"	rows=[1|5]	ERR 22007	temporal r25
 sp/having/d/"yesterday"	rows=[1|5]	ERR 22007	temporal r25
 sp/having/ts/" EPOCH "	rows=[0|4 ; 1|5]
-sp/having/ts/"+infinity"	rows=[]	ERR 22007	temporal r2
-sp/having/ts/"-infinity"	rows=[0|4 ; 1|5]	ERR 22007	temporal r2
+sp/having/ts/"+infinity"	rows=[]
+sp/having/ts/"-infinity"	rows=[0|4 ; 1|5]
 sp/having/ts/"2024-01-15 BC"	rows=[0|4 ; 1|5]	ERR 22007	temporal r25
 sp/having/ts/"allballs"	ERR 22007
 sp/having/ts/"epoch"	rows=[0|4 ; 1|5]
-sp/having/ts/"infinity"	rows=[]	ERR 22007	temporal r2
+sp/having/ts/"infinity"	rows=[]
 sp/having/ts/"now"	rows=[1|5]	ERR 22007	temporal r25
 sp/having/ts/"today"	rows=[1|5]	ERR 22007	temporal r25
 sp/having/ts/"tomorrow"	rows=[1|5]	ERR 22007	temporal r25
 sp/having/ts/"yesterday"	rows=[1|5]	ERR 22007	temporal r25
 sp/in/d/" EPOCH "	rows=[1 ; 4]
-sp/in/d/"+infinity"	rows=[4]	ERR 22007	temporal r2
-sp/in/d/"-infinity"	rows=[4]	ERR 22007	temporal r2
+sp/in/d/"+infinity"	rows=[4]
+sp/in/d/"-infinity"	rows=[4]
 sp/in/d/"2024-01-15 BC"	rows=[4]	ERR 22007	temporal r25
 sp/in/d/"allballs"	ERR 22007
 sp/in/d/"epoch"	rows=[1 ; 4]
-sp/in/d/"infinity"	rows=[4]	ERR 22007	temporal r2
+sp/in/d/"infinity"	rows=[4]
 sp/in/d/"now"	rows=[4 ; 9]	ERR 22007	temporal r25
 sp/in/d/"today"	rows=[4 ; 9]	ERR 22007	temporal r25
 sp/in/d/"tomorrow"	rows=[4]	ERR 22007	temporal r25
 sp/in/d/"yesterday"	rows=[4]	ERR 22007	temporal r25
 sp/in/ts/" EPOCH "	rows=[1 ; 4]
-sp/in/ts/"+infinity"	rows=[4]	ERR 22007	temporal r2
-sp/in/ts/"-infinity"	rows=[4]	ERR 22007	temporal r2
+sp/in/ts/"+infinity"	rows=[4]
+sp/in/ts/"-infinity"	rows=[4]
 sp/in/ts/"2024-01-15 BC"	rows=[4]	ERR 22007	temporal r25
 sp/in/ts/"allballs"	ERR 22007
 sp/in/ts/"epoch"	rows=[1 ; 4]
-sp/in/ts/"infinity"	rows=[4]	ERR 22007	temporal r2
+sp/in/ts/"infinity"	rows=[4]
 sp/in/ts/"now"	rows=[4]	ERR 22007	temporal r25
 sp/in/ts/"today"	rows=[4 ; 9]	ERR 22007	temporal r25
 sp/in/ts/"tomorrow"	rows=[4]	ERR 22007	temporal r25
 sp/in/ts/"yesterday"	rows=[4]	ERR 22007	temporal r25
 sp/in_only/d/" EPOCH "	rows=[1]
-sp/in_only/d/"+infinity"	rows=[]	ERR 22007	temporal r2
-sp/in_only/d/"-infinity"	rows=[]	ERR 22007	temporal r2
+sp/in_only/d/"+infinity"	rows=[]
+sp/in_only/d/"-infinity"	rows=[]
 sp/in_only/d/"2024-01-15 BC"	rows=[]	ERR 22007	temporal r25
 sp/in_only/d/"allballs"	ERR 22007
 sp/in_only/d/"epoch"	rows=[1]
-sp/in_only/d/"infinity"	rows=[]	ERR 22007	temporal r2
+sp/in_only/d/"infinity"	rows=[]
 sp/in_only/d/"now"	rows=[9]	ERR 22007	temporal r25
 sp/in_only/d/"today"	rows=[9]	ERR 22007	temporal r25
 sp/in_only/d/"tomorrow"	rows=[]	ERR 22007	temporal r25
 sp/in_only/d/"yesterday"	rows=[]	ERR 22007	temporal r25
 sp/in_only/ts/" EPOCH "	rows=[1]
-sp/in_only/ts/"+infinity"	rows=[]	ERR 22007	temporal r2
-sp/in_only/ts/"-infinity"	rows=[]	ERR 22007	temporal r2
+sp/in_only/ts/"+infinity"	rows=[]
+sp/in_only/ts/"-infinity"	rows=[]
 sp/in_only/ts/"2024-01-15 BC"	rows=[]	ERR 22007	temporal r25
 sp/in_only/ts/"allballs"	ERR 22007
 sp/in_only/ts/"epoch"	rows=[1]
-sp/in_only/ts/"infinity"	rows=[]	ERR 22007	temporal r2
+sp/in_only/ts/"infinity"	rows=[]
 sp/in_only/ts/"now"	rows=[]	ERR 22007	temporal r25
 sp/in_only/ts/"today"	rows=[9]	ERR 22007	temporal r25
 sp/in_only/ts/"tomorrow"	rows=[]	ERR 22007	temporal r25
 sp/in_only/ts/"yesterday"	rows=[]	ERR 22007	temporal r25
 sp/join_on/d/" EPOCH "	rows=[1 ; 8]
-sp/join_on/d/"+infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8]	ERR 22007	temporal r2
-sp/join_on/d/"-infinity"	rows=[]	ERR 22007	temporal r2
+sp/join_on/d/"+infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8]
+sp/join_on/d/"-infinity"	rows=[]
 sp/join_on/d/"2024-01-15 BC"	rows=[]	ERR 22007	temporal r25
 sp/join_on/d/"allballs"	ERR 22007
 sp/join_on/d/"epoch"	rows=[1 ; 8]
-sp/join_on/d/"infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8]	ERR 22007	temporal r2
+sp/join_on/d/"infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8]
 sp/join_on/d/"now"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 8]	ERR 22007	temporal r25
 sp/join_on/d/"today"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 8]	ERR 22007	temporal r25
 sp/join_on/d/"tomorrow"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 8]	ERR 22007	temporal r25
 sp/join_on/d/"yesterday"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 8]	ERR 22007	temporal r25
 sp/join_on/ts/" EPOCH "	rows=[1 ; 8]
-sp/join_on/ts/"+infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8]	ERR 22007	temporal r2
-sp/join_on/ts/"-infinity"	rows=[]	ERR 22007	temporal r2
+sp/join_on/ts/"+infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8]
+sp/join_on/ts/"-infinity"	rows=[]
 sp/join_on/ts/"2024-01-15 BC"	rows=[]	ERR 22007	temporal r25
 sp/join_on/ts/"allballs"	ERR 22007
 sp/join_on/ts/"epoch"	rows=[1 ; 8]
-sp/join_on/ts/"infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8]	ERR 22007	temporal r2
+sp/join_on/ts/"infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8]
 sp/join_on/ts/"now"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 8]	ERR 22007	temporal r25
 sp/join_on/ts/"today"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 8]	ERR 22007	temporal r25
 sp/join_on/ts/"tomorrow"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 8]	ERR 22007	temporal r25
 sp/join_on/ts/"yesterday"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 8]	ERR 22007	temporal r25
 sp/le/d/" EPOCH "	rows=[1 ; 8]
-sp/le/d/"+infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r2
-sp/le/d/"-infinity"	rows=[]	ERR 22007	temporal r2
+sp/le/d/"+infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
+sp/le/d/"-infinity"	rows=[]
 sp/le/d/"2024-01-15 BC"	rows=[]	ERR 22007	temporal r25
 sp/le/d/"allballs"	ERR 22007
 sp/le/d/"epoch"	rows=[1 ; 8]
-sp/le/d/"infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r2
+sp/le/d/"infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
 sp/le/d/"now"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 8 ; 9]	ERR 22007	temporal r25
 sp/le/d/"today"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 8 ; 9]	ERR 22007	temporal r25
 sp/le/d/"tomorrow"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 8 ; 9]	ERR 22007	temporal r25
 sp/le/d/"yesterday"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 8]	ERR 22007	temporal r25
 sp/le/ts/" EPOCH "	rows=[1 ; 8]
-sp/le/ts/"+infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r2
-sp/le/ts/"-infinity"	rows=[]	ERR 22007	temporal r2
+sp/le/ts/"+infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
+sp/le/ts/"-infinity"	rows=[]
 sp/le/ts/"2024-01-15 BC"	rows=[]	ERR 22007	temporal r25
 sp/le/ts/"allballs"	ERR 22007
 sp/le/ts/"epoch"	rows=[1 ; 8]
-sp/le/ts/"infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r2
+sp/le/ts/"infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
 sp/le/ts/"now"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 8 ; 9]	ERR 22007	temporal r25
 sp/le/ts/"today"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 8 ; 9]	ERR 22007	temporal r25
 sp/le/ts/"tomorrow"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 8 ; 9]	ERR 22007	temporal r25
 sp/le/ts/"yesterday"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 8]	ERR 22007	temporal r25
 sp/lit_left_lt/d/" EPOCH "	rows=[2 ; 3 ; 4 ; 5 ; 7 ; 9]
-sp/lit_left_lt/d/"+infinity"	rows=[]	ERR 22007	temporal r2
-sp/lit_left_lt/d/"-infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r2
+sp/lit_left_lt/d/"+infinity"	rows=[]
+sp/lit_left_lt/d/"-infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
 sp/lit_left_lt/d/"2024-01-15 BC"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r25
 sp/lit_left_lt/d/"allballs"	ERR 22007
 sp/lit_left_lt/d/"epoch"	rows=[2 ; 3 ; 4 ; 5 ; 7 ; 9]
-sp/lit_left_lt/d/"infinity"	rows=[]	ERR 22007	temporal r2
+sp/lit_left_lt/d/"infinity"	rows=[]
 sp/lit_left_lt/d/"now"	rows=[7]	ERR 22007	temporal r25
 sp/lit_left_lt/d/"today"	rows=[7]	ERR 22007	temporal r25
 sp/lit_left_lt/d/"tomorrow"	rows=[7]	ERR 22007	temporal r25
 sp/lit_left_lt/d/"yesterday"	rows=[7 ; 9]	ERR 22007	temporal r25
 sp/lit_left_lt/ts/" EPOCH "	rows=[2 ; 3 ; 4 ; 5 ; 7 ; 9]
-sp/lit_left_lt/ts/"+infinity"	rows=[]	ERR 22007	temporal r2
-sp/lit_left_lt/ts/"-infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r2
+sp/lit_left_lt/ts/"+infinity"	rows=[]
+sp/lit_left_lt/ts/"-infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
 sp/lit_left_lt/ts/"2024-01-15 BC"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r25
 sp/lit_left_lt/ts/"allballs"	ERR 22007
 sp/lit_left_lt/ts/"epoch"	rows=[2 ; 3 ; 4 ; 5 ; 7 ; 9]
-sp/lit_left_lt/ts/"infinity"	rows=[]	ERR 22007	temporal r2
+sp/lit_left_lt/ts/"infinity"	rows=[]
 sp/lit_left_lt/ts/"now"	rows=[7]	ERR 22007	temporal r25
 sp/lit_left_lt/ts/"today"	rows=[7]	ERR 22007	temporal r25
 sp/lit_left_lt/ts/"tomorrow"	rows=[7]	ERR 22007	temporal r25
 sp/lit_left_lt/ts/"yesterday"	rows=[7 ; 9]	ERR 22007	temporal r25
 sp/lt/d/" EPOCH "	rows=[8]
-sp/lt/d/"+infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r2
-sp/lt/d/"-infinity"	rows=[]	ERR 22007	temporal r2
+sp/lt/d/"+infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
+sp/lt/d/"-infinity"	rows=[]
 sp/lt/d/"2024-01-15 BC"	rows=[]	ERR 22007	temporal r25
 sp/lt/d/"allballs"	ERR 22007
 sp/lt/d/"epoch"	rows=[8]
-sp/lt/d/"infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r2
+sp/lt/d/"infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
 sp/lt/d/"now"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 8]	ERR 22007	temporal r25
 sp/lt/d/"today"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 8]	ERR 22007	temporal r25
 sp/lt/d/"tomorrow"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 8 ; 9]	ERR 22007	temporal r25
 sp/lt/d/"yesterday"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 8]	ERR 22007	temporal r25
 sp/lt/ts/" EPOCH "	rows=[8]
-sp/lt/ts/"+infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r2
-sp/lt/ts/"-infinity"	rows=[]	ERR 22007	temporal r2
+sp/lt/ts/"+infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
+sp/lt/ts/"-infinity"	rows=[]
 sp/lt/ts/"2024-01-15 BC"	rows=[]	ERR 22007	temporal r25
 sp/lt/ts/"allballs"	ERR 22007
 sp/lt/ts/"epoch"	rows=[8]
-sp/lt/ts/"infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r2
+sp/lt/ts/"infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
 sp/lt/ts/"now"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 8 ; 9]	ERR 22007	temporal r25
 sp/lt/ts/"today"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 8]	ERR 22007	temporal r25
 sp/lt/ts/"tomorrow"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 8 ; 9]	ERR 22007	temporal r25
 sp/lt/ts/"yesterday"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 8]	ERR 22007	temporal r25
 sp/ne/d/" EPOCH "	rows=[2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
-sp/ne/d/"+infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r2
-sp/ne/d/"-infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r2
+sp/ne/d/"+infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
+sp/ne/d/"-infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
 sp/ne/d/"2024-01-15 BC"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r25
 sp/ne/d/"allballs"	ERR 22007
 sp/ne/d/"epoch"	rows=[2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
-sp/ne/d/"infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r2
+sp/ne/d/"infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
 sp/ne/d/"now"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8]	ERR 22007	temporal r25
 sp/ne/d/"today"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8]	ERR 22007	temporal r25
 sp/ne/d/"tomorrow"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r25
 sp/ne/d/"yesterday"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r25
 sp/ne/ts/" EPOCH "	rows=[2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
-sp/ne/ts/"+infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r2
-sp/ne/ts/"-infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r2
+sp/ne/ts/"+infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
+sp/ne/ts/"-infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
 sp/ne/ts/"2024-01-15 BC"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r25
 sp/ne/ts/"allballs"	ERR 22007
 sp/ne/ts/"epoch"	rows=[2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
-sp/ne/ts/"infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r2
+sp/ne/ts/"infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
 sp/ne/ts/"now"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r25
 sp/ne/ts/"today"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8]	ERR 22007	temporal r25
 sp/ne/ts/"tomorrow"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r25
 sp/ne/ts/"yesterday"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r25
 sp/no_row_reaches/d/" EPOCH "	rows=[]
-sp/no_row_reaches/d/"+infinity"	rows=[]	ERR 22007	temporal r2
-sp/no_row_reaches/d/"-infinity"	rows=[]	ERR 22007	temporal r2
+sp/no_row_reaches/d/"+infinity"	rows=[]
+sp/no_row_reaches/d/"-infinity"	rows=[]
 sp/no_row_reaches/d/"2024-01-15 BC"	rows=[]	ERR 22007	temporal r25
 sp/no_row_reaches/d/"allballs"	ERR 22007
 sp/no_row_reaches/d/"epoch"	rows=[]
-sp/no_row_reaches/d/"infinity"	rows=[]	ERR 22007	temporal r2
+sp/no_row_reaches/d/"infinity"	rows=[]
 sp/no_row_reaches/d/"now"	rows=[]	ERR 22007	temporal r25
 sp/no_row_reaches/d/"today"	rows=[]	ERR 22007	temporal r25
 sp/no_row_reaches/d/"tomorrow"	rows=[]	ERR 22007	temporal r25
 sp/no_row_reaches/d/"yesterday"	rows=[]	ERR 22007	temporal r25
 sp/no_row_reaches/ts/" EPOCH "	rows=[]
-sp/no_row_reaches/ts/"+infinity"	rows=[]	ERR 22007	temporal r2
-sp/no_row_reaches/ts/"-infinity"	rows=[]	ERR 22007	temporal r2
+sp/no_row_reaches/ts/"+infinity"	rows=[]
+sp/no_row_reaches/ts/"-infinity"	rows=[]
 sp/no_row_reaches/ts/"2024-01-15 BC"	rows=[]	ERR 22007	temporal r25
 sp/no_row_reaches/ts/"allballs"	ERR 22007
 sp/no_row_reaches/ts/"epoch"	rows=[]
-sp/no_row_reaches/ts/"infinity"	rows=[]	ERR 22007	temporal r2
+sp/no_row_reaches/ts/"infinity"	rows=[]
 sp/no_row_reaches/ts/"now"	rows=[]	ERR 22007	temporal r25
 sp/no_row_reaches/ts/"today"	rows=[]	ERR 22007	temporal r25
 sp/no_row_reaches/ts/"tomorrow"	rows=[]	ERR 22007	temporal r25
 sp/no_row_reaches/ts/"yesterday"	rows=[]	ERR 22007	temporal r25
 sp/not_between/d/" EPOCH "	rows=[7 ; 8]
-sp/not_between/d/"+infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r2
-sp/not_between/d/"-infinity"	rows=[7]	ERR 22007	temporal r2
+sp/not_between/d/"+infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
+sp/not_between/d/"-infinity"	rows=[7]
 sp/not_between/d/"2024-01-15 BC"	rows=[7]	ERR 22007	temporal r25
 sp/not_between/d/"allballs"	ERR 22007
 sp/not_between/d/"epoch"	rows=[7 ; 8]
-sp/not_between/d/"infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r2
+sp/not_between/d/"infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
 sp/not_between/d/"now"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8]	ERR 22007	temporal r25
 sp/not_between/d/"today"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8]	ERR 22007	temporal r25
 sp/not_between/d/"tomorrow"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r25
 sp/not_between/d/"yesterday"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8]	ERR 22007	temporal r25
 sp/not_between/ts/" EPOCH "	rows=[7 ; 8]
-sp/not_between/ts/"+infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r2
-sp/not_between/ts/"-infinity"	rows=[7]	ERR 22007	temporal r2
+sp/not_between/ts/"+infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
+sp/not_between/ts/"-infinity"	rows=[7]
 sp/not_between/ts/"2024-01-15 BC"	rows=[7]	ERR 22007	temporal r25
 sp/not_between/ts/"allballs"	ERR 22007
 sp/not_between/ts/"epoch"	rows=[7 ; 8]
-sp/not_between/ts/"infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r2
+sp/not_between/ts/"infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
 sp/not_between/ts/"now"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r25
 sp/not_between/ts/"today"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8]	ERR 22007	temporal r25
 sp/not_between/ts/"tomorrow"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r25
 sp/not_between/ts/"yesterday"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8]	ERR 22007	temporal r25
 sp/not_distinct/d/" EPOCH "	rows=[1]
-sp/not_distinct/d/"+infinity"	rows=[]	ERR 22007	temporal r2
-sp/not_distinct/d/"-infinity"	rows=[]	ERR 22007	temporal r2
+sp/not_distinct/d/"+infinity"	rows=[]
+sp/not_distinct/d/"-infinity"	rows=[]
 sp/not_distinct/d/"2024-01-15 BC"	rows=[]	ERR 22007	temporal r25
 sp/not_distinct/d/"allballs"	ERR 22007
 sp/not_distinct/d/"epoch"	rows=[1]
-sp/not_distinct/d/"infinity"	rows=[]	ERR 22007	temporal r2
+sp/not_distinct/d/"infinity"	rows=[]
 sp/not_distinct/d/"now"	rows=[9]	ERR 22007	temporal r25
 sp/not_distinct/d/"today"	rows=[9]	ERR 22007	temporal r25
 sp/not_distinct/d/"tomorrow"	rows=[]	ERR 22007	temporal r25
 sp/not_distinct/d/"yesterday"	rows=[]	ERR 22007	temporal r25
 sp/not_distinct/ts/" EPOCH "	rows=[1]
-sp/not_distinct/ts/"+infinity"	rows=[]	ERR 22007	temporal r2
-sp/not_distinct/ts/"-infinity"	rows=[]	ERR 22007	temporal r2
+sp/not_distinct/ts/"+infinity"	rows=[]
+sp/not_distinct/ts/"-infinity"	rows=[]
 sp/not_distinct/ts/"2024-01-15 BC"	rows=[]	ERR 22007	temporal r25
 sp/not_distinct/ts/"allballs"	ERR 22007
 sp/not_distinct/ts/"epoch"	rows=[1]
-sp/not_distinct/ts/"infinity"	rows=[]	ERR 22007	temporal r2
+sp/not_distinct/ts/"infinity"	rows=[]
 sp/not_distinct/ts/"now"	rows=[]	ERR 22007	temporal r25
 sp/not_distinct/ts/"today"	rows=[9]	ERR 22007	temporal r25
 sp/not_distinct/ts/"tomorrow"	rows=[]	ERR 22007	temporal r25
 sp/not_distinct/ts/"yesterday"	rows=[]	ERR 22007	temporal r25
 sp/not_in/d/" EPOCH "	rows=[2 ; 3 ; 5 ; 7 ; 8 ; 9]
-sp/not_in/d/"+infinity"	rows=[1 ; 2 ; 3 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r2
-sp/not_in/d/"-infinity"	rows=[1 ; 2 ; 3 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r2
+sp/not_in/d/"+infinity"	rows=[1 ; 2 ; 3 ; 5 ; 7 ; 8 ; 9]
+sp/not_in/d/"-infinity"	rows=[1 ; 2 ; 3 ; 5 ; 7 ; 8 ; 9]
 sp/not_in/d/"2024-01-15 BC"	rows=[1 ; 2 ; 3 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r25
 sp/not_in/d/"allballs"	ERR 22007
 sp/not_in/d/"epoch"	rows=[2 ; 3 ; 5 ; 7 ; 8 ; 9]
-sp/not_in/d/"infinity"	rows=[1 ; 2 ; 3 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r2
+sp/not_in/d/"infinity"	rows=[1 ; 2 ; 3 ; 5 ; 7 ; 8 ; 9]
 sp/not_in/d/"now"	rows=[1 ; 2 ; 3 ; 5 ; 7 ; 8]	ERR 22007	temporal r25
 sp/not_in/d/"today"	rows=[1 ; 2 ; 3 ; 5 ; 7 ; 8]	ERR 22007	temporal r25
 sp/not_in/d/"tomorrow"	rows=[1 ; 2 ; 3 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r25
 sp/not_in/d/"yesterday"	rows=[1 ; 2 ; 3 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r25
 sp/not_in/ts/" EPOCH "	rows=[2 ; 3 ; 5 ; 7 ; 8 ; 9]
-sp/not_in/ts/"+infinity"	rows=[1 ; 2 ; 3 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r2
-sp/not_in/ts/"-infinity"	rows=[1 ; 2 ; 3 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r2
+sp/not_in/ts/"+infinity"	rows=[1 ; 2 ; 3 ; 5 ; 7 ; 8 ; 9]
+sp/not_in/ts/"-infinity"	rows=[1 ; 2 ; 3 ; 5 ; 7 ; 8 ; 9]
 sp/not_in/ts/"2024-01-15 BC"	rows=[1 ; 2 ; 3 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r25
 sp/not_in/ts/"allballs"	ERR 22007
 sp/not_in/ts/"epoch"	rows=[2 ; 3 ; 5 ; 7 ; 8 ; 9]
-sp/not_in/ts/"infinity"	rows=[1 ; 2 ; 3 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r2
+sp/not_in/ts/"infinity"	rows=[1 ; 2 ; 3 ; 5 ; 7 ; 8 ; 9]
 sp/not_in/ts/"now"	rows=[1 ; 2 ; 3 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r25
 sp/not_in/ts/"today"	rows=[1 ; 2 ; 3 ; 5 ; 7 ; 8]	ERR 22007	temporal r25
 sp/not_in/ts/"tomorrow"	rows=[1 ; 2 ; 3 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r25
 sp/not_in/ts/"yesterday"	rows=[1 ; 2 ; 3 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r25
 sp/not_in_only/d/" EPOCH "	rows=[2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
-sp/not_in_only/d/"+infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r2
-sp/not_in_only/d/"-infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r2
+sp/not_in_only/d/"+infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
+sp/not_in_only/d/"-infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
 sp/not_in_only/d/"2024-01-15 BC"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r25
 sp/not_in_only/d/"allballs"	ERR 22007
 sp/not_in_only/d/"epoch"	rows=[2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
-sp/not_in_only/d/"infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r2
+sp/not_in_only/d/"infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
 sp/not_in_only/d/"now"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8]	ERR 22007	temporal r25
 sp/not_in_only/d/"today"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8]	ERR 22007	temporal r25
 sp/not_in_only/d/"tomorrow"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r25
 sp/not_in_only/d/"yesterday"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r25
 sp/not_in_only/ts/" EPOCH "	rows=[2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
-sp/not_in_only/ts/"+infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r2
-sp/not_in_only/ts/"-infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r2
+sp/not_in_only/ts/"+infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
+sp/not_in_only/ts/"-infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
 sp/not_in_only/ts/"2024-01-15 BC"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r25
 sp/not_in_only/ts/"allballs"	ERR 22007
 sp/not_in_only/ts/"epoch"	rows=[2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
-sp/not_in_only/ts/"infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r2
+sp/not_in_only/ts/"infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
 sp/not_in_only/ts/"now"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r25
 sp/not_in_only/ts/"today"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8]	ERR 22007	temporal r25
 sp/not_in_only/ts/"tomorrow"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r25
 sp/not_in_only/ts/"yesterday"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r25
 sp/or/d/" EPOCH "	rows=[2 ; 3 ; 4 ; 5 ; 7 ; 9]
-sp/or/d/"+infinity"	rows=[4]	ERR 22007	temporal r2
-sp/or/d/"-infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r2
+sp/or/d/"+infinity"	rows=[4]
+sp/or/d/"-infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
 sp/or/d/"2024-01-15 BC"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r25
 sp/or/d/"allballs"	ERR 22007
 sp/or/d/"epoch"	rows=[2 ; 3 ; 4 ; 5 ; 7 ; 9]
-sp/or/d/"infinity"	rows=[4]	ERR 22007	temporal r2
+sp/or/d/"infinity"	rows=[4]
 sp/or/d/"now"	rows=[4 ; 7]	ERR 22007	temporal r25
 sp/or/d/"today"	rows=[4 ; 7]	ERR 22007	temporal r25
 sp/or/d/"tomorrow"	rows=[4 ; 7]	ERR 22007	temporal r25
 sp/or/d/"yesterday"	rows=[4 ; 7 ; 9]	ERR 22007	temporal r25
 sp/or/ts/" EPOCH "	rows=[2 ; 3 ; 4 ; 5 ; 7 ; 9]
-sp/or/ts/"+infinity"	rows=[4]	ERR 22007	temporal r2
-sp/or/ts/"-infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r2
+sp/or/ts/"+infinity"	rows=[4]
+sp/or/ts/"-infinity"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
 sp/or/ts/"2024-01-15 BC"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 22007	temporal r25
 sp/or/ts/"allballs"	ERR 22007
 sp/or/ts/"epoch"	rows=[2 ; 3 ; 4 ; 5 ; 7 ; 9]
-sp/or/ts/"infinity"	rows=[4]	ERR 22007	temporal r2
+sp/or/ts/"infinity"	rows=[4]
 sp/or/ts/"now"	rows=[4 ; 7]	ERR 22007	temporal r25
 sp/or/ts/"today"	rows=[4 ; 7]	ERR 22007	temporal r25
 sp/or/ts/"tomorrow"	rows=[4 ; 7]	ERR 22007	temporal r25
 sp/or/ts/"yesterday"	rows=[4 ; 7 ; 9]	ERR 22007	temporal r25
 sp/select/d/" EPOCH "	rows=[1|f|t ; 2|f|t ; 3|f|t ; 4|f|t ; 5|f|t ; 6|NULL|NULL ; 7|f|t ; 8|t|f ; 9|f|t]
-sp/select/d/"+infinity"	rows=[1|t|f ; 2|t|f ; 3|t|f ; 4|t|f ; 5|t|f ; 6|NULL|NULL ; 7|t|f ; 8|t|f ; 9|t|f]	ERR 22007	temporal r2
-sp/select/d/"-infinity"	rows=[1|f|t ; 2|f|t ; 3|f|t ; 4|f|t ; 5|f|t ; 6|NULL|NULL ; 7|f|t ; 8|f|t ; 9|f|t]	ERR 22007	temporal r2
+sp/select/d/"+infinity"	rows=[1|t|f ; 2|t|f ; 3|t|f ; 4|t|f ; 5|t|f ; 6|NULL|NULL ; 7|t|f ; 8|t|f ; 9|t|f]
+sp/select/d/"-infinity"	rows=[1|f|t ; 2|f|t ; 3|f|t ; 4|f|t ; 5|f|t ; 6|NULL|NULL ; 7|f|t ; 8|f|t ; 9|f|t]
 sp/select/d/"2024-01-15 BC"	rows=[1|f|t ; 2|f|t ; 3|f|t ; 4|f|t ; 5|f|t ; 6|NULL|NULL ; 7|f|t ; 8|f|t ; 9|f|t]	ERR 22007	temporal r25
 sp/select/d/"allballs"	ERR 22007
 sp/select/d/"epoch"	rows=[1|f|t ; 2|f|t ; 3|f|t ; 4|f|t ; 5|f|t ; 6|NULL|NULL ; 7|f|t ; 8|t|f ; 9|f|t]
-sp/select/d/"infinity"	rows=[1|t|f ; 2|t|f ; 3|t|f ; 4|t|f ; 5|t|f ; 6|NULL|NULL ; 7|t|f ; 8|t|f ; 9|t|f]	ERR 22007	temporal r2
+sp/select/d/"infinity"	rows=[1|t|f ; 2|t|f ; 3|t|f ; 4|t|f ; 5|t|f ; 6|NULL|NULL ; 7|t|f ; 8|t|f ; 9|t|f]
 sp/select/d/"now"	rows=[1|t|f ; 2|t|f ; 3|t|f ; 4|t|f ; 5|t|f ; 6|NULL|NULL ; 7|f|t ; 8|t|f ; 9|f|t]	ERR 22007	temporal r25
 sp/select/d/"today"	rows=[1|t|f ; 2|t|f ; 3|t|f ; 4|t|f ; 5|t|f ; 6|NULL|NULL ; 7|f|t ; 8|t|f ; 9|f|t]	ERR 22007	temporal r25
 sp/select/d/"tomorrow"	rows=[1|t|f ; 2|t|f ; 3|t|f ; 4|t|f ; 5|t|f ; 6|NULL|NULL ; 7|f|t ; 8|t|f ; 9|t|f]	ERR 22007	temporal r25
 sp/select/d/"yesterday"	rows=[1|t|f ; 2|t|f ; 3|t|f ; 4|t|f ; 5|t|f ; 6|NULL|NULL ; 7|f|t ; 8|t|f ; 9|f|t]	ERR 22007	temporal r25
 sp/select/ts/" EPOCH "	rows=[1|f|t ; 2|f|t ; 3|f|t ; 4|f|t ; 5|f|t ; 6|NULL|NULL ; 7|f|t ; 8|t|f ; 9|f|t]
-sp/select/ts/"+infinity"	rows=[1|t|f ; 2|t|f ; 3|t|f ; 4|t|f ; 5|t|f ; 6|NULL|NULL ; 7|t|f ; 8|t|f ; 9|t|f]	ERR 22007	temporal r2
-sp/select/ts/"-infinity"	rows=[1|f|t ; 2|f|t ; 3|f|t ; 4|f|t ; 5|f|t ; 6|NULL|NULL ; 7|f|t ; 8|f|t ; 9|f|t]	ERR 22007	temporal r2
+sp/select/ts/"+infinity"	rows=[1|t|f ; 2|t|f ; 3|t|f ; 4|t|f ; 5|t|f ; 6|NULL|NULL ; 7|t|f ; 8|t|f ; 9|t|f]
+sp/select/ts/"-infinity"	rows=[1|f|t ; 2|f|t ; 3|f|t ; 4|f|t ; 5|f|t ; 6|NULL|NULL ; 7|f|t ; 8|f|t ; 9|f|t]
 sp/select/ts/"2024-01-15 BC"	rows=[1|f|t ; 2|f|t ; 3|f|t ; 4|f|t ; 5|f|t ; 6|NULL|NULL ; 7|f|t ; 8|f|t ; 9|f|t]	ERR 22007	temporal r25
 sp/select/ts/"allballs"	ERR 22007
 sp/select/ts/"epoch"	rows=[1|f|t ; 2|f|t ; 3|f|t ; 4|f|t ; 5|f|t ; 6|NULL|NULL ; 7|f|t ; 8|t|f ; 9|f|t]
-sp/select/ts/"infinity"	rows=[1|t|f ; 2|t|f ; 3|t|f ; 4|t|f ; 5|t|f ; 6|NULL|NULL ; 7|t|f ; 8|t|f ; 9|t|f]	ERR 22007	temporal r2
+sp/select/ts/"infinity"	rows=[1|t|f ; 2|t|f ; 3|t|f ; 4|t|f ; 5|t|f ; 6|NULL|NULL ; 7|t|f ; 8|t|f ; 9|t|f]
 sp/select/ts/"now"	rows=[1|t|f ; 2|t|f ; 3|t|f ; 4|t|f ; 5|t|f ; 6|NULL|NULL ; 7|f|t ; 8|t|f ; 9|t|f]	ERR 22007	temporal r25
 sp/select/ts/"today"	rows=[1|t|f ; 2|t|f ; 3|t|f ; 4|t|f ; 5|t|f ; 6|NULL|NULL ; 7|f|t ; 8|t|f ; 9|f|t]	ERR 22007	temporal r25
 sp/select/ts/"tomorrow"	rows=[1|t|f ; 2|t|f ; 3|t|f ; 4|t|f ; 5|t|f ; 6|NULL|NULL ; 7|f|t ; 8|t|f ; 9|t|f]	ERR 22007	temporal r25
 sp/select/ts/"yesterday"	rows=[1|t|f ; 2|t|f ; 3|t|f ; 4|t|f ; 5|t|f ; 6|NULL|NULL ; 7|f|t ; 8|t|f ; 9|f|t]	ERR 22007	temporal r25
 spclock/cast_epoch_d	rows=[1970-01-01]
 spclock/cast_epoch_t	rows=[1970-01-01 00:00:00]
-spclock/cast_infinity_t	rows=[infinity]	ERR 22007	temporal r2
-spclock/cast_neg_infinity_d	rows=[-infinity]	ERR 22007	temporal r2
+spclock/cast_infinity_t	rows=[infinity]
+spclock/cast_neg_infinity_d	rows=[-infinity]
 spclock/cast_now_t	rows=[t]	ERR 22007	temporal r25
 spclock/cast_today_d	rows=[t]	ERR 22007	temporal r25
 spclock/d_now	rows=[0]	ERR 22007	temporal r25
@@ -1351,7 +1351,7 @@ union_all/d/"2024-01-15 10:30:00+16"	ERR 22009
 union_all/d/"2024-02-30"	ERR 22008
 union_all/d/"epoch"	rows=[1]
 union_all/d/"garbage"	ERR 22007
-union_all/d/"infinity"	rows=[]	ERR 22007	temporal r2
+union_all/d/"infinity"	rows=[]
 union_all/ts/""	ERR 22007
 union_all/ts/"0000-01-01"	ERR 22008
 union_all/ts/"1970-01-01 00:00:00"	rows=[1]
@@ -1361,7 +1361,7 @@ union_all/ts/"2024-01-15 10:30:00+16"	ERR 22009
 union_all/ts/"2024-02-30"	ERR 22008
 union_all/ts/"epoch"	rows=[1]
 union_all/ts/"garbage"	ERR 22007
-union_all/ts/"infinity"	rows=[]	ERR 22007	temporal r2
+union_all/ts/"infinity"	rows=[]
 values/d/""	ERR 22007
 values/d/"0000-01-01"	ERR 22008
 values/d/"1970-01-01 00:00:00"	rows=[1]
@@ -1371,7 +1371,7 @@ values/d/"2024-01-15 10:30:00+16"	ERR 22009
 values/d/"2024-02-30"	ERR 22008
 values/d/"epoch"	rows=[1]
 values/d/"garbage"	ERR 22007
-values/d/"infinity"	rows=[]	ERR 22007	temporal r2
+values/d/"infinity"	rows=[]
 values/ts/""	ERR 22007
 values/ts/"0000-01-01"	ERR 22008
 values/ts/"1970-01-01 00:00:00"	rows=[1]
@@ -1381,12 +1381,12 @@ values/ts/"2024-01-15 10:30:00+16"	ERR 22009
 values/ts/"2024-02-30"	ERR 22008
 values/ts/"epoch"	rows=[1]
 values/ts/"garbage"	ERR 22007
-values/ts/"infinity"	rows=[]	ERR 22007	temporal r2
-vol/now_lt_infinity/1	rows=[4096]	ERR 22007	temporal r2
-vol/now_lt_infinity/2	rows=[4096]	ERR 22007	temporal r2
-vol/now_lt_infinity/3	rows=[4096]	ERR 22007	temporal r2
-vol/now_lt_infinity/4	rows=[4096]	ERR 22007	temporal r2
-vol/now_lt_infinity/5	rows=[4096]	ERR 22007	temporal r2
-vol/now_lt_infinity/6	rows=[4096]	ERR 22007	temporal r2
-vol/now_lt_infinity/7	rows=[4096]	ERR 22007	temporal r2
-vol/now_lt_infinity/8	rows=[4096]	ERR 22007	temporal r2
+values/ts/"infinity"	rows=[]
+vol/now_lt_infinity/1	rows=[4096]
+vol/now_lt_infinity/2	rows=[4096]
+vol/now_lt_infinity/3	rows=[4096]
+vol/now_lt_infinity/4	rows=[4096]
+vol/now_lt_infinity/5	rows=[4096]
+vol/now_lt_infinity/6	rows=[4096]
+vol/now_lt_infinity/7	rows=[4096]
+vol/now_lt_infinity/8	rows=[4096]

@@ -275,10 +275,11 @@ func tcCells() []tcCell {
 		}
 	}
 	// PostgreSQL's special date/time input words. The comparison coerces its
-	// text exactly as CAST does: 'epoch' is read by the grammar and answers
-	// PostgreSQL's rows; every other word ('infinity', 'now', 'today', …, a
-	// BC date) is refused 22007 as `CAST('…' AS TIMESTAMP)` is (temporal r2 /
-	// r25); 'allballs' is a time word both systems refuse.
+	// text exactly as CAST does: 'epoch' and the infinite values ('infinity',
+	// '+infinity', '-infinity', since arc TI) are read by the grammar and
+	// answer PostgreSQL's rows; every other word ('now', 'today', …, a BC
+	// date) is refused 22007 as `CAST('…' AS TIMESTAMP)` is (temporal r25);
+	// 'allballs' is a time word both systems refuse.
 	spOps := []struct{ name, tmpl string }{
 		{"eq", "SELECT id FROM tc_t WHERE {C} = {L} ORDER BY id"},
 		{"ne", "SELECT id FROM tc_t WHERE {C} <> {L} ORDER BY id"},
@@ -353,8 +354,10 @@ func tcCells() []tcCell {
 	// The special words in the positions outside a WHERE / select-item /
 	// HAVING / JOIN ON comparison: ORDER BY, GROUP BY, a window's PARTITION
 	// BY, a simple CASE, NULLIF, `< ALL`, and a subquery's body (IN, EXISTS,
-	// NOT EXISTS). One rule in every position: 'epoch' answers PostgreSQL's
-	// rows, every other word raises 22007 (at 89cea148 several of these
+	// NOT EXISTS). One rule in every position: 'epoch', 'infinity' and
+	// '-infinity' answer PostgreSQL's rows (`< ALL` of a quoted array literal
+	// excepted: TC-F1 reads the literal as one scalar), every other word
+	// raises 22007 (at 89cea148 several of these
 	// answered PostgreSQL's rows by reading the word as text or as no match;
 	// at c161f596 a plan-time rewrite answered some and raised 42803 / 42000
 	// on others).
@@ -391,8 +394,9 @@ func tcCells() []tcCell {
 		}
 	}
 	// A volatile operand beside a special word, over 4096 rows (review r2
-	// B3): the operand is evaluated once per row and the word refused before
-	// any row; PostgreSQL answers 4096. Eight runs, one cell each.
+	// B3): the operand is evaluated once per row and compared with the
+	// infinite value (refused before any row until arc TI); PostgreSQL
+	// answers 4096. Eight runs, one cell each.
 	for i := 1; i <= 8; i++ {
 		cells = append(cells, tcCell{
 			name: fmt.Sprintf("vol/now_lt_infinity/%d", i),
@@ -508,9 +512,11 @@ func tcPins(t *testing.T) map[string]tcPin {
 // arc's rule; a pin that starts agreeing with PostgreSQL FAILS. #1190: a
 // relation with no files has no distributed scan stage, so on the three DAG
 // doors a statement over tc_e that the plan does not refuse first answers
-// 42000.
+// 42000 — except NOT EXISTS over it, which answers PostgreSQL's empty result
+// there (empty/pos_not_exists/ts/"infinity", the same at 89cea148).
 func tcDoorPin(door string, c tcCell, want string) (string, string) {
-	if strings.HasPrefix(door, "dag") && strings.HasPrefix(c.name, "empty/") && !strings.HasPrefix(want, "ERR ") {
+	if strings.HasPrefix(door, "dag") && strings.HasPrefix(c.name, "empty/") && !strings.HasPrefix(c.name, "empty/pos_not_exists/") &&
+		!strings.HasPrefix(want, "ERR ") {
 		return "ERR 42000", "#1190 — a relation with no files has no distributed scan stage"
 	}
 	return "", ""

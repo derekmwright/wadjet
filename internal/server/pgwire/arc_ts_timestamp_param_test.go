@@ -3,7 +3,6 @@
 package pgwire
 
 import (
-	"math"
 	"strings"
 	"testing"
 )
@@ -18,7 +17,8 @@ import (
 // dropped (`12:30:45.5` bound as `12:30:45`), and time.Duration's nanosecond
 // range wrapped any instant more than ~292 years from 2000 (1600 and 9999 bound
 // as other years). PostgreSQL's ±infinity (the int64 extremes) decoded to a
-// wrapped instant; the engine's TIMESTAMP has no infinity, so it is refused.
+// wrapped instant; they bind as the infinite values since arc TI
+// (TestArcTIInfinityOverTheWireBothFormats).
 func TestArcTSABinaryTimestampParameterIsTheInstantItNames(t *testing.T) {
 	_, srv := setupRealDB(t)
 	client := newPGClient(t, srv.Addr())
@@ -71,10 +71,10 @@ func TestArcTSABinaryTimestampParameterIsTheInstantItNames(t *testing.T) {
 		name  string
 		param boundParam
 	}{
-		{"timestamp +infinity", binaryParam(oidTimestamp, be64b(math.MaxInt64))},
-		{"timestamptz -infinity", binaryParam(oidTimestampTZ, be64b(math.MinInt64))},
-		// Not a timestamp: the error-state half on its own, through a
-		// refusal that already existed at 260fc569.
+		// The int64 extremes (PostgreSQL's infinity encoding) were refused
+		// here until arc TI gave the carrier its infinite values; they bind
+		// as `infinity` / `-infinity` now (TestArcTIInfinityOverTheWireBothFormats).
+		// The error-state half, through a refusal that existed at 260fc569.
 		{"int4 of the wrong width", binaryParam(oidInt4, []byte{0, 2})},
 	} {
 		if _, _, _, tag := client.paramQuery("SELECT 'previous portal' AS p", nil); strings.HasPrefix(tag, "ERROR") {

@@ -96,3 +96,30 @@ func TestWriteTypedNullTimestamp(t *testing.T) {
 		t.Errorf("epoch timestamp not rendered; output = %q", out)
 	}
 }
+
+// TestArcTIInfiniteValuesInEveryFormat: the carriers' extremes — PostgreSQL's
+// infinite TIMESTAMP and DATE — print as `infinity` / `-infinity` in the
+// table, JSON and CSV formats, never as the raw integer or a year millions
+// of years away.
+func TestArcTIInfiniteValuesInEveryFormat(t *testing.T) {
+	decls := []parquet.Column{{Name: "ts", Type: parquet.TypeTimestamp}, {Name: "d", Type: parquet.TypeDate}}
+	// A TIMESTAMP reaches the CLI as its epoch milliseconds; a DATE as the
+	// text the engine's vector boxes it in (batch.FormatDate).
+	rows := [][]any{
+		{int64(9223372036854775807), "infinity"},
+		{int64(-9223372036854775808), "-infinity"},
+	}
+	for _, f := range []Format{Table, JSON, CSV} {
+		var buf bytes.Buffer
+		if err := WriteDeclared(&buf, f, []string{"ts", "d"}, decls, rows); err != nil {
+			t.Fatalf("format %v: %v", f, err)
+		}
+		out := buf.String()
+		if strings.Count(out, "-infinity") != 2 || strings.Count(out, "infinity") != 4 {
+			t.Errorf("format %v: %q", f, out)
+		}
+		if strings.Contains(out, "922337") || strings.Contains(out, "214748") {
+			t.Errorf("format %v: a raw extreme printed: %q", f, out)
+		}
+	}
+}
