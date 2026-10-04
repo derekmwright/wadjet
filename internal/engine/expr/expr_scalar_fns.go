@@ -159,6 +159,9 @@ type FuncCall struct {
 	// bound by the compiler; the extremum and NULLIF arms read them for a
 	// container pair.
 	argDecls []*operandDecl
+	// round is ROUND's choice between its two kernels by the operand's
+	// declared type (rounding_rule.go); nil for every other call.
+	round *roundRule
 	// choiceArms is the argument list this call CHOOSES its value from, read
 	// off the registry's polymorphic declaration (Ret.SameAsArgs) so it
 	// cannot drift from the type fold: GREATEST/LEAST/COALESCE/IFNULL mirror
@@ -496,6 +499,9 @@ func (e *FuncCall) resolveFnSlow() {
 }
 
 func (e *FuncCall) Eval(b *batch.RecordBatch, row int) any {
+	if e.round != nil {
+		return e.round.pick(b).Eval(b, row)
+	}
 	e.resolveFn()
 	if e.fn == nil {
 		return nil
@@ -718,6 +724,10 @@ func pickExtremum(b *batch.RecordBatch, args []any, op CmpOp, arms *extremumArms
 // Falls back to per-row Eval if no vectorized implementation exists or if
 // argument types can't be resolved to column vectors.
 func (e *FuncCall) EvalVec(b *batch.RecordBatch, out *batch.Vector, n int) {
+	if e.round != nil {
+		e.round.pick(b).EvalVec(b, out, n)
+		return
+	}
 	e.vecOnce.Do(func() {
 		e.vecFn = DefaultRegistry.LookupVec(e.Name)
 		// No argument types to consult here, so a polymorphic declaration

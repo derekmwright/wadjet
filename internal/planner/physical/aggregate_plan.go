@@ -62,6 +62,9 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 	// type (#568). Derived computed arguments must retain their types through
 	// CASE rather than taking an ELSE type that fails the #361 store guard.
 	aggInputDecls := emittedColDecls(node.Children[0])
+	// The plan's category of the input columns, for the rounding sites
+	// (expr.WithInputPGCategories, #381).
+	aggInputCats := expr.WithInputPGCategories(emittedColPGCategory(node.Children[0]))
 	// A SCALAR SUBQUERY written DIRECTLY as the argument — `SUM((SELECT …))` —
 	// has no column for that walk to read: its declaration is the CATALOG fact
 	// annotateSubqueryColumnDecls stamps on the plan. Without it
@@ -103,10 +106,10 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 			if len(aggOuterTables) > 0 {
 				compiled, compErr = expr.CompileWithScopeResolver(agg.InputExpr, p.subqueryRunner,
 					aggOuterTables, aggOuterCols, p.SubqueryInnerColumns(),
-					p.subqueryDeclOptionFor(node.Children[0]), p.subqueryBudgetOption(), p.statementOption())
+					p.subqueryDeclOptionFor(node.Children[0]), p.subqueryBudgetOption(), p.statementOption(), aggInputCats)
 			} else {
 				compiled, compErr = expr.CompileWithRunner(agg.InputExpr, p.subqueryRunner,
-					p.subqueryDeclOption(), p.subqueryBudgetOption(), p.statementOption())
+					p.subqueryDeclOption(), p.subqueryBudgetOption(), p.statementOption(), aggInputCats)
 			}
 			if expr.IsCompileRefusal(compErr) {
 				return nil, nil, nil, compErr
@@ -396,7 +399,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 				if _, isLit := gbExpr.(*plansql.Lit); !isLit {
 					continue
 				}
-				compiled, compErr := expr.CompileWithRunner(gbExpr, p.subqueryRunner, p.subqueryDeclOption(), p.subqueryBudgetOption(), p.statementOption())
+				compiled, compErr := expr.CompileWithRunner(gbExpr, p.subqueryRunner, p.subqueryDeclOption(), p.subqueryBudgetOption(), p.statementOption(), aggInputCats)
 				if expr.IsCompileRefusal(compErr) {
 					return nil, nil, nil, compErr
 				}
@@ -439,7 +442,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 				// GroupByOutNames below, which is what keeps the two
 				// engines' output schemas equal (#720, ADR-0026).
 				synName := keyOuts[i].Slot
-				compiled, compErr := expr.CompileWithRunner(gbExpr, p.subqueryRunner, p.subqueryDeclOption(), p.subqueryBudgetOption(), p.statementOption())
+				compiled, compErr := expr.CompileWithRunner(gbExpr, p.subqueryRunner, p.subqueryDeclOption(), p.subqueryBudgetOption(), p.statementOption(), aggInputCats)
 				if expr.IsCompileRefusal(compErr) {
 					return nil, nil, nil, compErr
 				}

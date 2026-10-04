@@ -38,6 +38,10 @@ type Cast struct {
 	// planner's walk gives it, never under what its box looks like (arc CW
 	//). Nil for a Cast built outside the compiler.
 	opDecl *operandDecl
+	// elemCat is an array element's category, set by castToArray for the
+	// cast of each element (its operand is then a bare box with no
+	// declaration of its own); PGCatUnknown everywhere else.
+	elemCat PGCategory
 	// answer marks an integer CAST in a scalar subquery's body
 	// (plansql.CastNode.Answer): an integer operand of numeric arithmetic
 	// there (integerOperand), as the plan declares it.
@@ -90,7 +94,7 @@ func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
 		}
 	}
 	if elem, ok := ArrayCastElement(dest); ok {
-		return castToArray(v, elem, e.containerShape(b, row, v))
+		return castToArray(v, elem, e.containerShape(b, row, v), e.opDecl.category(b))
 	}
 	// A VECTOR destination converts (pgvector's array_to_vector / vector_in)
 	// and a CONTAINER operand is decided by the container table before any
@@ -270,10 +274,14 @@ func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
 		// planner's walk over the operand's AST against this batch's columns
 		// (operandDecl.category), so a DAG stage decides it from the same
 		// expression and the same input types the single-process arm has.
-		if isConstNumericOperand(e.Operand) || e.opDecl.category(b) == PGCatNumeric {
-			return castIntInRange(castFloatToInt64(ToFloat64(v), dest), dest)
+		cat := e.elemCat
+		if cat == PGCatUnknown {
+			cat = e.opDecl.category(b)
 		}
-		return castIntInRange(castFloatToInt64Even(ToFloat64(v), dest), dest)
+		if roundsHalfEven(cat, e.Operand) {
+			return castIntInRange(castFloatToInt64Even(ToFloat64(v), dest), dest)
+		}
+		return castIntInRange(castFloatToInt64(ToFloat64(v), dest), dest)
 	// FLOAT32 is the same gap one family over: it is this engine's own name
 	// for float4 and matched no label, so `CAST(1e40 AS FLOAT32)` answered
 	// 1e+40 as TEXT where `CAST(1e40 AS REAL)` raises 22003 (#901).

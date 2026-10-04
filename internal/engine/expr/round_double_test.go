@@ -77,28 +77,3 @@ func TestRoundNumericStillHalfAwayFromZero(t *testing.T) {
 		})
 	}
 }
-
-// TestIsBinaryFloatCast covers the compile-time routing signal directly.
-func TestIsBinaryFloatCast(t *testing.T) {
-	cases := []struct {
-		name string
-		e    Expr
-		want bool
-	}{
-		{"double_cast", &Cast{Operand: &Lit{Val: 0.5}, DestType: "double"}, true},
-		{"real_cast", &Cast{Operand: &Lit{Val: 0.5}, DestType: "real"}, true},
-		{"float_cast", &Cast{Operand: &Lit{Val: 0.5}, DestType: "float"}, true},
-		{"numeric_cast", &Cast{Operand: &Lit{Val: 0.5}, DestType: "numeric"}, false},
-		{"decimal_cast", &Cast{Operand: &Lit{Val: 0.5}, DestType: "decimal"}, false},
-		{"int_cast", &Cast{Operand: &Lit{Val: 5}, DestType: "int"}, false},
-		{"bare_literal", &Lit{Val: 0.5}, false},
-		{"col_ref", &ColRef{Name: "x"}, false},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			if got := isBinaryFloatCast(c.e); got != c.want {
-				t.Errorf("isBinaryFloatCast(%v) = %v, want %v", c.e, got, c.want)
-			}
-		})
-	}
-}

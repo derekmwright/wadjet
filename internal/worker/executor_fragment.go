@@ -2083,7 +2083,7 @@ func (e *Executor) buildFragmentBreaker(ctx context.Context, task distributed.Ta
 				return nil, kerr
 			}
 			project, _, perr := buildAggInputProjection(spec.GroupByCols, spec.Aggregates, nil,
-				spec.GroupByTypes, spec.GroupByDecimal, keyPlan, expr.WithStatementClock(ctx))
+				spec.GroupByTypes, spec.GroupByDecimal, keyPlan, taskCompileOptions(ctx, task)...)
 			if perr != nil {
 				return nil, fmt.Errorf("agg input project: %w", perr)
 			}
@@ -2174,7 +2174,7 @@ func (e *Executor) buildFragmentBreaker(ctx context.Context, task distributed.Ta
 		// upstream stage emits, so it is computed here, ahead of the
 		// operator's consume phase — the derived-aggregate-input shape one
 		// operator over (#585).
-		keyProject, kerr := buildWindowKeyProjection(spec.WindowKeyExprs, expr.WithStatementClock(ctx))
+		keyProject, kerr := buildWindowKeyProjection(spec.WindowKeyExprs, taskCompileOptions(ctx, task)...)
 		if kerr != nil {
 			win.Close()
 			return nil, fmt.Errorf("window key project: %w", kerr)
@@ -2747,7 +2747,7 @@ func (e *Executor) buildFragmentSource(task distributed.Task, spec distributed.O
 func (e *Executor) buildFragmentUnary(ctx context.Context, task distributed.Task, spec distributed.OpSpec) ([]exec.UnaryOperator, func(), error) {
 	switch spec.Type {
 	case distributed.OpFilter:
-		ops, _, err := compileFilterExprs(spec.Predicates, spec.ScanSchemaFilter, expr.WithStatementClock(ctx))
+		ops, _, err := compileFilterExprs(spec.Predicates, spec.ScanSchemaFilter, taskCompileOptions(ctx, task)...)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -2762,7 +2762,7 @@ func (e *Executor) buildFragmentUnary(ctx context.Context, task distributed.Task
 		return e.buildFragmentJoinProbe(ctx, task, spec)
 
 	case distributed.OpProject:
-		proj, err := buildSelectProjection(spec.Projections, expr.WithStatementClock(ctx))
+		proj, err := buildSelectProjection(spec.Projections, taskCompileOptions(ctx, task)...)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -2916,7 +2916,7 @@ func (e *Executor) buildFragmentJoinProbe(ctx context.Context, task distributed.
 			// dropped scan's filter (or its computed flag) to the build rows
 			// before insertion. Semantically identical to the dropped scan's
 			// own filter.
-			fops, _, err := compileFilterExprs(spec.BuildFilterExprs, false, expr.WithStatementClock(ctx))
+			fops, _, err := compileFilterExprs(spec.BuildFilterExprs, false, taskCompileOptions(ctx, task)...)
 			if err != nil {
 				return nil, fmt.Errorf("build filter: %w", err)
 			}

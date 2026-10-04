@@ -100,7 +100,19 @@ func pgCategoryOfNode(n plansql.Node, decls ColDecls) pgCategory {
 		return pgCatNumeric
 	case *plansql.ColRef:
 		d, c := colRefDeclaredType(x, decls)
+		if d.ID == parquet.TypeArray && d.Schema != nil && d.Schema.ElementType != nil {
+			// An ARRAY's category is its ELEMENT's (below).
+			return pgCategoryOfDecl(expr.Decl(d.Schema.ElementType.Type), c)
+		}
 		return pgCategoryOfDecl(withPGCategory(d, decls.colPGCategory(x)), c)
+	case *plansql.ArrayLitNode:
+		// An ARRAY's category is its ELEMENT's: the one reader is the cast of
+		// an array to an integer array, which rounds each element by the rule
+		// the element's own type selects (expr.roundsHalfEven, #1542) —
+		// `ARRAY[2.5::float8, 1.5::float8]` is float8[] and `ARRAY[2.5, 1.5]`
+		// numeric[] in PostgreSQL, the element type select_common_type
+		// resolves, which is CASE's fold.
+		return pgFold(x.Elements, decls)
 	case *plansql.UnaryOp:
 		if x.Op == "-" || x.Op == "+" {
 			return pgCategoryOf(x.Inner, decls)
@@ -111,15 +123,7 @@ func pgCategoryOfNode(n plansql.Node, decls ColDecls) pgCategory {
 			return pgArith(pgCategoryOf(x.Left, decls), pgCategoryOf(x.Right, decls))
 		}
 	case *plansql.CastNode:
-		if _, _, _, ok := expr.DecimalCastDest(x.TypeName); ok {
-			return pgCatNumeric
-		}
-		switch inferCastType(x.TypeName) {
-		case parquet.TypeFloat32, parquet.TypeFloat64:
-			return pgCatFloat
-		case parquet.TypeInt32, parquet.TypeInt64:
-			return pgCatInteger
-		}
+		return pgCategoryOfTypeName(x.TypeName)
 	case *plansql.CaseNode:
 		arms := make([]plansql.Node, 0, len(x.Whens)+1)
 		for _, w := range x.Whens {
@@ -138,6 +142,24 @@ func pgCategoryOfNode(n plansql.Node, decls ColDecls) pgCategory {
 				return pgCategoryOfDecl(withPGCategory(expr.Decl(col.Type), cat), expr.Decided)
 			}
 		}
+	}
+	return pgCatUnknown
+}
+
+// pgCategoryOfTypeName is the category of a value a CAST to typeName
+// produces; an array destination's is its element's (ArrayLitNode, above).
+func pgCategoryOfTypeName(typeName string) pgCategory {
+	if elem, ok := expr.ArrayCastElement(typeName); ok {
+		return pgCategoryOfTypeName(elem)
+	}
+	if _, _, _, ok := expr.DecimalCastDest(typeName); ok {
+		return pgCatNumeric
+	}
+	switch inferCastType(typeName) {
+	case parquet.TypeFloat32, parquet.TypeFloat64:
+		return pgCatFloat
+	case parquet.TypeInt32, parquet.TypeInt64:
+		return pgCatInteger
 	}
 	return pgCatUnknown
 }

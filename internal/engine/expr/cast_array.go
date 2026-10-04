@@ -38,7 +38,14 @@ func ArrayCastElement(typeName string) (string, bool) {
 // its date) and a DECIMAL one as a number — not as the epoch milliseconds or
 // the text its box holds (arc CW round 3: `CAST(ARRAY[ts] AS TEXT[])` was
 // `{1704070800000}`).
-func castToArray(v any, elem string, from *parquet.Column) any {
+//
+// cat is the ELEMENT's PostgreSQL category (the array operand's, from the
+// planner's category walk): it picks the rule an element is rounded by when
+// the destination is an integer (roundsHalfEven) — `ARRAY[2.5::float8,
+// 1.5::float8]::bigint[]` is {2,2} and `ARRAY[2.5, 1.5]::bigint[]` {3,2}. Each
+// element arrives here as a bare box, so without it every element took the
+// numeric constant's rule (#1542).
+func castToArray(v any, elem string, from *parquet.Column, cat PGCategory) any {
 	var elems []any
 	switch tv := v.(type) {
 	case []any:
@@ -76,14 +83,14 @@ func castToArray(v any, elem string, from *parquet.Column) any {
 	}
 	if _, isArr := v.([]any); isArr && from != nil && from.Type == parquet.TypeArray &&
 		from.ElementType != nil && ambiguousBoxDecl(from.ElementType) {
-		return castElementsAsColumn(elems, elem, *from.ElementType)
+		return castElementsAsColumn(elems, elem, *from.ElementType, cat)
 	}
 	out := make([]any, len(elems))
 	for i, e := range elems {
 		if e == nil {
 			continue
 		}
-		out[i] = (&Cast{Operand: &Lit{Val: e}, DestType: elem}).Eval(nil, 0)
+		out[i] = (&Cast{Operand: &Lit{Val: e}, DestType: elem, elemCat: cat}).Eval(nil, 0)
 	}
 	return out
 }
@@ -110,13 +117,13 @@ func nestedArrayOperand(v any, from *parquet.Column) bool {
 // castElementsAsColumn casts each element as a column of the declared element
 // type: one vector holds them all, and the same scalar Cast a column operand
 // takes reads each row.
-func castElementsAsColumn(elems []any, elem string, decl parquet.Column) []any {
+func castElementsAsColumn(elems []any, elem string, decl parquet.Column, cat PGCategory) []any {
 	decl.Name, decl.Nullable = "element", true
 	eb := batch.NewRecordBatch([]parquet.Column{decl}, len(elems))
 	for i, e := range elems {
 		eb.Columns[0].SetValue(i, e)
 	}
-	c := &Cast{Operand: &ColRef{Name: "element"}, DestType: elem}
+	c := &Cast{Operand: &ColRef{Name: "element"}, DestType: elem, elemCat: cat}
 	out := make([]any, len(elems))
 	for i, e := range elems {
 		if e == nil {

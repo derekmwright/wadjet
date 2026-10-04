@@ -284,7 +284,7 @@ func TestGatherReplayStream_AppliesRenames(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wait: %v", err)
 	}
-	applyOutputRenames(gr, []dagplan.OutputRename{{From: "x", To: "alias_x"}})
+	applyOutputRenames(gr, []dagplan.OutputRename{{From: "x", To: "alias_x"}}, nil)
 	if gr.columns[0] != "alias_x" {
 		t.Fatalf("columns after rename = %v", gr.columns)
 	}

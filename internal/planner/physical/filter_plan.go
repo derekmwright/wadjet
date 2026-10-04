@@ -38,14 +38,17 @@ func (p *Planner) buildFilterOp(pred logical.Predicate, scope *logical.Node, out
 	if pred.ASTExpr != nil {
 		var compiled expr.Expr
 		var err error
+		// The plan's category of the input columns, for the rounding sites
+		// (expr.WithInputPGCategories, #381).
+		inputCats := expr.WithInputPGCategories(emittedColPGCategory(scope))
 		if len(outerTables) > 0 {
 			if len(outerCols) > 0 {
-				compiled, err = expr.CompileWithScopeResolver(pred.ASTExpr, p.subqueryRunner, outerTables, outerCols, p.SubqueryInnerColumns(), p.subqueryDeclOptionFor(scope), p.subqueryBudgetOption(), p.statementOption())
+				compiled, err = expr.CompileWithScopeResolver(pred.ASTExpr, p.subqueryRunner, outerTables, outerCols, p.SubqueryInnerColumns(), p.subqueryDeclOptionFor(scope), p.subqueryBudgetOption(), p.statementOption(), inputCats)
 			} else {
-				compiled, err = expr.CompileWithScope(pred.ASTExpr, p.subqueryRunner, outerTables, p.subqueryDeclOptionFor(scope), p.subqueryBudgetOption(), p.statementOption())
+				compiled, err = expr.CompileWithScope(pred.ASTExpr, p.subqueryRunner, outerTables, p.subqueryDeclOptionFor(scope), p.subqueryBudgetOption(), p.statementOption(), inputCats)
 			}
 		} else {
-			compiled, err = expr.CompileWithRunner(pred.ASTExpr, p.subqueryRunner, p.subqueryDeclOption(), p.subqueryBudgetOption(), p.statementOption())
+			compiled, err = expr.CompileWithRunner(pred.ASTExpr, p.subqueryRunner, p.subqueryDeclOption(), p.subqueryBudgetOption(), p.statementOption(), inputCats)
 		}
 		if expr.IsCompileRefusal(err) {
 			return nil, err

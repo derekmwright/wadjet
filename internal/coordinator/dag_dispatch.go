@@ -727,7 +727,7 @@ func (c *Coordinator) executeStageDAG(
 			return gr, waitErr
 		}
 		if gr != nil && len(gatherStage.OutputRenames) > 0 {
-			applyOutputRenames(gr, gatherStage.OutputRenames, expr.WithStatementClock(ctx))
+			applyOutputRenames(gr, gatherStage.OutputRenames, expr.WithStatementClock(ctx), gatherPGCategoriesOption(ctx))
 		}
 		return gr, nil
 	}
@@ -747,7 +747,7 @@ func (c *Coordinator) executeStageDAG(
 	// aliases ("supp_nation", "l_year"). The Gather worker is a pipe and
 	// can't apply this — it has to happen here.
 	if gr != nil && len(gatherStage.OutputRenames) > 0 {
-		applyOutputRenames(gr, gatherStage.OutputRenames, expr.WithStatementClock(ctx))
+		applyOutputRenames(gr, gatherStage.OutputRenames, expr.WithStatementClock(ctx), gatherPGCategoriesOption(ctx))
 	}
 	return gr, nil
 }

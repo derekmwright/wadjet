@@ -40,9 +40,23 @@ func declaredShapeOf(node plansql.Node, schema []parquet.Column, sub expr.Subque
 
 // declaredCategoryOf is PostgreSQL's numeric category of node over schema
 // (ADR-0024 §2c): the category the same declaration carries, read by an
-// explicit integer CAST to choose its rounding (#1392).
-func declaredCategoryOf(node plansql.Node, schema []parquet.Column, sub expr.SubqueryDeclFunc) expr.PGCategory {
-	return pgCategoryOfDecl(nodeDeclaredType(node, schemaColDecls(schema, sub)))
+// explicit integer CAST and ROUND to choose their rounding (#1392, #381).
+//
+// An ARRAY's category is its ELEMENT's, read by the structural walk: the
+// array declaration's element is the FLOAT64 carrier for `ARRAY[2.5, 1.5]`
+// (numeric[] in PostgreSQL) and `ARRAY[2.5::float8]` (float8[]) alike, and
+// the cast of either to an integer array rounds each element by the rule
+// its PostgreSQL type selects (#1542).
+func declaredCategoryOf(node plansql.Node, schema []parquet.Column, sub expr.SubqueryDeclFunc, cats map[string]expr.PGCategory) expr.PGCategory {
+	decls := schemaColDecls(schema, sub)
+	if len(cats) > 0 {
+		decls.pgCat = cats
+	}
+	d, c := nodeDeclaredType(node, decls)
+	if c == expr.Decided && d.ID == parquet.TypeArray {
+		return pgCategoryOf(node, decls)
+	}
+	return pgCategoryOfDecl(d, c)
 }
 
 // schemaColDecls is the declaration context an expression over the given
