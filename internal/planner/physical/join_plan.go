@@ -400,7 +400,7 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 		}
 	}
 	if outerResidual {
-		newResidual, err := buildJoinResidualFilter(node.JoinFilter, hj.BuildTableAlias)
+		newResidual, err := buildJoinResidualFilter(node.JoinFilter, hj.BuildTableAlias, p.clockOption())
 		if err != nil {
 			// Refuse loudly rather than answer with the conjunct dropped —
 			// the pre-#358 failure mode this path replaced.
@@ -518,7 +518,7 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 			Workers:       innerPipelineWorkers(leftSource),
 			spill:         p.getSpillManager(),
 		}
-		return bridge, append([]exec.UnaryOperator{probe}, lateralEmptyDefaultOps(node)...), &exec.CollectSink{}, nil
+		return bridge, append([]exec.UnaryOperator{probe}, lateralEmptyDefaultOps(node, p.clockOption())...), &exec.CollectSink{}, nil
 	}
 
 	if deferBuild {
@@ -549,7 +549,7 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 				probe:    probe,
 			}, nil, &exec.CollectSink{}, nil
 		}
-		return bridge, append([]exec.UnaryOperator{probe}, lateralEmptyDefaultOps(node)...), &exec.CollectSink{}, nil
+		return bridge, append([]exec.UnaryOperator{probe}, lateralEmptyDefaultOps(node, p.clockOption())...), &exec.CollectSink{}, nil
 	}
 
 	// Immediate: wait for build to complete before accessing hash table state.
@@ -614,7 +614,7 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 	// pad, and the column's own value there is 0, not NULL. Above the join
 	// rather than in the enclosing query's references, so a star sees it
 	// (exec.LateralEmptyDefault, #977).
-	leftOps = append(leftOps, lateralEmptyDefaultOps(node)...)
+	leftOps = append(leftOps, lateralEmptyDefaultOps(node, p.clockOption())...)
 
 	// For RIGHT and FULL OUTER joins, unmatched build-side rows must be
 	// flushed after all probe batches have been processed. Wrap the source

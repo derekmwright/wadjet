@@ -2083,7 +2083,7 @@ func (e *Executor) buildFragmentBreaker(ctx context.Context, task distributed.Ta
 				return nil, kerr
 			}
 			project, _, perr := buildAggInputProjection(spec.GroupByCols, spec.Aggregates, nil,
-				spec.GroupByTypes, spec.GroupByDecimal, keyPlan)
+				spec.GroupByTypes, spec.GroupByDecimal, keyPlan, expr.WithStatementClock(ctx))
 			if perr != nil {
 				return nil, fmt.Errorf("agg input project: %w", perr)
 			}
@@ -2174,7 +2174,7 @@ func (e *Executor) buildFragmentBreaker(ctx context.Context, task distributed.Ta
 		// upstream stage emits, so it is computed here, ahead of the
 		// operator's consume phase — the derived-aggregate-input shape one
 		// operator over (#585).
-		keyProject, kerr := buildWindowKeyProjection(spec.WindowKeyExprs)
+		keyProject, kerr := buildWindowKeyProjection(spec.WindowKeyExprs, expr.WithStatementClock(ctx))
 		if kerr != nil {
 			win.Close()
 			return nil, fmt.Errorf("window key project: %w", kerr)
@@ -2747,7 +2747,7 @@ func (e *Executor) buildFragmentSource(task distributed.Task, spec distributed.O
 func (e *Executor) buildFragmentUnary(ctx context.Context, task distributed.Task, spec distributed.OpSpec) ([]exec.UnaryOperator, func(), error) {
 	switch spec.Type {
 	case distributed.OpFilter:
-		ops, _, err := compileFilterExprs(spec.Predicates, spec.ScanSchemaFilter)
+		ops, _, err := compileFilterExprs(spec.Predicates, spec.ScanSchemaFilter, expr.WithStatementClock(ctx))
 		if err != nil {
 			return nil, nil, err
 		}
@@ -2762,7 +2762,7 @@ func (e *Executor) buildFragmentUnary(ctx context.Context, task distributed.Task
 		return e.buildFragmentJoinProbe(ctx, task, spec)
 
 	case distributed.OpProject:
-		proj, err := buildSelectProjection(spec.Projections)
+		proj, err := buildSelectProjection(spec.Projections, expr.WithStatementClock(ctx))
 		if err != nil {
 			return nil, nil, err
 		}
@@ -2915,7 +2915,7 @@ func (e *Executor) buildFragmentJoinProbe(ctx context.Context, task distributed.
 			// dropped scan's filter (or its computed flag) to the build rows
 			// before insertion. Semantically identical to the dropped scan's
 			// own filter.
-			fops, _, err := compileFilterExprs(spec.BuildFilterExprs, false)
+			fops, _, err := compileFilterExprs(spec.BuildFilterExprs, false, expr.WithStatementClock(ctx))
 			if err != nil {
 				return nil, fmt.Errorf("build filter: %w", err)
 			}
@@ -3044,7 +3044,7 @@ func (e *Executor) buildFragmentJoinProbe(ctx context.Context, task distributed.
 	// same position the single-process planner gives it: an outer row the
 	// lateral matched nothing for exists only as this join's pad, and the
 	// column's own value there is 0, not NULL (exec.LateralEmptyDefault).
-	if op := lateralEmptyDefaultOp(spec); op != nil {
+	if op := lateralEmptyDefaultOp(spec, expr.WithStatementClock(ctx)); op != nil {
 		ops = append(ops, op)
 	}
 	return ops, cleanup, nil
@@ -3053,7 +3053,7 @@ func (e *Executor) buildFragmentJoinProbe(ctx context.Context, task distributed.
 // lateralEmptyDefaultOp is the operator that carries an ungrouped-aggregate
 // lateral's empty-input values on its own output columns; nil when this
 // fragment's join has none.
-func lateralEmptyDefaultOp(spec distributed.OpSpec) exec.UnaryOperator {
+func lateralEmptyDefaultOp(spec distributed.OpSpec, opts ...expr.CompileOption) exec.UnaryOperator {
 	if spec.PadMarker == "" {
 		return nil
 	}
@@ -3066,7 +3066,7 @@ func lateralEmptyDefaultOp(spec distributed.OpSpec) exec.UnaryOperator {
 		if err != nil {
 			continue
 		}
-		compiled, err := expr.Compile(node)
+		compiled, err := expr.Compile(node, opts...)
 		if err != nil {
 			continue
 		}

@@ -36,7 +36,7 @@ import (
 func (p *Planner) buildTableLessLateralJoin(ctx context.Context, node *logical.Node) (
 	exec.Source, []exec.UnaryOperator, exec.Sink, error) {
 
-	cols, err := compileLateralDualItems(node.LateralDualItems, node.Children[0])
+	cols, err := compileLateralDualItems(node.LateralDualItems, node.Children[0], p.clockOption())
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -61,7 +61,7 @@ func (p *Planner) buildTableLessLateralJoin(ctx context.Context, node *logical.N
 // value it stands for is the whole of what the issue lost, and a column
 // silently missing from the projection is the same wrong answer in another
 // shape.
-func compileLateralDualItems(items []logical.Projection, outer *logical.Node) (
+func compileLateralDualItems(items []logical.Projection, outer *logical.Node, clock expr.CompileOption) (
 	[]exec.LateralOuterColumn, error) {
 
 	decls := lateralOuterDecls(outer)
@@ -76,7 +76,7 @@ func compileLateralDualItems(items []logical.Projection, outer *logical.Node) (
 			return nil, fmt.Errorf("a LATERAL subquery with no FROM clause has an item "+
 				"this planner cannot compute: %q", item.Expr)
 		}
-		compiled, err := expr.CompileWithColumnTypes(item.ASTExpr, nil, decls.Types, nil)
+		compiled, err := expr.CompileWithColumnTypes(item.ASTExpr, nil, decls.Types, nil, clock)
 		if err != nil {
 			return nil, fmt.Errorf("compiling LATERAL item %q: %w", item.Expr, err)
 		}

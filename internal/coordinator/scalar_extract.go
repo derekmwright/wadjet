@@ -79,7 +79,7 @@ func (c *Coordinator) readScalarFromStageOutput(ctx context.Context, out StageOu
 		if err := guard.CheckBatches(path, batches); err != nil {
 			return "", tier, err
 		}
-		lit, ok, err := scalarFromBatches(batches, projection)
+		lit, ok, err := scalarFromBatches(batches, projection, expr.WithStatementClock(ctx))
 		if err != nil {
 			return "", tier, err
 		}
@@ -96,12 +96,12 @@ func (c *Coordinator) readScalarFromStageOutput(ctx context.Context, out StageOu
 // the expression for row 0 and return its formatted literal; a computed
 // container value is refused 0A000 (noContainerLiteral). Otherwise fall back
 // to firstScalarLiteral on the raw first column.
-func scalarFromBatches(batches []*batch.RecordBatch, projection []dagplan.OutputRename) (string, bool, error) {
+func scalarFromBatches(batches []*batch.RecordBatch, projection []dagplan.OutputRename, opts ...expr.CompileOption) (string, bool, error) {
 	for _, r := range projection {
 		if r.Expr == nil {
 			continue
 		}
-		compiled, err := expr.Compile(r.Expr)
+		compiled, err := expr.Compile(r.Expr, opts...)
 		if err != nil {
 			break // fall back to raw extraction
 		}

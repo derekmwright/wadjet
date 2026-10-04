@@ -16,6 +16,7 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/dataplane"
 	"github.com/derekmwright/wadjet/internal/distributed"
+	"github.com/derekmwright/wadjet/internal/engine/expr"
 	"github.com/derekmwright/wadjet/internal/optswitch"
 	"github.com/nats-io/nats.go"
 )
@@ -177,6 +178,20 @@ type preparedTask struct {
 // re-optimized under its own process's would order the joins differently
 // and split a relation its plan does not probe (#1223). A task with no SQL
 // text re-plans nothing and is left alone.
+// stampTaskStatementClock carries the statement clock ctx holds onto the task
+// (#1566): the worker answers now() / CURRENT_TIMESTAMP / CURRENT_DATE with
+// it rather than its own clock, so every task of one statement — and a
+// retry of one, which re-publishes the task it already carries — reads one
+// value. A task already stamped keeps its value.
+func stampTaskStatementClock(t *distributed.Task, ctx context.Context) {
+	if t.StatementTime != 0 {
+		return
+	}
+	if at, ok := expr.StatementClock(ctx); ok {
+		t.StatementTime = at.UnixNano()
+	}
+}
+
 func stampTaskPlannerOptions(t *distributed.Task, bushyJoinReorder bool) {
 	if t == nil || t.SQLText == "" {
 		return
@@ -228,6 +243,7 @@ func (s *Scheduler) PublishTasks(ctx context.Context, tasks []distributed.Task) 
 			s.annotate(&task)
 		}
 		stampTaskDeleteMarkers(&task, queryDeletes)
+		stampTaskStatementClock(&task, ctx)
 		stampTaskPlannerOptions(&task, s.BushyJoinReorder)
 		data, err := distributed.Marshal(task)
 		if err != nil {
