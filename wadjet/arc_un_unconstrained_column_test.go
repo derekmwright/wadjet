@@ -219,14 +219,15 @@ func TestArcUNARecordWithoutTheMarkerIsTheColumnItWas(t *testing.T) {
 	if err := db.CreateTable(ctx, "legacy", old, nil); err != nil {
 		t.Fatal(err)
 	}
-	for q, w := range map[string]string{
-		"INSERT INTO legacy VALUES (1, 1.25), (2, 7), (3, 0.5)": "INSERT 0 3",
-		"SELECT id, v FROM legacy ORDER BY id":                  "1|1 2|7 3|1",
-		"SELECT id, CAST(v AS TEXT) FROM legacy ORDER BY id":    "1|1 2|7 3|1",
-		"SELECT numeric_precision, numeric_scale FROM information_schema.columns WHERE table_name = 'legacy' AND column_name = 'v'": "38|0",
+	// In order: the write first, then the reads.
+	for _, c := range []struct{ q, w string }{
+		{"INSERT INTO legacy VALUES (1, 1.25), (2, 7), (3, 0.5)", "INSERT 0 3"},
+		{"SELECT id, v FROM legacy ORDER BY id", "1|1 2|7 3|1"},
+		{"SELECT id, CAST(v AS TEXT) FROM legacy ORDER BY id", "1|1 2|7 3|1"},
+		{"SELECT numeric_precision, numeric_scale FROM information_schema.columns WHERE table_name = 'legacy' AND column_name = 'v'", "38|0"},
 	} {
-		if got := unAnswer(ctx, t, db, q); got != w {
-			t.Errorf("%s\n  got  %s\n  want %s", q, got, w)
+		if got := unAnswer(ctx, t, db, c.q); got != c.w {
+			t.Errorf("%s\n  got  %s\n  want %s", c.q, got, c.w)
 		}
 	}
 	res, err := db.Query(ctx, "SELECT v FROM legacy")
