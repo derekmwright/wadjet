@@ -105,10 +105,9 @@ func TestArcTCDMLWhereARefusedTemporalTextChangesNothing(t *testing.T) {
 		{`UPDATE dm SET id = id + 100 WHERE ts = 'garbage'`, "22007", `invalid input syntax for type timestamp: "garbage"`},
 		{`UPDATE dm SET id = id + 100 WHERE d = '0000-01-01'`, "22008", `date/time field value out of range: "0000-01-01"`},
 		{`UPDATE dm SET id = id + 100 WHERE d < 'garbage'`, "22007", `invalid input syntax for type date: "garbage"`},
-		// Kept (ADR-0012 temporal r2): PostgreSQL reads 'infinity' and
-		// answers DELETE 0; the millisecond carrier has no infinity, and the
-		// refusal is 22007 here as it is for the CAST.
-		{`DELETE FROM dm WHERE ts = 'infinity'`, "22007", `invalid input syntax for type timestamp: "infinity"`},
+		// Kept (ADR-0012 temporal r25): PostgreSQL reads a BC date and
+		// answers DELETE 0; the grammar refuses it 22007, as the CAST does.
+		{`DELETE FROM dm WHERE ts = '2024-01-15 BC'`, "22007", `invalid input syntax for type timestamp: "2024-01-15 BC"`},
 	} {
 		t.Run(c.sql, func(t *testing.T) {
 			db := tcOpenFixture(t, ctx, "dm", tcDMLRows(), 2, 1)
@@ -189,5 +188,50 @@ func TestArcTCPrunedScanStillRaises(t *testing.T) {
 		if got := fmt.Sprint(res.Cells(0)[0]); got != c.state {
 			t.Errorf("%s: answered %s, want %s", c.sql, got, c.state)
 		}
+	}
+}
+
+// TestArcTCDMLSpecialWordsAnswerAsPostgres: PostgreSQL's special date/time
+// words in a DML WHERE (#1512 round 2) — 'epoch' read by the grammar,
+// 'now' / 'today' resolved and '±infinity' folded where the comparison meets
+// a DATE / TIMESTAMP column. Each want is PostgreSQL 17.11's over the same
+// four rows (tc_author/r2/pg_dml2.txt); NULL row 3 stays.
+func TestArcTCDMLSpecialWordsAnswerAsPostgres(t *testing.T) {
+	ctx := context.Background()
+	for _, c := range []struct {
+		sql  string
+		n    int64
+		left string
+	}{
+		{`DELETE FROM dm WHERE ts < 'infinity'`, 3, "3"},
+		{`DELETE FROM dm WHERE ts = 'now'`, 0, "1,2,3,4"},
+		{`DELETE FROM dm WHERE ts = 'epoch'`, 1, "2,3,4"},
+		{`DELETE FROM dm WHERE d > '-infinity'`, 3, "3"},
+		{`DELETE FROM dm WHERE ts NOT IN ('infinity')`, 3, "3"},
+		{`DELETE FROM dm WHERE d < 'today'`, 3, "3"},
+		{`UPDATE dm SET id = id + 100 WHERE ts = 'infinity'`, 0, "1,2,3,4"},
+		{`UPDATE dm SET id = id + 100 WHERE ts BETWEEN '-infinity' AND 'epoch'`, 1, "2,3,4,101"},
+	} {
+		t.Run(c.sql, func(t *testing.T) {
+			db := tcOpenFixture(t, ctx, "dm", tcDMLRows(), 2, 1)
+			res, err := db.Execute(ctx, c.sql)
+			if err != nil {
+				t.Fatalf("%v (PostgreSQL 17.11: %d rows)", err, c.n)
+			}
+			if res.RowsAffected != c.n {
+				t.Errorf("%s %d, want %d", res.Command, res.RowsAffected, c.n)
+			}
+			q, err := db.Query(ctx, "SELECT id FROM dm ORDER BY id")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var ids []string
+			for i := range q.Rows {
+				ids = append(ids, fmt.Sprint(q.Cells(i)[0]))
+			}
+			if got := strings.Join(ids, ","); got != c.left {
+				t.Errorf("rows left %s, want %s", got, c.left)
+			}
+		})
 	}
 }

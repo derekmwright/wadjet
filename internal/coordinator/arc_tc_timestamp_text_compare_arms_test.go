@@ -56,9 +56,23 @@ var tcRowsSpec = [][4]string{
 	{"8", "1969-12-31 23:59:59.999", "1969-12-31", "2024-02-30"},
 }
 
+// tcToday is row 9: midnight of the day the test runs (UTC), so the clock
+// words have a row to find — `ts = 'today'` and `d = 'today'` answer it and
+// `'yesterday'` / `'tomorrow'` do not — while every other row sits years
+// away from the clock. The answers name row ids only, so the pins hold on
+// any day (a run straddling UTC midnight between the fixture and the query
+// is the one window that would not).
+func tcToday() string { return time.Now().UTC().Format("2006-01-02") }
+
+func tcRowSpecs() [][4]string {
+	return append(append([][4]string(nil), tcRowsSpec...),
+		[4]string{"9", tcToday() + " 00:00:00", tcToday(), "now"})
+}
+
 func tcRows() []map[string]any {
-	rows := make([]map[string]any, len(tcRowsSpec))
-	for i, r := range tcRowsSpec {
+	specs := tcRowSpecs()
+	rows := make([]map[string]any, len(specs))
+	for i, r := range specs {
 		var id int64
 		fmt.Sscan(r[0], &id)
 		m := map[string]any{"id": id, "ts": nil, "d": nil, "s": nil}
@@ -97,7 +111,7 @@ func tcPGFixture() []string {
 		}
 		return "'" + s + "'"
 	}
-	for _, r := range tcRowsSpec {
+	for _, r := range tcRowSpecs() {
 		s := "NULL"
 		if r[3] != "<null>" {
 			s = "'" + r[3] + "'"
@@ -259,6 +273,73 @@ func tcCells() []tcCell {
 				cells = append(cells, tcCell{name: fmt.Sprintf("%s/%s/%q", k.name, c, x), sql: expand(k.tmpl, c, x)})
 			}
 		}
+	}
+	// PostgreSQL's special date/time input words (round 2): 'epoch' is read
+	// by the grammar; 'now' / 'today' / 'tomorrow' / 'yesterday' are resolved
+	// and '±infinity' folded where the planner types the operand; a BC date
+	// and 'allballs' (a time word, refused by both types) stay refused.
+	spOps := []struct{ name, tmpl string }{
+		{"eq", "SELECT id FROM tc_t WHERE {C} = {L} ORDER BY id"},
+		{"ne", "SELECT id FROM tc_t WHERE {C} <> {L} ORDER BY id"},
+		{"lt", "SELECT id FROM tc_t WHERE {C} < {L} ORDER BY id"},
+		{"le", "SELECT id FROM tc_t WHERE {C} <= {L} ORDER BY id"},
+		{"gt", "SELECT id FROM tc_t WHERE {C} > {L} ORDER BY id"},
+		{"ge", "SELECT id FROM tc_t WHERE {C} >= {L} ORDER BY id"},
+		{"lit_left_lt", "SELECT id FROM tc_t WHERE {L} < {C} ORDER BY id"},
+		{"between", "SELECT id FROM tc_t WHERE {C} BETWEEN {L} AND '2030-01-01' ORDER BY id"},
+		{"between_hi", "SELECT id FROM tc_t WHERE {C} BETWEEN '1960-01-01' AND {L} ORDER BY id"},
+		{"not_between", "SELECT id FROM tc_t WHERE {C} NOT BETWEEN {L} AND '2030-01-01' ORDER BY id"},
+		{"in", "SELECT id FROM tc_t WHERE {C} IN ('2000-02-29', {L}) ORDER BY id"},
+		{"in_only", "SELECT id FROM tc_t WHERE {C} IN ({L}) ORDER BY id"},
+		{"not_in", "SELECT id FROM tc_t WHERE {C} NOT IN ('2000-02-29', {L}) ORDER BY id"},
+		{"not_in_only", "SELECT id FROM tc_t WHERE {C} NOT IN ({L}) ORDER BY id"},
+		{"not_distinct", "SELECT id FROM tc_t WHERE {C} IS NOT DISTINCT FROM {L} ORDER BY id"},
+		{"distinct", "SELECT id FROM tc_t WHERE {C} IS DISTINCT FROM {L} ORDER BY id"},
+		{"case", "SELECT id, CASE WHEN {C} < {L} THEN 1 ELSE 0 END FROM tc_t ORDER BY id"},
+		{"select", "SELECT id, {C} < {L}, {C} >= {L} FROM tc_t ORDER BY id"},
+		{"join_on", "SELECT a.id FROM tc_t a JOIN tc_k b ON a.id = b.k AND a.{C} <= {L} ORDER BY 1"},
+		{"having", "SELECT id % 2, count(*) FROM tc_t GROUP BY 1 HAVING max({C}) > {L} ORDER BY 1"},
+		{"or", "SELECT id FROM tc_t WHERE id = 4 OR {C} > {L} ORDER BY id"},
+		{"no_row_reaches", "SELECT id FROM tc_t WHERE id > 100 AND {C} < {L} ORDER BY id"},
+	}
+	spWords := []string{"epoch", " EPOCH ", "infinity", "+infinity", "-infinity", "now", "today",
+		"tomorrow", "yesterday", "2024-01-15 BC", "allballs"}
+	for _, c := range cols {
+		for _, o := range spOps {
+			for _, x := range spWords {
+				cells = append(cells, tcCell{name: fmt.Sprintf("sp/%s/%s/%q", o.name, c, x), sql: expand(o.tmpl, c, x)})
+			}
+		}
+	}
+	// A refused text where no row reaches the comparison, through an operand
+	// that is not a stored column compared directly (review r1 B3).
+	for name, sql := range map[string]string{
+		"b3/cte_norow":        "WITH x AS (SELECT id, ts FROM tc_t) SELECT id FROM x WHERE id > 100 AND ts = 'garbage'",
+		"b3/derived_empty":    "SELECT id FROM (SELECT id, ts FROM tc_e) x WHERE ts = 'garbage'",
+		"b3/union_norow":      "SELECT id FROM (SELECT id, ts FROM tc_t UNION ALL SELECT id, ts FROM tc_t) x WHERE id > 100 AND ts = 'garbage'",
+		"b3/scalar_norow":     "SELECT id FROM tc_t WHERE id > 100 AND (SELECT min(ts) FROM tc_t) = 'garbage'",
+		"b3/coalesce_norow":   "SELECT id FROM tc_t WHERE id > 100 AND COALESCE(ts, TIMESTAMP '2000-01-01') = 'garbage'",
+		"b3/coalesce_empty":   "SELECT id FROM tc_e WHERE COALESCE(ts, TIMESTAMP '2000-01-01') = 'garbage'",
+		"b3/interval_norow":   "SELECT id FROM tc_t WHERE id > 100 AND ts + INTERVAL '1 day' = 'garbage'",
+		"b3/date_trunc_empty": "SELECT id FROM tc_e WHERE date_trunc('day', ts) = '2024-02-30'",
+		"b3/cte_d_norow":      "WITH x AS (SELECT id, d FROM tc_t) SELECT id FROM x WHERE id > 100 AND d = '0000-01-01'",
+		"b3/cast_norow":       "SELECT id FROM tc_t WHERE id > 100 AND CAST(ts AS TIMESTAMP) = 'garbage'",
+	} {
+		cells = append(cells, tcCell{name: name, sql: sql})
+	}
+	// The clock words against the clock functions, in one statement.
+	for name, sql := range map[string]string{
+		"spclock/ts_now":       "SELECT count(*) FROM tc_t WHERE (ts < 'now') IS DISTINCT FROM (ts < CURRENT_TIMESTAMP)",
+		"spclock/ts_today":     "SELECT count(*) FROM tc_t WHERE (ts = 'today') IS DISTINCT FROM (ts = CAST(CURRENT_DATE AS TIMESTAMP))",
+		"spclock/d_today":      "SELECT count(*) FROM tc_t WHERE (d = 'today') IS DISTINCT FROM (d = CURRENT_DATE)",
+		"spclock/d_tomorrow":   "SELECT count(*) FROM tc_t WHERE (d < 'tomorrow') IS DISTINCT FROM (d < CURRENT_DATE + 1)",
+		"spclock/d_yesterday":  "SELECT count(*) FROM tc_t WHERE (d > 'yesterday') IS DISTINCT FROM (d > CURRENT_DATE - 1)",
+		"spclock/d_now":        "SELECT count(*) FROM tc_t WHERE (d = 'now') IS DISTINCT FROM (d = CURRENT_DATE)",
+		"spclock/today_row":    "SELECT id FROM tc_t WHERE d = 'today' AND ts = 'today' ORDER BY id",
+		"spclock/cast_epoch_t": "SELECT CAST('epoch' AS TIMESTAMP)",
+		"spclock/cast_epoch_d": "SELECT CAST('epoch' AS DATE)",
+	} {
+		cells = append(cells, tcCell{name: name, sql: sql})
 	}
 	// A bound parameter: unknown-typed (OID 0), text (25), and the column's
 	// own type (1114 / 1082), text format.
