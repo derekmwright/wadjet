@@ -1236,6 +1236,7 @@ func (d ColDecls) colDecl(n *plansql.ColRef) (parquet.Column, bool) {
 		if t == parquet.TypeDecimal {
 			if m, ok := lookupColDecimal(d.Dec, key); ok {
 				col.Precision, col.Scale = m.Precision, m.Scale
+				col.Unconstrained = m.Unconstrained
 			}
 		}
 		return col, true

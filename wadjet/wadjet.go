@@ -455,6 +455,13 @@ type ColumnMeta struct {
 	// keeps a real typmod only for a BARE column reference. pgTypeMod
 	// treats this the same as Precision <= 0 (FIX 2, #457/#458 fold-in).
 	WireUnconstrained bool
+	// Unconstrained is true for a DECIMAL column that is a bare copy of a
+	// stored column CREATED from an unconstrained numeric — `NUMERIC` with no
+	// precision, or a CREATE TABLE AS column PostgreSQL types as plain numeric
+	// (ADR-0024 §10). Its values print without the stored scale's trailing
+	// zeros (`1.25`, `1`), as PostgreSQL prints its unconstrained column, and
+	// WireUnconstrained is true beside it.
+	Unconstrained bool
 	// Fields is a ROW column's declared field list, in declared ORDER.
 	//
 	// It is here for the reason Precision and Scale are: a bare TypeID is not
@@ -1286,6 +1293,7 @@ func deriveColumnMetas(columns []string, rows []map[string]any, outSchema []parq
 			metas[i].TypeID = col.Type
 			metas[i].TypeName = col.Type.String()
 			metas[i].Precision, metas[i].Scale = col.Precision, col.Scale
+			metas[i].Unconstrained = col.Unconstrained
 			metas[i].Fields = col.Fields
 			metas[i].ElementType = col.ElementType
 			continue
@@ -1297,6 +1305,7 @@ func deriveColumnMetas(columns []string, rows []map[string]any, outSchema []parq
 			metas[i].TypeID = col.Type
 			metas[i].TypeName = col.Type.String()
 			metas[i].Precision, metas[i].Scale = col.Precision, col.Scale
+			metas[i].Unconstrained = col.Unconstrained
 			metas[i].Fields = col.Fields
 			metas[i].ElementType = col.ElementType
 			continue
@@ -1307,6 +1316,7 @@ func deriveColumnMetas(columns []string, rows []map[string]any, outSchema []parq
 			metas[i].TypeID = col.Type
 			metas[i].TypeName = col.Type.String()
 			metas[i].Precision, metas[i].Scale = col.Precision, col.Scale
+			metas[i].Unconstrained = col.Unconstrained
 			metas[i].Fields = col.Fields
 			metas[i].ElementType = col.ElementType
 			continue
@@ -1357,7 +1367,11 @@ func deriveColumnMetas(columns []string, rows []map[string]any, outSchema []parq
 	for i := range metas {
 		if metas[i].TypeID != parquet.TypeDecimal {
 			metas[i].WireUnconstrained = false
+			metas[i].Unconstrained = false
 		}
+		// A column created from an unconstrained numeric is plain numeric on
+		// the wire wherever it is printed as one (ADR-0024 §10).
+		metas[i].WireUnconstrained = metas[i].WireUnconstrained || metas[i].Unconstrained
 		// The same gate for the string family's modifier, and for the same
 		// reason: the plan's map answers the length question without a type
 		// gate, and only here is the resolved type finally known (#838).

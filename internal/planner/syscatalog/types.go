@@ -167,7 +167,9 @@ func TypeOf(c parquet.Column) TypeInfo {
 		info.NumericPrecision, info.NumericPrecisionRadix = int32(53), int32(2)
 	case 1700:
 		info.NumericPrecisionRadix = int32(10)
-		if c.Type == parquet.TypeDecimal && c.Precision > 0 {
+		if c.Type == parquet.TypeDecimal && c.Precision > 0 && !c.Unconstrained {
+			// A column created from an unconstrained numeric is plain
+			// numeric there: typmod −1, NULL precision and scale (ADR-0024 §10).
 			info.Typmod = int32((c.Precision<<16)|(c.Scale&0xFFFF)) + 4
 			info.NumericPrecision, info.NumericScale = int32(c.Precision), int32(c.Scale)
 		}

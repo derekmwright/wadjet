@@ -270,6 +270,18 @@ func (p *Planner) DeclaredOutputSchema(plan *logical.Node) []parquet.Column {
 	return declaredOutputSchema(plan, p.SubqueryOutputColumn)
 }
 
+// DeclaredWireUnconstrained is DeclaredOutputSchema's companion for the wire
+// typmod: the output columns, keyed by DeclaredOutputSchema's names, that
+// PostgreSQL declares plain numeric (typmod −1) — the fold `Plan` stamps on
+// its sink. CREATE TABLE … AS WITH NO DATA reads it to create those columns
+// unconstrained, as the executed arm does from the result (ADR-0024 §10).
+func (p *Planner) DeclaredWireUnconstrained(plan *logical.Node) map[string]bool {
+	if plan == nil {
+		return nil
+	}
+	return declaredWireUnconstrainedDecimal(plan)
+}
+
 // SubqueryOutputColumn resolves a scalar subquery's single declared output
 // column. It recovers from a panic for the reason every plan-time helper on
 // this path does: an unplannable subquery must cost the comparison its

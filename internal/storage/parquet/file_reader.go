@@ -1012,6 +1012,15 @@ func overlayDeclaredLeaf(ic, dc *Column, n *SchemaNode) {
 		// two are describing different files.
 		return
 	}
+	if ic.Type == TypeDecimal && dc.Type == TypeDecimal &&
+		ic.Precision == dc.Precision && ic.Scale == dc.Scale {
+		// The file's DECIMAL annotation decides the type, precision and
+		// scale; the blob adds only whether the column was created from an
+		// unconstrained numeric (Column.Unconstrained, ADR-0024 §10), a
+		// declaration fact no decode or allocation path reads.
+		ic.Unconstrained = dc.Unconstrained
+		return
+	}
 	if n.LogicalType != nil || n.ConvertedType != nil {
 		// The file annotated this leaf, so the file wins — with one
 		// exception: a UTF8 STRING leaf may carry back the name CIDR,

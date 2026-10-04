@@ -83,6 +83,7 @@ func (w *declWalk) declaredOutputSchema(root *logical.Node,
 			// precision 0 (pgTypeMod's "unconstrained") when it cannot be
 			// resolved — the honest fallback, not a fabricated (p,s) (#458).
 			col.Precision, col.Scale = d.Precision, d.Scale
+			col.Unconstrained = projectionBareUnconstrained(proj, childTypes)
 		}
 		out = append(out, col)
 	}
@@ -172,6 +173,7 @@ func (w *declWalk) setOpDeclaredOutputSchema(root *logical.Node) ([]parquet.Colu
 				metas = nil
 			}
 		}
+		out[i].Unconstrained = false
 		if out[i].Type != parquet.TypeDecimal {
 			out[i].Precision, out[i].Scale = 0, 0
 			continue
@@ -184,6 +186,13 @@ func (w *declWalk) setOpDeclaredOutputSchema(root *logical.Node) ([]parquet.Colu
 			continue
 		}
 		out[i].Precision, out[i].Scale = m.Precision, m.Scale
+		// A bare copy of a column created from an unconstrained numeric only
+		// when EVERY arm is one (ADR-0024 §10): an arm of another column
+		// keeps its own text, so the result is not printed as such a column.
+		out[i].Unconstrained = true
+		for _, arm := range arms {
+			out[i].Unconstrained = out[i].Unconstrained && arm[i].Unconstrained
+		}
 	}
 	return out, true
 }
@@ -345,7 +354,8 @@ func projectionKeepsTypmod(proj logical.Projection, decls ColDecls, computed map
 		// Nothing to walk: the value is a copy of the column this projection
 		// names, so it keeps that column's typmod unless something below
 		// computed it.
-		return !computed[strings.ToLower(sourceRefName(proj))]
+		return !computed[strings.ToLower(sourceRefName(proj))] &&
+			!projectionBareUnconstrained(proj, decls)
 	}
 	p, sc, ok := declaredTypmod(proj.ASTExpr, decls, computed)
 	if !ok {
@@ -399,7 +409,9 @@ func declaredTypmod(node plansql.Node, decls ColDecls, computed map[string]bool)
 			// mixes one with a numeric(p,s) disagrees and drops to -1.
 			return 0, 0, true
 		}
-		if c.Precision <= 0 {
+		if c.Precision <= 0 || c.Unconstrained {
+			// A column created from an unconstrained numeric carries
+			// PostgreSQL's typmod −1 (ADR-0024 §10).
 			return 0, 0, false
 		}
 		return c.Precision, c.Scale, true
@@ -1034,7 +1046,35 @@ func declaredProjectionDecimal(proj logical.Projection, decls ColDecls, decMeta 
 	if d.ID != parquet.TypeDecimal || !d.DecKnown {
 		return logical.DecimalMeta{}, false
 	}
-	return logical.DecimalMeta{Precision: d.Precision, Scale: d.Scale}, true
+	return logical.DecimalMeta{Precision: d.Precision, Scale: d.Scale,
+		Unconstrained: projectionBareUnconstrained(proj, decls)}, true
+}
+
+// projectionBareUnconstrained reports a projection that is a bare copy of a
+// stored column created from an unconstrained numeric (ADR-0024 §10): the
+// marker rides a column reference — through a derived table, a CTE, a join,
+// a GROUP BY key — and nothing else. A computed value over such a column is
+// declared by the expression, without it.
+func projectionBareUnconstrained(proj logical.Projection, decls ColDecls) bool {
+	if proj.IsAgg {
+		return false
+	}
+	if proj.ASTExpr != nil && !isSimpleColRefForRename(proj.ASTExpr) {
+		return false
+	}
+	if cr, ok := bareColRefOf(proj.ASTExpr); ok {
+		c, ok := decls.colDecl(cr)
+		return ok && c.Type == parquet.TypeDecimal && c.Unconstrained
+	}
+	ref := proj.Column
+	if ref == "" {
+		ref = cleanExpr(proj.Expr)
+	}
+	if t, ok := lookupColType(decls.Types, ref); !ok || t != parquet.TypeDecimal {
+		return false
+	}
+	m, ok := lookupColDecimal(decls.Dec, ref)
+	return ok && m.Unconstrained
 }
 
 // bareColRefOf unwraps a projection expression that IS a column reference,

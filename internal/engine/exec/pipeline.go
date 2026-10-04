@@ -1260,15 +1260,61 @@ func (s *CollectSink) convert() {
 	}
 	s.rowsDone = true
 	s.applyOutputNames()
-	positional := hasDuplicateColumnName(s.Schema())
+	schema := s.Schema()
+	positional := hasDuplicateColumnName(schema)
 	for i, b := range s.batches {
-		s.Rows = append(s.Rows, b.ToRows()...)
+		rows := b.ToRows()
+		var vals [][]any
 		if positional {
-			s.rowValues = append(s.rowValues, b.ToRowValues()...)
+			vals = b.ToRowValues()
 		}
+		TrimUnconstrainedRows(schema, rows, vals)
+		s.Rows = append(s.Rows, rows...)
+		s.rowValues = append(s.rowValues, vals...)
 		s.batches[i] = nil
 	}
 	s.batches = nil
+}
+
+// TrimUnconstrainedRows is the printer of a column created from an
+// unconstrained numeric (parquet.Column.Unconstrained, ADR-0024 §10): its
+// values leave the engine without the stored scale's trailing zeros
+// (`1.25`, `1`), as PostgreSQL prints its unconstrained numeric column. It is
+// applied where a result is boxed — this sink, and the coordinator's result
+// (SQLResult.Rows, the gRPC stream) — keyed on the result schema's marker, so
+// every door that reads the boxed rows prints the same text. rows is the
+// name-keyed form, vals the positional one (either may be nil).
+func TrimUnconstrainedRows(schema []parquet.Column, rows []map[string]any, vals [][]any) {
+	var trim []int
+	for i, c := range schema {
+		if c.Unconstrained && c.Type == parquet.TypeDecimal {
+			trim = append(trim, i)
+		}
+	}
+	if len(trim) == 0 {
+		return
+	}
+	dup := hasDuplicateColumnName(schema)
+	for _, i := range trim {
+		name := schema[i].Name
+		for _, r := range vals {
+			if i < len(r) {
+				if t, ok := r[i].(string); ok {
+					r[i] = batch.TrimDecimalText(t)
+				}
+			}
+		}
+		if dup {
+			// A name two columns share addresses neither in the map; the
+			// positional form above is the answer for it.
+			continue
+		}
+		for _, r := range rows {
+			if t, ok := r[name].(string); ok {
+				r[name] = batch.TrimDecimalText(t)
+			}
+		}
+	}
 }
 
 // hasDuplicateColumnName reports whether two columns of a schema share a
@@ -1301,7 +1347,36 @@ func (s *CollectSink) Schema() []parquet.Column {
 	if s.schema == nil {
 		return s.SchemaHint
 	}
-	return s.schema
+	return WithPlannedUnconstrained(s.schema, s.SchemaHint)
+}
+
+// WithPlannedUnconstrained gives the executed schema the PLAN's answer to
+// "is this a bare copy of a column created from an unconstrained numeric"
+// (parquet.Column.Unconstrained, ADR-0024 §10), positionally. The vectors
+// cannot say it — a DECIMAL vector carries one scale and no declaration — and
+// the plan's walk is the one every arm reads, so the printed value does not
+// depend on which operator built the vector. A plan that declares a
+// different column count, or a different type at the position, answers
+// nothing.
+func WithPlannedUnconstrained(schema, hint []parquet.Column) []parquet.Column {
+	marked := false
+	for _, c := range schema {
+		marked = marked || c.Unconstrained
+	}
+	for _, c := range hint {
+		marked = marked || c.Unconstrained
+	}
+	if !marked {
+		return schema
+	}
+	out := make([]parquet.Column, len(schema))
+	copy(out, schema)
+	for i := range out {
+		out[i].Unconstrained = len(hint) == len(schema) &&
+			out[i].Type == parquet.TypeDecimal && hint[i].Type == parquet.TypeDecimal &&
+			hint[i].Unconstrained
+	}
+	return out
 }
 
 // applyOutputNames renames this sink's output columns to the names the CLIENT
