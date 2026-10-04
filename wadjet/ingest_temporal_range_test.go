@@ -21,7 +21,9 @@ import (
 // answer every SQL door gives. The writer's box normalisation asks the ONE
 // range question (parquet.DateDaysInRange / TimestampMillisInRange, which
 // expr's constructors read too); it used to store `d = int32(2147483647)` and
-// read it back as 5881580-07-11. The boxes exactly at the ends store.
+// read it back as 5881580-07-11. The boxes exactly at the ends store, and so
+// do the carriers' extremes, which are the infinite values since arc TI
+// (`d = int32(2147483647)` is `infinity`); the integers beside them are 22008.
 func TestIngesterHoldsPostgreSQLTemporalRange(t *testing.T) {
 	ctx := context.Background()
 	db, err := Open(ctx, Config{Store: objstore.NewMemStore(), Bucket: "test"})
@@ -45,7 +47,7 @@ func TestIngesterHoldsPostgreSQLTemporalRange(t *testing.T) {
 		return ing.FlushAll(ctx)
 	}
 	for _, row := range []map[string]any{
-		{"id": int64(1), "d": int32(2147483647)},
+		{"id": int64(1), "d": int32(2147483646)},
 		{"id": int64(2), "d": int64(parquet.MaxDateDay + 1)},
 		{"id": int64(3), "d": int(parquet.MinDateDay - 1)},
 		{"id": int64(4), "d": "5874898-01-01"},
@@ -64,6 +66,7 @@ func TestIngesterHoldsPostgreSQLTemporalRange(t *testing.T) {
 		{"id": int64(11), "d": int64(parquet.MinDateDay)},
 		{"id": int64(12), "ts": int64(parquet.EndTimestampMilli - 1)},
 		{"id": int64(13), "ts": time.Date(2026, 3, 3, 10, 20, 30, 0, time.UTC)},
+		{"id": int64(14), "d": int32(2147483647), "ts": int64(-9223372036854775808)},
 	} {
 		if err := ingestOne(row); err != nil {
 			t.Errorf("ingest %v: %v, want stored (inside the range)", row, err)
@@ -75,7 +78,8 @@ func TestIngesterHoldsPostgreSQLTemporalRange(t *testing.T) {
 	}
 	got := fmt.Sprint(res.Rows)
 	want := "[map[d:5874897-12-31 id:10 ts:<nil>] map[d:-4713-11-24 id:11 ts:<nil>] " +
-		"map[d:<nil> id:12 ts:294276-12-31 23:59:59.999] map[d:<nil> id:13 ts:2026-03-03 10:20:30]]"
+		"map[d:<nil> id:12 ts:294276-12-31 23:59:59.999] map[d:<nil> id:13 ts:2026-03-03 10:20:30] " +
+		"map[d:infinity id:14 ts:-infinity]]"
 	if got != want {
 		t.Errorf("stored rows\n  got  %s\n  want %s", got, want)
 	}

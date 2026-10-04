@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"math/big"
 	"os"
 	"strings"
 	"testing"
@@ -142,9 +143,34 @@ func tiFixtureOK() bool {
 	return pw.Close() == nil
 }
 
+// ti_x holds no temporal column: the infinite values' spellings are also a
+// FLOAT's and a NUMERIC's ('-Infinity'), and an integer, text or boolean
+// column reads them by its own input function. Its cells guard that the
+// temporal grammar never claims a literal beside another type (the
+// row-at-a-time `f > '-Infinity'` once compared the text as text).
+func tiXTable() tmdTable {
+	col := func(n string, t parquet.TypeID) parquet.Column {
+		return parquet.Column{Name: n, Type: t, Nullable: true}
+	}
+	sch := parquet.Schema{Columns: []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64}, col("i", parquet.TypeInt32), col("b", parquet.TypeInt64),
+		col("f", parquet.TypeFloat64), col("r", parquet.TypeFloat32),
+		{Name: "n", Type: parquet.TypeDecimal, Precision: 10, Scale: 2, Nullable: true},
+		col("s", parquet.TypeString), col("bo", parquet.TypeBool),
+	}}
+	rows := []map[string]any{
+		{"id": int64(1), "i": int32(-5), "b": int64(-5), "f": -1e300, "r": float32(-1.5), "n": dtpDecimal128(big.NewInt(-525)), "s": "abc", "bo": true},
+		{"id": int64(2), "i": int32(0), "b": int64(0), "f": 0.0, "r": float32(0), "n": dtpDecimal128(big.NewInt(0)), "s": "infinity", "bo": false},
+		{"id": int64(3), "i": int32(7), "b": int64(7), "f": 1e300, "r": float32(2.5), "n": dtpDecimal128(big.NewInt(775)), "s": "-infinity", "bo": true},
+		{"id": int64(4), "i": nil, "b": nil, "f": nil, "r": nil, "n": nil, "s": nil, "bo": nil},
+	}
+	return tmdTable{name: "ti_x", schema: sch, rows: rows}
+}
+
 func tiTables() []tmdTable {
 	ok := tiFixtureOK()
 	return []tmdTable{
+		tiXTable(),
 		{name: "ti_i", schema: tiSchema("id"), rows: tiRowsOf("id", tiSpec, !ok)},
 		{name: "ti_j", schema: tiSchema("k"), rows: tiRowsOf("k", tjSpec, !ok)},
 		{name: "ti_f", schema: tiSchema("id"), rows: tiRowsOf("id", tiSpec, true)},
@@ -179,6 +205,9 @@ func tiPGFixture() []string {
 		"INSERT INTO ti_f VALUES " + vals(tiSpec, true),
 		"CREATE TABLE ti_p (id bigint, ts timestamp, d date)",
 		"INSERT INTO ti_p VALUES " + vals(tpSpec, false),
+		"CREATE TABLE ti_x (id bigint, i int, b bigint, f double precision, r real, n numeric(10,2), s text, bo boolean)",
+		"INSERT INTO ti_x VALUES (1, -5, -5, -1e300, -1.5, -5.25, 'abc', true), (2, 0, 0, 0, 0, 0, 'infinity', false), " +
+			"(3, 7, 7, 1e300, 2.5, 7.75, '-infinity', true), (4, NULL, NULL, NULL, NULL, NULL, NULL, NULL)",
 		"CREATE TABLE ti_big (id bigint, ts timestamp, d date)",
 		fmt.Sprintf("INSERT INTO ti_big SELECT id, CASE id %% 10 WHEN 0 THEN 'infinity'::timestamp WHEN 1 THEN '-infinity' WHEN 2 THEN NULL "+
 			"ELSE '2000-01-01'::timestamp + id * interval '1 second' END, CASE id %% 10 WHEN 0 THEN 'infinity'::date WHEN 1 THEN '-infinity' "+
@@ -422,6 +451,19 @@ func tiCells() []tcCell {
 			"part_count": "SELECT {C}, max(c) FROM (SELECT {C}, count(*) OVER (PARTITION BY {C}) c FROM ti_big) x WHERE {C} IN ('infinity', '-infinity') GROUP BY {C} ORDER BY {C}",
 		} {
 			add(fmt.Sprintf("big/%s/%s", k, C), strings.ReplaceAll(v, "{C}", C))
+		}
+	}
+	// Beside a column of another type the words are that type's input.
+	for _, C := range []string{"i", "b", "f", "r", "n", "s", "bo"} {
+		for _, x := range []string{"infinity", "-Infinity", "+infinity"} {
+			for k, v := range map[string]string{
+				"lt":   "SELECT id FROM ti_x WHERE {C} < {L} ORDER BY id",
+				"gt":   "SELECT id FROM ti_x WHERE {C} > {L} ORDER BY id",
+				"case": "SELECT id, CASE WHEN {C} > {L} THEN 1 ELSE 0 END FROM ti_x ORDER BY id",
+				"in":   "SELECT id FROM ti_x WHERE {C} IN ({L}) ORDER BY id",
+			} {
+				add(fmt.Sprintf("other/%s/%s/%q", k, C, x), strings.NewReplacer("{C}", C, "{L}", tcQuote(x)).Replace(v))
+			}
 		}
 	}
 	// (1) a bound parameter: unknown-typed (OID 0), text (25) and the column's
