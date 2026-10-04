@@ -1141,6 +1141,16 @@ type ColDecls struct {
 	// double expression planned in 6.6 s against 3.1 s without the category.
 	// Nodes are pointers, so the key is the node's identity.
 	pgMemo map[plansql.Node]pgCategory
+	// declMemo and operandMemo hold, per declared-type walk, what
+	// nodeDeclaredType and decimalArithOperand answered for a node. A call's
+	// declaration asks its arguments several questions — the exact-numeric
+	// rule, the integer domain, the registry's signature — and each asks its
+	// own arguments again, so a chain of mod() calls (which `a % b % c`
+	// parses to) cost a multiple of the level below at every level: sixteen
+	// deep did not plan in ten minutes (#1527). Created by the walk's entry,
+	// like pgMemo.
+	declMemo    map[plansql.Node]declMemoEntry
+	operandMemo map[plansql.Node]operandMemoEntry
 	// subqueryDecl resolves a SCALAR SUBQUERY's single declared output
 	// column, and nil means "this caller cannot ask" — which is what every
 	// construction site that has no Planner leaves it at, and what
@@ -1538,6 +1548,24 @@ func nodeDeclaredType(node plansql.Node, decls ColDecls) (expr.DeclType, expr.Co
 	if decls.pgMemo == nil {
 		decls.pgMemo = map[plansql.Node]pgCategory{}
 	}
+	if decls.declMemo == nil {
+		decls.declMemo = map[plansql.Node]declMemoEntry{}
+	}
+	if e, ok := decls.declMemo[node]; ok {
+		return e.t, e.c
+	}
+	d, c := nodeDeclaredTypeCategory(node, decls)
+	decls.declMemo[node] = declMemoEntry{d, c}
+	return d, c
+}
+
+type declMemoEntry struct {
+	t expr.DeclType
+	c expr.Confidence
+}
+
+// nodeDeclaredTypeCategory is nodeDeclaredType's computation, unmemoized.
+func nodeDeclaredTypeCategory(node plansql.Node, decls ColDecls) (expr.DeclType, expr.Confidence) {
 	d, c := nodeDeclaredTypeOf(node, decls)
 	// PostgreSQL's CATEGORY where it disagrees with the carrier, in one place
 	// for every node kind (ADR-0024 §2c): `5 / 2.0`,

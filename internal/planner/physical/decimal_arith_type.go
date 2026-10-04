@@ -113,6 +113,25 @@ func binOpDecimalOperand(n *plansql.BinaryOp, decls ColDecls) (batch.DecimalType
 // function call, a CAST, a CASE — and the whole expression then declares what
 // it declared before.
 func decimalArithOperand(node plansql.Node, decls ColDecls) (batch.DecimalType, bool, bool) {
+	if decls.operandMemo == nil {
+		decls.operandMemo = map[plansql.Node]operandMemoEntry{}
+	}
+	if e, ok := decls.operandMemo[node]; ok {
+		return e.t, e.isDec, e.isOK
+	}
+	t, isDec, ok := decimalArithOperandOf(node, decls)
+	decls.operandMemo[node] = operandMemoEntry{t, isDec, ok}
+	return t, isDec, ok
+}
+
+type operandMemoEntry struct {
+	t           batch.DecimalType
+	isDec, isOK bool
+}
+
+// decimalArithOperandOf is decimalArithOperand's computation, unmemoized
+// (ColDecls.operandMemo).
+func decimalArithOperandOf(node plansql.Node, decls ColDecls) (batch.DecimalType, bool, bool) {
 	switch n := node.(type) {
 	case *plansql.ParenNode:
 		return decimalArithOperand(n.Inner, decls)
