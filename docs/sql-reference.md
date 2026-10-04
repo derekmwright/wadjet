@@ -982,6 +982,15 @@ SELECT * FROM flow_logs WHERE src_port >= 1024
 SELECT * FROM flow_logs WHERE bytes_out <= 512
 ```
 
+A quoted literal compared with a `TIMESTAMP` or `DATE` column is read by the
+column type's input function, and a text it refuses raises before any row is
+read — `WHERE ts = 'garbage'` is 22007, `WHERE d = '0000-01-01'` 22008,
+`WHERE ts = '2024-01-15 10:30:00+16'` 22009 — in every comparison and
+membership position, in an `UPDATE` / `DELETE` WHERE, and for a bound
+parameter (see [data types](data-types.md)). PostgreSQL's special values and
+named forms (`'infinity'`, `'epoch'`, `'now'`, `'Jan 15 2024'`) are refused
+22007 here where PostgreSQL reads them (postgres-differences.md).
+
 ### Logical Operators
 
 ```sql
