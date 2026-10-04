@@ -2,6 +2,8 @@
 
 package batch
 
+import "github.com/derekmwright/wadjet/internal/storage/parquet"
+
 // MillisPerDay is one DATE step in TIMESTAMP units: a DATE carries epoch
 // days, a TIMESTAMP epoch milliseconds.
 const MillisPerDay = 86_400_000
@@ -50,6 +52,17 @@ func TemporalPairType(a, b TypeID) (TypeID, bool) {
 // the promotion only ever goes this way: a TIMESTAMP is never read at DATE
 // by the pair (a DATE parsed from text is floored to its day by its own
 // input function before it arrives here).
+//
+// An infinite DATE is the infinite TIMESTAMP of the same sign (PostgreSQL's
+// date2timestamp maps DATE_NOBEGIN / DATE_NOEND to DT_NOBEGIN / DT_NOEND),
+// so `DATE 'infinity' = TIMESTAMP 'infinity'` holds and the extreme day count
+// never becomes a finite instant.
 func DateMidnightMillis(days int64) int64 {
+	switch days {
+	case int64(parquet.DatePosInfinity):
+		return parquet.TimestampPosInfinity
+	case int64(parquet.DateNegInfinity):
+		return parquet.TimestampNegInfinity
+	}
 	return days * MillisPerDay
 }

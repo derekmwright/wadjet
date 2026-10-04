@@ -253,11 +253,13 @@ func parseTimestampToEpochMsCachedOK(s string) (int64, bool) {
 // found by `WHERE t = ` that same literal (review B2). One function, one
 // answer, on every path.
 func parseTimestampToEpochMsOK(s string) (int64, bool) {
-	t, ok := parquet.ParseTimestampWallClock(s)
-	if !ok {
+	// ParseTimestampMillis answers what the wall-clock reading's UnixMilli
+	// did, and also the two infinite values, which name no instant.
+	ms, err := parquet.ParseTimestampMillis(s)
+	if err != nil {
 		return 0, false
 	}
-	return t.UnixMilli(), true
+	return ms, true
 }
 
 func toBool(e Expr, b *batch.RecordBatch, row int) bool {

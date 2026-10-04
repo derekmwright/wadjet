@@ -50,10 +50,11 @@ var (
 )
 
 // DateDaysInRange is the write path's question for a DATE-declared box: nil
-// when n is a day PostgreSQL's DATE holds, else its 22008. It IS
-// parquet.DateDaysInRange — one range question for the constructors here, the
-// SQL write doors and the writer's own box normalisation (the embedded
-// ingester API).
+// when n is a day PostgreSQL's DATE holds — one of its two infinite values
+// included — else its 22008. It IS parquet.DateDaysInRange — one range
+// question for the SQL write doors and the writer's own box normalisation
+// (the embedded ingester API). The constructors here ask the FINITE question
+// (parquet.DateDaysFinite): no computation produces an infinite value.
 func DateDaysInRange(n int64) error { return parquet.DateDaysInRange(n) }
 
 // TimestampMillisInRange is DateDaysInRange for a TIMESTAMP-declared box.
@@ -62,7 +63,7 @@ func TimestampMillisInRange(ms int64) error { return parquet.TimestampMillisInRa
 // dateDaysBox is the DATE box of an epoch-day count, refused 22008 outside
 // PostgreSQL's range.
 func dateDaysBox(n int64) int64 {
-	if err := DateDaysInRange(n); err != nil {
+	if err := parquet.DateDaysFinite(n); err != nil {
 		panic(fatalEval{err})
 	}
 	return n

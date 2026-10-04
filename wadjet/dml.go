@@ -2473,6 +2473,12 @@ func assignDateValue(v any, col parquet.Column, srcType parquet.TypeID, srcKnown
 		if err != nil {
 			return nil, err
 		}
+		switch ms {
+		case parquet.TimestampPosInfinity:
+			return parquet.DatePosInfinity, nil
+		case parquet.TimestampNegInfinity:
+			return parquet.DateNegInfinity, nil
+		}
 		t := time.UnixMilli(ms).UTC()
 		return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC), nil
 	}
@@ -2492,7 +2498,26 @@ func assignDateValue(v any, col parquet.Column, srcType parquet.TypeID, srcKnown
 		// to fail there with no SQLSTATE (round-2 review P1).
 		return nil, datatypeMismatchDeclared(v, col, srcType, srcKnown)
 	}
-	return time.Unix(int64(days)*86400, 0).UTC(), nil
+	return dateStoreBox(days), nil
+}
+
+// dateStoreBox is the box the writer receives for a DATE: the time.Time of
+// its midnight, which the partition-key formatter reads, for a finite day,
+// and the carrier's own extreme for an infinite one, which names no instant
+// (a time.Time millions of years out is refused by the writer's range rule).
+func dateStoreBox(days int32) any {
+	if parquet.IsInfiniteDate(int64(days)) {
+		return days
+	}
+	return time.Unix(int64(days)*86400, 0).UTC()
+}
+
+// timestampStoreBox is dateStoreBox for a TIMESTAMP.
+func timestampStoreBox(ms int64) any {
+	if parquet.IsInfiniteTimestamp(ms) {
+		return ms
+	}
+	return time.UnixMilli(ms).UTC()
 }
 
 // assignTimestampValue is assignDateValue's TIMESTAMP twin: every TIMESTAMP
@@ -2509,10 +2534,11 @@ func assignTimestampValue(v any, col parquet.Column, srcType parquet.TypeID, src
 		if err != nil {
 			return nil, err
 		}
-		if expr.TimestampMillisInRange(int64(days)*86400000) != nil {
+		ms := batch.DateMidnightMillis(int64(days))
+		if expr.TimestampMillisInRange(ms) != nil {
 			return nil, sqlerr.New("22008", "date out of range for timestamp")
 		}
-		return time.Unix(int64(days)*86400, 0).UTC(), nil
+		return timestampStoreBox(ms), nil
 	}
 	if srcKnown && srcType != parquet.TypeTimestamp {
 		return nil, datatypeMismatchDeclared(v, col, srcType, srcKnown)
@@ -2528,7 +2554,7 @@ func assignTimestampValue(v any, col parquet.Column, srcType parquet.TypeID, src
 		// assignDateValue's rule: an unreadable box is 42804 (review P1).
 		return nil, datatypeMismatchDeclared(v, col, srcType, srcKnown)
 	}
-	return time.UnixMilli(ms).UTC(), nil
+	return timestampStoreBox(ms), nil
 }
 
 // assignDecimalValue is the R1 fix. An INTEGER box is rendered to its decimal
@@ -3994,13 +4020,13 @@ func convertTemporalValue(s string, typ parquet.TypeID) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		return time.Unix(int64(days)*86400, 0).UTC(), nil
+		return dateStoreBox(days), nil
 	case parquet.TypeTimestamp:
 		ms, err := parquet.ParseTimestampMillis(s)
 		if err != nil {
 			return nil, err
 		}
-		return time.UnixMilli(ms).UTC(), nil
+		return timestampStoreBox(ms), nil
 	default:
 		return parquet.ParseDurationNanos(s)
 	}

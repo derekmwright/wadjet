@@ -3267,7 +3267,17 @@ func appendBinaryCell(buf []byte, val any, colType parquet.TypeID) []byte {
 // than as a wrapped-around instant: the field is fixed at 8 bytes, so there
 // is no way to signal "out of range" other than absence, and a silently
 // wrapped date is exactly the failure mode this whole change is closing.
+//
+// The carrier's two infinite values are PostgreSQL's own infinity encoding,
+// the int64 extremes (DT_NOEND / DT_NOBEGIN).
 func appendBinaryTimestamp(buf []byte, ms int64) []byte {
+	switch ms {
+	case parquet.TimestampPosInfinity, parquet.TimestampNegInfinity:
+		us := ms // MaxInt64 / MinInt64 microseconds on the wire
+		buf = appendInt32(buf, 8)
+		return append(buf, byte(us>>56), byte(us>>48), byte(us>>40), byte(us>>32),
+			byte(us>>24), byte(us>>16), byte(us>>8), byte(us))
+	}
 	const maxMillis = (math.MaxInt64 - pgEpochOffsetMicros) / 1000
 	const minMillis = (math.MinInt64 + pgEpochOffsetMicros) / 1000
 	if ms > maxMillis || ms < minMillis {
@@ -3330,7 +3340,19 @@ const pgEpochDays = 10957
 // so there is no way to say "not a date" other than absence — and writing the
 // text instead, which is what the generic encoder did, hands the client four
 // bytes of ASCII to read as a day count.
+//
+// The two infinite values (the text `infinity` / `-infinity`) are
+// PostgreSQL's own encoding of them, the int32 extremes (DATEVAL_NOEND /
+// DATEVAL_NOBEGIN).
 func appendBinaryDate(buf []byte, s string) []byte {
+	switch s {
+	case "infinity":
+		buf = appendInt32(buf, 4)
+		return appendInt32(buf, math.MaxInt32)
+	case "-infinity":
+		buf = appendInt32(buf, 4)
+		return appendInt32(buf, math.MinInt32)
+	}
 	t, err := time.Parse(time.DateOnly, s)
 	if err != nil {
 		return appendInt32(buf, -1)
