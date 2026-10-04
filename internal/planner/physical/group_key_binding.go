@@ -60,6 +60,10 @@ func (w *declWalk) resolveAggInputName(name string, child *logical.Node) (resolv
 	// because it only ever descends.
 	for n := child; n != nil; {
 		switch {
+		case logical.WindowShadowedBlock(n):
+			// A relation of its own: its items keep the block's names
+			// (logical.WindowShadowedBlock).
+			return resolved, nil, nil, alias
 		case n.Type == logical.NodeProject:
 			// A name qualified by the derived table's own alias (`GROUP BY
 			// u.k`) is looked up bare inside that table's scope — see

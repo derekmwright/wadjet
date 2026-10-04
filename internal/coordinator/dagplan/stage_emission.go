@@ -752,6 +752,15 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 			// scan's (#1102).
 			armMaterialized[ci] = absorbComputedSubqueryProjection(child, (*stages)[childStart:], false) ||
 				setOpArmPublishesItsOwnList(child)
+			// …or because the arm's block was PUBLISHED onto the stage that
+			// terminates it (publishedBlocks): the stream is then the block's
+			// own list, one column per item, which the block's alias names —
+			// a window over a shadowing derived table publishes its block
+			// (markWindowShadowedBlocks), and its `b` is the block's, not the
+			// window input's that the other arm may carry too.
+			if materializedBlockUnder(child, p.publishedBlocks) != nil {
+				armMaterialized[ci] = true
+			}
 			// …and the same materialization for a join input that is a
 			// SELECT list over an AGGREGATE: `(SELECT g, COUNT(*)+1 AS k …
 			// GROUP BY g) b` joined ON b.k names a column the aggregate

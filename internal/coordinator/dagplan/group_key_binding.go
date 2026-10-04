@@ -24,6 +24,11 @@ func resolveShuffleKey(key string, child *logical.Node, published map[*logical.N
 	}
 	resolved := key
 	for n := child; n != nil; {
+		if logical.WindowShadowedBlock(n) {
+			// A relation of its own: its items keep the block's names
+			// (logical.WindowShadowedBlock).
+			return resolved
+		}
 		if n.Type == logical.NodeProject {
 			bare := localPlanFacts.DerivedScopeBareName(resolved, n)
 			proj := localPlanFacts.ProjectionForName(n.Projections, resolved, bare)

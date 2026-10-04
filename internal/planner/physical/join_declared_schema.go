@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/derekmwright/wadjet/internal/planner/logical"
+	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -78,21 +79,48 @@ func (w *declWalk) declaredJoinSchema(n *logical.Node, want []string, published 
 			}
 			return
 		}
-		if top := logical.WindowShadowedInput(cur); top != nil {
+		if cur.Type == logical.NodeWindow && len(cur.Children) == 1 && windowStackOverShadow(cur) {
 			// A WINDOW OVER A DERIVED TABLE THAT SHADOWS ITS INPUT reads
 			// that table's DECLARED columns, which the stage DAG's producer
 			// materializes under their own names (logical.WindowShadowedInput): the
 			// side publishes the table's projection, as a materialized block
-			// does, and not the scan's columns below it.
-			before := make(map[string]bool, len(seen))
-			for k := range seen {
-				before[k] = true
+			// does, and not the scan's columns below it — and then the
+			// window's own columns, which it appends to that stream, in its
+			// emission order. A window stacked over it appends its own after.
+			if top := logical.WindowShadowedInput(cur); top != nil {
+				before := make(map[string]bool, len(seen))
+				for k := range seen {
+					before[k] = true
+				}
+				// The producer computes each declared column composed down
+				// through the derived tables below the table, so a column a
+				// lower table renames (`g AS gk`) is still on the stream; it
+				// is declared as the single-process walk declares the
+				// table's own output.
+				decls := w.emittedColDecls(top)
+				for _, item := range logical.VisibleProjections(top.Projections) {
+					lc := strings.ToLower(blockBareName(projectionOutputName(item)))
+					if lc == "" || before[lc] || seen[lc] || (len(wantSet) > 0 && !wantSet[lc]) {
+						continue
+					}
+					col, ok := decls.colDecl(&plansql.ColRef{Column: lc})
+					if !ok {
+						continue
+					}
+					col.Name, col.Nullable = lc, true
+					seen[lc] = true
+					out = append(out, col)
+				}
+			} else {
+				walk(cur.Children[0])
 			}
-			for _, col := range w.declaredBlockSchema(top, wantSet, published, subqueryDecl) {
-				lc := strings.ToLower(blockBareName(col.Name))
-				if before[lc] {
+			for _, we := range cur.WindowExprs {
+				lc := strings.ToLower(we.OutputCol)
+				if we.OutputCol == "" || seen[lc] || (len(wantSet) > 0 && !wantSet[lc]) {
 					continue
 				}
+				col := declTypeParts(w.windowSpecOutputType(cur, we))
+				col.Name, col.Nullable = we.OutputCol, true
 				seen[lc] = true
 				out = append(out, col)
 			}
@@ -400,4 +428,15 @@ func withDeclaredShape(col, sh parquet.Column) parquet.Column {
 		}
 	}
 	return col
+}
+
+// windowStackOverShadow reports whether a window, or a window it is stacked
+// on, reads a derived table that shadows its input (logical.WindowShadowedInput).
+func windowStackOverShadow(n *logical.Node) bool {
+	for cur := n; cur != nil && cur.Type == logical.NodeWindow && len(cur.Children) == 1; cur = cur.Children[0] {
+		if logical.WindowShadowedInput(cur) != nil {
+			return true
+		}
+	}
+	return false
 }

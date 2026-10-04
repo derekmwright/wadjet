@@ -126,6 +126,7 @@ func (p *StagePlanner) generateStages(node *logical.Node) []Stage {
 	p.cteTerminals = make(map[string]bool)
 	p.cteRefCounts = countCTEReferences(node)
 	p.starReadBlocks = starReadBlockProjections(node)
+	markWindowShadowedBlocks(node, p.starReadBlocks)
 	p.publishedBlocks = map[*logical.Node]bool{}
 	p.scanDeletes = nil
 	p.limitStageRoot = node
