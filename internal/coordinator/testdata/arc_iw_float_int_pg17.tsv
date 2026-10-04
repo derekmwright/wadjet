@@ -1,0 +1,895 @@
+# PostgreSQL 17.11 (postgres:17-alpine), measured by iw_author/pgrun.py over TestArcIWGenerate's cells and fixture.
+f8/smallint/9223372036854775808/cast_col	ERR 22003
+f8/smallint/9223372036854775808/colon_col	ERR 22003
+f8/smallint/9223372036854775808/cast_lit	ERR 22003
+f8/smallint/9223372036854775808/cast_expr	ERR 22003
+f8/integer/9223372036854775808/cast_col	ERR 22003
+f8/integer/9223372036854775808/colon_col	ERR 22003
+f8/integer/9223372036854775808/cast_lit	ERR 22003
+f8/integer/9223372036854775808/cast_expr	ERR 22003
+f8/integer/9223372036854775808/insert_select	ERR 22003 => (0 rows)
+f8/integer/9223372036854775808/insert_values	ERR 22003 => (0 rows)
+f8/integer/9223372036854775808/update	ERR 22003 => 0,7; 1,7
+f8/integer/9223372036854775808/merge_update	ERR 22003 => 0,7; 1,7
+f8/bigint/9223372036854775808/cast_col	ERR 22003
+f8/bigint/9223372036854775808/colon_col	ERR 22003
+f8/bigint/9223372036854775808/cast_lit	ERR 22003
+f8/bigint/9223372036854775808/cast_expr	ERR 22003
+f8/bigint/9223372036854775808/insert_select	ERR 22003 => (0 rows)
+f8/bigint/9223372036854775808/insert_values	ERR 22003 => (0 rows)
+f8/bigint/9223372036854775808/update	ERR 22003 => 0,7; 1,7
+f8/bigint/9223372036854775808/merge_update	ERR 22003 => 0,7; 1,7
+f4/smallint/9223372036854775808/cast_col	ERR 22003
+f4/smallint/9223372036854775808/colon_col	ERR 22003
+f4/smallint/9223372036854775808/cast_lit	ERR 22003
+f4/smallint/9223372036854775808/cast_expr	ERR 22003
+f4/integer/9223372036854775808/cast_col	ERR 22003
+f4/integer/9223372036854775808/colon_col	ERR 22003
+f4/integer/9223372036854775808/cast_lit	ERR 22003
+f4/integer/9223372036854775808/cast_expr	ERR 22003
+f4/integer/9223372036854775808/insert_select	ERR 22003 => (0 rows)
+f4/integer/9223372036854775808/insert_values	ERR 22003 => (0 rows)
+f4/integer/9223372036854775808/update	ERR 22003 => 0,7; 1,7
+f4/bigint/9223372036854775808/cast_col	ERR 22003
+f4/bigint/9223372036854775808/colon_col	ERR 22003
+f4/bigint/9223372036854775808/cast_lit	ERR 22003
+f4/bigint/9223372036854775808/cast_expr	ERR 22003
+f4/bigint/9223372036854775808/insert_select	ERR 22003 => (0 rows)
+f4/bigint/9223372036854775808/insert_values	ERR 22003 => (0 rows)
+f4/bigint/9223372036854775808/update	ERR 22003 => 0,7; 1,7
+f8/smallint/9223372036854774784/cast_col	ERR 22003
+f8/smallint/9223372036854774784/colon_col	ERR 22003
+f8/smallint/9223372036854774784/cast_lit	ERR 22003
+f8/smallint/9223372036854774784/cast_expr	ERR 22003
+f8/integer/9223372036854774784/cast_col	ERR 22003
+f8/integer/9223372036854774784/colon_col	ERR 22003
+f8/integer/9223372036854774784/cast_lit	ERR 22003
+f8/integer/9223372036854774784/cast_expr	ERR 22003
+f8/integer/9223372036854774784/insert_select	ERR 22003 => (0 rows)
+f8/integer/9223372036854774784/insert_values	ERR 22003 => (0 rows)
+f8/integer/9223372036854774784/update	ERR 22003 => 0,7; 2,7
+f8/integer/9223372036854774784/merge_update	ERR 22003 => 0,7; 2,7
+f8/bigint/9223372036854774784/cast_col	9223372036854774784
+f8/bigint/9223372036854774784/colon_col	9223372036854774784
+f8/bigint/9223372036854774784/cast_lit	9223372036854774784
+f8/bigint/9223372036854774784/cast_expr	9223372036854774784
+f8/bigint/9223372036854774784/insert_select	0,1; 2,9223372036854774784
+f8/bigint/9223372036854774784/insert_values	0,1; 2,9223372036854774784
+f8/bigint/9223372036854774784/update	0,1; 2,9223372036854774784
+f8/bigint/9223372036854774784/merge_update	0,1; 2,9223372036854774784
+f4/smallint/9223372036854774784/cast_col	ERR 22003
+f4/smallint/9223372036854774784/colon_col	ERR 22003
+f4/smallint/9223372036854774784/cast_lit	ERR 22003
+f4/smallint/9223372036854774784/cast_expr	ERR 22003
+f4/integer/9223372036854774784/cast_col	ERR 22003
+f4/integer/9223372036854774784/colon_col	ERR 22003
+f4/integer/9223372036854774784/cast_lit	ERR 22003
+f4/integer/9223372036854774784/cast_expr	ERR 22003
+f4/integer/9223372036854774784/insert_select	ERR 22003 => (0 rows)
+f4/integer/9223372036854774784/insert_values	ERR 22003 => (0 rows)
+f4/integer/9223372036854774784/update	ERR 22003 => 0,7; 2,7
+f4/bigint/9223372036854774784/cast_col	ERR 22003
+f4/bigint/9223372036854774784/colon_col	ERR 22003
+f4/bigint/9223372036854774784/cast_lit	ERR 22003
+f4/bigint/9223372036854774784/cast_expr	ERR 22003
+f4/bigint/9223372036854774784/insert_select	ERR 22003 => (0 rows)
+f4/bigint/9223372036854774784/insert_values	ERR 22003 => (0 rows)
+f4/bigint/9223372036854774784/update	ERR 22003 => 0,7; 2,7
+f8/smallint/-9223372036854775808/cast_col	ERR 22003
+f8/smallint/-9223372036854775808/colon_col	ERR 22003
+f8/smallint/-9223372036854775808/cast_lit	ERR 22003
+f8/smallint/-9223372036854775808/cast_expr	ERR 22003
+f8/integer/-9223372036854775808/cast_col	ERR 22003
+f8/integer/-9223372036854775808/colon_col	ERR 22003
+f8/integer/-9223372036854775808/cast_lit	ERR 22003
+f8/integer/-9223372036854775808/cast_expr	ERR 22003
+f8/integer/-9223372036854775808/insert_select	ERR 22003 => (0 rows)
+f8/integer/-9223372036854775808/insert_values	ERR 22003 => (0 rows)
+f8/integer/-9223372036854775808/update	ERR 22003 => 0,7; 3,7
+f8/integer/-9223372036854775808/merge_update	ERR 22003 => 0,7; 3,7
+f8/bigint/-9223372036854775808/cast_col	-9223372036854775808
+f8/bigint/-9223372036854775808/colon_col	-9223372036854775808
+f8/bigint/-9223372036854775808/cast_lit	-9223372036854775808
+f8/bigint/-9223372036854775808/cast_expr	-9223372036854775808
+f8/bigint/-9223372036854775808/insert_select	0,1; 3,-9223372036854775808
+f8/bigint/-9223372036854775808/insert_values	0,1; 3,-9223372036854775808
+f8/bigint/-9223372036854775808/update	0,1; 3,-9223372036854775808
+f8/bigint/-9223372036854775808/merge_update	0,1; 3,-9223372036854775808
+f4/smallint/-9223372036854775808/cast_col	ERR 22003
+f4/smallint/-9223372036854775808/colon_col	ERR 22003
+f4/smallint/-9223372036854775808/cast_lit	ERR 22003
+f4/smallint/-9223372036854775808/cast_expr	ERR 22003
+f4/integer/-9223372036854775808/cast_col	ERR 22003
+f4/integer/-9223372036854775808/colon_col	ERR 22003
+f4/integer/-9223372036854775808/cast_lit	ERR 22003
+f4/integer/-9223372036854775808/cast_expr	ERR 22003
+f4/integer/-9223372036854775808/insert_select	ERR 22003 => (0 rows)
+f4/integer/-9223372036854775808/insert_values	ERR 22003 => (0 rows)
+f4/integer/-9223372036854775808/update	ERR 22003 => 0,7; 3,7
+f4/bigint/-9223372036854775808/cast_col	-9223372036854775808
+f4/bigint/-9223372036854775808/colon_col	-9223372036854775808
+f4/bigint/-9223372036854775808/cast_lit	-9223372036854775808
+f4/bigint/-9223372036854775808/cast_expr	-9223372036854775808
+f4/bigint/-9223372036854775808/insert_select	0,1; 3,-9223372036854775808
+f4/bigint/-9223372036854775808/insert_values	0,1; 3,-9223372036854775808
+f4/bigint/-9223372036854775808/update	0,1; 3,-9223372036854775808
+f8/smallint/-9223372036854777856/cast_col	ERR 22003
+f8/smallint/-9223372036854777856/colon_col	ERR 22003
+f8/smallint/-9223372036854777856/cast_lit	ERR 22003
+f8/smallint/-9223372036854777856/cast_expr	ERR 22003
+f8/integer/-9223372036854777856/cast_col	ERR 22003
+f8/integer/-9223372036854777856/colon_col	ERR 22003
+f8/integer/-9223372036854777856/cast_lit	ERR 22003
+f8/integer/-9223372036854777856/cast_expr	ERR 22003
+f8/integer/-9223372036854777856/insert_select	ERR 22003 => (0 rows)
+f8/integer/-9223372036854777856/insert_values	ERR 22003 => (0 rows)
+f8/integer/-9223372036854777856/update	ERR 22003 => 0,7; 4,7
+f8/integer/-9223372036854777856/merge_update	ERR 22003 => 0,7; 4,7
+f8/bigint/-9223372036854777856/cast_col	ERR 22003
+f8/bigint/-9223372036854777856/colon_col	ERR 22003
+f8/bigint/-9223372036854777856/cast_lit	ERR 22003
+f8/bigint/-9223372036854777856/cast_expr	ERR 22003
+f8/bigint/-9223372036854777856/insert_select	ERR 22003 => (0 rows)
+f8/bigint/-9223372036854777856/insert_values	ERR 22003 => (0 rows)
+f8/bigint/-9223372036854777856/update	ERR 22003 => 0,7; 4,7
+f8/bigint/-9223372036854777856/merge_update	ERR 22003 => 0,7; 4,7
+f4/smallint/-9223372036854777856/cast_col	ERR 22003
+f4/smallint/-9223372036854777856/colon_col	ERR 22003
+f4/smallint/-9223372036854777856/cast_lit	ERR 22003
+f4/smallint/-9223372036854777856/cast_expr	ERR 22003
+f4/integer/-9223372036854777856/cast_col	ERR 22003
+f4/integer/-9223372036854777856/colon_col	ERR 22003
+f4/integer/-9223372036854777856/cast_lit	ERR 22003
+f4/integer/-9223372036854777856/cast_expr	ERR 22003
+f4/integer/-9223372036854777856/insert_select	ERR 22003 => (0 rows)
+f4/integer/-9223372036854777856/insert_values	ERR 22003 => (0 rows)
+f4/integer/-9223372036854777856/update	ERR 22003 => 0,7; 4,7
+f4/bigint/-9223372036854777856/cast_col	-9223372036854775808
+f4/bigint/-9223372036854777856/colon_col	-9223372036854775808
+f4/bigint/-9223372036854777856/cast_lit	-9223372036854775808
+f4/bigint/-9223372036854777856/cast_expr	-9223372036854775808
+f4/bigint/-9223372036854777856/insert_select	0,1; 4,-9223372036854775808
+f4/bigint/-9223372036854777856/insert_values	0,1; 4,-9223372036854775808
+f4/bigint/-9223372036854777856/update	0,1; 4,-9223372036854775808
+f8/smallint/2147483648/cast_col	ERR 22003
+f8/smallint/2147483648/colon_col	ERR 22003
+f8/smallint/2147483648/cast_lit	ERR 22003
+f8/smallint/2147483648/cast_expr	ERR 22003
+f8/integer/2147483648/cast_col	ERR 22003
+f8/integer/2147483648/colon_col	ERR 22003
+f8/integer/2147483648/cast_lit	ERR 22003
+f8/integer/2147483648/cast_expr	ERR 22003
+f8/integer/2147483648/insert_select	ERR 22003 => (0 rows)
+f8/integer/2147483648/insert_values	ERR 22003 => (0 rows)
+f8/integer/2147483648/update	ERR 22003 => 0,7; 5,7
+f8/integer/2147483648/merge_update	ERR 22003 => 0,7; 5,7
+f8/bigint/2147483648/cast_col	2147483648
+f8/bigint/2147483648/colon_col	2147483648
+f8/bigint/2147483648/cast_lit	2147483648
+f8/bigint/2147483648/cast_expr	2147483648
+f8/bigint/2147483648/insert_select	0,1; 5,2147483648
+f8/bigint/2147483648/insert_values	0,1; 5,2147483648
+f8/bigint/2147483648/update	0,1; 5,2147483648
+f8/bigint/2147483648/merge_update	0,1; 5,2147483648
+f4/smallint/2147483648/cast_col	ERR 22003
+f4/smallint/2147483648/colon_col	ERR 22003
+f4/smallint/2147483648/cast_lit	ERR 22003
+f4/smallint/2147483648/cast_expr	ERR 22003
+f4/integer/2147483648/cast_col	ERR 22003
+f4/integer/2147483648/colon_col	ERR 22003
+f4/integer/2147483648/cast_lit	ERR 22003
+f4/integer/2147483648/cast_expr	ERR 22003
+f4/integer/2147483648/insert_select	ERR 22003 => (0 rows)
+f4/integer/2147483648/insert_values	ERR 22003 => (0 rows)
+f4/integer/2147483648/update	ERR 22003 => 0,7; 5,7
+f4/bigint/2147483648/cast_col	2147483648
+f4/bigint/2147483648/colon_col	2147483648
+f4/bigint/2147483648/cast_lit	2147483648
+f4/bigint/2147483648/cast_expr	2147483648
+f4/bigint/2147483648/insert_select	0,1; 5,2147483648
+f4/bigint/2147483648/insert_values	0,1; 5,2147483648
+f4/bigint/2147483648/update	0,1; 5,2147483648
+f8/smallint/2147483647.5/cast_col	ERR 22003
+f8/smallint/2147483647.5/colon_col	ERR 22003
+f8/smallint/2147483647.5/cast_lit	ERR 22003
+f8/smallint/2147483647.5/cast_expr	ERR 22003
+f8/integer/2147483647.5/cast_col	ERR 22003
+f8/integer/2147483647.5/colon_col	ERR 22003
+f8/integer/2147483647.5/cast_lit	ERR 22003
+f8/integer/2147483647.5/cast_expr	ERR 22003
+f8/integer/2147483647.5/insert_select	ERR 22003 => (0 rows)
+f8/integer/2147483647.5/insert_values	ERR 22003 => (0 rows)
+f8/integer/2147483647.5/update	ERR 22003 => 0,7; 6,7
+f8/integer/2147483647.5/merge_update	ERR 22003 => 0,7; 6,7
+f8/bigint/2147483647.5/cast_col	2147483648
+f8/bigint/2147483647.5/colon_col	2147483648
+f8/bigint/2147483647.5/cast_lit	2147483648
+f8/bigint/2147483647.5/cast_expr	2147483648
+f8/bigint/2147483647.5/insert_select	0,1; 6,2147483648
+f8/bigint/2147483647.5/insert_values	0,1; 6,2147483648
+f8/bigint/2147483647.5/update	0,1; 6,2147483648
+f8/bigint/2147483647.5/merge_update	0,1; 6,2147483648
+f4/smallint/2147483647.5/cast_col	ERR 22003
+f4/smallint/2147483647.5/colon_col	ERR 22003
+f4/smallint/2147483647.5/cast_lit	ERR 22003
+f4/smallint/2147483647.5/cast_expr	ERR 22003
+f4/integer/2147483647.5/cast_col	ERR 22003
+f4/integer/2147483647.5/colon_col	ERR 22003
+f4/integer/2147483647.5/cast_lit	ERR 22003
+f4/integer/2147483647.5/cast_expr	ERR 22003
+f4/integer/2147483647.5/insert_select	ERR 22003 => (0 rows)
+f4/integer/2147483647.5/insert_values	ERR 22003 => (0 rows)
+f4/integer/2147483647.5/update	ERR 22003 => 0,7; 6,7
+f4/bigint/2147483647.5/cast_col	2147483648
+f4/bigint/2147483647.5/colon_col	2147483648
+f4/bigint/2147483647.5/cast_lit	2147483648
+f4/bigint/2147483647.5/cast_expr	2147483648
+f4/bigint/2147483647.5/insert_select	0,1; 6,2147483648
+f4/bigint/2147483647.5/insert_values	0,1; 6,2147483648
+f4/bigint/2147483647.5/update	0,1; 6,2147483648
+f8/smallint/2147483647.4/cast_col	ERR 22003
+f8/smallint/2147483647.4/colon_col	ERR 22003
+f8/smallint/2147483647.4/cast_lit	ERR 22003
+f8/smallint/2147483647.4/cast_expr	ERR 22003
+f8/integer/2147483647.4/cast_col	2147483647
+f8/integer/2147483647.4/colon_col	2147483647
+f8/integer/2147483647.4/cast_lit	2147483647
+f8/integer/2147483647.4/cast_expr	2147483647
+f8/integer/2147483647.4/insert_select	0,1; 7,2147483647
+f8/integer/2147483647.4/insert_values	0,1; 7,2147483647
+f8/integer/2147483647.4/update	0,1; 7,2147483647
+f8/integer/2147483647.4/merge_update	0,1; 7,2147483647
+f8/bigint/2147483647.4/cast_col	2147483647
+f8/bigint/2147483647.4/colon_col	2147483647
+f8/bigint/2147483647.4/cast_lit	2147483647
+f8/bigint/2147483647.4/cast_expr	2147483647
+f8/bigint/2147483647.4/insert_select	0,1; 7,2147483647
+f8/bigint/2147483647.4/insert_values	0,1; 7,2147483647
+f8/bigint/2147483647.4/update	0,1; 7,2147483647
+f8/bigint/2147483647.4/merge_update	0,1; 7,2147483647
+f4/smallint/2147483647.4/cast_col	ERR 22003
+f4/smallint/2147483647.4/colon_col	ERR 22003
+f4/smallint/2147483647.4/cast_lit	ERR 22003
+f4/smallint/2147483647.4/cast_expr	ERR 22003
+f4/integer/2147483647.4/cast_col	ERR 22003
+f4/integer/2147483647.4/colon_col	ERR 22003
+f4/integer/2147483647.4/cast_lit	ERR 22003
+f4/integer/2147483647.4/cast_expr	ERR 22003
+f4/integer/2147483647.4/insert_select	ERR 22003 => (0 rows)
+f4/integer/2147483647.4/insert_values	ERR 22003 => (0 rows)
+f4/integer/2147483647.4/update	ERR 22003 => 0,7; 7,7
+f4/bigint/2147483647.4/cast_col	2147483648
+f4/bigint/2147483647.4/colon_col	2147483648
+f4/bigint/2147483647.4/cast_lit	2147483648
+f4/bigint/2147483647.4/cast_expr	2147483648
+f4/bigint/2147483647.4/insert_select	0,1; 7,2147483648
+f4/bigint/2147483647.4/insert_values	0,1; 7,2147483648
+f4/bigint/2147483647.4/update	0,1; 7,2147483648
+f8/smallint/-2147483648.5/cast_col	ERR 22003
+f8/smallint/-2147483648.5/colon_col	ERR 22003
+f8/smallint/-2147483648.5/cast_lit	ERR 22003
+f8/smallint/-2147483648.5/cast_expr	ERR 22003
+f8/integer/-2147483648.5/cast_col	-2147483648
+f8/integer/-2147483648.5/colon_col	-2147483648
+f8/integer/-2147483648.5/cast_lit	-2147483648
+f8/integer/-2147483648.5/cast_expr	-2147483648
+f8/integer/-2147483648.5/insert_select	0,1; 8,-2147483648
+f8/integer/-2147483648.5/insert_values	0,1; 8,-2147483648
+f8/integer/-2147483648.5/update	0,1; 8,-2147483648
+f8/integer/-2147483648.5/merge_update	0,1; 8,-2147483648
+f8/bigint/-2147483648.5/cast_col	-2147483648
+f8/bigint/-2147483648.5/colon_col	-2147483648
+f8/bigint/-2147483648.5/cast_lit	-2147483648
+f8/bigint/-2147483648.5/cast_expr	-2147483648
+f8/bigint/-2147483648.5/insert_select	0,1; 8,-2147483648
+f8/bigint/-2147483648.5/insert_values	0,1; 8,-2147483648
+f8/bigint/-2147483648.5/update	0,1; 8,-2147483648
+f8/bigint/-2147483648.5/merge_update	0,1; 8,-2147483648
+f4/smallint/-2147483648.5/cast_col	ERR 22003
+f4/smallint/-2147483648.5/colon_col	ERR 22003
+f4/smallint/-2147483648.5/cast_lit	ERR 22003
+f4/smallint/-2147483648.5/cast_expr	ERR 22003
+f4/integer/-2147483648.5/cast_col	-2147483648
+f4/integer/-2147483648.5/colon_col	-2147483648
+f4/integer/-2147483648.5/cast_lit	-2147483648
+f4/integer/-2147483648.5/cast_expr	-2147483648
+f4/integer/-2147483648.5/insert_select	0,1; 8,-2147483648
+f4/integer/-2147483648.5/insert_values	0,1; 8,-2147483648
+f4/integer/-2147483648.5/update	0,1; 8,-2147483648
+f4/bigint/-2147483648.5/cast_col	-2147483648
+f4/bigint/-2147483648.5/colon_col	-2147483648
+f4/bigint/-2147483648.5/cast_lit	-2147483648
+f4/bigint/-2147483648.5/cast_expr	-2147483648
+f4/bigint/-2147483648.5/insert_select	0,1; 8,-2147483648
+f4/bigint/-2147483648.5/insert_values	0,1; 8,-2147483648
+f4/bigint/-2147483648.5/update	0,1; 8,-2147483648
+f8/smallint/-2147483648.4/cast_col	ERR 22003
+f8/smallint/-2147483648.4/colon_col	ERR 22003
+f8/smallint/-2147483648.4/cast_lit	ERR 22003
+f8/smallint/-2147483648.4/cast_expr	ERR 22003
+f8/integer/-2147483648.4/cast_col	-2147483648
+f8/integer/-2147483648.4/colon_col	-2147483648
+f8/integer/-2147483648.4/cast_lit	-2147483648
+f8/integer/-2147483648.4/cast_expr	-2147483648
+f8/integer/-2147483648.4/insert_select	0,1; 9,-2147483648
+f8/integer/-2147483648.4/insert_values	0,1; 9,-2147483648
+f8/integer/-2147483648.4/update	0,1; 9,-2147483648
+f8/integer/-2147483648.4/merge_update	0,1; 9,-2147483648
+f8/bigint/-2147483648.4/cast_col	-2147483648
+f8/bigint/-2147483648.4/colon_col	-2147483648
+f8/bigint/-2147483648.4/cast_lit	-2147483648
+f8/bigint/-2147483648.4/cast_expr	-2147483648
+f8/bigint/-2147483648.4/insert_select	0,1; 9,-2147483648
+f8/bigint/-2147483648.4/insert_values	0,1; 9,-2147483648
+f8/bigint/-2147483648.4/update	0,1; 9,-2147483648
+f8/bigint/-2147483648.4/merge_update	0,1; 9,-2147483648
+f4/smallint/-2147483648.4/cast_col	ERR 22003
+f4/smallint/-2147483648.4/colon_col	ERR 22003
+f4/smallint/-2147483648.4/cast_lit	ERR 22003
+f4/smallint/-2147483648.4/cast_expr	ERR 22003
+f4/integer/-2147483648.4/cast_col	-2147483648
+f4/integer/-2147483648.4/colon_col	-2147483648
+f4/integer/-2147483648.4/cast_lit	-2147483648
+f4/integer/-2147483648.4/cast_expr	-2147483648
+f4/integer/-2147483648.4/insert_select	0,1; 9,-2147483648
+f4/integer/-2147483648.4/insert_values	0,1; 9,-2147483648
+f4/integer/-2147483648.4/update	0,1; 9,-2147483648
+f4/bigint/-2147483648.4/cast_col	-2147483648
+f4/bigint/-2147483648.4/colon_col	-2147483648
+f4/bigint/-2147483648.4/cast_lit	-2147483648
+f4/bigint/-2147483648.4/cast_expr	-2147483648
+f4/bigint/-2147483648.4/insert_select	0,1; 9,-2147483648
+f4/bigint/-2147483648.4/insert_values	0,1; 9,-2147483648
+f4/bigint/-2147483648.4/update	0,1; 9,-2147483648
+f8/smallint/32768/cast_col	ERR 22003
+f8/smallint/32768/colon_col	ERR 22003
+f8/smallint/32768/cast_lit	ERR 22003
+f8/smallint/32768/cast_expr	ERR 22003
+f8/integer/32768/cast_col	32768
+f8/integer/32768/colon_col	32768
+f8/integer/32768/cast_lit	32768
+f8/integer/32768/cast_expr	32768
+f8/integer/32768/insert_select	0,1; 10,32768
+f8/integer/32768/insert_values	0,1; 10,32768
+f8/integer/32768/update	0,1; 10,32768
+f8/integer/32768/merge_update	0,1; 10,32768
+f8/bigint/32768/cast_col	32768
+f8/bigint/32768/colon_col	32768
+f8/bigint/32768/cast_lit	32768
+f8/bigint/32768/cast_expr	32768
+f8/bigint/32768/insert_select	0,1; 10,32768
+f8/bigint/32768/insert_values	0,1; 10,32768
+f8/bigint/32768/update	0,1; 10,32768
+f8/bigint/32768/merge_update	0,1; 10,32768
+f4/smallint/32768/cast_col	ERR 22003
+f4/smallint/32768/colon_col	ERR 22003
+f4/smallint/32768/cast_lit	ERR 22003
+f4/smallint/32768/cast_expr	ERR 22003
+f4/integer/32768/cast_col	32768
+f4/integer/32768/colon_col	32768
+f4/integer/32768/cast_lit	32768
+f4/integer/32768/cast_expr	32768
+f4/integer/32768/insert_select	0,1; 10,32768
+f4/integer/32768/insert_values	0,1; 10,32768
+f4/integer/32768/update	0,1; 10,32768
+f4/bigint/32768/cast_col	32768
+f4/bigint/32768/colon_col	32768
+f4/bigint/32768/cast_lit	32768
+f4/bigint/32768/cast_expr	32768
+f4/bigint/32768/insert_select	0,1; 10,32768
+f4/bigint/32768/insert_values	0,1; 10,32768
+f4/bigint/32768/update	0,1; 10,32768
+f8/smallint/32767.5/cast_col	ERR 22003
+f8/smallint/32767.5/colon_col	ERR 22003
+f8/smallint/32767.5/cast_lit	ERR 22003
+f8/smallint/32767.5/cast_expr	ERR 22003
+f8/integer/32767.5/cast_col	32768
+f8/integer/32767.5/colon_col	32768
+f8/integer/32767.5/cast_lit	32768
+f8/integer/32767.5/cast_expr	32768
+f8/integer/32767.5/insert_select	0,1; 11,32768
+f8/integer/32767.5/insert_values	0,1; 11,32768
+f8/integer/32767.5/update	0,1; 11,32768
+f8/integer/32767.5/merge_update	0,1; 11,32768
+f8/bigint/32767.5/cast_col	32768
+f8/bigint/32767.5/colon_col	32768
+f8/bigint/32767.5/cast_lit	32768
+f8/bigint/32767.5/cast_expr	32768
+f8/bigint/32767.5/insert_select	0,1; 11,32768
+f8/bigint/32767.5/insert_values	0,1; 11,32768
+f8/bigint/32767.5/update	0,1; 11,32768
+f8/bigint/32767.5/merge_update	0,1; 11,32768
+f4/smallint/32767.5/cast_col	ERR 22003
+f4/smallint/32767.5/colon_col	ERR 22003
+f4/smallint/32767.5/cast_lit	ERR 22003
+f4/smallint/32767.5/cast_expr	ERR 22003
+f4/integer/32767.5/cast_col	32768
+f4/integer/32767.5/colon_col	32768
+f4/integer/32767.5/cast_lit	32768
+f4/integer/32767.5/cast_expr	32768
+f4/integer/32767.5/insert_select	0,1; 11,32768
+f4/integer/32767.5/insert_values	0,1; 11,32768
+f4/integer/32767.5/update	0,1; 11,32768
+f4/bigint/32767.5/cast_col	32768
+f4/bigint/32767.5/colon_col	32768
+f4/bigint/32767.5/cast_lit	32768
+f4/bigint/32767.5/cast_expr	32768
+f4/bigint/32767.5/insert_select	0,1; 11,32768
+f4/bigint/32767.5/insert_values	0,1; 11,32768
+f4/bigint/32767.5/update	0,1; 11,32768
+f8/smallint/32767.4/cast_col	32767
+f8/smallint/32767.4/colon_col	32767
+f8/smallint/32767.4/cast_lit	32767
+f8/smallint/32767.4/cast_expr	32767
+f8/integer/32767.4/cast_col	32767
+f8/integer/32767.4/colon_col	32767
+f8/integer/32767.4/cast_lit	32767
+f8/integer/32767.4/cast_expr	32767
+f8/integer/32767.4/insert_select	0,1; 12,32767
+f8/integer/32767.4/insert_values	0,1; 12,32767
+f8/integer/32767.4/update	0,1; 12,32767
+f8/integer/32767.4/merge_update	0,1; 12,32767
+f8/bigint/32767.4/cast_col	32767
+f8/bigint/32767.4/colon_col	32767
+f8/bigint/32767.4/cast_lit	32767
+f8/bigint/32767.4/cast_expr	32767
+f8/bigint/32767.4/insert_select	0,1; 12,32767
+f8/bigint/32767.4/insert_values	0,1; 12,32767
+f8/bigint/32767.4/update	0,1; 12,32767
+f8/bigint/32767.4/merge_update	0,1; 12,32767
+f4/smallint/32767.4/cast_col	32767
+f4/smallint/32767.4/colon_col	32767
+f4/smallint/32767.4/cast_lit	32767
+f4/smallint/32767.4/cast_expr	32767
+f4/integer/32767.4/cast_col	32767
+f4/integer/32767.4/colon_col	32767
+f4/integer/32767.4/cast_lit	32767
+f4/integer/32767.4/cast_expr	32767
+f4/integer/32767.4/insert_select	0,1; 12,32767
+f4/integer/32767.4/insert_values	0,1; 12,32767
+f4/integer/32767.4/update	0,1; 12,32767
+f4/bigint/32767.4/cast_col	32767
+f4/bigint/32767.4/colon_col	32767
+f4/bigint/32767.4/cast_lit	32767
+f4/bigint/32767.4/cast_expr	32767
+f4/bigint/32767.4/insert_select	0,1; 12,32767
+f4/bigint/32767.4/insert_values	0,1; 12,32767
+f4/bigint/32767.4/update	0,1; 12,32767
+f8/smallint/-32768.5/cast_col	-32768
+f8/smallint/-32768.5/colon_col	-32768
+f8/smallint/-32768.5/cast_lit	-32768
+f8/smallint/-32768.5/cast_expr	-32768
+f8/integer/-32768.5/cast_col	-32768
+f8/integer/-32768.5/colon_col	-32768
+f8/integer/-32768.5/cast_lit	-32768
+f8/integer/-32768.5/cast_expr	-32768
+f8/integer/-32768.5/insert_select	0,1; 13,-32768
+f8/integer/-32768.5/insert_values	0,1; 13,-32768
+f8/integer/-32768.5/update	0,1; 13,-32768
+f8/integer/-32768.5/merge_update	0,1; 13,-32768
+f8/bigint/-32768.5/cast_col	-32768
+f8/bigint/-32768.5/colon_col	-32768
+f8/bigint/-32768.5/cast_lit	-32768
+f8/bigint/-32768.5/cast_expr	-32768
+f8/bigint/-32768.5/insert_select	0,1; 13,-32768
+f8/bigint/-32768.5/insert_values	0,1; 13,-32768
+f8/bigint/-32768.5/update	0,1; 13,-32768
+f8/bigint/-32768.5/merge_update	0,1; 13,-32768
+f4/smallint/-32768.5/cast_col	-32768
+f4/smallint/-32768.5/colon_col	-32768
+f4/smallint/-32768.5/cast_lit	-32768
+f4/smallint/-32768.5/cast_expr	-32768
+f4/integer/-32768.5/cast_col	-32768
+f4/integer/-32768.5/colon_col	-32768
+f4/integer/-32768.5/cast_lit	-32768
+f4/integer/-32768.5/cast_expr	-32768
+f4/integer/-32768.5/insert_select	0,1; 13,-32768
+f4/integer/-32768.5/insert_values	0,1; 13,-32768
+f4/integer/-32768.5/update	0,1; 13,-32768
+f4/bigint/-32768.5/cast_col	-32768
+f4/bigint/-32768.5/colon_col	-32768
+f4/bigint/-32768.5/cast_lit	-32768
+f4/bigint/-32768.5/cast_expr	-32768
+f4/bigint/-32768.5/insert_select	0,1; 13,-32768
+f4/bigint/-32768.5/insert_values	0,1; 13,-32768
+f4/bigint/-32768.5/update	0,1; 13,-32768
+f8/smallint/-32768.4/cast_col	-32768
+f8/smallint/-32768.4/colon_col	-32768
+f8/smallint/-32768.4/cast_lit	-32768
+f8/smallint/-32768.4/cast_expr	-32768
+f8/integer/-32768.4/cast_col	-32768
+f8/integer/-32768.4/colon_col	-32768
+f8/integer/-32768.4/cast_lit	-32768
+f8/integer/-32768.4/cast_expr	-32768
+f8/integer/-32768.4/insert_select	0,1; 14,-32768
+f8/integer/-32768.4/insert_values	0,1; 14,-32768
+f8/integer/-32768.4/update	0,1; 14,-32768
+f8/integer/-32768.4/merge_update	0,1; 14,-32768
+f8/bigint/-32768.4/cast_col	-32768
+f8/bigint/-32768.4/colon_col	-32768
+f8/bigint/-32768.4/cast_lit	-32768
+f8/bigint/-32768.4/cast_expr	-32768
+f8/bigint/-32768.4/insert_select	0,1; 14,-32768
+f8/bigint/-32768.4/insert_values	0,1; 14,-32768
+f8/bigint/-32768.4/update	0,1; 14,-32768
+f8/bigint/-32768.4/merge_update	0,1; 14,-32768
+f4/smallint/-32768.4/cast_col	-32768
+f4/smallint/-32768.4/colon_col	-32768
+f4/smallint/-32768.4/cast_lit	-32768
+f4/smallint/-32768.4/cast_expr	-32768
+f4/integer/-32768.4/cast_col	-32768
+f4/integer/-32768.4/colon_col	-32768
+f4/integer/-32768.4/cast_lit	-32768
+f4/integer/-32768.4/cast_expr	-32768
+f4/integer/-32768.4/insert_select	0,1; 14,-32768
+f4/integer/-32768.4/insert_values	0,1; 14,-32768
+f4/integer/-32768.4/update	0,1; 14,-32768
+f4/bigint/-32768.4/cast_col	-32768
+f4/bigint/-32768.4/colon_col	-32768
+f4/bigint/-32768.4/cast_lit	-32768
+f4/bigint/-32768.4/cast_expr	-32768
+f4/bigint/-32768.4/insert_select	0,1; 14,-32768
+f4/bigint/-32768.4/insert_values	0,1; 14,-32768
+f4/bigint/-32768.4/update	0,1; 14,-32768
+f8/smallint/NaN/cast_col	ERR 22003
+f8/smallint/NaN/colon_col	ERR 22003
+f8/smallint/NaN/cast_lit	ERR 22003
+f8/smallint/NaN/cast_expr	ERR 22003
+f8/integer/NaN/cast_col	ERR 22003
+f8/integer/NaN/colon_col	ERR 22003
+f8/integer/NaN/cast_lit	ERR 22003
+f8/integer/NaN/cast_expr	ERR 22003
+f8/integer/NaN/insert_select	ERR 22003 => (0 rows)
+f8/integer/NaN/insert_values	ERR 22003 => (0 rows)
+f8/integer/NaN/update	ERR 22003 => 0,7; 15,7
+f8/integer/NaN/merge_update	ERR 22003 => 0,7; 15,7
+f8/bigint/NaN/cast_col	ERR 22003
+f8/bigint/NaN/colon_col	ERR 22003
+f8/bigint/NaN/cast_lit	ERR 22003
+f8/bigint/NaN/cast_expr	ERR 22003
+f8/bigint/NaN/insert_select	ERR 22003 => (0 rows)
+f8/bigint/NaN/insert_values	ERR 22003 => (0 rows)
+f8/bigint/NaN/update	ERR 22003 => 0,7; 15,7
+f8/bigint/NaN/merge_update	ERR 22003 => 0,7; 15,7
+f4/smallint/NaN/cast_col	ERR 22003
+f4/smallint/NaN/colon_col	ERR 22003
+f4/smallint/NaN/cast_lit	ERR 22003
+f4/smallint/NaN/cast_expr	ERR 22003
+f4/integer/NaN/cast_col	ERR 22003
+f4/integer/NaN/colon_col	ERR 22003
+f4/integer/NaN/cast_lit	ERR 22003
+f4/integer/NaN/cast_expr	ERR 22003
+f4/integer/NaN/insert_select	ERR 22003 => (0 rows)
+f4/integer/NaN/insert_values	ERR 22003 => (0 rows)
+f4/integer/NaN/update	ERR 22003 => 0,7; 15,7
+f4/bigint/NaN/cast_col	ERR 22003
+f4/bigint/NaN/colon_col	ERR 22003
+f4/bigint/NaN/cast_lit	ERR 22003
+f4/bigint/NaN/cast_expr	ERR 22003
+f4/bigint/NaN/insert_select	ERR 22003 => (0 rows)
+f4/bigint/NaN/insert_values	ERR 22003 => (0 rows)
+f4/bigint/NaN/update	ERR 22003 => 0,7; 15,7
+f8/smallint/Infinity/cast_col	ERR 22003
+f8/smallint/Infinity/colon_col	ERR 22003
+f8/smallint/Infinity/cast_lit	ERR 22003
+f8/smallint/Infinity/cast_expr	ERR 22003
+f8/integer/Infinity/cast_col	ERR 22003
+f8/integer/Infinity/colon_col	ERR 22003
+f8/integer/Infinity/cast_lit	ERR 22003
+f8/integer/Infinity/cast_expr	ERR 22003
+f8/integer/Infinity/insert_select	ERR 22003 => (0 rows)
+f8/integer/Infinity/insert_values	ERR 22003 => (0 rows)
+f8/integer/Infinity/update	ERR 22003 => 0,7; 16,7
+f8/integer/Infinity/merge_update	ERR 22003 => 0,7; 16,7
+f8/bigint/Infinity/cast_col	ERR 22003
+f8/bigint/Infinity/colon_col	ERR 22003
+f8/bigint/Infinity/cast_lit	ERR 22003
+f8/bigint/Infinity/cast_expr	ERR 22003
+f8/bigint/Infinity/insert_select	ERR 22003 => (0 rows)
+f8/bigint/Infinity/insert_values	ERR 22003 => (0 rows)
+f8/bigint/Infinity/update	ERR 22003 => 0,7; 16,7
+f8/bigint/Infinity/merge_update	ERR 22003 => 0,7; 16,7
+f4/smallint/Infinity/cast_col	ERR 22003
+f4/smallint/Infinity/colon_col	ERR 22003
+f4/smallint/Infinity/cast_lit	ERR 22003
+f4/smallint/Infinity/cast_expr	ERR 22003
+f4/integer/Infinity/cast_col	ERR 22003
+f4/integer/Infinity/colon_col	ERR 22003
+f4/integer/Infinity/cast_lit	ERR 22003
+f4/integer/Infinity/cast_expr	ERR 22003
+f4/integer/Infinity/insert_select	ERR 22003 => (0 rows)
+f4/integer/Infinity/insert_values	ERR 22003 => (0 rows)
+f4/integer/Infinity/update	ERR 22003 => 0,7; 16,7
+f4/bigint/Infinity/cast_col	ERR 22003
+f4/bigint/Infinity/colon_col	ERR 22003
+f4/bigint/Infinity/cast_lit	ERR 22003
+f4/bigint/Infinity/cast_expr	ERR 22003
+f4/bigint/Infinity/insert_select	ERR 22003 => (0 rows)
+f4/bigint/Infinity/insert_values	ERR 22003 => (0 rows)
+f4/bigint/Infinity/update	ERR 22003 => 0,7; 16,7
+f8/smallint/-Infinity/cast_col	ERR 22003
+f8/smallint/-Infinity/colon_col	ERR 22003
+f8/smallint/-Infinity/cast_lit	ERR 22003
+f8/smallint/-Infinity/cast_expr	ERR 22003
+f8/integer/-Infinity/cast_col	ERR 22003
+f8/integer/-Infinity/colon_col	ERR 22003
+f8/integer/-Infinity/cast_lit	ERR 22003
+f8/integer/-Infinity/cast_expr	ERR 22003
+f8/integer/-Infinity/insert_select	ERR 22003 => (0 rows)
+f8/integer/-Infinity/insert_values	ERR 22003 => (0 rows)
+f8/integer/-Infinity/update	ERR 22003 => 0,7; 17,7
+f8/integer/-Infinity/merge_update	ERR 22003 => 0,7; 17,7
+f8/bigint/-Infinity/cast_col	ERR 22003
+f8/bigint/-Infinity/colon_col	ERR 22003
+f8/bigint/-Infinity/cast_lit	ERR 22003
+f8/bigint/-Infinity/cast_expr	ERR 22003
+f8/bigint/-Infinity/insert_select	ERR 22003 => (0 rows)
+f8/bigint/-Infinity/insert_values	ERR 22003 => (0 rows)
+f8/bigint/-Infinity/update	ERR 22003 => 0,7; 17,7
+f8/bigint/-Infinity/merge_update	ERR 22003 => 0,7; 17,7
+f4/smallint/-Infinity/cast_col	ERR 22003
+f4/smallint/-Infinity/colon_col	ERR 22003
+f4/smallint/-Infinity/cast_lit	ERR 22003
+f4/smallint/-Infinity/cast_expr	ERR 22003
+f4/integer/-Infinity/cast_col	ERR 22003
+f4/integer/-Infinity/colon_col	ERR 22003
+f4/integer/-Infinity/cast_lit	ERR 22003
+f4/integer/-Infinity/cast_expr	ERR 22003
+f4/integer/-Infinity/insert_select	ERR 22003 => (0 rows)
+f4/integer/-Infinity/insert_values	ERR 22003 => (0 rows)
+f4/integer/-Infinity/update	ERR 22003 => 0,7; 17,7
+f4/bigint/-Infinity/cast_col	ERR 22003
+f4/bigint/-Infinity/colon_col	ERR 22003
+f4/bigint/-Infinity/cast_lit	ERR 22003
+f4/bigint/-Infinity/cast_expr	ERR 22003
+f4/bigint/-Infinity/insert_select	ERR 22003 => (0 rows)
+f4/bigint/-Infinity/insert_values	ERR 22003 => (0 rows)
+f4/bigint/-Infinity/update	ERR 22003 => 0,7; 17,7
+f8/smallint/0.5/cast_col	0
+f8/smallint/0.5/colon_col	0
+f8/smallint/0.5/cast_lit	0
+f8/smallint/0.5/cast_expr	0
+f8/integer/0.5/cast_col	0
+f8/integer/0.5/colon_col	0
+f8/integer/0.5/cast_lit	0
+f8/integer/0.5/cast_expr	0
+f8/integer/0.5/insert_select	0,1; 18,0
+f8/integer/0.5/insert_values	0,1; 18,0
+f8/integer/0.5/update	0,1; 18,0
+f8/integer/0.5/merge_update	0,1; 18,0
+f8/bigint/0.5/cast_col	0
+f8/bigint/0.5/colon_col	0
+f8/bigint/0.5/cast_lit	0
+f8/bigint/0.5/cast_expr	0
+f8/bigint/0.5/insert_select	0,1; 18,0
+f8/bigint/0.5/insert_values	0,1; 18,0
+f8/bigint/0.5/update	0,1; 18,0
+f8/bigint/0.5/merge_update	0,1; 18,0
+f4/smallint/0.5/cast_col	0
+f4/smallint/0.5/colon_col	0
+f4/smallint/0.5/cast_lit	0
+f4/smallint/0.5/cast_expr	0
+f4/integer/0.5/cast_col	0
+f4/integer/0.5/colon_col	0
+f4/integer/0.5/cast_lit	0
+f4/integer/0.5/cast_expr	0
+f4/integer/0.5/insert_select	0,1; 18,0
+f4/integer/0.5/insert_values	0,1; 18,0
+f4/integer/0.5/update	0,1; 18,0
+f4/bigint/0.5/cast_col	0
+f4/bigint/0.5/colon_col	0
+f4/bigint/0.5/cast_lit	0
+f4/bigint/0.5/cast_expr	0
+f4/bigint/0.5/insert_select	0,1; 18,0
+f4/bigint/0.5/insert_values	0,1; 18,0
+f4/bigint/0.5/update	0,1; 18,0
+f8/smallint/1.5/cast_col	2
+f8/smallint/1.5/colon_col	2
+f8/smallint/1.5/cast_lit	2
+f8/smallint/1.5/cast_expr	2
+f8/integer/1.5/cast_col	2
+f8/integer/1.5/colon_col	2
+f8/integer/1.5/cast_lit	2
+f8/integer/1.5/cast_expr	2
+f8/integer/1.5/insert_select	0,1; 19,2
+f8/integer/1.5/insert_values	0,1; 19,2
+f8/integer/1.5/update	0,1; 19,2
+f8/integer/1.5/merge_update	0,1; 19,2
+f8/bigint/1.5/cast_col	2
+f8/bigint/1.5/colon_col	2
+f8/bigint/1.5/cast_lit	2
+f8/bigint/1.5/cast_expr	2
+f8/bigint/1.5/insert_select	0,1; 19,2
+f8/bigint/1.5/insert_values	0,1; 19,2
+f8/bigint/1.5/update	0,1; 19,2
+f8/bigint/1.5/merge_update	0,1; 19,2
+f4/smallint/1.5/cast_col	2
+f4/smallint/1.5/colon_col	2
+f4/smallint/1.5/cast_lit	2
+f4/smallint/1.5/cast_expr	2
+f4/integer/1.5/cast_col	2
+f4/integer/1.5/colon_col	2
+f4/integer/1.5/cast_lit	2
+f4/integer/1.5/cast_expr	2
+f4/integer/1.5/insert_select	0,1; 19,2
+f4/integer/1.5/insert_values	0,1; 19,2
+f4/integer/1.5/update	0,1; 19,2
+f4/bigint/1.5/cast_col	2
+f4/bigint/1.5/colon_col	2
+f4/bigint/1.5/cast_lit	2
+f4/bigint/1.5/cast_expr	2
+f4/bigint/1.5/insert_select	0,1; 19,2
+f4/bigint/1.5/insert_values	0,1; 19,2
+f4/bigint/1.5/update	0,1; 19,2
+f8/smallint/2.5/cast_col	2
+f8/smallint/2.5/colon_col	2
+f8/smallint/2.5/cast_lit	2
+f8/smallint/2.5/cast_expr	2
+f8/integer/2.5/cast_col	2
+f8/integer/2.5/colon_col	2
+f8/integer/2.5/cast_lit	2
+f8/integer/2.5/cast_expr	2
+f8/integer/2.5/insert_select	0,1; 20,2
+f8/integer/2.5/insert_values	0,1; 20,2
+f8/integer/2.5/update	0,1; 20,2
+f8/integer/2.5/merge_update	0,1; 20,2
+f8/bigint/2.5/cast_col	2
+f8/bigint/2.5/colon_col	2
+f8/bigint/2.5/cast_lit	2
+f8/bigint/2.5/cast_expr	2
+f8/bigint/2.5/insert_select	0,1; 20,2
+f8/bigint/2.5/insert_values	0,1; 20,2
+f8/bigint/2.5/update	0,1; 20,2
+f8/bigint/2.5/merge_update	0,1; 20,2
+f4/smallint/2.5/cast_col	2
+f4/smallint/2.5/colon_col	2
+f4/smallint/2.5/cast_lit	2
+f4/smallint/2.5/cast_expr	2
+f4/integer/2.5/cast_col	2
+f4/integer/2.5/colon_col	2
+f4/integer/2.5/cast_lit	2
+f4/integer/2.5/cast_expr	2
+f4/integer/2.5/insert_select	0,1; 20,2
+f4/integer/2.5/insert_values	0,1; 20,2
+f4/integer/2.5/update	0,1; 20,2
+f4/bigint/2.5/cast_col	2
+f4/bigint/2.5/colon_col	2
+f4/bigint/2.5/cast_lit	2
+f4/bigint/2.5/cast_expr	2
+f4/bigint/2.5/insert_select	0,1; 20,2
+f4/bigint/2.5/insert_values	0,1; 20,2
+f4/bigint/2.5/update	0,1; 20,2
+f8/smallint/-0.5/cast_col	0
+f8/smallint/-0.5/colon_col	0
+f8/smallint/-0.5/cast_lit	0
+f8/smallint/-0.5/cast_expr	0
+f8/integer/-0.5/cast_col	0
+f8/integer/-0.5/colon_col	0
+f8/integer/-0.5/cast_lit	0
+f8/integer/-0.5/cast_expr	0
+f8/integer/-0.5/insert_select	0,1; 21,0
+f8/integer/-0.5/insert_values	0,1; 21,0
+f8/integer/-0.5/update	0,1; 21,0
+f8/integer/-0.5/merge_update	0,1; 21,0
+f8/bigint/-0.5/cast_col	0
+f8/bigint/-0.5/colon_col	0
+f8/bigint/-0.5/cast_lit	0
+f8/bigint/-0.5/cast_expr	0
+f8/bigint/-0.5/insert_select	0,1; 21,0
+f8/bigint/-0.5/insert_values	0,1; 21,0
+f8/bigint/-0.5/update	0,1; 21,0
+f8/bigint/-0.5/merge_update	0,1; 21,0
+f4/smallint/-0.5/cast_col	0
+f4/smallint/-0.5/colon_col	0
+f4/smallint/-0.5/cast_lit	0
+f4/smallint/-0.5/cast_expr	0
+f4/integer/-0.5/cast_col	0
+f4/integer/-0.5/colon_col	0
+f4/integer/-0.5/cast_lit	0
+f4/integer/-0.5/cast_expr	0
+f4/integer/-0.5/insert_select	0,1; 21,0
+f4/integer/-0.5/insert_values	0,1; 21,0
+f4/integer/-0.5/update	0,1; 21,0
+f4/bigint/-0.5/cast_col	0
+f4/bigint/-0.5/colon_col	0
+f4/bigint/-0.5/cast_lit	0
+f4/bigint/-0.5/cast_expr	0
+f4/bigint/-0.5/insert_select	0,1; 21,0
+f4/bigint/-0.5/insert_values	0,1; 21,0
+f4/bigint/-0.5/update	0,1; 21,0
+f8/smallint/-1.5/cast_col	-2
+f8/smallint/-1.5/colon_col	-2
+f8/smallint/-1.5/cast_lit	-2
+f8/smallint/-1.5/cast_expr	-2
+f8/integer/-1.5/cast_col	-2
+f8/integer/-1.5/colon_col	-2
+f8/integer/-1.5/cast_lit	-2
+f8/integer/-1.5/cast_expr	-2
+f8/integer/-1.5/insert_select	0,1; 22,-2
+f8/integer/-1.5/insert_values	0,1; 22,-2
+f8/integer/-1.5/update	0,1; 22,-2
+f8/integer/-1.5/merge_update	0,1; 22,-2
+f8/bigint/-1.5/cast_col	-2
+f8/bigint/-1.5/colon_col	-2
+f8/bigint/-1.5/cast_lit	-2
+f8/bigint/-1.5/cast_expr	-2
+f8/bigint/-1.5/insert_select	0,1; 22,-2
+f8/bigint/-1.5/insert_values	0,1; 22,-2
+f8/bigint/-1.5/update	0,1; 22,-2
+f8/bigint/-1.5/merge_update	0,1; 22,-2
+f4/smallint/-1.5/cast_col	-2
+f4/smallint/-1.5/colon_col	-2
+f4/smallint/-1.5/cast_lit	-2
+f4/smallint/-1.5/cast_expr	-2
+f4/integer/-1.5/cast_col	-2
+f4/integer/-1.5/colon_col	-2
+f4/integer/-1.5/cast_lit	-2
+f4/integer/-1.5/cast_expr	-2
+f4/integer/-1.5/insert_select	0,1; 22,-2
+f4/integer/-1.5/insert_values	0,1; 22,-2
+f4/integer/-1.5/update	0,1; 22,-2
+f4/bigint/-1.5/cast_col	-2
+f4/bigint/-1.5/colon_col	-2
+f4/bigint/-1.5/cast_lit	-2
+f4/bigint/-1.5/cast_expr	-2
+f4/bigint/-1.5/insert_select	0,1; 22,-2
+f4/bigint/-1.5/insert_values	0,1; 22,-2
+f4/bigint/-1.5/update	0,1; 22,-2
+f8/smallint/-0/cast_col	0
+f8/smallint/-0/colon_col	0
+f8/smallint/-0/cast_lit	0
+f8/smallint/-0/cast_expr	0
+f8/integer/-0/cast_col	0
+f8/integer/-0/colon_col	0
+f8/integer/-0/cast_lit	0
+f8/integer/-0/cast_expr	0
+f8/integer/-0/insert_select	0,1; 23,0
+f8/integer/-0/insert_values	0,1; 23,0
+f8/integer/-0/update	0,1; 23,0
+f8/integer/-0/merge_update	0,1; 23,0
+f8/bigint/-0/cast_col	0
+f8/bigint/-0/colon_col	0
+f8/bigint/-0/cast_lit	0
+f8/bigint/-0/cast_expr	0
+f8/bigint/-0/insert_select	0,1; 23,0
+f8/bigint/-0/insert_values	0,1; 23,0
+f8/bigint/-0/update	0,1; 23,0
+f8/bigint/-0/merge_update	0,1; 23,0
+f4/smallint/-0/cast_col	0
+f4/smallint/-0/colon_col	0
+f4/smallint/-0/cast_lit	0
+f4/smallint/-0/cast_expr	0
+f4/integer/-0/cast_col	0
+f4/integer/-0/colon_col	0
+f4/integer/-0/cast_lit	0
+f4/integer/-0/cast_expr	0
+f4/integer/-0/insert_select	0,1; 23,0
+f4/integer/-0/insert_values	0,1; 23,0
+f4/integer/-0/update	0,1; 23,0
+f4/bigint/-0/cast_col	0
+f4/bigint/-0/colon_col	0
+f4/bigint/-0/cast_lit	0
+f4/bigint/-0/cast_expr	0
+f4/bigint/-0/insert_select	0,1; 23,0
+f4/bigint/-0/insert_values	0,1; 23,0
+f4/bigint/-0/update	0,1; 23,0
+f8/smallint/1e300/cast_col	ERR 22003
+f8/smallint/1e300/colon_col	ERR 22003
+f8/smallint/1e300/cast_lit	ERR 22003
+f8/smallint/1e300/cast_expr	ERR 22003
+f8/integer/1e300/cast_col	ERR 22003
+f8/integer/1e300/colon_col	ERR 22003
+f8/integer/1e300/cast_lit	ERR 22003
+f8/integer/1e300/cast_expr	ERR 22003
+f8/integer/1e300/insert_select	ERR 22003 => (0 rows)
+f8/integer/1e300/insert_values	ERR 22003 => (0 rows)
+f8/integer/1e300/update	ERR 22003 => 0,7; 24,7
+f8/integer/1e300/merge_update	ERR 22003 => 0,7; 24,7
+f8/bigint/1e300/cast_col	ERR 22003
+f8/bigint/1e300/colon_col	ERR 22003
+f8/bigint/1e300/cast_lit	ERR 22003
+f8/bigint/1e300/cast_expr	ERR 22003
+f8/bigint/1e300/insert_select	ERR 22003 => (0 rows)
+f8/bigint/1e300/insert_values	ERR 22003 => (0 rows)
+f8/bigint/1e300/update	ERR 22003 => 0,7; 24,7
+f8/bigint/1e300/merge_update	ERR 22003 => 0,7; 24,7

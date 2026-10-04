@@ -308,3 +308,15 @@ func TestConstArithLiftStopsWhereANameCanBeRebound(t *testing.T) {
 		})
 	}
 }
+
+// A statistic carried as a double reads as an exact integer only when it has
+// an int64 (#1484): the shared bound refuses 2^63 — whose int64 conversion is
+// MinInt64, a lower bound posing as an upper one — and the lift declines.
+func TestCAAStatIntSharesTheFloatBound(t *testing.T) {
+	if b, ok := caaStatInt(float64(0x1p63)); ok {
+		t.Fatalf("caaStatInt(2^63) = %v, want declined", b)
+	}
+	if b, ok := caaStatInt(float64(-0x1p63)); !ok || b.Int64() != -1<<63 {
+		t.Fatalf("caaStatInt(-2^63) = %v, %v; want -9223372036854775808", b, ok)
+	}
+}
