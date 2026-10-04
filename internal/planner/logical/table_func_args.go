@@ -3,6 +3,7 @@
 package logical
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 
@@ -30,30 +31,61 @@ func foldTableFuncArgs(fn string, args []string, exprs []plansql.Node) ([]string
 				"%s: argument %d (%s) must be a constant expression here; a column or subquery reference is not supported",
 				fn, i+1, e.String())
 		}
-		c, err := expr.Compile(e)
+		// An argument that reads the clock is folded here from a clock read
+		// for this fold alone — it serves the plan's declarations; the
+		// physical planner re-folds it with the statement's (FuncClockArgs).
+		v, err := FoldTableFuncArg(e, expr.WithStatementClock(expr.StartStatement(context.Background())))
 		if err != nil {
 			return nil, err
 		}
-		v, err := evalConstant(c)
-		if err != nil {
-			return nil, err
-		}
-		switch x := v.(type) {
-		case nil:
-			out[i] = "NULL"
-		case string:
-			out[i] = x
-		case int64:
-			out[i] = strconv.FormatInt(x, 10)
-		case int32:
-			out[i] = strconv.FormatInt(int64(x), 10)
-		case float64:
-			out[i] = strconv.FormatFloat(x, 'g', -1, 64)
-		default:
-			out[i] = fmt.Sprint(x)
-		}
+		out[i] = v
 	}
 	return out, nil
+}
+
+// FoldTableFuncArg evaluates one constant table-function argument to the text
+// its source reads. opts reach the compile: the physical planner re-folds an
+// argument that reads the clock with the statement's (Node.FuncClockArgs,
+// #1566) — this layer has no statement, so its own fold reads the live clock
+// and serves only the plan's declarations.
+func FoldTableFuncArg(e plansql.Node, opts ...expr.CompileOption) (string, error) {
+	c, err := expr.Compile(e, opts...)
+	if err != nil {
+		return "", err
+	}
+	v, err := evalConstant(c)
+	if err != nil {
+		return "", err
+	}
+	switch x := v.(type) {
+	case nil:
+		return "NULL", nil
+	case string:
+		return x, nil
+	case int64:
+		return strconv.FormatInt(x, 10), nil
+	case int32:
+		return strconv.FormatInt(int64(x), 10), nil
+	case float64:
+		return strconv.FormatFloat(x, 'g', -1, 64), nil
+	default:
+		return fmt.Sprint(x), nil
+	}
+}
+
+// tableFuncClockArgs is the arguments, by position, that read a SQL clock
+// function — the ones the physical planner re-folds with the statement clock.
+func tableFuncClockArgs(exprs []plansql.Node) map[int]plansql.Node {
+	var out map[int]plansql.Node
+	for i, e := range exprs {
+		if e != nil && readsClock(e) {
+			if out == nil {
+				out = map[int]plansql.Node{}
+			}
+			out[i] = e
+		}
+	}
+	return out
 }
 
 // evalConstant evaluates a constant expression, turning a raised SQL error

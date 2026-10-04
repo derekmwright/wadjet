@@ -119,6 +119,24 @@ func (p *Planner) buildScan(ctx context.Context, node *logical.Node) (exec.Sourc
 		// — the same bypass #859's column policies had. The decision itself
 		// lives in `internal/auth`, which imports this package, so it arrives
 		// as a guard on the context (#943).
+		if len(node.FuncClockArgs) > 0 {
+			// The arguments that read the clock read the STATEMENT's (#1566);
+			// the builder folded them with none.
+			args := append([]string(nil), node.FuncArgs...)
+			for i, e := range node.FuncClockArgs {
+				if i >= len(args) {
+					continue
+				}
+				v, err := logical.FoldTableFuncArg(e, p.clockOption())
+				if err != nil {
+					return nil, nil, nil, err
+				}
+				args[i] = v
+			}
+			n := *node
+			n.FuncArgs = args
+			node = &n
+		}
 		if guard := logical.TableFuncGuardFromContext(ctx); guard != nil {
 			if err := guard(node.FuncName, node.FuncArgs, node.FuncNamedArgs); err != nil {
 				return nil, nil, nil, err

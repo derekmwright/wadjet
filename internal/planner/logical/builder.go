@@ -1918,6 +1918,7 @@ func resolveTableOrCTE(table *plansql.TableRef, ctes []plansql.CTEDef) (*Node, e
 				return nil, err
 			}
 			node.FuncArgs = folded
+			node.FuncClockArgs = tableFuncClockArgs(table.FuncArgExprs)
 		}
 		node.FuncNamedArgs = table.FuncNamedArgs
 		node.WithOrdinality = table.WithOrdinality
