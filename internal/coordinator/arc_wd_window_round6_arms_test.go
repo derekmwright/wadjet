@@ -173,3 +173,30 @@ func TestArcWDTypedNullDefaultEveryArm(t *testing.T) {
 	wdRunCells(t, "testdata/arc_wd_typed_null_default_cells.tsv", "testdata/arc_wd_typed_null_default_pg17.tsv",
 		func(string) bool { return false })
 }
+
+// A CONSUMER ABOVE A JOIN OF ANY KIND OVER A WINDOW ON A SHADOWING DERIVED
+// TABLE (#1435 round 7): `wd_t y JOIN (SELECT id, g, SUM(b) OVER (…) AS w, b
+// AS w3, b FROM (SELECT id, g, b * 2 AS b FROM wd_t) s) x` read by the SELECT
+// list (qualified and bare), an aggregate, HAVING, GROUP BY, a window, WHERE,
+// ORDER BY + LIMIT, DISTINCT, a second join keyed on the arm's column, a UNION
+// ALL arm and a scalar subquery; INNER, LEFT, RIGHT, FULL, CROSS and a keyless
+// LEFT join, the window arm second or first, one or two levels of derived
+// tables, with and without a filter inside them (nowin/: the same table
+// without a window, the control). The block the window is read through
+// publishes its own list onto the window stage and the join names that arm by
+// the block's alias, so `x.w3` and `x.b` are the block's columns, never the
+// probe's bare `b`. At 9655ef07 an aggregate read the probe's `b` for `x.w3`
+// (180 where PostgreSQL answers 360; 8b00b112 refused), and DISTINCT, GROUP
+// BY, the SELECT list's `x.b`, a second join and a window read it on the
+// three DAG arms. Cells that route to the coordinator-local pipeline at base
+// (ORDER BY … LIMIT, a scalar subquery, every nowin/ cell) keep their route.
+func TestArcWDJoinConsumersEveryArm(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: five arms over a join above a window on a shadowing derived table")
+	}
+	wdRunCells(t, "testdata/arc_wd_join_consumers_cells.tsv", "testdata/arc_wd_join_consumers_pg17.tsv",
+		func(name string) bool {
+			return !strings.HasPrefix(name, "j7/nowin") && !strings.HasSuffix(name, "/scal") &&
+				!strings.HasSuffix(name, "/sort")
+		})
+}
