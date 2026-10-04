@@ -7,7 +7,6 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
-	"time"
 
 	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
 	"github.com/derekmwright/wadjet/internal/engine/expr"
@@ -387,9 +386,16 @@ func makeRowPred(colName string, typ parquet.TypeID, sc logical.Predicate) (scan
 		}
 	case parquet.TypeDate:
 		if str, ok := sc.Value.(string); ok {
-			if ts, err := time.Parse("2006-01-02", str); err == nil {
-				return scan.RowPred{Col: colName, Op: sc.Op, Value: ts.Unix() / 86400}, true
+			// The DATE input function the filter kernel reads; a text it
+			// refuses DECLINES, so no row is withheld from the kernel that
+			// raises its 22007 / 22008 / 22009. time.Parse read '0000-01-01'
+			// as year zero — a day no row holds — and the scan returned
+			// nothing for the kernel to refuse (#1512).
+			d, err := parquet.ParseDateDays(str)
+			if err != nil {
+				return scan.RowPred{}, false
 			}
+			return scan.RowPred{Col: colName, Op: sc.Op, Value: int64(d)}, true
 		}
 		if v, ok := sc.Value.(int64); ok {
 			return scan.RowPred{Col: colName, Op: sc.Op, Value: v}, true

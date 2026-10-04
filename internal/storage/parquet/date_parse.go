@@ -757,30 +757,6 @@ func ParseTimestampZone(s string) (wall time.Time, offsetSeconds int, hasZone bo
 	return wall, tt.offsetSeconds, tt.hasZone, true
 }
 
-// ParseTimestampMillisOrZero is the COMPARISON contract: the epoch
-// millisecond value, or 0 for text that names no timestamp.
-//
-// It exists so the comparison kernels stop carrying their own copy of the
-// layout list. They had two, and both had DRIFTED from the writer's — the
-// space-separated millisecond form stored fine and no predicate could read it
-// back — while the doc comment on timestampLayouts asserted the three were the
-// same list. A literal that STORES has to be a literal a predicate over the
-// same column reads the same way, and one function is the only way to keep
-// that true (#692).
-//
-// Zero is 1970-01-01 00:00:00, a value a TIMESTAMP column can hold: a
-// refused spelling compared with a column matches a row holding the epoch
-// (`ts = 'garbage'`), where PostgreSQL raises 22007 — a known wrong value of
-// the comparison kernels, which should raise as CAST does. A WRITE never
-// reads through here: the writer's entry point above returns the error.
-func ParseTimestampMillisOrZero(s string) int64 {
-	ms, err := ParseTimestampMillis(s)
-	if err != nil {
-		return 0
-	}
-	return ms
-}
-
 // WallClockMillis reads a parsed timestamp as PostgreSQL's
 // `timestamp without time zone` does and returns it in the engine's ONE
 // TIMESTAMP unit, epoch MILLISECONDS: the WALL-CLOCK FIELDS are the value and

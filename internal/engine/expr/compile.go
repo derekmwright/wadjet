@@ -981,12 +981,16 @@ func tryTemporalLit(col *ColRef, other Expr, op CmpOp, flip bool) *CmpTemporalLi
 	if !ok {
 		return nil
 	}
-	days, dok := parseDateToEpochDaysOK(s)
-	ms, mok := parseTimestampToEpochMsOK(s)
-	if !dok && !mok {
+	// Each unit through its type's own input function, keeping the refusal:
+	// a text one type reads and the other refuses ('294277-01-01' is a DATE
+	// and past TIMESTAMP's range) left the refused unit at 0, so a TIMESTAMP
+	// column met the epoch (#1512). The node raises it for that type's column.
+	days, derr := parquet.ParseDateDays(s)
+	ms, merr := parquet.ParseTimestampMillis(s)
+	if derr != nil && merr != nil {
 		return nil
 	}
-	return &CmpTemporalLit{Col: col, Lit: s, Op: op, Flip: flip, days: days, ms: ms}
+	return &CmpTemporalLit{Col: col, Lit: s, Op: op, Flip: flip, days: int64(days), ms: ms, daysErr: derr, msErr: merr}
 }
 
 // tryNetworkLit pre-parses string literals as IPv4, MAC, IPv6 and CIDR;

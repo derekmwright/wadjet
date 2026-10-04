@@ -104,11 +104,28 @@ func TestParseTemporalInt64OKDateAndTimestampCachesDoNotCollide(t *testing.T) {
 // a DATE column boxUnknown, per its own doc comment, so it falls through to
 // compare() rather than a declaration-driven rule). Running it over several
 // rows and two separate batches exercises the SAME cached literals
-// repeatedly, the way a real scan-pushed filter does, and a malformed
-// member in the same list must keep refusing (never match, never corrupt
-// the other members' answers) after the cache has warmed.
+// repeatedly, the way a real scan-pushed filter does. A malformed member in
+// the same list is PostgreSQL's 22007 for the whole statement (#1512): it
+// used to answer by the other members, matching no row for itself.
 func TestTemporalFallbackOverMultipleRowsAndBatches(t *testing.T) {
-	e := compileExprSQL(t, "d IN ('1998-01-01', 'not-a-date', '1999-03-06')")
+	bad := compileExprSQL(t, "d IN ('1998-01-01', 'not-a-date', '1999-03-06')")
+	func() {
+		defer func() {
+			fe, ok := recover().(fatalEval)
+			if !ok {
+				t.Fatalf("a malformed DATE member did not raise")
+			}
+			if c, ok := fe.err.(interface{ SQLState() string }); !ok || c.SQLState() != "22007" {
+				t.Fatalf("a malformed DATE member raised %v, want 22007", fe.err)
+			}
+		}()
+		schema := []parquet.Column{{Name: "d", Type: parquet.TypeDate}}
+		b := batch.NewRecordBatch(schema, 1)
+		b.Columns[0].SetValue(0, int32(1))
+		b.Len = 1
+		bad.(*In).EvalBool(b, 0)
+	}()
+	e := compileExprSQL(t, "d IN ('1998-01-01', '1999-03-06')")
 	in, ok := e.(*In)
 	if !ok {
 		t.Fatalf("compiled to %T, want *In", e)

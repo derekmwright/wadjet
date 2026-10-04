@@ -4,6 +4,7 @@ package exec
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -176,15 +177,20 @@ func ColumnCompareLit(colName string, op CompareOp, value any, litText string) P
 	// comparison or a segfault, not merely a stale value. Hoisting also
 	// removes the branch from the row loop.
 	strVal := fmt.Sprint(value)
-	intVal := toInt64(value)
+	// TIMESTAMP and DATE read the constant through their own input functions
+	// (kernel.TimestampFilterConst, kernel.DateLiteralDays) and raise their
+	// refusal in the arm below. The TIMESTAMP arm read toInt64, where a text
+	// the grammar refuses became 0 — the epoch — and the DATE arm compared its
+	// DAY count against that MILLISECOND reading (#1512).
+	tsVal, tsErr := kernel.TimestampFilterConst(value)
+	dateVal, dateErr := kernel.DateLiteralDays(value)
 	// An integer column's literal is read through the integer input grammar,
 	// exactly as the vectorized kernel does (#536). A non-OK status means the
 	// text names no integer (IntConstSyntax → 22P02) or overflows the type
 	// (IntConstRange → 22003); the arms below raise the matching error the
 	// same way the UUID/BOOL arms do, rather than the old toInt64 that read
 	// `k = 'abc'` — and `k = '42'` — as the zero value and matched every row
-	// holding it. TIMESTAMP/DATE keep intVal (parseTimestampString), which is
-	// #493's territory, not this fix's.
+	// holding it. TIMESTAMP/DATE read their own input functions (above).
 	//
 	// IntFilterBound, not Int64FilterConst: a constant with a FRACTION belongs
 	// to no integer, so the OPERATOR is rewritten rather than the value
@@ -290,9 +296,12 @@ func ColumnCompareLit(colName string, op CompareOp, value any, litText string) P
 			}
 			return compareInt64(v.Int64Data[row], int64Val, int64Op)
 		case batch.TypeTimestamp:
-			// TIMESTAMP reads intVal (parseTimestampString), not the integer
-			// grammar — a quoted string is a timestamp here (#493).
-			return compareInt64(v.Int64Data[row], intVal, op)
+			// TIMESTAMP reads its own grammar, not the integer one — a quoted
+			// string is a timestamp here (#493) — and raises what it refuses.
+			if tsErr != nil {
+				panic(fatalEvalError{timestampConstError(v.Type, value)})
+			}
+			return compareInt64(v.Int64Data[row], tsVal, op)
 		case batch.TypeInt32:
 			if int32Status != kernel.IntConstOK {
 				panic(fatalEvalError{intLitError(v.Type, int32Status, strVal)})
@@ -393,7 +402,10 @@ func ColumnCompareLit(colName string, op CompareOp, value any, litText string) P
 			}
 			return compareString(v.BytesData.UnsafeStringValue(row), uuidVal, op)
 		case batch.TypeDate:
-			return compareInt64(int64(v.Int32Data[row]), intVal, op)
+			if dateErr != nil {
+				panic(fatalEvalError{dateConstError(v.Type, value)})
+			}
+			return compareInt64(int64(v.Int32Data[row]), int64(dateVal), op)
 		case batch.TypeBytes:
 			// BYTES compares by bytes, like STRING over the same arena. The
 			// row fallback had no arm and fell to `return false`, so a
@@ -967,10 +979,31 @@ func dateConstError(typ batch.TypeID, value any) error {
 	if err == nil {
 		return nil
 	}
+	// The input function's own refusal when it made one: it names 22009 for
+	// a zone displacement out of range (`'2024-01-15 10:30:00+16'`), which
+	// the two codes below folded into 22008 (#1512).
+	var pe *parquet.DateParseError
+	if errors.As(err, &pe) {
+		return pe
+	}
 	if kernel.IsDateSyntaxError(err) {
 		return sqlerr.New("22007", "invalid input syntax for type date: %q", fmt.Sprint(value))
 	}
 	return sqlerr.New("22008", "date/time field value out of range: %q", fmt.Sprint(value))
+}
+
+// timestampConstError is dateConstError for a TIMESTAMP column: the
+// constant's refusal by kernel.TimestampFilterConst — parquet's
+// TimestampParseError for text, 22007 / 22008 / 22009 in PostgreSQL's words
+// — or nil when it names an instant. The kernel resolvers return no kernel
+// for exactly these constants, so this is what the statement answers.
+// Before #1512 a refused text was read as 0 and matched the epoch row.
+func timestampConstError(typ batch.TypeID, value any) error {
+	if typ != batch.TypeTimestamp || value == nil {
+		return nil
+	}
+	_, err := kernel.TimestampFilterConst(value)
+	return err
 }
 
 // floatConstError distinguishes quoted unknown literals from unquoted numeric ones.
@@ -1084,6 +1117,12 @@ func (f *KernelFilter) Execute(ctx context.Context, in *batch.RecordBatch) (*bat
 						if err := floatConstError(ft, f.Value, f.LitText); err != nil {
 							return nil, err
 						}
+						if err := dateConstError(ft, f.Value); err != nil {
+							return nil, err
+						}
+						if err := timestampConstError(ft, f.Value); err != nil {
+							return nil, err
+						}
 					}
 					f.useFallback = true
 					f.inner = NewFilter(f.RowFallback)
@@ -1117,6 +1156,9 @@ func (f *KernelFilter) Execute(ctx context.Context, in *batch.RecordBatch) (*bat
 			return nil, err
 		}
 		if err := dateConstError(typ, f.Value); err != nil {
+			return nil, err
+		}
+		if err := timestampConstError(typ, f.Value); err != nil {
 			return nil, err
 		}
 		if err := boolConstError(typ, f.Value); err != nil {
@@ -1254,6 +1296,9 @@ func (f *InFilter) Execute(ctx context.Context, in *batch.RecordBatch) (*batch.R
 				return nil, err
 			}
 			if err := dateConstError(typ, v); err != nil {
+				return nil, err
+			}
+			if err := timestampConstError(typ, v); err != nil {
 				return nil, err
 			}
 			if err := boolConstError(typ, v); err != nil {
@@ -1594,24 +1639,18 @@ func toInt64(v any) int64 {
 	case float64:
 		return int64(tv)
 	case string:
-		return parseTimestampString(tv)
+		// compareAny's spill fallback (sort.go) is the one caller: it orders
+		// two keys of ONE sort column, so a string never meets an int64 key
+		// there. It is no comparison with a literal — those read
+		// kernel.TimestampFilterConst, which raises what it refuses (#1512).
+		ms, err := parquet.ParseTimestampMillis(tv)
+		if err != nil {
+			return 0
+		}
+		return ms
 	default:
 		return 0
 	}
-}
-
-// parseTimestampString parses a timestamp literal into epoch milliseconds for
-// an implicit string-to-timestamp comparison, through the SAME function the
-// writer and the ingest boundary use.
-//
-// It used to be a private copy of the layout list, and the copy had drifted
-// from the writer's: the space-separated millisecond form stored fine and no
-// predicate could read it back. It also converted an offset-bearing literal to
-// its UTC instant while PostgreSQL's `timestamp without time zone` discards
-// the offset, so a predicate and a write disagreed about what the same literal
-// means (#692).
-func parseTimestampString(s string) int64 {
-	return parquet.ParseTimestampMillisOrZero(s)
 }
 
 // ChainFilter applies a sequence of unary filter operators in order.
