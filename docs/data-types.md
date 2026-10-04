@@ -1059,6 +1059,28 @@ leaves the type. An infinity that ARRIVES as a value is not affected: a
 and `SUM` over such a column answers `Infinity`. Unary minus has no rule at
 all, because negation cannot leave the range.
 
+**A float column orders, compares and groups by PostgreSQL's float order.**
+`NaN` is greater than every other value, `Infinity` included, and equal to
+every `NaN` whatever its sign bit; `-0` equals `0`. Over a `FLOAT64` or
+`FLOAT32` column holding `NaN`, `Infinity`, `-Infinity`, `-0` and `1.5`,
+`max(c)` is `NaN` and `min(c)` is `-Infinity`, `ORDER BY c DESC` puts the
+`NaN` rows first, and `-0` and `0` are one `GROUP BY` group, one `DISTINCT`
+value and a join match — as aggregates, window aggregates, sorts, top-N,
+`=`/`<>`/`<`/`<=`/`>`/`>=`, `BETWEEN`, `IN`, `IS DISTINCT FROM`,
+`GREATEST`/`LEAST`, `RANK`, `PARTITION BY`, hash joins, `IN (subquery)`,
+`EXISTS` and `UNION`/`INTERSECT`/`EXCEPT`, on the single-process, spilled
+and distributed paths alike.
+
+A group publishes one of its MEMBERS as its key, never a canonical stand-in:
+a group (or `DISTINCT` value, or set-operation row) whose only zero is `-0`
+publishes `-0`, as PostgreSQL does. When one group holds both `-0` and `0`,
+PostgreSQL publishes whichever member it met first, so which zero it prints
+depends on the plan; this engine likewise publishes one of the two.
+`MAX` over a float column is computed by a scan, never from parquet
+statistics: the format keeps `NaN` out of a row group's bounds, so the bounds
+cannot say whether the column's maximum is `NaN`. `MIN` is still answered
+from statistics.
+
 **`SUM` over a `FLOAT32` accumulates at `real`'s width**, which is what
 PostgreSQL's `sum(real)` does, in the grouped and the windowed spelling alike.
 `AVG` over the same column does not: PostgreSQL's `avg(real)` is
