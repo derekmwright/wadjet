@@ -32,7 +32,16 @@ import (
 // refusal alone is not one: a plan that read the file and THEN refused
 // answers 42501 too. The counter lives where the read happens, which is the
 // MIT side; the doors that must prove the order are the AGPL side.
-const maxAGPLPhysicalNames = 19
+//
+// 19 → 21 (2026-10-04, arc RE, #381): `physical.PlanPGCategories` and
+// `physical.AggregatePGCategory`. A native-DAG stage compiles its expressions
+// from TEXT over columns earlier stages materialized, and ROUND and the
+// integer cast round by the operand's PostgreSQL type, which for such a
+// column only the plan knows (`5 / 2.0 AS x` and `f AS x` are one FLOAT64 in
+// the batch). The coordinator folds the plan's categories by name and adds
+// the stage planner's aggregate and window output names, which only the AGPL
+// side mints; the category walk itself stays on the MIT side.
+const maxAGPLPhysicalNames = 21
 
 var measuredPhysicalNames = strings.Fields(`
 ColDecls

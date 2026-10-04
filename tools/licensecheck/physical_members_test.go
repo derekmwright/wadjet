@@ -76,12 +76,16 @@ import (
 // (a set-op arm's element, so the DAG casts an arm whose element differs). The
 // alternative was the DAG re-deriving an element from the Go value, which is
 // the fmt.Sprint text every one of those six issues came from (ADR-0045 §1).
-const maxAGPLPhysicalMembers = 222
+// 222 → 224 (2026-10-04, arc RE, #381): `PlanPGCategories` and
+// `AggregatePGCategory` — the same two package-scope functions the reference
+// budget above records, and for the same reason.
+const maxAGPLPhysicalMembers = 224
 
 // measuredPhysicalMembers are the members reached through values. With the 16
 // package-scope names of measuredPhysicalNames they are the whole surface, and
 // the budget above is their count.
 var measuredPhysicalMembers = strings.Fields(`
+AggregatePGCategory
 ColDecls.Dec
 ColDecls.Elems
 ColDecls.Fields
@@ -220,6 +224,7 @@ PlanContext.WindowKeySpecs
 PlanContext.WindowSpecOutputType
 PlanContext.WithManifestSnapshot
 PlanContext.WrapsAWindow
+PlanPGCategories
 Planner.AnnotateScanColumns
 Planner.ApplyContextColumnPolicies
 Planner.ApplyContextColumnPoliciesToNewScans
