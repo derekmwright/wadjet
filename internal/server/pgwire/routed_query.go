@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/queryroute"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 	"github.com/derekmwright/wadjet/wadjet"
@@ -208,8 +209,11 @@ func routedColumnMetas(res queryroute.Result) []wadjet.ColumnMeta {
 			// — it cannot be, since the plan cannot always type an aggregate
 			// output — so the gate is applied here, keeping the field's
 			// documented DECIMAL meaning.
-			WireUnconstrained: col.Type == parquet.TypeDecimal && unconstrained[name],
-			StringLength:      routedStringLength(col, stringLength[name]),
+			WireUnconstrained: col.Type == parquet.TypeDecimal && (unconstrained[name] || col.Unconstrained),
+			// A bare copy of a column created from an unconstrained
+			// numeric prints without trailing zeros (ADR-0024 §10).
+			Unconstrained: col.Type == parquet.TypeDecimal && col.Unconstrained,
+			StringLength:  routedStringLength(col, stringLength[name]),
 		}
 	}
 	return metas
@@ -232,7 +236,22 @@ func (c *pgConn) sendResultRows(ctx context.Context, columns []string, stream qu
 	// to match the type the RowDescription declared, and only the metas
 	// carry that (see timestampColumns).
 	colTypes := sendColumnTypes(columns, metas)
+	var trim []int
+	for i, m := range metas {
+		if m.Unconstrained {
+			trim = append(trim, i)
+		}
+	}
 	send := func(cells []any) {
+		// The column's own printer (ADR-0024 §10), on the routed stream and
+		// the boxed result alike: no trailing fraction zeros.
+		for _, i := range trim {
+			if i < len(cells) {
+				if s, ok := cells[i].(string); ok {
+					cells[i] = batch.TrimDecimalText(s)
+				}
+			}
+		}
 		if len(fmtCodes) > 0 {
 			c.sendDataRowFormatted(columns, cells, fmtCodes, colTypes, nestedSchema)
 		} else {

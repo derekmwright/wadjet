@@ -374,6 +374,34 @@ func fitsInt128(b *big.Int) bool {
 		b.CmpAbs(new(big.Int).Lsh(big.NewInt(1), 127)) == 0)
 }
 
+// TrimDecimalText drops the trailing fraction zeros of a FormatDecimal text,
+// and the point with them when nothing is left: `1.2500000000` is `1.25`,
+// `1.0000000000` is `1`, `-0.5000` is `-0.5`. It is the printer of a column
+// created from an unconstrained numeric (ADR-0024 §10), whose stored scale is
+// the column's and not the value's; any other text is returned unchanged.
+func TrimDecimalText(s string) string {
+	dot := strings.IndexByte(s, '.')
+	if dot < 0 {
+		return s
+	}
+	for i := dot + 1; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return s
+		}
+	}
+	end := len(s)
+	for end > dot+1 && s[end-1] == '0' {
+		end--
+	}
+	if end == dot+1 {
+		end = dot
+	}
+	if out := s[:end]; out != "-0" {
+		return out
+	}
+	return "0"
+}
+
 // FormatDecimal renders all 128 bits exactly at the declared scale (#434).
 // For scale > 0, emit EXACTLY scale fractional digits, including trailing zeros
 // (#453, ADR-0012); scale <= 0 emits no decimal point.
