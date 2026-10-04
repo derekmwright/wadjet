@@ -18,7 +18,7 @@ Millisecond storage truncates `.123456` return as `.123`; PostgreSQL retains `.1
 
 **TIMESTAMP has no infinity.**
 
-`'infinity'` and `'-infinity'` are refused as timestamp input (22007) — in a CAST, a literal, a stored value and a bound parameter — and a binary timestamp parameter carrying PostgreSQL's infinity encoding (the int64 extremes) is refused at Bind (22023); PostgreSQL stores and returns both. Compared with a DATE or TIMESTAMP operand the planner types, the words are answered as PostgreSQL answers them (`ts < 'infinity'` is every non-NULL row). (catalog: [temporal#r2, r3](adr/0012-divergences/temporal.md#catalog); #1266, #1512)
+`'infinity'` and `'-infinity'` are refused as timestamp input (22007) — in a CAST, a literal, a stored value, a bound parameter and a comparison with a DATE or TIMESTAMP, which coerces its text as CAST does (`ts < 'infinity'` is 22007 where PostgreSQL answers every non-NULL row: write `ts IS NOT NULL`) — and a binary timestamp parameter carrying PostgreSQL's infinity encoding (the int64 extremes) is refused at Bind (22023); PostgreSQL stores and returns both. `'now'`, `'today'`, `'tomorrow'` and `'yesterday'` are refused the same way (22007, catalog temporal r25): write `CURRENT_TIMESTAMP` / `CURRENT_DATE` (`CURRENT_DATE + 1` for `'tomorrow'`). `'epoch'` is read, as 1970-01-01 00:00:00. (catalog: [temporal#r2, r3, r25](adr/0012-divergences/temporal.md#catalog); #1266, #1512)
 
 **Clock functions return zoneless UTC.**
 
