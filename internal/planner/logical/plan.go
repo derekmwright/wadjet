@@ -239,9 +239,15 @@ type Node struct {
 	SampleNull        bool     // the TABLESAMPLE argument is NULL (2202H when the scan begins)
 
 	// Table Function (e.g., read_json, read_csv, unnest)
-	IsTableFunc    bool              // true if this scan reads from a table function
-	FuncName       string            // function name (e.g., "read_json")
-	FuncArgs       []string          // positional arguments (e.g., URL/path)
+	IsTableFunc bool     // true if this scan reads from a table function
+	FuncName    string   // function name (e.g., "read_json")
+	FuncArgs    []string // positional arguments (e.g., URL/path)
+	// FuncClockArgs are the argument expressions, by position, that read a
+	// clock function (now(), CURRENT_DATE, …). FuncArgs holds the builder's
+	// fold of them from the live clock, for the plan's declarations; the
+	// physical planner re-folds them with the statement's clock before the
+	// source reads them (#1566).
+	FuncClockArgs  map[int]plansql.Node
 	FuncNamedArgs  map[string]string // named arguments (e.g., delimiter="|")
 	WithOrdinality bool              // UNNEST(...) WITH ORDINALITY
 	FuncColAliases []string          // AS alias(col1, col2, ...)
