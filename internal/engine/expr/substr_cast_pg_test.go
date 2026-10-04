@@ -3,6 +3,7 @@
 package expr
 
 import (
+	"math"
 	"testing"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
@@ -131,5 +132,24 @@ func TestCastIntFunctionRounds(t *testing.T) {
 	}
 	if got := fnCastInt([]any{-4.7}); got != int64(-5) {
 		t.Errorf("cast_int(-4.7) = %#v, want -5", got)
+	}
+}
+
+// TestCastIntFunctionRangeChecksAFloat pins cast_int's float arm to the bound
+// CAST uses: a float no bigint holds raises, where it wrapped to the minimum
+// bigint (#1484).
+func TestCastIntFunctionRangeChecksAFloat(t *testing.T) {
+	for _, f := range []float64{9223372036854775808, math.NaN(), math.Inf(1), math.Inf(-1)} {
+		func() {
+			defer func() {
+				if r := recover(); r == nil {
+					t.Errorf("cast_int(%v) answered, want bigint out of range", f)
+				}
+			}()
+			fnCastInt([]any{f})
+		}()
+	}
+	if got := fnCastInt([]any{float64(-9223372036854775808)}); got != int64(math.MinInt64) {
+		t.Errorf("cast_int(-2^63) = %#v, want the minimum bigint", got)
 	}
 }

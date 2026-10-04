@@ -5,7 +5,6 @@ package expr
 
 import (
 	"fmt"
-	"math"
 )
 
 // --- Type casting ---
@@ -18,7 +17,7 @@ func fnCastInt(args []any) any {
 	if i, ok := toInt64Safe(args[0]); ok {
 		return i
 	}
-	return int64(math.Round(ToFloat64(args[0])))
+	return castFloatToInt64(ToFloat64(args[0]), "bigint")
 }
 
 func fnCastFloat(args []any) any {
