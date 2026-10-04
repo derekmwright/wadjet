@@ -254,3 +254,35 @@ func typedOverShadowedWindow(ast plansql.Node, child *logical.Node) (plansql.Nod
 	}
 	return nil, nil
 }
+
+// markWindowShadowedBlocks adds to the blocks the walk publishes every block a
+// query reads a window over a shadowing derived table through
+// (logical.WindowShadowedBlock) — every one but the statement's own output
+// projection, which the gather projects, and a set operation's arm, which the
+// operation projects onto its own columns.
+//
+// Every walk that resolves a reference from above stops at such a block, so
+// the reference keeps the block's own name (`x.w3`) and the stream must carry
+// it: the block's list is published onto the stage that terminates it, one
+// column per item, and a join above names that arm by the block's alias
+// (the arm is materialized, #780), so its duplicated columns are `x.b`, never
+// the window's input `b` that the other arm may carry too.
+func markWindowShadowedBlocks(root *logical.Node, blocks map[*logical.Node]blockDivergence) {
+	output := localPlanFacts.FindOutputProjectionNode(root)
+	var walk func(n *logical.Node, underSetOp bool)
+	walk = func(n *logical.Node, underSetOp bool) {
+		if n == nil {
+			return
+		}
+		if n != output && !underSetOp && logical.WindowShadowedBlock(n) {
+			if blocks[n] == blockAgrees {
+				blocks[n] = blockIntroduces
+			}
+		}
+		setOp := n.Type == logical.NodeUnion || n.Type == logical.NodeIntersect || n.Type == logical.NodeExcept
+		for _, c := range n.Children {
+			walk(c, setOp)
+		}
+	}
+	walk(root, false)
+}

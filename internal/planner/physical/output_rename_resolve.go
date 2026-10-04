@@ -60,6 +60,11 @@ func resolveRenameSource(name string, child *logical.Node, forGather bool) strin
 	}
 	for n := child; n != nil; {
 		switch {
+		case logical.WindowShadowedBlock(n):
+			// The block a window over a shadowing derived table is read
+			// through is a relation of its own: its items keep the block's
+			// names (logical.WindowShadowedBlock).
+			return resolved
 		case n.Type == logical.NodeProject:
 			// A source spelled through the derived table's own alias
 			// (`SELECT x.k FROM (SELECT s_suppkey AS k ...) x`) is looked up

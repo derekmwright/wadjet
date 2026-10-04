@@ -128,3 +128,37 @@ func bareLower(s string) string {
 	}
 	return strings.ToLower(s)
 }
+
+// WindowShadowedBlock reports whether p is the SELECT list of a window over a
+// derived table that shadows its input (WindowShadowedInput) — the block a
+// query reads that window through, `x` in `(SELECT id, SUM(b) OVER (…) AS w,
+// b AS w3 FROM (SELECT id, b * 2 AS b FROM t) s) x`.
+//
+// Such a block is a relation of its own above the window: its items are named
+// by the block (`x.w3`, `x.b`), and a walk that resolves a reference from
+// above stops AT it rather than chasing `w3` into the window's input, where
+// `b` is a name the other arm of a join may carry too. The stage DAG
+// publishes the block's list onto the stage that terminates it, so the
+// stream carries every item under the block's own name.
+func WindowShadowedBlock(p *Node) bool {
+	if p == nil || p.Type != NodeProject || p.SecurityBarrier || len(p.Children) != 1 {
+		return false
+	}
+	for n := p.Children[0]; n != nil; n = n.Children[0] {
+		switch n.Type {
+		case NodeFilter, NodeSort, NodeLimit:
+		case NodeWindow:
+			// Windows of different specifications stack; any of them may be
+			// the one over the shadowing table.
+			if WindowShadowedInput(n) != nil {
+				return true
+			}
+		default:
+			return false
+		}
+		if len(n.Children) != 1 {
+			return false
+		}
+	}
+	return false
+}

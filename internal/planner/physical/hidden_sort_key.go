@@ -33,6 +33,11 @@ func derivedAliasSourceColumn(name string, child *logical.Node) string {
 	}
 	resolved := name
 	for n := child; n != nil; {
+		if logical.WindowShadowedBlock(n) {
+			// A relation of its own: its items keep the block's names
+			// (logical.WindowShadowedBlock), so the walk ends here.
+			break
+		}
 		switch n.Type {
 		case logical.NodeProject:
 			bare := derivedScopeBareName(resolved, n)
