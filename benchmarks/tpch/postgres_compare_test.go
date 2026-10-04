@@ -2341,13 +2341,16 @@ func postgresSemanticsCases() []pgCase {
 	// Both spellings, because getting one right by accident is easy.
 	out = append(out,
 		pgCase{name: "RoundHalfNumeric", sql: `SELECT ROUND(0.5) AS a, ROUND(1.5) AS b, ROUND(2.5) AS c, ROUND(-0.5) AS d, ROUND(-1.5) AS e`},
-		// The CAST(x AS double precision) spelling parses since #374.
-		// compileFuncCallNode now routes ROUND(CAST(x AS double precision))
-		// to a half-to-even kernel (round_half_even in internal/engine/expr)
-		// so this agrees with PostgreSQL's DOUBLE PRECISION rule; ROUND on a
-		// bare literal or a NUMERIC/DECIMAL cast keeps the NUMERIC rule
-		// (RoundHalfNumeric above, math.Round) (#381, fixed).
-		pgCase{name: "RoundHalfDouble", sql: `SELECT ROUND(CAST(0.5 AS double precision)) AS a, ROUND(CAST(1.5 AS double precision)) AS b, ROUND(CAST(2.5 AS double precision)) AS c`},
+		// ROUND picks its rule from its operand's PostgreSQL type
+		// (expr.roundsHalfEven): a DOUBLE PRECISION value rounds half to
+		// even, a NUMERIC one half away from zero (RoundHalfNumeric above).
+		// The literal door was fixed first (#381); the COLUMN door — a
+		// derived table's double precision column, an expression over it,
+		// and its integer cast — rounded half away until arc RE (#381
+		// reopened): 3 for 2.5 where PostgreSQL answers 2.
+		pgCase{name: "RoundHalfDouble", ordered: true, sql: `SELECT k, ROUND(CAST(0.5 AS double precision)) AS a, ROUND(CAST(1.5 AS double precision)) AS b, ROUND(CAST(2.5 AS double precision)) AS c,
+			ROUND(f) AS col, ROUND(f * 1.0) AS expr, CAST(f AS bigint) AS cst
+			FROM (SELECT n_nationkey AS k, CAST(n_nationkey AS double precision) + 0.5 AS f FROM nation WHERE n_nationkey < 4) s ORDER BY k`},
 		pgCase{name: "TruncAndFloorNegative", sql: `SELECT FLOOR(-1.5) AS f, CEIL(-1.5) AS c, ABS(-1.5) AS a`},
 	)
 

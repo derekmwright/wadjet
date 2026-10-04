@@ -1,0 +1,2116 @@
+# PostgreSQL 17.11 (postgres:17-alpine), measured by re_author/pgrun.py over TestArcREGenerate's cells and fixture.
+f8col/0.5/round	0
+f8col/0.5/smallint	0
+f8col/0.5/integer	0
+f8col/0.5/bigint	0
+f8col/0.5/colon	0
+f8col/0.5/arr_bigint	{0}
+f8col/0.5/arr_integer	{0}
+f8col/0.5/where	1
+f8col/0.5/group	0,1
+f8col/0.5/agg	0
+f8col/0.5/window	0,1
+f4col/0.5/round	0
+f4col/0.5/smallint	0
+f4col/0.5/integer	0
+f4col/0.5/bigint	0
+f4col/0.5/colon	0
+f4col/0.5/arr_bigint	{0}
+f4col/0.5/arr_integer	{0}
+f4col/0.5/where	1
+f4col/0.5/group	0,1
+f4col/0.5/agg	0
+f4col/0.5/window	0,1
+numcol/0.5/round	1
+numcol/0.5/smallint	1
+numcol/0.5/integer	1
+numcol/0.5/bigint	1
+numcol/0.5/colon	1
+numcol/0.5/arr_bigint	{1}
+numcol/0.5/arr_integer	{1}
+numcol/0.5/where	0
+numcol/0.5/group	1,1
+numcol/0.5/agg	1
+numcol/0.5/window	1,1
+f8lit/0.5/round	0
+f8lit/0.5/smallint	0
+f8lit/0.5/integer	0
+f8lit/0.5/bigint	0
+f8lit/0.5/colon	0
+f8lit/0.5/arr_bigint	{0}
+f8lit/0.5/arr_integer	{0}
+f4lit/0.5/round	0
+f4lit/0.5/smallint	0
+f4lit/0.5/integer	0
+f4lit/0.5/bigint	0
+f4lit/0.5/colon	0
+f4lit/0.5/arr_bigint	{0}
+f4lit/0.5/arr_integer	{0}
+numlit/0.5/round	1
+numlit/0.5/smallint	1
+numlit/0.5/integer	1
+numlit/0.5/bigint	1
+numlit/0.5/colon	1
+numlit/0.5/arr_bigint	{1}
+numlit/0.5/arr_integer	{1}
+f8mul/0.5/round	0
+f8mul/0.5/smallint	0
+f8mul/0.5/integer	0
+f8mul/0.5/bigint	0
+f8mul/0.5/colon	0
+f8mul/0.5/arr_bigint	{0}
+f8mul/0.5/arr_integer	{0}
+f8add/0.5/round	0
+f8add/0.5/smallint	0
+f8add/0.5/integer	0
+f8add/0.5/bigint	0
+f8add/0.5/colon	0
+f8add/0.5/arr_bigint	{0}
+f8add/0.5/arr_integer	{0}
+f8sub/0.5/round	0
+f8sub/0.5/smallint	0
+f8sub/0.5/integer	0
+f8sub/0.5/bigint	0
+f8sub/0.5/colon	0
+f8sub/0.5/arr_bigint	{0}
+f8sub/0.5/arr_integer	{0}
+f8sum/0.5/round	0
+f8sum/0.5/smallint	0
+f8sum/0.5/integer	0
+f8sum/0.5/bigint	0
+f8sum/0.5/colon	0
+f8max/0.5/round	0
+f8max/0.5/smallint	0
+f8max/0.5/integer	0
+f8max/0.5/bigint	0
+f8max/0.5/colon	0
+f8derived/0.5/round	0
+f8derived/0.5/smallint	0
+f8derived/0.5/integer	0
+f8derived/0.5/bigint	0
+f8derived/0.5/colon	0
+f8derived/0.5/arr_bigint	{0}
+f8derived/0.5/arr_integer	{0}
+f8derived/0.5/where	1
+f8derived/0.5/group	0,1
+f8derived/0.5/agg	0
+f8derived/0.5/window	0,1
+numderived/0.5/round	1
+numderived/0.5/smallint	1
+numderived/0.5/integer	1
+numderived/0.5/bigint	1
+numderived/0.5/colon	1
+numderived/0.5/arr_bigint	{1}
+numderived/0.5/arr_integer	{1}
+numderived/0.5/where	0
+numderived/0.5/group	1,1
+numderived/0.5/agg	1
+numderived/0.5/window	1,1
+f8cte/0.5/round	0
+f8cte/0.5/smallint	0
+f8cte/0.5/integer	0
+f8cte/0.5/bigint	0
+f8cte/0.5/colon	0
+f8cte/0.5/arr_bigint	{0}
+f8cte/0.5/arr_integer	{0}
+f8cte/0.5/where	1
+f8cte/0.5/group	0,1
+f8cte/0.5/agg	0
+f8cte/0.5/window	0,1
+numcte/0.5/round	1
+numcte/0.5/smallint	1
+numcte/0.5/integer	1
+numcte/0.5/bigint	1
+numcte/0.5/colon	1
+numcte/0.5/arr_bigint	{1}
+numcte/0.5/arr_integer	{1}
+numcte/0.5/where	0
+numcte/0.5/group	1,1
+numcte/0.5/agg	1
+numcte/0.5/window	1,1
+f8union/0.5/round	0; 0
+f8union/0.5/smallint	0; 0
+f8union/0.5/integer	0; 0
+f8union/0.5/bigint	0; 0
+f8union/0.5/colon	0; 0
+f8union/0.5/arr_bigint	{0}; {0}
+f8union/0.5/arr_integer	{0}; {0}
+numdivderived/0.5/round	1
+numdivderived/0.5/smallint	1
+numdivderived/0.5/integer	1
+numdivderived/0.5/bigint	1
+numdivderived/0.5/colon	1
+numdivderived/0.5/arr_bigint	{1}
+numdivderived/0.5/arr_integer	{1}
+numdivderived/0.5/where	0
+numdivderived/0.5/group	1,1
+numdivderived/0.5/agg	1
+numdivderived/0.5/window	1,1
+numdivcte/0.5/round	1
+numdivcte/0.5/smallint	1
+numdivcte/0.5/integer	1
+numdivcte/0.5/bigint	1
+numdivcte/0.5/colon	1
+numdivcte/0.5/arr_bigint	{1}
+numdivcte/0.5/arr_integer	{1}
+numdivcte/0.5/where	0
+numdivcte/0.5/group	1,1
+numdivcte/0.5/agg	1
+numdivcte/0.5/window	1,1
+numdivunion/0.5/round	1; 1
+numdivunion/0.5/smallint	1; 1
+numdivunion/0.5/integer	1; 1
+numdivunion/0.5/bigint	1; 1
+numdivunion/0.5/colon	1; 1
+numdivunion/0.5/arr_bigint	{1}; {1}
+numdivunion/0.5/arr_integer	{1}; {1}
+numdivmax/0.5/round	1
+numdivmax/0.5/smallint	1
+numdivmax/0.5/integer	1
+numdivmax/0.5/bigint	1
+numdivmax/0.5/colon	1
+af/0.5/arr_bigint	{0,2}
+af/0.5/arr_integer	{0,2}
+f8col/1.5/round	2
+f8col/1.5/smallint	2
+f8col/1.5/integer	2
+f8col/1.5/bigint	2
+f8col/1.5/colon	2
+f8col/1.5/arr_bigint	{2}
+f8col/1.5/arr_integer	{2}
+f8col/1.5/where	0
+f8col/1.5/group	2,1
+f8col/1.5/agg	2
+f8col/1.5/window	2,1
+f4col/1.5/round	2
+f4col/1.5/smallint	2
+f4col/1.5/integer	2
+f4col/1.5/bigint	2
+f4col/1.5/colon	2
+f4col/1.5/arr_bigint	{2}
+f4col/1.5/arr_integer	{2}
+f4col/1.5/where	0
+f4col/1.5/group	2,1
+f4col/1.5/agg	2
+f4col/1.5/window	2,1
+numcol/1.5/round	2
+numcol/1.5/smallint	2
+numcol/1.5/integer	2
+numcol/1.5/bigint	2
+numcol/1.5/colon	2
+numcol/1.5/arr_bigint	{2}
+numcol/1.5/arr_integer	{2}
+numcol/1.5/where	0
+numcol/1.5/group	2,1
+numcol/1.5/agg	2
+numcol/1.5/window	2,1
+f8lit/1.5/round	2
+f8lit/1.5/smallint	2
+f8lit/1.5/integer	2
+f8lit/1.5/bigint	2
+f8lit/1.5/colon	2
+f8lit/1.5/arr_bigint	{2}
+f8lit/1.5/arr_integer	{2}
+f4lit/1.5/round	2
+f4lit/1.5/smallint	2
+f4lit/1.5/integer	2
+f4lit/1.5/bigint	2
+f4lit/1.5/colon	2
+f4lit/1.5/arr_bigint	{2}
+f4lit/1.5/arr_integer	{2}
+numlit/1.5/round	2
+numlit/1.5/smallint	2
+numlit/1.5/integer	2
+numlit/1.5/bigint	2
+numlit/1.5/colon	2
+numlit/1.5/arr_bigint	{2}
+numlit/1.5/arr_integer	{2}
+f8mul/1.5/round	2
+f8mul/1.5/smallint	2
+f8mul/1.5/integer	2
+f8mul/1.5/bigint	2
+f8mul/1.5/colon	2
+f8mul/1.5/arr_bigint	{2}
+f8mul/1.5/arr_integer	{2}
+f8add/1.5/round	2
+f8add/1.5/smallint	2
+f8add/1.5/integer	2
+f8add/1.5/bigint	2
+f8add/1.5/colon	2
+f8add/1.5/arr_bigint	{2}
+f8add/1.5/arr_integer	{2}
+f8sub/1.5/round	2
+f8sub/1.5/smallint	2
+f8sub/1.5/integer	2
+f8sub/1.5/bigint	2
+f8sub/1.5/colon	2
+f8sub/1.5/arr_bigint	{2}
+f8sub/1.5/arr_integer	{2}
+f8sum/1.5/round	2
+f8sum/1.5/smallint	2
+f8sum/1.5/integer	2
+f8sum/1.5/bigint	2
+f8sum/1.5/colon	2
+f8max/1.5/round	2
+f8max/1.5/smallint	2
+f8max/1.5/integer	2
+f8max/1.5/bigint	2
+f8max/1.5/colon	2
+f8derived/1.5/round	2
+f8derived/1.5/smallint	2
+f8derived/1.5/integer	2
+f8derived/1.5/bigint	2
+f8derived/1.5/colon	2
+f8derived/1.5/arr_bigint	{2}
+f8derived/1.5/arr_integer	{2}
+f8derived/1.5/where	0
+f8derived/1.5/group	2,1
+f8derived/1.5/agg	2
+f8derived/1.5/window	2,1
+numderived/1.5/round	2
+numderived/1.5/smallint	2
+numderived/1.5/integer	2
+numderived/1.5/bigint	2
+numderived/1.5/colon	2
+numderived/1.5/arr_bigint	{2}
+numderived/1.5/arr_integer	{2}
+numderived/1.5/where	0
+numderived/1.5/group	2,1
+numderived/1.5/agg	2
+numderived/1.5/window	2,1
+f8cte/1.5/round	2
+f8cte/1.5/smallint	2
+f8cte/1.5/integer	2
+f8cte/1.5/bigint	2
+f8cte/1.5/colon	2
+f8cte/1.5/arr_bigint	{2}
+f8cte/1.5/arr_integer	{2}
+f8cte/1.5/where	0
+f8cte/1.5/group	2,1
+f8cte/1.5/agg	2
+f8cte/1.5/window	2,1
+numcte/1.5/round	2
+numcte/1.5/smallint	2
+numcte/1.5/integer	2
+numcte/1.5/bigint	2
+numcte/1.5/colon	2
+numcte/1.5/arr_bigint	{2}
+numcte/1.5/arr_integer	{2}
+numcte/1.5/where	0
+numcte/1.5/group	2,1
+numcte/1.5/agg	2
+numcte/1.5/window	2,1
+f8union/1.5/round	2; 2
+f8union/1.5/smallint	2; 2
+f8union/1.5/integer	2; 2
+f8union/1.5/bigint	2; 2
+f8union/1.5/colon	2; 2
+f8union/1.5/arr_bigint	{2}; {2}
+f8union/1.5/arr_integer	{2}; {2}
+numdivderived/1.5/round	2
+numdivderived/1.5/smallint	2
+numdivderived/1.5/integer	2
+numdivderived/1.5/bigint	2
+numdivderived/1.5/colon	2
+numdivderived/1.5/arr_bigint	{2}
+numdivderived/1.5/arr_integer	{2}
+numdivderived/1.5/where	0
+numdivderived/1.5/group	2,1
+numdivderived/1.5/agg	2
+numdivderived/1.5/window	2,1
+numdivcte/1.5/round	2
+numdivcte/1.5/smallint	2
+numdivcte/1.5/integer	2
+numdivcte/1.5/bigint	2
+numdivcte/1.5/colon	2
+numdivcte/1.5/arr_bigint	{2}
+numdivcte/1.5/arr_integer	{2}
+numdivcte/1.5/where	0
+numdivcte/1.5/group	2,1
+numdivcte/1.5/agg	2
+numdivcte/1.5/window	2,1
+numdivunion/1.5/round	2; 2
+numdivunion/1.5/smallint	2; 2
+numdivunion/1.5/integer	2; 2
+numdivunion/1.5/bigint	2; 2
+numdivunion/1.5/colon	2; 2
+numdivunion/1.5/arr_bigint	{2}; {2}
+numdivunion/1.5/arr_integer	{2}; {2}
+numdivmax/1.5/round	2
+numdivmax/1.5/smallint	2
+numdivmax/1.5/integer	2
+numdivmax/1.5/bigint	2
+numdivmax/1.5/colon	2
+af/1.5/arr_bigint	{2,2}
+af/1.5/arr_integer	{2,2}
+f8col/2.5/round	2
+f8col/2.5/smallint	2
+f8col/2.5/integer	2
+f8col/2.5/bigint	2
+f8col/2.5/colon	2
+f8col/2.5/arr_bigint	{2}
+f8col/2.5/arr_integer	{2}
+f8col/2.5/where	1
+f8col/2.5/group	2,1
+f8col/2.5/agg	2
+f8col/2.5/window	2,1
+f4col/2.5/round	2
+f4col/2.5/smallint	2
+f4col/2.5/integer	2
+f4col/2.5/bigint	2
+f4col/2.5/colon	2
+f4col/2.5/arr_bigint	{2}
+f4col/2.5/arr_integer	{2}
+f4col/2.5/where	1
+f4col/2.5/group	2,1
+f4col/2.5/agg	2
+f4col/2.5/window	2,1
+numcol/2.5/round	3
+numcol/2.5/smallint	3
+numcol/2.5/integer	3
+numcol/2.5/bigint	3
+numcol/2.5/colon	3
+numcol/2.5/arr_bigint	{3}
+numcol/2.5/arr_integer	{3}
+numcol/2.5/where	0
+numcol/2.5/group	3,1
+numcol/2.5/agg	3
+numcol/2.5/window	3,1
+intcol/2.5/round	3
+intcol/2.5/smallint	3
+intcol/2.5/integer	3
+intcol/2.5/bigint	3
+intcol/2.5/colon	3
+intcol/2.5/arr_bigint	{3}
+intcol/2.5/arr_integer	{3}
+f8lit/2.5/round	2
+f8lit/2.5/smallint	2
+f8lit/2.5/integer	2
+f8lit/2.5/bigint	2
+f8lit/2.5/colon	2
+f8lit/2.5/arr_bigint	{2}
+f8lit/2.5/arr_integer	{2}
+f4lit/2.5/round	2
+f4lit/2.5/smallint	2
+f4lit/2.5/integer	2
+f4lit/2.5/bigint	2
+f4lit/2.5/colon	2
+f4lit/2.5/arr_bigint	{2}
+f4lit/2.5/arr_integer	{2}
+numlit/2.5/round	3
+numlit/2.5/smallint	3
+numlit/2.5/integer	3
+numlit/2.5/bigint	3
+numlit/2.5/colon	3
+numlit/2.5/arr_bigint	{3}
+numlit/2.5/arr_integer	{3}
+f8mul/2.5/round	2
+f8mul/2.5/smallint	2
+f8mul/2.5/integer	2
+f8mul/2.5/bigint	2
+f8mul/2.5/colon	2
+f8mul/2.5/arr_bigint	{2}
+f8mul/2.5/arr_integer	{2}
+f8add/2.5/round	2
+f8add/2.5/smallint	2
+f8add/2.5/integer	2
+f8add/2.5/bigint	2
+f8add/2.5/colon	2
+f8add/2.5/arr_bigint	{2}
+f8add/2.5/arr_integer	{2}
+f8sub/2.5/round	2
+f8sub/2.5/smallint	2
+f8sub/2.5/integer	2
+f8sub/2.5/bigint	2
+f8sub/2.5/colon	2
+f8sub/2.5/arr_bigint	{2}
+f8sub/2.5/arr_integer	{2}
+f8sum/2.5/round	2
+f8sum/2.5/smallint	2
+f8sum/2.5/integer	2
+f8sum/2.5/bigint	2
+f8sum/2.5/colon	2
+f8max/2.5/round	2
+f8max/2.5/smallint	2
+f8max/2.5/integer	2
+f8max/2.5/bigint	2
+f8max/2.5/colon	2
+f8derived/2.5/round	2
+f8derived/2.5/smallint	2
+f8derived/2.5/integer	2
+f8derived/2.5/bigint	2
+f8derived/2.5/colon	2
+f8derived/2.5/arr_bigint	{2}
+f8derived/2.5/arr_integer	{2}
+f8derived/2.5/where	1
+f8derived/2.5/group	2,1
+f8derived/2.5/agg	2
+f8derived/2.5/window	2,1
+numderived/2.5/round	3
+numderived/2.5/smallint	3
+numderived/2.5/integer	3
+numderived/2.5/bigint	3
+numderived/2.5/colon	3
+numderived/2.5/arr_bigint	{3}
+numderived/2.5/arr_integer	{3}
+numderived/2.5/where	0
+numderived/2.5/group	3,1
+numderived/2.5/agg	3
+numderived/2.5/window	3,1
+f8cte/2.5/round	2
+f8cte/2.5/smallint	2
+f8cte/2.5/integer	2
+f8cte/2.5/bigint	2
+f8cte/2.5/colon	2
+f8cte/2.5/arr_bigint	{2}
+f8cte/2.5/arr_integer	{2}
+f8cte/2.5/where	1
+f8cte/2.5/group	2,1
+f8cte/2.5/agg	2
+f8cte/2.5/window	2,1
+numcte/2.5/round	3
+numcte/2.5/smallint	3
+numcte/2.5/integer	3
+numcte/2.5/bigint	3
+numcte/2.5/colon	3
+numcte/2.5/arr_bigint	{3}
+numcte/2.5/arr_integer	{3}
+numcte/2.5/where	0
+numcte/2.5/group	3,1
+numcte/2.5/agg	3
+numcte/2.5/window	3,1
+f8union/2.5/round	2; 2
+f8union/2.5/smallint	2; 2
+f8union/2.5/integer	2; 2
+f8union/2.5/bigint	2; 2
+f8union/2.5/colon	2; 2
+f8union/2.5/arr_bigint	{2}; {2}
+f8union/2.5/arr_integer	{2}; {2}
+numdivderived/2.5/round	3
+numdivderived/2.5/smallint	3
+numdivderived/2.5/integer	3
+numdivderived/2.5/bigint	3
+numdivderived/2.5/colon	3
+numdivderived/2.5/arr_bigint	{3}
+numdivderived/2.5/arr_integer	{3}
+numdivderived/2.5/where	0
+numdivderived/2.5/group	3,1
+numdivderived/2.5/agg	3
+numdivderived/2.5/window	3,1
+numdivcte/2.5/round	3
+numdivcte/2.5/smallint	3
+numdivcte/2.5/integer	3
+numdivcte/2.5/bigint	3
+numdivcte/2.5/colon	3
+numdivcte/2.5/arr_bigint	{3}
+numdivcte/2.5/arr_integer	{3}
+numdivcte/2.5/where	0
+numdivcte/2.5/group	3,1
+numdivcte/2.5/agg	3
+numdivcte/2.5/window	3,1
+numdivunion/2.5/round	3; 3
+numdivunion/2.5/smallint	3; 3
+numdivunion/2.5/integer	3; 3
+numdivunion/2.5/bigint	3; 3
+numdivunion/2.5/colon	3; 3
+numdivunion/2.5/arr_bigint	{3}; {3}
+numdivunion/2.5/arr_integer	{3}; {3}
+numdivmax/2.5/round	3
+numdivmax/2.5/smallint	3
+numdivmax/2.5/integer	3
+numdivmax/2.5/bigint	3
+numdivmax/2.5/colon	3
+numagg/2.5/round	3
+numagg/2.5/smallint	3
+numagg/2.5/integer	3
+numagg/2.5/bigint	3
+numagg/2.5/colon	3
+af/2.5/arr_bigint	{2,2}
+af/2.5/arr_integer	{2,2}
+f8col/3.5/round	4
+f8col/3.5/smallint	4
+f8col/3.5/integer	4
+f8col/3.5/bigint	4
+f8col/3.5/colon	4
+f8col/3.5/arr_bigint	{4}
+f8col/3.5/arr_integer	{4}
+f8col/3.5/where	0
+f8col/3.5/group	4,1
+f8col/3.5/agg	4
+f8col/3.5/window	4,1
+f4col/3.5/round	4
+f4col/3.5/smallint	4
+f4col/3.5/integer	4
+f4col/3.5/bigint	4
+f4col/3.5/colon	4
+f4col/3.5/arr_bigint	{4}
+f4col/3.5/arr_integer	{4}
+f4col/3.5/where	0
+f4col/3.5/group	4,1
+f4col/3.5/agg	4
+f4col/3.5/window	4,1
+numcol/3.5/round	4
+numcol/3.5/smallint	4
+numcol/3.5/integer	4
+numcol/3.5/bigint	4
+numcol/3.5/colon	4
+numcol/3.5/arr_bigint	{4}
+numcol/3.5/arr_integer	{4}
+numcol/3.5/where	0
+numcol/3.5/group	4,1
+numcol/3.5/agg	4
+numcol/3.5/window	4,1
+f8lit/3.5/round	4
+f8lit/3.5/smallint	4
+f8lit/3.5/integer	4
+f8lit/3.5/bigint	4
+f8lit/3.5/colon	4
+f8lit/3.5/arr_bigint	{4}
+f8lit/3.5/arr_integer	{4}
+f4lit/3.5/round	4
+f4lit/3.5/smallint	4
+f4lit/3.5/integer	4
+f4lit/3.5/bigint	4
+f4lit/3.5/colon	4
+f4lit/3.5/arr_bigint	{4}
+f4lit/3.5/arr_integer	{4}
+numlit/3.5/round	4
+numlit/3.5/smallint	4
+numlit/3.5/integer	4
+numlit/3.5/bigint	4
+numlit/3.5/colon	4
+numlit/3.5/arr_bigint	{4}
+numlit/3.5/arr_integer	{4}
+f8mul/3.5/round	4
+f8mul/3.5/smallint	4
+f8mul/3.5/integer	4
+f8mul/3.5/bigint	4
+f8mul/3.5/colon	4
+f8mul/3.5/arr_bigint	{4}
+f8mul/3.5/arr_integer	{4}
+f8add/3.5/round	4
+f8add/3.5/smallint	4
+f8add/3.5/integer	4
+f8add/3.5/bigint	4
+f8add/3.5/colon	4
+f8add/3.5/arr_bigint	{4}
+f8add/3.5/arr_integer	{4}
+f8sub/3.5/round	4
+f8sub/3.5/smallint	4
+f8sub/3.5/integer	4
+f8sub/3.5/bigint	4
+f8sub/3.5/colon	4
+f8sub/3.5/arr_bigint	{4}
+f8sub/3.5/arr_integer	{4}
+f8sum/3.5/round	4
+f8sum/3.5/smallint	4
+f8sum/3.5/integer	4
+f8sum/3.5/bigint	4
+f8sum/3.5/colon	4
+f8max/3.5/round	4
+f8max/3.5/smallint	4
+f8max/3.5/integer	4
+f8max/3.5/bigint	4
+f8max/3.5/colon	4
+f8derived/3.5/round	4
+f8derived/3.5/smallint	4
+f8derived/3.5/integer	4
+f8derived/3.5/bigint	4
+f8derived/3.5/colon	4
+f8derived/3.5/arr_bigint	{4}
+f8derived/3.5/arr_integer	{4}
+f8derived/3.5/where	0
+f8derived/3.5/group	4,1
+f8derived/3.5/agg	4
+f8derived/3.5/window	4,1
+numderived/3.5/round	4
+numderived/3.5/smallint	4
+numderived/3.5/integer	4
+numderived/3.5/bigint	4
+numderived/3.5/colon	4
+numderived/3.5/arr_bigint	{4}
+numderived/3.5/arr_integer	{4}
+numderived/3.5/where	0
+numderived/3.5/group	4,1
+numderived/3.5/agg	4
+numderived/3.5/window	4,1
+f8cte/3.5/round	4
+f8cte/3.5/smallint	4
+f8cte/3.5/integer	4
+f8cte/3.5/bigint	4
+f8cte/3.5/colon	4
+f8cte/3.5/arr_bigint	{4}
+f8cte/3.5/arr_integer	{4}
+f8cte/3.5/where	0
+f8cte/3.5/group	4,1
+f8cte/3.5/agg	4
+f8cte/3.5/window	4,1
+numcte/3.5/round	4
+numcte/3.5/smallint	4
+numcte/3.5/integer	4
+numcte/3.5/bigint	4
+numcte/3.5/colon	4
+numcte/3.5/arr_bigint	{4}
+numcte/3.5/arr_integer	{4}
+numcte/3.5/where	0
+numcte/3.5/group	4,1
+numcte/3.5/agg	4
+numcte/3.5/window	4,1
+f8union/3.5/round	4; 4
+f8union/3.5/smallint	4; 4
+f8union/3.5/integer	4; 4
+f8union/3.5/bigint	4; 4
+f8union/3.5/colon	4; 4
+f8union/3.5/arr_bigint	{4}; {4}
+f8union/3.5/arr_integer	{4}; {4}
+numdivderived/3.5/round	4
+numdivderived/3.5/smallint	4
+numdivderived/3.5/integer	4
+numdivderived/3.5/bigint	4
+numdivderived/3.5/colon	4
+numdivderived/3.5/arr_bigint	{4}
+numdivderived/3.5/arr_integer	{4}
+numdivderived/3.5/where	0
+numdivderived/3.5/group	4,1
+numdivderived/3.5/agg	4
+numdivderived/3.5/window	4,1
+numdivcte/3.5/round	4
+numdivcte/3.5/smallint	4
+numdivcte/3.5/integer	4
+numdivcte/3.5/bigint	4
+numdivcte/3.5/colon	4
+numdivcte/3.5/arr_bigint	{4}
+numdivcte/3.5/arr_integer	{4}
+numdivcte/3.5/where	0
+numdivcte/3.5/group	4,1
+numdivcte/3.5/agg	4
+numdivcte/3.5/window	4,1
+numdivunion/3.5/round	4; 4
+numdivunion/3.5/smallint	4; 4
+numdivunion/3.5/integer	4; 4
+numdivunion/3.5/bigint	4; 4
+numdivunion/3.5/colon	4; 4
+numdivunion/3.5/arr_bigint	{4}; {4}
+numdivunion/3.5/arr_integer	{4}; {4}
+numdivmax/3.5/round	4
+numdivmax/3.5/smallint	4
+numdivmax/3.5/integer	4
+numdivmax/3.5/bigint	4
+numdivmax/3.5/colon	4
+af/3.5/arr_bigint	{4,2}
+af/3.5/arr_integer	{4,2}
+f8col/-0.5/round	-0
+f8col/-0.5/smallint	0
+f8col/-0.5/integer	0
+f8col/-0.5/bigint	0
+f8col/-0.5/colon	0
+f8col/-0.5/arr_bigint	{0}
+f8col/-0.5/arr_integer	{0}
+f8col/-0.5/where	0
+f8col/-0.5/group	-0,1
+f8col/-0.5/agg	-0
+f8col/-0.5/window	-0,1
+f4col/-0.5/round	-0
+f4col/-0.5/smallint	0
+f4col/-0.5/integer	0
+f4col/-0.5/bigint	0
+f4col/-0.5/colon	0
+f4col/-0.5/arr_bigint	{0}
+f4col/-0.5/arr_integer	{0}
+f4col/-0.5/where	0
+f4col/-0.5/group	-0,1
+f4col/-0.5/agg	-0
+f4col/-0.5/window	-0,1
+numcol/-0.5/round	-1
+numcol/-0.5/smallint	-1
+numcol/-0.5/integer	-1
+numcol/-0.5/bigint	-1
+numcol/-0.5/colon	-1
+numcol/-0.5/arr_bigint	{-1}
+numcol/-0.5/arr_integer	{-1}
+numcol/-0.5/where	1
+numcol/-0.5/group	-1,1
+numcol/-0.5/agg	-1
+numcol/-0.5/window	-1,1
+f8lit/-0.5/round	-0
+f8lit/-0.5/smallint	0
+f8lit/-0.5/integer	0
+f8lit/-0.5/bigint	0
+f8lit/-0.5/colon	0
+f8lit/-0.5/arr_bigint	{0}
+f8lit/-0.5/arr_integer	{0}
+f4lit/-0.5/round	-0
+f4lit/-0.5/smallint	0
+f4lit/-0.5/integer	0
+f4lit/-0.5/bigint	0
+f4lit/-0.5/colon	0
+f4lit/-0.5/arr_bigint	{0}
+f4lit/-0.5/arr_integer	{0}
+numlit/-0.5/round	-1
+numlit/-0.5/smallint	-1
+numlit/-0.5/integer	-1
+numlit/-0.5/bigint	-1
+numlit/-0.5/colon	-1
+numlit/-0.5/arr_bigint	{-1}
+numlit/-0.5/arr_integer	{-1}
+f8mul/-0.5/round	-0
+f8mul/-0.5/smallint	0
+f8mul/-0.5/integer	0
+f8mul/-0.5/bigint	0
+f8mul/-0.5/colon	0
+f8mul/-0.5/arr_bigint	{0}
+f8mul/-0.5/arr_integer	{0}
+f8add/-0.5/round	-0
+f8add/-0.5/smallint	0
+f8add/-0.5/integer	0
+f8add/-0.5/bigint	0
+f8add/-0.5/colon	0
+f8add/-0.5/arr_bigint	{0}
+f8add/-0.5/arr_integer	{0}
+f8sub/-0.5/round	-0
+f8sub/-0.5/smallint	0
+f8sub/-0.5/integer	0
+f8sub/-0.5/bigint	0
+f8sub/-0.5/colon	0
+f8sub/-0.5/arr_bigint	{0}
+f8sub/-0.5/arr_integer	{0}
+f8sum/-0.5/round	-0
+f8sum/-0.5/smallint	0
+f8sum/-0.5/integer	0
+f8sum/-0.5/bigint	0
+f8sum/-0.5/colon	0
+f8max/-0.5/round	-0
+f8max/-0.5/smallint	0
+f8max/-0.5/integer	0
+f8max/-0.5/bigint	0
+f8max/-0.5/colon	0
+f8derived/-0.5/round	-0
+f8derived/-0.5/smallint	0
+f8derived/-0.5/integer	0
+f8derived/-0.5/bigint	0
+f8derived/-0.5/colon	0
+f8derived/-0.5/arr_bigint	{0}
+f8derived/-0.5/arr_integer	{0}
+f8derived/-0.5/where	0
+f8derived/-0.5/group	-0,1
+f8derived/-0.5/agg	-0
+f8derived/-0.5/window	-0,1
+numderived/-0.5/round	-1
+numderived/-0.5/smallint	-1
+numderived/-0.5/integer	-1
+numderived/-0.5/bigint	-1
+numderived/-0.5/colon	-1
+numderived/-0.5/arr_bigint	{-1}
+numderived/-0.5/arr_integer	{-1}
+numderived/-0.5/where	1
+numderived/-0.5/group	-1,1
+numderived/-0.5/agg	-1
+numderived/-0.5/window	-1,1
+f8cte/-0.5/round	-0
+f8cte/-0.5/smallint	0
+f8cte/-0.5/integer	0
+f8cte/-0.5/bigint	0
+f8cte/-0.5/colon	0
+f8cte/-0.5/arr_bigint	{0}
+f8cte/-0.5/arr_integer	{0}
+f8cte/-0.5/where	0
+f8cte/-0.5/group	-0,1
+f8cte/-0.5/agg	-0
+f8cte/-0.5/window	-0,1
+numcte/-0.5/round	-1
+numcte/-0.5/smallint	-1
+numcte/-0.5/integer	-1
+numcte/-0.5/bigint	-1
+numcte/-0.5/colon	-1
+numcte/-0.5/arr_bigint	{-1}
+numcte/-0.5/arr_integer	{-1}
+numcte/-0.5/where	1
+numcte/-0.5/group	-1,1
+numcte/-0.5/agg	-1
+numcte/-0.5/window	-1,1
+f8union/-0.5/round	-0; -0
+f8union/-0.5/smallint	0; 0
+f8union/-0.5/integer	0; 0
+f8union/-0.5/bigint	0; 0
+f8union/-0.5/colon	0; 0
+f8union/-0.5/arr_bigint	{0}; {0}
+f8union/-0.5/arr_integer	{0}; {0}
+numdivderived/-0.5/round	-1
+numdivderived/-0.5/smallint	-1
+numdivderived/-0.5/integer	-1
+numdivderived/-0.5/bigint	-1
+numdivderived/-0.5/colon	-1
+numdivderived/-0.5/arr_bigint	{-1}
+numdivderived/-0.5/arr_integer	{-1}
+numdivderived/-0.5/where	1
+numdivderived/-0.5/group	-1,1
+numdivderived/-0.5/agg	-1
+numdivderived/-0.5/window	-1,1
+numdivcte/-0.5/round	-1
+numdivcte/-0.5/smallint	-1
+numdivcte/-0.5/integer	-1
+numdivcte/-0.5/bigint	-1
+numdivcte/-0.5/colon	-1
+numdivcte/-0.5/arr_bigint	{-1}
+numdivcte/-0.5/arr_integer	{-1}
+numdivcte/-0.5/where	1
+numdivcte/-0.5/group	-1,1
+numdivcte/-0.5/agg	-1
+numdivcte/-0.5/window	-1,1
+numdivunion/-0.5/round	-1; -1
+numdivunion/-0.5/smallint	-1; -1
+numdivunion/-0.5/integer	-1; -1
+numdivunion/-0.5/bigint	-1; -1
+numdivunion/-0.5/colon	-1; -1
+numdivunion/-0.5/arr_bigint	{-1}; {-1}
+numdivunion/-0.5/arr_integer	{-1}; {-1}
+numdivmax/-0.5/round	-1
+numdivmax/-0.5/smallint	-1
+numdivmax/-0.5/integer	-1
+numdivmax/-0.5/bigint	-1
+numdivmax/-0.5/colon	-1
+af/-0.5/arr_bigint	{0,2}
+af/-0.5/arr_integer	{0,2}
+f8col/-1.5/round	-2
+f8col/-1.5/smallint	-2
+f8col/-1.5/integer	-2
+f8col/-1.5/bigint	-2
+f8col/-1.5/colon	-2
+f8col/-1.5/arr_bigint	{-2}
+f8col/-1.5/arr_integer	{-2}
+f8col/-1.5/where	1
+f8col/-1.5/group	-2,1
+f8col/-1.5/agg	-2
+f8col/-1.5/window	-2,1
+f4col/-1.5/round	-2
+f4col/-1.5/smallint	-2
+f4col/-1.5/integer	-2
+f4col/-1.5/bigint	-2
+f4col/-1.5/colon	-2
+f4col/-1.5/arr_bigint	{-2}
+f4col/-1.5/arr_integer	{-2}
+f4col/-1.5/where	1
+f4col/-1.5/group	-2,1
+f4col/-1.5/agg	-2
+f4col/-1.5/window	-2,1
+numcol/-1.5/round	-2
+numcol/-1.5/smallint	-2
+numcol/-1.5/integer	-2
+numcol/-1.5/bigint	-2
+numcol/-1.5/colon	-2
+numcol/-1.5/arr_bigint	{-2}
+numcol/-1.5/arr_integer	{-2}
+numcol/-1.5/where	1
+numcol/-1.5/group	-2,1
+numcol/-1.5/agg	-2
+numcol/-1.5/window	-2,1
+f8lit/-1.5/round	-2
+f8lit/-1.5/smallint	-2
+f8lit/-1.5/integer	-2
+f8lit/-1.5/bigint	-2
+f8lit/-1.5/colon	-2
+f8lit/-1.5/arr_bigint	{-2}
+f8lit/-1.5/arr_integer	{-2}
+f4lit/-1.5/round	-2
+f4lit/-1.5/smallint	-2
+f4lit/-1.5/integer	-2
+f4lit/-1.5/bigint	-2
+f4lit/-1.5/colon	-2
+f4lit/-1.5/arr_bigint	{-2}
+f4lit/-1.5/arr_integer	{-2}
+numlit/-1.5/round	-2
+numlit/-1.5/smallint	-2
+numlit/-1.5/integer	-2
+numlit/-1.5/bigint	-2
+numlit/-1.5/colon	-2
+numlit/-1.5/arr_bigint	{-2}
+numlit/-1.5/arr_integer	{-2}
+f8mul/-1.5/round	-2
+f8mul/-1.5/smallint	-2
+f8mul/-1.5/integer	-2
+f8mul/-1.5/bigint	-2
+f8mul/-1.5/colon	-2
+f8mul/-1.5/arr_bigint	{-2}
+f8mul/-1.5/arr_integer	{-2}
+f8add/-1.5/round	-2
+f8add/-1.5/smallint	-2
+f8add/-1.5/integer	-2
+f8add/-1.5/bigint	-2
+f8add/-1.5/colon	-2
+f8add/-1.5/arr_bigint	{-2}
+f8add/-1.5/arr_integer	{-2}
+f8sub/-1.5/round	-2
+f8sub/-1.5/smallint	-2
+f8sub/-1.5/integer	-2
+f8sub/-1.5/bigint	-2
+f8sub/-1.5/colon	-2
+f8sub/-1.5/arr_bigint	{-2}
+f8sub/-1.5/arr_integer	{-2}
+f8sum/-1.5/round	-2
+f8sum/-1.5/smallint	-2
+f8sum/-1.5/integer	-2
+f8sum/-1.5/bigint	-2
+f8sum/-1.5/colon	-2
+f8max/-1.5/round	-2
+f8max/-1.5/smallint	-2
+f8max/-1.5/integer	-2
+f8max/-1.5/bigint	-2
+f8max/-1.5/colon	-2
+f8derived/-1.5/round	-2
+f8derived/-1.5/smallint	-2
+f8derived/-1.5/integer	-2
+f8derived/-1.5/bigint	-2
+f8derived/-1.5/colon	-2
+f8derived/-1.5/arr_bigint	{-2}
+f8derived/-1.5/arr_integer	{-2}
+f8derived/-1.5/where	1
+f8derived/-1.5/group	-2,1
+f8derived/-1.5/agg	-2
+f8derived/-1.5/window	-2,1
+numderived/-1.5/round	-2
+numderived/-1.5/smallint	-2
+numderived/-1.5/integer	-2
+numderived/-1.5/bigint	-2
+numderived/-1.5/colon	-2
+numderived/-1.5/arr_bigint	{-2}
+numderived/-1.5/arr_integer	{-2}
+numderived/-1.5/where	1
+numderived/-1.5/group	-2,1
+numderived/-1.5/agg	-2
+numderived/-1.5/window	-2,1
+f8cte/-1.5/round	-2
+f8cte/-1.5/smallint	-2
+f8cte/-1.5/integer	-2
+f8cte/-1.5/bigint	-2
+f8cte/-1.5/colon	-2
+f8cte/-1.5/arr_bigint	{-2}
+f8cte/-1.5/arr_integer	{-2}
+f8cte/-1.5/where	1
+f8cte/-1.5/group	-2,1
+f8cte/-1.5/agg	-2
+f8cte/-1.5/window	-2,1
+numcte/-1.5/round	-2
+numcte/-1.5/smallint	-2
+numcte/-1.5/integer	-2
+numcte/-1.5/bigint	-2
+numcte/-1.5/colon	-2
+numcte/-1.5/arr_bigint	{-2}
+numcte/-1.5/arr_integer	{-2}
+numcte/-1.5/where	1
+numcte/-1.5/group	-2,1
+numcte/-1.5/agg	-2
+numcte/-1.5/window	-2,1
+f8union/-1.5/round	-2; -2
+f8union/-1.5/smallint	-2; -2
+f8union/-1.5/integer	-2; -2
+f8union/-1.5/bigint	-2; -2
+f8union/-1.5/colon	-2; -2
+f8union/-1.5/arr_bigint	{-2}; {-2}
+f8union/-1.5/arr_integer	{-2}; {-2}
+numdivderived/-1.5/round	-2
+numdivderived/-1.5/smallint	-2
+numdivderived/-1.5/integer	-2
+numdivderived/-1.5/bigint	-2
+numdivderived/-1.5/colon	-2
+numdivderived/-1.5/arr_bigint	{-2}
+numdivderived/-1.5/arr_integer	{-2}
+numdivderived/-1.5/where	1
+numdivderived/-1.5/group	-2,1
+numdivderived/-1.5/agg	-2
+numdivderived/-1.5/window	-2,1
+numdivcte/-1.5/round	-2
+numdivcte/-1.5/smallint	-2
+numdivcte/-1.5/integer	-2
+numdivcte/-1.5/bigint	-2
+numdivcte/-1.5/colon	-2
+numdivcte/-1.5/arr_bigint	{-2}
+numdivcte/-1.5/arr_integer	{-2}
+numdivcte/-1.5/where	1
+numdivcte/-1.5/group	-2,1
+numdivcte/-1.5/agg	-2
+numdivcte/-1.5/window	-2,1
+numdivunion/-1.5/round	-2; -2
+numdivunion/-1.5/smallint	-2; -2
+numdivunion/-1.5/integer	-2; -2
+numdivunion/-1.5/bigint	-2; -2
+numdivunion/-1.5/colon	-2; -2
+numdivunion/-1.5/arr_bigint	{-2}; {-2}
+numdivunion/-1.5/arr_integer	{-2}; {-2}
+numdivmax/-1.5/round	-2
+numdivmax/-1.5/smallint	-2
+numdivmax/-1.5/integer	-2
+numdivmax/-1.5/bigint	-2
+numdivmax/-1.5/colon	-2
+af/-1.5/arr_bigint	{-2,2}
+af/-1.5/arr_integer	{-2,2}
+f8col/-2.5/round	-2
+f8col/-2.5/smallint	-2
+f8col/-2.5/integer	-2
+f8col/-2.5/bigint	-2
+f8col/-2.5/colon	-2
+f8col/-2.5/arr_bigint	{-2}
+f8col/-2.5/arr_integer	{-2}
+f8col/-2.5/where	0
+f8col/-2.5/group	-2,1
+f8col/-2.5/agg	-2
+f8col/-2.5/window	-2,1
+f4col/-2.5/round	-2
+f4col/-2.5/smallint	-2
+f4col/-2.5/integer	-2
+f4col/-2.5/bigint	-2
+f4col/-2.5/colon	-2
+f4col/-2.5/arr_bigint	{-2}
+f4col/-2.5/arr_integer	{-2}
+f4col/-2.5/where	0
+f4col/-2.5/group	-2,1
+f4col/-2.5/agg	-2
+f4col/-2.5/window	-2,1
+numcol/-2.5/round	-3
+numcol/-2.5/smallint	-3
+numcol/-2.5/integer	-3
+numcol/-2.5/bigint	-3
+numcol/-2.5/colon	-3
+numcol/-2.5/arr_bigint	{-3}
+numcol/-2.5/arr_integer	{-3}
+numcol/-2.5/where	1
+numcol/-2.5/group	-3,1
+numcol/-2.5/agg	-3
+numcol/-2.5/window	-3,1
+f8lit/-2.5/round	-2
+f8lit/-2.5/smallint	-2
+f8lit/-2.5/integer	-2
+f8lit/-2.5/bigint	-2
+f8lit/-2.5/colon	-2
+f8lit/-2.5/arr_bigint	{-2}
+f8lit/-2.5/arr_integer	{-2}
+f4lit/-2.5/round	-2
+f4lit/-2.5/smallint	-2
+f4lit/-2.5/integer	-2
+f4lit/-2.5/bigint	-2
+f4lit/-2.5/colon	-2
+f4lit/-2.5/arr_bigint	{-2}
+f4lit/-2.5/arr_integer	{-2}
+numlit/-2.5/round	-3
+numlit/-2.5/smallint	-3
+numlit/-2.5/integer	-3
+numlit/-2.5/bigint	-3
+numlit/-2.5/colon	-3
+numlit/-2.5/arr_bigint	{-3}
+numlit/-2.5/arr_integer	{-3}
+f8mul/-2.5/round	-2
+f8mul/-2.5/smallint	-2
+f8mul/-2.5/integer	-2
+f8mul/-2.5/bigint	-2
+f8mul/-2.5/colon	-2
+f8mul/-2.5/arr_bigint	{-2}
+f8mul/-2.5/arr_integer	{-2}
+f8add/-2.5/round	-2
+f8add/-2.5/smallint	-2
+f8add/-2.5/integer	-2
+f8add/-2.5/bigint	-2
+f8add/-2.5/colon	-2
+f8add/-2.5/arr_bigint	{-2}
+f8add/-2.5/arr_integer	{-2}
+f8sub/-2.5/round	-2
+f8sub/-2.5/smallint	-2
+f8sub/-2.5/integer	-2
+f8sub/-2.5/bigint	-2
+f8sub/-2.5/colon	-2
+f8sub/-2.5/arr_bigint	{-2}
+f8sub/-2.5/arr_integer	{-2}
+f8sum/-2.5/round	-2
+f8sum/-2.5/smallint	-2
+f8sum/-2.5/integer	-2
+f8sum/-2.5/bigint	-2
+f8sum/-2.5/colon	-2
+f8max/-2.5/round	-2
+f8max/-2.5/smallint	-2
+f8max/-2.5/integer	-2
+f8max/-2.5/bigint	-2
+f8max/-2.5/colon	-2
+f8derived/-2.5/round	-2
+f8derived/-2.5/smallint	-2
+f8derived/-2.5/integer	-2
+f8derived/-2.5/bigint	-2
+f8derived/-2.5/colon	-2
+f8derived/-2.5/arr_bigint	{-2}
+f8derived/-2.5/arr_integer	{-2}
+f8derived/-2.5/where	0
+f8derived/-2.5/group	-2,1
+f8derived/-2.5/agg	-2
+f8derived/-2.5/window	-2,1
+numderived/-2.5/round	-3
+numderived/-2.5/smallint	-3
+numderived/-2.5/integer	-3
+numderived/-2.5/bigint	-3
+numderived/-2.5/colon	-3
+numderived/-2.5/arr_bigint	{-3}
+numderived/-2.5/arr_integer	{-3}
+numderived/-2.5/where	1
+numderived/-2.5/group	-3,1
+numderived/-2.5/agg	-3
+numderived/-2.5/window	-3,1
+f8cte/-2.5/round	-2
+f8cte/-2.5/smallint	-2
+f8cte/-2.5/integer	-2
+f8cte/-2.5/bigint	-2
+f8cte/-2.5/colon	-2
+f8cte/-2.5/arr_bigint	{-2}
+f8cte/-2.5/arr_integer	{-2}
+f8cte/-2.5/where	0
+f8cte/-2.5/group	-2,1
+f8cte/-2.5/agg	-2
+f8cte/-2.5/window	-2,1
+numcte/-2.5/round	-3
+numcte/-2.5/smallint	-3
+numcte/-2.5/integer	-3
+numcte/-2.5/bigint	-3
+numcte/-2.5/colon	-3
+numcte/-2.5/arr_bigint	{-3}
+numcte/-2.5/arr_integer	{-3}
+numcte/-2.5/where	1
+numcte/-2.5/group	-3,1
+numcte/-2.5/agg	-3
+numcte/-2.5/window	-3,1
+f8union/-2.5/round	-2; -2
+f8union/-2.5/smallint	-2; -2
+f8union/-2.5/integer	-2; -2
+f8union/-2.5/bigint	-2; -2
+f8union/-2.5/colon	-2; -2
+f8union/-2.5/arr_bigint	{-2}; {-2}
+f8union/-2.5/arr_integer	{-2}; {-2}
+numdivderived/-2.5/round	-3
+numdivderived/-2.5/smallint	-3
+numdivderived/-2.5/integer	-3
+numdivderived/-2.5/bigint	-3
+numdivderived/-2.5/colon	-3
+numdivderived/-2.5/arr_bigint	{-3}
+numdivderived/-2.5/arr_integer	{-3}
+numdivderived/-2.5/where	1
+numdivderived/-2.5/group	-3,1
+numdivderived/-2.5/agg	-3
+numdivderived/-2.5/window	-3,1
+numdivcte/-2.5/round	-3
+numdivcte/-2.5/smallint	-3
+numdivcte/-2.5/integer	-3
+numdivcte/-2.5/bigint	-3
+numdivcte/-2.5/colon	-3
+numdivcte/-2.5/arr_bigint	{-3}
+numdivcte/-2.5/arr_integer	{-3}
+numdivcte/-2.5/where	1
+numdivcte/-2.5/group	-3,1
+numdivcte/-2.5/agg	-3
+numdivcte/-2.5/window	-3,1
+numdivunion/-2.5/round	-3; -3
+numdivunion/-2.5/smallint	-3; -3
+numdivunion/-2.5/integer	-3; -3
+numdivunion/-2.5/bigint	-3; -3
+numdivunion/-2.5/colon	-3; -3
+numdivunion/-2.5/arr_bigint	{-3}; {-3}
+numdivunion/-2.5/arr_integer	{-3}; {-3}
+numdivmax/-2.5/round	-3
+numdivmax/-2.5/smallint	-3
+numdivmax/-2.5/integer	-3
+numdivmax/-2.5/bigint	-3
+numdivmax/-2.5/colon	-3
+af/-2.5/arr_bigint	{-2,2}
+af/-2.5/arr_integer	{-2,2}
+f8col/2.4999999999999996/round	2
+f8col/2.4999999999999996/smallint	2
+f8col/2.4999999999999996/integer	2
+f8col/2.4999999999999996/bigint	2
+f8col/2.4999999999999996/colon	2
+f8col/2.4999999999999996/arr_bigint	{2}
+f8col/2.4999999999999996/arr_integer	{2}
+f8col/2.4999999999999996/where	1
+f8col/2.4999999999999996/group	2,1
+f8col/2.4999999999999996/agg	2
+f8col/2.4999999999999996/window	2,1
+f4col/2.4999999999999996/round	2
+f4col/2.4999999999999996/smallint	2
+f4col/2.4999999999999996/integer	2
+f4col/2.4999999999999996/bigint	2
+f4col/2.4999999999999996/colon	2
+f4col/2.4999999999999996/arr_bigint	{2}
+f4col/2.4999999999999996/arr_integer	{2}
+f4col/2.4999999999999996/where	1
+f4col/2.4999999999999996/group	2,1
+f4col/2.4999999999999996/agg	2
+f4col/2.4999999999999996/window	2,1
+numcol/2.4999999999999996/round	2
+numcol/2.4999999999999996/smallint	2
+numcol/2.4999999999999996/integer	2
+numcol/2.4999999999999996/bigint	2
+numcol/2.4999999999999996/colon	2
+numcol/2.4999999999999996/arr_bigint	{2}
+numcol/2.4999999999999996/arr_integer	{2}
+numcol/2.4999999999999996/where	1
+numcol/2.4999999999999996/group	2,1
+numcol/2.4999999999999996/agg	2
+numcol/2.4999999999999996/window	2,1
+f8lit/2.4999999999999996/round	2
+f8lit/2.4999999999999996/smallint	2
+f8lit/2.4999999999999996/integer	2
+f8lit/2.4999999999999996/bigint	2
+f8lit/2.4999999999999996/colon	2
+f8lit/2.4999999999999996/arr_bigint	{2}
+f8lit/2.4999999999999996/arr_integer	{2}
+f4lit/2.4999999999999996/round	2
+f4lit/2.4999999999999996/smallint	2
+f4lit/2.4999999999999996/integer	2
+f4lit/2.4999999999999996/bigint	2
+f4lit/2.4999999999999996/colon	2
+f4lit/2.4999999999999996/arr_bigint	{2}
+f4lit/2.4999999999999996/arr_integer	{2}
+numlit/2.4999999999999996/round	2
+numlit/2.4999999999999996/smallint	2
+numlit/2.4999999999999996/integer	2
+numlit/2.4999999999999996/bigint	2
+numlit/2.4999999999999996/colon	2
+numlit/2.4999999999999996/arr_bigint	{2}
+numlit/2.4999999999999996/arr_integer	{2}
+f8mul/2.4999999999999996/round	2
+f8mul/2.4999999999999996/smallint	2
+f8mul/2.4999999999999996/integer	2
+f8mul/2.4999999999999996/bigint	2
+f8mul/2.4999999999999996/colon	2
+f8mul/2.4999999999999996/arr_bigint	{2}
+f8mul/2.4999999999999996/arr_integer	{2}
+f8add/2.4999999999999996/round	2
+f8add/2.4999999999999996/smallint	2
+f8add/2.4999999999999996/integer	2
+f8add/2.4999999999999996/bigint	2
+f8add/2.4999999999999996/colon	2
+f8add/2.4999999999999996/arr_bigint	{2}
+f8add/2.4999999999999996/arr_integer	{2}
+f8sub/2.4999999999999996/round	2
+f8sub/2.4999999999999996/smallint	2
+f8sub/2.4999999999999996/integer	2
+f8sub/2.4999999999999996/bigint	2
+f8sub/2.4999999999999996/colon	2
+f8sub/2.4999999999999996/arr_bigint	{2}
+f8sub/2.4999999999999996/arr_integer	{2}
+f8sum/2.4999999999999996/round	2
+f8sum/2.4999999999999996/smallint	2
+f8sum/2.4999999999999996/integer	2
+f8sum/2.4999999999999996/bigint	2
+f8sum/2.4999999999999996/colon	2
+f8max/2.4999999999999996/round	2
+f8max/2.4999999999999996/smallint	2
+f8max/2.4999999999999996/integer	2
+f8max/2.4999999999999996/bigint	2
+f8max/2.4999999999999996/colon	2
+f8derived/2.4999999999999996/round	2
+f8derived/2.4999999999999996/smallint	2
+f8derived/2.4999999999999996/integer	2
+f8derived/2.4999999999999996/bigint	2
+f8derived/2.4999999999999996/colon	2
+f8derived/2.4999999999999996/arr_bigint	{2}
+f8derived/2.4999999999999996/arr_integer	{2}
+f8derived/2.4999999999999996/where	1
+f8derived/2.4999999999999996/group	2,1
+f8derived/2.4999999999999996/agg	2
+f8derived/2.4999999999999996/window	2,1
+numderived/2.4999999999999996/round	2
+numderived/2.4999999999999996/smallint	2
+numderived/2.4999999999999996/integer	2
+numderived/2.4999999999999996/bigint	2
+numderived/2.4999999999999996/colon	2
+numderived/2.4999999999999996/arr_bigint	{2}
+numderived/2.4999999999999996/arr_integer	{2}
+numderived/2.4999999999999996/where	1
+numderived/2.4999999999999996/group	2,1
+numderived/2.4999999999999996/agg	2
+numderived/2.4999999999999996/window	2,1
+f8cte/2.4999999999999996/round	2
+f8cte/2.4999999999999996/smallint	2
+f8cte/2.4999999999999996/integer	2
+f8cte/2.4999999999999996/bigint	2
+f8cte/2.4999999999999996/colon	2
+f8cte/2.4999999999999996/arr_bigint	{2}
+f8cte/2.4999999999999996/arr_integer	{2}
+f8cte/2.4999999999999996/where	1
+f8cte/2.4999999999999996/group	2,1
+f8cte/2.4999999999999996/agg	2
+f8cte/2.4999999999999996/window	2,1
+numcte/2.4999999999999996/round	2
+numcte/2.4999999999999996/smallint	2
+numcte/2.4999999999999996/integer	2
+numcte/2.4999999999999996/bigint	2
+numcte/2.4999999999999996/colon	2
+numcte/2.4999999999999996/arr_bigint	{2}
+numcte/2.4999999999999996/arr_integer	{2}
+numcte/2.4999999999999996/where	1
+numcte/2.4999999999999996/group	2,1
+numcte/2.4999999999999996/agg	2
+numcte/2.4999999999999996/window	2,1
+f8union/2.4999999999999996/round	2; 2
+f8union/2.4999999999999996/smallint	2; 2
+f8union/2.4999999999999996/integer	2; 2
+f8union/2.4999999999999996/bigint	2; 2
+f8union/2.4999999999999996/colon	2; 2
+f8union/2.4999999999999996/arr_bigint	{2}; {2}
+f8union/2.4999999999999996/arr_integer	{2}; {2}
+af/2.4999999999999996/arr_bigint	{2,2}
+af/2.4999999999999996/arr_integer	{2,2}
+f8col/2.5000000000000004/round	3
+f8col/2.5000000000000004/smallint	3
+f8col/2.5000000000000004/integer	3
+f8col/2.5000000000000004/bigint	3
+f8col/2.5000000000000004/colon	3
+f8col/2.5000000000000004/arr_bigint	{3}
+f8col/2.5000000000000004/arr_integer	{3}
+f8col/2.5000000000000004/where	0
+f8col/2.5000000000000004/group	3,1
+f8col/2.5000000000000004/agg	3
+f8col/2.5000000000000004/window	3,1
+f4col/2.5000000000000004/round	2
+f4col/2.5000000000000004/smallint	2
+f4col/2.5000000000000004/integer	2
+f4col/2.5000000000000004/bigint	2
+f4col/2.5000000000000004/colon	2
+f4col/2.5000000000000004/arr_bigint	{2}
+f4col/2.5000000000000004/arr_integer	{2}
+f4col/2.5000000000000004/where	1
+f4col/2.5000000000000004/group	2,1
+f4col/2.5000000000000004/agg	2
+f4col/2.5000000000000004/window	2,1
+numcol/2.5000000000000004/round	3
+numcol/2.5000000000000004/smallint	3
+numcol/2.5000000000000004/integer	3
+numcol/2.5000000000000004/bigint	3
+numcol/2.5000000000000004/colon	3
+numcol/2.5000000000000004/arr_bigint	{3}
+numcol/2.5000000000000004/arr_integer	{3}
+numcol/2.5000000000000004/where	0
+numcol/2.5000000000000004/group	3,1
+numcol/2.5000000000000004/agg	3
+numcol/2.5000000000000004/window	3,1
+f8lit/2.5000000000000004/round	3
+f8lit/2.5000000000000004/smallint	3
+f8lit/2.5000000000000004/integer	3
+f8lit/2.5000000000000004/bigint	3
+f8lit/2.5000000000000004/colon	3
+f8lit/2.5000000000000004/arr_bigint	{3}
+f8lit/2.5000000000000004/arr_integer	{3}
+f4lit/2.5000000000000004/round	2
+f4lit/2.5000000000000004/smallint	2
+f4lit/2.5000000000000004/integer	2
+f4lit/2.5000000000000004/bigint	2
+f4lit/2.5000000000000004/colon	2
+f4lit/2.5000000000000004/arr_bigint	{2}
+f4lit/2.5000000000000004/arr_integer	{2}
+numlit/2.5000000000000004/round	3
+numlit/2.5000000000000004/smallint	3
+numlit/2.5000000000000004/integer	3
+numlit/2.5000000000000004/bigint	3
+numlit/2.5000000000000004/colon	3
+numlit/2.5000000000000004/arr_bigint	{3}
+numlit/2.5000000000000004/arr_integer	{3}
+f8mul/2.5000000000000004/round	3
+f8mul/2.5000000000000004/smallint	3
+f8mul/2.5000000000000004/integer	3
+f8mul/2.5000000000000004/bigint	3
+f8mul/2.5000000000000004/colon	3
+f8mul/2.5000000000000004/arr_bigint	{3}
+f8mul/2.5000000000000004/arr_integer	{3}
+f8add/2.5000000000000004/round	3
+f8add/2.5000000000000004/smallint	3
+f8add/2.5000000000000004/integer	3
+f8add/2.5000000000000004/bigint	3
+f8add/2.5000000000000004/colon	3
+f8add/2.5000000000000004/arr_bigint	{3}
+f8add/2.5000000000000004/arr_integer	{3}
+f8sub/2.5000000000000004/round	3
+f8sub/2.5000000000000004/smallint	3
+f8sub/2.5000000000000004/integer	3
+f8sub/2.5000000000000004/bigint	3
+f8sub/2.5000000000000004/colon	3
+f8sub/2.5000000000000004/arr_bigint	{3}
+f8sub/2.5000000000000004/arr_integer	{3}
+f8sum/2.5000000000000004/round	3
+f8sum/2.5000000000000004/smallint	3
+f8sum/2.5000000000000004/integer	3
+f8sum/2.5000000000000004/bigint	3
+f8sum/2.5000000000000004/colon	3
+f8max/2.5000000000000004/round	3
+f8max/2.5000000000000004/smallint	3
+f8max/2.5000000000000004/integer	3
+f8max/2.5000000000000004/bigint	3
+f8max/2.5000000000000004/colon	3
+f8derived/2.5000000000000004/round	3
+f8derived/2.5000000000000004/smallint	3
+f8derived/2.5000000000000004/integer	3
+f8derived/2.5000000000000004/bigint	3
+f8derived/2.5000000000000004/colon	3
+f8derived/2.5000000000000004/arr_bigint	{3}
+f8derived/2.5000000000000004/arr_integer	{3}
+f8derived/2.5000000000000004/where	0
+f8derived/2.5000000000000004/group	3,1
+f8derived/2.5000000000000004/agg	3
+f8derived/2.5000000000000004/window	3,1
+numderived/2.5000000000000004/round	3
+numderived/2.5000000000000004/smallint	3
+numderived/2.5000000000000004/integer	3
+numderived/2.5000000000000004/bigint	3
+numderived/2.5000000000000004/colon	3
+numderived/2.5000000000000004/arr_bigint	{3}
+numderived/2.5000000000000004/arr_integer	{3}
+numderived/2.5000000000000004/where	0
+numderived/2.5000000000000004/group	3,1
+numderived/2.5000000000000004/agg	3
+numderived/2.5000000000000004/window	3,1
+f8cte/2.5000000000000004/round	3
+f8cte/2.5000000000000004/smallint	3
+f8cte/2.5000000000000004/integer	3
+f8cte/2.5000000000000004/bigint	3
+f8cte/2.5000000000000004/colon	3
+f8cte/2.5000000000000004/arr_bigint	{3}
+f8cte/2.5000000000000004/arr_integer	{3}
+f8cte/2.5000000000000004/where	0
+f8cte/2.5000000000000004/group	3,1
+f8cte/2.5000000000000004/agg	3
+f8cte/2.5000000000000004/window	3,1
+numcte/2.5000000000000004/round	3
+numcte/2.5000000000000004/smallint	3
+numcte/2.5000000000000004/integer	3
+numcte/2.5000000000000004/bigint	3
+numcte/2.5000000000000004/colon	3
+numcte/2.5000000000000004/arr_bigint	{3}
+numcte/2.5000000000000004/arr_integer	{3}
+numcte/2.5000000000000004/where	0
+numcte/2.5000000000000004/group	3,1
+numcte/2.5000000000000004/agg	3
+numcte/2.5000000000000004/window	3,1
+f8union/2.5000000000000004/round	3; 3
+f8union/2.5000000000000004/smallint	3; 3
+f8union/2.5000000000000004/integer	3; 3
+f8union/2.5000000000000004/bigint	3; 3
+f8union/2.5000000000000004/colon	3; 3
+f8union/2.5000000000000004/arr_bigint	{3}; {3}
+f8union/2.5000000000000004/arr_integer	{3}; {3}
+af/2.5000000000000004/arr_bigint	{3,2}
+af/2.5000000000000004/arr_integer	{3,2}
+f8col/4503599627370496.5/round	4.503599627370496e+15
+f8col/4503599627370496.5/smallint	ERR 22003
+f8col/4503599627370496.5/integer	ERR 22003
+f8col/4503599627370496.5/bigint	4503599627370496
+f8col/4503599627370496.5/colon	4503599627370496
+f8col/4503599627370496.5/arr_bigint	{4503599627370496}
+f8col/4503599627370496.5/arr_integer	ERR 22003
+f8col/4503599627370496.5/where	0
+f8col/4503599627370496.5/group	4.503599627370496e+15,1
+f8col/4503599627370496.5/agg	4.503599627370496e+15
+f8col/4503599627370496.5/window	4.503599627370496e+15,1
+f4col/4503599627370496.5/round	4.503599627370496e+15
+f4col/4503599627370496.5/smallint	ERR 22003
+f4col/4503599627370496.5/integer	ERR 22003
+f4col/4503599627370496.5/bigint	4503599627370496
+f4col/4503599627370496.5/colon	4503599627370496
+f4col/4503599627370496.5/arr_bigint	{4503599627370496}
+f4col/4503599627370496.5/arr_integer	ERR 22003
+f4col/4503599627370496.5/where	0
+f4col/4503599627370496.5/group	4.503599627370496e+15,1
+f4col/4503599627370496.5/agg	4.503599627370496e+15
+f4col/4503599627370496.5/window	4.503599627370496e+15,1
+numcol/4503599627370496.5/round	4503599627370497
+numcol/4503599627370496.5/smallint	ERR 22003
+numcol/4503599627370496.5/integer	ERR 22003
+numcol/4503599627370496.5/bigint	4503599627370497
+numcol/4503599627370496.5/colon	4503599627370497
+numcol/4503599627370496.5/arr_bigint	{4503599627370497}
+numcol/4503599627370496.5/arr_integer	ERR 22003
+numcol/4503599627370496.5/where	0
+numcol/4503599627370496.5/group	4503599627370497,1
+numcol/4503599627370496.5/agg	4503599627370497
+numcol/4503599627370496.5/window	4503599627370497,1
+f8lit/4503599627370496.5/round	4.503599627370496e+15
+f8lit/4503599627370496.5/smallint	ERR 22003
+f8lit/4503599627370496.5/integer	ERR 22003
+f8lit/4503599627370496.5/bigint	4503599627370496
+f8lit/4503599627370496.5/colon	4503599627370496
+f8lit/4503599627370496.5/arr_bigint	{4503599627370496}
+f8lit/4503599627370496.5/arr_integer	ERR 22003
+f4lit/4503599627370496.5/round	4.503599627370496e+15
+f4lit/4503599627370496.5/smallint	ERR 22003
+f4lit/4503599627370496.5/integer	ERR 22003
+f4lit/4503599627370496.5/bigint	4503599627370496
+f4lit/4503599627370496.5/colon	4503599627370496
+f4lit/4503599627370496.5/arr_bigint	{4503599627370496}
+f4lit/4503599627370496.5/arr_integer	ERR 22003
+numlit/4503599627370496.5/round	4503599627370497
+numlit/4503599627370496.5/smallint	ERR 22003
+numlit/4503599627370496.5/integer	ERR 22003
+numlit/4503599627370496.5/bigint	4503599627370497
+numlit/4503599627370496.5/colon	4503599627370497
+numlit/4503599627370496.5/arr_bigint	{4503599627370497}
+numlit/4503599627370496.5/arr_integer	ERR 22003
+f8mul/4503599627370496.5/round	4.503599627370496e+15
+f8mul/4503599627370496.5/smallint	ERR 22003
+f8mul/4503599627370496.5/integer	ERR 22003
+f8mul/4503599627370496.5/bigint	4503599627370496
+f8mul/4503599627370496.5/colon	4503599627370496
+f8mul/4503599627370496.5/arr_bigint	{4503599627370496}
+f8mul/4503599627370496.5/arr_integer	ERR 22003
+f8add/4503599627370496.5/round	4.503599627370496e+15
+f8add/4503599627370496.5/smallint	ERR 22003
+f8add/4503599627370496.5/integer	ERR 22003
+f8add/4503599627370496.5/bigint	4503599627370496
+f8add/4503599627370496.5/colon	4503599627370496
+f8add/4503599627370496.5/arr_bigint	{4503599627370496}
+f8add/4503599627370496.5/arr_integer	ERR 22003
+f8sub/4503599627370496.5/round	4.503599627370496e+15
+f8sub/4503599627370496.5/smallint	ERR 22003
+f8sub/4503599627370496.5/integer	ERR 22003
+f8sub/4503599627370496.5/bigint	4503599627370496
+f8sub/4503599627370496.5/colon	4503599627370496
+f8sub/4503599627370496.5/arr_bigint	{4503599627370496}
+f8sub/4503599627370496.5/arr_integer	ERR 22003
+f8sum/4503599627370496.5/round	4.503599627370496e+15
+f8sum/4503599627370496.5/smallint	ERR 22003
+f8sum/4503599627370496.5/integer	ERR 22003
+f8sum/4503599627370496.5/bigint	4503599627370496
+f8sum/4503599627370496.5/colon	4503599627370496
+f8max/4503599627370496.5/round	4.503599627370496e+15
+f8max/4503599627370496.5/smallint	ERR 22003
+f8max/4503599627370496.5/integer	ERR 22003
+f8max/4503599627370496.5/bigint	4503599627370496
+f8max/4503599627370496.5/colon	4503599627370496
+f8derived/4503599627370496.5/round	4.503599627370496e+15
+f8derived/4503599627370496.5/smallint	ERR 22003
+f8derived/4503599627370496.5/integer	ERR 22003
+f8derived/4503599627370496.5/bigint	4503599627370496
+f8derived/4503599627370496.5/colon	4503599627370496
+f8derived/4503599627370496.5/arr_bigint	{4503599627370496}
+f8derived/4503599627370496.5/arr_integer	ERR 22003
+f8derived/4503599627370496.5/where	0
+f8derived/4503599627370496.5/group	4.503599627370496e+15,1
+f8derived/4503599627370496.5/agg	4.503599627370496e+15
+f8derived/4503599627370496.5/window	4.503599627370496e+15,1
+numderived/4503599627370496.5/round	4503599627370497
+numderived/4503599627370496.5/smallint	ERR 22003
+numderived/4503599627370496.5/integer	ERR 22003
+numderived/4503599627370496.5/bigint	4503599627370497
+numderived/4503599627370496.5/colon	4503599627370497
+numderived/4503599627370496.5/arr_bigint	{4503599627370497}
+numderived/4503599627370496.5/arr_integer	ERR 22003
+numderived/4503599627370496.5/where	0
+numderived/4503599627370496.5/group	4503599627370497,1
+numderived/4503599627370496.5/agg	4503599627370497
+numderived/4503599627370496.5/window	4503599627370497,1
+f8cte/4503599627370496.5/round	4.503599627370496e+15
+f8cte/4503599627370496.5/smallint	ERR 22003
+f8cte/4503599627370496.5/integer	ERR 22003
+f8cte/4503599627370496.5/bigint	4503599627370496
+f8cte/4503599627370496.5/colon	4503599627370496
+f8cte/4503599627370496.5/arr_bigint	{4503599627370496}
+f8cte/4503599627370496.5/arr_integer	ERR 22003
+f8cte/4503599627370496.5/where	0
+f8cte/4503599627370496.5/group	4.503599627370496e+15,1
+f8cte/4503599627370496.5/agg	4.503599627370496e+15
+f8cte/4503599627370496.5/window	4.503599627370496e+15,1
+numcte/4503599627370496.5/round	4503599627370497
+numcte/4503599627370496.5/smallint	ERR 22003
+numcte/4503599627370496.5/integer	ERR 22003
+numcte/4503599627370496.5/bigint	4503599627370497
+numcte/4503599627370496.5/colon	4503599627370497
+numcte/4503599627370496.5/arr_bigint	{4503599627370497}
+numcte/4503599627370496.5/arr_integer	ERR 22003
+numcte/4503599627370496.5/where	0
+numcte/4503599627370496.5/group	4503599627370497,1
+numcte/4503599627370496.5/agg	4503599627370497
+numcte/4503599627370496.5/window	4503599627370497,1
+f8union/4503599627370496.5/round	4.503599627370496e+15; 4.503599627370496e+15
+f8union/4503599627370496.5/smallint	ERR 22003
+f8union/4503599627370496.5/integer	ERR 22003
+f8union/4503599627370496.5/bigint	4503599627370496; 4503599627370496
+f8union/4503599627370496.5/colon	4503599627370496; 4503599627370496
+f8union/4503599627370496.5/arr_bigint	{4503599627370496}; {4503599627370496}
+f8union/4503599627370496.5/arr_integer	ERR 22003
+af/4503599627370496.5/arr_bigint	{4503599627370496,2}
+af/4503599627370496.5/arr_integer	ERR 22003
+f8col/1e300/round	1e+300
+f8col/1e300/smallint	ERR 22003
+f8col/1e300/integer	ERR 22003
+f8col/1e300/bigint	ERR 22003
+f8col/1e300/colon	ERR 22003
+f8col/1e300/arr_bigint	ERR 22003
+f8col/1e300/arr_integer	ERR 22003
+f8col/1e300/where	0
+f8col/1e300/group	1e+300,1
+f8col/1e300/agg	1e+300
+f8col/1e300/window	1e+300,1
+f8lit/1e300/round	1e+300
+f8lit/1e300/smallint	ERR 22003
+f8lit/1e300/integer	ERR 22003
+f8lit/1e300/bigint	ERR 22003
+f8lit/1e300/colon	ERR 22003
+f8lit/1e300/arr_bigint	ERR 22003
+f8lit/1e300/arr_integer	ERR 22003
+f8mul/1e300/round	1e+300
+f8mul/1e300/smallint	ERR 22003
+f8mul/1e300/integer	ERR 22003
+f8mul/1e300/bigint	ERR 22003
+f8mul/1e300/colon	ERR 22003
+f8mul/1e300/arr_bigint	ERR 22003
+f8mul/1e300/arr_integer	ERR 22003
+f8add/1e300/round	1e+300
+f8add/1e300/smallint	ERR 22003
+f8add/1e300/integer	ERR 22003
+f8add/1e300/bigint	ERR 22003
+f8add/1e300/colon	ERR 22003
+f8add/1e300/arr_bigint	ERR 22003
+f8add/1e300/arr_integer	ERR 22003
+f8sub/1e300/round	1e+300
+f8sub/1e300/smallint	ERR 22003
+f8sub/1e300/integer	ERR 22003
+f8sub/1e300/bigint	ERR 22003
+f8sub/1e300/colon	ERR 22003
+f8sub/1e300/arr_bigint	ERR 22003
+f8sub/1e300/arr_integer	ERR 22003
+f8sum/1e300/round	1e+300
+f8sum/1e300/smallint	ERR 22003
+f8sum/1e300/integer	ERR 22003
+f8sum/1e300/bigint	ERR 22003
+f8sum/1e300/colon	ERR 22003
+f8max/1e300/round	1e+300
+f8max/1e300/smallint	ERR 22003
+f8max/1e300/integer	ERR 22003
+f8max/1e300/bigint	ERR 22003
+f8max/1e300/colon	ERR 22003
+f8derived/1e300/round	1e+300
+f8derived/1e300/smallint	ERR 22003
+f8derived/1e300/integer	ERR 22003
+f8derived/1e300/bigint	ERR 22003
+f8derived/1e300/colon	ERR 22003
+f8derived/1e300/arr_bigint	ERR 22003
+f8derived/1e300/arr_integer	ERR 22003
+f8derived/1e300/where	0
+f8derived/1e300/group	1e+300,1
+f8derived/1e300/agg	1e+300
+f8derived/1e300/window	1e+300,1
+f8cte/1e300/round	1e+300
+f8cte/1e300/smallint	ERR 22003
+f8cte/1e300/integer	ERR 22003
+f8cte/1e300/bigint	ERR 22003
+f8cte/1e300/colon	ERR 22003
+f8cte/1e300/arr_bigint	ERR 22003
+f8cte/1e300/arr_integer	ERR 22003
+f8cte/1e300/where	0
+f8cte/1e300/group	1e+300,1
+f8cte/1e300/agg	1e+300
+f8cte/1e300/window	1e+300,1
+f8union/1e300/round	1e+300; 1e+300
+f8union/1e300/smallint	ERR 22003
+f8union/1e300/integer	ERR 22003
+f8union/1e300/bigint	ERR 22003
+f8union/1e300/colon	ERR 22003
+f8union/1e300/arr_bigint	ERR 22003
+f8union/1e300/arr_integer	ERR 22003
+af/1e300/arr_bigint	ERR 22003
+af/1e300/arr_integer	ERR 22003
+f8col/NaN/round	NaN
+f8col/NaN/smallint	ERR 22003
+f8col/NaN/integer	ERR 22003
+f8col/NaN/bigint	ERR 22003
+f8col/NaN/colon	ERR 22003
+f8col/NaN/arr_bigint	ERR 22003
+f8col/NaN/arr_integer	ERR 22003
+f8col/NaN/where	0
+f8col/NaN/group	NaN,1
+f8col/NaN/agg	NaN
+f8col/NaN/window	NaN,1
+f4col/NaN/round	NaN
+f4col/NaN/smallint	ERR 22003
+f4col/NaN/integer	ERR 22003
+f4col/NaN/bigint	ERR 22003
+f4col/NaN/colon	ERR 22003
+f4col/NaN/arr_bigint	ERR 22003
+f4col/NaN/arr_integer	ERR 22003
+f4col/NaN/where	0
+f4col/NaN/group	NaN,1
+f4col/NaN/agg	NaN
+f4col/NaN/window	NaN,1
+f8lit/NaN/round	NaN
+f8lit/NaN/smallint	ERR 22003
+f8lit/NaN/integer	ERR 22003
+f8lit/NaN/bigint	ERR 22003
+f8lit/NaN/colon	ERR 22003
+f8lit/NaN/arr_bigint	ERR 22003
+f8lit/NaN/arr_integer	ERR 22003
+f4lit/NaN/round	NaN
+f4lit/NaN/smallint	ERR 22003
+f4lit/NaN/integer	ERR 22003
+f4lit/NaN/bigint	ERR 22003
+f4lit/NaN/colon	ERR 22003
+f4lit/NaN/arr_bigint	ERR 22003
+f4lit/NaN/arr_integer	ERR 22003
+f8mul/NaN/round	NaN
+f8mul/NaN/smallint	ERR 22003
+f8mul/NaN/integer	ERR 22003
+f8mul/NaN/bigint	ERR 22003
+f8mul/NaN/colon	ERR 22003
+f8mul/NaN/arr_bigint	ERR 22003
+f8mul/NaN/arr_integer	ERR 22003
+f8add/NaN/round	NaN
+f8add/NaN/smallint	ERR 22003
+f8add/NaN/integer	ERR 22003
+f8add/NaN/bigint	ERR 22003
+f8add/NaN/colon	ERR 22003
+f8add/NaN/arr_bigint	ERR 22003
+f8add/NaN/arr_integer	ERR 22003
+f8sub/NaN/round	NaN
+f8sub/NaN/smallint	ERR 22003
+f8sub/NaN/integer	ERR 22003
+f8sub/NaN/bigint	ERR 22003
+f8sub/NaN/colon	ERR 22003
+f8sub/NaN/arr_bigint	ERR 22003
+f8sub/NaN/arr_integer	ERR 22003
+f8sum/NaN/round	NaN
+f8sum/NaN/smallint	ERR 22003
+f8sum/NaN/integer	ERR 22003
+f8sum/NaN/bigint	ERR 22003
+f8sum/NaN/colon	ERR 22003
+f8max/NaN/round	NaN
+f8max/NaN/smallint	ERR 22003
+f8max/NaN/integer	ERR 22003
+f8max/NaN/bigint	ERR 22003
+f8max/NaN/colon	ERR 22003
+f8derived/NaN/round	NaN
+f8derived/NaN/smallint	ERR 22003
+f8derived/NaN/integer	ERR 22003
+f8derived/NaN/bigint	ERR 22003
+f8derived/NaN/colon	ERR 22003
+f8derived/NaN/arr_bigint	ERR 22003
+f8derived/NaN/arr_integer	ERR 22003
+f8derived/NaN/where	0
+f8derived/NaN/group	NaN,1
+f8derived/NaN/agg	NaN
+f8derived/NaN/window	NaN,1
+f8cte/NaN/round	NaN
+f8cte/NaN/smallint	ERR 22003
+f8cte/NaN/integer	ERR 22003
+f8cte/NaN/bigint	ERR 22003
+f8cte/NaN/colon	ERR 22003
+f8cte/NaN/arr_bigint	ERR 22003
+f8cte/NaN/arr_integer	ERR 22003
+f8cte/NaN/where	0
+f8cte/NaN/group	NaN,1
+f8cte/NaN/agg	NaN
+f8cte/NaN/window	NaN,1
+f8union/NaN/round	NaN; NaN
+f8union/NaN/smallint	ERR 22003
+f8union/NaN/integer	ERR 22003
+f8union/NaN/bigint	ERR 22003
+f8union/NaN/colon	ERR 22003
+f8union/NaN/arr_bigint	ERR 22003
+f8union/NaN/arr_integer	ERR 22003
+af/NaN/arr_bigint	ERR 22003
+af/NaN/arr_integer	ERR 22003
+f8col/Infinity/round	Infinity
+f8col/Infinity/smallint	ERR 22003
+f8col/Infinity/integer	ERR 22003
+f8col/Infinity/bigint	ERR 22003
+f8col/Infinity/colon	ERR 22003
+f8col/Infinity/arr_bigint	ERR 22003
+f8col/Infinity/arr_integer	ERR 22003
+f8col/Infinity/where	0
+f8col/Infinity/group	Infinity,1
+f8col/Infinity/agg	Infinity
+f8col/Infinity/window	Infinity,1
+f4col/Infinity/round	Infinity
+f4col/Infinity/smallint	ERR 22003
+f4col/Infinity/integer	ERR 22003
+f4col/Infinity/bigint	ERR 22003
+f4col/Infinity/colon	ERR 22003
+f4col/Infinity/arr_bigint	ERR 22003
+f4col/Infinity/arr_integer	ERR 22003
+f4col/Infinity/where	0
+f4col/Infinity/group	Infinity,1
+f4col/Infinity/agg	Infinity
+f4col/Infinity/window	Infinity,1
+f8lit/Infinity/round	Infinity
+f8lit/Infinity/smallint	ERR 22003
+f8lit/Infinity/integer	ERR 22003
+f8lit/Infinity/bigint	ERR 22003
+f8lit/Infinity/colon	ERR 22003
+f8lit/Infinity/arr_bigint	ERR 22003
+f8lit/Infinity/arr_integer	ERR 22003
+f4lit/Infinity/round	Infinity
+f4lit/Infinity/smallint	ERR 22003
+f4lit/Infinity/integer	ERR 22003
+f4lit/Infinity/bigint	ERR 22003
+f4lit/Infinity/colon	ERR 22003
+f4lit/Infinity/arr_bigint	ERR 22003
+f4lit/Infinity/arr_integer	ERR 22003
+f8mul/Infinity/round	Infinity
+f8mul/Infinity/smallint	ERR 22003
+f8mul/Infinity/integer	ERR 22003
+f8mul/Infinity/bigint	ERR 22003
+f8mul/Infinity/colon	ERR 22003
+f8mul/Infinity/arr_bigint	ERR 22003
+f8mul/Infinity/arr_integer	ERR 22003
+f8add/Infinity/round	Infinity
+f8add/Infinity/smallint	ERR 22003
+f8add/Infinity/integer	ERR 22003
+f8add/Infinity/bigint	ERR 22003
+f8add/Infinity/colon	ERR 22003
+f8add/Infinity/arr_bigint	ERR 22003
+f8add/Infinity/arr_integer	ERR 22003
+f8sub/Infinity/round	Infinity
+f8sub/Infinity/smallint	ERR 22003
+f8sub/Infinity/integer	ERR 22003
+f8sub/Infinity/bigint	ERR 22003
+f8sub/Infinity/colon	ERR 22003
+f8sub/Infinity/arr_bigint	ERR 22003
+f8sub/Infinity/arr_integer	ERR 22003
+f8sum/Infinity/round	Infinity
+f8sum/Infinity/smallint	ERR 22003
+f8sum/Infinity/integer	ERR 22003
+f8sum/Infinity/bigint	ERR 22003
+f8sum/Infinity/colon	ERR 22003
+f8max/Infinity/round	Infinity
+f8max/Infinity/smallint	ERR 22003
+f8max/Infinity/integer	ERR 22003
+f8max/Infinity/bigint	ERR 22003
+f8max/Infinity/colon	ERR 22003
+f8derived/Infinity/round	Infinity
+f8derived/Infinity/smallint	ERR 22003
+f8derived/Infinity/integer	ERR 22003
+f8derived/Infinity/bigint	ERR 22003
+f8derived/Infinity/colon	ERR 22003
+f8derived/Infinity/arr_bigint	ERR 22003
+f8derived/Infinity/arr_integer	ERR 22003
+f8derived/Infinity/where	0
+f8derived/Infinity/group	Infinity,1
+f8derived/Infinity/agg	Infinity
+f8derived/Infinity/window	Infinity,1
+f8cte/Infinity/round	Infinity
+f8cte/Infinity/smallint	ERR 22003
+f8cte/Infinity/integer	ERR 22003
+f8cte/Infinity/bigint	ERR 22003
+f8cte/Infinity/colon	ERR 22003
+f8cte/Infinity/arr_bigint	ERR 22003
+f8cte/Infinity/arr_integer	ERR 22003
+f8cte/Infinity/where	0
+f8cte/Infinity/group	Infinity,1
+f8cte/Infinity/agg	Infinity
+f8cte/Infinity/window	Infinity,1
+f8union/Infinity/round	Infinity; Infinity
+f8union/Infinity/smallint	ERR 22003
+f8union/Infinity/integer	ERR 22003
+f8union/Infinity/bigint	ERR 22003
+f8union/Infinity/colon	ERR 22003
+f8union/Infinity/arr_bigint	ERR 22003
+f8union/Infinity/arr_integer	ERR 22003
+af/Infinity/arr_bigint	ERR 22003
+af/Infinity/arr_integer	ERR 22003
+f8col/-Infinity/round	-Infinity
+f8col/-Infinity/smallint	ERR 22003
+f8col/-Infinity/integer	ERR 22003
+f8col/-Infinity/bigint	ERR 22003
+f8col/-Infinity/colon	ERR 22003
+f8col/-Infinity/arr_bigint	ERR 22003
+f8col/-Infinity/arr_integer	ERR 22003
+f8col/-Infinity/where	0
+f8col/-Infinity/group	-Infinity,1
+f8col/-Infinity/agg	-Infinity
+f8col/-Infinity/window	-Infinity,1
+f4col/-Infinity/round	-Infinity
+f4col/-Infinity/smallint	ERR 22003
+f4col/-Infinity/integer	ERR 22003
+f4col/-Infinity/bigint	ERR 22003
+f4col/-Infinity/colon	ERR 22003
+f4col/-Infinity/arr_bigint	ERR 22003
+f4col/-Infinity/arr_integer	ERR 22003
+f4col/-Infinity/where	0
+f4col/-Infinity/group	-Infinity,1
+f4col/-Infinity/agg	-Infinity
+f4col/-Infinity/window	-Infinity,1
+f8lit/-Infinity/round	-Infinity
+f8lit/-Infinity/smallint	ERR 22003
+f8lit/-Infinity/integer	ERR 22003
+f8lit/-Infinity/bigint	ERR 22003
+f8lit/-Infinity/colon	ERR 22003
+f8lit/-Infinity/arr_bigint	ERR 22003
+f8lit/-Infinity/arr_integer	ERR 22003
+f4lit/-Infinity/round	-Infinity
+f4lit/-Infinity/smallint	ERR 22003
+f4lit/-Infinity/integer	ERR 22003
+f4lit/-Infinity/bigint	ERR 22003
+f4lit/-Infinity/colon	ERR 22003
+f4lit/-Infinity/arr_bigint	ERR 22003
+f4lit/-Infinity/arr_integer	ERR 22003
+f8mul/-Infinity/round	-Infinity
+f8mul/-Infinity/smallint	ERR 22003
+f8mul/-Infinity/integer	ERR 22003
+f8mul/-Infinity/bigint	ERR 22003
+f8mul/-Infinity/colon	ERR 22003
+f8mul/-Infinity/arr_bigint	ERR 22003
+f8mul/-Infinity/arr_integer	ERR 22003
+f8add/-Infinity/round	-Infinity
+f8add/-Infinity/smallint	ERR 22003
+f8add/-Infinity/integer	ERR 22003
+f8add/-Infinity/bigint	ERR 22003
+f8add/-Infinity/colon	ERR 22003
+f8add/-Infinity/arr_bigint	ERR 22003
+f8add/-Infinity/arr_integer	ERR 22003
+f8sub/-Infinity/round	-Infinity
+f8sub/-Infinity/smallint	ERR 22003
+f8sub/-Infinity/integer	ERR 22003
+f8sub/-Infinity/bigint	ERR 22003
+f8sub/-Infinity/colon	ERR 22003
+f8sub/-Infinity/arr_bigint	ERR 22003
+f8sub/-Infinity/arr_integer	ERR 22003
+f8sum/-Infinity/round	-Infinity
+f8sum/-Infinity/smallint	ERR 22003
+f8sum/-Infinity/integer	ERR 22003
+f8sum/-Infinity/bigint	ERR 22003
+f8sum/-Infinity/colon	ERR 22003
+f8max/-Infinity/round	-Infinity
+f8max/-Infinity/smallint	ERR 22003
+f8max/-Infinity/integer	ERR 22003
+f8max/-Infinity/bigint	ERR 22003
+f8max/-Infinity/colon	ERR 22003
+f8derived/-Infinity/round	-Infinity
+f8derived/-Infinity/smallint	ERR 22003
+f8derived/-Infinity/integer	ERR 22003
+f8derived/-Infinity/bigint	ERR 22003
+f8derived/-Infinity/colon	ERR 22003
+f8derived/-Infinity/arr_bigint	ERR 22003
+f8derived/-Infinity/arr_integer	ERR 22003
+f8derived/-Infinity/where	0
+f8derived/-Infinity/group	-Infinity,1
+f8derived/-Infinity/agg	-Infinity
+f8derived/-Infinity/window	-Infinity,1
+f8cte/-Infinity/round	-Infinity
+f8cte/-Infinity/smallint	ERR 22003
+f8cte/-Infinity/integer	ERR 22003
+f8cte/-Infinity/bigint	ERR 22003
+f8cte/-Infinity/colon	ERR 22003
+f8cte/-Infinity/arr_bigint	ERR 22003
+f8cte/-Infinity/arr_integer	ERR 22003
+f8cte/-Infinity/where	0
+f8cte/-Infinity/group	-Infinity,1
+f8cte/-Infinity/agg	-Infinity
+f8cte/-Infinity/window	-Infinity,1
+f8union/-Infinity/round	-Infinity; -Infinity
+f8union/-Infinity/smallint	ERR 22003
+f8union/-Infinity/integer	ERR 22003
+f8union/-Infinity/bigint	ERR 22003
+f8union/-Infinity/colon	ERR 22003
+f8union/-Infinity/arr_bigint	ERR 22003
+f8union/-Infinity/arr_integer	ERR 22003
+af/-Infinity/arr_bigint	ERR 22003
+af/-Infinity/arr_integer	ERR 22003
+f8col/NULL/round	NULL
+f8col/NULL/smallint	NULL
+f8col/NULL/integer	NULL
+f8col/NULL/bigint	NULL
+f8col/NULL/colon	NULL
+f8col/NULL/arr_bigint	{NULL}
+f8col/NULL/arr_integer	{NULL}
+f8col/NULL/where	0
+f8col/NULL/group	NULL,1
+f8col/NULL/agg	NULL
+f8col/NULL/window	NULL,1
+f4col/NULL/round	NULL
+f4col/NULL/smallint	NULL
+f4col/NULL/integer	NULL
+f4col/NULL/bigint	NULL
+f4col/NULL/colon	NULL
+f4col/NULL/arr_bigint	{NULL}
+f4col/NULL/arr_integer	{NULL}
+f4col/NULL/where	0
+f4col/NULL/group	NULL,1
+f4col/NULL/agg	NULL
+f4col/NULL/window	NULL,1
+numcol/NULL/round	NULL
+numcol/NULL/smallint	NULL
+numcol/NULL/integer	NULL
+numcol/NULL/bigint	NULL
+numcol/NULL/colon	NULL
+numcol/NULL/arr_bigint	{NULL}
+numcol/NULL/arr_integer	{NULL}
+numcol/NULL/where	0
+numcol/NULL/group	NULL,1
+numcol/NULL/agg	NULL
+numcol/NULL/window	NULL,1
+f8lit/NULL/round	NULL
+f8lit/NULL/smallint	NULL
+f8lit/NULL/integer	NULL
+f8lit/NULL/bigint	NULL
+f8lit/NULL/colon	NULL
+f8lit/NULL/arr_bigint	{NULL}
+f8lit/NULL/arr_integer	{NULL}
+f4lit/NULL/round	NULL
+f4lit/NULL/smallint	NULL
+f4lit/NULL/integer	NULL
+f4lit/NULL/bigint	NULL
+f4lit/NULL/colon	NULL
+f4lit/NULL/arr_bigint	{NULL}
+f4lit/NULL/arr_integer	{NULL}
+f8mul/NULL/round	NULL
+f8mul/NULL/smallint	NULL
+f8mul/NULL/integer	NULL
+f8mul/NULL/bigint	NULL
+f8mul/NULL/colon	NULL
+f8mul/NULL/arr_bigint	{NULL}
+f8mul/NULL/arr_integer	{NULL}
+f8add/NULL/round	NULL
+f8add/NULL/smallint	NULL
+f8add/NULL/integer	NULL
+f8add/NULL/bigint	NULL
+f8add/NULL/colon	NULL
+f8add/NULL/arr_bigint	{NULL}
+f8add/NULL/arr_integer	{NULL}
+f8sub/NULL/round	NULL
+f8sub/NULL/smallint	NULL
+f8sub/NULL/integer	NULL
+f8sub/NULL/bigint	NULL
+f8sub/NULL/colon	NULL
+f8sub/NULL/arr_bigint	{NULL}
+f8sub/NULL/arr_integer	{NULL}
+f8sum/NULL/round	NULL
+f8sum/NULL/smallint	NULL
+f8sum/NULL/integer	NULL
+f8sum/NULL/bigint	NULL
+f8sum/NULL/colon	NULL
+f8max/NULL/round	NULL
+f8max/NULL/smallint	NULL
+f8max/NULL/integer	NULL
+f8max/NULL/bigint	NULL
+f8max/NULL/colon	NULL
+f8derived/NULL/round	NULL
+f8derived/NULL/smallint	NULL
+f8derived/NULL/integer	NULL
+f8derived/NULL/bigint	NULL
+f8derived/NULL/colon	NULL
+f8derived/NULL/arr_bigint	{NULL}
+f8derived/NULL/arr_integer	{NULL}
+f8derived/NULL/where	0
+f8derived/NULL/group	NULL,1
+f8derived/NULL/agg	NULL
+f8derived/NULL/window	NULL,1
+f8cte/NULL/round	NULL
+f8cte/NULL/smallint	NULL
+f8cte/NULL/integer	NULL
+f8cte/NULL/bigint	NULL
+f8cte/NULL/colon	NULL
+f8cte/NULL/arr_bigint	{NULL}
+f8cte/NULL/arr_integer	{NULL}
+f8cte/NULL/where	0
+f8cte/NULL/group	NULL,1
+f8cte/NULL/agg	NULL
+f8cte/NULL/window	NULL,1
+af/NULL/arr_bigint	NULL
+af/NULL/arr_integer	NULL
+issue1542/arrlit_bigint	{2,2}
+issue1542/arrlit_integer	{2}
+issue1542/arrcast_chain	{2,2}
+issue1542/numeric_array	{3,2}
+issue1542/text_array	{2,2}
+issue1542/real_array	{2,4}
+issue1542/mixed_array	{2,4}
+issue381/quoted_literal	2,0,-2
+issue381/column	0; 2; -2
