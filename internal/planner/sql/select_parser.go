@@ -702,7 +702,12 @@ func (p *selectParser) parseSelectColumn() (SelectColumn, error) {
 	// reports for an unaliased `SELECT GROUPING(g)`: the column name
 	// `grouping` (verified against PostgreSQL 17).
 	if col.Alias == "" && (!col.IsAgg || col.AggFunc == "grouping") {
-		if label := funcCallLabel(expr); label != "" {
+		// `?column?` is not a name the query gave the item: an operator the
+		// parser built a call for (`a % b`, `a ^ b`) publishes it, and the
+		// published name below says so. Made the ALIAS, it was rendered
+		// unquoted wherever the item is re-spelled as text — a correlated
+		// subquery's body is — and `… AS ?column?` failed to parse (#1527).
+		if label := funcCallLabel(expr); label != "" && label != UnnamedOutputColumn {
 			col.Alias = label
 		}
 	}

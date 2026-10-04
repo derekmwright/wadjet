@@ -71,6 +71,14 @@ type StagePlanner struct {
 	// respell pass has run, so the edges are collected here and wired at the
 	// end (attachProjectionScalarDependencies).
 	projScalarProducers map[string]projScalarProducer
+	// loweringProjection is set while lowerProjectionSubquery walks a
+	// SELECT item: the walk then leaves a subquery under a call's argument in
+	// place, so the item declines to the path that answers it. A deferred
+	// placeholder inside a call is typed on that path the way one under an
+	// arithmetic operator is (`(SELECT max(v) …) * 0.7` fails its task with
+	// "cannot store string into FLOAT64 vector"), and the call spelling must
+	// not join it (#1527).
+	loweringProjection bool
 
 	// loweredScalarProjExprs is the set of SELECT-list items the lowering
 	// above rewrote, keyed by the projection's own ADDRESS so that two items

@@ -344,8 +344,12 @@ func (p *StagePlanner) resolveSubqueryAST(ctx context.Context, node plansql.Node
 	// — which is also what `(SELECT …) % t.i` parses to — shipped the
 	// subquery to the worker inside the call and every task failed with
 	// "subqueries require a SubqueryRunner", while the same subquery under
-	// an arithmetic operator was resolved here (#1527).
+	// an arithmetic operator was resolved here (#1527). A SELECT item's
+	// lowering keeps the call whole (StagePlanner.loweringProjection).
 	case *plansql.FuncCallNode:
+		if p.loweringProjection {
+			return node
+		}
 		out := *n
 		out.Args = make([]plansql.Node, len(n.Args))
 		for i, a := range n.Args {

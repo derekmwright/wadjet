@@ -49,7 +49,9 @@ func (p *StagePlanner) lowerProjectionSubquery(stages *[]Stage, item *logical.Pr
 	var placeholderTypes map[string]parquet.TypeID
 	before := p.scalarPlaceholderSeq
 	stagesBefore := len(*stages)
+	p.loweringProjection = true
 	resolved := p.resolveSubqueryAST(p.PlanCtx, item.ASTExpr, &deferred, decls)
+	p.loweringProjection = false
 	if resolved == nil {
 		p.scalarPlaceholderSeq = before
 		return "", decl, false, false

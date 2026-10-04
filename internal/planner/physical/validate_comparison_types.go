@@ -396,6 +396,12 @@ func (c *comparisonTyper) walk(node plansql.Node) error {
 		if strings.EqualFold(n.Name, "nullif") && len(n.Args) == 2 {
 			return c.pair(n.Args[0], n.Args[1], "=")
 		}
+		if b, ok := modAsOperator(n); ok {
+			if err := c.textArithmetic(b); err != nil {
+				return err
+			}
+			return c.temporalArithmetic(b)
+		}
 	case *plansql.CaseNode:
 		if n.Subject != nil {
 			for _, w := range n.Whens {
@@ -964,11 +970,26 @@ func (c *comparisonTyper) walkTemporalArithmetic(node plansql.Node) error {
 			return err
 		}
 	}
-	if b, ok := node.(*plansql.BinaryOp); ok {
+	b, ok := node.(*plansql.BinaryOp)
+	if f, isCall := node.(*plansql.FuncCallNode); isCall {
+		b, ok = modAsOperator(f)
+	}
+	if ok {
 		if err := c.textArithmetic(b); err != nil {
 			return err
 		}
 		return c.temporalArithmetic(b)
 	}
 	return nil
+}
+
+// modAsOperator is mod(a, b) as the `%` operator it is — the same pg_proc
+// entries, and the call `a % b` parses to (#1527) — so the operator's
+// operand-class refusals hold for both spellings: PostgreSQL has no
+// `date % integer` and no `text % integer` (42883).
+func modAsOperator(f *plansql.FuncCallNode) (*plansql.BinaryOp, bool) {
+	if !strings.EqualFold(f.Name, "mod") || len(f.Args) != 2 {
+		return nil, false
+	}
+	return &plansql.BinaryOp{Op: "%", Left: f.Args[0], Right: f.Args[1]}, true
 }
