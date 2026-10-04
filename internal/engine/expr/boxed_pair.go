@@ -1308,10 +1308,24 @@ func refuseTemporalQuoted(kind boxKind, v any, text string) {
 	if !ok {
 		s = text
 	}
-	if err := RefuseTemporalLiteral(temporalKindTypeOrZero(kind), s); err != nil {
+	typ := temporalKindTypeOrZero(kind)
+	memo := &timestampRefuseMemo
+	if typ == batch.TypeDate {
+		memo = &dateRefuseMemo
+	}
+	if r, ok := memo.load(s); ok && r.ok {
+		return
+	}
+	err := RefuseTemporalLiteral(typ, s)
+	memo.store(s, temporalParseResult{ok: err == nil})
+	if err != nil {
 		panic(fatalEval{err})
 	}
 }
+
+// The refusal verdict per literal text, so the per-row boxed comparison does
+// not re-run the input function for a literal it already accepted.
+var timestampRefuseMemo, dateRefuseMemo temporalMemo
 
 func temporalKindTypeOrZero(k boxKind) batch.TypeID {
 	t, _ := temporalKindType(k)
