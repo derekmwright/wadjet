@@ -500,6 +500,10 @@ func setOpArmComputedSource(name string, n *logical.Node) (plansql.Node, bool) {
 	resolved := strings.ToLower(name)
 	for n != nil {
 		switch {
+		case logical.WindowShadowedBlock(n):
+			// A relation of its own: the reference is forwarded under the
+			// block's name (logical.WindowShadowedBlock).
+			return nil, false
 		case n.Type == logical.NodeProject:
 			bare := derivedScopeBareName(resolved, n)
 			if proj := projectionForName(n.Projections, resolved, bare); proj != nil {

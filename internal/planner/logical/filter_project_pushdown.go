@@ -769,6 +769,11 @@ func resolveFilterInSubtree(ast plansql.Node, n *Node, changed bool, subst *[]st
 			// to the stage and dagplan.resolveFilterAliasSpelling picks
 			// once attachScanSelectProjections has decided (#656).
 		case NodeProject:
+			if WindowShadowedBlock(n) {
+				// A relation of its own: its items keep the block's names,
+				// which its stage publishes (WindowShadowedBlock).
+				return ast, changed
+			}
 			newAST, ok := rewriteASTThroughProject(ast, newProjRefs(n, false).withSubstitutionLog(subst))
 			if !ok {
 				return ast, changed

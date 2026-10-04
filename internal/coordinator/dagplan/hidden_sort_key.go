@@ -458,6 +458,12 @@ func derivedAliasDefinition(name string, child *logical.Node) (plansql.Node, *lo
 	}
 	resolved := name
 	for n := child; n != nil; {
+		if logical.WindowShadowedBlock(n) {
+			// A relation of its own whose items its stage publishes under
+			// their own names: nothing to substitute
+			// (logical.WindowShadowedBlock).
+			return nil, nil
+		}
 		switch n.Type {
 		case logical.NodeProject:
 			bare := localPlanFacts.DerivedScopeBareName(resolved, n)
