@@ -19,7 +19,11 @@ func vecYear(args []*batch.Vector, out *batch.Vector, n int) {
 			out.Nulls.SetNull(i)
 			continue
 		}
-		t, ok := columnInstant(src, i)
+		t, x, inf, ok := columnReading(src, i)
+		if inf {
+			vecExtractInfinite(out, i, "year", x)
+			continue
+		}
 		if !ok {
 			out.Nulls.SetNull(i)
 			continue
@@ -36,7 +40,11 @@ func vecMonth(args []*batch.Vector, out *batch.Vector, n int) {
 			out.Nulls.SetNull(i)
 			continue
 		}
-		t, ok := columnInstant(src, i)
+		t, x, inf, ok := columnReading(src, i)
+		if inf {
+			vecExtractInfinite(out, i, "month", x)
+			continue
+		}
 		if !ok {
 			out.Nulls.SetNull(i)
 			continue
@@ -53,7 +61,11 @@ func vecDay(args []*batch.Vector, out *batch.Vector, n int) {
 			out.Nulls.SetNull(i)
 			continue
 		}
-		t, ok := columnInstant(src, i)
+		t, x, inf, ok := columnReading(src, i)
+		if inf {
+			vecExtractInfinite(out, i, "day", x)
+			continue
+		}
 		if !ok {
 			out.Nulls.SetNull(i)
 			continue
@@ -70,7 +82,11 @@ func vecHour(args []*batch.Vector, out *batch.Vector, n int) {
 			out.Nulls.SetNull(i)
 			continue
 		}
-		t, ok := columnInstant(src, i)
+		t, x, inf, ok := columnReading(src, i)
+		if inf {
+			vecExtractInfinite(out, i, "hour", x)
+			continue
+		}
 		if !ok {
 			out.Nulls.SetNull(i)
 			continue
@@ -92,7 +108,11 @@ func vecExtract(args []*batch.Vector, out *batch.Vector, n int) {
 			out.Nulls.SetNull(i)
 			continue
 		}
-		t, ok := columnInstant(src, i)
+		t, x, inf, ok := columnReading(src, i)
+		if inf {
+			vecExtractInfinite(out, i, unit, x)
+			continue
+		}
 		if !ok {
 			out.Nulls.SetNull(i)
 			continue

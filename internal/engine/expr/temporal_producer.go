@@ -257,6 +257,11 @@ func temporalBoxInstant(e Expr, b *batch.RecordBatch, v any) (any, castTemporalK
 	if !isInt {
 		return nil, k, false
 	}
+	// An infinite value is handed on as itself, never as the instant its
+	// extreme integer would name (temporal_infinity.go).
+	if x, inf := boxInfinity(k, n); inf {
+		return x, k, true
+	}
 	if k == castToDateKind {
 		return civilDate{t: epochDayInstant(n)}, k, true
 	}

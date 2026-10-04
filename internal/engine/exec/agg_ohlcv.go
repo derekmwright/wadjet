@@ -224,7 +224,8 @@ func ohlcvInstantMillis(v *batch.Vector, row int) (int64, bool) {
 		}
 	case parquet.TypeDate:
 		if row < len(v.Int32Data) {
-			return int64(v.Int32Data[row]) * 86_400_000, true
+			// The one DATE→TIMESTAMP conversion, an infinite DATE included.
+			return batch.DateMidnightMillis(int64(v.Int32Data[row])), true
 		}
 	}
 	return 0, false

@@ -6,6 +6,7 @@ package expr
 import (
 	"encoding/hex"
 	"fmt"
+	"math"
 	"strings"
 	"sync/atomic"
 
@@ -116,6 +117,16 @@ func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
 	}
 	if k := castTemporalKindLower(strings.TrimSpace(dest)); k != castNotTemporal {
 		return castTemporal(b, row, e.Operand, v, k)
+	}
+	// An infinite DATE or TIMESTAMP has a text and nothing else: the number
+	// its carrier's extreme would cast to (this engine's superset casts a
+	// temporal box to an integer or a float — PostgreSQL has no such cast,
+	// 42846) is not its value. The sentinel test is first, so a finite box
+	// pays one comparison.
+	if carrierExtreme(v) && !e.castsToText(dest) {
+		if x, inf := boxInfinity(producedTemporal(e.Operand, b), v); inf {
+			raiseInfiniteOperand("CAST to "+strings.TrimSpace(dest), x)
+		}
 	}
 	// A DECIMAL destination is resolved before the switch because its type
 	// name CARRIES its parameters — `decimal(10, 2)` matches no case label,
@@ -572,4 +583,21 @@ func castOperandDeclaresDecimal(e Expr, b *batch.RecordBatch) bool {
 		return v.DeclKnown && v.Decl == batch.TypeDecimal
 	}
 	return operandIsDecimalTyped(e, b)
+}
+
+// carrierExtreme reports whether a box is one of the four integers the
+// temporal carriers reserve for their infinite values.
+func carrierExtreme(v any) bool {
+	n, ok := v.(int64)
+	return ok && (n == math.MaxInt64 || n == math.MinInt64 || n == math.MaxInt32 || n == math.MinInt32)
+}
+
+// castsToText reports a destination that renders its operand as text.
+func (e *Cast) castsToText(dest string) bool {
+	switch strings.TrimSpace(dest) {
+	case "char", "varchar", "text", "string":
+		return true
+	}
+	_, ok := e.stringDestination()
+	return ok
 }

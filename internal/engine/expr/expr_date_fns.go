@@ -68,6 +68,11 @@ func fnDateTrunc(args []any) any {
 		return nil
 	}
 	unit := strings.ToLower(fmt.Sprint(args[0]))
+	if x, inf := args[1].(infiniteInstant); inf {
+		// PostgreSQL: date_trunc of an infinite value is that value, a
+		// TIMESTAMP for a DATE argument as for any other.
+		return x.tsBox()
+	}
 	t, ok := parseTimeOK(args[1])
 	if !ok {
 		return nil
@@ -124,6 +129,12 @@ func fnExtract(args []any) any {
 		return nil
 	}
 	unit := strings.ToLower(fmt.Sprint(args[0]))
+	if x, inf := args[1].(infiniteInstant); inf {
+		if f, ok := extractInfinite(unit, x); ok {
+			return f
+		}
+		return nil
+	}
 	t, ok := parseTimeOK(args[1])
 	if !ok {
 		return nil

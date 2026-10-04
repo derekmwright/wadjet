@@ -115,7 +115,10 @@ type FuncCall struct {
 	wantsText        bool
 	wantsNetworkText bool
 	wantsInstant     bool
-	wantsDateKind    bool
+	// extractUnit is the EXTRACT field this function answers, or "" (see
+	// extractFieldFuncs).
+	extractUnit   string
+	wantsDateKind bool
 	// typedArgs names, for a stringInputFuncs entry, the argument positions
 	// that are NOT read as text — SUBSTR's start/length, LEFT/RIGHT's count,
 	// LPAD/RPAD's width, SPLIT_PART's field, OVERLAY's start/count
@@ -304,6 +307,10 @@ func (e *FuncCall) resolveTemporalArgs(b *batch.RecordBatch, row int, args []any
 		// answered 1970 — #319 reached through the cast.
 		if _, isCol := a.(*ColRef); !isCol {
 			if inst, k, ok := temporalBoxInstant(a, b, args[i]); ok {
+				if x, inf := inst.(infiniteInstant); inf {
+					args[i] = e.infiniteArg(x)
+					continue
+				}
 				if k == castToDateKind && !e.wantsDateKind {
 					inst = inst.(civilDate).t
 				}
@@ -326,7 +333,12 @@ func (e *FuncCall) resolveTemporalArgs(b *batch.RecordBatch, row int, args []any
 		if !ok {
 			continue
 		}
-		if t, ok := columnInstant(src, r); ok {
+		t, x, inf, ok := columnReading(src, r)
+		if inf {
+			args[i] = e.infiniteArg(x)
+			continue
+		}
+		if ok {
 			if e.wantsDateKind && vt == batch.TypeDate {
 				args[i] = civilDate{t: t}
 				continue
@@ -334,6 +346,29 @@ func (e *FuncCall) resolveTemporalArgs(b *batch.RecordBatch, row int, args []any
 			args[i] = t
 		}
 	}
+}
+
+// infinityAwareFuncs are the temporal-input functions PostgreSQL answers for
+// an infinite argument and this engine answers the same way: date_trunc,
+// timezone and time_bucket (date_bin) keep the value, EXTRACT / date_part
+// answer per field (extractInfinite). Every other temporal-input function — this engine's own
+// names (year, date_add, time_bucket, …) included — refuses one with 22008
+// rather than computing on the extreme integer's calendar date.
+var infinityAwareFuncs = map[string]bool{
+	"date_trunc": true, "extract": true, "date_part": true, "timezone": true,
+	// time_bucket is PostgreSQL's date_bin under the time-series name.
+	"time_bucket": true,
+}
+
+// infiniteArg is resolveTemporalArgs' reading of an infinite argument: the
+// value itself for a function that answers it (infinityAwareFuncs, and the
+// EXTRACT field functions, extractFieldFuncs), else this function's 22008.
+func (e *FuncCall) infiniteArg(x infiniteInstant) any {
+	lower := strings.ToLower(e.Name)
+	if !infinityAwareFuncs[lower] && e.extractUnit == "" {
+		raiseInfiniteOperand(lower, x)
+	}
+	return x
 }
 
 // temporalOperand recovers the declared unit for date ± interval:
@@ -369,7 +404,10 @@ func temporalOperand(b *batch.RecordBatch, row int, e Expr, v any) (any, bool) {
 	if !ok {
 		return nil, false
 	}
-	t, ok := columnInstant(src, r)
+	t, x, inf, ok := columnReading(src, r)
+	if inf {
+		return x, true
+	}
 	if !ok {
 		return nil, false
 	}
@@ -399,6 +437,7 @@ func (e *FuncCall) resolveFnSlow() {
 	e.wantsText = stringInputFuncs[lower]
 	e.wantsNetworkText = networkTextFuncs[lower]
 	e.wantsInstant = temporalInputFuncs[lower]
+	e.extractUnit = extractFieldFuncs[lower]
 	e.wantsDateKind = dateArithFuncs[lower]
 	e.typedArgs = typedArgPositions[lower]
 	if d, c := DefaultRegistry.ReturnType(e.Name).Resolve(0, nil); c == Decided {
@@ -495,7 +534,11 @@ func (e *FuncCall) Eval(b *batch.RecordBatch, row int) any {
 	case e.nullifArms != nil:
 		out = evalNullIf(b, args, e.nullifArms)
 	default:
-		out = e.fn(args)
+		if v, inf := e.infiniteExtract(args); inf {
+			out = v
+		} else {
+			out = e.fn(args)
+		}
 	}
 	if e.choiceArms == nil || out == nil {
 		// Not a construct that CHOOSES between its arguments. Every other

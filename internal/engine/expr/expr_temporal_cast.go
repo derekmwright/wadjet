@@ -56,6 +56,14 @@ func castTemporal(b *batch.RecordBatch, row int, operand Expr, v any, kind castT
 	if !ok {
 		src = v
 	}
+	// An infinite DATE or TIMESTAMP casts to the same infinite value of the
+	// destination type, as in PostgreSQL (`'infinity'::date::timestamp`).
+	if x, inf := src.(infiniteInstant); inf {
+		if kind == castToDateKind {
+			return x.dateBox()
+		}
+		return x.tsBox()
+	}
 	// TEXT goes through the engine's ONE temporal accept-set, which answers
 	// the VALUE and the refusal from the same function — see
 	// castTemporalText. Every other box keeps parseDateArg's reading: a DATE
@@ -150,6 +158,10 @@ func epochDaysOf(t time.Time) int64 {
 // See docs/internals/whole-day-date-arithmetic-boundary.md for the design.
 func (e *BinOp) dateArith(b *batch.RecordBatch, row int, lv, rv any) (any, bool) {
 	ld, lok := temporalOperand(b, row, e.Left, lv)
+	rd, rok := temporalOperand(b, row, e.Right, rv)
+	if res, ok := e.infiniteDateArith(ld, lok, rd, rok, lv, rv); ok {
+		return res, true
+	}
 	if !lok {
 		// `n + date`, the one reversed shape that means anything. The DATE
 		// on the right is established FIRST: plainDayCount refuses a whole
@@ -157,11 +169,7 @@ func (e *BinOp) dateArith(b *batch.RecordBatch, row int, lv, rv any) (any, bool)
 		// a day count before a date was seen made `CAST('Infinity' AS DOUBLE
 		// PRECISION) + 1` (and a binary Infinity parameter, which binds as
 		// that cast) `date out of range` where it is plain float addition.
-		if e.Op != "+" {
-			return nil, false
-		}
-		rd, rok := temporalOperand(b, row, e.Right, rv)
-		if !rok {
+		if e.Op != "+" || !rok {
 			return nil, false
 		}
 		rt, dateOnly, parsed := parseDateArg(rd)
@@ -178,7 +186,7 @@ func (e *BinOp) dateArith(b *batch.RecordBatch, row int, lv, rv any) (any, bool)
 	if !lparsed {
 		return nil, false
 	}
-	if rd, rok := temporalOperand(b, row, e.Right, rv); rok {
+	if rok {
 		rt, rDateOnly, rparsed := parseDateArg(rd)
 		if !rparsed || e.Op != "-" || !lDateOnly || !rDateOnly {
 			return nil, false
@@ -196,6 +204,49 @@ func (e *BinOp) dateArith(b *batch.RecordBatch, row int, lv, rv any) (any, bool)
 		n = -n
 	}
 	return shiftDays(epochDaysOf(lt), n), true
+}
+
+// infiniteDateArith is dateArith over an infinite operand, answered as
+// PostgreSQL answers it: `date ± integer` and `integer + date` keep the
+// infinite DATE (date_pli / date_mii return an infinite date unchanged), and a
+// difference with an infinite side — `date - date`, and the millisecond
+// difference this engine computes for `timestamp - timestamp` where
+// PostgreSQL's is an INTERVAL — is 22008 (PostgreSQL: `cannot subtract
+// infinite dates`; its infinite interval has no value here). ld / lok and
+// rd / rok are temporalOperand's readings of the operands. ok=false when neither
+// operand is infinite: dateArith goes on as before.
+func (e *BinOp) infiniteDateArith(ld any, lok bool, rd any, rok bool, lv, rv any) (any, bool) {
+	lx, linf := ld.(infiniteInstant)
+	rx, rinf := rd.(infiniteInstant)
+	if !lok {
+		ld = nil
+	}
+	if !rok {
+		rd = nil
+	}
+	switch {
+	case !linf && !rinf:
+		return nil, false
+	case ld != nil && rd != nil:
+		// Both operands temporal: a difference (or a sum PostgreSQL has no
+		// operator for), with at least one side infinite.
+		x := lx
+		if !linf {
+			x = rx
+		}
+		raiseInfiniteOperand("`"+e.Op+"` between dates or timestamps", x)
+	case linf:
+		if _, isDay := plainDayCount(rv); isDay && lx.date {
+			return lx.dateBox(), true
+		}
+		raiseInfiniteOperand("`"+e.Op+"` with this operand", lx)
+	default: // rinf, the left operand not temporal
+		if _, isDay := plainDayCount(lv); isDay && rx.date && e.Op == "+" {
+			return rx.dateBox(), true
+		}
+		raiseInfiniteOperand("`"+e.Op+"` with this operand", rx)
+	}
+	return nil, false
 }
 
 // plainDayCount reads the non-date side of `date ± n` as a whole number of
