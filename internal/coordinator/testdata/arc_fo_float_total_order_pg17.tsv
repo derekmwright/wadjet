@@ -1,0 +1,1245 @@
+# PostgreSQL 17.11 answers for arc_fo_float_total_order_arms_test.go (TestArcFOMeasure).
+ddl/f8/first/create	ok
+ddl/f8/first/insert	ok
+ddl/f8/mid/create	ok
+ddl/f8/mid/insert	ok
+ddl/f8/last/create	ok
+ddl/f8/last/insert	ok
+ddl/f8/multi/create	ok
+ddl/f8/multi/insert1	ok
+ddl/f8/multi/insert2	ok
+ddl/f8/multi/insert3	ok
+ddl/f8/multi/insert4	ok
+ddl/f8/multi/insert5	ok
+ddl/f8/multi/insert6	ok
+ddl/f8/multi/insert7	ok
+ddl/f8/naninf/create	ok
+ddl/f8/naninf/insert	ok
+ddl/f8/infnan/create	ok
+ddl/f8/infnan/insert	ok
+ddl/f8/nanonly/create	ok
+ddl/f8/nanonly/insert	ok
+ddl/f8/negz/create	ok
+ddl/f8/negz/insert	ok
+ddl/f8/zeros/create	ok
+ddl/f8/zeros/insert	ok
+ddl/f4/first/create	ok
+ddl/f4/first/insert	ok
+ddl/f4/mid/create	ok
+ddl/f4/mid/insert	ok
+ddl/f4/last/create	ok
+ddl/f4/last/insert	ok
+ddl/f4/multi/create	ok
+ddl/f4/multi/insert1	ok
+ddl/f4/multi/insert2	ok
+ddl/f4/multi/insert3	ok
+ddl/f4/multi/insert4	ok
+ddl/f4/multi/insert5	ok
+ddl/f4/multi/insert6	ok
+ddl/f4/multi/insert7	ok
+ddl/f4/naninf/create	ok
+ddl/f4/naninf/insert	ok
+ddl/f4/infnan/create	ok
+ddl/f4/infnan/insert	ok
+ddl/f4/nanonly/create	ok
+ddl/f4/nanonly/insert	ok
+ddl/f4/negz/create	ok
+ddl/f4/negz/insert	ok
+ddl/f4/zeros/create	ok
+ddl/f4/zeros/insert	ok
+f8/first/minMax	lo:double precision,hi:double precision | -Infinity,NaN
+f8/first/minMaxExpr	lo:double precision,hi:double precision | -Infinity,NaN
+f8/first/grpMinMax	g:bigint,lo:double precision,hi:double precision | 0,-0,NaN; 1,-Infinity,NaN
+f8/first/groupBy	c:double precision,n:bigint | -Infinity,1; -0,1; 1.5,1; Infinity,1; NaN,2; NULL,1
+f8/first/groupByDesc	c:double precision,n:bigint | NaN,2; Infinity,1; 1.5,1; -0,1; -Infinity,1; NULL,1
+f8/first/groupByExpr	k:double precision,n:bigint | -Infinity,1; -0,1; 1.5,1; Infinity,1; NaN,2; NULL,1
+f8/first/groupByMax	c:double precision,m:bigint | Infinity,2; -Infinity,3; -0,4; 1.5,5; NaN,6; NULL,7
+f8/first/groupByBool	c:double precision,b:boolean,n:bigint | -Infinity,f,1; -0,t,1; 1.5,t,1; Infinity,f,1; NaN,f,1; NaN,t,1; NULL,t,1
+f8/first/groupByText	c:double precision,s:text,n:bigint | -Infinity,1,1; -0,0,1; 1.5,1,1; Infinity,0,1; NaN,0,1; NaN,1,1; NULL,1,1
+f8/first/groupByCountDistinct	c:double precision,n:bigint | -Infinity,1; -0,1; 1.5,1; Infinity,1; NaN,2; NULL,1
+f8/first/groupByKeyExpr	d:double precision,n:bigint | -Infinity,1; -0,1; 3,1; Infinity,1; NaN,2; NULL,1
+f8/first/rollup	c:double precision,n:bigint | -Infinity,1; -0,1; 1.5,1; Infinity,1; NaN,2; NULL,1; NULL,7
+f8/first/distinct	c:double precision | -Infinity; -0; 1.5; Infinity; NaN; NULL
+f8/first/countDistinct	n:bigint | 5
+f8/first/orderAsc	id:bigint | 3; 4; 5; 2; 1; 6; 7
+f8/first/orderDesc	id:bigint | 7; 1; 6; 2; 5; 4; 3
+f8/first/orderAscNullsFirst	id:bigint | 7; 3; 4; 5; 2; 1; 6
+f8/first/orderDescNullsLast	id:bigint | 1; 6; 2; 5; 4; 3; 7
+f8/first/orderExpr	id:bigint | 7; 1; 6; 2; 5; 4; 3
+f8/first/topNAsc	id:bigint | 3; 4; 5
+f8/first/topNDesc	id:bigint | 7; 1; 6
+f8/first/topNDescNullsLast	id:bigint,c:double precision | 1,NaN; 6,NaN
+f8/first/join	l:bigint,r:bigint | 1,1; 1,6; 2,2; 3,3; 4,4; 5,5; 6,1; 6,6
+f8/first/joinExpr	l:bigint,r:bigint | 1,1; 1,6; 2,2; 3,3; 4,4; 5,5; 6,1; 6,6
+f8/first/crossLt	l:bigint,r:bigint | 2,1; 2,6; 3,1; 3,2; 3,4; 3,5; 3,6; 4,1; 4,2; 4,5; 4,6; 5,1; 5,2; 5,6
+f8/first/crossGe	l:bigint,r:bigint | 1,1; 1,2; 1,3; 1,4; 1,5; 1,6; 2,2; 2,3; 2,4; 2,5; 3,3; 4,3; 4,4; 5,3; 5,4; 5,5; 6,1; 6,2; 6,3; 6,4; 6,5; 6,6
+f8/first/crossNe	l:bigint,r:bigint | 1,2; 1,3; 1,4; 1,5; 2,1; 2,3; 2,4; 2,5; 2,6; 3,1; 3,2; 3,4; 3,5; 3,6; 4,1; 4,2; 4,3; 4,5; 4,6; 5,1; 5,2; 5,3; 5,4; 5,6; 6,2; 6,3; 6,4; 6,5
+f8/first/crossProject	l:bigint,r:bigint,lt:boolean,le:boolean,eq:boolean,ne:boolean,gt:boolean,ge:boolean,dist:boolean | 1,1,f,t,t,f,f,t,f; 1,2,f,f,f,t,t,t,t; 1,3,f,f,f,t,t,t,t; 1,4,f,f,f,t,t,t,t; 1,5,f,f,f,t,t,t,t; 1,6,f,t,t,f,f,t,f; 1,7,NULL,NULL,NULL,NULL,NULL,NULL,t; 2,1,t,t,f,t,f,f,t; 2,2,f,t,t,f,f,t,f; 2,3,f,f,f,t,t,t,t; 2,4,f,f,f,t,t,t,t; 2,5,f,f,f,t,t,t,t; 2,6,t,t,f,t,f,f,t; 2,7,NULL,NULL,NULL,NULL,NULL,NULL,t; 3,1,t,t,f,t,f,f,t; 3,2,t,t,f,t,f,f,t; 3,3,f,t,t,f,f,t,f; 3,4,t,t,f,t,f,f,t; 3,5,t,t,f,t,f,f,t; 3,6,t,t,f,t,f,f,t; 3,7,NULL,NULL,NULL,NULL,NULL,NULL,t; 4,1,t,t,f,t,f,f,t; 4,2,t,t,f,t,f,f,t; 4,3,f,f,f,t,t,t,t; 4,4,f,t,t,f,f,t,f; 4,5,t,t,f,t,f,f,t; 4,6,t,t,f,t,f,f,t; 4,7,NULL,NULL,NULL,NULL,NULL,NULL,t; 5,1,t,t,f,t,f,f,t; 5,2,t,t,f,t,f,f,t; 5,3,f,f,f,t,t,t,t; 5,4,f,f,f,t,t,t,t; 5,5,f,t,t,f,f,t,f; 5,6,t,t,f,t,f,f,t; 5,7,NULL,NULL,NULL,NULL,NULL,NULL,t; 6,1,f,t,t,f,f,t,f; 6,2,f,f,f,t,t,t,t; 6,3,f,f,f,t,t,t,t; 6,4,f,f,f,t,t,t,t; 6,5,f,f,f,t,t,t,t; 6,6,f,t,t,f,f,t,f; 6,7,NULL,NULL,NULL,NULL,NULL,NULL,t; 7,1,NULL,NULL,NULL,NULL,NULL,NULL,t; 7,2,NULL,NULL,NULL,NULL,NULL,NULL,t; 7,3,NULL,NULL,NULL,NULL,NULL,NULL,t; 7,4,NULL,NULL,NULL,NULL,NULL,NULL,t; 7,5,NULL,NULL,NULL,NULL,NULL,NULL,t; 7,6,NULL,NULL,NULL,NULL,NULL,NULL,t; 7,7,NULL,NULL,NULL,NULL,NULL,NULL,f
+f8/first/eqNaN	id:bigint | 1; 6
+f8/first/eqNaNCast	id:bigint | 1; 6
+f8/first/neNaN	id:bigint | 2; 3; 4; 5
+f8/first/ltNaN	id:bigint | 2; 3; 4; 5
+f8/first/leNaN	id:bigint | 1; 2; 3; 4; 5; 6
+f8/first/gtNaN	(0 rows)
+f8/first/geNaN	id:bigint | 1; 6
+f8/first/gt15	id:bigint | 1; 2; 6
+f8/first/geInf	id:bigint | 1; 2; 6
+f8/first/gtInf	id:bigint | 1; 6
+f8/first/eqZero	id:bigint | 4
+f8/first/eqNegZero	id:bigint | 4
+f8/first/ltZero	id:bigint | 3
+f8/first/geZero	id:bigint | 1; 2; 4; 5; 6
+f8/first/between	id:bigint | 1; 2; 5; 6
+f8/first/in	id:bigint | 1; 4; 6
+f8/first/notIn	id:bigint | 2; 3; 5
+f8/first/distinctFrom	id:bigint | 2; 3; 4; 5; 7
+f8/first/notDistinctFrom	id:bigint | 4
+f8/first/projectCompare	id:bigint,gt:boolean,eqn:boolean,ltn:boolean,eqz:boolean | 1,t,t,f,f; 2,t,f,t,f; 3,f,f,t,f; 4,f,f,t,t; 5,f,f,t,f; 6,t,t,f,f; 7,NULL,NULL,NULL,NULL
+f8/first/greatestLeast	id:bigint,g:double precision,l:double precision,gn:double precision,ln:double precision | 1,NaN,1.5,NaN,NaN; 2,Infinity,1.5,NaN,Infinity; 3,1.5,-Infinity,NaN,-Infinity; 4,1.5,-0,NaN,-0; 5,1.5,1.5,NaN,1.5; 6,NaN,1.5,NaN,NaN; 7,1.5,1.5,NaN,NaN
+f8/first/rank	id:bigint,r:bigint,d:bigint | 1,5,5; 2,4,4; 3,1,1; 4,2,2; 5,3,3; 6,5,5; 7,7,6
+f8/first/rankDesc	id:bigint,r:bigint | 1,2; 2,4; 3,7; 4,6; 5,5; 6,2; 7,1
+f8/first/partition	id:bigint,n:bigint | 1,2; 2,1; 3,1; 4,1; 5,1; 6,2; 7,1
+f8/first/winMinMax	id:bigint,lo:double precision,hi:double precision | 1,-Infinity,NaN; 2,-Infinity,NaN; 3,-Infinity,NaN; 4,-Infinity,NaN; 5,-Infinity,NaN; 6,-Infinity,NaN; 7,-Infinity,NaN
+f8/first/winRunning	id:bigint,lo:double precision,hi:double precision | 1,NaN,NaN; 2,Infinity,NaN; 3,-Infinity,NaN; 4,-Infinity,NaN; 5,-Infinity,NaN; 6,-Infinity,NaN; 7,-Infinity,NaN
+f8/first/winPartMax	id:bigint,hi:double precision | 1,NaN; 2,NaN; 3,NaN; 4,NaN; 5,NaN; 6,NaN; 7,NaN
+f8/first/union	c:double precision | -Infinity; -0; 1.5; Infinity; NaN; NULL
+f8/first/intersect	c:double precision | -Infinity; -0; 1.5; NaN; NULL
+f8/first/except	c:double precision | -Infinity; Infinity
+f8/first/inSubquery	id:bigint | 1; 4; 5; 6
+f8/first/exists	id:bigint | 1; 6
+f8/first/eqScalarMax	id:bigint | 1; 6
+f8/first/eqScalarMaxInf	id:bigint | 2
+f8/first/derivedMinMax	lo:double precision,hi:double precision | -Infinity,NaN
+f8/first/cteGroupBy	c:double precision,n:bigint | -Infinity,1; -0,1; 1.5,1; Infinity,1; NaN,2; NULL,1
+f8/first/unionAllMinMax	lo:double precision,hi:double precision | -Infinity,NaN
+f8/first/unionAllGroupBy	c:double precision,n:bigint | -Infinity,2; -0,2; 1.5,2; Infinity,2; NaN,4; NULL,2
+f8/mid/minMax	lo:double precision,hi:double precision | -Infinity,NaN
+f8/mid/minMaxExpr	lo:double precision,hi:double precision | -Infinity,NaN
+f8/mid/grpMinMax	g:bigint,lo:double precision,hi:double precision | 0,1.5,Infinity; 1,-Infinity,NaN
+f8/mid/groupBy	c:double precision,n:bigint | -Infinity,1; -0,1; 1.5,1; Infinity,1; NaN,2; NULL,1
+f8/mid/groupByDesc	c:double precision,n:bigint | NaN,2; Infinity,1; 1.5,1; -0,1; -Infinity,1; NULL,1
+f8/mid/groupByExpr	k:double precision,n:bigint | -Infinity,1; -0,1; 1.5,1; Infinity,1; NaN,2; NULL,1
+f8/mid/groupByMax	c:double precision,m:bigint | -Infinity,1; 1.5,2; Infinity,4; -0,5; NULL,6; NaN,7
+f8/mid/groupByBool	c:double precision,b:boolean,n:bigint | -Infinity,f,1; -0,t,1; 1.5,f,1; Infinity,t,1; NaN,f,1; NaN,t,1; NULL,t,1
+f8/mid/groupByText	c:double precision,s:text,n:bigint | -Infinity,1,1; -0,1,1; 1.5,0,1; Infinity,0,1; NaN,1,2; NULL,0,1
+f8/mid/groupByCountDistinct	c:double precision,n:bigint | -Infinity,1; -0,1; 1.5,1; Infinity,1; NaN,2; NULL,1
+f8/mid/groupByKeyExpr	d:double precision,n:bigint | -Infinity,1; -0,1; 3,1; Infinity,1; NaN,2; NULL,1
+f8/mid/rollup	c:double precision,n:bigint | -Infinity,1; -0,1; 1.5,1; Infinity,1; NaN,2; NULL,1; NULL,7
+f8/mid/distinct	c:double precision | -Infinity; -0; 1.5; Infinity; NaN; NULL
+f8/mid/countDistinct	n:bigint | 5
+f8/mid/orderAsc	id:bigint | 1; 5; 2; 4; 3; 7; 6
+f8/mid/orderDesc	id:bigint | 6; 3; 7; 4; 2; 5; 1
+f8/mid/orderAscNullsFirst	id:bigint | 6; 1; 5; 2; 4; 3; 7
+f8/mid/orderDescNullsLast	id:bigint | 3; 7; 4; 2; 5; 1; 6
+f8/mid/orderExpr	id:bigint | 6; 3; 7; 4; 2; 5; 1
+f8/mid/topNAsc	id:bigint | 1; 5; 2
+f8/mid/topNDesc	id:bigint | 6; 3; 7
+f8/mid/topNDescNullsLast	id:bigint,c:double precision | 3,NaN; 7,NaN
+f8/mid/join	l:bigint,r:bigint | 1,1; 2,2; 3,3; 3,7; 4,4; 5,5; 7,3; 7,7
+f8/mid/joinExpr	l:bigint,r:bigint | 1,1; 2,2; 3,3; 3,7; 4,4; 5,5; 7,3; 7,7
+f8/mid/crossLt	l:bigint,r:bigint | 1,2; 1,3; 1,4; 1,5; 1,7; 2,3; 2,4; 2,7; 4,3; 4,7; 5,2; 5,3; 5,4; 5,7
+f8/mid/crossGe	l:bigint,r:bigint | 1,1; 2,1; 2,2; 2,5; 3,1; 3,2; 3,3; 3,4; 3,5; 3,7; 4,1; 4,2; 4,4; 4,5; 5,1; 5,5; 7,1; 7,2; 7,3; 7,4; 7,5; 7,7
+f8/mid/crossNe	l:bigint,r:bigint | 1,2; 1,3; 1,4; 1,5; 1,7; 2,1; 2,3; 2,4; 2,5; 2,7; 3,1; 3,2; 3,4; 3,5; 4,1; 4,2; 4,3; 4,5; 4,7; 5,1; 5,2; 5,3; 5,4; 5,7; 7,1; 7,2; 7,4; 7,5
+f8/mid/crossProject	l:bigint,r:bigint,lt:boolean,le:boolean,eq:boolean,ne:boolean,gt:boolean,ge:boolean,dist:boolean | 1,1,f,t,t,f,f,t,f; 1,2,t,t,f,t,f,f,t; 1,3,t,t,f,t,f,f,t; 1,4,t,t,f,t,f,f,t; 1,5,t,t,f,t,f,f,t; 1,6,NULL,NULL,NULL,NULL,NULL,NULL,t; 1,7,t,t,f,t,f,f,t; 2,1,f,f,f,t,t,t,t; 2,2,f,t,t,f,f,t,f; 2,3,t,t,f,t,f,f,t; 2,4,t,t,f,t,f,f,t; 2,5,f,f,f,t,t,t,t; 2,6,NULL,NULL,NULL,NULL,NULL,NULL,t; 2,7,t,t,f,t,f,f,t; 3,1,f,f,f,t,t,t,t; 3,2,f,f,f,t,t,t,t; 3,3,f,t,t,f,f,t,f; 3,4,f,f,f,t,t,t,t; 3,5,f,f,f,t,t,t,t; 3,6,NULL,NULL,NULL,NULL,NULL,NULL,t; 3,7,f,t,t,f,f,t,f; 4,1,f,f,f,t,t,t,t; 4,2,f,f,f,t,t,t,t; 4,3,t,t,f,t,f,f,t; 4,4,f,t,t,f,f,t,f; 4,5,f,f,f,t,t,t,t; 4,6,NULL,NULL,NULL,NULL,NULL,NULL,t; 4,7,t,t,f,t,f,f,t; 5,1,f,f,f,t,t,t,t; 5,2,t,t,f,t,f,f,t; 5,3,t,t,f,t,f,f,t; 5,4,t,t,f,t,f,f,t; 5,5,f,t,t,f,f,t,f; 5,6,NULL,NULL,NULL,NULL,NULL,NULL,t; 5,7,t,t,f,t,f,f,t; 6,1,NULL,NULL,NULL,NULL,NULL,NULL,t; 6,2,NULL,NULL,NULL,NULL,NULL,NULL,t; 6,3,NULL,NULL,NULL,NULL,NULL,NULL,t; 6,4,NULL,NULL,NULL,NULL,NULL,NULL,t; 6,5,NULL,NULL,NULL,NULL,NULL,NULL,t; 6,6,NULL,NULL,NULL,NULL,NULL,NULL,f; 6,7,NULL,NULL,NULL,NULL,NULL,NULL,t; 7,1,f,f,f,t,t,t,t; 7,2,f,f,f,t,t,t,t; 7,3,f,t,t,f,f,t,f; 7,4,f,f,f,t,t,t,t; 7,5,f,f,f,t,t,t,t; 7,6,NULL,NULL,NULL,NULL,NULL,NULL,t; 7,7,f,t,t,f,f,t,f
+f8/mid/eqNaN	id:bigint | 3; 7
+f8/mid/eqNaNCast	id:bigint | 3; 7
+f8/mid/neNaN	id:bigint | 1; 2; 4; 5
+f8/mid/ltNaN	id:bigint | 1; 2; 4; 5
+f8/mid/leNaN	id:bigint | 1; 2; 3; 4; 5; 7
+f8/mid/gtNaN	(0 rows)
+f8/mid/geNaN	id:bigint | 3; 7
+f8/mid/gt15	id:bigint | 3; 4; 7
+f8/mid/geInf	id:bigint | 3; 4; 7
+f8/mid/gtInf	id:bigint | 3; 7
+f8/mid/eqZero	id:bigint | 5
+f8/mid/eqNegZero	id:bigint | 5
+f8/mid/ltZero	id:bigint | 1
+f8/mid/geZero	id:bigint | 2; 3; 4; 5; 7
+f8/mid/between	id:bigint | 2; 3; 4; 7
+f8/mid/in	id:bigint | 3; 5; 7
+f8/mid/notIn	id:bigint | 1; 2; 4
+f8/mid/distinctFrom	id:bigint | 1; 2; 4; 5; 6
+f8/mid/notDistinctFrom	id:bigint | 5
+f8/mid/projectCompare	id:bigint,gt:boolean,eqn:boolean,ltn:boolean,eqz:boolean | 1,f,f,t,f; 2,f,f,t,f; 3,t,t,f,f; 4,t,f,t,f; 5,f,f,t,t; 6,NULL,NULL,NULL,NULL; 7,t,t,f,f
+f8/mid/greatestLeast	id:bigint,g:double precision,l:double precision,gn:double precision,ln:double precision | 1,1.5,-Infinity,NaN,-Infinity; 2,1.5,1.5,NaN,1.5; 3,NaN,1.5,NaN,NaN; 4,Infinity,1.5,NaN,Infinity; 5,1.5,-0,NaN,-0; 6,1.5,1.5,NaN,NaN; 7,NaN,1.5,NaN,NaN
+f8/mid/rank	id:bigint,r:bigint,d:bigint | 1,1,1; 2,3,3; 3,5,5; 4,4,4; 5,2,2; 6,7,6; 7,5,5
+f8/mid/rankDesc	id:bigint,r:bigint | 1,7; 2,5; 3,2; 4,4; 5,6; 6,1; 7,2
+f8/mid/partition	id:bigint,n:bigint | 1,1; 2,1; 3,2; 4,1; 5,1; 6,1; 7,2
+f8/mid/winMinMax	id:bigint,lo:double precision,hi:double precision | 1,-Infinity,NaN; 2,-Infinity,NaN; 3,-Infinity,NaN; 4,-Infinity,NaN; 5,-Infinity,NaN; 6,-Infinity,NaN; 7,-Infinity,NaN
+f8/mid/winRunning	id:bigint,lo:double precision,hi:double precision | 1,-Infinity,-Infinity; 2,-Infinity,1.5; 3,-Infinity,NaN; 4,-Infinity,NaN; 5,-Infinity,NaN; 6,-Infinity,NaN; 7,-Infinity,NaN
+f8/mid/winPartMax	id:bigint,hi:double precision | 1,NaN; 2,Infinity; 3,NaN; 4,Infinity; 5,NaN; 6,Infinity; 7,NaN
+f8/mid/union	c:double precision | -Infinity; -0; 1.5; Infinity; NaN; NULL
+f8/mid/intersect	c:double precision | -0; Infinity; NaN; NULL
+f8/mid/except	c:double precision | -Infinity; 1.5
+f8/mid/inSubquery	id:bigint | 3; 4; 5; 7
+f8/mid/exists	id:bigint | 3; 7
+f8/mid/eqScalarMax	id:bigint | 3; 7
+f8/mid/eqScalarMaxInf	id:bigint | 4
+f8/mid/derivedMinMax	lo:double precision,hi:double precision | -Infinity,NaN
+f8/mid/cteGroupBy	c:double precision,n:bigint | -Infinity,1; -0,1; 1.5,1; Infinity,1; NaN,2; NULL,1
+f8/mid/unionAllMinMax	lo:double precision,hi:double precision | -Infinity,NaN
+f8/mid/unionAllGroupBy	c:double precision,n:bigint | -Infinity,2; -0,2; 1.5,2; Infinity,2; NaN,4; NULL,2
+f8/last/minMax	lo:double precision,hi:double precision | -Infinity,NaN
+f8/last/minMaxExpr	lo:double precision,hi:double precision | -Infinity,NaN
+f8/last/grpMinMax	g:bigint,lo:double precision,hi:double precision | 0,-Infinity,NaN; 1,-0,NaN
+f8/last/groupBy	c:double precision,n:bigint | -Infinity,1; -0,1; 1.5,1; Infinity,1; NaN,2; NULL,1
+f8/last/groupByDesc	c:double precision,n:bigint | NaN,2; Infinity,1; 1.5,1; -0,1; -Infinity,1; NULL,1
+f8/last/groupByExpr	k:double precision,n:bigint | -Infinity,1; -0,1; 1.5,1; Infinity,1; NaN,2; NULL,1
+f8/last/groupByMax	c:double precision,m:bigint | Infinity,1; 1.5,2; -0,3; -Infinity,4; NULL,5; NaN,7
+f8/last/groupByBool	c:double precision,b:boolean,n:bigint | -Infinity,t,1; -0,f,1; 1.5,f,1; Infinity,f,1; NaN,t,2; NULL,t,1
+f8/last/groupByText	c:double precision,s:text,n:bigint | -Infinity,0,1; -0,1,1; 1.5,0,1; Infinity,1,1; NaN,0,1; NaN,1,1; NULL,1,1
+f8/last/groupByCountDistinct	c:double precision,n:bigint | -Infinity,1; -0,1; 1.5,1; Infinity,1; NaN,2; NULL,1
+f8/last/groupByKeyExpr	d:double precision,n:bigint | -Infinity,1; -0,1; 3,1; Infinity,1; NaN,2; NULL,1
+f8/last/rollup	c:double precision,n:bigint | -Infinity,1; -0,1; 1.5,1; Infinity,1; NaN,2; NULL,1; NULL,7
+f8/last/distinct	c:double precision | -Infinity; -0; 1.5; Infinity; NaN; NULL
+f8/last/countDistinct	n:bigint | 5
+f8/last/orderAsc	id:bigint | 4; 3; 2; 1; 6; 7; 5
+f8/last/orderDesc	id:bigint | 5; 6; 7; 1; 2; 3; 4
+f8/last/orderAscNullsFirst	id:bigint | 5; 4; 3; 2; 1; 6; 7
+f8/last/orderDescNullsLast	id:bigint | 6; 7; 1; 2; 3; 4; 5
+f8/last/orderExpr	id:bigint | 5; 6; 7; 1; 2; 3; 4
+f8/last/topNAsc	id:bigint | 4; 3; 2
+f8/last/topNDesc	id:bigint | 5; 6; 7
+f8/last/topNDescNullsLast	id:bigint,c:double precision | 6,NaN; 7,NaN
+f8/last/join	l:bigint,r:bigint | 1,1; 2,2; 3,3; 4,4; 6,6; 6,7; 7,6; 7,7
+f8/last/joinExpr	l:bigint,r:bigint | 1,1; 2,2; 3,3; 4,4; 6,6; 6,7; 7,6; 7,7
+f8/last/crossLt	l:bigint,r:bigint | 1,6; 1,7; 2,1; 2,6; 2,7; 3,1; 3,2; 3,6; 3,7; 4,1; 4,2; 4,3; 4,6; 4,7
+f8/last/crossGe	l:bigint,r:bigint | 1,1; 1,2; 1,3; 1,4; 2,2; 2,3; 2,4; 3,3; 3,4; 4,4; 6,1; 6,2; 6,3; 6,4; 6,6; 6,7; 7,1; 7,2; 7,3; 7,4; 7,6; 7,7
+f8/last/crossNe	l:bigint,r:bigint | 1,2; 1,3; 1,4; 1,6; 1,7; 2,1; 2,3; 2,4; 2,6; 2,7; 3,1; 3,2; 3,4; 3,6; 3,7; 4,1; 4,2; 4,3; 4,6; 4,7; 6,1; 6,2; 6,3; 6,4; 7,1; 7,2; 7,3; 7,4
+f8/last/crossProject	l:bigint,r:bigint,lt:boolean,le:boolean,eq:boolean,ne:boolean,gt:boolean,ge:boolean,dist:boolean | 1,1,f,t,t,f,f,t,f; 1,2,f,f,f,t,t,t,t; 1,3,f,f,f,t,t,t,t; 1,4,f,f,f,t,t,t,t; 1,5,NULL,NULL,NULL,NULL,NULL,NULL,t; 1,6,t,t,f,t,f,f,t; 1,7,t,t,f,t,f,f,t; 2,1,t,t,f,t,f,f,t; 2,2,f,t,t,f,f,t,f; 2,3,f,f,f,t,t,t,t; 2,4,f,f,f,t,t,t,t; 2,5,NULL,NULL,NULL,NULL,NULL,NULL,t; 2,6,t,t,f,t,f,f,t; 2,7,t,t,f,t,f,f,t; 3,1,t,t,f,t,f,f,t; 3,2,t,t,f,t,f,f,t; 3,3,f,t,t,f,f,t,f; 3,4,f,f,f,t,t,t,t; 3,5,NULL,NULL,NULL,NULL,NULL,NULL,t; 3,6,t,t,f,t,f,f,t; 3,7,t,t,f,t,f,f,t; 4,1,t,t,f,t,f,f,t; 4,2,t,t,f,t,f,f,t; 4,3,t,t,f,t,f,f,t; 4,4,f,t,t,f,f,t,f; 4,5,NULL,NULL,NULL,NULL,NULL,NULL,t; 4,6,t,t,f,t,f,f,t; 4,7,t,t,f,t,f,f,t; 5,1,NULL,NULL,NULL,NULL,NULL,NULL,t; 5,2,NULL,NULL,NULL,NULL,NULL,NULL,t; 5,3,NULL,NULL,NULL,NULL,NULL,NULL,t; 5,4,NULL,NULL,NULL,NULL,NULL,NULL,t; 5,5,NULL,NULL,NULL,NULL,NULL,NULL,f; 5,6,NULL,NULL,NULL,NULL,NULL,NULL,t; 5,7,NULL,NULL,NULL,NULL,NULL,NULL,t; 6,1,f,f,f,t,t,t,t; 6,2,f,f,f,t,t,t,t; 6,3,f,f,f,t,t,t,t; 6,4,f,f,f,t,t,t,t; 6,5,NULL,NULL,NULL,NULL,NULL,NULL,t; 6,6,f,t,t,f,f,t,f; 6,7,f,t,t,f,f,t,f; 7,1,f,f,f,t,t,t,t; 7,2,f,f,f,t,t,t,t; 7,3,f,f,f,t,t,t,t; 7,4,f,f,f,t,t,t,t; 7,5,NULL,NULL,NULL,NULL,NULL,NULL,t; 7,6,f,t,t,f,f,t,f; 7,7,f,t,t,f,f,t,f
+f8/last/eqNaN	id:bigint | 6; 7
+f8/last/eqNaNCast	id:bigint | 6; 7
+f8/last/neNaN	id:bigint | 1; 2; 3; 4
+f8/last/ltNaN	id:bigint | 1; 2; 3; 4
+f8/last/leNaN	id:bigint | 1; 2; 3; 4; 6; 7
+f8/last/gtNaN	(0 rows)
+f8/last/geNaN	id:bigint | 6; 7
+f8/last/gt15	id:bigint | 1; 6; 7
+f8/last/geInf	id:bigint | 1; 6; 7
+f8/last/gtInf	id:bigint | 6; 7
+f8/last/eqZero	id:bigint | 3
+f8/last/eqNegZero	id:bigint | 3
+f8/last/ltZero	id:bigint | 4
+f8/last/geZero	id:bigint | 1; 2; 3; 6; 7
+f8/last/between	id:bigint | 1; 2; 6; 7
+f8/last/in	id:bigint | 3; 6; 7
+f8/last/notIn	id:bigint | 1; 2; 4
+f8/last/distinctFrom	id:bigint | 1; 2; 3; 4; 5
+f8/last/notDistinctFrom	id:bigint | 3
+f8/last/projectCompare	id:bigint,gt:boolean,eqn:boolean,ltn:boolean,eqz:boolean | 1,t,f,t,f; 2,f,f,t,f; 3,f,f,t,t; 4,f,f,t,f; 5,NULL,NULL,NULL,NULL; 6,t,t,f,f; 7,t,t,f,f
+f8/last/greatestLeast	id:bigint,g:double precision,l:double precision,gn:double precision,ln:double precision | 1,Infinity,1.5,NaN,Infinity; 2,1.5,1.5,NaN,1.5; 3,1.5,-0,NaN,-0; 4,1.5,-Infinity,NaN,-Infinity; 5,1.5,1.5,NaN,NaN; 6,NaN,1.5,NaN,NaN; 7,NaN,1.5,NaN,NaN
+f8/last/rank	id:bigint,r:bigint,d:bigint | 1,4,4; 2,3,3; 3,2,2; 4,1,1; 5,7,6; 6,5,5; 7,5,5
+f8/last/rankDesc	id:bigint,r:bigint | 1,4; 2,5; 3,6; 4,7; 5,1; 6,2; 7,2
+f8/last/partition	id:bigint,n:bigint | 1,1; 2,1; 3,1; 4,1; 5,1; 6,2; 7,2
+f8/last/winMinMax	id:bigint,lo:double precision,hi:double precision | 1,-Infinity,NaN; 2,-Infinity,NaN; 3,-Infinity,NaN; 4,-Infinity,NaN; 5,-Infinity,NaN; 6,-Infinity,NaN; 7,-Infinity,NaN
+f8/last/winRunning	id:bigint,lo:double precision,hi:double precision | 1,Infinity,Infinity; 2,1.5,Infinity; 3,-0,Infinity; 4,-Infinity,Infinity; 5,-Infinity,Infinity; 6,-Infinity,NaN; 7,-Infinity,NaN
+f8/last/winPartMax	id:bigint,hi:double precision | 1,NaN; 2,NaN; 3,NaN; 4,NaN; 5,NaN; 6,NaN; 7,NaN
+f8/last/union	c:double precision | -Infinity; -0; 1.5; Infinity; NaN; NULL
+f8/last/intersect	c:double precision | -Infinity; -0; NaN; NULL
+f8/last/except	c:double precision | -0; 1.5; Infinity
+f8/last/inSubquery	id:bigint | 4; 6; 7
+f8/last/exists	id:bigint | 6; 7
+f8/last/eqScalarMax	id:bigint | 6; 7
+f8/last/eqScalarMaxInf	id:bigint | 1
+f8/last/derivedMinMax	lo:double precision,hi:double precision | -Infinity,NaN
+f8/last/cteGroupBy	c:double precision,n:bigint | -Infinity,1; -0,1; 1.5,1; Infinity,1; NaN,2; NULL,1
+f8/last/unionAllMinMax	lo:double precision,hi:double precision | -Infinity,NaN
+f8/last/unionAllGroupBy	c:double precision,n:bigint | -Infinity,2; -0,2; 1.5,2; Infinity,2; NaN,4; NULL,2
+f8/multi/minMax	lo:double precision,hi:double precision | -Infinity,NaN
+f8/multi/minMaxExpr	lo:double precision,hi:double precision | -Infinity,NaN
+f8/multi/grpMinMax	g:bigint,lo:double precision,hi:double precision | 0,-0,NaN; 1,-Infinity,NaN
+f8/multi/groupBy	c:double precision,n:bigint | -Infinity,1; -0,1; 1.5,1; Infinity,1; NaN,2; NULL,1
+f8/multi/groupByDesc	c:double precision,n:bigint | NaN,2; Infinity,1; 1.5,1; -0,1; -Infinity,1; NULL,1
+f8/multi/groupByExpr	k:double precision,n:bigint | -Infinity,1; -0,1; 1.5,1; Infinity,1; NaN,2; NULL,1
+f8/multi/groupByMax	c:double precision,m:bigint | Infinity,1; 1.5,3; -0,4; -Infinity,5; NULL,6; NaN,7
+f8/multi/groupByBool	c:double precision,b:boolean,n:bigint | -Infinity,t,1; -0,t,1; 1.5,f,1; Infinity,f,1; NaN,f,1; NaN,t,1; NULL,t,1
+f8/multi/groupByText	c:double precision,s:text,n:bigint | -Infinity,1,1; -0,0,1; 1.5,1,1; Infinity,1,1; NaN,0,1; NaN,1,1; NULL,0,1
+f8/multi/groupByCountDistinct	c:double precision,n:bigint | -Infinity,1; -0,1; 1.5,1; Infinity,1; NaN,2; NULL,1
+f8/multi/groupByKeyExpr	d:double precision,n:bigint | -Infinity,1; -0,1; 3,1; Infinity,1; NaN,2; NULL,1
+f8/multi/rollup	c:double precision,n:bigint | -Infinity,1; -0,1; 1.5,1; Infinity,1; NaN,2; NULL,1; NULL,7
+f8/multi/distinct	c:double precision | -Infinity; -0; 1.5; Infinity; NaN; NULL
+f8/multi/countDistinct	n:bigint | 5
+f8/multi/orderAsc	id:bigint | 5; 4; 3; 1; 2; 7; 6
+f8/multi/orderDesc	id:bigint | 6; 2; 7; 1; 3; 4; 5
+f8/multi/orderAscNullsFirst	id:bigint | 6; 5; 4; 3; 1; 2; 7
+f8/multi/orderDescNullsLast	id:bigint | 2; 7; 1; 3; 4; 5; 6
+f8/multi/orderExpr	id:bigint | 6; 2; 7; 1; 3; 4; 5
+f8/multi/topNAsc	id:bigint | 5; 4; 3
+f8/multi/topNDesc	id:bigint | 6; 2; 7
+f8/multi/topNDescNullsLast	id:bigint,c:double precision | 2,NaN; 7,NaN
+f8/multi/join	l:bigint,r:bigint | 1,1; 2,2; 2,7; 3,3; 4,4; 5,5; 7,2; 7,7
+f8/multi/joinExpr	l:bigint,r:bigint | 1,1; 2,2; 2,7; 3,3; 4,4; 5,5; 7,2; 7,7
+f8/multi/crossLt	l:bigint,r:bigint | 1,2; 1,7; 3,1; 3,2; 3,7; 4,1; 4,2; 4,3; 4,7; 5,1; 5,2; 5,3; 5,4; 5,7
+f8/multi/crossGe	l:bigint,r:bigint | 1,1; 1,3; 1,4; 1,5; 2,1; 2,2; 2,3; 2,4; 2,5; 2,7; 3,3; 3,4; 3,5; 4,4; 4,5; 5,5; 7,1; 7,2; 7,3; 7,4; 7,5; 7,7
+f8/multi/crossNe	l:bigint,r:bigint | 1,2; 1,3; 1,4; 1,5; 1,7; 2,1; 2,3; 2,4; 2,5; 3,1; 3,2; 3,4; 3,5; 3,7; 4,1; 4,2; 4,3; 4,5; 4,7; 5,1; 5,2; 5,3; 5,4; 5,7; 7,1; 7,3; 7,4; 7,5
+f8/multi/crossProject	l:bigint,r:bigint,lt:boolean,le:boolean,eq:boolean,ne:boolean,gt:boolean,ge:boolean,dist:boolean | 1,1,f,t,t,f,f,t,f; 1,2,t,t,f,t,f,f,t; 1,3,f,f,f,t,t,t,t; 1,4,f,f,f,t,t,t,t; 1,5,f,f,f,t,t,t,t; 1,6,NULL,NULL,NULL,NULL,NULL,NULL,t; 1,7,t,t,f,t,f,f,t; 2,1,f,f,f,t,t,t,t; 2,2,f,t,t,f,f,t,f; 2,3,f,f,f,t,t,t,t; 2,4,f,f,f,t,t,t,t; 2,5,f,f,f,t,t,t,t; 2,6,NULL,NULL,NULL,NULL,NULL,NULL,t; 2,7,f,t,t,f,f,t,f; 3,1,t,t,f,t,f,f,t; 3,2,t,t,f,t,f,f,t; 3,3,f,t,t,f,f,t,f; 3,4,f,f,f,t,t,t,t; 3,5,f,f,f,t,t,t,t; 3,6,NULL,NULL,NULL,NULL,NULL,NULL,t; 3,7,t,t,f,t,f,f,t; 4,1,t,t,f,t,f,f,t; 4,2,t,t,f,t,f,f,t; 4,3,t,t,f,t,f,f,t; 4,4,f,t,t,f,f,t,f; 4,5,f,f,f,t,t,t,t; 4,6,NULL,NULL,NULL,NULL,NULL,NULL,t; 4,7,t,t,f,t,f,f,t; 5,1,t,t,f,t,f,f,t; 5,2,t,t,f,t,f,f,t; 5,3,t,t,f,t,f,f,t; 5,4,t,t,f,t,f,f,t; 5,5,f,t,t,f,f,t,f; 5,6,NULL,NULL,NULL,NULL,NULL,NULL,t; 5,7,t,t,f,t,f,f,t; 6,1,NULL,NULL,NULL,NULL,NULL,NULL,t; 6,2,NULL,NULL,NULL,NULL,NULL,NULL,t; 6,3,NULL,NULL,NULL,NULL,NULL,NULL,t; 6,4,NULL,NULL,NULL,NULL,NULL,NULL,t; 6,5,NULL,NULL,NULL,NULL,NULL,NULL,t; 6,6,NULL,NULL,NULL,NULL,NULL,NULL,f; 6,7,NULL,NULL,NULL,NULL,NULL,NULL,t; 7,1,f,f,f,t,t,t,t; 7,2,f,t,t,f,f,t,f; 7,3,f,f,f,t,t,t,t; 7,4,f,f,f,t,t,t,t; 7,5,f,f,f,t,t,t,t; 7,6,NULL,NULL,NULL,NULL,NULL,NULL,t; 7,7,f,t,t,f,f,t,f
+f8/multi/eqNaN	id:bigint | 2; 7
+f8/multi/eqNaNCast	id:bigint | 2; 7
+f8/multi/neNaN	id:bigint | 1; 3; 4; 5
+f8/multi/ltNaN	id:bigint | 1; 3; 4; 5
+f8/multi/leNaN	id:bigint | 1; 2; 3; 4; 5; 7
+f8/multi/gtNaN	(0 rows)
+f8/multi/geNaN	id:bigint | 2; 7
+f8/multi/gt15	id:bigint | 1; 2; 7
+f8/multi/geInf	id:bigint | 1; 2; 7
+f8/multi/gtInf	id:bigint | 2; 7
+f8/multi/eqZero	id:bigint | 4
+f8/multi/eqNegZero	id:bigint | 4
+f8/multi/ltZero	id:bigint | 5
+f8/multi/geZero	id:bigint | 1; 2; 3; 4; 7
+f8/multi/between	id:bigint | 1; 2; 3; 7
+f8/multi/in	id:bigint | 2; 4; 7
+f8/multi/notIn	id:bigint | 1; 3; 5
+f8/multi/distinctFrom	id:bigint | 1; 3; 4; 5; 6
+f8/multi/notDistinctFrom	id:bigint | 4
+f8/multi/projectCompare	id:bigint,gt:boolean,eqn:boolean,ltn:boolean,eqz:boolean | 1,t,f,t,f; 2,t,t,f,f; 3,f,f,t,f; 4,f,f,t,t; 5,f,f,t,f; 6,NULL,NULL,NULL,NULL; 7,t,t,f,f
+f8/multi/greatestLeast	id:bigint,g:double precision,l:double precision,gn:double precision,ln:double precision | 1,Infinity,1.5,NaN,Infinity; 2,NaN,1.5,NaN,NaN; 3,1.5,1.5,NaN,1.5; 4,1.5,-0,NaN,-0; 5,1.5,-Infinity,NaN,-Infinity; 6,1.5,1.5,NaN,NaN; 7,NaN,1.5,NaN,NaN
+f8/multi/rank	id:bigint,r:bigint,d:bigint | 1,4,4; 2,5,5; 3,3,3; 4,2,2; 5,1,1; 6,7,6; 7,5,5
+f8/multi/rankDesc	id:bigint,r:bigint | 1,4; 2,2; 3,5; 4,6; 5,7; 6,1; 7,2
+f8/multi/partition	id:bigint,n:bigint | 1,1; 2,2; 3,1; 4,1; 5,1; 6,1; 7,2
+f8/multi/winMinMax	id:bigint,lo:double precision,hi:double precision | 1,-Infinity,NaN; 2,-Infinity,NaN; 3,-Infinity,NaN; 4,-Infinity,NaN; 5,-Infinity,NaN; 6,-Infinity,NaN; 7,-Infinity,NaN
+f8/multi/winRunning	id:bigint,lo:double precision,hi:double precision | 1,Infinity,Infinity; 2,Infinity,NaN; 3,1.5,NaN; 4,-0,NaN; 5,-Infinity,NaN; 6,-Infinity,NaN; 7,-Infinity,NaN
+f8/multi/winPartMax	id:bigint,hi:double precision | 1,NaN; 2,NaN; 3,NaN; 4,NaN; 5,NaN; 6,NaN; 7,NaN
+f8/multi/union	c:double precision | -Infinity; -0; 1.5; Infinity; NaN; NULL
+f8/multi/intersect	c:double precision | -Infinity; -0; 1.5; NaN; NULL
+f8/multi/except	c:double precision | 1.5; Infinity
+f8/multi/inSubquery	id:bigint | 2; 4; 5; 7
+f8/multi/exists	id:bigint | 2; 7
+f8/multi/eqScalarMax	id:bigint | 2; 7
+f8/multi/eqScalarMaxInf	id:bigint | 1
+f8/multi/derivedMinMax	lo:double precision,hi:double precision | -Infinity,NaN
+f8/multi/cteGroupBy	c:double precision,n:bigint | -Infinity,1; -0,1; 1.5,1; Infinity,1; NaN,2; NULL,1
+f8/multi/unionAllMinMax	lo:double precision,hi:double precision | -Infinity,NaN
+f8/multi/unionAllGroupBy	c:double precision,n:bigint | -Infinity,2; -0,2; 1.5,2; Infinity,2; NaN,4; NULL,2
+f8/naninf/minMax	lo:double precision,hi:double precision | Infinity,NaN
+f8/naninf/minMaxExpr	lo:double precision,hi:double precision | Infinity,NaN
+f8/naninf/grpMinMax	g:bigint,lo:double precision,hi:double precision | 0,Infinity,Infinity; 1,NaN,NaN
+f8/naninf/groupBy	c:double precision,n:bigint | Infinity,1; NaN,1
+f8/naninf/groupByDesc	c:double precision,n:bigint | NaN,1; Infinity,1
+f8/naninf/groupByExpr	k:double precision,n:bigint | Infinity,1; NaN,1
+f8/naninf/groupByMax	c:double precision,m:bigint | NaN,1; Infinity,2
+f8/naninf/groupByBool	c:double precision,b:boolean,n:bigint | Infinity,f,1; NaN,f,1
+f8/naninf/groupByText	c:double precision,s:text,n:bigint | Infinity,0,1; NaN,1,1
+f8/naninf/groupByCountDistinct	c:double precision,n:bigint | Infinity,1; NaN,1
+f8/naninf/groupByKeyExpr	d:double precision,n:bigint | Infinity,1; NaN,1
+f8/naninf/rollup	c:double precision,n:bigint | Infinity,1; NaN,1; NULL,2
+f8/naninf/distinct	c:double precision | Infinity; NaN
+f8/naninf/countDistinct	n:bigint | 2
+f8/naninf/orderAsc	id:bigint | 2; 1
+f8/naninf/orderDesc	id:bigint | 1; 2
+f8/naninf/orderAscNullsFirst	id:bigint | 2; 1
+f8/naninf/orderDescNullsLast	id:bigint | 1; 2
+f8/naninf/orderExpr	id:bigint | 1; 2
+f8/naninf/topNAsc	id:bigint | 2; 1
+f8/naninf/topNDesc	id:bigint | 1; 2
+f8/naninf/topNDescNullsLast	id:bigint,c:double precision | 1,NaN; 2,Infinity
+f8/naninf/join	l:bigint,r:bigint | 1,1; 2,2
+f8/naninf/joinExpr	l:bigint,r:bigint | 1,1; 2,2
+f8/naninf/crossLt	l:bigint,r:bigint | 2,1
+f8/naninf/crossGe	l:bigint,r:bigint | 1,1; 1,2; 2,2
+f8/naninf/crossNe	l:bigint,r:bigint | 1,2; 2,1
+f8/naninf/crossProject	l:bigint,r:bigint,lt:boolean,le:boolean,eq:boolean,ne:boolean,gt:boolean,ge:boolean,dist:boolean | 1,1,f,t,t,f,f,t,f; 1,2,f,f,f,t,t,t,t; 2,1,t,t,f,t,f,f,t; 2,2,f,t,t,f,f,t,f
+f8/naninf/eqNaN	id:bigint | 1
+f8/naninf/eqNaNCast	id:bigint | 1
+f8/naninf/neNaN	id:bigint | 2
+f8/naninf/ltNaN	id:bigint | 2
+f8/naninf/leNaN	id:bigint | 1; 2
+f8/naninf/gtNaN	(0 rows)
+f8/naninf/geNaN	id:bigint | 1
+f8/naninf/gt15	id:bigint | 1; 2
+f8/naninf/geInf	id:bigint | 1; 2
+f8/naninf/gtInf	id:bigint | 1
+f8/naninf/eqZero	(0 rows)
+f8/naninf/eqNegZero	(0 rows)
+f8/naninf/ltZero	(0 rows)
+f8/naninf/geZero	id:bigint | 1; 2
+f8/naninf/between	id:bigint | 1; 2
+f8/naninf/in	id:bigint | 1
+f8/naninf/notIn	id:bigint | 2
+f8/naninf/distinctFrom	id:bigint | 2
+f8/naninf/notDistinctFrom	(0 rows)
+f8/naninf/projectCompare	id:bigint,gt:boolean,eqn:boolean,ltn:boolean,eqz:boolean | 1,t,t,f,f; 2,t,f,t,f
+f8/naninf/greatestLeast	id:bigint,g:double precision,l:double precision,gn:double precision,ln:double precision | 1,NaN,1.5,NaN,NaN; 2,Infinity,1.5,NaN,Infinity
+f8/naninf/rank	id:bigint,r:bigint,d:bigint | 1,2,2; 2,1,1
+f8/naninf/rankDesc	id:bigint,r:bigint | 1,1; 2,2
+f8/naninf/partition	id:bigint,n:bigint | 1,1; 2,1
+f8/naninf/winMinMax	id:bigint,lo:double precision,hi:double precision | 1,Infinity,NaN; 2,Infinity,NaN
+f8/naninf/winRunning	id:bigint,lo:double precision,hi:double precision | 1,NaN,NaN; 2,Infinity,NaN
+f8/naninf/winPartMax	id:bigint,hi:double precision | 1,NaN; 2,Infinity
+f8/naninf/union	c:double precision | Infinity; NaN
+f8/naninf/intersect	(0 rows)
+f8/naninf/except	c:double precision | Infinity; NaN
+f8/naninf/inSubquery	(0 rows)
+f8/naninf/exists	(0 rows)
+f8/naninf/eqScalarMax	id:bigint | 1
+f8/naninf/eqScalarMaxInf	id:bigint | 2
+f8/naninf/derivedMinMax	lo:double precision,hi:double precision | Infinity,NaN
+f8/naninf/cteGroupBy	c:double precision,n:bigint | Infinity,1; NaN,1
+f8/naninf/unionAllMinMax	lo:double precision,hi:double precision | Infinity,NaN
+f8/naninf/unionAllGroupBy	c:double precision,n:bigint | Infinity,2; NaN,2
+f8/infnan/minMax	lo:double precision,hi:double precision | Infinity,NaN
+f8/infnan/minMaxExpr	lo:double precision,hi:double precision | Infinity,NaN
+f8/infnan/grpMinMax	g:bigint,lo:double precision,hi:double precision | 0,NaN,NaN; 1,Infinity,Infinity
+f8/infnan/groupBy	c:double precision,n:bigint | Infinity,1; NaN,1
+f8/infnan/groupByDesc	c:double precision,n:bigint | NaN,1; Infinity,1
+f8/infnan/groupByExpr	k:double precision,n:bigint | Infinity,1; NaN,1
+f8/infnan/groupByMax	c:double precision,m:bigint | Infinity,1; NaN,2
+f8/infnan/groupByBool	c:double precision,b:boolean,n:bigint | Infinity,f,1; NaN,f,1
+f8/infnan/groupByText	c:double precision,s:text,n:bigint | Infinity,1,1; NaN,0,1
+f8/infnan/groupByCountDistinct	c:double precision,n:bigint | Infinity,1; NaN,1
+f8/infnan/groupByKeyExpr	d:double precision,n:bigint | Infinity,1; NaN,1
+f8/infnan/rollup	c:double precision,n:bigint | Infinity,1; NaN,1; NULL,2
+f8/infnan/distinct	c:double precision | Infinity; NaN
+f8/infnan/countDistinct	n:bigint | 2
+f8/infnan/orderAsc	id:bigint | 1; 2
+f8/infnan/orderDesc	id:bigint | 2; 1
+f8/infnan/orderAscNullsFirst	id:bigint | 1; 2
+f8/infnan/orderDescNullsLast	id:bigint | 2; 1
+f8/infnan/orderExpr	id:bigint | 2; 1
+f8/infnan/topNAsc	id:bigint | 1; 2
+f8/infnan/topNDesc	id:bigint | 2; 1
+f8/infnan/topNDescNullsLast	id:bigint,c:double precision | 2,NaN; 1,Infinity
+f8/infnan/join	l:bigint,r:bigint | 1,1; 2,2
+f8/infnan/joinExpr	l:bigint,r:bigint | 1,1; 2,2
+f8/infnan/crossLt	l:bigint,r:bigint | 1,2
+f8/infnan/crossGe	l:bigint,r:bigint | 1,1; 2,1; 2,2
+f8/infnan/crossNe	l:bigint,r:bigint | 1,2; 2,1
+f8/infnan/crossProject	l:bigint,r:bigint,lt:boolean,le:boolean,eq:boolean,ne:boolean,gt:boolean,ge:boolean,dist:boolean | 1,1,f,t,t,f,f,t,f; 1,2,t,t,f,t,f,f,t; 2,1,f,f,f,t,t,t,t; 2,2,f,t,t,f,f,t,f
+f8/infnan/eqNaN	id:bigint | 2
+f8/infnan/eqNaNCast	id:bigint | 2
+f8/infnan/neNaN	id:bigint | 1
+f8/infnan/ltNaN	id:bigint | 1
+f8/infnan/leNaN	id:bigint | 1; 2
+f8/infnan/gtNaN	(0 rows)
+f8/infnan/geNaN	id:bigint | 2
+f8/infnan/gt15	id:bigint | 1; 2
+f8/infnan/geInf	id:bigint | 1; 2
+f8/infnan/gtInf	id:bigint | 2
+f8/infnan/eqZero	(0 rows)
+f8/infnan/eqNegZero	(0 rows)
+f8/infnan/ltZero	(0 rows)
+f8/infnan/geZero	id:bigint | 1; 2
+f8/infnan/between	id:bigint | 1; 2
+f8/infnan/in	id:bigint | 2
+f8/infnan/notIn	id:bigint | 1
+f8/infnan/distinctFrom	id:bigint | 1
+f8/infnan/notDistinctFrom	(0 rows)
+f8/infnan/projectCompare	id:bigint,gt:boolean,eqn:boolean,ltn:boolean,eqz:boolean | 1,t,f,t,f; 2,t,t,f,f
+f8/infnan/greatestLeast	id:bigint,g:double precision,l:double precision,gn:double precision,ln:double precision | 1,Infinity,1.5,NaN,Infinity; 2,NaN,1.5,NaN,NaN
+f8/infnan/rank	id:bigint,r:bigint,d:bigint | 1,1,1; 2,2,2
+f8/infnan/rankDesc	id:bigint,r:bigint | 1,2; 2,1
+f8/infnan/partition	id:bigint,n:bigint | 1,1; 2,1
+f8/infnan/winMinMax	id:bigint,lo:double precision,hi:double precision | 1,Infinity,NaN; 2,Infinity,NaN
+f8/infnan/winRunning	id:bigint,lo:double precision,hi:double precision | 1,Infinity,Infinity; 2,Infinity,NaN
+f8/infnan/winPartMax	id:bigint,hi:double precision | 1,Infinity; 2,NaN
+f8/infnan/union	c:double precision | Infinity; NaN
+f8/infnan/intersect	(0 rows)
+f8/infnan/except	c:double precision | Infinity; NaN
+f8/infnan/inSubquery	(0 rows)
+f8/infnan/exists	(0 rows)
+f8/infnan/eqScalarMax	id:bigint | 2
+f8/infnan/eqScalarMaxInf	id:bigint | 1
+f8/infnan/derivedMinMax	lo:double precision,hi:double precision | Infinity,NaN
+f8/infnan/cteGroupBy	c:double precision,n:bigint | Infinity,1; NaN,1
+f8/infnan/unionAllMinMax	lo:double precision,hi:double precision | Infinity,NaN
+f8/infnan/unionAllGroupBy	c:double precision,n:bigint | Infinity,2; NaN,2
+f8/nanonly/minMax	lo:double precision,hi:double precision | NaN,NaN
+f8/nanonly/minMaxExpr	lo:double precision,hi:double precision | NaN,NaN
+f8/nanonly/grpMinMax	g:bigint,lo:double precision,hi:double precision | 0,NaN,NaN; 1,NaN,NaN
+f8/nanonly/groupBy	c:double precision,n:bigint | NaN,2; NULL,1
+f8/nanonly/groupByDesc	c:double precision,n:bigint | NaN,2; NULL,1
+f8/nanonly/groupByExpr	k:double precision,n:bigint | NaN,2; NULL,1
+f8/nanonly/groupByMax	c:double precision,m:bigint | NaN,2; NULL,3
+f8/nanonly/groupByBool	c:double precision,b:boolean,n:bigint | NaN,f,2; NULL,f,1
+f8/nanonly/groupByText	c:double precision,s:text,n:bigint | NaN,0,1; NaN,1,1; NULL,1,1
+f8/nanonly/groupByCountDistinct	c:double precision,n:bigint | NaN,2; NULL,1
+f8/nanonly/groupByKeyExpr	d:double precision,n:bigint | NaN,2; NULL,1
+f8/nanonly/rollup	c:double precision,n:bigint | NaN,2; NULL,1; NULL,3
+f8/nanonly/distinct	c:double precision | NaN; NULL
+f8/nanonly/countDistinct	n:bigint | 1
+f8/nanonly/orderAsc	id:bigint | 1; 2; 3
+f8/nanonly/orderDesc	id:bigint | 3; 1; 2
+f8/nanonly/orderAscNullsFirst	id:bigint | 3; 1; 2
+f8/nanonly/orderDescNullsLast	id:bigint | 1; 2; 3
+f8/nanonly/orderExpr	id:bigint | 3; 1; 2
+f8/nanonly/topNAsc	id:bigint | 1; 2; 3
+f8/nanonly/topNDesc	id:bigint | 3; 1; 2
+f8/nanonly/topNDescNullsLast	id:bigint,c:double precision | 1,NaN; 2,NaN
+f8/nanonly/join	l:bigint,r:bigint | 1,1; 1,2; 2,1; 2,2
+f8/nanonly/joinExpr	l:bigint,r:bigint | 1,1; 1,2; 2,1; 2,2
+f8/nanonly/crossLt	(0 rows)
+f8/nanonly/crossGe	l:bigint,r:bigint | 1,1; 1,2; 2,1; 2,2
+f8/nanonly/crossNe	(0 rows)
+f8/nanonly/crossProject	l:bigint,r:bigint,lt:boolean,le:boolean,eq:boolean,ne:boolean,gt:boolean,ge:boolean,dist:boolean | 1,1,f,t,t,f,f,t,f; 1,2,f,t,t,f,f,t,f; 1,3,NULL,NULL,NULL,NULL,NULL,NULL,t; 2,1,f,t,t,f,f,t,f; 2,2,f,t,t,f,f,t,f; 2,3,NULL,NULL,NULL,NULL,NULL,NULL,t; 3,1,NULL,NULL,NULL,NULL,NULL,NULL,t; 3,2,NULL,NULL,NULL,NULL,NULL,NULL,t; 3,3,NULL,NULL,NULL,NULL,NULL,NULL,f
+f8/nanonly/eqNaN	id:bigint | 1; 2
+f8/nanonly/eqNaNCast	id:bigint | 1; 2
+f8/nanonly/neNaN	(0 rows)
+f8/nanonly/ltNaN	(0 rows)
+f8/nanonly/leNaN	id:bigint | 1; 2
+f8/nanonly/gtNaN	(0 rows)
+f8/nanonly/geNaN	id:bigint | 1; 2
+f8/nanonly/gt15	id:bigint | 1; 2
+f8/nanonly/geInf	id:bigint | 1; 2
+f8/nanonly/gtInf	id:bigint | 1; 2
+f8/nanonly/eqZero	(0 rows)
+f8/nanonly/eqNegZero	(0 rows)
+f8/nanonly/ltZero	(0 rows)
+f8/nanonly/geZero	id:bigint | 1; 2
+f8/nanonly/between	id:bigint | 1; 2
+f8/nanonly/in	id:bigint | 1; 2
+f8/nanonly/notIn	(0 rows)
+f8/nanonly/distinctFrom	id:bigint | 3
+f8/nanonly/notDistinctFrom	(0 rows)
+f8/nanonly/projectCompare	id:bigint,gt:boolean,eqn:boolean,ltn:boolean,eqz:boolean | 1,t,t,f,f; 2,t,t,f,f; 3,NULL,NULL,NULL,NULL
+f8/nanonly/greatestLeast	id:bigint,g:double precision,l:double precision,gn:double precision,ln:double precision | 1,NaN,1.5,NaN,NaN; 2,NaN,1.5,NaN,NaN; 3,1.5,1.5,NaN,NaN
+f8/nanonly/rank	id:bigint,r:bigint,d:bigint | 1,1,1; 2,1,1; 3,3,2
+f8/nanonly/rankDesc	id:bigint,r:bigint | 1,2; 2,2; 3,1
+f8/nanonly/partition	id:bigint,n:bigint | 1,2; 2,2; 3,1
+f8/nanonly/winMinMax	id:bigint,lo:double precision,hi:double precision | 1,NaN,NaN; 2,NaN,NaN; 3,NaN,NaN
+f8/nanonly/winRunning	id:bigint,lo:double precision,hi:double precision | 1,NaN,NaN; 2,NaN,NaN; 3,NaN,NaN
+f8/nanonly/winPartMax	id:bigint,hi:double precision | 1,NaN; 2,NaN; 3,NaN
+f8/nanonly/union	c:double precision | NaN; NULL
+f8/nanonly/intersect	c:double precision | NULL
+f8/nanonly/except	c:double precision | NaN; NULL
+f8/nanonly/inSubquery	(0 rows)
+f8/nanonly/exists	id:bigint | 1; 2
+f8/nanonly/eqScalarMax	id:bigint | 1; 2
+f8/nanonly/eqScalarMaxInf	(0 rows)
+f8/nanonly/derivedMinMax	lo:double precision,hi:double precision | NaN,NaN
+f8/nanonly/cteGroupBy	c:double precision,n:bigint | NaN,2; NULL,1
+f8/nanonly/unionAllMinMax	lo:double precision,hi:double precision | NaN,NaN
+f8/nanonly/unionAllGroupBy	c:double precision,n:bigint | NaN,4; NULL,2
+f8/negz/minMax	lo:double precision,hi:double precision | -0,1.5
+f8/negz/minMaxExpr	lo:double precision,hi:double precision | -0,1.5
+f8/negz/grpMinMax	g:bigint,lo:double precision,hi:double precision | 0,1.5,1.5; 1,-0,-0
+f8/negz/groupBy	c:double precision,n:bigint | -0,2; 1.5,1
+f8/negz/groupByDesc	c:double precision,n:bigint | 1.5,1; -0,2
+f8/negz/groupByExpr	k:double precision,n:bigint | -0,2; 1.5,1
+f8/negz/groupByMax	c:double precision,m:bigint | 1.5,2; -0,3
+f8/negz/groupByBool	c:double precision,b:boolean,n:bigint | -0,f,2; 1.5,f,1
+f8/negz/groupByText	c:double precision,s:text,n:bigint | -0,1,2; 1.5,0,1
+f8/negz/groupByCountDistinct	c:double precision,n:bigint | -0,2; 1.5,1
+f8/negz/groupByKeyExpr	d:double precision,n:bigint | -0,2; 3,1
+f8/negz/rollup	c:double precision,n:bigint | -0,2; 1.5,1; NULL,3
+f8/negz/distinct	c:double precision | -0; 1.5
+f8/negz/countDistinct	n:bigint | 2
+f8/negz/orderAsc	id:bigint | 1; 3; 2
+f8/negz/orderDesc	id:bigint | 2; 1; 3
+f8/negz/orderAscNullsFirst	id:bigint | 1; 3; 2
+f8/negz/orderDescNullsLast	id:bigint | 2; 1; 3
+f8/negz/orderExpr	id:bigint | 2; 1; 3
+f8/negz/topNAsc	id:bigint | 1; 3; 2
+f8/negz/topNDesc	id:bigint | 2; 1; 3
+f8/negz/topNDescNullsLast	id:bigint,c:double precision | 2,1.5; 1,-0
+f8/negz/join	l:bigint,r:bigint | 1,1; 1,3; 2,2; 3,1; 3,3
+f8/negz/joinExpr	l:bigint,r:bigint | 1,1; 1,3; 2,2; 3,1; 3,3
+f8/negz/crossLt	l:bigint,r:bigint | 1,2; 3,2
+f8/negz/crossGe	l:bigint,r:bigint | 1,1; 1,3; 2,1; 2,2; 2,3; 3,1; 3,3
+f8/negz/crossNe	l:bigint,r:bigint | 1,2; 2,1; 2,3; 3,2
+f8/negz/crossProject	l:bigint,r:bigint,lt:boolean,le:boolean,eq:boolean,ne:boolean,gt:boolean,ge:boolean,dist:boolean | 1,1,f,t,t,f,f,t,f; 1,2,t,t,f,t,f,f,t; 1,3,f,t,t,f,f,t,f; 2,1,f,f,f,t,t,t,t; 2,2,f,t,t,f,f,t,f; 2,3,f,f,f,t,t,t,t; 3,1,f,t,t,f,f,t,f; 3,2,t,t,f,t,f,f,t; 3,3,f,t,t,f,f,t,f
+f8/negz/eqNaN	(0 rows)
+f8/negz/eqNaNCast	(0 rows)
+f8/negz/neNaN	id:bigint | 1; 2; 3
+f8/negz/ltNaN	id:bigint | 1; 2; 3
+f8/negz/leNaN	id:bigint | 1; 2; 3
+f8/negz/gtNaN	(0 rows)
+f8/negz/geNaN	(0 rows)
+f8/negz/gt15	(0 rows)
+f8/negz/geInf	(0 rows)
+f8/negz/gtInf	(0 rows)
+f8/negz/eqZero	id:bigint | 1; 3
+f8/negz/eqNegZero	id:bigint | 1; 3
+f8/negz/ltZero	(0 rows)
+f8/negz/geZero	id:bigint | 1; 2; 3
+f8/negz/between	id:bigint | 2
+f8/negz/in	id:bigint | 1; 3
+f8/negz/notIn	id:bigint | 2
+f8/negz/distinctFrom	id:bigint | 1; 2; 3
+f8/negz/notDistinctFrom	id:bigint | 1; 3
+f8/negz/projectCompare	id:bigint,gt:boolean,eqn:boolean,ltn:boolean,eqz:boolean | 1,f,f,t,t; 2,f,f,t,f; 3,f,f,t,t
+f8/negz/greatestLeast	id:bigint,g:double precision,l:double precision,gn:double precision,ln:double precision | 1,1.5,-0,NaN,-0; 2,1.5,1.5,NaN,1.5; 3,1.5,-0,NaN,-0
+f8/negz/rank	id:bigint,r:bigint,d:bigint | 1,1,1; 2,3,2; 3,1,1
+f8/negz/rankDesc	id:bigint,r:bigint | 1,2; 2,1; 3,2
+f8/negz/partition	id:bigint,n:bigint | 1,2; 2,1; 3,2
+f8/negz/winMinMax	id:bigint,lo:double precision,hi:double precision | 1,-0,1.5; 2,-0,1.5; 3,-0,1.5
+f8/negz/winRunning	id:bigint,lo:double precision,hi:double precision | 1,-0,-0; 2,-0,1.5; 3,-0,1.5
+f8/negz/winPartMax	id:bigint,hi:double precision | 1,-0; 2,1.5; 3,-0
+f8/negz/union	c:double precision | -0; 1.5
+f8/negz/intersect	c:double precision | -0
+f8/negz/except	c:double precision | -0; 1.5
+f8/negz/inSubquery	(0 rows)
+f8/negz/exists	id:bigint | 1; 3
+f8/negz/eqScalarMax	id:bigint | 2
+f8/negz/eqScalarMaxInf	id:bigint | 2
+f8/negz/derivedMinMax	lo:double precision,hi:double precision | -0,1.5
+f8/negz/cteGroupBy	c:double precision,n:bigint | -0,2; 1.5,1
+f8/negz/unionAllMinMax	lo:double precision,hi:double precision | -0,1.5
+f8/negz/unionAllGroupBy	c:double precision,n:bigint | -0,4; 1.5,2
+f8/zeros/minMax	lo:double precision,hi:double precision | -0,1.5
+f8/zeros/minMaxExpr	lo:double precision,hi:double precision | -0,1.5
+f8/zeros/grpMinMax	g:bigint,lo:double precision,hi:double precision | 0,0,0; 1,-0,1.5
+f8/zeros/groupBy	c:double precision,n:bigint | -0,4; 1.5,1
+f8/zeros/groupByDesc	c:double precision,n:bigint | 1.5,1; -0,4
+f8/zeros/groupByExpr	k:double precision,n:bigint | -0,4; 1.5,1
+f8/zeros/groupByMax	c:double precision,m:bigint | 1.5,3; -0,5
+f8/zeros/groupByBool	c:double precision,b:boolean,n:bigint | -0,f,2; 0,t,2; 1.5,f,1
+f8/zeros/groupByText	c:double precision,s:text,n:bigint | 0,0,2; -0,1,2; 1.5,1,1
+f8/zeros/groupByCountDistinct	c:double precision,n:bigint | -0,4; 1.5,1
+f8/zeros/groupByKeyExpr	d:double precision,n:bigint | -0,4; 3,1
+f8/zeros/rollup	c:double precision,n:bigint | -0,4; 1.5,1; NULL,5
+f8/zeros/distinct	c:double precision | -0; 1.5
+f8/zeros/countDistinct	n:bigint | 2
+f8/zeros/orderAsc	id:bigint | 1; 2; 4; 5; 3
+f8/zeros/orderDesc	id:bigint | 3; 1; 2; 4; 5
+f8/zeros/orderAscNullsFirst	id:bigint | 1; 2; 4; 5; 3
+f8/zeros/orderDescNullsLast	id:bigint | 3; 1; 2; 4; 5
+f8/zeros/orderExpr	id:bigint | 3; 1; 2; 4; 5
+f8/zeros/topNAsc	id:bigint | 1; 2; 4
+f8/zeros/topNDesc	id:bigint | 3; 1; 2
+f8/zeros/topNDescNullsLast	id:bigint,c:double precision | 3,1.5; 1,-0
+f8/zeros/join	l:bigint,r:bigint | 1,1; 1,2; 1,4; 1,5; 2,1; 2,2; 2,4; 2,5; 3,3; 4,1; 4,2; 4,4; 4,5; 5,1; 5,2; 5,4; 5,5
+f8/zeros/joinExpr	l:bigint,r:bigint | 1,1; 1,2; 1,4; 1,5; 2,1; 2,2; 2,4; 2,5; 3,3; 4,1; 4,2; 4,4; 4,5; 5,1; 5,2; 5,4; 5,5
+f8/zeros/crossLt	l:bigint,r:bigint | 1,3; 2,3; 4,3; 5,3
+f8/zeros/crossGe	l:bigint,r:bigint | 1,1; 1,2; 1,4; 1,5; 2,1; 2,2; 2,4; 2,5; 3,1; 3,2; 3,3; 3,4; 3,5; 4,1; 4,2; 4,4; 4,5; 5,1; 5,2; 5,4; 5,5
+f8/zeros/crossNe	l:bigint,r:bigint | 1,3; 2,3; 3,1; 3,2; 3,4; 3,5; 4,3; 5,3
+f8/zeros/crossProject	l:bigint,r:bigint,lt:boolean,le:boolean,eq:boolean,ne:boolean,gt:boolean,ge:boolean,dist:boolean | 1,1,f,t,t,f,f,t,f; 1,2,f,t,t,f,f,t,f; 1,3,t,t,f,t,f,f,t; 1,4,f,t,t,f,f,t,f; 1,5,f,t,t,f,f,t,f; 2,1,f,t,t,f,f,t,f; 2,2,f,t,t,f,f,t,f; 2,3,t,t,f,t,f,f,t; 2,4,f,t,t,f,f,t,f; 2,5,f,t,t,f,f,t,f; 3,1,f,f,f,t,t,t,t; 3,2,f,f,f,t,t,t,t; 3,3,f,t,t,f,f,t,f; 3,4,f,f,f,t,t,t,t; 3,5,f,f,f,t,t,t,t; 4,1,f,t,t,f,f,t,f; 4,2,f,t,t,f,f,t,f; 4,3,t,t,f,t,f,f,t; 4,4,f,t,t,f,f,t,f; 4,5,f,t,t,f,f,t,f; 5,1,f,t,t,f,f,t,f; 5,2,f,t,t,f,f,t,f; 5,3,t,t,f,t,f,f,t; 5,4,f,t,t,f,f,t,f; 5,5,f,t,t,f,f,t,f
+f8/zeros/eqNaN	(0 rows)
+f8/zeros/eqNaNCast	(0 rows)
+f8/zeros/neNaN	id:bigint | 1; 2; 3; 4; 5
+f8/zeros/ltNaN	id:bigint | 1; 2; 3; 4; 5
+f8/zeros/leNaN	id:bigint | 1; 2; 3; 4; 5
+f8/zeros/gtNaN	(0 rows)
+f8/zeros/geNaN	(0 rows)
+f8/zeros/gt15	(0 rows)
+f8/zeros/geInf	(0 rows)
+f8/zeros/gtInf	(0 rows)
+f8/zeros/eqZero	id:bigint | 1; 2; 4; 5
+f8/zeros/eqNegZero	id:bigint | 1; 2; 4; 5
+f8/zeros/ltZero	(0 rows)
+f8/zeros/geZero	id:bigint | 1; 2; 3; 4; 5
+f8/zeros/between	id:bigint | 3
+f8/zeros/in	id:bigint | 1; 2; 4; 5
+f8/zeros/notIn	id:bigint | 3
+f8/zeros/distinctFrom	id:bigint | 1; 2; 3; 4; 5
+f8/zeros/notDistinctFrom	id:bigint | 1; 2; 4; 5
+f8/zeros/projectCompare	id:bigint,gt:boolean,eqn:boolean,ltn:boolean,eqz:boolean | 1,f,f,t,t; 2,f,f,t,t; 3,f,f,t,f; 4,f,f,t,t; 5,f,f,t,t
+f8/zeros/greatestLeast	id:bigint,g:double precision,l:double precision,gn:double precision,ln:double precision | 1,1.5,-0,NaN,-0; 2,1.5,0,NaN,0; 3,1.5,1.5,NaN,1.5; 4,1.5,0,NaN,0; 5,1.5,-0,NaN,-0
+f8/zeros/rank	id:bigint,r:bigint,d:bigint | 1,1,1; 2,1,1; 3,5,2; 4,1,1; 5,1,1
+f8/zeros/rankDesc	id:bigint,r:bigint | 1,2; 2,2; 3,1; 4,2; 5,2
+f8/zeros/partition	id:bigint,n:bigint | 1,4; 2,4; 3,1; 4,4; 5,4
+f8/zeros/winMinMax	id:bigint,lo:double precision,hi:double precision | 1,-0,1.5; 2,-0,1.5; 3,-0,1.5; 4,-0,1.5; 5,-0,1.5
+f8/zeros/winRunning	id:bigint,lo:double precision,hi:double precision | 1,-0,-0; 2,0,0; 3,0,1.5; 4,0,1.5; 5,-0,1.5
+f8/zeros/winPartMax	id:bigint,hi:double precision | 1,1.5; 2,0; 3,1.5; 4,0; 5,1.5
+f8/zeros/union	c:double precision | -0; 1.5
+f8/zeros/intersect	c:double precision | 0; 1.5
+f8/zeros/except	c:double precision | 1.5
+f8/zeros/inSubquery	id:bigint | 1; 2; 4; 5
+f8/zeros/exists	id:bigint | 1; 2; 4; 5
+f8/zeros/eqScalarMax	id:bigint | 3
+f8/zeros/eqScalarMaxInf	id:bigint | 3
+f8/zeros/derivedMinMax	lo:double precision,hi:double precision | -0,1.5
+f8/zeros/cteGroupBy	c:double precision,n:bigint | -0,4; 1.5,1
+f8/zeros/unionAllMinMax	lo:double precision,hi:double precision | -0,1.5
+f8/zeros/unionAllGroupBy	c:double precision,n:bigint | -0,8; 1.5,2
+f4/first/minMax	lo:real,hi:real | -Infinity,NaN
+f4/first/minMaxExpr	lo:double precision,hi:double precision | -Infinity,NaN
+f4/first/grpMinMax	g:bigint,lo:real,hi:real | 0,-0,NaN; 1,-Infinity,NaN
+f4/first/groupBy	c:real,n:bigint | -Infinity,1; -0,1; 1.5,1; Infinity,1; NaN,2; NULL,1
+f4/first/groupByDesc	c:real,n:bigint | NaN,2; Infinity,1; 1.5,1; -0,1; -Infinity,1; NULL,1
+f4/first/groupByExpr	k:double precision,n:bigint | -Infinity,1; -0,1; 1.5,1; Infinity,1; NaN,2; NULL,1
+f4/first/groupByMax	c:real,m:bigint | Infinity,2; -Infinity,3; -0,4; 1.5,5; NaN,6; NULL,7
+f4/first/groupByBool	c:real,b:boolean,n:bigint | -Infinity,f,1; -0,t,1; 1.5,t,1; Infinity,f,1; NaN,f,1; NaN,t,1; NULL,t,1
+f4/first/groupByText	c:real,s:text,n:bigint | -Infinity,1,1; -0,0,1; 1.5,1,1; Infinity,0,1; NaN,0,1; NaN,1,1; NULL,1,1
+f4/first/groupByCountDistinct	c:real,n:bigint | -Infinity,1; -0,1; 1.5,1; Infinity,1; NaN,2; NULL,1
+f4/first/groupByKeyExpr	d:double precision,n:bigint | -Infinity,1; -0,1; 3,1; Infinity,1; NaN,2; NULL,1
+f4/first/rollup	c:real,n:bigint | -Infinity,1; -0,1; 1.5,1; Infinity,1; NaN,2; NULL,1; NULL,7
+f4/first/distinct	c:real | -Infinity; -0; 1.5; Infinity; NaN; NULL
+f4/first/countDistinct	n:bigint | 5
+f4/first/orderAsc	id:bigint | 3; 4; 5; 2; 1; 6; 7
+f4/first/orderDesc	id:bigint | 7; 1; 6; 2; 5; 4; 3
+f4/first/orderAscNullsFirst	id:bigint | 7; 3; 4; 5; 2; 1; 6
+f4/first/orderDescNullsLast	id:bigint | 1; 6; 2; 5; 4; 3; 7
+f4/first/orderExpr	id:bigint | 7; 1; 6; 2; 5; 4; 3
+f4/first/topNAsc	id:bigint | 3; 4; 5
+f4/first/topNDesc	id:bigint | 7; 1; 6
+f4/first/topNDescNullsLast	id:bigint,c:real | 1,NaN; 6,NaN
+f4/first/join	l:bigint,r:bigint | 1,1; 1,6; 2,2; 3,3; 4,4; 5,5; 6,1; 6,6
+f4/first/joinExpr	l:bigint,r:bigint | 1,1; 1,6; 2,2; 3,3; 4,4; 5,5; 6,1; 6,6
+f4/first/crossLt	l:bigint,r:bigint | 2,1; 2,6; 3,1; 3,2; 3,4; 3,5; 3,6; 4,1; 4,2; 4,5; 4,6; 5,1; 5,2; 5,6
+f4/first/crossGe	l:bigint,r:bigint | 1,1; 1,2; 1,3; 1,4; 1,5; 1,6; 2,2; 2,3; 2,4; 2,5; 3,3; 4,3; 4,4; 5,3; 5,4; 5,5; 6,1; 6,2; 6,3; 6,4; 6,5; 6,6
+f4/first/crossNe	l:bigint,r:bigint | 1,2; 1,3; 1,4; 1,5; 2,1; 2,3; 2,4; 2,5; 2,6; 3,1; 3,2; 3,4; 3,5; 3,6; 4,1; 4,2; 4,3; 4,5; 4,6; 5,1; 5,2; 5,3; 5,4; 5,6; 6,2; 6,3; 6,4; 6,5
+f4/first/crossProject	l:bigint,r:bigint,lt:boolean,le:boolean,eq:boolean,ne:boolean,gt:boolean,ge:boolean,dist:boolean | 1,1,f,t,t,f,f,t,f; 1,2,f,f,f,t,t,t,t; 1,3,f,f,f,t,t,t,t; 1,4,f,f,f,t,t,t,t; 1,5,f,f,f,t,t,t,t; 1,6,f,t,t,f,f,t,f; 1,7,NULL,NULL,NULL,NULL,NULL,NULL,t; 2,1,t,t,f,t,f,f,t; 2,2,f,t,t,f,f,t,f; 2,3,f,f,f,t,t,t,t; 2,4,f,f,f,t,t,t,t; 2,5,f,f,f,t,t,t,t; 2,6,t,t,f,t,f,f,t; 2,7,NULL,NULL,NULL,NULL,NULL,NULL,t; 3,1,t,t,f,t,f,f,t; 3,2,t,t,f,t,f,f,t; 3,3,f,t,t,f,f,t,f; 3,4,t,t,f,t,f,f,t; 3,5,t,t,f,t,f,f,t; 3,6,t,t,f,t,f,f,t; 3,7,NULL,NULL,NULL,NULL,NULL,NULL,t; 4,1,t,t,f,t,f,f,t; 4,2,t,t,f,t,f,f,t; 4,3,f,f,f,t,t,t,t; 4,4,f,t,t,f,f,t,f; 4,5,t,t,f,t,f,f,t; 4,6,t,t,f,t,f,f,t; 4,7,NULL,NULL,NULL,NULL,NULL,NULL,t; 5,1,t,t,f,t,f,f,t; 5,2,t,t,f,t,f,f,t; 5,3,f,f,f,t,t,t,t; 5,4,f,f,f,t,t,t,t; 5,5,f,t,t,f,f,t,f; 5,6,t,t,f,t,f,f,t; 5,7,NULL,NULL,NULL,NULL,NULL,NULL,t; 6,1,f,t,t,f,f,t,f; 6,2,f,f,f,t,t,t,t; 6,3,f,f,f,t,t,t,t; 6,4,f,f,f,t,t,t,t; 6,5,f,f,f,t,t,t,t; 6,6,f,t,t,f,f,t,f; 6,7,NULL,NULL,NULL,NULL,NULL,NULL,t; 7,1,NULL,NULL,NULL,NULL,NULL,NULL,t; 7,2,NULL,NULL,NULL,NULL,NULL,NULL,t; 7,3,NULL,NULL,NULL,NULL,NULL,NULL,t; 7,4,NULL,NULL,NULL,NULL,NULL,NULL,t; 7,5,NULL,NULL,NULL,NULL,NULL,NULL,t; 7,6,NULL,NULL,NULL,NULL,NULL,NULL,t; 7,7,NULL,NULL,NULL,NULL,NULL,NULL,f
+f4/first/eqNaN	id:bigint | 1; 6
+f4/first/eqNaNCast	id:bigint | 1; 6
+f4/first/neNaN	id:bigint | 2; 3; 4; 5
+f4/first/ltNaN	id:bigint | 2; 3; 4; 5
+f4/first/leNaN	id:bigint | 1; 2; 3; 4; 5; 6
+f4/first/gtNaN	(0 rows)
+f4/first/geNaN	id:bigint | 1; 6
+f4/first/gt15	id:bigint | 1; 2; 6
+f4/first/geInf	id:bigint | 1; 2; 6
+f4/first/gtInf	id:bigint | 1; 6
+f4/first/eqZero	id:bigint | 4
+f4/first/eqNegZero	id:bigint | 4
+f4/first/ltZero	id:bigint | 3
+f4/first/geZero	id:bigint | 1; 2; 4; 5; 6
+f4/first/between	id:bigint | 1; 2; 5; 6
+f4/first/in	id:bigint | 1; 4; 6
+f4/first/notIn	id:bigint | 2; 3; 5
+f4/first/distinctFrom	id:bigint | 2; 3; 4; 5; 7
+f4/first/notDistinctFrom	id:bigint | 4
+f4/first/projectCompare	id:bigint,gt:boolean,eqn:boolean,ltn:boolean,eqz:boolean | 1,t,t,f,f; 2,t,f,t,f; 3,f,f,t,f; 4,f,f,t,t; 5,f,f,t,f; 6,t,t,f,f; 7,NULL,NULL,NULL,NULL
+f4/first/greatestLeast	id:bigint,g:real,l:real,gn:real,ln:real | 1,NaN,1.5,NaN,NaN; 2,Infinity,1.5,NaN,Infinity; 3,1.5,-Infinity,NaN,-Infinity; 4,1.5,-0,NaN,-0; 5,1.5,1.5,NaN,1.5; 6,NaN,1.5,NaN,NaN; 7,1.5,1.5,NaN,NaN
+f4/first/rank	id:bigint,r:bigint,d:bigint | 1,5,5; 2,4,4; 3,1,1; 4,2,2; 5,3,3; 6,5,5; 7,7,6
+f4/first/rankDesc	id:bigint,r:bigint | 1,2; 2,4; 3,7; 4,6; 5,5; 6,2; 7,1
+f4/first/partition	id:bigint,n:bigint | 1,2; 2,1; 3,1; 4,1; 5,1; 6,2; 7,1
+f4/first/winMinMax	id:bigint,lo:real,hi:real | 1,-Infinity,NaN; 2,-Infinity,NaN; 3,-Infinity,NaN; 4,-Infinity,NaN; 5,-Infinity,NaN; 6,-Infinity,NaN; 7,-Infinity,NaN
+f4/first/winRunning	id:bigint,lo:real,hi:real | 1,NaN,NaN; 2,Infinity,NaN; 3,-Infinity,NaN; 4,-Infinity,NaN; 5,-Infinity,NaN; 6,-Infinity,NaN; 7,-Infinity,NaN
+f4/first/winPartMax	id:bigint,hi:real | 1,NaN; 2,NaN; 3,NaN; 4,NaN; 5,NaN; 6,NaN; 7,NaN
+f4/first/union	c:real | -Infinity; -0; 1.5; Infinity; NaN; NULL
+f4/first/intersect	c:real | -Infinity; -0; 1.5; NaN; NULL
+f4/first/except	c:real | -Infinity; Infinity
+f4/first/inSubquery	id:bigint | 1; 4; 5; 6
+f4/first/exists	id:bigint | 1; 6
+f4/first/eqScalarMax	id:bigint | 1; 6
+f4/first/eqScalarMaxInf	id:bigint | 2
+f4/first/derivedMinMax	lo:real,hi:real | -Infinity,NaN
+f4/first/cteGroupBy	c:real,n:bigint | -Infinity,1; -0,1; 1.5,1; Infinity,1; NaN,2; NULL,1
+f4/first/unionAllMinMax	lo:real,hi:real | -Infinity,NaN
+f4/first/unionAllGroupBy	c:real,n:bigint | -Infinity,2; -0,2; 1.5,2; Infinity,2; NaN,4; NULL,2
+f4/mid/minMax	lo:real,hi:real | -Infinity,NaN
+f4/mid/minMaxExpr	lo:double precision,hi:double precision | -Infinity,NaN
+f4/mid/grpMinMax	g:bigint,lo:real,hi:real | 0,1.5,Infinity; 1,-Infinity,NaN
+f4/mid/groupBy	c:real,n:bigint | -Infinity,1; -0,1; 1.5,1; Infinity,1; NaN,2; NULL,1
+f4/mid/groupByDesc	c:real,n:bigint | NaN,2; Infinity,1; 1.5,1; -0,1; -Infinity,1; NULL,1
+f4/mid/groupByExpr	k:double precision,n:bigint | -Infinity,1; -0,1; 1.5,1; Infinity,1; NaN,2; NULL,1
+f4/mid/groupByMax	c:real,m:bigint | -Infinity,1; 1.5,2; Infinity,4; -0,5; NULL,6; NaN,7
+f4/mid/groupByBool	c:real,b:boolean,n:bigint | -Infinity,f,1; -0,t,1; 1.5,f,1; Infinity,t,1; NaN,f,1; NaN,t,1; NULL,t,1
+f4/mid/groupByText	c:real,s:text,n:bigint | -Infinity,1,1; -0,1,1; 1.5,0,1; Infinity,0,1; NaN,1,2; NULL,0,1
+f4/mid/groupByCountDistinct	c:real,n:bigint | -Infinity,1; -0,1; 1.5,1; Infinity,1; NaN,2; NULL,1
+f4/mid/groupByKeyExpr	d:double precision,n:bigint | -Infinity,1; -0,1; 3,1; Infinity,1; NaN,2; NULL,1
+f4/mid/rollup	c:real,n:bigint | -Infinity,1; -0,1; 1.5,1; Infinity,1; NaN,2; NULL,1; NULL,7
+f4/mid/distinct	c:real | -Infinity; -0; 1.5; Infinity; NaN; NULL
+f4/mid/countDistinct	n:bigint | 5
+f4/mid/orderAsc	id:bigint | 1; 5; 2; 4; 3; 7; 6
+f4/mid/orderDesc	id:bigint | 6; 3; 7; 4; 2; 5; 1
+f4/mid/orderAscNullsFirst	id:bigint | 6; 1; 5; 2; 4; 3; 7
+f4/mid/orderDescNullsLast	id:bigint | 3; 7; 4; 2; 5; 1; 6
+f4/mid/orderExpr	id:bigint | 6; 3; 7; 4; 2; 5; 1
+f4/mid/topNAsc	id:bigint | 1; 5; 2
+f4/mid/topNDesc	id:bigint | 6; 3; 7
+f4/mid/topNDescNullsLast	id:bigint,c:real | 3,NaN; 7,NaN
+f4/mid/join	l:bigint,r:bigint | 1,1; 2,2; 3,3; 3,7; 4,4; 5,5; 7,3; 7,7
+f4/mid/joinExpr	l:bigint,r:bigint | 1,1; 2,2; 3,3; 3,7; 4,4; 5,5; 7,3; 7,7
+f4/mid/crossLt	l:bigint,r:bigint | 1,2; 1,3; 1,4; 1,5; 1,7; 2,3; 2,4; 2,7; 4,3; 4,7; 5,2; 5,3; 5,4; 5,7
+f4/mid/crossGe	l:bigint,r:bigint | 1,1; 2,1; 2,2; 2,5; 3,1; 3,2; 3,3; 3,4; 3,5; 3,7; 4,1; 4,2; 4,4; 4,5; 5,1; 5,5; 7,1; 7,2; 7,3; 7,4; 7,5; 7,7
+f4/mid/crossNe	l:bigint,r:bigint | 1,2; 1,3; 1,4; 1,5; 1,7; 2,1; 2,3; 2,4; 2,5; 2,7; 3,1; 3,2; 3,4; 3,5; 4,1; 4,2; 4,3; 4,5; 4,7; 5,1; 5,2; 5,3; 5,4; 5,7; 7,1; 7,2; 7,4; 7,5
+f4/mid/crossProject	l:bigint,r:bigint,lt:boolean,le:boolean,eq:boolean,ne:boolean,gt:boolean,ge:boolean,dist:boolean | 1,1,f,t,t,f,f,t,f; 1,2,t,t,f,t,f,f,t; 1,3,t,t,f,t,f,f,t; 1,4,t,t,f,t,f,f,t; 1,5,t,t,f,t,f,f,t; 1,6,NULL,NULL,NULL,NULL,NULL,NULL,t; 1,7,t,t,f,t,f,f,t; 2,1,f,f,f,t,t,t,t; 2,2,f,t,t,f,f,t,f; 2,3,t,t,f,t,f,f,t; 2,4,t,t,f,t,f,f,t; 2,5,f,f,f,t,t,t,t; 2,6,NULL,NULL,NULL,NULL,NULL,NULL,t; 2,7,t,t,f,t,f,f,t; 3,1,f,f,f,t,t,t,t; 3,2,f,f,f,t,t,t,t; 3,3,f,t,t,f,f,t,f; 3,4,f,f,f,t,t,t,t; 3,5,f,f,f,t,t,t,t; 3,6,NULL,NULL,NULL,NULL,NULL,NULL,t; 3,7,f,t,t,f,f,t,f; 4,1,f,f,f,t,t,t,t; 4,2,f,f,f,t,t,t,t; 4,3,t,t,f,t,f,f,t; 4,4,f,t,t,f,f,t,f; 4,5,f,f,f,t,t,t,t; 4,6,NULL,NULL,NULL,NULL,NULL,NULL,t; 4,7,t,t,f,t,f,f,t; 5,1,f,f,f,t,t,t,t; 5,2,t,t,f,t,f,f,t; 5,3,t,t,f,t,f,f,t; 5,4,t,t,f,t,f,f,t; 5,5,f,t,t,f,f,t,f; 5,6,NULL,NULL,NULL,NULL,NULL,NULL,t; 5,7,t,t,f,t,f,f,t; 6,1,NULL,NULL,NULL,NULL,NULL,NULL,t; 6,2,NULL,NULL,NULL,NULL,NULL,NULL,t; 6,3,NULL,NULL,NULL,NULL,NULL,NULL,t; 6,4,NULL,NULL,NULL,NULL,NULL,NULL,t; 6,5,NULL,NULL,NULL,NULL,NULL,NULL,t; 6,6,NULL,NULL,NULL,NULL,NULL,NULL,f; 6,7,NULL,NULL,NULL,NULL,NULL,NULL,t; 7,1,f,f,f,t,t,t,t; 7,2,f,f,f,t,t,t,t; 7,3,f,t,t,f,f,t,f; 7,4,f,f,f,t,t,t,t; 7,5,f,f,f,t,t,t,t; 7,6,NULL,NULL,NULL,NULL,NULL,NULL,t; 7,7,f,t,t,f,f,t,f
+f4/mid/eqNaN	id:bigint | 3; 7
+f4/mid/eqNaNCast	id:bigint | 3; 7
+f4/mid/neNaN	id:bigint | 1; 2; 4; 5
+f4/mid/ltNaN	id:bigint | 1; 2; 4; 5
+f4/mid/leNaN	id:bigint | 1; 2; 3; 4; 5; 7
+f4/mid/gtNaN	(0 rows)
+f4/mid/geNaN	id:bigint | 3; 7
+f4/mid/gt15	id:bigint | 3; 4; 7
+f4/mid/geInf	id:bigint | 3; 4; 7
+f4/mid/gtInf	id:bigint | 3; 7
+f4/mid/eqZero	id:bigint | 5
+f4/mid/eqNegZero	id:bigint | 5
+f4/mid/ltZero	id:bigint | 1
+f4/mid/geZero	id:bigint | 2; 3; 4; 5; 7
+f4/mid/between	id:bigint | 2; 3; 4; 7
+f4/mid/in	id:bigint | 3; 5; 7
+f4/mid/notIn	id:bigint | 1; 2; 4
+f4/mid/distinctFrom	id:bigint | 1; 2; 4; 5; 6
+f4/mid/notDistinctFrom	id:bigint | 5
+f4/mid/projectCompare	id:bigint,gt:boolean,eqn:boolean,ltn:boolean,eqz:boolean | 1,f,f,t,f; 2,f,f,t,f; 3,t,t,f,f; 4,t,f,t,f; 5,f,f,t,t; 6,NULL,NULL,NULL,NULL; 7,t,t,f,f
+f4/mid/greatestLeast	id:bigint,g:real,l:real,gn:real,ln:real | 1,1.5,-Infinity,NaN,-Infinity; 2,1.5,1.5,NaN,1.5; 3,NaN,1.5,NaN,NaN; 4,Infinity,1.5,NaN,Infinity; 5,1.5,-0,NaN,-0; 6,1.5,1.5,NaN,NaN; 7,NaN,1.5,NaN,NaN
+f4/mid/rank	id:bigint,r:bigint,d:bigint | 1,1,1; 2,3,3; 3,5,5; 4,4,4; 5,2,2; 6,7,6; 7,5,5
+f4/mid/rankDesc	id:bigint,r:bigint | 1,7; 2,5; 3,2; 4,4; 5,6; 6,1; 7,2
+f4/mid/partition	id:bigint,n:bigint | 1,1; 2,1; 3,2; 4,1; 5,1; 6,1; 7,2
+f4/mid/winMinMax	id:bigint,lo:real,hi:real | 1,-Infinity,NaN; 2,-Infinity,NaN; 3,-Infinity,NaN; 4,-Infinity,NaN; 5,-Infinity,NaN; 6,-Infinity,NaN; 7,-Infinity,NaN
+f4/mid/winRunning	id:bigint,lo:real,hi:real | 1,-Infinity,-Infinity; 2,-Infinity,1.5; 3,-Infinity,NaN; 4,-Infinity,NaN; 5,-Infinity,NaN; 6,-Infinity,NaN; 7,-Infinity,NaN
+f4/mid/winPartMax	id:bigint,hi:real | 1,NaN; 2,Infinity; 3,NaN; 4,Infinity; 5,NaN; 6,Infinity; 7,NaN
+f4/mid/union	c:real | -Infinity; -0; 1.5; Infinity; NaN; NULL
+f4/mid/intersect	c:real | -0; Infinity; NaN; NULL
+f4/mid/except	c:real | -Infinity; 1.5
+f4/mid/inSubquery	id:bigint | 3; 4; 5; 7
+f4/mid/exists	id:bigint | 3; 7
+f4/mid/eqScalarMax	id:bigint | 3; 7
+f4/mid/eqScalarMaxInf	id:bigint | 4
+f4/mid/derivedMinMax	lo:real,hi:real | -Infinity,NaN
+f4/mid/cteGroupBy	c:real,n:bigint | -Infinity,1; -0,1; 1.5,1; Infinity,1; NaN,2; NULL,1
+f4/mid/unionAllMinMax	lo:real,hi:real | -Infinity,NaN
+f4/mid/unionAllGroupBy	c:real,n:bigint | -Infinity,2; -0,2; 1.5,2; Infinity,2; NaN,4; NULL,2
+f4/last/minMax	lo:real,hi:real | -Infinity,NaN
+f4/last/minMaxExpr	lo:double precision,hi:double precision | -Infinity,NaN
+f4/last/grpMinMax	g:bigint,lo:real,hi:real | 0,-Infinity,NaN; 1,-0,NaN
+f4/last/groupBy	c:real,n:bigint | -Infinity,1; -0,1; 1.5,1; Infinity,1; NaN,2; NULL,1
+f4/last/groupByDesc	c:real,n:bigint | NaN,2; Infinity,1; 1.5,1; -0,1; -Infinity,1; NULL,1
+f4/last/groupByExpr	k:double precision,n:bigint | -Infinity,1; -0,1; 1.5,1; Infinity,1; NaN,2; NULL,1
+f4/last/groupByMax	c:real,m:bigint | Infinity,1; 1.5,2; -0,3; -Infinity,4; NULL,5; NaN,7
+f4/last/groupByBool	c:real,b:boolean,n:bigint | -Infinity,t,1; -0,f,1; 1.5,f,1; Infinity,f,1; NaN,t,2; NULL,t,1
+f4/last/groupByText	c:real,s:text,n:bigint | -Infinity,0,1; -0,1,1; 1.5,0,1; Infinity,1,1; NaN,0,1; NaN,1,1; NULL,1,1
+f4/last/groupByCountDistinct	c:real,n:bigint | -Infinity,1; -0,1; 1.5,1; Infinity,1; NaN,2; NULL,1
+f4/last/groupByKeyExpr	d:double precision,n:bigint | -Infinity,1; -0,1; 3,1; Infinity,1; NaN,2; NULL,1
+f4/last/rollup	c:real,n:bigint | -Infinity,1; -0,1; 1.5,1; Infinity,1; NaN,2; NULL,1; NULL,7
+f4/last/distinct	c:real | -Infinity; -0; 1.5; Infinity; NaN; NULL
+f4/last/countDistinct	n:bigint | 5
+f4/last/orderAsc	id:bigint | 4; 3; 2; 1; 6; 7; 5
+f4/last/orderDesc	id:bigint | 5; 6; 7; 1; 2; 3; 4
+f4/last/orderAscNullsFirst	id:bigint | 5; 4; 3; 2; 1; 6; 7
+f4/last/orderDescNullsLast	id:bigint | 6; 7; 1; 2; 3; 4; 5
+f4/last/orderExpr	id:bigint | 5; 6; 7; 1; 2; 3; 4
+f4/last/topNAsc	id:bigint | 4; 3; 2
+f4/last/topNDesc	id:bigint | 5; 6; 7
+f4/last/topNDescNullsLast	id:bigint,c:real | 6,NaN; 7,NaN
+f4/last/join	l:bigint,r:bigint | 1,1; 2,2; 3,3; 4,4; 6,6; 6,7; 7,6; 7,7
+f4/last/joinExpr	l:bigint,r:bigint | 1,1; 2,2; 3,3; 4,4; 6,6; 6,7; 7,6; 7,7
+f4/last/crossLt	l:bigint,r:bigint | 1,6; 1,7; 2,1; 2,6; 2,7; 3,1; 3,2; 3,6; 3,7; 4,1; 4,2; 4,3; 4,6; 4,7
+f4/last/crossGe	l:bigint,r:bigint | 1,1; 1,2; 1,3; 1,4; 2,2; 2,3; 2,4; 3,3; 3,4; 4,4; 6,1; 6,2; 6,3; 6,4; 6,6; 6,7; 7,1; 7,2; 7,3; 7,4; 7,6; 7,7
+f4/last/crossNe	l:bigint,r:bigint | 1,2; 1,3; 1,4; 1,6; 1,7; 2,1; 2,3; 2,4; 2,6; 2,7; 3,1; 3,2; 3,4; 3,6; 3,7; 4,1; 4,2; 4,3; 4,6; 4,7; 6,1; 6,2; 6,3; 6,4; 7,1; 7,2; 7,3; 7,4
+f4/last/crossProject	l:bigint,r:bigint,lt:boolean,le:boolean,eq:boolean,ne:boolean,gt:boolean,ge:boolean,dist:boolean | 1,1,f,t,t,f,f,t,f; 1,2,f,f,f,t,t,t,t; 1,3,f,f,f,t,t,t,t; 1,4,f,f,f,t,t,t,t; 1,5,NULL,NULL,NULL,NULL,NULL,NULL,t; 1,6,t,t,f,t,f,f,t; 1,7,t,t,f,t,f,f,t; 2,1,t,t,f,t,f,f,t; 2,2,f,t,t,f,f,t,f; 2,3,f,f,f,t,t,t,t; 2,4,f,f,f,t,t,t,t; 2,5,NULL,NULL,NULL,NULL,NULL,NULL,t; 2,6,t,t,f,t,f,f,t; 2,7,t,t,f,t,f,f,t; 3,1,t,t,f,t,f,f,t; 3,2,t,t,f,t,f,f,t; 3,3,f,t,t,f,f,t,f; 3,4,f,f,f,t,t,t,t; 3,5,NULL,NULL,NULL,NULL,NULL,NULL,t; 3,6,t,t,f,t,f,f,t; 3,7,t,t,f,t,f,f,t; 4,1,t,t,f,t,f,f,t; 4,2,t,t,f,t,f,f,t; 4,3,t,t,f,t,f,f,t; 4,4,f,t,t,f,f,t,f; 4,5,NULL,NULL,NULL,NULL,NULL,NULL,t; 4,6,t,t,f,t,f,f,t; 4,7,t,t,f,t,f,f,t; 5,1,NULL,NULL,NULL,NULL,NULL,NULL,t; 5,2,NULL,NULL,NULL,NULL,NULL,NULL,t; 5,3,NULL,NULL,NULL,NULL,NULL,NULL,t; 5,4,NULL,NULL,NULL,NULL,NULL,NULL,t; 5,5,NULL,NULL,NULL,NULL,NULL,NULL,f; 5,6,NULL,NULL,NULL,NULL,NULL,NULL,t; 5,7,NULL,NULL,NULL,NULL,NULL,NULL,t; 6,1,f,f,f,t,t,t,t; 6,2,f,f,f,t,t,t,t; 6,3,f,f,f,t,t,t,t; 6,4,f,f,f,t,t,t,t; 6,5,NULL,NULL,NULL,NULL,NULL,NULL,t; 6,6,f,t,t,f,f,t,f; 6,7,f,t,t,f,f,t,f; 7,1,f,f,f,t,t,t,t; 7,2,f,f,f,t,t,t,t; 7,3,f,f,f,t,t,t,t; 7,4,f,f,f,t,t,t,t; 7,5,NULL,NULL,NULL,NULL,NULL,NULL,t; 7,6,f,t,t,f,f,t,f; 7,7,f,t,t,f,f,t,f
+f4/last/eqNaN	id:bigint | 6; 7
+f4/last/eqNaNCast	id:bigint | 6; 7
+f4/last/neNaN	id:bigint | 1; 2; 3; 4
+f4/last/ltNaN	id:bigint | 1; 2; 3; 4
+f4/last/leNaN	id:bigint | 1; 2; 3; 4; 6; 7
+f4/last/gtNaN	(0 rows)
+f4/last/geNaN	id:bigint | 6; 7
+f4/last/gt15	id:bigint | 1; 6; 7
+f4/last/geInf	id:bigint | 1; 6; 7
+f4/last/gtInf	id:bigint | 6; 7
+f4/last/eqZero	id:bigint | 3
+f4/last/eqNegZero	id:bigint | 3
+f4/last/ltZero	id:bigint | 4
+f4/last/geZero	id:bigint | 1; 2; 3; 6; 7
+f4/last/between	id:bigint | 1; 2; 6; 7
+f4/last/in	id:bigint | 3; 6; 7
+f4/last/notIn	id:bigint | 1; 2; 4
+f4/last/distinctFrom	id:bigint | 1; 2; 3; 4; 5
+f4/last/notDistinctFrom	id:bigint | 3
+f4/last/projectCompare	id:bigint,gt:boolean,eqn:boolean,ltn:boolean,eqz:boolean | 1,t,f,t,f; 2,f,f,t,f; 3,f,f,t,t; 4,f,f,t,f; 5,NULL,NULL,NULL,NULL; 6,t,t,f,f; 7,t,t,f,f
+f4/last/greatestLeast	id:bigint,g:real,l:real,gn:real,ln:real | 1,Infinity,1.5,NaN,Infinity; 2,1.5,1.5,NaN,1.5; 3,1.5,-0,NaN,-0; 4,1.5,-Infinity,NaN,-Infinity; 5,1.5,1.5,NaN,NaN; 6,NaN,1.5,NaN,NaN; 7,NaN,1.5,NaN,NaN
+f4/last/rank	id:bigint,r:bigint,d:bigint | 1,4,4; 2,3,3; 3,2,2; 4,1,1; 5,7,6; 6,5,5; 7,5,5
+f4/last/rankDesc	id:bigint,r:bigint | 1,4; 2,5; 3,6; 4,7; 5,1; 6,2; 7,2
+f4/last/partition	id:bigint,n:bigint | 1,1; 2,1; 3,1; 4,1; 5,1; 6,2; 7,2
+f4/last/winMinMax	id:bigint,lo:real,hi:real | 1,-Infinity,NaN; 2,-Infinity,NaN; 3,-Infinity,NaN; 4,-Infinity,NaN; 5,-Infinity,NaN; 6,-Infinity,NaN; 7,-Infinity,NaN
+f4/last/winRunning	id:bigint,lo:real,hi:real | 1,Infinity,Infinity; 2,1.5,Infinity; 3,-0,Infinity; 4,-Infinity,Infinity; 5,-Infinity,Infinity; 6,-Infinity,NaN; 7,-Infinity,NaN
+f4/last/winPartMax	id:bigint,hi:real | 1,NaN; 2,NaN; 3,NaN; 4,NaN; 5,NaN; 6,NaN; 7,NaN
+f4/last/union	c:real | -Infinity; -0; 1.5; Infinity; NaN; NULL
+f4/last/intersect	c:real | -Infinity; -0; NaN; NULL
+f4/last/except	c:real | -0; 1.5; Infinity
+f4/last/inSubquery	id:bigint | 4; 6; 7
+f4/last/exists	id:bigint | 6; 7
+f4/last/eqScalarMax	id:bigint | 6; 7
+f4/last/eqScalarMaxInf	id:bigint | 1
+f4/last/derivedMinMax	lo:real,hi:real | -Infinity,NaN
+f4/last/cteGroupBy	c:real,n:bigint | -Infinity,1; -0,1; 1.5,1; Infinity,1; NaN,2; NULL,1
+f4/last/unionAllMinMax	lo:real,hi:real | -Infinity,NaN
+f4/last/unionAllGroupBy	c:real,n:bigint | -Infinity,2; -0,2; 1.5,2; Infinity,2; NaN,4; NULL,2
+f4/multi/minMax	lo:real,hi:real | -Infinity,NaN
+f4/multi/minMaxExpr	lo:double precision,hi:double precision | -Infinity,NaN
+f4/multi/grpMinMax	g:bigint,lo:real,hi:real | 0,-0,NaN; 1,-Infinity,NaN
+f4/multi/groupBy	c:real,n:bigint | -Infinity,1; -0,1; 1.5,1; Infinity,1; NaN,2; NULL,1
+f4/multi/groupByDesc	c:real,n:bigint | NaN,2; Infinity,1; 1.5,1; -0,1; -Infinity,1; NULL,1
+f4/multi/groupByExpr	k:double precision,n:bigint | -Infinity,1; -0,1; 1.5,1; Infinity,1; NaN,2; NULL,1
+f4/multi/groupByMax	c:real,m:bigint | Infinity,1; 1.5,3; -0,4; -Infinity,5; NULL,6; NaN,7
+f4/multi/groupByBool	c:real,b:boolean,n:bigint | -Infinity,t,1; -0,t,1; 1.5,f,1; Infinity,f,1; NaN,f,1; NaN,t,1; NULL,t,1
+f4/multi/groupByText	c:real,s:text,n:bigint | -Infinity,1,1; -0,0,1; 1.5,1,1; Infinity,1,1; NaN,0,1; NaN,1,1; NULL,0,1
+f4/multi/groupByCountDistinct	c:real,n:bigint | -Infinity,1; -0,1; 1.5,1; Infinity,1; NaN,2; NULL,1
+f4/multi/groupByKeyExpr	d:double precision,n:bigint | -Infinity,1; -0,1; 3,1; Infinity,1; NaN,2; NULL,1
+f4/multi/rollup	c:real,n:bigint | -Infinity,1; -0,1; 1.5,1; Infinity,1; NaN,2; NULL,1; NULL,7
+f4/multi/distinct	c:real | -Infinity; -0; 1.5; Infinity; NaN; NULL
+f4/multi/countDistinct	n:bigint | 5
+f4/multi/orderAsc	id:bigint | 5; 4; 3; 1; 2; 7; 6
+f4/multi/orderDesc	id:bigint | 6; 2; 7; 1; 3; 4; 5
+f4/multi/orderAscNullsFirst	id:bigint | 6; 5; 4; 3; 1; 2; 7
+f4/multi/orderDescNullsLast	id:bigint | 2; 7; 1; 3; 4; 5; 6
+f4/multi/orderExpr	id:bigint | 6; 2; 7; 1; 3; 4; 5
+f4/multi/topNAsc	id:bigint | 5; 4; 3
+f4/multi/topNDesc	id:bigint | 6; 2; 7
+f4/multi/topNDescNullsLast	id:bigint,c:real | 2,NaN; 7,NaN
+f4/multi/join	l:bigint,r:bigint | 1,1; 2,2; 2,7; 3,3; 4,4; 5,5; 7,2; 7,7
+f4/multi/joinExpr	l:bigint,r:bigint | 1,1; 2,2; 2,7; 3,3; 4,4; 5,5; 7,2; 7,7
+f4/multi/crossLt	l:bigint,r:bigint | 1,2; 1,7; 3,1; 3,2; 3,7; 4,1; 4,2; 4,3; 4,7; 5,1; 5,2; 5,3; 5,4; 5,7
+f4/multi/crossGe	l:bigint,r:bigint | 1,1; 1,3; 1,4; 1,5; 2,1; 2,2; 2,3; 2,4; 2,5; 2,7; 3,3; 3,4; 3,5; 4,4; 4,5; 5,5; 7,1; 7,2; 7,3; 7,4; 7,5; 7,7
+f4/multi/crossNe	l:bigint,r:bigint | 1,2; 1,3; 1,4; 1,5; 1,7; 2,1; 2,3; 2,4; 2,5; 3,1; 3,2; 3,4; 3,5; 3,7; 4,1; 4,2; 4,3; 4,5; 4,7; 5,1; 5,2; 5,3; 5,4; 5,7; 7,1; 7,3; 7,4; 7,5
+f4/multi/crossProject	l:bigint,r:bigint,lt:boolean,le:boolean,eq:boolean,ne:boolean,gt:boolean,ge:boolean,dist:boolean | 1,1,f,t,t,f,f,t,f; 1,2,t,t,f,t,f,f,t; 1,3,f,f,f,t,t,t,t; 1,4,f,f,f,t,t,t,t; 1,5,f,f,f,t,t,t,t; 1,6,NULL,NULL,NULL,NULL,NULL,NULL,t; 1,7,t,t,f,t,f,f,t; 2,1,f,f,f,t,t,t,t; 2,2,f,t,t,f,f,t,f; 2,3,f,f,f,t,t,t,t; 2,4,f,f,f,t,t,t,t; 2,5,f,f,f,t,t,t,t; 2,6,NULL,NULL,NULL,NULL,NULL,NULL,t; 2,7,f,t,t,f,f,t,f; 3,1,t,t,f,t,f,f,t; 3,2,t,t,f,t,f,f,t; 3,3,f,t,t,f,f,t,f; 3,4,f,f,f,t,t,t,t; 3,5,f,f,f,t,t,t,t; 3,6,NULL,NULL,NULL,NULL,NULL,NULL,t; 3,7,t,t,f,t,f,f,t; 4,1,t,t,f,t,f,f,t; 4,2,t,t,f,t,f,f,t; 4,3,t,t,f,t,f,f,t; 4,4,f,t,t,f,f,t,f; 4,5,f,f,f,t,t,t,t; 4,6,NULL,NULL,NULL,NULL,NULL,NULL,t; 4,7,t,t,f,t,f,f,t; 5,1,t,t,f,t,f,f,t; 5,2,t,t,f,t,f,f,t; 5,3,t,t,f,t,f,f,t; 5,4,t,t,f,t,f,f,t; 5,5,f,t,t,f,f,t,f; 5,6,NULL,NULL,NULL,NULL,NULL,NULL,t; 5,7,t,t,f,t,f,f,t; 6,1,NULL,NULL,NULL,NULL,NULL,NULL,t; 6,2,NULL,NULL,NULL,NULL,NULL,NULL,t; 6,3,NULL,NULL,NULL,NULL,NULL,NULL,t; 6,4,NULL,NULL,NULL,NULL,NULL,NULL,t; 6,5,NULL,NULL,NULL,NULL,NULL,NULL,t; 6,6,NULL,NULL,NULL,NULL,NULL,NULL,f; 6,7,NULL,NULL,NULL,NULL,NULL,NULL,t; 7,1,f,f,f,t,t,t,t; 7,2,f,t,t,f,f,t,f; 7,3,f,f,f,t,t,t,t; 7,4,f,f,f,t,t,t,t; 7,5,f,f,f,t,t,t,t; 7,6,NULL,NULL,NULL,NULL,NULL,NULL,t; 7,7,f,t,t,f,f,t,f
+f4/multi/eqNaN	id:bigint | 2; 7
+f4/multi/eqNaNCast	id:bigint | 2; 7
+f4/multi/neNaN	id:bigint | 1; 3; 4; 5
+f4/multi/ltNaN	id:bigint | 1; 3; 4; 5
+f4/multi/leNaN	id:bigint | 1; 2; 3; 4; 5; 7
+f4/multi/gtNaN	(0 rows)
+f4/multi/geNaN	id:bigint | 2; 7
+f4/multi/gt15	id:bigint | 1; 2; 7
+f4/multi/geInf	id:bigint | 1; 2; 7
+f4/multi/gtInf	id:bigint | 2; 7
+f4/multi/eqZero	id:bigint | 4
+f4/multi/eqNegZero	id:bigint | 4
+f4/multi/ltZero	id:bigint | 5
+f4/multi/geZero	id:bigint | 1; 2; 3; 4; 7
+f4/multi/between	id:bigint | 1; 2; 3; 7
+f4/multi/in	id:bigint | 2; 4; 7
+f4/multi/notIn	id:bigint | 1; 3; 5
+f4/multi/distinctFrom	id:bigint | 1; 3; 4; 5; 6
+f4/multi/notDistinctFrom	id:bigint | 4
+f4/multi/projectCompare	id:bigint,gt:boolean,eqn:boolean,ltn:boolean,eqz:boolean | 1,t,f,t,f; 2,t,t,f,f; 3,f,f,t,f; 4,f,f,t,t; 5,f,f,t,f; 6,NULL,NULL,NULL,NULL; 7,t,t,f,f
+f4/multi/greatestLeast	id:bigint,g:real,l:real,gn:real,ln:real | 1,Infinity,1.5,NaN,Infinity; 2,NaN,1.5,NaN,NaN; 3,1.5,1.5,NaN,1.5; 4,1.5,-0,NaN,-0; 5,1.5,-Infinity,NaN,-Infinity; 6,1.5,1.5,NaN,NaN; 7,NaN,1.5,NaN,NaN
+f4/multi/rank	id:bigint,r:bigint,d:bigint | 1,4,4; 2,5,5; 3,3,3; 4,2,2; 5,1,1; 6,7,6; 7,5,5
+f4/multi/rankDesc	id:bigint,r:bigint | 1,4; 2,2; 3,5; 4,6; 5,7; 6,1; 7,2
+f4/multi/partition	id:bigint,n:bigint | 1,1; 2,2; 3,1; 4,1; 5,1; 6,1; 7,2
+f4/multi/winMinMax	id:bigint,lo:real,hi:real | 1,-Infinity,NaN; 2,-Infinity,NaN; 3,-Infinity,NaN; 4,-Infinity,NaN; 5,-Infinity,NaN; 6,-Infinity,NaN; 7,-Infinity,NaN
+f4/multi/winRunning	id:bigint,lo:real,hi:real | 1,Infinity,Infinity; 2,Infinity,NaN; 3,1.5,NaN; 4,-0,NaN; 5,-Infinity,NaN; 6,-Infinity,NaN; 7,-Infinity,NaN
+f4/multi/winPartMax	id:bigint,hi:real | 1,NaN; 2,NaN; 3,NaN; 4,NaN; 5,NaN; 6,NaN; 7,NaN
+f4/multi/union	c:real | -Infinity; -0; 1.5; Infinity; NaN; NULL
+f4/multi/intersect	c:real | -Infinity; -0; 1.5; NaN; NULL
+f4/multi/except	c:real | 1.5; Infinity
+f4/multi/inSubquery	id:bigint | 2; 4; 5; 7
+f4/multi/exists	id:bigint | 2; 7
+f4/multi/eqScalarMax	id:bigint | 2; 7
+f4/multi/eqScalarMaxInf	id:bigint | 1
+f4/multi/derivedMinMax	lo:real,hi:real | -Infinity,NaN
+f4/multi/cteGroupBy	c:real,n:bigint | -Infinity,1; -0,1; 1.5,1; Infinity,1; NaN,2; NULL,1
+f4/multi/unionAllMinMax	lo:real,hi:real | -Infinity,NaN
+f4/multi/unionAllGroupBy	c:real,n:bigint | -Infinity,2; -0,2; 1.5,2; Infinity,2; NaN,4; NULL,2
+f4/naninf/minMax	lo:real,hi:real | Infinity,NaN
+f4/naninf/minMaxExpr	lo:double precision,hi:double precision | Infinity,NaN
+f4/naninf/grpMinMax	g:bigint,lo:real,hi:real | 0,Infinity,Infinity; 1,NaN,NaN
+f4/naninf/groupBy	c:real,n:bigint | Infinity,1; NaN,1
+f4/naninf/groupByDesc	c:real,n:bigint | NaN,1; Infinity,1
+f4/naninf/groupByExpr	k:double precision,n:bigint | Infinity,1; NaN,1
+f4/naninf/groupByMax	c:real,m:bigint | NaN,1; Infinity,2
+f4/naninf/groupByBool	c:real,b:boolean,n:bigint | Infinity,f,1; NaN,f,1
+f4/naninf/groupByText	c:real,s:text,n:bigint | Infinity,0,1; NaN,1,1
+f4/naninf/groupByCountDistinct	c:real,n:bigint | Infinity,1; NaN,1
+f4/naninf/groupByKeyExpr	d:double precision,n:bigint | Infinity,1; NaN,1
+f4/naninf/rollup	c:real,n:bigint | Infinity,1; NaN,1; NULL,2
+f4/naninf/distinct	c:real | Infinity; NaN
+f4/naninf/countDistinct	n:bigint | 2
+f4/naninf/orderAsc	id:bigint | 2; 1
+f4/naninf/orderDesc	id:bigint | 1; 2
+f4/naninf/orderAscNullsFirst	id:bigint | 2; 1
+f4/naninf/orderDescNullsLast	id:bigint | 1; 2
+f4/naninf/orderExpr	id:bigint | 1; 2
+f4/naninf/topNAsc	id:bigint | 2; 1
+f4/naninf/topNDesc	id:bigint | 1; 2
+f4/naninf/topNDescNullsLast	id:bigint,c:real | 1,NaN; 2,Infinity
+f4/naninf/join	l:bigint,r:bigint | 1,1; 2,2
+f4/naninf/joinExpr	l:bigint,r:bigint | 1,1; 2,2
+f4/naninf/crossLt	l:bigint,r:bigint | 2,1
+f4/naninf/crossGe	l:bigint,r:bigint | 1,1; 1,2; 2,2
+f4/naninf/crossNe	l:bigint,r:bigint | 1,2; 2,1
+f4/naninf/crossProject	l:bigint,r:bigint,lt:boolean,le:boolean,eq:boolean,ne:boolean,gt:boolean,ge:boolean,dist:boolean | 1,1,f,t,t,f,f,t,f; 1,2,f,f,f,t,t,t,t; 2,1,t,t,f,t,f,f,t; 2,2,f,t,t,f,f,t,f
+f4/naninf/eqNaN	id:bigint | 1
+f4/naninf/eqNaNCast	id:bigint | 1
+f4/naninf/neNaN	id:bigint | 2
+f4/naninf/ltNaN	id:bigint | 2
+f4/naninf/leNaN	id:bigint | 1; 2
+f4/naninf/gtNaN	(0 rows)
+f4/naninf/geNaN	id:bigint | 1
+f4/naninf/gt15	id:bigint | 1; 2
+f4/naninf/geInf	id:bigint | 1; 2
+f4/naninf/gtInf	id:bigint | 1
+f4/naninf/eqZero	(0 rows)
+f4/naninf/eqNegZero	(0 rows)
+f4/naninf/ltZero	(0 rows)
+f4/naninf/geZero	id:bigint | 1; 2
+f4/naninf/between	id:bigint | 1; 2
+f4/naninf/in	id:bigint | 1
+f4/naninf/notIn	id:bigint | 2
+f4/naninf/distinctFrom	id:bigint | 2
+f4/naninf/notDistinctFrom	(0 rows)
+f4/naninf/projectCompare	id:bigint,gt:boolean,eqn:boolean,ltn:boolean,eqz:boolean | 1,t,t,f,f; 2,t,f,t,f
+f4/naninf/greatestLeast	id:bigint,g:real,l:real,gn:real,ln:real | 1,NaN,1.5,NaN,NaN; 2,Infinity,1.5,NaN,Infinity
+f4/naninf/rank	id:bigint,r:bigint,d:bigint | 1,2,2; 2,1,1
+f4/naninf/rankDesc	id:bigint,r:bigint | 1,1; 2,2
+f4/naninf/partition	id:bigint,n:bigint | 1,1; 2,1
+f4/naninf/winMinMax	id:bigint,lo:real,hi:real | 1,Infinity,NaN; 2,Infinity,NaN
+f4/naninf/winRunning	id:bigint,lo:real,hi:real | 1,NaN,NaN; 2,Infinity,NaN
+f4/naninf/winPartMax	id:bigint,hi:real | 1,NaN; 2,Infinity
+f4/naninf/union	c:real | Infinity; NaN
+f4/naninf/intersect	(0 rows)
+f4/naninf/except	c:real | Infinity; NaN
+f4/naninf/inSubquery	(0 rows)
+f4/naninf/exists	(0 rows)
+f4/naninf/eqScalarMax	id:bigint | 1
+f4/naninf/eqScalarMaxInf	id:bigint | 2
+f4/naninf/derivedMinMax	lo:real,hi:real | Infinity,NaN
+f4/naninf/cteGroupBy	c:real,n:bigint | Infinity,1; NaN,1
+f4/naninf/unionAllMinMax	lo:real,hi:real | Infinity,NaN
+f4/naninf/unionAllGroupBy	c:real,n:bigint | Infinity,2; NaN,2
+f4/infnan/minMax	lo:real,hi:real | Infinity,NaN
+f4/infnan/minMaxExpr	lo:double precision,hi:double precision | Infinity,NaN
+f4/infnan/grpMinMax	g:bigint,lo:real,hi:real | 0,NaN,NaN; 1,Infinity,Infinity
+f4/infnan/groupBy	c:real,n:bigint | Infinity,1; NaN,1
+f4/infnan/groupByDesc	c:real,n:bigint | NaN,1; Infinity,1
+f4/infnan/groupByExpr	k:double precision,n:bigint | Infinity,1; NaN,1
+f4/infnan/groupByMax	c:real,m:bigint | Infinity,1; NaN,2
+f4/infnan/groupByBool	c:real,b:boolean,n:bigint | Infinity,f,1; NaN,f,1
+f4/infnan/groupByText	c:real,s:text,n:bigint | Infinity,1,1; NaN,0,1
+f4/infnan/groupByCountDistinct	c:real,n:bigint | Infinity,1; NaN,1
+f4/infnan/groupByKeyExpr	d:double precision,n:bigint | Infinity,1; NaN,1
+f4/infnan/rollup	c:real,n:bigint | Infinity,1; NaN,1; NULL,2
+f4/infnan/distinct	c:real | Infinity; NaN
+f4/infnan/countDistinct	n:bigint | 2
+f4/infnan/orderAsc	id:bigint | 1; 2
+f4/infnan/orderDesc	id:bigint | 2; 1
+f4/infnan/orderAscNullsFirst	id:bigint | 1; 2
+f4/infnan/orderDescNullsLast	id:bigint | 2; 1
+f4/infnan/orderExpr	id:bigint | 2; 1
+f4/infnan/topNAsc	id:bigint | 1; 2
+f4/infnan/topNDesc	id:bigint | 2; 1
+f4/infnan/topNDescNullsLast	id:bigint,c:real | 2,NaN; 1,Infinity
+f4/infnan/join	l:bigint,r:bigint | 1,1; 2,2
+f4/infnan/joinExpr	l:bigint,r:bigint | 1,1; 2,2
+f4/infnan/crossLt	l:bigint,r:bigint | 1,2
+f4/infnan/crossGe	l:bigint,r:bigint | 1,1; 2,1; 2,2
+f4/infnan/crossNe	l:bigint,r:bigint | 1,2; 2,1
+f4/infnan/crossProject	l:bigint,r:bigint,lt:boolean,le:boolean,eq:boolean,ne:boolean,gt:boolean,ge:boolean,dist:boolean | 1,1,f,t,t,f,f,t,f; 1,2,t,t,f,t,f,f,t; 2,1,f,f,f,t,t,t,t; 2,2,f,t,t,f,f,t,f
+f4/infnan/eqNaN	id:bigint | 2
+f4/infnan/eqNaNCast	id:bigint | 2
+f4/infnan/neNaN	id:bigint | 1
+f4/infnan/ltNaN	id:bigint | 1
+f4/infnan/leNaN	id:bigint | 1; 2
+f4/infnan/gtNaN	(0 rows)
+f4/infnan/geNaN	id:bigint | 2
+f4/infnan/gt15	id:bigint | 1; 2
+f4/infnan/geInf	id:bigint | 1; 2
+f4/infnan/gtInf	id:bigint | 2
+f4/infnan/eqZero	(0 rows)
+f4/infnan/eqNegZero	(0 rows)
+f4/infnan/ltZero	(0 rows)
+f4/infnan/geZero	id:bigint | 1; 2
+f4/infnan/between	id:bigint | 1; 2
+f4/infnan/in	id:bigint | 2
+f4/infnan/notIn	id:bigint | 1
+f4/infnan/distinctFrom	id:bigint | 1
+f4/infnan/notDistinctFrom	(0 rows)
+f4/infnan/projectCompare	id:bigint,gt:boolean,eqn:boolean,ltn:boolean,eqz:boolean | 1,t,f,t,f; 2,t,t,f,f
+f4/infnan/greatestLeast	id:bigint,g:real,l:real,gn:real,ln:real | 1,Infinity,1.5,NaN,Infinity; 2,NaN,1.5,NaN,NaN
+f4/infnan/rank	id:bigint,r:bigint,d:bigint | 1,1,1; 2,2,2
+f4/infnan/rankDesc	id:bigint,r:bigint | 1,2; 2,1
+f4/infnan/partition	id:bigint,n:bigint | 1,1; 2,1
+f4/infnan/winMinMax	id:bigint,lo:real,hi:real | 1,Infinity,NaN; 2,Infinity,NaN
+f4/infnan/winRunning	id:bigint,lo:real,hi:real | 1,Infinity,Infinity; 2,Infinity,NaN
+f4/infnan/winPartMax	id:bigint,hi:real | 1,Infinity; 2,NaN
+f4/infnan/union	c:real | Infinity; NaN
+f4/infnan/intersect	(0 rows)
+f4/infnan/except	c:real | Infinity; NaN
+f4/infnan/inSubquery	(0 rows)
+f4/infnan/exists	(0 rows)
+f4/infnan/eqScalarMax	id:bigint | 2
+f4/infnan/eqScalarMaxInf	id:bigint | 1
+f4/infnan/derivedMinMax	lo:real,hi:real | Infinity,NaN
+f4/infnan/cteGroupBy	c:real,n:bigint | Infinity,1; NaN,1
+f4/infnan/unionAllMinMax	lo:real,hi:real | Infinity,NaN
+f4/infnan/unionAllGroupBy	c:real,n:bigint | Infinity,2; NaN,2
+f4/nanonly/minMax	lo:real,hi:real | NaN,NaN
+f4/nanonly/minMaxExpr	lo:double precision,hi:double precision | NaN,NaN
+f4/nanonly/grpMinMax	g:bigint,lo:real,hi:real | 0,NaN,NaN; 1,NaN,NaN
+f4/nanonly/groupBy	c:real,n:bigint | NaN,2; NULL,1
+f4/nanonly/groupByDesc	c:real,n:bigint | NaN,2; NULL,1
+f4/nanonly/groupByExpr	k:double precision,n:bigint | NaN,2; NULL,1
+f4/nanonly/groupByMax	c:real,m:bigint | NaN,2; NULL,3
+f4/nanonly/groupByBool	c:real,b:boolean,n:bigint | NaN,f,2; NULL,f,1
+f4/nanonly/groupByText	c:real,s:text,n:bigint | NaN,0,1; NaN,1,1; NULL,1,1
+f4/nanonly/groupByCountDistinct	c:real,n:bigint | NaN,2; NULL,1
+f4/nanonly/groupByKeyExpr	d:double precision,n:bigint | NaN,2; NULL,1
+f4/nanonly/rollup	c:real,n:bigint | NaN,2; NULL,1; NULL,3
+f4/nanonly/distinct	c:real | NaN; NULL
+f4/nanonly/countDistinct	n:bigint | 1
+f4/nanonly/orderAsc	id:bigint | 1; 2; 3
+f4/nanonly/orderDesc	id:bigint | 3; 1; 2
+f4/nanonly/orderAscNullsFirst	id:bigint | 3; 1; 2
+f4/nanonly/orderDescNullsLast	id:bigint | 1; 2; 3
+f4/nanonly/orderExpr	id:bigint | 3; 1; 2
+f4/nanonly/topNAsc	id:bigint | 1; 2; 3
+f4/nanonly/topNDesc	id:bigint | 3; 1; 2
+f4/nanonly/topNDescNullsLast	id:bigint,c:real | 1,NaN; 2,NaN
+f4/nanonly/join	l:bigint,r:bigint | 1,1; 1,2; 2,1; 2,2
+f4/nanonly/joinExpr	l:bigint,r:bigint | 1,1; 1,2; 2,1; 2,2
+f4/nanonly/crossLt	(0 rows)
+f4/nanonly/crossGe	l:bigint,r:bigint | 1,1; 1,2; 2,1; 2,2
+f4/nanonly/crossNe	(0 rows)
+f4/nanonly/crossProject	l:bigint,r:bigint,lt:boolean,le:boolean,eq:boolean,ne:boolean,gt:boolean,ge:boolean,dist:boolean | 1,1,f,t,t,f,f,t,f; 1,2,f,t,t,f,f,t,f; 1,3,NULL,NULL,NULL,NULL,NULL,NULL,t; 2,1,f,t,t,f,f,t,f; 2,2,f,t,t,f,f,t,f; 2,3,NULL,NULL,NULL,NULL,NULL,NULL,t; 3,1,NULL,NULL,NULL,NULL,NULL,NULL,t; 3,2,NULL,NULL,NULL,NULL,NULL,NULL,t; 3,3,NULL,NULL,NULL,NULL,NULL,NULL,f
+f4/nanonly/eqNaN	id:bigint | 1; 2
+f4/nanonly/eqNaNCast	id:bigint | 1; 2
+f4/nanonly/neNaN	(0 rows)
+f4/nanonly/ltNaN	(0 rows)
+f4/nanonly/leNaN	id:bigint | 1; 2
+f4/nanonly/gtNaN	(0 rows)
+f4/nanonly/geNaN	id:bigint | 1; 2
+f4/nanonly/gt15	id:bigint | 1; 2
+f4/nanonly/geInf	id:bigint | 1; 2
+f4/nanonly/gtInf	id:bigint | 1; 2
+f4/nanonly/eqZero	(0 rows)
+f4/nanonly/eqNegZero	(0 rows)
+f4/nanonly/ltZero	(0 rows)
+f4/nanonly/geZero	id:bigint | 1; 2
+f4/nanonly/between	id:bigint | 1; 2
+f4/nanonly/in	id:bigint | 1; 2
+f4/nanonly/notIn	(0 rows)
+f4/nanonly/distinctFrom	id:bigint | 3
+f4/nanonly/notDistinctFrom	(0 rows)
+f4/nanonly/projectCompare	id:bigint,gt:boolean,eqn:boolean,ltn:boolean,eqz:boolean | 1,t,t,f,f; 2,t,t,f,f; 3,NULL,NULL,NULL,NULL
+f4/nanonly/greatestLeast	id:bigint,g:real,l:real,gn:real,ln:real | 1,NaN,1.5,NaN,NaN; 2,NaN,1.5,NaN,NaN; 3,1.5,1.5,NaN,NaN
+f4/nanonly/rank	id:bigint,r:bigint,d:bigint | 1,1,1; 2,1,1; 3,3,2
+f4/nanonly/rankDesc	id:bigint,r:bigint | 1,2; 2,2; 3,1
+f4/nanonly/partition	id:bigint,n:bigint | 1,2; 2,2; 3,1
+f4/nanonly/winMinMax	id:bigint,lo:real,hi:real | 1,NaN,NaN; 2,NaN,NaN; 3,NaN,NaN
+f4/nanonly/winRunning	id:bigint,lo:real,hi:real | 1,NaN,NaN; 2,NaN,NaN; 3,NaN,NaN
+f4/nanonly/winPartMax	id:bigint,hi:real | 1,NaN; 2,NaN; 3,NaN
+f4/nanonly/union	c:real | NaN; NULL
+f4/nanonly/intersect	c:real | NULL
+f4/nanonly/except	c:real | NaN; NULL
+f4/nanonly/inSubquery	(0 rows)
+f4/nanonly/exists	id:bigint | 1; 2
+f4/nanonly/eqScalarMax	id:bigint | 1; 2
+f4/nanonly/eqScalarMaxInf	(0 rows)
+f4/nanonly/derivedMinMax	lo:real,hi:real | NaN,NaN
+f4/nanonly/cteGroupBy	c:real,n:bigint | NaN,2; NULL,1
+f4/nanonly/unionAllMinMax	lo:real,hi:real | NaN,NaN
+f4/nanonly/unionAllGroupBy	c:real,n:bigint | NaN,4; NULL,2
+f4/negz/minMax	lo:real,hi:real | -0,1.5
+f4/negz/minMaxExpr	lo:double precision,hi:double precision | -0,1.5
+f4/negz/grpMinMax	g:bigint,lo:real,hi:real | 0,1.5,1.5; 1,-0,-0
+f4/negz/groupBy	c:real,n:bigint | -0,2; 1.5,1
+f4/negz/groupByDesc	c:real,n:bigint | 1.5,1; -0,2
+f4/negz/groupByExpr	k:double precision,n:bigint | -0,2; 1.5,1
+f4/negz/groupByMax	c:real,m:bigint | 1.5,2; -0,3
+f4/negz/groupByBool	c:real,b:boolean,n:bigint | -0,f,2; 1.5,f,1
+f4/negz/groupByText	c:real,s:text,n:bigint | -0,1,2; 1.5,0,1
+f4/negz/groupByCountDistinct	c:real,n:bigint | -0,2; 1.5,1
+f4/negz/groupByKeyExpr	d:double precision,n:bigint | -0,2; 3,1
+f4/negz/rollup	c:real,n:bigint | -0,2; 1.5,1; NULL,3
+f4/negz/distinct	c:real | -0; 1.5
+f4/negz/countDistinct	n:bigint | 2
+f4/negz/orderAsc	id:bigint | 1; 3; 2
+f4/negz/orderDesc	id:bigint | 2; 1; 3
+f4/negz/orderAscNullsFirst	id:bigint | 1; 3; 2
+f4/negz/orderDescNullsLast	id:bigint | 2; 1; 3
+f4/negz/orderExpr	id:bigint | 2; 1; 3
+f4/negz/topNAsc	id:bigint | 1; 3; 2
+f4/negz/topNDesc	id:bigint | 2; 1; 3
+f4/negz/topNDescNullsLast	id:bigint,c:real | 2,1.5; 1,-0
+f4/negz/join	l:bigint,r:bigint | 1,1; 1,3; 2,2; 3,1; 3,3
+f4/negz/joinExpr	l:bigint,r:bigint | 1,1; 1,3; 2,2; 3,1; 3,3
+f4/negz/crossLt	l:bigint,r:bigint | 1,2; 3,2
+f4/negz/crossGe	l:bigint,r:bigint | 1,1; 1,3; 2,1; 2,2; 2,3; 3,1; 3,3
+f4/negz/crossNe	l:bigint,r:bigint | 1,2; 2,1; 2,3; 3,2
+f4/negz/crossProject	l:bigint,r:bigint,lt:boolean,le:boolean,eq:boolean,ne:boolean,gt:boolean,ge:boolean,dist:boolean | 1,1,f,t,t,f,f,t,f; 1,2,t,t,f,t,f,f,t; 1,3,f,t,t,f,f,t,f; 2,1,f,f,f,t,t,t,t; 2,2,f,t,t,f,f,t,f; 2,3,f,f,f,t,t,t,t; 3,1,f,t,t,f,f,t,f; 3,2,t,t,f,t,f,f,t; 3,3,f,t,t,f,f,t,f
+f4/negz/eqNaN	(0 rows)
+f4/negz/eqNaNCast	(0 rows)
+f4/negz/neNaN	id:bigint | 1; 2; 3
+f4/negz/ltNaN	id:bigint | 1; 2; 3
+f4/negz/leNaN	id:bigint | 1; 2; 3
+f4/negz/gtNaN	(0 rows)
+f4/negz/geNaN	(0 rows)
+f4/negz/gt15	(0 rows)
+f4/negz/geInf	(0 rows)
+f4/negz/gtInf	(0 rows)
+f4/negz/eqZero	id:bigint | 1; 3
+f4/negz/eqNegZero	id:bigint | 1; 3
+f4/negz/ltZero	(0 rows)
+f4/negz/geZero	id:bigint | 1; 2; 3
+f4/negz/between	id:bigint | 2
+f4/negz/in	id:bigint | 1; 3
+f4/negz/notIn	id:bigint | 2
+f4/negz/distinctFrom	id:bigint | 1; 2; 3
+f4/negz/notDistinctFrom	id:bigint | 1; 3
+f4/negz/projectCompare	id:bigint,gt:boolean,eqn:boolean,ltn:boolean,eqz:boolean | 1,f,f,t,t; 2,f,f,t,f; 3,f,f,t,t
+f4/negz/greatestLeast	id:bigint,g:real,l:real,gn:real,ln:real | 1,1.5,-0,NaN,-0; 2,1.5,1.5,NaN,1.5; 3,1.5,-0,NaN,-0
+f4/negz/rank	id:bigint,r:bigint,d:bigint | 1,1,1; 2,3,2; 3,1,1
+f4/negz/rankDesc	id:bigint,r:bigint | 1,2; 2,1; 3,2
+f4/negz/partition	id:bigint,n:bigint | 1,2; 2,1; 3,2
+f4/negz/winMinMax	id:bigint,lo:real,hi:real | 1,-0,1.5; 2,-0,1.5; 3,-0,1.5
+f4/negz/winRunning	id:bigint,lo:real,hi:real | 1,-0,-0; 2,-0,1.5; 3,-0,1.5
+f4/negz/winPartMax	id:bigint,hi:real | 1,-0; 2,1.5; 3,-0
+f4/negz/union	c:real | -0; 1.5
+f4/negz/intersect	c:real | -0
+f4/negz/except	c:real | -0; 1.5
+f4/negz/inSubquery	(0 rows)
+f4/negz/exists	id:bigint | 1; 3
+f4/negz/eqScalarMax	id:bigint | 2
+f4/negz/eqScalarMaxInf	id:bigint | 2
+f4/negz/derivedMinMax	lo:real,hi:real | -0,1.5
+f4/negz/cteGroupBy	c:real,n:bigint | -0,2; 1.5,1
+f4/negz/unionAllMinMax	lo:real,hi:real | -0,1.5
+f4/negz/unionAllGroupBy	c:real,n:bigint | -0,4; 1.5,2
+f4/zeros/minMax	lo:real,hi:real | -0,1.5
+f4/zeros/minMaxExpr	lo:double precision,hi:double precision | -0,1.5
+f4/zeros/grpMinMax	g:bigint,lo:real,hi:real | 0,0,0; 1,-0,1.5
+f4/zeros/groupBy	c:real,n:bigint | -0,4; 1.5,1
+f4/zeros/groupByDesc	c:real,n:bigint | 1.5,1; -0,4
+f4/zeros/groupByExpr	k:double precision,n:bigint | -0,4; 1.5,1
+f4/zeros/groupByMax	c:real,m:bigint | 1.5,3; -0,5
+f4/zeros/groupByBool	c:real,b:boolean,n:bigint | -0,f,2; 0,t,2; 1.5,f,1
+f4/zeros/groupByText	c:real,s:text,n:bigint | 0,0,2; -0,1,2; 1.5,1,1
+f4/zeros/groupByCountDistinct	c:real,n:bigint | -0,4; 1.5,1
+f4/zeros/groupByKeyExpr	d:double precision,n:bigint | -0,4; 3,1
+f4/zeros/rollup	c:real,n:bigint | -0,4; 1.5,1; NULL,5
+f4/zeros/distinct	c:real | -0; 1.5
+f4/zeros/countDistinct	n:bigint | 2
+f4/zeros/orderAsc	id:bigint | 1; 2; 4; 5; 3
+f4/zeros/orderDesc	id:bigint | 3; 1; 2; 4; 5
+f4/zeros/orderAscNullsFirst	id:bigint | 1; 2; 4; 5; 3
+f4/zeros/orderDescNullsLast	id:bigint | 3; 1; 2; 4; 5
+f4/zeros/orderExpr	id:bigint | 3; 1; 2; 4; 5
+f4/zeros/topNAsc	id:bigint | 1; 2; 4
+f4/zeros/topNDesc	id:bigint | 3; 1; 2
+f4/zeros/topNDescNullsLast	id:bigint,c:real | 3,1.5; 1,-0
+f4/zeros/join	l:bigint,r:bigint | 1,1; 1,2; 1,4; 1,5; 2,1; 2,2; 2,4; 2,5; 3,3; 4,1; 4,2; 4,4; 4,5; 5,1; 5,2; 5,4; 5,5
+f4/zeros/joinExpr	l:bigint,r:bigint | 1,1; 1,2; 1,4; 1,5; 2,1; 2,2; 2,4; 2,5; 3,3; 4,1; 4,2; 4,4; 4,5; 5,1; 5,2; 5,4; 5,5
+f4/zeros/crossLt	l:bigint,r:bigint | 1,3; 2,3; 4,3; 5,3
+f4/zeros/crossGe	l:bigint,r:bigint | 1,1; 1,2; 1,4; 1,5; 2,1; 2,2; 2,4; 2,5; 3,1; 3,2; 3,3; 3,4; 3,5; 4,1; 4,2; 4,4; 4,5; 5,1; 5,2; 5,4; 5,5
+f4/zeros/crossNe	l:bigint,r:bigint | 1,3; 2,3; 3,1; 3,2; 3,4; 3,5; 4,3; 5,3
+f4/zeros/crossProject	l:bigint,r:bigint,lt:boolean,le:boolean,eq:boolean,ne:boolean,gt:boolean,ge:boolean,dist:boolean | 1,1,f,t,t,f,f,t,f; 1,2,f,t,t,f,f,t,f; 1,3,t,t,f,t,f,f,t; 1,4,f,t,t,f,f,t,f; 1,5,f,t,t,f,f,t,f; 2,1,f,t,t,f,f,t,f; 2,2,f,t,t,f,f,t,f; 2,3,t,t,f,t,f,f,t; 2,4,f,t,t,f,f,t,f; 2,5,f,t,t,f,f,t,f; 3,1,f,f,f,t,t,t,t; 3,2,f,f,f,t,t,t,t; 3,3,f,t,t,f,f,t,f; 3,4,f,f,f,t,t,t,t; 3,5,f,f,f,t,t,t,t; 4,1,f,t,t,f,f,t,f; 4,2,f,t,t,f,f,t,f; 4,3,t,t,f,t,f,f,t; 4,4,f,t,t,f,f,t,f; 4,5,f,t,t,f,f,t,f; 5,1,f,t,t,f,f,t,f; 5,2,f,t,t,f,f,t,f; 5,3,t,t,f,t,f,f,t; 5,4,f,t,t,f,f,t,f; 5,5,f,t,t,f,f,t,f
+f4/zeros/eqNaN	(0 rows)
+f4/zeros/eqNaNCast	(0 rows)
+f4/zeros/neNaN	id:bigint | 1; 2; 3; 4; 5
+f4/zeros/ltNaN	id:bigint | 1; 2; 3; 4; 5
+f4/zeros/leNaN	id:bigint | 1; 2; 3; 4; 5
+f4/zeros/gtNaN	(0 rows)
+f4/zeros/geNaN	(0 rows)
+f4/zeros/gt15	(0 rows)
+f4/zeros/geInf	(0 rows)
+f4/zeros/gtInf	(0 rows)
+f4/zeros/eqZero	id:bigint | 1; 2; 4; 5
+f4/zeros/eqNegZero	id:bigint | 1; 2; 4; 5
+f4/zeros/ltZero	(0 rows)
+f4/zeros/geZero	id:bigint | 1; 2; 3; 4; 5
+f4/zeros/between	id:bigint | 3
+f4/zeros/in	id:bigint | 1; 2; 4; 5
+f4/zeros/notIn	id:bigint | 3
+f4/zeros/distinctFrom	id:bigint | 1; 2; 3; 4; 5
+f4/zeros/notDistinctFrom	id:bigint | 1; 2; 4; 5
+f4/zeros/projectCompare	id:bigint,gt:boolean,eqn:boolean,ltn:boolean,eqz:boolean | 1,f,f,t,t; 2,f,f,t,t; 3,f,f,t,f; 4,f,f,t,t; 5,f,f,t,t
+f4/zeros/greatestLeast	id:bigint,g:real,l:real,gn:real,ln:real | 1,1.5,-0,NaN,-0; 2,1.5,0,NaN,0; 3,1.5,1.5,NaN,1.5; 4,1.5,0,NaN,0; 5,1.5,-0,NaN,-0
+f4/zeros/rank	id:bigint,r:bigint,d:bigint | 1,1,1; 2,1,1; 3,5,2; 4,1,1; 5,1,1
+f4/zeros/rankDesc	id:bigint,r:bigint | 1,2; 2,2; 3,1; 4,2; 5,2
+f4/zeros/partition	id:bigint,n:bigint | 1,4; 2,4; 3,1; 4,4; 5,4
+f4/zeros/winMinMax	id:bigint,lo:real,hi:real | 1,-0,1.5; 2,-0,1.5; 3,-0,1.5; 4,-0,1.5; 5,-0,1.5
+f4/zeros/winRunning	id:bigint,lo:real,hi:real | 1,-0,-0; 2,0,0; 3,0,1.5; 4,0,1.5; 5,-0,1.5
+f4/zeros/winPartMax	id:bigint,hi:real | 1,1.5; 2,0; 3,1.5; 4,0; 5,1.5
+f4/zeros/union	c:real | -0; 1.5
+f4/zeros/intersect	c:real | 0; 1.5
+f4/zeros/except	c:real | 1.5
+f4/zeros/inSubquery	id:bigint | 1; 2; 4; 5
+f4/zeros/exists	id:bigint | 1; 2; 4; 5
+f4/zeros/eqScalarMax	id:bigint | 3
+f4/zeros/eqScalarMaxInf	id:bigint | 3
+f4/zeros/derivedMinMax	lo:real,hi:real | -0,1.5
+f4/zeros/cteGroupBy	c:real,n:bigint | -0,4; 1.5,1
+f4/zeros/unionAllMinMax	lo:real,hi:real | -0,1.5
+f4/zeros/unionAllGroupBy	c:real,n:bigint | -0,8; 1.5,2
+f8/values/minMax	lo:double precision,hi:double precision | -0,NaN
+f8/values/groupBy	c:double precision,n:bigint | -0,1; 1.5,1; Infinity,1; NaN,1
+f8/values/orderDesc	c:double precision | NaN; Infinity; 1.5; -0
+f8/values/greatest	g:double precision,l:double precision | NaN,-Infinity
+f4/values/minMax	lo:real,hi:real | -0,NaN
+f4/values/groupBy	c:real,n:bigint | -0,1; 1.5,1; Infinity,1; NaN,1
+f4/values/orderDesc	c:real | NaN; Infinity; 1.5; -0
+f4/values/greatest	g:real,l:real | NaN,-Infinity
