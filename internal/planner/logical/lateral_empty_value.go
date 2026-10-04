@@ -226,8 +226,11 @@ func onFoldsToTrue(node plansql.Node, text string) bool {
 // foldConstant evaluates a condition that reads no row, reporting ok=false
 // when it reads one or cannot be evaluated at all. NULL comes back as a nil
 // value with ok=true, which is a real answer and not a failure.
+//
+// A condition that reads a clock function is not folded (readsClock): its
+// value is the statement's clock, read where the statement runs (#1566).
 func foldConstant(node plansql.Node) (any, bool) {
-	if node == nil || !isConstantCondition(node) {
+	if node == nil || !isConstantCondition(node) || readsClock(node) {
 		return nil, false
 	}
 	compiled, err := expr.Compile(node)

@@ -23,6 +23,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/distributed"
 	"github.com/derekmwright/wadjet/internal/engine/diskio"
 	"github.com/derekmwright/wadjet/internal/engine/exec"
+	"github.com/derekmwright/wadjet/internal/engine/expr"
 	"github.com/derekmwright/wadjet/internal/engine/memory"
 	"github.com/derekmwright/wadjet/internal/engine/scan"
 	"github.com/derekmwright/wadjet/internal/metrics"
@@ -1917,6 +1918,7 @@ func (w *Worker) executeIncomingTaskDelivery(ctx context.Context, task distribut
 		}
 		taskCtx = distributed.ContextWithTrace(taskCtx, tc)
 	}
+	taskCtx = taskStatementContext(taskCtx, task)
 	// Per-task progress reporter. Operators along the hot loop (sources,
 	// sinks, exchange writers) call AddRows / AddBytes via
 	// exec.ProgressReporterFromContext; the heartbeat goroutine below
@@ -2713,4 +2715,18 @@ func (w *Worker) collectProfileEnvelope() WorkerProfile {
 		Mutex:     mutexBuf.Bytes(),
 		Goroutine: goroutineBuf.Bytes(),
 	}
+}
+
+// taskStatementContext carries the task's statement clock (#1566): the
+// instant its coordinator stamped (Task.StatementTime), so now() /
+// CURRENT_TIMESTAMP / CURRENT_DATE answer one value on every task of the
+// statement and a worker never reads its own clock for them. A task with no
+// stamp — from a coordinator that predates the field — falls back to the
+// task's own start: one value for the task, as before the field it was one
+// per evaluation.
+func taskStatementContext(ctx context.Context, task distributed.Task) context.Context {
+	if task.StatementTime == 0 {
+		return expr.StartStatement(ctx)
+	}
+	return expr.ContextWithStatementClock(ctx, time.Unix(0, task.StatementTime).UTC())
 }

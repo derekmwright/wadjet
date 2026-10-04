@@ -80,7 +80,15 @@ func filterIsConstantFalse(n *Node) bool {
 // evalConstantFilter evaluates a constant conjunct once; ok=false when it
 // does not compile or its evaluation raises (1/0 is the statement's answer
 // when the filter runs, not this pass's).
+//
+// A conjunct that reads a CLOCK function is not decided here either: its value
+// is the statement's clock (#1566), bound where the statement runs, and a
+// plan-time read of the live clock could fold a filter to an answer the
+// run-time evaluation of the same now() contradicts. It stays in the plan.
 func evalConstantFilter(node plansql.Node) (v any, ok bool) {
+	if readsClock(node) {
+		return nil, false
+	}
 	c, err := expr.Compile(node)
 	if err != nil {
 		return nil, false
@@ -119,4 +127,18 @@ func conjunctIsConstant(node plansql.Node) bool {
 		return nil, false
 	})
 	return constant
+}
+
+// readsClock reports whether node calls a SQL clock function (now(),
+// CURRENT_TIMESTAMP, LOCALTIMESTAMP, CURRENT_DATE): one value per statement,
+// which this layer has no statement to read (expr.StartStatement).
+func readsClock(node plansql.Node) bool {
+	found := false
+	plansql.RewriteExpr(node, func(x plansql.Node) (plansql.Node, bool) {
+		if f, ok := x.(*plansql.FuncCallNode); ok && expr.IsClockFunc(strings.ToLower(f.Name)) {
+			found = true
+		}
+		return nil, false
+	})
+	return found
 }

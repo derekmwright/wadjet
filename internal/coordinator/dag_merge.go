@@ -24,7 +24,7 @@ import (
 // resolves in the batch — if any source is missing (wrapped aggregates not
 // yet handled), falls back to a rename-only pass so the output is at least
 // non-empty rather than truncated to nothing.
-func applyOutputRenames(gr *gatherResult, renames []dagplan.OutputRename) {
+func applyOutputRenames(gr *gatherResult, renames []dagplan.OutputRename, opts ...expr.CompileOption) {
 	if gr == nil || len(renames) == 0 {
 		return
 	}
@@ -33,7 +33,7 @@ func applyOutputRenames(gr *gatherResult, renames []dagplan.OutputRename) {
 	// fully in memory and empty, keep the historical rename-only behavior;
 	// a spilled result always has decoded prefix batches (the budget is
 	// only exceeded after at least one decode), so columns are present.
-	br := newBatchRenamer(renames, gr.columns)
+	br := newBatchRenamer(renames, gr.columns, opts...)
 	if len(gr.batches) == 0 && gr.spillPath == "" && len(gr.columns) > 0 {
 		// Columns but no batches (historical edge): rename-only. A fully
 		// empty result (no columns either) keeps projecting the column
@@ -81,7 +81,7 @@ type batchRenamer struct {
 // source column resolves in columns (case-insensitive, tolerating worker-
 // side lowercasing). Otherwise batches get a rename-only pass so the output
 // is at least non-empty rather than truncated to nothing.
-func newBatchRenamer(renames []dagplan.OutputRename, columns []string) *batchRenamer {
+func newBatchRenamer(renames []dagplan.OutputRename, columns []string, opts ...expr.CompileOption) *batchRenamer {
 	br := &batchRenamer{renames: renames, project: true}
 	br.compiled = make(map[int]expr.Expr, len(renames))
 	br.exprType = make(map[int]parquet.TypeID, len(renames))
@@ -90,7 +90,7 @@ func newBatchRenamer(renames []dagplan.OutputRename, columns []string) *batchRen
 		if r.Expr == nil {
 			continue
 		}
-		e, cerr := expr.Compile(r.Expr)
+		e, cerr := expr.Compile(r.Expr, opts...)
 		if cerr != nil {
 			// Compilation failure → degrade to rename-only.
 			br.compiled = nil

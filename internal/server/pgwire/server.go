@@ -611,6 +611,14 @@ func (c *pgConn) queryContext() (context.Context, context.CancelFunc) {
 		sess.SSLCipher = tls.CipherSuiteName(st.CipherSuite)
 	}
 	ctx = syscatalog.WithSession(ctx, sess)
+	// The statement clock (#1566): now() / CURRENT_TIMESTAMP / CURRENT_DATE
+	// read this one instant on every row and every node the statement
+	// reaches — read here, at the door, so the embedded engine and the
+	// coordinator this statement is routed to keep it. Every statement reads
+	// its own: BEGIN / COMMIT are accepted and ignored (no transactions,
+	// ADR-0012 temporal r26), so the clock is the STATEMENT's, not a
+	// transaction's.
+	ctx = expr.StartStatement(ctx)
 	// Session-level statement_timeout overrides server default
 	timeout := c.queryTimeout
 	if v, ok := c.sessionVars["statement_timeout"]; ok {

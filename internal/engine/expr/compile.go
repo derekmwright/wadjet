@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
@@ -16,6 +17,11 @@ import (
 
 // compileContext holds optional state for expression compilation.
 type compileContext struct {
+	// clock is the statement clock the clock functions answer when
+	// clockBound (WithStatementClock, clock.go); unbound, they read the live
+	// clock per evaluation.
+	clock      time.Time
+	clockBound bool
 	// catalog answers the catalog functions (pg_catalog_fns.go) for this
 	// statement's identity; nil refuses them by name.
 	catalog     CatalogResolver
@@ -212,8 +218,8 @@ func applyCompileOptions(c *compileContext, opts []CompileOption) *compileContex
 }
 
 // Compile converts our AST Node into an Expr tree.
-func Compile(node plansql.Node) (Expr, error) {
-	return compileWithCtx(node, &compileContext{})
+func Compile(node plansql.Node, opts ...CompileOption) (Expr, error) {
+	return compileWithCtx(node, applyCompileOptions(&compileContext{}, opts))
 }
 
 // CompileWithRunner converts our AST Node into an Expr tree,
@@ -1436,6 +1442,7 @@ func compileFuncCallNamed(n *plansql.FuncCallNode, ctx *compileContext, checked 
 	}
 
 	fc := &FuncCall{Name: name, Args: args, answer: n.Answer && IntegralExtractField(name)}
+	bindClock(fc, ctx)
 	if len(args) == len(n.Args) {
 		// GREATEST / LEAST / NULLIF order their arguments through the one
 		// container comparator under each argument's declaration.

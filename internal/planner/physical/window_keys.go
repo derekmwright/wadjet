@@ -610,7 +610,7 @@ func (p *Planner) windowKeyProjections(keys map[string]windowKey, scope *logical
 		// operand compiled undeclared, so `(SELECT x.b …) * t.n + 3` was an
 		// exact numeric key computed in a double.
 		compiled, err := expr.CompileWithRunner(k.Expr, p.subqueryRunner, p.subqueryDeclOptionFor(scope),
-			p.subqueryBudgetOption(), p.catalogOption())
+			p.subqueryBudgetOption(), p.statementOption())
 		if err != nil {
 			return nil, nil, windowKeyCompileError(k.Text, err)
 		}

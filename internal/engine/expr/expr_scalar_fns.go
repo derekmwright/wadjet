@@ -100,6 +100,9 @@ type FuncCall struct {
 	// (plansql.FuncCallNode.Answer): an integer operand of numeric
 	// arithmetic there (integerOperand), as the plan declares it.
 	answer bool
+	// clockValue answers a clock function with its statement's value, bound
+	// at compile (bindClock, clock.go); nil keeps the registered evaluator.
+	clockValue ScalarFunc
 
 	// fnReady publishes fn and the argument-family flags below it: set last
 	// under fnMu, read first (and alone) by Eval.
@@ -434,6 +437,9 @@ func (e *FuncCall) resolveFnSlow() {
 	}
 	lower := strings.ToLower(e.Name)
 	e.fn = DefaultRegistry.Lookup(e.Name)
+	if e.clockValue != nil {
+		e.fn = e.clockValue
+	}
 	e.wantsText = stringInputFuncs[lower]
 	e.wantsNetworkText = networkTextFuncs[lower]
 	e.wantsInstant = temporalInputFuncs[lower]
@@ -1111,6 +1117,10 @@ type FuncRegistry struct {
 	// UDF's is its own parameter list. Recording it at registration is the
 	// only place the answer is known for certain.
 	udfs map[string]bool
+	// udfAt builds a UDF's evaluator for a statement that started at t: its
+	// body's clock functions answer t (#1566). A CREATE FUNCTION entry has
+	// one; a caller's RegisterFunc does not.
+	udfAt map[string]func(t time.Time) ScalarFunc
 }
 
 // NewFuncRegistry creates a new empty function registry.
@@ -1121,6 +1131,7 @@ func NewFuncRegistry() *FuncRegistry {
 		vecFuncs:   make(map[string]VecScalarFunc),
 		vecReturns: make(map[string]func() int),
 		udfs:       make(map[string]bool),
+		udfAt:      make(map[string]func(time.Time) ScalarFunc),
 	}
 }
 
@@ -1150,6 +1161,22 @@ func (r *FuncRegistry) RegisterUDF(name string, fn ScalarFunc, ret Ret) {
 	r.mu.Unlock()
 }
 
+// RegisterUDFAt is RegisterUDF for a CREATE FUNCTION body, with at building
+// the evaluator a statement's clock binds (bindClock).
+func (r *FuncRegistry) RegisterUDFAt(name string, fn ScalarFunc, at func(time.Time) ScalarFunc, ret Ret) {
+	r.RegisterUDF(name, fn, ret)
+	r.mu.Lock()
+	r.udfAt[strings.ToLower(name)] = at
+	r.mu.Unlock()
+}
+
+// lookupUDFAt is RegisterUDFAt's builder for name, or nil.
+func (r *FuncRegistry) lookupUDFAt(name string) func(time.Time) ScalarFunc {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.udfAt[strings.ToLower(name)]
+}
+
 // IsUDF reports whether this entry came from a CREATE FUNCTION or from a
 // caller's RegisterFunc rather than from this package's builtin tables.
 func (r *FuncRegistry) IsUDF(name string) bool {
@@ -1166,6 +1193,7 @@ func (r *FuncRegistry) Unregister(name string) bool {
 	delete(r.funcs, strings.ToLower(name))
 	delete(r.rets, strings.ToLower(name))
 	delete(r.udfs, strings.ToLower(name))
+	delete(r.udfAt, strings.ToLower(name))
 	r.mu.Unlock()
 	return existed
 }

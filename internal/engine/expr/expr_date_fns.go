@@ -11,8 +11,11 @@ import (
 
 // --- Date/time functions ---
 
+// fnNow and the other clock functions below are the evaluators a compile
+// with no statement clock keeps (clock.go): they read the live clock. A
+// compile a door reached answers the statement's value instead (bindClock).
 func fnNow(args []any) any {
-	return instantBox(clockNow())
+	return clockFuncs["now"](clockNow())
 }
 
 func fnYear(args []any) any {
@@ -171,9 +174,5 @@ func fnExtract(args []any) any {
 }
 
 func fnCurrentDate(args []any) any {
-	// UTC, the zone every other clock function renders in (clock.go). It read
-	// the machine's LOCAL date, so `CURRENT_DATE` and `CAST(NOW() AS DATE)`
-	// named two different days for the hours between local midnight and UTC
-	// midnight — #870.
-	return dateBox(clockNow().UTC())
+	return clockFuncs["current_date"](clockNow())
 }

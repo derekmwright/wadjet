@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
@@ -181,7 +182,8 @@ func (s *UDFStore) Register(def UDFDef, isAdmin bool) error {
 	// arbitrary SQL over the call's arguments — RetDynamic says so, and the
 	// planner keeps its own fallback for the projection. A UDF has no vec
 	// kernel, so nothing writes a typed slice on the strength of this.
-	DefaultRegistry.RegisterUDF(def.Name, s.makeScalarFunc(def.Name), RetDynamic)
+	DefaultRegistry.RegisterUDFAt(def.Name, s.makeScalarFunc(def.Name),
+		func(t time.Time) ScalarFunc { return s.makeScalarFuncAt(def.Name, &t) }, RetDynamic)
 
 	return nil
 }
@@ -283,7 +285,7 @@ func (s *UDFStore) CompileUDFCall(name string, argExprs []Expr) (Expr, error) {
 
 	argsSlice := make([]any, len(u.def.Params))
 	argsPtr := &argsSlice
-	body := cloneExprWithArgs(u.body, argsPtr)
+	body := cloneExprWithArgs(u.body, argsPtr, nil)
 
 	return &UDFCall{
 		Name:     name,
@@ -295,6 +297,14 @@ func (s *UDFStore) CompileUDFCall(name string, argExprs []Expr) (Expr, error) {
 }
 
 func (s *UDFStore) makeScalarFunc(name string) ScalarFunc {
+	return s.makeScalarFuncAt(name, nil)
+}
+
+// makeScalarFuncAt is makeScalarFunc for a statement that started at *at:
+// the body's clock functions (and those of a UDF it calls) answer *at, as a
+// PostgreSQL SQL function's now() answers its statement's (#1566). nil
+// leaves them on the live clock.
+func (s *UDFStore) makeScalarFuncAt(name string, at *time.Time) ScalarFunc {
 	return func(args []any) any {
 		s.mu.RLock()
 		u, ok := s.udfs[name]
@@ -307,7 +317,7 @@ func (s *UDFStore) makeScalarFunc(name string) ScalarFunc {
 		copy(argsSlice, args)
 		argsPtr := &argsSlice
 
-		body := cloneExprWithArgs(u.body, argsPtr)
+		body := cloneExprWithArgs(u.body, argsPtr, at)
 		return body.Eval(nil, 0)
 	}
 }
@@ -619,7 +629,7 @@ func walkFuncDeps(node plansql.Node, deps *[]string) {
 
 // cloneExprWithArgs deep-clones an expression tree, replacing all ParamRef
 // nodes' args pointer with the given pointer.
-func cloneExprWithArgs(e Expr, argsPtr *[]any) Expr {
+func cloneExprWithArgs(e Expr, argsPtr *[]any, at *time.Time) Expr {
 	if e == nil {
 		return nil
 	}
@@ -632,33 +642,33 @@ func cloneExprWithArgs(e Expr, argsPtr *[]any) Expr {
 		return &Lit{Val: n.Val}
 	case *BinOp:
 		return &BinOp{
-			Left:  cloneExprWithArgs(n.Left, argsPtr),
-			Right: cloneExprWithArgs(n.Right, argsPtr),
+			Left:  cloneExprWithArgs(n.Left, argsPtr, at),
+			Right: cloneExprWithArgs(n.Right, argsPtr, at),
 			Op:    n.Op,
 		}
 	case *UnaryOp:
 		return &UnaryOp{
-			Operand: cloneExprWithArgs(n.Operand, argsPtr),
+			Operand: cloneExprWithArgs(n.Operand, argsPtr, at),
 			Op:      n.Op,
 		}
 	case *Cmp:
-		return NewCmp(cloneExprWithArgs(n.Left, argsPtr),
-			cloneExprWithArgs(n.Right, argsPtr), n.Op)
+		return NewCmp(cloneExprWithArgs(n.Left, argsPtr, at),
+			cloneExprWithArgs(n.Right, argsPtr, at), n.Op)
 	case *And:
 		return &And{
-			Left:  cloneExprWithArgs(n.Left, argsPtr),
-			Right: cloneExprWithArgs(n.Right, argsPtr),
+			Left:  cloneExprWithArgs(n.Left, argsPtr, at),
+			Right: cloneExprWithArgs(n.Right, argsPtr, at),
 		}
 	case *Or:
 		return &Or{
-			Left:  cloneExprWithArgs(n.Left, argsPtr),
-			Right: cloneExprWithArgs(n.Right, argsPtr),
+			Left:  cloneExprWithArgs(n.Left, argsPtr, at),
+			Right: cloneExprWithArgs(n.Right, argsPtr, at),
 		}
 	case *Not:
-		return &Not{Operand: cloneExprWithArgs(n.Operand, argsPtr)}
+		return &Not{Operand: cloneExprWithArgs(n.Operand, argsPtr, at)}
 	case *IsNull:
 		return &IsNull{
-			Operand: cloneExprWithArgs(n.Operand, argsPtr),
+			Operand: cloneExprWithArgs(n.Operand, argsPtr, at),
 			Not:     n.Not,
 		}
 	// Offsets-shape nodes (shape_funcs.go) wrap a ColRef, which must be
@@ -667,74 +677,78 @@ func cloneExprWithArgs(e Expr, argsPtr *[]any) Expr {
 		return &ColIsNull{
 			Col:      &ColRef{Name: n.Col.Name},
 			Not:      n.Not,
-			Fallback: cloneExprWithArgs(n.Fallback, argsPtr).(*IsNull),
+			Fallback: cloneExprWithArgs(n.Fallback, argsPtr, at).(*IsNull),
 		}
 	case *ColEmptyStr:
 		return &ColEmptyStr{
 			Col:      &ColRef{Name: n.Col.Name},
 			Not:      n.Not,
-			Fallback: cloneExprWithArgs(n.Fallback, argsPtr).(*Cmp),
+			Fallback: cloneExprWithArgs(n.Fallback, argsPtr, at).(*Cmp),
 		}
 	case *ColShapeLen:
 		return &ColShapeLen{
 			Col:      &ColRef{Name: n.Col.Name},
 			Mul:      n.Mul,
-			Fallback: cloneExprWithArgs(n.Fallback, argsPtr).(*FuncCall),
+			Fallback: cloneExprWithArgs(n.Fallback, argsPtr, at).(*FuncCall),
 		}
 	case *flagsTest:
 		return &flagsTest{
 			Col:      &ColRef{Name: n.Col.Name},
 			Mask:     n.Mask,
 			Mode:     n.Mode,
-			Fallback: cloneExprWithArgs(n.Fallback, argsPtr).(*FuncCall),
+			Fallback: cloneExprWithArgs(n.Fallback, argsPtr, at).(*FuncCall),
 		}
 	case *FuncCall:
 		args := make([]Expr, len(n.Args))
 		for i, a := range n.Args {
-			args[i] = cloneExprWithArgs(a, argsPtr)
+			args[i] = cloneExprWithArgs(a, argsPtr, at)
 		}
-		return &FuncCall{Name: n.Name, Args: args}
+		fc := &FuncCall{Name: n.Name, Args: args}
+		if at != nil {
+			bindFuncAt(fc, *at)
+		}
+		return fc
 	case *Coalesce:
 		args := make([]Expr, len(n.Args))
 		for i, a := range n.Args {
-			args[i] = cloneExprWithArgs(a, argsPtr)
+			args[i] = cloneExprWithArgs(a, argsPtr, at)
 		}
 		return &Coalesce{Args: args}
 	case *Case:
 		c := &Case{}
 		if n.Operand != nil {
-			c.Operand = cloneExprWithArgs(n.Operand, argsPtr)
+			c.Operand = cloneExprWithArgs(n.Operand, argsPtr, at)
 		}
 		c.Whens = make([]CaseWhen, len(n.Whens))
 		for i, w := range n.Whens {
 			c.Whens[i] = CaseWhen{
-				Cond:   cloneExprWithArgs(w.Cond, argsPtr),
-				Result: cloneExprWithArgs(w.Result, argsPtr),
+				Cond:   cloneExprWithArgs(w.Cond, argsPtr, at),
+				Result: cloneExprWithArgs(w.Result, argsPtr, at),
 			}
 		}
 		if n.Else != nil {
-			c.Else = cloneExprWithArgs(n.Else, argsPtr)
+			c.Else = cloneExprWithArgs(n.Else, argsPtr, at)
 		}
 		return c
 	case *In:
 		values := make([]Expr, len(n.Values))
 		for i, v := range n.Values {
-			values[i] = cloneExprWithArgs(v, argsPtr)
+			values[i] = cloneExprWithArgs(v, argsPtr, at)
 		}
-		return NewIn(cloneExprWithArgs(n.Expr, argsPtr), values, n.Not)
+		return NewIn(cloneExprWithArgs(n.Expr, argsPtr, at), values, n.Not)
 	case *Between:
-		return NewBetween(cloneExprWithArgs(n.Expr, argsPtr),
-			cloneExprWithArgs(n.Low, argsPtr),
-			cloneExprWithArgs(n.Hi, argsPtr), n.Not)
+		return NewBetween(cloneExprWithArgs(n.Expr, argsPtr, at),
+			cloneExprWithArgs(n.Low, argsPtr, at),
+			cloneExprWithArgs(n.Hi, argsPtr, at), n.Not)
 	case *Like:
 		return &Like{
-			Expr:    cloneExprWithArgs(n.Expr, argsPtr),
-			Pattern: cloneExprWithArgs(n.Pattern, argsPtr),
+			Expr:    cloneExprWithArgs(n.Expr, argsPtr, at),
+			Pattern: cloneExprWithArgs(n.Pattern, argsPtr, at),
 			Not:     n.Not,
 		}
 	case *Cast:
 		return &Cast{
-			Operand:  cloneExprWithArgs(n.Operand, argsPtr),
+			Operand:  cloneExprWithArgs(n.Operand, argsPtr, at),
 			DestType: n.DestType,
 		}
 	default:
