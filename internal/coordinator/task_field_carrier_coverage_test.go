@@ -44,6 +44,8 @@ func TestTaskFieldCarrierCoverage(t *testing.T) {
 		// Identity / routing — no file paths.
 		"ID": notFile, "QueryID": notFile, "StageID": notFile, "Type": notFile,
 		"ClusterID": notFile, "TableName": notFile, "Attempt": notFile,
+		// The query's PostgreSQL numeric categories by column name (#381).
+		"PGCategories":   notFile,
 		"DegradedMemory": notFile, "EstimatedBytes": notFile,
 		"Priority": notFile, "PriorityDeep": notFile,
 

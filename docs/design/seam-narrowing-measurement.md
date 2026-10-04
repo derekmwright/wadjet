@@ -936,7 +936,10 @@ BJ, the planner's bushy option and its option set) and 19/217 (arc FR,
 `ReaderSchemaReads` — the counter the door gates read to prove a refused
 identity's file was never opened, ADR-0034) and 19/222 (arc CW, the five
 members that carry a container column's element and a VECTOR's width across
-the stage and wire specs, ADR-0045 §1). The change log lives with the
+the stage and wire specs, ADR-0045 §1) and 21/224 (arc RE,
+`PlanPGCategories` and `AggregatePGCategory` — the plan's PostgreSQL numeric
+category of the columns a stage reads from text, which ROUND and the
+integer cast round by, #381). The change log lives with the
 constants because that is where the next raise is written.
 
 ## Test placement and declaration renames
