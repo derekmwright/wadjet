@@ -351,10 +351,16 @@ func ResolveFilterKernel(typ batch.TypeID, op CompareOp, value any) FilterKernel
 		}
 		return compareFilterImpl(getInt64Data, n, op2)
 	case batch.TypeTimestamp:
-		// TIMESTAMP keeps its own string grammar (parseTimestampString via
-		// toInt64): a quoted string against a TIMESTAMP column is a timestamp,
-		// not an integer — #493, not #536.
-		return compareFilterImpl(getInt64Data, toInt64(value), op)
+		// TIMESTAMP keeps its own string grammar (TimestampFilterConst): a
+		// quoted string against a TIMESTAMP column is a timestamp, not an
+		// integer — #493, not #536. A text the grammar refuses returns no
+		// kernel; exec.timestampConstError raises its 22007 / 22008 / 22009
+		// (#1512: it read as 0, the epoch, and matched the row holding it).
+		ms, err := TimestampFilterConst(value)
+		if err != nil {
+			return nil
+		}
+		return compareFilterImpl(getInt64Data, ms, op)
 	case batch.TypeInt32:
 		n, op2, verdict, st := Int32FilterBound(value, op)
 		if st != IntConstOK {
@@ -1009,12 +1015,17 @@ func ResolveInFilterKernel(typ batch.TypeID, values []any, negate bool) FilterKe
 func ResolveInFilterKernelArity(typ batch.TypeID, values []any, negate bool, syntacticLen int) FilterKernel {
 	switch typ {
 	case batch.TypeTimestamp:
-		// TIMESTAMP keeps its own string grammar (parseTimestampString via
-		// toInt64): a quoted string against a TIMESTAMP column is a timestamp,
-		// not an integer — #493, not #536.
+		// TIMESTAMP keeps its own string grammar (TimestampFilterConst): a
+		// quoted string against a TIMESTAMP column is a timestamp, not an
+		// integer — #493, not #536. One member the grammar refuses returns no
+		// kernel for the whole list; exec.timestampConstError raises (#1512).
 		set := make(map[int64]struct{}, len(values))
 		for _, v := range values {
-			set[toInt64(v)] = struct{}{}
+			ms, err := TimestampFilterConst(v)
+			if err != nil {
+				return nil
+			}
+			set[ms] = struct{}{}
 		}
 		return inFilterInt64(getInt64Data, set, negate)
 	case batch.TypeInt64:
@@ -2014,21 +2025,27 @@ func matchLike(s, pattern string) bool {
 
 // --- Type conversion helpers ---
 
-func toInt64(v any) int64 {
+// TimestampFilterConst reads a TIMESTAMP comparison constant as epoch
+// milliseconds. Text goes through parquet.ParseTimestampMillis — the one
+// accept-set the writer, the ingest boundary and CAST read — and its failure
+// is returned, never read as 0: zero is 1970-01-01 00:00:00, a value the
+// column can hold, so `ts = 'garbage'` matched the epoch row where PostgreSQL
+// raises 22007 (#1512). A number keeps its recorded reading, the instant the
+// carrier holds (ADR-0012 comparison-membership).
+func TimestampFilterConst(v any) (int64, error) {
 	switch tv := v.(type) {
 	case int64:
-		return tv
+		return tv, nil
 	case int:
-		return int64(tv)
+		return int64(tv), nil
 	case int32:
-		return int64(tv)
+		return int64(tv), nil
 	case float64:
-		return int64(tv)
+		return int64(tv), nil
 	case string:
-		return parseTimestampString(tv)
-	default:
-		return 0
+		return parquet.ParseTimestampMillis(tv)
 	}
+	return 0, fmt.Errorf("internal: a TIMESTAMP comparison constant of type %T", v)
 }
 
 // IntConstStatus classifies an integer-column filter constant. IntConstOK
@@ -2180,7 +2197,7 @@ const pgIntWhitespace = " \t\n\v\f\r"
 // never a zero sentinel (#536, #463).
 // The grammar includes radix prefixes, underscore separators and decimal
 // leading zeros (#634); neither Go base-10 nor base-0 is equivalent.
-// TIMESTAMP text retains parseTimestampString, not this integer grammar (#493).
+// TIMESTAMP text retains TimestampFilterConst, not this integer grammar (#493).
 // Fractional/out-of-range float bounds require IntFilterBound's operator rewrite.
 // See docs/internals/kernel-integer-filter-constant-grammar.md for the design.
 func Int64FilterConst(v any) (int64, IntConstStatus) {
@@ -2293,20 +2310,6 @@ func DateLiteralDays(v any) (int32, error) {
 // count beyond the DATE column's int32 range rather than narrowing silently.
 func parseDateToDays(s string) (int32, error) {
 	return parquet.ParseDateDays(s)
-}
-
-// parseTimestampString parses a timestamp literal into epoch milliseconds for
-// an implicit string-to-timestamp comparison, through the SAME function the
-// writer and the ingest boundary use.
-//
-// It used to be a private copy of the layout list, and the copy had drifted
-// from the writer's: the space-separated millisecond form stored fine and no
-// predicate could read it back. It also converted an offset-bearing literal to
-// its UTC instant while PostgreSQL's `timestamp without time zone` discards
-// the offset, so a predicate and a write disagreed about what the same literal
-// means (#692).
-func parseTimestampString(s string) int64 {
-	return parquet.ParseTimestampMillisOrZero(s)
 }
 
 func toFloat64(v any) float64 {

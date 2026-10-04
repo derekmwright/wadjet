@@ -90,8 +90,8 @@ func TestToDateInt32RefusesOutOfRangeIntegers(t *testing.T) {
 		if err != nil {
 			t.Errorf("toDateInt32(%v) unexpected error: %v", v, err)
 		}
-		if v != nil && int64(got) != toInt64(v) {
-			t.Errorf("toDateInt32(%v) = %d, want %d", v, got, toInt64(v))
+		if want, _ := TimestampFilterConst(v); v != nil && int64(got) != want {
+			t.Errorf("toDateInt32(%v) = %d, want %d", v, got, want)
 		}
 	}
 }

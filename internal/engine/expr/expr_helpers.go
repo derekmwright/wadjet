@@ -207,18 +207,17 @@ func parseDateToEpochDaysCachedOK(s string) (int64, bool) {
 // parseDateToEpochDaysOK reads a date literal through THE accept-set, so a
 // DATE predicate and a TIMESTAMP predicate cannot disagree about what one
 // literal names (review B2).
+//
+// It is parquet.ParseDateDays — PostgreSQL's date input — and not the
+// timestamp's wall clock floored to a day: `'2024-01-14 24:00:00'` is the
+// DATE 2024-01-14 (the clock is read and dropped), while the wall clock rolls
+// it to the 15th (#1512).
 func parseDateToEpochDaysOK(s string) (int64, bool) {
-	t, ok := parquet.ParseTimestampWallClock(s)
-	if !ok {
+	days, err := parquet.ParseDateDays(s)
+	if err != nil {
 		return 0, false
 	}
-	const secondsPerDay = 86400
-	sec := t.Unix()
-	days := sec / secondsPerDay
-	if sec%secondsPerDay < 0 {
-		days--
-	}
-	return days, true
+	return int64(days), true
 }
 
 // parseTimestampToEpochMs parses common timestamp string formats into epoch

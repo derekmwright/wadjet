@@ -797,23 +797,40 @@ func TestFilterKernelDefaultCompareOp(t *testing.T) {
 
 // --- Type conversion helpers ---
 
-func TestToInt64(t *testing.T) {
+// TestTimestampFilterConst: a number keeps the instant the carrier holds;
+// text is read by the timestamp input function and a text it refuses is an
+// error, never 0 — the epoch, which matched the row holding it (#1512).
+func TestTimestampFilterConst(t *testing.T) {
 	tests := []struct {
 		input any
 		want  int64
+		state string
 	}{
-		{int64(42), 42},
-		{int(10), 10},
-		{int32(5), 5},
-		{float64(3.7), 3},
-		{"string", 0},
-		{nil, 0},
+		{int64(42), 42, ""},
+		{int(10), 10, ""},
+		{int32(5), 5, ""},
+		{float64(3.7), 3, ""},
+		{"1970-01-01 00:00:01", 1000, ""},
+		{"string", 0, "22007"},
+		{"", 0, "22007"},
+		{"2024-02-30", 0, "22008"},
+		{"2024-01-15 10:30:00+16", 0, "22009"},
 	}
 	for _, tt := range tests {
-		got := toInt64(tt.input)
-		if got != tt.want {
-			t.Fatalf("toInt64(%v) = %d, want %d", tt.input, got, tt.want)
+		got, err := TimestampFilterConst(tt.input)
+		if tt.state == "" {
+			if err != nil || got != tt.want {
+				t.Fatalf("TimestampFilterConst(%v) = %d, %v; want %d", tt.input, got, err, tt.want)
+			}
+			continue
 		}
+		c, ok := err.(interface{ SQLState() string })
+		if !ok || c.SQLState() != tt.state {
+			t.Fatalf("TimestampFilterConst(%q) = %d, %v; want SQLSTATE %s", tt.input, got, err, tt.state)
+		}
+	}
+	if _, err := TimestampFilterConst(nil); err == nil {
+		t.Fatal("TimestampFilterConst(nil): no error")
 	}
 }
 

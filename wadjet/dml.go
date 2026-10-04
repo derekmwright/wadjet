@@ -3503,9 +3503,15 @@ func refuseDMLPair(col parquet.Column, lit *plansql.Lit, op string) error {
 				pgOperandTypeName(col.Type), op)
 		}
 	case plansql.LitString:
-		// The runtime's own predicate, run early. A type with no rule
+		// The runtime's own predicates, run early. A type with no rule
 		// returns nil, so this is silent for everything but the numeric
-		// family.
+		// family and the two temporal types — a DATE / TIMESTAMP column
+		// coerces the text through its input function before any row, so
+		// `DELETE … WHERE id > 100 AND ts = 'garbage'` is 22007 even though
+		// no row reaches the comparison (#1512).
+		if err := expr.RefuseTemporalLiteral(col.Type, lit.Value); err != nil {
+			return err
+		}
 		return expr.RefuseNumericLiteral(col.Type, lit.Value)
 	}
 	return nil
