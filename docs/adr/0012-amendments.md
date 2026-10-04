@@ -1141,6 +1141,15 @@ Now `expr.translateAndCompile` is the one compile of a SQL-supplied pattern, in 
 
 2026-10-06: [numeric-decimal r24](0012-divergences/numeric-decimal.md#catalog) also covers CTAS from a computed numeric key with mixed select/GROUP BY spelling (ADR-0047): the created column now declares numeric, as PostgreSQL does, and trims trailing zeros (`wadjet.TestArcGKEmbeddedGroupKeySpelling` gk_c2 ordered; `pgwire.TestArcGKGroupKeySpellingOnTheWire` store/ctas/{s,e,b}); its `length(CAST(k AS TEXT))` consumer gives five groups where PostgreSQL gives three, matching the alike-spelling control at base and tip (`coordinator.TestArcGKCTASNumericTextEveryArm` mixedLength/alikeLength).
 
+## 2026-10-04: a float's rounding rule (arc RE, #381 #1542)
+
+ROUND, the integer cast and the cast of an array to an integer array decide the tie rule from the operand's PostgreSQL type in one place (expr.roundsHalfEven): double precision and real half to even, numeric half away from zero. At 89cea148 `round(f)` over a DOUBLE PRECISION column holding 2.5, 0.5, -2.5 answered 3, 1, -3 on all five arms (PostgreSQL 2, 0, -2; coordinator issue381/column), and `CAST(ARRAY[2.5::float8, 1.5::float8] AS BIGINT[])` {3,2} (PostgreSQL {2,2}; issue1542/arrlit_bigint); both are defects, not rows. A column a previous operator materialized reads the plan's category.
+
+| family | row | change | gate |
+|---|---|---|---|
+| dml-assignment | r2 | CLOSED (PostgreSQL's answer now): `CAST(s.x AS INTEGER)` over `(SELECT DISTINCT 5 / 2.0 + t.id * 0 AS x …) s` is 3 on all five arms, and so are the aggregate, GROUP BY, CTE, UNION, VALUES, window and join origins (89cea148: 2 on every arm; NX roundOrigin/*); the derived table's is 3 on the single-process arms (89cea148: 2) and still NULL on the stage DAG, a separate defect (roundOrigin/derived, kept) | `coordinator.TestArcNXNumericCarrierEveryArm` roundOrigin/\*, `coordinator.TestArcREFloatRoundsByDeclaredTypeOnEveryArm` numdivderived/\*, numdivcte/\*, numdivunion/\*, numdivmax/\* |
+| numeric-decimal | [r22](0012-divergences/numeric-decimal.md#catalog) | New: `round(f, 1)` over a double precision 0.25 is 0.2 where PostgreSQL raises 42883 — the operand's rule, half to even on f·10ⁿ; 89cea148 answered 0.3 over a column and 0.2 over a CAST literal | `wadjet.TestArcRERoundWithDigitsOverAFloatTakesTheFloatRule` |
+
 ## Dated markers inside the entries
 
 Every `Added` / `Amended` / `CLOSED` / `Corrected` / `narrowed` marker still inside an entry's retained text, in date order, with the entry that carries it.

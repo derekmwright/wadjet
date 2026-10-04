@@ -466,6 +466,19 @@ carries no category there (a parquet.Column, a batch.Vector and a `.wshf`
 schema have no field for it), so `CAST(s.x AS INTEGER)` over a DISTINCT
 `5 / 2.0` still rounds half to even (dml-assignment#r2, candidate NX-C1).
 
+Amended 2026-10-04 (arc RE, #381 #1542): the materialized column reads the
+PLAN's category. ROUND, the integer cast and an array element's cast make
+one decision (expr.roundsHalfEven) from the operand's category, and the
+category of a column a previous operator produced is the plan's
+(emittedColPGCategory): the single-process planner hands each projection,
+filter, aggregate input and window key its input's categories
+(expr.WithInputPGCategories), and a native-DAG query folds them by column
+name into a map every task and the gather's SELECT list read
+(physical.PlanPGCategories, distributed.Task.PGCategories). `CAST(s.x AS
+INTEGER)` over a DISTINCT `5 / 2.0` is 3 on all five arms (2 at 89cea148,
+NX roundOrigin/distinct), and dml-assignment#r2 is closed. A name the plan
+emits under two categories keeps the carrier's reading.
+
 ### 3. The (p,s) of a computed result follows the finite-decimal industry rule
 
 PostgreSQL has no `(p,s)` rule — numeric is unbounded. A finite carrier needs

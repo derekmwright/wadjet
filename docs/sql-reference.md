@@ -3498,14 +3498,16 @@ inside the operand is numeric, so `CAST(extract(year FROM d) * 0 + 2.5 AS INTEGE
 is 3. `extract(second FROM …)` answers whole seconds here
 (`extract(second FROM TIMESTAMP '2024-01-01 00:00:02.5')` is 2 where
 PostgreSQL answers 2.500000), so its `CAST` is 2 where PostgreSQL's is 3 —
-the value the cast reads differs, not its rounding. On the single-process
-arms a column that a derived table, a `DISTINCT`, an aggregate, a CTE, a set
-operation, `VALUES`, a window or a join produced from such a value is a
-double in the result and rounds half to even under a `CAST` (2 where
-PostgreSQL answers 3,
-[dml-assignment#r2](adr/0012-divergences/dml-assignment.md#catalog)), while an
-`INSERT … SELECT` of it into an integer column rounds 3; on the stage DAG a
-derived table's or a CTE's such column reads NULL, a separate defect.
+the value the cast reads differs, not its rounding. A column a derived
+table, a `DISTINCT`, an aggregate, a CTE, a set operation, `VALUES`, a window
+or a join produced from such a value keeps its type for the cast: `CAST(s.x
+AS INTEGER)` over `(SELECT DISTINCT 5 / 2.0 + t.id * 0 AS x FROM t) s` is 3,
+as on PostgreSQL, and over a derived table's `double precision` column 2 (on
+the stage DAG a derived table's float-carried numeric column reads NULL, a
+separate defect).
+The cast of an array to an integer array rounds each element by the
+element's type: `CAST(ARRAY[2.5::float8, 1.5::float8] AS BIGINT[])` is
+`{2,2}` and `CAST(ARRAY[2.5, 1.5] AS BIGINT[])` `{3,2}`, as on PostgreSQL.
 
 ## DISTINCT
 
@@ -4522,7 +4524,8 @@ SELECT host, agent_version
 | `ABS(n)` | Absolute value | `ABS(bytes_in - bytes_out)` |
 | `CEIL(n)` | Round up | `CEIL(avg_latency)` |
 | `FLOOR(n)` | Round down | `FLOOR(avg_latency)` |
-| `ROUND(n)` | Round to nearest | `ROUND(ratio)` |
+| `ROUND(n)` | Round to nearest, a tie by `n`'s type as in PostgreSQL: half to even for a `double precision` or `real` value — a column, a cast, an expression, a parameter or a quoted literal (`ROUND(f)` over 2.5, 0.5, -2.5 is 2, 0, -2) — and half away from zero for a `numeric` one (`ROUND(2.5)` is 3) | `ROUND(ratio)` |
+| `ROUND(n, d)` | Round to `d` fraction digits. Over a `numeric` it is PostgreSQL's `round(numeric, integer)`; over a `double precision` or `real` PostgreSQL has no such function (42883) and this engine answers it, rounding `n`·10^`d` half to even (`ROUND(f, 1)` over 0.25 is 0.2) — see [PostgreSQL differences](postgres-differences.md) | `ROUND(ratio, 2)` |
 | `POW(base, exp)` / `POWER(base, exp)` | Exponentiation | `POW(2, 10)` |
 | `SQRT(n)` | Square root | `SQRT(variance)` |
 | `MOD(a, b)` | Modulo | `MOD(17, 5)` → `2` |
