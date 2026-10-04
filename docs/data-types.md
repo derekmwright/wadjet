@@ -478,6 +478,17 @@ literal in a predicate, which read it through one accept-set. A literal whose
 fields name no instant (`2020-02-30`, month 13, hour 25) is SQLSTATE 22008;
 text that is not a timestamp at all is 22007.
 
+A quoted text compared with a `Timestamp` or `Date` — `=`, `<>`, `<`, `<=`,
+`>`, `>=`, `BETWEEN`, an `IN` list, a CASE, a join condition, a HAVING, an
+`UPDATE` or `DELETE` WHERE, a bound parameter — is read by that type's input
+function, and a text it refuses raises its code: `ts = 'garbage'` is 22007,
+`ts = '2024-02-30'` and `d = '0000-01-01'` 22008, `ts = '2024-01-15
+10:30:00+16'` 22009 (a zone displacement past ±15:59:59). The refusal does not
+wait for a row: over an empty table, beside a conjunct no row passes, or after
+the scan has skipped every file and row group, the statement raises as
+PostgreSQL's does. Until #1512 a refused text compared with a `Timestamp` in the embedded engine read
+as `1970-01-01 00:00:00` and matched a row holding the epoch.
+
 **One rendering.** A `Timestamp` coerced to text — `CAST(ts AS TEXT)`,
 `ts::text`, `ts || ''`, `CONCAT`, `UPPER` and every other string function,
 `LIKE`, `FORMAT('%s', ts)` — produces the same text the wire carries for the
