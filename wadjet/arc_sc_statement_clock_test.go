@@ -97,6 +97,16 @@ func TestArcSCEmbeddedStatementWritesOneClock(t *testing.T) {
 			if got := scQuery1(t, ctx, db, "SELECT count(DISTINCT ts), count(*) FROM sa WHERE ts = ct"); got != "1 4096" {
 				t.Errorf("CTAS now(), CURRENT_TIMESTAMP over 4096 rows: distinct, equal rows = %s; PostgreSQL 17.11: 1 4096", got)
 			}
+			// A table function's argument: the series starts at the statement's
+			// now() (PostgreSQL 17.11: 1 row equals it, every time). Many runs,
+			// because a fold that read its own clock disagreed in a few.
+			for i := 0; i < 64; i++ {
+				q := "SELECT count(*) FROM generate_series(CAST(extract(epoch FROM now()) * 1000 AS BIGINT), CAST(extract(epoch FROM now()) * 1000 AS BIGINT) + 5) g WHERE g = CAST(extract(epoch FROM now()) * 1000 AS BIGINT)"
+				if got := scQuery1(t, ctx, db, q); got != "1" {
+					t.Errorf("generate_series(now() in ms, … + 5) WHERE g = now() in ms, run %d: %s; PostgreSQL 17.11: 1", i, got)
+					break
+				}
+			}
 			// A UDF's body: PostgreSQL's SQL function reads the statement's now()
 			// too (17.11: count(DISTINCT sc_stamp(id)) over 4096 rows is 1).
 			if _, err := db.Query(ctx, "CREATE OR REPLACE FUNCTION sc_stamp(x) AS now()"); err != nil {
