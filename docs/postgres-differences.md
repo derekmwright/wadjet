@@ -18,7 +18,7 @@ Millisecond storage truncates `.123456` return as `.123`; PostgreSQL retains `.1
 
 **TIMESTAMP has no infinity.**
 
-`'infinity'` and `'-infinity'` are refused as timestamp input (22007) — in a CAST, a literal, a stored value, and compared with a DATE or TIMESTAMP (`ts < 'infinity'` is 22007 where PostgreSQL answers every non-null row) — and a binary timestamp parameter carrying PostgreSQL's infinity encoding (the int64 extremes) is refused at Bind (22023); PostgreSQL stores and returns both. (catalog: [temporal#r2, r3](adr/0012-divergences/temporal.md#catalog); #1266, #1512)
+`'infinity'` and `'-infinity'` are refused as timestamp input (22007) — in a CAST, a literal, a stored value and a bound parameter — and a binary timestamp parameter carrying PostgreSQL's infinity encoding (the int64 extremes) is refused at Bind (22023); PostgreSQL stores and returns both. Compared with a DATE or TIMESTAMP operand the planner types, the words are answered as PostgreSQL answers them (`ts < 'infinity'` is every non-NULL row). (catalog: [temporal#r2, r3](adr/0012-divergences/temporal.md#catalog); #1266, #1512)
 
 **Clock functions return zoneless UTC.**
 
