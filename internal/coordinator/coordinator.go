@@ -938,11 +938,15 @@ func (r *SQLResult) Rows() ([]map[string]any, error) {
 	if r == nil {
 		return nil, nil
 	}
+	// The result schema's printer (exec.TrimUnconstrainedRows, ADR-0024
+	// §10), read before Stream() detaches the batches.
+	schema := r.OutputSchema()
 	if r.stream == nil {
 		var rows []map[string]any
 		for _, b := range r.Batches {
 			rows = append(rows, b.ToRows()...)
 		}
+		exec.TrimUnconstrainedRows(schema, rows, nil)
 		return rows, nil
 	}
 	s := r.Stream()
@@ -954,6 +958,7 @@ func (r *SQLResult) Rows() ([]map[string]any, error) {
 			return rows, err
 		}
 		if b == nil {
+			exec.TrimUnconstrainedRows(schema, rows, nil)
 			return rows, nil
 		}
 		rows = append(rows, b.ToRows()...)
@@ -4186,7 +4191,10 @@ func columnNamesOf(schema []parquet.Column) []string {
 // batch to read the first from (#416).
 func schemaOrDeclared(gathered []parquet.Column, stages []dagplan.Stage) []parquet.Column {
 	if len(gathered) > 0 {
-		return gathered
+		// The batches' types, with the PLAN's answer to "a bare copy of a
+		// column created from an unconstrained numeric" (ADR-0024 §10): the
+		// printer the doors apply reads it, and a vector cannot carry it.
+		return exec.WithPlannedUnconstrained(gathered, dagplan.GatherOutputSchema(stages))
 	}
 	return dagplan.GatherOutputSchema(stages)
 }

@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/ingest"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
@@ -339,8 +340,44 @@ func renderRows(res *QueryResult) []string {
 	return out
 }
 
+// sameMultiset compares two results' rows as multisets. A column either side
+// prints as a column created from an unconstrained numeric (ADR-0024 §10) is
+// compared by its VALUE: the created table prints it without the trailing
+// zeros the query's one scale carries (`3.75` beside `3.750`).
 func sameMultiset(a, b *QueryResult) bool {
-	return ctasEqualStrings(renderRows(a), renderRows(b))
+	trim := unconstrainedPositions(a, b)
+	return ctasEqualStrings(renderTrimmedRows(a, trim), renderTrimmedRows(b, trim))
+}
+
+func unconstrainedPositions(rs ...*QueryResult) map[int]bool {
+	out := map[int]bool{}
+	for _, r := range rs {
+		for j, m := range r.ColumnMetas {
+			if m.Unconstrained {
+				out[j] = true
+			}
+		}
+	}
+	return out
+}
+
+func trimmedCells(res *QueryResult, i int, trim map[int]bool) []any {
+	cells := res.Cells(i)
+	for j := range cells {
+		if s, ok := cells[j].(string); ok && trim[j] {
+			cells[j] = batch.TrimDecimalText(s)
+		}
+	}
+	return cells
+}
+
+func renderTrimmedRows(res *QueryResult, trim map[int]bool) []string {
+	out := make([]string, 0, len(res.Rows))
+	for i := range res.Rows {
+		out = append(out, fmt.Sprint(trimmedCells(res, i, trim)))
+	}
+	sort.Strings(out)
+	return out
 }
 
 func ctasEqualStrings(a, b []string) bool {

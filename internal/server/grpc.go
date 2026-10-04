@@ -25,6 +25,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/auth"
 	"github.com/derekmwright/wadjet/internal/coordinator"
 	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/catalog"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -197,6 +198,7 @@ func (g *GRPCServer) QueryStream(req *wadjetv1.QueryRequest, stream wadjetv1.Wad
 				Plan:      result.Plan,
 			},
 		}
+		cs.schema = result.OutputSchema() // before Stream() detaches the batches
 		return streamResultBatches(cs, result.Stream())
 	}
 
@@ -267,7 +269,10 @@ func streamResultBatches(cs *chunkStreamer, stream coordinator.BatchStream) erro
 		if batchNeedsPositionalRows(b) {
 			vals = b.ToRowValues()
 		}
-		if err := cs.pushRows(b.ToRows(), vals); err != nil {
+		rows := b.ToRows()
+		// The result schema's printer (ADR-0024 §10).
+		exec.TrimUnconstrainedRows(cs.schema, rows, vals)
+		if err := cs.pushRows(rows, vals); err != nil {
 			return err
 		}
 	}
@@ -299,6 +304,9 @@ func batchNeedsPositionalRows(b *batch.RecordBatch) bool {
 // first response; an empty result still produces a single columns+stats
 // response — both exactly the legacy wire behavior.
 type chunkStreamer struct {
+	// schema is the coordinator result's declared schema, whose marker
+	// decides the printed text of an unconstrained numeric column.
+	schema      []parquet.Column
 	stream      wadjetv1.WadjetService_QueryStreamServer
 	columns     []string
 	stats       *wadjetv1.QueryStats
