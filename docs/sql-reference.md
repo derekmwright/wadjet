@@ -832,6 +832,19 @@ reads (see [the floating-point type names](data-types.md#the-floating-point-type
 Through v0.25.3 a column declared `FLOAT` was real; tables created then keep
 their real columns.
 
+A column declared `NUMERIC` or `DECIMAL` with no precision is PostgreSQL's
+unconstrained numeric: it is declared plain `numeric` (typmod −1, NULL
+`numeric_precision` / `numeric_scale`) and stores DECIMAL(38,10). A value
+keeps 10 fraction digits — more round half away from zero, so
+`0.00000000005` stores 0.0000000001 — and 28 integer digits; past that the
+write is SQLSTATE `22003`. A value prints without the stored scale's trailing
+zeros (`1.25`, `1`), so a trailing zero the writer typed is not printed
+(`2.50` prints `2.5`). The product of two such columns keeps 20 fraction
+digits and 18 integer digits (`v * v` over 1234567890 is `22003`; write
+`CAST(v AS NUMERIC(38,0)) * v`). `NUMERIC(p,s)` and `NUMERIC(p)` (scale 0)
+are the declared type. A table created before this rule declared `NUMERIC`
+as DECIMAL(38,0) and keeps it. See ADR-0024 §10.
+
 ## CREATE TABLE AS SELECT
 
 ```sql
@@ -875,6 +888,14 @@ already carries, so the table holds exactly the columns the identical bare
   than the query's output; the columns it does not reach keep the names the
   query published. A list longer than the output is SQLSTATE `42601`, `too
   many column names were specified`.
+- A column whose query output PostgreSQL types as plain `numeric` —
+  `CAST(b AS NUMERIC)`, a numeric literal, `COALESCE` / `CASE` / `GREATEST` /
+  `UNION ALL` over two scales, `SUM` / `AVG`, arithmetic, a typed NULL such as
+  `CAST(NULL AS NUMERIC)`, a bare copy of such a column — is created like a
+  column declared `NUMERIC` with no precision (above), at DECIMAL(38, s) with
+  s the output's scale or 10, whichever is more. A column copied from a `NUMERIC(p,s)`
+  column (or `NULLIF` over one) keeps `NUMERIC(p,s)`. A float-carried numeric
+  (`5 / 2.0 + id * 0`, `sqrt(n * n)`) is created double precision.
 - A declared type the Parquet writer cannot store is refused at `CREATE`, not
   at the first flush.
 
@@ -3782,7 +3803,7 @@ is `22012`; PostgreSQL answers), and a quoted one that does not coerce raises
 only when a row is read (aggregates-windows r21, r22). A NULL default under
 a CAST names its type family and no width: `CAST(NULL AS NUMERIC)` over a
 bigint is numeric, so a bigint value past 2^53 keeps its digits; a table
-created from such a result takes its one scale (aggregates-windows r24). A
+created from such a result is an unconstrained numeric column (ADR-0024 §10). A
 default that computes over a typed NULL (`CAST(NULL AS NUMERIC) + 0`) is
 double precision, and so is the result (#1541). An exponent-form literal no DECIMAL(38,s) holds (`1e300`) is
 double precision here as it is elsewhere, so the result is double precision

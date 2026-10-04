@@ -1040,6 +1040,18 @@ Now the door that starts a statement stamps one instant (`expr.StartStatement`: 
 
 Round 2 (the round-1 review's B1): two plan-time folds still compiled a clock function with no statement — a window function's integer argument (the parse-time constant folder) and the TABLESAMPLE percentage — and read a clock of their own. At 763f71e8 under a test clock that moves on one second per read, `lag(id, K)` / `lead` / `ntile(K)` / `nth_value(id, K)` and `TABLESAMPLE BERNOULLI (100 * (K % 2))`, K computed from `now()`, read the clock twice and answered `f` on the six doors, and `generate_series` with `now()`-derived bounds read it twice (fold/\*, `gate_advancing_clock_at_763f71e8_FAILS.log`); PostgreSQL answers `t` / `1`. Now the clock functions have no live-clock fallback (an unbound evaluation is XX000), the window folder takes the statement's context (it defers a clock-reading argument at parse time), and the builder records a clock-reading table-function or TABLESAMPLE argument for `logical.BindClockFolds`, which folds it with the statement clock where the plan meets its context.
 
+## 2026-10-05: a column created from an unconstrained numeric (arc UN, #1541)
+
+ADR-0024 §10 (Derek Wright's decision of 2026-10-05). At 8e681724 `CREATE TABLE d1 (v NUMERIC); INSERT INTO d1 VALUES (1.25)` stored 1 (DECIMAL(38,0)), and a CREATE TABLE AS column whose source PostgreSQL types as plain numeric took that source's (p,s): `CAST(b AS NUMERIC)` (38,0) stored a later 0.75 as 1, a literal `1.25` (3,2) refused a later 10 with 22003, `COALESCE` over numeric(10,2) and numeric(12,4) (12,4) refused 1234567890. Such a column is now DECIMAL(38, max(s, 10)) marked unconstrained (typmod −1, NULL numeric_precision / numeric_scale), its values print without trailing zeros, and a column created before the rule is unchanged (a store the 8e681724 binary wrote reads, writes and prints identically at the tip).
+
+| family | row | change | gate |
+|---|---|---|---|
+| dml-assignment | [r11](0012-divergences/dml-assignment.md#catalog) | Amended: generalized from a CTAS over COALESCE (DECIMAL(38,10), printed 12.7500000000) to every column created from an unconstrained numeric, DDL and CTAS: DECIMAL(38, max(s, 10)), typmod −1, printed without trailing zeros; the divergence left is the rounding past 10 fraction digits | `wadjet.TestArcUNUnconstrainedColumnEnumeration` |
+| numeric-decimal | [r17](0012-divergences/numeric-decimal.md#catalog) | Amended: the DECIMAL(38,20) product reaches every column created `NUMERIC` — `v * v` over 1234567890 is 22003 where 8e681724 (DECIMAL(38,0)) and PostgreSQL answer 1524157875019052100 (x1_vv); `CAST(v AS NUMERIC(38,0)) * v` answers | `coordinator.TestArcUNUnconstrainedColumnEveryArm` x1_vv, x1_cast |
+| numeric-decimal | [r23](0012-divergences/numeric-decimal.md#catalog) | Added: such a column keeps 10 fraction digits and 28 integer digits (0.00000000005 stores 0.0000000001; a 29-digit integer is 22003) | `wadjet.TestArcUNUnconstrainedColumnEnumeration` |
+| numeric-decimal | [r24](0012-divergences/numeric-decimal.md#catalog) | Added: a trailing zero the source carried is not printed (CTAS `2.50` prints 2.5) | `wadjet.TestAssignmentDoorsAgree`, `wadjet.TestArcUNUnconstrainedColumnEnumeration` |
+| aggregates-windows | r24 | CLOSED (PostgreSQL's answer now): a column created from a numeric LAG / LEAD result over a bigint stores a later 0.75 as 0.75 (c10; 8e681724 stored 1) | `wadjet.TestArcWDTypedNullCreateTableAs` c10 |
+
 ## Dated markers inside the entries
 
 Every `Added` / `Amended` / `CLOSED` / `Corrected` / `narrowed` marker still inside an entry's verbatim text, in date order, with the entry that carries it.
