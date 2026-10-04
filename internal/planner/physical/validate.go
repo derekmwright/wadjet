@@ -9,7 +9,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/derekmwright/wadjet/internal/engine/expr"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
@@ -62,7 +61,7 @@ func (p *Planner) ValidateColumns(ctx context.Context, info *plansql.SelectInfo)
 }
 
 func validateColumns(ctx context.Context, src tableColumnSource, info *plansql.SelectInfo) error {
-	b := &binder{ctx: ctx, src: src, ctes: map[string]cteEntry{}, now: expr.StatementClock()}
+	b := &binder{ctx: ctx, src: src, ctes: map[string]cteEntry{}}
 	return b.validateBlock(ctx, info, nil)
 }
 
@@ -644,11 +643,6 @@ type cteEntry struct {
 }
 
 type binder struct {
-	// now is the statement clock a 'now' / 'today' word is resolved to, read
-	// once per statement; folded counts the comparisons
-	// FoldSpecialTemporalWords rewrote (validate_special_temporal.go).
-	now    time.Time
-	folded int
 	// ctx is the validation's context, for the questions a check asks of a
 	// SUBQUERY's output (comparisonTyper), which run below checkExpr.
 	ctx         context.Context
@@ -698,7 +692,6 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 	if info == nil {
 		return nil
 	}
-	foldedBefore := b.folded
 
 	// Register this block's CTEs first so FROM sources and later CTEs can
 	// reference them. CTEs accumulate on the binder (additive scoping is only
@@ -1003,14 +996,8 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 		if col.Star || col.IsWindow {
 			continue
 		}
-		colFolded := b.folded
 		if err := b.checkExpr(col.ASTExpr, resolve); err != nil {
 			return err
-		}
-		if b.folded != colFolded && col.ASTExpr != nil {
-			// The item's text follows its rewritten AST (a stage DAG ships
-			// the text); its published name was stamped at parse time.
-			info.Columns[i].Expr = col.ASTExpr.String()
 		}
 		// A searched CASE's WHEN is a boolean context wherever it sits (#599).
 		if err := checkCaseWhenContexts(col.ASTExpr, resolve); err != nil {
@@ -1064,22 +1051,6 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 	}
 	if err := b.checkExpr(info.QualifyExpr, withOut); err != nil {
 		return err
-	}
-	// A clause the special-word fold rewrote keeps its text in step with its
-	// AST: the logical plan reads both (a WHERE's Raw, a join's Condition),
-	// and a stage DAG ships the text.
-	if b.folded != foldedBefore {
-		if info.WhereExpr != nil {
-			info.Where = info.WhereExpr.String()
-		}
-		if info.HavingExpr != nil {
-			info.Having = info.HavingExpr.String()
-		}
-		for i := range info.Joins {
-			if info.Joins[i].CondExpr != nil {
-				info.Joins[i].Condition = info.Joins[i].CondExpr.String()
-			}
-		}
 	}
 	// ORDER BY — items are raw expression strings; parse and check what parses.
 	for _, ob := range info.OrderBy {
@@ -1170,12 +1141,12 @@ func (b *binder) checkExpr(expr plansql.Node, scope *colScope) error {
 	if err := refuseLagLeadDefaultType(expr, rowFieldScopeDecls(scope)); err != nil {
 		return err
 	}
-	// PostgreSQL's special date/time words beside an operand whose DATE or
-	// TIMESTAMP type this block can state — a column (stored, or published
-	// by a derived table, a CTE or a set operation), a CAST, MIN / MAX over
-	// one, a scalar subquery — are resolved, or the comparison folded, here,
-	// where PostgreSQL coerces the constant and before the literal rule reads
-	// them (#1512, validate_special_temporal.go).
+	// A quoted literal compared with an operand whose DATE or TIMESTAMP type
+	// this block can state — a column (stored, or published by a derived
+	// table, a CTE or a set operation), a CAST, MIN / MAX over one, a scalar
+	// subquery, COALESCE-family, ± INTERVAL, date_trunc — is read by that
+	// type's input function here, where PostgreSQL coerces the constant, so
+	// its refusal comes before any row (#1512, validate_temporal_text.go).
 	if scope != nil {
 		structural := structuralTypeOf(rowFieldScopeDecls(scope))
 		var typeOf func(plansql.Node) (parquet.TypeID, bool)
@@ -1208,7 +1179,7 @@ func (b *binder) checkExpr(expr plansql.Node, scope *colScope) error {
 					}
 				case "coalesce", "ifnull", "nullif", "greatest", "least":
 					// One temporal type across every typed argument (a quoted
-					// literal takes it); anything else is not this fold's.
+					// literal takes it); anything else is not this walk's.
 					var common parquet.TypeID
 					for _, a := range v.Args {
 						if l, ok := unwrapParens(a).(*plansql.Lit); ok && (l.Kind == plansql.LitString || l.Kind == plansql.LitNull) {
@@ -1228,11 +1199,7 @@ func (b *binder) checkExpr(expr plansql.Node, scope *colScope) error {
 			}
 			return structural(n)
 		}
-		folded, err := FoldSpecialTemporalWords(expr, typeOf, b.now)
-		if folded {
-			b.folded++
-		}
-		if err != nil {
+		if err := RefuseTemporalTextBesideTypedOperand(expr, typeOf); err != nil {
 			return err
 		}
 	}

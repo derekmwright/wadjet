@@ -3649,24 +3649,6 @@ func BuildDMLPredicate(target plansql.DMLTarget, schema []parquet.Column, sub *D
 	if err := physical.RefuseAggregateInADMLPredicate(node); err != nil {
 		return nil, err
 	}
-	// PostgreSQL's special date/time words beside a DATE / TIMESTAMP column
-	// are resolved, or the comparison folded, before the literal rule reads
-	// them — the SELECT binder's rule (physical.FoldSpecialTemporalWords,
-	// #1512): `DELETE … WHERE ts < 'infinity'` deletes every non-NULL row.
-	if _, err := physical.FoldSpecialTemporalWords(node, func(n plansql.Node) (parquet.TypeID, bool) {
-		ref, ok := unwrapDMLParens(n).(*plansql.ColRef)
-		if !ok {
-			return 0, false
-		}
-		for _, c := range schema {
-			if strings.EqualFold(c.Name, ref.Column) {
-				return c.Type, true
-			}
-		}
-		return 0, false
-	}, expr.StatementClock()); err != nil {
-		return nil, err
-	}
 	if err := refuseDMLLiteralPairs(node, schema); err != nil {
 		return nil, err
 	}
