@@ -117,6 +117,9 @@ type CmpTemporalLit struct {
 	Flip bool  // literal was the LEFT operand: evaluate as (lit OP col)
 	days int64 // literal as epoch days
 	ms   int64 // literal as epoch milliseconds
+	// The input function's refusal of the literal as a DATE / a TIMESTAMP,
+	// raised when a column of that type meets it (#1512).
+	daysErr, msErr error
 }
 
 func (e *CmpTemporalLit) Eval(b *batch.RecordBatch, row int) any {
@@ -133,8 +136,14 @@ func (e *CmpTemporalLit) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool
 	var lit int64
 	switch e.Col.typ {
 	case batch.TypeDate:
+		if e.daysErr != nil {
+			panic(fatalEval{e.daysErr})
+		}
 		lit = e.days
 	case batch.TypeTimestamp:
+		if e.msErr != nil {
+			panic(fatalEval{e.msErr})
+		}
 		lit = e.ms
 	default:
 		// Non-temporal column: exact generic semantics (string columns
@@ -254,6 +263,14 @@ func (e *CmpNetworkLit) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool)
 		}
 		return e.evalCIDR(b, row)
 	default:
+		// A DATE / TIMESTAMP column: compileCmp built this node because the
+		// literal is a network spelling — '0000-01-01' is a macaddr — and no
+		// temporal one, so the column's input function refuses it, and that
+		// refusal is the answer; the generic compare() matched no row
+		// (#1512). RefuseTemporalLiteral is nil for every other type.
+		if err := RefuseTemporalLiteral(e.Col.typ, e.Lit); err != nil {
+			panic(fatalEval{err})
+		}
 		// Non-network column: exact generic semantics.
 		return e.genericFallback(b, row)
 	}

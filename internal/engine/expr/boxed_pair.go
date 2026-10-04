@@ -1297,6 +1297,27 @@ func temporalTextOrder(kind boxKind, tv, other any, otherText string) (int, bool
 	return 0, false
 }
 
+// refuseTemporalQuoted raises the input function's refusal of a QUOTED
+// literal compared with a DATE or TIMESTAMP operand (kind) — PostgreSQL
+// coerces the unknown-typed literal to the operand's type, so a text the
+// type refuses is 22007 / 22008 / 22009, never a fallthrough to compare(),
+// which answered FALSE for every row (`CASE WHEN ts = 'garbage'`, #1512).
+// A STRING column's values are not a literal and keep their reading.
+func refuseTemporalQuoted(kind boxKind, v any, text string) {
+	s, ok := v.(string)
+	if !ok {
+		s = text
+	}
+	if err := RefuseTemporalLiteral(temporalKindTypeOrZero(kind), s); err != nil {
+		panic(fatalEval{err})
+	}
+}
+
+func temporalKindTypeOrZero(k boxKind) batch.TypeID {
+	t, _ := temporalKindType(k)
+	return t
+}
+
 func cmpInt64(a, b int64) int {
 	switch {
 	case a < b:
@@ -1682,10 +1703,16 @@ func orderByKindsFold(lk, rk, lFold, rFold boxKind, lv, rv any, lText, rText str
 		}
 	// A TEMPORAL operand against text, in the DECLARED domain (#826).
 	case isTemporalKind(lk) && (rk == boxQuoted || rk == boxText):
+		if rk == boxQuoted {
+			refuseTemporalQuoted(lk, rv, rText)
+		}
 		if c, ok := temporalTextOrder(lk, lv, rv, rText); ok {
 			return c, true, false
 		}
 	case isTemporalKind(rk) && (lk == boxQuoted || lk == boxText):
+		if lk == boxQuoted {
+			refuseTemporalQuoted(rk, lv, lText)
+		}
 		if c, ok := temporalTextOrder(rk, rv, lv, lText); ok {
 			return -c, true, false
 		}

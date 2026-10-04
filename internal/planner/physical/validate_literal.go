@@ -338,6 +338,14 @@ func refuseLiteralAgainstColumn(scope *colScope, colSide, litSide plansql.Node) 
 	if kind != argTyped {
 		return nil
 	}
+	// A DATE / TIMESTAMP operand coerces the literal through its own input
+	// function, and PostgreSQL does it while analysing the statement: `ts =
+	// 'garbage'` is 22007 over an empty table, under a conjunct no row
+	// passes, and behind a pruned file alike. Here, and not in
+	// refuseLiteralForType, because the rule is the COMPARISON's (#1512).
+	if err := expr.RefuseTemporalLiteral(typ, lit.Value); err != nil {
+		return err
+	}
 	return refuseLiteralForType(typ, lit.Value)
 }
 

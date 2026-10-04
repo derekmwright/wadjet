@@ -100,6 +100,26 @@ func CheckUnknownTemporalLiteral(r UnknownTemporal, text string) (err error) {
 	return err
 }
 
+// RefuseTemporalLiteral is the refusal of a quoted literal coerced to a DATE
+// or TIMESTAMP operand's type: parquet.ParseDateDays' / ParseTimestampMillis'
+// own error (22007, 22008, 22009 in PostgreSQL's words), or nil when the text
+// names a value — and nil for every other type. One function, read at plan
+// time (physical.refuseLiteralForType: PostgreSQL coerces the constant while
+// it analyses the statement, so the refusal does not wait for a row) and by
+// the row-at-a-time comparison (refuseTemporalQuoted), so the two cannot
+// disagree about which texts name an instant (#1512).
+func RefuseTemporalLiteral(typ batch.TypeID, text string) error {
+	switch typ {
+	case batch.TypeDate:
+		_, err := parquet.ParseDateDays(text)
+		return err
+	case batch.TypeTimestamp:
+		_, err := parquet.ParseTimestampMillis(text)
+		return err
+	}
+	return nil
+}
+
 // unknownLiteralText is a compiled operand's text when it is a quoted
 // (string) literal.
 func unknownLiteralText(e Expr) (string, bool) {
