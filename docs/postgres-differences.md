@@ -446,6 +446,10 @@ PostgreSQL has no QUALIFY. It filters after windows, can read unprojected inputs
 
 `LAG(b, 1, (SELECT max(d) FROM t))` fails the query, with no SQLSTATE, where PostgreSQL evaluates the subquery once and answers; a constant subquery default such as `(SELECT 9)` answers, as does a column default. (catalog: [aggregates-windows#r23](adr/0012-divergences/aggregates-windows.md#catalog); #1435)
 
+**A table created from a numeric LAG / LEAD result takes the result's scale.**
+
+`CREATE TABLE c AS SELECT id, LAG(b, 1, CAST(NULL AS NUMERIC)) OVER (ORDER BY id) AS v FROM t` over a bigint `b` creates a DECIMAL(38,0) column, so a later `INSERT INTO c VALUES (9, 0.75)` stores 1 where PostgreSQL's column is unconstrained and stores 0.75. (catalog: [aggregates-windows#r24](adr/0012-divergences/aggregates-windows.md#catalog); #1436)
+
 **Network-native types have separate storage domains.**
 
 `IPV4`, `IPV6`, `CIDR` and `MAC` are native column types with PostgreSQL's `inet` and `macaddr` input grammar at every boundary — the writer, `CAST`, and a literal — but they declare `text` (OID 25) on the wire; `UUID` declares `uuid` (2950); `PORT` and `PROTOCOL` declare `integer` (23). A `CIDR` reads `inet`'s grammar, not `cidr`'s: it keeps host bits an `inet` would keep, where PostgreSQL's `cidr` refuses them, and `CAST('10' AS CIDR)` is 22P02 where PostgreSQL's classful reading answers `10.0.0.0/8`. See the [input grammar table](data-types.md#network-types). (catalog: [network#r1, r2, r3](adr/0012-divergences/network.md#catalog))
