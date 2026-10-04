@@ -1,0 +1,35 @@
+bare	SELECT id, v FROM un_t
+order	SELECT id, v FROM un_t ORDER BY v, id
+where_eq	SELECT id, v FROM un_t WHERE v = 1.25
+where_gt	SELECT id FROM un_t WHERE v > 1
+where_frac	SELECT id, v FROM un_t WHERE v = 0.755
+groupby	SELECT v, COUNT(*) FROM un_t GROUP BY v
+distinct	SELECT DISTINCT v FROM un_t
+derived	SELECT x.id, x.v FROM (SELECT id, v FROM un_t) x
+cte	WITH c AS (SELECT id, v FROM un_t) SELECT id, v FROM c
+join	SELECT t.id, t.v, u.v FROM un_t t JOIN un_u u ON t.id = u.id
+joinkey	SELECT t.id, u.id FROM un_t t JOIN un_u u ON t.v = u.v
+leftjoin	SELECT t.id, u.v FROM un_t t LEFT JOIN un_u u ON t.id = u.id
+union	SELECT v FROM un_t UNION ALL SELECT v FROM un_u
+union_n	SELECT v FROM un_t UNION ALL SELECT n FROM un_t
+minmax	SELECT MIN(v), MAX(v) FROM un_t
+sum	SELECT SUM(v) FROM un_t
+sum_g	SELECT g, SUM(v) FROM un_t GROUP BY g
+having	SELECT g, SUM(v) FROM un_t GROUP BY g HAVING SUM(v) > 2
+avg	SELECT AVG(w) FROM un_t
+plus	SELECT id, v + 1 FROM un_t
+cast_text	SELECT id, CAST(v AS TEXT) FROM un_t
+vw	SELECT id, v * w FROM un_t WHERE id <> 5
+x1_vv	SELECT id, v * v FROM un_t WHERE id = 5
+x1_cast	SELECT id, CAST(v AS NUMERIC(38,0)) * v FROM un_t WHERE id = 5
+x1_vb	SELECT id, v * b FROM un_t WHERE id = 5
+coalesce	SELECT id, COALESCE(v, n) FROM un_t
+case	SELECT id, CASE WHEN g = 1 THEN v ELSE n END FROM un_t
+lag	SELECT id, LAG(v) OVER (ORDER BY id) FROM un_t
+win_sum	SELECT id, SUM(v) OVER (PARTITION BY g) FROM un_t
+scalar	SELECT id, (SELECT MAX(v) FROM un_u) FROM un_t
+insub	SELECT id FROM un_t WHERE v IN (SELECT v FROM un_u)
+limit	SELECT id, v FROM un_t ORDER BY id LIMIT 3
+star	SELECT * FROM un_u
+div	SELECT id, v / 3 FROM un_t WHERE id IN (1, 6)
+round	SELECT id, ROUND(v, 1) FROM un_t
