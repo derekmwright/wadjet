@@ -199,6 +199,37 @@ func moCells() []nxCell {
 				"SELECT t.id, "+moSpell(s.op, x[1], x[2])+" FROM ss_t t WHERE t.id <> 4 ORDER BY t.id")
 		}
 	}
+	// Operand CLASSES PostgreSQL has no % / mod for (42883): a date, a
+	// timestamp, a text column, a boolean, a uuid, an array; an array
+	// element is an integer.
+	for _, k := range [][3]string{
+		{"d", "t.d", "2"}, {"ts", "t.ts", "2"}, {"s", "t.s", "2"}, {"o", "t.o", "2"}, {"u", "t.u", "2"}, {"a", "t.a", "2"},
+		{"rd", "8", "t.d"}, {"rs", "8", "t.s"}, {"dd", "t.d", "t.d"}, {"sq", "t.s", "'2'"}, {"ai", "t.a[1]", "t.i"}, {"ain", "t.a[1]", "t.n"},
+	} {
+		for _, s := range moSpellings {
+			add(fmt.Sprintf("k/%s/%s", k[0], s.name), true,
+				"SELECT t.id, "+moSpell(s.op, k[1], k[2])+" FROM ss_t t WHERE t.id IN (1, 2) ORDER BY t.id")
+		}
+	}
+	// A correlated subquery's body is re-spelled as text with the outer
+	// value in place: the operator's item must survive that.
+	for _, y := range [][3]string{{"arrN", "o.a[1]", "x.m"}, {"intN", "o.i", "x.m"}, {"intI", "o.i", "x.v"}, {"nQ", "o.n", "'2.5'"}} {
+		for _, s := range moSpellings {
+			add(fmt.Sprintf("y/%s/%s", y[0], s.name), true,
+				"SELECT o.id, (SELECT "+moSpell(s.op, y[1], y[2])+" FROM ss_i x WHERE x.id = 1) FROM ss_t o ORDER BY o.id")
+		}
+	}
+	// A deferred scalar subquery as an operand of the SELECT item and of a
+	// predicate on the stage DAG.
+	for _, v := range [][2]string{
+		{"projFrac", "SELECT t.id, %s FROM ss_t t WHERE t.id = 1"},
+		{"projAll", "SELECT t.id, %s FROM ss_t t ORDER BY t.id"},
+		{"where", "SELECT t.id FROM ss_t t WHERE %s > 0.3 ORDER BY t.id"},
+	} {
+		for _, s := range moSpellings {
+			add(fmt.Sprintf("v/%s/%s", v[0], s.name), true, fmt.Sprintf(v[1], moSpell(s.op, "(SELECT max(v) FROM ss_i)", "0.7")))
+		}
+	}
 	return out
 }
 
