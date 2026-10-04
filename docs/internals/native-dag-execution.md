@@ -1903,17 +1903,23 @@ producer below the window emits them under their own names
 the producer through every derived table between them — an aliased item or a
 bare pass-through column, so a chain of derived tables or CTEs above the
 shadowing one plans as a stage DAG too), so the shadowed source column is not
-on the stream, and every
-name walk that resolves a reference from above stops at such a window instead
-of respelling it into the table's definitions — the rename sources, the
-aggregate inputs, a set operation's arm, a pushed-down filter, a shuffle key,
-the window key ladder and a join side's declared schema. A producer that
-cannot compute every declared column — an aggregate, a window, a set
-operation or a DISTINCT below the table —
+on the stream. The block a query reads such a window through (`x` in
+`(SELECT id, SUM(b) OVER (…) AS w, b AS w3 FROM (…) s) x`,
+`logical.WindowShadowedBlock`) is a relation of its own: every name walk that
+resolves a reference from above stops AT it and keeps the block's own name
+(`x.w3`, `x.b`) — the rename sources, the aggregate inputs, a set
+operation's arm, a pushed-down filter, a shuffle key, the sort and window key
+ladders — and `dagplan.markWindowShadowedBlocks` publishes the block's list
+onto the window stage (the star-block publish), so the stream carries every
+item under the block's name. A join above names a published arm by the
+block's alias, as it names a materialized one (#780), so the arm's duplicate
+`b` is `x.b`, never the probe's bare `b`; the side's declared schema carries
+the table's columns, composed down the chain, and the window's own outputs.
+A walk entering BELOW the block (the window's own keys and argument) still
+stops at the window. A producer that cannot compute every declared column —
+an aggregate, a window, a set operation or a DISTINCT below the table —
 refuses the plan with `ErrUnreachableGatherOutput`, which routes it to the
-coordinator-local pipeline. On a join's BUILD side such a window arm is one
-relation's columns (`physical.armIsOneRelationsColumns`), so the gather reads
-its duplicate columns under the build alias the join qualified them with.
+coordinator-local pipeline.
 
 **Not covered:** frames are carried end to end but `exec.Window` never reads
 `WindowColumn.Frame` at all (#350) — an operator defect both paths share.
