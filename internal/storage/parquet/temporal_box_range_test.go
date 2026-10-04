@@ -12,7 +12,9 @@ import (
 // TestTemporalBoxRangeIsPostgreSQLs holds CheckLeafBox — the writer's own
 // box question, which the ingest boundary asks — to PostgreSQL's DATE and
 // TIMESTAMP range for every typed box a temporal column accepts (arc VL
-// round-4 review P2): one past either end is 22008, the end itself stores.
+// round-4 review P2): one past either end is 22008, the end itself stores —
+// and so do the carrier's two extremes, which are the infinite values
+// (DatePosInfinity …), while the integers beside them are 22008.
 func TestTemporalBoxRangeIsPostgreSQLs(t *testing.T) {
 	d := Column{Name: "d", Type: TypeDate}
 	ts := Column{Name: "ts", Type: TypeTimestamp}
@@ -23,12 +25,15 @@ func TestTemporalBoxRangeIsPostgreSQLs(t *testing.T) {
 	}{
 		{d, int32(MaxDateDay), ""}, {d, int64(MaxDateDay + 1), "22008"},
 		{d, int64(MinDateDay), ""}, {d, int(MinDateDay - 1), "22008"},
-		{d, int32(2147483647), "22008"}, {d, int32(-2147483648), "22008"},
+		{d, int32(2147483647), ""}, {d, int32(-2147483648), ""},
+		{d, int32(2147483646), "22008"}, {d, int32(-2147483647), "22008"},
+		{d, int64(2147483647), ""}, {d, int64(2147483648), "22008"},
 		{d, time.Date(5874897, 12, 31, 0, 0, 0, 0, time.UTC), ""},
 		{d, time.Date(5874898, 1, 1, 0, 0, 0, 0, time.UTC), "22008"},
 		{ts, int64(EndTimestampMilli - 1), ""}, {ts, int64(EndTimestampMilli), "22008"},
 		{ts, int64(MinTimestampMilli), ""}, {ts, int64(MinTimestampMilli - 1), "22008"},
-		{ts, int64(9223372036854775807), "22008"},
+		{ts, int64(9223372036854775807), ""}, {ts, int64(-9223372036854775808), ""},
+		{ts, int64(9223372036854775806), "22008"}, {ts, int64(-9223372036854775807), "22008"},
 		{ts, time.UnixMilli(EndTimestampMilli - 1).UTC(), ""},
 		{ts, time.UnixMilli(EndTimestampMilli).UTC(), "22008"},
 		{ts, time.Date(300000, 1, 1, 0, 0, 0, 0, time.UTC), "22008"},

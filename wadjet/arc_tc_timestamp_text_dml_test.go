@@ -193,12 +193,12 @@ func TestArcTCPrunedScanStillRaises(t *testing.T) {
 
 // TestArcTCDMLSpecialWordsRefuseAsCastDoes: PostgreSQL's special date/time
 // words in a DML WHERE (#1512). The comparison coerces its text exactly as
-// CAST does: 'epoch' is read by the grammar and deletes / updates
-// PostgreSQL's rows; every other word ('infinity', '-infinity', 'now',
-// 'today', …) is refused 22007 as `CAST('…' AS TIMESTAMP)` is (ADR-0012
-// temporal r2 / r25) and the statement changes NOTHING. PostgreSQL 17.11
-// answers each refused statement (tc_author/r3/pg_dml3.txt); the refusal is
-// the kept divergence.
+// CAST does: 'epoch', 'infinity' and '-infinity' are read by the grammar
+// (the two infinite values since arc TI) and delete / update PostgreSQL's
+// rows; every other word ('now', 'today', …) is refused 22007 as
+// `CAST('…' AS TIMESTAMP)` is (ADR-0012 temporal r25) and the statement
+// changes NOTHING. PostgreSQL 17.11 answers each refused statement
+// (tc_author/r3/pg_dml3.txt); the refusal is the kept divergence.
 func TestArcTCDMLSpecialWordsRefuseAsCastDoes(t *testing.T) {
 	ctx := context.Background()
 	for _, c := range []struct {
@@ -209,14 +209,14 @@ func TestArcTCDMLSpecialWordsRefuseAsCastDoes(t *testing.T) {
 	}{
 		{`DELETE FROM dm WHERE ts = 'epoch'`, 1, "2,3,4", ""},
 		{`UPDATE dm SET id = id + 100 WHERE d = ' EPOCH '`, 1, "2,3,4,101", ""},
-		{`DELETE FROM dm WHERE ts < 'infinity'`, 3, "3", "timestamp: \"infinity\""},
+		{`DELETE FROM dm WHERE ts < 'infinity'`, 3, "3", ""},
 		{`DELETE FROM dm WHERE ts = 'now'`, 0, "1,2,3,4", "timestamp: \"now\""},
-		{`DELETE FROM dm WHERE d > '-infinity'`, 3, "3", "date: \"-infinity\""},
-		{`DELETE FROM dm WHERE ts NOT IN ('infinity')`, 3, "3", "timestamp: \"infinity\""},
+		{`DELETE FROM dm WHERE d > '-infinity'`, 3, "3", ""},
+		{`DELETE FROM dm WHERE ts NOT IN ('infinity')`, 3, "3", ""},
 		{`DELETE FROM dm WHERE d < 'today'`, 3, "3", "date: \"today\""},
 		{`DELETE FROM dm WHERE id > 100 AND ts < 'tomorrow'`, 0, "1,2,3,4", "timestamp: \"tomorrow\""},
-		{`UPDATE dm SET id = id + 100 WHERE ts = 'infinity'`, 0, "1,2,3,4", "timestamp: \"infinity\""},
-		{`UPDATE dm SET id = id + 100 WHERE ts BETWEEN '-infinity' AND 'epoch'`, 1, "2,3,4,101", "timestamp: \"-infinity\""},
+		{`UPDATE dm SET id = id + 100 WHERE ts = 'infinity'`, 0, "1,2,3,4", ""},
+		{`UPDATE dm SET id = id + 100 WHERE ts BETWEEN '-infinity' AND 'epoch'`, 1, "2,3,4,101", ""},
 		{`UPDATE dm SET id = id + 100 WHERE d >= 'yesterday'`, 0, "1,2,3,4", "date: \"yesterday\""},
 	} {
 		t.Run(c.sql, func(t *testing.T) {

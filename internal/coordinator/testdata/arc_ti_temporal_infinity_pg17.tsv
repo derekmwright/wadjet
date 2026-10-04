@@ -1,0 +1,389 @@
+# cell	PostgreSQL 17.11 (TimeZone UTC, DateStyle ISO, MDY)	kept engine answer	catalog row
+ar/d_minus_1	rows=[1|1969-12-31 ; 2|2024-01-14 ; 3|infinity ; 4|-infinity ; 5|NULL ; 6|9999-12-30 ; 7|1969-12-30 ; 8|infinity]
+ar/d_minus_d	ERR 22008
+ar/d_minus_iv	rows=[1|1969-12-31 00:00:00 ; 2|2024-01-14 00:00:00 ; 3|infinity ; 4|-infinity ; 5|NULL ; 6|9999-12-30 00:00:00 ; 7|1969-12-30 00:00:00 ; 8|infinity]
+ar/d_minus_lit	ERR 22008
+ar/d_plus_1	rows=[1|1970-01-02 ; 2|2024-01-16 ; 3|infinity ; 4|-infinity ; 5|NULL ; 6|10000-01-01 ; 7|1970-01-01 ; 8|infinity]
+ar/d_plus_iv	rows=[1|1970-01-02 00:00:00 ; 2|2024-01-16 00:00:00 ; 3|infinity ; 4|-infinity ; 5|NULL ; 6|10000-01-01 00:00:00 ; 7|1970-01-01 00:00:00 ; 8|infinity]
+ar/d_to_int	ERR 42846	ERR 22008	temporal r2 (an infinite value has no number: 22008)
+ar/d_to_ts	rows=[1|1970-01-01 00:00:00 ; 2|2024-01-15 00:00:00 ; 3|infinity ; 4|-infinity ; 5|NULL ; 6|9999-12-31 00:00:00 ; 7|1969-12-31 00:00:00 ; 8|infinity]
+ar/date_part_dyear	rows=[1|1970 ; 2|2024 ; 3|Infinity ; 4|-Infinity ; 5|NULL ; 6|9999 ; 7|1969 ; 8|Infinity]
+ar/date_part_year	rows=[1|1970 ; 2|2024 ; 3|Infinity ; 4|-Infinity ; 5|NULL ; 6|9999 ; 7|1969 ; 8|Infinity]
+ar/date_trunc_d	rows=[1|1970-01-01 00:00:00+00 ; 2|2024-01-01 00:00:00+00 ; 3|infinity ; 4|-infinity ; 5|NULL ; 6|9999-01-01 00:00:00+00 ; 7|1969-01-01 00:00:00+00 ; 8|infinity]	rows=[1|1970-01-01 00:00:00 ; 2|2024-01-01 00:00:00 ; 3|infinity ; 4|-infinity ; 5|NULL ; 6|9999-01-01 00:00:00 ; 7|1969-01-01 00:00:00 ; 8|infinity]	base-identical: date_trunc over a DATE declares timestamp, PostgreSQL timestamptz
+ar/date_trunc_day	rows=[1|1970-01-01 00:00:00 ; 2|2024-01-15 00:00:00 ; 3|infinity ; 4|-infinity ; 5|NULL ; 6|9999-12-31 00:00:00 ; 7|1969-12-31 00:00:00 ; 8|infinity]
+ar/date_trunc_mon	rows=[1|1970-01-01 00:00:00 ; 2|2024-01-01 00:00:00 ; 3|infinity ; 4|-infinity ; 5|NULL ; 6|9999-12-01 00:00:00 ; 7|1969-12-01 00:00:00 ; 8|infinity]
+ar/eng_at_timezone(ts, 'UTC')	ERR 42883	ERR 22008	temporal r2 (an engine-only temporal function over an infinite value: 22008)
+ar/eng_date_add('day', 1, ts)	ERR 42883
+ar/eng_date_diff('day', ts, TIMESTAMP '2024-01-01')	ERR 42883
+ar/eng_date_format(ts, '%Y')	ERR 42883	ERR 22008	temporal r2 (an engine-only temporal function over an infinite value: 22008)
+ar/eng_date_sub('day', 1, d)	ERR 42883
+ar/eng_day(d)	ERR 42883	rows=[2|15 ; 3|NULL ; 4|NULL]	base-identical: an engine-only function (PostgreSQL 42883); an EXTRACT field function answers what EXTRACT answers
+ar/eng_day_of_week(ts)	ERR 42883	rows=[2|1 ; 3|NULL ; 4|NULL]	base-identical: an engine-only function (PostgreSQL 42883); an EXTRACT field function answers what EXTRACT answers
+ar/eng_day_of_year(d)	ERR 42883	rows=[2|15 ; 3|NULL ; 4|NULL]	base-identical: an engine-only function (PostgreSQL 42883); an EXTRACT field function answers what EXTRACT answers
+ar/eng_epoch(ts)	ERR 42883	rows=[2|1705314600 ; 3|Infinity ; 4|-Infinity]	base-identical: an engine-only function (PostgreSQL 42883); an EXTRACT field function answers what EXTRACT answers
+ar/eng_hour(ts)	ERR 42883	rows=[2|10 ; 3|NULL ; 4|NULL]	base-identical: an engine-only function (PostgreSQL 42883); an EXTRACT field function answers what EXTRACT answers
+ar/eng_last_day_of_month(d)	ERR 42883	ERR 22008	temporal r2 (an engine-only temporal function over an infinite value: 22008)
+ar/eng_minute(ts)	ERR 42883	rows=[2|30 ; 3|NULL ; 4|NULL]	base-identical: an engine-only function (PostgreSQL 42883); an EXTRACT field function answers what EXTRACT answers
+ar/eng_month(ts)	ERR 42883	rows=[2|1 ; 3|NULL ; 4|NULL]	base-identical: an engine-only function (PostgreSQL 42883); an EXTRACT field function answers what EXTRACT answers
+ar/eng_quarter(ts)	ERR 42883	rows=[2|1 ; 3|NULL ; 4|NULL]	base-identical: an engine-only function (PostgreSQL 42883); an EXTRACT field function answers what EXTRACT answers
+ar/eng_second(ts)	ERR 42883	rows=[2|0 ; 3|NULL ; 4|NULL]	base-identical: an engine-only function (PostgreSQL 42883); an EXTRACT field function answers what EXTRACT answers
+ar/eng_time_bucket(INTERVAL '1 day', ts)	ERR 42883	rows=[2|2024-01-15 00:00:00 ; 3|infinity ; 4|-infinity]	base-identical: an engine-only function (PostgreSQL 42883); an EXTRACT field function answers what EXTRACT answers
+ar/eng_timezone('UTC', ts)	rows=[2|2024-01-15 10:30:00+00 ; 3|infinity ; 4|-infinity]	rows=[2|2024-01-15 10:30:00 ; 3|infinity ; 4|-infinity]	base-identical: timezone() declares timestamp, PostgreSQL timestamptz
+ar/eng_to_date(ts)	ERR 42883	ERR 22008	temporal r2 (an engine-only temporal function over an infinite value: 22008)
+ar/eng_to_unixtime(ts)	ERR 42883	ERR 22008	temporal r2 (an engine-only temporal function over an infinite value: 22008)
+ar/eng_week(ts)	ERR 42883	rows=[2|3 ; 3|NULL ; 4|NULL]	base-identical: an engine-only function (PostgreSQL 42883); an EXTRACT field function answers what EXTRACT answers
+ar/eng_year(ts)	ERR 42883	rows=[2|2024 ; 3|Infinity ; 4|-Infinity]	base-identical: an engine-only function (PostgreSQL 42883); an EXTRACT field function answers what EXTRACT answers
+ar/extract_d_century	rows=[2|21 ; 3|Infinity ; 4|-Infinity]	ERR 42883	base-identical: an EXTRACT field this engine does not extract (42883)
+ar/extract_d_day	rows=[2|15 ; 3|NULL ; 4|NULL]
+ar/extract_d_decade	rows=[2|202 ; 3|Infinity ; 4|-Infinity]	ERR 42883	base-identical: an EXTRACT field this engine does not extract (42883)
+ar/extract_d_dow	rows=[2|1 ; 3|NULL ; 4|NULL]
+ar/extract_d_doy	rows=[2|15 ; 3|NULL ; 4|NULL]
+ar/extract_d_epoch	rows=[2|1705276800 ; 3|Infinity ; 4|-Infinity]
+ar/extract_d_hour	ERR 0A000	rows=[2|0 ; 3|NULL ; 4|NULL]	base-identical: EXTRACT of a time field from a DATE answers 0 (PostgreSQL 0A000)
+ar/extract_d_isodow	rows=[2|1 ; 3|NULL ; 4|NULL]	ERR 42883	base-identical: an EXTRACT field this engine does not extract (42883)
+ar/extract_d_isoyear	rows=[2|2024 ; 3|Infinity ; 4|-Infinity]	ERR 42883	base-identical: an EXTRACT field this engine does not extract (42883)
+ar/extract_d_julian	rows=[2|2460325 ; 3|Infinity ; 4|-Infinity]	ERR 42883	base-identical: an EXTRACT field this engine does not extract (42883)
+ar/extract_d_microseconds	ERR 0A000	ERR 42883	base-identical: an EXTRACT field this engine does not extract (42883)
+ar/extract_d_millennium	rows=[2|3 ; 3|Infinity ; 4|-Infinity]	ERR 42883	base-identical: an EXTRACT field this engine does not extract (42883)
+ar/extract_d_milliseconds	ERR 0A000	ERR 42883	base-identical: an EXTRACT field this engine does not extract (42883)
+ar/extract_d_minute	ERR 0A000	rows=[2|0 ; 3|NULL ; 4|NULL]	base-identical: EXTRACT of a time field from a DATE answers 0 (PostgreSQL 0A000)
+ar/extract_d_month	rows=[2|1 ; 3|NULL ; 4|NULL]
+ar/extract_d_quarter	rows=[2|1 ; 3|NULL ; 4|NULL]
+ar/extract_d_second	ERR 0A000	rows=[2|0 ; 3|NULL ; 4|NULL]	base-identical: EXTRACT of a time field from a DATE answers 0 (PostgreSQL 0A000)
+ar/extract_d_week	rows=[2|3 ; 3|NULL ; 4|NULL]
+ar/extract_d_year	rows=[2|2024 ; 3|Infinity ; 4|-Infinity]
+ar/extract_ts_century	rows=[2|21 ; 3|Infinity ; 4|-Infinity]	ERR 42883	base-identical: an EXTRACT field this engine does not extract (42883)
+ar/extract_ts_day	rows=[2|15 ; 3|NULL ; 4|NULL]
+ar/extract_ts_decade	rows=[2|202 ; 3|Infinity ; 4|-Infinity]	ERR 42883	base-identical: an EXTRACT field this engine does not extract (42883)
+ar/extract_ts_dow	rows=[2|1 ; 3|NULL ; 4|NULL]
+ar/extract_ts_doy	rows=[2|15 ; 3|NULL ; 4|NULL]
+ar/extract_ts_epoch	rows=[2|1705314600.000000 ; 3|Infinity ; 4|-Infinity]	rows=[2|1705314600 ; 3|Infinity ; 4|-Infinity]	base-identical: EXTRACT declares double precision, PostgreSQL numeric
+ar/extract_ts_hour	rows=[2|10 ; 3|NULL ; 4|NULL]
+ar/extract_ts_isodow	rows=[2|1 ; 3|NULL ; 4|NULL]	ERR 42883	base-identical: an EXTRACT field this engine does not extract (42883)
+ar/extract_ts_isoyear	rows=[2|2024 ; 3|Infinity ; 4|-Infinity]	ERR 42883	base-identical: an EXTRACT field this engine does not extract (42883)
+ar/extract_ts_julian	rows=[2|2460325.43750000000000000000 ; 3|Infinity ; 4|-Infinity]	ERR 42883	base-identical: an EXTRACT field this engine does not extract (42883)
+ar/extract_ts_microseconds	rows=[2|0 ; 3|NULL ; 4|NULL]	ERR 42883	base-identical: an EXTRACT field this engine does not extract (42883)
+ar/extract_ts_millennium	rows=[2|3 ; 3|Infinity ; 4|-Infinity]	ERR 42883	base-identical: an EXTRACT field this engine does not extract (42883)
+ar/extract_ts_milliseconds	rows=[2|0.000 ; 3|NULL ; 4|NULL]	ERR 42883	base-identical: an EXTRACT field this engine does not extract (42883)
+ar/extract_ts_minute	rows=[2|30 ; 3|NULL ; 4|NULL]
+ar/extract_ts_month	rows=[2|1 ; 3|NULL ; 4|NULL]
+ar/extract_ts_quarter	rows=[2|1 ; 3|NULL ; 4|NULL]
+ar/extract_ts_second	rows=[2|0.000000 ; 3|NULL ; 4|NULL]	rows=[2|0 ; 3|NULL ; 4|NULL]	base-identical: EXTRACT declares double precision, PostgreSQL numeric
+ar/extract_ts_week	rows=[2|3 ; 3|NULL ; 4|NULL]
+ar/extract_ts_year	rows=[2|2024 ; 3|Infinity ; 4|-Infinity]
+ar/finite_iv_ctrl	rows=[1|1970-01-02 00:00:00|1970-01-02 ; 2|2024-01-16 10:30:00|2024-01-16 ; 5|NULL|NULL ; 6|10000-01-01 23:59:59|10000-01-01 ; 7|1970-01-01 23:59:59.999|1970-01-01]
+ar/group_trunc	rows=[-infinity|1 ; 1969-12-31 00:00:00|1 ; 1970-01-01 00:00:00|1 ; 2024-01-15 00:00:00|1 ; 9999-12-31 00:00:00|1 ; infinity|2 ; NULL|1]
+ar/in_where_arith	rows=[3 ; 8]
+ar/in_where_darith	rows=[3 ; 6 ; 8]
+ar/iv_plus_ts	rows=[1|1970-01-02 00:00:00 ; 2|2024-01-16 10:30:00 ; 3|infinity ; 4|-infinity ; 5|NULL ; 6|10000-01-01 23:59:59 ; 7|1970-01-01 23:59:59.999 ; 8|infinity]
+ar/lit_cast_rt	rows=[infinity|-infinity]
+ar/lit_d_int	rows=[infinity|-infinity]
+ar/lit_d_minus	ERR 22008
+ar/lit_minus_ts	rows=[1|19723 days ; 2|-14 days -10:30:00 ; 3|-infinity ; 4|infinity ; 5|NULL ; 6|-2913173 days -23:59:59 ; 7|19723 days 00:00:00.001 ; 8|-infinity]	ERR 22008	temporal r2 (an infinite value has no number: 22008)
+ar/lit_ts_iv	rows=[infinity|-infinity]
+ar/lit_ts_minus	ERR 22008
+ar/of_d_big_ts	ERR 22008
+ar/of_d_first_out	ERR 22008
+ar/of_d_plus1	ERR 22008
+ar/of_d_to_max	ERR 22008
+ar/of_d_to_max2	ERR 22008
+ar/of_d_to_min	ERR 22008
+ar/of_int_to_d	ERR 42846	ERR 22008	temporal r5 (an integer-to-DATE cast; past the range 22008)
+ar/of_int_to_d_min	ERR 42846	ERR 22008	temporal r5 (an integer-to-DATE cast; past the range 22008)
+ar/of_ts_first_out	ERR 22008
+ar/of_ts_iv	ERR 22008
+ar/of_ts_max_ms	rows=[294276-12-31 23:59:59.999]
+ar/of_ts_neg	rows=[4031-01-01 00:00:00 BC]	rows=[-4030-01-01 00:00:00]	base-identical: a BC instant prints a signed year
+ar/of_ts_years	ERR 22008
+ar/one_plus_d	rows=[1|1970-01-02 ; 2|2024-01-16 ; 3|infinity ; 4|-infinity ; 5|NULL ; 6|10000-01-01 ; 7|1970-01-01 ; 8|infinity]
+ar/sort_by_arith	rows=[4 ; 7 ; 1 ; 2 ; 6 ; 3 ; 8 ; 5]
+ar/ts_minus_iv	rows=[1|1969-12-31 00:00:00 ; 2|2024-01-14 10:30:00 ; 3|infinity ; 4|-infinity ; 5|NULL ; 6|9999-12-30 23:59:59 ; 7|1969-12-30 23:59:59.999 ; 8|infinity]
+ar/ts_minus_lit	rows=[1|-19723 days ; 2|14 days 10:30:00 ; 3|infinity ; 4|-infinity ; 5|NULL ; 6|2913173 days 23:59:59 ; 7|-19723 days -00:00:00.001 ; 8|infinity]	ERR 22008	temporal r2 (an infinite value has no number: 22008)
+ar/ts_minus_ts	ERR 22008
+ar/ts_plus_iv	rows=[1|1970-01-02 00:00:00 ; 2|2024-01-16 10:30:00 ; 3|infinity ; 4|-infinity ; 5|NULL ; 6|10000-01-01 23:59:59 ; 7|1970-01-01 23:59:59.999 ; 8|infinity]
+ar/ts_to_bigint	ERR 42846	ERR 22008	temporal r2 (an infinite value has no number: 22008)
+ar/ts_to_d	rows=[1|1970-01-01 ; 2|2024-01-15 ; 3|infinity ; 4|-infinity ; 5|NULL ; 6|9999-12-31 ; 7|1969-12-31 ; 8|infinity]
+ar/ts_to_double	ERR 42846	ERR 22008	temporal r2 (an infinite value has no number: 22008)
+ar/ts_to_ts	rows=[1|1970-01-01 00:00:00 ; 2|2024-01-15 10:30:00 ; 3|infinity ; 4|-infinity ; 5|NULL ; 6|9999-12-31 23:59:59 ; 7|1969-12-31 23:59:59.999 ; 8|infinity]
+big/distinct/d	rows=[702|27000|30000]
+big/distinct/ts	rows=[21002|27000|30000]
+big/eq_ninf/d	rows=[3000|1|29991]
+big/eq_ninf/ts	rows=[3000|1|29991]
+big/group_hi/d	rows=[infinity|3000 ; 2002-09-26|30 ; 2002-09-25|30]
+big/group_hi/ts	rows=[infinity|3000 ; 2000-01-01 08:19:59|1 ; 2000-01-01 08:19:58|1]
+big/group_lo/d	rows=[NULL|3000 ; -infinity|3000 ; 2000-01-04|30]
+big/group_lo/ts	rows=[NULL|3000 ; -infinity|3000 ; 2000-01-01 00:00:03|1]
+big/join_j/d	rows=[1|3000 ; 2|3000]
+big/join_j/ts	rows=[1|3000 ; 2|3000]
+big/lt_inf/d	rows=[24000]
+big/lt_inf/ts	rows=[24000]
+big/minmax/d	rows=[-infinity|infinity]
+big/minmax/ts	rows=[-infinity|infinity]
+big/part_count/d	rows=[-infinity|3000 ; infinity|3000]
+big/part_count/ts	rows=[-infinity|3000 ; infinity|3000]
+big/rank_first/d	rows=[3000]
+big/rank_first/ts	rows=[3000]
+big/rank_last/d	rows=[27001]
+big/rank_last/ts	rows=[27001]
+big/self_join/d	rows=[27000]
+big/self_join/ts	rows=[27000]
+big/sort_asc/d	rows=[1 ; 11 ; 21 ; 31]
+big/sort_asc/ts	rows=[1 ; 11 ; 21 ; 31]
+big/sort_desc/d	rows=[10 ; 20 ; 30 ; 40]
+big/sort_desc/ts	rows=[10 ; 20 ; 30 ; 40]
+big/sort_tail/d	rows=[30000 ; 29990]
+big/sort_tail/ts	rows=[30000 ; 29990]
+in/cast/DATE/"  -Infinity  "	rows=[-infinity]
+in/cast/DATE/" infinity "	rows=[infinity]
+in/cast/DATE/"+ infinity"	rows=[infinity]
+in/cast/DATE/"++infinity"	ERR 22007
+in/cast/DATE/"+-infinity"	ERR 22007
+in/cast/DATE/"+inf"	ERR 22007
+in/cast/DATE/"+infinity"	rows=[infinity]
+in/cast/DATE/"- infinity"	rows=[-infinity]
+in/cast/DATE/"--infinity"	ERR 22007
+in/cast/DATE/"-INFINITY"	rows=[-infinity]
+in/cast/DATE/"-inf"	ERR 22007
+in/cast/DATE/"-infinity"	rows=[-infinity]
+in/cast/DATE/"2024-01-15"	rows=[2024-01-15]
+in/cast/DATE/"INFINITY"	rows=[infinity]
+in/cast/DATE/"Infinity"	rows=[infinity]
+in/cast/DATE/"epoch"	rows=[1970-01-01]
+in/cast/DATE/"inf"	ERR 22007
+in/cast/DATE/"infinit"	ERR 22007
+in/cast/DATE/"infinity 10:00"	ERR 22007
+in/cast/DATE/"infinity BC"	rows=[infinity]	ERR 22007	temporal r25 (an era beside the word: the grammar reads no era)
+in/cast/DATE/"infinity x"	ERR 22007
+in/cast/DATE/"infinity"	rows=[infinity]
+in/cast/DATE/"infinity+05"	ERR 22007
+in/cast/DATE/"infinityy"	ERR 22007
+in/cast/TIMESTAMP/"  -Infinity  "	rows=[-infinity]
+in/cast/TIMESTAMP/" infinity "	rows=[infinity]
+in/cast/TIMESTAMP/"+ infinity"	rows=[infinity]
+in/cast/TIMESTAMP/"++infinity"	ERR 22007
+in/cast/TIMESTAMP/"+-infinity"	ERR 22007
+in/cast/TIMESTAMP/"+inf"	ERR 22007
+in/cast/TIMESTAMP/"+infinity"	rows=[infinity]
+in/cast/TIMESTAMP/"- infinity"	rows=[-infinity]
+in/cast/TIMESTAMP/"--infinity"	ERR 22007
+in/cast/TIMESTAMP/"-INFINITY"	rows=[-infinity]
+in/cast/TIMESTAMP/"-inf"	ERR 22007
+in/cast/TIMESTAMP/"-infinity"	rows=[-infinity]
+in/cast/TIMESTAMP/"2024-01-15"	rows=[2024-01-15 00:00:00]
+in/cast/TIMESTAMP/"INFINITY"	rows=[infinity]
+in/cast/TIMESTAMP/"Infinity"	rows=[infinity]
+in/cast/TIMESTAMP/"epoch"	rows=[1970-01-01 00:00:00]
+in/cast/TIMESTAMP/"inf"	ERR 22007
+in/cast/TIMESTAMP/"infinit"	ERR 22007
+in/cast/TIMESTAMP/"infinity 10:00"	ERR 22007
+in/cast/TIMESTAMP/"infinity BC"	rows=[infinity]	ERR 22007	temporal r25 (an era beside the word: the grammar reads no era)
+in/cast/TIMESTAMP/"infinity x"	ERR 22007
+in/cast/TIMESTAMP/"infinity"	rows=[infinity]
+in/cast/TIMESTAMP/"infinity+05"	ERR 22007
+in/cast/TIMESTAMP/"infinityy"	ERR 22007
+in/coloncolon/DATE/inf	rows=[infinity|-infinity]
+in/coloncolon/TIMESTAMP/inf	rows=[infinity|-infinity]
+in/tab_nl/DATE	rows=[infinity]
+in/tab_nl/TIMESTAMP	rows=[infinity]
+in/text_col/DATE	rows=[-infinity ; 2024-01-15 ; infinity]
+in/text_col/TIMESTAMP	rows=[-infinity ; 2024-01-15 00:00:00 ; infinity]
+in/typed_lit/DATE/inf	rows=[infinity|-infinity]
+in/typed_lit/TIMESTAMP/inf	rows=[infinity|-infinity]
+in/values/DATE	rows=[-infinity ; 2024-01-15 ; infinity]
+in/values/TIMESTAMP	rows=[-infinity ; 2024-01-15 00:00:00 ; infinity]
+ord/between/d	rows=[1 ; 2 ; 3 ; 4 ; 6 ; 7 ; 8]
+ord/between/ts	rows=[1 ; 2 ; 3 ; 4 ; 6 ; 7 ; 8]
+ord/between_fin/d	rows=[2 ; 3 ; 6 ; 8]
+ord/between_fin/ts	rows=[2 ; 3 ; 6 ; 8]
+ord/case/d	rows=[1|fin ; 2|fin ; 3|pos ; 4|neg ; 5|fin ; 6|fin ; 7|fin ; 8|pos]
+ord/case/ts	rows=[1|fin ; 2|fin ; 3|pos ; 4|neg ; 5|fin ; 6|fin ; 7|fin ; 8|pos]
+ord/coalesce/d	rows=[1|1970-01-01 ; 2|2024-01-15 ; 3|infinity ; 4|-infinity ; 5|infinity ; 6|9999-12-31 ; 7|1969-12-31 ; 8|infinity]
+ord/coalesce/ts	rows=[1|1970-01-01 00:00:00 ; 2|2024-01-15 10:30:00 ; 3|infinity ; 4|-infinity ; 5|infinity ; 6|9999-12-31 23:59:59 ; 7|1969-12-31 23:59:59.999 ; 8|infinity]
+ord/count/d	rows=[4|4]
+ord/count/ts	rows=[4|4]
+ord/count_distinct/d	rows=[6]
+ord/count_distinct/ts	rows=[6]
+ord/cross_eq	rows=[1 ; 3 ; 4 ; 8]
+ord/cross_in	rows=[1 ; 3 ; 8]
+ord/cross_join	rows=[3|1 ; 4|2 ; 8|1]
+ord/cross_lit	rows=[t|f|t]
+ord/cross_lt	rows=[2 ; 6 ; 7]
+ord/cross_union	rows=[-infinity ; 2024-01-15 00:00:00 ; infinity ; NULL]	ERR 0A000	set-operations r7 (no common carrier for DATE and TIMESTAMP)
+ord/cte/d	rows=[3 ; 6 ; 8]
+ord/cte/ts	rows=[3 ; 6 ; 8]
+ord/derived/d	rows=[3 ; 8]
+ord/derived/ts	rows=[3 ; 8]
+ord/distinct/d	rows=[1 ; 2 ; 4 ; 5 ; 6 ; 7]
+ord/distinct/ts	rows=[1 ; 2 ; 4 ; 5 ; 6 ; 7]
+ord/distinct_sel/d	rows=[-infinity ; 1969-12-31 ; 1970-01-01 ; 2024-01-15 ; 9999-12-31 ; infinity ; NULL]
+ord/distinct_sel/ts	rows=[-infinity ; 1969-12-31 23:59:59.999 ; 1970-01-01 00:00:00 ; 2024-01-15 10:30:00 ; 9999-12-31 23:59:59 ; infinity ; NULL]
+ord/eq_any/d	rows=[2 ; 3 ; 8]	ERR 22007	open: filing candidate TC-F1 (ANY / ALL of a quoted array literal reads the literal as one scalar)
+ord/eq_any/ts	rows=[3 ; 8]	ERR 22007	open: filing candidate TC-F1 (ANY / ALL of a quoted array literal reads the literal as one scalar)
+ord/eq_inf/d	rows=[3 ; 8]
+ord/eq_inf/ts	rows=[3 ; 8]
+ord/eq_ninf/d	rows=[4]
+ord/eq_ninf/ts	rows=[4]
+ord/except/d	rows=[1969-12-31 ; 1970-01-01 ; 9999-12-31]
+ord/except/ts	rows=[1969-12-31 23:59:59.999 ; 1970-01-01 00:00:00 ; 9999-12-31 23:59:59]
+ord/finite_ctrl/d	rows=[1 ; 2 ; 6 ; 7]
+ord/finite_ctrl/ts	rows=[1 ; 2 ; 6 ; 7]
+ord/ge_ninf/d	rows=[1 ; 2 ; 3 ; 4 ; 6 ; 7 ; 8]
+ord/ge_ninf/ts	rows=[1 ; 2 ; 3 ; 4 ; 6 ; 7 ; 8]
+ord/greatest/d	rows=[1|2024-01-01 ; 2|2024-01-15 ; 3|infinity ; 4|2024-01-01 ; 5|2024-01-01 ; 6|9999-12-31 ; 7|2024-01-01 ; 8|infinity]
+ord/greatest/ts	rows=[1|2024-01-01 00:00:00 ; 2|2024-01-15 10:30:00 ; 3|infinity ; 4|2024-01-01 00:00:00 ; 5|2024-01-01 00:00:00 ; 6|9999-12-31 23:59:59 ; 7|2024-01-01 00:00:00 ; 8|infinity]
+ord/group/d	rows=[-infinity|1 ; 1969-12-31|1 ; 1970-01-01|1 ; 2024-01-15|1 ; 9999-12-31|1 ; infinity|2 ; NULL|1]
+ord/group/ts	rows=[-infinity|1 ; 1969-12-31 23:59:59.999|1 ; 1970-01-01 00:00:00|1 ; 2024-01-15 10:30:00|1 ; 9999-12-31 23:59:59|1 ; infinity|2 ; NULL|1]
+ord/group_by_cmp/d	rows=[f|2 ; t|5 ; NULL|1]
+ord/group_by_cmp/ts	rows=[f|2 ; t|5 ; NULL|1]
+ord/gt_finite/d	rows=[2 ; 3 ; 6 ; 8]
+ord/gt_finite/ts	rows=[2 ; 3 ; 6 ; 8]
+ord/gt_inf/d	rows=[]
+ord/gt_inf/ts	rows=[]
+ord/gt_ninf/d	rows=[1 ; 2 ; 3 ; 6 ; 7 ; 8]
+ord/gt_ninf/ts	rows=[1 ; 2 ; 3 ; 6 ; 7 ; 8]
+ord/having/d	rows=[0|4 ; 1|4]
+ord/having/ts	rows=[0|4 ; 1|4]
+ord/in/d	rows=[3 ; 4 ; 8]
+ord/in/ts	rows=[3 ; 4 ; 8]
+ord/in_sub/d	rows=[2 ; 3 ; 4 ; 8]
+ord/in_sub/ts	rows=[2 ; 3 ; 4 ; 8]
+ord/intersect/d	rows=[-infinity ; 2024-01-15 ; infinity ; NULL]
+ord/intersect/ts	rows=[-infinity ; 2024-01-15 10:30:00 ; infinity ; NULL]
+ord/join/d	rows=[2|3 ; 3|1 ; 4|2 ; 8|1]
+ord/join/ts	rows=[2|3 ; 3|1 ; 4|2 ; 8|1]
+ord/lag/d	rows=[1|NULL ; 2|1970-01-01 ; 3|2024-01-15 ; 4|infinity ; 5|-infinity ; 6|NULL ; 7|9999-12-31 ; 8|1969-12-31]
+ord/lag/ts	rows=[1|NULL ; 2|1970-01-01 00:00:00 ; 3|2024-01-15 10:30:00 ; 4|infinity ; 5|-infinity ; 6|NULL ; 7|9999-12-31 23:59:59 ; 8|1969-12-31 23:59:59.999]
+ord/le_inf/d	rows=[1 ; 2 ; 3 ; 4 ; 6 ; 7 ; 8]
+ord/le_inf/ts	rows=[1 ; 2 ; 3 ; 4 ; 6 ; 7 ; 8]
+ord/least/d	rows=[1|1970-01-01 ; 2|2024-01-01 ; 3|2024-01-01 ; 4|-infinity ; 5|2024-01-01 ; 6|2024-01-01 ; 7|1969-12-31 ; 8|2024-01-01]
+ord/least/ts	rows=[1|1970-01-01 00:00:00 ; 2|2024-01-01 00:00:00 ; 3|2024-01-01 00:00:00 ; 4|-infinity ; 5|2024-01-01 00:00:00 ; 6|2024-01-01 00:00:00 ; 7|1969-12-31 23:59:59.999 ; 8|2024-01-01 00:00:00]
+ord/left_join/d	rows=[1|3 ; 1|8 ; 2|4 ; 3|2 ; 4|NULL]
+ord/left_join/ts	rows=[1|3 ; 1|8 ; 2|4 ; 3|2 ; 4|NULL]
+ord/lt_all/d	rows=[1 ; 2 ; 4 ; 6 ; 7]	ERR 22007	open: filing candidate TC-F1 (ANY / ALL of a quoted array literal reads the literal as one scalar)
+ord/lt_all/ts	rows=[1 ; 2 ; 4 ; 6 ; 7]	ERR 22007	open: filing candidate TC-F1 (ANY / ALL of a quoted array literal reads the literal as one scalar)
+ord/lt_expr_inf/d	rows=[1 ; 2 ; 6 ; 7]
+ord/lt_expr_inf/ts	rows=[1 ; 2 ; 6 ; 7]
+ord/lt_finite/d	rows=[1 ; 4 ; 7]
+ord/lt_finite/ts	rows=[1 ; 4 ; 7]
+ord/lt_inf/d	rows=[1 ; 2 ; 4 ; 6 ; 7]
+ord/lt_inf/ts	rows=[1 ; 2 ; 4 ; 6 ; 7]
+ord/lt_ninf/d	rows=[]
+ord/lt_ninf/ts	rows=[]
+ord/minmax/d	rows=[-infinity|infinity]
+ord/minmax/ts	rows=[-infinity|infinity]
+ord/minmax_grp/d	rows=[0|-infinity|infinity ; 1|1969-12-31|infinity]
+ord/minmax_grp/ts	rows=[0|-infinity|infinity ; 1|1969-12-31 23:59:59.999|infinity]
+ord/ne_inf/d	rows=[1 ; 2 ; 4 ; 6 ; 7]
+ord/ne_inf/ts	rows=[1 ; 2 ; 4 ; 6 ; 7]
+ord/not_distinct/d	rows=[4]
+ord/not_distinct/ts	rows=[4]
+ord/not_in/d	rows=[1 ; 4 ; 6 ; 7]
+ord/not_in/ts	rows=[1 ; 2 ; 4 ; 6 ; 7]
+ord/not_in_sub/d	rows=[1 ; 6 ; 7]
+ord/not_in_sub/ts	rows=[1 ; 6 ; 7]
+ord/nullif/d	rows=[1|1970-01-01 ; 2|2024-01-15 ; 3|NULL ; 4|-infinity ; 5|NULL ; 6|9999-12-31 ; 7|1969-12-31 ; 8|NULL]
+ord/nullif/ts	rows=[1|1970-01-01 00:00:00 ; 2|2024-01-15 10:30:00 ; 3|NULL ; 4|-infinity ; 5|NULL ; 6|9999-12-31 23:59:59 ; 7|1969-12-31 23:59:59.999 ; 8|NULL]
+ord/order_asc/d	rows=[4 ; 7 ; 1 ; 2 ; 6 ; 3 ; 8 ; 5]
+ord/order_asc/ts	rows=[4 ; 7 ; 1 ; 2 ; 6 ; 3 ; 8 ; 5]
+ord/order_by_cmp/d	rows=[3 ; 8 ; 1 ; 2 ; 4 ; 6 ; 7 ; 5]
+ord/order_by_cmp/ts	rows=[3 ; 8 ; 1 ; 2 ; 4 ; 6 ; 7 ; 5]
+ord/order_desc/d	rows=[5 ; 3 ; 8 ; 6 ; 2 ; 1 ; 7 ; 4]
+ord/order_desc/ts	rows=[5 ; 3 ; 8 ; 6 ; 2 ; 1 ; 7 ; 4]
+ord/order_nf/d	rows=[5 ; 4 ; 7 ; 1 ; 2 ; 6 ; 3 ; 8]
+ord/order_nf/ts	rows=[5 ; 4 ; 7 ; 1 ; 2 ; 6 ; 3 ; 8]
+ord/param_like_cmp/d	rows=[3 ; 8]
+ord/param_like_cmp/ts	rows=[3 ; 8]
+ord/part/d	rows=[1|1 ; 2|1 ; 3|2 ; 4|1 ; 5|1 ; 6|1 ; 7|1 ; 8|2]
+ord/part/ts	rows=[1|1 ; 2|1 ; 3|2 ; 4|1 ; 5|1 ; 6|1 ; 7|1 ; 8|2]
+ord/rank/d	rows=[1|3 ; 2|4 ; 3|6 ; 4|1 ; 5|8 ; 6|5 ; 7|2 ; 8|6]
+ord/rank/ts	rows=[1|3 ; 2|4 ; 3|6 ; 4|1 ; 5|8 ; 6|5 ; 7|2 ; 8|6]
+ord/rank_desc/d	rows=[1|6 ; 2|5 ; 3|2 ; 4|8 ; 5|1 ; 6|4 ; 7|7 ; 8|2]
+ord/rank_desc/ts	rows=[1|6 ; 2|5 ; 3|2 ; 4|8 ; 5|1 ; 6|4 ; 7|7 ; 8|2]
+ord/scalar_sub/d	rows=[3 ; 8]
+ord/scalar_sub/ts	rows=[3 ; 8]
+ord/topn/d	rows=[3 ; 8 ; 6]
+ord/topn/ts	rows=[3 ; 8 ; 6]
+ord/topn_asc/d	rows=[4 ; 7]
+ord/topn_asc/ts	rows=[4 ; 7]
+ord/union/d	rows=[-infinity ; 1969-12-31 ; 1970-01-01 ; 2024-01-15 ; 9999-12-31 ; infinity ; NULL]
+ord/union/ts	rows=[-infinity ; 1969-12-31 23:59:59.999 ; 1970-01-01 00:00:00 ; 2024-01-15 10:30:00 ; 9999-12-31 23:59:59 ; infinity ; NULL]
+ord/win_minmax/d	rows=[1|1970-01-01 ; 2|2024-01-15 ; 3|infinity ; 4|infinity ; 5|infinity ; 6|infinity ; 7|infinity ; 8|infinity]
+ord/win_minmax/ts	rows=[1|1970-01-01 00:00:00 ; 2|2024-01-15 10:30:00 ; 3|infinity ; 4|infinity ; 5|infinity ; 6|infinity ; 7|infinity ; 8|infinity]
+out/array	rows=[{infinity} ; {-infinity}]
+out/cast_text	rows=[1|1970-01-01 00:00:00|1970-01-01 ; 2|2024-01-15 10:30:00|2024-01-15 ; 3|infinity|infinity ; 4|-infinity|-infinity ; 5|NULL|NULL ; 6|9999-12-31 23:59:59|9999-12-31 ; 7|1969-12-31 23:59:59.999|1969-12-31 ; 8|infinity|infinity]
+out/concat	rows=[1|1970-01-01 00:00:00|1970-01-01 ; 2|2024-01-15 10:30:00|2024-01-15 ; 3|infinity|infinity ; 4|-infinity|-infinity ; 5|NULL ; 6|9999-12-31 23:59:59|9999-12-31 ; 7|1969-12-31 23:59:59.999|1969-12-31 ; 8|infinity|infinity]
+out/darray	rows=[{infinity} ; {-infinity}]
+out/json	rows=[1|{"t" : "1970-01-01T00:00:00", "d" : "1970-01-01"} ; 2|{"t" : "2024-01-15T10:30:00", "d" : "2024-01-15"} ; 3|{"t" : "infinity", "d" : "infinity"} ; 4|{"t" : "-infinity", "d" : "-infinity"} ; 5|{"t" : null, "d" : null} ; 6|{"t" : "9999-12-31T23:59:59", "d" : "9999-12-31"} ; 7|{"t" : "1969-12-31T23:59:59.999", "d" : "1969-12-31"} ; 8|{"t" : "infinity", "d" : "infinity"}]
+out/length	rows=[9]
+out/select	rows=[1|1970-01-01 00:00:00|1970-01-01 ; 2|2024-01-15 10:30:00|2024-01-15 ; 3|infinity|infinity ; 4|-infinity|-infinity ; 5|NULL|NULL ; 6|9999-12-31 23:59:59|9999-12-31 ; 7|1969-12-31 23:59:59.999|1969-12-31 ; 8|infinity|infinity]
+out/upper	rows=[INFINITY]
+param0/d/" Infinity "	rows=[3 ; 8]
+param0/d/"+infinity"	rows=[3 ; 8]
+param0/d/"-infinity"	rows=[4]
+param0/d/"inf"	ERR 22007
+param0/d/"infinity"	rows=[3 ; 8]
+param0/d/lt_inf	rows=[1 ; 2 ; 4 ; 6 ; 7]
+param0/d/select	rows=[-infinity]
+param0/ts/" Infinity "	rows=[3 ; 8]
+param0/ts/"+infinity"	rows=[3 ; 8]
+param0/ts/"-infinity"	rows=[4]
+param0/ts/"inf"	ERR 22007
+param0/ts/"infinity"	rows=[3 ; 8]
+param0/ts/lt_inf	rows=[1 ; 2 ; 4 ; 6 ; 7]
+param0/ts/select	rows=[-infinity]
+param1082/d/" Infinity "	rows=[3 ; 8]
+param1082/d/"+infinity"	rows=[3 ; 8]
+param1082/d/"-infinity"	rows=[4]
+param1082/d/"inf"	ERR 22007
+param1082/d/"infinity"	rows=[3 ; 8]
+param1082/d/lt_inf	rows=[1 ; 2 ; 4 ; 6 ; 7]
+param1082/d/select	rows=[-infinity]
+param1114/ts/" Infinity "	rows=[3 ; 8]
+param1114/ts/"+infinity"	rows=[3 ; 8]
+param1114/ts/"-infinity"	rows=[4]
+param1114/ts/"inf"	ERR 22007
+param1114/ts/"infinity"	rows=[3 ; 8]
+param1114/ts/lt_inf	rows=[1 ; 2 ; 4 ; 6 ; 7]
+param1114/ts/select	rows=[-infinity]
+param25/d/" Infinity "	ERR 42883	rows=[3 ; 8]	comparison-membership r4 (a text-declared parameter is spliced as the quoted literal)
+param25/d/"+infinity"	ERR 42883	rows=[3 ; 8]	comparison-membership r4 (a text-declared parameter is spliced as the quoted literal)
+param25/d/"-infinity"	ERR 42883	rows=[4]	comparison-membership r4 (a text-declared parameter is spliced as the quoted literal)
+param25/d/"inf"	ERR 42883	ERR 22007	comparison-membership r4 (a text-declared parameter is spliced as the quoted literal)
+param25/d/"infinity"	ERR 42883	rows=[3 ; 8]	comparison-membership r4 (a text-declared parameter is spliced as the quoted literal)
+param25/d/lt_inf	ERR 42883	rows=[1 ; 2 ; 4 ; 6 ; 7]	comparison-membership r4 (a text-declared parameter is spliced as the quoted literal)
+param25/d/select	rows=[-infinity]
+param25/ts/" Infinity "	ERR 42883	rows=[3 ; 8]	comparison-membership r4 (a text-declared parameter is spliced as the quoted literal)
+param25/ts/"+infinity"	ERR 42883	rows=[3 ; 8]	comparison-membership r4 (a text-declared parameter is spliced as the quoted literal)
+param25/ts/"-infinity"	ERR 42883	rows=[4]	comparison-membership r4 (a text-declared parameter is spliced as the quoted literal)
+param25/ts/"inf"	ERR 42883	ERR 22007	comparison-membership r4 (a text-declared parameter is spliced as the quoted literal)
+param25/ts/"infinity"	ERR 42883	rows=[3 ; 8]	comparison-membership r4 (a text-declared parameter is spliced as the quoted literal)
+param25/ts/lt_inf	ERR 42883	rows=[1 ; 2 ; 4 ; 6 ; 7]	comparison-membership r4 (a text-declared parameter is spliced as the quoted literal)
+param25/ts/select	rows=[-infinity]
+prune/between/d	rows=[1 ; 2 ; 3]
+prune/between/ts	rows=[1 ; 2 ; 3]
+prune/eq_inf/d	rows=[8]
+prune/eq_inf/ts	rows=[8]
+prune/eq_ninf/d	rows=[10]
+prune/eq_ninf/ts	rows=[10]
+prune/fin_2050/d	rows=[7 ; 9]
+prune/fin_2050/ts	rows=[7 ; 9]
+prune/ge_2030/d	rows=[4 ; 5 ; 6 ; 7 ; 8 ; 9]
+prune/ge_2030/ts	rows=[4 ; 5 ; 6 ; 7 ; 8 ; 9]
+prune/ge_inf/d	rows=[8]
+prune/ge_inf/ts	rows=[8]
+prune/gt_far/d	rows=[8]
+prune/gt_far/ts	rows=[8]
+prune/gt_ninf/d	rows=[11]
+prune/gt_ninf/ts	rows=[11]
+prune/in_inf/d	rows=[8 ; 11]
+prune/in_inf/ts	rows=[8 ; 11]
+prune/le_ninf/d	rows=[10]
+prune/le_ninf/ts	rows=[10]
+prune/lt_far/d	rows=[10]
+prune/lt_far/ts	rows=[10]
+prune/lt_inf/d	rows=[11]
+prune/lt_inf/ts	rows=[11]
+prune/minmax/d	rows=[-infinity|infinity|12]
+prune/minmax/ts	rows=[-infinity|infinity|12]
+prune/ne_inf/d	rows=[11]
+prune/ne_inf/ts	rows=[11]
