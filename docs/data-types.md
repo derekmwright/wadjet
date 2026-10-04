@@ -486,10 +486,11 @@ function, and a text it refuses raises its code: `ts = 'garbage'` is 22007,
 10:30:00+16'` 22009 (a zone displacement past ±15:59:59). Where the planner
 states the operand's type (a stored column, a derived table's, a CTE's or a
 `UNION ALL`'s column, a scalar subquery, `COALESCE`, `CAST`, `MIN` / `MAX`,
-`± INTERVAL`, `date_trunc`) the refusal does not wait for a row: over an empty
-table, beside a conjunct no row passes, or after the scan has skipped every
-file and row group, the statement raises as PostgreSQL's does; another
-operand raises when a row evaluates the comparison. Until #1512 a refused
+`± INTERVAL`, `date_trunc` over a `Timestamp` or a `Date`) the refusal does
+not wait for a row: over an empty table, beside a conjunct no row passes, or
+after the scan has skipped every file and row group, the statement raises as
+PostgreSQL's does; another operand, a window's `PARTITION BY` and `ANY` /
+`ALL` of an array literal raise when a row evaluates the comparison. Until #1512 a refused
 text compared with a `Timestamp` in the embedded engine read as `1970-01-01
 00:00:00` and matched a row holding the epoch.
 
@@ -543,12 +544,11 @@ instant, not a rounding applied at print time.
 
 **There is no infinity.** PostgreSQL's `timestamp` accepts `'infinity'` and
 `'-infinity'`; this engine's millisecond carrier has no such value, so the text
-is refused (`22007`) as a value — a literal, `CAST`, `INSERT`, a bound
-parameter — and so is a binary wire parameter carrying PostgreSQL's infinity
-encoding (`22023` at Bind), rather than stored as some far-off year. Compared
-with a `Timestamp` or `Date` the planner types, the word needs no value and is
-answered as PostgreSQL answers it: `ts < 'infinity'` is every non-NULL row,
-`ts = 'infinity'` none, `ts > '-infinity'` every non-NULL row.
+is refused (`22007`) — a literal, `CAST`, `INSERT`, a bound parameter, and a
+comparison with a `Timestamp` or `Date`, which coerces its text as `CAST`
+does (`ts < 'infinity'` is 22007; write `ts IS NOT NULL`) — and so is a
+binary wire parameter carrying PostgreSQL's infinity encoding (`22023` at
+Bind), rather than stored as some far-off year.
 
 `Duration` is the exception, and deliberately: it declares `int8` on the wire
 counting nanoseconds, so `CAST(d AS TEXT)` renders that integer — the text
@@ -626,14 +626,13 @@ hour (`+000130` is 01:30), so there is no run-together `±hhmmss` form
 (`+053000` is hour 530, 22009). `24:00:00` is the next midnight and second
 60 the next minute, as on PostgreSQL; a `Date` drops the clock. A field out
 of range is 22008 and a zone past ±15:59:59 is 22009. Zone names, `AM` /
-`PM`, `infinity` / `now` / `today`, BC years, month names and Julian days,
-which PostgreSQL also reads, are refused 22007 here by a literal, `CAST`,
-`INSERT`, `COPY` and a bound parameter (catalog
+`PM`, `infinity` / `now` / `today` / `tomorrow` / `yesterday`, BC years,
+month names and Julian days, which PostgreSQL also reads, are refused 22007
+here by a literal, `CAST`, `INSERT`, `COPY`, a bound parameter and a
+comparison (catalog
 [temporal#r2, r25](adr/0012-divergences/temporal.md#catalog)); `epoch` is
-read, as 1970-01-01 00:00:00. In a comparison with an operand the planner
-types, `now` / `today` / `tomorrow` / `yesterday` and `±infinity` are answered
-as PostgreSQL answers them, and a text the input function refuses raises
-(above).
+read, as 1970-01-01 00:00:00. For `'now'` / `'today'` write
+`CURRENT_TIMESTAMP` / `CURRENT_DATE`.
 
 ### Identifier Types
 

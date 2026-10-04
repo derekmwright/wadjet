@@ -982,23 +982,26 @@ SELECT * FROM flow_logs WHERE src_port >= 1024
 SELECT * FROM flow_logs WHERE bytes_out <= 512
 ```
 
-A quoted literal compared with a `TIMESTAMP` or `DATE` operand is read by the
-type's input function, and a text it refuses raises — `WHERE ts = 'garbage'`
-is 22007, `WHERE d = '0000-01-01'` 22008, `WHERE ts = '2024-01-15
-10:30:00+16'` 22009 — in every comparison and membership position, in an
-`UPDATE` / `DELETE` WHERE, and for a bound parameter. Where the planner can
-state the operand's type — a stored column, a column of a derived table, a CTE
-or a `UNION ALL`, a scalar subquery, `COALESCE` over such operands, a `CAST`,
-`MIN` / `MAX`, `ts + INTERVAL …`, `date_trunc` — it raises before any row, so
-an empty table or a conjunct no row passes raises too; any other operand
-raises when a row evaluates the comparison. PostgreSQL's special words are
-read as PostgreSQL reads them: `'epoch'` is 1970-01-01 00:00:00 everywhere,
-and against an operand the planner types `'now'` is the statement's
-`CURRENT_TIMESTAMP`, `'today'` / `'tomorrow'` / `'yesterday'` midnight of
-`CURRENT_DATE` and the next and previous day, and `'infinity'` /
-`'-infinity'` compare above / below every value (`ts < 'infinity'` is every
-non-NULL row). A BC date, a month name, a Julian day or a zone name is refused
-22007 here where PostgreSQL reads it (postgres-differences.md).
+A quoted literal compared with a `TIMESTAMP` or `DATE` operand is coerced
+exactly as `CAST` coerces it: the type's input function reads it, and a text
+that function refuses raises — `WHERE ts = 'garbage'` is 22007, `WHERE d =
+'0000-01-01'` 22008, `WHERE ts = '2024-01-15 10:30:00+16'` 22009 — in every
+comparison and membership position, in an `UPDATE` / `DELETE` WHERE, and for
+a bound parameter. Where the planner can state the operand's type — a stored
+column, a column of a derived table, a CTE or a `UNION ALL`, a scalar
+subquery, `COALESCE` over such operands, a `CAST`, `MIN` / `MAX`, `ts +
+INTERVAL …`, `date_trunc` over a `TIMESTAMP` or a `DATE` — a comparison in a
+WHERE, a select item, HAVING, a join condition, ORDER BY, GROUP BY, a simple
+CASE, NULLIF or a subquery's body raises before any row, so an empty table or
+a conjunct no row passes raises too; any other operand, a window's
+`PARTITION BY`, and `ANY` / `ALL` of an array literal raise when a row
+evaluates the comparison. Of PostgreSQL's special input words only `'epoch'`
+(1970-01-01 00:00:00) is read. `'infinity'`, `'-infinity'`, `'now'`,
+`'today'`, `'tomorrow'`, `'yesterday'`, a BC date, a month name, a Julian day
+or a zone name is refused 22007, as `CAST('now' AS TIMESTAMP)` is, where
+PostgreSQL reads it: write `ts IS NOT NULL` for `ts < 'infinity'`, and
+`CURRENT_TIMESTAMP` / `CURRENT_DATE` for `'now'` / `'today'`
+(postgres-differences.md).
 
 ### Logical Operators
 
