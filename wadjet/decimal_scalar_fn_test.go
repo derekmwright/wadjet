@@ -171,7 +171,9 @@ func TestIntegerFunctionArithmeticTruncates(t *testing.T) {
 		{"octet_length over two", "SELECT OCTET_LENGTH(s) / 2 AS v FROM decdecl WHERE id = 1", 2, parquet.TypeInt64},
 		{"char_length over two", "SELECT CHAR_LENGTH(s) / 2 AS v FROM decdecl WHERE id = 1", 2, parquet.TypeInt64},
 		{"nested", "SELECT (LENGTH(s) + 1) / 2 AS v FROM decdecl WHERE id = 1", 3, parquet.TypeInt64},
-		{"modulo", "SELECT LENGTH(s) % 2 AS v FROM decdecl WHERE id = 1", 1, parquet.TypeInt64},
+		// `%` is MOD (#1527), and MOD over two int4 operands declares int4
+		// as PostgreSQL does (numeric-decimal r1 names it).
+		{"modulo", "SELECT LENGTH(s) % 2 AS v FROM decdecl WHERE id = 1", 1, parquet.TypeInt32},
 		// The plain integer forms, unchanged, beside them.
 		{"column over literal", "SELECT id / 2 AS v FROM decdecl WHERE id = 7", 3, parquet.TypeInt64},
 		{"two literals", "SELECT 7 / 2 AS v FROM decdecl WHERE id = 1", 3, parquet.TypeInt64},

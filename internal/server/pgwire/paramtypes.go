@@ -575,6 +575,12 @@ func (pt *paramTyper) pgOperatorType(n plansql.Node, sc *scope) (uint32, bool) {
 			return oidFloat4, true
 		}
 		return oidFloat8, true
+	case *plansql.FuncCallNode:
+		// mod(a, b) is the `%` operator by its function name — the same
+		// pg_proc entries — and `a % b` parses to this call (#1527).
+		if strings.EqualFold(e.Name, "mod") && len(e.Args) == 2 {
+			return pt.pgOperatorType(&plansql.BinaryOp{Op: "%", Left: e.Args[0], Right: e.Args[1]}, sc)
+		}
 	}
 	return 0, false
 }
@@ -832,13 +838,21 @@ func (pt *paramTyper) anyNonParam(nodes []plansql.Node) bool {
 }
 
 // call types the parameters of a function call whose arguments share one
-// type (COALESCE, NULLIF, GREATEST, LEAST) by their known peers, and walks
+// type (COALESCE, NULLIF, GREATEST, LEAST; MOD, whose operands resolve as
+// the `%` operator's do) by their known peers, and walks
 // every argument. Any other function's argument type is its signature's,
 // which this walk does not resolve; such a parameter stays undecided.
 func (pt *paramTyper) call(f *plansql.FuncCallNode, sc *scope) {
 	switch strings.ToLower(f.Name) {
 	case "coalesce", "nullif", "greatest", "least":
 		if pt.anyNonParam(f.Args) {
+			pt.peers(sc, f.Args...)
+		}
+	case "mod":
+		// The `%` operator's rule (a % b parses to mod(a, b), #1527): a
+		// parameter beside a typed operand takes that operand's type, as
+		// PostgreSQL's operator and function resolution both give it.
+		if len(f.Args) == 2 && pt.anyNonParam(f.Args) {
 			pt.peers(sc, f.Args...)
 		}
 	case "lag", "lead", "ntile", "nth_value", "first_value", "last_value":

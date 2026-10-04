@@ -340,6 +340,19 @@ func (p *StagePlanner) resolveSubqueryAST(ctx context.Context, node plansql.Node
 			Inner: p.resolveSubqueryAST(ctx, n.Inner, deferred, decls),
 		}
 
+	// A call's arguments are operand positions too: `mod((SELECT …), t.i)`
+	// — which is also what `(SELECT …) % t.i` parses to — shipped the
+	// subquery to the worker inside the call and every task failed with
+	// "subqueries require a SubqueryRunner", while the same subquery under
+	// an arithmetic operator was resolved here (#1527).
+	case *plansql.FuncCallNode:
+		out := *n
+		out.Args = make([]plansql.Node, len(n.Args))
+		for i, a := range n.Args {
+			out.Args[i] = p.resolveSubqueryAST(ctx, a, deferred, decls)
+		}
+		return &out
+
 	case *plansql.ParenNode:
 		inner := p.resolveSubqueryAST(ctx, n.Inner, deferred, decls)
 		if inner != nil {

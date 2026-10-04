@@ -2528,6 +2528,21 @@ func (p *selectParser) parseMultiplication() (Node, error) {
 		if err != nil {
 			return nil, err
 		}
+		if op == "%" {
+			// `a % b` IS `mod(a, b)`: PostgreSQL implements the operator and
+			// the function by the same pg_proc entries (int2mod, int4mod,
+			// int8mod, numeric_mod), so the two resolve their operands, type
+			// their result, raise their errors and answer their values
+			// alike. Building the call here gives the operator MOD's typing
+			// and kernel on every path — the declaration, the single-process
+			// and DAG executors, the parameter typer — instead of a second
+			// implementation free to disagree with it (#1527). The result
+			// is published under `?column?`, the operator's name, as `^`'s
+			// power() call is.
+			left = &FuncCallNode{Name: "mod", Args: []Node{left, right},
+				OutputLabel: UnnamedOutputColumn}
+			continue
+		}
 		left = &BinaryOp{Left: left, Op: op, Right: right}
 	}
 }

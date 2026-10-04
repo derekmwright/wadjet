@@ -1922,12 +1922,13 @@ func TestParseExpression_Modulo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseExpression: %v", err)
 	}
-	bo, ok := expr.(*BinaryOp)
+	// `a % b` is mod(a, b), published under the operator's `?column?` (#1527).
+	fc, ok := expr.(*FuncCallNode)
 	if !ok {
-		t.Fatalf("expected BinaryOp, got %T", expr)
+		t.Fatalf("expected FuncCallNode, got %T", expr)
 	}
-	if bo.Op != "%" {
-		t.Errorf("expected op '%%', got %q", bo.Op)
+	if fc.Name != "mod" || len(fc.Args) != 2 || fc.OutputLabel != UnnamedOutputColumn {
+		t.Errorf("expected mod(a, b) labelled %q, got %s labelled %q", UnnamedOutputColumn, fc, fc.OutputLabel)
 	}
 }
 

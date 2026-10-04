@@ -133,6 +133,11 @@ func grammarRewriteSpellings() []grammarRewrite {
 		{"power_operator", `2 ^ 3`, "power", 2},
 		{"power_operator_left_associative", `2 ^ 3 ^ 2`, "power", 2},
 		{"power_operator_over_columns", `s ^ n`, "power", 2},
+		// --- `a % b` -> mod(a, b): the operator and the function are the
+		// same pg_proc entries, and the parser builds the call (#1527).
+		{"modulo_operator", `7 % 3`, "mod", 2},
+		{"modulo_operator_left_associative", `7 % 3 % 2`, "mod", 2},
+		{"modulo_operator_over_columns", `n % 2.5`, "mod", 2},
 		// --- a FULL `JOIN … USING (c)` merges its joined column to
 		// COALESCE(left.c, right.c), minted in TWO places: the star
 		// expansion's merged output item (logical.mergedUsingItem) and the
