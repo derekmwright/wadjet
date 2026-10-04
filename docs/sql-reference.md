@@ -995,11 +995,15 @@ WHERE, a select item, HAVING, a join condition, ORDER BY, GROUP BY, a simple
 CASE, NULLIF or a subquery's body raises before any row, so an empty table or
 a conjunct no row passes raises too; any other operand, a window's
 `PARTITION BY`, and `ANY` / `ALL` of an array literal raise when a row
-evaluates the comparison. Of PostgreSQL's special input words only `'epoch'`
-(1970-01-01 00:00:00) is read. `'infinity'`, `'-infinity'`, `'now'`,
-`'today'`, `'tomorrow'`, `'yesterday'`, a BC date, a month name, a Julian day
-or a zone name is refused 22007, as `CAST('now' AS TIMESTAMP)` is, where
-PostgreSQL reads it: write `ts IS NOT NULL` for `ts < 'infinity'`, and
+evaluates the comparison. Of PostgreSQL's special input words `'epoch'`
+(1970-01-01 00:00:00) and the infinite values `'infinity'`, `'+infinity'` and
+`'-infinity'` are read: `ts < 'infinity'` is every non-NULL row that is not
+itself `infinity`, and `d = '-infinity'` finds the rows holding that value
+(see [Data Types](data-types.md), Timestamp). `ANY` / `ALL` of a quoted array
+literal reads the literal as one scalar and refuses it (`ts < ALL
+('{infinity}')` is 22007). `'now'`, `'today'`, `'tomorrow'`, `'yesterday'`, a
+BC date, a month name, a Julian day or a zone name is refused 22007, as
+`CAST('now' AS TIMESTAMP)` is, where PostgreSQL reads it: write
 `CURRENT_TIMESTAMP` / `CURRENT_DATE` for `'now'` / `'today'`
 (postgres-differences.md).
 

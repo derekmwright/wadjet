@@ -27,8 +27,9 @@ import (
 // PostgreSQL 17.11's answer (re-measured when WADJET_PG_DSN names a server).
 //
 // At 8e681724 a binary timestamp parameter carrying an extreme was refused
-// 22023 at Bind (temporal r3), a binary date extreme bound as a date in the
-// year 5881610 and was refused 22008, and the text 'infinity' was 22007.
+// 22023 at Bind (temporal r3), a binary date parameter carrying the int32
+// maximum was read as the year 5881610 and refused 22008 (the minimum
+// 22007), and the text 'infinity' was 22007.
 
 type tiWireCell struct {
 	name    string

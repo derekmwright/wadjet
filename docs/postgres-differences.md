@@ -16,9 +16,9 @@ Decimal statistics (`STDDEV`, `VARIANCE`, `CORR`, `COVAR`, `MEDIAN`, `PERCENTILE
 
 Millisecond storage truncates `.123456` return as `.123`; PostgreSQL retains `.123456`. (catalog: [temporal#r1](adr/0012-divergences/temporal.md#catalog); #692-residual)
 
-**TIMESTAMP has no infinity.**
+**Arithmetic over an infinite TIMESTAMP is refused where PostgreSQL answers an interval.**
 
-`'infinity'` and `'-infinity'` are refused as timestamp input (22007) — in a CAST, a literal, a stored value, a bound parameter and a comparison with a DATE or TIMESTAMP, which coerces its text as CAST does (`ts < 'infinity'` is 22007 where PostgreSQL answers every non-NULL row: write `ts IS NOT NULL`) — and a binary timestamp parameter carrying PostgreSQL's infinity encoding (the int64 extremes) is refused at Bind (22023); PostgreSQL stores and returns both. `'now'`, `'today'`, `'tomorrow'` and `'yesterday'` are refused the same way (22007, catalog temporal r25): write `CURRENT_TIMESTAMP` / `CURRENT_DATE` (`CURRENT_DATE + 1` for `'tomorrow'`). `'epoch'` is read, as 1970-01-01 00:00:00. (catalog: [temporal#r2, r3, r25](adr/0012-divergences/temporal.md#catalog); #1266, #1512)
+`infinity` and `-infinity` are TIMESTAMP and DATE values, read, stored, printed and ordered as PostgreSQL does; `± INTERVAL`, `date ± integer`, the casts between the two types, EXTRACT, date\_trunc and time\_bucket answer PostgreSQL's value. `ts - TIMESTAMP '2024-01-01'` over an infinite `ts` is 22008 where PostgreSQL answers an infinite interval (this engine's timestamp difference is a millisecond count, temporal r16), and so is a CAST of an infinite value to a number and this engine's own temporal functions over one. `'now'`, `'today'`, `'tomorrow'` and `'yesterday'` are refused as timestamp input (22007, catalog temporal r25): write `CURRENT_TIMESTAMP` / `CURRENT_DATE` (`CURRENT_DATE + 1` for `'tomorrow'`). `'epoch'` is read, as 1970-01-01 00:00:00. (catalog: [temporal#r2, r25](adr/0012-divergences/temporal.md#catalog); #1266, #1512)
 
 **Clock functions return zoneless UTC.**
 

@@ -542,13 +542,30 @@ on the way in, and every rendering of it — the wire, a cast, a function result
 shows the truncated value consistently. It is one rendering of one stored
 instant, not a rounding applied at print time.
 
-**There is no infinity.** PostgreSQL's `timestamp` accepts `'infinity'` and
-`'-infinity'`; this engine's millisecond carrier has no such value, so the text
-is refused (`22007`) — a literal, `CAST`, `INSERT`, a bound parameter, and a
-comparison with a `Timestamp` or `Date`, which coerces its text as `CAST`
-does (`ts < 'infinity'` is 22007; write `ts IS NOT NULL`) — and so is a
-binary wire parameter carrying PostgreSQL's infinity encoding (`22023` at
-Bind), rather than stored as some far-off year.
+**`infinity` and `-infinity` are values.** A `Timestamp` and a `Date` hold
+PostgreSQL's two infinite values, as PostgreSQL stores them: the carrier's
+extremes (the int64 maximum and minimum milliseconds; the int32 maximum and
+minimum days), which are also PostgreSQL's binary encoding of them, so a
+binary wire parameter or result carries them unchanged. Text reads them
+— `'infinity'`, `'+infinity'`, `'-infinity'`, any case, outer whitespace, a
+sign that whitespace may separate from the word — in a literal, `CAST`,
+`INSERT`, `COPY`, a bound parameter and a comparison; they print as
+`infinity` / `-infinity`. `-infinity` sorts below and `infinity` above every
+other value, so `ts < 'infinity'` is every non-NULL finite row, `ORDER BY`,
+`MIN` / `MAX`, `GROUP BY`, a join key and a pruned scan order them as
+PostgreSQL does, and `DATE 'infinity' = TIMESTAMP 'infinity'`. Arithmetic
+answers what PostgreSQL answers: `± INTERVAL`, `date ± integer` and a `CAST`
+between the two types keep the value; `EXTRACT` / `date_part` (and `year()`
+… the functions `EXTRACT` is written as) answer `Infinity` / `-Infinity` for
+year and epoch and NULL for every other field; `date_trunc` and
+`time_bucket` answer the value. `date - date` with an infinite side is 22008,
+as on PostgreSQL. Refused 22008 where PostgreSQL answers or has no such
+operation: a `timestamp - timestamp` difference (this engine's millisecond
+count; PostgreSQL's infinite interval), a `CAST` of an infinite value to a
+number, this engine's own temporal functions (`date_add`, `to_date`,
+`last_day_of_month`, `to_unixtime`, …) and `time_bucket`'s infinite origin
+(catalog [temporal#r2](adr/0012-divergences/temporal.md#catalog)). No
+computation produces one: `DATE '1970-01-02' + 2147483646` is 22008.
 
 `Duration` is the exception, and deliberately: it declares `int8` on the wire
 counting nanoseconds, so `CAST(d AS TEXT)` renders that integer — the text
@@ -626,13 +643,15 @@ hour (`+000130` is 01:30), so there is no run-together `±hhmmss` form
 (`+053000` is hour 530, 22009). `24:00:00` is the next midnight and second
 60 the next minute, as on PostgreSQL; a `Date` drops the clock. A field out
 of range is 22008 and a zone past ±15:59:59 is 22009. Zone names, `AM` /
-`PM`, `infinity` / `now` / `today` / `tomorrow` / `yesterday`, BC years,
-month names and Julian days, which PostgreSQL also reads, are refused 22007
+`PM`, `now` / `today` / `tomorrow` / `yesterday`, BC years, month names,
+Julian days and `infinity` beside an era, a meridiem or punctuation
+(`infinity BC`, `infinity,`), which PostgreSQL also reads, are refused 22007
 here by a literal, `CAST`, `INSERT`, `COPY`, a bound parameter and a
 comparison (catalog
-[temporal#r2, r25](adr/0012-divergences/temporal.md#catalog)); `epoch` is
-read, as 1970-01-01 00:00:00. For `'now'` / `'today'` write
-`CURRENT_TIMESTAMP` / `CURRENT_DATE`.
+[temporal#r25](adr/0012-divergences/temporal.md#catalog)); `epoch` is
+read, as 1970-01-01 00:00:00, and `infinity` / `-infinity` as the infinite
+values above. For `'now'` / `'today'` write `CURRENT_TIMESTAMP` /
+`CURRENT_DATE`.
 
 ### Identifier Types
 
