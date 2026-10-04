@@ -421,6 +421,9 @@ func (h *HashAggregate) consumeBatchGenericSoA(b *batch.RecordBatch) {
 			// the migration/merge cold paths (same deferral as packed keys:
 			// 32B x groups of pure overhead otherwise).
 			h.strGroupStates = append(h.strGroupStates, nil)
+			if floatKeyNotCanonical(kcols, row) {
+				h.boxFloatMemberKey(b, row, newIdx)
+			}
 			h.keyBuf = serializeGroupKey(h.keyBuf[:0], kcols, row)
 			h.serializedKeys = append(h.serializedKeys, string(h.keyBuf))
 			h.serializedKeyBytes += int64(len(h.keyBuf))
@@ -552,4 +555,24 @@ func (h *HashAggregate) strIndexForRow() *strHashTable {
 		h.strGroupIndex = newStrHashTable(4096)
 	}
 	return h.strGroupIndex
+}
+
+// boxFloatMemberKey gives a typed-generic group whose first member holds a
+// float key value the key bytes cannot rebuild (-0, or a non-canonical NaN —
+// the key holds the CANONICAL bits, kernel.KeyFloat64Bits) a state carrying
+// that member's own key values, the eager path's form, so output, merge and
+// spill publish the member instead of the canonical stand-in (#1489: a group
+// whose only member is -0 publishes -0, as PostgreSQL does). Every other
+// group on this path stays deferred; out of line so the lookup closure does
+// not grow.
+func (h *HashAggregate) boxFloatMemberKey(b *batch.RecordBatch, row int, groupIdx int32) {
+	gs := h.gsPool.alloc()
+	keyVals := make([]any, len(h.GroupByCols))
+	for ki, idx := range h.groupColIdx {
+		if idx >= 0 {
+			keyVals[ki] = b.Columns[idx].GetValue(row)
+		}
+	}
+	gs.ensureExtras().keyValues = keyVals
+	h.strGroupStates[groupIdx] = gs
 }

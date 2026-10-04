@@ -39,7 +39,12 @@ type keySerCol struct {
 // encoding losslessly AND box to a primitive whose reconstruction is trivial
 // (GetValue parity). The network types, DATE and UUID box as FORMATTED
 // STRINGS; DECIMAL boxes as one too, and its storage is an Int128 plus a
-// scale rather than a flat typed slice.
+// scale rather than a flat typed slice. FLOAT64 and FLOAT32 round-trip every
+// value but two kinds: the key holds CANONICAL bits (-0 folds onto 0, every
+// NaN payload onto one NaN, #459), so a group whose first member is -0 or a
+// non-canonical NaN boxes that member at creation (floatKeyNotCanonical,
+// #1489) and every other float group stays deferred
+// (TestDeferredKeyBoxingBoxesEveryLossyMember).
 func genericKeyBoxingDeferrable(t batch.TypeID) bool {
 	switch t {
 	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeDuration,
@@ -230,6 +235,36 @@ func serializedKeyMatchesRow(key string, cols []keySerCol, row int) bool {
 		}
 	}
 	return len(key) == 0
+}
+
+// floatKeyNotCanonical reports whether row holds a float key value whose bits
+// differ from the canonical bits its key is built from — -0, or a NaN whose
+// payload or sign is not the canonical NaN's. Such a value cannot be rebuilt
+// from the key bytes, so its group boxes its first member (#1489). A row
+// holding no float key column costs one byte compare per column.
+func floatKeyNotCanonical(kcols []keySerCol, row int) bool {
+	for i := range kcols {
+		c := &kcols[i]
+		switch c.kind {
+		case 3:
+			if c.nulls.IsNullFast(row) {
+				continue
+			}
+			f := c.f64[row]
+			if math.Float64bits(f) != keyFloat64bits(f) {
+				return true
+			}
+		case 4:
+			if c.nulls.IsNullFast(row) {
+				continue
+			}
+			f := c.f32[row]
+			if math.Float32bits(f) != keyFloat32bits(f) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // decodeSerializedKeyIntoColumns parses a group's binary serialized key

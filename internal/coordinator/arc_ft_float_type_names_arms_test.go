@@ -530,23 +530,12 @@ func ftArmsFixture(t *testing.T, ctx context.Context) (*wadjet.DB, []struct {
 }
 
 // ftKnown is the pinned answer of a cell whose difference from PostgreSQL is
-// OUTSIDE this arc's seam (float aggregate and grouping semantics, not type
-// names) and identical at base through the spellings base already resolved
-// (FLOAT(1..24) as real, FLOAT(25..53) and DOUBLE as double precision). A pin
-// FAILS the moment the arm starts agreeing — delete it then. "" = no pin.
-//
-//   - minMax, single-process arms: max over a column holding NaN answers
-//     Infinity, where PostgreSQL orders NaN above every number and answers
-//     NaN (the DAG arms answer NaN).
-//   - groupBy, every arm: the group whose only member is -0 publishes its key
-//     as 0, where PostgreSQL publishes the stored -0.
+// OUTSIDE this arc's seam. A pin FAILS the moment the arm starts agreeing —
+// delete it then. "" = no pin. The two pins this table carried (max over a
+// column holding NaN on the single-process arms; the -0 group key on every
+// arm) were deleted by arc FO when both started agreeing with PostgreSQL
+// (#1488, #1489; arc_fo_float_total_order_arms_test.go).
 func ftKnown(cell, arm, want string) string {
-	switch {
-	case strings.HasSuffix(cell, "/minMax") && (arm == "single" || arm == "spilled512k") && strings.HasSuffix(want, ",NaN"):
-		return strings.TrimSuffix(want, ",NaN") + ",Infinity"
-	case strings.HasSuffix(cell, "/groupBy") && strings.Contains(want, " | -0,1;"):
-		return strings.Replace(want, " | -0,1;", " | 0,1;", 1)
-	}
 	return ""
 }
 
@@ -587,7 +576,7 @@ func TestArcFTFloatTypeNamesEveryArm(t *testing.T) {
 			}
 		}
 	}
-	if len(cells) < 300 || discriminating < 60 || pinned != 20*2+20*5 {
+	if len(cells) < 300 || discriminating < 60 || pinned != 0 {
 		t.Fatalf("%d cells, %d carrying a width-discriminating value, %d pinned: the table must discriminate", len(cells), discriminating, pinned)
 	}
 }
