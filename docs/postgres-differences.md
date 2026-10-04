@@ -316,7 +316,7 @@ Generic resolution means `SELECT -'5'` returns varchar `-5`; PostgreSQL raises 4
 
 **A quoted number beside an integer is read as the number it spells.**
 
-`MOD(8, '2.5')` returns the double 0.5 and `8 + '2.5'` returns 10.5; PostgreSQL resolves the unknown literal to `integer` and raises 22P02. A quoted integer keeps the integer type: `MOD(i, '3')` is `integer`, as on PostgreSQL. (catalog: [numeric-decimal#r21](adr/0012-divergences/numeric-decimal.md#catalog))
+`MOD(8, '2.5')` and `8 % '2.5'` return the double 0.5 and `8 + '2.5'` returns 10.5; PostgreSQL resolves the unknown literal to `integer` and raises 22P02. A quoted integer keeps the integer type: `MOD(i, '3')` is `integer`, as on PostgreSQL. (catalog: [numeric-decimal#r21](adr/0012-divergences/numeric-decimal.md#catalog))
 
 **HAVING resolves output aliases.**
 
