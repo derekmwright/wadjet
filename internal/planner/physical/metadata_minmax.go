@@ -25,7 +25,8 @@ import (
 // filters, table functions, TABLESAMPLE, partition filters or delete markers.
 // WADJET_META_MINMAX=0 disables it. Read each file's schema to exclude scan-side
 // coercions; catalog RG-metadata values alone cannot establish equivalence.
-// Support only Int32/Int64/Date/Timestamp and Float32/Float64; decline other types.
+// Support only Int32/Int64/Date/Timestamp and Float32/Float64; decline other types,
+// and decline MAX over a float: statistics exclude NaN, the float maximum (#1488).
 // Ignore all-null groups; empty/all-null tables yield NULL. Any non-all-null group
 // without readable extrema aborts the optimization and uses the scan.
 // See docs/internals/metadata-minmax-statistics.md for the design.
@@ -345,6 +346,14 @@ func (p *Planner) tryBuildMetadataMinMax(ctx context.Context, node *logical.Node
 					name: schemaCol.Name, kind: kind, colType: schemaCol.Type, outType: outType,
 				})
 				idx = len(cols) - 1
+			}
+			if agg.Func == "max" && cols[idx].kind == mmFloat {
+				// Parquet keeps NaN out of a float chunk's bounds, and NaN is
+				// the float MAXIMUM (PostgreSQL's order), so the bounds cannot
+				// answer MAX: a chunk bounded [1.5, Infinity] may hold a NaN
+				// (#1488). MIN needs no exception — NaN is never a minimum
+				// while a non-NaN value exists.
+				return nil, false
 			}
 			minMaxSeen = true
 			outputs = append(outputs, mmOutput{name: outName, col: idx, isMax: agg.Func == "max"})

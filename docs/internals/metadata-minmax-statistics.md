@@ -31,7 +31,15 @@ Source: internal/planner/physical/metadata_minmax.go — metadata MIN/MAX, moved
 // Type support is deliberately narrow, limited to types whose statistics are
 // both exactly representable and ordered the way the engine orders them:
 // Int32, Int64, Date, Timestamp (stats decode to int64) and Float32, Float64
-// (stats decode to float64). Explicitly NOT supported:
+// (stats decode to float64) — MIN only for a float column. Explicitly NOT
+// supported:
+//   - MAX over Float32/Float64. The parquet format keeps NaN out of min/max
+//     (and our writer skips it, #928), and PostgreSQL orders NaN ABOVE every
+//     value, Infinity included. A chunk bounded [-Infinity, Infinity] may
+//     therefore hold the column's true maximum, NaN, and the footer cannot
+//     say so: MAX answered from it was Infinity where PostgreSQL answers NaN
+//     (#1488). MIN is exact — NaN is never a minimum while a non-NaN value
+//     exists, and a chunk of only NaN writes no bound, which declines.
 //   - String/Bytes. Parquet min/max for BYTE_ARRAY may be TRUNCATED, with
 //     is_min_value_exact / is_max_value_exact flagging it — and our
 //     ColumnStats does not carry those flags out of the thrift layer

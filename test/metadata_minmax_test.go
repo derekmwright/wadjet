@@ -149,7 +149,18 @@ func TestMetadataMinMax(t *testing.T) {
 			wantRows: []map[string]any{{"lo": int64(1000), "hi": int64(16000)}},
 		},
 		{
-			name: "float64", wantFire: true,
+			name: "float64 MIN", wantFire: true,
+			sql:      "SELECT MIN(f64) AS lo FROM events",
+			wantRows: []map[string]any{{"lo": 1.5}},
+		},
+		{
+			// A float column's statistics say nothing about NaN: the parquet
+			// format keeps NaN out of min/max, and PostgreSQL orders NaN above
+			// every value, so a chunk bounded [1.5, 16.5] may hold the column's
+			// true MAX, NaN, invisibly (#1488). MIN is safe — NaN is never a
+			// minimum while a non-NaN value exists, and a chunk of only NaN
+			// writes no bound, which declines. MAX over a float scans.
+			name: "float64 MAX scans", wantFire: false,
 			sql:      "SELECT MIN(f64) AS lo, MAX(f64) AS hi FROM events",
 			wantRows: []map[string]any{{"lo": 1.5, "hi": 16.5}},
 		},
@@ -161,6 +172,11 @@ func TestMetadataMinMax(t *testing.T) {
 			// `double precision` or `real` depending on whether a WHERE
 			// clause sent the query down the other one.
 			name: "float32 stays float32", wantFire: true,
+			sql:      "SELECT MIN(f32) AS lo FROM events",
+			wantRows: []map[string]any{{"lo": float32(1.25)}},
+		},
+		{
+			name: "float32 MAX scans", wantFire: false,
 			sql:      "SELECT MIN(f32) AS lo, MAX(f32) AS hi FROM events",
 			wantRows: []map[string]any{{"lo": float32(1.25), "hi": float32(16.25)}},
 		},
@@ -457,5 +473,43 @@ func TestMetadataMinMaxResolvesFoldedReferences(t *testing.T) {
 				t.Errorf("rows diverge:\n  metadata %#v\n  scan     %#v", got.Rows, scanned.Rows)
 			}
 		})
+	}
+}
+
+// TestMetadataMinMaxFloatMaxSeesNaN is #1488 at the statistics path: a NaN
+// that is not a chunk's first value leaves the chunk's bounds [-Infinity,
+// Infinity], and MAX answered from those bounds was Infinity where PostgreSQL
+// answers NaN. MIN over the same chunk is still answered from statistics.
+func TestMetadataMinMaxFloatMaxSeesNaN(t *testing.T) {
+	ctx := context.Background()
+	db, err := wadjet.Open(ctx, wadjet.Config{Store: objstore.NewMemStore(), Bucket: "test"})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	for _, ty := range []string{"DOUBLE PRECISION", "REAL"} {
+		if _, err := db.Query(ctx, "DROP TABLE IF EXISTS fnan"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Query(ctx, "CREATE TABLE fnan (c "+ty+")"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Query(ctx, "INSERT INTO fnan VALUES (CAST('Infinity' AS "+ty+")), (1.5), "+
+			"(CAST('NaN' AS "+ty+")), (CAST('-Infinity' AS "+ty+"))"); err != nil {
+			t.Fatal(err)
+		}
+		got, fired := mmRun(t, db, ctx, "SELECT CAST(max(c) AS TEXT) AS hi FROM fnan", true)
+		if fired != 0 {
+			t.Errorf("%s: MAX over a float column was answered from statistics", ty)
+		}
+		if hi := fmt.Sprint(got.Rows[0]["hi"]); hi != "NaN" {
+			t.Errorf("%s: max(c) = %s, want NaN (PostgreSQL 17.11)", ty, hi)
+		}
+		got, fired = mmRun(t, db, ctx, "SELECT CAST(min(c) AS TEXT) AS lo FROM fnan", true)
+		if fired == 0 {
+			t.Errorf("%s: MIN over a float column stopped being answered from statistics", ty)
+		}
+		if lo := fmt.Sprint(got.Rows[0]["lo"]); lo != "-Infinity" {
+			t.Errorf("%s: min(c) = %s, want -Infinity", ty, lo)
+		}
 	}
 }
