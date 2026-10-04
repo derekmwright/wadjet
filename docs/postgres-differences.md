@@ -32,6 +32,14 @@ No blank-padded type exists. `CAST('ab' AS CHAR(4))`: wadjet `ab`; PostgreSQL `a
 
 Storage has one scale per column. `COALESCE(numeric(15,2), 12.3456789012345)`: the ADR’s column value prints `12.7500000000000` versus `12.75`, and the elements of a numeric[] array share one scale too: `ARRAY[n, 1]` over a numeric(10,2) prints `{2.25,1.00}` versus `{2.25,1}`. (catalog: [numeric-decimal#r18](adr/0012-divergences/numeric-decimal.md#catalog); #764)
 
+**A column created from an unconstrained numeric prints no trailing zeros.**
+
+Its values print without the stored scale's trailing zeros — `1.25`, `1`, `0.755`, as PostgreSQL prints them — so a trailing zero the source carried is not printed either: `CREATE TABLE t AS SELECT 2.50 AS v` prints `2.5` where PostgreSQL prints `2.50`. An expression over the column (`v + 1`, `SUM(v)`) prints at its one declared scale. (catalog: [numeric-decimal#r24](adr/0012-divergences/numeric-decimal.md#catalog); #1541)
+
+**A column created from an unconstrained numeric holds 28 integer digits.**
+
+A value past 28 integer digits written to such a column raises 22003 where PostgreSQL stores it (`INSERT INTO t VALUES (12345678901234567890123456789)`); past 10 fraction digits it rounds (`1e-11` is 0). (catalog: [numeric-decimal#r23](adr/0012-divergences/numeric-decimal.md#catalog); #1541)
+
 **A decimal quotient keeps one scale.**
 
 `m / i` over a numeric(10,2) 1.25 and an integer 3 prints `0.4166666666667` (max(6, s1 + p2 + 1) fraction digits, one scale per column) where PostgreSQL prints `0.41666666666666666667` (at least sixteen significant digits per value). A quotient over an operand a cast made exact — `CAST(i AS INTEGER) / n`, the cast under `NULLIF`, `COALESCE`, `CASE`, `GREATEST`, `LEAST`, `abs`, unary minus, integer or numeric arithmetic, as in `n / NULLIF(CAST(b AS BIGINT), 0)` and `(CAST(i AS INTEGER) * 1.0) / n`, a bare `CAST(… AS NUMERIC)` as in `CAST(i AS NUMERIC) / n`, or either under `abs`, `mod`, `round`, `ceil`, `floor`, `trunc` or `sign` as in `ceil(CAST(i AS NUMERIC)) / n` — keeps the double precision quotient (OID 701, `1.3333333333333333`, `1.111111111111111e-09`) where PostgreSQL answers numeric `1.3333333333333333`, `0.0000000011111111111111111111`, because the one-scale quotient would drop digits the double carries. A quotient of two constants is the double too, an integer literal past the bigint range among them (`9223372036854775808 / 2` prints `4.611686018427388e+18`, PostgreSQL `4611686018427387904`); the same literal over a column is the one-scale numeric (`n / 9223372036854775808` prints `0.0000000000000000002439`, PostgreSQL `0.000000000000000000243945488809238498`). An alias does not change a quotient's type: `7 / t.n AS x` prints `3.11111111111` as `7 / t.n` does. (catalog: [numeric-decimal#r19](adr/0012-divergences/numeric-decimal.md#catalog); #1422, #1450)
@@ -166,9 +174,9 @@ Storage requires one scale. PostgreSQL declares unconstrained numeric; wadjet re
 
 PORT with INT32/PROTOCOL uses the common integer representation, OID 20; PostgreSQL’s int4 pair stays OID 23. (catalog: [set-operations#r5](adr/0012-divergences/set-operations.md#catalog); ADR-0012 §12/integer-width)
 
-**CTAS stores constrained decimals.**
+**A column created from an unconstrained numeric keeps ten fraction digits.**
 
-Stored columns require `(p,s)`. A CTAS over `COALESCE(numeric(15,2), numeric(38,10))` stores DECIMAL(38,10); PostgreSQL stores unconstrained numeric (`12.7500000000` versus `12.75`). (catalog: [dml-assignment#r11](adr/0012-divergences/dml-assignment.md#catalog); ADR-0012 §13/#1024-CTAS)
+`CREATE TABLE t (v NUMERIC)` (or `DECIMAL`, or a CREATE TABLE AS column PostgreSQL types as plain numeric — `CAST(b AS NUMERIC)`, `COALESCE(a, b)` over two scales, `SUM(n)`, a literal, a typed NULL) is declared plain numeric, as on PostgreSQL, and stores DECIMAL(38,10): `0.00000000005` is stored as 0.0000000001 and `12345678901234567890.123456789012` as 12345678901234567890.123456789, where PostgreSQL keeps every digit; a source with more fraction digits keeps them (`n / m` over numeric(10,2) and numeric(12,4)). A table created before this rule (DECIMAL(38,0) for `NUMERIC`) is unchanged. (catalog: [dml-assignment#r11](adr/0012-divergences/dml-assignment.md#catalog); #1024, #1541)
 
 **OHLCV decimal fields retain their typmod.**
 
@@ -344,7 +352,7 @@ An outer operand computed from numeric constants — `CASE … THEN 14.000000000
 
 **Decimal arithmetic stops at 38 digits.**
 
-Precision stops at 38 while exact operators retain scale. DECIMAL(38,10) multiplication produces DECIMAL(38,20), raising 22003 beyond its range where PostgreSQL numeric answers. (catalog: [numeric-decimal#r17](adr/0012-divergences/numeric-decimal.md#catalog); #749)
+Precision stops at 38 while exact operators retain scale. DECIMAL(38,10) multiplication produces DECIMAL(38,20), raising 22003 beyond its range where PostgreSQL numeric answers. A column created `NUMERIC` is DECIMAL(38,10), so `v * v` over 1234567890 raises 22003 where PostgreSQL answers 1524157875019052100; write `CAST(v AS NUMERIC(38,0)) * v`. (catalog: [numeric-decimal#r17](adr/0012-divergences/numeric-decimal.md#catalog); #749, #1541)
 
 **SUM overflow survives cancellation.**
 
@@ -445,10 +453,6 @@ PostgreSQL has no QUALIFY. It filters after windows, can read unprojected inputs
 **A LAG / LEAD default that reads a table is not evaluated.**
 
 `LAG(b, 1, (SELECT max(d) FROM t))` fails the query, with no SQLSTATE, where PostgreSQL evaluates the subquery once and answers; a constant subquery default such as `(SELECT 9)` answers, as does a column default. (catalog: [aggregates-windows#r23](adr/0012-divergences/aggregates-windows.md#catalog); #1435)
-
-**A table created from a numeric LAG / LEAD result takes the result's scale.**
-
-`CREATE TABLE c AS SELECT id, LAG(b, 1, CAST(NULL AS NUMERIC)) OVER (ORDER BY id) AS v FROM t` over a bigint `b` creates a DECIMAL(38,0) column, so a later `INSERT INTO c VALUES (9, 0.75)` stores 1 where PostgreSQL's column is unconstrained and stores 0.75. (catalog: [aggregates-windows#r24](adr/0012-divergences/aggregates-windows.md#catalog); #1436)
 
 **Network-native types have separate storage domains.**
 
