@@ -221,6 +221,9 @@ func (s *Scheduler) PublishTasks(ctx context.Context, tasks []distributed.Task) 
 	// snapshot (#491). Nil for the common case — a query over tables with
 	// no deletes — and then this is one map lookup per publish.
 	queryDeletes := queryDeleteMarkersFromContext(ctx)
+	// The query's PostgreSQL numeric categories ride the same context, for
+	// the same reason (dag_pg_categories.go, #381).
+	queryCats := queryPGCategoriesFromContext(ctx)
 
 	batch := make([]preparedTask, 0, len(tasks))
 	for _, task := range tasks {
@@ -228,6 +231,7 @@ func (s *Scheduler) PublishTasks(ctx context.Context, tasks []distributed.Task) 
 			s.annotate(&task)
 		}
 		stampTaskDeleteMarkers(&task, queryDeletes)
+		stampTaskPGCategories(&task, queryCats)
 		stampTaskPlannerOptions(&task, s.BushyJoinReorder)
 		data, err := distributed.Marshal(task)
 		if err != nil {

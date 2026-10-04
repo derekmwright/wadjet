@@ -24,7 +24,7 @@ type computedColAppender struct {
 	be   expr.BoolExpr // non-nil fast path
 }
 
-func newComputedColAppenders(specs []distributed.ComputedColSpec) ([]computedColAppender, error) {
+func newComputedColAppenders(specs []distributed.ComputedColSpec, opts ...expr.CompileOption) ([]computedColAppender, error) {
 	if len(specs) == 0 {
 		return nil, nil
 	}
@@ -34,7 +34,7 @@ func newComputedColAppenders(specs []distributed.ComputedColSpec) ([]computedCol
 		if err != nil {
 			return nil, fmt.Errorf("parse computed col %s (%q): %w", sp.Name, sp.Expr, err)
 		}
-		compiled, err := expr.Compile(node)
+		compiled, err := expr.CompileWithRunner(node, nil, opts...)
 		if err != nil {
 			return nil, fmt.Errorf("compile computed col %s (%q): %w", sp.Name, sp.Expr, err)
 		}

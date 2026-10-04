@@ -60,6 +60,9 @@ type compileContext struct {
 	// nil means "not known", which is every caller that cannot plan a
 	// subquery — the compile then classifies as it always did.
 	subqueryDecl SubqueryDeclFunc
+	// inputCats is the plan's PostgreSQL numeric category of the input
+	// columns, where the planner named one (WithInputPGCategories).
+	inputCats map[string]PGCategory
 	// subqueryCols answers how many COLUMNS a subquery's SELECT list has,
 	// resolved from its own plan at compile time. It is what lets a
 	// construct that requires ONE column refuse before a single row is read,
@@ -114,6 +117,13 @@ type CompileOption func(*compileContext)
 // ok=false means the caller could not resolve it, and every construct that
 // asks then keeps the answer it had.
 type SubqueryColumnsFunc func(sql string) (int, bool)
+
+// WithInputPGCategories supplies the plan's PostgreSQL numeric category of
+// the input columns, keyed by lower-case column name: what a rounding site
+// reads a materialized column's type from (CategoryResolver, #381).
+func WithInputPGCategories(cats map[string]PGCategory) CompileOption {
+	return func(c *compileContext) { c.inputCats = cats }
+}
 
 // WithSubqueryDeclTypes supplies the resolver described on
 // compileContext.subqueryDecl (#696).
@@ -1430,18 +1440,11 @@ func compileFuncCallNamed(n *plansql.FuncCallNode, ctx *compileContext, checked 
 			fc.argDecls = append(fc.argDecls, newOperandDecl(a, ctx))
 		}
 	}
-	// ROUND on a DOUBLE PRECISION (or REAL/FLOAT — Wadjet's Cast collapses
-	// all three to the same runtime float64) operand rounds half TO EVEN in
-	// PostgreSQL; ROUND on NUMERIC — the default, no CAST at all — rounds
-	// half AWAY from zero, which fnRound already implements correctly. The
-	// two runtime values are indistinguishable bare float64s by the time a
-	// kernel would see them (no numeric tower), so the type distinction has
-	// to be caught here, from the immediate operand's own CAST, before that
-	// boxing happens (#381). This is independent of CAST(x AS integer)'s
-	// half-away-from-zero rounding rule (#373) — PostgreSQL specifies CAST
-	// and ROUND separately, and unifying them would be wrong for one of them.
-	if name == "round" && len(args) >= 1 && isBinaryFloatCast(args[0]) {
-		fc.Name = "round_half_even"
+	// ROUND rounds by its operand's declared type: half to even over a
+	// double precision or real, half away from zero over a numeric — the
+	// one decision every rounding site makes (rounding_rule.go, #381).
+	if name == "round" {
+		fc.round = newRoundRule(fc)
 	}
 	// Offsets-shape: length()/octet_length()/bit_length() over a bare column
 	// reference are offsets subtractions, not value reads (shape_funcs.go).
@@ -1477,28 +1480,6 @@ func compileFuncCallNamed(n *plansql.FuncCallNode, ctx *compileContext, checked 
 		return &numericFuncCall{fc}, nil
 	}
 	return fc, nil
-}
-
-// isBinaryFloatCast reports whether e is an explicit CAST to one of
-// PostgreSQL's IEEE-754 binary floating-point types — double precision,
-// real, or float — as opposed to NUMERIC/DECIMAL or a bare literal/column.
-// It is the one signal left, post-parse, that an operand is declared
-// DOUBLE PRECISION rather than NUMERIC: Wadjet represents both as a plain
-// float64 at runtime (#381). Only the immediate operand is checked, matching
-// the reproduction this fixes (ROUND(CAST(x AS double precision))) — a cast
-// buried inside a larger expression (ROUND(CAST(x AS double precision) + 1))
-// is out of scope.
-func isBinaryFloatCast(e Expr) bool {
-	c, ok := e.(*Cast)
-	if !ok {
-		return false
-	}
-	switch strings.ToLower(strings.TrimSpace(c.DestType)) {
-	case "double", "double precision", "real", "float", "float4", "float8":
-		return true
-	default:
-		return false
-	}
 }
 
 // shapeLenMul maps the byte-length family to its multiplier. length / len /

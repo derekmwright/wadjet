@@ -88,7 +88,7 @@ func TestRenameSourceIndicesDistinctOrRefused(t *testing.T) {
 // apply copied one source into every output — the original bug, silently.
 func TestUnsatisfiableDuplicateGroupDegradesToRenameOnly(t *testing.T) {
 	renames := renamesFor([2]string{"u", "u"}, [2]string{"u", "u"}, [2]string{"u", "u"})
-	br := newBatchRenamer(renames, []string{"u", "u", "other"})
+	br := newBatchRenamer(renames, []string{"u", "u", "other"}, nil)
 	if br.project {
 		t.Errorf("project stayed on for a name that addresses 2 columns and 3 outputs — " +
 			"apply would then hand some of them the same column")
@@ -101,7 +101,7 @@ func TestUnsatisfiableDuplicateGroupDegradesToRenameOnly(t *testing.T) {
 // refusal was too broad.
 func TestSharedSourceDuplicateGroupStillProjects(t *testing.T) {
 	renames := renamesFor([2]string{"u", "u"}, [2]string{"u", "u"})
-	br := newBatchRenamer(renames, []string{"u", "other"})
+	br := newBatchRenamer(renames, []string{"u", "other"}, nil)
 	if !br.project {
 		t.Errorf("project turned off for two outputs reading ONE source column — " +
 			"the result would lose a column")
@@ -114,7 +114,7 @@ func TestSharedSourceDuplicateGroupStillProjects(t *testing.T) {
 // transposed.
 func TestBatchRenamerResolvesAgainstEachBatch(t *testing.T) {
 	renames := renamesFor([2]string{"a", "x"}, [2]string{"b", "y"})
-	br := newBatchRenamer(renames, []string{"a", "b"})
+	br := newBatchRenamer(renames, []string{"a", "b"}, nil)
 	if !br.project {
 		t.Fatalf("expected a projecting renamer")
 	}
@@ -150,7 +150,7 @@ func TestBatchRenamerResolvesAgainstEachBatch(t *testing.T) {
 // with — neither joins the group nor shifts it.
 func TestDuplicateRenamesFollowTheBatchOrder(t *testing.T) {
 	renames := renamesFor([2]string{"u", "u"}, [2]string{"u", "u"})
-	br := newBatchRenamer(renames, []string{"u", "u"})
+	br := newBatchRenamer(renames, []string{"u", "u"}, nil)
 	if !br.project {
 		t.Fatalf("expected a projecting renamer")
 	}

@@ -1353,6 +1353,7 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 
 	c.logger.Info("routing to native DAG executor",
 		"query", queryID, "stages", len(physStages))
+	ctx = withQueryPGCategories(ctx, dagPGCategories(logicalPlan, physStages))
 	gr, gerr := c.executeStageDAG(ctx, queryID, sql, physStages, c.workers.Count())
 	if gerr != nil {
 		// ErrInputLost: a producer died before its background upload landed

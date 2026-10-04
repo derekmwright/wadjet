@@ -28,7 +28,7 @@ import (
 // exec.Window back where #585 found it — resolving a key name nothing
 // produces — except that there the operator now refuses, so the only thing
 // silence would buy is a worse error message.
-func buildWindowKeyProjection(specs []distributed.ProjectSpec) (exec.UnaryOperator, error) {
+func buildWindowKeyProjection(specs []distributed.ProjectSpec, opts ...expr.CompileOption) (exec.UnaryOperator, error) {
 	if len(specs) == 0 {
 		return nil, nil
 	}
@@ -43,7 +43,7 @@ func buildWindowKeyProjection(specs []distributed.ProjectSpec) (exec.UnaryOperat
 		if err != nil {
 			return nil, fmt.Errorf("parse window key %q: %w", spec.Expr, err)
 		}
-		compiled, err := expr.Compile(node)
+		compiled, err := expr.CompileWithRunner(node, nil, opts...)
 		if err != nil {
 			return nil, fmt.Errorf("compile window key %q: %w", spec.Expr, err)
 		}
@@ -119,7 +119,7 @@ func buildWindowKeyProjection(specs []distributed.ProjectSpec) (exec.UnaryOperat
 // mean the planner named something the table does not have. See
 // OpSpec.ScanSchemaFilter for why a filter above a JOIN cannot be checked the
 // same way.
-func compileFilterExprs(exprs []string, scanSchema bool) ([]exec.UnaryOperator, []string, error) {
+func compileFilterExprs(exprs []string, scanSchema bool, opts ...expr.CompileOption) ([]exec.UnaryOperator, []string, error) {
 	if len(exprs) == 0 {
 		return nil, nil, nil
 	}
@@ -131,7 +131,7 @@ func compileFilterExprs(exprs []string, scanSchema bool) ([]exec.UnaryOperator, 
 			return nil, nil, fmt.Errorf("parse filter %q: %w", s, err)
 		}
 		collectFilterColumns(node, colSet)
-		compiled, err := expr.Compile(node)
+		compiled, err := expr.CompileWithRunner(node, nil, opts...)
 		if err != nil {
 			return nil, nil, fmt.Errorf("compile filter %q: %w", s, err)
 		}
@@ -177,6 +177,7 @@ func buildAggInputProjection(
 	groupByTypes map[string]int,
 	groupByDecimal map[string]distributed.DecimalMeta,
 	keys *fragmentGroupKeys,
+	opts ...expr.CompileOption,
 ) (*exec.Project, []string, error) {
 	// Detect derived inputs. An aggregate can carry InputExpr explicitly;
 	// a GROUP BY column is "derived" when parsing it yields anything
@@ -247,7 +248,7 @@ func buildAggInputProjection(
 			// Compile the expression once and emit a projection under
 			// the same name HashAggregate expects.
 			collectFilterColumns(node, nil)
-			compiled, err := expr.Compile(node)
+			compiled, err := expr.CompileWithRunner(node, nil, opts...)
 			if err != nil {
 				return nil, nil, fmt.Errorf("compile group-by %q: %w", c, err)
 			}
@@ -334,7 +335,7 @@ func buildAggInputProjection(
 			return nil, nil, fmt.Errorf("parse agg input %q: %w", a.InputExpr, err)
 		}
 		collectFilterColumns(node, extraColSet)
-		compiled, err := expr.Compile(node)
+		compiled, err := expr.CompileWithRunner(node, nil, opts...)
 		if err != nil {
 			return nil, nil, fmt.Errorf("compile agg input %q: %w", a.InputExpr, err)
 		}
@@ -489,7 +490,7 @@ func collectFilterColumns(n plansql.Node, out map[string]struct{}) {
 // exactly the fragment's output schema — anything not listed is dropped,
 // which is the point: the fragment emits the SELECT list, not the scan's
 // input columns (#169).
-func buildSelectProjection(specs []distributed.ProjectSpec) (*exec.Project, error) {
+func buildSelectProjection(specs []distributed.ProjectSpec, opts ...expr.CompileOption) (*exec.Project, error) {
 	if len(specs) == 0 {
 		return nil, fmt.Errorf("project: at least one projection required")
 	}
@@ -540,7 +541,7 @@ func buildSelectProjection(specs []distributed.ProjectSpec) (*exec.Project, erro
 			projCols = append(projCols, pc)
 			continue
 		}
-		compiled, err := expr.Compile(node)
+		compiled, err := expr.CompileWithRunner(node, nil, opts...)
 		if err != nil {
 			return nil, fmt.Errorf("compile projection %q: %w", p.Expr, err)
 		}

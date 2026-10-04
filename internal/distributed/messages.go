@@ -47,6 +47,13 @@ type Task struct {
 	// with the same ID and a bumped Attempt (coordinator.taskRetrier).
 	// 0 means unset (pre-retry senders); treat as attempt 1.
 	Attempt int `json:"attempt,omitempty"`
+	// PGCategories is PostgreSQL's numeric category (expr.PGCategory) of the
+	// column names this query's plan emits (physical.PlanPGCategories), for
+	// every expression the task compiles: a column a previous stage
+	// materialized is a bare FLOAT64 whether PostgreSQL calls it numeric
+	// (`5 / 2.0 AS x`) or float8, and ROUND and the integer cast round by
+	// which (#381). Stamped by Scheduler.PublishTasks.
+	PGCategories map[string]uint8 `json:"pg_categories,omitempty"`
 	// DegradedMemory is a WORKER-LOCAL flag, never serialized: the poison-
 	// task defense (#318) sets it before executing a redelivery whose prior
 	// attempt coincided with a worker death. The executor then wires the

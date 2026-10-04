@@ -1428,7 +1428,7 @@ func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, re
 	// Appended expression columns (exchange subsumption dedup): compiled
 	// once, evaluated per batch, appended ahead of the partitioning sink so
 	// the flag ships inside every partition file.
-	computedAppenders, err := newComputedColAppenders(task.ComputedCols)
+	computedAppenders, err := newComputedColAppenders(task.ComputedCols, taskCompileOptions(task)...)
 	if err != nil {
 		return fmt.Errorf("shuffle task %s: %w", task.ID, err)
 	}

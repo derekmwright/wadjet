@@ -35,7 +35,7 @@ func TestApplyOutputRenames(t *testing.T) {
 		{From: "revenue", To: "revenue"},
 	}
 
-	applyOutputRenames(gr, renames)
+	applyOutputRenames(gr, renames, nil)
 
 	wantCols := []string{"supp_nation", "l_year", "revenue"}
 	for i, w := range wantCols {
@@ -61,7 +61,7 @@ func TestApplyOutputRenames_CaseInsensitive(t *testing.T) {
 	renames := []dagplan.OutputRename{
 		{From: "SUBSTR(L_SHIPDATE, 1, 4)", To: "l_year"},
 	}
-	applyOutputRenames(gr, renames)
+	applyOutputRenames(gr, renames, nil)
 	if gr.columns[0] != "l_year" {
 		t.Errorf("got %q, want l_year", gr.columns[0])
 	}
@@ -94,7 +94,7 @@ func TestApplyOutputRenames_SelfJoinQualifierFallback(t *testing.T) {
 		{From: "n2.n_name", To: "cust_nation"},
 	}
 
-	applyOutputRenames(gr, renames)
+	applyOutputRenames(gr, renames, nil)
 
 	want := []string{"supp_nation", "cust_nation"}
 	for i, w := range want {
@@ -145,9 +145,9 @@ func TestResolveRenameSource(t *testing.T) {
 // TestApplyOutputRenames_NoOp guards the empty-renames + nil-result
 // fast paths.
 func TestApplyOutputRenames_NoOp(t *testing.T) {
-	applyOutputRenames(nil, []dagplan.OutputRename{{From: "x", To: "y"}}) // must not panic
+	applyOutputRenames(nil, []dagplan.OutputRename{{From: "x", To: "y"}}, nil) // must not panic
 	gr := &gatherResult{columns: []string{"x"}}
-	applyOutputRenames(gr, nil)
+	applyOutputRenames(gr, nil, nil)
 	if gr.columns[0] != "x" {
 		t.Errorf("nil renames should leave columns unchanged, got %q", gr.columns[0])
 	}

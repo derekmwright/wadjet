@@ -46,7 +46,14 @@ func SetShapeResolver(f ShapeResolver) { shapeResolver.Store(&f) }
 // stamps DeclType.PGNumeric on the projection's declaration, asked of the
 // operand's AST against the input batch's executed columns — so every arm,
 // a DAG stage included, reads it from what that arm actually has.
-type CategoryResolver func(node plansql.Node, schema []parquet.Column, sub SubqueryDeclFunc) PGCategory
+//
+// cats is the PLAN's category of the input columns where the planner named
+// one (the compile's WithInputPGCategories): a column a previous operator
+// materialized — a derived table's, a CTE's, a set operation's, an
+// aggregate's output — is a bare FLOAT64 in the batch whether PostgreSQL
+// calls it numeric (`5 / 2.0 AS x`, `avg(i)`) or float8, and only the plan
+// still knows which (#381).
+type CategoryResolver func(node plansql.Node, schema []parquet.Column, sub SubqueryDeclFunc, cats map[string]PGCategory) PGCategory
 
 var categoryResolver atomic.Pointer[CategoryResolver]
 
@@ -59,6 +66,8 @@ func SetCategoryResolver(f CategoryResolver) { categoryResolver.Store(&f) }
 type operandDecl struct {
 	node plansql.Node
 	sub  SubqueryDeclFunc
+	// cats is the plan's category of the input columns (CategoryResolver).
+	cats map[string]PGCategory
 	res  atomic.Pointer[resolvedDecl]
 	// cat is the resolved category plus one (0 = not resolved yet).
 	cat atomic.Int32
@@ -78,7 +87,7 @@ func (d *operandDecl) category(b *batch.RecordBatch) PGCategory {
 	if f == nil {
 		return PGCatUnknown
 	}
-	c := (*f)(d.node, batchSchema(b), d.sub)
+	c := (*f)(d.node, batchSchema(b), d.sub, d.cats)
 	if b != nil {
 		d.cat.Store(int32(c) + 1)
 	}
@@ -94,6 +103,7 @@ func newOperandDecl(node plansql.Node, ctx *compileContext) *operandDecl {
 	d := &operandDecl{node: node}
 	if ctx != nil {
 		d.sub = ctx.subqueryDecl
+		d.cats = ctx.inputCats
 	}
 	return d
 }

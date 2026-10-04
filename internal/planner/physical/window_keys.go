@@ -603,6 +603,9 @@ func (p *Planner) windowKeyProjections(keys map[string]windowKey, scope *logical
 	}
 	cols := make([]exec.ProjectColumn, 0, len(specs))
 	meta := make([]parquet.Column, 0, len(specs))
+	// The plan's category of the input columns, for the rounding sites
+	// (expr.WithInputPGCategories, #381).
+	inputCats := expr.WithInputPGCategories(emittedColPGCategory(scope))
 	for _, spec := range specs {
 		k := byName[spec.Name]
 		// The scalar-subquery declarations the key was DECLARED with
@@ -610,7 +613,7 @@ func (p *Planner) windowKeyProjections(keys map[string]windowKey, scope *logical
 		// operand compiled undeclared, so `(SELECT x.b …) * t.n + 3` was an
 		// exact numeric key computed in a double.
 		compiled, err := expr.CompileWithRunner(k.Expr, p.subqueryRunner, p.subqueryDeclOptionFor(scope),
-			p.subqueryBudgetOption(), p.catalogOption())
+			p.subqueryBudgetOption(), p.catalogOption(), inputCats)
 		if err != nil {
 			return nil, nil, windowKeyCompileError(k.Text, err)
 		}

@@ -186,6 +186,9 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 	// a rename of a value computed BELOW the aggregate, so it types against
 	// the aggregate's input rather than its output.
 	childColTypes := emittedColDecls(child)
+	// The plan's category of the child's columns, for the rounding sites
+	// (expr.WithInputPGCategories, #381).
+	inputCats := expr.WithInputPGCategories(emittedColPGCategory(child))
 	// A SELECT-list scalar subquery types against its OWN plan, not against
 	// this projection's input columns (#874).
 	// A CORRELATED one types its outer references as child's columns
@@ -319,7 +322,7 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 					aggOutputCol += ")"
 					// Replace inner aggregate with a column reference in the AST
 					rewritten := replaceAggWithColRef(proj.ASTExpr, innerAgg, aggOutputCol)
-					compiled, compErr := expr.CompileWithRunner(rewritten, p.subqueryRunner, p.subqueryBudgetOption(), p.catalogOption())
+					compiled, compErr := expr.CompileWithRunner(rewritten, p.subqueryRunner, p.subqueryBudgetOption(), p.catalogOption(), inputCats)
 					if expr.IsCompileRefusal(compErr) {
 						return nil, nil, nil, compErr
 					}
@@ -364,9 +367,9 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 			var compErr error
 			if len(outerTables) > 0 {
 				if len(outerCols) > 0 {
-					compiled, compErr = expr.CompileWithScopeResolver(astExpr, p.subqueryRunner, outerTables, outerCols, p.SubqueryInnerColumns(), p.subqueryDeclOptionFor(child), p.subqueryBudgetOption(), p.catalogOption())
+					compiled, compErr = expr.CompileWithScopeResolver(astExpr, p.subqueryRunner, outerTables, outerCols, p.SubqueryInnerColumns(), p.subqueryDeclOptionFor(child), p.subqueryBudgetOption(), p.catalogOption(), inputCats)
 				} else {
-					compiled, compErr = expr.CompileWithScope(astExpr, p.subqueryRunner, outerTables, p.subqueryDeclOptionFor(child), p.subqueryBudgetOption(), p.catalogOption())
+					compiled, compErr = expr.CompileWithScope(astExpr, p.subqueryRunner, outerTables, p.subqueryDeclOptionFor(child), p.subqueryBudgetOption(), p.catalogOption(), inputCats)
 				}
 			} else {
 				// With the child's DECLARED column types in hand, so a pair
@@ -380,7 +383,7 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 				// what a CAST of that container renders its element under (arc
 				// CW round 3, expr/operand_decl.go).
 				compiled, compErr = expr.CompileWithColumnTypes(
-					astExpr, p.subqueryRunner, childColTypes.Types, p.subqueryDeclOption(), p.subqueryBudgetOption(), p.catalogOption())
+					astExpr, p.subqueryRunner, childColTypes.Types, p.subqueryDeclOption(), p.subqueryBudgetOption(), p.catalogOption(), inputCats)
 			}
 			// A name nothing implements has no input column to fall back to,
 			// so the direct-copy path below would only re-report it as a
