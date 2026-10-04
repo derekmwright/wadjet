@@ -1014,6 +1014,17 @@ A comparison coerces its text exactly as CAST does. `'epoch'` is read by the one
 | temporal | [r25](0012-divergences/temporal.md#catalog) | Amended: `epoch` leaves the list (read as 1970-01-01 00:00:00 everywhere); `now` / `today` / `tomorrow` / `yesterday` and a BC date are 22007 in a comparison as in a CAST; write `CURRENT_TIMESTAMP` / `CURRENT_DATE` | `coordinator.TestArcTCTimestampTextComparisonEveryArm` (sp/\*, pos/\*, spclock/\*), `pgwire.TestArcPWRound2MatchesPostgres` (b3/\*/epoch, pins deleted) |
 | comparison-membership | [r4](0012-divergences/comparison-membership.md#catalog) | Amended: a text-declared parameter bound `'epoch'` answers as the literal; bound `'infinity'` raises 22007 as the literal does | `coordinator.TestArcTCBoundParameterEveryDoor` (param25/\*) |
 
+## 2026-10-04: a statement reads the clock once (arc SC, #1566)
+
+`NOW()`, `CURRENT_TIMESTAMP`, `LOCALTIMESTAMP` and `CURRENT_DATE` read the clock at every evaluation. At 8e681724 (`coordinator.TestArcSCStatementClockEveryArm`, 4096 rows, eight runs per door): `SELECT count(*) FROM sc_k a, sc_k b, sc_k c, sc_k e WHERE CAST(now() AS TIMESTAMP) = CAST(now() AS TIMESTAMP)` answered 4093 to 4096 (issue/cross\_now\_eq\_now), `count(DISTINCT CAST(now() AS TEXT))` answered 1 to 5 (issue/distinct\_now\_text, 3 to 5 on the dag and dag-shuffled doors), two derived `now()` columns joined on equality answered 0 rows on the single and spilled512k doors (pos/join\_sides), and `now() IN (SELECT now() FROM sc_k)` answered 0 rows on the three DAG doors (pos/in\_subquery), where PostgreSQL 17.11 answers 4096, 1, 4096 and 4096; on the embedded door an `INSERT … VALUES (…, now())` of 2048 rows stored 11 to 22 distinct values and `UPDATE … SET ts = now()` 2 to 5 (`wadjet.TestArcSCEmbeddedStatementWritesOneClock`, two runs of eight at 8e681724 with the gate copied in), where PostgreSQL stores 1.
+
+Now the door that starts a statement stamps one instant (`expr.StartStatement`: pgwire per statement and per EXECUTE, `wadjet.DB` `Query` / `ExecuteParsed`, `Coordinator.ExecuteSQL` / `SubmitSQL`; the outermost door wins), every compile binds the clock functions to it (`expr.WithStatementClock`: the physical planner, the DML evaluator, the coordinator's gather and scalar-subquery reads, a CREATE FUNCTION body), and the stage DAG carries it on the task (`distributed.Task.StatementTime`, stamped by `Scheduler.PublishTasks`; a worker binds it and never reads its own clock, a task without it falls back to its own start). The logical optimizer's plan-time folds leave a clock-reading conjunct in the plan, evaluated where the statement runs.
+
+| family | row | change | gate |
+|---|---|---|---|
+| temporal | r13 | Retired: `WHERE LOCALTIMESTAMP >= LOCALTIMESTAMP` keeps every row, as on PostgreSQL; the clock is read once per statement on the five doors and the embedded DML door (page entry P014, "read PER ROW", removed) | `coordinator.TestArcSCStatementClockEveryArm`, `wadjet.TestArcSCEmbeddedStatementWritesOneClock` |
+| temporal | [r26](0012-divergences/temporal.md#catalog) | Added: the clock is the STATEMENT's — two statements inside `BEGIN … COMMIT` or in one multi-statement string read two values where PostgreSQL reads the transaction's one (no transactions, parameters-pgwire E11) | `pgwire.TestArcSCStatementClockIsTheStatements` |
+
 ## Dated markers inside the entries
 
 Every `Added` / `Amended` / `CLOSED` / `Corrected` / `narrowed` marker still inside an entry's verbatim text, in date order, with the entry that carries it.
