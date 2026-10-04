@@ -46,8 +46,16 @@ CREATE TABLE transactions (
 );
 ```
 
-- **precision**: Total number of digits (1–38, default 38)
-- **scale**: Digits after the decimal point (default 0)
+- **precision**: Total number of digits (1–38)
+- **scale**: Digits after the decimal point (`NUMERIC(p)` is scale 0)
+- **No parameters**: a stored column declared `NUMERIC` / `DECIMAL` — or created
+  by `CREATE TABLE AS` from a value PostgreSQL types as plain numeric — is
+  PostgreSQL's unconstrained numeric: declared `numeric` with typmod −1, stored
+  as DECIMAL(38,10) (38, s for a source with more fraction digits), printed
+  without trailing zeros (`1.25`, `1`). More than 10 fraction digits round,
+  more than 28 integer digits are `22003`, and the product of two such
+  columns holds 18 integer digits (ADR-0024 §10). A nested
+  `ARRAY(NUMERIC)` element is DECIMAL(38,0).
 - **Arithmetic**: SUM, AVG, MIN, MAX all use exact Int128 arithmetic through the aggregate pipeline
 - **Parquet storage**: Written as Parquet DECIMAL logical type for interoperability
 
