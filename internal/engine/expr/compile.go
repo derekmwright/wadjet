@@ -990,6 +990,15 @@ func tryTemporalLit(col *ColRef, other Expr, op CmpOp, flip bool) *CmpTemporalLi
 	if derr != nil && merr != nil {
 		return nil
 	}
+	// The infinite values' spellings are also a FLOAT's and a NUMERIC's
+	// (`f > '-Infinity'`), and this node's fallback for a non-temporal
+	// column is compare(), which reads the text as text and drops the
+	// negative rows. They take the generic comparison, whose declared-pair
+	// reading answers each column type — the temporal ones included
+	// (boxedPair's temporal arm reads the word into the carrier's extreme).
+	if merr == nil && parquet.IsInfiniteTimestamp(ms) {
+		return nil
+	}
 	return &CmpTemporalLit{Col: col, Lit: s, Op: op, Flip: flip, days: int64(days), ms: ms, daysErr: derr, msErr: merr}
 }
 
