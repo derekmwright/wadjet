@@ -2680,10 +2680,15 @@ func assignIntegerValue(v any, col parquet.Column, srcFloat bool, srcType parque
 		if srcFloat {
 			r = math.RoundToEven(t)
 		}
-		if math.IsNaN(r) || math.IsInf(r, 0) || r < -9.223372036854776e18 || r > 9.223372036854776e18 {
+		// The shared bound (#1484). This site's own copy compared against
+		// 9.223372036854776e18, which IS 2^63, with `>`: the double 2^63
+		// passed and converted to -9223372036854775808, so INSERT, UPDATE
+		// and MERGE stored it where PostgreSQL raises 22003.
+		i, ok := parquet.FloatToInt64(r)
+		if !ok {
 			return nil, sqlerr.New("22003", "%s out of range", col.Type)
 		}
-		n = int64(r)
+		n = i
 	case float32:
 		return assignIntegerValue(float64(t), col, srcFloat, srcType, srcKnown)
 	case string:

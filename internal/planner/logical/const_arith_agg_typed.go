@@ -302,10 +302,13 @@ func caaStatInt(v any) (*big.Int, bool) {
 	case int:
 		return big.NewInt(int64(x)), true
 	case float64:
-		if x != math.Trunc(x) || math.Abs(x) > math.MaxInt64 {
+		// The shared bound (#1484): `math.Abs(x) > math.MaxInt64` compared
+		// against 2^63 and let 2^63 through, whose int64 is MinInt64.
+		n, ok := parquet.FloatToInt64(x)
+		if x != math.Trunc(x) || !ok {
 			return nil, false
 		}
-		return big.NewInt(int64(x)), true
+		return big.NewInt(n), true
 	}
 	return nil, false
 }

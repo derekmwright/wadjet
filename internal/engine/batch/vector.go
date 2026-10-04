@@ -1121,7 +1121,7 @@ func (v *Vector) SetValue(i int, val any) {
 		case int32:
 			v.Int64Data[i] = int64(tv)
 		case float64:
-			v.Int64Data[i] = int64(tv)
+			v.Int64Data[i] = v.int64FromFloatOrRaise(tv)
 		default:
 			v.mismatch(val)
 		}

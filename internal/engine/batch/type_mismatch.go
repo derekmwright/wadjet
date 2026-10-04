@@ -220,6 +220,18 @@ func (v *Vector) int32FromFloatOrRaise(f float64) int32 {
 	return int32(f)
 }
 
+// int64FromFloatOrRaise is the same guard for an INT64 vector, on the bound
+// every float → integer conversion shares (parquet.FloatToInt64, #1484). The
+// arm it guards converted with a bare int64(f), which for a NaN or a value
+// at or past 2^63 is implementation-defined — MinInt64 on amd64.
+func (v *Vector) int64FromFloatOrRaise(f float64) int64 {
+	n, ok := parquet.FloatToInt64(f)
+	if !ok {
+		panic(&IntegerRangeError{Dst: v.Type, Val: f})
+	}
+	return n
+}
+
 // NetworkTextWriteError reports TEXT written into a PORT or PROTOCOL vector
 // that names no value of that type — the third guard on this seam, beside
 // TypeMismatchError (the Go type has nowhere to go) and IntegerRangeError (the

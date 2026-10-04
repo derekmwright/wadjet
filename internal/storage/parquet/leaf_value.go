@@ -290,14 +290,42 @@ func networkIntInRange(colType TypeID, n int64) (int32, error) {
 // positive side and closed on the negative one, where -2^63 is exact.
 const maxInt64AsFloat = 9223372036854775808.0
 
+// FloatToInt64 is the ONE range check every float → integer conversion makes
+// (#1484): f's integer part as an int64, ok=false when f has none — a NaN,
+// an infinity, anything at or past 2^63, anything below -2^63.
+//
+// The bound has to be written against the two powers of two and compared on
+// the float, because math.MaxInt64 has no float64: float64(math.MaxInt64)
+// ROUNDS UP to 2^63, so `f > math.MaxInt64` is `f > 2^63` and lets 2^63
+// itself through — and Go's conversion of an out-of-range float is
+// implementation-defined (MinInt64 on amd64). That is how `INSERT INTO t(a
+// BIGINT) SELECT f` stored -9223372036854775808 for the double 2^63 where
+// PostgreSQL raises 22003 and the explicit CAST of the same value did too.
+//
+// A caller ROUNDS first and passes the rounded value: rint (half to even) for
+// a float8 or float4 source, half away from zero for a float-carried numeric,
+// as PostgreSQL's own casts do. Every float at or above 2^52 is already an
+// integer, so the result is the same whether the caller rounded or truncated.
+// A narrower destination (int4, PORT, PROTOCOL, int2) checks its own range on
+// the int64 this returns.
+func FloatToInt64(f float64) (int64, bool) {
+	// Written as a conjunction that holds, so a NaN — every comparison with
+	// which is false — fails it with no separate test.
+	if !(f >= -maxInt64AsFloat && f < maxInt64AsFloat) {
+		return 0, false
+	}
+	return int64(f), true
+}
+
 func floatToInt64Leaf(colType TypeID, f float64, box any) (int64, error) {
-	if math.IsNaN(f) || math.IsInf(f, 0) || f < -maxInt64AsFloat || f >= maxInt64AsFloat {
+	n, ok := FloatToInt64(f)
+	if !ok {
 		return 0, leafRangeError(colType, box)
 	}
 	if f != math.Trunc(f) {
 		return 0, leafInexactError(colType, box)
 	}
-	return int64(f), nil
+	return n, nil
 }
 
 // boolLeafValue, float32LeafValue, float64LeafValue, bytesLeafValue and

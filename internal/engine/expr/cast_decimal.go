@@ -564,26 +564,26 @@ func castIntInRange(v int64, dest string) int64 {
 // correctly on the same tree: ONE destination family with two answers, which
 // is this arc's headline defect, in the file it rewrote (review round 0, P2).
 //
-// PostgreSQL raises `bigint out of range` for it, measured, and the bound is
-// its own: a float64 cannot represent 2^63-1 exactly, so the comparison is
-// against the exact powers of two that bracket the range.
+// PostgreSQL raises `bigint out of range` for it, measured. The bound is
+// parquet.FloatToInt64's, the one every float → integer conversion shares
+// (the assignment cast's copy of it let 2^63 through, #1484).
 func castFloatToInt64(f float64, dest string) int64 {
-	r := math.Round(f)
-	if math.IsNaN(r) || r >= 9223372036854775808.0 || r < -9223372036854775808.0 {
+	n, ok := parquet.FloatToInt64(math.Round(f))
+	if !ok {
 		raiseIntegerOutOfRange(dest)
 	}
-	return int64(r)
+	return n
 }
 
 // castFloatToInt64Even is castFloatToInt64 with PostgreSQL's rint() rounding —
 // half TO EVEN, which is what a FLOAT source gets (#768). The range check is
 // the same one and is shared rather than copied.
 func castFloatToInt64Even(f float64, dest string) int64 {
-	r := math.RoundToEven(f)
-	if math.IsNaN(r) || r >= 9223372036854775808.0 || r < -9223372036854775808.0 {
+	n, ok := parquet.FloatToInt64(math.RoundToEven(f))
+	if !ok {
 		raiseIntegerOutOfRange(dest)
 	}
-	return int64(r)
+	return n
 }
 
 // castExactSourceText is the operand's own numeric SOURCE TEXT, when it has
