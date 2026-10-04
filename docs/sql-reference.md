@@ -2455,7 +2455,8 @@ A position past the end of the select list is SQLSTATE `42P10`
 A float sort key follows PostgreSQL's float order: `NaN` sorts above every
 other value (`Infinity` included) and all `NaN`s are peers; `-0` and `0` are
 peers. `ORDER BY c` therefore puts `NaN` after `Infinity` and before the
-`NULL`s, `ORDER BY c DESC` puts it first, and `RANK() OVER (ORDER BY c)` ranks
+`NULL`s, `ORDER BY c DESC` puts it right after the `NULL`s (which `DESC` sorts
+first unless `NULLS LAST` is given), and `RANK() OVER (ORDER BY c)` ranks
 `-0` and `0` alike. See [data types](data-types.md) for grouping and the value
 a group of `-0` publishes.
 

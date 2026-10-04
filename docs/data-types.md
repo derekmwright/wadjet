@@ -1064,12 +1064,14 @@ all, because negation cannot leave the range.
 every `NaN` whatever its sign bit; `-0` equals `0`. Over a `FLOAT64` or
 `FLOAT32` column holding `NaN`, `Infinity`, `-Infinity`, `-0` and `1.5`,
 `max(c)` is `NaN` and `min(c)` is `-Infinity`, `ORDER BY c DESC` puts the
-`NaN` rows first, and `-0` and `0` are one `GROUP BY` group, one `DISTINCT`
+`NaN` rows right after the `NULL`s, and `-0` and `0` are one `GROUP BY` group, one `DISTINCT`
 value and a join match — as aggregates, window aggregates, sorts, top-N,
 `=`/`<>`/`<`/`<=`/`>`/`>=`, `BETWEEN`, `IN`, `IS DISTINCT FROM`,
 `GREATEST`/`LEAST`, `RANK`, `PARTITION BY`, hash joins, `IN (subquery)`,
 `EXISTS` and `UNION`/`INTERSECT`/`EXCEPT`, on the single-process, spilled
-and distributed paths alike.
+and distributed paths alike — except that on the distributed path a comparison
+against a scalar subquery whose answer is `NaN` or an infinity is compared as
+`NULL` (#1576).
 
 A group publishes one of its MEMBERS as its key, never a canonical stand-in:
 a group (or `DISTINCT` value, or set-operation row) whose only zero is `-0`
