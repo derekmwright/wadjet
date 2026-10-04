@@ -4766,8 +4766,8 @@ LIMIT 10
 
 | Function | Description | Example |
 |----------|-------------|---------|
-| `NOW()` | Current timestamp | `NOW()` |
-| `CURRENT_DATE()` | Current date | `CURRENT_DATE()` |
+| `NOW()` | The statement's start time (see "When the clock is read") | `NOW()` |
+| `CURRENT_DATE()` | The UTC day of the statement's start time | `CURRENT_DATE()` |
 | `YEAR(ts)` | Extract year | `YEAR(timestamp)` |
 | `MONTH(ts)` | Extract month | `MONTH(timestamp)` |
 | `DAY(ts)` | Extract day | `DAY(timestamp)` |
@@ -4789,8 +4789,8 @@ LIMIT 10
 | `DAY_OF_WEEK(ts)` | Day of week (1=Monday, 7=Sunday) | `DAY_OF_WEEK(timestamp)` |
 | `DAY_OF_YEAR(ts)` | Day of year (1-366) | `DAY_OF_YEAR(timestamp)` |
 | `LAST_DAY_OF_MONTH(ts)` | Last day of the month | `LAST_DAY_OF_MONTH(timestamp)` |
-| `CURRENT_TIMESTAMP()` | Current timestamp (alias for NOW) | `CURRENT_TIMESTAMP()` |
-| `LOCALTIMESTAMP [(precision)]` | Current timestamp, declared WITHOUT time zone. Spelled with or without parentheses; the precision is accepted and ignored | `SELECT LOCALTIMESTAMP` |
+| `CURRENT_TIMESTAMP()` | The statement's start time (alias for NOW) | `CURRENT_TIMESTAMP()` |
+| `LOCALTIMESTAMP [(precision)]` | The statement's start time, declared WITHOUT time zone. Spelled with or without parentheses; the precision is accepted and ignored | `SELECT LOCALTIMESTAMP` |
 | `FROM_ISO8601_TIMESTAMP(s)` | Parse ISO 8601 timestamp to epoch millis | `FROM_ISO8601_TIMESTAMP('2026-03-15T10:30:00Z')` |
 | `FROM_ISO8601_DATE(s)` | Parse and validate ISO 8601 date | `FROM_ISO8601_DATE('2026-03-15')` |
 | `TO_ISO8601(epoch_ms)` | Convert epoch millis to ISO 8601 string | `TO_ISO8601(1773570600000)` → `'2026-03-15T10:30:00Z'` |
@@ -4799,6 +4799,33 @@ LIMIT 10
 | `TIMEZONE_MINUTE(epoch_ms)` | Extract timezone minute offset | `TIMEZONE_MINUTE(ts)` → `0` |
 | `AT_TIMEZONE(ts, tz)` | Convert timestamp to timezone | `AT_TIMEZONE(ts, 'America/New_York')` |
 | `HUMAN_READABLE_SECONDS(n)` | Format seconds as human string | `HUMAN_READABLE_SECONDS(3661)` → `'1 hour, 1 minute, 1 second'` |
+
+#### When the clock is read
+
+`NOW()`, `CURRENT_TIMESTAMP`, `LOCALTIMESTAMP` and `CURRENT_DATE` read the
+clock ONCE, when the statement starts, and answer that one value on every
+row, in every clause and on every worker of a distributed query — as
+PostgreSQL's do. Over 4096 rows `count(DISTINCT now())` is `1`,
+`WHERE now() = now()` keeps every row, `now() = CURRENT_TIMESTAMP`,
+`LOCALTIMESTAMP = CAST(now() AS TIMESTAMP)` and
+`CURRENT_DATE = CAST(now() AS DATE)` hold on every row, and
+`INSERT … SELECT now() …`, a many-row `VALUES (…, now())`,
+`UPDATE … SET ts = now()` and a CTAS store one value on every row they write
+(`coordinator.TestArcSCStatementClockEveryArm`,
+`wadjet.TestArcSCEmbeddedStatementWritesOneClock`). A `CREATE FUNCTION` body
+that calls `now()` answers its calling statement's value.
+
+The statement is what starts the clock: on the PostgreSQL wire protocol it is
+each statement of a simple-query string and each EXECUTE of the extended
+protocol, so a prepared statement executed twice reads two values
+(`pgwire.TestArcSCStatementClockOnTheWire`). This engine has no transactions —
+`BEGIN` and `COMMIT` are accepted and ignored — so two statements inside
+`BEGIN … COMMIT`, or in one multi-statement string, read two values where
+PostgreSQL reads its transaction's one (catalog: temporal r26).
+
+`CLOCK_TIMESTAMP()`, `STATEMENT_TIMESTAMP()`, `TRANSACTION_TIMESTAMP()`,
+`TIMEOFDAY()`, `CURRENT_TIME`, `LOCALTIME` and one-argument `AGE(ts)` are not
+implemented here (42883; `LOCALTIME` reads as a column name, 42703).
 
 #### Declared types
 
