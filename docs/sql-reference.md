@@ -5305,7 +5305,7 @@ one listed difference):
 
 | Source (declared) | Target | Answer |
 |---|---|---|
-| any numeric type | any numeric type | stored; a fractional value into an integer rounds by the source's PostgreSQL type — half away from zero from a numeric, half to even from a float8; out of range is 22003 |
+| any numeric type | any numeric type | stored; a fractional value into an integer rounds by the source's PostgreSQL type — half away from zero from a numeric, half to even from a float8 or float4; a rounded value out of the column's range is 22003 and the statement stores nothing — NaN, ±Infinity and the double 2^63 (`bigint`'s first value past its maximum) included, as under `CAST` |
 | any scalar — number, boolean, date, timestamp, address, UUID | TEXT | stored as its text (`true`, `2026-01-02`, `10.0.0.1/32`, `1e+20`) |
 | DATE | TIMESTAMP | its midnight |
 | TIMESTAMP | DATE | its calendar day |
