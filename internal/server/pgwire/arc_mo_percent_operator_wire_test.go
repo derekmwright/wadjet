@@ -25,6 +25,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -250,6 +251,65 @@ func TestArcMOPercentIsModParameters(t *testing.T) {
 		name, mode, _ := strings.Cut(k, "\x00")
 		if twin, ok := strings.CutSuffix(name, "/pct"); ok && !moParamMatches(g, got[twin+"/mod\x00"+mode]) {
 			t.Errorf("%s (%s): %% %s, MOD %s (the operator is MOD)", name, mode, g, got[twin+"/mod\x00"+mode])
+		}
+	}
+}
+
+// TestArcMOPercentPlanningDepth: the operator is a call now, and every walk
+// that reads a call — the declaration, the operand-class refusals, the
+// parameter typer, the correlated body's re-spelling — must stay linear in
+// depth: sixteen nested derived tables over the operator, a sixteen-deep
+// chain of it and of MOD (whose declaration asked each argument several
+// questions, each again of its own arguments: a sixteen-deep chain did not
+// plan in ten minutes at 8ccfa832), and the chain inside a correlated scalar
+// subquery, each planned and answered under planningDepthBound.
+func TestArcMOPercentPlanningDepth(t *testing.T) {
+	srv := setupSSAuditWireDB(t)
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, fmt.Sprintf("postgres://wadjet:wadjet@%s/wadjet?sslmode=disable", srv.Addr()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { conn.Close(ctx) })
+	for _, depth := range []int{4, 8, 16} {
+		chain, modChain := "t.i", "t.i"
+		for i := 0; i < depth; i++ {
+			chain = "(" + chain + " % 7)"
+			modChain = "MOD(" + modChain + ", 7)"
+		}
+		nested := "SELECT t.id, t.i % 3 AS v FROM ss_t t"
+		for i := 0; i < depth; i++ {
+			nested = "SELECT id, v FROM (" + nested + ") d"
+		}
+		for name, q := range map[string]string{
+			"derived": nested,
+			"chain":   "SELECT t.id, " + chain + " AS v FROM ss_t t WHERE " + chain + " >= -7",
+			"mod":     "SELECT t.id, " + modChain + " AS v FROM ss_t t WHERE " + modChain + " >= -7",
+			"scalar":  "SELECT o.id, (SELECT " + strings.ReplaceAll(chain, "t.i", "o.i") + " + x.v FROM ss_i x WHERE x.id = 1) AS v FROM ss_t o",
+		} {
+			t.Run(fmt.Sprintf("%s/depth%d", name, depth), func(t *testing.T) {
+				qctx, cancel := context.WithTimeout(ctx, 10*planningDepthBound)
+				defer cancel()
+				start := time.Now()
+				rows, err := conn.Query(qctx, q)
+				if err != nil {
+					t.Fatal(err)
+				}
+				n := 0
+				for rows.Next() {
+					n++
+				}
+				if err := rows.Err(); err != nil {
+					t.Fatal(err)
+				}
+				elapsed := time.Since(start)
+				if n == 0 {
+					t.Fatalf("%s answered no rows", q)
+				}
+				if depth == 16 && elapsed > planningDepthBound {
+					t.Errorf("depth %d took %s, want < %s", depth, elapsed, planningDepthBound)
+				}
+			})
 		}
 	}
 }
