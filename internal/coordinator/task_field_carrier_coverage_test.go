@@ -54,6 +54,9 @@ func TestTaskFieldCarrierCoverage(t *testing.T) {
 		// The planner option that rides beside SQLText for the worker
 		// that re-plans it (#1223): a bool, no path of any kind.
 		"BushyJoinReorder": notFile,
+		// The statement clock (#1566): Unix nanoseconds, an int64 — no
+		// path of any kind.
+		"StatementTime": notFile,
 
 		// The file-carrying fields both walkers cover today.
 		"PreScannedInputs": walked, "ScanFileFilter": walked, "Files": walked,
