@@ -1172,8 +1172,11 @@ func (b *binder) checkExpr(expr plansql.Node, scope *colScope) error {
 			case *plansql.FuncCallNode:
 				switch strings.ToLower(v.Name) {
 				case "date_trunc":
+					// date_trunc answers a TIMESTAMP over a TIMESTAMP or a
+					// DATE (expr's RetTimestamp), so the literal beside it is
+					// read as one per evaluation too.
 					if len(v.Args) == 2 {
-						if t, ok := typeOf(v.Args[1]); ok && t == parquet.TypeTimestamp {
+						if t, ok := typeOf(v.Args[1]); ok && (t == parquet.TypeTimestamp || t == parquet.TypeDate) {
 							return parquet.TypeTimestamp, true
 						}
 					}
