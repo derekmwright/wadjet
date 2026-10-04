@@ -1897,7 +1897,8 @@ an inner `LAG(b, 1, 0)` no longer reads the inner default.
 
 A window over a derived table that computes a column under the name of a
 column of its own input (`SELECT b * 2 AS b, b AS ob`,
-`logical.WindowShadowedInput`) reads that table's DECLARED columns: the
+`logical.WindowShadowedInput`; an expression — a shadow that is an aggregate,
+`SUM(b) AS b … GROUP BY g`, is not covered, #1549) reads that table's DECLARED columns: the
 producer below the window emits them under their own names
 (`dagplan.materializeWindowDeclaredInput`, each definition composed down to
 the producer through every derived table between them — an aliased item or a

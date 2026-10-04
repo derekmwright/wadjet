@@ -3749,7 +3749,9 @@ is `22012`; PostgreSQL answers), and a quoted one that does not coerce raises
 only when a row is read (aggregates-windows r21, r22). A NULL default under
 a CAST names its type family and no width: `CAST(NULL AS NUMERIC)` over a
 bigint is numeric, so a bigint value past 2^53 keeps its digits; a table
-created from such a result takes its one scale (aggregates-windows r24). An exponent-form literal no DECIMAL(38,s) holds (`1e300`) is
+created from such a result takes its one scale (aggregates-windows r24). A
+default that computes over a typed NULL (`CAST(NULL AS NUMERIC) + 0`) is
+double precision, and so is the result (#1541). An exponent-form literal no DECIMAL(38,s) holds (`1e300`) is
 double precision here as it is elsewhere, so the result is double precision
 where PostgreSQL's is numeric, and a bigint value past 2^53 is rounded under it
 (`LAG(b * 1000000000000000 + 1, 1, 1e300)` answers 1e+16 for
