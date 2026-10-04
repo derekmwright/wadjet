@@ -1941,7 +1941,10 @@ door, and carried; nothing below the door reads the clock for these functions.
 
 The logical optimizer has no statement: its plan-time folds (`evalConstantFilter`,
 `foldConstant`) leave a conjunct that reads a clock function undecided, so it
-stays in the plan and is evaluated where the statement runs. A compile that no
+stays in the plan and is evaluated where the statement runs. A table
+function's argument is folded by the logical builder for the plan's
+declarations and recorded (`Node.FuncClockArgs`); the physical planner
+re-folds it with the statement clock before the source reads it. A compile that no
 door reached keeps the live clock per evaluation; `expr.SetUnboundClockHookForTest`
 reports one, and `coordinator.TestArcSCStatementClockEveryArm` /
 `wadjet.TestArcSCEmbeddedStatementWritesOneClock` fail on any.

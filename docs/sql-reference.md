@@ -4813,7 +4813,9 @@ PostgreSQL's do. Over 4096 rows `count(DISTINCT now())` is `1`,
 `UPDATE … SET ts = now()` and a CTAS store one value on every row they write
 (`coordinator.TestArcSCStatementClockEveryArm`,
 `wadjet.TestArcSCEmbeddedStatementWritesOneClock`). A `CREATE FUNCTION` body
-that calls `now()` answers its calling statement's value.
+that calls `now()` answers its calling statement's value, and so does a table
+function's argument: `generate_series(n, n + 5)` with `n` computed from
+`now()` starts at the value the statement's `WHERE` reads.
 
 The statement is what starts the clock: on the PostgreSQL wire protocol it is
 each statement of a simple-query string and each EXECUTE of the extended
