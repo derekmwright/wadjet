@@ -44,7 +44,13 @@ over a bigint is DECIMAL(38,0)); elsewhere a bare NUMERIC cast of the NULL
 literal keeps the float rung, so a table created from one stores a later
 fractional write exactly. A column created from a numeric LAG / LEAD result
 takes that result's one scale, where PostgreSQL's column is unconstrained
-(catalog aggregates-windows r24).
+(catalog aggregates-windows r24; withdrawn 2026-10-05 by §10).
+Amended 2026-10-05 (arc UN, #1541) with §10: a column CREATED from an
+unconstrained numeric — DDL `NUMERIC` / `DECIMAL` with no precision, or a
+CREATE TABLE AS column PostgreSQL types as plain numeric — is
+DECIMAL(38, max(s, 10)) marked unconstrained: typmod −1 on the wire, NULL
+numeric_precision / numeric_scale, and a printed value without the stored
+scale's trailing zeros.
 
 ## Context
 
@@ -1043,6 +1049,13 @@ the grammar, stated:
   everywhere the writer annotates a leaf, so this is what those files have
   always been written as.
 
+(Amended 2026-10-05, §10: a stored column a DDL door declares bare is no
+longer that record — it is DECIMAL(38,10) marked unconstrained — so the
+first premise now reads "the parameter grammar's bare `DECIMAL`"
+(`ParseDecimalParams`, which a nested element still uses); the
+second is unchanged, and a `Precision: 0` column still reads as
+DECIMAL(38,0). `TestLegacyPrecisionZeroDecimalReadsAsBareDecimal` pins both.)
+
 The consequence a reader should expect is scale, not range: a value assigned
 to such a column ROUNDS to zero fractional digits, exactly as PostgreSQL's
 `numeric(38,0)` does. `12.34` stores 12. That is correct behaviour for the
@@ -1106,6 +1119,103 @@ agree byte-for-byte over the full 22-type matrix, and
 `TestSQLDeclaredParameterizedTypesRoundTrip` writes and reads one value per
 parameterized type through SQL DDL rather than through a programmatic schema —
 which is why the defect was invisible for as long as it was.
+
+### 10. A column created from an unconstrained numeric is DECIMAL(38, max(s, 10)), marked unconstrained
+
+Added 2026-10-05 (arc UN, #1541; Derek Wright's decision of that date over
+the options the arc's round 1 measured). Item 1 stays: one scale per stored
+column, no per-value scale (E64).
+
+**The rule.** A stored column is created from an unconstrained numeric when
+its declaration is `NUMERIC` or `DECIMAL` with no parameters (the DDL door,
+`parquet.DeclaredColumn`), or when it is a CREATE TABLE AS column whose
+source PostgreSQL types as plain numeric (typmod −1): the plan's wire fold of
+item 5 says so, or the item is a numeric typed NULL (`CAST(NULL AS NUMERIC)`,
+`NULL::numeric`, a CASE of them). Such a column is
+`parquet.UnconstrainedNumericColumn`: DECIMAL(38, max(s, 10)), where s is
+the scale the source declares (10 for DDL), and `parquet.Column.Unconstrained`
+marks it. A constrained declaration (`NUMERIC(10,2)`, `NUMERIC(5)` = scale 0)
+and a CREATE TABLE AS from a constrained column (or `NULLIF` over one, which
+keeps its typmod) are untouched. A column created before the marker existed
+— a DDL `NUMERIC` that was DECIMAL(38,0), a typed NULL that was double
+precision — has no marker and reads, writes and prints exactly as it did:
+the marker is read from the record (`unconstrained`, absent = false), never
+inferred from (38,10). A nested `ARRAY(NUMERIC)` element keeps item 8's
+(38,0); the rule is the stored column's.
+
+**What a write does.** More than 10 fraction digits round to 10, half away
+from zero (`0.00000000005` is 0.0000000001, `1e-11` is 0); more than 28
+integer digits is 22003 (item 4) where PostgreSQL stores the value. A source
+with more than 10 fraction digits keeps them in the column it creates
+(`n / m` over numeric(10,2) and numeric(12,4) is DECIMAL(38,15)).
+
+**What the marker decides, and nothing else.** (a) The declaration
+PostgreSQL gives the column: typmod −1 on the wire, NULL numeric_precision /
+numeric_scale in information_schema. (b) The printed value: a bare copy of
+the column — through a filter, a sort, a derived table, a CTE, a star, a
+join, a GROUP BY key, DISTINCT, a set operation whose every arm is one —
+prints without the stored scale's trailing zeros (`1.25`, `1`, `0.755`), in
+the text and binary wire formats, the CLI, the HTTP JSON rows and
+`CAST(v AS TEXT)`. It is one printer (`batch.TrimDecimalText`) applied where
+a result is boxed (`exec.TrimUnconstrainedRows` at the sink and the
+coordinator's result; pgwire's routed metas) and keyed on the plan's marker,
+which `logical.DecimalMeta.Unconstrained` carries from the scan; the parquet
+footer's declared schema carries it to a DAG stage that reads the file alone.
+A computed value over the column — `v + 1`, `SUM(v)`, `MIN(v)`, a window,
+`COALESCE(v, n)` — is declared by its expression and prints at its one scale
+(catalog numeric-decimal r18).
+
+**Measured** (arc UN, base 8e681724 → tip; PostgreSQL 17.11 first; the
+statement table is `wadjet/testdata/arc_un_enum.tsv`, 26 creation paths × 14
+writes × 8 reads):
+
+| creation path | 8e681724 declared | then | tip declared | then |
+|---|---|---|---|---|
+| `CREATE TABLE d1 (v NUMERIC)`, `DECIMAL` | DECIMAL(38,0) | 1.25 stores 1, 0.755 stores 1 | DECIMAL(38,10) u | 1.25, 0.755 |
+| CTAS `CAST(1 AS NUMERIC)`, `CAST(b AS NUMERIC)`, `SUM(bigint)`, `LAG(b, 1, CAST(NULL AS NUMERIC))` | DECIMAL(38,0) | 0.75 stores 1 | DECIMAL(38,10) u | 0.75 |
+| CTAS a literal `1.25` | DECIMAL(3,2) | 10 is 22003 | DECIMAL(38,10) u | 10 |
+| CTAS `COALESCE` / `CASE` / `GREATEST` / `UNION ALL` over numeric(10,2), numeric(12,4) | DECIMAL(12,4) | 1234567890 is 22003 | DECIMAL(38,10) u | 1234567890 |
+| CTAS `SUM(n)`, `AVG(n)`, `n * m`, `ROUND(n, 3)`, `LEAD(n, 1, CAST(NULL AS NUMERIC))` | (38,2), (38,6), (23,6), (11,3), (10,2) | rounds or 22003 by that type | DECIMAL(38,10) u | stores |
+| CTAS `n / m` | DECIMAL(27,15) | a 20-digit integer part is 22003 | DECIMAL(38,15) u | stores |
+| CTAS `CAST(NULL AS NUMERIC)`, `NULL::numeric` | double precision | 1.25 stores 1.25 | DECIMAL(38,10) u | 1.25 |
+| DDL `NUMERIC(10,2)`, `NUMERIC(5)`; CTAS of an n column, `NULLIF(n, m)` | (10,2), (5,0), (10,2), (10,2) | = PostgreSQL | unchanged | = PostgreSQL |
+
+**What it costs, recorded rather than left to be discovered.**
+
+- *X1, range.* §3 keeps the scale of `*`, so the product of two such columns
+  is DECIMAL(38,20) and more than 18 integer digits is 22003 where
+  8e681724 (a DECIMAL(38,0) column) and PostgreSQL answer: `v * v` over
+  1234567890 is 1524157875019052100 on both and 22003 here (numeric-decimal
+  r17). `CAST(v AS NUMERIC(38,0)) * v` answers 1524157875019052100.0000000000.
+  A product beside a bigint (`v * b`, DECIMAL(38,10)) keeps 28 integer
+  digits and answers.
+- *The trailing zero.* A value keeps no scale of its own, so a trailing zero
+  the source carried is not printed: CTAS `SELECT 2.50 AS v` prints 2.5 where
+  PostgreSQL prints 2.50 (numeric-decimal r24). This is the text 8e681724
+  printed as PostgreSQL does for a CREATE TABLE AS column from a computed
+  value of fixed scale — `t.n % 2.5` over numeric(10,2) prints -1 for -1.00,
+  `t.i * t.n` 24.5 for 24.50, a numeric CAST 67.5 for 67.50 — recorded in the
+  assignment-door, MO and SS wire tables' kept cells with the values unchanged.
+- *Ten fraction digits.* A write past 10 fraction digits is rounded where
+  PostgreSQL keeps every digit (numeric-decimal r23).
+
+**Rejected.** Keeping DECIMAL(38,0) and refusing a write that would round
+(no base-right cell changes, but `INSERT 1.25` into `NUMERIC` is an error
+where PostgreSQL stores it); one DECIMAL(38,10) for every CREATE TABLE AS
+(rounds a source's digits past 10 that 8e681724 stored: `0.0001` cubed was
+0.000000000001 and would be 0); printing the stored scale (`1.0000000000`
+for a 1 that 8e681724 printed `1`, as PostgreSQL does); per-value scale
+(E64, deferred on cost). A float-carried numeric (§2c: `5 / 2.0 + id * 0`,
+`sqrt(n * n)`) keeps its double precision column under CREATE TABLE AS: its
+digits are not a fixed scale's, so a (38,10) column would round what
+8e681724 stored.
+
+Gated by `wadjet.TestArcUNUnconstrainedColumnEnumeration`,
+`wadjet.TestArcUNUnconstrainedColumnPersists` (reopen and compaction),
+`wadjet.TestArcUNARecordWithoutTheMarkerIsTheColumnItWas`,
+`coordinator.TestArcUNUnconstrainedColumnEveryArm` (35 SELECTs, five arms),
+`server.TestArcUNUnconstrainedColumnOnTheWire` (single-process, coordinator
+and HTTP doors) and `parquet.TestUnconstrainedNumericColumnIsOneDeclaration`.
 
 ## Consequences
 

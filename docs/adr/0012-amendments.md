@@ -1014,6 +1014,18 @@ A comparison coerces its text exactly as CAST does. `'epoch'` is read by the one
 | temporal | [r25](0012-divergences/temporal.md#catalog) | Amended: `epoch` leaves the list (read as 1970-01-01 00:00:00 everywhere); `now` / `today` / `tomorrow` / `yesterday` and a BC date are 22007 in a comparison as in a CAST; write `CURRENT_TIMESTAMP` / `CURRENT_DATE` | `coordinator.TestArcTCTimestampTextComparisonEveryArm` (sp/\*, pos/\*, spclock/\*), `pgwire.TestArcPWRound2MatchesPostgres` (b3/\*/epoch, pins deleted) |
 | comparison-membership | [r4](0012-divergences/comparison-membership.md#catalog) | Amended: a text-declared parameter bound `'epoch'` answers as the literal; bound `'infinity'` raises 22007 as the literal does | `coordinator.TestArcTCBoundParameterEveryDoor` (param25/\*) |
 
+## 2026-10-05: a column created from an unconstrained numeric (arc UN, #1541)
+
+ADR-0024 §10 (Derek Wright's decision of 2026-10-05). At 8e681724 `CREATE TABLE d1 (v NUMERIC); INSERT INTO d1 VALUES (1.25)` stored 1 (DECIMAL(38,0)), and a CREATE TABLE AS column whose source PostgreSQL types as plain numeric took that source's (p,s): `CAST(b AS NUMERIC)` (38,0) stored a later 0.75 as 1, a literal `1.25` (3,2) refused a later 10 with 22003, `COALESCE` over numeric(10,2) and numeric(12,4) (12,4) refused 1234567890. Such a column is now DECIMAL(38, max(s, 10)) marked unconstrained (typmod −1, NULL numeric_precision / numeric_scale), its values print without trailing zeros, and a column created before the rule is unchanged (a store the 8e681724 binary wrote reads, writes and prints identically at the tip).
+
+| family | row | change | gate |
+|---|---|---|---|
+| dml-assignment | [r11](0012-divergences/dml-assignment.md#catalog) | Amended: generalized from a CTAS over COALESCE (DECIMAL(38,10), printed 12.7500000000) to every column created from an unconstrained numeric, DDL and CTAS: DECIMAL(38, max(s, 10)), typmod −1, printed without trailing zeros; the divergence left is the rounding past 10 fraction digits | `wadjet.TestArcUNUnconstrainedColumnEnumeration` |
+| numeric-decimal | [r17](0012-divergences/numeric-decimal.md#catalog) | Amended: the DECIMAL(38,20) product reaches every column created `NUMERIC` — `v * v` over 1234567890 is 22003 where 8e681724 (DECIMAL(38,0)) and PostgreSQL answer 1524157875019052100 (x1_vv); `CAST(v AS NUMERIC(38,0)) * v` answers | `coordinator.TestArcUNUnconstrainedColumnEveryArm` x1_vv, x1_cast |
+| numeric-decimal | [r23](0012-divergences/numeric-decimal.md#catalog) | Added: such a column keeps 10 fraction digits and 28 integer digits (0.00000000005 stores 0.0000000001; a 29-digit integer is 22003) | `wadjet.TestArcUNUnconstrainedColumnEnumeration` |
+| numeric-decimal | [r24](0012-divergences/numeric-decimal.md#catalog) | Added: a trailing zero the source carried is not printed (CTAS `2.50` prints 2.5) | `wadjet.TestAssignmentDoorsAgree`, `wadjet.TestArcUNUnconstrainedColumnEnumeration` |
+| aggregates-windows | r24 | CLOSED (PostgreSQL's answer now): a column created from a numeric LAG / LEAD result over a bigint stores a later 0.75 as 0.75 (c10; 8e681724 stored 1) | `wadjet.TestArcWDTypedNullCreateTableAs` c10 |
+
 ## Dated markers inside the entries
 
 Every `Added` / `Amended` / `CLOSED` / `Corrected` / `narrowed` marker still inside an entry's verbatim text, in date order, with the entry that carries it.
