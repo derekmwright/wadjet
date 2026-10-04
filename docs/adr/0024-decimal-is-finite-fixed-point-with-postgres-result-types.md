@@ -37,10 +37,14 @@ TIMESTAMP, INTERVAL, UUID, an array or a vector refuses the type pair,
 is still a double there (`CAST(14.5 AS DATE)` the day count 1970-01-15,
 `CAST(14.5 AS UUID)` 22P02). An explicit integer CAST reads §2c's category
 of its operand and rounds a numeric half away from zero.
-Amended 2026-10-03 (arc WD, #1436): a bare NUMERIC cast of the NULL literal
-is DECIMAL(38,0), as of an integer operand — it has no digits to lose — so a
-typed NULL is numeric in every common type it takes part in (`COALESCE(v,
-CAST(NULL AS NUMERIC))`, a LAG / LEAD default) rather than the float rung.
+Amended 2026-10-03 (arc WD, #1436), narrowed 2026-10-04: a LAG / LEAD
+default that is a NULL literal under a CAST contributes its type family and
+no width to the result's common type (`LAG(v, 1, CAST(NULL AS NUMERIC))`
+over a bigint is DECIMAL(38,0)); elsewhere a bare NUMERIC cast of the NULL
+literal keeps the float rung, so a table created from one stores a later
+fractional write exactly. A column created from a numeric LAG / LEAD result
+takes that result's one scale, where PostgreSQL's column is unconstrained
+(catalog aggregates-windows r24).
 
 ## Context
 
