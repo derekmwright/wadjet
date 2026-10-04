@@ -472,7 +472,7 @@ func (p *StagePlanner) gateDeferredFailure(original, resolved string) {
 	if err != nil {
 		return
 	}
-	c, err := expr.Compile(node)
+	c, err := expr.Compile(node, expr.WithStatementClock(p.PlanCtx))
 	if err != nil {
 		return
 	}

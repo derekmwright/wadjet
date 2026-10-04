@@ -90,6 +90,9 @@ func (db *DB) Execute(ctx context.Context, sql string) (*ExecResult, error) {
 // handler routes on the statement type before dispatching — and for the tests
 // that drive a synthesized statement no text can spell.
 func (db *DB) ExecuteParsed(ctx context.Context, parsed *plansql.ParsedQuery) (res *ExecResult, err error) {
+	// The statement clock (#1566): every row this statement writes or
+	// reads sees one now(), its source query's included.
+	ctx = expr.StartStatement(ctx)
 	// Same seam as DB.Query: DML builds row batches (batch.FromRows) with
 	// user-supplied values, so batch.TypeMismatchError (#361's guard) must
 	// come back as an error, never a process exit — and since #511 so must
@@ -236,6 +239,10 @@ func (db *DB) executeInsert(ctx context.Context, info *plansql.InsertInfo) (*Exe
 
 	// Convert parsed string values to typed rows
 	var rows []map[string]any
+	// One statement clock for every VALUES row (#1566): each row's
+	// expressions compile on their own, and an unbound now() read the clock
+	// per row — 2048 rows held a dozen values.
+	clock := expr.WithStatementClock(ctx)
 	for rowIdx, vals := range info.Values {
 		if len(vals) != len(columns) {
 			// PostgreSQL: 42601, `INSERT has more target columns than
@@ -255,7 +262,7 @@ func (db *DB) executeInsert(ctx context.Context, info *plansql.InsertInfo) (*Exe
 			// PostgreSQL, which stores 3 (review P6). It also carries the
 			// classes the cast raises, so an out-of-range INSERT is 22003 and
 			// unreadable text is 22P02 rather than the blanket 42000 (P18).
-			v, err := assignInsertValue(vals[i], cols[i])
+			v, err := assignInsertValue(vals[i], cols[i], clock)
 			if err != nil {
 				return nil, fmt.Errorf("row %d, column %q: %w", rowIdx, colName, err)
 			}
@@ -450,7 +457,7 @@ func (db *DB) updateOnce(ctx context.Context, info *plansql.UpdateInfo) (*ExecRe
 	// declaration, BEFORE the loop below touches a file: an unknown target is
 	// 42703 and a literal a column cannot hold is refused here rather than
 	// after a delete marker is committed (#647, #678).
-	assigns, err := ResolveDMLSetClauses(info.SetClauses, info.DMLTarget, schema)
+	assigns, err := ResolveDMLSetClauses(info.SetClauses, info.DMLTarget, schema, expr.WithStatementClock(ctx))
 	if err != nil {
 		return nil, err
 	}
@@ -1571,7 +1578,7 @@ func (ev *mergeEvaluator) compile(node plansql.Node) (expr.Expr, error) {
 		return nil, err
 	}
 	if !dmlClauseHasSubquery(node) {
-		return expr.Compile(node)
+		return expr.Compile(node, ev.sub.clock())
 	}
 	if ev.sub == nil || ev.sub.Runner == nil {
 		return nil, sqlerr.New("0A000",
@@ -2979,7 +2986,7 @@ func assignLiteralToColumn(text string, col parquet.Column) (any, error) {
 // a constant to it), a query environment this evaluator has none of, so it
 // names the gap with 0A000 instead of silently answering NULL. An aggregate
 // or window function is 42803 / 42P20 (refuseAggregateOrWindow).
-func assignInsertValue(text string, col parquet.Column) (any, error) {
+func assignInsertValue(text string, col parquet.Column, opts ...expr.CompileOption) (any, error) {
 	trimmed := strings.TrimSpace(text)
 	if strings.EqualFold(trimmed, "default") {
 		return nil, nil
@@ -3005,7 +3012,7 @@ func assignInsertValue(text string, col parquet.Column) (any, error) {
 	if err := refuseNonConstantValuesExpr(node); err != nil {
 		return nil, err
 	}
-	compiled, err := expr.Compile(node)
+	compiled, err := expr.Compile(node, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("compiling %q: %w", trimmed, err)
 	}
@@ -3597,6 +3604,17 @@ type DMLSubqueryEnv struct {
 	Runner    expr.SubqueryRunner
 	InnerCols plansql.TableColumns
 	Opts      []expr.CompileOption
+	// Clock binds the statement's clock functions (expr.WithStatementClock,
+	// #1566) in a clause with no subquery too.
+	Clock expr.CompileOption
+}
+
+// clock is the statement-clock option of an environment that may be nil.
+func (s *DMLSubqueryEnv) clock() expr.CompileOption {
+	if s == nil {
+		return nil
+	}
+	return s.Clock
 }
 
 // BuildDMLPredicate resolves every name against schema before execution
@@ -3697,7 +3715,7 @@ func BuildDMLPredicate(target plansql.DMLTarget, schema []parquet.Column, sub *D
 func compileDMLPredicate(node plansql.Node, target plansql.DMLTarget,
 	schema []parquet.Column, sub *DMLSubqueryEnv) (expr.Expr, error) {
 	if !dmlClauseHasSubquery(node) {
-		return expr.Compile(node)
+		return expr.Compile(node, sub.clock())
 	}
 	if sub == nil || sub.Runner == nil {
 		return nil, sqlerr.New("0A000",
@@ -3765,7 +3783,10 @@ type DMLAssignment struct {
 // a.n resolves and the hidden relation name does not (42P01; #686).
 // An aggregate or window function in a SET value is 42803 / 42P20.
 // See docs/internals/update-set-resolution-and-evaluation.md for the design.
-func ResolveDMLSetClauses(clauses []plansql.SetClause, target plansql.DMLTarget, schema []parquet.Column) ([]DMLAssignment, error) {
+//
+// opts reach every SET expression's compile: the statement clock
+// (expr.WithStatementClock), so `SET ts = now()` writes one value (#1566).
+func ResolveDMLSetClauses(clauses []plansql.SetClause, target plansql.DMLTarget, schema []parquet.Column, opts ...expr.CompileOption) ([]DMLAssignment, error) {
 	out := make([]DMLAssignment, 0, len(clauses))
 	for _, sc := range clauses {
 		// UPDATE's parser rejects qualified SET targets before this point (42601;
@@ -3830,7 +3851,7 @@ func ResolveDMLSetClauses(clauses []plansql.SetClause, target plansql.DMLTarget,
 			return nil, sqlerr.New("0A000",
 				"SET %s: a subquery in an UPDATE's SET list is not supported", name)
 		}
-		compiled, err := expr.Compile(node)
+		compiled, err := expr.Compile(node, opts...)
 		if err != nil {
 			return nil, fmt.Errorf("SET %s: compiling %q: %w", name, sc.Value, err)
 		}
@@ -4310,7 +4331,8 @@ func (db *DB) dmlSubqueryEnv(ctx context.Context) *DMLSubqueryEnv {
 	// a question one row answers — and reported a multi-row scalar subquery
 	// as 54000 where this engine's own rule is 21000.
 	opts = append(opts, expr.WithSetRowBound(physical.MaxInlinedInSetRows()))
-	return &DMLSubqueryEnv{Runner: db.dmlSubqueryRunner(ctx), InnerCols: innerCols, Opts: opts}
+	return &DMLSubqueryEnv{Runner: db.dmlSubqueryRunner(ctx), InnerCols: innerCols, Opts: opts,
+		Clock: expr.WithStatementClock(ctx)}
 }
 
 // dmlSubqueryRunner executes a DML predicate's subquery through DB.Query — the

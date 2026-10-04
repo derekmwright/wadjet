@@ -40,12 +40,12 @@ func (p *Planner) buildFilterOp(pred logical.Predicate, scope *logical.Node, out
 		var err error
 		if len(outerTables) > 0 {
 			if len(outerCols) > 0 {
-				compiled, err = expr.CompileWithScopeResolver(pred.ASTExpr, p.subqueryRunner, outerTables, outerCols, p.SubqueryInnerColumns(), p.subqueryDeclOptionFor(scope), p.subqueryBudgetOption(), p.catalogOption())
+				compiled, err = expr.CompileWithScopeResolver(pred.ASTExpr, p.subqueryRunner, outerTables, outerCols, p.SubqueryInnerColumns(), p.subqueryDeclOptionFor(scope), p.subqueryBudgetOption(), p.statementOption())
 			} else {
-				compiled, err = expr.CompileWithScope(pred.ASTExpr, p.subqueryRunner, outerTables, p.subqueryDeclOptionFor(scope), p.subqueryBudgetOption(), p.catalogOption())
+				compiled, err = expr.CompileWithScope(pred.ASTExpr, p.subqueryRunner, outerTables, p.subqueryDeclOptionFor(scope), p.subqueryBudgetOption(), p.statementOption())
 			}
 		} else {
-			compiled, err = expr.CompileWithRunner(pred.ASTExpr, p.subqueryRunner, p.subqueryDeclOption(), p.subqueryBudgetOption(), p.catalogOption())
+			compiled, err = expr.CompileWithRunner(pred.ASTExpr, p.subqueryRunner, p.subqueryDeclOption(), p.subqueryBudgetOption(), p.statementOption())
 		}
 		if expr.IsCompileRefusal(err) {
 			return nil, err

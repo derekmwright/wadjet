@@ -81,6 +81,14 @@ type Task struct {
 	PriorityDeep bool `json:"priority_deep,omitempty"`
 
 	// Pipeline-specific (full query on one worker)
+	// StatementTime is the statement clock (#1566), Unix nanoseconds: the
+	// instant the statement started at its coordinator. A worker answers
+	// now() / CURRENT_TIMESTAMP / LOCALTIMESTAMP / CURRENT_DATE with it and
+	// never reads its own clock for them, so every task of one statement —
+	// and a retried task — reads one value. Zero (a coordinator that predates
+	// the field) falls back to the task's own start.
+	StatementTime int64 `json:"statement_time,omitempty"`
+
 	SQLText    string `json:"sql_text,omitempty"`    // SQL query to execute as standalone pipeline
 	DataBucket string `json:"data_bucket,omitempty"` // bucket containing source data (tables)
 	// BushyJoinReorder is the COORDINATOR's planner option, carried to the

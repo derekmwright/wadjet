@@ -41,7 +41,7 @@ const residualColPrefix = "_wj_on_"
 // a window function, a function or type the compiler refuses. The caller raises
 // it rather than dropping the conjunct (#351).
 // See docs/internals/outer-join-residual-evaluation.md for the design.
-func buildJoinResidualFilter(filter, buildAlias string) (func() exec.JoinResidual, error) {
+func buildJoinResidualFilter(filter, buildAlias string, opts ...expr.CompileOption) (func() exec.JoinResidual, error) {
 	node := parseJoinCondExpr(filter)
 	if node == nil {
 		return nil, fmt.Errorf("%q does not parse as an expression", filter)
@@ -55,7 +55,7 @@ func buildJoinResidualFilter(filter, buildAlias string) (func() exec.JoinResidua
 	// a predicate closure, which this engine already requires to be stateless
 	// across parallel workers (exec.Filter.Clone shares Pred for the same
 	// reason). Only the combined-row scratch is per evaluator.
-	compiled, err := expr.Compile(node)
+	compiled, err := expr.Compile(node, opts...)
 	if err != nil {
 		return nil, err
 	}

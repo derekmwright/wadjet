@@ -603,6 +603,10 @@ func (db *DB) Query(ctx context.Context, sql string) (*QueryResult, error) {
 // client that asked for a billion rows gets them, and the memory model's own
 // operators are what bound the work below the sink.
 func (db *DB) query(ctx context.Context, sql string, gatherBytes int64) (res *QueryResult, err error) {
+	// The statement clock (#1566): one now() for every row the statement
+	// reads, unless the door that called (pgwire, a DML statement whose
+	// source is this query) already started it.
+	ctx = expr.StartStatement(ctx)
 	// The embedded API's query boundary. Panics that carry a query ERROR
 	// (exec.FatalEvalPanic — including batch.TypeMismatchError, #361's
 	// silent-write guard) become that error here: this entry reaches

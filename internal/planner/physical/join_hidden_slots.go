@@ -31,8 +31,8 @@ import (
 // lateralEmptyDefaultOps is the operator that carries an ungrouped aggregate's
 // empty-input value on the lateral's own output column, or nil when this join
 // has none. See exec.LateralEmptyDefault and logical.Node.LateralCountDefaults.
-func lateralEmptyDefaultOps(node *logical.Node) []exec.UnaryOperator {
-	marker, cols, drop := lateralEmptySpec(node)
+func lateralEmptyDefaultOps(node *logical.Node, opts ...expr.CompileOption) []exec.UnaryOperator {
+	marker, cols, drop := lateralEmptySpec(node, opts...)
 	op := exec.NewLateralEmptyDefault(marker, cols, drop)
 	if op == nil {
 		return nil
@@ -45,12 +45,12 @@ func lateralEmptyDefaultOps(node *logical.Node) []exec.UnaryOperator {
 // same route every other computed column takes. A rule that will not compile
 // is dropped rather than approximated: the column then reads what the pad
 // wrote, which is NULL.
-func compileLateralDefault(sql string) (exec.Expression, error) {
+func compileLateralDefault(sql string, opts ...expr.CompileOption) (exec.Expression, error) {
 	node, err := plansql.ParseExpression(sql)
 	if err != nil {
 		return nil, err
 	}
-	compiled, err := expr.Compile(node)
+	compiled, err := expr.Compile(node, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -65,7 +65,7 @@ func compileLateralDefault(sql string) (exec.Expression, error) {
 // would otherwise drop it BELOW this operator, and the marker is what this
 // operator reads. Where the lateral publishes its key under a name the query
 // wrote, the column is the user's and nobody drops it.
-func lateralEmptySpec(node *logical.Node) (marker string, cols []exec.LateralDefault, drop bool) {
+func lateralEmptySpec(node *logical.Node, opts ...expr.CompileOption) (marker string, cols []exec.LateralDefault, drop bool) {
 	if node == nil || len(node.LateralEmptyDefaults) == 0 || node.LateralPadMarker == "" {
 		return "", nil, false
 	}
@@ -76,7 +76,7 @@ func lateralEmptySpec(node *logical.Node) (marker string, cols []exec.LateralDef
 			// way the column is left exactly as the pad wrote it.
 			continue
 		}
-		compiled, err := compileLateralDefault(d.ExprSQL)
+		compiled, err := compileLateralDefault(d.ExprSQL, opts...)
 		if err != nil {
 			continue
 		}

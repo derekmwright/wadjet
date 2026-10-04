@@ -31,6 +31,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
+	"github.com/derekmwright/wadjet/internal/engine/expr"
 	"github.com/derekmwright/wadjet/internal/engine/scan"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	"github.com/derekmwright/wadjet/internal/planner/physical"
@@ -962,6 +963,10 @@ func (r *SQLResult) Rows() ([]map[string]any, error) {
 
 // ExecuteSQL parses SQL, plans, distributes across workers, and collects results.
 func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResult, err error) {
+	// The statement clock (#1566), unless the door above (pgwire) started
+	// it: every task this statement dispatches carries it
+	// (Scheduler.PublishTasks), so a worker answers now() with this value.
+	ctx = expr.StartStatement(ctx)
 	// The coordinator's own query boundary. Panics carrying a query error
 	// (exec.FatalEvalPanic, including batch.TypeMismatchError — #361's
 	// silent-write guard) become that error: coordinator-side merge and
@@ -3622,6 +3627,7 @@ func (c *Coordinator) Tracker() *QueryTracker {
 // SubmitSQL parses, plans, and dispatches a query without blocking for results.
 // Returns the query ID and plan string immediately.
 func (c *Coordinator) SubmitSQL(ctx context.Context, sql string) (queryID string, planStr string, err error) {
+	ctx = expr.StartStatement(ctx) // the statement clock (#1566)
 	if !c.isLeaderOrStandalone() {
 		leaderID := ""
 		if c.leader != nil {
@@ -3855,6 +3861,11 @@ func (c *Coordinator) SubmitSQL(ctx context.Context, sql string) (queryID string
 		queryTimeout = 30 * time.Minute
 	}
 	asyncCtx, asyncCancel := context.WithTimeout(context.Background(), queryTimeout)
+	// The asynchronous query outlives ctx but is the same statement: it
+	// keeps ctx's clock (#1566).
+	if t, ok := expr.StatementClock(ctx); ok {
+		asyncCtx = expr.ContextWithStatementClock(asyncCtx, t)
+	}
 	// No withQueryDeleteMarkers stamp here (#491): the synthetic pipeline stage has no ScanDeletes.
 	// TaskTypePipeline tasks reparse SQLText and run planner.Plan on the worker;
 	// newScanner/catalogScanSource reads live manifest DeleteMarkers at scan Init.

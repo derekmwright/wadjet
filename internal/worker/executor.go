@@ -23,6 +23,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/distributed"
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec"
+	"github.com/derekmwright/wadjet/internal/engine/expr"
 	"github.com/derekmwright/wadjet/internal/engine/memory"
 	"github.com/derekmwright/wadjet/internal/engine/scan"
 	"github.com/derekmwright/wadjet/internal/metrics"
@@ -1428,7 +1429,7 @@ func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, re
 	// Appended expression columns (exchange subsumption dedup): compiled
 	// once, evaluated per batch, appended ahead of the partitioning sink so
 	// the flag ships inside every partition file.
-	computedAppenders, err := newComputedColAppenders(task.ComputedCols)
+	computedAppenders, err := newComputedColAppenders(task.ComputedCols, expr.WithStatementClock(ctx))
 	if err != nil {
 		return fmt.Errorf("shuffle task %s: %w", task.ID, err)
 	}

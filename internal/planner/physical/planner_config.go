@@ -253,6 +253,20 @@ func (p *Planner) getMemTracker() *memory.Tracker {
 	return r.memTracker
 }
 
+// statementOption binds what a compiled expression reads from its STATEMENT:
+// the catalog functions to one resolver over this statement's view, reused
+// for every expression so they read one catalog snapshot (ADR-0044), and the
+// clock functions to the statement's clock (expr.WithStatementClock, #1566).
+func (p *Planner) statementOption() expr.CompileOption {
+	return expr.Options(p.catalogOption(), p.clockOption())
+}
+
+// clockOption binds the clock functions to the statement clock PlanCtx
+// carries; nil when no door stamped one.
+func (p *Planner) clockOption() expr.CompileOption {
+	return expr.WithStatementClock(p.PlanCtx)
+}
+
 // catalogOption binds catalog functions to one resolver over this statement
 // view. It reuses that resolver for every expression so they read one
 // catalog snapshot (ADR-0044).

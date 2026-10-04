@@ -17,6 +17,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/auth"
 	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/distributed"
+	"github.com/derekmwright/wadjet/internal/engine/expr"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
@@ -726,7 +727,7 @@ func (c *Coordinator) executeStageDAG(
 			return gr, waitErr
 		}
 		if gr != nil && len(gatherStage.OutputRenames) > 0 {
-			applyOutputRenames(gr, gatherStage.OutputRenames)
+			applyOutputRenames(gr, gatherStage.OutputRenames, expr.WithStatementClock(ctx))
 		}
 		return gr, nil
 	}
@@ -746,7 +747,7 @@ func (c *Coordinator) executeStageDAG(
 	// aliases ("supp_nation", "l_year"). The Gather worker is a pipe and
 	// can't apply this — it has to happen here.
 	if gr != nil && len(gatherStage.OutputRenames) > 0 {
-		applyOutputRenames(gr, gatherStage.OutputRenames)
+		applyOutputRenames(gr, gatherStage.OutputRenames, expr.WithStatementClock(ctx))
 	}
 	return gr, nil
 }
