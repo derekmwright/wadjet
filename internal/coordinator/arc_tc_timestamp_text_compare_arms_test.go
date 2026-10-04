@@ -52,7 +52,11 @@ var tcRowsSpec = [][4]string{
 	{"4", "2000-02-29 00:00:00", "2000-02-29", "2000-02-29"},
 	{"5", "2024-01-15 00:00:00", "2024-01-15", "<null>"},
 	{"6", "", "", "1970-01-01 00:00:00"},
-	{"7", "9999-12-31 23:59:59", "9999-12-31", "infinity"},
+	// s is a special word the grammar refuses (it was 'infinity' until arc
+	// TI made that a value): a row group's refusal of row 7 comes before row
+	// 8's '2024-02-30' (22008), so text_col_cast/* has one SQLSTATE whatever
+	// row group a scan worker reaches first (TI-F5).
+	{"7", "9999-12-31 23:59:59", "9999-12-31", "now"},
 	{"8", "1969-12-31 23:59:59.999", "1969-12-31", "2024-02-30"},
 }
 
