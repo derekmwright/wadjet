@@ -278,21 +278,21 @@ func TestH2TheWindowDeclaredTypeCensus(t *testing.T) {
 		// above pins — and each group's AVG is that group's SUM over its own
 		// COUNT(*) (1660 / 1640 / 1637), so every number here is checkable
 		// from PostgreSQL's `sum(int4)` rule and arithmetic, not taken on
-		// faith. `c_proto % 3` declares INT64 since #1000: arithmetic over a
-		// PROTOCOL is int4 arithmetic and `proto % 3` is `integer` on the
-		// server, which this engine widens to int8 the way it widens every
-		// computed integer (ADR-0024's recorded widening). It declared float8
-		// before, which was the modulo reading its operand through a double.
+		// faith. `c_proto % 3` declares INT32: arithmetic over a PROTOCOL is
+		// int4 arithmetic and `proto % 3` is `integer` on the server, and `%`
+		// is MOD's spelling, which declares the integer domain's own width
+		// (#1527; INT64 from #1000 to then, the operator's widening, and
+		// float8 before, the modulo reading its operand through a double).
 		{name: "953 keyed: SUM(PROTOCOL) GROUP BY a key — the row updater and the SoA scatter",
 			sql:  "SELECT c_proto % 3 AS g, SUM(c_proto) AS s FROM typemx GROUP BY c_proto % 3 ORDER BY 1",
-			want: "cols=[g:INT64 s:INT64] rows=4 | 0,209145 | 1,205430 | 2,206860 | NULL,NULL"},
+			want: "cols=[g:INT32 s:INT64] rows=4 | 0,209145 | 1,205430 | 2,206860 | NULL,NULL"},
 		{name: "953 keyed: AVG(PROTOCOL) GROUP BY a key — the exact Int128 scatter",
 			sql: "SELECT c_proto % 3 AS g, AVG(c_proto) AS a FROM typemx GROUP BY c_proto % 3 ORDER BY 1",
-			want: "cols=[g:INT64 a:DECIMAL(38,4)] rows=4 | 0,125.9910 | 1,125.2622 | " +
+			want: "cols=[g:INT32 a:DECIMAL(38,4)] rows=4 | 0,125.9910 | 1,125.2622 | " +
 				"2,126.3653 | NULL,NULL"},
 		{name: "953 keyed: SUM(PORT) GROUP BY a key",
 			sql: "SELECT c_port % 3 AS g, SUM(c_port) AS s FROM typemx GROUP BY c_port % 3 ORDER BY 1",
-			want: "cols=[g:INT64 s:INT64] rows=4 | 0,5792238 | 1,5792226 | " +
+			want: "cols=[g:INT32 s:INT64] rows=4 | 0,5792238 | 1,5792226 | " +
 				"2,5792214 | NULL,NULL"},
 		// PROTOCOL holds 0..255 with every value present, so the DISTINCT
 		// total is 0+1+…+255 = 32640 over 256 values — sharply different from
