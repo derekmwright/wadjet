@@ -2042,11 +2042,14 @@ func FormatDate(days int32) string {
 // accept-set a stored value already goes through — one reading of a timestamp
 // text, not two.
 func timestampTextMillis(s string) (int64, bool) {
-	t, ok := parquet.ParseTimestampWallClock(s)
-	if !ok {
+	// ParseTimestampMillis, not the wall-clock reading: it answers the same
+	// accept-set and the same value, and it also reads `infinity` /
+	// `-infinity`, which name no instant.
+	ms, err := parquet.ParseTimestampMillis(s)
+	if err != nil {
 		return 0, false
 	}
-	return t.UTC().UnixMilli(), true
+	return ms, true
 }
 
 // FormatTimestamp renders epoch MILLISECONDS — the engine's one timestamp
@@ -2065,6 +2068,15 @@ func timestampTextMillis(s string) (int64, bool) {
 // column's declared type. Formatting inside GetValue instead would push the
 // rendered form into every compute path that shares that boxing.
 func FormatTimestamp(ms int64) string {
+	// The carrier's two extremes are the infinite values (parquet's
+	// TimestampPosInfinity / TimestampNegInfinity), printed as PostgreSQL
+	// prints them; every finite value lies millions of years inside them.
+	switch ms {
+	case parquet.TimestampPosInfinity:
+		return "infinity"
+	case parquet.TimestampNegInfinity:
+		return "-infinity"
+	}
 	t := time.UnixMilli(ms).UTC()
 	if ms%1000 == 0 {
 		return t.Format("2006-01-02 15:04:05")

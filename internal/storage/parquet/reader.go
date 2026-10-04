@@ -841,8 +841,15 @@ func CoercibleTo(file, want TypeID) bool {
 
 // FormatDateDays renders a DATE (days since 1970-01-01) the way the engine
 // does. batch.FormatDate delegates here so the row path and the native scan
-// cannot drift apart on a DATE→STRING coercion.
+// cannot drift apart on a DATE→STRING coercion. The carrier's two extremes
+// are the infinite values and print as PostgreSQL prints them.
 func FormatDateDays(days int32) string {
+	switch days {
+	case DatePosInfinity:
+		return "infinity"
+	case DateNegInfinity:
+		return "-infinity"
+	}
 	return epochDate.AddDate(0, 0, int(days)).Format("2006-01-02")
 }
 

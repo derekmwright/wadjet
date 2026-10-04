@@ -5,6 +5,7 @@ package parquet
 import (
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -44,8 +45,62 @@ const (
 	EndTimestampMilli int64 = 9224318016000000 // exclusive
 )
 
-// DateDaysInRange is THE range question for a DATE's epoch-day count: nil
-// when PostgreSQL's DATE holds it, else its 22008. Every construction of a
+// The two infinite values of each temporal type are the carrier's extremes,
+// as PostgreSQL stores them (DATEVAL_NOBEGIN / DATEVAL_NOEND are INT32_MIN /
+// INT32_MAX, DT_NOBEGIN / DT_NOEND INT64_MIN / INT64_MAX): `-infinity` sorts
+// below and `infinity` above every finite value by the integer order alone,
+// so a comparison, a sort, a group, a join key, MIN / MAX and a row-group
+// statistic need no case of their own. No finite value reaches them — the
+// finite range (MinDateDay … MaxDateDay, MinTimestampMilli …
+// EndTimestampMilli) ends millions of years short of either — so a stored
+// extreme can only be one of the two words. Only the text grammar
+// (parseTemporalText) produces them and only the two printers
+// (FormatDateDays, batch.FormatTimestamp) print them; an operation that
+// computes on a temporal value must answer them in the function that owns it
+// (expr), never read them as the instant their integer would name.
+const (
+	DateNegInfinity      int32 = math.MinInt32
+	DatePosInfinity      int32 = math.MaxInt32
+	TimestampNegInfinity int64 = math.MinInt64
+	TimestampPosInfinity int64 = math.MaxInt64
+)
+
+// IsInfiniteDate reports whether an epoch-day count (any integer width) is
+// one of the DATE carrier's two infinite values.
+func IsInfiniteDate(n int64) bool {
+	return n == int64(DatePosInfinity) || n == int64(DateNegInfinity)
+}
+
+// IsInfiniteTimestamp reports whether an epoch-millisecond count is one of
+// the TIMESTAMP carrier's two infinite values.
+func IsInfiniteTimestamp(ms int64) bool {
+	return ms == TimestampPosInfinity || ms == TimestampNegInfinity
+}
+
+// DateDaysFinite is the range question a CONSTRUCTION asks — arithmetic, a
+// cast from a number, a clock: nil when n is a finite day PostgreSQL's DATE
+// holds, else 22008. An infinite value is never computed: `DATE
+// '1970-01-02' + 2147483646` lands on the carrier's maximum and is 22008, as
+// PostgreSQL's date_pli refuses it (IS_VALID_DATE).
+func DateDaysFinite(n int64) error {
+	if n < MinDateDay || n > MaxDateDay {
+		return sqlerr.New("22008", "date out of range")
+	}
+	return nil
+}
+
+// TimestampMillisFinite is DateDaysFinite for a TIMESTAMP's epoch
+// milliseconds.
+func TimestampMillisFinite(ms int64) error {
+	if ms < MinTimestampMilli || ms >= EndTimestampMilli {
+		return sqlerr.New("22008", "timestamp out of range")
+	}
+	return nil
+}
+
+// DateDaysInRange is THE range question for a STORED DATE's epoch-day count:
+// nil when PostgreSQL's DATE holds it — a finite day in range or one of the
+// two infinite values — else its 22008. Every construction of a
 // DATE asks it — the expression layer's constructors (expr temporal_range.go
 // reads it through expr.DateDaysInRange), the SQL write doors, and this
 // writer's own box normalisation (normalizeTemporalBox), which the embedded
@@ -53,19 +108,19 @@ const (
 // range was stored there and read back as year 5881580 (arc VL round-4
 // review P2).
 func DateDaysInRange(n int64) error {
-	if n < MinDateDay || n > MaxDateDay {
-		return sqlerr.New("22008", "date out of range")
+	if IsInfiniteDate(n) {
+		return nil
 	}
-	return nil
+	return DateDaysFinite(n)
 }
 
 // TimestampMillisInRange is DateDaysInRange for a TIMESTAMP's epoch
 // milliseconds.
 func TimestampMillisInRange(ms int64) error {
-	if ms < MinTimestampMilli || ms >= EndTimestampMilli {
-		return sqlerr.New("22008", "timestamp out of range")
+	if IsInfiniteTimestamp(ms) {
+		return nil
 	}
-	return nil
+	return TimestampMillisFinite(ms)
 }
 
 // timestampInstantMillis is a time.Time as a TIMESTAMP box, range-checked on
@@ -141,6 +196,12 @@ func ParseDateDays(s string) (int32, error) {
 		return 0, &DateParseError{Text: s, FieldRange: true}
 	case dateFieldsZone:
 		return 0, &DateParseError{Text: s, ZoneRange: true}
+	}
+	if tt.infinite > 0 {
+		return DatePosInfinity, nil
+	}
+	if tt.infinite < 0 {
+		return DateNegInfinity, nil
 	}
 	// The DATE is the date fields: a trailing time-of-day is validated and
 	// dropped, `24:00:00` included (PostgreSQL 17.11: DATE '2024-03-04
@@ -469,6 +530,9 @@ type temporalText struct {
 	hour, minute, second, ns int
 	hasZone                  bool
 	offsetSeconds            int
+	// infinite is +1 for `infinity`, -1 for `-infinity` and 0 for a finite
+	// value; the fields above are unset when it is not 0.
+	infinite int
 }
 
 // parseTemporalText is THE date/time text grammar, one for DATE and
@@ -490,8 +554,9 @@ type temporalText struct {
 //
 // The accepted forms are PostgreSQL 17.11's, measured per spelling (gated by
 // pgwire.TestArcPWRound2MatchesPostgres and the zone table of
-// coordinator.TestArcPWZoneSpellingsEveryArm). PostgreSQL also reads month
-// names, `epoch` / `infinity` / `now` / `today`, BC years, AM / PM, Julian
+// coordinator.TestArcPWZoneSpellingsEveryArm), plus `epoch` and the two
+// infinite values (infinityWord). PostgreSQL also reads month
+// names, `now` / `today`, BC years, AM / PM, Julian
 // days, zone NAMES — a POSIX zone spec among them: `…12:00:00Z+05` is the
 // zone `Z+05`, five hours WEST of UTC (17:00 UTC as a timestamptz), not `Z`
 // and then an offset — and a leading one-to-three-digit field as MDY; this
@@ -513,6 +578,10 @@ func parseTemporalText(s string) (temporalText, dateFieldsKind) {
 	// finite constant: 1970-01-01 00:00:00 for TIMESTAMP and DATE alike.
 	if strings.EqualFold(text, "epoch") {
 		tt.year, tt.month, tt.day = 1970, 1, 1
+		return tt, dateFieldsOK
+	}
+	if sign := infinityWord(text); sign != 0 {
+		tt.infinite = sign
 		return tt, dateFieldsOK
 	}
 	datePart, rest := text, ""
@@ -549,6 +618,29 @@ func parseTemporalText(s string) (temporalText, dateFieldsKind) {
 		return tt, dateFieldsOK
 	}
 	return tt, tt.readClock(rest)
+}
+
+// infinityWord reads PostgreSQL's two infinite values: `infinity`, any case,
+// with an optional sign that whitespace may separate from the word (`+
+// infinity` and `-\tInfinity` read there; measured on 17.11). It answers +1,
+// -1, or 0 for any other text — `inf`, `--infinity`, `+-infinity`,
+// `infinity x`, `infinity 10:00`, `infinity+05` are 22007 as in PostgreSQL.
+// PostgreSQL's date/time lexer also drops punctuation (`infinity,`,
+// `"infinity"`) and an era or meridiem beside the word (`infinity BC`,
+// `infinity AM`); this grammar reads neither (temporal r25), as for a finite
+// value. text has its outer whitespace trimmed.
+func infinityWord(text string) int {
+	sign := 1
+	if text != "" && (text[0] == '+' || text[0] == '-') {
+		if text[0] == '-' {
+			sign = -1
+		}
+		text = strings.TrimLeft(text[1:], temporalSpace)
+	}
+	if strings.EqualFold(text, "infinity") {
+		return sign
+	}
+	return 0
 }
 
 // temporalSpace is the grammar's whitespace: PostgreSQL's ParseDateTime
@@ -723,6 +815,12 @@ func ParseTimestampMillis(s string) (int64, error) {
 	case dateFieldsZone:
 		return 0, &TimestampParseError{Text: s, ZoneRange: true}
 	}
+	if tt.infinite > 0 {
+		return TimestampPosInfinity, nil
+	}
+	if tt.infinite < 0 {
+		return TimestampNegInfinity, nil
+	}
 	ms, err := timestampInstantMillis(tt.wallClock())
 	if err != nil {
 		return 0, &TimestampParseError{Text: s, FieldRange: true}
@@ -750,10 +848,12 @@ func ParseTimestampWallClock(s string) (time.Time, bool) {
 // zone` reading of the text is the instant wall − offset (pgwire's
 // timestamptz parameter, which this engine binds as the TIMESTAMP of its UTC
 // instant). ok=false for text outside the grammar and for a wall clock
-// outside PostgreSQL's TIMESTAMP range.
+// outside PostgreSQL's TIMESTAMP range — and for `infinity` / `-infinity`,
+// which name no instant: a caller that must store them reads
+// ParseTimestampMillis, which answers the carrier's extremes.
 func ParseTimestampZone(s string) (wall time.Time, offsetSeconds int, hasZone bool, ok bool) {
 	tt, kind := parseTemporalText(s)
-	if kind != dateFieldsOK {
+	if kind != dateFieldsOK || tt.infinite != 0 {
 		return time.Time{}, 0, false, false
 	}
 	wall = tt.wallClock()

@@ -624,6 +624,31 @@ func (ing *Ingester) flushBuffer(ctx context.Context, partPath string, buf *part
 }
 
 func (ing *Ingester) formatPartitionValue(key string, v any) string {
+	// An infinite DATE or TIMESTAMP reaches here as its carrier's extreme
+	// (the DML door's box: it names no instant to hold in a time.Time); the
+	// key is its text, as a finite value's is.
+	switch n := v.(type) {
+	case int32, int64:
+		for _, col := range ing.schema.Columns {
+			if col.Name != key {
+				continue
+			}
+			switch col.Type {
+			case parquet.TypeDate:
+				if d, ok := n.(int32); ok && parquet.IsInfiniteDate(int64(d)) {
+					return parquet.FormatDateDays(d)
+				}
+			case parquet.TypeTimestamp:
+				if ms, ok := n.(int64); ok && parquet.IsInfiniteTimestamp(ms) {
+					if ms > 0 {
+						return "infinity"
+					}
+					return "-infinity"
+				}
+			}
+			break
+		}
+	}
 	switch t := v.(type) {
 	case time.Time:
 		for _, col := range ing.schema.Columns {

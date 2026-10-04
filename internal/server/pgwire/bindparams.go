@@ -424,13 +424,10 @@ func paramNullLiteral(oid uint32) string {
 // fraction to the microsecond (the engine then floors it to its millisecond
 // carrier, exactly as it does the same literal typed as text).
 //
-// PostgreSQL's `infinity` / `-infinity` are the int64 extremes on the wire.
-// The engine's TIMESTAMP has no infinity, so they are refused rather than
-// bound as the year 294247 they would otherwise decode to.
+// PostgreSQL's `infinity` / `-infinity` are the int64 extremes on the wire;
+// renderBinaryParam reads them before this function, as the two words, and
+// they never reach here as the year 294247 they would otherwise decode to.
 func binaryTimestampInstant(micros int64) (time.Time, error) {
-	if micros == math.MaxInt64 || micros == math.MinInt64 {
-		return time.Time{}, fmt.Errorf("timestamp parameter is infinity, which a TIMESTAMP cannot hold")
-	}
 	secs := micros / 1_000_000
 	rem := micros % 1_000_000
 	if rem < 0 {
@@ -498,6 +495,15 @@ func renderBinaryParam(raw []byte, oid uint32) (string, error) {
 			return "", fmt.Errorf("date parameter has %d bytes, want 4", len(raw))
 		}
 		days := int32(binary.BigEndian.Uint32(raw))
+		// PostgreSQL's DATE infinities are the int32 extremes on the wire
+		// (DATEVAL_NOBEGIN / DATEVAL_NOEND): the two words, which the DATE
+		// input reads into this engine's own extremes.
+		switch days {
+		case math.MaxInt32:
+			return renderTextParam("infinity", oidDate)
+		case math.MinInt32:
+			return renderTextParam("-infinity", oidDate)
+		}
 		return renderTextParam(pgEpoch.AddDate(0, 0, int(days)).Format("2006-01-02"), oidDate)
 
 	case oidTimestamp, oidTimestampTZ:
@@ -505,6 +511,14 @@ func renderBinaryParam(raw []byte, oid uint32) (string, error) {
 			return "", fmt.Errorf("timestamp parameter has %d bytes, want 8", len(raw))
 		}
 		micros := int64(binary.BigEndian.Uint64(raw))
+		// PostgreSQL's TIMESTAMP infinities are the int64 extremes on the
+		// wire (DT_NOBEGIN / DT_NOEND), for timestamptz as for timestamp.
+		switch micros {
+		case math.MaxInt64:
+			return renderTextParam("infinity", oidTimestamp)
+		case math.MinInt64:
+			return renderTextParam("-infinity", oidTimestamp)
+		}
 		t, err := binaryTimestampInstant(micros)
 		if err != nil {
 			return "", err
