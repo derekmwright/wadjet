@@ -114,7 +114,7 @@ func (w *declWalk) lagLeadWidening(node *logical.Node, we logical.WindowExpr) (l
 	}
 	v, vok := w.windowValueDecl(node, we)
 	decls := withSubqueryDecls(w.emittedColDecls(node.Children[0]), node)
-	d, dc := nodeDeclaredType(def, decls)
+	d, dc := lagLeadDefaultDecl(def, decls, v, vok)
 	out := v
 	cast := vok && dc == expr.Decided && !d.Untyped && lagLeadCompatible(v, d)
 	if cast {
@@ -272,7 +272,7 @@ func lagLeadCallTypes(fc *plansql.FuncCallNode, decls ColDecls) error {
 		return nil
 	}
 	v, vc := nodeDeclaredType(fc.Args[0], decls)
-	d, dc := nodeDeclaredType(fc.Args[2], decls)
+	d, dc := lagLeadDefaultDecl(fc.Args[2], decls, v, vc == expr.Decided)
 	if vc != expr.Decided || dc != expr.Decided || v.Untyped || d.Untyped || v.Quoted || d.Quoted {
 		return nil
 	}
@@ -291,4 +291,67 @@ func lagLeadTypeName(d expr.DeclType) string {
 		return pgTypeName(d.Schema.ElementType.Type) + "[]"
 	}
 	return pgTypeName(d.ID)
+}
+
+// lagLeadDefaultDecl is the declaration a LAG / LEAD default contributes to
+// the common type. A NULL literal under a CAST (`CAST(NULL AS NUMERIC)`,
+// `NULL::numeric`, and an expression whose every leaf is one, such as
+// `-CAST(NULL AS NUMERIC)` or `COALESCE(CAST(NULL AS NUMERIC), NULL)`)
+// contributes its type FAMILY and no width: it carries no
+// value, so it names the type PostgreSQL resolves `lag(anycompatible,
+// integer, anycompatible)` over and nothing about digits. For a numeric
+// cast that is the exact family at no scale of its own — over a bigint
+// value the result is DECIMAL(38,0), so `LAG(b * 1000000000000000 + 1, 1,
+// CAST(NULL AS NUMERIC))` keeps 10000000000000001; over a DECIMAL(10,2)
+// value it is that value's own type; over a double, double precision.
+// Outside this seam a bare NUMERIC cast of the NULL literal keeps its
+// planner-wide declaration (ADR-0024).
+func lagLeadDefaultDecl(def plansql.Node, decls ColDecls, v expr.DeclType, vok bool) (expr.DeclType, expr.Confidence) {
+	if nullOnlyTree(def) && castsToDecimal(def) {
+		if vok && v.ID == batch.TypeDecimal && v.Precision > 0 {
+			return v, expr.Decided // the family is the value's own
+		}
+		return expr.DeclDecimal(batch.MaxDecimalPrecision, 0), expr.Decided
+	}
+	return nodeDeclaredType(def, decls)
+}
+
+// nullOnlyTree reports whether every leaf of an expression is the NULL
+// literal, so the expression has no value of its own.
+func nullOnlyTree(n plansql.Node) bool {
+	switch e := plansql.Unparen(n).(type) {
+	case *plansql.Lit:
+		return e.Kind == plansql.LitNull
+	case *plansql.CastNode:
+		return nullOnlyTree(e.Inner)
+	case *plansql.ColRef, *plansql.SubqueryNode, *plansql.ExistsNode, nil:
+		return false
+	}
+	ops := exprOperands(n)
+	if len(ops) == 0 {
+		return false
+	}
+	for _, o := range ops {
+		if !nullOnlyTree(o) {
+			return false
+		}
+	}
+	return true
+}
+
+// castsToDecimal reports whether a NULL-only expression is of the NUMERIC
+// family: its outermost CAST, or one of its operands', names NUMERIC /
+// DECIMAL.
+func castsToDecimal(n plansql.Node) bool {
+	if c, ok := plansql.Unparen(n).(*plansql.CastNode); ok {
+		// The outermost CAST names the family.
+		_, _, _, isDec := expr.DecimalCastDest(c.TypeName)
+		return isDec
+	}
+	for _, o := range exprOperands(n) {
+		if castsToDecimal(o) {
+			return true
+		}
+	}
+	return false
 }
