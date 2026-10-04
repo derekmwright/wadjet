@@ -398,8 +398,8 @@ func paramNullLiteral(oid uint32) string {
 	case oidFloat8:
 		return "CAST(NULL AS DOUBLE PRECISION)"
 	case oidNumeric:
-		// A numeric literal's NULLIF is numeric (CAST(NULL AS NUMERIC) is
-		// too, DECIMAL(38,0), since arc WD round 6).
+		// CAST(NULL AS NUMERIC) is a double here (an unconstrained NUMERIC
+		// is carried as one); a numeric literal's NULLIF is numeric.
 		return "NULLIF(0.0, 0.0)"
 	case oidDate:
 		return "CAST(NULL AS DATE)"
