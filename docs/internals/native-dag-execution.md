@@ -1925,6 +1925,27 @@ coordinator-local pipeline.
 **Not covered:** frames are carried end to end but `exec.Window` never reads
 `WindowColumn.Frame` at all (#350) — an operator defect both paths share.
 
+## The statement clock (#1566)
+
+`now()` / `CURRENT_TIMESTAMP` / `LOCALTIMESTAMP` / `CURRENT_DATE` are ONE value
+per statement (PostgreSQL's transaction start; this engine has no transactions,
+so the statement's — ADR-0012 temporal r26). The value is read once, at the
+door, and carried; nothing below the door reads the clock for these functions.
+
+| Where | What |
+|---|---|
+| `expr.StartStatement(ctx)` | the stamp: pgwire `queryContext` (each statement; the EXECUTE's for the extended protocol), `wadjet.DB.query` / `ExecuteParsed`, `Coordinator.ExecuteSQL` / `SubmitSQL` (its async context keeps it). The outermost door wins. |
+| `expr.WithStatementClock(ctx)` | the binding: a compile option that makes every clock-function `FuncCall` (and a CREATE FUNCTION body's) answer the stamped instant. The physical planner passes it through `Planner.statementOption()` / `clockOption()` from `PlanCtx`; the DML evaluator, the gather renamer (`applyOutputRenames`), the scalar-subquery reader and dagplan's deferred-failure gate pass it from their context. |
+| `Scheduler.PublishTasks` → `stampTaskStatementClock` | the ONE stamp on the wire: `distributed.Task.StatementTime`, Unix nanoseconds. A task already stamped keeps its value, so a retry re-publishing its task reads the same instant. |
+| worker `taskStatementContext` | the task's context carries `StatementTime` (zero — a coordinator that predates the field — falls back to the task's own start); the fragment compiles (filters, projections, aggregate input, window keys, shuffle computed columns, LATERAL defaults) and the worker's planner bind it. |
+
+The logical optimizer has no statement: its plan-time folds (`evalConstantFilter`,
+`foldConstant`) leave a conjunct that reads a clock function undecided, so it
+stays in the plan and is evaluated where the statement runs. A compile that no
+door reached keeps the live clock per evaluation; `expr.SetUnboundClockHookForTest`
+reports one, and `coordinator.TestArcSCStatementClockEveryArm` /
+`wadjet.TestArcSCEmbeddedStatementWritesOneClock` fail on any.
+
 ## Query cancellation (and `statement_timeout`)
 
 Client cancellation and the query timeout are one mechanism: a cancelled

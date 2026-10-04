@@ -60,9 +60,9 @@ Declared CREATE/DROP TABLE uses row results; PostgreSQL sends DDL tags without r
 
 `LOCALTIMESTAMP(0) = LOCALTIMESTAMP(6)` is `f` on PostgreSQL 17.11, which truncates the value to the requested precision, and `t` here: this engine renders an instant to milliseconds and has no per-call precision. The wire declares the base type either way. (catalog: [temporal#r12](adr/0012-divergences/temporal.md#catalog); #1169-localtimestamp-precision)
 
-**`LOCALTIMESTAMP`, `CURRENT_TIMESTAMP` and `NOW()` are read PER ROW.**
+**`NOW()` is the statement's start time, not the transaction's.**
 
-PostgreSQL answers the statement's start time for every row, so `WHERE LOCALTIMESTAMP >= LOCALTIMESTAMP` selects every row. Here the clock is read where the expression is evaluated, so a row that straddles a millisecond can answer FALSE. (catalog: [temporal#r13](adr/0012-divergences/temporal.md#catalog); #1169-per-row-clock)
+`NOW()`, `CURRENT_TIMESTAMP`, `LOCALTIMESTAMP` and `CURRENT_DATE` read the clock once per statement and answer that value on every row and every worker, as PostgreSQL 17.11 does within a statement. This engine has no transactions — `BEGIN` and `COMMIT` are accepted and ignored, and a multi-statement string runs as a sequence — so `BEGIN; SELECT now(); SELECT now(); COMMIT` answers two values where PostgreSQL answers its transaction's one, and so do two statements in one simple-query string. (catalog: [temporal#r26](adr/0012-divergences/temporal.md#catalog); #1566)
 
 **An explicit integer CAST of a materialized float-carried numeric rounds half to even.**
 
