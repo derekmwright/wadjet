@@ -509,6 +509,12 @@ func parseTemporalText(s string) (temporalText, dateFieldsKind) {
 	if text == "" {
 		return tt, dateFieldsNone
 	}
+	// PostgreSQL's special input 'epoch' (any case, outer whitespace) is a
+	// finite constant: 1970-01-01 00:00:00 for TIMESTAMP and DATE alike.
+	if strings.EqualFold(text, "epoch") {
+		tt.year, tt.month, tt.day = 1970, 1, 1
+		return tt, dateFieldsOK
+	}
 	datePart, rest := text, ""
 	if i := strings.IndexAny(text, temporalSpace+"Tt"); i >= 0 {
 		datePart, rest = text[:i], strings.TrimLeft(text[i+1:], temporalSpace)
