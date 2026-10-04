@@ -5,7 +5,9 @@ package coordinator
 import (
 	"context"
 	"fmt"
+	"math"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -218,14 +220,69 @@ func TestArcMOGenerate(t *testing.T) {
 
 // moAggregate names a cell whose answer is a SUM, AVG or window SUM of
 // doubles: its last bits depend on the order partial states meet (ADR-0013),
-// so it matches a double within nxFloatSumClose's few units in the last place.
+// so it matches a double within a relative 1e-12 (moFloatClose). A sum of
+// float remainders spans more units in the last place than nxFloatSumClose
+// allows: SUM(t.n % (SELECT m …)) is 0.01 or 0.010000000000000009 by the
+// order the DAG's partial sums meet.
 func moAggregate(name string) bool {
 	return strings.Contains(name, "/sum/") || strings.Contains(name, "/avg/") || strings.Contains(name, "/win/") ||
 		strings.HasSuffix(name, "/sum/pct") || strings.HasSuffix(name, "/sum/mod")
 }
 
 func moMatches(name, got, want string) bool {
-	return nxMatches(got, want) || moAggregate(name) && nxFloatSumClose(got, want)
+	return nxMatches(got, want) || moAggregate(name) && moFloatClose(got, want)
+}
+
+// moFloatClose: the same declared types and row count, every field equal
+// but a double, and each double within a relative 1e-12 of the wanted one
+// with the same sign.
+func moFloatClose(got, want string) bool {
+	if !strings.HasPrefix(want, "{") || !strings.Contains(want, "float") {
+		return false
+	}
+	gh, gr, gok := strings.Cut(strings.TrimSpace(got), " rows=")
+	wh, wr, wok := strings.Cut(strings.TrimSpace(want), " rows=")
+	if !gok || !wok || gh != wh {
+		return false
+	}
+	split := func(s string) []string {
+		return strings.FieldsFunc(s, func(r rune) bool { return r == ',' || r == '|' || r == ' ' })
+	}
+	gf, wf := split(gr), split(wr)
+	if len(gf) != len(wf) {
+		return false
+	}
+	for k := range gf {
+		if gf[k] == wf[k] {
+			continue
+		}
+		a, aerr := strconv.ParseFloat(gf[k], 64)
+		b, berr := strconv.ParseFloat(wf[k], 64)
+		if aerr != nil || berr != nil || math.Signbit(a) != math.Signbit(b) ||
+			math.Abs(a-b) > 1e-12*math.Max(math.Abs(a), math.Abs(b)) {
+			return false
+		}
+	}
+	return true
+}
+
+// TestMOFloatCloseIsNarrow: the two DAG answers match; another digit, a
+// numeric, another row count or a sign do not.
+func TestMOFloatCloseIsNarrow(t *testing.T) {
+	for _, c := range []struct {
+		got, want string
+		ok        bool
+	}{
+		{"{float} rows=1 0.010000000000000009", "{float} rows=1 0.01", true},
+		{"{float} rows=1 0.0101", "{float} rows=1 0.01", false},
+		{"{numeric} rows=1 0.010000000000000009", "{numeric} rows=1 0.01", false},
+		{"{float} rows=2 0.01 | 1", "{float} rows=1 0.01", false},
+		{"{float} rows=1 -0.01", "{float} rows=1 0.01", false},
+	} {
+		if moFloatClose(c.got, c.want) != c.ok {
+			t.Errorf("moFloatClose(%q, %q) != %v", c.got, c.want, c.ok)
+		}
+	}
 }
 
 func TestArcMOPercentIsModEveryArm(t *testing.T) {
