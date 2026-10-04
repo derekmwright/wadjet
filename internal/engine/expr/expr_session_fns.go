@@ -171,6 +171,16 @@ func dateShift(args []any, subtract bool) any {
 // whole DAY, so the output no longer depends on how the value reached the
 // operator (#322, #544).
 func intervalShift(v any, iv IntervalValue, subtract bool) any {
+	// PostgreSQL: an infinite DATE or TIMESTAMP ± a (finite) INTERVAL is the
+	// same infinite TIMESTAMP — the interval moves no instant it could name.
+	if x, inf := v.(infiniteInstant); inf {
+		return x.tsBox()
+	}
+	if s, isText := v.(string); isText {
+		if x, inf := textInfinity(s); inf {
+			return x.tsBox()
+		}
+	}
 	t, _, ok := parseDateArg(v)
 	if !ok {
 		return nil

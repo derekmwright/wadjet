@@ -153,19 +153,38 @@ func (e *BinOp) unknownTemporalArith(b *batch.RecordBatch, row int, lv, rv any) 
 	}
 	var t time.Time
 	isTimestamp := false
+	inf, isInf := d.(infiniteInstant)
 	switch x := d.(type) {
 	case civilDate:
 		t = x.t
 	case time.Time:
 		t, isTimestamp = x, true
+	case infiniteInstant:
+		isTimestamp = !x.date
 	default:
 		return nil, false
+	}
+	if isInf {
+		// An infinite operand: `± '<interval>'` keeps it (intervalShift),
+		// and a difference is 22008, as PostgreSQL's `cannot subtract
+		// infinite dates` (a TIMESTAMP difference is an infinite INTERVAL
+		// there, which this engine's INTERVAL cannot hold).
+		switch ResolveUnknownTemporal(e.Op, isTimestamp) {
+		case UnknownAmbiguous:
+			panic(fatalEval{UnknownTemporalAmbiguous(e.Op, litLeft)})
+		case UnknownAsInterval:
+			return intervalShift(inf, castToIntervalText(lit), false), true
+		}
+		raiseInfiniteOperand("`"+e.Op+"` between dates or timestamps", inf)
 	}
 	switch ResolveUnknownTemporal(e.Op, isTimestamp) {
 	case UnknownAmbiguous:
 		panic(fatalEval{UnknownTemporalAmbiguous(e.Op, litLeft)})
 	case UnknownAsDate:
 		days, _ := castTemporalText(lit, castToDateKind)
+		if x, inf := dateInfinity(days.(int64)); inf {
+			raiseInfiniteOperand("`"+e.Op+"` between dates or timestamps", x)
+		}
 		diff := epochDaysOf(t) - days.(int64)
 		if litLeft {
 			diff = -diff
@@ -173,6 +192,9 @@ func (e *BinOp) unknownTemporalArith(b *batch.RecordBatch, row int, lv, rv any) 
 		return diff, true
 	case UnknownAsTimestamp:
 		ms, _ := castTemporalText(lit, castToTimestampKind)
+		if x, inf := timestampInfinity(ms.(int64)); inf {
+			raiseInfiniteOperand("`"+e.Op+"` between dates or timestamps", x)
+		}
 		diff := t.UnixMilli() - ms.(int64)
 		if litLeft {
 			diff = -diff

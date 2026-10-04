@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // --- String entropy ---
@@ -48,28 +49,54 @@ func fnEntropy(args []any) any {
 // String/Bytes parse text; other Int64Data values read as seconds, as parseTimeOK(int64).
 // Report whether resolution succeeded; never read a DATE from the absent Int64Data.
 // See docs/internals/column-instant-storage-units.md for the design.
-func columnInstant(src *batch.Vector, i int) (time.Time, bool) {
+//
+// An infinite DATE or TIMESTAMP names no instant: it is refused 22008 here,
+// with op naming the operation (raiseInfiniteOperand). A consumer PostgreSQL
+// answers for one reads columnReading instead (vecExtract, the field
+// kernels, resolveTemporalArgs, temporalOperand).
+func columnInstant(src *batch.Vector, i int, op string) (time.Time, bool) {
+	t, x, inf, ok := columnReading(src, i)
+	if inf {
+		raiseInfiniteOperand(op, x)
+	}
+	return t, ok
+}
+
+// columnReading is columnInstant's one read of row i, the infinite values
+// told apart in the same type switch: inf is true (and x the value) for a
+// DATE or TIMESTAMP carrier extreme, else t is the instant.
+func columnReading(src *batch.Vector, i int) (t time.Time, x infiniteInstant, inf, ok bool) {
 	switch src.Type {
 	case batch.TypeString, batch.TypeBytes:
 		t, ok := parseTimeOK(src.BytesData.StringValue(i))
 		if !ok {
-			return time.Time{}, false
+			return time.Time{}, x, false, false
 		}
-		return t, true
+		return t, x, false, true
 	case batch.TypeDate:
 		if i < len(src.Int32Data) {
+			n := src.Int32Data[i]
+			if n == parquet.DatePosInfinity || n == parquet.DateNegInfinity {
+				x, _ = dateInfinity(int64(n))
+				return time.Time{}, x, true, true
+			}
 			// Days since the Unix epoch.
-			return time.Unix(int64(src.Int32Data[i])*86400, 0).UTC(), true
+			return time.Unix(int64(n)*86400, 0).UTC(), x, false, true
 		}
 	case batch.TypeTimestamp:
 		if i < len(src.Int64Data) {
+			ms := src.Int64Data[i]
+			if ms == parquet.TimestampPosInfinity || ms == parquet.TimestampNegInfinity {
+				x, _ = timestampInfinity(ms)
+				return time.Time{}, x, true, true
+			}
 			// Milliseconds since the Unix epoch.
-			return time.UnixMilli(src.Int64Data[i]).UTC(), true
+			return time.UnixMilli(ms).UTC(), x, false, true
 		}
 	default:
 		if i < len(src.Int64Data) {
-			return time.Unix(src.Int64Data[i], 0).UTC(), true
+			return time.Unix(src.Int64Data[i], 0).UTC(), x, false, true
 		}
 	}
-	return time.Time{}, false
+	return time.Time{}, x, false, false
 }

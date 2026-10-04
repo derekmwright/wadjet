@@ -32,6 +32,17 @@ func fnTimeBucket(args []any) any {
 	}
 	strideMs := timeBucketStrideMillis(iv)
 
+	// PostgreSQL's date_bin, measured on 17.11: an infinite source is its own
+	// bucket, an infinite origin is 22008 `origin out of range` (checked
+	// first, as date_bin checks it).
+	if len(args) == 3 {
+		if _, inf := args[2].(infiniteInstant); inf {
+			panic(fatalEval{sqlerr.New("22008", "origin out of range")})
+		}
+	}
+	if x, inf := args[1].(infiniteInstant); inf {
+		return x.tsBox()
+	}
 	src, ok := parseTimeOK(args[1])
 	if !ok {
 		return nil

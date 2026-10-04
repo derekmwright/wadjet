@@ -149,6 +149,10 @@ func fnTimezone(args []any) any {
 	if !isUTCZone(toString(args[0])) {
 		return nil
 	}
+	if x, inf := args[1].(infiniteInstant); inf {
+		// PostgreSQL: an infinite timestamp at any zone is itself.
+		return x.tsBox()
+	}
 	t, ok := parseTimeOK(args[1])
 	if !ok {
 		return nil

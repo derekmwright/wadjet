@@ -83,6 +83,9 @@ type BinOpNumeric struct {
 	// sides as numbers. Resolved with the mode, from the same column types,
 	// and nil for every other operand pair — see BinOp.dateArith (#340).
 	dateNode *BinOp
+	// tempCols are the DATE / TIMESTAMP column operands, read for an
+	// infinite value before the typed paths (infiniteColumnOperand).
+	tempCols []*ColRef
 	// dayCount marks `date - date` over two DATE operands: the node answers
 	// an integer day count (dateNode's answer), so it is an integer operand
 	// and its typed evaluators answer that count, as Eval does.
@@ -211,6 +214,17 @@ func (e *BinOpNumeric) resolveModeSlow(b *batch.RecordBatch) {
 		(temporalColOperand(e.Left, b) || temporalColOperand(e.Right, b) ||
 			producedTemporal(e.Left, b) != castNotTemporal || producedTemporal(e.Right, b) != castNotTemporal) {
 		e.dateNode = &BinOp{Left: e.Left, Right: e.Right, Op: e.Op}
+		for _, op := range []Expr{e.Left, e.Right} {
+			if cr, ok := op.(*ColRef); ok {
+				cr.resolve(b)
+				if cr.idx < 0 {
+					continue
+				}
+				if vt := cr.valueType(); vt == batch.TypeDate || vt == batch.TypeTimestamp {
+					e.tempCols = append(e.tempCols, cr)
+				}
+			}
+		}
 		e.dayCount = e.Op == "-" && !e.isInt &&
 			producedTemporal(e.Left, b) == castToDateKind && producedTemporal(e.Right, b) == castToDateKind
 	}
@@ -310,6 +324,17 @@ func (e *BinOpNumeric) intArith(b *batch.RecordBatch, row int) (int64, bool) {
 	if !rok {
 		return 0, false
 	}
+	// A temporal operand holding an infinite value (a carrier extreme) is
+	// answered by date arithmetic, which keeps it or refuses 22008
+	// (infiniteDateArith) — never the integer difference of two extremes,
+	// which is 0 for `ts - ts` over infinity where PostgreSQL raises.
+	if e.dateNode != nil && (carrierExtreme(lv) || carrierExtreme(rv)) {
+		if res, ok := e.dateNode.dateArith(b, row, lv, rv); ok {
+			if n, isInt := res.(int64); isInt {
+				return n, true
+			}
+		}
+	}
 	// Checked: an integer result with no int64 is 22003, PostgreSQL's
 	// `bigint out of range`, and never the wrapped number this node's own
 	// doc comment used to promise (#637 — int_overflow.go).
@@ -357,11 +382,78 @@ func (e *BinOpNumeric) EvalFloat64(b *batch.RecordBatch, row int) (float64, bool
 		}
 		return v.ToFloat64(e.dec.out.Scale), true
 	}
+	if e.tempCols != nil {
+		return e.temporalFloat(b, row)
+	}
 	v, ok := e.flt.EvalFloat64(b, row)
 	if ok && e.divTrunc {
 		v = math.Trunc(v)
 	}
 	return v, ok
+}
+
+// temporalFloat is the float path of `±` over a DATE or TIMESTAMP column
+// operand. An operand whose float is a carrier extreme is checked against
+// its vector, and an infinite value goes to date arithmetic
+// (infiniteDateArith: it keeps the value or refuses 22008) — the float sum
+// or difference of the extremes is no answer (`ts - ts` over infinity is 0).
+func (e *BinOpNumeric) temporalFloat(b *batch.RecordBatch, row int) (float64, bool) {
+	lf, lok := e.flt.Left.EvalFloat64(b, row)
+	if !lok {
+		return 0, false
+	}
+	rf, rok := e.flt.Right.EvalFloat64(b, row)
+	if !rok {
+		return 0, false
+	}
+	if (floatCarrierExtreme(lf) || floatCarrierExtreme(rf)) && e.infiniteColumnOperand(b, row) {
+		if res, ok := e.dateNode.dateArith(b, row, lf, rf); ok {
+			switch v := res.(type) {
+			case int64:
+				return float64(v), true
+			case float64:
+				return v, true
+			}
+		}
+		return 0, false
+	}
+	if e.opCode == arithSub {
+		return pgFloatSub(lf, rf), true
+	}
+	return pgFloatAdd(lf, rf), true
+}
+
+// floatCarrierExtreme reports a float equal to one of the four integers the
+// temporal carriers reserve for their infinite values.
+func floatCarrierExtreme(f float64) bool {
+	return f == math.MaxInt64 || f == math.MinInt64 || f == math.MaxInt32 || f == math.MinInt32
+}
+
+// infiniteColumnOperand reports whether a DATE or TIMESTAMP column operand of
+// this node holds an infinite value at row — read from the column's vector,
+// so no operand is evaluated twice.
+func (e *BinOpNumeric) infiniteColumnOperand(b *batch.RecordBatch, row int) bool {
+	for _, cr := range e.tempCols {
+		src, r, ok := cr.valueVector(b, row)
+		if !ok {
+			continue
+		}
+		switch src.Type {
+		case batch.TypeTimestamp:
+			if r < len(src.Int64Data) {
+				if ms := src.Int64Data[r]; ms == math.MaxInt64 || ms == math.MinInt64 {
+					return !(src.Nulls.HasNulls() && src.Nulls.IsNullFast(r))
+				}
+			}
+		case batch.TypeDate:
+			if r < len(src.Int32Data) {
+				if n := src.Int32Data[r]; n == math.MaxInt32 || n == math.MinInt32 {
+					return !(src.Nulls.HasNulls() && src.Nulls.IsNullFast(r))
+				}
+			}
+		}
+	}
+	return false
 }
 
 // operandIsIntStructural is operandIsInt with nested arithmetic judged by
