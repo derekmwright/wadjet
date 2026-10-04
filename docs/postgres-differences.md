@@ -64,10 +64,6 @@ Declared CREATE/DROP TABLE uses row results; PostgreSQL sends DDL tags without r
 
 PostgreSQL answers the statement's start time for every row, so `WHERE LOCALTIMESTAMP >= LOCALTIMESTAMP` selects every row. Here the clock is read where the expression is evaluated, so a row that straddles a millisecond can answer FALSE. (catalog: [temporal#r13](adr/0012-divergences/temporal.md#catalog); #1169-per-row-clock)
 
-**An explicit integer CAST of a materialized float-carried numeric rounds half to even.**
-
-`CAST(s.x AS INTEGER)` over `(SELECT DISTINCT 5 / 2.0 + t.id * 0 AS x FROM t) s` answers 2 where PostgreSQL answers 3, and so does the same column read from a derived table, an aggregate, a CTE, a set operation, VALUES, a window or a join on the single-process arms (on the stage DAG a derived table's or a CTE's such column reads NULL, a separate defect): the column is a float64 in the batch and carries no PostgreSQL category, so the cast rounds it by float8's rule. A cast whose operand computes the value — `CAST(5 / 2.0 AS INTEGER)`, `CAST(SQRT(6.25) AS INTEGER)`, `CAST(POWER(2.5, 1) AS INTEGER)`, negated, SMALLINT and BIGINT alike — rounds half away from zero, 3, as PostgreSQL does, and an assignment of the materialized column rounds 3 too (see "Division and the transcendental functions over numeric declare double precision"). (catalog: [dml-assignment#r2](adr/0012-divergences/dml-assignment.md#catalog); #1353-cast, ADR-0024 §2c)
-
 **An integer CAST of a JSON field read reads the JSON number.**
 
 `CAST(j->>'k' AS INTEGER)` over `{"k": 2.5}` answers 2 where PostgreSQL raises 22P02 (`->>` is text there, and `2.5` is not an integer's text); assigning `j->>'k'` or `j->'k'` itself to an integer column is 42804 on every write door, as in PostgreSQL. (catalog: [dml-assignment#r3](adr/0012-divergences/dml-assignment.md#catalog); #1353-json, #1406)
@@ -421,6 +417,10 @@ Neither type exists in PostgreSQL core; wadjet defines their total orders. (cata
 **`DOUBLE` and the quoted keywords `"float"` / `"real"` name float types.**
 
 `CREATE TABLE t (c DOUBLE)` is a double precision column and `CAST(1 AS "float")` / `CAST(1 AS "real")` are double precision / real; PostgreSQL has no type `double` and resolves a quoted name against its catalog (`"float4"` and `"float8"` are the types on both), so it raises 42704. `FLOAT32` and `FLOAT64` are this engine's own names for real and double precision. Every PostgreSQL spelling — `FLOAT`, `FLOAT(n)`, `FLOAT4`, `FLOAT8`, `REAL`, `DOUBLE PRECISION` — means what it means there. (catalog: [numeric-decimal#r20](adr/0012-divergences/numeric-decimal.md#catalog); #1464)
+
+**`round(x, n)` over a double precision or real value answers.**
+
+`round(f, 1)` over a double precision 0.25 answers 0.2; PostgreSQL has no `round(double precision, integer)` and raises 42883. The value is rounded by its own type's rule, as `round(f)` is: f·10ⁿ half to even, then scaled back. Over a numeric it is PostgreSQL's `round(numeric, integer)` on both. (catalog: [numeric-decimal#r22](adr/0012-divergences/numeric-decimal.md#catalog); #381)
 
 **QUALIFY follows DuckDB 1.1.3.**
 
