@@ -148,18 +148,19 @@ func TestArcWDTwoLevelShadowBigResultOnTheDAG(t *testing.T) {
 	}
 }
 
-// A TYPED NULL IS ITS TYPE (#1436 round 6): `CAST(NULL AS NUMERIC)` declares
-// numeric, (38,0) as an integer operand's bare NUMERIC cast does, so a LAG /
-// LEAD default of it is numeric and a bigint value past 2^53 keeps its digits
-// (`LAG(b * 1000000000000000 + 1, 1, CAST(NULL AS NUMERIC))` answers
-// 10000000000000001 where 4e6592c7 answered double precision 1e+16 and
-// 9420d256 refused). The same declaration feeds every common type it takes
-// part in (g/, ar/: COALESCE, CASE, UNION ALL, NULLIF, GREATEST, arithmetic,
-// SUM / AVG / MAX), where the base declared double precision and rounded the
-// same values. b2/ covers every default type over a value past 2^53 (a
-// typed NULL of each type, NULL, omitted, integer / decimal / wide / exponent
-// literals, CASTs, a quoted literal, columns, expressions) for LAG, LEAD and a
-// SUM above; b2t/ a typed NULL over each value type.
+// A TYPED-NULL LAG / LEAD DEFAULT (#1436): a default that is a NULL literal —
+// bare, under a CAST, or an expression whose every leaf is one — contributes
+// its type FAMILY and no width (physical.lagLeadDefaultDecl), so
+// `LAG(b * 1000000000000000 + 1, 1, CAST(NULL AS NUMERIC))` is numeric and
+// answers 10000000000000001 where 8b00b112 failed the query on every arm.
+// b2/ covers every default type over a value past 2^53 (a typed NULL of each
+// type, NULL, omitted, integer / decimal / wide / exponent literals, CASTs, a
+// quoted literal, columns, expressions) for LAG, LEAD and a SUM above; b2t/ a
+// typed NULL over each value type; ar/lag_*, ar/cmp and ar/text a typed NULL
+// beside the window. The rule is the default's alone: a typed NULL in
+// COALESCE, CASE, UNION ALL, NULLIF, GREATEST or arithmetic keeps its
+// planner-wide declaration (double precision, as at 8b00b112), and those
+// cells left this table in round 8 (ADR-0024, candidate U).
 //
 // Left out, base-identical and recorded as filing candidates: `1e300` (no
 // DECIMAL(38,s) holds it, so the literal is a double here and numeric on

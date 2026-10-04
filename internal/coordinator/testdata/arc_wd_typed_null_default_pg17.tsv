@@ -108,31 +108,11 @@ b2t/i_null_double	type=double precision rows=6 1,NULL | 2,10 | 3,20 | 4,NULL | 5
 b2t/i_null_double/plus	type=boolean rows=6 1,true | 2,false | 3,false | 4,true | 5,false | 6,false
 b2t/bplus_null_numeric	type=numeric rows=6 1,NULL | 2,10.5 | 3,20.5 | 4,NULL | 5,40.5 | 6,50.5
 b2t/bplus_null_numeric/plus	type=boolean rows=6 1,true | 2,false | 3,false | 4,true | 5,false | 6,false
-g/cast_null_num	type=numeric rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
-g/coalesce	type=numeric rows=6 1,10000000000000001 | 2,20000000000000001 | 3,NULL | 4,40000000000000001 | 5,50000000000000001 | 6,60000000000000001
-g/case	type=numeric rows=6 1,10000000000000001 | 2,20000000000000001 | 3,NULL | 4,40000000000000001 | 5,50000000000000001 | 6,60000000000000001
-g/plus	type=numeric rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
-g/union	type=numeric rows=7 1,10000000000000001 | 2,20000000000000001 | 3,NULL | 4,40000000000000001 | 5,50000000000000001 | 6,60000000000000001 | 7,NULL
 g/cast_b_num	type=numeric rows=6 1,10000000000000001 | 2,20000000000000001 | 3,NULL | 4,40000000000000001 | 5,50000000000000001 | 6,60000000000000001
-g/nullif	type=numeric rows=6 1,10000000000000001 | 2,20000000000000001 | 3,NULL | 4,40000000000000001 | 5,50000000000000001 | 6,60000000000000001
-g/greatest	type=numeric rows=6 1,10000000000000001 | 2,20000000000000001 | 3,NULL | 4,40000000000000001 | 5,50000000000000001 | 6,60000000000000001
-ar/plus_dec	type=numeric rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
-ar/mul_dec	type=numeric rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
-ar/plus_n	type=numeric rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
 ar/plus_d	type=double precision rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
-ar/sum	type=numeric rows=1 NULL
-ar/avg	type=numeric rows=1 NULL
-ar/coalesce_n	type=numeric rows=6 1,1.25 | 2,2.25 | 3,NULL | 4,4.25 | 5,5.25 | 6,6.25
 ar/coalesce_d	type=double precision rows=6 1,1.5 | 2,2.5 | 3,NULL | 4,4.5 | 5,5.5 | 6,6.5
-ar/coalesce_dec	type=numeric rows=6 1,2.5 | 2,2.5 | 3,2.5 | 4,2.5 | 5,2.5 | 6,2.5
-ar/case_n	type=numeric rows=6 1,NULL | 2,NULL | 3,NULL | 4,4.25 | 5,5.25 | 6,6.25
-ar/union_n	type=numeric rows=7 1,1.25 | 2,2.25 | 3,NULL | 4,4.25 | 5,5.25 | 6,6.25 | 7,NULL
 ar/cmp	type=boolean rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
 ar/text	type=text rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
-ar/round	type=numeric rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
 ar/lag_n	type=numeric rows=6 1,NULL | 2,2.50 | 3,4.50 | 4,NULL | 5,8.50 | 6,10.50
 ar/lag_d	type=double precision rows=6 1,NULL | 2,1.5 | 3,2.5 | 4,NULL | 5,4.5 | 6,5.5
-ar/paren	type=numeric rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
-ar/colon	type=numeric rows=6 1,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL
 ar/lag_colon	type=numeric rows=6 1,NULL | 2,10000000000000001 | 3,20000000000000001 | 4,NULL | 5,40000000000000001 | 6,50000000000000001
-ar/max	type=numeric rows=1 6.25
