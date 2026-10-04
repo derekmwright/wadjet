@@ -207,9 +207,12 @@ func ctasCompareQueries(t *testing.T, ctx context.Context, db *DB, wantSQL, gotS
 	if len(got.Rows) != len(want.Rows) {
 		t.Fatalf("%d rows, want %d", len(got.Rows), len(want.Rows))
 	}
+	// A column the written table created from an unconstrained numeric
+	// prints without trailing zeros (ADR-0024 §10); it is compared by value.
+	trim := unconstrainedPositions(got, want)
 	for i := range want.Rows {
-		g, _ := json.Marshal(got.Cells(i))
-		w, _ := json.Marshal(want.Cells(i))
+		g, _ := json.Marshal(trimmedCells(got, i, trim))
+		w, _ := json.Marshal(trimmedCells(want, i, trim))
 		if !bytes.Equal(g, w) {
 			t.Fatalf("row %d differs:\n  written %s\n  queried %s", i, g, w)
 		}

@@ -401,6 +401,10 @@ func (e *Cast) castStringRender(b *batch.RecordBatch, row int, v any) string {
 		return `\x` + hex.EncodeToString(raw)
 	}
 	if s, ok := stringOperand(text); ok {
+		if c, isCol := operand.(*ColRef); isCol && c.unconstrainedDecimal(b) {
+			// The column's own printer (ADR-0024 §10): no trailing zeros.
+			return batch.TrimDecimalText(s)
+		}
 		return s
 	}
 	// A DOUBLE/REAL renders through the one float-text renderer (#1252,

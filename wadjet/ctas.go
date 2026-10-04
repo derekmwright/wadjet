@@ -100,7 +100,15 @@ func (db *DB) executeCreateTableAs(ctx context.Context, ct *plansql.CreateTableI
 	if err != nil {
 		return nil, querySourceError(err, db.querySourcedWriteBudget())
 	}
-	schema, err := db.ctasSchema(ct, res.OutputSchema)
+	declared := make([]parquet.Column, len(res.OutputSchema))
+	copy(declared, res.OutputSchema)
+	for i := range declared {
+		declared[i].Unconstrained = i < len(res.ColumnMetas) && len(res.ColumnMetas) == len(declared) &&
+			res.ColumnMetas[i].TypeID == parquet.TypeDecimal &&
+			(res.ColumnMetas[i].WireUnconstrained || res.ColumnMetas[i].Unconstrained)
+	}
+	markTypedNullNumeric(ct.AsSelect, declared)
+	schema, err := db.ctasSchema(ct, declared)
 	if err != nil {
 		return nil, err
 	}
@@ -116,6 +124,27 @@ func (db *DB) executeCreateTableAs(ctx context.Context, ct *plansql.CreateTableI
 	}
 	// `SELECT <n>`: the tag PostgreSQL sends for a CTAS that ran its query.
 	return &ExecResult{Command: "SELECT", RowsAffected: n}, nil
+}
+
+// markTypedNullNumeric marks the double-precision output columns whose
+// SELECT item is a numeric typed NULL (physical.TypedNullNumeric): the
+// planner carries `CAST(NULL AS NUMERIC)` on the float rung, and the table
+// PostgreSQL creates from it is unconstrained numeric (ADR-0024 §10). Read
+// positionally from a plain SELECT list; a star or a set operation marks
+// nothing.
+func markTypedNullNumeric(parsed *plansql.ParsedQuery, declared []parquet.Column) {
+	info, err := plansql.ExtractSelect(parsed)
+	if err != nil || info == nil || info.Union != nil || len(info.Columns) != len(declared) {
+		return
+	}
+	for i, c := range info.Columns {
+		if c.Star || c.ASTExpr == nil || declared[i].Type != parquet.TypeFloat64 {
+			continue
+		}
+		if physical.TypedNullNumeric(c.ASTExpr) {
+			declared[i].Unconstrained = true
+		}
+	}
 }
 
 // ctasSchema is the last step both arms share: the rename list, the reserved
@@ -421,6 +450,15 @@ func (db *DB) declaredOutputFor(ctx context.Context, parsed *plansql.ParsedQuery
 		return nil, err
 	}
 	declared := planner.DeclaredOutputSchema(logicalPlan)
+	// The columns PostgreSQL declares plain numeric, by the walk's own names
+	// and before the renames below: the WITH DATA arm reads the same fold
+	// from the result's ColumnMetas (ADR-0024 §10).
+	wire := planner.DeclaredWireUnconstrained(logicalPlan)
+	for i := range declared {
+		declared[i].Unconstrained = declared[i].Type == parquet.TypeDecimal &&
+			(declared[i].Unconstrained || wire[declared[i].Name])
+	}
+	markTypedNullNumeric(parsed, declared)
 
 	// The NAMES come from the one rule, not from this walk.
 	//

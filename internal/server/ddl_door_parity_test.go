@@ -102,7 +102,7 @@ func ddlDoorMatrix() ([]plansql.ColumnDef, []parquet.Column) {
 		{Name: "c_uuid", Type: parquet.TypeUUID, Nullable: true},
 		{Name: "c_date", Type: parquet.TypeDate, Nullable: true},
 		dec("c_decimal", 9, 2),
-		dec("c_decimal_bare", 38, 0),
+		parquet.UnconstrainedNumericColumn("c_decimal_bare", 0), // ADR-0024 §10
 		dec("c_decimal_wide", 38, 10),
 		{Name: "c_vector", Type: parquet.TypeVector, Nullable: true, Dimension: 384},
 		{Name: "c_array", Type: parquet.TypeArray, Nullable: true,
@@ -220,6 +220,9 @@ func declaredColumnDeep(c parquet.Column) string {
 	switch {
 	case c.Type == parquet.TypeDecimal:
 		s += fmt.Sprintf("(%d,%d)", c.Precision, c.Scale)
+		if c.Unconstrained {
+			s += " unconstrained"
+		}
 	case c.Type == parquet.TypeVector:
 		s += fmt.Sprintf("(%d)", c.Dimension)
 	}
@@ -293,17 +296,20 @@ func TestLegacyPrecisionZeroDecimalReadsAsBareDecimal(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// A bare `DECIMAL` declared TODAY produces (38, 0), so the two are the
-	// same column and nothing in a manifest can tell them apart. That is the
-	// premise the read-side default rests on; if it stopped holding, the
-	// default would be inventing a rule rather than stating one.
-	bare, err := parquet.DeclaredColumn("d", "DECIMAL", true)
-	if err != nil {
-		t.Fatal(err)
+	// ParseDecimalParams' bare `DECIMAL` is (38, 0) — the parameter
+	// grammar's default, which decimalEffectivePrecision wrote those files'
+	// leaves at. That is the premise the read-side default rests on; if it
+	// stopped holding, the default would be inventing a rule rather than
+	// stating one. A stored column a DDL door declares bare is a different
+	// record since 2026-10-05: DECIMAL(38,10) marked unconstrained (ADR-0024
+	// §10), so a manifest tells the two apart.
+	if p, sc, err := parquet.ParseDecimalParams("DECIMAL"); err != nil || p != 38 || sc != 0 {
+		t.Fatalf("a bare DECIMAL parameter list is (%d,%d) (%v), want (38,0) — ADR-0024 item 8's premise no longer holds",
+			p, sc, err)
 	}
-	if bare.Precision != 38 || bare.Scale != 0 {
-		t.Fatalf("a bare DECIMAL declares (%d,%d), want (38,0) — ADR-0024 item 8's premise no longer holds",
-			bare.Precision, bare.Scale)
+	if bare, err := parquet.DeclaredColumn("d", "DECIMAL", true); err != nil ||
+		bare.Precision != 38 || bare.Scale != 10 || !bare.Unconstrained {
+		t.Fatalf("a stored bare DECIMAL declares %+v (%v), want DECIMAL(38,10) marked unconstrained (ADR-0024 §10)", bare, err)
 	}
 
 	// Values are accepted and read back at scale 0 — PostgreSQL's numeric(38,0)

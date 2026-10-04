@@ -33,6 +33,11 @@ import (
 // the planner already carries, so the table a CTAS creates has exactly the
 // columns the identical bare SELECT returns.
 //
+// A declared column marked Unconstrained is one PostgreSQL types as plain
+// numeric — the caller decides that from the plan's wire typmod — and it is
+// created by parquet.UnconstrainedNumericColumn, the rule the DDL door's
+// `NUMERIC` takes (ADR-0024 §10).
+//
 // Three rules are PostgreSQL 17.11's, measured:
 //
 //   - NOT NULL is never inferred. Every column of a CTAS result is nullable
@@ -69,6 +74,15 @@ func TableSchemaForQuery(declared []parquet.Column, renames []string) (parquet.S
 		// query legitimately produces (an outer join's pad, a CASE with no
 		// ELSE) with 23502.
 		cols[i].Nullable = true
+		// A column whose source PostgreSQL types as plain numeric is created
+		// unconstrained (ADR-0024 §10): the caller marks such a declaration,
+		// and the one rule the DDL door takes too gives it DECIMAL(38,
+		// max(s, 10)) — a typed NULL declared double precision included.
+		if c.Unconstrained && (c.Type == parquet.TypeDecimal || c.Type == parquet.TypeFloat64) {
+			cols[i] = parquet.UnconstrainedNumericColumn(cols[i].Name, c.Scale)
+		} else {
+			cols[i].Unconstrained = false
+		}
 	}
 
 	seen := make(map[string]string, len(cols))
