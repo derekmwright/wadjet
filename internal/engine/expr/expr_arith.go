@@ -359,10 +359,15 @@ func (e *BinOpFloat64) EvalFloat64Vec(b *batch.RecordBatch, dst []float64, n int
 			return true
 		}
 	case arithMod:
+		// The row arm's remainder (EvalFloat64: math.Mod). Truncating both
+		// operands to int64 first answered `2.25 % 2.5` 0 and divided by an
+		// integer zero for any divisor in (-1, 1), a NULL row's placeholder
+		// included (#1527). SQL's `%` no longer reaches this node — it parses
+		// to mod() — so this keeps the node's two passes one function.
 		sawZero := false
 		for i := 0; i < n; i++ {
 			if dst[i] != 0 {
-				dst[i] = float64(int64(tmp[i]) % int64(dst[i]))
+				dst[i] = math.Mod(tmp[i], dst[i])
 			} else {
 				sawZero = true
 			}
