@@ -20,11 +20,11 @@ import (
 // A LAG over a bigint expression with a typed-NULL default is numeric and is
 // stored exactly past 2^53 (c15, PostgreSQL's 10000000000000001).
 //
-// c10 PINS a documented gap (aggregates-windows catalog, ADR-0024): a column
-// created from a numeric LAG / LEAD result over a bigint takes scale 0, so a
-// later 0.75 stores 1 where PostgreSQL's column is unconstrained and stores
-// 0.75. 8b00b112 refused the CTAS itself. The day it stores 0.75 this cell
-// fails and is deleted as the proof.
+// c10: a column created from a numeric LAG / LEAD result is PostgreSQL's
+// unconstrained numeric column (ADR-0024 §10, #1541) and stores a later 0.75
+// as 0.75; arc WD's tip stored 1 (scale 0, the withdrawn aggregates-windows
+// r24 pin) and 8b00b112 refused the CTAS itself. c1/c6/c8/c9 are created
+// unconstrained numeric now (8b00b112: double precision) and read the same.
 func TestArcWDTypedNullCreateTableAs(t *testing.T) {
 	ctx := context.Background()
 	db, err := Open(ctx, Config{Store: objstore.NewMemStore(), Bucket: "test"})
@@ -58,7 +58,7 @@ func TestArcWDTypedNullCreateTableAs(t *testing.T) {
 		{"SELECT v FROM c8 WHERE id = 9", "0.75"},
 		{"SELECT v FROM c9 WHERE id = 9", "0.75"},
 		{"SELECT v FROM c15 ORDER BY id", "NULL 10000000000000001 20000000000000001"},
-		{"SELECT v FROM c10 WHERE id = 9", "1"}, // the documented gap (PostgreSQL 0.75)
+		{"SELECT v FROM c10 WHERE id = 9", "0.75"}, // PostgreSQL 0.75
 	} {
 		res, err := db.Query(ctx, c.sql)
 		if err != nil {

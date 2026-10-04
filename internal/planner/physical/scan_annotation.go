@@ -221,7 +221,7 @@ func stampScanSchema(node *logical.Node, columns []parquet.Column) {
 		cols[i] = c.Name
 		colTypes[strings.ToLower(c.Name)] = c.Type
 		if c.Type == parquet.TypeDecimal {
-			colDecimal[strings.ToLower(c.Name)] = logical.DecimalMeta{Precision: c.Precision, Scale: c.Scale}
+			colDecimal[strings.ToLower(c.Name)] = logical.DecimalMeta{Precision: c.Precision, Scale: c.Scale, Unconstrained: c.Unconstrained}
 		}
 		if c.Type == parquet.TypeRow && len(c.Fields) > 0 {
 			// A ROW's fields are the only declaration a field path has; they

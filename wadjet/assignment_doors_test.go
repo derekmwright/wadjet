@@ -257,6 +257,13 @@ var assignmentCTASDivergences = map[string]string{
 	"-5":                    "negated integer literal typed bigint",
 	"1 + 1":                 "integer arithmetic typed bigint",
 	"CAST(NULL AS INTEGER)": "CAST(… AS INTEGER) typed bigint",
+	// A column created from an unconstrained numeric prints without the
+	// trailing zeros the source carried (ADR-0024 §10, catalog numeric-decimal
+	// r24): the VALUE is PostgreSQL's.
+	"2.50":     "unconstrained column prints 2.5 (trailing zero not kept)",
+	"1.10":     "unconstrained column prints 1.1 (trailing zero not kept)",
+	"-2.50":    "unconstrained column prints -2.5 (trailing zero not kept)",
+	"1.10 + 0": "unconstrained column prints 1.1 (trailing zero not kept)",
 }
 
 type assignmentDoorCell struct{ src, tgt, kind, want string }

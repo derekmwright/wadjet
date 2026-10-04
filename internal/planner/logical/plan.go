@@ -18,6 +18,11 @@ import (
 type DecimalMeta struct {
 	Precision int
 	Scale     int
+	// Unconstrained is a stored column's parquet.Column.Unconstrained
+	// (ADR-0024 §10). The scan sets it and a bare copy of the column keeps it
+	// — through a filter, a sort, a join, a derived table, a GROUP BY key;
+	// a computed value's declaration is built without it.
+	Unconstrained bool
 }
 
 // SubqueryColumnDecl is the declared output of one scalar-subquery projection:

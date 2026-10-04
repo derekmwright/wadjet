@@ -52,6 +52,7 @@ func (w *declWalk) starOnlyDeclaredOutputSchema(root *logical.Node,
 			// "unconstrained" — rather than a fabricated pair (#458).
 			if m, ok := lookupColDecimal(scan.ScanColDecimal, name); ok {
 				col.Precision, col.Scale = m.Precision, m.Scale
+				col.Unconstrained = m.Unconstrained
 			}
 		}
 		out = append(out, col)

@@ -105,7 +105,9 @@ func TestEveryDDLDoorReadsDecimalParameters(t *testing.T) {
 		{Name: "id", Type: parquet.TypeInt64},
 		{Name: "d", Type: parquet.TypeDecimal, Precision: 9, Scale: 2, Nullable: true},
 		{Name: "w", Type: parquet.TypeDecimal, Precision: 38, Scale: 10, Nullable: true},
-		{Name: "bare", Type: parquet.TypeDecimal, Precision: 38, Scale: 0, Nullable: true},
+		// A stored bare DECIMAL is PostgreSQL's unconstrained numeric
+		// (ADR-0024 §10).
+		parquet.UnconstrainedNumericColumn("bare", 0),
 	}
 
 	// The HTTP door.
@@ -216,8 +218,8 @@ func sameDeclaredColumn(a, b parquet.Column) bool {
 }
 
 func declaredColumnString(c parquet.Column) string {
-	return fmt.Sprintf("%s %v(%d,%d) nullable=%v dim=%d elem=%v fields=%d",
-		c.Name, c.Type, c.Precision, c.Scale, c.Nullable, c.Dimension, c.ElementType != nil, len(c.Fields))
+	return fmt.Sprintf("%s %v(%d,%d) nullable=%v dim=%d elem=%v fields=%d unconstrained=%v",
+		c.Name, c.Type, c.Precision, c.Scale, c.Nullable, c.Dimension, c.ElementType != nil, len(c.Fields), c.Unconstrained)
 }
 
 // A statement refused for what it CONTAINS is the client's error. The HTTP DML

@@ -365,6 +365,39 @@ func stripTypeParams(upper string, names ...string) (string, bool) {
 	return "", false
 }
 
+// UnconstrainedNumericMinScale is the fewest fraction digits a column created
+// from an unconstrained numeric stores (ADR-0024 §10).
+const UnconstrainedNumericMinScale = 10
+
+// UnconstrainedNumericColumn is the ONE declaration of a stored column created
+// from an unconstrained numeric: by DDL (`NUMERIC`, `DECIMAL` with no
+// precision, scale 0 passed) or by CREATE TABLE AS from an expression
+// PostgreSQL types as plain numeric (the scale that expression declares).
+// It is DECIMAL(38, max(scale, 10)), marked Unconstrained: a write keeps ten
+// fraction digits (or the source's own, when it has more), more than 38 − s
+// integer digits is 22003, and the marker gives the column PostgreSQL's
+// typmod −1 and a printed value without trailing zeros (ADR-0024 §10).
+func UnconstrainedNumericColumn(name string, scale int) Column {
+	if scale < UnconstrainedNumericMinScale {
+		scale = UnconstrainedNumericMinScale
+	}
+	if scale > MaxDecimalDigits {
+		scale = MaxDecimalDigits
+	}
+	return Column{Name: name, Type: TypeDecimal, Nullable: true,
+		Precision: MaxDecimalDigits, Scale: scale, Unconstrained: true}
+}
+
+// isBareDecimalSpelling reports a DECIMAL / NUMERIC type written with no
+// parameter list.
+func isBareDecimalSpelling(typeStr string) bool {
+	switch strings.ToUpper(strings.TrimSpace(typeStr)) {
+	case "DECIMAL", "NUMERIC":
+		return true
+	}
+	return false
+}
+
 // ParseDecimalParams defaults bare DECIMAL to (38,0) and enforces
 // 1 <= precision <= 38, 0 <= scale <= precision, raising 22023.
 // Precision is the finite Int128 carrier limit (ADR-0024 item 1, #647);
@@ -431,6 +464,12 @@ func DeclaredColumn(name, typeStr string, nullable bool) (Column, error) {
 	col, err := ResolveColumn(name, typeStr)
 	if err != nil {
 		return Column{}, err
+	}
+	if col.Type == TypeDecimal && isBareDecimalSpelling(typeStr) {
+		// A stored column declared `NUMERIC` / `DECIMAL` is PostgreSQL's
+		// unconstrained numeric (ADR-0024 §10). Only the top-level column of
+		// a table: a nested element keeps ResolveColumn's (38, 0).
+		col = UnconstrainedNumericColumn(name, 0)
 	}
 	// ResolveColumn answers for a nested field, where parquet's repetition is
 	// optional by default; only the TOP-level declaration carries a NOT NULL.
@@ -608,6 +647,15 @@ type Column struct {
 	Dimension   int      `json:"dimension,omitempty"`    // for VECTOR: number of float32 elements
 	ElementType *Column  `json:"element_type,omitempty"` // for ARRAY: element column definition
 	Fields      []Column `json:"fields,omitempty"`       // for ROW/MAP: child field definitions
+	// Unconstrained marks a DECIMAL column CREATED from an unconstrained
+	// numeric — `NUMERIC` / `DECIMAL` with no precision, or a CREATE TABLE AS
+	// column whose source PostgreSQL types as plain numeric (ADR-0024 §10).
+	// Precision and Scale still say how the value is stored; the marker is what
+	// PostgreSQL's declaration says about the column: typmod −1 on the wire,
+	// NULL numeric_precision / numeric_scale, and a printed value without the
+	// stored scale's trailing zeros. A record written without the field reads
+	// as false, which is every column created before the marker existed.
+	Unconstrained bool `json:"unconstrained,omitempty"`
 }
 
 // Field returns c's named child field. It answers only for a ROW column:
