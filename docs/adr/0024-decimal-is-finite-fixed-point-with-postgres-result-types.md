@@ -1212,7 +1212,9 @@ files at dispatch, the way merge-on-read delete markers ride the file key
 manifest), and the worker's one binding of an exchange read
 (`applyDeclaredScanSchema`) stamps them onto every batch it decodes
 (`exec.UnconstrainedStamp`); a base-table read carries the catalog's mark in
-its declared schema (`ColumnSpec.Unconstrained`). The column's text is then
+its declared schema (`ColumnSpec.Unconstrained`), and a spill run (the columnar
+run format a grace join, a CTE collector and the external sort replay)
+carries it in its flag byte. The column's text is then
 the same on all five arms after a GROUP BY, a DISTINCT, a set operation, a
 window, an equi-join on either side, a sort with LIMIT and a CTE read twice
 (`coordinator.TestArcUNExchangeKeepsThePrinterEveryArm`).
