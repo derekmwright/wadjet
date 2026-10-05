@@ -2071,6 +2071,9 @@ func (e *Executor) serializeBatches(batches []*batch.RecordBatch) ([]byte, error
 		if nRows == 0 {
 			continue
 		}
+		if err := checkWrittenMarks(schema, b.Schema); err != nil {
+			return nil, err
+		}
 		if b.Sel != nil {
 			if err := sw.writeChunk(b.Columns, b.Sel, nRows); err != nil {
 				return nil, fmt.Errorf("writing chunk: %w", err)

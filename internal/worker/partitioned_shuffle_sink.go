@@ -32,6 +32,9 @@ import (
 // See docs/design/sink-direct-chunk.md; WADJET_SINK_DIRECT_CHUNK=0 disables it.
 // See docs/internals/worker-partitioned-shuffle-sink-design.md for the design.
 type partitionedShuffleSink struct {
+	// marks holds every batch to the file header's unconstrained marks
+	// (markGuard, ADR-0024 §10).
+	marks    markGuard
 	spillDir string
 	keys     []string // partition key column names
 	// keyTypes[i] is the type keys[i] must be HASHED at — see withKeyTypes.
@@ -193,6 +196,11 @@ func (s *partitionedShuffleSink) Init(_ context.Context) error {
 func (s *partitionedShuffleSink) Consume(_ context.Context, b *batch.RecordBatch) error {
 	if s.closed.Load() {
 		return fmt.Errorf("partitionedShuffleSink: Consume after Close")
+	}
+	if b != nil {
+		if err := s.marks.Check(b.Schema); err != nil {
+			return err
+		}
 	}
 
 	// Resolve key column indices from schema on the first batch. Use the

@@ -27,6 +27,9 @@ import (
 // sink each batch is written to disk and released back to the pool before
 // the next batch arrives, so memory stays bounded by one batch.
 type shuffleStreamSink struct {
+	// marks holds every batch to the file header's unconstrained marks
+	// (markGuard, ADR-0024 §10).
+	marks    markGuard
 	spillDir string
 
 	mu      sync.Mutex
@@ -70,6 +73,9 @@ func (s *shuffleStreamSink) Consume(_ context.Context, b *batch.RecordBatch) err
 
 	if s.file == nil {
 		return fmt.Errorf("shuffleStreamSink: not initialized")
+	}
+	if err := s.marks.Check(b.Schema); err != nil {
+		return err
 	}
 
 	if s.writer == nil {
