@@ -230,7 +230,7 @@ func setOpQuotedLiteralGap(column string, arm int, t parquet.TypeID) error {
 }
 
 // setOpQuotedLiteralArms marks, per OUTPUT POSITION, the select items of one
-// arm that are QUOTED string literals. It is SetOpUnknownLiteralArms minus the
+// arm that are QUOTED string literals. It is setOpUnknownLiteralArms minus the
 // bare NULLs: both are UNKNOWN-typed to PostgreSQL and take the other arms'
 // type, but only a quoted one carries TEXT that has to reach a typed vector.
 func setOpQuotedLiteralArms(arm *logical.Node, cols int) []bool {
@@ -625,7 +625,17 @@ type SetOpArmPlan struct {
 	// cast evaluator produces a float64 for a DECIMAL destination, which is
 	// exactly the precision loss the exact carrier exists to avoid.
 	Coerce []DecimalCoercion
+	// facts is what each select item is (setOpArmFactsOf): an untyped
+	// literal takes the result's type, and each item contributes to the
+	// result's mark. nil for a nested set operation, whose Types carry it.
+	facts SetOpArmFacts
 }
+
+// Untyped reports whether this arm's select item at col has no type of its
+// own and takes the result column's (a quoted literal, a bare NULL, a NULL
+// cast to plain NUMERIC): its stage declares the result's type and writes the
+// item's value into it, with no cast.
+func (p SetOpArmPlan) Untyped(col int) bool { return p.facts.at(col).untyped }
 
 // SetOpColType is a plan-time output type, or the absence of one. There is no
 // spare TypeID to mean "unknown" — TypeBool is the zero value — so the flag
@@ -650,6 +660,12 @@ type SetOpColType struct {
 	// declaredProjectionDecimal declines (#458).
 	Dec      logical.DecimalMeta
 	DecKnown bool
+	// fold is, for a set operation's DECIMAL result column, what its arms
+	// contributed to its mark (setOpResultColumn): marked, neutral or veto.
+	// As an arm of the operation above it contributes exactly that, as its
+	// own arms would have, so nesting gives the flat answer. Zero (by
+	// declaration) for every other column.
+	fold setOpMarkRole
 }
 
 // setOpArmProjection builds the OpProject spec list that puts one arm's
@@ -662,6 +678,17 @@ type SetOpColType struct {
 // exist under names the aggregate machinery chose, not under the SELECT
 // list's expression text, so those arms are refused rather than guessed at.
 func setOpArmProjection(arm *logical.Node, outNames []string) (SetOpArmPlan, error) {
+	plan, err := setOpArmProjectionSpecs(arm, outNames)
+	if err != nil {
+		return plan, err
+	}
+	// What each select item is, beside the type it declares: the one result
+	// rule (setOpResultColumn) reads both.
+	plan.facts = setOpArmFactsOf(arm, len(outNames))
+	return plan, nil
+}
+
+func setOpArmProjectionSpecs(arm *logical.Node, outNames []string) (SetOpArmPlan, error) {
 	inner := setOpUnwrap(arm)
 	// A nested set operation already projected ITS arms onto ITS OWN result
 	// names; read the arm through those, not through a projection it does
@@ -951,85 +978,24 @@ func setOpRefDecl(decls ColDecls, resolved string, pr logical.Projection) (SetOp
 // carry no scale to disagree about, while a typed DECIMAL beside an untyped
 // arm is the reinterpretation #551 is about.
 // setOpArmIsUnknownLit reports whether arm i's select item at this column is an
-// UNKNOWN-typed literal.
+// UNKNOWN-typed literal (a mask of setOpArmTypeConflict's own).
 func setOpArmIsUnknownLit(unknown [][]bool, i, col int) bool {
 	return unknown != nil && i < len(unknown) && unknown[i] != nil &&
 		col < len(unknown[i]) && unknown[i][col]
 }
 
 // setOpTargetType folds one result column's arms into the type they must all
-// emit. allKnown is false when some arm carries no type at all, which is the
-// caller's signal to leave the column alone.
-func setOpTargetType(plans []SetOpArmPlan, col int, name, op string, unknown [][]bool) (SetOpColType, bool, error) {
-	var want SetOpColType
-	allKnown := true
+// emit, through the one rule (setOpResultColumn). allKnown is false when some
+// arm carries no type at all, which is the caller's signal to leave the column
+// alone.
+func setOpTargetType(plans []SetOpArmPlan, col int, name, op string) (SetOpColType, bool, error) {
+	arms := make([]SetOpColType, len(plans))
+	armFacts := make([]setOpArmFact, len(plans))
 	for i, plan := range plans {
-		if setOpArmIsUnknownLit(unknown, i, col) {
-			continue // an unknown literal takes the other arms' type
-		}
-		ct := plan.Types[col]
-		if !ct.Known {
-			allKnown = false
-			continue
-		}
-		if !want.Known {
-			want = ct
-			continue
-		}
-		widened, ok := setOpWiden(want.Typ, ct.Typ)
-		if !ok {
-			if setOpNoCommonType(want.Typ, ct.Typ) {
-				// PostgreSQL's own 42804. SetOpArmTypeConflict raises the same
-				// refusal before any stage is emitted and the single-process
-				// path calls it too, so one query takes one answer; this is
-				// the backstop for a shape that reaches here without it.
-				return SetOpColType{}, false, setOpTypeMismatch(op, name, want.Typ, ct.Typ)
-			}
-			// A pair PostgreSQL DOES match, on a ladder that does not reach it
-			// — PORT/PROTOCOL beside an integer, DURATION beside a bigint, two
-			// members of the inet family, DATE beside a TIMESTAMP. This engine
-			// cannot concatenate the two .wshf files, so the DAG still refuses;
-			// the message says so rather than claiming PostgreSQL would.
-			// The same carrier refusal SetOpArmTypeConflict raises, which runs
-			// ahead of this walk on both paths; this is the backstop for a
-			// shape that reaches here without it.
-			return SetOpColType{}, false, setOpCarrierGap(name, want.Typ, ct.Typ)
-		}
-		elem, err := setOpElementTarget(want, ct, name, op)
-		if err != nil {
-			return SetOpColType{}, false, err
-		}
-		want = SetOpColType{Typ: widened, Known: true, Fields: want.Fields, ElementType: elem}
+		arms[i] = plan.Types[col]
+		armFacts[i] = plan.facts.at(col)
 	}
-	if want.Known && want.Typ == parquet.TypeDecimal && allKnown {
-		arms := make([]SetOpColType, 0, len(plans))
-		litArm := false
-		for i, plan := range plans {
-			if setOpArmIsUnknownLit(unknown, i, col) {
-				litArm = true
-				// It contributes no type, so it contributes no (p,s) either;
-				// counting its STRING here made the target unresolvable and
-				// refused a union PostgreSQL answers as numeric.
-				continue
-			}
-			arms = append(arms, plan.Types[col])
-		}
-		want.Dec, want.DecKnown = setOpDecimalTarget(arms)
-		// The result column is created from an unconstrained numeric only
-		// when every arm's is (ADR-0024 §10, the single-process rule of
-		// setOpUnifyColumn). Part of the node's TYPE, so a set operation
-		// nested as an arm, or read through a derived table or CTE, reports
-		// it to the operation above (setOpNodeResultTypes, setOpNodeDecls),
-		// and an arm whose mark the result does not keep is coerced.
-		// An untyped NULL arm is not a column created from an unconstrained
-		// numeric: the single-process rule (unifySetOpSchemas) drops the mark.
-		mark := want.DecKnown && len(arms) > 0 && !litArm
-		for _, a := range arms {
-			mark = mark && a.Typ == parquet.TypeDecimal && a.DecKnown && a.Dec.Unconstrained
-		}
-		want.Dec.Unconstrained = mark
-	}
-	return want, allKnown, nil
+	return setOpResultColumn(arms, armFacts, name, op)
 }
 
 // setOpNodeResultTypes is the per-column type a nested set-operation node
@@ -1042,25 +1008,22 @@ func setOpNodeResultTypes(n *logical.Node) []SetOpColType {
 		return nil
 	}
 	plans := make([]SetOpArmPlan, 0, len(n.Children))
-	unknown := make([][]bool, 0, len(n.Children))
 	for _, child := range n.Children {
 		plan, err := setOpArmProjection(child, names)
 		if err != nil {
 			return nil
 		}
 		plans = append(plans, plan)
-		// The UNKNOWN-literal mask travels into the nested node too. Without
-		// it this walk counted a quoted literal's STRING as a type of its own
-		// and returned "unknown" for the whole nested result — so
-		// `SELECT '1.5' … UNION ALL SELECT a … UNION ALL SELECT a …`, whose
-		// arms nest as (literal ∪ a) ∪ a, reached reconcileSetOpArmTypes with
-		// an untyped arm beside a DECIMAL one and was REFUSED, while the
-		// single-process path answered it. PostgreSQL answers it numeric.
-		unknown = append(unknown, setOpUnknownLiteralArms(child, len(names)))
+		// The arm's facts (an untyped literal among them) travel into the
+		// nested node too, on the plan. Without them this walk counted a
+		// quoted literal's STRING as a type of its own and returned
+		// "unknown" for the whole nested result, so `SELECT '1.5' … UNION
+		// ALL SELECT a … UNION ALL SELECT a …` was REFUSED on the DAG while
+		// the single-process path answered it. PostgreSQL answers numeric.
 	}
 	out := make([]SetOpColType, len(names))
 	for col := range names {
-		want, allKnown, err := setOpTargetType(plans, col, names[col], setOpBaseName(n), unknown)
+		want, allKnown, err := setOpTargetType(plans, col, names[col], setOpBaseName(n))
 		if err != nil || !allKnown {
 			continue
 		}

@@ -41,16 +41,16 @@ func (p *Planner) buildSetOp(ctx context.Context, node *logical.Node, op string)
 	}
 
 	src := &setOpSourceAdapter{
-		leftSource:   leftSource,
-		leftOps:      leftOps,
-		rightSource:  rightSource,
-		rightOps:     rightOps,
-		all:          node.UnionAll,
-		op:           op,
-		leftLits:     setOpArmLiterals(node.Children[0]),
-		rightLits:    setOpArmLiterals(node.Children[1]),
-		leftUnknown:  setOpArmUnknownLits(node.Children[0]),
-		rightUnknown: setOpArmUnknownLits(node.Children[1]),
+		leftSource:  leftSource,
+		leftOps:     leftOps,
+		rightSource: rightSource,
+		rightOps:    rightOps,
+		all:         node.UnionAll,
+		op:          op,
+		leftLits:    setOpArmLiterals(node.Children[0]),
+		rightLits:   setOpArmLiterals(node.Children[1]),
+		leftFacts:   setOpAdapterArmFacts(node.Children[0]),
+		rightFacts:  setOpAdapterArmFacts(node.Children[1]),
 		// Each arm's DECLARED output, for an arm that produces no batch: its
 		// sink then still has the arm's names and types (round 4, N2). An
 		// empty FIRST arm left the operation with only the second arm's
@@ -99,17 +99,29 @@ func setOpArmLiterals(arm *logical.Node) []*setOpLitDecimal {
 	return out
 }
 
-// setOpArmUnknownLits is SetOpUnknownLiteralArms for the single-process path,
-// whose arms are a NESTED tree rather than the DAG's flattened list: the width
-// comes from this arm's own select list, and a nested set-operation arm has no
-// output projection of its own, so it contributes no mask (its columns are
-// already resolved by its own adapter).
-func setOpArmUnknownLits(arm *logical.Node) []bool {
+// setOpAdapterArmFacts is setOpArmFactsOf for the single-process path, whose
+// arm is executed before its columns are seen: the width comes from the arm's
+// own select list. A nested set-operation arm has no select list; its facts
+// are what its own result type says its arms contributed to its mark
+// (setOpNodeResultTypes, the type the stage planner reads for the same arm),
+// because its runtime column says only whether it is marked.
+func setOpAdapterArmFacts(arm *logical.Node) SetOpArmFacts {
+	if inner := setOpUnwrap(arm); isSetOpNode(inner) {
+		types := setOpNodeResultTypes(inner)
+		if types == nil {
+			return nil
+		}
+		out := make(SetOpArmFacts, len(types))
+		for i, t := range types {
+			out[i].role = t.fold
+		}
+		return out
+	}
 	proj := findOutputProjectionNode(arm)
 	if proj == nil {
 		return nil
 	}
-	return setOpUnknownLiteralArms(arm, len(proj.Projections))
+	return setOpArmFactsOf(arm, len(proj.Projections))
 }
 
 // setOpApplyLiteralDecls restates a literal arm's column as the DECIMAL its
@@ -177,13 +189,14 @@ type setOpSourceAdapter struct {
 	// setOpArmLiterals.
 	leftLits  []*setOpLitDecimal
 	rightLits []*setOpLitDecimal
-	// leftUnknown / rightUnknown mark, per output position, the select items
-	// that are UNKNOWN-typed literals — a quoted string or a bare NULL, which
-	// PostgreSQL types from the OTHER arm. See setOpResolveUnknownLiteralArms.
-	leftUnknown  []bool
-	rightUnknown []bool
-	leftHint     []parquet.Column
-	rightHint    []parquet.Column
+	// leftFacts / rightFacts are each arm's SetOpArmFacts: the untyped items
+	// (a quoted string, a bare NULL), which PostgreSQL types from the OTHER
+	// arm (setOpResolveUnknownLiteralArms), and what each item contributes
+	// to the result's mark (setOpResultColumn).
+	leftFacts  SetOpArmFacts
+	rightFacts SetOpArmFacts
+	leftHint   []parquet.Column
+	rightHint  []parquet.Column
 
 	batches     []*batch.RecordBatch
 	idx         int
@@ -228,8 +241,8 @@ func (u *setOpSourceAdapter) Next(ctx context.Context) (*batch.RecordBatch, erro
 		leftSchema := setOpApplyLiteralDecls(leftSink.Schema(), u.leftLits)
 		rightSchema := setOpApplyLiteralDecls(rightSink.Schema(), u.rightLits)
 		leftSchema, rightSchema = setOpResolveUnknownLiteralArms(
-			leftSchema, rightSchema, u.leftUnknown, u.rightUnknown)
-		schema := unifySetOpSchemas(leftSchema, rightSchema)
+			leftSchema, rightSchema, u.leftFacts, u.rightFacts)
+		schema := unifySetOpSchemas(leftSchema, rightSchema, u.leftFacts, u.rightFacts)
 
 		// Coerce each arm's boxes to the unified column shape BEFORE combining them:
 		// DECIMAL text, integers and floats must represent the same value to both dedup

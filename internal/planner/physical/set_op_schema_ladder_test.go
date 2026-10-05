@@ -84,7 +84,7 @@ func TestUnifySetOpSchemasWidensEveryRung(t *testing.T) {
 		{"bigint_then_decimal", i64, d92, parquet.TypeDecimal, 21, 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			out := unifySetOpSchemas([]parquet.Column{tc.left}, []parquet.Column{tc.right})
+			out := unifySetOpSchemas([]parquet.Column{tc.left}, []parquet.Column{tc.right}, nil, nil)
 			got := out[0]
 			if got.Type != tc.wantType {
 				t.Fatalf("type: got %s, want %s", got.Type, tc.wantType)
@@ -98,11 +98,7 @@ func TestUnifySetOpSchemasWidensEveryRung(t *testing.T) {
 			// The DAG's own answer for the same pair, through the functions
 			// reconcileSetOpArmTypes calls. Drift between the two paths is
 			// what #541 asked to make impossible.
-			lc, ok1 := setOpColTypeFromColumn(tc.left)
-			rc, ok2 := setOpColTypeFromColumn(tc.right)
-			if !ok1 || !ok2 {
-				t.Fatalf("the ladder must resolve both arms")
-			}
+			lc, rc := setOpColTypeOfColumn(tc.left), setOpColTypeOfColumn(tc.right)
 			dagType, ok := setOpWiden(lc.Typ, rc.Typ)
 			if !ok || dagType != got.Type {
 				t.Fatalf("the stage DAG resolves %s, the local path %s", dagType, got.Type)
@@ -123,7 +119,7 @@ func TestUnifySetOpSchemasLeavesUnresolvableArmsAlone(t *testing.T) {
 	// A DECIMAL with no declared precision beside an INTEGER: nothing to
 	// rebuild a precision from, so the column is left as written.
 	out := unifySetOpSchemas([]parquet.Column{unconstrained},
-		[]parquet.Column{{Name: "v", Type: parquet.TypeInt64}})
+		[]parquet.Column{{Name: "v", Type: parquet.TypeInt64}}, nil, nil)
 	if out[0].Type != parquet.TypeDecimal || out[0].Precision != 0 {
 		t.Errorf("an unconstrained DECIMAL arm must be left alone, got %+v", out[0])
 	}
@@ -131,13 +127,13 @@ func TestUnifySetOpSchemasLeavesUnresolvableArmsAlone(t *testing.T) {
 	// Two DECIMALs, one unconstrained: the max(scale) fallback still applies,
 	// because #532's truncation happens whether or not a precision was
 	// declared and max(scale) moves no value.
-	out = unifySetOpSchemas([]parquet.Column{decCol("v", 9, 2)}, []parquet.Column{unconstrained})
+	out = unifySetOpSchemas([]parquet.Column{decCol("v", 9, 2)}, []parquet.Column{unconstrained}, nil, nil)
 	if out[0].Scale != 4 {
 		t.Errorf("two DECIMAL arms must still widen to max(scale) 4, got scale %d", out[0].Scale)
 	}
 
 	// A non-numeric pair is off the ladder entirely.
-	out = unifySetOpSchemas([]parquet.Column{str}, []parquet.Column{{Name: "v", Type: parquet.TypeInt64}})
+	out = unifySetOpSchemas([]parquet.Column{str}, []parquet.Column{{Name: "v", Type: parquet.TypeInt64}}, nil, nil)
 	if out[0].Type != parquet.TypeString {
 		t.Errorf("a STRING arm must be left alone, got %s", out[0].Type)
 	}

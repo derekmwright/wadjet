@@ -104,11 +104,7 @@ func (p *StagePlanner) emitSetOpStages(node *logical.Node, stages *[]Stage) {
 		plans = append(plans, plan)
 		deps = append(deps, leaves[0])
 	}
-	unknownLits := make([][]bool, 0, len(node.Children))
-	for _, child := range node.Children {
-		unknownLits = append(unknownLits, p.PlanContext.SetOpUnknownLiteralArms(child, len(outNames)))
-	}
-	if err := reconcileSetOpArmTypes(plans, outNames, p.PlanContext.SetOpBaseName(node), unknownLits); err != nil {
+	if err := reconcileSetOpArmTypes(plans, outNames, p.PlanContext.SetOpBaseName(node)); err != nil {
 		if sqlerr.StateOf(err) != "" {
 			// A refusal that already carries PostgreSQL's SQLSTATE and wording
 			// is the client's answer as written, with no distributed-planning
@@ -247,15 +243,15 @@ func setOpKeyPositions(n int) []int {
 // Numeric widening uses casts or value-moving DECIMAL coercion; refuse unsupported
 // disagreements rather than invent a number-to-text conversion. Reconcile DECIMAL
 // (p,s) even when TypeIDs already match, or file headers reinterpret scale (#533).
-// unknown marks per-arm/per-column UNKNOWN literals: they take other arms' types
-// without casts, with SetValueChecked parsing text into the reconciled vector
-// (#648).
-func reconcileSetOpArmTypes(plans []physical.SetOpArmPlan, outNames []string, op string, unknown [][]bool) error {
+// An untyped item (SetOpArmPlan.Untyped: a quoted literal, a bare NULL) takes
+// the other arms' type without a cast, with SetValueChecked parsing text into
+// the reconciled vector (#648).
+func reconcileSetOpArmTypes(plans []physical.SetOpArmPlan, outNames []string, op string) error {
 	if len(plans) < 2 {
 		return nil
 	}
 	for col := range outNames {
-		want, allKnown, err := localPlanFacts.SetOpTargetType(plans, col, outNames[col], op, unknown)
+		want, allKnown, err := localPlanFacts.SetOpTargetType(plans, col, outNames[col], op)
 		if err != nil {
 			return err
 		}
@@ -312,7 +308,7 @@ func reconcileSetOpArmTypes(plans []physical.SetOpArmPlan, outNames []string, op
 					outNames[col], setOpUnresolvedArmsDesc(plans, col))
 			}
 			for i := range plans {
-				if localPlanFacts.SetOpArmIsUnknownLit(unknown, i, col) {
+				if plans[i].Untyped(col) {
 					// An UNKNOWN literal takes the resolved type, and the ARM'S
 					// OWN STAGE has to say so: the union arm's projection is
 					// what the worker builds the .wshf column from, and a
@@ -324,6 +320,18 @@ func reconcileSetOpArmTypes(plans []physical.SetOpArmPlan, outNames []string, op
 					plans[i].Specs[col].TypeKnown = true
 					plans[i].Specs[col].Precision = want.Dec.Precision
 					plans[i].Specs[col].Scale = want.Dec.Scale
+					if want.Dec.Unconstrained {
+						// The value the literal parses into is unmarked; the
+						// result's mark is stamped like any other arm's, so the
+						// arm's file carries the result's header.
+						plans[i].Coerce = append(plans[i].Coerce, physical.DecimalCoercion{
+							Name:          outNames[col],
+							Precision:     want.Dec.Precision,
+							Scale:         want.Dec.Scale,
+							Unconstrained: true,
+						})
+					}
+					plans[i].Types[col] = want
 					continue
 				}
 				ct := plans[i].Types[col]
@@ -354,7 +362,7 @@ func reconcileSetOpArmTypes(plans []physical.SetOpArmPlan, outNames []string, op
 			continue
 		}
 		for i := range plans {
-			if localPlanFacts.SetOpArmIsUnknownLit(unknown, i, col) {
+			if plans[i].Untyped(col) {
 				// The resolved type, DECLARED on the arm's own projection, and
 				// no CAST: SetValueChecked parses the literal's text into
 				// whatever vector the spec names, which is what PostgreSQL

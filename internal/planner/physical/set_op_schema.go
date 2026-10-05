@@ -7,31 +7,30 @@ import (
 	"strconv"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
-	"github.com/derekmwright/wadjet/internal/planner/logical"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// setOpResolveUnknownLiteralArms assigns quoted literals and bare NULL the
-// other arm's type before unifySetOpSchemas, despite their pipeline STRING vector.
-// Use the plan-time SetOpUnknownLiteralArms mask so local and DAG select the same
-// items and declarations. Leave positions where both arms are UNKNOWN alone:
-// PostgreSQL resolves those to text, which they already declare.
+// setOpResolveUnknownLiteralArms assigns an untyped item (a quoted literal, a
+// bare NULL, a NULL cast to plain NUMERIC) the other arm's type before
+// unifySetOpSchemas, despite its pipeline vector, so its boxes are read in
+// that type. Use the plan-time SetOpArmFacts so local and DAG select the same
+// items. Leave positions where both arms are untyped alone: PostgreSQL
+// resolves those to text, which they already declare.
 func setOpResolveUnknownLiteralArms(left, right []parquet.Column,
-	leftUnknown, rightUnknown []bool) ([]parquet.Column, []parquet.Column) {
+	leftFacts, rightFacts SetOpArmFacts) ([]parquet.Column, []parquet.Column) {
 	if len(left) == 0 || len(left) != len(right) {
 		return left, right
 	}
 	// A mask is a list of POSITIONS, and a position is only an address while
 	// the mask and the runtime schema are the same length.
-	if (len(leftUnknown) != 0 && len(leftUnknown) != len(left)) ||
-		(len(rightUnknown) != 0 && len(rightUnknown) != len(right)) {
+	if (len(leftFacts) != 0 && len(leftFacts) != len(left)) ||
+		(len(rightFacts) != 0 && len(rightFacts) != len(right)) {
 		return left, right
 	}
-	at := func(mask []bool, i int) bool { return i < len(mask) && mask[i] }
 	var l2, r2 []parquet.Column
 	for i := range left {
-		lu, ru := at(leftUnknown, i), at(rightUnknown, i)
+		lu, ru := leftFacts.at(i).untyped, rightFacts.at(i).untyped
 		if lu == ru {
 			continue
 		}
@@ -64,16 +63,14 @@ func setOpResolveUnknownLiteralArms(left, right []parquet.Column,
 	return left, right
 }
 
-// unifySetOpSchemas keeps first-arm names over per-position common types from
-// the DAG's SetOpWiden and SetOpDecimalTarget, including wire OIDs (#541).
-// DECIMAL scale is max; rebuild precision from max integer digits (#532).
-// Integers widen into numeric at its scale, never as unscaled carriers (#547).
-// FLOAT32/FLOAT64 beat exact types and only FLOAT64 beats FLOAT32, in either
-// arm order; preserve REAL's value rendering (#361, #541). INT32/INT64 becomes INT64.
-// Leave unsupported nonnumeric or unresolved DECIMAL (p,s) unchanged; never guess
-// a declaration that could move values (#555).
-// See docs/internals/local-set-operation-common-schema.md for the design.
-func unifySetOpSchemas(left, right []parquet.Column) []parquet.Column {
+// unifySetOpSchemas is the single-process path's result schema: per position,
+// the column setOpResultColumn computes from the two arms' runtime columns and
+// facts (the one rule the stage planner and the declared output use too: the
+// numeric ladder, DECIMAL (p,s) through batch.DecimalCommon, the mark), named
+// after the first arm. A position that rule cannot resolve keeps the first
+// arm's column as written; never guess a declaration that could move values
+// (#555). See docs/internals/local-set-operation-common-schema.md.
+func unifySetOpSchemas(left, right []parquet.Column, leftFacts, rightFacts SetOpArmFacts) []parquet.Column {
 	if len(left) == 0 {
 		return right
 	}
@@ -81,165 +78,24 @@ func unifySetOpSchemas(left, right []parquet.Column) []parquet.Column {
 		return left
 	}
 	var out []parquet.Column
-	set := func(i int, col parquet.Column) {
+	for i := range left {
+		l, r := left[i], right[i]
+		want, _, err := setOpResultColumn(
+			[]SetOpColType{setOpColTypeOfColumn(l), setOpColTypeOfColumn(r)},
+			[]setOpArmFact{leftFacts.at(i), rightFacts.at(i)}, l.Name, "UNION")
+		col, ok := setOpColumnFromResult(l, want, err)
+		if !ok {
+			continue
+		}
 		if out == nil {
 			out = append(out, left...)
 		}
 		out[i] = col
 	}
-	for i := range left {
-		l, r := left[i], right[i]
-		col, ok := setOpUnifyColumn(l, r)
-		if !ok {
-			col = l
-		}
-		// The result is a column created from an unconstrained numeric only
-		// when every arm is one (ADR-0024 §10): an arm of another column
-		// keeps its own text.
-		if col.Unconstrained && !r.Unconstrained {
-			col.Unconstrained = false
-			ok = true
-		}
-		if !ok {
-			continue
-		}
-		set(i, col)
-	}
 	if out == nil {
 		return left
 	}
 	return out
-}
-
-// setOpUnifyColumn resolves one column position. ok=false means "leave the
-// first arm's column exactly as it is", which is the answer for every pair
-// the numeric ladder does not describe and for every pair already agreed.
-func setOpUnifyColumn(l, r parquet.Column) (parquet.Column, bool) {
-	// Two ARRAY (or MAP) arms fold their ELEMENTS on the ladder the stage
-	// arms use (setOpElementTarget), so `int[] ∪ bigint[]` is bigint[] on
-	// every path and the boxes are coerced into the wider child (arc CW).
-	if (l.Type == parquet.TypeArray || l.Type == parquet.TypeMap) && l.Type == r.Type &&
-		l.ElementType != nil && r.ElementType != nil && (l.ElementType.Type != r.ElementType.Type ||
-		(l.ElementType.Type == parquet.TypeDecimal && (l.ElementType.Precision != r.ElementType.Precision ||
-			l.ElementType.Scale != r.ElementType.Scale))) {
-		el, err := setOpElementTarget(SetOpColType{Typ: l.Type, ElementType: l.ElementType},
-			SetOpColType{Typ: r.Type, ElementType: r.ElementType}, l.Name, "UNION")
-		if err != nil || el == nil {
-			return parquet.Column{}, false
-		}
-		out := l
-		out.ElementType = el
-		return out, true
-	}
-	lc, ok1 := setOpColTypeFromColumn(l)
-	rc, ok2 := setOpColTypeFromColumn(r)
-	if !ok1 || !ok2 {
-		// One side is not on the ladder. Two DECIMALs whose (p,s) could not
-		// be read are the one case still worth widening: #532's truncation
-		// happens whether or not a precision was declared, and max(scale) is
-		// the answer that moves no value.
-		if l.Type == parquet.TypeDecimal && r.Type == parquet.TypeDecimal {
-			return setOpUnifyDecimalFallback(l, r)
-		}
-		return parquet.Column{}, false
-	}
-	widened, ok := setOpWiden(lc.Typ, rc.Typ)
-	if !ok {
-		return parquet.Column{}, false
-	}
-	col := l // the result takes the FIRST arm's NAME
-	switch widened {
-	case parquet.TypeDecimal:
-		meta, ok := setOpDecimalTarget([]SetOpColType{lc, rc})
-		if !ok {
-			if l.Type == parquet.TypeDecimal && r.Type == parquet.TypeDecimal {
-				return setOpUnifyDecimalFallback(l, r)
-			}
-			return parquet.Column{}, false
-		}
-		if l.Type == parquet.TypeDecimal && l.Precision == meta.Precision && l.Scale == meta.Scale {
-			return parquet.Column{}, false
-		}
-		col.Type = parquet.TypeDecimal
-		col.Precision = meta.Precision
-		col.Scale = meta.Scale
-	case parquet.TypeFloat64:
-		if l.Type == parquet.TypeFloat64 {
-			return parquet.Column{}, false
-		}
-		col.Type = parquet.TypeFloat64
-		col.Precision, col.Scale = 0, 0
-	case parquet.TypeFloat32:
-		if l.Type == parquet.TypeFloat32 {
-			return parquet.Column{}, false
-		}
-		col.Type = parquet.TypeFloat32
-		col.Precision, col.Scale = 0, 0
-	case parquet.TypeInt64:
-		if l.Type == parquet.TypeInt64 {
-			return parquet.Column{}, false
-		}
-		col.Type = parquet.TypeInt64
-		col.Precision, col.Scale = 0, 0
-	default:
-		// SetOpWiden's a==b early return for two identical non-DECIMAL types.
-		return parquet.Column{}, false
-	}
-	// A set operation's output column takes a NULL from either arm, and the
-	// widened column is rebuilt from scratch, so it is declared nullable.
-	col.Nullable = true
-	return col, true
-}
-
-// setOpUnifyDecimalFallback is the DECIMAL ∪ DECIMAL rule for the pair
-// setOpDecimalTarget declines: max(scale) so no arm's digits are dropped
-// (#532), max(precision) because there is no declared integer part to rebuild
-// one from. It is deliberately the PRE-existing behaviour of this path —
-// leaving an unresolvable pair alone entirely would reopen #532 for it.
-func setOpUnifyDecimalFallback(l, r parquet.Column) (parquet.Column, bool) {
-	if r.Scale <= l.Scale && r.Precision <= l.Precision {
-		return parquet.Column{}, false
-	}
-	col := l
-	col.Scale = max(l.Scale, r.Scale)
-	col.Precision = max(l.Precision, r.Precision)
-	col.Nullable = true
-	return col, true
-}
-
-// setOpColTypeFromColumn adapts a runtime parquet.Column into the SetOpColType
-// the ladder helpers take. It resolves only the numeric types the ladder
-// describes; everything else is ok=false, which unifySetOpSchemas reads as
-// "leave this column alone".
-func setOpColTypeFromColumn(c parquet.Column) (SetOpColType, bool) {
-	switch c.Type {
-	case parquet.TypeDecimal:
-		if c.Precision <= 0 {
-			// #458's "unconstrained" sentinel. Reported as unresolved rather
-			// than taken at face value: SetOpDecimalTarget would otherwise
-			// widen every arm to scale 0 and truncate all of them.
-			return SetOpColType{}, false
-		}
-		return SetOpColType{
-			Typ:      c.Type,
-			Known:    true,
-			Dec:      logical.DecimalMeta{Precision: c.Precision, Scale: c.Scale},
-			DecKnown: true,
-		}, true
-	case parquet.TypeInt32, parquet.TypeInt64, parquet.TypeFloat32, parquet.TypeFloat64:
-		return SetOpColType{Typ: c.Type, Known: true}, true
-	case parquet.TypePort, parquet.TypeProtocol, parquet.TypeDuration:
-		// The three types whose WIRE declaration is an integer (#834). They are
-		// on SetOpWiden's ladder, so the stage DAG resolves `PORT ∪ INT64` to
-		// bigint and builds the column as one — and this path used to decline
-		// them here, leave the column at the FIRST arm's type, and materialise
-		// the union in a PORT vector: `SELECT c_port … UNION ALL SELECT
-		// 4000000000` came back as -294967296 on this path and 4000000000 on
-		// the DAG, one query answered two ways by the fast-path threshold.
-		return SetOpColType{Typ: c.Type, Known: true}, true
-	default:
-		return SetOpColType{}, false
-	}
 }
 
 // coerceSetOpArmRows converts boxes before dedup/FromRows: integers to DECIMAL

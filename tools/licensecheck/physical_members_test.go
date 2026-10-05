@@ -80,7 +80,13 @@ import (
 // set operation's arm is coerced to the result column's unconstrained mark
 // beside its (p,s), so the DAG reads the mark where it reads the scale
 // (ADR-0024 §10). The alternative was a second, name-keyed list on the stage.
-const maxAGPLPhysicalMembers = 223
+// 223 → 222 (2026-10-06, arc UN, #1541): a set-operation arm's plan carries
+// what each select item is beside its type, so one function computes the
+// result column for the stage planner and the single-process path, and the
+// stage asks the plan `SetOpArmPlan.Untyped` where it asked the context for a
+// separate mask (`PlanContext.SetOpUnknownLiteralArms`,
+// `PlanContext.SetOpArmIsUnknownLit`, both removed).
+const maxAGPLPhysicalMembers = 222
 
 // measuredPhysicalMembers are the members reached through values. With the 16
 // package-scope names of measuredPhysicalNames they are the whole surface, and
@@ -199,7 +205,6 @@ PlanContext.ScanColDecls
 PlanContext.ScopePreservingWrapper
 PlanContext.SemiAntiBuildStoreCols
 PlanContext.SemiAntiNE
-PlanContext.SetOpArmIsUnknownLit
 PlanContext.SetOpArmProjection
 PlanContext.SetOpArmTypeConflict
 PlanContext.SetOpBaseName
@@ -207,7 +212,6 @@ PlanContext.SetOpCarrierGapPairs
 PlanContext.SetOpName
 PlanContext.SetOpOutputNames
 PlanContext.SetOpTargetType
-PlanContext.SetOpUnknownLiteralArms
 PlanContext.SetReverseBloomInnerThreshold
 PlanContext.SortInputSetOpWidth
 PlanContext.SortKeySlotPos
@@ -280,6 +284,7 @@ RefuseUnresolvedJoinResidual
 SetOpArmPlan.Coerce
 SetOpArmPlan.Specs
 SetOpArmPlan.Types
+SetOpArmPlan.Untyped
 SetOpColType.Dec
 SetOpColType.DecKnown
 SetOpColType.ElementType

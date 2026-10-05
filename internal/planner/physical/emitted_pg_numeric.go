@@ -286,12 +286,12 @@ func setOpPGCategory(n *logical.Node, cols []parquet.Column) []pgCategory {
 	if !walk(n) || len(arms) == 0 {
 		return nil
 	}
-	unknown := setOpArmUnknownLiteralSchemas(n, len(arms), len(cols))
+	facts := setOpArmFactSchemas(n, len(arms), len(cols))
 	out := make([]pgCategory, len(cols))
 	for i := range cols {
 		cats := make([]pgCategory, 0, len(arms))
 		for a, arm := range arms {
-			if unknown[a] != nil && i < len(unknown[a]) && unknown[a][i] {
+			if facts[a].at(i).untyped {
 				continue
 			}
 			if i >= len(arm) {
