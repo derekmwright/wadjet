@@ -511,6 +511,31 @@ DIVISION is untouched. Its scale is `max(6, s1 + p2 + 1)` — a floor this
 project chose, not a fact about the operands — so reducing it drops no digit
 the answer had.
 
+**Measured, round 3** (2026-10-05; PostgreSQL 17.11's `format_type` of the
+created column first; `wadjet/testdata/arc_un_typmod.tsv`: 113 source
+shapes over a numeric(10,2), a numeric(5) and an unconstrained column, WITH
+DATA and WITH NO DATA, each followed by `INSERT 1.255, 0.755`). Of 673
+created tables, a later write stores PostgreSQL's value in 650, c23adbbb's
+in 17 (catalog dml-assignment r23, and two WITH NO DATA scalar subqueries
+over a CTE that both binaries declare text), and 6 have no PostgreSQL
+spelling (`IFNULL`); none stores a third value. At 742965c1, which marked
+the column from the wire fold, 120 cells stored a third value:
+
+| source (over n numeric(10,2)) | PostgreSQL | 742965c1 | now |
+|---|---|---|---|
+| a scalar subquery over n — plain, correlated, `ORDER BY … LIMIT 1`, nested, through a derived table, a CTE, a CASE of n and n, a UNION ALL of n and n; `COALESCE((SELECT n …), n)` | numeric(10,2): 1.26 | marked: 1.255 | numeric(10,2): 1.26 |
+| a derived table or CTE whose column is `COALESCE(n, n)`, a CASE of n and n, `CAST(n AS NUMERIC(8,1))`, a scalar subquery over n; a join to one; `DISTINCT` CASE of n and n | numeric(10,2) / (8,1) | marked | kept |
+| WITH DATA: `CASE WHEN 1 = 1 THEN n END`, `CASE WHEN true THEN n ELSE NULL END`, `COALESCE(n, NULL)`, `COALESCE(NULL, n)`, `CASE WHEN 'a' = 'a' …`, `(ARRAY[n])[1]` | numeric(10,2) | marked | numeric(10,2) |
+| the same WITH NO DATA (PostgreSQL does not fold) | numeric: 1.255 | marked | marked: 1.255 |
+| an aggregate (also inside a scalar subquery), a window function, arithmetic, `ROUND` / `ABS` / `TRUNC`, `CAST(n AS NUMERIC)`, a CASE / COALESCE / GREATEST / UNION ALL over two declarations or with a NULL value | numeric | marked | marked |
+| a constant CASE over two declarations, `+n` (r23) | numeric(5) / numeric | marked | the plan's declaration (c23adbbb's) |
+
+*Downgrade* (review r2, measured on the c23adbbb CLI over a store this
+release wrote): every value reads right, prints the stored scale
+(`1.2500000000`) and information_schema reports 38 / 10; an INSERT or
+UPDATE through that binary keeps the record's marker, so this release reads
+NULL / NULL and `1.25` again afterwards.
+
 **What it costs, recorded rather than left to be discovered.** RANGE, and the
 carrier's own: at scale s an Int128 holds `38 − s` integer digits.
 `DECIMAL(38,10) × DECIMAL(38,10)` is `(38,20)` now rather than `(38,6)`, so a
@@ -1129,19 +1154,40 @@ column, no per-value scale (E64).
 **The rule.** A stored column is created from an unconstrained numeric when
 its declaration is `NUMERIC` or `DECIMAL` with no parameters (the DDL door,
 `parquet.DeclaredColumn`), or when it is a CREATE TABLE AS column whose
-source PostgreSQL types as plain numeric (typmod −1): the plan's wire fold of
-item 5 says so, or the item is a numeric typed NULL (`CAST(NULL AS NUMERIC)`,
-`NULL::numeric`, a CASE of them). Such a column is
+source PostgreSQL types as plain numeric (typmod −1). Such a column is
 `parquet.UnconstrainedNumericColumn`: DECIMAL(38, max(s, 10)), where s is
 the scale the source declares (10 for DDL), and `parquet.Column.Unconstrained`
 marks it. A constrained declaration (`NUMERIC(10,2)`, `NUMERIC(5)` = scale 0)
-and a CREATE TABLE AS from a constrained column (or `NULLIF` over one, which
-keeps its typmod) are untouched. A column created before the marker existed
+is untouched. A column created before the marker existed
 — a DDL `NUMERIC` that was DECIMAL(38,0), a typed NULL that was double
 precision — has no marker and reads, writes and prints exactly as it did:
 the marker is read from the record (`unconstrained`, absent = false), never
 inferred from (38,10). A nested `ARRAY(NUMERIC)` element keeps item 8's
 (38,0); the rule is the stored column's.
+
+*Which CREATE TABLE AS source is plain numeric* is PostgreSQL's typmod
+rule (`exprTypmod`), and one function answers it for both arms of the
+statement: `physical.Planner.CreatedColumns`, which the storage declaration
+(`ingest.TableSchemaForQuery`) and the marker both read. An expression keeps
+a typmod when it is a column reference — through any number of derived
+tables, CTEs, scalar subqueries, joins, GROUP BY keys and set operations
+whose arms all carry the same one; a `CASE`, `COALESCE`, `GREATEST` or
+`LEAST` whose every value carries the same one (a `NULL` value and a
+missing `ELSE` carry none); `NULLIF` (its first argument's); an array
+subscript of `ARRAY[…]` whose elements carry the same one; `CAST(x AS
+NUMERIC(p,s))`. Everything else numeric — arithmetic, a function, an
+aggregate, a window function, a literal, `CAST(x AS NUMERIC)` — carries
+none. On WITH DATA PostgreSQL decides it after constant folding, and so does
+the walk: a `CASE` whose condition is a constant is the arm it selects
+(`CASE WHEN 1 = 1 THEN n END` keeps numeric(10,2); WITH NO DATA it is
+numeric, as PostgreSQL's), and `COALESCE` drops its NULL constants. The
+answer has a third value, *unknown* — a construct the walk does not model, a
+constant condition it cannot evaluate (`1 + 1 = 2`), a column it cannot
+trace — and an unknown column keeps the declaration the plan gives it, which
+is the one c23adbbb created: a mark set wrongly changes what a later write
+stores, a mark left unset is the base's behaviour. A numeric typed NULL
+(`CAST(NULL AS NUMERIC)`, `NULL::numeric`, a CASE of them), which the
+planner carries on the float rung, is marked by the same function.
 
 **What a write does.** More than 10 fraction digits round to 10, half away
 from zero (`0.00000000005` is 0.0000000001, `1e-11` is 0); more than 28
@@ -1151,19 +1197,34 @@ with more than 10 fraction digits keeps them in the column it creates
 
 **What the marker decides, and nothing else.** (a) The declaration
 PostgreSQL gives the column: typmod −1 on the wire, NULL numeric_precision /
-numeric_scale in information_schema. (b) The printed value: a bare copy of
-the column — through a filter, a sort, a derived table, a CTE, a star, a
-join, a GROUP BY key, DISTINCT, a set operation whose every arm is one —
-prints without the stored scale's trailing zeros (`1.25`, `1`, `0.755`), in
-the text and binary wire formats, the CLI, the HTTP JSON rows and
-`CAST(v AS TEXT)`. It is one printer (`batch.TrimDecimalText`) applied where
-a result is boxed (`exec.TrimUnconstrainedRows` at the sink and the
-coordinator's result; pgwire's routed metas) and keyed on the plan's marker,
-which `logical.DecimalMeta.Unconstrained` carries from the scan; the parquet
-footer's declared schema carries it to a DAG stage that reads the file alone.
-A computed value over the column — `v + 1`, `SUM(v)`, `MIN(v)`, a window,
-`COALESCE(v, n)` — is declared by its expression and prints at its one scale
-(catalog numeric-decimal r18).
+numeric_scale in information_schema. (b) The printed value: the column's
+value prints without the stored scale's trailing zeros (`1.25`, `1`,
+`0.755`). It is ONE decision, made where the value is boxed: a DECIMAL's
+box is its text, and `batch.Vector.GetValueOf` boxes a marked column's value
+as its printed text. The result rows read it (the single-process sink, the
+coordinator's result, the gRPC stream, the text and binary wire formats, the
+CLI, the HTTP JSON rows), and so does every expression that renders the
+value as text, because they all read the column reference's box
+(`expr.ColRef.Eval`): `CAST(v AS TEXT)`, `v || ''`, `concat`, `concat_ws`,
+`format('%s', v)`, `quote_literal`, `json_build_object`, `array_to_string`.
+The marker rides a bare copy of the column — through a filter, a sort, a
+derived table, a CTE, a star, a join, a GROUP BY key, DISTINCT, a LATERAL
+body's outer reference, a set operation whose every arm is one — in the
+plan (`logical.DecimalMeta.Unconstrained`, read at the sink) and in the
+batch schema each operator emits (read by the expressions); the parquet
+footer's declared schema carries it to a DAG stage that reads the stored
+file. A computed value over the column — `v + 1`, `SUM(v)`, `MIN(v)`, a
+window, a scalar subquery's answer — is declared by its expression and
+prints at its one scale (catalog numeric-decimal r18); a `COALESCE`, `CASE`,
+`GREATEST` or `NULLIF` that answers the column's own value hands on its
+box, so rendered as text it prints the column's text (`CAST(COALESCE(v, n)
+AS TEXT)` is `1.25`, as PostgreSQL's) while the SELECT list prints the
+expression at its one scale (r18). On the three DAG arms a stage boundary
+that is not a stored file — a GROUP BY key after a shuffle, a UNION ALL
+arm's output — carries no marker (the `.wshf` header names a column's type,
+precision and scale only), so a later stage's text rendering of the key
+prints the stored scale there, every renderer alike; the SELECT list prints
+it trimmed on every arm (the gather reads the plan's schema).
 
 **Measured** (arc UN, base 8e681724 → tip; PostgreSQL 17.11 first; the
 statement table is `wadjet/testdata/arc_un_enum.tsv`, 26 creation paths × 14
@@ -1215,11 +1276,13 @@ digits are not a fixed scale's, so a (38,10) column would round what
 8e681724 stored.
 
 Gated by `wadjet.TestArcUNUnconstrainedColumnEnumeration`,
+`wadjet.TestArcUNCreatedColumnKeepsPostgresTypmod` (the round-3 table),
+`wadjet.TestArcUNOneTextPrinter`,
 `wadjet.TestArcUNUnconstrainedColumnPersists` (reopen and compaction),
 `wadjet.TestArcUNARecordWithoutTheMarkerIsTheColumnItWas`,
-`coordinator.TestArcUNUnconstrainedColumnEveryArm` (35 SELECTs, five arms),
-`server.TestArcUNUnconstrainedColumnOnTheWire` (single-process, coordinator
-and HTTP doors) and `parquet.TestUnconstrainedNumericColumnIsOneDeclaration`.
+`coordinator.TestArcUNUnconstrainedColumnEveryArm` (60 SELECTs, five arms),
+`server.TestArcUNUnconstrainedColumnOnTheWire` (single-process, coordinator,
+HTTP and gRPC doors) and `parquet.TestUnconstrainedNumericColumnIsOneDeclaration`.
 
 ## Consequences
 
