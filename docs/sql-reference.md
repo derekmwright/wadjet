@@ -4206,23 +4206,24 @@ is `cat`. In PostgreSQL's constructs:
   lookbehind, `\m` / `\M`, `[[:<:]]` / `[[:>:]]`, a collating element — is
   refused 0A000.
 
-The options of PostgreSQL's constructs, as an embedded `(?…)` prefix or the
-flags argument (`REGEXP_LIKE`, `REGEXP_COUNT`, `REGEXP_REPLACE`); the letter
-written last wins:
+PostgreSQL's constructs accept options in an embedded `(?…)` prefix or a
+flags argument (`REGEXP_LIKE`, `REGEXP_COUNT`, `REGEXP_REPLACE`), as listed
+below. For conflicting options in either place, the letter written last wins.
 
-| letter | meaning |
-|---|---|
-| `i` / `c` | case-insensitive / case-sensitive |
-| `q` | the pattern is a literal string |
-| `s` | `.` and `[^…]` match a newline, `^` `$` match only at the string's ends (the default) |
-| `n`, `m` | newline-sensitive: `.` and `[^…]` do not match a newline, `^` `$` match at each line |
-| `p` | `.` and `[^…]` do not match a newline; `^` `$` only at the string's ends |
-| `w` | `^` `$` match at each line; `.` and `[^…]` match a newline |
-| `x` / `t` | expanded syntax (white space and `#` comments outside brackets ignored) / tight |
-| `g` | every match — `REGEXP_REPLACE` only; 22023 on the others |
-| `b`, `e` | the basic and extended dialects: refused 0A000 |
+| letter | accepted location | meaning |
+|---|---|---|
+| `i` / `c` | both | case-insensitive / case-sensitive |
+| `q` | both | the pattern is a literal string |
+| `s` | both | `.` and `[^…]` match a newline, `^` `$` match only at the string's ends (the default) |
+| `n`, `m` | both | newline-sensitive: `.` and `[^…]` do not match a newline, `^` `$` match at each line |
+| `p` | both | `.` and `[^…]` do not match a newline; `^` `$` only at the string's ends |
+| `w` | both | `^` `$` match at each line; `.` and `[^…]` match a newline |
+| `x` / `t` | both | expanded syntax (white space and `#` comments outside brackets ignored) / tight |
+| `g` | flags argument of `REGEXP_REPLACE` only | replace every match; 22023 in the flags argument of `REGEXP_LIKE` or `REGEXP_COUNT`; 2201B in an embedded prefix |
+| `b`, `e` | neither implemented; recognized in both | the basic and extended dialects: refused 0A000 |
 
-Any other letter is 22023. `REGEXP_COUNT`'s start past 1 over a pattern
+An unknown letter in the flags argument raises 22023; an unknown letter in
+an embedded prefix raises 2201B. `REGEXP_COUNT`'s start past 1 over a pattern
 holding `^`, `\A`, `\y` or `\Y` is refused 0A000. A pattern compiles once and
 is kept in a bounded cache (4096 patterns, the oldest evicted first), so a
 literal pattern is not recompiled per row and a column of distinct patterns
