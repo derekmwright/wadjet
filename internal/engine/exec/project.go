@@ -187,6 +187,11 @@ type ProjectColumn struct {
 	// (ADR-0024 item 2; #529, #555).
 	Precision int
 	Scale     int
+	// Unconstrained marks a COMPUTED output that is still a bare copy of a
+	// DECIMAL column created from an unconstrained numeric — a LATERAL
+	// body's outer reference — so the output column carries the mark the
+	// input column would (parquet.Column.Unconstrained, ADR-0024 §10).
+	Unconstrained bool
 	// Computed marks an output whose value comes from Expr rather than from
 	// an input column of the same name. Such an output must NOT be typed by
 	// looking its own name up in the input: when the alias shadows an input
@@ -374,6 +379,10 @@ func (p *Project) Execute(_ context.Context, in *batch.RecordBatch) (*batch.Reco
 				col.Precision = in.Schema[srcIdx].Precision
 				col.Fields = in.Schema[srcIdx].Fields
 				col.ElementType = in.Schema[srcIdx].ElementType
+				// A bare copy of a column created from an unconstrained
+				// numeric is still that column, and prints as one
+				// (ADR-0024 §10); a computed value is not.
+				col.Unconstrained = !proj.Computed && in.Schema[srcIdx].Unconstrained
 			}
 			// Computed VECTOR projections (e.g. embed(text)) don't resolve to an
 			// input column, so carry their dimension from the projection itself.
@@ -392,6 +401,7 @@ func (p *Project) Execute(_ context.Context, in *batch.RecordBatch) (*batch.Reco
 			if col.Type == parquet.TypeDecimal && col.Precision <= 0 && proj.Precision > 0 {
 				col.Precision, col.Scale = proj.Precision, proj.Scale
 			}
+			col.Unconstrained = col.Unconstrained || (proj.Unconstrained && col.Type == parquet.TypeDecimal)
 			schema[i] = col
 		}
 		p.cachedSchema = schema

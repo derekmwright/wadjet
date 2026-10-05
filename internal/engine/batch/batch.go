@@ -626,7 +626,7 @@ func (b *RecordBatch) Compact() *RecordBatch {
 func (b *RecordBatch) RowAt(i int) map[string]any {
 	row := make(map[string]any, len(b.Schema))
 	for j, col := range b.Schema {
-		row[col.Name] = b.Columns[j].GetValue(i)
+		row[col.Name] = b.Columns[j].GetValueOf(i, col.Unconstrained)
 	}
 	return row
 }
@@ -646,8 +646,8 @@ func (b *RecordBatch) ToRowValues() [][]any {
 	rows := make([][]any, 0, b.ActiveLen())
 	appendRow := func(i int) {
 		row := make([]any, len(b.Schema))
-		for j := range b.Schema {
-			row[j] = b.Columns[j].GetValue(i)
+		for j, col := range b.Schema {
+			row[j] = b.Columns[j].GetValueOf(i, col.Unconstrained)
 		}
 		rows = append(rows, row)
 	}
@@ -669,7 +669,7 @@ func (b *RecordBatch) ToRows() []map[string]any {
 		for _, idx := range b.Sel {
 			row := make(map[string]any, len(b.Schema))
 			for j, col := range b.Schema {
-				row[col.Name] = b.Columns[j].GetValue(int(idx))
+				row[col.Name] = b.Columns[j].GetValueOf(int(idx), col.Unconstrained)
 			}
 			rows = append(rows, row)
 		}
@@ -677,7 +677,7 @@ func (b *RecordBatch) ToRows() []map[string]any {
 		for i := 0; i < b.Len; i++ {
 			row := make(map[string]any, len(b.Schema))
 			for j, col := range b.Schema {
-				row[col.Name] = b.Columns[j].GetValue(i)
+				row[col.Name] = b.Columns[j].GetValueOf(i, col.Unconstrained)
 			}
 			rows = append(rows, row)
 		}

@@ -486,6 +486,8 @@ func (h *HashAggregate) outputSchema() []parquet.Column {
 			out.Fields = meta.Fields
 			out.ElementType = meta.ElementType
 			out.Dimension = meta.Dimension
+			// A key is a bare copy of its column (ADR-0024 §10).
+			out.Unconstrained = meta.Unconstrained
 		}
 		cols = append(cols, out)
 	}
