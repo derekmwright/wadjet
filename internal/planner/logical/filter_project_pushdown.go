@@ -187,7 +187,7 @@ func substitutionUnsafe(n plansql.Node) bool {
 	case *plansql.CastNode:
 		return substitutionUnsafe(e.Inner)
 	case *plansql.FuncCallNode:
-		if volatileFuncs[strings.ToLower(e.Name)] {
+		if expr.IsVolatileFunction(e.Name) {
 			return true
 		}
 		// A set-returning item is a SET, not a row-wise value: substituting
