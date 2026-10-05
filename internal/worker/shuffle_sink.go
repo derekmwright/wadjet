@@ -64,10 +64,7 @@ func (s *shuffleStreamSink) Init(_ context.Context) error {
 
 // Consume writes the batch as a WSHF chunk to the spill file. Safe for
 // concurrent calls from parallel pipeline workers — serialized via mu.
-func (s *shuffleStreamSink) Consume(ctx context.Context, b *batch.RecordBatch) error {
-	if b != nil {
-		noteWrittenSchema(ctx, b.Schema)
-	}
+func (s *shuffleStreamSink) Consume(_ context.Context, b *batch.RecordBatch) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

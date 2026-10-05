@@ -175,7 +175,7 @@ func (e *Executor) executeGatherStage(ctx context.Context, task distributed.Task
 		// is dispatched at all and the coordinator hands its file list to
 		// this task. Task.ColumnTypes is that read's declared schema, and
 		// its absence is refused rather than trusted (#503).
-		if err := applyDeclaredScanSchema(src, "gather task", alias, files, task.ColumnTypes, task.Unconstrained); err != nil {
+		if err := applyDeclaredScanSchema(src, "gather task", alias, files, task.ColumnTypes); err != nil {
 			src.Close()
 			return fmt.Errorf("gather task %s: %w", task.ID, err)
 		}
@@ -734,8 +734,6 @@ func execColumn(s distributed.ColumnSpec) parquet.Column {
 		Precision: s.Precision,
 		Scale:     s.Scale,
 		Dimension: s.Dimension,
-
-		Unconstrained: s.Unconstrained && parquet.TypeID(s.Type) == parquet.TypeDecimal,
 	}
 	if s.ElementType != nil {
 		e := execColumn(*s.ElementType)

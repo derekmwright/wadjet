@@ -62,7 +62,7 @@ func TestApplyDeclaredScanSchemaRefusesAnUndeclaredBaseTableRead(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			src := &cachedFileStreamSource{}
-			err := applyDeclaredScanSchema(src, "scan", "alias", tc.files, tc.declared, nil)
+			err := applyDeclaredScanSchema(src, "scan", "alias", tc.files, tc.declared)
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("no error; an undeclared base-table read must be refused, not trusted")
@@ -91,7 +91,7 @@ func TestApplyDeclaredScanSchemaRefusesAnUndeclaredBaseTableRead(t *testing.T) {
 func TestDeclaredSchemaGuardHasAKillSwitch(t *testing.T) {
 	files := []string{"tables/t/chunk_0000.parquet"}
 
-	if err := applyDeclaredScanSchema(&cachedFileStreamSource{}, "scan", "alias", files, nil, nil); err == nil {
+	if err := applyDeclaredScanSchema(&cachedFileStreamSource{}, "scan", "alias", files, nil); err == nil {
 		t.Fatal("the guard is off by default; it must refuse an undeclared base-table read")
 	} else if !strings.Contains(err.Error(), "WADJET_DECLARED_SCHEMA_STRICT=0") {
 		t.Errorf("the refusal does not name its way out: %v", err)
@@ -101,7 +101,7 @@ func TestDeclaredSchemaGuardHasAKillSwitch(t *testing.T) {
 	t.Cleanup(func() { DeclaredSchemaStrict.Set(prev) })
 
 	src := &cachedFileStreamSource{}
-	if err := applyDeclaredScanSchema(src, "scan", "alias", files, nil, nil); err != nil {
+	if err := applyDeclaredScanSchema(src, "scan", "alias", files, nil); err != nil {
 		t.Fatalf("with the switch off the read must proceed, not be refused: %v", err)
 	}
 	if len(src.declaredSchema) != 0 {
@@ -113,7 +113,7 @@ func TestDeclaredSchemaGuardHasAKillSwitch(t *testing.T) {
 	// whether the catalog's types are applied when they are present.
 	declared := []distributed.ColumnSpec{{Name: "c0", Type: int(parquet.TypeInt64)}}
 	src = &cachedFileStreamSource{}
-	if err := applyDeclaredScanSchema(src, "scan", "alias", files, declared, nil); err != nil {
+	if err := applyDeclaredScanSchema(src, "scan", "alias", files, declared); err != nil {
 		t.Fatalf("a declared read must still be applied with the switch off: %v", err)
 	}
 	if len(src.declaredSchema) == 0 {
@@ -128,7 +128,7 @@ func TestDeclaredSchemaGuardHasAKillSwitch(t *testing.T) {
 // the stage's whole budget repeating a verdict about the plan.
 func TestUndeclaredBaseTableReadIsRefusedByType(t *testing.T) {
 	err := applyDeclaredScanSchema(&cachedFileStreamSource{}, "broadcast_probe build", "d",
-		[]string{"tables/t/a.parquet", "tables/t/b.parquet"}, nil, nil)
+		[]string{"tables/t/a.parquet", "tables/t/b.parquet"}, nil)
 	if err == nil {
 		t.Fatal("no refusal")
 	}

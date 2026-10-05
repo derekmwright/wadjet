@@ -152,10 +152,7 @@ type Task struct {
 	// own types in the WSHF payload. Fragment tasks declare this per input
 	// instead, on OpSpec.ColumnTypes.
 	ColumnTypes []ColumnSpec `json:"column_types,omitempty"`
-	// Unconstrained is OpSpec.Unconstrained for a shuffle or gather task's
-	// own input files.
-	Unconstrained []string `json:"unconstrained,omitempty"`
-	FilterExprs   []string `json:"filter_exprs,omitempty"` // SQL filter expressions for pushdown
+	FilterExprs []string     `json:"filter_exprs,omitempty"` // SQL filter expressions for pushdown
 	// PostFilterExprs are SQL filter expressions applied to the stage's
 	// OUTPUT (post-aggregate/post-join) rather than to raw scan input.
 	// Native-DAG compute stages use this for HAVING and join residual
@@ -535,12 +532,6 @@ type OpSpec struct {
 	// retypeFromCatalog), so a declaration the file's bytes cannot carry
 	// fails the task by name instead of decoding one type as another.
 	ColumnTypes []ColumnSpec `json:"column_types,omitempty"`
-	// Unconstrained names the DECIMAL columns of this op's input — a stage's
-	// output read from an exchange — that the producing stage wrote as
-	// columns created from an unconstrained numeric (ADR-0024 §10;
-	// ResultNotification.UnconstrainedColumns). The reader stamps them onto
-	// every batch it decodes.
-	Unconstrained []string `json:"unconstrained,omitempty"`
 	// Sample is a base-table OpScan's TABLESAMPLE (#1411); see TableSampleSpec.
 	Sample *TableSampleSpec `json:"sample,omitempty"`
 
@@ -587,11 +578,9 @@ type OpSpec struct {
 	// instead of an upstream stage's WSHF. Same reason and same admission
 	// as ColumnTypes (#423). Empty when the build reads stage output.
 	BuildColumnTypes []ColumnSpec `json:"build_column_types,omitempty"`
-	// BuildUnconstrained is Unconstrained for the BUILD side's input.
-	BuildUnconstrained []string `json:"build_unconstrained,omitempty"`
-	JoinFilter         string   `json:"join_filter,omitempty"`
-	BuildRowHint       int64    `json:"build_row_hint,omitempty"`
-	SemiAntiKeyOnly    bool     `json:"semi_anti_key_only,omitempty"`
+	JoinFilter       string       `json:"join_filter,omitempty"`
+	BuildRowHint     int64        `json:"build_row_hint,omitempty"`
+	SemiAntiKeyOnly  bool         `json:"semi_anti_key_only,omitempty"`
 	// NullAwareAnti marks an anti-join op that came from a NOT IN and must
 	// answer its three-valued rule: a NULL probe key never survives, and a
 	// NULL anywhere in the build makes the whole answer empty (#507).
@@ -788,16 +777,13 @@ type PreComputedAggregate struct {
 // An older worker ignoring nested declarations retains its old limitations.
 // See docs/internals/distributed-recursive-column-declaration.md for the design.
 type ColumnSpec struct {
-	Name      string `json:"name"`
-	Type      int    `json:"type"`
-	Precision int    `json:"precision,omitempty"`
-	Scale     int    `json:"scale,omitempty"`
-	// Unconstrained is parquet.Column.Unconstrained (ADR-0024 §10): the
-	// declared column was created from an unconstrained numeric.
-	Unconstrained bool         `json:"unconstrained,omitempty"`
-	Dimension     int          `json:"dimension,omitempty"`
-	ElementType   *ColumnSpec  `json:"element_type,omitempty"`
-	Fields        []ColumnSpec `json:"fields,omitempty"`
+	Name        string       `json:"name"`
+	Type        int          `json:"type"`
+	Precision   int          `json:"precision,omitempty"`
+	Scale       int          `json:"scale,omitempty"`
+	Dimension   int          `json:"dimension,omitempty"`
+	ElementType *ColumnSpec  `json:"element_type,omitempty"`
+	Fields      []ColumnSpec `json:"fields,omitempty"`
 }
 
 // ProjectSpec is one output column of an OpProject: Name is the emitted
@@ -1263,14 +1249,6 @@ type ResultNotification struct {
 	// first attempt had not, so the retrier treats it the way it treats a
 	// recovered panic — terminal on the first failure.
 	PlanRefused bool `json:"plan_refused,omitempty"`
-
-	// UnconstrainedColumns names the DECIMAL columns this task WROTE as
-	// columns created from an unconstrained numeric (ADR-0024 §10,
-	// exec.UnconstrainedNames over the batches its output sink consumed).
-	// A `.wshf` exchange header cannot say it; the coordinator hands it to
-	// every task that reads this stage's output (OpSpec.Unconstrained,
-	// Task.Unconstrained), whose reader stamps it back (exec.UnconstrainedStamp).
-	UnconstrainedColumns []string `json:"unconstrained_columns,omitempty"`
 }
 
 // UploadComplete (streaming exchange Phase B) is published by a worker when
@@ -1308,11 +1286,6 @@ type ProducerTaskManifest struct {
 	// task; a consumer that has resolved every candidate and seen Final
 	// may EOF its manifest feed.
 	Final bool `json:"final,omitempty"`
-	// UnconstrainedColumns is the producer task's
-	// ResultNotification.UnconstrainedColumns (ADR-0024 §10): an eager
-	// consumer is built before its producers report, so the marks of the
-	// files it streams arrive with them.
-	UnconstrainedColumns []string `json:"unconstrained_columns,omitempty"`
 }
 
 // EagerInput describes one eagerly-fed input alias of a consumer task
