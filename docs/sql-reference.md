@@ -5677,7 +5677,7 @@ coerced by the same rule (see [INSERT](#insert)).
 | PORT | Integer 0-65535 |
 | PROTOCOL | Integer 0-255 |
 | DURATION | Integer nanoseconds |
-| BYTES | Quoted, read by `byteain`: `'\x6869'` (hex) or `'raw'` / `'a\\b\000'` (escape form); see [BYTES input](data-types.md#bytes-is-postgresqls-bytea) |
+| BYTES | Quoted, read by `byteain` when assigned or compared: `'\x6869'` (hex) or `'raw'` / `'a\\b\000'` (escape form); inside an expression (`COALESCE`, `CASE`, `\|\|`) a literal keeps its spelling — see [BYTES input](data-types.md#bytes-is-postgresqls-bytea) |
 | IPV4, IPV6, MAC, CIDR, UUID | Quoted literal in the type's text form: `'10.0.0.1'`, `'aa:bb:cc:dd:ee:ff'` |
 
 An `ARRAY[...]` constructor now writes into an ARRAY column with `INSERT ...

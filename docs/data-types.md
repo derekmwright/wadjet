@@ -83,10 +83,11 @@ Variable-length types use an **offset/data** columnar layout: a contiguous data 
 It declares OID 17 on the wire and renders as `\x` hex in the text format.
 
 **A text becomes `BYTES` through `byteain`**, PostgreSQL's own bytea input
-function, at every door: a literal beside a `BYTES` column in a comparison, a
+function, at these doors: a literal beside a `BYTES` column in a comparison, a
 literal assigned to one by `INSERT … VALUES`, `INSERT … SELECT`, `UPDATE`,
-`MERGE` or `COPY`, `CAST(text AS BYTES)`, and a text-format `bytea` parameter
-(#582, #1501). So all of these name the same two bytes, and a row written with
+`MERGE` or `COPY`, `CAST(text AS BYTES)`, a text-format `bytea` parameter,
+`decode(…, 'hex' / 'escape')`, and a quoted literal as the argument of
+`encode`, `get_byte` or `set_byte` (#582, #1501). So all of these name the same two bytes, and a row written with
 a literal is found by the same literal:
 
 ```sql
@@ -117,11 +118,21 @@ cannot cast type … to bytea`. A value already stored is read as the bytes it
 holds: rows written before #1501 hold the text's own characters
 (`'\x6869'` stored six bytes) and keep reading as those bytes.
 
+Not yet: a quoted literal that becomes `BYTES` inside an expression —
+`COALESCE(b, '\x41')`, `CASE … THEN '\x41' ELSE b END`, a set operation,
+`GREATEST`, `b || '\x41'`, a `LAG` / `LEAD` default — keeps its spelling
+(`length(COALESCE(NULLIF(b, b), '\x6869'))` is 6 here, 2 on PostgreSQL), and
+the packet, payload, DNS, TLS and JA3 functions read their own hex text.
+
 A `BYTES` value that has to travel as SQL text — a bound bytea parameter, a
 scalar subquery's answer handed to a later stage, a correlated re-run's outer
 value — is written as `CAST('\x<hex>' AS BYTES)`, which reads back as the same
-bytes whatever they are (a NUL and invalid UTF-8 included); a binary-format
-bytea parameter carries its bytes untouched.
+bytes whatever they are (a NUL and invalid UTF-8 included), in the positions
+measured — the select list, WHERE, IN, BETWEEN, CASE, COALESCE, NULLIF,
+GREATEST, functions, LIKE, window values and defaults, aggregates, GROUP BY,
+ORDER BY, JOIN ON, subquery and CTE bodies, and VALUES / UPDATE / MERGE. A `BYTES` value
+assigned to a text column stores bytea's hex output, `\x6869`, as on
+PostgreSQL.
 
 **Functions over `BYTES` follow PostgreSQL's catalog**, which means BYTES, not
 characters:

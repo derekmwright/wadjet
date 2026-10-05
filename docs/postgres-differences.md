@@ -378,9 +378,9 @@ Overflow remains recorded even after cancellation: `+9e37, +9e37, -9e37` fails h
 
 `SELECT amount AS __key_0` raises 42939 here; PostgreSQL answers. Intermediate columns need these names; stored columns remain readable. (catalog: [other#r12](adr/0012-divergences/other.md#catalog); #956)
 
-**A BYTES, container or DURATION value is not assigned to a text column.**
+**A container or DURATION value is not assigned to a text column.**
 
-`INSERT INTO t (text_col) SELECT bytes_col` (and the same through VALUES, UPDATE and MERGE) raises 42804 here; PostgreSQL converts a bytea, an array or an interval to its text. Every other scalar is assigned to TEXT as PostgreSQL renders it. (catalog: [dml-assignment#r13](adr/0012-divergences/dml-assignment.md#catalog); ADR-0012 §13/#1024-assignment)
+`INSERT INTO t (text_col) SELECT array_col` (and the same through VALUES, UPDATE and MERGE) raises 42804 here; PostgreSQL converts an array or an interval to its text. Every other scalar — a BYTES value included, as `\x` hex — is assigned to TEXT as PostgreSQL renders it. (catalog: [dml-assignment#r13](adr/0012-divergences/dml-assignment.md#catalog); ADR-0012 §13/#1024-assignment)
 
 **A quoted INSERT SELECT into a container column is refused.**
 
