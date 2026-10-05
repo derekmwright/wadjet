@@ -4,6 +4,8 @@ package expr
 
 import (
 	"fmt"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/derekmwright/wadjet/internal/sqlerr"
@@ -203,5 +205,43 @@ func TestArcRXCacheEvictsOneEntryAtATime(t *testing.T) {
 	}
 	if n := regexCacheLen(); n > regexCacheBound {
 		t.Fatalf("cache holds %d entries, bound %d", n, regexCacheBound)
+	}
+}
+
+// TestArcRXCaseFormsArePostgresTowlowerTowupper: for every character in
+// U+0000..U+1FFFF, the lower- and upper-case forms case-insensitive matching
+// takes are the oracle's (testdata/pg17_case_pairs.csv: `SELECT c,
+// ascii(lower(chr(c))), ascii(upper(chr(c)))` on PostgreSQL 17.11, the rows
+// with a mapping; a character absent from it maps to itself).
+func TestArcRXCaseFormsArePostgresTowlowerTowupper(t *testing.T) {
+	raw, err := os.ReadFile("testdata/pg17_case_pairs.csv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pg := map[rune][2]rune{}
+	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		var c, l, u rune
+		if _, err := fmt.Sscanf(line, "%d,%d,%d", &c, &l, &u); err != nil {
+			t.Fatalf("%q: %v", line, err)
+		}
+		pg[c] = [2]rune{l, u}
+	}
+	bad := 0
+	for r := rune(0); r <= 0x1FFFF; r++ {
+		if r >= 0xD800 && r <= 0xDFFF {
+			continue
+		}
+		want, ok := pg[r]
+		if !ok {
+			want = [2]rune{r, r}
+		}
+		if l, u := caseForms(r); l != want[0] || u != want[1] {
+			if bad++; bad <= 10 {
+				t.Errorf("U+%04X: forms U+%04X / U+%04X, PostgreSQL U+%04X / U+%04X", r, l, u, want[0], want[1])
+			}
+		}
+	}
+	if bad > 0 {
+		t.Errorf("%d characters differ", bad)
 	}
 }

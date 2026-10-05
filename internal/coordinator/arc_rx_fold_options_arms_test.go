@@ -38,6 +38,7 @@ var rxfRows = []rxRow{
 	{"Ж", "[а-я]"},
 	{"Ä", "[^ä]"},
 	{"µ", "Μ"},
+	{"ⓐ", "Ⓐ"},
 	{"line1\nline2", nil},
 	{"k: v\nk2: w", nil},
 	{"a\nb", nil},
