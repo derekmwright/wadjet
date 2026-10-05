@@ -150,7 +150,9 @@ func (r *streamingShuffleReader) readHeader() error {
 				return fmt.Errorf("truncated decimal schema at column %d: %w", i, err)
 			}
 			r.schema[i].Scale = int(r.hdr[0])
-			r.schema[i].Precision = int(r.hdr[1])
+			// Bit 7 of the precision byte is the column's unconstrained mark
+			// (wshf.DecimalUnconstrainedBit, ADR-0024 §10).
+			r.schema[i].Precision, r.schema[i].Unconstrained = wshf.SplitDecimalPrecisionByte(r.hdr[1])
 			r.headerEnd += 2
 		}
 	}

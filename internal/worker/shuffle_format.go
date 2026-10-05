@@ -136,9 +136,16 @@ func (sw *shuffleWriter) writeHeader() error {
 		// (distributed GROUP BY decimal keys lost their fraction —
 		// issue #144 suite finding). Written only for decimal columns;
 		// all WSHF readers consume it conditionally on the type byte.
+		// Bit 7 of the precision byte carries the column's unconstrained
+		// mark (wshf.DecimalUnconstrainedBit, ADR-0024 §10); a column
+		// without it writes the byte it always wrote.
 		if col.Type == parquet.TypeDecimal {
+			pb, err := wshf.DecimalPrecisionByte(col.Precision, col.Unconstrained)
+			if err != nil {
+				return fmt.Errorf("column %q: %w", col.Name, err)
+			}
 			sw.buf[0] = uint8(col.Scale)
-			sw.buf[1] = uint8(col.Precision)
+			sw.buf[1] = pb
 			if _, err := sw.w.Write(sw.buf[:2]); err != nil {
 				return err
 			}
