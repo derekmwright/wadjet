@@ -698,7 +698,12 @@ body's rows is computed only when some reference asks for a row past what has
 been computed, so a reference that stops early (`LIMIT`, `EXISTS`) does not
 compute — or raise an error on — the batches no reference reaches. The unit
 is a batch, not a row: a reference that stops inside the batch holding a
-failing row raises where PostgreSQL answers. It is held under the
+failing row raises where PostgreSQL answers. And only a reference that itself
+stops early is spared: a reference with a filter below its `LIMIT` or
+`EXISTS`, a `LIMIT` reference used as a join side, or an `OR` whose other
+operand reads the CTE reads on to the failing row and raises where PostgreSQL
+answers. A recursive term re-runs a volatile CTE it reads once on every
+iteration. It is held under the
 statement's memory budget and spills past it, and `EXPLAIN VERBOSE` names it
 (`CTE s: volatile, evaluated once; every reference reads that result`). A
 volatile CTE read once, and any deterministic CTE, is expanded into the plan

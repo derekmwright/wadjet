@@ -2964,8 +2964,10 @@ reference is a `Source` over the spool at its own position. So a reader that
 stops early (LIMIT, EXISTS) does not force the BATCHES nobody reaches, nor an
 error in one (the unit is a batch: a reader that stops inside the batch
 holding a failing row raises where PostgreSQL, filling row by row, answers;
-and a recursive term re-runs a volatile CTE it reads once on every iteration
-— both as at c67ebf5b): `… SELECT (SELECT g FROM s LIMIT 1) + (SELECT g FROM s LIMIT 1)` over a
+a reference with a filter below its LIMIT / EXISTS, a LIMIT reference used
+as a join side, or an OR whose other operand reads the CTE reads on to the
+failing row and raises where PostgreSQL answers; and a recursive term re-runs
+a volatile CTE it reads once on every iteration — all as at c67ebf5b): `… SELECT (SELECT g FROM s LIMIT 1) + (SELECT g FROM s LIMIT 1)` over a
 body that raises at its 150 000th row answers 2, as on PostgreSQL; a reader
 that reads on to that row raises it, when it reaches it; readers at
 different speeds, in either order, a self-join and both arms of a UNION ALL

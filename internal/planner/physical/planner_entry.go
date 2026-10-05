@@ -94,10 +94,11 @@ func (p *Planner) mergeDuplicateScans(node *logical.Node) {
 // root carries it; a SET OPERATION at the root does not — the builder hands
 // the list to each arm's root (buildSetOpPlan) — so a scalar subquery in an
 // arm (`WITH c AS (…) SELECT (SELECT max(id) FROM c) UNION ALL SELECT …`)
-// found no `c` and answered NULL where PostgreSQL 17.11 answers the max (#1531
-// round 3, review P2). The walk descends only through the set operation and
-// the nodes its builder puts above it, to the first arm: every arm carries
-// the same list, and a nested block's own WITH is never reached.
+// found no `c` and answered NULL where PostgreSQL 17.11 answers the max
+// (#1531). The list is the root's own, or — below the Sort / Limit / Distinct
+// a set operation's builder puts above it — the one EVERY arm of a root set
+// operation carries; arms that disagree (a flattened block with its own WITH)
+// give none, so a nested block's WITH is never taken for the statement's.
 func statementCTEs(node *logical.Node) []plansql.CTEDef {
 	if node == nil {
 		return nil
