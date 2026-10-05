@@ -1102,7 +1102,7 @@ The earlier rule evaluated a volatile CTE's body whole when its first reference 
 | other | [r25](0012-divergences/other.md#catalog) | Narrowed: a volatile body READ MORE THAN ONCE is evaluated once without the keywords | `coordinator.TestArcCMVolatileCTEReadTwiceIsEvaluatedOnce` ref1\_from/matrnd, nmatrnd |
 | other | [r27](0012-divergences/other.md#catalog) | Added: a CTE read once from a correlated subquery, or declared inside one, is evaluated per outer row (50; PostgreSQL 1) | `wadjet.TestArcCMCorrelatedReaderIsEvaluatedPerOuterRow` |
 
-## 2026-10-05: PostgreSQL's regular-expression constructs read their pattern as an ARE (arc RX, #1499)
+## 2026-10-05: PostgreSQL's regular-expression constructs read their pattern as an ARE (#1499)
 
 The `~` operators and `regexp_replace` read their pattern through the ARE translation (ADR-0044); `regexp_like`, `regexp_count`, `substring(s FROM p)` and SIMILAR TO's rewrite handed it to RE2 untranslated. At 4256886b (`coordinator.TestArcRXRegexTableEveryArm`, the gate copied in: 107 cells fail): `regexp_like('abc', '\b')` answered t and `regexp_count('abc', '\b')` 2 where PostgreSQL 17.11 answers f and 0 (`\b` is a backspace in an ARE); `regexp_like('ab', 'b\z')` answered t where PostgreSQL raises 2201B; `regexp_like('a', '(')` answered NULL (PostgreSQL 2201B); `E'a\nc' SIMILAR TO 'a_c'` answered f (PostgreSQL t); `substring('abc' FROM 'a|ab')` answered a (PostgreSQL ab); `'ÄBC' ~* 'äbc'` answered f (PostgreSQL t under en_US.utf8); the newline options (`regexp_replace(…, 'n')`, `'a' ~ '(?n)…'`) were 0A000; `regexp_like(s, p, flags)` and `regexp_count(s, p, start [, flags])` were 42883.
 
