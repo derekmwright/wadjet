@@ -1,0 +1,7 @@
+# arc RX round 2: kept cells (name, scope, answer, why)
+opt/b/refused/group	all	ERR 0A000	text-collation r23: the basic and extended dialects (b, e) are refused 0A000, embedded or as a flag
+opt/b/refused/proj	all	ERR 0A000	text-collation r23: the basic and extended dialects (b, e) are refused 0A000, embedded or as a flag
+opt/b/refused/where	all	ERR 0A000	text-collation r23: the basic and extended dialects (b, e) are refused 0A000, embedded or as a flag
+opt/e/refused/group	all	ERR 0A000	text-collation r23: the basic and extended dialects (b, e) are refused 0A000, embedded or as a flag
+opt/e/refused/proj	all	ERR 0A000	text-collation r23: the basic and extended dialects (b, e) are refused 0A000, embedded or as a flag
+opt/e/refused/where	all	ERR 0A000	text-collation r23: the basic and extended dialects (b, e) are refused 0A000, embedded or as a flag

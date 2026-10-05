@@ -183,7 +183,7 @@ func rxCells() []rxCell {
 	return out
 }
 
-func rxStandalone(t *testing.T, ctx context.Context, budget int64) *wadjet.DB {
+func rxStandalone(t *testing.T, ctx context.Context, budget int64, tables []tmdTable) *wadjet.DB {
 	t.Helper()
 	cfg := wadjet.Config{Store: objstore.NewMemStore(), Bucket: "test"}
 	if budget > 0 {
@@ -195,7 +195,7 @@ func rxStandalone(t *testing.T, ctx context.Context, budget int64) *wadjet.DB {
 		t.Fatalf("open standalone: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
-	for _, tbl := range rxTables() {
+	for _, tbl := range tables {
 		if err := db.CreateTable(ctx, tbl.name, tbl.schema, nil); err != nil {
 			t.Fatalf("create %s: %v", tbl.name, err)
 		}
@@ -210,13 +210,13 @@ func rxStandalone(t *testing.T, ctx context.Context, budget int64) *wadjet.DB {
 	return db
 }
 
-func rxArms(t *testing.T, ctx context.Context) []ssArm {
+func rxArms(t *testing.T, ctx context.Context, tables []tmdTable) []ssArm {
 	t.Helper()
-	single := rxStandalone(t, ctx, 0)
-	spilled := rxStandalone(t, ctx, 512*1024)
+	single := rxStandalone(t, ctx, 0, tables)
+	spilled := rxStandalone(t, ctx, 512*1024, tables)
 	stand := func(wcfg func(*worker.Config), opts ...func(*Config)) *Coordinator {
 		infra := tmdInfra(t, ctx)
-		tmdWriteTableList(t, ctx, infra, nil, rxTables())
+		tmdWriteTableList(t, ctx, infra, nil, tables)
 		if wcfg != nil {
 			return tmdCoordinatorWithWorkers(t, ctx, infra, wcfg, opts...)
 		}
@@ -315,7 +315,7 @@ func TestArcRXRegexTableEveryArm(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	t.Cleanup(cancel)
-	arms := rxArms(t, ctx)
+	arms := rxArms(t, ctx, rxTables())
 	var dump *os.File
 	if p := os.Getenv("RX_DUMP"); p != "" {
 		f, err := os.Create(p)
