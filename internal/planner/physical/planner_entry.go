@@ -8,6 +8,7 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
+	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
 
 // mergeDuplicateScans detects tables scanned multiple times in a query
@@ -89,6 +90,32 @@ func (p *Planner) mergeDuplicateScans(node *logical.Node) {
 	}
 }
 
+// statementCTEs is the statement's WITH list as the plan carries it. A block
+// root carries it; a SET OPERATION at the root does not — the builder hands
+// the list to each arm's root (buildSetOpPlan) — so a scalar subquery in an
+// arm (`WITH c AS (…) SELECT (SELECT max(id) FROM c) UNION ALL SELECT …`)
+// found no `c` and answered NULL where PostgreSQL 17.11 answers the max (#1531
+// round 3, review P2). The walk descends only through the set operation and
+// the nodes its builder puts above it, to the first arm: every arm carries
+// the same list, and a nested block's own WITH is never reached.
+func statementCTEs(node *logical.Node) []plansql.CTEDef {
+	for n := node; n != nil; {
+		if len(n.CTEs) > 0 {
+			return n.CTEs
+		}
+		switch n.Type {
+		case logical.NodeUnion, logical.NodeIntersect, logical.NodeExcept, logical.NodeSort, logical.NodeLimit, logical.NodeDistinct:
+		default:
+			return nil
+		}
+		if len(n.Children) == 0 {
+			return nil
+		}
+		n = n.Children[0]
+	}
+	return nil
+}
+
 // Plan converts a logical plan to a physical plan for local execution.
 func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, error) {
 	p.PlanCtx = ctx              // store for subquery runner context propagation
@@ -99,8 +126,8 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 	p.onceCTEs = &onceCTECache{} // one evaluation per volatile CTE, this statement
 	// Propagate CTE definitions from the logical plan so scalar subqueries
 	// (e.g., in WHERE/HAVING) can resolve CTE table references.
-	if len(node.CTEs) > 0 {
-		p.Ctes = node.CTEs
+	if ctes := statementCTEs(node); len(ctes) > 0 {
+		p.Ctes = ctes
 	}
 
 	// A bare `*` over a `JOIN … USING` whose merged output the star expansion
