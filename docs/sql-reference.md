@@ -196,6 +196,22 @@ FROM table_name [alias]
 [LIMIT n [OFFSET m]]
 ```
 
+### GROUP BY: which spellings are one key
+
+A select item, a `HAVING` term or an `ORDER BY` term IS the `GROUP BY` key it
+repeats when the two are the same expression once parentheses, identifier
+case, whitespace and — in a query over ONE relation — that relation's
+qualifier are set aside, and it publishes the key's value and declared type:
+`SELECT 2 * t.n, COUNT(*) FROM t GROUP BY 2 * n ORDER BY 1` and
+`SELECT 2 * n … GROUP BY 2 * t.n` are both numeric and both sort numerically.
+A qualifier naming any other relation (an outer query's, in a correlated
+subquery) is not set aside. An expression that only computes the same value
+is not the key: `1 + i` against `GROUP BY i + 1`, or `ABS(-1) * n` against
+`GROUP BY 1 * n`, is 42803, as in PostgreSQL. Over a JOIN, a bare and a
+qualified spelling of one column are not matched and the statement is 42803
+where PostgreSQL answers it — write the item and the key alike there. `GROUP
+BY 1` and `GROUP BY <output alias>` group by the select item they name.
+
 ## Table Functions
 
 Query files directly from SQL without prior ingestion. Table functions appear in the `FROM` clause and support positional arguments, named parameters (`key=value`), and glob patterns.

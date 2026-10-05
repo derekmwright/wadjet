@@ -1086,6 +1086,14 @@ The round-2 rule evaluated a volatile CTE's body whole when its first reference 
 | other | [r25](0012-divergences/other.md#catalog) | Narrowed: a volatile body READ MORE THAN ONCE is evaluated once without the keywords | `coordinator.TestArcCMVolatileCTEReadTwiceIsEvaluatedOnce` ref1\_from/matrnd, nmatrnd |
 | other | [r27](0012-divergences/other.md#catalog) | Added: a CTE read once from a correlated subquery, or declared inside one, is evaluated per outer row (50; PostgreSQL 1) | `wadjet.TestArcCMCorrelatedReaderIsEvaluatedPerOuterRow` |
 
+## 2026-10-05: a select item spelled apart from its GROUP BY key is the key (arc GK, #1524)
+
+A select item, HAVING or ORDER BY term that repeated a GROUP BY key with the relation's qualifier on one side only was not matched to it. At 33e2fb92 (`coordinator.TestArcGKGroupKeySpellingEveryArm`, the gate file run at base: gk\_author/gate\_coverage\_at\_base\_FAILS.log): `SELECT 2 * t.n, count(*) FROM ss_t t GROUP BY 2 * n ORDER BY 1` declared text and ordered `20.00` before `4.50` on all five arms (pair/numeric/itemQual/ordinalUnaliased); `SELECT 2 * n AS k, count(*) AS c FROM ss_t t GROUP BY 2 * t.n` was 42803 on every arm (pair/numeric/keyQual/sel). Now in a single-relation block a qualifier naming that relation is spelling and every term that is a key under it is spelled as the key (ADR-0026 §1a); the join case is the row below.
+
+| family | row | change | gate |
+|---|---|---|---|
+| names-scopes | [r10](0012-divergences/names-scopes.md#catalog) | Narrowed: the 42803 is now the bare-versus-qualified pair over a JOIN, both directions; in a single-relation block both directions answer PostgreSQL's rows and declared type | `coordinator.TestArcGKGroupKeySpellingEveryArm` origin/joinOneSide\*, origin/joinOtherSide\*, pair/\*/keyQual/\* |
+
 ## Dated markers inside the entries
 
 Every `Added` / `Amended` / `CLOSED` / `Corrected` / `narrowed` marker still inside an entry's verbatim text, in date order, with the entry that carries it.

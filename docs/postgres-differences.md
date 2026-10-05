@@ -358,9 +358,9 @@ Overflow remains recorded even after cancellation: `+9e37, +9e37, -9e37` fails h
 
 `SUM(b * 1)` and `SUM(ABS(b))` over a bigint column declare `numeric` and answer past bigint, as PostgreSQL does: the argument's width is read from the expression, and one int8 operand makes it numeric. Where the width cannot be inferred the result stays `bigint`, and a total beyond bigint raises 22003 where PostgreSQL answers a numeric; cast the argument to `numeric` to avoid it. (catalog: [aggregates-windows#r4](adr/0012-divergences/aggregates-windows.md#catalog))
 
-**Qualified GROUP BY can refuse.**
+**Qualified GROUP BY over a join can refuse.**
 
-`SELECT g + 1 ... GROUP BY typemx.g + 1` raises 42803 here; PostgreSQL answers. Evaluation requires the input’s unqualified name. (catalog: [names-scopes#r10](adr/0012-divergences/names-scopes.md#catalog); #738)
+`SELECT t.i + 1 ... FROM ss_t t LEFT JOIN ss_i x ON x.id = t.id GROUP BY i + 1` raises 42803 here, and so does the mirror (a qualified key under a bare item); PostgreSQL answers both. Over one relation either spelling is the key, its value and its type. (catalog: [names-scopes#r10](adr/0012-divergences/names-scopes.md#catalog); #738, #1524)
 
 **VARCHAR declarations discard length.**
 
