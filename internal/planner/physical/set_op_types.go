@@ -1003,8 +1003,10 @@ func setOpTargetType(plans []SetOpArmPlan, col int, name, op string, unknown [][
 	}
 	if want.Known && want.Typ == parquet.TypeDecimal && allKnown {
 		arms := make([]SetOpColType, 0, len(plans))
+		litArm := false
 		for i, plan := range plans {
 			if setOpArmIsUnknownLit(unknown, i, col) {
+				litArm = true
 				// It contributes no type, so it contributes no (p,s) either;
 				// counting its STRING here made the target unresolvable and
 				// refused a union PostgreSQL answers as numeric.
@@ -1019,7 +1021,9 @@ func setOpTargetType(plans []SetOpArmPlan, col int, name, op string, unknown [][
 		// nested as an arm, or read through a derived table or CTE, reports
 		// it to the operation above (setOpNodeResultTypes, setOpNodeDecls),
 		// and an arm whose mark the result does not keep is coerced.
-		mark := want.DecKnown && len(arms) > 0
+		// An untyped NULL arm is not a column created from an unconstrained
+		// numeric: the single-process rule (unifySetOpSchemas) drops the mark.
+		mark := want.DecKnown && len(arms) > 0 && !litArm
 		for _, a := range arms {
 			mark = mark && a.Typ == parquet.TypeDecimal && a.DecKnown && a.Dec.Unconstrained
 		}
