@@ -77,17 +77,61 @@ type reFlags struct {
 	dialect regexDialect
 }
 
-// regexDialect names the language a SQL construct's pattern is read in. Every
-// construct reads PostgreSQL's ARE today; the engine's own functions
-// (regexp_extract, regexp_extract_all, regexp_split, payload_matches) take
-// theirs from ownFunctionFlags, so their dialect is decided in one place.
+// regexDialect names the language a SQL construct's pattern is read in. The
+// dialect is chosen by the function's ORIGIN: PostgreSQL's own constructs
+// read PostgreSQL's ARE; the engine's DuckDB-origin functions — which
+// PostgreSQL does not have, and which every engine that has them reads in
+// RE2 syntax (`\b` a word boundary) — read RE2, with DuckDB as their oracle.
+// Every function that takes a pattern declares its dialect in
+// regexFunctionDialect.
 type regexDialect uint8
 
-const dialectARE regexDialect = iota
+const (
+	// dialectARE is PostgreSQL's advanced regular expression, translated
+	// into RE2 by aregexToRE2 (or refused where RE2 cannot express it).
+	dialectARE regexDialect = iota
+	// dialectRE2 is the pattern as written, compiled by RE2 with its own
+	// leftmost-first preference and no translation.
+	dialectRE2
+)
 
-// ownFunctionFlags are the flags the engine's own regular-expression
-// functions — those PostgreSQL does not have — compile their pattern under.
-var ownFunctionFlags = reFlags{dialect: dialectARE}
+// regexFunctionDialect is the declaration: every registered function that
+// compiles a SQL pattern, and the dialect its origin gives it. The registry
+// walk (TestArcRXEveryRegexFunctionDeclaresItsDialect) fails a function that
+// takes a pattern without a row here, and a row whose function answers in
+// the other dialect.
+var regexFunctionDialect = map[string]regexDialect{
+	// PostgreSQL's constructs.
+	"textregexeq":    dialectARE, // ~
+	"texticregexeq":  dialectARE, // ~*
+	"textregexne":    dialectARE, // !~
+	"texticregexne":  dialectARE, // !~*
+	"similar_to":     dialectARE, // SIMILAR TO (its rewrite is an ARE)
+	"substring":      dialectARE, // substring(s FROM pattern)
+	"regexp_replace": dialectARE,
+	"regexp_like":    dialectARE,
+	"regexp_count":   dialectARE,
+	// The engine's own, DuckDB-origin functions.
+	"regexp_extract":     dialectRE2,
+	"regexp_extract_all": dialectRE2,
+	"regexp_split":       dialectRE2,
+	"payload_matches":    dialectRE2,
+}
+
+// ownFunctionFlags are the flags the engine's own (DuckDB-origin) regular-
+// expression functions compile their pattern under: RE2, as written.
+var ownFunctionFlags = reFlags{dialect: dialectRE2}
+
+// ownFunctionRegex is the compiled pattern of one of the engine's own
+// regular-expression functions, or nil when RE2 rejects the pattern — the
+// function then answers NULL, as these functions always have.
+func ownFunctionRegex(pattern string) *regexp.Regexp {
+	re, err := translateAndCompile(pattern, ownFunctionFlags)
+	if err != nil {
+		return nil
+	}
+	return re.re
+}
 
 // cacheOpts packs every option the compile reads into one byte, so the
 // cache key stays a string and a byte.
@@ -182,8 +226,9 @@ func newlineOption(r rune) (nlStop, nlAnchor bool) {
 	return false, false // s
 }
 
-// sqlRegex is a pattern a SQL construct supplied, compiled as PostgreSQL
-// reads it: an ARE translated into RE2 (aregexToRE2), under its flags.
+// sqlRegex is a pattern a SQL construct supplied, compiled in its
+// dialect: an ARE translated into RE2 (aregexToRE2) under its flags, or an
+// RE2 pattern as written (only re is set).
 type sqlRegex struct {
 	re *regexp.Regexp
 	// emptyAt reports whether the pattern matches the empty string at
@@ -201,11 +246,12 @@ type sqlRegex struct {
 // translateAndCompile is THE compile of a SQL-supplied pattern: every
 // construct that takes one — the `~` operators, SIMILAR TO, substring(s
 // FROM p), regexp_like, regexp_count, regexp_replace, regexp_extract,
-// regexp_extract_all, regexp_split, payload_matches — compiles it here, so
-// one engine reads one dialect (PostgreSQL's ARE, #1499). The pattern is
-// translated by aregexToRE2 (or quoted, under the q flag); a form RE2
+// regexp_extract_all, regexp_split, payload_matches — compiles it here, in
+// the dialect its origin declares (regexFunctionDialect). Under the RE2
+// dialect the pattern compiles as written. Under the ARE dialect (#1499) it
+// is translated by aregexToRE2 (or quoted, under the q flag); a form RE2
 // cannot express is refused 0A000 and a malformed one is 2201B, never a
-// NULL or a match read in another dialect. An RE whose quantifiers are all
+// NULL or a match read in another dialect. An ARE whose quantifiers are all
 // greedy prefers the LONGEST match at the leftmost position, as an ARE does
 // (§9.7.3.5: `substring('abc' FROM 'a|ab')` is ab where RE2's leftmost-first
 // answers a); one holding a non-greedy quantifier keeps RE2's leftmost-first
@@ -238,6 +284,16 @@ func mustCompileSQLRegex(pattern string, f reFlags) *sqlRegex {
 
 func compileSQLRegex(pattern string, f reFlags) (*sqlRegex, error) {
 	regexCompiles.Add(1)
+	if f.dialect == dialectRE2 {
+		// The pattern as written, RE2's leftmost-first preference, no
+		// empty match beside a non-empty one: the reading these functions
+		// have always had.
+		re, err := regexp.Compile(pattern)
+		if err != nil {
+			return nil, sqlerr.New("2201B", "invalid regular expression: %s", reErrorText(err))
+		}
+		return &sqlRegex{re: re}, nil
+	}
 	var translated string
 	if f.literal {
 		translated = "(?s)" + literalARE(pattern, f.icase)

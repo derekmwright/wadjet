@@ -50,8 +50,13 @@ func fnPayloadMatches(args []any) any {
 	if len(args) < 2 || args[0] == nil || args[1] == nil {
 		return nil
 	}
-	// The pattern is read as every SQL pattern is (translateAndCompile).
-	return mustCompileSQLRegex(toString(args[1]), ownFunctionFlags).re.MatchString(toString(args[0]))
+	// A DuckDB-origin function: the pattern is RE2 syntax as written, and
+	// one RE2 rejects answers NULL (regexFunctionDialect).
+	re := ownFunctionRegex(toString(args[1]))
+	if re == nil {
+		return nil
+	}
+	return re.MatchString(toString(args[0]))
 }
 
 func fnPayloadOffset(args []any) any {
@@ -155,16 +160,18 @@ func fnRegexpExtractAll(args []any) any {
 	if len(args) < 2 || args[0] == nil || args[1] == nil {
 		return nil
 	}
-	re := mustCompileSQLRegex(toString(args[1]), ownFunctionFlags)
-	src := toString(args[0])
-	matches := re.findAll(src)
-	if len(matches) == 0 {
+	re := ownFunctionRegex(toString(args[1]))
+	if re == nil {
+		return nil
+	}
+	matches := re.FindAllString(toString(args[0]), -1)
+	if matches == nil {
 		return "[]"
 	}
 	// Return as JSON array string (no native array type yet)
 	parts := make([]string, len(matches))
 	for i, m := range matches {
-		escaped, _ := json.Marshal(src[m[0]:m[1]])
+		escaped, _ := json.Marshal(m)
 		parts[i] = string(escaped)
 	}
 	return "[" + strings.Join(parts, ",") + "]"
@@ -174,8 +181,11 @@ func fnRegexpSplit(args []any) any {
 	if len(args) < 2 || args[0] == nil || args[1] == nil {
 		return nil
 	}
-	re := mustCompileSQLRegex(toString(args[1]), ownFunctionFlags)
-	parts := re.re.Split(toString(args[0]), -1)
+	re := ownFunctionRegex(toString(args[1]))
+	if re == nil {
+		return nil
+	}
+	parts := re.Split(toString(args[0]), -1)
 	jsonParts := make([]string, len(parts))
 	for i, p := range parts {
 		escaped, _ := json.Marshal(p)

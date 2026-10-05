@@ -86,21 +86,23 @@ func regexFlagsArg(args []any, i int, fn string) (reFlags, bool) {
 }
 
 // fnRegexpExtract is this engine's regexp_extract(string, pattern [,
-// group]): the leftmost match (or its group), NULL without one. The
-// pattern is read as every other construct reads it — PostgreSQL's ARE
-// through translateAndCompile, so `\b` is a backspace and the match the
-// longest at the leftmost position — which makes it regexp_substr(string,
-// pattern, 1, 1, ”, group) (catalog: the engine's own regex functions).
+// group]): the leftmost match (or its group), NULL without one. It is a
+// DuckDB-origin function, so its pattern is RE2 syntax as written — `\b` a
+// word boundary, the first alternative that matches preferred
+// (regexFunctionDialect) — and a pattern RE2 rejects answers NULL.
 func fnRegexpExtract(args []any) any {
 	if len(args) < 2 || args[0] == nil || args[1] == nil {
 		return nil
 	}
-	re := mustCompileSQLRegex(toString(args[1]), ownFunctionFlags)
+	re := ownFunctionRegex(toString(args[1]))
+	if re == nil {
+		return nil
+	}
 	group := 0
 	if len(args) >= 3 && args[2] != nil {
 		group = int(ToFloat64(args[2]))
 	}
-	matches := re.re.FindStringSubmatch(toString(args[0]))
+	matches := re.FindStringSubmatch(toString(args[0]))
 	if matches == nil || group < 0 || group >= len(matches) {
 		return nil
 	}
