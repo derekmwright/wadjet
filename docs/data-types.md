@@ -128,11 +128,16 @@ A `BYTES` value that has to travel as SQL text — a bound bytea parameter, a
 scalar subquery's answer handed to a later stage, a correlated re-run's outer
 value — is written as `CAST('\x<hex>' AS BYTES)`, which reads back as the same
 bytes whatever they are (a NUL and invalid UTF-8 included), in the positions
-measured — the select list, WHERE, IN, BETWEEN, CASE, COALESCE, NULLIF,
-GREATEST, functions, LIKE, window values and defaults, aggregates, GROUP BY,
-ORDER BY, JOIN ON, subquery and CTE bodies, and VALUES / UPDATE / MERGE. A `BYTES` value
+that answer — the select list, WHERE, IN, BETWEEN, CASE, COALESCE, NULLIF,
+GREATEST, functions, window values and defaults, aggregates, GROUP BY,
+ORDER BY, JOIN ON, subquery and CTE bodies, VALUES and UPDATE. Some positions
+refuse a subquery's or an outer row's value there, as they do for any type,
+and a MERGE action's bytea parameter travels as its hex text, which the
+target column's input reads back as the same bytes. A `BYTES` value
 assigned to a text column stores bytea's hex output, `\x6869`, as on
-PostgreSQL.
+PostgreSQL; a `VARCHAR(n)` column keeps no length here, so the hex text is
+stored whole where PostgreSQL raises 22001 past `n`. `LIKE` over `BYTES`
+does not read `\` as an escape.
 
 **Functions over `BYTES` follow PostgreSQL's catalog**, which means BYTES, not
 characters:
