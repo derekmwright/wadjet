@@ -631,11 +631,13 @@ type SetOpArmPlan struct {
 	facts SetOpArmFacts
 }
 
-// Untyped reports whether this arm's select item at col has no type of its
-// own and takes the result column's (a quoted literal, a bare NULL, a NULL
-// cast to plain NUMERIC): its stage declares the result's type and writes the
-// item's value into it, with no cast.
-func (p SetOpArmPlan) Untyped(col int) bool { return p.facts.at(col).untyped }
+// UsesResultLayout reports whether the stage can write this item directly
+// under the result's declaration: an unknown literal or a numeric NULL.
+// A numeric NULL still contributes NUMERIC to the common type.
+func (p SetOpArmPlan) UsesResultLayout(col int) bool {
+	f := p.facts.at(col)
+	return f.untyped || f.numericNull
+}
 
 // SetOpColType is a plan-time output type, or the absence of one. There is no
 // spare TypeID to mean "unknown" — TypeBool is the zero value — so the flag
