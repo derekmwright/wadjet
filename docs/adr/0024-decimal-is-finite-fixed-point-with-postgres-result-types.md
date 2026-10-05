@@ -1195,7 +1195,11 @@ writes × 8 reads):
   printed as PostgreSQL does for a CREATE TABLE AS column from a computed
   value of fixed scale — `t.n % 2.5` over numeric(10,2) prints -1 for -1.00,
   `t.i * t.n` 24.5 for 24.50, a numeric CAST 67.5 for 67.50 — recorded in the
-  assignment-door, MO and SS wire tables' kept cells with the values unchanged.
+  assignment-door, MO, NX and SS tables' kept cells with the values unchanged.
+  The same printer makes two NX CREATE TABLE AS cells print PostgreSQL's text
+  where 8e681724 printed the fold's one scale: `COALESCE(t.b,
+  14.0000000000000000001)` reads 30 (was 30.0000000000000000000) and a `CASE`
+  of 14 and 13.25 reads 14 (was 14.00); their kept lines are deleted.
 - *Ten fraction digits.* A write past 10 fraction digits is rounded where
   PostgreSQL keeps every digit (numeric-decimal r23).
 
