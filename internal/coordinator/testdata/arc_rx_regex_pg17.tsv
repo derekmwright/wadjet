@@ -1,0 +1,157 @@
+# arc RX: PostgreSQL 17.11's answer for every cell (TestArcRXMeasurePostgres)
+op/lit/proj	rows=10 1,f | 10,NULL | 2,t | 3,f | 4,f | 5,f | 6,f | 7,f | 8,f | 9,f
+op/lit/group	rows=3 NULL,1 | f,8 | t,1
+op/lit/where	rows=1 2
+opI/lit/proj	rows=10 1,f | 10,NULL | 2,t | 3,f | 4,f | 5,f | 6,f | 7,f | 8,f | 9,f
+opI/lit/group	rows=3 NULL,1 | f,8 | t,1
+opI/lit/where	rows=1 2
+opNot/lit/proj	rows=10 1,t | 10,NULL | 2,f | 3,t | 4,t | 5,t | 6,t | 7,t | 8,t | 9,t
+opNot/lit/group	rows=3 NULL,1 | f,1 | t,8
+opNot/lit/where	rows=8 1 | 3 | 4 | 5 | 6 | 7 | 8 | 9
+like/lit/proj	rows=10 1,f | 10,NULL | 2,t | 3,f | 4,f | 5,f | 6,f | 7,f | 8,f | 9,f
+like/lit/group	rows=3 NULL,1 | f,8 | t,1
+like/lit/where	rows=1 2
+count/lit/proj	rows=10 1,0 | 10,NULL | 2,1 | 3,0 | 4,0 | 5,0 | 6,0 | 7,0 | 8,0 | 9,0
+count/lit/group	rows=3 0,8 | 1,1 | NULL,1
+count/lit/where	rows=1 2
+replace/lit/proj	rows=10 1,abc | 10,NULL | 2,a#c | 3,the cat sat | 4,GETS /x | 5,line1\nline2 | 6,éaéa | 7,aab | 8,baaac | 9,
+replace/lit/group	rows=10 ,1 | GETS /x,1 | NULL,1 | a#c,1 | aab,1 | abc,1 | baaac,1 | line1\nline2,1 | the cat sat,1 | éaéa,1
+replace/lit/where	rows=0 
+substring/lit/proj	rows=10 1,NULL | 10,NULL | 2,\x08 | 3,NULL | 4,NULL | 5,NULL | 6,NULL | 7,NULL | 8,NULL | 9,NULL
+substring/lit/group	rows=2 NULL,9 | \x08,1
+substring/lit/where	rows=0 
+extract/lit/proj	rows=10 1,NULL | 10,NULL | 2,\x08 | 3,NULL | 4,NULL | 5,NULL | 6,NULL | 7,NULL | 8,NULL | 9,NULL
+extract/lit/group	rows=2 NULL,9 | \x08,1
+extract/lit/where	rows=0 
+extractAll/lit/proj	rows=10 1,[] | 10,NULL | 2,["\\b"] | 3,[] | 4,[] | 5,[] | 6,[] | 7,[] | 8,[] | 9,[]
+extractAll/lit/group	rows=3 NULL,1 | ["\\b"],1 | [],8
+extractAll/lit/where	rows=0 
+split/lit/proj	rows=10 1,["abc"] | 10,NULL | 2,["a","c"] | 3,["the cat sat"] | 4,["GETS /x"] | 5,["line1\\nline2"] | 6,["éaéa"] | 7,["aab"] | 8,["baaac"] | 9,[""]
+split/lit/group	rows=10 NULL,1 | [""],1 | ["GETS /x"],1 | ["a","c"],1 | ["aab"],1 | ["abc"],1 | ["baaac"],1 | ["line1\\nline2"],1 | ["the cat sat"],1 | ["éaéa"],1
+split/lit/where	rows=1 9
+payload/lit/proj	rows=10 1,f | 10,NULL | 2,t | 3,f | 4,f | 5,f | 6,f | 7,f | 8,f | 9,f
+payload/lit/group	rows=3 NULL,1 | f,8 | t,1
+payload/lit/where	rows=1 2
+op/col/proj	rows=10 1,f | 10,NULL | 2,t | 3,t | 4,t | 5,t | 6,t | 7,t | 8,t | 9,t
+op/col/group	rows=3 NULL,1 | f,1 | t,8
+op/col/where	rows=8 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
+opI/col/proj	rows=10 1,f | 10,NULL | 2,t | 3,t | 4,t | 5,t | 6,t | 7,t | 8,t | 9,t
+opI/col/group	rows=3 NULL,1 | f,1 | t,8
+opI/col/where	rows=8 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
+opNot/col/proj	rows=10 1,t | 10,NULL | 2,f | 3,f | 4,f | 5,f | 6,f | 7,f | 8,f | 9,f
+opNot/col/group	rows=3 NULL,1 | f,8 | t,1
+opNot/col/where	rows=1 1
+like/col/proj	rows=10 1,f | 10,NULL | 2,t | 3,t | 4,t | 5,t | 6,t | 7,t | 8,t | 9,t
+like/col/group	rows=3 NULL,1 | f,1 | t,8
+like/col/where	rows=8 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
+count/col/proj	rows=10 1,0 | 10,NULL | 2,1 | 3,1 | 4,1 | 5,1 | 6,2 | 7,1 | 8,4 | 9,1
+count/col/group	rows=5 0,1 | 1,6 | 2,1 | 4,1 | NULL,1
+count/col/where	rows=6 2 | 3 | 4 | 5 | 7 | 9
+replace/col/proj	rows=10 1,abc | 10,NULL | 2,# | 3,the # sat | 4,# /x | 5,line#ine2 | 6,é#é# | 7,#b | 8,#b##c# | 9,#
+replace/col/group	rows=9 # /x,1 | #,2 | #b##c#,1 | #b,1 | NULL,1 | abc,1 | line#ine2,1 | the # sat,1 | é#é#,1
+replace/col/where	rows=0 
+substring/col/proj	rows=10 1,NULL | 10,NULL | 2,a\x08c | 3,cat | 4,GETS | 5,1\nl | 6,a | 7,aa | 8, | 9,
+substring/col/group	rows=8 ,2 | 1\nl,1 | GETS,1 | NULL,2 | a,1 | a\x08c,1 | aa,1 | cat,1
+substring/col/where	rows=2 3 | 4
+extract/col/proj	rows=10 1,NULL | 10,NULL | 2,a\x08c | 3,cat | 4,GETS | 5,1\nl | 6,a | 7,aa | 8, | 9,
+extract/col/group	rows=8 ,2 | 1\nl,1 | GETS,1 | NULL,2 | a,1 | a\x08c,1 | aa,1 | cat,1
+extract/col/where	rows=2 3 | 4
+extractAll/col/proj	rows=10 1,[] | 10,NULL | 2,["a\\bc"] | 3,["cat"] | 4,["GETS"] | 5,["1\\nl"] | 6,["a","a"] | 7,["aa"] | 8,["","aaa","",""] | 9,[""]
+extractAll/col/group	rows=10 NULL,1 | ["","aaa","",""],1 | [""],1 | ["1\\nl"],1 | ["GETS"],1 | ["a","a"],1 | ["a\\bc"],1 | ["aa"],1 | ["cat"],1 | [],1
+extractAll/col/where	rows=1 9
+split/col/proj	rows=10 1,["abc"] | 10,NULL | 2,["",""] | 3,["the "," sat"] | 4,[""," /x"] | 5,["line","ine2"] | 6,["é","é",""] | 7,["","b"] | 8,["b","c"] | 9,[""]
+split/col/group	rows=10 NULL,1 | [""," /x"],1 | ["",""],1 | ["","b"],1 | [""],1 | ["abc"],1 | ["b","c"],1 | ["line","ine2"],1 | ["the "," sat"],1 | ["é","é",""],1
+split/col/where	rows=1 9
+payload/col/proj	rows=10 1,f | 10,NULL | 2,t | 3,t | 4,t | 5,t | 6,t | 7,t | 8,t | 9,t
+payload/col/group	rows=3 NULL,1 | f,1 | t,8
+payload/col/where	rows=8 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
+like/z/proj	ERR 2201B ERROR: invalid regular expression: invalid escape \ sequence (SQLSTATE 2201B)
+like/z/group	ERR 2201B ERROR: invalid regular expression: invalid escape \ sequence (SQLSTATE 2201B)
+like/z/where	ERR 2201B ERROR: invalid regular expression: invalid escape \ sequence (SQLSTATE 2201B)
+like/y/proj	rows=10 1,f | 10,NULL | 2,f | 3,t | 4,f | 5,f | 6,f | 7,f | 8,f | 9,f
+like/y/group	rows=3 NULL,1 | f,8 | t,1
+like/y/where	rows=1 3
+like/dotNewline/proj	rows=10 1,f | 10,NULL | 2,f | 3,f | 4,f | 5,t | 6,f | 7,f | 8,f | 9,f
+like/dotNewline/group	rows=3 NULL,1 | f,8 | t,1
+like/dotNewline/where	rows=1 5
+like/invalid/proj	ERR 2201B ERROR: invalid regular expression: parentheses () not balanced (SQLSTATE 2201B)
+like/invalid/group	ERR 2201B ERROR: invalid regular expression: parentheses () not balanced (SQLSTATE 2201B)
+like/invalid/where	ERR 2201B ERROR: invalid regular expression: parentheses () not balanced (SQLSTATE 2201B)
+like/wordNonASCII/proj	rows=10 1,t | 10,NULL | 2,t | 3,t | 4,t | 5,t | 6,t | 7,t | 8,t | 9,f
+like/wordNonASCII/group	rows=3 NULL,1 | f,1 | t,8
+like/wordNonASCII/where	rows=8 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8
+extract/longest/proj	rows=10 1,NULL | 10,NULL | 2,NULL | 3,NULL | 4,GETS | 5,NULL | 6,NULL | 7,NULL | 8,NULL | 9,NULL
+extract/longest/group	rows=2 GETS,1 | NULL,9
+extract/longest/where	rows=1 4
+extract/group/proj	rows=10 1,b | 10,NULL | 2,\x08 | 3,t | 4,NULL | 5,NULL | 6,é | 7,a | 8,a | 9,NULL
+extract/group/group	rows=6 NULL,4 | \x08,1 | a,2 | b,1 | t,1 | é,1
+extract/group/where	rows=2 1 | 3
+extract/lazy/proj	rows=10 1, | 10,NULL | 2, | 3, | 4,NULL | 5,NULL | 6, | 7, | 8, | 9,NULL
+extract/lazy/group	rows=2 ,6 | NULL,4
+extract/lazy/where	rows=0 
+count/longest/proj	rows=10 1,1 | 10,NULL | 2,1 | 3,2 | 4,0 | 5,0 | 6,2 | 7,1 | 8,2 | 9,0
+count/longest/group	rows=4 0,3 | 1,3 | 2,3 | NULL,1
+count/longest/where	rows=3 1 | 2 | 7
+count/abuttingEmpty/proj	rows=10 1,4 | 10,NULL | 2,4 | 3,12 | 4,8 | 5,12 | 6,5 | 7,3 | 8,4 | 9,1
+count/abuttingEmpty/group	rows=7 1,1 | 12,2 | 3,1 | 4,3 | 5,1 | 8,1 | NULL,1
+count/abuttingEmpty/where	rows=1 9
+likeFlags/i/proj	rows=10 1,t | 10,NULL | 2,t | 3,t | 4,f | 5,f | 6,t | 7,t | 8,t | 9,f
+likeFlags/i/group	rows=3 NULL,1 | f,3 | t,6
+likeFlags/i/where	rows=6 1 | 2 | 3 | 6 | 7 | 8
+likeFlags/ic/proj	rows=10 1,f | 10,NULL | 2,f | 3,f | 4,f | 5,f | 6,f | 7,f | 8,f | 9,f
+likeFlags/ic/group	rows=2 NULL,1 | f,9
+likeFlags/ic/where	rows=0 
+likeFlags/q/proj	rows=10 1,f | 10,NULL | 2,f | 3,f | 4,f | 5,f | 6,f | 7,f | 8,f | 9,f
+likeFlags/q/group	rows=2 NULL,1 | f,9
+likeFlags/q/where	rows=0 
+likeFlags/null/proj	rows=10 1,NULL | 10,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL | 7,NULL | 8,NULL | 9,NULL
+likeFlags/null/group	rows=1 NULL,10
+likeFlags/null/where	rows=0 
+likeFlags/g/proj	ERR 22023 ERROR: regexp_like() does not support the "global" option (SQLSTATE 22023)
+likeFlags/g/group	ERR 22023 ERROR: regexp_like() does not support the "global" option (SQLSTATE 22023)
+likeFlags/g/where	ERR 22023 ERROR: regexp_like() does not support the "global" option (SQLSTATE 22023)
+likeFlags/bad/proj	ERR 22023 ERROR: invalid regular expression option: "z" (SQLSTATE 22023)
+likeFlags/bad/group	ERR 22023 ERROR: invalid regular expression option: "z" (SQLSTATE 22023)
+likeFlags/bad/where	ERR 22023 ERROR: invalid regular expression option: "z" (SQLSTATE 22023)
+likeFlags/n/proj	rows=10 1,f | 10,NULL | 2,f | 3,f | 4,f | 5,f | 6,f | 7,f | 8,f | 9,f
+likeFlags/n/group	rows=2 NULL,1 | f,9
+likeFlags/n/where	rows=0 
+countStart/3/proj	rows=10 1,0 | 10,NULL | 2,0 | 3,2 | 4,0 | 5,0 | 6,1 | 7,0 | 8,2 | 9,0
+countStart/3/group	rows=4 0,6 | 1,1 | 2,2 | NULL,1
+countStart/3/where	rows=1 6
+countStart/flags/proj	rows=10 1,0 | 10,NULL | 2,0 | 3,2 | 4,0 | 5,0 | 6,2 | 7,1 | 8,3 | 9,0
+countStart/flags/group	rows=5 0,5 | 1,1 | 2,2 | 3,1 | NULL,1
+countStart/flags/where	rows=1 7
+countStart/zero/proj	ERR 22023 ERROR: invalid value for parameter "start": 0 (SQLSTATE 22023)
+countStart/zero/group	ERR 22023 ERROR: invalid value for parameter "start": 0 (SQLSTATE 22023)
+countStart/zero/where	ERR 22023 ERROR: invalid value for parameter "start": 0 (SQLSTATE 22023)
+countStart/null/proj	rows=10 1,NULL | 10,NULL | 2,NULL | 3,NULL | 4,NULL | 5,NULL | 6,NULL | 7,NULL | 8,NULL | 9,NULL
+countStart/null/group	rows=1 NULL,10
+countStart/null/where	rows=0 
+countStart/past/proj	rows=10 1,0 | 10,NULL | 2,0 | 3,0 | 4,0 | 5,0 | 6,0 | 7,0 | 8,0 | 9,0
+countStart/past/group	rows=2 0,9 | NULL,1
+countStart/past/where	rows=0 
+countStart/wordY/proj	rows=10 1,0 | 10,NULL | 2,0 | 3,0 | 4,0 | 5,0 | 6,0 | 7,0 | 8,0 | 9,0
+countStart/wordY/group	rows=2 0,9 | NULL,1
+countStart/wordY/where	rows=0 
+similar/underscore/proj	rows=10 1,f | 10,NULL | 2,f | 3,f | 4,f | 5,t | 6,f | 7,f | 8,f | 9,f
+similar/underscore/group	rows=3 NULL,1 | f,8 | t,1
+similar/underscore/where	rows=1 5
+similar/percent/proj	rows=10 1,f | 10,NULL | 2,f | 3,f | 4,f | 5,t | 6,f | 7,f | 8,f | 9,f
+similar/percent/group	rows=3 NULL,1 | f,8 | t,1
+similar/percent/where	rows=1 5
+similar/wordY/proj	rows=10 1,f | 10,NULL | 2,f | 3,t | 4,f | 5,f | 6,f | 7,f | 8,f | 9,f
+similar/wordY/group	rows=3 NULL,1 | f,8 | t,1
+similar/wordY/where	rows=1 3
+similar/backspace/proj	rows=10 1,f | 10,NULL | 2,t | 3,f | 4,f | 5,f | 6,f | 7,f | 8,f | 9,f
+similar/backspace/group	rows=3 NULL,1 | f,8 | t,1
+similar/backspace/where	rows=1 2
+similar/backref/proj	ERR 2201B ERROR: invalid regular expression: invalid backreference number (SQLSTATE 2201B)
+similar/backref/group	ERR 2201B ERROR: invalid regular expression: invalid backreference number (SQLSTATE 2201B)
+similar/backref/where	ERR 2201B ERROR: invalid regular expression: invalid backreference number (SQLSTATE 2201B)
+likeOp/control/proj	rows=10 1,t | 10,NULL | 2,t | 3,f | 4,f | 5,f | 6,f | 7,f | 8,f | 9,f
+likeOp/control/group	rows=3 NULL,1 | f,7 | t,2
+likeOp/control/where	rows=2 1 | 2
+ilikeOp/control/proj	rows=10 1,t | 10,NULL | 2,t | 3,f | 4,f | 5,f | 6,f | 7,t | 8,f | 9,f
+ilikeOp/control/group	rows=3 NULL,1 | f,6 | t,3
+ilikeOp/control/where	rows=3 1 | 2 | 7
