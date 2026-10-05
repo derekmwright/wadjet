@@ -73,9 +73,12 @@ func (p *Planner) CreatedColumns(plan *logical.Node, declared []parquet.Column, 
 			if mods != nil {
 				m := mods[i]
 				if m.cls == tmKept && (m.p != out[i].Precision || m.s != out[i].Scale) {
-					// The typmod PostgreSQL keeps is not the (p,s) this
-					// plan computes the column at: keep the plan's.
-					m.cls = tmUnknown
+					// The typmod PostgreSQL keeps is not the (p,s) this plan
+					// computes the column at — a constant CASE the walk folds
+					// to one arm, whose other arm widens the plan's common
+					// type. The kept typmod is the column's declaration, so a
+					// later write stores what PostgreSQL stores.
+					out[i].Precision, out[i].Scale = m.p, m.s
 				}
 				out[i].Unconstrained = out[i].Unconstrained || m.cls == tmNone
 			}
