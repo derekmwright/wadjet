@@ -31,7 +31,10 @@ import (
 // (other.md r25, r26).
 //
 // The table is the round-1 enumeration (reference count × position × body) plus
-// the round-2 consumer-filter cells, on seven arms; cmCells says what each arm
+// the round-2 consumer-filter cells and the UNBEGUN ones — a reference under a
+// constant-false filter or a LIMIT 0, which PostgreSQL never begins and so
+// never evaluates the body for (`… TABLESAMPLE BERNOULLI (101) … WHERE false`
+// is 0 there; read, it is 2202H), on seven arms; cmCells says what each arm
 // asserts. The two embedded arms assert PostgreSQL's answer on every cell, eight
 // times. The stage-DAG arms are NOT changed by this rule: a cell PostgreSQL
 // answers and the DAG does not is pinned NOT (docs/adr/0012-divergences/other.md
@@ -95,9 +98,6 @@ func cmMatches(got, want, pg string) bool {
 	case "NOT":
 		return !isErr && got != pg
 	case "ERR":
-		if strings.HasPrefix(pg, "ERR ") {
-			return strings.HasPrefix(got, pg)
-		}
 		return isErr
 	}
 	return true // ANY
