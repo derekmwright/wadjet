@@ -176,7 +176,7 @@ An array of `INTERVAL` has no text here: `CAST(ARRAY[INTERVAL '1 hour'] AS TEXT)
 
 **Decimal set operations keep one declared scale.**
 
-Storage requires one scale. PostgreSQL declares unconstrained numeric; wadjet retains `(p,s)` and prints `12.7500` where PostgreSQL prints `12.75`. (catalog: [set-operations#r4](adr/0012-divergences/set-operations.md#catalog); ADR-0012 §12/decimal-carrier)
+Storage requires one scale. PostgreSQL declares unconstrained numeric; wadjet retains `(p,s)` and prints `12.7500` where PostgreSQL prints `12.75`. Beside a column created from an unconstrained `NUMERIC` the result prints that column's text, without trailing zeros, unless another arm is a `NUMERIC(p,s)` column, a CAST to one, or a literal spelled with trailing zeros (`2.50`): then every value prints the stored scale (`1.0000000000`, `2.5000000000`). (catalog: [set-operations#r4](adr/0012-divergences/set-operations.md#catalog); ADR-0012 §12/decimal-carrier)
 
 **Mixed int4-family sets declare bigint.**
 
