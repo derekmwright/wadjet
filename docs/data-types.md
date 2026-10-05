@@ -553,19 +553,24 @@ sign that whitespace may separate from the word — in a literal, `CAST`,
 `infinity` / `-infinity`. `-infinity` sorts below and `infinity` above every
 other value, so `ts < 'infinity'` is every non-NULL finite row, `ORDER BY`,
 `MIN` / `MAX`, `GROUP BY`, a join key and a pruned scan order them as
-PostgreSQL does, and `DATE 'infinity' = TIMESTAMP 'infinity'`. Arithmetic
-answers what PostgreSQL answers: `± INTERVAL`, `date ± integer` and a `CAST`
+PostgreSQL does, and `DATE 'infinity' = TIMESTAMP 'infinity'`. These
+operations answer what PostgreSQL answers: `± INTERVAL`, `date ± integer` and a `CAST`
 between the two types keep the value; `EXTRACT` / `date_part` (and `year()`
 … the functions `EXTRACT` is written as) answer `Infinity` / `-Infinity` for
-year and epoch and NULL for every other field; `date_trunc` and
-`time_bucket` answer the value. `date - date` with an infinite side is 22008,
+year and epoch and NULL for every other field this engine extracts; `date_trunc`
+answers the value, and so does `time_bucket` (this engine's function). `date - date` with an infinite side is 22008,
 as on PostgreSQL. Refused 22008 where PostgreSQL answers or has no such
 operation: a `timestamp - timestamp` difference (this engine's millisecond
-count; PostgreSQL's infinite interval), a `CAST` of an infinite value to a
-number, this engine's own temporal functions (`date_add`, `to_date`,
+count; PostgreSQL's infinite interval), a `CAST` of an infinite value to
+`bigint` or `double precision` (to `integer` or `smallint` it is 22003, and to
+`numeric` an internal error), this engine's own temporal functions (`date_add`, `to_date`,
 `last_day_of_month`, `to_unixtime`, …) and `time_bucket`'s infinite origin
 (catalog [temporal#r2](adr/0012-divergences/temporal.md#catalog)). No
-computation produces one: `DATE '1970-01-02' + 2147483646` is 22008.
+computation produces one: `DATE '1970-01-02' + 2147483646` is 22008. A function
+or operator that takes a number also takes a DATE or TIMESTAMP here, where
+PostgreSQL raises 42883, and reads the stored count: over an infinite value
+`-d` answers -2147483647, `round(ts)` 9.22e18, and `ts = 9223372036854775807`
+is true.
 
 `Duration` is the exception, and deliberately: it declares `int8` on the wire
 counting nanoseconds, so `CAST(d AS TEXT)` renders that integer — the text
