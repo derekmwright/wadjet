@@ -608,9 +608,6 @@ func (c *Coordinator) noteTaskResult(r distributed.ResultNotification) {
 	// Streaming exchange: the worker that reported these files wrote them
 	// and adopted them into its local stage cache — record it as the peer
 	// to fetch them from. Retries record the winning attempt's worker.
-	// The columns those files hold as columns created from an unconstrained
-	// numeric, for every task that reads them (exchange_marks.go).
-	c.scheduler.exchangeMarks.record(r)
 	if c.peerFiles != nil && r.Success {
 		c.peerFiles.Record(r.ResultFiles, r.WorkerID)
 		c.peerFiles.RecordPending(r.UploadPendingKeys)
@@ -1642,7 +1639,6 @@ func (c *Coordinator) cleanupQuery(queryID string) {
 	// token (nil-safe when disabled). Workers drop their side on the
 	// complete/cancel broadcasts below.
 	c.peerFiles.CleanupQuery(queryID)
-	c.scheduler.exchangeMarks.forgetQuery(queryID)
 	c.coordReadStages.Delete(queryID)
 
 	// Broadcast cancellation FIRST: by the time cleanupQuery runs the query

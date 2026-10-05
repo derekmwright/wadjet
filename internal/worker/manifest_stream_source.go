@@ -32,9 +32,6 @@ type manifestFileSet struct {
 	taskID  string
 	attempt int
 	files   []string // in-range files only; may be empty (still resolves the task)
-	// unconstrained is the producer task's ProducerTaskManifest.
-	// UnconstrainedColumns (ADR-0024 §10), stamped onto its files' batches.
-	unconstrained []string
 }
 
 type manifestStreamSource struct {
@@ -157,7 +154,7 @@ func (s *manifestStreamSource) observe(m distributed.ProducerTaskManifest) {
 				s.executor.peers.addHint(f, m.PeerAddr)
 			}
 		}
-		s.queue = append(s.queue, manifestFileSet{taskID: m.TaskID, attempt: m.Attempt, files: inRange, unconstrained: m.UnconstrainedColumns})
+		s.queue = append(s.queue, manifestFileSet{taskID: m.TaskID, attempt: m.Attempt, files: inRange})
 	}
 	s.signalLocked()
 }
@@ -195,9 +192,6 @@ func (s *manifestStreamSource) Next(ctx context.Context) (*batch.RecordBatch, er
 			s.consumed[s.current.taskID] = s.current.attempt
 			s.mu.Unlock()
 			inner := newCachedFileStreamSource(s.executor, s.queryID, s.bucket, s.current.files)
-			if len(s.current.unconstrained) > 0 {
-				inner.SetUnconstrained(exec.NewUnconstrainedStamp(s.current.unconstrained))
-			}
 			inner.acq = &s.acq
 			if err := inner.Init(ctx); err != nil {
 				return nil, fmt.Errorf("eager source: inner init (%s): %w", s.current.taskID, err)
