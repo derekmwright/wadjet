@@ -847,26 +847,29 @@ func escapedAt(runes []rune, i int) bool {
 	return n%2 == 1
 }
 
+// caseForms is r's lower- and upper-case forms as PostgreSQL's oracle reads
+// them: Go's unicode.ToLower / ToUpper, except where the oracle's C library
+// differs (libcCaseForms, measured).
+func caseForms(r rune) (lower, upper rune) {
+	if f, ok := libcCaseForms[r]; ok {
+		return f[0], f[1]
+	}
+	return unicode.ToLower(r), unicode.ToUpper(r)
+}
+
 // caseVariants is r followed by its lower- and upper-case forms, distinct:
 // the characters a case-insensitive ARE matches for r. PostgreSQL takes
 // exactly these (towlower / towupper), not the whole case-folding orbit:
 // 'ς' ~* 'σ' is false there (σ's forms are σ and Σ), and 'İ' ~* 'i' false
-// while 'i' ~* 'İ' is true. Go's Unicode tables give the forms, plus the
-// pair ß / ẞ the oracle's C library has and Go's simple mappings do not.
+// while 'i' ~* 'İ' is true.
 func caseVariants(r rune) []rune {
 	out := []rune{r}
-	add := func(c rune) {
-		for _, x := range out {
-			if x == c {
-				return
-			}
-		}
-		out = append(out, c)
+	lo, up := caseForms(r)
+	if lo != r {
+		out = append(out, lo)
 	}
-	add(unicode.ToLower(r))
-	add(unicode.ToUpper(r))
-	if r == 'ß' {
-		add('ẞ')
+	if up != r && up != lo {
+		out = append(out, up)
 	}
 	return out
 }
