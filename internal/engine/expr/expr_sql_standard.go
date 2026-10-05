@@ -209,18 +209,26 @@ func fnSimilarTo(args []any) any {
 		}
 	}
 	pattern := toString(args[1])
-	re := compileRegexpCached(SimilarToRegexp(pattern, esc))
-	if re == nil {
-		// A pattern the translation cannot express as a regular expression is
-		// REFUSED, not answered NULL: the server raises 2201B for the same
-		// patterns (`SIMILAR TO '*'` is "quantifier operand invalid",
-		// `SIMILAR TO '['` is "brackets [] not balanced"), and a NULL here
-		// would be a plausible answer to a question that has none.
-		panic(fatalEval{sqlerr.New("2201B",
-			"invalid regular expression: the SIMILAR TO pattern %s cannot be matched",
-			sqlerr.Quote(pattern))})
+	// The rewrite is an ARE, compiled like every SQL pattern
+	// (translateAndCompile): `_` and `%` match a newline, as on the server,
+	// and an escaped letter is the ARE escape it spells there (`#y` a word
+	// boundary, `#b` a backspace).
+	re, err := translateAndCompile(SimilarToRegexp(pattern, esc), reFlags{})
+	if err != nil {
+		if sqlerr.StateOf(err) == "2201B" {
+			// A pattern the translation cannot express as a regular
+			// expression is REFUSED, not answered NULL: the server raises
+			// 2201B for the same patterns (`SIMILAR TO '*'` is "quantifier
+			// operand invalid", `SIMILAR TO '['` is "brackets [] not
+			// balanced"), and a NULL here would be a plausible answer to a
+			// question that has none.
+			err = sqlerr.New("2201B",
+				"invalid regular expression: the SIMILAR TO pattern %s cannot be matched",
+				sqlerr.Quote(pattern))
+		}
+		panic(fatalEval{err})
 	}
-	return re.MatchString(toString(args[0]))
+	return re.re.MatchString(toString(args[0]))
 }
 
 // SimilarToRegexp translates a SIMILAR TO pattern into the anchored regular
@@ -231,12 +239,14 @@ func fnSimilarTo(args []any) any {
 //
 //	%          → .*          (LIKE's wildcard, not the regex quantifier)
 //	_          → .           (LIKE's single character)
-//	| * + ? { } ( ) [ ]      pass through as regex metacharacters
+//	| * + ? { } ) [ ]        pass through as regex metacharacters
+//	(          → (?:         (a SIMILAR TO group does not capture)
 //	.  ^  $  \                and every other metacharacter is QUOTED
 //	<esc>c     → the literal c
 //
-// The result is wrapped in `\A(?:…)\z` because SIMILAR TO matches the whole
-// string, which is what makes `'abc' SIMILAR TO 'ab'` false.
+// The result is an ARE wrapped in `^(?:…)$`, as similar_to_escape writes it,
+// because SIMILAR TO matches the whole string, which is what makes `'abc'
+// SIMILAR TO 'ab'` false.
 //
 // A bracket expression is copied VERBATIM to the regex: inside `[…]`, `%` and
 // `_` are ordinary characters on the server too, and `[[:alpha:]]` is the
@@ -250,7 +260,7 @@ func SimilarToRegexp(pattern, escape string) string {
 		}
 	}
 	var b strings.Builder
-	b.WriteString(`\A(?:`)
+	b.WriteString(`^(?:`)
 	runes := []rune(pattern)
 	for i := 0; i < len(runes); i++ {
 		r := runes[i]
@@ -259,8 +269,9 @@ func SimilarToRegexp(pattern, escape string) string {
 			// `\c`, which is what PostgreSQL's own similar_to_escape emits —
 			// and it is not the same as "that character, literally". Measured
 			// on 17.11: `'abc' SIMILAR TO 'a#bc' ESCAPE '#'` is FALSE, because
-			// `\b` is the word-boundary escape in the regex language both
-			// engines hand the pattern to; `'a5c' SIMILAR TO 'a#5c'` is 2201B
+			// `\b` is a backspace in the ARE the server hands the pattern to
+			// (and `'a b' SIMILAR TO 'a#y b' ESCAPE '#'` is TRUE: `\y` is its
+			// word boundary); `'a5c' SIMILAR TO 'a#5c'` is 2201B
 			// (invalid backreference) and `'agc' SIMILAR TO 'a#gc'` is 2201B
 			// (invalid escape). Emitting the literal instead would answer TRUE
 			// for all three.
@@ -285,7 +296,12 @@ func SimilarToRegexp(pattern, escape string) string {
 			b.WriteString(`.*`)
 		case '_':
 			b.WriteString(`.`)
-		case '|', '*', '+', '?', '{', '}', '(', ')':
+		case '(':
+			// A SIMILAR TO group does not capture: similar_to_escape writes
+			// `(?:`, so `'aa' SIMILAR TO '(a)#1' ESCAPE '#'` is 2201B there
+			// (invalid backreference number: the RE has no group 1).
+			b.WriteString(`(?:`)
+		case '|', '*', '+', '?', '{', '}', ')':
 			b.WriteRune(r)
 		case '[':
 			// A bracket expression travels verbatim, up to its closing ]. A
@@ -321,7 +337,7 @@ func SimilarToRegexp(pattern, escape string) string {
 			b.WriteString(quoteRegexpRune(r))
 		}
 	}
-	b.WriteString(`)\z`)
+	b.WriteString(`)$`)
 	return b.String()
 }
 

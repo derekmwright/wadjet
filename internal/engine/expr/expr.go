@@ -828,13 +828,6 @@ var (
 	timestampEpochMsCache temporalMemo // epoch milliseconds
 )
 
-// regexpCache caches compiled patterns process-wide. Scalar regexp
-// functions previously called regexp.Compile PER ROW — ClickBench Q29
-// (REGEXP_REPLACE over 100M Referers) spent its 117s recompiling one
-// pattern 100M times. sync.Map: read-mostly, a handful of distinct
-// patterns per workload.
-var regexpCache sync.Map // pattern string → *regexp.Regexp (nil for invalid)
-
 // processStart is when this process began, captured once at package
 // initialization.
 var processStart = time.Now()
