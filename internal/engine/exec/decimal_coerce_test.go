@@ -132,6 +132,40 @@ func TestDecimalCoercePrecisionOnlyIsSchemaOnly(t *testing.T) {
 	}
 }
 
+// TestDecimalCoerceStatesTheResultMark: a set operation's arm column carries
+// the RESULT column's unconstrained mark after the coercion, whatever its own
+// was (ADR-0024 §10): a marked arm under an unmarked result loses it, and two
+// marked arms of different scales keep it.
+func TestDecimalCoerceStatesTheResultMark(t *testing.T) {
+	marked := dcDecimal(38, 10)
+	marked.Unconstrained = true
+	for _, tc := range []struct {
+		name string
+		in   parquet.Column
+		to   DecimalCoerceColumn
+		want bool
+	}{
+		{"marked arm, unmarked result, same scale", marked, DecimalCoerceColumn{Name: "v", Precision: 38, Scale: 10}, false},
+		{"marked arm, marked result, wider scale", marked, DecimalCoerceColumn{Name: "v", Precision: 38, Scale: 12, Unconstrained: true}, true},
+		{"unmarked arm, unmarked result", dcDecimal(10, 2), DecimalCoerceColumn{Name: "v", Precision: 38, Scale: 10}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := dcBatch(t, tc.in, []int64{25})
+			in.Schema[0].Unconstrained = tc.in.Unconstrained
+			out, err := NewDecimalCoerce([]DecimalCoerceColumn{tc.to}).Execute(context.Background(), in)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if out.Schema[0].Unconstrained != tc.want {
+				t.Errorf("coerced column marked %v, want %v", out.Schema[0].Unconstrained, tc.want)
+			}
+			if &out.Schema[0] == &in.Schema[0] {
+				t.Error("the coercion wrote the input's schema")
+			}
+		})
+	}
+}
+
 // TestDecimalCoerceOverflowIsAnError: a value with no Int128 at the output
 // scale fails, rather than wrapping into a different number wearing the right
 // type (ADR-0012 item 9's rule for SUM, for the same reason).
