@@ -178,6 +178,51 @@ consumer can sniff and decode, including mid-stream.
   `batch.SyncContainerSchema` rebuilds the shape on read — so an identity row
   has nothing to lose for them, which the same gate asserts through the answer.
 
+- **A DECIMAL column's header carries its unconstrained mark in bit 7 of the
+  precision byte** (amended 2026-10-05, arc UN, #1541; ADR-0024 §10). The
+  header is the magic, the chunk count (u32), the column count (u16), then per
+  column the name (u16 length + bytes), the type (u8) and, for a DECIMAL, the
+  scale (u8) and the precision (u8). It has no version field, and the mark
+  needs none: a precision is 1..38 (`parquet.MaxDecimalDigits`), so bit 7 of
+  its byte (`wshf.DecimalUnconstrainedBit`, 0x80) is never set by a
+  precision. The writer sets it from `parquet.Column.Unconstrained`
+  (`wshf.DecimalPrecisionByte`, which refuses a precision of 128 or more
+  rather than write it into the bit); both header parsers — the one decoder
+  `wshf.ParseHeader` and the worker's streaming reader — mask it off the
+  precision and set the decoded column's mark (`wshf.SplitDecimalPrecisionByte`).
+  The mark is a property of the column's TYPE, so it travels where the type
+  does: in the header, on the column it belongs to, by position. Every batch a
+  file decodes to carries its file's marks; `wshf.SchemaGuard` does not
+  compare them (they change no carrier), and a set operation's arms meet under
+  the result column's mark because each arm is coerced to it before it writes
+  (`exec.DecimalCoerce`, `DecimalCoerceColumn.Unconstrained`).
+
+  *Why it is safe.* A column without the mark writes exactly the byte it
+  always wrote, so a file with no marked column is byte-for-byte the file
+  c67ebf5b wrote, and a header without the bit reads as it always read
+  (`worker.TestWSHFUnmarkedColumnsEncodeAsBase` holds a c67ebf5b-encoded
+  golden; `worker.TestWSHFMarkRoundTripsByPosition` holds a marked column's
+  mark to its position when two DECIMAL columns share a name). An exchange
+  file is a per-query temporary written and read by the same build, and no
+  deployment of the engine exists, so no reader of another version meets a
+  marked header; a binary from before the bit would read a marked column's
+  precision as p + 128, which the wholesale-deploy rule below already
+  excludes. The bit costs nothing per row: it is one byte of the header,
+  read once per file.
+
+  *What it replaced.* The mark first rode BESIDE the file: the producing
+  task reported the names of the columns it wrote marked, the coordinator
+  stamped every task that read those files, and the reader re-applied the
+  names to every decoded batch. A name does not identify a column — a set
+  operation whose arms publish `v` from a NUMERIC and from a NUMERIC(10,2)
+  column stamped both — and a reader nobody stamped (the asynchronous door's
+  result and build-cache reads) lost the mark. Removed with the bit: a task
+  marshals as it did at c67ebf5b, except that a set operation's DECIMAL
+  coercion names the result column's mark when every arm carries one
+  (`ColumnSpec.Unconstrained`, omitted when false) — a field a worker that
+  ignored it would answer differently without, so it falls under the
+  wholesale-deploy rule too.
+
 - **The partition ASSIGNMENT is part of the exchange contract, not just the
   byte layout.** Every producer of a repartition stage must map a key to the
   same partition number, because the consumer of partition *p* reads only the
