@@ -252,12 +252,9 @@ func substitutionUnsafe(n plansql.Node) bool {
 
 // volatileFuncs lists functions whose result differs across evaluations, so
 // duplicating them via substitution would change the query's meaning.
-var volatileFuncs = map[string]bool{
-	"rand":            true,
-	"random":          true,
-	"uuid":            true,
-	"gen_random_uuid": true,
-}
+// The list is the parser package's, so the CTE rule that evaluates a volatile
+// body once (plansql.CTEDef.EvaluatedOnce) and this one cannot disagree.
+var volatileFuncs = plansql.VolatileFunctions
 
 // projRefs resolves references against a Project's output AND its scope.
 // A bare-name map suffices directly above a Project, but not across join arms.

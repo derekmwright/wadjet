@@ -91,11 +91,12 @@ func (p *Planner) mergeDuplicateScans(node *logical.Node) {
 
 // Plan converts a logical plan to a physical plan for local execution.
 func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, error) {
-	p.PlanCtx = ctx           // store for subquery runner context propagation
-	p.catResolver = nil       // one catalog view per statement (catalogOption)
-	p.releaseScanCache()      // reset per-query scan cache (drops tracker reservation)
-	p.res = &queryResources{} // reset per-query spill manager + memory tracker
-	p.releaseCTECache()       // reset per-query CTE cache (frees stale spill scratch)
+	p.PlanCtx = ctx              // store for subquery runner context propagation
+	p.catResolver = nil          // one catalog view per statement (catalogOption)
+	p.releaseScanCache()         // reset per-query scan cache (drops tracker reservation)
+	p.res = &queryResources{}    // reset per-query spill manager + memory tracker
+	p.releaseCTECache()          // reset per-query CTE cache (frees stale spill scratch)
+	p.onceCTEs = &onceCTECache{} // one evaluation per volatile CTE, this statement
 	// Propagate CTE definitions from the logical plan so scalar subqueries
 	// (e.g., in WHERE/HAVING) can resolve CTE table references.
 	if len(node.CTEs) > 0 {
@@ -200,6 +201,7 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 			Workers: pipelineWorkers,
 		},
 		OutputSchema: declaredOutputSchema(node, p.SubqueryOutputColumn),
+		OnceCTEs:     onceCTENames(node),
 	}
 	// Hand the sink the plan's answer for the case where no batch will ever
 	// tell it: a zero-row result. It is consulted only then (#416).

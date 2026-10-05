@@ -1799,6 +1799,10 @@ func resolveTableOrCTE(table *plansql.TableRef, ctes []plansql.CTEDef) (*Node, e
 			// Tag the sub-plan so the physical planner can detect CTE subtrees
 			// and materialize multi-referenced CTEs.
 			plan.CTEName = cte.Name
+			if cte.EvaluatedOnce() {
+				plan.OnceCTE = cte
+				plan.OnceCTEScope = ctes[:i]
+			}
 
 			// A CTE reference is a NAMED SCOPE, exactly as a derived table's
 			// alias is, and the enclosing query writes `c.col` for its OUTPUT
