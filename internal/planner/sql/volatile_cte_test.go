@@ -2,12 +2,31 @@
 
 package sql
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
+
+// The function registry (expr) installs the volatility oracle; this package's
+// tests stand in for it with the builtins it marks.
+func withTestOracle(t *testing.T) {
+	t.Helper()
+	prev := volatileOracle.Load()
+	SetVolatileFunctionOracle(func(name string) bool {
+		switch strings.ToLower(name) {
+		case "random", "rand", "uuid":
+			return true
+		}
+		return false
+	})
+	t.Cleanup(func() { volatileOracle.Store(prev) })
+}
 
 // A CTE body is volatile when a TOKEN calls a volatile function or samples a
 // relation, wherever in the body — and never because a string, a column or a
 // delimited identifier spells the word.
 func TestTextIsVolatileReadsTokens(t *testing.T) {
+	withTestOracle(t)
 	cells := []struct {
 		sql  string
 		want bool
@@ -17,7 +36,7 @@ func TestTextIsVolatileReadsTokens(t *testing.T) {
 		{"SELECT pg_catalog.random() FROM t", true},
 		{"SELECT rand() FROM t", true},
 		{"SELECT CAST(uuid() AS TEXT) FROM t", true},
-		{"SELECT gen_random_uuid() FROM t", true},
+		{"SELECT gen_random_uuid() FROM t", false}, // not a function this engine has (42883)
 		{"SELECT id FROM t TABLESAMPLE BERNOULLI (50)", true},
 		{"SELECT id FROM t tablesample system (5)", true},
 		{"SELECT id FROM t WHERE id IN (SELECT id FROM u WHERE random() < 0.5)", true},
@@ -39,6 +58,7 @@ func TestTextIsVolatileReadsTokens(t *testing.T) {
 // Every copy of a WITH item carries the item's identity; two items do not
 // share one, even when they spell the same body.
 func TestCTEIdentityTravelsWithTheValue(t *testing.T) {
+	withTestOracle(t)
 	p, err := Parse("WITH s AS (SELECT random() AS r), u AS (SELECT random() AS r) SELECT r FROM s")
 	if err != nil {
 		t.Fatal(err)

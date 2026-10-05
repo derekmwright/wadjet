@@ -5,6 +5,7 @@ package logical
 import (
 	"strings"
 
+	"github.com/derekmwright/wadjet/internal/engine/expr"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
@@ -250,11 +251,17 @@ func substitutionUnsafe(n plansql.Node) bool {
 	}
 }
 
-// volatileFuncs lists functions whose result differs across evaluations, so
-// duplicating them via substitution would change the query's meaning.
-// The list is the parser package's, so the CTE rule that evaluates a volatile
-// body once (plansql.CTEDef.EvaluatedOnce) and this one cannot disagree.
-var volatileFuncs = plansql.VolatileFunctions
+// volatileFuncs lists the builtin functions whose result differs across
+// evaluations, so duplicating them via substitution would change the query's
+// meaning. The set is the function registry's mark (expr.VolatileBuiltins),
+// the one the CTE rule reads too (plansql.CTEDef.EvaluatedOnce).
+var volatileFuncs = func() map[string]bool {
+	m := map[string]bool{}
+	for _, name := range expr.VolatileBuiltins() {
+		m[name] = true
+	}
+	return m
+}()
 
 // projRefs resolves references against a Project's output AND its scope.
 // A bare-name map suffices directly above a Project, but not across join arms.
