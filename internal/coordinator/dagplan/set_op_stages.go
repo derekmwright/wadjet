@@ -285,22 +285,12 @@ func reconcileSetOpArmTypes(plans []physical.SetOpArmPlan, outNames []string, op
 			continue
 		}
 		if want.Typ == parquet.TypeDecimal {
-			// The result column is created from an unconstrained numeric
-			// only when every arm's is (ADR-0024 §10; the single-process
-			// plan's rule, setOpUnifyColumn). Each arm's file carries its
-			// own column's mark in its header (wshf.DecimalUnconstrainedBit),
-			// so an arm whose mark the result does not keep is coerced to
-			// the result's declaration like an arm of another scale: the
-			// rows meet under one declaration, as they do in one process.
-			wantMark := want.DecKnown
-			for i := range plans {
-				if localPlanFacts.SetOpArmIsUnknownLit(unknown, i, col) {
-					continue
-				}
-				ct := plans[i].Types[col]
-				wantMark = wantMark && ct.Typ == parquet.TypeDecimal && ct.DecKnown && ct.Dec.Unconstrained
-			}
-			want.Dec.Unconstrained = wantMark
+			// want.Dec carries the result column's mark (every arm's, or
+			// none: SetOpTargetType). Each arm's file carries its own
+			// column's mark in its header (wshf.DecimalUnconstrainedBit), so
+			// an arm whose mark the result does not keep is coerced to the
+			// result's declaration like an arm of another scale: the rows
+			// meet under one declaration, as they do in one process.
 			if !want.DecKnown {
 				// An arm whose (p,s) nothing resolved. Leaving every arm as
 				// written was the pre-#533 behaviour, and it is a SILENT

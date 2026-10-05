@@ -1013,6 +1013,17 @@ func setOpTargetType(plans []SetOpArmPlan, col int, name, op string, unknown [][
 			arms = append(arms, plan.Types[col])
 		}
 		want.Dec, want.DecKnown = setOpDecimalTarget(arms)
+		// The result column is created from an unconstrained numeric only
+		// when every arm's is (ADR-0024 §10, the single-process rule of
+		// setOpUnifyColumn). Part of the node's TYPE, so a set operation
+		// nested as an arm, or read through a derived table or CTE, reports
+		// it to the operation above (setOpNodeResultTypes, setOpNodeDecls),
+		// and an arm whose mark the result does not keep is coerced.
+		mark := want.DecKnown && len(arms) > 0
+		for _, a := range arms {
+			mark = mark && a.Typ == parquet.TypeDecimal && a.DecKnown && a.Dec.Unconstrained
+		}
+		want.Dec.Unconstrained = mark
 	}
 	return want, allKnown, nil
 }
