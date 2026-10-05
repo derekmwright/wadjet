@@ -3,6 +3,7 @@
 package coordinator
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"fmt"
@@ -35,12 +36,18 @@ import (
 // Every statement of testdata/arc_un_inband_cells.tsv — same-name arms of
 // two typmods through UNION ALL / UNION / INTERSECT / EXCEPT, joins whose two
 // sides both publish `v` (one marked), a CTE read twice, renamed and swapped
-// columns, the asynchronous door's bare reads and its probe split — answers
-// the same on eleven arms: single, spilled, dag, dag-shuffled, dag-morsel4,
-// dag-eager (streaming exchange + eager dispatch), dag-skew, dag-aggsplit,
-// the fast path, the asynchronous door, and the asynchronous door with its
-// probe split forced. That answer is PostgreSQL 17.11's
-// (testdata/arc_un_inband_pg17.tsv) or the kept one below.
+// columns, the asynchronous door's bare reads and its probe split, and set
+// operations of three arms flat and nested left- and right-deep whose marked
+// arms come before a NUMERIC(10,2) one (round 6: the inner operation's plan
+// type did not carry its mark, so its marked batches reached the union's
+// file uncoerced) — answers the same on eleven arms: single, spilled, dag,
+// dag-shuffled, dag-morsel4, dag-eager, dag-skew, dag-aggsplit, the fast
+// path, the asynchronous door, and the asynchronous door with its probe split
+// forced. The dag-eager arm is the streaming-exchange + eager-dispatch
+// CONFIGURATION: on this fixture it publishes no eager manifest
+// (EagerManifestsPublished stays 0), so it does not prove eager dispatch
+// itself. The answer is PostgreSQL 17.11's (testdata/arc_un_inband_pg17.tsv)
+// or the kept one (testdata/arc_un_inband_kept.tsv).
 func TestArcUNInBandMarkEveryArm(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: eleven arms over the unconstrained mark")
@@ -110,22 +117,26 @@ func TestArcUNInBandMarkEveryArm(t *testing.T) {
 // unibKept is the kept answer, the same on every arm, where it is not
 // PostgreSQL's.
 func unibKept() map[string]struct{ want, why string } {
-	return map[string]struct{ want, why string }{
-		"c08":  {"rows=12 0.0000000000 | 0.0000000001 | 1.0000000000 | 1.0000000000 | 1.0000000000 | 1.5000000000 | 1.5000000000 | 2.5000000000 | 7.0000000000 | 7.0000000000 | NULL | NULL", unibR18},
-		"c10":  {"rows=1 0", unibR18},
-		"c26b": {"rows=4 1.0000000000 | 1.5000000000 | 7.0000000000 | NULL", unibR18},
-		"c36":  {"rows=2 1.5000000000 | 1.5000000000", unibR18},
-		"c37":  {"rows=7 0.0000000000 | 0.0000000001 | 1.0000000000 | 1.5000000000 | 2.5000000000 | 7.0000000000 | NULL", unibR18},
-		"v1":   {"rows=12 0.0000000000 | 0.0000000001 | 1.0000000000 | 1.0000000000 | 1.0000000000 | 1.0000000000 | 1.5000000000 | 1.5000000000 | 7.0000000000 | 7.0000000000 | NULL | NULL", unibR18},
-		"v2":   {"rows=12 0.0000000000 | 0.0000000001 | 1.0000000000 | 1.0000000000 | 1.0000000000 | 1.5000000000 | 1.5000000000 | 2.5000000000 | 7.0000000000 | 7.0000000000 | NULL | NULL", unibR18},
-		"v4":   {"rows=2 0.0000000000 | 2.5000000000", unibR18},
-		"v5":   {"rows=12 0.0000000000 | 0.0000000001 | 1.0000000000 | 1.0000000000 | 1.0000000000 | 1.5000000000 | 1.5000000000 | 2.5000000000 | 7.0000000000 | 7.0000000000 | NULL | NULL", unibR18},
-		"v6":   {"rows=1 9", unibR18},
-		"v7":   {"rows=2 2.5000000000 | 2.5000000000", unibR18},
-		"e01":  {"rows=12 0.0000000000 | 0.0000000001 | 1.0000000000 | 1.0000000000 | 1.0000000000 | 1.5000000000 | 1.5000000000 | 2.5000000000 | 7.0000000000 | 7.0000000000 | NULL | NULL", unibR18},
-		"e04":  {"rows=2 0.0000000000 | 2.5000000000", unibR18},
-		"e12":  {"rows=11 0.0000000000 | 0.0000000001 | 1.0000000000 | 1.0000000000 | 1.5000000000 | 1.5000000000 | 2.5000000000 | 7.0000000000 | 7.0000000000 | NULL | NULL", unibR18},
+	out := map[string]struct{ want, why string }{}
+	f, err := os.Open("testdata/arc_un_inband_kept.tsv")
+	if err != nil {
+		panic(err)
 	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 1<<20), 1<<20)
+	for sc.Scan() {
+		line := sc.Text()
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		parts := strings.Split(line, "	")
+		if len(parts) != 3 || parts[2] != "r18" {
+			panic(fmt.Sprintf("arc_un_inband_kept.tsv: malformed line %q", line))
+		}
+		out[parts[0]] = struct{ want, why string }{parts[1], unibR18}
+	}
+	return out
 }
 
 // unibR18: the set operation's column is created unconstrained only when
@@ -146,20 +157,23 @@ func unibArmKept() map[string]struct {
 		why  string
 		arms map[string]string
 	}{
-		"c15": {unibGroupByMerge, map[string]string{"async-probesplit": "ERR is not in the partial result schema"}},
-		"c19": {unibGroupByMerge, map[string]string{"async-probesplit": "ERR is not in the partial result schema"}},
-		"c22": {unibProbeSplitCount, map[string]string{"async-probesplit": "rows=15 {\"v\" : 0.0000000001} | {\"v\" : 0.0000000001} | {\"v\" : 0.0000000001} | {\"v\" : 1.5} | {\"v\" : 1.5} | {\"v\" : 1.5} | {\"v\" : 1} | {\"v\" : 1} | {\"v\" : 1} | {\"v\" : 7} | {\"v\" : 7} | {\"v\" : 7} | {\"v\" : null} | {\"v\" : null} | {\"v\" : null}"}},
-		"c24": {unibProbeSplitCount, map[string]string{"async-probesplit": "rows=1 12"}},
-		"c25": {unibNoSelectList, map[string]string{"async": "ERR the stage DAG computed no SELECT list for this shape", "async-probesplit": "ERR the stage DAG computed no SELECT list for this shape"}},
-		"c30": {unibNoSelectList, map[string]string{"async": "ERR the stage DAG computed no SELECT list for this shape", "async-probesplit": "ERR the stage DAG computed no SELECT list for this shape"}},
-		"c31": {unibProbeSplitCount, map[string]string{"async-probesplit": "rows=3 0.0000000001 | 0.0000000001 | 0.0000000001"}},
-		"c39": {unibNoSelectList, map[string]string{"async": "ERR the stage DAG computed no SELECT list for this shape", "async-probesplit": "ERR the stage DAG computed no SELECT list for this shape"}},
-		"c41": {unibGroupByMerge, map[string]string{"async-probesplit": "ERR is not in the partial result schema"}},
-		"c42": {unibGroupByMerge, map[string]string{"async-probesplit": "ERR is not in the partial result schema"}},
-		"c44": {unibGroupByMerge, map[string]string{"async-probesplit": "ERR is not in the partial result schema"}},
-		"c45": {unibGroupByMerge, map[string]string{"async-probesplit": "ERR is not in the partial result schema"}},
-		"c47": {unibGroupByMerge, map[string]string{"async-probesplit": "ERR is not in the partial result schema"}},
-		"e08": {unibSwappedRename, map[string]string{"async": "rows=6 0.75,NULL | 1.25,NULL | 10.00,NULL | 2.50,NULL | 3.33,NULL | NULL,NULL", "async-probesplit": "rows=6 0.75,NULL | 1.25,NULL | 10.00,NULL | 2.50,NULL | 3.33,NULL | NULL,NULL"}},
+		"c15":     {unibGroupByMerge, map[string]string{"async-probesplit": "ERR is not in the partial result schema"}},
+		"c19":     {unibGroupByMerge, map[string]string{"async-probesplit": "ERR is not in the partial result schema"}},
+		"c22":     {unibProbeSplitCount, map[string]string{"async-probesplit": "rows=15 {\"v\" : 0.0000000001} | {\"v\" : 0.0000000001} | {\"v\" : 0.0000000001} | {\"v\" : 1.5} | {\"v\" : 1.5} | {\"v\" : 1.5} | {\"v\" : 1} | {\"v\" : 1} | {\"v\" : 1} | {\"v\" : 7} | {\"v\" : 7} | {\"v\" : 7} | {\"v\" : null} | {\"v\" : null} | {\"v\" : null}"}},
+		"c24":     {unibProbeSplitCount, map[string]string{"async-probesplit": "rows=1 12"}},
+		"c25":     {unibNoSelectList, map[string]string{"async": "ERR the stage DAG computed no SELECT list for this shape", "async-probesplit": "ERR the stage DAG computed no SELECT list for this shape"}},
+		"c30":     {unibNoSelectList, map[string]string{"async": "ERR the stage DAG computed no SELECT list for this shape", "async-probesplit": "ERR the stage DAG computed no SELECT list for this shape"}},
+		"c31":     {unibProbeSplitCount, map[string]string{"async-probesplit": "rows=3 0.0000000001 | 0.0000000001 | 0.0000000001"}},
+		"c39":     {unibNoSelectList, map[string]string{"async": "ERR the stage DAG computed no SELECT list for this shape", "async-probesplit": "ERR the stage DAG computed no SELECT list for this shape"}},
+		"c41":     {unibGroupByMerge, map[string]string{"async-probesplit": "ERR is not in the partial result schema"}},
+		"c42":     {unibGroupByMerge, map[string]string{"async-probesplit": "ERR is not in the partial result schema"}},
+		"c44":     {unibGroupByMerge, map[string]string{"async-probesplit": "ERR is not in the partial result schema"}},
+		"c45":     {unibGroupByMerge, map[string]string{"async-probesplit": "ERR is not in the partial result schema"}},
+		"c47":     {unibGroupByMerge, map[string]string{"async-probesplit": "ERR is not in the partial result schema"}},
+		"null_xu": {unibTableLess, map[string]string{"async": "ERR a table-less SELECT has no distributed stage", "async-probesplit": "ERR a table-less SELECT has no distributed stage"}},
+		"null_x2": {unibTableLess, map[string]string{"async": "ERR a table-less SELECT has no distributed stage", "async-probesplit": "ERR a table-less SELECT has no distributed stage"}},
+		"xx_n_gk": {unibNoSelectList, map[string]string{"async": "ERR the stage DAG computed no SELECT list for this shape", "async-probesplit": "ERR the stage DAG computed no SELECT list for this shape"}},
+		"e08":     {unibSwappedRename, map[string]string{"async": "rows=6 0.75,NULL | 1.25,NULL | 10.00,NULL | 2.50,NULL | 3.33,NULL | NULL,NULL", "async-probesplit": "rows=6 0.75,NULL | 1.25,NULL | 10.00,NULL | 2.50,NULL | 3.33,NULL | NULL,NULL"}},
 	}
 }
 
@@ -167,6 +181,7 @@ const (
 	unibNoSelectList    = "the asynchronous door refuses a shape whose gather renames a computed column (#656), at c67ebf5b too (review r4 N3)"
 	unibGroupByMerge    = "the forced probe split cannot merge a GROUP BY over a text key, at c67ebf5b too (review r4 N2)"
 	unibProbeSplitCount = "the forced probe split merges no DISTINCT / GROUP BY / MIN: one row per worker, at c67ebf5b too (review r4 N2)"
+	unibTableLess       = "the asynchronous door refuses an arm with no FROM clause, at c67ebf5b too (review r4 N3)"
 	unibSwappedRename   = "the asynchronous door answers NULL for the second of two swapped names under a GROUP BY, at c67ebf5b too (UN-F10)"
 )
 
