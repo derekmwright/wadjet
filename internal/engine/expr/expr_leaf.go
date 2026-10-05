@@ -220,20 +220,6 @@ func (e *ColRef) resolveSlow(b *batch.RecordBatch) {
 	e.resolved.Store(true)
 }
 
-// unconstrainedDecimal reports a reference to a DECIMAL column of b that was
-// created from an unconstrained numeric (parquet.Column.Unconstrained,
-// ADR-0024 §10), as b's schema declares it.
-func (e *ColRef) unconstrainedDecimal(b *batch.RecordBatch) bool {
-	if b == nil {
-		return false
-	}
-	e.resolve(b)
-	if e.idx < 0 || e.structField != "" || e.typ != batch.TypeDecimal || e.idx >= len(b.Schema) {
-		return false
-	}
-	return b.Schema[e.idx].Unconstrained
-}
-
 // fieldVector resolves a ROW field to the CHILD VECTOR that holds it and the
 // row index within it, or reports that the field has no value here (the
 // container is NULL, or the field is not one of its children).
@@ -450,6 +436,10 @@ func (e *ColRef) Eval(b *batch.RecordBatch, row int) any {
 			return nil
 		}
 		return val
+	case batch.TypeDecimal:
+		// The column's own printer (ADR-0024 §10): the box a DECIMAL
+		// column's value is read as is its text.
+		return v.GetValueOf(row, e.idx < len(b.Schema) && b.Schema[e.idx].Unconstrained)
 	default:
 		return v.GetValue(row)
 	}

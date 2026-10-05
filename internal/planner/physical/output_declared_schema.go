@@ -1521,6 +1521,9 @@ func (w *declWalk) emittedColDecimalUncached(n *logical.Node) map[string]logical
 			}
 			out[strings.ToLower(arms[0][i].Name)] = logical.DecimalMeta{
 				Precision: col.Precision, Scale: col.Scale,
+				// Every arm a bare copy of a column created unconstrained
+				// (setOpDeclaredOutputSchema, ADR-0024 §10).
+				Unconstrained: col.Unconstrained,
 			}
 		}
 		return out

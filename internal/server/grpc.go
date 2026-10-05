@@ -265,13 +265,16 @@ func streamResultBatches(cs *chunkStreamer, stream coordinator.BatchStream) erro
 		// the schema publishes a name twice, because that is the only case a
 		// map-boxed row loses a value and this path's peak boxed residency is
 		// deliberately one batch (see this function's own comment).
+		//
+		// Boxed under the result schema's declaration, so a column created
+		// from an unconstrained numeric goes out as its printed text
+		// (ADR-0024 §10, batch.Vector.GetValueOf).
+		b.Schema = exec.WithUnconstrainedOf(b.Schema, cs.schema)
 		var vals [][]any
 		if batchNeedsPositionalRows(b) {
 			vals = b.ToRowValues()
 		}
 		rows := b.ToRows()
-		// The result schema's printer (ADR-0024 §10).
-		exec.TrimUnconstrainedRows(cs.schema, rows, vals)
 		if err := cs.pushRows(rows, vals); err != nil {
 			return err
 		}
