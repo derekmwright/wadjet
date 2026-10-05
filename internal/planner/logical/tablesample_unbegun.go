@@ -44,10 +44,19 @@ func dropUnbegunSamples(n *Node) {
 	}
 }
 
+// A reference to a volatile CTE inside such a subtree is a reference
+// PostgreSQL never begins either: its CTE Scan is below the one-time filter,
+// so the body is not evaluated for it. The reference loses its claim on the
+// statement's one evaluation (ADR-0021 §2d) and is expanded in place, where
+// the walk below takes the samplers off its body too — evaluating the body
+// for a reader no answer depends on would raise what PostgreSQL never
+// checks (`WITH c AS (… TABLESAMPLE BERNOULLI (101)) SELECT count(*) FROM c
+// WHERE false` is 0 there, never 2202H).
 func clearSamples(n *Node) {
 	if n == nil {
 		return
 	}
+	n.OnceCTE, n.OnceCTEScope = nil, nil
 	if n.Type == NodeScan && n.SampleMethod != "" {
 		n.SampleMethod, n.SamplePercent, n.SampleNull, n.SampleClockArg = "", 0, false, nil
 	}
