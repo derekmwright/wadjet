@@ -161,7 +161,7 @@ func byRender(res *oracle.Result) string {
 	return fmt.Sprintf("rows=%d %s", len(rows), strings.Join(rows, " | "))
 }
 
-func byStandalone(t *testing.T, ctx context.Context, budget int64) *wadjet.DB {
+func byStandalone(t *testing.T, ctx context.Context, budget int64, tables []tmdTable) *wadjet.DB {
 	t.Helper()
 	cfg := wadjet.Config{Store: objstore.NewMemStore(), Bucket: "test"}
 	if budget > 0 {
@@ -173,7 +173,7 @@ func byStandalone(t *testing.T, ctx context.Context, budget int64) *wadjet.DB {
 		t.Fatalf("open standalone: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
-	for _, tbl := range byTables() {
+	for _, tbl := range tables {
 		if err := db.CreateTable(ctx, tbl.name, tbl.schema, nil); err != nil {
 			t.Fatalf("create %s: %v", tbl.name, err)
 		}
@@ -190,15 +190,21 @@ func byStandalone(t *testing.T, ctx context.Context, budget int64) *wadjet.DB {
 
 func byArms(t *testing.T, ctx context.Context) []brArm {
 	t.Helper()
+	return byArmsOver(t, ctx, byTables())
+}
+
+// byArmsOver stands the five arms up over tables.
+func byArmsOver(t *testing.T, ctx context.Context, tables []tmdTable) []brArm {
+	t.Helper()
 	stand := func(wcfg func(*worker.Config), opts ...func(*Config)) *Coordinator {
 		infra := tmdInfra(t, ctx)
-		tmdWriteTableList(t, ctx, infra, nil, byTables())
+		tmdWriteTableList(t, ctx, infra, nil, tables)
 		if wcfg != nil {
 			return tmdCoordinatorWithWorkers(t, ctx, infra, wcfg, opts...)
 		}
 		return tmdCoordinator(t, ctx, infra, opts...)
 	}
-	single, spilled := byStandalone(t, ctx, 0), byStandalone(t, ctx, 512*1024)
+	single, spilled := byStandalone(t, ctx, 0, tables), byStandalone(t, ctx, 512*1024, tables)
 	coord := stand(nil)
 	coordB := stand(nil, func(c *Config) { c.BroadcastBytesOverride = 1 })
 	coordM := stand(func(w *worker.Config) { w.MorselWorkers = 4 })
