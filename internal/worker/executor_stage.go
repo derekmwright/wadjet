@@ -562,6 +562,9 @@ func (e *Executor) writeUnpartitionedWSHF(ctx context.Context, task distributed.
 		if active == 0 {
 			continue
 		}
+		if err := checkWrittenMarks(schema, b.Schema); err != nil {
+			return fmt.Errorf("stage task %s: %w", task.ID, err)
+		}
 		if err := sw.writeChunk(b.Columns, b.Sel, active); err != nil {
 			return fmt.Errorf("stage task %s: writeChunk: %w", task.ID, err)
 		}
@@ -734,6 +737,8 @@ func execColumn(s distributed.ColumnSpec) parquet.Column {
 		Precision: s.Precision,
 		Scale:     s.Scale,
 		Dimension: s.Dimension,
+
+		Unconstrained: s.Unconstrained && parquet.TypeID(s.Type) == parquet.TypeDecimal,
 	}
 	if s.ElementType != nil {
 		e := execColumn(*s.ElementType)

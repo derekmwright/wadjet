@@ -346,7 +346,10 @@ func (w *declWalk) declaredJoinSchema(n *logical.Node, want []string, published 
 					// the wire — and an empty side of a join wrote a header
 					// its siblings disagree with.
 					if m, ok := lookupColDecimal(cur.ScanColDecimal, name); ok {
-						col.Precision, col.Scale = m.Precision, m.Scale
+						// The mark too (ADR-0024 §10): an empty side pads NULLs
+						// under this declaration into the file its siblings
+						// write marked.
+						col.Precision, col.Scale, col.Unconstrained = m.Precision, m.Scale, m.Unconstrained
 					}
 				}
 				out = append(out, col)
