@@ -4812,18 +4812,32 @@ LIMIT 10
 
 `NOW()`, `CURRENT_TIMESTAMP`, `LOCALTIMESTAMP` and `CURRENT_DATE` read the
 clock ONCE, when the statement starts, and answer that one value on every
-row, in every clause and on every worker of a distributed query — as
-PostgreSQL's do. Over 4096 rows `count(DISTINCT now())` is `1`,
-`WHERE now() = now()` keeps every row, `now() = CURRENT_TIMESTAMP`,
-`LOCALTIMESTAMP = CAST(now() AS TIMESTAMP)` and
-`CURRENT_DATE = CAST(now() AS DATE)` hold on every row, and
+row and on every worker of a distributed query — as PostgreSQL's do. The
+positions measured are: the SELECT list, `WHERE` (pushed to the scan too), a
+`CASE`, `JOIN … ON` and both sides of a join, `GROUP BY`, `HAVING`,
+`DISTINCT`, `ORDER BY`, a scalar, `IN` or correlated subquery, a CTE read
+twice, a window's argument and its integer argument (the offset of `lag` /
+`lead`, `ntile`'s count, `nth_value`'s n, a `lag` default), `UNION ALL`,
+`LATERAL`, `VALUES`, an `IN` list, a `CAST`'s argument, a partition-column
+predicate, the `TABLESAMPLE` percentage, a table function's arguments
+(`generate_series` bounds), and a `CREATE FUNCTION` body, nested ones
+included — each read exactly once per statement under a test clock that
+moves on at every read, on the embedded engine, the coordinator's DAG (three
+shapes), its small-query fast path and under a memory budget
+(`coordinator.TestArcSCAdvancingClockOneReadEveryDoor`,
+`wadjet.TestArcSCEmbeddedAdvancingClockOneRead`). Over 4096 rows
+`count(DISTINCT now())` is `1`, `WHERE now() = now()` keeps every row, and
 `INSERT … SELECT now() …`, a many-row `VALUES (…, now())`,
 `UPDATE … SET ts = now()` and a CTAS store one value on every row they write
 (`coordinator.TestArcSCStatementClockEveryArm`,
-`wadjet.TestArcSCEmbeddedStatementWritesOneClock`). A `CREATE FUNCTION` body
-that calls `now()` answers its calling statement's value, and so does a table
-function's argument: `generate_series(n, n + 5)` with `n` computed from
-`now()` starts at the value the statement's `WHERE` reads.
+`wadjet.TestArcSCEmbeddedStatementWritesOneClock`). There is no second clock:
+a clock function evaluated where no statement's value reached it is an
+internal error (XX000), never a different instant.
+
+`LIMIT` and `OFFSET` take a number literal only, and `CREATE TABLE` has no
+column `DEFAULT`: an expression there — a clock function or any other — is a
+syntax error (42601), where PostgreSQL evaluates it with the statement's
+clock (catalog: temporal r27).
 
 The statement is what starts the clock: on the PostgreSQL wire protocol it is
 each statement of a simple-query string and each EXECUTE of the extended
