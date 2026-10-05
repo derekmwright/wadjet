@@ -36,9 +36,9 @@ Storage has one scale per column. `COALESCE(numeric(15,2), 12.3456789012345)`: t
 
 Its values print without the stored scale's trailing zeros — `1.25`, `1`, `0.755`, as PostgreSQL prints them — so a trailing zero the source carried is not printed either: `CREATE TABLE t AS SELECT 2.50 AS v` prints `2.5` where PostgreSQL prints `2.50`. Every text rendering of the value prints the same text — `CAST(v AS TEXT)`, `v || ''`, `concat`, `format`, `json_build_object`. An expression over the column (`v + 1`, `SUM(v)`) prints at its one declared scale. (catalog: [numeric-decimal#r24](adr/0012-divergences/numeric-decimal.md#catalog); #1541)
 
-**A CREATE TABLE AS column from a constant CASE over two declarations keeps the CASE's type.**
+**A CREATE TABLE AS column from `+n`, or from a CASE whose constant condition calls a function, keeps the plan's type.**
 
-`CREATE TABLE c AS SELECT CASE WHEN 1 = 1 THEN k ELSE n END AS x FROM t` over a numeric(5) k and a numeric(10,2) n creates numeric(10,2), so a later `INSERT 1.255` stores 1.26 where PostgreSQL, which folds the CASE to k first, creates numeric(5) and stores 1; `+n` likewise keeps n's numeric(10,2) where PostgreSQL creates plain numeric. (catalog: [dml-assignment#r23](adr/0012-divergences/dml-assignment.md#catalog); #1541)
+`CREATE TABLE c AS SELECT +n AS x FROM t` over a numeric(10,2) n creates numeric(10,2), so a later `INSERT 1.255` stores 1.26 where PostgreSQL creates plain numeric and stores 1.255. `CREATE TABLE c AS SELECT CASE WHEN length('ab') = 2 THEN k ELSE n END AS x FROM t` over a numeric(5) k creates the CASE's numeric(10,2) and stores 1.26 where PostgreSQL, which folds the CASE to k first, creates numeric(5) and stores 1; likewise a constant condition with a division, a modulo, `IS DISTINCT FROM` or a cast. A constant `IS NULL`, `IN`, `BETWEEN` or arithmetic comparison folds as PostgreSQL's does. (catalog: [dml-assignment#r23](adr/0012-divergences/dml-assignment.md#catalog); #1541)
 
 **A column created from an unconstrained numeric holds 28 integer digits.**
 

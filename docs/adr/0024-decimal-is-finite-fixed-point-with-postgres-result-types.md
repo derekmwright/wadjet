@@ -1123,7 +1123,7 @@ which is why the defect was invisible for as long as it was.
 ### 10. A column created from an unconstrained numeric is DECIMAL(38, max(s, 10)), marked unconstrained
 
 Added 2026-10-05 (arc UN, #1541; Derek Wright's decision of that date over
-the options the arc's round 1 measured). Item 1 stays: one scale per stored
+the options the arc measured). Item 1 stays: one scale per stored
 column, no per-value scale (E64).
 
 **The rule.** A stored column is created from an unconstrained numeric when
@@ -1157,14 +1157,20 @@ the walk: a `CASE` whose condition is a constant is the arm it selects
 (`CASE WHEN 1 = 1 THEN n END` keeps numeric(10,2); WITH NO DATA it is
 numeric, as PostgreSQL's), and `COALESCE` drops its NULL constants. The
 answer has a third value, *unknown* — a construct the walk does not model, a
-constant condition it cannot evaluate (one calling a function), a column it
-cannot trace — and an unknown column keeps the declaration the plan gives
-it: a mark set wrongly changes what a later write stores, a mark left unset
-is the base's behaviour. That declaration is the one c23adbbb created except
-where the plan's type itself moved with an unconstrained column: a constant
-CASE the walk cannot fold over such a column and a constrained one is the
-plan's common DECIMAL(38,10), unmarked, storing PostgreSQL's value and
-printing ten fraction digits. The walk folds the boolean and NULL literals,
+constant condition it cannot evaluate (a function call, a division or
+modulo, `IS DISTINCT FROM`, a cast), a column it cannot trace — and an
+unknown column keeps the declaration the plan gives it: a mark set wrongly
+changes what a later write stores, a mark left unset is the base's
+behaviour. That declaration is the one c23adbbb created except where the
+plan's type itself moved with an unconstrained column: a constant CASE the
+walk cannot fold over such a column and a constrained one is the plan's
+common DECIMAL(38,10), unmarked, storing PostgreSQL's value and printing ten
+fraction digits. A typmod the walk keeps is the column's declaration
+whatever (p,s) the plan computes the expression at: a constant CASE folded
+to one arm creates that arm's typmod even where the other arm widens the
+plan's common type (`CASE WHEN true THEN n ELSE u END` and `CASE WHEN 1 = 1
+THEN k ELSE n END` create numeric(10,2) and numeric(5), as PostgreSQL's).
+The walk folds the boolean and NULL literals,
 NOT / AND / OR, comparisons, `IS [NOT] NULL / TRUE / FALSE`, `[NOT] IN` and
 `BETWEEN` over number and string literals and their sums, differences and
 products. A numeric typed NULL
@@ -1201,23 +1207,27 @@ prints at its one scale (catalog numeric-decimal r18); a `COALESCE`, `CASE`,
 `GREATEST` or `NULLIF` that answers the column's own value hands on its
 box, so rendered as text it prints the column's text (`CAST(COALESCE(v, n)
 AS TEXT)` is `1.25`, as PostgreSQL's) while the SELECT list prints the
-expression at its one scale (r18). A DAG stage reads such a column back from a `.wshf` exchange, whose
-header names a column's type, precision and scale and has no version field
-to say more, so the mark rides beside the file, not in it. The task that
-writes the file reports the columns it wrote marked
-(`distributed.ResultNotification.UnconstrainedColumns`, from the batches its
-output sinks consumed), the coordinator stamps every task that reads those
-files at dispatch, the way merge-on-read delete markers ride the file key
-(`exchange_marks.go`; an eager consumer receives them in the producer's
-manifest), and the worker's one binding of an exchange read
-(`applyDeclaredScanSchema`) stamps them onto every batch it decodes
-(`exec.UnconstrainedStamp`); a base-table read carries the catalog's mark in
-its declared schema (`ColumnSpec.Unconstrained`), and a spill run (the columnar
-run format a grace join, a CTE collector and the external sort replay)
-carries it in its flag byte. The column's text is then
-the same on all five arms after a GROUP BY, a DISTINCT, a set operation, a
-window, an equi-join on either side, a sort with LIMIT and a CTE read twice
-(`coordinator.TestArcUNExchangeKeepsThePrinterEveryArm`).
+expression at its one scale (r18). A DAG stage reads such a column back from
+a `.wshf` exchange, and the file's header carries the mark on the column it
+belongs to: bit 7 of a DECIMAL column's precision byte, which no precision
+reaches (ADR-0010's 2026-10-05 amendment). The writer sets it from the batch
+schema it writes and the decoder sets it on the column it decodes, by
+position, so every reader of an exchange — a shuffle, a broadcast build, a
+gather, the coordinator's merge, the asynchronous door's result and build
+cache, an eager consumer's stream — gets the mark the producer's column had,
+and two columns of one name keep their own. A set operation's arms meet under
+the result column's mark (every arm's, or none): on the DAG each arm whose
+mark the result does not keep is coerced to the result's declaration before
+it writes (`exec.DecimalCoerce`), as the single process unifies the arms'
+schemas. A base-table read takes the mark from the parquet footer's declared
+schema, and a spill run (the columnar run format a grace join, a CTE
+collector and the external sort replay) carries it in its flag byte. The
+column's text is then the same on eleven arms — single, spilled, the five DAG
+arms (shuffled, morsel, eager, skew split, aggregate split), the fast path
+and the asynchronous door with and without its probe split — and on every
+door (`coordinator.TestArcUNExchangeKeepsThePrinterEveryArm`,
+`coordinator.TestArcUNInBandMarkEveryArm`,
+`server.TestArcUNInBandMarkEveryDoor`).
 
 **Measured** (arc UN, base 8e681724 → tip; PostgreSQL 17.11 first; the
 statement table is `wadjet/testdata/arc_un_enum.tsv`, 26 creation paths × 14
@@ -1238,10 +1248,17 @@ writes × 8 reads):
 of the created column first; `wadjet/testdata/arc_un_typmod.tsv`: 121
 source shapes over a numeric(10,2), a numeric(5) and an unconstrained
 column, WITH DATA and WITH NO DATA, each followed by `INSERT 1.255, 0.755`).
-Of 721 created tables, a later write stores PostgreSQL's value in 682,
-c23adbbb's in 33 (catalog dml-assignment r23, and two WITH NO DATA scalar
-subqueries over a CTE that both binaries declare text), and 6 have no
-PostgreSQL spelling (`IFNULL`); none stores a third value. At 742965c1, which marked
+Of 721 created tables, a later write stores PostgreSQL's value in 709,
+c23adbbb's in 6 (`+n` and `+k`, catalog dml-assignment r23, and two WITH NO
+DATA scalar subqueries over a CTE that both binaries declare text), and 6
+have no PostgreSQL spelling (`IFNULL`); none stores a third value. A second
+census of 260 constant-CASE tables (40 conditions × a constrained arm over
+another declaration or over an unconstrained column, and 10 folded to the
+constrained arm over an unconstrained one, WITH DATA and WITH NO DATA, then
+`INSERT 1.255, 0.755, 12345.678901234567`) stores PostgreSQL's value in 77,
+PostgreSQL's rounded to ten fraction digits in 171 (numeric-decimal r23),
+c23adbbb's in 12 (a condition the walk cannot fold over two declarations)
+and a third value in none. At 742965c1, which marked
 the column from the wire fold, 120 cells stored a third value:
 
 | source (over n numeric(10,2)) | PostgreSQL | 742965c1 | now |
@@ -1251,9 +1268,10 @@ the column from the wire fold, 120 cells stored a third value:
 | WITH DATA: `CASE WHEN 1 = 1 THEN n END`, `CASE WHEN true THEN n ELSE NULL END`, `COALESCE(n, NULL)`, `COALESCE(NULL, n)`, `CASE WHEN 'a' = 'a' …`, `(ARRAY[n])[1]` | numeric(10,2) | marked | numeric(10,2) |
 | the same WITH NO DATA (PostgreSQL does not fold) | numeric: 1.255 | marked | marked: 1.255 |
 | an aggregate (also inside a scalar subquery), a window function, arithmetic, `ROUND` / `ABS` / `TRUNC`, `CAST(n AS NUMERIC)`, a CASE / COALESCE / GREATEST / UNION ALL over two declarations or with a NULL value | numeric | marked | marked |
-| a constant CASE over two declarations, `+n` (r23) | numeric(5) / numeric | marked | the plan's declaration (c23adbbb's) |
+| WITH DATA: a CASE whose foldable constant condition selects a constrained arm over another declaration or over an unconstrained column (`CASE WHEN 1 = 1 THEN k ELSE n END`, `CASE WHEN true THEN n ELSE u END`) | numeric(5) / numeric(10,2) | marked | PostgreSQL's typmod |
+| `+n` (r23) | numeric | marked | n's declaration (c23adbbb's) |
 
-*Downgrade* (review r2, measured on the c23adbbb CLI over a store this
+*Downgrade* (measured on the c23adbbb CLI over a store this
 release wrote): every value reads right, prints the stored scale
 (`1.2500000000`) and information_schema reports 38 / 10; an INSERT or
 UPDATE through that binary keeps the record's marker, so this release reads
@@ -1294,13 +1312,19 @@ digits are not a fixed scale's, so a (38,10) column would round what
 8e681724 stored.
 
 Gated by `wadjet.TestArcUNUnconstrainedColumnEnumeration`,
-`wadjet.TestArcUNCreatedColumnKeepsPostgresTypmod` (the round-3 table),
+`wadjet.TestArcUNCreatedColumnKeepsPostgresTypmod`,
 `wadjet.TestArcUNOneTextPrinter`,
 `wadjet.TestArcUNUnconstrainedColumnPersists` (reopen and compaction),
 `wadjet.TestArcUNARecordWithoutTheMarkerIsTheColumnItWas`,
 `coordinator.TestArcUNUnconstrainedColumnEveryArm` (60 SELECTs, five arms),
 `server.TestArcUNUnconstrainedColumnOnTheWire` (single-process, coordinator,
-HTTP and gRPC doors) and `parquet.TestUnconstrainedNumericColumnIsOneDeclaration`.
+HTTP and gRPC doors), `coordinator.TestArcUNInBandMarkEveryArm` (eleven
+arms), `server.TestArcUNInBandMarkEveryDoor` (six doors),
+`worker.TestWSHFUnmarkedColumnsEncodeAsBase`,
+`worker.TestWSHFMarkRoundTripsByPosition`,
+`exec.TestDecimalCoerceStatesTheResultMark`,
+`exec.TestSpillRunKeepsTheUnconstrainedMark` and
+`parquet.TestUnconstrainedNumericColumnIsOneDeclaration`.
 
 ## Consequences
 
