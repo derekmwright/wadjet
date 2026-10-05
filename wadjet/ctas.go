@@ -103,11 +103,14 @@ func (db *DB) executeCreateTableAs(ctx context.Context, ct *plansql.CreateTableI
 	declared := make([]parquet.Column, len(res.OutputSchema))
 	copy(declared, res.OutputSchema)
 	for i := range declared {
-		declared[i].Unconstrained = i < len(res.ColumnMetas) && len(res.ColumnMetas) == len(declared) &&
-			res.ColumnMetas[i].TypeID == parquet.TypeDecimal &&
-			(res.ColumnMetas[i].WireUnconstrained || res.ColumnMetas[i].Unconstrained)
+		// The walk's own mark: a bare copy of a column created unconstrained.
+		declared[i].Unconstrained = len(res.ColumnMetas) == len(declared) && res.ColumnMetas[i].Unconstrained
 	}
-	markTypedNullNumeric(ct.AsSelect, declared)
+	planner, logicalPlan, _, err := db.ctasPlan(ctx, ct.AsSelect)
+	if err != nil {
+		return nil, err
+	}
+	declared = planner.CreatedColumns(logicalPlan, declared, true)
 	schema, err := db.ctasSchema(ct, declared)
 	if err != nil {
 		return nil, err
@@ -124,27 +127,6 @@ func (db *DB) executeCreateTableAs(ctx context.Context, ct *plansql.CreateTableI
 	}
 	// `SELECT <n>`: the tag PostgreSQL sends for a CTAS that ran its query.
 	return &ExecResult{Command: "SELECT", RowsAffected: n}, nil
-}
-
-// markTypedNullNumeric marks the double-precision output columns whose
-// SELECT item is a numeric typed NULL (physical.TypedNullNumeric): the
-// planner carries `CAST(NULL AS NUMERIC)` on the float rung, and the table
-// PostgreSQL creates from it is unconstrained numeric (ADR-0024 §10). Read
-// positionally from a plain SELECT list; a star or a set operation marks
-// nothing.
-func markTypedNullNumeric(parsed *plansql.ParsedQuery, declared []parquet.Column) {
-	info, err := plansql.ExtractSelect(parsed)
-	if err != nil || info == nil || info.Union != nil || len(info.Columns) != len(declared) {
-		return
-	}
-	for i, c := range info.Columns {
-		if c.Star || c.ASTExpr == nil || declared[i].Type != parquet.TypeFloat64 {
-			continue
-		}
-		if physical.TypedNullNumeric(c.ASTExpr) {
-			declared[i].Unconstrained = true
-		}
-	}
 }
 
 // ctasSchema is the last step both arms share: the rename list, the reserved
@@ -416,10 +398,14 @@ func (db *DB) tableExists(ctx context.Context, name string) (bool, error) {
 // already describes a zero-row result from (#1008). The enforcement runs
 // BEFORE the declaration is taken, so the columns declared are the columns
 // this identity may see (ADR-0034).
-func (db *DB) declaredOutputFor(ctx context.Context, parsed *plansql.ParsedQuery) ([]parquet.Column, error) {
+// ctasPlan is the build-enforce-optimize sequence DB.Query runs, up to the
+// optimized logical plan: the plan both arms of CREATE TABLE AS read what a
+// created column declares from (physical.Planner.CreatedColumns), and the
+// one WITH NO DATA declares its whole table from.
+func (db *DB) ctasPlan(ctx context.Context, parsed *plansql.ParsedQuery) (*physical.Planner, *logical.Node, *plansql.SelectInfo, error) {
 	selectInfo, err := plansql.ExtractSelect(parsed)
 	if err != nil {
-		return nil, stageError("extracting SELECT", err)
+		return nil, nil, nil, stageError("extracting SELECT", err)
 	}
 	planner := db.newPlanner(ctx)
 	// The table-function CAPABILITY, BEFORE the binder and before the scan
@@ -428,37 +414,38 @@ func (db *DB) declaredOutputFor(ctx context.Context, parsed *plansql.ParsedQuery
 	// planner read a reader's schema at all.
 	ctx, err = auth.AuthorizeTableFunctions(ctx, db.authProvider, "embedded", selectInfo)
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
 	if err := auth.ValidateStatementColumns(ctx, db.authProvider, db.catalog, selectInfo, "embedded"); err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
 	logicalPlan, err := logical.BuildFromSelect(selectInfo)
 	if err != nil {
-		return nil, stageError("building logical plan", err)
+		return nil, nil, nil, stageError("building logical plan", err)
 	}
 	planner.AnnotateScanColumns(ctx, logicalPlan)
 	ctx, logicalPlan, err = db.enforceAccessPolicies(ctx, selectInfo, logicalPlan)
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
 	logicalPlan = logical.OptimizeWith(logicalPlan, planner.LogicalOptions(), func(plan *logical.Node) {
 		planner.AnnotateScanColumns(ctx, plan)
 	})
 	logicalPlan, err = auth.EnforceOptimizedPlan(ctx, db.catalog, logicalPlan)
 	if err != nil {
+		return nil, nil, nil, err
+	}
+	return planner, logicalPlan, selectInfo, nil
+}
+
+func (db *DB) declaredOutputFor(ctx context.Context, parsed *plansql.ParsedQuery) ([]parquet.Column, error) {
+	planner, logicalPlan, selectInfo, err := db.ctasPlan(ctx, parsed)
+	if err != nil {
 		return nil, err
 	}
-	declared := planner.DeclaredOutputSchema(logicalPlan)
-	// The columns PostgreSQL declares plain numeric, by the walk's own names
-	// and before the renames below: the WITH DATA arm reads the same fold
-	// from the result's ColumnMetas (ADR-0024 §10).
-	wire := planner.DeclaredWireUnconstrained(logicalPlan)
-	for i := range declared {
-		declared[i].Unconstrained = declared[i].Type == parquet.TypeDecimal &&
-			(declared[i].Unconstrained || wire[declared[i].Name])
-	}
-	markTypedNullNumeric(parsed, declared)
+	// What each column declares, from the one rule both arms read: before
+	// the renames below, positionally (ADR-0024 §10).
+	declared := planner.CreatedColumns(logicalPlan, planner.DeclaredOutputSchema(logicalPlan), false)
 
 	// The NAMES come from the one rule, not from this walk.
 	//

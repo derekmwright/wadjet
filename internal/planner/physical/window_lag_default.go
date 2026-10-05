@@ -316,14 +316,14 @@ func lagLeadDefaultDecl(def plansql.Node, decls ColDecls, v expr.DeclType, vok b
 	return nodeDeclaredType(def, decls)
 }
 
-// TypedNullNumeric reports a SELECT item that is PostgreSQL's plain numeric
+// typedNullNumeric reports a SELECT item that is PostgreSQL's plain numeric
 // NULL and nothing else: `CAST(NULL AS NUMERIC)`, `NULL::numeric`, an
 // expression whose every leaf is the NULL literal and whose cast names the
 // numeric family, or a CASE whose every result is one of those or NULL. The
 // planner declares it double precision (the float rung); a table created from
 // it is PostgreSQL's unconstrained numeric column, and it carries no value
 // whose digits a fixed scale could drop (ADR-0024 §10).
-func TypedNullNumeric(n plansql.Node) bool {
+func typedNullNumeric(n plansql.Node) bool {
 	if c, ok := plansql.Unparen(n).(*plansql.CaseNode); ok {
 		typed := false
 		arms := make([]plansql.Node, 0, len(c.Whens)+1)
@@ -337,7 +337,7 @@ func TypedNullNumeric(n plansql.Node) bool {
 			if l, ok := plansql.Unparen(a).(*plansql.Lit); ok && l.Kind == plansql.LitNull {
 				continue
 			}
-			if !TypedNullNumeric(a) {
+			if !typedNullNumeric(a) {
 				return false
 			}
 			typed = true
