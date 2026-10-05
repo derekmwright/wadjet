@@ -827,9 +827,9 @@ An unqualified `pg_class` is `pg_catalog.pg_class`, as PostgreSQL's search
 path makes it; a WITH query of the same name is the WITH query.
 
 The catalog functions those clients call are implemented: the pattern-match
-operators `~ ~* !~ !~*` (and `OPERATOR(pg_catalog.~)`; an ARE construct RE2
-cannot express — a back reference, lookaround, `\m`/`\M` — is refused
-`0A000`), `COLLATE` for the byte-order collations (`C`, `POSIX`,
+operators `~ ~* !~ !~*` (and `OPERATOR(pg_catalog.~)`; the pattern is read
+as every regular-expression construct reads it — see Regular expressions
+under String Functions), `COLLATE` for the byte-order collations (`C`, `POSIX`,
 `ucs_basic`, `default`; any other is refused `0A000`), the `reg*` casts,
 `ARRAY(subquery)`, `format_type`, `pg_get_userbyid`, `to_regclass`,
 `pg_get_serial_sequence` and the `pg_get_*def` family.
@@ -4152,10 +4152,10 @@ see the Encoding Functions section.
 | `SUBSTRING(s FROM start [FOR count])` | The SQL-standard spelling of `SUBSTRING(s, start, count)`. A TEXT second operand is a regular expression instead — `SUBSTRING(s FROM '(b)(c)')` answers the first capture group, `b` — which is how PostgreSQL chooses between the two readings. A negative count is SQLSTATE 22011 | `SUBSTRING(hostname FROM 2 FOR 3)`, `SUBSTRING(url FROM '[0-9]+')` |
 | `OVERLAY(s PLACING new FROM start [FOR count])` / `OVERLAY(s, new, start [, count])` | Replace `count` characters of `s` from `start` with `new`; `count` defaults to the length of `new`. `FROM 0` is SQLSTATE 22011 | `OVERLAY('Txxxxas' PLACING 'hom' FROM 2 FOR 4)` → `'Thomas'` |
 | `NORMALIZE(s [, NFC \| NFD \| NFKC \| NFKD])` | Unicode normalization; the form is a bare keyword and defaults to NFC | `NORMALIZE(name, NFD)` |
-| `REGEXP_LIKE(s, pattern)` | Test if string matches regex | `REGEXP_LIKE(src_ip, '^\d+\.\d+')` |
-| `REGEXP_EXTRACT(s, pattern [, group])` | Extract regex match or capture group | `REGEXP_EXTRACT(url, '(\w+)://(\w+)', 2)` |
+| `REGEXP_LIKE(s, pattern [, flags])` | Whether the pattern matches, as PostgreSQL answers it; `flags` as below, `g` refused 22023 | `REGEXP_LIKE(src_ip, '^\d+\.\d+')` |
+| `REGEXP_EXTRACT(s, pattern [, group])` | The leftmost match, or its capture group; NULL without a match. PostgreSQL's `regexp_substr(s, pattern, 1, 1, '', group)` | `REGEXP_EXTRACT(url, '(\w+)://(\w+)', 2)` |
 | `REGEXP_REPLACE(s, pattern, repl [, flags])` | Replace the FIRST match, or every match under the `g` flag, as PostgreSQL does. The pattern is read as the `~` operators read it (PostgreSQL's ARE translated form by form, ADR-0044: `.` matches a newline, `\b` is a backspace, a back reference is refused 0A000), and an RE whose quantifiers are all greedy takes the longest match. In `repl`, `\1`…`\9` are groups and `\&` the whole match. Flags: `g`, `i` (ASCII letters fold) / `c`, `q` (literal pattern), `s` and `t` (the defaults); `n`, `m`, `p`, `w`, `x`, `b` and `e` are refused 0A000, as is an integer start position, and any other letter is 22023 | `REGEXP_REPLACE(message, '\s+', ' ', 'g')` |
-| `REGEXP_COUNT(s, pattern)` | Count regex matches | `REGEXP_COUNT(path, '/')` → `3` |
+| `REGEXP_COUNT(s, pattern [, start [, flags]])` | Count the matches, searching from the `start`th CHARACTER (a start below 1 is 22023); `flags` as below, `g` refused 22023 | `REGEXP_COUNT(path, '/')` → `3` |
 | `REGEXP_EXTRACT_ALL(s, pattern)` | Extract all regex matches (JSON array) | `REGEXP_EXTRACT_ALL(log, '\d+')` → `'["123","456"]'` |
 | `REGEXP_SPLIT(s, pattern)` | Split by regex (JSON array) | `REGEXP_SPLIT(csv, ',\s*')` |
 | `SPLIT(s, delim)` | Split by delimiter (JSON array) | `SPLIT('a.b.c', '.')` → `'["a","b","c"]'` |
@@ -4174,6 +4174,41 @@ see the Encoding Functions section.
 | `LCASE(s)` / `UCASE(s)` | Aliases for LOWER/UPPER | `LCASE(name)` |
 | `TO_UTF8(s)` | String to its raw UTF-8 bytes (BYTES) | `TO_UTF8('hello')` |
 | `FROM_UTF8(b)` | BYTES back to a string; NULL when the bytes are not valid UTF-8 | `FROM_UTF8(data)` |
+
+#### Regular expressions
+
+One dialect: every construct that takes a pattern — `~ ~* !~ !~*`, `SIMILAR TO`
+(whose rewrite is an ARE), `SUBSTRING(s FROM pattern)`, `REGEXP_LIKE`,
+`REGEXP_COUNT`, `REGEXP_REPLACE`, `REGEXP_EXTRACT`, `REGEXP_EXTRACT_ALL`,
+`REGEXP_SPLIT` and `PAYLOAD_MATCHES` — reads it as PostgreSQL's advanced
+regular expression (ARE), translated form by form for Go's RE2:
+
+- `\b` is a backspace and `\B` a backslash; the word boundary is `\y` (`\Y` its
+  negation): `REGEXP_LIKE('abc', '\b')` is false, `REGEXP_EXTRACT('the cat sat',
+  '\ycat\y')` is `cat`.
+- `.` and a negated bracket match a newline; `\A` and `\Z` anchor the string.
+- An RE whose quantifiers are all greedy takes the longest match at the
+  leftmost position: `REGEXP_EXTRACT('GETS /x', 'GET|GETS')` is `GETS`. An RE
+  holding a non-greedy quantifier is matched leftmost-first, quantifier by
+  quantifier (PostgreSQL makes the whole RE non-greedy).
+- `\w` and `[[:alpha:]]` are ASCII classes (`REGEXP_LIKE('é', '\w')` is false;
+  PostgreSQL true under a UTF-8 locale), and `i` folds ASCII letters only, as
+  PostgreSQL does under the C collation.
+- An RE2-only spelling (`\z`, `\pL`, `\Q…\E`, `(?P<name>…)`, an option after
+  the start) and a malformed pattern are SQLSTATE 2201B.
+- A form RE2 cannot express — a back reference in the pattern, lookahead /
+  lookbehind, `\m` / `\M`, `[[:<:]]` / `[[:>:]]`, a collating element, the
+  `b e n p w x` embedded options — is refused 0A000.
+
+The flags argument (`REGEXP_LIKE`, `REGEXP_COUNT`, `REGEXP_REPLACE`) takes
+PostgreSQL's letters: `i` / `c` (case-insensitive / sensitive, the last one
+written wins), `q` (the pattern is a literal), `s` and `t` (the defaults), and
+`g` on `REGEXP_REPLACE` only (22023 elsewhere). The newline-sensitive flags
+`n`, `m`, `p`, `w` and `x`, `b`, `e` are refused 0A000; any other letter is
+22023. `REGEXP_COUNT`'s start past 1 over a pattern holding `^`, `\A`, `\y` or
+`\Y` is refused 0A000. A pattern compiles once and is kept in a bounded cache
+(1024 patterns), so a literal pattern is not recompiled per row and a column
+of distinct patterns cannot grow memory past the bound.
 
 ### Version String Functions
 
