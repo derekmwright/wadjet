@@ -1277,7 +1277,13 @@ what it measures). Some arms refuse a shape, and the same arms refused it at
 the base too: `CAST(v AS TEXT)` with `ORDER BY 1` over a UNION on the six DAG arms
 ("sort: key column … does not exist", UN-F9) and over an INTERSECT / EXCEPT
 on the asynchronous door (#656); `sum` over a quoted literal in the FIRST
-arm and a scalar-subquery arm are refused on every arm
+arm and a scalar-subquery arm are refused on every arm. The same dropped
+projection reaches two doors: without the ORDER BY the DAG answers
+`CAST(v AS TEXT)` over a UNION (distinct) with the deduplicated numeric
+column, which the HTTP and gRPC coordinator doors print at its stored scale
+(`1.0000000000`) where the PostgreSQL, asynchronous and embedded doors print
+`1` — for an all-marked UNION at the base, and beside a NULL, integer or
+expression arm now that such a result is marked (numeric-decimal r24)
 (`coordinator.TestArcUNSetOperationMatrix` over 1,944 statements × 11 arms,
 `physical.TestSetOpMarkTable`,
 `physical.TestSetOpResultColumnOneAnswerOnBothCallSites`,
