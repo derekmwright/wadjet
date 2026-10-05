@@ -4156,7 +4156,7 @@ see the Encoding Functions section.
 | `NORMALIZE(s [, NFC \| NFD \| NFKC \| NFKD])` | Unicode normalization; the form is a bare keyword and defaults to NFC | `NORMALIZE(name, NFD)` |
 | `REGEXP_LIKE(s, pattern [, flags])` | Whether the pattern matches, as PostgreSQL answers it; `flags` as below, `g` refused 22023 | `REGEXP_LIKE(src_ip, '^\d+\.\d+')` |
 | `REGEXP_EXTRACT(s, pattern [, group])` | The leftmost match, or its capture group; NULL without a match. PostgreSQL's `regexp_substr(s, pattern, 1, 1, '', group)` | `REGEXP_EXTRACT(url, '(\w+)://(\w+)', 2)` |
-| `REGEXP_REPLACE(s, pattern, repl [, flags])` | Replace the FIRST match, or every match under the `g` flag, as PostgreSQL does. The pattern is read as the `~` operators read it (PostgreSQL's ARE translated form by form, ADR-0044: `.` matches a newline, `\b` is a backspace, a back reference is refused 0A000), and an RE whose quantifiers are all greedy takes the longest match. In `repl`, `\1`…`\9` are groups and `\&` the whole match. Flags: `g`, `i` (ASCII letters fold) / `c`, `q` (literal pattern), `s` and `t` (the defaults); `n`, `m`, `p`, `w`, `x`, `b` and `e` are refused 0A000, as is an integer start position, and any other letter is 22023 | `REGEXP_REPLACE(message, '\s+', ' ', 'g')` |
+| `REGEXP_REPLACE(s, pattern, repl [, flags])` | Replace the FIRST match, or every match under the `g` flag, as PostgreSQL does. The pattern is read as every regular-expression construct reads it (see Regular expressions below), and an RE whose quantifiers are all greedy takes the longest match. In `repl`, `\1`…`\9` are groups and `\&` the whole match. `flags` as below; an integer start position is refused 0A000 | `REGEXP_REPLACE(message, '\s+', ' ', 'g')` |
 | `REGEXP_COUNT(s, pattern [, start [, flags]])` | Count the matches, searching from the `start`th CHARACTER (a start below 1 is 22023); `flags` as below, `g` refused 22023 | `REGEXP_COUNT(path, '/')` → `3` |
 | `REGEXP_EXTRACT_ALL(s, pattern)` | Extract all regex matches (JSON array) | `REGEXP_EXTRACT_ALL(log, '\d+')` → `'["123","456"]'` |
 | `REGEXP_SPLIT(s, pattern)` | Split by regex (JSON array) | `REGEXP_SPLIT(csv, ',\s*')` |
@@ -4188,29 +4188,43 @@ regular expression (ARE), translated form by form for Go's RE2:
 - `\b` is a backspace and `\B` a backslash; the word boundary is `\y` (`\Y` its
   negation): `REGEXP_LIKE('abc', '\b')` is false, `REGEXP_EXTRACT('the cat sat',
   '\ycat\y')` is `cat`.
-- `.` and a negated bracket match a newline; `\A` and `\Z` anchor the string.
+- `.` and a negated bracket match a newline unless a newline option says
+  otherwise (below); `\A` and `\Z` anchor the string.
 - An RE whose quantifiers are all greedy takes the longest match at the
   leftmost position: `REGEXP_EXTRACT('GETS /x', 'GET|GETS')` is `GETS`. An RE
   holding a non-greedy quantifier is matched leftmost-first, quantifier by
   quantifier (PostgreSQL makes the whole RE non-greedy).
+- Case-insensitivity matches each pattern letter's lower- and upper-case
+  forms, as PostgreSQL does: `'ÄBC' ~* 'äbc'` is true, `'ς' ~* 'σ'` false
+  (σ's forms are σ and Σ).
 - `\w` and `[[:alpha:]]` are ASCII classes (`REGEXP_LIKE('é', '\w')` is false;
-  PostgreSQL true under a UTF-8 locale), and `i` folds ASCII letters only, as
-  PostgreSQL does under the C collation.
-- An RE2-only spelling (`\z`, `\pL`, `\Q…\E`, `(?P<name>…)`, an option after
-  the start) and a malformed pattern are SQLSTATE 2201B.
+  PostgreSQL true under a UTF-8 locale).
+- An RE2-only spelling (`\z`, `\pL`, `\Q…\E`, `\x{41}`, `(?P<name>…)`, `(?i:…)`,
+  an option after the start) and a malformed pattern are SQLSTATE 2201B.
 - A form RE2 cannot express — a back reference in the pattern, lookahead /
-  lookbehind, `\m` / `\M`, `[[:<:]]` / `[[:>:]]`, a collating element, the
-  `b e n p w x` embedded options — is refused 0A000.
+  lookbehind, `\m` / `\M`, `[[:<:]]` / `[[:>:]]`, a collating element — is
+  refused 0A000.
 
-The flags argument (`REGEXP_LIKE`, `REGEXP_COUNT`, `REGEXP_REPLACE`) takes
-PostgreSQL's letters: `i` / `c` (case-insensitive / sensitive, the last one
-written wins), `q` (the pattern is a literal), `s` and `t` (the defaults), and
-`g` on `REGEXP_REPLACE` only (22023 elsewhere). The newline-sensitive flags
-`n`, `m`, `p`, `w` and `x`, `b`, `e` are refused 0A000; any other letter is
-22023. `REGEXP_COUNT`'s start past 1 over a pattern holding `^`, `\A`, `\y` or
-`\Y` is refused 0A000. A pattern compiles once and is kept in a bounded cache
-(1024 patterns), so a literal pattern is not recompiled per row and a column
-of distinct patterns cannot grow memory past the bound.
+The options, as an embedded `(?…)` prefix or the flags argument (`REGEXP_LIKE`,
+`REGEXP_COUNT`, `REGEXP_REPLACE`); the letter written last wins:
+
+| letter | meaning |
+|---|---|
+| `i` / `c` | case-insensitive / case-sensitive |
+| `q` | the pattern is a literal string |
+| `s` | `.` and `[^…]` match a newline, `^` `$` match only at the string's ends (the default) |
+| `n`, `m` | newline-sensitive: `.` and `[^…]` do not match a newline, `^` `$` match at each line |
+| `p` | `.` and `[^…]` do not match a newline; `^` `$` only at the string's ends |
+| `w` | `^` `$` match at each line; `.` and `[^…]` match a newline |
+| `x` / `t` | expanded syntax (white space and `#` comments outside brackets ignored) / tight |
+| `g` | every match — `REGEXP_REPLACE` only; 22023 on the others |
+| `b`, `e` | the basic and extended dialects: refused 0A000 |
+
+Any other letter is 22023. `REGEXP_COUNT`'s start past 1 over a pattern
+holding `^`, `\A`, `\y` or `\Y` is refused 0A000. A pattern compiles once and
+is kept in a bounded cache (4096 patterns, the oldest evicted first), so a
+literal pattern is not recompiled per row and a column of distinct patterns
+cannot grow memory past the bound.
 
 ### Version String Functions
 
