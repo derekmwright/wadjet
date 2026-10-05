@@ -34,7 +34,7 @@ Storage has one scale per column. `COALESCE(numeric(15,2), 12.3456789012345)`: t
 
 **A column created from an unconstrained numeric prints no trailing zeros.**
 
-Its values print without the stored scale's trailing zeros — `1.25`, `1`, `0.755`, as PostgreSQL prints them — so a trailing zero the source carried is not printed either: `CREATE TABLE t AS SELECT 2.50 AS v` prints `2.5` where PostgreSQL prints `2.50`. Every text rendering of the value prints the same text — `CAST(v AS TEXT)`, `v || ''`, `concat`, `format`, `json_build_object` — except that on a distributed query a GROUP BY key or a UNION ALL arm rendered as text by a later stage prints the stored scale (`1.2500000000`). An expression over the column (`v + 1`, `SUM(v)`) prints at its one declared scale. (catalog: [numeric-decimal#r24](adr/0012-divergences/numeric-decimal.md#catalog); #1541)
+Its values print without the stored scale's trailing zeros — `1.25`, `1`, `0.755`, as PostgreSQL prints them — so a trailing zero the source carried is not printed either: `CREATE TABLE t AS SELECT 2.50 AS v` prints `2.5` where PostgreSQL prints `2.50`. Every text rendering of the value prints the same text — `CAST(v AS TEXT)`, `v || ''`, `concat`, `format`, `json_build_object`. An expression over the column (`v + 1`, `SUM(v)`) prints at its one declared scale. (catalog: [numeric-decimal#r24](adr/0012-divergences/numeric-decimal.md#catalog); #1541)
 
 **A CREATE TABLE AS column from a constant CASE over two declarations keeps the CASE's type.**
 
