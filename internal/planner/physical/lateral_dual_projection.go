@@ -84,6 +84,9 @@ func compileLateralDualItems(items []logical.Projection, outer *logical.Node, cl
 		expr.StampArithMode(compiled, decl.ID == parquet.TypeInt64)
 		out = append(out, exec.LateralOuterColumn{
 			Name: name, Expr: compiled.Eval, Decl: decl,
+			// A bare outer reference to a column created unconstrained is
+			// still that column (ADR-0024 §10).
+			Unconstrained: decl.ID == parquet.TypeDecimal && projectionBareUnconstrained(item, decls),
 		})
 	}
 	return out, nil

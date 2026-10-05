@@ -91,6 +91,16 @@ func unifySetOpSchemas(left, right []parquet.Column) []parquet.Column {
 		l, r := left[i], right[i]
 		col, ok := setOpUnifyColumn(l, r)
 		if !ok {
+			col = l
+		}
+		// The result is a column created from an unconstrained numeric only
+		// when every arm is one (ADR-0024 §10): an arm of another column
+		// keeps its own text.
+		if col.Unconstrained && !r.Unconstrained {
+			col.Unconstrained = false
+			ok = true
+		}
+		if !ok {
 			continue
 		}
 		set(i, col)

@@ -1,0 +1,97 @@
+# arc UN round 3 (ADR-0024 §10): every TEXT rendering of a column created from an unconstrained numeric is one printer (batch.Vector.GetValueOf). statement<TAB>this engine<TAB>PostgreSQL 17.11 (wadjet-pg-un3)<TAB>disposition: = (PostgreSQL's text) or r18 (a computed value over the column — a scalar subquery's answer, arithmetic, a set operation over a column of another declaration — prints at its one scale, catalog numeric-decimal r18). Answers: rows ` | `-joined in the statement's order, cells `,`-joined, NULL spelled out. At 742965c1 `v || ''`, concat, concat_ws, format, quote_literal, json_build_object, array_to_string and a GROUP BY key or LATERAL column under CAST printed the stored scale (1.5000000000).
+SETUP	CREATE TABLE un (id BIGINT, v NUMERIC)
+SETUP	INSERT INTO un VALUES (1, 1.5), (2, 2), (3, 0.25), (4, NULL), (5, -0.0001)
+SETUP	CREATE TABLE tx (id BIGINT, s TEXT)
+SELECT id, CAST(v AS TEXT) FROM un ORDER BY id	1,1.5 | 2,2 | 3,0.25 | 4,NULL | 5,-0.0001	1,1.5 | 2,2 | 3,0.25 | 4,NULL | 5,-0.0001	=
+SELECT id, v::text FROM un ORDER BY id	1,1.5 | 2,2 | 3,0.25 | 4,NULL | 5,-0.0001	1,1.5 | 2,2 | 3,0.25 | 4,NULL | 5,-0.0001	=
+SELECT id, CAST(v AS VARCHAR) FROM un ORDER BY id	1,1.5 | 2,2 | 3,0.25 | 4,NULL | 5,-0.0001	1,1.5 | 2,2 | 3,0.25 | 4,NULL | 5,-0.0001	=
+SELECT id, CAST(v AS VARCHAR(30)) FROM un ORDER BY id	1,1.5 | 2,2 | 3,0.25 | 4,NULL | 5,-0.0001	1,1.5 | 2,2 | 3,0.25 | 4,NULL | 5,-0.0001	=
+SELECT id, v || '' FROM un ORDER BY id	1,1.5 | 2,2 | 3,0.25 | 4,NULL | 5,-0.0001	1,1.5 | 2,2 | 3,0.25 | 4,NULL | 5,-0.0001	=
+SELECT id, '' || v FROM un ORDER BY id	1,1.5 | 2,2 | 3,0.25 | 4,NULL | 5,-0.0001	1,1.5 | 2,2 | 3,0.25 | 4,NULL | 5,-0.0001	=
+SELECT id, v || 'x' FROM un ORDER BY id	1,1.5x | 2,2x | 3,0.25x | 4,NULL | 5,-0.0001x	1,1.5x | 2,2x | 3,0.25x | 4,NULL | 5,-0.0001x	=
+SELECT id, concat(v) FROM un ORDER BY id	1,1.5 | 2,2 | 3,0.25 | 4, | 5,-0.0001	1,1.5 | 2,2 | 3,0.25 | 4, | 5,-0.0001	=
+SELECT id, concat(v, '|') FROM un ORDER BY id	1,1.5| | 2,2| | 3,0.25| | 4,| | 5,-0.0001|	1,1.5| | 2,2| | 3,0.25| | 4,| | 5,-0.0001|	=
+SELECT id, concat_ws(',', v, v) FROM un ORDER BY id	1,1.5,1.5 | 2,2,2 | 3,0.25,0.25 | 4, | 5,-0.0001,-0.0001	1,1.5,1.5 | 2,2,2 | 3,0.25,0.25 | 4, | 5,-0.0001,-0.0001	=
+SELECT id, format('%s', v) FROM un ORDER BY id	1,1.5 | 2,2 | 3,0.25 | 4, | 5,-0.0001	1,1.5 | 2,2 | 3,0.25 | 4, | 5,-0.0001	=
+SELECT id, format('%L', v) FROM un ORDER BY id	1,'1.5' | 2,'2' | 3,'0.25' | 4,NULL | 5,'-0.0001'	1,'1.5' | 2,'2' | 3,'0.25' | 4,NULL | 5,'-0.0001'	=
+SELECT id, json_build_object('v', v) FROM un ORDER BY id	1,{"v" : 1.5} | 2,{"v" : 2} | 3,{"v" : 0.25} | 4,{"v" : null} | 5,{"v" : -0.0001}	1,{"v" : 1.5} | 2,{"v" : 2} | 3,{"v" : 0.25} | 4,{"v" : null} | 5,{"v" : -0.0001}	=
+SELECT id, array_to_string(ARRAY[v], ',') FROM un ORDER BY id	1,1.5 | 2,2 | 3,0.25 | 4, | 5,-0.0001	1,1.5 | 2,2 | 3,0.25 | 4, | 5,-0.0001	=
+SELECT id, quote_literal(v) FROM un ORDER BY id	1,'1.5' | 2,'2' | 3,'0.25' | 4,NULL | 5,'-0.0001'	1,'1.5' | 2,'2' | 3,'0.25' | 4,NULL | 5,'-0.0001'	=
+SELECT id, quote_nullable(v) FROM un ORDER BY id	1,'1.5' | 2,'2' | 3,'0.25' | 4,NULL | 5,'-0.0001'	1,'1.5' | 2,'2' | 3,'0.25' | 4,NULL | 5,'-0.0001'	=
+SELECT id, length(v::text) FROM un ORDER BY id	1,3 | 2,1 | 3,4 | 4,NULL | 5,7	1,3 | 2,1 | 3,4 | 4,NULL | 5,7	=
+SELECT id, upper(v::text) FROM un ORDER BY id	1,1.5 | 2,2 | 3,0.25 | 4,NULL | 5,-0.0001	1,1.5 | 2,2 | 3,0.25 | 4,NULL | 5,-0.0001	=
+SELECT COUNT(*) FROM un WHERE CAST(v AS TEXT) = v || ''	4	4	=
+SELECT COUNT(*) FROM un WHERE CAST(v AS TEXT) = concat(v)	4	4	=
+SELECT COUNT(*) FROM un WHERE CAST(v AS TEXT) = format('%s', v)	4	4	=
+SELECT COUNT(*) FROM un WHERE CAST(v AS TEXT) = '' || v	4	4	=
+SELECT COUNT(*) FROM un WHERE CAST(v AS TEXT) = concat_ws(',', v)	4	4	=
+SELECT id, CAST(v AS TEXT) FROM (SELECT id, v FROM un) d ORDER BY id	1,1.5 | 2,2 | 3,0.25 | 4,NULL | 5,-0.0001	1,1.5 | 2,2 | 3,0.25 | 4,NULL | 5,-0.0001	=
+SELECT id, x || '' FROM (SELECT id, v AS x FROM un) d ORDER BY id	1,1.5 | 2,2 | 3,0.25 | 4,NULL | 5,-0.0001	1,1.5 | 2,2 | 3,0.25 | 4,NULL | 5,-0.0001	=
+SELECT id, (SELECT u2.v FROM un u2 WHERE u2.id = 1) || '' FROM un ORDER BY id	1,1.5000000000 | 2,1.5000000000 | 3,1.5000000000 | 4,1.5000000000 | 5,1.5000000000	1,1.5 | 2,1.5 | 3,1.5 | 4,1.5 | 5,1.5	r18
+SELECT id, COALESCE(v, 0) || '' FROM un ORDER BY id	1,1.5 | 2,2 | 3,0.25 | 4,0 | 5,-0.0001	1,1.5 | 2,2 | 3,0.25 | 4,0 | 5,-0.0001	=
+SELECT id, CASE WHEN id > 0 THEN v END || '' FROM un ORDER BY id	1,1.5 | 2,2 | 3,0.25 | 4,NULL | 5,-0.0001	1,1.5 | 2,2 | 3,0.25 | 4,NULL | 5,-0.0001	=
+SELECT id, (v + 0) || '' FROM un ORDER BY id	1,1.5000000000 | 2,2.0000000000 | 3,0.2500000000 | 4,NULL | 5,-0.0001000000	1,1.5 | 2,2 | 3,0.25 | 4,NULL | 5,-0.0001	r18
+SETUP	INSERT INTO tx SELECT id, v FROM un
+SELECT id, s FROM tx ORDER BY id	1,1.5 | 2,2 | 3,0.25 | 4,NULL | 5,-0.0001	1,1.5 | 2,2 | 3,0.25 | 4,NULL | 5,-0.0001	=
+SELECT id, md5(v || '') FROM un ORDER BY id	1,6008647277c4454cecd97d33c069f0ca | 2,c81e728d9d4c2f636f067f89cc14862c | 3,70da82175ec8a195a3d8b0fa8f69681d | 4,NULL | 5,bff134857338d482c19e7e6a22708147	1,6008647277c4454cecd97d33c069f0ca | 2,c81e728d9d4c2f636f067f89cc14862c | 3,70da82175ec8a195a3d8b0fa8f69681d | 4,NULL | 5,bff134857338d482c19e7e6a22708147	=
+SELECT string_agg(v || '', ',') FROM (SELECT v FROM un ORDER BY id) s	1.5,2,0.25,-0.0001	1.5,2,0.25,-0.0001	=
+SETUP	CREATE TABLE un_t (id BIGINT, g BIGINT, v NUMERIC, w NUMERIC, n NUMERIC(10,2))
+SETUP	INSERT INTO un_t VALUES (1,1,1.25,2,1.25),(2,1,0.755,0.5,2.50),(3,1,1,NULL,NULL),(4,2,NULL,3.3333333333,3.33),(6,3,2.5,1.5,0.75)
+SETUP	CREATE TABLE un_u (id BIGINT, v NUMERIC)
+SETUP	INSERT INTO un_u VALUES (1,1.25),(2,7),(7,0.1)
+SELECT id, x AS r FROM (SELECT id, v AS x FROM un_t) q0 ORDER BY 1, 2	1,1.25 | 2,0.755 | 3,1 | 4,NULL | 6,2.5	1,1.25 | 2,0.755 | 3,1 | 4,NULL | 6,2.5	=
+SELECT id, CAST(x AS TEXT) AS r FROM (SELECT id, v AS x FROM un_t) q0 ORDER BY 1, 2	1,1.25 | 2,0.755 | 3,1 | 4,NULL | 6,2.5	1,1.25 | 2,0.755 | 3,1 | 4,NULL | 6,2.5	=
+SELECT id, x || '' AS r FROM (SELECT id, v AS x FROM un_t) q0 ORDER BY 1, 2	1,1.25 | 2,0.755 | 3,1 | 4,NULL | 6,2.5	1,1.25 | 2,0.755 | 3,1 | 4,NULL | 6,2.5	=
+SELECT id, concat(x) AS r FROM (SELECT id, v AS x FROM un_t) q0 ORDER BY 1, 2	1,1.25 | 2,0.755 | 3,1 | 4, | 6,2.5	1,1.25 | 2,0.755 | 3,1 | 4, | 6,2.5	=
+SELECT id, v AS r FROM un_t ORDER BY 1, 2	1,1.25 | 2,0.755 | 3,1 | 4,NULL | 6,2.5	1,1.25 | 2,0.755 | 3,1 | 4,NULL | 6,2.5	=
+SELECT id, CAST(v AS TEXT) AS r FROM un_t ORDER BY 1, 2	1,1.25 | 2,0.755 | 3,1 | 4,NULL | 6,2.5	1,1.25 | 2,0.755 | 3,1 | 4,NULL | 6,2.5	=
+SELECT id, v || '' AS r FROM un_t ORDER BY 1, 2	1,1.25 | 2,0.755 | 3,1 | 4,NULL | 6,2.5	1,1.25 | 2,0.755 | 3,1 | 4,NULL | 6,2.5	=
+SELECT id, concat(v) AS r FROM un_t ORDER BY 1, 2	1,1.25 | 2,0.755 | 3,1 | 4, | 6,2.5	1,1.25 | 2,0.755 | 3,1 | 4, | 6,2.5	=
+SELECT id, x AS r FROM (SELECT id, v AS x FROM un_t) d ORDER BY 1, 2	1,1.25 | 2,0.755 | 3,1 | 4,NULL | 6,2.5	1,1.25 | 2,0.755 | 3,1 | 4,NULL | 6,2.5	=
+SELECT id, CAST(x AS TEXT) AS r FROM (SELECT id, v AS x FROM un_t) d ORDER BY 1, 2	1,1.25 | 2,0.755 | 3,1 | 4,NULL | 6,2.5	1,1.25 | 2,0.755 | 3,1 | 4,NULL | 6,2.5	=
+SELECT id, x || '' AS r FROM (SELECT id, v AS x FROM un_t) d ORDER BY 1, 2	1,1.25 | 2,0.755 | 3,1 | 4,NULL | 6,2.5	1,1.25 | 2,0.755 | 3,1 | 4,NULL | 6,2.5	=
+SELECT id, concat(x) AS r FROM (SELECT id, v AS x FROM un_t) d ORDER BY 1, 2	1,1.25 | 2,0.755 | 3,1 | 4, | 6,2.5	1,1.25 | 2,0.755 | 3,1 | 4, | 6,2.5	=
+SETUP	WITH c AS (SELECT id, v AS x FROM un_t) SELECT id, x AS r FROM c ORDER BY 1, 2
+SETUP	WITH c AS (SELECT id, v AS x FROM un_t) SELECT id, CAST(x AS TEXT) AS r FROM c ORDER BY 1, 2
+SETUP	WITH c AS (SELECT id, v AS x FROM un_t) SELECT id, x || '' AS r FROM c ORDER BY 1, 2
+SETUP	WITH c AS (SELECT id, v AS x FROM un_t) SELECT id, concat(x) AS r FROM c ORDER BY 1, 2
+SELECT g AS id, x AS r FROM (SELECT g, v AS x FROM un_t GROUP BY g, v) q ORDER BY 1, 2	1,0.755 | 1,1 | 1,1.25 | 2,NULL | 3,2.5	1,0.755 | 1,1 | 1,1.25 | 2,NULL | 3,2.5	=
+SELECT g AS id, CAST(x AS TEXT) AS r FROM (SELECT g, v AS x FROM un_t GROUP BY g, v) q ORDER BY 1, 2	1,0.755 | 1,1 | 1,1.25 | 2,NULL | 3,2.5	1,0.755 | 1,1 | 1,1.25 | 2,NULL | 3,2.5	=
+SELECT g AS id, x || '' AS r FROM (SELECT g, v AS x FROM un_t GROUP BY g, v) q ORDER BY 1, 2	1,0.755 | 1,1 | 1,1.25 | 2,NULL | 3,2.5	1,0.755 | 1,1 | 1,1.25 | 2,NULL | 3,2.5	=
+SELECT g AS id, concat(x) AS r FROM (SELECT g, v AS x FROM un_t GROUP BY g, v) q ORDER BY 1, 2	1,0.755 | 1,1 | 1,1.25 | 2, | 3,2.5	1,0.755 | 1,1 | 1,1.25 | 2, | 3,2.5	=
+SELECT g AS id, v AS r FROM un_t GROUP BY g, v ORDER BY 1, 2	1,0.755 | 1,1 | 1,1.25 | 2,NULL | 3,2.5	1,0.755 | 1,1 | 1,1.25 | 2,NULL | 3,2.5	=
+SELECT g AS id, CAST(v AS TEXT) AS r FROM un_t GROUP BY g, v ORDER BY 1, 2	1,0.755 | 1,1 | 1,1.25 | 2,NULL | 3,2.5	1,0.755 | 1,1 | 1,1.25 | 2,NULL | 3,2.5	=
+SELECT g AS id, v || '' AS r FROM un_t GROUP BY g, v ORDER BY 1, 2	1,0.755 | 1,1 | 1,1.25 | 2,NULL | 3,2.5	1,0.755 | 1,1 | 1,1.25 | 2,NULL | 3,2.5	=
+SELECT g AS id, concat(v) AS r FROM un_t GROUP BY g, v ORDER BY 1, 2	1,0.755 | 1,1 | 1,1.25 | 2, | 3,2.5	1,0.755 | 1,1 | 1,1.25 | 2, | 3,2.5	=
+SELECT DISTINCT id, v AS r FROM un_t ORDER BY 1, 2	1,1.25 | 2,0.755 | 3,1 | 4,NULL | 6,2.5	1,1.25 | 2,0.755 | 3,1 | 4,NULL | 6,2.5	=
+SELECT DISTINCT id, CAST(v AS TEXT) AS r FROM un_t ORDER BY 1, 2	1,1.25 | 2,0.755 | 3,1 | 4,NULL | 6,2.5	1,1.25 | 2,0.755 | 3,1 | 4,NULL | 6,2.5	=
+SELECT DISTINCT id, v || '' AS r FROM un_t ORDER BY 1, 2	1,1.25 | 2,0.755 | 3,1 | 4,NULL | 6,2.5	1,1.25 | 2,0.755 | 3,1 | 4,NULL | 6,2.5	=
+SELECT DISTINCT id, concat(v) AS r FROM un_t ORDER BY 1, 2	1,1.25 | 2,0.755 | 3,1 | 4, | 6,2.5	1,1.25 | 2,0.755 | 3,1 | 4, | 6,2.5	=
+SELECT un_t.id, un_t.v AS r FROM un_t JOIN un_u ON un_t.id = un_u.id ORDER BY 1, 2	1,1.25 | 2,0.755	1,1.25 | 2,0.755	=
+SELECT un_t.id, CAST(un_t.v AS TEXT) AS r FROM un_t JOIN un_u ON un_t.id = un_u.id ORDER BY 1, 2	1,1.25 | 2,0.755	1,1.25 | 2,0.755	=
+SELECT un_t.id, un_t.v || '' AS r FROM un_t JOIN un_u ON un_t.id = un_u.id ORDER BY 1, 2	1,1.25 | 2,0.755	1,1.25 | 2,0.755	=
+SELECT un_t.id, concat(un_t.v) AS r FROM un_t JOIN un_u ON un_t.id = un_u.id ORDER BY 1, 2	1,1.25 | 2,0.755	1,1.25 | 2,0.755	=
+SELECT id, x AS r FROM (SELECT id, v AS x FROM un_t UNION ALL SELECT id, w FROM un_t) s ORDER BY 1, 2	1,1.25 | 1,2 | 2,0.5 | 2,0.755 | 3,1 | 3,NULL | 4,3.3333333333 | 4,NULL | 6,1.5 | 6,2.5	1,1.25 | 1,2 | 2,0.5 | 2,0.755 | 3,1 | 3,NULL | 4,3.3333333333 | 4,NULL | 6,1.5 | 6,2.5	=
+SELECT id, CAST(x AS TEXT) AS r FROM (SELECT id, v AS x FROM un_t UNION ALL SELECT id, w FROM un_t) s ORDER BY 1, 2	1,1.25 | 1,2 | 2,0.5 | 2,0.755 | 3,1 | 3,NULL | 4,3.3333333333 | 4,NULL | 6,1.5 | 6,2.5	1,1.25 | 1,2 | 2,0.5 | 2,0.755 | 3,1 | 3,NULL | 4,3.3333333333 | 4,NULL | 6,1.5 | 6,2.5	=
+SELECT id, x || '' AS r FROM (SELECT id, v AS x FROM un_t UNION ALL SELECT id, w FROM un_t) s ORDER BY 1, 2	1,1.25 | 1,2 | 2,0.5 | 2,0.755 | 3,1 | 3,NULL | 4,3.3333333333 | 4,NULL | 6,1.5 | 6,2.5	1,1.25 | 1,2 | 2,0.5 | 2,0.755 | 3,1 | 3,NULL | 4,3.3333333333 | 4,NULL | 6,1.5 | 6,2.5	=
+SELECT id, concat(x) AS r FROM (SELECT id, v AS x FROM un_t UNION ALL SELECT id, w FROM un_t) s ORDER BY 1, 2	1,1.25 | 1,2 | 2,0.5 | 2,0.755 | 3, | 3,1 | 4, | 4,3.3333333333 | 6,1.5 | 6,2.5	1,1.25 | 1,2 | 2,0.5 | 2,0.755 | 3, | 3,1 | 4, | 4,3.3333333333 | 6,1.5 | 6,2.5	=
+SELECT id, x AS r FROM (SELECT id, v AS x FROM un_t UNION ALL SELECT id, n FROM un_t) s ORDER BY 1, 2	1,1.2500000000 | 1,1.2500000000 | 2,0.7550000000 | 2,2.5000000000 | 3,1.0000000000 | 3,NULL | 4,3.3300000000 | 4,NULL | 6,0.7500000000 | 6,2.5000000000	1,1.25 | 1,1.25 | 2,0.755 | 2,2.50 | 3,1 | 3,NULL | 4,3.33 | 4,NULL | 6,0.75 | 6,2.5	r18
+SELECT id, CAST(x AS TEXT) AS r FROM (SELECT id, v AS x FROM un_t UNION ALL SELECT id, n FROM un_t) s ORDER BY 1, 2	1,1.2500000000 | 1,1.2500000000 | 2,0.7550000000 | 2,2.5000000000 | 3,1.0000000000 | 3,NULL | 4,3.3300000000 | 4,NULL | 6,0.7500000000 | 6,2.5000000000	1,1.25 | 1,1.25 | 2,0.755 | 2,2.50 | 3,1 | 3,NULL | 4,3.33 | 4,NULL | 6,0.75 | 6,2.5	r18
+SELECT id, x || '' AS r FROM (SELECT id, v AS x FROM un_t UNION ALL SELECT id, n FROM un_t) s ORDER BY 1, 2	1,1.2500000000 | 1,1.2500000000 | 2,0.7550000000 | 2,2.5000000000 | 3,1.0000000000 | 3,NULL | 4,3.3300000000 | 4,NULL | 6,0.7500000000 | 6,2.5000000000	1,1.25 | 1,1.25 | 2,0.755 | 2,2.50 | 3,1 | 3,NULL | 4,3.33 | 4,NULL | 6,0.75 | 6,2.5	r18
+SELECT id, concat(x) AS r FROM (SELECT id, v AS x FROM un_t UNION ALL SELECT id, n FROM un_t) s ORDER BY 1, 2	1,1.2500000000 | 1,1.2500000000 | 2,0.7550000000 | 2,2.5000000000 | 3, | 3,1.0000000000 | 4, | 4,3.3300000000 | 6,0.7500000000 | 6,2.5000000000	1,1.25 | 1,1.25 | 2,0.755 | 2,2.50 | 3, | 3,1 | 4, | 4,3.33 | 6,0.75 | 6,2.5	r18
+SELECT id, x AS r FROM (SELECT id, v AS x FROM un_t ORDER BY id LIMIT 10) s ORDER BY 1, 2	1,1.25 | 2,0.755 | 3,1 | 4,NULL | 6,2.5	1,1.25 | 2,0.755 | 3,1 | 4,NULL | 6,2.5	=
+SELECT id, CAST(x AS TEXT) AS r FROM (SELECT id, v AS x FROM un_t ORDER BY id LIMIT 10) s ORDER BY 1, 2	1,1.25 | 2,0.755 | 3,1 | 4,NULL | 6,2.5	1,1.25 | 2,0.755 | 3,1 | 4,NULL | 6,2.5	=
+SELECT id, x || '' AS r FROM (SELECT id, v AS x FROM un_t ORDER BY id LIMIT 10) s ORDER BY 1, 2	1,1.25 | 2,0.755 | 3,1 | 4,NULL | 6,2.5	1,1.25 | 2,0.755 | 3,1 | 4,NULL | 6,2.5	=
+SELECT id, concat(x) AS r FROM (SELECT id, v AS x FROM un_t ORDER BY id LIMIT 10) s ORDER BY 1, 2	1,1.25 | 2,0.755 | 3,1 | 4, | 6,2.5	1,1.25 | 2,0.755 | 3,1 | 4, | 6,2.5	=
+SELECT id, x AS r FROM (SELECT id, v AS x, ROW_NUMBER() OVER (ORDER BY id) AS rn FROM un_t) s ORDER BY 1, 2	1,1.25 | 2,0.755 | 3,1 | 4,NULL | 6,2.5	1,1.25 | 2,0.755 | 3,1 | 4,NULL | 6,2.5	=
+SELECT id, CAST(x AS TEXT) AS r FROM (SELECT id, v AS x, ROW_NUMBER() OVER (ORDER BY id) AS rn FROM un_t) s ORDER BY 1, 2	1,1.25 | 2,0.755 | 3,1 | 4,NULL | 6,2.5	1,1.25 | 2,0.755 | 3,1 | 4,NULL | 6,2.5	=
+SELECT id, x || '' AS r FROM (SELECT id, v AS x, ROW_NUMBER() OVER (ORDER BY id) AS rn FROM un_t) s ORDER BY 1, 2	1,1.25 | 2,0.755 | 3,1 | 4,NULL | 6,2.5	1,1.25 | 2,0.755 | 3,1 | 4,NULL | 6,2.5	=
+SELECT id, concat(x) AS r FROM (SELECT id, v AS x, ROW_NUMBER() OVER (ORDER BY id) AS rn FROM un_t) s ORDER BY 1, 2	1,1.25 | 2,0.755 | 3,1 | 4, | 6,2.5	1,1.25 | 2,0.755 | 3,1 | 4, | 6,2.5	=
+SELECT id, x AS r FROM (SELECT id, (SELECT u.v FROM un_u u WHERE u.id = 1) AS x FROM un_t) s ORDER BY 1, 2	1,1.2500000000 | 2,1.2500000000 | 3,1.2500000000 | 4,1.2500000000 | 6,1.2500000000	1,1.25 | 2,1.25 | 3,1.25 | 4,1.25 | 6,1.25	r18
+SELECT id, CAST(x AS TEXT) AS r FROM (SELECT id, (SELECT u.v FROM un_u u WHERE u.id = 1) AS x FROM un_t) s ORDER BY 1, 2	1,1.2500000000 | 2,1.2500000000 | 3,1.2500000000 | 4,1.2500000000 | 6,1.2500000000	1,1.25 | 2,1.25 | 3,1.25 | 4,1.25 | 6,1.25	r18
+SELECT id, x || '' AS r FROM (SELECT id, (SELECT u.v FROM un_u u WHERE u.id = 1) AS x FROM un_t) s ORDER BY 1, 2	1,1.2500000000 | 2,1.2500000000 | 3,1.2500000000 | 4,1.2500000000 | 6,1.2500000000	1,1.25 | 2,1.25 | 3,1.25 | 4,1.25 | 6,1.25	r18
+SELECT id, concat(x) AS r FROM (SELECT id, (SELECT u.v FROM un_u u WHERE u.id = 1) AS x FROM un_t) s ORDER BY 1, 2	1,1.2500000000 | 2,1.2500000000 | 3,1.2500000000 | 4,1.2500000000 | 6,1.2500000000	1,1.25 | 2,1.25 | 3,1.25 | 4,1.25 | 6,1.25	r18
+SELECT t.id, l.x AS r FROM un_t t, LATERAL (SELECT t.v AS x) l ORDER BY 1, 2	1,1.25 | 2,0.755 | 3,1 | 4,NULL | 6,2.5	1,1.25 | 2,0.755 | 3,1 | 4,NULL | 6,2.5	=
+SELECT t.id, CAST(l.x AS TEXT) AS r FROM un_t t, LATERAL (SELECT t.v AS x) l ORDER BY 1, 2	1,1.25 | 2,0.755 | 3,1 | 4,NULL | 6,2.5	1,1.25 | 2,0.755 | 3,1 | 4,NULL | 6,2.5	=
+SELECT t.id, l.x || '' AS r FROM un_t t, LATERAL (SELECT t.v AS x) l ORDER BY 1, 2	1,1.25 | 2,0.755 | 3,1 | 4,NULL | 6,2.5	1,1.25 | 2,0.755 | 3,1 | 4,NULL | 6,2.5	=
+SELECT t.id, concat(l.x) AS r FROM un_t t, LATERAL (SELECT t.v AS x) l ORDER BY 1, 2	1,1.25 | 2,0.755 | 3,1 | 4, | 6,2.5	1,1.25 | 2,0.755 | 3,1 | 4, | 6,2.5	=
