@@ -23,7 +23,11 @@ import (
 // forms (towlower / towupper, as PostgreSQL does), whatever the script; the
 // newline options m n p w and the expanded syntax x answer with
 // PostgreSQL's meaning, embedded or as a flags argument. Construct × spelling
-// × subject script / option on five arms against PostgreSQL 17.11.
+// × subject script / option on five arms against PostgreSQL 17.11; the
+// engine's own DuckDB-origin functions (regexp_extract, regexp_split,
+// payload_matches) read RE2 syntax and are asserted against their answer at
+// base 4256886b (testdata/arc_rx_fold_options_re2.tsv), the regex engine's
+// own Unicode folding and RE2's options.
 //
 //	rxf_t: id | s text | p text (a pattern per row, for the case cells)
 
@@ -126,7 +130,7 @@ func rxfCells() []rxCell {
 			{"group", "SELECT %s AS k, count(*) AS c FROM rxf_t t GROUP BY 1"},
 			{"where", "SELECT t.id FROM rxf_t t WHERE CAST(%s AS TEXT) IN ('true', 't', '1', '2', 'w', 'line2', 'ÄBC', 'ς', 'Σ', 'i', 'ẞ', 'Ж')"},
 		} {
-			out = append(out, rxCell{k.name + "/" + c.consumer, fmt.Sprintf(c.tmpl, k.expr), fmt.Sprintf(c.tmpl, pgExpr), false})
+			out = append(out, rxCell{name: k.name + "/" + c.consumer, sql: fmt.Sprintf(c.tmpl, k.expr), pg: fmt.Sprintf(c.tmpl, pgExpr), own: rxOwnFunction(k.expr)})
 		}
 	}
 	return out
@@ -134,6 +138,7 @@ func rxfCells() []rxCell {
 
 const rxfPGFile = "testdata/arc_rx_fold_options_pg17.tsv"
 const rxfKeptFile = "testdata/arc_rx_fold_options_kept.tsv"
+const rxfRE2File = "testdata/arc_rx_fold_options_re2.tsv"
 
 // TestArcRXFoldOptionsMeasurePostgres measures every cell on PostgreSQL
 // 17.11 (RX_PG_DSN=postgres://…) and writes the answer file.
@@ -156,6 +161,9 @@ func TestArcRXFoldOptionsMeasurePostgres(t *testing.T) {
 	var b strings.Builder
 	b.WriteString("# arc RX round 2: PostgreSQL 17.11's answer for every cell (TestArcRXFoldOptionsMeasurePostgres)\n")
 	for _, c := range rxfCells() {
+		if c.own {
+			continue
+		}
 		a := func() string {
 			rows, err := conn.Query(ctx, c.pg, pgx.QueryExecModeSimpleProtocol)
 			if err != nil {
@@ -186,24 +194,22 @@ func TestArcRXFoldOptionsMeasurePostgres(t *testing.T) {
 	}
 }
 
-// TestArcRXFoldOptionsEveryArm runs every cell on the five arms against
-// PostgreSQL 17.11's answer, or a kept cell's catalogued answer.
+// TestArcRXFoldOptionsEveryArm runs every cell on the five arms against its
+// oracle's answer (rxOracle: PostgreSQL 17.11, or base for a DuckDB-origin
+// function), or a kept cell's catalogued answer.
 func TestArcRXFoldOptionsEveryArm(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: five arms over the case-folding and option table")
 	}
-	pg := rnReadTSV(t, rxfPGFile, 2)
 	kept := map[string][]rnKeep{}
 	for name, p := range rnReadTSV(t, rxfKeptFile, 4) {
 		kept[name] = append(kept[name], rnKeep{scope: p[0], want: p[1], why: p[2]})
 	}
 	cells := rxfCells()
+	oracle := rxOracle(t, cells, rxfPGFile, rxfRE2File)
 	names := map[string]bool{}
 	for _, c := range cells {
 		names[c.name] = true
-		if _, ok := pg[c.name]; !ok {
-			t.Fatalf("cell %s has no PostgreSQL answer: re-measure the table", c.name)
-		}
 	}
 	for name := range kept {
 		if !names[name] {
@@ -224,7 +230,7 @@ func TestArcRXFoldOptionsEveryArm(t *testing.T) {
 	}
 	var dumpMu sync.Mutex
 	for _, tc := range cells {
-		pgWant := pg[tc.name][0]
+		o := oracle[tc.name]
 		ks := kept[tc.name]
 		t.Run(tc.name, func(t *testing.T) {
 			got := make([]string, len(arms))
@@ -249,7 +255,7 @@ func TestArcRXFoldOptionsEveryArm(t *testing.T) {
 				dumpMu.Unlock()
 			}
 			for i, arm := range arms {
-				want, why := pgWant, "PostgreSQL 17.11"
+				want, why := o[0], o[1]
 				for _, k := range ks {
 					if k.scope == "all" || (k.scope == "dag") == strings.HasPrefix(arm.name, "dag") {
 						want, why = k.want, "kept: "+k.why
