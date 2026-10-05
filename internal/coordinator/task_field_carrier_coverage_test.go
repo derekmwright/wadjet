@@ -70,9 +70,7 @@ func TestTaskFieldCarrierCoverage(t *testing.T) {
 		// Columns/ColumnTypes name output columns and their declared
 		// types, never a path.
 		"Columns": notFile, "ColumnTypes": notFile,
-		// Column NAMES (the exchange marks, ADR-0024 §10), not a file path.
-		"Unconstrained": notFile,
-		"FilterExprs":   notFile, "PostFilterExprs": notFile,
+		"FilterExprs": notFile, "PostFilterExprs": notFile,
 		"ScanAggGroupBy": notFile, "ScanAggSpecs": notFile,
 		"GroupByCols": notFile, "Aggregates": notFile,
 		"RowLimit": notFile, "SortKeys": notFile, "Limit": notFile,

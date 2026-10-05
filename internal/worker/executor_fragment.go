@@ -2715,7 +2715,7 @@ func (e *Executor) buildFragmentSource(task distributed.Task, spec distributed.O
 	}
 	// The catalog's declared schema for a base-table scan (#423), and a
 	// REFUSAL when a base-table read arrives without one (#503).
-	if err := applyDeclaredScanSchema(src, string(spec.Type), spec.InputAlias, spec.InputFiles, spec.ColumnTypes, spec.Unconstrained); err != nil {
+	if err := applyDeclaredScanSchema(src, string(spec.Type), spec.InputAlias, spec.InputFiles, spec.ColumnTypes); err != nil {
 		return nil, err
 	}
 	// Row-group sharding for OpScan over a single compacted parquet file.
@@ -3325,7 +3325,7 @@ func (s *fragmentGatherSink) close() {}
 // A build reading stage output carries no declaration and is untouched; a
 // build reading PARQUET without one is refused (#503).
 func applyBuildSchema(src exec.Source, spec distributed.OpSpec) error {
-	return applyDeclaredScanSchema(src, string(spec.Type)+" build", spec.BuildAlias, spec.BuildFiles, spec.BuildColumnTypes, spec.BuildUnconstrained)
+	return applyDeclaredScanSchema(src, string(spec.Type)+" build", spec.BuildAlias, spec.BuildFiles, spec.BuildColumnTypes)
 }
 
 // applyDeclaredScanSchema supplies catalog declarations to base-parquet sources;
@@ -3336,25 +3336,7 @@ func applyBuildSchema(src exec.Source, spec distributed.OpSpec) error {
 // WADJET_DECLARED_SCHEMA_STRICT=0 permits file-only typing and warns EVERY use:
 // an emergency escape hatch that can return wrong values, not a supported mode.
 // See docs/internals/worker-required-base-scan-schema.md for the design.
-//
-// It is also the one place an exchange read learns which of its columns were
-// created from an unconstrained numeric (ADR-0024 §10): the declaration's
-// marks for a base-table read, and unconstrained — the producing stage's
-// answer (distributed.ResultNotification.UnconstrainedColumns) — for a read of
-// stage output, whose `.wshf` header cannot carry them. The source stamps them
-// onto every batch it decodes (exec.UnconstrainedStamp).
-func applyDeclaredScanSchema(src exec.Source, what, alias string, files []string, declared []distributed.ColumnSpec, unconstrained []string) error {
-	if cs, ok := src.(*cachedFileStreamSource); ok {
-		var fromDecl []string
-		for _, c := range declared {
-			if c.Unconstrained {
-				fromDecl = append(fromDecl, c.Name)
-			}
-		}
-		if len(fromDecl) > 0 || len(unconstrained) > 0 {
-			cs.SetUnconstrained(exec.NewUnconstrainedStamp(fromDecl, unconstrained))
-		}
-	}
+func applyDeclaredScanSchema(src exec.Source, what, alias string, files []string, declared []distributed.ColumnSpec) error {
 	if len(declared) > 0 {
 		if cs, ok := src.(*cachedFileStreamSource); ok {
 			cs.SetDeclaredSchema(execColumns(declared))

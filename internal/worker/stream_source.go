@@ -103,13 +103,6 @@ type cachedFileStreamSource struct {
 	// could not type, which reads exactly as it did before.
 	declaredSchema []parquet.Column
 
-	// unconstrained stamps the columns created from an unconstrained numeric
-	// onto every batch this source hands on (ADR-0024 §10): a `.wshf`
-	// header cannot carry the mark, so the producing stage's answer comes
-	// with the task (OpSpec.Unconstrained) and the catalog's with the
-	// declared schema. Nil stamps nothing.
-	unconstrained *exec.UnconstrainedStamp
-
 	// projectionSkipWarned dedupes the once-per-source WARN emitted when
 	// projectColumns names a column absent from the file schema (the
 	// all-or-nothing guard reverting to full width).
@@ -369,15 +362,6 @@ func (s *cachedFileStreamSource) SetDeclaredSchema(cols []parquet.Column) {
 	s.declaredSchema = cols
 }
 
-// SetUnconstrained installs the stamp for the DECIMAL columns this source's
-// files hold as columns created from an unconstrained numeric (ADR-0024 §10).
-func (s *cachedFileStreamSource) SetUnconstrained(st *exec.UnconstrainedStamp) {
-	if s == nil {
-		return
-	}
-	s.unconstrained = st
-}
-
 // SetDeleteMarkers installs the merge-on-read DELETE state for the files
 // this source reads, keyed by S3 key. Idempotent and safe to call before
 // Init; nil or an empty map is the pre-existing behavior (no filtering).
@@ -457,7 +441,6 @@ func (s *cachedFileStreamSource) Next(ctx context.Context) (*batch.RecordBatch, 
 					return nil, err
 				}
 				s.dropBehindWalk()
-				s.unconstrained.Apply(b)
 				return b, nil
 			}
 			// Current file exhausted — release its mmap and remove the local
@@ -493,7 +476,6 @@ func (s *cachedFileStreamSource) Next(ctx context.Context) (*batch.RecordBatch, 
 					continue
 				}
 				s.tryPreOpenNextParquet()
-				s.unconstrained.Apply(b)
 				return b, nil
 			}
 			// Cross-file continuation: the next file was pre-opened and
@@ -542,7 +524,6 @@ func (s *cachedFileStreamSource) Next(ctx context.Context) (*batch.RecordBatch, 
 				s.RecycleBatch(b, b.Mint())
 				continue
 			}
-			s.unconstrained.Apply(b)
 			return b, nil
 		}
 		if s.fallbackBatches != nil {
