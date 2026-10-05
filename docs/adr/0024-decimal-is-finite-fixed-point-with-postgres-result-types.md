@@ -511,31 +511,6 @@ DIVISION is untouched. Its scale is `max(6, s1 + p2 + 1)` — a floor this
 project chose, not a fact about the operands — so reducing it drops no digit
 the answer had.
 
-**Measured, round 3** (2026-10-05; PostgreSQL 17.11's `format_type` of the
-created column first; `wadjet/testdata/arc_un_typmod.tsv`: 113 source
-shapes over a numeric(10,2), a numeric(5) and an unconstrained column, WITH
-DATA and WITH NO DATA, each followed by `INSERT 1.255, 0.755`). Of 673
-created tables, a later write stores PostgreSQL's value in 650, c23adbbb's
-in 17 (catalog dml-assignment r23, and two WITH NO DATA scalar subqueries
-over a CTE that both binaries declare text), and 6 have no PostgreSQL
-spelling (`IFNULL`); none stores a third value. At 742965c1, which marked
-the column from the wire fold, 120 cells stored a third value:
-
-| source (over n numeric(10,2)) | PostgreSQL | 742965c1 | now |
-|---|---|---|---|
-| a scalar subquery over n — plain, correlated, `ORDER BY … LIMIT 1`, nested, through a derived table, a CTE, a CASE of n and n, a UNION ALL of n and n; `COALESCE((SELECT n …), n)` | numeric(10,2): 1.26 | marked: 1.255 | numeric(10,2): 1.26 |
-| a derived table or CTE whose column is `COALESCE(n, n)`, a CASE of n and n, `CAST(n AS NUMERIC(8,1))`, a scalar subquery over n; a join to one; `DISTINCT` CASE of n and n | numeric(10,2) / (8,1) | marked | kept |
-| WITH DATA: `CASE WHEN 1 = 1 THEN n END`, `CASE WHEN true THEN n ELSE NULL END`, `COALESCE(n, NULL)`, `COALESCE(NULL, n)`, `CASE WHEN 'a' = 'a' …`, `(ARRAY[n])[1]` | numeric(10,2) | marked | numeric(10,2) |
-| the same WITH NO DATA (PostgreSQL does not fold) | numeric: 1.255 | marked | marked: 1.255 |
-| an aggregate (also inside a scalar subquery), a window function, arithmetic, `ROUND` / `ABS` / `TRUNC`, `CAST(n AS NUMERIC)`, a CASE / COALESCE / GREATEST / UNION ALL over two declarations or with a NULL value | numeric | marked | marked |
-| a constant CASE over two declarations, `+n` (r23) | numeric(5) / numeric | marked | the plan's declaration (c23adbbb's) |
-
-*Downgrade* (review r2, measured on the c23adbbb CLI over a store this
-release wrote): every value reads right, prints the stored scale
-(`1.2500000000`) and information_schema reports 38 / 10; an INSERT or
-UPDATE through that binary keeps the record's marker, so this release reads
-NULL / NULL and `1.25` again afterwards.
-
 **What it costs, recorded rather than left to be discovered.** RANGE, and the
 carrier's own: at scale s an Int128 holds `38 − s` integer digits.
 `DECIMAL(38,10) × DECIMAL(38,10)` is `(38,20)` now rather than `(38,6)`, so a
@@ -1182,10 +1157,17 @@ the walk: a `CASE` whose condition is a constant is the arm it selects
 (`CASE WHEN 1 = 1 THEN n END` keeps numeric(10,2); WITH NO DATA it is
 numeric, as PostgreSQL's), and `COALESCE` drops its NULL constants. The
 answer has a third value, *unknown* — a construct the walk does not model, a
-constant condition it cannot evaluate (`1 + 1 = 2`), a column it cannot
-trace — and an unknown column keeps the declaration the plan gives it, which
-is the one c23adbbb created: a mark set wrongly changes what a later write
-stores, a mark left unset is the base's behaviour. A numeric typed NULL
+constant condition it cannot evaluate (one calling a function), a column it
+cannot trace — and an unknown column keeps the declaration the plan gives
+it: a mark set wrongly changes what a later write stores, a mark left unset
+is the base's behaviour. That declaration is the one c23adbbb created except
+where the plan's type itself moved with an unconstrained column: a constant
+CASE the walk cannot fold over such a column and a constrained one is the
+plan's common DECIMAL(38,10), unmarked, storing PostgreSQL's value and
+printing ten fraction digits. The walk folds the boolean and NULL literals,
+NOT / AND / OR, comparisons, `IS [NOT] NULL / TRUE / FALSE`, `[NOT] IN` and
+`BETWEEN` over number and string literals and their sums, differences and
+products. A numeric typed NULL
 (`CAST(NULL AS NUMERIC)`, `NULL::numeric`, a CASE of them), which the
 planner carries on the float rung, is marked by the same function.
 
@@ -1219,12 +1201,21 @@ prints at its one scale (catalog numeric-decimal r18); a `COALESCE`, `CASE`,
 `GREATEST` or `NULLIF` that answers the column's own value hands on its
 box, so rendered as text it prints the column's text (`CAST(COALESCE(v, n)
 AS TEXT)` is `1.25`, as PostgreSQL's) while the SELECT list prints the
-expression at its one scale (r18). On the three DAG arms a stage boundary
-that is not a stored file — a GROUP BY key after a shuffle, a UNION ALL
-arm's output — carries no marker (the `.wshf` header names a column's type,
-precision and scale only), so a later stage's text rendering of the key
-prints the stored scale there, every renderer alike; the SELECT list prints
-it trimmed on every arm (the gather reads the plan's schema).
+expression at its one scale (r18). A DAG stage reads such a column back from a `.wshf` exchange, whose
+header names a column's type, precision and scale and has no version field
+to say more, so the mark rides beside the file, not in it. The task that
+writes the file reports the columns it wrote marked
+(`distributed.ResultNotification.UnconstrainedColumns`, from the batches its
+output sinks consumed), the coordinator stamps every task that reads those
+files at dispatch, the way merge-on-read delete markers ride the file key
+(`exchange_marks.go`; an eager consumer receives them in the producer's
+manifest), and the worker's one binding of an exchange read
+(`applyDeclaredScanSchema`) stamps them onto every batch it decodes
+(`exec.UnconstrainedStamp`); a base-table read carries the catalog's mark in
+its declared schema (`ColumnSpec.Unconstrained`). The column's text is then
+the same on all five arms after a GROUP BY, a DISTINCT, a set operation, a
+window, an equi-join on either side, a sort with LIMIT and a CTE read twice
+(`coordinator.TestArcUNExchangeKeepsThePrinterEveryArm`).
 
 **Measured** (arc UN, base 8e681724 → tip; PostgreSQL 17.11 first; the
 statement table is `wadjet/testdata/arc_un_enum.tsv`, 26 creation paths × 14
@@ -1240,6 +1231,31 @@ writes × 8 reads):
 | CTAS `n / m` | DECIMAL(27,15) | a 20-digit integer part is 22003 | DECIMAL(38,15) u | stores |
 | CTAS `CAST(NULL AS NUMERIC)`, `NULL::numeric` | double precision | 1.25 stores 1.25 | DECIMAL(38,10) u | 1.25 |
 | DDL `NUMERIC(10,2)`, `NUMERIC(5)`; CTAS of an n column, `NULLIF(n, m)` | (10,2), (5,0), (10,2), (10,2) | = PostgreSQL | unchanged | = PostgreSQL |
+
+**Measured, created columns** (2026-10-05; PostgreSQL 17.11's `format_type`
+of the created column first; `wadjet/testdata/arc_un_typmod.tsv`: 121
+source shapes over a numeric(10,2), a numeric(5) and an unconstrained
+column, WITH DATA and WITH NO DATA, each followed by `INSERT 1.255, 0.755`).
+Of 721 created tables, a later write stores PostgreSQL's value in 682,
+c23adbbb's in 33 (catalog dml-assignment r23, and two WITH NO DATA scalar
+subqueries over a CTE that both binaries declare text), and 6 have no
+PostgreSQL spelling (`IFNULL`); none stores a third value. At 742965c1, which marked
+the column from the wire fold, 120 cells stored a third value:
+
+| source (over n numeric(10,2)) | PostgreSQL | 742965c1 | now |
+|---|---|---|---|
+| a scalar subquery over n — plain, correlated, `ORDER BY … LIMIT 1`, nested, through a derived table, a CTE, a CASE of n and n, a UNION ALL of n and n; `COALESCE((SELECT n …), n)` | numeric(10,2): 1.26 | marked: 1.255 | numeric(10,2): 1.26 |
+| a derived table or CTE whose column is `COALESCE(n, n)`, a CASE of n and n, `CAST(n AS NUMERIC(8,1))`, a scalar subquery over n; a join to one; `DISTINCT` CASE of n and n | numeric(10,2) / (8,1) | marked | kept |
+| WITH DATA: `CASE WHEN 1 = 1 THEN n END`, `CASE WHEN true THEN n ELSE NULL END`, `COALESCE(n, NULL)`, `COALESCE(NULL, n)`, `CASE WHEN 'a' = 'a' …`, `(ARRAY[n])[1]` | numeric(10,2) | marked | numeric(10,2) |
+| the same WITH NO DATA (PostgreSQL does not fold) | numeric: 1.255 | marked | marked: 1.255 |
+| an aggregate (also inside a scalar subquery), a window function, arithmetic, `ROUND` / `ABS` / `TRUNC`, `CAST(n AS NUMERIC)`, a CASE / COALESCE / GREATEST / UNION ALL over two declarations or with a NULL value | numeric | marked | marked |
+| a constant CASE over two declarations, `+n` (r23) | numeric(5) / numeric | marked | the plan's declaration (c23adbbb's) |
+
+*Downgrade* (review r2, measured on the c23adbbb CLI over a store this
+release wrote): every value reads right, prints the stored scale
+(`1.2500000000`) and information_schema reports 38 / 10; an INSERT or
+UPDATE through that binary keeps the record's marker, so this release reads
+NULL / NULL and `1.25` again afterwards.
 
 **What it costs, recorded rather than left to be discovered.**
 
