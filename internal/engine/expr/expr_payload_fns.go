@@ -160,7 +160,8 @@ func fnRegexpExtractAll(args []any) any {
 	if len(args) < 2 || args[0] == nil || args[1] == nil {
 		return nil
 	}
-	re := ownFunctionRegex(toString(args[1]))
+	// Keep the original pattern conversion: bytes format as "[97]", not "a".
+	re := ownFunctionRegex(fmt.Sprint(args[1]))
 	if re == nil {
 		return nil
 	}
@@ -181,7 +182,8 @@ func fnRegexpSplit(args []any) any {
 	if len(args) < 2 || args[0] == nil || args[1] == nil {
 		return nil
 	}
-	re := ownFunctionRegex(toString(args[1]))
+	// Keep the original pattern conversion: bytes format as "[97]", not "a".
+	re := ownFunctionRegex(fmt.Sprint(args[1]))
 	if re == nil {
 		return nil
 	}
