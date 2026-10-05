@@ -2,7 +2,8 @@
 
 // Package wshf owns shuffle magics/envelopes and the ONE bounds-checked decoder
 // for worker file/stream/pread and coordinator inline consumers (#422).
-// Preserve column order, per-file schema, DECIMAL scale/precision and per-chunk
+// Preserve column order, per-file schema, DECIMAL scale/precision (and its
+// unconstrained mark, DecimalUnconstrainedBit) and per-chunk
 // row/null/data framing; the complete wire layout is in the design.
 // The writer stays in internal/worker for batch gather/views and WIDX footer.
 // All reads use Cursor: malformed or short untrusted payloads return errors,
