@@ -3190,6 +3190,8 @@ sample's 2202H where PostgreSQL folds `1/0` first and raises 22012
 
 ## JOIN
 
+A RIGHT or FULL join with an empty input retains the preserved side's values and NULL-extends the empty side, including when a spilled partition is replayed ([ADR-0006](adr/0006-never-oom-memory-model.md#2026-10-03-arc-sj-a-partition-replay-emits-the-joins-own-output-whatever-the-other-sides-size-1359)).
+
 Wadjet supports multiple join types using a hash join strategy.
 
 ### Join conditions
@@ -3800,7 +3802,7 @@ COMMON type of the value and the default, as on PostgreSQL
 a DATE beside a TIMESTAMP resolved to timestamp. The value may be a column or
 an expression (`LAG(b * 2, 1, d)` is double precision). A constant scalar
 subquery default (`(SELECT 9)`) answers; one that reads a table
-(`LAG(b, 1, (SELECT max(d) FROM t))`) fails the query, with no SQLSTATE
+(`LAG(b, 1, (SELECT max(d) FROM t))`) fails the query (no engine SQLSTATE; pgwire sends `42000`)
 (ADR-0012 catalog, aggregates-windows r23).
 
 ```sql
@@ -4404,7 +4406,7 @@ SELECT host, agent_version
 | `ROUND(n)` | Round to nearest | `ROUND(ratio)` |
 | `POW(base, exp)` / `POWER(base, exp)` | Exponentiation | `POW(2, 10)` |
 | `SQRT(n)` | Square root | `SQRT(variance)` |
-| `MOD(a, b)` | Modulo | `MOD(timestamp, 3600000)` |
+| `MOD(a, b)` | Modulo | `MOD(17, 5)` → `2` |
 | `LOG(n)` | Base-10 logarithm | `LOG(bytes_in)` |
 | `LN(n)` | Natural logarithm | `LN(bytes_in)` |
 | `EXP(n)` | Exponential (e^n) | `EXP(rate)` |

@@ -1,0 +1,30 @@
+issue	state	title	closedAt	detail
+1422	CLOSED	expr: a correlated scalar subquery (SELECT c.f + x.v …) over an outer DOUBLE and an inner INT declares integer and answers 6 where PostgreSQL answers 6.5	2026-10-02T11:46:26Z	
+1427	CLOSED	planner: DATE = (scalar subquery over a DATE) at 9999-12-31 answers 0 rows on the single-process arms where PostgreSQL and the DAG answer 1	2026-10-02T11:46:29Z	
+1428	CLOSED	expr: a TIMESTAMP scalar subquery in a projection comes back as its epoch number (CAST AS VARCHAR, extract) on every arm	2026-10-02T11:46:31Z	
+1431	CLOSED	expr: (SELECT max(ts) ...) + INTERVAL / - INTERVAL answers the subquery's value, dropping the interval	2026-10-02T11:46:33Z	
+1466	CLOSED	expr: json_build_object writes a DATE / TIMESTAMP as its day count / epoch ms	2026-10-03T01:35:16Z	
+1467	CLOSED	expr: format('%s', <double>) and format('%s', NULL) print Go's %!s(...) text	2026-10-03T01:35:18Z	
+1474	CLOSED	expr: json_build_object over json_build_object writes a string, not an object	2026-10-03T01:35:21Z	
+1481	CLOSED	expr: regexp_replace without the 'g' flag replaces every match	2026-10-03T01:35:24Z	
+1410	CLOSED	pgwire: parameter inference reads $1 = n + d as int4, so a float parameter matches 0 rows where PostgreSQL returns 1	2026-10-03T13:26:13Z	
+1426	CLOSED	pgwire: a TIMESTAMP parameter (OID 1114) against a DATE column is compared as a DATE — a non-midnight instant matches the day	2026-10-03T13:26:16Z	
+1405	CLOSED	parser: DOUBLE PRECISION does not parse as a column type in CREATE TABLE	2026-10-03T16:08:53Z	
+1464	CLOSED	engine: FLOAT is float4 (stores 675000000 for 674999997) and FLOAT8 is 42704	2026-10-03T16:08:55Z	
+1359	CLOSED	exec: a spilled RIGHT/FULL join over an empty side intermittently loses the preserved side's values	2026-10-03T17:30:46Z	
+1386	CLOSED	expr: ADR-0024's float8-boxed numeric constant inside a choice, a double unary minus, or a scalar subquery answers wrong in a direct comparison	2026-10-03T20:27:37Z	
+1392	CLOSED	expr: an explicit CAST(<float-carried numeric expr> AS INTEGER) rounds by the float64 carrier where PostgreSQL rounds by its own numeric type	2026-10-03T20:27:39Z	
+1242	CLOSED	storage: read_csv/read_json silently NULL a value past the 100-row inference sample — SUM answers 5050 over a file that sums to 5050.75	2026-10-03T21:52:38Z	
+1411	CLOSED	engine: TABLESAMPLE BERNOULLI (0) answers every row, and a percentage over 100 or a cast overflow answers where PostgreSQL raises 2202H / 22003	2026-10-04T12:31:42Z	
+1484	CLOSED	dml: INSERT ... SELECT of the double 9223372036854775808 into a BIGINT column stores -9223372036854775808; PostgreSQL raises 22003	2026-10-04T15:11:03Z	
+1435	CLOSED	exec: a LAG / LEAD default of a wider type is truncated to the value column's type — LAG(x, 1, 2.5) over bigint answers 2 where PostgreSQL answers 2.5	2026-10-04T15:52:17Z	
+1436	CLOSED	exec: a LAG / LEAD default that is text, a column, a CAST or a boolean fails the query at the write, and a text default at offset 0 answers where PostgreSQL raises 22P02	2026-10-04T15:52:19Z	
+1527	CLOSED	expr: the % operator over a quoted literal or NULL answers wrong values and an internal integer-divide-by-zero on the single-process arms	2026-10-04T19:32:14Z	
+1512	CLOSED	exec: a TIMESTAMP comparison against a spelling the grammar refuses reads it as 1970-01-01 00:00:00 and matches the epoch row; PostgreSQL raises 22007	2026-10-04T20:10:37Z	
+1488	CLOSED	exec: max() over a float column holding NaN answers Infinity on the single-process and spilled arms; PostgreSQL answers NaN	2026-10-04T23:10:42Z	
+1489	CLOSED	planner: GROUP BY over a float column publishes the key -0 as 0 on every arm; PostgreSQL publishes -0	2026-10-04T23:10:44Z	
+1567	CLOSED	temporal: 'infinity' / '-infinity' are not TIMESTAMP / DATE values — a comparison with them raises 22007 where PostgreSQL answers (33 cells answered on every door before #1512's fix)	2026-10-05T03:01:59Z	
+1566	CLOSED	exec: now() / CURRENT_TIMESTAMP is read per evaluation — now() = now() is false on up to 4 of 4096 rows and 512 rows hold 2-4 distinct values where PostgreSQL answers one statement time	2026-10-05T04:22:33Z	
+1501	CLOSED	dml: a quoted '\x6869' assigned to a BYTES column stores its six characters; PostgreSQL stores two bytes	2026-10-05T10:54:19Z	
+1531	CLOSED	engine: a CTE referenced twice is evaluated once per reference in a scalar position — (SELECT r FROM s) <> (SELECT r FROM s) is true for 3 rows, PostgreSQL 0	2026-10-05T13:44:49Z	
+1450	OPEN	expr: integer CAST beside a numeric computes in float8: CAST(i AS INTEGER) / n		

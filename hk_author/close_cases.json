@@ -1,0 +1,256 @@
+[
+  {
+    "issue": "1422",
+    "steps": [
+      "CREATE TABLE c (id INT,f DOUBLE)",
+      "INSERT INTO c VALUES (1,2.5)",
+      "CREATE TABLE x (id INT,v INT)",
+      "INSERT INTO x VALUES (1,4)",
+      "SELECT (SELECT c.f + x.v FROM x WHERE x.id=c.id) FROM c"
+    ],
+    "want": "6.5; OID 701"
+  },
+  {
+    "issue": "1427",
+    "steps": [
+      "CREATE TABLE t (id INT,d DATE)",
+      "INSERT INTO t VALUES (3,DATE '9999-12-31')",
+      "SELECT id FROM t WHERE d = (SELECT d FROM t WHERE id=3)"
+    ],
+    "want": "3"
+  },
+  {
+    "issue": "1428",
+    "steps": [
+      "CREATE TABLE t (ts TIMESTAMP)",
+      "INSERT INTO t VALUES (TIMESTAMP '1969-12-31 23:59:59.999')",
+      "SELECT CAST((SELECT ts FROM t) AS VARCHAR)"
+    ],
+    "want": "1969-12-31 23:59:59.999"
+  },
+  {
+    "issue": "1431",
+    "steps": [
+      "CREATE TABLE t (ts TIMESTAMP)",
+      "INSERT INTO t VALUES (TIMESTAMP '2024-03-04 12:00:00')",
+      "SELECT (SELECT max(ts) FROM t) + INTERVAL '1 hour'"
+    ],
+    "want": "2024-03-04 13:00:00"
+  },
+  {
+    "issue": "1466",
+    "steps": [
+      "SELECT json_build_object('d', DATE '2024-03-04', 'ts', TIMESTAMP '2024-03-04 12:00:00')"
+    ],
+    "want": "{\"d\" : \"2024-03-04\", \"ts\" : \"2024-03-04T12:00:00\"}"
+  },
+  {
+    "issue": "1467",
+    "steps": [
+      "SELECT format('%s|', NULL)"
+    ],
+    "want": "|"
+  },
+  {
+    "issue": "1474",
+    "steps": [
+      "SELECT json_build_object('o', json_build_object('a', 2.25, 'b', 3))"
+    ],
+    "want": "{\"o\" : {\"a\" : 2.25, \"b\" : 3}}"
+  },
+  {
+    "issue": "1481",
+    "steps": [
+      "SELECT regexp_replace('-10.50', '0', 'z')"
+    ],
+    "want": "-1z.50"
+  },
+  {
+    "issue": "1410",
+    "steps": [
+      [
+        "SELECT $1",
+        [
+          20
+        ],
+        [
+          "42"
+        ]
+      ]
+    ],
+    "want": "42; OID 20"
+  },
+  {
+    "issue": "1426",
+    "steps": [
+      "CREATE TABLE t (id INT,d DATE)",
+      "INSERT INTO t VALUES (2,DATE '1969-12-31')",
+      [
+        "SELECT id FROM t WHERE d = $1",
+        [
+          1114
+        ],
+        [
+          "1969-12-31 23:59:59.999"
+        ]
+      ]
+    ],
+    "want": "no rows"
+  },
+  {
+    "issue": "1405",
+    "steps": [
+      "CREATE TABLE fl (id INTEGER, f DOUBLE PRECISION, n INTEGER)",
+      "INSERT INTO fl VALUES (1,674999997,1)",
+      "SELECT f FROM fl"
+    ],
+    "want": "674999997; OID 701"
+  },
+  {
+    "issue": "1464",
+    "steps": [
+      "CREATE TABLE z (dv FLOAT)",
+      "INSERT INTO z VALUES (674999997)",
+      "SELECT dv FROM z"
+    ],
+    "want": "674999997; OID 701"
+  },
+  {
+    "issue": "1359",
+    "steps": [
+      "CREATE TABLE sj_e (k_int INT,ey TEXT)",
+      "CREATE TABLE sj_p_one AS SELECT 1 AS id,1 AS k_int,CAST(1.25 AS NUMERIC(10,2)) AS v_dec,ARRAY[1,2] AS v_arr",
+      "SELECT p.id,p.k_int,p.v_dec,p.v_arr,e.k_int,e.ey FROM sj_e e FULL JOIN sj_p_one p ON e.k_int=p.k_int"
+    ],
+    "want": "1,1,1.25,{1,2},NULL,NULL; ordinary execution only"
+  },
+  {
+    "issue": "1386",
+    "steps": [
+      "SELECT CASE WHEN true THEN 14.0000000000000000001 END = 14"
+    ],
+    "want": "f"
+  },
+  {
+    "issue": "1392",
+    "steps": [
+      "SELECT CAST(5 / 2.0 AS INTEGER),CAST(SQRT(6.25) AS INTEGER),CAST(POWER(2.5,1) AS INTEGER),CAST(2.5*1 AS INTEGER),CAST(2.5 AS INTEGER),CAST(ABS(2.5) AS INTEGER)"
+    ],
+    "want": "3,3,3,3,3,3"
+  },
+  {
+    "issue": "1242",
+    "steps": [
+      "SELECT * FROM read_json('/tmp/codex-hk9-tmp/seamb-late-key.json') WHERE id=2200"
+    ],
+    "want": "22P04"
+  },
+  {
+    "issue": "1411",
+    "steps": [
+      "CREATE TABLE tb_p (id INT)",
+      "INSERT INTO tb_p VALUES (1),(2),(3)",
+      "SELECT count(*) FROM tb_p TABLESAMPLE BERNOULLI (0)"
+    ],
+    "want": "0"
+  },
+  {
+    "issue": "1484",
+    "steps": [
+      "CREATE TABLE t (a BIGINT)",
+      "CREATE TABLE s (f DOUBLE)",
+      "INSERT INTO s VALUES (9223372036854775808)",
+      "INSERT INTO t SELECT f FROM s"
+    ],
+    "want": "22003"
+  },
+  {
+    "issue": "1435",
+    "steps": [
+      "CREATE TABLE t (id INT,x BIGINT)",
+      "INSERT INTO t VALUES (1,10),(2,20),(3,NULL),(4,40),(5,50),(6,60)",
+      "SELECT LAG(x,1,2.5) OVER (ORDER BY id) FROM t"
+    ],
+    "want": "2.5,10.0,20.0,NULL,40.0,50.0; OID 1700"
+  },
+  {
+    "issue": "1436",
+    "steps": [
+      "CREATE TABLE t (id INT,x BIGINT)",
+      "INSERT INTO t VALUES (1,10)",
+      "SELECT LAG(x,1,'a') OVER (ORDER BY id) FROM t"
+    ],
+    "want": "22P02"
+  },
+  {
+    "issue": "1527",
+    "steps": [
+      "CREATE TABLE t (n NUMERIC(10,2))",
+      "INSERT INTO t VALUES (2.25),(-1),(0),(5),(0.01)",
+      "SELECT SUM(t.n % '2.5') FROM t"
+    ],
+    "want": "1.26"
+  },
+  {
+    "issue": "1512",
+    "steps": [
+      "CREATE TABLE tc_t (id INT,ts TIMESTAMP)",
+      "INSERT INTO tc_t VALUES (1,TIMESTAMP '1970-01-01')",
+      "SELECT id FROM tc_t WHERE ts='garbage'",
+      "SELECT id FROM tc_t WHERE ts < 'infinity'"
+    ],
+    "want": "22007 for garbage; close text says 22007 for infinity, now row 1"
+  },
+  {
+    "issue": "1488",
+    "steps": [
+      "CREATE TABLE fo_f8_last (c DOUBLE)",
+      "INSERT INTO fo_f8_last VALUES ('Infinity'),(1.5),('-0'),('-Infinity'),(NULL),(-CAST('NaN' AS DOUBLE PRECISION)),('NaN')",
+      "SELECT min(c),max(c) FROM fo_f8_last"
+    ],
+    "want": "-Infinity,NaN"
+  },
+  {
+    "issue": "1489",
+    "steps": [
+      "CREATE TABLE t (c DOUBLE)",
+      "INSERT INTO t VALUES ('NaN'),('Infinity'),('-Infinity'),('-0'),(1.5),(-CAST('NaN' AS DOUBLE PRECISION)),(NULL)",
+      "SELECT c,count(*) FROM t GROUP BY c ORDER BY c"
+    ],
+    "want": "-Infinity,1; -0,1; 1.5,1; Infinity,1; NaN,2; NULL,1"
+  },
+  {
+    "issue": "1567",
+    "steps": [
+      "SELECT CAST('infinity' AS TIMESTAMP)"
+    ],
+    "want": "infinity"
+  },
+  {
+    "issue": "1566",
+    "steps": [
+      "CREATE TABLE sc_r AS SELECT generate_series AS id FROM generate_series(1,4096)",
+      "SELECT count(DISTINCT CAST(now() AS TEXT)) FROM sc_r"
+    ],
+    "want": "1"
+  },
+  {
+    "issue": "1501",
+    "steps": [
+      "CREATE TABLE bt (id INT,b BYTES)",
+      "INSERT INTO bt VALUES (3, E'\\\\x6869')",
+      "SELECT encode(b,'hex') FROM bt"
+    ],
+    "want": "6869"
+  },
+  {
+    "issue": "1531",
+    "steps": [
+      "CREATE TABLE cm_big AS SELECT generate_series AS id FROM generate_series(1,4096)",
+      "CREATE TABLE cm_p (id INT)",
+      "INSERT INTO cm_p VALUES (1),(2),(3)",
+      "WITH s AS (SELECT sum(random()) AS r FROM cm_big) SELECT count(*) FROM cm_p WHERE (SELECT r FROM s) <> (SELECT r FROM s)"
+    ],
+    "want": "0"
+  }
+]

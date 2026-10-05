@@ -316,7 +316,7 @@ Generic comparison accepts `s = 1.50` as `s = '1.50'`; PostgreSQL raises 42883. 
 
 **Unary minus accepts numeric text.**
 
-Generic resolution means `SELECT -'5'` returns varchar `-5`; PostgreSQL raises 42725. Non-numeric text raises 22P02 here. (catalog: [numeric-decimal#r13](adr/0012-divergences/numeric-decimal.md#catalog); #505)
+Generic resolution means `SELECT -'5'` returns double precision `-5`; PostgreSQL raises 42725. Non-numeric text raises 22P02 here. (catalog: [numeric-decimal#r13](adr/0012-divergences/numeric-decimal.md#catalog); #505)
 
 **A quoted number beside an integer is read as the number it spells.**
 
@@ -448,7 +448,7 @@ PostgreSQL has no QUALIFY. It filters after windows, can read unprojected inputs
 
 **A LAG / LEAD default that reads a table is not evaluated.**
 
-`LAG(b, 1, (SELECT max(d) FROM t))` fails the query, with no SQLSTATE, where PostgreSQL evaluates the subquery once and answers; a constant subquery default such as `(SELECT 9)` answers, as does a column default. (catalog: [aggregates-windows#r23](adr/0012-divergences/aggregates-windows.md#catalog); #1435)
+`LAG(b, 1, (SELECT max(d) FROM t))` fails the query (no engine SQLSTATE; pgwire sends 42000), where PostgreSQL evaluates the subquery once and answers; a constant subquery default such as `(SELECT 9)` answers, as does a column default. (catalog: [aggregates-windows#r23](adr/0012-divergences/aggregates-windows.md#catalog); #1435)
 
 **A table created from a numeric LAG / LEAD result takes the result's scale.**
 

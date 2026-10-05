@@ -322,6 +322,27 @@ Full analytical SQL via a custom recursive descent parser:
 - 29 aggregate functions including approx_distinct, corr, covar, percentile_cont/disc, mode, median, min_by/max_by, and `ohlcv(ts, price, volume)` — one mergeable state that answers a whole downsampled bar as a ROW (`open`, `high`, `low`, `close`, `volume`, `vwap`), grouped by `TIME_BUCKET(INTERVAL '5' MINUTE, ts)` ([ADR-0035](docs/adr/0035-mergeable-aggregate-states.md))
 - User-defined functions (CREATE FUNCTION)
 
+For the v0.25.4 compatibility changes (details in the [SQL reference](docs/sql-reference.md), [type reference](docs/data-types.md) and [release notes](docs/releases/v0.25.4.md)):
+
+- A scalar subquery keeps its value's type through temporal casts, comparisons and arithmetic, and keeps fractional outer values when computing a correlated answer.
+- `json_build_object` renders dates and timestamps as ISO text and nests object expressions, `format` uses PostgreSQL's formatting rules, and `regexp_replace` replaces only the first match unless given `g` (unsupported flags raise `0A000`).
+- Concurrent DECIMAL/NUMERIC and VARCHAR/CHAR casts share synchronized destination caches and retain their declared conversion rules.
+- Bound parameters use their declared or inferred type, including timestamp comparisons with DATE, integer range checks (`22003`), and bigint parameters for `LIMIT` and `OFFSET`.
+- New `FLOAT` columns are double precision, `REAL`/`FLOAT4` are real and `FLOAT8`/`DOUBLE PRECISION` are double precision; existing columns retain their stored type.
+- A RIGHT or FULL join with an empty input preserves the other side's columns and fills the empty side with NULL, including partition replay after spilling.
+- Long numeric literals retain their digits, integer casts of numeric halves round away from zero, and casts of exact numeric values to unsupported type families raise `42846`.
+- `read_csv` and `read_json` accept `sample_size = -1` to infer from every row; otherwise a later JSON key or nested field outside the inferred schema raises `22P04` or `22P02`.
+- `TABLESAMPLE` reads a constant argument as real, samples no rows at zero, and raises `2202H` for NULL, NaN or percentages outside 0–100 when the scan begins (`22003` if coercion to real is out of range).
+- A float outside an integer destination's range raises `22003` on assignment, including the double 2^63 assigned to BIGINT.
+- `LAG` and `LEAD` use the common type of their value and default, accept column and expression defaults, and raise `42883` for incompatible types or `22P02` for an unreadable quoted default.
+- `%` uses `MOD`'s types, values and errors, including NULL propagation, `22012` for zero divisors and `42883` for stored text or date operands.
+- Text compared with DATE or TIMESTAMP uses the temporal input rules and raises `22007`, `22008` or `22009` when refused; use `CURRENT_TIMESTAMP` or `CURRENT_DATE` instead of the quoted clock words.
+- Float MAX reads the column and includes NaN, while grouping preserves the sign of a group containing only -0.
+- DATE and TIMESTAMP accept `infinity` and `-infinity`, with unsupported operations over infinite values raising `22008`.
+- `now()`, `CURRENT_TIMESTAMP`, `LOCALTIMESTAMP` and `CURRENT_DATE` share one clock reading per statement, including each execution of a prepared statement.
+- Text assigned or cast to `BYTES` uses PostgreSQL bytea input (`22023` or `22P02` for malformed input), and BYTES assigned to text stores its hex output; existing stored bytes stay unchanged.
+- On the embedded engine a volatile CTE read more than once is evaluated once and filled on demand; the stage DAG still evaluates a volatile projection per consumer.
+
 ```sql
 -- Query JSON files directly from SQL
 SELECT ip, count, geoip_country(ip) AS country

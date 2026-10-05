@@ -1,0 +1,167 @@
+[
+  [
+    "DR",
+    [
+      "SELECT CAST(1.25 AS NUMERIC(10,2)), CAST('abcdef' AS VARCHAR(3))"
+    ],
+    "1.25,abc; ordinary value check, cache synchronization checked in code"
+  ],
+  [
+    "PW-limit",
+    [
+      [
+        "SELECT generate_series FROM generate_series(1,3) LIMIT $1",
+        [],
+        [
+          "1"
+        ]
+      ]
+    ],
+    "1; parameter bigint"
+  ],
+  [
+    "NX-refusal",
+    [
+      "SELECT CAST(9223372036854775808 AS DATE)"
+    ],
+    "42846"
+  ],
+  [
+    "RN-flags",
+    [
+      "SELECT regexp_replace('abc','a','x','n')"
+    ],
+    "0A000"
+  ],
+  [
+    "RD-all",
+    [
+      "SELECT id,k FROM read_json('/tmp/codex-hk9-tmp/seamb-late-key.json', sample_size=-1) WHERE id=2200"
+    ],
+    "2200,7"
+  ],
+  [
+    "TB-range",
+    [
+      "CREATE TABLE t (id INT)",
+      "INSERT INTO t VALUES (1)",
+      "SELECT * FROM t TABLESAMPLE BERNOULLI (101)"
+    ],
+    "2202H"
+  ],
+  [
+    "WD-type",
+    [
+      "CREATE TABLE t (id INT,s TEXT)",
+      "INSERT INTO t VALUES (1,'a')",
+      "SELECT LAG(s,1,2.5) OVER (ORDER BY id) FROM t"
+    ],
+    "42883"
+  ],
+  [
+    "MO-text",
+    [
+      "CREATE TABLE t (s TEXT)",
+      "INSERT INTO t VALUES ('8')",
+      "SELECT s % 2 FROM t"
+    ],
+    "42883"
+  ],
+  [
+    "MO-zero",
+    [
+      "SELECT 8 % 0"
+    ],
+    "22012"
+  ],
+  [
+    "TC-now",
+    [
+      "SELECT TIMESTAMP '2024-01-01' < 'now'"
+    ],
+    "22007"
+  ],
+  [
+    "TI-op",
+    [
+      "SELECT TIMESTAMP 'infinity' - TIMESTAMP '2024-01-01'"
+    ],
+    "22008"
+  ],
+  [
+    "BY-bad",
+    [
+      "SELECT CAST('a\\b' AS BYTES)"
+    ],
+    "22P02"
+  ],
+  [
+    "BY-output",
+    [
+      "CREATE TABLE t (s TEXT)",
+      "INSERT INTO t SELECT DECODE('6869','hex')",
+      "SELECT s FROM t"
+    ],
+    "\\x6869"
+  ],
+  [
+    "ADR-0021-2c",
+    [
+      "CREATE TABLE t (id INT)",
+      "INSERT INTO t VALUES (1),(2),(3)",
+      "SELECT count(*) FROM t a JOIN t b ON a.id=b.id WHERE a.id IN (SELECT id FROM t LIMIT 1)"
+    ],
+    "1"
+  ],
+  [
+    "ADR-0021-2d",
+    [
+      "WITH s AS (SELECT random() AS r) SELECT (SELECT r FROM s) = (SELECT r FROM s)"
+    ],
+    "t"
+  ],
+  [
+    "ADR-0024",
+    [
+      "SELECT CAST(5 / 2.0 AS INTEGER)"
+    ],
+    "3"
+  ],
+  [
+    "ADR-0026",
+    [
+      "CREATE TABLE t (i INT)",
+      "INSERT INTO t VALUES (1),(2),(3)",
+      "SELECT i % 2,count(*) FROM t GROUP BY mod(i,2) ORDER BY 1"
+    ],
+    "0,1;1,2"
+  ],
+  [
+    "ADR-0039",
+    [
+      "SELECT id,k FROM read_json('/tmp/codex-hk9-tmp/seamb-late-key.json', sample_size=-1) WHERE id=2200"
+    ],
+    "2200,7"
+  ],
+  [
+    "ADR-0046",
+    [
+      "SELECT 1"
+    ],
+    "1; smoke statement only; runner policy checked against deploy/gates, no runner launched"
+  ],
+  [
+    "ADR-0012",
+    [
+      "SELECT -'5'"
+    ],
+    "-5; double precision"
+  ],
+  [
+    "MOD-example",
+    [
+      "SELECT MOD(17,5)"
+    ],
+    "2"
+  ]
+]

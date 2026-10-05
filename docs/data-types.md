@@ -1187,3 +1187,5 @@ Parquet files written by the ingester support multiple compression codecs:
 | **Gzip** | Good ratio, slower | Compatibility with external tools |
 | **LZ4** | Fastest decompression | Latency-critical queries |
 | **None** | No compression | Debugging, already-compressed data |
+
+Concurrent casts to DECIMAL/NUMERIC and VARCHAR/CHAR share synchronized destination caches, so each evaluation uses the same parsed precision, scale or length ([cast implementation](../internal/engine/expr/expr_cast.go)).

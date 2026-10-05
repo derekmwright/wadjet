@@ -1,0 +1,538 @@
+[
+  {
+    "id": "aggregates-windows#r9",
+    "steps": [
+      "CREATE TABLE t (id INT, b BIGINT, d DOUBLE, x INT, o INT, g INT, c_bytes BYTES)",
+      "INSERT INTO t VALUES (1,10,1.5,1,1,1,'hi'),(2,20,6.5,2,1,1,'ab')",
+      "SELECT STRING_AGG(c_bytes, ',') FROM t"
+    ],
+    "expected": "ERROR 0A000"
+  },
+  {
+    "id": "aggregates-windows#r14",
+    "steps": [
+      "CREATE TABLE t (id INT, b BIGINT, d DOUBLE, x INT, o INT, g INT, c_bytes BYTES)",
+      "INSERT INTO t VALUES (1,10,1.5,1,1,1,'hi'),(2,20,6.5,2,1,1,'ab')",
+      "SELECT STDDEV(x) OVER (PARTITION BY g ORDER BY x) FROM t"
+    ],
+    "expected": "ERROR 0A000 listing the sixteen window functions (aggregates: SUM, COUNT, AVG, MIN, MAX)"
+  },
+  {
+    "id": "aggregates-windows#r18",
+    "steps": [
+      "CREATE TABLE t (id INT, b BIGINT, d DOUBLE, x INT, o INT, g INT, c_bytes BYTES)",
+      "INSERT INTO t VALUES (1,10,1.5,1,1,1,'hi'),(2,20,6.5,2,1,1,'ab')",
+      "SELECT FIRST_VALUE('b') OVER (ORDER BY id), LAG(NULL) OVER (ORDER BY id) FROM t"
+    ],
+    "expected": "'b' as text on every row; NULL on every row"
+  },
+  {
+    "id": "aggregates-windows#r19",
+    "steps": [
+      "CREATE TABLE t (id INT, b BIGINT, d DOUBLE, x INT, o INT, g INT, c_bytes BYTES)",
+      "INSERT INTO t VALUES (1,10,1.5,1,1,1,'hi'),(2,20,6.5,2,1,1,'ab')",
+      "SELECT LAG(x, o) OVER (ORDER BY id), LAG(x, o + 1) OVER (ORDER BY id), NTILE(o) OVER (ORDER BY id), LAG(x, (SELECT 1)) OVER (ORDER BY id) FROM t"
+    ],
+    "expected": "ERROR 0A000 the integer argument of lag must be a constant here; a constant expression is folded and answers (`LAG(x, 2 - 1)`), except `LAG(x, '1' + 1)`, typed numeric by the fold: 42883 where PostgreSQL reads 2"
+  },
+  {
+    "id": "aggregates-windows#r21",
+    "steps": [
+      "CREATE TABLE t (id INT, b BIGINT, d DOUBLE, x INT, o INT, g INT, c_bytes BYTES)",
+      "INSERT INTO t VALUES (1,10,1.5,1,1,1,'hi'),(2,20,6.5,2,1,1,'ab')",
+      "SELECT LAG(b, 1, 10 / (id - 2)) OVER (ORDER BY id) FROM t"
+    ],
+    "expected": "ERROR 22012 division by zero: the default is materialized as a column and evaluated on every row, so a default that raises on a row it does not fill raises the query"
+  },
+  {
+    "id": "aggregates-windows#r22",
+    "steps": [
+      "CREATE TABLE t (id INT, b BIGINT, d DOUBLE, x INT, o INT, g INT, c_bytes BYTES)",
+      "INSERT INTO t VALUES (1,10,1.5,1,1,1,'hi'),(2,20,6.5,2,1,1,'ab')",
+      "SELECT LAG(b, 1, 'a') OVER (ORDER BY id) FROM t WHERE id > 100"
+    ],
+    "expected": "no rows: the default is coerced when a row reads it; over rows it is 22P02 as on PostgreSQL. A quoted literal default of an ARRAY value raises `cannot store string into ARRAY vector` (no SQLSTATE) where PostgreSQL raises 22P02 malformed array literal"
+  },
+  {
+    "id": "aggregates-windows#r23",
+    "steps": [
+      "CREATE TABLE t (id INT, b BIGINT, d DOUBLE, x INT, o INT, g INT, c_bytes BYTES)",
+      "INSERT INTO t VALUES (1,10,1.5,1,1,1,'hi'),(2,20,6.5,2,1,1,'ab')",
+      "SELECT LAG(b, 1, (SELECT max(d) FROM t)) OVER (ORDER BY id) FROM t"
+    ],
+    "expected": "ERROR, no SQLSTATE: `cannot store string into INT64 vector` on the single-process arms, `window key project: compile window key \"((SELECT max(d) FROM t))\"` on the DAG arms; a constant subquery (`(SELECT 9)`) answers"
+  },
+  {
+    "id": "comparison-membership#r1",
+    "steps": [
+      "CREATE TABLE t (id BIGINT, s TEXT, d NUMERIC(10,2), bt BYTES)",
+      "INSERT INTO t VALUES (12,'1.50',12.50,'hi'),(14,'x',14.00,'ab')",
+      "SELECT id FROM t WHERE s = 1.50"
+    ],
+    "expected": "compares s with the literal's source text '1.50': 1 row; s = 1.5 matches none (measured)"
+  },
+  {
+    "id": "comparison-membership#r6",
+    "steps": [
+      "CREATE TABLE t (id BIGINT, s TEXT, d NUMERIC(10,2), bt BYTES)",
+      "INSERT INTO t VALUES (12,'1.50',12.50,'hi'),(14,'x',14.00,'ab')",
+      "SELECT id FROM t WHERE id IN (SELECT '12')"
+    ],
+    "expected": "12 (a FROM-less literal body folds into the IN list, as id IN ('12'); measured)"
+  },
+  {
+    "id": "comparison-membership#r8",
+    "steps": [
+      "CREATE TABLE t (id BIGINT, s TEXT, d NUMERIC(10,2), bt BYTES)",
+      "INSERT INTO t VALUES (12,'1.50',12.50,'hi'),(14,'x',14.00,'ab')",
+      "SELECT id FROM t WHERE id <> ALL (SELECT s FROM t)"
+    ],
+    "expected": "ERROR 42883 naming = (read as NOT IN)"
+  },
+  {
+    "id": "comparison-membership#r9",
+    "steps": [
+      "CREATE TABLE t (id BIGINT, s TEXT, d NUMERIC(10,2), bt BYTES)",
+      "INSERT INTO t VALUES (12,'1.50',12.50,'hi'),(14,'x',14.00,'ab')",
+      "SELECT id FROM t WHERE '14.0000000000000000000000000000000000000001' IN (SELECT d FROM t)"
+    ],
+    "expected": "ERROR 22003 numeric field overflow naming the literal, every arm (measured)"
+  },
+  {
+    "id": "comparison-membership#r10",
+    "steps": [
+      "CREATE TABLE t (id BIGINT, s TEXT, d NUMERIC(10,2), bt BYTES)",
+      "INSERT INTO t VALUES (12,'1.50',12.50,'hi'),(14,'x',14.00,'ab')",
+      "SELECT id FROM t WHERE sqrt(12.5 * 12.5) IN (SELECT d FROM t)"
+    ],
+    "expected": "ERROR 0A000 naming the operand, every arm (measured); exp, ln, power the same"
+  },
+  {
+    "id": "comparison-membership#r14",
+    "steps": [
+      "CREATE TABLE t (id BIGINT, s TEXT, d NUMERIC(10,2), bt BYTES)",
+      "INSERT INTO t VALUES (12,'1.50',12.50,'hi'),(14,'x',14.00,'ab')",
+      "SELECT string_agg(bt, ',') FROM t"
+    ],
+    "expected": "ERROR 0A000 string_agg over bytea is not supported (measured)"
+  },
+  {
+    "id": "dml-assignment#r1",
+    "steps": [
+      "CREATE TABLE tt (s TEXT)",
+      "SELECT 5 / 2.0"
+    ],
+    "expected": "2.5, declared double precision (OID 701) (measured); INSERT INTO t VALUES (1, 5 / 2.0) stores 3 on both (measured)"
+  },
+  {
+    "id": "dml-assignment#r3",
+    "steps": [
+      "CREATE TABLE tt (s TEXT)",
+      "SELECT CAST(CAST('{\"k\": 2.5}' AS JSON)->>'k' AS INTEGER)"
+    ],
+    "expected": "2 (measured): the cast reads the JSON number; assigning j->>'k' to an integer column is 42804 on both (measured)"
+  },
+  {
+    "id": "dml-assignment#r8",
+    "steps": [
+      "CREATE TABLE tt (s TEXT)",
+      "CREATE TABLE sm (n SMALLINT)"
+    ],
+    "expected": "ERROR 42704 type \"SMALLINT\" does not exist (measured): no int16 storage"
+  },
+  {
+    "id": "dml-assignment#r9",
+    "steps": [
+      "CREATE TABLE tt (s TEXT)",
+      "SELECT CAST(3 AS SMALLINT)"
+    ],
+    "expected": "3, declared bigint (measured)"
+  },
+  {
+    "id": "dml-assignment#r13",
+    "steps": [
+      "CREATE TABLE tt (s TEXT)",
+      "INSERT INTO tt (s) SELECT DECODE('6869','hex')",
+      "SELECT s FROM tt"
+    ],
+    "expected": "stores \\x6869, as PostgreSQL does (amended 2026-10-05, arc BY round 2: a BYTES value is assigned to a text column as bytea's hex output; ERROR 42804 at c67ebf5b); a container or DURATION is ERROR 42804 column \"s\" is of type STRING (measured)"
+  },
+  {
+    "id": "lateral-subqueries#r3",
+    "steps": [
+      "CREATE TABLE users (id INT)",
+      "INSERT INTO users VALUES (1),(2),(3)",
+      "CREATE TABLE x (id INT)",
+      "INSERT INTO x VALUES (1)",
+      "CREATE TABLE y (id INT)",
+      "INSERT INTO y VALUES (99)",
+      "SELECT (SELECT MAX(u.id) FROM x) FROM users u"
+    ],
+    "expected": "ERROR 0A000 no lowering for an aggregate level above the block it is written in (measured)"
+  },
+  {
+    "id": "lateral-subqueries#r4",
+    "steps": [
+      "CREATE TABLE users (id INT)",
+      "INSERT INTO users VALUES (1),(2),(3)",
+      "CREATE TABLE x (id INT)",
+      "INSERT INTO x VALUES (1)",
+      "CREATE TABLE y (id INT)",
+      "INSERT INTO y VALUES (99)",
+      "SELECT id, (SELECT u.id FROM x WHERE x.id=1 UNION ALL SELECT u.id FROM y WHERE y.id=99) FROM users u"
+    ],
+    "expected": "ERROR 0A000 correlated scalar subquery whose body is a SET OPERATION (measured)"
+  },
+  {
+    "id": "lateral-subqueries#r7",
+    "steps": [
+      "CREATE TABLE users (id INT)",
+      "INSERT INTO users VALUES (1),(2),(3)",
+      "CREATE TABLE x (id INT)",
+      "INSERT INTO x VALUES (1)",
+      "CREATE TABLE y (id INT)",
+      "INSERT INTO y VALUES (99)",
+      "SELECT id, (SELECT 1+SUM(u.id) OVER () FROM users x WHERE x.id=1) FROM users u"
+    ],
+    "expected": "ERROR 0A000 correlated scalar subquery holds a window function (measured)"
+  },
+  {
+    "id": "numeric-decimal#r3",
+    "steps": [
+      "SELECT 2147483647 + 1"
+    ],
+    "expected": "2147483648 (measured); an integer CAST is the same int4 arithmetic, `CAST(t.i AS INTEGER) + 2147483647` over 3 is 2147483650 (measured 2026-10-02 at the tip and at c39858f3 alike: the integer CAST beside an integer stays integer arithmetic, only beside a numeric is it numeric)"
+  },
+  {
+    "id": "numeric-decimal#r10",
+    "steps": [
+      "SELECT 2 ^ -1"
+    ],
+    "expected": "0.5"
+  },
+  {
+    "id": "numeric-decimal#r11",
+    "steps": [
+      "SELECT 2 ^ 3 % 5"
+    ],
+    "expected": "3 (`%` is MOD's spelling, 2026-10-04: over a double operand both compute the float remainder, a zero remainder an unsigned 0 \u2014 `t.f % 2.5` over -2.5 printed -0 at 8ccfa832, g/proj/f_ln)"
+  },
+  {
+    "id": "numeric-decimal#r13",
+    "steps": [
+      "SELECT -'5'"
+    ],
+    "expected": "-5 varchar; -'abc' raises 22P02"
+  },
+  {
+    "id": "numeric-decimal#r14",
+    "steps": [
+      "SELECT CAST(1::bigint AS BOOLEAN)"
+    ],
+    "expected": "true (0 is false, other values true, NULL is NULL)"
+  },
+  {
+    "id": "numeric-decimal#r16",
+    "steps": [
+      "SELECT CAST('NaN' AS DECIMAL(9,2))"
+    ],
+    "expected": "ERROR 22003 \"NaN\" has no DECIMAL value (measured)"
+  },
+  {
+    "id": "numeric-decimal#r21",
+    "steps": [
+      "SELECT MOD(8, '2.5')"
+    ],
+    "expected": "0.5, double precision (OID 701) (measured): beside an integer, a quoted literal whose text is not an integer is read as the number it spells, as `8 + '2.5'` is 10.5 and `MOD(t.b, '2.5')` over -70 is 0; a quoted integer keeps the integer type, `MOD(t.i, '3')` is integer (OID 23) as on PostgreSQL. The `%` operator is the `MOD` function, so the two spellings match each other where an expression must match a grouping key: `SELECT t.i % 2, count(*) FROM t GROUP BY mod(t.i, 2)` answers the groups here (measured 2026-10-04) where PostgreSQL raises 42803. 9420d256 answered `MOD(8, '2.5')` 0.5 and `8 + '2.5'` 10.5 the same, and `MOD(t.i, '2.5')` over 3 the integer 0; the `%` spelling is MOD (2026-10-04, #1527): `8 % '2.5'` is the same double 0.5 and `t.i % '2.5'` over 3, -7, 5 is 0.5, -2, 0 as `MOD(t.i, '2.5')` is (8ccfa832: `8 % '2.5'` 0 on the single-process arms and 0.5 on the DAG arms, `t.i % '2.5'` 1, -1, 1 single-process and 0.5, -2, 0 on the DAG, g/proj/l8_q25, g/proj/i_q25)"
+  },
+  {
+    "id": "other#r2",
+    "steps": [
+      "CREATE TABLE t (id INT)",
+      "INSERT INTO t VALUES (1),(2),(3)",
+      "SELECT CAST('abc' AS bytea)"
+    ],
+    "expected": "ERROR 42704 type \"bytea\" does not exist; money and inet the same (measured)"
+  },
+  {
+    "id": "other#r3",
+    "steps": [
+      "CREATE TABLE t (id INT)",
+      "INSERT INTO t VALUES (1),(2),(3)",
+      "SELECT CAST('12:34:56' AS time)"
+    ],
+    "expected": "12:34:56 declared text (OID 25); json and xml likewise pass their text through (measured)"
+  },
+  {
+    "id": "other#r4",
+    "steps": [
+      "CREATE TABLE t (id INT)",
+      "INSERT INTO t VALUES (1),(2),(3)",
+      "SELECT CAST('abc' AS DURATION)"
+    ],
+    "expected": "abc, the operand unchanged (measured); CAST('abc' AS BYTES) left this row 2026-10-05: it is byteain's bytes, `\\x616263`, as `'abc'::bytea` is on PostgreSQL (#1501)"
+  },
+  {
+    "id": "other#r6",
+    "steps": [
+      "CREATE TABLE t (id INT)",
+      "INSERT INTO t VALUES (1),(2),(3)",
+      "SELECT ARRAY[1.5] > ARRAY[1]"
+    ],
+    "expected": "true (compared by the numbers; measured)"
+  },
+  {
+    "id": "other#r7",
+    "steps": [
+      "CREATE TABLE t (id INT)",
+      "INSERT INTO t VALUES (1),(2),(3)",
+      "SELECT CAST(ARRAY[1,2] AS JSON)"
+    ],
+    "expected": "[1,2], to_json's text; json_array_length reads 2 (measured); other non-text container destinations 42846"
+  },
+  {
+    "id": "other#r16",
+    "steps": [
+      "CREATE TABLE t (id INT)",
+      "INSERT INTO t VALUES (1),(2),(3)",
+      "SELECT json_build_object('o', x) FROM (SELECT json_build_object('a', 1) AS x) s"
+    ],
+    "expected": "{\"o\" : \"{\\\"a\\\" : 1}\"} (measured): json_build_object declares text (OID 25), so a json value that reaches it declared text \u2014 a derived table's, a CTE's or a stored column, a scalar subquery over a table, a COALESCE with a text arm \u2014 is written as a JSON string; a FROM-less scalar subquery over its own `json_build_object` nests as an object; one its own argument expression produces (json_build_object, a CAST to json, a COALESCE or CASE of those) nests as an object. Being text, the object is also compared, grouped and md5'd where PostgreSQL raises 42883 for json"
+  },
+  {
+    "id": "other#r17",
+    "steps": [
+      "CREATE TABLE t (id INT)",
+      "INSERT INTO t VALUES (1),(2),(3)",
+      "SELECT count(*) FROM t TABLESAMPLE BERNOULLI (100) REPEATABLE (1)"
+    ],
+    "expected": "ERROR 42601 syntax error: REPEATABLE is not parsed (measured)"
+  },
+  {
+    "id": "other#r18",
+    "steps": [
+      "CREATE TABLE t (id INT)",
+      "INSERT INTO t VALUES (1),(2),(3)",
+      "SELECT count(*) FROM t TABLESAMPLE BERNOULLI ((SELECT 50))"
+    ],
+    "expected": "ERROR 0A000: the argument is evaluated at plan time, before any row exists (measured)"
+  },
+  {
+    "id": "parameters-pgwire#r4",
+    "steps": [
+      "SELECT 1 +"
+    ],
+    "expected": "ERROR 42601 same sentence; no POSITION field (measured)"
+  },
+  {
+    "id": "parameters-pgwire#r5",
+    "steps": [
+      "CREATE TABLE p (id INT,n INT)",
+      "INSERT INTO p VALUES (1,7)",
+      [
+        "SELECT id FROM p WHERE n = $1",
+        [
+          25
+        ],
+        [
+          "7"
+        ]
+      ]
+    ],
+    "expected": "id 1: a text or varchar parameter is spliced as SQL's unknown literal, which the integer column's input reads (measured); `SELECT $1` declared varchar declares text (OID 25) where PostgreSQL declares varchar, and an undeclared parameter beside a VARCHAR column is typed text, as such a column declares here"
+  },
+  {
+    "id": "parameters-pgwire#r7",
+    "steps": [
+      [
+        "SELECT $1 IS NULL, $1",
+        [],
+        [
+          null
+        ]
+      ]
+    ],
+    "expected": "`t`, NULL declared text (OID 25), and 6: the select-list parameter is text, the `IS NULL` operand undetermined (OID 0) (measured)"
+  },
+  {
+    "id": "parameters-pgwire#r8",
+    "steps": [
+      [
+        "SELECT $1",
+        [
+          21
+        ],
+        [
+          "7"
+        ]
+      ]
+    ],
+    "expected": "integer (OID 23): no smallint type (measured)"
+  },
+  {
+    "id": "parameters-pgwire#r9",
+    "steps": [
+      [
+        "SELECT $1",
+        [
+          1184
+        ],
+        [
+          "2024-03-04 12:00:00+00"
+        ]
+      ]
+    ],
+    "expected": "timestamp (OID 1114) `2024-03-04 12:00:00`: the instant at UTC, the session TimeZone the server reports; an offset spelled `Z`, `\u00b1hh`, `\u00b1hh:mm`, `\u00b1hhmm` or `\u00b1hh:mm:ss` (a space before it or not) is applied \u2014 `ts = $1` bound `'2024-03-04 17:00:00+05'` or `'\u2026+0530'` matches as on PostgreSQL \u2014 and a zone NAME (`UTC`, `EST`, `America/New_York`) is refused 22007 as the TIMESTAMP input refuses it ([temporal#r25](temporal.md#catalog); measured)"
+  },
+  {
+    "id": "parameters-pgwire#r10",
+    "steps": [
+      [
+        "SELECT $1",
+        [
+          17
+        ],
+        [
+          "\\x6869"
+        ]
+      ]
+    ],
+    "expected": "text (OID 25): `\\x6869` for a text-format and a binary bytea alike \u2014 the parameter is a BYTES value (`CAST('\\x6869' AS BYTES)`), and only the statement Describe declares it text (amended 2026-10-05: a binary one printed its raw bytes, `hi`, at c67ebf5b); `{1,2}`; an array parameter in binary format is refused 22023 (measured)"
+  },
+  {
+    "id": "parameters-pgwire#r12",
+    "steps": [
+      [
+        "SELECT $1 + 1",
+        [],
+        [
+          "2"
+        ]
+      ]
+    ],
+    "expected": "parameter integer, result bigint: the parameter takes PostgreSQL's type \u2014 beside arithmetic its operator result type, so `$1 = n * 2` is integer as on PostgreSQL \u2014 and the expression around it this engine's declaration: integer arithmetic ([numeric-decimal#r1](numeric-decimal.md#catalog)), an integer CAST (`SELECT CAST($1 AS INTEGER)`) and NTILE declare bigint, and `WHERE m = $1` over a derived `n * 2 AS m` types the parameter bigint where PostgreSQL types it integer (the derived column is this engine's declaration). `SELECT $1` (or `COALESCE($1, 0)`) declared integer and bound `-7`, text or binary, executes as bigint (a negative integer literal declares bigint here, and so does `CAST(-7 AS INTEGER)`) while the statement Describe declared integer: eight bytes in a binary row where PostgreSQL sends four, so a client that decodes binary rows by that Describe refuses the value; declared smallint it is r8's integer Describe with the same eight bytes (PostgreSQL: smallint, two). An integer or smallint parameter past its width raises 22003 as on PostgreSQL (measured)"
+  },
+  {
+    "id": "recursion#r11",
+    "steps": [
+      "CREATE TABLE t (id INT,n NUMERIC(10,2))",
+      "INSERT INTO t VALUES (1,2.25)",
+      "WITH RECURSIVE r(k, v) AS (SELECT 1, (SELECT x.n FROM t x WHERE x.id = 1) UNION ALL SELECT k + 1, v + 1 FROM r WHERE k < 3) SELECT k, v FROM r"
+    ],
+    "expected": "2.25, 3.25, 4.25: the subquery's answer is declared without the column's modifier, so it seeds an unconstrained column (likewise a correlated `(SELECT t.n \u2026)`, a `CAST(x.n AS NUMERIC(10,2))` inside the subquery, and a numeric(5,2) answer under `v * 10`: 225.00, 2250.00, 22500.00); v0.25.3 raised 42804 (measured)"
+  },
+  {
+    "id": "recursion#r12",
+    "steps": [
+      "CREATE TABLE t (id INT,n NUMERIC(10,2))",
+      "INSERT INTO t VALUES (1,2.25)",
+      "WITH RECURSIVE r(k, v) AS (SELECT 1, CAST(1.5 AS NUMERIC(38,2)) UNION ALL SELECT k + 1, v + 1 FROM r WHERE k < 3) SELECT k, v FROM r"
+    ],
+    "expected": "1.50, 2.50, 3.50: a numeric(38,s) seed \u2014 a CAST or a column \u2014 reads as unconstrained (38 digits is the widest DECIMAL this engine holds); the same at v0.25.3 (measured); at precision 37 the seed is 42804 as on PostgreSQL"
+  },
+  {
+    "id": "table-functions#r7",
+    "steps": [
+      "EXPLAIN SELECT * FROM read_json('/missing.json')"
+    ],
+    "expected": "ERROR 58P01 for the query and its EXPLAIN (measured); 42501 unreadable file, 42809 a directory"
+  },
+  {
+    "id": "table-functions#r10",
+    "steps": [
+      "SELECT * FROM generate_series(1, 2) WITH ORDINALITY AS g(a, b)"
+    ],
+    "expected": "ERROR 42P10: one column only; without the list it answers 1, 2 (measured); unnest adds ordinality"
+  },
+  {
+    "id": "table-functions#r12",
+    "steps": [
+      "SELECT * FROM generate_series(5, 1)"
+    ],
+    "expected": "zero rows (measured); step 0 is ERROR 22023, PostgreSQL's sentence; v0.22.0 answered 5..1"
+  },
+  {
+    "id": "table-functions#r13",
+    "steps": [
+      "SELECT 1 + unnest(ARRAY[1, 2])"
+    ],
+    "expected": "ERROR 0A000: an SRF answers only as a whole SELECT item (measured)"
+  },
+  {
+    "id": "temporal#r1",
+    "steps": [
+      "SELECT CAST('2020-01-01 00:00:00.123456' AS TIMESTAMP)"
+    ],
+    "expected": "2020-01-01 00:00:00.123 (measured): the millisecond carrier floors sub-millisecond digits"
+  },
+  {
+    "id": "temporal#r4",
+    "steps": [
+      "SELECT CAST(true AS DATE)"
+    ],
+    "expected": "NULL (measured); a container, CAST(ARRAY[1] AS DATE), is 42846 as in PostgreSQL (measured)"
+  },
+  {
+    "id": "temporal#r6",
+    "steps": [
+      "SELECT CAST(3000000000 AS DATE)"
+    ],
+    "expected": "ERROR 22003 integer out of range (measured): the signed 32-bit day count is the bound"
+  },
+  {
+    "id": "temporal#r7",
+    "steps": [
+      "SELECT CAST('31/12/1996' AS DATE)"
+    ],
+    "expected": "ERROR 22007 invalid input syntax for type date (measured): no spelling whose field order DateStyle decides is read"
+  },
+  {
+    "id": "temporal#r12",
+    "steps": [
+      "SELECT LOCALTIMESTAMP(0) = LOCALTIMESTAMP(6)"
+    ],
+    "expected": "t (measured): precision accepted and ignored; declared timestamp either way"
+  },
+  {
+    "id": "temporal#r18",
+    "steps": [
+      "SELECT CAST('2020-01-03' AS DATE) - CAST('2020-01-01 00:00:00' AS TIMESTAMP)"
+    ],
+    "expected": "ERROR 42883 operator does not exist: date - timestamp without time zone (measured)"
+  },
+  {
+    "id": "temporal#r23",
+    "steps": [
+      "SELECT CURRENT_TIME"
+    ],
+    "expected": "ERROR 42883 unknown function: current_time (measured); there is no TIME type"
+  },
+  {
+    "id": "temporal#r25",
+    "steps": [
+      "SELECT CAST('2024-03-04 12:00:00 UTC' AS TIMESTAMP)"
+    ],
+    "expected": "ERROR 22007 invalid input syntax (measured): outside the one date/time grammar (E41) \u2014 refused, never guessed; `DATE '2024-03-04 12:00:00Z+05'` and `\u2026z+05` read 2024-03-04 at 978cd0e5, which discarded what followed the clock"
+  },
+  {
+    "id": "text-collation#r2",
+    "steps": [
+      "SELECT 'a' < 'b' COLLATE \"en_US\""
+    ],
+    "expected": "ERROR 0A000 collation \"en_US\" is not supported (measured); C, POSIX, ucs_basic and default are accepted"
+  },
+  {
+    "id": "text-collation#r3",
+    "steps": [
+      "SELECT 'abab' ~ '(a)b\\1'"
+    ],
+    "expected": "ERROR 0A000 regular expression back reference \\1 is not supported (measured): RE2 matches; `regexp_replace` reads its pattern through the same translation and refuses the same forms (2026-10-02)"
+  },
+  {
+    "id": "text-collation#r4",
+    "steps": [
+      "SELECT '\u00c9' ~* '\u00e9'"
+    ],
+    "expected": "f: case-insensitive matching folds ASCII letters only, as PostgreSQL does under the C collation; `regexp_replace`'s `i` flag the same, and its `\\y` counts ASCII letters, digits and `_` as word characters (2026-10-02, measured)"
+  }
+]

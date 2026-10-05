@@ -1,0 +1,168 @@
+bundle entry	key statement	file	line	matching text
+SS	scalar subquery	docs/sql-reference.md	878	LATERAL, a set operation, `DISTINCT`, `ORDER BY … LIMIT`, a scalar subquery.
+SS	scalar subquery	docs/data-types.md	128	scalar subquery's answer handed to a later stage, a correlated re-run's outer
+SS	scalar subquery	README.md	311	- Subqueries: scalar, IN, EXISTS, correlated subqueries (over a base table, a derived table or a CTE), and `LATERAL` joins — including a scalar subquery with no `FROM` clause, which is its `SELECT` expression evaluated in the enclosing row's scope (`SELECT (SELECT u.x) FROM ... u`), and the same shape as a `LATERAL` body
+SS	declaration	docs/sql-reference.md	523	declaration is what the consumers read, so `SELECT SUM(x) FROM
+SS	declaration	docs/data-types.md	58	the declaration. Wadjet moves such a value to the column's declared scale as it
+SS	22003	docs/sql-reference.md	300	  `22003` for a number outside the type's range, `22007` for a timestamp
+SS	22003	docs/data-types.md	60	rounded half away from zero when it falls, and `22003 numeric field overflow`
+SS	22003	README.md	330	- Bound parameters use their declared or inferred type, including timestamp comparisons with DATE, integer range checks (`22003`), and bigint parameters for `LIMIT` and `OFFSET`.
+RN	json_build_object	docs/sql-reference.md	1314	`array_to_string` over its text, `json_build_object`'s value (a JSON number:
+RN	json_build_object	README.md	328	- `json_build_object` renders dates and timestamps as ISO text and nests object expressions, `format` uses PostgreSQL's formatting rules, and `regexp_replace` replaces only the first match unless given `g` (unsupported flags raise `0A000`).
+RN	format	docs/sql-reference.md	376	matches is not one of them — and each file is read on its own by its format's
+RN	format	docs/data-types.md	83	It declares OID 17 on the wire and renders as `\x` hex in the text format.
+RN	format	README.md	113	Wadjet is a distributed SQL engine over a lake: it owns no storage format,
+RN	regexp_replace	docs/sql-reference.md	4159	| `REGEXP_REPLACE(s, pattern, repl [, flags])` | Replace the FIRST match, or every match under the `g` flag, as PostgreSQL does. The pattern is read as the `~` operators read it (PostgreSQL's ARE translated form by form, ADR-0044: `.` matches a newline, `\b` is a backspace, a back reference is refused 0A000), and an RE whose quantifiers are all greedy takes the longest match. In `repl`, `\1`…`\9` are groups and `\&` the whole match. Flags: `g`, `i` (ASCII letters fold) / `c`, `q` (literal pattern), `s` and `t` (the defaults); `n`, `m`, `p`, `w`, `x`, `b` and `e` are refused 0A000, as is an integer start position, and any other letter is 22023 | `REGEXP_REPLACE(message, '\s+', ' ', 'g')` |
+RN	regexp_replace	README.md	328	- `json_build_object` renders dates and timestamps as ISO text and nests object expressions, `format` uses PostgreSQL's formatting rules, and `regexp_replace` replaces only the first match unless given `g` (unsupported flags raise `0A000`).
+RN	22023	docs/sql-reference.md	367	or `-1`, is `22023`.
+RN	22023	docs/data-types.md	106	  a non-hex digit. An odd digit count is `22023 invalid hexadecimal data: odd
+RN	22023	README.md	343	- Text assigned or cast to `BYTES` uses PostgreSQL bytea input (`22023` or `22P02` for malformed input), and BYTES assigned to text stores its hex output; existing stored bytes stay unchanged.
+RN	0A000	docs/sql-reference.md	22	| `MERGE INTO ... USING ... WHEN MATCHED` | Conditional upsert; target and source must have different exposed names (SQLSTATE 42712 otherwise); `WHEN NOT MATCHED BY SOURCE/TARGET` is refused with SQLSTATE 0A000 |
+RN	0A000	docs/data-types.md	436	`0A000`, one class at every door.** An `IPv4` column cannot hold a NETWORK
+RN	0A000	README.md	312	- 16 window functions (the rank family, SUM/COUNT/AVG/MIN/MAX, LAG/LEAD, FIRST_VALUE/LAST_VALUE/NTH_VALUE, NTILE, PERCENT_RANK, CUME_DIST) with PARTITION BY, ORDER BY, NULLS FIRST/LAST, and ROWS/RANGE frame specs; any other aggregate in the window position is refused `0A000` with the supported set named
+DR	Concurrent casts	docs/data-types.md	1191	Concurrent casts to DECIMAL/NUMERIC and VARCHAR/CHAR share synchronized destination caches, so each evaluation uses the same parsed precision, scale or length ([cast implementation](../internal/engine/expr/expr_cast.go)).
+PW	parameter	docs/sql-reference.md	201	Query files directly from SQL without prior ingestion. Table functions appear in the `FROM` clause and support positional arguments, named parameters (`key=value`), and glob patterns.
+PW	parameter	docs/data-types.md	65	DECIMAL columns were declared with different parameters. It applies at every
+PW	parameter	README.md	16	- **Table functions** — `read_json()`, `read_csv()`, `read_parquet()` query local files and HTTP URLs directly from SQL, with glob patterns and named parameters; `generate_series()` and `unnest()` generate rows. A table function in `FROM` is a relation: over a regular local file it publishes a column list *before the query runs* — a Parquet file's footer, the first 100 rows of a CSV or JSON file — so a reference to a column it does not publish is `42703` naming the column, `f.*` expands, and its columns carry their type into aggregates and joins. (An `http(s)` URL and the database readers are read when the query runs, and are held to their columns at their first batch.)
+PW	22P02	docs/sql-reference.md	299	  with the SQLSTATE PostgreSQL's `COPY` raises for the same field: `22P02`,
+PW	22P02	docs/data-types.md	112	  `22P02 invalid input syntax for type bytea`.
+PW	22P02	README.md	334	- `read_csv` and `read_json` accept `sample_size = -1` to infer from every row; otherwise a later JSON key or nested field outside the inferred schema raises `22P04` or `22P02`.
+PW	22003	docs/sql-reference.md	300	  `22003` for a number outside the type's range, `22007` for a timestamp
+PW	22003	docs/data-types.md	60	rounded half away from zero when it falls, and `22003 numeric field overflow`
+PW	22003	README.md	330	- Bound parameters use their declared or inferred type, including timestamp comparisons with DATE, integer range checks (`22003`), and bigint parameters for `LIMIT` and `OFFSET`.
+PW	42883	docs/sql-reference.md	1125	CIDR) against a subquery that selects TEXT is SQLSTATE 42883 `operator does
+PW	42883	docs/data-types.md	161	  `42883 function upper(bytea) does not exist`;
+PW	42883	README.md	337	- `LAG` and `LEAD` use the common type of their value and default, accept column and expression defaults, and raise `42883` for incompatible types or `22P02` for an unreadable quoted default.
+PW	LIMIT	docs/sql-reference.md	63	A **delimited** identifier — one written between double quotes — keeps its
+PW	LIMIT	docs/data-types.md	836	and `\` escaped) when it is empty, contains a delimiter, brace, quote,
+PW	LIMIT	README.md	138	"./wadjet-bin query ""SELECT id_orig_h, SUM(orig_bytes) AS total FROM read_json('conn.log') GROUP BY 1 ORDER BY 2 DESC LIMIT 10"""
+PW	OFFSET	docs/sql-reference.md	196	[LIMIT n [OFFSET m]]
+PW	OFFSET	docs/data-types.md	76	| `String` | `string` | Variable-length (offset/data layout) | Hostnames, messages, labels |
+PW	OFFSET	README.md	330	- Bound parameters use their declared or inferred type, including timestamp comparisons with DATE, integer range checks (`22003`), and bigint parameters for `LIMIT` and `OFFSET`.
+FT	FLOAT	docs/sql-reference.md	287	the sample (`int8in`, then `float8in`), so a spelling the sample types is
+FT	FLOAT	docs/data-types.md	13	| `Float32` | `float32` | 4 bytes | IEEE 754 | Ratios, percentages |
+FT	FLOAT	README.md	331	- New `FLOAT` columns are double precision, `REAL`/`FLOAT4` are real and `FLOAT8`/`DOUBLE PRECISION` are double precision; existing columns retain their stored type.
+FT	FLOAT4	docs/sql-reference.md	864	precision, `REAL` / `FLOAT4` / `FLOAT(1..24)` real — the same table `CAST`
+FT	FLOAT4	docs/data-types.md	183	| `REAL`, `FLOAT4` | `Float32` (real, OID 700) |
+FT	FLOAT4	README.md	331	- New `FLOAT` columns are double precision, `REAL`/`FLOAT4` are real and `FLOAT8`/`DOUBLE PRECISION` are double precision; existing columns retain their stored type.
+FT	FLOAT8	docs/sql-reference.md	287	the sample (`int8in`, then `float8in`), so a spelling the sample types is
+FT	FLOAT8	docs/data-types.md	181	| `FLOAT8`, `DOUBLE PRECISION` | `Float64` (double precision, OID 701) |
+FT	FLOAT8	README.md	331	- New `FLOAT` columns are double precision, `REAL`/`FLOAT4` are real and `FLOAT8`/`DOUBLE PRECISION` are double precision; existing columns retain their stored type.
+FT	DOUBLE PRECISION	docs/sql-reference.md	275	have (an integer column that meets `0.75` there becomes `double precision`),
+FT	DOUBLE PRECISION	docs/data-types.md	180	| `FLOAT` (bare) | `Float64` (double precision, OID 701) — PostgreSQL's unqualified `float` is double precision |
+FT	DOUBLE PRECISION	README.md	331	- New `FLOAT` columns are double precision, `REAL`/`FLOAT4` are real and `FLOAT8`/`DOUBLE PRECISION` are double precision; existing columns retain their stored type.
+FT	700	docs/sql-reference.md	824	`170000`.
+FT	700	docs/data-types.md	27	| `SUM(i64)`, `AVG(i32)`, `AVG(i64)` | `numeric` | 1700 | same |
+FT	701	docs/sql-reference.md	899	"  one statement is SQLSTATE `42701`, `column ""?column?"" specified more than"
+FT	701	docs/data-types.md	180	| `FLOAT` (bare) | `Float64` (double precision, OID 701) — PostgreSQL's unqualified `float` is double precision |
+SJ	partition is replayed	docs/sql-reference.md	3193	A RIGHT or FULL join with an empty input retains the preserved side's values and NULL-extends the empty side, including when a spilled partition is replayed ([ADR-0006](adr/0006-never-oom-memory-model.md#2026-10-03-arc-sj-a-partition-replay-emits-the-joins-own-output-whatever-the-other-sides-size-1359)).
+NX	numeric literal	docs/sql-reference.md	1151	Against a NUMERIC subquery a numeric literal — quoted, under a bare
+NX	numeric literal	docs/data-types.md	219	stores 2). Through v0.25.1 a float parameter was read as a numeric literal:
+NX	numeric literal	README.md	333	- Long numeric literals retain their digits, integer casts of numeric halves round away from zero, and casts of exact numeric values to unsupported type families raise `42846`.
+NX	42846	docs/sql-reference.md	3415	`INTERVAL`, `UUID`, an array type or `VECTOR` is refused (42846), as on
+NX	42846	docs/data-types.md	116	every other type's. `CAST(x AS BYTES)` of a non-text operand is `42846
+NX	42846	README.md	333	- Long numeric literals retain their digits, integer casts of numeric halves round away from zero, and casts of exact numeric values to unsupported type families raise `42846`.
+NX	half away	docs/sql-reference.md	3430	`numeric` half away from zero, a `double precision` half to even.
+NX	half away	docs/data-types.md	60	rounded half away from zero when it falls, and `22003 numeric field overflow`
+NX	MOD	docs/sql-reference.md	20	| `INSERT` / `UPDATE` / `DELETE` | Modify table data (merge-on-read) — see [Data Manipulation](#data-manipulation-dml) |
+NX	MOD	docs/data-types.md	30	| `i32 << 2` | `bigint` | 20 | `integer`, and MODULAR |
+NX	MOD	README.md	3	[![Release](https://img.shields.io/github/v/release/derekmwright/wadjet?sort=semver)](https://github.com/derekmwright/wadjet/releases) [![CI](https://img.shields.io/github/actions/workflow/status/derekmwright/wadjet/ci.yml?branch=main&label=CI)](https://github.com/derekmwright/wadjet/actions/workflows/ci.yml) [![Go Version](https://img.shields.io/github/go-mod/go-version/derekmwright/wadjet)](https://github.com/derekmwright/wadjet/blob/main/go.mod) [![License](https://img.shields.io/github/license/derekmwright/wadjet)](https://github.com/derekmwright/wadjet/blob/main/LICENSE) [![Go Report Card](https://goreportcard.com/badge/github.com/derekmwright/wadjet)](https://goreportcard.com/report/github.com/derekmwright/wadjet) [![Issues](https://img.shields.io/github/issues/derekmwright/wadjet)](https://github.com/derekmwright/wadjet/issues)
+RD	sample_size	docs/sql-reference.md	306	"  read_json: /data/f.json: row 101 column ""a"": value 0.75 (double precision) is not of type bigint (the column's type was inferred from the file's first 100 rows); sample_size = -1 infers it from every row"
+RD	sample_size	README.md	334	- `read_csv` and `read_json` accept `sample_size = -1` to infer from every row; otherwise a later JSON key or nested field outside the inferred schema raises `22P04` or `22P02`.
+RD	22P04	docs/sql-reference.md	330	  value, refuses the statement with `22P04` (`COPY`'s class for a record
+RD	22P04	README.md	334	- `read_csv` and `read_json` accept `sample_size = -1` to infer from every row; otherwise a later JSON key or nested field outside the inferred schema raises `22P04` or `22P02`.
+RD	22P02	docs/sql-reference.md	299	  with the SQLSTATE PostgreSQL's `COPY` raises for the same field: `22P02`,
+RD	22P02	docs/data-types.md	112	  `22P02 invalid input syntax for type bytea`.
+RD	22P02	README.md	334	- `read_csv` and `read_json` accept `sample_size = -1` to infer from every row; otherwise a later JSON key or nested field outside the inferred schema raises `22P04` or `22P02`.
+TB	TABLESAMPLE	docs/sql-reference.md	685	relation with `TABLESAMPLE` — and that the statement reads **more than once**
+TB	TABLESAMPLE	README.md	335	- `TABLESAMPLE` reads a constant argument as real, samples no rows at zero, and raises `2202H` for NULL, NaN or percentages outside 0–100 when the scan begins (`22003` if coercion to real is out of range).
+TB	2202H	docs/sql-reference.md	3156	other than one 2202H. When the scan begins, the percentage must be between 0
+TB	2202H	README.md	335	- `TABLESAMPLE` reads a constant argument as real, samples no rows at zero, and raises `2202H` for NULL, NaN or percentages outside 0–100 when the scan begins (`22003` if coercion to real is out of range).
+TB	22003	docs/sql-reference.md	300	  `22003` for a number outside the type's range, `22007` for a timestamp
+TB	22003	docs/data-types.md	60	rounded half away from zero when it falls, and `22003 numeric field overflow`
+TB	22003	README.md	330	- Bound parameters use their declared or inferred type, including timestamp comparisons with DATE, integer range checks (`22003`), and bigint parameters for `LIMIT` and `OFFSET`.
+IW	2^63	docs/sql-reference.md	4244	  is exact, including the band from `2^53` to `2^63-1` that node-semver — being
+IW	2^63	docs/data-types.md	12	| `Int64` | `int64` | 8 bytes | -2^63 to 2^63-1 | Byte counts, large counters, IDs |
+IW	2^63	README.md	336	- A float outside an integer destination's range raises `22003` on assignment, including the double 2^63 assigned to BIGINT.
+IW	22003	docs/sql-reference.md	300	  `22003` for a number outside the type's range, `22007` for a timestamp
+IW	22003	docs/data-types.md	60	rounded half away from zero when it falls, and `22003 numeric field overflow`
+IW	22003	README.md	330	- Bound parameters use their declared or inferred type, including timestamp comparisons with DATE, integer range checks (`22003`), and bigint parameters for `LIMIT` and `OFFSET`.
+WD	LAG	docs/sql-reference.md	292	identifiers or flag strings. Past the sample a `bigint` column still reads
+WD	LAG	docs/data-types.md	16	| `Bool` | `bool` | 1 bit | true/false | Flags, states |
+WD	LAG	README.md	45	"(`--storage-type` defaults to `s3`; the two flags are what ""no S3, no"
+WD	LEAD	docs/sql-reference.md	346	named argument. A positive count types the columns from that many leading
+WD	LEAD	docs/data-types.md	123	`GREATEST`, `b || '\x41'`, a `LAG` / `LEAD` default — keeps its spelling
+WD	LEAD	README.md	312	- 16 window functions (the rank family, SUM/COUNT/AVG/MIN/MAX, LAG/LEAD, FIRST_VALUE/LAST_VALUE/NTH_VALUE, NTILE, PERCENT_RANK, CUME_DIST) with PARTITION BY, ORDER BY, NULLS FIRST/LAST, and ROWS/RANGE frame specs; any other aggregate in the window position is refused `0A000` with the supported set named
+WD	42883	docs/sql-reference.md	1125	CIDR) against a subquery that selects TEXT is SQLSTATE 42883 `operator does
+WD	42883	docs/data-types.md	161	  `42883 function upper(bytea) does not exist`;
+WD	42883	README.md	337	- `LAG` and `LEAD` use the common type of their value and default, accept column and expression defaults, and raise `42883` for incompatible types or `22P02` for an unreadable quoted default.
+WD	22P02	docs/sql-reference.md	299	  with the SQLSTATE PostgreSQL's `COPY` raises for the same field: `22P02`,
+WD	22P02	docs/data-types.md	112	  `22P02 invalid input syntax for type bytea`.
+WD	22P02	README.md	334	- `read_csv` and `read_json` accept `sample_size = -1` to infer from every row; otherwise a later JSON key or nested field outside the inferred schema raises `22P04` or `22P02`.
+WD	typed NULL	docs/sql-reference.md	3827	default that computes over a typed NULL (`CAST(NULL AS NUMERIC) + 0`) is
+MO	%	docs/sql-reference.md	1064	SELECT * FROM syslog WHERE message LIKE '%error%'
+MO	%	docs/data-types.md	393	| `MAC` | `08:00:2b:01:02:03`, `08-00-2b-01-02-03`, `08002b:010203`, `08002b-010203`, `0800.2b01.0203`, `0800-2b01-0203`, `08002b010203`, any case — `macaddr_in`'s seven `sscanf` patterns. The colon and hyphen forms read VARIABLE-width groups, so `a:b:c:d:e:f` is `0a:0b:0c:0d:0e:0f`; any other regrouping (`0800:2b01:0203`, `08.00.2b.01.02.03`) is `22P02`, and an octet above 255 is `22003 invalid octet value`. A field is converted the way C's `%x` converts it, which truncates TWICE: a value past 2^64−1 saturates and is `22003` (`'10000000000000000:0:0:0:0:0'`), and what survives that is taken mod 2^32 (`'100000001:0:0:0:0:0'` is `01:00:00:00:00:00`). Leading zeros do not count toward either — twenty-two of them are still the value they precede |
+MO	%	README.md	122	- **Trino** — the one measured head-to-head. Identical hardware, same day, SF100 TPC-H on S3 (coordinator `c7g.2xlarge` + 3× `c7gd.4xlarge` workers), Trino 470 in fault-tolerant execution (`retry-policy=TASK` + S3 exchange spooling): steady suite **198.5 s vs 221.2 s** (−10 %) as means of runs 3–4, per-query geomean **−19 %**, **12 of 22** queries won, cold a tie ([comparison memo](docs/benchmarks/trino-comparison-2026-08-14.md), 2026-08-14). Wadjet has since improved on that topology — steady mean 198.5 s → **125.3 s**, best single suite wall 187.2 s → **123.8 s** ([baseline memo](docs/benchmarks/sf100-baseline-v0.18.12-2026-09-02.md), 2026-09-02) — while Trino has not been re-run, so the *current* gap is unmeasured.
+MO	MOD	docs/sql-reference.md	20	| `INSERT` / `UPDATE` / `DELETE` | Modify table data (merge-on-read) — see [Data Manipulation](#data-manipulation-dml) |
+MO	MOD	docs/data-types.md	30	| `i32 << 2` | `bigint` | 20 | `integer`, and MODULAR |
+MO	MOD	README.md	3	[![Release](https://img.shields.io/github/v/release/derekmwright/wadjet?sort=semver)](https://github.com/derekmwright/wadjet/releases) [![CI](https://img.shields.io/github/actions/workflow/status/derekmwright/wadjet/ci.yml?branch=main&label=CI)](https://github.com/derekmwright/wadjet/actions/workflows/ci.yml) [![Go Version](https://img.shields.io/github/go-mod/go-version/derekmwright/wadjet)](https://github.com/derekmwright/wadjet/blob/main/go.mod) [![License](https://img.shields.io/github/license/derekmwright/wadjet)](https://github.com/derekmwright/wadjet/blob/main/LICENSE) [![Go Report Card](https://goreportcard.com/badge/github.com/derekmwright/wadjet)](https://goreportcard.com/report/github.com/derekmwright/wadjet) [![Issues](https://img.shields.io/github/issues/derekmwright/wadjet)](https://github.com/derekmwright/wadjet/issues)
+MO	22012	docs/sql-reference.md	2252	(`SUM(price*volume)/SUM(volume)`) raises `22012` instead, here as on the
+MO	22012	README.md	338	- `%` uses `MOD`'s types, values and errors, including NULL propagation, `22012` for zero divisors and `42883` for stored text or date operands.
+MO	42883	docs/sql-reference.md	1125	CIDR) against a subquery that selects TEXT is SQLSTATE 42883 `operator does
+MO	42883	docs/data-types.md	161	  `42883 function upper(bytea) does not exist`;
+MO	42883	README.md	337	- `LAG` and `LEAD` use the common type of their value and default, accept column and expression defaults, and raise `42883` for incompatible types or `22P02` for an unreadable quoted default.
+TC	22007	docs/sql-reference.md	300	  `22003` for a number outside the type's range, `22007` for a timestamp
+TC	22007	docs/data-types.md	519	text that is not a timestamp at all is 22007.
+TC	22007	README.md	339	- Text compared with DATE or TIMESTAMP uses the temporal input rules and raises `22007`, `22008` or `22009` when refused; use `CURRENT_TIMESTAMP` or `CURRENT_DATE` instead of the quoted clock words.
+TC	22008	docs/sql-reference.md	1022	'0000-01-01'` 22008, `WHERE ts = '2024-01-15 10:30:00+16'` 22009 — in every
+TC	22008	docs/data-types.md	518	fields name no instant (`2020-02-30`, month 13, hour 25) is SQLSTATE 22008;
+TC	22008	README.md	339	- Text compared with DATE or TIMESTAMP uses the temporal input rules and raises `22007`, `22008` or `22009` when refused; use `CURRENT_TIMESTAMP` or `CURRENT_DATE` instead of the quoted clock words.
+TC	22009	docs/sql-reference.md	1022	'0000-01-01'` 22008, `WHERE ts = '2024-01-15 10:30:00+16'` 22009 — in every
+TC	22009	docs/data-types.md	526	10:30:00+16'` 22009 (a zone displacement past ±15:59:59). Where the planner
+TC	22009	README.md	339	- Text compared with DATE or TIMESTAMP uses the temporal input rules and raises `22007`, `22008` or `22009` when refused; use `CURRENT_TIMESTAMP` or `CURRENT_DATE` instead of the quoted clock words.
+TC	CURRENT_DATE	docs/sql-reference.md	1041	`CURRENT_TIMESTAMP` / `CURRENT_DATE` for `'now'` / `'today'`
+TC	CURRENT_DATE	docs/data-types.md	561	`CURRENT_DATE` is the UTC date of the same clock — one zone for every clock
+TC	CURRENT_DATE	README.md	305	- `INSERT ... VALUES` with any scalar expression in a cell (typed literals, `CAST`, `now()` / `CURRENT_DATE`, arithmetic), assigned by PostgreSQL's assignment casts — the same table `INSERT ... SELECT`, `UPDATE` and `MERGE` use
+FO	NaN	docs/sql-reference.md	285	whitespace, a sign, digits, a fraction, an exponent) or as `NaN`/`Infinity`,
+FO	NaN	docs/data-types.md	15	| `Decimal(p,s)` | `Int128` | 16 bytes | Up to 38 digits | Financial amounts, exact arithmetic |
+FO	NaN	README.md	335	- `TABLESAMPLE` reads a constant argument as real, samples no rows at zero, and raises `2202H` for NULL, NaN or percentages outside 0–100 when the scan begins (`22003` if coercion to real is out of range).
+FO	-0	docs/sql-reference.md	113	recorded divergence (ADR-0012).
+FO	-0	docs/data-types.md	32	The last three rows are recorded divergences (ADR-0012). Arithmetic and an
+FO	-0	README.md	10	- **PostgreSQL semantics, measured** — PostgreSQL 17.11 is the oracle: the correctness gates run the same statements against it and against this engine on every execution path (single process, spilled, and the three distributed modes), and each deliberate divergence is a row in the [divergence catalog](docs/adr/0012-divergences/README.md) with both answers. [ADR-0012](docs/adr/0012-sql-semantics-authority.md) is the position.
+FO	MAX	docs/sql-reference.md	524	generate_series(1,3) gs(x)` is `bigint`, `AVG` is `numeric`, and `MIN`/`MAX`
+FO	MAX	docs/data-types.md	24	| `MIN(i32)`, `MAX(i32)` | `integer` | 23 | same |
+FO	MAX	README.md	14	- **Network-native types** — first-class IPv4, IPv6, CIDR, MAC, Port, and Protocol column types with 100+ network functions covering CIDR math, deep packet inspection, ICMP analysis, IPv6 tunneling, JA3/JA3S TLS fingerprinting, payload search, and GeoIP/ASN enrichment (MaxMind).
+TI	infinity	docs/sql-reference.md	285	whitespace, a sign, digits, a fraction, an exponent) or as `NaN`/`Infinity`,
+TI	infinity	docs/data-types.md	217	`Infinity` bind, a `CREATE TABLE … AS SELECT $1` column is `double precision`,
+TI	infinity	README.md	341	- DATE and TIMESTAMP accept `infinity` and `-infinity`, with unsupported operations over infinite values raising `22008`.
+TI	22008	docs/sql-reference.md	1022	'0000-01-01'` 22008, `WHERE ts = '2024-01-15 10:30:00+16'` 22009 — in every
+TI	22008	docs/data-types.md	518	fields name no instant (`2020-02-30`, month 13, hour 25) is SQLSTATE 22008;
+TI	22008	README.md	339	- Text compared with DATE or TIMESTAMP uses the temporal input rules and raises `22007`, `22008` or `22009` when refused; use `CURRENT_TIMESTAMP` or `CURRENT_DATE` instead of the quoted clock words.
+SC	statement	docs/sql-reference.md	5	## Supported Statement Types
+SC	statement	docs/data-types.md	531	after the scan has skipped every file and row group, the statement raises as
+SC	statement	README.md	10	- **PostgreSQL semantics, measured** — PostgreSQL 17.11 is the oracle: the correctness gates run the same statements against it and against this engine on every execution path (single process, spilled, and the three distributed modes), and each deliberate divergence is a row in the [divergence catalog](docs/adr/0012-divergences/README.md) with both answers. [ADR-0012](docs/adr/0012-sql-semantics-authority.md) is the position.
+SC	clock	docs/sql-reference.md	4822	"| `NOW()` | The statement's start time (see ""When the clock is read"") | `NOW()` |"
+SC	clock	docs/data-types.md	558	name is its contract) and `AT_TIMEZONE` (a wall clock in another zone, whose
+SC	clock	README.md	339	- Text compared with DATE or TIMESTAMP uses the temporal input rules and raises `22007`, `22008` or `22009` when refused; use `CURRENT_TIMESTAMP` or `CURRENT_DATE` instead of the quoted clock words.
+SC	CURRENT_TIMESTAMP	docs/sql-reference.md	1041	`CURRENT_TIMESTAMP` / `CURRENT_DATE` for `'now'` / `'today'`
+SC	CURRENT_TIMESTAMP	docs/data-types.md	554	`DATE_PARSE`, `TIMEZONE`, `NOW`, `CURRENT_TIMESTAMP` and
+SC	CURRENT_TIMESTAMP	README.md	339	- Text compared with DATE or TIMESTAMP uses the temporal input rules and raises `22007`, `22008` or `22009` when refused; use `CURRENT_TIMESTAMP` or `CURRENT_DATE` instead of the quoted clock words.
+BY	BYTES	docs/sql-reference.md	64	"bytes, so `""id.orig_h""` is a single column name with a dot in it and `""Kk""` is"
+BY	BYTES	docs/data-types.md	11	| `Int32` | `int32` | 4 bytes | -2^31 to 2^31-1 | Ports, counters, protocol numbers |
+BY	BYTES	README.md	18	- **Scales out when a laptop is not enough** — `wadjetd` splits into a coordinator that plans and schedules and workers that read from and write results to object storage directly, so the coordinator is never on the data path; queries under `--local-fastpath-bytes` still run in-process on the coordinator. One engine, one optimized plan, gates that assert the same answers embedded and distributed ([LICENSING.md](LICENSING.md): the engine and `wadjet` are MIT, the distributed binary AGPL).
+BY	22023	docs/sql-reference.md	367	or `-1`, is `22023`.
+BY	22023	docs/data-types.md	106	  a non-hex digit. An odd digit count is `22023 invalid hexadecimal data: odd
+BY	22023	README.md	343	- Text assigned or cast to `BYTES` uses PostgreSQL bytea input (`22023` or `22P02` for malformed input), and BYTES assigned to text stores its hex output; existing stored bytes stay unchanged.
+BY	22P02	docs/sql-reference.md	299	  with the SQLSTATE PostgreSQL's `COPY` raises for the same field: `22P02`,
+BY	22P02	docs/data-types.md	112	  `22P02 invalid input syntax for type bytea`.
+BY	22P02	README.md	334	- `read_csv` and `read_json` accept `sample_size = -1` to infer from every row; otherwise a later JSON key or nested field outside the inferred schema raises `22P04` or `22P02`.
+BY	hex	docs/sql-reference.md	3583	BYTES `\x` plus lowercase hex.
+BY	hex	docs/data-types.md	83	It declares OID 17 on the wire and renders as `\x` hex in the text format.
+BY	hex	README.md	343	- Text assigned or cast to `BYTES` uses PostgreSQL bytea input (`22023` or `22P02` for malformed input), and BYTES assigned to text stores its hex output; existing stored bytes stay unchanged.
+CM	volatile	docs/sql-reference.md	683	A CTE whose body is **volatile** — it calls `random()`, `rand()` or `uuid()`,
+CM	volatile	README.md	344	- On the embedded engine a volatile CTE read more than once is evaluated once and filled on demand; the stage DAG still evaluates a volatile projection per consumer.
+CM	CTE	docs/sql-reference.md	132	Table **aliases**, CTE names and function names are matched byte for byte, as
+CM	CTE	docs/data-types.md	118	holds: rows written before #1501 hold the text's own characters
+CM	CTE	README.md	308	- CTEs (`WITH ... AS`, and `WITH RECURSIVE` — the recursive form is answered in-process), UNION / INTERSECT / EXCEPT (with ALL variants; `INTERSECT` binds tighter than `UNION` and `EXCEPT`, as in PostgreSQL)
+CM	demand	docs/sql-reference.md	696	The shared evaluation is filled on demand, as PostgreSQL's is: a batch of the
+CM	demand	README.md	344	- On the embedded engine a volatile CTE read more than once is evaluated once and filled on demand; the stage DAG still evaluates a volatile projection per consumer.
