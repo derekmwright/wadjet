@@ -28,6 +28,9 @@ import (
 // it and surfaces it in the terminal message; subsequent Consume calls are
 // no-ops.
 type gatherReplySink struct {
+	// marks holds every batch to the file header's unconstrained marks
+	// (markGuard, ADR-0024 §10).
+	marks     markGuard
 	nc        *nats.Conn
 	dpClient  *dataplane.Client // optional gRPC delivery; nil = NATS only
 	subject   string
@@ -79,6 +82,10 @@ func (s *gatherReplySink) Consume(_ context.Context, b *batch.RecordBatch) error
 	}
 	if s.schema == nil {
 		s.schema = b.Schema
+	}
+	if err := checkWrittenMarks(s.schema, b.Schema); err != nil {
+		s.err = err
+		return err
 	}
 
 	// Resolve the source selection vector. When b.Sel is nil we synthesize
