@@ -5,7 +5,11 @@ package wadjet
 import (
 	"context"
 	"fmt"
+	"io/fs"
+	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -219,4 +223,246 @@ var cmDeterministicShapes = []struct{ sql, plan string }{
 		"Project: [count(*)];   Aggregate: group_by=[] aggs=[count() AS count(*)];     Join: join ON a.id = b.id;       Project: [id];         Filter: [v > 10];           Project: [id v];             Scan: cm_big;       Project: [id];         Filter: [v > 10];           Project: [id v];             Scan: cm_big"},
 	{"WITH r AS (SELECT id % 7 AS k, sum(v) AS total FROM cm_big GROUP BY id % 7) SELECT k FROM r WHERE total = (SELECT max(total) FROM r)",
 		"Project: [k];   Filter: [total = (SELECT max(total) FROM r)];     Project: [k total];       Aggregate: group_by=[mod(id, 7)] aggs=[sum(v) AS total];         Scan: cm_big"},
+}
+
+// A VOLATILE CTE READ ONCE IS PLANNED EXACTLY AS AT c67ebf5b (#1531 round 3):
+// one reader, nothing to share, so its body is inlined (and pushed into) as
+// any other block's. EXPLAIN VERBOSE prints the text c67ebf5b printed for
+// eight single-reference shapes — FROM, LIMIT, a body raising past the rows
+// read, TABLESAMPLE, uuid(), a scalar subquery, a correlated EXISTS, a nested
+// block — on both arms. At d56767c1 each printed a "CTE s: volatile,
+// evaluated once" line and the third raised 22012.
+func TestArcCMSingleReferenceVolatileCTEPlansAsAtBase(t *testing.T) {
+	for _, budget := range []int64{0, 512 << 10} {
+		db := cmOpen(t, budget)
+		for _, c := range cmSingleReferenceShapes {
+			want := c.plan
+			if budget > 0 && c.spilled != "" {
+				want = c.spilled
+			}
+			got := cmAnswer(t, db, "EXPLAIN VERBOSE "+c.sql)
+			if got != want && !(strings.HasPrefix(want, "ERR") && strings.HasPrefix(got, want)) {
+				t.Errorf("budget %d: %s\n  got  %q\n  want %q (the plan at c67ebf5b)", budget, c.sql, got, want)
+			}
+		}
+	}
+}
+
+// cmSingleReferenceShapes: EXPLAIN VERBOSE at c67ebf5b (cm_author/r3/explain_tree_c67ebf5b.tsv);
+// spilled is what c67ebf5b printed under 512 KiB where that differs (the
+// uuid() shape's hash join build is refused there: filing candidate F6).
+var cmSingleReferenceShapes = []struct{ sql, plan, spilled string }{
+	{"WITH s AS (SELECT id, random() AS r FROM cm_big) SELECT count(*) FROM s WHERE id < 10",
+		"Project: [count(*)];   Aggregate: group_by=[] aggs=[count() AS count(*)];     Filter: [id < 10];       Project: [id r];         Scan: cm_big; ; -- Physical Plan --; Single-stage local execution", ""},
+	{"WITH s AS (SELECT id, random() AS r FROM cm_big) SELECT id, r FROM s LIMIT 1",
+		"Limit: 1 offset: 0;   Project: [id r];     Project: [id r];       Scan: cm_big; ; -- Physical Plan --; Single-stage local execution", ""},
+	{"WITH s AS (SELECT g, random() AS r, 1/(g-150000) AS z FROM generate_series(1, 200000) g) SELECT g FROM s LIMIT 1",
+		"Limit: 1 offset: 0;   Project: [g];     Project: [g r z];       Scan: generate_series AS g; ; -- Physical Plan --; Single-stage local execution", ""},
+	{"WITH s AS (SELECT id FROM cm_big TABLESAMPLE BERNOULLI (50)) SELECT count(*) FROM s WHERE id > 5",
+		"Project: [count(*)];   Aggregate: group_by=[] aggs=[count() AS count(*)];     Filter: [id > 5];       Project: [id];         Scan: cm_big TABLESAMPLE BERNOULLI (50); ; -- Physical Plan --; Single-stage local execution", ""},
+	{"WITH s AS (SELECT id, uuid() AS u FROM cm_big) SELECT count(*) FROM s a JOIN cm_p b ON a.id = b.id",
+		"Project: [count(*)];   Aggregate: group_by=[] aggs=[count() AS count(*)];     Join: join ON a.id = b.id;       Project: [id u];         Scan: cm_big;       Scan: cm_p AS b; ; -- Physical Plan --; Single-stage local execution",
+		"ERR building physical plan: building hash table: hash join build: query: memory budget exceeded"},
+	{"WITH s AS (SELECT sum(random()) AS r FROM cm_big) SELECT count(*) FROM cm_p WHERE (SELECT r FROM s) > 0",
+		"Project: [count(*)];   Aggregate: group_by=[] aggs=[count() AS count(*)];     Filter: [(SELECT r FROM s) > 0];       Scan: cm_p; ; -- Physical Plan --; Single-stage local execution", ""},
+	{"WITH s AS (SELECT id, random() AS r FROM cm_big) SELECT count(*) FROM cm_p WHERE EXISTS (SELECT 1 FROM s WHERE s.id = cm_p.id)",
+		"Project: [count(*)];   Aggregate: group_by=[] aggs=[count() AS count(*)];     Filter: [exists (SELECT 1 FROM s WHERE s.id = cm_p.id)];       Scan: cm_p; ; -- Physical Plan --; Single-stage local execution", ""},
+	{"SELECT count(*) FROM (WITH s AS (SELECT id, random() AS r FROM cm_big) SELECT id FROM s WHERE id < 5) x",
+		"Project: [count(*)];   Aggregate: group_by=[] aggs=[count() AS count(*)];     Project: [id];       Filter: [id < 5];         Project: [id r];           Scan: cm_big AS x; ; -- Physical Plan --; Single-stage local execution", ""},
+}
+
+// cmRaisingBody raises 22012 at its 150 000th row; cmHalfBody does not raise.
+const (
+	cmRaisingBody = "WITH s AS (SELECT g, random() AS r, 1/(g-150000) AS z FROM generate_series(1, 200000) g) "
+	cmHalfBody    = "WITH s AS (SELECT g, random() AS r FROM generate_series(1, 100000) g) "
+)
+
+// A VOLATILE CTE READ MORE THAN ONCE IS FILLED ON DEMAND (#1531 round 3): its
+// one evaluation advances only when a reader asks for a row it does not hold
+// yet, so a reader that stops early never forces rows nobody reads — nor the
+// error on one — and every reader, fast or slow, in any order, reads the same
+// rows. PostgreSQL 17.11 answers each cell (cm_author/r3/pg_new.tsv,
+// pg_rev.tsv); ×8 per arm. At d56767c1 the body ran whole when a reference was
+// built, and the E1b / F1 / F5 / G1b / G1c / G2 / G3 cells raised 22012 or
+// were refused (gate_lazy_at_d56767c1_FAILS.log).
+func TestArcCMSharedVolatileCTEIsFilledOnDemand(t *testing.T) {
+	cells := []struct{ name, sql, want string }{
+		{"E1b_two_limit_readers", cmRaisingBody + "SELECT (SELECT g FROM s LIMIT 1) + (SELECT g FROM s LIMIT 1)", "2"},
+		{"F1b_two_exists_readers", cmRaisingBody + "SELECT EXISTS (SELECT 1 FROM s) AND EXISTS (SELECT 1 FROM s LIMIT 1)", "true"},
+		{"F5b_uuid_two_limit_readers", "WITH s AS (SELECT g, uuid() AS u, 1/(g-150000) AS z FROM generate_series(1, 200000) g) " +
+			"SELECT (SELECT count(*) FROM (SELECT g FROM s LIMIT 5) x) + (SELECT count(*) FROM (SELECT u FROM s LIMIT 3) y)", "8"},
+		{"G1b_limit_reader_then_raising_full_reader", cmRaisingBody + "SELECT (SELECT g FROM s LIMIT 1), (SELECT count(*) FROM s)",
+			"ERR division by zero"},
+		{"G1_two_speeds", cmHalfBody + "SELECT (SELECT g FROM s ORDER BY g LIMIT 1), (SELECT count(*) FROM s), " +
+			"(SELECT sum(r) FROM s) - (SELECT sum(r) FROM s)", "1 100000 0"},
+		{"G1c_limit_then_full", cmHalfBody + "SELECT (SELECT g FROM s LIMIT 1), (SELECT count(*) FROM s)", "1 100000"},
+		{"G1d_full_then_limit", cmHalfBody + "SELECT (SELECT count(*) FROM s), (SELECT g FROM s LIMIT 1)", "100000 1"},
+		{"G2_selfjoin", cmHalfBody + "SELECT count(*) FROM s a JOIN s b ON a.g = b.g WHERE a.r <> b.r", "0"},
+		{"G2b_selfjoin_count", cmHalfBody + "SELECT count(*) FROM s a JOIN s b ON a.g = b.g", "100000"},
+		{"G3_union_all_arms", cmHalfBody + "SELECT count(DISTINCT r) FROM (SELECT g, r FROM s UNION ALL SELECT g, r FROM s) x",
+			"100000"},
+		{"G3b_except_all_arms", cmHalfBody + "SELECT count(*) FROM (SELECT g, r FROM s EXCEPT ALL SELECT g, r FROM s) x", "0"},
+		{"G4_correlated_reader", "WITH s AS (SELECT random() AS r) SELECT count(*) FROM cm_big t " +
+			"WHERE t.id <= 50 AND (SELECT r + t.id*0 FROM s) <> (SELECT r FROM s)", "0"},
+	}
+	for _, budget := range []int64{0, 512 << 10} {
+		db := cmOpen(t, budget)
+		for _, c := range cells {
+			for rep := 0; rep < 8; rep++ {
+				got := cmAnswer(t, db, c.sql)
+				if got != c.want && !(strings.HasPrefix(c.want, "ERR") && strings.HasPrefix(got, c.want)) {
+					t.Errorf("budget %d %s rep %d: got %s, want %s (PostgreSQL 17.11)", budget, c.name, rep, got, c.want)
+				}
+			}
+		}
+	}
+}
+
+// THE CLASSIFIER ASKS THE FUNCTION REGISTRY (#1531 round 3, review B2): a
+// function CREATE FUNCTION defined is volatile when its BODY is, followed
+// through the functions the body calls. The issue's cell through
+// `CREATE FUNCTION f_r() AS random()` — and through f_r2() calling f_r() —
+// answers PostgreSQL's 0 ×8 per arm (3 at d56767c1 and c67ebf5b:
+// gate_udf_at_d56767c1_FAILS.log); a deterministic function's body keeps
+// its CTE inlined (EXPLAIN VERBOSE names no shared CTE).
+func TestArcCMVolatileUserFunctionMakesTheCTEShared(t *testing.T) {
+	// The function store is the process's: create once, drop at the end.
+	ddlDB := cmOpen(t, 0)
+	for _, ddl := range []string{"CREATE FUNCTION cm_f_r() AS random()", "CREATE FUNCTION cm_f_r2() AS cm_f_r() + 1",
+		"CREATE FUNCTION cm_f_d(x) AS x * 2.0"} {
+		if got := cmAnswer(t, ddlDB, ddl); strings.HasPrefix(got, "ERR") {
+			t.Fatalf("%s: %s", ddl, got)
+		}
+	}
+	t.Cleanup(func() {
+		for _, name := range []string{"cm_f_r2", "cm_f_r", "cm_f_d"} {
+			cmAnswer(t, ddlDB, "DROP FUNCTION "+name)
+		}
+	})
+	for _, budget := range []int64{0, 512 << 10} {
+		db := cmOpen(t, budget)
+		for _, fn := range []string{"cm_f_r()", "cm_f_r2()", "cm_f_d(id)"} {
+			q := "WITH s AS (SELECT sum(" + fn + ") AS r FROM cm_big) SELECT count(*) FROM cm_p WHERE (SELECT r FROM s) <> (SELECT r FROM s)"
+			for rep := 0; rep < 8; rep++ {
+				if got := cmAnswer(t, db, q); got != "0" {
+					t.Errorf("budget %d: %s rep %d: got %s, want 0 (PostgreSQL 17.11)", budget, q, rep, got)
+				}
+			}
+			plan := cmAnswer(t, db, "EXPLAIN VERBOSE "+q)
+			shared := strings.Contains(plan, "CTE s: volatile")
+			if want := fn != "cm_f_d(id)"; shared != want {
+				t.Errorf("budget %d: %s: EXPLAIN VERBOSE names a shared CTE = %v, want %v:\n%s", budget, fn, shared, want, plan)
+			}
+		}
+	}
+}
+
+// THE SHARED EVALUATION LIVES AS LONG AS ITS STATEMENT (#1531 round 3): under
+// a 512 KiB budget, a spool that spilled, a body that raised mid-spool, and a
+// statement cancelled mid-spool each leave no run file in the spill directory
+// and no body goroutine behind; concurrent statements each get their own
+// evaluation (every pair of references agrees, the sums differ).
+func TestArcCMSharedSpoolEndsWithItsStatement(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	db, err := Open(ctx, Config{Store: objstore.NewMemStore(), Bucket: "test", MemoryBudget: 512 << 10, SpillDir: dir})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer db.Close()
+	files := func() int {
+		n := 0
+		_ = filepath.WalkDir(dir, func(_ string, d fs.DirEntry, err error) error {
+			if err == nil && !d.IsDir() {
+				n++
+			}
+			return nil
+		})
+		return n
+	}
+	bodies := func() int {
+		buf := make([]byte, 1<<22)
+		return strings.Count(string(buf[:runtime.Stack(buf, true)]), "(*SharedSpool).run")
+	}
+	settled := func(what string) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for (files() != 0 || bodies() != 0) && time.Now().Before(deadline) {
+			time.Sleep(20 * time.Millisecond)
+		}
+		if n, b := files(), bodies(); n != 0 || b != 0 {
+			t.Errorf("%s: %d spill files and %d body goroutines left after the statement", what, n, b)
+		}
+	}
+	big := "WITH s AS (SELECT g, random() AS r FROM generate_series(1, 2000000) g) "
+	if got := cmAnswer(t, db, big+"SELECT (SELECT sum(r) FROM s) - (SELECT sum(r) FROM s)"); got != "0" {
+		t.Errorf("2M rows read twice: got %s, want 0", got)
+	}
+	settled("spilled spool")
+	if got := cmAnswer(t, db, cmRaisingBody+"SELECT (SELECT g FROM s LIMIT 1), (SELECT count(*) FROM s)"); !strings.HasPrefix(got, "ERR division by zero") {
+		t.Errorf("raising body: got %s, want 22012", got)
+	}
+	settled("raising body")
+	if got := cmAnswer(t, db, cmRaisingBody+"SELECT (SELECT g FROM s LIMIT 1) + (SELECT g FROM s LIMIT 1)"); got != "2" {
+		t.Errorf("two early readers: got %s, want 2", got)
+	}
+	settled("early readers")
+	for _, d := range []time.Duration{20 * time.Millisecond, 100 * time.Millisecond, 400 * time.Millisecond} {
+		cctx, cancel := context.WithTimeout(ctx, d)
+		_, err := db.Query(cctx, big+"SELECT (SELECT sum(r) FROM s) - (SELECT sum(r) FROM s)")
+		cancel()
+		if err == nil {
+			t.Logf("cancel after %s: the statement finished first", d)
+		}
+		settled(fmt.Sprintf("cancelled after %s", d))
+	}
+	var wg sync.WaitGroup
+	diffs, sums := make([]string, 6), make([]string, 6)
+	for i := range diffs {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			q := "WITH s AS (SELECT g, random() AS r FROM generate_series(1, 50000) g) "
+			diffs[i] = cmAnswer(t, db, q+"SELECT (SELECT sum(r) FROM s) - (SELECT sum(r) FROM s)")
+			sums[i] = cmAnswer(t, db, q+"SELECT (SELECT sum(r) FROM s) + 0 * (SELECT count(*) FROM s)")
+		}(i)
+	}
+	wg.Wait()
+	seen := map[string]bool{}
+	for i := range diffs {
+		if diffs[i] != "0" {
+			t.Errorf("session %d: two references disagree: %s", i, diffs[i])
+		}
+		if seen[sums[i]] {
+			t.Errorf("session %d: sum %s repeats another statement's evaluation", i, sums[i])
+		}
+		seen[sums[i]] = true
+	}
+	settled("concurrent sessions")
+}
+
+// A SET OPERATION AT THE STATEMENT ROOT READS THE STATEMENT'S WITH LIST FROM
+// ITS ARMS' EXPRESSION SUBQUERIES (#1531 round 3, review P2). The root of a
+// set operation carries no WITH list — each arm's root does — and a scalar
+// subquery in an arm found no `c`: NULL where PostgreSQL 17.11 answers the
+// value, for a deterministic body too. At c67ebf5b and d56767c1 every cell
+// below answered NULL or no row (gate_setop_at_d56767c1_FAILS.log).
+func TestArcCMSetOperationArmsReadTheStatementWith(t *testing.T) {
+	const c = "WITH c AS (SELECT id FROM cm_p) "
+	cells := []struct{ sql, want string }{
+		{c + "SELECT (SELECT max(id) FROM c) AS id UNION ALL SELECT (SELECT min(id) FROM c)", "3; 1"},
+		{"WITH c AS (SELECT id, random() AS r FROM cm_p) SELECT (SELECT max(id) FROM c) AS id UNION ALL SELECT (SELECT min(id) FROM c)", "3; 1"},
+		{c + "SELECT (SELECT max(id) FROM c) AS id FROM cm_p WHERE id = 1 UNION ALL SELECT (SELECT min(id) FROM c) FROM cm_p WHERE id = 1", "3; 1"},
+		{c + "SELECT (SELECT max(id) FROM c) AS id UNION ALL SELECT (SELECT min(id) FROM c) ORDER BY 1", "1; 3"},
+		{c + "SELECT (SELECT max(id) FROM c) AS id UNION ALL SELECT (SELECT min(id) FROM c) UNION ALL SELECT (SELECT count(*) FROM c)", "3; 1; 3"},
+		{c + "SELECT id FROM cm_p WHERE id = (SELECT max(id) FROM c) EXCEPT SELECT id FROM cm_p WHERE id = (SELECT min(id) FROM c)", "3"},
+	}
+	for _, budget := range []int64{0, 512 << 10} {
+		db := cmOpen(t, budget)
+		for _, cell := range cells {
+			if got := cmAnswer(t, db, cell.sql); got != cell.want {
+				t.Errorf("budget %d: %s\n  got %s, want %s (PostgreSQL 17.11)", budget, cell.sql, got, cell.want)
+			}
+		}
+	}
 }
