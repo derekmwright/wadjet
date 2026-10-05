@@ -1526,7 +1526,7 @@ func (c *pgConn) handleBind(payload []byte) {
 				case nulls[r.n-1] && pos != posValue:
 					return "NULL", true
 				case pos == posWindowDefault:
-					return untypedLiteral(literals[r.n-1]), true
+					return windowDefaultLiteral(literals[r.n-1]), true
 				case pos == posMergeValue && !declaredFloat(declared, r.n):
 					// The target column's input reads the value, as an
 					// assignment does; a float the client declared keeps

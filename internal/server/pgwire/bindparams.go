@@ -791,6 +791,22 @@ func untypedLiteral(lit string) string {
 	return lit
 }
 
+// windowDefaultLiteral is a parameter's spelling as a LAG / LEAD default: the
+// untyped literal (untypedLiteral), except a BYTES value, which keeps its
+// CAST (#1501, arc BY round 2). The two positions that take an untyped
+// literal differ in who reads it: a MERGE action's value is read by the
+// TARGET column's input function — byteain for a BYTES column, which turns
+// `'\x6869'` back into the bytes, and a TEXT column stores exactly the
+// bytea's output text — while a window default is read by nothing, so the
+// hex spelling stayed six characters where PostgreSQL's default is the two
+// bytes. The typed BYTES default is evaluated.
+func windowDefaultLiteral(lit string) string {
+	if strings.HasSuffix(lit, " AS BYTES)") {
+		return lit
+	}
+	return untypedLiteral(lit)
+}
+
 // substituteRefs replaces each placeholder in refs with lit(ref); a ref for
 // which lit answers false is left as written.
 func substituteRefs(sql string, refs []paramRef, lit func(paramRef) (string, bool)) string {
