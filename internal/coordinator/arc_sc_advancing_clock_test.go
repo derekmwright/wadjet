@@ -91,6 +91,11 @@ func scAdvCells() []scCell {
 		{"fold/partition", "SELECT count(*) = 100 FROM sc_p WHERE p = CAST(extract(epoch FROM now()) AS BIGINT) % 3", "rows=[t]"},
 		{"fold/udf", "SELECT count(*) FROM sc_r WHERE sc_adv_u(id) = now()", "rows=[4096]"},
 		{"fold/udf_nested", "SELECT count(DISTINCT sc_adv_u2(id)) FROM sc_r", "rows=[1]"},
+		// A CREATE FUNCTION body that reads the clock, in a position folded at
+		// plan time: the fold takes the statement's clock for the body too.
+		{"fold/udf_lag", "SELECT count(*) = 4096 - sc_adv_k(1) FROM (SELECT id, lag(id, sc_adv_k(1)) OVER (ORDER BY id) l FROM sc_r) s WHERE l = id - sc_adv_k(1)", "rows=[t]"},
+		{"fold/udf_ntile", "SELECT max(n) = sc_adv_k(1) FROM (SELECT ntile(sc_adv_k(1)) OVER (ORDER BY id) n FROM sc_r) s", "rows=[t]"},
+		{"fold/udf_generate_series", "SELECT count(*) = sc_adv_k(1) FROM generate_series(1, sc_adv_k(1)) g", "rows=[t]"},
 		{"fold/lag_default", "SELECT count(*) FROM (SELECT lag(now(), 1, now()) OVER (ORDER BY id) l FROM sc_r) s WHERE l = now()", "rows=[4096]"},
 		{"ddl/default", "CREATE TABLE sc_def (id BIGINT, ts TIMESTAMP DEFAULT now())", "rows=[]"},
 	}
@@ -127,7 +132,8 @@ func TestArcSCAdvancingClockOneReadEveryDoor(t *testing.T) {
 			"CREATE TABLE sc_p (id bigint, p bigint)",
 			"INSERT INTO sc_p SELECT g, (g - 1) % 3 FROM generate_series(1, 300) g",
 			"CREATE FUNCTION sc_adv_u(bigint) RETURNS timestamptz LANGUAGE sql AS 'SELECT now()'",
-			"CREATE FUNCTION sc_adv_u2(bigint) RETURNS timestamptz LANGUAGE sql AS 'SELECT sc_adv_u($1)'")
+			"CREATE FUNCTION sc_adv_u2(bigint) RETURNS timestamptz LANGUAGE sql AS 'SELECT sc_adv_u($1)'",
+			"CREATE FUNCTION sc_adv_k(bigint) RETURNS int LANGUAGE sql AS 'SELECT "+scK+"'")
 		for _, s := range pre {
 			if _, err := pg.Exec(ctx, s).ReadAll(); err != nil {
 				t.Fatalf("%s: %v", s, err)
@@ -208,7 +214,7 @@ func TestArcSCAdvancingClockOneReadEveryDoor(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer conn.Close(ctx)
-			for _, f := range []string{"CREATE OR REPLACE FUNCTION sc_adv_u(x) AS now()", "CREATE OR REPLACE FUNCTION sc_adv_u2(x) AS sc_adv_u(x)"} {
+			for _, f := range []string{"CREATE OR REPLACE FUNCTION sc_adv_u(x) AS now()", "CREATE OR REPLACE FUNCTION sc_adv_u2(x) AS sc_adv_u(x)", "CREATE OR REPLACE FUNCTION sc_adv_k(x) AS " + scK} {
 				if got := scRun(ctx, conn, f); strings.HasPrefix(got, "ERR") {
 					t.Fatalf("%s: %s", f, got)
 				}
