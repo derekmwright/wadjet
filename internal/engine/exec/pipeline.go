@@ -1340,8 +1340,8 @@ func (s *CollectSink) Schema() []parquet.Column {
 // cannot say it — a DECIMAL vector carries one scale and no declaration — and
 // the plan's walk is the one every arm reads, so the printed value does not
 // depend on which operator built the vector. A plan that declares a
-// different column count, or a different type at the position, answers
-// nothing.
+// different type at a position cannot replace that batch column's mark.
+// A different column count supplies no positional declaration.
 func WithPlannedUnconstrained(schema, hint []parquet.Column) []parquet.Column {
 	marked := false
 	for _, c := range schema {
@@ -1356,6 +1356,13 @@ func WithPlannedUnconstrained(schema, hint []parquet.Column) []parquet.Column {
 	out := make([]parquet.Column, len(schema))
 	copy(out, schema)
 	for i := range out {
+		// A declaration for a different type cannot describe this vector.
+		// A TEXT projection omitted by the stage planner must not clear
+		// the DECIMAL batch's own print mark. All doors then box it through
+		// Vector.GetValueOf using the same column declaration.
+		if len(hint) == len(schema) && out[i].Type != hint[i].Type {
+			continue
+		}
 		out[i].Unconstrained = len(hint) == len(schema) &&
 			out[i].Type == parquet.TypeDecimal && hint[i].Type == parquet.TypeDecimal &&
 			hint[i].Unconstrained

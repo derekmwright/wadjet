@@ -43,6 +43,11 @@ import (
 // rendered by column name (every statement aliases its columns), values as
 // the door's text, sorted.
 func TestArcUNInBandMarkEveryDoor(t *testing.T) {
+	unibCheckDoors(t, unibDoorCells, []string{"pg-single", "pg-coordinator", "http", "http-async", "grpc-coordinator", "grpc-embedded"})
+}
+
+func unibCheckDoors(t *testing.T, cells []struct{ name, sql, want, why string }, doors []string) {
+	t.Helper()
 	if testing.Short() {
 		t.Skip("-short: six doors over a coordinator with three workers")
 	}
@@ -79,7 +84,6 @@ func TestArcUNInBandMarkEveryDoor(t *testing.T) {
 		"grpc-coordinator": NewGRPCServer(GRPCConfig{Coord: coord}, slog.Default()),
 		"grpc-embedded":    NewGRPCServer(GRPCConfig{DB: db}, slog.Default()),
 	}
-	doors := []string{"pg-single", "pg-coordinator", "http", "http-async", "grpc-coordinator", "grpc-embedded"}
 	answer := func(door, sql string) (string, error) {
 		switch door {
 		case "pg-single", "pg-coordinator":
@@ -131,7 +135,7 @@ func TestArcUNInBandMarkEveryDoor(t *testing.T) {
 		defer gen.Flush()
 	}
 	asserted := 0
-	for _, c := range unibDoorCells {
+	for _, c := range cells {
 		t.Run(c.name, func(t *testing.T) {
 			for _, door := range doors {
 				got, err := answer(door, c.sql)
@@ -148,7 +152,7 @@ func TestArcUNInBandMarkEveryDoor(t *testing.T) {
 			}
 		})
 	}
-	if asserted != len(unibDoorCells)*len(doors) {
+	if asserted != len(cells)*len(doors) {
 		t.Fatalf("%d (statement, door) answers asserted", asserted)
 	}
 }
