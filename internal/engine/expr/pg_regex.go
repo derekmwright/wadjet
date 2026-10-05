@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"regexp"
 	"regexp/syntax"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -66,6 +67,53 @@ func pgRegexMatch(args []any, icase, negate bool) any {
 // (global).
 type reFlags struct {
 	icase, literal, global bool
+	// The newline-sensitivity and syntax options (PostgreSQL §9.7.3.5,
+	// Table 9.25): nlStop — `.` and a negated bracket expression do not
+	// match a newline (n, m, p); nlAnchor — `^` and `$` match at a line's
+	// start and end (n, m, w); expanded — white space and #-comments in the
+	// pattern are ignored (x).
+	nlStop, nlAnchor, expanded bool
+	// dialect is the language the pattern is written in.
+	dialect regexDialect
+}
+
+// regexDialect names the language a SQL construct's pattern is read in. Every
+// construct reads PostgreSQL's ARE today; the engine's own functions
+// (regexp_extract, regexp_extract_all, regexp_split, payload_matches) take
+// theirs from ownFunctionFlags, so their dialect is decided in one place.
+type regexDialect uint8
+
+const dialectARE regexDialect = iota
+
+// ownFunctionFlags are the flags the engine's own regular-expression
+// functions — those PostgreSQL does not have — compile their pattern under.
+var ownFunctionFlags = reFlags{dialect: dialectARE}
+
+// cacheOpts packs every option the compile reads into one byte, so the
+// cache key stays a string and a byte.
+func (f reFlags) cacheOpts() uint8 {
+	o := uint8(f.dialect) << 5
+	if f.icase {
+		o |= 1
+	}
+	if f.literal {
+		o |= 2
+	}
+	if f.nlStop {
+		o |= 4
+	}
+	if f.nlAnchor {
+		o |= 8
+	}
+	if f.expanded {
+		o |= 16
+	}
+	return o
+}
+
+// reMode is the part of reFlags the translation reads.
+func (f reFlags) mode() reMode {
+	return reMode{icase: f.icase, nlStop: f.nlStop, nlAnchor: f.nlAnchor, expanded: f.expanded, dialect: f.dialect}
 }
 
 // parseREFlags reads the flags string of the regular-expression function
@@ -75,15 +123,18 @@ type reFlags struct {
 //	       raises 22023 "<fn>() does not support the "global" option"
 //	i, c   case-insensitive / case-sensitive, the last one written wins
 //	q      the pattern is a literal string
-//	s, t   PostgreSQL's defaults (non-newline-sensitive, tight syntax)
+//	s      non-newline-sensitive (the default)
+//	n, m   newline-sensitive: `.` and [^…] stop at a newline, ^ $ match at lines
+//	p      partial: `.` and [^…] stop at a newline, ^ $ at the string's ends
+//	w      inverse partial: ^ $ match at lines, `.` and [^…] cross a newline
+//	x, t   expanded syntax (white space and #-comments ignored) / tight
 //
-// The newline-sensitive flags (n, m, p, w), expanded syntax (x) and the
-// basic / extended dialects (b, e) are refused 0A000, as the translator
-// refuses their embedded-option spellings; any other letter is PostgreSQL's
-// own 22023.
+// The basic and extended dialects (b, e) are refused 0A000, as the
+// translator refuses their embedded-option spellings; any other letter is
+// PostgreSQL's own 22023.
 func parseREFlags(fn, flags string) (reFlags, error) {
 	var f reFlags
-	var newline, unsupported rune
+	var unsupported rune
 	for _, r := range flags {
 		switch r {
 		case 'g':
@@ -97,12 +148,13 @@ func parseREFlags(fn, flags string) (reFlags, error) {
 			f.icase = false
 		case 'q':
 			f.literal = true
-		case 's':
-			newline = 0
+		case 's', 'n', 'm', 'p', 'w':
+			f.nlStop, f.nlAnchor = newlineOption(r)
+		case 'x':
+			f.expanded = true
 		case 't':
-		case 'n', 'm', 'p', 'w':
-			newline = r
-		case 'x', 'b', 'e':
+			f.expanded = false
+		case 'b', 'e':
 			if unsupported == 0 {
 				unsupported = r
 			}
@@ -110,13 +162,24 @@ func parseREFlags(fn, flags string) (reFlags, error) {
 			return f, sqlerr.New("22023", "invalid regular expression option: %s", sqlerr.Quote(string(r)))
 		}
 	}
-	if unsupported == 0 {
-		unsupported = newline
-	}
 	if unsupported != 0 {
 		return f, sqlerr.New("0A000", "%s flag %s is not supported", fn, sqlerr.Quote(string(unsupported)))
 	}
 	return f, nil
+}
+
+// newlineOption is the (nlStop, nlAnchor) pair a newline option letter
+// sets — the letter written last wins, as on the server.
+func newlineOption(r rune) (nlStop, nlAnchor bool) {
+	switch r {
+	case 'n', 'm':
+		return true, true
+	case 'p':
+		return true, false
+	case 'w':
+		return false, true
+	}
+	return false, false // s
 }
 
 // sqlRegex is a pattern a SQL construct supplied, compiled as PostgreSQL
@@ -153,14 +216,13 @@ type sqlRegex struct {
 // compiles once per process, and a column of distinct patterns cannot grow
 // the cache past the bound.
 func translateAndCompile(pattern string, f reFlags) (*sqlRegex, error) {
-	key := regexCacheKey{pattern: pattern, icase: f.icase, literal: f.literal}
-	gen := regexCacheGen.Load()
-	if v, ok := gen.m.Load(key); ok {
+	key := regexCacheKey{pattern: pattern, opts: f.cacheOpts()}
+	if v, ok := regexCache.Load(key); ok {
 		e := v.(*regexCacheEntry)
 		return e.re, e.err
 	}
 	re, err := compileSQLRegex(pattern, f)
-	gen.store(key, &regexCacheEntry{re: re, err: err})
+	regexCacheStore(key, &regexCacheEntry{re: re, err: err})
 	return re, err
 }
 
@@ -181,7 +243,7 @@ func compileSQLRegex(pattern string, f reFlags) (*sqlRegex, error) {
 		translated = "(?s)" + literalARE(pattern, f.icase)
 	} else {
 		var err error
-		if translated, err = aregexToRE2(pattern, f.icase); err != nil {
+		if translated, err = aregexToRE2(pattern, f.mode()); err != nil {
 			return nil, err
 		}
 	}
@@ -232,17 +294,17 @@ func (r *sqlRegex) findAll(src string) [][]int {
 	return matches
 }
 
-// The bounded compile cache. A generation is a sync.Map (lock-free reads:
-// the pattern is almost always a constant looked up once per row); when a
-// generation reaches regexCacheBound entries it is replaced by an empty
-// one, so the cache holds at most regexCacheBound patterns (plus the
-// handful a concurrent store may add while the swap happens) however many
-// distinct patterns a column supplies.
-const regexCacheBound = 1024
+// The bounded compile cache: a sync.Map (lock-free reads — the pattern is
+// almost always a constant looked up once per row) holding at most
+// regexCacheBound patterns. A ring of the stored keys, under a mutex taken
+// only on a miss, names the victim: a store past the bound evicts ONE entry,
+// the oldest (first in, first out), never the whole cache — so a working set
+// under the bound keeps hitting after its first pass.
+const regexCacheBound = 4096
 
 type regexCacheKey struct {
-	pattern        string
-	icase, literal bool
+	pattern string
+	opts    uint8 // reFlags.cacheOpts: every option the compile reads
 }
 
 type regexCacheEntry struct {
@@ -250,37 +312,39 @@ type regexCacheEntry struct {
 	err error
 }
 
-type regexCacheGeneration struct {
-	m sync.Map
-	n atomic.Int64
-}
-
-func (g *regexCacheGeneration) store(k regexCacheKey, e *regexCacheEntry) {
-	if g.n.Add(1) > regexCacheBound {
-		next := &regexCacheGeneration{}
-		if !regexCacheGen.CompareAndSwap(g, next) {
-			next = regexCacheGen.Load()
-		}
-		next.n.Add(1)
-		next.m.Store(k, e)
-		return
-	}
-	g.m.Store(k, e)
-}
-
 var (
-	regexCacheGen atomic.Pointer[regexCacheGeneration]
+	regexCache sync.Map // regexCacheKey → *regexCacheEntry
+	regexRing  struct {
+		mu   sync.Mutex
+		keys []regexCacheKey
+		next int
+	}
 	// regexCompiles counts compileSQLRegex calls (the benchmarks and the
 	// cache gate read it).
 	regexCompiles atomic.Int64
 )
 
-func init() { regexCacheGen.Store(&regexCacheGeneration{}) }
+func regexCacheStore(k regexCacheKey, e *regexCacheEntry) {
+	if _, loaded := regexCache.LoadOrStore(k, e); loaded {
+		return
+	}
+	regexRing.mu.Lock()
+	if len(regexRing.keys) < regexCacheBound {
+		regexRing.keys = append(regexRing.keys, k)
+		regexRing.mu.Unlock()
+		return
+	}
+	victim := regexRing.keys[regexRing.next]
+	regexRing.keys[regexRing.next] = k
+	regexRing.next = (regexRing.next + 1) % regexCacheBound
+	regexRing.mu.Unlock()
+	regexCache.Delete(victim)
+}
 
-// regexCacheLen is the number of patterns the current generation holds.
+// regexCacheLen is the number of patterns the cache holds.
 func regexCacheLen() int {
 	n := 0
-	regexCacheGen.Load().m.Range(func(_, _ any) bool { n++; return true })
+	regexCache.Range(func(_, _ any) bool { n++; return true })
 	return n
 }
 
@@ -305,20 +369,29 @@ func invalidARE(why string) error {
 }
 
 // aregexToRE2 translates PostgreSQL ARE forms into equivalent RE2 forms.
-// It preserves newline matching, anchors, literal modes, character escapes
-// and bounds up to 255. Case-insensitive matching folds ASCII only.
-// Back references, lookaround, word-edge forms, collating elements and
-// unsupported embedded options refuse rather than change the match.
+// It preserves newline matching (and the newline-sensitive options n m p w),
+// anchors, literal modes, expanded syntax (x), character escapes and bounds
+// up to 255. Case-insensitive matching takes, for every letter, its lower-
+// and upper-case forms (caseVariants), as PostgreSQL does.
+// Back references, lookaround, word-edge forms, collating elements and the
+// b / e dialects refuse rather than change the match.
 // Malformed forms raise 2201B; unrepresentable forms raise 0A000.
 // Traps: \b is backspace and \B backslash (\y/\Y are word boundaries);
 // \mnn is a back reference only with that many groups, else octal, else 2201B;
 // a { that starts no bound is literal; . matches newline (RE2 needs (?s)).
 // See ADR-0044 and TestPatternMatchOperatorsAnswerAsPostgreSQL.
-func aregexToRE2(p string, icase bool) (string, error) {
+// reMode is what the translation reads from the flags: case-insensitivity
+// and the newline / syntax options (see reFlags).
+type reMode struct {
+	icase, nlStop, nlAnchor, expanded bool
+	dialect                           regexDialect
+}
+
+func aregexToRE2(p string, m reMode) (string, error) {
 	// Metasyntax: ***= and ***: director prefixes.
 	switch {
 	case strings.HasPrefix(p, "***="):
-		return "(?s)" + literalARE(p[4:], icase), nil
+		return "(?s)" + literalARE(p[4:], m.icase), nil
 	case strings.HasPrefix(p, "***:"):
 		p = p[4:]
 	}
@@ -332,13 +405,18 @@ func aregexToRE2(p string, icase bool) (string, error) {
 		for _, c := range p[2:end] {
 			switch c {
 			case 'i':
-				icase = true
+				m.icase = true
 			case 'c':
-				icase = false
-			case 's', 't':
+				m.icase = false
+			case 's', 'n', 'm', 'p', 'w':
+				m.nlStop, m.nlAnchor = newlineOption(c)
+			case 'x':
+				m.expanded = true
+			case 't':
+				m.expanded = false
 			case 'q':
 				literal = true
-			case 'b', 'e', 'm', 'n', 'p', 'w', 'x':
+			case 'b', 'e':
 				return "", refuseARE(fmt.Sprintf("option (?%c)", c))
 			default:
 				return "", invalidARE("invalid embedded option")
@@ -346,13 +424,24 @@ func aregexToRE2(p string, icase bool) (string, error) {
 		}
 		p = p[end+1:]
 		if literal {
-			return "(?s)" + literalARE(p, icase), nil
+			return "(?s)" + literalARE(p, m.icase), nil
 		}
 	}
+	icase := m.icase
 	var b strings.Builder
-	b.WriteString("(?s)")
+	switch {
+	case !m.nlStop && m.nlAnchor:
+		b.WriteString("(?ms)")
+	case !m.nlStop:
+		b.WriteString("(?s)")
+	case m.nlAnchor:
+		b.WriteString("(?m)")
+	}
 
 	runes := []rune(p)
+	if m.expanded {
+		runes = stripExpanded(runes)
+	}
 	groups := countGroups(runes)
 	inBracket := false
 	for i := 0; i < len(runes); i++ {
@@ -396,22 +485,22 @@ func aregexToRE2(p string, icase bool) (string, error) {
 				b.WriteString(s)
 				i += n - 1
 			case i+2 < len(runes) && runes[i+1] == '-' && runes[i+2] != ']':
-				// A range. Under case-insensitivity an ASCII letter range
-				// takes its other case's range too.
+				// A range. Under case-insensitivity PostgreSQL folds it
+				// letter by letter: the other cases of every letter INSIDE it
+				// join the set, so `[A-_]` takes a-z, `[Z-a]` takes z and A,
+				// and `[à-æ]` takes À-Æ (measured on 17.11).
 				lo, hi := r, runes[i+2]
 				b.WriteString(bracketLiteral(lo) + "-" + bracketLiteral(hi))
 				if icase {
-					// PostgreSQL folds a range letter by letter: the other
-					// case of every ASCII letter INSIDE it joins the set, so
-					// `[A-_]` takes a-z and `[Z-a]` takes z and A, whatever
-					// the endpoints are (measured on 17.11).
-					b.WriteString(foldedRangeCounterparts(lo, hi))
+					b.WriteString(rangeCaseCounterparts(lo, hi))
 				}
 				i += 2
 			default:
 				b.WriteString(bracketLiteral(r))
-				if icase && isASCIILetter(r) {
-					b.WriteString(bracketLiteral(swapCase(r)))
+				if icase {
+					for _, v := range caseVariants(r)[1:] {
+						b.WriteString(bracketLiteral(v))
+					}
 				}
 			}
 			continue
@@ -437,6 +526,11 @@ func aregexToRE2(p string, icase bool) (string, error) {
 			inBracket = true
 			if i+1 < len(runes) && runes[i+1] == '^' {
 				b.WriteRune('^')
+				if m.nlStop {
+					// Newline-sensitive: a negated bracket expression does
+					// not match a newline.
+					b.WriteString(`\n`)
+				}
 				i++
 			}
 			if i+1 < len(runes) && runes[i+1] == ']' {
@@ -493,8 +587,8 @@ func aregexToRE2(p string, icase bool) (string, error) {
 			b.WriteString(string(runes[i : end+1]))
 			i = end
 		default:
-			if icase && isASCIILetter(r) {
-				b.WriteString("[" + string(r) + string(swapCase(r)) + "]")
+			if v := caseVariants(r); icase && len(v) > 1 {
+				b.WriteString(bracketOf(v))
 				continue
 			}
 			b.WriteRune(r)
@@ -506,16 +600,16 @@ func aregexToRE2(p string, icase bool) (string, error) {
 	return b.String(), nil
 }
 
-// literalARE is a pattern read literally (***= and (?q)), case-folded over
-// ASCII letters when asked.
+// literalARE is a pattern read literally (***= and (?q)), every letter
+// matching its other cases when asked.
 func literalARE(s string, icase bool) string {
 	if !icase {
 		return regexp.QuoteMeta(s)
 	}
 	var b strings.Builder
 	for _, r := range s {
-		if isASCIILetter(r) {
-			b.WriteString("[" + string(r) + string(swapCase(r)) + "]")
+		if v := caseVariants(r); len(v) > 1 {
+			b.WriteString(bracketOf(v))
 			continue
 		}
 		b.WriteString(regexp.QuoteMeta(string(r)))
@@ -565,15 +659,6 @@ func countGroups(runes []rune) int {
 	return n
 }
 
-func isASCIILetter(r rune) bool { return r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' }
-
-func swapCase(r rune) rune {
-	if r >= 'a' && r <= 'z' {
-		return r - 'a' + 'A'
-	}
-	return r - 'A' + 'a'
-}
-
 // bracketLiteral is one character inside an RE2 bracket expression.
 func bracketLiteral(r rune) string {
 	switch r {
@@ -594,22 +679,30 @@ func isOptionLetter(c byte) bool {
 }
 
 // translateEscape translates the escape starting at runes[i] (a backslash)
-// and reports how many runes it spans. A character-entry escape that names an
-// ASCII letter is case-folded like any other letter under case-insensitivity.
+// and reports how many runes it spans. A character-entry escape that names a
+// letter matches its other cases like any other letter under
+// case-insensitivity.
 func translateEscape(runes []rune, i int, inBracket bool, groups int, icase bool) (string, int, error) {
 	out, n, err := translateEscapeRaw(runes, i, inBracket, groups)
 	if err != nil || !icase || !strings.HasPrefix(out, `\x{`) {
 		return out, n, err
 	}
 	v, perr := strconv.ParseUint(strings.TrimSuffix(strings.TrimPrefix(out, `\x{`), "}"), 16, 32)
-	if perr != nil || !isASCIILetter(rune(v)) {
+	if perr != nil {
 		return out, n, err
 	}
-	pair := fmt.Sprintf(`\x{%x}\x{%x}`, v, swapCase(rune(v)))
-	if inBracket {
-		return pair, n, nil
+	vs := caseVariants(rune(v))
+	if len(vs) == 1 {
+		return out, n, err
 	}
-	return "[" + pair + "]", n, nil
+	var set strings.Builder
+	for _, c := range vs {
+		fmt.Fprintf(&set, `\x{%x}`, c)
+	}
+	if inBracket {
+		return set.String(), n, nil
+	}
+	return "[" + set.String() + "]", n, nil
 }
 
 func translateEscapeRaw(runes []rune, i int, inBracket bool, groups int) (string, int, error) {
@@ -754,18 +847,127 @@ func escapedAt(runes []rune, i int) bool {
 	return n%2 == 1
 }
 
-// foldedRangeCounterparts is the other-case range of every ASCII letter in
-// [lo, hi], as bracket-expression members.
-func foldedRangeCounterparts(lo, hi rune) string {
-	var b strings.Builder
-	add := func(from, to, base, other rune) {
-		a, z := max(lo, from), min(hi, to)
-		if a > z {
-			return
+// caseVariants is r followed by its lower- and upper-case forms, distinct:
+// the characters a case-insensitive ARE matches for r. PostgreSQL takes
+// exactly these (towlower / towupper), not the whole case-folding orbit:
+// 'ς' ~* 'σ' is false there (σ's forms are σ and Σ), and 'İ' ~* 'i' false
+// while 'i' ~* 'İ' is true. Go's Unicode tables give the forms, plus the
+// pair ß / ẞ the oracle's C library has and Go's simple mappings do not.
+func caseVariants(r rune) []rune {
+	out := []rune{r}
+	add := func(c rune) {
+		for _, x := range out {
+			if x == c {
+				return
+			}
 		}
-		b.WriteString(bracketLiteral(a-base+other) + "-" + bracketLiteral(z-base+other))
+		out = append(out, c)
 	}
-	add('A', 'Z', 'A', 'a')
-	add('a', 'z', 'a', 'A')
+	add(unicode.ToLower(r))
+	add(unicode.ToUpper(r))
+	if r == 'ß' {
+		add('ẞ')
+	}
+	return out
+}
+
+// bracketOf is a bracket expression matching exactly the runes given.
+func bracketOf(rs []rune) string {
+	var b strings.Builder
+	b.WriteByte('[')
+	for _, r := range rs {
+		b.WriteString(bracketLiteral(r))
+	}
+	b.WriteByte(']')
 	return b.String()
+}
+
+// rangeCaseCounterparts is the other-case forms of every character in
+// [lo, hi] that lie outside it, as bracket-expression members (runs written
+// as ranges). A range wider than 65536 characters takes no counterparts.
+func rangeCaseCounterparts(lo, hi rune) string {
+	if hi < lo || hi-lo > 65536 {
+		return ""
+	}
+	set := map[rune]bool{}
+	for r := lo; r <= hi; r++ {
+		for _, v := range caseVariants(r)[1:] {
+			if v < lo || v > hi {
+				set[v] = true
+			}
+		}
+	}
+	rs := make([]rune, 0, len(set))
+	for r := range set {
+		rs = append(rs, r)
+	}
+	slices.Sort(rs)
+	var b strings.Builder
+	for i := 0; i < len(rs); {
+		j := i
+		for j+1 < len(rs) && rs[j+1] == rs[j]+1 {
+			j++
+		}
+		b.WriteString(bracketLiteral(rs[i]))
+		if j > i {
+			b.WriteString("-" + bracketLiteral(rs[j]))
+		}
+		i = j + 1
+	}
+	return b.String()
+}
+
+// stripExpanded is an expanded-syntax (x) pattern with its white space and
+// #-comments removed: outside a bracket expression an unescaped space, tab,
+// newline or `#…` to the end of the line is not part of the RE; an escaped
+// one, and anything inside brackets, is.
+func stripExpanded(runes []rune) []rune {
+	out := make([]rune, 0, len(runes))
+	inBracket := false
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
+		switch {
+		case r == '\\' && i+1 < len(runes):
+			out = append(out, r, runes[i+1])
+			i++
+		case inBracket:
+			out = append(out, r)
+			if r == '[' && i+1 < len(runes) && (runes[i+1] == ':' || runes[i+1] == '.' || runes[i+1] == '=') {
+				// A class, collating element or equivalence class: copy
+				// through its closing `x]`.
+				kind := runes[i+1]
+				for j := i + 1; j < len(runes); j++ {
+					out = append(out, runes[j])
+					if runes[j] == ']' && runes[j-1] == kind && j > i+2 {
+						i = j
+						break
+					}
+					i = j
+				}
+				continue
+			}
+			if r == ']' {
+				inBracket = false
+			}
+		case r == '[':
+			out = append(out, r)
+			inBracket = true
+			if i+1 < len(runes) && runes[i+1] == '^' {
+				out = append(out, '^')
+				i++
+			}
+			if i+1 < len(runes) && runes[i+1] == ']' {
+				out = append(out, ']')
+				i++
+			}
+		case r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == '\f' || r == '\v':
+		case r == '#':
+			for i+1 < len(runes) && runes[i+1] != '\n' {
+				i++
+			}
+		default:
+			out = append(out, r)
+		}
+	}
+	return out
 }

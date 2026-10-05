@@ -95,7 +95,7 @@ func fnRegexpExtract(args []any) any {
 	if len(args) < 2 || args[0] == nil || args[1] == nil {
 		return nil
 	}
-	re := mustCompileSQLRegex(toString(args[1]), reFlags{})
+	re := mustCompileSQLRegex(toString(args[1]), ownFunctionFlags)
 	group := 0
 	if len(args) >= 3 && args[2] != nil {
 		group = int(ToFloat64(args[2]))
