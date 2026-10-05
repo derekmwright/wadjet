@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
+	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
 
 // Tests for scalar functions at 0% or low coverage.
@@ -1075,7 +1076,11 @@ func TestFnCastString(t *testing.T) {
 }
 
 func TestFnNow(t *testing.T) {
-	result := fnNow(nil)
+	c, err := Compile(&plansql.FuncCallNode{Name: "now"}, testClock())
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := c.Eval(nil, 0)
 	if result == nil {
 		t.Error("expected non-nil")
 	}
@@ -1229,7 +1234,11 @@ func TestFnExtract(t *testing.T) {
 }
 
 func TestFnCurrentDate(t *testing.T) {
-	result := fnCurrentDate(nil)
+	cd, err := Compile(&plansql.FuncCallNode{Name: "current_date"}, testClock())
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := cd.Eval(nil, 0)
 	if result == nil {
 		t.Fatal("expected non-nil")
 	}

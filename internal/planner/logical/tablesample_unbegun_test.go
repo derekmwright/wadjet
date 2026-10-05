@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/derekmwright/wadjet/internal/engine/expr"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
 
@@ -36,7 +37,7 @@ func sampledScans(n *Node) (sampled, all int) {
 func TestDropUnbegunSamples(t *testing.T) {
 	prev := tablesampleEvaluator
 	t.Cleanup(func() { SetTablesampleEvaluator(prev) })
-	SetTablesampleEvaluator(func(arg plansql.Node) (float64, bool, error) {
+	SetTablesampleEvaluator(func(arg plansql.Node, _ ...expr.CompileOption) (float64, bool, error) {
 		f, err := strconv.ParseFloat(arg.String(), 64)
 		return f, false, err
 	})

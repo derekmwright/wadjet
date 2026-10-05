@@ -434,8 +434,8 @@ func (PlanContext) WantBareName(name string) string {
 	return wantBareName(name)
 }
 
-func (PlanContext) WindowExecColumn(node *logical.Node, we logical.WindowExpr, keys map[string]windowKey) exec.WindowColumn {
-	return windowExecColumn(node, we, keys)
+func (PlanContext) WindowExecColumn(ctx context.Context, node *logical.Node, we logical.WindowExpr, keys map[string]windowKey) exec.WindowColumn {
+	return windowExecColumn(ctx, node, we, keys)
 }
 
 func (PlanContext) WindowKeySpecs(keys map[string]windowKey) []ProjectExprSpec {

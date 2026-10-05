@@ -3,6 +3,7 @@
 package logical
 
 import (
+	"github.com/derekmwright/wadjet/internal/engine/expr"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
@@ -11,11 +12,12 @@ import (
 // is physical.TablesampleArgument, installed by package physical at init
 // (SetTablesampleEvaluator): the expression typer it needs lives there, and
 // physical imports this package, not the other way round.
-var tablesampleEvaluator func(arg plansql.Node) (pct float64, isNull bool, err error)
+var tablesampleEvaluator func(arg plansql.Node, opts ...expr.CompileOption) (pct float64, isNull bool, err error)
 
 // SetTablesampleEvaluator installs the TABLESAMPLE argument's evaluation.
-// Package physical calls it once, at init.
-func SetTablesampleEvaluator(f func(arg plansql.Node) (float64, bool, error)) {
+// Package physical calls it once, at init. opts reach its compile: the
+// statement clock, for an argument that reads one (BindClockFolds).
+func SetTablesampleEvaluator(f func(arg plansql.Node, opts ...expr.CompileOption) (float64, bool, error)) {
 	tablesampleEvaluator = f
 }
 

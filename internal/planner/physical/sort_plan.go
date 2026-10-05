@@ -325,7 +325,7 @@ func (p *Planner) buildWindow(ctx context.Context, node *logical.Node) (exec.Sou
 	}
 	var winCols []exec.WindowColumn
 	for _, we := range node.WindowExprs {
-		winCols = append(winCols, windowExecColumn(node, we, winKeys))
+		winCols = append(winCols, windowExecColumn(ctx, node, we, winKeys))
 	}
 
 	winOp := exec.NewWindow(winCols)

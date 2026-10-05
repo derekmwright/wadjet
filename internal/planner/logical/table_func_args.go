@@ -31,10 +31,14 @@ func foldTableFuncArgs(fn string, args []string, exprs []plansql.Node) ([]string
 				"%s: argument %d (%s) must be a constant expression here; a column or subquery reference is not supported",
 				fn, i+1, e.String())
 		}
-		// An argument that reads the clock is folded here from a clock read
-		// for this fold alone — it serves the plan's declarations; the
-		// physical planner re-folds it with the statement's (FuncClockArgs).
-		v, err := FoldTableFuncArg(e, expr.WithStatementClock(expr.StartStatement(context.Background())))
+		// An argument that reads the clock is not folded here: this layer
+		// has no statement. It stays as written and is recorded
+		// (Node.FuncClockArgs); BindClockFolds folds it with the statement's
+		// clock, before anything reads the arguments (#1566).
+		if readsClock(e) {
+			continue
+		}
+		v, err := FoldTableFuncArg(e)
 		if err != nil {
 			return nil, err
 		}
@@ -141,15 +145,62 @@ func constantArg(e plansql.Node) bool {
 // The window functions' integer argument (plansql.WindowIntegerArgument)
 // folds a constant expression with this same fold.
 func init() {
-	plansql.SetConstantFolder(func(n plansql.Node) (any, bool, error) {
+	plansql.SetConstantFolder(func(ctx context.Context, n plansql.Node) (any, bool, error) {
 		if !constantArg(n) {
 			return nil, false, nil
 		}
-		c, err := expr.Compile(n)
+		if ctx == nil {
+			// Parse time: no statement. A clock-reading argument waits for
+			// the plan, which folds it with the statement's clock (#1566).
+			if readsClock(n) {
+				return plansql.ClockDeferred, true, nil
+			}
+			ctx = context.Background()
+		}
+		c, err := expr.Compile(n, expr.WithStatementClock(ctx))
 		if err != nil {
 			return nil, true, err
 		}
 		v, err := evalConstant(c)
 		return v, true, err
 	})
+}
+
+// BindClockFolds folds what the builder deferred on a Scan because it reads a
+// clock function — its table-function arguments (FuncClockArgs) and its
+// TABLESAMPLE argument (SampleClockArg) — with the statement clock opt binds
+// (expr.WithStatementClock). The physical planner calls it where a context
+// first reaches the plan (AnnotateScanColumns) and again where the scan is
+// built, which raises its error. With no clock bound the fold raises XX000
+// (expr's clock functions have no live-clock fallback). The node keeps what
+// was deferred until a fold succeeds.
+func BindClockFolds(n *Node, opt expr.CompileOption) error {
+	if n == nil || n.Type != NodeScan {
+		return nil
+	}
+	if len(n.FuncClockArgs) > 0 {
+		args := append([]string(nil), n.FuncArgs...)
+		for i, e := range n.FuncClockArgs {
+			if i >= len(args) {
+				continue
+			}
+			v, err := FoldTableFuncArg(e, opt)
+			if err != nil {
+				return err
+			}
+			args[i] = v
+		}
+		n.FuncArgs, n.FuncClockArgs = args, nil
+	}
+	if n.SampleClockArg != nil {
+		if tablesampleEvaluator == nil {
+			return sqlerr.New("XX000", "TABLESAMPLE: no argument evaluator is installed")
+		}
+		pct, isNull, err := tablesampleEvaluator(n.SampleClockArg, opt)
+		if err != nil {
+			return err
+		}
+		n.SamplePercent, n.SampleNull, n.SampleClockArg = pct, isNull, nil
+	}
+	return nil
 }

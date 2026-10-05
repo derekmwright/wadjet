@@ -1942,6 +1942,12 @@ func resolveTableOrCTE(table *plansql.TableRef, ctes []plansql.CTEDef) (*Node, e
 	node := NewScan(table.Name, table.Alias)
 	if table.SampleMethod != "" {
 		node.SampleMethod = strings.ToUpper(table.SampleMethod)
+		if table.SampleArg != nil && readsClock(table.SampleArg) {
+			// The statement's clock is not here: BindClockFolds evaluates
+			// it where the plan meets its context (#1566).
+			node.SampleClockArg = table.SampleArg
+			return node, nil
+		}
 		pct, isNull, err := tablesampleArgument(table.SampleArg)
 		if err != nil {
 			return nil, err

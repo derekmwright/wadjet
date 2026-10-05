@@ -4,6 +4,7 @@
 package physical
 
 import (
+	"context"
 	"strings"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
@@ -11,6 +12,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/engine/expr"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -316,7 +318,7 @@ func windowInputCol(node *logical.Node, we logical.WindowExpr) string {
 // no catalog and no logical plan, so a second implementation there would be a
 // second answer; the arguments are parsed once, here, where the types resolve
 // (#345's shape, and #329/#333's).
-func windowExecColumn(node *logical.Node, we logical.WindowExpr, keys map[string]windowKey) exec.WindowColumn {
+func windowExecColumn(ctx context.Context, node *logical.Node, we logical.WindowExpr, keys map[string]windowKey) exec.WindowColumn {
 	// ResolveWindowKeys binds a qualified reference to the input column and
 	// renames an expression to the column the pre-window projection computes
 	// under; a term it left alone keeps its own spelling (#585).
@@ -411,8 +413,14 @@ func windowExecColumn(node *logical.Node, we logical.WindowExpr, keys map[string
 		if err != nil {
 			return 0, false
 		}
-		v, isNull, err := plansql.WindowIntegerArgument(fn, ast)
+		// With the statement's clock: an argument that reads one (lag(x,
+		// K) with K from now()) is the statement's value, and with none
+		// bound the fold raises XX000 rather than read a clock (#1566).
+		v, isNull, err := plansql.WindowIntegerArgumentIn(ctx, fn, ast)
 		if err != nil {
+			if sqlerr.StateOf(err) == "XX000" {
+				panic(err)
+			}
 			return 0, false
 		}
 		if isNull {

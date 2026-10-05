@@ -38,7 +38,7 @@ func init() { logical.SetTablesampleEvaluator(TablesampleArgument) }
 // checks it when the scan begins (exec.CheckSamplePercent, at a sampled
 // scan's first batch: exec.NewSampledSource, on a worker too), so a scan that
 // never begins answers, and EXPLAIN plans.
-func TablesampleArgument(arg plansql.Node) (pct float64, isNull bool, err error) {
+func TablesampleArgument(arg plansql.Node, opts ...expr.CompileOption) (pct float64, isNull bool, err error) {
 	if err := tablesampleArgumentReadsNoRow(arg); err != nil {
 		return 0, false, err
 	}
@@ -65,7 +65,7 @@ func TablesampleArgument(arg plansql.Node) (pct float64, isNull bool, err error)
 				"argument of TABLESAMPLE must be type real, not type %s", name)
 		}
 	}
-	c, err := expr.Compile(&plansql.CastNode{Inner: arg, TypeName: "REAL"})
+	c, err := expr.Compile(&plansql.CastNode{Inner: arg, TypeName: "REAL"}, opts...)
 	if err != nil {
 		return 0, false, err
 	}

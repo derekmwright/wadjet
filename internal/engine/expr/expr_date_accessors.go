@@ -55,7 +55,7 @@ func fnLastDayOfMonth(args []any) any {
 }
 
 func fnCurrentTimestamp(args []any) any {
-	return clockFuncs["current_timestamp"](clockNow())
+	return unboundClock("CURRENT_TIMESTAMP")
 }
 
 func fnAtTimezone(args []any) any {

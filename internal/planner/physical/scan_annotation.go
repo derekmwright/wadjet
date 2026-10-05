@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/derekmwright/wadjet/internal/engine/expr"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
@@ -38,6 +39,11 @@ func (p *Planner) annotateScanColumns(ctx context.Context, node *logical.Node) {
 	if node == nil {
 		return
 	}
+	// The first pass that holds the statement's context: what the builder
+	// deferred because it reads a clock is folded here with the statement's
+	// clock, before the declarations below read it. A failure leaves it
+	// deferred; the scan's build raises it (#1566).
+	_ = logical.BindClockFolds(node, expr.WithStatementClock(ctx))
 	// A TABLE FUNCTION whose signature declares its columns is annotated the
 	// way a base table is, from that declaration rather than from the catalog:
 	// the aggregate and arithmetic result-type rules then see an integer as an

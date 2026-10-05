@@ -162,6 +162,11 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 			EstimatedRows:   estRows,
 		}
 		if node.SampleMethod != "" {
+			// A TABLESAMPLE argument that reads the clock reads the
+			// statement's (#1566).
+			if err := logical.BindClockFolds(node, expr.WithStatementClock(p.PlanCtx)); err != nil {
+				p.refusePlanTimeAnswer(err)
+			}
 			// The scan's TABLESAMPLE, the argument's real value as the
 			// logical build coerced it (#1411).
 			stage.Sample = &exec.TableSample{Method: node.SampleMethod, Percent: node.SamplePercent, Null: node.SampleNull}
@@ -1375,7 +1380,7 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 			// spec and the single-process operator describe one computation
 			// — including the output type, which nothing downstream of the
 			// worker can correct (#345).
-			ec := p.PlanContext.WindowExecColumn(node, we, winKeys)
+			ec := p.PlanContext.WindowExecColumn(p.PlanCtx, node, we, winKeys)
 			var orderBy []SortKeySpec
 			for i, ob := range we.OrderBy {
 				// ec.OrderBy carries the RESOLVED spelling; ob.Column is

@@ -9,6 +9,7 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
 // tickingClock answers a later instant, one millisecond on, at every read —
@@ -90,11 +91,29 @@ func TestStatementClockBindsEveryClockFunction(t *testing.T) {
 	var unbound []string
 	restore := SetUnboundClockHookForTest(func(name string) { unbound = append(unbound, name) })
 	defer restore()
-	if got := compileText(t, "now() = now()").Eval(b, 0); got != false {
-		t.Errorf("unbound now() = now() under a ticking clock = %v; the live clock is read per evaluation", got)
+	// Unbound, every clock function RAISES (XX000) rather than read a clock
+	// of its own: there is no live-clock fallback.
+	reads := 0
+	defer SetClockForTest(func() time.Time { reads++; return at })()
+	for _, fn := range []string{"now()", "CURRENT_TIMESTAMP", "LOCALTIMESTAMP", "CURRENT_DATE"} {
+		e := compileText(t, fn)
+		func() {
+			defer func() {
+				r := recover()
+				f, ok := r.(interface{ FatalEvalError() error })
+				if !ok || sqlerr.StateOf(f.FatalEvalError()) != "XX000" {
+					t.Errorf("unbound %s evaluated: recovered %v, want an XX000 refusal", fn, r)
+				}
+			}()
+			v := e.Eval(b, 0)
+			t.Errorf("unbound %s answered %v", fn, v)
+		}()
 	}
-	if len(unbound) != 2 {
-		t.Errorf("the unbound hook saw %v, want two now() compiles", unbound)
+	if reads != 0 {
+		t.Errorf("an unbound clock function read the clock %d times", reads)
+	}
+	if len(unbound) != 4 {
+		t.Errorf("the unbound hook saw %v, want four compiles", unbound)
 	}
 }
 
@@ -113,4 +132,10 @@ func TestStatementClockBindsAUDFBody(t *testing.T) {
 	if got := e.Eval(&batch.RecordBatch{Len: 1}, 0); got != true {
 		t.Errorf("a UDF body's now() against the statement's: %v, want true", got)
 	}
+}
+
+// testClock binds a compile to a statement clock read now — what a door does
+// — for the tests that evaluate a clock function outside any statement.
+func testClock() CompileOption {
+	return WithStatementClock(StartStatement(context.Background()))
 }

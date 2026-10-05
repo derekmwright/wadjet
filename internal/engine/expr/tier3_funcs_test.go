@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 
+	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
@@ -567,8 +568,11 @@ func TestTier3LastDayOfMonth(t *testing.T) {
 }
 
 func TestTier3CurrentTimestamp(t *testing.T) {
-	fn := DefaultRegistry.Lookup("current_timestamp")
-	got := fn([]any{})
+	c, err := Compile(&plansql.FuncCallNode{Name: "current_timestamp"}, testClock())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := c.Eval(nil, 0)
 	if got == nil {
 		t.Fatal("current_timestamp() returned nil")
 	}

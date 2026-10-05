@@ -58,7 +58,14 @@ func TestTemporalRegistryEntriesProduceTheirDeclaredUnit(t *testing.T) {
 			continue
 		}
 		checked++
-		got := DefaultRegistry.Lookup(n)(tc.args)
+		var got any
+		if read, isClock := clockFuncs[n]; isClock {
+			// A clock function answers its statement's instant (the
+			// registered evaluator raises: there is no live clock, #1566).
+			got = read(clock)
+		} else {
+			got = DefaultRegistry.Lookup(n)(tc.args)
+		}
 		want := tc.want.UnixMilli()
 		unit := "epoch milliseconds"
 		if decl.ID == batch.TypeDate {

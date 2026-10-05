@@ -177,7 +177,7 @@ func matchLikeEscRecur(s, pattern string, si, pi int, hasEsc bool, esc byte) boo
 // the spelling — a client reading the wire sees timestamp, not timestamptz.
 // This engine has one timestamp type and renders every instant in UTC, so the
 // VALUE is current_timestamp's; the declaration is what changes.
-func fnLocalTimestamp(args []any) any { return fnCurrentTimestamp(args) }
+func fnLocalTimestamp(args []any) any { return unboundClock("LOCALTIMESTAMP") }
 
 // fnSimilarTo is `x SIMILAR TO pattern [ESCAPE escape]` (#1168).
 //

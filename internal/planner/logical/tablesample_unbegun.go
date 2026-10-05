@@ -49,7 +49,7 @@ func clearSamples(n *Node) {
 		return
 	}
 	if n.Type == NodeScan && n.SampleMethod != "" {
-		n.SampleMethod, n.SamplePercent, n.SampleNull = "", 0, false
+		n.SampleMethod, n.SamplePercent, n.SampleNull, n.SampleClockArg = "", 0, false, nil
 	}
 	for _, c := range n.Children {
 		clearSamples(c)
