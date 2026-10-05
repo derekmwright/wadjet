@@ -5,3 +5,6 @@ opt/b/refused/where	all	ERR 0A000	text-collation r23: the basic and extended dia
 opt/e/refused/group	all	ERR 0A000	text-collation r23: the basic and extended dialects (b, e) are refused 0A000, embedded or as a flag
 opt/e/refused/proj	all	ERR 0A000	text-collation r23: the basic and extended dialects (b, e) are refused 0A000, embedded or as a flag
 opt/e/refused/where	all	ERR 0A000	text-collation r23: the basic and extended dialects (b, e) are refused 0A000, embedded or as a flag
+fold/ilikeControl/group	all	rows=3 NULL,4 | f,5 | t,6	control, not a regular expression: ILIKE folds with Go's tables, so 'ⓐ' ILIKE 'Ⓐ' is t (PostgreSQL f; the same at 4256886b) — filing candidate
+fold/ilikeControl/proj	all	rows=15 1,t | 10,f | 11,t | 12,NULL | 13,NULL | 14,NULL | 15,NULL | 2,t | 3,f | 4,f | 5,t | 6,t | 7,t | 8,f | 9,f	control, not a regular expression: ILIKE folds with Go's tables, so 'ⓐ' ILIKE 'Ⓐ' is t (PostgreSQL f; the same at 4256886b) — filing candidate
+fold/ilikeControl/where	all	rows=6 1 | 11 | 2 | 5 | 6 | 7	control, not a regular expression: ILIKE folds with Go's tables, so 'ⓐ' ILIKE 'Ⓐ' is t (PostgreSQL f; the same at 4256886b) — filing candidate
