@@ -12,7 +12,7 @@ import (
 )
 
 // setOpResolveUnknownLiteralArms assigns an untyped item (a quoted literal, a
-// bare NULL, a NULL cast to plain NUMERIC) the other arm's type before
+// bare NULL) the other arm's type before
 // unifySetOpSchemas, despite its pipeline vector, so its boxes are read in
 // that type. Use the plan-time SetOpArmFacts so local and DAG select the same
 // items. Leave positions where both arms are untyped alone: PostgreSQL

@@ -252,6 +252,8 @@ func (u *setOpSourceAdapter) Next(ctx context.Context) (*batch.RecordBatch, erro
 		// (#556, #844). Rename schemas to slots temporarily and restore result names
 		// at the end; no slot name may escape this function.
 		// See docs/internals/set-operation-positional-row-carriers.md for the design.
+		leftSchema = setOpNullLayout(leftSchema, schema, u.leftFacts)
+		rightSchema = setOpNullLayout(rightSchema, schema, u.rightFacts)
 		posResult := setOpSlotSchema(schema)
 		leftRows, err := coerceSetOpArmRows(
 			setOpLiteralRows(setOpArmRows(leftSink, leftSchema), u.leftLits),
@@ -554,4 +556,27 @@ func rowHashKey(row map[string]any) string {
 		b.WriteString(fmt.Sprintf("%v", row[k]))
 	}
 	return b.String()
+}
+
+// setOpNullLayout describes an all-NULL numeric item at the resolved layout.
+// It supplied its type to the fold, but has no digits to rescale.
+func setOpNullLayout(src, target []parquet.Column, facts SetOpArmFacts) []parquet.Column {
+	if len(src) != len(target) {
+		return src
+	}
+	var out []parquet.Column
+	for i := range src {
+		if !facts.at(i).numericNull {
+			continue
+		}
+		if out == nil {
+			out = append([]parquet.Column(nil), src...)
+		}
+		out[i] = target[i]
+		out[i].Name = src[i].Name
+	}
+	if out == nil {
+		return src
+	}
+	return out
 }

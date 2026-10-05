@@ -82,8 +82,10 @@ import (
 // (ADR-0024 §10). The alternative was a second, name-keyed list on the stage.
 // 223 → 222 (2026-10-05, arc UN, #1541): a set-operation arm's plan carries
 // what each select item is beside its type, so one function computes the
-// result column for the stage planner and the single-process path, and the
-// stage asks the plan `SetOpArmPlan.Untyped` where it asked the context for a
+// result column for the stage planner and the single-process path. Numeric
+// NULLs contribute their type but materialize at the resolved layout;
+// UsesResultLayout renames Untyped without adding a member. The stage asks
+// the plan `SetOpArmPlan.UsesResultLayout` where it asked the context for a
 // separate mask (`PlanContext.SetOpUnknownLiteralArms`,
 // `PlanContext.SetOpArmIsUnknownLit`, both removed).
 const maxAGPLPhysicalMembers = 222
@@ -284,7 +286,7 @@ RefuseUnresolvedJoinResidual
 SetOpArmPlan.Coerce
 SetOpArmPlan.Specs
 SetOpArmPlan.Types
-SetOpArmPlan.Untyped
+SetOpArmPlan.UsesResultLayout
 SetOpColType.Dec
 SetOpColType.DecKnown
 SetOpColType.ElementType

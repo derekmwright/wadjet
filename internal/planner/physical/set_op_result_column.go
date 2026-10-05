@@ -19,16 +19,12 @@ import (
 type SetOpArmFacts []setOpArmFact
 
 type setOpArmFact struct {
-	// untyped: PostgreSQL gives the item no type of its own and resolves it
-	// to the other arms' — a quoted literal, a bare NULL, and a NULL cast to
-	// plain NUMERIC (which is numeric there; this engine's expression typing
-	// declares that cast double precision, so the declaration is not used).
+	// untyped items (bare NULL and quoted literals) take the other arms' type.
 	untyped bool
-	// weak: an untyped item that still DECLARES a type (the NULL cast to
-	// plain NUMERIC). When no other arm is typed, its declaration is the
-	// result's, as it was before, rather than leaving the column untyped.
-	weak bool
-	role setOpMarkRole
+	// A typed NULL contributes its type, but no digits or print role.
+	typedNull   bool
+	numericNull bool
+	role        setOpMarkRole
 }
 
 // setOpMarkRole is what one arm contributes to the result column's mark.
@@ -42,8 +38,8 @@ type setOpArmFact struct {
 // NUMERIC(p,s) column or CAST, or a literal spelled with trailing zeros, whose
 // values PostgreSQL prints at that scale. Every other arm — an integer, a NULL,
 // a quoted or numeric literal without trailing zeros, an expression PostgreSQL
-// types plain numeric — is neutral: trimming prints its values as PostgreSQL
-// does. The rule is a fold (any veto wins, then any mark), so the arms' order
+// types plain numeric — is neutral. A computed value can still carry
+// trailing zeros in PostgreSQL; trimming those is numeric-decimal r24. The rule is a fold (any veto wins, then any mark), so the arms' order
 // and nesting give one answer. The measured table is ADR-0024 §10.
 type setOpMarkRole uint8
 
@@ -105,9 +101,7 @@ func setOpItemFact(e plansql.Node) setOpArmFact {
 		}
 		_, _, hasParams, isDec := expr.DecimalCastDest(n.TypeName)
 		if lit, ok := plansql.Unparen(n.Inner).(*plansql.Lit); ok && lit.Kind == plansql.LitNull {
-			// A typed NULL holds no digits. Cast to plain NUMERIC it has no
-			// (p,s) either, and is resolved like an untyped NULL.
-			return setOpArmFact{untyped: isDec && !hasParams, weak: isDec && !hasParams, role: setOpMarkNeutral}
+			return setOpArmFact{typedNull: true, numericNull: isDec, role: setOpMarkNeutral}
 		}
 		if isDec && hasParams {
 			return setOpArmFact{role: setOpMarkByDecl}
@@ -157,8 +151,9 @@ func setOpArmMarkRole(ct SetOpColType, f setOpArmFact) setOpMarkRole {
 // its type, its DECIMAL (precision, scale) and its mark, from every arm's
 // declared column and that arm's facts. The stage planner (setOpTargetType),
 // the single-process path (unifySetOpSchemas) and the declared output
-// (setOpDeclaredOutputSchema) all call it and make no decision of their own,
-// so one query has one result column on every path.
+// (setOpDeclaredOutputSchema) all call it for that common result. Input
+// classification, unresolved schemas, wire typmods and storage declarations
+// remain separate decisions.
 //
 // allKnown is false when a typed arm carries no type at all. An error is a
 // pair the numeric ladder cannot meet (the plan-time refusal,
@@ -173,19 +168,15 @@ func setOpResultColumn(arms []SetOpColType, facts []setOpArmFact, name, op strin
 		}
 		return setOpArmFact{}
 	}
-	// An untyped item takes the other arms' type. A weak one (a NULL cast to
-	// plain NUMERIC) is typed by its declaration only when nothing else is.
 	untyped := func(i int) bool { return fact(i).untyped }
-	strong := false
-	for i := range arms {
-		strong = strong || !fact(i).untyped
-	}
-	if !strong {
-		untyped = func(i int) bool { return fact(i).untyped && !fact(i).weak }
-	}
 	var want SetOpColType
 	allKnown := true
 	for i, ct := range arms {
+		if fact(i).numericNull {
+			// Expression typing uses FLOAT64 for a plain numeric NULL. The
+			// common type must still include NUMERIC, even beside an integer.
+			ct = SetOpColType{Typ: parquet.TypeDecimal, Known: true}
+		}
 		if untyped(i) {
 			continue
 		}
@@ -233,14 +224,20 @@ func setOpResultColumn(arms []SetOpColType, facts []setOpArmFact, name, op strin
 		case setOpMarkVeto:
 			veto = true
 		}
-		if untyped(i) {
-			// No type of its own, so no (p,s) either: counting its STRING
+		if untyped(i) || fact(i).typedNull {
+			// No digits of its own, so no (p,s) either: counting its STRING
 			// made the target unresolvable and refused a union PostgreSQL
 			// answers as numeric.
 			continue
 		}
 		dec = append(dec, ct)
 		allDecimal = allDecimal && ct.Typ == parquet.TypeDecimal
+	}
+	if len(dec) == 0 {
+		// No value supplies a scale (only NULLs and unknown literals).
+		// Use the unconstrained carrier without making the NULL a mark.
+		dec = append(dec, SetOpColType{Typ: parquet.TypeDecimal, Known: true,
+			Dec: logical.DecimalMeta{Precision: 38, Scale: 10}, DecKnown: true})
 	}
 	want.Dec, want.DecKnown = setOpDecimalTarget(dec)
 	if !want.DecKnown {

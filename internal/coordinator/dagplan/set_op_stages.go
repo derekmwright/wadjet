@@ -308,7 +308,7 @@ func reconcileSetOpArmTypes(plans []physical.SetOpArmPlan, outNames []string, op
 					outNames[col], setOpUnresolvedArmsDesc(plans, col))
 			}
 			for i := range plans {
-				if plans[i].Untyped(col) {
+				if plans[i].UsesResultLayout(col) {
 					// An UNKNOWN literal takes the resolved type, and the ARM'S
 					// OWN STAGE has to say so: the union arm's projection is
 					// what the worker builds the .wshf column from, and a
@@ -362,7 +362,7 @@ func reconcileSetOpArmTypes(plans []physical.SetOpArmPlan, outNames []string, op
 			continue
 		}
 		for i := range plans {
-			if plans[i].Untyped(col) {
+			if plans[i].UsesResultLayout(col) {
 				// The resolved type, DECLARED on the arm's own projection, and
 				// no CAST: SetValueChecked parses the literal's text into
 				// whatever vector the spec names, which is what PostgreSQL
