@@ -221,3 +221,51 @@ func isRegexpCall(call *ast.CallExpr, alias string, fns map[string]bool) bool {
 	id, ok := sel.X.(*ast.Ident)
 	return ok && id.Name == alias && fns[sel.Sel.Name]
 }
+
+// Patterns retain each function's original argument conversion. Subjects
+// containing bytes are still read as text, an intentional difference.
+func TestArcRXOwnPatternTypes(t *testing.T) {
+	patterns := []struct {
+		name  string
+		value any
+	}{
+		{"text literal", "a"}, {"text column", "a"}, {"bytes", []byte("a")}, {"integer", int64(97)}, {"null", nil},
+	}
+	rows := []struct {
+		name string
+		want []string
+	}{
+		{"regexp_extract", []string{"a", "a", "a", "97", "NULL"}},
+		{"regexp_extract_all", []string{`["a","a"]`, `["a","a"]`, `["9","7","9","7"]`, `["97","97"]`, "NULL"}},
+		{"regexp_split", []string{`["","[97]97","b"]`, `["","[97]97","b"]`, `["a[","","]","","ab"]`, `["a[","]","ab"]`, "NULL"}},
+		{"payload_matches", []string{"true", "true", "true", "true", "NULL"}},
+	}
+	for _, row := range rows {
+		for i, pattern := range patterns {
+			t.Run(row.name+"/"+pattern.name, func(t *testing.T) {
+				value := pattern.value
+				if pattern.name == "text column" {
+					b := testBatch()
+					b.Columns[1].ResetForWrite(1)
+					b.Columns[1].SetValue(0, "a")
+					value = (&ColRef{Name: "name"}).Eval(b, 0)
+				}
+				if got := rxOutcome(row.name, "a[97]97ab", value); got != row.want[i] {
+					t.Fatalf("got %s, want %s", got, row.want[i])
+				}
+			})
+		}
+	}
+	for _, row := range []struct {
+		subject any
+		want    string
+	}{
+		{"ab", "[]"}, {"[97]", `["9","7"]`},
+		// Base returned ["9","7","9"] by reading the subject as "[97 98]".
+		{[]byte("ab"), "[]"},
+	} {
+		if got := rxOutcome("regexp_extract_all", row.subject, []byte("a")); got != row.want {
+			t.Errorf("subject %v: got %s, want %s", row.subject, got, row.want)
+		}
+	}
+}
