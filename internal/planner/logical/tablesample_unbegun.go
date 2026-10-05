@@ -135,7 +135,9 @@ func conjunctIsConstant(node plansql.Node) bool {
 func readsClock(node plansql.Node) bool {
 	found := false
 	plansql.RewriteExpr(node, func(x plansql.Node) (plansql.Node, bool) {
-		if f, ok := x.(*plansql.FuncCallNode); ok && expr.IsClockFunc(strings.ToLower(f.Name)) {
+		// A CREATE FUNCTION body may read the clock too: a UDF call is
+		// treated as clock-reading, folded where the statement's clock is.
+		if f, ok := x.(*plansql.FuncCallNode); ok && (expr.IsClockFunc(strings.ToLower(f.Name)) || expr.DefaultRegistry.IsUDF(f.Name)) {
 			found = true
 		}
 		return nil, false
