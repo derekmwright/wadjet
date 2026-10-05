@@ -82,22 +82,46 @@ Variable-length types use an **offset/data** columnar layout: a contiguous data 
 
 It declares OID 17 on the wire and renders as `\x` hex in the text format.
 
-**A literal beside a `BYTES` column is read by `byteain`**, PostgreSQL's own
-bytea input function, in both of its spellings — so all three of these name the
-same two bytes:
+**A text becomes `BYTES` through `byteain`**, PostgreSQL's own bytea input
+function, at every door: a literal beside a `BYTES` column in a comparison, a
+literal assigned to one by `INSERT … VALUES`, `INSERT … SELECT`, `UPDATE`,
+`MERGE` or `COPY`, `CAST(text AS BYTES)`, and a text-format `bytea` parameter
+(#582, #1501). So all of these name the same two bytes, and a row written with
+a literal is found by the same literal:
 
 ```sql
-SELECT b FROM t WHERE b = 'hi';        -- the escape form: no backslash, its own bytes
-SELECT b FROM t WHERE b = '\x6869';    -- the hex form, which is what the wire prints
-SELECT b FROM t WHERE b = '\150\151';  -- octal escapes
+INSERT INTO t (b) VALUES ('\x6869');     -- stores the two bytes 0x68 0x69
+SELECT b FROM t WHERE b = 'hi';          -- the escape form: no backslash, its own bytes
+SELECT b FROM t WHERE b = '\x6869';      -- the hex form, which is what the wire prints
+SELECT b FROM t WHERE b = '\150\151';    -- octal escapes
+SELECT CAST('\x6869' AS BYTES);          -- the same two bytes, declared bytea
 ```
 
-`\\` is one backslash and `\ooo` one octal byte; anything else after a
-backslash is `22P02`, as it is on the server — and so are an odd number of hex
-digits, a non-hex digit, and the UPPERCASE `\X` form, which `byteain` does not
-take. Whitespace inside the hex digits IS taken (`'\x68 69'`), because
-`hex_decode` skips it. The refusal is decided when the query is planned, like
-every other type's.
+The grammar, as PostgreSQL 17.11 reads it:
+
+* **hex form** — a LOWERCASE `\x` then hex digits, upper or lower case. Space,
+  tab, newline and carriage return BETWEEN digit pairs are skipped
+  (`'\x68 69'` is two bytes); anywhere else, or a vertical tab or form feed, is
+  a non-hex digit. An odd digit count is `22023 invalid hexadecimal data: odd
+  number of digits` and a non-hex digit `22023 invalid hexadecimal digit:
+  "z"`.
+* **escape form** — everything else, including `\X…`: `\\` is one backslash,
+  `\ooo` one byte (first digit 0–3), every other byte stands for itself
+  (`'é'` is its two UTF-8 bytes). A backslash followed by anything else is
+  `22P02 invalid input syntax for type bytea`.
+
+A refused text stores nothing — a multi-row `INSERT` holding one writes no
+row — and a comparison's refusal is decided when the query is planned, like
+every other type's. `CAST(x AS BYTES)` of a non-text operand is `42846
+cannot cast type … to bytea`. A value already stored is read as the bytes it
+holds: rows written before #1501 hold the text's own characters
+(`'\x6869'` stored six bytes) and keep reading as those bytes.
+
+A `BYTES` value that has to travel as SQL text — a bound bytea parameter, a
+scalar subquery's answer handed to a later stage, a correlated re-run's outer
+value — is written as `CAST('\x<hex>' AS BYTES)`, which reads back as the same
+bytes whatever they are (a NUL and invalid UTF-8 included); a binary-format
+bytea parameter carries its bytes untouched.
 
 **Functions over `BYTES` follow PostgreSQL's catalog**, which means BYTES, not
 characters:

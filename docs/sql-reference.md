@@ -3530,9 +3530,14 @@ as above, to `JSON` its `to_json` text (`[1,2]`, a timestamp element as
 and the JSON text is what the JSON functions read — and to every other type
 `42846 cannot cast type … to …`, as PostgreSQL raises.
 
+`CAST(x AS BYTES)` is PostgreSQL's `x::bytea`: a text operand is read by
+`byteain` (`CAST('\x6869' AS BYTES)` is the two bytes `hi`, see
+[BYTES input](data-types.md#bytes-is-postgresqls-bytea)), a `BYTES` operand is
+unchanged, and any other type is `42846 cannot cast type … to bytea` (#1501).
+
 The remaining type names are **accepted destinations this engine does not
-convert to**: `BYTES`, `DURATION`, `MAP` hand a scalar operand's text back
-under a `text` declaration (OID 25), and `ROW` is a syntax error. A name that
+convert to**: `DURATION`, `MAP` hand a scalar operand's text back under a
+`text` declaration (OID 25), and `ROW` is a syntax error. A name that
 answers to no type at all is `42704`, not a text column (#652).
 
 `CAST(<col> AS STRING)` renders the value's own printed form — the text the
@@ -3657,7 +3662,7 @@ time)` is `12:34:56` on both. They are described as `text` on the wire where
 PostgreSQL describes them as their own types.
 
 A cast to a destination this engine HAS but does not convert — the network
-types, `DURATION`, `BYTES`, the containers — still returns a scalar operand
+types, `DURATION`, the containers — still returns a scalar operand
 unchanged, and a cast of non-address text to `IPV4`, `IPV6`, `CIDR` or
 `MACADDR` does the same rather than raising. Also in that list.
 
@@ -5006,7 +5011,7 @@ See [data-types.md](data-types.md) §Timestamp, "One rendering".
 | `TO_BASE32(s)` | Encode string to Base32 | `TO_BASE32('hello')` → `'NBSWY3DP'` |
 | `FROM_BASE32(s)` | Decode Base32 string | `FROM_BASE32('NBSWY3DP')` → `'hello'` |
 | `ENCODE(b, format)` | Render a `BYTES` value as TEXT. `format` is `hex`, `base64` or `escape` (a printable byte as itself, a backslash doubled, everything else as a three-digit octal escape). Any other format is SQLSTATE 22023 | `ENCODE(payload, 'hex')` → `'6869'`, `ENCODE(payload, 'escape')` → `'\377\376\000A'` |
-| `DECODE(s, format)` | Read TEXT back into `BYTES`, the inverse of `ENCODE`. Input the format cannot read is SQLSTATE 22023 — not NULL, which is where this pair differs from `FROM_HEX` | `DECODE('6869', 'hex')` → the two bytes `hi` |
+| `DECODE(s, format)` | Read TEXT back into `BYTES`, the inverse of `ENCODE`. `hex` and `escape` are `byteain`'s two halves (whitespace between hex digit pairs is skipped). Input the format cannot read is SQLSTATE 22023 for `hex` and `base64` and 22P02 for `escape`, as on PostgreSQL — not NULL, which is where this pair differs from `FROM_HEX` | `DECODE('6869', 'hex')` → the two bytes `hi` |
 | `GET_BYTE(b, n)` | The `n`th byte of a `BYTES` value as a number, 0-based. An index outside the value is SQLSTATE 2202E naming the valid range | `GET_BYTE(payload, 0)` → `104` |
 | `SET_BYTE(b, n, v)` | A copy of `b` with its `n`th byte set to `v & 255`. The index is bounded the same way `GET_BYTE`'s is | `SET_BYTE(payload, 0, 65)` → the bytes `Ai` |
 
@@ -5563,8 +5568,10 @@ each column as the bound value will, except an `integer` or `smallint`
 parameter bound a negative value, which executes as `bigint` (catalog
 parameters-pgwire r12). A position this engine cannot type
 stays OID 0, and its value is read by the position as an untyped literal is.
-A `text`, `varchar`, `bytea` or array parameter is such an untyped literal
-too. The ADR-0012 catalog family
+A `text`, `varchar` or array parameter is such an untyped literal too. A
+`bytea` parameter is a `BYTES` value: its text format is read by `byteain`
+(a refusal is the input function's 22P02 / 22023 at Bind), its binary format
+carries its bytes untouched, and both bind as `CAST('\x…' AS BYTES)` (#1501). The ADR-0012 catalog family
 [parameters-pgwire](adr/0012-divergences/parameters-pgwire.md#catalog)
 records every difference from PostgreSQL (#1410, #1426).
 
@@ -5670,7 +5677,7 @@ coerced by the same rule (see [INSERT](#insert)).
 | PORT | Integer 0-65535 |
 | PROTOCOL | Integer 0-255 |
 | DURATION | Integer nanoseconds |
-| BYTES | Quoted: `'raw'` |
+| BYTES | Quoted, read by `byteain`: `'\x6869'` (hex) or `'raw'` / `'a\\b\000'` (escape form); see [BYTES input](data-types.md#bytes-is-postgresqls-bytea) |
 | IPV4, IPV6, MAC, CIDR, UUID | Quoted literal in the type's text form: `'10.0.0.1'`, `'aa:bb:cc:dd:ee:ff'` |
 
 An `ARRAY[...]` constructor now writes into an ARRAY column with `INSERT ...
@@ -5771,7 +5778,7 @@ and `internal/storage/parquet/wide_decimal_test.go`.)
 - An AGGREGATE in a subquery's own `WHERE` — `x IN (SELECT y FROM t WHERE SUM(y) > 0)` — SQLSTATE `42803`, `aggregate functions are not allowed in WHERE`, which is what PostgreSQL raises. An aggregate belonging to the ENCLOSING query is legal there in PostgreSQL and is refused here with the same code: a lowering gap, recorded in ADR-0012's divergence list.
 - A WINDOW FUNCTION in a subquery's own `WHERE` or `JOIN` condition — `WHERE EXISTS (SELECT 1 FROM t z WHERE SUM(z.n) OVER () > 0)` — SQLSTATE `42P20`, `window functions are not allowed in WHERE`, which is what PostgreSQL raises. The rule holds at EVERY query level, because a window is evaluated after the rows are selected and so cannot select them, and it is applied at PLAN time: the same class reaches the client on the single-process and the distributed arms alike.
 - A DERIVED TABLE inside a subquery's `FROM` that references the enclosing query — `WHERE EXISTS (SELECT 1 FROM (SELECT … WHERE t.k = a.k) d)` — SQLSTATE `0A000`, naming two workarounds: lift the correlated predicate ABOVE the derived table (`… (SELECT … ) d WHERE d.k = a.k`, which answers), or write the derived table as a `LATERAL` join. PostgreSQL answers the original — no `LATERAL` is needed for a reference to an OUTER query level — and this engine has no lowering for it. A reference to a SIBLING of the same `FROM` list is a different thing and stays `42P01`: `LATERAL` is what governs that one, and PostgreSQL refuses it too.
-- A correlated subquery this engine cannot express as a join is re-run per outer row with the outer values substituted as literals, so an outer value with no literal spelling that reads back unchanged — a ROW / MAP / VECTOR (an ARRAY is its typed array literal, `CAST('{…}' AS T[])`), a BYTES value that is not valid UTF-8 or holds a NUL, NaN or ±Infinity — is SQLSTATE `0A000` rather than a wrong answer.
+- A correlated subquery this engine cannot express as a join is re-run per outer row with the outer values substituted as literals, so an outer value with no literal spelling that reads back unchanged — a ROW / MAP / VECTOR (an ARRAY is its typed array literal, `CAST('{…}' AS T[])`, and a BYTES value its typed hex value, `CAST('\x…' AS BYTES)`), NaN or ±Infinity — is SQLSTATE `0A000` rather than a wrong answer.
 - No time-of-day type: a Parquet `TIME` column is read as its raw integer in the file's own unit
 
 

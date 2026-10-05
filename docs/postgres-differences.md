@@ -204,10 +204,6 @@ A parameter takes PostgreSQL's type for its position — `SELECT $1 + 1` and `WH
 
 Bind renders a parameter declared text (OID 25) as a quoted literal, which the integer column's input function reads, so a MERGE `SET n = $1` bound as the text `2.5` raises 22P02 where PostgreSQL raises 42804 (text is not assignable to integer without a cast); neither writes. A float8 or numeric parameter keeps its type and rounds by it. (catalog: [dml-assignment#r4](adr/0012-divergences/dml-assignment.md#catalog); #1353-param, #1408)
 
-**A binary bytea parameter holding a backslash is 22P02.**
-
-`WHERE bt = $1` with `$1` declared `bytea` and bound in binary as the bytes `00 ff 5c` raises 22P02: the bytes are spliced into a literal that the BYTES comparison reads through bytea input again. PostgreSQL matches the row. (catalog: [parameters-pgwire#r11](adr/0012-divergences/parameters-pgwire.md#catalog); #1410)
-
 **Arithmetic over a text expression is evaluated.**
 
 Arithmetic between a bare text column and a number is 42883, as in PostgreSQL, but a text EXPRESSION is read as its number: `UPPER(x) * 2` over `'12'` answers 24, `-x` answers -12, and `CAST(n AS TEXT) * 2`, `CASE … x END * 2` and `(x || '') * 1` answer likewise, and every write stores the same value (MERGE `SET n = UPPER(s.x) * 1` stores 12), where PostgreSQL raises 42883 for each. (catalog: [dml-assignment#r5, r6](adr/0012-divergences/dml-assignment.md#catalog); #1353-text-expr, #1409)
@@ -260,7 +256,7 @@ PostgreSQL adds a second `ordinality` column to any function in FROM; this engin
 
 **Some known casts leave values unchanged.**
 
-`CAST('abc' AS DURATION)` and `CAST('abc' AS BYTES)` return `abc`: this engine has those types but does not convert text into them, so the operand passes through where PostgreSQL has no such type. VECTOR, container and network destinations convert or refuse: `CAST('abc' AS VECTOR(3))`, `CAST('abc' AS INTEGER[])` and `CAST('abc' AS IPV4)` raise 22P02 as PostgreSQL's input functions do, and `CAST(ARRAY[1,2] AS VECTOR(2))` is `[1,2]`. Recognizing a type name does not by itself perform a conversion. (catalog: [other#r4](adr/0012-divergences/other.md#catalog); #652)
+`CAST('abc' AS DURATION)` returns `abc`: this engine has the type but does not convert text into it, so the operand passes through where PostgreSQL has no such type. VECTOR, container and network destinations convert or refuse: `CAST('abc' AS VECTOR(3))`, `CAST('abc' AS INTEGER[])` and `CAST('abc' AS IPV4)` raise 22P02 as PostgreSQL's input functions do, and `CAST(ARRAY[1,2] AS VECTOR(2))` is `[1,2]`. Recognizing a type name does not by itself perform a conversion. (catalog: [other#r4](adr/0012-divergences/other.md#catalog); #652)
 
 **Undescribable results are refused.**
 
@@ -810,7 +806,7 @@ A subquery’s derived table cannot evaluate enclosing-query references: 0A000 v
 
 **Some correlated values cannot be substituted.**
 
-A correlated subquery this engine re-runs per outer row substitutes the outer values as literals, and a value with no literal that reads back as itself stops the query: `(SELECT c.f + x.v FROM x WHERE x.id = 1)` raises 0A000 when a row of `c.f` is a non-finite `DOUBLE`, and so does a `BYTES` value that is not text, where PostgreSQL answers per row. An `ARRAY` outer value is substituted and its expressions answer (`c.arr[1]`, `c.arr = ARRAY[…]`), and so does a subquery that returns the array itself, `(SELECT c.arr …)`, declared as the column is. Where the correlation can be written as a join, write it as one. (catalog: [lateral-subqueries#r12](adr/0012-divergences/lateral-subqueries.md#catalog))
+A correlated subquery this engine re-runs per outer row substitutes the outer values as literals, and a value with no literal that reads back as itself stops the query: `(SELECT c.f + x.v FROM x WHERE x.id = 1)` raises 0A000 when a row of `c.f` is a non-finite `DOUBLE`, where PostgreSQL answers per row. An `ARRAY` outer value is substituted and its expressions answer (`c.arr[1]`, `c.arr = ARRAY[…]`), and so does a subquery that returns the array itself, `(SELECT c.arr …)`, declared as the column is. Where the correlation can be written as a join, write it as one. (catalog: [lateral-subqueries#r12](adr/0012-divergences/lateral-subqueries.md#catalog))
 
 **Recursive UNION without ALL is refused.**
 
