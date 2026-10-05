@@ -51,7 +51,7 @@ func fnPayloadMatches(args []any) any {
 		return nil
 	}
 	// The pattern is read as every SQL pattern is (translateAndCompile).
-	return mustCompileSQLRegex(toString(args[1]), reFlags{}).re.MatchString(toString(args[0]))
+	return mustCompileSQLRegex(toString(args[1]), ownFunctionFlags).re.MatchString(toString(args[0]))
 }
 
 func fnPayloadOffset(args []any) any {
@@ -90,6 +90,18 @@ func fnRegexpCount(args []any) any {
 			return nil
 		}
 		start = ToInt64(args[2])
+		switch v := args[2].(type) {
+		case int32, int16, int8:
+		case int64:
+			// The start is an integer on the server: a value past int4
+			// arrives as a bigint, for which there is no regexp_count.
+			if v != int64(int32(v)) {
+				panic(fatalEval{sqlerr.New("42883", "function regexp_count(text, text, bigint) does not exist")})
+			}
+		case string:
+		default:
+			panic(fatalEval{sqlerr.New("42883", "function regexp_count(text, text, %T) does not exist: the start is an integer", v)})
+		}
 		if txt, ok := args[2].(string); ok {
 			// An untyped literal ('3') is read as the integer it spells,
 			// as the server resolves it.
@@ -143,7 +155,7 @@ func fnRegexpExtractAll(args []any) any {
 	if len(args) < 2 || args[0] == nil || args[1] == nil {
 		return nil
 	}
-	re := mustCompileSQLRegex(toString(args[1]), reFlags{})
+	re := mustCompileSQLRegex(toString(args[1]), ownFunctionFlags)
 	src := toString(args[0])
 	matches := re.findAll(src)
 	if len(matches) == 0 {
@@ -162,7 +174,7 @@ func fnRegexpSplit(args []any) any {
 	if len(args) < 2 || args[0] == nil || args[1] == nil {
 		return nil
 	}
-	re := mustCompileSQLRegex(toString(args[1]), reFlags{})
+	re := mustCompileSQLRegex(toString(args[1]), ownFunctionFlags)
 	parts := re.re.Split(toString(args[0]), -1)
 	jsonParts := make([]string, len(parts))
 	for i, p := range parts {
