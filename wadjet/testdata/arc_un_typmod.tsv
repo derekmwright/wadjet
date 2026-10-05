@@ -1,0 +1,684 @@
+# arc UN round 3 (ADR-0024 §10): what a CREATE TABLE AS column declares, by PostgreSQL's typmod rule. Each cell creates <arm>_<shape> AS <source> (arm d: WITH DATA, e: WITH NO DATA), inserts (99, 1.255), (98, 0.755) and reads x back for id >= 98 ordered by id.
+# Columns: cell<TAB>source<TAB>this engine (want)<TAB>PostgreSQL 17.11 (format_type: values)<TAB>c23adbbb (declaration: values)<TAB>disposition. =PG: PostgreSQL's stored values; =c23adbbb: the declaration base gave the column, where PostgreSQL folds a constant this walk does not (or declares numeric where the plan carries the source's scale); no-PG: an engine-only function, the u column's base declaration was (38,0). Generated from scratchpad un_author_r3/enum (gen.py, pgrun.py); regenerate the want column with UN_TYPMOD_GEN=<path>.
+SETUP	CREATE TABLE t (id BIGINT, n NUMERIC(10,2), k NUMERIC(5), u NUMERIC, m NUMERIC(12,4))
+SETUP	INSERT INTO t VALUES (1, 1.50, 3, 1.5, 2.2500), (2, -2.00, -7, 100, 0.1000), (3, 0, 0, 0.0000000001, 1.0000), (4, NULL, NULL, NULL, NULL)
+SETUP	CREATE TABLE t2 (id BIGINT, n NUMERIC(10,2), k NUMERIC(5), u NUMERIC, m NUMERIC(12,4))
+SETUP	INSERT INTO t2 VALUES (1, 1.50, 3, 1.5, 2.2500), (2, 7.25, 8, 100, 0.5000), (5, 3.00, 2, 2, 1.0000)
+SETUP	CREATE TABLE t3 (id BIGINT, n NUMERIC(12,4), k NUMERIC(7,1), u NUMERIC(10,2))
+SETUP	INSERT INTO t3 VALUES (1, 1.5000, 3.0, 1.50), (2, 7.2500, 8.0, 100.00)
+SETUP	CREATE VIEW vw_n AS SELECT id, n AS x FROM t
+SETUP	CREATE VIEW vw_k AS SELECT id, k AS x FROM t
+SETUP	CREATE VIEW vw_u AS SELECT id, u AS x FROM t
+d_bare__n	SELECT id, n AS x FROM t	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+e_bare__n	SELECT id, n AS x FROM t WITH NO DATA	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+d_bare__k	SELECT id, k AS x FROM t	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+e_bare__k	SELECT id, k AS x FROM t WITH NO DATA	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+d_bare__u	SELECT id, u AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_bare__u	SELECT id, u AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_derived__n	SELECT id, x FROM (SELECT id, n AS x FROM t) d	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+e_derived__n	SELECT id, x FROM (SELECT id, n AS x FROM t) d WITH NO DATA	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+d_derived__k	SELECT id, x FROM (SELECT id, k AS x FROM t) d	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+e_derived__k	SELECT id, x FROM (SELECT id, k AS x FROM t) d WITH NO DATA	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+d_derived__u	SELECT id, x FROM (SELECT id, u AS x FROM t) d	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_derived__u	SELECT id, x FROM (SELECT id, u AS x FROM t) d WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_derived2__n	SELECT id, x FROM (SELECT id, x FROM (SELECT id, n AS x FROM t) d1) d2	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+e_derived2__n	SELECT id, x FROM (SELECT id, x FROM (SELECT id, n AS x FROM t) d1) d2 WITH NO DATA	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+d_derived2__k	SELECT id, x FROM (SELECT id, x FROM (SELECT id, k AS x FROM t) d1) d2	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+e_derived2__k	SELECT id, x FROM (SELECT id, x FROM (SELECT id, k AS x FROM t) d1) d2 WITH NO DATA	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+d_derived2__u	SELECT id, x FROM (SELECT id, x FROM (SELECT id, u AS x FROM t) d1) d2	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_derived2__u	SELECT id, x FROM (SELECT id, x FROM (SELECT id, u AS x FROM t) d1) d2 WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_cte__n	WITH c AS (SELECT id, n AS x FROM t) SELECT id, x FROM c	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+e_cte__n	WITH c AS (SELECT id, n AS x FROM t) SELECT id, x FROM c WITH NO DATA	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+d_cte__k	WITH c AS (SELECT id, k AS x FROM t) SELECT id, x FROM c	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+e_cte__k	WITH c AS (SELECT id, k AS x FROM t) SELECT id, x FROM c WITH NO DATA	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+d_cte__u	WITH c AS (SELECT id, u AS x FROM t) SELECT id, x FROM c	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_cte__u	WITH c AS (SELECT id, u AS x FROM t) SELECT id, x FROM c WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_lateral__n	SELECT t.id, l.x FROM t, LATERAL (SELECT t.n AS x) l	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+e_lateral__n	SELECT t.id, l.x FROM t, LATERAL (SELECT t.n AS x) l WITH NO DATA	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+d_lateral__k	SELECT t.id, l.x FROM t, LATERAL (SELECT t.k AS x) l	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+e_lateral__k	SELECT t.id, l.x FROM t, LATERAL (SELECT t.k AS x) l WITH NO DATA	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+d_lateral__u	SELECT t.id, l.x FROM t, LATERAL (SELECT t.u AS x) l	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_lateral__u	SELECT t.id, l.x FROM t, LATERAL (SELECT t.u AS x) l WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_star__n	SELECT * FROM (SELECT id, n AS x FROM t) s	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+e_star__n	SELECT * FROM (SELECT id, n AS x FROM t) s WITH NO DATA	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+d_star__k	SELECT * FROM (SELECT id, k AS x FROM t) s	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+e_star__k	SELECT * FROM (SELECT id, k AS x FROM t) s WITH NO DATA	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+d_star__u	SELECT * FROM (SELECT id, u AS x FROM t) s	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_star__u	SELECT * FROM (SELECT id, u AS x FROM t) s WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_orderby_limit__n	SELECT id, n AS x FROM t ORDER BY id LIMIT 2	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+e_orderby_limit__n	SELECT id, n AS x FROM t ORDER BY id LIMIT 2 WITH NO DATA	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+d_orderby_limit__k	SELECT id, k AS x FROM t ORDER BY id LIMIT 2	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+e_orderby_limit__k	SELECT id, k AS x FROM t ORDER BY id LIMIT 2 WITH NO DATA	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+d_orderby_limit__u	SELECT id, u AS x FROM t ORDER BY id LIMIT 2	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_orderby_limit__u	SELECT id, u AS x FROM t ORDER BY id LIMIT 2 WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_sub_col__n	SELECT id, (SELECT t2.n FROM t2 WHERE t2.id = 1) AS x FROM t	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+e_sub_col__n	SELECT id, (SELECT t2.n FROM t2 WHERE t2.id = 1) AS x FROM t WITH NO DATA	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+d_sub_col__k	SELECT id, (SELECT t2.k FROM t2 WHERE t2.id = 1) AS x FROM t	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+e_sub_col__k	SELECT id, (SELECT t2.k FROM t2 WHERE t2.id = 1) AS x FROM t WITH NO DATA	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+d_sub_col__u	SELECT id, (SELECT t2.u FROM t2 WHERE t2.id = 1) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_sub_col__u	SELECT id, (SELECT t2.u FROM t2 WHERE t2.id = 1) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_sub_corr__n	SELECT id, (SELECT t2.n FROM t2 WHERE t2.id = t.id) AS x FROM t	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+e_sub_corr__n	SELECT id, (SELECT t2.n FROM t2 WHERE t2.id = t.id) AS x FROM t WITH NO DATA	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+d_sub_corr__k	SELECT id, (SELECT t2.k FROM t2 WHERE t2.id = t.id) AS x FROM t	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+e_sub_corr__k	SELECT id, (SELECT t2.k FROM t2 WHERE t2.id = t.id) AS x FROM t WITH NO DATA	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+d_sub_corr__u	SELECT id, (SELECT t2.u FROM t2 WHERE t2.id = t.id) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_sub_corr__u	SELECT id, (SELECT t2.u FROM t2 WHERE t2.id = t.id) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_sub_lim__n	SELECT id, (SELECT t2.n FROM t2 ORDER BY t2.id LIMIT 1) AS x FROM t	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+e_sub_lim__n	SELECT id, (SELECT t2.n FROM t2 ORDER BY t2.id LIMIT 1) AS x FROM t WITH NO DATA	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+d_sub_lim__k	SELECT id, (SELECT t2.k FROM t2 ORDER BY t2.id LIMIT 1) AS x FROM t	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+e_sub_lim__k	SELECT id, (SELECT t2.k FROM t2 ORDER BY t2.id LIMIT 1) AS x FROM t WITH NO DATA	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+d_sub_lim__u	SELECT id, (SELECT t2.u FROM t2 ORDER BY t2.id LIMIT 1) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_sub_lim__u	SELECT id, (SELECT t2.u FROM t2 ORDER BY t2.id LIMIT 1) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_sub_nested__n	SELECT id, (SELECT (SELECT t2.n FROM t2 WHERE t2.id = 1)) AS x FROM t	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+e_sub_nested__n	SELECT id, (SELECT (SELECT t2.n FROM t2 WHERE t2.id = 1)) AS x FROM t WITH NO DATA	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+d_sub_nested__k	SELECT id, (SELECT (SELECT t2.k FROM t2 WHERE t2.id = 1)) AS x FROM t	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+e_sub_nested__k	SELECT id, (SELECT (SELECT t2.k FROM t2 WHERE t2.id = 1)) AS x FROM t WITH NO DATA	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+d_sub_nested__u	SELECT id, (SELECT (SELECT t2.u FROM t2 WHERE t2.id = 1)) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_sub_nested__u	SELECT id, (SELECT (SELECT t2.u FROM t2 WHERE t2.id = 1)) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_sub_derived__n	SELECT id, (SELECT y FROM (SELECT t2.n AS y FROM t2 WHERE t2.id = 1) s) AS x FROM t	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+e_sub_derived__n	SELECT id, (SELECT y FROM (SELECT t2.n AS y FROM t2 WHERE t2.id = 1) s) AS x FROM t WITH NO DATA	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+d_sub_derived__k	SELECT id, (SELECT y FROM (SELECT t2.k AS y FROM t2 WHERE t2.id = 1) s) AS x FROM t	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+e_sub_derived__k	SELECT id, (SELECT y FROM (SELECT t2.k AS y FROM t2 WHERE t2.id = 1) s) AS x FROM t WITH NO DATA	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+d_sub_derived__u	SELECT id, (SELECT y FROM (SELECT t2.u AS y FROM t2 WHERE t2.id = 1) s) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_sub_derived__u	SELECT id, (SELECT y FROM (SELECT t2.u AS y FROM t2 WHERE t2.id = 1) s) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_sub_cte__n	WITH c AS (SELECT t2.n AS y FROM t2 WHERE t2.id = 1) SELECT id, (SELECT y FROM c) AS x FROM t	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+e_sub_cte__n	WITH c AS (SELECT t2.n AS y FROM t2 WHERE t2.id = 1) SELECT id, (SELECT y FROM c) AS x FROM t WITH NO DATA	0.755 | 1.255	(10,2): 0.76 | 1.26	STRING: 0.755 | 1.255	=c23adbbb
+d_sub_cte__k	WITH c AS (SELECT t2.k AS y FROM t2 WHERE t2.id = 1) SELECT id, (SELECT y FROM c) AS x FROM t	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+e_sub_cte__k	WITH c AS (SELECT t2.k AS y FROM t2 WHERE t2.id = 1) SELECT id, (SELECT y FROM c) AS x FROM t WITH NO DATA	0.755 | 1.255	(5,0): 1 | 1	STRING: 0.755 | 1.255	=c23adbbb
+d_sub_cte__u	WITH c AS (SELECT t2.u AS y FROM t2 WHERE t2.id = 1) SELECT id, (SELECT y FROM c) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_sub_cte__u	WITH c AS (SELECT t2.u AS y FROM t2 WHERE t2.id = 1) SELECT id, (SELECT y FROM c) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	STRING: 0.755 | 1.255	=PG
+d_sub_case__n	SELECT id, (SELECT CASE WHEN t2.id > 0 THEN t2.n ELSE t2.n END FROM t2 WHERE t2.id = 1) AS x FROM t	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+e_sub_case__n	SELECT id, (SELECT CASE WHEN t2.id > 0 THEN t2.n ELSE t2.n END FROM t2 WHERE t2.id = 1) AS x FROM t WITH NO DATA	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+d_sub_case__k	SELECT id, (SELECT CASE WHEN t2.id > 0 THEN t2.k ELSE t2.k END FROM t2 WHERE t2.id = 1) AS x FROM t	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+e_sub_case__k	SELECT id, (SELECT CASE WHEN t2.id > 0 THEN t2.k ELSE t2.k END FROM t2 WHERE t2.id = 1) AS x FROM t WITH NO DATA	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+d_sub_case__u	SELECT id, (SELECT CASE WHEN t2.id > 0 THEN t2.u ELSE t2.u END FROM t2 WHERE t2.id = 1) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_sub_case__u	SELECT id, (SELECT CASE WHEN t2.id > 0 THEN t2.u ELSE t2.u END FROM t2 WHERE t2.id = 1) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_sub_union__n	SELECT id, (SELECT t2.n FROM t2 WHERE t2.id = 1 UNION ALL SELECT t2.n FROM t2 WHERE t2.id = 99) AS x FROM t	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+e_sub_union__n	SELECT id, (SELECT t2.n FROM t2 WHERE t2.id = 1 UNION ALL SELECT t2.n FROM t2 WHERE t2.id = 99) AS x FROM t WITH NO DATA	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+d_sub_union__k	SELECT id, (SELECT t2.k FROM t2 WHERE t2.id = 1 UNION ALL SELECT t2.k FROM t2 WHERE t2.id = 99) AS x FROM t	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+e_sub_union__k	SELECT id, (SELECT t2.k FROM t2 WHERE t2.id = 1 UNION ALL SELECT t2.k FROM t2 WHERE t2.id = 99) AS x FROM t WITH NO DATA	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+d_sub_union__u	SELECT id, (SELECT t2.u FROM t2 WHERE t2.id = 1 UNION ALL SELECT t2.u FROM t2 WHERE t2.id = 99) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_sub_union__u	SELECT id, (SELECT t2.u FROM t2 WHERE t2.id = 1 UNION ALL SELECT t2.u FROM t2 WHERE t2.id = 99) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_sub_union_mixed__n	SELECT id, (SELECT t2.n FROM t2 WHERE t2.id = 1 UNION ALL SELECT t2.m FROM t2 WHERE t2.id = 99) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(12,4): 0.7550 | 1.2550	=PG
+e_sub_union_mixed__n	SELECT id, (SELECT t2.n FROM t2 WHERE t2.id = 1 UNION ALL SELECT t2.m FROM t2 WHERE t2.id = 99) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(12,4): 0.7550 | 1.2550	=PG
+d_sub_union_mixed__k	SELECT id, (SELECT t2.k FROM t2 WHERE t2.id = 1 UNION ALL SELECT t2.n FROM t2 WHERE t2.id = 99) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+e_sub_union_mixed__k	SELECT id, (SELECT t2.k FROM t2 WHERE t2.id = 1 UNION ALL SELECT t2.n FROM t2 WHERE t2.id = 99) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+d_sub_union_mixed__u	SELECT id, (SELECT t2.u FROM t2 WHERE t2.id = 1 UNION ALL SELECT t2.n FROM t2 WHERE t2.id = 99) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,2): 0.76 | 1.26	=PG
+e_sub_union_mixed__u	SELECT id, (SELECT t2.u FROM t2 WHERE t2.id = 1 UNION ALL SELECT t2.n FROM t2 WHERE t2.id = 99) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,2): 0.76 | 1.26	=PG
+d_sub_min__n	SELECT id, (SELECT MIN(t2.n) FROM t2) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+e_sub_min__n	SELECT id, (SELECT MIN(t2.n) FROM t2) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+d_sub_min__k	SELECT id, (SELECT MIN(t2.k) FROM t2) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(5,0): 1 | 1	=PG
+e_sub_min__k	SELECT id, (SELECT MIN(t2.k) FROM t2) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(5,0): 1 | 1	=PG
+d_sub_min__u	SELECT id, (SELECT MIN(t2.u) FROM t2) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_sub_min__u	SELECT id, (SELECT MIN(t2.u) FROM t2) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_sub_max__n	SELECT id, (SELECT MAX(t2.n) FROM t2) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+e_sub_max__n	SELECT id, (SELECT MAX(t2.n) FROM t2) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+d_sub_max__k	SELECT id, (SELECT MAX(t2.k) FROM t2) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(5,0): 1 | 1	=PG
+e_sub_max__k	SELECT id, (SELECT MAX(t2.k) FROM t2) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(5,0): 1 | 1	=PG
+d_sub_max__u	SELECT id, (SELECT MAX(t2.u) FROM t2) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_sub_max__u	SELECT id, (SELECT MAX(t2.u) FROM t2) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_sub_sum__n	SELECT id, (SELECT SUM(t2.n) FROM t2) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,2): 0.76 | 1.26	=PG
+e_sub_sum__n	SELECT id, (SELECT SUM(t2.n) FROM t2) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,2): 0.76 | 1.26	=PG
+d_sub_sum__k	SELECT id, (SELECT SUM(t2.k) FROM t2) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_sub_sum__k	SELECT id, (SELECT SUM(t2.k) FROM t2) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_sub_sum__u	SELECT id, (SELECT SUM(t2.u) FROM t2) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_sub_sum__u	SELECT id, (SELECT SUM(t2.u) FROM t2) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_sub_arith__n	SELECT id, (SELECT t2.n + 0 FROM t2 WHERE t2.id = 1) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(11,2): 0.76 | 1.26	=PG
+e_sub_arith__n	SELECT id, (SELECT t2.n + 0 FROM t2 WHERE t2.id = 1) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(11,2): 0.76 | 1.26	=PG
+d_sub_arith__k	SELECT id, (SELECT t2.k + 0 FROM t2 WHERE t2.id = 1) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(6,0): 1 | 1	=PG
+e_sub_arith__k	SELECT id, (SELECT t2.k + 0 FROM t2 WHERE t2.id = 1) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(6,0): 1 | 1	=PG
+d_sub_arith__u	SELECT id, (SELECT t2.u + 0 FROM t2 WHERE t2.id = 1) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_sub_arith__u	SELECT id, (SELECT t2.u + 0 FROM t2 WHERE t2.id = 1) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_sub_cast__n	SELECT id, (SELECT CAST(t2.n AS NUMERIC(8,1)) FROM t2 WHERE t2.id = 1) AS x FROM t	0.8 | 1.3	(8,1): 0.8 | 1.3	(8,1): 0.8 | 1.3	=PG
+e_sub_cast__n	SELECT id, (SELECT CAST(t2.n AS NUMERIC(8,1)) FROM t2 WHERE t2.id = 1) AS x FROM t WITH NO DATA	0.8 | 1.3	(8,1): 0.8 | 1.3	(8,1): 0.8 | 1.3	=PG
+d_sub_cast__k	SELECT id, (SELECT CAST(t2.k AS NUMERIC(8,1)) FROM t2 WHERE t2.id = 1) AS x FROM t	0.8 | 1.3	(8,1): 0.8 | 1.3	(8,1): 0.8 | 1.3	=PG
+e_sub_cast__k	SELECT id, (SELECT CAST(t2.k AS NUMERIC(8,1)) FROM t2 WHERE t2.id = 1) AS x FROM t WITH NO DATA	0.8 | 1.3	(8,1): 0.8 | 1.3	(8,1): 0.8 | 1.3	=PG
+d_sub_cast__u	SELECT id, (SELECT CAST(t2.u AS NUMERIC(8,1)) FROM t2 WHERE t2.id = 1) AS x FROM t	0.8 | 1.3	(8,1): 0.8 | 1.3	(8,1): 0.8 | 1.3	=PG
+e_sub_cast__u	SELECT id, (SELECT CAST(t2.u AS NUMERIC(8,1)) FROM t2 WHERE t2.id = 1) AS x FROM t WITH NO DATA	0.8 | 1.3	(8,1): 0.8 | 1.3	(8,1): 0.8 | 1.3	=PG
+d_sub_in_coalesce__n	SELECT id, COALESCE((SELECT t2.n FROM t2 WHERE t2.id = 1), n) AS x FROM t	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+e_sub_in_coalesce__n	SELECT id, COALESCE((SELECT t2.n FROM t2 WHERE t2.id = 1), n) AS x FROM t WITH NO DATA	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+d_sub_in_coalesce__k	SELECT id, COALESCE((SELECT t2.k FROM t2 WHERE t2.id = 1), k) AS x FROM t	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+e_sub_in_coalesce__k	SELECT id, COALESCE((SELECT t2.k FROM t2 WHERE t2.id = 1), k) AS x FROM t WITH NO DATA	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+d_sub_in_coalesce__u	SELECT id, COALESCE((SELECT t2.u FROM t2 WHERE t2.id = 1), u) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_sub_in_coalesce__u	SELECT id, COALESCE((SELECT t2.u FROM t2 WHERE t2.id = 1), u) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_case_same__n	SELECT id, CASE WHEN id > 1 THEN n ELSE n END AS x FROM t	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+e_case_same__n	SELECT id, CASE WHEN id > 1 THEN n ELSE n END AS x FROM t WITH NO DATA	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+d_case_same__k	SELECT id, CASE WHEN id > 1 THEN k ELSE k END AS x FROM t	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+e_case_same__k	SELECT id, CASE WHEN id > 1 THEN k ELSE k END AS x FROM t WITH NO DATA	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+d_case_same__u	SELECT id, CASE WHEN id > 1 THEN u ELSE u END AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_case_same__u	SELECT id, CASE WHEN id > 1 THEN u ELSE u END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_case_mixed__n	SELECT id, CASE WHEN id > 1 THEN n ELSE m END AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(12,4): 0.7550 | 1.2550	=PG
+e_case_mixed__n	SELECT id, CASE WHEN id > 1 THEN n ELSE m END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(12,4): 0.7550 | 1.2550	=PG
+d_case_mixed__k	SELECT id, CASE WHEN id > 1 THEN k ELSE n END AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+e_case_mixed__k	SELECT id, CASE WHEN id > 1 THEN k ELSE n END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+d_case_mixed__u	SELECT id, CASE WHEN id > 1 THEN u ELSE n END AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,2): 0.76 | 1.26	=PG
+e_case_mixed__u	SELECT id, CASE WHEN id > 1 THEN u ELSE n END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,2): 0.76 | 1.26	=PG
+d_case_noelse__n	SELECT id, CASE WHEN id > 1 THEN n END AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+e_case_noelse__n	SELECT id, CASE WHEN id > 1 THEN n END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+d_case_noelse__k	SELECT id, CASE WHEN id > 1 THEN k END AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(5,0): 1 | 1	=PG
+e_case_noelse__k	SELECT id, CASE WHEN id > 1 THEN k END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(5,0): 1 | 1	=PG
+d_case_noelse__u	SELECT id, CASE WHEN id > 1 THEN u END AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_case_noelse__u	SELECT id, CASE WHEN id > 1 THEN u END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_case_elsenull__n	SELECT id, CASE WHEN id > 1 THEN n ELSE NULL END AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+e_case_elsenull__n	SELECT id, CASE WHEN id > 1 THEN n ELSE NULL END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+d_case_elsenull__k	SELECT id, CASE WHEN id > 1 THEN k ELSE NULL END AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(5,0): 1 | 1	=PG
+e_case_elsenull__k	SELECT id, CASE WHEN id > 1 THEN k ELSE NULL END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(5,0): 1 | 1	=PG
+d_case_elsenull__u	SELECT id, CASE WHEN id > 1 THEN u ELSE NULL END AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_case_elsenull__u	SELECT id, CASE WHEN id > 1 THEN u ELSE NULL END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_case_simple__n	SELECT id, CASE id WHEN 1 THEN n ELSE n END AS x FROM t	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+e_case_simple__n	SELECT id, CASE id WHEN 1 THEN n ELSE n END AS x FROM t WITH NO DATA	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+d_case_simple__k	SELECT id, CASE id WHEN 1 THEN k ELSE k END AS x FROM t	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+e_case_simple__k	SELECT id, CASE id WHEN 1 THEN k ELSE k END AS x FROM t WITH NO DATA	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+d_case_simple__u	SELECT id, CASE id WHEN 1 THEN u ELSE u END AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_case_simple__u	SELECT id, CASE id WHEN 1 THEN u ELSE u END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_case_nested__n	SELECT id, CASE WHEN id > 1 THEN CASE WHEN id > 2 THEN n ELSE n END ELSE n END AS x FROM t	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+e_case_nested__n	SELECT id, CASE WHEN id > 1 THEN CASE WHEN id > 2 THEN n ELSE n END ELSE n END AS x FROM t WITH NO DATA	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+d_case_nested__k	SELECT id, CASE WHEN id > 1 THEN CASE WHEN id > 2 THEN k ELSE k END ELSE k END AS x FROM t	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+e_case_nested__k	SELECT id, CASE WHEN id > 1 THEN CASE WHEN id > 2 THEN k ELSE k END ELSE k END AS x FROM t WITH NO DATA	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+d_case_nested__u	SELECT id, CASE WHEN id > 1 THEN CASE WHEN id > 2 THEN u ELSE u END ELSE u END AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_case_nested__u	SELECT id, CASE WHEN id > 1 THEN CASE WHEN id > 2 THEN u ELSE u END ELSE u END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_case_const__n	SELECT id, CASE WHEN 1 = 1 THEN n END AS x FROM t	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+e_case_const__n	SELECT id, CASE WHEN 1 = 1 THEN n END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+d_case_const__k	SELECT id, CASE WHEN 1 = 1 THEN k END AS x FROM t	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+e_case_const__k	SELECT id, CASE WHEN 1 = 1 THEN k END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(5,0): 1 | 1	=PG
+d_case_const__u	SELECT id, CASE WHEN 1 = 1 THEN u END AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_case_const__u	SELECT id, CASE WHEN 1 = 1 THEN u END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_case_true_elsenull__n	SELECT id, CASE WHEN true THEN n ELSE NULL END AS x FROM t	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+e_case_true_elsenull__n	SELECT id, CASE WHEN true THEN n ELSE NULL END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+d_case_true_elsenull__k	SELECT id, CASE WHEN true THEN k ELSE NULL END AS x FROM t	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+e_case_true_elsenull__k	SELECT id, CASE WHEN true THEN k ELSE NULL END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(5,0): 1 | 1	=PG
+d_case_true_elsenull__u	SELECT id, CASE WHEN true THEN u ELSE NULL END AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_case_true_elsenull__u	SELECT id, CASE WHEN true THEN u ELSE NULL END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_case_const_mixed_t__n	SELECT id, CASE WHEN 1 = 1 THEN n ELSE m END AS x FROM t	0.7550 | 1.2550	(10,2): 0.76 | 1.26	(12,4): 0.7550 | 1.2550	=c23adbbb
+e_case_const_mixed_t__n	SELECT id, CASE WHEN 1 = 1 THEN n ELSE m END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(12,4): 0.7550 | 1.2550	=PG
+d_case_const_mixed_t__k	SELECT id, CASE WHEN 1 = 1 THEN k ELSE n END AS x FROM t	0.76 | 1.26	(5,0): 1 | 1	(10,2): 0.76 | 1.26	=c23adbbb
+e_case_const_mixed_t__k	SELECT id, CASE WHEN 1 = 1 THEN k ELSE n END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+d_case_const_mixed_t__u	SELECT id, CASE WHEN 1 = 1 THEN u ELSE n END AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,2): 0.76 | 1.26	=PG
+e_case_const_mixed_t__u	SELECT id, CASE WHEN 1 = 1 THEN u ELSE n END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,2): 0.76 | 1.26	=PG
+d_case_const_mixed_f__n	SELECT id, CASE WHEN 1 = 0 THEN m ELSE n END AS x FROM t	0.7550 | 1.2550	(10,2): 0.76 | 1.26	(12,4): 0.7550 | 1.2550	=c23adbbb
+e_case_const_mixed_f__n	SELECT id, CASE WHEN 1 = 0 THEN m ELSE n END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(12,4): 0.7550 | 1.2550	=PG
+d_case_const_mixed_f__k	SELECT id, CASE WHEN 1 = 0 THEN n ELSE k END AS x FROM t	0.76 | 1.26	(5,0): 1 | 1	(10,2): 0.76 | 1.26	=c23adbbb
+e_case_const_mixed_f__k	SELECT id, CASE WHEN 1 = 0 THEN n ELSE k END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+d_case_const_mixed_f__u	SELECT id, CASE WHEN 1 = 0 THEN n ELSE u END AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,2): 0.76 | 1.26	=PG
+e_case_const_mixed_f__u	SELECT id, CASE WHEN 1 = 0 THEN n ELSE u END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,2): 0.76 | 1.26	=PG
+d_case_const_false_noelse__n	SELECT id, CASE WHEN 1 = 0 THEN n END AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+e_case_const_false_noelse__n	SELECT id, CASE WHEN 1 = 0 THEN n END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+d_case_const_false_noelse__k	SELECT id, CASE WHEN 1 = 0 THEN k END AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(5,0): 1 | 1	=PG
+e_case_const_false_noelse__k	SELECT id, CASE WHEN 1 = 0 THEN k END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(5,0): 1 | 1	=PG
+d_case_const_false_noelse__u	SELECT id, CASE WHEN 1 = 0 THEN u END AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_case_const_false_noelse__u	SELECT id, CASE WHEN 1 = 0 THEN u END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_case_const_typednull__n	SELECT id, CASE WHEN 1 = 1 THEN CAST(NULL AS NUMERIC(10,2)) END AS x FROM t	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+e_case_const_typednull__n	SELECT id, CASE WHEN 1 = 1 THEN CAST(NULL AS NUMERIC(10,2)) END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+d_case_const_typednull__k	SELECT id, CASE WHEN 1 = 1 THEN CAST(NULL AS NUMERIC(5)) END AS x FROM t	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+e_case_const_typednull__k	SELECT id, CASE WHEN 1 = 1 THEN CAST(NULL AS NUMERIC(5)) END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(5,0): 1 | 1	=PG
+d_case_const_typednull__u	SELECT id, CASE WHEN 1 = 1 THEN CAST(NULL AS NUMERIC) END AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	FLOAT64: 0.755 | 1.255	=PG
+e_case_const_typednull__u	SELECT id, CASE WHEN 1 = 1 THEN CAST(NULL AS NUMERIC) END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	FLOAT64: 0.755 | 1.255	=PG
+d_case_simple_const__n	SELECT id, CASE 1 WHEN 1 THEN n ELSE m END AS x FROM t	0.7550 | 1.2550	(10,2): 0.76 | 1.26	(12,4): 0.7550 | 1.2550	=c23adbbb
+e_case_simple_const__n	SELECT id, CASE 1 WHEN 1 THEN n ELSE m END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(12,4): 0.7550 | 1.2550	=PG
+d_case_simple_const__k	SELECT id, CASE 1 WHEN 1 THEN k ELSE n END AS x FROM t	0.76 | 1.26	(5,0): 1 | 1	(10,2): 0.76 | 1.26	=c23adbbb
+e_case_simple_const__k	SELECT id, CASE 1 WHEN 1 THEN k ELSE n END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+d_case_simple_const__u	SELECT id, CASE 1 WHEN 1 THEN u ELSE n END AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,2): 0.76 | 1.26	=PG
+e_case_simple_const__u	SELECT id, CASE 1 WHEN 1 THEN u ELSE n END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,2): 0.76 | 1.26	=PG
+d_coalesce1__n	SELECT id, COALESCE(n) AS x FROM t	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+e_coalesce1__n	SELECT id, COALESCE(n) AS x FROM t WITH NO DATA	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+d_coalesce1__k	SELECT id, COALESCE(k) AS x FROM t	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+e_coalesce1__k	SELECT id, COALESCE(k) AS x FROM t WITH NO DATA	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+d_coalesce1__u	SELECT id, COALESCE(u) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_coalesce1__u	SELECT id, COALESCE(u) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_coalesce_same__n	SELECT id, COALESCE(n, n) AS x FROM t	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+e_coalesce_same__n	SELECT id, COALESCE(n, n) AS x FROM t WITH NO DATA	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+d_coalesce_same__k	SELECT id, COALESCE(k, k) AS x FROM t	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+e_coalesce_same__k	SELECT id, COALESCE(k, k) AS x FROM t WITH NO DATA	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+d_coalesce_same__u	SELECT id, COALESCE(u, u) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_coalesce_same__u	SELECT id, COALESCE(u, u) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_coalesce_mixed__n	SELECT id, COALESCE(n, m) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(12,4): 0.7550 | 1.2550	=PG
+e_coalesce_mixed__n	SELECT id, COALESCE(n, m) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(12,4): 0.7550 | 1.2550	=PG
+d_coalesce_mixed__k	SELECT id, COALESCE(k, n) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+e_coalesce_mixed__k	SELECT id, COALESCE(k, n) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+d_coalesce_mixed__u	SELECT id, COALESCE(u, n) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,2): 0.76 | 1.26	=PG
+e_coalesce_mixed__u	SELECT id, COALESCE(u, n) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,2): 0.76 | 1.26	=PG
+d_coalesce_null__n	SELECT id, COALESCE(n, NULL) AS x FROM t	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+e_coalesce_null__n	SELECT id, COALESCE(n, NULL) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+d_coalesce_null__k	SELECT id, COALESCE(k, NULL) AS x FROM t	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+e_coalesce_null__k	SELECT id, COALESCE(k, NULL) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(5,0): 1 | 1	=PG
+d_coalesce_null__u	SELECT id, COALESCE(u, NULL) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_coalesce_null__u	SELECT id, COALESCE(u, NULL) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_coalesce_lit__n	SELECT id, COALESCE(n, 0) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+e_coalesce_lit__n	SELECT id, COALESCE(n, 0) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+d_coalesce_lit__k	SELECT id, COALESCE(k, 0) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(5,0): 1 | 1	=PG
+e_coalesce_lit__k	SELECT id, COALESCE(k, 0) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(5,0): 1 | 1	=PG
+d_coalesce_lit__u	SELECT id, COALESCE(u, 0) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_coalesce_lit__u	SELECT id, COALESCE(u, 0) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_nullif__n	SELECT id, NULLIF(n, 0) AS x FROM t	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+e_nullif__n	SELECT id, NULLIF(n, 0) AS x FROM t WITH NO DATA	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+d_nullif__k	SELECT id, NULLIF(k, 0) AS x FROM t	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+e_nullif__k	SELECT id, NULLIF(k, 0) AS x FROM t WITH NO DATA	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+d_nullif__u	SELECT id, NULLIF(u, 0) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_nullif__u	SELECT id, NULLIF(u, 0) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_nullif_mixed__n	SELECT id, NULLIF(n, m) AS x FROM t	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+e_nullif_mixed__n	SELECT id, NULLIF(n, m) AS x FROM t WITH NO DATA	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+d_nullif_mixed__k	SELECT id, NULLIF(k, n) AS x FROM t	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+e_nullif_mixed__k	SELECT id, NULLIF(k, n) AS x FROM t WITH NO DATA	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+d_nullif_mixed__u	SELECT id, NULLIF(u, n) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_nullif_mixed__u	SELECT id, NULLIF(u, n) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_greatest1__n	SELECT id, GREATEST(n) AS x FROM t	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+e_greatest1__n	SELECT id, GREATEST(n) AS x FROM t WITH NO DATA	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+d_greatest1__k	SELECT id, GREATEST(k) AS x FROM t	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+e_greatest1__k	SELECT id, GREATEST(k) AS x FROM t WITH NO DATA	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+d_greatest1__u	SELECT id, GREATEST(u) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_greatest1__u	SELECT id, GREATEST(u) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_greatest_same__n	SELECT id, GREATEST(n, n) AS x FROM t	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+e_greatest_same__n	SELECT id, GREATEST(n, n) AS x FROM t WITH NO DATA	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+d_greatest_same__k	SELECT id, GREATEST(k, k) AS x FROM t	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+e_greatest_same__k	SELECT id, GREATEST(k, k) AS x FROM t WITH NO DATA	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+d_greatest_same__u	SELECT id, GREATEST(u, u) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_greatest_same__u	SELECT id, GREATEST(u, u) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_greatest_mixed__n	SELECT id, GREATEST(n, m) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(12,4): 0.7550 | 1.2550	=PG
+e_greatest_mixed__n	SELECT id, GREATEST(n, m) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(12,4): 0.7550 | 1.2550	=PG
+d_greatest_mixed__k	SELECT id, GREATEST(k, n) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+e_greatest_mixed__k	SELECT id, GREATEST(k, n) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+d_greatest_mixed__u	SELECT id, GREATEST(u, n) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,2): 0.76 | 1.26	=PG
+e_greatest_mixed__u	SELECT id, GREATEST(u, n) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,2): 0.76 | 1.26	=PG
+d_least_same__n	SELECT id, LEAST(n, n) AS x FROM t	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+e_least_same__n	SELECT id, LEAST(n, n) AS x FROM t WITH NO DATA	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+d_least_same__k	SELECT id, LEAST(k, k) AS x FROM t	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+e_least_same__k	SELECT id, LEAST(k, k) AS x FROM t WITH NO DATA	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+d_least_same__u	SELECT id, LEAST(u, u) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_least_same__u	SELECT id, LEAST(u, u) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_least_null__n	SELECT id, LEAST(n, NULL) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+e_least_null__n	SELECT id, LEAST(n, NULL) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+d_least_null__k	SELECT id, LEAST(k, NULL) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(5,0): 1 | 1	=PG
+e_least_null__k	SELECT id, LEAST(k, NULL) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(5,0): 1 | 1	=PG
+d_least_null__u	SELECT id, LEAST(u, NULL) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_least_null__u	SELECT id, LEAST(u, NULL) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_union_same__n	SELECT id, n AS x FROM t UNION ALL SELECT id, n FROM t2	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+e_union_same__n	SELECT id, n AS x FROM t UNION ALL SELECT id, n FROM t2 WITH NO DATA	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+d_union_same__k	SELECT id, k AS x FROM t UNION ALL SELECT id, k FROM t2	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+e_union_same__k	SELECT id, k AS x FROM t UNION ALL SELECT id, k FROM t2 WITH NO DATA	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+d_union_same__u	SELECT id, u AS x FROM t UNION ALL SELECT id, u FROM t2	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_union_same__u	SELECT id, u AS x FROM t UNION ALL SELECT id, u FROM t2 WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_union_mixed__n	SELECT id, n AS x FROM t UNION ALL SELECT id, m FROM t2	0.755 | 1.255	U: 0.755 | 1.255	(12,4): 0.7550 | 1.2550	=PG
+e_union_mixed__n	SELECT id, n AS x FROM t UNION ALL SELECT id, m FROM t2 WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(12,4): 0.7550 | 1.2550	=PG
+d_union_mixed__k	SELECT id, k AS x FROM t UNION ALL SELECT id, n FROM t2	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+e_union_mixed__k	SELECT id, k AS x FROM t UNION ALL SELECT id, n FROM t2 WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+d_union_mixed__u	SELECT id, u AS x FROM t UNION ALL SELECT id, n FROM t2	0.755 | 1.255	U: 0.755 | 1.255	(38,2): 0.76 | 1.26	=PG
+e_union_mixed__u	SELECT id, u AS x FROM t UNION ALL SELECT id, n FROM t2 WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,2): 0.76 | 1.26	=PG
+d_union_null__n	SELECT id, n AS x FROM t UNION ALL SELECT 9, NULL	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+e_union_null__n	SELECT id, n AS x FROM t UNION ALL SELECT 9, NULL WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+d_union_null__k	SELECT id, k AS x FROM t UNION ALL SELECT 9, NULL	0.755 | 1.255	U: 0.755 | 1.255	(5,0): 1 | 1	=PG
+e_union_null__k	SELECT id, k AS x FROM t UNION ALL SELECT 9, NULL WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(5,0): 1 | 1	=PG
+d_union_null__u	SELECT id, u AS x FROM t UNION ALL SELECT 9, NULL	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_union_null__u	SELECT id, u AS x FROM t UNION ALL SELECT 9, NULL WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_union_distinct__n	SELECT id, n AS x FROM t UNION SELECT id, n FROM t2	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+e_union_distinct__n	SELECT id, n AS x FROM t UNION SELECT id, n FROM t2 WITH NO DATA	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+d_union_distinct__k	SELECT id, k AS x FROM t UNION SELECT id, k FROM t2	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+e_union_distinct__k	SELECT id, k AS x FROM t UNION SELECT id, k FROM t2 WITH NO DATA	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+d_union_distinct__u	SELECT id, u AS x FROM t UNION SELECT id, u FROM t2	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_union_distinct__u	SELECT id, u AS x FROM t UNION SELECT id, u FROM t2 WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_intersect__n	SELECT id, n AS x FROM t INTERSECT SELECT id, n FROM t2	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+e_intersect__n	SELECT id, n AS x FROM t INTERSECT SELECT id, n FROM t2 WITH NO DATA	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+d_intersect__k	SELECT id, k AS x FROM t INTERSECT SELECT id, k FROM t2	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+e_intersect__k	SELECT id, k AS x FROM t INTERSECT SELECT id, k FROM t2 WITH NO DATA	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+d_intersect__u	SELECT id, u AS x FROM t INTERSECT SELECT id, u FROM t2	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_intersect__u	SELECT id, u AS x FROM t INTERSECT SELECT id, u FROM t2 WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_win_lag__n	SELECT id, LAG(n) OVER (ORDER BY id) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+e_win_lag__n	SELECT id, LAG(n) OVER (ORDER BY id) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+d_win_lag__k	SELECT id, LAG(k) OVER (ORDER BY id) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(5,0): 1 | 1	=PG
+e_win_lag__k	SELECT id, LAG(k) OVER (ORDER BY id) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(5,0): 1 | 1	=PG
+d_win_lag__u	SELECT id, LAG(u) OVER (ORDER BY id) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_win_lag__u	SELECT id, LAG(u) OVER (ORDER BY id) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_win_lead__n	SELECT id, LEAD(n) OVER (ORDER BY id) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+e_win_lead__n	SELECT id, LEAD(n) OVER (ORDER BY id) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+d_win_lead__k	SELECT id, LEAD(k) OVER (ORDER BY id) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(5,0): 1 | 1	=PG
+e_win_lead__k	SELECT id, LEAD(k) OVER (ORDER BY id) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(5,0): 1 | 1	=PG
+d_win_lead__u	SELECT id, LEAD(u) OVER (ORDER BY id) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_win_lead__u	SELECT id, LEAD(u) OVER (ORDER BY id) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_win_first__n	SELECT id, FIRST_VALUE(n) OVER (ORDER BY id) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+e_win_first__n	SELECT id, FIRST_VALUE(n) OVER (ORDER BY id) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+d_win_first__k	SELECT id, FIRST_VALUE(k) OVER (ORDER BY id) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(5,0): 1 | 1	=PG
+e_win_first__k	SELECT id, FIRST_VALUE(k) OVER (ORDER BY id) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(5,0): 1 | 1	=PG
+d_win_first__u	SELECT id, FIRST_VALUE(u) OVER (ORDER BY id) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_win_first__u	SELECT id, FIRST_VALUE(u) OVER (ORDER BY id) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_win_last__n	SELECT id, LAST_VALUE(n) OVER (ORDER BY id) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+e_win_last__n	SELECT id, LAST_VALUE(n) OVER (ORDER BY id) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+d_win_last__k	SELECT id, LAST_VALUE(k) OVER (ORDER BY id) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(5,0): 1 | 1	=PG
+e_win_last__k	SELECT id, LAST_VALUE(k) OVER (ORDER BY id) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(5,0): 1 | 1	=PG
+d_win_last__u	SELECT id, LAST_VALUE(u) OVER (ORDER BY id) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_win_last__u	SELECT id, LAST_VALUE(u) OVER (ORDER BY id) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_win_nth__n	SELECT id, NTH_VALUE(n, 1) OVER (ORDER BY id) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+e_win_nth__n	SELECT id, NTH_VALUE(n, 1) OVER (ORDER BY id) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+d_win_nth__k	SELECT id, NTH_VALUE(k, 1) OVER (ORDER BY id) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(5,0): 1 | 1	=PG
+e_win_nth__k	SELECT id, NTH_VALUE(k, 1) OVER (ORDER BY id) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(5,0): 1 | 1	=PG
+d_win_nth__u	SELECT id, NTH_VALUE(u, 1) OVER (ORDER BY id) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_win_nth__u	SELECT id, NTH_VALUE(u, 1) OVER (ORDER BY id) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_win_max__n	SELECT id, MAX(n) OVER () AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+e_win_max__n	SELECT id, MAX(n) OVER () AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+d_win_max__k	SELECT id, MAX(k) OVER () AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(5,0): 1 | 1	=PG
+e_win_max__k	SELECT id, MAX(k) OVER () AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(5,0): 1 | 1	=PG
+d_win_max__u	SELECT id, MAX(u) OVER () AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_win_max__u	SELECT id, MAX(u) OVER () AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_win_sum__n	SELECT id, SUM(n) OVER () AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,2): 0.76 | 1.26	=PG
+e_win_sum__n	SELECT id, SUM(n) OVER () AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,2): 0.76 | 1.26	=PG
+d_win_sum__k	SELECT id, SUM(k) OVER () AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_win_sum__k	SELECT id, SUM(k) OVER () AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_win_sum__u	SELECT id, SUM(u) OVER () AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_win_sum__u	SELECT id, SUM(u) OVER () AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_join_on__n	SELECT t.id, t2.n AS x FROM t JOIN t2 ON t.id = t2.id	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+e_join_on__n	SELECT t.id, t2.n AS x FROM t JOIN t2 ON t.id = t2.id WITH NO DATA	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+d_join_on__k	SELECT t.id, t2.k AS x FROM t JOIN t2 ON t.id = t2.id	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+e_join_on__k	SELECT t.id, t2.k AS x FROM t JOIN t2 ON t.id = t2.id WITH NO DATA	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+d_join_on__u	SELECT t.id, t2.u AS x FROM t JOIN t2 ON t.id = t2.id	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_join_on__u	SELECT t.id, t2.u AS x FROM t JOIN t2 ON t.id = t2.id WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_join_left__n	SELECT t.id, t2.n AS x FROM t LEFT JOIN t2 ON t.id = t2.id	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+e_join_left__n	SELECT t.id, t2.n AS x FROM t LEFT JOIN t2 ON t.id = t2.id WITH NO DATA	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+d_join_left__k	SELECT t.id, t2.k AS x FROM t LEFT JOIN t2 ON t.id = t2.id	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+e_join_left__k	SELECT t.id, t2.k AS x FROM t LEFT JOIN t2 ON t.id = t2.id WITH NO DATA	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+d_join_left__u	SELECT t.id, t2.u AS x FROM t LEFT JOIN t2 ON t.id = t2.id	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_join_left__u	SELECT t.id, t2.u AS x FROM t LEFT JOIN t2 ON t.id = t2.id WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_arith_add__n	SELECT id, n + 0 AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(11,2): 0.76 | 1.26	=PG
+e_arith_add__n	SELECT id, n + 0 AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(11,2): 0.76 | 1.26	=PG
+d_arith_add__k	SELECT id, k + 0 AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(6,0): 1 | 1	=PG
+e_arith_add__k	SELECT id, k + 0 AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(6,0): 1 | 1	=PG
+d_arith_add__u	SELECT id, u + 0 AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_arith_add__u	SELECT id, u + 0 AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_arith_mul__n	SELECT id, n * 1 AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(12,2): 0.76 | 1.26	=PG
+e_arith_mul__n	SELECT id, n * 1 AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(12,2): 0.76 | 1.26	=PG
+d_arith_mul__k	SELECT id, k * 1 AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(7,0): 1 | 1	=PG
+e_arith_mul__k	SELECT id, k * 1 AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(7,0): 1 | 1	=PG
+d_arith_mul__u	SELECT id, u * 1 AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_arith_mul__u	SELECT id, u * 1 AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_neg__n	SELECT id, -n AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+e_neg__n	SELECT id, -n AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+d_neg__k	SELECT id, -k AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(5,0): 1 | 1	=PG
+e_neg__k	SELECT id, -k AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(5,0): 1 | 1	=PG
+d_neg__u	SELECT id, -u AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_neg__u	SELECT id, -u AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_round2__n	SELECT id, ROUND(n, 2) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+e_round2__n	SELECT id, ROUND(n, 2) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+d_round2__k	SELECT id, ROUND(k, 2) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(7,2): 0.76 | 1.26	=PG
+e_round2__k	SELECT id, ROUND(k, 2) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(7,2): 0.76 | 1.26	=PG
+d_round2__u	SELECT id, ROUND(u, 2) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_round2__u	SELECT id, ROUND(u, 2) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_abs__n	SELECT id, ABS(n) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+e_abs__n	SELECT id, ABS(n) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+d_abs__k	SELECT id, ABS(k) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(5,0): 1 | 1	=PG
+e_abs__k	SELECT id, ABS(k) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(5,0): 1 | 1	=PG
+d_abs__u	SELECT id, ABS(u) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_abs__u	SELECT id, ABS(u) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_trunc2__n	SELECT id, TRUNC(n, 2) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+e_trunc2__n	SELECT id, TRUNC(n, 2) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+d_trunc2__k	SELECT id, TRUNC(k, 2) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(7,2): 0.76 | 1.26	=PG
+e_trunc2__k	SELECT id, TRUNC(k, 2) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(7,2): 0.76 | 1.26	=PG
+d_trunc2__u	SELECT id, TRUNC(u, 2) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_trunc2__u	SELECT id, TRUNC(u, 2) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_agg_min__n	SELECT id, MIN(n) AS x FROM t GROUP BY id	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+e_agg_min__n	SELECT id, MIN(n) AS x FROM t GROUP BY id WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+d_agg_min__k	SELECT id, MIN(k) AS x FROM t GROUP BY id	0.755 | 1.255	U: 0.755 | 1.255	(5,0): 1 | 1	=PG
+e_agg_min__k	SELECT id, MIN(k) AS x FROM t GROUP BY id WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(5,0): 1 | 1	=PG
+d_agg_min__u	SELECT id, MIN(u) AS x FROM t GROUP BY id	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_agg_min__u	SELECT id, MIN(u) AS x FROM t GROUP BY id WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_agg_max__n	SELECT id, MAX(n) AS x FROM t GROUP BY id	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+e_agg_max__n	SELECT id, MAX(n) AS x FROM t GROUP BY id WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+d_agg_max__k	SELECT id, MAX(k) AS x FROM t GROUP BY id	0.755 | 1.255	U: 0.755 | 1.255	(5,0): 1 | 1	=PG
+e_agg_max__k	SELECT id, MAX(k) AS x FROM t GROUP BY id WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(5,0): 1 | 1	=PG
+d_agg_max__u	SELECT id, MAX(u) AS x FROM t GROUP BY id	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_agg_max__u	SELECT id, MAX(u) AS x FROM t GROUP BY id WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_agg_sum__n	SELECT id, SUM(n) AS x FROM t GROUP BY id	0.755 | 1.255	U: 0.755 | 1.255	(38,2): 0.76 | 1.26	=PG
+e_agg_sum__n	SELECT id, SUM(n) AS x FROM t GROUP BY id WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,2): 0.76 | 1.26	=PG
+d_agg_sum__k	SELECT id, SUM(k) AS x FROM t GROUP BY id	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_agg_sum__k	SELECT id, SUM(k) AS x FROM t GROUP BY id WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_agg_sum__u	SELECT id, SUM(u) AS x FROM t GROUP BY id	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_agg_sum__u	SELECT id, SUM(u) AS x FROM t GROUP BY id WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_groupkey__n	SELECT id, n AS x FROM t GROUP BY id, n	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+e_groupkey__n	SELECT id, n AS x FROM t GROUP BY id, n WITH NO DATA	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+d_groupkey__k	SELECT id, k AS x FROM t GROUP BY id, k	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+e_groupkey__k	SELECT id, k AS x FROM t GROUP BY id, k WITH NO DATA	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+d_groupkey__u	SELECT id, u AS x FROM t GROUP BY id, u	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_groupkey__u	SELECT id, u AS x FROM t GROUP BY id, u WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_distinct__n	SELECT DISTINCT id, n AS x FROM t	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+e_distinct__n	SELECT DISTINCT id, n AS x FROM t WITH NO DATA	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+d_distinct__k	SELECT DISTINCT id, k AS x FROM t	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+e_distinct__k	SELECT DISTINCT id, k AS x FROM t WITH NO DATA	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+d_distinct__u	SELECT DISTINCT id, u AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_distinct__u	SELECT DISTINCT id, u AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_derived_case_same__n	SELECT id, x FROM (SELECT id, CASE WHEN id > 1 THEN n ELSE n END AS x FROM t) d	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+e_derived_case_same__n	SELECT id, x FROM (SELECT id, CASE WHEN id > 1 THEN n ELSE n END AS x FROM t) d WITH NO DATA	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+d_derived_case_same__k	SELECT id, x FROM (SELECT id, CASE WHEN id > 1 THEN k ELSE k END AS x FROM t) d	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+e_derived_case_same__k	SELECT id, x FROM (SELECT id, CASE WHEN id > 1 THEN k ELSE k END AS x FROM t) d WITH NO DATA	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+d_derived_case_same__u	SELECT id, x FROM (SELECT id, CASE WHEN id > 1 THEN u ELSE u END AS x FROM t) d	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_derived_case_same__u	SELECT id, x FROM (SELECT id, CASE WHEN id > 1 THEN u ELSE u END AS x FROM t) d WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_derived_coalesce_same__n	SELECT id, x FROM (SELECT id, COALESCE(n, n) AS x FROM t) d	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+e_derived_coalesce_same__n	SELECT id, x FROM (SELECT id, COALESCE(n, n) AS x FROM t) d WITH NO DATA	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+d_derived_coalesce_same__k	SELECT id, x FROM (SELECT id, COALESCE(k, k) AS x FROM t) d	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+e_derived_coalesce_same__k	SELECT id, x FROM (SELECT id, COALESCE(k, k) AS x FROM t) d WITH NO DATA	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+d_derived_coalesce_same__u	SELECT id, x FROM (SELECT id, COALESCE(u, u) AS x FROM t) d	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_derived_coalesce_same__u	SELECT id, x FROM (SELECT id, COALESCE(u, u) AS x FROM t) d WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_derived_cast_ps__n	SELECT id, x FROM (SELECT id, CAST(n AS NUMERIC(8,1)) AS x FROM t) d	0.8 | 1.3	(8,1): 0.8 | 1.3	(8,1): 0.8 | 1.3	=PG
+e_derived_cast_ps__n	SELECT id, x FROM (SELECT id, CAST(n AS NUMERIC(8,1)) AS x FROM t) d WITH NO DATA	0.8 | 1.3	(8,1): 0.8 | 1.3	(8,1): 0.8 | 1.3	=PG
+d_derived_cast_ps__k	SELECT id, x FROM (SELECT id, CAST(k AS NUMERIC(8,1)) AS x FROM t) d	0.8 | 1.3	(8,1): 0.8 | 1.3	(8,1): 0.8 | 1.3	=PG
+e_derived_cast_ps__k	SELECT id, x FROM (SELECT id, CAST(k AS NUMERIC(8,1)) AS x FROM t) d WITH NO DATA	0.8 | 1.3	(8,1): 0.8 | 1.3	(8,1): 0.8 | 1.3	=PG
+d_derived_cast_ps__u	SELECT id, x FROM (SELECT id, CAST(u AS NUMERIC(8,1)) AS x FROM t) d	0.8 | 1.3	(8,1): 0.8 | 1.3	(8,1): 0.8 | 1.3	=PG
+e_derived_cast_ps__u	SELECT id, x FROM (SELECT id, CAST(u AS NUMERIC(8,1)) AS x FROM t) d WITH NO DATA	0.8 | 1.3	(8,1): 0.8 | 1.3	(8,1): 0.8 | 1.3	=PG
+d_derived_sub_col__n	SELECT id, x FROM (SELECT id, (SELECT t2.n FROM t2 WHERE t2.id = 1) AS x FROM t) d	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+e_derived_sub_col__n	SELECT id, x FROM (SELECT id, (SELECT t2.n FROM t2 WHERE t2.id = 1) AS x FROM t) d WITH NO DATA	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+d_derived_sub_col__k	SELECT id, x FROM (SELECT id, (SELECT t2.k FROM t2 WHERE t2.id = 1) AS x FROM t) d	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+e_derived_sub_col__k	SELECT id, x FROM (SELECT id, (SELECT t2.k FROM t2 WHERE t2.id = 1) AS x FROM t) d WITH NO DATA	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+d_derived_sub_col__u	SELECT id, x FROM (SELECT id, (SELECT t2.u FROM t2 WHERE t2.id = 1) AS x FROM t) d	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_derived_sub_col__u	SELECT id, x FROM (SELECT id, (SELECT t2.u FROM t2 WHERE t2.id = 1) AS x FROM t) d WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_derived_case_const__n	SELECT id, x FROM (SELECT id, CASE WHEN 1 = 1 THEN n END AS x FROM t) d	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+e_derived_case_const__n	SELECT id, x FROM (SELECT id, CASE WHEN 1 = 1 THEN n END AS x FROM t) d WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+d_derived_case_const__k	SELECT id, x FROM (SELECT id, CASE WHEN 1 = 1 THEN k END AS x FROM t) d	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+e_derived_case_const__k	SELECT id, x FROM (SELECT id, CASE WHEN 1 = 1 THEN k END AS x FROM t) d WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(5,0): 1 | 1	=PG
+d_derived_case_const__u	SELECT id, x FROM (SELECT id, CASE WHEN 1 = 1 THEN u END AS x FROM t) d	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_derived_case_const__u	SELECT id, x FROM (SELECT id, CASE WHEN 1 = 1 THEN u END AS x FROM t) d WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_derived_arith__n	SELECT id, x FROM (SELECT id, n + 0 AS x FROM t) d	0.755 | 1.255	U: 0.755 | 1.255	(11,2): 0.76 | 1.26	=PG
+e_derived_arith__n	SELECT id, x FROM (SELECT id, n + 0 AS x FROM t) d WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(11,2): 0.76 | 1.26	=PG
+d_derived_arith__k	SELECT id, x FROM (SELECT id, k + 0 AS x FROM t) d	0.755 | 1.255	U: 0.755 | 1.255	(6,0): 1 | 1	=PG
+e_derived_arith__k	SELECT id, x FROM (SELECT id, k + 0 AS x FROM t) d WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(6,0): 1 | 1	=PG
+d_derived_arith__u	SELECT id, x FROM (SELECT id, u + 0 AS x FROM t) d	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_derived_arith__u	SELECT id, x FROM (SELECT id, u + 0 AS x FROM t) d WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_derived_agg_max__n	SELECT id, x FROM (SELECT id, MAX(n) AS x FROM t GROUP BY id) d	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+e_derived_agg_max__n	SELECT id, x FROM (SELECT id, MAX(n) AS x FROM t GROUP BY id) d WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+d_derived_agg_max__k	SELECT id, x FROM (SELECT id, MAX(k) AS x FROM t GROUP BY id) d	0.755 | 1.255	U: 0.755 | 1.255	(5,0): 1 | 1	=PG
+e_derived_agg_max__k	SELECT id, x FROM (SELECT id, MAX(k) AS x FROM t GROUP BY id) d WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(5,0): 1 | 1	=PG
+d_derived_agg_max__u	SELECT id, x FROM (SELECT id, MAX(u) AS x FROM t GROUP BY id) d	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_derived_agg_max__u	SELECT id, x FROM (SELECT id, MAX(u) AS x FROM t GROUP BY id) d WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_derived_win_lag__n	SELECT id, x FROM (SELECT id, LAG(n) OVER (ORDER BY id) AS x FROM t) d	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+e_derived_win_lag__n	SELECT id, x FROM (SELECT id, LAG(n) OVER (ORDER BY id) AS x FROM t) d WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+d_derived_win_lag__k	SELECT id, x FROM (SELECT id, LAG(k) OVER (ORDER BY id) AS x FROM t) d	0.755 | 1.255	U: 0.755 | 1.255	(5,0): 1 | 1	=PG
+e_derived_win_lag__k	SELECT id, x FROM (SELECT id, LAG(k) OVER (ORDER BY id) AS x FROM t) d WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(5,0): 1 | 1	=PG
+d_derived_win_lag__u	SELECT id, x FROM (SELECT id, LAG(u) OVER (ORDER BY id) AS x FROM t) d	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_derived_win_lag__u	SELECT id, x FROM (SELECT id, LAG(u) OVER (ORDER BY id) AS x FROM t) d WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_derived_union_same__n	SELECT id, x FROM (SELECT id, n AS x FROM t UNION ALL SELECT id, n FROM t2) d	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+e_derived_union_same__n	SELECT id, x FROM (SELECT id, n AS x FROM t UNION ALL SELECT id, n FROM t2) d WITH NO DATA	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+d_derived_union_same__k	SELECT id, x FROM (SELECT id, k AS x FROM t UNION ALL SELECT id, k FROM t2) d	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+e_derived_union_same__k	SELECT id, x FROM (SELECT id, k AS x FROM t UNION ALL SELECT id, k FROM t2) d WITH NO DATA	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+d_derived_union_same__u	SELECT id, x FROM (SELECT id, u AS x FROM t UNION ALL SELECT id, u FROM t2) d	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_derived_union_same__u	SELECT id, x FROM (SELECT id, u AS x FROM t UNION ALL SELECT id, u FROM t2) d WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_derived_union_mixed__n	SELECT id, x FROM (SELECT id, n AS x FROM t UNION ALL SELECT id, m FROM t2) d	0.755 | 1.255	U: 0.755 | 1.255	(12,4): 0.7550 | 1.2550	=PG
+e_derived_union_mixed__n	SELECT id, x FROM (SELECT id, n AS x FROM t UNION ALL SELECT id, m FROM t2) d WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(12,4): 0.7550 | 1.2550	=PG
+d_derived_union_mixed__k	SELECT id, x FROM (SELECT id, k AS x FROM t UNION ALL SELECT id, n FROM t2) d	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+e_derived_union_mixed__k	SELECT id, x FROM (SELECT id, k AS x FROM t UNION ALL SELECT id, n FROM t2) d WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+d_derived_union_mixed__u	SELECT id, x FROM (SELECT id, u AS x FROM t UNION ALL SELECT id, n FROM t2) d	0.755 | 1.255	U: 0.755 | 1.255	(38,2): 0.76 | 1.26	=PG
+e_derived_union_mixed__u	SELECT id, x FROM (SELECT id, u AS x FROM t UNION ALL SELECT id, n FROM t2) d WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,2): 0.76 | 1.26	=PG
+d_cte_coalesce_same__n	WITH c AS (SELECT id, COALESCE(n, n) AS x FROM t) SELECT id, x FROM c	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+e_cte_coalesce_same__n	WITH c AS (SELECT id, COALESCE(n, n) AS x FROM t) SELECT id, x FROM c WITH NO DATA	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+d_cte_coalesce_same__k	WITH c AS (SELECT id, COALESCE(k, k) AS x FROM t) SELECT id, x FROM c	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+e_cte_coalesce_same__k	WITH c AS (SELECT id, COALESCE(k, k) AS x FROM t) SELECT id, x FROM c WITH NO DATA	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+d_cte_coalesce_same__u	WITH c AS (SELECT id, COALESCE(u, u) AS x FROM t) SELECT id, x FROM c	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_cte_coalesce_same__u	WITH c AS (SELECT id, COALESCE(u, u) AS x FROM t) SELECT id, x FROM c WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_cte_case_const__n	WITH c AS (SELECT id, CASE WHEN true THEN n END AS x FROM t) SELECT id, x FROM c	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+e_cte_case_const__n	WITH c AS (SELECT id, CASE WHEN true THEN n END AS x FROM t) SELECT id, x FROM c WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+d_cte_case_const__k	WITH c AS (SELECT id, CASE WHEN true THEN k END AS x FROM t) SELECT id, x FROM c	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+e_cte_case_const__k	WITH c AS (SELECT id, CASE WHEN true THEN k END AS x FROM t) SELECT id, x FROM c WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(5,0): 1 | 1	=PG
+d_cte_case_const__u	WITH c AS (SELECT id, CASE WHEN true THEN u END AS x FROM t) SELECT id, x FROM c	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_cte_case_const__u	WITH c AS (SELECT id, CASE WHEN true THEN u END AS x FROM t) SELECT id, x FROM c WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_join_derived__n	SELECT t.id, d.x FROM t JOIN (SELECT id, COALESCE(n, n) AS x FROM t2) d ON t.id = d.id	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+e_join_derived__n	SELECT t.id, d.x FROM t JOIN (SELECT id, COALESCE(n, n) AS x FROM t2) d ON t.id = d.id WITH NO DATA	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+d_join_derived__k	SELECT t.id, d.x FROM t JOIN (SELECT id, COALESCE(k, k) AS x FROM t2) d ON t.id = d.id	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+e_join_derived__k	SELECT t.id, d.x FROM t JOIN (SELECT id, COALESCE(k, k) AS x FROM t2) d ON t.id = d.id WITH NO DATA	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+d_join_derived__u	SELECT t.id, d.x FROM t JOIN (SELECT id, COALESCE(u, u) AS x FROM t2) d ON t.id = d.id	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_join_derived__u	SELECT t.id, d.x FROM t JOIN (SELECT id, COALESCE(u, u) AS x FROM t2) d ON t.id = d.id WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_union_cast_ps__n	SELECT id, CAST(n AS NUMERIC(8,1)) AS x FROM t UNION ALL SELECT id, CAST(m AS NUMERIC(8,1)) FROM t2	0.8 | 1.3	(8,1): 0.8 | 1.3	(8,1): 0.8 | 1.3	=PG
+e_union_cast_ps__n	SELECT id, CAST(n AS NUMERIC(8,1)) AS x FROM t UNION ALL SELECT id, CAST(m AS NUMERIC(8,1)) FROM t2 WITH NO DATA	0.8 | 1.3	(8,1): 0.8 | 1.3	(8,1): 0.8 | 1.3	=PG
+d_union_cast_ps__k	SELECT id, CAST(k AS NUMERIC(8,1)) AS x FROM t UNION ALL SELECT id, CAST(n AS NUMERIC(8,1)) FROM t2	0.8 | 1.3	(8,1): 0.8 | 1.3	(8,1): 0.8 | 1.3	=PG
+e_union_cast_ps__k	SELECT id, CAST(k AS NUMERIC(8,1)) AS x FROM t UNION ALL SELECT id, CAST(n AS NUMERIC(8,1)) FROM t2 WITH NO DATA	0.8 | 1.3	(8,1): 0.8 | 1.3	(8,1): 0.8 | 1.3	=PG
+d_union_cast_ps__u	SELECT id, CAST(u AS NUMERIC(8,1)) AS x FROM t UNION ALL SELECT id, CAST(n AS NUMERIC(8,1)) FROM t2	0.8 | 1.3	(8,1): 0.8 | 1.3	(8,1): 0.8 | 1.3	=PG
+e_union_cast_ps__u	SELECT id, CAST(u AS NUMERIC(8,1)) AS x FROM t UNION ALL SELECT id, CAST(n AS NUMERIC(8,1)) FROM t2 WITH NO DATA	0.8 | 1.3	(8,1): 0.8 | 1.3	(8,1): 0.8 | 1.3	=PG
+d_union_case__n	SELECT id, CASE WHEN id > 1 THEN n ELSE n END AS x FROM t UNION ALL SELECT id, n FROM t2	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+e_union_case__n	SELECT id, CASE WHEN id > 1 THEN n ELSE n END AS x FROM t UNION ALL SELECT id, n FROM t2 WITH NO DATA	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+d_union_case__k	SELECT id, CASE WHEN id > 1 THEN k ELSE k END AS x FROM t UNION ALL SELECT id, k FROM t2	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+e_union_case__k	SELECT id, CASE WHEN id > 1 THEN k ELSE k END AS x FROM t UNION ALL SELECT id, k FROM t2 WITH NO DATA	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+d_union_case__u	SELECT id, CASE WHEN id > 1 THEN u ELSE u END AS x FROM t UNION ALL SELECT id, u FROM t2	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_union_case__u	SELECT id, CASE WHEN id > 1 THEN u ELSE u END AS x FROM t UNION ALL SELECT id, u FROM t2 WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_union_sub__n	SELECT id, (SELECT t2.n FROM t2 WHERE t2.id = 1) AS x FROM t UNION ALL SELECT id, n FROM t2 WITH NO DATA	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+e_union_sub__k	SELECT id, (SELECT t2.k FROM t2 WHERE t2.id = 1) AS x FROM t UNION ALL SELECT id, k FROM t2 WITH NO DATA	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+e_union_sub__u	SELECT id, (SELECT t2.u FROM t2 WHERE t2.id = 1) AS x FROM t UNION ALL SELECT id, u FROM t2 WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_union_typednull__n	SELECT id, n AS x FROM t UNION ALL SELECT 9, CAST(NULL AS NUMERIC(10,2))	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+e_union_typednull__n	SELECT id, n AS x FROM t UNION ALL SELECT 9, CAST(NULL AS NUMERIC(10,2)) WITH NO DATA	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+d_union_typednull__k	SELECT id, k AS x FROM t UNION ALL SELECT 9, CAST(NULL AS NUMERIC(5))	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+e_union_typednull__k	SELECT id, k AS x FROM t UNION ALL SELECT 9, CAST(NULL AS NUMERIC(5)) WITH NO DATA	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+d_union_typednull__u	SELECT id, u AS x FROM t UNION ALL SELECT 9, CAST(NULL AS NUMERIC)	0.755 | 1.255	U: 0.755 | 1.255	FLOAT64: 0.755 | 1.255	=PG
+e_union_typednull__u	SELECT id, u AS x FROM t UNION ALL SELECT 9, CAST(NULL AS NUMERIC) WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	FLOAT64: 0.755 | 1.255	=PG
+d_case_var_then_const__n	SELECT id, CASE WHEN id > 1 THEN n WHEN 1 = 1 THEN n ELSE m END AS x FROM t	0.7550 | 1.2550	(10,2): 0.76 | 1.26	(12,4): 0.7550 | 1.2550	=c23adbbb
+e_case_var_then_const__n	SELECT id, CASE WHEN id > 1 THEN n WHEN 1 = 1 THEN n ELSE m END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(12,4): 0.7550 | 1.2550	=PG
+d_case_var_then_const__k	SELECT id, CASE WHEN id > 1 THEN k WHEN 1 = 1 THEN k ELSE n END AS x FROM t	0.76 | 1.26	(5,0): 1 | 1	(10,2): 0.76 | 1.26	=c23adbbb
+e_case_var_then_const__k	SELECT id, CASE WHEN id > 1 THEN k WHEN 1 = 1 THEN k ELSE n END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+d_case_var_then_const__u	SELECT id, CASE WHEN id > 1 THEN u WHEN 1 = 1 THEN u ELSE n END AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,2): 0.76 | 1.26	=PG
+e_case_var_then_const__u	SELECT id, CASE WHEN id > 1 THEN u WHEN 1 = 1 THEN u ELSE n END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,2): 0.76 | 1.26	=PG
+d_case_const_expr__n	SELECT id, CASE WHEN 1 + 1 = 2 THEN n END AS x FROM t	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+e_case_const_expr__n	SELECT id, CASE WHEN 1 + 1 = 2 THEN n END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+d_case_const_expr__k	SELECT id, CASE WHEN 1 + 1 = 2 THEN k END AS x FROM t	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+e_case_const_expr__k	SELECT id, CASE WHEN 1 + 1 = 2 THEN k END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(5,0): 1 | 1	=PG
+d_case_const_expr__u	SELECT id, CASE WHEN 1 + 1 = 2 THEN u END AS x FROM t	0.7550000000 | 1.2550000000	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_case_const_expr__u	SELECT id, CASE WHEN 1 + 1 = 2 THEN u END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_case_volatile__n	SELECT id, CASE WHEN random() < 2 THEN n END AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+e_case_volatile__n	SELECT id, CASE WHEN random() < 2 THEN n END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+d_case_volatile__k	SELECT id, CASE WHEN random() < 2 THEN k END AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(5,0): 1 | 1	=PG
+e_case_volatile__k	SELECT id, CASE WHEN random() < 2 THEN k END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(5,0): 1 | 1	=PG
+d_case_volatile__u	SELECT id, CASE WHEN random() < 2 THEN u END AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_case_volatile__u	SELECT id, CASE WHEN random() < 2 THEN u END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_case_and_const__n	SELECT id, CASE WHEN 1 = 1 AND 2 > 1 THEN n ELSE NULL END AS x FROM t	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+e_case_and_const__n	SELECT id, CASE WHEN 1 = 1 AND 2 > 1 THEN n ELSE NULL END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+d_case_and_const__k	SELECT id, CASE WHEN 1 = 1 AND 2 > 1 THEN k ELSE NULL END AS x FROM t	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+e_case_and_const__k	SELECT id, CASE WHEN 1 = 1 AND 2 > 1 THEN k ELSE NULL END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(5,0): 1 | 1	=PG
+d_case_and_const__u	SELECT id, CASE WHEN 1 = 1 AND 2 > 1 THEN u ELSE NULL END AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_case_and_const__u	SELECT id, CASE WHEN 1 = 1 AND 2 > 1 THEN u ELSE NULL END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_case_null_cond__n	SELECT id, CASE WHEN NULL THEN m ELSE n END AS x FROM t	0.7550 | 1.2550	(10,2): 0.76 | 1.26	(12,4): 0.7550 | 1.2550	=c23adbbb
+e_case_null_cond__n	SELECT id, CASE WHEN NULL THEN m ELSE n END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(12,4): 0.7550 | 1.2550	=PG
+d_case_null_cond__k	SELECT id, CASE WHEN NULL THEN n ELSE k END AS x FROM t	0.76 | 1.26	(5,0): 1 | 1	(10,2): 0.76 | 1.26	=c23adbbb
+e_case_null_cond__k	SELECT id, CASE WHEN NULL THEN n ELSE k END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+d_case_null_cond__u	SELECT id, CASE WHEN NULL THEN n ELSE u END AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,2): 0.76 | 1.26	=PG
+e_case_null_cond__u	SELECT id, CASE WHEN NULL THEN n ELSE u END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,2): 0.76 | 1.26	=PG
+d_case_str_const__n	SELECT id, CASE WHEN 'a' = 'a' THEN n END AS x FROM t	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+e_case_str_const__n	SELECT id, CASE WHEN 'a' = 'a' THEN n END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+d_case_str_const__k	SELECT id, CASE WHEN 'a' = 'a' THEN k END AS x FROM t	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+e_case_str_const__k	SELECT id, CASE WHEN 'a' = 'a' THEN k END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(5,0): 1 | 1	=PG
+d_case_str_const__u	SELECT id, CASE WHEN 'a' = 'a' THEN u END AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_case_str_const__u	SELECT id, CASE WHEN 'a' = 'a' THEN u END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_coalesce_null_first__n	SELECT id, COALESCE(NULL, n) AS x FROM t	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+e_coalesce_null_first__n	SELECT id, COALESCE(NULL, n) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+d_coalesce_null_first__k	SELECT id, COALESCE(NULL, k) AS x FROM t	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+e_coalesce_null_first__k	SELECT id, COALESCE(NULL, k) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(5,0): 1 | 1	=PG
+d_coalesce_null_first__u	SELECT id, COALESCE(NULL, u) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_coalesce_null_first__u	SELECT id, COALESCE(NULL, u) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_coalesce_typednull_first__n	SELECT id, COALESCE(CAST(NULL AS NUMERIC(10,2)), n) AS x FROM t	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+e_coalesce_typednull_first__n	SELECT id, COALESCE(CAST(NULL AS NUMERIC(10,2)), n) AS x FROM t WITH NO DATA	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+d_coalesce_typednull_first__k	SELECT id, COALESCE(CAST(NULL AS NUMERIC(10,2)), k) AS x FROM t	0.76 | 1.26	(5,0): 1 | 1	(10,2): 0.76 | 1.26	=c23adbbb
+e_coalesce_typednull_first__k	SELECT id, COALESCE(CAST(NULL AS NUMERIC(10,2)), k) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+d_coalesce_typednull_first__u	SELECT id, COALESCE(CAST(NULL AS NUMERIC(10,2)), u) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,2): 0.76 | 1.26	=PG
+e_coalesce_typednull_first__u	SELECT id, COALESCE(CAST(NULL AS NUMERIC(10,2)), u) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,2): 0.76 | 1.26	=PG
+d_coalesce_lit_mid__n	SELECT id, COALESCE(n, 0, m) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(12,4): 0.7550 | 1.2550	=PG
+e_coalesce_lit_mid__n	SELECT id, COALESCE(n, 0, m) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(12,4): 0.7550 | 1.2550	=PG
+d_coalesce_lit_mid__k	SELECT id, COALESCE(k, 0, n) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+e_coalesce_lit_mid__k	SELECT id, COALESCE(k, 0, n) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+d_coalesce_lit_mid__u	SELECT id, COALESCE(u, 0, n) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,2): 0.76 | 1.26	=PG
+e_coalesce_lit_mid__u	SELECT id, COALESCE(u, 0, n) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,2): 0.76 | 1.26	=PG
+d_coalesce_foldcase__n	SELECT id, COALESCE(CASE WHEN 1 = 0 THEN n END, n) AS x FROM t	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+e_coalesce_foldcase__n	SELECT id, COALESCE(CASE WHEN 1 = 0 THEN n END, n) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+d_coalesce_foldcase__k	SELECT id, COALESCE(CASE WHEN 1 = 0 THEN k END, k) AS x FROM t	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+e_coalesce_foldcase__k	SELECT id, COALESCE(CASE WHEN 1 = 0 THEN k END, k) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(5,0): 1 | 1	=PG
+d_coalesce_foldcase__u	SELECT id, COALESCE(CASE WHEN 1 = 0 THEN u END, u) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_coalesce_foldcase__u	SELECT id, COALESCE(CASE WHEN 1 = 0 THEN u END, u) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_nullif_null__n	SELECT id, NULLIF(n, NULL) AS x FROM t	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+e_nullif_null__n	SELECT id, NULLIF(n, NULL) AS x FROM t WITH NO DATA	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+d_nullif_null__k	SELECT id, NULLIF(k, NULL) AS x FROM t	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+e_nullif_null__k	SELECT id, NULLIF(k, NULL) AS x FROM t WITH NO DATA	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+d_nullif_null__u	SELECT id, NULLIF(u, NULL) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_nullif_null__u	SELECT id, NULLIF(u, NULL) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_sub_case_const__n	SELECT id, (SELECT CASE WHEN 1 = 1 THEN t2.n END FROM t2 WHERE t2.id = 1) AS x FROM t	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+e_sub_case_const__n	SELECT id, (SELECT CASE WHEN 1 = 1 THEN t2.n END FROM t2 WHERE t2.id = 1) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+d_sub_case_const__k	SELECT id, (SELECT CASE WHEN 1 = 1 THEN t2.k END FROM t2 WHERE t2.id = 1) AS x FROM t	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+e_sub_case_const__k	SELECT id, (SELECT CASE WHEN 1 = 1 THEN t2.k END FROM t2 WHERE t2.id = 1) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(5,0): 1 | 1	=PG
+d_sub_case_const__u	SELECT id, (SELECT CASE WHEN 1 = 1 THEN t2.u END FROM t2 WHERE t2.id = 1) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_sub_case_const__u	SELECT id, (SELECT CASE WHEN 1 = 1 THEN t2.u END FROM t2 WHERE t2.id = 1) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_sub_coalesce_null__n	SELECT id, (SELECT COALESCE(t2.n, NULL) FROM t2 WHERE t2.id = 1) AS x FROM t	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+e_sub_coalesce_null__n	SELECT id, (SELECT COALESCE(t2.n, NULL) FROM t2 WHERE t2.id = 1) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+d_sub_coalesce_null__k	SELECT id, (SELECT COALESCE(t2.k, NULL) FROM t2 WHERE t2.id = 1) AS x FROM t	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+e_sub_coalesce_null__k	SELECT id, (SELECT COALESCE(t2.k, NULL) FROM t2 WHERE t2.id = 1) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(5,0): 1 | 1	=PG
+d_sub_coalesce_null__u	SELECT id, (SELECT COALESCE(t2.u, NULL) FROM t2 WHERE t2.id = 1) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_sub_coalesce_null__u	SELECT id, (SELECT COALESCE(t2.u, NULL) FROM t2 WHERE t2.id = 1) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_sub_of_derived_case__n	SELECT id, (SELECT y FROM (SELECT CASE WHEN t2.id > 0 THEN t2.n ELSE t2.n END AS y FROM t2) s WHERE y IS NOT NULL ORDER BY y LIMIT 1) AS x FROM t	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+e_sub_of_derived_case__n	SELECT id, (SELECT y FROM (SELECT CASE WHEN t2.id > 0 THEN t2.n ELSE t2.n END AS y FROM t2) s WHERE y IS NOT NULL ORDER BY y LIMIT 1) AS x FROM t WITH NO DATA	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+d_sub_of_derived_case__k	SELECT id, (SELECT y FROM (SELECT CASE WHEN t2.id > 0 THEN t2.k ELSE t2.k END AS y FROM t2) s WHERE y IS NOT NULL ORDER BY y LIMIT 1) AS x FROM t	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+e_sub_of_derived_case__k	SELECT id, (SELECT y FROM (SELECT CASE WHEN t2.id > 0 THEN t2.k ELSE t2.k END AS y FROM t2) s WHERE y IS NOT NULL ORDER BY y LIMIT 1) AS x FROM t WITH NO DATA	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+d_sub_of_derived_case__u	SELECT id, (SELECT y FROM (SELECT CASE WHEN t2.id > 0 THEN t2.u ELSE t2.u END AS y FROM t2) s WHERE y IS NOT NULL ORDER BY y LIMIT 1) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_sub_of_derived_case__u	SELECT id, (SELECT y FROM (SELECT CASE WHEN t2.id > 0 THEN t2.u ELSE t2.u END AS y FROM t2) s WHERE y IS NOT NULL ORDER BY y LIMIT 1) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_groupkey_derived__n	SELECT id, x FROM (SELECT id, n AS x FROM t) d GROUP BY id, x	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+e_groupkey_derived__n	SELECT id, x FROM (SELECT id, n AS x FROM t) d GROUP BY id, x WITH NO DATA	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+d_groupkey_derived__k	SELECT id, x FROM (SELECT id, k AS x FROM t) d GROUP BY id, x	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+e_groupkey_derived__k	SELECT id, x FROM (SELECT id, k AS x FROM t) d GROUP BY id, x WITH NO DATA	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+d_groupkey_derived__u	SELECT id, x FROM (SELECT id, u AS x FROM t) d GROUP BY id, x	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_groupkey_derived__u	SELECT id, x FROM (SELECT id, u AS x FROM t) d GROUP BY id, x WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_distinct_case__n	SELECT DISTINCT id, CASE WHEN id > 1 THEN n ELSE n END AS x FROM t	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+e_distinct_case__n	SELECT DISTINCT id, CASE WHEN id > 1 THEN n ELSE n END AS x FROM t WITH NO DATA	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+d_distinct_case__k	SELECT DISTINCT id, CASE WHEN id > 1 THEN k ELSE k END AS x FROM t	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+e_distinct_case__k	SELECT DISTINCT id, CASE WHEN id > 1 THEN k ELSE k END AS x FROM t WITH NO DATA	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+d_distinct_case__u	SELECT DISTINCT id, CASE WHEN id > 1 THEN u ELSE u END AS x FROM t	0.7550000000 | 1.2550000000	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_distinct_case__u	SELECT DISTINCT id, CASE WHEN id > 1 THEN u ELSE u END AS x FROM t WITH NO DATA	0.7550000000 | 1.2550000000	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_ifnull__n	SELECT id, IFNULL(n, n) AS x FROM t	0.76 | 1.26	ERR	(10,2): 0.76 | 1.26	no-PG
+e_ifnull__n	SELECT id, IFNULL(n, n) AS x FROM t WITH NO DATA	0.76 | 1.26	ERR	(10,2): 0.76 | 1.26	no-PG
+d_ifnull__k	SELECT id, IFNULL(k, k) AS x FROM t	1 | 1	ERR	(5,0): 1 | 1	no-PG
+e_ifnull__k	SELECT id, IFNULL(k, k) AS x FROM t WITH NO DATA	1 | 1	ERR	(5,0): 1 | 1	no-PG
+d_ifnull__u	SELECT id, IFNULL(u, u) AS x FROM t	0.755 | 1.255	ERR	(38,0): 1 | 1	no-PG
+e_ifnull__u	SELECT id, IFNULL(u, u) AS x FROM t WITH NO DATA	0.755 | 1.255	ERR	(38,0): 1 | 1	no-PG
+d_paren_neg_neg__n	SELECT id, -(-n) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+e_paren_neg_neg__n	SELECT id, -(-n) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
+d_paren_neg_neg__k	SELECT id, -(-k) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(5,0): 1 | 1	=PG
+e_paren_neg_neg__k	SELECT id, -(-k) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(5,0): 1 | 1	=PG
+d_paren_neg_neg__u	SELECT id, -(-u) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_paren_neg_neg__u	SELECT id, -(-u) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_unary_plus__n	SELECT id, +n AS x FROM t	0.76 | 1.26	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=c23adbbb
+e_unary_plus__n	SELECT id, +n AS x FROM t WITH NO DATA	0.76 | 1.26	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=c23adbbb
+d_unary_plus__k	SELECT id, +k AS x FROM t	1 | 1	U: 0.755 | 1.255	(5,0): 1 | 1	=c23adbbb
+e_unary_plus__k	SELECT id, +k AS x FROM t WITH NO DATA	1 | 1	U: 0.755 | 1.255	(5,0): 1 | 1	=c23adbbb
+d_unary_plus__u	SELECT id, +u AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_unary_plus__u	SELECT id, +u AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_array_elem__n	SELECT id, (ARRAY[n])[1] AS x FROM t	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+e_array_elem__n	SELECT id, (ARRAY[n])[1] AS x FROM t WITH NO DATA	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+d_array_elem__k	SELECT id, (ARRAY[k])[1] AS x FROM t	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+e_array_elem__k	SELECT id, (ARRAY[k])[1] AS x FROM t WITH NO DATA	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
+d_array_elem__u	SELECT id, (ARRAY[u])[1] AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_array_elem__u	SELECT id, (ARRAY[u])[1] AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_cast_bare__n	SELECT id, CAST(n AS NUMERIC) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,2): 0.76 | 1.26	=PG
+e_cast_bare__n	SELECT id, CAST(n AS NUMERIC) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,2): 0.76 | 1.26	=PG
+d_cast_bare__k	SELECT id, CAST(k AS NUMERIC) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_cast_bare__k	SELECT id, CAST(k AS NUMERIC) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_cast_bare__u	SELECT id, CAST(u AS NUMERIC) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+e_cast_bare__u	SELECT id, CAST(u AS NUMERIC) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
+d_cast_ps__n	SELECT id, CAST(n AS NUMERIC(8,1)) AS x FROM t	0.8 | 1.3	(8,1): 0.8 | 1.3	(8,1): 0.8 | 1.3	=PG
+e_cast_ps__n	SELECT id, CAST(n AS NUMERIC(8,1)) AS x FROM t WITH NO DATA	0.8 | 1.3	(8,1): 0.8 | 1.3	(8,1): 0.8 | 1.3	=PG
+d_cast_ps__k	SELECT id, CAST(k AS NUMERIC(8,1)) AS x FROM t	0.8 | 1.3	(8,1): 0.8 | 1.3	(8,1): 0.8 | 1.3	=PG
+e_cast_ps__k	SELECT id, CAST(k AS NUMERIC(8,1)) AS x FROM t WITH NO DATA	0.8 | 1.3	(8,1): 0.8 | 1.3	(8,1): 0.8 | 1.3	=PG
+d_cast_ps__u	SELECT id, CAST(u AS NUMERIC(8,1)) AS x FROM t	0.8 | 1.3	(8,1): 0.8 | 1.3	(8,1): 0.8 | 1.3	=PG
+e_cast_ps__u	SELECT id, CAST(u AS NUMERIC(8,1)) AS x FROM t WITH NO DATA	0.8 | 1.3	(8,1): 0.8 | 1.3	(8,1): 0.8 | 1.3	=PG
+d_coloncast__n	SELECT id, n::numeric(10,2) AS x FROM t	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+e_coloncast__n	SELECT id, n::numeric(10,2) AS x FROM t WITH NO DATA	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+d_coloncast__k	SELECT id, k::numeric(10,2) AS x FROM t	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+e_coloncast__k	SELECT id, k::numeric(10,2) AS x FROM t WITH NO DATA	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+d_coloncast__u	SELECT id, u::numeric(10,2) AS x FROM t	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+e_coloncast__u	SELECT id, u::numeric(10,2) AS x FROM t WITH NO DATA	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
+d_lit__z	SELECT id, 1.25 AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(3,2): 0.76 | 1.26	=PG
+e_lit__z	SELECT id, 1.25 AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(3,2): 0.76 | 1.26	=PG
+d_castnull__z	SELECT id, CAST(NULL AS NUMERIC) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	FLOAT64: 0.755 | 1.255	=PG
+e_castnull__z	SELECT id, CAST(NULL AS NUMERIC) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	FLOAT64: 0.755 | 1.255	=PG
