@@ -389,11 +389,7 @@ func rightRunes(s string, n int) string {
 // PostgreSQL 17.11: `substring('abcdef' from '(b)(c)')` is `b`, not `bc`.
 // No match is NULL.
 func substringRegex(s, pattern string) any {
-	re := compileRegexpCached(pattern)
-	if re == nil {
-		return nil
-	}
-	m := re.FindStringSubmatch(s)
+	m := mustCompileSQLRegex(pattern, reFlags{}).re.FindStringSubmatch(s)
 	if m == nil {
 		return nil
 	}

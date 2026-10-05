@@ -5,9 +5,11 @@ package expr
 import (
 	"fmt"
 	"regexp"
+	"regexp/syntax"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"unicode"
 
 	"github.com/derekmwright/wadjet/internal/sqlerr"
@@ -53,49 +55,233 @@ func pgRegexMatch(args []any, icase, negate bool) any {
 	if len(args) != 2 || args[0] == nil || args[1] == nil {
 		return nil
 	}
-	re := compileARE(toString(args[1]), icase)
-	matched := re.MatchString(toString(args[0]))
+	re := mustCompileSQLRegex(toString(args[1]), reFlags{icase: icase})
+	matched := re.re.MatchString(toString(args[0]))
 	return matched != negate
 }
 
-type areKey struct {
-	pattern string
-	icase   bool
+// reFlags is a regular-expression function's flags argument as PostgreSQL's
+// parse_re_flags reads it: the options the pattern compiles under (icase,
+// literal) and the one that chooses how many matches a function takes
+// (global).
+type reFlags struct {
+	icase, literal, global bool
 }
 
-var areCache sync.Map // areKey → *regexp.Regexp or error
-
-// compileARE compiles an ARE pattern through its RE2 translation, raising
-// the refusal a pattern that cannot be translated earns. The result — either
-// way — is cached per pattern, because the pattern is almost always a
-// constant evaluated once per row.
-func compileARE(pattern string, icase bool) *regexp.Regexp {
-	key := areKey{pattern, icase}
-	if v, ok := areCache.Load(key); ok {
-		if err, bad := v.(error); bad {
-			panic(fatalEval{err})
+// parseREFlags reads the flags string of the regular-expression function
+// fn. The letters, measured on 17.11:
+//
+//	g      every match — only regexp_replace takes it; any other function
+//	       raises 22023 "<fn>() does not support the "global" option"
+//	i, c   case-insensitive / case-sensitive, the last one written wins
+//	q      the pattern is a literal string
+//	s, t   PostgreSQL's defaults (non-newline-sensitive, tight syntax)
+//
+// The newline-sensitive flags (n, m, p, w), expanded syntax (x) and the
+// basic / extended dialects (b, e) are refused 0A000, as the translator
+// refuses their embedded-option spellings; any other letter is PostgreSQL's
+// own 22023.
+func parseREFlags(fn, flags string) (reFlags, error) {
+	var f reFlags
+	var newline, unsupported rune
+	for _, r := range flags {
+		switch r {
+		case 'g':
+			if fn != "regexp_replace" {
+				return f, sqlerr.New("22023", "%s() does not support the \"global\" option", fn)
+			}
+			f.global = true
+		case 'i':
+			f.icase = true
+		case 'c':
+			f.icase = false
+		case 'q':
+			f.literal = true
+		case 's':
+			newline = 0
+		case 't':
+		case 'n', 'm', 'p', 'w':
+			newline = r
+		case 'x', 'b', 'e':
+			if unsupported == 0 {
+				unsupported = r
+			}
+		default:
+			return f, sqlerr.New("22023", "invalid regular expression option: %s", sqlerr.Quote(string(r)))
 		}
-		return v.(*regexp.Regexp)
 	}
-	re, err := translateAndCompile(pattern, icase)
+	if unsupported == 0 {
+		unsupported = newline
+	}
+	if unsupported != 0 {
+		return f, sqlerr.New("0A000", "%s flag %s is not supported", fn, sqlerr.Quote(string(unsupported)))
+	}
+	return f, nil
+}
+
+// sqlRegex is a pattern a SQL construct supplied, compiled as PostgreSQL
+// reads it: an ARE translated into RE2 (aregexToRE2), under its flags.
+type sqlRegex struct {
+	re *regexp.Regexp
+	// emptyAt reports whether the pattern matches the empty string at
+	// offset e of src; findAll uses it to take the empty match PostgreSQL
+	// takes right after a non-empty one (see withAbuttingEmpty).
+	emptyAt func(src string, e int) bool
+	// anchored: every match starts at offset 0 (anchoredAtTextStart).
+	anchored bool
+	// readsLeft: the pattern holds an empty-width assertion that reads the
+	// character before a position (\A, ^, \y, \Y), so it cannot be matched
+	// over a suffix of the subject as if the suffix were the whole text.
+	readsLeft bool
+}
+
+// translateAndCompile is THE compile of a SQL-supplied pattern: every
+// construct that takes one — the `~` operators, SIMILAR TO, substring(s
+// FROM p), regexp_like, regexp_count, regexp_replace, regexp_extract,
+// regexp_extract_all, regexp_split, payload_matches — compiles it here, so
+// one engine reads one dialect (PostgreSQL's ARE, #1499). The pattern is
+// translated by aregexToRE2 (or quoted, under the q flag); a form RE2
+// cannot express is refused 0A000 and a malformed one is 2201B, never a
+// NULL or a match read in another dialect. An RE whose quantifiers are all
+// greedy prefers the LONGEST match at the leftmost position, as an ARE does
+// (§9.7.3.5: `substring('abc' FROM 'a|ab')` is ab where RE2's leftmost-first
+// answers a); one holding a non-greedy quantifier keeps RE2's leftmost-first
+// preference (catalog r24).
+//
+// The result — a compiled regex or the refusal — is cached per (pattern,
+// options) in a bounded cache (regexCacheBound entries): a literal pattern
+// compiles once per process, and a column of distinct patterns cannot grow
+// the cache past the bound.
+func translateAndCompile(pattern string, f reFlags) (*sqlRegex, error) {
+	key := regexCacheKey{pattern: pattern, icase: f.icase, literal: f.literal}
+	gen := regexCacheGen.Load()
+	if v, ok := gen.m.Load(key); ok {
+		e := v.(*regexCacheEntry)
+		return e.re, e.err
+	}
+	re, err := compileSQLRegex(pattern, f)
+	gen.store(key, &regexCacheEntry{re: re, err: err})
+	return re, err
+}
+
+// mustCompileSQLRegex is translateAndCompile for an evaluator: a refusal is
+// raised.
+func mustCompileSQLRegex(pattern string, f reFlags) *sqlRegex {
+	re, err := translateAndCompile(pattern, f)
 	if err != nil {
-		areCache.Store(key, err)
 		panic(fatalEval{err})
 	}
-	areCache.Store(key, re)
 	return re
 }
 
-func translateAndCompile(pattern string, icase bool) (*regexp.Regexp, error) {
-	translated, err := aregexToRE2(pattern, icase)
+func compileSQLRegex(pattern string, f reFlags) (*sqlRegex, error) {
+	regexCompiles.Add(1)
+	var translated string
+	if f.literal {
+		translated = "(?s)" + literalARE(pattern, f.icase)
+	} else {
+		var err error
+		if translated, err = aregexToRE2(pattern, f.icase); err != nil {
+			return nil, err
+		}
+	}
+	re, err := regexp.Compile(translated)
 	if err != nil {
-		return nil, err
+		return nil, sqlerr.New("2201B", "invalid regular expression: %s", reErrorText(err))
 	}
-	re, cerr := regexp.Compile(translated)
-	if cerr != nil {
-		return nil, sqlerr.New("2201B", "invalid regular expression: %s", reErrorText(cerr))
+	// One parse answers every structural question about the pattern.
+	parsed, perr := syntax.Parse(translated, syntax.Perl)
+	if perr != nil {
+		return nil, sqlerr.New("2201B", "invalid regular expression: %s", reErrorText(perr))
 	}
-	return re, nil
+	if !hasLazyIn(parsed) {
+		re.Longest()
+	}
+	return &sqlRegex{
+		re:        re,
+		emptyAt:   emptyMatcherOf(parsed.Simplify()),
+		anchored:  beginsWithTextAnchor(parsed),
+		readsLeft: readsLeftContext(parsed),
+	}, nil
+}
+
+// readsLeftContext reports whether a parsed pattern holds an empty-width
+// assertion whose answer depends on the text before the position.
+func readsLeftContext(re *syntax.Regexp) bool {
+	switch re.Op {
+	case syntax.OpBeginText, syntax.OpBeginLine, syntax.OpWordBoundary, syntax.OpNoWordBoundary:
+		return true
+	}
+	for _, sub := range re.Sub {
+		if readsLeftContext(sub) {
+			return true
+		}
+	}
+	return false
+}
+
+// findAll is every match PostgreSQL takes in src, as submatch index slices:
+// RE2's non-overlapping matches plus the empty match an ARE also takes at
+// the end of a non-empty one (`regexp_count('baaac', 'a*')` is 4 there and
+// 3 under Go's FindAll).
+func (r *sqlRegex) findAll(src string) [][]int {
+	matches := r.re.FindAllStringSubmatchIndex(src, -1)
+	if r.emptyAt != nil {
+		matches = withAbuttingEmpty(r.emptyAt, src, matches)
+	}
+	return matches
+}
+
+// The bounded compile cache. A generation is a sync.Map (lock-free reads:
+// the pattern is almost always a constant looked up once per row); when a
+// generation reaches regexCacheBound entries it is replaced by an empty
+// one, so the cache holds at most regexCacheBound patterns (plus the
+// handful a concurrent store may add while the swap happens) however many
+// distinct patterns a column supplies.
+const regexCacheBound = 1024
+
+type regexCacheKey struct {
+	pattern        string
+	icase, literal bool
+}
+
+type regexCacheEntry struct {
+	re  *sqlRegex
+	err error
+}
+
+type regexCacheGeneration struct {
+	m sync.Map
+	n atomic.Int64
+}
+
+func (g *regexCacheGeneration) store(k regexCacheKey, e *regexCacheEntry) {
+	if g.n.Add(1) > regexCacheBound {
+		next := &regexCacheGeneration{}
+		if !regexCacheGen.CompareAndSwap(g, next) {
+			next = regexCacheGen.Load()
+		}
+		next.n.Add(1)
+		next.m.Store(k, e)
+		return
+	}
+	g.m.Store(k, e)
+}
+
+var (
+	regexCacheGen atomic.Pointer[regexCacheGeneration]
+	// regexCompiles counts compileSQLRegex calls (the benchmarks and the
+	// cache gate read it).
+	regexCompiles atomic.Int64
+)
+
+func init() { regexCacheGen.Store(&regexCacheGeneration{}) }
+
+// regexCacheLen is the number of patterns the current generation holds.
+func regexCacheLen() int {
+	n := 0
+	regexCacheGen.Load().m.Range(func(_, _ any) bool { n++; return true })
+	return n
 }
 
 func reErrorText(err error) string {

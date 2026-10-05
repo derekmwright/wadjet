@@ -12,12 +12,12 @@ import (
 	"math/bits"
 	"math/rand"
 	"net"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/derekmwright/wadjet/internal/geoip"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
 // --- Payload Search Functions ---
@@ -50,11 +50,8 @@ func fnPayloadMatches(args []any) any {
 	if len(args) < 2 || args[0] == nil || args[1] == nil {
 		return nil
 	}
-	matched, err := regexp.MatchString(toString(args[1]), toString(args[0]))
-	if err != nil {
-		return nil
-	}
-	return matched
+	// The pattern is read as every SQL pattern is (translateAndCompile).
+	return mustCompileSQLRegex(toString(args[1]), reFlags{}).re.MatchString(toString(args[0]))
 }
 
 func fnPayloadOffset(args []any) any {
@@ -79,34 +76,83 @@ func fnPayloadLength(args []any) any {
 
 // ── Regex: Additional ───────────────────────────────────────────────────────
 
+// fnRegexpCount is regexp_count(string, pattern [, start [, flags]]): the
+// number of matches PostgreSQL takes (findAll), searching from the start'th
+// CHARACTER. A start below 1 is 22023 as on the server; a NULL start or
+// flags is NULL.
 func fnRegexpCount(args []any) any {
 	if len(args) < 2 || args[0] == nil || args[1] == nil {
 		return nil
 	}
-	re := compileRegexpCached(fmt.Sprint(args[1]))
-	if re == nil {
+	start := int64(1)
+	if len(args) >= 3 {
+		if args[2] == nil {
+			return nil
+		}
+		start = ToInt64(args[2])
+		if txt, ok := args[2].(string); ok {
+			// An untyped literal ('3') is read as the integer it spells,
+			// as the server resolves it.
+			v, err := strconv.ParseInt(strings.TrimSpace(txt), 10, 32)
+			if err != nil {
+				panic(fatalEval{sqlerr.New("22P02", "invalid input syntax for type integer: %s", sqlerr.Quote(txt))})
+			}
+			start = v
+		}
+		if start < 1 {
+			panic(fatalEval{sqlerr.New("22023", "invalid value for parameter \"start\": %d", start)})
+		}
+	}
+	f, ok := regexFlagsArg(args, 3, "regexp_count")
+	if !ok {
 		return nil
 	}
-	matches := re.FindAllString(fmt.Sprint(args[0]), -1)
-	return int64(len(matches))
+	re := mustCompileSQLRegex(toString(args[1]), f)
+	s := toString(args[0])
+	if start > 1 {
+		off, ok := runeOffset(s, start-1)
+		if !ok {
+			return int64(0)
+		}
+		if re.readsLeft {
+			// A match at the start position would read the character
+			// before it (\y, \Y, ^, \A); Go's regexp matches a suffix only
+			// as a whole text, which would answer for a different string.
+			panic(fatalEval{sqlerr.New("0A000",
+				"regexp_count with a start position over a pattern holding ^, \\A, \\y or \\Y is not supported")})
+		}
+		s = s[off:]
+	}
+	return int64(len(re.findAll(s)))
+}
+
+// runeOffset is the byte offset of the n'th character of s (0-based); n
+// equal to the character count is len(s). ok=false: s is shorter.
+func runeOffset(s string, n int64) (int, bool) {
+	var i int64
+	for off := range s {
+		if i == n {
+			return off, true
+		}
+		i++
+	}
+	return len(s), i == n
 }
 
 func fnRegexpExtractAll(args []any) any {
 	if len(args) < 2 || args[0] == nil || args[1] == nil {
 		return nil
 	}
-	re := compileRegexpCached(fmt.Sprint(args[1]))
-	if re == nil {
-		return nil
-	}
-	matches := re.FindAllString(fmt.Sprint(args[0]), -1)
-	if matches == nil {
+	re := mustCompileSQLRegex(toString(args[1]), reFlags{})
+	src := toString(args[0])
+	matches := re.findAll(src)
+	if len(matches) == 0 {
 		return "[]"
 	}
 	// Return as JSON array string (no native array type yet)
 	parts := make([]string, len(matches))
 	for i, m := range matches {
-		escaped, _ := json.Marshal(m)
+		escaped, _ := json.Marshal(src[m[0]:m[1]])
 		parts[i] = string(escaped)
 	}
 	return "[" + strings.Join(parts, ",") + "]"
@@ -116,11 +162,8 @@ func fnRegexpSplit(args []any) any {
 	if len(args) < 2 || args[0] == nil || args[1] == nil {
 		return nil
 	}
-	re := compileRegexpCached(fmt.Sprint(args[1]))
-	if re == nil {
-		return nil
-	}
-	parts := re.Split(fmt.Sprint(args[0]), -1)
+	re := mustCompileSQLRegex(toString(args[1]), reFlags{})
+	parts := re.re.Split(toString(args[0]), -1)
 	jsonParts := make([]string, len(parts))
 	for i, p := range parts {
 		escaped, _ := json.Marshal(p)
