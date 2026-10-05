@@ -2935,6 +2935,14 @@ on any pipeline goroutine and through any subquery planner, replays it.
 `EXPLAIN VERBOSE` names each such CTE (`CTE s: volatile, evaluated once; every
 reference reads that result`).
 
+A reference PostgreSQL never BEGINS is not a reader: under a constant-false
+filter or a LIMIT 0 its CTE Scan never runs, so the body is not evaluated for
+it. Such a reference gives up its claim on the one evaluation and is expanded
+in place with its samplers removed (`dropUnbegunSamples`): `WITH c AS (SELECT *
+FROM tb_p TABLESAMPLE BERNOULLI (101)) SELECT count(*) FROM c a JOIN c b ON
+a.id = b.id WHERE false` is 0, as on PostgreSQL, and read without the filter it
+is 2202H on both (unbegun/selfjoin\_where\_false, unbegun/sampled\_101\_read).
+
 A reference count is not needed: a volatile body read once is evaluated once
 either way, and PostgreSQL materializes it too (`ref1_from/rnd`: one `CTE
 Scan`). A DETERMINISTIC body is untouched — inlined at each reference with
