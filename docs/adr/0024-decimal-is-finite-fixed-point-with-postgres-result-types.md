@@ -1227,7 +1227,7 @@ its result is plain numeric whenever the arms' typmods differ (a
 numeric(10,2) arm beside a numeric, an integer or a NULL arm; measured over
 670 CREATE TABLE AS set operations), and each value prints its own scale —
 but a SELECT here marks the result only when every arm is marked and prints
-a mixed one at its one scale (numeric-decimal r18): marking it would drop
+a mixed one — an arm of another declaration, or an untyped NULL or quoted literal arm — at its one scale (set-operations r4, numeric-decimal r18): marking it would drop
 the trailing zeros of the constrained arm's values that this engine prints
 today. The writer of an exchange file refuses a batch whose column carries
 another mark than the file's (ADR-0010), and an empty join side pads its
