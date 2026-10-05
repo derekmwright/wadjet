@@ -5,7 +5,6 @@ package physical
 import (
 	"strings"
 
-	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/expr"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
@@ -115,15 +114,14 @@ func (w *declWalk) setOpDeclaredOutputSchema(root *logical.Node) ([]parquet.Colu
 	if len(arms) < 2 {
 		return nil, false
 	}
-	// An UNKNOWN-typed literal arm declares STRING here, and it has no type of
-	// its own: PostgreSQL resolves the union to the OTHER arms' type
-	// (`SELECT '1.5' … UNION ALL SELECT a …` is numeric). Skipping those arms
-	// is what stops the fold declining on STRING-vs-DECIMAL and publishing the
-	// leftmost arm's STRING — the right value under OID 25, which is the exact
-	// divergence the wire arm exists for.
-	unknown := setOpArmUnknownLiteralSchemas(n, len(arms), len(arms[0]))
+	// An untyped item (a quoted literal, a bare NULL) declares STRING here,
+	// and it has no type of its own: PostgreSQL resolves the union to the
+	// OTHER arms' type (`SELECT '1.5' … UNION ALL SELECT a …` is numeric).
+	// The result column itself is the one rule's (setOpResultColumn), so the
+	// declaration and the executed column describe one type and one mark.
+	facts := setOpArmFactSchemas(n, len(arms), len(arms[0]))
 	base := 0
-	for base < len(arms) && unknown[base] != nil && allTrue(unknown[base]) {
+	for base < len(arms) && facts[base] != nil && setOpAllUntyped(facts[base]) {
 		base++
 	}
 	if base == len(arms) {
@@ -131,67 +129,41 @@ func (w *declWalk) setOpDeclaredOutputSchema(root *logical.Node) ([]parquet.Colu
 	}
 	out := make([]parquet.Column, len(arms[base]))
 	copy(out, arms[base])
+	cols := make([]SetOpColType, len(arms))
+	armFacts := make([]setOpArmFact, len(arms))
 	for i := range out {
-		if unknown[base] != nil && i < len(unknown[base]) && unknown[base][i] {
-			for a := range arms {
-				if (unknown[a] == nil || i >= len(unknown[a]) || !unknown[a][i]) && i < len(arms[a]) {
-					out[i].Type = arms[a][i].Type
-					out[i].Fields = arms[a][i].Fields
-					out[i].ElementType = arms[a][i].ElementType
-					out[i].Precision, out[i].Scale = arms[a][i].Precision, arms[a][i].Scale
-					break
-				}
-			}
-		}
-		metas := []batch.DecimalType{}
-		for ai, arm := range arms {
+		for a, arm := range arms {
 			if i >= len(arm) {
 				return nil, false
 			}
-			if unknown[ai] != nil && i < len(unknown[ai]) && unknown[ai][i] {
-				continue
-			}
-			t, ok := setOpWiden(out[i].Type, arm[i].Type)
-			if !ok {
-				// Two types the ladder does not reconcile (two strings, two
-				// dates, a mismatch): the first arm's declaration stands,
-				// which is what the executed schema does too.
-				metas = nil
-				break
-			}
-			out[i].Type = t
-			// Two ARRAY arms fold their ELEMENTS on the same ladder, so the
-			// declared result is the array the stage arms write (arc CW).
-			if el, err := setOpElementTarget(SetOpColType{Typ: out[i].Type, ElementType: out[i].ElementType},
-				SetOpColType{Typ: arm[i].Type, ElementType: arm[i].ElementType}, out[i].Name, "UNION"); err == nil {
-				out[i].ElementType = el
-			}
-			if m, ok := batch.DecimalTypeOf(arm[i].Type,
-				batch.DecimalType{Precision: arm[i].Precision, Scale: arm[i].Scale}); ok && metas != nil {
-				metas = append(metas, m)
-			} else {
-				metas = nil
-			}
+			cols[a] = setOpColTypeOfColumn(arm[i])
+			armFacts[a] = facts[a].at(i)
 		}
+		want, _, err := setOpResultColumn(cols, armFacts, out[i].Name, "UNION")
+		if err != nil || !want.Known {
+			// Two types the ladder does not reconcile (two strings, two
+			// dates, a mismatch): the first arm's declaration stands, which
+			// is what the executed schema does too.
+			out[i].Unconstrained = false
+			if out[i].Type == parquet.TypeDecimal {
+				out[i].Precision, out[i].Scale = 0, 0
+			}
+			continue
+		}
+		out[i].Type = want.Typ
+		if want.Fields != nil {
+			out[i].Fields = want.Fields
+		}
+		if want.ElementType != nil {
+			out[i].ElementType = want.ElementType
+		}
+		out[i].Precision, out[i].Scale = 0, 0
 		out[i].Unconstrained = false
-		if out[i].Type != parquet.TypeDecimal {
-			out[i].Precision, out[i].Scale = 0, 0
-			continue
-		}
-		m, ok := batch.DecimalCommon(metas)
-		if !ok {
-			// No (p,s) the arms agree on: precision 0 is the honest
+		if want.Typ == parquet.TypeDecimal && want.DecKnown {
+			// No (p,s) the arms agree on stays precision 0: the honest
 			// "unconstrained" answer, never a fabricated one (#458).
-			out[i].Precision, out[i].Scale = 0, 0
-			continue
-		}
-		out[i].Precision, out[i].Scale = m.Precision, m.Scale
-		// A bare copy of a column created from an unconstrained numeric only
-		// when EVERY arm is one (ADR-0024 §10): an arm of another column
-		// keeps its own text, so the result is not printed as such a column.
-		out[i].Unconstrained = true
-		for _, arm := range arms {
-			out[i].Unconstrained = out[i].Unconstrained && arm[i].Unconstrained
+			out[i].Precision, out[i].Scale = want.Dec.Precision, want.Dec.Scale
+			out[i].Unconstrained = want.Dec.Unconstrained
 		}
 	}
 	return out, true
@@ -216,11 +188,11 @@ func setOpRoot(n *logical.Node) *logical.Node {
 	return nil
 }
 
-// setOpArmUnknownLiteralSchemas marks, per ARM and per column, the select items
-// that are UNKNOWN-typed literals, flattened the way setOpArmSchemas flattens a
-// nested set operation.
-func setOpArmUnknownLiteralSchemas(n *logical.Node, arms, cols int) [][]bool {
-	out := make([][]bool, 0, arms)
+// setOpArmFactSchemas is each arm's SetOpArmFacts, flattened the way
+// setOpArmSchemas flattens a nested set operation (the one rule is a fold, so
+// the flattened arms give the nested operations' answer).
+func setOpArmFactSchemas(n *logical.Node, arms, cols int) []SetOpArmFacts {
+	out := make([]SetOpArmFacts, 0, arms)
 	var walk func(*logical.Node)
 	walk = func(m *logical.Node) {
 		for _, c := range m.Children {
@@ -228,7 +200,7 @@ func setOpArmUnknownLiteralSchemas(n *logical.Node, arms, cols int) [][]bool {
 				walk(inner)
 				continue
 			}
-			out = append(out, setOpUnknownLiteralArms(c, cols))
+			out = append(out, setOpArmFactsOf(c, cols))
 		}
 	}
 	walk(n)
@@ -238,13 +210,13 @@ func setOpArmUnknownLiteralSchemas(n *logical.Node, arms, cols int) [][]bool {
 	return out[:arms]
 }
 
-func allTrue(b []bool) bool {
-	for _, v := range b {
-		if !v {
+func setOpAllUntyped(f SetOpArmFacts) bool {
+	for _, v := range f {
+		if !v.untyped {
 			return false
 		}
 	}
-	return len(b) > 0
+	return len(f) > 0
 }
 
 // setOpArmSchemas is the declared output schema of each arm of a set

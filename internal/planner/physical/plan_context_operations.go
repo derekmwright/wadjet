@@ -361,10 +361,6 @@ func (PlanContext) RewriteColRefs(n plansql.Node, sub func(*plansql.ColRef) (pla
 	return rewriteColRefs(n, sub)
 }
 
-func (PlanContext) SetOpArmIsUnknownLit(unknown [][]bool, i, col int) bool {
-	return setOpArmIsUnknownLit(unknown, i, col)
-}
-
 func (PlanContext) SetOpArmProjection(arm *logical.Node, outNames []string) (SetOpArmPlan, error) {
 	return setOpArmProjection(arm, outNames)
 }
@@ -385,12 +381,8 @@ func (PlanContext) SetOpOutputNames(arm *logical.Node) []string {
 	return setOpOutputNames(arm)
 }
 
-func (PlanContext) SetOpTargetType(plans []SetOpArmPlan, col int, name, op string, unknown [][]bool) (SetOpColType, bool, error) {
-	return setOpTargetType(plans, col, name, op, unknown)
-}
-
-func (PlanContext) SetOpUnknownLiteralArms(arm *logical.Node, cols int) []bool {
-	return setOpUnknownLiteralArms(arm, cols)
+func (PlanContext) SetOpTargetType(plans []SetOpArmPlan, col int, name, op string) (SetOpColType, bool, error) {
+	return setOpTargetType(plans, col, name, op)
 }
 
 func (PlanContext) SortInputSetOpWidth(child *logical.Node) (int, bool) {

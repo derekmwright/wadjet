@@ -50,7 +50,7 @@ func TestUnifySetOpSchemasDecimalIntegerRung(t *testing.T) {
 		{"int64_int64", i64, i64, parquet.TypeInt64, 0, 0, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			out := unifySetOpSchemas([]parquet.Column{tc.left}, []parquet.Column{tc.right})
+			out := unifySetOpSchemas([]parquet.Column{tc.left}, []parquet.Column{tc.right}, nil, nil)
 			got := out[0]
 			if !tc.wantChange {
 				if got.Type != tc.left.Type {

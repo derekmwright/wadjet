@@ -34,7 +34,7 @@ func TestReconcileEmitsNoCoercionWhenTheArmsAlreadyAgree(t *testing.T) {
 
 	t.Run("identical", func(t *testing.T) {
 		plans := []physical.SetOpArmPlan{arm(dec(9, 2)), arm(dec(9, 2))}
-		if err := reconcileSetOpArmTypes(plans, []string{"v"}, "UNION", nil); err != nil {
+		if err := reconcileSetOpArmTypes(plans, []string{"v"}, "UNION"); err != nil {
 			t.Fatalf("reconcile: %v", err)
 		}
 		for i, p := range plans {
@@ -46,7 +46,7 @@ func TestReconcileEmitsNoCoercionWhenTheArmsAlreadyAgree(t *testing.T) {
 
 	t.Run("three_identical_arms", func(t *testing.T) {
 		plans := []physical.SetOpArmPlan{arm(dec(18, 4)), arm(dec(18, 4)), arm(dec(18, 4))}
-		if err := reconcileSetOpArmTypes(plans, []string{"v"}, "UNION", nil); err != nil {
+		if err := reconcileSetOpArmTypes(plans, []string{"v"}, "UNION"); err != nil {
 			t.Fatalf("reconcile: %v", err)
 		}
 		for i, p := range plans {
@@ -59,7 +59,7 @@ func TestReconcileEmitsNoCoercionWhenTheArmsAlreadyAgree(t *testing.T) {
 	t.Run("non_decimal_arms_are_untouched", func(t *testing.T) {
 		i64 := physical.SetOpColType{Typ: parquet.TypeInt64, Known: true}
 		plans := []physical.SetOpArmPlan{arm(i64), arm(i64)}
-		if err := reconcileSetOpArmTypes(plans, []string{"v"}, "UNION", nil); err != nil {
+		if err := reconcileSetOpArmTypes(plans, []string{"v"}, "UNION"); err != nil {
 			t.Fatalf("reconcile: %v", err)
 		}
 		for i, p := range plans {
@@ -75,7 +75,7 @@ func TestReconcileEmitsNoCoercionWhenTheArmsAlreadyAgree(t *testing.T) {
 	// whole needed reconciling — the coercion is per ARM, not per operation.
 	t.Run("only_the_differing_arm_is_moved", func(t *testing.T) {
 		plans := []physical.SetOpArmPlan{arm(dec(9, 2)), arm(dec(18, 4))}
-		if err := reconcileSetOpArmTypes(plans, []string{"v"}, "UNION", nil); err != nil {
+		if err := reconcileSetOpArmTypes(plans, []string{"v"}, "UNION"); err != nil {
 			t.Fatalf("reconcile: %v", err)
 		}
 		if len(plans[0].Coerce) != 1 {
@@ -94,7 +94,7 @@ func TestReconcileEmitsNoCoercionWhenTheArmsAlreadyAgree(t *testing.T) {
 	// (9,4) resolves to (20,4), which is neither.
 	t.Run("both_arms_move_when_neither_is_the_target", func(t *testing.T) {
 		plans := []physical.SetOpArmPlan{arm(dec(18, 2)), arm(dec(9, 4))}
-		if err := reconcileSetOpArmTypes(plans, []string{"v"}, "UNION", nil); err != nil {
+		if err := reconcileSetOpArmTypes(plans, []string{"v"}, "UNION"); err != nil {
 			t.Fatalf("reconcile: %v", err)
 		}
 		for i, p := range plans {
@@ -117,7 +117,7 @@ func TestReconcileEmitsNoCoercionWhenTheArmsAlreadyAgree(t *testing.T) {
 	// calls the honest interim.
 	t.Run("an_unresolved_arm_is_refused", func(t *testing.T) {
 		plans := []physical.SetOpArmPlan{arm(dec(9, 2)), arm(physical.SetOpColType{Typ: parquet.TypeDecimal, Known: true})}
-		err := reconcileSetOpArmTypes(plans, []string{"v"}, "UNION", nil)
+		err := reconcileSetOpArmTypes(plans, []string{"v"}, "UNION")
 		if err == nil {
 			t.Fatalf("an unresolvable DECIMAL target was accepted; the arms then keep their own scales, "+
 				"which is a silently wrong answer (#551). coercions: %+v / %+v",
@@ -138,7 +138,7 @@ func TestReconcileEmitsNoCoercionWhenTheArmsAlreadyAgree(t *testing.T) {
 	t.Run("every_arm_unresolved_is_refused_too", func(t *testing.T) {
 		unres := physical.SetOpColType{Typ: parquet.TypeDecimal, Known: true}
 		plans := []physical.SetOpArmPlan{arm(unres), arm(unres)}
-		if err := reconcileSetOpArmTypes(plans, []string{"v"}, "UNION", nil); err == nil {
+		if err := reconcileSetOpArmTypes(plans, []string{"v"}, "UNION"); err == nil {
 			t.Fatal("two unresolvable DECIMAL arms were accepted")
 		}
 	})
