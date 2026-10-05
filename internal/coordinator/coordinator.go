@@ -4206,8 +4206,16 @@ func schemaOrDeclared(gathered []parquet.Column, stages []dagplan.Stage) []parqu
 	if len(gathered) > 0 {
 		// The batches' types, with the PLAN's answer to "a bare copy of a
 		// column created from an unconstrained numeric" (ADR-0024 §10): the
-		// printer the doors apply reads it, and a vector cannot carry it.
-		return exec.WithPlannedUnconstrained(gathered, dagplan.GatherOutputSchema(stages))
+		// printer the doors apply reads it. A plan with no gather
+		// declaration — the asynchronous door's one pipeline task — leaves
+		// the batches' own marks, which the result files' headers carried
+		// in-band (wshf.DecimalUnconstrainedBit); clearing them printed the
+		// stored scale on that door alone.
+		hint := dagplan.GatherOutputSchema(stages)
+		if len(hint) != len(gathered) {
+			return gathered
+		}
+		return exec.WithPlannedUnconstrained(gathered, hint)
 	}
 	return dagplan.GatherOutputSchema(stages)
 }
