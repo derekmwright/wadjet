@@ -1,6 +1,6 @@
 # ADR-0044: The system catalog is relations the engine scans
 
-Status: Accepted (2026-09-23, #1251, arc PC)
+Status: Accepted (2026-09-23, #1251)
 
 Related: ADR-0039 (a table function in FROM is a relation — the path the
 catalog relations travel), ADR-0034 (metadata follows the effective table
@@ -55,7 +55,7 @@ it one more spelling.
    values arrive masked. A DENIED column or relation is absent from every
    catalog relation. The catalog describes what the identity can SELECT;
    hiding a masked column's definition would describe a relation the
-   identity's own `SELECT *` contradicts (arc PC, B5).
+   identity's own `SELECT *` contradicts (B5).
 4. **What the catalog lists:** pg_catalog, public and information_schema;
    the user tables and the system relations themselves (pg_class,
    pg_attribute, information_schema.tables/columns); the types the wire

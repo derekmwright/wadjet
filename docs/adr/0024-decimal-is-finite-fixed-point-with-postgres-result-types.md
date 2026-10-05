@@ -8,14 +8,14 @@ band: every door where the `(p, s)` is a DECLARATION already enforces it and
 agrees with PostgreSQL, the shapes the issue named as unguarded are the ones
 PostgreSQL leaves UNCONSTRAINED, and the real residual is the opposite
 divergence — see "The second of those two, measured 2026-09-03". Amended
-2026-09-12 (arc A2) with §2a: how an INTEGER expression's PostgreSQL width is
+2026-09-12 with §2a: how an INTEGER expression's PostgreSQL width is
 DECIDED, which the `SUM(int2/int4) → bigint ; SUM(int8) → numeric` line above
 assumes and never states.
-Amended 2026-09-28 (arc IR, #1353) with §2c: a float-carried numeric (a
+Amended 2026-09-28 (#1353) with §2c: a float-carried numeric (a
 division, a transcendental function, EXTRACT) keeps its FLOAT64 carrier and
 OID and declares PostgreSQL's CATEGORY beside it, which is what an integer
 assignment rounds by.
-Amended 2026-10-02 (arc NX, #1386 #1392 #1450): an integer CAST is an
+Amended 2026-10-02 (#1386 #1392 #1450): an integer CAST is an
 integer operand of exact arithmetic wherever it sits (DECIMAL(19,0), as
 every integer expression); a numeric literal a double cannot carry — a
 fractional spelling, or an integer past int64 — compiles to the DECIMAL its
@@ -37,7 +37,7 @@ TIMESTAMP, INTERVAL, UUID, an array or a vector refuses the type pair,
 is still a double there (`CAST(14.5 AS DATE)` the day count 1970-01-15,
 `CAST(14.5 AS UUID)` 22P02). An explicit integer CAST reads §2c's category
 of its operand and rounds a numeric half away from zero.
-Amended 2026-10-03 (arc WD, #1436), narrowed 2026-10-04: a LAG / LEAD
+Amended 2026-10-03 (#1436), narrowed 2026-10-04: a LAG / LEAD
 default that is a NULL literal under a CAST contributes its type family and
 no width to the result's common type (`LAG(v, 1, CAST(NULL AS NUMERIC))`
 over a bigint is DECIMAL(38,0)); elsewhere a bare NUMERIC cast of the NULL
@@ -115,7 +115,7 @@ Category resolution is PostgreSQL's, already pinned for set operations by
     windowed SUM/AVG answer what the grouped ones answer, exactly
 
 **The last line held for DECIMAL from #586 and for INTEGER only from #987**
-(2026-09-07, arc K2). A windowed SUM/AVG over an int4/int8 column accumulated
+(2026-09-07). A windowed SUM/AVG over an int4/int8 column accumulated
 in float64 — so it declared float8 where the grouped spelling declared bigint
 or numeric, and past 2^53 it answered a number that depended on the ORDER the
 rows arrived in. `exec.IntegerAccOutputType` is now the ONE table the grouped
@@ -124,7 +124,7 @@ read, and `exec.windowExactFrames` runs the integer arms on the same Int128
 carrier as the grouped path, in every frame form and in both spilled
 evaluators. A total the declaration cannot hold is item 4's 22003.
 
-#### 2a. An integer's PostgreSQL WIDTH is a DECLARATION, and it rides the column (2026-09-12, arc A2)
+#### 2a. An integer's PostgreSQL WIDTH is a DECLARATION, and it rides the column (2026-09-12)
 
 The rule table's `SUM(int2/int4) → bigint ; SUM(int8) → numeric` presumes the
 argument's width is known. For a bare column it is the schema's. For a
@@ -160,14 +160,14 @@ divergence entry that recorded the arc's measurements, function by function
 and position by position, is ADR-0012's bitwise-family item; this is where the
 RULE lives.
 
-#### 2b. A literal's width is its DECLARED TYPE; an expression's is not (2026-09-15, arc ND, #1070)
+#### 2b. A literal's width is its DECLARED TYPE; an expression's is not (2026-09-15, #1070)
 
 §2a says the width is "METADATA BESIDE the carrier" and gives the reason:
 declaring an INT32 vector for an int4-domain expression "would put every such
-value in front of the #361 store guard". Arc ND set out to reverse that
+value in front of the #361 store guard". Numeric declaration measurements tested the opposite
 reading — `batch.IntegerRangeError` raises `22003 integer out of range`, which
 is PostgreSQL's own answer for `2147483647 + 1`, so being in front of that
-guard is agreement rather than a hazard — and MEASURED the result on five arms.
+guard agrees with PostgreSQL — with the result measured on five arms.
 Half of it holds and half does not, and the line between them is the DAG.
 
 **What holds: a LITERAL.** An integer literal that fits int4 declares
@@ -407,7 +407,7 @@ visible. Filed as #709 and pinned by
 `coordinator.TestAggregateOverADerivedColumnTwoPath`, each pin failing when
 the DAG starts agreeing.
 
-#### 2c. A float-carried numeric declares PostgreSQL's CATEGORY beside the carrier (2026-09-28, arc IR, #1353)
+#### 2c. A float-carried numeric declares PostgreSQL's CATEGORY beside the carrier (2026-09-28, #1353)
 
 Division and the transcendental functions over numeric operands are computed
 in float64 (Consequences, "The transcendental functions stay float64") and
@@ -448,7 +448,7 @@ evaluates outside any plan (a MERGE action's) is declared by the Planner's
 own resolver for it (physical.DeclaredTypeOfNodeWith), the same declaration
 a plan stamps.
 
-Amended 2026-10-02 (arc NX, #1392): an explicit integer CAST reads the
+Amended 2026-10-02 (#1392): an explicit integer CAST reads the
 category too. The cast kernel asks the same walk about its operand's AST
 against the input batch's columns (expr.SetCategoryResolver, registered by
 the planner beside the shape resolver), so every arm — a DAG stage included
@@ -693,7 +693,7 @@ a change to what `exec.ProjectColumn.Precision` MEANS (a cap, or a hint), and
 it is not made here.
 
 **#712 and #764 are ONE item, and it is a CARRIER change.** (Added 2026-09-06,
-arc H3's earlier implementation; both re-measured on this tree against live PostgreSQL 17.11,
+the earlier decimal arithmetic implementation; both re-measured on this tree against live PostgreSQL 17.11,
 and both DEFERRED rather than bounded.) The paragraph above ends at a
 declaration; the arc that re-opened it found the other half is the same fact.
 
@@ -1234,7 +1234,7 @@ which is why the defect was invisible for as long as it was.
     (Amended 2026-09-28, #1353: the VALUE and the declared carrier stay
     float64; the declaration carries PostgreSQL's numeric category beside it,
     §2c, which is what an integer assignment rounds by.)
-  - **A fractional literal IS numeric (amended 2026-09-24, arc VL;
+  - **A fractional literal IS numeric (amended 2026-09-24;
     the paragraph below is the position it replaced).** The literal
     declares the DECIMAL(p,s) of its spelling wherever it sits — a bare
     projection (`SELECT 2.50` is 2.50, OID 1700), a CASE / COALESCE /

@@ -420,7 +420,7 @@ the build side were rejected. The bloom stays valid for the IN-MEMORY probe
 path, whose key set is exactly what the index holds, so what declines is the
 pushdown and not the filter (`exec.TestASpilledBuildDoesNotPublishItsBloom`).
 
-### 2026-09-18 (arc JR): an outer join's ON RESIDUAL is evaluated AT the join, crosses a stage boundary by IDENTITY, and a keyless outer join is not a cross join
+### 2026-09-18: an outer join's ON RESIDUAL is evaluated AT the join, crosses a stage boundary by IDENTITY, and a keyless outer join is not a cross join
 
 Two positions this arc settled, both about WHERE a predicate runs and therefore
 about which build the memory model has to account for.
@@ -484,7 +484,7 @@ reads every build row, so its build must fit the budget and says so loudly when
 it cannot. Widening what a residual may contain does not move that boundary —
 it moves shapes off the refusal and onto the routed-probe side of it.
 
-### 2026-09-19 (arc CJ): a join's build OWNS the row set it stores (#1189)
+### 2026-09-19: a join's build OWNS the row set it stores (#1189)
 
 The 2026-09-03 amendment above establishes that a CROSS join's probe does not
 route by a key and therefore walks `buildBatches` DIRECTLY, entry by entry, for
@@ -522,7 +522,7 @@ relation's five rows, since the third file holds one FALSE row and a batch the
 filter empties never arrives at all (`exec.Filter` returns nil for it). `GROUP
 BY b1.f` reports thirteen surviving rows whose own `f` is FALSE: one rejected
 build row per probe row. Where every arriving batch keeps at least one row —
-the ordinary case, and the one arc JR's four pinned cells measured — what
+the ordinary case, and the one measured by the four pinned outer-join cells — what
 comes back IS the whole unfiltered relation per probe row. (The 52 is 13 x 4,
 not 13 x 5 — measured by the earlier measurement of this amendment.) Fifty-seven of
 the sixty-six NoREC row-count mismatches a 200-database SQLancer run reached
@@ -545,7 +545,7 @@ arms against PostgreSQL 17.11),
 `server.TestCJARowFilterOverACrossJoinsBuildKeepsItsRowsOut` (nine doors),
 `pgwire.TestCJACrossJoinsBuildColumnDeclaresItsOwnType` (both format codes).
 
-### 2026-10-03 (arc SJ): a partition replay emits the join's own output, whatever the other side's size (#1359)
+### 2026-10-03: a partition replay emits the join's own output, whatever the other side's size (#1359)
 
 The grace hash join emits an evicted build partition's rows from a REPLAY at
 the end of the probe (`HashJoinProbe.NextFlush`): a temporary join over the

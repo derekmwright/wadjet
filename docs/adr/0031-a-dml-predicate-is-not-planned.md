@@ -1,7 +1,7 @@
 # ADR-0031: A DML predicate is compiled, not planned — and closing that needs a projectable row identity
 
-Status: Accepted (2026-09-03, arc D3), AMENDED 2026-09-04 (arc E6) and
-2026-09-19 (arc PT). The POSITION stands: a DML predicate is compiled, not
+Status: Accepted (2026-09-03), AMENDED 2026-09-04 and
+2026-09-19. The POSITION stands: a DML predicate is compiled, not
 planned, and the projectable-row-identity work below is still blocked and still
 unstarted. The 2026-09-04 amendment changes the CONCLUSION drawn from it — #688
 is closed, because answering a subquery in a DML predicate never needed the
@@ -32,14 +32,14 @@ is a legal and common capability. Five of them are pinned in the DML census
 (`internal/server/pgwire/dml_census_test.go`, `bug: "#688"`) with
 PostgreSQL's answer recorded beside the refusal.
 
-Arc B deferred #688 under rule 11 because the BOUNDED fix — handing
+The bounded DML approach left #688 deferred under rule 11 because the BOUNDED fix — handing
 `expr.CompileWithRunner` a `db.Query` closure, three lines — closes
 `IN (SELECT …)`, `NOT IN (SELECT …)` and the scalar subquery while leaving
 CORRELATED `EXISTS` refused, and correlated `EXISTS` is the shape #688's own
 body names first. A fix that leaves the issue's headline shape pinned is not
 shipped.
 
-Arc D3 was asked to attempt the STRUCTURAL fix instead. This record is what
+DML predicate planning requires the STRUCTURAL fix instead. This record is what
 that attempt found.
 
 ## Decision
@@ -193,7 +193,7 @@ a projected identity can rest on it.
   amendment at the end of this record says what that buys.
 - `BuildDMLPredicate`'s doc comment names this record.
 
-## What the deferral got wrong (2026-09-04, arc E6)
+## What the deferral got wrong (2026-09-04)
 
 The blocked design above is for planning the STATEMENT — `SELECT <row identity>
 FROM t WHERE <pred>`, the door consuming a set of `(file, row)` identities. It
@@ -253,7 +253,7 @@ model for a correlated subquery it cannot express as a join. The DML door does
 not decorrelate, and cannot: it has no join to lower into.
 
 
-## Amendment, 2026-09-19 (arc PT): a DML predicate is not planned, but it IS typed
+## Amendment, 2026-09-19: a DML predicate is not planned, but it IS typed
 
 A predicate that is not a boolean is a type error in SQL, and the planner had
 said so for a `SELECT`'s `WHERE` since #599. The DML door does not reach the

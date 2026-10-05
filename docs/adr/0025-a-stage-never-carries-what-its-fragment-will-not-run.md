@@ -1,6 +1,6 @@
 # ADR-0025: A stage never carries a predicate or a projection its fragment will not run
 
-Status: Accepted (2026-08-29, #656; amended 2026-09-03 by arc S1 — a scan's read set is a plan-time fact, and a column the gather computes is typed by the plan; amended 2026-09-06 by arc H2 — a consumer that resolves a column by a SECOND spelling is NOT SETTLED, and #770 is deferred with its census; SETTLED 2026-09-07 by arc J2 — a consumer binds through the identity its PRODUCER published, and the payload is widened only for a value no published spelling reaches (#770, #947, #949); amended 2026-09-11 by arc A2 — a WINDOW ARGUMENT naming a computed derived alias is materialized by its producer, exactly as a window KEY already was (#1018))
+Status: Accepted (2026-08-29, #656; amended 2026-09-03 — a scan's read set is a plan-time fact, and a column the gather computes is typed by the plan; amended 2026-09-06 — a consumer that resolves a column by a SECOND spelling is NOT SETTLED, and #770 is deferred with its census; SETTLED 2026-09-07 — a consumer binds through the identity its PRODUCER published, and the payload is widened only for a value no published spelling reaches (#770, #947, #949); amended 2026-09-11 — a WINDOW ARGUMENT naming a computed derived alias is materialized by its producer, exactly as a window KEY already was (#1018))
 
 ## Context
 
@@ -323,7 +323,7 @@ The sections above are about a stage carrying a predicate or a projection its
 fragment will not RUN. This is the mirror: a stage whose fragment WILL run
 something, over a column its payload does not carry — or carries under another
 name. It was recorded here as an OPEN position on 2026-09-06 and is settled by
-arc J2.
+the expression naming.
 
 A join stage's `Columns` is an OutputFilter and its exchanges' are payload
 manifests, both built from the join node's `NeededColumns` at stage emission.
@@ -432,7 +432,7 @@ agreeing, and it moves three shapes in
 `TestAWindowBetweenTheSelectListAndItsJoinThreeArms` from right to wrong.
 
 **Carrying the second spelling down, bounded by "the consuming stage already
-names it"**, was built in arc H2 and withdrawn in the same branch. It closed
+names it"**, was implemented for window declarations and then withdrawn. It closed
 the filed query at exactly THREE relations and reopened at four: the bound is a
 MODEL of where the value can be needed, not a fact about it. Nothing in the
 decision above asks whether a stage already names anything — it asks the
@@ -443,7 +443,7 @@ widening: measured, it put `n_name` / `n1.n_name` / `n2.n_name` onto eight
 TPC-H joins and exchanges across Q05/Q07/Q08/Q09/Q10 and `c_name` /
 `l_quantity` onto two Q18 joins. The decision above pays none of it, and the
 measurement is the gate: `TestTPCHStageDumpGolden` is byte-identical across
-every commit of arc J2, because every TPC-H consumer's spelling already binds
+every measured version of expression naming, because every TPC-H consumer's spelling already binds
 and a respell costs no bytes.
 
 ### What is gated
@@ -461,7 +461,7 @@ is DELETED: every shape in it answers.
 ### NOT settled: two shapes, both pinned fail-on-agree
 
 The third — **a window's PARTITION BY key** — was pinned here and is CLOSED by
-arc K1 (#975); its record is below, under "SETTLED: the sixth consumer". Two
+the window partition binding (#975); its record is below, under "SETTLED: the sixth consumer". Two
 shapes this decision does not reach remain.
 
 **A join stage whose tasks write different `.wshf` schemas.** An OUTER join with
@@ -492,7 +492,7 @@ means making some fragment RUN the item, which is the attach pass's decision
 and not a spelling.
 
 
-## SETTLED: the sixth consumer — a window's PARTITION BY key (2026-09-07, #975, arc K1)
+## SETTLED: the sixth consumer — a window's PARTITION BY key (2026-09-07, #975)
 
 The key is bound at EMISSION and has to be, because it is also the stage's
 DISTRIBUTION: the exchange ahead of a window stage hash-partitions on it
@@ -528,7 +528,7 @@ is a fact about the executor, not a preference:
   arm-aware helper the window's ARGUMENT has used since #742, at the
   PARTITION BY and window-ORDER-BY sites as well now.
 
-Neither is reachable until the qualifier survives, which is why arc J2's
+Neither is reachable until the qualifier survives, which is why the expression naming's
 attempt to route the key through that helper alone moved nothing: the arm had
 already been erased upstream of it.
 
@@ -1471,9 +1471,9 @@ at its top level and has no subtests). Zero fail on the tip. Counted with
 `CTEFilterAboveAJoinChain…` 2. `TestTPCHStageDumpGolden` PASSES in that tree,
 which is the byte-identical claim above checked from the other direction.
 (Earlier figures in this ADR — 22, 37, 42, 46, 47 — were each true of the gate
-set of their own round and were restated as if they were the current one; 47
+set measured at that time and were restated as if they were the current one; 47
 was also short by two, the measurement's re-derivation being 49 across nine because
-the `OrAcrossArms` pin entries belong in the count. Each fix ROUND adds gates,
+the `OrAcrossArms` pin entries belong in the count. The gate set grows with each fix,
 so the number is only meaningful with the tree and the gate set it was measured
 on, both of which this paragraph names.)
 
@@ -2309,7 +2309,7 @@ differently and the store guard raised 22003 on a query PostgreSQL answers.
 declaration there, and the DAG keeps the raw origins because on the DAG they
 are true.
 
-### A SCAN'S READ SET IS A PLAN-TIME FACT, and so is the type of a column the GATHER computes (2026-09-03, arc S1: #776, #831, #645, #713)
+### A SCAN'S READ SET IS A PLAN-TIME FACT, and so is the type of a column the GATHER computes (2026-09-03: #776, #831, #645, #713)
 
 This ADR's rule is about what a stage CARRIES. Four defects one arc apart were
 about what a stage is BELIEVED to carry, and they came apart into two rules.
@@ -2386,7 +2386,7 @@ day on the DAG (pinned in
 `coordinator.TestTheDerivedTableSpellingIsNotAControlForTheOwnTypeCase`; the fix
 is to give that walk `emittedColTypes`' answer, which is merging the two).
 What holds is that the GATHER no longer declares a type it did not derive.
-**Closed 2026-09-24 (arc CW, ADR-0045):** `attachScanSelectProjections` types
+**Closed 2026-09-24 (ADR-0045):** `attachScanSelectProjections` types
 the stage's SELECT list against the child's EMITTED declarations — the walk the
 single-process projection reads — and the pin was deleted as the proof; the
 shape is the control `ctl_derived_table_spelling_own_type` in

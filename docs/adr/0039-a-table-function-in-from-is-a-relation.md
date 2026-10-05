@@ -1,18 +1,18 @@
 # ADR-0039: A table function in FROM is a relation, and where its columns come from decides where a reference to a missing one is refused
 
-Status: Accepted (2026-09-19, #1210 / #1203 / #1211 / #1202, arc TF; amended
+Status: Accepted (2026-09-19, #1210 / #1203 / #1211 / #1202; amended
 the same day after the arc's earlier measurement — §4a, §6a, §7, §8 and the
 Consequences; the Consequences amended again after the closure measurement, which
 measured the two-reader residue as a silent wrong VALUE rather than an
-unchecked shape — #1229; amended 2026-09-20 by arc FR, which CLOSED §3's
+unchecked shape — #1229; amended 2026-09-20, which CLOSED §3's
 deferral: §3 is now the authorization ORDER and the plan-time schema it
 buys, §9 is the join key's side, and the Consequences are the boundaries that
-remain — #1229 / #1230 / #1231; amended 2026-09-22 by arc RP, whose paragraph
+remain — #1229 / #1230 / #1231; amended 2026-09-22, with a paragraph
 in §3 is what a row past the readers' inference sample does — #1242 / #1243 /
-#1247; amended 2026-09-23 by arc FR2, whose paragraphs in §3 are the glob as
+#1247; amended 2026-09-23, with paragraphs in §3 are the glob as
 a sequence of files, the sample's type reading every sampled value, and the
 plan-time refusal of an input that cannot be opened — #1262 / #1240 / #1260 /
-#1261 / #1245 / #1248 / #1259; amended 2026-10-03 by arc RD, whose paragraph
+#1261 / #1245 / #1248 / #1259; amended 2026-10-03, with a paragraph
 in §3 is the POSITION past the sample — loud by default, every row on
 request — and its measurement — #1242)
 
@@ -115,7 +115,7 @@ refused**, and the line is drawn by AUTHORIZATION, not by convenience.
    is the readers' own 100-ROW sample (`csv.sampleSize`,
    `json.defaultSampleSize`), and it describes the whole file. A row past the
    sample with a non-NULL value that does not fit its column refuses with
-   SQLSTATE `22P02` (arc RP, #1242, #1243). Every CSV and JSON read path
+   SQLSTATE `22P02` (#1242, #1243). Every CSV and JSON read path
    checks before conversion or vector writes, against the sample the schema
    was ACTUALLY inferred from (the JSON stream reader's sample stops at
    8 MiB, so it can be fewer than 100 rows). The error carries the SQLSTATE
@@ -131,15 +131,15 @@ refused**, and the line is drawn by AUTHORIZATION, not by convenience.
    infers text). Integer to
    fractional number is a mismatch; text columns accept every value as text.
    JSON null and UNQUOTED empty CSV fields are NULL; a quoted empty CSV field
-   is the empty string, as COPY reads it (arc FR2, #1259, which reads CSV
+   is the empty string, as COPY reads it (#1259, which reads CSV
    with COPY's record grammar and refuses an unterminated quote and a record
    of the wrong width with 22P04, #1248; blank lines and mixed line endings
    stay answered, [table-functions](0012-divergences/table-functions.md) in the ADR-0012 catalog). COUNT(*) refuses when the reader reaches the row; a LIMIT that
    stops reading before it need not refuse. A key first seen past the sample
-   is refused too (arc RD, below).
+   is refused too (below).
 
    **PAST THE SAMPLE THE READER IS LOUD BY DEFAULT, AND READS EVERY ROW ON
-   REQUEST** (arc RD, #1242). This is the position, stated once for every
+   REQUEST** (#1242). This is the position, stated once for every
    shape a later row can take, and an embedded user's default:
 
    - the default is the 100-row sample, and a later row the relation cannot
@@ -149,7 +149,7 @@ refused**, and the line is drawn by AUTHORIZATION, not by convenience.
      COPY's class for a record with a field past the relation's last column,
      naming the reader, the input, the row and the key; a non-NULL value
      under a FIELD of a nested object the sample never saw — `22P02` naming
-     the column and the field. Before arc RD both were skipped and the row
+     the column and the field. Before inference checked later fields, both were skipped and the row
      read without them, so `SELECT *` and a `CREATE TABLE AS` STORED the row
      as if the key were absent. A JSON `null` under such a key or field is
      the NULL the relation already answers there, and is read. Every refusal
@@ -215,7 +215,7 @@ refused**, and the line is drawn by AUTHORIZATION, not by convenience.
    larger default sample (DuckDB's 20 480) narrows how often the refusal is
    met but changes no position, and is left for a measurement of its own.
 
-   **THE SAMPLE'S TYPE READS EVERY VALUE THE SAMPLE HOLDS** (arc FR2). The
+   **THE SAMPLE'S TYPE READS EVERY VALUE THE SAMPLE HOLDS**. The
    one-grammar rule holds INSIDE the sample as well as past it: a sample
    mixing booleans and numbers is text (it inferred bigint and read the
    boolean NULL or 1, #1260), and a nested column's element and field types
@@ -224,10 +224,10 @@ refused**, and the line is drawn by AUTHORIZATION, not by convenience.
    sampled value is converted into a type that cannot hold it, and read_csv
    refuses a field that does not parse wherever it is.
 
-   **A GLOB IS A SEQUENCE OF FILES** (arc FR2, #1262, #1240). Through
+   **A GLOB IS A SEQUENCE OF FILES** (#1262, #1240). Through
    v0.24.0 a glob was its matched files' BYTES run together and handed to a
    single-file decoder: a CSV header per file had to be re-parsed out of the
-   stream (arc RP's special case), a JSON array glob stopped at the first
+   stream (the reader value validation special case), a JSON array glob stopped at the first
    file's `]` and dropped every later file's rows, and a Parquet glob of two
    files was unreadable. Every reader now takes the matched FILES in name
    order and decodes each on its own — its own CSV record state and header,
@@ -243,10 +243,9 @@ refused**, and the line is drawn by AUTHORIZATION, not by convenience.
    22P04 naming the file. A Parquet member is read ROW GROUP by row group
    through the staged reader, so memory follows the row group, not the file. The plan-time read and the execution read the same
    sequence, so this is not a new schema source: `parquetFooterSchema` has
-   read the first file's footer since arc FR.
+   read the first file's footer since schema planning moved before execution.
 
-   **AN INPUT THAT CANNOT BE OPENED IS REFUSED AT PLAN TIME** (arc FR2,
-   #1245). The resolver used to DECLINE it — the rereadable check stat'd a
+   **AN INPUT THAT CANNOT BE OPENED IS REFUSED AT PLAN TIME** (   #1245). The resolver used to DECLINE it — the rereadable check stat'd a
    missing path and answered "not a regular file" — so the error came at the
    first batch with no SQLSTATE, and EXPLAIN printed a plan. It now asks
    first, after the capability guard, whether the input — every regular
@@ -409,15 +408,15 @@ each is a consequence of where a column list comes from:
   invariant for a file the caller can see is empty;
 - a file whose LATER rows carry a value the sample did not type is refused
   by the reader itself, with COPY's SQLSTATE for the field (§3's sample
-  paragraph). Through arc FR the JSON reader wrote a string past the sample
+  paragraph). Before later-value validation, the JSON reader wrote a string past the sample
   into a numeric column's storage and the query failed as a RECOVERED PANIC
-  (`XX000 index out of range`); arc RP made it `22P02` naming the file, row,
+  (`XX000 index out of range`); later-value validation made it `22P02` naming the file, row,
   column and both types (#1243). A KEY or nested FIELD first seen past the
-  sample is refused as well (arc RD, `22P04` / `22P02`), and
+  sample is refused as well (`22P04` / `22P02`), and
   `sample_size = -1` reads such a file with every row typed, at the measured
   2.2–6.7× of a read (§3's position paragraph);
 - a table function is still not a DAG stage (`stage scan-0 has no
-  dependencies and no ScanFiles`). That is `distributed` and arc PT's pin;
+  dependencies and no ScanFiles`). That is `distributed` and the predicate typing pin;
   the five-arm gates carry it per cell rather than chasing it. A DAG fragment
   re-planned on a WORKER has no authorization record on its context, so a
   reader replanned there would take the first-batch path — unreachable while
@@ -448,7 +447,7 @@ function, not of this position, and it lives with the rest of them in
 - `sql.TestArcTFATableFunctionReadsASignedNumberAsOneArgument`,
   `physical.TestGenerateSeries_DescendingBoundsWithTheDefaultStepAreEmpty`.
 
-Arc FR's, for §3 and §9:
+Reader schema planning gates, for §3 and §9:
 
 - `wadjet.TestArcFRAFileReaderIsARelationWithASchema` — the qualified star,
   the empty relation, the zero-byte refusal, an unknown column through eleven
@@ -480,10 +479,10 @@ Arc FR's, for §3 and §9:
   ORDER, per door (embedded, pgwire, HTTP, gRPC, coordinator fast path,
   coordinator DAG) × eleven shapes, asserted with `ReaderSchemaReads`.
 - `coordinator.TestArcFRAFileReaderIsARelationOnEveryArm` — §9 on single /
-  single+budget / dag / dag-shuffled / dag+morsel4, with arc PT's
+  single+budget / dag / dag-shuffled / dag+morsel4, with the predicate typing
   `distributed` pin carried per cell.
 
-Arc FR2's, for §3's glob, sample and unopenable-input paragraphs:
+Reader input gates, for §3's glob, sample and unopenable-input paragraphs:
 
 - `wadjet.TestArcFR2AGlobIsASequenceOfFiles` — five reader formats × one
   file, a glob of 2, a glob of 100, empty files first / middle / last, a
@@ -498,7 +497,7 @@ Arc FR2's, for §3's glob, sample and unopenable-input paragraphs:
 - `server.TestArcFR2AnUnopenableReaderInputIsRefusedOnEveryDoor` and
   `coordinator.TestArcFR2AnUnopenableReaderInputIsRefusedOnTheCoordinator`.
 
-Arc RD's, for §3's position past the sample:
+Reader inference gates, for §3's position past the sample:
 
 - `wadjet.TestArcRDReaderPastSampleCoverage` — the coverage table: 15 cell
   shapes (a later float, text, boolean, date, quoted empty string, `NULL`

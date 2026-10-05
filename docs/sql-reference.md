@@ -3190,7 +3190,7 @@ sample's 2202H where PostgreSQL folds `1/0` first and raises 22012
 
 ## JOIN
 
-A RIGHT or FULL join with an empty input retains the preserved side's values and NULL-extends the empty side, including when a spilled partition is replayed ([ADR-0006](adr/0006-never-oom-memory-model.md#2026-10-03-arc-sj-a-partition-replay-emits-the-joins-own-output-whatever-the-other-sides-size-1359)).
+A RIGHT or FULL join with an empty input retains the preserved side's values and NULL-extends the empty side, including when a spilled partition is replayed ([ADR-0006](adr/0006-never-oom-memory-model.md#2026-10-03-a-partition-replay-emits-the-joins-own-output-whatever-the-other-sides-size-1359)).
 
 Wadjet supports multiple join types using a hash join strategy.
 

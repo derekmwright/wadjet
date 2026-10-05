@@ -10,7 +10,7 @@ Columns: `cell` is the smallest statement that shows the difference; `PostgreSQL
 The position is ADR-0024 §2c: a float-carried numeric (`5 / 2.0`, `SQRT(6.25)`, EXTRACT) keeps its FLOAT64 carrier and OID 701 and declares PostgreSQL's category beside it, and every write door (VALUES, INSERT … SELECT, UPDATE, MERGE) rounds an integer target by that category: half away from zero from a numeric, half to even from a float8, so `5 / 2.0` stores 3. A float4/float8 parameter binds as its own type (OID 700/701), as in PostgreSQL. An explicit `CAST` does not see the category, because the cast kernel sees only its compiled operand and a DAG stage boundary carries no category (#1392).
 
 **The writes PostgreSQL refuses are refused before a row is written** (E93)
-A MERGE action's expression forms are one table measured on 17.11 (`intround.MergeSetCells`): an aggregate is 42803 and a window function 42P20 on every door that evaluates one row, a target-correlated subquery under a reached WHEN NOT MATCHED clause is 42P01, an `ON` key naming a name a subquery source publishes twice is 42702, arithmetic between a bare text column and a number is 42883 (in a SELECT too), and a JSON field read (`j->>'k'`, `j->'k'`) into a non-text column is 42804 — the assignment half of "no text-to-integer superset" (arc VL). Six recorded exceptions remain, each with its page entry: the explicit cast (#1392), the JSON cast (#1406), the text parameter (#1408), text expressions (#1409), the unreached WHEN NOT MATCHED clause (#1043) and SMALLINT storage (#1407).
+A MERGE action's expression forms are one table measured on 17.11 (`intround.MergeSetCells`): an aggregate is 42803 and a window function 42P20 on every door that evaluates one row, a target-correlated subquery under a reached WHEN NOT MATCHED clause is 42P01, an `ON` key naming a name a subquery source publishes twice is 42702, arithmetic between a bare text column and a number is 42883 (in a SELECT too), and a JSON field read (`j->>'k'`, `j->'k'`) into a non-text column is 42804 — the assignment half of "no text-to-integer superset". Six recorded exceptions remain, each with its page entry: the explicit cast (#1392), the JSON cast (#1406), the text parameter (#1408), text expressions (#1409), the unreached WHEN NOT MATCHED clause (#1043) and SMALLINT storage (#1407).
 
 ## Catalog
 
@@ -28,7 +28,7 @@ A MERGE action's expression forms are one table measured on 17.11 (`intround.Mer
 | **r10** `CREATE TABLE t (id INT, n INT)` | command tag CREATE TABLE, no rows | one row, result = Table "t" created (measured) | — | value divergence | — · P011 | #1024 | — |
 | **r11** `CREATE TABLE ctas_t AS SELECT COALESCE(a, b) AS c FROM ctas_src` | unconstrained numeric column; c is 12.75 | DECIMAL(38,10) column; c is 12.7500000000 (measured): stored columns require (p,s) | — | value divergence | — · P031 | #1024 | — |
 | **r12** `CREATE TABLE IF NOT EXISTS ctas_t AS SELECT 1 AS c` | NOTICE relation "ctas_t" already exists, skipping; tag CREATE TABLE AS | tag CREATE TABLE AS, no notice (measured) | — | value divergence | — · P080 | #1024 | — |
-| **r13** `INSERT INTO tt (s) SELECT DECODE('6869','hex')` | stores the bytea's text \x6869 | stores \x6869, as PostgreSQL does (amended 2026-10-05, arc BY: a BYTES value is assigned to a text column as bytea's hex output; ERROR 42804 at c67ebf5b); a container or DURATION is ERROR 42804 column "s" is of type STRING (measured) | 42804 | refusal | — · P077 | #1024 | — |
+| **r13** `INSERT INTO tt (s) SELECT DECODE('6869','hex')` | stores the bytea's text \x6869 | stores \x6869, as PostgreSQL does (amended 2026-10-05: a BYTES value is assigned to a text column as bytea's hex output; ERROR 42804 at c67ebf5b); a container or DURATION is ERROR 42804 column "s" is of type STRING (measured) | 42804 | refusal | — · P077 | #1024 | — |
 | **r14** `INSERT INTO qa (a) SELECT '{1,2}'` | stores {1,2} through the array input function | ERROR 42804 column "a" is ARRAY and a string value is not an ARRAY (measured); BOOL and BYTES targets read the text (measured) | 42804 | refusal | — · P078 | #1088 | — |
 | **r15** `INSERT INTO t VALUES (3, (SELECT max(n) FROM t))` | inserts the subquery's value | ERROR 0A000 a subquery in an INSERT ... VALUES expression is not supported (measured); MERGE's INSERT VALUES runs one | 0A000 | refusal | — · P108 | #1252 | — |
 | **r16** `UPDATE t SET n = (SELECT max(i) FROM s)` | updates every row to the subquery's value | ERROR 0A000 SET n: a subquery in an UPDATE's SET list is not supported (measured); a MERGE SET answers one | 0A000 | refusal | — · P147 | — | — |
@@ -49,7 +49,7 @@ ADR lines 4311-4351. Catalog rows: r1, r2, r3, r4, r5, r6, r7, r8, r9. Stated in
 
 - **An integer assignment rounds by the source's PostgreSQL type; the
   writes PostgreSQL refuses are refused before a row is written, with
-  six recorded exceptions.** (Added 2026-09-28, arc IR, #1353.) The
+  six recorded exceptions.** (Added 2026-09-28, #1353.) The
   position is ADR-0024 §2c: a float-carried numeric (`5 / 2.0`,
   `SQRT(6.25)`, EXTRACT) keeps its FLOAT64 carrier and OID 701 and
   declares PostgreSQL's category beside it, and every write door —
@@ -63,7 +63,7 @@ ADR lines 4311-4351. Catalog rows: r1, r2, r3, r4, r5, r6, r7, r8, r9. Stated in
   subquery source publishes twice is 42702, arithmetic between a text
   COLUMN and a number is 42883 (`SELECT x * 2` too), and a JSON field
   read (`j->>'k'`, `j->'k'`) into a non-text column is 42804 — the
-  assignment half of this section's "no text→integer superset" (arc VL).
+  assignment half of this section's "no text→integer superset".
   A float4/float8 parameter binds as its own type (OID 700/701), as in
   PostgreSQL, where v0.25.1 read it as a numeric literal. Recorded, each
   with its differences-page entry:

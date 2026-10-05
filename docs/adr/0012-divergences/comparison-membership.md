@@ -25,7 +25,7 @@ PostgreSQL refuses `text = numeric` by overload resolution; the engine has one g
 | **r1** `SELECT id FROM t WHERE s = 1.50` | ERROR 42883 operator does not exist: text = numeric | compares s with the literal's source text '1.50': 1 row; s = 1.5 matches none (measured) | — | kept superset | 2026-08-24 · [E42](#e42), P060 | #504 | `internal/server/pgwire/dml_census_test.go` |
 | **r2** `SELECT id FROM t WHERE ts >= 1700000000000` | ERROR 42883 | compares with the instant 1700000000000 ms after the epoch (measured) | — | kept superset | 2026-09-22 · [E42](#e42), [E01](#e01), P093 | #1216 | — |
 | **r3** `SELECT id FROM t WHERE id = s` | ERROR 42883 operator does not exist: bigint = text | answers through the value's text (also in an IN list; int4, float8, numeric, PORT, PROTOCOL, DURATION, UUID, IPv6, CIDR) | — | kept superset | 2026-09-22 · [E01](#e01), P091 | #826, #1073 | — |
-| **r4** `SELECT id FROM t WHERE ts = s` (likewise `ts = $1` with `$1` declared text, OID 25) | ERROR 42883 | answers directly and in an IN list (DATE, TIMESTAMP, boolean likewise); their subquery membership is 42883. A stored text naming no instant is ordered as TEXT against a DATE or TIMESTAMP (`ts < s` over `'garbage'` is TRUE; measured, five doors — a recorded gap, not part of the superset). A text-declared parameter is spliced as the quoted literal: a valid text answers as the literal does (`'epoch'` too, param25/\*/"epoch"), a refused one raises 22007 / 22008 / 22009; `'infinity'` / `'-infinity'` answer as the literal does, the infinite values (param25/\*/"infinity": no row over tc\_t, which holds none; the rows that hold one in ti\_i, coordinator.TestArcTIInfinityEveryArm param25/\*; refused 22007 from #1512 until arc TI, 2026-10-04) (#1512; at 93e4804e `ts = $1` declared text and bound `'garbage'` matched the epoch row on the embedded doors) | — | kept superset | 2026-09-22 · [E01](#e01), P091; 2026-10-04 (#1512) | #1073, #1512 | `coordinator.TestArcTCTimestampTextComparisonEveryArm` (kept text\_col/\*), `coordinator.TestArcTCBoundParameterEveryDoor` (kept param25/\*) |
+| **r4** `SELECT id FROM t WHERE ts = s` (likewise `ts = $1` with `$1` declared text, OID 25) | ERROR 42883 | answers directly and in an IN list (DATE, TIMESTAMP, boolean likewise); their subquery membership is 42883. A stored text naming no instant is ordered as TEXT against a DATE or TIMESTAMP (`ts < s` over `'garbage'` is TRUE; measured, five doors — a recorded gap, not part of the superset). A text-declared parameter is spliced as the quoted literal: a valid text answers as the literal does (`'epoch'` too, param25/\*/"epoch"), a refused one raises 22007 / 22008 / 22009; `'infinity'` / `'-infinity'` answer as the literal does, the infinite values (param25/\*/"infinity": no row over tc\_t, which holds none; the rows that hold one in ti\_i, coordinator.TestArcTIInfinityEveryArm param25/\*; refused 22007 from #1512 until temporal infinity support, 2026-10-04) (#1512; at 93e4804e `ts = $1` declared text and bound `'garbage'` matched the epoch row on the embedded doors) | — | kept superset | 2026-09-22 · [E01](#e01), P091; 2026-10-04 (#1512) | #1073, #1512 | `coordinator.TestArcTCTimestampTextComparisonEveryArm` (kept text\_col/\*), `coordinator.TestArcTCBoundParameterEveryDoor` (kept param25/\*) |
 | **r5** `SELECT id FROM t WHERE id IN (SELECT CAST(id AS TEXT) FROM t)` | ERROR 42883 operator does not exist: bigint = text | 12, 14 (the body's text provably converts; any other text body is 42883; measured) | — | kept superset | 2026-09-27 · [E01](#e01), P091 | #1308, #1374 | — |
 | **r6** `SELECT id FROM t WHERE id IN (SELECT '12')` | ERROR 42883 | 12 (a FROM-less literal body folds into the IN list, as id IN ('12'); measured) | — | kept superset | — · P091 | #1308 | — |
 | **r7** `SELECT id FROM t WHERE id IN (SELECT CAST(id AS TEXT) FROM t UNION SELECT CAST(d AS TEXT) FROM t)` | ERROR 42883 | 12, 14; the same arms in the other order are 42883 (the body is judged by its first arm; measured) | — | documented gap | 2026-09-28 · [E01](#e01), P091 | — | — |
@@ -50,7 +50,7 @@ ADR lines 62-305. Catalog rows: r2, r3, r4, r5, r7, r8, r9, r10, r11, r12, r13, 
 
 - **Where PostgreSQL refuses by TYPE, wadjet refuses — and the supersets it
   keeps are the ones whose value is meaningful on every arm.** (Added
-  2026-09-22, arc BR: #1249 #1073 #1205 #1061 #1060 #1065 #1233 #1236
+  2026-09-22: #1249 #1073 #1205 #1061 #1060 #1065 #1233 #1236
   #1216.) The binder now asks, before any row, the type questions
   PostgreSQL's parse analysis asks: an aggregate's argument class
   (`function sum(text) does not exist`, 42883; `sum(unknown) is not
@@ -82,7 +82,7 @@ ADR lines 62-305. Catalog rows: r2, r3, r4, r5, r7, r8, r9, r10, r11, r12, r13, 
   - STRING_AGG renders a non-text argument as its own text — BOOL, the
     integers, REAL, DOUBLE, DECIMAL, IPV4, IPV6, CIDR, MACADDR, PORT,
     PROTOCOL, DURATION, UUID and DATE (ISO) — which base answered
-    identically on every arm (arc BR). TIMESTAMP (epoch
+    identically on every arm. TIMESTAMP (epoch
     milliseconds) and typed container columns are 42883; BYTEA is
     below. An `ARRAY(subquery)` aggregate argument can instead return
     an incorrect value (#1309).
@@ -101,7 +101,7 @@ ADR lines 62-305. Catalog rows: r2, r3, r4, r5, r7, r8, r9, r10, r11, r12, r13, 
     The subquery column holds for EVERY body, and "kept where the body
     selects `CAST(x AS TEXT)`" means only there: any other text body is
     42883 in the explicit JOIN's words (`operator does not exist: bigint
-    = text`). (Amended 2026-09-26, arc ST, #1308: a body selecting a
+    = text`). (Amended 2026-09-26, #1308: a body selecting a
     stored, derived-table or CTE TEXT column became a semi/anti join
     whose key pair (typed, text) was never converted — 0 rows over
     matching values, NOT IN every row, on all five arms at v0.25.1, the
@@ -117,7 +117,7 @@ ADR lines 62-305. Catalog rows: r2, r3, r4, r5, r7, r8, r9, r10, r11, r12, r13, 
     value as the compared type renders it: the same type, two integer
     kinds (int4, int8, port, protocol, duration), or a port or protocol
     against float8, which prints each of their values as they do.
-    (Amended 2026-09-27, arc SM, #1374: it was the same comparisonClass
+    (Amended 2026-09-27, #1374: it was the same comparisonClass
     and never a fractional rendering into an integer kind, so `v_dec IN
     (SELECT CAST(v_i64 AS TEXT) …)` was kept and converted the text — 1
     row — while the same comparison as an EXISTS key compared it
@@ -129,7 +129,7 @@ ADR lines 62-305. Catalog rows: r2, r3, r4, r5, r7, r8, r9, r10, r11, r12, r13, 
     TEXT)` against a bigint outer value was "kept" while the DAG's cast
     of the rendered text (`'14.0000'`) back to bigint is 22P02 and the
     single arms compared the text as it stood — an arm-dependent cell
-    inside the rule's own kept set. (Amended 2026-09-26, arc ST,
+    inside the rule's own kept set. (Amended 2026-09-26,
     #1308.) The body's CORRELATED equalities are the
     semi/anti join's keys and take the JOIN-key rule below: `EXISTS (…
     WHERE b.s = a.v)`, a correlated `IN`'s key, is 42883
@@ -137,7 +137,7 @@ ADR lines 62-305. Catalog rows: r2, r3, r4, r5, r7, r8, r9, r10, r11, r12, r13, 
     filter and keeps the direct reading.
 
     The rule reads BOTH operands whatever their shape (amended
-    2026-09-27, arc SM, #1369 #1370 #1368 #1372 #1374), one table of
+    2026-09-27, #1369 #1370 #1368 #1372 #1374), one table of
     positions × dispositions: an operand the structural walk does not
     type is typed by its declaration for the text/typed question, so
     an expression outer (`v + 0 IN (SELECT s …)`: 0 rows single, 2 DAG)

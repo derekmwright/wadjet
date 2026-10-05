@@ -81,7 +81,7 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
    carries every `kept superset` and `value divergence` row. A new divergence
    is a catalog row, a log entry and, for those two dispositions, a
    differences-page entry. Changing a row's disposition is an amendment.
-   (Amended 2026-09-29, arc DS: this item held the entries themselves as
+   (Amended 2026-09-29: this item held the entries themselves as
    4,295 lines of prose. They moved to the catalog and the log verbatim, and
    the catalog's README counts them.)
 
@@ -1132,7 +1132,7 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     its operand through `expr.toString`, so `UPPER(b)` ANSWERS where
     PostgreSQL raises 42883 (#583, `ByteaTextFunctionOverBytes`).
 
-    (Corrected 2026-09-18, arc EX.) The second half is no longer true:
+    (Corrected 2026-09-18.) The second half is no longer true:
     `UPPER(b)` is 42883 here now, from a plan-time check over the argument's
     declared type, and `ByteaTextFunctionOverBytes`'s pin in the wire arm's
     error list is deleted. The BYTES LITERAL half stands.
@@ -1282,8 +1282,7 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     STRING, BYTES, IPV4, IPV6, CIDR, MAC, UUID, DATE, DECIMAL — and it is held
     to what `SetValue` actually does by
     `batch.TestVectorAcceptsTextIsWhatSetValueDoes`, which writes a string into
-    a vector of every one of the 22 types and compares; a list somebody keeps
-    by hand is what cost this rule a measurement round already.
+    a vector of every one of the 22 types and compares; a manually maintained list had already disagreed with the measured vector behavior.
 
     The other nine — BOOL, INT32, INT64, FLOAT32, FLOAT64, TIMESTAMP, PORT,
     PROTOCOL, DURATION — failed the #361 silent-write guard with NO SQLSTATE
@@ -1641,7 +1640,7 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
         ''        22P02             22P02               22P02
 
     (Corrected 2026-09-28: the `'0o17'` numeric cell read 22P02; PostgreSQL
-    17.11 answers 15, `'0o14'::numeric` 12, measured by arc SM.)
+    17.11 answers 15, `'0o14'::numeric` 12, measured for numeric comparison.)
 
     - **INTEGER** is PostgreSQL 16's `pg_strtoint*`: C whitespace trimmed, an
       optional sign, `0x`/`0o`/`0b` radix prefixes, underscore separators
@@ -1667,7 +1666,7 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
       with no RANGE failure: a literal past the Int128 carrier SATURATES into
       its place in the order rather than erroring (#462).
     - **PORT and PROTOCOL** read their OWN input function, not the `integer`
-      they declare on the wire. (Added 2026-09-18, #1137, closing arc NT's
+      they declare on the wire. (Added 2026-09-18, #1137, resolving network typing's
       deferral 1.) PROTOCOL takes the IANA NAME `protocol_name()` prints —
       `'udp'` is 17 — and neither takes int4's radix prefixes or underscores,
       which the writer refuses; the range is the TYPE's, 0..65535 and 0..255.
@@ -1684,7 +1683,7 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
       name a client can resolve in pg_type; `port` and `protocol` resolve to
       nothing there. The RANGE refusal deliberately keeps its own sentence —
       `PORT value 70000 out of range [0, 65535]` — which names the bound and
-      says more than PostgreSQL's shape would. Arc EX's earlier measurement (N1)
+      says more than PostgreSQL's shape would. The earlier expression-typing measurement (N1)
       measured the split: eleven doors said `integer` and the writer said
       `port`.
 
@@ -1746,7 +1745,7 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     answers `Decided(bool)` is never refused. `UPPER(bool_col)` answers and
     `UPPER(TRUE)` is 42883, because a LITERAL's type is syntactic. (This
     paragraph named `expr.trustedArgType` until 2026-09-18; no such symbol
-    exists, and arc EX's earlier measurement caught it — N2.)
+    exists, and the earlier expression-typing measurement confirmed it — N2.)
 
     **The CAST to an integer type is TWO casts, and the operand's DECLARATION
     chooses.** (Added 2026-09-18, #1141.) `'2.5'::integer` is 22P02 — int4in
@@ -1941,7 +1940,7 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     VALUES pair by pair, against each other and against PostgreSQL's measured
     answer.
 
-    **Amended 2026-09-24 (arc VL, #1252 #1254): ONE assignment table
+    **Amended 2026-09-24 (#1252 #1254): ONE assignment table
     for every write, and it is PostgreSQL's.** `ingest.AssignableToColumn` is
     asked by `INSERT … VALUES`, `INSERT … SELECT`, `UPDATE … SET` and `MERGE`
     alike, from the source's DECLARED type, before a row is read. It assigns
@@ -1965,7 +1964,7 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     WhatItProduces`, `wadjet.TestOneAssignmentTableOnEveryDoor` (580 cells ×
     four doors against PostgreSQL 17.11's measured answers).
 
-    **Amended 2026-09-24 (arc VL): one assignment FUNCTION, and a
+    **Amended 2026-09-24: one assignment FUNCTION, and a
     door-diff gate.** earlier implementation's one table sat under two converters — INSERT …
     SELECT assigned a constant from the value its select list had evaluated
     (a decimal literal is a double there, ADR-0024), so `SELECT 2.50` into
@@ -1986,7 +1985,7 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     value is constructed (#911's family), and the date/timestamp operator
     refusal (42883) into expression typing on every DML door.
 
-    **Amended 2026-09-24 (arc VL): the door-diff gate gets its
+    **Amended 2026-09-24: the door-diff gate gets its
     SOURCE axis and its PostgreSQL column.** earlier implementation's gate proved no two
     doors differ; it could not see every door being equally wrong, and they
     were: a decimal constant one expression deeper (`CASE WHEN true THEN 2.50
@@ -2009,11 +2008,11 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     (PostgreSQL raises 22015 at the literal for a field past its own range;
     here the shift is 22008); and the writer's temporal box normalisation —
     the embedded ingester API's door — asks the same range question.
-    INTERVAL itself stays what it was before arc VL except where that was a
+    INTERVAL itself stays what it was before the assignment changes except where that was a
     wrong value (see postgres-differences, "INTERVAL").
 
   - **A CTAS over a star of a self join answered where PostgreSQL refuses —
-    CLOSED 2026-09-13 by arc O1 (#997, #1012).** (Added 2026-09-12, #1024.)
+    CLOSED 2026-09-13 (#997, #1012).** (Added 2026-09-12, #1024.)
     `CREATE TABLE t AS SELECT * FROM s a JOIN s b ON b.id = a.id` is `42701`
     on PostgreSQL 17.11 — `column "id" specified more than once` — because
     both sides publish `id` and a relation cannot hold two columns of one
@@ -2068,7 +2067,7 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     clause; the skip is consistent with the form it belongs to.
 
   - **The SQL-standard spellings, and what this engine does NOT read of
-    them.** (Added 2026-09-18, arc PT / #1169, #1168, #1179, #1180, #1183.)
+    them.** (Added 2026-09-18, #1169, #1168, #1179, #1180, #1183.)
     `SUBSTRING(s FROM n FOR m)`, `SUBSTRING(s FROM pattern)`, `OVERLAY(s
     PLACING r FROM n [FOR m])`, `NORMALIZE(s [, NFC|NFD|NFKC|NFKD])`,
     `LOCALTIMESTAMP [(p)]`, `LIKE|ILIKE|SIMILAR TO … ESCAPE`, `LEFT`/`RIGHT`
@@ -2099,7 +2098,7 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     same reasoning that expands `BETWEEN SYMMETRIC` and `ILIKE` at parse time.
 
   - **A truth context types EVERY expression kind, and a DML predicate is a
-    truth context.** (Added 2026-09-19, arc PT / #1179.) A `WHERE`, a
+    truth context.** (Added 2026-09-19, #1179.) A `WHERE`, a
     `HAVING`, a `JOIN … ON`, the operands of `NOT`/`AND`/`OR`, a searched
     `CASE`'s `WHEN`, a `DELETE`'s and an `UPDATE`'s `WHERE` and a `MERGE`'s
     `WHEN … AND` all require a boolean, and the type is proved from whatever
@@ -2123,25 +2122,25 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     reports in.
 
   - **A table function's column-alias list is applied at its SOURCE.**
-    (Added 2026-09-18, arc PT / #1184; narrowed 2026-09-19, arc TF / #1210.)
+    (Added 2026-09-18, #1184; narrowed 2026-09-19, #1210.)
     `FROM read_json(…) [AS] f(k, v)` now renames positionally like every other
     FROM item. The rename happens where the relation's WIDTH is known, and
-    since arc FR (2026-09-20, #1230) that is PLAN time for a LOCAL file
+    since 2026-09-20 (#1230) that is PLAN time for a LOCAL file
     reader: `42P10` is raised before anything runs, like PostgreSQL's. It is
     still EXECUTION for an `http(s)` source and for the database readers,
     whose inputs the planner does not read (ADR-0039 §3), and one of those
     that produces no batch at all is never measured against its list. For
     `generate_series` and `unnest` the width is a function of the CALL. A
     repeated name in the list is `42701` at the list, the same narrower
-    refusal arc PS recorded for a base table.
+    refusal recorded by name-scope validation for a base table.
 
   - **A TABLE FUNCTION IN FROM IS A RELATION, AND WHERE ITS COLUMNS COME FROM
-    DECIDES WHERE A MISSING ONE IS REFUSED.** (Added 2026-09-19, arc TF /
+    DECIDES WHERE A MISSING ONE IS REFUSED.** (Added 2026-09-19,
     #1210 #1203 #1211 #1202; the position is ADR-0039.) A reference to a
     column a table function does not publish is `42703` naming the column, as
     it is over a base table — where it used to answer NULL for every row.
     `generate_series` and `unnest` declare their columns from the call, so
-    their refusal is made at plan time — and since arc FR (2026-09-20,
+    their refusal is made at plan time — and since 2026-09-20 (
     #1229/#1230/#1231) so is a LOCAL FILE reader's. The ordering that stopped
     it is fixed rather than worked around: the table-function capability is
     authorized FIRST, before the statement binds, so the planner may read the
@@ -2152,13 +2151,13 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     readers' own 100-ROW SAMPLE and describes the whole file; a row past it
     with a non-NULL value that does not fit refuses with COPY's SQLSTATE for
     the field (`22P02`, `22003`, `22007`), naming the reader, file, row,
-    column and types (arc RP, #1242, #1243); a CSV field is read with
+    column and types (#1242, #1243); a CSV field is read with
     PostgreSQL's bigint/float8/bool input functions. Divergences: a timestamp
     column takes only the sample's spellings and an inet column no prefix
     length (both on the differences page). A key first
     seen past the sample is refused too (`22P04`, a nested field `22P02`),
     and `sample_size = -1` types the columns from every row (ADR-0039 §3,
-    arc RD, 2026-10-03). With a column list the reader is
+    2026-10-03). With a column list the reader is
     an ordinary relation: an unknown column is `42703` at plan time through
     ANY path, `f.*` expands, and `SUM` over a whole-number column is `numeric`
     and `MIN`/`MAX` keep its width, which is what PostgreSQL declares for the
@@ -2172,12 +2171,11 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     PostgreSQL raises, `EXPLAIN` over such a statement does not refuse, an
     aggregate over their column declares `double precision` and a qualified
     star over one is `0A000`; and `generate_series(…) WITH ORDINALITY`
-    publishes one column where PostgreSQL publishes two. Amended 2026-09-24
-    for arc PC: a FROM alias now names a single-column function's output,
+    publishes one column where PostgreSQL publishes two. Amended 2026-09-24: a FROM alias now names a single-column function's output,
     as PostgreSQL does (`SELECT g FROM generate_series(1,2) AS g`).
 
   - **A FILE READER WHOSE INPUT DECLARES NO COLUMNS IS `0A000`, WHERE
-    POSTGRESQL HAS A ZERO-COLUMN RELATION.** (Added 2026-09-20, arc FR /
+    POSTGRESQL HAS A ZERO-COLUMN RELATION.** (Added 2026-09-20,
     #1230.) `SELECT * FROM read_json('<zero-byte file>')` raises `0A000 the
     table function "read_json" published no columns: its input … is empty`.
     PostgreSQL permits a relation with zero columns — `CREATE TABLE t ();
@@ -2209,7 +2207,7 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     and not a float8 that loses the value.
 
   - **`read_csv` READS THE GRAMMAR OF `COPY … (FORMAT csv)`, WITH FIVE
-    DIFFERENCES.** (Added 2026-09-23, arc FR2 / #1248 #1259.) A field is NULL
+    DIFFERENCES.** (Added 2026-09-23, #1248 #1259.) A field is NULL
     only when it is empty and no part of it was quoted, so `""` is the empty
     string; a quote opens anywhere in a field; whitespace is data; and an
     unterminated quote and a record of the wrong width are `22P04`

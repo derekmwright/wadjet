@@ -1,6 +1,6 @@
 # ADR-0045: A container declares its element at the declared-output seam and renders through one renderer
 
-Status: Accepted (2026-09-24, arc CW: #1250, #1017, #1133, #1303, #1268, #1021; amended the same day). Amended 2026-09-25 ( a subquery operand and a DECIMAL element declare and order as PostgreSQL does; one common element type for two containers; multi-dimensional arrays taken out of scope, #1337) and 2026-09-26 (earlier implementation: an INTERVAL element through the DURATION carrier; the common-element rule's scope is scalar elements).
+Status: Accepted (2026-09-24: #1250, #1017, #1133, #1303, #1268, #1021; amended the same day). Amended 2026-09-25 ( a subquery operand and a DECIMAL element declare and order as PostgreSQL does; one common element type for two containers; multi-dimensional arrays taken out of scope, #1337) and 2026-09-26 (earlier implementation: an INTERVAL element through the DURATION carrier; the common-element rule's scope is scalar elements).
 
 Related: ADR-0026 (a group key/slot has one identity and one name — the
 declared output this extends), ADR-0012 (PostgreSQL decides semantics; the

@@ -1,6 +1,6 @@
 # ADR-0022: A ROW field path is not a column reference
 
-Status: Accepted (2026-08-25; amended 2026-09-04 by arc E3 for #769 — rule 1's ORDER is stated the other way round and asked in ONE place; amended 2026-09-07 by arc J1 — the "not decided here" entry for a field path as an IN-subquery's INNER key is CLOSED, and it closed at the DANGLING-REFERENCE GUARD rather than at the lowering: rule 7)
+Status: Accepted (2026-08-25; amended 2026-09-04 for #769 — rule 1's ORDER is stated the other way round and asked in ONE place; amended 2026-09-07 — the "not decided here" entry for a field path as an IN-subquery's INNER key is CLOSED, and it closed at the DANGLING-REFERENCE GUARD rather than at the lowering: rule 7)
 
 ## Context
 
@@ -196,12 +196,12 @@ excludes first — and both directions are gated.
 ## Not decided here
 
 - **A field path as an IN-subquery's INNER key** — `x IN (SELECT c_row.b FROM
-  t)`. Added 2026-09-06 (arc H1, #866); **CLOSED 2026-09-07 by arc J1**, and
+  t)`. Added 2026-09-06 (#866); **CLOSED 2026-09-07 by the correlation key binding**, and
   the answer is rule 7 below rather than anything in this list. The entry is
   kept because what it predicted was wrong in an instructive way.
 
   H1 recorded that answering it "needs the field path MATERIALISED into the
-  subquery's own output under a hidden slot", and arc J1 built exactly that:
+  subquery's own output under a hidden slot", and correlation-key binding now does exactly that:
   a Project publishing `__path_0` above the build side, with the semi join
   keyed on the slot. The single-process and spilled arms then answered
   PostgreSQL's row. **The stage DAG answered ZERO rows and its `NOT IN` twin
@@ -223,7 +223,7 @@ excludes first — and both directions are gated.
   ("trailing input after the end of the statement"). That is a parser feature,
   and it fails loudly rather than answering wrongly.
 
-  **Amended 2026-09-04 (arc E3).** PostgreSQL's own spelling for a
+  **Amended 2026-09-04.** PostgreSQL's own spelling for a
   field path is the PARENTHESISED one — it reads `c_row.b` as `table.column`
   and only `(c_row).b` as the field — and wadjet parses it now:
   `(c_row).b` produces the SAME `plansql.ColRef{Table: "c_row", Column: "b"}`
@@ -271,7 +271,7 @@ excludes first — and both directions are gated.
   the field is asked for. That is rule 1's list again, one part wider, and it
   is its own change.
 
-  **Amended 2026-09-23 (arc PC): the qualified container answers.**
+  **Amended 2026-09-23: the qualified container answers.**
   The three-part identity was never needed. The earlier attempt answered NULL
   because it FLATTENED the path into a three-part name and stripped the
   qualifier; the fix keeps the two-part reference exactly as written —

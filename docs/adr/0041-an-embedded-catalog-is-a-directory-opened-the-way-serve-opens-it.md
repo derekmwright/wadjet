@@ -1,6 +1,6 @@
 # ADR-0041: An embedded program's catalog is a directory, opened the way `serve` opens it
 
-Status: Accepted (2026-09-22, #1255, arc EC)
+Status: Accepted (2026-09-22, #1255)
 
 Related: ADR-0037 (the license seam: everything `wadjet.Open` reaches stays
 MIT), ADR-0029 (configuration precedence — `derivedCatalogStoreDir` is the

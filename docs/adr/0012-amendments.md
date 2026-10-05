@@ -73,7 +73,7 @@ own arc. Pinned by `coordinator.TestLiteralScaleInADecimalFold`.
 
 Catalog: [Aggregates and windows](0012-divergences/aggregates-windows.md#catalog) rows r4; from entry [E17](0012-divergences/aggregates-windows.md#e17), ADR lines 634-711 at 0da8399a; dated 2026-09-07.
 
-- **CLOSED 2026-09-07 (#987, arc K2): a window SUM/AVG over an INTEGER
+- **CLOSED 2026-09-07 (#987): a window SUM/AVG over an INTEGER
   column is EXACT and declares what PostgreSQL declares.** The entry below
   is kept as the record of what the divergence was and how it was measured;
   it is no longer a divergence, and the pins that held it are deleted.
@@ -155,7 +155,7 @@ Catalog: [Aggregates and windows](0012-divergences/aggregates-windows.md#catalog
 
 Catalog: [Names, scopes, joins and stars](0012-divergences/names-scopes.md#catalog) rows r27; from entry [E68](0012-divergences/names-scopes.md#e68), ADR lines 2725-2849 at 0da8399a; dated 2026-09-07.
 
-- **CLOSED 2026-09-07 by arc K3 (#984): on the DISTRIBUTED arms `SELECT *`
+- **CLOSED 2026-09-07 (#984): on the DISTRIBUTED arms `SELECT *`
   showed the STAGE's stream and not the query's projection.** A Project
   emits no stage, so a derived block's SELECT list was not a relation on the
   DAG and a star above the join published the Scan's or the Aggregate's own
@@ -207,7 +207,7 @@ Catalog: [Names, scopes, joins and stars](0012-divergences/names-scopes.md#catal
   gate's `ctl/derived-aggregate-is-its-stream` cell and in the INNER cells of
   `coordinator.TestArcJ1APublishedKeyIsAUserColumn`.
 
-  CORRECTED 2026-09-08 by arc L1 (#997): "same NAMES" was wrong, and the
+  CORRECTED 2026-09-08 (#997): "same NAMES" was wrong, and the
   order and the names are ONE divergence rather than two. The join qualifies
   the BUILD side's duplicate columns by their owning alias, and which side
   builds is a cost decision — `logical.reorderJoins` expresses it by
@@ -220,7 +220,7 @@ Catalog: [Names, scopes, joins and stars](0012-divergences/names-scopes.md#catal
   two schemas for one query. PostgreSQL publishes the FROM clause's arms in
   written order and keeps duplicate names by POSITION, never qualified.
 
-  CLOSED 2026-09-13 by arc O1 (#997, #1012, #993), and NOT by the
+  CLOSED 2026-09-13 (#997, #1012, #993), and NOT by the
   build-side mark this paragraph proposed — `reorderJoins` swaps only a
   TWO-relation chain and `costBasedJoinReorder` REBUILDS a longer one, so
   there is no node whose children a mark could be relative to. The star is
@@ -262,7 +262,7 @@ Catalog: [Names, scopes, joins and stars](0012-divergences/names-scopes.md#catal
   `coordinator.TestO1AStarOverAJoinPublishesTheQueryNotThePlan`, so the
   arc's proof is deleting the pin.
 
-  EXTENDED 2026-09-08 by arc M1 (#993): there is a SECOND producer of the
+  EXTENDED 2026-09-08 (#993): there is a SECOND producer of the
   same divergence, and it splits the two DISTRIBUTED arms from each other.
   `physical.markCoPathingSelfJoinBuilds` sets `Stage.QualifyAllBuildCols`
   when two joins in one chain BUILD over the same table (Q07's self-join
@@ -275,7 +275,7 @@ Catalog: [Names, scopes, joins and stars](0012-divergences/names-scopes.md#catal
   order. Disabling that pass in place makes all four arms agree;
   `WADJET_STAGE_FUSION=0` does not change it, so the fusion passes are not
   the cause. It reproduces with NO derived block in the statement, which is
-  what says arc K3's "a block whose body is a JOIN is never marked" boundary
+  what says the "a block whose body is a JOIN is never marked" boundary for derived relations
   is not the condition. Pinned per DAG arm, in both spellings, in the same
   gate; it rides #997's arc because it is the same rule — which side builds
   is a cost decision and must not decide a NAME.
@@ -284,7 +284,7 @@ Catalog: [Names, scopes, joins and stars](0012-divergences/names-scopes.md#catal
 
 Catalog: [Names, scopes, joins and stars](0012-divergences/names-scopes.md#catalog) (history only; no live row); from entry [E69](0012-divergences/names-scopes.md#e69), ADR lines 2850-2881 at 0da8399a; dated 2026-09-07.
 
-- **CLOSED 2026-09-07 by arc K3 (#978): a zero-row `SELECT *` over a JOIN
+- **CLOSED 2026-09-07 (#978): a zero-row `SELECT *` over a JOIN
   carried no columns at all**, on every arm and on the wire. `SELECT *`
   over a join has no Project for the declaration walk to read and no single
   scan for it to describe, so a result WITH rows was described from the
@@ -320,7 +320,7 @@ Catalog: [Names, scopes, joins and stars](0012-divergences/names-scopes.md#catal
 
 Catalog: [LATERAL and subqueries](0012-divergences/lateral-subqueries.md#catalog) (history only; no live row); from entry [E86](0012-divergences/lateral-subqueries.md#e86), ADR lines 4161-4168 at 0da8399a; dated 2026-09-07.
 
-- **WITHDRAWN the same day (arc J1): the refusal of `SELECT *` over
+- **WITHDRAWN the same day: the refusal of `SELECT *` over
   a LATERAL whose ungrouped COUNT can see no rows.** It fired on the SHAPE,
   and a plan-time refusal cannot know the data — it refused queries whose
   outer rows all match, which had answered correctly one commit earlier. The
@@ -332,7 +332,7 @@ Catalog: [LATERAL and subqueries](0012-divergences/lateral-subqueries.md#catalog
 
 Catalog: [Names, scopes, joins and stars](0012-divergences/names-scopes.md#catalog) (history only; no live row); from entry [E54](0012-divergences/names-scopes.md#e54), ADR lines 2069-2078 at 0da8399a; dated 2026-09-13.
 
-**The FIRST of the three is CLOSED (2026-09-13, arc O1, #997/#1012): a
+**The FIRST of the three is CLOSED (2026-09-13, #997/#1012): a
 star over a join IS expanded now**, into the FROM clause's arms in
 written order (ADR-0026 §9), so a positional ORDER BY has a list to count
 and `ResolveStarJoinOrdinalSortKeys` answers it in the item's SOURCE
@@ -347,7 +347,7 @@ O1 gate's positional cells on five arms.
 Catalog: [LATERAL and subqueries](0012-divergences/lateral-subqueries.md#catalog) (history only; no live row); from entry [E87](0012-divergences/lateral-subqueries.md#e87), ADR lines 4183-4201 at 0da8399a; dated 2026-09-13.
 
 **The LATERAL's own star is no longer among them — CLOSED 2026-09-13 by
-arc O2.** It published the whole join until #979, was REFUSED from then
+the derived column publication.** It published the whole join until #979, was REFUSED from then
 until this arc, and publishes the body's own SELECT list now: the
 correlation slot the join is about to drop is identified by
 `Node.HiddenJoinCols` — the same identity the drop itself uses (ADR-0026
@@ -369,7 +369,7 @@ and — for the policed list, which is the half a star must never widen —
 
 Catalog: [Aggregates and windows](0012-divergences/aggregates-windows.md#catalog) (history only; no live row); from entry [E18](0012-divergences/aggregates-windows.md#e18), ADR lines 768-779 at 0da8399a; dated 2026-09-14.
 
-**That FLOAT32 cell's VALUE half CLOSED 2026-09-14 (arc NV, #950).**
+**That FLOAT32 cell's VALUE half CLOSED 2026-09-14 (#950).**
 `sum(real)` is `real` on PostgreSQL — float4pl — and every arm of this
 engine accumulates at that width now, grouped, distinct, through a
 derived table and windowed, so the three answers are one and it is the
@@ -377,15 +377,14 @@ server's: `1.6777224e+07`. `avg(real)` stays double precision, which is
 PostgreSQL's (#760). What remains OPEN is the window column's
 DECLARATION: `SUM(real) OVER ()` still describes itself float8 where the
 server declares real. The digits are the grouped spelling's, widened —
-a declaration, not a value — and moving it is the window-output typing
-arc ND owns. The census cell `813 SUM(real) OVER ()` now carries
+a declaration, not a value — and moving it requires changing window-output declarations. The census cell `813 SUM(real) OVER ()` now carries
 PostgreSQL's VALUE and names the declaration in its `why`.
 
 ### A06
 
 Catalog: [Aggregates and windows](0012-divergences/aggregates-windows.md#catalog) rows r5, r6; from entry [E21](0012-divergences/aggregates-windows.md#e21), ADR lines 941-978 at 0da8399a; dated 2026-09-14.
 
-**That gap CLOSED 2026-09-14 (arc NV, #1000), and it was not only a
+**That gap CLOSED 2026-09-14 (#1000), and it was not only a
 type.** The mechanism was one layer below the declaration:
 `expr.operandIsInt` kept the network types on the FLOAT path and
 `physical.intArithAllInt` mirrored that predicate so a declaration could
@@ -428,7 +427,7 @@ made here.
 
 Catalog: [Aggregates and windows](0012-divergences/aggregates-windows.md#catalog) (history only; no live row); from entry [E18](0012-divergences/aggregates-windows.md#e18), ADR lines 780-795 at 0da8399a; dated 2026-09-15.
 
-**That DECLARATION half CLOSED 2026-09-15 (arc ND, #1118).**
+**That DECLARATION half CLOSED 2026-09-15 (#1118).**
 `SUM(real) OVER (…)` declares real (OID 700) on every arm, which is what
 the grouped spelling has declared since #950 and what the server declares
 for both. Three layers had to agree — `physical.windowSpecOutputType`,
@@ -449,7 +448,7 @@ carrier.
 
 Catalog: [Numbers and DECIMAL](0012-divergences/numeric-decimal.md#catalog) (history only; no live row); from entry [E19](0012-divergences/numeric-decimal.md#e19), ADR lines 825-848 at 0da8399a; dated 2026-09-15.
 
-**CLOSED 2026-09-15 (arc ND, #1117), and the DECLARATION was the whole
+**CLOSED 2026-09-15 (#1117), and the DECLARATION was the whole
 of it.** `real op real` declares real, and the exact sum, difference or
 product of two float32s is representable in a float64 — so rounding the
 carrier's result once into a float4 output vector IS the correctly
@@ -477,7 +476,7 @@ so there is no server type to follow.
 
 Catalog: [Numbers and DECIMAL](0012-divergences/numeric-decimal.md#catalog) rows r6, r7, r8, r9; from entry [E19](0012-divergences/numeric-decimal.md#e19), ADR lines 849-902 at 0da8399a; dated 2026-09-15.
 
-**Amended 2026-09-15 (arc ND): the declaration is the whole of it
+**Amended 2026-09-15: the declaration is the whole of it
 for a PROJECTED value, and for nothing else.** The rounding IS the store
 into the float4 output vector the declaration names, so it happens
 exactly where a projection materializes the expression. Three positions
@@ -608,7 +607,7 @@ Catalog: [Network types](0012-divergences/network.md#catalog) rows r1, r3, r8, r
      `expr.TestAValueEnteringPortOrProtocolIsHeldToTheTypesRange`, on five
      arms in `coordinator.TestNetworkTextGrammarAnswersTheSameOnEveryArm`,
      and on the wire in `pgwire.TestANetworkCastOnTheWire`.
-  3. **CLOSED 2026-09-18 by arc EX (#1137): PORT and PROTOCOL beside a
+  3. **CLOSED 2026-09-18 (#1137): PORT and PROTOCOL beside a
      COLUMN read their OWN input function.** What this recorded: a
      comparison resolved an unknown literal against the column's declared
      wire type (OID 23, #834) — int4's whole grammar — so
@@ -619,7 +618,7 @@ Catalog: [Network types](0012-divergences/network.md#catalog) rows r1, r3, r8, r
      reader the CAST and every writer door already used), and the entry
      that states the settled rule is **PORT and PROTOCOL read their OWN
      input function** in §5's literal-resolution list below.
-  4. **CLOSED 2026-09-18 by arc EX (#1141): a fractional value whose
+  4. **CLOSED 2026-09-18 (#1141): a fractional value whose
      DECLARATION is text reads the destination's input function, whatever
      shape it arrives in.** (Narrowed twice 2026-09-15; closed
      2026-09-18.) What this recorded: the cast chose between the TYPE's
@@ -712,8 +711,8 @@ Catalog: [Network types](0012-divergences/network.md#catalog) rows r1, r3, r8, r
 Catalog: [Names, scopes, joins and stars](0012-divergences/names-scopes.md#catalog) (history only; no live row); from entry [E27](0012-divergences/names-scopes.md#e27), ADR lines 1087-1099 at 0da8399a; dated 2026-09-18.
 
 - ~~**A `BETWEEN` of any spelling inside a `JOIN … ON` clause is
-  refused.**~~ (Added 2026-09-18 by arc PS, #655/#1154; **CLOSED the same
-  day by arc JR, #1178**.)
+  refused.**~~ (Added 2026-09-18, #655/#1154; **CLOSED the same
+  day, #1178**.)
 
   `logical.splitOnAnd` split a rendered ON clause into conjuncts on the
   literal text `" AND "`, and `BETWEEN low AND high` carries one, so the
@@ -733,7 +732,7 @@ the joined column into one output column — a different rule from the
 arms' concatenation — and `logical.usingJoinStarColumns` states it: the
 USING columns once and first, then each arm's remaining columns, with the
 merged VALUE being the side that is never NULL-extended and
-`COALESCE(l.c, r.c)` for a FULL join. Arc SR then removed the last
+`COALESCE(l.c, r.c)` for a FULL join. The column-publication rule then removed the last
 decline that was not about a name being unnameable: a column name the two
 arms share OUTSIDE the USING list is published TWICE, which is
 PostgreSQL's answer. What is left refused (0A000) is an arm that
@@ -774,8 +773,7 @@ rather than all at once. Gated by
 Catalog: [Names, scopes, joins and stars](0012-divergences/names-scopes.md#catalog) (history only; no live row); from entry [E33](0012-divergences/names-scopes.md#e33), ADR lines 1189-1204 at 0da8399a; dated 2026-09-20.
 
 - ~~**`PARTITION BY <bare name>` over two join arms that both publish it is
-  answered, not refused.**~~ (Added 2026-09-07, #975; **CLOSED 2026-09-20
-  by arc RS, #1161/#1162.**) PostgreSQL raises 42702 `column reference "w"
+  answered, not refused.**~~ (Added 2026-09-07, #975; **CLOSED 2026-09-20, #1161/#1162.**) PostgreSQL raises 42702 `column reference "w"
   is ambiguous` for `SUM(y.w) OVER (PARTITION BY w)` where two FROM items
   publish `w`, verified live; wadjet bound one of them and answered.
 
@@ -789,7 +787,7 @@ Catalog: [Names, scopes, joins and stars](0012-divergences/names-scopes.md#catal
   `975 ctl the BARE contested spelling PostgreSQL refuses` asserts the
   refusal now; the row set it used to record is gone, which is the proof.
 
-## 2026-09-29: reconciled against the tip binary (arc DS)
+## 2026-09-29: reconciled against the tip binary
 
 Where the differences page and a §5 entry disagreed, or a §5 entry's own cell no longer described the engine, the cell was measured on the tip binary (the embedded server, `wadjet serve`, over its own file store) and the measured answer is what the catalog row says. The source entries keep their text as history. `winner` names which text the measurement bore out: `page`, `adr`, `neither` (both were stale), or `agrees-with-pg` (the divergence is gone on the embedded arm).
 
@@ -834,7 +832,7 @@ Rows retired by the measurement (the divergence is gone on the embedded arm; a r
 - aggregates-windows r12 (sources E16, P023): grouped and window MIN/MAX over REAL and INTEGER declare real and integer on the tip, as PostgreSQL does; the page entry P023 is removed.
 - lateral-subqueries r6 (sources E75): SUM(decimal) + (SELECT 1) in a correlated body declares numeric with PostgreSQL values on the tip; E75 recorded FLOAT64.
 
-## 2026-09-29: a DATE against a TIMESTAMP (arc DT, #1378)
+## 2026-09-29: a DATE against a TIMESTAMP (#1378)
 
 PostgreSQL's `date = timestamp` promotes the DATE to its midnight; this engine's direct comparison did so for column and literal operands, and every carrier that turns the pair into a KEY did not: a membership, NOT IN, an EXISTS, LATERAL or JOIN key compared the TIMESTAMP's milliseconds since 1970 with the DATE's day number, so the issue's 2024 cells answered 0 rows on every arm, NOT IN kept the TIMESTAMPs at a DATE's midnight, and `1970-01-01 00:00:00.001` matched the DATE 1970-01-02 (in `DATE '1970-01-02' IN (SELECT TIMESTAMP '1970-01-01 00:00:00.001' …)` too). A DATE scalar subquery against a TIMESTAMP was read by a magnitude guess (an integer inside ±500 000 taken as a day count), so `ts = (SELECT d …)` for 1969-12-31 also matched 1969-12-31 23:59:59.999 on the single-process arms, and on all five when correlated. The pair now meets at TIMESTAMP through one rule and one conversion (`batch.TemporalCommonType`, `batch.DateMidnightMillis`) in the comparison kernel, the equi-join key ladder, the membership set and the stage DAG's inlined set and scalar, which closes those cells without a catalog row. A TIMESTAMP-typed bind parameter against a DATE is still read at DATE (#1426, a defect, not a divergence). The DATE / TIMESTAMP declaration a derived table, CTE or recursive CTE now publishes for a column a scalar subquery, a window call or the recursive CTE's non-recursive term computes is read by every operator, as a stored column's is: arithmetic, `sum` / `avg` and an integer key over such a column raise 42883 (at v0.25.2 they answered a number, a day count or 0 rows; r24 names the shapes). Two rows record what stays refused:
 
@@ -843,7 +841,7 @@ PostgreSQL's `date = timestamp` promotes the DATE to its midnight; this engine's
 | temporal | [r24](0012-divergences/temporal.md#catalog) | Added: CASE / COALESCE / GREATEST / LEAST mixing DATE and TIMESTAMP arms is refused 0A000 whatever the arm's shape (a column — of a table, a derived table, a CTE or recursive CTE (inside its own recursive term too), a join, a set operation, VALUES or a LATERAL output, whatever produced it — a literal, expression, scalar subquery, window call or aggregate); at v0.25.2 it answered a day count in a TIMESTAMP column, epoch milliseconds in a DATE one, or raised 22003 — or, for a TIMESTAMP-first fold whose DATE arm is a scalar subquery, an instant a bare projection printed as PostgreSQL does but that CAST, extract and + INTERVAL then read wrongly (`CAST(COALESCE(ts, (SELECT max(d) …)) AS VARCHAR)` answered epoch milliseconds); 13 such folds measured right in a bare projection at v0.25.2 are refused now | `coordinator.TestArcDTDateTimestampEveryArm`, `coordinator.TestArcDTR2ScalarAndFoldArmsEveryArm` |
 | set-operations | [r7](0012-divergences/set-operations.md#catalog) | Amended: gated, with INTERSECT, EXCEPT and a mixed membership body named | `coordinator.TestArcDTDateTimestampEveryArm` |
 
-## 2026-09-29: a window function's argument list (arc WA, #1394 #1399)
+## 2026-09-29: a window function's argument list (#1394 #1399)
 
 A bare literal VALUE argument to a window function was never materialized as an input column, so `SUM(2.5) OVER ()`, `FIRST_VALUE(2.5) OVER (…)`, `LAG(5) OVER (…)` and `SUM(2) OVER ()` answered NULL on every row and arm, and an INSERT … SELECT of one stored NULL; it is now materialized like any expression. The INTEGER argument (LAG / LEAD's offset, NTILE's and NTH_VALUE's n) was read by `strconv.Atoi` over its text, and every evaluator read an offset or n <= 0 as 1, so `LAG(x, 0)` answered the previous row, `LAG(x, -1)` the previous instead of the next, `LAG(x, NULL)`, `LAG(x, 1 + 1)` and `LAG(x, o)` answered as `LAG(x)`, and `NTILE(0)` answered 1. It is now typed as PostgreSQL types it, a constant expression is folded at plan time, and a per-row integer argument is refused.
 
@@ -853,7 +851,7 @@ A bare literal VALUE argument to a window function was never materialized as an 
 | aggregates-windows | [r19](0012-divergences/aggregates-windows.md#catalog) | Added: a per-row LAG / LEAD offset or NTILE / NTH_VALUE n (a column, an expression over one, a subquery) is refused 0A000 (at v0.25.2 it was read as the default 1) | `coordinator.TestArcWAWindowArgumentsEveryArm` |
 | aggregates-windows | [r20](0012-divergences/aggregates-windows.md#catalog) | Added: a bound int8 / text / numeric parameter as the integer argument answers by its value where PostgreSQL raises 42883 (the same at v0.25.2) | `pgwire.TestAWindowArgumentParameterAnswers` |
 
-## 2026-09-30: a scalar subquery's answer is a typed operand (arc SS, #1428 #1431 #1427 #1422)
+## 2026-09-30: a scalar subquery's answer is a typed operand (#1428 #1431 #1427 #1422)
 
 A scalar subquery's answer reached its consumer as the runner's row box — a DATE as its ISO text, a TIMESTAMP as a bare count of epoch milliseconds — and nothing that reads an instant by its producer read the subquery's declaration. At v0.25.3, on all five arms, `CAST((SELECT ts …) AS VARCHAR)` for 1969-12-31 23:59:59.999 answered `-1`, `extract(year FROM (SELECT min(ts) …))` over 1000-01-01 answered -968030, and `(SELECT max(ts) …) + INTERVAL '1 hour'` and `- INTERVAL '1 day'` answered the subquery's own 2024-03-04 12:00:00 (`coordinator.TestArcSSScalarSubqueryTypedOperandEveryArm` issue/1428/*, issue/1431/*); `d = (SELECT d …)` for 9999-12-31 answered no row on the single-process arms and the row on the DAG arms (issue/1427/eq). The answer is now the box its declared type has on the row path and every consumer reads its unit from the same declaration (`expr.typedScalarAnswer`, `producedTemporal`), and the comparison kernel's temporal pair rule covers the same-type pair (`batch.TemporalPairType`), so no DATE or TIMESTAMP pair reaches the magnitude guess. A correlated subquery was declared from its text with the outer names unresolved: at v0.25.3 `(SELECT c.f + x.v …)` over a DOUBLE `c.f` and an INT `x.v` declared integer and answered 6 for 6.5 on all five arms (issue/1422/outerFirst), and one returning an outer column declared text (`*/corr/proj`); it is now declared with each outer reference typed as the outer column, as the per-row re-run spells it (`expr.OuterTypedSubquerySQL`): the outer value is a COLUMN-TYPED literal (`plansql.CastNode.Column`) that the planner and the evaluator type as the outer column — its integer width, its DECIMAL (p,s), its array element — so `(SELECT coalesce(o.i, x.v) …)` over an int4 `o.i` declares integer and `(SELECT coalesce(o.a, x.a) …)` over an int4[] declares integer[], as at v0.25.3 and on PostgreSQL (`pgwire.TestArcSSScalarSubqueryTypedOnTheWire` coalesceOuterInt, coalesceOuterArray). An integer CAST the user writes keeps its own rule: `CAST(t.i AS INTEGER) / t.n` answers 1.3333333333333333 double precision as at v0.25.3 (`coordinator.TestArcSSOperandClassAndWidthEveryArm` castI/divN). These close cells without a catalog row; r12 and r19 below are the rows that moved.
 
@@ -875,7 +873,7 @@ A scalar subquery's answer reached its consumer as the runner's row box — a DA
 | recursion | [r12](0012-divergences/recursion.md#catalog) | Added (2026-10-01): a `numeric(38,s)` seed, a CAST or a column, reads as unconstrained and answers where PostgreSQL raises 42804 (`CAST(1.5 AS NUMERIC(38,2))` 1.50, 2.50, 3.50), as at v0.25.3 (r13/seed/n382cast) | `pgwire.TestArcSSAuditConsumersOnTheWire` r13/seed/n38* |
 | — | — | Closed without a row (2026-10-01; PostgreSQL's answer now): `json_build_object` writes a value declared `numeric` as a JSON number with its own digits — a `numeric` column's `json_build_object('v', n)` is `{"v" : 2.25}` where v0.25.3 wrote the JSON string `{"v" : "2.25"}` (r13/b4/colN), `json_build_object('v', t.a[1] * t.n)` is `{"v" : -10.50}` where v0.25.3 wrote the double's `{"v" : -10.5}` (r13/b4/idxSmall), and an array value's elements are joined by a bare comma as PostgreSQL's are: `json_build_object('v', ARRAY[n, 1])` is `{"v" : [2.25,1]}` where v0.25.3 wrote `{"v" : ["2.25", 1]}` (r13/b4/nArr). The object stays declared text where PostgreSQL declares json (a recorded filing candidate) | `coordinator.TestArcSSOperandKindTimesConsumerEveryArm` r13/b4/*, r13/c36_*; `pgwire.TestArcSSAuditConsumersOnTheWire` r13/b4/* |
 
-## 2026-10-02: the scalar renderers write a value as its declared type's text (arc RN, #1474 #1466 #1467 #1481)
+## 2026-10-02: the scalar renderers write a value as its declared type's text (#1474 #1466 #1467 #1481)
 
 Four renderers turned a typed value into text from the Go type of its box rather than from its declared type. At c39858f3, on all five arms: `json_build_object('d', t.d, 'ts', t.ts)` wrote the day count and the epoch milliseconds (`{"d" : 19786, "ts" : 1709553600000}` for 2024-03-04 12:00:00), a nested `json_build_object` was written as an escaped JSON string, `format('%s|', t.f * t.n + 3)` was `%!s(float64=6.375)|` and `format('%s|', NULL)` `%!s(<nil>)|`, and `regexp_replace(CAST(t.a[1] * t.n AS TEXT), '0', 'z')` replaced every match (`-1z.5z` for -10.50) and took no flags argument (42883). Each now renders by the declaration: json_build_object through `batch.FormatPGJSON` (CAST(container AS JSON)'s renderer), format through `batch.FormatPGText` (the pgwire text format's), and regexp_replace reads its pattern through the `~` operators' ARE translation with PostgreSQL's flags. Gate: `coordinator.TestArcRNRendererTableEveryArm` (963 cells × five arms; 616 fail at c39858f3, and no arm-cell where c39858f3 agreed with PostgreSQL disagrees), `wadjet.TestArcRNEmbeddedRenderers`, `pgwire.TestArcRNRenderersOnTheWire`.
 
@@ -890,7 +888,7 @@ Four renderers turned a typed value into text from the Go type of its box rather
 | — | — | Closed without a row (PostgreSQL's answer now): format is PostgreSQL's `%[n$][-][width]type` grammar over each value's type text (`6.375\|`, `\|` for NULL, `t`, `{1,2}`), `%d` and `%5.2s` are 22023; quote_ident quotes a non-UNRESERVED keyword and quote_literal writes E'…' for a backslash (#1467) | `coordinator.TestArcRNRendererTableEveryArm` fmtS/*, fmtWidth/*, fmtPosL/*, fx/* |
 | — | — | Closed without a row (PostgreSQL's answer now): regexp_replace replaces the first match unless `g`, takes `i` / `c` / `q` / `s` / `t`, expands `\&`, keeps the empty match after a non-empty one under `g`, and an all-greedy RE takes the longest match (`regexp_replace('abcd', 'a\|ab', 'X')` is Xcd; Xbcd at c39858f3) (#1481) | `coordinator.TestArcRNRendererTableEveryArm` rx/* |
 
-## 2026-10-02: a bound parameter's type (arc PW, #1426 #1410)
+## 2026-10-02: a bound parameter's type (#1426 #1410)
 
 A bound parameter reached the planner as SQL text, and the text was not a value of the parameter's type: a timestamp was a bare quoted literal — SQL's unknown — which a DATE operand read with the DATE input function, so `d = $1` bound as timestamp `'1969-12-31 23:59:59.999'` matched 1969-12-31, `d IN ($1, $2)` with `'2024-03-04 12:00:00'` matched 2024-03-04, `d < $1` with `'1969-12-31 00:00:00.001'` missed 1969-12-31 and `d = ANY (SELECT $1 UNION ALL SELECT $2)` was 42883 (#1426; v0.25.3, `pgwire.TestArcPWParameterTypesMatchPostgres` date/\*/text and /bin); a bigint was a bare integer, so `SELECT $1` declared integer; and a statement's Describe stood an untyped NULL in for every parameter and declared text. The type of an undeclared parameter was read lexically from the identifier beside it, so `$1 = n + d` was typed integer and a pgx client's 14.5 matched no row, `INSERT … VALUES (2, $1)` bound 2.5 into an integer column was 22P02, and `LIMIT $1` was 42601 (#1410; `pgwire.TestArcPWPgxClientsBindAsPostgres` 1410/\*). A parameter is now its declared type, or its position's as PostgreSQL types it, spliced as a literal of that type, and a NULL parameter — the Describe stand-in included — is a NULL of that type.
 
@@ -907,7 +905,7 @@ A bound parameter reached the planner as SQL text, and the text was not a value 
 | temporal | [r25](0012-divergences/temporal.md#catalog) | Amended 2026-10-03: a numeric zone offset is read by PostgreSQL's digit rule (with no `:`, the last two digits the minute and the rest the hour: `+000130` is 01:30, `+001500` 15:00, `+00130` / `+0000130` / `+00000000130` read, `+05:` is +05, `+053000` and `+0530:00` are 22009 as on PostgreSQL — the clause recording `'…+0530:00'` at 22007 is closed); `…Z+05`, PostgreSQL's POSIX zone five hours west, is a zone name and refused 22007 (it read as a DATE at 978cd0e5, which discarded the suffix); `now` and `today` leave the row's list, which names only gated spellings | `coordinator.TestArcPWZoneSpellingsEveryArm`, `parquet.TestTheZoneOffsetReadsPostgresDigitRule`, `pgwire.TestArcPWRound2MatchesPostgres` (b3/\*) |
 | temporal | [r25](0012-divergences/temporal.md#catalog) | Amended 2026-10-03: whitespace after a zone's sign is skipped as PostgreSQL's lexer skips it — `'2024-03-04 12:00:00+ 05'` is +05 and `'… - 05'` −05 (DATE 2024-03-04; the clause recording `… - 05` and "a sign set apart by a space" as refused is closed), `+ 16` / `+ 053000` / `+05 - 16` are 22009 — and the grammar's whitespace is PostgreSQL's isspace (`\n`, `\r`, `\v`, `\f` as well as space and tab, between every field); `…z+05`, the lower-case POSIX zone, joins `…Z+05` in the row's list | `parquet.TestTheGrammarSkipsPostgresWhitespace`, `coordinator.TestArcPWZoneSpellingsEveryArm`, `pgwire.TestArcPWRound2MatchesPostgres` (b3/\*) |
 
-## 2026-10-02: a LAG / LEAD default widens the result (arc WD, #1435)
+## 2026-10-02: a LAG / LEAD default widens the result (#1435)
 
 LAG / LEAD's default reached the operator as a float64 or as its SQL text and was written into a vector of the VALUE's type. At 978cd0e5, on the single-process arm: `LAG(b, 10, 2.5) OVER (ORDER BY id)` over a bigint declared bigint and answered 2 on every row where PostgreSQL declares numeric and answers 2.5 (type/lag/bigint/dec; #1435's three statements, issue/*, answered 2 on the rows the default fills on all five arms); a text, column, CAST or `1 + 1` default failed the query with `cannot store string into INT64 vector` (type/lag/bigint/{text,same,colwide,cast,expr}); over a DATE value an integer default failed the write (`cannot store float64 into DATE vector`) and a DATE default answered NULL (type/lag/date/{int,date}); over a NUMERIC(10,2) value a text, boolean or column default answered 0.00 (type/lag/numeric/{text,bool,colwide}); over a TEXT value a CAST default answered its SQL source `cast(7 as bigint)` (type/lag/text/cast). The result is now the common type of the value and the default (`expr.CommonDeclType`, with the DATE → TIMESTAMP rung), both read from materialized columns of that type, the default at the row it fills; a pair with no common type is 42883 as on PostgreSQL ([aggregates-windows](0012-divergences/aggregates-windows.md) mechanism paragraph).
 
@@ -926,7 +924,7 @@ LAG / LEAD's default reached the operator as a float64 or as its SQL text and wa
 | aggregates-windows | [r24](0012-divergences/aggregates-windows.md#catalog) | Added, 2026-10-04: a column created from a numeric LAG / LEAD result takes the result's scale and stores a later 0.75 as 1 where PostgreSQL stores 0.75 (c10; 8b00b112 refused the CREATE TABLE AS). The 2026-10-03 typed-NULL line above is narrowed to the LAG / LEAD default: a NULL default under a CAST contributes its type family and no width (b2/*); a typed NULL in COALESCE, CASE, UNION ALL, NULLIF, GREATEST or arithmetic declares double precision again, as at 8b00b112, so `CREATE TABLE c1 AS SELECT CAST(NULL AS NUMERIC) AS v` then INSERT 1.25 stores 1.25 (the 2026-10-03 declaration stored 1) | `wadjet.TestArcWDTypedNullCreateTableAs` |
 | aggregates-windows | [r24](0012-divergences/aggregates-windows.md#catalog) | Amended, 2026-10-04: the shadowing rule names an expression, not an aggregate (`SUM(b) AS b … GROUP BY g` under a window read through a join reads the other side's `b` on the DAG arms, as at 93e4804e, #1549); r24 cites #1541 and names a default computed over a typed NULL (`CAST(NULL AS NUMERIC) + 0`: double precision, 1e+16 where PostgreSQL answers 10000000000000001) | measured on five arms against PostgreSQL 17.11 on 2026-10-04; no gate row |
 
-## 2026-10-02: the numeric carrier (arc NX, #1386 #1392 #1450)
+## 2026-10-02: the numeric carrier (#1386 #1392 #1450)
 
 Three operand kinds PostgreSQL types `numeric` rode this engine's float8 rung. An integer CAST beside a numeric was not an integer operand of exact arithmetic outside a scalar subquery's body: at v0.25.3 (and at c39858f3), `CAST(t.i AS INTEGER) % t.n` over 1 and 0.01 answered 0.00999999999999998, `CAST(t.i AS INTEGER) * 0.1` over 3 answered 0.30000000000000004 and `CAST(t.b AS BIGINT) * 10000000 * t.n - 3` over 9000000000 and 10.00 answered 900000000000000000 (`wadjet.TestArcNXEmbeddedNumericCarrier` 1450/modMulPast2^53). A numeric constant a double cannot carry was boxed as a float64, so `COALESCE(14.0000000000000000001, 0)`, `CASE WHEN true THEN 14.0000000000000000001 END`, `LEAST(14.0000000000000000001, 20)` and `-(-14.0000000000000000001)` compared equal to 14 and `(SELECT COALESCE(14.0000000000000000001, 0))` answered 14 (1386/choiceUnarySubquery, 1386/where: 4 rows for PostgreSQL's 0). The explicit integer CAST of `5 / 2.0`, `SQRT(6.25)` and `POWER(2.5, 1)` answered 2 (negated -2) for PostgreSQL's 3 (1392/six, 1392/negSmallBig). Each is now PostgreSQL's answer on all five arms (`coordinator.TestArcNXNumericCarrierEveryArm`, 2008 cells) and on the wire (`pgwire.TestArcNXNumericCarrierOnTheWire`); a quotient over an operand a cast made exact keeps the double (r19) and a column a previous operator materialized keeps half-to-even rounding under an explicit CAST (dml-assignment r2).
 
@@ -937,7 +935,7 @@ Three operand kinds PostgreSQL types `numeric` rode this engine's float8 rung. A
 | numeric-decimal | [r18](0012-divergences/numeric-decimal.md#catalog) | Amended: a constant a double cannot carry folds at its own scale, so `COALESCE(t.b, 14.0000000000000000001)` prints 30.0000000000000000000 for 30 and keeps 14.0000000000000000001 (c39858f3: the double 14, nx/ncCoalesceCol/proj); `CASE WHEN 14.0000000000000000001 > 14 THEN 14 ELSE 13.25 END` prints 14.00 for 14 (c39858f3: 13.25, nx/ncCaseChoice/proj) | `coordinator.TestArcNXNumericCarrierEveryArm` |
 | numeric-decimal | [r19](0012-divergences/numeric-decimal.md#catalog) | Amended: a quotient over an operand a cast made exact — an integer CAST bare or under NULLIF, COALESCE, CASE, GREATEST, LEAST, abs, unary minus, integer or numeric arithmetic; a bare NUMERIC cast; either under abs, mod, round, ceil, ceiling, floor, trunc or sign — keeps the double, `CAST(t.i AS INTEGER) / t.n` 1.3333333333333333 (OID 701) as at c39858f3 (issue/1450/div), `CAST(t.n AS NUMERIC) / 3` 0.75, 0.0033333333333333335 as at c39858f3 (bareCast/numOperand), and `t.n / NULLIF(CAST(t.b AS BIGINT), 0) = 0.0000000011111111111111111111`, `(CAST(t.i AS INTEGER) * 1.0) / t.n = 1.3333333333333333` and `CAST(t.i AS NUMERIC) / t.n = 1.3333333333333333` select PostgreSQL's row as at c39858f3 (nx/icBigDiv/cmp, nx/wq*/cmp, nx/wn*/cmp, qn/*/cmp); the wrapped cast's projection is the double 1.111111111111111e-09 where c39858f3 raised 22003 (nx/icBigDiv/proj); `ceil(CAST(t.i AS NUMERIC)) / t.n = 1.3333333333333333` selects PostgreSQL's row as at c39858f3 (qf/*/cmp); a quotient of two constants, an integer literal past int64 among them, keeps the double (`9223372036854775808 / 2` 4.611686018427388e+18, negLit/pastInt64Quot) while `t.n / 9223372036854775808` is the one-scale numeric 0.0000000000000000002439 (negLit/colOverPastInt64), both as at c39858f3; an aliased item is the same quotient on every arm, `7 / t.n AS x` 3.11111111111 and `9223372036854775808 / t.n AS x` 4099276460824344803.55555555556, where c39858f3's single-process arms typed it by the column `n` its text named after the first dot and printed 3.11 and 4099276460824344803.56 (alias/smallQuot, alias/pastInt64Quot) | `coordinator.TestArcNXNumericCarrierEveryArm` |
 | dml-assignment | [r2](0012-divergences/dml-assignment.md#catalog) | NARROWED: an explicit integer CAST of a float-carried numeric computed in the cast's own operand rounds half away (`CAST(5 / 2.0 AS INTEGER)` 3; 2 at v0.25.3, 1392/six); a column a previous operator materialized keeps half to even (`CAST(s.x AS INTEGER)` over `SELECT DISTINCT 5 / 2.0 + t.id * 0` 2 on every arm, as at c39858f3, roundOrigin/distinct) | `coordinator.TestArcNXNumericCarrierEveryArm` (kept roundOrigin/*) |
-| — | — | Closed without a row (PostgreSQL's answer now): a bare `CAST(<exact operand> AS NUMERIC)` is that operand's numeric in the consumers the rows measure — every operator but a quotient, which keeps the double (r19) — `CAST((SELECT x.b * 10000000 …) * t.n AS NUMERIC) + 3` is 202500000000000003.00 (OID 1700) where c39858f3 answered the double 2.025e+17 (arc SS N-19: coordinator r11/c01_project_castBare and 36 more cells, wire r11/*_castBare), and `CAST('14.0000000000000000001' AS NUMERIC)` keeps its digits (nx/ncCastNumText/*); a wide numeric literal in a window's argument is exact, `SUM(99999999999999999999.5) OVER ()` over one row 99999999999999999999.5 (c39858f3: 1e+20) | `coordinator.TestArcSSOperandKindTimesConsumerEveryArm`, `coordinator.TestArcNXNumericCarrierEveryArm` |
+| — | — | Closed without a row (PostgreSQL's answer now): a bare `CAST(<exact operand> AS NUMERIC)` is that operand's numeric in the consumers the rows measure — every operator but a quotient, which keeps the double (r19) — `CAST((SELECT x.b * 10000000 …) * t.n AS NUMERIC) + 3` is 202500000000000003.00 (OID 1700) where c39858f3 answered the double 2.025e+17 (the scalar-subquery typing N-19: coordinator r11/c01_project_castBare and 36 more cells, wire r11/*_castBare), and `CAST('14.0000000000000000001' AS NUMERIC)` keeps its digits (nx/ncCastNumText/*); a wide numeric literal in a window's argument is exact, `SUM(99999999999999999999.5) OVER ()` over one row 99999999999999999999.5 (c39858f3: 1e+20) | `coordinator.TestArcSSOperandKindTimesConsumerEveryArm`, `coordinator.TestArcNXNumericCarrierEveryArm` |
 | — | — | Closed without a row (PostgreSQL's answer now): a `numeric` the engine carries exactly — a column, a typed or bare NUMERIC cast, a fractional literal a double cannot carry, an integer literal past int64, a numeric expression or scalar subquery — cast to BOOLEAN, DATE, TIMESTAMP, INTERVAL, UUID, an array or a vector refuses the type pair, 42846 — `CAST(t.n AS DATE)` over a numeric(10,2) column (c39858f3: 22007 invalid input syntax for type date: "2.25", castRefusal/numColWhere/DATE), `CAST(CAST(1.5 AS NUMERIC(10,2)) AS BOOLEAN)` (c39858f3: 22P02, castRefusal/numCast/BOOLEAN), `CAST(14.0000000000000000001 AS DATE)` (c39858f3: 1970-01-15, castRefusal/wide/DATE), `9223372036854775808::DATE` (c39858f3: 22003, castRefusal/pastInt64Colon/DATE), `CAST(CAST(1.5 AS NUMERIC(10,2)) AS VECTOR(1))` (c39858f3: 22P02, castRefusal/numCast/VECTOR; pgvector 0.8.2 answers 42846). A narrow fractional literal keeps its double: `CAST(14.5 AS DATE)` is 1970-01-15 (the day count, as at c39858f3, castRefusal/narrow/DATE) and `CAST(14.5 AS UUID)` 22P02 (as at c39858f3, castRefusal/narrow/UUID, candidate NX-C11) | `coordinator.TestArcNXNumericCarrierEveryArm` castRefusal/*, `pgwire.TestArcNXNumericCarrierOnTheWire` w/castRefusal* |
 | — | — | Closed without a row (PostgreSQL's answer now): an integer literal past int64 is the numeric its digits name, and a minus folds into the constant before it is typed — `SELECT 9223372036854775808` is 9223372036854775808 (OID 1700), `SELECT -9223372036854775808` the bigint -9223372036854775808 and `SELECT -(-9223372036854775808)` the numeric 9223372036854775808 (c39858f3: the doubles 9.223372036854776e+18, -9.223372036854776e+18, 9.223372036854776e+18; negLit/pastInt64, negLit/int64Min, negLit/doubleNeg), `9223372036854775808 = 9223372036854775807` is false (c39858f3: true, negLit/pastInt64Cmp), and `SELECT - 9223372036854775808 - 1` and `CAST((-9223372036854775809) AS BIGINT)` raise 22003 bigint out of range (c39858f3: -9223372036854775809 and -9223372036854775808, negLit/int64MinMinus1, negLit/pastInt64ToBigint) | `coordinator.TestArcNXNumericCarrierEveryArm` negLit/*, `pgwire.TestArcNXNumericCarrierOnTheWire` w/pastInt64*, `wadjet.TestAnOutOfRangeCastRefusesAtTheDoor` |
 | — | — | Closed without a row (PostgreSQL's answer now): an explicit integer CAST over an EXTRACT of a column rounds half away on the stage DAG too — `CAST(extract(year FROM t.d) * 0 + 2.5 AS INTEGER)` is 3 on all five arms (c39858f3: 2 on every arm; roundOrigin/extractDate). A DAG stage re-parses the EXTRACT as `year(t.d)`, which now keeps EXTRACT's category | `coordinator.TestArcNXNumericCarrierEveryArm` roundOrigin/extract* |
@@ -948,12 +946,12 @@ Three operand kinds PostgreSQL types `numeric` rode this engine's float8 rung. A
 | numeric-decimal | [r19](0012-divergences/numeric-decimal.md#catalog) | Amended (2026-10-03): a quotient over MOD with a numeric argument keeps one scale per column as the `%` spelling does, `MOD(8, 2.5) / t.n` over 2.25 is 0.222222222222 as `(8 % 2.5) / t.n` is (9420d256: the double 0.2222222222222222 for MOD, 0.222222222222 for `%`; m/modLitFracDiv) | `coordinator.TestArcNXNumericCarrierEveryArm` (kept m/modLitFracDiv) |
 | — | — | Closed without a row (PostgreSQL's answer now, 2026-10-03): MOD with a numeric argument is mod(numeric, numeric), the exact remainder `%` computes — `MOD(t.b, 0.7)` over a bigint 30, -70, 9000000000 is 0.6, 0.0, 0.1 (9420d256: the integer 0 on every row, m/modColFracB), `MOD(t.b, 2.5)` over -70 prints 0.0 (9420d256: the integer 0, w/modBigFracCol), `MOD(8, 2.5)` is numeric 0.5 (9420d256: the double 0.5, m/modLitFrac) and `MOD(9223372036854775807, 2.5)` is 2.0 (9420d256: the double 0.5, m/modLitBigFrac) | `coordinator.TestArcNXNumericCarrierEveryArm` (m/*), `pgwire.TestArcNXNumericCarrierOnTheWire` (w/modColFracB, w/modBigFracCol), `wadjet.TestArcNXEmbeddedNumericCarrier` mod/numericDivisorExact |
 
-## 2026-10-02: concurrent casts share a synchronized destination cache (arc DR)
+## 2026-10-02: concurrent casts share a synchronized destination cache
 
 The DECIMAL/NUMERIC and VARCHAR/CHAR cast destination caches synchronize lookup and publication; concurrent evaluation keeps the same destination declaration and value, as specified by `expr.Cast.decimalDestination` and the string-modifier cache in `internal/engine/expr`.
 No SQL value or catalog disposition changes: `SELECT CAST(1.25 AS NUMERIC(10,2))` answers 1.25 (the ordinary binary checks the value, while the concurrency gates establish cache ownership).
 
-## 2026-10-03: the floating-point type names (arc FT, #1464 #1405)
+## 2026-10-03: the floating-point type names (#1464 #1405)
 
 The CREATE TABLE door read a column's type through `parquet.ParseTypeID`, whose switch made a bare `FLOAT` float4 and knew none of `REAL`, `FLOAT4`, `FLOAT8` or `DOUBLE PRECISION`, while the CAST door read every spelling as PostgreSQL does. At 977865f5, on all five arms, `CREATE TABLE z (dv FLOAT)` declared real and stored 674999997 as 6.75e+08, 1e39 into it was 22003, and `dv REAL`, `dv FLOAT4`, `dv FLOAT8` were 42704 and `dv DOUBLE PRECISION` 42601 (`coordinator.TestArcFTFloatTypeNamesEveryArm` ddl/\*, read/float/\*); `CAST(1 AS FLOAT(1))` was labelled `float8` (read/float1/castLabel) and `CAST(g AS FLOAT) … GROUP BY CAST(g AS FLOAT8)` was 42803 (identity/floatFloat8). `parquet.FloatTypeID` is now the one table — the DDL door, ARRAY/ROW/MAP elements, KnownTypeName's CAST accept-set, the cast label and the GROUP BY cast identity read it — and every cell answers PostgreSQL's. The catalog records a column's TypeID, never its spelling, so a column declared FLOAT before this change stays real (`wadjet.TestArcFTAColumnDeclaredFloatBeforeTheChangeStaysReal`).
 
@@ -962,7 +960,7 @@ The CREATE TABLE door read a column's type through `parquet.ParseTypeID`, whose 
 | numeric-decimal | [r20](0012-divergences/numeric-decimal.md#catalog) | Added: `DOUBLE`, and the quoted keywords `"float"` and `"real"`, are accepted as double precision / real where PostgreSQL answers 42704 (a kept superset; at 977865f5 a `DOUBLE` column was already float8, a `"float"` column real, and both quoted keywords already read as their types in a CAST) | `coordinator.TestArcFTFloatTypeNamesEveryArm` ddl/double/\*, ddl/floatQuoted/\*, ddl/realQuoted/\* |
 | — | — | Closed without a row (PostgreSQL's answer now): FLOAT is double precision and FLOAT4 / FLOAT8 / REAL / DOUBLE PRECISION declare a column, at every door (#1464 #1405) | `coordinator.TestArcFTFloatTypeNamesEveryArm`, `wadjet.TestArcFTFloatColumnStoresDoublePrecision`, `pgwire.TestArcFTFloatTypeNamesOnTheWire` |
 
-## 2026-10-03: the readers past the inference sample (arc RD, #1242)
+## 2026-10-03: the readers past the inference sample (#1242)
 
 `read_json` read a non-NULL value under a key first seen past its 100-row sample, or under a field of a nested object first seen past it, by skipping it: at 9420d256 `SELECT * FROM read_json(f)` over 2 199 objects `{"id","a"}` and a 2 200th holding `"k": 7` answered the row as `[2200 2200]`, and `CREATE TABLE … AS` stored it so; `{"m":{"x":2200,"y":2}}` past a sample of `{"m":{"x":…}}` stored `m = {x: 2200}` (`wadjet.TestArcRDReaderPastSampleCoverage` key/\*, nested_field/\*). Both are refused now, and the readers take `sample_size` (a count, or -1 for every row), which reads such a file widened (ADR-0039 §3). PostgreSQL has no reader; COPY declares its columns.
 
@@ -970,7 +968,7 @@ The CREATE TABLE door read a column's type through `parquet.ParseTypeID`, whose 
 |---|---|---|---|
 | table-functions | [mechanism](0012-divergences/table-functions.md#mechanisms) | Amended: a key first seen past the sample is 22P04, a nested field 22P02; `sample_size = -1` / `N` | `wadjet.TestArcRDReaderPastSampleCoverage`, `pgwire.TestArcRDReaderPastSampleWire`, `coordinator.TestArcRDReaderPastSampleOnEveryArm` |
 
-## 2026-10-03: the TABLESAMPLE argument (arc TB, #1411)
+## 2026-10-03: the TABLESAMPLE argument (#1411)
 
 The TABLESAMPLE argument was one number token (or a float parameter's CAST spelling) read with `strconv.ParseFloat` and no range check, and the sampler was installed only for a percentage above 0. At 6184761c, on all five arms, `BERNOULLI (0)` and `SYSTEM (0)` answered every row of tb_p (3), and `101`, `1e20`, `99999999999999999999`, `CAST('1e20' AS DOUBLE PRECISION)`, `CAST('1e400' AS DOUBLE PRECISION)` and a bare `1e400` answered 3; `-1`, `NULL`, `'50'`, `25 * 2`, `CAST(50 AS NUMERIC)` and `CAST('NaN' AS DOUBLE PRECISION)` were 42601. On the three DAG arms no stage fragment carried the sampler: `BERNOULLI (50)` over tb_big (20 000 rows) answered 20000, and at 9420d256 `SELECT count(*) FROM tb_big WHERE id < (SELECT count(*) FROM tb_p TABLESAMPLE BERNOULLI (0))` answered 2 on every arm (identical at 8b00b112). The single-process sampler drew from every physical row of a batch: at 9420d256 `SELECT id FROM tbd1 TABLESAMPLE BERNOULLI (100)` after `DELETE FROM tbd1 WHERE id = 1` answered 1; 2; 3 on the embedded arm (the DAG arms, which did not sample, answered 2; 3). The argument is now PostgreSQL's: an expression coerced to real at plan time (`physical.TablesampleArgument`: 22003 / 42804 / 42703 / 0A000 there, EXPLAIN too; real's input refuses a `_` separator, 22P02, and a nonzero value that underflows, 22003 — `CAST('1_0' AS REAL)` answered 10 and `CAST('1e-46' AS REAL)` 0 at 9420d256, identical at 8b00b112), the range checked when the scan begins (2202H; a scan under a constant-false WHERE or HAVING or a LIMIT 0 never begins, as on PostgreSQL), and the sample drawn where the scan runs from the rows it selects — the worker's scan fragment applies the single-process kernel (`exec.NewSampledSource`), whatever position the scan has. A subquery a constant decides is folded away in the logical plan both paths consume, before the DAG resolves a filter's subqueries (`logical.foldShortCircuitedSubqueries`: x AND false, x OR true, a NULL conjunct of a WHERE / HAVING): at c4dbd842 `SELECT count(*) FROM tb_p WHERE false AND EXISTS (SELECT 1 FROM tb_big TABLESAMPLE BERNOULLI (101))` and `… WHERE true OR EXISTS (…)` failed uncoded on the four coordinator arms, `… WHERE false AND id < (SELECT count(*) FROM tb_big TABLESAMPLE BERNOULLI (101))` raised 2202H there, and `… WHERE EXISTS (…) AND false` raised 2202H on the embedded arms, where 9420d256 and PostgreSQL answered 0 / 3 / 0 / 0. The DAG's EXISTS arm answers any coded refusal of its subquery (it kept only 42501: `… WHERE EXISTS (SELECT 1 FROM tb_big TABLESAMPLE BERNOULLI (101))` was uncoded on the DAG at c4dbd842). A subquery's failure is raised when a row EVALUATES the subquery, not when the statement is planned, as PostgreSQL runs an uncorrelated sublink on its first reference: the stage DAG runs an uncorrelated EXISTS (and a scalar subquery it cannot defer to a producer stage) on the coordinator at plan time, and a failure of class 22 or 21 now stands where the answer would have (`plansql.DeferredErrorNode`, raised by `expr.DeferredError` for the row that reaches it), with a conjunct that reads no row evaluated once at plan time as PostgreSQL's one-time filter is. At 1edb55e2 `SELECT count(*) FROM tb_p WHERE CASE WHEN false THEN EXISTS (SELECT 1 FROM tb_big TABLESAMPLE BERNOULLI (101)) ELSE true END`, `… CASE WHEN id > 5 THEN EXISTS (…) ELSE true END` (tb_p holds ids 1–3), `… CASE WHEN true THEN true ELSE EXISTS (…) END`, a `HAVING CASE WHEN false THEN EXISTS (…) ELSE true END` and `… WHERE id = 1 OR (NULL AND EXISTS (…))` raised 2202H on the four coordinator arms and the asynchronous door, and the unsampled `… CASE WHEN false THEN EXISTS (SELECT 1 FROM tb_p WHERE 1/(id-id) > 0) ELSE true END` raised 22012, where PostgreSQL and the embedded engine answer 3 / 3 / 3 / `0,1; 1,2` / 1 / 3; over ids 1–7 the `id > 5` arm is 2202H on every arm, as on PostgreSQL. On the async door a statement with a TABLESAMPLE clause is not probe-split (`plansql.HasTablesample`): each task re-planned the text and drew its own sample of the build, so with ids 1..1000 in each of eight files about 750 ids answered a count other than 0 or 8 at c4dbd842, at 9420d256 and at 8b00b112.
 
@@ -985,12 +983,12 @@ The TABLESAMPLE argument was one number token (or a float parameter's CAST spell
 | extensions | [E81 coverage residuals](0012-divergences/extensions.md#e81) | Narrowed: the TABLESAMPLE cell of the empty-input coverage census is 22023 on every door (it was 42601 before binding); its pin in `tcpflagcases.ResidualState` is deleted as the proof | `pgwire.TestTCPFlagASTCoverage`, `coordinator.TestTCPFlagASTCoverage` |
 | — | — | Closed without a row (PostgreSQL's answer now): 0 % samples nothing, a percentage outside 0–100, NaN or NULL is 2202H, a value real cannot hold is 22003, every argument expression PostgreSQL takes is read, a sampled scan PostgreSQL never begins (`… TABLESAMPLE BERNOULLI (101) WHERE false`, `… LIMIT 0`, which answered no rows at 9420d256) answers no rows, a sampled subquery a constant short-circuits (`WHERE false AND EXISTS (…)`, `WHERE true OR …`, either operand order, a NULL conjunct) is never run, an EXISTS subquery's failure in an arm no row reaches (a CASE arm, an `x OR (NULL AND …)` arm) is never raised (a scalar subquery under a WHERE CASE is not planned on the cluster arms at all — an uncoded failure, as at 9420d256, #1364), a sample is drawn from the rows a DELETE left, and a statement draws each sample once on the async door — on the six arms and in the positions the gate's rows measure (a FROM item, a derived table, a CTE body, a WHERE / HAVING / ON / SELECT-list scalar subquery, IN, EXISTS); other r21 names the two cells that follow this engine's evaluation order (#1411) | `coordinator.TestArcTBTablesampleArgumentOnEveryArm`, `coordinator.TestArcTBDeferredSubqueryFailureOnEveryArm`, `expr.TestDeferredErrorRaisesOnlyWhereARowEvaluatesIt`, `test.TestTablesampleArgumentIsPostgresReal`, `sql.TestTablesampleArgumentIsAnExpression`, `server.TestArcTBASampledPolicedRelationPublishesOnlyThePolicysRows`, `exec.TestSampledSourceHonoursTheScansSelection`, `logical.TestDropUnbegunSamples`, `expr.TestCastTextToFloatTakesPostgresGrammar`, `coordinator.TestArcTBAsyncProbeSplitDrawsEachSampleOnce`, `sql.TestHasTablesampleReadsTokens` |
 
-## 2026-10-03: an empty join input retains the other side's columns (arc SJ, #1359)
+## 2026-10-03: an empty join input retains the other side's columns (#1359)
 
-A spilled RIGHT or FULL join reads its recorded probe schema when the probe produces no batch, so a replay emits the preserved side's values in the join's output order and NULL for the empty side, as specified in [ADR-0006](0006-never-oom-memory-model.md#2026-10-03-arc-sj-a-partition-replay-emits-the-joins-own-output-whatever-the-other-sides-size-1359).
+A spilled RIGHT or FULL join reads its recorded probe schema when the probe produces no batch, so a replay emits the preserved side's values in the join's output order and NULL for the empty side, as specified in [ADR-0006](0006-never-oom-memory-model.md#2026-10-03-a-partition-replay-emits-the-joins-own-output-whatever-the-other-sides-size-1359).
 This repairs a wrong answer without adding a divergence row.
 
-## 2026-10-04: the % operator is MOD (arc MO, #1527)
+## 2026-10-04: the % operator is MOD (#1527)
 
 `a % b` had its own implementation beside `MOD(a, b)`, and the two disagreed with each other and with themselves across the arms. At 8ccfa832 `SUM(t.n % '2.5')` answered -1 on the single-process arms and 1.26 on the DAG arms (PostgreSQL 1.26, g/sum/n_q25), `NULL % t.n` raised XX000 "integer divide by zero" on the single-process arms (u/proj/nul_n), `SUM(t.i % NULL)` answered 0 there (g/sum/i_nul) and `t.i % 3` declared bigint where `MOD(t.i, 3)` and PostgreSQL declare integer (g/proj/i_l3). PostgreSQL implements the operator and the function by the same pg_proc entries; the parser now builds the mod() call for `%`, so every cell of the table answers in its `%` spelling exactly what its MOD spelling answers, on five arms, over the wire in three modes and as a bound parameter.
 
@@ -1001,7 +999,7 @@ This repairs a wrong answer without adding a divergence row.
 | numeric-decimal | [r1](0012-divergences/numeric-decimal.md#catalog) | Amended: `t.i % 3` declares integer (OID 23) as MOD does (8ccfa832: bigint, g/proj/i_l3) | `pgwire.TestArcMOPercentIsModOnTheWire` |
 | — | — | Closed without a row (PostgreSQL's answer now): `SUM(t.n % '2.5')` is 1.26 and `t.n % '2.5'` over 2.25 is 2.25 on every arm; `NULL % t.n` is NULL and `SUM(t.i % NULL)` NULL; `SUM(t.n % '0')` is 22012 (8ccfa832 single-process: 0, g/sum/n_q0) | `coordinator.TestArcMOPercentIsModEveryArm`, `wadjet.TestArcMOPercentIsModStored` |
 
-## 2026-10-04: a text compared with a DATE or TIMESTAMP (arc TC, #1512)
+## 2026-10-04: a text compared with a DATE or TIMESTAMP (#1512)
 
 The TIMESTAMP comparison kernels read a quoted text through `parquet.ParseTimestampMillisOrZero`, which answered 0 — `1970-01-01 00:00:00` — for a spelling the grammar refuses, and the expression path answered a refused text as no match. At 93e4804e (`coordinator.TestArcTCTimestampTextComparisonEveryArm`, fixture tc_t with the epoch in row 1): `ts = 'garbage'`, `ts = ''`, `ts = '2024-02-30'`, `ts = '2024-01-15 10:30:00+16'` and `ts = '0000-01-01'` answered row 1 on the two embedded doors and no row on the three DAG doors, where PostgreSQL raises 22007 / 22007 / 22008 / 22009 / 22008 (eq/ts/\*); `ts = $1` declared text (OID 25) and bound `'garbage'` answered row 1 on the embedded doors and no row on the DAG doors (param25/ts/"garbage"; declared unknown or timestamp it raised 22007); a CASE or SELECT-list comparison with `'garbage'` answered FALSE for every row on every door (case/ts, select/ts); `d = '0000-01-01'` answered no row on every door, and `d = '2024-01-15 10:30:00+16'` was 22008 on the embedded doors and no row on the DAG doors (eq/d/\*); `d = '2024-01-14 24:00:00'` answered row 2 on the embedded doors and rows 2 and 5 on the DAG doors where PostgreSQL answers none (the expression path read the wall clock's next day, 2024-01-15); beside a conjunct no row passes neither type raised on any door (no\_row\_reaches/\*), nor over an empty table on the embedded doors (empty/\*); and through a derived table, a CTE or a UNION ALL `ts = 'garbage'` answered row 1 on the embedded doors and no row on the three DAG doors (derived/ts, cte/ts, union\_all/ts). In the embedded DML door (`wadjet.TestArcTCDMLWhereARefusedTemporalTextChangesNothing`), `DELETE FROM dm WHERE ts <> 'garbage'` deleted 3 rows and `UPDATE dm SET id = id + 100 WHERE d < 'garbage'` updated 3.
 
@@ -1023,9 +1021,9 @@ The following records the intermediate TC result, superseded for infinity by TI 
 | temporal | [r25](0012-divergences/temporal.md#catalog) | Amended: `epoch` leaves the list (read as 1970-01-01 00:00:00 everywhere); `now` / `today` / `tomorrow` / `yesterday` and a BC date are 22007 in a comparison as in a CAST; write `CURRENT_TIMESTAMP` / `CURRENT_DATE` | `coordinator.TestArcTCTimestampTextComparisonEveryArm` (sp/\*, pos/\*, spclock/\*), `pgwire.TestArcPWRound2MatchesPostgres` (b3/\*/epoch, pins deleted) |
 | comparison-membership | [r4](0012-divergences/comparison-membership.md#catalog) | Historical result, superseded by TI below: a text-declared parameter bound `'epoch'` answers as the literal; bound `'infinity'` raised 22007 at 8e681724 | `coordinator.TestArcTCBoundParameterEveryDoor` (param25/\*) |
 
-## 2026-10-04: infinity and -infinity are TIMESTAMP and DATE values (arc TI)
+## 2026-10-04: infinity and -infinity are TIMESTAMP and DATE values
 
-The temporal carriers reserve their extremes for PostgreSQL's two infinite values, as PostgreSQL stores them: TIMESTAMP int64 epoch milliseconds MaxInt64 / MinInt64, DATE int32 epoch days MaxInt32 / MinInt32 — PostgreSQL's binary encoding of them too. The one grammar reads `infinity`, any case, with an optional sign that whitespace may separate from it; the printers write `infinity` / `-infinity`; the integer order is the temporal order, so comparison, sort, group, join key, MIN / MAX and pruning statistics need no case of their own. Each temporal operation — `± INTERVAL`, `date ± integer`, `date - date`, a timestamp difference, EXTRACT, `date_trunc`, `time_bucket`, a CAST between DATE and TIMESTAMP or to `bigint` / `double precision`, and this engine's own temporal functions — answers an infinite value in its own body as PostgreSQL does or refuses it 22008 (temporal r2), and no computation produces one. A function or operator that takes a number also takes a DATE or TIMESTAMP here (PostgreSQL 42883) and reads the stored count, an infinite value's included: `-d` is -2147483647 and `round(ts)` 9.22e18, as `-ts` over a finite value answered a number at 8e681724. At 8e681724 and at 89cea148 `SELECT CAST('infinity' AS TIMESTAMP)` and `SELECT CAST('-infinity' AS DATE)` raised 22007 on five doors (in/cast/TIMESTAMP/"infinity", in/cast/DATE/"-infinity"), and so did the INSERT of either word (`wadjet.TestArcTIInfinityStoresReopensAndAnswersDML`'s first statement); at 8e681724 a binary timestamp parameter carrying the int64 extreme was 22023 at Bind (`pgwire.TestArcTSABinaryTimestampParameterIsTheInstantItNames`). Over a relation of finite values, `SELECT id FROM ti_f WHERE ts < 'infinity'` (ord/finite\_ctrl/ts) answered row 7 alone on the embedded doors and PostgreSQL's four rows on the DAG doors at 89cea148, raised 22007 on five doors at 8e681724, and answers PostgreSQL's four rows on five doors at 65907c97. Of the 33 `'infinity'` cells of arc TC that 89cea148 answered as PostgreSQL does on all five doors and 8e681724 refused 22007 (the 2026-10-04 entry above), 31 answer PostgreSQL's rows on five doors again at 65907c97; `ts < ALL ('{infinity}')` and `d < ALL ('{infinity}')` (pos/lt\_all\_one/\*/"infinity") stay 22007, because `ANY` / `ALL` of a quoted array literal reads the literal as one scalar (filing candidate TC-F1, every type alike).
+The temporal carriers reserve their extremes for PostgreSQL's two infinite values, as PostgreSQL stores them: TIMESTAMP int64 epoch milliseconds MaxInt64 / MinInt64, DATE int32 epoch days MaxInt32 / MinInt32 — PostgreSQL's binary encoding of them too. The one grammar reads `infinity`, any case, with an optional sign that whitespace may separate from it; the printers write `infinity` / `-infinity`; the integer order is the temporal order, so comparison, sort, group, join key, MIN / MAX and pruning statistics need no case of their own. Each temporal operation — `± INTERVAL`, `date ± integer`, `date - date`, a timestamp difference, EXTRACT, `date_trunc`, `time_bucket`, a CAST between DATE and TIMESTAMP or to `bigint` / `double precision`, and this engine's own temporal functions — answers an infinite value in its own body as PostgreSQL does or refuses it 22008 (temporal r2), and no computation produces one. A function or operator that takes a number also takes a DATE or TIMESTAMP here (PostgreSQL 42883) and reads the stored count, an infinite value's included: `-d` is -2147483647 and `round(ts)` 9.22e18, as `-ts` over a finite value answered a number at 8e681724. At 8e681724 and at 89cea148 `SELECT CAST('infinity' AS TIMESTAMP)` and `SELECT CAST('-infinity' AS DATE)` raised 22007 on five doors (in/cast/TIMESTAMP/"infinity", in/cast/DATE/"-infinity"), and so did the INSERT of either word (`wadjet.TestArcTIInfinityStoresReopensAndAnswersDML`'s first statement); at 8e681724 a binary timestamp parameter carrying the int64 extreme was 22023 at Bind (`pgwire.TestArcTSABinaryTimestampParameterIsTheInstantItNames`). Over a relation of finite values, `SELECT id FROM ti_f WHERE ts < 'infinity'` (ord/finite\_ctrl/ts) answered row 7 alone on the embedded doors and PostgreSQL's four rows on the DAG doors at 89cea148, raised 22007 on five doors at 8e681724, and answers PostgreSQL's four rows on five doors at 65907c97. Of the 33 `'infinity'` temporal text comparison cells that 89cea148 answered as PostgreSQL does on all five doors and 8e681724 refused 22007 (the 2026-10-04 entry above), 31 answer PostgreSQL's rows on five doors again at 65907c97; `ts < ALL ('{infinity}')` and `d < ALL ('{infinity}')` (pos/lt\_all\_one/\*/"infinity") stay 22007, because `ANY` / `ALL` of a quoted array literal reads the literal as one scalar (filing candidate TC-F1, every type alike).
 
 | family | row | change | gate |
 |---|---|---|---|
@@ -1035,7 +1033,7 @@ The temporal carriers reserve their extremes for PostgreSQL's two infinite value
 | comparison-membership | [r4](0012-divergences/comparison-membership.md#catalog) | Amended: a text-declared parameter bound `'infinity'` answers as the literal does (8e681724: 22007) | `coordinator.TestArcTCBoundParameterEveryDoor` (param25/\*/"infinity"), `coordinator.TestArcTIInfinityEveryArm` (param25/\*) |
 | — | — | Closed without a row (PostgreSQL's answer now): an infinite TIMESTAMP or DATE from CAST, a typed literal, `::`, a text column, VALUES, INSERT, COPY and a text or binary parameter; printed on the wire in text and binary, by CAST to text, JSON and the CLI; ordered by every comparison and membership position, ORDER BY, top-N, MIN / MAX, GROUP BY, DISTINCT, joins, set operations and windows; `± INTERVAL`, `date ± integer`, CASTs between the two types, EXTRACT / date\_part, date\_trunc and time\_bucket; `date - date` with an infinite side 22008 as on PostgreSQL; stored through the writer, the catalog, a partition key, a reopened data directory, the 512 KiB budget door and the shuffled exchange; pruned by statistics holding an infinite bound | `coordinator.TestArcTIInfinityEveryArm`, `wadjet.TestArcTIInfinityStoresReopensAndAnswersDML`, `pgwire.TestArcTIInfinityOverTheWireBothFormats`, `coordinator.TestArcTCTimestampTextComparisonEveryArm` |
 
-## 2026-10-04: a statement reads the clock once (arc SC, #1566)
+## 2026-10-04: a statement reads the clock once (#1566)
 
 `NOW()`, `CURRENT_TIMESTAMP`, `LOCALTIMESTAMP` and `CURRENT_DATE` read the clock at every evaluation. At 8e681724 (`coordinator.TestArcSCStatementClockEveryArm`, 4096 rows, eight runs per door): `SELECT count(*) FROM sc_k a, sc_k b, sc_k c, sc_k e WHERE CAST(now() AS TIMESTAMP) = CAST(now() AS TIMESTAMP)` answered 4093 to 4096 (issue/cross\_now\_eq\_now), `count(DISTINCT CAST(now() AS TEXT))` answered 1 to 5 (issue/distinct\_now\_text, 3 to 5 on the dag and dag-shuffled doors), two derived `now()` columns joined on equality answered 0 rows on the single and spilled512k doors (pos/join\_sides), and `now() IN (SELECT now() FROM sc_k)` answered 0 rows on the three DAG doors (pos/in\_subquery), where PostgreSQL 17.11 answers 4096, 1, 4096 and 4096; on the embedded door an `INSERT … VALUES (…, now())` of 2048 rows stored 11 to 22 distinct values and `UPDATE … SET ts = now()` 2 to 5 (`wadjet.TestArcSCEmbeddedStatementWritesOneClock`, two runs of eight at 8e681724 with the gate copied in), where PostgreSQL stores 1.
 
@@ -1049,18 +1047,18 @@ Now the door that starts a statement stamps one instant (`expr.StartStatement`: 
 
 The earlier implementation (the earlier measurement's B1): two plan-time folds still compiled a clock function with no statement — a window function's integer argument (the parse-time constant folder) and the TABLESAMPLE percentage — and read a clock of their own. At 763f71e8 under a test clock that moves on one second per read, `lag(id, K)` / `lead` / `ntile(K)` / `nth_value(id, K)` and `TABLESAMPLE BERNOULLI (100 * (K % 2))`, K computed from `now()`, read the clock twice and answered `f` on the six doors, and `generate_series` with `now()`-derived bounds read it twice (fold/\*, `gate_advancing_clock_at_763f71e8_FAILS.log`); PostgreSQL answers `t` / `1`. Now the clock functions have no live-clock fallback (an unbound evaluation is XX000), the window folder takes the statement's context (it defers a clock-reading argument at parse time), and the builder records a clock-reading table-function or TABLESAMPLE argument for `logical.BindClockFolds`, which folds it with the statement clock where the plan meets its context.
 
-## 2026-10-04: a float assigned to an integer must fit its range (arc IW, #1484)
+## 2026-10-04: a float assigned to an integer must fit its range (#1484)
 
 The shared float-to-int64 conversion accepts -2^63 and excludes +2^63, NaN and either infinity; an assignment of the double 9223372036854775808 to BIGINT raises 22003 and stores no row.
 CAST, assignment, the vector and writer conversions, statistics and `cast_int` use that range check; no remaining value divergence is added.
 
-## 2026-10-04: float extrema and grouped values retain NaN and signed zero (arc FO, #1488 #1489)
+## 2026-10-04: float extrema and grouped values retain NaN and signed zero (#1488 #1489)
 
 MAX over a float column scans the values because Parquet's bounds exclude NaN; a column containing Infinity and NaN therefore has maximum NaN.
 A grouped value is a member's original value, so a group containing only -0 prints -0; a group containing both signs may publish either member, as recorded by ADR-0013.
 These corrections add no catalog row.
 
-## 2026-10-05: a text becomes BYTES through byteain at the assignment, CAST, comparison and parameter doors (arc BY, #1501)
+## 2026-10-05: a text becomes BYTES through byteain at the assignment, CAST, comparison and parameter doors (#1501)
 
 A comparison read a literal beside a BYTES column through bytea input (#582), and no other door did. At c67ebf5b (`wadjet.TestArcBYBytesAssignmentStoresByteainBytes`, the gate copied in): `INSERT INTO bt VALUES (3, E'\\x6869')` and `INSERT INTO bt SELECT 13, '\x6869'` stored the six bytes `5c7836383639`, `(4, 'a\\b')` four bytes and `(5, 'a\000b')` six, where PostgreSQL 17.11 stores `6869`, `615c62` and `610062`, so `SELECT count(*) FROM bt WHERE b = '\x6869'` answered 0 where PostgreSQL answers 5; `(22, '\x686')`, `(23, '\X6869')`, `(24, '\x68zz')`, the multi-row `(20, '\x6869'), (21, 'a\b')` and `UPDATE bt SET b = 'a\b'` were stored where PostgreSQL refuses 22023 / 22P02 and stores nothing; `INSERT … SELECT CAST(s AS BYTES)` was 42804 and `CREATE TABLE bc AS SELECT CAST('\x6869' AS BYTES)` minted a text column. On the five doors (`coordinator.TestArcBYByteaInputEveryArm`, 33 of 45 cells failing at c67ebf5b): `CAST(text AS BYTES)` passed its operand through declared text (cast/\*), `CAST(id AS BYTES)` answered (cast/col/bigint; PostgreSQL 42846), `b = '\x6 869'` matched rows 1 and 6 (cmp/ws-in-pair; PostgreSQL 22023), `b = '\x686'` was 22P02 (cmp/odd; PostgreSQL 22023), `decode('68 69', 'hex')` was refused (decode/hex-ws; PostgreSQL `\x6869`), a scalar subquery's BYTES answer reached the DAG stage as `[92 120 52 49]` and failed to parse (scalar/\*, the three DAG doors), a correlated re-run's outer value was read by bytea input a second time — `(SELECT count(*) FROM by_t i WHERE i.b = o.b)` answered 2 for the four bytes `\x41` and 0 for two backslashes, where PostgreSQL answers 1 and 1 (correlated/count-no-nul) — and refused a value holding a NUL (correlated/count, correlated/select-outer). Over the wire (`pgwire.TestArcBYByteaWireDoorsMatchPostgres`, 10 steps failing at c67ebf5b) the text bytea parameter `'a\b'` was refused 22023 at Bind where PostgreSQL refuses 22P02 (ins/text-bytea-lone-backslash), and the retired bytea parameter refusal (now parameters-pgwire r10)'s binary `00 ff 5c` was 22P02 (cmp/binary-backslash).
 
@@ -1084,7 +1082,7 @@ Now a BYTES value is assigned to a text column as `\x` + hex (`ingest.assignment
 | dml-assignment | [r13](0012-divergences/dml-assignment.md#catalog) | Narrowed: a BYTES value is assigned to a text column as `\x` hex (42804 at c67ebf5b); a container or DURATION is still 42804 | `wadjet.TestArcBYR2BytesAssignmentMatrix` |
 | — | — | Closed without a row (PostgreSQL's answer now): a bytea parameter as a LAG / LEAD default in either format; encode / get_byte / set_byte over a quoted literal | `pgwire.TestArcBYR2ReentryPositionsOnTheWire`, `wadjet.TestArcBYR2ByteaFunctionArgumentIsByteain` |
 
-## 2026-10-05: a volatile CTE is evaluated once (arc CM, #1531)
+## 2026-10-05: a volatile CTE is evaluated once (#1531)
 
 A CTE whose body calls `random()`, `rand()`, `uuid()` or samples a relation was evaluated once per reference wherever the reference was not a tag in the root's plan tree. At c67ebf5b (`coordinator.TestArcCMVolatileCTEReadTwiceIsEvaluatedOnce`, the gate file run at base: r2/gate\_arms\_at\_base\_FAILS.log): `WITH s AS (SELECT sum(random()) AS r FROM tb_big) SELECT count(*) FROM tb_p WHERE (SELECT r FROM s) <> (SELECT r FROM s)` answered 3 on single and spilled512k (issue/c1); `SELECT count(*) FROM (WITH s AS (SELECT id, random() AS r FROM tb_big WHERE id <= 50) SELECT a.id FROM s a JOIN s b ON a.id = b.id WHERE a.r <> b.r) x` answered 50 on single and spilled512k (nested\_derived/rnd); and `INSERT INTO cm_t WITH s AS (…random()…) SELECT id, r FROM s UNION ALL SELECT id, r FROM s` stored two values for each of 50 ids (`wadjet.TestArcCMInsertWithUnionAllStoresOneEvaluation`). PostgreSQL 17.11 answers 0, 0 and 0.
 

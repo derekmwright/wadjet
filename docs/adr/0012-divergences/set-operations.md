@@ -10,7 +10,7 @@ Columns: `cell` is the smallest statement that shows the difference; `PostgreSQL
 VECTOR storage is fixed-width per column and `setOpColType` in `internal/planner/physical/set_op_schema.go` holds a TypeID and a DECIMAL's (p,s) only, so there is no carrier for a mixed-width result. UNION and UNION ALL refuse a value that would be materialized at another arm's width (22000) rather than truncate it, which the engine did before. INTERSECT and EXCEPT emit left-arm values only and answer. Closing it needs a set-op type ladder that carries a VECTOR's width and a mixed-width carrier; PostgreSQL's pgvector answer for INTERSECT/EXCEPT is not measured.
 
 **A set operation publishes its leftmost arm's names** (E09)
-Closed 2026-09-18 by arc SR (#1079). `publishedOutputProjectionNode` passes a set operation to its leftmost arm for the names the client reads, and the DAG carries the same rule as a gather rename (`dagplan.setOpPublishedRenames`), so `SELECT g + 1 FROM t UNION ALL …` publishes `?column?` as PostgreSQL does. Gated by `coordinator.TestSRAStarPublishesItsArmsOwnColumns` (`naming/*`) and `pgwire.TestSRTheWireDeclaresAStarsOwnArms`.
+Closed 2026-09-18 (#1079). `publishedOutputProjectionNode` passes a set operation to its leftmost arm for the names the client reads, and the DAG carries the same rule as a gather rename (`dagplan.setOpPublishedRenames`), so `SELECT g + 1 FROM t UNION ALL …` publishes `?column?` as PostgreSQL does. Gated by `coordinator.TestSRAStarPublishesItsArmsOwnColumns` (`naming/*`) and `pgwire.TestSRTheWireDeclaresAStarsOwnArms`.
 
 ## Catalog
 
@@ -74,7 +74,7 @@ ADR lines 401-435. Catalog rows: r1, r2. Stated in [Mechanisms](#mechanisms).
 ADR lines 511-535. Stated in [Mechanisms](#mechanisms).
 
 - **A SET OPERATION does not take PostgreSQL's output-column names.**
-  (Added 2026-09-05, #732. **CLOSED 2026-09-18 by arc SR, #1079;
+  (Added 2026-09-05, #732. **CLOSED 2026-09-18, #1079;
   the pins are deleted and that is the proof.**) The naming rule is applied
   at the two places a query's values leave the engine — the collecting sink
   and the gather's rename target — and both were reached through the

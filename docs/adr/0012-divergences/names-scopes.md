@@ -87,17 +87,16 @@ ADR lines 306-371. Catalog rows: r25, r26. Stated in [Mechanisms](#mechanisms).
   RECURSIVE CTE. With no rows to read a schema off, those returned a result
   with zero columns and no error.
 
-  **Ordinary nested joins are CLOSED (2026-09-13, arc O1, #997/#1012).** A
+  **Ordinary nested joins are CLOSED (2026-09-13, #997/#1012).** A
   star over a join is now EXPANDED into the FROM clause's arms in written
   order (ADR-0026 §9), so it is an ordinary SELECT list and the ordinary
   projection walk declares it — at any join depth, because the expansion is
   per ARM rather than per operator. `SELECT * FROM a JOIN b JOIN c WHERE
   false` declares its columns on every arm and on the async door
   (`coordinator.TestN1AnAsyncResultDeclaresItsColumns`,
-  `TestN1AResultWithNoColumnsIsRefused`). **Amended 2026-09-24 for arc
-  RC:** recursive CTEs now retain the seed declaration even when empty
+  `TestN1AResultWithNoColumnsIsRefused`). **Amended 2026-09-24 :** recursive CTEs now retain the seed declaration even when empty
   (ADR-0021 §1o-b); the ungrouped-aggregate LATERAL boundary remains.
-  **Amended 2026-09-25 for arc JP (#1013):** a star over a LATERAL
+  **Amended 2026-09-25 (#1013):** a star over a LATERAL
   join is expanded into the FROM arms' own lists too, the lateral's read
   as `s.*` reads it (ADR-0026 §8l), so a zero-row star over two or more
   LATERALs, a LATERAL beside another join, and an ungrouped-aggregate
@@ -106,7 +105,7 @@ ADR lines 306-371. Catalog rows: r25, r26. Stated in [Mechanisms](#mechanisms).
   reads the join's output. Over an UNGROUPED AGGREGATE body it refuses
   (XX000: the join carries the pad marker); over a PLAIN body it was said
   to refuse too, and measured it answered, declaring the duplicate ONCE
-  (four columns for PostgreSQL's five, arc JP measurement). **Amended 2026-09-25 for arc JP:**
+  (four columns for PostgreSQL's five, the lateral binding measurement). **Amended 2026-09-25:**
   the block's own list is declared as written, so the empty result
   declares both columns, the second as `s.m` — the join's qualified name
   for a duplicate, the non-empty result's name too (FC-JP-13); over an
@@ -243,7 +242,7 @@ ADR lines 536-544. Stated in [Mechanisms](#mechanisms).
 ADR lines 979-1002. Catalog rows: r15. Stated in [Mechanisms](#mechanisms).
 
 - **A column-alias list over a `SELECT *` is not applied.** (Added
-  2026-09-04, #613. CLOSED and RE-SCOPED 2026-09-07 by arc K1, #958: the
+  2026-09-04, #613. CLOSED and RE-SCOPED 2026-09-07, #958: the
   entry was right about the reason and wrong about the symptom, and the
   shape it now covers is much narrower.)
 
@@ -271,7 +270,7 @@ ADR lines 979-1002. Catalog rows: r15. Stated in [Mechanisms](#mechanisms).
 ADR lines 1003-1017. Catalog rows: r13. Stated in [Mechanisms](#mechanisms).
 
 - **A column-alias list that REPEATS a name is refused (42701), where
-  PostgreSQL accepts the list.** (Added 2026-09-18 by arc PS, #959.)
+  PostgreSQL accepts the list.** (Added 2026-09-18, #959.)
 
   PostgreSQL accepts `FROM t a(k, k)` and refuses every REFERENCE to `k`
   with 42702 `column reference "k" is ambiguous` — a scope that holds two
@@ -290,7 +289,7 @@ ADR lines 1003-1017. Catalog rows: r13. Stated in [Mechanisms](#mechanisms).
 ADR lines 1018-1032. Catalog rows: r14. Stated in [Mechanisms](#mechanisms).
 
 - **A column-alias list on a reference to a `WITH` query is refused
-  (0A000).** (Added 2026-09-18 by arc PS, #959/#1158.)
+  (0A000).** (Added 2026-09-18, #959/#1158.)
 
   `WITH c AS (…) SELECT * FROM c z(x, y)` renames the query's output in the
   ENCLOSING scope. A list on a NAMED relation is lowered to the
@@ -310,7 +309,7 @@ ADR lines 1033-1057. Catalog rows: r16. Stated in [Mechanisms](#mechanisms).
 
 - **A BARE reference to a `JOIN … USING` join's MERGED column is 42702
   outside a sort or window key, where PostgreSQL answers.** (Added
-  2026-09-18 by arc PS, #655; narrowed the same day by the earlier measurement's
+  2026-09-18, #655; narrowed the same day by the earlier measurement's
   B1.)
 
   USING merges the joined column into one, so `SELECT id FROM a JOIN b
@@ -339,7 +338,7 @@ ADR lines 1058-1086. Catalog rows: r17, r18. Stated in [Mechanisms](#mechanisms)
 
 - **A bare `SELECT *` over a FULL `JOIN … USING` cannot be ORDERED BY the
   merged column (0A000), where PostgreSQL answers.** (Added 2026-09-18 by
-  arc PS, #655.)
+  the name scope validation, #655.)
 
   The consequence of the entry above. A FULL join's merged value is
   `COALESCE(l.c, r.c)` — a COMPUTED key — and `logical.hiddenSortProjection`
@@ -377,7 +376,7 @@ ADR lines 1087-1099. Moved to the log: [A07](../0012-amendments.md#a07).
 ADR lines 1111-1122. Catalog rows: r8.
 
 - **A `FULL JOIN` on a non-equi `ON` condition ANSWERS, where PostgreSQL
-  refuses.** (Added 2026-09-18 by arc JR, #1153.)
+  refuses.** (Added 2026-09-18, #1153.)
 
   `FULL JOIN b ON a.n < b.n` raises `FULL JOIN is only supported with
   merge-joinable or hash-joinable join conditions` on PostgreSQL 17.11,
@@ -414,8 +413,8 @@ ADR lines 1139-1155. Catalog rows: r5.
 ADR lines 1156-1188. Catalog rows: r24. Stated in [Mechanisms](#mechanisms).
 
 - **A QUALIFIED reference into a block that publishes the name TWICE binds
-  the first, where PostgreSQL refuses it.** (Added 2026-09-13, arc O1.
-  **CLOSED 2026-09-18 by arc SR, #1094.**)
+  the first, where PostgreSQL refuses it.** (Added 2026-09-13.
+  **CLOSED 2026-09-18, #1094.**)
   `SELECT d.*, x.id FROM (SELECT * FROM lat_ord o JOIN lat_item li ON …) d
   JOIN lat_ord x ON x.id = d.id` is 42702 `column reference "id" is
   ambiguous` on postgres:17 — `d` publishes `id` twice, because a star over
@@ -601,9 +600,9 @@ ADR lines 1869-1885. Catalog rows: r6.
 
 ADR lines 1968-1973. Catalog rows: r7.
 
-- **A JOIN's ON condition can reference comma-join siblings; PostgreSQL rejects this.** (Closed #617; briefly reversed 2026-09-20 by arc RS, #1220; **restored 2026-09-23 by the BX hotfix.**) A join predicate like `SELECT ... FROM a, b JOIN c ON a.k = c.k` references a sibling of the comma join in its ON clause. PostgreSQL 17 rejects this with `invalid reference to FROM-clause entry`; wadjet answers it, matching DuckDB. This is a strict SUPERSET: errors on PostgreSQL, runs on wadjet; not a value divergence and not a wire-protocol violation. Gated against DuckDB and the two-path oracle (PostgreSQL offers no value to assert). #593 fixed the prior silent-zero wrong answer in this shape.
+- **A JOIN's ON condition can reference comma-join siblings; PostgreSQL rejects this.** (Closed #617; briefly reversed 2026-09-20, #1220; **restored 2026-09-23 by the BX hotfix.**) A join predicate like `SELECT ... FROM a, b JOIN c ON a.k = c.k` references a sibling of the comma join in its ON clause. PostgreSQL 17 rejects this with `invalid reference to FROM-clause entry`; wadjet answers it, matching DuckDB. This is a strict SUPERSET: errors on PostgreSQL, runs on wadjet; not a value divergence and not a wire-protocol violation. Gated against DuckDB and the two-path oracle (PostgreSQL offers no value to assert). #593 fixed the prior silent-zero wrong answer in this shape.
 
-  Arc RS's #1220 measurement found the planner had no ON-scope validation at all, and the missing restriction let an ON clause ALSO name a relation the statement joins LATER (`FROM a JOIN b ON c.x = a.x JOIN c ON …`) — not a superset of anything, a typo answered with rows; 82 of 200 SQLancer databases at seed 1 stop on that shape. RS built the validation (`physical.relationCensus` / `visibleAtJoin`) to fix the LATER case, but scoped visibility to the ON's own FROM item, which also refused the EARLIER-comma-sibling case #617 had already settled as an answered superset — conflating "not yet written" with "written elsewhere, on the page already."
+  The #1220 measurement found the planner had no ON-scope validation at all, and the missing restriction let an ON clause ALSO name a relation the statement joins LATER (`FROM a JOIN b ON c.x = a.x JOIN c ON …`) — not a superset of anything, a typo answered with rows; 82 of 200 SQLancer databases at seed 1 stop on that shape. The validation was built (`physical.relationCensus` / `visibleAtJoin`) to fix the LATER case, but scoped visibility to the ON's own FROM item, which also refused the EARLIER-comma-sibling case #617 had already settled as an answered superset — conflating "not yet written" with "written elsewhere, on the page already."
 
   The BX hotfix told the two apart: `visibleAtJoin` is POSITIONAL over the whole census now, not per-item — anything the FROM clause has already declared, in a comma item or a join, is visible to a later ON; only what is written AFTER remains out of scope. Both of PostgreSQL's sentences still apply to what stays refused: a relation joined LATER is `missing FROM-clause entry`; a base table reachable only through an alias, named by its own hidden name, is `invalid reference to FROM-clause entry`. Gated by `physical.TestArcRSAQualifiedReferenceNamesOneRelationInScope` and `coordinator.TestArcRSAQualifiedReferenceNamesOneRelationOnEveryArm`.
 
@@ -694,7 +693,7 @@ ADR lines 2850-2881. Moved to the log: [A15](../0012-amendments.md#a15).
 ADR lines 4238-4261. Catalog rows: r24. Stated in [Mechanisms](#mechanisms).
 
 - **A QUALIFIED star over a block that publishes TWO columns of one name is
-  REFUSED, where PostgreSQL answers the pair.** (Added 2026-09-13, arc O2 —
+  REFUSED, where PostgreSQL answers the pair.** (Added 2026-09-13, the derived column publication —
   a WRONG → LOUD move, measured at `0193c4e9`.) `SELECT x.* FROM (SELECT
   a.id, b.id FROM lat_item a JOIN lat_item b …) x` published the FIRST `id`
   twice on the single-process arms (`1,1 | 1,1 | …` for PostgreSQL's

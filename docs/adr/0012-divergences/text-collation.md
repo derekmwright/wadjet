@@ -33,8 +33,8 @@ Rendering the bytea operand through `bytea_out` needs the operand's declared typ
 |---|---|---|---|---|---|---|---|
 | **r1** `SELECT 'B' < 'a'` | f under a locale collation such as en_US; t in a C-collation database | t (measured): strings compare and sort by bytes | — | value divergence | — · [E12](#e12), P081 | — | — |
 | **r2** `SELECT 'a' < 'b' COLLATE "en_US"` | t (compared under en_US) | ERROR 0A000 collation "en_US" is not supported (measured); C, POSIX, ucs_basic and default are accepted | 0A000 | refusal | — · P111 | — | — |
-| **r3** `SELECT 'abab' ~ '(a)b\1'` | t | ERROR 0A000 regular expression back reference \1 is not supported (measured): RE2 matches; `regexp_replace` reads its pattern through the same translation and refuses the same forms (2026-10-02) | 0A000 | refusal | — · P110, [RN](../0012-amendments.md#2026-10-02-the-scalar-renderers-write-a-value-as-its-declared-types-text-arc-rn-1474-1466-1467-1481) | #1481 | `coordinator.TestArcRNRendererTableEveryArm` rx/backrefPattern |
-| **r4** `SELECT 'É' ~* 'é'` | t under a UTF-8 locale collation | f: case-insensitive matching folds ASCII letters only, as PostgreSQL does under the C collation; `regexp_replace`'s `i` flag the same, and its `\y` counts ASCII letters, digits and `_` as word characters (2026-10-02, measured) | — | value divergence | — · P110, [RN](../0012-amendments.md#2026-10-02-the-scalar-renderers-write-a-value-as-its-declared-types-text-arc-rn-1474-1466-1467-1481) | #1481 | `coordinator.TestArcRNRendererTableEveryArm` rx/icaseNonASCII, rx/wordY |
+| **r3** `SELECT 'abab' ~ '(a)b\1'` | t | ERROR 0A000 regular expression back reference \1 is not supported (measured): RE2 matches; `regexp_replace` reads its pattern through the same translation and refuses the same forms (2026-10-02) | 0A000 | refusal | — · P110, [RN](../0012-amendments.md#2026-10-02-the-scalar-renderers-write-a-value-as-its-declared-types-text-1474-1466-1467-1481) | #1481 | `coordinator.TestArcRNRendererTableEveryArm` rx/backrefPattern |
+| **r4** `SELECT 'É' ~* 'é'` | t under a UTF-8 locale collation | f: case-insensitive matching folds ASCII letters only, as PostgreSQL does under the C collation; `regexp_replace`'s `i` flag the same, and its `\y` counts ASCII letters, digits and `_` as word characters (2026-10-02, measured) | — | value divergence | — · P110, [RN](../0012-amendments.md#2026-10-02-the-scalar-renderers-write-a-value-as-its-declared-types-text-1474-1466-1467-1481) | #1481 | `coordinator.TestArcRNRendererTableEveryArm` rx/icaseNonASCII, rx/wordY |
 | **r5** `SELECT CAST('ab' AS CHAR(4))` | 'ab  ' (blank-padded to 4) | 'ab' (measured): no blank-padded string type; length, \|\| and = agree with PostgreSQL | — | value divergence | 2026-09-03 · [E56](#e56), P006 | #708, #838 | `wadjet.TestStringCastEnforcesItsLengthAndStillDropsTheDeclaration` |
 | **r6** `SELECT CAST('abcdef' AS CHAR(4))` | abcd, declared character(4) (OID 1042) | abcd, declared character varying(4) (OID 1043) (measured) | — | value divergence | 2026-09-04 · [E56](#e56), P006 | #708 | `pgwire.TestVarcharCastDeclaresItsLengthOnTheWire` |
 | **r7** `SELECT CAST('abcdef' AS CHAR)` | a, declared character(1) | abcdef, declared text (measured): bare CHAR is the unparameterized string | — | value divergence | 2026-09-04 · [E56](#e56), P006 | #708 | `pgwire.TestVarcharCastDeclaresItsLengthOnTheWire` |
@@ -53,8 +53,8 @@ Rendering the bytea operand through `bytea_out` needs the operand's declared typ
 | **r20** `SELECT LOCALTIME` | the current local time, declared time | ERROR 42703 unknown column "localtime" (measured): no TIME type | 42703 | documented gap | — · P112 | #1169 | — |
 | **r21** `SELECT 'abc' IS NORMALIZED` | t | ERROR 42601 syntax error at or near "NORMALIZED" (measured) | 42601 | documented gap | — · P112 | #1169 | — |
 | **r22** `SELECT U&'\0065\0301'` | é (e plus combining acute) | ERROR 42601 unexpected character: & (measured) | 42601 | documented gap | — · P112 | #1169 | — |
-| **r23** `SELECT regexp_replace(E'x\nab', '^a', 'X', 'n')` | x, newline, Xb (newline-sensitive) | ERROR 0A000 regexp_replace flag "n" is not supported (measured); `m`, `p`, `w`, `x`, `b` and `e` the same, and an integer fourth argument (a start position) | 0A000 | refusal | 2026-10-02 · [RN](../0012-amendments.md#2026-10-02-the-scalar-renderers-write-a-value-as-its-declared-types-text-arc-rn-1474-1466-1467-1481) | #1481 | `coordinator.TestArcRNRendererTableEveryArm` rx/flagN, rx/flagP, rx/flagW, rx/flagX, rx/flagB, rx/flagE |
-| **r24** `SELECT regexp_replace('Hello', 'x*?H*', '#')` | #Hello: a non-greedy RE takes the shortest match | #ello (measured): an RE holding a non-greedy quantifier is matched leftmost-first, and among equal-length matches the groups are RE2's leftmost-first choice (`regexp_replace('abcd', '(a\|ab)(c\|bcd)(d*)', '[\1\|\2\|\3]')` is [a\|bcd\|] where PostgreSQL writes [ab\|c\|d]); an RE whose quantifiers are all greedy takes the longest match, as PostgreSQL does | — | value divergence | 2026-10-02 · [RN](../0012-amendments.md#2026-10-02-the-scalar-renderers-write-a-value-as-its-declared-types-text-arc-rn-1474-1466-1467-1481) | #1481 | `coordinator.TestArcRNRendererTableEveryArm` rx/lazyRE, rx/posixCaptures |
+| **r23** `SELECT regexp_replace(E'x\nab', '^a', 'X', 'n')` | x, newline, Xb (newline-sensitive) | ERROR 0A000 regexp_replace flag "n" is not supported (measured); `m`, `p`, `w`, `x`, `b` and `e` the same, and an integer fourth argument (a start position) | 0A000 | refusal | 2026-10-02 · [RN](../0012-amendments.md#2026-10-02-the-scalar-renderers-write-a-value-as-its-declared-types-text-1474-1466-1467-1481) | #1481 | `coordinator.TestArcRNRendererTableEveryArm` rx/flagN, rx/flagP, rx/flagW, rx/flagX, rx/flagB, rx/flagE |
+| **r24** `SELECT regexp_replace('Hello', 'x*?H*', '#')` | #Hello: a non-greedy RE takes the shortest match | #ello (measured): an RE holding a non-greedy quantifier is matched leftmost-first, and among equal-length matches the groups are RE2's leftmost-first choice (`regexp_replace('abcd', '(a\|ab)(c\|bcd)(d*)', '[\1\|\2\|\3]')` is [a\|bcd\|] where PostgreSQL writes [ab\|c\|d]); an RE whose quantifiers are all greedy takes the longest match, as PostgreSQL does | — | value divergence | 2026-10-02 · [RN](../0012-amendments.md#2026-10-02-the-scalar-renderers-write-a-value-as-its-declared-types-text-1474-1466-1467-1481) | #1481 | `coordinator.TestArcRNRendererTableEveryArm` rx/lazyRE, rx/posixCaptures |
 
 ## Source entries
 
@@ -191,8 +191,8 @@ ADR lines 2215-2326. Catalog rows: r5, r6, r7, r8, r9, r10. Stated in [Mechanism
 
 ADR lines 2574-2581. Stated in [Mechanisms](#mechanisms).
 
-- **`ENCODE` takes BYTES and not text.** (Added 2026-09-18, arc EX's
-  earlier measurement, N6.) `encode('hi'::text, 'hex')` is
+- **`ENCODE` takes BYTES and not text.** (Added 2026-09-18, the earlier expression-typing
+  measurement, N6.) `encode('hi'::text, 'hex')` is
   `42883 function encode(text, unknown) does not exist` on 17.11 while
   `md5(text)`, `length(text)` and `substring(text)` all answer there — the
   asymmetry is PostgreSQL's own, so `encode`'s first position is
@@ -205,7 +205,7 @@ ADR lines 2574-2581. Stated in [Mechanisms](#mechanisms).
 ADR lines 2582-2647. Catalog rows: r11, r12, r13, r14. Stated in [Mechanisms](#mechanisms).
 
 - **A text-only function over a BYTES argument raises 42883.** (Added
-  2026-09-05, #583; CLOSED 2026-09-18, arc EX.) `upper(b)`, `lower(b)`,
+  2026-09-05, #583; CLOSED 2026-09-18.) `upper(b)`, `lower(b)`,
   `trim(b)`, `reverse(b)`, `replace(b, ...)`, `starts_with(b, ...)`,
   `split_part(b, ...)`, `lpad(b, ...)`, `repeat(b, ...)` and `char_length(b)` /
   `character_length(b)` have no bytea overload on the server —
@@ -238,7 +238,7 @@ ADR lines 2582-2647. Catalog rows: r11, r12, r13, r14. Stated in [Mechanisms](#m
   `Plan` and `dagplan.PlanDistributed` reach before any stage exists — so the
   refusal is one answer for every arm, and `expr.compileFuncCallNamed` keeps
   the same call as the backstop for the doors that walk does not see
-  (2026-09-18, arc EX).
+  (2026-09-18).
 
   TWO value divergences ride with it, both pinned by
   `wadjet.TestByteaFunctionsAnswerInBytes`.

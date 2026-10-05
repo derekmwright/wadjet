@@ -7,7 +7,7 @@ Columns: `cell` is the smallest statement that shows the difference; `PostgreSQL
 ## Mechanisms
 
 **MAP and VECTOR orders are wadjet-defined** (E14)
-MAP and VECTOR exist only here, so their total orders (`internal/engine/exec/kernel/container_sort.go`) are not a choice against a PostgreSQL answer. ROW is PostgreSQL's `record`, which has no `min`/`max` (MIN/MAX over ROW is refused since arc BR; its ORDER BY is unchanged). ARRAY maps to `anyarray`, which does have `min`/`max`, so ARRAY is the one container whose ordering is measurable against PostgreSQL, though no fixture gates it there.
+MAP and VECTOR exist only here, so their total orders (`internal/engine/exec/kernel/container_sort.go`) are not a choice against a PostgreSQL answer. ROW is PostgreSQL's `record`, which has no `min`/`max` (MIN/MAX over ROW is refused by the operand type rules; its ORDER BY is unchanged). ARRAY maps to `anyarray`, which does have `min`/`max`, so ARRAY is the one container whose ordering is measurable against PostgreSQL, though no fixture gates it there.
 
 **A dotted container reference is a field path only where it can mean nothing else** (E35)
 A bare `c_row.b` is a field path only where its qualifier names a ROW column of the stream that declares the field (`batch.RowFieldPath`, the one place the engine asks); an ordinary qualified reference to a relation is untouched, and a container that does not declare the field is refused with PostgreSQL's wording, `could not identify column "nosuch" in record data type` (42703). `(c_row).b` becomes the same reference as the bare form. ADR-0022 carries the mechanism.
@@ -59,7 +59,7 @@ ADR lines 597-606. Catalog rows: r18, r19. Stated in [Mechanisms](#mechanisms).
   container_sort.go`) are wadjet-defined, not a choice against a
   PostgreSQL answer. This bullet is ONLY MAP and VECTOR: ROW is `record`,
   which PostgreSQL HAS as a type but offers no `min`/`max` over (and
-  wadjet's MIN/MAX over it is refused since arc BR, above; its ORDER BY is
+  wadjet's MIN/MAX over it is refused by the operand type rules, above; its ORDER BY is
   unchanged), and ARRAY maps to PostgreSQL's `anyarray`,
   which DOES have `min`/`max` — so ARRAY is the one container whose
   ordering is a choice measurable against a PostgreSQL answer, even though
@@ -119,11 +119,11 @@ ADR lines 1324-1368. Catalog rows: r1. Stated in [Mechanisms](#mechanisms).
 ADR lines 3145-3191. Catalog rows: r2, r3, r13, r14, r15, r20, r21, r22, r23. Stated in [Mechanisms](#mechanisms).
 
 - **A ROW column declares OID 25 (text), not `record` 2249.** (Added
-  2026-09-08, arc A1; the divergence predates it.) `\gdesc` on
+  2026-09-08; the divergence predates it.) `\gdesc` on
   `ROW(1::int4, 2.5::float8, 'x'::text)` says `record`, OID 2249, measured
   on 17.11. `pgTypeOID` has no ROW arm and falls to its text default, as it
   does for MAP and for the network types this engine renders as text.
-  **ARRAY left that list 2026-09-15 (arc ND, #992):** an ARRAY column
+  **ARRAY left that list 2026-09-15 (#992):** an ARRAY column
   declares the array OF its element now (int4[] 1007, int8[] 1016, text[]
   1009, float8[] 1022, numeric[] 1231, timestamp[] 1115, date[] 1182,
   uuid[] 2951, bool[] 1000, bytea[] 1001), with PostgreSQL's array binary
@@ -136,12 +136,12 @@ ADR lines 3145-3191. Catalog rows: r2, r3, r13, r14, r15, r20, r21, r22, r23. St
   vector to read the element from and `colDecls` carries no element map.
   The last is pinned fail-on-agree in
   `pgwire.TestAZeroRowArrayResultKeepsItsDeclaration`.
-  **The zero-row shape left the list 2026-09-24 (arc CW, #1133):** the
+  **The zero-row shape left the list 2026-09-24 (#1133):** the
   declared-output seam carries a container's element (ADR-0045), so a
   zero-row ARRAY result declares its array OID; the pin flipped to 1007
   as the proof. A nested array now renders bare (`{{1,2},{3,4}}`,
   `array_out`'s form) and keeps OID 25 for the raggedness above.
-  The other container differences arc CW measured (2026-09-24..26) are
+  The other measured container typing differences (2026-09-24..26) are
   recorded in ADR-0045's Consequences and on the differences page rather
   than repeated here: a network-type array is `text[]`, `x::int[]` is
   `bigint[]`, a fractional literal array `float8[]`; two supersets kept —
@@ -158,7 +158,7 @@ ADR lines 3145-3191. Catalog rows: r2, r3, r13, r14, r15, r20, r21, r22, r23. St
   text gets the server's answer; only the OID a driver binds by differs.
   Moving it to 2249 is a decision about the whole ROW TYPE — every column of
   it, on every door — and is #992's neighbour rather than a per-function
-  choice. What arc A1 DID close is the declaration REACHING the renderer:
+  choice. What mergeable aggregate states resolved is the declaration REACHING the renderer:
   until #965 the only source of a composite's field order was the CATALOG,
   which describes no value an aggregate constructs, and such a column
   rendered with SORTED KEYS — a well-formed DataRow carrying the right

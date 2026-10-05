@@ -22,7 +22,7 @@ The names are converted into the mask operand, so a misspelling outranks a NULL 
 `has_tcp_flag`, `tcp_flags_from_string`, `tcp_flags_to_string`, `is_tcp_handshake` and `is_tcp_reset` read the nine-name table rather than an eight-bit one, so `tcp_flags_to_string(256)` is `AE` and `has_tcp_flag(f,'AE')` answers. An unknown name, and a flags argument that is not an integer (previously read as zero), are 22023 naming the name or the type.
 
 **The bitwise family reads its argument exactly and declares an integer** (E82)
-Twelve functions (`bitwise_and/or/xor/not`, the three shifts, `to_hex`, `to_base`, `bit_count`, `from_hex`, `from_base`) no longer carry an integer through float64, so bits above 2^53 survive; `numericFuncCall.EvalInt64` converts exactly. AND/OR/XOR/NOT over int4 operands declare `integer` since 2026-09-15 (#1018, arc ND), decided by `expr.PGIntegerResult.FitsOperands`; the shifts stay bigint because PostgreSQL's int4 shift is modular. The operator spellings `&`, `<<` and `>>` are not parsed (42601, measured); the functions are the spelling.
+Twelve functions (`bitwise_and/or/xor/not`, the three shifts, `to_hex`, `to_base`, `bit_count`, `from_hex`, `from_base`) no longer carry an integer through float64, so bits above 2^53 survive; `numericFuncCall.EvalInt64` converts exactly. AND/OR/XOR/NOT over int4 operands declare `integer` since 2026-09-15 (#1018), decided by `expr.PGIntegerResult.FitsOperands`; the shifts stay bigint because PostgreSQL's int4 shift is modular. The operator spellings `&`, `<<` and `>>` are not parsed (42601, measured); the functions are the spelling.
 
 **An aggregate over an integer function takes PostgreSQL's result width from one table** (E82)
 `expr.PGIntegerResultWidth`, read only by `physical.aggInputIsWideInteger`, gives each integer-returning function PostgreSQL's measured `pg_typeof`, or else the width that holds its whole domain; the bitwise family follows its operands. So `SUM(BITWISE_AND(int4_col,18))` is bigint and the int8 form numeric, as on 17.11. `expr.TestEveryIntegerDeclaredFunctionNamesItsPostgresResultWidth` holds the table and the registry to the same set.
@@ -31,7 +31,7 @@ Twelve functions (`bitwise_and/or/xor/not`, the three shifts, `to_hex`, `to_base
 The int4/int8 domain rides beside the INT64 carrier as `physical.colDecls.intWidth`, filled by `physical.emittedColIntWidth`: a call takes its table row, arithmetic and bitwise take the widest operand, a column its catalog type, a CAST its target, MIN/MAX the argument's width, a set operation the widest arm (nothing if any arm is silent). A scalar subquery's column is stamped once by `physical.annotateSubqueryColumnDecls` and read by `physical.buildAggregate` and `physical.resolveWindowKeys`; `refuseScalarSubqueryProjections` refuses to stage a window term holding a subquery. Gates: `pgwire.TestPGWireDeclaresSumOverAMaterializedIntegerColumn`, `pgwire.TestPGWireDeclaresSumOverAScalarSubqueryColumn`.
 
 **`tcp_flags` declares text[]** (E83)
-Closed 2026-09-24 (arc CW, #1017, ADR-0045): registry container returns carry their element, so `SELECT tcp_flags(f)` declares `text[]` (1009) and renders `{SYN,ACK}` on every door (measured). The earlier TEXT projection pin was deleted.
+Closed 2026-09-24 (#1017, ADR-0045): registry container returns carry their element, so `SELECT tcp_flags(f)` declares `text[]` (1009) and renders `{SYN,ACK}` on every door (measured). The earlier TEXT projection pin was deleted.
 
 **Semver: the specification decides precedence, NULL for data, loud for the query's text** (E85)
 PostgreSQL 17.11 has no semver function, so SemVer 2.0.0 §11 decides precedence; where a pure-SQL spelling exists (the integer-array core) it was measured as the oracle. Every function answers NULL for a string that is not a version; `semver_normalize_strict`/`semver_parse_strict` raise 22023. `semver_prerelease`/`semver_build` answer '' for a valid version without one. Components declare int8 (the int64 acceptance bound); `semver_cmp` declares int4.
@@ -95,7 +95,7 @@ The ADR-0012 §5 entries this family was built from, verbatim as they stood at 0
 ADR lines 3052-3111. Catalog rows: r1, r2, r3, r4, r5, r6, r7, r8. Stated in [Mechanisms](#mechanisms).
 
 - **`OHLCV` and `TIME_BUCKET` are EXTENSIONS, and their oracle is
-  PostgreSQL spelled out.** (Added 2026-09-08, arc A1, #965, ADR-0035.)
+  PostgreSQL spelled out.** (Added 2026-09-08, #965, ADR-0035.)
 
   `TIME_BUCKET(stride, ts[, origin])` IS `date_bin(stride, ts, origin)`
   under another name, and every one of its answers and both of its refusals
@@ -159,7 +159,7 @@ ADR lines 3052-3111. Catalog rows: r1, r2, r3, r4, r5, r6, r7, r8. Stated in [Me
 ADR lines 3221-3435. Catalog rows: r9, r10, r11, r12, r13. Stated in [Mechanisms](#mechanisms).
 
 - **The TCP flag family is an EXTENSION, and each function names the
-  PostgreSQL spelling it is equivalent to.** (Added 2026-09-08, arc A2,
+  PostgreSQL spelling it is equivalent to.** (Added 2026-09-08,
   #966.) PostgreSQL has no `tcp_flags_has_all`; it has `&`. The six
   functions are defined BY that arithmetic and gated against it, so the
   equivalence is the specification rather than a resemblance:
@@ -379,7 +379,7 @@ ADR lines 3436-3784. Catalog rows: r15, r16, r17, r18, r19, r20, r21, r22, r23, 
 
 - **The bitwise family reads its argument exactly and answers an integer;
   `bigint` where PostgreSQL answers `int4` for int4 operands.**
-  (Added 2026-09-08, arc A2, #966; extended the same day in earlier implementation to the
+  (Added 2026-09-08, #966; extended the same day in earlier implementation to the
   whole family.) `pg_typeof(2::int4 & 18::int4)` is `integer` and
   `pg_typeof(2::int8 & 18::int8)` is `bigint`, measured on 17.11; this
   engine declares bigint for both. A value-preserving widening.
@@ -415,7 +415,7 @@ ADR lines 3436-3784. Catalog rows: r15, r16, r17, r18, r19, r20, r21, r22, r23, 
   with PostgreSQL: no gate counts any of them as agreement, and the arm
   census normalizes or labels each one where it appears (#966, N3).
   The int4-operand widening at the head of this entry was filed as #1018
-  and **CLOSED 2026-09-15 (arc ND)**: `BITWISE_AND/OR/XOR/NOT` over int4
+  and **CLOSED 2026-09-15**: `BITWISE_AND/OR/XOR/NOT` over int4
   operands declares `integer` (OID 23) now, following its operands the way
   `+ - *` already did. AND, OR, XOR and NOT over two int4 values produce an
   int4 value by construction, so the narrower output vector can hold every
@@ -731,7 +731,7 @@ ADR lines 3436-3784. Catalog rows: r15, r16, r17, r18, r19, r20, r21, r22, r23, 
 ADR lines 3785-3807. Catalog rows: r12. Stated in [Mechanisms](#mechanisms).
 
 - **`tcp_flags` declares an ARRAY and a top-level projection of it is
-  TEXT.** (Added 2026-09-08, arc A2, #966; the limitation predates it.)
+  TEXT.** (Added 2026-09-08, #966; the limitation predates it.)
   `physical.funcReturnType` (unexported, `internal/planner/physical/
   declared_output.go`) declines ARRAY/MAP-returning functions and ROW functions without fixed fields — a projection has no element type to size the child vector with
   — so `SELECT tcp_flags(f)` is declared TEXT and the client is handed Go's
@@ -746,7 +746,7 @@ ADR lines 3785-3807. Catalog rows: r12. Stated in [Mechanisms](#mechanisms).
   projection can carry an ARRAY declaration. Fixed-schema ROW declarations
   travel through the complete column declaration independently (A3b);
   ARRAY/MAP element declarations remain #1017's open class.
-  **CLOSED 2026-09-24 (arc CW, #1017):** the registry's container returns
+  **CLOSED 2026-09-24 (#1017):** the registry's container returns
   carry their element (`tcp_flags`, `current_schemas`: text; the MAP
   functions: derived from the argument's key/value), so `SELECT
   tcp_flags(f)` declares `text[]` (1009) and renders `{SYN,ACK}` on every
@@ -758,7 +758,7 @@ ADR lines 3785-3807. Catalog rows: r12. Stated in [Mechanisms](#mechanisms).
 ADR lines 3808-3827. Catalog rows: r11, r14. Stated in [Mechanisms](#mechanisms).
 
 - **`has_tcp_flag` and `tcp_flags_from_string` now REFUSE a name they do not
-  know.** (Added 2026-09-08, arc A2, #966.) They predate the family above
+  know.** (Added 2026-09-08, #966.) They predate the family above
   and carried their own eight-entry name table in a `byte`. Three
   consequences, all fixed by folding them onto the one table:
   `tcp_flags_to_string(256)` answered the empty string for a value with the
@@ -782,8 +782,7 @@ ADR lines 3808-3827. Catalog rows: r11, r14. Stated in [Mechanisms](#mechanisms)
 ADR lines 3828-4160. Catalog rows: r25, r26, r27, r28, r29, r30, r31, r32, r33. Stated in [Mechanisms](#mechanisms).
 
 - **The semver family is an EXTENSION, and the SPECIFICATION is its
-  oracle because PostgreSQL has no semver at all.** (Added 2026-09-11, arc
-  A3, #967.) `SELECT count(*) FROM pg_proc WHERE proname ILIKE '%semver%'`
+  oracle because PostgreSQL has no semver at all.** (Added 2026-09-11, #967.) `SELECT count(*) FROM pg_proc WHERE proname ILIKE '%semver%'`
   is **0** on 17.11, measured. There is a third-party `semver` extension;
   it is not core, and this ADR's authority rule is about the PostgreSQL a
   client connects to. So Semantic Versioning 2.0.0 §11 decides precedence.
@@ -879,7 +878,7 @@ ADR lines 3828-4160. Catalog rows: r25, r26, r27, r28, r29, r30, r31, r32, r33. 
   sampled pairs).
 
   **`semver_satisfies` IMPLEMENTS node-semver's PUBLISHED RANGE GRAMMAR,
-  because the specification has none.** (Added 2026-09-11, arc A3, #967.)
+  because the specification has none.** (Added 2026-09-11, #967.)
   Semantic Versioning 2.0.0 defines PRECEDENCE and no range syntax at all.
   The syntax people actually write is node-semver's — a `package.json`
   dependency, a Dependabot alert, a Renovate rule, an advisory's
@@ -904,10 +903,9 @@ ADR lines 3828-4160. Catalog rows: r25, r26, r27, r28, r29, r30, r31, r32, r33. 
   A RANGE THIS GRAMMAR DOES NOT KNOW IS 22023 NAMING IT, NEVER A SILENT
   FALSE. The version argument is DATA and keeps the family's NULL; the
   range is the QUERY AUTHOR'S OWN TEXT, so a spelling nobody implements is
-  a property of the query, and `false` for it drops every row the author
-  meant to select while looking exactly like an empty table. The range is
+  a property of the query, and `false` for it drops every intended row while looking exactly like an empty table. The range is
   read FIRST — before a NULL or unparseable version argument is consulted —
-  which is the same ordering arc A2 settled for a flag NAME against a NULL
+  which is the same ordering used by version range evaluation for a flag NAME against a NULL
   flags argument, and for the same reason: whether a typo is an error must
   not depend on the rows. A NULL range is a NULL operand and answers NULL,
   because a NULL is not a misspelling.
@@ -954,7 +952,7 @@ ADR lines 3828-4160. Catalog rows: r25, r26, r27, r28, r29, r30, r31, r32, r33. 
   the binder call fails thirteen of those subtests.
 
   **THE TRIVIAL LOWER BOUND `>=0.0.0` IS DELETED FROM EVERY COMPARATOR
-  SET, AS node-semver DELETES IT.** (Added 2026-09-11, arc A3,
+  SET, AS node-semver DELETES IT.** (Added 2026-09-11,
   #967.) Three facts decide this, and they are worth separating because the
   first is not in play at all:
 
@@ -1039,7 +1037,7 @@ ADR lines 3828-4160. Catalog rows: r25, r26, r27, r28, r29, r30, r31, r32, r33. 
   answer false here and true there, 2 the other way through the `||` rule.
 
   **A GENERATED BOUND AT THE TOP OF THE DOMAIN IS SATURATED, NOT WRAPPED
-  AND NOT REFUSED.** (Added 2026-09-11, arc A3, #967.) Every range
+  AND NOT REFUSED.** (Added 2026-09-11, #967.) Every range
   spelling except an exact version closes its band by raising ONE component
   by one — `^1.2.3` is `>=1.2.3 <2.0.0-0`, `>1.2.x` is `>=1.3.0` — and a
   component is accepted up to int64's MAXIMUM, which is the acceptance
@@ -1109,7 +1107,7 @@ ADR lines 3828-4160. Catalog rows: r25, r26, r27, r28, r29, r30, r31, r32, r33. 
   are empty strings. Invalid strings return NULL, or 22023 naming the string
   in the strict form. NULL remains NULL in either form.
   This covers #1017's fixed-schema ROW case and #1055's derived stored-field
-  grouping. ARRAY/MAP scalar declarations were closed by arc CW
+  grouping. ARRAY/MAP scalar declarations were resolved by container typing
   (2026-09-24, ADR-0045). Composite scalar-subquery transport retains its existing
   local route; declarations and values now survive it. See
   [fixed ROW declarations](../../internals/scalar-row-declarations.md).

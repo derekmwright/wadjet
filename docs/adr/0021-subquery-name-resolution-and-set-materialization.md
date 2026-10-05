@@ -25,10 +25,10 @@ uncorrelated scalar subquery and an IN-subquery already had (#955).
 its own WITH scope in the parse, the build and the rebuild, makes the nested
 correlation walk the same walk as the top-level one, and gives a recursive CTE
 reference the column list a join key needs (#1098, #1067, #1072, #1066).
-§1o-b (2026-09-22, arc RC) settles how a recursive CTE's fixed point ENDS — at
+§1o-b (2026-09-22) settles how a recursive CTE's fixed point ENDS — at
 the fixed point or with an error, never with the rows so far — and what types
 and names it publishes (#1246, #1041, #1074, #1193).
-§1o-a was amended (2026-09-26, arc SP, #1349) when `INTERSECT` came to bind
+§1o-a was amended (2026-09-26, #1349) when `INTERSECT` came to bind
 tighter than `UNION` and `EXCEPT`: the recursive term is the top-level
 `UNION ALL`'s last operand, and a self-reference inside it follows
 PostgreSQL's set-operation rule.
@@ -42,7 +42,7 @@ evaluates an uncorrelated subquery the optimizer leaves in a filter: its own
 plan, reading storage — never a cache sized for the enclosing
 statement's scans.
 
-§2d (2026-10-05, arc CM, #1531) states how often the single-process engine
+§2d (2026-10-05, #1531) states how often the single-process engine
 evaluates a WITH item whose body is volatile and that the statement reads
 more than once: once, filled on demand, whichever reference reads it — and
 that the stage DAG does not yet.
@@ -368,7 +368,7 @@ Two families have no literal at all, and both FAIL the query with 0A000
 else:
 
 - **ROW, MAP and VECTOR.** There is no literal for these containers in this
-  dialect. (An ARRAY was in this family until arc CW, 2026-09-25: it
+  dialect. (An ARRAY was in this family until 2026-09-25: it
   is now spelled as its typed array literal, `CAST('{1,2}' AS BIGINT[])` —
   `expr.ArrayValueLiteral`, the spelling a DAG scalar subquery's array
   already used — so a correlated re-run over an array column answers
@@ -755,7 +755,7 @@ the record is a fixture rather than a memory.
   LATERAL governs references to same-level FROM siblings; a reference to an
   OUTER-QUERY column from inside a sub-SELECT's derived table needs none.
 
-  **The REFUSAL stands and its CLASS is corrected** (2026-09-04, arc F4). It
+  **The REFUSAL stands and its CLASS is corrected** (2026-09-04). It
   was 42P01 `missing FROM-clause entry for table "a"` on all four arms — a
   message that asserts the SQL is invalid, which it is not, and which a user
   cannot act on. It is now 0A000 naming the two workarounds (lift the
@@ -1055,7 +1055,7 @@ reference whose qualifier the INNER relation also answers to
 those — both scopes carry the identifier — and they stay pinned.
 
 Nor did it close the shape a COLUMN-ALIAS LIST on a CTE reaches — **CLOSED
-2026-09-07 by arc K1 (#958), the way this paragraph said it had to be.**
+2026-09-07 (#958), the way this paragraph said it had to be.**
 PostgreSQL's list renames the LEADING columns and the rest keep their names;
 this engine treated it as the whole namespace, in the binder (`registerCTE`
 stored `cte.Columns` outright) and in the correlation classifier
@@ -1081,9 +1081,9 @@ subquery was mis-correlated and its predicate dropped; with the scope right the
 single-process arms answer PostgreSQL and the DAG arms reach lowering gaps the
 wrong answer had been hiding. Each was pinned with the sentence it fails by, and two are now CLOSED: TWO
 qualified stars in one SELECT list (the logical builder emitted a projection
-column literally named `dim.*` — closed by arc J1's qualified-star expansion,
+column literally named `dim.*` — closed by qualified-star expansion during correlation-key binding,
 #962, verified on four arms at `bb8635a4`), and a QUALIFIED star over a JOIN
-inside a derived table that is then FILTERED (closed by arc K1, #963: a
+inside a derived table that is then FILTERED (closed, #963: a
 qualified star ALONE built no projection at all, so nothing carried the star
 for the expansion to rewrite and the derived block published the join). Two
 remain pinned: a RECURSIVE CTE named inside a subquery (§1b: it has no stage
@@ -1389,7 +1389,7 @@ one: there is no faithful rendering of an `OVER` clause to rebuild, and
 `WindowFuncNode.String()` emitting `OVER (...)` — three literal dots — is a
 defect of its own worth closing before anything here can.
 
-(Arc L1, 2026-09-14.) Fifteen cells of
+(Qualified column binding, 2026-09-14.) Fifteen cells of
 `coordinator.TestArcL1LateralAndWindowScopeAnswersPostgresOnEveryArm` hold that
 refusal on five arms — the scalar subquery in three join positions × the
 window's argument, a bare argument, `PARTITION BY`, `ORDER BY` and a two-row
@@ -1706,7 +1706,7 @@ different defect in kind.
   A set-operation anchor publishes its LEFT arm's names, which is what
   `inferCTESchema` reads for a multi-arm non-recursive term.
 
-**Amendment (2026-09-26, #1349):** arc SP's precedence fix made the tree's TOP
+**Amendment (2026-09-26, #1349):** the set-operation precedence fix made the tree's TOP
 node's Right an arbitrary UNION/EXCEPT-level operand, which may itself be an
 `INTERSECT` chain of several arms, since `INTERSECT` binds tighter — so "does
 any arm but the last name the CTE" above is no longer exact. The recursive
@@ -1741,7 +1741,7 @@ NOT-SETTLED here, `42601` at the parser; §1p closed it.)
 
 ### 1o-b. A recursive CTE answers its whole closure or fails
 
-(Added 2026-09-22, arc RC: #1246, #1041, #1074, #1193; the recursive half of
+(Added 2026-09-22: #1246, #1041, #1074, #1193; the recursive half of
 #1013.)
 
 §1o settled WHERE a recursive CTE is materialized; this settles what the
@@ -2037,7 +2037,7 @@ refusal says.
 
 ### 1q. A LATERAL's BOUND travels with the correlation key, its ALIAS is what the join qualifies it by, and everything else it reads is loud
 
-(Added 2026-09-14, #1019, #1111, arc L1.)
+(Added 2026-09-14, #1019, #1111.)
 
 §1h settled what a LATERAL means for an EMPTY input. This is the next layer,
 and it is three facts about one lowering — `buildLateralSubquery` promotes the
@@ -2050,7 +2050,7 @@ n` bounds each evaluation; the decorrelation makes the body ONE relation joined
 once and the bound applied to the whole of it, so the top-N-per-group idiom
 answers ONE row for PostgreSQL's two, silently, on every arm (#1019).
 
-*(2026-09-23, arc LT: superseded by §1s — the bound IS per outer row now, on
+*(2026-09-23: superseded by §1s — the bound IS per outer row now, on
 every arm, through the rewrite below with its three faults closed at their
 seams; the paragraphs that follow are the record of why it was withdrawn.)*
 
@@ -2245,7 +2245,7 @@ over} on five arms, every want live PostgreSQL 17.11.
 
 ### 1r. A decorrelated subquery's outer references are a SET over the WHOLE body
 
-(Added 2026-09-20, #1232, #1104, arc DC.)
+(Added 2026-09-20, #1232, #1104.)
 
 Every section above is about what a correlated reference MEANS once the
 rewrite has found it. This one is about FINDING it. All three decorrelations
@@ -2277,7 +2277,7 @@ WHERE o.id IN (SELECT b.order_id FROM lat_item b
 silently, on all five arms, with three discriminators right beside it — the
 same correlation in a plain join, the same correlation moved to the body's
 WHERE, and the EXISTS spelling (#1232, localised to the PLAN and not the
-binder by arc RS's measurement). An INNER join's ON conjunct IS a WHERE conjunct,
+binder by the name resolution measurement). An INNER join's ON conjunct IS a WHERE conjunct,
 so a conjunct of one that names the enclosing query is LIFTED into the
 classification the rewrite already runs, and becomes a key, a residual or an
 outer-side filter exactly as the same text written in the WHERE does. An
@@ -2340,7 +2340,7 @@ keeps the build-side disposition and fails loudly by name.
 Before this, the unqualified spelling was invisible outside the `WHERE`: in a
 body `JOIN`'s `ON` it became a join key no relation publishes (zero rows), in
 a `HAVING` the aggregate rewrite dropped it (every row), in the SELECT list it
-became a key the build side lacks (zero rows) — silent, on every arm (arc DC
+became a key the build side lacks (zero rows) — silent, on every arm (the decorrelation
 The earlier implementation, B1).
 
 **TWO KEYS, ONE BUILD.** A correlated IN whose IN key and correlation key are
@@ -2420,7 +2420,7 @@ reading is asserted on all nine doors.
 
 ### 1s. A correlated body is decorrelated only where it is KEY-PARTITIONABLE, and evaluated per outer row otherwise
 
-(Added 2026-09-23, #1019, #1238, #1274, #1131, #1130, arc LT. Supersedes
+(Added 2026-09-23, #1019, #1238, #1274, #1131, #1130. Supersedes
 §1q's "THE BOUND IS STILL NOT PER OUTER ROW" and §2's LATERAL-bound mark.)
 
 Every decorrelation in this record replaces "the body evaluated once per outer
@@ -2459,7 +2459,7 @@ are each closed at their own seam: the DAG partition binds since ADR-0026
 self-correlated bodies, every equality-keyed cell agreeing); the decline list
 is the rule itself; the `__win_N` collision was a base defect of user-written
 QUALIFY in two blocks under one join, closed in the physical slot rename.
-The disclosure arc L1 measured on four doors is a different, PRE-EXISTING
+The result measured for qualified column binding on four doors is a different, PRE-EXISTING
 fault of the distributed path, not of the minted window: a WINDOW over a
 policed scan whose output feeds a JOIN answers the stored column's pairing
 on every DAG door — for a user-written window inside a lateral body, a user
@@ -2509,7 +2509,7 @@ scalar, JOIN / LEFT JOIN / comma LATERAL} × {17 body shapes} × {equality,
 inequality, mixed, shared name, none}`, 680 cells against live PostgreSQL
 17.11 — had 87 wrong and 61 refused cells at base; at the tip 0 wrong and 183
 refused, on five arms (`coordinator.TestArcLTACorrelatedBodyIsEvaluatedPerOuterRowOnEveryArm`).
-On arc L1's table 28 cells went wrong → right, 9 wrong → loud, 2 loud → right
+On the qualified column binding table 28 cells went wrong → right, 9 wrong → loud, 2 loud → right
 (the qualified star over a bounded body), and one right → loud
 (`R4/aliasCollides`, the coincidence above). N1's, O2's, L1's and the QUALIFY
 table's #1019 pins are deleted. Twelve (cell, arm) results moved right → loud
@@ -2549,7 +2549,7 @@ the single path only. A window ABOVE a lateral join is refused on the DAG
 answers PostgreSQL's rows — the loud → wrong move of `R2/collideWinBound` is
 withdrawn, and its unbounded twin is right for the first time.
 
-**AN OUTER EXPRESSION IS A KEY (2026-09-24, arc JP, #1302).** The rule above
+**AN OUTER EXPRESSION IS A KEY (2026-09-24, #1302).** The rule above
 says "an expression over the outer row alone", and the code said "a bare outer
 column": `i.order_id = o.id - 0` answered ZERO rows unbounded and was refused
 bounded. The unbounded zero was a placement fault, not a key question: the
@@ -2618,7 +2618,7 @@ runs on the coordinator-local single-process pipeline
 (`Coordinator.runLateralIdentityLocal`, counted and logged; the async door
 runs it as one pipeline task). The property is asked of every LATERAL arm,
 correlated or not: an uncorrelated body aliasing an aggregate `total` beside
-`lat_ord.total` read the outer column on the DAG too (arc L1's
+`lat_ord.total` read the outer column on the DAG too (the qualified column binding's
 `UNCORRLAT/collidingName` pin, deleted). Right-and-single beats
 wrong-and-distributed.
 Measured over the closure corpus (1143 statements) and 634 carried cells
@@ -2638,7 +2638,7 @@ OWN column (qualified by its alias, matched exact-first, named as the built
 body publishes it: `max(i.id) AS id` beside `o.id`, and an unaliased
 `count(*)` answering 0); and a non-key correlated conjunct (`i.id <> o.id`) is
 spelled through the lateral's alias, `s.id`, which reads the body's column
-over the join's output — so arc LT's "the two columns cannot be told apart"
+over the join's output — so the earlier "the two columns cannot be told apart"
 refusal stands only for a lateral with no alias. A filter whose value side
 names a column never falls back to the text path's literal comparison: a
 LATERAL nested in another that names the outermost relation is refused,
@@ -2703,7 +2703,7 @@ the lateral marker) to the new root, earlier implementation's alias rule at the 
 that moves the root. A WINDOW is the other clause: a window anywhere in the
 body — a bare or nested SELECT item, QUALIFY, HAVING, ORDER BY — is
 partitioned by every correlation key it does not already carry (the per-key
-partition arc LT's bound mints), which is exactly the rows one outer row
+partition the per-row lateral bound mints), which is exactly the rows one outer row
 sees when every correlated part is `<inner expression> = <outer
 expression>`; a non-key correlated part (evaluated above the join, after the
 window numbered rows it removes) or an ungrouped-aggregate body (whose
@@ -2891,7 +2891,7 @@ runner (#1384, #1364).
 
 ### 2d. A volatile CTE read more than once is evaluated ONCE, on demand, on the single-process path
 
-(Added 2026-10-05, arc CM, #1531; amended the same day, earlier implementation: the shared
+(Added 2026-10-05, #1531; amended the same day, earlier implementation: the shared
 evaluation is filled on demand, a CTE read once is not shared, and a
 function's volatility is the registry's.)
 
@@ -3216,7 +3216,7 @@ subquery declares no type to the const-arith fold, which is ADR-0024's rung
 
 ### 5. A scalar subquery is at most ONE row, and the second row is 21000
 
-(Added 2026-09-04, arc E6.)
+(Added 2026-09-04.)
 
 Every site in the engine that reduced a scalar subquery's result to a value
 took `rows[0]` and said nothing about the rest. There were four of them: the
@@ -3349,7 +3349,7 @@ counters assert beside the rows. The DML door reached the same boundary as a
   subquery's own WHERE), and #616 / #614 / #714 (measured, not moved).
   `internal/coordinator/arc_d5_correlation_two_path_test.go` is their census.
 - §1q: #1111 (the lateral's alias as a join arm's qualifier), the lateral
-  scope refusals arc L1 measured, and #1019's repair written, measured and
+  scope refusals measured for qualified column binding, and #1019's repair written, measured and
   withdrawn.
 - §1p: #1098 (the probe key, the per-row batch read), #1067 (a block's own
   WITH, in the parse / the build / the rebuild), #1072 (the nested walk and the

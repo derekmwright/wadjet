@@ -1,6 +1,6 @@
 # ADR-0026: A GROUP BY key has one identity and one published name
 
-Status: Accepted (2026-08-30, #720 / #723 / #725; amended 2026-09-03 by arc S1 — §4b's deferral is CLOSED, the phantom scan column under it is named at its real site, and a sort or window key over a computed derived alias needs no second name ON THE WIRE because the definition is materialized at plan time; amended three times the same day — one identity, one SLOT, one published name, one ALLOCATOR per aggregate, and a NAME never re-read as structure; amended 2026-09-04 by arc E3 — §3a is CLOSED: a HAVING binds its aggregate through the slot that aggregate OWNS, and the gather pairs a lone rename by CLASS (#785); amended again 2026-09-01 for #737 and #759 — a WINDOW above the aggregate is spelled against what it publishes, and the allocator's per-aggregate SCOPE is a boundary with a fixture that attempts it; amended 2026-09-02 with §5 for #792, #775 and #729 — a name re-spelled for dispatch is TYPED where it was re-spelled TO — and with §4a's record that the stage-spelling pass sketched there was built and WITHDRAWN, because a Stage carrying one name per key cannot state a derived alias (#794, #795); amended 2026-09-04 by arc F4 — §3a's fragment-projection residual is closed for the THREE WRAPPED spellings it pinned, and it was two defects: an unaliased SELECT item was invisible to the class walk's lookup, and a fragment projection above an aggregate addressed a duplicated name by NAME where it now addresses the SLOT. Two sibling spellings — under a SET-OP wrapper and under a DISTINCT — are NOT closed and stay pinned (2026-09-05). Amended 2026-09-07 by arc J2 with §6 — the two names are not a property of GROUP BY keys: a UNION arm's projection, an aggregate argument, a window argument, an ORDER BY term and a projection's DECLARED TYPE each have a second spelling, and every one of them binds through the identity its producer published (#770, #947, #949; the mechanism is in ADR-0025); amended 2026-09-07 by arc J1 with §3c — a key the PLANNER MINTED is published under a hidden slot and RESOLVED by the column it reads, which is §2's pair of names in the opposite direction, and the stage's published list says what `exec.PublishedGroupKeyNames` will emit (#956, #767); amended the same day — the minted column is DROPPED BY THE JOIN that made it rather than trimmed at the statement's output, because a star-only query has no output projection to trim, and the collision is closed in the spelling where the SELECT list carries the key too (#956, #767); amended a fourth time — the empty-input default is the ITEM's folded value and lands only where the correlation key is NULL, the reference rewrite is deleted, and a qualified star expands from its relation's OUTPUT list or is refused; amended a third time — the drop's identity is a POSITION on the side the lowering BUILT (a name, and a name that is a join key, both dropped a user's stored `__key_0`), the re-spell walks the whole block, and an ungrouped aggregate's empty-input value rides on the lateral's OUTPUT COLUMN rather than on the references to it (#977); amended again after the second measurement — the drop is by IDENTITY (the slot the join KEYS ON, on the side it minted it for) and never by a name a table could also own, the colliding spelling takes the FULL mint with its own references re-spelled to the slot, and the distributed path's materialized lateral projection is what may ask for the slot back (#956, #767); amended a fifth time — the empty-input default is a COMPILED PROJECTION EXPRESSION and not a stamped value (a text carrier could not write a varlen or a container vector and emptied a MATCHED string row), a published correlation key is a USER column under whatever name and however many times the query published it, and a written ON over an unrepaired lateral is folded over the defaults and REFUSED unless it provably rejects the padded row — never NULL where PostgreSQL answers a value (#977, #956); amended a sixth time — a star over a lateral whose block projection is not its stage's column list is ROUTED to the local pipeline rather than answered short (the INNER spelling lost the column silently, the LEFT one failed loudly), and a constant `ON` folds through the compiler rather than through its text (#984); amended 2026-09-07 by arc K3 with §7 — a DERIVED BLOCK A STAR READS IS A RELATION AND A STAGE PUBLISHES IT, so the route's trigger shrinks to the blocks no stage could carry (#984, #980, #981); amended 2026-09-08 by arc L1 with §6a — the ORDER BY consumer keeps the QUALIFIER on the single-process path too, because a `SELECT *` has no select list to take a position from and the qualifier is the only thing telling two references of one relation apart (#989); §6a also records the residual it does NOT settle — the join's published name list is a plan artifact because `reorderJoins` expresses the build side by SWAPPING the node's children (#997, deferred with its mechanism). Amended 2026-09-13 by arc O2 with §9 — a DERIVED BLOCK PUBLISHES ITS VISIBLE LIST and a QUALIFIED STAR READS IT: a key the block materialized for its own ORDER BY dies where every relation-COMBINING operator composes its output (#991, #1075 — a JOIN was not the only one, and a set operation put `__sortkey_0` on the wire, refused the DAG and lost every INTERSECT row), a minted correlation slot's ordinal is read through the block's own Sort (#1020), the star binds the RESOLUTION spelling and publishes the PUBLISHED one (#1077), an AGGREGATE OUTPUT occupies its name before a key's qualifier is stripped (#1078), and two published columns of one name are not enumerable by name at all (#1076, refused). Amended the same day — the block-publication walk reaches a sort key one projection deeper, and a correlated LATERAL whose body carries its own bound is marked rather than answering a plausible row count (#1079); amended a second time after the closure measurement — the class is every WIRING of a join or set-op node and not its four constructors, because the decorrelation of IN / NOT IN / EXISTS and a correlated scalar subquery each builds a NodeJoin literally (#1080), and the LATERAL bound's refusal is narrowed to the QUALIFIED STAR, because a refusal on the bound's EXISTENCE replaced right answers with errors (#1019); amended 2026-09-18 by arc SR with §9a — a name TWO relations publish is publishable twice and a name ONE relation publishes twice is not addressable, which closes the USING star's shared-tail-name decline (#1177), the duplicate-published-name reference (#1094) and the set operation's published names on both engines (#1079).
+Status: Accepted (2026-08-30, #720 / #723 / #725; amended 2026-09-03 — §4b's deferral is CLOSED, the phantom scan column under it is named at its real site, and a sort or window key over a computed derived alias needs no second name ON THE WIRE because the definition is materialized at plan time; amended three times the same day — one identity, one SLOT, one published name, one ALLOCATOR per aggregate, and a NAME never re-read as structure; amended 2026-09-04 — §3a is CLOSED: a HAVING binds its aggregate through the slot that aggregate OWNS, and the gather pairs a lone rename by CLASS (#785); amended again 2026-09-01 for #737 and #759 — a WINDOW above the aggregate is spelled against what it publishes, and the allocator's per-aggregate SCOPE is a boundary with a fixture that attempts it; amended 2026-09-02 with §5 for #792, #775 and #729 — a name re-spelled for dispatch is TYPED where it was re-spelled TO — and with §4a's record that the stage-spelling pass sketched there was built and WITHDRAWN, because a Stage carrying one name per key cannot state a derived alias (#794, #795); amended 2026-09-04 — §3a's fragment-projection residual is closed for the THREE WRAPPED spellings it pinned, and it was two defects: an unaliased SELECT item was invisible to the class walk's lookup, and a fragment projection above an aggregate addressed a duplicated name by NAME where it now addresses the SLOT. Two sibling spellings — under a SET-OP wrapper and under a DISTINCT — are NOT closed and stay pinned (2026-09-05). Amended 2026-09-07 with §6 — the two names are not a property of GROUP BY keys: a UNION arm's projection, an aggregate argument, a window argument, an ORDER BY term and a projection's DECLARED TYPE each have a second spelling, and every one of them binds through the identity its producer published (#770, #947, #949; the mechanism is in ADR-0025); amended 2026-09-07 with §3c — a key the PLANNER MINTED is published under a hidden slot and RESOLVED by the column it reads, which is §2's pair of names in the opposite direction, and the stage's published list says what `exec.PublishedGroupKeyNames` will emit (#956, #767); amended the same day — the minted column is DROPPED BY THE JOIN that made it rather than trimmed at the statement's output, because a star-only query has no output projection to trim, and the collision is closed in the spelling where the SELECT list carries the key too (#956, #767); amended a fourth time — the empty-input default is the ITEM's folded value and lands only where the correlation key is NULL, the reference rewrite is deleted, and a qualified star expands from its relation's OUTPUT list or is refused; amended a third time — the drop's identity is a POSITION on the side the lowering BUILT (a name, and a name that is a join key, both dropped a user's stored `__key_0`), the re-spell walks the whole block, and an ungrouped aggregate's empty-input value rides on the lateral's OUTPUT COLUMN rather than on the references to it (#977); amended again after the second measurement — the drop is by IDENTITY (the slot the join KEYS ON, on the side it minted it for) and never by a name a table could also own, the colliding spelling takes the FULL mint with its own references re-spelled to the slot, and the distributed path's materialized lateral projection is what may ask for the slot back (#956, #767); amended a fifth time — the empty-input default is a COMPILED PROJECTION EXPRESSION and not a stamped value (a text carrier could not write a varlen or a container vector and emptied a MATCHED string row), a published correlation key is a USER column under whatever name and however many times the query published it, and a written ON over an unrepaired lateral is folded over the defaults and REFUSED unless it provably rejects the padded row — never NULL where PostgreSQL answers a value (#977, #956); amended a sixth time — a star over a lateral whose block projection is not its stage's column list is ROUTED to the local pipeline rather than answered short (the INNER spelling lost the column silently, the LEFT one failed loudly), and a constant `ON` folds through the compiler rather than through its text (#984); amended 2026-09-07 with §7 — a DERIVED BLOCK A STAR READS IS A RELATION AND A STAGE PUBLISHES IT, so the route's trigger shrinks to the blocks no stage could carry (#984, #980, #981); amended 2026-09-08 with §6a — the ORDER BY consumer keeps the QUALIFIER on the single-process path too, because a `SELECT *` has no select list to take a position from and the qualifier is the only thing telling two references of one relation apart (#989); §6a also records the residual it does NOT settle — the join's published name list is a plan artifact because `reorderJoins` expresses the build side by SWAPPING the node's children (#997, deferred with its mechanism). Amended 2026-09-13 with §9 — a DERIVED BLOCK PUBLISHES ITS VISIBLE LIST and a QUALIFIED STAR READS IT: a key the block materialized for its own ORDER BY dies where every relation-COMBINING operator composes its output (#991, #1075 — a JOIN was not the only one, and a set operation put `__sortkey_0` on the wire, refused the DAG and lost every INTERSECT row), a minted correlation slot's ordinal is read through the block's own Sort (#1020), the star binds the RESOLUTION spelling and publishes the PUBLISHED one (#1077), an AGGREGATE OUTPUT occupies its name before a key's qualifier is stripped (#1078), and two published columns of one name are not enumerable by name at all (#1076, refused). Amended the same day — the block-publication walk reaches a sort key one projection deeper, and a correlated LATERAL whose body carries its own bound is marked rather than answering a plausible row count (#1079); amended a second time after the closure measurement — the class is every WIRING of a join or set-op node and not its four constructors, because the decorrelation of IN / NOT IN / EXISTS and a correlated scalar subquery each builds a NodeJoin literally (#1080), and the LATERAL bound's refusal is narrowed to the QUALIFIED STAR, because a refusal on the bound's EXISTENCE replaced right answers with errors (#1019); amended 2026-09-18 with §9a — a name TWO relations publish is publishable twice and a name ONE relation publishes twice is not addressable, which closes the USING star's shared-tail-name decline (#1177), the duplicate-published-name reference (#1094) and the set operation's published names on both engines (#1079).
 
 §2 REWRITTEN 2026-09-02 from a sketch into the design that closes #794 and
 #795: a Stage carries TWO names per GROUP BY key — the PUBLISHED name in
@@ -16,7 +16,7 @@ A key whose expression is an AGGREGATE or WINDOW call was refused there too,
 and that refusal is retired: the DISTINCT lowering was RECORDING one, and no
 query can write one. §3b.)
 
-Amended 2026-09-18 by arc WK — **§8j is SETTLED**: a window key, a sort key, a
+Amended 2026-09-18 — **§8j is SETTLED**: a window key, a sort key, a
 lifted predicate column and a join-arm reference bind by the OCCURRENCE that
 produced the column, and a NAME is derived from that identity for publication,
 never the reverse (#1028). `exec.ColumnIndexFallback` is NOT deleted — its
@@ -616,7 +616,7 @@ value is published under the input column's own name and every consumer
 already reads it there; a mapping for them would only re-route a resolution
 that works.
 
-#### 3a. An AGGREGATE OUTPUT may still take a group key's name, and the HAVING binds it through the slot it OWNS (2026-09-02 #785, CLOSED 2026-09-04 by arc E3)
+#### 3a. An AGGREGATE OUTPUT may still take a group key's name, and the HAVING binds it through the slot it OWNS (2026-09-02 #785, CLOSED 2026-09-04 by the aggregate binding)
 
 This ADR gives a group KEY one identity and one name. It says nothing about
 an AGGREGATE OUTPUT minting the same name, and one can:
@@ -709,7 +709,7 @@ rather than one, at
 `785/nested-in-a-derived-table-inside-a-cte`, and
 `785/nested-two-derived-tables-deep` — the last with no CTE anywhere in it.
 
-**CLOSED 2026-09-04 (arc F4), and the paragraph above was right about the
+**CLOSED 2026-09-04, and the paragraph above was right about the
 boundary and wrong about the mechanism at one of the three.** Measuring the
 three apart is what closed them, because they are TWO defects:
 
@@ -1459,7 +1459,7 @@ because a fix that makes the DAG execute a shape it currently routes is
 invisible to a row check and so is the regression back (rule 11). Nothing in the
 tree named #807 before it.
 
-#### CLOSED, and the phantom was the whole of it (2026-09-03, arc S1)
+#### CLOSED, and the phantom was the whole of it (2026-09-03)
 
 The order this section fixed was right and the estimate of what came after it
 was wrong. Once the phantom was closed the carrier needed no extension at all,
@@ -1584,7 +1584,7 @@ protocol is why it carries a fixture instead of a sentence: **#796**, pinned in
 `TestNumericArc2ShapesMatchPostgres` beside the six shapes it is one nesting
 level away from.
 
-**#796 is CLOSED as of 2026-09-04 (arc F1), and it was not this walk.** The
+**#796 is CLOSED as of 2026-09-04, and it was not this walk.** The
 LOUD half described above is already gone on `18f3660e`; what survived was the
 DECLARATION, on every arm. The defect was one level up from the walk this
 section is about: `windowSpecOutputType` resolved the WINDOW's own input column
@@ -1849,7 +1849,7 @@ fails the paren-nested, identifier-case and ORDER BY entries; stubbing
 fails `TestEveryComputedKeyResolvesAgainstItsProducer` on the join shapes and
 `TestWindowOutputAsAGroupKeyMatchesPostgres` on every #777 and #781 entry.
 
-## §6. The two names are not a property of GROUP BY keys (2026-09-07, arc J2)
+## §6. The two names are not a property of GROUP BY keys (2026-09-07)
 
 §2 gave a GROUP BY key a PUBLISHED name and a RESOLUTION spelling and carried
 both on the Stage. The two names stopped at the aggregate, and every consumer
@@ -1897,7 +1897,7 @@ nothing and fell to the float rule. An exact DECIMAL declared FLOAT64 on every
 arm, and on the DAG a DECIMAL value written into a float vector, which is what
 #361's guard is for.
 
-### §6a. The ORDER BY consumer keeps the QUALIFIER (2026-09-08, arc L1, #989)
+### §6a. The ORDER BY consumer keeps the QUALIFIER (2026-09-08, #989)
 
 §6's fourth row — an ORDER BY term's two names — was settled for the STAGE
 consumer (`SortKeySpec.WrittenTerm`, `resolveSortKeyColumn`) and left unstated
@@ -1931,7 +1931,7 @@ ORDINAL (#557), the SELECT-list POSITION of the item the term names
 (`sortKeyLocalSlotPos`, #905 — available only where the Sort's child is a
 Project), and the WRITTEN SPELLING (#989 — what a star-only query has left).
 
-SETTLED 2026-09-13 by arc O1 (#997, #1012, #993) — §9. The lead this
+SETTLED 2026-09-13 (#997, #1012, #993) — §9. The lead this
 paragraph recorded was that the join's PUBLISHED name list is itself a plan
 artifact: `logical.reorderJoins` expresses "which side builds" by SWAPPING the
 join node's children and `physical.buildJoin` reads `Children[0]` as probe, so
@@ -1949,7 +1949,7 @@ stream, because the projection §9 mints sits ABOVE the sort. The census is in
 
 ## §7 A derived block a STAR reads is a relation, and a stage publishes it
 
-Added 2026-09-07 by arc K3 (#984, #980, #981).
+Added 2026-09-07 (#984, #980, #981).
 
 §2 gave a GROUP BY key two names, and §6 generalized that: a consumer binds
 through the identity its producer published. §7 is the same rule for the
@@ -2030,7 +2030,7 @@ declaration, which is worse than the none #978 replaced. There is no such thing 
 cannot declare: `ARRAY[c0]`, an all-NULL `CASE`, a bare `NULL` and
 `COALESCE(NULL, NULL)` reach a client with an OID today, and so does a
 scalar-subquery item. A WEAKER SECOND INFERENCE HERE WAS THE DEFECT that three
-rounds of this arc kept re-discovering: it declined on `expr.Undecided`, and
+successive measurements confirmed: it declined on `expr.Undecided`, and
 every decline became a DISPOSITION — a query the single path answers with a
 declared type was routed off the DAG, or left to read the stream.
 
@@ -2068,7 +2068,7 @@ nor closes it. Closing it needs a join's emitted list stated at plan time —
 `exec.JoinOutputSchema` is that list, and reaching it here needs the side
 schemas the star declaration already assembles, one level deeper.
 
-RE-MEASURED 2026-09-08 by arc M1 (#993): the column SET half of that boundary
+RE-MEASURED 2026-09-08 (#993): the column SET half of that boundary
 no longer reproduces — v0.18.62's `Stage.ProjectExprs` closed it and all four
 arms publish PostgreSQL's ten for the bare-star spelling. What survives is a
 NAME divergence between the two DAG arms, and it is NOT the block's: the SAME
@@ -2128,7 +2128,7 @@ collide are still qualified, by the `isDup` + `BuildColOrigins` rule in
 `joinOutputSchemaWithMapping`, which is the rule for a collision the plan
 cannot see coming.
 
-**Not settled here; CLOSED 2026-09-08 by arc M1 (#988) — see §8.** Two
+**Not settled here; CLOSED 2026-09-08 (#988) — see §8.** Two
 independent LATERALs over one table publish the SECOND lowering's minted slot
 to the client (`__key_1` beside `mx` and `mn`) on both DAG arms. The slot is
 left in place by the join for the empty-input default operator above it to drop
@@ -2141,7 +2141,7 @@ second join is ABSORBED by `fuseStageChains` into the first's stage, and
 
 ## §8 The DAG publishes the PLAN's column set and ORDER, never a stage's stream
 
-Added 2026-09-08 by arc M1 (#1002, #961, #988, and the gather-rename defect the
+Added 2026-09-08 (#1002, #961, #988, and the gather-rename defect the
 #1002 gate found).
 
 §2 gave a group key two names, §6 generalized it to every consumer, and §7 made
@@ -2431,12 +2431,12 @@ therefore not an address, and it was the only one in use in three places:
    columns answer to it", §3a), and the positions are the inner operation's
    own by the same construction the rest of this item rests on.
 
-### 8j. A WINDOW key, a SORT key and a join-arm reference bind by OCCURRENCE (2026-09-14, arc L1: #1028; SETTLED 2026-09-18, arc WK)
+### 8j. A WINDOW key, a SORT key and a join-arm reference bind by OCCURRENCE (2026-09-14: #1028; SETTLED 2026-09-18)
 
 A window key is a key, and §4's rule holds for it: the identity of a column is
 the relation that produced it, never the bare name two relations share. Three
 mechanisms used to answer "which arm owns this key" and they did not agree.
-This section recorded the seam; arc WK closes it with ONE resolution.
+This section recorded the seam; the window key binding closes it with ONE resolution.
 
 **THE RULE.** A window key, a sort key, a lifted predicate column and a
 join-arm reference bind by IDENTITY — the OCCURRENCE that produced the column,
@@ -2565,7 +2565,7 @@ expression whose two leaves name two occurrences — both DAG-only, both
   key that CONTAINS one is the same question one layer down. Right on the two
   single arms, `distributed`, pinned per arm (measured by the earlier measurement).
 
-*(2026-09-23, arc LT: the rewrite is back and the minted partition BINDS on
+*(2026-09-23: the rewrite is back and the minted partition BINDS on
 the three DAG arms — measured over the arc's seam table and over
 self-correlated bodies, every equality-keyed bound cell agreeing with
 PostgreSQL 17.11. The four-door disclosure below was not the minted key's
@@ -2576,7 +2576,7 @@ localised; ADR-0021 §1s records it. What follows is the record of the
 withdrawal; §1s is the current rule.)*
 
 **A PLANNER-MINTED window inherited all three, and that is why #1019's rewrite
-was withdrawn.** Arc L1 built the per-outer-row LATERAL bound on a minted
+was withdrawn.** The qualified column binding built the per-outer-row LATERAL bound on a minted
 `ROW_NUMBER() OVER (PARTITION BY <the inner correlation column>)`: on the three
 DAG arms that partition did not bind the body's own column, so over a
 SELF-correlated body every row became its own partition — and over a POLICED
@@ -2592,7 +2592,7 @@ mask and eight singletons under the stored values, and the gate asserts the
 mask's answer, the absence of every stored policed value, and a non-vacuous
 (cell, door) answered count.
 
-### 8i. A join ARM that is not a base scan is named by the query (2026-09-14, arc R2: #1102, #1099, #1095)
+### 8i. A join ARM that is not a base scan is named by the query (2026-09-14: #1102, #1099, #1095)
 
 A join arm that is a SET OPERATION, a join-bodied derived block, a grouped
 block or a nested renamed block is keyed, shuffled, merged and NAMED on the
@@ -2613,7 +2613,7 @@ spelling the arm's stream really carries.**
    Which side BUILDS is a cost decision, so the same statement was right
    whenever the plan chose the other relation. Such an arm is a MATERIALIZED
    arm now (`setOpArmPublishesItsOwnList`), qualified by `joinArmAlias`; with
-   its columns addressable, arc O1's decline of the STAR over one comes out
+   its columns addressable, the outer-join publication decline of the STAR over one comes out
    (§9's table) and `blockOwnProjection` descends a set operation to its
    leftmost arm, which is the list PostgreSQL publishes.
 
@@ -2712,7 +2712,7 @@ side. The name-collision dimension is load-bearing: with names nothing else
 spells, three of the five classes answer correctly by luck. So is the OUTER
 one: an inner join never asks a task to shape a row its data did not produce.
 
-### 8k. A join conjunct hangs where every relation its QUALIFIERS name is joined (2026-09-24, arc JP: #1299)
+### 8k. A join conjunct hangs where every relation its QUALIFIERS name is joined (2026-09-24: #1299)
 
 `reorderJoins` takes an inner-join chain apart into relations and edges and
 rebuilds it in the cheapest order, hanging each ON conjunct on the first join
@@ -2781,7 +2781,7 @@ comes back on the stage DAG with the first arm's columns NULL on a row the
 second arm pads (and dropped when every build is shuffled) — identical at base,
 the logical plan right; pinned per arm in the gate, filed `distributed`.
 
-### 8l. A block's name belongs to the block, and a minted slot is its own name (2026-09-24, arc JP: #1302, #1299)
+### 8l. A block's name belongs to the block, and a minted slot is its own name (2026-09-24: #1302, #1299)
 
 The earlier implementation made one key rule for bounded and unbounded LATERAL bodies and read
 the key back by NAME wherever the body already published one. The measurement
@@ -2858,7 +2858,7 @@ schema check is one of the routed shapes and answers.
 
 ## §9 A derived block publishes its VISIBLE list, and a qualified star reads it
 
-Added 2026-09-13 by arc O2 (#1077, #991, #1020).
+Added 2026-09-13 (#1077, #991, #1020).
 
 §7 made a derived block a relation the DAG can publish. §9 says what that
 relation IS on every path — its VISIBLE projection, under the names the block
@@ -3016,7 +3016,7 @@ relation by POSITION, is untouched and right. Closing it means the block's
 published list travelling by position, `ProjectExprSpec.SourceSlot` one
 relation out, and it is recorded in ADR-0012 until it does.
 
-*(2026-09-23, arc LT: superseded by ADR-0021 §1s — the bound is applied per
+*(2026-09-23: superseded by ADR-0021 §1s — the bound is applied per
 outer row, `Node.LateralBoundNotPerRow` and the qualified star's decline on it
 are deleted, and the two `qstar` refusals assert PostgreSQL's rows.)*
 
@@ -3081,7 +3081,7 @@ still `42703`. `server.TestPolicyMaskingIsPlanTimeOnEveryDoor`'s three
 
 ### Not settled
 
-CLOSED 2026-09-13 by arc O1 (§9): the star's column ORDER and its qualified
+CLOSED 2026-09-13 (§9): the star's column ORDER and its qualified
 side were the PLAN's, from THREE producers of one class — `reorderJoins`
 swapping an ordinary inner join's sides, `costBasedJoinReorder` rebuilding a
 longer chain, and `markCoPathingSelfJoinBuilds` deciding
@@ -3140,7 +3140,7 @@ they may resolve a rename owned by the current unary scope, not another arm's.
 
 ## §9 A star over a join is the FROM clause's arms, in written order
 
-Added 2026-09-13 by arc O1 (#997, #1012, #993).
+Added 2026-09-13 (#997, #1012, #993).
 
 §2 gave a key two names; §6 generalized it to every consumer; §7 gave the
 consumer with no name of its own — a star — a relation to read. §9 is the same
@@ -3207,7 +3207,7 @@ before this arc, for a statement PostgreSQL answers.
 **A STAR ITEM IS A (RESOLVE, PUBLISH) PAIR, and that is the invariant.** §8j
 generalizes exactly this pair to the window key, the sort key, the lifted
 predicate column and the join-arm reference, whose resolve half names an
-OCCURRENCE (SETTLED 2026-09-18, arc WK). The
+OCCURRENCE (SETTLED 2026-09-18). The
 expanded list carries NAMES — `(FROM-clause relation, column name)` — resolved
 later against whatever tree the optimizer ends up with, not positions in the
 step-1 tree and not stable column handles. Measured (earlier measurement), the pair
@@ -3226,7 +3226,7 @@ and emits `count(*)`, so an item spelled `s.count` bound nothing and read NULL
 under the STRING default. **CLOSED by carrying the pair**: a star item is a
 `StarColumn{Resolve, Publish}` — it references the producer's spelling and
 publishes PostgreSQL's name — which is the same seam a QUALIFIED star uses
-(#1077, arc O2), so one model serves both spellings. An unaliased aggregate,
+(#1077), so one model serves both spellings. An unaliased aggregate,
 expression, literal or CAST in an arm now answers PostgreSQL's value under
 PostgreSQL's name and OID on all five arms and on the wire.
 
@@ -3247,7 +3247,7 @@ expansion is never returned:
 A SET OPERATION is no longer one of them: it publishes its leftmost arm's list
 and its own stage emits exactly that list, so once the arm is named by the
 query (§8i item 1) the expansion's reference is an address on every arm
-(#1102, arc R2).
+(#1102).
 
 A block's ROOT is not one of them. `(SELECT … ORDER BY … LIMIT 2) a`,
 `(SELECT DISTINCT …) a` and a `GROUP BY` block all publish their own
@@ -3270,9 +3270,9 @@ the shapes #991 had just repaired — the two rules compose or neither holds, an
 The design, with every measurement, is
 `docs/internals/bare-star-over-a-join-arms.md`.
 
-### §9a. A star publishes a name both arms carry, and a name one arm carries TWICE is not addressable (2026-09-18, arc SR: #1177, #1094, #1079)
+### §9a. A star publishes a name both arms carry, and a name one arm carries TWICE is not addressable (2026-09-18: #1177, #1094, #1079)
 
-§9 above gives a bare star over a join its arms' own lists and §9 (arc O2)
+§9 above gives a bare star over a join its arms' own lists and §9
 gives a derived block its visible list. Three of the boundaries those two arcs
 drew were drawn on the wrong property, and each is one sentence of the same
 rule: **a name two RELATIONS publish is publishable twice; a name ONE relation
