@@ -59,11 +59,11 @@ type preparedRegexp struct {
 // abutted the previous one — so when Go's next match does not start at e,
 // the preferred match at e was empty exactly when the pattern can match the
 // empty string at e. Its groups are empty or unset, which expand alike.
-func (p *preparedRegexp) withAbuttingEmpty(src string, matches [][]int) [][]int {
+func withAbuttingEmpty(emptyAt func(string, int) bool, src string, matches [][]int) [][]int {
 	var out [][]int // nil until the first insertion
 	for i, m := range matches {
 		e := m[1]
-		insert := m[0] != e && (i+1 == len(matches) || matches[i+1][0] != e) && p.emptyAt(src, e)
+		insert := m[0] != e && (i+1 == len(matches) || matches[i+1][0] != e) && emptyAt(src, e)
 		if insert && out == nil {
 			out = append(make([][]int, 0, len(matches)+1), matches[:i]...)
 		}
@@ -85,14 +85,10 @@ func (p *preparedRegexp) withAbuttingEmpty(src string, matches [][]int) [][]int 
 	return out
 }
 
-// emptyMatcher is emptyAt for a Go pattern: whether it matches the empty
-// string at an offset, given the zero-width assertions true there.
-func emptyMatcher(pattern string) func(string, int) bool {
-	re, err := syntax.Parse(pattern, syntax.Perl)
-	if err != nil {
-		return nil
-	}
-	re = re.Simplify()
+// emptyMatcherOf is emptyAt for a parsed, simplified Go pattern: whether it
+// matches the empty string at an offset, given the zero-width assertions
+// true there.
+func emptyMatcherOf(re *syntax.Regexp) func(string, int) bool {
 	return func(src string, e int) bool {
 		return canMatchEmpty(re, src, e)
 	}
@@ -207,17 +203,14 @@ func parseSQLReplacement(repl string) []replSeg {
 	return segs
 }
 
-// prepareRegexpReplace builds the prepared state for literal pattern and
-// replacement strings.
-func prepareRegexpReplace(pattern, repl string) *preparedRegexp {
-	re, err := regexp.Compile(pattern)
-	if err != nil {
-		return &preparedRegexp{}
-	}
+// preparedFrom is the prepared state over a pattern translateAndCompile
+// compiled, with no replacement template yet (withTemplate adds it).
+func preparedFrom(rx *sqlRegex, global bool) *preparedRegexp {
 	return &preparedRegexp{
-		re:       re,
-		segs:     parseSQLReplacement(repl),
-		anchored: anchoredAtTextStart(pattern),
+		re:       rx.re,
+		anchored: rx.anchored,
+		emptyAt:  rx.emptyAt,
+		global:   global,
 		ok:       true,
 	}
 }
@@ -296,7 +289,7 @@ func (p *preparedRegexp) replaceAll(src string) string {
 	}
 	matches := p.re.FindAllStringSubmatchIndex(src, -1)
 	if p.emptyAt != nil {
-		matches = p.withAbuttingEmpty(src, matches)
+		matches = withAbuttingEmpty(p.emptyAt, src, matches)
 	}
 	if len(matches) == 0 {
 		return src

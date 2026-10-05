@@ -246,3 +246,19 @@ func BenchmarkRegexpReplacePrepared(b *testing.B) {
 		_ = prep.replaceAll(in)
 	}
 }
+
+// prepareRegexpReplace is the prepared state over an RE2 pattern compiled
+// as written — the shape these kernel tests exercise; SQL patterns reach
+// preparedFrom only through translateAndCompile.
+func prepareRegexpReplace(pattern, repl string) *preparedRegexp {
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return &preparedRegexp{}
+	}
+	return &preparedRegexp{
+		re:       re,
+		segs:     parseSQLReplacement(repl),
+		anchored: anchoredAtTextStart(pattern),
+		ok:       true,
+	}
+}
