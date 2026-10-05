@@ -10,31 +10,32 @@ import (
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
-	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
-// A VOLATILE CTE IS EVALUATED ONCE PER STATEMENT, AND EVERY REFERENCE READS
-// THAT ONE RESULT (#1531, ADR-0021 §2d).
+// A VOLATILE CTE READ MORE THAN ONCE IS EVALUATED ONCE PER STATEMENT, AND
+// EVERY REFERENCE READS THAT ONE EVALUATION, ON DEMAND (#1531, ADR-0021 §2d).
 //
-// PostgreSQL never inlines a CTE whose body contains a volatile function, and
-// it materializes any CTE referenced more than once, so in
+// PostgreSQL materializes a CTE referenced more than once into ONE tuplestore
+// that its CTE Scans fill on demand, so in
 // `WITH s AS (SELECT sum(random()) AS r FROM t) … (SELECT r FROM s) <> (SELECT r FROM s)`
 // both references read the same r and the comparison is false. This engine
 // inlines a CTE's body at every reference, and `materializeCTEs` caches a ROOT
-// CTE only when the logical tree tags it — so a CTE read only from an
-// expression subquery's TEXT, a CTE declared on a nested block, and a CTE read
-// by the arms of a set operation at the statement root (which carries no WITH
-// list) were each evaluated once PER REFERENCE: two draws of random(), two
-// samples of a TABLESAMPLE, two uuid() columns.
+// CTE only when the logical tree tags it — so a CTE read from an expression
+// subquery's TEXT, a CTE declared on a nested block, and a CTE read by the
+// arms of a set operation at the statement root were each evaluated once PER
+// REFERENCE: two draws of random(), two samples of a TABLESAMPLE.
 //
 // The rule is one decision at one place: a reference whose definition is
-// volatile (logical.Node.OnceCTE, set by the builder from
-// plansql.CTEDef.EvaluatedOnce) is served from a cache keyed by the
-// definition's IDENTITY — shared by every copy of the WITH item, whichever
-// scope carried it there — and the first reference to arrive evaluates the
-// body into a spill-backed collector that every reference replays. A
-// deterministic body is untouched: it is inlined (and pushed into) exactly as
-// before.
+// volatile AND read more than once in the statement (logical.Node.OnceCTE,
+// set by the builder from plansql.CTEDef.EvaluatedOnce) reads a SHARED SPOOL
+// keyed by the definition's IDENTITY — shared by every copy of the WITH item,
+// whichever scope carried it there. The first reference to be BUILT builds
+// the body's pipeline; the body RUNS only when some reader first asks for a
+// batch, and advances one batch at a time only when a reader asks for one the
+// spool does not hold yet (exec.SharedSpool). A reader that stops early
+// (LIMIT, EXISTS) therefore never forces rows nobody reads, nor an error on
+// one. A CTE read ONCE, and a deterministic body, are untouched: they are
+// planned exactly as before.
 //
 // The cache exists only on a statement planned by Plan — the single-process
 // pipeline, its subquery planners (forSubquery shares the pointer), the
@@ -48,14 +49,15 @@ type onceCTECache struct {
 }
 
 type onceCTEEntry struct {
-	done chan struct{} // closed when mat/err are final
-	mat  *cteMaterialized
-	err  error
+	built chan struct{} // closed when spool/err are final
+	spool *exec.SharedSpool
+	err   error
 }
 
-// serveOnceCTE answers a reference to a volatile CTE from its one
-// evaluation, evaluating it if this is the first reference to arrive.
-// handled is false when the reference is not one this rule serves.
+// serveOnceCTE answers a reference to a volatile CTE read more than once with
+// a reader of the statement's one spool, building the spool's body if this is
+// the first reference built. handled is false when the reference is not one
+// this rule serves.
 func (p *Planner) serveOnceCTE(ctx context.Context, node *logical.Node) (exec.Source, bool, error) {
 	cache := p.onceCTEs
 	def := node.OnceCTE
@@ -69,18 +71,31 @@ func (p *Planner) serveOnceCTE(ctx context.Context, node *logical.Node) (exec.So
 	}
 	e, ok := cache.entries[id]
 	if !ok {
-		e = &onceCTEEntry{done: make(chan struct{})}
+		e = &onceCTEEntry{built: make(chan struct{})}
 		cache.entries[id] = e
 	}
 	cache.mu.Unlock()
 	if !ok {
-		e.mat, e.err = p.evaluateOnceCTE(ctx, def, node.OnceCTEScope)
-		close(e.done)
+		// Built outside the lock: the body may read another such CTE, whose
+		// reference comes back here.
+		source, ops, err := p.buildOnceCTEBody(ctx, def, node.OnceCTEScope)
+		if err == nil {
+			spool := &exec.SharedSpool{Spill: p.getSpillManager(), Source: source, Ops: ops}
+			// A result that is only ever replayed in order has no merge to
+			// keep cheap: drain in runs of a quarter of the budget (the
+			// recursive closure's reason, recursive_cte_iteration.go).
+			if sm := spool.Spill; sm != nil {
+				spool.RunBytes = sm.SpillBudget() / 4
+			}
+			e.spool = spool
+		}
+		e.err = err
+		close(e.built)
 	} else {
-		// Another reference — possibly on another pipeline goroutine, through
-		// a subquery planner — is evaluating it: wait for that one result.
+		// Another reference — possibly on another goroutine, through a
+		// subquery planner — is building it: wait for that one body.
 		select {
-		case <-e.done:
+		case <-e.built:
 		case <-ctx.Done():
 			return nil, true, ctx.Err()
 		}
@@ -88,52 +103,68 @@ func (p *Planner) serveOnceCTE(ctx context.Context, node *logical.Node) (exec.So
 	if e.err != nil {
 		return nil, true, e.err
 	}
-	return nestedCTESource(e.mat), true, nil
+	return e.spool.NewReader(), true, nil
 }
 
-// evaluateOnceCTE runs a volatile CTE's body into a spill-backed collector:
-// the same columnar materialization `materializeCTEs` gives a root CTE,
-// planned with the WITH items in scope inside the body (the ones before it).
-func (p *Planner) evaluateOnceCTE(ctx context.Context, def *plansql.CTEDef, scope []plansql.CTEDef) (*cteMaterialized, error) {
+// buildOnceCTEBody plans a volatile CTE's body — planned, not run — with the
+// WITH items in scope inside the body (the ones before it).
+func (p *Planner) buildOnceCTEBody(ctx context.Context, def *plansql.CTEDef, scope []plansql.CTEDef) (exec.Source, []exec.UnaryOperator, error) {
 	// The body is a CTE's, not a scalar subquery's answer, whichever planner
 	// reached it (ExecuteSubquerySchema marks its own body only).
 	saved := p.scalarBody
 	p.scalarBody = false
 	defer func() { p.scalarBody = saved }()
-	body, _ := def.BodySelect()
-	coll, schema, err := p.materializeCTEColumnarRuns(ctx, def.SQL, body, scope, true)
+	var source exec.Source
+	var ops []exec.UnaryOperator
+	var err error
+	if body, _ := def.BodySelect(); body != nil {
+		source, ops, _, err = p.buildSubqueryPipelineScopedFor(ctx, body, scope)
+	} else {
+		source, ops, _, err = p.buildSubqueryPipelineScoped(ctx, def.SQL, scope)
+	}
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	if schema == nil {
-		coll.Release()
-		return nil, sqlerr.New("0A000",
-			"the WITH query %q produced no column list, so there is nothing to read it as", def.Name)
-	}
-	return &cteMaterialized{schema: schema, coll: coll}, nil
+	return source, ops, nil
 }
 
-// releaseOnceCTEs frees every collector the statement's volatile CTEs were
-// evaluated into (tracker charge + spill scratch). Idempotent.
+// release ends every spool of the statement: a body still running is
+// cancelled, and the runs and the tracker charge are freed. Idempotent.
 func (c *onceCTECache) release() {
 	if c == nil {
 		return
 	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	for _, e := range c.entries {
+	entries := c.entries
+	c.entries = nil
+	c.mu.Unlock()
+	for _, e := range entries {
 		select {
-		case <-e.done:
-			if e.mat != nil && e.mat.coll != nil {
-				e.mat.coll.Release()
+		case <-e.built:
+			if e.spool != nil {
+				e.spool.Close()
 			}
 		default:
-			// Still evaluating: Plan's cleanup runs after the pipeline, so a
-			// pending entry belongs to a goroutine that failed out; its
-			// collector is released by its own error path.
+			// Still being built: Plan's cleanup runs after the pipeline, so a
+			// pending entry belongs to a goroutine that failed out mid-build.
 		}
 	}
-	c.entries = nil
+}
+
+// spools lists the statement's spools (gates).
+func (c *onceCTECache) spools() []*exec.SharedSpool {
+	if c == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var out []*exec.SharedSpool
+	for _, e := range c.entries {
+		if e.spool != nil {
+			out = append(out, e.spool)
+		}
+	}
+	return out
 }
 
 // onceCTENames lists, in plan order, the volatile WITH items declared by the

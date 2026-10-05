@@ -73,6 +73,12 @@ func (p *Planner) materializeCTEs(ctx context.Context, root *logical.Node) {
 		if refCounts[cte.Name] < 2 {
 			continue
 		}
+		// A volatile CTE read more than once is the shared spool's, filled on
+		// demand (once_cte.go): evaluating it here, whole and before any
+		// reader asks, raises what no reader reaches (#1531).
+		if cte.EvaluatedOnce() {
+			continue
+		}
 		// EARLIER CTEs only — see buildSubqueryPipelineScoped (#771).
 		//
 		// Materialize columnar into a tracker-charged, spill-backed
@@ -103,17 +109,6 @@ func (p *Planner) materializeCTEs(ctx context.Context, root *logical.Node) {
 // normally via PhysicalPlan.Cleanup through releaseCTECache.
 func (p *Planner) materializeCTEColumnar(ctx context.Context, sql string,
 	body *plansql.SelectInfo, scope []plansql.CTEDef) (*exec.SpillableBatchCollector, []parquet.Column, error) {
-	return p.materializeCTEColumnarRuns(ctx, sql, body, scope, false)
-}
-
-// materializeCTEColumnarRuns is materializeCTEColumnar, and with smallRuns the
-// collector drains in runs of a quarter of the budget rather than the sort
-// floor — the recursive closure's reason (recursive_cte_iteration.go): a
-// result that is only ever replayed in order has no merge to keep cheap, and
-// held in forced tracking up to the floor under a small budget it refuses
-// every operator that reads it.
-func (p *Planner) materializeCTEColumnarRuns(ctx context.Context, sql string,
-	body *plansql.SelectInfo, scope []plansql.CTEDef, smallRuns bool) (*exec.SpillableBatchCollector, []parquet.Column, error) {
 	var source exec.Source
 	var ops []exec.UnaryOperator
 	var err error
@@ -126,9 +121,6 @@ func (p *Planner) materializeCTEColumnarRuns(ctx context.Context, sql string,
 		return nil, nil, err
 	}
 	coll := &exec.SpillableBatchCollector{Spill: p.getSpillManager()}
-	if sm := coll.Spill; smallRuns && sm != nil {
-		coll.RunBytes = sm.SpillBudget() / 4
-	}
 	sink := &cteMaterializingSink{coll: coll}
 	pipeline := &exec.Pipeline{Source: source, Ops: ops, Sink: sink}
 	if err := pipeline.Run(ctx); err != nil {
@@ -178,8 +170,9 @@ func (p *Planner) releaseCTECache() {
 		}
 	}
 	p.cteCache = nil
-	// A volatile CTE's one evaluation has the statement's lifetime too. The
-	// holder itself stays: subquery planners already copied its pointer.
+	// A volatile CTE's shared evaluation has the statement's lifetime too: a
+	// body still running is cancelled. The holder itself stays: subquery
+	// planners already copied its pointer.
 	p.onceCTEs.release()
 	// The per-block recursive materializations are a SECOND set of collectors
 	// with the same lifetime: a nested entry is moved OUT of cteCache when it
@@ -200,9 +193,9 @@ func (p *Planner) releaseCTECache() {
 // cteCacheHasCollectors reports whether any cached CTE holds spill-backed
 // state that requires an explicit release at query end.
 func (p *Planner) cteCacheHasCollectors() bool {
-	// A volatile CTE read only from an expression subquery is evaluated when
-	// that subquery runs, after Plan returns — so the cleanup is owed to every
-	// statement that could evaluate one, not only to one that already has.
+	// A shared evaluation is opened by its first reader, which may be an
+	// expression subquery that runs after Plan returns — so the cleanup is
+	// owed to every statement that could open one.
 	if p.onceCTEs != nil {
 		return true
 	}

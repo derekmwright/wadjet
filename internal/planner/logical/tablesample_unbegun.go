@@ -46,12 +46,16 @@ func dropUnbegunSamples(n *Node) {
 
 // A reference to a volatile CTE inside such a subtree is a reference
 // PostgreSQL never begins either: its CTE Scan is below the one-time filter,
-// so the body is not evaluated for it. The reference loses its claim on the
-// statement's one evaluation (ADR-0021 §2d) and is expanded in place, where
-// the walk below takes the samplers off its body too — evaluating the body
-// for a reader no answer depends on would raise what PostgreSQL never
-// checks (`WITH c AS (… TABLESAMPLE BERNOULLI (101)) SELECT count(*) FROM c
-// WHERE false` is 0 there, never 2202H).
+// so the body is not evaluated for it. The shared evaluation is filled on
+// demand (ADR-0021 §2d), but that does not make this case its consequence:
+// this engine has no one-time filter, so the subtree still PULLS its reader
+// and the reader opens the body. The reference therefore loses its claim on
+// the shared evaluation and is expanded in place, where the walk below takes
+// the samplers off its body too — evaluating the body for a reader no answer
+// depends on would raise what PostgreSQL never checks (`WITH c AS (…
+// TABLESAMPLE BERNOULLI (101)) SELECT count(*) FROM c a, c b WHERE false` is
+// 0 there, never 2202H; measured with this line removed: 2202H on E6b, E6c
+// and P2_ts101_comma_where_false, cm_author/r3).
 func clearSamples(n *Node) {
 	if n == nil {
 		return
