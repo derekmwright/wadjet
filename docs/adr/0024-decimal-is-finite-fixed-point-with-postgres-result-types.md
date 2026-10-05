@@ -1220,27 +1220,30 @@ type, its (p,s) and its mark — is computed by ONE function,
 `physical.setOpResultColumn`, from every arm's declared column and what the
 arm's select item is; the stage planner (`SetOpTargetType`), the
 single-process path (`unifySetOpSchemas`) and the declared output
-(`setOpDeclaredOutputSchema`) call it and decide nothing of their own. The
-mark follows PostgreSQL wherever one stored scale per column can express
-it. PostgreSQL types a set-operation column over numeric arms whose type
+(`setOpDeclaredOutputSchema`) call it for that common result. Input
+classification, unresolved-schema handling, wire typmods and CREATE TABLE AS
+storage declarations remain separate decisions. The mark follows PostgreSQL
+wherever one stored scale per column can express it. PostgreSQL types a set-operation column over numeric arms whose type
 modifiers differ as plain numeric (a numeric(10,2) arm beside a NULL arm
 included; measured over 670 CREATE TABLE AS set operations and the arm kinds
 below) and prints every value at its own scale. Here a marked column prints
 its values trimmed and an unmarked one at its stored scale, so each arm
 contributes MARKED, NEUTRAL or a VETO, and the result is marked when one arm
 is marked and none vetoes — a fold, so arm order and nesting give one answer
-(a nested set operation reports its own fold to the operation above):
+(a nested set operation reports its own fold to the operation above,
+including through a derived table, CTE, ORDER BY / LIMIT, a forwarding SELECT
+list or a rename; a computed wrapper such as `v + 0` is neutral):
 
 | arm (select item) | contributes | PostgreSQL prints the arm's values | marked result here |
 |---|---|---|---|
 | a column created from an unconstrained numeric (a bare copy) | MARKED | `1`, `1.5` | `1`, `1.5` |
 | an untyped NULL; a typed NULL (`CAST(NULL AS NUMERIC(10,2))`) | neutral | NULL | NULL |
-| a NULL cast to plain `NUMERIC` | neutral, no type of its own | NULL | NULL |
+| a NULL cast to plain `NUMERIC` | neutral; contributes NUMERIC to the common type, no scale | NULL | NULL |
 | a quoted literal without trailing fraction zeros (`'1.5'`) | neutral, no type of its own | `1.5` | `1.5` |
 | an integer (literal, column, expression); a DECIMAL at scale 0 | neutral | `2` | `2` |
 | a numeric literal without trailing fraction zeros (`2.5`) | neutral | `2.5` | `2.5` |
 | an expression PostgreSQL types plain numeric (`v + 0`, a function, an aggregate, `CAST(x AS NUMERIC)`) | neutral | its own scale: `1`, `1.5`; `n + 0` over numeric(10,2) `2.50` | `1`, `1.5`; `2.5` (numeric-decimal r24) |
-| a NUMERIC(p,s) column or `CAST(x AS NUMERIC(p,s))`, s > 0 | VETO | `1.00`, `2.50` | — (unmarked) |
+| a NUMERIC(p,s) column or non-NULL `CAST(x AS NUMERIC(p,s))`, s > 0 | VETO | `1.00`, `2.50` | — (unmarked) |
 | a literal spelled with trailing fraction zeros (`2.50`, `'1.50'`) | VETO | `2.50` | — (unmarked) |
 
 An unmarked mixed result prints its one stored scale where PostgreSQL prints
@@ -1250,16 +1253,23 @@ For the trailing-zero literal the choice was measured: marked, `2.50` would
 print `2.5`; unmarked it prints `2.5000000000`; neither is PostgreSQL's. Over
 the set-operation matrix (`coordinator.TestArcUNSetOperationMatrix`) the
 unmarked reading leaves three text reads that the base printed as
-PostgreSQL does (`2.50 EXCEPT …`) at the stored scale and changes no count;
-the marked one trims the same three and also changes three `LIKE '%0'`
-counts.
+PostgreSQL does (`2.50 EXCEPT …`) at the stored scale and changes no
+count that the base answered as PostgreSQL does; the marked one trims the
+same three and also changes three such `LIKE '%0'` counts. The stored-scale
+class includes 52 text reads and 74 counts, not only display differences.
+Of those counts, 28 differ from base 33e2fb92 as well as PostgreSQL: for
+`SELECT count(*) FROM (SELECT v FROM un_x UNION ALL SELECT 2.50 AS v FROM
+un_u) s WHERE CAST(v AS TEXT) LIKE '%0'`, the result is 7, PostgreSQL 3 and
+that base 8 (recorded candidate, unchanged here).
 Without a marked arm the result is unmarked, as before (`n * 1 UNION ALL n *
-2` prints `2.50`, `5.00`, as PostgreSQL does). A NULL cast to plain NUMERIC,
-which the expression typing declares double precision (a computed value's
-declaration, #1541's open cells), takes the other arms' type like an untyped
-NULL, so `v UNION ALL CAST(NULL AS NUMERIC)` is the marked DECIMAL and
-prints `0.0000000001` where it printed `1e-10`. On the DAG each arm whose
-declaration or mark the result does not share is coerced to the result's
+2` prints `2.50`, `5.00`, as PostgreSQL does). A typed NULL contributes
+its type but no scale or veto. In the common-type inputs a numeric NULL is
+NUMERIC even when expression typing declares it double precision, so
+`CAST(NULL AS NUMERIC) UNION ALL SELECT 2` creates a numeric column and a
+later INSERT of 1.255 stores 1.255. Numeric NULL items are materialized at
+the resolved result layout; `v UNION ALL CAST(NULL AS NUMERIC)` remains
+marked DECIMAL and prints `0.0000000001` rather than `1e-10`. On the DAG each
+arm whose declaration or mark the result does not share is coerced to the result's
 before it writes (`exec.DecimalCoerce`), an untyped arm included, as the
 single process unifies the arms' schemas. The writer of an exchange file
 refuses a batch whose column carries another mark than the file's
@@ -1277,14 +1287,18 @@ what it measures). Some arms refuse a shape, and the same arms refused it at
 the base too: `CAST(v AS TEXT)` with `ORDER BY 1` over a UNION on the six DAG arms
 ("sort: key column … does not exist", UN-F9) and over an INTERSECT / EXCEPT
 on the asynchronous door (#656); `sum` over a quoted literal in the FIRST
-arm and a scalar-subquery arm are refused on every arm. The same dropped
-projection reaches two doors: without the ORDER BY the DAG answers
-`CAST(v AS TEXT)` over a UNION (distinct) with the deduplicated numeric
-column, which the HTTP and gRPC coordinator doors print at its stored scale
-(`1.0000000000`) where the PostgreSQL, asynchronous and embedded doors print
-`1` — for an all-marked UNION at the base, and beside a NULL, integer or
-expression arm now that such a result is marked (numeric-decimal r24)
+arm and the matrix's scalar-subquery arm `(SELECT max(v) FROM un_x)`
+are refused on every arm; `(SELECT 2.5)` answers. Without ORDER BY the DAG
+still omits the projection in `CAST(v AS TEXT) AS x` over UNION (distinct),
+publishing the numeric column named `v` (UN-F9). Its batch's own mark is
+preserved when the declared projection has a different type, so pgwire,
+HTTP and gRPC coordinator doors all box it through `Vector.GetValueOf` and
+print `1`. Previously HTTP and gRPC printed `1.0000000000`; that door
+difference did not exist at base 33e2fb92, whose values were rounded
 (`coordinator.TestArcUNSetOperationMatrix` over 1,944 statements × 11 arms,
+`coordinator.TestArcUNSetOperationForwardingWrappers`,
+`wadjet.TestArcUNTypedNullSetOperationWrite`,
+`server.TestArcUNSetOperationTextEveryDoor`,
 `physical.TestSetOpMarkTable`,
 `physical.TestSetOpResultColumnOneAnswerOnBothCallSites`,
 `coordinator.TestArcUNExchangeKeepsThePrinterEveryArm`,
