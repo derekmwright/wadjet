@@ -960,11 +960,10 @@ func setOpRefDecl(decls ColDecls, resolved string, pr logical.Projection) (SetOp
 			continue
 		}
 		d := declFromKey(decls, key)
-		ct := SetOpColType{Typ: d.ID, Known: true, Fields: declTypeParts(d).Fields, ElementType: declTypeParts(d).ElementType}
+		ct := SetOpColType{Typ: d.ID, Known: true, Fields: declTypeParts(d).Fields, ElementType: declTypeParts(d).ElementType, fold: decls.setOpRoles[key]}
 		if d.ID == parquet.TypeDecimal && d.DecKnown && d.Precision > 0 {
 			// A bare reference copies its source column's mark too (ADR-0024
-			// §10): the set operation's result keeps it only when every arm
-			// carries it.
+			// §10), together with the role of any inner set operation.
 			ct.Dec = logical.DecimalMeta{Precision: d.Precision, Scale: d.Scale,
 				Unconstrained: decls.Dec[key].Unconstrained}
 			ct.DecKnown = true

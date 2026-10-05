@@ -1095,8 +1095,10 @@ func strictIntArithColsThroughRenames(n *logical.Node) map[string]bool {
 // so every lookup missed, the projection kept its STRING default, and a ROW
 // field path was declared STRING whatever its real type (#568).
 type ColDecls struct {
-	Types  map[string]parquet.TypeID
-	Fields map[string][]parquet.Column
+	// setOpRoles preserves a forwarded result's marked, neutral or veto role.
+	setOpRoles map[string]setOpMarkRole
+	Types      map[string]parquet.TypeID
+	Fields     map[string][]parquet.Column
 	// Elems carries the whole declared column of the ARRAY and MAP entries in
 	// types — the element a bare TypeID cannot say (arc CW). Without it a
 	// column reference to a container declined, and a derived table, a CTE, a

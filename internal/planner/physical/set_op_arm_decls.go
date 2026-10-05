@@ -168,16 +168,25 @@ func joinArmDecls(left, right ColDecls) ColDecls {
 	}
 	types := make(map[string]parquet.TypeID, len(left.Types)+len(right.Types))
 	dec := make(map[string]logical.DecimalMeta, len(left.Dec)+len(right.Dec))
+	roles := make(map[string]setOpMarkRole, len(left.setOpRoles)+len(right.setOpRoles))
 	for c, t := range left.Types {
 		types[c] = t
+		roles[c] = left.setOpRoles[c]
 	}
 	for c, m := range left.Dec {
 		dec[c] = m
 	}
 	for c, t := range right.Types {
+		if _, dup := types[c]; dup && roles[c] != right.setOpRoles[c] {
+			delete(types, c)
+			delete(dec, c)
+			delete(roles, c)
+			continue
+		}
 		if prev, dup := types[c]; dup && prev != t {
 			delete(types, c)
 			delete(dec, c)
+			delete(roles, c)
 			continue
 		}
 		if m, ok := right.Dec[c]; ok {
@@ -187,6 +196,7 @@ func joinArmDecls(left, right ColDecls) ColDecls {
 				// nothing; the qualified keys carry both.
 				delete(types, c)
 				delete(dec, c)
+				delete(roles, c)
 				continue
 			}
 			dec[c] = m
@@ -195,9 +205,11 @@ func joinArmDecls(left, right ColDecls) ColDecls {
 			// both carry as DECIMAL. Not one column either.
 			delete(types, c)
 			delete(dec, c)
+			delete(roles, c)
 			continue
 		}
 		types[c] = t
+		roles[c] = right.setOpRoles[c]
 	}
 	if len(dec) == 0 {
 		dec = nil
@@ -209,7 +221,7 @@ func joinArmDecls(left, right ColDecls) ColDecls {
 	// a plan-time refusal naming the column to a task error naming a column
 	// that does not exist. Leaving the arm untyped is what routes it to the
 	// refusal, which is the better of the two loud answers.
-	return ColDecls{Types: types, Dec: dec}
+	return ColDecls{Types: types, Dec: dec, setOpRoles: roles}
 }
 
 // setOpNodeDecls describes a nested set operation's output: its own result
@@ -223,6 +235,7 @@ func setOpNodeDecls(n *logical.Node) ColDecls {
 	}
 	types := make(map[string]parquet.TypeID, len(names))
 	var dec map[string]logical.DecimalMeta
+	roles := make(map[string]setOpMarkRole, len(names))
 	for i, name := range names {
 		ct := inferred[i]
 		if !ct.Known {
@@ -230,6 +243,7 @@ func setOpNodeDecls(n *logical.Node) ColDecls {
 		}
 		lc := strings.ToLower(name)
 		types[lc] = ct.Typ
+		roles[lc] = ct.fold
 		if ct.Typ == parquet.TypeDecimal && ct.DecKnown && ct.Dec.Precision > 0 {
 			if dec == nil {
 				dec = make(map[string]logical.DecimalMeta, len(names))
@@ -240,7 +254,7 @@ func setOpNodeDecls(n *logical.Node) ColDecls {
 	if len(types) == 0 {
 		return ColDecls{}
 	}
-	return ColDecls{Types: types, Dec: dec}
+	return ColDecls{Types: types, Dec: dec, setOpRoles: roles}
 }
 
 // projectArmDecls is what a Project EMITS, which is what a derived-table arm's
@@ -255,18 +269,20 @@ func projectArmDecls(n *logical.Node, in ColDecls, quals []string) ColDecls {
 	strictInt := strictIntArithCols(n.Children[0])
 	types := make(map[string]parquet.TypeID, len(n.Projections))
 	var dec map[string]logical.DecimalMeta
+	roles := make(map[string]setOpMarkRole, len(n.Projections))
 	// A projected CONTAINER's element / fields, by output name: the input's
 	// shapes below describe the projection's INPUT, so a container the
 	// projection COMPUTES (`ARRAY[2] AS pa`) had no element here, and an arm
 	// forwarding it declared a bare ARRAY the stage could not allocate
 	// (round 4).
 	outShapes := map[string]parquet.Column{}
-	put := func(name string, d expr.DeclType) {
+	put := func(name string, d expr.DeclType, role setOpMarkRole) {
 		lc := strings.ToLower(strings.TrimSpace(name))
 		if lc == "" {
 			return
 		}
 		types[lc] = d.ID
+		roles[lc] = role
 		if col, ok := declColumn(d); ok && batch.IsContainerType(col.Type) {
 			outShapes[lc] = col
 		}
@@ -274,7 +290,7 @@ func projectArmDecls(n *logical.Node, in ColDecls, quals []string) ColDecls {
 			if dec == nil {
 				dec = make(map[string]logical.DecimalMeta, len(n.Projections))
 			}
-			dec[lc] = logical.DecimalMeta{Precision: d.Precision, Scale: d.Scale}
+			dec[lc] = logical.DecimalMeta{Precision: d.Precision, Scale: d.Scale, Unconstrained: role == setOpMarkMarked}
 		}
 	}
 	// quals is the SCOPE this Project's output answers to — a derived table's
@@ -315,9 +331,22 @@ func projectArmDecls(n *logical.Node, in ColDecls, quals []string) ColDecls {
 			d, ok = projectionArmDecl(proj, in, strictInt)
 		}
 		if ok {
-			put(name, d)
+			ct := SetOpColType{Typ: d.ID, Known: true, DecKnown: d.DecKnown,
+				Dec: logical.DecimalMeta{Precision: d.Precision, Scale: d.Scale}}
+			fact := setOpArmFact{role: setOpMarkNeutral}
+			if proj.ASTExpr != nil {
+				fact = setOpItemFact(proj.ASTExpr)
+			}
+			if _, bare := bareColRefOf(proj.ASTExpr); bare || (proj.ASTExpr == nil && proj.Column != "") {
+				if ref, found := setOpRefDecl(in, proj.Column, proj); found {
+					ct = ref
+					fact.role = setOpMarkByDecl
+				}
+			}
+			role := setOpArmMarkRole(ct, fact)
+			put(name, d, role)
 			for _, q := range quals {
-				put(q+"."+strings.ToLower(strings.TrimSpace(name)), d)
+				put(q+"."+strings.ToLower(strings.TrimSpace(name)), d, role)
 			}
 		}
 	}
@@ -339,7 +368,7 @@ func projectArmDecls(n *logical.Node, in ColDecls, quals []string) ColDecls {
 		}
 		elems[k] = c
 	}
-	return ColDecls{Types: types, Fields: fields, Elems: elems, Dec: dec}
+	return ColDecls{Types: types, Fields: fields, Elems: elems, Dec: dec, setOpRoles: roles}
 }
 
 // armScopeAt adds the relation names recorded ON ONE NODE to the scope in
