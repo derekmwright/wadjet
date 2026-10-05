@@ -466,3 +466,21 @@ func TestArcCMSetOperationArmsReadTheStatementWith(t *testing.T) {
 		}
 	}
 }
+
+// PINS (catalog other#r27): a volatile CTE read ONCE is inlined (ADR-0021
+// §2d), and a correlated subquery re-runs it per outer row; a WITH declared
+// inside the correlated subquery is re-parsed per execution. PostgreSQL 17.11
+// answers 1 for both (one evaluation, kept across rescans); this engine 50 at
+// c67ebf5b and here. A pin that starts answering 1 FAILS: delete it with the
+// catalog row.
+func TestArcCMCorrelatedReaderIsEvaluatedPerOuterRow(t *testing.T) {
+	db := cmOpen(t, 0)
+	for _, q := range []string{
+		"WITH s AS (SELECT random() AS r) SELECT count(DISTINCT (SELECT r + t.id*0 FROM s)) FROM cm_big t WHERE t.id <= 50",
+		"SELECT count(DISTINCT (WITH s AS (SELECT random() AS r) SELECT r + t.id*0 FROM s)) FROM cm_big t WHERE t.id <= 50",
+	} {
+		if got := cmAnswer(t, db, q); got != "50" {
+			t.Errorf("%s\n  got %s, want the pinned 50 (PostgreSQL 17.11: 1) — if it agrees now, delete this pin and other#r27", q, got)
+		}
+	}
+}
