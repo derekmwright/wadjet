@@ -1,0 +1,203 @@
+x_gk_cast	SELECT CAST(x AS TEXT) FROM (SELECT v AS x FROM un_x GROUP BY v) q
+x_gk_cat	SELECT x || '' FROM (SELECT v AS x FROM un_x GROUP BY v) q
+x_gk_concat	SELECT concat(x, '|') FROM (SELECT v AS x FROM un_x GROUP BY v) q
+x_gk_fmt	SELECT format('%s', x) FROM (SELECT v AS x FROM un_x GROUP BY v) q
+x_gk_json	SELECT CAST(json_build_object('x', x) AS TEXT) FROM (SELECT v AS x FROM un_x GROUP BY v) q
+x_gk_eq1	SELECT COUNT(*) FROM (SELECT v AS x FROM un_x GROUP BY v) q WHERE CAST(x AS TEXT) = '1'
+x_gk_eq15	SELECT COUNT(*) FROM (SELECT v AS x FROM un_x GROUP BY v) q WHERE CAST(x AS TEXT) = '1.5'
+x_gk_eq7	SELECT COUNT(*) FROM (SELECT v AS x FROM un_x GROUP BY v) q WHERE x || '' = '7'
+x_gk_grp	SELECT CAST(x AS TEXT), COUNT(*) FROM (SELECT v AS x FROM un_x GROUP BY v) q GROUP BY CAST(x AS TEXT)
+x_gk_ord	SELECT CAST(x AS TEXT) FROM (SELECT v AS x FROM un_x GROUP BY v) q ORDER BY 1
+x_gk_lit	SELECT COUNT(*) FROM (SELECT v AS x FROM un_x GROUP BY v) q WHERE x = '1'
+x_gk2_cast	SELECT CAST(x AS TEXT) FROM (SELECT g, v AS x FROM un_x GROUP BY g, v) q
+x_gk2_cat	SELECT x || '' FROM (SELECT g, v AS x FROM un_x GROUP BY g, v) q
+x_gk2_concat	SELECT concat(x, '|') FROM (SELECT g, v AS x FROM un_x GROUP BY g, v) q
+x_gk2_fmt	SELECT format('%s', x) FROM (SELECT g, v AS x FROM un_x GROUP BY g, v) q
+x_gk2_json	SELECT CAST(json_build_object('x', x) AS TEXT) FROM (SELECT g, v AS x FROM un_x GROUP BY g, v) q
+x_gk2_eq1	SELECT COUNT(*) FROM (SELECT g, v AS x FROM un_x GROUP BY g, v) q WHERE CAST(x AS TEXT) = '1'
+x_gk2_eq15	SELECT COUNT(*) FROM (SELECT g, v AS x FROM un_x GROUP BY g, v) q WHERE CAST(x AS TEXT) = '1.5'
+x_gk2_eq7	SELECT COUNT(*) FROM (SELECT g, v AS x FROM un_x GROUP BY g, v) q WHERE x || '' = '7'
+x_gk2_grp	SELECT CAST(x AS TEXT), COUNT(*) FROM (SELECT g, v AS x FROM un_x GROUP BY g, v) q GROUP BY CAST(x AS TEXT)
+x_gk2_ord	SELECT CAST(x AS TEXT) FROM (SELECT g, v AS x FROM un_x GROUP BY g, v) q ORDER BY 1
+x_gk2_lit	SELECT COUNT(*) FROM (SELECT g, v AS x FROM un_x GROUP BY g, v) q WHERE x = '1'
+x_dist_cast	SELECT CAST(x AS TEXT) FROM (SELECT DISTINCT v AS x FROM un_x) q
+x_dist_cat	SELECT x || '' FROM (SELECT DISTINCT v AS x FROM un_x) q
+x_dist_concat	SELECT concat(x, '|') FROM (SELECT DISTINCT v AS x FROM un_x) q
+x_dist_fmt	SELECT format('%s', x) FROM (SELECT DISTINCT v AS x FROM un_x) q
+x_dist_json	SELECT CAST(json_build_object('x', x) AS TEXT) FROM (SELECT DISTINCT v AS x FROM un_x) q
+x_dist_eq1	SELECT COUNT(*) FROM (SELECT DISTINCT v AS x FROM un_x) q WHERE CAST(x AS TEXT) = '1'
+x_dist_eq15	SELECT COUNT(*) FROM (SELECT DISTINCT v AS x FROM un_x) q WHERE CAST(x AS TEXT) = '1.5'
+x_dist_eq7	SELECT COUNT(*) FROM (SELECT DISTINCT v AS x FROM un_x) q WHERE x || '' = '7'
+x_dist_grp	SELECT CAST(x AS TEXT), COUNT(*) FROM (SELECT DISTINCT v AS x FROM un_x) q GROUP BY CAST(x AS TEXT)
+x_dist_ord	SELECT CAST(x AS TEXT) FROM (SELECT DISTINCT v AS x FROM un_x) q ORDER BY 1
+x_dist_lit	SELECT COUNT(*) FROM (SELECT DISTINCT v AS x FROM un_x) q WHERE x = '1'
+x_uall_cast	SELECT CAST(x AS TEXT) FROM (SELECT v AS x FROM un_x UNION ALL SELECT v FROM un_u) q
+x_uall_cat	SELECT x || '' FROM (SELECT v AS x FROM un_x UNION ALL SELECT v FROM un_u) q
+x_uall_concat	SELECT concat(x, '|') FROM (SELECT v AS x FROM un_x UNION ALL SELECT v FROM un_u) q
+x_uall_fmt	SELECT format('%s', x) FROM (SELECT v AS x FROM un_x UNION ALL SELECT v FROM un_u) q
+x_uall_json	SELECT CAST(json_build_object('x', x) AS TEXT) FROM (SELECT v AS x FROM un_x UNION ALL SELECT v FROM un_u) q
+x_uall_eq1	SELECT COUNT(*) FROM (SELECT v AS x FROM un_x UNION ALL SELECT v FROM un_u) q WHERE CAST(x AS TEXT) = '1'
+x_uall_eq15	SELECT COUNT(*) FROM (SELECT v AS x FROM un_x UNION ALL SELECT v FROM un_u) q WHERE CAST(x AS TEXT) = '1.5'
+x_uall_eq7	SELECT COUNT(*) FROM (SELECT v AS x FROM un_x UNION ALL SELECT v FROM un_u) q WHERE x || '' = '7'
+x_uall_grp	SELECT CAST(x AS TEXT), COUNT(*) FROM (SELECT v AS x FROM un_x UNION ALL SELECT v FROM un_u) q GROUP BY CAST(x AS TEXT)
+x_uall_ord	SELECT CAST(x AS TEXT) FROM (SELECT v AS x FROM un_x UNION ALL SELECT v FROM un_u) q ORDER BY 1
+x_uall_lit	SELECT COUNT(*) FROM (SELECT v AS x FROM un_x UNION ALL SELECT v FROM un_u) q WHERE x = '1'
+x_union_eq1	SELECT COUNT(*) FROM (SELECT v AS x FROM un_x UNION SELECT v FROM un_u) q WHERE CAST(x AS TEXT) = '1'
+x_union_eq15	SELECT COUNT(*) FROM (SELECT v AS x FROM un_x UNION SELECT v FROM un_u) q WHERE CAST(x AS TEXT) = '1.5'
+x_union_eq7	SELECT COUNT(*) FROM (SELECT v AS x FROM un_x UNION SELECT v FROM un_u) q WHERE x || '' = '7'
+x_union_grp	SELECT CAST(x AS TEXT), COUNT(*) FROM (SELECT v AS x FROM un_x UNION SELECT v FROM un_u) q GROUP BY CAST(x AS TEXT)
+x_union_lit	SELECT COUNT(*) FROM (SELECT v AS x FROM un_x UNION SELECT v FROM un_u) q WHERE x = '1'
+x_isect_cast	SELECT CAST(x AS TEXT) FROM (SELECT v AS x FROM un_x INTERSECT SELECT v FROM un_x) q
+x_isect_cat	SELECT x || '' FROM (SELECT v AS x FROM un_x INTERSECT SELECT v FROM un_x) q
+x_isect_concat	SELECT concat(x, '|') FROM (SELECT v AS x FROM un_x INTERSECT SELECT v FROM un_x) q
+x_isect_fmt	SELECT format('%s', x) FROM (SELECT v AS x FROM un_x INTERSECT SELECT v FROM un_x) q
+x_isect_json	SELECT CAST(json_build_object('x', x) AS TEXT) FROM (SELECT v AS x FROM un_x INTERSECT SELECT v FROM un_x) q
+x_isect_eq1	SELECT COUNT(*) FROM (SELECT v AS x FROM un_x INTERSECT SELECT v FROM un_x) q WHERE CAST(x AS TEXT) = '1'
+x_isect_eq15	SELECT COUNT(*) FROM (SELECT v AS x FROM un_x INTERSECT SELECT v FROM un_x) q WHERE CAST(x AS TEXT) = '1.5'
+x_isect_eq7	SELECT COUNT(*) FROM (SELECT v AS x FROM un_x INTERSECT SELECT v FROM un_x) q WHERE x || '' = '7'
+x_isect_grp	SELECT CAST(x AS TEXT), COUNT(*) FROM (SELECT v AS x FROM un_x INTERSECT SELECT v FROM un_x) q GROUP BY CAST(x AS TEXT)
+x_isect_ord	SELECT CAST(x AS TEXT) FROM (SELECT v AS x FROM un_x INTERSECT SELECT v FROM un_x) q ORDER BY 1
+x_isect_lit	SELECT COUNT(*) FROM (SELECT v AS x FROM un_x INTERSECT SELECT v FROM un_x) q WHERE x = '1'
+x_exc_cast	SELECT CAST(x AS TEXT) FROM (SELECT v AS x FROM un_x EXCEPT SELECT v FROM un_u) q
+x_exc_cat	SELECT x || '' FROM (SELECT v AS x FROM un_x EXCEPT SELECT v FROM un_u) q
+x_exc_concat	SELECT concat(x, '|') FROM (SELECT v AS x FROM un_x EXCEPT SELECT v FROM un_u) q
+x_exc_fmt	SELECT format('%s', x) FROM (SELECT v AS x FROM un_x EXCEPT SELECT v FROM un_u) q
+x_exc_json	SELECT CAST(json_build_object('x', x) AS TEXT) FROM (SELECT v AS x FROM un_x EXCEPT SELECT v FROM un_u) q
+x_exc_eq1	SELECT COUNT(*) FROM (SELECT v AS x FROM un_x EXCEPT SELECT v FROM un_u) q WHERE CAST(x AS TEXT) = '1'
+x_exc_eq15	SELECT COUNT(*) FROM (SELECT v AS x FROM un_x EXCEPT SELECT v FROM un_u) q WHERE CAST(x AS TEXT) = '1.5'
+x_exc_eq7	SELECT COUNT(*) FROM (SELECT v AS x FROM un_x EXCEPT SELECT v FROM un_u) q WHERE x || '' = '7'
+x_exc_grp	SELECT CAST(x AS TEXT), COUNT(*) FROM (SELECT v AS x FROM un_x EXCEPT SELECT v FROM un_u) q GROUP BY CAST(x AS TEXT)
+x_exc_ord	SELECT CAST(x AS TEXT) FROM (SELECT v AS x FROM un_x EXCEPT SELECT v FROM un_u) q ORDER BY 1
+x_exc_lit	SELECT COUNT(*) FROM (SELECT v AS x FROM un_x EXCEPT SELECT v FROM un_u) q WHERE x = '1'
+x_win_in_cast	SELECT CAST(x AS TEXT) FROM (SELECT v AS x, ROW_NUMBER() OVER (PARTITION BY g ORDER BY id) AS rn FROM un_x) q
+x_win_in_cat	SELECT x || '' FROM (SELECT v AS x, ROW_NUMBER() OVER (PARTITION BY g ORDER BY id) AS rn FROM un_x) q
+x_win_in_concat	SELECT concat(x, '|') FROM (SELECT v AS x, ROW_NUMBER() OVER (PARTITION BY g ORDER BY id) AS rn FROM un_x) q
+x_win_in_fmt	SELECT format('%s', x) FROM (SELECT v AS x, ROW_NUMBER() OVER (PARTITION BY g ORDER BY id) AS rn FROM un_x) q
+x_win_in_json	SELECT CAST(json_build_object('x', x) AS TEXT) FROM (SELECT v AS x, ROW_NUMBER() OVER (PARTITION BY g ORDER BY id) AS rn FROM un_x) q
+x_win_in_eq1	SELECT COUNT(*) FROM (SELECT v AS x, ROW_NUMBER() OVER (PARTITION BY g ORDER BY id) AS rn FROM un_x) q WHERE CAST(x AS TEXT) = '1'
+x_win_in_eq15	SELECT COUNT(*) FROM (SELECT v AS x, ROW_NUMBER() OVER (PARTITION BY g ORDER BY id) AS rn FROM un_x) q WHERE CAST(x AS TEXT) = '1.5'
+x_win_in_eq7	SELECT COUNT(*) FROM (SELECT v AS x, ROW_NUMBER() OVER (PARTITION BY g ORDER BY id) AS rn FROM un_x) q WHERE x || '' = '7'
+x_win_in_grp	SELECT CAST(x AS TEXT), COUNT(*) FROM (SELECT v AS x, ROW_NUMBER() OVER (PARTITION BY g ORDER BY id) AS rn FROM un_x) q GROUP BY CAST(x AS TEXT)
+x_win_in_ord	SELECT CAST(x AS TEXT) FROM (SELECT v AS x, ROW_NUMBER() OVER (PARTITION BY g ORDER BY id) AS rn FROM un_x) q ORDER BY 1
+x_win_in_lit	SELECT COUNT(*) FROM (SELECT v AS x, ROW_NUMBER() OVER (PARTITION BY g ORDER BY id) AS rn FROM un_x) q WHERE x = '1'
+x_win_pk_cast	SELECT CAST(x AS TEXT) FROM (SELECT v AS x, COUNT(*) OVER (PARTITION BY v) AS c FROM un_x) q
+x_win_pk_cat	SELECT x || '' FROM (SELECT v AS x, COUNT(*) OVER (PARTITION BY v) AS c FROM un_x) q
+x_win_pk_concat	SELECT concat(x, '|') FROM (SELECT v AS x, COUNT(*) OVER (PARTITION BY v) AS c FROM un_x) q
+x_win_pk_fmt	SELECT format('%s', x) FROM (SELECT v AS x, COUNT(*) OVER (PARTITION BY v) AS c FROM un_x) q
+x_win_pk_json	SELECT CAST(json_build_object('x', x) AS TEXT) FROM (SELECT v AS x, COUNT(*) OVER (PARTITION BY v) AS c FROM un_x) q
+x_win_pk_eq1	SELECT COUNT(*) FROM (SELECT v AS x, COUNT(*) OVER (PARTITION BY v) AS c FROM un_x) q WHERE CAST(x AS TEXT) = '1'
+x_win_pk_eq15	SELECT COUNT(*) FROM (SELECT v AS x, COUNT(*) OVER (PARTITION BY v) AS c FROM un_x) q WHERE CAST(x AS TEXT) = '1.5'
+x_win_pk_eq7	SELECT COUNT(*) FROM (SELECT v AS x, COUNT(*) OVER (PARTITION BY v) AS c FROM un_x) q WHERE x || '' = '7'
+x_win_pk_grp	SELECT CAST(x AS TEXT), COUNT(*) FROM (SELECT v AS x, COUNT(*) OVER (PARTITION BY v) AS c FROM un_x) q GROUP BY CAST(x AS TEXT)
+x_win_pk_ord	SELECT CAST(x AS TEXT) FROM (SELECT v AS x, COUNT(*) OVER (PARTITION BY v) AS c FROM un_x) q ORDER BY 1
+x_win_pk_lit	SELECT COUNT(*) FROM (SELECT v AS x, COUNT(*) OVER (PARTITION BY v) AS c FROM un_x) q WHERE x = '1'
+x_win_ok_cast	SELECT CAST(x AS TEXT) FROM (SELECT v AS x, ROW_NUMBER() OVER (ORDER BY v, id) AS rn FROM un_x) q
+x_win_ok_cat	SELECT x || '' FROM (SELECT v AS x, ROW_NUMBER() OVER (ORDER BY v, id) AS rn FROM un_x) q
+x_win_ok_concat	SELECT concat(x, '|') FROM (SELECT v AS x, ROW_NUMBER() OVER (ORDER BY v, id) AS rn FROM un_x) q
+x_win_ok_fmt	SELECT format('%s', x) FROM (SELECT v AS x, ROW_NUMBER() OVER (ORDER BY v, id) AS rn FROM un_x) q
+x_win_ok_json	SELECT CAST(json_build_object('x', x) AS TEXT) FROM (SELECT v AS x, ROW_NUMBER() OVER (ORDER BY v, id) AS rn FROM un_x) q
+x_win_ok_eq1	SELECT COUNT(*) FROM (SELECT v AS x, ROW_NUMBER() OVER (ORDER BY v, id) AS rn FROM un_x) q WHERE CAST(x AS TEXT) = '1'
+x_win_ok_eq15	SELECT COUNT(*) FROM (SELECT v AS x, ROW_NUMBER() OVER (ORDER BY v, id) AS rn FROM un_x) q WHERE CAST(x AS TEXT) = '1.5'
+x_win_ok_eq7	SELECT COUNT(*) FROM (SELECT v AS x, ROW_NUMBER() OVER (ORDER BY v, id) AS rn FROM un_x) q WHERE x || '' = '7'
+x_win_ok_grp	SELECT CAST(x AS TEXT), COUNT(*) FROM (SELECT v AS x, ROW_NUMBER() OVER (ORDER BY v, id) AS rn FROM un_x) q GROUP BY CAST(x AS TEXT)
+x_win_ok_ord	SELECT CAST(x AS TEXT) FROM (SELECT v AS x, ROW_NUMBER() OVER (ORDER BY v, id) AS rn FROM un_x) q ORDER BY 1
+x_win_ok_lit	SELECT COUNT(*) FROM (SELECT v AS x, ROW_NUMBER() OVER (ORDER BY v, id) AS rn FROM un_x) q WHERE x = '1'
+x_jk_l_cast	SELECT CAST(x AS TEXT) FROM (SELECT a.v AS x FROM un_x a JOIN un_u b ON a.v = b.v) q
+x_jk_l_cat	SELECT x || '' FROM (SELECT a.v AS x FROM un_x a JOIN un_u b ON a.v = b.v) q
+x_jk_l_concat	SELECT concat(x, '|') FROM (SELECT a.v AS x FROM un_x a JOIN un_u b ON a.v = b.v) q
+x_jk_l_fmt	SELECT format('%s', x) FROM (SELECT a.v AS x FROM un_x a JOIN un_u b ON a.v = b.v) q
+x_jk_l_json	SELECT CAST(json_build_object('x', x) AS TEXT) FROM (SELECT a.v AS x FROM un_x a JOIN un_u b ON a.v = b.v) q
+x_jk_l_eq1	SELECT COUNT(*) FROM (SELECT a.v AS x FROM un_x a JOIN un_u b ON a.v = b.v) q WHERE CAST(x AS TEXT) = '1'
+x_jk_l_eq15	SELECT COUNT(*) FROM (SELECT a.v AS x FROM un_x a JOIN un_u b ON a.v = b.v) q WHERE CAST(x AS TEXT) = '1.5'
+x_jk_l_eq7	SELECT COUNT(*) FROM (SELECT a.v AS x FROM un_x a JOIN un_u b ON a.v = b.v) q WHERE x || '' = '7'
+x_jk_l_grp	SELECT CAST(x AS TEXT), COUNT(*) FROM (SELECT a.v AS x FROM un_x a JOIN un_u b ON a.v = b.v) q GROUP BY CAST(x AS TEXT)
+x_jk_l_ord	SELECT CAST(x AS TEXT) FROM (SELECT a.v AS x FROM un_x a JOIN un_u b ON a.v = b.v) q ORDER BY 1
+x_jk_l_lit	SELECT COUNT(*) FROM (SELECT a.v AS x FROM un_x a JOIN un_u b ON a.v = b.v) q WHERE x = '1'
+x_jk_r_cast	SELECT CAST(x AS TEXT) FROM (SELECT b.v AS x FROM un_x a JOIN un_u b ON a.v = b.v) q
+x_jk_r_cat	SELECT x || '' FROM (SELECT b.v AS x FROM un_x a JOIN un_u b ON a.v = b.v) q
+x_jk_r_concat	SELECT concat(x, '|') FROM (SELECT b.v AS x FROM un_x a JOIN un_u b ON a.v = b.v) q
+x_jk_r_fmt	SELECT format('%s', x) FROM (SELECT b.v AS x FROM un_x a JOIN un_u b ON a.v = b.v) q
+x_jk_r_json	SELECT CAST(json_build_object('x', x) AS TEXT) FROM (SELECT b.v AS x FROM un_x a JOIN un_u b ON a.v = b.v) q
+x_jk_r_eq1	SELECT COUNT(*) FROM (SELECT b.v AS x FROM un_x a JOIN un_u b ON a.v = b.v) q WHERE CAST(x AS TEXT) = '1'
+x_jk_r_eq15	SELECT COUNT(*) FROM (SELECT b.v AS x FROM un_x a JOIN un_u b ON a.v = b.v) q WHERE CAST(x AS TEXT) = '1.5'
+x_jk_r_eq7	SELECT COUNT(*) FROM (SELECT b.v AS x FROM un_x a JOIN un_u b ON a.v = b.v) q WHERE x || '' = '7'
+x_jk_r_grp	SELECT CAST(x AS TEXT), COUNT(*) FROM (SELECT b.v AS x FROM un_x a JOIN un_u b ON a.v = b.v) q GROUP BY CAST(x AS TEXT)
+x_jk_r_ord	SELECT CAST(x AS TEXT) FROM (SELECT b.v AS x FROM un_x a JOIN un_u b ON a.v = b.v) q ORDER BY 1
+x_jk_r_lit	SELECT COUNT(*) FROM (SELECT b.v AS x FROM un_x a JOIN un_u b ON a.v = b.v) q WHERE x = '1'
+x_jp_l_cast	SELECT CAST(x AS TEXT) FROM (SELECT a.v AS x FROM un_x a JOIN un_u b ON a.id = b.id) q
+x_jp_l_cat	SELECT x || '' FROM (SELECT a.v AS x FROM un_x a JOIN un_u b ON a.id = b.id) q
+x_jp_l_concat	SELECT concat(x, '|') FROM (SELECT a.v AS x FROM un_x a JOIN un_u b ON a.id = b.id) q
+x_jp_l_fmt	SELECT format('%s', x) FROM (SELECT a.v AS x FROM un_x a JOIN un_u b ON a.id = b.id) q
+x_jp_l_json	SELECT CAST(json_build_object('x', x) AS TEXT) FROM (SELECT a.v AS x FROM un_x a JOIN un_u b ON a.id = b.id) q
+x_jp_l_eq1	SELECT COUNT(*) FROM (SELECT a.v AS x FROM un_x a JOIN un_u b ON a.id = b.id) q WHERE CAST(x AS TEXT) = '1'
+x_jp_l_eq15	SELECT COUNT(*) FROM (SELECT a.v AS x FROM un_x a JOIN un_u b ON a.id = b.id) q WHERE CAST(x AS TEXT) = '1.5'
+x_jp_l_eq7	SELECT COUNT(*) FROM (SELECT a.v AS x FROM un_x a JOIN un_u b ON a.id = b.id) q WHERE x || '' = '7'
+x_jp_l_grp	SELECT CAST(x AS TEXT), COUNT(*) FROM (SELECT a.v AS x FROM un_x a JOIN un_u b ON a.id = b.id) q GROUP BY CAST(x AS TEXT)
+x_jp_l_ord	SELECT CAST(x AS TEXT) FROM (SELECT a.v AS x FROM un_x a JOIN un_u b ON a.id = b.id) q ORDER BY 1
+x_jp_l_lit	SELECT COUNT(*) FROM (SELECT a.v AS x FROM un_x a JOIN un_u b ON a.id = b.id) q WHERE x = '1'
+x_jp_r_cast	SELECT CAST(x AS TEXT) FROM (SELECT b.v AS x FROM un_x a JOIN un_u b ON a.id = b.id) q
+x_jp_r_cat	SELECT x || '' FROM (SELECT b.v AS x FROM un_x a JOIN un_u b ON a.id = b.id) q
+x_jp_r_concat	SELECT concat(x, '|') FROM (SELECT b.v AS x FROM un_x a JOIN un_u b ON a.id = b.id) q
+x_jp_r_fmt	SELECT format('%s', x) FROM (SELECT b.v AS x FROM un_x a JOIN un_u b ON a.id = b.id) q
+x_jp_r_json	SELECT CAST(json_build_object('x', x) AS TEXT) FROM (SELECT b.v AS x FROM un_x a JOIN un_u b ON a.id = b.id) q
+x_jp_r_eq1	SELECT COUNT(*) FROM (SELECT b.v AS x FROM un_x a JOIN un_u b ON a.id = b.id) q WHERE CAST(x AS TEXT) = '1'
+x_jp_r_eq15	SELECT COUNT(*) FROM (SELECT b.v AS x FROM un_x a JOIN un_u b ON a.id = b.id) q WHERE CAST(x AS TEXT) = '1.5'
+x_jp_r_eq7	SELECT COUNT(*) FROM (SELECT b.v AS x FROM un_x a JOIN un_u b ON a.id = b.id) q WHERE x || '' = '7'
+x_jp_r_grp	SELECT CAST(x AS TEXT), COUNT(*) FROM (SELECT b.v AS x FROM un_x a JOIN un_u b ON a.id = b.id) q GROUP BY CAST(x AS TEXT)
+x_jp_r_ord	SELECT CAST(x AS TEXT) FROM (SELECT b.v AS x FROM un_x a JOIN un_u b ON a.id = b.id) q ORDER BY 1
+x_jp_r_lit	SELECT COUNT(*) FROM (SELECT b.v AS x FROM un_x a JOIN un_u b ON a.id = b.id) q WHERE x = '1'
+x_ljoin_cast	SELECT CAST(x AS TEXT) FROM (SELECT a.v AS x FROM un_x a LEFT JOIN un_u b ON a.id = b.id) q
+x_ljoin_cat	SELECT x || '' FROM (SELECT a.v AS x FROM un_x a LEFT JOIN un_u b ON a.id = b.id) q
+x_ljoin_concat	SELECT concat(x, '|') FROM (SELECT a.v AS x FROM un_x a LEFT JOIN un_u b ON a.id = b.id) q
+x_ljoin_fmt	SELECT format('%s', x) FROM (SELECT a.v AS x FROM un_x a LEFT JOIN un_u b ON a.id = b.id) q
+x_ljoin_json	SELECT CAST(json_build_object('x', x) AS TEXT) FROM (SELECT a.v AS x FROM un_x a LEFT JOIN un_u b ON a.id = b.id) q
+x_ljoin_eq1	SELECT COUNT(*) FROM (SELECT a.v AS x FROM un_x a LEFT JOIN un_u b ON a.id = b.id) q WHERE CAST(x AS TEXT) = '1'
+x_ljoin_eq15	SELECT COUNT(*) FROM (SELECT a.v AS x FROM un_x a LEFT JOIN un_u b ON a.id = b.id) q WHERE CAST(x AS TEXT) = '1.5'
+x_ljoin_eq7	SELECT COUNT(*) FROM (SELECT a.v AS x FROM un_x a LEFT JOIN un_u b ON a.id = b.id) q WHERE x || '' = '7'
+x_ljoin_grp	SELECT CAST(x AS TEXT), COUNT(*) FROM (SELECT a.v AS x FROM un_x a LEFT JOIN un_u b ON a.id = b.id) q GROUP BY CAST(x AS TEXT)
+x_ljoin_ord	SELECT CAST(x AS TEXT) FROM (SELECT a.v AS x FROM un_x a LEFT JOIN un_u b ON a.id = b.id) q ORDER BY 1
+x_ljoin_lit	SELECT COUNT(*) FROM (SELECT a.v AS x FROM un_x a LEFT JOIN un_u b ON a.id = b.id) q WHERE x = '1'
+x_sortlim_cast	SELECT CAST(x AS TEXT) FROM (SELECT v AS x FROM un_x ORDER BY v NULLS LAST, id LIMIT 4) q
+x_sortlim_cat	SELECT x || '' FROM (SELECT v AS x FROM un_x ORDER BY v NULLS LAST, id LIMIT 4) q
+x_sortlim_concat	SELECT concat(x, '|') FROM (SELECT v AS x FROM un_x ORDER BY v NULLS LAST, id LIMIT 4) q
+x_sortlim_fmt	SELECT format('%s', x) FROM (SELECT v AS x FROM un_x ORDER BY v NULLS LAST, id LIMIT 4) q
+x_sortlim_json	SELECT CAST(json_build_object('x', x) AS TEXT) FROM (SELECT v AS x FROM un_x ORDER BY v NULLS LAST, id LIMIT 4) q
+x_sortlim_eq1	SELECT COUNT(*) FROM (SELECT v AS x FROM un_x ORDER BY v NULLS LAST, id LIMIT 4) q WHERE CAST(x AS TEXT) = '1'
+x_sortlim_eq15	SELECT COUNT(*) FROM (SELECT v AS x FROM un_x ORDER BY v NULLS LAST, id LIMIT 4) q WHERE CAST(x AS TEXT) = '1.5'
+x_sortlim_eq7	SELECT COUNT(*) FROM (SELECT v AS x FROM un_x ORDER BY v NULLS LAST, id LIMIT 4) q WHERE x || '' = '7'
+x_sortlim_grp	SELECT CAST(x AS TEXT), COUNT(*) FROM (SELECT v AS x FROM un_x ORDER BY v NULLS LAST, id LIMIT 4) q GROUP BY CAST(x AS TEXT)
+x_sortlim_ord	SELECT CAST(x AS TEXT) FROM (SELECT v AS x FROM un_x ORDER BY v NULLS LAST, id LIMIT 4) q ORDER BY 1
+x_sortlim_lit	SELECT COUNT(*) FROM (SELECT v AS x FROM un_x ORDER BY v NULLS LAST, id LIMIT 4) q WHERE x = '1'
+x_maxg_cast	SELECT CAST(x AS TEXT) FROM (SELECT MAX(v) AS x FROM un_x GROUP BY g) q
+x_maxg_cat	SELECT x || '' FROM (SELECT MAX(v) AS x FROM un_x GROUP BY g) q
+x_maxg_concat	SELECT concat(x, '|') FROM (SELECT MAX(v) AS x FROM un_x GROUP BY g) q
+x_maxg_fmt	SELECT format('%s', x) FROM (SELECT MAX(v) AS x FROM un_x GROUP BY g) q
+x_maxg_json	SELECT CAST(json_build_object('x', x) AS TEXT) FROM (SELECT MAX(v) AS x FROM un_x GROUP BY g) q
+x_maxg_eq1	SELECT COUNT(*) FROM (SELECT MAX(v) AS x FROM un_x GROUP BY g) q WHERE CAST(x AS TEXT) = '1'
+x_maxg_eq15	SELECT COUNT(*) FROM (SELECT MAX(v) AS x FROM un_x GROUP BY g) q WHERE CAST(x AS TEXT) = '1.5'
+x_maxg_eq7	SELECT COUNT(*) FROM (SELECT MAX(v) AS x FROM un_x GROUP BY g) q WHERE x || '' = '7'
+x_maxg_grp	SELECT CAST(x AS TEXT), COUNT(*) FROM (SELECT MAX(v) AS x FROM un_x GROUP BY g) q GROUP BY CAST(x AS TEXT)
+x_maxg_ord	SELECT CAST(x AS TEXT) FROM (SELECT MAX(v) AS x FROM un_x GROUP BY g) q ORDER BY 1
+x_maxg_lit	SELECT COUNT(*) FROM (SELECT MAX(v) AS x FROM un_x GROUP BY g) q WHERE x = '1'
+x_scal_cast	SELECT CAST(x AS TEXT) FROM (SELECT (SELECT MAX(v) FROM un_x) AS x) q
+x_scal_cat	SELECT x || '' FROM (SELECT (SELECT MAX(v) FROM un_x) AS x) q
+x_scal_concat	SELECT concat(x, '|') FROM (SELECT (SELECT MAX(v) FROM un_x) AS x) q
+x_scal_fmt	SELECT format('%s', x) FROM (SELECT (SELECT MAX(v) FROM un_x) AS x) q
+x_scal_json	SELECT CAST(json_build_object('x', x) AS TEXT) FROM (SELECT (SELECT MAX(v) FROM un_x) AS x) q
+x_scal_eq1	SELECT COUNT(*) FROM (SELECT (SELECT MAX(v) FROM un_x) AS x) q WHERE CAST(x AS TEXT) = '1'
+x_scal_eq15	SELECT COUNT(*) FROM (SELECT (SELECT MAX(v) FROM un_x) AS x) q WHERE CAST(x AS TEXT) = '1.5'
+x_scal_eq7	SELECT COUNT(*) FROM (SELECT (SELECT MAX(v) FROM un_x) AS x) q WHERE x || '' = '7'
+x_scal_grp	SELECT CAST(x AS TEXT), COUNT(*) FROM (SELECT (SELECT MAX(v) FROM un_x) AS x) q GROUP BY CAST(x AS TEXT)
+x_scal_ord	SELECT CAST(x AS TEXT) FROM (SELECT (SELECT MAX(v) FROM un_x) AS x) q ORDER BY 1
+x_scal_lit	SELECT COUNT(*) FROM (SELECT (SELECT MAX(v) FROM un_x) AS x) q WHERE x = '1'
+x_cte2_cast	WITH c AS (SELECT v AS y FROM un_x GROUP BY v) SELECT CAST(x AS TEXT) FROM (SELECT c1.y AS x FROM c c1 JOIN c c2 ON c1.y = c2.y) q
+x_cte2_cat	WITH c AS (SELECT v AS y FROM un_x GROUP BY v) SELECT x || '' FROM (SELECT c1.y AS x FROM c c1 JOIN c c2 ON c1.y = c2.y) q
+x_cte2_concat	WITH c AS (SELECT v AS y FROM un_x GROUP BY v) SELECT concat(x, '|') FROM (SELECT c1.y AS x FROM c c1 JOIN c c2 ON c1.y = c2.y) q
+x_cte2_fmt	WITH c AS (SELECT v AS y FROM un_x GROUP BY v) SELECT format('%s', x) FROM (SELECT c1.y AS x FROM c c1 JOIN c c2 ON c1.y = c2.y) q
+x_cte2_json	WITH c AS (SELECT v AS y FROM un_x GROUP BY v) SELECT CAST(json_build_object('x', x) AS TEXT) FROM (SELECT c1.y AS x FROM c c1 JOIN c c2 ON c1.y = c2.y) q
+x_cte2_eq1	WITH c AS (SELECT v AS y FROM un_x GROUP BY v) SELECT COUNT(*) FROM (SELECT c1.y AS x FROM c c1 JOIN c c2 ON c1.y = c2.y) q WHERE CAST(x AS TEXT) = '1'
+x_cte2_eq15	WITH c AS (SELECT v AS y FROM un_x GROUP BY v) SELECT COUNT(*) FROM (SELECT c1.y AS x FROM c c1 JOIN c c2 ON c1.y = c2.y) q WHERE CAST(x AS TEXT) = '1.5'
+x_cte2_eq7	WITH c AS (SELECT v AS y FROM un_x GROUP BY v) SELECT COUNT(*) FROM (SELECT c1.y AS x FROM c c1 JOIN c c2 ON c1.y = c2.y) q WHERE x || '' = '7'
+x_cte2_grp	WITH c AS (SELECT v AS y FROM un_x GROUP BY v) SELECT CAST(x AS TEXT), COUNT(*) FROM (SELECT c1.y AS x FROM c c1 JOIN c c2 ON c1.y = c2.y) q GROUP BY CAST(x AS TEXT)
+x_cte2_ord	WITH c AS (SELECT v AS y FROM un_x GROUP BY v) SELECT CAST(x AS TEXT) FROM (SELECT c1.y AS x FROM c c1 JOIN c c2 ON c1.y = c2.y) q ORDER BY 1
+x_cte2_lit	WITH c AS (SELECT v AS y FROM un_x GROUP BY v) SELECT COUNT(*) FROM (SELECT c1.y AS x FROM c c1 JOIN c c2 ON c1.y = c2.y) q WHERE x = '1'

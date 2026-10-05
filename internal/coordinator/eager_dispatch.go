@@ -61,6 +61,9 @@ func (c *Coordinator) eagerManifestPublisher(rootQueryID, stageID string, feed *
 			WorkerID: workerID,
 			PeerAddr: c.workers.PeerAddr(workerID),
 			Final:    final,
+			// Recorded by noteTaskResult before the retrier observes the
+			// result that fires this hook (exchange_marks.go).
+			UnconstrainedColumns: c.scheduler.exchangeMarks.marks(files),
 		}
 		if feed != nil {
 			// Replay before accounting: a consumer released by the

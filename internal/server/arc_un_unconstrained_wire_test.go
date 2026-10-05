@@ -78,6 +78,10 @@ func TestArcUNUnconstrainedColumnOnTheWire(t *testing.T) {
 		{"cat", "SELECT v || '' FROM un_w ORDER BY id", 25, -1, "1.25;0.755;1;NULL;1234567890", ""},
 		{"concat", "SELECT concat(v, '|') FROM un_w ORDER BY id", 25, -1, "1.25|;0.755|;1|;|;1234567890|", ""},
 		{"format", "SELECT format('%s', v) FROM un_w ORDER BY id", 25, -1, "1.25;0.755;1;;1234567890", ""},
+		// Read back across an exchange on the coordinator door (a GROUP BY):
+		// the producing stage's marks ride the file (ADR-0024 §10).
+		{"gk_text", "SELECT CAST(v AS TEXT) FROM (SELECT v FROM un_w GROUP BY v) q ORDER BY q.v", 25, -1, "0.755;1;1.25;1234567890;NULL", ""},
+		{"gk_count", "SELECT COUNT(*) FROM (SELECT v FROM un_w GROUP BY v) q WHERE CAST(v AS TEXT) = '1'", 20, -1, "1", ""},
 		{"info_schema", "SELECT numeric_precision, numeric_scale FROM information_schema.columns WHERE table_name = 'un_w' AND column_name = 'v'", 0, 0, "NULL|NULL", ""},
 		// The controls.
 		{"constrained", "SELECT n FROM un_w ORDER BY id", 1700, (10<<16 | 2) + 4, "1.25;2.50;1.00;NULL;10.00", "2;2;2;NULL;2"},
@@ -94,6 +98,7 @@ func TestArcUNUnconstrainedColumnOnTheWire(t *testing.T) {
 		{"SELECT c FROM un_c ORDER BY id", "c", "1;2;3;4;5"},
 		{"SELECT n FROM un_w ORDER BY id", "n", "1.25;2.50;1.00;NULL;10.00"},
 		{"SELECT l FROM un_legacy ORDER BY id", "l", "1;7"},
+		{"SELECT CAST(v AS TEXT) AS t FROM (SELECT v FROM un_w GROUP BY v) q ORDER BY q.v", "t", "0.755;1;1.25;1234567890;NULL"},
 	} {
 		t.Run("http/"+c.key, func(t *testing.T) {
 			if got := unHTTPRows(t, hs.URL, c.sql, c.key); got != c.want {
@@ -115,6 +120,7 @@ func TestArcUNUnconstrainedColumnOnTheWire(t *testing.T) {
 			{"SELECT c FROM un_c ORDER BY id", "c", "1;2;3;4;5"},
 			{"SELECT n FROM un_w ORDER BY id", "n", "1.25;2.50;1.00;NULL;10.00"},
 			{"SELECT l FROM un_legacy ORDER BY id", "l", "1;7"},
+			{"SELECT CAST(v AS TEXT) AS g FROM (SELECT v FROM un_w GROUP BY v) q ORDER BY q.v", "g", "0.755;1;1.25;1234567890;NULL"},
 		} {
 			t.Run(door.name+"/"+c.key+"/"+c.sql, func(t *testing.T) {
 				fs := &dupNameStream{}
