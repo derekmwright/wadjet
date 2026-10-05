@@ -84,6 +84,11 @@ type DecimalCoercion struct {
 	Name      string
 	Precision int
 	Scale     int
+	// Unconstrained is the set operation's result column's mark (ADR-0024
+	// §10): set only when every arm's column is created from an
+	// unconstrained numeric. The coerced column carries exactly this mark,
+	// so the arms' rows meet under one declaration.
+	Unconstrained bool
 }
 
 // PrettyPrint renders the plan for EXPLAIN VERBOSE.

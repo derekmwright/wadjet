@@ -784,6 +784,11 @@ type ColumnSpec struct {
 	Dimension   int          `json:"dimension,omitempty"`
 	ElementType *ColumnSpec  `json:"element_type,omitempty"`
 	Fields      []ColumnSpec `json:"fields,omitempty"`
+	// Unconstrained is set only on an OpDecimalCoerce coercion: the set
+	// operation's result column is created from an unconstrained numeric
+	// (every arm's is; ADR-0024 §10). Absent everywhere else, so a task
+	// without such a coercion marshals as it always did.
+	Unconstrained bool `json:"unconstrained,omitempty"`
 }
 
 // ProjectSpec is one output column of an OpProject: Name is the emitted
