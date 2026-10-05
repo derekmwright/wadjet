@@ -2243,6 +2243,12 @@ func inferCastType(typeName string) parquet.TypeID {
 		// mints a STRING column over a foreign file's string column — which
 		// is the whole reason the cast exists.
 		return parquet.TypeMAC
+	case "BYTES", "BINARY", "VARBINARY":
+		// The declaration half of #1501's cast door: Cast.Eval reads a text
+		// operand through byteain and answers BYTES, so the projection
+		// allocates a BYTES column — OID 17 on the wire, and a BYTES column
+		// out of a CTAS — where it declared STRING over the operand's text.
+		return parquet.TypeBytes
 	case "UUID":
 		// The declaration half of #839. `CAST(x AS UUID)` declared STRING, so
 		// the cast changed neither the value nor the type a client sees —
@@ -2251,7 +2257,7 @@ func inferCastType(typeName string) parquet.TypeID {
 		return parquet.TypeUUID
 	default:
 		// What is LEFT here is the destinations Cast.Eval does not implement
-		// and passes its operand through — the containers, DURATION, BYTES.
+		// and passes its operand through — the containers and DURATION.
 		// A name that answers to NO type at all no
 		// longer reaches this arm: expr.KnownCastDest refuses it at compile
 		// with 42704, because declaring STRING for it made the two layers

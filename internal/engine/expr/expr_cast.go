@@ -171,6 +171,9 @@ func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
 	if strings.TrimSpace(dest) == "interval" {
 		return castToInterval(v)
 	}
+	if isBytesCastDest(dest) {
+		return e.castToBytes(b, v)
+	}
 	switch dest {
 	// Keep this label list and IsIntegerCastDest in step: that predicate tells
 	// the DAG's gather materialization to build an INT64 vector for this
@@ -559,6 +562,8 @@ func numericCastRefusal(dest string) (string, bool) {
 		return "interval", true
 	case "uuid":
 		return "uuid", true
+	case "bytes", "binary", "varbinary":
+		return "bytea", true
 	}
 	if elem, ok := ArrayCastElement(dest); ok {
 		return elem + "[]", true
@@ -590,6 +595,16 @@ func castOperandDeclaresDecimal(e Expr, b *batch.RecordBatch) bool {
 func carrierExtreme(v any) bool {
 	n, ok := v.(int64)
 	return ok && (n == math.MaxInt64 || n == math.MinInt64 || n == math.MaxInt32 || n == math.MinInt32)
+}
+
+// isBytesCastDest reports the BYTES destination spellings parquet.ParseTypeID
+// takes (BYTEA itself is refused by KnownCastDest, ADR-0012 other#r2).
+func isBytesCastDest(dest string) bool {
+	switch strings.TrimSpace(dest) {
+	case "bytes", "binary", "varbinary":
+		return true
+	}
+	return false
 }
 
 // castsToText reports a destination that renders its operand as text.

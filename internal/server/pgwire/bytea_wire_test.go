@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
 	"github.com/derekmwright/wadjet/internal/storage/ingest"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -337,7 +338,7 @@ func TestCastByteaToTextIsHexOnTheWire(t *testing.T) {
 // which are an ERROR rather than a silent fallback to the raw characters:
 // binding the SPELLING of a value the client meant as bytes is the defect
 // this decoder exists to prevent, so guessing is the wrong failure mode.
-func TestDecodeByteaText(t *testing.T) {
+func TestByteaParamTextIsByteain(t *testing.T) {
 	for _, tc := range []struct {
 		in      string
 		want    []byte
@@ -357,18 +358,18 @@ func TestDecodeByteaText(t *testing.T) {
 		{in: `\400`, wantErr: true},  // past one byte
 	} {
 		t.Run(tc.in, func(t *testing.T) {
-			got, err := decodeByteaText(tc.in)
+			got, err := kernel.ByteaIn(tc.in)
 			if tc.wantErr {
 				if err == nil {
-					t.Fatalf("decodeByteaText(%q) = %#v, want an error", tc.in, got)
+					t.Fatalf("kernel.ByteaIn(%q) = %#v, want an error", tc.in, got)
 				}
 				return
 			}
 			if err != nil {
-				t.Fatalf("decodeByteaText(%q): %v", tc.in, err)
+				t.Fatalf("kernel.ByteaIn(%q): %v", tc.in, err)
 			}
 			if !bytes.Equal(got, tc.want) {
-				t.Errorf("decodeByteaText(%q) = %#v, want %#v", tc.in, got, tc.want)
+				t.Errorf("kernel.ByteaIn(%q) = %#v, want %#v", tc.in, got, tc.want)
 			}
 		})
 	}

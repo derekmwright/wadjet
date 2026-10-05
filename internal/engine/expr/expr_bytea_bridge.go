@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
@@ -28,9 +29,9 @@ import (
 //	decode('hi','escape')    \x6869      bytea
 //
 // An unrecognized encoding NAME is `22023 unrecognized encoding: "zzz"` on both
-// functions, and bad input for a recognized one is 22023 as well
-// (`invalid hexadecimal digit: "z"`). Both are the server's own SQLSTATE and
-// wording.
+// functions; bad hex input is 22023 (`invalid hexadecimal digit: "z"`) and bad
+// escape input 22P02 (`invalid input syntax for type bytea`), the server's own
+// SQLSTATE and wording, from the one bytea reading (kernel.ByteaIn's halves).
 
 func fnEncode(args []any) any {
 	if len(args) < 2 || args[0] == nil || args[1] == nil {
@@ -56,9 +57,12 @@ func fnDecode(args []any) any {
 	in := toString(args[0])
 	switch byteaEncodingName(args[1]) {
 	case "hex":
-		out, err := hex.DecodeString(in)
+		// PostgreSQL's hex_decode, the same function byteain's `\x` form
+		// reads, so whitespace between digit pairs is skipped and a bad digit
+		// is named (#1501's one reading).
+		out, err := kernel.ByteaHexDecode(in)
 		if err != nil {
-			raiseInvalidEncodedInput("invalid hexadecimal digit", in)
+			panic(fatalEval{err})
 		}
 		return out
 	case "base64":
@@ -68,9 +72,9 @@ func fnDecode(args []any) any {
 		}
 		return out
 	case "escape":
-		out, ok := byteaEscapeDecode(in)
-		if !ok {
-			raiseInvalidEncodedInput("invalid input syntax for type bytea", in)
+		out, err := kernel.ByteaEscapeDecode(in)
+		if err != nil {
+			panic(fatalEval{err})
 		}
 		return out
 	}
@@ -152,39 +156,4 @@ func byteaEscapeEncode(raw []byte) string {
 		}
 	}
 	return b.String()
-}
-
-// byteaEscapeDecode is its inverse, and the same reading byteain gives an
-// escape-format literal: `\\` is one backslash, `\nnn` three OCTAL digits, and
-// any other byte is itself. A trailing or malformed escape is a refusal, never
-// a byte quietly dropped.
-func byteaEscapeDecode(s string) ([]byte, bool) {
-	out := make([]byte, 0, len(s))
-	for i := 0; i < len(s); i++ {
-		if s[i] != '\\' {
-			out = append(out, s[i])
-			continue
-		}
-		if i+1 < len(s) && s[i+1] == '\\' {
-			out = append(out, '\\')
-			i++
-			continue
-		}
-		if i+3 >= len(s) {
-			return nil, false
-		}
-		var v int
-		for _, d := range s[i+1 : i+4] {
-			if d < '0' || d > '7' {
-				return nil, false
-			}
-			v = v*8 + int(d-'0')
-		}
-		if v > 0xff {
-			return nil, false
-		}
-		out = append(out, byte(v))
-		i += 3
-	}
-	return out, true
 }

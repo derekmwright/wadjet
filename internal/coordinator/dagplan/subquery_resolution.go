@@ -728,6 +728,11 @@ func scalarToLiteral(v any, typ parquet.TypeID, typed bool) plansql.Node {
 		return &plansql.Lit{Value: fmt.Sprintf("%d", val), Kind: plansql.LitNumber}
 	case string:
 		return &plansql.Lit{Value: val, Kind: plansql.LitString}
+	case []byte:
+		// A BYTES answer is the typed BYTES value (expr.BytesValueLiteral).
+		// It reached the default arm below and was spelled as Go's
+		// `[92 120 52 49]`, which the stage refused to parse (#1501).
+		return expr.BytesValueLiteral(val)
 	default:
 		return &plansql.Lit{Value: fmt.Sprint(v), Kind: plansql.LitNumber}
 	}

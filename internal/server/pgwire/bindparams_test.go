@@ -79,13 +79,14 @@ func TestRenderParamText(t *testing.T) {
 		// raw bytes would be decoded a SECOND time: the last cell is the one
 		// that says so — under the old splice `a\b` went out as `'a\b'`, a
 		// lone backslash, which byteain refuses. The hex form round-trips
-		// whatever the bytes are.
-		{"bytea hex", `\x6869`, oidBytea, `'\x6869'`},
-		{"bytea hex empty", `\x`, oidBytea, `'\x'`},
-		{"bytea hex uppercase digits", `\x4869`, oidBytea, `'\x4869'`},
-		{"bytea escape form", "hi", oidBytea, `'\x6869'`},
-		{"bytea escape octal", `\150\151`, oidBytea, `'\x6869'`},
-		{"bytea escape doubled backslash", `a\\b`, oidBytea, `'\x615c62'`},
+		// whatever the bytes are, and since #1501 it is TYPED: a bytea
+		// parameter is a BYTES value wherever it lands.
+		{"bytea hex", `\x6869`, oidBytea, `CAST('\x6869' AS BYTES)`},
+		{"bytea hex empty", `\x`, oidBytea, `CAST('\x' AS BYTES)`},
+		{"bytea hex uppercase digits", `\x4869`, oidBytea, `CAST('\x4869' AS BYTES)`},
+		{"bytea escape form", "hi", oidBytea, `CAST('\x6869' AS BYTES)`},
+		{"bytea escape octal", `\150\151`, oidBytea, `CAST('\x6869' AS BYTES)`},
+		{"bytea escape doubled backslash", `a\\b`, oidBytea, `CAST('\x615c62' AS BYTES)`},
 
 		// Quoting is by doubling, the only escape this lexer reads.
 		{"embedded quote", "it's", oidText, "'it''s'"},
@@ -139,14 +140,15 @@ func TestRenderParamBinary(t *testing.T) {
 			0xa1, 0x65, 0x70, 0x86, 0x77, 0x28, 0x95, 0x0e,
 		}, oidUUID, "CAST('0f8fad5b-d9cb-469f-a165-70867728950e' AS UUID)"},
 		// bytea's binary form IS the value's bytes, and the literal has to
-		// carry those bytes — not their `\x` SPELLING, which is a
+		// carry those bytes — not their `\x` SPELLING as text, which is a
 		// ten-character STRING that matches nothing against a BYTES column
-		// (#570). Every byte here survives the lexer verbatim: lexString
-		// slices the input rather than re-encoding runes, so 0xde does not
-		// become U+FFFD on the way back in.
-		{"bytea", []byte{0xde, 0xad, 0xbe, 0xef}, oidBytea, "'" + string([]byte{0xde, 0xad, 0xbe, 0xef}) + "'"},
-		{"bytea with a quote and a NUL", []byte{'a', '\'', 0x00}, oidBytea, "'a''" + string([]byte{0x00}) + "'"},
-		{"bytea empty", []byte{}, oidBytea, "''"},
+		// (#570), and not the raw bytes in a quoted literal either, which a
+		// BYTES consumer reads through byteain a second time (a backslash
+		// among them was 22P02, #1501). The typed hex value carries every
+		// byte, a quote and a NUL included.
+		{"bytea", []byte{0xde, 0xad, 0xbe, 0xef}, oidBytea, `CAST('\xdeadbeef' AS BYTES)`},
+		{"bytea with a quote and a NUL", []byte{'a', '\'', 0x00}, oidBytea, `CAST('\x612700' AS BYTES)`},
+		{"bytea empty", []byte{}, oidBytea, `CAST('\x' AS BYTES)`},
 		// Binary text is the same bytes as text text.
 		{"text", []byte("it's"), oidText, "'it''s'"},
 	}

@@ -5,9 +5,9 @@ package wadjet
 import (
 	"context"
 	"fmt"
-	"strings"
 	"testing"
 
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/ingest"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -80,8 +80,12 @@ func TestByteaLiteralRefusalsFollowByteain(t *testing.T) {
 	db := f3ByteaOpen(t)
 
 	for _, c := range []struct{ name, lit, state string }{
-		{"odd_hex_digits", `\x6`, "22P02"},
-		{"bad_hex_digit", `\xzz`, "22P02"},
+		// hex_decode's two refusals are 22023 (invalid_parameter_value) on
+		// 17.11, not 22P02 — measured, and the one bytea reading raises them
+		// at every door since #1501.
+		{"odd_hex_digits", `\x6`, "22023"},
+		{"bad_hex_digit", `\xzz`, "22023"},
+		{"space_inside_a_digit_pair", `\x6 869`, "22023"},
 		{"lone_backslash", `a\b`, "22P02"},
 		{"uppercase_x_is_not_the_hex_form", `\X6869`, "22P02"},
 		{"trailing_backslash", `abc\`, "22P02"},
@@ -98,8 +102,8 @@ func TestByteaLiteralRefusalsFollowByteain(t *testing.T) {
 					t.Errorf("answered; PostgreSQL 17.11 refuses with %s\n  SQL: %s", c.state, sql)
 					continue
 				}
-				if !strings.Contains(err.Error(), "bytea") {
-					t.Errorf("%v — want a bytea input refusal\n  SQL: %s", err, sql)
+				if got := sqlerr.StateOf(err); got != c.state {
+					t.Errorf("%v (SQLSTATE %s) — PostgreSQL 17.11 refuses with %s\n  SQL: %s", err, got, c.state, sql)
 				}
 			}
 		})

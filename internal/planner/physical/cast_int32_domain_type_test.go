@@ -78,7 +78,15 @@ func TestInferCastTypeInt32DomainSpellings(t *testing.T) {
 	// VECTOR left this list in arc CW round 2: Cast.Eval converts to it
 	// (pgvector's array_to_vector / vector_in), so it declares VECTOR — the
 	// pass-through text it answered made every vector function read NULL.
-	for _, spelling := range []string{"DURATION", "BYTES"} {
+	//
+	// BYTES left it with #1501: Cast.Eval reads a text operand through
+	// byteain (expr.castToBytes), so the cast declares BYTES.
+	for _, spelling := range []string{"BYTES", "binary", " VARBINARY "} {
+		if got := inferCastType(spelling); got != parquet.TypeBytes {
+			t.Errorf("inferCastType(%q) = %v, want BYTES", spelling, got)
+		}
+	}
+	for _, spelling := range []string{"DURATION"} {
 		if got := inferCastType(spelling); got != parquet.TypeString {
 			t.Errorf("inferCastType(%q) = %v, want STRING — Cast.Eval has no arm for it, "+
 				"so declaring a type would publish the operand under an OID nothing produces",

@@ -336,6 +336,8 @@ func castDestType(dest string) (batch.TypeID, bool) {
 		return batch.TypeDecimal, true
 	case "CHAR", "VARCHAR", "TEXT", "STRING":
 		return batch.TypeString, true
+	case "BYTES", "BINARY", "VARBINARY":
+		return batch.TypeBytes, true
 	case "DATE":
 		return batch.TypeDate, true
 	case "TIMESTAMP", "DATETIME", "TIMESTAMPTZ":

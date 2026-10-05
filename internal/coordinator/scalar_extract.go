@@ -181,7 +181,7 @@ func formatGoValue(v any) string {
 	case string:
 		return "'" + strings.ReplaceAll(x, "'", "''") + "'"
 	case []byte:
-		return "'" + strings.ReplaceAll(string(x), "'", "''") + "'"
+		return expr.BytesValueLiteral(x).String()
 	default:
 		return fmt.Sprint(v)
 	}
@@ -302,7 +302,12 @@ func formatScalar(vec *batch.Vector, row int, typ parquet.TypeID) string {
 			return "null"
 		}
 		return strconv.FormatFloat(v, 'f', -1, 64)
-	case parquet.TypeString, parquet.TypeBytes, parquet.TypeIPv6, parquet.TypeCIDR, parquet.TypeUUID:
+	case parquet.TypeBytes:
+		// The typed BYTES value, as dagplan.scalarToLiteral spells it: the
+		// raw bytes in a quoted literal were read by byteain a second time
+		// beside a BYTES operand (#1501).
+		return expr.BytesValueLiteral(vec.BytesData.Value(row)).String()
+	case parquet.TypeString, parquet.TypeIPv6, parquet.TypeCIDR, parquet.TypeUUID:
 		s := string(vec.BytesData.Value(row))
 		return "'" + strings.ReplaceAll(s, "'", "''") + "'"
 	case parquet.TypeDecimal:

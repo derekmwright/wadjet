@@ -1487,7 +1487,14 @@ func (c *pgConn) handleBind(payload []byte) {
 					counts[i], err = renderCountParam(raw, binaryFmt, oid)
 				}
 				if err != nil {
-					c.sendError("ERROR", "22023", fmt.Sprintf("binding parameter $%d: %v", i+1, err))
+					// The input function's own class where it named one —
+					// byteain's 22P02 / 22023 for a text-format bytea
+					// parameter (#1501) — and 22023 for the rest.
+					state := sqlerr.StateOf(err)
+					if state == "" {
+						state = "22023"
+					}
+					c.sendError("ERROR", state, fmt.Sprintf("binding parameter $%d: %v", i+1, err))
 					// The extended protocol's error state, as for every other
 					// refusal here: without it the client's Describe/Execute
 					// ran the PREVIOUS portal's SQL (c.portalSQL is untouched)

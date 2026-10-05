@@ -7,7 +7,6 @@ import (
 	"math"
 	"strconv"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
@@ -19,9 +18,9 @@ import (
 // Use CAST for DECIMAL/DATE/TIMESTAMP/REAL, numeric spelling for numeric
 // values and quoted text for network/UUID values; the round-trip gate is
 // TestOuterLiteralRendersEveryTypeAsItsOwnType.
-// An ARRAY is its typed array literal (ArrayValueLiteral). Refuse ROW/MAP/
-// VECTOR, an ARRAY whose element has no exact cast spelling, and BYTES
-// containing invalid UTF-8 or NUL: this substitution path has no faithful
+// An ARRAY is its typed array literal (ArrayValueLiteral), BYTES its typed
+// hex value (BytesValueLiteral). Refuse ROW/MAP/VECTOR and an ARRAY whose
+// element has no exact cast spelling: this substitution path has no faithful
 // literal spelling for them.
 // Every CAST spelling here is COLUMN-TYPED (plansql.CastNode.Column): the
 // literal is the value of an outer column of that type, and the re-run types
@@ -165,14 +164,19 @@ func outerColumnLiteral(v *batch.Vector, precision, row int) (plansql.Node, erro
 		return str(s), nil
 
 	case batch.TypeBytes:
+		// The typed BYTES value (BytesValueLiteral), column-typed like every
+		// other CAST here. The raw bytes as a quoted literal were read by
+		// byteain a second time beside a BYTES operand, so an outer value
+		// holding `\x41` matched the row holding `A` and one holding two
+		// backslashes matched nothing (#1501); a NUL or invalid UTF-8 had no
+		// spelling at all and refused the query.
 		raw, ok := val.([]byte)
 		if !ok {
 			return nil, unrenderableOuterValue(v.Type, val)
 		}
-		if !bytesHaveALiteral(raw) {
-			return nil, unrenderableOuterValue(v.Type, val)
-		}
-		return str(string(raw)), nil
+		lit := BytesValueLiteral(raw)
+		lit.Column = true
+		return lit, nil
 
 	case batch.TypeArray:
 		// An ARRAY outer value is its typed array literal (arc CW round 5,
@@ -250,22 +254,6 @@ func outerDecimalScale(v *batch.Vector) int {
 		v = v.Base
 	}
 	return v.DecimalData.Scale
-}
-
-// bytesHaveALiteral reports whether these bytes survive the round trip
-// through the only bytea spelling this dialect has, a quoted string.
-//
-// A NUL cannot travel through the wire's text format at all (#570), and
-// invalid UTF-8 does not survive the parser's string handling. Both come back
-// as DIFFERENT bytes, which is a wrong answer rather than a failure — so the
-// renderer refuses instead.
-func bytesHaveALiteral(raw []byte) bool {
-	for _, b := range raw {
-		if b == 0 {
-			return false
-		}
-	}
-	return utf8.Valid(raw)
 }
 
 // UnrenderableOuterValueError reports an outer-row value with no literal

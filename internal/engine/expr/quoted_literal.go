@@ -170,6 +170,14 @@ func RefuseNetworkPrefixLiteral(typ batch.TypeID, text string) error {
 }
 
 func numericLitError(typ batch.TypeID, text string, st kernel.NumConstStatus) error {
+	if typ == batch.TypeBytes {
+		// byteain's own refusal, which is two classes: 22023 for the hex
+		// form's odd digit count or non-hex digit, 22P02 for the escape form.
+		// The one reading every text → BYTES door shares raises it, so a
+		// comparison and an INSERT of the same literal refuse alike (#1501).
+		_, err := kernel.ByteaIn(text)
+		return err
+	}
 	name, ok := kernel.NumericTypeName(typ)
 	if !ok {
 		return nil

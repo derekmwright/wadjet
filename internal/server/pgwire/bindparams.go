@@ -27,6 +27,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
+	"github.com/derekmwright/wadjet/internal/engine/expr"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -101,50 +103,23 @@ func quoteLiteral(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
 }
 
-// decodeByteaText reads PostgreSQL's TEXT representation of a bytea value
-// into the bytes it denotes, the way byteain does:
+// byteaParamLiteral is the SQL a bytea parameter's BYTES stand as: a typed
+// BYTES value spelled in byteain's hex form, `CAST('\x6869' AS BYTES)`.
 //
-//	\x48656c6c6f   hex form, the default bytea_output produces it
-//	Hello\134\000  escape form: \\ is one backslash, \ooo one octal byte,
-//	                and every other byte stands for itself
-//
-// A malformed spelling is an ERROR rather than a fallback to the raw text:
-// the two forms are not ambiguous, and quietly binding the SPELLING of a
-// value the client meant as bytes is how `WHERE b = $1` matches nothing.
-func decodeByteaText(s string) ([]byte, error) {
-	if strings.HasPrefix(s, `\x`) || strings.HasPrefix(s, `\X`) {
-		raw, err := hex.DecodeString(s[2:])
-		if err != nil {
-			return nil, fmt.Errorf("bytea parameter is not valid hex: %w", err)
-		}
-		return raw, nil
-	}
-	out := make([]byte, 0, len(s))
-	for i := 0; i < len(s); i++ {
-		if s[i] != '\\' {
-			out = append(out, s[i])
-			continue
-		}
-		if i+1 < len(s) && s[i+1] == '\\' {
-			out = append(out, '\\')
-			i++
-			continue
-		}
-		if i+3 < len(s) && isOctalDigit(s[i+1]) && isOctalDigit(s[i+2]) && isOctalDigit(s[i+3]) {
-			v := (int(s[i+1]-'0') << 6) | (int(s[i+2]-'0') << 3) | int(s[i+3]-'0')
-			if v > 0xFF {
-				return nil, fmt.Errorf("bytea parameter has an octal escape past one byte: %q", s[i:i+4])
-			}
-			out = append(out, byte(v))
-			i += 3
-			continue
-		}
-		return nil, fmt.Errorf("bytea parameter has an invalid escape at offset %d", i)
-	}
-	return out, nil
+// TYPED, because a bytea parameter is a bytea value wherever it lands (#1501):
+// the quoted literal it was before is SQL's `unknown`, which each consumer then
+// read through its own input function a second time — a comparison or an
+// assignment beside a BYTES column through byteain, so the binary bytes
+// `00 ff 5c` became an escape and refused 22P02 (parameters-pgwire#r10/#r11),
+// and `SELECT $1` answered text. The HEX form, because it round-trips every
+// byte exactly — a NUL, invalid UTF-8 and a backslash included.
+func byteaParamLiteral(raw []byte) string {
+	// Upper-case CAST, the spelling every typed parameter literal here has,
+	// so untypedLiteral can hand a MERGE action's value its bare hex literal
+	// (the target column's byteain reads it back to the same bytes).
+	n := expr.BytesValueLiteral(raw)
+	return "CAST(" + n.Inner.String() + " AS " + n.TypeName + ")"
 }
-
-func isOctalDigit(c byte) bool { return c >= '0' && c <= '7' }
 
 // renderParam turns one Bind parameter into the SQL literal that stands in for
 // it. raw is the parameter's bytes, binary reports the format code, and oid is
@@ -244,27 +219,15 @@ func renderTextParam(s string, oid uint32) (string, error) {
 		}
 		return quoteLiteral(s), nil
 	case oid == oidBytea:
-		// PostgreSQL's TEXT input for bytea, byteain: either the hex form
-		// `\x` + hex digits, or the historical escape form where a
-		// backslash introduces `\\` for one backslash and `\ooo` for one
-		// octal byte. Both denote BYTES, and what wadjet compares a BYTES
-		// column against is the VALUE's bytes — so the literal written here
-		// carries those bytes, not their spelling. Writing the spelling was
-		// the defect: `WHERE b = $1` bound with the two bytes "hi" became
-		// `WHERE b = '\x6869'`, a ten-character string against a two-byte
-		// column, and matched nothing (#570).
-		raw, err := decodeByteaText(s)
+		// PostgreSQL's TEXT input for bytea, byteain — the one reading every
+		// text → BYTES door shares (kernel.ByteaIn): the hex form `\x…` or
+		// the escape form. What the parameter denotes is those BYTES, not
+		// their spelling (#570); a text byteain refuses is refused at Bind.
+		raw, err := kernel.ByteaIn(s)
 		if err != nil {
 			return "", err
 		}
-		// Written back in byteain's HEX form rather than as the raw bytes.
-		// Since #582 the engine reads a literal beside a BYTES column through
-		// byteain too, so raw bytes carrying a backslash would be decoded a
-		// SECOND time here — `\` would collapse to one byte and a lone
-		// backslash would become a refusal. The hex form round-trips exactly,
-		// whatever the bytes are, and is the spelling the server itself
-		// produces.
-		return `'\x` + hex.EncodeToString(raw) + `'`, nil
+		return byteaParamLiteral(raw), nil
 	case oid == oidBool:
 		switch strings.ToLower(strings.TrimSpace(s)) {
 		case "t", "true", "y", "yes", "on", "1":
@@ -544,12 +507,11 @@ func renderBinaryParam(raw []byte, oid uint32) (string, error) {
 
 	case oidBytea:
 		// The binary form of a bytea parameter IS the value's bytes
-		// (bytearecv), so they go straight into the literal. Rendering them
-		// as `\x` + hex instead wrote a TEN-character string literal for a
-		// two-byte value, which compared against a BYTES column matched
-		// nothing — the silent-wrong-answer shape this whole file exists to
-		// close, on the one type it had left open (#570).
-		return quoteLiteral(string(raw)), nil
+		// (bytearecv): no input function reads them, so they are written as
+		// the typed value they are (byteaParamLiteral). Spliced raw into a
+		// quoted literal, a backslash among them was read by byteain a second
+		// time and refused 22P02 (parameters-pgwire#r11).
+		return byteaParamLiteral(raw), nil
 
 	case oidNumeric:
 		text, err := renderBinaryNumeric(raw)

@@ -52,7 +52,14 @@ func TestOuterLiteralRendersEveryTypeAsItsOwnType(t *testing.T) {
 			"__column_value(cast('0.14285715' as real))"},
 		{"string", batch.TypeString, 0, "s-000001", "'s-000001'"},
 		{"string_with_a_quote", batch.TypeString, 0, "o'brien", "'o''brien'"},
-		{"bytes", batch.TypeBytes, 0, []byte("bytes-000001-x"), "'bytes-000001-x'"},
+		// BYTES is its typed hex value (BytesValueLiteral, #1501): the raw
+		// bytes in a quoted literal were read by byteain a second time beside
+		// a BYTES operand. The hex form spells every byte, so a NUL and
+		// invalid UTF-8 render too (they were refused, below, before).
+		{"bytes", batch.TypeBytes, 0, []byte("bytes-000001-x"), `__column_value(cast('\x62797465732d3030303030312d78' as BYTES))`},
+		{"bytes_backslash", batch.TypeBytes, 0, []byte(`\x41`), `__column_value(cast('\x5c783431' as BYTES))`},
+		{"bytes_with_a_nul", batch.TypeBytes, 0, []byte{0x41, 0x00, 0x42}, `__column_value(cast('\x410042' as BYTES))`},
+		{"bytes_invalid_utf8", batch.TypeBytes, 0, []byte{0xff, 0xfe, 0x00, 0x41}, `__column_value(cast('\xfffe0041' as BYTES))`},
 		{"timestamp", batch.TypeTimestamp, 0, int64(1699999999000),
 			"__column_value(cast('2023-11-14 22:13:19' as timestamp))"},
 		// Sub-second precision has to survive: batch.FormatTimestamp keeps
@@ -151,12 +158,8 @@ func TestOuterLiteralRefusesValuesWithNoLiteralSpelling(t *testing.T) {
 		{"float64_inf", batch.TypeFloat64, math.Inf(1)},
 		{"float64_neg_inf", batch.TypeFloat64, math.Inf(-1)},
 		{"float32_nan", batch.TypeFloat32, float32(math.NaN())},
-		// The only bytea spelling the parser accepts is a quoted string, and
-		// these bytes do not survive it: a NUL cannot travel through the
-		// wire's text format at all (#570) and invalid UTF-8 comes back as
-		// different bytes.
-		{"bytes_with_a_nul", batch.TypeBytes, []byte{0x41, 0x00, 0x42}},
-		{"bytes_invalid_utf8", batch.TypeBytes, []byte{0xff, 0xfe, 0x00, 0x41}},
+		// BYTES left this list with #1501: its typed hex value spells every
+		// byte (TestOuterLiteralRendersEveryTypeAsItsOwnType's bytes rows).
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			v := batch.NewVector(tc.typ, 1)

@@ -17,6 +17,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/auth"
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec"
+	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
 	"github.com/derekmwright/wadjet/internal/engine/expr"
 	"github.com/derekmwright/wadjet/internal/engine/scan"
 	"github.com/derekmwright/wadjet/internal/planner/physical"
@@ -4149,7 +4150,7 @@ func columnChecked(v any, err error) func(parquet.Column) (any, error) {
 }
 
 // convertValue decodes literal text, then convertUnquoted selects its type.
-// BYTES passes raw string bytes; network/UUID text uses the authoritative
+// BYTES reads the text through byteain (kernel.ByteaIn, #1501); network/UUID text uses the authoritative
 // writer conversion. DECIMAL stays exact TEXT until declared (p,s) is known;
 // an integer box would mean an unscaled carrier (ADR-0018 §4; #647).
 // The checked leaf converter rounds scale and refuses 22003/22P02, never
@@ -4249,6 +4250,22 @@ func convertUnquoted(s string, typ parquet.TypeID) (any, error) {
 		return v, nil
 	case parquet.TypeString:
 		return s, nil
+	case parquet.TypeBytes:
+		// byteain, the one reading of a text as bytea (kernel.ByteaIn): the
+		// literal `'\x6869'` is the two bytes 0x68 0x69, as it is to a
+		// comparison of the same column (#582). The text itself was handed on
+		// before, so INSERT, UPDATE, MERGE and COPY stored its six characters
+		// and the row did not match the literal it was written with (#1501). A
+		// text byteain refuses is refused here, before any row is written.
+		//
+		// The box stays a Go STRING holding the bytes — the box this arm has
+		// always returned and the writer stores verbatim — so a BYTES
+		// partition key still formats as the bytes' text.
+		raw, err := kernel.ByteaIn(s)
+		if err != nil {
+			return nil, err
+		}
+		return string(raw), nil
 	case parquet.TypeIPv4, parquet.TypeIPv6, parquet.TypeCIDR, parquet.TypeMAC, parquet.TypeUUID:
 		// The five text-formed network types, validated HERE rather than left
 		// to the writer, because the writer's `""` means ABSENCE — the empty

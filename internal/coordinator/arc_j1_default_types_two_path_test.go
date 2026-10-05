@@ -113,8 +113,11 @@ func TestArcJ1TheEmptyInputDefaultIsRightForEveryTypeFamily(t *testing.T) {
 		{"string", nullThen(`CAST(COUNT(*) AS VARCHAR)`), `Alice,NULL | Bob,2 | Carol,0`},
 		{"string-concat", nullThen(`'n=' || CAST(COUNT(*) AS VARCHAR)`),
 			`Alice,NULL | Bob,n=2 | Carol,n=0`},
+		// A BYTES value since #1501 (the cast reads its text through
+		// byteain, `\x32` / `\x30` on PostgreSQL); e3Render prints a byte
+		// slice as Go does.
 		{"bytes", nullThen(`CAST(CAST(COUNT(*) AS VARCHAR) AS BYTES)`),
-			`Alice,NULL | Bob,2 | Carol,0`},
+			`Alice,NULL | Bob,[50] | Carol,[48]`},
 		{"int64", nullThen(`COUNT(*) + 1`), `Alice,NULL | Bob,3 | Carol,1`},
 		{"int32", nullThen(`CAST(COUNT(*) AS INT32)`), `Alice,NULL | Bob,2 | Carol,0`},
 		{"float64", nullThen(`COALESCE(SUM(amount), 0)`), `Alice,NULL | Bob,200 | Carol,0`},
