@@ -33,8 +33,8 @@ Rendering the bytea operand through `bytea_out` needs the operand's declared typ
 |---|---|---|---|---|---|---|---|
 | **r1** `SELECT 'B' < 'a'` | f under a locale collation such as en_US; t in a C-collation database | t (measured): strings compare and sort by bytes | — | value divergence | — · [E12](#e12), P081 | — | — |
 | **r2** `SELECT 'a' < 'b' COLLATE "en_US"` | t (compared under en_US) | ERROR 0A000 collation "en_US" is not supported (measured); C, POSIX, ucs_basic and default are accepted | 0A000 | refusal | — · P111 | — | — |
-| **r3** `SELECT 'abab' ~ '(a)b\1'` | t | ERROR 0A000 regular expression back reference \1 is not supported (measured): RE2 matches; `regexp_replace` reads its pattern through the same translation and refuses the same forms (2026-10-02) | 0A000 | refusal | — · P110, [RN](../0012-amendments.md#2026-10-02-the-scalar-renderers-write-a-value-as-its-declared-types-text-1474-1466-1467-1481) | #1481 | `coordinator.TestArcRNRendererTableEveryArm` rx/backrefPattern |
-| **r4** `SELECT 'É' ~* 'é'` | t under a UTF-8 locale collation | f: case-insensitive matching folds ASCII letters only, as PostgreSQL does under the C collation; `regexp_replace`'s `i` flag the same, and its `\y` counts ASCII letters, digits and `_` as word characters (2026-10-02, measured) | — | value divergence | — · P110, [RN](../0012-amendments.md#2026-10-02-the-scalar-renderers-write-a-value-as-its-declared-types-text-1474-1466-1467-1481) | #1481 | `coordinator.TestArcRNRendererTableEveryArm` rx/icaseNonASCII, rx/wordY |
+| **r3** `SELECT 'abab' ~ '(a)b\1'` | t | ERROR 0A000 regular expression back reference \1 is not supported (measured): RE2 matches; every regular-expression construct — `regexp_replace` (2026-10-02), `regexp_like`, `regexp_count`, `substring(s FROM p)`, SIMILAR TO and the engine's own `regexp_extract`, `regexp_extract_all`, `regexp_split`, `payload_matches` (2026-10-05) — reads its pattern through the same translation and refuses the same forms | 0A000 | refusal | — · P110, [RN](../0012-amendments.md#2026-10-02-the-scalar-renderers-write-a-value-as-its-declared-types-text-arc-rn-1474-1466-1467-1481), [RX](../0012-amendments.md#2026-10-05-every-regular-expression-construct-reads-its-pattern-as-an-are-arc-rx-1499) | #1481, #1499 | `coordinator.TestArcRNRendererTableEveryArm` rx/backrefPattern, `expr.TestArcRXTranslateAndCompileRows` |
+| **r4** `SELECT 'É' ~* 'é'` | t under a UTF-8 locale collation | f: case-insensitive matching folds ASCII letters only, as PostgreSQL does under the C collation; `regexp_replace`'s `i` flag the same, and its `\y` counts ASCII letters, digits and `_` as word characters (2026-10-02, measured); in every regular-expression construct `\w` and `[[:alpha:]]` are ASCII classes: `regexp_like('é', '\w')` is f (PostgreSQL t under en_US.utf8; 2026-10-05, measured) | — | value divergence | — · P110, [RN](../0012-amendments.md#2026-10-02-the-scalar-renderers-write-a-value-as-its-declared-types-text-arc-rn-1474-1466-1467-1481), [RX](../0012-amendments.md#2026-10-05-every-regular-expression-construct-reads-its-pattern-as-an-are-arc-rx-1499) | #1481, #1499 | `coordinator.TestArcRNRendererTableEveryArm` rx/icaseNonASCII, rx/wordY, `coordinator.TestArcRXRegexTableEveryArm` like/wordNonASCII |
 | **r5** `SELECT CAST('ab' AS CHAR(4))` | 'ab  ' (blank-padded to 4) | 'ab' (measured): no blank-padded string type; length, \|\| and = agree with PostgreSQL | — | value divergence | 2026-09-03 · [E56](#e56), P006 | #708, #838 | `wadjet.TestStringCastEnforcesItsLengthAndStillDropsTheDeclaration` |
 | **r6** `SELECT CAST('abcdef' AS CHAR(4))` | abcd, declared character(4) (OID 1042) | abcd, declared character varying(4) (OID 1043) (measured) | — | value divergence | 2026-09-04 · [E56](#e56), P006 | #708 | `pgwire.TestVarcharCastDeclaresItsLengthOnTheWire` |
 | **r7** `SELECT CAST('abcdef' AS CHAR)` | a, declared character(1) | abcdef, declared text (measured): bare CHAR is the unparameterized string | — | value divergence | 2026-09-04 · [E56](#e56), P006 | #708 | `pgwire.TestVarcharCastDeclaresItsLengthOnTheWire` |
@@ -53,8 +53,9 @@ Rendering the bytea operand through `bytea_out` needs the operand's declared typ
 | **r20** `SELECT LOCALTIME` | the current local time, declared time | ERROR 42703 unknown column "localtime" (measured): no TIME type | 42703 | documented gap | — · P112 | #1169 | — |
 | **r21** `SELECT 'abc' IS NORMALIZED` | t | ERROR 42601 syntax error at or near "NORMALIZED" (measured) | 42601 | documented gap | — · P112 | #1169 | — |
 | **r22** `SELECT U&'\0065\0301'` | é (e plus combining acute) | ERROR 42601 unexpected character: & (measured) | 42601 | documented gap | — · P112 | #1169 | — |
-| **r23** `SELECT regexp_replace(E'x\nab', '^a', 'X', 'n')` | x, newline, Xb (newline-sensitive) | ERROR 0A000 regexp_replace flag "n" is not supported (measured); `m`, `p`, `w`, `x`, `b` and `e` the same, and an integer fourth argument (a start position) | 0A000 | refusal | 2026-10-02 · [RN](../0012-amendments.md#2026-10-02-the-scalar-renderers-write-a-value-as-its-declared-types-text-1474-1466-1467-1481) | #1481 | `coordinator.TestArcRNRendererTableEveryArm` rx/flagN, rx/flagP, rx/flagW, rx/flagX, rx/flagB, rx/flagE |
-| **r24** `SELECT regexp_replace('Hello', 'x*?H*', '#')` | #Hello: a non-greedy RE takes the shortest match | #ello (measured): an RE holding a non-greedy quantifier is matched leftmost-first, and among equal-length matches the groups are RE2's leftmost-first choice (`regexp_replace('abcd', '(a\|ab)(c\|bcd)(d*)', '[\1\|\2\|\3]')` is [a\|bcd\|] where PostgreSQL writes [ab\|c\|d]); an RE whose quantifiers are all greedy takes the longest match, as PostgreSQL does | — | value divergence | 2026-10-02 · [RN](../0012-amendments.md#2026-10-02-the-scalar-renderers-write-a-value-as-its-declared-types-text-1474-1466-1467-1481) | #1481 | `coordinator.TestArcRNRendererTableEveryArm` rx/lazyRE, rx/posixCaptures |
+| **r23** `SELECT regexp_replace(E'x\nab', '^a', 'X', 'n')` | x, newline, Xb (newline-sensitive) | ERROR 0A000 regexp_replace flag "n" is not supported (measured); `m`, `p`, `w`, `x`, `b` and `e` the same, and an integer fourth argument (a start position); `regexp_like`'s and `regexp_count`'s flags argument refuses the same letters (`regexp_like(E'x\nab', '^a', 'n')` is 0A000, PostgreSQL t; 2026-10-05, measured) | 0A000 | refusal | 2026-10-02 · [RN](../0012-amendments.md#2026-10-02-the-scalar-renderers-write-a-value-as-its-declared-types-text-arc-rn-1474-1466-1467-1481), [RX](../0012-amendments.md#2026-10-05-every-regular-expression-construct-reads-its-pattern-as-an-are-arc-rx-1499) | #1481, #1499 | `coordinator.TestArcRNRendererTableEveryArm` rx/flagN, rx/flagP, rx/flagW, rx/flagX, rx/flagB, rx/flagE, `coordinator.TestArcRXRegexTableEveryArm` likeFlags/n |
+| **r24** `SELECT regexp_replace('Hello', 'x*?H*', '#')` | #Hello: a non-greedy RE takes the shortest match | #ello (measured): an RE holding a non-greedy quantifier is matched leftmost-first, and among equal-length matches the groups are RE2's leftmost-first choice (`regexp_replace('abcd', '(a\|ab)(c\|bcd)(d*)', '[\1\|\2\|\3]')` is [a\|bcd\|] where PostgreSQL writes [ab\|c\|d]); an RE whose quantifiers are all greedy takes the longest match, as PostgreSQL does; the same preference in `regexp_count`, `substring(s FROM p)` and `regexp_extract` (`regexp_extract('k=v=w', '(.*?)=(.*)', 2)` is v=w where `regexp_substr(…, 1, 1, '', 2)` is the empty string; 2026-10-05, measured) | — | value divergence | 2026-10-02 · [RN](../0012-amendments.md#2026-10-02-the-scalar-renderers-write-a-value-as-its-declared-types-text-arc-rn-1474-1466-1467-1481), [RX](../0012-amendments.md#2026-10-05-every-regular-expression-construct-reads-its-pattern-as-an-are-arc-rx-1499) | #1481, #1499 | `coordinator.TestArcRNRendererTableEveryArm` rx/lazyRE, rx/posixCaptures, `coordinator.TestArcRXRegexTableEveryArm` extract/lazy |
+| **r25** `SELECT regexp_count('ab', '\yb', 2)` | 0: the search starts at the second character and `\y` reads the character before it | ERROR 0A000 (measured): a start position past 1 over a pattern holding `^`, `\A`, `\y` or `\Y` is refused, since the match runs over the rest of the string as a whole text; any other pattern answers from the start'th character (`regexp_count('éaéa', 'a', 3)` is 1) | 0A000 | refusal | 2026-10-05 · [RX](../0012-amendments.md#2026-10-05-every-regular-expression-construct-reads-its-pattern-as-an-are-arc-rx-1499) | #1499 | `coordinator.TestArcRXRegexTableEveryArm` countStart/wordY |
 
 ## Source entries
 
@@ -162,7 +163,7 @@ ADR lines 2215-2326. Catalog rows: r5, r6, r7, r8, r9, r10. Stated in [Mechanism
   carries all three answers now — a positive length, `character varying`
   unconstrained (`parquet.StringLengthUnconstrainedVarchar`), and `text` —
   and `parquet.VarcharNoLength` is the one place the family's spellings are
-  named (earlier measurement, P2). Bare `CHAR` is deliberately not in it: the
+  named (round-1 review, P2). Bare `CHAR` is deliberately not in it: the
   server reads that as `character(1)` and TRUNCATES, which is part of the
   bpchar residual below rather than a declaration question.
 
@@ -191,8 +192,8 @@ ADR lines 2215-2326. Catalog rows: r5, r6, r7, r8, r9, r10. Stated in [Mechanism
 
 ADR lines 2574-2581. Stated in [Mechanisms](#mechanisms).
 
-- **`ENCODE` takes BYTES and not text.** (Added 2026-09-18, the earlier expression-typing
-  measurement, N6.) `encode('hi'::text, 'hex')` is
+- **`ENCODE` takes BYTES and not text.** (Added 2026-09-18, arc EX's
+  round-1 review, N6.) `encode('hi'::text, 'hex')` is
   `42883 function encode(text, unknown) does not exist` on 17.11 while
   `md5(text)`, `length(text)` and `substring(text)` all answer there — the
   asymmetry is PostgreSQL's own, so `encode`'s first position is
@@ -205,7 +206,7 @@ ADR lines 2574-2581. Stated in [Mechanisms](#mechanisms).
 ADR lines 2582-2647. Catalog rows: r11, r12, r13, r14. Stated in [Mechanisms](#mechanisms).
 
 - **A text-only function over a BYTES argument raises 42883.** (Added
-  2026-09-05, #583; CLOSED 2026-09-18.) `upper(b)`, `lower(b)`,
+  2026-09-05, #583; CLOSED 2026-09-18, arc EX.) `upper(b)`, `lower(b)`,
   `trim(b)`, `reverse(b)`, `replace(b, ...)`, `starts_with(b, ...)`,
   `split_part(b, ...)`, `lpad(b, ...)`, `repeat(b, ...)` and `char_length(b)` /
   `character_length(b)` have no bytea overload on the server —
@@ -232,13 +233,13 @@ ADR lines 2582-2647. Catalog rows: r11, r12, r13, r14. Stated in [Mechanisms](#m
   by bytes, and `bytea || bytea` is bytea under OID 17. `text || bytea` is
   TEXT there and here: the server resolves that pair through
   `text || anynonarray`, and declaring it bytea was a wrong class this arc
-  briefly introduced and its measurement caught. The plan-time
+  briefly introduced and its review caught. The plan-time
   argument-type check the rest needed is `expr.RefuseUnresolvableCall`, run
   from the binder's own walk (`physical.refuseInvalidRowFields`), which BOTH
   `Plan` and `dagplan.PlanDistributed` reach before any stage exists — so the
   refusal is one answer for every arm, and `expr.compileFuncCallNamed` keeps
   the same call as the backstop for the doors that walk does not see
-  (2026-09-18).
+  (2026-09-18, arc EX).
 
   TWO value divergences ride with it, both pinned by
   `wadjet.TestByteaFunctionsAnswerInBytes`.
@@ -248,8 +249,8 @@ ADR lines 2582-2647. Catalog rows: r11, r12, r13, r14. Stated in [Mechanisms](#m
   appends four characters where the server appends one byte. That is
   #582's rule at a function ARGUMENT rather than at a comparison.
 
-  `residual_text_concat_bytea_value` (×3, added 2026-09-05 in earlier implementation —
-  the earlier implementation cells asserted these values as PostgreSQL's, which they are
+  `residual_text_concat_bytea_value` (×3, added 2026-09-05 in round 3 —
+  the round-2 cells asserted these values as PostgreSQL's, which they are
   not): where the pair is TEXT, the server RENDERS the bytea operand
   through `bytea_out` and concatenates the `\x` hex text, and this engine
   splices the raw bytes.
