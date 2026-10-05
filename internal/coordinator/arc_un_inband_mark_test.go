@@ -459,11 +459,14 @@ func unibArms(t *testing.T, ctx context.Context) []wdArm {
 }
 
 // TestArcUNLiteralArmOfASetOperationAgreesOnEveryArm: a set operation with an
-// untyped NULL (or quoted) arm read FROM a table, beside an unconstrained
-// NUMERIC column. The single-process rule and the stage planner's rule must
-// give the column one mark, so every arm prints one text and counts one
-// count; when they disagreed the stage arms printed the trimmed text, counted
-// differently, and the writer's mark check failed the bare read.
+// untyped NULL arm read FROM a table, beside an unconstrained NUMERIC column,
+// answers PostgreSQL 17.11's rows and counts on every arm. The result is
+// marked (an untyped NULL holds no digits of its own, ADR-0024 §10), so it
+// prints `1` where PostgreSQL does and the text equality count is 2. When the
+// stage planner and the single-process path each decided the mark they
+// disagreed (the stage arms printed the trimmed text and the writer's mark
+// check failed the bare read); the first repair agreed on UNMARKED, and every
+// arm then printed `1.0000000000` and counted 0.
 func TestArcUNLiteralArmOfASetOperationAgreesOnEveryArm(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: eleven arms over pgwire")
@@ -472,36 +475,28 @@ func TestArcUNLiteralArmOfASetOperationAgreesOnEveryArm(t *testing.T) {
 	t.Cleanup(cancel)
 	arms := unibArms(t, ctx)
 	typePrefix := regexp.MustCompile(`^type=\S* `)
-	for _, sql := range []string{
-		"SELECT v FROM (SELECT v FROM un_x UNION ALL SELECT NULL AS v FROM un_u) s ORDER BY 1",
-		"SELECT CAST(v AS TEXT) FROM (SELECT v FROM un_x UNION ALL SELECT NULL AS v FROM un_u) s ORDER BY 1",
-		"SELECT count(*) FROM (SELECT v FROM un_x UNION ALL SELECT NULL AS v FROM un_u) s WHERE CAST(v AS TEXT) = '1'",
-		"SELECT count(*) FROM (SELECT NULL AS v FROM un_u UNION ALL SELECT v FROM un_x) s WHERE CAST(v AS TEXT) LIKE '%0'",
-		"SELECT v FROM (SELECT v FROM un_x UNION ALL SELECT NULL FROM un_u UNION ALL SELECT v FROM un_u) s ORDER BY 1",
-		"SELECT count(*) FROM (SELECT v FROM un_x UNION SELECT NULL FROM un_u) s WHERE v || '' = '1'",
+	for _, c := range []struct{ sql, pg string }{
+		{"SELECT v FROM (SELECT v FROM un_x UNION ALL SELECT NULL AS v FROM un_u) s ORDER BY 1",
+			"rows=9 0.0000000001 | 1 | 1 | 1.5 | 7 | NULL | NULL | NULL | NULL"},
+		{"SELECT CAST(v AS TEXT) FROM (SELECT v FROM un_x UNION ALL SELECT NULL AS v FROM un_u) s ORDER BY 1",
+			"rows=9 0.0000000001 | 1 | 1 | 1.5 | 7 | NULL | NULL | NULL | NULL"},
+		{"SELECT count(*) FROM (SELECT v FROM un_x UNION ALL SELECT NULL AS v FROM un_u) s WHERE CAST(v AS TEXT) = '1'",
+			"rows=1 2"},
+		{"SELECT count(*) FROM (SELECT NULL AS v FROM un_u UNION ALL SELECT v FROM un_x) s WHERE CAST(v AS TEXT) LIKE '%0'",
+			"rows=1 0"},
+		{"SELECT v FROM (SELECT v FROM un_x UNION ALL SELECT NULL FROM un_u UNION ALL SELECT v FROM un_u) s ORDER BY 1",
+			"rows=12 0.0000000001 | 0.1 | 1 | 1 | 1.25 | 1.5 | 7 | 7 | NULL | NULL | NULL | NULL"},
+		{"SELECT count(*) FROM (SELECT v FROM un_x UNION SELECT NULL FROM un_u) s WHERE v || '' = '1'",
+			"rows=1 1"},
 	} {
-		first, firstArm := "", ""
 		for _, arm := range arms {
-			if strings.Contains(arm.name, "async") {
-				continue // the asynchronous door's own refusals are pinned in the table gate
-			}
-			res, err := arm.run(sql)
-			got := ""
+			res, err := arm.run(c.sql)
 			if err != nil {
-				got = "ERR " + strings.SplitN(err.Error(), "\n", 2)[0]
-			} else {
-				got = typePrefix.ReplaceAllString(unRender(res), "")
-			}
-			if strings.HasPrefix(got, "ERR ") {
-				t.Errorf("%s\n  arm %s: %s", sql, arm.name, got)
+				t.Errorf("%s\n  arm %s: ERR %s", c.sql, arm.name, strings.SplitN(err.Error(), "\n", 2)[0])
 				continue
 			}
-			if firstArm == "" {
-				first, firstArm = got, arm.name
-				continue
-			}
-			if got != first {
-				t.Errorf("%s\n  arm %s: %s\n  arm %s: %s", sql, firstArm, first, arm.name, got)
+			if got := typePrefix.ReplaceAllString(unRender(res), ""); got != c.pg {
+				t.Errorf("%s\n  arm %s: %s\n  PostgreSQL: %s", c.sql, arm.name, got, c.pg)
 			}
 		}
 	}
