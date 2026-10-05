@@ -76,7 +76,11 @@ import (
 // (a set-op arm's element, so the DAG casts an arm whose element differs). The
 // alternative was the DAG re-deriving an element from the Go value, which is
 // the fmt.Sprint text every one of those six issues came from (ADR-0045 §1).
-const maxAGPLPhysicalMembers = 222
+// 222 → 223 (2026-10-05, arc UN, #1541): `DecimalCoercion.Unconstrained` — a
+// set operation's arm is coerced to the result column's unconstrained mark
+// beside its (p,s), so the DAG reads the mark where it reads the scale
+// (ADR-0024 §10). The alternative was a second, name-keyed list on the stage.
+const maxAGPLPhysicalMembers = 223
 
 // measuredPhysicalMembers are the members reached through values. With the 16
 // package-scope names of measuredPhysicalNames they are the whole surface, and
@@ -90,6 +94,7 @@ ColDecls.Types
 DecimalCoercion.Name
 DecimalCoercion.Precision
 DecimalCoercion.Scale
+DecimalCoercion.Unconstrained
 GroupKeyResolution.Alias
 GroupKeyResolution.Computed
 GroupKeyResolution.Decl
