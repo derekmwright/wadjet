@@ -578,7 +578,20 @@ func DecimalTextAt(text string, scale int) (ScaledDecimal, bool) {
 		if len(digits)+shift > maxInt128Digits {
 			return saturatedDecimal(neg), true
 		}
-		kept = digits + strings.Repeat("0", shift)
+		// The digits scaled up in the carrier rather than padded with
+		// zeros in a new string: text with fewer fraction digits than the
+		// scale — the printed box of a column created unconstrained,
+		// `1.25` at scale 10 — is read back on every per-row write, and the
+		// padding was an allocation per value. 2^127 ends in 8, so no
+		// shifted value lands on the one magnitude MulPow10 declines.
+		v, ok := int128FromDigits(digits, neg)
+		if ok {
+			v, ok = v.MulPow10(shift)
+		}
+		if !ok {
+			return saturatedDecimal(neg), true
+		}
+		return ScaledDecimal{Unscaled: v}, true
 	default:
 		drop := -shift
 		if drop >= len(digits) {
