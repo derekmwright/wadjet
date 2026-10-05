@@ -43,11 +43,8 @@ func rxOutcome(fn string, args ...any) (out string) {
 	return fmt.Sprint(v)
 }
 
-// rxPatternFunctions is every registered function that takes a SQL pattern,
-// with how to call it over (subject, pattern). A function whose name reads
-// as a regular-expression function must be listed here
-// (TestArcRXEveryRegexFunctionCompilesThroughTheSeam), and every listed one
-// must answer the ARE reading.
+// rxPatternFunctions is how to call every function that takes a SQL
+// pattern over (subject, pattern). Its keys are regexFunctionDialect's.
 var rxPatternFunctions = map[string]func(s, p string) []any{
 	"textregexeq":        func(s, p string) []any { return []any{s, p} },
 	"texticregexeq":      func(s, p string) []any { return []any{s, p} },
@@ -66,40 +63,69 @@ var rxPatternFunctions = map[string]func(s, p string) []any{
 	"similar_to": func(s, p string) []any { return []any{s, "%" + strings.ReplaceAll(p, `\`, `#`) + "%", "#"} },
 }
 
-// TestArcRXEveryRegexFunctionCompilesThroughTheSeam walks the function
+// TestArcRXEveryRegexFunctionDeclaresItsDialect walks the function
 // registry: a function whose name reads as a regular-expression function
-// cannot be registered without a row in rxPatternFunctions, and every row
-// answers the ARE reading of two patterns the dialects read differently —
-// `\b` over 'abc' (a backspace: no match; RE2's word boundary matches) and
-// `b\z` (2201B: not an ARE escape; RE2's end of text).
-func TestArcRXEveryRegexFunctionCompilesThroughTheSeam(t *testing.T) {
+// cannot be registered without DECLARING its dialect (a regexFunctionDialect
+// row — PostgreSQL's constructs the ARE, the engine's DuckDB-origin
+// functions RE2), and every declared function answers in the dialect it
+// declares on two patterns the dialects read differently: `\b` over 'a b'
+// (ARE: a backspace, no match; RE2: a word boundary) and `b\z` over 'ab'
+// (ARE: 2201B, not an ARE escape; RE2: the end of the text).
+func TestArcRXEveryRegexFunctionDeclaresItsDialect(t *testing.T) {
 	nameRE := regexp.MustCompile(`regex|rlike|^similar|payload_match|glob`)
 	for _, name := range DefaultRegistry.Names() {
 		if nameRE.MatchString(name) {
-			if _, ok := rxPatternFunctions[name]; !ok {
-				t.Errorf("registered function %s reads as a regular-expression function but has no rxPatternFunctions row: "+
-					"compile its pattern with translateAndCompile and add the row", name)
+			if _, ok := regexFunctionDialect[name]; !ok {
+				t.Errorf("registered function %s reads as a regular-expression function but declares no dialect: "+
+					"add its regexFunctionDialect row (ARE for a PostgreSQL construct, RE2 for a DuckDB-origin function)", name)
 			}
 		}
 	}
-	// What each function answers over 'abc' with `\b` under the ARE
-	// reading (no match anywhere).
-	noMatch := map[string]string{
-		"textregexeq": "false", "texticregexeq": "false", "textregexne": "true", "texticregexne": "true",
-		"regexp_like": "false", "regexp_count": "0", "regexp_replace": "abc", "regexp_extract": "NULL",
-		"regexp_extract_all": "[]", "regexp_split": `["abc"]`, "payload_matches": "false",
-		"substring": "NULL", "similar_to": "false",
+	for name := range regexFunctionDialect {
+		if _, ok := rxPatternFunctions[name]; !ok {
+			t.Errorf("%s declares a dialect but has no rxPatternFunctions row", name)
+		}
 	}
-	for name, call := range rxPatternFunctions {
-		if !DefaultRegistry.Has(name) {
-			t.Errorf("%s is listed but not registered", name)
+	// Each function's answer to (subject, pattern) in each dialect.
+	type cell struct{ s, p string }
+	backspace, endOfText := cell{"a b", `\b`}, cell{"ab", `b\z`}
+	want := map[regexDialect]map[string]map[cell]string{
+		dialectARE: {
+			"textregexeq":    {backspace: "false", endOfText: "E:2201B"},
+			"texticregexeq":  {backspace: "false", endOfText: "E:2201B"},
+			"textregexne":    {backspace: "true", endOfText: "E:2201B"},
+			"texticregexne":  {backspace: "true", endOfText: "E:2201B"},
+			"regexp_like":    {backspace: "false", endOfText: "E:2201B"},
+			"regexp_count":   {backspace: "0", endOfText: "E:2201B"},
+			"regexp_replace": {backspace: "a b", endOfText: "E:2201B"},
+			"substring":      {backspace: "NULL", endOfText: "E:2201B"},
+			"similar_to":     {backspace: "false", endOfText: "E:2201B"},
+		},
+		dialectRE2: {
+			"regexp_extract":     {backspace: "", endOfText: "b"},
+			"regexp_extract_all": {backspace: `["","","",""]`, endOfText: `["b"]`},
+			"regexp_split":       {backspace: `["a"," ","b"]`, endOfText: `["a",""]`},
+			"payload_matches":    {backspace: "true", endOfText: "true"},
+		},
+	}
+	for name, d := range regexFunctionDialect {
+		call, ok := rxPatternFunctions[name]
+		if !ok {
 			continue
 		}
-		if got, want := rxOutcome(name, call("abc", `\b`)...), noMatch[name]; got != want {
-			t.Errorf(`%s('abc', '\b') = %s, want %s: \b is a backspace in an ARE`, name, got, want)
+		if !DefaultRegistry.Has(name) {
+			t.Errorf("%s declares a dialect but is not registered", name)
+			continue
 		}
-		if got := rxOutcome(name, call("ab", `b\z`)...); got != "E:2201B" {
-			t.Errorf(`%s('ab', 'b\z') = %s, want E:2201B: \z is not an ARE escape`, name, got)
+		cells, ok := want[d][name]
+		if !ok {
+			t.Errorf("%s declares dialect %d but the table has no answers for it in that dialect", name, d)
+			continue
+		}
+		for c, w := range cells {
+			if got := rxOutcome(name, call(c.s, c.p)...); got != w {
+				t.Errorf("%s(%q, %q) = %s, want %s (declared dialect %d)", name, c.s, c.p, got, w, d)
+			}
 		}
 	}
 }

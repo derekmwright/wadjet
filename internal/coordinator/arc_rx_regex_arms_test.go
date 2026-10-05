@@ -21,17 +21,19 @@ import (
 	"github.com/derekmwright/wadjet/wadjet"
 )
 
-// EVERY REGULAR-EXPRESSION CONSTRUCT READS ITS PATTERN AS AN ARE (#1499).
-// The seam is the compile of a SQL-supplied pattern (expr.translateAndCompile):
-// the `~` operators, SIMILAR TO, substring(s FROM p), regexp_like,
-// regexp_count, regexp_replace and this engine's own regexp_extract,
-// regexp_extract_all, regexp_split and payload_matches. This table is that
-// seam enumerated once — construct × pattern origin (a literal, a COLUMN of
-// patterns) × consumer (projection, WHERE, GROUP BY) — on five arms against
-// PostgreSQL 17.11's rows. A construct PostgreSQL does not have is measured
-// through its PostgreSQL equivalent (rxCell.pg): regexp_extract is
-// regexp_substr, regexp_extract_all the array of regexp_substr occurrences,
-// regexp_split regexp_split_to_array, payload_matches `~`.
+// EVERY REGULAR-EXPRESSION CONSTRUCT READS ITS PATTERN IN THE DIALECT ITS
+// ORIGIN GIVES IT (#1499). The seam is the compile of a SQL-supplied pattern
+// (expr.translateAndCompile). PostgreSQL's constructs — the `~` operators,
+// SIMILAR TO, substring(s FROM p), regexp_like, regexp_count, regexp_replace
+// — read PostgreSQL's ARE and are asserted against PostgreSQL 17.11's rows.
+// The engine's own DuckDB-origin functions — regexp_extract,
+// regexp_extract_all, regexp_split, payload_matches — read RE2 syntax as
+// written; PostgreSQL has no such function, so a cell over one is asserted
+// against the answer it gave at base 4256886b, RE2 as written
+// (testdata/arc_rx_regex_re2.tsv, measured on the five arms at base). This
+// table is that seam enumerated once — construct × pattern origin (a
+// literal, a COLUMN of patterns) × consumer (projection, WHERE, GROUP BY) —
+// on five arms.
 //
 // The fixture discriminates the two dialects: a subject holding a backspace
 // (`\b` in an ARE), a word a `\b` word boundary would find, an alternation
@@ -124,6 +126,10 @@ func rxKinds() []rxKind {
 		rxKind{"extract/longest", "regexp_extract(t.s, 'GET|GETS')", "regexp_substr(t.s, 'GET|GETS')"},
 		rxKind{"extract/group", "regexp_extract(t.s, '(a)(.)', 2)", "regexp_substr(t.s, '(a)(.)', 1, 1, '', 2)"},
 		rxKind{"extract/lazy", "regexp_extract(t.s, '(.*?)a(.*)', 2)", "regexp_substr(t.s, '(.*?)a(.*)', 1, 1, '', 2)"},
+		// A non-greedy RE in a PostgreSQL construct: leftmost-first per
+		// quantifier (catalog r24) — the group after a lazy prefix is the
+		// rest of the text here, the empty string on PostgreSQL.
+		rxKind{"substring/lazy", "substring(t.s FROM '(?:.*?)a(.*)')", ""},
 		rxKind{"count/longest", "regexp_count(t.s, 'a|aa')", ""},
 		rxKind{"count/abuttingEmpty", "regexp_count(t.s, 'a*')", ""},
 		// The flags argument (regexp_like) and the start position in
@@ -159,6 +165,54 @@ func rxKinds() []rxKind {
 type rxCell struct {
 	name, sql, pg string
 	ordered       bool
+	// own: the expression calls one of the engine's DuckDB-origin
+	// functions, whose oracle is its answer at base (RE2), not PostgreSQL.
+	own bool
+}
+
+// rxOwnFunction reports whether an expression calls one of the engine's own
+// DuckDB-origin regular-expression functions (expr.regexFunctionDialect's
+// RE2 rows).
+func rxOwnFunction(expr string) bool {
+	for _, fn := range []string{"regexp_extract(", "regexp_extract_all(", "regexp_split(", "payload_matches("} {
+		if strings.Contains(expr, fn) {
+			return true
+		}
+	}
+	return false
+}
+
+// rxOracle is every cell's expected answer and its source: PostgreSQL
+// 17.11's (pgFile) for a PostgreSQL construct, the answer at base 4256886b
+// (re2File: name, answer) for a DuckDB-origin function. A cell without its
+// answer, or an answer for no cell, fails the table.
+func rxOracle(t *testing.T, cells []rxCell, pgFile, re2File string) map[string][2]string {
+	t.Helper()
+	pg := rnReadTSV(t, pgFile, 2)
+	re2 := rnReadTSV(t, re2File, 2)
+	out := map[string][2]string{}
+	for _, c := range cells {
+		src, why := pg, "PostgreSQL 17.11"
+		if c.own {
+			src, why = re2, "RE2 as at base 4256886b (a DuckDB-origin function)"
+		}
+		a, ok := src[c.name]
+		if !ok {
+			t.Fatalf("cell %s has no %s answer: re-measure the table", c.name, why)
+		}
+		out[c.name] = [2]string{a[0], why}
+	}
+	for name := range pg {
+		if _, ok := out[name]; !ok || out[name][1] != "PostgreSQL 17.11" {
+			t.Fatalf("%s: PostgreSQL answer for no PostgreSQL-construct cell %s", pgFile, name)
+		}
+	}
+	for name := range re2 {
+		if _, ok := out[name]; !ok || out[name][1] == "PostgreSQL 17.11" {
+			t.Fatalf("%s: base answer for no DuckDB-origin cell %s", re2File, name)
+		}
+	}
+	return out
 }
 
 func rxCells() []rxCell {
@@ -177,7 +231,7 @@ func rxCells() []rxCell {
 			// comparison of the value's text.
 			{"where", "SELECT t.id FROM rx_t t WHERE CAST(%s AS TEXT) IN ('true', 't', '1', 'ab', 'GETS', 'c', 'cat', '[\"\"]', 'b')"},
 		} {
-			out = append(out, rxCell{k.name + "/" + c.consumer, q(k.expr, c.tmpl), q(pgExpr, c.tmpl), false})
+			out = append(out, rxCell{name: k.name + "/" + c.consumer, sql: q(k.expr, c.tmpl), pg: q(pgExpr, c.tmpl), own: rxOwnFunction(k.expr)})
 		}
 	}
 	return out
@@ -239,9 +293,10 @@ func rxArms(t *testing.T, ctx context.Context, tables []tmdTable) []ssArm {
 
 const rxPGFile = "testdata/arc_rx_regex_pg17.tsv"
 const rxKeptFile = "testdata/arc_rx_regex_kept.tsv"
+const rxRE2File = "testdata/arc_rx_regex_re2.tsv"
 
-// TestArcRXMeasurePostgres measures every cell on PostgreSQL 17.11
-// (RX_PG_DSN=postgres://…) and writes the answer file.
+// TestArcRXMeasurePostgres measures every PostgreSQL-construct cell on
+// PostgreSQL 17.11 (RX_PG_DSN=postgres://…) and writes the answer file.
 func TestArcRXMeasurePostgres(t *testing.T) {
 	dsn := os.Getenv("RX_PG_DSN")
 	if dsn == "" {
@@ -261,6 +316,9 @@ func TestArcRXMeasurePostgres(t *testing.T) {
 	var b strings.Builder
 	b.WriteString("# arc RX: PostgreSQL 17.11's answer for every cell (TestArcRXMeasurePostgres)\n")
 	for _, c := range rxCells() {
+		if c.own {
+			continue
+		}
 		a := func() string {
 			rows, err := conn.Query(ctx, c.pg, pgx.QueryExecModeSimpleProtocol)
 			if err != nil {
@@ -292,21 +350,18 @@ func TestArcRXMeasurePostgres(t *testing.T) {
 }
 
 // TestArcRXRegexTableEveryArm runs every cell on the five arms and compares
-// with PostgreSQL 17.11's answer, or — for a cell in the kept file — with
-// the catalogued divergence or refusal it holds.
+// with its oracle's answer (rxOracle), or — for a cell in the kept file —
+// with the catalogued divergence or refusal it holds.
 func TestArcRXRegexTableEveryArm(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: five arms over the regular-expression table")
 	}
-	pg := rnReadTSV(t, rxPGFile, 2)
 	kept := rxKept(t)
 	cells := rxCells()
+	oracle := rxOracle(t, cells, rxPGFile, rxRE2File)
 	names := map[string]bool{}
 	for _, c := range cells {
 		names[c.name] = true
-		if _, ok := pg[c.name]; !ok {
-			t.Fatalf("cell %s has no PostgreSQL answer: re-measure the table", c.name)
-		}
 	}
 	for name := range kept {
 		if !names[name] {
@@ -327,7 +382,7 @@ func TestArcRXRegexTableEveryArm(t *testing.T) {
 	}
 	var dumpMu sync.Mutex
 	for _, tc := range cells {
-		pgWant := pg[tc.name][0]
+		o := oracle[tc.name]
 		ks := kept[tc.name]
 		t.Run(tc.name, func(t *testing.T) {
 			got := make([]string, len(arms))
@@ -352,7 +407,7 @@ func TestArcRXRegexTableEveryArm(t *testing.T) {
 				dumpMu.Unlock()
 			}
 			for i, arm := range arms {
-				want, why := pgWant, "PostgreSQL 17.11"
+				want, why := o[0], o[1]
 				dag := strings.HasPrefix(arm.name, "dag")
 				for _, k := range ks {
 					if k.scope == "all" || (k.scope == "dag") == dag {

@@ -16,12 +16,13 @@ import (
 	"github.com/derekmwright/wadjet/wadjet"
 )
 
-// A pattern that arrives as a BOUND PARAMETER is read as an ARE like a
-// literal one (#1499): the Bind door (text and unknown parameter OIDs) and
-// the embedded door (wadjet.DB.Query with the literal spelling) answer what
-// PostgreSQL 17.11 answers through `PREPARE x(text, …) AS …; EXECUTE x(…)`
-// (rx_author/pg_param.txt). regexp_extract is measured through its
-// PostgreSQL equivalent regexp_substr.
+// A pattern that arrives as a BOUND PARAMETER is read in its function's
+// dialect like a literal one (#1499): the Bind door (text and unknown
+// parameter OIDs) and the embedded door (wadjet.DB.Query with the literal
+// spelling) answer what PostgreSQL 17.11 answers through `PREPARE x(text, …)
+// AS …; EXECUTE x(…)` (rx_author/pg_param.txt) for PostgreSQL's constructs,
+// and — for the DuckDB-origin regexp_extract, RE2 syntax — what it answered
+// at base 4256886b (`\b` a word boundary).
 func TestArcRXPatternParameterReadsAsAnARE(t *testing.T) {
 	ctx := context.Background()
 	db, err := wadjet.Open(ctx, wadjet.Config{Store: objstore.NewMemStore(), Bucket: "rxparam"})
@@ -51,7 +52,8 @@ func TestArcRXPatternParameterReadsAsAnARE(t *testing.T) {
 		{"count/backspace", "SELECT regexp_count($1, $2)", []string{"abc", `\b`}, nil, "0"},
 		{"count/startFlags", "SELECT regexp_count($1, $2, $3, $4)", []string{"éaéa", "A", "3", "i"},
 			[]uint32{oidText, oidText, oidInt4, oidText}, "1"},
-		{"extract/wordB", "SELECT regexp_extract($1, $2)", []string{"the cat sat", `\bcat\b`}, nil, "NULL"},
+		{"extract/wordB", "SELECT regexp_extract($1, $2)", []string{"the cat sat", `\bcat\b`}, nil, "cat"},
+		{"extract/wordY", "SELECT regexp_extract($1, $2)", []string{"the cat sat", `\ycat\y`}, nil, "NULL"},
 		{"op/backspace", "SELECT $1 ~ $2", []string{"abc", `\b`}, nil, "f"},
 		{"op/wordY", "SELECT $1 ~ $2", []string{"the cat sat", `\ycat\y`}, nil, "t"},
 		{"substring/longest", "SELECT substring($1 FROM $2)", []string{"abc", "a|ab"}, nil, "ab"},
