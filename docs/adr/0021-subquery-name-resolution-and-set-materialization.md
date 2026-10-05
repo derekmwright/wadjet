@@ -43,9 +43,9 @@ plan, reading storage — never a cache sized for the enclosing
 statement's scans.
 
 §2d (2026-10-05, arc CM, #1531) states how often the single-process engine
-evaluates a WITH item whose body is volatile: once per statement, however
-many references read it and wherever they sit — and that the stage DAG does
-not yet.
+evaluates a WITH item whose body is volatile and that the statement reads
+more than once: once, filled on demand, whichever reference reads it — and
+that the stage DAG does not yet.
 
 ## Context
 
@@ -2889,9 +2889,11 @@ arms, a subquery predicate §2's resolution does not reach (under `IS NOT
 NULL`, `OR` or `NOT`), which fails in the worker's filter with no subquery
 runner (#1384, #1364).
 
-### 2d. A volatile CTE is evaluated ONCE per statement on the single-process path
+### 2d. A volatile CTE read more than once is evaluated ONCE, on demand, on the single-process path
 
-(Added 2026-10-05, arc CM, #1531.)
+(Added 2026-10-05, arc CM, #1531; amended the same day, round 3: the shared
+evaluation is filled on demand, a CTE read once is not shared, and a
+function's volatility is the registry's.)
 
 PostgreSQL 17.11 never inlines a CTE whose body contains a volatile function,
 and materializes any CTE referenced more than once; every reference reads one
@@ -2918,36 +2920,82 @@ reference were therefore evaluated once each:
   evaluations (50 of 50 ids with two values, PostgreSQL 0:
   `wadjet.TestArcCMInsertWithUnionAllStoresOneEvaluation`).
 
-**Decision.** A WITH item whose body is VOLATILE — it calls `random()`,
-`rand()`, `uuid()` or `gen_random_uuid()`, or samples a relation with
-`TABLESAMPLE`, anywhere in its text (`plansql.CTEDef.EvaluatedOnce`; a
-recursive CTE is materialized to its fixed point and is not this rule's) — is
-evaluated ONCE per statement, and every reference reads that result. The
-builder tags each reference with the definition (`logical.Node.OnceCTE`);
-the definition carries an identity every copy of the item shares, whichever
-scope copied it, so a reference in a subquery's text, in a nested block or in
-a set-operation arm finds the same entry. The first reference to arrive
-evaluates the body into a spill-backed collector — a pipeline breaker under
-the statement's memory budget, drained in quarter-budget runs
-(`physical.TestOnceCTEMaterializationSpillsAndBothReferencesAgree`: two
-million rows under 512 KiB, spilled, both sums equal) — and every reference,
-on any pipeline goroutine and through any subquery planner, replays it.
-`EXPLAIN VERBOSE` names each such CTE (`CTE s: volatile, evaluated once; every
-reference reads that result`).
+**Decision.** A WITH item whose body is VOLATILE and that the statement
+reads MORE THAN ONCE is evaluated once, and every reference reads that one
+evaluation (`plansql.CTEDef.EvaluatedOnce`; a recursive CTE is materialized
+to its fixed point and is not this rule's).
+
+- *Volatile* is the function registry's answer, asked once per call in the
+  body's text (`expr.IsVolatileFunction`): a builtin by its mark — `random()`,
+  `rand()`, `uuid()`, the set a test walking the registry asserts
+  (`expr.TestEveryRegisteredVolatileFunctionIsMarked`) — and a function
+  `CREATE FUNCTION` defined by its BODY, followed through the functions it
+  calls (`CREATE FUNCTION f_r() AS random()` makes `sum(f_r())` volatile:
+  `wadjet.TestArcCMVolatileUserFunctionMakesTheCTEShared`); a `TABLESAMPLE`
+  anywhere in the body; or a read of an earlier volatile item of the same
+  WITH list.
+- *Read more than once* is counted over the whole statement when it is
+  parsed: every FROM / JOIN reference in the statement's text — nested
+  blocks, expression subqueries, set-operation arms — and in the later
+  items' bodies (`relationRefs`). The count may only err high: a reference
+  inside a block that declares its own WITH counts twice, because that
+  block's items are inlined at each of their references.
+
+A volatile item read ONCE has one reader and nothing to share: it is planned
+exactly as at c67ebf5b — inlined, pushed into, a single reference's error
+raised exactly where it was (EXPLAIN VERBOSE of eight single-reference shapes
+is the text c67ebf5b printed: `wadjet.TestArcCMSingleReferenceVolatileCTEPlansAsAtBase`).
+PostgreSQL materializes such a CTE too, and a single reader of a
+materialization reads the rows an inlined body yields — with one exception
+measured: a reference inside a CORRELATED subquery is re-run per outer row
+here, so `WITH s AS (SELECT random() r) SELECT count(DISTINCT (SELECT r +
+t.id*0 FROM s)) FROM cm_big t WHERE t.id <= 50` answers 50, PostgreSQL 1
+(R1; a WITH declared inside the correlated subquery likewise, R3; catalog
+[other#r27](0012-divergences/other.md#catalog)).
+
+A volatile item read more than once is a SHARED SPOOL (`exec.SharedSpool`),
+keyed by an identity every copy of the item carries, whichever scope copied
+it, so a reference in a subquery's text, in a nested block or in a
+set-operation arm finds the same one. The first reference BUILT plans the
+body; the body RUNS only when some reader first asks for a batch, and
+advances one batch at a time only when a reader asks for a batch the spool
+does not hold yet — PostgreSQL's CTE Scan over one tuplestore. Every
+reference is a `Source` over the spool at its own position. So a reader that
+stops early (LIMIT, EXISTS) never forces rows nobody reads, nor the error on
+one: `… SELECT (SELECT g FROM s LIMIT 1) + (SELECT g FROM s LIMIT 1)` over a
+body that raises at its 150 000th row answers 2, as on PostgreSQL; a reader
+that reads on to that row raises it, when it reaches it; readers at
+different speeds, in either order, a self-join and both arms of a UNION ALL
+read one evaluation (`wadjet.TestArcCMSharedVolatileCTEIsFilledOnDemand`).
+Stored batches are charged to the statement's memory budget and written to
+quarter-budget runs past it (`physical.TestOnceCTEMaterializationSpillsAndBothReferencesAgree`:
+two million rows under 512 KiB, spilled, both sums equal); the statement's
+cleanup cancels a body still running and frees the runs
+(`wadjet.TestArcCMSharedSpoolEndsWithItsStatement`). `EXPLAIN VERBOSE` names
+each shared CTE (`CTE s: volatile, evaluated once; every reference reads that
+result`).
 
 A reference PostgreSQL never BEGINS is not a reader: under a constant-false
 filter or a LIMIT 0 its CTE Scan never runs, so the body is not evaluated for
-it. Such a reference gives up its claim on the one evaluation and is expanded
-in place with its samplers removed (`dropUnbegunSamples`): `WITH c AS (SELECT *
-FROM tb_p TABLESAMPLE BERNOULLI (101)) SELECT count(*) FROM c a JOIN c b ON
-a.id = b.id WHERE false` is 0, as on PostgreSQL, and read without the filter it
-is 2202H on both (unbegun/selfjoin\_where\_false, unbegun/sampled\_101\_read).
+it. This engine has no one-time filter — the subtree below such a filter is
+still pulled, and a pulled reader opens the spool — so such a reference
+gives up its claim on the shared evaluation and is expanded in place with
+its samplers removed (`dropUnbegunSamples`): `WITH c AS (SELECT * FROM tb_p
+TABLESAMPLE BERNOULLI (101)) SELECT count(*) FROM c a JOIN c b ON a.id = b.id
+WHERE false` is 0, as on PostgreSQL, and read without the filter it is 2202H
+on both (unbegun/selfjoin\_where\_false, unbegun/sampled\_101\_read).
 
-A reference count is not needed: a volatile body read once is evaluated once
-either way, and PostgreSQL materializes it too (`ref1_from/rnd`: one `CTE
-Scan`). A DETERMINISTIC body is untouched — inlined at each reference with
-the enclosing predicates pushed into it; six plan shapes print the text
+A DETERMINISTIC body is untouched — inlined at each reference with the
+enclosing predicates pushed into it; six plan shapes print the text
 c67ebf5b printed (`wadjet.TestArcCMDeterministicCTEPlanShapesAreUnchanged`).
+
+A set operation at the statement root carries no WITH list of its own — the
+builder hands the list to each arm's root — so an arm's expression subquery
+found no item and answered NULL (`WITH c AS (SELECT id FROM cm_p) SELECT
+(SELECT max(id) FROM c) UNION ALL SELECT (SELECT min(id) FROM c)`: NULL; NULL
+at c67ebf5b for a deterministic body too, PostgreSQL 3; 1). `Plan` now takes
+the statement's list through the set operation from its first arm
+(`statementCTEs`; `wadjet.TestArcCMSetOperationArmsReadTheStatementWith`).
 
 **Where it applies.** The cache exists on a statement planned by the local
 planner's `Plan`: the embedded engine, the `wadjet serve` doors, and on a

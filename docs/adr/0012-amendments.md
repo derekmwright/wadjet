@@ -1077,6 +1077,15 @@ Now the single-process planner serves every reference to a volatile WITH item fr
 | other | [r25](0012-divergences/other.md#catalog) | Added: `AS [NOT] MATERIALIZED` is 42601 on every arm (base-identical); PostgreSQL's own NOT MATERIALIZED over a sampled body read twice disagrees with itself | `coordinator.TestArcCMVolatileCTEReadTwiceIsEvaluatedOnce` ref1\_from/matrnd, nmatrnd |
 | other | [r26](0012-divergences/other.md#catalog) | Added: `WITH … INSERT` is 42601 on every arm (base-identical) | `coordinator.TestArcCMVolatileCTEReadTwiceIsEvaluatedOnce` dml\_withfirst/rnd |
 
+## 2026-10-05: a volatile CTE read more than once is filled on demand (arc CM round 3, #1531)
+
+The round-2 rule evaluated a volatile CTE's body whole when its first reference was planned, for a CTE read once too: at d56767c1 `WITH s AS (SELECT g, random() r, 1/(g-150000) z FROM generate_series(1,200000) g) SELECT g FROM s LIMIT 1` raised 22012 where c67ebf5b and PostgreSQL 17.11 answer 1, and `sum(f_r())` over `CREATE FUNCTION f_r() AS random()` read twice answered 3 (PostgreSQL 0). Now a volatile CTE the statement reads once is planned as at c67ebf5b, one read more than once is a shared spool filled on demand, volatility is the function registry's answer (a user function by its body), and a set operation at the root gives its arms' expression subqueries the statement's WITH list (ADR-0021 §2d; `wadjet.TestArcCMSharedVolatileCTEIsFilledOnDemand`, `TestArcCMSingleReferenceVolatileCTEPlansAsAtBase`, `TestArcCMVolatileUserFunctionMakesTheCTEShared`, `TestArcCMSetOperationArmsReadTheStatementWith`). A CTE read once from a correlated subquery is re-run per outer row, as at c67ebf5b.
+
+| family | row | change | gate |
+|---|---|---|---|
+| other | [r25](0012-divergences/other.md#catalog) | Narrowed: a volatile body READ MORE THAN ONCE is evaluated once without the keywords | `coordinator.TestArcCMVolatileCTEReadTwiceIsEvaluatedOnce` ref1\_from/matrnd, nmatrnd |
+| other | [r27](0012-divergences/other.md#catalog) | Added: a CTE read once from a correlated subquery, or declared inside one, is evaluated per outer row (50; PostgreSQL 1) | `wadjet.TestArcCMCorrelatedReaderIsEvaluatedPerOuterRow` |
+
 ## Dated markers inside the entries
 
 Every `Added` / `Amended` / `CLOSED` / `Corrected` / `narrowed` marker still inside an entry's verbatim text, in date order, with the entry that carries it.
