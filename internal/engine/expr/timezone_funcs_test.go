@@ -29,7 +29,9 @@ func TestPgPostmasterStartTime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("not the engine's timestamp rendering: %q (%v)", got, err)
 	}
-	if d := time.Since(ts); d < 0 || d > time.Minute {
+	// The bound is the test binary's own lifetime, not a minute: under -race
+	// on a loaded host the package runs longer than that before this test.
+	if d := time.Since(ts); d < 0 || d > 30*time.Minute {
 		t.Fatalf("process start %v is %v away from now — not this process", ts, d)
 	}
 	if second := tsText(fn(nil)).(string); second != got {
@@ -147,7 +149,7 @@ func TestDataGripStartupTimeChain(t *testing.T) {
 	if !ok {
 		t.Fatalf("round() returned %T, want float64", rounded)
 	}
-	if delta := math.Abs(got - float64(time.Now().Unix())); delta > 60 {
+	if delta := math.Abs(got - float64(time.Now().Unix())); delta > 1800 {
 		t.Fatalf("startup_time %v is %vs from now — not this process's start", got, delta)
 	}
 }
