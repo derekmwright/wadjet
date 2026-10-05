@@ -105,6 +105,11 @@ type CTEDef struct {
 
 	// ident is this item's identity, shared by every copy (volatile_cte.go).
 	ident *CTEIdentity
+	// reads and volatile are stamped when the statement is parsed
+	// (stampCTEReads): how many times the statement reads the item, and
+	// whether its body is volatile.
+	reads    int
+	volatile bool
 
 	// The CTE body, parsed at most once per definition — see sub_block.go.
 	body     *SelectInfo
@@ -513,7 +518,9 @@ func parseSelectStatement(stmt, body string) (*ParsedQuery, error) {
 		return nil, err
 	}
 
-	// Propagate CTE definitions
+	// Propagate CTE definitions, each with how often the statement reads it
+	// and whether its body is volatile (#1531).
+	stampCTEReads(cteDefs, trimmed)
 	info.CTEs = cteDefs
 
 	// Collect window specs from parsed columns (populated by parseSelectColumn

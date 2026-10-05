@@ -127,15 +127,6 @@ func (c *SpillableBatchCollector) Rows() int {
 	return c.totalRows
 }
 
-// SpillRuns reports how many runs the collector has written to disk — the
-// engagement a spill gate asserts (GATES.md: a gate must show the operator
-// actually spilled).
-func (c *SpillableBatchCollector) SpillRuns() int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return len(c.spillFiles)
-}
-
 // Schema returns the schema of the first consumed batch (nil if none).
 func (c *SpillableBatchCollector) Schema() []parquet.Column {
 	c.mu.Lock()

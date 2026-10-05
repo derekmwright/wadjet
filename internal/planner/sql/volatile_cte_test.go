@@ -59,7 +59,7 @@ func TestTextIsVolatileReadsTokens(t *testing.T) {
 // share one, even when they spell the same body.
 func TestCTEIdentityTravelsWithTheValue(t *testing.T) {
 	withTestOracle(t)
-	p, err := Parse("WITH s AS (SELECT random() AS r), u AS (SELECT random() AS r) SELECT r FROM s")
+	p, err := Parse("WITH s AS (SELECT random() AS r), u AS (SELECT random() AS r) SELECT a.r FROM s a, s b")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,6 +78,55 @@ func TestCTEIdentityTravelsWithTheValue(t *testing.T) {
 		t.Error("two WITH items share one identity")
 	}
 	if !info.CTEs[0].EvaluatedOnce() {
-		t.Error("a random() body is not evaluated once")
+		t.Error("a random() body read twice is not evaluated once")
+	}
+	if info.CTEs[1].EvaluatedOnce() {
+		t.Error("a random() body read by nobody is shared")
+	}
+}
+
+// HOW OFTEN A STATEMENT READS A WITH ITEM decides whether it is shared: a
+// volatile item read ONCE is planned as any other block (#1531 round 3). The
+// count may only err high.
+func TestStatementReadsOfAWithItem(t *testing.T) {
+	withTestOracle(t)
+	cells := []struct {
+		sql   string
+		reads []int // per WITH item
+		once  []bool
+	}{
+		{"WITH s AS (SELECT random() r) SELECT r FROM s", []int{1}, []bool{false}},
+		{"WITH s AS (SELECT random() r) SELECT r FROM s LIMIT 1", []int{1}, []bool{false}},
+		{"WITH s AS (SELECT random() r) SELECT a.r FROM s a JOIN s b ON true", []int{2}, []bool{true}},
+		{"WITH s AS (SELECT random() r) SELECT (SELECT r FROM s) <> (SELECT r FROM s)", []int{2}, []bool{true}},
+		{"WITH s AS (SELECT random() r) SELECT EXISTS (SELECT 1 FROM s)", []int{1}, []bool{false}},
+		{"WITH s AS (SELECT random() r) SELECT r FROM s UNION ALL SELECT r FROM s", []int{2}, []bool{true}},
+		{"WITH s AS (SELECT random() r) SELECT s.r FROM s WHERE s.r > 0", []int{1}, []bool{false}},
+		{"WITH s AS (SELECT random() r), t AS (SELECT r FROM s) SELECT a.r FROM t a, t b", []int{1, 2}, []bool{false, true}},
+		{"WITH s AS (SELECT random() r), t AS (SELECT r FROM s), u AS (SELECT r FROM s) SELECT * FROM t, u", []int{2, 1, 1}, []bool{true, false, false}},
+		{"WITH s AS (SELECT id FROM t) SELECT a.id FROM s a, s b", []int{2}, []bool{false}},
+		// A reference inside a block with its own WITH counts twice: that
+		// block's items are inlined at each of their references.
+		{"WITH s AS (SELECT random() r) SELECT * FROM (WITH t AS (SELECT r FROM s) SELECT a.r FROM t a, t b) x", []int{2}, []bool{true}},
+		{"WITH s AS (SELECT random() r) SELECT 'FROM s', u.s FROM u", []int{0}, []bool{false}},
+		{"WITH s AS (SELECT id FROM t TABLESAMPLE BERNOULLI (50)) SELECT * FROM (s a JOIN s b ON a.id = b.id)", []int{2}, []bool{true}},
+	}
+	for _, c := range cells {
+		p, err := Parse(c.sql)
+		if err != nil {
+			t.Fatalf("%s: %v", c.sql, err)
+		}
+		info, err := ExtractSelect(p)
+		if err != nil {
+			t.Fatalf("%s: %v", c.sql, err)
+		}
+		for i := range info.CTEs {
+			if got := info.CTEs[i].Reads(); got != c.reads[i] {
+				t.Errorf("%s: item %s read %d times, want %d", c.sql, info.CTEs[i].Name, got, c.reads[i])
+			}
+			if got := info.CTEs[i].EvaluatedOnce(); got != c.once[i] {
+				t.Errorf("%s: item %s shared = %v, want %v", c.sql, info.CTEs[i].Name, got, c.once[i])
+			}
+		}
 	}
 }

@@ -12,7 +12,7 @@ import (
 // A VOLATILE CTE'S ONE EVALUATION IS A PIPELINE BREAKER THAT SPILLS (#1531,
 // GATES.md spill gate). Two million rows read twice through two scalar
 // subqueries under a 512 KiB budget: the body is evaluated once into a
-// spill-backed collector (engagement: the collector wrote runs to disk), both
+// spill-backed spool (engagement: the spool wrote runs to disk), both
 // references read that one result, and the two sums are equal.
 func TestOnceCTEMaterializationSpillsAndBothReferencesAgree(t *testing.T) {
 	if testing.Short() {
@@ -44,20 +44,15 @@ func TestOnceCTEMaterializationSpillsAndBothReferencesAgree(t *testing.T) {
 	if len(rows) != 1 || rows[0]["n"] != int64(0) {
 		t.Fatalf("got %v, want one row 0 (PostgreSQL 17.11: the two references read one evaluation)", rows)
 	}
-	p.onceCTEs.mu.Lock()
-	defer p.onceCTEs.mu.Unlock()
-	if len(p.onceCTEs.entries) != 1 {
-		t.Fatalf("%d volatile CTE evaluations recorded, want exactly 1", len(p.onceCTEs.entries))
+	spools := p.onceCTEs.spools()
+	if len(spools) != 1 {
+		t.Fatalf("%d shared evaluations recorded, want exactly 1", len(spools))
 	}
-	for _, e := range p.onceCTEs.entries {
-		<-e.done
-		if e.err != nil || e.mat == nil || e.mat.coll == nil {
-			t.Fatalf("evaluation: err=%v mat=%v", e.err, e.mat)
-		}
-		if got := e.mat.coll.Rows(); got != 2000000 {
+	for _, sp := range spools {
+		if got := sp.Rows(); got != 2000000 {
 			t.Fatalf("the one evaluation holds %d rows, want 2000000", got)
 		}
-		if e.mat.coll.SpillRuns() == 0 {
+		if sp.SpillRuns() == 0 {
 			t.Fatal("the one evaluation never spilled under a 512 KiB budget: this gate compares two in-memory reads")
 		}
 	}
