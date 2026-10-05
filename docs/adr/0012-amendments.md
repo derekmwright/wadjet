@@ -1086,7 +1086,7 @@ Now a BYTES value is assigned to a text column as `\x` + hex (`ingest.assignment
 
 A CTE whose body calls `random()`, `rand()`, `uuid()` or samples a relation was evaluated once per reference wherever the reference was not a tag in the root's plan tree. At c67ebf5b (`coordinator.TestArcCMVolatileCTEReadTwiceIsEvaluatedOnce`, the gate file run at base: r2/gate\_arms\_at\_base\_FAILS.log): `WITH s AS (SELECT sum(random()) AS r FROM tb_big) SELECT count(*) FROM tb_p WHERE (SELECT r FROM s) <> (SELECT r FROM s)` answered 3 on single and spilled512k (issue/c1); `SELECT count(*) FROM (WITH s AS (SELECT id, random() AS r FROM tb_big WHERE id <= 50) SELECT a.id FROM s a JOIN s b ON a.id = b.id WHERE a.r <> b.r) x` answered 50 on single and spilled512k (nested\_derived/rnd); and `INSERT INTO cm_t WITH s AS (…random()…) SELECT id, r FROM s UNION ALL SELECT id, r FROM s` stored two values for each of 50 ids (`wadjet.TestArcCMInsertWithUnionAllStoresOneEvaluation`). PostgreSQL 17.11 answers 0, 0 and 0.
 
-Now the single-process planner serves every reference to a volatile WITH item from one evaluation per statement (ADR-0021 §2d); the stage DAG is unchanged and its per-consumer evaluation is a catalog row.
+On the single-process path, a volatile WITH item read more than once is evaluated once per statement; a CTE read once is not shared, a single reference from a correlated subquery is evaluated per outer row, and the stage DAG evaluates per consumer (ADR-0021 §2d; catalog other r24–r27).
 
 | family | row | change | gate |
 |---|---|---|---|
