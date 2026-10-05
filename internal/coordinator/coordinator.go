@@ -939,15 +939,17 @@ func (r *SQLResult) Rows() ([]map[string]any, error) {
 	if r == nil {
 		return nil, nil
 	}
-	// The result schema's printer (exec.TrimUnconstrainedRows, ADR-0024
-	// §10), read before Stream() detaches the batches.
+	// Each batch is boxed under the result schema's declaration, read before
+	// Stream() detaches the batches: a column created from an unconstrained
+	// numeric is boxed as its printed text (ADR-0024 §10,
+	// batch.Vector.GetValueOf).
 	schema := r.OutputSchema()
 	if r.stream == nil {
 		var rows []map[string]any
 		for _, b := range r.Batches {
+			b.Schema = exec.WithUnconstrainedOf(b.Schema, schema)
 			rows = append(rows, b.ToRows()...)
 		}
-		exec.TrimUnconstrainedRows(schema, rows, nil)
 		return rows, nil
 	}
 	s := r.Stream()
@@ -959,9 +961,9 @@ func (r *SQLResult) Rows() ([]map[string]any, error) {
 			return rows, err
 		}
 		if b == nil {
-			exec.TrimUnconstrainedRows(schema, rows, nil)
 			return rows, nil
 		}
+		b.Schema = exec.WithUnconstrainedOf(b.Schema, schema)
 		rows = append(rows, b.ToRows()...)
 	}
 }

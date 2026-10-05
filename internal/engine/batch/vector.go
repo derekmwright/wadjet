@@ -925,6 +925,28 @@ func NewMapVector(length int, keyType, valueType TypeID) *Vector {
 // GetValue returns the value at position i as an interface{}.
 // Note: returns boxed values for numeric types (unavoidable with any return type).
 // Prefer typed accessors (GetInt64, GetFloat64, etc.) in hot paths.
+// GetValueOf is GetValue for a value of a column whose declaration is
+// known: a DECIMAL column created from an unconstrained numeric
+// (parquet.Column.Unconstrained, ADR-0024 §10) boxes its PRINTED text, the
+// stored scale's trailing zeros dropped (TrimDecimalText) — `1.5` where
+// GetValue boxes `1.5000000000`. A DECIMAL's box is its text, so this is the
+// one printer decision for such a column: the result rows, every expression
+// that reads the column's value (CAST to TEXT, ||, concat, format,
+// json_build_object …) and every door read the same box. Every other value
+// is GetValue's.
+func (v *Vector) GetValueOf(i int, unconstrained bool) any {
+	if !unconstrained || v.Type != TypeDecimal {
+		return v.GetValue(i)
+	}
+	if v.Nulls.IsNullFast(i) {
+		return nil
+	}
+	if v.Base != nil {
+		return v.Base.GetValueOf(int(v.Indices[i]), true)
+	}
+	return TrimDecimalText(v.DecimalData.Data[i].FormatDecimal(v.DecimalData.Scale))
+}
+
 func (v *Vector) GetValue(i int) any {
 	if v.Nulls.IsNullFast(i) {
 		return nil

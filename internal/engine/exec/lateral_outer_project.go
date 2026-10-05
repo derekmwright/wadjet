@@ -54,6 +54,10 @@ type LateralOuterColumn struct {
 	Name string
 	Expr Expression
 	Decl expr.DeclType
+	// Unconstrained marks a bare reference to an outer DECIMAL column
+	// created from an unconstrained numeric (parquet.Column.Unconstrained,
+	// ADR-0024 §10), which the item's value still is.
+	Unconstrained bool
 }
 
 // projectColumn is this item as the projection operator's own column: the
@@ -69,6 +73,8 @@ func (c LateralOuterColumn) projectColumn(name string) ProjectColumn {
 		Fields:    c.Decl.RowFields(),
 		Precision: c.Decl.Precision,
 		Scale:     c.Decl.Scale,
+
+		Unconstrained: c.Unconstrained,
 	}
 	// A computed ARRAY/MAP's element, for the same reason (arc CW): an
 	// ARRAY vector allocated without one has no child to write into.

@@ -1263,58 +1263,42 @@ func (s *CollectSink) convert() {
 	schema := s.Schema()
 	positional := hasDuplicateColumnName(schema)
 	for i, b := range s.batches {
-		rows := b.ToRows()
-		var vals [][]any
+		// The batch boxes each value under the result's declaration, so a
+		// column created from an unconstrained numeric is boxed as its
+		// printed text (batch.Vector.GetValueOf) — once, rather than boxed
+		// and then re-boxed trimmed.
+		b.Schema = WithUnconstrainedOf(b.Schema, schema)
+		s.Rows = append(s.Rows, b.ToRows()...)
 		if positional {
-			vals = b.ToRowValues()
+			s.rowValues = append(s.rowValues, b.ToRowValues()...)
 		}
-		TrimUnconstrainedRows(schema, rows, vals)
-		s.Rows = append(s.Rows, rows...)
-		s.rowValues = append(s.rowValues, vals...)
 		s.batches[i] = nil
 	}
 	s.batches = nil
 }
 
-// TrimUnconstrainedRows is the printer of a column created from an
-// unconstrained numeric (parquet.Column.Unconstrained, ADR-0024 §10): its
-// values leave the engine without the stored scale's trailing zeros
-// (`1.25`, `1`), as PostgreSQL prints its unconstrained numeric column. It is
-// applied where a result is boxed — this sink, and the coordinator's result
-// (SQLResult.Rows, the gRPC stream) — keyed on the result schema's marker, so
-// every door that reads the boxed rows prints the same text. rows is the
-// name-keyed form, vals the positional one (either may be nil).
-func TrimUnconstrainedRows(schema []parquet.Column, rows []map[string]any, vals [][]any) {
-	var trim []int
-	for i, c := range schema {
-		if c.Unconstrained && c.Type == parquet.TypeDecimal {
-			trim = append(trim, i)
-		}
+// WithUnconstrainedOf is a batch schema carrying the result schema's
+// Unconstrained marks positionally; the batch's own schema when the two do
+// not line up or nothing is marked.
+func WithUnconstrainedOf(bs, result []parquet.Column) []parquet.Column {
+	if len(bs) != len(result) {
+		return bs
 	}
-	if len(trim) == 0 {
-		return
-	}
-	dup := hasDuplicateColumnName(schema)
-	for _, i := range trim {
-		name := schema[i].Name
-		for _, r := range vals {
-			if i < len(r) {
-				if t, ok := r[i].(string); ok {
-					r[i] = batch.TrimDecimalText(t)
-				}
-			}
-		}
-		if dup {
-			// A name two columns share addresses neither in the map; the
-			// positional form above is the answer for it.
+	var out []parquet.Column
+	for i := range bs {
+		if bs[i].Unconstrained == result[i].Unconstrained {
 			continue
 		}
-		for _, r := range rows {
-			if t, ok := r[name].(string); ok {
-				r[name] = batch.TrimDecimalText(t)
-			}
+		if out == nil {
+			out = make([]parquet.Column, len(bs))
+			copy(out, bs)
 		}
+		out[i].Unconstrained = result[i].Unconstrained && bs[i].Type == parquet.TypeDecimal
 	}
+	if out == nil {
+		return bs
+	}
+	return out
 }
 
 // hasDuplicateColumnName reports whether two columns of a schema share a

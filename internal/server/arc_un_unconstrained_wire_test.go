@@ -7,13 +7,16 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgconn"
+	"google.golang.org/protobuf/types/known/structpb"
 
+	wadjetv1 "github.com/derekmwright/wadjet/gen/wadjet/v1"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 	"github.com/derekmwright/wadjet/wadjet"
 )
@@ -70,6 +73,11 @@ func TestArcUNUnconstrainedColumnOnTheWire(t *testing.T) {
 		{"ctas_cast", "SELECT c FROM un_c ORDER BY id", 1700, -1, "1;2;3;4;5", "0;0;0;0;0"},
 		{"derived", "SELECT x.v FROM (SELECT id, v FROM un_w) x ORDER BY x.id", 1700, -1, "1.25;0.755;1;NULL;1234567890", "2;3;0;NULL;0"},
 		{"cast_text", "SELECT CAST(v AS TEXT) FROM un_w ORDER BY id", 25, -1, "1.25;0.755;1;NULL;1234567890", ""},
+		// Every TEXT rendering of the column's value is the one printer's
+		// (batch.Vector.GetValueOf): the operators read the same box.
+		{"cat", "SELECT v || '' FROM un_w ORDER BY id", 25, -1, "1.25;0.755;1;NULL;1234567890", ""},
+		{"concat", "SELECT concat(v, '|') FROM un_w ORDER BY id", 25, -1, "1.25|;0.755|;1|;|;1234567890|", ""},
+		{"format", "SELECT format('%s', v) FROM un_w ORDER BY id", 25, -1, "1.25;0.755;1;;1234567890", ""},
 		{"info_schema", "SELECT numeric_precision, numeric_scale FROM information_schema.columns WHERE table_name = 'un_w' AND column_name = 'v'", 0, 0, "NULL|NULL", ""},
 		// The controls.
 		{"constrained", "SELECT n FROM un_w ORDER BY id", 1700, (10<<16 | 2) + 4, "1.25;2.50;1.00;NULL;10.00", "2;2;2;NULL;2"},
@@ -92,6 +100,43 @@ func TestArcUNUnconstrainedColumnOnTheWire(t *testing.T) {
 				t.Errorf("%s over HTTP\n  got  %s\n  want %s", c.sql, got, c.want)
 			}
 		})
+	}
+	// The gRPC door, over the coordinator (the stream boxes the result
+	// batches itself) and over the embedded engine: the same text.
+	for _, door := range []struct {
+		name string
+		cfg  GRPCConfig
+	}{{"grpc-coordinator", GRPCConfig{Coord: coord}}, {"grpc-embedded", GRPCConfig{DB: db}}} {
+		g := NewGRPCServer(door.cfg, slog.Default())
+		for _, c := range []struct{ sql, key, want string }{
+			{"SELECT v FROM un_w ORDER BY id", "v", "1.25;0.755;1;NULL;1234567890"},
+			{"SELECT x.v FROM (SELECT id, v FROM un_w) x ORDER BY x.id", "v", "1.25;0.755;1;NULL;1234567890"},
+			{"SELECT v || '' AS t FROM un_w ORDER BY id", "t", "1.25;0.755;1;NULL;1234567890"},
+			{"SELECT c FROM un_c ORDER BY id", "c", "1;2;3;4;5"},
+			{"SELECT n FROM un_w ORDER BY id", "n", "1.25;2.50;1.00;NULL;10.00"},
+			{"SELECT l FROM un_legacy ORDER BY id", "l", "1;7"},
+		} {
+			t.Run(door.name+"/"+c.key+"/"+c.sql, func(t *testing.T) {
+				fs := &dupNameStream{}
+				if err := g.QueryStream(&wadjetv1.QueryRequest{Sql: c.sql}, fs); err != nil {
+					t.Fatalf("QueryStream(%s): %v", c.sql, err)
+				}
+				var cells []string
+				for _, r := range fs.sent {
+					for _, row := range r.Rows {
+						v := row.Fields[c.key]
+						if _, null := v.GetKind().(*structpb.Value_NullValue); v == nil || null {
+							cells = append(cells, "NULL")
+							continue
+						}
+						cells = append(cells, fmt.Sprint(v.AsInterface()))
+					}
+				}
+				if got := strings.Join(cells, ";"); got != c.want {
+					t.Errorf("%s over gRPC\n  got  %s\n  want %s", c.sql, got, c.want)
+				}
+			})
+		}
 	}
 	for _, door := range []struct{ name, addr string }{{"single", singleAddr}, {"dag", dagAddr}} {
 		conn, err := pgconn.Connect(ctx, fmt.Sprintf("postgres://wadjet:wadjet@%s/wadjet?sslmode=disable", door.addr))

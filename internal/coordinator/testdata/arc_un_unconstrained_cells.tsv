@@ -33,3 +33,28 @@ limit	SELECT id, v FROM un_t ORDER BY id LIMIT 3
 star	SELECT * FROM un_u
 div	SELECT id, v / 3 FROM un_t WHERE id IN (1, 6)
 round	SELECT id, ROUND(v, 1) FROM un_t
+r_cast	SELECT id, CAST(v AS TEXT) FROM un_t
+r_coloncast	SELECT id, v::text FROM un_t
+r_cat	SELECT id, v || '' FROM un_t
+r_cat_left	SELECT id, '' || v FROM un_t
+r_concat	SELECT id, concat(v, '|') FROM un_t
+r_concat_ws	SELECT id, concat_ws(',', v, w) FROM un_t
+r_format	SELECT id, format('%s', v) FROM un_t
+r_quote	SELECT id, quote_literal(v) FROM un_t
+r_json	SELECT id, CAST(json_build_object('v', v) AS TEXT) FROM un_t
+r_array	SELECT id, array_to_string(ARRAY[v], ',') FROM un_t
+r_derived	SELECT id, CAST(x AS TEXT), x || '' FROM (SELECT id, v AS x FROM un_t) d
+r_eq_cat	SELECT COUNT(*) FROM un_t WHERE CAST(v AS TEXT) = v || ''
+r_eq_concat	SELECT COUNT(*) FROM un_t WHERE CAST(v AS TEXT) = concat(v)
+r_eq_concat_ws	SELECT COUNT(*) FROM un_t WHERE CAST(v AS TEXT) = concat_ws(',', v)
+r_eq_format	SELECT COUNT(*) FROM un_t WHERE CAST(v AS TEXT) = format('%s', v)
+r_eq_quote	SELECT COUNT(*) FROM un_t WHERE quote_literal(CAST(v AS TEXT)) = quote_literal(v)
+r_eq_array	SELECT COUNT(*) FROM un_t WHERE CAST(v AS TEXT) = array_to_string(ARRAY[v], ',')
+r_eq_derived	SELECT COUNT(*) FROM (SELECT v AS x FROM un_t) d WHERE CAST(x AS TEXT) = x || ''
+r_where_cat	SELECT id FROM un_t WHERE v || '' = '1.25'
+r_group	SELECT COUNT(*) FROM (SELECT g, v FROM un_t GROUP BY g, v) q WHERE CAST(v AS TEXT) = v || '' AND CAST(v AS TEXT) = concat(v)
+r_cte	WITH c AS (SELECT id, v AS x FROM un_t) SELECT id, CAST(x AS TEXT), x || '' FROM c
+r_union	SELECT COUNT(*) FROM (SELECT id, v AS x FROM un_t UNION ALL SELECT id, w FROM un_t) s WHERE CAST(x AS TEXT) = x || '' AND CAST(x AS TEXT) = format('%s', x)
+r_lateral	SELECT t.id, CAST(l.x AS TEXT), l.x || '' FROM un_t t, LATERAL (SELECT t.v AS x) l
+r_join	SELECT un_t.id, CAST(un_t.v AS TEXT), un_u.v || '' FROM un_t JOIN un_u ON un_t.id = un_u.id
+r_distinct	SELECT DISTINCT CAST(v AS TEXT) FROM un_t
