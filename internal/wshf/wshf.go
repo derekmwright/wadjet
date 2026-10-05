@@ -72,6 +72,36 @@ const (
 // HeaderLen is the smallest possible header: magic + NumChunks + NumCols.
 const HeaderLen = 10
 
+// DecimalUnconstrainedBit is bit 7 of a DECIMAL column's header PRECISION
+// byte: set, the column was created from an unconstrained numeric
+// (parquet.Column.Unconstrained, ADR-0024 §10; ADR-0010's 2026-10-05
+// amendment). A precision is 1..38 (parquet.MaxDecimalDigits) and never
+// reaches the bit, so a column without the mark writes exactly the byte it
+// always wrote and every header without the bit reads as it always read.
+// The mark travels with the column by POSITION, as its type and scale do.
+const DecimalUnconstrainedBit = 0x80
+
+// DecimalPrecisionByte is the header's precision byte for a DECIMAL column of
+// precision p, with the unconstrained bit when the column carries the mark.
+// A precision the byte cannot hold beside the bit is refused, never truncated
+// into it.
+func DecimalPrecisionByte(p int, unconstrained bool) (byte, error) {
+	if p < 0 || p >= DecimalUnconstrainedBit {
+		return 0, fmt.Errorf("shuffle header: DECIMAL precision %d does not fit the header's precision byte", p)
+	}
+	b := byte(p)
+	if unconstrained {
+		b |= DecimalUnconstrainedBit
+	}
+	return b, nil
+}
+
+// SplitDecimalPrecisionByte is DecimalPrecisionByte's inverse: the precision
+// and whether the column carries the unconstrained mark.
+func SplitDecimalPrecisionByte(b byte) (precision int, unconstrained bool) {
+	return int(b &^ DecimalUnconstrainedBit), b&DecimalUnconstrainedBit != 0
+}
+
 // Sentinels returned by FixedTypeLen for the two classes whose byte count
 // is not a function of the row count.
 const (

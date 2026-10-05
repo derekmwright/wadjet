@@ -112,6 +112,11 @@ func (g *SchemaGuard) check(what string, schema []parquet.Column, ident []parque
 				"number silently (ADR-0010)",
 				want.name, got[i].precision, got[i].scale, what, want.precision, want.scale)
 		}
+		// The unconstrained mark (DecimalUnconstrainedBit) is not compared:
+		// it changes no carrier, and each file's batches carry their own
+		// file's mark, so two files that disagree print each value as its
+		// own column declared it — what PostgreSQL does for a set
+		// operation's arms of two typmods.
 	}
 	return nil
 }
