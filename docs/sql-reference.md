@@ -828,8 +828,7 @@ path makes it; a WITH query of the same name is the WITH query.
 
 The catalog functions those clients call are implemented: the pattern-match
 operators `~ ~* !~ !~*` (and `OPERATOR(pg_catalog.~)`; the pattern is read
-as every regular-expression construct reads it — see Regular expressions
-under String Functions), `COLLATE` for the byte-order collations (`C`, `POSIX`,
+as PostgreSQL's ARE — see Regular expressions under String Functions), `COLLATE` for the byte-order collations (`C`, `POSIX`,
 `ucs_basic`, `default`; any other is refused `0A000`), the `reg*` casts,
 `ARRAY(subquery)`, `format_type`, `pg_get_userbyid`, `to_regclass`,
 `pg_get_serial_sequence` and the `pg_get_*def` family.
@@ -4153,8 +4152,8 @@ see the Encoding Functions section.
 | `OVERLAY(s PLACING new FROM start [FOR count])` / `OVERLAY(s, new, start [, count])` | Replace `count` characters of `s` from `start` with `new`; `count` defaults to the length of `new`. `FROM 0` is SQLSTATE 22011 | `OVERLAY('Txxxxas' PLACING 'hom' FROM 2 FOR 4)` → `'Thomas'` |
 | `NORMALIZE(s [, NFC \| NFD \| NFKC \| NFKD])` | Unicode normalization; the form is a bare keyword and defaults to NFC | `NORMALIZE(name, NFD)` |
 | `REGEXP_LIKE(s, pattern [, flags])` | Whether the pattern matches, as PostgreSQL answers it; `flags` as below, `g` refused 22023 | `REGEXP_LIKE(src_ip, '^\d+\.\d+')` |
-| `REGEXP_EXTRACT(s, pattern [, group])` | The leftmost match, or its capture group; NULL without a match. PostgreSQL's `regexp_substr(s, pattern, 1, 1, '', group)` | `REGEXP_EXTRACT(url, '(\w+)://(\w+)', 2)` |
-| `REGEXP_REPLACE(s, pattern, repl [, flags])` | Replace the FIRST match, or every match under the `g` flag, as PostgreSQL does. The pattern is read as every regular-expression construct reads it (see Regular expressions below), and an RE whose quantifiers are all greedy takes the longest match. In `repl`, `\1`…`\9` are groups and `\&` the whole match. `flags` as below; an integer start position is refused 0A000 | `REGEXP_REPLACE(message, '\s+', ' ', 'g')` |
+| `REGEXP_EXTRACT(s, pattern [, group])` | The leftmost match, or its capture group; NULL without a match or for a pattern RE2 rejects. The pattern is RE2 syntax (see Regular expressions below) | `REGEXP_EXTRACT(url, '(\w+)://(\w+)', 2)` |
+| `REGEXP_REPLACE(s, pattern, repl [, flags])` | Replace the FIRST match, or every match under the `g` flag, as PostgreSQL does. The pattern is read as PostgreSQL's ARE (see Regular expressions below), and an RE whose quantifiers are all greedy takes the longest match. In `repl`, `\1`…`\9` are groups and `\&` the whole match. `flags` as below; an integer start position is refused 0A000 | `REGEXP_REPLACE(message, '\s+', ' ', 'g')` |
 | `REGEXP_COUNT(s, pattern [, start [, flags]])` | Count the matches, searching from the `start`th CHARACTER (a start below 1 is 22023); `flags` as below, `g` refused 22023 | `REGEXP_COUNT(path, '/')` → `3` |
 | `REGEXP_EXTRACT_ALL(s, pattern)` | Extract all regex matches (JSON array) | `REGEXP_EXTRACT_ALL(log, '\d+')` → `'["123","456"]'` |
 | `REGEXP_SPLIT(s, pattern)` | Split by regex (JSON array) | `REGEXP_SPLIT(csv, ',\s*')` |
@@ -4177,19 +4176,23 @@ see the Encoding Functions section.
 
 #### Regular expressions
 
-One dialect: every construct that takes a pattern — `~ ~* !~ !~*`, `SIMILAR TO`
-(whose rewrite is an ARE), `SUBSTRING(s FROM pattern)`, `REGEXP_LIKE`,
-`REGEXP_COUNT`, `REGEXP_REPLACE`, `REGEXP_EXTRACT`, `REGEXP_EXTRACT_ALL`,
-`REGEXP_SPLIT` and `PAYLOAD_MATCHES` — reads it as PostgreSQL's advanced
-regular expression (ARE), translated form by form for Go's RE2:
+A pattern is read in the dialect of the function's ORIGIN:
+
+| functions | dialect | word boundary |
+|---|---|---|
+| PostgreSQL's constructs: `~ ~* !~ !~*`, `SIMILAR TO` (whose rewrite is an ARE), `SUBSTRING(s FROM pattern)`, `REGEXP_LIKE`, `REGEXP_COUNT`, `REGEXP_REPLACE` | PostgreSQL's advanced regular expression (ARE), translated form by form for Go's RE2; the options below; the forms RE2 cannot express are refused 0A000 | `\y` (`\b` is a backspace) |
+| This engine's own, DuckDB-origin functions, which PostgreSQL does not have: `REGEXP_EXTRACT`, `REGEXP_EXTRACT_ALL`, `REGEXP_SPLIT`, `PAYLOAD_MATCHES` | RE2 syntax as written, as DuckDB reads these functions' patterns: the first alternative that matches is preferred, `.` does not match a newline, `(?i)` `(?m)` `(?s)` `(?U)`, `\z`, `\pL`, `\Q…\E` and `(?P<name>…)` are RE2's; a pattern RE2 rejects answers NULL | `\b` |
+
+So `REGEXP_LIKE('the cat sat', '\bcat\b')` is false and `REGEXP_LIKE('the
+cat sat', '\ycat\y')` true, while `REGEXP_EXTRACT('the cat sat', '\bcat\b')`
+is `cat`. In PostgreSQL's constructs:
 
 - `\b` is a backspace and `\B` a backslash; the word boundary is `\y` (`\Y` its
-  negation): `REGEXP_LIKE('abc', '\b')` is false, `REGEXP_EXTRACT('the cat sat',
-  '\ycat\y')` is `cat`.
+  negation).
 - `.` and a negated bracket match a newline unless a newline option says
   otherwise (below); `\A` and `\Z` anchor the string.
 - An RE whose quantifiers are all greedy takes the longest match at the
-  leftmost position: `REGEXP_EXTRACT('GETS /x', 'GET|GETS')` is `GETS`. An RE
+  leftmost position: `SUBSTRING('GETS /x' FROM 'GET|GETS')` is `GETS`. An RE
   holding a non-greedy quantifier is matched leftmost-first, quantifier by
   quantifier (PostgreSQL makes the whole RE non-greedy).
 - Case-insensitivity matches each pattern letter's lower- and upper-case
@@ -4203,8 +4206,9 @@ regular expression (ARE), translated form by form for Go's RE2:
   lookbehind, `\m` / `\M`, `[[:<:]]` / `[[:>:]]`, a collating element — is
   refused 0A000.
 
-The options, as an embedded `(?…)` prefix or the flags argument (`REGEXP_LIKE`,
-`REGEXP_COUNT`, `REGEXP_REPLACE`); the letter written last wins:
+The options of PostgreSQL's constructs, as an embedded `(?…)` prefix or the
+flags argument (`REGEXP_LIKE`, `REGEXP_COUNT`, `REGEXP_REPLACE`); the letter
+written last wins:
 
 | letter | meaning |
 |---|---|
@@ -4222,7 +4226,9 @@ Any other letter is 22023. `REGEXP_COUNT`'s start past 1 over a pattern
 holding `^`, `\A`, `\y` or `\Y` is refused 0A000. A pattern compiles once and
 is kept in a bounded cache (4096 patterns, the oldest evicted first), so a
 literal pattern is not recompiled per row and a column of distinct patterns
-cannot grow memory past the bound.
+cannot grow memory past the bound; the bound is deliberate, so a column of
+more than 4096 distinct patterns recompiles each pattern the cache no longer
+holds.
 
 ### Version String Functions
 

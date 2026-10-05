@@ -70,6 +70,11 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
    recorded, and a gate that meets one configures its oracle to the recorded
    answer (item 3). It never exempts the query, and it keeps comparing
    everything else the row carries.
+   Where PostgreSQL has no such construct, the oracle is the engine the
+   spelling comes from — DuckDB for a DuckDB-origin function, so
+   `regexp_extract` reads its pattern in RE2 syntax as DuckDB does while
+   PostgreSQL's own regular-expression constructs read PostgreSQL's ARE
+   (arc RX, 2026-10-06).
 
    The divergences are the [divergence catalog](0012-divergences/README.md):
    one file per family, one row per cell (the SQL, PostgreSQL 17.11's answer,
