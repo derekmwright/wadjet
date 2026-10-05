@@ -263,7 +263,7 @@ type sqlRegex struct {
 // the cache past the bound.
 func translateAndCompile(pattern string, f reFlags) (*sqlRegex, error) {
 	key := regexCacheKey{pattern: pattern, opts: f.cacheOpts()}
-	if v, ok := regexCache.Load(key); ok {
+	if v, ok := regexCache[key.opts].Load(pattern); ok {
 		e := v.(*regexCacheEntry)
 		return e.re, e.err
 	}
@@ -350,8 +350,9 @@ func (r *sqlRegex) findAll(src string) [][]int {
 	return matches
 }
 
-// The bounded compile cache: a sync.Map (lock-free reads — the pattern is
-// almost always a constant looked up once per row) holding at most
+// The bounded compile cache: one sync.Map per option byte, keyed by the
+// pattern text (lock-free reads of a string key — the pattern is almost
+// always a constant looked up once per row), holding at most
 // regexCacheBound patterns. A ring of the stored keys, under a mutex taken
 // only on a miss, names the victim: a store past the bound evicts ONE entry,
 // the oldest (first in, first out), never the whole cache — so a working set
@@ -369,7 +370,7 @@ type regexCacheEntry struct {
 }
 
 var (
-	regexCache sync.Map // regexCacheKey → *regexCacheEntry
+	regexCache [64]sync.Map // [reFlags.cacheOpts] pattern → *regexCacheEntry
 	regexRing  struct {
 		mu   sync.Mutex
 		keys []regexCacheKey
@@ -381,7 +382,7 @@ var (
 )
 
 func regexCacheStore(k regexCacheKey, e *regexCacheEntry) {
-	if _, loaded := regexCache.LoadOrStore(k, e); loaded {
+	if _, loaded := regexCache[k.opts].LoadOrStore(k.pattern, e); loaded {
 		return
 	}
 	regexRing.mu.Lock()
@@ -394,13 +395,15 @@ func regexCacheStore(k regexCacheKey, e *regexCacheEntry) {
 	regexRing.keys[regexRing.next] = k
 	regexRing.next = (regexRing.next + 1) % regexCacheBound
 	regexRing.mu.Unlock()
-	regexCache.Delete(victim)
+	regexCache[victim.opts].Delete(victim.pattern)
 }
 
 // regexCacheLen is the number of patterns the cache holds.
 func regexCacheLen() int {
 	n := 0
-	regexCache.Range(func(_, _ any) bool { n++; return true })
+	for i := range regexCache {
+		regexCache[i].Range(func(_, _ any) bool { n++; return true })
+	}
 	return n
 }
 
