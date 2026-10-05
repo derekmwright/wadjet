@@ -82,7 +82,7 @@ ADR lines 62-305. Catalog rows: r2, r3, r4, r5, r7, r8, r9, r10, r11, r12, r13, 
   - STRING_AGG renders a non-text argument as its own text — BOOL, the
     integers, REAL, DOUBLE, DECIMAL, IPV4, IPV6, CIDR, MACADDR, PORT,
     PROTOCOL, DURATION, UUID and DATE (ISO) — which base answered
-    identically on every arm (arc BR round 2). TIMESTAMP (epoch
+    identically on every arm (arc BR). TIMESTAMP (epoch
     milliseconds) and typed container columns are 42883; BYTEA is
     below. An `ARRAY(subquery)` aggregate argument can instead return
     an incorrect value (#1309).
@@ -129,7 +129,7 @@ ADR lines 62-305. Catalog rows: r2, r3, r4, r5, r7, r8, r9, r10, r11, r12, r13, 
     TEXT)` against a bigint outer value was "kept" while the DAG's cast
     of the rendered text (`'14.0000'`) back to bigint is 22P02 and the
     single arms compared the text as it stood — an arm-dependent cell
-    inside the rule's own kept set. (Amended 2026-09-26, arc ST round 2,
+    inside the rule's own kept set. (Amended 2026-09-26, arc ST,
     #1308.) The body's CORRELATED equalities are the
     semi/anti join's keys and take the JOIN-key rule below: `EXISTS (…
     WHERE b.s = a.v)`, a correlated `IN`'s key, is 42883
@@ -250,7 +250,7 @@ ADR lines 62-305. Catalog rows: r2, r3, r4, r5, r7, r8, r9, r10, r11, r12, r13, 
     arms compare the text, so any other text converts data-dependently
     — #1073's `id IN (SELECT product … UNION ALL …)` answered 0 rows on
     the single arms and failed the cast on the DAG — and is 42883 (arc
-    BR round 3b). A quoted-literal body of the set-operation kind
+    BR measurements). A quoted-literal body of the set-operation kind
     (`v_date IN (SELECT '2024-01-02' … UNION ALL SELECT '2024-03-04'
     …)`) lost its text origin through the merge and kept a silent,
     data-dependent reading: for DATE, TIMESTAMP and BOOLEAN, and for a
@@ -259,7 +259,7 @@ ADR lines 62-305. Catalog rows: r2, r3, r4, r5, r7, r8, r9, r10, r11, r12, r13, 
     every arm answered the membership (2). The merge now carries the literal's origin
     through every set operator, so the body refuses 42883 the same way
     a single-SELECT literal body already did. (Amended 2026-09-26, arc
-    ST round 2, #1308.)
+    ST earlier implementation, #1308.)
     The merge still keeps the LEFT arm's origin when the two arms'
     origins share a comparisonClass, so a later arm whose CAST does not
     provably convert is never judged: `v IN (SELECT CAST(v AS TEXT) …
@@ -335,7 +335,7 @@ ADR lines 1695-1836. Catalog rows: r1, r2. Stated in [Mechanisms](#mechanisms).
   literal text the row path uses.
 
   **This rule is about a NUMERIC literal meeting a TEXT column, and it does
-  not run backwards.** (Added 2026-08-25, from the #504 review; the opposite
+  not run backwards.** (Added 2026-08-25, from the #504 measurement; the opposite
   pair is item 13's whole subject as of #646.) A QUOTED
   literal meeting a NUMBER column is the opposite pair and takes the
   opposite rule: PostgreSQL types an unknown-typed literal FROM the operand

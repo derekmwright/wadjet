@@ -63,7 +63,7 @@ is given comes from the EXECUTED plan — `QueryResult.OutputSchema`, which is
 the CollectSink's schema. `WITH NO DATA`, which does not execute, takes its
 TYPES from `Planner.DeclaredOutputSchema` and its NAMES from
 `physical.PublishedOutputNames` — the list `Plan` stamps onto the sink, derived
-from the LOGICAL plan alone. Three rounds of review were spent on where those
+from the LOGICAL plan alone. Three rounds of measurement were spent on where those
 names come from. Taking them from the type walk spells an unaliased item by its
 expression TEXT, so `WITH NO DATA` declared `"n + 1"` where `WITH DATA` and
 PostgreSQL say `?column?`, and with the name went the duplicate rule. Taking
@@ -76,7 +76,7 @@ name list is a walk over the logical plan and nothing else. Both are post-
 enforcement, which is what makes rule 2 of the Context hold.
 
 **2b. Every value goes through the one assignment conversion.** (Added
-2026-09-13, the round-2 review.) A CREATE needs none — its target columns ARE
+2026-09-13, the earlier measurement.) A CREATE needs none — its target columns ARE
 the query's declared output — but an APPEND has two type lists, and the value
 has to cross between them. It crosses through `assignEvaluatedValue`, the
 converter `INSERT … VALUES` and `UPDATE … SET` have used since #647/#678, at the
@@ -100,7 +100,7 @@ manifest, and the statement ends in one catalog write:
   earlier ones back. Readers do not agree about which record IS the table —
   `GetTable` reads the first, `DropTable` goes through the last — so a partial
   write leaves not a half-table but a WEDGED NAME, one that cannot be read,
-  created or dropped (the round-2 review reached it from ordinary SQL);
+  created or dropped (the earlier measurement reached it from ordinary SQL);
 - `catalog.CommitIngest` for an append — one CAS, validated INSIDE the CAS
   against the table incarnation the STATEMENT read (#919, ADR-0030).
 
@@ -129,7 +129,7 @@ executed on the node that received them. MERGE's own source read
 (`db.Query("SELECT * FROM <source>")`) is exactly this shape. A CTAS joins that
 family rather than breaking it.
 
-The boundary is LOUD where it bites, and since the round-2 review it is also
+The boundary is LOUD where it bites, and since the earlier measurement it is also
 REACHABLE: the statement gathers the whole result before it writes, and the SIZE
 OF THAT RESULT is bounded by `DefaultQuerySourcedWriteBytes` (64 MiB, the same
 number `--local-fastpath-bytes` uses for a gathered result) or by
@@ -139,8 +139,8 @@ unreachable: `CollectSink.MaxBytes` was set only inside `internal/coordinator`,
 which refuses these statements `0A000` before it gets there, so a 99 MiB CTAS
 was never refused at all.
 
-**The bound is on the RESULT, not on the process.** Measured in the round-2
-review: a 94 MiB result refused against a 64 MiB bound still peaked at 1400 MiB
+**The bound is on the RESULT, not on the process.** Measured in the earlier implementation
+measurement: a 94 MiB result refused against a 64 MiB bound still peaked at 1400 MiB
 of Go heap, and the IDENTICAL query as a plain unbounded `SELECT` peaked at
 1500 MiB. The remainder is `DB.Query`'s `map[string]any` per row — the pattern
 `CollectSink`'s own comment records as having held 21 GB at SF10 Q18 — and it
@@ -219,7 +219,7 @@ commit it needs (`CommitIngest` takes a list).
 
 ## Consequences
 
-- Gate (round 4): `wadjet.TestWithNoDataReadsNothingAndEvaluatesNothing` asserts
+- Gate (earlier implementation): `wadjet.TestWithNoDataReadsNothingAndEvaluatesNothing` asserts
   the ABSENCE of execution rather than the outcome — fifteen shapes, each
   required to read ZERO data objects, leave no spill scratch, and declare a
   table even when a row would make the query fail — with the same poisoned
@@ -229,7 +229,7 @@ commit it needs (`CommitIngest` takes a list).
   which is how a change that ran every CTE body and every join build inside
   `WITH NO DATA` passed the declaration gate.
 
-- Gates (round 2): `wadjet.TestBothWriteDoorsStoreTheSameNumber` and
+- Gates (earlier implementation): `wadjet.TestBothWriteDoorsStoreTheSameNumber` and
   `TestADecimalSourceIsAssignedAtItsValue` (the two doors' stored VALUES, pair
   by pair, against each other and against PostgreSQL 17.11);
   `TestAQuerySourcedWriteRefusesTheSameRangesTheOtherDoorsDo`;
@@ -270,7 +270,7 @@ commit it needs (`CommitIngest` takes a list).
   `ExecResult.Tag()` rather than an inline format, so they stop reporting
   `INSERT 1` where pgwire and REST report `INSERT 0 1`.
   `docs/api-reference.md` has promised the tag does not depend on the door
-  since review B8; it is now true on all four.
+  since measurement B8; it is now true on all four.
 
 ## Related
 

@@ -516,7 +516,7 @@ is operator information, and it belongs in the log beside the rule id.
   the in-process doors, the two DAG ones included: `Contains` cannot see a
   ROUTE NAME in front of the decision's sentence, which is how
   `physical plan: permission denied for table "x"` and `table-less SELECT with
-  no distributed stage local execution: …` survived a clean round on the door a
+  no distributed stage local execution: …` survived a successful check on the door a
   deployed server uses.
 - `internal/server/sec5_subquery_grpc_test.go` — the gRPC cell of the same
   census, through the bufconn server with the production interceptors, both

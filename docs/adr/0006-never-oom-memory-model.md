@@ -524,7 +524,7 @@ BY b1.f` reports thirteen surviving rows whose own `f` is FALSE: one rejected
 build row per probe row. Where every arriving batch keeps at least one row —
 the ordinary case, and the one arc JR's four pinned cells measured — what
 comes back IS the whole unfiltered relation per probe row. (The 52 is 13 x 4,
-not 13 x 5 — measured by the round-1 review of this amendment.) Fifty-seven of
+not 13 x 5 — measured by the earlier measurement of this amendment.) Fifty-seven of
 the sixty-six NoREC row-count mismatches a 200-database SQLancer run reached
 were this one shape; sixty-five of the sixty-six are gone.
 

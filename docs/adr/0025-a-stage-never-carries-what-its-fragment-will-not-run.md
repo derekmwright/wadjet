@@ -396,7 +396,7 @@ it, because `Column` is rewritten by several passes before planning ends and
 "which OUTPUT column does this term name" cannot be asked of the rewritten
 field.
 
-### The same rule at a SINGLE relation: a window argument naming a computed derived alias (2026-09-11, #1018 round 5)
+### The same rule at a SINGLE relation: a window argument naming a computed derived alias (2026-09-11, #1018)
 
 The decision above is about a JOIN's published identity. The identical gap
 exists one producer over, with no join in the query at all, and it was a
@@ -525,7 +525,7 @@ is a fact about the executor, not a preference:
   exact spelling, then the bare part, then a unique `.bare` suffix.
 - the DAG's join publishes the arm's SOURCE column, because that Project emits
   no stage, so the key is resolved through `windowArgSourceInScope` — the
-  arm-aware helper the window's ARGUMENT has used since #742 round 4, at the
+  arm-aware helper the window's ARGUMENT has used since #742, at the
   PARTITION BY and window-ORDER-BY sites as well now.
 
 Neither is reachable until the qualifier survives, which is why arc J2's
@@ -1001,7 +1001,7 @@ That is the same gap #700 and #726 were filed for, with the loud face instead
 of the silent one — there the exchange carried the CTE's ALIAS while the
 predicate had been re-spelled to the base column, so the filter was UNKNOWN on
 every row and the query answered zero rows on the shuffled arm alone. The two
-passes below, plus the #694-round-2 payload repair that had already landed,
+passes below, plus the #694-earlier implementation payload repair that had already landed,
 close the ONE-JOIN face of both issues. They do not close the two-join face:
 both were reopened against this paragraph, and "A subtree publishes what it
 MINTS" below is what actually closes them.
@@ -1166,7 +1166,7 @@ shape over a FLOAT or a BIGINT aggregate was never declined and was always
 correct on every arm; a plain rename of the aggregate output was always
 correct. The TYPE is the trigger and the join is only what hid it — which is
 also why the fix belongs at the refusal and not at the column pruner, where
-the round-2 review first pointed. The pruner already published computed
+the earlier measurement first pointed. The pruner already published computed
 aliases: `projectionPublishedName` keys on the ALIAS, so `a * 2 AS dv`
 publishes `dv`, and the stage dump shows `dv` in the inner join's needed set.
 
@@ -1267,10 +1267,10 @@ name — resolves to it and answers silently. An 811-shape sweep over the
 PostgreSQL 17) found 430 divergent (shape, arm) rows on `376b2cac`.
 
 That sweep's harness is not in the tree, and its residual figure was restated
-from memory each round — 52, then 48 — while the corpus behind the number did
+from memory at each measurement — 52, then 48 — while the corpus behind the number did
 not move with it. So the figure this ADR carries is the one measured LAST, on
 a corpus that IS on disk and reproducible: 273 shapes on three arms (819
-arm-rows), being the review corpora of every round plus the families each fix
+arm-rows), being the measurement corpora of every measurement plus the families each fix
 added, 243 of them over `decpair` with a live PostgreSQL 17 answer. Against
 `376b2cac`: **0 regressions, 261 arm-rows fixed, 61 still divergent** — 45 of
 those byte-identical to `376b2cac` and 16 loud on both trees under different
@@ -1285,12 +1285,12 @@ values the join-free spelling of the same query returns.
 is not a summary of the fixes; it is the only thing that measures the one way
 this work could leave a deployment WORSE than `376b2cac` — a refusal turning
 into a wrong answer, on the shuffled lowering the chain rewiring made runnable.
-Round 3 reported that number as 1 without measuring it and it was 18. Round 4
+The earlier implementation reported that number as 1 without measuring it and it was 18. earlier implementation
 fixed those two mechanisms, re-measured 1, and the number was 1 for the corpus
-it was measured on: the next review's corpus put a WINDOW between the SELECT
+it was measured on: the next measurement's corpus put a WINDOW between the SELECT
 list and the join and found ten more. Both times the finding came from
 widening the corpus, not from a gate — so the standing obligation is that a
-round which claims this number states the corpus it measured, and a round that
+measurement which claims this number states the corpus it measured, and a measurement that
 adds a node kind between a SELECT list and a join adds it to that corpus.
 
 **Five sites, each a specific thing a pass was getting wrong.**
@@ -1472,7 +1472,7 @@ at its top level and has no subtests). Zero fail on the tip. Counted with
 which is the byte-identical claim above checked from the other direction.
 (Earlier figures in this ADR — 22, 37, 42, 46, 47 — were each true of the gate
 set of their own round and were restated as if they were the current one; 47
-was also short by two, the review's re-derivation being 49 across nine because
+was also short by two, the measurement's re-derivation being 49 across nine because
 the `OrAcrossArms` pin entries belong in the count. Each fix ROUND adds gates,
 so the number is only meaningful with the tree and the gate set it was measured
 on, both of which this paragraph names.)
@@ -1486,7 +1486,7 @@ join-output resolution. One entry carries #766's literal cross-scale spelling
 with the single arm PINNED at the wrong rendering, so #754's fix is what
 deletes it.
 
-### A chained LINK'S list narrows the joined stream, not the probe's (2026-08-31, #755 round 2, #762)
+### A chained LINK'S list narrows the joined stream, not the probe's (2026-08-31, #755, #762)
 
 The rewiring above makes a chain over derived arms RUNNABLE where it used to
 be refused at dispatch, and what those plans then ran was #762's silent zero.
@@ -1651,7 +1651,7 @@ reverting each candidate on its own: the mirror alone makes that shape answer,
 and the resolver's ROW-guard repair alone does not. Both pins are deleted and
 the isolating test with them.
 
-### A scope walk descends through the wrappers a join wears (2026-08-31, #742 round 4)
+### A scope walk descends through the wrappers a join wears (2026-08-31, #742)
 
 `attachScanSelectProjections` resolves a qualified SELECT-list item inside the
 subtree its qualifier names — that is `resolveRenameSourceInScope`, and it is
@@ -1668,7 +1668,7 @@ and a filter is exactly what a CTE arm puts there:
     JOIN c ON c.id = x.id WHERE c.dv > 1 ORDER BY x.id
     -- PostgreSQL 5 rows of 12.75 | 1275.00
     -- 376b2cac  shuffled REFUSED at dispatch (chained join build dep)
-    -- round 3   shuffled answered 12.75 | 12.75 — x's w under BOTH names
+    -- earlier implementation   shuffled answered 12.75 | 12.75 — x's w under BOTH names
 
 The DERIVED spelling of the identical query is right, and that pair is the
 whole diagnosis: a CTE's Project is a materialization fence, so the predicate
@@ -1684,7 +1684,7 @@ schema alone, so the walk descends through them; `Project`, `Aggregate`,
 plan the fix shows as `join-4 PROJ=[… {a yw}]` becoming `PROJ=[… {y.w yw}]`,
 which is the derived spelling's plan exactly.
 
-### A WINDOW is scope-preserving, and its ARGUMENT is not scope-free (2026-08-31, #742 round 4)
+### A WINDOW is scope-preserving, and its ARGUMENT is not scope-free (2026-08-31, #742)
 
 The walk above lists the nodes it may descend through, and the list was one
 short. `resolveRenameSource` — the other walk in the same file, over the same
@@ -1710,7 +1710,7 @@ The agreement is asserted now instead of argued.
 `physical.TestScopePreservingWrapperMatchesTheRenameWalk` runs the two walks
 over EVERY logical node type, with a completeness check that fails when the
 logical package gains one — because this omission was invisible to every gate
-in the tree and was found by a review widening its corpus, and the same
+in the tree and was found by a measurement widening its corpus, and the same
 omission is available to the next node kind. Removing `NodeWindow` from the
 list fails it; and its own first cut was wrong in the way METHOD 10 predicts —
 it built a one-child Join and a one-child Union, which no plan contains, and
@@ -1767,7 +1767,7 @@ including the base-self-join and MIN/MAX entries the whitelist does not touch.
 No control fails under either. A future reader asking "which of these two did
 what" should run those two reverts, not read the diff.
 
-### A join arm answers to the name the QUERY calls it (2026-08-31, #742 round 4, #753)
+### A join arm answers to the name the QUERY calls it (2026-08-31, #742, #753)
 
 `findScanAlias` walks to the scan under a join arm and returns its alias — the
 name a base table and a DERIVED table both answer to, because
@@ -1785,7 +1785,7 @@ duplicate columns with a name no reference in the query is written against:
     JOIN decpair y ON c.id = y.id ORDER BY x.id
     -- PostgreSQL 17  cdv 25.50, pdv -87.2500 — two different columns
     -- 376b2cac  single and DAG: cdv == pdv; shuffled REFUSED at dispatch
-    -- round 3   shuffled answered cdv == pdv too
+    -- earlier implementation   shuffled answered cdv == pdv too
 
 The stream carried `dv` (p's, bare) and `decpair.dv` (c's, renamed by
 `QualifyAllBuildCols`). `c.dv` matched neither exactly, fell through to
@@ -1854,7 +1854,7 @@ mechanism was:
   **The DERIVED spelling (#773) is CLOSED on the SINGLE-process path**, which
   is where it was wrong — `Node.DerivedAlias` is the name `joinArmAlias` was
   missing. What stays open beside it is ONE residual, restated after the
-  round-2 review measured its edges rather than assuming them:
+  earlier measurement measured its edges rather than assuming them:
 
   > **A CTE arm whose published column shares its bare name with the probe
   > arm's answers the PROBE arm's column on both DAG arms, whenever the
@@ -1955,9 +1955,9 @@ mechanism was:
 **The loud→silent census on this tip is ONE arm-row, and it is the GROUP-BY
 residual above.** That is the number this section has to carry, and it has been
 wrong twice, both times because the corpus it was measured on was narrower than
-the mechanism. Round 3 claimed 1 without measuring; the review measured 18 —
+the mechanism. earlier implementation claimed 1 without measuring; the measurement measured 18 —
 fifteen of the CTE-arm capture, two of the sibling-arm binding, and this one.
-Round 4 fixed those two and re-measured 1; the next review put a WINDOW between
+The earlier implementation fixed those two and re-measured 1; the next measurement put a WINDOW between
 the SELECT list and the join and measured 11, ten of them that family. Both
 mechanisms are fixed above and the corpus now carries the shapes that found
 them, which is what the number is worth.
@@ -2018,7 +2018,7 @@ and the bare-name fallback bound the SIBLING arm's column. `Node.DerivedAlias`
 is the derived spelling of `CTEName`, and `joinArmAlias` walks down single-child
 nodes to find whichever of the three the arm carries.
 
-### …and the answer is DIFFERENT on the two engines, because the streams are (2026-09-01, #773 round 2, #706 round 2)
+### …and the answer is DIFFERENT on the two engines, because the streams are (2026-09-01, #773, #706)
 
 Giving both engines the arm's name looked like the obvious repair and was a
 silent wrong answer on the DAG, on a shape with no window in it at all:
@@ -2161,7 +2161,7 @@ is stale (it reports 2 rows with a NULL on BOTH DAG arms; on `18f3660e` the
 broadcast arm is right and only the shuffled arm is loud).
 
 **The third residual is `SELECT *` over a materialized arm, and it is a COLUMN
-COUNT, not a value.** (2026-09-05, #780's round-2 review.) Both DAG arms
+COUNT, not a value.** (2026-09-05, #780's earlier measurement.) Both DAG arms
 publish **10** columns where PostgreSQL and the single-process path publish
 **8**: the arm's stage passes its whole inner stream through and APPENDS the
 computed alias, so the arm's join partner rides out with it —
@@ -2189,7 +2189,7 @@ arms in `coordinator.TestF1AJoinArmPublishesTheColumnsItSelects`, cell
 the day the DAG publishes 8, that cell fails and deleting it is the proof.
 
 **A pass that ABSORBS a stage must not absorb away its projection.**
-(2026-09-05, #780's round-1 review.) The materialization above puts the arm's
+(2026-09-05, #780's earlier measurement.) The materialization above puts the arm's
 computed column on the stage that terminates the arm — and `fuseJoinStages`
 then absorbed that stage into its consumer, dropping the `ProjectExprs` with
 it, because `FusedJoinSpec` has no field for a projection. The arm's column was
@@ -2245,7 +2245,7 @@ Repro B of that filing — a partitioned shuffle key naming a derived alias —
 answers on all four arms at this base and is ratcheted rather than re-fixed.
 
 **A stage that runs ONE task emits ONE stream, whatever its input was
-partitioned on.** (2026-09-05, #480's round-1 review.) Making these plans
+partitioned on.** (2026-09-05, #480's earlier measurement.) Making these plans
 runnable made a mislabel reachable that had never had a plan to be wrong in: a
 join inherits its PROBE's distribution, and a keyless join running a single
 task reads every file of both inputs and emits one output — so inheriting
@@ -2301,7 +2301,7 @@ name qualifies nothing — an entry under a name that does not own the column
 would be this defect pointing the other way.
 
 That declaration is path-independent and the VALUE was not, which is the
-round-2 finding in the section above: a NAMED arm holding TWO relations was
+The earlier implementation finding in the section above: a NAMED arm holding TWO relations was
 declared `m.d92` while the single-process join published that very column as
 `p.d92` — the alias of a scan inside the arm — so the two described one output
 differently and the store guard raised 22003 on a query PostgreSQL answers.

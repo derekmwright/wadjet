@@ -23,7 +23,7 @@ healthy S3 into a dead one:
 | 2026-09-02 (#798) | one `ResultCleaner.CleanQuery` whose 30 s deadline expired: every remaining `Delete` returns `DeadlineExceeded` instantly | breaker open → **every base-table READ** fast-fails with "circuit breaker open: S3 unavailable" | this ADR |
 
 Each fix excluded one more error class from the counter, and the defect
-came back in the next class. Round-0 measured the fourth instance through
+came back in the next class. earlier implementation measured the fourth instance through
 the production `ResultCleaner` and `CircuitStore` (no AWS, no MinIO): five
 consecutive `DeadlineExceeded` deletes opened it; the next `Get`, `Head`
 and `List` on an existing key all returned `ErrCircuitOpen`. It also
@@ -55,7 +55,7 @@ switch, and no metric recorded that a breaker had opened (#822).
 **Query reclamation.** The second half of the same failure of scope. A query
 writes to two places that outlive its goroutine — local spill scratch and
 the object store's `queries/<id>/*` prefix — and the code that reclaimed
-them was attached to the SUCCESSFUL exit only. Round-0 measured, at a
+them was attached to the SUCCESSFUL exit only. earlier implementation measured, at a
 4 MiB budget with the spill floors lowered, a cancelled single-process
 query against a control arm running the identical query to completion:
 

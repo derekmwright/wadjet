@@ -111,7 +111,7 @@ The model mirrors `exec.joinOutputSchemaWithMapping`: probe columns verbatim,
 then build columns qualified by their owning relation exactly where the bare
 name already occurs on the probe side. It also mirrors
 `exec.HashAggregate.outputSchema`, which is a SECOND renaming and was got
-wrong first time round: a group key READS one name and EMITS another, because
+wrong in the earlier implementation: a group key READS one name and EMITS another, because
 the aggregate strips the qualifier off its output column unless stripping
 would make two keys collide. Modelling the output as the key's own text left
 a semi join over a grouped inner naming `c.x` while the aggregate emitted `x`
@@ -368,7 +368,7 @@ Two families have no literal at all, and both FAIL the query with 0A000
 else:
 
 - **ROW, MAP and VECTOR.** There is no literal for these containers in this
-  dialect. (An ARRAY was in this family until arc CW round 5, 2026-09-25: it
+  dialect. (An ARRAY was in this family until arc CW, 2026-09-25: it
   is now spelled as its typed array literal, `CAST('{1,2}' AS BIGINT[])` —
   `expr.ArrayValueLiteral`, the spelling a DAG scalar subquery's array
   already used — so a correlated re-run over an array column answers
@@ -405,7 +405,7 @@ object-store reads of the inner file for `N` outer rows, against a flat 3 for
 the base-table spelling that DOES decorrelate. That is LINEAR, not
 superlinear, and the tracker's `used` is FLAT across the re-runs — the scan
 charge is released each time and nothing leaks. The 295 forced-reservation
-warnings that took the round-0 census past a thirty-minute timeout were 295
+warnings that took the earlier implementation census past a thirty-minute timeout were 295
 RE-RUNS, not 295 leaks.
 
 Two seconds of each re-run is a SECOND and independent defect, in
@@ -733,7 +733,7 @@ the record is a fixture rather than a memory.
   the correlation model.
 
   The hang's condition is **narrower than a comma join and wider than TPC-H
-  Q2**, and the round-1 review's second repro is what says so: `a.k IN (SELECT
+  Q2**, and the earlier measurement's second repro is what says so: `a.k IN (SELECT
   b.k FROM t b WHERE b.k > (SELECT AVG(c.k) FROM t c))` hangs with no comma
   join and no correlation anywhere in it. The discriminator is a control that
   changes ONE thing — the scalar subquery's TABLE — and answers in
@@ -1097,8 +1097,8 @@ closes.
 
 ### 1l. A FROM-less scalar subquery IS its SELECT expression, in the block that supplies the row — and a per-row re-run substitutes into every clause it rebuilds
 
-(Added 2026-09-12, #1044. Rewritten the same day after round 2 moved the
-decision and completed the substitution, and amended after rounds 3 and 4
+(Added 2026-09-12, #1044. Rewritten the same day after earlier implementation moved the
+decision and completed the substitution, and amended after the subsequent measurements
 narrowed the two refusals to the shapes that actually need them.)
 
 §1c settled what a subquery this engine cannot RUN answers: it fails the query.
@@ -1175,8 +1175,8 @@ therefore no repair. A rendering that is already an expression (`x.id * (1 -
 
 Two narrower dispositions were tried first and are recorded because each was
 wider than the trap: refusing on the PRESENCE of an outer reference in those
-clauses took four shapes main answers exactly as PostgreSQL does (round-3
-review, P4), and refusing on the RENDERING took three more (round-4 review,
+clauses took four shapes main answers exactly as PostgreSQL does (earlier implementation
+measurement, P4), and refusing on the RENDERING took three more (earlier measurement,
 P2 — `(SELECT COUNT(*) FROM x GROUP BY u.id, x.id ORDER BY x.id LIMIT 1)` is
 1, 1, 1 on PostgreSQL and at main). `expr.UnsubstitutedOuterRefError` (0A000)
 survives as the POST-CONDITION of the rendering: it asks its question of the
@@ -1184,17 +1184,17 @@ text the rebuild writes, reports nothing today, and refuses loudly rather than
 silently reading a position if a rendering ever becomes bare again.
 
 **The refusal is only as wide as the walk that FINDS the reference**, and for
-one round it was narrower than this paragraph said. `findCorrelatedRefs` read
+the earlier implementation was narrower than this paragraph said. `findCorrelatedRefs` read
 the body's WHERE, HAVING and SELECT list and nothing else, so a subquery whose
 ONLY outer reference sat in an ORDER BY term was never called correlated, never
 reached the re-run, and answered the qualifier strip's constant — `(SELECT
 x.visits FROM c2users x ORDER BY x.id * (u.id - 2) LIMIT 1)` was 100, 100, 100
-for PostgreSQL 17.11's 200, 100, 100 (round-2 review, P1). `walkBlockForOuterRefs`
+for PostgreSQL 17.11's 200, 100, 100 (earlier measurement, P1). `walkBlockForOuterRefs`
 now reads every clause of the block that can carry a column reference — the
 WHERE, the HAVING, the QUALIFY, the SELECT list, the GROUP BY terms, the
 non-positional ORDER BY terms and each JOIN's ON condition — and every arm of
 a set operation. The ON condition was the last one missing, and a reference
-there was planned uncorrelated on all five arms (round-3 review, P1); LIMIT
+there was planned uncorrelated on all five arms (earlier measurement, P1); LIMIT
 and OFFSET carry no reference this parser will accept (`OFFSET u.id - 1` is
 *expected number after OFFSET*), which is why the walk's silence about those
 two clauses costs nothing today. Seeing the
@@ -1207,7 +1207,7 @@ ordinal trap caught the FROM-less rewrite itself. It ran after
 with nothing left to resolve it, and the planner refused it 42P10 as a position
 naming no item — on ten shapes main answers exactly as PostgreSQL does, because
 PostgreSQL reads only an integer literal WRITTEN IN THE CLAUSE as an ordinal,
-never one a subquery evaluates to (round-2 review, B1). `ORDER BY (SELECT 1)`
+never one a subquery evaluates to (earlier measurement, B1). `ORDER BY (SELECT 1)`
 is the generated-SQL idiom for a sort a query does not care about. The rewrite
 declines any ORDER BY **or GROUP BY** term whose replacement would render as a
 bare numeric literal; a constant sort or a constant grouping is what the
@@ -1216,8 +1216,8 @@ DISTINCT … ORDER BY (SELECT 1)` keeps PostgreSQL's own message rather than the
 ordinal one. The decline was written in one of the two loops for a round, and
 the other one turned `GROUP BY (SELECT 1)` into the ordinal `1`: seven
 statements PostgreSQL and main both raise 42803 on answered a fabricated row
-(`visits, n` = `NULL, 3` under OID 25) on all five arms instead (round-3
-review, B2). One decline, both clauses.
+(`visits, n` = `NULL, 3` under OID 25) on all five arms instead (earlier implementation
+measurement, B2). One decline, both clauses.
 
 **AN AGGREGATE BELONGS TO THE LEVEL OF THE DEEPEST VARIABLE IN ITS ARGUMENTS,
 and this engine does not implement levels**, so a subquery holding an aggregate
@@ -1383,7 +1383,7 @@ fixture's and not the engine's.
 substituted now (§1l); `GROUP BY` and `ORDER BY` are not, because a substituted
 term there renders as a bare literal and reads as a select-list POSITION, and
 `RebuildSQL` drops a `QUALIFY` clause outright. All three are refused rather
-than run, and since round 3 the classifier reads those clauses, so the refusal
+than run, and since earlier implementation the classifier reads those clauses, so the refusal
 reaches a subquery whose ONLY outer reference is in one of them. The WINDOW case stays refused for a different reason and a harder
 one: there is no faithful rendering of an `OVER` clause to rebuild, and
 `WindowFuncNode.String()` emitting `OVER (...)` — three literal dots — is a
@@ -1441,8 +1441,8 @@ five execution arms answer through this one lowering rather than needing the
 distributed single-row source that refusal exists for. The DAG cells assert
 `TableLessLocalRoutes` beside their rows.
 
-**THE CLASSIFIER ASKS TWO QUESTIONS, NOT ONE** (amended 2026-09-12, round-2
-review B1). A table-less body that names NO column is not correlated at all:
+**THE CLASSIFIER ASKS TWO QUESTIONS, NOT ONE** (amended 2026-09-12, earlier implementation
+measurement B1). A table-less body that names NO column is not correlated at all:
 nothing about it depends on the outer row, the ordinary build already produced
 `Project(Dual, …)`, and the cross join with its one row is exactly PostgreSQL's
 answer. Classifying by the FROM clause alone took twelve such shapes —
@@ -1465,7 +1465,7 @@ a name to resolve to. Three exclusions, each with a cell:
   per-item `SelectColumn.IsWindow` flag — and `RewriteExpr` enters neither an
   AGGREGATE call nor a WINDOW call, so each lost a different piece: a read
   inside `SUM(l.w) OVER ()` or `HAVING MAX(l.w) > 2` was invisible to the
-  star-list test (round-4 review, B2), and `(SUM(u.id) OVER ()) + 1` was not a
+  star-list test (earlier measurement, B2), and `(SUM(u.id) OVER ()) + 1` was not a
   window body to the flag (B3). The disagreement between them is what four
   rounds of oscillation between a too-wide and a too-narrow refusal were made
   of;
@@ -1476,8 +1476,8 @@ a name to resolve to. Three exclusions, each with a cell:
   window's PARTITION BY / ORDER BY terms as strings, and counting any non-empty
   one as a column read made `OVER (ORDER BY 1)` and `OVER (PARTITION BY 1)` —
   integer literals — "reads the outer row"; a window body is not a projection,
-  so the shape was refused where the base answered PostgreSQL's rows (round-2
-  review, B1). A false positive here is not a lost optimization: the predicate
+  so the shape was refused where the base answered PostgreSQL's rows (earlier implementation
+  measurement, B1). A false positive here is not a lost optimization: the predicate
   is what ARMS the refusal.
 
 And THE BODY'S OWN SORT TERM IS NOT ASKED AT ALL — a different question from
@@ -1498,15 +1498,15 @@ have to PAD (a non-trivial ON, or a body WHERE) are refused `0A000` naming the
 class. Each of THOSE answered plausible NULLs before; loud beats plausible.
 
 **THE ITEM IS TYPED AGAINST WHAT THE OUTER SIDE PUBLISHES** (amended
-2026-09-12, round-2 review P1). `inputColDecls` walks to the scan annotation and
+2026-09-12, earlier measurement P1). `inputColDecls` walks to the scan annotation and
 STOPS at a Project, so an outer side that is a derived table, a CTE, a sort or
 an aggregate answered nothing and every item took the STRING default — the
 right VALUES under OID 25, which is the half of #1033 the issue was filed for,
 one position over. The declaration now merges the EMITTED walk, which types a
 Project through the same `declaredProjectionDecl` the output schema uses.
 
-**THE FROM ITEM'S COLUMN-ALIAS LIST RENAMES THE ITEMS POSITIONALLY** (round-2
-review P2), on BOTH lateral lowerings and before either reads the list, because
+**THE FROM ITEM'S COLUMN-ALIAS LIST RENAMES THE ITEMS POSITIONALLY** (earlier implementation
+measurement P2), on BOTH lateral lowerings and before either reads the list, because
 the decorrelating one injects correlation keys into it. Without that,
 `LATERAL (SELECT u.id AS v) l(w)` renamed a column nothing carried and `l.w`
 answered NULL — the headline shape under a second spelling. A list longer than
@@ -1514,8 +1514,8 @@ the body is PostgreSQL's 42P10.
 
 **A list over a body carrying a STAR is REFUSED 0A000 WHEN — and only when —
 the enclosing query READS a name the list introduces** (amended 2026-09-12,
-round-2 review B2; narrowed by round-3 review B2 and stated here in round 5,
-where the review found this paragraph still unconditional). PostgreSQL applies a
+The earlier measurement B2; narrowed by earlier measurement B2 and stated here in earlier implementation,
+where the measurement found this paragraph still unconditional). PostgreSQL applies a
 SHORT list to the first k columns of the star's expansion and leaves the rest
 under their own names, so a query that never mentions a renamed name is
 unaffected by the rename, and refusing on the PRESENCE of the list was ten cells
@@ -1528,8 +1528,8 @@ one in a LATER FROM item's body, one in the enclosing block's ORDER BY, and —
 through a star in the enclosing block — one block up.
 
 EACH POSITION IS KEYED ON WHAT THE REFERENCE RESOLVES TO, never on the name
-alone and never on how it is QUALIFIED (amended 2026-09-12, round-5 review B1;
-corrected 2026-09-12, round-6 review B1/B2/B3 — the first correction swung to
+alone and never on how it is QUALIFIED (amended 2026-09-12, earlier measurement B1;
+corrected 2026-09-12, earlier measurement B1/B2/B3 — the first correction swung to
 qualification, which is a different wrong answer). The three positions, as the
 code asks them:
 
@@ -1556,12 +1556,12 @@ code asks them:
   NODE rather than per TERM made those sorts bind nothing and answer the wrong
   order where the previous tip refused; the fixture that separates the two
   bindings is `SELECT -u.total AS w`, whose two candidate orders differ, and it
-  is a gate row (round-7 review, B1). A PARENTHESISED bare name PostgreSQL still
+  is a gate row (earlier measurement, B1). A PARENTHESISED bare name PostgreSQL still
   binds to the output column, and this layer CAN see the `ParenNode`: the
   refusal is forced by what skipping it would PRODUCE, not by what the AST
   shows. Peel the parentheses and take the skip, and the sort binds nothing —
   `SELECT u.total AS w … ORDER BY (w) DESC` then answers `150,150,200,200` for
-  PostgreSQL's `200,200,150,150` (measured, round-8 review P2). That is round-5
+  PostgreSQL's `200,200,150,150` (measured, earlier measurement P2). That is earlier implementation
   B2 again, and loud beats it.
 
   THE COST IS A MIXED SORT LIST, recorded rather than wished away: a list whose
@@ -1577,10 +1577,10 @@ that PostgreSQL, main and the previous tip all answer; keyed on qualification,
 the sibling position dropped three more. Every row of the seam — each position
 crossed with what a reference there can resolve to — is one cell of
 `TestC1FTheReadTestSeam` (`internal/coordinator/arc_c1_read_seam_two_path_test.go`),
-on five arms, so a new position is a row rather than a round.
+on five arms, so a new position is an additional row in the measurement table.
 
-A SORT TERM THAT NAMES THE LIST IS A READ (amended 2026-09-12, round-5 review
-B2, reversing this section's round-5 sentence). The reasoning for excluding it — a sort term
+A SORT TERM THAT NAMES THE LIST IS A READ (amended 2026-09-12, earlier measurement
+B2, reversing this section's earlier implementation sentence). The reasoning for excluding it — a sort term
 decides the order and never the values — holds only for a sort term that BINDS.
 This one does not bind: the rename is dropped on the lowered path, so
 `… l(w) ORDER BY l.w DESC` sorted on nothing and answered `1,1,2,2` for
@@ -1588,7 +1588,7 @@ PostgreSQL's `2,2,1,1`, and a permuted list `l(order_id, id, amount, product)
 ORDER BY l.product` sorted by a different column of the same rows. The ASCENDING
 spelling agreed with PostgreSQL by coincidence — an unbound sort term leaves the
 scan's order, which over this fixture is ascending — and that coincidence is
-what made the exclusion look measured for a round. The rename cannot be applied
+what made the exclusion look measured in the earlier implementation. The rename cannot be applied
 for a sort term for the same reason it cannot be applied in the SELECT list (the
 paragraph below), so the disposition is the refusal wherever the term names the
 list — and a spelling that would bind nothing is refused rather than answered.
@@ -1605,10 +1605,10 @@ star could take that column and leave the join keying on a name nothing carries
 — zero rows, in silence. Wrong → loud, and the sentence now describes the code.
 
 **NOT SETTLED:** a zero-row outer side and a lateral inside a scalar subquery's
-own block still declare STRING with the right values (round-2 review, P2). Both
+own block still declare STRING with the right values (earlier measurement, P2). Both
 carry a fail-on-agree cell in
 `internal/coordinator/arc_c1_scope_two_path_test.go`; the second was added in
-round 4 after the review found the claim named one pin and only one existed.
+The earlier implementation after the measurement found the claim named one pin and only one existed.
 
 **NOT SETTLED, and recorded rather than repaired here:** an accumulating
 aggregate OVER such a column declares float8 where PostgreSQL declares numeric
@@ -1659,11 +1659,11 @@ where the block is planned. Three consequences are part of the position:
   every path that used to return silently now names itself. The six refusal
   cells of §1o-a's gate take exactly that route, which is what makes this a
   reachable position rather than a claim about a branch nothing reaches
-  (round-2 review, P3).
+  (earlier measurement, P3).
 
 ### 1o-a. The FORM is decided before the body is planned
 
-(Added 2026-09-12, round-2 review B3.)
+(Added 2026-09-12, earlier measurement B3.)
 
 §1o's materialization PLANS the body, and the body's self-reference is a tagged
 scan whose cache lookup misses until the first iteration seeds the work table.
@@ -1693,13 +1693,13 @@ different defect in kind.
   the TOP operator `UNION ALL` (if it is a plain `UNION`, 0A000: PostgreSQL
   answers it by removing duplicates at every step, which is a feature gap and
   not a syntax error, ADR-0012). Asking the ALL-ness BEFORE the arm position
-  gave a first-arm self-reference 0A000 where PostgreSQL raises 42P19 (round-2
-  review, P1).
+  gave a first-arm self-reference 0A000 where PostgreSQL raises 42P19 (earlier implementation
+  measurement, P1).
 
   Deciding it from the body's TEXT instead — a split at the FIRST top-level
   `UNION ALL` — put an arm that names the CTE and an arm that does not into one
-  "recursive term", and the iteration re-ran the constant arm every round: 1002
-  rows, one then 1001 NULLs, where PostgreSQL answers five (round-2 review,
+  "recursive term", and the iteration re-ran the constant arm every iteration: 1002
+  rows, one then 1001 NULLs, where PostgreSQL answers five (earlier measurement,
   B3). The text split that feeds the iteration now takes the LAST top-level
   `UNION ALL` and is VERIFIED against the parse — the two halves are re-parsed
   and must name the CTE exactly as the tree said, or the body is refused.
@@ -1811,11 +1811,11 @@ needs; a value exact at the column's scale is stored there (`1.0 * 0.5` is 0.50
 by its declared scale and 0.5 by its value), so a product does not widen the
 column without end. Scales only grow and stop at 38.
 
-Round 1 of this arc checked the term against a two-entry list (integer↔integer,
+The earlier implementation of this arc checked the term against a two-entry list (integer↔integer,
 integer/real→double) and refused shapes PostgreSQL and the base both answer —
-an integer term under a numeric seed, a bare NULL term (review B1). The table
+an integer term under a numeric seed, a bare NULL term (measurement B1). The table
 replaced the list; 0 of its 224 cells answered correctly at the base and
-differently at round 2's tip.
+differently at earlier implementation's tip.
 
 **THE FORM IS PostgreSQL's.** §1o-a decided the set-operation form; the
 recursive term's own shape is decided before anything runs, with PostgreSQL's
@@ -1824,9 +1824,9 @@ reference (the term, or a derived table at any depth under it — an aggregate
 over a derived table that reads the reference is answered, as PostgreSQL
 answers it), no self-reference inside a subquery expression, on the nullable
 side of an outer join, or more than once. Each of those, iterated, reaches no
-fixed point or the wrong one. (Round 1 checked the aggregate at the term's own
+fixed point or the wrong one. (earlier implementation checked the aggregate at the term's own
 level only, and `SELECT n FROM (SELECT max(n)+1 AS n FROM r …) q` answered —
-review B2.)
+measurement B2.)
 
 **THE NAMES ARE THE SEED's.** The binder closes a recursive CTE's scope over
 the seed's published names overlaid by the column list, so a name only the
@@ -1976,7 +1976,7 @@ CTE's rows (#1066). The list is the block's own published namespace, ADR-0026
 and an explicit column list renames them positionally.
 
 **AND THE PUBLISHED LIST IS ARITY-CHECKED, AND READ BY THE STAR.** Two consumers
-of that list were found by the round-2 review and are part of this section, not
+of that list were found by the earlier measurement and are part of this section, not
 a follow-up:
 
 - `physical.registerCTE` splits on `cte.Recursive` and the recursive branch
@@ -2057,7 +2057,7 @@ seams; the paragraphs that follow are the record of why it was withdrawn.)*
 The repair §1h named — the bound travelling with the correlation key as a
 per-key top-N, `ROW_NUMBER() OVER (PARTITION BY <the inner column the
 correlation keys on> ORDER BY <the body's own ORDER BY>)` and a `QUALIFY` over
-it — was built, and an adversarial review measured three faults in it that are
+it — was built, and an adversarial measurement measured three faults in it that are
 all one fault:
 
 - **The minted window's partition does not bind the body's own column on the
@@ -2070,7 +2070,7 @@ all one fault:
   classes under its STORED values, so the answer an analyst reads is arithmetic
   on the column the policy hides, on four of the nine doors (embedded/dag,
   embedded/dag-shuffled, pgwire/dag, http/dag), where all nine gave the mask's
-  answer before. That is the class #859 round 2 named, reached through a window
+  answer before. That is the class #859 named, reached through a window
   the PLANNER mints rather than one the user wrote.
 - **The decline list was false.** `lateralBoundPerOuterRow` returned false the
   moment one correlated part named no inner column, so a body with BOTH
@@ -2161,7 +2161,7 @@ LEFT-padded `NULL` per outer row, silently.
 **The DAG answered these by MECHANISM, and that is what the repair follows.**
 An earlier version of this section refused the shape uniformly and said closing
 it needed "#1028's DAG-identity layer plus a lifted predicate evaluated AT the
-join". The round-2 review refuted the first half by measurement: over 40 outer
+join". The earlier measurement refuted the first half by measurement: over 40 outer
 rows and 5 000 inner ones, with the correlation column published under NO name
 at all, the three DAG arms land on PostgreSQL's 177 500 rows — because the
 DAG's stage plan reads the column off a stream that carries the SCAN's own
@@ -2186,7 +2186,7 @@ not write. ADR-0026 §3c's answer is a hidden slot dropped by position, and that
 is not available here: the single-process path evaluates the predicate ABOVE
 the join whenever an equality beside it keys the join, and a dropped slot
 answers zero rows there (measured), while a MINTED NAME is one the DAG's
-evaluation point does not carry (measured, round 3).
+evaluation point does not carry (measured, earlier implementation).
 
 So the column is materialized ONLY where publishing it changes nothing else,
 and three shapes decline — each returning to the disposition it had at
@@ -2194,7 +2194,7 @@ and three shapes decline — each returning to the disposition it had at
 whose own output alias already publishes the name, or an enclosing relation
 that does; and an enclosing query that writes a star over this join. A GROUPED
 body needs no decline — it aggregates, so the refusal above fires first.
-Round 4's seven cells hold them, with the base measurement beside each.
+The earlier implementation's seven cells hold them, with the base measurement beside each.
 
 An AGGREGATED body is still refused, for a reason the projection cannot answer:
 publishing `i.amount` beside `SUM(i.amount)` needs it in the `GROUP BY`, which
@@ -2205,7 +2205,7 @@ row; this engine does not, for that shape.
 THAN COMMENTED.** The refusal and the declines look alike — neither
 materializes anything — but they are not interchangeable: a decline on an
 aggregated body DROPS the predicate, so every outer row is given the whole
-relation's aggregate, or a NULL. Round 4 put the refusal in front of the
+relation's aggregate, or a NULL. earlier implementation put the refusal in front of the
 `DISTINCT` / contested arm and left the enclosing-star test as an early return
 above the loop, and one statement then had two dispositions decided by the
 ENCLOSING SELECT list: written with a named list it was `0A000`, written
@@ -2277,7 +2277,7 @@ WHERE o.id IN (SELECT b.order_id FROM lat_item b
 silently, on all five arms, with three discriminators right beside it — the
 same correlation in a plain join, the same correlation moved to the body's
 WHERE, and the EXISTS spelling (#1232, localised to the PLAN and not the
-binder by arc RS's review). An INNER join's ON conjunct IS a WHERE conjunct,
+binder by arc RS's measurement). An INNER join's ON conjunct IS a WHERE conjunct,
 so a conjunct of one that names the enclosing query is LIFTED into the
 classification the rewrite already runs, and becomes a key, a residual or an
 outer-side filter exactly as the same text written in the WHERE does. An
@@ -2330,7 +2330,7 @@ and the `QUALIFY`. A name the body does publish stays the body's, whatever the
 enclosing query also has: with the namespace known, the classifier reads the
 enclosing column map RESTRICTED to the names the body cannot supply, so
 `EXISTS (SELECT 1 FROM dc_side c WHERE id = c.j)` is `c.id = c.j` and not
-`o.id = c.j` (round 3; round 2 applied the rule in the outward direction only
+`o.id = c.j` (earlier implementation; earlier implementation applied the rule in the outward direction only
 and answered 3 rows for PostgreSQL's 5). When the namespace cannot be named completely — a
 table function in the body's FROM, whose columns are its call's or its input's
 and are not re-read to answer this — an unqualified enclosing name in a clause
@@ -2341,15 +2341,15 @@ Before this, the unqualified spelling was invisible outside the `WHERE`: in a
 body `JOIN`'s `ON` it became a join key no relation publishes (zero rows), in
 a `HAVING` the aggregate rewrite dropped it (every row), in the SELECT list it
 became a key the build side lacks (zero rows) — silent, on every arm (arc DC
-round 1, B1).
+The earlier implementation, B1).
 
 **TWO KEYS, ONE BUILD.** A correlated IN whose IN key and correlation key are
 two integer pairs (`semi ON j = id AND j = id`) is a two-integer-key join, and
 when the reorderer builds the enclosing side (RIGHT SEMI) the probe arm that
 marks matched build rows had no two-integer case and marked nothing — the
-single-process arms answered EMPTY for a self-join body. Round 2's hoist took
+single-process arms answered EMPTY for a self-join body. earlier implementation's hoist took
 shapes that used to be refused onto that path; the executor arm is fixed
-(`markKeyMatchedLocked` now IS `markKeyMatched`) and the review's cells are
+(`markKeyMatchedLocked` now IS `markKeyMatched`) and the measurement's cells are
 gated on five arms and nine doors.
 
 **A DECLINE IS RIGHT BECAUSE THE RERUN CAN EXECUTE IT.** The per-row rerun
@@ -2363,7 +2363,7 @@ the statement. The demotion now lifts it itself, as the inner join it has
 become; the same fix answers the plain `RIGHT JOIN … ON c.j = b.k AND 100 >
 100 WHERE b.tag = 10`, which refused before any subquery was involved.
 
-**THE BOUNDARY, AS MEASURED (round 4).** Three closures and the cells that
+**THE BOUNDARY, AS MEASURED (earlier implementation).** Three closures and the cells that
 are still open, rather than a claim over all of them:
 
 - The rerun now scopes the body's OWN `WITH` items over its FROM
@@ -2375,11 +2375,11 @@ are still open, rather than a claim over all of them:
   is an outer name in both enclosing column maps (the logical decorrelations'
   and the physical rerun's), as a CTE's already was.
 - A correlated non-equality whose two sides render with the same bare name
-  is guarded WHERE THE COLLAPSE HAPPENS (round 5): the stage DAG re-spells a
+  is guarded WHERE THE COLLAPSE HAPPENS (earlier implementation): the stage DAG re-spells a
   residual leaf by asking which arm moves the name, so a renaming arm on
   either side — through any number of pass-through layers — could move both
-  leaves onto one stage column (`total < total` became `x.amt < x.amt`). Round
-  4 predicted the renaming shapes in the planner and missed a spelling twice;
+  leaves onto one stage column (`total < total` became `x.amt < x.amt`). The earlier planner
+  predicted the renaming shapes in the planner and missed a spelling twice;
   `dagplan.residualWithStageSpellings` now refuses any residual whose two leaves
   land on one stage column (`ErrResidualSidesMergedDistributed`) and the
   coordinator runs the plan single-process. The planner keeps one decline, for
@@ -2412,7 +2412,7 @@ sentence each refusal says. 221 of its cells fail at `6b9c7acf`, and 221 at
 (121 statements, every position spelled unqualified) and
 `coordinator.TestArcDCAnOuterJoinsOnBesideACorrelatedWhere` (27, an outer
 join's `ON` beside a `WHERE` that rejects its padding, with and without a
-subquery) are the round-2 halves.
+subquery) are the earlier implementation halves.
 `server.TestArcDCARelocatedBodyConditionReadsTheMaskOnEveryDoor` is the other
 half: this rewrite moves a predicate ACROSS a relation boundary, and over a
 policed relation the answer is the ROW SET rather than a cell, so the mask's
@@ -2483,7 +2483,7 @@ row over a 1 000 000-row inner relation (linear; recorded). `EXISTS (… LIMIT
 0)` answered rows and `EXISTS (… GROUP BY … HAVING …)` ignored its HAVING on
 all five arms before (#1238, #1274). IN / NOT IN and the scalar rewrite
 already declined a bound; a QUALIFY or a set operation in their body is
-declined by the shared build side since the round-2 review. The rerun's own
+declined by the shared build side since the earlier measurement. The rerun's own
 boundaries stand: a correlated body holding a window function, or a set
 operation, is refused by the rerun's rebuild (§1m) on every consumer. A LATERAL has no per-row runner: a bound with a
 correlated predicate that is not an equality on an inner column (`i.v >
@@ -2522,7 +2522,7 @@ pinned per arm, and the reason it refused before was incidental to the
 whole-relation bound's stage shape. All 22 TPC-H plans are byte-identical to
 `51addfb6` modulo Q19's brand-list order.
 
-**WHAT THE ROUND-2 REVIEW MEASURED, AND WHAT MOVED (2026-09-24).** The rule
+**WHAT THE earlier measurement MEASURED, AND WHAT MOVED (2026-09-24).** The rule
 as first implemented was both too loose and too narrow, and each finding is
 closed at its seam: the key is read off the PARSED predicate — `<inner
 expression over the body's relations> = <bare outer column>` — so a side
@@ -2580,7 +2580,7 @@ qualified star, EXISTS, EXISTS LIMIT 1, NOT EXISTS, IN, scalar} on five arms:
 54 wrong and 42 refused on the single arm at base, 0 wrong and the 12 bare
 stars refused at the tip.
 
-**Round 2 (2026-09-24): the key is an identity, never a name.** Every body in
+**The earlier implementation (2026-09-24): the key is an identity, never a name.** Every body in
 that gate aliased its columns; with the body publishing a name the outer
 relation also has (`SELECT DISTINCT i.k … = o.k - 0`, `SELECT i.id … LIMIT 2`)
 the key travelled under the body's name and the lifted equality or the
@@ -2589,19 +2589,19 @@ colliding name on the stage DAG. A lifted key is now always minted into its
 own slot, a DISTINCT body keeps the lateral's name, and the DAG resolves the
 lateral's unaliased items and aggregate-published slot to what its stream
 carries (ADR-0026 §8l). A grouped body keyed on an outer expression, which
-answered zero or every row on the DAG at base and at round 1, answers too.
+answered zero or every row on the DAG at base and at earlier implementation, answers too.
 Gate: `coordinator.TestArcJPBLateralBodyNamesNeverBindTheOuterRelationOnEveryArm`.
 
-**Round 3 (2026-09-24): the DAG carries a LATERAL by a PROPERTY, and routes
-the rest.** The round-2 closure review found the round-2 DAG rule wrong through
+**The earlier implementation (2026-09-24): the DAG carries a LATERAL by a PROPERTY, and routes
+the rest.** The earlier implementation closure measurement found the earlier implementation DAG rule wrong through
 new spellings — a body naming its relation by its TABLE or CTE name (28 rows
 for 9), `SELECT DISTINCT *` (`s.id` read `o.id`), a `SELECT *` body with a bare
 key, a derived table or CTE inside the body, a third relation joined on `s.k`
-— the same defect as round 1's colliding unaliased column: the stage DAG does
+— the same defect as earlier implementation's colliding unaliased column: the stage DAG does
 not run a decorrelated body's Project, the join stage reads the body's SCAN
 stream, and every reference above it is re-spelled onto that stream, binding
 by bare name where a qualifier is lost. Two rounds taught the re-spell one
-spelling each; round 3 asks the plan instead
+spelling each; earlier implementation asks the plan instead
 (`dagplan.refuseCollidingLateral`, `ErrLateralIdentityDistributed`). The DAG
 carries a correlated LATERAL only when (1) no non-minted name its arm carries
 ACROSS its join — what its SELECT list, aggregate or bare scan publishes, and
@@ -2609,7 +2609,7 @@ the columns those items are computed from (a column the body only filters on
 stays in the body's own stage) — is carried by another relation of the query
 (the subtrees hanging off the path from the root to the arm; a slot the
 planner mints in a RESERVED family such as `__key_0` is unique by
-construction — round 4: only those families, `plansql.ReservedSlotFamily`,
+construction — earlier implementation: only those families, `plansql.ReservedSlotFamily`,
 not every `__` name), and (2) the join does not null-extend a grouped arm (a LEFT
 lateral over a DISTINCT or GROUP BY body wrote pad and aggregate files of
 different widths, ADR-0010, or padded every row NULL through a table-named
@@ -2627,7 +2627,7 @@ differ from single-process on no LATERAL cell; 710 of the corpus route and 123
 of the carried cells route (clause 2), the other 511 run as stages and answer
 PostgreSQL's rows.
 
-The single-process half, at the seams the review named: the outer side of a
+The single-process half, at the seams the measurement named: the outer side of a
 key binds through ONE path — the outer names include a CTE reference's name
 (its alias alone when it has one) and a derived table's, a qualifier is read
 from the parse (a delimited `"O"` included), and the equality's two sides come
@@ -2646,18 +2646,18 @@ not compared as the string `o.k`.
 Gate: `coordinator.TestArcJP3CorrelatedLateralRoutesOrAnswersOnEveryArm`
 (every cell's routing decision recorded).
 
-**Round 4 (2026-09-25): a routed LATERAL is right only when single-process is
-right, and every net keys on the predicate's SHAPE.** The round-3 closure
-review found the property passable and the routing dishonest in three places,
+**The earlier implementation (2026-09-25): a routed LATERAL is right only when single-process is
+right, and every net keys on the predicate's SHAPE.** The earlier implementation closure
+measurement found the property passable and the routing dishonest in three places,
 each one mechanism: (1) the guard dropped every `__`-prefixed name as minted,
 so a LATERAL over user names `__id` / `__k` crossed exactly the names the
-property is about and ran as stages with the round-2 wrong rows; it now skips
+property is about and ran as stages with the earlier implementation wrong rows; it now skips
 only the planner's reserved families and compares names under
 `strings.EqualFold`'s folding, the identity the re-spell's resolvers use (a
 body's `"ſ"` beside an outer `s`). (2) Three routed cells answered the
 single-process pipeline's wrong rows on every arm — routing made the arms
 agree, not right. The single arm is fixed at its seams: the lateral's alias
-names its arm when the body is a derived table's star (ADR-0026 §8l round 4),
+names its arm when the body is a derived table's star (ADR-0026 §8l earlier implementation),
 and (3) the body's WHERE splits into conjuncts on the AST (the text split cut
 `BETWEEN o.total AND o.total + 20` in two; a part that parses and is not a
 correlated equality has no key, so `LIKE CASE WHEN o.k = 1 …` no longer mints
@@ -2665,10 +2665,10 @@ correlated equality has no key, so `LIKE CASE WHEN o.k = 1 …` no longer mints
 bare column against constants, and every other predicate that reaches it —
 a column in a value position, NOT BETWEEN / NOT IN, `<>`, AND / OR / NOT, CASE,
 IS DISTINCT FROM, a function — is refused, never compared as text or dropped
-(this supersedes round 3's "a filter whose value side names a column"). A
+(this supersedes earlier implementation's "a filter whose value side names a column"). A
 bare `SELECT *` over an expression-keyed LATERAL is no longer refused: it
 expands to the FROM arms' own lists (the lateral's read as `s.*` reads it,
-without the key slot), which is PostgreSQL's star — round 1's refusal refused
+without the key slot), which is PostgreSQL's star — earlier implementation's refusal refused
 cells base answered right; a star that cannot be expanded (a lateral list
 naming one column twice) is refused after expansion, on both paths. For the
 same reason a lifted non-equality predicate under a bare star is no longer
@@ -2686,8 +2686,8 @@ distributed disposition, not the destination: evaluating such a lateral as
 stages is #1323 (a planner-phase follow-up); until then a routed cell is
 right exactly when the single-process pipeline is.
 
-**Round 5 (2026-09-25): a correlated body is evaluated for ONE outer row in
-every clause the lowering moves.** Round 4 split the body's WHERE on the AST
+**The earlier implementation (2026-09-25): a correlated body is evaluated for ONE outer row in
+every clause the lowering moves.** earlier implementation split the body's WHERE on the AST
 but rebuilt its LOCAL terms as text with no AST, and the filter re-split that
 text at every AND — `q.qv BETWEEN 10 AND 30` became `q.qv between 10` and a
 constant `30` (zero rows single-process, a parse error on the DAG). The split
@@ -2699,7 +2699,7 @@ whose FROM holds a LATERAL join (it loses its correlation, filed), and a term
 naming a relation that is neither the body's nor to its left — a LATERAL
 nested in another that names the outermost relation (42000 until now). A
 Filter pushed below a Project hands the subtree's name (its derived alias,
-the lateral marker) to the new root, round 4's alias rule at the rewrite
+the lateral marker) to the new root, earlier implementation's alias rule at the rewrite
 that moves the root. A WINDOW is the other clause: a window anywhere in the
 body — a bare or nested SELECT item, QUALIFY, HAVING, ORDER BY — is
 partitioned by every correlation key it does not already carry (the per-key
@@ -2891,7 +2891,7 @@ runner (#1384, #1364).
 
 ### 2d. A volatile CTE read more than once is evaluated ONCE, on demand, on the single-process path
 
-(Added 2026-10-05, arc CM, #1531; amended the same day, round 3: the shared
+(Added 2026-10-05, arc CM, #1531; amended the same day, earlier implementation: the shared
 evaluation is filled on demand, a CTE read once is not shared, and a
 function's volatility is the registry's.)
 
@@ -3216,7 +3216,7 @@ subquery declares no type to the const-arith fold, which is ADR-0024's rung
 
 ### 5. A scalar subquery is at most ONE row, and the second row is 21000
 
-(Added 2026-09-04, arc E6 round 1.)
+(Added 2026-09-04, arc E6.)
 
 Every site in the engine that reduced a scalar subquery's result to a value
 took `rows[0]` and said nothing about the rest. There were four of them: the
@@ -3256,7 +3256,7 @@ rows are neither one per task nor one per file, and a SINGLE-row producer can
 surface in more than one file, so a count taken there is unsound in both
 directions. The lever the deferral exists for is untouched.
 
-**How much a construct READS is part of the rule** (added round 2). `> 1` is
+**How much a construct READS is part of the rule** (added earlier implementation). `> 1` is
 the whole cardinality test, so the second row decides it and the read stops
 there (`plansql.AppendRowLimit`, `LIMIT 2`); `EXISTS` asks whether there is A
 row and reads one. This is not only an efficiency: the DML doors bound what a

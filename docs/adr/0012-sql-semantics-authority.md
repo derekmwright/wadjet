@@ -180,7 +180,7 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      generally.
 
      **The classification covers BOTH arithmetic nodes, not only the typed
-     one.** (Amended 2026-09-04, #849 round-3 residual / #555.) Exact
+     one.** (Amended 2026-09-04, #849 residual / #555.) Exact
      fixed-point arithmetic boxes its result exactly as a DECIMAL COLUMN
      boxes one — the value's rendered text — so an arithmetic node is a
      `boxDecimal` operand whenever its exact arm resolved. `expr.BinOpNumeric`
@@ -302,7 +302,7 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      `d = 'NaN'` is refused here and answered there (#534).
 
      **The refusal's cost is a plan-time cost, not a per-row one.**
-     (Added 2026-08-24, from the #505 review.) The first version asked both
+     (Added 2026-08-24, from the #505 measurement.) The first version asked both
      of the refusal's questions on EVERY ROW — allocating a
      `kernel.DecimalLiteral` and re-walking the literal's digits to answer
      "is this a number", then re-resolving the column to answer "is this a
@@ -459,7 +459,7 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
        same class as the DECIMAL AVG bullet above, and what the wire oracle's
        `SumAvgOverInteger` float-render pin cites.
 
-       **RE-AFFIRMED 2026-09-02** after the arc-A round-0 pass re-opened it
+       **RE-AFFIRMED 2026-09-02** after the arc-A earlier implementation pass re-opened it
        as a candidate defect and measured PostgreSQL 17 directly. The rule
        there is `select_div_scale`: at least sixteen SIGNIFICANT digits, so
        the FRACTIONAL digit count moves with the magnitude of the answer, and
@@ -540,7 +540,7 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
 
        One consequence worth naming: because `pgwire.TypeMod` answers −1 for
        `Precision <= 0`, a LOST precision and an honestly-unconstrained
-       numeric send the same four bytes. That is why round 3's grouped-bar
+       numeric send the same four bytes. That is why earlier implementation's grouped-bar
        divergence — DECIMAL(0,2) on the DAG arms — was invisible on the wire
        and visible only in `wadjet.ColumnMeta.Precision`, and why the arm
        census asserts `(type, precision, scale)` rather than the typmod.
@@ -598,7 +598,7 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
 10. **A network-literal comparison follows the ADDRESS's own order and
     PostgreSQL's `inet` rules — item 8's boxed-value rule applied to IPv6
     and CIDR — and a literal that names no address is a query ERROR.**
-    (Added 2026-08-24, #492. Rewritten 2026-08-24 after review: the first
+    (Added 2026-08-24, #492. Rewritten 2026-08-24: the first
     pass got the ordering RULE wrong for CIDR and invented a match-nothing
     answer for a literal it could not parse.) `tryNetworkLit`/
     `CmpNetworkLit` (`internal/engine/expr`) already pre-parsed an IPv4 or
@@ -851,7 +851,7 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
 11. **LIKE renders the column to TEXT for every type — the value's own
     printed form, identical at both evaluation sites — rather than refusing
     the way PostgreSQL does.** (Added 2026-08-24, #497. Scoped and corrected
-    2026-08-24 after review: the original claimed the rendering matches
+    2026-08-24: the original claimed the rendering matches
     `CAST AS STRING` across all 22 types, which is true of the seven types
     the fix was about and false of DATE.)
 
@@ -877,13 +877,13 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     exactly what `CAST AS STRING` and every scalar function argument produce.
     (Amended 2026-08-25, #521: it did NOT hold for DATE — `CAST(c_date AS
     STRING)` answered the epoch DAY, `15007`, where the projection and LIKE
-    answered `2011-02-02` — and the review that closed it found the identical
+    answered `2011-02-02` — and the measurement that closed it found the identical
     gap for FLOAT32, where CAST answered the float64-widened digits instead
     of the float32-shortest-round-trip form. Both were `expr.Cast.Eval`'s
     string-family case reading the operand through `ColRef.Eval`'s raw-box
     fast path (epoch-day int32 for DATE, float64-widened for FLOAT32)
     instead of the column's own rendering — the identical mechanism LIKE's
-    operand had via `likeOperand`, which #497's review had already fixed
+    operand had via `likeOperand`, which #497's measurement had already fixed
     for these same two types on the LIKE side and left CAST's separate,
     narrower `networkOperand` (IPv4/MAC only) unfixed. The two resolvers
     are now one function, `boxedTextOperand`, shared by both call sites —
@@ -899,7 +899,7 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     every flat type and is what caught FLOAT32 for LIKE in the first place.)
 
     **A FLOAT32 concatenated as TEXT is rendered at FLOAT64 WIDTH, and that
-    is a recorded divergence.** (Added 2026-09-02, #609's review.) The
+    is a recorded divergence.** (Added 2026-09-02, #609's measurement.) The
     paragraph above says a FLOAT32's text is `0.14285715`, its shortest
     round-trip, and that is what `CAST` and `LIKE` answer — they share
     `boxedTextOperand`, whose type list has FLOAT32 on it since #521. The
@@ -944,7 +944,7 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     four types `ColRef.Eval` boxes differently from `GetValue`. #497 closed
     two of them (TypeIPv4/TypeMAC, through the shared `networkOperand`
     resolver `Cast`'s string-family case already used) and left two open,
-    which the review found: `c_date LIKE '20%'` matched 4949 rows through
+    which the measurement found: `c_date LIKE '20%'` matched 4949 rows through
     the scan and 83 through a projection — the epoch DAY, not the date —
     and `c_f32 LIKE '%1%'` differed by 237 rows, a float64-widened rendering
     of a float32. `expr.likeOperand` closes both, and
@@ -1166,7 +1166,7 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     API hands back — bounded by the same five consumers, and not this one.
 
     **A SUB-SECOND timestamp prints the MINIMAL fraction, as PostgreSQL
-    does.** (Recorded as a divergence 2026-09-02 by the review of #544;
+    does.** (Recorded as a divergence 2026-09-02 by the measurement of #544;
     CLOSED 2026-09-04.) The server prints `2023-11-14 22:13:20.5` for `.500`
     and `.25` for `.250` — verified live — and `batch.FormatTimestamp` printed
     three digits always. It is the same function pgwire's send path calls, so
@@ -1228,7 +1228,7 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     position is the localization PostgreSQL's own message does not carry.
 
     **The question asked is PostgreSQL's ALGORITHM, not a list of pairs.**
-    (Rewritten 2026-09-04, round-2 review of #648.) The first draft of this
+    (Rewritten 2026-09-04, earlier measurement of #648.) The first draft of this
     refusal exempted a pair only when the numeric ladder widened it, when the
     two mapped to the same `pgTypeName`, or when it was DATE/TIMESTAMP — and
     that hand-written list refused pairs PostgreSQL MATCHES: thirteen ordered
@@ -1251,7 +1251,7 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
 
     **The unknown-literal rule is applied at every door that DECLARES the
     column, not only at the one that executes it.** (Amended 2026-09-04,
-    round-3 review of #648.) There are three: the stage DAG's arm projection
+    earlier measurement of #648.) There are three: the stage DAG's arm projection
     (`reconcileSetOpArmTypes` stamps the resolved type on the literal arm's
     spec), the DAG's declared output schema (`setOpDeclaredOutputSchema` skips
     unknown arms in its fold) and the single-process path's schema
@@ -1272,7 +1272,7 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     a query the single-process path answered.
 
     **A QUOTED literal whose resolved type cannot be built from TEXT is
-    refused at plan time with 0A000.** (Amended 2026-09-04, round-3 review of
+    refused at plan time with 0A000.** (Amended 2026-09-04, earlier measurement of
     #648.) PostgreSQL parses such a literal with the resolved type's own input
     function, so `c_ts ∪ '2010-01-01 00:00:00'` is timestamp, `c_bool ∪ 'true'`
     boolean and `c_port ∪ 'notaport'` is 22P02 — all measured live on 17.11.
@@ -1283,7 +1283,7 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     to what `SetValue` actually does by
     `batch.TestVectorAcceptsTextIsWhatSetValueDoes`, which writes a string into
     a vector of every one of the 22 types and compares; a list somebody keeps
-    by hand is what cost this rule a review round already.
+    by hand is what cost this rule a measurement round already.
 
     The other nine — BOOL, INT32, INT64, FLOAT32, FLOAT64, TIMESTAMP, PORT,
     PROTOCOL, DURATION — failed the #361 silent-write guard with NO SQLSTATE
@@ -1540,7 +1540,7 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
       `1.2345678901234568e+38`, a rounded number under an exact type, on both
       paths. Beside a FLOAT arm PostgreSQL resolves double precision and that
       float8 IS the answer, so the refusal is scoped to an exact result
-      (round-2 review of #683).
+      (earlier measurement of #683).
 
     **A computed DECIMAL expression does NOT reach the refusal**, and saying it
     did was wrong in both directions. `d + d` and `COALESCE(d, d)` are declared
@@ -1684,7 +1684,7 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
       name a client can resolve in pg_type; `port` and `protocol` resolve to
       nothing there. The RANGE refusal deliberately keeps its own sentence —
       `PORT value 70000 out of range [0, 65535]` — which names the bound and
-      says more than PostgreSQL's shape would. Arc EX's round-1 review (N1)
+      says more than PostgreSQL's shape would. Arc EX's earlier measurement (N1)
       measured the split: eleven doors said `integer` and the writer said
       `port`.
 
@@ -1746,7 +1746,7 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     answers `Decided(bool)` is never refused. `UPPER(bool_col)` answers and
     `UPPER(TRUE)` is 42883, because a LITERAL's type is syntactic. (This
     paragraph named `expr.trustedArgType` until 2026-09-18; no such symbol
-    exists, and arc EX's round-1 review caught it — N2.)
+    exists, and arc EX's earlier measurement caught it — N2.)
 
     **The CAST to an integer type is TWO casts, and the operand's DECLARATION
     chooses.** (Added 2026-09-18, #1141.) `'2.5'::integer` is 22P02 — int4in
@@ -1783,7 +1783,7 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     question their ordering is.
 
     **Inside a COMPOSITE the type is the CALL'S, folded once over every
-    argument.** (Added 2026-08-29 from this item's own review.)
+    argument.** (Added 2026-08-29 from this item's own measurement.)
     GREATEST/LEAST, CASE and COALESCE resolve one type through
     `select_common_type` and coerce the unknown-typed literal to THAT, so
     `GREATEST(bigint, '3.1', double precision)` is a double comparison and
@@ -1810,7 +1810,7 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     bound is what refuses at the wrong width.
 
     **DECIMAL is a rung of that fold, and a NUMERIC CONSTANT arm carries its
-    own type into it.** (Added 2026-08-29 from this item's second review.) The
+    own type into it.** (Added 2026-08-29 from this item's second measurement.) The
     ladder is `select_common_type`'s, the same one item 12 pins for set
     operations, with `float4` where live `pg_typeof` puts it:
 
@@ -1834,7 +1834,7 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     byte order instead.
 
     **The fold decides the READING, not only the literal's grammar.** (Added
-    2026-08-30 from this item's fourth review.) The kind and the type are two
+    2026-08-30 from this item's fourth measurement.) The kind and the type are two
     answers, and applying the second to the literal alone left the comparison
     on the first. A composite whose kind is DECIMAL and whose fold is float8
     took the DECIMAL arm on every row the decimal arm supplied — read with the
@@ -1914,7 +1914,7 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
 
   - **`INSERT INTO … SELECT` assigns within the NUMERIC family and refuses
     outside it.** (Added 2026-09-12, #1024; narrowed 2026-09-13 after the
-    round-2 review.) PostgreSQL's `transformAssignedExpr` coerces each query
+    earlier measurement.) PostgreSQL's `transformAssignedExpr` coerces each query
     item to its target column's type, so `INSERT INTO t (text_col) SELECT
     bigint_col` succeeds there (measured on 17.11). This engine converts every
     cell through its OWN assignment converter — `assignEvaluatedValue`, the one
@@ -1930,7 +1930,7 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     assignment-casts the first of those and refuses the second. The divergence
     is therefore in the REFUSING direction and it is narrow.
 
-    The round-1 record here was much wider: it refused an integer into a DECIMAL
+    The earlier implementation record here was much wider: it refused an integer into a DECIMAL
     and a DECIMAL into anything, because the door handed the query's BOX to the
     writer and `parquet.DecimalValueFromBox` reads an integer box as the
     already-UNSCALED carrier (ADR-0018 §4) — a BIGINT 5 into `DECIMAL(18,4)`
@@ -1941,7 +1941,7 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     VALUES pair by pair, against each other and against PostgreSQL's measured
     answer.
 
-    **Amended 2026-09-24 (arc VL round 3, #1252 #1254): ONE assignment table
+    **Amended 2026-09-24 (arc VL, #1252 #1254): ONE assignment table
     for every write, and it is PostgreSQL's.** `ingest.AssignableToColumn` is
     asked by `INSERT … VALUES`, `INSERT … SELECT`, `UPDATE … SET` and `MERGE`
     alike, from the source's DECLARED type, before a row is read. It assigns
@@ -1955,7 +1955,7 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     TEXT for a network or UUID value (`expr.DeclaresTextForTypedValue`:
     `uuid()`, `int_to_ip`, …) is read by the target's input function like an
     unknown-typed literal. The table is only as right as the declarations it
-    reads, so the same round made every TEMPORAL declaration true: a
+    reads, so the same change made every TEMPORAL declaration true: a
     date/time function or operator declares PostgreSQL's type and its kernel
     produces that type's box (int64 epoch days / epoch milliseconds), the
     unit of a box is read from its PRODUCER (`expr.producedTemporal`) at every
@@ -1965,8 +1965,8 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     WhatItProduces`, `wadjet.TestOneAssignmentTableOnEveryDoor` (580 cells ×
     four doors against PostgreSQL 17.11's measured answers).
 
-    **Amended 2026-09-24 (arc VL round 4): one assignment FUNCTION, and a
-    door-diff gate.** Round 3's one table sat under two converters — INSERT …
+    **Amended 2026-09-24 (arc VL): one assignment FUNCTION, and a
+    door-diff gate.** earlier implementation's one table sat under two converters — INSERT …
     SELECT assigned a constant from the value its select list had evaluated
     (a decimal literal is a double there, ADR-0024), so `SELECT 2.50` into
     TEXT stored `2.5` there and `2.50` on every other door. Every door now
@@ -1979,15 +1979,15 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     different value or raise a different SQLSTATE, and that the common
     answer is PostgreSQL 17.11's; the only listed differences are CTAS
     column TYPES (a decimal literal was double precision by ADR-0024's
-    literal rule — closed in round 5 below; integer arithmetic and a negated
+    literal rule — closed in earlier implementation below; integer arithmetic and a negated
     integer literal declare bigint),
-    never a stored value another door disagrees with. The same round put
+    never a stored value another door disagrees with. The same change put
     PostgreSQL's DATE / TIMESTAMP range (22008) at the one place a temporal
     value is constructed (#911's family), and the date/timestamp operator
     refusal (42883) into expression typing on every DML door.
 
-    **Amended 2026-09-24 (arc VL round 5): the door-diff gate gets its
-    SOURCE axis and its PostgreSQL column.** Round 4's gate proved no two
+    **Amended 2026-09-24 (arc VL): the door-diff gate gets its
+    SOURCE axis and its PostgreSQL column.** earlier implementation's gate proved no two
     doors differ; it could not see every door being equally wrong, and they
     were: a decimal constant one expression deeper (`CASE WHEN true THEN 2.50
     END`, `COALESCE(2.50, 1)`, a CTE's, a derived table's, a VALUES list's)
@@ -2001,7 +2001,7 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     splits and zero unlisted differences from PostgreSQL 17.11; the three
     listed cells are the #764 trailing-zero class (a choice over constants of
     different scales prints at one scale). The CTAS decimal-literal type
-    divergences are closed. The same round: a quoted operand beside a DATE or
+    divergences are closed. The same change: a quoted operand beside a DATE or
     TIMESTAMP is typed by PostgreSQL's operator resolution in every statement
     (`date + '…'` 42725; the literal of `date - '…'`, `ts - '…'`, `ts + '…'`
     read as a date, a timestamp, an interval); an INTERVAL's clock part is
@@ -2099,7 +2099,7 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     same reasoning that expands `BETWEEN SYMMETRIC` and `ILIKE` at parse time.
 
   - **A truth context types EVERY expression kind, and a DML predicate is a
-    truth context.** (Added 2026-09-19, arc PT round 2 / #1179.) A `WHERE`, a
+    truth context.** (Added 2026-09-19, arc PT / #1179.) A `WHERE`, a
     `HAVING`, a `JOIN … ON`, the operands of `NOT`/`AND`/`OR`, a searched
     `CASE`'s `WHEN`, a `DELETE`'s and an `UPDATE`'s `WHERE` and a `MERGE`'s
     `WHEN … AND` all require a boolean, and the type is proved from whatever

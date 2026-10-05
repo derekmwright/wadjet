@@ -205,7 +205,7 @@ and a COMPARISON (`WHERE r + 1.0::real > 16777216::real`, a `CASE WHEN`
 condition) reach none, and both still compute at float8's width where
 PostgreSQL rounds at every float4 operator; both are measured, gated as census
 cells with a `ctl_` twin that spells the `CAST`, and recorded in ADR-0012 with
-the shape of the fix and why it was backed out of round 2 rather than landed on
+the shape of the fix and why it was backed out of earlier implementation rather than landed on
 two arms of five.
 
 A SET OPERATION was a third such position and is closed: it REPLACES the arm's
@@ -309,7 +309,7 @@ literal's, in one column. A wadjet vector has one scale for the whole column
 `12.7500000000000`: the same number, with trailing zeros that track the
 literal's fractional length.
 
-The alternative was implemented during #724's review round 1 and reverted with
+The alternative was implemented during #724's measurement and reverted with
 evidence. Taking the scale from the DECLARED operands alone keeps the columns'
 rows byte-identical to PostgreSQL and leaves a SELECTED literal finer than that
 scale with nowhere to go, so `CASE WHEN g < 3 THEN numeric(9,2) ELSE 0.125 END`
@@ -541,7 +541,7 @@ that must honour `Sat`.
 
 **Arithmetic over an aggregate carries the aggregate's declaration, and a
 derived table is not a boundary it stops at.** (Added 2026-09-05, #867;
-mechanism CORRECTED 2026-09-05 in round 3 — the first version of this
+mechanism CORRECTED 2026-09-05 in earlier implementation — the first version of this
 paragraph, written when the shape was still deferred, named a cause the code
 does not have. See the correction note below.)
 
@@ -566,7 +566,7 @@ only add an answer, never change one. Gated by
 asserts PostgreSQL's exact value and a numeric declaration for all five
 spellings plus the `SELECT *` control.
 
-> **Correction to the round-2 text.** It said the trigger was a RENAME, that
+> **Correction to the earlier implementation text.** It said the trigger was a RENAME, that
 > the walk was left "undecided", and that the child's emitted columns carry no
 > declaration for the renamed column. All three are false, measured at the same
 > commit: `SELECT SUM(c_i64 * 3000000) + 1 FROM (SELECT c_i64 FROM t) x` has no
@@ -575,7 +575,7 @@ spellings plus the `SELECT *` control.
 > FLOAT64, so the documented `ok=false` guard never fired; and
 > `emittedColDecls` returns `{v: INT64}` for exactly the shape the paragraph
 > said it could not type. An ADR may not describe a mechanism the code does not
-> have — the same standard round 1 applied to the #764 entry.
+> have — the same standard earlier implementation applied to the #764 entry.
 
 **A SET OPERATION is not a boundary either, and arms of DIFFERING type are
 reconciled rather than left untyped.** (Added 2026-09-06, #884.) The set-op arm
@@ -605,7 +605,7 @@ and the emitted-type map cannot disagree about a column they both describe.
 
 **The CARRIER and the WIRE want DIFFERENT answers about the same node, and the
 seam that separates them is `emittedComputedCols`.** (Corrected 2026-09-06,
-round-1 review B1 — the first version of this paragraph asserted the outcome
+The earlier measurement B1 — the first version of this paragraph asserted the outcome
 without the mechanism, and the code did not have it.)
 
 PostgreSQL's `numeric(9,2) ∪ numeric(20,6)` is `numeric` with typmod −1 —
@@ -693,7 +693,7 @@ a change to what `exec.ProjectColumn.Precision` MEANS (a cap, or a hint), and
 it is not made here.
 
 **#712 and #764 are ONE item, and it is a CARRIER change.** (Added 2026-09-06,
-arc H3's round 0; both re-measured on this tree against live PostgreSQL 17.11,
+arc H3's earlier implementation; both re-measured on this tree against live PostgreSQL 17.11,
 and both DEFERRED rather than bounded.) The paragraph above ends at a
 declaration; the arc that re-opened it found the other half is the same fact.
 
@@ -862,7 +862,7 @@ accepts them: `DecimalTextAt` still refuses, so nothing value-producing can
 reach a bound by accident, and `ParseDecimalStringChecked` turns the three
 into the `22003` above.
 
-**Two limits of the CHECKED WRITERS, recorded 2026-08-29 with #695's review.**
+**Two limits of the CHECKED WRITERS, recorded 2026-08-29 with #695's measurement.**
 Neither is reachable from SQL today and neither is claimed closed. A box of a
 type a DECIMAL column cannot take at all — a bool, a `[]byte` — falls through
 to `SetValue`, whose `mismatch()` PANICS, so the query boundary reports an
@@ -1067,7 +1067,7 @@ an accidental refusal or an accidental different scale.
 
 ### 9. A DDL type parameter is spelled with PARENTHESES, and the container spellings are a documented SUPERSET
 
-Added 2026-08-29 (#675, #678 review). Wadjet's `CREATE TABLE` takes a type's
+Added 2026-08-29 (#675, #678 measurement). Wadjet's `CREATE TABLE` takes a type's
 parameters in parentheses, for every parameterized type:
 
 ```sql
@@ -1234,13 +1234,13 @@ which is why the defect was invisible for as long as it was.
     (Amended 2026-09-28, #1353: the VALUE and the declared carrier stay
     float64; the declaration carries PostgreSQL's numeric category beside it,
     §2c, which is what an integer assignment rounds by.)
-  - **A fractional literal IS numeric (amended 2026-09-24, arc VL round 5;
+  - **A fractional literal IS numeric (amended 2026-09-24, arc VL;
     the paragraph below is the position it replaced).** The literal
     declares the DECIMAL(p,s) of its spelling wherever it sits — a bare
     projection (`SELECT 2.50` is 2.50, OID 1700), a CASE / COALESCE /
     GREATEST / LEAST / NULLIF arm, a derived table's, a CTE's or a VALUES
     list's column, a set-operation arm — so the write doors assign PostgreSQL's
-    numeric through all of them (round-4 review B2: one CASE deeper the
+    numeric through all of them (earlier measurement B2: one CASE deeper the
     literal was a double and `2.50` stored `2.5` into TEXT). The objection
     recorded below — covering half of the positions is worse than none — is
     met by covering the declaration itself, not a list of positions; the

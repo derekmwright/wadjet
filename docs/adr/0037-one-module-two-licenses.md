@@ -55,7 +55,7 @@ GitHub's detector and a prospective embedder both read.
 `tools/licensecheck` fails if any MIT package reaches an AGPL package through
 non-test imports at any depth, and prints the import path that did it. The
 MIT artifacts are distributable under the MIT terms only while nothing they
-link is AGPL; that is a transitive question, and no diff review answers it.
+link is AGPL; that is a transitive question, and inspecting a diff alone does not answer it.
 A second check requires every `.go` file to carry the SPDX identifier of its
 directory's region, every AGPL directory to carry a verbatim copy of the AGPL
 text (pkg.go.dev resolves a license from the nearest `LICENSE` at or above a

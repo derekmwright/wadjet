@@ -282,7 +282,7 @@ Mechanisms, each with its instrumented evidence in the commit body:
   one was taught because it buys the trade it exists for.
 - Narrowing BYTES `SetValue` against a string carrier: a shared coercion
   the ingest and expression paths rely on; the producer was fixed instead,
-  and no producer of a rendered BYTES form remains (the review searched).
+  and no producer of a rendered BYTES form remains (confirmed by a source search).
 
 ## Consequences and boundaries
 

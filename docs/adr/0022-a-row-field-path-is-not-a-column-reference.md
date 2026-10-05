@@ -70,7 +70,7 @@ The PREDICATE spelling is the one that shows the class rather than the count:
 NULLs — 2 where the field has 3 — on all four arms, and it counts 3 on all four
 now. An earlier draft of this paragraph said the two engines disagreed about it
 (2 against 3); they did not, and the number is corrected here rather than left
-standing (round-2 review, P3).
+standing (earlier measurement, P3).
 
 The step is gated on the container DECLARING the field, which is what keeps
 the reorder off an ordinary qualified reference whose qualifier happens to
@@ -223,7 +223,7 @@ excludes first — and both directions are gated.
   ("trailing input after the end of the statement"). That is a parser feature,
   and it fails loudly rather than answering wrongly.
 
-  **Amended 2026-09-04 (arc E3 round 3).** PostgreSQL's own spelling for a
+  **Amended 2026-09-04 (arc E3).** PostgreSQL's own spelling for a
   field path is the PARENTHESISED one — it reads `c_row.b` as `table.column`
   and only `(c_row).b` as the field — and wadjet parses it now:
   `(c_row).b` produces the SAME `plansql.ColRef{Table: "c_row", Column: "b"}`
@@ -233,8 +233,8 @@ excludes first — and both directions are gated.
   key (INNER and OUTER, see below), aggregate argument, cast, arithmetic, and
   redundant parentheses (`((c_row)).b`). `a.b.c` is still a syntax error.
 
-  **The join key needed TWO sites, and the second was found by a reviewer
-  measuring the claim** (2026-09-04 round 4). An INNER join's field-path ON
+  **The join key needed TWO sites, and the second was found by a measurements
+  measuring the claim** (2026-09-04 earlier implementation). An INNER join's field-path ON
   conjunct is declined as a key pair and lifted into a filter above the join,
   which MATERIALIZES the path — that is `logical.isBareColRef`. An OUTER join
   cannot use that placement (a residual above the join deletes the rows the
@@ -271,7 +271,7 @@ excludes first — and both directions are gated.
   the field is asked for. That is rule 1's list again, one part wider, and it
   is its own change.
 
-  **Amended 2026-09-23 (arc PC round 3): the qualified container answers.**
+  **Amended 2026-09-23 (arc PC): the qualified container answers.**
   The three-part identity was never needed. The earlier attempt answered NULL
   because it FLATTENED the path into a three-part name and stripped the
   qualifier; the fix keeps the two-part reference exactly as written —
@@ -307,7 +307,7 @@ excludes first — and both directions are gated.
   spellings in `internal/planner/sql/paren_field_path_test.go`.
 
   **Rule 1 binds NINE resolvers.** The ninth is the IN-SUBQUERY lowering
-  (2026-09-04 round 5): `logical.tryDecorrelateInSubquery` names the semi
+  (2026-09-04 earlier implementation): `logical.tryDecorrelateInSubquery` names the semi
   join's outer key with `colRefName`, which returns a ColRef's Column and
   DROPS the qualifier — right for `t.col`, wrong for `c_row.b`. The semi join
   was built with `b` as its probe key, `b` is no column of the probe, and a key
@@ -331,7 +331,7 @@ excludes first — and both directions are gated.
   Pre-existing, and LOUD where base was a silent cross product on every arm.
   Gated at `both-sides-field-path-key`.
 
-  **Two more are pinned, and neither is this rule's** (round 5). A SPILLED
+  **Two more are pinned, and neither is this rule's** (earlier implementation). A SPILLED
   LEFT JOIN loses a PROJECTED ROW CONTAINER: `SELECT d.id, n.c_row FROM d LEFT
   JOIN n ON d.id = n.id` answers NULL for every container on the 512 KiB arm
   and the rows on the other three — a plain equi key, no expression, no

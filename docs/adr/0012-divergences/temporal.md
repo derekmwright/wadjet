@@ -251,7 +251,7 @@ ADR lines 2467-2530. Catalog rows: r9, r10, r11. Stated in [Mechanisms](#mechani
 - **`NOW`, `CURRENT_TIMESTAMP` and `PG_POSTMASTER_START_TIME` render a
   ZONELESS instant at MILLISECOND resolution where PostgreSQL renders a
   `timestamptz` with an offset at microsecond resolution.** (Added
-  2026-09-04, from #544's second pass; round-2 review, B2r2.)
+  2026-09-04, from #544's second pass; earlier measurement, B2r2.)
 
   Measured on PostgreSQL 17.11:
 

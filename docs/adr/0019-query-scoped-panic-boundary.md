@@ -1,6 +1,6 @@
 # ADR-0019: A panic fails the query, not the server — and the gate is what keeps that honest
 
-Status: Accepted (2026-08-24; §2 obligation principle added the same day after an adversarial review found four boundaries that recovered without discharging one)
+Status: Accepted (2026-08-24; §2 obligation principle added the same day after an adversarial measurement found four boundaries that recovered without discharging one)
 
 ## Context
 
@@ -139,7 +139,7 @@ refusing everything fails the gate rather than passing it.
   `TestPipelineReportsOrdinaryPanicsAsInternalErrors` (exec) and
   `TestScanWorkerPanicReportsRealBugsAsInternalErrors` (physical).
 - Adding a goroutine to the query path without a boundary is now a reviewable
-  omission with a named helper to point at — and the review question is not
+  omission with a named helper to point at — and the measurement question is not
   "does it recover" but "what does it owe".
 - A recovered panic is **not retryable**. It is deterministic, so the stage
   retrier marks it terminal on the first failure instead of spending the

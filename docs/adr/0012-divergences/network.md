@@ -81,11 +81,11 @@ ADR lines 2120-2214. Catalog rows: r1, r2, r3, r4, r5. Stated in [Mechanisms](#m
   maskless (0 accepted), the 4×34 octet-count-by-mask grid, and the
   leading-zero and trailing-dot forms.
 
-  **The FOLD sites agree too, and the round-3 entry that said otherwise
+  **The FOLD sites agree too, and the earlier implementation entry that said otherwise
   compared this engine against a PostgreSQL type it cannot be.** (Corrected
-  2026-09-05 in round 4.) `GREATEST`, `LEAST` and `COALESCE` resolve no
+  2026-09-05 in earlier implementation.) `GREATEST`, `LEAST` and `COALESCE` resolve no
   operator — they UNIFY their arguments' types — so beside a `cidr` column
-  the literal is read by the CIDR parser, and round 3 recorded wadjet's
+  the literal is read by the CIDR parser, and earlier implementation recorded wadjet's
   refusal of `GREATEST(cidr_col, '239')` as a divergence on that basis.
 
   It is not one, because a wadjet CIDR column is not a PostgreSQL `cidr`
@@ -149,7 +149,7 @@ ADR lines 2120-2214. Catalog rows: r1, r2, r3, r4, r5. Stated in [Mechanisms](#m
   is this entry's site list. So this entry, the gate's pins and #627 are one
   record, and it fires when #627 closes. A fixture at every site, a refusal asserted
   at two: that distinction is the same one this entry's first version lost,
-  and a bound with no fixture is how the defect survived review.
+  and a bound with no fixture is how the defect survived measurement.
 
 ### E61
 

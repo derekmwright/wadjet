@@ -304,7 +304,7 @@ Gates: `server.TestArcPTTheDMLTruthContextRefusesEveryNodeKindOnEveryDoor` (67
 expression node kinds × 3 doors = 201 cells, each over its own fresh table,
 asserting the SQLSTATE AND that the rows are still there),
 `server.TestArcPTTheSELECTWhereTakesTheSameRule` (20 cells) and
-`server.TestArcPTAMergeWhenConditionTakesTheSameRule` (7). The arc's review ran
+`server.TestArcPTAMergeWhenConditionTakesTheSameRule` (7). The arc's measurement ran
 an independent census of 342 (kind, verb, door) cells and found no door
 disagreeing with another. ADR-0012 carries the rule in its list of positions
 PostgreSQL decides; the differences page carries the two spellings where this

@@ -61,7 +61,7 @@ PostgreSQL declares `lag(anycompatible, integer, anycompatible)`. `physical.lagL
 | **r20** `PREPARE p(text) AS SELECT LAG(x, $1) OVER (ORDER BY id) FROM t; EXECUTE p('1')` | ERROR 42883 function lag(bigint, text) does not exist | LAG(x, 1): a text parameter is spliced as SQL's unknown literal and read by its value; a parameter declared `int8` or `numeric` is its type's literal and raises 42883 as on PostgreSQL (since [PW](../0012-amendments.md#2026-10-02-a-bound-parameters-type-arc-pw-1426-1410); both answered at v0.25.3) | — | kept superset | 2026-09-29 · [WA](../0012-amendments.md#2026-09-29-a-window-functions-argument-list-arc-wa-1394-1399), narrowed 2026-10-02 · [PW](../0012-amendments.md#2026-10-02-a-bound-parameters-type-arc-pw-1426-1410) | #1399, #1439 | `pgwire.TestAWindowArgumentParameterAnswers` (offset/text/1), `pgwire.TestArcPWParameterTypesMatchPostgres` (infer/LAG int8, infer/LAG numeric) |
 | **r21** `SELECT LAG(b, 1, 10 / (id - 2)) OVER (ORDER BY id) FROM t` | evaluates the default only on the rows it fills: -10, 10, 20, NULL, 40, 50 | ERROR 22012 division by zero: the default is materialized as a column and evaluated on every row, so a default that raises on a row it does not fill raises the query | 22012 | documented gap | 2026-10-02 · [WD](../0012-amendments.md#2026-10-02-a-lag--lead-default-widens-the-result-arc-wd-1435) | #1435 | `coordinator.TestArcWDWindowDefaultEveryArm` (gap/default_every_row) |
 | **r22** `SELECT LAG(b, 1, 'a') OVER (ORDER BY id) FROM t WHERE id > 100` (no row) | ERROR 22P02 invalid input syntax for type bigint: "a" (the unknown literal is coerced when the query is planned) | no rows: the default is coerced when a row reads it; over rows it is 22P02 as on PostgreSQL. A quoted literal default of an ARRAY value raises `cannot store string into ARRAY vector` (no SQLSTATE) where PostgreSQL raises 22P02 malformed array literal | — | kept superset | 2026-10-02 · [WD](../0012-amendments.md#2026-10-02-a-lag--lead-default-widens-the-result-arc-wd-1435) | #1435 | `coordinator.TestArcWDWindowDefaultEveryArm` (gap/no_rows_text, type/*/array/{text,qnum}) |
-| **r23** `SELECT LAG(b, 1, (SELECT max(d) FROM t)) OVER (ORDER BY id) FROM t` (b bigint, d double precision) | evaluates the subquery once: double precision, the maximum on the row the default fills (6.5, 10, 20, NULL, 40, 50 over the gate's fixture) | ERROR, no SQLSTATE: `cannot store string into INT64 vector` on the single-process arms, `window key project: compile window key "((SELECT max(d) FROM t))"` on the DAG arms; a constant subquery (`(SELECT 9)`) answers | — | refusal | 2026-10-03 · [WD](../0012-amendments.md#2026-10-02-a-lag--lead-default-widens-the-result-arc-wd-1435) | #1435 | `wadjet.TestArcWDWindowDefaultOnTheEmbeddedEngine` (pin: fails when the statement answers) |
+| **r23** `SELECT LAG(b, 1, (SELECT max(d) FROM t)) OVER (ORDER BY id) FROM t` (b bigint, d double precision) | evaluates the subquery once: double precision, the maximum on the row the default fills (6.5, 10, 20, NULL, 40, 50 over the gate's fixture) | ERROR: `cannot store string into INT64 vector` on the single-process arms (no engine SQLSTATE; pgwire sends 42000, measured 2026-10-05), `window key project: compile window key "((SELECT max(d) FROM t))"` on the DAG arms; a constant subquery (`(SELECT 9)`) answers | — | refusal | 2026-10-03 · [WD](../0012-amendments.md#2026-10-02-a-lag--lead-default-widens-the-result-arc-wd-1435) | #1435 | `wadjet.TestArcWDWindowDefaultOnTheEmbeddedEngine` (pin: fails when the statement answers) |
 | **r24** `CREATE TABLE c AS SELECT id, LAG(b, 1, CAST(NULL AS NUMERIC)) OVER (ORDER BY id) AS v FROM t; INSERT INTO c VALUES (9, 0.75)` (b bigint) | the column is unconstrained numeric and stores 0.75 | the column is DECIMAL(38,0), the scale of the LAG result over a bigint, and stores 1; a column created from a numeric LAG / LEAD result takes the result's one scale where PostgreSQL's column is unconstrained (ADR-0024 §1; the unconstrained NUMERIC column, `CREATE TABLE t (v NUMERIC)`, is the same scale-0 rung, #1541). A default that is an expression over a typed NULL (`CAST(NULL AS NUMERIC) + 0`) is declared double precision, as that expression is everywhere (#1541), so `LAG(b * 1e15 + 1, 1, CAST(NULL AS NUMERIC) + 0)` answers the double 1e+16 where PostgreSQL answers 10000000000000001 (measured 2026-10-04). 8b00b112 refused the CREATE TABLE AS (`cannot store string into INT64 vector`) | — | value divergence | 2026-10-04 · [WD](../0012-amendments.md#2026-10-02-a-lag--lead-default-widens-the-result-arc-wd-1435) | #1436 | `wadjet.TestArcWDTypedNullCreateTableAs` c10 (pin: fails when 0.75 is stored) |
 
 ## Source entries
@@ -150,7 +150,7 @@ ADR lines 712-795. Stated in [Mechanisms](#mechanisms). Moved to the log: [A02](
 
 - **A window SUM/AVG over an INTEGER column answers in float64 — wrong
   DIGITS, not only a wrong declaration.** (Added 2026-09-04, #813, arc F1;
-  CORRECTED 2026-09-05 after the arc's round-1 review, which measured what
+  CORRECTED 2026-09-05 after the arc's earlier measurement, which measured what
   the first version of this entry asserted without measuring. CLOSED
   2026-09-07 — see the entry above.) PostgreSQL
   declares `sum(int4) over ()` bigint and `sum(int8) over ()` /
@@ -213,7 +213,7 @@ ADR lines 712-795. Stated in [Mechanisms](#mechanisms). Moved to the log: [A02](
 ADR lines 903-927. Stated in [Mechanisms](#mechanisms).
 
 - **`DISTINCT` inside a window call is REFUSED, not answered.** (Added
-  2026-09-07, #987 review P4.) PostgreSQL 17.11 does not implement the
+  2026-09-07, #987 measurement P4.) PostgreSQL 17.11 does not implement the
   feature and says so: `ERROR: 0A000: DISTINCT is not implemented for
   window functions`. Wadjet dropped the keyword — both structures that turn
   a parsed window call into a plan build the argument list from the
@@ -228,7 +228,7 @@ ADR lines 903-927. Stated in [Mechanisms](#mechanisms).
   by `coordinator.TestAWindowFunctionRefusesDISTINCT` on four arms.
 
   The MESSAGE is PostgreSQL's sentence, once (amended 2026-09-08, #987
-  review P3). It arrived as `parsing SQL: parsing SQL: DISTINCT is not
+  measurement P3). It arrived as `parsing SQL: parsing SQL: DISTINCT is not
   implemented for window functions (sum)`, because the refusal is raised
   inside the recursive descent and `parseDispatch` prefixed everything that
   came out of it. `sql.wrapParseFailure` applies to the TEXT the rule
@@ -251,7 +251,7 @@ ADR lines 928-978. Catalog rows: r5. Moved to the log: [A06](../0012-amendments.
   Both spellings, grouped and windowed, take the same rule from
   `exec.IntegerAccOutputType` — for a **bare** argument. Under ARITHMETIC
   they do not, and that is a recorded GAP rather than a rule (added
-  2026-09-08, #987 review round 3, P1): `SUM(c_port * 1)`,
+  2026-09-08, #987 measurement, P1): `SUM(c_port * 1)`,
   `SUM(ABS(c_proto))` and `AVG(c_proto * 1)` answer float8 in BOTH
   spellings, where the bare column answers bigint and numeric(38,4).
 
@@ -289,7 +289,7 @@ ADR lines 2002-2014. Catalog rows: r13.
   for the aggregates PostgreSQL DOES accept it on are PostgreSQL's, values
   and ordering both — `STRING_AGG(DISTINCT s, ',')` sorts the distinct
   values, which is what PostgreSQL's dedup produces and what wadjet emits
-  since #703's review round.
+  since #703's measurements.
 
 ### E80
 

@@ -130,7 +130,7 @@ ADR lines 2882-2899. Catalog rows: r13. Stated in [Mechanisms](#mechanisms).
 
 - **A written `ON` over an unrepaired LATERAL with an empty-input default
   is REFUSED (0A000) where PostgreSQL answers.** (Added 2026-09-07, arc J1
-  round 5, #977.) PostgreSQL evaluates the lateral per outer row and applies
+  earlier implementation, #977.) PostgreSQL evaluates the lateral per outer row and applies
   the ON AFTER it, so an outer row the lateral matched nothing for still
   offers the ON a row carrying the item's empty-input value. This engine
   decorrelates into a join, which pads on the correlation BEFORE the ON is
@@ -161,7 +161,7 @@ ADR lines 2900-2920. Catalog rows: r14. Stated in [Mechanisms](#mechanisms).
   that answer (a named list, `o.*, s.*`). It is the disposition a lifted
   non-equality predicate under a bare star already has (ADR-0021 §1s).
   Gated in `coordinator.TestArcJPALateralOuterExpressionKeyAnswersOnEveryArm`.
-  **NARROWED 2026-09-25 (arc JP round 4):** a bare star over a LATERAL
+  **NARROWED 2026-09-25 (arc JP):** a bare star over a LATERAL
   join is expanded into the FROM arms' own lists, the lateral's read as
   `s.*` reads it, which hides the slot — so the star answers PostgreSQL's
   rows and names, and the lifted non-equality predicate under a bare star
@@ -177,7 +177,7 @@ ADR lines 2921-2940. Catalog rows: r17, r18, r19. Stated in [Mechanisms](#mechan
 
 - **A LATERAL body's correlated predicate that reads the enclosing
   relation through a subquery whose FROM holds a LATERAL join is REFUSED
-  (0A000) where PostgreSQL answers.** (Added 2026-09-25, arc JP round 4.)
+  (0A000) where PostgreSQL answers.** (Added 2026-09-25, arc JP.)
   A subquery with a LATERAL join does not keep its correlation with the
   query around it on any execution path — `EXISTS (SELECT 1 FROM j JOIN
   LATERAL (…) t ON true WHERE j.id = q.qid AND t.xv > 5)` admits every
@@ -186,7 +186,7 @@ ADR lines 2921-2940. Catalog rows: r17, r18, r19. Stated in [Mechanisms](#mechan
   outer row, and the lateral answered every pair. Base refused it by
   accident (a text split at the first `=` inside the EXISTS); the
   property is refused now (`logical.refuseOuterReferenceThroughLateralSubquery`).
-  **Amended 2026-09-25 for arc JP round 5:** the same subquery in a LOCAL
+  **Amended 2026-09-25 for arc JP:** the same subquery in a LOCAL
   condition of the body (reading only the body's relation, `j.id = q.qid`)
   is refused too (`logical.refuseLocalSubqueryWithLateral`) — the text
   path had refused it by accident, and the local condition now reaches the
@@ -201,9 +201,9 @@ ADR lines 2941-2949. Catalog rows: r20, r21. Stated in [Mechanisms](#mechanisms)
 
 - **A window in a correlated LATERAL body beside a NON-EQUALITY correlated
   condition, or in an UNGROUPED aggregate body, is REFUSED (0A000) where
-  PostgreSQL answers.** (Added 2026-09-25, arc JP round 5.) The window is
+  PostgreSQL answers.** (Added 2026-09-25, arc JP.) The window is
   evaluated per outer row by partitioning it by the correlation keys
-  (ADR-0021 §1s round 5), which is exact only when every correlated part is
+  (ADR-0021 §1s earlier implementation), which is exact only when every correlated part is
   an equality key; a non-key part is a filter over the join, applied after
   the window numbered the rows, and an ungrouped aggregate's no-match row
   is the join's default pad, whose window value the pad cannot know.
@@ -250,8 +250,8 @@ ADR lines 2982-3034. Catalog rows: r3, r4, r5. Stated in [Mechanisms](#mechanism
 
 - **A correlated subquery whose body is a SET OPERATION or a LATERAL body,
   and one holding an aggregate the ENCLOSING query owns, are REFUSED
-  (0A000) where PostgreSQL answers.** (Added 2026-09-12, arc C2 round 2,
-  #1044; narrowed in rounds 4 and 5, which left the GROUP BY / ORDER BY
+  (0A000) where PostgreSQL answers.** (Added 2026-09-12, arc C2,
+  #1044; narrowed by the subsequent measurements, which left the GROUP BY / ORDER BY
   half with no members.) A correlated subquery this engine does not
   decorrelate is re-run per outer row by substituting the outer values into
   its text. The substitution reaches the SELECT list, the WHERE, the
@@ -279,7 +279,7 @@ ADR lines 2982-3034. Catalog rows: r3, r4, r5. Stated in [Mechanisms](#mechanism
   NOT refused and is answered as `bf99c56c` answers it, under a
   declaration that is the FLOAT64 default where PostgreSQL 17.11 declares
   `numeric` (#1018 / ADR-0024's family, pinned fail-on-agree on the wire).
-  Since round 3 the classifier reads
+  Since earlier implementation the classifier reads
   every clause of the block and a set operation's arms, so the refusal
   reaches a subquery whose ONLY outer reference is in one of them — which
   before answered the qualifier strip's constant in silence. A LATERAL body
@@ -308,7 +308,7 @@ ADR lines 3035-3051. Catalog rows: r8, r9. Stated in [Mechanisms](#mechanisms).
 - **An UNQUALIFIED outer reference inside a correlated subquery's body is
   bound as PostgreSQL binds it, except where the body's namespace cannot
   be named.** (Added 2026-09-20, arc DC, #1104; narrowed 2026-09-22, arc
-  DC round 2.) PostgreSQL binds an unqualified name to the innermost scope
+  DC earlier implementation.) PostgreSQL binds an unqualified name to the innermost scope
   that supplies it, so `total` in a body over `dc_in` is the enclosing
   row's. The decorrelation reads the body's own FROM namespace from the
   catalog and binds the same way in every clause. Two spellings remain
@@ -333,7 +333,7 @@ ADR lines 4161-4168. Moved to the log: [A16](../0012-amendments.md#a16).
 ADR lines 4169-4201. Catalog rows: r16. Stated in [Mechanisms](#mechanisms). Moved to the log: [A17](../0012-amendments.md#a17).
 
 - **A qualified star ALONE over a lateral join publishes the whole join.**
-  (Amended 2026-09-07, arc J1 rounds 3 and 4. CLOSED 2026-09-07 by arc K1,
+  (Amended 2026-09-07, arc J1. CLOSED 2026-09-07 by arc K1,
   #979, and it was never about laterals.) `SELECT o.*` with nothing beside
   it published the whole join — over a LATERAL four columns for
   PostgreSQL's three, and over a PLAIN join seven for three, one of them
@@ -356,7 +356,7 @@ ADR lines 4202-4237. Stated in [Mechanisms](#mechanisms).
   is its expression text, where PostgreSQL publishes `?column?`.** (Added
   2026-09-13, arc O2; PRE-EXISTING, measured byte-identical at `0193c4e9`.
   NARROWED 2026-09-14 by arc O1 — the JOIN half is CLOSED. **CLOSED
-  2026-09-25 by arc JP round 4**: a star over a LATERAL join is expanded
+  2026-09-25 by arc JP**: a star over a LATERAL join is expanded
   into the arms' own lists like a star over any join, each item ADR-0026
   §2's pair, and the six `lateral/*` pins in
   `coordinator.TestArcO2ADerivedBlockPublishesItsVisibleList` are
@@ -415,7 +415,7 @@ ADR lines 4262-4279. Catalog rows: r22. Stated in [Mechanisms](#mechanisms).
 ADR lines 4280-4292. Stated in [Mechanisms](#mechanisms).
 
 - **A star over a NON-aggregated LATERAL publishes PostgreSQL's columns in
-  a different ORDER.** (Added 2026-09-07, arc J1 round 2; PRE-EXISTING.
+  a different ORDER.** (Added 2026-09-07, arc J1; PRE-EXISTING.
   **CLOSED by #1008.**) `SELECT * FROM o JOIN LATERAL (SELECT amount …) li`
   published `amount, id, customer, total` on the single-process arms where
   PostgreSQL publishes `id, customer, total, amount`: a join emits its

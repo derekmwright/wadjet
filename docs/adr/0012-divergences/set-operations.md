@@ -36,7 +36,7 @@ ADR lines 401-435. Catalog rows: r1, r2. Stated in [Mechanisms](#mechanisms).
 
 - **A set operation over two VECTOR columns of different declared widths
   is REFUSED, where PostgreSQL answers.** (Added 2026-09-05, #900's
-  round-2 review.) PostgreSQL's `vector` extension makes `vector(2)` and
+  earlier measurement.) PostgreSQL's `vector` extension makes `vector(2)` and
   `vector(3)` ONE type carrying a width typmod, so a union of the two drops
   the typmod and returns both rows. Wadjet's VECTOR storage is fixed-width
   PER COLUMN and has no carrier for a mixed-width result, so a value that
@@ -74,7 +74,7 @@ ADR lines 401-435. Catalog rows: r1, r2. Stated in [Mechanisms](#mechanisms).
 ADR lines 511-535. Stated in [Mechanisms](#mechanisms).
 
 - **A SET OPERATION does not take PostgreSQL's output-column names.**
-  (Added 2026-09-05, #732 round 2. **CLOSED 2026-09-18 by arc SR, #1079;
+  (Added 2026-09-05, #732. **CLOSED 2026-09-18 by arc SR, #1079;
   the pins are deleted and that is the proof.**) The naming rule is applied
   at the two places a query's values leave the engine — the collecting sink
   and the gather's rename target — and both were reached through the

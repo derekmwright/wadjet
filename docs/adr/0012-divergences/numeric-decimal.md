@@ -46,7 +46,7 @@ PostgreSQL's unconstrained numeric carries a per-value scale; `batch.DecimalColu
 | **r10** `SELECT 2 ^ -1` | ERROR operator does not exist: integer ^- integer | 0.5 | PG 42883 | kept superset | 2026-09-18 · [E30](#e30), P086 | #1155 | — |
 | **r11** `SELECT 2 ^ 3 % 5` | ERROR no double precision % integer operator | 3 (`%` is MOD's spelling, 2026-10-04: over a double operand both compute the float remainder, a zero remainder an unsigned 0 — `t.f % 2.5` over -2.5 printed -0 at 8ccfa832, g/proj/f_ln) | PG 42883 | kept superset | 2026-09-18 · [E30](#e30), P086 | #1155 | `coordinator.TestArcMOPercentIsModEveryArm` g/\*/f_\* (kept); `pgwire.TestArcMOPercentIsModOnTheWire` g/proj/f_ln |
 | **r12** `SELECT 5.0 # 3, 'a' # 'b'` | ERROR 42883; ERROR 42725 | answers (operands read as integers); int4 # int4 is integer, a bigint operand bigint, as on PostgreSQL | PG 42883 | kept superset | — · P103 | #1179 | — |
-| **r13** `SELECT -'5'` | ERROR 42725 operator is not unique: - unknown | -5 varchar; -'abc' raises 22P02 | PG 42725 | kept superset | 2026-08-24 · [E43](#e43), P061 | #505 | — |
+| **r13** `SELECT -'5'` | ERROR 42725 operator is not unique: - unknown | -5 double precision (OID 701, measured 2026-10-05); -'abc' raises 22P02 | PG 42725 | kept superset | 2026-08-24 · [E43](#e43), P061 | #505 | — |
 | **r14** `SELECT CAST(1::bigint AS BOOLEAN)` | ERROR 42846 cannot cast type bigint to boolean | true (0 is false, other values true, NULL is NULL) | PG 42846 | kept superset | 2026-08-25 · [E46](#e46), P063 | #592 | — |
 | **r15** `INSERT INTO nd VALUES ('NaN') -- nd.d DECIMAL(9,2)` | stores NaN | ERROR 22003 numeric field overflow: "NaN" has no DECIMAL value (measured; 'Infinity' also 22003, as PG does for constrained numeric) | 22003 | refusal | 2026-08-29 · [E47](#e47), P064 | #534 | — |
 | **r16** `SELECT CAST('NaN' AS DECIMAL(9,2))` | NaN | ERROR 22003 "NaN" has no DECIMAL value (measured) | 22003 | refusal | 2026-08-29 · [E47](#e47), P064 | #534, #555 | — |
@@ -102,7 +102,7 @@ ADR lines 796-902. Catalog rows: r6. Stated in [Mechanisms](#mechanisms). Moved 
 ADR lines 1123-1138. Catalog rows: r10, r11. Stated in [Mechanisms](#mechanisms).
 
 - **The `^` operator answers two spellings PostgreSQL's lexer and operator
-  table reject.** (Added 2026-09-18 by arc PS's round-1 review, N10; recorded
+  table reject.** (Added 2026-09-18 by arc PS's earlier measurement, N10; recorded
   2026-09-18, #1155.)
 
   `SELECT 2 ^ -1` is 0.5 here. PostgreSQL lexes `^-` as ONE operator name —
@@ -253,7 +253,7 @@ ADR lines 2327-2372. Catalog rows: r4, r5. Stated in [Mechanisms](#mechanisms).
 
 - **An integer result with no room in its declared type FAILS; it is never
   a wrapped number — and the check is at the STORE, not in the kernel.**
-  (Added 2026-09-04, round-1 review P1.)
+  (Added 2026-09-04, earlier measurement P1.)
 
   `ABS(<int4 column>)` at -2147483648 answered -2147483648 where PostgreSQL
   17.11 raises `integer out of range` (22003), while the int8 twin already

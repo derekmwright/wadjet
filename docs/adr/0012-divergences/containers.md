@@ -79,7 +79,7 @@ ADR lines 1324-1368. Catalog rows: r1. Stated in [Mechanisms](#mechanisms).
   answers the same here, and the spelling PostgreSQL refuses is one it
   cannot mean anything else by.
 
-  **PostgreSQL's own spelling parses too** (2026-09-04 round 3):
+  **PostgreSQL's own spelling parses too** (2026-09-04 earlier implementation):
   `(c_row).b` becomes the SAME reference the bare form does, so the
   superset is two spellings of one meaning rather than two meanings. The
   one PostgreSQL spelling wadjet does NOT accept is a container the

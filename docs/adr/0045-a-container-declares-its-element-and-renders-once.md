@@ -1,6 +1,6 @@
 # ADR-0045: A container declares its element at the declared-output seam and renders through one renderer
 
-Status: Accepted (2026-09-24, arc CW: #1250, #1017, #1133, #1303, #1268, #1021; rounds 1–3 the same day). Amended 2026-09-25 (rounds 4–5: a subquery operand and a DECIMAL element declare and order as PostgreSQL does; one common element type for two containers; multi-dimensional arrays taken out of scope, #1337) and 2026-09-26 (round 6: an INTERVAL element through the DURATION carrier; the common-element rule's scope is scalar elements).
+Status: Accepted (2026-09-24, arc CW: #1250, #1017, #1133, #1303, #1268, #1021; amended the same day). Amended 2026-09-25 ( a subquery operand and a DECIMAL element declare and order as PostgreSQL does; one common element type for two containers; multi-dimensional arrays taken out of scope, #1337) and 2026-09-26 (earlier implementation: an INTERVAL element through the DURATION carrier; the common-element rule's scope is scalar elements).
 
 Related: ADR-0026 (a group key/slot has one identity and one name — the
 declared output this extends), ADR-0012 (PostgreSQL decides semantics; the
@@ -44,7 +44,7 @@ psql).
    (Type, Precision, Scale, Fields) — carries the element beside the fields.
    Set-op arms fold their ELEMENTS on the numeric ladder (`int4[] ∪ bigint[]`
    is `bigint[]`); arms with no common element are 42804.
-   **Round 2 (every PUBLISHER, from the same walk).** A column that an
+   **every PUBLISHER, from the same walk.** A column that an
    operator PUBLISHES — an aggregate's output (grouped, HAVING, the empty
    identity row), a window function's (MIN/MAX and the value functions over a
    column or a computed argument), a scalar subquery's (the stamp carries the
@@ -56,7 +56,7 @@ psql).
    and the DAG gather allocates and publishes a computed column from the whole
    declaration. A zero-row result therefore declares what the same query with
    rows declares, on every arm.
-   **Round 3 (the null-padded side, and every READER of a box).** The side of
+   **the null-padded side, and every READER of a box.** The side of
    an OUTER join or a LATERAL that produced no rows is declared by the plan's
    join-side schema (`declaredJoinSchema` / `declaredBlockSchema`), which built
    a scan, computed or aggregate column from its TypeID alone and declined a
@@ -74,7 +74,7 @@ psql).
    box. A DATE or TIMESTAMP scalar a DAG stage substitutes for a subquery is a
    typed literal (`CAST('…' AS TIMESTAMP)`), so the stage declares it as the
    plan does.
-   **Round 4 (a subquery that IS the container).** The expression layer asked
+   **a subquery that IS the container.** The expression layer asked
    for a scalar subquery's declaration through `expr.SubqueryDeclFunc`, which
    carried a TypeID, a precision and a scale — so a subquery that RETURNS an
    array reached the cast and every comparator with no element, and the box
@@ -91,7 +91,7 @@ psql).
    its element's (p,s) by the scalar cast's rule (a bare NUMERIC takes the
    operand element's scale); it declared text[], so its elements were
    compared and hashed as text.
-   **Round 6 (an element with no column type of its own).** An INTERVAL
+   **an element with no column type of its own.** An INTERVAL
    literal (`INTERVAL '…'`, or a CAST to one) declares no column type
    ANYWHERE else in this engine (`physical.binOpTemporalType`'s note: "the
    engine has no interval column") — `nodeDeclaredType` had no case for it, so
@@ -123,19 +123,19 @@ psql).
    vector is a `*TypeMismatchError` (#361's guard), not `fmt.Sprint` text;
    a container written into an ARRAY/MAP/ROW vector allocated without its
    element or fields is a `*ContainerShapeError`, not the NULL the old silent
-   return left. Round 1 claimed no declared path reached either and the
-   review measured two that did (a correlated scalar subquery's MIN/MAX of an
-   array, the single path's empty MIN/MAX); round 2 closed both at the walk
-   above, and the claim is now the gates' — every publisher in the round-2
+   return left. earlier implementation claimed no declared path reached either and the
+   measurement measured two that did (a correlated scalar subquery's MIN/MAX of an
+   array, the single path's empty MIN/MAX); earlier implementation closed both at the walk
+   above, and the claim is now the gates' — every publisher in the earlier implementation
    zero-row table and the correlated-subquery cells answer on every arm. A
    path that does not carry the declaration fails with a named error. A CAST of a container is
    decided by ONE table before any scalar arm reads the box
-   (`expr/cast_container.go`, round 2): text destinations take the rendering of
+   (`expr/cast_container.go`, earlier implementation): text destinations take the rendering of
    §3, an array type converts element-wise, `VECTOR(n)` CONVERTS (pgvector's
-   array_to_vector; round 1 had it hand back the `{…}` text, and every vector
+   array_to_vector; earlier implementation had it hand back the `{…}` text, and every vector
    function over it read NULL), `JSON` takes `to_json`'s text
    (`batch.FormatPGJSON`), and every other destination is 42846 as on
-   PostgreSQL — round 1 left `CAST(ARRAY[1,2] AS INT)` answering 0 and
+   PostgreSQL — earlier implementation left `CAST(ARRAY[1,2] AS INT)` answering 0 and
    `AS DATE` NULL. A VECTOR's dimension is part of its declaration and rides
    every projection spec beside the element; a VECTOR vector allocated without
    it refuses (`*ContainerShapeError`) instead of keeping the slot NULL. A function registered with a container return and no shape (no builtin
@@ -143,18 +143,18 @@ psql).
    no PostgreSQL text form here — an INTERVAL (a scalar INTERVAL prints its
    own text, `1 day`, but no container renderer gives an element PostgreSQL's
    interval text) — refuses a text or JSON cast with 0A000 rather than printing
-   Go's struct text (round 3). An array cast to `VECTOR(n)` whose declared
+   Go's struct text (earlier implementation). An array cast to `VECTOR(n)` whose declared
    element is not a number is 42846, pgvector's answer, whatever its box.
-   **Multi-dimensional arrays are out of this decision's scope (round 5).**
+   **Multi-dimensional arrays are out of this decision's scope (earlier implementation).**
    This engine holds a nested array as an array of arrays and renders it as
    `array_out` does (`{{1,2},{3,4}}`, OID 25, §3), but it does not have
    PostgreSQL's multi-dimensional SEMANTICS: its leaves, its dimensions,
    `unnest` over the leaves, `cardinality`, `array_length(…, 2)`,
-   `array_to_string` of the leaves. Round 4 made the cast into `T[]` convert
+   `array_to_string` of the leaves. earlier implementation made the cast into `T[]` convert
    the leaves and keep the dimensions, and the rest of the engine then read
    that shape as the outer array's inner arrays (`unnest` answered `{1,2}`
    rows where PostgreSQL answers the leaves; a constructed argument had
-   refused before). Round 5 returns every multi-dimensional spelling to its
+   refused before). earlier implementation returns every multi-dimensional spelling to its
    pre-arc behaviour: the cast of a nested value into `T[]` passes it through
    unchanged under its own declaration, a text operand spelling a
    multi-dimensional array (`CAST('{{1,2},{3,4}}' AS INT[])`) passes through
@@ -169,7 +169,7 @@ psql).
    `batch.FormatPGText`, keyed on the DECLARED column, in the lowest MIT layer
    every door imports. pgwire's text format, the CLI's table and CSV, and
    `CAST(container AS TEXT)` call it — the cast under its operand's DECLARED
-   element (§1, round 3): the box is first read through a vector of that
+   element (§1, earlier implementation): the box is first read through a vector of that
    declaration (`batch.DeclaredValue`), which is the one writer that accepts
    every storage width a type has (a DATE's int32 or int64 day count, an
    address's integer), and an element cast into `T[]` casts each element as a
@@ -187,11 +187,11 @@ psql).
    asks the same kernel: the six operators, IN, BETWEEN, a simple CASE's WHEN
    and IS [NOT] DISTINCT FROM through `boxedPair.order`; GREATEST, LEAST and
    NULLIF through `extremumArms.order` (both with their operands'
-   declarations, §1 round 3); and `compare()`, the last resort every other
-   caller reaches, with the shape read off the boxes. Round 2 routed the six
+   declarations, §1 earlier implementation); and `compare()`, the last resort every other
+   caller reaches, with the shape read off the boxes. earlier implementation routed the six
    operators alone, and GREATEST/LEAST answered the text-greater array while
-   BETWEEN kept the text order (round-2 review B3, P1).
-   **Round 4.** Two DECIMAL elements of different scales are ordered by VALUE:
+   BETWEEN kept the text order (earlier measurement B3, P1).
+   **The earlier implementation.** Two DECIMAL elements of different scales are ordered by VALUE:
    each side is written under its OWN declaration and the kernel compares two
    DECIMAL vectors at their common scale exactly
    (`kernel.CompareDecimalValues`) — never through a double; an integer beside
@@ -206,7 +206,7 @@ psql).
    flattened leaves, then their count, then the dimensions (each level's
    lengths; a ragged value's keep two shapes apart) — in the columnar kernel
    and the boxed comparator alike, so `{{1,2},{3,4}}` > `{{1,2,3}}`.
-   **Round 5 (the element types of a pair are unified ONCE).** Round 4
+   **the element types of a pair are unified ONCE.** earlier implementation
    unified two DECIMAL scales and left every other pair to its meeting point:
    `=` widened int ⊕ float8 to a double while the hash-join key, the set
    operations and the FULL join's matched set keyed each side under its own
@@ -230,7 +230,7 @@ psql).
    chosen box is moved into it before the declared vector receives it
    (`expr.containerChoice`: an integer leaf as its exact text for a DECIMAL
    element, never an unscaled carrier).
-   **Scope (round 6): scalar elements.** `batch.CommonContainerColumn` unifies
+   **Scope (earlier implementation): scalar elements.** `batch.CommonContainerColumn` unifies
    a SCALAR element pair at every meeting point; a ROW or MAP element's OWN
    FIELDS keep their own per-side type instead of folding through the same
    rule. An array of ROW whose fields differ in integer width
@@ -268,7 +268,7 @@ and `map_entries` follow the MAP's stored order (they ranged over a Go map).
 Two supersets are kept: `ARRAY[1.5] > ARRAY[1]` compares by value where
 PostgreSQL has no `numeric[] > integer[]` operator (42883), and `CAST(ARRAY[1,2]
 AS JSON)` is `to_json`'s text where PostgreSQL has no such cast (42846). An
-INTERVAL element compares by value (§1 round 6) but a text/JSON cast of it is
+INTERVAL element compares by value (§1 earlier implementation) but a text/JSON cast of it is
 0A000 and a bare projection answers the DURATION nanosecond count; a nested
 array's multi-dimensional semantics are not PostgreSQL's (§2, #1337). Arrays
 with NO common element type (an integer array beside a text array) are not yet

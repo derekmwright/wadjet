@@ -195,7 +195,7 @@ ADR lines 3221-3435. Catalog rows: r9, r10, r11, r12, r13. Stated in [Mechanisms
     expression is refused per row, where it first exists.
 
   **A NAME THE TABLE DOES NOT KNOW OUTRANKS A NULL FLAGS ARGUMENT**
-  (decided 2026-09-08, round 3, #966 P4). The family says both "NULL flags
+  (decided 2026-09-08, earlier implementation, #966 P4). The family says both "NULL flags
   give NULL" and "an unknown name is 22023", and did not say which wins:
   the three predicates folded the mask first and raised, while the legacy
   `has_tcp_flag` checked both arguments for NULL first and answered NULL, so
@@ -219,7 +219,7 @@ ADR lines 3221-3435. Catalog rows: r9, r10, r11, r12, r13. Stated in [Mechanisms
   five arms by the census's `unknown_name_on_a_null_row` cells.
 
   **AN INVALID LITERAL NAME IS REFUSED FROM THE DECLARATION, ROWS OR NO
-  ROWS** (decided 2026-09-11, round 5, #1018 B2). The paragraph above was
+  ROWS** (decided 2026-09-11, earlier implementation, #1018 B2). The paragraph above was
   written for the NULL case and stated the whole rule — "neither a NULL
   operand nor an empty row set excuses it" — while the code folded the
   names per row and the entry's own preceding sentence said so. The two
@@ -241,7 +241,7 @@ ADR lines 3221-3435. Catalog rows: r9, r10, r11, r12, r13. Stated in [Mechanisms
   it, for the same reason — an arity is known without rows.
 
   **THE DECIDING LAYER IS THE BINDER, NOT COMPILATION** (amended
-  2026-09-11, round 6, #1018 B1). This entry's first version put the fold at
+  2026-09-11, earlier implementation, #1018 B1). This entry's first version put the fold at
   COMPILE time and called that one seam for every door, planned or not. That
   is true of the SINGLE-PROCESS path, where `Plan` compiles the whole
   expression tree while it builds the physical plan, and FALSE of the stage
@@ -276,7 +276,7 @@ ADR lines 3221-3435. Catalog rows: r9, r10, r11, r12, r13. Stated in [Mechanisms
   builder with 42601. These doors are independently pinned by
   `TestTCPFlagValidationDoors` and `TestTCPFlagASTCoverage`.
 
-  **RECURSIVE CTE BODIES ARE VALIDATED BEFORE ROWS** (2026-09-11, round 8,
+  **RECURSIVE CTE BODIES ARE VALIDATED BEFORE ROWS** (2026-09-11, earlier implementation,
   B1). `binder.registerCTE` registers the recursive self-reference as open,
   then calls the existing `validateBlock` over its body. Both UNION arms
   are visited, even with an empty seed or an unused CTE. An open schema
@@ -295,14 +295,14 @@ ADR lines 3221-3435. Catalog rows: r9, r10, r11, r12, r13. Stated in [Mechanisms
   MERGE ON supports column equalities only (0A000). DML has no DAG planning
   path (0A000); its wire door executes locally. These are named residuals,
   not claims that every possible SQL expression reaches this walk.
-  The round-8 inventory also pins `cte_shadowed_body`: `registerCTE`'s
+  The earlier implementation inventory also pins `cte_shadowed_body`: `registerCTE`'s
   additive name map skips a nested body when its name already exists.
   The unused shadowing-body fixture answers zero rows on all five arms
   and both formats. It pins `set_order_by` too: validateBlock returns
   after the UNION arms without checking the wrapper ORDER BY, and
   buildSetOpPlan carries the term as a column name, not a compiled
   expression. All five arms and both formats answer zero rows; the DAG
-  arms take UnreachableOutputLocalRoutes +1 before the local answer. Both reproduce with the round-8 binder fix removed. These are
+  arms take UnreachableOutputLocalRoutes +1 before the local answer. Both reproduce with the earlier implementation binder fix removed. These are
   scope/set-operation coverage residuals, not recursive-body regressions.
 
   What stays per row is what is not knowable from the declaration: a name
@@ -323,7 +323,7 @@ ADR lines 3221-3435. Catalog rows: r9, r10, r11, r12, r13. Stated in [Mechanisms
   FIVE for `position_scalar_subquery_empty`.
 
   **"EVERY EXPRESSION POSITION" IS A CLAIM ABOUT THE WALK, AND THE WALK HAD
-  THREE BLIND SPOTS** (amended 2026-09-11, round 7, #1018 B1). The sentence
+  THREE BLIND SPOTS** (amended 2026-09-11, earlier implementation, #1018 B1). The sentence
   above was written for the positions the BINDER re-parses; the positions a
   SUBQUERY BODY can hide in are decided by a different collector, and that
   collector — `binder.blockSubqueries` — walked WHERE, HAVING, QUALIFY, the
@@ -355,7 +355,7 @@ ADR lines 3221-3435. Catalog rows: r9, r10, r11, r12, r13. Stated in [Mechanisms
 
   `tcp_flags_from_string`, which reads a COMMA-SEPARATED list rather than an
   argument list, splits the two cases and answers the arithmetic where it
-  can (decided 2026-09-08, round 2): an EMPTY string is a list of no names
+  can (decided 2026-09-08, earlier implementation): an EMPTY string is a list of no names
   and answers `0` — the mask of no names, which is what it answered before
   this arc and what a telemetry column spelling "no flags" as the empty
   string needs — while an empty ELEMENT (`'SYN,'`, `'SYN,,ACK'`) is 22023
@@ -379,7 +379,7 @@ ADR lines 3436-3784. Catalog rows: r15, r16, r17, r18, r19, r20, r21, r22, r23, 
 
 - **The bitwise family reads its argument exactly and answers an integer;
   `bigint` where PostgreSQL answers `int4` for int4 operands.**
-  (Added 2026-09-08, arc A2, #966; extended the same day in round 2 to the
+  (Added 2026-09-08, arc A2, #966; extended the same day in earlier implementation to the
   whole family.) `pg_typeof(2::int4 & 18::int4)` is `integer` and
   `pg_typeof(2::int8 & 18::int8)` is `bigint`, measured on 17.11; this
   engine declares bigint for both. A value-preserving widening.
@@ -413,7 +413,7 @@ ADR lines 3436-3784. Catalog rows: r15, r16, r17, r18, r19, r20, r21, r22, r23, 
   FIVE RESIDUAL DIVERGENCES in that family, stated rather than glossed.
   They are LIMITATIONS, not cells where this engine was measured to agree
   with PostgreSQL: no gate counts any of them as agreement, and the arm
-  census normalizes or labels each one where it appears (#966 round 2, N3).
+  census normalizes or labels each one where it appears (#966, N3).
   The int4-operand widening at the head of this entry was filed as #1018
   and **CLOSED 2026-09-15 (arc ND)**: `BITWISE_AND/OR/XOR/NOT` over int4
   operands declares `integer` (OID 23) now, following its operands the way
@@ -455,7 +455,7 @@ ADR lines 3436-3784. Catalog rows: r15, r16, r17, r18, r19, r20, r21, r22, r23, 
     PostgreSQL's function and renders the machine word, so the two disagree
     on a negative argument by design.
   - **`FROM_HEX` answers NULL for text that is not hexadecimal, where
-    PostgreSQL's decoder RAISES.** (Decided 2026-09-08, round 3, #966 N2.)
+    PostgreSQL's decoder RAISES.** (Decided 2026-09-08, earlier implementation, #966 N2.)
     `decode('12zz','hex')` is 22023 on 17.11; `FROM_HEX('12zz')` is NULL
     here, which is what this engine's own `FROM_BASE('12z',16)` answers and
     what the rest of its parse-or-NULL family does. What it must NOT do is
@@ -490,10 +490,10 @@ ADR lines 3436-3784. Catalog rows: r15, r16, r17, r18, r19, r20, r21, r22, r23, 
   not merely mislabel the answer: over two rows of 2^62 it REFUSES with
   22003 where PostgreSQL answers 9223372036854775808, and the same
   expression answered 2^63 as a float64 before the declaration changed — a
-  right value turned into an error (#966 round 2, B1).
+  right value turned into an error (#966, B1).
 
   The first repair of this read the FUNCTION'S OWN `Ret` DECLARATION and
-  was wrong in the other direction (#966 round 3 review, B1). `Ret` names
+  was wrong in the other direction (#966 measurement, B1). `Ret` names
   the VECTOR a result is stored in, not the type PostgreSQL calls it, and
   every integer in this engine computes in an int64 (ADR-0024's widening) —
   so `regexp_count`, whose PostgreSQL result is `integer`, declares
@@ -547,7 +547,7 @@ ADR lines 3436-3784. Catalog rows: r15, r16, r17, r18, r19, r20, r21, r22, r23, 
   cells.
 
   **THE WIDTH IS A PROPERTY OF THE COLUMN'S DECLARATION AND SURVIVES
-  MATERIALIZATION** (decided 2026-09-11, round 5, #1018 B1). The repair
+  MATERIALIZATION** (decided 2026-09-11, earlier implementation, #1018 B1). The repair
   above reads the table while the CALL is still visible in the AST, and
   that is not everywhere the width is needed: a derived table, a CTE, a
   set-operation arm and a window slot MATERIALIZE the expression into a
@@ -587,7 +587,7 @@ ADR lines 3436-3784. Catalog rows: r15, r16, r17, r18, r19, r20, r21, r22, r23, 
   MIN/MAX/MIN_BY/MAX_BY, which hand back a value the input HELD and keep
   its width — the ARGUMENT's width, whether the argument is a bare column
   or an EXPRESSION, which is the same walk one level down (amended
-  2026-09-11, round 6, P1: the computed case was declined, and declining
+  2026-09-11, earlier implementation, P1: the computed case was declined, and declining
   was not silence, because the caller then recorded the INT64 CARRIER, so
   `MIN(BITWISE_AND(int4_col,3))` positively claimed int8 and its SUM went
   out numeric where PostgreSQL 17.11 answers `integer` for the MIN and
@@ -621,7 +621,7 @@ ADR lines 3436-3784. Catalog rows: r15, r16, r17, r18, r19, r20, r21, r22, r23, 
   cells while the direct cells still pass.
 
   **A SCALAR SUBQUERY'S COLUMN CARRIES ITS DECLARATION THROUGH A
-  MATERIALIZATION TOO** (added 2026-09-11, round 6, P2). A subquery is a
+  MATERIALIZATION TOO** (added 2026-09-11, earlier implementation, P2). A subquery is a
   whole second query whose type lives in the CATALOG, so only a Planner can
   answer it — and the declaration walks are free functions over the logical
   tree that hold none. `colDecls.subqueryDecl` was nil in every one of them
@@ -659,9 +659,9 @@ ADR lines 3436-3784. Catalog rows: r15, r16, r17, r18, r19, r20, r21, r22, r23, 
   "v=int64:72").
 
   **AND WRITTEN DIRECTLY AS THE AGGREGATE'S ARGUMENT** (added 2026-09-11,
-  round 7, B3). Round 6 left `SUM((SELECT …))` as a residual and described
+  earlier implementation, B3). earlier implementation left `SUM((SELECT …))` as a residual and described
   it as "LOUD-or-declaration rather than a wrong value". That description
-  was FALSE, and the round-6 review measured it: over three rows
+  was FALSE, and the earlier measurement measured it: over three rows
   `SELECT SUM((SELECT CAST(9007199254740993 AS BIGINT))) AS v FROM users`
   answered **27021597764222976** as float8 where PostgreSQL 17.11 answers
   the exact **27021597764222979** as numeric — a WRONG VALUE past 2^53,
@@ -698,11 +698,11 @@ ADR lines 3436-3784. Catalog rows: r15, r16, r17, r18, r19, r20, r21, r22, r23, 
   windowed census cells on the three DAG arms.
 
   **The BIGINT case above is exact; a wide DECIMAL literal is not**
-  (round 8, N1, #1037). `SUM((SELECT CAST(9007199254740993.25 AS
+  (earlier implementation, N1, #1037). `SUM((SELECT CAST(9007199254740993.25 AS
   DECIMAL(30,2))))` over three users returns **27021597764222982** under
   numeric OID 1700; PostgreSQL 17.11 returns **27021597764222979.75**.
   The literal has already rounded through float64 before the aggregate
-  reads it. The reviewer reproduced the direct CAST at base `6fc99b39`:
+  reads it. Measurements reproduced the direct CAST at base `6fc99b39`:
   **9007199254740994.00**, versus PostgreSQL's **9007199254740993.25**.
   This pre-existing literal-ingestion defect is not repaired by declaring
   the scalar-subquery argument. `TestScalarSubqueryAggregateMatrix` pins
@@ -954,7 +954,7 @@ ADR lines 3828-4160. Catalog rows: r25, r26, r27, r28, r29, r30, r31, r32, r33. 
   the binder call fails thirteen of those subtests.
 
   **THE TRIVIAL LOWER BOUND `>=0.0.0` IS DELETED FROM EVERY COMPARATOR
-  SET, AS node-semver DELETES IT.** (Added 2026-09-11, arc A3 round 3,
+  SET, AS node-semver DELETES IT.** (Added 2026-09-11, arc A3,
   #967.) Three facts decide this, and they are worth separating because the
   first is not in play at all:
 
@@ -1039,7 +1039,7 @@ ADR lines 3828-4160. Catalog rows: r25, r26, r27, r28, r29, r30, r31, r32, r33. 
   answer false here and true there, 2 the other way through the `||` rule.
 
   **A GENERATED BOUND AT THE TOP OF THE DOMAIN IS SATURATED, NOT WRAPPED
-  AND NOT REFUSED.** (Added 2026-09-11, arc A3 round 2, #967.) Every range
+  AND NOT REFUSED.** (Added 2026-09-11, arc A3, #967.) Every range
   spelling except an exact version closes its band by raising ONE component
   by one — `^1.2.3` is `>=1.2.3 <2.0.0-0`, `>1.2.x` is `>=1.3.0` — and a
   component is accepted up to int64's MAXIMUM, which is the acceptance
@@ -1050,7 +1050,7 @@ ADR lines 3828-4160. Catalog rows: r25, r26, r27, r28, r29, r30, r31, r32, r33. 
   `<-9223372036854775808.0.0-0`, which is below every version, so it
   dropped every row it named; `>9223372036854775807.x` desugared to
   `>=-9223372036854775808.0.0`, so it admitted every row. Found by the
-  round-1 adversarial review.
+  earlier implementation boundary measurements.
 
   TWO POSITIONS WERE AVAILABLE AND THE SATURATING ONE IS TAKEN. Refusing
   the range (22023, the loud half this family already has) is what

@@ -97,7 +97,7 @@ ADR lines 306-371. Catalog rows: r25, r26. Stated in [Mechanisms](#mechanisms).
   `TestN1AResultWithNoColumnsIsRefused`). **Amended 2026-09-24 for arc
   RC:** recursive CTEs now retain the seed declaration even when empty
   (ADR-0021 §1o-b); the ungrouped-aggregate LATERAL boundary remains.
-  **Amended 2026-09-25 for arc JP round 4 (#1013):** a star over a LATERAL
+  **Amended 2026-09-25 for arc JP (#1013):** a star over a LATERAL
   join is expanded into the FROM arms' own lists too, the lateral's read
   as `s.*` reads it (ADR-0026 §8l), so a zero-row star over two or more
   LATERALs, a LATERAL beside another join, and an ungrouped-aggregate
@@ -106,7 +106,7 @@ ADR lines 306-371. Catalog rows: r25, r26. Stated in [Mechanisms](#mechanisms).
   reads the join's output. Over an UNGROUPED AGGREGATE body it refuses
   (XX000: the join carries the pad marker); over a PLAIN body it was said
   to refuse too, and measured it answered, declaring the duplicate ONCE
-  (four columns for PostgreSQL's five, arc JP round 4 review). **Amended 2026-09-25 for arc JP round 5:**
+  (four columns for PostgreSQL's five, arc JP measurement). **Amended 2026-09-25 for arc JP:**
   the block's own list is declared as written, so the empty result
   declares both columns, the second as `s.m` — the join's qualified name
   for a duplicate, the non-empty result's name too (FC-JP-13); over an
@@ -310,7 +310,7 @@ ADR lines 1033-1057. Catalog rows: r16. Stated in [Mechanisms](#mechanisms).
 
 - **A BARE reference to a `JOIN … USING` join's MERGED column is 42702
   outside a sort or window key, where PostgreSQL answers.** (Added
-  2026-09-18 by arc PS, #655; narrowed the same day by the round-1 review's
+  2026-09-18 by arc PS, #655; narrowed the same day by the earlier measurement's
   B1.)
 
   USING merges the joined column into one, so `SELECT id FROM a JOIN b
@@ -364,7 +364,7 @@ ADR lines 1058-1086. Catalog rows: r17, r18. Stated in [Mechanisms](#mechanisms)
   PostgreSQL's 1, 1, and `ROW_NUMBER() OVER (ORDER BY id)` answered 1, 2, 3
   for 2, 3, 1 — so the refusal replaces a base-WRONG answer rather than a
   right one, and it cannot tell the two fixtures apart without the data.
-  Measured both ways by the round-2 review (P1-r2).
+  Measured both ways by the earlier measurement (P1-r2).
 
 ### E27
 

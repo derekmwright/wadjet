@@ -1,0 +1,4 @@
+330 catalog rows: unique and ordered within each family
+328 explicit references: no missing live row; 2 explicit retirement records retained
+19 added kept-superset/value-divergence rows all appear on the differences page
+Added rows: aggregates-windows#r22, aggregates-windows#r24, numeric-decimal#r19, numeric-decimal#r20, numeric-decimal#r21, other#r16, other#r20, other#r21, other#r22, other#r24, other#r27, parameters-pgwire#r5, parameters-pgwire#r6, parameters-pgwire#r7, parameters-pgwire#r16, recursion#r11, recursion#r12, temporal#r26, text-collation#r24

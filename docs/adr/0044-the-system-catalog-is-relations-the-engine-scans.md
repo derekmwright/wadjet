@@ -55,7 +55,7 @@ it one more spelling.
    values arrive masked. A DENIED column or relation is absent from every
    catalog relation. The catalog describes what the identity can SELECT;
    hiding a masked column's definition would describe a relation the
-   identity's own `SELECT *` contradicts (arc PC round 2, B5).
+   identity's own `SELECT *` contradicts (arc PC, B5).
 4. **What the catalog lists:** pg_catalog, public and information_schema;
    the user tables and the system relations themselves (pg_class,
    pg_attribute, information_schema.tables/columns); the types the wire
@@ -74,13 +74,13 @@ The recorded divergences are listed on the differences page and pinned in
 `pgwire.TestArcPCToolCatalogQueriesAnswerAsPostgreSQL`: one database and one
 role (PostgreSQL also lists templates and its superuser); `relam` is 0 and
 `pg_am` empty; no DOMAIN types in pg_type; a string literal cast to
-`regclass` is read to its OID and printed as it. Round 2 made the rest
+`regclass` is read to its OID and printed as it. earlier implementation made the rest
 answer: `E'…'` strings, `x = ANY(array expression)`, set-returning functions
 as whole SELECT items (`unnest`, `generate_subscripts`,
 `information_schema._pg_expandarray`), constant expressions as
 `generate_series` arguments, and `current_schemas()` as an array.
 
-**Amended 2026-09-23 (round 3).**
+**Amended 2026-09-23 (earlier implementation).**
 
 - *One PostgreSQL major, on the wire and in the catalog.* The catalog is
   PostgreSQL 17's, so the server reports 17 everywhere it reports a version

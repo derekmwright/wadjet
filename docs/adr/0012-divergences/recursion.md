@@ -47,7 +47,7 @@ ADR lines 4293-4310. Catalog rows: r1, r2, r3, r4, r6, r7, r8, r9, r10. Stated i
   the seed's width), a text term under a varchar(n) seed, and a mistyped
   term that never produces a row. (A float term under a fractional-literal
   seed was on this list while the literal was double precision here; since
-  arc VL round 5 the literal is numeric and the cell is PostgreSQL's 42804.) A quoted seed is text here and resolved from the
+  arc VL the literal is numeric and the cell is PostgreSQL's 42804.) A quoted seed is text here and resolved from the
   term there (42804 here for a non-text term). Gated in
   `wadjet.TestArcRCRecursiveCTEAnswersItsWholeClosureOrFails` and, cell by
   cell against PostgreSQL, `…SeedTypeDecidesAgainstEveryTermType`.

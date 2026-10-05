@@ -10,7 +10,7 @@ with its own fix backed out.)
 
 Amended 2026-09-05: this record now also governs COMPACTION's two physical
 schedules — its manifest publication and its deferred-delete queue — after an
-adversarial review reproduced four losses there (#893, #894, #895, #896). See
+adversarial measurement reproduced four losses there (#893, #894, #895, #896). See
 "Amendment, 2026-09-05" below for the rule and what it does not close.
 
 ## Context
@@ -25,7 +25,7 @@ grace-then-delete path: `DropTable` snapshots the exact file paths its
 manifest held, and a background sweep deletes them once
 `DefaultDropTableGrace` (30m) has elapsed.
 
-An adversarial review of that first attempt reproduced live data loss in
+An adversarial measurement of that first attempt reproduced live data loss in
 two shapes, both hitting the same missing check:
 
 - **Drop-then-re-register.** #278 documents AddFiles as deliberately
@@ -43,7 +43,7 @@ two shapes, both hitting the same missing check:
 Both are the identical bug: the delete list was built once, at drop time,
 and nothing checked it against the world as it stood *at delete time*.
 
-A second adversarial review of the guarded redo found a third shape, which
+A second adversarial measurement of the guarded redo found a third shape, which
 neither of those guards addresses because it never involves a recreate at
 all: **reclaim deleted files the engine never wrote.** `DropTable`
 snapshotted *every* path in the dropped manifest, and a manifest is full of
@@ -88,7 +88,7 @@ the sweep that calls it is opt-in.**
    regardless of which incarnation originally owned it.
 
    Building the set **once** and deleting against it was itself the
-   review's second reproduced loss. It is a time-of-check/time-of-use
+   measurement's second reproduced loss. It is a time-of-check/time-of-use
    check: the set was built at the top of the call and the delete loop
    never looked again, so a re-registration landing after the build and
    before the `Delete` was invisible to it — the ordinary interleaving of
@@ -123,7 +123,7 @@ the sweep that calls it is opt-in.**
    it understated the exposure. Any writer not serialized with the delete
    loop is invisible inside the window, including a second goroutine
    calling `AddFiles` on this **same** `*Catalog` while the delete loop is
-   mid-entry: a reviewer's probe against one instance reproduced exactly
+   mid-entry: a measurements's probe against one instance reproduced exactly
    that, deleting a file `AddFiles` had just re-registered. The window is
    one pending entry's **whole delete batch** — every `Head`+`Delete` pair
    over that entry's `pd.paths`, not a single call — so a multi-file table
@@ -261,7 +261,7 @@ Every clause is load-bearing, and two qualifiers are not decoration:
 
 ## Amendment, 2026-09-05: compaction publication is one validated transaction, and retirement needs proof
 
-Status: Accepted (landed 2026-09-05, following an adversarial review of the
+Status: Accepted (landed 2026-09-05, following an adversarial measurement of the
 compaction publication path that reproduced four losses 5/5 with no sleeps and
 no probabilistic race: #893, #894, #895, #896. Every rule below has a
 regression test confirmed to fail with its own hunk backed out — eleven
@@ -269,7 +269,7 @@ single-hunk reverts, each turning its named gate red.)
 
 This record already governed one physical-deletion schedule, `DROP TABLE`'s.
 Compaction has two more — its own deferred-delete queue and its manifest
-publication — and neither was held to the same standard. The review found
+publication — and neither was held to the same standard. The measurement found
 that the publication was not a transaction at all and that the queue's
 eligibility test did not mean what its name said.
 

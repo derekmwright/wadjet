@@ -1,8 +1,8 @@
 # ADR-0039: A table function in FROM is a relation, and where its columns come from decides where a reference to a missing one is refused
 
 Status: Accepted (2026-09-19, #1210 / #1203 / #1211 / #1202, arc TF; amended
-the same day after the arc's round-1 review — §4a, §6a, §7, §8 and the
-Consequences; the Consequences amended again after the closure review, which
+the same day after the arc's earlier measurement — §4a, §6a, §7, §8 and the
+Consequences; the Consequences amended again after the closure measurement, which
 measured the two-reader residue as a silent wrong VALUE rather than an
 unchecked shape — #1229; amended 2026-09-20 by arc FR, which CLOSED §3's
 deferral: §3 is now the authorization ORDER and the plan-time schema it
@@ -303,14 +303,14 @@ refused**, and the line is drawn by AUTHORIZATION, not by convenience.
    such field is PARSED and the references it actually makes are taken. Read
    as names they ask for a column no relation has: `GROUP BY a + 1` over a
    reader was `42703 column "a + 1" does not exist`, a new refusal on eight
-   spellings PostgreSQL answers and this engine answered right (the round-1
-   review's B3). A term that will not parse cannot be enumerated with
+   spellings PostgreSQL answers and this engine answered right (the earlier implementation
+   measurement's B3). A term that will not parse cannot be enumerated with
    certainty, and takes the same exit as everything else that cannot.
 
-4a. **A JOIN ARM is held to its columns too** (added after round 1;
+4a. **A JOIN ARM is held to its columns too** (added after earlier implementation;
    `physical.stampTableFuncRequiredColumns`). Over a join the consumer's
    input is the join's OUTPUT and a bare name there may belong to either arm,
-   so round 1 made no check at all and a reference to a column a reader does
+   so earlier implementation made no check at all and a reference to a column a reader does
    not publish answered NULL for every row — the very thing this ADR's rule
    forbids. Two classes of name are certain directly above a join:
 
@@ -344,7 +344,7 @@ refused**, and the line is drawn by AUTHORIZATION, not by convenience.
    the same bytes.
 
 6a. **A JOIN ARM IS A FROM ITEM**, and §6 applies to it unchanged (added
-   after round 1). The rebuild wrote a join's right arm as its bare NAME
+   after earlier implementation). The rebuild wrote a join's right arm as its bare NAME
    while writing the comma-separated items as calls, so a correlated subquery
    whose table function is a join ARM answered 0 for every outer row — §6's
    own defect, one clause lower. `JoinInfo.RightTableRef` carries the whole

@@ -162,7 +162,7 @@ ADR lines 2215-2326. Catalog rows: r5, r6, r7, r8, r9, r10. Stated in [Mechanism
   carries all three answers now — a positive length, `character varying`
   unconstrained (`parquet.StringLengthUnconstrainedVarchar`), and `text` —
   and `parquet.VarcharNoLength` is the one place the family's spellings are
-  named (round-1 review, P2). Bare `CHAR` is deliberately not in it: the
+  named (earlier measurement, P2). Bare `CHAR` is deliberately not in it: the
   server reads that as `character(1)` and TRUNCATES, which is part of the
   bpchar residual below rather than a declaration question.
 
@@ -192,7 +192,7 @@ ADR lines 2215-2326. Catalog rows: r5, r6, r7, r8, r9, r10. Stated in [Mechanism
 ADR lines 2574-2581. Stated in [Mechanisms](#mechanisms).
 
 - **`ENCODE` takes BYTES and not text.** (Added 2026-09-18, arc EX's
-  round-1 review, N6.) `encode('hi'::text, 'hex')` is
+  earlier measurement, N6.) `encode('hi'::text, 'hex')` is
   `42883 function encode(text, unknown) does not exist` on 17.11 while
   `md5(text)`, `length(text)` and `substring(text)` all answer there — the
   asymmetry is PostgreSQL's own, so `encode`'s first position is
@@ -232,7 +232,7 @@ ADR lines 2582-2647. Catalog rows: r11, r12, r13, r14. Stated in [Mechanisms](#m
   by bytes, and `bytea || bytea` is bytea under OID 17. `text || bytea` is
   TEXT there and here: the server resolves that pair through
   `text || anynonarray`, and declaring it bytea was a wrong class this arc
-  briefly introduced and its review caught. The plan-time
+  briefly introduced and its measurement caught. The plan-time
   argument-type check the rest needed is `expr.RefuseUnresolvableCall`, run
   from the binder's own walk (`physical.refuseInvalidRowFields`), which BOTH
   `Plan` and `dagplan.PlanDistributed` reach before any stage exists — so the
@@ -248,8 +248,8 @@ ADR lines 2582-2647. Catalog rows: r11, r12, r13, r14. Stated in [Mechanisms](#m
   appends four characters where the server appends one byte. That is
   #582's rule at a function ARGUMENT rather than at a comparison.
 
-  `residual_text_concat_bytea_value` (×3, added 2026-09-05 in round 3 —
-  the round-2 cells asserted these values as PostgreSQL's, which they are
+  `residual_text_concat_bytea_value` (×3, added 2026-09-05 in earlier implementation —
+  the earlier implementation cells asserted these values as PostgreSQL's, which they are
   not): where the pair is TEXT, the server RENDERS the bytea operand
   through `bytea_out` and concatenates the `\x` hex text, and this engine
   splices the raw bytes.

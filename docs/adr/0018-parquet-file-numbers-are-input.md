@@ -4,7 +4,7 @@ Status: Accepted (landed 2026-08-23, `09b19d2`..`94143bc`, on the hardening
 arc that began with `20049f9`; ceilings measured against pyarrow 23.0.1,
 parquet-go and wadjet's own writer). Amended 2026-08-23 with §4, "the
 writer's box for a value is the reader's box for it", after the same arc's
-review found read → write was not the identity for DECIMAL (#429) and that
+measurement found read → write was not the identity for DECIMAL (#429) and that
 `ReadRowGroup` and `ReadRows` were two readers that disagreed about a nested
 column (#428). A second compatibility note follows the pre-#409 one, for the
 `DECIMAL(p > 18)` files the writer produced before #429 (#437). Amended
@@ -56,7 +56,7 @@ The first pass over this (`20049f9`, `ba0ad8e`) refused the negatives — five
 of the six whole-file-mutation crashers were a negative `data_page_offset`
 used directly as a slice index, and the sixth was a negative `num_rows`
 reaching `makeslice`. Refusing negatives was necessary and not sufficient. A
-review of the result found four more classes, and each was a different way of
+measurement of the result found four more classes, and each was a different way of
 believing the file:
 
 - **Believing a number because another number in the same file agrees.**
@@ -200,7 +200,7 @@ values had no encoding here at all.
 
 ### 5. A statistics bound can be silent about a value it never recorded
 
-(Added 2026-08-24, from the #459/#474 fold-in review.) The four rules above
+(Added 2026-08-24, from the #459/#474 fold-in measurement.) The four rules above
 are about believing a NUMBER the file states. A statistics bound is a
 narrower kind of claim than a row count or an offset: it is not wrong the way
 an overstated `total_compressed_size` is wrong, but it can still be
@@ -359,7 +359,7 @@ box above is what stopped it from being a silent wrong answer a second time.
 
 ### 7a. A comparison box is not a persistable value
 
-(Added 2026-08-25, review follow-up to #523.) `CidrInetBound` as first shipped
+(Added 2026-08-25, measurement follow-up to #523.) `CidrInetBound` as first shipped
 carried ONE string: the inet-order sort key. That is the right value for the
 comparator and the wrong value for everything else that touches a
 `RowGroupStats`, because its other consumers do not compare it at all — they
@@ -707,7 +707,7 @@ argument §4 makes for DECIMAL. What changes is that those checks are now
 convenience, not the guarantee.
 
 **And they are the same rule, not a second one.** `checkType` used to keep its
-own six lists, and the round-1 review of this arc measured them disagreeing
+own six lists, and the earlier measurement of this arc measured them disagreeing
 with the writer on 64 cells in both directions: 21 boxes it refused and the
 writer stores (`uint` and `uint64` into INT32/PORT/PROTOCOL, `int8`/`int16`/
 `uint*` into FLOAT32/FLOAT64 — every one a value the leaf holds exactly), and
@@ -896,7 +896,7 @@ is not settled here.
 
 ### 12. Five residuals of the same discipline (2026-09-06, ARC P-READER)
 
-§11 established the rule; a follow-up review found five more places the reader
+§11 established the rule; a follow-up measurement found five more places the reader
 believed a number the file states. Each is the same shape — a self-describing
 value used before it is verified — in a corner the §11 gates did not reach.
 
