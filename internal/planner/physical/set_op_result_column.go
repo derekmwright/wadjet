@@ -14,7 +14,7 @@ import (
 // SetOpArmFacts is what one arm's SELECT list says, per result position,
 // beyond the column it declares: whether the item has a type of its own, and
 // what it contributes to the result column's mark (ADR-0024 §10). Both are
-// read off the item's SPELLING, so the stage planner and the single-process
+// read from the item and the declaration it forwards, so the stage planner and the single-process
 // path, which see the same logical arm, read the same facts.
 type SetOpArmFacts []setOpArmFact
 
@@ -49,7 +49,7 @@ const (
 	setOpMarkByDecl setOpMarkRole = iota
 	setOpMarkNeutral
 	setOpMarkVeto
-	// setOpMarkMarked is only ever a resolved role, never a fact.
+	// setOpMarkMarked is a resolved role, including a forwarded column fact.
 	setOpMarkMarked
 )
 
@@ -71,9 +71,18 @@ func setOpArmFactsOf(arm *logical.Node, cols int) SetOpArmFacts {
 		return nil
 	}
 	out := make(SetOpArmFacts, cols)
+	var decls ColDecls
+	if len(proj.Children) == 1 {
+		decls = setOpArmDecls(proj.Children[0])
+	}
 	for i, pr := range proj.Projections {
 		if pr.ASTExpr != nil {
 			out[i] = setOpItemFact(pr.ASTExpr)
+			if _, bare := bareColRefOf(pr.ASTExpr); bare {
+				if ct, ok := setOpRefDecl(decls, pr.Column, pr); ok {
+					out[i].role = setOpArmMarkRole(ct, out[i])
+				}
+			}
 		}
 	}
 	return out
