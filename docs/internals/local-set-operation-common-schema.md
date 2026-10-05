@@ -2,6 +2,15 @@
 
 Source: internal/planner/physical/set_op_schema.go — unifySetOpSchemas, moved 2026-09-11 (#1026)
 
+Since 2026-10-05 (arc UN, #1541) the rungs below — and the result column's
+unconstrained mark — are computed by ONE function,
+`setOpResultColumn` (internal/planner/physical/set_op_result_column.go),
+which the stage planner (`setOpTargetType`) and the declared output
+(`setOpDeclaredOutputSchema`) call too; `unifySetOpSchemas` converts the two
+arms' runtime columns and their select items' facts (`SetOpArmFacts`) into
+its input and writes its answer back onto the first arm's column, deciding
+nothing of its own. The mark rule is ADR-0024 §10's table.
+
 ```go
 // unifySetOpSchemas is the result type of a set operation: the first arm's
 // column NAMES — SQL says the result takes them — over the COMMON TYPE of the

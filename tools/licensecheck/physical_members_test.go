@@ -80,7 +80,7 @@ import (
 // set operation's arm is coerced to the result column's unconstrained mark
 // beside its (p,s), so the DAG reads the mark where it reads the scale
 // (ADR-0024 §10). The alternative was a second, name-keyed list on the stage.
-// 223 → 222 (2026-10-06, arc UN, #1541): a set-operation arm's plan carries
+// 223 → 222 (2026-10-05, arc UN, #1541): a set-operation arm's plan carries
 // what each select item is beside its type, so one function computes the
 // result column for the stage planner and the single-process path, and the
 // stage asks the plan `SetOpArmPlan.Untyped` where it asked the context for a
