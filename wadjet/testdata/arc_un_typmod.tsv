@@ -189,15 +189,15 @@ d_case_true_elsenull__k	SELECT id, CASE WHEN true THEN k ELSE NULL END AS x FROM
 e_case_true_elsenull__k	SELECT id, CASE WHEN true THEN k ELSE NULL END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(5,0): 1 | 1	=PG
 d_case_true_elsenull__u	SELECT id, CASE WHEN true THEN u ELSE NULL END AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
 e_case_true_elsenull__u	SELECT id, CASE WHEN true THEN u ELSE NULL END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
-d_case_const_mixed_t__n	SELECT id, CASE WHEN 1 = 1 THEN n ELSE m END AS x FROM t	0.7550 | 1.2550	(10,2): 0.76 | 1.26	(12,4): 0.7550 | 1.2550	=c23adbbb
+d_case_const_mixed_t__n	SELECT id, CASE WHEN 1 = 1 THEN n ELSE m END AS x FROM t	0.76 | 1.26	(10,2): 0.76 | 1.26	(12,4): 0.7550 | 1.2550	=PG
 e_case_const_mixed_t__n	SELECT id, CASE WHEN 1 = 1 THEN n ELSE m END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(12,4): 0.7550 | 1.2550	=PG
-d_case_const_mixed_t__k	SELECT id, CASE WHEN 1 = 1 THEN k ELSE n END AS x FROM t	0.76 | 1.26	(5,0): 1 | 1	(10,2): 0.76 | 1.26	=c23adbbb
+d_case_const_mixed_t__k	SELECT id, CASE WHEN 1 = 1 THEN k ELSE n END AS x FROM t	1 | 1	(5,0): 1 | 1	(10,2): 0.76 | 1.26	=PG
 e_case_const_mixed_t__k	SELECT id, CASE WHEN 1 = 1 THEN k ELSE n END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
 d_case_const_mixed_t__u	SELECT id, CASE WHEN 1 = 1 THEN u ELSE n END AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,2): 0.76 | 1.26	=PG
 e_case_const_mixed_t__u	SELECT id, CASE WHEN 1 = 1 THEN u ELSE n END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,2): 0.76 | 1.26	=PG
-d_case_const_mixed_f__n	SELECT id, CASE WHEN 1 = 0 THEN m ELSE n END AS x FROM t	0.7550 | 1.2550	(10,2): 0.76 | 1.26	(12,4): 0.7550 | 1.2550	=c23adbbb
+d_case_const_mixed_f__n	SELECT id, CASE WHEN 1 = 0 THEN m ELSE n END AS x FROM t	0.76 | 1.26	(10,2): 0.76 | 1.26	(12,4): 0.7550 | 1.2550	=PG
 e_case_const_mixed_f__n	SELECT id, CASE WHEN 1 = 0 THEN m ELSE n END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(12,4): 0.7550 | 1.2550	=PG
-d_case_const_mixed_f__k	SELECT id, CASE WHEN 1 = 0 THEN n ELSE k END AS x FROM t	0.76 | 1.26	(5,0): 1 | 1	(10,2): 0.76 | 1.26	=c23adbbb
+d_case_const_mixed_f__k	SELECT id, CASE WHEN 1 = 0 THEN n ELSE k END AS x FROM t	1 | 1	(5,0): 1 | 1	(10,2): 0.76 | 1.26	=PG
 e_case_const_mixed_f__k	SELECT id, CASE WHEN 1 = 0 THEN n ELSE k END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
 d_case_const_mixed_f__u	SELECT id, CASE WHEN 1 = 0 THEN n ELSE u END AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,2): 0.76 | 1.26	=PG
 e_case_const_mixed_f__u	SELECT id, CASE WHEN 1 = 0 THEN n ELSE u END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,2): 0.76 | 1.26	=PG
@@ -213,9 +213,9 @@ d_case_const_typednull__k	SELECT id, CASE WHEN 1 = 1 THEN CAST(NULL AS NUMERIC(5
 e_case_const_typednull__k	SELECT id, CASE WHEN 1 = 1 THEN CAST(NULL AS NUMERIC(5)) END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(5,0): 1 | 1	=PG
 d_case_const_typednull__u	SELECT id, CASE WHEN 1 = 1 THEN CAST(NULL AS NUMERIC) END AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	FLOAT64: 0.755 | 1.255	=PG
 e_case_const_typednull__u	SELECT id, CASE WHEN 1 = 1 THEN CAST(NULL AS NUMERIC) END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	FLOAT64: 0.755 | 1.255	=PG
-d_case_simple_const__n	SELECT id, CASE 1 WHEN 1 THEN n ELSE m END AS x FROM t	0.7550 | 1.2550	(10,2): 0.76 | 1.26	(12,4): 0.7550 | 1.2550	=c23adbbb
+d_case_simple_const__n	SELECT id, CASE 1 WHEN 1 THEN n ELSE m END AS x FROM t	0.76 | 1.26	(10,2): 0.76 | 1.26	(12,4): 0.7550 | 1.2550	=PG
 e_case_simple_const__n	SELECT id, CASE 1 WHEN 1 THEN n ELSE m END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(12,4): 0.7550 | 1.2550	=PG
-d_case_simple_const__k	SELECT id, CASE 1 WHEN 1 THEN k ELSE n END AS x FROM t	0.76 | 1.26	(5,0): 1 | 1	(10,2): 0.76 | 1.26	=c23adbbb
+d_case_simple_const__k	SELECT id, CASE 1 WHEN 1 THEN k ELSE n END AS x FROM t	1 | 1	(5,0): 1 | 1	(10,2): 0.76 | 1.26	=PG
 e_case_simple_const__k	SELECT id, CASE 1 WHEN 1 THEN k ELSE n END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
 d_case_simple_const__u	SELECT id, CASE 1 WHEN 1 THEN u ELSE n END AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,2): 0.76 | 1.26	=PG
 e_case_simple_const__u	SELECT id, CASE 1 WHEN 1 THEN u ELSE n END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,2): 0.76 | 1.26	=PG
@@ -540,9 +540,9 @@ d_union_typednull__k	SELECT id, k AS x FROM t UNION ALL SELECT 9, CAST(NULL AS N
 e_union_typednull__k	SELECT id, k AS x FROM t UNION ALL SELECT 9, CAST(NULL AS NUMERIC(5)) WITH NO DATA	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
 d_union_typednull__u	SELECT id, u AS x FROM t UNION ALL SELECT 9, CAST(NULL AS NUMERIC)	0.755 | 1.255	U: 0.755 | 1.255	FLOAT64: 0.755 | 1.255	=PG
 e_union_typednull__u	SELECT id, u AS x FROM t UNION ALL SELECT 9, CAST(NULL AS NUMERIC) WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	FLOAT64: 0.755 | 1.255	=PG
-d_case_var_then_const__n	SELECT id, CASE WHEN id > 1 THEN n WHEN 1 = 1 THEN n ELSE m END AS x FROM t	0.7550 | 1.2550	(10,2): 0.76 | 1.26	(12,4): 0.7550 | 1.2550	=c23adbbb
+d_case_var_then_const__n	SELECT id, CASE WHEN id > 1 THEN n WHEN 1 = 1 THEN n ELSE m END AS x FROM t	0.76 | 1.26	(10,2): 0.76 | 1.26	(12,4): 0.7550 | 1.2550	=PG
 e_case_var_then_const__n	SELECT id, CASE WHEN id > 1 THEN n WHEN 1 = 1 THEN n ELSE m END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(12,4): 0.7550 | 1.2550	=PG
-d_case_var_then_const__k	SELECT id, CASE WHEN id > 1 THEN k WHEN 1 = 1 THEN k ELSE n END AS x FROM t	0.76 | 1.26	(5,0): 1 | 1	(10,2): 0.76 | 1.26	=c23adbbb
+d_case_var_then_const__k	SELECT id, CASE WHEN id > 1 THEN k WHEN 1 = 1 THEN k ELSE n END AS x FROM t	1 | 1	(5,0): 1 | 1	(10,2): 0.76 | 1.26	=PG
 e_case_var_then_const__k	SELECT id, CASE WHEN id > 1 THEN k WHEN 1 = 1 THEN k ELSE n END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
 d_case_var_then_const__u	SELECT id, CASE WHEN id > 1 THEN u WHEN 1 = 1 THEN u ELSE n END AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,2): 0.76 | 1.26	=PG
 e_case_var_then_const__u	SELECT id, CASE WHEN id > 1 THEN u WHEN 1 = 1 THEN u ELSE n END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,2): 0.76 | 1.26	=PG
@@ -564,9 +564,9 @@ d_case_and_const__k	SELECT id, CASE WHEN 1 = 1 AND 2 > 1 THEN k ELSE NULL END AS
 e_case_and_const__k	SELECT id, CASE WHEN 1 = 1 AND 2 > 1 THEN k ELSE NULL END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(5,0): 1 | 1	=PG
 d_case_and_const__u	SELECT id, CASE WHEN 1 = 1 AND 2 > 1 THEN u ELSE NULL END AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
 e_case_and_const__u	SELECT id, CASE WHEN 1 = 1 AND 2 > 1 THEN u ELSE NULL END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
-d_case_null_cond__n	SELECT id, CASE WHEN NULL THEN m ELSE n END AS x FROM t	0.7550 | 1.2550	(10,2): 0.76 | 1.26	(12,4): 0.7550 | 1.2550	=c23adbbb
+d_case_null_cond__n	SELECT id, CASE WHEN NULL THEN m ELSE n END AS x FROM t	0.76 | 1.26	(10,2): 0.76 | 1.26	(12,4): 0.7550 | 1.2550	=PG
 e_case_null_cond__n	SELECT id, CASE WHEN NULL THEN m ELSE n END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(12,4): 0.7550 | 1.2550	=PG
-d_case_null_cond__k	SELECT id, CASE WHEN NULL THEN n ELSE k END AS x FROM t	0.76 | 1.26	(5,0): 1 | 1	(10,2): 0.76 | 1.26	=c23adbbb
+d_case_null_cond__k	SELECT id, CASE WHEN NULL THEN n ELSE k END AS x FROM t	1 | 1	(5,0): 1 | 1	(10,2): 0.76 | 1.26	=PG
 e_case_null_cond__k	SELECT id, CASE WHEN NULL THEN n ELSE k END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
 d_case_null_cond__u	SELECT id, CASE WHEN NULL THEN n ELSE u END AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,2): 0.76 | 1.26	=PG
 e_case_null_cond__u	SELECT id, CASE WHEN NULL THEN n ELSE u END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,2): 0.76 | 1.26	=PG
@@ -584,7 +584,7 @@ d_coalesce_null_first__u	SELECT id, COALESCE(NULL, u) AS x FROM t	0.755 | 1.255	
 e_coalesce_null_first__u	SELECT id, COALESCE(NULL, u) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
 d_coalesce_typednull_first__n	SELECT id, COALESCE(CAST(NULL AS NUMERIC(10,2)), n) AS x FROM t	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
 e_coalesce_typednull_first__n	SELECT id, COALESCE(CAST(NULL AS NUMERIC(10,2)), n) AS x FROM t WITH NO DATA	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
-d_coalesce_typednull_first__k	SELECT id, COALESCE(CAST(NULL AS NUMERIC(10,2)), k) AS x FROM t	0.76 | 1.26	(5,0): 1 | 1	(10,2): 0.76 | 1.26	=c23adbbb
+d_coalesce_typednull_first__k	SELECT id, COALESCE(CAST(NULL AS NUMERIC(10,2)), k) AS x FROM t	1 | 1	(5,0): 1 | 1	(10,2): 0.76 | 1.26	=PG
 e_coalesce_typednull_first__k	SELECT id, COALESCE(CAST(NULL AS NUMERIC(10,2)), k) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
 d_coalesce_typednull_first__u	SELECT id, COALESCE(CAST(NULL AS NUMERIC(10,2)), u) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,2): 0.76 | 1.26	=PG
 e_coalesce_typednull_first__u	SELECT id, COALESCE(CAST(NULL AS NUMERIC(10,2)), u) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,2): 0.76 | 1.26	=PG
@@ -660,51 +660,51 @@ d_array_elem__k	SELECT id, (ARRAY[k])[1] AS x FROM t	1 | 1	(5,0): 1 | 1	(5,0): 1
 e_array_elem__k	SELECT id, (ARRAY[k])[1] AS x FROM t WITH NO DATA	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
 d_array_elem__u	SELECT id, (ARRAY[u])[1] AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
 e_array_elem__u	SELECT id, (ARRAY[u])[1] AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
-d_case_isnull_mixed__n	SELECT id, CASE WHEN NULL IS NULL THEN n ELSE m END AS x FROM t	0.7550 | 1.2550	(10,2): 0.76 | 1.26	(12,4): 0.7550 | 1.2550	=c23adbbb
+d_case_isnull_mixed__n	SELECT id, CASE WHEN NULL IS NULL THEN n ELSE m END AS x FROM t	0.76 | 1.26	(10,2): 0.76 | 1.26	(12,4): 0.7550 | 1.2550	=PG
 e_case_isnull_mixed__n	SELECT id, CASE WHEN NULL IS NULL THEN n ELSE m END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(12,4): 0.7550 | 1.2550	=PG
-d_case_isnull_mixed__k	SELECT id, CASE WHEN NULL IS NULL THEN k ELSE n END AS x FROM t	0.76 | 1.26	(5,0): 1 | 1	(10,2): 0.76 | 1.26	=c23adbbb
+d_case_isnull_mixed__k	SELECT id, CASE WHEN NULL IS NULL THEN k ELSE n END AS x FROM t	1 | 1	(5,0): 1 | 1	(10,2): 0.76 | 1.26	=PG
 e_case_isnull_mixed__k	SELECT id, CASE WHEN NULL IS NULL THEN k ELSE n END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
 d_case_isnull_mixed__u	SELECT id, CASE WHEN NULL IS NULL THEN u ELSE n END AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,2): 0.76 | 1.26	=PG
 e_case_isnull_mixed__u	SELECT id, CASE WHEN NULL IS NULL THEN u ELSE n END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,2): 0.76 | 1.26	=PG
-d_case_in_mixed__n	SELECT id, CASE WHEN 1 IN (1, 2) THEN n ELSE m END AS x FROM t	0.7550 | 1.2550	(10,2): 0.76 | 1.26	(12,4): 0.7550 | 1.2550	=c23adbbb
+d_case_in_mixed__n	SELECT id, CASE WHEN 1 IN (1, 2) THEN n ELSE m END AS x FROM t	0.76 | 1.26	(10,2): 0.76 | 1.26	(12,4): 0.7550 | 1.2550	=PG
 e_case_in_mixed__n	SELECT id, CASE WHEN 1 IN (1, 2) THEN n ELSE m END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(12,4): 0.7550 | 1.2550	=PG
-d_case_in_mixed__k	SELECT id, CASE WHEN 1 IN (1, 2) THEN k ELSE n END AS x FROM t	0.76 | 1.26	(5,0): 1 | 1	(10,2): 0.76 | 1.26	=c23adbbb
+d_case_in_mixed__k	SELECT id, CASE WHEN 1 IN (1, 2) THEN k ELSE n END AS x FROM t	1 | 1	(5,0): 1 | 1	(10,2): 0.76 | 1.26	=PG
 e_case_in_mixed__k	SELECT id, CASE WHEN 1 IN (1, 2) THEN k ELSE n END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
 d_case_in_mixed__u	SELECT id, CASE WHEN 1 IN (1, 2) THEN u ELSE n END AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,2): 0.76 | 1.26	=PG
 e_case_in_mixed__u	SELECT id, CASE WHEN 1 IN (1, 2) THEN u ELSE n END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,2): 0.76 | 1.26	=PG
-d_case_between_mixed__n	SELECT id, CASE WHEN 2 BETWEEN 1 AND 3 THEN n ELSE m END AS x FROM t	0.7550 | 1.2550	(10,2): 0.76 | 1.26	(12,4): 0.7550 | 1.2550	=c23adbbb
+d_case_between_mixed__n	SELECT id, CASE WHEN 2 BETWEEN 1 AND 3 THEN n ELSE m END AS x FROM t	0.76 | 1.26	(10,2): 0.76 | 1.26	(12,4): 0.7550 | 1.2550	=PG
 e_case_between_mixed__n	SELECT id, CASE WHEN 2 BETWEEN 1 AND 3 THEN n ELSE m END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(12,4): 0.7550 | 1.2550	=PG
-d_case_between_mixed__k	SELECT id, CASE WHEN 2 BETWEEN 1 AND 3 THEN k ELSE n END AS x FROM t	0.76 | 1.26	(5,0): 1 | 1	(10,2): 0.76 | 1.26	=c23adbbb
+d_case_between_mixed__k	SELECT id, CASE WHEN 2 BETWEEN 1 AND 3 THEN k ELSE n END AS x FROM t	1 | 1	(5,0): 1 | 1	(10,2): 0.76 | 1.26	=PG
 e_case_between_mixed__k	SELECT id, CASE WHEN 2 BETWEEN 1 AND 3 THEN k ELSE n END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
 d_case_between_mixed__u	SELECT id, CASE WHEN 2 BETWEEN 1 AND 3 THEN u ELSE n END AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,2): 0.76 | 1.26	=PG
 e_case_between_mixed__u	SELECT id, CASE WHEN 2 BETWEEN 1 AND 3 THEN u ELSE n END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,2): 0.76 | 1.26	=PG
-d_case_notin_mixed__n	SELECT id, CASE WHEN 1 NOT IN (2, 3) THEN n ELSE m END AS x FROM t	0.7550 | 1.2550	(10,2): 0.76 | 1.26	(12,4): 0.7550 | 1.2550	=c23adbbb
+d_case_notin_mixed__n	SELECT id, CASE WHEN 1 NOT IN (2, 3) THEN n ELSE m END AS x FROM t	0.76 | 1.26	(10,2): 0.76 | 1.26	(12,4): 0.7550 | 1.2550	=PG
 e_case_notin_mixed__n	SELECT id, CASE WHEN 1 NOT IN (2, 3) THEN n ELSE m END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(12,4): 0.7550 | 1.2550	=PG
-d_case_notin_mixed__k	SELECT id, CASE WHEN 1 NOT IN (2, 3) THEN k ELSE n END AS x FROM t	0.76 | 1.26	(5,0): 1 | 1	(10,2): 0.76 | 1.26	=c23adbbb
+d_case_notin_mixed__k	SELECT id, CASE WHEN 1 NOT IN (2, 3) THEN k ELSE n END AS x FROM t	1 | 1	(5,0): 1 | 1	(10,2): 0.76 | 1.26	=PG
 e_case_notin_mixed__k	SELECT id, CASE WHEN 1 NOT IN (2, 3) THEN k ELSE n END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
 d_case_notin_mixed__u	SELECT id, CASE WHEN 1 NOT IN (2, 3) THEN u ELSE n END AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,2): 0.76 | 1.26	=PG
 e_case_notin_mixed__u	SELECT id, CASE WHEN 1 NOT IN (2, 3) THEN u ELSE n END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,2): 0.76 | 1.26	=PG
-d_case_in_false_mixed__n	SELECT id, CASE WHEN 5 IN (1, 2) THEN m ELSE n END AS x FROM t	0.7550 | 1.2550	(10,2): 0.76 | 1.26	(12,4): 0.7550 | 1.2550	=c23adbbb
+d_case_in_false_mixed__n	SELECT id, CASE WHEN 5 IN (1, 2) THEN m ELSE n END AS x FROM t	0.76 | 1.26	(10,2): 0.76 | 1.26	(12,4): 0.7550 | 1.2550	=PG
 e_case_in_false_mixed__n	SELECT id, CASE WHEN 5 IN (1, 2) THEN m ELSE n END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(12,4): 0.7550 | 1.2550	=PG
-d_case_in_false_mixed__k	SELECT id, CASE WHEN 5 IN (1, 2) THEN n ELSE k END AS x FROM t	0.76 | 1.26	(5,0): 1 | 1	(10,2): 0.76 | 1.26	=c23adbbb
+d_case_in_false_mixed__k	SELECT id, CASE WHEN 5 IN (1, 2) THEN n ELSE k END AS x FROM t	1 | 1	(5,0): 1 | 1	(10,2): 0.76 | 1.26	=PG
 e_case_in_false_mixed__k	SELECT id, CASE WHEN 5 IN (1, 2) THEN n ELSE k END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
 d_case_in_false_mixed__u	SELECT id, CASE WHEN 5 IN (1, 2) THEN n ELSE u END AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,2): 0.76 | 1.26	=PG
 e_case_in_false_mixed__u	SELECT id, CASE WHEN 5 IN (1, 2) THEN n ELSE u END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,2): 0.76 | 1.26	=PG
-d_case_isnotnull_mixed__n	SELECT id, CASE WHEN 1 IS NOT NULL THEN n ELSE m END AS x FROM t	0.7550 | 1.2550	(10,2): 0.76 | 1.26	(12,4): 0.7550 | 1.2550	=c23adbbb
+d_case_isnotnull_mixed__n	SELECT id, CASE WHEN 1 IS NOT NULL THEN n ELSE m END AS x FROM t	0.76 | 1.26	(10,2): 0.76 | 1.26	(12,4): 0.7550 | 1.2550	=PG
 e_case_isnotnull_mixed__n	SELECT id, CASE WHEN 1 IS NOT NULL THEN n ELSE m END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(12,4): 0.7550 | 1.2550	=PG
-d_case_isnotnull_mixed__k	SELECT id, CASE WHEN 1 IS NOT NULL THEN k ELSE n END AS x FROM t	0.76 | 1.26	(5,0): 1 | 1	(10,2): 0.76 | 1.26	=c23adbbb
+d_case_isnotnull_mixed__k	SELECT id, CASE WHEN 1 IS NOT NULL THEN k ELSE n END AS x FROM t	1 | 1	(5,0): 1 | 1	(10,2): 0.76 | 1.26	=PG
 e_case_isnotnull_mixed__k	SELECT id, CASE WHEN 1 IS NOT NULL THEN k ELSE n END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
 d_case_isnotnull_mixed__u	SELECT id, CASE WHEN 1 IS NOT NULL THEN u ELSE n END AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,2): 0.76 | 1.26	=PG
 e_case_isnotnull_mixed__u	SELECT id, CASE WHEN 1 IS NOT NULL THEN u ELSE n END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,2): 0.76 | 1.26	=PG
-d_case_innull_mixed__n	SELECT id, CASE WHEN NULL IN (1) THEN m ELSE n END AS x FROM t	0.7550 | 1.2550	(10,2): 0.76 | 1.26	(12,4): 0.7550 | 1.2550	=c23adbbb
+d_case_innull_mixed__n	SELECT id, CASE WHEN NULL IN (1) THEN m ELSE n END AS x FROM t	0.76 | 1.26	(10,2): 0.76 | 1.26	(12,4): 0.7550 | 1.2550	=PG
 e_case_innull_mixed__n	SELECT id, CASE WHEN NULL IN (1) THEN m ELSE n END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(12,4): 0.7550 | 1.2550	=PG
-d_case_innull_mixed__k	SELECT id, CASE WHEN NULL IN (1) THEN n ELSE k END AS x FROM t	0.76 | 1.26	(5,0): 1 | 1	(10,2): 0.76 | 1.26	=c23adbbb
+d_case_innull_mixed__k	SELECT id, CASE WHEN NULL IN (1) THEN n ELSE k END AS x FROM t	1 | 1	(5,0): 1 | 1	(10,2): 0.76 | 1.26	=PG
 e_case_innull_mixed__k	SELECT id, CASE WHEN NULL IN (1) THEN n ELSE k END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
 d_case_innull_mixed__u	SELECT id, CASE WHEN NULL IN (1) THEN n ELSE u END AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,2): 0.76 | 1.26	=PG
 e_case_innull_mixed__u	SELECT id, CASE WHEN NULL IN (1) THEN n ELSE u END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,2): 0.76 | 1.26	=PG
-d_case_constexpr_mixed__n	SELECT id, CASE WHEN 1 + 1 = 2 THEN n ELSE m END AS x FROM t	0.7550 | 1.2550	(10,2): 0.76 | 1.26	(12,4): 0.7550 | 1.2550	=c23adbbb
+d_case_constexpr_mixed__n	SELECT id, CASE WHEN 1 + 1 = 2 THEN n ELSE m END AS x FROM t	0.76 | 1.26	(10,2): 0.76 | 1.26	(12,4): 0.7550 | 1.2550	=PG
 e_case_constexpr_mixed__n	SELECT id, CASE WHEN 1 + 1 = 2 THEN n ELSE m END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(12,4): 0.7550 | 1.2550	=PG
-d_case_constexpr_mixed__k	SELECT id, CASE WHEN 1 + 1 = 2 THEN k ELSE n END AS x FROM t	0.76 | 1.26	(5,0): 1 | 1	(10,2): 0.76 | 1.26	=c23adbbb
+d_case_constexpr_mixed__k	SELECT id, CASE WHEN 1 + 1 = 2 THEN k ELSE n END AS x FROM t	1 | 1	(5,0): 1 | 1	(10,2): 0.76 | 1.26	=PG
 e_case_constexpr_mixed__k	SELECT id, CASE WHEN 1 + 1 = 2 THEN k ELSE n END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(10,2): 0.76 | 1.26	=PG
 d_case_constexpr_mixed__u	SELECT id, CASE WHEN 1 + 1 = 2 THEN u ELSE n END AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,2): 0.76 | 1.26	=PG
 e_case_constexpr_mixed__u	SELECT id, CASE WHEN 1 + 1 = 2 THEN u ELSE n END AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,2): 0.76 | 1.26	=PG
