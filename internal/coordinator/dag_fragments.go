@@ -183,6 +183,7 @@ func buildUnionFragment(stage dagplan.Stage, t *distributed.Task, taskInputs map
 			cols = append(cols, distributed.ColumnSpec{
 				Name: c.Name, Type: int(parquet.TypeDecimal),
 				Precision: c.Precision, Scale: c.Scale,
+				Unconstrained: c.Unconstrained,
 			})
 		}
 		ops = append(ops, distributed.OpSpec{Type: distributed.OpDecimalCoerce, Coercions: cols})

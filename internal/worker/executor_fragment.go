@@ -2779,6 +2779,7 @@ func (e *Executor) buildFragmentUnary(ctx context.Context, task distributed.Task
 		for _, c := range spec.Coercions {
 			cols = append(cols, exec.DecimalCoerceColumn{
 				Name: c.Name, Precision: c.Precision, Scale: c.Scale,
+				Unconstrained: c.Unconstrained,
 			})
 		}
 		return []exec.UnaryOperator{exec.NewDecimalCoerce(cols)}, nil, nil

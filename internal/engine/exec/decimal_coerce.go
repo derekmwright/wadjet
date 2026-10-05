@@ -17,6 +17,9 @@ type DecimalCoerceColumn struct {
 	Name      string
 	Precision int
 	Scale     int
+	// Unconstrained is the result column's mark (ADR-0024 §10): the coerced
+	// column carries exactly it, whatever mark the arm's own column had.
+	Unconstrained bool
 }
 
 // DecimalCoerce puts named set-operation arm columns into one declared DECIMAL(p,s)
@@ -163,6 +166,7 @@ func (d *DecimalCoerce) resolve(in *batch.RecordBatch) error {
 		schema[idx].Scale = want.Scale
 		schema[idx].Precision = want.Precision
 		schema[idx].Nullable = true
+		schema[idx].Unconstrained = want.Unconstrained
 		d.plan = append(d.plan, c)
 	}
 	d.schema = schema
