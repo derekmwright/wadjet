@@ -12,7 +12,7 @@ import (
 )
 
 // The declared-output walk answers the expression layer's container sites too
-// (arc CW round 3, expr/operand_decl.go): a CAST that renders or converts a
+// (arc CW, expr/operand_decl.go): a CAST that renders or converts a
 // container, and every comparator that orders two, read their operand's
 // declaration from nodeDeclaredType — the walk that types the same
 // expression's projection output — asked against the input batch's executed
@@ -74,7 +74,7 @@ func schemaColDecls(schema []parquet.Column, sub expr.SubqueryDeclFunc) ColDecls
 		// The subquery's WHOLE declared column — its element and fields
 		// with it — so a cast or a comparator whose operand is a subquery
 		// that returns a container reads the same declaration the
-		// projection of that subquery does (round 4, B1/B4).
+		// projection of that subquery does (B1/B4).
 		decls.subqueryDecl = sub
 	}
 	return decls

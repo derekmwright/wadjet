@@ -157,7 +157,7 @@ func RefuseNumericLiteral(typ batch.TypeID, text string) error {
 // It is asked at PLAN time beside RefuseNumericLiteral and at runtime by
 // exec.networkConstError, and both read kernel.NetworkPrefixLiteral, so one
 // literal cannot be a network at one site and garbage at another. Before #627
-// round 2 the 0A000 existed at ONE evaluator: the same query refused in a
+// the earlier implementation the 0A000 existed at ONE evaluator: the same query refused in a
 // WHERE clause, answered inside a CASE, and on the DAG answered a WRONG NUMBER
 // (the widened parser read the prefix as the address zero).
 func RefuseNetworkPrefixLiteral(typ batch.TypeID, text string) error {

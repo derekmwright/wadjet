@@ -461,7 +461,7 @@ func readLeafColumn(fr *FileReader, rgIdx, colIdx int, col Column) (leafColumnDa
 	// And the same point for a DECIMAL buried inside one. col carries the
 	// CATALOG's (p, s) here — leafColumnsFromCatalog put it there — so this is
 	// the nested twin of readColumnToAny's rescale, through one function so the
-	// flat and nested arms of one read cannot answer differently (round 0's B1,
+	// flat and nested arms of one read cannot answer differently (case B1,
 	// where a nested leaf answered 1275.00 for the 12.75 the flat column beside
 	// it answered correctly).
 	if typeID == TypeDecimal {
@@ -934,7 +934,7 @@ func retypeFromCatalog(readCols, catalog []Column, root *SchemaNode, leaves []*S
 		}
 		claimed[FoldName(c.Name)] = c.Name
 		// The catalog's SPELLING is the answer's, so a file written by a
-		// writer that preserved the author's capitalisation is keyed by the
+		// writer that preserved the input's capitalisation is keyed by the
 		// name the caller asked for rather than by the one on disk.
 		out[i].Name = want.Name
 		if want.Type == c.Type {

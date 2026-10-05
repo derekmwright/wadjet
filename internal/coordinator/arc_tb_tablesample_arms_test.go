@@ -37,12 +37,12 @@ import (
 // PostgreSQL takes was 42601. On the DAG arms no stage fragment carried the
 // sampler at all: every file was read whole, so BERNOULLI (50) over 20 000
 // rows answered 20 000 — in a FROM item, a CTE body, and a WHERE / HAVING /
-// ON / SELECT-list scalar subquery alike. Round 1 (a38dba67) routed every
+// ON / SELECT-list scalar subquery alike. The earlier implementation (a38dba67) routed every
 // sampled statement to the coordinator-local pipeline instead, which kept
 // the DAG scan unsampled for an expression subquery, refused a 100 %
 // sampled 20 000-row join under a 64 KiB fast path, and — with the local
 // sampler discarding the scan's selection vector — returned DELETEd rows.
-// Round 2 reverts that route: the worker's scan fragment applies the same
+// The scan fragment owns the sampling: the worker's scan fragment applies the same
 // sampler kernel the single-process scan does (exec.NewSampledSource), over
 // the rows the scan selects.
 //
@@ -84,7 +84,7 @@ func TestArcTBTablesampleArgumentOnEveryArm(t *testing.T) {
 				if !tbMatches(got, want) {
 					t.Errorf("%s: %s\n  got  %s\n  want %s%s", arm.name, c.sql, got, want, why)
 				}
-				// A sampled scan runs ON THE DAG (round 2): the statement is
+				// A sampled scan runs ON THE DAG (): the statement is
 				// never routed to the coordinator-local pipeline for it.
 				if c.onDAG && arm.dag && arm.coord.TableLessLocalRoutes() != routesBefore {
 					t.Errorf("%s: %s was routed to the coordinator-local pipeline; the DAG's scan fragment samples it",
@@ -215,9 +215,9 @@ func tbCells() []tbCell {
 		{"e39_real", "CAST('1e39' AS REAL)", "ERR 22003"},
 		{"e400_text", "'1e400'", "ERR 22003"},
 		{"e39_text", "'1e39'", "ERR 22003"},
-		// real's input refuses what float4in refuses (review r1 B3): a `_`
+		// real's input refuses what float4in refuses (measured case B3): a `_`
 		// digit separator and a nonzero value real rounds to zero (base 9420d256
-		// refused these 42601; round 1 answered a 10 % and a 0 % sample)
+		// refused these 42601; the earlier implementation answered a 10 % and a 0 % sample)
 		{"text_underflow", "'1e-46'", "ERR 22003"},
 		{"text_underflow_negative", "'-1e-46'", "ERR 22003"},
 		{"text_subnormal", "'1e-45'", "RANGE 0 3"},
@@ -287,7 +287,7 @@ func tbCells() []tbCell {
 	dag("big/system_fifty", "SELECT count(*) FROM tb_big TABLESAMPLE SYSTEM (50)", "RANGE 0 20000")
 
 	// A DELETE narrows the scan's selection, and the sample is drawn from
-	// what is left (review r1 B1: round 1 returned the deleted rows under
+	// what is left (measured case B1: the earlier implementation returned the deleted rows under
 	// BERNOULLI (100) on every arm — on the DAG arms, where base answered
 	// PostgreSQL's rows — and SYSTEM (0) answered every selected row).
 	dag("delete/bernoulli_hundred_rows", "SELECT id FROM tb_d TABLESAMPLE BERNOULLI (100) ORDER BY id", "1; 3; 5; 7")
@@ -305,7 +305,7 @@ func tbCells() []tbCell {
 	dag("delete/big_join", "SELECT count(*) FROM tb_bd TABLESAMPLE BERNOULLI (100) JOIN tb_big ON tb_bd.id = tb_big.id", "10000")
 
 	// A sampled scan inside an expression subquery is sampled where it runs —
-	// a producer stage on the DAG — not routed (review r1 B2: round 1 read it
+	// a producer stage on the DAG — not routed (measured case B2: the earlier implementation read it
 	// whole on the DAG arms, where base read it whole on every arm).
 	add("subquery/where_zero", "SELECT count(*) FROM tb_big WHERE id < (SELECT count(*) FROM tb_p TABLESAMPLE BERNOULLI (0))", "0")
 	add("subquery/where_101", "SELECT count(*) FROM tb_big WHERE id < (SELECT count(*) FROM tb_p TABLESAMPLE BERNOULLI (101))", "ERR 2202H")
@@ -323,8 +323,8 @@ func tbCells() []tbCell {
 	add("subquery/cte_body_zero", "WITH s AS (SELECT * FROM tb_p TABLESAMPLE BERNOULLI (0)) SELECT count(*) FROM tb_big WHERE id < (SELECT count(*) FROM s)", "0")
 	add("subquery/join_on_zero", "SELECT count(*) FROM tb_p a JOIN tb_big b ON a.id = b.id AND b.id > (SELECT count(*) FROM tb_p TABLESAMPLE BERNOULLI (0))", "3")
 
-	// A 20 000-row sampled join runs on the DAG (review r1 P2: under a 64 KiB
-	// fast path round 1 refused the 100 % join on the local budget, where
+	// A 20 000-row sampled join runs on the DAG (measured case P2: under a 64 KiB
+	// fast path the earlier implementation refused the 100 % join on the local budget, where
 	// base answered it), and two samples of one table are two draws.
 	dag("bigjoin/hundred", "SELECT count(*) FROM tb_big TABLESAMPLE BERNOULLI (100) JOIN tb_big b2 ON tb_big.id = b2.id", "20000")
 	dag("bigjoin/hundred_rows", "SELECT count(*) FROM (SELECT tb_big.id, b2.v FROM tb_big TABLESAMPLE BERNOULLI (100) JOIN tb_big b2 ON tb_big.id = b2.id) s", "20000")
@@ -353,8 +353,8 @@ func tbCells() []tbCell {
 	add("subquery/scalar_101", "SELECT (SELECT count(*) FROM tb_p TABLESAMPLE BERNOULLI (101))", "ERR 2202H")
 	add("union/101", "SELECT count(*) FROM tb_p TABLESAMPLE BERNOULLI (101) UNION ALL SELECT 1", "ERR 2202H")
 	// The range is a scan-time check, and PostgreSQL never begins a scan under
-	// a constant-false WHERE or HAVING or a LIMIT 0, so it answers (review r1
-	// B4: base 9420d256 answered these; round 1 raised 2202H on every arm).
+	// a constant-false WHERE or HAVING or a LIMIT 0, so it answers (measured case
+	// B4: base 9420d256 answered these; the earlier implementation raised 2202H on every arm).
 	// A filter that reads a row begins the scan on PostgreSQL too.
 	add("never_scanned/where_false", "SELECT id FROM tb_p TABLESAMPLE BERNOULLI (101) WHERE false", "(0 rows)")
 	add("never_scanned/where_false_count", "SELECT count(*) FROM tb_p TABLESAMPLE BERNOULLI (101) WHERE false", "0")
@@ -371,7 +371,7 @@ func tbCells() []tbCell {
 	add("scanned/where_id_negative", "SELECT id FROM tb_p TABLESAMPLE BERNOULLI (101) WHERE id < 0", "ERR 2202H")
 	// A subquery a constant short-circuits is never planned or run, as on
 	// PostgreSQL, which folds `false AND …` / `true OR …` and a top-level
-	// NULL conjunct before it plans a sublink (review r2 B1: the DAG arms
+	// NULL conjunct before it plans a sublink (measured case B1: the DAG arms
 	// failed uncoded, or raised the subquery's 2202H, where base and
 	// PostgreSQL answered; the reversed spellings raised on the embedded arms
 	// too). A connective the constant does not decide keeps its subquery.
@@ -400,7 +400,7 @@ func tbCells() []tbCell {
 	add("short_circuit/null_or_exists", sc("NULL OR "+ex101), "ERR 2202H")
 	add("short_circuit/true_and_exists", sc("true AND "+ex101), "ERR 2202H")
 	// The DAG's EXISTS arm answers the subquery's SQLSTATE, as the scalar
-	// arm does (review r2 B1: every coded refusal but 42501 was swallowed
+	// arm does (measured case B1: every coded refusal but 42501 was swallowed
 	// and the task failed uncoded).
 	add("exists_coded/exists_101", sc(ex101), "ERR 2202H")
 	add("exists_coded/not_exists_101", sc("NOT "+ex101), "ERR 2202H")
@@ -428,7 +428,7 @@ func tbCells() []tbCell {
 		want: "CONTAINS ERR ", localPin: "ERR 2202H"})
 
 	// EXPLAIN plans without scanning, shows the sample on the scan line
-	// (review r1 N3), and raises the coercion's own failure.
+	// (measured case N3), and raises the coercion's own failure.
 	add("explain/fifty", "EXPLAIN SELECT * FROM tb_p TABLESAMPLE BERNOULLI (50)", "CONTAINS TABLESAMPLE BERNOULLI (50)")
 	add("explain/101", "EXPLAIN SELECT * FROM tb_p TABLESAMPLE BERNOULLI (101)", "PLAN")
 	add("explain/null", "EXPLAIN SELECT * FROM tb_p TABLESAMPLE BERNOULLI (NULL)", "PLAN")
@@ -441,12 +441,12 @@ func tbCells() []tbCell {
 	for _, s := range []string{"1", "0", "-1", "1e400", "NULL"} {
 		pin("repeatable/"+s, "SELECT count(*) FROM tb_p TABLESAMPLE BERNOULLI (100) REPEATABLE ("+s+")", "ERR 42601")
 	}
-	// The alias position (other r19, review r1 N4): PostgreSQL takes the
+	// The alias position (other r19, measured case N4): PostgreSQL takes the
 	// alias BEFORE the clause and refuses it after; this parser the reverse.
 	pin("alias/before_clause", "SELECT count(*) FROM tb_p x TABLESAMPLE BERNOULLI (100)", "ERR 42601")
 	pin("alias/after_clause", "SELECT count(*) FROM tb_p TABLESAMPLE BERNOULLI (100) x", "3")
 
-	// real's input function, outside TABLESAMPLE (review r1 B3).
+	// real's input function, outside TABLESAMPLE (measured case B3).
 	add("real_input/underflow", "SELECT CAST('1e-46' AS REAL)", "ERR 22003")
 	add("real_input/underscore", "SELECT CAST('1_0' AS REAL)", "ERR 22P02")
 	add("real_input/float8_underflow", "SELECT CAST('1e-400' AS DOUBLE PRECISION)", "ERR 22003")

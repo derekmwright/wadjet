@@ -168,7 +168,7 @@ func resolveWindowKeys(node *logical.Node) map[string]windowKey {
 				// five arms, silently (#1028).
 				//
 				// `windowArgKeepsItsQualifier` is the test the window's ARGUMENT has
-				// used since #742 round 4, and what it keeps is an ADDRESS: a join
+				// used since #742, and what it keeps is an ADDRESS: a join
 				// publishes the probe's columns bare and qualifies duplicate build
 				// columns by alias, so ColumnIndexFallback needs no model of which
 				// side built (ADR-0026 §6a).
@@ -223,7 +223,7 @@ func resolveWindowKeys(node *logical.Node) map[string]windowKey {
 				// TEXT vector, and the window aggregate read NULL out of it in
 				// every row where PostgreSQL answers 9 — while `MAX` of the
 				// same argument answered the right digits under OID 25
-				// (#1018 round 7, B3's window half).
+				// (#1018, B3's window half).
 				// The ARRAY elements too: a subscript is declared by its
 				// element (`t.a[1] * t.n` over an int4[] is numeric), and
 				// without them the key was declared double while the kernel

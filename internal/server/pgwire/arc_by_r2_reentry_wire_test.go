@@ -20,7 +20,7 @@ import (
 	"github.com/derekmwright/wadjet/wadjet"
 )
 
-// Arc BY round 2 (#1501, review r1 B2): a bound bytea parameter is the typed
+// Arc BY (#1501, measured case B2): a bound bytea parameter is the typed
 // value `CAST('\x<hex>' AS BYTES)`, and that spelling survives EVERY position
 // the parameter can sit in — the LAG / LEAD default and a MERGE value
 // included, where Bind used to strip the CAST and leave the hex SPELLING. The
@@ -75,7 +75,7 @@ var byR2WireWrites = []struct{ name, q string }{
 }
 
 // byR2WireKept: the cells this engine answers differently from PostgreSQL
-// 17.11 at c67ebf5b and at the round-2 tip alike (arc BY filing candidates).
+// 17.11 at c67ebf5b and at the earlier implementation tip alike (arc BY filing candidates).
 // A kept cell that starts agreeing FAILS: delete its line.
 func byR2WireKept(name string) (string, bool) {
 	switch {

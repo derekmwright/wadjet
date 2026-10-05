@@ -387,7 +387,7 @@ func TestTier3BitCount(t *testing.T) {
 	fn := DefaultRegistry.Lookup("bit_count")
 	// BIT_COUNT answers an INTEGER, as PostgreSQL's bit_count does (bigint,
 	// measured 17.11), and counts over the exact 64-bit pattern: the wide values
-	// below count 1 instead of 3 and 63 through a double (#966 round 2).
+	// below count 1 instead of 3 and 63 through a double (#966).
 	tests := []struct {
 		arg  any
 		want int64
@@ -576,7 +576,7 @@ func TestTier3CurrentTimestamp(t *testing.T) {
 	if got == nil {
 		t.Fatal("current_timestamp() returned nil")
 	}
-	// TIMESTAMP-declared, so the TIMESTAMP box (arc VL round 3).
+	// TIMESTAMP-declared, so the TIMESTAMP box (arc VL).
 	s, ok := tsText(got).(string)
 	if !ok {
 		t.Fatalf("current_timestamp() returned %T, want an epoch-millisecond box", got)
@@ -824,7 +824,7 @@ func TestTier3BaseRoundTrips(t *testing.T) {
 	// Round-trip across multiple bases. The values are int64 and so is the
 	// answer: FROM_BASE returned float64(n), which is not a round trip past
 	// 2^53 — the last two values are the ones that fail through a double
-	// (#966 round 2).
+	// (#966).
 	bases := []float64{2, 8, 10, 16, 36}
 	values := []int64{0, 1, 42, 255, 1000, 65535, 1<<62 | 18, 9223372036854775807}
 	for _, base := range bases {

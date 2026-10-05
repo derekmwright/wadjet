@@ -71,9 +71,9 @@ type compileContext struct {
 	// construct that requires ONE column refuse before a single row is read,
 	// which is PostgreSQL's order: `subquery must return only one column` is
 	// raised during parse analysis, so it fires over an EMPTY subquery too
-	// (round-1 P1). Counting the returned rows cannot reach that case, and
+	// (case P1). Counting the returned rows cannot reach that case, and
 	// counting a Go map keyed by NAME cannot see two columns that share one
-	// (round-1 B1).
+	// (case B1).
 	subqueryCols SubqueryColumnsFunc
 	// setRowBound bounds the MEMBERSHIP SET an IN-subquery may build, in
 	// rows. Zero means unbounded, which is every caller that does not ask.
@@ -103,7 +103,7 @@ type compileContext struct {
 // SubqueryDeclFunc resolves a scalar subquery's SQL to the declared column of
 // its single output: the type, a DECIMAL's precision and scale, and — for a
 // container — its element or fields, the same declaration the planner's
-// declared-output walk gives every other producer (arc CW round 4: a subquery
+// declared-output walk gives every other producer (arc CW: a subquery
 // that RETURNS an array reached the cast and the comparators with no element,
 // so a TIMESTAMP element printed its epoch and a DATE array never equalled).
 // ok=false for a subquery whose output the caller cannot resolve; the
@@ -129,7 +129,7 @@ func WithSubqueryDeclTypes(f SubqueryDeclFunc) CompileOption {
 
 // WithSubqueryEnv supplies both plan-time answers a subquery construct takes
 // from the planner: its single output column's DECLARED TYPE (#696) and its
-// SELECT list's COLUMN COUNT (round-1 P1). They travel together because they
+// SELECT list's COLUMN COUNT (case P1). They travel together because they
 // come from one walk of one plan, and a call site that took only the first
 // would leave a construct unable to refuse a multi-column subquery before it
 // reads a row.
@@ -531,11 +531,11 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 						if refusal := refuseWindowBorneCorrelation("IN", sq.SQL, info, refs); refusal != nil {
 							return nil, refusal
 						}
-						// An aggregate the ENCLOSING query owns (#1044 round 2).
+						// An aggregate the ENCLOSING query owns (#1044).
 						if refusal := refuseOuterLevelAggregate("IN", sq.SQL, ctx.outerTables); refusal != nil {
 							return nil, refusal
 						}
-						// A body the rebuild cannot write back out (#1044 round 3).
+						// A body the rebuild cannot write back out (#1044).
 						if refusal := refuseShadowingWith("IN", sq.SQL, info, refs, ctx.enclosingCTEs); refusal != nil {
 							return nil, refusal
 						}
@@ -725,11 +725,11 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 				if refusal := refuseWindowBorneCorrelation("scalar", n.SQL, info, refs); refusal != nil {
 					return nil, refusal
 				}
-				// An aggregate the ENCLOSING query owns (#1044 round 2).
+				// An aggregate the ENCLOSING query owns (#1044).
 				if refusal := refuseOuterLevelAggregate("scalar", n.SQL, ctx.outerTables); refusal != nil {
 					return nil, refusal
 				}
-				// A body the rebuild cannot write back out (#1044 round 3).
+				// A body the rebuild cannot write back out (#1044).
 				if refusal := refuseShadowingWith("scalar", n.SQL, info, refs, ctx.enclosingCTEs); refusal != nil {
 					return nil, refusal
 				}
@@ -811,11 +811,11 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 				if refusal := refuseWindowBorneCorrelation("EXISTS", n.SQL, info, refs); refusal != nil {
 					return nil, refusal
 				}
-				// An aggregate the ENCLOSING query owns (#1044 round 2).
+				// An aggregate the ENCLOSING query owns (#1044).
 				if refusal := refuseOuterLevelAggregate("EXISTS", n.SQL, ctx.outerTables); refusal != nil {
 					return nil, refusal
 				}
-				// A body the rebuild cannot write back out (#1044 round 3).
+				// A body the rebuild cannot write back out (#1044).
 				if refusal := refuseShadowingWith("EXISTS", n.SQL, info, refs, ctx.enclosingCTEs); refusal != nil {
 					return nil, refusal
 				}
@@ -1109,7 +1109,7 @@ func compileBinOp(left, right Expr, op string, ctx *compileContext) Expr {
 	// The same for an operand that PRODUCES a date or a timestamp — a clock
 	// function, a cast, nested date arithmetic: its box is a day or an
 	// instant, never a number to the typed float/int nodes, which have no
-	// date arm (producedTemporal, arc VL round 3). Column operands resolve
+	// date arm (producedTemporal, arc VL). Column operands resolve
 	// per batch and are BinOpNumeric's dateNode question.
 	if (op == "+" || op == "-") &&
 		(producedTemporal(left, nil) != castNotTemporal || producedTemporal(right, nil) != castNotTemporal) {
@@ -1410,7 +1410,7 @@ func compileFuncCallNamed(n *plansql.FuncCallNode, ctx *compileContext, checked 
 	// (`'x'::bigint` is 22P02 under `WHERE false`). This is the BACKSTOP, not
 	// the decision: compilation is not one seam, because a DAG stage compiles
 	// its fragment only when a TASK RUNS, so this site alone refused in one
-	// process and answered zero rows on the DAG (#1018 round 6, B1). The
+	// process and answered zero rows on the DAG (#1018, B1). The
 	// deciding site is the binder's physical.refuseUnknownFlagNames; this one
 	// covers the doors the binder does not see, listed on
 	// RefuseUnknownTCPFlagNameLiterals. A name that is a COLUMN or an
@@ -1583,7 +1583,7 @@ func compileCaseNode(n *plansql.CaseNode, ctx *compileContext) (Expr, error) {
 // `(SELECT COUNT(*) FROM c WHERE id < d.id)` has an inner `id` and an outer
 // `d.id`, and substituting both answered 0 for every outer row where
 // PostgreSQL counts c's rows below it, on all four arms and over a base table
-// as well as a CTE (round-1 review B3). `OuterRef.Bare` is that distinction,
+// as well as a CTE (case B3). `OuterRef.Bare` is that distinction,
 // recorded where the scope is known instead of re-derived here from a name
 // collision.
 func buildUnqualOuterCols(refs []plansql.OuterRef, outerCols map[string]string) map[string]string {

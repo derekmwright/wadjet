@@ -78,7 +78,7 @@ func blockPublishedColumns(p *logical.Node, published map[*logical.Node]bool,
 // Declining there left the empty side with no declaration at all, and the
 // outer join dropped its columns: a LATERAL aggregate that matched nothing
 // published its array as the STRING fallback on the single path (arc CW
-// round 3, B2), where the DAG's walk — and the same side with rows — declared
+// the earlier implementation, B2), where the DAG's walk — and the same side with rows — declared
 // the array.
 func (w *declWalk) blockColumnsOf(p *logical.Node, published map[*logical.Node]bool,
 	subqueryDecl func(string) (parquet.Column, bool), aggFromStream bool) ([]blockColumn, bool) {
@@ -106,7 +106,7 @@ func (w *declWalk) blockColumnsOf(p *logical.Node, published map[*logical.Node]b
 	// sq` fell to the STRING fallback: a zero-row `SELECT *` over a block
 	// holding one declared `sq` as text where the same statement under a
 	// matching predicate declares int8 and PostgreSQL declares integer. One
-	// inference means one set of arguments too (round-4 B1).
+	// inference means one set of arguments too (case B1).
 	decls.subqueryDecl = subqueryDecl
 	if decls.Types == nil {
 		decls.Types = map[string]parquet.TypeID{}
@@ -140,7 +140,7 @@ func (w *declWalk) blockColumnsOf(p *logical.Node, published map[*logical.Node]b
 	// VISIBLE items only. A hidden `__sortkey_N` is the planner's own — a
 	// materialized ORDER BY term the block's SELECT list does not carry — and
 	// publishing it put a reserved name on the wire that no query can spell
-	// (round-1 P3). It is the same list extractOutputRenames walks for the
+	// (case P3). It is the same list extractOutputRenames walks for the
 	// statement's own projection, and for the same reason.
 	items := logical.VisibleProjections(p.Projections)
 	sortKeyFamily := plansql.ReservedSlotFamily(plansql.SlotName(plansql.SlotSortKey, 0))

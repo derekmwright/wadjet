@@ -5,7 +5,7 @@ package expr
 import "testing"
 
 // REAL AND DOUBLE PRECISION READ TEXT AS float4in / float8in DO (#1411
-// review r1 B3).
+// measured case B3).
 //
 // strconv.ParseFloat is Go's literal grammar: it takes a `_` digit
 // separator, and it rounds a value below the type's smallest subnormal to

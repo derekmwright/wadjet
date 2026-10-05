@@ -209,7 +209,7 @@ func (e *BinOpNumeric) resolveModeSlow(b *batch.RecordBatch) {
 	// box (producedTemporal: `(d + 1) + 1`'s inner node is one) — makes this
 	// node a date-arithmetic candidate. Only the COLUMN test existed, so the
 	// outer `+ 1` of `(d + 1) + 1` took the float path and boxed a float64
-	// day count under a DATE declaration (arc VL round 3).
+	// day count under a DATE declaration (arc VL).
 	if !e.isDec && (e.Op == "+" || e.Op == "-") &&
 		(temporalColOperand(e.Left, b) || temporalColOperand(e.Right, b) ||
 			producedTemporal(e.Left, b) != castNotTemporal || producedTemporal(e.Right, b) != castNotTemporal) {

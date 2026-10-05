@@ -223,7 +223,7 @@ func (r AggregateShuffleRejectReason) String() string {
 // (scan-aggregate → merge → shuffle → join) that is the MERGE — which by
 // design carries no resolution list at all. Asking the merge answered "the two
 // names are the same" for every plan, so the guard could not fire on the chain
-// it guards (#794 round 2, B3).
+// it guards (#794, B3).
 //
 // A chain with no key-computing stage under it is one this pass does not
 // model, and the answer there is NO: the pre-compute SQL below writes the key

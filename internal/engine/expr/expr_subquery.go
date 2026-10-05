@@ -276,7 +276,7 @@ type InSubquery struct {
 	probe boxOperand
 	vals  []any // fallback for mixed types
 	// probeDecl and setDecl are the two sides' DECLARATIONS for a container
-	// probe (round 4, B4): the probe's from its AST, the set's from the
+	// probe (B4): the probe's from its AST, the set's from the
 	// subquery's declared output column. A container member is equal to the
 	// probe by the one container comparator under both (containerMember) —
 	// the box alone cannot say that a DATE element boxed as an int32 and one

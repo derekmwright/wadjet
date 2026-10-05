@@ -49,7 +49,7 @@ type Scheduler struct {
 	// a context of its own: SubmitSQL's async publish runs on a ctx derived
 	// from context.Background(), which drops any mark set at planning time,
 	// so a ctx-based guard was inert exactly on the door it was written for
-	// (#859 round 3). Nil = nothing is policed.
+	// (#859). Nil = nothing is policed.
 	PolicedQuery func(queryID string) bool
 
 	// BushyJoinReorder is the coordinator's planner option, stamped onto
@@ -211,7 +211,7 @@ func (s *Scheduler) PublishTasks(ctx context.Context, tasks []distributed.Task) 
 	// THE choke point every dispatcher goes through, which is why the
 	// SQL-text guard lives here rather than at the six sites that build such
 	// a task: a seventh added later inherits it instead of inheriting the
-	// leak (#859 round 2, review P2). A task a worker will RE-PLAN from its
+	// leak (#859, measurement P2). A task a worker will RE-PLAN from its
 	// text carries none of the policy the coordinator applied.
 	for i := range tasks {
 		policed := s.PolicedQuery != nil && s.PolicedQuery(tasks[i].QueryID)

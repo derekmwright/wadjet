@@ -193,7 +193,7 @@ func substitutionUnsafe(n plansql.Node) bool {
 		// A set-returning item is a SET, not a row-wise value: substituting
 		// its definition below the Project that expands it filters the
 		// ARRAY (a field of it reads NULL, a comparison fails to plan)
-		// instead of each element (arc PC round 3).
+		// instead of each element (arc PC).
 		if isSetReturningName(e.Name) {
 			return true
 		}
@@ -297,7 +297,7 @@ type projRefs struct {
 	// passthrough: substituting its source (`s.__key_0` → `i.k`) named a
 	// column the aggregate never emits, and a lifted equality over a grouped
 	// LATERAL body read the OUTER `k` through the qualifier strip, or
-	// nothing — every row or no row on the stage DAG (arc JP round 2).
+	// nothing — every row or no row on the stage DAG (arc JP).
 	published map[string]bool
 	// rowFields maps a lower-cased column name BELOW this Project to the
 	// fields it declares, when it is a ROW. It is what tells a candidate ROW
@@ -652,7 +652,7 @@ func nodeScopeNames(n *Node) map[string]bool {
 // A Project that expands a SET (ProjectsASet) keeps every predicate: below
 // it a set-returning output is still the ARRAY, so a predicate over it —
 // however it is spelled, `u`, `r.u` or `(r.k).x` — would filter arrays, not
-// elements (arc PC round 3: `(r.k).x = 3` over `_pg_expandarray` answered
+// elements (arc PC: `(r.k).x = 3` over `_pg_expandarray` answered
 // zero rows, `r.u = 3` failed to plan).
 func splitFilterForProjectPush(preds []Predicate, project *Node) (pushed, kept []Predicate) {
 	if ProjectsASet(project) {

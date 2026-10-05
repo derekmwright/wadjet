@@ -169,7 +169,7 @@ func TestOuterLiteralRefusesValuesWithNoLiteralSpelling(t *testing.T) {
 	}
 
 	// ROW, MAP and VECTOR have no literal at all. An ARRAY has one since arc CW
-	// round 5 — its typed array literal (ArrayValueLiteral), which reads back
+	// the earlier implementation — its typed array literal (ArrayValueLiteral), which reads back
 	// as the same value — so it is asserted rendered, not refused. They are
 	// built through a batch rather than SetValue, which the container vectors
 	// do not take.

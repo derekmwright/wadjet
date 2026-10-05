@@ -639,7 +639,7 @@ func (w *declWalk) inputColShapesUncached(n *logical.Node) map[string]parquet.Co
 					// container MIN/MAX's element. SHADOWING it lost the
 					// element of every aggregate read through a projection
 					// that renames it: a LATERAL body's `MAX(c2.ad) AS a`
-					// declared a zero-row `t.a` as text (arc CW round 2, B1).
+					// declared a zero-row `t.a` as text (arc CW, B1).
 					out[name] = sh
 				} else {
 					out[name] = parquet.Column{}
@@ -705,7 +705,7 @@ func (w *declWalk) inputColShapesUncached(n *logical.Node) map[string]parquet.Co
 				// a copy from the column it copies), so a container key's
 				// element came from nowhere and `SELECT DISTINCT av` /
 				// `GROUP BY av` declared its zero-row array as text (arc CW
-				// round 2, B1). The shape below IS the key's shape.
+				// the earlier implementation, B1). The shape below IS the key's shape.
 				if sh.Fields == nil && sh.ElementType == nil {
 					if cr, ok := plansql.Unparen(ast).(*plansql.ColRef); ok {
 						if childShapes == nil {
@@ -770,7 +770,7 @@ func (w *declWalk) inputColShapesUncached(n *logical.Node) map[string]parquet.Co
 			}
 			d, c := nodeDeclaredType(arg, *childDecls)
 			if c != expr.Decided && a.InputExpr == nil {
-				// The qualified spelling of a derived table's column (round 4).
+				// The qualified spelling of a derived table's column ().
 				for _, ref := range aggInputRefs(a.InputCol)[1:] {
 					if d, c = nodeDeclaredType(ref, *childDecls); c == expr.Decided {
 						break
@@ -793,7 +793,7 @@ func (w *declWalk) inputColShapesUncached(n *logical.Node) map[string]parquet.Co
 		// function. A MIN/MAX (or a value function) over a container answers
 		// the argument's value, so its output's shape is the argument's —
 		// the declaration a zero-row `MIN(ARRAY[x]) OVER ()` is described
-		// from (arc CW round 2, B1).
+		// from (arc CW, B1).
 		if len(n.Children) != 1 {
 			return nil
 		}
@@ -1120,7 +1120,7 @@ type ColDecls struct {
 	// INT64 column whose PostgreSQL type is integer — and the reader that
 	// had only the carrier declared `SUM(v)` numeric where PostgreSQL
 	// declares bigint, on every arm and both wire formats, while the DIRECT
-	// call one level down declared it right (#1018 round 5, B1).
+	// call one level down declared it right (#1018, B1).
 	//
 	// An absent entry is "this declaration says nothing", not int4: the
 	// reader then falls back to the carrier, which for a base column IS the
@@ -1223,7 +1223,7 @@ func (d ColDecls) colDecl(n *plansql.ColRef) (parquet.Column, bool) {
 			// map carries under the qualifier while the shape walk keys the
 			// column bare: the bare entry is this column's element, because
 			// a join's shape walk drops a bare name its sides declare
-			// differently (arc CW round 2, B1 — a decorrelated LATERAL's
+			// differently (arc CW, B1 — a decorrelated LATERAL's
 			// `MAX(c2.ad)` declared no element).
 			if dot := strings.LastIndexByte(key, '.'); dot >= 0 {
 				e, ok = d.Elems[key[dot+1:]]
@@ -1598,7 +1598,7 @@ func nodeDeclaredTypeOf(node plansql.Node, decls ColDecls) (expr.DeclType, expr.
 			// renders the bytea and concatenates as text —
 			// `'AB'::text || '\x6869'::bytea` is `AB\x6869` with pg_typeof
 			// text, measured on 17.11. Declaring bytea for it moved a RIGHT
-			// declared class to a wrong one (round 2, B3). So bytea only when
+			// declared class to a wrong one (B3). So bytea only when
 			// no operand is DECLARED text; an unknown literal declares
 			// nothing and is the case that takes bytea.
 			if bytesOperand(n.Left, decls) || bytesOperand(n.Right, decls) {
@@ -1702,7 +1702,7 @@ func nodeDeclaredTypeOf(node plansql.Node, decls ColDecls) (expr.DeclType, expr.
 			// used to take: the hidden sort key materialized as TEXT and the
 			// rows came back in the order "-1" < "-2" < "-3" gives, which is
 			// ASCENDING by `a` where PostgreSQL sorts descending. A wrong
-			// ORDER, silently (round-1 review, N10).
+			// ORDER, silently (N10).
 			//
 			// Float64 is the same declaration a BINARY arithmetic node over
 			// the same undecided operand already takes, which is why
@@ -1753,7 +1753,7 @@ func nodeDeclaredTypeOf(node plansql.Node, decls ColDecls) (expr.DeclType, expr.
 			// ARRAY(subquery) is an array OF the subquery's column, and it
 			// declares that element — bigint[] over a bigint column — so the
 			// operator builds an array vector and the wire declares the
-			// array type (arc PC round 2, B4).
+			// array type (arc PC, B4).
 			elem := col
 			elem.Name = "element"
 			elem.Nullable = true
@@ -1803,15 +1803,15 @@ func nodeDeclaredTypeOf(node plansql.Node, decls ColDecls) (expr.DeclType, expr.
 				d = expr.Decl(inferCastType(el))
 			}
 			// A MULTI-DIMENSIONAL operand passes through the cast unchanged
-			// (expr.castToArray, arc CW round 5: the engine has no
+			// (expr.castToArray, arc CW: the engine has no
 			// multi-dimensional semantics), so it keeps its own declaration.
 			if src, ok := nestedArrayCastOperand(n, decls); ok {
 				return src, expr.Decided
 			}
 			// A TEXT operand spelling a multi-dimensional array passes
 			// through as its text (expr.castToArray), as it did before arc
-			// CW: `CAST('{{1,2},{3,4}}' AS INT[])` is that text (round-4
-			// review B4; round 5 returns multi-dimensional input to base).
+			// CW: `CAST('{{1,2},{3,4}}' AS INT[])` is that text (
+			// measurement B4; the earlier implementation returns multi-dimensional input to base).
 			if multiDimTextCastOperand(n.Inner, decls) {
 				return expr.Decl(parquet.TypeString), expr.Decided
 			}
@@ -1819,7 +1819,7 @@ func nodeDeclaredTypeOf(node plansql.Node, decls ColDecls) (expr.DeclType, expr.
 		}
 		// A VECTOR destination declares a VECTOR of its dimension — the
 		// evaluator converts (pgvector's array_to_vector), and the projection
-		// sizes its output from the declared dimension (arc CW round 2).
+		// sizes its output from the declared dimension (arc CW).
 		if _, _, ok := expr.VectorCastDim(n.TypeName); ok {
 			col := parquet.Column{Type: parquet.TypeVector, Nullable: true, Dimension: castVectorDim(n)}
 			return expr.DeclType{ID: parquet.TypeVector, Schema: &col}, expr.Decided
@@ -1860,8 +1860,8 @@ func nodeDeclaredTypeOf(node plansql.Node, decls ColDecls) (expr.DeclType, expr.
 			// a bare projection, a CASE / COALESCE / GREATEST arm, a derived
 			// table's or CTE's column, a VALUES list, a set-operation arm —
 			// so `SELECT 2.50` is 2.50 (OID 1700) and so is the value it
-			// assigns to a text column through any of them (arc VL round 5;
-			// round-4 review B2: `CASE WHEN true THEN 2.50 END` stored `2.5`).
+			// assigns to a text column through any of them (arc VL;
+			// the earlier measurement B2: `CASE WHEN true THEN 2.50 END` stored `2.5`).
 			// It closes ADR-0024's recorded literal deferral. A spelling a
 			// double cannot carry compiles to the exact DECIMAL it names
 			// (expr.WideNumericLiteral, #1386), so it declares that DECIMAL
@@ -2090,7 +2090,7 @@ func funcReturnType(n *plansql.FuncCallNode, decls ColDecls) (expr.DeclType, exp
 // DATE shifted by a whole number of days is a DATE, and anything else — a
 // TIMESTAMP, text, an INTERVAL shift — is a TIMESTAMP. expr.dateShift boxes
 // by the same rule and expr.shiftProducedTemporal names it for consumers, so
-// the declaration and the value agree (arc VL round 3: the registry declared
+// the declaration and the value agree (arc VL: the registry declared
 // both functions TEXT while they returned a date, so `UPDATE … SET d =
 // date_add(d, 1)` was refused as a text source).
 func dateShiftReturn(n *plansql.FuncCallNode, decls ColDecls) (expr.DeclType, bool) {
@@ -2295,7 +2295,7 @@ func castVectorDim(n *plansql.CastNode) int {
 //	date|timestamp ± 'text' → as expr.ResolveUnknownTemporal resolves it
 //
 // Every operand is judged by its DECLARED type, never by how it is spelled
-// (arc VL round 3): `DATE '…' + CAST(1 AS INT)`, `(d + 1) + 1`, `d + i` over an
+// (arc VL): `DATE '…' + CAST(1 AS INT)`, `(d + 1) + 1`, `d + i` over an
 // INTEGER column and `CURRENT_DATE + 1 - 1` are all DATE, where the old rule
 // accepted only a bare number literal on the integer side and declared every
 // other spelling double precision while expr.BinOp produced a day count.
@@ -2340,7 +2340,7 @@ func binOpTemporalType(n *plansql.BinaryOp, decls ColDecls) (expr.DeclType, expr
 		// number of milliseconds (docs/postgres-differences.md), a double —
 		// the value the kernel produces. Undecided, it was published as TEXT
 		// (OID 25) on the wire: `now() - now()` read `0` as a string
-		// (round-3 review N4).
+		// (case N4).
 		return expr.Decl(parquet.TypeFloat64), expr.Decided
 	case lk == temporalDay && rk == temporalNone && nodeIsIntegerDeclared(n.Right, decls):
 		return expr.Decl(parquet.TypeDate), expr.Decided
@@ -2393,7 +2393,7 @@ const (
 // from its DECLARED type — a cast's destination, a column's catalog type, a
 // function's registry declaration, a nested arithmetic node's own
 // binOpTemporalType answer — so a DATE is a DATE however it was produced (arc
-// VL round 3; round 2 added the function arm alone, and a nested `(d + 1) + 1`
+// VL; the earlier implementation added the function arm alone, and a nested `(d + 1) + 1`
 // or `CURRENT_DATE + 1 - 1` still fell to double precision). A quoted literal
 // is SQL's unknown and names nothing; a column the catalog declares VARCHAR is
 // the one text operand read as a day (see temporalKind).
@@ -2491,7 +2491,7 @@ func isTextColRef(node plansql.Node, decls ColDecls) bool {
 // INTERVAL or DECLARES a date or timestamp. Such an operator is temporal
 // arithmetic, never numeric: binOpTemporalType types the shapes that have a
 // type, and every other one (a timestamp plus a number, say) must not be
-// declared a number either. Judged by declared type (arc VL round 3); it was a
+// declared a number either. Judged by declared type (arc VL); it was a
 // list of five function NAMES, which missed every other date-valued producer.
 // A VARCHAR column is not temporal here — `s * 2` over one stays numeric.
 func binOpInvolvesTemporal(b *plansql.BinaryOp, decls ColDecls) bool {
@@ -2553,10 +2553,10 @@ func isSimpleColRef(node plansql.Node) bool {
 // An INTERVAL element (nodeIsInterval) declares DURATION, ordered by
 // PostgreSQL's interval_cmp metric (expr.IntervalValue.DurationNanos), so
 // "2 days" < "10 days" where the rendered text orders the other way. Declined,
-// it was a #361 guard panic at every meeting point (arc CW round 6, B1: a
+// it was a #361 guard panic at every meeting point (arc CW, B1: a
 // projection nothing reads, `=`, `<`, GROUP BY, DISTINCT, UNION, CASE). The
 // wire keeps #1268's refusal (0A000). Why DURATION, and what each meeting
-// point guessed, is ADR-0045 §1 "Round 6".
+// point guessed, is ADR-0045 §1 "The earlier implementation".
 func arrayLitDeclaredType(n *plansql.ArrayLitNode, decls ColDecls) (expr.DeclType, expr.Confidence) {
 	var decided []expr.DeclType
 	for _, e := range n.Elements {

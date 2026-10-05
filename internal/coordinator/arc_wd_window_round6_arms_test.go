@@ -78,7 +78,7 @@ func wdRunCells(t *testing.T, cellsPath, answersPath string, onDAG func(string) 
 }
 
 // A WINDOW OVER A CHAIN OF DERIVED TABLES WHOSE LOWER TABLE SHADOWS A COLUMN
-// OF ITS OWN INPUT (#1435 round 6): `(SELECT id, g, b FROM (SELECT id, g, b *
+// OF ITS OWN INPUT (#1435): `(SELECT id, g, b FROM (SELECT id, g, b *
 // 2 AS b FROM wd_t) s0) s`, three levels, a qualified or `*` pass-through, a
 // filter between the tables, a CTE chain. The DAG's producer emits the upper
 // table's declared columns, each composed down through the chain to the scan
@@ -102,7 +102,7 @@ func TestArcWDTwoLevelShadowPlansOnTheDAG(t *testing.T) {
 
 // A result larger than the coordinator-local budget over a two-level shadowing
 // table, on a DAG coordinator with a 64 KiB fast path: 4e6592c7 routed it local
-// and refused `… result exceeded the local budget`; 9420d256 and the round-6
+// and refused `… result exceeded the local budget`; 9420d256 and the earlier implementation
 // tip answer every row on the stage DAG.
 func TestArcWDTwoLevelShadowBigResultOnTheDAG(t *testing.T) {
 	if testing.Short() {
@@ -160,7 +160,7 @@ func TestArcWDTwoLevelShadowBigResultOnTheDAG(t *testing.T) {
 // beside the window. The rule is the default's alone: a typed NULL in
 // COALESCE, CASE, UNION ALL, NULLIF, GREATEST or arithmetic keeps its
 // planner-wide declaration (double precision, as at 8b00b112), and those
-// cells left this table in round 8 (ADR-0024, candidate U).
+// cells left this table in the earlier implementation (ADR-0024, candidate U).
 //
 // Left out, base-identical and recorded as filing candidates: `1e300` (no
 // DECIMAL(38,s) holds it, so the literal is a double here and numeric on
@@ -176,7 +176,7 @@ func TestArcWDTypedNullDefaultEveryArm(t *testing.T) {
 }
 
 // A CONSUMER ABOVE A JOIN OF ANY KIND OVER A WINDOW ON A SHADOWING DERIVED
-// TABLE (#1435 round 7): `wd_t y JOIN (SELECT id, g, SUM(b) OVER (…) AS w, b
+// TABLE (#1435): `wd_t y JOIN (SELECT id, g, SUM(b) OVER (…) AS w, b
 // AS w3, b FROM (SELECT id, g, b * 2 AS b FROM wd_t) s) x` read by the SELECT
 // list (qualified and bare), an aggregate, HAVING, GROUP BY, a window, WHERE,
 // ORDER BY + LIMIT, DISTINCT, a second join keyed on the arm's column, a UNION

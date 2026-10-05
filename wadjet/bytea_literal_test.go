@@ -55,7 +55,7 @@ func f3ByteaOpen(t *testing.T) *DB {
 		// The two bytes of an encoded 'é' — VALID UTF-8, so one rune and two
 		// bytes. It is the only shape that separates a byte count from a
 		// character count, and #583's first pass had it in the file's header
-		// comment and in no LENGTH cell (round 2, B4).
+		// comment and in no LENGTH cell (B4).
 		{"k": int64(6), "b": []byte{0xc3, 0xa9}},
 		{"k": int64(7), "b": []byte("héllo")},
 	}
@@ -72,7 +72,7 @@ func f3ByteaOpen(t *testing.T) *DB {
 // byteain's REFUSALS, which the four sites that read a bytea literal used to
 // answer around: each fell back to the literal's raw SPELLING when the decode
 // failed and none of them raised, so `b = '\x6'` and `b <> '\xzz'` ANSWERED
-// where PostgreSQL refuses (round 2, P7). The accept-side edges are here too —
+// where PostgreSQL refuses (P7). The accept-side edges are here too —
 // uppercase `\X` is a refusal on the server and whitespace inside the hex
 // digits is NOT.
 func TestByteaLiteralRefusalsFollowByteain(t *testing.T) {

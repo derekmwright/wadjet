@@ -19,7 +19,7 @@ type OuterRef struct {
 	// discovered through a QUALIFIED spelling replaces the INNER column of the
 	// same name too. `(SELECT COUNT(*) FROM c WHERE id < d.id)` answered 0 for
 	// every outer row where PostgreSQL counts c's rows below it, because the
-	// one ref `d.id` put `id` in the substitution map (round-1 review B3).
+	// one ref `d.id` put `id` in the substitution map (case B3).
 	Bare bool
 }
 
@@ -214,8 +214,8 @@ func dropFieldPathRefs(refs []OuterRef, info *SelectInfo, resolve TableColumns) 
 // catalog); without the block's own, `WITH d AS (SELECT k, amt AS total FROM
 // dc_in) SELECT … FROM d b … total > 100` did not see `total` as the body's,
 // classified it as the enclosing row's, and the per-row re-run substituted the
-// enclosing value for it — `2` where PostgreSQL answers `1 | 2` (arc DC round
-// 4; the Codex review's N4 / round-2 N4).
+// enclosing value for it — `2` where PostgreSQL answers `1 | 2` (arc DC;
+// case N4).
 func blockScopeResolver(info *SelectInfo, resolve TableColumns) TableColumns {
 	if info == nil || len(info.CTEs) == 0 {
 		return resolve
@@ -266,7 +266,7 @@ func findCorrelatedRefs(subquerySQL string, outerTables map[string]bool, outerCo
 //	    1, 1, 1 for its 1, 2, 3
 //
 // Four documents said the first was REFUSED, and it was — but only when the
-// subquery was correlated through some OTHER clause (round-2 review, P1/P3).
+// subquery was correlated through some OTHER clause (P1/P3).
 // Seeing the reference is what lets the re-run substitute it where it can and
 // refuse it where it cannot; neither is possible for a reference nobody looks
 // for.
@@ -286,7 +286,7 @@ func walkBlockForOuterRefs(info *SelectInfo, scope *outerRefScope, refs *[]Outer
 		// `d.id IN (SELECT id FROM t WHERE … UNION ALL SELECT id FROM t WHERE
 		// …)` was classified CORRELATED on `d.id, d.visits`, refused 0A000
 		// because its body is a set operation, and answers 1, 3 on PostgreSQL
-		// 17.11 and at bf99c56c (round-5 review, B2 — the qualified spelling
+		// 17.11 and at bf99c56c (B2 — the qualified spelling
 		// was the discriminator, because a qualifier the arm's FROM supplies
 		// is recognised where a bare name was not). nest accumulates: a
 		// reference the arm resolves against its own FROM is the arm's,
@@ -313,7 +313,7 @@ func walkBlockForOuterRefs(info *SelectInfo, scope *outerRefScope, refs *[]Outer
 		// A JOIN's ON condition is a clause like any other, and the one this
 		// walk missed: `(SELECT t.visits FROM x JOIN t ON t.id = u.id WHERE
 		// x.id = 1)` was planned UNCORRELATED and answered 100, 100, 100 for
-		// PostgreSQL 17.11's 100, 42, 200 (round-3 review, P1). The rebuild
+		// PostgreSQL 17.11's 100, 42, 200 (P1). The rebuild
 		// renders it from this tree, so seeing it is enough to answer it.
 		walkForOuterRefs(info.Joins[i].CondExpr, scope, refs)
 	}
@@ -558,7 +558,7 @@ func BlockPublishedColumnsWithFuncs(info *SelectInfo, resolve TableColumns, fn F
 // columns and none of t's — and claiming both sides made an OUTER reference to
 // a name only the other side carries look INNER, which is #955's own defect
 // with the sign flipped: the value went silently wrong on all four arms in the
-// CTE spelling and loud in the derived-table one (round-1 review B1).
+// CTE spelling and loud in the derived-table one (case B1).
 //
 // Order is load-bearing rather than cosmetic: sourceColumns overlays a
 // column-alias list POSITIONALLY over this list, so `SELECT a, t.*, b` has to
@@ -685,7 +685,7 @@ func CTEColumnsWithFuncs(ctes []CTEDef, base TableColumns, fn FromItemColumns) T
 	// RECURSIVE body answers "unknown" rather than looping. A numeric bound
 	// here would TRUNCATE a long chain of star-bodied items instead, and
 	// "unknown" is not a refusal: it falls back to the outer scope, which is
-	// #955's own wrong answer (round-1 review B4).
+	// #955's own wrong answer (case B4).
 	var resolveAt func(scope int) TableColumns
 	resolveAt = func(scope int) TableColumns {
 		return func(table string) []string {
@@ -1163,7 +1163,7 @@ func anyToLit(v any) *Lit {
 }
 
 // A PER-ROW RE-RUN SUBSTITUTES INTO EVERY CLAUSE IT REBUILDS FROM AN AST, NOT
-// ONLY THE WHERE (#1044 round 2, P1).
+// ONLY THE WHERE (#1044, P1).
 //
 // The re-run rewrites the outer row's values into the subquery's text and
 // hands the result back to the runner. Until this, only the WHERE clause was
@@ -1410,7 +1410,7 @@ func rebuildSQLFull(info *SelectInfo, cols []string, rewrittenWhere Node, having
 		// name alone re-parses as a base table nothing declares, so the arm
 		// read empty and a correlated subquery over it answered 0 for every
 		// outer row: #1203's own defect, one clause lower, left open when the
-		// FROM-item half was fixed. Measured by the round-1 review.
+		// FROM-item half was fixed. Measured with the same input on every path.
 		if tr := j.RightTableRef; tr != nil && tr.IsFunction && tr.FuncCallText != "" {
 			sb.WriteString(tr.FuncCallText)
 			if tr.WithOrdinality {
@@ -1561,7 +1561,7 @@ func collectOuterCandidatesBlock(info *SelectInfo, out map[string]bool) {
 	// x.visits FROM c2users x ORDER BY u.name, x.id LIMIT 1) FROM c2users u`
 	// was `correlated subquery references outer column u.name, which the outer
 	// query does not carry (batch columns: id)` — 42703, on all five arms —
-	// for PostgreSQL 17.11's 100, 100, 100 (round-4 review, P1). The two lists
+	// for PostgreSQL 17.11's 100, 100, 100 (P1). The two lists
 	// are one claim: whatever position can make a subquery CORRELATED can make
 	// the enclosing query need the column.
 	for i := range info.Joins {
@@ -1589,7 +1589,7 @@ func collectOuterCandidatesBlock(info *SelectInfo, out map[string]bool) {
 	// `SELECT id FROM e7bal WHERE id IN (SELECT id FROM e7bal WHERE bal > 300
 	// UNION ALL …)` answered the masked reading where
 	// server.TestPolicyMaskingIsPlanTimeOnEveryDoor requires the refusal
-	// (round-5 review, B2). Cell 122 is the shape this omission is safe for.
+	// (B2). Cell 122 is the shape this omission is safe for.
 }
 
 // walkOuterCandidates collects every column reference under node that is not
@@ -1738,7 +1738,7 @@ func HoldsWindowCall(info *SelectInfo) bool {
 }
 
 // AN AGGREGATE BELONGS TO THE LEVEL OF THE DEEPEST VARIABLE IN ITS ARGUMENTS,
-// AND THIS ENGINE DOES NOT IMPLEMENT LEVELS (#1044 round 2).
+// AND THIS ENGINE DOES NOT IMPLEMENT LEVELS (#1044).
 //
 // AggregatesOverOnlyOuterRefs reports the outer references that make an
 // aggregate inside subquerySQL the ENCLOSING query's rather than this block's:
@@ -1916,7 +1916,7 @@ func OuterRefsInUnsubstitutedClauses(info *SelectInfo, outerTables map[string]bo
 	return dedup(out)
 }
 
-// A SET OPERATION IS A BODY THE REBUILD CANNOT WRITE (round-2 review, P3).
+// A SET OPERATION IS A BODY THE REBUILD CANNOT WRITE (P3).
 //
 // HoldsSetOperation reports whether a subquery's body is a set operation.
 // RebuildSQL renders ONE select — its SELECT list, FROM, joins, WHERE, GROUP
@@ -2004,7 +2004,7 @@ func holdsNestedSetOperation(info *SelectInfo, depth int) bool {
 	return found
 }
 
-// AN AGGREGATE BESIDE A NESTED SUBQUERY HAS NO PLAN-TIME TYPE (round-2
+// AN AGGREGATE BESIDE A NESTED SUBQUERY HAS NO PLAN-TIME TYPE (
 // review, P4).
 //
 // AggregateBesideANestedSubquery reports whether any SELECT ITEM of a
@@ -2019,7 +2019,7 @@ func holdsNestedSetOperation(info *SelectInfo, depth int) bool {
 //
 // THE OUTER REFERENCE IS THE WHOLE CONDITION, and asking only "an aggregate
 // beside any nested subquery" took seven shapes main answers exactly as
-// PostgreSQL 17.11 (round-3 review, B1). `(SELECT SUM(x.visits) + (SELECT
+// PostgreSQL 17.11 (B1). `(SELECT SUM(x.visits) + (SELECT
 // MAX(y.id) FROM c2users y) FROM c2users x WHERE x.id <= u.id)` is 103, 145,
 // 345 on both engines, with the correlation in the WHERE, which the re-run
 // substitutes — so the shape is ANSWERED AS MAIN ANSWERS IT.
@@ -2030,7 +2030,7 @@ func holdsNestedSetOperation(info *SelectInfo, depth int) bool {
 // declares `numeric`, and past 2^53 the float64 arithmetic answers
 // 1.0000000000000004e+16 for PostgreSQL's 10000000000000003 — identically at
 // `bf99c56c`, and the same statement with NO nested subquery is exact
-// (round-4 review, B2). The declaration is #1018 / ADR-0024's family, pinned
+// (B2). The declaration is #1018 / ADR-0024's family, pinned
 // fail-on-agree in pgwire's wire cell, and it is not what this predicate is
 // about: only a nested subquery whose own body NAMES THE ENCLOSING QUERY
 // makes the item unwritable, because its value is the outer row's.
@@ -2044,7 +2044,7 @@ func holdsNestedSetOperation(info *SelectInfo, depth int) bool {
 // other failing on an internal invariant.
 //
 // THE PREDICATE IS THE SHAPE, NOT THE DECLARATION, and saying otherwise
-// described only part of what it takes (round-3 review, P3). `COUNT(x.id +
+// described only part of what it takes (P3). `COUNT(x.id +
 // (SELECT u.id))` accumulates an int64 the FLOAT64 box holds, and `MIN(x.name
 // || (SELECT u.name))` has no numeric declaration at all: both would answer
 // PostgreSQL's values, and both are refused beside the accumulators that
@@ -2206,7 +2206,7 @@ func collectNestedQueries(n Node, f func(Node)) {
 // to be declined and the query refused (0A000) on shapes `bf99c56c` answers
 // exactly as PostgreSQL 17.11 does: `(SELECT COUNT(*) FROM x GROUP BY u.id,
 // x.id ORDER BY x.id LIMIT 1)` is 1, 1, 1 there and was refused here
-// (round-4 review, P2). A CAST is the same constant and is not a position —
+// (P2). A CAST is the same constant and is not a position —
 // measured on PostgreSQL 17.11 and on this engine, statement for statement:
 // `GROUP BY CAST(1 AS BIGINT)` and `ORDER BY CAST(1 AS BIGINT)` are constant
 // expressions on both, where `(1)` is a position on both and so is no repair.

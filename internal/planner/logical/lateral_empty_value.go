@@ -54,7 +54,7 @@ func lateralEmptyDefaults(info *plansql.SelectInfo, marker string) []LateralEmpt
 	// THE DEFAULT NAMES THE LATERAL'S OWN COLUMN, qualified the way the
 	// marker is: the join emits a lateral column that collides with an outer
 	// one as `alias.name`, and a bare name reached the OUTER column first
-	// (`max(i.id) AS id` beside `o.id`, arc JP round 3, B4). The ELSE branch
+	// (`max(i.id) AS id` beside `o.id`, arc JP, B4). The ELSE branch
 	// is a quoted identifier, never the name's text as SQL: an unaliased
 	// `count(*)` publishes the name `count(*)`, which as SQL is an aggregate
 	// CALL — the rule failed to compile, was skipped, and the pad's NULL
@@ -321,7 +321,7 @@ func lateralHavingHoldsOnEmpty(having plansql.Node) (keep, decided bool) {
 // with. An unaliased `count(*)` is named `count` by PostgreSQL and published
 // `count(*)` by the body's aggregate: the rule named a column the stream does
 // not carry, matched nothing, and the pad's NULL stood where PostgreSQL
-// answers 0 (arc JP round 3, B5). The identity is the POSITION the item holds
+// answers 0 (arc JP, B5). The identity is the POSITION the item holds
 // in the body's own list, not either spelling of its name.
 func nameEmptyDefaultsAsPublished(defs []LateralEmptyDefault, body *Node, lead int, marker string) []LateralEmptyDefault {
 	if len(defs) == 0 || body == nil || body.Type != NodeProject || marker == "" {

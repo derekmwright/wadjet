@@ -371,7 +371,7 @@ func boundWindowKey(b *batch.RecordBatch, clause, name string) (string, error) {
 		// name twice — a group key beside an aggregate aliased to it — and
 		// `(input has: a, a)` is that collision talking rather than anything
 		// the user wrote or can act on: PostgreSQL names the column, not the
-		// schema (#968, round-2 P3). Order is the schema's, so the list still
+		// schema (#968, the earlier implementation P3). Order is the schema's, so the list still
 		// reads as the row does.
 		have := make([]string, 0, len(b.Schema))
 		seen := make(map[string]bool, len(b.Schema))

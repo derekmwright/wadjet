@@ -64,7 +64,7 @@ func (w *declWalk) aggOhlcvOutputFields(node *logical.Node, agg logical.AggExpr)
 	// no plan-time declaration at all for `ohlcv(ts, price*2, volume)`, and a
 	// declaration the plan declines is one every consumer then invents
 	// differently — which is exactly how the DAG and the single path came to
-	// declare two things (#965 round 2, B1).
+	// declare two things (#965, B1).
 	price, ok := col(agg.InputCol)
 	if !ok {
 		t, prec, scale, known := w.aggComputedInputExprDecl(node, agg)
@@ -206,7 +206,7 @@ func (w *declWalk) aggComputedInputDecl(node *logical.Node, agg logical.AggExpr)
 // types — `ohlcv(ts, price*2, volume)` declares open/high/low/close as
 // `price*2`'s DECIMAL(20,4), the way MIN of that expression would. Without it
 // the plan declined a computed bar entirely, and a declaration the plan
-// declines is one every consumer invents differently (#965 round 2, B1).
+// declines is one every consumer invents differently (#965, B1).
 func (w *declWalk) aggComputedInputExprDecl(node *logical.Node, agg logical.AggExpr) (parquet.TypeID, int, int, bool) {
 	if agg.InputExpr == nil || node == nil || len(node.Children) == 0 {
 		return 0, 0, 0, false
@@ -377,7 +377,7 @@ func (w *declWalk) aggInputColumnType(node *logical.Node, col string) (parquet.T
 // (`MAX(s.pb)`, recorded "s.pb") — as the qualified reference it is. Asked
 // only as the one-part name `s.pb`, the walk found no such column, the output
 // declared float8 and a zero-row or subquery-declared container came back
-// untyped (arc CW round 4, the one-ordering gate's aggregate operand).
+// untyped (arc CW, the one-ordering gate's aggregate operand).
 func aggInputRefs(col string) []*plansql.ColRef {
 	refs := []*plansql.ColRef{{Column: col}}
 	if dot := strings.LastIndexByte(col, '.'); dot > 0 && dot < len(col)-1 && !strings.ContainsAny(col, " ()\"'") {
@@ -427,7 +427,7 @@ func (w *declWalk) aggInputColumnDecimal(node *logical.Node, col string) (logica
 // `SELECT SUM(v) FROM (SELECT BITWISE_AND(id, 3) AS v FROM users) s` asked
 // about INT64 and declared numeric, where the identical DIRECT call one level
 // down declared bigint and PostgreSQL declares bigint. Same number, two boxes,
-// on every arm and both wire formats (#1018 round 5, B1).
+// on every arm and both wire formats (#1018, B1).
 //
 // This is the ONE reader of the declared width for a bare argument, and it is
 // deliberately narrow: only an INT64 carrier can be hiding an int4 width, and

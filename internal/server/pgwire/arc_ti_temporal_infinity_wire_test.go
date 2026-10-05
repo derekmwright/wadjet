@@ -27,7 +27,7 @@ import (
 // PostgreSQL 17.11's answer (re-measured when WADJET_PG_DSN names a server).
 //
 // At 8e681724 a binary timestamp parameter carrying an extreme was refused
-// 22023 at Bind (temporal r3), a binary date parameter carrying the int32
+// 22023 at Bind (the retired infinite-input refusal; see temporal r2), a binary date parameter carrying the int32
 // maximum was read as the year 5881610 and refused 22008 (the minimum
 // 22007), and the text 'infinity' was 22007.
 

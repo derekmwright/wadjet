@@ -42,7 +42,7 @@ func s4VectorTable(t *testing.T, table string, dim int) *DB {
 // FIXED_LEN_BYTE_ARRAY(N*4) leaf verbatim. `INSERT INTO t (v) VALUES ('[1]')`
 // answered "INSERT 1" and left a page whose body is 3 bytes where its header
 // promises 8 — the table unqueryable from then on — and `'[1,2]'`, the RIGHT
-// width, did exactly the same with 5 bytes. Round-2 review B2.
+// width, did exactly the same with 5 bytes. The earlier measurement B2.
 func TestAVectorLiteralIsExactlyTheDeclaredWidthAtEveryDoor(t *testing.T) {
 	ctx := context.Background()
 
@@ -177,7 +177,7 @@ func TestAVectorLiteralIsExactlyTheDeclaredWidthAtEveryDoor(t *testing.T) {
 // measured on a STRING literal (`'2147483648'::date`). The reachable shape is
 // an INTEGER literal cast: at de5bc970 `SELECT 3000000000::DATE` answered
 // -3543531-12-19, and -2147483649::DATE and 2147483647::DATE answered the SAME
-// date. Round-2 review B1.
+// date. The earlier measurement B1.
 //
 // PostgreSQL has no int-to-date cast at all (42846, "cannot cast type bigint to
 // date"), so wadjet's cast is a deliberate superset (ADR-0012 §5 (catalog: docs/adr/0012-divergences/)); inside a
@@ -201,7 +201,7 @@ func TestAnOutOfRangeCastRefusesAtTheDoor(t *testing.T) {
 		// The int32 extremes fit the carrier but lie past PostgreSQL's DATE
 		// range (4714-11-24 BC … 5874897-12-31): 22008 `date out of range`,
 		// the one range rule every temporal constructor applies (arc VL
-		// round 4). The range's own ends answer.
+		//). The range's own ends answer.
 		{`SELECT 2147483647::DATE`, "22008"},
 		{`SELECT (-2147483648)::DATE`, "22008"},
 		{`SELECT 2145042905::DATE`, ""},
@@ -348,8 +348,8 @@ func TestAnOutOfRangeCastRefusesAtTheDoor(t *testing.T) {
 // the shared oracle server carries no vector extension, and pgvector's
 // comparison operators are documented to RAISE on differing dimensions rather
 // than compare unequal — which would make it error where this engine answers.
-// The cells below assert THIS engine's behaviour only. Round-2 review P1,
-// round-3 review P4; ADR-0012 §5 (catalog: docs/adr/0012-divergences/) carries the same caveat.
+// The cells below assert THIS engine's behaviour only. The earlier measurement P1,
+// the earlier measurement P4; ADR-0012 §5 (catalog: docs/adr/0012-divergences/) carries the same caveat.
 func TestASetOperationOverTwoVectorWidths(t *testing.T) {
 	ctx := context.Background()
 	db, err := Open(ctx, Config{Store: objstore.NewMemStore(), Bucket: "s4"})

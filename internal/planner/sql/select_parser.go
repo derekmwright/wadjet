@@ -38,7 +38,7 @@ func newSelectParser(input string) *selectParser {
 // position; the parser's own account of the failure (`parsing WHERE:
 // unexpected token …`) stays reachable through Unwrap for a log, and never
 // reaches a client, because it carries no code and sqlerr.SentenceOf reads
-// the deepest error that does (arc PC round 3, B6).
+// the deepest error that does (arc PC, B6).
 type syntaxError struct {
 	code, msg string
 	// atEnd marks a failure at the end of the text parsed — which, for the
@@ -1202,7 +1202,7 @@ func (p *selectParser) parseValuesTableRef() (TableRef, error) {
 	if len(colAliases) > ncols {
 		// PostgreSQL's own message and class for the shape, verbatim: a
 		// VALUES list used as a table source is a "table" there, and too many
-		// column aliases is 42P10, not a syntax error (#613 round-1 P4).
+		// column aliases is 42P10, not a syntax error (#613 P4).
 		name := alias
 		if name == "" {
 			name = "*VALUES*"
@@ -4087,7 +4087,7 @@ func (p *selectParser) parseIntervalLiteral() (Node, error) {
 			// `ts + INTERVAL '2'` moved the instant by two days — the same
 			// silent-wrong-value class as the sub-second units #1005 closed,
 			// reached by a spelling that never gets as far as the unit table
-			// (#965 round 3). Nothing in the tree spelled it, so no query
+			// (#965). Nothing in the tree spelled it, so no query
 			// that answered changes its answer.
 			unit = "second"
 		}
@@ -4103,7 +4103,7 @@ func (p *selectParser) parseIntervalLiteral() (Node, error) {
 // the `INTERVAL '30 days'` literal and for a CAST of text to INTERVAL
 // (`CAST('1 day' AS INTERVAL)`, `'1 day'::interval`, a bound parameter), which
 // used to pass the text through uncast so `ts + CAST('1 day' AS INTERVAL)`
-// added ONE MILLISECOND (arc VL round 4, round-3 review N2). Anything else is
+// added ONE MILLISECOND (arc VL, the earlier measurement N2). Anything else is
 // 22007.
 func ParseIntervalText(s string) (*IntervalLit, error) {
 	parts := strings.Fields(s)

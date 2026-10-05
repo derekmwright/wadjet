@@ -15,7 +15,7 @@ import (
 )
 
 // TestIngesterHoldsPostgreSQLTemporalRange is the embedded ingester API's row
-// of the range table (arc VL round-4 review P2): a typed DATE or TIMESTAMP box
+// of the range table (arc VL measurement P2): a typed DATE or TIMESTAMP box
 // past PostgreSQL's range — an int32 day count, a time.Time, an int64 of
 // epoch milliseconds — is 22008 at Ingest and nothing is stored, the same
 // answer every SQL door gives. The writer's box normalisation asks the ONE

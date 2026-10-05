@@ -76,7 +76,7 @@ func CheckInt32LeafValue(colType TypeID, v any) error {
 // fails at the FLUSH instead, which happens per BUFFER, so one bad row takes a
 // batch of good ones with it and reports against a partition rather than
 // against the row that carried it — the argument #647 already made for DECIMAL
-// and #560 for DATE (round-1 review P2).
+// and #560 for DATE (case P2).
 //
 // A nil is not this function's business: presence is the schema's rule and
 // decomposeLeaf's, and the caller checks it first.
@@ -163,7 +163,7 @@ func int64LeafValue(colType TypeID, v any) (int64, error) {
 		// take a time.Time for any of them and store a millisecond count
 		// nobody asked for. ingest.checkType admits a time.Time for TIMESTAMP
 		// and DATE and for nothing else, and it is right to — a BIGINT column
-		// is a number, not an instant (round-2 review, the agreement gate's
+		// is a number, not an instant (the agreement gate's
 		// last numeric cell).
 		if colType != TypeTimestamp {
 			return 0, leafBoxError(colType, v)
@@ -275,7 +275,7 @@ func floatToInt32Leaf(colType TypeID, f float64, box any) (int32, error) {
 // Derek's rule ("checked when a value ENTERS the type, by cast or by write")
 // reaches the Go-box door too: db.NewIngester().Ingest with int32(65536) put a
 // number no PORT can be at REST, where the same value as text and the same
-// value through a CAST are both 22003 (review NT round 2, B2).
+// value through a CAST are both 22003 (measurement NT the earlier implementation, B2).
 func networkIntInRange(colType TypeID, n int64) (int32, error) {
 	if colType == TypePort || colType == TypeProtocol {
 		if lo, hi := NetworkIntBounds(colType); n < lo || n > hi {

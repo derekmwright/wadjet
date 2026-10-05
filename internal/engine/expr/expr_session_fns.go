@@ -153,7 +153,7 @@ func dateShift(args []any, subtract bool) any {
 	// A DATE shifted by whole days is a DATE (epoch days); every other
 	// argument — a TIMESTAMP, a text instant — is a TIMESTAMP (epoch
 	// milliseconds). The same rule shiftProducedTemporal names for the box
-	// and physical.funcReturnType for the declaration (arc VL round 3).
+	// and physical.funcReturnType for the declaration (arc VL).
 	if _, isDate := args[0].(civilDate); isDate {
 		return shiftDays(epochDaysOf(t), days)
 	}
@@ -189,7 +189,7 @@ func intervalShift(v any, iv IntervalValue, subtract bool) any {
 	// TIMESTAMP, whole days or not: the result is the TIMESTAMP box (epoch
 	// milliseconds) the declaration names. It used to render a whole day as
 	// DATE text under a DATE declaration — a value PostgreSQL prints with its
-	// midnight (arc VL round 3).
+	// midnight (arc VL).
 	return instantBox(addInterval(t, iv, subtract))
 }
 
@@ -248,7 +248,7 @@ func fnToDate(args []any) any {
 	if t.IsZero() {
 		return nil
 	}
-	// A DATE, boxed as a DATE column is: epoch days (arc VL round 3).
+	// A DATE, boxed as a DATE column is: epoch days (arc VL).
 	return dateBox(t)
 }
 
@@ -345,7 +345,7 @@ func parseUUIDHex(s string) []byte {
 // which is the evaluator the DAG reaches. `c_ipv4 = '10.0.0.1/32'` is the
 // address itself on the server and on the vectorized arm, and this copy read
 // it as no address at all, so the DAG answered 0 rows where the single arm
-// answered 1 (#627 round 2, B1).
+// answered 1 (#627, B1).
 func ipv4LitToInt64(s string) (int64, bool) {
 	return kernel.IPv4LitKey(s)
 }

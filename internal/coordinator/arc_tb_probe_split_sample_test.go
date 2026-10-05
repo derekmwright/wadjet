@@ -19,7 +19,7 @@ import (
 // of the probe's files and reads every other relation whole — so a sampled
 // build side, or a sampled IN / EXISTS / scalar subquery, was drawn once PER
 // TASK, and one table's rows were joined against three different samples
-// (#1411 review r2 P1: ~740 of 1000 keys answered a count PostgreSQL cannot
+// (#1411 measured case P1: ~740 of 1000 keys answered a count PostgreSQL cannot
 // produce; base 9420d256 the same). A statement with a TABLESAMPLE runs as one
 // task and draws each sample once.
 //

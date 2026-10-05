@@ -163,7 +163,7 @@ func (w *declWalk) lateralDualItemDecls(join *logical.Node) map[string]expr.Decl
 // derived table, a CTE, a sort or an aggregate answered nothing and every item
 // took the STRING default. `SELECT l.v FROM (SELECT id FROM lat_ord) u, LATERAL
 // (SELECT u.id AS v) l` carried the right values under OID 25, which is the
-// half of #1033 the issue was filed for, one position over (round-2 review,
+// half of #1033 the issue was filed for, one position over (,
 // P1/B2i).
 //
 // `EmittedColDecls` is the walk that answers for a Project — it types each

@@ -15,7 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-// ARC PW ROUND 2: the review's four blocking findings as gate rows, each
+// ARC PW: the measurement's four blocking findings as gate rows, each
 // measured on PostgreSQL 17.11 over the same pgconn calls (pinned in
 // arc_pw_param_types_r2_pins_test.go; with WADJET_PG_DSN the PostgreSQL half
 // is re-measured, and a pin that starts agreeing fails).

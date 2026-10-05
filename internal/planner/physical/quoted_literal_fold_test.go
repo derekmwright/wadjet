@@ -178,7 +178,7 @@ func TestQuotedLiteralIsUnknownInTheFold(t *testing.T) {
 // a non-constant arm, and it is not a reopening of the deferral: it is the
 // only reading under which the value survives. An integer declaration there
 // builds an integer vector and the fraction the evaluator produces is
-// truncated into it (round-1 review, B3). expr.fractionalLitTriggersFold and
+// truncated into it (B3). expr.fractionalLitTriggersFold and
 // its runtime twin expr.fracLitArmTriggersFold are the one place that is
 // decided. The wide-literal case keeps it too, for the reason
 // wadjet.TestWideNumericLiteralInAChoiceStaysFloat pins: past a double's ~17
@@ -201,11 +201,11 @@ func TestNumericLiteralKeepsItsOwnDeclarationInAFold(t *testing.T) {
 		// PostgreSQL types `COALESCE(i32, 1.5)` numeric, the integer
 		// declaration built an int32 vector, and the 1.5 the evaluator
 		// produced was TRUNCATED into it — `LEAST(c_i64, 1.5) * 3` answered 4
-		// for the server's 4.5 (round-1 review, B3). The scale comes from the
+		// for the server's 4.5 (B3). The scale comes from the
 		// literal's spelling; the precision from the column's range plus it.
 		{"a fractional literal beside an int column widens to the decimal rung",
 			"COALESCE(i32, 1.5)", expr.DeclDecimal(11, 1)},
-		// A fractional literal is PostgreSQL's numeric (arc VL round 5), so
+		// A fractional literal is PostgreSQL's numeric (arc VL), so
 		// two of them fold to the DECIMAL their spellings need.
 		{"two fractional literals fold to their numeric",
 			"GREATEST(0.5, 1.5)", expr.DeclDecimal(2, 1)},
@@ -258,7 +258,7 @@ func TestDeclaredFoldAgreesWithTheComparisonFold(t *testing.T) {
 				// CASE and Coalesce, and the two lists are not the same list.
 				// The #724 review found the gap by hand
 				// (`COALESCE(NULLIF(numeric, '…'), real)`), so it is enumerated
-				// here rather than left to the next reviewer.
+				// here rather than left to the next change.
 				"COALESCE(NULLIF(%s, '1.5'), %s)",
 				"COALESCE(GREATEST(%s, '1.5'), %s)",
 				"GREATEST(COALESCE(%s, '1.5'), %s)",

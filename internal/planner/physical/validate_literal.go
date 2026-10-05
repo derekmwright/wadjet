@@ -101,7 +101,7 @@ func checkLiteralTypes(node plansql.Node, scope *colScope) error {
 			// `COALESCE(numeric_col, 'abc')` and the macaddr/uuid/inet forms
 			// all raise there (measured 17.11). It ANSWERED here for all five
 			// network types on every arm — the last site outside the "one
-			// classification, every site" claim (round-2 review P-7).
+			// classification, every site" claim ( P-7).
 			if err := refuseLiteralAmong(scope, n.Args); err != nil {
 				return err
 			}
@@ -361,7 +361,7 @@ func refuseLiteralForType(typ parquet.TypeID, text string) error {
 	// A network PREFIX met by a bare-address column is 0A000 and not a syntax
 	// error, so it is asked first: `'10/8'` IS valid inet text, and calling it
 	// invalid input would be the wrong claim about PostgreSQL's own grammar
-	// (#627 round 2, B1).
+	// (#627, B1).
 	if err := expr.RefuseNetworkPrefixLiteral(typ, text); err != nil {
 		return err
 	}

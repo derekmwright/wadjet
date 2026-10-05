@@ -338,7 +338,7 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 	// Declared by what each side PUBLISHES. On this path a derived block's
 	// Project is a real operator, so a hint read from the scan below it
 	// described an EMPTY side by columns the full side never emits — eight
-	// columns for PostgreSQL's five (round-1 P2).
+	// columns for PostgreSQL's five (case P2).
 	hj.ProbeSchemaHint, hj.BuildSchemaHint = joinSideSchemas(node, hj.LeftKeys, hj.RightKeys,
 		sideBlockProjections(node), p.SubqueryOutputColumn)
 

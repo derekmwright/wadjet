@@ -620,7 +620,7 @@ type fragmentGroupKeys struct {
 //	             asserts that at plan time. Degrading to the text re-parse
 //	             there would answer the query by the pre-arc rule with no
 //	             signal at all, which is the silent branch this arc exists to
-//	             remove — so the task FAILS instead (#794 round 2, P4).
+//	             remove — so the task FAILS instead (#794, P4).
 func fragmentGroupKeyPlan(spec distributed.OpSpec) (*fragmentGroupKeys, error) {
 	if len(spec.GroupByResolve) == 0 {
 		return nil, nil // an older coordinator; the caller falls back

@@ -1376,7 +1376,7 @@ func (ev *mergeEvaluator) checkOnKeys(keys []onKeyPair) error {
 // A QUALIFIER is honoured rather than dropped. It used to be stripped —
 // `merged[ref.Column]` — so `SET n = other.k` read the source's k and stored
 // it, for a relation the statement does not have; PostgreSQL raises 42P01
-// (#678 review R2). An unqualified name must exist somewhere in the merged
+// (#678 measured case). An unqualified name must exist somewhere in the merged
 // namespace, or it is 42703 rather than the NULL it used to evaluate to.
 func (ev *mergeEvaluator) resolveRef(ref *plansql.ColRef) (parquet.Column, string, error) {
 	return ev.resolveRefIn(ref, true)
@@ -1711,12 +1711,12 @@ func dmlSourceDeclaredType(node plansql.Node, schema []parquet.Column, cat []exp
 //   - anything else: its DECLARED type (and whether that is a float, which
 //     decides the integer rounding), read by assignEvaluatedValue.
 //
-// Round 3 had one TABLE but two converters: VALUES / SET / MERGE read a
+// The earlier implementation had one TABLE but two converters: VALUES / SET / MERGE read a
 // constant through its literal text, INSERT … SELECT through the value the
 // SELECT list had already evaluated — a numeric literal there is a float, so
 // `SELECT 2.50` into TEXT stored `2.5` and `SELECT 2.5` into INTEGER stored 2,
 // and a quoted `'t'` into BOOLEAN stored on VALUES and was 42804 on INSERT …
-// SELECT (round-3 review B2 / P2). Now INSERT … SELECT classifies each select
+// SELECT (case B2 / P2). Now INSERT … SELECT classifies each select
 // item's AST through the same assignSourceOf (selectItemSources), and every
 // door calls check then assign on the result.
 type assignSource struct {
@@ -1728,7 +1728,7 @@ type assignSource struct {
 	declFloat bool
 	// declScale is a DECIMAL source's declared scale: a numeric constant
 	// evaluated inside an expression (`CASE … THEN 2.50 END`) arrives as a
-	// float box and is numeric at that scale (arc VL round 5).
+	// float box and is numeric at that scale (arc VL).
 	declScale int
 }
 
@@ -1877,7 +1877,7 @@ func (s assignSource) assign(v any, col parquet.Column) (any, error) {
 // already is: the numeric at its declared scale, so every door assigns what
 // the SELECT-list doors store from their DECIMAL vector (`2.50` into text, 3
 // into integer — numeric rounds half away from zero — never the double's
-// `2.5` / 2; arc VL round 5, round-4 review B2). Any other box is returned as
+// `2.5` / 2; arc VL, the earlier measurement B2). Any other box is returned as
 // it is.
 func decimalDeclaredText(v any, scale int) any {
 	switch x := v.(type) {
@@ -1914,9 +1914,9 @@ func assignmentClassified(t parquet.TypeID) bool {
 // every expression it evaluates — a VALUES cell, a SET value, a WHERE, a
 // MERGE clause — before it compiles it: the rule the SELECT binder applies to
 // every clause (physical.RefuseTemporalArithmetic, the date/timestamp `+` /
-// `-` pairs PostgreSQL has no operator for, 42883). Round 3 installed that
+// `-` pairs PostgreSQL has no operator for, 42883). The earlier implementation installed that
 // rule in the binder only, so the same expression was refused on SELECT and
-// INSERT … SELECT and stored on VALUES / UPDATE (round-3 review B3).
+// INSERT … SELECT and stored on VALUES / UPDATE (case B3).
 func dmlExpressionTyping(node plansql.Node, alias string, schema []parquet.Column) error {
 	return physical.RefuseTemporalArithmetic(node, alias, schema)
 }
@@ -2017,7 +2017,7 @@ func (ev *mergeEvaluator) value(text string, merged map[string]any, col parquet.
 	}
 	// A bare reference is read straight out of the merged row — but RESOLVED
 	// first, so an unknown name is 42703 and an unknown qualifier is 42P01
-	// rather than a NULL or another relation's value (#678 review R2), and
+	// rather than a NULL or another relation's value (#678 measured case), and
 	// then ASSIGNED, so an integer box reaching a DECIMAL column is the value
 	// and not the unscaled carrier (R1).
 	if ref, ok := unwrapDMLParens(node).(*plansql.ColRef); ok {
@@ -2203,7 +2203,7 @@ func (ev *mergeEvaluator) checkConditionType(node plansql.Node, matched bool) er
 	// INTERVAL, a polymorphic call and a scalar subquery all reach it, and a
 	// misplaced aggregate or window is its own class. The bespoke arms above
 	// stay because they resolve a MERGE-qualified name (`s.n`) that a plain
-	// column scope cannot (#1179 round 2).
+	// column scope cannot (#1179).
 	if err := physical.RefuseAggregateInADMLPredicate(node); err != nil {
 		return err
 	}
@@ -2276,7 +2276,7 @@ func lowercaseKeys(m map[string]any) map[string]any {
 //
 // srcType/srcKnown are the SOURCE expression's declared type (assignSource,
 // via assignSourceOf) — the ONE assignment-cast table every target arm below
-// reads (round-2 review B1/B2/P2): the Go box a DATE, a TIMESTAMP and a
+// reads (case B1/B2/P2): the Go box a DATE, a TIMESTAMP and a
 // plain INTEGER expression produce collide (int32/int64 day counts and
 // epoch-ms counts are indistinguishable at the box from a number that
 // happens to share the shape), so only the DECLARATION can tell
@@ -2294,7 +2294,7 @@ func assignEvaluatedValue(v any, col parquet.Column, srcFloat bool, srcType parq
 		// text (PostgreSQL's assignment cast through interval's output — the
 		// value INSERT … SELECT already stored); every other column is
 		// PostgreSQL's 42804. Both used to reach the writer's box validation
-		// and fail there with no SQLSTATE (arc VL round-4 review P1).
+		// and fail there with no SQLSTATE (arc VL measurement P1).
 		if col.Type == parquet.TypeString {
 			return iv.String(), nil
 		}
@@ -2326,7 +2326,7 @@ func assignEvaluatedValue(v any, col parquet.Column, srcFloat bool, srcType parq
 	case parquet.TypeBool:
 		// No target arm existed for BOOL at all: a computed value of any
 		// other shape reached ingest.checkType raw, "expected bool, got
-		// int64" with no SQLSTATE, where PostgreSQL raises 42804 (round-2
+		// int64" with no SQLSTATE, where PostgreSQL raises 42804 (
 		// review P2). The box IS the type here — a Go bool only ever comes
 		// from a genuinely boolean-typed expression — so no declared-type
 		// lookup is needed to tell an assignable value from a mismatched one.
@@ -2346,7 +2346,7 @@ func assignEvaluatedValue(v any, col parquet.Column, srcFloat bool, srcType parq
 			// The column's own native carrier (an IPv4 or MAC column's encoded
 			// int64, `SET ip = ip`): the writer takes the address TEXT, so the
 			// carrier is rendered — it reached ingest raw and failed there
-			// with no SQLSTATE (the arc VL round-3 assignment gate's cell).
+			// with no SQLSTATE (the arc VL assignment gate's cell).
 			if col.Type == parquet.TypeIPv4 {
 				return batch.FormatIPv4(uint32(v.(int64))), nil
 			}
@@ -2360,7 +2360,7 @@ func assignEvaluatedValue(v any, col parquet.Column, srcFloat bool, srcType parq
 			// A non-text box whose declared source is NOT this same network
 			// family (an INTEGER expression, a different address family, a
 			// UUID into an IPv4 column, …) has no PostgreSQL assignment cast
-			// into inet/macaddr/uuid — round-2 review P2's `1 + 1` into IPv4
+			// into inet/macaddr/uuid — the earlier measurement P2's `1 + 1` into IPv4
 			// case. A box the layer could not TYPE at all, or one whose
 			// source genuinely IS this column's own network family (an
 			// UPDATE/MERGE column-to-column move, whose native box is not
@@ -2385,7 +2385,7 @@ func nativeNetworkBox(v any, t parquet.TypeID) bool {
 // nonNumericAssignmentSource reports whether a declared source type PostgreSQL
 // refuses OUTRIGHT as an assignment into any numeric column family — DATE,
 // TIMESTAMP, a network family, UUID, or a container, none of which PostgreSQL
-// has an assignment cast from into a number (round-2 review B1: `(n bigint)
+// has an assignment cast from into a number (case B1: `(n bigint)
 // VALUES (DATE '2026-01-01')` stored 20454 where PostgreSQL raises 42804).
 //
 // TEXT is not on this list because a TEXT source never reaches these arms
@@ -2406,13 +2406,13 @@ func nonNumericAssignmentSource(t parquet.TypeID) bool {
 
 // dateBoxToDays reads a DATE-declared expression's box as its epoch-day
 // count: every DATE producer boxes an int64 day count (a column, a cast, a
-// date/time function, date arithmetic — arc VL round 3); the INSERT … SELECT
+// date/time function, date arithmetic — arc VL); the INSERT … SELECT
 // door hands its rows' rendered text.
 //
 // It never narrows on its own: a day count outside PostgreSQL's DATE range is
 // the ONE range rule's 22008 (expr.DateDaysInRange), asked before the int32
 // the carrier is. It used to be `int32(t)`, which stored `-5877585-08-22` for
-// `SET d = d + 2147483647` (arc VL round-3 review B1, #911's family).
+// `SET d = d + 2147483647` (arc VL measurement B1, #911's family).
 func dateBoxToDays(v any) (int32, error) {
 	var n int64
 	switch t := v.(type) {
@@ -2467,9 +2467,9 @@ func timestampBoxToMillis(v any) (int64, error) {
 // PARTITION KEY the same way for `CAST(x AS DATE)` as it does for a
 // `DATE '...'` literal assigned to the same column (#1252). Every DATE
 // producer boxes the int64 day count the matching COLUMN carries
-// (expr.producedTemporal, arc VL round 3).
+// (expr.producedTemporal, arc VL).
 //
-// The RULE, not only the box (round-2 review B1): a TIMESTAMP source
+// The RULE, not only the box (case B1): a TIMESTAMP source
 // truncates to its calendar day, matching PostgreSQL's `date(timestamp)`;
 // anything else this layer manages to TYPE (INTEGER, FLOAT, DECIMAL, BOOL,
 // TEXT, a network family, UUID) has no PostgreSQL assignment cast into DATE
@@ -2504,7 +2504,7 @@ func assignDateValue(v any, col parquet.Column, srcType parquet.TypeID, srcKnown
 	if err != nil {
 		// A box no DATE reading exists for — a float from `now() - now()`,
 		// say — is PostgreSQL's 42804, never a raw box handed to the writer
-		// to fail there with no SQLSTATE (round-2 review P1).
+		// to fail there with no SQLSTATE (case P1).
 		return nil, datatypeMismatchDeclared(v, col, srcType, srcKnown)
 	}
 	return dateStoreBox(days), nil
@@ -2536,7 +2536,7 @@ func timestampStoreBox(ms int64) any {
 // A DATE source answers that date's midnight, matching PostgreSQL's
 // `date::timestamp`; everything else this layer can TYPE besides TIMESTAMP
 // itself is refused 42804, the assignDateValue rule mirrored the other way
-// (round-2 review B1's `(ts) VALUES (2 + 3)` cell).
+// (case B1's `(ts) VALUES (2 + 3)` cell).
 func assignTimestampValue(v any, col parquet.Column, srcType parquet.TypeID, srcKnown bool) (any, error) {
 	if srcKnown && srcType == parquet.TypeDate {
 		days, err := dateBoxToDays(v)
@@ -2575,7 +2575,7 @@ func assignTimestampValue(v any, col parquet.Column, srcType parquet.TypeID, src
 //
 // A DECIDED source nonNumericAssignmentSource names — DATE, TIMESTAMP, a
 // network family, UUID, a container — is refused 42804 before any box is
-// read (round-2 review B1's `(dec numeric(10,2)) VALUES (DATE '2026-01-01')`
+// read (case B1's `(dec numeric(10,2)) VALUES (DATE '2026-01-01')`
 // cell, which stored 20454.00).
 func assignDecimalValue(v any, col parquet.Column, srcType parquet.TypeID, srcKnown bool) (any, error) {
 	if srcKnown && nonNumericAssignmentSource(srcType) {
@@ -2640,7 +2640,7 @@ func datatypeMismatch(v any, col parquet.Column) error {
 		col.Name, physical.PgTypeName(col.Type), dmlBoxTypeName(v))
 }
 
-// datatypeMismatchDeclared is datatypeMismatch's round-2 sibling: it names
+// datatypeMismatchDeclared is datatypeMismatch's declared-type counterpart: it names
 // the expression side from the SOURCE's declared type when one is known,
 // not from the Go box dmlBoxTypeName reads.
 //
@@ -2779,7 +2779,7 @@ func assignIntegerValue(v any, col parquet.Column, srcFloat bool, srcType parque
 // takes float32, float64, int, int32, int64).
 //
 // A DECIDED source nonNumericAssignmentSource names is refused 42804 before
-// any box is read (round-2 review B1's `(f double) VALUES (DATE …)` cell).
+// any box is read (case B1's `(f double) VALUES (DATE …)` cell).
 func assignFloatValue(v any, col parquet.Column, srcType parquet.TypeID, srcKnown bool) (any, error) {
 	if srcKnown && nonNumericAssignmentSource(srcType) {
 		return nil, datatypeMismatchDeclared(v, col, srcType, srcKnown)
@@ -2807,7 +2807,7 @@ func assignFloatValue(v any, col parquet.Column, srcType parquet.TypeID, srcKnow
 // assignment cast to text answers — `batch.FormatDate`/`FormatTimestamp`,
 // the one renderer every other door already uses — rather than falling to
 // the generic box switch below, which had no DATE/TIMESTAMP arm at all and
-// printed the raw day count or epoch-ms number instead (round-2 review B1's
+// printed the raw day count or epoch-ms number instead (case B1's
 // `(s text) VALUES (DATE '2026-01-01')` cell, and B2's `INSERT … SELECT
 // CURRENT_DATE` into a TEXT column, the same rule at the other call site).
 func assignTextValue(v any, _ parquet.Column, srcType parquet.TypeID, srcKnown bool) (any, error) {
@@ -2966,7 +2966,7 @@ func assignLiteralToColumn(text string, col parquet.Column) (any, error) {
 		// `invalid input syntax for type numeric: "'zzz'"` — a different type
 		// name, and the literal with its quotes in it — where every other
 		// door says `invalid input syntax for type integer: "zzz"`. One
-		// refusal has one sentence (round-1 review, N1).
+		// refusal has one sentence (N1).
 		//
 		// Only for a QUOTED literal: an unquoted number is a NUMBER and the
 		// cast's refusal is the right one for it, the same split #1141 makes
@@ -2977,7 +2977,7 @@ func assignLiteralToColumn(text string, col parquet.Column) (any, error) {
 			// identifier for everything else — so an INT64 column reported
 			// `invalid input syntax for type INT64`, a name no client can look
 			// up in pg_type and not the `bigint` this engine's other doors
-			// give for the same column (round-2 review).
+			// give for the same column ().
 			if st, known := netTextStatusOf(col.Type, inner); known {
 				if nerr := parquet.NetworkTextError(col.Type, inner, st); nerr != nil {
 					return nil, nerr
@@ -2985,7 +2985,7 @@ func assignLiteralToColumn(text string, col parquet.Column) (any, error) {
 			}
 			// int4in / int8in's own sentence, on the unquoted text: a bound
 			// `$1 = '2.5'` into an integer said `for type numeric: "'2.5'"`
-			// (round-4 review N4).
+			// (case N4).
 			if (col.Type == parquet.TypeInt32 || col.Type == parquet.TypeInt64) && sqlerr.StateOf(cerr) == "22P02" {
 				if n, perr := strconv.ParseInt(strings.TrimSpace(inner), 10, 64); errors.Is(perr, strconv.ErrRange) ||
 					(perr == nil && col.Type == parquet.TypeInt32 && (n < math.MinInt32 || n > math.MaxInt32)) {
@@ -3688,14 +3688,14 @@ func BuildDMLPredicate(target plansql.DMLTarget, schema []parquet.Column, sub *D
 	// INPUT function, exactly as a SELECT's WHERE reads it: `WHERE 'true'`
 	// removes every row, `WHERE 'no'` removes none, and `WHERE 'abc'` is
 	// 22P02. This clause never reached that walk (ADR-0031), so all three
-	// removed nothing (#1179 round 2).
+	// removed nothing (#1179).
 	node, err = plansql.CoerceBooleanNode(node)
 	if err != nil {
 		return nil, err
 	}
 	// A WINDOW is refused BEFORE the columns are resolved and an AGGREGATE
 	// AFTER — the server's own order, and the order the SELECT door keeps
-	// (round-2 review, P3-r2).
+	// (P3-r2).
 	if err := physical.RefuseWindowInADMLPredicate(node); err != nil {
 		return nil, err
 	}
@@ -3805,7 +3805,7 @@ type DMLAssignment struct {
 	constant any       // used when expr is nil
 	expr     expr.Expr // per-row evaluation
 	// src is the source expression as the one assignment function reads it
-	// (assignSourceOf): its declared type and float-ness (#699, round-2
+	// (assignSourceOf): its declared type and float-ness (#699, the earlier implementation
 	// review B1), or the typed-text reading. The compiled expr cannot carry
 	// any of it — expr.Expr is one method, Eval — and the BOX cannot decide
 	// it, because a DATE, a TIMESTAMP and a plain INTEGER collide there.
@@ -4225,7 +4225,7 @@ func convertUnquoted(s string, typ parquet.TypeID) (any, error) {
 		// their negations, any unique prefix, case- and space-insensitive —
 		// the reading a truth context already gives a quoted literal. It was
 		// strconv.ParseBool, which refused `'yes'`, `'no'` and `'off'` with no
-		// SQLSTATE (round-3 review P2) and took `'T'`/`'F'` spellings boolin
+		// SQLSTATE (case P2) and took `'T'`/`'F'` spellings boolin
 		// does not share with it.
 		if v, ok := plansql.ParseBoolText(s); ok {
 			return v, nil
@@ -4243,7 +4243,7 @@ func convertUnquoted(s string, typ parquet.TypeID) (any, error) {
 		// float4in / float8in's two refusals, classified: text naming no
 		// number is 22P02 and a magnitude the type cannot hold 22003. The raw
 		// strconv error crossed every door with no SQLSTATE (`'yes'` into a
-		// double precision column; arc VL round 4's door-diff table).
+		// double precision column; arc VL door-diff table).
 		bits := 64
 		if typ == parquet.TypeFloat32 {
 			bits = 32
@@ -4342,7 +4342,7 @@ func convertUnquoted(s string, typ parquet.TypeID) (any, error) {
 }
 
 // parseVectorLiteral is batch.ParseVectorText, pgvector's vector_in — the
-// one reader CAST(text AS VECTOR(n)) uses too (arc CW round 2).
+// one reader CAST(text AS VECTOR(n)) uses too (arc CW).
 func parseVectorLiteral(s string) ([]float32, error) {
 	return batch.ParseVectorText(s)
 }

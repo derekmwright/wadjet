@@ -14,7 +14,7 @@ import (
 )
 
 // TestRegistryDeclaredTypeIsTheProducedType is the census gate of arc VL
-// round 3: for every registered scalar function with a FIXED declaration it
+// the earlier implementation: for every registered scalar function with a FIXED declaration it
 // calls the kernel over a pool of sample arguments and checks that every value
 // it produces is the box its DECLARED type is carried in — a DATE is int64
 // epoch days, a TIMESTAMP int64 epoch milliseconds, a number a Go number, a

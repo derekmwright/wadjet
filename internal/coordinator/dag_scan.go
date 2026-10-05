@@ -494,7 +494,7 @@ func (c *Coordinator) dispatchScanFilterStage(
 		if op, ok := projectOpFromSpecs(stage.SecurityProjectExprs); ok {
 			t.Operators = append(t.Operators, op)
 			// Then the predicates the USER wrote. They must see the mask, not
-			// the stored column: before #859 round 2 they shared the slot
+			// the stored column: before #859 they shared the slot
 			// above and `WHERE bal > (SELECT MIN(bal) FROM t)` over a masked
 			// `bal` returned exactly the rows whose hidden value was positive.
 			if len(stage.PostSecurityFilterExprs) > 0 {

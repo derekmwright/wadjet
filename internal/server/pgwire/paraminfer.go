@@ -75,7 +75,7 @@ func (c *pgConn) inferenceContext() (context.Context, context.CancelFunc) {
 	// on `env.source_ip` or `env.protocol` decides nothing without it, so a
 	// deny that names one would not have matched here and the denied
 	// relation's column types would have gone back on the wire anyway
-	// (round-1 review P8).
+	// (case P8).
 	//
 	// The SAME expression `queryContext` attaches for a statement — one
 	// builder, one spelling, so the inference path and the statement path

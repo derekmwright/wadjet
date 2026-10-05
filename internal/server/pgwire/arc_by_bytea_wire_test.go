@@ -46,7 +46,7 @@ var byWireSteps = []byWireStep{
 	{name: "ins/simple", sql: `INSERT INTO pb VALUES (5, '\x6869'), (6, 'a\\b')`, simple: true},
 	{name: "copy", sql: `COPY pb (id, b) FROM STDIN`, copyIn: "7\t\\\\x6869\n8\thi\n"},
 	{name: "upd/binary-bytea", sql: `UPDATE pb SET b = $1 WHERE id = 6`, params: [][]byte{{0x5c}}, oids: []uint32{17}, formats: []int16{1}},
-	// Parameters into a comparison: parameters-pgwire#r11's binary bytes
+	// Parameters into a comparison: parameters-pgwire#r10's binary bytes
 	// holding a backslash, and the text forms.
 	{name: "cmp/binary-backslash", sql: `SELECT id FROM pb WHERE b = $1 ORDER BY id`, params: [][]byte{{0x00, 0xff, 0x5c}}, oids: []uint32{17}, formats: []int16{1}},
 	{name: "cmp/binary-hi", sql: `SELECT id FROM pb WHERE b = $1 ORDER BY id`, params: [][]byte{[]byte("hi")}, oids: []uint32{17}, formats: []int16{1}},
@@ -141,7 +141,7 @@ func byWireErr(err error) string {
 
 // TestArcBYByteaWireDoorsMatchPostgres is the wire half of #1501: a text bytea
 // parameter is read by byteain, a binary one carries its bytes untouched into
-// an assignment and a comparison (parameters-pgwire#r11), a bytea parameter is
+// an assignment and a comparison (parameters-pgwire#r10), a bytea parameter is
 // a bytea value (#r10), and the column reads back in both result formats.
 func TestArcBYByteaWireDoorsMatchPostgres(t *testing.T) {
 	ctx := context.Background()

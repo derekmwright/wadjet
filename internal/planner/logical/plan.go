@@ -35,7 +35,7 @@ type SubqueryColumnDecl struct {
 	IntWidth         int
 	// ElementType and Fields are a container column's shape — an ARRAY's
 	// or MAP's element, a ROW's fields — which a TypeID cannot say (arc CW
-	// round 2: a scalar subquery answering an ARRAY declared text on a
+	// the earlier implementation: a scalar subquery answering an ARRAY declared text on a
 	// zero-row result).
 	ElementType *parquet.Column
 	Fields      []parquet.Column
@@ -225,7 +225,7 @@ type Node struct {
 	// was declared STRING, and every reader above it fell to float64:
 	// `SELECT SUM(v) FROM (SELECT (SELECT c & 3 FROM u) AS v FROM t) s`
 	// declared OID 701 on all five arms where PostgreSQL declares bigint
-	// (#1018 round 5 review, P2).
+	// (#1018 measurement, P2).
 	//
 	// It is stamped ONCE per plan by physical.AnnotateScanColumns, the same
 	// pass that puts ScanColTypes on a Scan, so the walks read a FACT off the
@@ -395,7 +395,7 @@ type Node struct {
 	// input by NAME, so rewriting the position onto the expression produced an
 	// EXECUTION-time `key column "coalesce(…)" does not exist in the input
 	// schema`. The marker turns it into the plan-time refusal that says so
-	// (review round 1, B1).
+	// (measured case, B1).
 	MergedUsingOrdinalKey bool
 	// StarLiftedRefCols, on a JOIN node, names slots the LATERAL lowering
 	// materialized so a LIFTED correlated predicate could be evaluated — and
@@ -407,7 +407,7 @@ type Node struct {
 	// beside an equality it can key on) reads the column THERE. Dropping it
 	// answered zero rows; publishing it put a duplicate in `SELECT *`. These
 	// are the same slots under the first half of that rule only
-	// (ADR-0021 §1q, round 3).
+	// (ADR-0021 §1q, the earlier implementation).
 	StarLiftedRefCols []string
 	// LateralSubtree marks the node a DECORRELATED LATERAL's lowering built —
 	// the side of the join that carries the columns it MINTED.
@@ -416,7 +416,7 @@ type Node struct {
 	// a join-order pass may swap the children, and "which side minted this"
 	// has to survive that. Searching both sides for the slot's NAME instead
 	// found the OUTER relation's stored `__key_0` and dropped the user's
-	// column — the round-2 blocker in its third shape.
+	// column — the earlier implementation blocker in its third shape.
 	LateralSubtree bool
 	// LateralEmptyDefaults, on the same JOIN node, is what each output column
 	// of an UNGROUPED-aggregate lateral reads for an outer row the lateral
@@ -1212,7 +1212,7 @@ func injectColumnPolicies(n *Node, tableName string, policies []ColumnPolicy, sc
 		// where the DAG, which does not attach there, answered every row. The
 		// row set is arithmetic on the stored statistics, so a client that
 		// moves the constant reads the hidden column's range off it: a
-		// disclosure, not a path quirk (#859 round 5).
+		// disclosure, not a path quirk (#859).
 		restricted := make(map[string]bool, len(denySet)+len(maskMap))
 		for col := range denySet {
 			restricted[col] = true
@@ -1326,7 +1326,7 @@ func (n *Node) ScopeNames() []string {
 // (`FROM jp_i a`). PostgreSQL then hides the table name: in `FROM jp_i jp_j
 // JOIN jp_j jp_i`, `jp_i.v` is the SECOND table's column, and a scan that
 // still answered to its table name made `jp_i` name both relations (arc JP
-// round 2, P1). An alias setSubtreeAlias stamped from an enclosing derived
+// the earlier implementation, P1). An alias setSubtreeAlias stamped from an enclosing derived
 // table is not one — it is recorded in DerivedAliases too, and the body the
 // scan sits in still writes the table's own name.
 func (n *Node) userAliased() bool {

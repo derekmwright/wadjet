@@ -147,7 +147,7 @@ type colScope struct {
 	// elemTypes records the ELEMENT type of the ARRAY and MAP columns the
 	// scope was built from, keyed by bare column name, so a SUBSCRIPT —
 	// lowered to `element_at(container, i)` — can be typed by what it
-	// PRODUCES rather than by the container it reads (round-2 review,
+	// PRODUCES rather than by the container it reads (,
 	// P2-r2). Absent for a container whose element type the source does not
 	// declare, which leaves the subscript untyped rather than guessed.
 	elemTypes map[string]parquet.TypeID
@@ -400,7 +400,7 @@ func (s *colScope) merge(o *colScope) {
 	// sources declaring one container name with different element types leave
 	// the subscript untyped. A map that did not travel left the scope the
 	// WHERE check runs against empty, so the subscript rule could not fire at
-	// all (round-2 review, P2-r2).
+	// all (P2-r2).
 	for c, typ := range o.elemTypes {
 		if prev, seen := s.elemTypes[c]; seen && prev != typ {
 			delete(s.elemTypes, c)
@@ -444,7 +444,7 @@ func (s *colScope) clone() *colScope {
 // source's: `s."Id"` over a derived or LATERAL `s` publishing `"Id"`, beside
 // a base table `o` declaring `id`, was refused because `o`'s fold-equal `id`
 // counted as the declaration the spelling missed — for a relation the
-// qualifier does not name (arc JP round 4 review, N5; PostgreSQL answers,
+// qualifier does not name (arc JP measurement, N5; PostgreSQL answers,
 // and a plain join over the same derived table was refused too).
 func (s *colScope) refuseDelimitedMiss(ref *plansql.ColRef) error {
 	if plansql.FoldIdent(ref.Column) == ref.Column || s.exact[ref.Column] {
@@ -482,7 +482,7 @@ func (s *colScope) resolveRef(ref *plansql.ColRef) error {
 	col := strings.ToLower(ref.Column)
 	if ref.Table != "" {
 		// A DELIMITED qualifier is byte-exact, the way a delimited column is
-		// (#731 / round-0 B2). It fires only where the fold WOULD have
+		// (#731 / the earlier implementation B2). It fires only where the fold WOULD have
 		// resolved it and no FROM source declared those bytes, so a scope
 		// that lost a spelling cannot manufacture a refusal.
 		if plansql.FoldIdent(ref.Table) != ref.Table && !s.exactQuals[ref.Table] &&
@@ -527,7 +527,7 @@ func (s *colScope) resolveRef(ref *plansql.ColRef) error {
 			// depended on the plan shape. That is the same silent pick the
 			// bare-column rule below refuses, one level down: a container is a
 			// column, and the ambiguity is the container's, not the field's —
-			// which is why the message names the QUALIFIER (#769 round 2).
+			// which is why the message names the QUALIFIER (#769).
 			if s.srcCount[q] > 1 {
 				return sqlerr.New("42702", "column reference %q is ambiguous", ref.Table)
 			}
@@ -1109,7 +1109,7 @@ func (b *binder) checkExpr(expr plansql.Node, scope *colScope) error {
 	// asks the scope nothing: a TCP flag name that names no flag is a property
 	// of the statement's text, and it has to be the same answer on the DAG —
 	// where a stage's fragment compiles when a task RUNS — as in one process
-	// (#1018 round 6, B1). See validate_flag_names.go.
+	// (#1018, B1). See validate_flag_names.go.
 	if err := refuseUnknownFlagNames(expr); err != nil {
 		return err
 	}
@@ -1959,7 +1959,7 @@ func checkUngrouped(info *plansql.SelectInfo, from *colScope) error {
 	// judges. Without it `… GROUP BY (SELECT u.v) HAVING (SELECT u.v) > 50`
 	// was 42803 where PostgreSQL answers, because the clause reached the check
 	// in its unfolded spelling while the unfolded key is deliberately not
-	// registered (round-5 review, P1).
+	// registered (P1).
 	if err := g.check(g.asWritten(info.HavingExpr, info.HavingUnfoldedFrom)); err != nil {
 		return err
 	}
@@ -2344,7 +2344,7 @@ func (g *groupCheck) asWritten(unfolded plansql.Node, origin string) plansql.Nod
 // PostgreSQL matches the PARSED expression: `( SELECT u.v )`, `(select u.v)`
 // and — in a single-relation block — `(SELECT v)` are one term there, and
 // keying on the raw text made them three and judged the item ungrouped
-// (round-5 review, P1).
+// (P1).
 func (g *groupCheck) originKey(n plansql.Node) string {
 	c := plansql.CanonicalSubqueryTerms(n, g.unqualify)
 	if g.unqualify {
@@ -2457,7 +2457,7 @@ func exprOperands(node plansql.Node) []plansql.Node {
 // TCP_FLAG_MASK('BOGUS') …)`, the GROUP BY spelling of it and `SUM((SELECT
 // TCP_FLAG_MASK('BOGUS') …)) OVER ()` each answered ZERO ROWS on both wire
 // formats over an empty input where the same misspelling anywhere else raised
-// 22023 (#1018 round 7, B1). Set-operation arms, derived-table bodies and CTE
+// 22023 (#1018, B1). Set-operation arms, derived-table bodies and CTE
 // bodies are their own blocks and reach this function through validateBlock's
 // own recursion; a subquery NESTED in a subquery reaches it the same way.
 //
@@ -2708,7 +2708,7 @@ func walkExpr(node plansql.Node, refs *[]*plansql.ColRef, subs *[]string, calls 
 		// resolves an OVER term against the INPUT relation — an output alias
 		// is `column "a" does not exist` there, measured on 17.11 — which is
 		// the scope every caller of this walk already passes, so descending
-		// costs no concession (#1018 round 7, B1).
+		// costs no concession (#1018, B1).
 		walkExpr(n.Func, refs, subs, calls)
 		for _, pb := range n.PartitionBy {
 			walkExpr(pb, refs, subs, calls)

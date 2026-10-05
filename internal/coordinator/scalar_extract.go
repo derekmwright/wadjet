@@ -127,7 +127,7 @@ func scalarFromBatches(batches []*batch.RecordBatch, projection []dagplan.Output
 			if isContainerValue(v) {
 				// A projection that COMPUTES a container has no declaration
 				// here to spell its literal from; loud, never Go's text of the
-				// box (`a.v = [2024-01-10]` failed to parse, round-3 N5).
+				// box (`a.v = [2024-01-10]` failed to parse, the earlier implementation N5).
 				return "", false, noContainerLiteral()
 			}
 			return formatGoValue(v), true, nil
@@ -226,8 +226,8 @@ func firstScalarLiteral(batches []*batch.RecordBatch) (string, bool, error) {
 
 // arrayScalarLiteral spells a one-dimensional ARRAY value as the typed literal
 // the stage that reads it compiles back to the same array: its PostgreSQL text
-// cast to the element's array type, `CAST('{2024-01-10}' AS DATE[])` (round
-// 4). The DAG substituted an array-valued scalar subquery as Go's text of the
+// cast to the element's array type, `CAST('{2024-01-10}' AS DATE[])` (change
+// ). The DAG substituted an array-valued scalar subquery as Go's text of the
 // box (a parse error) or, through the raw path, as `null` — every comparison
 // against it then answered no row where the single-process path answered.
 // ok=false for an element with no castable name here (a nested array, a ROW).
@@ -268,7 +268,7 @@ func formatScalar(vec *batch.Vector, row int, typ parquet.TypeID) string {
 	case parquet.TypeDate, parquet.TypeTimestamp:
 		// A DATE or TIMESTAMP substitutes as a TYPED literal — a cast of its
 		// text — so the stage that compiles it declares it as the type it is
-		// (arc CW round 3). The bare day count / epoch milliseconds this sent
+		// (arc CW). The bare day count / epoch milliseconds this sent
 		// before boxed identically but declared bigint, and a container built
 		// over it (`CAST(ARRAY[(SELECT MAX(ts) …)] AS TEXT)`) rendered the
 		// number on the DAG where the single-process path, declaring from the
@@ -391,7 +391,7 @@ func (c *Coordinator) substituteScalarDependencies(ctx context.Context, stage da
 	}
 	// The same substitution for the predicates that run ABOVE the security
 	// projection. They are the slot a user predicate over a policed column
-	// lands in (#859 round 2), and a scalar subquery is exactly the kind of
+	// lands in (#859), and a scalar subquery is exactly the kind of
 	// predicate that ends up there — substitution could not push it down, so
 	// it stayed above the barrier and carries a `:scalar_N` placeholder.
 	if len(out.PostSecurityFilterExprs) > 0 {

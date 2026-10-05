@@ -193,7 +193,7 @@ func aggStageGroupKey(key string, e plansql.Node, child *logical.Node) (string, 
 		// absorbWindowArmProjection, the passes that decide whether any fragment
 		// materializes the alias at all.
 		//
-		// Round 1 of this arc inferred the answer from NODE KINDS and got it
+		// The earlier implementation of this arc inferred the answer from NODE KINDS and got it
 		// wrong three times in three different directions (#777's history is in
 		// ADR-0026 §4a). A key whose value no stage can name is REFUSED and
 		// routed instead — refuseUnstageableGroupKey condition (3).

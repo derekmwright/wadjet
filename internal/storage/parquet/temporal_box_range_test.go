@@ -12,7 +12,7 @@ import (
 // TestTemporalBoxRangeIsPostgreSQLs holds CheckLeafBox — the writer's own
 // box question, which the ingest boundary asks — to PostgreSQL's DATE and
 // TIMESTAMP range for every typed box a temporal column accepts (arc VL
-// round-4 review P2): one past either end is 22008, the end itself stores —
+// the earlier measurement P2): one past either end is 22008, the end itself stores —
 // and so do the carrier's two extremes, which are the infinite values
 // (DatePosInfinity …), while the integers beside them are 22008.
 func TestTemporalBoxRangeIsPostgreSQLs(t *testing.T) {

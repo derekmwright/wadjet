@@ -141,7 +141,7 @@ func TestAssignableToColumn(t *testing.T) {
 		// The whole NUMERIC family assigns, in every direction, because the
 		// statement door converts every cell through the engine's one
 		// assignment converter before the writer sees it — the same converter
-		// INSERT … VALUES uses (round-2 review B1/B2). PostgreSQL assigns all
+		// INSERT … VALUES uses (case B1/B2). PostgreSQL assigns all
 		// of these too, and `wadjet.TestBothWriteDoorsStoreTheSameNumber` and
 		// `TestADecimalSourceIsAssignedAtItsValue` compare the VALUE both
 		// doors store, pair by pair, against its measured answer.
@@ -153,7 +153,7 @@ func TestAssignableToColumn(t *testing.T) {
 		{"IntIntoPort", fqCol("a", parquet.TypeInt64), fqCol("b", parquet.TypePort), true},
 
 		// PostgreSQL's assignment casts into TEXT and across DATE/TIMESTAMP
-		// (arc VL round 3). These two were pinned as ADR-0012's recorded
+		// (arc VL). These two were pinned as ADR-0012's recorded
 		// divergence (42804 here) and now agree with PostgreSQL.
 		{"IntIntoString", fqCol("a", parquet.TypeInt64), fqCol("b", parquet.TypeString), true},
 		{"IPv4IntoString", fqCol("a", parquet.TypeIPv4), fqCol("b", parquet.TypeString), true},
@@ -173,7 +173,7 @@ func TestAssignableToColumn(t *testing.T) {
 		{"IntIntoIPv4", fqCol("a", parquet.TypeInt64), fqCol("b", parquet.TypeIPv4), false},
 		// BYTES into TEXT is PostgreSQL's assignment cast, its I/O conversion:
 		// 17.11 stores the bytea's `\x41` text, and so does this engine since
-		// arc BY round 2 (#1501; it refused here before).
+		// arc BY (#1501; it refused here before).
 		{"BytesIntoString", fqCol("a", parquet.TypeBytes), fqCol("b", parquet.TypeString), true},
 		{"RowFieldNameDiffers", row1, row2, false},
 		{"VectorWidthDiffers",

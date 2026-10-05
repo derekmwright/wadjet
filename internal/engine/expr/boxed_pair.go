@@ -70,7 +70,7 @@ const (
 	// as an address. Without this kind the fold sites compared that text —
 	// `GREATEST(c_ipv4, '10.0.0.1') = c_ipv4` counted 4916 rows where
 	// PostgreSQL's inet counts 4915, and `LEAST` counted 0 where it counts 2
-	// (round-3 review P-A). CIDR and IPv6 had their kinds since #565; MAC
+	// ( P-A). CIDR and IPv6 had their kinds since #565; MAC
 	// needs none, because its rendered form is fixed-width zero-padded hex,
 	// whose byte order IS its numeric one.
 	boxIPv4
@@ -78,8 +78,8 @@ const (
 	// the column stores as an int64 and ColRef.Eval boxes RAW, so a quoted
 	// literal beside it fell to compare(), which reads "aa:bb:cc:00:00:01" as
 	// the number ZERO — `c_mac IN (<any address>)` answered 0 on both DAG
-	// arms where the server and the single arm answer 1 (round-2 review P-2,
-	// round-3 review P-A's family). Its RENDERED form is fixed-width
+	// arms where the server and the single arm answer 1 ( P-2,
+	// the earlier measurement P-A's family). Its RENDERED form is fixed-width
 	// zero-padded hex, whose byte order IS its numeric one, so only the raw
 	// box needed a rule.
 	boxMAC
@@ -579,7 +579,7 @@ func classifyOperand(e Expr, b *batch.RecordBatch) (boxKind, bool) {
 		}
 		// A function whose VALUE is a DATE or TIMESTAMP is a temporal operand
 		// in the unit its box carries — the same kinds a column of that type
-		// gets (producedTemporal, arc VL round 3).
+		// gets (producedTemporal, arc VL).
 		if k, ok := temporalBoxKind(v, b); ok {
 			return k, true
 		}
@@ -861,7 +861,7 @@ func joinOperandKinds(args []Expr, b *batch.RecordBatch) (boxKind, bool) {
 		case k == boxDecimal || kind == boxDecimal:
 			// A DECIMAL arm keeps the composite's KIND decimal even when the
 			// fold's TYPE is wider. The two are different questions and
-			// collapsing them was #646 round-3's blocker: PostgreSQL's
+			// collapsing them was #646 blocker: PostgreSQL's
 			// `numeric ∪ float8` is float8, so the literal beside such a
 			// composite is coerced at the FLOAT rung (extremumArms.commonKind
 			// answers that, through the ladder) — but the VALUE this operand
@@ -1100,7 +1100,7 @@ func pairApplies(lk, rk boxKind, lText, rText string) bool {
 	// arms carry is deliberately absent here: `''` is the one unparseable
 	// string PostgreSQL names in its own error text
 	// (`invalid input syntax for type boolean: ""`), and guarding it out made
-	// `(k > 1) = ''` answer FALSE where the server raises 22P02 (round 2, P8).
+	// `(k > 1) = ''` answer FALSE where the server raises 22P02 (P8).
 	case lk == boxBool && rk == boxQuoted:
 		return true
 	case rk == boxBool && lk == boxQuoted:
@@ -1127,7 +1127,7 @@ func pairApplies(lk, rk boxKind, lText, rText string) bool {
 	// A DATE against a TIMESTAMP: two domains, epoch DAYS and epoch
 	// MILLISECONDS. PostgreSQL promotes the date to its midnight; compare()
 	// read the two numbers as one unit, so `DATE '2026-01-02' > TIMESTAMP
-	// '2026-01-01 10:00:00'` answered false (arc VL round 3).
+	// '2026-01-01 10:00:00'` answered false (arc VL).
 	case (lk == boxDate && rk == boxTimestamp) || (lk == boxTimestamp && rk == boxDate):
 		return true
 	}
@@ -1407,7 +1407,7 @@ func netKeyFor(k boxKind, literal bool) func(string) (string, bool) {
 // Two shapes reach it. `ColRef.Eval` hands GREATEST/LEAST the column's RAW
 // int64 — which is why comparing it against a quoted literal through
 // compare() read the literal as the address ZERO and counted 4916 rows where
-// PostgreSQL counts 4915 (round-3 review P-A) — while the paths that format
+// PostgreSQL counts 4915 ( P-A) — while the paths that format
 // their arguments first (FuncCall's wantsNetworkText rewrite) hand it the
 // rendered dotted quad. Both are the same address and both key the same way.
 func ipv4BoxKey(v any) (key string, shaped, parsed bool) {
@@ -1590,7 +1590,7 @@ func orderByKindsFold(lk, rk, lFold, rFold boxKind, lv, rv any, lText, rText str
 	// the DECIMAL arms below.
 	//
 	// It used to come after them, and the ordering was the whole of #646's
-	// round-4 blocker. A composite mixing a DECIMAL column with a FLOAT one
+	// the earlier implementation blocker. A composite mixing a DECIMAL column with a FLOAT one
 	// has kind boxDecimal and fold float8, so on every row the decimal arm won
 	// the pair took the DECIMAL arm and was read with the DECIMAL grammar at
 	// DECIMAL width — three wrong answers at once. `COALESCE(numeric, float8)

@@ -36,7 +36,7 @@ type Cast struct {
 	// opDecl is the OPERAND's declared shape source (operand_decl.go): a
 	// container operand renders and converts under the declaration the
 	// planner's walk gives it, never under what its box looks like (arc CW
-	// round 3). Nil for a Cast built outside the compiler.
+	//). Nil for a Cast built outside the compiler.
 	opDecl *operandDecl
 	// answer marks an integer CAST in a scalar subquery's body
 	// (plansql.CastNode.Answer): an integer operand of numeric arithmetic
@@ -94,7 +94,7 @@ func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
 	}
 	// A VECTOR destination converts (pgvector's array_to_vector / vector_in)
 	// and a CONTAINER operand is decided by the container table before any
-	// scalar arm can read its box (cast_container.go, arc CW round 2).
+	// scalar arm can read its box (cast_container.go, arc CW).
 	if dim, err, ok := VectorCastDim(dest); ok {
 		if err != nil {
 			panic(fatalEval{err})
@@ -102,7 +102,7 @@ func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
 		// pgvector converts an array of NUMBERS; any other element is its
 		// 42846, decided by the operand's DECLARED element — a DATE element's
 		// box is a day count, which the numeric reader below would take
-		// (arc CW round 3: `CAST(ARRAY[d] AS VECTOR(1))` was `[19724]`).
+		// (arc CW: `CAST(ARRAY[d] AS VECTOR(1))` was `[19724]`).
 		if col := e.containerShape(b, row, v); col != nil && col.Type == parquet.TypeArray &&
 			col.ElementType != nil && !numericLeaf(col.ElementType.Type) {
 			panic(fatalEval{sqlerr.New("42846", "cannot cast type %s to vector",
@@ -407,7 +407,7 @@ func (e *Cast) castStringRender(b *batch.RecordBatch, row int, v any) string {
 		return s
 	}
 	// A DOUBLE/REAL renders through the one float-text renderer (#1252,
-	// review r5 P1) rather than fmt.Sprint's shortest %v, which switches to
+	// measured case P1) rather than fmt.Sprint's shortest %v, which switches to
 	// exponent form once the exponent reaches the digit count:
 	// `CAST(1234567.0 AS TEXT)` stored "1.234567e+06" where PostgreSQL's
 	// float8out answers "1234567".
@@ -447,7 +447,7 @@ func boxedTextOperand(b *batch.RecordBatch, row int, operand Expr, v any) any {
 		// box loses the literal's own scale, so `CAST(2.50 AS TEXT)` read
 		// "2.5" where PostgreSQL's numeric spelling is "2.50" — only
 		// decimalType/evalDecimal carry the scale the literal was written
-		// with (review r5 B1's "second spelling", #1252).
+		// with (measured case B1's "second spelling", #1252).
 		if s, ok := decimalLitText(operand, b, row); ok {
 			return s
 		}
@@ -519,7 +519,7 @@ func stringOperand(v any) (string, bool) {
 // 42846 `cannot cast type integer to interval`). The text used to fall
 // through this switch unparsed, so `ts + CAST('1 day' AS INTERVAL)` —
 // declared a TIMESTAMP shift — added the text's leading number as ONE
-// MILLISECOND (arc VL round 4; round-3 review N2).
+// MILLISECOND (arc VL; the earlier measurement N2).
 func castToInterval(v any) any {
 	switch x := v.(type) {
 	case IntervalValue:

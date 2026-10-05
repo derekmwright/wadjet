@@ -86,7 +86,7 @@ func TestCTEIdentityTravelsWithTheValue(t *testing.T) {
 }
 
 // HOW OFTEN A STATEMENT READS A WITH ITEM decides whether it is shared: a
-// volatile item read ONCE is planned as any other block (#1531 round 3). The
+// volatile item read ONCE is planned as any other block (#1531). The
 // count may only err high.
 func TestStatementReadsOfAWithItem(t *testing.T) {
 	withTestOracle(t)

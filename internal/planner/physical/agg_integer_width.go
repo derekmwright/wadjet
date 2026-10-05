@@ -23,7 +23,7 @@ import (
 // like the (p,s) it has to RIDE the declaration through every Project, derived
 // table, CTE, set-operation arm, window slot and stage boundary, or the same
 // expression means two different things either side of a materialization
-// (#1018 round 5, B1).
+// (#1018, B1).
 //
 // Three values, not two: intWidthUnknown is "this declaration says nothing",
 // and its reader falls back to the carrier — which for a base column IS the
@@ -102,7 +102,7 @@ func declaredIntWidth(node plansql.Node, decls ColDecls) intWidth {
 		// annotateSubqueryColumnDecls and installed beside subqueryDecl. The
 		// carrier it comes back in cannot say it: `(SELECT c & 3 FROM u)` is
 		// an int4-domain value in an int64 box, and SUM over it is bigint
-		// where SUM over an int8 one is numeric (#1018 round 5 review, P2).
+		// where SUM over an int8 one is numeric (#1018 measurement, P2).
 		if decls.subqueryIntWidth == nil {
 			return intWidthUnknown
 		}
@@ -179,7 +179,7 @@ func declaredIntWidth(node plansql.Node, decls ColDecls) intWidth {
 		// here declares RetInt64 because every integer in this engine
 		// computes in an int64 (ADR-0024's widening), so `regexp_count`,
 		// whose PostgreSQL result is `integer`, declares it exactly as
-		// `bit_count`, whose PostgreSQL result is `bigint`, does. Round 3 of
+		// `bit_count`, whose PostgreSQL result is `bigint`, does. The earlier implementation of
 		// #966 read that declaration and made `SUM(regexp_count(…))` numeric
 		// where PostgreSQL declares bigint — twelve wire cells, grouped and
 		// windowed, text and binary.
@@ -230,7 +230,7 @@ func declaredIntWidth(node plansql.Node, decls ColDecls) intWidth {
 		// width and the two agree; for a MATERIALIZED column — a derived
 		// table's, a CTE's, a set-operation arm's, a window slot's — the
 		// carrier is the INT64 every integer computes in and says nothing,
-		// which is the whole of #1018's round-5 finding.
+		// which is the whole of #1018's the earlier implementation finding.
 		if decls.isFieldPath(n) {
 			f, ok := decls.field(n)
 			if !ok {

@@ -12,7 +12,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/engine/expr"
 )
 
-// The embedded door under an ADVANCING clock (#1566, round 2): the one
+// The embedded door under an ADVANCING clock (#1566, the earlier implementation): the one
 // accessor's clock moves on one second at every read, so any read but the
 // statement's stamp shows — in the count and in the answer. Every statement
 // below, a write included, reads the clock exactly once and answers

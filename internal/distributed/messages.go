@@ -807,7 +807,7 @@ type ProjectSpec struct {
 	// its element has no child (arc CW).
 	ElementType *parquet.Column `json:"element_type,omitempty"`
 	// Dimension is a computed VECTOR's width, for the same reason (arc CW
-	// round 2).
+	//).
 	Dimension int    `json:"dimension,omitempty"`
 	Expr      string `json:"expr"`
 	Name      string `json:"name"`

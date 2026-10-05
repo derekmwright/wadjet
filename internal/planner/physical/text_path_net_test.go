@@ -8,12 +8,12 @@ import (
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 )
 
-// THE TEXT PATH'S NET IS THE PREDICATE'S SHAPE (arc JP round 4, B3). The raw
+// THE TEXT PATH'S NET IS THE PREDICATE'S SHAPE (arc JP, B3). The raw
 // fallback evaluates `<column> <op> <constants>` and nothing else, so every
 // other shape — a column in a value position, NOT BETWEEN / NOT IN (read as
 // a column named `c NOT`), `<>`, a boolean combination, CASE, IS DISTINCT
 // FROM, a function or an expression on the subject side — is refused rather
-// than compared as text or dropped. Round 3's net inspected only a
+// than compared as text or dropped. the earlier implementation's net inspected only a
 // comparison's right side, and `q.qv BETWEEN o.total AND o.total + 20`
 // answered zero rows through it.
 func TestTheTextPathReadsOnlyAColumnAgainstConstants(t *testing.T) {

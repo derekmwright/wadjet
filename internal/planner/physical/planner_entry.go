@@ -291,7 +291,7 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 		// PostgreSQL sends -1 for.
 		rawWire, rawLens := declaredWireUnconstrainedDecimal(node), declaredStringLengths(node)
 		// POSITIONAL first, and it is the authority: a name is not an address
-		// when two output columns publish one (#732, round-1 review B2).
+		// when two output columns publish one (#732, the earlier measurement B2).
 		cs.SchemaHintWireUnconstrainedPos, cs.SchemaHintStringLengthPos =
 			publishedOutputDecls(p.outputProjection, rawWire, rawLens)
 		cs.SchemaHintWireUnconstrainedDecimal = republishDeclaredNames(p.outputProjection, rawWire)

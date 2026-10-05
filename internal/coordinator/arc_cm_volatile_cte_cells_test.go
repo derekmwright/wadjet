@@ -2,7 +2,7 @@
 
 package coordinator
 
-// cmCells is generated from the arc CM round-2 measurements: the SQL, PostgreSQL
+// cmCells is generated from the arc CM measurements: the SQL, PostgreSQL
 // 17.11's answer (tooling/arcs/cm_cte_materialize/cm_author: pg_raw.txt, pg2_raw.txt,
 // r2/pg4_raw.txt), and per arm what the gate asserts — PG (PostgreSQL's answer),
 // NOT (a pinned divergence: any answer but PostgreSQL's; it FAILS when the arm starts

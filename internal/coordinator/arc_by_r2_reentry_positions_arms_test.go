@@ -21,7 +21,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// Arc BY round 2 (#1501, review r1 B2): a BYTES value that re-enters SQL text
+// Arc BY (#1501, measured case B2): a BYTES value that re-enters SQL text
 // — a scalar subquery's answer, a correlated re-run's outer value — is
 // `CAST('\x<hex>' AS BYTES)`, and that spelling has to survive EVERY position
 // it can land in, not the window default alone. byR2Positions is the position
@@ -103,7 +103,7 @@ CREATE TABLE by_v (k bigint, b bytea);
 INSERT INTO by_v VALUES (1, '\x6869'), (2, '\x610062'), (3, '\x27'), (4, '\x5c'), (5, '\x');`
 
 // byR2Kept is the cells this engine answers differently from PostgreSQL 17.11
-// at c67ebf5b and at the round-2 tip alike — none is the re-entry spelling,
+// at c67ebf5b and at the earlier implementation tip alike — none is the re-entry spelling,
 // each is a position this engine has no reading for yet, recorded as an arc BY
 // filing candidate. ok=false means the cell must equal PostgreSQL. A kept cell
 // that starts agreeing FAILS: delete its line.

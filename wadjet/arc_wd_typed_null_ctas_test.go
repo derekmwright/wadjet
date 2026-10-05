@@ -11,12 +11,12 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 )
 
-// A CREATE TABLE … AS over a typed NULL (#1436 round 8). The arc's rule for a
+// A CREATE TABLE … AS over a typed NULL (#1436). The arc's rule for a
 // NULL literal under a CAST is scoped to the LAG / LEAD default: elsewhere a
 // bare NUMERIC cast of NULL keeps its planner-wide declaration, so a table
 // created from one stores what is later written into it exactly, as it did at
 // 8b00b112 (c1/c6/c8/c9: PostgreSQL stores 1.25, 2.5, 3.75 and 0.75); the
-// round-6 declaration made the column DECIMAL(38,0) and stored 1, 3, 4 and 1.
+// the earlier implementation declaration made the column DECIMAL(38,0) and stored 1, 3, 4 and 1.
 // A LAG over a bigint expression with a typed-NULL default is numeric and is
 // stored exactly past 2^53 (c15, PostgreSQL's 10000000000000001).
 //

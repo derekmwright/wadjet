@@ -991,7 +991,7 @@ func declaredProjectionDecl(proj logical.Projection, decls ColDecls, strictInt m
 // namedDecl is a column the walk below emitted under name, as the WHOLE
 // declaration: a DECIMAL's (p,s), a ROW's fields, an ARRAY's or MAP's
 // element. It is the one lookup declaredProjectionDecl's three name-resolving
-// arms share (arc CW round 2, B1): each used to rebuild the column from the
+// arms share (arc CW, B1): each used to rebuild the column from the
 // TypeID and the ROW fields alone, so an aggregate, window or scalar-subquery
 // output that IS an ARRAY — `MIN(av)` grouped, `MIN(ARRAY[x]) OVER ()` — was
 // declared ARRAY with no element, and a zero-row result told the client text
@@ -1311,7 +1311,7 @@ func namedArmScope(n *logical.Node) string {
 		// A DERIVED alias first: it is stamped by the ENCLOSING item — a
 		// derived table or a LATERAL whose body is `SELECT * FROM c` collapses
 		// onto the CTE reference's own root — so it is the one name the
-		// enclosing query can write for the arm (arc JP round 4, B2).
+		// enclosing query can write for the arm (arc JP, B2).
 		if cur.DerivedAlias != "" {
 			return cur.DerivedAlias
 		}

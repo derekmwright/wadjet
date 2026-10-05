@@ -49,9 +49,9 @@ func j1Arms(t *testing.T, ctx context.Context) []e3Arm {
 }
 
 // AN UNGROUPED AGGREGATE'S EMPTY-INPUT VALUE IS RIGHT FOR EVERY TYPE FAMILY,
-// BECAUSE IT IS AN EXPRESSION AND NOT A STAMPED VALUE (#977, arc J1 round 5).
+// BECAUSE IT IS AN EXPRESSION AND NOT A STAMPED VALUE (#977, arc J1).
 //
-// Round 4 carried the default as TEXT and wrote it into the padded row's
+// The earlier implementation carried the default as TEXT and wrote it into the padded row's
 // vector in place, through a hand-written type switch. That cannot be right
 // for a varlen or a container vector and it was not:
 // `CAST(COUNT(*) AS VARCHAR)` answered `2 | "" | "20"` — a MATCHED row emptied
@@ -70,8 +70,8 @@ func j1Arms(t *testing.T, ctx context.Context) []e3Arm {
 // TWO and Carol NONE, so `CASE WHEN COUNT(*) = 1 THEN NULL ELSE <item> END`
 // gives:
 //
-//   - Alice — a MATCHED row whose own value is NULL. Round 3 stamped these.
-//   - Bob   — a MATCHED row with a value. Round 4 emptied these.
+//   - Alice — a MATCHED row whose own value is NULL. The earlier implementation stamped these.
+//   - Bob   — a MATCHED row with a value. The earlier implementation emptied these.
 //   - Carol — the PAD, whose value is the item over an empty input: the
 //     aggregate is 0 there, so `CAST(COUNT(*) AS VARCHAR)` is '0'.
 //
@@ -206,7 +206,7 @@ func TestArcJ1TheEmptyInputDefaultIsRightForEveryTypeFamily(t *testing.T) {
 // its own name or under aliases, and every one of those is a column of the
 // answer under the name the query gave it.
 //
-// ROUND 5 PINNED THE DAG HERE AND THE PIN WAS BUILT ON THE HALF THAT COULD NOT
+// THE EARLIER IMPLEMENTATION PINNED THE DAG HERE AND THE PIN WAS BUILT ON THE HALF THAT COULD NOT
 // MOVE. The `lat()` helper spelled the INNER join only, and the two join kinds
 // failed DIFFERENTLY: the INNER one answered with the duplicate silently gone,
 // the LEFT one failed loudly (the join's empty-build task declared the block's
@@ -309,7 +309,7 @@ func TestArcJ1APublishedKeyIsAUserColumn(t *testing.T) {
 					if arm.coord != nil {
 						routed := arm.coord.LateralProjectionLocalRoutes() > routesBefore
 						// A LEFT lateral over a grouped arm routes single-process
-						// before stage planning since arc JP round 3
+						// before stage planning since arc JP
 						// (dagplan.ErrLateralIdentityDistributed): the
 						// lateral-projection refusal is then never asked, and the
 						// plan's routing is recorded by TestArcJP3's corpus.
@@ -337,7 +337,7 @@ func TestArcJ1APublishedKeyIsAUserColumn(t *testing.T) {
 	}
 }
 
-// THE NAMED SPELLING OVER THE SAME LATERAL IS NOT ROUTED (#984, arc J1 round 6).
+// THE NAMED SPELLING OVER THE SAME LATERAL IS NOT ROUTED (#984, arc J1).
 //
 // The refusal above is scoped to a STAR, and this is the cell that says so. A
 // SELECT list that NAMES its columns asks the gather for them by name and gets
@@ -394,7 +394,7 @@ func TestArcJ1ANamedListOverThatLateralStaysDistributed(t *testing.T) {
 }
 
 // A STAR OVER A LATERAL WHOSE PROJECTION IS NOT ITS STREAM IS RIGHT, AND THE
-// DISPOSITION IS THE CLAIM (#984, arc J1 round 6; retriggered by arc K3).
+// DISPOSITION IS THE CLAIM (#984, arc J1; retriggered by arc K3).
 //
 // Each cell was one of two wrong things at v0.18.59 — LOUD (`shuffle read: …
 // one stage's files describe one relation`) for the LEFT spelling, or a
@@ -504,7 +504,7 @@ func TestArcJ1AStarOverAnUnstageableLateralProjectionIsRouted(t *testing.T) {
 }
 
 // AN `ON` CONDITION OVER A DEFAULTED COLUMN IS EITHER RIGHT OR LOUD, NEVER
-// NULL WHERE POSTGRESQL SAYS 0 (arc J1 round 5).
+// NULL WHERE POSTGRESQL SAYS 0 (arc J1).
 //
 // PostgreSQL evaluates the LATERAL per outer row and applies the ON AFTER it,
 // so a row the subquery produced from NO INPUT still faces the condition, and

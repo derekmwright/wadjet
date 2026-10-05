@@ -11,7 +11,7 @@ import (
 )
 
 // The DECLARED shape of an operand, for the sites that read a container's box
-// (arc CW round 3, ADR-0045 §2): a CAST that renders or converts a container,
+// (arc CW, ADR-0045 §2): a CAST that renders or converts a container,
 // and every comparator that orders two of them. The box alone cannot say what
 // it holds — a TIMESTAMP element is an int64 of epoch milliseconds, a DATE
 // element an int32 or int64 day count, a DECIMAL element its text — so these
@@ -20,7 +20,7 @@ import (
 // projection's output vector), asked of the same AST against the input batch's
 // executed columns.
 //
-// Round 2 re-derived it instead, from a narrow operand walk (a column's vector,
+// The earlier implementation re-derived it instead, from a narrow operand walk (a column's vector,
 // a cast's element, a constructor of those): every element another expression
 // built — COALESCE, CASE, GREATEST, a scalar subquery, a subscript — had no
 // declaration and printed its box raw (`CAST(ARRAY[COALESCE(ts, …)] AS TEXT)`

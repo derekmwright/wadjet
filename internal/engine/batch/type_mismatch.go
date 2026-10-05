@@ -11,7 +11,7 @@ import (
 )
 
 // DurationNanoser lets a value from a package this one cannot import supply
-// its own DURATION carrier (arc CW round 6, B1): expr.IntervalValue is the
+// its own DURATION carrier (arc CW, B1): expr.IntervalValue is the
 // one example today — an INTERVAL literal's element, which declares no
 // column type anywhere else in this engine — implementing it rather than
 // this package naming that type. false is the same refusal an unrecognized

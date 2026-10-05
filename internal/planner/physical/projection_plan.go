@@ -50,7 +50,7 @@ func (p *Planner) buildFilter(ctx context.Context, node *logical.Node) (exec.Sou
 		// the DAG's single filter slot. `IN (SELECT id FROM t WHERE ssn =
 		// '***')` compared the stored SSN against the mask and answered no
 		// rows; `… WHERE bal > 300` over a masked `bal` answered exactly the
-		// rows above the threshold (#859 round 3).
+		// rows above the threshold (#859).
 		//
 		// The POLICY's own filter is exempt for the reason it always is: it
 		// is supposed to read the row as stored, and it sits BELOW the
@@ -378,7 +378,7 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 				// already pass: a scalar subquery inside a container (ARRAY[
 				// (SELECT MAX(ts) …)]) is declared by its own plan, which is
 				// what a CAST of that container renders its element under (arc
-				// CW round 3, expr/operand_decl.go).
+				// CW, expr/operand_decl.go).
 				compiled, compErr = expr.CompileWithColumnTypes(
 					astExpr, p.subqueryRunner, childColTypes.Types, p.subqueryDeclOption(), p.subqueryBudgetOption(), p.statementOption())
 			}
@@ -436,7 +436,7 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 		// arithmetic mode, and the compiled tree is told it here rather than
 		// deriving its own. Two walks over two representations of one
 		// expression is how a float came to be computed under an INT64
-		// declaration and TRUNCATED into the vector (round-1 review, B3);
+		// declaration and TRUNCATED into the vector (B3);
 		// expr.StampArithMode is the seam that makes it one decision.
 		if compiledExpr != nil {
 			expr.StampArithMode(compiledExpr, outType == parquet.TypeInt64)
@@ -456,7 +456,7 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 		}
 		// A computed ARRAY carries its element declaration to the operator,
 		// and ARRAY(subquery) must have one: without it the array would go
-		// out as TEXT in a Go rendering (arc PC round 2, B4).
+		// out as TEXT in a Go rendering (arc PC, B4).
 		if (outType == parquet.TypeArray || outType == parquet.TypeMap) && outDecl.Schema != nil && outDecl.Schema.ElementType != nil {
 			elem := *outDecl.Schema.ElementType
 			pc.ElementType = &elem
@@ -488,7 +488,7 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 				if _, err, isVec := expr.VectorCastDim(cn.TypeName); isVec {
 					// A modifier pgvector refuses (VECTOR(0), past 16000) is
 					// its typmod error, 22023 — decided by the type name before
-					// the width question arises (arc CW round 3, N3).
+					// the width question arises (arc CW, N3).
 					if err != nil {
 						return nil, nil, nil, err
 					}

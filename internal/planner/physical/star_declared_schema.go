@@ -108,7 +108,7 @@ func starOnlySourceScan(n *logical.Node) (*logical.Node, []string) {
 				// reader with a plan-time schema) is a relation like any
 				// other: a zero-row `SELECT * … WHERE <nothing matches>`
 				// over it publishes its columns, as PostgreSQL does (arc
-				// PC round 2, B3).
+				// PC, B3).
 				return nil, nil
 			}
 			return n, names
@@ -154,7 +154,7 @@ func (w *declWalk) starJoinDeclaredOutputSchema(root *logical.Node,
 	// does not emit: `(SELECT order_id, amount FROM kitem WHERE …)` declared
 	// TEN fields where PostgreSQL and the non-empty twin describe seven, with
 	// `s.id`, `product` and `qty` invented and a rename's alias missing
-	// (round-1 B3). That is #984's own defect living inside #978's answer.
+	// (case B3). That is #984's own defect living inside #978's answer.
 	published := sideBlockProjections(join)
 	probe := w.declaredJoinSchema(join.Children[0], nil, published, subqueryDecl)
 	build := w.declaredJoinSchema(join.Children[1], nil, published, subqueryDecl)

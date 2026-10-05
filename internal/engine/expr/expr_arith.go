@@ -592,8 +592,8 @@ func (e *UnaryOp) Eval(b *batch.RecordBatch, row int) any {
 				// negative value than positive — so this WRAPPED to itself and
 				// `-bigint_min` answered a NEGATIVE number under a right type.
 				// PostgreSQL raises `bigint out of range`, measured. Same
-				// refusal as absKeepsDomain's, one operator over (review round
-				// 0, P2/P3).
+				// refusal as absKeepsDomain's, one operator over (measured change
+				// cases P2/P3).
 				raiseBigintOutOfRange()
 			}
 			return -i

@@ -33,7 +33,7 @@ func (w *declWalk) declaredJoinSchema(n *logical.Node, want []string, published 
 	seen := make(map[string]bool)
 	// shadowed names a column a COMPUTING projection above has replaced: the
 	// side publishes the projection's value under that name, and the scan's
-	// own column of the name is not part of the relation (arc CW round 3,
+	// own column of the name is not part of the relation (arc CW,
 	// B2). Declaring it too — qualified, by the duplicate rule below — made
 	// the empty side of `(SELECT id, ARRAY[ts] AS x FROM st …) a` answer
 	// `a.x` with st's bigint `x` where the side with rows answers the array.
@@ -63,7 +63,7 @@ func (w *declWalk) declaredJoinSchema(n *logical.Node, want []string, published 
 			// (`SELECT i.v AS m, i.id AS m …`), and dropping the second
 			// declared four columns for a zero-row star over the lateral
 			// where the executed answer, and PostgreSQL, have five (arc JP
-			// round 4 review, B3). Only a name an EARLIER side of this walk
+			// the earlier measurement, B3). Only a name an EARLIER side of this walk
 			// already declared is skipped.
 			before := make(map[string]bool, len(seen))
 			for k := range seen {
@@ -169,7 +169,7 @@ func (w *declWalk) declaredJoinSchema(n *logical.Node, want []string, published 
 				decl := inferProjectionDeclType(pr.ASTExpr, parquet.TypeString, strictInt, colTypes)
 				// The WHOLE declaration — a container's element, a ROW's
 				// fields — as the materializing projection allocates it
-				// (declTypeParts), not its TypeID alone (arc CW round 3, B2).
+				// (declTypeParts), not its TypeID alone (arc CW, B2).
 				col := declTypeParts(decl)
 				col.Name, col.Nullable = pr.Alias, true
 				out = append(out, col)
@@ -181,7 +181,7 @@ func (w *declWalk) declaredJoinSchema(n *logical.Node, want []string, published 
 			// still carried it — and on an OUTER join the task whose build
 			// partition was EMPTY then wrote a file one column narrower than
 			// its siblings': `declares 3 columns where an earlier file of the
-			// same stage input declared 4` (ADR-0010, arc R2 round 2 B1).
+			// same stage input declared 4` (ADR-0010, arc R2 B1).
 			//
 			// The want is WIDENED rather than replaced: this Project's own
 			// items may also be wanted under their published names, and an
@@ -224,7 +224,7 @@ func (w *declWalk) declaredJoinSchema(n *logical.Node, want []string, published 
 			in := w.emittedColTypes(cur.Children[0])
 			// A container key or aggregate output carries its element / fields
 			// from the shape walk the aggregate's own output is declared by
-			// (arc CW round 3, B2): declared from its TypeID alone, the
+			// (arc CW, B2): declared from its TypeID alone, the
 			// null-padded side of an OUTER join or a LATERAL whose body
 			// produced no rows declared `ARRAY` with no element, which the wire
 			// sends as text, where the same side with rows declared the array.
@@ -304,7 +304,7 @@ func (w *declWalk) declaredJoinSchema(n *logical.Node, want []string, published 
 					// an earlier file of the same stage input declared 3`
 					// (ADR-0010), on every outer join over a join-bodied
 					// derived arm keyed on a name both of its relations
-					// publish (arc R2 round 2, B1).
+					// publish (arc R2, B1).
 					//
 					// With no alias the executor cannot qualify it either and
 					// DROPS it (the `case isDup:` arm), so the declaration
@@ -328,7 +328,7 @@ func (w *declWalk) declaredJoinSchema(n *logical.Node, want []string, published 
 				seen[lc] = true
 				col := parquet.Column{Name: emit, Type: t, Nullable: true}
 				// A stored container carries its element / fields (arc CW
-				// round 3, B2): the same shape inputColShapes reads off a scan.
+				// the earlier implementation, B2): the same shape inputColShapes reads off a scan.
 				if el, ok := cur.ScanColElems[bare]; ok && (t == parquet.TypeArray || t == parquet.TypeMap) {
 					e := el.Clone()
 					col.ElementType = &e

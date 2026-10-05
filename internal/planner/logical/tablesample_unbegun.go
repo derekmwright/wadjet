@@ -11,7 +11,7 @@ import (
 
 // dropUnbegunSamples takes the sampler off every TABLESAMPLE scan whose rows
 // no answer can read: a scan below a Filter with a constant-false (or NULL)
-// conjunct, or below a LIMIT 0 (#1411 review r1 B4).
+// conjunct, or below a LIMIT 0 (#1411 measured case B4).
 //
 // PostgreSQL checks a sample's percentage when the sample scan BEGINS — its
 // first fetch — and its planner never begins these: a constant-false WHERE or

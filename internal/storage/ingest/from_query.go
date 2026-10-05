@@ -335,7 +335,7 @@ func reclaimPendingObjects(ctx context.Context, cat *catalog.Catalog, pending []
 // assignment cast from text, and a quoted LITERAL, which it does type from
 // the target, is AssignableFromUnknownLiteral's question, not this one.
 //
-// This is the ONE table (arc VL round 3): INSERT … SELECT asks it per column
+// This is the ONE table (arc VL): INSERT … SELECT asks it per column
 // from the plan's declared output, and INSERT … VALUES, UPDATE … SET and
 // MERGE ask it per cell or clause from the expression's declared type before
 // a row is read — so one source × target pair answers one way on every door.
@@ -378,7 +378,7 @@ func assignmentCast(from, to parquet.TypeID) bool {
 }
 
 // AssignableFromUnknownLiteral is the same question for a source read AS an
-// unknown-typed literal — since arc VL round 4 only a call the registry
+// unknown-typed literal — since arc VL only a call the registry
 // declares TEXT for a network or UUID value (a bare quoted literal is read by
 // the target's input function on every door, wadjet's assignSource).
 // PostgreSQL types an unknown FROM the target and coerces it with that type's

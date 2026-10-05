@@ -20,7 +20,7 @@ import (
 type ArrayLitExpr struct {
 	Elements []Expr
 	// cc moves an element that is itself an array into the elements' common
-	// shape (choice_container.go, arc CW round 5): `ARRAY[a, b]` of a
+	// shape (choice_container.go, arc CW): `ARRAY[a, b]` of a
 	// numeric(5,2)[] and a numeric(9,4)[] declares numeric(9,4) leaves.
 	cc *containerChoice
 	// decl is the constructor's own declaration (operand_decl.go), and elem
@@ -128,7 +128,7 @@ type FuncCall struct {
 	// (typedArgPositions). formatDecimalLitArgs must not rewrite one of
 	// these to its literal text: the function's OWN declaration says the
 	// position is a NUMBER, regardless of whether the function as a whole
-	// "wants text" for its other arguments (round 8, #1252 — the guard keys
+	// "wants text" for its other arguments (#1252 — the guard keys
 	// on the parameter's declared type, never on "text-input function").
 	// nil when every argument is text, same convention as vecTypedArgs.
 	typedArgs map[int]bool
@@ -205,7 +205,7 @@ func (e *FuncCall) formatTemporalArgs(b *batch.RecordBatch, args []any) {
 	// a cast (#340, #273, #544), a clock function, date arithmetic, a choice
 	// over them — and producedTemporal is the one place that names it, so a
 	// string function reads the value's text rather than its epoch digits
-	// whatever produced it (arc VL round 3).
+	// whatever produced it (arc VL).
 	for i, a := range e.Args {
 		if s, ok := renderTemporalBox(a, b, args[i]); ok {
 			args[i] = s
@@ -244,7 +244,7 @@ func (e *FuncCall) formatNetworkArgs(b *batch.RecordBatch, row int, args []any) 
 // formatTemporalArgs and formatNetworkArgs already make for a boxed DATE or
 // network column: `2.50 || 'x'` and `CONCAT(2.50, 'x')` read Lit.Val, the
 // literal's float64 box for arithmetic, and answered "2.5x" where
-// PostgreSQL's numeric spelling is "2.50x" (review r5 B1's "second
+// PostgreSQL's numeric spelling is "2.50x" (measured case B1's "second
 // spelling", #1252). decimalLitText is the shared renderer; a DECIMAL
 // COLUMN or a computed decimal expression already boxes as its rendered
 // text from Eval() and needs no rewrite.
@@ -257,7 +257,7 @@ func (e *FuncCall) formatNetworkArgs(b *batch.RecordBatch, row int, args []any) 
 // integer 2 into the Go string "2", and fnSubstr's own #1169 rule — decide
 // the two-argument form's second operand is a REGEX PATTERN when it is a
 // string, a character position when it is a number — then read "2" as a
-// pattern that does not match "abcdef" and answered NULL (round 8, #1252):
+// pattern that does not match "abcdef" and answered NULL (#1252):
 // a DAG stage recompiles this projection through the per-row Eval path
 // where the single-process pipeline's constant fold uses the vectorized
 // kernel instead, which formatDecimalLitArgs never touches, so only the DAG
@@ -305,7 +305,7 @@ func (e *FuncCall) resolveTemporalArgs(b *batch.RecordBatch, row int, args []any
 		// A non-column producer — a CAST (#340), a clock function, date
 		// arithmetic, a choice over temporal arms — boxes its unit the way a
 		// column does and loses it at exactly the same point; producedTemporal
-		// names it, by the same rule for every producer (arc VL round 3).
+		// names it, by the same rule for every producer (arc VL).
 		// Without it YEAR(CAST(d AS DATE)) read 9505 days as 9505 seconds and
 		// answered 1970 — #319 reached through the cast.
 		if _, isCol := a.(*ColRef); !isCol {
@@ -518,7 +518,7 @@ func (e *FuncCall) Eval(b *batch.RecordBatch, row int) any {
 		// rather than being duplicated.
 		e.formatNetworkArgs(b, row, args)
 		// A bare DECIMAL LITERAL has the same gap again: Lit.Eval's float64
-		// box loses the literal's own scale (review r5 B1, #1252).
+		// box loses the literal's own scale (measured case B1, #1252).
 		e.formatDecimalLitArgs(b, row, args)
 	}
 	if e.wantsNetworkText {

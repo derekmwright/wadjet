@@ -58,7 +58,7 @@ func castTemporalText(src any, kind castTemporalKindT) (any, bool) {
 // whitespace is trimmed, and `inf` / `infinity` / `nan` are VALUES in every
 // case spelling. strconv.ParseFloat takes those, but it is Go's literal
 // grammar, not strtod, in two places that answer where PostgreSQL refuses,
-// so the float destinations refuse them here (#1411 review r1 B3):
+// so the float destinations refuse them here (#1411 measured case B3):
 //
 //   - a `_` digit separator: '1_0' read as 10 and '1e1_0' as 1e10, where
 //     float4in / float8in raise 22P02 (numeric and the integers take `_`

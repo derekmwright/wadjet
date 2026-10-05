@@ -259,14 +259,14 @@ type queryMeta struct {
 	// policyEnforced records that a row or column security policy shaped this
 	// query's plan. The SQL-text dispatch guard reads it through
 	// Scheduler.PolicedQuery, because a dispatcher may publish under a
-	// context that never carried the mark (#859 round 3).
+	// context that never carried the mark (#859).
 	policyEnforced bool
 	mergeInfo      *logical.MergeInfo // non-nil for probe-split queries needing merge
 	// declared is the PLAN-TIME output schema, for the zero-row result this
 	// door has no batch to read one from. `dagplan.GatherOutputSchema`
 	// describes a GATHER stage, and a one-stage plan has none, so without
 	// this every zero-row SELECT came back from the async door with no
-	// columns at all while the other three doors described it (#1008 round 2).
+	// columns at all while the other three doors described it (#1008).
 	declared []parquet.Column
 	// prebuiltTasks, if non-nil for a given stage, supplies the publish loop's
 	// task list instead of calling createTasksForStage. Set by the shuffle path
@@ -492,7 +492,7 @@ func New(cfg Config, cat *catalog.Catalog, nc *nats.Conn, js jetstream.JetStream
 	c.scheduler.SetWorkerRegistry(c.workers)
 	// The SQL-text dispatch guard asks the coordinator's own per-query record
 	// rather than the dispatching context, which a dispatcher may have
-	// derived from context.Background() (#859 round 3).
+	// derived from context.Background() (#859).
 	c.scheduler.PolicedQuery = c.queryIsPoliced
 	// …and the planner option a re-planning worker must plan under, stamped
 	// at the same choke point (#1223).
@@ -1290,7 +1290,7 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 			return c.runUnbuildableStageLocal(ctx, queryID, logicalPlan, planStr, start, err)
 		}
 		// And a join residual whose stage re-spelling would read both of the
-		// sides it compares from ONE arm (arc DC round 5): emitted, EXISTS
+		// sides it compares from ONE arm (arc DC): emitted, EXISTS
 		// answered no rows and NOT EXISTS every row. The single-process
 		// pipeline binds each leaf through its own arm.
 		if errors.Is(err, dagplan.ErrResidualSidesMergedDistributed) {
@@ -1302,14 +1302,14 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 		if errors.Is(err, dagplan.ErrPolicedWindowUnderJoinDistributed) {
 			return c.runPolicedWindowLocal(ctx, queryID, logicalPlan, planStr, start, err)
 		}
-		// And a window above a LATERAL join (arc LT round 2): the DAG binds
+		// And a window above a LATERAL join (arc LT): the DAG binds
 		// its key to the outer occurrence; the single-process pipeline
 		// answers PostgreSQL's rows.
 		if errors.Is(err, dagplan.ErrWindowOverLateralDistributed) {
 			return c.runWindowOverLateralLocal(ctx, queryID, logicalPlan, planStr, start, err)
 		}
 		// And a correlated LATERAL whose arm shares a column name with another
-		// relation (arc JP round 3): the DAG re-spells the body's names onto
+		// relation (arc JP): the DAG re-spells the body's names onto
 		// its scan stream and a lost qualifier binds the other relation's
 		// column. The single-process pipeline runs the body as written.
 		if errors.Is(err, dagplan.ErrLateralIdentityDistributed) {
@@ -1317,7 +1317,7 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 		}
 		// An authorization refusal is not a planning narrative: it reaches
 		// the client as the decision's own sentence, the same one the
-		// FROM-list denial on this connection carries (round-1 P1).
+		// FROM-list denial on this connection carries (case P1).
 		if refusal, ok := authorizationRefusal(err); ok {
 			return nil, refusal
 		}
@@ -3763,7 +3763,7 @@ func (c *Coordinator) SubmitSQL(ctx context.Context, sql string) (queryID string
 	// The PLAN's own declaration of this statement's columns, taken before the
 	// stages are built because that is the only thing a ZERO-ROW result on
 	// this door can be described from: `GetQueryResults` reads its columns off
-	// the gathered batches, and there are none (#1008 round 2). It is the same
+	// the gathered batches, and there are none (#1008). It is the same
 	// walk the embedded door's `Plan.OutputSchema` carries, so the four doors
 	// describe one statement with one list.
 	declaredOut := planner.DeclaredOutputSchema(logicalPlan)
@@ -3772,7 +3772,7 @@ func (c *Coordinator) SubmitSQL(ctx context.Context, sql string) (queryID string
 		// This door runs ONE pipeline task over the logical plan (below);
 		// the stage list only decides a probe split, which a LATERAL whose
 		// arm shares a name with another relation does not take (arc JP
-		// round 3). Run it as one task rather than refuse it.
+		//). Run it as one task rather than refuse it.
 		c.localLateralIdentity.Add(1)
 		c.logger.Info("stage DAG refused the plan, running it as one pipeline task",
 			"query", queryID, "refusal", err)
@@ -3793,7 +3793,7 @@ func (c *Coordinator) SubmitSQL(ctx context.Context, sql string) (queryID string
 	// the probe's files and reads every other relation whole, so a sampled
 	// relation would be drawn once PER TASK — a build side, an IN / EXISTS /
 	// scalar subquery — and the tasks' answers would join different samples
-	// of one table (#1411 review r2 P1). One task draws each sample once.
+	// of one table (#1411 measured case P1). One task draws each sample once.
 	if canProbeSplit && plansql.HasTablesample(sql) {
 		canProbeSplit = false
 	}
@@ -4033,7 +4033,7 @@ func (c *Coordinator) GetQueryResults(ctx context.Context, queryID string) (res 
 	}
 
 	// AN EMPTY COLUMN LIST IS NEVER AN ANSWER, ON THIS DOOR TOO
-	// (sqlerr.EmptyResultColumns, #1008 / #1010 round 2).
+	// (sqlerr.EmptyResultColumns, #1008 / #1010).
 	//
 	// This is the FOURTH place a result set is assembled — `SubmitSQL` is its
 	// own entry and this function reads the columns off the gathered batches,
@@ -4106,7 +4106,7 @@ func (c *Coordinator) GetQueryResults(ctx context.Context, queryID string) (res 
 
 	// Apply probe-split merge if needed (same as ExecuteSQL path).
 	//
-	// A MERGE FAILURE IS THE ANSWER ON THIS DOOR TOO (#1002 round 2). The
+	// A MERGE FAILURE IS THE ANSWER ON THIS DOOR TOO (#1002). The
 	// merge is what applies the query's ORDER BY over the workers' partials,
 	// and it refuses `0A000` when it cannot — a key that does not resolve, or
 	// partials that do not describe one relation (ADR-0026 §8a). This site
@@ -4143,7 +4143,7 @@ func (c *Coordinator) GetQueryResults(ctx context.Context, queryID string) (res 
 	if len(declared) == 0 {
 		// The PLAN's declaration, which is what a zero-row result on this
 		// door has instead of a batch: `GatherOutputSchema` describes a
-		// GATHER stage and a one-stage plan has none (#1008 round 2).
+		// GATHER stage and a one-stage plan has none (#1008).
 		declared = meta.declared
 	}
 	return &SQLResult{

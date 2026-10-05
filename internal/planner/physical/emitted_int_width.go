@@ -25,7 +25,7 @@ import (
 // because there the CALL was still visible in the AST. The width has to ride
 // the declaration through every Project, derived table, CTE, set-operation
 // arm, window slot and join the way a DECIMAL's (p,s) already does (#1018
-// round 5, B1).
+// the earlier implementation, B1).
 //
 // An ABSENT entry means the declaration says nothing, and every reader falls
 // back to the carrier — which for a base column IS the catalog's storage
@@ -221,7 +221,7 @@ func (w *declWalk) emittedColIntWidthUncached(n *logical.Node) map[string]intWid
 				// materializes in — so `MIN(BITWISE_AND(int4,3)) OVER ()`
 				// claimed int8 and its SUM went out numeric where PostgreSQL
 				// says bigint. The same walk the grouped spelling's
-				// aggArgIntWidth now takes (#1018 round 5 review, P1).
+				// aggArgIntWidth now takes (#1018 measurement, P1).
 				if we.InputExpr != nil {
 					if _, bare := we.InputExpr.(*plansql.ColRef); !bare {
 						if w := declaredIntWidth(we.InputExpr, in); w != intWidthUnknown {
@@ -289,7 +289,7 @@ func (w *declWalk) setOpArmIntWidths(n *logical.Node) [][]intWidth {
 // every reader above it made its SUM numeric — where PostgreSQL 17.11 answers
 // `integer` for the MIN (measured: `min(id & 3)`, `max(id & 3)`,
 // `min(regexp_count(name,'a'))`, grouped and `OVER ()`) and `bigint` for its
-// SUM (#1018 round 5 review, P1). `declaredIntWidth` already knew that
+// SUM (#1018 measurement, P1). `declaredIntWidth` already knew that
 // expression's width; this arm simply asks it, which is what the ColRef arm
 // does one level down.
 func aggArgIntWidth(agg logical.AggExpr, in ColDecls) (intWidth, bool) {

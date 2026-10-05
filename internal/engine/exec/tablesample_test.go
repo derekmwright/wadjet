@@ -52,7 +52,7 @@ func drainSampled(t *testing.T, src Source) ([]uint32, error) {
 	}
 }
 
-// THE SAMPLE IS DRAWN FROM THE ROWS THE SCAN SELECTS (#1411 review r1 B1).
+// THE SAMPLE IS DRAWN FROM THE ROWS THE SCAN SELECTS (#1411 measured case B1).
 //
 // A DELETE keeps the batch's Len physical and drops the deleted rows from
 // Sel. The sampler redrew from 0..Len-1, so BERNOULLI (100) returned a

@@ -89,7 +89,7 @@ type comparisonTyper struct {
 	// joinKeys is set for a JOIN's ON clause, where two plain COLUMNS of a
 	// text/typed pair become hash-join keys: that path failed on three arms
 	// (#615's key-type error) and answered zero rows on the shuffled one at
-	// base, so no text reading is kept for it (arc BR round 2).
+	// base, so no text reading is kept for it (arc BR).
 	joinKeys bool
 	// decls is the scope's declarations, for the temporal-arithmetic rule's
 	// DECLARED operand types (temporalArithmetic).
@@ -148,7 +148,7 @@ func isTypedLiteral(n plansql.Node) bool {
 }
 
 // textConversionAnswers is the MEASURED per-pair table for text against a
-// typed operand (arc BR round 2, br_codex/corpus.json text*/, base 260fc569):
+// typed operand (arc BR, br_codex/corpus.json text*/, base 260fc569):
 // the pair is kept where the base engine had ONE conversion that answered the
 // same on all five arms — a value compared with its own rendering matched all
 // 20 rows everywhere — and refused where it did not.
@@ -466,7 +466,7 @@ func (c *comparisonTyper) concatOperands(n *plansql.BinaryOp) error {
 // number minus a date or a timestamp, and the sum of two temporal values.
 // Each answered a NUMBER here — the epoch count plus the operand, under no
 // temporal declaration — and the two execution paths typed that number
-// differently (arc VL round 3's census: `MAX(c_ts) + 0` answered
+// differently (arc VL census: `MAX(c_ts) + 0` answered
 // 1.772532e+12 on one arm and 1.7e+12 on the DAG). `date ± integer`,
 // `date - date`, `timestamp - timestamp` and any INTERVAL shift keep their
 // meaning (binOpTemporalType). A side typed by neither the statement's
@@ -571,8 +571,8 @@ func (c *comparisonTyper) textArithmetic(n *plansql.BinaryOp) error {
 // — `date + unknown` is 42725, and a literal the resolution reads as a DATE,
 // a TIMESTAMP or an INTERVAL is refused here when its text is not one, as
 // PostgreSQL refuses the constant while it analyses the statement. Before arc
-// VL round 5 arithOperand called the quoted side SQL's unknown and let the
-// pair through, and the kernel read the literal's leading number (round-4
+// VL arithOperand called the quoted side SQL's unknown and let the
+// pair through, and the kernel read the literal's leading number (
 // review B3: `DATE '…' + '1.5'` stored 20516.5).
 func (c *comparisonTyper) unknownTemporal(n *plansql.BinaryOp) (expr.UnknownTemporal, error) {
 	lText, lUnknown := unknownOperand(n.Left)
@@ -646,7 +646,7 @@ func (c *comparisonTyper) arithOperand(n plansql.Node) (parquet.TypeID, bool) {
 // included (`1 = ANY(text[])`, `'x'::text = ANY(bigint[])`). The text
 // conversions textConversionAnswers keeps and the unquoted-literal superset
 // were measured for DIRECT comparisons, not for an element read out of an
-// array at run time, so neither extends to this form (arc PC round 3: the
+// array at run time, so neither extends to this form (arc PC: the
 // element pair was not checked at all, and a stored bigint[] against text
 // answered false where the base engine and PostgreSQL raise 42883). An
 // array whose element this layer cannot type — an ARRAY[…] of constants

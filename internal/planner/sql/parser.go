@@ -478,7 +478,7 @@ func parseSelectStatement(stmt, body string) (*ParsedQuery, error) {
 	// A STAR NEEDS A RELATION. `SELECT *` with no FROM clause is
 	// `SELECT * with no tables specified is not valid` on PostgreSQL 17.11,
 	// SQLSTATE 42601; this engine answered NULL for it, in the SELECT list and
-	// as a scalar subquery alike (`SELECT (SELECT *) FROM t`) — round-2
+	// as a scalar subquery alike (`SELECT (SELECT *) FROM t`) — the earlier implementation
 	// review, N3.
 	if err := refuseStarWithNoRelation(info); err != nil {
 		return nil, err
@@ -495,7 +495,7 @@ func parseSelectStatement(stmt, body string) (*ParsedQuery, error) {
 	// (fromless_scalar.go), so any pass that edits a spec before this line has
 	// its edit discarded — which is what happened to the merged-key binding,
 	// and a RIGHT `JOIN … USING` window key went back to the left arm and
-	// answered wrong values on all five arms (review round 2, B1-r2; repair
+	// answered wrong values on all five arms (measured case, B1-r2; repair
 	// measured by that review). The binding rewrites the NODE as well as the
 	// spec now, and it runs again HERE so a spec rebuilt from a node it could
 	// not reach is bound too. Running it twice is the no-op
@@ -513,7 +513,7 @@ func parseSelectStatement(stmt, body string) (*ParsedQuery, error) {
 
 	// A WINDOW function in a WHERE or a JOIN condition is 42P20, and the
 	// server refuses it BEFORE it resolves names — so this runs here, where
-	// both planner entries reach it ahead of any binding (#1179 round 2).
+	// both planner entries reach it ahead of any binding (#1179).
 	if err := RefuseWindowInARowFilteringClause(info); err != nil {
 		return nil, err
 	}
@@ -739,7 +739,7 @@ type SelectColumn struct {
 	// GROUP BY term AS WRITTEN, so `SELECT (SELECT u.v) … GROUP BY (SELECT
 	// u.v)` is covered and `SELECT v … GROUP BY (SELECT u.v)` is 42803 — two
 	// verdicts the unfold collapses into one by making both sides read `u.v`
-	// (round-5 addendum, round-3's c16).
+	// (additional case, the earlier implementation's c16).
 	UnfoldedFrom string
 }
 
@@ -1321,7 +1321,7 @@ func lexParseCreateTable(sql string, l *lexer) (*ParsedQuery, error) {
 	// reaches it is the natural mistake now that `CREATE TABLE … AS` exists:
 	// `CREATE TABLE t (a INT64) AS SELECT 1` reported SUCCESS over an empty
 	// table, having discarded the query. PostgreSQL 17.11 answers
-	// `syntax error at or near "AS"` (measured); round-2 review P1.
+	// `syntax error at or near "AS"` (measured); the earlier measurement P1.
 	if tail := l.nextToken(); tail.typ != TokenEOF {
 		if tail.typ == TokenKWAs {
 			return nil, sqlerr.New("42601",

@@ -25,7 +25,7 @@ import (
 // reader above it fell to float64: `SELECT SUM(v) FROM (SELECT (SELECT c & 3
 // FROM u) AS v FROM t) s` declared OID 701 on all five arms and both wire
 // formats where PostgreSQL declares bigint, and the int8, bare-int8-column and
-// COUNT(*) forms declared 701 where PostgreSQL declares numeric (#1018 round 5
+// COUNT(*) forms declared 701 where PostgreSQL declares numeric (#1018
 // review, P2). A float64 accumulator over a wide bigint drops digits past 2^53,
 // which is the class ADR-0024 exists to prevent.
 //

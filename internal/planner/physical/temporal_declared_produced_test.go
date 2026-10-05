@@ -14,13 +14,13 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// TestTemporalArithmeticDeclaresWhatItProduces is arc VL round 3's
+// TestTemporalArithmeticDeclaresWhatItProduces is arc VL
 // declared == produced gate for the OPERATOR forms: for every spelling, the
 // declaration (DeclaredTypeOfNode) and the value the compiled expression
 // produces agree — a DATE declaration comes with a DATE box (int64 epoch
 // days) holding PostgreSQL's value, a TIMESTAMP one with a TIMESTAMP box.
 //
-// The spellings are the round-2 review's second spellings of round 1's
+// The spellings are the earlier measurement's second spellings of the earlier implementation's
 // finding: the operand of `date ± n` judged by its DECLARED type — a cast, a
 // nested sum, an integer column, a clock function — never by whether it is a
 // bare number literal; and date arithmetic's own result reaching a parent

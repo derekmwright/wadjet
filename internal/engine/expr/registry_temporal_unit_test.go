@@ -11,10 +11,10 @@ import (
 )
 
 // TestTemporalRegistryEntriesProduceTheirDeclaredUnit is the UNIT half of the
-// census (round-3 review P1): TestRegistryDeclaredTypeIsTheProducedType checks
+// census (case P1): TestRegistryDeclaredTypeIsTheProducedType checks
 // that a DATE- or TIMESTAMP-declared kernel boxes an int64, and an int64 is
 // what BOTH units are carried in — a DATE kernel boxing epoch MILLISECONDS
-// passed it (the reviewer's to_date / from_iso8601_date mutations). Here every
+// passed it (the recorded to_date / from_iso8601_date mutations). Here every
 // temporal-declared registry entry is evaluated on a KNOWN instant and its
 // value must equal that instant's encoding in the declared unit: epoch days
 // for DATE, epoch milliseconds for TIMESTAMP. An entry this table does not

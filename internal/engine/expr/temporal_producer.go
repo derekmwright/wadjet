@@ -24,7 +24,7 @@ import (
 // and date arithmetic's own DATE result was a unit-less number to its parent:
 // `CURRENT_DATE + 1 - 1 - CURRENT_DATE` answered 18694, because the outer
 // minus read the right operand's text as the number 2026, and
-// `year(DATE '2026-01-01' + 1)` answered 1970 (arc VL round 3).
+// `year(DATE '2026-01-01' + 1)` answered 1970 (arc VL).
 //
 // The answer is the producer's DECLARATION: a registry function's fixed
 // return type, a cast's destination, a column's type, and for the composite

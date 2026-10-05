@@ -384,7 +384,7 @@ func aggregateStageOutputs(s *Stage) (groupKeys, aggOuts map[string]string) {
 // answers PostgreSQL's `-5 … 0`. The binary spellings of the same value
 // (`g * -3`, `0 - g`) were already right, because their own arms consult
 // `decls` for each operand and reach the aggregate's INPUT through a different
-// route; the unary one had nothing to consult (#851 round 2).
+// route; the unary one had nothing to consult (#851).
 //
 // The type comes from the aggregate's own INPUT, which is where a bare key's
 // value comes from, and is added only for a name the stage does not already
@@ -481,7 +481,7 @@ func stageAggregateDecls(stage *Stage, decls physical.ColDecls) (physical.ColDec
 	}
 	// A container aggregate output's ELEMENT rides with it, so an expression
 	// over it (`CAST(MIN(arr) AS TEXT[])`) declares what the local path
-	// declares — the element, and a multi-dimensional value's depth (round 4).
+	// declares — the element, and a multi-dimensional value's depth ().
 	elems := make(map[string]parquet.Column, len(decls.Elems))
 	for k, v := range decls.Elems {
 		elems[k] = v

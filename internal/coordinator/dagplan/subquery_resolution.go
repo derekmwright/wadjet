@@ -199,7 +199,7 @@ func (p *StagePlanner) resolveSubqueryAST(ctx context.Context, node plansql.Node
 			// A failure with a SQLSTATE stands where the answer would have
 			// and is raised when a row evaluates it (deferredFailure). An
 			// authorization refusal is the statement's answer wherever the
-			// subquery sits, and is parked (#1411 review r1; the producer
+			// subquery sits, and is parked (#1411 measured case; the producer
 			// fallback in walkStages takes the same rule).
 			if d, ok := deferredFailure(err, false); ok {
 				return d
@@ -273,11 +273,11 @@ func (p *StagePlanner) resolveSubqueryAST(ctx context.Context, node plansql.Node
 			// the failure stands where the boolean would have and is raised
 			// when a row evaluates it (deferredFailure) — never when the
 			// subquery sits in an arm no row reaches, which parking it as the
-			// statement's answer did (#1411 review r3 B1). Swallowing it
+			// statement's answer did (#1411 measured case B1). Swallowing it
 			// shipped the filter, and every task failed with "EXISTS
-			// subquery requires a SubqueryRunner" and no SQLSTATE (review r2
+			// subquery requires a SubqueryRunner" and no SQLSTATE (measured case
 			// B1). An AUTHORIZATION refusal is the decision's own sentence
-			// wherever the subquery sits (ADR-0034 item 6, round-1 review
+			// wherever the subquery sits (ADR-0034 item 6, the earlier measurement
 			// P1) and is parked.
 			if d, ok := deferredFailure(err, true); ok {
 				return d
@@ -370,7 +370,7 @@ func (p *StagePlanner) resolveSubqueryAST(ctx context.Context, node plansql.Node
 	// is split into conjuncts BEFORE this walk; `OR` and `NOT` cannot be
 	// split, so `… WHERE d.id < 2 OR EXISTS (…)` shipped verbatim and every
 	// task failed with "EXISTS subquery requires a SubqueryRunner"
-	// (round-1 review B2). Walking the tree is what makes the rule ADR-0021
+	// (case B2). Walking the tree is what makes the rule ADR-0021
 	// §2b states — an uncorrelated EXISTS is a query-wide constant — true of
 	// the predicate rather than of one shape of predicate.
 	//
@@ -421,7 +421,7 @@ func (p *StagePlanner) resolveSubqueryAST(ctx context.Context, node plansql.Node
 // `CASE WHEN id > 5 THEN EXISTS (…) ELSE true END` raises the subquery's
 // error only if some row has id > 5, and an arm no row reaches never does.
 // Parking the failure as the statement's answer instead raised it from every
-// arm (#1411 review r3 B1).
+// arm (#1411 measured case B1).
 //
 // A conjunct that reads no row is PostgreSQL's one-time filter, evaluated
 // once before any row: gateDeferredFailure raises it there.
@@ -739,9 +739,9 @@ func scalarToLiteral(v any, typ parquet.TypeID, typed bool) plansql.Node {
 }
 
 // ArrayScalarLiteral spells a scalar subquery's ARRAY value as the typed
-// literal a stage compiles back to the same array (arc CW round 4). It is
+// literal a stage compiles back to the same array (arc CW). It is
 // expr.ArrayValueLiteral — the speller the correlated re-run's outer literal
-// shares (round 5) — over a one-column result schema.
+// shares () — over a one-column result schema.
 func ArrayScalarLiteral(v any, schema []parquet.Column) (plansql.Node, bool) {
 	if len(schema) != 1 {
 		return nil, false

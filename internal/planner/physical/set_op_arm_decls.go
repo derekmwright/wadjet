@@ -259,7 +259,7 @@ func projectArmDecls(n *logical.Node, in ColDecls, quals []string) ColDecls {
 	// shapes below describe the projection's INPUT, so a container the
 	// projection COMPUTES (`ARRAY[2] AS pa`) had no element here, and an arm
 	// forwarding it declared a bare ARRAY the stage could not allocate
-	// (round 4).
+	// ().
 	outShapes := map[string]parquet.Column{}
 	put := func(name string, d expr.DeclType) {
 		lc := strings.ToLower(strings.TrimSpace(name))
@@ -416,7 +416,7 @@ func projectionArmDecl(proj logical.Projection, decls ColDecls, strictInt map[st
 			// A container column keeps its element / fields: an arm that
 			// forwards a derived table's ARRAY declared a bare ARRAY, and the
 			// stage allocated a vector with no element to write it into
-			// (round 4 — the one-ordering gate's `column` operand under
+			// ( — the one-ordering gate's `column` operand under
 			// UNION on the DAG).
 			if col, ok := declColumn(expr.DeclType{ID: c.Type, Schema: &c}); ok {
 				return expr.DeclType{ID: c.Type, Schema: &col}, true

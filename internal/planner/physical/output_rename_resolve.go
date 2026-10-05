@@ -179,7 +179,7 @@ func resolveRenameSource(name string, child *logical.Node, forGather bool) strin
 // matched neither `i.id` nor `id`, and the resolver's qualifier strip bound
 // the OUTER relation's `id` — every LATERAL body publishing a name the outer
 // side also publishes read the outer value on the DAG, whatever its key (arc
-// JP round 2; `SELECT i.id AS id` answered right). An item written without a
+// JP; `SELECT i.id AS id` answered right). An item written without a
 // qualifier (`SELECT k, v FROM lt_i i`) is the one relation's column and is
 // qualified here (the caller) the way `i.k` already is.
 func lateralUnaliasedItem(n *logical.Node, bare string) *logical.Projection {

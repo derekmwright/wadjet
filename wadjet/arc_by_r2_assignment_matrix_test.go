@@ -15,7 +15,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 )
 
-// The assignment matrix of arc BY round 2 (#1501, review r1 B1): a BYTES value
+// The assignment matrix of arc BY (#1501, measured case B1): a BYTES value
 // — a BYTES column, CAST(… AS BYTES), decode() — assigned to a TEXT, a
 // VARCHAR(n), a BYTES and an integer column through every write door. PostgreSQL
 // 17.11 assigns bytea to the string types by its I/O conversion (bytea_output
@@ -295,7 +295,7 @@ func TestArcBYR2BytesAssignmentMatrix(t *testing.T) {
 
 // TestArcBYR2ByteaFunctionArgumentIsByteain: a quoted literal as the bytea
 // argument of encode / get_byte / set_byte is read by byteain, as PostgreSQL
-// 17.11 coerces it (review r1 P2). At c67ebf5b and 714098e5 an even-length hex
+// 17.11 coerces it (measured case P2). At c67ebf5b and 714098e5 an even-length hex
 // text was read as the bytes it spells (`encode('6869', 'hex')` answered 6869)
 // and `\x…` as its characters.
 func TestArcBYR2ByteaFunctionArgumentIsByteain(t *testing.T) {

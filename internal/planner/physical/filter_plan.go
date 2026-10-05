@@ -27,7 +27,7 @@ func (p *Planner) buildFilterOp(pred logical.Predicate, scope *logical.Node, out
 	// any other: the text path reads it as a column called `1` (loud) or
 	// returns nothing for it (the filter dropped — right only for a true
 	// constant), and the shape net below refuses what it cannot read
-	// (arc JP round 4).
+	// (arc JP).
 	if pred.ASTExpr == nil && pred.Raw != "" {
 		if node, err := plansql.ParseExpression(pred.Raw); err == nil && node != nil && constantPredicate(node) {
 			pred.ASTExpr = node
@@ -80,9 +80,9 @@ func (p *Planner) buildFilterOp(pred logical.Predicate, scope *logical.Node, out
 	// (`j.k = o.k - 0` in a LATERAL nested inside another, whose `o` is two
 	// levels out) was compared as the STRING "o.k - 0": `invalid input
 	// syntax for type bigint` for an integer key and zero rows, silently,
-	// for a text one (arc JP round 3). Loud beats plausible.
+	// for a text one (arc JP). Loud beats plausible.
 	//
-	// THE NET IS THE PREDICATE'S SHAPE, not its operator (arc JP round 4, B3):
+	// THE NET IS THE PREDICATE'S SHAPE, not its operator (arc JP, B3):
 	// the text path evaluates exactly `<column> <op> <constants>` — a
 	// comparison, [NOT] BETWEEN, [NOT] IN over a list, [NOT] LIKE, IS [NOT]
 	// NULL — and nothing else. A column anywhere but the subject (a BETWEEN

@@ -476,7 +476,7 @@ func TestRenderBinaryNumericResourceExhaustionShape(t *testing.T) {
 	binary.BigEndian.PutUint16(raw[6:8], dscale)
 	binary.BigEndian.PutUint16(raw[8:10], 1) // one real digit; everything else implicit zero
 
-	// A few thousand decodes — not the reviewer's literal 65535-parameter
+	// A few thousand decodes — not the recorded literal 65535-parameter
 	// Bind message, which is a wire-parsing/allocation cost this function
 	// does not pay (it decodes bytes already read off the wire); what this
 	// function owns is the per-call string-building cost, which this loop

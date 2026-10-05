@@ -974,7 +974,7 @@ func ReplaceAllAggregates(node Node, replacements map[string]string) Node {
 	case *CaseNode:
 		// The SUBJECT of a simple CASE too: `CASE MIN(x) WHEN MAX(x) …` left
 		// MIN(x) unreplaced, so the post-aggregate projection evaluated an
-		// aggregate call as a scalar and every WHEN missed (arc CW round 4,
+		// aggregate call as a scalar and every WHEN missed (arc CW,
 		// found by the one-ordering gate's aggregate operand).
 		subject := ReplaceAllAggregates(n.Subject, replacements)
 		changed := subject != n.Subject

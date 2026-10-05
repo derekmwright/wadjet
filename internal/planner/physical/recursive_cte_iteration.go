@@ -69,7 +69,7 @@ func (p *Planner) iterateRecursiveCTEAt(ctx context.Context, cte plansql.CTEDef,
 	// A numeric CONSTANT seeds an UNCONSTRAINED numeric column: PostgreSQL
 	// gives a numeric literal typmod -1, so `SELECT 1.5 … UNION ALL SELECT
 	// 2::int` is numeric overall, not numeric(2,1). The literal declares its
-	// spelling's DECIMAL(p,s) (arc VL round 5); the CTE column takes its
+	// spelling's DECIMAL(p,s) (arc VL); the CTE column takes its
 	// scale and the unconstrained precision.
 	//
 	// So does every other numeric PostgreSQL types without a modifier: a

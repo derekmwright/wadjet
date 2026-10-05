@@ -65,7 +65,7 @@ type ProjectExprSpec struct {
 	ElementType *parquet.Column
 	// Dimension carries a computed VECTOR's width for the same reason: a
 	// VECTOR vector allocated without it has nowhere to put a value (arc CW
-	// round 2).
+	//).
 	Dimension int
 	// SourceSlot names the input column by POSITION rather than by name, for
 	// a projection whose input publishes the name TWICE. It is

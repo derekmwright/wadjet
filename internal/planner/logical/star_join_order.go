@@ -273,7 +273,7 @@ func ResolveStarJoinOrdinalSortKeys(n *Node) {
 					// `sort: key column "coalesce(…)" does not exist in the
 					// input schema` at EXECUTION. Left unresolved, the
 					// ordinal is refused at PLAN time instead, which is the
-					// same fact a client can act on (review round 1, B1).
+					// same fact a client can act on (measured case, B1).
 					continue
 				}
 				cur.OrderBy[i].Column = src.Expr
@@ -369,7 +369,7 @@ func joinArmColumns(join *Node) []joinStarItem {
 		// bare `*` over it is `o.*, s.*`, which is PostgreSQL's star over
 		// `FROM o JOIN LATERAL (…) s`. Read off the join stream instead, a bare
 		// star published the minted key slot, and was refused for that (arc
-		// JP round 4, B5). The arm is named by the lateral's alias alone.
+		// JP, B5). The arm is named by the lateral's alias alone.
 		if n.LateralSubtree && parent != nil {
 			name := n.DerivedAlias
 			var cols []StarColumn
@@ -514,7 +514,7 @@ func armRelationColumns(arm *Node) (string, []StarColumn) {
 // list and the star can state it. Stopping at the root instead made the star
 // read the JOIN's stream for every such block, which is the PLAN's order and
 // the PLAN's qualified side: the very divergence this file exists to close,
-// surviving one node above where it was looked for (round-2 review, P1).
+// surviving one node above where it was looked for (P1).
 //
 // A SET OPERATION publishes its LEFTMOST arm's list, which is PostgreSQL's
 // rule and the one `plansql.BlockOutputColumns` reads, and the operation's own

@@ -130,7 +130,7 @@ type arcD5Cell struct {
 	// for. The optimization-invariance oracle compares RESULTS, and those do
 	// not move; this field is what keeps the ROUTE assertion honest under the
 	// switch instead of pinning a number that only holds one way (#659,
-	// round-1 review P2).
+	// the earlier measurement P2).
 	loweredOnlyWhenDeferred bool
 	// The per-DAG-arm counter deltas. 0 = the DAG executed the shape.
 	wantCorrRoutes        int64
@@ -139,7 +139,7 @@ type arcD5Cell struct {
 	wantUnreachableRoutes int64
 	// wantLateralIdentityRoutes: an ungrouped aggregate LATERAL lowers to a
 	// LEFT join over a grouped arm, which runs single-process since arc JP
-	// round 3 (dagplan.ErrLateralIdentityDistributed) before stage planning
+	// the earlier implementation (dagplan.ErrLateralIdentityDistributed) before stage planning
 	// could refuse it for an unreachable output.
 	wantLateralIdentityRoutes int64
 	// wantSQLState, when set, is the SQLSTATE every arm's error must carry.
@@ -397,7 +397,7 @@ func arcD5TypedRerunCells() []arcD5Cell {
 		// answers instead. The promise is kept in the position that still
 		// re-runs.
 		//
-		// An ARRAY outer value is no longer in that class: arc CW round 5
+		// An ARRAY outer value is no longer in that class: arc CW
 		// spells it as its typed array literal (expr.ArrayValueLiteral), so
 		// the cell that pinned its refusal here started answering
 		// PostgreSQL's value and was turned into the answer it gives. The
@@ -656,7 +656,7 @@ func arcD5LateralCells() []arcD5Cell {
 			wantUnreachableRoutes: 1,
 			pgSays:                "Alice|2|Alice, Bob|2|Bob, Carol|0|Carol — the FULL spelling diverges the same way"},
 		// AND THE ONE THAT AGREES, which is what bounds the cost to the
-		// DEFAULT row. Round 1's review reported this spelling as diverging
+		// DEFAULT row. the earlier implementation's measurement reported this spelling as diverging
 		// too; measured against live PostgreSQL 17 it does not. With
 		// `ON s.n > 1` the lateral row Carol would have had is rejected by
 		// the lateral join's own condition, so PostgreSQL null-extends the
@@ -680,7 +680,7 @@ func arcD5LateralCells() []arcD5Cell {
 		// query CAN name the lateral's output, PostgreSQL resolves it, and it
 		// applies the empty-input default there like anywhere else.
 		//
-		// CLOSED by arc J1 round 3, and the two cells are its proof. The
+		// CLOSED by arc J1, and the two cells are its proof. The
 		// outer row's `s.n` is substituted into the subquery's text per row
 		// by the re-run (§1e), and it used to substitute the LEFT join's NULL
 		// rather than 0 — `amount > NULL` matched nothing and Carol's answer
@@ -801,7 +801,7 @@ func arcD5LateralCells() []arcD5Cell {
 			want:                  []string{"c=Alice|n=int64:2", "c=Bob|n=int64:2", "c=Carol|n=NULL"},
 			wantUnreachableRoutes: 1,
 			pgSays:                "Carol NULL — an OUTER join pads the pair its ON rejects"},
-		// THE BOUNDARY of the repair, and it is LOUD now (arc J1 round 5).
+		// THE BOUNDARY of the repair, and it is LOUD now (arc J1).
 		// An OUTER join whose ON the DEFAULT row would SATISFY needs the
 		// lateral's columns nulled per column for the pairs the ON rejects and
 		// KEPT for the one it accepts — a CASE per output over a schema this
@@ -896,7 +896,7 @@ func arcD5LateralCells() []arcD5Cell {
 		// THE `SELECT *` OVER AN AGGREGATED LATERAL ANSWERS POSTGRESQL, and
 		// this cell is the third disposition it has had in one arc: NULL for
 		// Carol where PostgreSQL says 0 (the reference rewrite cannot reach a
-		// star), then a REFUSAL (round 2, which also refused queries whose
+		// star), then a REFUSAL (which also refused queries whose
 		// outer rows all match — a right answer taken away), and now the
 		// answer. The default rides on the lateral's own OUTPUT COLUMN above
 		// the join, so the star reads it like any other column
@@ -941,7 +941,7 @@ func arcD5LateralCells() []arcD5Cell {
 		// It is LOUD at arc L1 (0A000) and the pin is deleted. The lifted
 		// predicate is not an equality and names `amount`, and the body
 		// AGGREGATES — so unlike the unaggregated spellings, which answer on
-		// every arm since round 3, there is no projection to publish the
+		// every arm since the earlier implementation, there is no projection to publish the
 		// column in: publishing it would put it in the GROUP BY and change
 		// what the aggregate computes. Answering it needs the body evaluated
 		// per outer row (ADR-0021 §1q).
@@ -1989,7 +1989,7 @@ func arcD5SelectListSubqueryCells() []arcD5Cell {
 		// A SCALAR subquery inside a CASE arm routes, and the reason is now
 		// sharper than "the walk does not descend into a CaseNode".
 		//
-		// The walk DOES descend (#955, round-1 review B2) — it had to, because
+		// The walk DOES descend (#955, the earlier measurement B2) — it had to, because
 		// an uncorrelated EXISTS under `OR` or `NOT` shipped to a worker
 		// verbatim and failed every task — but it resolves only the EXISTS
 		// leaves it finds there. A boolean connective SHORT-CIRCUITS, and
@@ -1997,7 +1997,7 @@ func arcD5SelectListSubqueryCells() []arcD5Cell {
 		// arm the query may never reach makes that arm's failure the query's
 		// answer: `… WHERE d.id < 100 OR d.id > (SELECT id FROM t WHERE id<5)`
 		// is 9 rows on PostgreSQL 17 and on this engine's single-process path,
-		// and 21000 if the subquery is hoisted (round-1 review P2). So a
+		// and 21000 if the subquery is hoisted (case P2). So a
 		// scalar leaf in a boolean position keeps the disposition it had, and
 		// this cell keeps its route.
 		{issue: "#659", name: "boundary_select_list_subquery_inside_a_case_arm_routes",

@@ -127,7 +127,7 @@ func FormatIPv6(raw []byte) string {
 	// It elides the RENDER LOOP and nothing else: this sits AFTER the words[]
 	// fill and AFTER the zero-run scan, both of which still run for every
 	// address. Reverting just this hunk costs 11.1 % on the family
-	// (round-4 review, p=0.001), which is what the render loop alone is
+	// (p=0.001), which is what the render loop alone is
 	// worth; the rest of its gap against `net.IP.String` is the longer string
 	// PostgreSQL's spelling requires — `::ffff:10.0.0.1` is 15 bytes where Go
 	// prints `10.0.0.1`.
@@ -145,7 +145,7 @@ func FormatIPv6(raw []byte) string {
 	// One stack buffer and one allocation, the way formatMAC does it: the
 	// strings.Builder plus a strconv.FormatUint per non-zero hextet this
 	// replaces cost up to nine heap strings per address, on a path every
-	// IPv6 value goes through (round-2 review B2-4). 45 = the longest form,
+	// IPv6 value goes through (case B2-4). 45 = the longest form,
 	// "0000:0000:0000:0000:0000:ffff:255.255.255.255".
 	const hexd = "0123456789abcdef"
 	var buf [45]byte
@@ -1332,7 +1332,7 @@ func (v *Vector) SetValue(i int, val any) {
 		case DurationNanoser:
 			// A value from an upper layer that carries no column type of its
 			// own here — expr.IntervalValue, an INTERVAL literal's box (arc CW
-			// round 6, B1) — supplies its own nanosecond count rather than
+			// the earlier implementation, B1) — supplies its own nanosecond count rather than
 			// this package importing expr to recognize it by name. false is
 			// the same refusal an unmatched Go type gets: an opaque interval
 			// (a CAST of runtime text this engine cannot reduce to a value,
@@ -1434,7 +1434,7 @@ func (v *Vector) SetValue(i int, val any) {
 		if v.VectorDim <= 0 {
 			// A VECTOR vector allocated without its dimension has nowhere to
 			// put a value, and returning here left the slot NULL — the
-			// VECTOR twin of the shapeless container above (arc CW round 2:
+			// VECTOR twin of the shapeless container above (arc CW:
 			// a CASE over a VECTOR(n) cast answered NULL on every row).
 			switch val.(type) {
 			case []float32, []any:
@@ -2099,7 +2099,7 @@ func FormatTimestamp(ms int64) string {
 // the digit count — an epoch like 1787049120 came out "1.78704912e+09",
 // which a client reading it as an integer rejects, and a DOUBLE assigned to
 // a TEXT column stored "1.234567e+06" where PostgreSQL stores "1234567"
-// (review r5 P1, #1252). Extreme magnitudes keep e-notation, and the special
+// (measured case P1, #1252). Extreme magnitudes keep e-notation, and the special
 // values use PostgreSQL's spellings.
 //
 // This is the ONE renderer for a float's text form: pgwire's own wire

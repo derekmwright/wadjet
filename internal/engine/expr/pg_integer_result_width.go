@@ -5,7 +5,7 @@ package expr
 import "strings"
 
 // THE WIDTH POSTGRESQL DECLARES FOR A FUNCTION WHOSE RESULT IS AN INTEGER —
-// which is NOT the width this engine carries that result in (#966 round 3).
+// which is NOT the width this engine carries that result in (#966).
 //
 // `Ret` says which VECTOR a function's results are stored in, and for an
 // integer that is almost always `RetInt64`: every integer in this engine
@@ -25,7 +25,7 @@ import "strings"
 // measured on PostgreSQL 17.11 for every row of the census in
 // `physical.aggInputIsWideInteger`'s comment. Reading the carrier made
 // `SUM(regexp_count(…))` numeric where PostgreSQL declares bigint — twelve
-// wire cells, grouped and windowed, text and binary (#966 round 3 review B1).
+// wire cells, grouped and windowed, text and binary (#966 measurement B1).
 //
 // So this file is the table and its readers ask IT rather than keeping second
 // lists: physical.aggInputIsWideInteger (an accumulating aggregate's result

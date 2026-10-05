@@ -4363,7 +4363,7 @@ func (p *HashJoinProbe) markMatchedBuildEntries(in *batch.RecordBatch) {
 // a RIGHT ANTI join every build row. `o.j IN (SELECT b.id FROM dc_out b JOIN
 // dc_out c ON c.id = b.id WHERE b.id = o.j)` plans exactly that — the IN key
 // and the correlation key are two pairs — and answered empty on the
-// single-process arms where PostgreSQL answers `1 | 2 | 9` (arc DC round 3,
+// single-process arms where PostgreSQL answers `1 | 2 | 9` (arc DC,
 // review N6). One body now serves both callers, so the arms cannot drift
 // apart again.
 func (p *HashJoinProbe) markKeyMatchedLocked(in *batch.RecordBatch, row int) {

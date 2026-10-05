@@ -1,0 +1,5 @@
+162 Go files: all changed lines are // comments; non-comment tokens identical to 33e2fb92
+gofmt -l changed Go files: clean
+All backtick-delimited examples unchanged; no comment lines removed
+git diff --check: clean
+go build ./...: exit 0

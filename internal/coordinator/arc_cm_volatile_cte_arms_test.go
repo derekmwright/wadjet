@@ -30,8 +30,8 @@ import (
 // answers: `AS MATERIALIZED`, `AS NOT MATERIALIZED` (42601) and `WITH … INSERT`
 // (other.md r25, r26).
 //
-// The table is the round-1 enumeration (reference count × position × body) plus
-// the round-2 consumer-filter cells and the UNBEGUN ones — a reference under a
+// The table is the earlier implementation enumeration (reference count × position × body) plus
+// the earlier implementation consumer-filter cells and the UNBEGUN ones — a reference under a
 // constant-false filter or a LIMIT 0, which PostgreSQL never begins and so
 // never evaluates the body for (`… TABLESAMPLE BERNOULLI (101) … WHERE false`
 // is 0 there; read, it is 2202H), on seven arms; cmCells says what each arm

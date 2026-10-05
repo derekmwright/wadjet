@@ -31,7 +31,7 @@ import (
 // DATE computed past int32 was narrowed with `int32(t)` at the writer and
 // stored as `-5877585-08-22` (`UPDATE … SET d = d + 2147483647`), and an
 // INTERVAL shift past the millisecond carrier wrapped to year -284552024 (arc
-// VL round-3 review B1) — the same family as #911, whose bigint→DATE cast was
+// VL measurement B1) — the same family as #911, whose bigint→DATE cast was
 // narrowed to int32 before the store: that close put the check where the day
 // count is still the number the query wrote, and this one puts it where every
 // temporal value is built.
@@ -79,7 +79,7 @@ func dateBox(t time.Time) int64 {
 
 // instantBox is the TIMESTAMP box of an instant: UTC epoch milliseconds, what
 // a TIMESTAMP column's ColRef.Eval hands out. Every TIMESTAMP-declared kernel
-// returns it (arc VL round 3), so its value and its declaration agree; an
+// returns it (arc VL), so its value and its declaration agree; an
 // instant PostgreSQL's TIMESTAMP cannot hold is 22008 here, before UnixMilli
 // could wrap it.
 func instantBox(t time.Time) int64 {

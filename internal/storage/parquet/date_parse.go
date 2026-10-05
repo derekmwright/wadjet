@@ -35,7 +35,7 @@ type DateParseError struct {
 // and epoch milliseconds — measured on 17.11: DATE 4714-11-24 BC …
 // 5874897-12-31, TIMESTAMP 4714-11-24 00:00 BC … 294276-12-31 23:59:59.999999.
 // The carriers (int32 days, int64 ms) hold wider values; nothing PostgreSQL
-// refuses may be constructed or stored (arc VL round 4, #911's family). The
+// refuses may be constructed or stored (arc VL, #911's family). The
 // expression layer's constructors (expr temporal_range.go) and this package's
 // text readers take the bounds from here, so there is one range.
 const (
@@ -105,7 +105,7 @@ func TimestampMillisFinite(ms int64) error {
 // reads it through expr.DateDaysInRange), the SQL write doors, and this
 // writer's own box normalisation (normalizeTemporalBox), which the embedded
 // ingester API reaches through CheckLeafBox: a typed int32 day count past the
-// range was stored there and read back as year 5881580 (arc VL round-4
+// range was stored there and read back as year 5881580 (arc VL
 // review P2).
 func DateDaysInRange(n int64) error {
 	if IsInfiniteDate(n) {

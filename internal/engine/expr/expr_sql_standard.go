@@ -122,7 +122,7 @@ func matchLikeEscRecur(s, pattern string, si, pi int, hasEsc bool, esc byte) boo
 			// end with escape character") — but only where the matcher
 			// REACHES it: PostgreSQL short-circuits to FALSE when the string
 			// is exhausted first, so `'abc' LIKE 'abc!' ESCAPE '!'` is `f`
-			// there and was a refusal here (round-1 review, N6).
+			// there and was a refusal here (N6).
 			if pi+1 >= len(pattern) {
 				if si >= len(s) {
 					return false
@@ -271,7 +271,7 @@ func SimilarToRegexp(pattern, escape string) string {
 			// and `'abc' SIMILAR TO 'abc!' ESCAPE '!'` are both TRUE, and
 			// `'' SIMILAR TO '!' ESCAPE '!'` is TRUE. (`'abc' SIMILAR TO 'a\'`
 			// is FALSE there because `a` does not match `abc`, not because a
-			// dangling escape matches nothing — the cell this arc's round-1
+			// dangling escape matches nothing — the cell this arc's the earlier implementation
 			// notes reasoned from, which does not discriminate.)
 			if i+1 >= len(runes) {
 				break

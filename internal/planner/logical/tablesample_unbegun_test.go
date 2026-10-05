@@ -28,7 +28,7 @@ func sampledScans(n *Node) (sampled, all int) {
 }
 
 // A SAMPLE SCAN POSTGRESQL NEVER BEGINS IS PLANNED WITHOUT ITS SAMPLER
-// (#1411 review r1 B4).
+// (#1411 measured case B4).
 //
 // PostgreSQL checks the percentage when the sample scan begins, and its
 // planner never begins one under a constant-false WHERE / HAVING (a one-time

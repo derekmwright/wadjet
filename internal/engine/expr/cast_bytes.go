@@ -77,7 +77,7 @@ func bytesCastSourceName(v any) string {
 // Spliced raw into a quoted literal, the bytes were SQL's `unknown`, which a
 // BYTES consumer reads through byteain a SECOND time (#582): bytes that happen
 // to spell another value (`\x41`, two backslashes) became that value, and a
-// lone backslash a 22P02 (#1501; parameters-pgwire#r11). The hex form
+// lone backslash a 22P02 (#1501; parameters-pgwire#r10). The hex form
 // round-trips every byte — a NUL and invalid UTF-8 included — and the cast
 // makes the value BYTES wherever it lands.
 func BytesValueLiteral(raw []byte) *plansql.CastNode {

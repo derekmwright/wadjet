@@ -28,7 +28,7 @@ import (
 // relation's own `id`. Nine shapes that had been refused loudly by ADR-0021
 // §1c's dangling guard — `(SELECT (SELECT u.id) FROM c2users x WHERE x.id=1)`
 // and its IN / HAVING / LATERAL / CTE / nested spellings — started answering
-// one constant for every outer row instead (round-2 review, B1).
+// one constant for every outer row instead (B1).
 //
 // This pass runs AFTER the block is parsed, so the block's own FROM list is
 // there to ask, and it rewrites only where the reference RESOLVES HERE:
@@ -52,7 +52,7 @@ import (
 // PostgreSQL names a scalar subquery's column after the subquery's own target
 // list, alias included: `SELECT (SELECT 1 AS zzz) FROM u` publishes `zzz`. The
 // parser-time form returned the inner expression and dropped the alias, so
-// that name became `?column?` (round-2 review, B2). Here the stamp is already
+// that name became `?column?` (B2). Here the stamp is already
 // on the item and the rewrite leaves it alone.
 
 // unfoldFromlessScalars rewrites every FROM-less scalar subquery in one parsed
@@ -90,7 +90,7 @@ func unfoldFromlessScalars(info *SelectInfo) {
 				//
 				// The published NAME is not touched: it is stamped on the
 				// item AS WRITTEN, which is what keeps `(SELECT 1 AS zzz)`
-				// publishing `zzz` (round-2 review, B2).
+				// publishing `zzz` (B2).
 				col.Expr = col.ASTExpr.String()
 				if c, ok := col.ASTExpr.(*ColRef); ok && !col.Star {
 					col.ColumnRef, col.TableRef = c.Column, c.Table
@@ -152,7 +152,7 @@ func unfoldFromlessScalars(info *SelectInfo) {
 		// worse: `SELECT visits FROM t GROUP BY (SELECT 1)` passed the
 		// ungrouped-column validator as "group by item #1" and projected a
 		// fabricated NULL row where PostgreSQL 17.11 and main both raise
-		// 42803 (round-3 review, B2). The decline is the ORDER BY one, in the
+		// 42803 (B2). The decline is the ORDER BY one, in the
 		// clause its own comment always claimed.
 		if isBareNumericLit(rewritten) && !isBareNumericLit(info.GroupByExprs[i]) {
 			continue
@@ -185,7 +185,7 @@ func unfoldFromlessScalars(info *SelectInfo) {
 		// resolvePositionalRefs, so nothing resolves it again — the term
 		// reaches the logical planner as an ordinal that names no item, and
 		// ten shapes main answers exactly as PostgreSQL were refused 42P10
-		// (round-2 review, B1). A constant sort is what the subquery is
+		// (B1). A constant sort is what the subquery is
 		// either way, so declining costs the shape nothing.
 		if isBareNumericLit(rewritten) && !isBareNumericLit(info.OrderBy[i].Expr) {
 			continue

@@ -59,7 +59,7 @@ const (
 // have both signs. It exists to make a per-row disclosure VISIBLE: with `bal`
 // masked to 0, a predicate that reads the MASK answers the same for every row,
 // and one that reads the STORED column answers the SIGN of each row — so the
-// row set itself is arithmetic on the value the policy hides (#859 round 2).
+// row set itself is arithmetic on the value the policy hides (#859).
 const pmBal = "e7bal"
 
 func pmBalSchema() parquet.Schema {
@@ -658,7 +658,7 @@ func pmRigUpWith(t *testing.T, ctx context.Context, provider *auth.Provider, ext
 	// have, and it is not a duplicate of any other: with the v0.18.61 star
 	// expansion the census is 52 leaking cells over the eight doors below and
 	// 65 with this one, because the fast path leaks exactly as the
-	// single-process doors do (round-1 review, P1).
+	// single-process doors do (P1).
 	dagFastPath := newCoord(func(c *coordinator.Config) { c.LocalFastPathBytes = 64 << 20 })
 	// Heartbeat on the workers' behalf so planning sees the cluster now.
 	deadline := time.Now().Add(30 * time.Second)
@@ -1033,7 +1033,7 @@ func pmCells() []pmCell {
 			want: []string{"n=n1|s=***", "n=n2|s=***", "n=n3|s=***"}},
 
 		// ------------------------------------------------------------------
-		// Round-1 review: the shapes the first matrix did not carry. Thirteen
+		// The earlier measurement: the shapes the first matrix did not carry. Thirteen
 		// of them leaked at af6f18db on all eight runners of that day — EXCEPT, INTERSECT
 		// and UNION-distinct over a masked column, and a correlated scalar
 		// subquery's OUTER reference, among them.
@@ -1132,7 +1132,7 @@ func pmCells() []pmCell {
 		// a star renamed by a column-alias list, a star inside a subquery.
 		//
 		// MEASURED with THESE cells, `WADJET_E7_CENSUS=1`, one tree per base
-		// (round-1 review §1.3; the nine-door figure measured here):
+		// ( §1.3; the nine-door figure measured here):
 		//
 		//   v0.18.60 (bb8635a4)   8 leaking cells over  2 shapes on 8 doors
 		//                        10 over the same 2 with the fast-path door
@@ -1289,7 +1289,7 @@ func pmCells() []pmCell {
 			want: []string{"c=12|g=" + pmMaskSSN}},
 		// The oracle probe goes THROUGH the deferred-scalar producer: a
 		// table-less `(SELECT 'true-ssn-01')` folds before planning and
-		// answers c=0 under every hypothesis, so it could not fail (round-2
+		// answers c=0 under every hypothesis, so it could not fail (
 		// P1). Over the policed table it discriminates: if the outer column
 		// were read stored, `ssn = (SELECT MIN('true-ssn-01') FROM e7emp)`
 		// would match the one row whose stored ssn is that value.
@@ -1383,7 +1383,7 @@ func pmCells() []pmCell {
 		// its predicate read the STORED column, and `… IN (SELECT id FROM t
 		// WHERE bal > 300)` returned exactly the rows above the threshold the
 		// CLIENT chose. Five such probes recover every hidden value
-		// (#859 round 3). Mixed signs are load-bearing: over a same-sign
+		// (#859). Mixed signs are load-bearing: over a same-sign
 		// column a mask of 0 hides the defect.
 		{name: "inner_predicate_over_masked_gt_zero",
 			sql:  `SELECT id FROM e7bal WHERE id IN (SELECT id FROM e7bal WHERE bal > 0) ORDER BY id`,
@@ -1413,7 +1413,7 @@ func pmCells() []pmCell {
 		// `b.bal > 0` is false on every masked row, so no pair survives and
 		// the count is the mask's 0 — a stored read answers the positive
 		// balances' count. The body's local predicate reached its filter as
-		// TEXT until arc JP round 5, in a shape the invariant could not
+		// TEXT until arc JP, in a shape the invariant could not
 		// place above the security projection, and every door refused; it
 		// now reaches it as the parsed node, which the planner places above
 		// the projection like any other predicate (a refusal that became the
@@ -1438,7 +1438,7 @@ func pmCells() []pmCell {
 		//
 		// This spelling REFUSED until v0.18.36's set-operation work changed
 		// how a derived table inside an IN list is planned; the refusal is
-		// recorded in the round-5 report because a shape moving from 0A000 to
+		// recorded in the earlier implementation report because a shape moving from 0A000 to
 		// an answer is a change in what the branch promises.
 		{name: "derived_table_inside_in_reads_the_mask",
 			sql: `SELECT d.id FROM e7other d WHERE d.id IN (` +
@@ -1463,7 +1463,7 @@ func pmCells() []pmCell {
 		// range excluded '***' and the query answered no rows, where the DAG,
 		// which attaches nothing there, answered every row. A client who moves
 		// the constant reads the stored range off the answer, so this is a
-		// disclosure at row-group granularity (#859 round 5, P2).
+		// disclosure at row-group granularity (#859, P2).
 		//
 		// `e7bal` is the control: its stored values BRACKET its mask
 		// (-800..800 around 0), so nothing was prunable and the same defect
@@ -1501,7 +1501,7 @@ func pmCells() []pmCell {
 		// the invariant was asked over the subquery's OWN plan: the inner
 		// query is SQL TEXT when enforcement runs, so what it contains — a
 		// derived table, a set operation, a correlation — is the client's
-		// choice and no per-shape teaching can enumerate it (#859 round 4).
+		// choice and no per-shape teaching can enumerate it (#859).
 		// Every one of them used to REFUSE 0A000 on every runner, and
 		// SEVEN of them now ANSWER — with the MASK, uniformly on all of them
 		// (7 cells x the 8 runners of that day is the 56 failures a base measurement shows;
@@ -1580,7 +1580,7 @@ func pmCells() []pmCell {
 		// earlier revision of docs/security.md drew the boundary at the outer
 		// statement's FROM list — "a subquery over a table the outer statement
 		// also reads answers normally" — and these cells are why that sentence
-		// is gone (#859 round 5, review P1). They still refuse, and they are
+		// is gone (#859, measurement P1). They still refuse, and they are
 		// the control that says the six cells above did not start answering
 		// because the invariant stopped being asked.
 		{name: "hidden_relation_union_all_inside_in_outer_reads_it",

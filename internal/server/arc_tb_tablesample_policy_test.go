@@ -17,7 +17,7 @@ import (
 //
 // Arc TB reads the argument as an expression and draws the sample where the
 // scan runs: the single-process scan and, on the DAG doors, the worker's scan
-// fragment, which now carries the sampler (round 2; round 1 routed every
+// fragment, which now carries the sampler (the earlier implementation routed every
 // sampled statement to the coordinator-local pipeline). So a sampled scan
 // runs a sampler on the DAG it did not run before, over the same enforced
 // plan. This is the masking gate for it: e7emp (ssn masked, salary denied)
@@ -29,8 +29,8 @@ import (
 //
 // Then a DELETE (as admin, through each door) removes one visible row of
 // each table, and the sampled statements must still equal the unsampled ones:
-// the sample is drawn from the rows the scan SELECTS. Round 1's sampler drew
-// from every physical row and returned the deleted one (review r1 B1).
+// the sample is drawn from the rows the scan SELECTS. the earlier implementation's sampler drew
+// from every physical row and returned the deleted one (measured case B1).
 //
 // Non-vacuity: every (cell, door) pair of the answering cells must answer;
 // a door that refuses one of them fails here rather than passing silently,

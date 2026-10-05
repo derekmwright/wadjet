@@ -1132,7 +1132,7 @@ func deriveColumns(info *plansql.SelectInfo, rows []map[string]any, schema []par
 					// same positional list the planner derived from this same
 					// rule — so this list and the name-keyed row map agree.
 					// (buildProject does NOT read PublishedName; an earlier
-					// version of this comment said it did — round-1 review N1.) An unaliased `SUM(a) OVER ()` is `sum` under
+					// version of this comment said it did — the earlier measurement N1.) An unaliased `SUM(a) OVER ()` is `sum` under
 					// both rules; naming it from the expression TEXT asked the
 					// result schema for a column the projection does not emit,
 					// and every row came back NULL.
@@ -1230,7 +1230,7 @@ func deriveColumnMetas(columns []string, rows []map[string]any, outSchema []parq
 	// halves of `CAST(s AS VARCHAR(4)), CAST(s AS VARCHAR(9))` at modifier 13.
 	// The schema is positional and was built from the same list in the same
 	// order, which is what makes this exact rather than a heuristic
-	// (round-1 review B2).
+	// (case B2).
 	positional := len(outSchema) == len(columns)
 
 	// The executed output schema, keyed by column name. The whole Column,
@@ -1245,7 +1245,7 @@ func deriveColumnMetas(columns []string, rows []map[string]any, outSchema []parq
 	// The catalog's columns by bare name, the last rung before inference.
 	// Built only when a column reaches it: reading every table's definition
 	// for every result cost a JSON decode per table per statement, which over
-	// a 1,000-table catalog was most of a psql `\d` (arc PC round 2, P1).
+	// a 1,000-table catalog was most of a psql `\d` (arc PC, P1).
 	var schemaMap map[string]parquet.Column
 	catalogColumns := func() map[string]parquet.Column {
 		if schemaMap != nil {
@@ -1507,7 +1507,7 @@ func (db *DB) createTableSQL(ctx context.Context, ct *plansql.CreateTableInfo) (
 	// type error (measured). The clause reaches this form since #1024 gave
 	// the grammar `parseIfNotExists`; until this, it parsed, was documented as
 	// a no-op, and raised the 42P07 the documentation said it replaced
-	// (round-2 review B3).
+	// (case B3).
 	if ct.IfNotExists {
 		exists, err := db.tableExists(ctx, ct.Name)
 		if err != nil {
@@ -1755,7 +1755,7 @@ func columnDefsToSchema(defs []plansql.ColumnDef) (parquet.Schema, error) {
 // naming `HITS` or `hItS` against a catalog `Hits` matched nothing, and a
 // scoped rule that matches nothing is a grant beside the broad allow every
 // `roles:`-to-ABAC migration emits: the masked column came back in plaintext
-// and the denied column was writable, on all three doors (#882 round 2).
+// and the denied column was writable, on all three doors (#882).
 //
 // The error is returned AND remembered. A caller that ignores it does not get
 // the unbound set enforced quietly: `Provider.BindError` makes every

@@ -108,7 +108,7 @@ func (p *StagePlanner) PlanDistributed(ctx context.Context, node *logical.Node) 
 		return nil, err
 	}
 	// A WINDOW above a dependent (LATERAL) join binds the wrong arm on this
-	// path (arc LT round 2, B4); the coordinator runs the plan single-process.
+	// path (arc LT, B4); the coordinator runs the plan single-process.
 	if err := refuseWindowOverDependentJoin(node); err != nil {
 		return nil, err
 	}
@@ -146,7 +146,7 @@ func (p *StagePlanner) PlanDistributed(ctx context.Context, node *logical.Node) 
 	}
 	// A correlated LATERAL whose arm carries a name across its join that
 	// another relation of the query also carries, or whose join pads a
-	// grouped arm (arc JP round 3, lateral_identity_guard.go): the join stage
+	// grouped arm (arc JP, lateral_identity_guard.go): the join stage
 	// reads the body's scan stream and re-spells every reference onto it,
 	// binding by bare name where a qualifier is lost. The coordinator runs the
 	// plan single-process. Asked, and returned, BEFORE stage generation: the
@@ -156,7 +156,7 @@ func (p *StagePlanner) PlanDistributed(ctx context.Context, node *logical.Node) 
 	// name is such a shape, so the DAG's own refusal of it (#1130) below is
 	// never reached for it.
 	// A star that would publish a lateral join's lifted key slot is refused
-	// on this path as on the single-process one (arc JP round 4).
+	// on this path as on the single-process one (arc JP).
 	if err := logical.RefuseStarPublishingLiftedSlot(node); err != nil {
 		return nil, err
 	}
@@ -167,7 +167,7 @@ func (p *StagePlanner) PlanDistributed(ctx context.Context, node *logical.Node) 
 	// (#1130): the INNER and comma spellings answer on this path (the
 	// predicate is evaluated at the join off the scan's own stream), the LEFT
 	// spelling is refused — it padded every row NULL on one stage shape and
-	// routed on another for the same statement (arc LT round 2).
+	// routed on another for the same statement (arc LT).
 	if err := logical.RefuseContestedLiftedRefs(node, true); err != nil {
 		return nil, err
 	}
@@ -660,7 +660,7 @@ func (p *StagePlanner) PlanDistributed(ctx context.Context, node *logical.Node) 
 	// projection may read a column that projection hides. A pass that copied
 	// FilterExprs without its PostSecurityFilterExprs companion would put one
 	// back, and the failure mode is a per-row disclosure rather than a wrong
-	// count (#859 round 2), so this refuses rather than trusting the routing.
+	// count (#859), so this refuses rather than trusting the routing.
 	if err := CheckSecurityFilterOrder(ctx, stages); err != nil {
 		return nil, err
 	}

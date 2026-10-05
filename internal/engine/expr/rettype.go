@@ -445,7 +445,7 @@ const (
 // The fixed declarations. A declaration names the SQL type of the function's
 // result AND the box its kernel returns: a DATE is int64 epoch days and a
 // TIMESTAMP int64 epoch milliseconds, the boxes a column of that type gives
-// (arc VL round 3 — now/current_date used to return formatted TEXT under a
+// (arc VL — now/current_date used to return formatted TEXT under a
 // TIMESTAMP / DATE declaration, and to_date a date under a TEXT one).
 // TestRegistryDeclaredTypeIsTheProducedType holds every entry to it; the
 // address/UUID functions that still declare TEXT are declaredTextTypedValue.
@@ -603,7 +603,7 @@ func (r Ret) Resolve(nargs int, argType func(i int) (DeclType, Confidence)) (Dec
 			// and once for the safety check — cost 2^depth over nested
 			// polymorphic calls: a linear-text COALESCE nested 22 deep took
 			// 2.7 seconds to PLAN, and 30 deep would not have finished
-			// (#555's review, round 4).
+			// (#555's measurement, the earlier implementation).
 			seen := make([]DeclType, nargs)
 			conf := make([]Confidence, nargs)
 			sawUnknown := false
@@ -687,7 +687,7 @@ func ArrayLitElementDecl(decided []DeclType) (DeclType, bool) {
 	typed := make([]DeclType, 0, len(decided))
 	for i, d := range decided {
 		if d.Lit && d.ID == batch.TypeDecimal {
-			// A fractional literal declares its numeric since arc VL round 5,
+			// A fractional literal declares its numeric since arc VL,
 			// but an ARRAY[…] of constants materializes each element's OWN
 			// box — an integer constant's int64 — into the element vector,
 			// and an int64 in a DECIMAL vector is the already-scaled carrier
@@ -752,7 +752,7 @@ func CommonDeclType(decided []DeclType, sawUnknown bool) (DeclType, bool) {
 		// Nothing but INTEGER constants (or non-numeric ones). With no typed
 		// operand there is nothing for the fold to resolve them FROM, and the
 		// first declares the call. A FRACTIONAL constant declares PostgreSQL's
-		// numeric (DECIMAL of its spelling, arc VL round 5), so a choice over
+		// numeric (DECIMAL of its spelling, arc VL), so a choice over
 		// constants that holds one folds below like any DECIMAL decider:
 		// `GREATEST(0.5, 1.5)` is DECIMAL(2,1), `COALESCE(2.50, 1)` numeric.
 		return typed[0], true
@@ -835,7 +835,7 @@ func anyDecimalDecl(ds []DeclType) bool {
 // branches, COALESCE / GREATEST / LEAST arguments, an ARRAY[a, b]
 // constructor's elements — that are all declared containers: their common
 // declaration is batch.CommonContainerColumn's, the one rule the comparators,
-// the join keys and the set operations unify through (arc CW round 5, review
+// the join keys and the set operations unify through (arc CW, measurement
 // B5). Before it the FIRST decider answered, so a numeric(5,2)[] branch beside
 // a numeric(20,6)[] one declared scale 2 and the other branch's elements were
 // rounded into it. The runtime moves every branch's box into the same shape
@@ -1100,7 +1100,7 @@ func FuncFixedNonBooleanType(name string) (batch.TypeID, bool) {
 // on PostgreSQL 17.11, and a DELETE whose WHERE is that removed every row
 // here. A polymorphic call cannot be typed from the declaration alone, but it
 // CAN be typed from the arguments the declaration says it mirrors — which is
-// the caller's job, one level up, where the scope is (#1179 round 2).
+// the caller's job, one level up, where the scope is (#1179).
 func FuncPolymorphicArgPositions(name string) ([]int, bool) {
 	r := DefaultRegistry.ReturnType(name)
 	if r.kind != retSameAsArg {
@@ -1260,7 +1260,7 @@ func (d DeclType) RowFields() []parquet.Column {
 // value they produce is the text of a NETWORK address or a UUID — values a
 // PostgreSQL client would receive typed inet or uuid. They are the one list
 // the census gate (TestRegistryDeclaredTypeIsTheProducedType) pins after arc
-// VL round 3 made every TEMPORAL entry declare and produce its own type, and
+// VL made every TEMPORAL entry declare and produce its own type, and
 // the assignment rule reads the same list: such a source assigned into a
 // typed column is read by the column's input function, as SQL's unknown-typed
 // literal is, rather than refused as text (a documented superset —

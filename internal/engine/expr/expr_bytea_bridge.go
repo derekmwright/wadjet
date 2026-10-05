@@ -90,7 +90,7 @@ func fnDecode(args []any) any {
 // The result is an INT32, because `pg_typeof(get_byte('hi'::bytea,0))` is
 // `integer` on 17.11 and the wire declares what Ret says: RetInt64 put OID 20
 // on a column the server declares 23, beside three siblings that do declare
-// PostgreSQL's type (round-1 review, P1). A byte is 0..255 and always fits.
+// PostgreSQL's type (P1). A byte is 0..255 and always fits.
 func fnGetByte(args []any) any {
 	if len(args) < 2 || args[0] == nil || args[1] == nil {
 		return nil
@@ -124,7 +124,7 @@ func fnSetByte(args []any) any {
 // byteaArg is the bytea argument of encode / get_byte / set_byte, PostgreSQL's
 // own bytea functions: a BYTES value is its bytes, and text — a quoted literal,
 // which the server coerces to bytea — is read by byteain, the one reading of a
-// text as bytea (kernel.ByteaIn; #1501, arc BY round 2). It was toBytes, the
+// text as bytea (kernel.ByteaIn; #1501, arc BY). It was toBytes, the
 // extension functions' reader, which takes an even-length hex text as the
 // bytes it spells and anything else as its characters: `encode('6869', 'hex')`
 // answered 6869 where PostgreSQL answers 36383639, and `encode('\x6869',

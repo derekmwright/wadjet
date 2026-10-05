@@ -62,7 +62,7 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 			// honest: without it a twice-referenced CTE whose projection WAS
 			// materialized still looked unpublished, and the query was routed
 			// off the DAG onto a pipeline that is not answer-preserving
-			// (round-1 B1). The cached terminal's own ProjectExprs is the
+			// (case B1). The cached terminal's own ProjectExprs is the
 			// observable fact, not a guess.
 			if idx, ok := p.stageIndexByID(*stages, termID); ok &&
 				len((*stages)[idx].ProjectExprs) > 0 {
@@ -788,7 +788,7 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 				// producer over). Without this the join qualified such an
 				// arm's duplicate columns by the SCAN below it, and two
 				// copies of one grouped block each bound the PROBE's copy:
-				// every row came back paired with itself (arc R2 round 2,
+				// every row came back paired with itself (arc R2,
 				// P1). The mark is HERE, and not on every aggregate-rooted
 				// arm, because this is where the arm's list was really
 				// materialized: marking one whose projection this pass could
@@ -965,7 +965,7 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 			// the gather's `OutputRename{__win_0 -> w}` fell back to the
 			// producer's raw columns: `[id, y.id]` for a query that asked for
 			// `[id, w]`. It bit only the SHUFFLED lowering, because the
-			// broadcast one has no payload list to get wrong (#694 round 2).
+			// broadcast one has no payload list to get wrong (#694).
 			needed := resolveJoinNeededColumns(node, p.publishedBlocks)
 			var shuffleCols []string
 			if len(needed) > 0 {
@@ -1270,7 +1270,7 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 							// the statement's answer. Shipping the subquery's
 							// text instead failed every task with `subqueries
 							// require a SubqueryRunner` and no SQLSTATE
-							// (#1411 review r1).
+							// (#1411 measured case).
 							if df, ok := deferredFailure(sErr, false); ok {
 								resolvedExpr = strings.ReplaceAll(resolvedExpr, ":"+d.Placeholder, df.String())
 								continue
@@ -1311,7 +1311,7 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 				// projection runs ABOVE that projection, never in the slot
 				// beside the policy's own row filter — otherwise it reads the
 				// STORED column and its row set is arithmetic on the value the
-				// policy hides (#859 round 2). The barrier is absorbed by the
+				// policy hides (#859). The barrier is absorbed by the
 				// time this runs: walkStages recurses children first, so the
 				// Project below this Filter has already set the field.
 				//
@@ -1459,7 +1459,7 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 			// DerivedAliasSourceColumn leaves those (and `*`) alone; a
 			// QUALIFIED argument resolves inside the arm its qualifier names,
 			// which that helper cannot do because it stops at a Join (#742
-			// round 4) — without the scoping, `SUM(x.w) OVER ()` over two arms
+			// the earlier implementation) — without the scoping, `SUM(x.w) OVER ()` over two arms
 			// both publishing `w` summed the OTHER arm's column.
 			//
 			// THE ARGUMENT'S LADDER IS NOT THE KEYS' LADDER, DELIBERATELY. The
@@ -1488,7 +1488,7 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 				// every row — `SUM(v) OVER ()` over
 				// `(SELECT BITWISE_AND(f4,18) AS v FROM tcpflow) s` answered
 				// NULL on all three DAG arms and 36 on the single one, in
-				// silence (#1018 round 5; the argument half of #770).
+				// silence (#1018; the argument half of #770).
 				//
 				// The repair is the one the PARTITION BY and ORDER BY keys
 				// two loops up already take: MATERIALIZE the alias on the
@@ -1613,7 +1613,7 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 		// SELECT list is the opposite of that: it is the relation the CTE
 		// DEFINES, identical for every reference. Withholding it there left a
 		// twice-referenced CTE marked and unpublishable, so the query was
-		// refused and routed instead of executing (round-1 B1).
+		// refused and routed instead of executing (case B1).
 		if node.Type == logical.NodeProject && p.starReadBlocks[node] != blockAgrees &&
 			len(*stages) > preDefaultCount {
 			// Only a block that was REALLY materialized is recorded. The

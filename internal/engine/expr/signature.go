@@ -54,7 +54,7 @@ const (
 	// does not exist` on 17.11 — measured — while `md5(text)`,
 	// `length(text)` and `substring(text)` all answer there. The asymmetry is
 	// PostgreSQL's, and it is the position this engine answered at where the
-	// server refuses (round-1 review, N6). An unknown-typed LITERAL still
+	// server refuses (N6). An unknown-typed LITERAL still
 	// fits, because the server coerces it to bytea: `encode('hi','hex')` is
 	// `6869` there.
 	ArgBytes
@@ -112,7 +112,7 @@ func (s Signature) domain(i int) ArgDomain {
 // Accepts reports whether n arguments satisfy this signature's arity. It is
 // exported for the GRAMMAR-side closure: physical's rewrite gate parses every
 // spelling this engine turns into a call the query did not write as one, and
-// asks this about the call it produced (the round-1 review's B1).
+// asks this about the call it produced (the earlier measurement's B1).
 func (s Signature) Accepts(n int) bool { return s.accepts(n) }
 
 // accepts reports whether n arguments satisfy this signature's arity.
@@ -805,7 +805,7 @@ func RefuseUnresolvableCall(n *plansql.FuncCallNode, decl func(plansql.Node) (De
 		// server while `md5(text)` and `length(text)` answer, so this is not
 		// the superset the paragraph above keeps — it is one function's own
 		// accept-set, and answering there made docs/sql-reference.md's row
-		// ("a BYTES value") untrue (round-1 review, N6).
+		// ("a BYTES value") untrue (N6).
 		if d == ArgBytes && t.ID == batch.TypeString {
 			return &WrongSignatureError{Name: name, Args: types}
 		}
@@ -838,7 +838,7 @@ func literalFitsDomain(d ArgDomain, t batch.TypeID) bool {
 // A UNARY SIGN over a numeric literal is still that literal. PostgreSQL says
 // `function upper(integer) does not exist` for `upper(-1)` exactly as it does
 // for `upper(1)`, and leaving the sign undecided here let `UPPER(-1)` answer
-// where the server refuses (round-1 review, N7's neighbour).
+// where the server refuses (N7's neighbour).
 func argDeclType(arg plansql.Node, decl func(plansql.Node) (DeclType, Confidence)) (DeclType, Confidence) {
 	if lit, ok := literalArg(arg); ok {
 		switch lit.Kind {
@@ -885,7 +885,7 @@ func literalArg(arg plansql.Node) (*plansql.Lit, bool) {
 // bare integer literal INT64), because the only thing reading it is the
 // message a client sees — naming `bigint` where the server names `integer` was
 // the one exception to "PostgreSQL's own message shape" the arc claimed
-// (round-1 review, N7). The DOMAIN decision is unchanged: every one of these
+// (N7). The DOMAIN decision is unchanged: every one of these
 // is a number and no text position takes one.
 func numericLitDeclaredType(text string) batch.TypeID {
 	t := strings.TrimSpace(text)

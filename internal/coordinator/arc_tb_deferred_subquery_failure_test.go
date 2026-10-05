@@ -19,7 +19,7 @@ import (
 )
 
 // AN UNCORRELATED SUBQUERY'S FAILURE IS RAISED WHEN THE SUBQUERY IS
-// EVALUATED, NOT WHEN IT IS PLANNED (#1411 review r3 B1), on seven arms.
+// EVALUATED, NOT WHEN IT IS PLANNED (#1411 measured case B1), on seven arms.
 //
 // PostgreSQL 17.11 runs an uncorrelated sublink as an InitPlan on its first
 // reference: `CASE WHEN id > 5 THEN EXISTS (… TABLESAMPLE BERNOULLI (101))

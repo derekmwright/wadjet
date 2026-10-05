@@ -70,7 +70,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 	// float64 vector and `SUM((SELECT CAST(9007199254740993 AS BIGINT)))` over
 	// three rows answered 27021597764222976 for PostgreSQL 17.11's exact
 	// 27021597764222979 — a WRONG VALUE past 2^53, the class ADR-0024 exists
-	// to prevent, not the declaration residual round 6 recorded (#1018 round 7,
+	// to prevent, not the declaration residual the earlier implementation recorded (#1018,
 	// B3). The derived spelling of the same query — `SUM(v) FROM (SELECT
 	// (SELECT …) AS v …)` — was already exact, because there the stamp reaches
 	// the column through the Project.
@@ -308,7 +308,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 		// (inputColShapes' Aggregate arm). The identity row of an EMPTY input
 		// has no vector to read it from, and without it the zero-row answer
 		// of `SELECT MIN(ARRAY[x]) … WHERE false` declared text on this path
-		// while the DAG declared the array (arc CW round 2, B1).
+		// while the DAG declared the array (arc CW, B1).
 		if (ac.OutputType == parquet.TypeArray || ac.OutputType == parquet.TypeMap) && ac.OutputElementType == nil {
 			if aggShapes == nil {
 				aggShapes = inputColShapes(node)

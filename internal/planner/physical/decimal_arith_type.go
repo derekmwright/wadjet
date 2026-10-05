@@ -466,11 +466,11 @@ func scalarFnDeclaredDecimal(n *plansql.FuncCallNode, decls ColDecls) (expr.Decl
 		return expr.DeclType{}, false
 	}
 	// A CONSTANT argument is no longer routed off this path: since #1252's
-	// round 5 (`9b096b9e`) a fractional literal declares DECIMAL wherever it
+	// the earlier implementation (`9b096b9e`) a fractional literal declares DECIMAL wherever it
 	// sits, so `decimalArithOperand`'s own Lit/UnaryOp arms already answer the
 	// same DECIMAL for `ROUND(0.5)` and `ROUND(-0.5)` that they answer for a
 	// DECIMAL column — there is no longer a second type for a constant-folded
-	// expression to disagree with itself over (review r5 B1, #1252).
+	// expression to disagree with itself over (measured case B1, #1252).
 	if strings.EqualFold(strings.TrimSpace(n.Name), "mod") {
 		// mod(x, y) is the `%` operator spelled as a call, so the `%` rule
 		// decides it whole: exact when EITHER argument is a DECIMAL and the
@@ -745,7 +745,7 @@ func decimalArithOperandDecided(node plansql.Node, decls ColDecls) bool {
 // arrayCastDecimalElement is the element a `T[]` cast declares when T is
 // DECIMAL/NUMERIC, by the scalar cast's own rule (castDeclaredDecimal): a
 // DECIMAL(p,s) destination is its (p,s), and a bare one takes the operand
-// ELEMENT's scale — an integer element scale 0. Round 4 (B3): the element was
+// ELEMENT's scale — an integer element scale 0. The earlier implementation (B3): the element was
 // declared by inferCastType, which knows no (p,s), so `CAST(v AS
 // DECIMAL(9,4)[])` declared text[] — its elements were compared and hashed as
 // their TEXT (`10.0000` ≠ `10.00` in a join key, IN, UNION) — and `CAST(… AS

@@ -686,7 +686,7 @@ func setOpArmProjection(arm *logical.Node, outNames []string) (SetOpArmPlan, err
 				// does not carry (NULL, declared text). On the DAG,
 				// `SELECT ARRAY[1] … UNION SELECT ARRAY[2] … UNION SELECT
 				// ARRAY[3] …` answered {1},{3}, scalars refused on a STRING
-				// file (arc CW round 5, review B2's arity gate).
+				// file (arc CW, measurement B2's arity gate).
 				Expr: plansql.QuoteIdent(n), Name: outNames[i],
 				// The SLOT, because a nested operation's result columns may
 				// repeat a NAME and the enclosing arm reads them from its
@@ -1118,7 +1118,7 @@ func setOpElementTarget(want, ct SetOpColType, name, op string) (*parquet.Column
 	}
 	a, b := want.ElementType, ct.ElementType
 	// The ONE element rule every meeting point of two containers unifies
-	// through (batch.CommonContainerColumn, arc CW round 5): the numeric
+	// through (batch.CommonContainerColumn, arc CW): the numeric
 	// promotion ladder, two DECIMALs at their common (p,s), an integer
 	// beside a DECIMAL at the DECIMAL's scale with the integer's range. So
 	// `int[] ∪ numeric(9,2)[]` is a numeric(21,2)[] union here — it refused

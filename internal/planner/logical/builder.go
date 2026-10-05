@@ -165,7 +165,7 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 				// most it could see was the literal's SPELLING, and lifting on
 				// that alone is not an identity over a float column. It lives
 				// in const_arith_agg_typed.go now, inside logical.Optimize,
-				// where the column's type is on the scan (#850, round-1 B1).
+				// where the column's type is on the scan (#850, the earlier implementation B1).
 
 				// Find all aggregates in this expression (handles multi-aggregate
 				// expressions like MAX(x) - MIN(x)).
@@ -1564,8 +1564,8 @@ func buildFromClause(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*Node, er
 				// table's Project, which carries `i` — a name the enclosing
 				// query cannot write; kept, the join qualified the duplicates
 				// `i.id`, `s.id` matched nothing and its qualifier strip bound
-				// the OUTER `id` (arc JP round 4, B2 `d/b6starBare`, every arm;
-				// ADR-0026 §8l "Round 4").
+				// the OUTER `id` (arc JP, B2 `d/b6starBare`, every arm;
+				// ADR-0026 §8l "The earlier implementation").
 				if join.RightAlias != "" {
 					right.DerivedAlias = join.RightAlias
 				}
@@ -2138,7 +2138,7 @@ func buildLateralSubquery(outer *plansql.SelectInfo, left *Node, join plansql.Jo
 	// wrong positions. It is PostgreSQL's rule and the one
 	// `plansql.OverlayColumnAliases` states for a derived table; without it
 	// `LATERAL (…) l(w)` renamed a column nothing carried and `l.w` answered
-	// NULL (round-2 review, P2). A list over a body whose width is not knowable
+	// NULL (P2). A list over a body whose width is not knowable
 	// — one with a star — is left alone, and `RefuseUnappliedColumnAliasLists`
 	// raises PostgreSQL's 42P10 for it.
 	if err := applyLateralItemAliases(subInfo, join); err != nil {
@@ -2152,7 +2152,7 @@ func buildLateralSubquery(outer *plansql.SelectInfo, left *Node, join plansql.Jo
 	// inside `FROM lat_ord x, LATERAL (…)` against lat_item. Without this
 	// subtraction `leftAliases` claims the name, so the WHERE split calls a
 	// purely LOCAL predicate correlated and the refusal below fires on a body
-	// that reads nothing from the outer row at all (round-2 review).
+	// that reads nothing from the outer row at all ().
 	for _, tr := range subInfo.Tables {
 		if tr.Alias != "" {
 			delete(leftAliases, strings.ToLower(tr.Alias))
@@ -2178,7 +2178,7 @@ func buildLateralSubquery(outer *plansql.SelectInfo, left *Node, join plansql.Jo
 	// Split WHERE clause into correlated and local predicates
 	// The split is taken on the PARSED WHERE, and each LOCAL term keeps its
 	// node: the body's own filter is rebuilt from those nodes below and never
-	// from text (arc JP round 5, B1).
+	// from text (arc JP, B1).
 	var correlatedParts []string
 	var localNodes []plansql.Node
 	conjuncts, err := lateralWhereConjuncts(subInfo)
@@ -2218,7 +2218,7 @@ func buildLateralSubquery(outer *plansql.SelectInfo, left *Node, join plansql.Jo
 	// no AST, and the filter then re-split that text at every textual AND:
 	// `q.qv BETWEEN 10 AND 30` became `q.qv between 10` and a constant `30`
 	// (zero rows on the single-process arm, a parse error on the DAG — arc
-	// JP round 4 review, B1). The text is kept only as the node's rendering.
+	// JP measurement, B1). The text is kept only as the node's rendering.
 	subInfo.Where, subInfo.WhereExpr = "", nil
 	for _, n := range localNodes {
 		andIntoWhere(subInfo, renderConjunct(n), n)
@@ -2246,7 +2246,7 @@ func buildLateralSubquery(outer *plansql.SelectInfo, left *Node, join plansql.Jo
 	empty := lateralEmptyInputOf(subInfo, hasAgg, len(correlatedParts) > 0)
 	// An ungrouped aggregate's one row is REMOVED by `LIMIT 0` or by any
 	// OFFSET, for every outer row, so there is no default row to pad and the
-	// INNER spelling answers nothing (round-2 review, B1: `COUNT(*) … LIMIT
+	// INNER spelling answers nothing (B1: `COUNT(*) … LIMIT
 	// 0` answered five NULL pads for PostgreSQL's zero rows). The bound is
 	// decided here, before the pad, because the pad is what the bound
 	// removes.
@@ -2331,7 +2331,7 @@ func buildLateralSubquery(outer *plansql.SelectInfo, left *Node, join plansql.Jo
 			// including the one that had already been rewritten to a minted
 			// slot: `q.qk = p.k AND q.qk = p.oid` published the key once as
 			// `__key_0` but the join still read `s.qk` for BOTH conditions
-			// (arc JP round 5 closure review B1, #1299/#1302).
+			// (arc JP closure measurement B1, #1299/#1302).
 			if _, seen := keyRename[strings.ToLower(strings.TrimSpace(innerCol))]; seen {
 				continue
 			}
@@ -2344,7 +2344,7 @@ func buildLateralSubquery(outer *plansql.SelectInfo, left *Node, join plansql.Jo
 			// key the join on that slot. The aggregate publishes it, the projection carries it,
 			// the shuffle can name it, and the join drops it on output on every path.
 			// See docs/internals/lateral-published-key-collisions.md for the design.
-			// THE LIFTED KEY OWNS A SLOT (#1302, round 2; ADR-0026 §8l, §3a).
+			// THE LIFTED KEY OWNS A SLOT (#1302, the earlier implementation; ADR-0026 §8l, §3a).
 			// Where the outer side is an EXPRESSION the equality is no hash
 			// key: it is evaluated ABOVE the join, over both sides' columns,
 			// binding by NAME, so the shortcuts below — the key handed over
@@ -2453,7 +2453,7 @@ func buildLateralSubquery(outer *plansql.SelectInfo, left *Node, join plansql.Jo
 			// that cannot be expanded that way is refused after expansion,
 			// where it is known (RefuseStarPublishingLiftedSlot) — refusing here
 			// refused every bare star over an expression-keyed lateral,
-			// including the ones base answered right (arc JP round 4, B5).
+			// including the ones base answered right (arc JP, B5).
 			if !lifted {
 				injectedSlots = append(injectedSlots, slot)
 			} else {
@@ -2568,7 +2568,7 @@ func buildLateralSubquery(outer *plansql.SelectInfo, left *Node, join plansql.Jo
 	// count it, and DROPPED the list, so `LATERAL (SELECT * FROM i WHERE
 	// i.order_id = u.id) l(w)` answered four NULLs for PostgreSQL's 1,2,3,4 —
 	// the exact failure `column_alias_defer.go` exists to prevent, on the one
-	// FROM item never wired into it (round-2 review, B2).
+	// FROM item never wired into it (B2).
 	//
 	// REFUSED and not deferred, unlike the CTE and derived-table arms, because
 	// a decorrelated LATERAL JOINS on the column its correlated predicate
@@ -2601,7 +2601,7 @@ func buildLateralSubquery(outer *plansql.SelectInfo, left *Node, join plansql.Jo
 	// expression), where the body's own qualifier `i` names nothing: the
 	// stripped name bound the OUTER column wherever the enclosing relation
 	// publishes it too — `i.k = o.k - 0 AND i.id <> o.id` compared `o.id`
-	// with itself and answered zero rows (arc JP round 3, B7). The join emits
+	// with itself and answered zero rows (arc JP, B7). The join emits
 	// the body's column under `s.id` when it collides and `id` when it does
 	// not; `s.id` reads it either way.
 	for i, part := range correlatedParts {
@@ -2663,7 +2663,7 @@ func collectLogicalAliases(n *Node) map[string]bool {
 		// correlation `i.k = c.k - 0` was not recognized as one, stayed in
 		// the body, and `c.k - 0` reached the scan as a string: zero rows for
 		// a text key, `invalid input syntax for type bigint` for an integer
-		// one (arc JP round 3, B3).
+		// one (arc JP, B3).
 		switch {
 		case n.CTERefAlias != "":
 			aliases[strings.ToLower(n.CTERefAlias)] = true
@@ -2685,8 +2685,8 @@ func collectLogicalAliases(n *Node) map[string]bool {
 // read ON THE AST — the rule splitJoinConjuncts states for an ON clause
 // (#1178). The body's WHERE was split at every top-level AND of its TEXT,
 // cutting `q.qv BETWEEN o.total AND o.total + 20` (and a `CASE WHEN a AND b
-// …`) in two (arc JP round 4, B3); and the LOCAL terms were then rebuilt as
-// text and split again one layer down (round 5, B1). The terms are the parse's
+// …`) in two (arc JP, B3); and the LOCAL terms were then rebuilt as
+// text and split again one layer down (B1). The terms are the parse's
 // own nodes, so the correlated ones are rendered once for the key reading and
 // the local ones reach the body's filter as the nodes themselves. A WHERE with
 // no AST is parsed; one the expression parser cannot read is refused, never
@@ -2769,7 +2769,7 @@ func lateralKeySelectItem(innerCol string) (plansql.SelectColumn, bool) {
 // name ANOTHER item of the list publishes. The join resolves its key by that
 // name and took the first: `SELECT i.id AS m, i.k AS m … WHERE i.k = o.k`
 // keyed `o.k` on `i.id` (4 rows for PostgreSQL's 9, every arm, base = tip;
-// arc JP round 5). Such a key is minted into a slot like any other
+// arc JP). Such a key is minted into a slot like any other
 // collision, and both columns are published as written.
 func lateralKeyNamePublishedTwice(cols []plansql.SelectColumn, innerCol string) bool {
 	name, ok := lateralPublishedKeyName(cols, innerCol)
@@ -2820,7 +2820,7 @@ func lateralKeyNameCollides(cols []plansql.SelectColumn, innerCol string) bool {
 
 // lateralWindowsPerOuterRow makes every window of a correlated LATERAL body
 // read the rows ONE outer row sees, or refuses the body (ADR-0021 §1s, arc JP
-// round 5).
+// the earlier implementation).
 //
 // Decorrelation moves the correlated predicate OUT of the body into the join,
 // so a window computed over the rows the body sees would see every row
@@ -2831,7 +2831,7 @@ func lateralKeyNameCollides(cols []plansql.SelectColumn, innerCol string) bool {
 // arc LT's per-key partition (lateralBoundPerOuterRow) applied to the body's
 // windows. Every window counts — a SELECT item, one nested in a SELECT
 // expression, QUALIFY, HAVING, ORDER BY; bare items alone were asked until
-// round 5, so `QUALIFY row_number() OVER (ORDER BY i.v DESC) = 1` answered zero
+// the earlier implementation, so `QUALIFY row_number() OVER (ORDER BY i.v DESC) = 1` answered zero
 // rows (LEFT: every row NULL) on every arm and `row_number() OVER (…) + 0` the
 // whole relation's numbers (B2). A window in a NESTED subquery of the body
 // belongs to that subquery's block, which the decorrelation does not move. A
@@ -3005,7 +3005,7 @@ func respellKeyRefsToSlot(info *plansql.SelectInfo, innerCol, slot string) {
 		// The item keeps the NAME the query gave it: respelling what it
 		// reads does not rename what it publishes. An unaliased `i.k`
 		// respelled to the slot published `__key_0`, and the enclosing
-		// `s.k` then bound the outer relation's `k` (arc JP round 2).
+		// `s.k` then bound the outer relation's `k` (arc JP).
 		if c.Alias == "" {
 			c.Alias = plansql.OutputColumnName(*c)
 		}
@@ -3216,7 +3216,7 @@ func renameCorrelatedInnerRef(part string, keyRename map[string]string, rightAli
 	// `=`: an outer side `CASE WHEN o.k = 1 …` holds one of its own, and the
 	// split renamed nothing — the key slot was never read and the equality
 	// compared the outer value with the body's raw column above the join
-	// (zero rows on the single-process pipeline; arc JP round 3, B3).
+	// (zero rows on the single-process pipeline; arc JP, B3).
 	outer, inner := "", ""
 	if node, err := plansql.ParseExpression(part); err == nil && node != nil {
 		for {
@@ -3285,14 +3285,14 @@ func lateralSelectsColumn(cols []plansql.SelectColumn, innerCol string) bool {
 func extractInnerColumn(expr string, outerAliases map[string]bool) string {
 	// The equality's own two sides, from the parse — the first `=` of the
 	// TEXT is inside the outer side when that side is `CASE WHEN o.k = 1 …`
-	// (arc JP round 3, B3). One binding path: lateralCorrelatedEquality.
+	// (arc JP, B3). One binding path: lateralCorrelatedEquality.
 	if inner, _, ok := lateralCorrelatedEquality(expr, outerAliases); ok {
 		return inner.String()
 	}
 	// A part that PARSES and is not that equality has no inner key column,
 	// whatever `=` its text holds: the text split below read the `=` inside
 	// `q.qtag LIKE CASE WHEN o.k = 1 …` (or `(q.qv > o.total) = true`) as the
-	// key and minted `1 THEN …` as its inner side — zero rows (arc JP round 4,
+	// key and minted `1 THEN …` as its inner side — zero rows (arc JP,
 	// B3). The text path stays for a part the expression parser cannot read.
 	if node, err := plansql.ParseExpression(expr); err == nil && node != nil {
 		return ""

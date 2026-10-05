@@ -238,7 +238,7 @@ type QueryResponse struct {
 	// columns called `?column?` in PostgreSQL and here (#732), and `rows`
 	// carries one key for the three of them. `columns` is always the full
 	// positional list; a client that needs every value reads `values` when it
-	// is present (round-1 review B1).
+	// is present (case B1).
 	Values [][]any    `json:"values,omitempty"`
 	Stats  QueryStats `json:"stats"`
 	Error  string     `json:"error,omitempty"`
@@ -614,7 +614,7 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		// output columns legally publish one name (`SELECT g + 1, g + 2` is
 		// two `?column?`), so the key set answered ONE column for three and
 		// dropped two values with it. The positional form rides along for
-		// exactly that case (round-1 review B1).
+		// exactly that case (case B1).
 		for _, c := range collectSink.Schema() {
 			columns = append(columns, c.Name)
 		}
@@ -747,7 +747,7 @@ func (s *Server) dml() *wadjet.DB {
 	// column policy at all: `UPDATE e7emp SET dept = ssn` copied the STORED
 	// value of a masked column into a column the identity may read, and
 	// `DELETE FROM e7emp WHERE salary > 0` was answered from a DENIED column.
-	// The other two doors have carried it since #859 round 1; this one was
+	// The other two doors have carried it since #859; this one was
 	// built from a bare catalog and never given it.
 	//
 	// The attach is per statement because the DB is: `wadjet.Attach` builds a
@@ -797,7 +797,7 @@ func (s *Server) visibleTables(ctx context.Context, tables []string) []string {
 // which can disagree with the one that actually refused: an `env.hour`
 // condition that turned over between the two, or a hot reload landing between
 // them, would print a refusal for a request the second decision permits, or
-// the reverse (round-1 review P9). One decision per request.
+// the reverse (case P9). One decision per request.
 //
 // A caller holding the decision's ERROR renders `err.Error()` directly —
 // handleGetTable and mayWriteExistingTable do — and this is for the two

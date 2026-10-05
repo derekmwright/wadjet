@@ -15,7 +15,7 @@ import (
 // number or boolean bare, a TIMESTAMP in ISO 8601 with a `T`
 // ("2024-01-01T01:00:00"), a non-finite float and every other scalar as the
 // JSON string of its PostgreSQL text (FormatPGText). It is what
-// `CAST(container AS JSON)` answers (arc CW round 2): PostgreSQL has no such
+// `CAST(container AS JSON)` answers (arc CW): PostgreSQL has no such
 // cast and raises 42846, and the array's `{…}` text this engine answered
 // instead is not JSON — json_array_length over it was NULL.
 func FormatPGJSON(val any, col *parquet.Column) string {

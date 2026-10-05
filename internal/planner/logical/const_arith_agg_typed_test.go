@@ -106,7 +106,7 @@ func TestConstArithLiftDecidesFromTheColumnType(t *testing.T) {
 		// `SUM(f) + k*COUNT(f)` are different numbers as soon as the summands
 		// span enough magnitude to cancel. Over `1e16, 1, 1, 1, 1` PostgreSQL
 		// 17.11 answers 1.0000000000000008e+16 and the lifted form answers
-		// …004e+16 (round-1 review, B1).
+		// …004e+16 (B1).
 		// wadjet.TestConstArithLiftIsNotAppliedToFloatColumns is that fixture.
 		{"float64", "SUM(f + 3)", parquet.TypeFloat64, nil, nil, million,
 			"proj{s isagg=true ast=sum(f + 3)} agg{sum(f + 3)->s}"},
@@ -153,7 +153,7 @@ func TestConstArithLiftDecidesFromTheColumnType(t *testing.T) {
 		// AVG over a MULTIPLICATION declines: `AVG(col)` is a value rounded to
 		// four decimals, and multiplying it by k rounds before the multiply.
 		// PostgreSQL over 1, 2, 4: `avg(x*3)` is 7.0000000000000000 and
-		// `avg(x)*3` is 6.9999999999999999 (round-1 review, B2). `±` is exact
+		// `avg(x)*3` is 6.9999999999999999 (B2). `±` is exact
 		// and stays lifted, which is what makes this row a statement about the
 		// OPERATOR rather than about AVG.
 		{"int32_avg_times", "AVG(w * 3)", parquet.TypeInt32, nil, nil, million,

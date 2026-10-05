@@ -7,7 +7,7 @@ import (
 )
 
 // foldShortCircuitedSubqueries removes every subquery a constant decides is
-// never evaluated, before any path resolves one (#1411 review r2 B1).
+// never evaluated, before any path resolves one (#1411 measured case B1).
 //
 // PostgreSQL folds constants (eval_const_expressions) BEFORE it plans a
 // sublink: `false AND EXISTS (…)` and `true OR EXISTS (…)` are constants

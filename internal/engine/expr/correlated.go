@@ -113,7 +113,7 @@ type CorrelatedInSubquery struct {
 	// those two for a set neither builds.
 	SetBound int
 	// probeDecl / setDecl: a container probe's and the set's declarations,
-	// as on InSubquery (round 4, B4).
+	// as on InSubquery (B4).
 	probeDecl *operandDecl
 	setDecl   *parquet.Column
 }
@@ -448,7 +448,7 @@ func ScalarSubqueryValue(sql string, rows []map[string]any) (any, error) {
 // not an exception. Counting the rows cannot reach that case —
 // `(SELECT id, c_i64 FROM t WHERE id < 0)` returned no row, so there was
 // nothing to count, and the scalar answered SQL NULL where PostgreSQL raises
-// (round-1 P1). Asking the plan reaches it, and reaches a two-column subquery
+// (case P1). Asking the plan reaches it, and reaches a two-column subquery
 // over a two-row relation in the right order as well.
 //
 // cols is nil when nothing could resolve the arity — a compile site with no
@@ -749,7 +749,7 @@ func refuseWindowBorneCorrelation(kind, sql string, info *plansql.SelectInfo,
 }
 
 // A PER-ROW RE-RUN SUBSTITUTES INTO EVERY CLAUSE IT REBUILDS, AND REFUSES WHAT
-// IT COULD NOT REACH (#1044 round 2).
+// IT COULD NOT REACH (#1044).
 //
 // rerunSQL is the ONE text a correlated re-run runs, for all three constructs.
 // It reads the outer row's values, rewrites them into every clause
@@ -986,7 +986,7 @@ func refuseUnrebuildableBody(kind, sql string, info *plansql.SelectInfo,
 // enclosing ones, and both the logical builder (first match) and the physical
 // CTE cache (keyed by name) then read the ENCLOSING item — a zero-row answer
 // where PostgreSQL answers `1 | 2` for same-schema items, a missing-column
-// refusal otherwise (arc DC round 5; docs/internals/nested-with-scope-precedence.md
+// refusal otherwise (arc DC; docs/internals/nested-with-scope-precedence.md
 // records why the precedence cannot simply be reversed). Loud, with its
 // construct named, until the CTE identity is scope-aware.
 type ShadowingWithError struct {

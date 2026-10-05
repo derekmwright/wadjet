@@ -61,7 +61,7 @@ func rewriteDistinctAsGroupBy(n *Node) *Node {
 // the Distinct, `FROM lt_o o CROSS JOIN (SELECT DISTINCT i.k FROM lt_i i) s
 // WHERE s.k = o.k + 1` qualified the build's `k` by the SCAN's alias `i`, and
 // `s.k` then bound the OUTER `k` — zero rows for PostgreSQL's two, on every
-// arm (arc JP round 2). The WITH list travels for the reason it always did:
+// arm (arc JP). The WITH list travels for the reason it always did:
 // the Distinct may be the plan root.
 func inheritRootNaming(dst, src *Node) {
 	if dst.DerivedAlias == "" {

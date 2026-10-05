@@ -504,7 +504,7 @@ func ResolveColumn(name, typeStr string) (Column, error) {
 			// accepts and the writer cannot store is a table that fails at its
 			// first flush — and at 0a3da4ff it was worse than that:
 			// VECTOR(4611686018427387905) was accepted here and wrote a file
-			// declaring a four-byte leaf (#971, round-1 B1).
+			// declaring a four-byte leaf (#971, the earlier implementation B1).
 			dim := parseVectorDim(inner)
 			if _, err := vectorTypeLength(dim); err != nil {
 				if dim <= 0 {

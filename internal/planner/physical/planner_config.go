@@ -69,7 +69,7 @@ type Planner struct {
 	// from every parallel pipeline goroutine — so an INHERITED map is N child
 	// planners writing one map concurrently, which `-race` reports inside
 	// scalarSubqueryColumnDecl and which the Go runtime may turn into a fatal
-	// concurrent map write that no recover() can catch (#1018 round 6 review,
+	// concurrent map write that no recover() can catch (#1018 measurement,
 	// B2). Sharing it across builds bought nothing the memo promises: the
 	// saving it exists for is a subquery text written TWICE IN ONE PLAN, and
 	// that is a within-build question.
@@ -89,7 +89,7 @@ type Planner struct {
 	// declare `WITH RECURSIVE r`, and they are two relations: keying the
 	// statement-wide cteCache by name alone let the second materialization
 	// overwrite the first and BOTH references read the second one's rows
-	// (#1047 round 1). The name key is still what the fixed-point iteration
+	// (#1047). The name key is still what the fixed-point iteration
 	// seeds for the self-reference, and is restored to whatever it held when
 	// the materialization is done.
 	nestedCTECache map[*plansql.CTEDef]*cteMaterialized

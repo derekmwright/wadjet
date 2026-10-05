@@ -59,7 +59,7 @@ func (p *Planner) forSubquery() *Planner {
 	// goroutine — so an inherited map is one map that N child planners write
 	// at once, which the race detector reports and which Go's runtime can
 	// turn into a fatal concurrent map write no recover() can catch (#1018
-	// round 6 review, B2). A child gets its own; memoization is a
+	// the earlier measurement, B2). A child gets its own; memoization is a
 	// within-one-build economy, never a promise across builds.
 	sub.subqueryDeclCache = &subqueryDeclMemo{}
 	sub.MaterializedInputs = nil
@@ -177,8 +177,8 @@ func outerDeclsOf(scope *logical.Node) expr.OuterDeclFunc {
 // It is what lets a construct requiring ONE column refuse before the subquery
 // runs, which is PostgreSQL's order — `subquery must return only one column`
 // is a parse-analysis error there, so it fires over an EMPTY subquery too
-// (round-1 P1). Counting rows cannot reach that case and counting the row map
-// cannot see two columns that share a name (round-1 B1); the declared schema
+// (case P1). Counting rows cannot reach that case and counting the row map
+// cannot see two columns that share a name (case B1); the declared schema
 // is positional and knows both.
 //
 // It recovers from a panic and answers not-known for anything it cannot plan,
@@ -228,7 +228,7 @@ func (p *Planner) SubqueryOutputArity(sql string) (n int, ok bool) {
 // `Plan.OutputSchema` — for a door that assembles a result set from batches it
 // may not have.
 //
-// The ASYNC door is that door (#1008 round 2): `SubmitSQL` plans stages and
+// The ASYNC door is that door (#1008): `SubmitSQL` plans stages and
 // `GetQueryResults` reads the columns off the gathered batches, of which a
 // ZERO-ROW query has none, and the DAG's own `GatherOutputSchema` describes a
 // gather stage that a one-stage plan does not have. Every zero-row SELECT
@@ -256,10 +256,10 @@ func (p *Planner) DeclaredOutputSchema(plan *logical.Node) []parquet.Column {
 	// `(SELECT SUM(d) FROM c)` was DECIMAL(38,10) executed and FLOAT64
 	// declared, and an append into the declared table stored
 	// 1.2345678901234123e+13 for a number the executed arm and PostgreSQL
-	// 17.11 both store as 12345678901234.1234567892 (round-4 review B1).
+	// 17.11 both store as 12345678901234.1234567892 (case B1).
 	//
 	// The NAMES are seeded, not the bodies: nothing here runs a CTE, which is
-	// what keeps the caller's zero-read property (round-3 B1). Restored on the
+	// what keeps the caller's zero-read property (case B1). Restored on the
 	// way out because this walk is also called from inside a plan that has its
 	// own WITH list.
 	if len(plan.CTEs) > 0 {
@@ -474,7 +474,7 @@ func (p *Planner) buildSubqueryPipelineForPlan(ctx context.Context, info *plansq
 		// The invariant over THIS plan too. A subquery's predicates are
 		// pushed here, and one that ends up between a security projection and
 		// its scan reads the stored column exactly as it would in the outer
-		// plan (#859 round 4).
+		// plan (#859).
 		if err := p.CheckPolicyPlanOrderFromContext(ctx, logicalPlan); err != nil {
 			return nil, nil, nil, nil, err
 		}
@@ -493,7 +493,7 @@ func (p *Planner) buildSubqueryPipelineForPlan(ctx context.Context, info *plansq
 		// An authorization refusal raised while the pipeline is BUILT — the
 		// table-function guard `buildScan` asks (#943) is the one that gets
 		// here — is the decision's own sentence, not a planning narrative
-		// about the subquery (ADR-0034 item 6; round-1 P1).
+		// about the subquery (ADR-0034 item 6; the earlier implementation P1).
 		if sqlerr.StateOf(err) == "42501" {
 			return nil, nil, nil, nil, err
 		}

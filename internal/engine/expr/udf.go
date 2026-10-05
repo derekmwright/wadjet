@@ -229,7 +229,7 @@ func (s *UDFStore) Unregister(name, caller string, isAdmin bool) error {
 		// 42883 undefined_function, PostgreSQL's class for DROP FUNCTION
 		// over a name that is not there. Without it `DROP FUNCTION nosuchfn`
 		// answered with the message alone on every door while the API
-		// reference promised a class (arc E2 round-3 B1).
+		// reference promised a class (arc E2 B1).
 		return sqlerr.New("42883", "function %q does not exist", name)
 	}
 	if existing.def.Locked && existing.def.Owner != "" &&

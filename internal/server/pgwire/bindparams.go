@@ -110,7 +110,7 @@ func quoteLiteral(s string) string {
 // the quoted literal it was before is SQL's `unknown`, which each consumer then
 // read through its own input function a second time — a comparison or an
 // assignment beside a BYTES column through byteain, so the binary bytes
-// `00 ff 5c` became an escape and refused 22P02 (parameters-pgwire#r10/#r11),
+// `00 ff 5c` became an escape and refused 22P02 (parameters-pgwire#r10),
 // and `SELECT $1` answered text. The HEX form, because it round-trips every
 // byte exactly — a NUL, invalid UTF-8 and a backslash included.
 func byteaParamLiteral(raw []byte) string {
@@ -510,7 +510,7 @@ func renderBinaryParam(raw []byte, oid uint32) (string, error) {
 		// (bytearecv): no input function reads them, so they are written as
 		// the typed value they are (byteaParamLiteral). Spliced raw into a
 		// quoted literal, a backslash among them was read by byteain a second
-		// time and refused 22P02 (parameters-pgwire#r11).
+		// time and refused 22P02 (parameters-pgwire#r10).
 		return byteaParamLiteral(raw), nil
 
 	case oidNumeric:
@@ -793,7 +793,7 @@ func untypedLiteral(lit string) string {
 
 // windowDefaultLiteral is a parameter's spelling as a LAG / LEAD default: the
 // untyped literal (untypedLiteral), except a BYTES value, which keeps its
-// CAST (#1501, arc BY round 2). The two positions that take an untyped
+// CAST (#1501, arc BY). The two positions that take an untyped
 // literal differ in who reads it: a MERGE action's value is read by the
 // TARGET column's input function — byteain for a BYTES column, which turns
 // `'\x6869'` back into the bytes, and a TEXT column stores exactly the

@@ -21,7 +21,7 @@ import (
 	"github.com/derekmwright/wadjet/wadjet"
 )
 
-// The statement clock under an ADVANCING clock (#1566, round 2): the one
+// The statement clock under an ADVANCING clock (#1566, the earlier implementation): the one
 // accessor's clock is replaced by one that moves on one second at every
 // read, so a statement that reads the clock anywhere but its own stamp —
 // a plan-time fold, a worker, a second door — answers a different instant
@@ -51,8 +51,8 @@ func scPRows() []map[string]any {
 	return rows
 }
 
-// scAdvCells is the advancing-clock table: round 1's positions and the
-// round-1 review's (window integer arguments, TABLESAMPLE, table-function
+// scAdvCells is the advancing-clock table: the earlier implementation's positions and the
+// the earlier measurement's (window integer arguments, TABLESAMPLE, table-function
 // arguments, LIMIT / OFFSET, an IN list, a CAST argument, a partition
 // predicate, a CREATE FUNCTION body). "DDL" cells run before the others.
 func scAdvCells() []scCell {

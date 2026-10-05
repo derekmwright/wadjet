@@ -54,7 +54,7 @@ var wdConsumerKeptArms = map[string]map[string]string{
 }
 
 // EVERY CONSUMER ABOVE A WINDOW OVER A DERIVED TABLE THAT SHADOWS A COLUMN OF
-// ITS OWN INPUT, ON EVERY ARM (#1435 round 5). Above `(SELECT id, g, b * 2 AS
+// ITS OWN INPUT, ON EVERY ARM (#1435). Above `(SELECT id, g, b * 2 AS
 // b, b AS ob FROM wd_t) s` the name `b` is the derived table's computed column
 // and `ob` its rename of the source; the shadowed source column itself does
 // not exist. The stage DAG's producer emits the table's declared columns under
@@ -76,7 +76,7 @@ var wdConsumerKeptArms = map[string]map[string]string{
 // join shapes × six windows × a shadowing or non-shadowing alias), h2/ and
 // r4h/ (stacked windows, whose window-key names collided on the DAG), r4v/
 // (eight window readings × 33 consumers), ag/scalar_agg/ and c/sh/agg/ (a
-// window key over an alias computed over an aggregate) are review round 4's
+// window key over an alias computed over an aggregate) are the measured
 // cells.
 //
 // At bba3c944 the DAG arms answered a JOIN above the window from the shadowed

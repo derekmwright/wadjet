@@ -75,7 +75,7 @@ func TestInferCastTypeInt32DomainSpellings(t *testing.T) {
 	// declaration change without a kernel change is the #310/#443 shape in
 	// the other direction.
 	//
-	// VECTOR left this list in arc CW round 2: Cast.Eval converts to it
+	// VECTOR left this list in arc CW: Cast.Eval converts to it
 	// (pgvector's array_to_vector / vector_in), so it declares VECTOR — the
 	// pass-through text it answered made every vector function read NULL.
 	//

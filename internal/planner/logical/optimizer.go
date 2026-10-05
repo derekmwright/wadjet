@@ -607,7 +607,7 @@ func pushColumnNeeds(n *Node, parentNeeds map[string]bool) {
 	// the stream that reaches the gather does not carry it, and the gather's
 	// `OutputRename{__win_0 -> w}` silently falls back to the producer's raw
 	// columns: `SELECT x.id, x.w FROM (SELECT id, SUM(a) OVER () AS w FROM t) x
-	// JOIN t y ON …` came back as `[id, y.id]` (#694 round 2, R1).
+	// JOIN t y ON …` came back as `[id, y.id]` (#694, R1).
 	//
 	// This is the rule the NodeSort arm of collectNodeColumnRefs already
 	// applies to `__sortkey_N` and for the same reason. It is stated here
@@ -1339,7 +1339,7 @@ func tryDecorrelateScalarSubquery(pred Predicate, outerTables map[string]bool, o
 		// publishes is the body's even when the enclosing query has one too
 		// (`EXISTS (SELECT 1 FROM dc_side c WHERE id = c.j)` is c.id = c.j,
 		// not o.id = c.j) — and it is TPC-H Q2's rule: `ps_partkey` is the
-		// body's, `p_partkey` is not (arc DC round 3, B2).
+		// body's, `p_partkey` is not (arc DC, B2).
 		outerColMap = bodyOuter
 		if refs2, err2 := plansql.FindCorrelatedRefsWithScope(subq.SQL, outerTables, outerColMap,
 			plansql.CTEColumns(scopeCTEs(ctes, info.CTEs), nil)); err2 == nil {
@@ -1978,7 +1978,7 @@ func tryDecorrelateInSubquery(inExpr *plansql.InExpr, subq *plansql.SubqueryNode
 		// publishes is the body's even when the enclosing query has one too
 		// (`EXISTS (SELECT 1 FROM dc_side c WHERE id = c.j)` is c.id = c.j,
 		// not o.id = c.j) — and it is TPC-H Q2's rule: `ps_partkey` is the
-		// body's, `p_partkey` is not (arc DC round 3, B2).
+		// body's, `p_partkey` is not (arc DC, B2).
 		outerColMap = bodyOuter
 	}
 	liftedON, blocked := liftBodyOuterConditions(info, outerTables, innerTableSet, bodyOuter, undecided, true)
@@ -2229,9 +2229,9 @@ func pushdownPredicates(n *Node) *Node {
 			// LATERAL (SELECT * FROM (SELECT id AS xxid, … FROM lt_i) i WHERE
 			// i.xxk = o.xxk AND i.xxv > 10) s` then qualified the arm's
 			// duplicate `xxid` as `i.xxid`, `s.xxid` matched nothing, and its
-			// qualifier strip bound the OUTER `xxid` (arc JP round 5: reached
+			// qualifier strip bound the OUTER `xxid` (arc JP: reached
 			// once the body's local WHERE compiled). The alias REPLACES the
-			// Project's, as the lateral's does at build time (round 4, B2).
+			// Project's, as the lateral's does at build time (B2).
 			root := child
 			if len(kept) > 0 {
 				root = NewFilter(child, kept)
@@ -3069,8 +3069,8 @@ func collectScanInfoRec(n *Node, tables map[string]bool, colToTable map[string]s
 	// below it to publish the name. Without it an unqualified `t2` inside a
 	// correlated subquery over this relation was not an enclosing column at
 	// all, so the body walk never read it as one: `HAVING SUM(b.amt) > t2`
-	// was dropped by the EXISTS rewrite and answered every row (arc DC round
-	// 4; Codex review B1 / N5). The CTE spelling of the same relation already
+	// was dropped by the EXISTS rewrite and answered every row (arc DC change
+	// ; Codex review B1 / N5). The CTE spelling of the same relation already
 	// answered, through the branch above.
 	if derivedOutputs && n.DerivedAlias != "" && len(cteScopeNames(n)) == 0 {
 		scope := strings.ToLower(n.DerivedAlias)
@@ -3532,7 +3532,7 @@ func tryDecorrelateExists(exists *plansql.ExistsNode, outerTables map[string]boo
 		// publishes is the body's even when the enclosing query has one too
 		// (`EXISTS (SELECT 1 FROM dc_side c WHERE id = c.j)` is c.id = c.j,
 		// not o.id = c.j) — and it is TPC-H Q2's rule: `ps_partkey` is the
-		// body's, `p_partkey` is not (arc DC round 3, B2).
+		// body's, `p_partkey` is not (arc DC, B2).
 		outerColMap = bodyOuter
 	}
 	liftedON, blocked := liftBodyOuterConditions(info, outerTables, innerTables, bodyOuter, undecided, false)
@@ -3737,7 +3737,7 @@ func flattenASTNodes(node plansql.Node, result *[]plansql.Node) {
 // planned single-process (an alias list over a catalog table renames a `SELECT
 // *` the physical planner did not expand — a pre-existing refusal), so the
 // rewrite DECLINES and the subquery runs per outer row, which answers
-// PostgreSQL's rows on every arm (arc DC round 5; measured: without this,
+// PostgreSQL's rows on every arm (arc DC; measured: without this,
 // only the `catalog_alias` cells regress, all to that refusal).
 func residualSidesCollide(outer, inner KeyRef, info *plansql.SelectInfo, ctes []plansql.CTEDef) bool {
 	if outer.Column == "" || !strings.EqualFold(outer.Column, inner.Column) {

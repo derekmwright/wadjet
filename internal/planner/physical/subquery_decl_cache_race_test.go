@@ -9,10 +9,10 @@ import (
 	"testing"
 )
 
-// TestTheScalarSubqueryDeclarationMemoIsOwnedByOneBuild is the reviewer's #1018
-// round-6 B2 probe, promoted.
+// TestTheScalarSubqueryDeclarationMemoIsOwnedByOneBuild is the recorded #1018
+// the earlier implementation B2 probe, promoted.
 //
-// The memo added in round 6 (annotateSubqueryColumnDecls → scalarSubqueryColumnDecl)
+// The memo added in the earlier implementation (annotateSubqueryColumnDecls → scalarSubqueryColumnDecl)
 // is a plain map on the Planner. forSubquery SHALLOW-COPIES the Planner, so
 // before the reset this test pins, every child planner inherited the PARENT's
 // map header — and the subquery runner baked into a compiled expression is
@@ -20,7 +20,7 @@ import (
 // a scalar subquery is what initializes the map; eight concurrent child plans
 // then wrote it at once, and `-race` reported concurrent map access inside
 // scalarSubqueryColumnDecl. Go can also turn that into a fatal concurrent map
-// write, which the round-6 recover() cannot catch: a fatal error is not a
+// write, which the earlier implementation recover() cannot catch: a fatal error is not a
 // panic.
 //
 // It uses the same seam as #334's TestSubqueryRunnerConcurrent — the real

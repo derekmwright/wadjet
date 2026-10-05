@@ -14,7 +14,7 @@ import (
 // and never otherwise: under a WHEN no row satisfies, behind an AND whose
 // left operand is false, behind an OR whose left is true, or behind a
 // COALESCE argument that is not NULL, behind a filter's NULL AND. That is the whole of the rule the stage
-// planner relies on (#1411 review r3 B1): PostgreSQL runs an uncorrelated
+// planner relies on (#1411 measured case B1): PostgreSQL runs an uncorrelated
 // sublink when it is first referenced.
 func TestDeferredErrorRaisesOnlyWhereARowEvaluatesIt(t *testing.T) {
 	const fail = "cast(__deferred_error('2202H', 'sample percentage must be between 0 and 100') as boolean)"

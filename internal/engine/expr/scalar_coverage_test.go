@@ -1242,7 +1242,7 @@ func TestFnCurrentDate(t *testing.T) {
 	if result == nil {
 		t.Fatal("expected non-nil")
 	}
-	// DATE-declared, so the DATE box: epoch days (#1254, arc VL round 3).
+	// DATE-declared, so the DATE box: epoch days (#1254, arc VL).
 	days, ok := result.(int64)
 	if !ok || len(batch.FormatDate(int32(days))) != 10 {
 		t.Errorf("expected an epoch-day DATE box, got %v (%T)", result, result)

@@ -1,0 +1,574 @@
+file	line	before	after
+internal/coordinator/arc_by_r2_reentry_positions_arms_test.go	24	// Arc BY round 2 (#1501, review r1 B2): a BYTES value that re-enters SQL text	// Arc BY (#1501, measured case B2): a BYTES value that re-enters SQL text
+internal/coordinator/arc_by_r2_reentry_positions_arms_test.go	106	// at c67ebf5b and at the round-2 tip alike — none is the re-entry spelling,	// at c67ebf5b and at the earlier implementation tip alike — none is the re-entry spelling,
+internal/coordinator/arc_c2_subquery_correlation_two_path_test.go	389	// (round-2 review, B1). The rewrite fires where the ENCLOSING BLOCK	// (B1). The rewrite fires where the ENCLOSING BLOCK
+internal/coordinator/arc_c2_subquery_correlation_two_path_test.go	433	// select-list POSITION rather than as a value (round-3 review, P4).	// select-list POSITION rather than as a value (P4).
+internal/coordinator/arc_c2_subquery_correlation_two_path_test.go	475	// --- #1044's own shape WITH a FROM clause (round-2 review, P1).	// --- #1044's own shape WITH a FROM clause (P1).
+internal/coordinator/arc_c2_subquery_correlation_two_path_test.go	532	// instead of a silent NULL (round-2 review, N1), and a star with no	// instead of a silent NULL (N1), and a star with no
+internal/coordinator/arc_c2_subquery_correlation_two_path_test.go	571	// --- AN ORDER BY TERM IS NEVER REWRITTEN INTO AN ORDINAL (round-2	// --- AN ORDER BY TERM IS NEVER REWRITTEN INTO AN ORDINAL (
+internal/coordinator/arc_c2_subquery_correlation_two_path_test.go	636	// round 3 hid it by rewriting the term to an ordinal, which	// the earlier implementation hid it by rewriting the term to an ordinal, which
+internal/coordinator/arc_c2_subquery_correlation_two_path_test.go	647	// refused there instead of answering a constant (round-2 review, P1).	// refused there instead of answering a constant (P1).
+internal/coordinator/arc_c2_subquery_correlation_two_path_test.go	665	// (round-2 review, P3).	// (P3).
+internal/coordinator/arc_c2_subquery_correlation_two_path_test.go	681	// the client as the #361 silent-write guard's message (round-2	// the client as the #361 silent-write guard's message (
+internal/coordinator/arc_c2_subquery_correlation_two_path_test.go	712	// and answers (round-2 review, P2 — the docs said otherwise).	// and answers (P2 — the docs said otherwise).
+internal/coordinator/arc_c2_subquery_correlation_two_path_test.go	726	// (round-3 review, B1). The refusal exists for a nested subquery whose	// (B1). The refusal exists for a nested subquery whose
+internal/coordinator/arc_c2_subquery_correlation_two_path_test.go	757	// stands (round-2 review, P4's shapes).	// stands (P4's shapes).
+internal/coordinator/arc_c2_subquery_correlation_two_path_test.go	770	// (round-3 review, B2). `GROUP BY (SELECT 1)` rewritten to `1` passed	// (B2). `GROUP BY (SELECT 1)` rewritten to `1` passed
+internal/coordinator/arc_c2_subquery_correlation_two_path_test.go	806	// SCOPE HAS TO SAY SO (round-5 review, B2). A union node has no FROM,	// SCOPE HAS TO SAY SO (B2). A union node has no FROM,
+internal/coordinator/arc_c2_subquery_correlation_two_path_test.go	859	// AND NOTHING ELSE (round-5 addendum, round-3's c16). PostgreSQL	// AND NOTHING ELSE (additional case, the earlier implementation's c16). PostgreSQL
+internal/coordinator/arc_c2_subquery_correlation_two_path_test.go	889	// The rule reads the PARSE, not the text (round-5 review, P1).	// The rule reads the PARSE, not the text (P1).
+internal/coordinator/arc_c2_subquery_correlation_two_path_test.go	934	// --- A JOIN'S ON CONDITION IS A CLAUSE THE WALK READS (round-3	// --- A JOIN'S ON CONDITION IS A CLAUSE THE WALK READS (
+internal/coordinator/arc_c2_subquery_correlation_two_path_test.go	944	// (round-3 review, P4). A sort with no slice cannot change which rows	// (P4). A sort with no slice cannot change which rows
+internal/coordinator/arc_c2_subquery_correlation_two_path_test.go	960	// declined (round-4 review, P2): `ORDER BY u.id` renders `ORDER BY	// declined (P2): `ORDER BY u.id` renders `ORDER BY
+internal/coordinator/arc_c2_subquery_correlation_two_path_test.go	987	// CORRELATE ON, WHICHEVER CLAUSE NAMES IT (round-4 review, P1). The	// CORRELATE ON, WHICHEVER CLAUSE NAMES IT (P1). The
+internal/coordinator/arc_c2_subquery_correlation_two_path_test.go	1030	// WHERE had demoted to inner, where nothing placed it. Arc DC round 2	// WHERE had demoted to inner, where nothing placed it. Arc DC
+internal/coordinator/arc_cm_volatile_cte_arms_test.go	33	// The table is the round-1 enumeration (reference count × position × body) plus	// The table is the earlier implementation enumeration (reference count × position × body) plus
+internal/coordinator/arc_cm_volatile_cte_arms_test.go	34	// the round-2 consumer-filter cells and the UNBEGUN ones — a reference under a	// the earlier implementation consumer-filter cells and the UNBEGUN ones — a reference under a
+internal/coordinator/arc_cm_volatile_cte_cells_test.go	5	// cmCells is generated from the arc CM round-2 measurements: the SQL, PostgreSQL	// cmCells is generated from the arc CM measurements: the SQL, PostgreSQL
+internal/coordinator/arc_d5_correlation_two_path_test.go	133	// round-1 review P2).	// the earlier measurement P2).
+internal/coordinator/arc_d5_correlation_two_path_test.go	142	// round 3 (dagplan.ErrLateralIdentityDistributed) before stage planning	// the earlier implementation (dagplan.ErrLateralIdentityDistributed) before stage planning
+internal/coordinator/arc_d5_correlation_two_path_test.go	400	// An ARRAY outer value is no longer in that class: arc CW round 5	// An ARRAY outer value is no longer in that class: arc CW
+internal/coordinator/arc_d5_correlation_two_path_test.go	659	// DEFAULT row. Round 1's review reported this spelling as diverging	// DEFAULT row. the earlier implementation's measurement reported this spelling as diverging
+internal/coordinator/arc_d5_correlation_two_path_test.go	683	// CLOSED by arc J1 round 3, and the two cells are its proof. The	// CLOSED by arc J1, and the two cells are its proof. The
+internal/coordinator/arc_d5_correlation_two_path_test.go	804	// THE BOUNDARY of the repair, and it is LOUD now (arc J1 round 5).	// THE BOUNDARY of the repair, and it is LOUD now (arc J1).
+internal/coordinator/arc_d5_correlation_two_path_test.go	899	// star), then a REFUSAL (round 2, which also refused queries whose	// star), then a REFUSAL (which also refused queries whose
+internal/coordinator/arc_d5_correlation_two_path_test.go	944	// every arm since round 3, there is no projection to publish the	// every arm since the earlier implementation, there is no projection to publish the
+internal/coordinator/arc_d5_correlation_two_path_test.go	1992	// The walk DOES descend (#955, round-1 review B2) — it had to, because	// The walk DOES descend (#955, the earlier measurement B2) — it had to, because
+internal/coordinator/arc_d5_correlation_two_path_test.go	2000	// and 21000 if the subquery is hoisted (round-1 review P2). So a	// and 21000 if the subquery is hoisted (case P2). So a
+internal/coordinator/arc_h2_window_declared_type_census_test.go	267	// aggregate uses. Round 1 found that: reverting the PROTOCOL arm of	// aggregate uses. The counter-example shows that: reverting the PROTOCOL arm of
+internal/coordinator/arc_h2_window_declared_type_census_test.go	330	"// — ""a computed window argument keeps float8"" — and round 1 measured"	"// — ""a computed window argument keeps float8"" — and the measurements showed"
+internal/coordinator/arc_h2_window_declared_type_census_test.go	388	// #987 review B1: the SAME question, WINDOWED. Round 2's fix read the	// #987 measurement B1: the SAME question, WINDOWED. the earlier implementation's fix read the
+internal/coordinator/arc_h2_window_declared_type_census_test.go	431	// #987 review ROUND 3, B1: a CAST is an operand whose width is its	// #987 measured case, B1: a CAST is an operand whose width is its
+internal/coordinator/arc_j1_default_types_two_path_test.go	52	// BECAUSE IT IS AN EXPRESSION AND NOT A STAMPED VALUE (#977, arc J1 round 5).	// BECAUSE IT IS AN EXPRESSION AND NOT A STAMPED VALUE (#977, arc J1).
+internal/coordinator/arc_j1_default_types_two_path_test.go	54	// Round 4 carried the default as TEXT and wrote it into the padded row's	// The earlier implementation carried the default as TEXT and wrote it into the padded row's
+internal/coordinator/arc_j1_default_types_two_path_test.go	73	//   - Alice — a MATCHED row whose own value is NULL. Round 3 stamped these.	//   - Alice — a MATCHED row whose own value is NULL. The earlier implementation stamped these.
+internal/coordinator/arc_j1_default_types_two_path_test.go	74	//   - Bob   — a MATCHED row with a value. Round 4 emptied these.	//   - Bob   — a MATCHED row with a value. The earlier implementation emptied these.
+internal/coordinator/arc_j1_default_types_two_path_test.go	209	// ROUND 5 PINNED THE DAG HERE AND THE PIN WAS BUILT ON THE HALF THAT COULD NOT	// THE EARLIER IMPLEMENTATION PINNED THE DAG HERE AND THE PIN WAS BUILT ON THE HALF THAT COULD NOT
+internal/coordinator/arc_j1_default_types_two_path_test.go	312	// before stage planning since arc JP round 3	// before stage planning since arc JP
+internal/coordinator/arc_j1_default_types_two_path_test.go	340	// THE NAMED SPELLING OVER THE SAME LATERAL IS NOT ROUTED (#984, arc J1 round 6).	// THE NAMED SPELLING OVER THE SAME LATERAL IS NOT ROUTED (#984, arc J1).
+internal/coordinator/arc_j1_default_types_two_path_test.go	397	// DISPOSITION IS THE CLAIM (#984, arc J1 round 6; retriggered by arc K3).	// DISPOSITION IS THE CLAIM (#984, arc J1; retriggered by arc K3).
+internal/coordinator/arc_j1_default_types_two_path_test.go	507	// NULL WHERE POSTGRESQL SAYS 0 (arc J1 round 5).	// NULL WHERE POSTGRESQL SAYS 0 (arc J1).
+internal/coordinator/arc_sc_advancing_clock_test.go	24	// The statement clock under an ADVANCING clock (#1566, round 2): the one	// The statement clock under an ADVANCING clock (#1566, the earlier implementation): the one
+internal/coordinator/arc_sc_advancing_clock_test.go	54	// scAdvCells is the advancing-clock table: round 1's positions and the	// scAdvCells is the advancing-clock table: the earlier implementation's positions and the
+internal/coordinator/arc_sc_advancing_clock_test.go	55	// round-1 review's (window integer arguments, TABLESAMPLE, table-function	// the earlier measurement's (window integer arguments, TABLESAMPLE, table-function
+internal/coordinator/arc_tb_deferred_subquery_failure_test.go	22	// EVALUATED, NOT WHEN IT IS PLANNED (#1411 review r3 B1), on seven arms.	// EVALUATED, NOT WHEN IT IS PLANNED (#1411 measured case B1), on seven arms.
+internal/coordinator/arc_tb_probe_split_sample_test.go	22	// (#1411 review r2 P1: ~740 of 1000 keys answered a count PostgreSQL cannot	// (#1411 measured case P1: ~740 of 1000 keys answered a count PostgreSQL cannot
+internal/coordinator/arc_tb_tablesample_arms_test.go	40	// ON / SELECT-list scalar subquery alike. Round 1 (a38dba67) routed every	// ON / SELECT-list scalar subquery alike. The earlier implementation (a38dba67) routed every
+internal/coordinator/arc_tb_tablesample_arms_test.go	45	// Round 2 reverts that route: the worker's scan fragment applies the same	// The scan fragment owns the sampling: the worker's scan fragment applies the same
+internal/coordinator/arc_tb_tablesample_arms_test.go	87	// A sampled scan runs ON THE DAG (round 2): the statement is	// A sampled scan runs ON THE DAG (): the statement is
+internal/coordinator/arc_tb_tablesample_arms_test.go	218	// real's input refuses what float4in refuses (review r1 B3): a `_`	// real's input refuses what float4in refuses (measured case B3): a `_`
+internal/coordinator/arc_tb_tablesample_arms_test.go	220	// refused these 42601; round 1 answered a 10 % and a 0 % sample)	// refused these 42601; the earlier implementation answered a 10 % and a 0 % sample)
+internal/coordinator/arc_tb_tablesample_arms_test.go	290	// what is left (review r1 B1: round 1 returned the deleted rows under	// what is left (measured case B1: the earlier implementation returned the deleted rows under
+internal/coordinator/arc_tb_tablesample_arms_test.go	308	// a producer stage on the DAG — not routed (review r1 B2: round 1 read it	// a producer stage on the DAG — not routed (measured case B2: the earlier implementation read it
+internal/coordinator/arc_tb_tablesample_arms_test.go	326	// A 20 000-row sampled join runs on the DAG (review r1 P2: under a 64 KiB	// A 20 000-row sampled join runs on the DAG (measured case P2: under a 64 KiB
+internal/coordinator/arc_tb_tablesample_arms_test.go	327	// fast path round 1 refused the 100 % join on the local budget, where	// fast path the earlier implementation refused the 100 % join on the local budget, where
+internal/coordinator/arc_tb_tablesample_arms_test.go	356	// a constant-false WHERE or HAVING or a LIMIT 0, so it answers (review r1	// a constant-false WHERE or HAVING or a LIMIT 0, so it answers (measured case
+internal/coordinator/arc_tb_tablesample_arms_test.go	357	// B4: base 9420d256 answered these; round 1 raised 2202H on every arm).	// B4: base 9420d256 answered these; the earlier implementation raised 2202H on every arm).
+internal/coordinator/arc_tb_tablesample_arms_test.go	374	// NULL conjunct before it plans a sublink (review r2 B1: the DAG arms	// NULL conjunct before it plans a sublink (measured case B1: the DAG arms
+internal/coordinator/arc_tb_tablesample_arms_test.go	403	// arm does (review r2 B1: every coded refusal but 42501 was swallowed	// arm does (measured case B1: every coded refusal but 42501 was swallowed
+internal/coordinator/arc_tb_tablesample_arms_test.go	431	// (review r1 N3), and raises the coercion's own failure.	// (measured case N3), and raises the coercion's own failure.
+internal/coordinator/arc_tb_tablesample_arms_test.go	444	// The alias position (other r19, review r1 N4): PostgreSQL takes the	// The alias position (other r19, measured case N4): PostgreSQL takes the
+internal/coordinator/arc_tb_tablesample_arms_test.go	449	// real's input function, outside TABLESAMPLE (review r1 B3).	// real's input function, outside TABLESAMPLE (measured case B3).
+internal/coordinator/arc_tc_timestamp_text_compare_arms_test.go	321	// that is not a stored column compared directly (review r1 B3).	// that is not a stored column compared directly (measured case B3).
+internal/coordinator/arc_tc_timestamp_text_compare_arms_test.go	333	// date_trunc over a DATE answers a TIMESTAMP (review r2 P1).	// date_trunc over a DATE answers a TIMESTAMP (measured case P1).
+internal/coordinator/arc_tc_timestamp_text_compare_arms_test.go	400	// A volatile operand beside a special word, over 4096 rows (review r2	// A volatile operand beside a special word, over 4096 rows (measured case
+internal/coordinator/arc_wd_window_consumers_arms_test.go	57	// ITS OWN INPUT, ON EVERY ARM (#1435 round 5). Above `(SELECT id, g, b * 2 AS	// ITS OWN INPUT, ON EVERY ARM (#1435). Above `(SELECT id, g, b * 2 AS
+internal/coordinator/arc_wd_window_consumers_arms_test.go	79	// window key over an alias computed over an aggregate) are review round 4's	// window key over an alias computed over an aggregate) are the measured
+internal/coordinator/arc_wd_window_round6_arms_test.go	81	// OF ITS OWN INPUT (#1435 round 6): `(SELECT id, g, b FROM (SELECT id, g, b *	// OF ITS OWN INPUT (#1435): `(SELECT id, g, b FROM (SELECT id, g, b *
+internal/coordinator/arc_wd_window_round6_arms_test.go	105	// and refused `… result exceeded the local budget`; 9420d256 and the round-6	// and refused `… result exceeded the local budget`; 9420d256 and the earlier implementation
+internal/coordinator/arc_wd_window_round6_arms_test.go	163	// cells left this table in round 8 (ADR-0024, candidate U).	// cells left this table in the earlier implementation (ADR-0024, candidate U).
+internal/coordinator/arc_wd_window_round6_arms_test.go	179	// TABLE (#1435 round 7): `wd_t y JOIN (SELECT id, g, SUM(b) OVER (…) AS w, b	// TABLE (#1435): `wd_t y JOIN (SELECT id, g, SUM(b) OVER (…) AS w, b
+internal/coordinator/coordinator.go	262	// context that never carried the mark (#859 round 3).	// context that never carried the mark (#859).
+internal/coordinator/coordinator.go	269	// columns at all while the other three doors described it (#1008 round 2).	// columns at all while the other three doors described it (#1008).
+internal/coordinator/coordinator.go	495	// derived from context.Background() (#859 round 3).	// derived from context.Background() (#859).
+internal/coordinator/coordinator.go	1293	// sides it compares from ONE arm (arc DC round 5): emitted, EXISTS	// sides it compares from ONE arm (arc DC): emitted, EXISTS
+internal/coordinator/coordinator.go	1305	// And a window above a LATERAL join (arc LT round 2): the DAG binds	// And a window above a LATERAL join (arc LT): the DAG binds
+internal/coordinator/coordinator.go	1312	// relation (arc JP round 3): the DAG re-spells the body's names onto	// relation (arc JP): the DAG re-spells the body's names onto
+internal/coordinator/coordinator.go	1320	// FROM-list denial on this connection carries (round-1 P1).	// FROM-list denial on this connection carries (case P1).
+internal/coordinator/coordinator.go	3766	// the gathered batches, and there are none (#1008 round 2). It is the same	// the gathered batches, and there are none (#1008). It is the same
+internal/coordinator/coordinator.go	3775	// round 3). Run it as one task rather than refuse it.	//). Run it as one task rather than refuse it.
+internal/coordinator/coordinator.go	3796	// of one table (#1411 review r2 P1). One task draws each sample once.	// of one table (#1411 measured case P1). One task draws each sample once.
+internal/coordinator/coordinator.go	4036	// (sqlerr.EmptyResultColumns, #1008 / #1010 round 2).	// (sqlerr.EmptyResultColumns, #1008 / #1010).
+internal/coordinator/coordinator.go	4109	// A MERGE FAILURE IS THE ANSWER ON THIS DOOR TOO (#1002 round 2). The	// A MERGE FAILURE IS THE ANSWER ON THIS DOOR TOO (#1002). The
+internal/coordinator/coordinator.go	4146	// GATHER stage and a one-stage plan has none (#1008 round 2).	// GATHER stage and a one-stage plan has none (#1008).
+internal/coordinator/dag_fragments.go	520	// fragment's copy of this records (#859 round 2).	// fragment's copy of this records (#859).
+internal/coordinator/dag_merge.go	415	// array the gather computed (arc CW round 2, B1).	// array the gather computed (arc CW, B1).
+internal/coordinator/dag_scan.go	497	// the stored column: before #859 round 2 they shared the slot	// the stored column: before #859 they shared the slot
+internal/coordinator/dagplan/agg_output_projection.go	387	// route; the unary one had nothing to consult (#851 round 2).	// route; the unary one had nothing to consult (#851).
+internal/coordinator/dagplan/agg_output_projection.go	484	// declares — the element, and a multi-dimensional value's depth (round 4).	// declares — the element, and a multi-dimensional value's depth ().
+internal/coordinator/dagplan/aggregate_shuffle.go	226	// it guards (#794 round 2, B3).	// it guards (#794, B3).
+internal/coordinator/dagplan/group_key_binding.go	196	// Round 1 of this arc inferred the answer from NODE KINDS and got it	// The earlier implementation of this arc inferred the answer from NODE KINDS and got it
+internal/coordinator/dagplan/plan.go	111	// path (arc LT round 2, B4); the coordinator runs the plan single-process.	// path (arc LT, B4); the coordinator runs the plan single-process.
+internal/coordinator/dagplan/plan.go	149	// grouped arm (arc JP round 3, lateral_identity_guard.go): the join stage	// grouped arm (arc JP, lateral_identity_guard.go): the join stage
+internal/coordinator/dagplan/plan.go	159	// on this path as on the single-process one (arc JP round 4).	// on this path as on the single-process one (arc JP).
+internal/coordinator/dagplan/plan.go	170	// routed on another for the same statement (arc LT round 2).	// routed on another for the same statement (arc LT).
+internal/coordinator/dagplan/plan.go	663	// count (#859 round 2), so this refuses rather than trusting the routing.	// count (#859), so this refuses rather than trusting the routing.
+internal/coordinator/dagplan/stage_emission.go	65	// (round-1 B1). The cached terminal's own ProjectExprs is the	// (case B1). The cached terminal's own ProjectExprs is the
+internal/coordinator/dagplan/stage_emission.go	791	// every row came back paired with itself (arc R2 round 2,	// every row came back paired with itself (arc R2,
+internal/coordinator/dagplan/stage_emission.go	968	// broadcast one has no payload list to get wrong (#694 round 2).	// broadcast one has no payload list to get wrong (#694).
+internal/coordinator/dagplan/stage_emission.go	1273	// (#1411 review r1).	// (#1411 measured case).
+internal/coordinator/dagplan/stage_emission.go	1314	// policy hides (#859 round 2). The barrier is absorbed by the	// policy hides (#859). The barrier is absorbed by the
+internal/coordinator/dagplan/stage_emission.go	1462	// round 4) — without the scoping, `SUM(x.w) OVER ()` over two arms	// the earlier implementation) — without the scoping, `SUM(x.w) OVER ()` over two arms
+internal/coordinator/dagplan/stage_emission.go	1491	// silence (#1018 round 5; the argument half of #770).	// silence (#1018; the argument half of #770).
+internal/coordinator/dagplan/stage_emission.go	1616	// refused and routed instead of executing (round-1 B1).	// refused and routed instead of executing (case B1).
+internal/coordinator/dagplan/stage_types.go	540	// Dimension is a computed VECTOR rename's width (arc CW round 2).	// Dimension is a computed VECTOR rename's width (arc CW).
+internal/coordinator/dagplan/subquery_resolution.go	202	// subquery sits, and is parked (#1411 review r1; the producer	// subquery sits, and is parked (#1411 measured case; the producer
+internal/coordinator/dagplan/subquery_resolution.go	276	// statement's answer did (#1411 review r3 B1). Swallowing it	// statement's answer did (#1411 measured case B1). Swallowing it
+internal/coordinator/dagplan/subquery_resolution.go	278	"// subquery requires a SubqueryRunner"" and no SQLSTATE (review r2"	"// subquery requires a SubqueryRunner"" and no SQLSTATE (measured case"
+internal/coordinator/dagplan/subquery_resolution.go	280	// wherever the subquery sits (ADR-0034 item 6, round-1 review	// wherever the subquery sits (ADR-0034 item 6, the earlier measurement
+internal/coordinator/dagplan/subquery_resolution.go	373	// (round-1 review B2). Walking the tree is what makes the rule ADR-0021	// (case B2). Walking the tree is what makes the rule ADR-0021
+internal/coordinator/dagplan/subquery_resolution.go	424	// arm (#1411 review r3 B1).	// arm (#1411 measured case B1).
+internal/coordinator/dagplan/subquery_resolution.go	742	// literal a stage compiles back to the same array (arc CW round 4). It is	// literal a stage compiles back to the same array (arc CW). It is
+internal/coordinator/dagplan/subquery_resolution.go	744	// shares (round 5) — over a one-column result schema.	// shares () — over a one-column result schema.
+internal/coordinator/scalar_extract.go	130	// box (`a.v = [2024-01-10]` failed to parse, round-3 N5).	// box (`a.v = [2024-01-10]` failed to parse, the earlier implementation N5).
+internal/coordinator/scalar_extract.go	229	// cast to the element's array type, `CAST('{2024-01-10}' AS DATE[])` (round	// cast to the element's array type, `CAST('{2024-01-10}' AS DATE[])` (change
+internal/coordinator/scalar_extract.go	230	// 4). The DAG substituted an array-valued scalar subquery as Go's text of the	// ). The DAG substituted an array-valued scalar subquery as Go's text of the
+internal/coordinator/scalar_extract.go	271	// (arc CW round 3). The bare day count / epoch milliseconds this sent	// (arc CW). The bare day count / epoch milliseconds this sent
+internal/coordinator/scalar_extract.go	394	// lands in (#859 round 2), and a scalar subquery is exactly the kind of	// lands in (#859), and a scalar subquery is exactly the kind of
+internal/coordinator/scheduler.go	52	// (#859 round 3). Nil = nothing is policed.	// (#859). Nil = nothing is policed.
+internal/coordinator/scheduler.go	214	// leak (#859 round 2, review P2). A task a worker will RE-PLAN from its	// leak (#859, measurement P2). A task a worker will RE-PLAN from its
+internal/distributed/messages.go	810	// round 2).	//).
+internal/engine/batch/pgjson.go	18	// `CAST(container AS JSON)` answers (arc CW round 2): PostgreSQL has no such	// `CAST(container AS JSON)` answers (arc CW): PostgreSQL has no such
+internal/engine/batch/type_mismatch.go	14	// its own DURATION carrier (arc CW round 6, B1): expr.IntervalValue is the	// its own DURATION carrier (arc CW, B1): expr.IntervalValue is the
+internal/engine/batch/vector.go	130	// (round-4 review, p=0.001), which is what the render loop alone is	// (p=0.001), which is what the render loop alone is
+internal/engine/batch/vector.go	148	// IPv6 value goes through (round-2 review B2-4). 45 = the longest form,	// IPv6 value goes through (case B2-4). 45 = the longest form,
+internal/engine/batch/vector.go	1335	// round 6, B1) — supplies its own nanosecond count rather than	// the earlier implementation, B1) — supplies its own nanosecond count rather than
+internal/engine/batch/vector.go	1437	// VECTOR twin of the shapeless container above (arc CW round 2:	// VECTOR twin of the shapeless container above (arc CW:
+internal/engine/batch/vector.go	2102	// (review r5 P1, #1252). Extreme magnitudes keep e-notation, and the special	// (measured case P1, #1252). Extreme magnitudes keep e-notation, and the special
+internal/engine/exec/agg_ohlcv.go	827	// production caller — round-2 review, P3.)	// production caller — the earlier measurement, P3.)
+internal/engine/exec/filter.go	216	// (review round 1, F11).	// (measured case, F11).
+internal/engine/exec/filter.go	446	// DAG (round 2, B1).	// DAG (B1).
+internal/engine/exec/filter.go	1895	// every expression comparator of two arrays use (ADR-0045 §4). Round 4:	// every expression comparator of two arrays use (ADR-0045 §4). The earlier implementation:
+internal/engine/exec/join.go	4366	// single-process arms where PostgreSQL answers `1 | 2 | 9` (arc DC round 3,	// single-process arms where PostgreSQL answers `1 | 2 | 9` (arc DC,
+internal/engine/exec/kernel/compare.go	817	// single arm too — one literal, three dispositions (round-3 review B3-1).	// single arm too — one literal, three dispositions (case B3-1).
+internal/engine/exec/kernel/compare.go	874	// zero rows (round-3 review B3-3) — and any v4 literal keys as the	// zero rows (case B3-3) — and any v4 literal keys as the
+internal/engine/exec/kernel/compare.go	2437	// counts 4915 (round-3 review P-A).	// counts 4915 ( P-A).
+internal/engine/exec/tablesample_test.go	55	// THE SAMPLE IS DRAWN FROM THE ROWS THE SCAN SELECTS (#1411 review r1 B1).	// THE SAMPLE IS DRAWN FROM THE ROWS THE SCAN SELECTS (#1411 measured case B1).
+internal/engine/exec/window.go	374	// schema (#968, round-2 P3). Order is the schema's, so the list still	// schema (#968, the earlier implementation P3). Order is the schema's, so the list still
+internal/engine/expr/binop_decimal.go	223	"// call this rather than reimplementing it (review r5 B1's ""second spelling"","	"// call this rather than reimplementing it (measured case B1's ""second spelling"","
+internal/engine/expr/binop_decimal.go	317	// float64 (round-2 review, B1r2).	// float64 (B1r2).
+internal/engine/expr/binop_decimal.go	587	// float mode and the exact kernel was never selected (round-2 review).	// float mode and the exact kernel was never selected ().
+internal/engine/expr/binop_decimal.go	1351	// builds one vector and this hands it another box (round-1 B3).	// builds one vector and this hands it another box (case B3).
+internal/engine/expr/binop_numeric.go	212	// day count under a DATE declaration (arc VL round 3).	// day count under a DATE declaration (arc VL).
+internal/engine/expr/boxed_pair.go	73	// (round-3 review P-A). CIDR and IPv6 had their kinds since #565; MAC	// ( P-A). CIDR and IPv6 had their kinds since #565; MAC
+internal/engine/expr/boxed_pair.go	81	// arms where the server and the single arm answer 1 (round-2 review P-2,	// arms where the server and the single arm answer 1 ( P-2,
+internal/engine/expr/boxed_pair.go	82	// round-3 review P-A's family). Its RENDERED form is fixed-width	// the earlier measurement P-A's family). Its RENDERED form is fixed-width
+internal/engine/expr/boxed_pair.go	582	// gets (producedTemporal, arc VL round 3).	// gets (producedTemporal, arc VL).
+internal/engine/expr/boxed_pair.go	864	// collapsing them was #646 round-3's blocker: PostgreSQL's	// collapsing them was #646 blocker: PostgreSQL's
+internal/engine/expr/boxed_pair.go	1103	// `(k > 1) = ''` answer FALSE where the server raises 22P02 (round 2, P8).	// `(k > 1) = ''` answer FALSE where the server raises 22P02 (P8).
+internal/engine/expr/boxed_pair.go	1130	// '2026-01-01 10:00:00'` answered false (arc VL round 3).	// '2026-01-01 10:00:00'` answered false (arc VL).
+internal/engine/expr/boxed_pair.go	1410	// PostgreSQL counts 4915 (round-3 review P-A) — while the paths that format	// PostgreSQL counts 4915 ( P-A) — while the paths that format
+internal/engine/expr/boxed_pair.go	1593	// round-4 blocker. A composite mixing a DECIMAL column with a FLOAT one	// the earlier implementation blocker. A composite mixing a DECIMAL column with a FLOAT one
+internal/engine/expr/cast_bytes.go	80	// lone backslash a 22P02 (#1501; parameters-pgwire#r11). The hex form	// lone backslash a 22P02 (#1501; parameters-pgwire#r10). The hex form
+internal/engine/expr/cast_decimal.go	565	// is this arc's headline defect, in the file it rewrote (review round 0, P2).	// is this arc's headline defect, in the file it rewrote (measured case, P2).
+internal/engine/expr/cast_float_text_grammar_test.go	8	// review r1 B3).	// measured case B3).
+internal/engine/expr/cast_refusal.go	61	// so the float destinations refuse them here (#1411 review r1 B3):	// so the float destinations refuse them here (#1411 measured case B3):
+internal/engine/expr/choice_decimal.go	282	// round 5 (`9b096b9e`) a fractional literal declares DECIMAL	// the earlier implementation (`9b096b9e`) a fractional literal declares DECIMAL
+internal/engine/expr/compile.go	74	// (round-1 P1). Counting the returned rows cannot reach that case, and	// (case P1). Counting the returned rows cannot reach that case, and
+internal/engine/expr/compile.go	76	// (round-1 B1).	// (case B1).
+internal/engine/expr/compile.go	106	// declared-output walk gives every other producer (arc CW round 4: a subquery	// declared-output walk gives every other producer (arc CW: a subquery
+internal/engine/expr/compile.go	132	// SELECT list's COLUMN COUNT (round-1 P1). They travel together because they	// SELECT list's COLUMN COUNT (case P1). They travel together because they
+internal/engine/expr/compile.go	534	// An aggregate the ENCLOSING query owns (#1044 round 2).	// An aggregate the ENCLOSING query owns (#1044).
+internal/engine/expr/compile.go	538	// A body the rebuild cannot write back out (#1044 round 3).	// A body the rebuild cannot write back out (#1044).
+internal/engine/expr/compile.go	728	// An aggregate the ENCLOSING query owns (#1044 round 2).	// An aggregate the ENCLOSING query owns (#1044).
+internal/engine/expr/compile.go	732	// A body the rebuild cannot write back out (#1044 round 3).	// A body the rebuild cannot write back out (#1044).
+internal/engine/expr/compile.go	814	// An aggregate the ENCLOSING query owns (#1044 round 2).	// An aggregate the ENCLOSING query owns (#1044).
+internal/engine/expr/compile.go	818	// A body the rebuild cannot write back out (#1044 round 3).	// A body the rebuild cannot write back out (#1044).
+internal/engine/expr/compile.go	1112	// date arm (producedTemporal, arc VL round 3). Column operands resolve	// date arm (producedTemporal, arc VL). Column operands resolve
+internal/engine/expr/compile.go	1413	// process and answered zero rows on the DAG (#1018 round 6, B1). The	// process and answered zero rows on the DAG (#1018, B1). The
+internal/engine/expr/compile.go	1586	// as well as a CTE (round-1 review B3). `OuterRef.Bare` is that distinction,	// as well as a CTE (case B3). `OuterRef.Bare` is that distinction,
+internal/engine/expr/compile_coverage_test.go	722	// for every outer row (#955, round-1 review B3).	// for every outer row (#955, the earlier measurement B3).
+internal/engine/expr/correlated.go	116	// as on InSubquery (round 4, B4).	// as on InSubquery (B4).
+internal/engine/expr/correlated.go	451	// (round-1 P1). Asking the plan reaches it, and reaches a two-column subquery	// (case P1). Asking the plan reaches it, and reaches a two-column subquery
+internal/engine/expr/correlated.go	752	// IT COULD NOT REACH (#1044 round 2).	// IT COULD NOT REACH (#1044).
+internal/engine/expr/correlated.go	989	// refusal otherwise (arc DC round 5; docs/internals/nested-with-scope-precedence.md	// refusal otherwise (arc DC; docs/internals/nested-with-scope-precedence.md
+internal/engine/expr/decimal_scalar_fn.go	186	// #1252's round 5 (`9b096b9e`) a fractional literal declares DECIMAL	// #1252's the earlier implementation (`9b096b9e`) a fractional literal declares DECIMAL
+internal/engine/expr/decimal_scalar_fn.go	191	// (review r5 B1, #1252).	// (measured case B1, #1252).
+internal/engine/expr/decimal_scalar_fn.go	201	// (ADR-0024's recorded divergence, review r5 N3) — only a scalar function's	// (ADR-0024's recorded divergence, measured case N3) — only a scalar function's
+internal/engine/expr/deferred_error_test.go	17	// planner relies on (#1411 review r3 B1): PostgreSQL runs an uncorrelated	// planner relies on (#1411 measured case B1): PostgreSQL runs an uncorrelated
+internal/engine/expr/expr_arith.go	595	// refusal as absKeepsDomain's, one operator over (review round	// refusal as absKeepsDomain's, one operator over (measured change
+internal/engine/expr/expr_arith.go	596	// 0, P2/P3).	// cases P2/P3).
+internal/engine/expr/expr_bytea_bridge.go	93	// PostgreSQL's type (round-1 review, P1). A byte is 0..255 and always fits.	// PostgreSQL's type (P1). A byte is 0..255 and always fits.
+internal/engine/expr/expr_bytea_bridge.go	127	// text as bytea (kernel.ByteaIn; #1501, arc BY round 2). It was toBytes, the	// text as bytea (kernel.ByteaIn; #1501, arc BY). It was toBytes, the
+internal/engine/expr/expr_cast.go	39	// round 3). Nil for a Cast built outside the compiler.	//). Nil for a Cast built outside the compiler.
+internal/engine/expr/expr_cast.go	97	// scalar arm can read its box (cast_container.go, arc CW round 2).	// scalar arm can read its box (cast_container.go, arc CW).
+internal/engine/expr/expr_cast.go	105	// (arc CW round 3: `CAST(ARRAY[d] AS VECTOR(1))` was `[19724]`).	// (arc CW: `CAST(ARRAY[d] AS VECTOR(1))` was `[19724]`).
+internal/engine/expr/expr_cast.go	410	// review r5 P1) rather than fmt.Sprint's shortest %v, which switches to	// measured case P1) rather than fmt.Sprint's shortest %v, which switches to
+internal/engine/expr/expr_cast.go	450	"// with (review r5 B1's ""second spelling"", #1252)."	"// with (measured case B1's ""second spelling"", #1252)."
+internal/engine/expr/expr_cast.go	522	// MILLISECOND (arc VL round 4; round-3 review N2).	// MILLISECOND (arc VL; the earlier measurement N2).
+internal/engine/expr/expr_helpers.go	31	// float-text renderer (#1252, review r5 P1) instead of fmt.Sprint's shortest	// float-text renderer (#1252, measured case P1) instead of fmt.Sprint's shortest
+internal/engine/expr/expr_scalar_fns.go	23	// shape (choice_container.go, arc CW round 5): `ARRAY[a, b]` of a	// shape (choice_container.go, arc CW): `ARRAY[a, b]` of a
+internal/engine/expr/expr_scalar_fns.go	131	"// ""wants text"" for its other arguments (round 8, #1252 — the guard keys"	"// ""wants text"" for its other arguments (#1252 — the guard keys"
+internal/engine/expr/expr_scalar_fns.go	208	// whatever produced it (arc VL round 3).	// whatever produced it (arc VL).
+internal/engine/expr/expr_scalar_fns.go	247	"// PostgreSQL's numeric spelling is ""2.50x"" (review r5 B1's ""second"	"// PostgreSQL's numeric spelling is ""2.50x"" (measured case B1's ""second"
+internal/engine/expr/expr_scalar_fns.go	260	"// pattern that does not match ""abcdef"" and answered NULL (round 8, #1252):"	"// pattern that does not match ""abcdef"" and answered NULL (#1252):"
+internal/engine/expr/expr_scalar_fns.go	308	// names it, by the same rule for every producer (arc VL round 3).	// names it, by the same rule for every producer (arc VL).
+internal/engine/expr/expr_scalar_fns.go	521	// box loses the literal's own scale (review r5 B1, #1252).	// box loses the literal's own scale (measured case B1, #1252).
+internal/engine/expr/expr_session_fns.go	156	// and physical.funcReturnType for the declaration (arc VL round 3).	// and physical.funcReturnType for the declaration (arc VL).
+internal/engine/expr/expr_session_fns.go	192	// midnight (arc VL round 3).	// midnight (arc VL).
+internal/engine/expr/expr_session_fns.go	251	// A DATE, boxed as a DATE column is: epoch days (arc VL round 3).	// A DATE, boxed as a DATE column is: epoch days (arc VL).
+internal/engine/expr/expr_session_fns.go	348	// answered 1 (#627 round 2, B1).	// answered 1 (#627, B1).
+internal/engine/expr/expr_sql_standard.go	125	// there and was a refusal here (round-1 review, N6).	// there and was a refusal here (N6).
+internal/engine/expr/expr_sql_standard.go	274	// dangling escape matches nothing — the cell this arc's round-1	// dangling escape matches nothing — the cell this arc's the earlier implementation
+internal/engine/expr/expr_subquery.go	279	// probe (round 4, B4): the probe's from its AST, the set's from the	// probe (B4): the probe's from its AST, the set's from the
+internal/engine/expr/operand_decl.go	14	// (arc CW round 3, ADR-0045 §2): a CAST that renders or converts a container,	// (arc CW, ADR-0045 §2): a CAST that renders or converts a container,
+internal/engine/expr/operand_decl.go	23	// Round 2 re-derived it instead, from a narrow operand walk (a column's vector,	// The earlier implementation re-derived it instead, from a narrow operand walk (a column's vector,
+internal/engine/expr/outer_literal.go	182	// An ARRAY outer value is its typed array literal (arc CW round 5,	// An ARRAY outer value is its typed array literal (arc CW,
+internal/engine/expr/outer_literal_test.go	172	// round 5 — its typed array literal (ArrayValueLiteral), which reads back	// the earlier implementation — its typed array literal (ArrayValueLiteral), which reads back
+internal/engine/expr/pg_integer_result_width.go	8	// which is NOT the width this engine carries that result in (#966 round 3).	// which is NOT the width this engine carries that result in (#966).
+internal/engine/expr/pg_integer_result_width.go	28	// wire cells, grouped and windowed, text and binary (#966 round 3 review B1).	// wire cells, grouped and windowed, text and binary (#966 measurement B1).
+internal/engine/expr/pg_integer_result_width_test.go	13	// THE TABLE AND THE REGISTRY NAME THE SAME SET (#966 round 3 review B1).	// THE TABLE AND THE REGISTRY NAME THE SAME SET (#966 measurement B1).
+internal/engine/expr/quoted_literal.go	160	// round 2 the 0A000 existed at ONE evaluator: the same query refused in a	// the earlier implementation the 0A000 existed at ONE evaluator: the same query refused in a
+internal/engine/expr/registry_declared_is_produced_test.go	17	// round 3: for every registered scalar function with a FIXED declaration it	// the earlier implementation: for every registered scalar function with a FIXED declaration it
+internal/engine/expr/registry_temporal_unit_test.go	14	// census (round-3 review P1): TestRegistryDeclaredTypeIsTheProducedType checks	// census (case P1): TestRegistryDeclaredTypeIsTheProducedType checks
+internal/engine/expr/registry_temporal_unit_test.go	17	// passed it (the reviewer's to_date / from_iso8601_date mutations). Here every	// passed it (the recorded to_date / from_iso8601_date mutations). Here every
+internal/engine/expr/rettype.go	448	// (arc VL round 3 — now/current_date used to return formatted TEXT under a	// (arc VL — now/current_date used to return formatted TEXT under a
+internal/engine/expr/rettype.go	606	// (#555's review, round 4).	// (#555's measurement, the earlier implementation).
+internal/engine/expr/rettype.go	690	// A fractional literal declares its numeric since arc VL round 5,	// A fractional literal declares its numeric since arc VL,
+internal/engine/expr/rettype.go	755	// numeric (DECIMAL of its spelling, arc VL round 5), so a choice over	// numeric (DECIMAL of its spelling, arc VL), so a choice over
+internal/engine/expr/rettype.go	838	// the join keys and the set operations unify through (arc CW round 5, review	// the join keys and the set operations unify through (arc CW, measurement
+internal/engine/expr/rettype.go	1103	// the caller's job, one level up, where the scope is (#1179 round 2).	// the caller's job, one level up, where the scope is (#1179).
+internal/engine/expr/rettype.go	1263	// VL round 3 made every TEMPORAL entry declare and produce its own type, and	// VL made every TEMPORAL entry declare and produce its own type, and
+internal/engine/expr/round_double_test.go	49	// #1252's round 5 (`9b096b9e`) a fractional literal declares DECIMAL	// #1252's the earlier implementation (`9b096b9e`) a fractional literal declares DECIMAL
+internal/engine/expr/round_double_test.go	50	// wherever it sits, and round 7's B1 fix moved scalarFnDeclaredDecimal's own	// wherever it sits, and the earlier implementation's B1 fix moved scalarFnDeclaredDecimal's own
+internal/engine/expr/round_double_test.go	52	// PostgreSQL's numeric does (review r5 B1, #1252). A bare, unparameterized	// PostgreSQL's numeric does (measured case B1, #1252). A bare, unparameterized
+internal/engine/expr/scalar_coverage_test.go	1245	// DATE-declared, so the DATE box: epoch days (#1254, arc VL round 3).	// DATE-declared, so the DATE box: epoch days (#1254, arc VL).
+internal/engine/expr/signature.go	57	// server refuses (round-1 review, N6). An unknown-typed LITERAL still	// server refuses (N6). An unknown-typed LITERAL still
+internal/engine/expr/signature.go	115	// asks this about the call it produced (the round-1 review's B1).	// asks this about the call it produced (the earlier measurement's B1).
+internal/engine/expr/signature.go	808	"// (""a BYTES value"") untrue (round-1 review, N6)."	"// (""a BYTES value"") untrue (N6)."
+internal/engine/expr/signature.go	841	// where the server refuses (round-1 review, N7's neighbour).	// where the server refuses (N7's neighbour).
+internal/engine/expr/signature.go	888	// (round-1 review, N7). The DOMAIN decision is unchanged: every one of these	// (N7). The DOMAIN decision is unchanged: every one of these
+internal/engine/expr/substr_cast_pg_test.go	108	// #1252's round 5 made the literal itself numeric (`9b096b9e`), and	// #1252's the earlier implementation made the literal itself numeric (`9b096b9e`), and
+internal/engine/expr/substr_cast_pg_test.go	109	// round 7's B1 fix moved this scalar function's own DECIMAL	// the earlier implementation's B1 fix moved this scalar function's own DECIMAL
+internal/engine/expr/substr_cast_pg_test.go	113	// path was removed (review r5 B1, #1252).	// path was removed (measured case B1, #1252).
+internal/engine/expr/temporal_producer.go	27	// `year(DATE '2026-01-01' + 1)` answered 1970 (arc VL round 3).	// `year(DATE '2026-01-01' + 1)` answered 1970 (arc VL).
+internal/engine/expr/temporal_range.go	34	// VL round-3 review B1) — the same family as #911, whose bigint→DATE cast was	// VL measurement B1) — the same family as #911, whose bigint→DATE cast was
+internal/engine/expr/temporal_range.go	82	// returns it (arc VL round 3), so its value and its declaration agree; an	// returns it (arc VL), so its value and its declaration agree; an
+internal/engine/expr/temporal_unknown.go	27	// Before arc VL round 5 the quoted operand was read by the numeric path: its	// Before arc VL the quoted operand was read by the numeric path: its
+internal/engine/expr/temporal_unknown.go	30	// `DATE '…' + '1.5'` stored 20516.5 in a float column — round-4 review B3).	// `DATE '…' + '1.5'` stored 20516.5 in a float column — the earlier measurement B3).
+internal/engine/expr/tier3_funcs_test.go	390	// below count 1 instead of 3 and 63 through a double (#966 round 2).	// below count 1 instead of 3 and 63 through a double (#966).
+internal/engine/expr/tier3_funcs_test.go	579	// TIMESTAMP-declared, so the TIMESTAMP box (arc VL round 3).	// TIMESTAMP-declared, so the TIMESTAMP box (arc VL).
+internal/engine/expr/tier3_funcs_test.go	827	// (#966 round 2).	// (#966).
+internal/engine/expr/udf.go	232	// reference promised a class (arc E2 round-3 B1).	// reference promised a class (arc E2 B1).
+internal/planner/logical/builder.go	168	// where the column's type is on the scan (#850, round-1 B1).	// where the column's type is on the scan (#850, the earlier implementation B1).
+internal/planner/logical/builder.go	1567	// the OUTER `id` (arc JP round 4, B2 `d/b6starBare`, every arm;	// the OUTER `id` (arc JP, B2 `d/b6starBare`, every arm;
+internal/planner/logical/builder.go	1568	"// ADR-0026 §8l ""Round 4"")."	"// ADR-0026 §8l ""The earlier implementation"")."
+internal/planner/logical/builder.go	2141	// NULL (round-2 review, P2). A list over a body whose width is not knowable	// NULL (P2). A list over a body whose width is not knowable
+internal/planner/logical/builder.go	2155	// that reads nothing from the outer row at all (round-2 review).	// that reads nothing from the outer row at all ().
+internal/planner/logical/builder.go	2181	// from text (arc JP round 5, B1).	// from text (arc JP, B1).
+internal/planner/logical/builder.go	2221	// JP round 4 review, B1). The text is kept only as the node's rendering.	// JP measurement, B1). The text is kept only as the node's rendering.
+internal/planner/logical/builder.go	2249	// INNER spelling answers nothing (round-2 review, B1: `COUNT(*) … LIMIT	// INNER spelling answers nothing (B1: `COUNT(*) … LIMIT
+internal/planner/logical/builder.go	2334	// (arc JP round 5 closure review B1, #1299/#1302).	// (arc JP closure measurement B1, #1299/#1302).
+internal/planner/logical/builder.go	2347	// THE LIFTED KEY OWNS A SLOT (#1302, round 2; ADR-0026 §8l, §3a).	// THE LIFTED KEY OWNS A SLOT (#1302, the earlier implementation; ADR-0026 §8l, §3a).
+internal/planner/logical/builder.go	2456	// including the ones base answered right (arc JP round 4, B5).	// including the ones base answered right (arc JP, B5).
+internal/planner/logical/builder.go	2571	// FROM item never wired into it (round-2 review, B2).	// FROM item never wired into it (B2).
+internal/planner/logical/builder.go	2604	// with itself and answered zero rows (arc JP round 3, B7). The join emits	// with itself and answered zero rows (arc JP, B7). The join emits
+internal/planner/logical/builder.go	2666	// one (arc JP round 3, B3).	// one (arc JP, B3).
+internal/planner/logical/builder.go	2688	// …`) in two (arc JP round 4, B3); and the LOCAL terms were then rebuilt as	// …`) in two (arc JP, B3); and the LOCAL terms were then rebuilt as
+internal/planner/logical/builder.go	2689	// text and split again one layer down (round 5, B1). The terms are the parse's	// text and split again one layer down (B1). The terms are the parse's
+internal/planner/logical/builder.go	2772	// arc JP round 5). Such a key is minted into a slot like any other	// arc JP). Such a key is minted into a slot like any other
+internal/planner/logical/builder.go	2823	// round 5).	// the earlier implementation).
+internal/planner/logical/builder.go	2834	// round 5, so `QUALIFY row_number() OVER (ORDER BY i.v DESC) = 1` answered zero	// the earlier implementation, so `QUALIFY row_number() OVER (ORDER BY i.v DESC) = 1` answered zero
+internal/planner/logical/builder.go	3008	// `s.k` then bound the outer relation's `k` (arc JP round 2).	// `s.k` then bound the outer relation's `k` (arc JP).
+internal/planner/logical/builder.go	3219	// (zero rows on the single-process pipeline; arc JP round 3, B3).	// (zero rows on the single-process pipeline; arc JP, B3).
+internal/planner/logical/builder.go	3288	// (arc JP round 3, B3). One binding path: lateralCorrelatedEquality.	// (arc JP, B3). One binding path: lateralCorrelatedEquality.
+internal/planner/logical/builder.go	3295	// key and minted `1 THEN …` as its inner side — zero rows (arc JP round 4,	// key and minted `1 THEN …` as its inner side — zero rows (arc JP,
+internal/planner/logical/const_arith_agg_typed_test.go	109	// …004e+16 (round-1 review, B1).	// …004e+16 (B1).
+internal/planner/logical/const_arith_agg_typed_test.go	156	// `avg(x)*3` is 6.9999999999999999 (round-1 review, B2). `±` is exact	// `avg(x)*3` is 6.9999999999999999 (B2). `±` is exact
+internal/planner/logical/distinct_rewrite.go	64	// arm (arc JP round 2). The WITH list travels for the reason it always did:	// arm (arc JP). The WITH list travels for the reason it always did:
+internal/planner/logical/filter_project_pushdown.go	196	// instead of each element (arc PC round 3).	// instead of each element (arc PC).
+internal/planner/logical/filter_project_pushdown.go	300	// nothing — every row or no row on the stage DAG (arc JP round 2).	// nothing — every row or no row on the stage DAG (arc JP).
+internal/planner/logical/filter_project_pushdown.go	655	// elements (arc PC round 3: `(r.k).x = 3` over `_pg_expandarray` answered	// elements (arc PC: `(r.k).x = 3` over `_pg_expandarray` answered
+internal/planner/logical/lateral_empty_value.go	57	// (`max(i.id) AS id` beside `o.id`, arc JP round 3, B4). The ELSE branch	// (`max(i.id) AS id` beside `o.id`, arc JP, B4). The ELSE branch
+internal/planner/logical/lateral_empty_value.go	324	// answers 0 (arc JP round 3, B5). The identity is the POSITION the item holds	// answers 0 (arc JP, B5). The identity is the POSITION the item holds
+internal/planner/logical/optimizer.go	610	// JOIN t y ON …` came back as `[id, y.id]` (#694 round 2, R1).	// JOIN t y ON …` came back as `[id, y.id]` (#694, R1).
+internal/planner/logical/optimizer.go	1342	// body's, `p_partkey` is not (arc DC round 3, B2).	// body's, `p_partkey` is not (arc DC, B2).
+internal/planner/logical/optimizer.go	1981	// body's, `p_partkey` is not (arc DC round 3, B2).	// body's, `p_partkey` is not (arc DC, B2).
+internal/planner/logical/optimizer.go	2232	// qualifier strip bound the OUTER `xxid` (arc JP round 5: reached	// qualifier strip bound the OUTER `xxid` (arc JP: reached
+internal/planner/logical/optimizer.go	2234	// Project's, as the lateral's does at build time (round 4, B2).	// Project's, as the lateral's does at build time (B2).
+internal/planner/logical/optimizer.go	3072	// was dropped by the EXISTS rewrite and answered every row (arc DC round	// was dropped by the EXISTS rewrite and answered every row (arc DC change
+internal/planner/logical/optimizer.go	3073	// 4; Codex review B1 / N5). The CTE spelling of the same relation already	// ; Codex review B1 / N5). The CTE spelling of the same relation already
+internal/planner/logical/optimizer.go	3535	// body's, `p_partkey` is not (arc DC round 3, B2).	// body's, `p_partkey` is not (arc DC, B2).
+internal/planner/logical/optimizer.go	3740	// PostgreSQL's rows on every arm (arc DC round 5; measured: without this,	// PostgreSQL's rows on every arm (arc DC; measured: without this,
+internal/planner/logical/plan.go	38	// round 2: a scalar subquery answering an ARRAY declared text on a	// the earlier implementation: a scalar subquery answering an ARRAY declared text on a
+internal/planner/logical/plan.go	228	// (#1018 round 5 review, P2).	// (#1018 measurement, P2).
+internal/planner/logical/plan.go	398	// (review round 1, B1).	// (measured case, B1).
+internal/planner/logical/plan.go	410	// (ADR-0021 §1q, round 3).	// (ADR-0021 §1q, the earlier implementation).
+internal/planner/logical/plan.go	419	// column — the round-2 blocker in its third shape.	// column — the earlier implementation blocker in its third shape.
+internal/planner/logical/plan.go	1215	// disclosure, not a path quirk (#859 round 5).	// disclosure, not a path quirk (#859).
+internal/planner/logical/plan.go	1329	// round 2, P1). An alias setSubtreeAlias stamped from an enclosing derived	// the earlier implementation, P1). An alias setSubtreeAlias stamped from an enclosing derived
+internal/planner/logical/star_join_order.go	276	// same fact a client can act on (review round 1, B1).	// same fact a client can act on (measured case, B1).
+internal/planner/logical/star_join_order.go	372	// JP round 4, B5). The arm is named by the lateral's alias alone.	// JP, B5). The arm is named by the lateral's alias alone.
+internal/planner/logical/star_join_order.go	517	// surviving one node above where it was looked for (round-2 review, P1).	// surviving one node above where it was looked for (P1).
+internal/planner/logical/subquery_short_circuit.go	10	// never evaluated, before any path resolves one (#1411 review r2 B1).	// never evaluated, before any path resolves one (#1411 measured case B1).
+internal/planner/logical/tablesample_explain_test.go	10	// EXPLAIN's scan line shows the sample (#1411 review r1 N3): the method and	// EXPLAIN's scan line shows the sample (#1411 measured case N3): the method and
+internal/planner/logical/tablesample_unbegun.go	14	// conjunct, or below a LIMIT 0 (#1411 review r1 B4).	// conjunct, or below a LIMIT 0 (#1411 measured case B4).
+internal/planner/logical/tablesample_unbegun_test.go	31	// (#1411 review r1 B4).	// (#1411 measured case B4).
+internal/planner/physical/agg_integer_width.go	26	// (#1018 round 5, B1).	// (#1018, B1).
+internal/planner/physical/agg_integer_width.go	105	// where SUM over an int8 one is numeric (#1018 round 5 review, P2).	// where SUM over an int8 one is numeric (#1018 measurement, P2).
+internal/planner/physical/agg_integer_width.go	182	// `bit_count`, whose PostgreSQL result is `bigint`, does. Round 3 of	// `bit_count`, whose PostgreSQL result is `bigint`, does. The earlier implementation of
+internal/planner/physical/agg_integer_width.go	233	// which is the whole of #1018's round-5 finding.	// which is the whole of #1018's the earlier implementation finding.
+internal/planner/physical/aggregate_declared_output.go	67	// declare two things (#965 round 2, B1).	// declare two things (#965, B1).
+internal/planner/physical/aggregate_declared_output.go	209	// declines is one every consumer invents differently (#965 round 2, B1).	// declines is one every consumer invents differently (#965, B1).
+internal/planner/physical/aggregate_declared_output.go	380	// untyped (arc CW round 4, the one-ordering gate's aggregate operand).	// untyped (arc CW, the one-ordering gate's aggregate operand).
+internal/planner/physical/aggregate_declared_output.go	430	// on every arm and both wire formats (#1018 round 5, B1).	// on every arm and both wire formats (#1018, B1).
+internal/planner/physical/aggregate_plan.go	73	// to prevent, not the declaration residual round 6 recorded (#1018 round 7,	// to prevent, not the declaration residual the earlier implementation recorded (#1018,
+internal/planner/physical/aggregate_plan.go	311	// while the DAG declared the array (arc CW round 2, B1).	// while the DAG declared the array (arc CW, B1).
+internal/planner/physical/block_projection.go	81	// round 3, B2), where the DAG's walk — and the same side with rows — declared	// the earlier implementation, B2), where the DAG's walk — and the same side with rows — declared
+internal/planner/physical/block_projection.go	109	// inference means one set of arguments too (round-4 B1).	// inference means one set of arguments too (case B1).
+internal/planner/physical/block_projection.go	143	// (round-1 P3). It is the same list extractOutputRenames walks for the	// (case P3). It is the same list extractOutputRenames walks for the
+internal/planner/physical/cast_int32_domain_type_test.go	78	// VECTOR left this list in arc CW round 2: Cast.Eval converts to it	// VECTOR left this list in arc CW: Cast.Eval converts to it
+internal/planner/physical/cte_materialization.go	255	// (round-2 review, B3).	// (B3).
+internal/planner/physical/decimal_arith_type.go	469	// round 5 (`9b096b9e`) a fractional literal declares DECIMAL wherever it	// the earlier implementation (`9b096b9e`) a fractional literal declares DECIMAL wherever it
+internal/planner/physical/decimal_arith_type.go	473	// expression to disagree with itself over (review r5 B1, #1252).	// expression to disagree with itself over (measured case B1, #1252).
+internal/planner/physical/decimal_arith_type.go	748	// ELEMENT's scale — an integer element scale 0. Round 4 (B3): the element was	// ELEMENT's scale — an integer element scale 0. The earlier implementation (B3): the element was
+internal/planner/physical/declared_output.go	642	// declared a zero-row `t.a` as text (arc CW round 2, B1).	// declared a zero-row `t.a` as text (arc CW, B1).
+internal/planner/physical/declared_output.go	708	// round 2, B1). The shape below IS the key's shape.	// the earlier implementation, B1). The shape below IS the key's shape.
+internal/planner/physical/declared_output.go	773	// The qualified spelling of a derived table's column (round 4).	// The qualified spelling of a derived table's column ().
+internal/planner/physical/declared_output.go	796	// from (arc CW round 2, B1).	// from (arc CW, B1).
+internal/planner/physical/declared_output.go	1123	// call one level down declared it right (#1018 round 5, B1).	// call one level down declared it right (#1018, B1).
+internal/planner/physical/declared_output.go	1226	// differently (arc CW round 2, B1 — a decorrelated LATERAL's	// differently (arc CW, B1 — a decorrelated LATERAL's
+internal/planner/physical/declared_output.go	1601	// declared class to a wrong one (round 2, B3). So bytea only when	// declared class to a wrong one (B3). So bytea only when
+internal/planner/physical/declared_output.go	1705	// ORDER, silently (round-1 review, N10).	// ORDER, silently (N10).
+internal/planner/physical/declared_output.go	1756	// array type (arc PC round 2, B4).	// array type (arc PC, B4).
+internal/planner/physical/declared_output.go	1806	// (expr.castToArray, arc CW round 5: the engine has no	// (expr.castToArray, arc CW: the engine has no
+internal/planner/physical/declared_output.go	1813	// CW: `CAST('{{1,2},{3,4}}' AS INT[])` is that text (round-4	// CW: `CAST('{{1,2},{3,4}}' AS INT[])` is that text (
+internal/planner/physical/declared_output.go	1814	// review B4; round 5 returns multi-dimensional input to base).	// measurement B4; the earlier implementation returns multi-dimensional input to base).
+internal/planner/physical/declared_output.go	1822	// sizes its output from the declared dimension (arc CW round 2).	// sizes its output from the declared dimension (arc CW).
+internal/planner/physical/declared_output.go	1863	// assigns to a text column through any of them (arc VL round 5;	// assigns to a text column through any of them (arc VL;
+internal/planner/physical/declared_output.go	1864	// round-4 review B2: `CASE WHEN true THEN 2.50 END` stored `2.5`).	// the earlier measurement B2: `CASE WHEN true THEN 2.50 END` stored `2.5`).
+internal/planner/physical/declared_output.go	2093	// the declaration and the value agree (arc VL round 3: the registry declared	// the declaration and the value agree (arc VL: the registry declared
+internal/planner/physical/declared_output.go	2298	// (arc VL round 3): `DATE '…' + CAST(1 AS INT)`, `(d + 1) + 1`, `d + i` over an	// (arc VL): `DATE '…' + CAST(1 AS INT)`, `(d + 1) + 1`, `d + i` over an
+internal/planner/physical/declared_output.go	2343	// (round-3 review N4).	// (case N4).
+internal/planner/physical/declared_output.go	2396	// VL round 3; round 2 added the function arm alone, and a nested `(d + 1) + 1`	// VL; the earlier implementation added the function arm alone, and a nested `(d + 1) + 1`
+internal/planner/physical/declared_output.go	2494	// declared a number either. Judged by declared type (arc VL round 3); it was a	// declared a number either. Judged by declared type (arc VL); it was a
+internal/planner/physical/declared_output.go	2556	// it was a #361 guard panic at every meeting point (arc CW round 6, B1: a	// it was a #361 guard panic at every meeting point (arc CW, B1: a
+internal/planner/physical/declared_output.go	2559	"// point guessed, is ADR-0045 §1 ""Round 6""."	"// point guessed, is ADR-0045 §1 ""The earlier implementation""."
+internal/planner/physical/emitted_int_width.go	28	// round 5, B1).	// the earlier implementation, B1).
+internal/planner/physical/emitted_int_width.go	224	// aggArgIntWidth now takes (#1018 round 5 review, P1).	// aggArgIntWidth now takes (#1018 measurement, P1).
+internal/planner/physical/emitted_int_width.go	292	// SUM (#1018 round 5 review, P1). `declaredIntWidth` already knew that	// SUM (#1018 measurement, P1). `declaredIntWidth` already knew that
+internal/planner/physical/filter_plan.go	30	// (arc JP round 4).	// (arc JP).
+internal/planner/physical/filter_plan.go	83	// for a text one (arc JP round 3). Loud beats plausible.	// for a text one (arc JP). Loud beats plausible.
+internal/planner/physical/filter_plan.go	85	// THE NET IS THE PREDICATE'S SHAPE, not its operator (arc JP round 4, B3):	// THE NET IS THE PREDICATE'S SHAPE, not its operator (arc JP, B3):
+internal/planner/physical/grammar_rewrite_arity_test.go	27	// exist` on a shape the base answered with PostgreSQL's exact value (round-1	// exist` on a shape the base answered with PostgreSQL's exact value (
+internal/planner/physical/group_key_binding.go	246	// two callers (LS review round 2, P2).	// two callers (LS measured case, P2).
+internal/planner/physical/join_declared_schema.go	36	// own column of the name is not part of the relation (arc CW round 3,	// own column of the name is not part of the relation (arc CW,
+internal/planner/physical/join_declared_schema.go	66	// round 4 review, B3). Only a name an EARLIER side of this walk	// the earlier measurement, B3). Only a name an EARLIER side of this walk
+internal/planner/physical/join_declared_schema.go	172	// (declTypeParts), not its TypeID alone (arc CW round 3, B2).	// (declTypeParts), not its TypeID alone (arc CW, B2).
+internal/planner/physical/join_declared_schema.go	184	// same stage input declared 4` (ADR-0010, arc R2 round 2 B1).	// same stage input declared 4` (ADR-0010, arc R2 B1).
+internal/planner/physical/join_declared_schema.go	227	// (arc CW round 3, B2): declared from its TypeID alone, the	// (arc CW, B2): declared from its TypeID alone, the
+internal/planner/physical/join_declared_schema.go	307	// publish (arc R2 round 2, B1).	// publish (arc R2, B1).
+internal/planner/physical/join_declared_schema.go	331	// round 3, B2): the same shape inputColShapes reads off a scan.	// the earlier implementation, B2): the same shape inputColShapes reads off a scan.
+internal/planner/physical/join_plan.go	341	// columns for PostgreSQL's five (round-1 P2).	// columns for PostgreSQL's five (case P2).
+internal/planner/physical/lateral_dual_projection.go	166	// half of #1033 the issue was filed for, one position over (round-2 review,	// half of #1033 the issue was filed for, one position over (,
+internal/planner/physical/operand_shape.go	15	// (arc CW round 3, expr/operand_decl.go): a CAST that renders or converts a	// (arc CW, expr/operand_decl.go): a CAST that renders or converts a
+internal/planner/physical/operand_shape.go	77	// projection of that subquery does (round 4, B1/B4).	// projection of that subquery does (B1/B4).
+internal/planner/physical/output_declared_schema.go	994	// arms share (arc CW round 2, B1): each used to rebuild the column from the	// arms share (arc CW, B1): each used to rebuild the column from the
+internal/planner/physical/output_declared_schema.go	1314	// enclosing query can write for the arm (arc JP round 4, B2).	// enclosing query can write for the arm (arc JP, B2).
+internal/planner/physical/output_rename_resolve.go	182	// JP round 2; `SELECT i.id AS id` answered right). An item written without a	// JP; `SELECT i.id AS id` answered right). An item written without a
+internal/planner/physical/plan_types.go	68	// round 2).	//).
+internal/planner/physical/planner_config.go	72	// concurrent map write that no recover() can catch (#1018 round 6 review,	// concurrent map write that no recover() can catch (#1018 measurement,
+internal/planner/physical/planner_config.go	92	// (#1047 round 1). The name key is still what the fixed-point iteration	// (#1047). The name key is still what the fixed-point iteration
+internal/planner/physical/planner_entry.go	294	// when two output columns publish one (#732, round-1 review B2).	// when two output columns publish one (#732, the earlier measurement B2).
+internal/planner/physical/projection_plan.go	53	// rows above the threshold (#859 round 3).	// rows above the threshold (#859).
+internal/planner/physical/projection_plan.go	381	// CW round 3, expr/operand_decl.go).	// CW, expr/operand_decl.go).
+internal/planner/physical/projection_plan.go	439	// declaration and TRUNCATED into the vector (round-1 review, B3);	// declaration and TRUNCATED into the vector (B3);
+internal/planner/physical/projection_plan.go	459	// out as TEXT in a Go rendering (arc PC round 2, B4).	// out as TEXT in a Go rendering (arc PC, B4).
+internal/planner/physical/projection_plan.go	491	// the width question arises (arc CW round 3, N3).	// the width question arises (arc CW, N3).
+internal/planner/physical/quoted_literal_fold_test.go	181	// truncated into it (round-1 review, B3). expr.fractionalLitTriggersFold and	// truncated into it (B3). expr.fractionalLitTriggersFold and
+internal/planner/physical/quoted_literal_fold_test.go	204	// for the server's 4.5 (round-1 review, B3). The scale comes from the	// for the server's 4.5 (B3). The scale comes from the
+internal/planner/physical/quoted_literal_fold_test.go	208	// A fractional literal is PostgreSQL's numeric (arc VL round 5), so	// A fractional literal is PostgreSQL's numeric (arc VL), so
+internal/planner/physical/quoted_literal_fold_test.go	261	// here rather than left to the next reviewer.	// here rather than left to the next change.
+internal/planner/physical/recursive_cte_iteration.go	72	// spelling's DECIMAL(p,s) (arc VL round 5); the CTE column takes its	// spelling's DECIMAL(p,s) (arc VL); the CTE column takes its
+internal/planner/physical/set_op_arm_decls.go	262	// (round 4).	// ().
+internal/planner/physical/set_op_arm_decls.go	419	// (round 4 — the one-ordering gate's `column` operand under	// ( — the one-ordering gate's `column` operand under
+internal/planner/physical/set_op_types.go	689	// file (arc CW round 5, review B2's arity gate).	// file (arc CW, measurement B2's arity gate).
+internal/planner/physical/set_op_types.go	1121	// through (batch.CommonContainerColumn, arc CW round 5): the numeric	// through (batch.CommonContainerColumn, arc CW): the numeric
+internal/planner/physical/star_declared_schema.go	111	// PC round 2, B3).	// PC, B3).
+internal/planner/physical/star_declared_schema.go	157	// (round-1 B3). That is #984's own defect living inside #978's answer.	// (case B3). That is #984's own defect living inside #978's answer.
+internal/planner/physical/subquery_decl_annotation.go	28	// COUNT(*) forms declared 701 where PostgreSQL declares numeric (#1018 round 5	// COUNT(*) forms declared 701 where PostgreSQL declares numeric (#1018
+internal/planner/physical/subquery_decl_cache_race_test.go	12	// TestTheScalarSubqueryDeclarationMemoIsOwnedByOneBuild is the reviewer's #1018	// TestTheScalarSubqueryDeclarationMemoIsOwnedByOneBuild is the recorded #1018
+internal/planner/physical/subquery_decl_cache_race_test.go	13	// round-6 B2 probe, promoted.	// the earlier implementation B2 probe, promoted.
+internal/planner/physical/subquery_decl_cache_race_test.go	15	// The memo added in round 6 (annotateSubqueryColumnDecls → scalarSubqueryColumnDecl)	// The memo added in the earlier implementation (annotateSubqueryColumnDecls → scalarSubqueryColumnDecl)
+internal/planner/physical/subquery_decl_cache_race_test.go	23	// write, which the round-6 recover() cannot catch: a fatal error is not a	// write, which the earlier implementation recover() cannot catch: a fatal error is not a
+internal/planner/physical/subquery_pipeline.go	62	// round 6 review, B2). A child gets its own; memoization is a	// the earlier measurement, B2). A child gets its own; memoization is a
+internal/planner/physical/subquery_pipeline.go	180	// (round-1 P1). Counting rows cannot reach that case and counting the row map	// (case P1). Counting rows cannot reach that case and counting the row map
+internal/planner/physical/subquery_pipeline.go	181	// cannot see two columns that share a name (round-1 B1); the declared schema	// cannot see two columns that share a name (case B1); the declared schema
+internal/planner/physical/subquery_pipeline.go	231	// The ASYNC door is that door (#1008 round 2): `SubmitSQL` plans stages and	// The ASYNC door is that door (#1008): `SubmitSQL` plans stages and
+internal/planner/physical/subquery_pipeline.go	259	// 17.11 both store as 12345678901234.1234567892 (round-4 review B1).	// 17.11 both store as 12345678901234.1234567892 (case B1).
+internal/planner/physical/subquery_pipeline.go	262	// what keeps the caller's zero-read property (round-3 B1). Restored on the	// what keeps the caller's zero-read property (case B1). Restored on the
+internal/planner/physical/subquery_pipeline.go	477	// plan (#859 round 4).	// plan (#859).
+internal/planner/physical/subquery_pipeline.go	496	// about the subquery (ADR-0034 item 6; round-1 P1).	// about the subquery (ADR-0034 item 6; the earlier implementation P1).
+internal/planner/physical/table_func.go	349	// when one is exhausted. Through v0.24.0 (and FR2 round 1) a member was	// when one is exhausted. Through v0.24.0 (and FR2) a member was
+internal/planner/physical/table_func.go	729	// Measured by the round-1 review.	// Measured with the same input on every path.
+internal/planner/physical/temporal_declared_produced_test.go	17	// TestTemporalArithmeticDeclaresWhatItProduces is arc VL round 3's	// TestTemporalArithmeticDeclaresWhatItProduces is arc VL
+internal/planner/physical/temporal_declared_produced_test.go	23	// The spellings are the round-2 review's second spellings of round 1's	// The spellings are the earlier measurement's second spellings of the earlier implementation's
+internal/planner/physical/text_path_net_test.go	11	// THE TEXT PATH'S NET IS THE PREDICATE'S SHAPE (arc JP round 4, B3). The raw	// THE TEXT PATH'S NET IS THE PREDICATE'S SHAPE (arc JP, B3). The raw
+internal/planner/physical/text_path_net_test.go	16	// than compared as text or dropped. Round 3's net inspected only a	// than compared as text or dropped. the earlier implementation's net inspected only a
+internal/planner/physical/validate.go	150	// PRODUCES rather than by the container it reads (round-2 review,	// PRODUCES rather than by the container it reads (,
+internal/planner/physical/validate.go	403	// all (round-2 review, P2-r2).	// all (P2-r2).
+internal/planner/physical/validate.go	447	// qualifier does not name (arc JP round 4 review, N5; PostgreSQL answers,	// qualifier does not name (arc JP measurement, N5; PostgreSQL answers,
+internal/planner/physical/validate.go	485	// (#731 / round-0 B2). It fires only where the fold WOULD have	// (#731 / the earlier implementation B2). It fires only where the fold WOULD have
+internal/planner/physical/validate.go	530	// which is why the message names the QUALIFIER (#769 round 2).	// which is why the message names the QUALIFIER (#769).
+internal/planner/physical/validate.go	1112	// (#1018 round 6, B1). See validate_flag_names.go.	// (#1018, B1). See validate_flag_names.go.
+internal/planner/physical/validate.go	1962	// registered (round-5 review, P1).	// registered (P1).
+internal/planner/physical/validate.go	2347	// (round-5 review, P1).	// (P1).
+internal/planner/physical/validate.go	2460	// 22023 (#1018 round 7, B1). Set-operation arms, derived-table bodies and CTE	// 22023 (#1018, B1). Set-operation arms, derived-table bodies and CTE
+internal/planner/physical/validate.go	2711	// costs no concession (#1018 round 7, B1).	// costs no concession (#1018, B1).
+internal/planner/physical/validate_comparison_types.go	92	// base, so no text reading is kept for it (arc BR round 2).	// base, so no text reading is kept for it (arc BR).
+internal/planner/physical/validate_comparison_types.go	151	// typed operand (arc BR round 2, br_codex/corpus.json text*/, base 260fc569):	// typed operand (arc BR, br_codex/corpus.json text*/, base 260fc569):
+internal/planner/physical/validate_comparison_types.go	469	// differently (arc VL round 3's census: `MAX(c_ts) + 0` answered	// differently (arc VL census: `MAX(c_ts) + 0` answered
+internal/planner/physical/validate_comparison_types.go	574	// VL round 5 arithOperand called the quoted side SQL's unknown and let the	// VL arithOperand called the quoted side SQL's unknown and let the
+internal/planner/physical/validate_comparison_types.go	575	// pair through, and the kernel read the literal's leading number (round-4	// pair through, and the kernel read the literal's leading number (
+internal/planner/physical/validate_comparison_types.go	649	// array at run time, so neither extends to this form (arc PC round 3: the	// array at run time, so neither extends to this form (arc PC: the
+internal/planner/physical/validate_literal.go	104	"// classification, every site"" claim (round-2 review P-7)."	"// classification, every site"" claim ( P-7)."
+internal/planner/physical/validate_literal.go	364	// (#627 round 2, B1).	// (#627, B1).
+internal/planner/physical/window_declared_output.go	194	// round 5 review, P1). exec.WindowMinMaxType is asked rather than	// the earlier measurement, P1). exec.WindowMinMaxType is asked rather than
+internal/planner/physical/window_declared_output.go	204	// round 2, B1).	// the earlier implementation, B1).
+internal/planner/physical/window_declared_output.go	216	// declaration alone (arc CW round 2, B1).	// declaration alone (arc CW, B1).
+internal/planner/physical/window_declared_output.go	241	// fact, from the same map (#1018 round 5, B1).	// fact, from the same map (#1018, B1).
+internal/planner/physical/window_keys.go	171	// used since #742 round 4, and what it keeps is an ADDRESS: a join	// used since #742, and what it keeps is an ADDRESS: a join
+internal/planner/physical/window_keys.go	226	// (#1018 round 7, B3's window half).	// (#1018, B3's window half).
+internal/planner/sql/ast.go	977	// aggregate call as a scalar and every WHEN missed (arc CW round 4,	// aggregate call as a scalar and every WHEN missed (arc CW,
+internal/planner/sql/correlation.go	22	// one ref `d.id` put `id` in the substitution map (round-1 review B3).	// one ref `d.id` put `id` in the substitution map (case B3).
+internal/planner/sql/correlation.go	217	// enclosing value for it — `2` where PostgreSQL answers `1 | 2` (arc DC round	// enclosing value for it — `2` where PostgreSQL answers `1 | 2` (arc DC;
+internal/planner/sql/correlation.go	218	// 4; the Codex review's N4 / round-2 N4).	// case N4).
+internal/planner/sql/correlation.go	269	// subquery was correlated through some OTHER clause (round-2 review, P1/P3).	// subquery was correlated through some OTHER clause (P1/P3).
+internal/planner/sql/correlation.go	289	// 17.11 and at bf99c56c (round-5 review, B2 — the qualified spelling	// 17.11 and at bf99c56c (B2 — the qualified spelling
+internal/planner/sql/correlation.go	316	// PostgreSQL 17.11's 100, 42, 200 (round-3 review, P1). The rebuild	// PostgreSQL 17.11's 100, 42, 200 (P1). The rebuild
+internal/planner/sql/correlation.go	561	// CTE spelling and loud in the derived-table one (round-1 review B1).	// CTE spelling and loud in the derived-table one (case B1).
+internal/planner/sql/correlation.go	688	// #955's own wrong answer (round-1 review B4).	// #955's own wrong answer (case B4).
+internal/planner/sql/correlation.go	1166	// ONLY THE WHERE (#1044 round 2, P1).	// ONLY THE WHERE (#1044, P1).
+internal/planner/sql/correlation.go	1413	// FROM-item half was fixed. Measured by the round-1 review.	// FROM-item half was fixed. Measured with the same input on every path.
+internal/planner/sql/correlation.go	1564	// for PostgreSQL 17.11's 100, 100, 100 (round-4 review, P1). The two lists	// for PostgreSQL 17.11's 100, 100, 100 (P1). The two lists
+internal/planner/sql/correlation.go	1592	// (round-5 review, B2). Cell 122 is the shape this omission is safe for.	// (B2). Cell 122 is the shape this omission is safe for.
+internal/planner/sql/correlation.go	1741	// AND THIS ENGINE DOES NOT IMPLEMENT LEVELS (#1044 round 2).	// AND THIS ENGINE DOES NOT IMPLEMENT LEVELS (#1044).
+internal/planner/sql/correlation.go	1919	// A SET OPERATION IS A BODY THE REBUILD CANNOT WRITE (round-2 review, P3).	// A SET OPERATION IS A BODY THE REBUILD CANNOT WRITE (P3).
+internal/planner/sql/correlation.go	2007	// AN AGGREGATE BESIDE A NESTED SUBQUERY HAS NO PLAN-TIME TYPE (round-2	// AN AGGREGATE BESIDE A NESTED SUBQUERY HAS NO PLAN-TIME TYPE (
+internal/planner/sql/correlation.go	2022	// PostgreSQL 17.11 (round-3 review, B1). `(SELECT SUM(x.visits) + (SELECT	// PostgreSQL 17.11 (B1). `(SELECT SUM(x.visits) + (SELECT
+internal/planner/sql/correlation.go	2033	// (round-4 review, B2). The declaration is #1018 / ADR-0024's family, pinned	// (B2). The declaration is #1018 / ADR-0024's family, pinned
+internal/planner/sql/correlation.go	2047	// described only part of what it takes (round-3 review, P3). `COUNT(x.id +	// described only part of what it takes (P3). `COUNT(x.id +
+internal/planner/sql/correlation.go	2209	// (round-4 review, P2). A CAST is the same constant and is not a position —	// (P2). A CAST is the same constant and is not a position —
+internal/planner/sql/fromless_scalar.go	31	// one constant for every outer row instead (round-2 review, B1).	// one constant for every outer row instead (B1).
+internal/planner/sql/fromless_scalar.go	55	// that name became `?column?` (round-2 review, B2). Here the stamp is already	// that name became `?column?` (B2). Here the stamp is already
+internal/planner/sql/fromless_scalar.go	93	// publishing `zzz` (round-2 review, B2).	// publishing `zzz` (B2).
+internal/planner/sql/fromless_scalar.go	155	// 42803 (round-3 review, B2). The decline is the ORDER BY one, in the	// 42803 (B2). The decline is the ORDER BY one, in the
+internal/planner/sql/fromless_scalar.go	188	// (round-2 review, B1). A constant sort is what the subquery is	// (B1). A constant sort is what the subquery is
+internal/planner/sql/parser.go	481	// as a scalar subquery alike (`SELECT (SELECT *) FROM t`) — round-2	// as a scalar subquery alike (`SELECT (SELECT *) FROM t`) — the earlier implementation
+internal/planner/sql/parser.go	498	// answered wrong values on all five arms (review round 2, B1-r2; repair	// answered wrong values on all five arms (measured case, B1-r2; repair
+internal/planner/sql/parser.go	516	// both planner entries reach it ahead of any binding (#1179 round 2).	// both planner entries reach it ahead of any binding (#1179).
+internal/planner/sql/parser.go	742	// (round-5 addendum, round-3's c16).	// (additional case, the earlier implementation's c16).
+internal/planner/sql/parser.go	1324	"// `syntax error at or near ""AS""` (measured); round-2 review P1."	"// `syntax error at or near ""AS""` (measured); the earlier measurement P1."
+internal/planner/sql/select_parser.go	41	// the deepest error that does (arc PC round 3, B6).	// the deepest error that does (arc PC, B6).
+internal/planner/sql/select_parser.go	1205	// column aliases is 42P10, not a syntax error (#613 round-1 P4).	// column aliases is 42P10, not a syntax error (#613 P4).
+internal/planner/sql/select_parser.go	4090	// (#965 round 3). Nothing in the tree spelled it, so no query	// (#965). Nothing in the tree spelled it, so no query
+internal/planner/sql/select_parser.go	4106	// added ONE MILLISECOND (arc VL round 4, round-3 review N2). Anything else is	// added ONE MILLISECOND (arc VL, the earlier measurement N2). Anything else is
+internal/planner/sql/volatile_cte_test.go	89	// volatile item read ONCE is planned as any other block (#1531 round 3). The	// volatile item read ONCE is planned as any other block (#1531). The
+internal/server/arc_tb_tablesample_policy_test.go	20	// fragment, which now carries the sampler (round 2; round 1 routed every	// fragment, which now carries the sampler (the earlier implementation routed every
+internal/server/arc_tb_tablesample_policy_test.go	32	// the sample is drawn from the rows the scan SELECTS. Round 1's sampler drew	// the sample is drawn from the rows the scan SELECTS. the earlier implementation's sampler drew
+internal/server/arc_tb_tablesample_policy_test.go	33	// from every physical row and returned the deleted one (review r1 B1).	// from every physical row and returned the deleted one (measured case B1).
+internal/server/pgwire/arc_by_bytea_wire_test.go	49	// Parameters into a comparison: parameters-pgwire#r11's binary bytes	// Parameters into a comparison: parameters-pgwire#r10's binary bytes
+internal/server/pgwire/arc_by_bytea_wire_test.go	144	// an assignment and a comparison (parameters-pgwire#r11), a bytea parameter is	// an assignment and a comparison (parameters-pgwire#r10), a bytea parameter is
+internal/server/pgwire/arc_by_r2_reentry_wire_test.go	23	// Arc BY round 2 (#1501, review r1 B2): a bound bytea parameter is the typed	// Arc BY (#1501, measured case B2): a bound bytea parameter is the typed
+internal/server/pgwire/arc_by_r2_reentry_wire_test.go	78	// 17.11 at c67ebf5b and at the round-2 tip alike (arc BY filing candidates).	// 17.11 at c67ebf5b and at the earlier implementation tip alike (arc BY filing candidates).
+internal/server/pgwire/arc_pw_param_types_r2_test.go	18	// ARC PW ROUND 2: the review's four blocking findings as gate rows, each	// ARC PW: the measurement's four blocking findings as gate rows, each
+internal/server/pgwire/arc_ti_temporal_infinity_wire_test.go	30	// 22023 at Bind (temporal r3), a binary date parameter carrying the int32	// 22023 at Bind (the retired infinite-input refusal; see temporal r2), a binary date parameter carrying the int32
+internal/server/pgwire/bindparams.go	113	// `00 ff 5c` became an escape and refused 22P02 (parameters-pgwire#r10/#r11),	// `00 ff 5c` became an escape and refused 22P02 (parameters-pgwire#r10),
+internal/server/pgwire/bindparams.go	513	// time and refused 22P02 (parameters-pgwire#r11).	// time and refused 22P02 (parameters-pgwire#r10).
+internal/server/pgwire/bindparams.go	796	// CAST (#1501, arc BY round 2). The two positions that take an untyped	// CAST (#1501, arc BY). The two positions that take an untyped
+internal/server/pgwire/bindparams_test.go	479	// A few thousand decodes — not the reviewer's literal 65535-parameter	// A few thousand decodes — not the recorded literal 65535-parameter
+internal/server/pgwire/paraminfer.go	78	// (round-1 review P8).	// (case P8).
+internal/server/pgwire/server.go	429	// (round-1 review P4). The refusal must end the statement, not the	// (case P4). The refusal must end the statement, not the
+internal/server/pgwire/server.go	754	// reported and before its column list is resolved (#938, round-1 review).	// reported and before its column list is resolved (#938, the earlier measurement).
+internal/server/pgwire/server.go	3078	// milliseconds, and a binary client read a wrong date (arc CW round 2,	// milliseconds, and a binary client read a wrong date (arc CW,
+internal/server/pgwire/server.go	3569	// wire and the identical one once it is stored in a TEXT column (review r5	// wire and the identical one once it is stored in a TEXT column (measured case
+internal/server/pgwire/subquery_correlation_wire_test.go	74	// THE PUBLISHED NAME, ALIAS INCLUDED (round-2 review, B2). PostgreSQL	// THE PUBLISHED NAME, ALIAS INCLUDED (B2). PostgreSQL
+internal/server/pgwire/subquery_correlation_wire_test.go	132	// correlate on, WHICHEVER clause names it (round-4 review, P1). On the	// correlate on, WHICHEVER clause names it (P1). On the
+internal/server/policy_masking_matrix_test.go	62	// row set itself is arithmetic on the value the policy hides (#859 round 2).	// row set itself is arithmetic on the value the policy hides (#859).
+internal/server/policy_masking_matrix_test.go	661	// single-process doors do (round-1 review, P1).	// single-process doors do (P1).
+internal/server/policy_masking_matrix_test.go	1036	// Round-1 review: the shapes the first matrix did not carry. Thirteen	// The earlier measurement: the shapes the first matrix did not carry. Thirteen
+internal/server/policy_masking_matrix_test.go	1135	// (round-1 review §1.3; the nine-door figure measured here):	// ( §1.3; the nine-door figure measured here):
+internal/server/policy_masking_matrix_test.go	1292	// answers c=0 under every hypothesis, so it could not fail (round-2	// answers c=0 under every hypothesis, so it could not fail (
+internal/server/policy_masking_matrix_test.go	1386	// (#859 round 3). Mixed signs are load-bearing: over a same-sign	// (#859). Mixed signs are load-bearing: over a same-sign
+internal/server/policy_masking_matrix_test.go	1416	// TEXT until arc JP round 5, in a shape the invariant could not	// TEXT until arc JP, in a shape the invariant could not
+internal/server/policy_masking_matrix_test.go	1441	// recorded in the round-5 report because a shape moving from 0A000 to	// recorded in the earlier implementation report because a shape moving from 0A000 to
+internal/server/policy_masking_matrix_test.go	1466	// disclosure at row-group granularity (#859 round 5, P2).	// disclosure at row-group granularity (#859, P2).
+internal/server/policy_masking_matrix_test.go	1504	// choice and no per-shape teaching can enumerate it (#859 round 4).	// choice and no per-shape teaching can enumerate it (#859).
+internal/server/policy_masking_matrix_test.go	1583	// is gone (#859 round 5, review P1). They still refuse, and they are	// is gone (#859, measurement P1). They still refuse, and they are
+internal/server/server.go	241	// is present (round-1 review B1).	// is present (case B1).
+internal/server/server.go	617	// exactly that case (round-1 review B1).	// exactly that case (case B1).
+internal/server/server.go	750	// The other two doors have carried it since #859 round 1; this one was	// The other two doors have carried it since #859; this one was
+internal/server/server.go	800	// the reverse (round-1 review P9). One decision per request.	// the reverse (case P9). One decision per request.
+internal/storage/ingest/from_query.go	338	// This is the ONE table (arc VL round 3): INSERT … SELECT asks it per column	// This is the ONE table (arc VL): INSERT … SELECT asks it per column
+internal/storage/ingest/from_query.go	381	// unknown-typed literal — since arc VL round 4 only a call the registry	// unknown-typed literal — since arc VL only a call the registry
+internal/storage/ingest/from_query_test.go	144	// INSERT … VALUES uses (round-2 review B1/B2). PostgreSQL assigns all	// INSERT … VALUES uses (case B1/B2). PostgreSQL assigns all
+internal/storage/ingest/from_query_test.go	156	// (arc VL round 3). These two were pinned as ADR-0012's recorded	// (arc VL). These two were pinned as ADR-0012's recorded
+internal/storage/ingest/from_query_test.go	176	// arc BY round 2 (#1501; it refused here before).	// arc BY (#1501; it refused here before).
+internal/storage/ingest/ingest.go	222	// They used to. The round-1 review of the writer-boundary arc measured 21 boxes	// They used to. The earlier measurement of the writer-boundary arc measured 21 boxes
+internal/storage/parquet/date_parse.go	38	// refuses may be constructed or stored (arc VL round 4, #911's family). The	// refuses may be constructed or stored (arc VL, #911's family). The
+internal/storage/parquet/date_parse.go	108	// range was stored there and read back as year 5881580 (arc VL round-4	// range was stored there and read back as year 5881580 (arc VL
+internal/storage/parquet/leaf_value.go	79	// and #560 for DATE (round-1 review P2).	// and #560 for DATE (case P2).
+internal/storage/parquet/leaf_value.go	166	// is a number, not an instant (round-2 review, the agreement gate's	// is a number, not an instant (the agreement gate's
+internal/storage/parquet/leaf_value.go	278	// value through a CAST are both 22003 (review NT round 2, B2).	// value through a CAST are both 22003 (measurement NT the earlier implementation, B2).
+internal/storage/parquet/reader.go	464	// flat and nested arms of one read cannot answer differently (round 0's B1,	// flat and nested arms of one read cannot answer differently (case B1,
+internal/storage/parquet/reader.go	937	// writer that preserved the author's capitalisation is keyed by the	// writer that preserved the input's capitalisation is keyed by the
+internal/storage/parquet/schema.go	507	// declaring a four-byte leaf (#971, round-1 B1).	// declaring a four-byte leaf (#971, the earlier implementation B1).
+internal/storage/parquet/temporal_box_range_test.go	15	// round-4 review P2): one past either end is 22008, the end itself stores —	// the earlier measurement P2): one past either end is 22008, the end itself stores —
+internal/worker/filter_compile.go	623	"//	             remove — so the task FAILS instead (#794 round 2, P4)."	"//	             remove — so the task FAILS instead (#794, P4)."
+wadjet/arc_by_r2_assignment_matrix_test.go	18	// The assignment matrix of arc BY round 2 (#1501, review r1 B1): a BYTES value	// The assignment matrix of arc BY (#1501, measured case B1): a BYTES value
+wadjet/arc_by_r2_assignment_matrix_test.go	298	// 17.11 coerces it (review r1 P2). At c67ebf5b and 714098e5 an even-length hex	// 17.11 coerces it (measured case P2). At c67ebf5b and 714098e5 an even-length hex
+wadjet/arc_cm_volatile_cte_test.go	228	// A VOLATILE CTE READ ONCE IS PLANNED EXACTLY AS AT c67ebf5b (#1531 round 3):	// A VOLATILE CTE READ ONCE IS PLANNED EXACTLY AS AT c67ebf5b (#1531):
+wadjet/arc_cm_volatile_cte_test.go	280	// A VOLATILE CTE READ MORE THAN ONCE IS FILLED ON DEMAND (#1531 round 3): its	// A VOLATILE CTE READ MORE THAN ONCE IS FILLED ON DEMAND (#1531): its
+wadjet/arc_cm_volatile_cte_test.go	321	// THE CLASSIFIER ASKS THE FUNCTION REGISTRY (#1531 round 3, review B2): a	// THE CLASSIFIER ASKS THE FUNCTION REGISTRY (#1531, measurement B2): a
+wadjet/arc_cm_volatile_cte_test.go	360	// THE SHARED EVALUATION LIVES AS LONG AS ITS STATEMENT (#1531 round 3): under	// THE SHARED EVALUATION LIVES AS LONG AS ITS STATEMENT (#1531): under
+wadjet/arc_cm_volatile_cte_test.go	445	// ITS ARMS' EXPRESSION SUBQUERIES (#1531 round 3, review P2). The root of a	// ITS ARMS' EXPRESSION SUBQUERIES (#1531, measurement P2). The root of a
+wadjet/arc_sc_advancing_clock_test.go	15	// The embedded door under an ADVANCING clock (#1566, round 2): the one	// The embedded door under an ADVANCING clock (#1566, the earlier implementation): the one
+wadjet/arc_wd_typed_null_ctas_test.go	14	// A CREATE TABLE … AS over a typed NULL (#1436 round 8). The arc's rule for a	// A CREATE TABLE … AS over a typed NULL (#1436). The arc's rule for a
+wadjet/arc_wd_typed_null_ctas_test.go	19	// round-6 declaration made the column DECIMAL(38,0) and stored 1, 3, 4 and 1.	// the earlier implementation declaration made the column DECIMAL(38,0) and stored 1, 3, 4 and 1.
+wadjet/bytea_literal_test.go	58	// comment and in no LENGTH cell (round 2, B4).	// comment and in no LENGTH cell (B4).
+wadjet/bytea_literal_test.go	75	// where PostgreSQL refuses (round 2, P7). The accept-side edges are here too —	// where PostgreSQL refuses (P7). The accept-side edges are here too —
+wadjet/dml.go	1379	// (#678 review R2). An unqualified name must exist somewhere in the merged	// (#678 measured case). An unqualified name must exist somewhere in the merged
+wadjet/dml.go	1714	// Round 3 had one TABLE but two converters: VALUES / SET / MERGE read a	// The earlier implementation had one TABLE but two converters: VALUES / SET / MERGE read a
+wadjet/dml.go	1719	// SELECT (round-3 review B2 / P2). Now INSERT … SELECT classifies each select	// SELECT (case B2 / P2). Now INSERT … SELECT classifies each select
+wadjet/dml.go	1731	// float box and is numeric at that scale (arc VL round 5).	// float box and is numeric at that scale (arc VL).
+wadjet/dml.go	1880	// `2.5` / 2; arc VL round 5, round-4 review B2). Any other box is returned as	// `2.5` / 2; arc VL, the earlier measurement B2). Any other box is returned as
+wadjet/dml.go	1917	// `-` pairs PostgreSQL has no operator for, 42883). Round 3 installed that	// `-` pairs PostgreSQL has no operator for, 42883). The earlier implementation installed that
+wadjet/dml.go	1919	// INSERT … SELECT and stored on VALUES / UPDATE (round-3 review B3).	// INSERT … SELECT and stored on VALUES / UPDATE (case B3).
+wadjet/dml.go	2020	// rather than a NULL or another relation's value (#678 review R2), and	// rather than a NULL or another relation's value (#678 measured case), and
+wadjet/dml.go	2206	// column scope cannot (#1179 round 2).	// column scope cannot (#1179).
+wadjet/dml.go	2279	// reads (round-2 review B1/B2/P2): the Go box a DATE, a TIMESTAMP and a	// reads (case B1/B2/P2): the Go box a DATE, a TIMESTAMP and a
+wadjet/dml.go	2297	// and fail there with no SQLSTATE (arc VL round-4 review P1).	// and fail there with no SQLSTATE (arc VL measurement P1).
+wadjet/dml.go	2329	"// int64"" with no SQLSTATE, where PostgreSQL raises 42804 (round-2"	"// int64"" with no SQLSTATE, where PostgreSQL raises 42804 ("
+wadjet/dml.go	2349	// with no SQLSTATE (the arc VL round-3 assignment gate's cell).	// with no SQLSTATE (the arc VL assignment gate's cell).
+wadjet/dml.go	2363	// into inet/macaddr/uuid — round-2 review P2's `1 + 1` into IPv4	// into inet/macaddr/uuid — the earlier measurement P2's `1 + 1` into IPv4
+wadjet/dml.go	2388	// has an assignment cast from into a number (round-2 review B1: `(n bigint)	// has an assignment cast from into a number (case B1: `(n bigint)
+wadjet/dml.go	2409	// date/time function, date arithmetic — arc VL round 3); the INSERT … SELECT	// date/time function, date arithmetic — arc VL); the INSERT … SELECT
+wadjet/dml.go	2415	// `SET d = d + 2147483647` (arc VL round-3 review B1, #911's family).	// `SET d = d + 2147483647` (arc VL measurement B1, #911's family).
+wadjet/dml.go	2470	// (expr.producedTemporal, arc VL round 3).	// (expr.producedTemporal, arc VL).
+wadjet/dml.go	2472	// The RULE, not only the box (round-2 review B1): a TIMESTAMP source	// The RULE, not only the box (case B1): a TIMESTAMP source
+wadjet/dml.go	2507	// to fail there with no SQLSTATE (round-2 review P1).	// to fail there with no SQLSTATE (case P1).
+wadjet/dml.go	2539	// (round-2 review B1's `(ts) VALUES (2 + 3)` cell).	// (case B1's `(ts) VALUES (2 + 3)` cell).
+wadjet/dml.go	2578	// read (round-2 review B1's `(dec numeric(10,2)) VALUES (DATE '2026-01-01')`	// read (case B1's `(dec numeric(10,2)) VALUES (DATE '2026-01-01')`
+wadjet/dml.go	2643	// datatypeMismatchDeclared is datatypeMismatch's round-2 sibling: it names	// datatypeMismatchDeclared is datatypeMismatch's declared-type counterpart: it names
+wadjet/dml.go	2782	// any box is read (round-2 review B1's `(f double) VALUES (DATE …)` cell).	// any box is read (case B1's `(f double) VALUES (DATE …)` cell).
+wadjet/dml.go	2810	// printed the raw day count or epoch-ms number instead (round-2 review B1's	// printed the raw day count or epoch-ms number instead (case B1's
+wadjet/dml.go	2969	// refusal has one sentence (round-1 review, N1).	// refusal has one sentence (N1).
+wadjet/dml.go	2980	// give for the same column (round-2 review).	// give for the same column ().
+wadjet/dml.go	2988	// (round-4 review N4).	// (case N4).
+wadjet/dml.go	3691	// removed nothing (#1179 round 2).	// removed nothing (#1179).
+wadjet/dml.go	3698	// (round-2 review, P3-r2).	// (P3-r2).
+wadjet/dml.go	3808	// (assignSourceOf): its declared type and float-ness (#699, round-2	// (assignSourceOf): its declared type and float-ness (#699, the earlier implementation
+wadjet/dml.go	4228	// SQLSTATE (round-3 review P2) and took `'T'`/`'F'` spellings boolin	// SQLSTATE (case P2) and took `'T'`/`'F'` spellings boolin
+wadjet/dml.go	4246	// double precision column; arc VL round 4's door-diff table).	// double precision column; arc VL door-diff table).
+wadjet/dml.go	4345	// one reader CAST(text AS VECTOR(n)) uses too (arc CW round 2).	// one reader CAST(text AS VECTOR(n)) uses too (arc CW).
+wadjet/ingest_temporal_range_test.go	18	// of the range table (arc VL round-4 review P2): a typed DATE or TIMESTAMP box	// of the range table (arc VL measurement P2): a typed DATE or TIMESTAMP box
+wadjet/vector_and_int32_doors_test.go	45	// width, did exactly the same with 5 bytes. Round-2 review B2.	// width, did exactly the same with 5 bytes. The earlier measurement B2.
+wadjet/vector_and_int32_doors_test.go	180	// date. Round-2 review B1.	// date. The earlier measurement B1.
+wadjet/vector_and_int32_doors_test.go	204	// round 4). The range's own ends answer.	//). The range's own ends answer.
+wadjet/vector_and_int32_doors_test.go	351	// The cells below assert THIS engine's behaviour only. Round-2 review P1,	// The cells below assert THIS engine's behaviour only. The earlier measurement P1,
+wadjet/vector_and_int32_doors_test.go	352	// round-3 review P4; ADR-0012 §5 (catalog: docs/adr/0012-divergences/) carries the same caveat.	// the earlier measurement P4; ADR-0012 §5 (catalog: docs/adr/0012-divergences/) carries the same caveat.
+wadjet/wadjet.go	1135	// version of this comment said it did — round-1 review N1.) An unaliased `SUM(a) OVER ()` is `sum` under	// version of this comment said it did — the earlier measurement N1.) An unaliased `SUM(a) OVER ()` is `sum` under
+wadjet/wadjet.go	1233	// (round-1 review B2).	// (case B2).
+wadjet/wadjet.go	1248	// a 1,000-table catalog was most of a psql `\d` (arc PC round 2, P1).	// a 1,000-table catalog was most of a psql `\d` (arc PC, P1).
+wadjet/wadjet.go	1510	// (round-2 review B3).	// (case B3).
+wadjet/wadjet.go	1758	// and the denied column was writable, on all three doors (#882 round 2).	// and the denied column was writable, on all three doors (#882).

@@ -243,7 +243,7 @@ func declsCoverEveryColRef(node plansql.Node, decls ColDecls) bool {
 // Both planners need it — the local pipeline binds the key to a column of its
 // input, the stage emitter to a column of its producer stage — so it stays on
 // the MIT side. It was spelled AggStageDerivedKey, which named one of those
-// two callers (LS review round 2, P2).
+// two callers (LS measured case, P2).
 func (w *declWalk) aggDerivedGroupKey(key string, child *logical.Node) (string, bool) {
 	node, err := plansql.ParseExpression(key)
 	if err != nil {

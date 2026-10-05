@@ -814,7 +814,7 @@ func CidrAddressText(s string) bool {
 	// net.ParseCIDR alone made the same literal an address to the KERNEL and
 	// garbage to this gate: `c_cidr = '010.1.2.3'` answered on the single arm
 	// and raised 22P02 on both DAG arms, and refused inside a CASE on the
-	// single arm too — one literal, three dispositions (round-3 review B3-1).
+	// single arm too — one literal, three dispositions (case B3-1).
 	if _, _, ok := parquet.PgIPv4PtonQuad(s); ok {
 		return true
 	}
@@ -871,7 +871,7 @@ func IPv6LitKey(s string) (key string, ok bool) {
 		// The mask belongs to the body's FAMILY. A v4-shaped body takes the
 		// v4 grammar — which refuses `'10.0.0.1/128'`, as the server does,
 		// rather than stripping a mask no v4 address can carry and answering
-		// zero rows (round-3 review B3-3) — and any v4 literal keys as the
+		// zero rows (case B3-3) — and any v4 literal keys as the
 		// family sentinel below.
 		if !strings.ContainsRune(body, ':') {
 			if _, bits, ok := parquet.PgIPv4Pton(s); !ok || bits != 32 {
@@ -2434,7 +2434,7 @@ func NetworkPrefixLiteral(typ batch.TypeID, text string) bool {
 // because the rendered dotted quad's byte order is NOT the address's:
 // "10.9.0.0" sorts above "10.10.0.0" as text and below it as an address, so a
 // boxed fold over an IPV4 column counted 4916 rows where PostgreSQL's inet
-// counts 4915 (round-3 review P-A).
+// counts 4915 ( P-A).
 //
 // ok is false for text that names no v4 address; the caller falls through, and
 // the plan-time refusal has already turned real garbage into 22P02.

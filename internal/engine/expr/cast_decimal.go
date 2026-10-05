@@ -562,7 +562,7 @@ func castIntInRange(v int64, dest string) int64 {
 // MinInt64. So `CAST(1e30 AS BIGINT)` came back as -9223372036854775808, a
 // wrapped number wearing the right type, while `CAST(1e30 AS INTEGER)` raised
 // correctly on the same tree: ONE destination family with two answers, which
-// is this arc's headline defect, in the file it rewrote (review round 0, P2).
+// is this arc's headline defect, in the file it rewrote (measured case, P2).
 //
 // PostgreSQL raises `bigint out of range` for it, measured. The bound is
 // parquet.FloatToInt64's, the one every float → integer conversion shares

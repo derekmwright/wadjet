@@ -24,7 +24,7 @@ import (
 // closure gate could see it — one compares the table with the registry and the
 // other with the docs, and a rewrite is in neither — so every SQL-standard
 // TRIM spelling was refused `42883 function trim(text, unknown) does not
-// exist` on a shape the base answered with PostgreSQL's exact value (round-1
+// exist` on a shape the base answered with PostgreSQL's exact value (
 // review, B1).
 //
 // The only thing that catches that is PARSING the spelling and asking the

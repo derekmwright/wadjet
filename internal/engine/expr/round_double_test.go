@@ -46,10 +46,10 @@ func TestRoundDoublePrecisionHalfToEven(t *testing.T) {
 // onto them.
 //
 // A bare literal argument boxes as a decimal string, not a float64: since
-// #1252's round 5 (`9b096b9e`) a fractional literal declares DECIMAL
-// wherever it sits, and round 7's B1 fix moved scalarFnDeclaredDecimal's own
+// #1252's the earlier implementation (`9b096b9e`) a fractional literal declares DECIMAL
+// wherever it sits, and the earlier implementation's B1 fix moved scalarFnDeclaredDecimal's own
 // declaration with it, so `ROUND(2.5)` now answers a decimal "3" the way
-// PostgreSQL's numeric does (review r5 B1, #1252). A bare, unparameterized
+// PostgreSQL's numeric does (measured case B1, #1252). A bare, unparameterized
 // `CAST(x AS numeric/decimal)` over an operand with an exact type is that
 // type at the carrier's width (#1386, Cast.bareDecimalType), so it answers
 // the same decimal text.

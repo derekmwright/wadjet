@@ -719,7 +719,7 @@ func TestBuildUnqualOuterCols(t *testing.T) {
 	// nothing about the BARE one, which SQL resolves innermost-first. Putting
 	// it in this map substituted the INNER column of the same name into the
 	// per-row re-run: `(SELECT COUNT(*) FROM c WHERE id < d.id)` answered 0
-	// for every outer row (#955, round-1 review B3).
+	// for every outer row (#955, the earlier measurement B3).
 	qualifiedOnly := []plansql.OuterRef{{Table: "t1", Column: "id"}}
 	if got := buildUnqualOuterCols(qualifiedOnly, outerCols); got != nil {
 		t.Fatalf("a qualified-only ref must not be substituted by its bare name, got %v", got)

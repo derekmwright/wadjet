@@ -346,7 +346,7 @@ func (s *parquetTableFuncSource) fileError(path string, err error) error {
 }
 
 // Next is the next ROW GROUP of the current member, opening the next member
-// when one is exhausted. Through v0.24.0 (and FR2 round 1) a member was
+// when one is exhausted. Through v0.24.0 (and FR2) a member was
 // decoded whole into one merged batch — every row group decoded, then copied
 // into a batch the file's size — so a 500 MB file held ~2.7 GB (review B3).
 // Now a decoded row group is released to the consumer before the next one is
@@ -726,7 +726,7 @@ type generateSeriesSource struct {
 	// 9223372036854775807) emitted 2048-row batches forever — every row after
 	// the wrap a value the series does not contain — and the embedded query
 	// was OOM-killed at 43 s where PostgreSQL 17.11 answers three rows.
-	// Measured by the round-1 review.
+	// Measured with the same input on every path.
 	exhausted bool
 }
 

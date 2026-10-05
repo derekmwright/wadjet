@@ -10,7 +10,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 )
 
-// THE TABLE AND THE REGISTRY NAME THE SAME SET (#966 round 3 review B1).
+// THE TABLE AND THE REGISTRY NAME THE SAME SET (#966 measurement B1).
 //
 // This is the gate that makes the table a TABLE rather than a list somebody
 // remembered to extend. A function whose result is an integer and whose

@@ -191,7 +191,7 @@ func (w *declWalk) windowArgOutputType(node *logical.Node, we logical.WindowExpr
 			// int8-argument twin declared 701 where it declares numeric —
 			// a declaration that is not even in the integer family, so the
 			// width attribute could not be recorded for it at all (#1018
-			// round 5 review, P1). exec.WindowMinMaxType is asked rather than
+			// the earlier measurement, P1). exec.WindowMinMaxType is asked rather than
 			// assumed, exactly as the decided-column arm below asks it, so
 			// the planner and the operator cannot disagree about a type.
 			if d, _, ok := w.windowComputedArgDecl(node, we); ok {
@@ -201,7 +201,7 @@ func (w *declWalk) windowArgOutputType(node *logical.Node, we logical.WindowExpr
 					}
 					// A container's whole shape, the element with it: the
 					// zero-row answer is described from this alone (arc CW
-					// round 2, B1).
+					// the earlier implementation, B1).
 					if batch.IsContainerType(batch.TypeID(out)) && d.Schema != nil {
 						return d
 					}
@@ -213,7 +213,7 @@ func (w *declWalk) windowArgOutputType(node *logical.Node, we logical.WindowExpr
 		// so a computed argument declares the result exactly as a column
 		// argument does below (`return t`): FIRST_VALUE(ARRAY[x]) OVER (…)
 		// fell to float8 on a zero-row result, which is described from this
-		// declaration alone (arc CW round 2, B1).
+		// declaration alone (arc CW, B1).
 		if windowValueFunc(fn) {
 			if d, _, ok := w.windowComputedArgDecl(node, we); ok {
 				return d
@@ -238,7 +238,7 @@ func (w *declWalk) windowArgOutputType(node *logical.Node, we logical.WindowExpr
 			// `BITWISE_AND(id, 3) AS v` is an int4 column in an int64 box,
 			// and `SUM(v) OVER ()` over it declares bigint in PostgreSQL.
 			// The grouped spelling asks aggIntegerInputWidth for the same
-			// fact, from the same map (#1018 round 5, B1).
+			// fact, from the same map (#1018, B1).
 			out, prec, scale, ok := exec.IntegerAccOutputType(fn == "avg",
 				windowBareArgWidth(inDecls, col, t.ID))
 			if !ok {

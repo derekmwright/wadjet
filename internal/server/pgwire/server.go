@@ -426,7 +426,7 @@ func (c *pgConn) dispatch(msgType byte, payload []byte) (keepGoing bool) {
 		// anyway, and routing those into the default case below answered
 		// 08P01 AND set skipUntilSync — so a simple-protocol client, which
 		// never sends Sync, got no answer to anything it sent afterwards
-		// (round-1 review P4). The refusal must end the statement, not the
+		// (case P4). The refusal must end the statement, not the
 		// connection.
 	case 'X': // Terminate
 		return false
@@ -751,7 +751,7 @@ func (c *pgConn) handleCopyIn(sql string) {
 	tableName = c.db.Catalog().ResolveTableName(tableName)
 
 	// The WRITE decision comes FIRST — before the relation's existence is
-	// reported and before its column list is resolved (#938, round-1 review).
+	// reported and before its column list is resolved (#938, the earlier measurement).
 	//
 	// The 42P01 below and the 42703 further down are metadata about a relation
 	// this identity may not touch: asked after them, the authorization refusal
@@ -3075,7 +3075,7 @@ func nestedColumnFor(nestedSchema *nestedFieldSchema, name string, pos int) *par
 	// columns of one name — `max(ats), max(ad)`, the default naming of an
 	// ordinary query — resolved to the LAST one's declaration, so a
 	// timestamp[] rendered under the date[] column's element as epoch
-	// milliseconds, and a binary client read a wrong date (arc CW round 2,
+	// milliseconds, and a binary client read a wrong date (arc CW,
 	// B2). The name lookup stays for the renamed column the gather's renamer
 	// publishes and for the legacy catalog map, which has no order.
 	if nestedSchema.ordered != nil && pos >= 0 && pos < len(nestedSchema.ordered) && nestedSchema.ordered[pos].Name == name {
@@ -3566,7 +3566,7 @@ func formatPgValueTyped(val any, col *parquet.Column) string {
 // is batch.FormatFloat8Text, the ONE renderer this engine has for a float's
 // text form — the double/real-to-TEXT assignment and cast sites in the
 // embedded engine call the same function, so a DOUBLE prints one text on the
-// wire and the identical one once it is stored in a TEXT column (review r5
+// wire and the identical one once it is stored in a TEXT column (measured case
 // P1, #1252).
 func formatPgFloat(v float64, bits int) string { return batch.FormatFloat8Text(v, bits) }
 func quotePgArray(s string) string             { return batch.QuotePGArrayElement(s) }

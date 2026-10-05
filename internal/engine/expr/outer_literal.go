@@ -179,7 +179,7 @@ func outerColumnLiteral(v *batch.Vector, precision, row int) (plansql.Node, erro
 		return lit, nil
 
 	case batch.TypeArray:
-		// An ARRAY outer value is its typed array literal (arc CW round 5,
+		// An ARRAY outer value is its typed array literal (arc CW,
 		// review P2): `CAST('{1,2}' AS BIGINT[])`, the spelling the DAG's
 		// scalar-subquery substitution already writes (ArrayValueLiteral), so
 		// `(SELECT count(*) FROM ca c2 WHERE c2.ai = ca.ai)` over a stored

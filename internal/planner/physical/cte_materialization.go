@@ -252,7 +252,7 @@ func (p *Planner) inferCTESchema(sql string) []parquet.Column {
 	// rule and the one `plansql.BlockOutputColumns` already states. The union
 	// node itself carries no SELECT list, so a multi-arm body gave a schema of
 	// ZERO columns and the reference answered "the result has no columns"
-	// (round-2 review, B3).
+	// (B3).
 	for info.Union != nil && info.Union.Left != nil {
 		info = info.Union.Left
 	}

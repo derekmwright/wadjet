@@ -225,7 +225,7 @@ var cmDeterministicShapes = []struct{ sql, plan string }{
 		"Project: [k];   Filter: [total = (SELECT max(total) FROM r)];     Project: [k total];       Aggregate: group_by=[mod(id, 7)] aggs=[sum(v) AS total];         Scan: cm_big"},
 }
 
-// A VOLATILE CTE READ ONCE IS PLANNED EXACTLY AS AT c67ebf5b (#1531 round 3):
+// A VOLATILE CTE READ ONCE IS PLANNED EXACTLY AS AT c67ebf5b (#1531):
 // one reader, nothing to share, so its body is inlined (and pushed into) as
 // any other block's. EXPLAIN VERBOSE prints the text c67ebf5b printed for
 // eight single-reference shapes — FROM, LIMIT, a body raising past the rows
@@ -277,7 +277,7 @@ const (
 	cmHalfBody    = "WITH s AS (SELECT g, random() AS r FROM generate_series(1, 100000) g) "
 )
 
-// A VOLATILE CTE READ MORE THAN ONCE IS FILLED ON DEMAND (#1531 round 3): its
+// A VOLATILE CTE READ MORE THAN ONCE IS FILLED ON DEMAND (#1531): its
 // one evaluation advances only when a reader asks for a row it does not hold
 // yet, so a reader that stops early never forces rows nobody reads — nor the
 // error on one — and every reader, fast or slow, in any order, reads the same
@@ -318,7 +318,7 @@ func TestArcCMSharedVolatileCTEIsFilledOnDemand(t *testing.T) {
 	}
 }
 
-// THE CLASSIFIER ASKS THE FUNCTION REGISTRY (#1531 round 3, review B2): a
+// THE CLASSIFIER ASKS THE FUNCTION REGISTRY (#1531, measurement B2): a
 // function CREATE FUNCTION defined is volatile when its BODY is, followed
 // through the functions the body calls. The issue's cell through
 // `CREATE FUNCTION f_r() AS random()` — and through f_r2() calling f_r() —
@@ -357,7 +357,7 @@ func TestArcCMVolatileUserFunctionMakesTheCTEShared(t *testing.T) {
 	}
 }
 
-// THE SHARED EVALUATION LIVES AS LONG AS ITS STATEMENT (#1531 round 3): under
+// THE SHARED EVALUATION LIVES AS LONG AS ITS STATEMENT (#1531): under
 // a 512 KiB budget, a spool that spilled, a body that raised mid-spool, and a
 // statement cancelled mid-spool each leave no run file in the spill directory
 // and no body goroutine behind; concurrent statements each get their own
@@ -442,7 +442,7 @@ func TestArcCMSharedSpoolEndsWithItsStatement(t *testing.T) {
 }
 
 // A SET OPERATION AT THE STATEMENT ROOT READS THE STATEMENT'S WITH LIST FROM
-// ITS ARMS' EXPRESSION SUBQUERIES (#1531 round 3, review P2). The root of a
+// ITS ARMS' EXPRESSION SUBQUERIES (#1531, measurement P2). The root of a
 // set operation carries no WITH list — each arm's root does — and a scalar
 // subquery in an arm found no `c`: NULL where PostgreSQL 17.11 answers the
 // value, for a deterministic body too. At c67ebf5b and d56767c1 every cell

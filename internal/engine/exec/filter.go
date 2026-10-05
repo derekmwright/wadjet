@@ -213,7 +213,7 @@ func ColumnCompareLit(colName string, op CompareOp, value any, litText string) P
 		// stays exactly the comparison it always was — the vectorized kernel
 		// does the same thing with matchNothingKernel / matchAllNonNullKernel.
 		// Carrying it as a branch instead cost +9.6% on FilterAndPredicate
-		// (review round 1, F11).
+		// (measured case, F11).
 		int64Val, k64 = intBoundAsCompare(int64Val, k64, v64, -1<<63)
 		var v32wide int64
 		v32wide, k32 = intBoundAsCompare(int64(int32Val), k32, v32, -1<<31)
@@ -443,7 +443,7 @@ func bytesFilterVal(value any) string {
 // was the address on the vectorized arm and the ZERO here, and the DAG (which
 // reaches this copy) answered 0 rows where the single arm answered 1. The same
 // zero reading turned #627's network-prefix refusal into a wrong NUMBER on the
-// DAG (round 2, B1).
+// DAG (B1).
 //
 // ok=false still yields 0, and that is safe now for the reason it was not
 // before: the literal has already been classified at PLAN time
@@ -1892,7 +1892,7 @@ type ColColFilter struct {
 	// container is set when both columns are containers: the typed kernels
 	// have no container arm, so each row orders through the ONE container
 	// comparator (kernel.CompareValuesAt) — what ORDER BY, the join keys and
-	// every expression comparator of two arrays use (ADR-0045 §4). Round 4:
+	// every expression comparator of two arrays use (ADR-0045 §4). The earlier implementation:
 	// `WHERE v > w` over two array columns of a derived table refused with
 	// "could not resolve kernel".
 	container bool

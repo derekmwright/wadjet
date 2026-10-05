@@ -219,7 +219,7 @@ func (ing *Ingester) validateRow(row map[string]any) error {
 // asked through parquet.CheckLeafBox — one function, so the two boundaries
 // cannot answer differently.
 //
-// They used to. The round-1 review of the writer-boundary arc measured 21 boxes
+// They used to. The earlier measurement of the writer-boundary arc measured 21 boxes
 // this door refused and the writer stored (`uint` and `uint64` into
 // INT32/PORT/PROTOCOL, int8/int16/uint* into FLOAT32/FLOAT64 — every one a
 // value the leaf holds exactly), and the agreement gate beside this file then

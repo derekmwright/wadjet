@@ -517,7 +517,7 @@ func buildScanAggregateFragment(stage dagplan.Stage, t *distributed.Task, files 
 	// ABAC security barrier runs BEFORE the partial aggregate so grouping
 	// and aggregation see masked values and never see denied columns — and
 	// the user's own predicates run above it, for the reason the scan
-	// fragment's copy of this records (#859 round 2).
+	// fragment's copy of this records (#859).
 	if op, ok := projectOpFromSpecs(stage.SecurityProjectExprs); ok {
 		ops = append(ops, op)
 		if len(stage.PostSecurityFilterExprs) > 0 {

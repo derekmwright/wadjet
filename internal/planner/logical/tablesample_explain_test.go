@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// EXPLAIN's scan line shows the sample (#1411 review r1 N3): the method and
+// EXPLAIN's scan line shows the sample (#1411 measured case N3): the method and
 // the argument as the real the scan samples with — PostgreSQL prints
 // `Sampling: bernoulli ('50'::real)` — or NULL. It showed `Scan: t`.
 func TestScanLineShowsTablesample(t *testing.T) {

@@ -824,7 +824,7 @@ func decodeOhlcvState(s string) (ohlcvState, bool) {
 // until one of them is changed. (They had already drifted: this arm adopted
 // the source's declared FIELDS on an empty destination and MergeOhlcvStates
 // did not, which was invisible only because MergeOhlcvStates had no
-// production caller — round-2 review, P3.)
+// production caller — the earlier measurement, P3.)
 //
 // The destination's DOMAIN is adopted only when it has seen nothing, for the
 // reason ohlcvState.merge states: within one aggregate the carrier is one

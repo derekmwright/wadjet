@@ -220,7 +220,7 @@ func litDecimal(text string) (batch.DecimalType, batch.Int128, bool) {
 // float64 arithmetic box's "2.5" — for a site that needs the exact text a
 // decimal literal was written with rather than its arithmetic value:
 // castStringRender's non-column arm and FuncCall.formatDecimalLitArgs both
-// call this rather than reimplementing it (review r5 B1's "second spelling",
+// call this rather than reimplementing it (measured case B1's "second spelling",
 // #1252). ok is false for anything that is not a constant, or not decimal
 // (an integer literal, one too wide for the DECIMAL carrier) — the caller
 // falls back to its own rendering.
@@ -314,7 +314,7 @@ type decMode struct {
 // One reading, because two drifted: DecimalResultOf spelled these three cases
 // out for the GATHER path and resolveDecimalMode did not spell them out at
 // all, which is how a choice came to be DECLARED numeric and COMPUTED in
-// float64 (round-2 review, B1r2).
+// float64 (B1r2).
 func choiceDecimalArms(e Expr) ([]Expr, bool) {
 	switch v := e.(type) {
 	case *Case:
@@ -584,7 +584,7 @@ func operandIsDecimalTyped(e Expr, b *batch.RecordBatch) bool {
 	// `COALESCE(bigint, 1.5)` is numeric on PostgreSQL and boxed as decimal
 	// text here, so it is a genuine DECIMAL operand and not an integer wearing
 	// a fixed-point type — without this arm the pair below fell to the int or
-	// float mode and the exact kernel was never selected (round-2 review).
+	// float mode and the exact kernel was never selected ().
 	if arms, isChoice := choiceDecimalArms(e); isChoice {
 		_, _, ok := decimalArmFold(arms, b)
 		return ok
@@ -1348,7 +1348,7 @@ func decimalArmFold(arms []Expr, b *batch.RecordBatch) (int, int, bool) {
 		// A FRACTIONAL literal beside a non-constant arm is the exception —
 		// expr.CommonDeclType's fractionalLitTriggersFold makes the identical
 		// call over the DECLARED arms, and the two must not drift or the plan
-		// builds one vector and this hands it another box (round-1 B3).
+		// builds one vector and this hands it another box (case B3).
 		return 0, 0, false
 	}
 	m, ok := foldDecimalMetas(metas, declared)

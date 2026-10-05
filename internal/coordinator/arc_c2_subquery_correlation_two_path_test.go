@@ -386,7 +386,7 @@ func c2Cells() []c2Cell {
 			want: `id,v | 1,6 | 2,6 | 3,6`},
 		// --- THE REWRITE'S REACH: every position a FROM-less scalar subquery
 		// can occupy relative to the scope that owns its references
-		// (round-2 review, B1). The rewrite fires where the ENCLOSING BLOCK
+		// (B1). The rewrite fires where the ENCLOSING BLOCK
 		// supplies the row; where the enclosing block is a subquery whose own
 		// text a per-row re-run rebuilds, the node stays and the outer value
 		// arrives through that rebuild instead — or the shape is refused.
@@ -430,7 +430,7 @@ func c2Cells() []c2Cell {
 		// writes an ORDER BY or GROUP BY term like any other, and only a term
 		// whose SUBSTITUTED rendering is a bare numeric literal is refused,
 		// because that is the one rendering both engines read as a
-		// select-list POSITION rather than as a value (round-3 review, P4).
+		// select-list POSITION rather than as a value (P4).
 		// A constant sort under a LIMIT picks an ARBITRARY row (ADR-0013), so
 		// the cell carries a real tiebreak; what it asserts is that the term
 		// is written into the rebuild rather than refused.
@@ -472,7 +472,7 @@ func c2Cells() []c2Cell {
 			wantErr: `correlated on u.id`,
 			routes:  a2Routes{ScalarProjection: 1}},
 
-		// --- #1044's own shape WITH a FROM clause (round-2 review, P1).
+		// --- #1044's own shape WITH a FROM clause (P1).
 		// The re-run substitutes the outer row into the SELECT list and the
 		// HAVING now, not only the WHERE.
 		{name: "55_the_issue_shape_with_a_from_clause",
@@ -529,7 +529,7 @@ func c2Cells() []c2Cell {
 			want: `v | 3`},
 
 		// --- the clauses the rewrite DECLINES now answer through the re-run
-		// instead of a silent NULL (round-2 review, N1), and a star with no
+		// instead of a silent NULL (N1), and a star with no
 		// relation is PostgreSQL's 42601 (N3).
 		{name: "65_a_declined_ORDER_BY_answers_through_the_rerun",
 			sql:    `SELECT id, (SELECT u.id ORDER BY 1) AS v FROM c2users u ORDER BY id`,
@@ -568,7 +568,7 @@ func c2Cells() []c2Cell {
 			// outer row, or its outer-reading items computed ABOVE the join —
 			// ADR-0021's dependent-join layer.
 			wantErr: `LATERAL body's SELECT list reads "u.id" from the enclosing query`},
-		// --- AN ORDER BY TERM IS NEVER REWRITTEN INTO AN ORDINAL (round-2
+		// --- AN ORDER BY TERM IS NEVER REWRITTEN INTO AN ORDINAL (
 		// review, B1). PostgreSQL reads only an integer literal WRITTEN IN
 		// THE CLAUSE as a select-list position, never one a subquery
 		// evaluates to, so `ORDER BY (SELECT 1)` is a constant sort. The
@@ -633,7 +633,7 @@ func c2Cells() []c2Cell {
 				// term at all — the scan-agg fragment builds its group-by
 				// projection without a SubqueryRunner. Keeping the node (which
 				// is what B2 requires, and what main does) is what exposes it;
-				// round 3 hid it by rewriting the term to an ordinal, which
+				// the earlier implementation hid it by rewriting the term to an ordinal, which
 				// silently grouped by a select-list position instead.
 				"dag":          `subqueries require a SubqueryRunner`,
 				"dag-shuffled": `subqueries require a SubqueryRunner`,
@@ -644,7 +644,7 @@ func c2Cells() []c2Cell {
 
 		// --- AN OUTER REFERENCE WHOSE ONLY POSITION IS THE SUBQUERY'S ORDER
 		// BY is seen by the classifier now, so it reaches the re-run and is
-		// refused there instead of answering a constant (round-2 review, P1).
+		// refused there instead of answering a constant (P1).
 		// The `, x.id` tiebreak is load-bearing: for the middle outer row the
 		// factor is zero, so without it the sort key is constant and LIMIT 1
 		// picks an arbitrary row (ADR-0013). The cell decides the
@@ -662,7 +662,7 @@ func c2Cells() []c2Cell {
 
 		// --- A CORRELATED BODY THAT IS A SET OPERATION has no rendering in
 		// the rebuild, and its arms were invisible to the classifier
-		// (round-2 review, P3).
+		// (P3).
 		{name: "84_a_correlated_set_operation_body", // PostgreSQL: 1, 2, 3
 			sql: `SELECT id, (SELECT u.id FROM c2users x WHERE x.id=1 ` +
 				`UNION ALL SELECT u.id FROM c2users y WHERE y.id=99) AS v ` +
@@ -678,7 +678,7 @@ func c2Cells() []c2Cell {
 
 		// --- AN AGGREGATE BESIDE A NESTED SUBQUERY has no plan-time type, so
 		// the item fell to FLOAT64 and an exact accumulator's DECIMAL reached
-		// the client as the #361 silent-write guard's message (round-2
+		// the client as the #361 silent-write guard's message (
 		// review, P4). It is one shape whether the accumulator is exact or
 		// not: the int32 twins answered under OID 701 where PostgreSQL
 		// declares bigint.
@@ -709,7 +709,7 @@ func c2Cells() []c2Cell {
 			routes: a2Routes{Correlated: 1}},
 
 		// --- a FROM-less block's OWN aggregate or window call is the block's,
-		// and answers (round-2 review, P2 — the docs said otherwise).
+		// and answers (P2 — the docs said otherwise).
 		{name: "91_a_fromless_blocks_own_aggregate_answers",
 			sql:    `SELECT id, (SELECT MAX(1)) AS v FROM c2users u ORDER BY id`,
 			want:   `id,v | 1,1 | 2,1 | 3,1`,
@@ -723,7 +723,7 @@ func c2Cells() []c2Cell {
 			want:   `id,v | 1,1 | 2,1 | 3,1`,
 			routes: a2Routes{ScalarProjection: 1}},
 		// --- AN UNCORRELATED NESTED SUBQUERY BESIDE AN AGGREGATE TYPES FINE
-		// (round-3 review, B1). The refusal exists for a nested subquery whose
+		// (B1). The refusal exists for a nested subquery whose
 		// own body names the ENCLOSING query — that one has no plan-time type.
 		// An ordinary one does, and the correlation is in the WHERE, which the
 		// re-run substitutes.
@@ -754,7 +754,7 @@ func c2Cells() []c2Cell {
 			routes: a2Routes{Correlated: 1}},
 		// The discriminator: the nested subquery NAMES the enclosing query, so
 		// the item has no type until the outer row is known and the refusal
-		// stands (round-2 review, P4's shapes).
+		// stands (P4's shapes).
 		{name: "99_the_nested_subquery_names_the_enclosing_query", // PostgreSQL: 343, 344, 345
 			sql: `SELECT id, (SELECT SUM(x.visits) + (SELECT u.id) FROM c2users x) AS v ` +
 				`FROM c2users u ORDER BY id`,
@@ -767,7 +767,7 @@ func c2Cells() []c2Cell {
 			routes:  a2Routes{Correlated: 1}},
 
 		// --- A GROUP BY TERM IS NEVER REWRITTEN INTO A SELECT-LIST POSITION
-		// (round-3 review, B2). `GROUP BY (SELECT 1)` rewritten to `1` passed
+		// (B2). `GROUP BY (SELECT 1)` rewritten to `1` passed
 		// the ungrouped-column validator as "group by item #1" and projected a
 		// fabricated NULL row where PostgreSQL 17.11 and main both raise
 		// 42803 — a row of NULLs beside a real aggregate.
@@ -803,7 +803,7 @@ func c2Cells() []c2Cell {
 				"scan-agg fragment"},
 
 		// --- AN ARM OF A SET OPERATION IS A BLOCK WITH ITS OWN FROM, AND THE
-		// SCOPE HAS TO SAY SO (round-5 review, B2). A union node has no FROM,
+		// SCOPE HAS TO SAY SO (B2). A union node has no FROM,
 		// so walking an arm with the union's scope left the arm's relations
 		// out of the inner namespace and every BARE column in an arm was read
 		// as a reference to the enclosing query: an ordinary uncorrelated
@@ -856,7 +856,7 @@ func c2Cells() []c2Cell {
 			routes:  a2Routes{Correlated: 1}},
 
 		// --- A GROUP BY TERM COVERS THE SELECT ITEM WRITTEN THE SAME WAY,
-		// AND NOTHING ELSE (round-5 addendum, round-3's c16). PostgreSQL
+		// AND NOTHING ELSE (additional case, the earlier implementation's c16). PostgreSQL
 		// matches a SELECT item against a GROUP BY term AS WRITTEN: `GROUP BY
 		// (SELECT u.visits)` covers `(SELECT u.visits)` and raises 42803 on
 		// `visits`. The FROM-less unfold rewrote both sides to `u.visits`,
@@ -886,7 +886,7 @@ func c2Cells() []c2Cell {
 		{name: "132_boundary_an_ordinary_GROUP_BY_still_covers_the_subquery_item",
 			sql:  `SELECT (SELECT u.visits) AS v FROM c2users u GROUP BY visits ORDER BY v`,
 			want: `v | 42 | 100 | 200`},
-		// The rule reads the PARSE, not the text (round-5 review, P1).
+		// The rule reads the PARSE, not the text (P1).
 		// PostgreSQL matches the parsed expression, so whitespace, keyword
 		// case and — in a single-relation block — the qualified spelling of
 		// the inner column are immaterial there; keying on the raw SQL of a
@@ -931,7 +931,7 @@ func c2Cells() []c2Cell {
 				`GROUP BY visits, (SELECT u.visits) ORDER BY visits`,
 			want: `visits,n | 42,1 | 100,1 | 200,1`},
 
-		// --- A JOIN'S ON CONDITION IS A CLAUSE THE WALK READS (round-3
+		// --- A JOIN'S ON CONDITION IS A CLAUSE THE WALK READS (
 		// review, P1). It was the seventh clause, unread, and the shape was
 		// planned uncorrelated and silently wrong at main too.
 		{name: "108_an_outer_reference_in_a_JOINs_ON_condition",
@@ -941,7 +941,7 @@ func c2Cells() []c2Cell {
 			routes: a2Routes{Correlated: 1}},
 
 		// --- THE ORDER BY REFUSAL IS THE ORDINAL TRAP AND NOTHING WIDER
-		// (round-3 review, P4). A sort with no slice cannot change which rows
+		// (P4). A sort with no slice cannot change which rows
 		// a scalar subquery, an EXISTS or an IN set reads, so its term is left
 		// as written; a term that SUBSTITUTES to an expression is written into
 		// the rebuild; only a term that substitutes to a bare numeric literal
@@ -957,7 +957,7 @@ func c2Cells() []c2Cell {
 			want:   `id,v | 1,100 | 2,100 | 3,100`,
 			routes: a2Routes{Correlated: 1}},
 		// A term that substitutes to a bare numeric literal is WRAPPED, not
-		// declined (round-4 review, P2): `ORDER BY u.id` renders `ORDER BY
+		// declined (P2): `ORDER BY u.id` renders `ORDER BY
 		// CAST(1 AS BIGINT)`, which is a constant expression on PostgreSQL
 		// 17.11 and here and a select-list POSITION on neither. The `, x.id`
 		// tiebreak is the cell's, not the repair's: a constant sort under a
@@ -984,7 +984,7 @@ func c2Cells() []c2Cell {
 			routes: a2Routes{Correlated: 1}},
 
 		// --- THE OUTER PROJECTION CARRIES EVERY COLUMN ITS SUBQUERIES
-		// CORRELATE ON, WHICHEVER CLAUSE NAMES IT (round-4 review, P1). The
+		// CORRELATE ON, WHICHEVER CLAUSE NAMES IT (P1). The
 		// walk reads seven clauses; the pruning collector read three, so a
 		// column named ONLY in a GROUP BY, an ORDER BY or a JOIN's ON was
 		// pruned out of the enclosing projection and the per-row re-run then
@@ -1027,7 +1027,7 @@ func c2Cells() []c2Cell {
 			routes: a2Routes{Correlated: 1}},
 		// The RIGHT JOIN twin. It was LOUD here once: the substituted ON
 		// condition `t.name = 'alice'` sat in the ON of a join the body's
-		// WHERE had demoted to inner, where nothing placed it. Arc DC round 2
+		// WHERE had demoted to inner, where nothing placed it. Arc DC
 		// made the demotion lift it, and the pin started agreeing with
 		// PostgreSQL on all five arms — deleted as the proof.
 		{name: "119_the_RIGHT_JOIN_twin",

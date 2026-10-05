@@ -71,7 +71,7 @@ func TestASubqueryReadsTheRowItIsCorrelatedOnOnTheWire(t *testing.T) {
 		{name: "a_string_column_declares_text",
 			sql:  `SELECT (SELECT u.nm) AS v FROM (SELECT name AS nm FROM users) u ORDER BY 1`,
 			oids: []uint32{25}, text: `alice|bob|carol`},
-		// THE PUBLISHED NAME, ALIAS INCLUDED (round-2 review, B2). PostgreSQL
+		// THE PUBLISHED NAME, ALIAS INCLUDED (B2). PostgreSQL
 		// names a scalar subquery's column after the subquery's own target
 		// list, and a BI client binds a result set to that name (#732). Every
 		// other cell here is written `AS v`, which is exactly what hid this:
@@ -129,7 +129,7 @@ func TestASubqueryReadsTheRowItIsCorrelatedOnOnTheWire(t *testing.T) {
 				`FROM users u ORDER BY id`,
 			wantErr: `holds a window function`},
 		// --- the outer projection carries every column its subqueries
-		// correlate on, WHICHEVER clause names it (round-4 review, P1). On the
+		// correlate on, WHICHEVER clause names it (P1). On the
 		// wire because the message a client got was an internal one about
 		// batch columns, in both result formats.
 		{name: "an_ORDER_BY_names_a_column_the_outer_list_omits",

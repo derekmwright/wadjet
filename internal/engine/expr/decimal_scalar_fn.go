@@ -183,12 +183,12 @@ func (e *decimalScalarFn) resolveMode(b *batch.RecordBatch) bool {
 // used to be excluded here, on the reasoning that `SELECT 1.5` declared
 // FLOAT64 and so `ROUND(0.5)` answering DECIMAL would make a constant-folded
 // expression change type depending on which function wrapped it. Since
-// #1252's round 5 (`9b096b9e`) a fractional literal declares DECIMAL
+// #1252's the earlier implementation (`9b096b9e`) a fractional literal declares DECIMAL
 // wherever it sits, so `ROUND(0.5)` and a DECIMAL column now agree without a
 // carve-out: `operandIsDecimalTyped`'s own Lit arm (`litIsExactDecimal`)
 // already answers DECIMAL for the literal, and its UnaryOp arm recurses
 // through unary ± the same way `ROUND(-0.5)` and `ROUND(0.5)` need to
-// (review r5 B1, #1252).
+// (measured case B1, #1252).
 func decimalScalarArg(e Expr, b *batch.RecordBatch) bool {
 	return operandIsDecimalTyped(e, b)
 }
@@ -198,7 +198,7 @@ func decimalScalarArg(e Expr, b *batch.RecordBatch) bool {
 // test over the AST. Used by the constant-division and CASE/choice fold
 // guards (binop_decimal.go, choice_decimal.go), which are unchanged by B1:
 // constant division and the transcendental functions stay on the float path
-// (ADR-0024's recorded divergence, review r5 N3) — only a scalar function's
+// (ADR-0024's recorded divergence, measured case N3) — only a scalar function's
 // own DECIMAL declaration (decimalScalarArg, above) stopped excluding a
 // constant argument.
 func isConstNumericLit(e Expr) bool {

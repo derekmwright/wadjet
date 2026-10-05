@@ -318,7 +318,7 @@ func tcCells() []tcCell {
 		}
 	}
 	// A refused text where no row reaches the comparison, through an operand
-	// that is not a stored column compared directly (review r1 B3).
+	// that is not a stored column compared directly (measured case B3).
 	for name, sql := range map[string]string{
 		"b3/cte_norow":        "WITH x AS (SELECT id, ts FROM tc_t) SELECT id FROM x WHERE id > 100 AND ts = 'garbage'",
 		"b3/derived_empty":    "SELECT id FROM (SELECT id, ts FROM tc_e) x WHERE ts = 'garbage'",
@@ -330,7 +330,7 @@ func tcCells() []tcCell {
 		"b3/date_trunc_empty": "SELECT id FROM tc_e WHERE date_trunc('day', ts) = '2024-02-30'",
 		"b3/cte_d_norow":      "WITH x AS (SELECT id, d FROM tc_t) SELECT id FROM x WHERE id > 100 AND d = '0000-01-01'",
 		"b3/cast_norow":       "SELECT id FROM tc_t WHERE id > 100 AND CAST(ts AS TIMESTAMP) = 'garbage'",
-		// date_trunc over a DATE answers a TIMESTAMP (review r2 P1).
+		// date_trunc over a DATE answers a TIMESTAMP (measured case P1).
 		"b3/date_trunc_d_empty": "SELECT id FROM tc_e WHERE date_trunc('day', d) = 'garbage'",
 		"b3/date_trunc_d_norow": "SELECT id FROM tc_t WHERE id > 100 AND date_trunc('day', d) = '2024-02-30'",
 	} {
@@ -397,7 +397,7 @@ func tcCells() []tcCell {
 			cells = append(cells, tcCell{name: fmt.Sprintf("empty/pos_%s/ts/%q", o.name, x), sql: q})
 		}
 	}
-	// A volatile operand beside a special word, over 4096 rows (review r2
+	// A volatile operand beside a special word, over 4096 rows (measured case
 	// B3): the operand is evaluated once per row and compared with the
 	// infinite value (refused before any row until arc TI); PostgreSQL
 	// answers 4096. Eight runs, one cell each.

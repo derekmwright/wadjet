@@ -264,7 +264,7 @@ func TestH2TheWindowDeclaredTypeCensus(t *testing.T) {
 
 		// #953's grouped half reaches the accumulator through FOUR producers
 		// and the whole-table cells above exercise only the ones a scalar
-		// aggregate uses. Round 1 found that: reverting the PROTOCOL arm of
+		// aggregate uses. The counter-example shows that: reverting the PROTOCOL arm of
 		// `kernel.ResolveRowSum` ALONE, or the four `agg_scatter.go` SUM/AVG
 		// arms ALONE, left every gate in the branch green while
 		// `SUM(c_proto) … GROUP BY` came back NULL on four arms. A gate that
@@ -327,7 +327,7 @@ func TestH2TheWindowDeclaredTypeCensus(t *testing.T) {
 			want: "cols=[v:INT64] rows=1 | 621435"},
 
 		// A COMPUTED window argument. The first REPORT called this a deferral
-		// — "a computed window argument keeps float8" — and round 1 measured
+		// — "a computed window argument keeps float8" — and the measurements showed
 		// it FALSE: the pre-window projection materializes the expression as a
 		// column with its own INT64 declaration, so windowSpecOutputType's new
 		// integer arm reads it and these are exact too. Two of them returned
@@ -385,7 +385,7 @@ func TestH2TheWindowDeclaredTypeCensus(t *testing.T) {
 			sql:  "SELECT SUM(CASE WHEN w_key > 3 THEN 1 ELSE 0 END) AS v FROM numwidth",
 			want: "cols=[v:INT64] rows=1 | 6"},
 
-		// #987 review B1: the SAME question, WINDOWED. Round 2's fix read the
+		// #987 measurement B1: the SAME question, WINDOWED. the earlier implementation's fix read the
 		// MATERIALIZED argument column, and every integer expression in this
 		// engine computes in int64 (ADR-0024's widening) — so an int4-domain
 		// expression came back INT64 and declared DECIMAL(38,0), OID 1700,
@@ -428,7 +428,7 @@ func TestH2TheWindowDeclaredTypeCensus(t *testing.T) {
 		{name: "987 B1 control: SUM(MOD(int4, 10)) grouped",
 			sql:  "SELECT SUM(MOD(w_i32, 10)) AS v FROM numwidth",
 			want: "cols=[v:INT64] rows=1 | 24"},
-		// #987 review ROUND 3, B1: a CAST is an operand whose width is its
+		// #987 measured case, B1: a CAST is an operand whose width is its
 		// TARGET's, and the walk had no arm for one — so every int8 operand
 		// written under a cast read as int4 and `SUM(bigint_col::bigint)`
 		// declared bigint in BOTH spellings where PostgreSQL declares

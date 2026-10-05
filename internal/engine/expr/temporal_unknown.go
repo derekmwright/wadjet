@@ -24,10 +24,10 @@ import (
 // and for `date + unknown` there are several (integer, interval, time) —
 // 42725 `operator is not unique`.
 //
-// Before arc VL round 5 the quoted operand was read by the numeric path: its
+// Before arc VL the quoted operand was read by the numeric path: its
 // leading number was a day count or a MILLISECOND count (`ts + '1 day'`
 // answered ts + 1 ms as a number, `d - '2026-03-01'` answered d − 2026 days,
-// `DATE '…' + '1.5'` stored 20516.5 in a float column — round-4 review B3).
+// `DATE '…' + '1.5'` stored 20516.5 in a float column — the earlier measurement B3).
 type UnknownTemporal int
 
 const (
