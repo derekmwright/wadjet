@@ -367,7 +367,8 @@ func assignmentCast(from, to parquet.TypeID) bool {
 		case parquet.TypeInt32, parquet.TypeInt64, parquet.TypePort, parquet.TypeProtocol,
 			parquet.TypeFloat32, parquet.TypeFloat64, parquet.TypeDecimal,
 			parquet.TypeBool, parquet.TypeDate, parquet.TypeTimestamp,
-			parquet.TypeIPv4, parquet.TypeIPv6, parquet.TypeCIDR, parquet.TypeMAC, parquet.TypeUUID:
+			parquet.TypeIPv4, parquet.TypeIPv6, parquet.TypeCIDR, parquet.TypeMAC, parquet.TypeUUID,
+			parquet.TypeBytes:
 			return true
 		}
 	case parquet.TypeDate, parquet.TypeTimestamp:

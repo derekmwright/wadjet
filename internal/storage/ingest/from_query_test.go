@@ -171,9 +171,10 @@ func TestAssignableToColumn(t *testing.T) {
 		{"IntIntoDate", fqCol("a", parquet.TypeInt32), fqCol("b", parquet.TypeDate), false},
 		{"TimestampIntoInt", fqCol("a", parquet.TypeTimestamp), fqCol("b", parquet.TypeInt64), false},
 		{"IntIntoIPv4", fqCol("a", parquet.TypeInt64), fqCol("b", parquet.TypeIPv4), false},
-		// BYTES into TEXT is an assignment cast in PostgreSQL (its \x text);
-		// this engine refuses it — the refusing direction, ADR-0012.
-		{"BytesIntoString", fqCol("a", parquet.TypeBytes), fqCol("b", parquet.TypeString), false},
+		// BYTES into TEXT is PostgreSQL's assignment cast, its I/O conversion:
+		// 17.11 stores the bytea's `\x41` text, and so does this engine since
+		// arc BY round 2 (#1501; it refused here before).
+		{"BytesIntoString", fqCol("a", parquet.TypeBytes), fqCol("b", parquet.TypeString), true},
 		{"RowFieldNameDiffers", row1, row2, false},
 		{"VectorWidthDiffers",
 			parquet.Column{Name: "v", Type: parquet.TypeVector, Dimension: 4},

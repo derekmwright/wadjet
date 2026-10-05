@@ -5,6 +5,7 @@ package wadjet
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -2829,6 +2830,16 @@ func assignTextValue(v any, _ parquet.Column, srcType parquet.TypeID, srcKnown b
 			return v, nil
 		}
 		return batch.FormatTimestamp(ms), nil
+	}
+	if srcKnown && srcType == parquet.TypeBytes {
+		// bytea's output function (bytea_output = hex): PostgreSQL's
+		// assignment of bytea to text is its I/O conversion.
+		switch t := v.(type) {
+		case []byte:
+			return `\x` + hex.EncodeToString(t), nil
+		case string:
+			return `\x` + hex.EncodeToString([]byte(t)), nil
+		}
 	}
 	if srcKnown {
 		if s, ok := networkAssignmentText(v, srcType); ok {
