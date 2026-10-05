@@ -693,10 +693,12 @@ WITH s AS (SELECT sum(random()) AS r FROM flow_logs)
 SELECT count(*) FROM device_inventory WHERE (SELECT r FROM s) <> (SELECT r FROM s)
 ```
 
-The shared evaluation is filled on demand, as PostgreSQL's is: a row of the
-body is computed only when some reference asks for a row past what has been
-computed, so a reference that stops early (`LIMIT`, `EXISTS`) never computes
-— or raises an error on — rows no reference reads. It is held under the
+The shared evaluation is filled on demand, as PostgreSQL's is: a batch of the
+body's rows is computed only when some reference asks for a row past what has
+been computed, so a reference that stops early (`LIMIT`, `EXISTS`) does not
+compute — or raise an error on — the batches no reference reaches. The unit
+is a batch, not a row: a reference that stops inside the batch holding a
+failing row raises where PostgreSQL answers. It is held under the
 statement's memory budget and spills past it, and `EXPLAIN VERBOSE` names it
 (`CTE s: volatile, evaluated once; every reference reads that result`). A
 volatile CTE read once, and any deterministic CTE, is expanded into the plan

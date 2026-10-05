@@ -2961,8 +2961,11 @@ body; the body RUNS only when some reader first asks for a batch, and
 advances one batch at a time only when a reader asks for a batch the spool
 does not hold yet — PostgreSQL's CTE Scan over one tuplestore. Every
 reference is a `Source` over the spool at its own position. So a reader that
-stops early (LIMIT, EXISTS) never forces rows nobody reads, nor the error on
-one: `… SELECT (SELECT g FROM s LIMIT 1) + (SELECT g FROM s LIMIT 1)` over a
+stops early (LIMIT, EXISTS) does not force the BATCHES nobody reaches, nor an
+error in one (the unit is a batch: a reader that stops inside the batch
+holding a failing row raises where PostgreSQL, filling row by row, answers;
+and a recursive term re-runs a volatile CTE it reads once on every iteration
+— both as at c67ebf5b): `… SELECT (SELECT g FROM s LIMIT 1) + (SELECT g FROM s LIMIT 1)` over a
 body that raises at its 150 000th row answers 2, as on PostgreSQL; a reader
 that reads on to that row raises it, when it reaches it; readers at
 different speeds, in either order, a self-join and both arms of a UNION ALL
