@@ -1,0 +1,47 @@
+# PostgreSQL 17.11 (postgres:17-alpine) answers for TestArcBYByteaInputEveryArm over by_t / by_s (byPGFixture). BYTES is CREATE DOMAIN bytes AS bytea there, so the three 42846 lines name bytea as `CAST(x AS bytea)` does on 17.11 (the domain names itself).
+# name<TAB>rows=N <sorted rows, cells joined by ','; bytea as \x hex; NULL as NULL> | ERR <SQLSTATE> <message>.
+cast/lit/hex	rows=1 6869
+cast/lit/plain	rows=1 6869
+cast/lit/escape	rows=1 615c6200635c
+cast/lit/empty-hex	rows=1 ,0
+cast/lit/utf8	rows=1 c3a9
+cast/lit/ws	rows=1 6869
+cast/lit/upper-x	ERR 22P02 invalid input syntax for type bytea
+cast/lit/odd	ERR 22023 invalid hexadecimal data: odd number of digits
+cast/lit/bad-digit	ERR 22023 invalid hexadecimal digit: "z"
+cast/lit/ws-in-pair	ERR 22023 invalid hexadecimal digit: " "
+cast/lit/lone-backslash	ERR 22P02 invalid input syntax for type bytea
+cast/lit/octal-past-byte	ERR 22P02 invalid input syntax for type bytea
+cast/col/ok	rows=4 1,6869 | 2,6869 | 5,6869 | 6,NULL
+cast/col/lone-backslash	ERR 22P02 invalid input syntax for type bytea
+cast/col/odd	ERR 22023 invalid hexadecimal data: odd number of digits
+cast/col/join-key	rows=6 1,1 | 1,6 | 2,1 | 2,6 | 5,1 | 5,6
+cast/col/bigint	ERR 42846 cannot cast type bigint to bytea
+cast/lit/numeric	ERR 42846 cannot cast type numeric to bytea
+cast/lit/boolean	ERR 42846 cannot cast type boolean to bytea
+cast/col/identity	rows=8 1,6869 | 2,5c783431 | 3,41 | 4,615c5c62 | 5,NULL | 6,6869 | 7,41 | 8,00ff
+cast/col/text-roundtrip	rows=8 1,6869 | 2,5c783431 | 3,41 | 4,615c5c62 | 5,NULL | 6,6869 | 7,41 | 8,00ff
+cast/where	rows=2 1 | 6
+cmp/hex	rows=2 1 | 6
+cmp/ws	rows=2 1 | 6
+cmp/ws-in-pair	ERR 22023 invalid hexadecimal digit: " "
+cmp/odd	ERR 22023 invalid hexadecimal data: odd number of digits
+cmp/bad-digit	ERR 22023 invalid hexadecimal digit: "z"
+cmp/upper-x	ERR 22P02 invalid input syntax for type bytea
+cmp/escape	rows=1 4
+cmp/lone-backslash	ERR 22P02 invalid input syntax for type bytea
+cmp/in	rows=3 2 | 3 | 7
+read/rows	rows=8 1,\x6869,2,\x6869 | 2,\x5c783431,4,\x5c783431 | 3,\x41,1,\x41 | 4,\x615c5c62,4,\x615c5c62 | 5,NULL,NULL,NULL | 6,\x6869,2,\x6869 | 7,\x41,1,\x41 | 8,\x00ff,2,\x00ff
+read/join	rows=2 1,6 | 3,7
+read/group	rows=6 00ff,1 | 41,2 | 5c783431,1 | 615c5c62,1 | 6869,2 | NULL,1
+scalar/where-backslash	rows=1 2
+scalar/where-two-backslashes	rows=1 4
+scalar/select	rows=1 5c783431
+correlated/count	rows=7 1,2 | 2,1 | 3,2 | 4,1 | 6,2 | 7,2 | 8,1
+correlated/exists	rows=4 1 | 3 | 6 | 7
+decode/hex-ws	rows=1 6869
+decode/hex-odd	ERR 22023 invalid hexadecimal data: odd number of digits
+decode/escape-bad	ERR 22P02 invalid input syntax for type bytea
+decode/escape-ok	rows=1 615c6200
+correlated/select-outer	rows=8 1,6869 | 2,5c783431 | 3,41 | 4,615c5c62 | 5,NULL | 6,6869 | 7,41 | 8,00ff
+correlated/count-no-nul	rows=6 1,2 | 2,1 | 3,2 | 4,1 | 6,2 | 7,2
