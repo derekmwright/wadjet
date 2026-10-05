@@ -1115,6 +1115,8 @@ ADR-0024 §10 (Derek Wright's decision of 2026-10-05). At 8e681724 `CREATE TABLE
 | aggregates-windows | r24 | CLOSED (PostgreSQL's answer now): a column created from a numeric LAG / LEAD result over a bigint stores a later 0.75 as 0.75 (c10; 8e681724 stored 1) | `wadjet.TestArcWDTypedNullCreateTableAs` c10 |
 | dml-assignment | [r23](0012-divergences/dml-assignment.md#catalog) | Added (round 3): a CREATE TABLE AS column from a constant CASE over two declarations (`CASE WHEN 1 = 1 THEN k ELSE n END`), and from `+n`, keeps the plan's declaration (c23adbbb's) where PostgreSQL folds to the selected arm's typmod | `wadjet.TestArcUNCreatedColumnKeepsPostgresTypmod` |
 | numeric-decimal | [r24](0012-divergences/numeric-decimal.md#catalog) | Amended (round 3): every text rendering of the column's value — `||`, `concat`, `concat_ws`, `format`, `quote_literal`, `json_build_object`, `array_to_string`, CAST — is the one printer; the DAG stage-boundary residual named | `wadjet.TestArcUNOneTextPrinter`, `coordinator.TestArcUNUnconstrainedColumnEveryArm` |
+| dml-assignment | [r23](0012-divergences/dml-assignment.md#catalog) | Narrowed (round 4): a constant `IS NULL` / `IN` / `BETWEEN` / arithmetic CASE condition now folds; a constant the walk cannot read over an unconstrained arm is DECIMAL(38,10) unmarked | `wadjet.TestArcUNCreatedColumnKeepsPostgresTypmod` |
+| numeric-decimal | [r24](0012-divergences/numeric-decimal.md#catalog) | Amended (round 4): the text is the same on all five arms after an exchange (GROUP BY, DISTINCT, set operation, window, join); the DAG residual withdrawn | `coordinator.TestArcUNExchangeKeepsThePrinterEveryArm` |
 
 ## 2026-10-05: PostgreSQL's regular-expression constructs read their pattern as an ARE (#1499)
 
