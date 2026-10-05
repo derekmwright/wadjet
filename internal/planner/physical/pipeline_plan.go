@@ -33,6 +33,14 @@ func (p *Planner) buildPipeline(ctx context.Context, node *logical.Node) (exec.S
 			source := exec.NewSliceSource(mat.schema, mat.rows)
 			return source, nil, &exec.CollectSink{}, nil
 		}
+		// A VOLATILE CTE's reference: its one evaluation for the statement
+		// (once_cte.go, #1531).
+		if source, handled, err := p.serveOnceCTE(ctx, node); handled {
+			if err != nil {
+				return nil, nil, nil, err
+			}
+			return source, nil, &exec.CollectSink{}, nil
+		}
 		// A RECURSIVE reference the cache does not hold: materialize it HERE,
 		// where this block is planned. materializeCTEs fills the cache from
 		// `root.CTEs` alone, so a recursive CTE declared in a derived table,

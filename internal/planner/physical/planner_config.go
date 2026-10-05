@@ -30,6 +30,10 @@ type Planner struct {
 	PlanCtx     context.Context // context from the current Plan() call, used by subquery runner
 	catResolver *sysrows.Resolver
 	Ctes        []plansql.CTEDef // CTE definitions from the current query, for subquery resolution
+	// onceCTEs serves every reference to a volatile CTE from one evaluation
+	// per statement (once_cte.go). Plan allocates it; forSubquery's copy
+	// shares the pointer; a planner Plan never ran (the stage DAG's) has none.
+	onceCTEs *onceCTECache
 	// outputProjection is the Project whose names LEAVE the engine, resolved
 	// once per Plan() call. Only that projection publishes PostgreSQL's
 	// FigureColname (Projection.PublishedName, #732): a nested block's names

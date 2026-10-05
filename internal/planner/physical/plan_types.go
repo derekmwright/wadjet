@@ -16,6 +16,10 @@ import (
 type PhysicalPlan struct {
 	Pipeline *exec.Pipeline
 	Cleanup  func() // optional: called after pipeline finishes to clean up spill files
+	// OnceCTEs names the volatile WITH items this plan's blocks declare,
+	// each evaluated once for the statement (once_cte.go); EXPLAIN VERBOSE
+	// prints them.
+	OnceCTEs []string
 	// OutputSchema is the PLAN-DERIVED output schema: the SELECT list's
 	// column names with the types the catalog says they carry. It answers
 	// the question a zero-row result leaves open, since every other source
@@ -93,6 +97,15 @@ type DecimalCoercion struct {
 // embedded API — and through the `wadjet` binary — printed a DAG the embedded
 // engine never executes, emitted only to be printed. The stage list belongs to
 // the distributed planner and `wadjetd` still prints it, from there.
+//
+// A volatile CTE the statement declares is named on its own line: the
+// pipeline evaluates its body ONCE and every reference reads that result
+// (once_cte.go). The line is the plan's, not the stage DAG's — the
+// distributed path does not evaluate it once (#1531).
 func (p *PhysicalPlan) PrettyPrint() string {
-	return "Single-stage local execution"
+	s := "Single-stage local execution"
+	for _, name := range p.OnceCTEs {
+		s += "\nCTE " + name + ": volatile, evaluated once; every reference reads that result"
+	}
+	return s
 }

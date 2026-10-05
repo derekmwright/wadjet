@@ -541,6 +541,16 @@ type Node struct {
 	// item `gk` names (#653).
 	CTEName string
 
+	// OnceCTE is set beside CTEName on a reference to a WITH item whose body
+	// is VOLATILE (plansql.CTEDef.EvaluatedOnce): the definition, carrying its
+	// identity, and OnceCTEScope the WITH items in scope inside its body
+	// (the ones before it). The single-process planner evaluates such a body
+	// ONCE per statement and serves every reference — in the plan tree, in an
+	// expression subquery's text, in a nested block, in a set-operation arm —
+	// from that one result, keyed by the identity rather than by the name.
+	OnceCTE      *plansql.CTEDef
+	OnceCTEScope []plansql.CTEDef
+
 	// CTERefAlias is the name ONE reference gives that scope — `x` in
 	// `FROM c AS x`, which PostgreSQL makes the only spelling the enclosing
 	// query may use. It sits beside CTEName rather than replacing it because

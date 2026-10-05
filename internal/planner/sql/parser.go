@@ -103,6 +103,9 @@ type CTEDef struct {
 	Columns   []string // optional column name list
 	Recursive bool     // WITH RECURSIVE
 
+	// ident is this item's identity, shared by every copy (volatile_cte.go).
+	ident *CTEIdentity
+
 	// The CTE body, parsed at most once per definition — see sub_block.go.
 	body     *SelectInfo
 	bodyErr  error
@@ -1722,6 +1725,7 @@ func lexParseCTEs(l *lexer) ([]CTEDef, error) {
 			SQL:       body,
 			Columns:   columns,
 			Recursive: recursive,
+			ident:     &CTEIdentity{},
 		})
 
 		// Check for comma (more CTEs) or end
