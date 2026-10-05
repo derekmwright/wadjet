@@ -36,6 +36,9 @@ import (
 // under mu — each consumer appends into a checked-out slab of its own
 // (stage_sink_accum.go); mu is taken only at chunk boundaries.
 type unpartitionedStageSink struct {
+	// marks holds every batch to the file header's unconstrained marks
+	// (markGuard, ADR-0024 §10).
+	marks     markGuard
 	spillPath string
 
 	mu        sync.Mutex
@@ -165,6 +168,9 @@ func (s *unpartitionedStageSink) Consume(_ context.Context, b *batch.RecordBatch
 	n := b.ActiveLen()
 	if n == 0 {
 		return nil
+	}
+	if err := s.marks.Check(b.Schema); err != nil {
+		return err
 	}
 	// Direct-chunk bypass: a batch that alone meets a flush threshold would
 	// only pass through the accumulator to be flushed immediately — encode

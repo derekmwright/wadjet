@@ -218,6 +218,66 @@ func (sw *shuffleWriter) writeChunk(cols []*batch.Vector, sel []uint32, numRows 
 	return nil
 }
 
+// markGuard holds every batch a `.wshf` file is written from to the
+// unconstrained marks of the file's header (wshf.DecimalUnconstrainedBit,
+// ADR-0024 §10). The header records each DECIMAL column's mark once, from the
+// first batch, and every chunk is read back under it, so a batch whose column
+// carries the other mark would be read as a column it is not — `2.50` printed
+// `2.5`, or the reverse. The planner makes a set operation's arms agree before
+// they meet (SetOpTargetType's result mark, the arms' DecimalCoerce); this is
+// the backstop for a producer it did not reconcile, and it turns that class
+// from a silent first-batch-wins into a failed task, beside writeChunk's scale
+// check. No stage declares which of two marks is right, so a disagreement is
+// refused rather than restated. The zero value is ready; Check is safe for
+// concurrent use.
+type markGuard struct {
+	first atomic.Pointer[[]parquet.Column]
+}
+
+// Check records schema as the file's when it is the first, and otherwise
+// refuses a DECIMAL column whose mark differs from the first schema's at the
+// same position. A batch sharing the first schema's slice costs one compare.
+func (g *markGuard) Check(schema []parquet.Column) error {
+	if len(schema) == 0 {
+		return nil
+	}
+	p := g.first.Load()
+	if p == nil {
+		s := schema
+		if g.first.CompareAndSwap(nil, &s) {
+			return nil
+		}
+		p = g.first.Load()
+	}
+	return checkWrittenMarks(*p, schema)
+}
+
+// checkWrittenMarks refuses a batch schema whose DECIMAL column, by position,
+// carries a different unconstrained mark from the file's schema.
+func checkWrittenMarks(file, b []parquet.Column) error {
+	if len(file) != len(b) || len(b) == 0 || &file[0] == &b[0] {
+		return nil
+	}
+	for i := range file {
+		if file[i].Type != parquet.TypeDecimal || b[i].Type != parquet.TypeDecimal ||
+			file[i].Unconstrained == b[i].Unconstrained {
+			continue
+		}
+		mark := func(u bool) string {
+			if u {
+				return "created from an unconstrained numeric"
+			}
+			return "not marked"
+		}
+		return fmt.Errorf(
+			"shuffle write: column %d (%q) is %s in this batch but %s in the file header — "+
+				"one file cannot declare two marks for one column, and its rows would print as "+
+				"a column they are not (ADR-0024 §10): the planner did not coerce this producer",
+			i, b[i].Name, mark(b[i].Unconstrained), mark(file[i].Unconstrained))
+	}
+	return nil
+}
+
 // decimalVectorScale is the scale a DECIMAL vector's unscaled integers are
 // at. A view owns no storage, so it defers to the base it reads through.
 func decimalVectorScale(v *batch.Vector) int {

@@ -4,9 +4,11 @@ package worker
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
@@ -234,4 +236,93 @@ func TestWSHFPrecisionByteRefusesAPrecisionTheBitWouldCover(t *testing.T) {
 		t.Errorf("writeHeader accepted DECIMAL precision 200")
 	}
 	_ = binary.LittleEndian
+}
+
+// THE WRITER REFUSES TO LIE (markGuard). A `.wshf` header records each DECIMAL
+// column's mark once; a batch whose column carries the other mark would be
+// read back as a column it is not. Every writer — the stream, partitioned and
+// unpartitioned stage sinks, the gather reply, the batch-list writers — holds
+// each batch to the first batch's marks by position and refuses a mismatch.
+func TestWSHFWriterRefusesABatchOfAnotherMark(t *testing.T) {
+	marked := markFixtureSchema(false, true, false)
+	unmarked := markFixtureSchema(false, false, false)
+	otherNonDecimal := markFixtureSchema(false, true, false)
+	otherNonDecimal[0].Unconstrained = true // not a DECIMAL: ignored
+
+	var g markGuard
+	if err := g.Check(marked); err != nil {
+		t.Fatalf("first schema refused: %v", err)
+	}
+	if err := g.Check(marked); err != nil {
+		t.Fatalf("the same schema refused: %v", err)
+	}
+	if err := g.Check(markFixtureSchema(false, true, false)); err != nil {
+		t.Fatalf("an equal schema (another slice) refused: %v", err)
+	}
+	if err := g.Check(otherNonDecimal); err != nil {
+		t.Fatalf("a non-DECIMAL column's mark refused: %v", err)
+	}
+	err := g.Check(unmarked)
+	if err == nil || !strings.Contains(err.Error(), `column 2 ("v")`) {
+		t.Fatalf("a batch whose second v is unmarked under a marked header: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		sink func(t *testing.T) interface {
+			Consume(context.Context, *batch.RecordBatch) error
+		}
+	}{
+		{"shuffleStreamSink", func(t *testing.T) interface {
+			Consume(context.Context, *batch.RecordBatch) error
+		} {
+			s := newShuffleStreamSink(t.TempDir())
+			if err := s.Init(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { s.Close() })
+			return s
+		}},
+		{"unpartitionedStageSink", func(t *testing.T) interface {
+			Consume(context.Context, *batch.RecordBatch) error
+		} {
+			s := newUnpartitionedStageSink(t.TempDir(), "mark")
+			if err := s.Init(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { s.Close() })
+			return s
+		}},
+		{"partitionedShuffleSink", func(t *testing.T) interface {
+			Consume(context.Context, *batch.RecordBatch) error
+		} {
+			s := newPartitionedShuffleSink(t.TempDir(), []string{"id"}, 2, marked)
+			if err := s.Init(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { s.Close() })
+			return s
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// The row copiers read every row's string offsets: the fixture's
+			// NULL row gets an empty one.
+			mk := func(schema []parquet.Column) *batch.RecordBatch {
+				b := markFixtureBatch(schema)
+				b.Columns[3].BytesData.Set(2, nil)
+				return b
+			}
+			s := tc.sink(t)
+			if err := s.Consume(context.Background(), mk(marked)); err != nil {
+				t.Fatalf("first batch: %v", err)
+			}
+			if err := s.Consume(context.Background(), mk(marked)); err != nil {
+				t.Fatalf("a batch of the same marks: %v", err)
+			}
+			err := s.Consume(context.Background(), mk(unmarked))
+			if err == nil || !strings.Contains(err.Error(), "two marks for one column") {
+				t.Fatalf("a batch of another mark was written: %v", err)
+			}
+		})
+	}
 }
