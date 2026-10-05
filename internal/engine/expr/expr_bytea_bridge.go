@@ -37,7 +37,7 @@ func fnEncode(args []any) any {
 	if len(args) < 2 || args[0] == nil || args[1] == nil {
 		return nil
 	}
-	raw := toBytes(args[0])
+	raw := byteaArg(args[0])
 	switch byteaEncodingName(args[1]) {
 	case "hex":
 		return hex.EncodeToString(raw)
@@ -95,7 +95,7 @@ func fnGetByte(args []any) any {
 	if len(args) < 2 || args[0] == nil || args[1] == nil {
 		return nil
 	}
-	raw := toBytes(args[0])
+	raw := byteaArg(args[0])
 	i := ToInt64(args[1])
 	if i < 0 || i >= int64(len(raw)) {
 		raiseByteaIndexOutOfRange(i, len(raw))
@@ -110,7 +110,7 @@ func fnSetByte(args []any) any {
 	if len(args) < 3 || args[0] == nil || args[1] == nil || args[2] == nil {
 		return nil
 	}
-	raw := toBytes(args[0])
+	raw := byteaArg(args[0])
 	i := ToInt64(args[1])
 	if i < 0 || i >= int64(len(raw)) {
 		raiseByteaIndexOutOfRange(i, len(raw))
@@ -119,6 +119,30 @@ func fnSetByte(args []any) any {
 	copy(out, raw)
 	out[i] = byte(ToInt64(args[2]) & 0xff)
 	return out
+}
+
+// byteaArg is the bytea argument of encode / get_byte / set_byte, PostgreSQL's
+// own bytea functions: a BYTES value is its bytes, and text — a quoted literal,
+// which the server coerces to bytea — is read by byteain, the one reading of a
+// text as bytea (kernel.ByteaIn; #1501, arc BY round 2). It was toBytes, the
+// extension functions' reader, which takes an even-length hex text as the
+// bytes it spells and anything else as its characters: `encode('6869', 'hex')`
+// answered 6869 where PostgreSQL answers 36383639, and `encode('\x6869',
+// 'hex')` 5c7836383639 where it answers 6869. The packet, payload, DNS, TLS
+// and JA3 functions keep toBytes: they are this engine's, and their contract
+// is the hex text a capture tool writes.
+func byteaArg(v any) []byte {
+	switch tv := v.(type) {
+	case []byte:
+		return tv
+	case string:
+		raw, err := kernel.ByteaIn(tv)
+		if err != nil {
+			panic(fatalEval{err})
+		}
+		return raw
+	}
+	return toBytes(v)
 }
 
 func byteaEncodingName(v any) string {
