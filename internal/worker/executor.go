@@ -795,6 +795,10 @@ func (e *Executor) Execute(ctx context.Context, task distributed.Task, workerID 
 
 	peakTracker := newTaskPeakHeapTracker(ctx)
 
+	// The columns this task's output sinks write as columns created from an
+	// unconstrained numeric (ADR-0024 §10), reported beside its files.
+	ctx, marks := withWrittenMarks(ctx)
+
 	var err error
 	switch task.Type {
 	case distributed.TaskTypePipeline:
@@ -862,6 +866,7 @@ func (e *Executor) Execute(ctx context.Context, task distributed.Task, workerID 
 		}
 	} else {
 		result.Success = true
+		result.UnconstrainedColumns = marks.names()
 	}
 
 	// Ensure TaskStats is always populated (fallback for tasks without spill)
@@ -1375,7 +1380,7 @@ func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, re
 	// then carry raw storage form to every consumer downstream (#423).
 	// …and refused outright when a base-table read arrives without them,
 	// rather than typed from the file's own footer (#503).
-	if err := applyDeclaredScanSchema(src, "shuffle task", task.ID, task.Files, task.ColumnTypes); err != nil {
+	if err := applyDeclaredScanSchema(src, "shuffle task", task.ID, task.Files, task.ColumnTypes, task.Unconstrained); err != nil {
 		return err
 	}
 	// Dynamic-filter pushdown for shuffle's implicit parquet scan. Operates

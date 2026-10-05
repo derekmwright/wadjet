@@ -1,0 +1,19 @@
+# cell<TAB>this engine's answer on every arm where it is not PostgreSQL's text: MAX(v) and a scalar subquery's answer are computed values that print at the column's one scale (catalog numeric-decimal r18).
+x_maxg_cast	type=text rows=3 1.0000000000 | 1.5000000000 | 7.0000000000
+x_maxg_cat	type=text rows=3 1.0000000000 | 1.5000000000 | 7.0000000000
+x_maxg_concat	type=text rows=3 1.0000000000| | 1.5000000000| | 7.0000000000|
+x_maxg_eq1	type=bigint rows=1 0
+x_maxg_eq15	type=bigint rows=1 0
+x_maxg_eq7	type=bigint rows=1 0
+x_maxg_fmt	type=text rows=3 1.0000000000 | 1.5000000000 | 7.0000000000
+x_maxg_grp	type=text;bigint rows=3 1.0000000000,1 | 1.5000000000,1 | 7.0000000000,1
+x_maxg_json	type=text rows=3 {"x" : 1.0000000000} | {"x" : 1.5000000000} | {"x" : 7.0000000000}
+x_maxg_ord	type=text rows=3 1.0000000000 | 1.5000000000 | 7.0000000000
+x_scal_cast	type=text rows=1 7.0000000000
+x_scal_cat	type=text rows=1 7.0000000000
+x_scal_concat	type=text rows=1 7.0000000000|
+x_scal_eq7	type=bigint rows=1 0
+x_scal_fmt	type=text rows=1 7.0000000000
+x_scal_grp	type=text;bigint rows=1 7.0000000000,1
+x_scal_json	type=text rows=1 {"x" : 7.0000000000}
+x_scal_ord	type=text rows=1 7.0000000000

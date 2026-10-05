@@ -158,7 +158,10 @@ func (s *unpartitionedStageSink) Init(_ context.Context) error {
 // small writes from shuffleWriter into syscall-sized chunks — without it,
 // ~95% of stage-output CPU was unbuffered file Writes (the same fix from the
 // 2026-04-30 shuffle-sink bufio refactor).
-func (s *unpartitionedStageSink) Consume(_ context.Context, b *batch.RecordBatch) error {
+func (s *unpartitionedStageSink) Consume(ctx context.Context, b *batch.RecordBatch) error {
+	if b != nil {
+		noteWrittenSchema(ctx, b.Schema)
+	}
 	if b == nil {
 		return nil
 	}

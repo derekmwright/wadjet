@@ -263,6 +263,8 @@ func wireColumnSpec(c parquet.Column) distributed.ColumnSpec {
 		Precision: c.Precision,
 		Scale:     c.Scale,
 		Dimension: c.Dimension,
+		// The catalog's mark rides the declaration (ADR-0024 §10).
+		Unconstrained: c.Unconstrained && c.Type == parquet.TypeDecimal,
 	}
 	if c.ElementType != nil {
 		e := wireColumnSpec(*c.ElementType)
