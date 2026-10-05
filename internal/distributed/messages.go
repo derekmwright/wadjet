@@ -784,10 +784,10 @@ type ColumnSpec struct {
 	Dimension   int          `json:"dimension,omitempty"`
 	ElementType *ColumnSpec  `json:"element_type,omitempty"`
 	Fields      []ColumnSpec `json:"fields,omitempty"`
-	// Unconstrained is set only on an OpDecimalCoerce coercion: the set
-	// operation's result column is created from an unconstrained numeric
-	// (every arm's is; ADR-0024 §10). Absent everywhere else, so a task
-	// without such a coercion marshals as it always did.
+	// Unconstrained is parquet.Column.Unconstrained of the declared column
+	// (ADR-0024 §10), by position in its list: an OpDecimalCoerce coercion's
+	// result column, a join side's plan-declared schema. Omitted when false,
+	// so a task over no such column marshals as it always did.
 	Unconstrained bool `json:"unconstrained,omitempty"`
 }
 

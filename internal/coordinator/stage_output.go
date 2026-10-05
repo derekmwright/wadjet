@@ -263,6 +263,10 @@ func wireColumnSpec(c parquet.Column) distributed.ColumnSpec {
 		Precision: c.Precision,
 		Scale:     c.Scale,
 		Dimension: c.Dimension,
+		// The declared column's unconstrained mark (ADR-0024 §10): an empty
+		// side's plan-declared schema is what an outer join pads NULLs
+		// under, and its batches go into the same file as the other side's.
+		Unconstrained: c.Unconstrained && c.Type == parquet.TypeDecimal,
 	}
 	if c.ElementType != nil {
 		e := wireColumnSpec(*c.ElementType)
