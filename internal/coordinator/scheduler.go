@@ -96,6 +96,10 @@ type Scheduler struct {
 	// retried) passes through. Used by streaming exchange to attach
 	// peer-location hints and fetch tokens. Must be cheap and thread-safe.
 	annotate func(*distributed.Task)
+	// exchangeMarks stamps every exchange read with the columns its files
+	// were written with as columns created from an unconstrained numeric
+	// (ADR-0024 §10; exchange_marks.go). Nil stamps nothing.
+	exchangeMarks *exchangeMarkRegistry
 
 	// localityPlacement enables input-locality placement (docs/design/
 	// locality-placement.md): a task whose peer-location hints all point
@@ -115,6 +119,7 @@ func NewScheduler(nc *nats.Conn, logger *slog.Logger) *Scheduler {
 		logger:        logger,
 		inflight:      make(map[string]inflightTask),
 		eagerInflight: make(map[string]inflightTask),
+		exchangeMarks: newExchangeMarkRegistry(),
 	}
 }
 
@@ -243,6 +248,7 @@ func (s *Scheduler) PublishTasks(ctx context.Context, tasks []distributed.Task) 
 			s.annotate(&task)
 		}
 		stampTaskDeleteMarkers(&task, queryDeletes)
+		stampTaskUnconstrained(&task, s.exchangeMarks)
 		stampTaskStatementClock(&task, ctx)
 		stampTaskPlannerOptions(&task, s.BushyJoinReorder)
 		data, err := distributed.Marshal(task)
