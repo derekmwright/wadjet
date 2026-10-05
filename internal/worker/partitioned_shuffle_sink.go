@@ -190,7 +190,10 @@ func (s *partitionedShuffleSink) Init(_ context.Context) error {
 // call operates on its own batch b — callers never share a batch across
 // concurrent Consume calls (morsel views and pipeline batches are
 // single-owner by contract).
-func (s *partitionedShuffleSink) Consume(_ context.Context, b *batch.RecordBatch) error {
+func (s *partitionedShuffleSink) Consume(ctx context.Context, b *batch.RecordBatch) error {
+	if b != nil {
+		noteWrittenSchema(ctx, b.Schema)
+	}
 	if s.closed.Load() {
 		return fmt.Errorf("partitionedShuffleSink: Consume after Close")
 	}

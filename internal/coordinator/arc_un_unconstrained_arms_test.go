@@ -108,6 +108,8 @@ var unPGFixture = []string{
 	"INSERT INTO un_t VALUES (1,1,10,1.25,2,1.25),(2,1,20,0.755,0.5,2.50),(3,1,NULL,1,NULL,NULL),(4,2,40,NULL,3.3333333333,3.33),(5,2,1234567890,1234567890,10,10.00),(6,3,60,2.5,1.5,0.75)",
 	"CREATE TABLE un_u (id BIGINT, v NUMERIC)",
 	"INSERT INTO un_u VALUES (1,1.25),(2,7),(7,0.1)",
+	"CREATE TABLE un_x (id BIGINT, g BIGINT, v NUMERIC)",
+	"INSERT INTO un_x VALUES (1,1,1),(2,1,1.5),(3,2,7),(4,2,0.0000000001),(5,3,NULL),(6,3,1)",
 }
 
 // unTables is the same fixture as the files the DAG arms read: each column's
@@ -148,11 +150,14 @@ func unTables(t *testing.T) []tmdTable {
 	tc := []parquet.Column{decl("id", "BIGINT"), decl("g", "BIGINT"), decl("b", "BIGINT"),
 		decl("v", "NUMERIC"), decl("w", "NUMERIC"), decl("n", "NUMERIC(10,2)")}
 	uc := []parquet.Column{decl("id", "BIGINT"), decl("v", "NUMERIC")}
+	xc := []parquet.Column{decl("id", "BIGINT"), decl("g", "BIGINT"), decl("v", "NUMERIC")}
 	return []tmdTable{
 		mk("un_t", tc, [][]string{{"1", "1", "10", "1.25", "2", "1.25"}, {"2", "1", "20", "0.755", "0.5", "2.50"},
 			{"3", "1", "NULL", "1", "NULL", "NULL"}, {"4", "2", "40", "NULL", "3.3333333333", "3.33"},
 			{"5", "2", "1234567890", "1234567890", "10", "10.00"}, {"6", "3", "60", "2.5", "1.5", "0.75"}}),
 		mk("un_u", uc, [][]string{{"1", "1.25"}, {"2", "7"}, {"7", "0.1"}}),
+		mk("un_x", xc, [][]string{{"1", "1", "1"}, {"2", "1", "1.5"}, {"3", "2", "7"},
+			{"4", "2", "0.0000000001"}, {"5", "3", "NULL"}, {"6", "3", "1"}}),
 	}
 }
 
@@ -328,4 +333,58 @@ func unTrim(s string) string {
 		end = dot
 	}
 	return s[:end]
+}
+
+// A COLUMN CREATED FROM AN UNCONSTRAINED NUMERIC KEEPS ITS PRINTER ACROSS AN
+// EXCHANGE (ADR-0024 §10, arc UN round 4). Read back after a GROUP BY key, a
+// DISTINCT, a set-operation arm, a window's input, partition or order key, an
+// equi-join key or payload on either side, a sort + LIMIT or a CTE read twice,
+// the column's value renders as text — CAST, ||, concat, format,
+// json_build_object, a text comparison, GROUP BY / ORDER BY of its text — the
+// same on all five arms, and as PostgreSQL 17.11 prints it. A DAG stage reads
+// such a column from a `.wshf` exchange, whose header carries no marker; the
+// producing task reports the marked columns it wrote and every exchange read
+// stamps them onto the batches it decodes (exec.StampUnconstrained). At
+// 1c1083d0 `SELECT COUNT(*) FROM (SELECT v FROM un_x GROUP BY v) q WHERE
+// CAST(v AS TEXT) = '1'` answered 1 on the single-process arms and 0 on the
+// three DAG arms. MAX(v) and a scalar subquery's answer are computed values
+// and print at the column's scale on every arm (catalog numeric-decimal r18).
+func TestArcUNExchangeKeepsThePrinterEveryArm(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: five arms over an unconstrained NUMERIC column")
+	}
+	cells := wdConsumerTable(t, "testdata/arc_un_exchange_cells.tsv")
+	answers := map[string]string{}
+	for _, a := range wdConsumerTable(t, "testdata/arc_un_exchange_pg17.tsv") {
+		answers[a[0]] = a[1]
+	}
+	kept := map[string]string{}
+	for _, a := range wdConsumerTable(t, "testdata/arc_un_exchange_kept.tsv") {
+		kept[a[0]] = a[1]
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+	t.Cleanup(cancel)
+	arms := unArms(t, ctx)
+	for _, c := range cells {
+		name, sql := c[0], c[1]
+		want, ok := answers[name]
+		if !ok {
+			t.Fatalf("cell %s has no PostgreSQL answer: re-measure the table", name)
+		}
+		if k, ok := kept[name]; ok {
+			want = k
+		}
+		t.Run(name, func(t *testing.T) {
+			for _, arm := range arms {
+				res, err := arm.run(sql)
+				if err != nil {
+					t.Errorf("%s\n  arm  %s\n  refused: %v\n  want %s", sql, arm.name, err, want)
+					continue
+				}
+				if got := unRender(res); got != want {
+					t.Errorf("%s\n  arm  %s\n  got  %s\n  want %s", sql, arm.name, got, want)
+				}
+			}
+		})
+	}
 }

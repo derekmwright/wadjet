@@ -1,0 +1,204 @@
+# PostgreSQL 17.11 (postgres:17-alpine, wadjet-pg-un4) answers for TestArcUNExchangeKeepsThePrinterEveryArm over un_x, un_u; same form as arc_un_unconstrained_pg17.tsv. The six renderer cells over a UNION (distinct) derived table are left out: on the DAG arms the outer projection over it is dropped (type numeric, a sort key on it missing) at c67ebf5b and at this tip alike — a defect of its own (filing candidate UN-F9), not of the printer.
+x_gk_cast	type=text rows=5 0.0000000001 | 1 | 1.5 | 7 | NULL
+x_gk_cat	type=text rows=5 0.0000000001 | 1 | 1.5 | 7 | NULL
+x_gk_concat	type=text rows=5 0.0000000001| | 1.5| | 1| | 7| | |
+x_gk_fmt	type=text rows=5  | 0.0000000001 | 1 | 1.5 | 7
+x_gk_json	type=text rows=5 {"x" : 0.0000000001} | {"x" : 1.5} | {"x" : 1} | {"x" : 7} | {"x" : null}
+x_gk_eq1	type=bigint rows=1 1
+x_gk_eq15	type=bigint rows=1 1
+x_gk_eq7	type=bigint rows=1 1
+x_gk_grp	type=text;bigint rows=5 0.0000000001,1 | 1,1 | 1.5,1 | 7,1 | NULL,1
+x_gk_ord	type=text rows=5 0.0000000001 | 1 | 1.5 | 7 | NULL
+x_gk_lit	type=bigint rows=1 1
+x_gk2_cast	type=text rows=6 0.0000000001 | 1 | 1 | 1.5 | 7 | NULL
+x_gk2_cat	type=text rows=6 0.0000000001 | 1 | 1 | 1.5 | 7 | NULL
+x_gk2_concat	type=text rows=6 0.0000000001| | 1.5| | 1| | 1| | 7| | |
+x_gk2_fmt	type=text rows=6  | 0.0000000001 | 1 | 1 | 1.5 | 7
+x_gk2_json	type=text rows=6 {"x" : 0.0000000001} | {"x" : 1.5} | {"x" : 1} | {"x" : 1} | {"x" : 7} | {"x" : null}
+x_gk2_eq1	type=bigint rows=1 2
+x_gk2_eq15	type=bigint rows=1 1
+x_gk2_eq7	type=bigint rows=1 1
+x_gk2_grp	type=text;bigint rows=5 0.0000000001,1 | 1,2 | 1.5,1 | 7,1 | NULL,1
+x_gk2_ord	type=text rows=6 0.0000000001 | 1 | 1 | 1.5 | 7 | NULL
+x_gk2_lit	type=bigint rows=1 2
+x_dist_cast	type=text rows=5 0.0000000001 | 1 | 1.5 | 7 | NULL
+x_dist_cat	type=text rows=5 0.0000000001 | 1 | 1.5 | 7 | NULL
+x_dist_concat	type=text rows=5 0.0000000001| | 1.5| | 1| | 7| | |
+x_dist_fmt	type=text rows=5  | 0.0000000001 | 1 | 1.5 | 7
+x_dist_json	type=text rows=5 {"x" : 0.0000000001} | {"x" : 1.5} | {"x" : 1} | {"x" : 7} | {"x" : null}
+x_dist_eq1	type=bigint rows=1 1
+x_dist_eq15	type=bigint rows=1 1
+x_dist_eq7	type=bigint rows=1 1
+x_dist_grp	type=text;bigint rows=5 0.0000000001,1 | 1,1 | 1.5,1 | 7,1 | NULL,1
+x_dist_ord	type=text rows=5 0.0000000001 | 1 | 1.5 | 7 | NULL
+x_dist_lit	type=bigint rows=1 1
+x_uall_cast	type=text rows=9 0.0000000001 | 0.1 | 1 | 1 | 1.25 | 1.5 | 7 | 7 | NULL
+x_uall_cat	type=text rows=9 0.0000000001 | 0.1 | 1 | 1 | 1.25 | 1.5 | 7 | 7 | NULL
+x_uall_concat	type=text rows=9 0.0000000001| | 0.1| | 1.25| | 1.5| | 1| | 1| | 7| | 7| | |
+x_uall_fmt	type=text rows=9  | 0.0000000001 | 0.1 | 1 | 1 | 1.25 | 1.5 | 7 | 7
+x_uall_json	type=text rows=9 {"x" : 0.0000000001} | {"x" : 0.1} | {"x" : 1.25} | {"x" : 1.5} | {"x" : 1} | {"x" : 1} | {"x" : 7} | {"x" : 7} | {"x" : null}
+x_uall_eq1	type=bigint rows=1 2
+x_uall_eq15	type=bigint rows=1 1
+x_uall_eq7	type=bigint rows=1 2
+x_uall_grp	type=text;bigint rows=7 0.0000000001,1 | 0.1,1 | 1,2 | 1.25,1 | 1.5,1 | 7,2 | NULL,1
+x_uall_ord	type=text rows=9 0.0000000001 | 0.1 | 1 | 1 | 1.25 | 1.5 | 7 | 7 | NULL
+x_uall_lit	type=bigint rows=1 2
+x_union_eq1	type=bigint rows=1 1
+x_union_eq15	type=bigint rows=1 1
+x_union_eq7	type=bigint rows=1 1
+x_union_grp	type=text;bigint rows=7 0.0000000001,1 | 0.1,1 | 1,1 | 1.25,1 | 1.5,1 | 7,1 | NULL,1
+x_union_lit	type=bigint rows=1 1
+x_isect_cast	type=text rows=5 0.0000000001 | 1 | 1.5 | 7 | NULL
+x_isect_cat	type=text rows=5 0.0000000001 | 1 | 1.5 | 7 | NULL
+x_isect_concat	type=text rows=5 0.0000000001| | 1.5| | 1| | 7| | |
+x_isect_fmt	type=text rows=5  | 0.0000000001 | 1 | 1.5 | 7
+x_isect_json	type=text rows=5 {"x" : 0.0000000001} | {"x" : 1.5} | {"x" : 1} | {"x" : 7} | {"x" : null}
+x_isect_eq1	type=bigint rows=1 1
+x_isect_eq15	type=bigint rows=1 1
+x_isect_eq7	type=bigint rows=1 1
+x_isect_grp	type=text;bigint rows=5 0.0000000001,1 | 1,1 | 1.5,1 | 7,1 | NULL,1
+x_isect_ord	type=text rows=5 0.0000000001 | 1 | 1.5 | 7 | NULL
+x_isect_lit	type=bigint rows=1 1
+x_exc_cast	type=text rows=4 0.0000000001 | 1 | 1.5 | NULL
+x_exc_cat	type=text rows=4 0.0000000001 | 1 | 1.5 | NULL
+x_exc_concat	type=text rows=4 0.0000000001| | 1.5| | 1| | |
+x_exc_fmt	type=text rows=4  | 0.0000000001 | 1 | 1.5
+x_exc_json	type=text rows=4 {"x" : 0.0000000001} | {"x" : 1.5} | {"x" : 1} | {"x" : null}
+x_exc_eq1	type=bigint rows=1 1
+x_exc_eq15	type=bigint rows=1 1
+x_exc_eq7	type=bigint rows=1 0
+x_exc_grp	type=text;bigint rows=4 0.0000000001,1 | 1,1 | 1.5,1 | NULL,1
+x_exc_ord	type=text rows=4 0.0000000001 | 1 | 1.5 | NULL
+x_exc_lit	type=bigint rows=1 1
+x_win_in_cast	type=text rows=6 0.0000000001 | 1 | 1 | 1.5 | 7 | NULL
+x_win_in_cat	type=text rows=6 0.0000000001 | 1 | 1 | 1.5 | 7 | NULL
+x_win_in_concat	type=text rows=6 0.0000000001| | 1.5| | 1| | 1| | 7| | |
+x_win_in_fmt	type=text rows=6  | 0.0000000001 | 1 | 1 | 1.5 | 7
+x_win_in_json	type=text rows=6 {"x" : 0.0000000001} | {"x" : 1.5} | {"x" : 1} | {"x" : 1} | {"x" : 7} | {"x" : null}
+x_win_in_eq1	type=bigint rows=1 2
+x_win_in_eq15	type=bigint rows=1 1
+x_win_in_eq7	type=bigint rows=1 1
+x_win_in_grp	type=text;bigint rows=5 0.0000000001,1 | 1,2 | 1.5,1 | 7,1 | NULL,1
+x_win_in_ord	type=text rows=6 0.0000000001 | 1 | 1 | 1.5 | 7 | NULL
+x_win_in_lit	type=bigint rows=1 2
+x_win_pk_cast	type=text rows=6 0.0000000001 | 1 | 1 | 1.5 | 7 | NULL
+x_win_pk_cat	type=text rows=6 0.0000000001 | 1 | 1 | 1.5 | 7 | NULL
+x_win_pk_concat	type=text rows=6 0.0000000001| | 1.5| | 1| | 1| | 7| | |
+x_win_pk_fmt	type=text rows=6  | 0.0000000001 | 1 | 1 | 1.5 | 7
+x_win_pk_json	type=text rows=6 {"x" : 0.0000000001} | {"x" : 1.5} | {"x" : 1} | {"x" : 1} | {"x" : 7} | {"x" : null}
+x_win_pk_eq1	type=bigint rows=1 2
+x_win_pk_eq15	type=bigint rows=1 1
+x_win_pk_eq7	type=bigint rows=1 1
+x_win_pk_grp	type=text;bigint rows=5 0.0000000001,1 | 1,2 | 1.5,1 | 7,1 | NULL,1
+x_win_pk_ord	type=text rows=6 0.0000000001 | 1 | 1 | 1.5 | 7 | NULL
+x_win_pk_lit	type=bigint rows=1 2
+x_win_ok_cast	type=text rows=6 0.0000000001 | 1 | 1 | 1.5 | 7 | NULL
+x_win_ok_cat	type=text rows=6 0.0000000001 | 1 | 1 | 1.5 | 7 | NULL
+x_win_ok_concat	type=text rows=6 0.0000000001| | 1.5| | 1| | 1| | 7| | |
+x_win_ok_fmt	type=text rows=6  | 0.0000000001 | 1 | 1 | 1.5 | 7
+x_win_ok_json	type=text rows=6 {"x" : 0.0000000001} | {"x" : 1.5} | {"x" : 1} | {"x" : 1} | {"x" : 7} | {"x" : null}
+x_win_ok_eq1	type=bigint rows=1 2
+x_win_ok_eq15	type=bigint rows=1 1
+x_win_ok_eq7	type=bigint rows=1 1
+x_win_ok_grp	type=text;bigint rows=5 0.0000000001,1 | 1,2 | 1.5,1 | 7,1 | NULL,1
+x_win_ok_ord	type=text rows=6 0.0000000001 | 1 | 1 | 1.5 | 7 | NULL
+x_win_ok_lit	type=bigint rows=1 2
+x_jk_l_cast	type=text rows=1 7
+x_jk_l_cat	type=text rows=1 7
+x_jk_l_concat	type=text rows=1 7|
+x_jk_l_fmt	type=text rows=1 7
+x_jk_l_json	type=text rows=1 {"x" : 7}
+x_jk_l_eq1	type=bigint rows=1 0
+x_jk_l_eq15	type=bigint rows=1 0
+x_jk_l_eq7	type=bigint rows=1 1
+x_jk_l_grp	type=text;bigint rows=1 7,1
+x_jk_l_ord	type=text rows=1 7
+x_jk_l_lit	type=bigint rows=1 0
+x_jk_r_cast	type=text rows=1 7
+x_jk_r_cat	type=text rows=1 7
+x_jk_r_concat	type=text rows=1 7|
+x_jk_r_fmt	type=text rows=1 7
+x_jk_r_json	type=text rows=1 {"x" : 7}
+x_jk_r_eq1	type=bigint rows=1 0
+x_jk_r_eq15	type=bigint rows=1 0
+x_jk_r_eq7	type=bigint rows=1 1
+x_jk_r_grp	type=text;bigint rows=1 7,1
+x_jk_r_ord	type=text rows=1 7
+x_jk_r_lit	type=bigint rows=1 0
+x_jp_l_cast	type=text rows=2 1 | 1.5
+x_jp_l_cat	type=text rows=2 1 | 1.5
+x_jp_l_concat	type=text rows=2 1.5| | 1|
+x_jp_l_fmt	type=text rows=2 1 | 1.5
+x_jp_l_json	type=text rows=2 {"x" : 1.5} | {"x" : 1}
+x_jp_l_eq1	type=bigint rows=1 1
+x_jp_l_eq15	type=bigint rows=1 1
+x_jp_l_eq7	type=bigint rows=1 0
+x_jp_l_grp	type=text;bigint rows=2 1,1 | 1.5,1
+x_jp_l_ord	type=text rows=2 1 | 1.5
+x_jp_l_lit	type=bigint rows=1 1
+x_jp_r_cast	type=text rows=2 1.25 | 7
+x_jp_r_cat	type=text rows=2 1.25 | 7
+x_jp_r_concat	type=text rows=2 1.25| | 7|
+x_jp_r_fmt	type=text rows=2 1.25 | 7
+x_jp_r_json	type=text rows=2 {"x" : 1.25} | {"x" : 7}
+x_jp_r_eq1	type=bigint rows=1 0
+x_jp_r_eq15	type=bigint rows=1 0
+x_jp_r_eq7	type=bigint rows=1 1
+x_jp_r_grp	type=text;bigint rows=2 1.25,1 | 7,1
+x_jp_r_ord	type=text rows=2 1.25 | 7
+x_jp_r_lit	type=bigint rows=1 0
+x_ljoin_cast	type=text rows=6 0.0000000001 | 1 | 1 | 1.5 | 7 | NULL
+x_ljoin_cat	type=text rows=6 0.0000000001 | 1 | 1 | 1.5 | 7 | NULL
+x_ljoin_concat	type=text rows=6 0.0000000001| | 1.5| | 1| | 1| | 7| | |
+x_ljoin_fmt	type=text rows=6  | 0.0000000001 | 1 | 1 | 1.5 | 7
+x_ljoin_json	type=text rows=6 {"x" : 0.0000000001} | {"x" : 1.5} | {"x" : 1} | {"x" : 1} | {"x" : 7} | {"x" : null}
+x_ljoin_eq1	type=bigint rows=1 2
+x_ljoin_eq15	type=bigint rows=1 1
+x_ljoin_eq7	type=bigint rows=1 1
+x_ljoin_grp	type=text;bigint rows=5 0.0000000001,1 | 1,2 | 1.5,1 | 7,1 | NULL,1
+x_ljoin_ord	type=text rows=6 0.0000000001 | 1 | 1 | 1.5 | 7 | NULL
+x_ljoin_lit	type=bigint rows=1 2
+x_sortlim_cast	type=text rows=4 0.0000000001 | 1 | 1 | 1.5
+x_sortlim_cat	type=text rows=4 0.0000000001 | 1 | 1 | 1.5
+x_sortlim_concat	type=text rows=4 0.0000000001| | 1.5| | 1| | 1|
+x_sortlim_fmt	type=text rows=4 0.0000000001 | 1 | 1 | 1.5
+x_sortlim_json	type=text rows=4 {"x" : 0.0000000001} | {"x" : 1.5} | {"x" : 1} | {"x" : 1}
+x_sortlim_eq1	type=bigint rows=1 2
+x_sortlim_eq15	type=bigint rows=1 1
+x_sortlim_eq7	type=bigint rows=1 0
+x_sortlim_grp	type=text;bigint rows=3 0.0000000001,1 | 1,2 | 1.5,1
+x_sortlim_ord	type=text rows=4 0.0000000001 | 1 | 1 | 1.5
+x_sortlim_lit	type=bigint rows=1 2
+x_maxg_cast	type=text rows=3 1 | 1.5 | 7
+x_maxg_cat	type=text rows=3 1 | 1.5 | 7
+x_maxg_concat	type=text rows=3 1.5| | 1| | 7|
+x_maxg_fmt	type=text rows=3 1 | 1.5 | 7
+x_maxg_json	type=text rows=3 {"x" : 1.5} | {"x" : 1} | {"x" : 7}
+x_maxg_eq1	type=bigint rows=1 1
+x_maxg_eq15	type=bigint rows=1 1
+x_maxg_eq7	type=bigint rows=1 1
+x_maxg_grp	type=text;bigint rows=3 1,1 | 1.5,1 | 7,1
+x_maxg_ord	type=text rows=3 1 | 1.5 | 7
+x_maxg_lit	type=bigint rows=1 1
+x_scal_cast	type=text rows=1 7
+x_scal_cat	type=text rows=1 7
+x_scal_concat	type=text rows=1 7|
+x_scal_fmt	type=text rows=1 7
+x_scal_json	type=text rows=1 {"x" : 7}
+x_scal_eq1	type=bigint rows=1 0
+x_scal_eq15	type=bigint rows=1 0
+x_scal_eq7	type=bigint rows=1 1
+x_scal_grp	type=text;bigint rows=1 7,1
+x_scal_ord	type=text rows=1 7
+x_scal_lit	type=bigint rows=1 0
+x_cte2_cast	type=text rows=4 0.0000000001 | 1 | 1.5 | 7
+x_cte2_cat	type=text rows=4 0.0000000001 | 1 | 1.5 | 7
+x_cte2_concat	type=text rows=4 0.0000000001| | 1.5| | 1| | 7|
+x_cte2_fmt	type=text rows=4 0.0000000001 | 1 | 1.5 | 7
+x_cte2_json	type=text rows=4 {"x" : 0.0000000001} | {"x" : 1.5} | {"x" : 1} | {"x" : 7}
+x_cte2_eq1	type=bigint rows=1 1
+x_cte2_eq15	type=bigint rows=1 1
+x_cte2_eq7	type=bigint rows=1 1
+x_cte2_grp	type=text;bigint rows=4 0.0000000001,1 | 1,1 | 1.5,1 | 7,1
+x_cte2_ord	type=text rows=4 0.0000000001 | 1 | 1.5 | 7
+x_cte2_lit	type=bigint rows=1 1
