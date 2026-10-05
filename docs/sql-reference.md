@@ -680,6 +680,27 @@ WITH traffic(ip, total_bytes) AS (
 SELECT ip, total_bytes FROM traffic ORDER BY total_bytes DESC LIMIT 10
 ```
 
+A CTE whose body is **volatile** — it calls `random()`, `rand()`, `uuid()` or
+`gen_random_uuid()`, or samples a relation with `TABLESAMPLE` — is evaluated
+once per statement, and every reference reads that one result, wherever the
+reference sits (a FROM item, a join side, a scalar / IN / EXISTS subquery, a
+set-operation arm, a nested block, another CTE's body). Both sides of this
+comparison read the same `r`, so it is never true:
+
+```sql
+WITH s AS (SELECT sum(random()) AS r FROM flow_logs)
+SELECT count(*) FROM device_inventory WHERE (SELECT r FROM s) <> (SELECT r FROM s)
+```
+
+`EXPLAIN VERBOSE` names such a CTE (`CTE s: volatile, evaluated once; every
+reference reads that result`). Its result is held under the statement's memory
+budget and spills past it. Any other CTE is expanded into the plan at each
+reference, as before. On the stage DAG of a cluster a
+volatile CTE read more than once is still evaluated per consuming stage (see
+[PostgreSQL differences](postgres-differences.md)). `AS MATERIALIZED`,
+`AS NOT MATERIALIZED` and a WITH list before `INSERT` are not parsed (42601);
+write `INSERT INTO t WITH s AS (…) SELECT …`.
+
 ## Set Operations (UNION, INTERSECT, EXCEPT)
 
 Combine results from multiple queries:

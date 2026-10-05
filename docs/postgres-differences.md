@@ -96,6 +96,10 @@ With `t = 'hi'` and `b = '\x6869'`, `t || b` answers `hihi` (length 4) and `b ||
 
 `SYSTEM (50)` keeps or drops each block of 2048 rows, as the scan reads them, as a whole — on a cluster each worker's scan task samples its own files the same way; PostgreSQL keeps or drops heap pages. Both answer a random subset; `SYSTEM (0)` and `SYSTEM (100)` answer no row and every row on both. (catalog: [other#r20](adr/0012-divergences/other.md#catalog); #1411)
 
+**On a cluster, a volatile CTE read more than once is evaluated per consumer.**
+
+A CTE whose body calls `random()`, `rand()` or `uuid()` or samples a relation is evaluated once per statement by the embedded engine, `wadjet serve`, the asynchronous door and a statement a coordinator runs on its local pipeline: every reference reads the same rows, as on PostgreSQL. On the stage DAG it is evaluated once per consuming stage: `WITH s AS (SELECT id, random() AS r FROM t WHERE id <= 50) SELECT count(*) FROM (SELECT id, r FROM s EXCEPT SELECT id, r FROM s) u` answers 50 there, PostgreSQL 0. A sampled body agrees where the sample is drawn in the scan the consumers share. (catalog: [other#r24](adr/0012-divergences/other.md#catalog); ADR-0021 §2d; #1531)
+
 **A text-typed parameter is a `TABLESAMPLE` percentage.**
 
 `TABLESAMPLE BERNOULLI ($1)` with `$1` declared text (OID 25) and bound `'100'` answers every row here; PostgreSQL raises 42804 (the argument must be real). Bind renders a text parameter as an untyped literal, which the argument reads through real's input. (catalog: [parameters-pgwire#r16](adr/0012-divergences/parameters-pgwire.md#catalog); #1411)
@@ -597,6 +601,10 @@ A parameter declared `text` or `varchar` is read by the position it lands in, as
 An undeclared parameter in a FROM-less subquery — `n IN (SELECT $1)`, `n = (SELECT $1)` — takes the comparison's type and answers, where PostgreSQL types it text and raises 42883; `SELECT $1 IS NULL, $1` declares the parameter `text` and `WHERE $1 IS NULL` leaves it undetermined (OID 0), both answering where PostgreSQL raises 42P08 / 42P18. (catalog: [parameters-pgwire#r6, r7](adr/0012-divergences/parameters-pgwire.md#catalog); #1410)
 
 ## Not supported
+
+**`AS MATERIALIZED`, `AS NOT MATERIALIZED`, and a WITH list before INSERT.**
+
+`WITH s AS MATERIALIZED (…)`, `WITH s AS NOT MATERIALIZED (…)` and `WITH s AS (…) INSERT INTO …` raise 42601. A CTE whose body is volatile is evaluated once without the keyword; `INSERT INTO t WITH s AS (…) SELECT …` is the spelling that inserts. (catalog: [other#r25, r26](adr/0012-divergences/other.md#catalog))
 
 **A SMALLINT / INT2 column.**
 

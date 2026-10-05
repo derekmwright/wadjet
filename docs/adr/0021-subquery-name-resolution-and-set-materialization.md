@@ -42,6 +42,11 @@ evaluates an uncorrelated subquery the optimizer leaves in a filter: its own
 plan, reading storage — never a cache sized for the enclosing
 statement's scans.
 
+§2d (2026-10-05, arc CM, #1531) states how often the single-process engine
+evaluates a WITH item whose body is volatile: once per statement, however
+many references read it and wherever they sit — and that the stage DAG does
+not yet.
+
 ## Context
 
 `IN (SELECT …)`, `NOT IN (SELECT …)` and correlated `EXISTS` are all lowered
@@ -2883,6 +2888,80 @@ an OUTER join's ON (docs/postgres-differences.md, #1153) and, on the DAG
 arms, a subquery predicate §2's resolution does not reach (under `IS NOT
 NULL`, `OR` or `NOT`), which fails in the worker's filter with no subquery
 runner (#1384, #1364).
+
+### 2d. A volatile CTE is evaluated ONCE per statement on the single-process path
+
+(Added 2026-10-05, arc CM, #1531.)
+
+PostgreSQL 17.11 never inlines a CTE whose body contains a volatile function,
+and materializes any CTE referenced more than once; every reference reads one
+evaluation (EXPLAIN: a `CTE Scan` per reference). This engine inlines a CTE's
+body at every reference and, before this section, cached a ROOT CTE only when
+the logical tree tagged a reference to it (`materializeCTEs`). Three kinds of
+reference were therefore evaluated once each:
+
+- a reference that lives only in an expression subquery's TEXT — a scalar
+  subquery in WHERE, HAVING, ON, CASE, the SELECT list, an IN / EXISTS body —
+  which is planned when the subquery runs (`WITH s AS (SELECT sum(random()) AS
+  r FROM tb_big) SELECT count(*) FROM tb_p WHERE (SELECT r FROM s) <> (SELECT r
+  FROM s)` answered 3 on single, spilled and the asynchronous door at
+  c67ebf5b, PostgreSQL 0: `coordinator.TestArcCMVolatileCTEReadTwiceIsEvaluatedOnce`
+  issue/c1);
+- a reference to a WITH item declared on a NESTED block (a derived table, a
+  subquery body): `SELECT count(*) FROM (WITH s AS (SELECT id, random() AS r
+  FROM tb_big WHERE id <= 50) SELECT a.id FROM s a JOIN s b ON a.id = b.id
+  WHERE a.r <> b.r) x` answered 50 on the embedded arms, PostgreSQL 0
+  (nested\_derived/rnd);
+- a reference from a set operation at the statement ROOT, which carries no
+  WITH list — a top-level `… EXCEPT …`, and `INSERT INTO cm_t WITH s AS (…)
+  SELECT id, r FROM s UNION ALL SELECT id, r FROM s`, which STORED two
+  evaluations (50 of 50 ids with two values, PostgreSQL 0:
+  `wadjet.TestArcCMInsertWithUnionAllStoresOneEvaluation`).
+
+**Decision.** A WITH item whose body is VOLATILE — it calls `random()`,
+`rand()`, `uuid()` or `gen_random_uuid()`, or samples a relation with
+`TABLESAMPLE`, anywhere in its text (`plansql.CTEDef.EvaluatedOnce`; a
+recursive CTE is materialized to its fixed point and is not this rule's) — is
+evaluated ONCE per statement, and every reference reads that result. The
+builder tags each reference with the definition (`logical.Node.OnceCTE`);
+the definition carries an identity every copy of the item shares, whichever
+scope copied it, so a reference in a subquery's text, in a nested block or in
+a set-operation arm finds the same entry. The first reference to arrive
+evaluates the body into a spill-backed collector — a pipeline breaker under
+the statement's memory budget, drained in quarter-budget runs
+(`physical.TestOnceCTEMaterializationSpillsAndBothReferencesAgree`: two
+million rows under 512 KiB, spilled, both sums equal) — and every reference,
+on any pipeline goroutine and through any subquery planner, replays it.
+`EXPLAIN VERBOSE` names each such CTE (`CTE s: volatile, evaluated once; every
+reference reads that result`).
+
+A reference count is not needed: a volatile body read once is evaluated once
+either way, and PostgreSQL materializes it too (`ref1_from/rnd`: one `CTE
+Scan`). A DETERMINISTIC body is untouched — inlined at each reference with
+the enclosing predicates pushed into it; six plan shapes print the text
+c67ebf5b printed (`wadjet.TestArcCMDeterministicCTEPlanShapesAreUnchanged`).
+
+**Where it applies.** The cache exists on a statement planned by the local
+planner's `Plan`: the embedded engine, the `wadjet serve` doors, and on a
+cluster the coordinator's small-query local fast path and its refused-plan
+route (a table-less SELECT, a SELECT-list subquery) — on those cells the DAG
+arms answer PostgreSQL's (cte\_body\_two\_scalars, selectlist\_two,
+intersect\_arms). The asynchronous door runs a statement as ONE pipeline task
+on a worker, planned by `Plan`, so it is on this path too: in the table it
+answers PostgreSQL's wherever it answers (issue/c1 0 where it answered 3 at
+c67ebf5b), and refuses the table-less and SELECT-list shapes it refused there.
+
+**What the stage DAG still does** (catalog: [other#r24](0012-divergences/other.md#catalog)).
+The distributed planner does not call `Plan`, and this section changes nothing
+there. A volatile CTE read more than once is evaluated per consumer where the
+shared-producer dedup does not hold the volatile expression: the stage two
+consumers share is the body's SCAN, and the volatile projection is computed in
+each consumer (`ref2_except_arms/rnd` 50, `issue/c1` 3, PostgreSQL 0); and an
+IN / NOT IN set or a subquery under CASE is executed on the coordinator at
+plan time while the FROM reference runs on the DAG (`ref2_not_in/aggrnd` 1,
+PostgreSQL 0). A TABLESAMPLE body agrees where the sample is drawn in the
+shared scan stage (issue/c3 0). The DAG-native shared stage is a distributed
+follow-up.
 
 ### 3. A build-side narrowing is all-or-nothing, and the condition is read STRUCTURALLY
 
