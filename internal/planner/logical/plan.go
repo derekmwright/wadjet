@@ -237,6 +237,10 @@ type Node struct {
 	SampleMethod      string   // TABLESAMPLE method: BERNOULLI, SYSTEM
 	SamplePercent     float64  // TABLESAMPLE argument as real (float4), unchecked: the range is the sampler's
 	SampleNull        bool     // the TABLESAMPLE argument is NULL (2202H when the scan begins)
+	// SampleClockArg is a TABLESAMPLE argument that reads a clock function,
+	// left unevaluated by the builder (no statement there) until
+	// BindClockFolds evaluates it with the statement's clock (#1566).
+	SampleClockArg plansql.Node
 
 	// Table Function (e.g., read_json, read_csv, unnest)
 	IsTableFunc bool     // true if this scan reads from a table function
@@ -1478,7 +1482,9 @@ func (n *Node) PrettyPrint(indent int) string {
 			// samples with (PostgreSQL's EXPLAIN: `Sampling: bernoulli
 			// ('50'::real)`).
 			pct := "NULL"
-			if !n.SampleNull {
+			if n.SampleClockArg != nil {
+				pct = n.SampleClockArg.String()
+			} else if !n.SampleNull {
 				pct = strconv.FormatFloat(n.SamplePercent, 'g', -1, 32)
 			}
 			s += fmt.Sprintf(" TABLESAMPLE %s (%s)", n.SampleMethod, pct)

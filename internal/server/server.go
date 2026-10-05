@@ -25,6 +25,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/coordinator"
 	"github.com/derekmwright/wadjet/internal/distributed"
 	"github.com/derekmwright/wadjet/internal/engine/exec"
+	"github.com/derekmwright/wadjet/internal/engine/expr"
 	"github.com/derekmwright/wadjet/internal/metrics"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	"github.com/derekmwright/wadjet/internal/planner/physical"
@@ -251,6 +252,10 @@ type QueryStats struct {
 }
 
 func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
+	// The statement clock (#1566): this door plans some statements itself
+	// (the local planner below, EXPLAIN), so it starts the clock as every
+	// other door does; the engine and the coordinator keep it.
+	r = r.WithContext(expr.StartStatement(r.Context()))
 	var req QueryRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())

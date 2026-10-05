@@ -778,7 +778,7 @@ func TestCompileCurrentDateMinusInterval(t *testing.T) {
 		Right: &plansql.IntervalLit{Value: 30, Unit: "day"},
 	}
 
-	compiled, err := Compile(ast)
+	compiled, err := Compile(ast, testClock())
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
@@ -806,7 +806,7 @@ func TestCompileCurrentDatePlusInterval(t *testing.T) {
 		Right: &plansql.IntervalLit{Value: 1, Unit: "year"},
 	}
 
-	compiled, err := Compile(ast)
+	compiled, err := Compile(ast, testClock())
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}

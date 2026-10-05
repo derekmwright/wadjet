@@ -36,6 +36,14 @@ func TestTaskStatementClock(t *testing.T) {
 	if err := json.Unmarshal(raw, &n); err != nil || n != at.UnixNano() || strings.ContainsAny(string(raw), `".`) {
 		t.Fatalf("statement_time on the wire is %s, want the int64 %d", raw, at.UnixNano())
 	}
+	// Its size on the wire: the key, the colon, nineteen digits and a comma.
+	bare, err := distributed.Marshal(distributed.Task{ID: "t1", SQLText: "SELECT now()"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len(data) - len(bare); n != 37 {
+		t.Errorf("statement_time adds %d bytes to the task message, want 37", n)
+	}
 	var task distributed.Task
 	if err := distributed.Unmarshal(data, &task); err != nil {
 		t.Fatal(err)

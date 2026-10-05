@@ -6,6 +6,8 @@ import (
 	"context"
 	"sync/atomic"
 	"time"
+
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
 // The engine's CLOCK, and its one ZONE.
@@ -63,9 +65,11 @@ func SetClockForTest(f func() time.Time) func() {
 //     (distributed.Task.StatementTime), so a worker never reads its own
 //     clock for these functions and a retried task reads the same value.
 //
-// The four functions keep their registered evaluators (clockFuncs reads the
-// live clock) for a compile no door reached. SetUnboundClockHookForTest lets
-// a gate assert that none did.
+// There is NO live-clock fallback: clockNow is read by StartStatement and by
+// nothing else, and a clock function compiled with no statement clock bound
+// raises XX000 when it is evaluated (unboundClock) — a compile site a door
+// did not reach is an internal error, never a silently different instant.
+// SetUnboundClockHookForTest additionally reports such a compile.
 
 type statementClockKey struct{}
 
@@ -166,4 +170,12 @@ func bindFuncAt(fc *FuncCall, t time.Time) {
 	if at := DefaultRegistry.lookupUDFAt(fc.Name); at != nil {
 		fc.clockValue = at(t)
 	}
+}
+
+// unboundClock is the registered evaluator of every clock function: it is
+// reached only by a compile no statement clock was bound to, and it raises
+// rather than read a clock of its own (#1566).
+func unboundClock(name string) any {
+	panic(fatalEval{sqlerr.New("XX000",
+		"%s was evaluated with no statement clock: a compile site no statement reached (internal error)", name)})
 }

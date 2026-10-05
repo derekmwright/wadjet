@@ -3,6 +3,7 @@
 package physical
 
 import (
+	"context"
 	"fmt"
 	"testing"
 	"time"
@@ -88,7 +89,7 @@ func TestTemporalArithmeticDeclaresWhatItProduces(t *testing.T) {
 			if conf != expr.Decided || decl.ID != tc.typ {
 				t.Errorf("declares %s (%v), want %s", decl.ID, conf, tc.typ)
 			}
-			compiled, err := expr.Compile(node)
+			compiled, err := expr.Compile(node, expr.WithStatementClock(expr.StartStatement(context.Background())))
 			if err != nil {
 				t.Fatal(err)
 			}

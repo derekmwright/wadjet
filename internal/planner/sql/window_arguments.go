@@ -3,6 +3,7 @@
 package sql
 
 import (
+	"context"
 	"math"
 	"strconv"
 	"strings"
@@ -31,9 +32,25 @@ import (
 // column reference, a subquery: PostgreSQL evaluates it per row, and the
 // operator takes the offset / n as one constant.
 func WindowIntegerArgument(fn string, n Node) (v int64, isNull bool, err error) {
+	return windowIntegerArgument(nil, fn, n)
+}
+
+// WindowIntegerArgumentIn is WindowIntegerArgument for the plan that runs the
+// statement: an argument that reads a clock function (now(), CURRENT_DATE,
+// …) is folded with ctx's statement clock (#1566). The parse-time reading
+// (WindowIntegerArgument) has no statement: it checks such an argument's
+// operand types and leaves its value to this one.
+func WindowIntegerArgumentIn(ctx context.Context, fn string, n Node) (v int64, isNull bool, err error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return windowIntegerArgument(ctx, fn, n)
+}
+
+func windowIntegerArgument(ctx context.Context, fn string, n Node) (v int64, isNull bool, err error) {
 	switch e := n.(type) {
 	case *ParenNode:
-		return WindowIntegerArgument(fn, e.Inner)
+		return windowIntegerArgument(ctx, fn, e.Inner)
 	case *UnaryOp:
 		if e.Op != "-" && e.Op != "+" {
 			break
@@ -43,9 +60,9 @@ func WindowIntegerArgument(fn string, n Node) (v int64, isNull bool, err error) 
 		// read apart, its magnitude is past int4 and was refused 42883.
 		if lit, ok := Unparen(e.Inner).(*Lit); ok && e.Op == "-" && lit.Kind == LitNumber &&
 			!strings.HasPrefix(lit.Value, "-") {
-			return WindowIntegerArgument(fn, &Lit{Kind: LitNumber, Value: "-" + lit.Value})
+			return windowIntegerArgument(ctx, fn, &Lit{Kind: LitNumber, Value: "-" + lit.Value})
 		}
-		inner, null, err := WindowIntegerArgument(fn, e.Inner)
+		inner, null, err := windowIntegerArgument(ctx, fn, e.Inner)
 		if err != nil || null {
 			return 0, null, err
 		}
@@ -97,7 +114,7 @@ func WindowIntegerArgument(fn string, n Node) (v int64, isNull bool, err error) 
 	case *CastNode:
 		switch t := strings.ToLower(strings.TrimSpace(e.TypeName)); t {
 		case "int", "integer", "int4", "smallint", "int2":
-			return WindowIntegerArgument(fn, e.Inner)
+			return windowIntegerArgument(ctx, fn, e.Inner)
 		default:
 			// A cast to any other type is an argument OF that type, which
 			// no window function takes there (`LAG(x, CAST(0 AS BIGINT))`
@@ -106,17 +123,26 @@ func WindowIntegerArgument(fn string, n Node) (v int64, isNull bool, err error) 
 				"function %s with a %s argument does not exist: the argument is an integer", fn, t)
 		}
 	}
-	return foldWindowIntegerArgument(fn, n)
+	return foldWindowIntegerArgument(ctx, fn, n)
 }
 
 // constantFolder is the planner's constant fold (package logical installs it
 // with SetConstantFolder): constant reports whether n reads no row, and v is
-// its value when it does not.
-var constantFolder func(n Node) (v any, constant bool, err error)
+// its value when it does not. ctx is the statement's (its clock binds a clock
+// function in n); nil at parse time, where an n that reads a clock answers
+// ClockDeferred rather than read a clock of its own (#1566).
+var constantFolder func(ctx context.Context, n Node) (v any, constant bool, err error)
+
+// ClockDeferred is the constant fold's answer, at parse time, for an
+// expression that reads a clock function: its value is the statement's, read
+// where the plan runs (WindowIntegerArgumentIn).
+var ClockDeferred = &struct{ deferred bool }{true}
 
 // SetConstantFolder installs the planner's constant fold for
 // WindowIntegerArgument. Package logical calls it once, at init.
-func SetConstantFolder(f func(n Node) (v any, constant bool, err error)) { constantFolder = f }
+func SetConstantFolder(f func(ctx context.Context, n Node) (v any, constant bool, err error)) {
+	constantFolder = f
+}
 
 // foldWindowIntegerArgument reads a constant EXPRESSION as the integer
 // argument, typed as PostgreSQL types it: a number literal inside it that is
@@ -124,12 +150,12 @@ func SetConstantFolder(f func(n Node) (v any, constant bool, err error)) { const
 // no window function takes (42883, `LAG(x, 2147483648 - 1)`), and an int4
 // result past int4 is PostgreSQL's integer overflow (22003,
 // `LAG(x, 2147483647 + 1)`).
-func foldWindowIntegerArgument(fn string, n Node) (int64, bool, error) {
+func foldWindowIntegerArgument(ctx context.Context, fn string, n Node) (int64, bool, error) {
 	var v any
 	constant := false
 	var err error
 	if constantFolder != nil {
-		v, constant, err = constantFolder(n)
+		v, constant, err = constantFolder(ctx, n)
 	}
 	if !constant {
 		return 0, false, sqlerr.New("0A000",
@@ -141,6 +167,9 @@ func foldWindowIntegerArgument(fn string, n Node) (int64, bool, error) {
 	}
 	if err != nil {
 		return 0, false, err
+	}
+	if v == ClockDeferred {
+		return 0, false, nil
 	}
 	var i int64
 	switch x := v.(type) {

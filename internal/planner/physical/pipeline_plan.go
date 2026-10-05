@@ -119,23 +119,9 @@ func (p *Planner) buildScan(ctx context.Context, node *logical.Node) (exec.Sourc
 		// — the same bypass #859's column policies had. The decision itself
 		// lives in `internal/auth`, which imports this package, so it arrives
 		// as a guard on the context (#943).
-		if len(node.FuncClockArgs) > 0 {
-			// The arguments that read the clock read the STATEMENT's (#1566);
-			// the builder folded them with none.
-			args := append([]string(nil), node.FuncArgs...)
-			for i, e := range node.FuncClockArgs {
-				if i >= len(args) {
-					continue
-				}
-				v, err := logical.FoldTableFuncArg(e, p.clockOption())
-				if err != nil {
-					return nil, nil, nil, err
-				}
-				args[i] = v
-			}
-			n := *node
-			n.FuncArgs = args
-			node = &n
+		// The arguments that read the clock read the STATEMENT's (#1566).
+		if err := logical.BindClockFolds(node, p.clockOption()); err != nil {
+			return nil, nil, nil, err
 		}
 		if guard := logical.TableFuncGuardFromContext(ctx); guard != nil {
 			if err := guard(node.FuncName, node.FuncArgs, node.FuncNamedArgs); err != nil {
@@ -242,6 +228,10 @@ func (p *Planner) buildScan(ctx context.Context, node *logical.Node) (exec.Sourc
 	}
 
 	if node.SampleMethod != "" {
+		// A TABLESAMPLE argument that reads the clock reads the statement's.
+		if err := logical.BindClockFolds(node, p.clockOption()); err != nil {
+			return nil, nil, nil, err
+		}
 		// The sample is drawn where the scan reads, from the rows the scan's
 		// batch selects (a DELETE's markers narrow Sel), and its range is
 		// checked when the scan begins — the same kernel a worker's scan

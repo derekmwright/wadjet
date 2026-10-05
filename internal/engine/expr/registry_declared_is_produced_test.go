@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 )
@@ -85,7 +86,14 @@ func TestRegistryDeclaredTypeIsTheProducedType(t *testing.T) {
 		if conf != Decided || DefaultRegistry.ReturnType(n).Boolean() && decl.ID != batch.TypeBool {
 			continue
 		}
-		shapes := sampleShapes(DefaultRegistry.Lookup(n), n, pool)
+		fn := DefaultRegistry.Lookup(n)
+		if read, isClock := clockFuncs[n]; isClock {
+			// A clock function's value is its statement's (bound at compile;
+			// the registered evaluator raises, #1566): sample the bound one.
+			at := time.Now()
+			fn = func([]any) any { return read(at) }
+		}
+		shapes := sampleShapes(fn, n, pool)
 		if len(shapes) == 0 {
 			noValue[n] = true
 			continue

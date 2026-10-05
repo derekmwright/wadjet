@@ -12,10 +12,10 @@ import (
 // --- Date/time functions ---
 
 // fnNow and the other clock functions below are the evaluators a compile
-// with no statement clock keeps (clock.go): they read the live clock. A
-// compile a door reached answers the statement's value instead (bindClock).
+// with no statement clock keeps (clock.go): they raise. A compile a door
+// reached answers the statement's value instead (bindClock).
 func fnNow(args []any) any {
-	return clockFuncs["now"](clockNow())
+	return unboundClock("now()")
 }
 
 func fnYear(args []any) any {
@@ -174,5 +174,5 @@ func fnExtract(args []any) any {
 }
 
 func fnCurrentDate(args []any) any {
-	return clockFuncs["current_date"](clockNow())
+	return unboundClock("CURRENT_DATE")
 }
