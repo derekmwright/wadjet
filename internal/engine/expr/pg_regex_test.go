@@ -25,7 +25,7 @@ func TestPatternMatchOperatorsAnswerAsPostgreSQL(t *testing.T) {
 	refused := map[string]bool{
 		`(ab)\1`: true, `a(?=b)`: true, `a(?!b)`: true, `(?<=a)b`: true, `(?<!a)b`: true,
 		`\mc`: true, `b\M`: true, `[[:<:]]b`: true, `a[[:>:]]`: true, `[[.a.]]`: true,
-		`[[=a=]]`: true, `(?n)a.b`: true, `(?x)a b c`: true, `(?b)abc`: true, `(?e)abc`: true,
+		`[[=a=]]`: true, `(?b)abc`: true, `(?e)abc`: true,
 	}
 	cells := []struct{ subject, pattern, op, pg string }{
 		{"abc", "abc", "~", "true"},
@@ -177,7 +177,7 @@ func TestPatternMatchOperatorsAnswerAsPostgreSQL(t *testing.T) {
 		{"a", "[a-a]", "~", "true"},
 		{"-", "[a\\-z]", "~", "true"},
 		{"b", "[a\\-z]", "~", "false"},
-		{"\u00c9", "\u00e9", "~*", "false"},
+		{"\u00c9", "\u00e9", "~*", "true"}, // en_US.utf8: towupper(é) is É (arc RX round 2)
 		{"stra\u00dfe", "STRASSE", "~*", "false"},
 	}
 	fn := map[string]string{"~": "textregexeq", "~*": "texticregexeq", "!~": "textregexne", "!~*": "texticregexne"}

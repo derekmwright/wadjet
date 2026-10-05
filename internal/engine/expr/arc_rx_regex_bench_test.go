@@ -58,3 +58,54 @@ func BenchmarkArcRXRegexpLikeColumnDistinct(b *testing.B) {
 		fnRegexpLike([]any{rxBenchSubjects[i%len(rxBenchSubjects)], pats[i%len(pats)]})
 	}
 }
+
+// The `~` operator over a column of distinct patterns, cycled: a working set
+// under the cache's bound (500, 1500) and one far over it (100k).
+func benchRXOpColumn(b *testing.B, n int) {
+	f := DefaultRegistry.Lookup("textregexeq")
+	pats := make([]string, n)
+	for i := range pats {
+		pats[i] = fmt.Sprintf(`items/%d\?user=u[0-9]+`, i)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		f([]any{rxBenchSubjects[i%len(rxBenchSubjects)], pats[i%n]})
+	}
+}
+
+func BenchmarkArcRXRegexOpColumn500(b *testing.B)  { benchRXOpColumn(b, 500) }
+func BenchmarkArcRXRegexOpColumn1500(b *testing.B) { benchRXOpColumn(b, 1500) }
+func BenchmarkArcRXRegexOpColumn100k(b *testing.B) { benchRXOpColumn(b, 100000) }
+
+// The literal pattern under parallel evaluation (morsel workers share the
+// cache).
+func BenchmarkArcRXRegexOpLiteralParallel(b *testing.B) {
+	f := DefaultRegistry.Lookup("textregexeq")
+	b.ReportAllocs()
+	b.RunParallel(func(pb *testing.PB) {
+		i := 0
+		for pb.Next() {
+			f([]any{rxBenchSubjects[i%len(rxBenchSubjects)], `items/[0-9]+\?user=u1`})
+			i++
+		}
+	})
+}
+
+// A column of 1500 distinct patterns under parallel evaluation.
+func BenchmarkArcRXRegexOpColumn1500Parallel(b *testing.B) {
+	f := DefaultRegistry.Lookup("textregexeq")
+	pats := make([]string, 1500)
+	for i := range pats {
+		pats[i] = fmt.Sprintf(`items/%d\?user=u[0-9]+`, i)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		i := 0
+		for pb.Next() {
+			f([]any{rxBenchSubjects[i%len(rxBenchSubjects)], pats[i%len(pats)]})
+			i++
+		}
+	})
+}

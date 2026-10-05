@@ -27,37 +27,55 @@ func TestArcRXTranslateAndCompileRows(t *testing.T) {
 		subject string
 		want    string // "t" / "f" / "E:<state>"
 	}{
-		{`\b`, reFlags{}, "abc", "f"},                    // backspace, not a word boundary (#1499)
-		{`a\bc`, reFlags{}, "a\bc", "t"},                 // the backspace it is
-		{`\ya`, reFlags{}, "b a", "t"},                   // the word boundary is \y
-		{`b\Y`, reFlags{}, "ba", "t"},                    // \Y: not a boundary
-		{`a\Bb`, reFlags{}, `a\b`, "t"},                  // \B is a backslash
-		{`b\Z`, reFlags{}, "ab", "t"},                    // \Z ends the string
-		{`b\z`, reFlags{}, "ab", "E:2201B"},              // RE2-only spelling
-		{`\pL`, reFlags{}, "a", "E:2201B"},               // RE2-only spelling
-		{`\Qa.\E`, reFlags{}, "a.", "E:2201B"},           // RE2-only spelling
-		{`(?P<n>a)`, reFlags{}, "a", "E:2201B"},          // RE2-only spelling
-		{`a(?i)b`, reFlags{}, "aB", "E:2201B"},           // an option only at the start
-		{`a.b`, reFlags{}, "a\nb", "t"},                  // . matches a newline
-		{`\s`, reFlags{}, "\v", "t"},                     // \s holds the vertical tab
-		{`A`, reFlags{}, "A", "t"},                       // \uXXXX
-		{`***=a.c`, reFlags{}, "abc", "f"},               // literal director
-		{`***:a.c`, reFlags{}, "abc", "t"},               // ARE director
-		{`(?i)A`, reFlags{}, "a", "t"},                   // embedded option
-		{`A`, reFlags{icase: true}, "a", "t"},            // the i flag
-		{`a.c`, reFlags{literal: true}, "abc", "f"},      // the q flag
-		{`a.c`, reFlags{literal: true}, "a.c", "t"},      // the q flag
-		{`(a`, reFlags{}, "a", "E:2201B"},                // unbalanced
-		{`[a`, reFlags{}, "a", "E:2201B"},                // unbalanced
-		{`*a`, reFlags{}, "a", "E:2201B"},                // quantifier operand
-		{`a{256}`, reFlags{}, "a", "E:2201B"},            // bound > 255
-		{``, reFlags{}, "abc", "t"},                      // the empty pattern
-		{`(a)\1`, reFlags{}, "aa", "E:0A000"},            // back reference: refused
-		{`a(?=b)`, reFlags{}, "ab", "E:0A000"},           // lookahead: refused
-		{`(?<=a)b`, reFlags{}, "ab", "E:0A000"},          // lookbehind: refused
-		{`\ma`, reFlags{}, "b a", "E:0A000"},             // \m: refused
-		{`[[:<:]]a`, reFlags{}, "b a", "E:0A000"},        // [[:<:]]: refused
-		{`(?x) a b`, reFlags{}, "ab", "E:0A000"},         // expanded syntax: refused
+		{`\b`, reFlags{}, "abc", "f"},               // backspace, not a word boundary (#1499)
+		{`a\bc`, reFlags{}, "a\bc", "t"},            // the backspace it is
+		{`\ya`, reFlags{}, "b a", "t"},              // the word boundary is \y
+		{`b\Y`, reFlags{}, "ba", "t"},               // \Y: not a boundary
+		{`a\Bb`, reFlags{}, `a\b`, "t"},             // \B is a backslash
+		{`b\Z`, reFlags{}, "ab", "t"},               // \Z ends the string
+		{`b\z`, reFlags{}, "ab", "E:2201B"},         // RE2-only spelling
+		{`\pL`, reFlags{}, "a", "E:2201B"},          // RE2-only spelling
+		{`\Qa.\E`, reFlags{}, "a.", "E:2201B"},      // RE2-only spelling
+		{`(?P<n>a)`, reFlags{}, "a", "E:2201B"},     // RE2-only spelling
+		{`a(?i)b`, reFlags{}, "aB", "E:2201B"},      // an option only at the start
+		{`a.b`, reFlags{}, "a\nb", "t"},             // . matches a newline
+		{`\s`, reFlags{}, "\v", "t"},                // \s holds the vertical tab
+		{`A`, reFlags{}, "A", "t"},                  // \uXXXX
+		{`***=a.c`, reFlags{}, "abc", "f"},          // literal director
+		{`***:a.c`, reFlags{}, "abc", "t"},          // ARE director
+		{`(?i)A`, reFlags{}, "a", "t"},              // embedded option
+		{`A`, reFlags{icase: true}, "a", "t"},       // the i flag
+		{`a.c`, reFlags{literal: true}, "abc", "f"}, // the q flag
+		{`a.c`, reFlags{literal: true}, "a.c", "t"}, // the q flag
+		{`(a`, reFlags{}, "a", "E:2201B"},           // unbalanced
+		{`[a`, reFlags{}, "a", "E:2201B"},           // unbalanced
+		{`*a`, reFlags{}, "a", "E:2201B"},           // quantifier operand
+		{`a{256}`, reFlags{}, "a", "E:2201B"},       // bound > 255
+		{``, reFlags{}, "abc", "t"},                 // the empty pattern
+		{`(a)\1`, reFlags{}, "aa", "E:0A000"},       // back reference: refused
+		{`a(?=b)`, reFlags{}, "ab", "E:0A000"},      // lookahead: refused
+		{`(?<=a)b`, reFlags{}, "ab", "E:0A000"},     // lookbehind: refused
+		{`\ma`, reFlags{}, "b a", "E:0A000"},        // \m: refused
+		{`[[:<:]]a`, reFlags{}, "b a", "E:0A000"},   // [[:<:]]: refused
+		{`(?x) a b`, reFlags{}, "ab", "t"},          // expanded syntax
+		{`(?x)a\ b`, reFlags{}, "a b", "t"},
+		{`(?n)a.b`, reFlags{}, "a\nb", "f"},
+		{`(?m)^b`, reFlags{}, "a\nb", "t"},
+		{`(?p)^b`, reFlags{}, "a\nb", "f"},
+		{`(?w)a.b`, reFlags{}, "a\nb", "t"},
+		{`a[^x]b`, reFlags{nlStop: true}, "a\nb", "f"},
+		{`a\Wb`, reFlags{nlStop: true}, "a\nb", "t"},
+		{`(?b)a`, reFlags{}, "a", "E:0A000"},
+		{`äbc`, reFlags{icase: true}, "ÄBC", "t"},
+		{`σ`, reFlags{icase: true}, "ς", "f"},
+		{`ς`, reFlags{icase: true}, "Σ", "t"},
+		{`i`, reFlags{icase: true}, "İ", "f"},
+		{`İ`, reFlags{icase: true}, "i", "t"},
+		{`ß`, reFlags{icase: true}, "ẞ", "t"},
+		{`[à-æ]`, reFlags{icase: true}, "À", "t"},
+		{`[^ä]`, reFlags{icase: true}, "Ä", "f"},
+		{`\u00e4`, reFlags{icase: true}, "Ä", "t"},
+		{`äbc`, reFlags{icase: true, literal: true}, "ÄBC", "t"},
 		{`[[:alpha:]][[:digit:]]`, reFlags{}, "a1", "t"}, // POSIX classes
 	}
 	for _, c := range cells {
@@ -91,14 +109,17 @@ func TestArcRXFlagsRows(t *testing.T) {
 		{"regexp_like", "t", ""},
 		{"regexp_like", "", ""},
 		{"regexp_like", "z", "E:22023"},
-		{"regexp_like", "n", "E:0A000"},
-		{"regexp_like", "m", "E:0A000"},
-		{"regexp_like", "p", "E:0A000"},
-		{"regexp_like", "w", "E:0A000"},
-		{"regexp_like", "x", "E:0A000"},
+		{"regexp_like", "n", "NA"},
+		{"regexp_like", "m", "NA"},
+		{"regexp_like", "p", "N"},
+		{"regexp_like", "w", "A"},
+		{"regexp_like", "x", "X"},
+		{"regexp_like", "xt", ""},
+		{"regexp_like", "ms", ""},
 		{"regexp_like", "b", "E:0A000"},
 		{"regexp_like", "e", "E:0A000"},
 		{"regexp_like", "ns", ""}, // s after n restores the default
+		{"regexp_like", "sn", "NA"},
 	}
 	for _, c := range cells {
 		f, err := parseREFlags(c.fn, c.flags)
@@ -114,6 +135,15 @@ func TestArcRXFlagsRows(t *testing.T) {
 			}
 			if f.literal {
 				got += "q"
+			}
+			if f.nlStop {
+				got += "N"
+			}
+			if f.nlAnchor {
+				got += "A"
+			}
+			if f.expanded {
+				got += "X"
 			}
 		}
 		if got != c.want {
@@ -139,5 +169,39 @@ func TestArcRXCompileCacheIsBounded(t *testing.T) {
 		if n := regexCacheLen(); n > regexCacheBound+8 {
 			t.Fatalf("after %d distinct patterns the cache holds %d entries, bound %d", i+1, n, regexCacheBound)
 		}
+	}
+}
+
+// TestArcRXCacheEvictsOneEntryAtATime: past the bound the cache drops its
+// oldest entry, not all of them — a working set of 1500 patterns compiles
+// once and then hits on every later pass, and the cache never holds more
+// than regexCacheBound entries.
+func TestArcRXCacheEvictsOneEntryAtATime(t *testing.T) {
+	for i := 0; i < regexCacheBound+100; i++ {
+		fnRegexpLike([]any{"x", fmt.Sprintf("arc-rx-evict-fill-%d", i)})
+	}
+	if n := regexCacheLen(); n > regexCacheBound {
+		t.Fatalf("cache holds %d entries, bound %d", n, regexCacheBound)
+	}
+	ws := make([]string, 1500)
+	for i := range ws {
+		ws[i] = fmt.Sprintf(`arc-rx-evict-ws-%d\y`, i)
+	}
+	for pass := 0; pass < 3; pass++ {
+		before := regexCompiles.Load()
+		for _, p := range ws {
+			pgRegexMatch([]any{"x", p}, false, false)
+		}
+		n := regexCompiles.Load() - before
+		want := int64(0)
+		if pass == 0 {
+			want = int64(len(ws))
+		}
+		if n != want {
+			t.Errorf("pass %d over a working set of %d patterns compiled %d, want %d", pass, len(ws), n, want)
+		}
+	}
+	if n := regexCacheLen(); n > regexCacheBound {
+		t.Fatalf("cache holds %d entries, bound %d", n, regexCacheBound)
 	}
 }
