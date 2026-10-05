@@ -467,6 +467,43 @@ func TestArcCMSetOperationArmsReadTheStatementWith(t *testing.T) {
 	}
 }
 
+// A WITH declared inside a derived table belongs to that block: a subquery of
+// the OUTER block that names the same relation reads the stored table, under a
+// root ORDER BY, LIMIT or set operation as without one. c67ebf5b answered
+// these; a walk that took the first arm's WITH list for the statement's did
+// not.
+func TestArcCMNestedWithIsScopedToItsBlock(t *testing.T) {
+	const d = "SELECT * FROM (WITH cm_p AS (SELECT id + 98 AS id FROM cm_big WHERE id = 1) SELECT id FROM cm_p) d "
+	cells := []struct{ sql, want string }{
+		{d + "WHERE id > (SELECT min(id) FROM cm_p) ORDER BY 1", "99"},
+		{d + "WHERE id > (SELECT min(id) FROM cm_p) LIMIT 5", "99"},
+		{d + "UNION ALL SELECT id FROM cm_big WHERE id = (SELECT max(id) FROM cm_p)", "99; 3"},
+		{"SELECT * FROM (WITH cm_p AS (SELECT 99 AS id) SELECT id FROM cm_p) d UNION ALL SELECT id FROM cm_big WHERE id = (SELECT max(id) FROM cm_p)", "99; 3"},
+	}
+	for _, budget := range []int64{0, 512 << 10} {
+		db := cmOpen(t, budget)
+		for _, cell := range cells {
+			if got := cmAnswer(t, db, cell.sql); got != cell.want {
+				t.Errorf("budget %d: %s\n  got %s, want %s (PostgreSQL 17.11)", budget, cell.sql, got, cell.want)
+			}
+		}
+	}
+}
+
+// A CREATE FUNCTION whose body is volatile is not substituted into a filter:
+// the column is computed once per row and compared with itself.
+func TestArcCMVolatileFunctionColumnIsNotReEvaluated(t *testing.T) {
+	db := cmOpen(t, 0)
+	if _, err := db.Query(context.Background(), "CREATE OR REPLACE FUNCTION cm_fr2() AS random()"); err != nil {
+		t.Fatal(err)
+	}
+	const q = "SELECT count(*) FROM (SELECT cm_fr2() AS r FROM cm_big) s WHERE r = r"
+	want := cmAnswer(t, db, "SELECT count(*) FROM cm_big")
+	if got := cmAnswer(t, db, q); got != want {
+		t.Errorf("%s\n  got %s, want %s (every row: PostgreSQL 17.11)", q, got, want)
+	}
+}
+
 // PINS (catalog other#r27): a volatile CTE read ONCE is inlined (ADR-0021
 // §2d), and a correlated subquery re-runs it per outer row; a WITH declared
 // inside the correlated subquery is re-parsed per execution. PostgreSQL 17.11
