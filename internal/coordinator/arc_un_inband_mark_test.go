@@ -457,3 +457,52 @@ func unibArms(t *testing.T, ctx context.Context) []wdArm {
 		{"async-probesplit", runAsync(asyncCoord(), true), nil},
 	}
 }
+
+// TestArcUNLiteralArmOfASetOperationAgreesOnEveryArm: a set operation with an
+// untyped NULL (or quoted) arm read FROM a table, beside an unconstrained
+// NUMERIC column. The single-process rule and the stage planner's rule must
+// give the column one mark, so every arm prints one text and counts one
+// count; when they disagreed the stage arms printed the trimmed text, counted
+// differently, and the writer's mark check failed the bare read.
+func TestArcUNLiteralArmOfASetOperationAgreesOnEveryArm(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: eleven arms over pgwire")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	t.Cleanup(cancel)
+	arms := unibArms(t, ctx)
+	typePrefix := regexp.MustCompile(`^type=\S* `)
+	for _, sql := range []string{
+		"SELECT v FROM (SELECT v FROM un_x UNION ALL SELECT NULL AS v FROM un_u) s ORDER BY 1",
+		"SELECT CAST(v AS TEXT) FROM (SELECT v FROM un_x UNION ALL SELECT NULL AS v FROM un_u) s ORDER BY 1",
+		"SELECT count(*) FROM (SELECT v FROM un_x UNION ALL SELECT NULL AS v FROM un_u) s WHERE CAST(v AS TEXT) = '1'",
+		"SELECT count(*) FROM (SELECT NULL AS v FROM un_u UNION ALL SELECT v FROM un_x) s WHERE CAST(v AS TEXT) LIKE '%0'",
+		"SELECT v FROM (SELECT v FROM un_x UNION ALL SELECT NULL FROM un_u UNION ALL SELECT v FROM un_u) s ORDER BY 1",
+		"SELECT count(*) FROM (SELECT v FROM un_x UNION SELECT NULL FROM un_u) s WHERE v || '' = '1'",
+	} {
+		first, firstArm := "", ""
+		for _, arm := range arms {
+			if strings.Contains(arm.name, "async") {
+				continue // the asynchronous door's own refusals are pinned in the table gate
+			}
+			res, err := arm.run(sql)
+			got := ""
+			if err != nil {
+				got = "ERR " + strings.SplitN(err.Error(), "\n", 2)[0]
+			} else {
+				got = typePrefix.ReplaceAllString(unRender(res), "")
+			}
+			if strings.HasPrefix(got, "ERR ") {
+				t.Errorf("%s\n  arm %s: %s", sql, arm.name, got)
+				continue
+			}
+			if firstArm == "" {
+				first, firstArm = got, arm.name
+				continue
+			}
+			if got != first {
+				t.Errorf("%s\n  arm %s: %s\n  arm %s: %s", sql, firstArm, first, arm.name, got)
+			}
+		}
+	}
+}
