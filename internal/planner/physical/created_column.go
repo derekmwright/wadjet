@@ -663,8 +663,119 @@ func constBool(n plansql.Node) (int, bool) {
 		return constFalse, true
 	case *plansql.CmpExpr:
 		return constCompare(e)
+	case *plansql.IsExpr:
+		return constIs(e)
+	case *plansql.InExpr:
+		return constIn(e)
+	case *plansql.BetweenExpr:
+		lo, lok := constCompare(&plansql.CmpExpr{Left: e.Left, Op: ">=", Right: e.Low})
+		hi, hok := constCompare(&plansql.CmpExpr{Left: e.Left, Op: "<=", Right: e.High})
+		if !lok || !hok {
+			return 0, false
+		}
+		v := and3(lo, hi)
+		if e.Not {
+			v = not3(v)
+		}
+		return v, true
 	}
 	return 0, false
+}
+
+// constIs is `x IS [NOT] NULL / TRUE / FALSE` over a constant x this walk can
+// read: a literal, or a condition constBool reads.
+func constIs(e *plansql.IsExpr) (int, bool) {
+	var v int
+	switch l := plansql.Unparen(e.Left).(type) {
+	case *plansql.Lit:
+		switch l.Kind {
+		case plansql.LitNull:
+			v = constNull
+		case plansql.LitBool:
+			b, ok := constBool(l)
+			if !ok {
+				return 0, false
+			}
+			v = b
+		default:
+			if strings.ToLower(e.Check) != "null" {
+				return 0, false
+			}
+			v = constTrue // a non-NULL literal: only its NULL-ness is read
+		}
+	default:
+		b, ok := constBool(l)
+		if !ok {
+			return 0, false
+		}
+		v = b
+	}
+	var r int
+	switch strings.ToLower(e.Check) {
+	case "null":
+		r = boolConst(v == constNull)
+	case "true":
+		r = boolConst(v == constTrue)
+	case "false":
+		r = boolConst(v == constFalse)
+	default:
+		return 0, false
+	}
+	if e.Not {
+		r = not3(r)
+	}
+	return r, true
+}
+
+// constIn is `x [NOT] IN (v, …)` over literals: true on a match, NULL when
+// no value matches and one compared NULL, false otherwise.
+func constIn(e *plansql.InExpr) (int, bool) {
+	if len(e.Values) == 0 {
+		return 0, false
+	}
+	sawNull := false
+	for _, v := range e.Values {
+		c, ok := constCompare(&plansql.CmpExpr{Left: e.Left, Op: "=", Right: v})
+		if !ok {
+			return 0, false
+		}
+		switch c {
+		case constTrue:
+			if e.Not {
+				return constFalse, true
+			}
+			return constTrue, true
+		case constNull:
+			sawNull = true
+		}
+	}
+	if sawNull {
+		return constNull, true
+	}
+	if e.Not {
+		return constTrue, true
+	}
+	return constFalse, true
+}
+
+func not3(v int) int {
+	switch v {
+	case constTrue:
+		return constFalse
+	case constFalse:
+		return constTrue
+	}
+	return constNull
+}
+
+func and3(a, b int) int {
+	switch {
+	case a == constFalse || b == constFalse:
+		return constFalse
+	case a == constNull || b == constNull:
+		return constNull
+	}
+	return constTrue
 }
 
 func constCompare(e *plansql.CmpExpr) (int, bool) {
@@ -731,6 +842,26 @@ func constNumber(n plansql.Node) (*big.Rat, bool) {
 			return r.Neg(r), true
 		case "+":
 			return r, true
+		}
+	case *plansql.BinaryOp:
+		// Sums, differences and products are exact in every numeric type,
+		// so the rational answer is PostgreSQL's whatever the operands'
+		// types; a quotient is not (integer division truncates).
+		a, ok := constNumber(e.Left)
+		if !ok {
+			return nil, false
+		}
+		b, ok := constNumber(e.Right)
+		if !ok {
+			return nil, false
+		}
+		switch e.Op {
+		case "+":
+			return new(big.Rat).Add(a, b), true
+		case "-":
+			return new(big.Rat).Sub(a, b), true
+		case "*":
+			return new(big.Rat).Mul(a, b), true
 		}
 	}
 	return nil, false
