@@ -195,7 +195,13 @@ consumer can sniff and decode, including mid-stream.
   file decodes to carries its file's marks; `wshf.SchemaGuard` does not
   compare them (they change no carrier), and a set operation's arms meet under
   the result column's mark because each arm is coerced to it before it writes
-  (`exec.DecimalCoerce`, `DecimalCoerceColumn.Unconstrained`).
+  (`exec.DecimalCoerce`, `DecimalCoerceColumn.Unconstrained`; the mark is part
+  of the set operation's declared type, so a nested operation's arm is
+  coerced too). The header records a column's mark from the FIRST batch, so
+  every writer holds each later batch to it by position beside the scale
+  check (`worker.markGuard`): a batch whose column carries the other mark
+  fails the task — no stage declares which of two marks is right, and a
+  silent first-batch-wins would print a column as one it is not.
 
   *Why it is safe.* A column without the mark writes exactly the byte it
   always wrote, so a file with no marked column is byte-for-byte the file

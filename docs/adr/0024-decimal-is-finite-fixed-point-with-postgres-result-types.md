@@ -1219,13 +1219,28 @@ and two columns of one name keep their own. A set operation's arms meet under
 the result column's mark (every arm's, or none): on the DAG each arm whose
 mark the result does not keep is coerced to the result's declaration before
 it writes (`exec.DecimalCoerce`), as the single process unifies the arms'
-schemas. A base-table read takes the mark from the parquet footer's declared
+schemas. The mark is part of the set operation's declared type
+(`SetOpTargetType`), so a set operation nested as an arm, or read through a
+derived table or a CTE, tells the operation above whether its column is
+marked, and its arm is coerced at any depth. PostgreSQL's rule is wider —
+its result is plain numeric whenever the arms' typmods differ (a
+numeric(10,2) arm beside a numeric, an integer or a NULL arm; measured over
+670 CREATE TABLE AS set operations), and each value prints its own scale —
+but a SELECT here marks the result only when every arm is marked and prints
+a mixed one at its one scale (numeric-decimal r18): marking it would drop
+the trailing zeros of the constrained arm's values that this engine prints
+today. The writer of an exchange file refuses a batch whose column carries
+another mark than the file's (ADR-0010), and an empty join side pads its
+NULLs under a declaration that carries the column's mark. A base-table read takes the mark from the parquet footer's declared
 schema, and a spill run (the columnar run format a grace join, a CTE
 collector and the external sort replay) carries it in its flag byte. The
-column's text is then the same on eleven arms — single, spilled, the five DAG
-arms (shuffled, morsel, eager, skew split, aggregate split), the fast path
-and the asynchronous door with and without its probe split — and on every
-door (`coordinator.TestArcUNExchangeKeepsThePrinterEveryArm`,
+column's text is then the same on eleven arms — single, spilled, the six DAG
+arms (plain, shuffled, morsel, the streaming-exchange and eager-dispatch
+configuration, skew split, aggregate split), the fast path and the
+asynchronous door with and without its probe split — for two-arm, three-arm
+and nested set operations alike, and on every door (the eager configuration
+publishes no eager manifest on the gate's fixture, so eager dispatch itself
+is not what it measures) (`coordinator.TestArcUNExchangeKeepsThePrinterEveryArm`,
 `coordinator.TestArcUNInBandMarkEveryArm`,
 `server.TestArcUNInBandMarkEveryDoor`).
 
