@@ -230,4 +230,8 @@ var cmCells = []cmCell{
 	{"filt/colalias", "WITH s(a, b) AS (SELECT id, random() AS r FROM tb_big WHERE id <= 50) SELECT count(*) FROM tb_p WHERE (SELECT max(b) FROM s WHERE a < 5) = (SELECT max(b) FROM s WHERE a < 5)", "3", [7]string{"PG", "PG", "ERR", "ERR", "ERR", "ERR", "PG"}},
 	{"filt/limit_on_ref", "WITH s AS (SELECT id, random() AS r FROM tb_big WHERE id <= 50) SELECT count(*) FROM tb_p WHERE (SELECT count(*) FROM (SELECT id FROM s ORDER BY id LIMIT 7) q) = 7", "3", [7]string{"PG", "PG", "ERR", "ERR", "ERR", "ERR", "PG"}},
 	{"filt/agg_ref", "WITH s AS (SELECT id, random() AS r FROM tb_big WHERE id <= 50) SELECT count(*) FROM tb_p WHERE (SELECT count(DISTINCT id) FROM s) = 50 AND (SELECT sum(id) FROM s) = 1275", "3", [7]string{"PG", "PG", "PG", "PG", "PG", "PG", "PG"}},
+	{"unbegun/selfjoin_where_false", "WITH c AS (SELECT * FROM tb_p TABLESAMPLE BERNOULLI (101)) SELECT count(*) FROM c a JOIN c b ON a.id = b.id WHERE false", "0", [7]string{"PG", "PG", "PG", "PG", "PG", "PG", "PG"}},
+	{"unbegun/limit_zero_and_read", "WITH c AS (SELECT id, random() AS r FROM tb_big WHERE id <= 50) SELECT (SELECT count(*) FROM (SELECT * FROM c LIMIT 0) q) + (SELECT count(*) FROM c a JOIN c b ON a.id = b.id WHERE a.r = b.r)", "50", [7]string{"PG", "PG", "PG", "PG", "PG", "PG", "ERR"}},
+	{"unbegun/nested_where_false", "SELECT count(*) FROM (WITH c AS (SELECT * FROM tb_p TABLESAMPLE BERNOULLI (101)) SELECT a.id FROM c a JOIN c b ON a.id = b.id WHERE 1 = 2) x", "0", [7]string{"PG", "PG", "PG", "PG", "PG", "PG", "PG"}},
+	{"unbegun/sampled_101_read", "WITH c AS (SELECT * FROM tb_p TABLESAMPLE BERNOULLI (101)) SELECT count(*) FROM c a JOIN c b ON a.id = b.id", "ERR 2202H", [7]string{"PG", "PG", "ERR", "ERR", "ERR", "ERR", "ERR"}},
 }
