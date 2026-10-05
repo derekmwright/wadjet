@@ -1065,6 +1065,18 @@ Now a BYTES value is assigned to a text column as `\x` + hex (`ingest.assignment
 | dml-assignment | [r13](0012-divergences/dml-assignment.md#catalog) | Narrowed: a BYTES value is assigned to a text column as `\x` hex (42804 at c67ebf5b); a container or DURATION is still 42804 | `wadjet.TestArcBYR2BytesAssignmentMatrix` |
 | — | — | Closed without a row (PostgreSQL's answer now): a bytea parameter as a LAG / LEAD default in either format; encode / get_byte / set_byte over a quoted literal | `pgwire.TestArcBYR2ReentryPositionsOnTheWire`, `wadjet.TestArcBYR2ByteaFunctionArgumentIsByteain` |
 
+## 2026-10-05: a volatile CTE is evaluated once (arc CM, #1531)
+
+A CTE whose body calls `random()`, `rand()`, `uuid()` or samples a relation was evaluated once per reference wherever the reference was not a tag in the root's plan tree. At c67ebf5b (`coordinator.TestArcCMVolatileCTEReadTwiceIsEvaluatedOnce`, the gate file run at base: r2/gate\_arms\_at\_base\_FAILS.log): `WITH s AS (SELECT sum(random()) AS r FROM tb_big) SELECT count(*) FROM tb_p WHERE (SELECT r FROM s) <> (SELECT r FROM s)` answered 3 on single and spilled512k (issue/c1); `SELECT count(*) FROM (WITH s AS (SELECT id, random() AS r FROM tb_big WHERE id <= 50) SELECT a.id FROM s a JOIN s b ON a.id = b.id WHERE a.r <> b.r) x` answered 50 on single and spilled512k (nested\_derived/rnd); and `INSERT INTO cm_t WITH s AS (…random()…) SELECT id, r FROM s UNION ALL SELECT id, r FROM s` stored two values for each of 50 ids (`wadjet.TestArcCMInsertWithUnionAllStoresOneEvaluation`). PostgreSQL 17.11 answers 0, 0 and 0.
+
+Now the single-process planner serves every reference to a volatile WITH item from one evaluation per statement (ADR-0021 §2d); the stage DAG is unchanged and its per-consumer evaluation is a catalog row.
+
+| family | row | change | gate |
+|---|---|---|---|
+| other | [r24](0012-divergences/other.md#catalog) | Added: on the stage DAG a volatile CTE read more than once is evaluated per consumer (the shared stage is the scan; an IN set or CASE-wrapped subquery runs on the coordinator at plan time) | `coordinator.TestArcCMVolatileCTEReadTwiceIsEvaluatedOnce` (NOT pins) |
+| other | [r25](0012-divergences/other.md#catalog) | Added: `AS [NOT] MATERIALIZED` is 42601 on every arm (base-identical); PostgreSQL's own NOT MATERIALIZED over a sampled body read twice disagrees with itself | `coordinator.TestArcCMVolatileCTEReadTwiceIsEvaluatedOnce` ref1\_from/matrnd, nmatrnd |
+| other | [r26](0012-divergences/other.md#catalog) | Added: `WITH … INSERT` is 42601 on every arm (base-identical) | `coordinator.TestArcCMVolatileCTEReadTwiceIsEvaluatedOnce` dml\_withfirst/rnd |
+
 ## Dated markers inside the entries
 
 Every `Added` / `Amended` / `CLOSED` / `Corrected` / `narrowed` marker still inside an entry's verbatim text, in date order, with the entry that carries it.
