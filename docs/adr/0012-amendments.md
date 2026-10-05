@@ -1076,6 +1076,8 @@ ADR-0024 §10 (Derek Wright's decision of 2026-10-05). At 8e681724 `CREATE TABLE
 | numeric-decimal | [r23](0012-divergences/numeric-decimal.md#catalog) | Added: such a column keeps 10 fraction digits and 28 integer digits (0.00000000005 stores 0.0000000001; a 29-digit integer is 22003) | `wadjet.TestArcUNUnconstrainedColumnEnumeration` |
 | numeric-decimal | [r24](0012-divergences/numeric-decimal.md#catalog) | Added: a trailing zero the source carried is not printed (CTAS `2.50` prints 2.5) | `wadjet.TestAssignmentDoorsAgree`, `wadjet.TestArcUNUnconstrainedColumnEnumeration` |
 | aggregates-windows | r24 | CLOSED (PostgreSQL's answer now): a column created from a numeric LAG / LEAD result over a bigint stores a later 0.75 as 0.75 (c10; 8e681724 stored 1) | `wadjet.TestArcWDTypedNullCreateTableAs` c10 |
+| dml-assignment | [r23](0012-divergences/dml-assignment.md#catalog) | Added (round 3): a CREATE TABLE AS column from a constant CASE over two declarations (`CASE WHEN 1 = 1 THEN k ELSE n END`), and from `+n`, keeps the plan's declaration (c23adbbb's) where PostgreSQL folds to the selected arm's typmod | `wadjet.TestArcUNCreatedColumnKeepsPostgresTypmod` |
+| numeric-decimal | [r24](0012-divergences/numeric-decimal.md#catalog) | Amended (round 3): every text rendering of the column's value — `||`, `concat`, `concat_ws`, `format`, `quote_literal`, `json_build_object`, `array_to_string`, CAST — is the one printer; the DAG stage-boundary residual named | `wadjet.TestArcUNOneTextPrinter`, `coordinator.TestArcUNUnconstrainedColumnEveryArm` |
 
 ## Dated markers inside the entries
 
