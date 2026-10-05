@@ -32,11 +32,14 @@ import (
 //     `canonicalExpr`, which is a pure text function: `a.x` and `b.x` over a
 //     join are two expressions and `t.x` and `x` in a single-relation block are
 //     one, and only a caller holding the FROM list can tell them apart. So the
-//     erasure lives in `physical.groupCheck`, which has that scope, and fires
-//     only when the block has ONE source.
+//     erasure lives with the block (`plansql.RespellGroupKeyTerms`, #1524),
+//     which has that scope, and fires only when the block has ONE source.
 //
-// The erasure is on the TERM and not on the KEY, and the MIRROR spelling below
-// is the boundary that states it.
+// #738 erased the qualifier on the TERM alone, and the MIRROR spelling — a
+// qualified key under a bare item — stayed a stated 42803 bound. #1524
+// replaces the erasure with one block-level rule: in a single-relation block
+// every term that IS a key once its own qualifier is erased is spelled AS the
+// key (plansql.RespellGroupKeyTerms), and the mirror answers.
 type a2IdentCell struct {
 	issue, name, sql string
 	want             []string
@@ -131,20 +134,20 @@ func a2IdentCells() []a2IdentCell {
 			wantErrLike: `column "zzp.d92" must appear in the GROUP BY clause`,
 			wantState:   "42803",
 			pgSays:      `42803 — PostgreSQL refuses it too`},
-		// THE BOUND THIS COMMIT SETS, and PostgreSQL ANSWERS it: the MIRROR
-		// spelling, a QUALIFIED key with a bare select item. The erasure is on
-		// the TERM alone, because answering this needs the aggregate to
-		// evaluate `typemx.g + 1` over a batch whose column is `g` — it
-		// cannot, and when the identity was erased on both sides the
-		// projection above read a column that does not exist and every group's
-		// key came back NULL. A loud 42803 beats a plausible NULL (protocol
-		// method 8), so the refusal stays and this fixture holds it.
-		{issue: "#738", name: "boundary_qualified_key_bare_select_item",
-			sql:         `SELECT g + 1 AS k, COUNT(*) AS n FROM typemx GROUP BY typemx.g + 1 ORDER BY k`,
-			wantErrLike: `column "g" must appear in the GROUP BY clause`,
-			wantState:   "42803",
-			pgSays: "PostgreSQL ANSWERS this. Wadjet refuses it, loudly, because the aggregate " +
-				"cannot evaluate a qualified key over an unqualified batch"},
+		// THE MIRROR, a QUALIFIED key with a bare select item. #738 set it as
+		// a stated bound — a loud 42803 — because the erasure was on the TERM
+		// alone and erasing it on the key read a column the batch did not
+		// have. #1524 lifts it: the block's references are resolved once and
+		// every term that IS a key is spelled AS the key
+		// (plansql.RespellGroupKeyTerms, ADR-0026 §1a), so the item reads the
+		// key's own column. PostgreSQL answers it with the rows of the
+		// spelling above.
+		{issue: "#1524", name: "qualified_key_bare_select_item",
+			sql: `SELECT g + 1 AS k, COUNT(*) AS n FROM typemx WHERE id < 24 GROUP BY typemx.g + 1 ORDER BY k`,
+			want: rows("k=int64:1|n=int64:4", "k=int64:2|n=int64:4", "k=int64:3|n=int64:4",
+				"k=int64:4|n=int64:3", "k=int64:5|n=int64:3", "k=int64:6|n=int64:2",
+				"k=int64:7|n=int64:3", "k=NULL|n=int64:1"),
+			pgSays: "8 groups: 4,4,4,3,3,2,3 and one NULL group of 1"},
 	}
 }
 

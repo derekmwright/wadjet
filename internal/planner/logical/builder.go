@@ -32,6 +32,11 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 	if err := checkAggregatePlacement(info); err != nil {
 		return nil, err
 	}
+	// A select item, HAVING, ORDER BY or window term that IS a GROUP BY key
+	// once its references are resolved is spelled AS the key before anything
+	// matches one to the other (#1524, ADR-0026 §1a). The binder applies the
+	// same pass before its grouping check; it is idempotent.
+	plansql.RespellGroupKeyTerms(info)
 
 	plan, err := buildFromClause(info, ctes)
 	if err != nil {

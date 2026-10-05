@@ -1036,6 +1036,11 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 		return err
 	}
 	plansql.RevertGroupByAliasesShadowedByInput(info, from.providesBareColumn)
+	// AFTER the revert, so the keys are the ones the query groups by: every
+	// term that IS a key under the block's resolved identity is spelled as
+	// that key, which is what the grouping check below and the logical
+	// builder both read (#1524, ADR-0026 §1a).
+	plansql.RespellGroupKeyTerms(info)
 	// GROUP BY expressions
 	for _, gb := range info.GroupByExprs {
 		if err := b.checkExpr(gb, withOut); err != nil {
@@ -2003,17 +2008,15 @@ type groupCheck struct {
 	// the FROM-less unfold rewrote them; a SELECT item is covered by one only
 	// when its OWN written spelling holds it.
 	originKeys map[string]bool
-	// unqualify erases TABLE QUALIFIERS from every expression identity this
-	// check renders, so `SELECT typemx.g + 1 ... GROUP BY g + 1` matches
-	// (#738). It is set only when the block's FROM provides exactly ONE
-	// source, because that is the scope in which `t.x` and `x` are the same
-	// expression; over a join they are not, and `GROUP BY zzj.d92` licensing
-	// `SELECT zzp.d92` would be a wrong answer, not a missed match.
-	//
-	// PostgreSQL erases the qualifier at every arity, because its comparison
-	// is over RESOLVED targetlist entries rather than over text. Matching that
-	// needs the resolution, not a wider text rule — which is why the bound is
-	// here and why the join case keeps its 42803, gated below.
+	// unqualify erases TABLE QUALIFIERS inside a FROM-less scalar subquery
+	// TERM's identity (originKey), in a block whose FROM provides exactly ONE
+	// source. It no longer decides whether an ordinary item IS a key: that is
+	// plansql.RespellGroupKeyTerms, run before this check, which erases only
+	// the qualifier naming the block's own relation and spells every term
+	// that is a key AS the key (#1524). Over a join the bare-against-qualified
+	// pair keeps its 42803 — resolving a bare name to a relation needs the
+	// relations' column sets, which the logical builder does not hold
+	// (ADR-0026 §1a).
 	unqualify bool
 }
 
@@ -2204,23 +2207,6 @@ func (g *groupCheck) check(node plansql.Node) error {
 	}
 	if k := groupTermKey(node); k != "" && g.keys[k] {
 		return nil
-	}
-	// The same term with its table QUALIFIER erased, in a single-relation
-	// block: `SELECT typemx.g + 1 ... GROUP BY g + 1` is one expression
-	// written twice, and PostgreSQL answers it (#738).
-	//
-	// The erasure is on the TERM alone and deliberately NOT on the KEY. That
-	// asymmetry is what keeps the MIRROR spelling — a qualified KEY and a bare
-	// term — refusing: PostgreSQL answers that one too, and answering it here
-	// needs the aggregate to evaluate `typemx.g + 1` over a batch whose column
-	// is `g`, which it cannot; the projection above then read a column that
-	// does not exist and every group's key came back NULL. A loud 42803 is the
-	// right disposition for a shape this engine cannot compute, and turning it
-	// into a plausible NULL would be the regression protocol method 8 names.
-	if g.unqualify {
-		if k := plansql.ExprIdentityUnqualified(node); k != "" && g.keys[k] {
-			return nil
-		}
 	}
 	switch n := node.(type) {
 	case *plansql.ColRef:

@@ -55,19 +55,16 @@ func ExprIdentity(n Node) string {
 	return c.String()
 }
 
-// ExprIdentityUnqualified is ExprIdentity with TABLE QUALIFIERS erased as
-// well, so `typemx.g + 1` and `g + 1` are one identity (#738).
+// ExprIdentityUnqualified is ExprIdentity with EVERY table qualifier erased.
 //
-// It is a SEPARATE function and not a fourth rule in ExprIdentity, because
-// erasing a qualifier needs a SCOPE that this file does not have: `a.x` and
-// `b.x` over a join are two expressions and `t.x` and `x` in a single-relation
-// block are one. Only a caller holding the block's FROM list can tell them
-// apart, and exactly one does — physical.groupCheck, which uses this when the
-// block has ONE source and ExprIdentity when it has more.
-//
-// Erasing it unconditionally would make two different expressions one
-// identity, which is the failure this file's header calls "the wrong answer in
-// the more dangerous direction".
+// It is NOT the rule that decides whether a select item is a group key: that
+// is BlockIdentity, which erases only the qualifier naming the block's own
+// relation (group_key_respell.go, #1524) — erasing every qualifier also
+// erases an OUTER relation's, and `o.x` in a correlated block is not the
+// block's `x`. What remains here is the canonical rendering of a FROM-less
+// scalar subquery's body (canonicalSubquerySQL), whose one item has no
+// relation of its own, for physical.groupCheck's as-written subquery terms in
+// a single-source block (#738).
 func ExprIdentityUnqualified(n Node) string {
 	c := canonicalExpr(stripQualifiers(n), true)
 	if c == nil {
@@ -344,21 +341,16 @@ func isInfixNode(n Node) bool {
 }
 
 // groupKeyRefLookup finds the published name for an expression that IS one of
-// the aggregate's group keys.
+// the aggregate's group keys, by ExprIdentity.
 //
-// It tries the ordinary identity first and the QUALIFIER-ERASED one second, so
-// `SELECT typemx.g + 1 ... GROUP BY g + 1` substitutes (#738). The second
-// lookup is safe because the map only ever CONTAINS an unqualified entry when
-// the builder registered one, and it registers one only for a block whose FROM
-// has a single relation — the scope in which a qualifier is spelling. Over a
-// join the map holds qualified identities alone, so an unqualified probe finds
-// nothing and the substitution declines, which is what keeps `GROUP BY zzj.d92`
-// from licensing `SELECT zzp.d92`.
+// A qualifier is not erased here. Whether `t.x` and `x` are one column is the
+// block's question, and RespellGroupKeyTerms answers it once, before the
+// builder runs, by spelling every term that is a key AS the key (#1524). An
+// unconditional erasure here — which is what stood in this function for
+// #738 — erased an OUTER relation's qualifier too, and `2 * o.n` in a
+// correlated block grouped by `2 * n` is not the key.
 func groupKeyRefLookup(keys map[string]string, n Node) (string, bool) {
-	if name, ok := keys[ExprIdentity(n)]; ok {
-		return name, true
-	}
-	name, ok := keys[ExprIdentityUnqualified(n)]
+	name, ok := keys[ExprIdentity(n)]
 	return name, ok
 }
 
