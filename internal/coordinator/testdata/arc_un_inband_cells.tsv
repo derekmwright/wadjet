@@ -1,0 +1,70 @@
+# arc UN round 5: the in-band mark gate's statements (TestArcUNInBandMarkEveryArm). c*/a*: review r4's own cells; v*: review r4's set-operation variants; x_cte2_*: a CTE read twice; e*: same-name arms and renamed columns added in round 5. Fixture: unPGFixture + unibFixture.
+c01	SELECT CAST(a.v AS TEXT), CAST(b.v AS TEXT) FROM un_x a JOIN rv_n b ON a.id = b.id
+c03	SELECT CAST(av AS TEXT), CAST(bv AS TEXT) FROM (SELECT a.v AS av, b.v AS bv FROM un_x a JOIN rv_n b ON a.id = b.id GROUP BY a.v, b.v) q
+c04	SELECT CAST(a.v AS TEXT) || '/' || CAST(b.v AS TEXT) FROM un_x a JOIN rv_n b ON a.id = b.id ORDER BY 1
+c05	SELECT CAST(a.v AS TEXT), CAST(b.v AS TEXT) FROM un_x a JOIN rv_n b ON a.v = b.v
+c06	SELECT CAST(a.v AS TEXT), CAST(b.v AS TEXT), count(*) FROM un_x a JOIN rv_n b ON a.v = b.v GROUP BY a.v, b.v
+c07	SELECT CAST(a.v AS TEXT), count(*) FROM un_x a JOIN un_x b ON a.v = b.v GROUP BY a.v
+c08	SELECT CAST(v AS TEXT) FROM (SELECT v FROM un_x UNION ALL SELECT v FROM rv_n) s
+c10	SELECT count(*) FROM (SELECT v FROM un_x UNION ALL SELECT v FROM rv_n) s WHERE CAST(v AS TEXT) = '1'
+c11	SELECT CAST(w AS TEXT) FROM (SELECT v AS w FROM un_x GROUP BY v) q
+c12	SELECT CAST(q.v AS TEXT), CAST(q.n AS TEXT) FROM (SELECT v AS n, n AS v FROM un_t GROUP BY v, n) q
+c13	SELECT CAST(x AS TEXT) FROM (SELECT b.v AS x FROM un_x a JOIN rv_n b ON a.id = b.id GROUP BY b.v) q
+c14	SELECT CAST(x AS TEXT) FROM (SELECT a.v AS x FROM rv_n a JOIN un_x b ON a.id = b.id GROUP BY a.v) q
+c15	SELECT CAST(k.v AS TEXT), count(*) FROM rv_big b JOIN rv_k k ON b.id = k.id GROUP BY k.v
+c16	SELECT CAST(k.v AS TEXT), CAST(b.v AS TEXT) FROM rv_big b JOIN rv_k k ON b.id = k.id WHERE b.id <= 10
+c17	SELECT k.v, b.v FROM rv_big b JOIN rv_k k ON b.id = k.id WHERE b.id <= 10
+c19	SELECT CAST(v AS TEXT), cnt FROM (SELECT b.v, count(*) cnt FROM rv_big b JOIN rv_k k ON b.id = k.id GROUP BY b.v) q
+c20	SELECT CAST(v AS TEXT), rn FROM (SELECT b.v, ROW_NUMBER() OVER (PARTITION BY b.v ORDER BY b.id) rn FROM rv_big b JOIN rv_k k ON b.id = k.id) q WHERE rn = 1
+c21	SELECT g, length(string_agg(CAST(v AS TEXT), ',')) FROM (SELECT g, v FROM un_x GROUP BY g, v) q GROUP BY g
+c22	SELECT CAST(json_build_object('v', v) AS TEXT) FROM (SELECT DISTINCT v FROM rv_big) q
+c23	SELECT CASE WHEN CAST(v AS TEXT) IS NULL THEN 1 ELSE 0 END, count(*) FROM (SELECT v FROM un_x GROUP BY v) q GROUP BY 1
+c24	SELECT count(*) FROM (SELECT v FROM rv_big GROUP BY v) q WHERE CAST(v AS TEXT) IN ('1', '1.5', '7', '0.0000000001')
+c25	WITH c AS (SELECT v, count(*) n FROM rv_big GROUP BY v) SELECT CAST(a.v AS TEXT), a.n FROM c a JOIN c b ON a.v = b.v
+c26	SELECT count(*) FROM (SELECT v FROM un_x INTERSECT SELECT v FROM rv_n) s
+c26b	SELECT CAST(v AS TEXT) FROM (SELECT v FROM un_x INTERSECT SELECT v FROM rv_n) s
+c27	SELECT CAST(v AS TEXT) FROM (SELECT v FROM un_x EXCEPT SELECT v FROM rv_n) s
+c30	SELECT CAST(v AS TEXT) FROM (SELECT v FROM rv_big ORDER BY v DESC NULLS LAST, id LIMIT 3) q
+c31	SELECT CAST(m AS TEXT) FROM (SELECT g, MIN(v) m FROM rv_big GROUP BY g) q WHERE g = 1
+c32	SELECT CAST(q.v AS TEXT), CAST(r.v AS TEXT) FROM (SELECT v FROM un_x GROUP BY v) q LEFT JOIN rv_n r ON q.v = r.v
+c33	SELECT q.v, r.v FROM (SELECT v FROM un_x GROUP BY v) q JOIN rv_n r ON q.v = r.v
+c34	SELECT concat(a.v, '|', b.v) FROM un_x a JOIN un_u b ON a.id = b.id
+c35	SELECT format('%s %s', q.v, r.v) FROM (SELECT DISTINCT v FROM un_x) q JOIN (SELECT DISTINCT v FROM rv_n) r ON q.v = r.v
+c36	SELECT CAST(v AS TEXT) FROM (SELECT v FROM rv_n UNION ALL SELECT v FROM un_x) s WHERE v = 1.5
+c37	SELECT v || '' FROM (SELECT v FROM un_x UNION SELECT v FROM rv_n) s
+c38	SELECT CAST(b.v AS TEXT) t, count(*) FROM un_x a JOIN rv_n b ON a.id = b.id GROUP BY CAST(b.v AS TEXT)
+c39	SELECT CAST(a.v AS TEXT) FROM un_x a JOIN rv_n b ON a.id = b.id ORDER BY CAST(b.v AS TEXT), a.id
+c40	SELECT CAST(x AS TEXT), CAST(y AS TEXT) FROM (SELECT a.v x, b.v y FROM un_x a JOIN rv_n b ON a.v = b.v) q ORDER BY 1
+c41	SELECT CAST(b.v AS TEXT), CAST(r.v AS TEXT), count(*) FROM rv_big b JOIN rv_n r ON b.g = r.g GROUP BY b.v, r.v
+c42	SELECT CAST(b.v AS TEXT), count(*) FROM rv_big b JOIN rv_n r ON b.g = r.g GROUP BY b.v
+c43	SELECT count(*) FROM rv_big b JOIN rv_k k ON b.id = k.id WHERE CAST(b.v AS TEXT) = '1' AND CAST(k.v AS TEXT) = '1'
+c44	SELECT CAST(k AS TEXT), count(*) FROM (SELECT k.k FROM rv_big b JOIN rv_k k ON b.id = k.id) q GROUP BY k
+c45	SELECT CAST(n AS TEXT), count(*) FROM (SELECT n FROM rv_big GROUP BY n) q GROUP BY n
+c46	SELECT CAST(q.v AS TEXT), CAST(r.v AS TEXT) FROM (SELECT v FROM rv_n GROUP BY v) q JOIN (SELECT v FROM un_x GROUP BY v) r ON q.v = r.v
+c47	SELECT CAST(v AS TEXT), count(*) FROM (SELECT b.v FROM rv_big b JOIN rv_n r ON b.g = r.g) q GROUP BY v
+a01	SELECT v FROM un_x
+a02	SELECT CAST(v AS TEXT) FROM un_x
+a03	SELECT v FROM (SELECT v FROM un_x GROUP BY v) q
+a04	SELECT id, v FROM un_t
+v1	SELECT CAST(x AS TEXT) FROM (SELECT v AS x FROM un_x UNION ALL SELECT CAST(v AS NUMERIC(10,2)) FROM un_x) s
+v2	SELECT CAST(v AS TEXT) FROM (SELECT v FROM rv_n UNION ALL SELECT v FROM un_x) s
+v4	SELECT CAST(v AS TEXT) FROM (SELECT v FROM rv_n EXCEPT SELECT v FROM un_x) s
+v5	SELECT v FROM (SELECT v FROM un_x UNION ALL SELECT v FROM rv_n) s
+v6	SELECT count(*) FROM (SELECT v FROM rv_n UNION ALL SELECT v FROM un_x) s WHERE CAST(v AS TEXT) LIKE '%.%0'
+v7	SELECT concat(v, '') FROM (SELECT v FROM un_t UNION ALL SELECT n FROM un_t) s WHERE v = 2.5
+x_cte2_cast	WITH c AS (SELECT v AS y FROM un_x GROUP BY v) SELECT CAST(x AS TEXT) FROM (SELECT c1.y AS x FROM c c1 JOIN c c2 ON c1.y = c2.y) q
+x_cte2_fmt	WITH c AS (SELECT v AS y FROM un_x GROUP BY v) SELECT format('%s', x) FROM (SELECT c1.y AS x FROM c c1 JOIN c c2 ON c1.y = c2.y) q
+x_cte2_eq1	WITH c AS (SELECT v AS y FROM un_x GROUP BY v) SELECT COUNT(*) FROM (SELECT c1.y AS x FROM c c1 JOIN c c2 ON c1.y = c2.y) q WHERE CAST(x AS TEXT) = '1'
+x_cte2_grp	WITH c AS (SELECT v AS y FROM un_x GROUP BY v) SELECT CAST(x AS TEXT), COUNT(*) FROM (SELECT c1.y AS x FROM c c1 JOIN c c2 ON c1.y = c2.y) q GROUP BY CAST(x AS TEXT)
+x_cte2_lit	WITH c AS (SELECT v AS y FROM un_x GROUP BY v) SELECT COUNT(*) FROM (SELECT c1.y AS x FROM c c1 JOIN c c2 ON c1.y = c2.y) q WHERE x = '1'
+e01	SELECT CAST(w AS TEXT) FROM (SELECT v AS w FROM un_x UNION ALL SELECT v AS w FROM rv_n) s
+e02	SELECT CAST(v AS TEXT) FROM (SELECT v FROM un_x UNION ALL SELECT v FROM un_u) s
+e03	SELECT CAST(v AS TEXT), count(*) FROM (SELECT v FROM un_x UNION ALL SELECT v FROM un_u) s GROUP BY v
+e04	SELECT CAST(v AS TEXT) FROM (SELECT v FROM rv_n EXCEPT SELECT v FROM un_x) s
+e05	SELECT CAST(v AS TEXT) FROM (SELECT v FROM un_x UNION SELECT v FROM un_u) s
+e06	WITH c AS (SELECT v FROM un_x), d AS (SELECT v FROM rv_n) SELECT CAST(c.v AS TEXT) AS x, CAST(d.v AS TEXT) AS y FROM c JOIN d ON c.v = d.v
+e07	WITH c AS (SELECT v FROM un_x GROUP BY v) SELECT CAST(c1.v AS TEXT) AS x, CAST(c2.v AS TEXT) AS y FROM c c1 JOIN c c2 ON c1.v = c2.v
+e08	SELECT CAST(q.v AS TEXT) AS x, CAST(q.w AS TEXT) AS y FROM (SELECT n AS v, v AS w FROM un_t GROUP BY n, v) q
+e09	SELECT CAST(a.v AS TEXT) AS x, CAST(b.v AS TEXT) AS y FROM (SELECT v, g FROM un_x GROUP BY v, g) a JOIN (SELECT v, g FROM rv_n GROUP BY v, g) b ON a.g = b.g
+e10	SELECT count(*) FROM (SELECT v FROM un_x UNION ALL SELECT v FROM un_u) s WHERE CAST(v AS TEXT) = '1'
+e12	SELECT CAST(x AS TEXT) FROM (SELECT DISTINCT v AS x FROM un_x UNION ALL SELECT DISTINCT v AS x FROM rv_n) s
