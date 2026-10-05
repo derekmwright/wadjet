@@ -452,7 +452,7 @@ func (sr *spillBatchReader) Close() error {
 
 // writeColumnarBatch writes a single RecordBatch in columnar binary format.
 // Format: [numRows:u32] [numCols:u32] per-column: [typeID:u8] [nameLen:u16] [name]
-// [decimal? scale:u8 precision:u8] [nullable:u8] [nested declaration] [hasNulls:u8]
+// [decimal? scale:u8 precision:u8] [flags:u8 — 1 nullable, 2 unconstrained] [nested declaration] [hasNulls:u8]
 // [nullBitmap?] [data]
 func writeColumnarBatch(w *bufio.Writer, b *batch.RecordBatch) error {
 	var buf [8]byte
@@ -483,12 +483,20 @@ func writeColumnarBatch(w *bufio.Writer, b *batch.RecordBatch) error {
 			w.WriteByte(byte(b.Schema[i].Precision))
 		}
 
-		// Nullable flag from schema
+		// Nullable flag from schema, and in bit 1 the mark of a DECIMAL
+		// column created from an unconstrained numeric (ADR-0024 §10): a run
+		// read back without it printed the stored scale where the column
+		// prints its own text, so a CTE read twice under a spill, or a
+		// grace join's replayed side, rendered `7.0000000000` for `7`.
+		// The file is written and read by this process in one query.
+		flags := byte(0)
 		if b.Schema[i].Nullable {
-			w.WriteByte(1)
-		} else {
-			w.WriteByte(0)
+			flags |= 1
 		}
+		if b.Schema[i].Unconstrained && col.Type == batch.TypeDecimal {
+			flags |= 2
+		}
+		w.WriteByte(flags)
 
 		// The nested/parameterized part of the DECLARATION. The vector's own
 		// children ride in the data section, so this section exists for the
@@ -917,9 +925,11 @@ func readColumnarBatch(r *bufio.Reader) (*batch.RecordBatch, error) {
 		schema[i] = parquet.Column{
 			Name:      string(nameBuf),
 			Type:      typeID,
-			Nullable:  nullable == 1,
+			Nullable:  nullable&1 != 0,
 			Scale:     scale,
 			Precision: precision,
+
+			Unconstrained: nullable&2 != 0 && typeID == parquet.TypeDecimal,
 		}
 
 		// The nested half of the declaration (#865). Without it a container
