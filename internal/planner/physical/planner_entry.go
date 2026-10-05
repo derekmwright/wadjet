@@ -99,21 +99,61 @@ func (p *Planner) mergeDuplicateScans(node *logical.Node) {
 // the nodes its builder puts above it, to the first arm: every arm carries
 // the same list, and a nested block's own WITH is never reached.
 func statementCTEs(node *logical.Node) []plansql.CTEDef {
-	for n := node; n != nil; {
-		if len(n.CTEs) > 0 {
-			return n.CTEs
-		}
-		switch n.Type {
-		case logical.NodeUnion, logical.NodeIntersect, logical.NodeExcept, logical.NodeSort, logical.NodeLimit, logical.NodeDistinct:
-		default:
-			return nil
-		}
-		if len(n.Children) == 0 {
-			return nil
-		}
+	if node == nil {
+		return nil
+	}
+	if len(node.CTEs) > 0 {
+		return node.CTEs
+	}
+	n := skipSetOpWrappers(node)
+	if !isStmtSetOp(n) {
+		return nil
+	}
+	return setOpArmsCTEs(n)
+}
+
+func isStmtSetOp(n *logical.Node) bool {
+	return n != nil && (n.Type == logical.NodeUnion || n.Type == logical.NodeIntersect || n.Type == logical.NodeExcept)
+}
+
+func skipSetOpWrappers(n *logical.Node) *logical.Node {
+	for n != nil && len(n.CTEs) == 0 && len(n.Children) > 0 &&
+		(n.Type == logical.NodeSort || n.Type == logical.NodeLimit || n.Type == logical.NodeDistinct) {
 		n = n.Children[0]
 	}
-	return nil
+	return n
+}
+
+// setOpArmsCTEs is the WITH list every arm of a set operation carries — the
+// statement's, handed to each arm by buildSetOpPlan — or nil when the arms
+// disagree (an arm that is a flattened block with its own WITH).
+func setOpArmsCTEs(n *logical.Node) []plansql.CTEDef {
+	var out []plansql.CTEDef
+	for i, c := range n.Children {
+		c = skipSetOpWrappers(c)
+		var l []plansql.CTEDef
+		if isStmtSetOp(c) && len(c.CTEs) == 0 {
+			l = setOpArmsCTEs(c)
+		} else if c != nil {
+			l = c.CTEs
+		}
+		if len(l) == 0 {
+			return nil
+		}
+		if i == 0 {
+			out = l
+			continue
+		}
+		if len(l) != len(out) {
+			return nil
+		}
+		for j := range l {
+			if l[j].Identity() != out[j].Identity() {
+				return nil
+			}
+		}
+	}
+	return out
 }
 
 // Plan converts a logical plan to a physical plan for local execution.
