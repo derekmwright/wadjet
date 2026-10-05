@@ -927,8 +927,16 @@ already carries, so the table holds exactly the columns the identical bare
   `UNION ALL` over two scales, `SUM` / `AVG`, arithmetic, a typed NULL such as
   `CAST(NULL AS NUMERIC)`, a bare copy of such a column — is created like a
   column declared `NUMERIC` with no precision (above), at DECIMAL(38, s) with
-  s the output's scale or 10, whichever is more. A column copied from a `NUMERIC(p,s)`
-  column (or `NULLIF` over one) keeps `NUMERIC(p,s)`. A float-carried numeric
+  s the output's scale or 10, whichever is more. A column whose output keeps
+  PostgreSQL's typmod keeps `NUMERIC(p,s)`: a `NUMERIC(p,s)` column read
+  through derived tables, CTEs, joins, GROUP BY, a scalar subquery or a set
+  operation whose arms all carry the same `(p,s)`; a `CASE`, `COALESCE`,
+  `GREATEST` or `LEAST` whose every value carries it (a `NULL` value or a
+  missing `ELSE` carries none); `NULLIF` over one; `CAST(x AS NUMERIC(p,s))`;
+  and, with data, a `CASE` whose condition is a constant (`CASE WHEN 1 = 1
+  THEN n END`). Where this engine cannot tell — a constant `CASE` over two
+  declarations, `+n` — the column keeps the declaration the query computes
+  it at (catalog dml-assignment r23). A float-carried numeric
   (`5 / 2.0 + id * 0`, `sqrt(n * n)`) is created double precision.
 - A declared type the Parquet writer cannot store is refused at `CREATE`, not
   at the first flush.
