@@ -64,6 +64,10 @@ Declared CREATE/DROP TABLE uses row results; PostgreSQL sends DDL tags without r
 
 `NOW()`, `CURRENT_TIMESTAMP`, `LOCALTIMESTAMP` and `CURRENT_DATE` read the clock once per statement and answer that value on every row and every worker, as PostgreSQL 17.11 does within a statement. This engine has no transactions — `BEGIN` and `COMMIT` are accepted and ignored, and a multi-statement string runs as a sequence — so `BEGIN; SELECT now(); SELECT now(); COMMIT` answers two values where PostgreSQL answers its transaction's one, and so do two statements in one simple-query string. (catalog: [temporal#r26](adr/0012-divergences/temporal.md#catalog); #1566)
 
+**`LIMIT` / `OFFSET` take a number literal, and there is no column `DEFAULT`.**
+
+`LIMIT CAST(extract(epoch FROM now()) AS BIGINT) % 7 + 1`, an `OFFSET` expression and `CREATE TABLE t (ts TIMESTAMP DEFAULT now())` are syntax errors (42601) here, for any expression, where PostgreSQL 17.11 evaluates them with the statement's clock. Write the number. (catalog: [temporal#r27](adr/0012-divergences/temporal.md#catalog); #1566)
+
 **An explicit integer CAST of a materialized float-carried numeric rounds half to even.**
 
 `CAST(s.x AS INTEGER)` over `(SELECT DISTINCT 5 / 2.0 + t.id * 0 AS x FROM t) s` answers 2 where PostgreSQL answers 3, and so does the same column read from a derived table, an aggregate, a CTE, a set operation, VALUES, a window or a join on the single-process arms (on the stage DAG a derived table's or a CTE's such column reads NULL, a separate defect): the column is a float64 in the batch and carries no PostgreSQL category, so the cast rounds it by float8's rule. A cast whose operand computes the value — `CAST(5 / 2.0 AS INTEGER)`, `CAST(SQRT(6.25) AS INTEGER)`, `CAST(POWER(2.5, 1) AS INTEGER)`, negated, SMALLINT and BIGINT alike — rounds half away from zero, 3, as PostgreSQL does, and an assignment of the materialized column rounds 3 too (see "Division and the transcendental functions over numeric declare double precision"). (catalog: [dml-assignment#r2](adr/0012-divergences/dml-assignment.md#catalog); #1353-cast, ADR-0024 §2c)

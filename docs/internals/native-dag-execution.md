@@ -1934,20 +1934,27 @@ door, and carried; nothing below the door reads the clock for these functions.
 
 | Where | What |
 |---|---|
-| `expr.StartStatement(ctx)` | the stamp: pgwire `queryContext` (each statement; the EXECUTE's for the extended protocol), `wadjet.DB.query` / `ExecuteParsed`, `Coordinator.ExecuteSQL` / `SubmitSQL` (its async context keeps it). The outermost door wins. |
+| `expr.StartStatement(ctx)` | the stamp, and the ONLY read of the clock (`expr.clockNow`): pgwire `queryContext` (each statement; the EXECUTE's for the extended protocol), `wadjet.DB.query` / `ExecuteParsed`, the HTTP `handleQuery`, `Coordinator.ExecuteSQL` / `SubmitSQL` (its async context keeps it). The outermost door wins. |
 | `expr.WithStatementClock(ctx)` | the binding: a compile option that makes every clock-function `FuncCall` (and a CREATE FUNCTION body's) answer the stamped instant. The physical planner passes it through `Planner.statementOption()` / `clockOption()` from `PlanCtx`; the DML evaluator, the gather renamer (`applyOutputRenames`), the scalar-subquery reader and dagplan's deferred-failure gate pass it from their context. |
-| `Scheduler.PublishTasks` → `stampTaskStatementClock` | the ONE stamp on the wire: `distributed.Task.StatementTime`, Unix nanoseconds. A task already stamped keeps its value, so a retry re-publishing its task reads the same instant. |
+| `Scheduler.PublishTasks` → `stampTaskStatementClock` | the ONE stamp on the wire: `distributed.Task.StatementTime`, Unix nanoseconds, a JSON number of 37 bytes with its key (`worker.TestTaskStatementClock`). A task already stamped keeps its value, so a retry re-publishing its task reads the same instant. |
 | worker `taskStatementContext` | the task's context carries `StatementTime` (zero — a coordinator that predates the field — falls back to the task's own start); the fragment compiles (filters, projections, aggregate input, window keys, shuffle computed columns, LATERAL defaults) and the worker's planner bind it. |
 
-The logical optimizer has no statement: its plan-time folds (`evalConstantFilter`,
-`foldConstant`) leave a conjunct that reads a clock function undecided, so it
-stays in the plan and is evaluated where the statement runs. A table
-function's argument is folded by the logical builder for the plan's
-declarations and recorded (`Node.FuncClockArgs`); the physical planner
-re-folds it with the statement clock before the source reads it. A compile that no
-door reached keeps the live clock per evaluation; `expr.SetUnboundClockHookForTest`
-reports one, and `coordinator.TestArcSCStatementClockEveryArm` /
-`wadjet.TestArcSCEmbeddedStatementWritesOneClock` fail on any.
+The parser and the logical layer have no statement, so nothing there
+evaluates a clock function: the optimizer's plan-time folds (`evalConstantFilter`,
+`foldConstant`) leave a clock-reading conjunct in the plan; the parse-time
+constant folder (`plansql.SetConstantFolder`, a window function's integer
+argument) answers `plansql.ClockDeferred` for one, and the plan folds it with
+`PlanCtx` (`WindowIntegerArgumentIn` from `windowExecColumn`); the builder
+records a clock-reading table-function or TABLESAMPLE argument
+(`Node.FuncClockArgs`, `Node.SampleClockArg`) and `logical.BindClockFolds`
+folds it with the statement clock in `AnnotateScanColumns`, again where the
+scan or the DAG stage is built (which raise its error).
+
+There is no fallback: a clock function compiled with no statement clock raises
+XX000 when evaluated (`expr.unboundClock`), and `expr.SetUnboundClockHookForTest`
+reports such a compile. `coordinator.TestArcSCAdvancingClockOneReadEveryDoor`
+replaces the clock with one that moves on one second per read and requires
+every statement on six doors to read it exactly once.
 
 ## Query cancellation (and `statement_timeout`)
 
