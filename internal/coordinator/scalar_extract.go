@@ -328,7 +328,10 @@ func formatScalar(vec *batch.Vector, row int, typ parquet.TypeID) string {
 		// answered from the same subquery's real value. FormatDecimal is the
 		// same rendering a DECIMAL column's own box uses, so the worker
 		// re-parses exactly the digits any other DECIMAL literal would carry.
-		return vec.DecimalData.Data[row].FormatDecimal(vec.DecimalData.Scale)
+		// The value's own text (DecimalColumn.Text): its display scale when
+		// it has one, so the substituted literal prints as the single-process
+		// answer does (ADR-0024 §1 as amended).
+		return vec.DecimalData.Text(row, false)
 	default:
 		return "null"
 	}
