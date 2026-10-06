@@ -558,7 +558,22 @@ func (e *FuncCall) Eval(b *batch.RecordBatch, row int) any {
 		// DECIMAL answered through an integer box (#695).
 		return out
 	}
-	return choiceBox(e.boxMode(b), out)
+	mode := e.boxMode(b)
+	if f, isFloat := out.(float64); isFloat && mode == choiceBoxDecimal {
+		// The chosen argument's own spelling when it is a numeric literal
+		// (decimalArmSpelling): NULLIF answers argument 0, GREATEST / LEAST
+		// the first argument holding the chosen value.
+		for i, a := range args {
+			if af, ok := a.(float64); ok && af == f && i < len(e.Args) {
+				out = decimalArmSpelling(mode, e.Args[i], out)
+				break
+			}
+			if e.nullifArms != nil {
+				break
+			}
+		}
+	}
+	return choiceBox(mode, out)
 }
 
 // boxMode reports what this call's chosen box must be rewritten to — see

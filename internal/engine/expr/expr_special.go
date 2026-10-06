@@ -361,14 +361,20 @@ type CaseWhen struct {
 }
 
 func (e *Case) Eval(b *batch.RecordBatch, row int) any {
-	v := e.eval(b, row)
+	arm := e.pick(b, row)
+	if arm == nil {
+		return nil
+	}
+	v := arm.Eval(b, row)
 	if v == nil {
 		return v
 	}
-	return e.cc.conform(b, choiceBox(e.boxMode(b), v))
+	mode := e.boxMode(b)
+	return e.cc.conform(b, choiceBox(mode, decimalArmSpelling(mode, arm, v)))
 }
 
-func (e *Case) eval(b *batch.RecordBatch, row int) any {
+// pick is the result expression the row selects, nil when none does.
+func (e *Case) pick(b *batch.RecordBatch, row int) Expr {
 	if e.Operand != nil {
 		// Simple CASE: CASE x WHEN v1 THEN r1 ...
 		opVal := e.Operand.Eval(b, row)
@@ -389,7 +395,7 @@ func (e *Case) eval(b *batch.RecordBatch, row int) any {
 			if opVal != nil && whenVal != nil {
 				arms.refuse[i].check(b)
 				if arms.pairs[i].compare(b, opVal, whenVal, CmpEq) {
-					return w.Result.Eval(b, row)
+					return w.Result
 				}
 			}
 		}
@@ -397,12 +403,12 @@ func (e *Case) eval(b *batch.RecordBatch, row int) any {
 		// Searched CASE: CASE WHEN cond1 THEN r1 ...
 		for _, w := range e.Whens {
 			if toBool(w.Cond, b, row) {
-				return w.Result.Eval(b, row)
+				return w.Result
 			}
 		}
 	}
 	if e.Else != nil {
-		return e.Else.Eval(b, row)
+		return e.Else
 	}
 	return nil
 }
@@ -423,7 +429,8 @@ func (e *Coalesce) Eval(b *batch.RecordBatch, row int) any {
 		if v == nil {
 			continue
 		}
-		return e.cc.conform(b, choiceBox(e.boxMode(b), v))
+		mode := e.boxMode(b)
+		return e.cc.conform(b, choiceBox(mode, decimalArmSpelling(mode, arg, v)))
 	}
 	return nil
 }
