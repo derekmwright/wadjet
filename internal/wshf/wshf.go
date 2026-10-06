@@ -84,10 +84,10 @@ const DecimalUnconstrainedBit = 0x80
 
 // DecimalPrecisionByte is the header's precision byte for a DECIMAL column of
 // precision p, with the unconstrained bit when the column carries the mark.
-// A precision the byte cannot hold beside the bit is refused, never truncated
-// into it.
+// A precision past parquet.MaxDecimalDigits is refused, never truncated into
+// the flag bits: the decoder refuses it too (SplitDecimalPrecisionByte).
 func DecimalPrecisionByte(p int, unconstrained bool) (byte, error) {
-	if p < 0 || p >= DecimalUnconstrainedBit {
+	if p < 0 || p > parquet.MaxDecimalDigits {
 		return 0, fmt.Errorf("shuffle header: DECIMAL precision %d does not fit the header's precision byte", p)
 	}
 	b := byte(p)
@@ -97,10 +97,24 @@ func DecimalPrecisionByte(p int, unconstrained bool) (byte, error) {
 	return b, nil
 }
 
+// decimalHeaderFlagBits are the precision byte's bits a writer may set
+// beside the precision itself.
+const decimalHeaderFlagBits = DecimalUnconstrainedBit
+
 // SplitDecimalPrecisionByte is DecimalPrecisionByte's inverse: the precision
-// and whether the column carries the unconstrained mark.
-func SplitDecimalPrecisionByte(b byte) (precision int, unconstrained bool) {
-	return int(b &^ DecimalUnconstrainedBit), b&DecimalUnconstrainedBit != 0
+// and whether the column carries the unconstrained mark. A byte no writer
+// produces — a precision past parquet.MaxDecimalDigits, or a bit no writer
+// sets — is a corrupt or foreign header and is refused (#1662): read as it
+// stood, precision 39..127 decoded the chunk under a declaration no DECIMAL
+// can have, and a flag bit added later would be read as precision instead of
+// as the layout it announces.
+func SplitDecimalPrecisionByte(b byte) (precision int, unconstrained bool, err error) {
+	precision = int(b &^ decimalHeaderFlagBits)
+	if precision > parquet.MaxDecimalDigits {
+		return 0, false, fmt.Errorf("shuffle header: DECIMAL precision byte %#x: precision %d exceeds %d or carries an unknown flag bit",
+			b, precision, parquet.MaxDecimalDigits)
+	}
+	return precision, b&DecimalUnconstrainedBit != 0, nil
 }
 
 // Sentinels returned by FixedTypeLen for the two classes whose byte count
