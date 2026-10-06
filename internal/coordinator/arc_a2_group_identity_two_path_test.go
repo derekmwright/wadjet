@@ -42,6 +42,9 @@ type a2IdentCell struct {
 	want             []string
 	wantErrLike      string
 	wantState        string
+	// dagErrLike is a refusal the stage-DAG arms keep while the single-process
+	// arms answer want (ADR-0047 stage 1: the coordinator does not bind).
+	dagErrLike string
 	// wantUnreach is the UnreachableOutputLocalRoutes delta each DAG arm must
 	// show. A derived key that routes is right-but-routed, and rows alone
 	// cannot tell that from the DAG executing it (rule 11).
@@ -131,20 +134,24 @@ func a2IdentCells() []a2IdentCell {
 			wantErrLike: `column "zzp.d92" must appear in the GROUP BY clause`,
 			wantState:   "42803",
 			pgSays:      `42803 — PostgreSQL refuses it too`},
-		// THE BOUND THIS COMMIT SETS, and PostgreSQL ANSWERS it: the MIRROR
-		// spelling, a QUALIFIED key with a bare select item. The erasure is on
-		// the TERM alone, because answering this needs the aggregate to
-		// evaluate `typemx.g + 1` over a batch whose column is `g` — it
-		// cannot, and when the identity was erased on both sides the
-		// projection above read a column that does not exist and every group's
-		// key came back NULL. A loud 42803 beats a plausible NULL (protocol
-		// method 8), so the refusal stays and this fixture holds it.
+		// The MIRROR spelling, a QUALIFIED key with a bare select item, which
+		// PostgreSQL ANSWERS. It was refused 42803 on every arm while the
+		// match compared spellings: answering it needs the aggregate to know
+		// that `g` and `typemx.g` are one column, and the qualifier-erasing
+		// rule above could only erase the TERM's. The binder's binding knows
+		// it (ADR-0047 stage 1): the single-process arms answer the alike
+		// spelling's rows (the control below), and the stage-DAG arms — whose
+		// AST the coordinator does not bind — keep the 42803 until stage 5.
 		{issue: "#738", name: "boundary_qualified_key_bare_select_item",
-			sql:         `SELECT g + 1 AS k, COUNT(*) AS n FROM typemx GROUP BY typemx.g + 1 ORDER BY k`,
-			wantErrLike: `column "g" must appear in the GROUP BY clause`,
-			wantState:   "42803",
-			pgSays: "PostgreSQL ANSWERS this. Wadjet refuses it, loudly, because the aggregate " +
-				"cannot evaluate a qualified key over an unqualified batch"},
+			sql:        `SELECT g + 1 AS k, COUNT(*) AS n FROM typemx GROUP BY typemx.g + 1 ORDER BY k`,
+			want:       a2MirrorRows(),
+			dagErrLike: `column "g" must appear in the GROUP BY clause`,
+			wantState:  "42803",
+			pgSays:     "PostgreSQL ANSWERS this; the DAG arms refuse it until ADR-0047 stage 5"},
+		{issue: "#738", name: "boundary_qualified_key_alike_control",
+			sql:    `SELECT typemx.g + 1 AS k, COUNT(*) AS n FROM typemx GROUP BY typemx.g + 1 ORDER BY k`,
+			want:   a2MirrorRows(),
+			pgSays: "the alike spelling, answered on every arm"},
 	}
 }
 
@@ -171,16 +178,20 @@ func TestTheIdentityErasesAQualifierAndATypeSynonym(t *testing.T) {
 			check := func(arm string, got []string, err error) {
 				t.Helper()
 				sort.Strings(got)
-				if tc.wantErrLike != "" {
+				errLike := tc.wantErrLike
+				if tc.dagErrLike != "" && strings.HasPrefix(arm, "dag") {
+					errLike = tc.dagErrLike
+				}
+				if errLike != "" {
 					if err == nil {
 						t.Errorf("%s arm: ANSWERED %v — this shape's refusal is a stated BOUND. "+
 							"If it is lifted deliberately, assert the rows and delete this cell's "+
 							"wantErrLike.\n  PostgreSQL 17: %s\n  SQL: %s", arm, got, tc.pgSays, tc.sql)
 						return
 					}
-					if !strings.Contains(err.Error(), tc.wantErrLike) {
+					if !strings.Contains(err.Error(), errLike) {
 						t.Errorf("%s arm: error %v\n  want one containing %q\n  SQL: %s",
-							arm, err, tc.wantErrLike, tc.sql)
+							arm, err, errLike, tc.sql)
 					}
 					if s := sqlerr.StateOf(err); s != tc.wantState {
 						t.Errorf("%s arm: SQLSTATE %q, want %q\n  SQL: %s", arm, s, tc.wantState, tc.sql)
@@ -222,4 +233,11 @@ func TestTheIdentityErasesAQualifierAndATypeSynonym(t *testing.T) {
 			}
 		})
 	}
+}
+
+// a2MirrorRows is the GROUP BY typemx.g + 1 answer over all 5000 typemx rows.
+func a2MirrorRows() []string {
+	return []string{"k=NULL|n=int64:384", "k=int64:1|n=int64:660", "k=int64:2|n=int64:660",
+		"k=int64:3|n=int64:659", "k=int64:4|n=int64:659", "k=int64:5|n=int64:659",
+		"k=int64:6|n=int64:659", "k=int64:7|n=int64:660"}
 }

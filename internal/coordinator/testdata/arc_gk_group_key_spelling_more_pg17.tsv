@@ -1,0 +1,322 @@
+# PostgreSQL 17.11 (postgres:17-alpine) answers for gkMoreCells: name<TAB>{declared classes} rows=N rows, or ERR <SQLSTATE> <message>
+alias/negOrdQual	{int,int} rows=6 7,1 | 0,1 | -1,1 | -3,1 | -5,1 | NULL,1
+alias/negOrdQualCtl	{int,int} rows=6 7,1 | 0,1 | -1,1 | -3,1 | -5,1 | NULL,1
+alias/negOrdQualDesc	{int,int} rows=6 NULL,1 | 5,1 | 7,1 | 9,1 | 10,1 | 17,1
+alias/negOrdExpr	{int,int} rows=6 -5,1 | -3,1 | -1,1 | 0,1 | 7,1 | NULL,1
+alias/negOrdExprCtl	{int,int} rows=6 -5,1 | -3,1 | -1,1 | 0,1 | 7,1 | NULL,1
+alias/negHavingQual	{int,int} rows=2 -3,1 | -5,1
+alias/negHavingQualCtl	{int,int} rows=2 -3,1 | -5,1
+alias/negHavingExpr	{int,int} rows=1 7,1
+alias/negHavingExprCtl	{int,int} rows=1 7,1
+alias/aggHavingKeyExpr	{int,int} rows=2 4,1 | 6,1
+alias/aggHavingKeyExprCtl	{int,int} rows=2 4,1 | 6,1
+alias/aggOrdKeyExpr	{int,int} rows=6 6,1 | 4,1 | 2,1 | 1,1 | -6,1 | NULL,1
+alias/aggOrdKeyExprCtl	{int,int} rows=6 6,1 | 4,1 | 2,1 | 1,1 | -6,1 | NULL,1
+alias/aggNumHaving	{numeric,int} rows=2 20.00,1 | 4.50,1
+alias/aggNumHavingCtl	{numeric,int} rows=2 20.00,1 | 4.50,1
+alias/aggNumOrd	{numeric,int} rows=6 NULL,1 | 20.00,1 | 4.50,1 | 0.02,1 | 0.00,1 | -7.00,1
+alias/aggNumOrdCtl	{numeric,int} rows=6 NULL,1 | 20.00,1 | 4.50,1 | 0.02,1 | 0.00,1 | -7.00,1
+alias/winOrdQual	{int,int,int} rows=6 -7,7,1 | 0,0,2 | 1,-1,3 | 3,-3,4 | 5,-5,5 | NULL,NULL,6
+alias/winOrdQualCtl	{int,int,int} rows=6 -7,7,1 | 0,0,2 | 1,-1,3 | 3,-3,4 | 5,-5,5 | NULL,NULL,6
+alias/winPartQual	{int,int,int} rows=6 -7,7,3 | 0,0,3 | 1,-1,3 | 3,-3,2 | 5,-5,2 | NULL,NULL,1
+alias/negOrdQualKeyQual	{int,int} rows=6 -5,1 | -3,1 | -1,1 | 0,1 | 7,1 | NULL,1
+alias/negDistinctOrd	{int} rows=6 -5 | -3 | -1 | 0 | 7 | NULL
+corr/innerShadow	{int,numeric} rows=6 1,4.50 | 2,4.50 | 3,4.50 | 4,4.50 | 5,4.50 | 6,4.50
+corr/outerItemInnerKeyBareSameAlias	{int,numeric} rows=6 1,4.50 | 2,-7.00 | 3,20.00 | 4,0.00 | 5,0.02 | 6,NULL
+corr/outerKeyBareResolvesOuter	{int,int} rows=6 1,2 | 2,NULL | 3,2 | 4,NULL | 5,NULL | 6,NULL
+corr/outerKeyBareResolvesOuterSel	{int,numeric} rows=6 1,4.50 | 2,-7.00 | 3,20.00 | 4,0.00 | 5,0.02 | 6,NULL
+corr/outerSameAliasDiffTable	{int,int} rows=6 1,5 | 2,5 | 3,5 | 4,5 | 5,5 | 6,5
+corr/subqInSelOuterKey	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corr/subqInSelOuterKeyCtl	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corr/subqInSelOuterKeyBare	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corr/subqInHaving	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corr/fromlessSubq	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corr/fromlessSubqKeyQual	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corr/existsOuterGrouped	{int} rows=5 1 | 2 | 3 | 4 | 5
+corr/lateralGrouped	{int,int} rows=12 1,6 | 1,7 | 2,6 | 2,7 | 3,6 | 3,7 | 4,6 | 4,7 | 5,6 | 5,7 | 6,6 | 6,7
+corr/inSubqGrouped	{int} rows=1 3
+one/tableNameAliased	ERR 42P01 invalid reference to FROM-clause entry for table "ss_t"
+one/schemaQualTable	{int,int} rows=6 -6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1
+one/schemaQualTableKey	{int,int} rows=6 -6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1
+one/schemaQualItem	{int,int} rows=6 -6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1
+one/upperTableName	{int,int} rows=6 -6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1
+one/aliasIsColumnName	{int,int} rows=6 -6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1
+one/aliasIsColumnNameKey	{int,int} rows=6 -6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1
+one/aliasIsColumnNameBare	ERR 42P01 missing FROM-clause entry for table "i"
+one/colLikeTable	{numeric,int} rows=6 -7.00,1 | 0.00,1 | 0.02,1 | 4.50,1 | 20.00,1 | NULL,1
+one/colLikeTableKey	{numeric,int} rows=6 -7.00,1 | 0.00,1 | 0.02,1 | 4.50,1 | 20.00,1 | NULL,1
+one/quotedDotAlias	{numeric,int} rows=6 -7.00,1 | 0.00,1 | 0.02,1 | 4.50,1 | 20.00,1 | NULL,1
+one/quotedDotAliasKey	{numeric,int} rows=6 -7.00,1 | 0.00,1 | 0.02,1 | 4.50,1 | 20.00,1 | NULL,1
+one/quotedUpperAlias	{numeric,int} rows=6 -7.00,1 | 0.00,1 | 0.02,1 | 4.50,1 | 20.00,1 | NULL,1
+one/quotedUpperAliasMismatch	ERR 42P01 missing FROM-clause entry for table "t"
+one/derivedNoAlias	{numeric,int} rows=6 -7.00,1 | 0.00,1 | 0.02,1 | 4.50,1 | 20.00,1 | NULL,1
+one/cteSameNameAsTable	{numeric,int} rows=6 -70.00,1 | 0.00,1 | 0.20,1 | 45.00,1 | 200.00,1 | NULL,1
+one/selfJoinComma	ERR 42702 column reference "i" is ambiguous
+one/unionArmSecond	{int} rows=7 -6 | 1 | 1 | 2 | 4 | 6 | NULL
+one/unionArmFirst	{numeric} rows=6 -7.00 | 0.00 | 0.02 | 4.50 | 20.00 | NULL
+one/fromless	{int} rows=1 2
+one/funcFrom	{int,int} rows=3 2,1 | 3,1 | 4,1
+term/aggArgKey	{int,int,int} rows=6 -6,-6,1 | 1,1,1 | 2,2,1 | 4,4,1 | 6,6,1 | NULL,NULL,1
+term/aggFilter	{int,int} rows=6 -6,0 | 1,0 | 2,0 | 4,1 | 6,1 | NULL,0
+term/aggOnlyArg	{int} rows=6 -6 | 1 | 2 | 4 | 6 | NULL
+term/winAggArg	{int,int} rows=6 -6,7 | 1,7 | 2,7 | 4,7 | 6,7 | NULL,7
+term/winPartition	{int,int} rows=6 -6,3 | 1,3 | 2,3 | 4,2 | 6,2 | NULL,1
+term/distinctOn	{int,int} rows=6 -6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1
+term/distinctOnKeyQual	{int,int} rows=6 -6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1
+term/groupingFn	{int,int} rows=7 -6,0 | 1,0 | 2,0 | 4,0 | 6,0 | NULL,0 | NULL,1
+term/groupingFnCtl	{int,int} rows=7 -6,0 | 1,0 | 2,0 | 4,0 | 6,0 | NULL,0 | NULL,1
+term/extractName	{numeric,int} rows=6 1000,1 | 1969,1 | 1970,1 | 2024,1 | 9999,1 | NULL,1
+term/extractNameCtl	{numeric,int} rows=6 1000,1 | 1969,1 | 1970,1 | 2024,1 | 9999,1 | NULL,1
+term/isDistinctName	{bool,int} rows=2 f,1 | t,5
+term/isDistinctNameCtl	{bool,int} rows=2 f,1 | t,5
+term/colNameBare	{int,int} rows=6 -7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1
+term/nullifName	{int,int} rows=5 -7,1 | 0,1 | 1,1 | 5,1 | NULL,2
+term/orderByNotSelected	{int} rows=6 1 | 1 | 1 | 1 | 1 | 1
+term/orderByNotSelectedDesc	{int,int} rows=6 1,6 | 1,3 | 1,1 | 1,5 | 1,4 | 1,2
+term/havingAndOrder	{numeric} rows=4 4.50 | 0.02 | 0.00 | -7.00
+term/twoKeysSubterm	{int,int} rows=6 -7,-6 | 0,1 | 1,2 | 3,4 | 5,6 | NULL,NULL
+term/keyAndSubKey	{int,int} rows=6 -6,42 | 1,0 | 2,2 | 4,12 | 6,30 | NULL,NULL
+term/limitOffset	{numeric} rows=3 0.00 | 0.02 | 4.50
+ref/commuted	ERR 42803 column "t.i" must appear in the GROUP BY clause or be used in an aggregate function
+ref/constFold	ERR 42803 column "t.n" must appear in the GROUP BY clause or be used in an aggregate function
+ref/castSpelling	{numeric,int} rows=6 -7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1
+ref/castFloat	{float,int} rows=6 -7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1
+ref/subtermOnly	ERR 42803 column "t.i" must appear in the GROUP BY clause or be used in an aggregate function
+ref/otherCol	ERR 42803 column "t.b" must appear in the GROUP BY clause or be used in an aggregate function
+ref/parenWs	{int,int} rows=6 -6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1
+ref/upperFunc	{text,int} rows=6 ,1 | ABC,1 | HELLO,1 | NULL,1 | X,1 | ZZ,1
+ref/assocDiff	ERR 42803 column "t.i" must appear in the GROUP BY clause or be used in an aggregate function
+ref/assocSame	{int,int} rows=6 -5,1 | 2,1 | 3,1 | 5,1 | 7,1 | NULL,1
+ref/intLitType	ERR 42803 column "t.n" must appear in the GROUP BY clause or be used in an aggregate function
+ref/caseItem	{int,int} rows=2 0,4 | 1,2
+ref/caseItemDiff	ERR 42803 column "t.i" must appear in the GROUP BY clause or be used in an aggregate function
+ref/notEq	ERR 42803 column "t.i" must appear in the GROUP BY clause or be used in an aggregate function
+ref/betweenSame	{bool,int} rows=3 NULL,1 | f,3 | t,2
+ref/inListSame	{bool,int} rows=3 NULL,1 | f,3 | t,2
+ref/likeSame	{bool,int} rows=3 NULL,1 | f,4 | t,1
+ref/coalesceDiffArgs	ERR 42803 column "t.i" must appear in the GROUP BY clause or be used in an aggregate function
+ref/concatOrder	ERR 42803 column "t.s" must appear in the GROUP BY clause or be used in an aggregate function
+b1/numOrdQual	{numeric,int} rows=6 3.50,1 | 0.00,1 | -0.01,1 | -2.25,1 | -10.00,1 | NULL,1
+b1/aggAliasOrdQual	{int,int} rows=6 -7,107 | 0,100 | 1,99 | 3,97 | 5,95 | NULL,NULL
+b1/aggAliasOrdQualCtl	{int,int} rows=6 -7,107 | 0,100 | 1,99 | 3,97 | 5,95 | NULL,NULL
+b1/ordQualExpr	{int} rows=6 7 | 0 | -1 | -3 | -5 | NULL
+b1/ordQualNullsFirst	{int} rows=6 NULL | 7 | 0 | -1 | -3 | -5
+b1/ordQualTwoKeys	{text,int} rows=6 Hello,-7 | ,0 | x,1 | abc,3 | zz,5 | NULL,NULL
+b1/ordQualKeyArith	{int} rows=6 107 | 100 | 99 | 97 | 95 | NULL
+b1/ordQualText	{text} rows=6  | HELLO | ABC | X | ZZ | NULL
+b1/ordQualTextCtl	{text} rows=6  | HELLO | ABC | X | ZZ | NULL
+b1/ordQualDerived	{int} rows=3 7 | 0 | -1
+b1/ordQualLimit	{int} rows=2 7 | 0
+b1/ordQualNoAlias	{int} rows=6 7 | 0 | -1 | -3 | -5 | NULL
+b1/ordQualDistinct	ERR 42P10 for SELECT DISTINCT, ORDER BY expressions must appear in select list
+b1/havingQualAliasAgg	{int,int} rows=2 3,1 | 5,1
+b1/winOrdQualAlias	{int,int,int} rows=6 -7,7,1 | 0,0,2 | 1,-1,3 | 3,-3,4 | 5,-5,5 | NULL,NULL,6
+qd/sameQual	{numeric,int} rows=6 -7.00,1 | 0.00,1 | 0.02,1 | 4.50,1 | 20.00,1 | NULL,1
+qd/bareBoth	{numeric,int} rows=6 -7.00,1 | 0.00,1 | 0.02,1 | 4.50,1 | 20.00,1 | NULL,1
+qd/keyQualSel	{numeric,int} rows=6 -7.00,1 | 0.00,1 | 0.02,1 | 20.00,1 | 4.50,1 | NULL,1
+qd/keyQualHaving	{int} rows=2 1 | 1
+qd/keyQualBareCol	{numeric,int} rows=6 -3.50,1 | 0.00,1 | 0.01,1 | 2.25,1 | 10.00,1 | NULL,1
+qd/quotedSpaceAlias	{numeric,int} rows=6 -7.00,1 | 0.00,1 | 0.02,1 | 4.50,1 | 20.00,1 | NULL,1
+qd/quotedUpperKey	{numeric,int} rows=6 -7.00,1 | 0.00,1 | 0.02,1 | 4.50,1 | 20.00,1 | NULL,1
+qd/quotedKeywordAlias	{numeric,int} rows=6 -7.00,1 | 0.00,1 | 0.02,1 | 4.50,1 | 20.00,1 | NULL,1
+qd/quotedColKey	ERR 42803 column "t.n" must appear in the GROUP BY clause or be used in an aggregate function
+qd/quotedColKeyItem	{numeric,int} rows=6 -7.00,1 | 0.00,1 | 0.02,1 | 4.50,1 | 20.00,1 | NULL,1
+qd/quotedColDotKey	{numeric,int} rows=6 -7.00,1 | 0.00,1 | 0.02,1 | 4.50,1 | 20.00,1 | NULL,1
+qd/quotedColDotItem	{numeric,int} rows=6 -7.00,1 | 0.00,1 | 0.02,1 | 4.50,1 | 20.00,1 | NULL,1
+nx/gk/qualKey/alias	{int,int} rows=6 -6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1
+nx/gk/qualKey/bare	{int,int} rows=6 -6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1
+nx/gk/qualKey/same	{int,int} rows=6 -6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1
+nx/gk/tableKey/alias	ERR 42P01 invalid reference to FROM-clause entry for table "ss_t"
+nx/gk/tableKey/bare	ERR 42P01 invalid reference to FROM-clause entry for table "ss_t"
+nx/gk/tableKey/same	ERR 42P01 invalid reference to FROM-clause entry for table "ss_t"
+nx/gk/bKey/alias	{int,int} rows=6 -69,1 | 1,1 | 2,1 | 31,1 | 9000000001,1 | NULL,1
+nx/gk/bKey/bare	{int,int} rows=6 -69,1 | 1,1 | 2,1 | 31,1 | 9000000001,1 | NULL,1
+nx/gk/bKey/same	{int,int} rows=6 -69,1 | 1,1 | 2,1 | 31,1 | 9000000001,1 | NULL,1
+nx/gk/nKey/alias	{numeric,int} rows=6 -2.50,1 | 1.00,1 | 1.01,1 | 11.00,1 | 3.25,1 | NULL,1
+nx/gk/nKey/bare	{numeric,int} rows=6 -2.50,1 | 1.00,1 | 1.01,1 | 11.00,1 | 3.25,1 | NULL,1
+nx/gk/nKey/same	{numeric,int} rows=6 -2.50,1 | 1.00,1 | 1.01,1 | 11.00,1 | 3.25,1 | NULL,1
+nx/gk/nKeyMul/alias	{numeric,int} rows=6 -7.00,1 | 0.00,1 | 0.02,1 | 20.00,1 | 4.50,1 | NULL,1
+nx/gk/nKeyMul/bare	{numeric,int} rows=6 -7.00,1 | 0.00,1 | 0.02,1 | 20.00,1 | 4.50,1 | NULL,1
+nx/gk/nKeyMul/same	{numeric,int} rows=6 -7.00,1 | 0.00,1 | 0.02,1 | 20.00,1 | 4.50,1 | NULL,1
+nx/gk/quotKey/alias	{numeric,int} rows=4 -2.0000000000000000,1 | 0.70000000000000000000,1 | 3.1111111111111111,1 | 700.0000000000000000,1
+nx/gk/quotKey/bare	{numeric,int} rows=4 -2.0000000000000000,1 | 0.70000000000000000000,1 | 3.1111111111111111,1 | 700.0000000000000000,1
+nx/gk/quotKey/same	{numeric,int} rows=4 -2.0000000000000000,1 | 0.70000000000000000000,1 | 3.1111111111111111,1 | 700.0000000000000000,1
+nx/gk/absKey/alias	{numeric,int} rows=6 -3.50,1 | 0.00,1 | 0.01,1 | 10.00,1 | 2.25,1 | NULL,1
+nx/gk/absKey/bare	{numeric,int} rows=6 -3.50,1 | 0.00,1 | 0.01,1 | 10.00,1 | 2.25,1 | NULL,1
+nx/gk/absKey/same	{numeric,int} rows=6 -3.50,1 | 0.00,1 | 0.01,1 | 10.00,1 | 2.25,1 | NULL,1
+nx/gk/pastKey/alias	{numeric,int} rows=4 -2635249153387078802.29,1 | 4099276460824344803.56,1 | 922337203685477580.80,1 | 922337203685477580800.00,1
+nx/gk/pastKey/bare	{numeric,int} rows=4 -2635249153387078802.29,1 | 4099276460824344803.56,1 | 922337203685477580.80,1 | 922337203685477580800.00,1
+nx/gk/pastKey/same	{numeric,int} rows=4 -2635249153387078802.29,1 | 4099276460824344803.56,1 | 922337203685477580.80,1 | 922337203685477580800.00,1
+c738/qualTerm	{int,int} rows=6 -6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1
+c738/qualTermNoAlias	{int,int} rows=6 -6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1
+c738/mirror	{int,int} rows=6 -6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1
+c738/castSyn	{int,int} rows=6 -7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1
+c738/joinOther	ERR 42803 column "zzp.i" must appear in the GROUP BY clause or be used in an aggregate function
+c738/subqTermQual	ERR 42803 subquery uses ungrouped column "ss_t.i" from outer query
+c738/subqTermBareKeyQual	ERR 42803 subquery uses ungrouped column "ss_t.i" from outer query
+c738/havingQual	{int} rows=2 1 | 1
+c738/outerQualDropped	{int,int} rows=6 1,1 | 2,1 | 3,1 | 4,1 | 5,1 | 6,NULL
+c738/outerQualSameName	{int,int} rows=6 1,1 | 2,1 | 3,1 | 4,1 | 5,1 | 6,NULL
+c738/outerQualItem	{int,numeric} rows=6 1,4.50 | 2,-7.00 | 3,20.00 | 4,0.00 | 5,0.02 | 6,NULL
+c738/outerQualItemAliasT	{int,numeric} rows=6 1,4.50 | 2,-7.00 | 3,20.00 | 4,0.00 | 5,0.02 | 6,NULL
+c738/outerQualNested	{int,numeric} rows=6 1,4.50 | 2,-7.00 | 3,20.00 | 4,0.00 | 5,0.02 | 6,NULL
+c738/outerOrderBy	{int,numeric} rows=6 1,4.50 | 2,-7.00 | 3,20.00 | 4,0.00 | 5,0.02 | 6,NULL
+c738/outerWhereGrouped	{int,int} rows=6 1,1 | 2,1 | 3,NULL | 4,1 | 5,1 | 6,NULL
+c738/outerDerived	{int,numeric} rows=6 1,4.50 | 2,-7.00 | 3,20.00 | 4,0.00 | 5,0.02 | 6,NULL
+c738/outerCte	{int,numeric} rows=6 1,4.50 | 2,-7.00 | 3,20.00 | 4,0.00 | 5,0.02 | 6,NULL
+c738/outerSameAliasInner	{int,numeric} rows=6 1,-7.00 | 2,-7.00 | 3,-7.00 | 4,-7.00 | 5,-7.00 | 6,-7.00
+c738/outerInJoinInner	{int,numeric} rows=6 1,4.50 | 2,-7.00 | 3,20.00 | 4,0.00 | 5,0.02 | 6,NULL
+ref2/doubleNeg	{int,int} rows=6 -7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1
+ref2/mulOne	{int,int} rows=6 -7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1
+ref2/noopCastInt	{int,int} rows=6 -7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1
+ref2/noopCastText	{text,int} rows=6 ,1 | Hello,1 | NULL,1 | abc,1 | x,1 | zz,1
+ref2/int8Syn	{int,int} rows=6 -7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1
+ref2/lowerCase	{text,int} rows=6 ,1 | NULL,1 | abc,1 | hello,1 | x,1 | zz,1
+ref2/litType	ERR 42803 column "t.i" must appear in the GROUP BY clause or be used in an aggregate function
+ref2/litTypeNum	ERR 42803 column "t.n" must appear in the GROUP BY clause or be used in an aggregate function
+ref2/parenEach	{int,int} rows=6 -6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1
+ref2/minusNeg	ERR 42803 column "t.i" must appear in the GROUP BY clause or be used in an aggregate function
+ref2/concatEmpty	{text,int} rows=6 ,1 | Hello,1 | NULL,1 | abc,1 | x,1 | zz,1
+ref2/caseSimple	{text,int} rows=2 a,1 | b,5
+ref2/isNull	{bool,int} rows=2 f,5 | t,1
+ref2/notBool	{bool,int} rows=3 NULL,1 | f,3 | t,2
+ref2/varcharVsText	{text,int} rows=6 ,1 | Hello,1 | NULL,1 | abc,1 | x,1 | zz,1
+ref2/castNumScale	ERR 42803 column "t.n" must appear in the GROUP BY clause or be used in an aggregate function
+term/distinctOnSame	{int,int} rows=6 -6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1
+j/itemQual/ord	{int,int} rows=6 -6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1
+j/keyQual/ord	{int,int} rows=6 -6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1
+j/itemQualNum/ordU	{numeric,int} rows=6 -7.00,1 | 0.00,1 | 0.02,1 | 4.50,1 | 20.00,1 | NULL,1
+j/keyQualNum/ordU	{numeric,int} rows=6 -7.00,1 | 0.00,1 | 0.02,1 | 4.50,1 | 20.00,1 | NULL,1
+j/otherItemQual/ord	{int,int} rows=3 10,1 | 12,1 | NULL,4
+j/otherKeyQual/ord	{int,int} rows=3 10,1 | 12,1 | NULL,4
+j/eachSide/ord	{int,int} rows=3 -1,1 | 8,1 | NULL,4
+j/eachSideMixed/ord	{int,int} rows=3 -1,1 | 8,1 | NULL,4
+j/twoKeys/ord	{int,int,int} rows=6 -7,6,1 | 0,NULL,1 | 1,NULL,1 | 3,5,1 | 5,NULL,1 | NULL,NULL,1
+j/twoKeysMixed/ord	{int,int,int} rows=6 -7,6,1 | 0,NULL,1 | 1,NULL,1 | 3,5,1 | 5,NULL,1 | NULL,NULL,1
+j/bareColItemQual/ord	{int,int} rows=6 -7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1
+j/bareColKeyQual/ord	{int,int} rows=6 -7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1
+j/having/sel	{int} rows=2 1 | 1
+j/havingKeyQual/sel	{int} rows=2 1 | 1
+j/orderTerm/ord	{int,int} rows=6 1,2 | 1,4 | 1,5 | 1,1 | 1,3 | 1,6
+j/orderTermKeyQual/ord	{int,int} rows=6 1,2 | 1,4 | 1,5 | 1,1 | 1,3 | 1,6
+j/larger/ord	{int} rows=6 -12 | 2 | 4 | 8 | 12 | NULL
+j/distinct/ord	{int} rows=6 -6 | 1 | 2 | 4 | 6 | NULL
+j/window/ord	{int,int} rows=6 -6,1 | 1,2 | 2,3 | 4,4 | 6,5 | NULL,6
+j/windowKeyQual/ord	{int,int} rows=6 -6,1 | 1,2 | 2,3 | 4,4 | 6,5 | NULL,6
+j/rollup/ord	{int,int} rows=7 -6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1 | NULL,6
+j/aggArg/ord	{int,int,int} rows=6 -6,-6,1 | 1,1,0 | 2,2,0 | 4,4,1 | 6,6,0 | NULL,NULL,0
+j/inner/ord	{int,int} rows=2 -6,1 | 4,1
+j/innerKeyQual/ord	{int,int} rows=2 -6,1 | 4,1
+j/comma/ord	{int,int} rows=2 -6,1 | 4,1
+j/unaliased/ord	{int,int} rows=6 -6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1
+j/unaliasedKeyQual/ord	{int,int} rows=6 -6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1
+j/threeWay/ord	{int,int} rows=6 -6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1
+j/derivedSide/ord	{int,int} rows=3 6,1 | 7,1 | NULL,4
+j/derivedSideKeyQual/ord	{int,int} rows=3 6,1 | 7,1 | NULL,4
+j/cteSide/ord	{int,int} rows=3 6,1 | 7,1 | NULL,4
+j/lateral/ord	{int,int} rows=6 -6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1
+j/lateralKeyQual/ord	{int,int} rows=6 -6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1
+j/ambigBare/sel	ERR 42702 column reference "id" is ambiguous
+j/ambigBareItem/sel	ERR 42702 column reference "id" is ambiguous
+j/ambigOtherSide/sel	ERR 42803 column "u.id" must appear in the GROUP BY clause or be used in an aggregate function
+j/selfBare/sel	ERR 42702 column reference "i" is ambiguous
+j/selfOther/sel	ERR 42803 column "b.i" must appear in the GROUP BY clause or be used in an aggregate function
+j/selfSame/ord	{int,int} rows=6 -6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1
+j/selfBoth/ord	{int,int} rows=6 -14,1 | 0,1 | 2,1 | 6,1 | 10,1 | NULL,1
+j/selfSwapped/sel	ERR 42803 column "b.i" must appear in the GROUP BY clause or be used in an aggregate function
+j/usingBareKey/ord	{int,int} rows=2 2,1 | 3,1
+j/usingQualKey/ord	{int,int} rows=2 2,1 | 3,1
+j/usingOtherQual/ord	ERR 42803 column "u.id" must appear in the GROUP BY clause or be used in an aggregate function
+j/usingLeftOther/sel	ERR 42803 column "u.id" must appear in the GROUP BY clause or be used in an aggregate function
+j/usingLeftOwn/ord	{int,int} rows=6 2,1 | 3,1 | 4,1 | 5,1 | 6,1 | 7,1
+j/usingBareBoth/ord	{int,int} rows=6 2,1 | 3,1 | 4,1 | 5,1 | 6,1 | 7,1
+j/usingFull/sel	ERR 42803 column "t.id" must appear in the GROUP BY clause or be used in an aggregate function
+j/usingOtherCol/ord	{int,int} rows=2 -6,1 | 4,1
+a/gbPrefersInput/ord	{int,int} rows=6 -5,1 | -3,1 | -1,1 | 0,1 | 7,1 | NULL,1
+a/gbAliasNoCol/ord	{int,int} rows=6 -6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1
+a/gbAliasIsOtherCol/sel	ERR 42803 column "t.i" must appear in the GROUP BY clause or be used in an aggregate function
+a/obPrefersOutput/ord	{int,int} rows=6 -5,1 | -3,1 | -1,1 | 0,1 | 7,1 | NULL,1
+a/obPrefersOutputQualKey/ord	{int,int} rows=6 -5,1 | -3,1 | -1,1 | 0,1 | 7,1 | NULL,1
+a/obExprIsInput/ord	{int,int} rows=6 7,1 | 0,1 | -1,1 | -3,1 | -5,1 | NULL,1
+a/obExprQual/ord	{int,int} rows=6 7,1 | 0,1 | -1,1 | -3,1 | -5,1 | NULL,1
+a/obExprKeyQual/ord	{int,int} rows=6 7,1 | 0,1 | -1,1 | -3,1 | -5,1 | NULL,1
+a/obQualAliasKeyExpr/ord	{int,int} rows=6 NULL,1 | 6,1 | 4,1 | 2,1 | 1,1 | -6,1
+a/obAliasKeyExpr/ord	{int} rows=6 -6 | 1 | 2 | 4 | 6 | NULL
+a/havingInput/sel	{int,int} rows=3 -1,1 | -3,1 | -5,1
+a/havingQual/sel	{int,int} rows=3 -1,1 | -3,1 | -5,1
+a/havingKeyQual/sel	{int,int} rows=3 -1,1 | -3,1 | -5,1
+a/joinObQual/ord	{int,int} rows=6 7,1 | 0,1 | -1,1 | -3,1 | -5,1 | NULL,1
+a/joinObAlias/ord	{int,int} rows=6 -5,1 | -3,1 | -1,1 | 0,1 | 7,1 | NULL,1
+a/joinObAliasV/ord	{int,int} rows=3 -5,1 | -6,1 | NULL,4
+a/derivedObQual/ord	{int} rows=6 7 | 0 | -1 | -3 | -5 | NULL
+a/cteObQual/ord	{int} rows=6 7 | 0 | -1 | -3 | -5 | NULL
+a/distinctObQual/sel	ERR 42P10 for SELECT DISTINCT, ORDER BY expressions must appear in select list
+a/distinctObAlias/ord	{int} rows=6 -5 | -3 | -1 | 0 | 7 | NULL
+a/distinctObExpr/ord	{int} rows=6 -6 | 1 | 2 | 4 | 6 | NULL
+a/distinctObExprJoin/ord	{int} rows=6 -6 | 1 | 2 | 4 | 6 | NULL
+a/distinctObExprMiss/sel	ERR 42P10 for SELECT DISTINCT, ORDER BY expressions must appear in select list
+a/winOrdQualAlias/ord	{int,int} rows=6 7,1 | 0,2 | -1,3 | -3,4 | -5,5 | NULL,6
+a/winOrdAlias/ord	{int,int} rows=6 7,1 | 0,2 | -1,3 | -3,4 | -5,5 | NULL,6
+q/mixedCaseCol/ord	{int,int} rows=6 -6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1
+q/mixedCaseColKey/ord	{int,int} rows=6 -6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1
+q/mixedCaseColFold/sel	ERR 42703 column t.ab does not exist
+q/spaceCol/ord	{int,int} rows=6 -6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1
+q/spaceColKey/ord	{int,int} rows=6 -6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1
+q/dotColBareCol/ord	{int,int} rows=6 -7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1
+q/dotColBareColKey/ord	{int,int} rows=6 -7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1
+q/dotAliasBareCol/ord	{int,int} rows=6 -7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1
+q/dotAliasJoin/ord	{int,int} rows=6 -6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1
+q/dotAliasJoinKey/ord	{int,int} rows=6 -6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1
+q/upperAliasJoin/ord	{int,int} rows=6 -6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1
+q/quotedTableName/ord	{int,int} rows=6 -6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1
+q/schemaJoin/ord	{int,int} rows=6 -6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1
+p/scalarSubq/sel	{int} rows=1 6
+p/scalarSubqJoin/sel	{int} rows=1 6
+p/scalarDirect/sel	{int} rows=1 NULL
+p/scalarDirectItem/sel	{int} rows=1 6
+p/scalarDirectJoin/sel	{int} rows=1 6
+p/inSubq/ord	{int} rows=5 1 | 2 | 3 | 4 | 5
+p/inSubqJoin/ord	{int} rows=5 1 | 2 | 3 | 4 | 5
+p/existsHaving/ord	{int} rows=5 1 | 2 | 3 | 4 | 5
+p/correlatedJoin/ord	{int,int} rows=6 1,1 | 2,NULL | 3,1 | 4,1 | 5,1 | 6,NULL
+p/correlatedOuterSpelling/ord	{int,int} rows=6 1,1 | 2,NULL | 3,1 | 4,1 | 5,1 | 6,NULL
+p/cteBody/ord	{int,int} rows=6 -6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1
+p/cteBodyJoin/ord	{int,int} rows=6 -6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1
+p/derivedBody/ord	{numeric,int} rows=6 -7.00,1 | 0.00,1 | 0.02,1 | 4.50,1 | 20.00,1 | NULL,1
+p/unionArmJoin/ord	{int} rows=7 -6 | 1 | 2 | 4 | 6 | 100 | NULL
+p/lateralBodyJoin/ord	{int,int} rows=6 1,4 | 2,4 | 3,6 | 4,6 | 5,6 | 6,6
+g/rollupItemQual/ord	{int,int} rows=7 -6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1 | NULL,6
+g/rollupKeyQual/ord	{int,int} rows=7 -6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1 | NULL,6
+g/setsItemQual/ord	{int,text,int} rows=12 -6,NULL,1 | 1,NULL,1 | 2,NULL,1 | 4,NULL,1 | 6,NULL,1 | NULL,,1 | NULL,Hello,1 | NULL,abc,1 | NULL,x,1 | NULL,zz,1 | NULL,NULL,1 | NULL,NULL,1
+g/groupingJoin/ord	{int,int} rows=7 -6,0 | 1,0 | 2,0 | 4,0 | 6,0 | NULL,0 | NULL,1
+f4/derivedNoOrder	{int} rows=6 -1 | -3 | -5 | 0 | 7 | NULL
+f4/derivedOrd1	{int} rows=6 -5 | -3 | -1 | 0 | 7 | NULL
+f4/derivedOtherAlias	{int} rows=6 -1 | -3 | -5 | 0 | 7 | NULL
+f4/derivedBareItem	{int} rows=6 -1 | -3 | -5 | 0 | 7 | NULL
+f4/cteNoOrder	{int} rows=6 -1 | -3 | -5 | 0 | 7 | NULL
+f4/baseTableNoOrder	{int} rows=6 -1 | -3 | -5 | 0 | 7 | NULL
+f4/derivedCount	{int,int} rows=6 -1,1 | -3,1 | -5,1 | 0,1 | 7,1 | NULL,1
+ci1/innerJoinItemQual	{int,int} rows=2 -6,1 | 4,1
+ci1/innerJoinKeyQual	{int,int} rows=2 -6,1 | 4,1
+ci1/innerJoinNumeric	{numeric,int} rows=2 -7.00,1 | 4.50,1
+ci1/joinWindowOrder	{int,int} rows=2 -6,1 | 4,2
+ci1/joinWindowPartition	{int,int} rows=2 -6,1 | 4,1
+ci1/joinWindowArg	{int,int} rows=2 -6,-2 | 4,-2
+ci1/joinHaving	{int} rows=1 1
+ci1/joinOrderByKeyQual	{int} rows=2 1 | 1
+ci1/joinDistinct	{int} rows=2 -6 | 4
+ci1/joinGrouping	{int,int,int} rows=3 -6,0,1 | 4,0,1 | NULL,1,2
+ci1/joinOtherSide	ERR 42803 column "u.v" must appear in the GROUP BY clause or be used in an aggregate function
+ci1/joinSameNameOtherRel	ERR 42803 column "t.id" must appear in the GROUP BY clause or be used in an aggregate function
+ci1/selfJoinOtherAlias	ERR 42803 column "a.i" must appear in the GROUP BY clause or be used in an aggregate function
+ci1/selfJoinSameAlias	{int,int} rows=6 -6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1
+ci1/joinAliasOrderQual	{int,int} rows=2 7,1 | -3,1
+ci1/joinAliasOrderAlias	{int,int} rows=2 -3,1 | 7,1
+ci1/joinAggAliasHaving	{int} rows=1 1
+ci1/joinCommuted	ERR 42803 column "t.i" must appear in the GROUP BY clause or be used in an aggregate function
+ci1/joinLargerExpr	{int,int} rows=2 -12,1 | 8,1
+ci1/joinDerivedOuter	{int} rows=2 -6 | 4
+ci1/joinCteBody	{int,int} rows=2 -6,1 | 4,1
+ci1/joinUnionArm	{int} rows=3 -6 | 4 | 100
+ci1/joinDate	{date,int} rows=2 1970-01-02,1 | 2024-03-05,1
+ci1/joinText	{text,int} rows=2 ABC,1 | HELLO,1

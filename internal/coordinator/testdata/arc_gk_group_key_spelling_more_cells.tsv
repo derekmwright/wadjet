@@ -1,0 +1,322 @@
+# name<TAB>ordered<TAB>sql — the GK round-1 review probes (184), round 2 (106), GK-F4 (7) and arc CI1 (24)
+alias/negOrdQual	true	SELECT -t.i AS i, count(*) AS c FROM ss_t t GROUP BY i ORDER BY t.i
+alias/negOrdQualCtl	true	SELECT -t.i AS i, count(*) AS c FROM ss_t t GROUP BY t.i ORDER BY t.i
+alias/negOrdQualDesc	true	SELECT 10 - t.i AS i, count(*) AS c FROM ss_t t GROUP BY i ORDER BY t.i DESC
+alias/negOrdExpr	true	SELECT -t.i AS i, count(*) AS c FROM ss_t t GROUP BY -i ORDER BY -t.i
+alias/negOrdExprCtl	true	SELECT -t.i AS i, count(*) AS c FROM ss_t t GROUP BY -t.i ORDER BY -t.i
+alias/negHavingQual	false	SELECT -t.i AS i, count(*) AS c FROM ss_t t GROUP BY i HAVING t.i > 1
+alias/negHavingQualCtl	false	SELECT -t.i AS i, count(*) AS c FROM ss_t t GROUP BY t.i HAVING t.i > 1
+alias/negHavingExpr	false	SELECT -t.i AS i, count(*) AS c FROM ss_t t GROUP BY -i HAVING -t.i > 0
+alias/negHavingExprCtl	false	SELECT -t.i AS i, count(*) AS c FROM ss_t t GROUP BY -t.i HAVING -t.i > 0
+alias/aggHavingKeyExpr	false	SELECT t.i + 1 AS k, count(*) AS i FROM ss_t t GROUP BY i + 1 HAVING t.i + 1 > 2
+alias/aggHavingKeyExprCtl	false	SELECT t.i + 1 AS k, count(*) AS i FROM ss_t t GROUP BY t.i + 1 HAVING t.i + 1 > 2
+alias/aggOrdKeyExpr	true	SELECT t.i + 1 AS k, count(*) AS i FROM ss_t t GROUP BY i + 1 ORDER BY -(t.i + 1)
+alias/aggOrdKeyExprCtl	true	SELECT t.i + 1 AS k, count(*) AS i FROM ss_t t GROUP BY t.i + 1 ORDER BY -(t.i + 1)
+alias/aggNumHaving	false	SELECT t.n * 2 AS k, count(*) AS n FROM ss_t t GROUP BY n * 2 HAVING t.n * 2 > 1
+alias/aggNumHavingCtl	false	SELECT t.n * 2 AS k, count(*) AS n FROM ss_t t GROUP BY t.n * 2 HAVING t.n * 2 > 1
+alias/aggNumOrd	true	SELECT t.n * 2 AS k, count(*) AS n FROM ss_t t GROUP BY n * 2 ORDER BY t.n * 2 DESC
+alias/aggNumOrdCtl	true	SELECT t.n * 2 AS k, count(*) AS n FROM ss_t t GROUP BY t.n * 2 ORDER BY t.n * 2 DESC
+alias/winOrdQual	true	SELECT t.i AS k, -t.i AS i, rank() OVER (ORDER BY t.i) AS r FROM ss_t t GROUP BY i ORDER BY 1
+alias/winOrdQualCtl	true	SELECT t.i AS k, -t.i AS i, rank() OVER (ORDER BY t.i) AS r FROM ss_t t GROUP BY t.i ORDER BY 1
+alias/winPartQual	false	SELECT t.i AS k, -t.i AS i, count(*) OVER (PARTITION BY t.i > 2) AS r FROM ss_t t GROUP BY i
+alias/negOrdQualKeyQual	true	SELECT -i AS i, count(*) AS c FROM ss_t t GROUP BY t.i ORDER BY i
+alias/negDistinctOrd	true	SELECT DISTINCT -t.i AS i FROM ss_t t GROUP BY i ORDER BY i
+corr/innerShadow	true	SELECT t.id, (SELECT 2 * t.n FROM ss_t t WHERE t.id = 1 GROUP BY 2 * n) AS y FROM ss_t t ORDER BY t.id
+corr/outerItemInnerKeyBareSameAlias	true	SELECT o.id, (SELECT 2 * o.n FROM ss_t x WHERE x.id = 1 GROUP BY 2 * n) AS y FROM ss_t o ORDER BY o.id
+corr/outerKeyBareResolvesOuter	true	SELECT o.id, (SELECT count(*) FROM ss_i x GROUP BY 2 * n HAVING 2 * o.n > 1) AS y FROM ss_t o ORDER BY o.id
+corr/outerKeyBareResolvesOuterSel	true	SELECT o.id, (SELECT 2 * o.n FROM ss_i x WHERE x.id = 1 GROUP BY 2 * n) AS y FROM ss_t o ORDER BY o.id
+corr/outerSameAliasDiffTable	true	SELECT t.id, (SELECT max(t.v) FROM ss_i t GROUP BY t.v + 1 HAVING t.v + 1 > 0 LIMIT 1) AS y FROM ss_t t ORDER BY t.id
+corr/subqInSelOuterKey	false	SELECT t.i + 1 AS k, (SELECT max(x.v) FROM ss_i x WHERE x.v > t.i + 1) AS y FROM ss_t t GROUP BY i + 1
+corr/subqInSelOuterKeyCtl	false	SELECT t.i + 1 AS k, (SELECT max(x.v) FROM ss_i x WHERE x.v > t.i + 1) AS y FROM ss_t t GROUP BY t.i + 1
+corr/subqInSelOuterKeyBare	false	SELECT i + 1 AS k, (SELECT max(x.v) FROM ss_i x WHERE x.v > i + 1) AS y FROM ss_t t GROUP BY t.i + 1
+corr/subqInHaving	false	SELECT count(*) AS c FROM ss_t t GROUP BY i + 1 HAVING EXISTS (SELECT 1 FROM ss_i x WHERE x.v > t.i + 1)
+corr/fromlessSubq	false	SELECT (SELECT t.i + 1) AS k, count(*) FROM ss_t t GROUP BY i + 1
+corr/fromlessSubqKeyQual	false	SELECT (SELECT i + 1) AS k, count(*) FROM ss_t t GROUP BY t.i + 1
+corr/existsOuterGrouped	true	SELECT o.id FROM ss_t o WHERE EXISTS (SELECT 1 FROM ss_t o2 GROUP BY o2.i + 1 HAVING o.i + 1 = i + 1) ORDER BY 1
+corr/lateralGrouped	false	SELECT t.id, l.k FROM ss_t t, LATERAL (SELECT x.v + 1 AS k FROM ss_i x GROUP BY v + 1) l
+corr/inSubqGrouped	false	SELECT t.id FROM ss_t t WHERE t.i + 1 IN (SELECT x.v + 1 FROM ss_i x GROUP BY v + 1)
+one/tableNameAliased	false	SELECT ss_t.i + 1, count(*) FROM ss_t t GROUP BY i + 1
+one/schemaQualTable	false	SELECT ss_t.i + 1 AS k, count(*) FROM public.ss_t GROUP BY i + 1
+one/schemaQualTableKey	false	SELECT i + 1 AS k, count(*) FROM public.ss_t GROUP BY ss_t.i + 1
+one/schemaQualItem	false	SELECT public.ss_t.i + 1 AS k, count(*) FROM ss_t GROUP BY i + 1
+one/upperTableName	false	SELECT SS_T.i + 1 AS k, count(*) FROM ss_t GROUP BY i + 1
+one/aliasIsColumnName	false	SELECT i.i + 1 AS k, count(*) FROM ss_t AS i GROUP BY i + 1
+one/aliasIsColumnNameKey	false	SELECT i + 1 AS k, count(*) FROM ss_t AS i GROUP BY i.i + 1
+one/aliasIsColumnNameBare	true	SELECT i.n * 2 AS k, count(*) FROM ss_t AS n GROUP BY n * 2 ORDER BY 1
+one/colLikeTable	true	SELECT t.t * 2 AS k, count(*) FROM (SELECT n AS t FROM ss_t) t GROUP BY t * 2 ORDER BY 1
+one/colLikeTableKey	true	SELECT t * 2 AS k, count(*) FROM (SELECT n AS t FROM ss_t) t GROUP BY t.t * 2 ORDER BY 1
+one/quotedDotAlias	true	SELECT "a.b".n * 2 AS k, count(*) FROM ss_t AS "a.b" GROUP BY n * 2 ORDER BY 1
+one/quotedDotAliasKey	true	SELECT n * 2 AS k, count(*) FROM ss_t AS "a.b" GROUP BY "a.b".n * 2 ORDER BY 1
+one/quotedUpperAlias	true	SELECT "T".n * 2 AS k, count(*) FROM ss_t AS "T" GROUP BY n * 2 ORDER BY 1
+one/quotedUpperAliasMismatch	false	SELECT t.n * 2 AS k, count(*) FROM ss_t AS "T" GROUP BY n * 2
+one/derivedNoAlias	true	SELECT n * 2 AS k, count(*) FROM (SELECT * FROM ss_t) AS s GROUP BY s.n * 2 ORDER BY 1
+one/cteSameNameAsTable	true	WITH ss_t AS (SELECT id, n * 10 AS n FROM ss_t) SELECT ss_t.n * 2 AS k, count(*) FROM ss_t GROUP BY n * 2 ORDER BY 1
+one/selfJoinComma	false	SELECT a.i + 1, count(*) FROM ss_t a, ss_t b WHERE a.id = b.id GROUP BY i + 1
+one/unionArmSecond	false	SELECT 1 AS k UNION ALL SELECT t.i + 1 FROM ss_t t GROUP BY i + 1
+one/unionArmFirst	true	SELECT t.n * 2 AS k FROM ss_t t GROUP BY n * 2 UNION SELECT 0 ORDER BY 1
+one/fromless	false	SELECT 1 + 1 AS k GROUP BY 1 + 1
+one/funcFrom	false	SELECT g.g + 1 AS k, count(*) FROM generate_series(1, 3) g GROUP BY g + 1
+term/aggArgKey	false	SELECT t.i + 1 AS k, sum(t.i + 1) AS s, count(*) FROM ss_t t GROUP BY i + 1
+term/aggFilter	false	SELECT t.i + 1 AS k, count(*) FILTER (WHERE t.i + 1 > 2) AS c FROM ss_t t GROUP BY i + 1
+term/aggOnlyArg	false	SELECT sum(t.i + 1) AS s FROM ss_t t GROUP BY i + 1
+term/winAggArg	false	SELECT t.i + 1 AS k, sum(t.i + 1) OVER () AS s FROM ss_t t GROUP BY i + 1
+term/winPartition	false	SELECT t.i + 1 AS k, count(*) OVER (PARTITION BY t.i + 1 > 3) AS s FROM ss_t t GROUP BY i + 1
+term/distinctOn	true	SELECT DISTINCT ON (t.i + 1) t.i + 1 AS k, count(*) AS c FROM ss_t t GROUP BY i + 1 ORDER BY t.i + 1
+term/distinctOnKeyQual	true	SELECT DISTINCT ON (i + 1) i + 1 AS k, count(*) AS c FROM ss_t t GROUP BY t.i + 1 ORDER BY i + 1
+term/groupingFn	false	SELECT t.i + 1 AS k, GROUPING(t.i + 1) AS g FROM ss_t t GROUP BY ROLLUP (i + 1)
+term/groupingFnCtl	false	SELECT i + 1 AS k, GROUPING(i + 1) AS g FROM ss_t t GROUP BY ROLLUP (i + 1)
+term/extractName	false	SELECT extract(year FROM t.d), count(*) FROM ss_t t GROUP BY extract(year FROM d)
+term/extractNameCtl	false	SELECT extract(year FROM t.d), count(*) FROM ss_t t GROUP BY extract(year FROM t.d)
+term/isDistinctName	false	SELECT t.i IS DISTINCT FROM 3, count(*) FROM ss_t t GROUP BY i IS DISTINCT FROM 3
+term/isDistinctNameCtl	false	SELECT t.i IS DISTINCT FROM 3, count(*) FROM ss_t t GROUP BY t.i IS DISTINCT FROM 3
+term/colNameBare	false	SELECT t.i, count(*) FROM ss_t t GROUP BY i
+term/nullifName	false	SELECT nullif(t.i, 3), count(*) FROM ss_t t GROUP BY nullif(i, 3)
+term/orderByNotSelected	true	SELECT count(*) AS c FROM ss_t t GROUP BY 2 * n ORDER BY 2 * t.n
+term/orderByNotSelectedDesc	true	SELECT count(*) AS c, min(t.id) AS m FROM ss_t t GROUP BY 2 * n ORDER BY 2 * t.n DESC
+term/havingAndOrder	true	SELECT 2 * t.n AS k FROM ss_t t GROUP BY 2 * n HAVING 2 * t.n < 10 ORDER BY 2 * t.n DESC
+term/twoKeysSubterm	true	SELECT t.i AS a, t.i + 1 AS b FROM ss_t t GROUP BY i + 1, i ORDER BY 1
+term/keyAndSubKey	true	SELECT t.i + 1 AS b, (t.i + 1) * t.i AS c FROM ss_t t GROUP BY i, i + 1 ORDER BY 1
+term/limitOffset	true	SELECT 2 * t.n AS k FROM ss_t t GROUP BY 2 * n ORDER BY 1 LIMIT 3 OFFSET 1
+ref/commuted	false	SELECT 1 + t.i, count(*) FROM ss_t t GROUP BY i + 1
+ref/constFold	false	SELECT ABS(-1) * t.n, count(*) FROM ss_t t GROUP BY 1 * n
+ref/castSpelling	false	SELECT t.i::numeric, count(*) FROM ss_t t GROUP BY CAST(i AS DECIMAL)
+ref/castFloat	false	SELECT t.i::float8, count(*) FROM ss_t t GROUP BY i::double precision
+ref/subtermOnly	false	SELECT t.i, count(*) FROM ss_t t GROUP BY i + 1
+ref/otherCol	false	SELECT t.b + 1, count(*) FROM ss_t t GROUP BY i + 1
+ref/parenWs	false	SELECT ((t.i)+(1)), count(*) FROM ss_t t GROUP BY i + 1
+ref/upperFunc	false	SELECT UPPER(T.S), count(*) FROM ss_t t GROUP BY upper(s)
+ref/assocDiff	false	SELECT t.i + 1 + 1, count(*) FROM ss_t t GROUP BY i + (1 + 1)
+ref/assocSame	false	SELECT (t.i + 1) + 1, count(*) FROM ss_t t GROUP BY i + 1 + 1
+ref/intLitType	false	SELECT t.n * 2.0, count(*) FROM ss_t t GROUP BY n * 2
+ref/caseItem	false	SELECT CASE WHEN t.i > 2 THEN 1 ELSE 0 END, count(*) FROM ss_t t GROUP BY CASE WHEN i > 2 THEN 1 ELSE 0 END
+ref/caseItemDiff	false	SELECT CASE WHEN t.i >= 3 THEN 1 ELSE 0 END, count(*) FROM ss_t t GROUP BY CASE WHEN i > 2 THEN 1 ELSE 0 END
+ref/notEq	false	SELECT NOT (t.i = 3), count(*) FROM ss_t t GROUP BY i <> 3
+ref/betweenSame	false	SELECT t.i BETWEEN 1 AND 3, count(*) FROM ss_t t GROUP BY i BETWEEN 1 AND 3
+ref/inListSame	false	SELECT t.i IN (1, 3), count(*) FROM ss_t t GROUP BY i IN (1, 3)
+ref/likeSame	false	SELECT t.s LIKE 'a%', count(*) FROM ss_t t GROUP BY s LIKE 'a%'
+ref/coalesceDiffArgs	false	SELECT coalesce(t.i, 1), count(*) FROM ss_t t GROUP BY coalesce(i, 0)
+ref/concatOrder	false	SELECT 'x' || t.s, count(*) FROM ss_t t GROUP BY t.s || 'x'
+b1/numOrdQual	true	SELECT -t.n AS n, count(*) AS c FROM ss_t t GROUP BY n ORDER BY t.n
+b1/aggAliasOrdQual	true	SELECT t.i AS k, count(*) * 100 - t.i AS i FROM ss_t t GROUP BY i ORDER BY t.i
+b1/aggAliasOrdQualCtl	true	SELECT t.i AS k, count(*) * 100 - t.i AS i FROM ss_t t GROUP BY t.i ORDER BY t.i
+b1/ordQualExpr	true	SELECT -t.i AS i FROM ss_t t GROUP BY i ORDER BY t.i + 0
+b1/ordQualNullsFirst	true	SELECT -t.i AS i FROM ss_t t GROUP BY i ORDER BY t.i NULLS FIRST
+b1/ordQualTwoKeys	true	SELECT t.s AS i, t.i AS s FROM ss_t t GROUP BY i, s ORDER BY t.i
+b1/ordQualKeyArith	true	SELECT 100 - t.i AS i FROM ss_t t GROUP BY i ORDER BY t.i
+b1/ordQualText	true	SELECT upper(t.s) AS s FROM ss_t t GROUP BY s ORDER BY t.s
+b1/ordQualTextCtl	true	SELECT upper(t.s) AS s FROM ss_t t GROUP BY t.s ORDER BY t.s
+b1/ordQualDerived	true	SELECT * FROM (SELECT -t.i AS i FROM ss_t t GROUP BY i ORDER BY t.i LIMIT 3) z
+b1/ordQualLimit	true	SELECT -t.i AS i FROM ss_t t GROUP BY i ORDER BY t.i LIMIT 2
+b1/ordQualNoAlias	true	SELECT -ss_t.i AS i FROM ss_t GROUP BY i ORDER BY ss_t.i
+b1/ordQualDistinct	true	SELECT DISTINCT -t.i AS i FROM ss_t t GROUP BY i ORDER BY t.i
+b1/havingQualAliasAgg	false	SELECT t.i AS k, count(*) AS i FROM ss_t t GROUP BY i HAVING t.i > 1
+b1/winOrdQualAlias	true	SELECT t.i AS k, -t.i AS i, row_number() OVER (ORDER BY t.i) AS r FROM ss_t t GROUP BY i ORDER BY 1
+qd/sameQual	true	SELECT "a.b".n * 2 AS k, count(*) FROM ss_t AS "a.b" GROUP BY "a.b".n * 2 ORDER BY 1
+qd/bareBoth	true	SELECT n * 2 AS k, count(*) FROM ss_t AS "a.b" GROUP BY n * 2 ORDER BY 1
+qd/keyQualSel	false	SELECT n * 2 AS k, count(*) FROM ss_t AS "a.b" GROUP BY "a.b".n * 2
+qd/keyQualHaving	false	SELECT count(*) AS c FROM ss_t AS "a.b" GROUP BY "a.b".n * 2 HAVING n * 2 > 1
+qd/keyQualBareCol	true	SELECT n AS k, count(*) FROM ss_t AS "a.b" GROUP BY "a.b".n ORDER BY 1
+qd/quotedSpaceAlias	true	SELECT n * 2 AS k, count(*) FROM ss_t AS "a b" GROUP BY "a b".n * 2 ORDER BY 1
+qd/quotedUpperKey	true	SELECT n * 2 AS k, count(*) FROM ss_t AS "T" GROUP BY "T".n * 2 ORDER BY 1
+qd/quotedKeywordAlias	true	SELECT n * 2 AS k, count(*) FROM ss_t AS "select" GROUP BY "select".n * 2 ORDER BY 1
+qd/quotedColKey	true	SELECT n * 2 AS k, count(*) FROM (SELECT n AS "N" , n FROM ss_t) t GROUP BY t."N" * 2 ORDER BY 1
+qd/quotedColKeyItem	true	SELECT "N" * 2 AS k, count(*) FROM (SELECT n AS "N" FROM ss_t) t GROUP BY t."N" * 2 ORDER BY 1
+qd/quotedColDotKey	true	SELECT "x.y" * 2 AS k, count(*) FROM (SELECT n AS "x.y" FROM ss_t) t GROUP BY t."x.y" * 2 ORDER BY 1
+qd/quotedColDotItem	true	SELECT t."x.y" * 2 AS k, count(*) FROM (SELECT n AS "x.y" FROM ss_t) t GROUP BY "x.y" * 2 ORDER BY 1
+nx/gk/qualKey/alias	false	SELECT t.i + 1 AS k, COUNT(*) FROM ss_t t GROUP BY i + 1
+nx/gk/qualKey/bare	false	SELECT t.i + 1, COUNT(*) FROM ss_t t GROUP BY i + 1
+nx/gk/qualKey/same	false	SELECT t.i + 1 AS k, COUNT(*) FROM ss_t t GROUP BY t.i + 1
+nx/gk/tableKey/alias	false	SELECT ss_t.i + 1 AS k, COUNT(*) FROM ss_t t GROUP BY i + 1
+nx/gk/tableKey/bare	false	SELECT ss_t.i + 1, COUNT(*) FROM ss_t t GROUP BY i + 1
+nx/gk/tableKey/same	false	SELECT ss_t.i + 1 AS k, COUNT(*) FROM ss_t t GROUP BY ss_t.i + 1
+nx/gk/bKey/alias	false	SELECT t.b + 1 AS k, COUNT(*) FROM ss_t t GROUP BY b + 1
+nx/gk/bKey/bare	false	SELECT t.b + 1, COUNT(*) FROM ss_t t GROUP BY b + 1
+nx/gk/bKey/same	false	SELECT t.b + 1 AS k, COUNT(*) FROM ss_t t GROUP BY t.b + 1
+nx/gk/nKey/alias	false	SELECT t.n + 1 AS k, COUNT(*) FROM ss_t t GROUP BY n + 1
+nx/gk/nKey/bare	false	SELECT t.n + 1, COUNT(*) FROM ss_t t GROUP BY n + 1
+nx/gk/nKey/same	false	SELECT t.n + 1 AS k, COUNT(*) FROM ss_t t GROUP BY t.n + 1
+nx/gk/nKeyMul/alias	false	SELECT 2 * t.n AS k, COUNT(*) FROM ss_t t GROUP BY 2 * n
+nx/gk/nKeyMul/bare	false	SELECT 2 * t.n, COUNT(*) FROM ss_t t GROUP BY 2 * n
+nx/gk/nKeyMul/same	false	SELECT 2 * t.n AS k, COUNT(*) FROM ss_t t GROUP BY 2 * t.n
+nx/gk/quotKey/alias	false	SELECT 7 / t.n AS k, COUNT(*) FROM ss_t t WHERE t.n <> 0 GROUP BY 7 / n
+nx/gk/quotKey/bare	false	SELECT 7 / t.n, COUNT(*) FROM ss_t t WHERE t.n <> 0 GROUP BY 7 / n
+nx/gk/quotKey/same	false	SELECT 7 / t.n AS k, COUNT(*) FROM ss_t t WHERE t.n <> 0 GROUP BY 7 / t.n
+nx/gk/absKey/alias	false	SELECT ABS(-1) * t.n AS k, COUNT(*) FROM ss_t t GROUP BY ABS(-1) * n
+nx/gk/absKey/bare	false	SELECT ABS(-1) * t.n, COUNT(*) FROM ss_t t GROUP BY ABS(-1) * n
+nx/gk/absKey/same	false	SELECT ABS(-1) * t.n AS k, COUNT(*) FROM ss_t t GROUP BY ABS(-1) * t.n
+nx/gk/pastKey/alias	false	SELECT 9223372036854775808 / t.n AS k, COUNT(*) FROM ss_t t WHERE t.n <> 0 GROUP BY 9223372036854775808 / n
+nx/gk/pastKey/bare	false	SELECT 9223372036854775808 / t.n, COUNT(*) FROM ss_t t WHERE t.n <> 0 GROUP BY 9223372036854775808 / n
+nx/gk/pastKey/same	false	SELECT 9223372036854775808 / t.n AS k, COUNT(*) FROM ss_t t WHERE t.n <> 0 GROUP BY 9223372036854775808 / t.n
+c738/qualTerm	true	SELECT t.i + 1 AS k, count(*) AS n FROM ss_t t GROUP BY i + 1 ORDER BY k
+c738/qualTermNoAlias	true	SELECT ss_t.i + 1 AS k, count(*) AS n FROM ss_t GROUP BY i + 1 ORDER BY k
+c738/mirror	true	SELECT i + 1 AS k, count(*) AS n FROM ss_t GROUP BY ss_t.i + 1 ORDER BY k
+c738/castSyn	true	SELECT CAST(i AS INT) AS k, count(*) AS n FROM ss_t GROUP BY CAST(i AS INTEGER) ORDER BY k
+c738/joinOther	false	SELECT zzp.i + 1, count(*) FROM ss_t zzj JOIN ss_t zzp ON zzj.id = zzp.id GROUP BY zzj.i + 1
+c738/subqTermQual	false	SELECT (SELECT ss_t.i + 1) AS k, count(*) AS n FROM ss_t GROUP BY i + 1
+c738/subqTermBareKeyQual	false	SELECT (SELECT i + 1) AS k, count(*) AS n FROM ss_t GROUP BY ss_t.i + 1
+c738/havingQual	false	SELECT count(*) AS n FROM ss_t GROUP BY i + 1 HAVING ss_t.i + 1 > 3
+c738/outerQualDropped	true	SELECT o.id, (SELECT count(*) FROM ss_t x GROUP BY i + 1 HAVING o.i + 1 = i + 1) AS y FROM ss_t o ORDER BY 1
+c738/outerQualSameName	true	SELECT ss_t.id, (SELECT count(*) FROM ss_t x GROUP BY 2 * n HAVING 2 * ss_t.n = 2 * n) AS y FROM ss_t ORDER BY 1
+c738/outerQualItem	true	SELECT ss_t.id, (SELECT 2 * ss_t.n FROM ss_t x WHERE x.id = 1 GROUP BY 2 * n) AS y FROM ss_t ORDER BY 1
+c738/outerQualItemAliasT	true	SELECT t.id, (SELECT 2 * t.n FROM ss_t x WHERE x.id = 1 GROUP BY 2 * x.n) AS y FROM ss_t t ORDER BY 1
+c738/outerQualNested	true	SELECT t.id, (SELECT (SELECT 2 * t.n FROM ss_i y WHERE y.id = 1) FROM ss_t x WHERE x.id = 1 GROUP BY 2 * n) AS y FROM ss_t t ORDER BY 1
+c738/outerOrderBy	true	SELECT t.id, (SELECT 2 * x.n FROM ss_t x GROUP BY 2 * n ORDER BY abs(2 * x.n - 2 * t.n) LIMIT 1) AS y FROM ss_t t ORDER BY 1
+c738/outerWhereGrouped	true	SELECT t.id, (SELECT count(*) FROM ss_t x WHERE x.n > t.n GROUP BY 2 * n HAVING count(*) > 0 ORDER BY 1 LIMIT 1) AS y FROM ss_t t ORDER BY 1
+c738/outerDerived	true	SELECT t.id, (SELECT 2 * t.n FROM (SELECT * FROM ss_t) x WHERE x.id = 1 GROUP BY 2 * n) AS y FROM ss_t t ORDER BY 1
+c738/outerCte	true	WITH w AS (SELECT * FROM ss_t) SELECT t.id, (SELECT 2 * t.n FROM w WHERE w.id = 1 GROUP BY 2 * n) AS y FROM ss_t t ORDER BY 1
+c738/outerSameAliasInner	true	SELECT t.id, (SELECT 2 * t.n FROM ss_t t WHERE t.id = 2 GROUP BY 2 * n) AS y FROM ss_t t ORDER BY 1
+c738/outerInJoinInner	true	SELECT t.id, (SELECT 2 * t.n FROM ss_t x JOIN ss_i y ON x.id = y.id WHERE x.id = 1 GROUP BY 2 * x.n) AS y FROM ss_t t ORDER BY 1
+ref2/doubleNeg	false	SELECT -(-t.i), count(*) FROM ss_t t GROUP BY i
+ref2/mulOne	false	SELECT t.i * 1, count(*) FROM ss_t t GROUP BY i
+ref2/noopCastInt	false	SELECT t.i::int, count(*) FROM ss_t t GROUP BY i
+ref2/noopCastText	false	SELECT t.s::text, count(*) FROM ss_t t GROUP BY s
+ref2/int8Syn	false	SELECT t.i::bigint, count(*) FROM ss_t t GROUP BY i::int8
+ref2/lowerCase	false	SELECT lower(T.S), count(*) FROM ss_t t GROUP BY LOWER(s)
+ref2/litType	false	SELECT t.i + 1, count(*) FROM ss_t t GROUP BY i + 1.0
+ref2/litTypeNum	false	SELECT t.n * 2, count(*) FROM ss_t t GROUP BY n * 2.0
+ref2/parenEach	false	SELECT (t.i) + (1), count(*) FROM ss_t t GROUP BY (i + 1)
+ref2/minusNeg	false	SELECT t.i - -1, count(*) FROM ss_t t GROUP BY i + 1
+ref2/concatEmpty	false	SELECT t.s || '', count(*) FROM ss_t t GROUP BY s
+ref2/caseSimple	false	SELECT CASE t.i WHEN 1 THEN 'a' ELSE 'b' END, count(*) FROM ss_t t GROUP BY CASE i WHEN 1 THEN 'a' ELSE 'b' END
+ref2/isNull	false	SELECT t.i IS NULL, count(*) FROM ss_t t GROUP BY i IS NULL
+ref2/notBool	false	SELECT NOT t.o, count(*) FROM ss_t t GROUP BY NOT o
+ref2/varcharVsText	false	SELECT CAST(t.s AS VARCHAR), count(*) FROM ss_t t GROUP BY s::text
+ref2/castNumScale	false	SELECT CAST(t.n AS NUMERIC(12,1)), count(*) FROM ss_t t GROUP BY CAST(n AS NUMERIC(12,2))
+term/distinctOnSame	true	SELECT DISTINCT ON (i + 1) i + 1 AS k, count(*) AS c FROM ss_t t GROUP BY i + 1 ORDER BY i + 1
+j/itemQual/ord	true	SELECT t.i + 1 AS k, count(*) AS c FROM ss_t t LEFT JOIN ss_i u ON u.id = t.id GROUP BY i + 1 ORDER BY 1
+j/keyQual/ord	true	SELECT i + 1 AS k, count(*) AS c FROM ss_t t LEFT JOIN ss_i u ON u.id = t.id GROUP BY t.i + 1 ORDER BY 1
+j/itemQualNum/ordU	true	SELECT 2 * t.n, count(*) FROM ss_t t LEFT JOIN ss_i u ON u.id = t.id GROUP BY 2 * n ORDER BY 1
+j/keyQualNum/ordU	true	SELECT 2 * n, count(*) FROM ss_t t LEFT JOIN ss_i u ON u.id = t.id GROUP BY 2 * t.n ORDER BY 1
+j/otherItemQual/ord	true	SELECT u.v * 2 AS k, count(*) AS c FROM ss_t t LEFT JOIN ss_i u ON u.id = t.id GROUP BY v * 2 ORDER BY 1
+j/otherKeyQual/ord	true	SELECT v * 2 AS k, count(*) AS c FROM ss_t t LEFT JOIN ss_i u ON u.id = t.id GROUP BY u.v * 2 ORDER BY 1
+j/eachSide/ord	true	SELECT t.i + u.v AS k, count(*) AS c FROM ss_t t LEFT JOIN ss_i u ON u.id = t.id GROUP BY i + v ORDER BY 1
+j/eachSideMixed/ord	true	SELECT i + u.v AS k, count(*) AS c FROM ss_t t LEFT JOIN ss_i u ON u.id = t.id GROUP BY t.i + v ORDER BY 1
+j/twoKeys/ord	true	SELECT t.i AS a, u.v AS b, count(*) AS c FROM ss_t t LEFT JOIN ss_i u ON u.id = t.id GROUP BY i, v ORDER BY 1, 2
+j/twoKeysMixed/ord	true	SELECT i AS a, v AS b, count(*) AS c FROM ss_t t LEFT JOIN ss_i u ON u.id = t.id GROUP BY t.i, u.v ORDER BY 1, 2
+j/bareColItemQual/ord	true	SELECT t.i, count(*) AS c FROM ss_t t LEFT JOIN ss_i u ON u.id = t.id GROUP BY i ORDER BY 1
+j/bareColKeyQual/ord	true	SELECT i, count(*) AS c FROM ss_t t LEFT JOIN ss_i u ON u.id = t.id GROUP BY t.i ORDER BY 1
+j/having/sel	false	SELECT count(*) AS c FROM ss_t t LEFT JOIN ss_i u ON u.id = t.id GROUP BY i + 1 HAVING t.i + 1 > 2
+j/havingKeyQual/sel	false	SELECT count(*) AS c FROM ss_t t LEFT JOIN ss_i u ON u.id = t.id GROUP BY t.i + 1 HAVING i + 1 > 2
+j/orderTerm/ord	true	SELECT count(*) AS c, min(t.id) AS m FROM ss_t t LEFT JOIN ss_i u ON u.id = t.id GROUP BY 2 * n ORDER BY 2 * t.n
+j/orderTermKeyQual/ord	true	SELECT count(*) AS c, min(t.id) AS m FROM ss_t t LEFT JOIN ss_i u ON u.id = t.id GROUP BY 2 * t.n ORDER BY 2 * n
+j/larger/ord	true	SELECT (t.i + 1) * 2 AS k FROM ss_t t LEFT JOIN ss_i u ON u.id = t.id GROUP BY i + 1 ORDER BY 1
+j/distinct/ord	true	SELECT DISTINCT t.i + 1 AS k FROM ss_t t LEFT JOIN ss_i u ON u.id = t.id GROUP BY i + 1 ORDER BY 1
+j/window/ord	true	SELECT t.i + 1 AS k, rank() OVER (ORDER BY i + 1) AS r FROM ss_t t LEFT JOIN ss_i u ON u.id = t.id GROUP BY i + 1 ORDER BY 1
+j/windowKeyQual/ord	true	SELECT i + 1 AS k, rank() OVER (ORDER BY t.i + 1) AS r FROM ss_t t LEFT JOIN ss_i u ON u.id = t.id GROUP BY t.i + 1 ORDER BY 1
+j/rollup/ord	true	SELECT t.i + 1 AS k, count(*) AS c FROM ss_t t LEFT JOIN ss_i u ON u.id = t.id GROUP BY ROLLUP (i + 1) ORDER BY 1, 2
+j/aggArg/ord	true	SELECT t.i + 1 AS k, sum(i + 1) AS s, count(*) FILTER (WHERE u.v > 0) AS f FROM ss_t t LEFT JOIN ss_i u ON u.id = t.id GROUP BY i + 1 ORDER BY 1
+j/inner/ord	true	SELECT t.i + 1 AS k, count(*) AS c FROM ss_t t JOIN ss_i u ON u.id = t.id GROUP BY i + 1 ORDER BY 1
+j/innerKeyQual/ord	true	SELECT i + 1 AS k, count(*) AS c FROM ss_t t JOIN ss_i u ON u.id = t.id GROUP BY t.i + 1 ORDER BY 1
+j/comma/ord	true	SELECT t.i + 1 AS k, count(*) AS c FROM ss_t t, ss_i u WHERE u.id = t.id GROUP BY i + 1 ORDER BY 1
+j/unaliased/ord	true	SELECT ss_t.i + 1 AS k, count(*) AS c FROM ss_t LEFT JOIN ss_i ON ss_i.id = ss_t.id GROUP BY i + 1 ORDER BY 1
+j/unaliasedKeyQual/ord	true	SELECT i + 1 AS k, count(*) AS c FROM ss_t LEFT JOIN ss_i ON ss_i.id = ss_t.id GROUP BY ss_t.i + 1 ORDER BY 1
+j/threeWay/ord	true	SELECT t.i + 1 AS k, count(*) AS c FROM ss_t t LEFT JOIN ss_i u ON u.id = t.id LEFT JOIN ss_i w ON w.id = t.id + 1 GROUP BY i + 1 ORDER BY 1
+j/derivedSide/ord	true	SELECT d.x + 1 AS k, count(*) AS c FROM ss_t t LEFT JOIN (SELECT id, v AS x FROM ss_i) d ON d.id = t.id GROUP BY x + 1 ORDER BY 1
+j/derivedSideKeyQual/ord	true	SELECT x + 1 AS k, count(*) AS c FROM ss_t t LEFT JOIN (SELECT id, v AS x FROM ss_i) d ON d.id = t.id GROUP BY d.x + 1 ORDER BY 1
+j/cteSide/ord	true	WITH c AS (SELECT id, v AS x FROM ss_i) SELECT c.x + 1 AS k, count(*) AS n FROM ss_t t LEFT JOIN c ON c.id = t.id GROUP BY x + 1 ORDER BY 1
+j/lateral/ord	true	SELECT l.x + 1 AS k, count(*) AS c FROM ss_t t, LATERAL (SELECT t.i AS x) l GROUP BY x + 1 ORDER BY 1
+j/lateralKeyQual/ord	true	SELECT x + 1 AS k, count(*) AS c FROM ss_t t, LATERAL (SELECT t.i AS x) l GROUP BY l.x + 1 ORDER BY 1
+j/ambigBare/sel	false	SELECT t.id + 1 AS k, count(*) AS c FROM ss_t t LEFT JOIN ss_i u ON u.id = t.id GROUP BY id + 1
+j/ambigBareItem/sel	false	SELECT id + 1 AS k, count(*) AS c FROM ss_t t LEFT JOIN ss_i u ON u.id = t.id GROUP BY t.id + 1
+j/ambigOtherSide/sel	false	SELECT u.id + 1 AS k, count(*) AS c FROM ss_t t LEFT JOIN ss_i u ON u.id = t.id GROUP BY t.id + 1
+j/selfBare/sel	false	SELECT a.i + 1 AS k, count(*) AS c FROM ss_t a JOIN ss_t b ON a.id = b.id GROUP BY i + 1
+j/selfOther/sel	false	SELECT b.i + 1 AS k, count(*) AS c FROM ss_t a JOIN ss_t b ON a.id = b.id GROUP BY a.i + 1
+j/selfSame/ord	true	SELECT a.i + 1 AS k, count(*) AS c FROM ss_t a JOIN ss_t b ON a.id = b.id GROUP BY a.i + 1 ORDER BY 1
+j/selfBoth/ord	true	SELECT a.i + b.i AS k, count(*) AS c FROM ss_t a JOIN ss_t b ON a.id = b.id GROUP BY a.i + b.i ORDER BY 1
+j/selfSwapped/sel	false	SELECT b.i + a.i AS k, count(*) AS c FROM ss_t a JOIN ss_t b ON a.id = b.id GROUP BY a.i + b.i
+j/usingBareKey/ord	true	SELECT t.id + 1 AS k, count(*) AS c FROM ss_t t JOIN ss_i u USING (id) GROUP BY id + 1 ORDER BY 1
+j/usingQualKey/ord	true	SELECT id + 1 AS k, count(*) AS c FROM ss_t t JOIN ss_i u USING (id) GROUP BY t.id + 1 ORDER BY 1
+j/usingOtherQual/ord	true	SELECT u.id + 1 AS k, count(*) AS c FROM ss_t t JOIN ss_i u USING (id) GROUP BY id + 1 ORDER BY 1
+j/usingLeftOther/sel	false	SELECT u.id + 1 AS k, count(*) AS c FROM ss_t t LEFT JOIN ss_i u USING (id) GROUP BY id + 1
+j/usingLeftOwn/ord	true	SELECT t.id + 1 AS k, count(*) AS c FROM ss_t t LEFT JOIN ss_i u USING (id) GROUP BY id + 1 ORDER BY 1
+j/usingBareBoth/ord	true	SELECT id + 1 AS k, count(*) AS c FROM ss_t t LEFT JOIN ss_i u USING (id) GROUP BY id + 1 ORDER BY 1
+j/usingFull/sel	false	SELECT t.id + 1 AS k, count(*) AS c FROM ss_t t FULL JOIN ss_i u USING (id) GROUP BY id + 1
+j/usingOtherCol/ord	true	SELECT t.i + 1 AS k, count(*) AS c FROM ss_t t JOIN ss_i u USING (id) GROUP BY i + 1 ORDER BY 1
+a/gbPrefersInput/ord	true	SELECT -i AS i, count(*) AS c FROM ss_t GROUP BY i ORDER BY 2, 1
+a/gbAliasNoCol/ord	true	SELECT i + 1 AS w, count(*) AS c FROM ss_t GROUP BY w ORDER BY 1
+a/gbAliasIsOtherCol/sel	false	SELECT t.i + 1 AS n, count(*) AS c FROM ss_t t GROUP BY n
+a/obPrefersOutput/ord	true	SELECT -i AS i, count(*) AS c FROM ss_t GROUP BY i ORDER BY i
+a/obPrefersOutputQualKey/ord	true	SELECT -t.i AS i, count(*) AS c FROM ss_t t GROUP BY t.i ORDER BY i
+a/obExprIsInput/ord	true	SELECT -i AS i, count(*) AS c FROM ss_t GROUP BY i ORDER BY i + 1
+a/obExprQual/ord	true	SELECT -t.i AS i, count(*) AS c FROM ss_t t GROUP BY i ORDER BY t.i + 1
+a/obExprKeyQual/ord	true	SELECT -t.i AS i, count(*) AS c FROM ss_t t GROUP BY t.i ORDER BY i + 1
+a/obQualAliasKeyExpr/ord	true	SELECT t.i + 1 AS i, count(*) AS c FROM ss_t t GROUP BY i + 1 ORDER BY t.i + 1 DESC
+a/obAliasKeyExpr/ord	true	SELECT t.i + 1 AS i FROM ss_t t GROUP BY i + 1 ORDER BY i
+a/havingInput/sel	false	SELECT -i AS i, count(*) AS c FROM ss_t GROUP BY i HAVING i > 0
+a/havingQual/sel	false	SELECT -t.i AS i, count(*) AS c FROM ss_t t GROUP BY i HAVING t.i > 0
+a/havingKeyQual/sel	false	SELECT -t.i AS i, count(*) AS c FROM ss_t t GROUP BY t.i HAVING i > 0
+a/joinObQual/ord	true	SELECT -t.i AS i, count(*) AS c FROM ss_t t LEFT JOIN ss_i u ON u.id = t.id GROUP BY i ORDER BY t.i
+a/joinObAlias/ord	true	SELECT -t.i AS i, count(*) AS c FROM ss_t t LEFT JOIN ss_i u ON u.id = t.id GROUP BY t.i ORDER BY i
+a/joinObAliasV/ord	true	SELECT -u.v AS v, count(*) AS c FROM ss_t t LEFT JOIN ss_i u ON u.id = t.id GROUP BY v ORDER BY u.v
+a/derivedObQual/ord	true	SELECT -s.i AS i FROM (SELECT i FROM ss_t) s GROUP BY i ORDER BY s.i
+a/cteObQual/ord	true	WITH s AS (SELECT i FROM ss_t) SELECT -s.i AS i FROM s GROUP BY i ORDER BY s.i
+a/distinctObQual/sel	false	SELECT DISTINCT -t.i AS i FROM ss_t t ORDER BY t.i
+a/distinctObAlias/ord	true	SELECT DISTINCT -t.i AS i FROM ss_t t ORDER BY i
+a/distinctObExpr/ord	true	SELECT DISTINCT t.i + 1 AS k FROM ss_t t ORDER BY i + 1
+a/distinctObExprJoin/ord	true	SELECT DISTINCT t.i + 1 AS k FROM ss_t t LEFT JOIN ss_i u ON u.id = t.id ORDER BY i + 1
+a/distinctObExprMiss/sel	false	SELECT DISTINCT t.i + 1 AS k FROM ss_t t ORDER BY i + 2
+a/winOrdQualAlias/ord	true	SELECT -t.i AS i, rank() OVER (ORDER BY t.i) AS r FROM ss_t t GROUP BY i ORDER BY 2
+a/winOrdAlias/ord	true	SELECT -t.i AS i, rank() OVER (ORDER BY i) AS r FROM ss_t t GROUP BY i ORDER BY 2
+q/mixedCaseCol/ord	true	SELECT t."Ab" + 1 AS k, count(*) AS c FROM (SELECT i AS "Ab" FROM ss_t) t GROUP BY "Ab" + 1 ORDER BY 1
+q/mixedCaseColKey/ord	true	SELECT "Ab" + 1 AS k, count(*) AS c FROM (SELECT i AS "Ab" FROM ss_t) t GROUP BY t."Ab" + 1 ORDER BY 1
+q/mixedCaseColFold/sel	false	SELECT t.ab + 1 AS k, count(*) AS c FROM (SELECT i AS "Ab" FROM ss_t) t GROUP BY "Ab" + 1
+q/spaceCol/ord	true	SELECT t."a b" + 1 AS k, count(*) AS c FROM (SELECT i AS "a b" FROM ss_t) t GROUP BY "a b" + 1 ORDER BY 1
+q/spaceColKey/ord	true	SELECT "a b" + 1 AS k, count(*) AS c FROM (SELECT i AS "a b" FROM ss_t) t GROUP BY t."a b" + 1 ORDER BY 1
+q/dotColBareCol/ord	true	SELECT t."x.y", count(*) AS c FROM (SELECT i AS "x.y" FROM ss_t) t GROUP BY "x.y" ORDER BY 1
+q/dotColBareColKey/ord	true	SELECT "x.y", count(*) AS c FROM (SELECT i AS "x.y" FROM ss_t) t GROUP BY t."x.y" ORDER BY 1
+q/dotAliasBareCol/ord	true	SELECT "a.b".i, count(*) AS c FROM ss_t AS "a.b" GROUP BY i ORDER BY 1
+q/dotAliasJoin/ord	true	SELECT "a.b".i + 1 AS k, count(*) AS c FROM ss_t AS "a.b" LEFT JOIN ss_i u ON u.id = "a.b".id GROUP BY i + 1 ORDER BY 1
+q/dotAliasJoinKey/ord	true	SELECT i + 1 AS k, count(*) AS c FROM ss_t AS "a.b" LEFT JOIN ss_i u ON u.id = "a.b".id GROUP BY "a.b".i + 1 ORDER BY 1
+q/upperAliasJoin/ord	true	SELECT "T".i + 1 AS k, count(*) AS c FROM ss_t AS "T" LEFT JOIN ss_i u ON u.id = "T".id GROUP BY i + 1 ORDER BY 1
+q/quotedTableName/ord	true	SELECT "ss_t".i + 1 AS k, count(*) AS c FROM ss_t GROUP BY i + 1 ORDER BY 1
+q/schemaJoin/ord	true	SELECT ss_t.i + 1 AS k, count(*) AS c FROM public.ss_t LEFT JOIN public.ss_i ON ss_i.id = ss_t.id GROUP BY i + 1 ORDER BY 1
+p/scalarSubq/sel	false	SELECT (SELECT max(k) FROM (SELECT t.i + 1 AS k FROM ss_t t GROUP BY i + 1) s) AS m
+p/scalarSubqJoin/sel	false	SELECT (SELECT max(k) FROM (SELECT t.i + 1 AS k FROM ss_t t LEFT JOIN ss_i u ON u.id = t.id GROUP BY i + 1) s) AS m
+p/scalarDirect/sel	false	SELECT (SELECT max(t.i + 1) FROM ss_t t GROUP BY i + 1 ORDER BY 1 DESC LIMIT 1) AS m
+p/scalarDirectItem/sel	false	SELECT (SELECT t.i + 1 FROM ss_t t GROUP BY i + 1 ORDER BY t.i + 1 DESC NULLS LAST LIMIT 1) AS m
+p/scalarDirectJoin/sel	false	SELECT (SELECT t.i + 1 FROM ss_t t LEFT JOIN ss_i u ON u.id = t.id GROUP BY i + 1 ORDER BY t.i + 1 DESC NULLS LAST LIMIT 1) AS m
+p/inSubq/ord	true	SELECT id FROM ss_t WHERE i + 1 IN (SELECT t.i + 1 FROM ss_t t GROUP BY i + 1) ORDER BY id
+p/inSubqJoin/ord	true	SELECT id FROM ss_t WHERE i + 1 IN (SELECT t.i + 1 FROM ss_t t LEFT JOIN ss_i u ON u.id = t.id GROUP BY i + 1) ORDER BY id
+p/existsHaving/ord	true	SELECT o.id FROM ss_t o WHERE EXISTS (SELECT 1 FROM ss_t t GROUP BY i + 1 HAVING t.i + 1 = o.i + 1) ORDER BY 1
+p/correlatedJoin/ord	true	SELECT o.id, (SELECT count(*) FROM ss_t t LEFT JOIN ss_i u ON u.id = t.id WHERE t.id = o.id GROUP BY i + 1 HAVING t.i + 1 > 0) AS y FROM ss_t o ORDER BY 1
+p/correlatedOuterSpelling/ord	true	SELECT o.id, (SELECT count(*) FROM ss_i u GROUP BY v + 1 HAVING o.i + 1 > 0 LIMIT 1) AS y FROM ss_t o ORDER BY 1
+p/cteBody/ord	true	WITH c AS (SELECT t.i + 1 AS k, count(*) AS n FROM ss_t t GROUP BY i + 1) SELECT k, n FROM c ORDER BY 1
+p/cteBodyJoin/ord	true	WITH c AS (SELECT t.i + 1 AS k, count(*) AS n FROM ss_t t LEFT JOIN ss_i u ON u.id = t.id GROUP BY i + 1) SELECT k, n FROM c ORDER BY 1
+p/derivedBody/ord	true	SELECT k, n FROM (SELECT 2 * t.n AS k, count(*) AS n FROM ss_t t GROUP BY 2 * n) s ORDER BY 1
+p/unionArmJoin/ord	true	SELECT t.i + 1 AS k FROM ss_t t LEFT JOIN ss_i u ON u.id = t.id GROUP BY i + 1 UNION SELECT 100 ORDER BY 1
+p/lateralBodyJoin/ord	true	SELECT o.id, l.k FROM ss_t o, LATERAL (SELECT max(t.i + 1) AS k FROM ss_t t LEFT JOIN ss_i u ON u.id = t.id WHERE t.id <= o.id GROUP BY i + 1 ORDER BY 1 DESC NULLS LAST LIMIT 1) l ORDER BY 1
+g/rollupItemQual/ord	true	SELECT t.i + 1 AS k, count(*) AS c FROM ss_t t GROUP BY ROLLUP (i + 1) ORDER BY 1, 2
+g/rollupKeyQual/ord	true	SELECT i + 1 AS k, count(*) AS c FROM ss_t t GROUP BY ROLLUP (t.i + 1) ORDER BY 1, 2
+g/setsItemQual/ord	true	SELECT t.i + 1 AS k, t.s AS s, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS ((i + 1), (s)) ORDER BY 1, 2
+g/groupingJoin/ord	true	SELECT t.i + 1 AS k, GROUPING(i + 1) AS g FROM ss_t t LEFT JOIN ss_i u ON u.id = t.id GROUP BY ROLLUP (t.i + 1) ORDER BY 1, 2
+f4/derivedNoOrder	false	SELECT -s.i AS i FROM (SELECT i FROM ss_t) s GROUP BY i
+f4/derivedOrd1	true	SELECT -s.i AS i FROM (SELECT i FROM ss_t) s GROUP BY i ORDER BY 1
+f4/derivedOtherAlias	false	SELECT -s.i AS k FROM (SELECT i FROM ss_t) s GROUP BY i
+f4/derivedBareItem	false	SELECT -i AS i FROM (SELECT i FROM ss_t) s GROUP BY i
+f4/cteNoOrder	false	WITH s AS (SELECT i FROM ss_t) SELECT -i AS i FROM s GROUP BY i
+f4/baseTableNoOrder	false	SELECT -i AS i FROM ss_t GROUP BY i
+f4/derivedCount	false	SELECT -i AS i, count(*) AS c FROM (SELECT i FROM ss_t) s GROUP BY i
+ci1/innerJoinItemQual	true	SELECT t.i + 1 AS k, count(*) AS c FROM ss_t t JOIN ss_i u ON u.id = t.id GROUP BY i + 1 ORDER BY 1
+ci1/innerJoinKeyQual	true	SELECT i + 1 AS k, count(*) AS c FROM ss_t t JOIN ss_i u ON u.id = t.id GROUP BY t.i + 1 ORDER BY 1
+ci1/innerJoinNumeric	true	SELECT 2 * t.n, count(*) FROM ss_t t JOIN ss_i u ON u.id = t.id GROUP BY 2 * n ORDER BY 1
+ci1/joinWindowOrder	true	SELECT t.i + 1 AS k, rank() OVER (ORDER BY t.i + 1) AS r FROM ss_t t JOIN ss_i u ON u.id = t.id GROUP BY i + 1 ORDER BY 1
+ci1/joinWindowPartition	true	SELECT i + 1 AS k, count(*) OVER (PARTITION BY t.i + 1) AS w FROM ss_t t JOIN ss_i u ON u.id = t.id GROUP BY i + 1 ORDER BY 1
+ci1/joinWindowArg	true	SELECT i + 1 AS k, sum(t.i + 1) OVER () AS s FROM ss_t t JOIN ss_i u ON u.id = t.id GROUP BY i + 1 ORDER BY 1
+ci1/joinHaving	false	SELECT count(*) AS c FROM ss_t t JOIN ss_i u ON u.id = t.id GROUP BY i + 1 HAVING t.i + 1 > 2
+ci1/joinOrderByKeyQual	true	SELECT count(*) AS c FROM ss_t t JOIN ss_i u ON u.id = t.id GROUP BY i + 1 ORDER BY t.i + 1
+ci1/joinDistinct	true	SELECT DISTINCT i + 1 AS k FROM ss_t t JOIN ss_i u ON u.id = t.id GROUP BY t.i + 1 ORDER BY 1
+ci1/joinGrouping	true	SELECT t.i + 1 AS k, GROUPING(t.i + 1) AS g, count(*) AS c FROM ss_t t JOIN ss_i u ON u.id = t.id GROUP BY ROLLUP (i + 1) ORDER BY 1, 2
+ci1/joinOtherSide	false	SELECT u.v + 1 AS k, count(*) FROM ss_t t JOIN ss_i u ON u.id = t.id GROUP BY t.i + 1
+ci1/joinSameNameOtherRel	false	SELECT t.id + 1 AS k, count(*) FROM ss_t t JOIN ss_i u ON u.id = t.id GROUP BY u.id + 1
+ci1/selfJoinOtherAlias	false	SELECT a.i + 1 AS k, count(*) FROM ss_t a JOIN ss_t b ON a.id = b.id GROUP BY b.i + 1
+ci1/selfJoinSameAlias	true	SELECT a.i + 1 AS k, count(*) AS c FROM ss_t a JOIN ss_t b ON a.id = b.id GROUP BY a.i + 1 ORDER BY 1
+ci1/joinAliasOrderQual	true	SELECT -t.i AS i, count(*) AS c FROM ss_t t JOIN ss_i u ON u.id = t.id GROUP BY i ORDER BY t.i
+ci1/joinAliasOrderAlias	true	SELECT -t.i AS i, count(*) AS c FROM ss_t t JOIN ss_i u ON u.id = t.id GROUP BY i ORDER BY i
+ci1/joinAggAliasHaving	false	SELECT count(*) AS i FROM ss_t t JOIN ss_i u ON u.id = t.id GROUP BY i + 1 HAVING t.i + 1 > 2
+ci1/joinCommuted	false	SELECT 1 + t.i AS k, count(*) FROM ss_t t JOIN ss_i u ON u.id = t.id GROUP BY i + 1
+ci1/joinLargerExpr	true	SELECT (t.i + 1) * 2 AS k, count(*) AS c FROM ss_t t JOIN ss_i u ON u.id = t.id GROUP BY i + 1 ORDER BY 1
+ci1/joinDerivedOuter	true	SELECT s.k FROM (SELECT t.i + 1 AS k FROM ss_t t JOIN ss_i u ON u.id = t.id GROUP BY i + 1) s ORDER BY 1
+ci1/joinCteBody	true	WITH c AS (SELECT i + 1 AS k, count(*) AS n FROM ss_t t JOIN ss_i u ON u.id = t.id GROUP BY t.i + 1) SELECT k, n FROM c ORDER BY 1
+ci1/joinUnionArm	true	SELECT t.i + 1 AS k FROM ss_t t JOIN ss_i u ON u.id = t.id GROUP BY i + 1 UNION ALL SELECT 100 ORDER BY 1
+ci1/joinDate	true	SELECT t.d + 1 AS k, count(*) AS c FROM ss_t t JOIN ss_i u ON u.id = t.id GROUP BY d + 1 ORDER BY 1
+ci1/joinText	true	SELECT upper(t.s) AS k, count(*) AS c FROM ss_t t JOIN ss_i u ON u.id = t.id GROUP BY upper(s) ORDER BY 1
