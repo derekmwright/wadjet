@@ -229,6 +229,26 @@ consumer can sniff and decode, including mid-stream.
   ignored it would answer differently without, so it falls under the
   wholesale-deploy rule too.
 
+- **A DECIMAL chunk may carry its values' display scales** (amended
+  2026-10-06, arc PS stage 1; ADR-0024 §11). After a DECIMAL column's
+  `16 × rows` carrier bytes a chunk may end with a display-scale section —
+  `[0][code]` when every row of the chunk shares one, `[1][one code per
+  row]` otherwise — and the column's data length counts it
+  (`wshf.DataLenOK`: `16 × rows`, `+ 2`, or `+ 1 + rows`). The writer emits
+  it only for a column whose values carry display scales, so every other
+  chunk is the bytes it was (`worker.TestWSHFUnmarkedColumnsEncodeAsBase`'s
+  golden); every reader — the one decoder, the streaming stage walk and the
+  extent-index validator — checks the length and refuses an unknown mode or
+  a code past the column's scale (`worker.TestWSHFDisplayScaleRoundTrip`).
+  The announcement is per CHUNK, not a header bit: the header is written
+  when the first batch arrives, and whether a column's values carry display
+  scales is a property of each batch. A decoder from before the section
+  refuses a chunk that has one (its length is not `16 × rows`), never
+  misreading it. The header's precision byte refuses a precision past 38
+  and any bit but the unconstrained mark (#1662,
+  `worker.TestWSHFDecoderRefusesAnInvalidPrecisionByte`), and the writer
+  refuses to write one.
+
 - **The partition ASSIGNMENT is part of the exchange contract, not just the
   byte layout.** Every producer of a repartition stage must map a key to the
   same partition number, because the consumer of partition *p* reads only the
