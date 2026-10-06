@@ -1139,6 +1139,8 @@ Now `expr.translateAndCompile` is the one compile of a SQL-supplied pattern, in 
 
 [names-scopes r10](0012-divergences/names-scopes.md#catalog) narrowed to the stage-DAG arms: on the single-process engine a term spelled apart from its GROUP BY key — the qualifier on one side only, over one relation or over a join — is the key when both resolve to the same column, so `SELECT g + 1 FROM typemx GROUP BY typemx.g + 1` and `SELECT i + 1 … FROM ss_t t JOIN ss_i u ON u.id = t.id GROUP BY t.i + 1` answer PostgreSQL's rows there; the three stage-DAG arms keep ERROR 42803 until ADR-0047 stage 5 (`coordinator.TestTheIdentityErasesAQualifierAndATypeSynonym`, `coordinator.TestArcGKGroupKeySpellingEveryArm`).
 
+2026-10-06: [numeric-decimal r24](0012-divergences/numeric-decimal.md#catalog) also covers CTAS from a computed numeric key with mixed select/GROUP BY spelling (ADR-0047): the created column now declares numeric, as PostgreSQL does, and trims trailing zeros (`wadjet.TestArcGKEmbeddedGroupKeySpelling` gk_c2 ordered; `pgwire.TestArcGKGroupKeySpellingOnTheWire` store/ctas/{s,e,b}); its `length(CAST(k AS TEXT))` consumer gives five groups where PostgreSQL gives three, matching the alike-spelling control at base and tip (`coordinator.TestArcGKCTASNumericTextEveryArm` mixedLength/alikeLength).
+
 ## Dated markers inside the entries
 
 Every `Added` / `Amended` / `CLOSED` / `Corrected` / `narrowed` marker still inside an entry's retained text, in date order, with the entry that carries it.

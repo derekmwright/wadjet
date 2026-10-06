@@ -17,7 +17,8 @@ import (
 // with or without the relation's qualifier is the key — its value, its order
 // and its declared type — in `DB.Query`, in the column a CREATE TABLE … AS
 // declares (read from the catalog), and in what an INSERT … SELECT stores.
-// Every want is PostgreSQL 17.11's over the same DDL. At 33e2fb92 the item
+// Expectations follow PostgreSQL 17.11 over the same DDL, except the gk_c2
+// ordered read pinned to numeric-decimal r24 below. At 33e2fb92 the item
 // spelled apart from its key was declared TEXT: `ORDER BY 1` put `20.00`
 // before `4.50`, the CTAS column was TEXT, and the qualified key under a bare
 // item was 42803.
@@ -94,11 +95,14 @@ func TestArcGKEmbeddedGroupKeySpelling(t *testing.T) {
 			t.Errorf("%s: the CTAS column k is declared %v, want %v (PostgreSQL 17.11)\n  %s", c.table, got, c.want, c.sql)
 		}
 	}
-	// The CTAS column's ORDER is the key's, which a TEXT column cannot give.
+	// gk_c2 ordered: numeric-decimal r24 trims a computed numeric CTAS
+	// column's text to -7, 0, 0.02, 4.5, 20, NULL; PostgreSQL keeps scale two.
+	// The declaration is now numeric, as in PostgreSQL (base: text), and the
+	// rows retain PostgreSQL's numeric order.
 	if res, err := db.Query(ctx, "SELECT k FROM gk_c2 ORDER BY k"); err != nil {
 		t.Errorf("reading gk_c2: %v", err)
-	} else if got, want := ssEmbeddedRender(res), "{numeric} -7.00 | 0.00 | 0.02 | 4.50 | 20.00 | NULL"; got != want {
-		t.Errorf("gk_c2 ordered\n  got  %s\n  want %s (PostgreSQL 17.11)", got, want)
+	} else if got, want := ssEmbeddedRender(res), "{numeric} -7 | 0 | 0.02 | 4.5 | 20 | NULL"; got != want {
+		t.Errorf("gk_c2 ordered\n  got  %s\n  want %s (numeric-decimal r24)", got, want)
 	}
 
 	// INSERT … SELECT into typed columns stores the key's value.

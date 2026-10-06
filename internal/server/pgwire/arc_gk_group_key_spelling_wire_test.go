@@ -12,11 +12,13 @@ package pgwire
 // an INSERT … SELECT store. At 33e2fb92 every item spelled apart from its key
 // was declared OID 25 (text) and `ORDER BY 1` sorted `20.00` before `4.50`.
 //
-// Every want is PostgreSQL 17.11's, measured over the same fixture
+// PostgreSQL answers are measured over the same fixture
 // (setupSSAuditWireDB) with the same client (pgx; default_query_exec_mode
 // simple_protocol / exec / describe_exec) — testdata/arc_gk_group_key_spelling_wire_pg17.tsv:
 // name, mode, ordered, sql, answer; a cell's statements are joined by " ;; "
-// and the answer is the last one's.
+// and the answer is the last one's; kept rows record catalogued differences.
+// store/ctas/{s,e,b} pins numeric-decimal r24: the created column is now
+// numeric, as in PostgreSQL (base: text), with trailing zeros trimmed.
 
 import (
 	"context"
