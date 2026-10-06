@@ -56,7 +56,10 @@ type nfLit struct {
 // TestDecimalBesideAnIntegerIsNumeric. A trailing zero is the same number; a
 // refused query is no answer at all.
 //
-// So the residual is the RENDERING, it is pinned per entry, and it is #764.
+// So the residual was the RENDERING, pinned per entry: #764. Since arc PS
+// stage 1 (ADR-0024 §1 as amended, 2026-10-06) each value carries its own
+// display scale beside the fold's one carrier scale, every entry prints
+// PostgreSQL's own text, and the render pins are deleted as the proof.
 //
 // Both SPELLINGS take the identical rule — a quoted literal is `unknown` and
 // resolved from its neighbours (#724), an unquoted one carries its own
@@ -123,28 +126,28 @@ func TestLiteralScaleInADecimalFold(t *testing.T) {
 		// engines; the columns' rows are the pinned rendering.
 		{"CoalesceFinerLiteral", "COALESCE(n_d152, '12.3456789012345')",
 			"12.75;12.3456789012345;1.00;-3.50",
-			"12.7500000000000;12.3456789012345;1.0000000000000;-3.5000000000000", false},
+			"", false},
 		{"CoalesceFinerLiteralUnquoted", "COALESCE(n_d152, 12.3456789012345)",
 			"12.75;12.3456789012345;1.00;-3.50",
-			"12.7500000000000;12.3456789012345;1.0000000000000;-3.5000000000000", false},
+			"", false},
 		{"CoalesceTinyLiteral", "COALESCE(n_d152, '0.00000000000001')",
 			"12.75;0.00000000000001;1.00;-3.50",
-			"12.75000000000000;0.00000000000001;1.00000000000000;-3.50000000000000", false},
+			"", false},
 		{"CoalesceOverTheWideColumn", "COALESCE(n_d3810, '12.3456789012345')",
 			"12.7500000001;12.3456789012345;1.0000000000;-3.5000000000",
-			"12.7500000001000;12.3456789012345;1.0000000000000;-3.5000000000000", false},
+			"", false},
 		{"GreatestFinerLiteral", "GREATEST(n_d152, '12.3456789012345')",
 			"12.75;12.3456789012345;12.3456789012345;12.3456789012345",
-			"12.7500000000000;12.3456789012345;12.3456789012345;12.3456789012345", false},
+			"", false},
 		{"GreatestFinerLiteralUnquoted", "GREATEST(n_d152, 12.3456789012345)",
 			"12.75;12.3456789012345;12.3456789012345;12.3456789012345",
-			"12.7500000000000;12.3456789012345;12.3456789012345;12.3456789012345", false},
+			"", false},
 		{"CaseFinerLiteral", "CASE WHEN id = 1 THEN n_d152 ELSE '12.3456789012345' END",
 			"12.75;12.3456789012345;12.3456789012345;12.3456789012345",
-			"12.7500000000000;12.3456789012345;12.3456789012345;12.3456789012345", false},
+			"", false},
 		{"CaseFinerLiteralUnquoted", "CASE WHEN id = 1 THEN n_d152 ELSE 12.3456789012345 END",
 			"12.75;12.3456789012345;12.3456789012345;12.3456789012345",
-			"12.7500000000000;12.3456789012345;12.3456789012345;12.3456789012345", false},
+			"", false},
 		// NULLIF's value is argument 0 and its typmod is argument 0's, on both
 		// engines. With the literal in argument 0 the fold is the literal's.
 		{"NullifLiteralIsArgumentZero", "NULLIF('12.3456789012345', n_d152)",
@@ -155,15 +158,15 @@ func TestLiteralScaleInADecimalFold(t *testing.T) {
 		// A literal the columns' scale already holds. Nothing moves and
 		// nothing refuses — the control for the rule above.
 		{"LeastSmallLiteral", "LEAST(n_d152, '0.5')", "0.5;0.5;0.5;-3.50",
-			"0.50;0.50;0.50;-3.50", false},
+			"", false},
 		{"CoalesceIntegerLiteral", "COALESCE(n_d152, '7')", "12.75;7;1.00;-3.50",
-			"12.75;7.00;1.00;-3.50", false},
+			"", false},
 		{"GreatestWidensTheIntegerPart", "GREATEST(n_d152, '1234567890123')",
 			"1234567890123;1234567890123;1234567890123;1234567890123",
-			"1234567890123.00;1234567890123.00;1234567890123.00;1234567890123.00", false},
+			"", false},
 		{"GreatestPastTheColumnsIntegerPart", "GREATEST(n_d152, '123456789012345678')",
 			"123456789012345678;123456789012345678;123456789012345678;123456789012345678",
-			"123456789012345678.00;123456789012345678.00;123456789012345678.00;123456789012345678.00",
+			"",
 			false},
 
 		// A literal past the CARRIER — forty digits and a fraction. It has no

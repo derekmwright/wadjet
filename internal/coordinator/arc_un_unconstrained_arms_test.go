@@ -78,26 +78,26 @@ func TestArcUNUnconstrainedColumnEveryArm(t *testing.T) {
 // unKeptCells are the cells whose printed answer is not PostgreSQL's text,
 // each for a recorded reason; the VALUES are PostgreSQL's unless the reason
 // says otherwise.
+// union_n, coalesce and case print PostgreSQL's text since arc PS stage 1
+// (ADR-0024 §1 as amended: each value keeps its own display scale); their
+// r18 pins are deleted as the proof.
 func unKeptCells() map[string]wdKept {
 	r18 := "an expression over the column prints at its declared one scale (numeric-decimal r18)"
 	return map[string]wdKept{
-		"union_n":  {"type=numeric rows=12 0.7500000000 | 0.7550000000 | 1.0000000000 | 1.2500000000 | 1.2500000000 | 10.0000000000 | 1234567890.0000000000 | 2.5000000000 | 2.5000000000 | 3.3300000000 | NULL | NULL", r18 + "; a set operation over a column of another declaration is not a bare copy"},
-		"minmax":   {"type=numeric;numeric rows=1 0.7550000000,1234567890.0000000000", r18},
-		"sum":      {"type=numeric rows=1 1234567895.5050000000", r18},
-		"sum_g":    {"type=bigint;numeric rows=3 1,3.0050000000 | 2,1234567890.0000000000 | 3,2.5000000000", r18},
-		"having":   {"type=bigint;numeric rows=3 1,3.0050000000 | 2,1234567890.0000000000 | 3,2.5000000000", r18},
-		"avg":      {"type=numeric rows=1 3.46666666666000", r18 + "; AVG keeps min(s+4, 38) digits (ADR-0024 §2)"},
-		"plus":     {"type=numeric rows=6 1,2.2500000000 | 2,1.7550000000 | 3,2.0000000000 | 4,NULL | 5,1234567891.0000000000 | 6,3.5000000000", r18},
-		"vw":       {"type=numeric rows=5 1,2.50000000000000000000 | 2,0.37750000000000000000 | 3,NULL | 4,NULL | 6,3.75000000000000000000", r18},
-		"x1_vv":    {"ERR 22003 numeric field overflow", "X1: v * v keeps scale 20 (ADR-0024 §3), so more than 18 integer digits is 22003 where PostgreSQL answers"},
-		"x1_cast":  {"type=numeric rows=1 5,1524157875019052100.0000000000", r18 + "; the X1 workaround"},
-		"x1_vb":    {"type=numeric rows=1 5,1524157875019052100.0000000000", r18},
-		"coalesce": {"type=numeric rows=6 1,1.2500000000 | 2,0.7550000000 | 3,1.0000000000 | 4,3.3300000000 | 5,1234567890.0000000000 | 6,2.5000000000", r18},
-		"case":     {"type=numeric rows=6 1,1.2500000000 | 2,0.7550000000 | 3,1.0000000000 | 4,3.3300000000 | 5,10.0000000000 | 6,0.7500000000", r18},
-		"lag":      {"type=numeric rows=6 1,NULL | 2,1.2500000000 | 3,0.7550000000 | 4,1.0000000000 | 5,NULL | 6,1234567890.0000000000", r18},
-		"win_sum":  {"type=numeric rows=6 1,3.0050000000 | 2,3.0050000000 | 3,3.0050000000 | 4,1234567890.0000000000 | 5,1234567890.0000000000 | 6,2.5000000000", r18},
-		"scalar":   {"type=numeric rows=6 1,7.0000000000 | 2,7.0000000000 | 3,7.0000000000 | 4,7.0000000000 | 5,7.0000000000 | 6,7.0000000000", r18},
-		"div":      {"type=numeric rows=2 1,0.4166666667 | 6,0.8333333333", r18 + "; a quotient keeps max(6, s1 + p2 + 1) digits capped at 38 (ADR-0024 §3)"},
+		"minmax":  {"type=numeric;numeric rows=1 0.7550000000,1234567890.0000000000", r18},
+		"sum":     {"type=numeric rows=1 1234567895.5050000000", r18},
+		"sum_g":   {"type=bigint;numeric rows=3 1,3.0050000000 | 2,1234567890.0000000000 | 3,2.5000000000", r18},
+		"having":  {"type=bigint;numeric rows=3 1,3.0050000000 | 2,1234567890.0000000000 | 3,2.5000000000", r18},
+		"avg":     {"type=numeric rows=1 3.46666666666000", r18 + "; AVG keeps min(s+4, 38) digits (ADR-0024 §2)"},
+		"plus":    {"type=numeric rows=6 1,2.2500000000 | 2,1.7550000000 | 3,2.0000000000 | 4,NULL | 5,1234567891.0000000000 | 6,3.5000000000", r18},
+		"vw":      {"type=numeric rows=5 1,2.50000000000000000000 | 2,0.37750000000000000000 | 3,NULL | 4,NULL | 6,3.75000000000000000000", r18},
+		"x1_vv":   {"ERR 22003 numeric field overflow", "X1: v * v keeps scale 20 (ADR-0024 §3), so more than 18 integer digits is 22003 where PostgreSQL answers"},
+		"x1_cast": {"type=numeric rows=1 5,1524157875019052100.0000000000", r18 + "; the X1 workaround"},
+		"x1_vb":   {"type=numeric rows=1 5,1524157875019052100.0000000000", r18},
+		"lag":     {"type=numeric rows=6 1,NULL | 2,1.2500000000 | 3,0.7550000000 | 4,1.0000000000 | 5,NULL | 6,1234567890.0000000000", r18},
+		"win_sum": {"type=numeric rows=6 1,3.0050000000 | 2,3.0050000000 | 3,3.0050000000 | 4,1234567890.0000000000 | 5,1234567890.0000000000 | 6,2.5000000000", r18},
+		"scalar":  {"type=numeric rows=6 1,7.0000000000 | 2,7.0000000000 | 3,7.0000000000 | 4,7.0000000000 | 5,7.0000000000 | 6,7.0000000000", r18},
+		"div":     {"type=numeric rows=2 1,0.4166666667 | 6,0.8333333333", r18 + "; a quotient keeps max(6, s1 + p2 + 1) digits capped at 38 (ADR-0024 §3)"},
 	}
 }
 

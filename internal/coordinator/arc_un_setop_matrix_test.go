@@ -27,9 +27,9 @@ import (
 //
 // Each statement's row in testdata/arc_un_setop_matrix.tsv names the answer
 // every arm that answers must give, how it stands to PostgreSQL's
-// (`pg` equal; `r4r18` the stored-scale text of an unmarked mixed result;
-// `r24` the trailing-zero trim of a marked one; `refused` a refusal the base
-// gives too), PostgreSQL's own answer, and the arms that refuse (each one a
+// (`pg` equal; `a13rep` ADR-0013's representative class; `refused` a refusal
+// the base gives too), PostgreSQL's own answer, and the arms that refuse
+// (each one a
 // refusal identical at the base: the stage arms' ORDER BY over the text of a
 // UNION, the asynchronous door's rename, a quoted-first SUM, a scalar
 // subquery arm). Before the rule was one function the stage planner and the
@@ -37,6 +37,19 @@ import (
 // found an input on which they differed; the agreed repair unmarked the
 // result beside a NULL, integer or expression arm, so the text equality
 // count answered 0 where PostgreSQL and the base answer 2.
+//
+// Since arc PS stage 1 (ADR-0024 §11, 2026-10-06) each value prints its own
+// display scale: the 126 `r4r18` pins (the stored-scale text of an unmarked
+// mixed result, 52 text reads and 74 counts, #1647's 28 among them) are
+// deleted — 120 answer PostgreSQL's text on every arm. Eighteen cells — a
+// UNION or INTERSECT of the NUMERIC(10,2) arm with the unconstrained column,
+// counted by a text predicate — are `a13rep`: the operation keeps the first
+// of two equal values it meets (`1` from un_x, `1.00` from rv_n), which is
+// PostgreSQL's own answer with the predicate fenced above the operation
+// (`… s OFFSET 0) q WHERE …`); unfenced, PostgreSQL's planner pushes the
+// text predicate into each arm before the deduplication and counts the
+// other value. Twelve of them answered PostgreSQL's count at the base only
+// because every value printed ten fraction digits.
 //
 // The default run is a deterministic 300-statement subset that covers every
 // arm kind × position × operation × read; WADJET_UN_SETOP_MATRIX=full runs

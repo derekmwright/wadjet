@@ -63,8 +63,16 @@ func TestArcUNSetOperationForwardingWrappers(t *testing.T) {
 		}
 	}
 	// The inner result vetoes; arithmetic over it supplies a new neutral value.
+	// PostgreSQL 17.11 prints the two alike (`2.5` three times, `2.50` once):
+	// each value keeps its own display scale, `v + 0` included. Since arc PS
+	// stage 1 (ADR-0024 §1 as amended) the flat form prints PostgreSQL's text
+	// on every arm; arithmetic still answers at the carrier scale until stage
+	// 2, so `v + 0` over the inner union's `2.5` prints 2.50 (numeric-decimal
+	// r18's in-flight-arithmetic sub-cell). Both are asserted on every arm.
 	computed := "SELECT CAST(v AS TEXT) AS x FROM (SELECT v+0 AS v FROM (SELECT v FROM rv_n UNION ALL SELECT 2.5 AS v FROM un_u) d UNION ALL SELECT v FROM un_x) s ORDER BY 1"
 	flat := "SELECT CAST(v AS TEXT) AS x FROM (SELECT v+0 AS v FROM rv_n UNION ALL SELECT 2.5 AS v FROM un_u UNION ALL SELECT v FROM un_x) s ORDER BY 1"
+	const pgText = "rows=15 0.00 | 0.0000000001 | 1 | 1 | 1.00 | 1.5 | 1.50 | 2.5 | 2.5 | 2.5 | 2.50 | 7 | 7.00 | NULL | NULL"
+	const keptComputed = "rows=15 0.00 | 0.0000000001 | 1 | 1 | 1.00 | 1.5 | 1.50 | 2.50 | 2.50 | 2.50 | 2.50 | 7 | 7.00 | NULL | NULL"
 	for _, arm := range arms {
 		a, e := arm.run(computed)
 		if e != nil {
@@ -75,8 +83,11 @@ func TestArcUNSetOperationForwardingWrappers(t *testing.T) {
 		if e != nil {
 			t.Fatal(e)
 		}
-		if prefix.ReplaceAllString(unRender(a), "") != prefix.ReplaceAllString(unRender(b), "") {
-			t.Errorf("%s computed wrapper: %s; flat: %s", arm.name, unRender(a), unRender(b))
+		if got := prefix.ReplaceAllString(unRender(b), ""); got != pgText {
+			t.Errorf("%s flat: %s, want PostgreSQL's %s", arm.name, got, pgText)
+		}
+		if got := prefix.ReplaceAllString(unRender(a), ""); got != keptComputed {
+			t.Errorf("%s computed wrapper: %s, want the kept %s (PostgreSQL %s; stage 2)", arm.name, got, keptComputed, pgText)
 		}
 	}
 }
