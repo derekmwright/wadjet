@@ -198,12 +198,12 @@ FROM table_name [alias]
 
 ### GROUP BY: what matches a key
 
-A SELECT item, a `HAVING` or `ORDER BY` term, a window's `PARTITION BY` /
-`ORDER BY` term or a `GROUPING` argument IS a GROUP BY key when it is the
-same expression — parentheses, identifier case and whitespace aside — over
-the same columns. On the embedded engine (`wadjet.DB`, `wadjet serve`) "the
-same columns" is decided by what each reference RESOLVES to, the way
-PostgreSQL decides it, not by how it is spelled (ADR-0047):
+For blocks bound in full on the embedded engine (`wadjet.DB`, `wadjet serve`),
+a SELECT item, `HAVING` or `ORDER BY` term, window `PARTITION BY` / `ORDER BY`
+term or `GROUPING` argument matches a GROUP BY key when it is the same
+expression over the same resolved columns, ignoring parentheses, identifier
+case and whitespace (ADR-0047; the group-key gate's `pair/*`, `shape/*`,
+`j/*`, `g/grouping*` rows):
 
 ```sql
 -- one key: t.n and n are the same column of ss_t
@@ -216,8 +216,11 @@ SELECT t.id + 1, COUNT(*) FROM ss_t t JOIN ss_i u ON u.id = t.id GROUP BY u.id +
 SELECT 1 + i, COUNT(*) FROM ss_t GROUP BY i + 1;
 ```
 
-The matched item is published with the key's value, order and declared
-type. A bare `ORDER BY` name names an output column first (`SELECT -t.i AS i
+The numeric example above retains the key's numeric value, order and type
+(`pair/numeric/itemQual/ordinalUnaliased` in the group-key gate). Dotted
+names, USING names and unfolded FROM-less subqueries retain the gate's
+recorded spelling-based limits (`qd/*`, `j/using*`, `corr/fromlessSubq*`).
+A bare `ORDER BY` name names an output column first (`SELECT -t.i AS i
 … GROUP BY i ORDER BY i` sorts by `-t.i`; `ORDER BY t.i` sorts by the key),
 and an output alias never stands for an input column of the same name in
 `HAVING`. Through the coordinator (`wadjetd`) a key and a term are still
