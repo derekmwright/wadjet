@@ -257,7 +257,7 @@ func ReadColumn(c *Cursor, vec *batch.Vector, numRows int, typ parquet.TypeID) e
 	if err != nil {
 		return err
 	}
-	if want >= 0 && dataLen != want {
+	if !DataLenOK(typ, numRows, want, dataLen) {
 		return fmt.Errorf("column data length %d != expected %d for %d rows of %v", dataLen, want, numRows, typ)
 	}
 
@@ -380,6 +380,38 @@ func readDecimal(c *Cursor, dataLen int, vec *batch.Vector, numRows int) error {
 			Hi: int64(binary.LittleEndian.Uint64(src[off+8:])),
 		}
 	}
+	return readDecimalDScale(src[numRows*16:], vec, numRows)
+}
+
+// readDecimalDScale reads the chunk's display-scale section (DataLenOK) into
+// vec: none leaves every value without a display scale of its own, as every
+// chunk before the section read. A code past the column's carrier scale
+// would print digits the carrier does not hold (invariant I1) and is refused.
+func readDecimalDScale(sec []byte, vec *batch.Vector, numRows int) error {
+	vec.DecimalData.ResetDScale()
+	if len(sec) == 0 {
+		return nil
+	}
+	scale := vec.DecimalData.Scale
+	valid := func(code uint8) bool {
+		return code == batch.DScaleCarrier || code == batch.DScaleUnknown || int(code) <= scale
+	}
+	switch {
+	case sec[0] == DecimalDScaleUniform && len(sec) == 2:
+		if !valid(sec[1]) {
+			return fmt.Errorf("decimal display scale %d exceeds the column's scale %d", sec[1], scale)
+		}
+		vec.DecimalData.SetUniformDScale(sec[1])
+	case sec[0] == DecimalDScalePerRow && len(sec) == 1+numRows:
+		for i, code := range sec[1:] {
+			if !valid(code) {
+				return fmt.Errorf("decimal display scale %d at row %d exceeds the column's scale %d", code, i, scale)
+			}
+			vec.DecimalData.SetDScaleCode(i, code)
+		}
+	default:
+		return fmt.Errorf("decimal display-scale section: mode %d with %d bytes for %d rows", sec[0], len(sec), numRows)
+	}
 	return nil
 }
 
@@ -409,7 +441,7 @@ func ValidateChunkBytes(schema []parquet.Column, numRows int, buf []byte) error 
 		if err != nil {
 			return fmt.Errorf("column %d: %w", ci, err)
 		}
-		if want >= 0 && dataLen != want {
+		if !DataLenOK(schema[ci].Type, numRows, want, dataLen) {
 			return fmt.Errorf("column %d (%v): data length %d != expected %d for %d rows",
 				ci, schema[ci].Type, dataLen, want, numRows)
 		}

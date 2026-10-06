@@ -658,9 +658,16 @@ func (sw *shuffleWriter) writeBytesData(bc *batch.BytesColumn, nulls *batch.Bitm
 }
 
 func (sw *shuffleWriter) writeDecimalData(vec *batch.Vector, sel []uint32, numRows int) error {
-	// Decimal: write as 16-byte Int128 pairs (lo, hi)
+	// Decimal: write as 16-byte Int128 pairs (lo, hi), then — only when the
+	// column's values carry display scales — the chunk's display-scale
+	// section (wshf.DataLenOK). A column without them writes exactly the
+	// bytes it always wrote.
 	nbytes := numRows * 16
-	binary.LittleEndian.PutUint32(sw.buf[:4], uint32(nbytes))
+	var dsec []byte
+	if vec.DecimalData.Data != nil && vec.DecimalData.HasDisplayScale() {
+		dsec = decimalDScaleSection(&vec.DecimalData, sel, numRows)
+	}
+	binary.LittleEndian.PutUint32(sw.buf[:4], uint32(nbytes+len(dsec)))
 	if _, err := sw.w.Write(sw.buf[:4]); err != nil {
 		return err
 	}
@@ -676,8 +683,10 @@ func (sw *shuffleWriter) writeDecimalData(vec *batch.Vector, sel []uint32, numRo
 			binary.LittleEndian.PutUint64(gb[i*16:], d.Lo)
 			binary.LittleEndian.PutUint64(gb[i*16+8:], uint64(d.Hi))
 		}
-		_, err := sw.w.Write(gb[:nbytes])
-		return err
+		if _, err := sw.w.Write(gb[:nbytes]); err != nil {
+			return err
+		}
+		return sw.writeRaw(dsec)
 	}
 	// Wire order is (Lo, Hi), matching the sel path above, the
 	// coordinator's decode of the same bytes, and the exec spill format. The
@@ -690,8 +699,49 @@ func (sw *shuffleWriter) writeDecimalData(vec *batch.Vector, sel []uint32, numRo
 		binary.LittleEndian.PutUint64(gb[i*16:], d.Lo)
 		binary.LittleEndian.PutUint64(gb[i*16+8:], uint64(d.Hi))
 	}
-	_, err := sw.w.Write(gb[:nbytes])
+	if _, err := sw.w.Write(gb[:nbytes]); err != nil {
+		return err
+	}
+	return sw.writeRaw(dsec)
+}
+
+func (sw *shuffleWriter) writeRaw(b []byte) error {
+	if len(b) == 0 {
+		return nil
+	}
+	_, err := sw.w.Write(b)
 	return err
+}
+
+// decimalDScaleSection is a chunk's display-scale section for the selected
+// rows of d: [uniform][code] when they share one code, else [per-row][codes].
+func decimalDScaleSection(d *batch.DecimalColumn, sel []uint32, numRows int) []byte {
+	row := func(i int) int {
+		if sel != nil {
+			return int(sel[i])
+		}
+		return i
+	}
+	if d.DScale == nil {
+		return []byte{wshf.DecimalDScaleUniform, d.UniformDScale()}
+	}
+	codes := make([]byte, 1+numRows)
+	codes[0] = wshf.DecimalDScalePerRow
+	same := true
+	for i := 0; i < numRows; i++ {
+		codes[1+i] = d.DScaleCode(row(i))
+		same = same && codes[1+i] == codes[1]
+	}
+	if numRows > 0 && same {
+		if codes[1] == batch.DScaleCarrier {
+			return nil
+		}
+		return []byte{wshf.DecimalDScaleUniform, codes[1]}
+	}
+	if numRows == 0 {
+		return nil
+	}
+	return codes
 }
 
 // The wire identity of the format — magics, envelope codec and the whole
