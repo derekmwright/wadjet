@@ -428,10 +428,23 @@ func (d Int128) FormatDecimal(scale int) string {
 	return intPart + "." + fracStr
 }
 
-// DecimalColumn stores an array of Int128 values for DECIMAL vectors.
+// DecimalColumn stores an array of Int128 values for DECIMAL vectors: the
+// carrier, every value exact at the one Scale, and beside it each value's
+// display scale (decimal_dscale.go) — nil DScale when every value shares
+// DAll's, which is every column but one assembled from values of different
+// display scales.
 type DecimalColumn struct {
 	Data  []Int128
-	Scale int // number of decimal places
+	Scale int // number of decimal places: the carrier scale S
+
+	// DScale is each row's display-scale code (DScaleCarrier, DScaleUnknown
+	// or 0..S); nil means every row has DAll's. Rows past its length read
+	// DAll's too. Read and written through DScaleCode / SetDScaleCode and
+	// the copy helpers, never indexed directly.
+	DScale []uint8
+	// DAll is the uniform code, encoded so the zero value is DScaleCarrier:
+	// 0 = DScaleCarrier, -1 = DScaleUnknown, d+1 = display scale d.
+	DAll int16
 }
 
 // NewDecimalColumn creates a new decimal column with the given capacity and scale.

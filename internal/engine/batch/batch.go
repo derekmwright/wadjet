@@ -388,6 +388,9 @@ func resetVectorForReuse(col *Vector, numRows int) {
 	col.claimed = false
 	col.Len = numRows
 	col.Nulls.ResetNonNull(numRows)
+	// A recycled vector holds new values: none of them has a display scale
+	// until a writer records one.
+	col.DecimalData.ResetDScale()
 	switch col.Type {
 	case TypeString, TypeBytes, TypeIPv6, TypeCIDR, TypeUUID:
 		col.BytesData.Reset()
@@ -422,6 +425,7 @@ func truncateVectorStorage(v *Vector) {
 	if v.DecimalData.Data != nil {
 		v.DecimalData.Data = v.DecimalData.Data[:0]
 	}
+	v.DecimalData.ResetDScale()
 	v.BytesData.Reset()
 	if len(v.BytesData.Offsets) > 0 {
 		v.BytesData.Offsets = v.BytesData.Offsets[:1]

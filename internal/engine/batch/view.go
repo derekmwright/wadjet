@@ -184,6 +184,7 @@ func (v *Vector) Flatten() {
 				flat.DecimalData.Data[di] = base.DecimalData.Data[si]
 			}
 		}
+		flat.DecimalData.GatherCodes(&base.DecimalData, idx)
 	case TypeString, TypeBytes, TypeIPv6, TypeCIDR, TypeUUID:
 		// Pre-size the destination arena to avoid growslice per SetFrom.
 		srcOff := base.BytesData.Offsets

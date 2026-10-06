@@ -658,6 +658,7 @@ func (v *Vector) ResetForWrite(n int) {
 		v.BytesData.ResetForWrite(n)
 	case TypeDecimal:
 		v.DecimalData.Data = resizeCleared(v.DecimalData.Data, n)
+		v.DecimalData.ResetDScale()
 	case TypeVector:
 		v.Float32Data = resizeCleared(v.Float32Data, n*v.VectorDim)
 	default:
@@ -789,6 +790,7 @@ func (v *Vector) EnsureLen(n int) {
 			v.BytesData.Offsets = g
 		}
 	case TypeDecimal:
+		v.DecimalData.truncateDScale(n)
 		if cap(v.DecimalData.Data) >= n {
 			v.DecimalData.Data = v.DecimalData.Data[:n]
 		} else {
@@ -926,25 +928,29 @@ func NewMapVector(length int, keyType, valueType TypeID) *Vector {
 // Note: returns boxed values for numeric types (unavoidable with any return type).
 // Prefer typed accessors (GetInt64, GetFloat64, etc.) in hot paths.
 // GetValueOf is GetValue for a value of a column whose declaration is
-// known: a DECIMAL column created from an unconstrained numeric
-// (parquet.Column.Unconstrained, ADR-0024 §10) boxes its PRINTED text, the
-// stored scale's trailing zeros dropped (TrimDecimalText) — `1.5` where
-// GetValue boxes `1.5000000000`. A DECIMAL's box is its text, so this is the
-// one printer decision for such a column: the result rows, every expression
+// known, and for a DECIMAL it is the ONE printer: the value's text at its
+// display scale (DecimalColumn.Text) — `2.50`, `1.5`, `7` side by side in
+// one column, as PostgreSQL prints an unconstrained numeric. unconstrained
+// is the column's ADR-0024 §10 mark, which decides only how a value with no
+// display scale of its own prints (without the stored scale's trailing
+// zeros). A DECIMAL's box is its text, so the result rows, every expression
 // that reads the column's value (CAST to TEXT, ||, concat, format,
-// json_build_object …) and every door read the same box. Every other value
-// is GetValue's.
+// json_build_object …) and every door read the same box. GetValue keeps the
+// CANONICAL text at the carrier scale, because that box is also a key
+// (GROUP BY, the coordinator's re-aggregation, the window comparator) and
+// equal numbers must box alike (invariant I5). Every other value is
+// GetValue's.
 func (v *Vector) GetValueOf(i int, unconstrained bool) any {
-	if !unconstrained || v.Type != TypeDecimal {
+	if v.Type != TypeDecimal {
 		return v.GetValue(i)
 	}
 	if v.Nulls.IsNullFast(i) {
 		return nil
 	}
 	if v.Base != nil {
-		return v.Base.GetValueOf(int(v.Indices[i]), true)
+		return v.Base.GetValueOf(int(v.Indices[i]), unconstrained)
 	}
-	return TrimDecimalText(v.DecimalData.Data[i].FormatDecimal(v.DecimalData.Scale))
+	return v.DecimalData.Text(i, unconstrained)
 }
 
 func (v *Vector) GetValue(i int) any {
@@ -1405,6 +1411,9 @@ func (v *Vector) SetValue(i int, val any) {
 			v.mismatch(val)
 		}
 	case TypeDecimal:
+		// Every arm but text writes a value with no display scale of its
+		// own; text names one (DecimalColumn.Text, ADR-0024 §1 as amended).
+		dcode := DScaleCarrier
 		switch tv := val.(type) {
 		case Int128:
 			v.DecimalData.Data[i] = tv
@@ -1449,9 +1458,11 @@ func (v *Vector) SetValue(i int, val any) {
 			// number lands on zero. Value-producing callers take
 			// SetValueChecked, which reports both (#553, ADR-0024 item 4).
 			v.DecimalData.Data[i] = ParseDecimalString(tv, v.DecimalData.Scale)
+			dcode = textDScaleCode(tv, v.DecimalData.Scale)
 		default:
 			v.mismatch(val)
 		}
+		v.DecimalData.SetDScaleCode(i, dcode)
 	case TypeVector:
 		if v.VectorDim <= 0 {
 			// A VECTOR vector allocated without its dimension has nowhere to
@@ -1678,6 +1689,13 @@ func (v *Vector) setCheckedDecimal(i int, val any) error {
 		}
 		v.Nulls.SetValid(i)
 		v.DecimalData.Data[i] = d
+		// The boxed setter is where a value's display scale enters a vector
+		// from the row path: a DECIMAL's box is its text, and the text's
+		// fraction digits are its display scale (a choice's chosen value, a
+		// literal's spelling, a set-operation arm's value). Text at the
+		// column's own scale — every box of a value at that scale — keeps
+		// the column uniform.
+		v.DecimalData.SetDScaleCode(i, textDScaleCode(tv, v.DecimalData.Scale))
 		return nil
 	case int64, int, int32:
 		// The ingest reinterpretation (SetValue's int arms) is a CARRIER
@@ -1727,6 +1745,10 @@ func (v *Vector) setCheckedDecimalFloat(i int, f float64, bitSize int) error {
 	}
 	v.Nulls.SetValid(i)
 	v.DecimalData.Data[i] = d
+	// A float's shortest spelling is not a display scale anything wrote (a
+	// literal reaches here as the double compileLit boxed, `1.50` as 1.5),
+	// so the value displays at the carrier, as before.
+	v.DecimalData.SetDScaleCode(i, DScaleCarrier)
 	return nil
 }
 
@@ -1850,6 +1872,9 @@ func growForAppend(v *Vector, val any) (idx int, hasValue bool) {
 		v.BytesData.Offsets = append(v.BytesData.Offsets, v.BytesData.Offsets[len(v.BytesData.Offsets)-1])
 	case TypeDecimal:
 		v.DecimalData.Data = append(v.DecimalData.Data, Int128{})
+		if v.DecimalData.DScale != nil {
+			v.DecimalData.SetDScaleCode(len(v.DecimalData.Data)-1, v.DecimalData.UniformDScale())
+		}
 	case TypeVector:
 		// A VECTOR row occupies VectorDim components, so a logical row costs
 		// VectorDim slots here — a NULL placeholder included. Without this arm
@@ -2338,11 +2363,7 @@ func (v *Vector) AppendFrom(src *Vector, si int) {
 			v.BytesData.Offsets = append(v.BytesData.Offsets, uint32(len(v.BytesData.Data)))
 		}
 	case TypeDecimal:
-		var x Int128
-		if !isNull {
-			x = src.DecimalData.Data[si]
-		}
-		v.DecimalData.Data = append(v.DecimalData.Data, x)
+		v.DecimalData.AppendRow(&src.DecimalData, si, isNull)
 	case TypeVector:
 		dim := v.VectorDim
 		if dim > 0 {
@@ -2441,7 +2462,7 @@ func (v *Vector) CopyValueFrom(di int, src *Vector, si int) {
 		}
 	case TypeDecimal:
 		if !isNull {
-			v.DecimalData.Data[di] = src.DecimalData.Data[si]
+			v.DecimalData.CopyRow(di, &src.DecimalData, si)
 		}
 	case TypeVector:
 		dim := src.VectorDim
@@ -2566,6 +2587,13 @@ func (v *Vector) SetComputedChecked(i int, val any) error {
 	}
 	v.Nulls.SetValid(i)
 	v.DecimalData.Data[i] = d
+	// An integer is a numeric of display scale 0 (PostgreSQL's int-to-numeric
+	// cast): `CASE … THEN 14 ELSE 13.25 END` prints 14.
+	if v.DecimalData.Scale > 0 {
+		v.DecimalData.SetDScaleCode(i, 0)
+	} else {
+		v.DecimalData.SetDScaleCode(i, DScaleCarrier)
+	}
 	return nil
 }
 
