@@ -466,7 +466,7 @@ carries no category there (a parquet.Column, a batch.Vector and a `.wshf`
 schema have no field for it), so `CAST(s.x AS INTEGER)` over a DISTINCT
 `5 / 2.0` still rounds half to even (dml-assignment#r2, candidate NX-C1).
 
-Amended 2026-10-04 (arc RE, #381 #1542): the materialized column reads the
+Amended 2026-10-04 (#381 #1542): the materialized column reads the
 PLAN's category. ROUND, the integer cast and an array element's cast make
 one decision (expr.roundsHalfEven) from the operand's category, and the
 category of a column a previous operator produced is the plan's

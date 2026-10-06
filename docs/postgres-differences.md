@@ -436,7 +436,7 @@ Neither type exists in PostgreSQL core; wadjet defines their total orders. (cata
 
 **`round(x, n)` over a double precision or real value answers.**
 
-`round(f, 1)` over a double precision 0.25 answers 0.2; PostgreSQL has no `round(double precision, integer)` and raises 42883. The value is rounded by its own type's rule, as `round(f)` is: f·10ⁿ half to even, then scaled back. Over a numeric it is PostgreSQL's `round(numeric, integer)` on both. (catalog: [numeric-decimal#r22](adr/0012-divergences/numeric-decimal.md#catalog); #381)
+`round(f, 1)` over a double precision 0.25 answers 0.2; PostgreSQL has no `round(double precision, integer)` and raises 42883. The value is rounded by its own type's rule, as `round(f)` is: f·10ⁿ half to even, then scaled back. Where 10ⁿ or f·10ⁿ is not a finite double (n ≥ 309, or n ≥ 308 − log10|f|, or n ≤ −324) a finite f raises 22003. Over a numeric it is PostgreSQL's `round(numeric, integer)` on both. (catalog: [numeric-decimal#r22](adr/0012-divergences/numeric-decimal.md#catalog); #381)
 
 **QUALIFY follows DuckDB 1.1.3.**
 
