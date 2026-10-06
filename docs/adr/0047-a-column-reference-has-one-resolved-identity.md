@@ -70,7 +70,7 @@ A block is bound in full or not at all. A reference the binder cannot bind with 
 
 A consumer that compares a bound term with an unbound one is #738's mechanism — the 42803 check admits the term, a text site misses it, and the item is published as arithmetic — and is not shippable. The census gate (§ Gates) counts it: none on the corpora.
 
-A DOOR records bindings only when the plan it executes is built from that same AST by consumers that read them (`auth.BindStatementColumns` → `physical.BindColumnsUnderPolicy`): the embedded engine's `Query`, its CTAS / INSERT … SELECT door and the pgwire server over it. The coordinator validates as before and plans an unbound AST, so every stage-DAG arm — and the coordinator's in-process fast path — runs the base code by construction until stage 5 (§ Alternatives 7: no route).
+A DOOR records bindings only when the plan it executes is built from that same AST by consumers that read them (`auth.BindStatementColumns` → `physical.BindColumnsUnderPolicy`): the embedded engine's `Query`, its CTAS / INSERT … SELECT door and the pgwire server over it. The coordinator validates as before and plans an unbound AST, so every stage-DAG arm — and the coordinator's in-process fast path — runs the base code by construction until stage 5 (§ Alternatives 7: no route). A binder that does not stamp leaves the AST exactly as it finds it: under a column policy the embedded door validates a statement twice — at the door, which binds, and again under the policy's schema after the plan is built (`auth.EnforcePlanPolicies`) — and the second pass reads the first pass's bindings rather than clearing them, so the logical and the physical planner never see one block bound and unbound.
 
 ### 7. Identity across a stage boundary and in the task message — by position, never by name
 
@@ -129,6 +129,7 @@ The identity type (`RelID`, `Binding`, `GroupTermIdentity`) lives in `internal/p
 ## Gates
 
 - `coordinator.TestArcGKGroupKeySpellingEveryArm` — 1,063 cells × five arms against PostgreSQL 17.11: the single-process arms answer PostgreSQL or a kept line (base-identical or the alike spelling's catalogued row); the DAG arms are pinned to the base. 418 cells fail with the file on the base.
-- `coordinator.TestArcCI1BindingCensusOverTheGroupKeyTable` and `tpch.TestCI1BindingCensusTPCH` — RISKS M1 / M3 / M5 as counts: no mixed block, no bound term compared with an unbound one, no ordinal disagreement.
+- `wadjet.TestArcCI1BindingCensusOverTheGroupKeyTable` and `tpch.TestCI1BindingCensusTPCH` — RISKS M1 / M3 / M5 as counts: no mixed block, no bound term compared with an unbound one, no ordinal disagreement.
+- `server.TestArcCI1GroupKeyByBindingNeverPublishesAPolicedValue` — the nine-door masking census over e7emp (masked ssn / acct, denied salary) and e7bal (row filter): no policed value and no denied column reaches a client, a masked key answers the mask, and the mixed-spelling cells answer on the three embedded doors and keep 42803 on the six coordinator and http doors.
 - `pgwire.TestArcGKGroupKeySpellingOnTheWire`, `wadjet.TestArcGKEmbeddedGroupKeySpelling` (declared OIDs, CTAS, INSERT … SELECT), `wadjet.TestArcGKGroupKeyMatchPlanningBound` (depth 16, 200 items over 50 keys, a twelve-way join, each under 2 s).
 - `coordinator.TestTheIdentityErasesAQualifierAndATypeSynonym` (#738's mirror spelling now answers on the single-process arms and keeps its 42803 on the DAG) and `coordinator.TestArcNXNumericCarrierEveryArm` (#1524's issue cells' pins hold on the DAG arms only).
