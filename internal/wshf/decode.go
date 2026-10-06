@@ -385,14 +385,36 @@ func readDecimal(c *Cursor, dataLen int, vec *batch.Vector, numRows int) error {
 
 // readDecimalDScale reads the chunk's display-scale section (DataLenOK) into
 // vec: none leaves every value without a display scale of its own, as every
-// chunk before the section read. A code past the column's carrier scale
-// would print digits the carrier does not hold (invariant I1) and is refused.
+// chunk before the section read. The section is checked by
+// checkDecimalDScaleSection first, the check the extent validator runs.
 func readDecimalDScale(sec []byte, vec *batch.Vector, numRows int) error {
 	vec.DecimalData.ResetDScale()
+	if err := checkDecimalDScaleSection(sec, vec.DecimalData.Scale, numRows); err != nil {
+		return err
+	}
+	switch {
+	case len(sec) == 0:
+	case sec[0] == DecimalDScaleUniform:
+		vec.DecimalData.SetUniformDScale(sec[1])
+	default:
+		for i, code := range sec[1:] {
+			vec.DecimalData.SetDScaleCode(i, code)
+		}
+	}
+	return nil
+}
+
+// checkDecimalDScaleSection is the ONE check of a chunk's display-scale
+// section, run by every reader — the decoder (readDecimalDScale), the
+// streaming stage walk through it, and the extent validator
+// (ValidateChunkBytes): the mode must be uniform with one code or per-row
+// with one code per row, and every code must be DScaleCarrier,
+// DScaleUnknown or at most the column's carrier scale — a code past it
+// would print digits the carrier does not hold (invariant I1).
+func checkDecimalDScaleSection(sec []byte, scale, numRows int) error {
 	if len(sec) == 0 {
 		return nil
 	}
-	scale := vec.DecimalData.Scale
 	valid := func(code uint8) bool {
 		return code == batch.DScaleCarrier || code == batch.DScaleUnknown || int(code) <= scale
 	}
@@ -401,13 +423,11 @@ func readDecimalDScale(sec []byte, vec *batch.Vector, numRows int) error {
 		if !valid(sec[1]) {
 			return fmt.Errorf("decimal display scale %d exceeds the column's scale %d", sec[1], scale)
 		}
-		vec.DecimalData.SetUniformDScale(sec[1])
 	case sec[0] == DecimalDScalePerRow && len(sec) == 1+numRows:
 		for i, code := range sec[1:] {
 			if !valid(code) {
 				return fmt.Errorf("decimal display scale %d at row %d exceeds the column's scale %d", code, i, scale)
 			}
-			vec.DecimalData.SetDScaleCode(i, code)
 		}
 	default:
 		return fmt.Errorf("decimal display-scale section: mode %d with %d bytes for %d rows", sec[0], len(sec), numRows)
@@ -445,7 +465,20 @@ func ValidateChunkBytes(schema []parquet.Column, numRows int, buf []byte) error 
 			return fmt.Errorf("column %d (%v): data length %d != expected %d for %d rows",
 				ci, schema[ci].Type, dataLen, want, numRows)
 		}
-		if err := c.Skip(dataLen, "column data"); err != nil {
+		if schema[ci].Type == parquet.TypeDecimal && dataLen != want {
+			// The display-scale section after the carriers is checked as
+			// the decoder checks it, not only measured.
+			if err := c.Skip(want, "column data"); err != nil {
+				return fmt.Errorf("column %d: %w", ci, err)
+			}
+			sec, err := c.Take(dataLen-want, "decimal display-scale section")
+			if err != nil {
+				return fmt.Errorf("column %d: %w", ci, err)
+			}
+			if err := checkDecimalDScaleSection(sec, schema[ci].Scale, numRows); err != nil {
+				return fmt.Errorf("column %d: %w", ci, err)
+			}
+		} else if err := c.Skip(dataLen, "column data"); err != nil {
 			return fmt.Errorf("column %d: %w", ci, err)
 		}
 		if want == LenBytes {
