@@ -760,6 +760,16 @@ type WindowExpr struct {
 	// (aggInputIsWideInteger) and why the window now carries the same node to
 	// ask the same question (#987 review, B1).
 	InputExpr plansql.Node
+	// ArgExprs, PartitionByExprs and OrderByExprs are the PARSED terms the
+	// text fields above were rendered from, index-aligned with Arguments(),
+	// PartitionBy and OrderBy, and nil where the builder had no tree. They
+	// carry the binder's bindings (plansql.ColRef.Bound, ADR-0047) to the one
+	// place a window term is matched to a GROUP BY key — the re-spelling over
+	// an aggregate — so a term of a bound block is never compared as an
+	// unbound re-parse of its own text.
+	ArgExprs         []plansql.Node
+	PartitionByExprs []plansql.Node
+	OrderByExprs     []plansql.Node
 }
 
 // InputColumn returns the VALUE argument of a window expression: a column,
