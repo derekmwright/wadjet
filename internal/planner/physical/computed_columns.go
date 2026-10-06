@@ -225,6 +225,8 @@ func (a *aggPreProject) Execute(_ context.Context, in *batch.RecordBatch) (*batc
 			col := a.computedVectors[k]
 			col.Len = in.Len
 			col.Nulls.ResetNonNull(in.Len)
+			// New values: none has a display scale until a writer records one.
+			col.DecimalData.ResetDScale()
 			switch col.Type {
 			case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
 				col.BytesData.Reset()

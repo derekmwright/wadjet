@@ -32,7 +32,10 @@ func ColumnRef(name string) Expression {
 		}
 		v := b.Columns[idx]
 		if field < 0 {
-			return v.GetValue(row)
+			// The column's printed box (GetValueOf): a DECIMAL value moved by
+			// a column reference keeps its display scale (ADR-0024 §1 as
+			// amended); every other type boxes as GetValue.
+			return v.GetValueOf(row, false)
 		}
 		return rowFieldValue(v, field, row)
 	}

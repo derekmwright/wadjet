@@ -36,11 +36,15 @@ func (h *HashAggregate) processRow(b *batch.RecordBatch, row int) {
 		return
 	}
 
-	// New group
+	// New group. Its key values are the first member's PRINTED boxes, so a
+	// DECIMAL key keeps that member's display scale through the output,
+	// the in-memory merge and the spill run's value section, as PostgreSQL's
+	// representative does (ADR-0024 §1 as amended; ADR-0013's representative
+	// class). The merge key is the value's (appendGroupKeyColumn).
 	keyVals := make([]any, len(h.GroupByCols))
 	for i, idx := range h.groupColIdx {
 		if idx >= 0 {
-			keyVals[i] = b.Columns[idx].GetValue(row)
+			keyVals[i] = b.Columns[idx].GetValueOf(row, false)
 		}
 	}
 	gs := h.gsPool.alloc()
@@ -111,7 +115,7 @@ func (h *HashAggregate) processRowGroupingSets(b *batch.RecordBatch, row int) {
 		keyVals := make([]any, len(h.GroupByCols))
 		for i, idx := range h.groupColIdx {
 			if inSet[i] && idx >= 0 {
-				keyVals[i] = b.Columns[idx].GetValue(row)
+				keyVals[i] = b.Columns[idx].GetValueOf(row, false)
 			}
 			// columns not in set stay nil
 		}
