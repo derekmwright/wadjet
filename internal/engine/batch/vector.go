@@ -1873,7 +1873,7 @@ func growForAppend(v *Vector, val any) (idx int, hasValue bool) {
 	case TypeDecimal:
 		v.DecimalData.Data = append(v.DecimalData.Data, Int128{})
 		if v.DecimalData.DScale != nil {
-			v.DecimalData.SetDScaleCode(len(v.DecimalData.Data)-1, v.DecimalData.UniformDScale())
+			v.DecimalData.setDScaleCode(len(v.DecimalData.Data)-1, v.DecimalData.UniformDScale())
 		}
 	case TypeVector:
 		// A VECTOR row occupies VectorDim components, so a logical row costs

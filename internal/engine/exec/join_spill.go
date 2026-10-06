@@ -498,9 +498,12 @@ func writeColumnarBatch(w *bufio.Writer, b *batch.RecordBatch) error {
 		}
 		// Bit 2: the column's values carry display scales (ADR-0024 §1 as
 		// amended), written after the data by writeDisplayScales. A column
-		// without them writes the bytes it always wrote.
+		// without them — or whose rows all print at the carrier — writes the
+		// bytes it always wrote.
 		if col.Type == batch.TypeDecimal && col.DecimalData.HasDisplayScale() {
-			flags |= 4
+			if code, ok := col.DecimalData.UniformDScaleOver(numRows); !ok || code != batch.DScaleCarrier {
+				flags |= 4
+			}
 		}
 		w.WriteByte(flags)
 
@@ -546,9 +549,9 @@ func writeColumnarBatch(w *bufio.Writer, b *batch.RecordBatch) error {
 // carriers: [0][code] when every row shares one, else [1][n codes]. The run
 // is written and read by this process within one query.
 func writeDisplayScales(w *bufio.Writer, d *batch.DecimalColumn, n int) {
-	if d.DScale == nil {
+	if code, ok := d.UniformDScaleOver(n); ok {
 		w.WriteByte(0)
-		w.WriteByte(d.UniformDScale())
+		w.WriteByte(code)
 		return
 	}
 	w.WriteByte(1)
