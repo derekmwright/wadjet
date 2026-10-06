@@ -1491,9 +1491,9 @@ carrier:
   in-memory group and join key, the spill run's merge key (a DECIMAL box
   read without its trailing zeros), the boxed coordinator key — is the
   value's. Which of two equal values represents a group is the first one
-  met, as on PostgreSQL, where it depends on the plan: a new ADR-0013
-  class (the display scale of a representative of equal numeric values),
-  gated by value.
+  met, as on PostgreSQL, where it depends on the plan; a predicate over the
+  text of a set operation's output, which PostgreSQL may test before or
+  after the operation chooses that representative, is ADR-0013 item 11.
 - **Where a display scale comes from in stage 1.** A value written from
   TEXT records the text's fraction digits (below S; text at the column's
   own scale leaves it uniform) — a DECIMAL box is its printed text, so a

@@ -1,4 +1,4 @@
-# arc PS stage 1: a NUMERIC value carries its display scale (TestArcPSDisplayScaleEveryArm). Fixture: unPGFixture + unibFixture. r18_*: numeric-decimal r18's COALESCE / CASE sub-cells and #764's statements; r4_*: set-operations r4 incl. the 2.50-veto sub-cell; c1647*: #1647's statement and its companion; k_*: a column whose values carry different display scales through every consumer that materializes it; i5_*: equal values of different display scales compare, join, group and dedup as one.
+# arc PS stage 1: a NUMERIC value carries its display scale (TestArcPSDisplayScaleEveryArm). Fixture: unPGFixture + unibFixture. r18_*: numeric-decimal r18's COALESCE / CASE sub-cells and #764's statements; r4_*: set-operations r4 incl. the 2.50-veto sub-cell; c1647*: #1647's statement and its companion; i11_*: a text predicate over a set operation whose arms carry different display scales (ADR-0013 item 11: PostgreSQL's answer is its fenced statement's); k_*: a column whose values carry different display scales through every consumer that materializes it; i5_*: equal values of different display scales compare, join, group and dedup as one.
 r18_coalesce_lit13	SELECT id, COALESCE(n, 12.3456789012345) FROM un_t
 r18_coalesce_15	SELECT id, COALESCE(n, 1.5) FROM un_t
 r18_coalesce_150	SELECT id, COALESCE(n, 1.50) FROM un_t
@@ -27,6 +27,8 @@ r4_nested	SELECT v FROM un_x UNION ALL (SELECT 2.50 AS v FROM un_u WHERE id = 1 
 r4_three	SELECT v FROM un_u UNION ALL SELECT n FROM un_t UNION ALL SELECT 1.5 FROM un_x WHERE id = 1
 c1647	SELECT count(*) FROM (SELECT v FROM un_x UNION ALL SELECT 2.50 AS v FROM un_u) s WHERE CAST(v AS TEXT) LIKE '%0'
 c1647_companion	SELECT count(*) FROM (SELECT v FROM un_x UNION ALL SELECT v FROM rv_n) s WHERE CAST(v AS TEXT) LIKE '%0'
+i11_union_zero	SELECT count(*) FROM (SELECT v FROM un_x UNION SELECT v FROM rv_n) s WHERE CAST(v AS TEXT) LIKE '%0'
+i11_intersect_one	SELECT count(*) FROM (SELECT v FROM un_x INTERSECT SELECT v FROM rv_n) s WHERE CAST(v AS TEXT) = '1'
 k_filter	SELECT id, k FROM (SELECT id, COALESCE(n, 1.5) AS k FROM un_t) s WHERE k > 1
 k_order_limit	SELECT k FROM (SELECT COALESCE(n, 1.5) AS k FROM un_t) s ORDER BY k DESC LIMIT 3
 k_cte2	WITH c AS (SELECT id, COALESCE(n, 1.5) AS k FROM un_t) SELECT a.id, a.k, b.k FROM c a JOIN c b ON a.id = b.id

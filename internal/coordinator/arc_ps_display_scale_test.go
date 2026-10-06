@@ -28,9 +28,14 @@ import (
 // dag-aggsplit, the fast path, the asynchronous door and the asynchronous
 // door with its probe split forced — the display scale crosses the .wshf
 // exchange, the spill run, the coordinator's merge and the asynchronous
-// result. The rows are compared as text, sorted; no cell depends on which
-// of two equal values represents a group (ADR-0013's representative class):
-// the i5_* cells count, they do not print, a group or distinct value.
+// result. The rows are compared as text, sorted; the i5_* cells count, they
+// do not print, a group or distinct value. The i11_* cells test the TEXT of
+// a set operation's output whose arms carry equal values at different
+// display scales: PostgreSQL's answer depends on whether its planner pushes
+// the predicate into the arms (ADR-0013 item 11), and their PostgreSQL row
+// is its answer to the statement with the set operation fenced (`OFFSET
+// 0`), which tests the representative the operation chose — the reading
+// this engine evaluates on every arm.
 func TestArcPSDisplayScaleEveryArm(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: eleven arms over the display scale")

@@ -150,6 +150,32 @@ named mechanism.
     window is the defect; `wadjet.TestWindowUnorderedRowNumberIsAPermutation`
     is the replacement, run with the scan forced wide so the reordering
     actually happens rather than holding vacuously.
+11. **The text of a value PostgreSQL may test before or after a set operation
+    chooses its representative.** (2026-10-06, arc PS stage 1; ADR-0024 §11.)
+    A predicate over the TEXT of a numeric column of a UNION, INTERSECT or
+    EXCEPT whose arms carry different display scales answers differently in
+    PostgreSQL depending on its plan: `SELECT count(*) FROM (SELECT v FROM
+    un_x UNION SELECT v FROM rv_n) s WHERE CAST(v AS TEXT) LIKE '%0'` counts
+    5 unfenced, because its planner pushes the predicate into each arm's scan
+    and tests each arm's own text (`1` from the bare NUMERIC un_x, `1.00`
+    from the NUMERIC(10,2) rv_n) BEFORE the set operation forms its common
+    output and keeps one representative of the equal values, and 2 with the
+    set operation fenced by `OFFSET 0`, where the predicate reads the
+    operation's output (`EXPLAIN (VERBOSE)` shows the filter below and above
+    the operation respectively). Over the UN set-operation matrix's 648
+    count statements exactly 18 change with the fence. This engine evaluates
+    the predicate over the set operation's output — the SQL reading of the
+    statement — and prints the surviving representative's own display scale,
+    so it answers PostgreSQL's FENCED statement on every arm. The oracle is
+    configured per statement, never a blanket fence: the 18 rows of
+    `coordinator.TestArcUNSetOperationMatrix`'s `one` / `zero` count reads
+    whose answer the fence changes carry the disposition `fenced` and
+    PostgreSQL's fenced answer, and `coordinator.TestArcPSDisplayScaleEveryArm`'s
+    `i11_*` cells carry the two statements above; every other count
+    statement answers alike either way and is compared with the statement as
+    written. Which of two equal values a set operation keeps is itself plan
+    order (PostgreSQL's HashAggregate keeps the first it meets), so a gate
+    that prints a representative states the plan it measured.
 
 ### Amendment 2026-09-12: a per-RUN difference in the ROW SET under a TOTAL key is never one of these classes, and the ARMS have to be separable (#1058)
 

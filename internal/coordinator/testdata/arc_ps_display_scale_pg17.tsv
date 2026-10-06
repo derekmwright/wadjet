@@ -27,6 +27,9 @@ r4_nested	rows=13 0.00 | 0.0000000001 | 1 | 1 | 1.00 | 1.5 | 1.50 | 2.50 | 2.50 
 r4_three	rows=10 0.1 | 0.75 | 1.25 | 1.25 | 1.5 | 10.00 | 2.50 | 3.33 | 7 | NULL
 c1647	rows=1 3
 c1647_companion	rows=1 5
+# i11_*: ADR-0013 item 11 — PostgreSQL's answer to the statement with the set operation fenced (`… UNION SELECT v FROM rv_n OFFSET 0) s …`), which tests the representative the set operation chose; unfenced its planner tests each arm's own text first and answers 5 and 0 (measured 17.11, 2026-10-06).
+i11_union_zero	rows=1 2
+i11_intersect_one	rows=1 1
 k_filter	rows=5 1,1.25 | 2,2.50 | 3,1.5 | 4,3.33 | 5,10.00
 k_order_limit	rows=3 10.00 | 2.50 | 3.33
 k_cte2	rows=6 1,1.25,1.25 | 2,2.50,2.50 | 3,1.5,1.5 | 4,3.33,3.33 | 5,10.00,10.00 | 6,0.75,0.75
