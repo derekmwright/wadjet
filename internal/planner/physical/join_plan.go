@@ -316,8 +316,21 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 			joinType = exec.RightAntiJoin
 		}
 		hj.JoinType = joinType
-		// Swap children
-		node.Children[0], node.Children[1] = node.Children[1], node.Children[0]
+		// Swap the children on a COPY of the node: the rest of this build
+		// reads the physical sides from it, and the logical plan keeps the
+		// outer relation first. Every walk that asks what a semi or anti
+		// join emits (the category, declared-output, naming and key-type
+		// walks) reads Children[0] as the side whose rows it emits; after
+		// an in-place swap a Project compiled above this join read the
+		// INNER relation's columns as the outer's — `round(b)` over a
+		// numeric b under IN against a table more than three times larger
+		// took that table's double precision b and rounded half to even
+		// (2 where PostgreSQL answers 3). Copying also makes a second build
+		// of the same node plan the same join instead of a semi join over
+		// the swapped sides.
+		swapped := *node
+		swapped.Children = append([]*logical.Node{node.Children[1], node.Children[0]}, node.Children[2:]...)
+		node = &swapped
 		// Swap keys and update the hash join
 		leftKeys, rightKeys = rightKeys, leftKeys
 		hj.LeftKeys = leftKeys
