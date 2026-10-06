@@ -121,9 +121,9 @@ func TestSetOpReconcilesArmsOfDifferentType(t *testing.T) {
 		// as the already-scaled carrier ADR-0018 §4 defines for ingest. The
 		// integer 1 used to come back as 0.0001.
 		{"numeric_then_bigint", "SELECT d AS v FROM t_dec4 UNION ALL SELECT i FROM t_int",
-			parquet.TypeDecimal, []string{"1.0000", "2.5000"}},
+			parquet.TypeDecimal, []string{"1", "2.5000"}}, // PostgreSQL 17.11 (ADR-0024 §11)
 		{"bigint_then_numeric", "SELECT i AS v FROM t_int UNION ALL SELECT d FROM t_dec4",
-			parquet.TypeDecimal, []string{"1.0000", "2.5000"}},
+			parquet.TypeDecimal, []string{"1", "2.5000"}}, // PostgreSQL 17.11 (ADR-0024 §11)
 		// Shape 2: `double precision UNION ALL numeric` resolves to double
 		// precision. Under the first arm's FLOAT64 schema the DECIMAL arm's
 		// rendered TEXT hit the #361 store guard and the query FAILED
@@ -169,7 +169,7 @@ func TestSetOpReconcilesArmsOfDifferentType(t *testing.T) {
 		// A DISTINCT form, so the dedup key is exercised on a widened column
 		// too: the two arms hold different numbers, so both survive.
 		{"union_distinct_across_types", "SELECT d AS v FROM t_dec4 UNION SELECT i FROM t_int",
-			parquet.TypeDecimal, []string{"1.0000", "2.5000"}},
+			parquet.TypeDecimal, []string{"1", "2.5000"}}, // PostgreSQL 17.11 (ADR-0024 §11)
 		// The same on the float rung. The key reads the BOX, so both arms
 		// have to arrive already narrowed to float32 or the widened arm keys
 		// as a third member.

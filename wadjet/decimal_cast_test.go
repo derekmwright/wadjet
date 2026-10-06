@@ -375,12 +375,12 @@ func TestDecimalCastIsAChoiceAndSetOpArm(t *testing.T) {
 	}{
 		{"set-operation arm",
 			"SELECT CAST(a AS DECIMAL(10,2)) AS v FROM decdecl WHERE id = 1 " +
-				"UNION ALL SELECT b FROM decdecl WHERE id = 1", "12.7500"},
+				"UNION ALL SELECT b FROM decdecl WHERE id = 1", "12.75"}, // PostgreSQL 17.11 (ADR-0024 §11)
 		{"coalesce argument",
-			"SELECT COALESCE(CAST(a AS DECIMAL(10,2)), b) AS v FROM decdecl WHERE id = 1", "12.7500"},
+			"SELECT COALESCE(CAST(a AS DECIMAL(10,2)), b) AS v FROM decdecl WHERE id = 1", "12.75"}, // PostgreSQL 17.11 (ADR-0024 §11)
 		{"case branch",
 			"SELECT CASE WHEN id = 1 THEN CAST(a AS DECIMAL(10,2)) ELSE b END AS v " +
-				"FROM decdecl WHERE id = 1", "12.7500"},
+				"FROM decdecl WHERE id = 1", "12.75"}, // PostgreSQL 17.11 (ADR-0024 §11)
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			res := ddrQuery(t, db, tc.sql)

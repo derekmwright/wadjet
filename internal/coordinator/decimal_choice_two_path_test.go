@@ -50,13 +50,13 @@ func TestDecimalChoiceExpressionTwoPath(t *testing.T) {
 		// DECIMAL(18,4) — the maximum scale with the widest integer part —
 		// so every row renders with four fraction digits.
 		{"greatest", "GREATEST(a, b)",
-			[]string{"12.7500", "12.7501", "12.7500", "-0.0100", "10.0000", "0.0000", "1.0000", "12.7500", ""}},
+			[]string{"12.75", "12.7501", "12.75", "-0.01", "10.0000", "0.00", "1.0000", "12.75", ""}}, // PostgreSQL 17.11 (ADR-0024 §11)
 		{"least", "LEAST(a, b)",
-			[]string{"12.7500", "12.7500", "12.7499", "-0.0100", "2.0000", "0.0000", "1.0000", "12.7500", ""}},
+			[]string{"12.75", "12.75", "12.7499", "-0.01", "2.00", "0.00", "1.0000", "12.75", ""}}, // PostgreSQL 17.11 (ADR-0024 §11)
 		{"coalesce", "COALESCE(a, b)",
-			[]string{"12.7500", "12.7500", "12.7500", "-0.0100", "2.0000", "0.0000", "1.0000", "12.7500", ""}},
+			[]string{"12.75", "12.75", "12.75", "-0.01", "2.00", "0.00", "1.0000", "12.75", ""}}, // PostgreSQL 17.11 (ADR-0024 §11)
 		{"case", "CASE WHEN id < 5 THEN a ELSE b END",
-			[]string{"12.7500", "12.7500", "12.7500", "-0.0100", "10.0000", "0.0000", "1.0000", "", ""}},
+			[]string{"12.75", "12.75", "12.75", "-0.01", "10.0000", "0.0000", "1.0000", "", ""}}, // PostgreSQL 17.11 (ADR-0024 §11)
 		// NULLIF mirrors argument 0 alone, so the output keeps a's (9,2).
 		// Rows 1, 4 and 6 are NULL because the EQUALITY is exact: 12.75 at
 		// scale 2 and 12.7500 at scale 4 are the same number, though not the
@@ -237,12 +237,12 @@ func TestDecimalComputedKeyTwoPath(t *testing.T) {
 		// collapses: 12.7500 and 12.7501 both truncate to 12.
 		{"group by a computed decimal",
 			"SELECT COALESCE(a, b) AS k, COUNT(*) AS n FROM " + dbpTable + " GROUP BY COALESCE(a, b) ORDER BY 1",
-			"[map[k:-0.0100 n:1] map[k:0.0000 n:1] map[k:1.0000 n:1] map[k:2.0000 n:1] " +
-				"map[k:12.7500 n:4] map[k:<nil> n:1]]"},
+			"[map[k:-0.01 n:1] map[k:0.00 n:1] map[k:1.0000 n:1] map[k:2.00 n:1] " +
+				"map[k:12.75 n:4] map[k:<nil> n:1]]"}, // PostgreSQL 17.11 (ADR-0024 §11)
 		{"distinct over a computed decimal",
 			"SELECT DISTINCT GREATEST(a, b) AS g FROM " + dbpTable + " ORDER BY 1",
-			"[map[g:-0.0100] map[g:0.0000] map[g:1.0000] map[g:10.0000] map[g:12.7500] " +
-				"map[g:12.7501] map[g:<nil>]]"},
+			"[map[g:-0.01] map[g:0.00] map[g:1.0000] map[g:10.0000] map[g:12.75] " +
+				"map[g:12.7501] map[g:<nil>]]"}, // PostgreSQL 17.11 (ADR-0024 §11)
 		{"an aggregate over a computed decimal",
 			"SELECT MAX(COALESCE(a, b)) AS m, MIN(GREATEST(a, b)) AS l FROM " + dbpTable,
 			"[map[l:-0.0100 m:12.7500]]"},
@@ -320,15 +320,15 @@ func TestDecimalChoiceOverAnIntegerTwoPath(t *testing.T) {
 		// The literal's own spelling is its (p,s), so the fold keeps the
 		// column's DECIMAL(9,2) rather than widening to an INT64 range.
 		{"greatest over a literal the decimal never beats", "GREATEST(a, 100)",
-			[]string{"100.00", "100.00", "100.00", "100.00", "100.00", "100.00", "100.00", "100.00", "100.00"}},
+			[]string{"100", "100", "100", "100", "100", "100", "100", "100", "100"}}, // PostgreSQL 17.11 (ADR-0024 §11)
 		{"coalesce with zero", "COALESCE(a, 0)",
-			[]string{"12.75", "12.75", "12.75", "-0.01", "2.00", "0.00", "0.00", "12.75", "0.00"}},
+			[]string{"12.75", "12.75", "12.75", "-0.01", "2.00", "0.00", "0", "12.75", "0"}}, // PostgreSQL 17.11 (ADR-0024 §11)
 		{"case with an integer else", "CASE WHEN id < 5 THEN a ELSE 0 END",
-			[]string{"12.75", "12.75", "12.75", "-0.01", "0.00", "0.00", "0.00", "0.00", "0.00"}},
+			[]string{"12.75", "12.75", "12.75", "-0.01", "0", "0", "0", "0", "0"}}, // PostgreSQL 17.11 (ADR-0024 §11)
 		// An integer COLUMN contributes its whole RANGE at scale 0, so this
 		// one is DECIMAL(21,2).
 		{"least over an integer column", "LEAST(a, id)",
-			[]string{"1.00", "2.00", "3.00", "-0.01", "2.00", "0.00", "7.00", "8.00", "9.00"}},
+			[]string{"1", "2", "3", "-0.01", "2.00", "0.00", "7", "8", "9"}}, // PostgreSQL 17.11 (ADR-0024 §11)
 		// NULLIF mirrors argument 0 alone, so the fold is over `a` and the
 		// output keeps its (9,2). Row 6 is NULL because a IS 0 there.
 		{"nullif against an integer literal", "NULLIF(a, 0)",
@@ -337,7 +337,7 @@ func TestDecimalChoiceOverAnIntegerTwoPath(t *testing.T) {
 		// integer literal in the ELSE. (9,2) x (18,4) is DECIMAL(28,6).
 		{"the Q14 shape", "CASE WHEN id < 5 THEN a * b ELSE 0 END",
 			[]string{"162.562500", "162.563775", "162.561225", "0.000100",
-				"0.000000", "0.000000", "0.000000", "0.000000", "0.000000"}},
+				"0", "0", "0", "0", "0"}}, // PostgreSQL 17.11 (ADR-0024 §11)
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			sql := fmt.Sprintf("SELECT %s AS v FROM %s ORDER BY id", tc.expr, dbpTable)
@@ -450,7 +450,7 @@ func TestDecimalChoiceOverAnIntegerAggregatedTwoPath(t *testing.T) {
 		// the pin is gone: both paths assert one value, which is what deleting
 		// it proves.
 		{"coalesce over an empty sum",
-			"SELECT COALESCE(SUM(a), 0) AS v FROM " + dbpTable + " WHERE id < 0", "0.00"},
+			"SELECT COALESCE(SUM(a), 0) AS v FROM " + dbpTable + " WHERE id < 0", "0"}, // PostgreSQL 17.11 (ADR-0024 §11)
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, arm := range []struct {
@@ -473,7 +473,7 @@ func TestDecimalChoiceOverAnIntegerAggregatedTwoPath(t *testing.T) {
 	t.Run("group by the choice expression", func(t *testing.T) {
 		sql := "SELECT CASE WHEN id < 5 THEN a ELSE 0 END AS k, COUNT(*) AS n FROM " +
 			dbpTable + " GROUP BY 1 ORDER BY 1"
-		want := []string{"-0.01=1", "0.00=5", "12.75=3"}
+		want := []string{"-0.01=1", "0=5", "12.75=3"} // PostgreSQL 17.11 (ADR-0024 §11)
 		for _, arm := range []struct {
 			name string
 			dag  bool

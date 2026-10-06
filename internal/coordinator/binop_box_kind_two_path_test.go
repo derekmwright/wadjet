@@ -158,18 +158,17 @@ func TestGenericBinOpBoxKindMatchesPostgres(t *testing.T) {
 			" WHERE (COALESCE(a, 0) + 1) > f", []string{"n=3"}},
 		{"against_a_decimal_literal", "SELECT COUNT(*) AS n FROM " + tbl +
 			" WHERE (COALESCE(a, 0) + 1) > 1.0", []string{"n=5"}},
-		// The two below carry ADR-0024's recorded per-value scale (#764):
-		// PostgreSQL prints the chosen literal `2`, because its numeric keeps
-		// each VALUE's own dscale, and a single-scale vector renders every row
-		// at the fold's — `2.00`. The DIGITS are the server's, which is what
-		// these cells are for: before the fix GREATEST answered 2 for
-		// PostgreSQL's 13.75, because "13.75" sorts below "2" as bytes.
+		// PostgreSQL prints the chosen literal `2` at its own display scale,
+		// and so does this engine since ADR-0024 §11 (arc PS stage 1). The
+		// cells were written for the DIGITS: before the fix GREATEST
+		// answered 2 for PostgreSQL's 13.75, because "13.75" sorts below "2"
+		// as bytes.
 		{"greatest_over_the_node", "SELECT GREATEST(COALESCE(a, 0) + 1, 2) AS v FROM " +
 			tbl + " WHERE id IN (1, 4, 6) ORDER BY id",
-			[]string{"v=13.75", "v=2.00", "v=2.00"}},
+			[]string{"v=13.75", "v=2", "v=2"}},
 		{"least_over_the_node", "SELECT LEAST(COALESCE(a, 0) + 1, 2) AS v FROM " +
 			tbl + " WHERE id IN (1, 4, 6) ORDER BY id",
-			[]string{"v=2.00", "v=0.99", "v=1.00"}},
+			[]string{"v=2", "v=0.99", "v=1.00"}},
 		{"case_when_over_the_node", "SELECT CASE WHEN (COALESCE(a, 0) + 1) > 1 " +
 			"THEN 'y' ELSE 'n' END AS v FROM " + tbl + " WHERE id IN (1, 4, 6) ORDER BY id",
 			[]string{"v=y", "v=n", "v=n"}},

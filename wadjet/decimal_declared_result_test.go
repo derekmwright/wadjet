@@ -119,25 +119,25 @@ func TestDecimalChoiceExpressionsProjectExactly(t *testing.T) {
 			scale: 4,
 			// Row 3 is the proof the comparison is exact and not textual:
 			// 12.75 > 12.7499 numerically, while "12.75" < "12.7499" as text.
-			want: []string{"12.7500", "12.7501", "12.7500", "10.0000", "-0.0100", "1.0000", "12.7500"},
+			want: []string{"12.75", "12.7501", "12.75", "10.0000", "-0.01", "1.0000", "12.75"}, // PostgreSQL 17.11 (ADR-0024 §11)
 		},
 		{
 			name:  "least",
 			sql:   "SELECT LEAST(a, b) AS v FROM " + ddrTable + " ORDER BY id",
 			scale: 4,
-			want:  []string{"12.7500", "12.7500", "12.7499", "2.0000", "-0.0100", "1.0000", "12.7500"},
+			want:  []string{"12.75", "12.75", "12.7499", "2.00", "-0.01", "1.0000", "12.75"}, // PostgreSQL 17.11 (ADR-0024 §11)
 		},
 		{
 			name:  "coalesce",
 			sql:   "SELECT COALESCE(a, b) AS v FROM " + ddrTable + " ORDER BY id",
 			scale: 4,
-			want:  []string{"12.7500", "12.7500", "12.7500", "2.0000", "-0.0100", "1.0000", "12.7500"},
+			want:  []string{"12.75", "12.75", "12.75", "2.00", "-0.01", "1.0000", "12.75"}, // PostgreSQL 17.11 (ADR-0024 §11)
 		},
 		{
 			name:  "case",
 			sql:   "SELECT CASE WHEN id < 4 THEN a ELSE b END AS v FROM " + ddrTable + " ORDER BY id",
 			scale: 4,
-			want:  []string{"12.7500", "12.7500", "12.7500", "10.0000", "-0.0100", "1.0000", ""},
+			want:  []string{"12.75", "12.75", "12.75", "10.0000", "-0.0100", "1.0000", ""}, // PostgreSQL 17.11 (ADR-0024 §11)
 		},
 		{
 			// NULLIF mirrors argument 0 alone, so the output keeps a's own
@@ -328,10 +328,10 @@ func TestDecimalComputedKeysAreNotTruncated(t *testing.T) {
 	}{
 		{"group by a computed decimal",
 			"SELECT COALESCE(a, b) AS k, COUNT(*) AS n FROM " + ddrTable + " GROUP BY COALESCE(a, b) ORDER BY 1",
-			"[map[k:-0.0100 n:1] map[k:1.0000 n:1] map[k:2.0000 n:1] map[k:12.7500 n:4]]"},
+			"[map[k:-0.01 n:1] map[k:1.0000 n:1] map[k:2.00 n:1] map[k:12.75 n:4]]"}, // PostgreSQL 17.11 (ADR-0024 §11)
 		{"distinct over a computed decimal",
 			"SELECT DISTINCT GREATEST(a, b) AS g FROM " + ddrTable + " ORDER BY 1",
-			"[map[g:-0.0100] map[g:1.0000] map[g:10.0000] map[g:12.7500] map[g:12.7501]]"},
+			"[map[g:-0.01] map[g:1.0000] map[g:10.0000] map[g:12.75] map[g:12.7501]]"}, // PostgreSQL 17.11 (ADR-0024 §11)
 		{"an aggregate over a computed decimal",
 			"SELECT MAX(COALESCE(a, b)) AS m, MIN(GREATEST(a, b)) AS l FROM " + ddrTable,
 			"[map[l:-0.0100 m:12.7500]]"},
@@ -554,7 +554,7 @@ func TestDecimalDecidesThroughParensAndDerivedTables(t *testing.T) {
 	for _, r := range res.Rows {
 		got = append(got, fmt.Sprintf("%v", r["g"]))
 	}
-	want := []string{"-0.0100", "1.0000", "10.0000", "12.7500", "12.7500", "12.7500", "12.7501"}
+	want := []string{"-0.01", "1.0000", "10.0000", "12.75", "12.75", "12.75", "12.7501"} // PostgreSQL 17.11 (ADR-0024 §11)
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("GREATEST over a derived table = %v, want %v", got, want)
 	}
@@ -602,7 +602,7 @@ func TestDecimalBesideAnIntegerIsNumeric(t *testing.T) {
 			prec: 9, scale: 2,
 			// GREATEST ignores a NULL argument on PostgreSQL, so row 6
 			// answers 100 rather than NULL.
-			want: []string{"100.00", "100.00", "100.00", "100.00", "100.00", "100.00", "100.00"},
+			want: []string{"100", "100", "100", "100", "100", "100", "100"}, // PostgreSQL 17.11 (ADR-0024 §11)
 		},
 		{
 			// The shape that used to FAIL at the store guard on row 1. TPC-H
@@ -610,13 +610,13 @@ func TestDecimalBesideAnIntegerIsNumeric(t *testing.T) {
 			name: "greatest over a literal the decimal beats",
 			sql:  "SELECT GREATEST(a, 1) AS v FROM " + ddrTable + " ORDER BY id",
 			prec: 9, scale: 2,
-			want: []string{"12.75", "12.75", "12.75", "2.00", "1.00", "1.00", "12.75"},
+			want: []string{"12.75", "12.75", "12.75", "2.00", "1", "1", "12.75"}, // PostgreSQL 17.11 (ADR-0024 §11)
 		},
 		{
 			name: "coalesce with zero",
 			sql:  "SELECT COALESCE(a, 0) AS v FROM " + ddrTable + " ORDER BY id",
 			prec: 9, scale: 2,
-			want: []string{"12.75", "12.75", "12.75", "2.00", "-0.01", "0.00", "12.75"},
+			want: []string{"12.75", "12.75", "12.75", "2.00", "-0.01", "0", "12.75"}, // PostgreSQL 17.11 (ADR-0024 §11)
 		},
 		{
 			// A FRACTIONAL literal, whose own declaration is FLOAT64: only
@@ -625,7 +625,7 @@ func TestDecimalBesideAnIntegerIsNumeric(t *testing.T) {
 			name: "case with a fractional literal branch",
 			sql:  "SELECT CASE WHEN id > 4 THEN a ELSE 1.5 END AS v FROM " + ddrTable + " ORDER BY id",
 			prec: 9, scale: 2,
-			want: []string{"1.50", "1.50", "1.50", "1.50", "-0.01", "", "12.75"},
+			want: []string{"1.5", "1.5", "1.5", "1.5", "-0.01", "", "12.75"}, // PostgreSQL 17.11 (ADR-0024 §11)
 		},
 		{
 			// A literal FINER than the column widens the fold's scale, so
@@ -634,7 +634,7 @@ func TestDecimalBesideAnIntegerIsNumeric(t *testing.T) {
 			name: "case with a literal finer than the column",
 			sql:  "SELECT CASE WHEN id > 4 THEN a ELSE 0.125 END AS v FROM " + ddrTable + " ORDER BY id",
 			prec: 10, scale: 3,
-			want: []string{"0.125", "0.125", "0.125", "0.125", "-0.010", "", "12.750"},
+			want: []string{"0.125", "0.125", "0.125", "0.125", "-0.01", "", "12.75"}, // PostgreSQL 17.11 (ADR-0024 §11)
 		},
 		{
 			// NULLIF mirrors argument 0 alone, so the fold is over `a` and
@@ -652,13 +652,13 @@ func TestDecimalBesideAnIntegerIsNumeric(t *testing.T) {
 			name: "least over an integer column",
 			sql:  "SELECT LEAST(a, id) AS v FROM " + ddrTable + " ORDER BY id",
 			prec: 21, scale: 2,
-			want: []string{"1.00", "2.00", "3.00", "2.00", "-0.01", "6.00", "7.00"},
+			want: []string{"1", "2", "3", "2.00", "-0.01", "6", "7"}, // PostgreSQL 17.11 (ADR-0024 §11)
 		},
 		{
 			name: "greatest over an integer column",
 			sql:  "SELECT GREATEST(a, id) AS v FROM " + ddrTable + " ORDER BY id",
 			prec: 21, scale: 2,
-			want: []string{"12.75", "12.75", "12.75", "4.00", "5.00", "6.00", "12.75"},
+			want: []string{"12.75", "12.75", "12.75", "4", "5", "6", "12.75"}, // PostgreSQL 17.11 (ADR-0024 §11)
 		},
 		{
 			// Three alternatives at three widths, one of them an integer
@@ -668,7 +668,7 @@ func TestDecimalBesideAnIntegerIsNumeric(t *testing.T) {
 			sql: "SELECT CASE WHEN id < 3 THEN a WHEN id < 5 THEN b ELSE 0 END AS v FROM " +
 				ddrTable + " ORDER BY id",
 			prec: 18, scale: 4,
-			want: []string{"12.7500", "12.7500", "12.7499", "10.0000", "0.0000", "0.0000", "0.0000"},
+			want: []string{"12.75", "12.75", "12.7499", "10.0000", "0", "0", "0"}, // PostgreSQL 17.11 (ADR-0024 §11)
 		},
 		{
 			// TPC-H Q14's expression, whose THEN branch is exact arithmetic
@@ -678,7 +678,7 @@ func TestDecimalBesideAnIntegerIsNumeric(t *testing.T) {
 			sql: "SELECT CASE WHEN id > 3 THEN a * b ELSE 0 END AS v FROM " +
 				ddrTable + " ORDER BY id",
 			prec: 28, scale: 6,
-			want: []string{"0.000000", "0.000000", "0.000000", "20.000000", "0.000100", "", ""},
+			want: []string{"0", "0", "0", "20.000000", "0.000100", "", ""}, // PostgreSQL 17.11 (ADR-0024 §11)
 		},
 		{
 			// The control that must NOT move: a FLOAT column beside a DECIMAL
@@ -916,11 +916,9 @@ func TestDecimalChoiceOverAContainerElementComparesByValue(t *testing.T) {
 // DECIMAL(18,4) and every digit survives. All four shapes refused before;
 // PostgreSQL 17 answers all four, measured live over these same seven rows.
 //
-// The one difference from PostgreSQL is the RENDERING: numeric carries each
-// VALUE's own dscale there and a single-scale vector renders every row at the
-// fold's, so `12.75` reads `12.7500` here. That is ADR-0024's recorded
-// per-value-dscale deferral and it is true of every DECIMAL fold in this
-// engine, not of this shape. The DIGITS agree, which is what the cells check.
+// Each value prints its own display scale, as numeric does (ADR-0024 §11,
+// arc PS stage 1): `12.75` beside `12.7501` in one column. The one remaining
+// difference is a quotient's digits (stage 4).
 //
 // The BOUNDARY is a subquery whose own plan cannot name a (p,s) — a COMPUTED
 // decimal, where declaredProjectionDecl answers DecKnown=false — and it still
@@ -932,13 +930,13 @@ func TestDecimalChoiceFoldsOverAScalarSubquery(t *testing.T) {
 	for _, tc := range []struct{ name, sql, want string }{
 		{"case", "SELECT CASE WHEN a IS NULL THEN " + sub + " ELSE a END AS c FROM " +
 			ddrTable + " ORDER BY id",
-			"12.7500,12.7500,12.7500,2.0000,-0.0100,12.7501,12.7500"},
+			"12.75,12.75,12.75,2.00,-0.01,12.7501,12.75"}, // PostgreSQL 17.11 (ADR-0024 §11)
 		{"coalesce", "SELECT COALESCE(a, " + sub + ") AS c FROM " + ddrTable + " ORDER BY id",
-			"12.7500,12.7500,12.7500,2.0000,-0.0100,12.7501,12.7500"},
+			"12.75,12.75,12.75,2.00,-0.01,12.7501,12.75"}, // PostgreSQL 17.11 (ADR-0024 §11)
 		{"greatest", "SELECT GREATEST(a, " + sub + ") AS c FROM " + ddrTable + " ORDER BY id",
 			"12.7501,12.7501,12.7501,12.7501,12.7501,12.7501,12.7501"},
 		{"least", "SELECT LEAST(a, " + sub + ") AS c FROM " + ddrTable + " ORDER BY id",
-			"12.7500,12.7500,12.7500,2.0000,-0.0100,12.7501,12.7500"},
+			"12.75,12.75,12.75,2.00,-0.01,12.7501,12.75"}, // PostgreSQL 17.11 (ADR-0024 §11)
 	} {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
@@ -948,7 +946,7 @@ func TestDecimalChoiceFoldsOverAScalarSubquery(t *testing.T) {
 				got = append(got, fmt.Sprintf("%v", r["c"]))
 			}
 			if strings.Join(got, ",") != tc.want {
-				t.Errorf("%s\n  got  %v\n  want %s (live PostgreSQL 17, at the fold's scale)",
+				t.Errorf("%s\n  got  %v\n  want %s (PostgreSQL 17.11)",
 					tc.sql, got, tc.want)
 			}
 			if m := res.ColumnMetas[0]; m.TypeID != parquet.TypeDecimal || m.Scale != 4 {
@@ -966,11 +964,15 @@ func TestDecimalChoiceFoldsOverAScalarSubquery(t *testing.T) {
 		{"an arithmetic aggregate",
 			"SELECT COALESCE(a, (SELECT MAX(b * 2) FROM " + ddrTable + ")) AS c FROM " +
 				ddrTable + " ORDER BY id",
-			"12.7500,12.7500,12.7500,2.0000,-0.0100,25.5002,12.7500"},
+			"12.75,12.75,12.75,2.00,-0.01,25.5002,12.75"}, // PostgreSQL 17.11 (ADR-0024 §11)
 		{"a divided sum",
 			"SELECT COALESCE(a, (SELECT SUM(b) / 3 FROM " + ddrTable + ")) AS c FROM " +
 				ddrTable + " ORDER BY id",
-			"12.750000,12.750000,12.750000,2.000000,-0.010000,16.413333,12.750000"},
+			// PostgreSQL 17.11 prints 16.4133333333333333 for row 6 (the
+			// quotient's own scale): this engine keeps the quotient's
+			// one scale until stage 4 of ADR-0024 §11 (numeric-decimal
+			// r19); every other row is PostgreSQL's text.
+			"12.75,12.75,12.75,2.00,-0.01,16.413333,12.75"},
 	} {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
@@ -1184,33 +1186,33 @@ func TestDecimalChoiceOverAnIntegerEXPRESSION(t *testing.T) {
 		want []string
 	}{
 		{"projection", "SELECT " + intExpr + " AS v FROM " + ddrTable + " WHERE id = 1",
-			"v", []string{"1.00"}},
+			"v", []string{"1"}}, // PostgreSQL 17.11 (ADR-0024 §11)
 		{"a nested choice of integers",
 			"SELECT COALESCE(a, CASE WHEN id = 1 THEN 1 ELSE 2 END) AS v FROM " + ddrTable + " WHERE id = 6",
-			"v", []string{"2.00"}},
+			"v", []string{"2"}}, // PostgreSQL 17.11 (ADR-0024 §11)
 		{"a CAST beside an empty aggregate",
 			"SELECT COALESCE(MAX(a), CAST(0 AS BIGINT)) AS v FROM " + ddrTable + " WHERE id < 0",
-			"v", []string{"0.00"}},
+			"v", []string{"0"}}, // PostgreSQL 17.11 (ADR-0024 §11)
 		{"a nested choice beside an empty aggregate",
 			"SELECT COALESCE(SUM(a), CASE WHEN 1=1 THEN 0 ELSE 1 END) AS v FROM " + ddrTable + " WHERE id < 0",
-			"v", []string{"0.00"}},
+			"v", []string{"0"}}, // PostgreSQL 17.11 (ADR-0024 §11)
 		{"greatest over a CAST", "SELECT GREATEST(a, CAST(id AS BIGINT)) AS v FROM " + ddrTable + " WHERE id = 1",
 			"v", []string{"12.75"}},
 		{"a GROUP BY key", "SELECT " + intExpr + " AS v FROM " + ddrTable + " GROUP BY 1 ORDER BY 1",
-			"v", []string{"1.00", "2.00", "3.00", "4.00", "5.00", "6.00", "7.00"}},
+			"v", []string{"1", "2", "3", "4", "5", "6", "7"}}, // PostgreSQL 17.11 (ADR-0024 §11)
 		{"an ORDER BY key", "SELECT id FROM " + ddrTable + " ORDER BY " + intExpr + " LIMIT 2",
 			"id", []string{"1", "2"}},
 		{"an aggregate input", "SELECT MAX(" + intExpr + ") AS v FROM " + ddrTable,
 			"v", []string{"7.00"}},
 		{"a DISTINCT key", "SELECT DISTINCT " + intExpr + " AS v FROM " + ddrTable + " ORDER BY 1",
-			"v", []string{"1.00", "2.00", "3.00", "4.00", "5.00", "6.00", "7.00"}},
+			"v", []string{"1", "2", "3", "4", "5", "6", "7"}}, // PostgreSQL 17.11 (ADR-0024 §11)
 		{"a window PARTITION key",
 			"SELECT COUNT(*) OVER (PARTITION BY " + intExpr + ") AS v FROM " + ddrTable + " WHERE id = 1",
 			"v", []string{"1"}},
 		{"a set-operation arm",
 			"SELECT " + intExpr + " AS v FROM " + ddrTable + " WHERE id = 1" +
 				" UNION ALL SELECT a FROM " + ddrTable + " WHERE id = 4",
-			"v", []string{"1.00", "2.00"}},
+			"v", []string{"1", "2.00"}}, // PostgreSQL 17.11 (ADR-0024 §11)
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			res := ddrQuery(t, db, tc.sql)
@@ -1283,7 +1285,7 @@ func TestDecimalChoiceOverAHighScaleColumn(t *testing.T) {
 	}{
 		// PostgreSQL answers 5 and 7 — the bigint wins both rows.
 		{"SELECT GREATEST(w, id) AS v FROM wscale ORDER BY id",
-			[]string{"5.000000000000000000000000000000", "7.000000000000000000000000000000"}},
+			[]string{"5", "7"}}, // PostgreSQL 17.11 (ADR-0024 §11): the integer argument's display scale
 		{"SELECT LEAST(w, id) AS v FROM wscale ORDER BY id",
 			[]string{"1.500000000000000000000000000000", "2.250000000000000000000000000000"}},
 	} {
@@ -1333,8 +1335,8 @@ func TestNullifTypesOverBothArgumentsWhenOnlyTheSecondIsDecimal(t *testing.T) {
 		t.Errorf("NULLIF(0, a) declared %s(%d,%d), want DECIMAL(9,2); PostgreSQL says numeric",
 			m.TypeID, m.Precision, m.Scale)
 	}
-	if got := fmt.Sprintf("%v", res.Rows[0]["v"]); got != "0.00" {
-		t.Errorf("NULLIF(0, a) = %q, want 0.00", got)
+	if got := fmt.Sprintf("%v", res.Rows[0]["v"]); got != "0" { // PostgreSQL 17.11 (ADR-0024 §11)
+		t.Errorf("NULLIF(0, a) = %q, want 0", got)
 	}
 	// The control that must NOT move: over two DECIMALs the fold stays on
 	// argument 0 alone, so the output keeps a's own (9,2).

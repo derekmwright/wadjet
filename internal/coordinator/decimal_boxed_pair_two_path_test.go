@@ -896,18 +896,19 @@ func TestMixedDecimalIntegerSetOpIsReconciled(t *testing.T) {
 		return got
 	}
 
-	// Every expectation is PostgreSQL's answer for the identical rows,
-	// rendered at the DECIMAL(9,2) column's scale and sorted as text. The two
-	// arm orders name the result column differently ("a" vs "id") but produce
-	// the identical value set; the DISTINCT and ALL forms differ only in the
-	// duplicate 12.75s and the second NULL that UNION ALL keeps.
-	wantDistinct := []string{
-		"-0.01", "0.00", "1.00", "12.75", "2.00", "3.00", "4.00", "5.00",
-		"6.00", "7.00", "8.00", "9.00", "<nil>",
+	// Every expectation is PostgreSQL 17.11's answer for the identical rows,
+	// sorted as text. Each value prints its own display scale (ADR-0024 §11,
+	// arc PS stage 1): the integer arm's values print as integers, the
+	// DECIMAL(9,2) arm's at scale 2. A DISTINCT form keeps the FIRST arm's
+	// member of an equal pair, so `a UNION id` answers 2.00 and `id UNION a`
+	// answers 2 (PostgreSQL's HashAggregate, measured).
+	wantDistinct := func(two string) []string {
+		return []string{"-0.01", "0.00", "1", "12.75", two, "3", "4", "5",
+			"6", "7", "8", "9", "<nil>"}
 	}
 	wantAll := []string{
-		"-0.01", "0.00", "1.00", "12.75", "12.75", "12.75", "12.75", "2.00",
-		"2.00", "3.00", "4.00", "5.00", "6.00", "7.00", "8.00", "9.00",
+		"-0.01", "0.00", "1", "12.75", "12.75", "12.75", "12.75", "2",
+		"2.00", "3", "4", "5", "6", "7", "8", "9",
 		"<nil>", "<nil>",
 	}
 
@@ -917,9 +918,9 @@ func TestMixedDecimalIntegerSetOpIsReconciled(t *testing.T) {
 		want []string
 	}{
 		{"union_decimal_first",
-			fmt.Sprintf("SELECT a FROM %s UNION SELECT id FROM %s", dbpTable, dbpTable), wantDistinct},
+			fmt.Sprintf("SELECT a FROM %s UNION SELECT id FROM %s", dbpTable, dbpTable), wantDistinct("2.00")},
 		{"union_integer_first",
-			fmt.Sprintf("SELECT id FROM %s UNION SELECT a FROM %s", dbpTable, dbpTable), wantDistinct},
+			fmt.Sprintf("SELECT id FROM %s UNION SELECT a FROM %s", dbpTable, dbpTable), wantDistinct("2")},
 		{"union_all_decimal_first",
 			fmt.Sprintf("SELECT a FROM %s UNION ALL SELECT id FROM %s", dbpTable, dbpTable), wantAll},
 		{"union_all_integer_first",
@@ -935,7 +936,7 @@ func TestMixedDecimalIntegerSetOpIsReconciled(t *testing.T) {
 			[]string{"2.00"}},
 		{"except_integer_first",
 			fmt.Sprintf("SELECT id FROM %s EXCEPT SELECT a FROM %s", dbpTable, dbpTable),
-			[]string{"1.00", "3.00", "4.00", "5.00", "6.00", "7.00", "8.00", "9.00"}},
+			[]string{"1", "3", "4", "5", "6", "7", "8", "9"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			sres, err := tmdRunSingle(ctx, single, tc.sql)

@@ -49,8 +49,8 @@ func TestDecimalLiteralIsNumericInEveryContext(t *testing.T) {
 		{"SELECT 2.50 + 1 AS v", "[3.50]", "", parquet.TypeDecimal},
 		{"SELECT unnest(ARRAY[1, 2.5]) AS v", "[1 2.5]", "", parquet.TypeFloat64},
 		{"SELECT unnest(ARRAY[2.5, 1]) AS v", "[2.5 1]", "", parquet.TypeFloat64},
-		{"SELECT COALESCE(1, 2.5) AS v", "[1.0]", "[1]", parquet.TypeDecimal},
-		{"SELECT CASE WHEN x > 1 THEN 1 ELSE 2.5 END AS v FROM (VALUES (1), (2)) t(x)", "[2.5 1.0]", "[2.5 1]", parquet.TypeDecimal},
+		{"SELECT COALESCE(1, 2.5) AS v", "[1]", "", parquet.TypeDecimal},                                                    // PostgreSQL 17.11 (ADR-0024 §11)
+		{"SELECT CASE WHEN x > 1 THEN 1 ELSE 2.5 END AS v FROM (VALUES (1), (2)) t(x)", "[2.5 1]", "", parquet.TypeDecimal}, // PostgreSQL 17.11 (ADR-0024 §11)
 	} {
 		res, err := db.Query(ctx, tc.sql)
 		if err != nil {

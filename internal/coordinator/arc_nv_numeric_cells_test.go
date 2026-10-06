@@ -452,17 +452,13 @@ func nvCells() []nvCell {
 				"id=4<i8>|v=2<i8>;id=5<i8>|v=2<i8>"},
 
 		// ------------------------------------------------------------------
-		// #712 and #764 — DEFERRED, re-measured here, and pinned so the
-		// deferral is visible rather than remembered.
-		//
-		// They are ONE item and it is the CARRIER's: a wadjet DECIMAL vector
-		// has ONE scale for the whole column (ADR-0018 §4) and PostgreSQL
-		// gives a composite over a column and a constant typmod −1, which
-		// prints every VALUE at its OWN scale. So every cell below is the
-		// SAME NUMBER as the server's with a different count of trailing
-		// zeros, and closing it needs a per-value render scale carried
-		// through the vector, the spill run, the `.wshf` chunk and the
-		// parquet leaf — a carrier arc, not a typing one.
+		// #712 and #764 — PostgreSQL's text since ADR-0024 §11 (arc PS
+		// stage 1). PostgreSQL gives a composite over a column and a
+		// constant typmod −1, which prints every VALUE at its OWN scale; the
+		// wadjet DECIMAL vector keeps one carrier scale (ADR-0018 §4) and
+		// now a per-value display scale beside it, carried through the
+		// vector, the spill run and the `.wshf` chunk, so each cell below
+		// prints the server's text.
 		//
 		// #712's own proposal — enforce 10^p at SetValueChecked /
 		// SetComputedChecked — was implemented, measured and reverted before
@@ -476,7 +472,7 @@ func nvCells() []nvCell {
 		// There is no second construction site to carry a precision to.
 		{name: "712/a_fold_over_a_wide_decimal_and_an_integer_keeps_its_value",
 			sql:  "SELECT GREATEST(d30, 100000000) AS v FROM " + nvFoldTable + " WHERE id=1",
-			want: "v=100000000.000000000000000000000000000000",
+			want: "v=100000000", // PostgreSQL 17.11 (ADR-0024 §11)
 			why: "psql: 100000000, under a bare `numeric` (pg_typeof, measured). The " +
 				"same NUMBER with 30 trailing zeros — 39 digits under a " +
 				"DECIMAL(38,30) declaration nothing enforces, which is #712's report. " +
@@ -484,22 +480,22 @@ func nvCells() []nvCell {
 		{name: "764/coalesce_with_a_finer_literal",
 			sql: "SELECT id, COALESCE(d152, '12.3456789012345') AS v FROM " + nvFoldTable +
 				" ORDER BY id",
-			want: "id=1<i8>|v=12.7500000000000;id=2<i8>|v=12.3456789012345;" +
-				"id=3<i8>|v=1.0000000000000;id=4<i8>|v=-3.5000000000000",
+			want: "id=1<i8>|v=12.75;id=2<i8>|v=12.3456789012345;" + // PostgreSQL 17.11 (ADR-0024 §11)
+				"id=3<i8>|v=1.00;id=4<i8>|v=-3.50",
 			why: "psql: 12.75; 12.3456789012345; 1.00; -3.50 — every value at its own " +
 				"scale under typmod −1"},
 		{name: "764/coalesce_with_an_integer_literal",
 			sql:  "SELECT id, COALESCE(d152, '7') AS v FROM " + nvFoldTable + " ORDER BY id",
-			want: "id=1<i8>|v=12.75;id=2<i8>|v=7.00;id=3<i8>|v=1.00;id=4<i8>|v=-3.50",
+			want: "id=1<i8>|v=12.75;id=2<i8>|v=7;id=3<i8>|v=1.00;id=4<i8>|v=-3.50", // PostgreSQL 17.11 (ADR-0024 §11)
 			why:  "psql: 12.75; 7; 1.00; -3.50 — only the literal's row differs"},
 		{name: "764/least_against_a_coarser_literal",
 			sql:  "SELECT id, LEAST(d152, '0.5') AS v FROM " + nvFoldTable + " ORDER BY id",
-			want: "id=1<i8>|v=0.50;id=2<i8>|v=0.50;id=3<i8>|v=0.50;id=4<i8>|v=-3.50",
+			want: "id=1<i8>|v=0.5;id=2<i8>|v=0.5;id=3<i8>|v=0.5;id=4<i8>|v=-3.50", // PostgreSQL 17.11 (ADR-0024 §11)
 			why:  "psql: 0.5; 0.5; 0.5; -3.50"},
 		{name: "764/a_case_whose_else_is_a_finer_literal",
 			sql: "SELECT id, CASE WHEN g < 2 THEN d152 ELSE 0.125 END AS v FROM " +
 				nvFoldTable + " ORDER BY id",
-			want: "id=1<i8>|v=12.750;id=2<i8>|v=NULL;id=3<i8>|v=0.125;id=4<i8>|v=0.125",
+			want: "id=1<i8>|v=12.75;id=2<i8>|v=NULL;id=3<i8>|v=0.125;id=4<i8>|v=0.125", // PostgreSQL 17.11 (ADR-0024 §11)
 			why: "psql: 12.75; NULL; 0.125; 0.125. Taking the DECLARED operands' scale " +
 				"instead would give the column's rows exactly and leave 0.125 with " +
 				"nowhere to go — a 22003 for 200 rows the server answers, which is " +

@@ -41,12 +41,11 @@ import (
 // `an_unknown_literal_arm_first` (wantRows: 10) stayed green throughout.
 //
 // The declared TYPMOD is the typed arm's, deliberately: PostgreSQL declares
-// numeric with typmod -1 here and renders the literal `1.5` beside the
-// column's `2.00`, where wadjet declares DECIMAL(9,2) and renders `1.50`. A
-// wadjet DECIMAL vector has ONE scale, so "unconstrained" is not a carrier it
-// has; keeping the typed arm's (p,s) is the same answer `c_dec ∪ '0'` already
-// gives when the typed arm is on the LEFT, and the alternative — resolving one
-// arm's scale away — is #532's truncation. Recorded in ADR-0012 item 12.
+// numeric with typmod -1 here, and a wadjet DECIMAL vector's carrier has ONE
+// scale, so the typed arm's (p,s) is the carrier and the alternative —
+// resolving one arm's scale away — is #532's truncation. The RENDERED text is
+// PostgreSQL's since ADR-0024 §11 (arc PS stage 1): each value carries its own
+// display scale, so the literal prints `1.5` beside the column's `2.00`.
 type setOpUnkDeclCell struct {
 	issue, name, sql string
 	// wantDecl is the result's declared first column, `name:TYPE(p,s)`.
@@ -65,12 +64,12 @@ func setOpUnkDeclCells() []setOpUnkDeclCell {
 			sql: `SELECT a AS v FROM decpair WHERE id IN (4,5,6) UNION ALL ` +
 				`SELECT '1.5' FROM decpair WHERE id = 1`,
 			wantDecl: "v:DECIMAL(9,2)",
-			wantRows: []string{"-0.01", "0.00", "1.50", "2.00"}},
+			wantRows: []string{"-0.01", "0.00", "1.5", "2.00"}}, // PostgreSQL 17.11 (ADR-0024 §11)
 		{issue: "#648", name: "an_unknown_literal_then_a_numeric_column",
 			sql: `SELECT '1.5' AS v FROM decpair WHERE id = 1 UNION ALL ` +
 				`SELECT a FROM decpair WHERE id IN (4,5,6)`,
 			wantDecl: "v:DECIMAL(9,2)",
-			wantRows: []string{"-0.01", "0.00", "1.50", "2.00"}},
+			wantRows: []string{"-0.01", "0.00", "1.5", "2.00"}}, // PostgreSQL 17.11 (ADR-0024 §11)
 		// A bare NULL is the other unknown spelling and has the same answer:
 		// PostgreSQL types `NULL ∪ numeric` numeric.
 		{issue: "#648", name: "a_null_literal_then_a_numeric_column",
@@ -111,7 +110,7 @@ func setOpUnkDeclCells() []setOpUnkDeclCell {
 				`SELECT a FROM decpair WHERE id IN (4,5) UNION ALL ` +
 				`SELECT a FROM decpair WHERE id = 6`,
 			wantDecl: "v:DECIMAL(9,2)",
-			wantRows: []string{"-0.01", "0.00", "1.50", "2.00"}},
+			wantRows: []string{"-0.01", "0.00", "1.5", "2.00"}}, // PostgreSQL 17.11 (ADR-0024 §11)
 		// Controls. Two unknown arms resolve to text in PostgreSQL, which is
 		// what they already declare — the mask must not drag them anywhere.
 		{issue: "#648", name: "ctl_two_unknown_literal_arms_stay_text",
@@ -120,18 +119,18 @@ func setOpUnkDeclCells() []setOpUnkDeclCell {
 			wantDecl: "v:STRING",
 			wantRows: []string{"a", "b"}},
 		// An unknown literal does not widen a typmod either: the typed arm's
-		// DECIMAL(18,4) stands and the literal renders at that scale.
+		// DECIMAL(18,4) stands, and the literal prints its own `0`.
 		{issue: "#648", name: "ctl_an_unknown_literal_keeps_the_typed_arms_typmod",
 			sql: `SELECT c_dec AS v FROM typemx WHERE id < 3 UNION ALL ` +
 				`SELECT '0' FROM typemx WHERE id = 0`,
 			wantDecl: "v:DECIMAL(18,4)",
-			wantRows: []string{"0.0000", "0.0000", "1.0001", "2.0002"}},
+			wantRows: []string{"0", "0.0000", "1.0001", "2.0002"}}, // PostgreSQL 17.11 (ADR-0024 §11)
 		// And a pair with NO unknown arm is untouched by any of this.
 		{issue: "#648", name: "ctl_two_typed_numeric_arms",
 			sql: `SELECT a AS v FROM decpair WHERE id IN (4,5,6) UNION ALL ` +
 				`SELECT b FROM decpair WHERE id = 4`,
 			wantDecl: "v:DECIMAL(18,4)",
-			wantRows: []string{"-0.0100", "-0.0100", "0.0000", "2.0000"}},
+			wantRows: []string{"-0.01", "-0.0100", "0.00", "2.00"}}, // PostgreSQL 17.11 (ADR-0024 §11)
 	}
 }
 
