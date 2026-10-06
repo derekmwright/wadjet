@@ -257,7 +257,7 @@ func (r *streamingShuffleReader) readChunkBytesInto(buf []byte, numRows int) ([]
 		}
 		switch {
 		case want >= 0:
-			if dataLen != want {
+			if !wshf.DataLenOK(r.schema[ci].Type, numRows, want, dataLen) {
 				return nil, fmt.Errorf("column %d (%v): data length %d != expected %d for %d rows",
 					ci, r.schema[ci].Type, dataLen, want, numRows)
 			}

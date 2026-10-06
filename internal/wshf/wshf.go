@@ -128,6 +128,28 @@ const (
 	LenContainer = -2
 )
 
+// DataLenOK reports whether dataLen is a valid payload length for numRows
+// rows of typ, given FixedTypeLen's want. A fixed-width payload is exactly
+// want bytes, except a DECIMAL's, whose carriers may be followed by the
+// chunk's display-scale section (ADR-0024 §1 as amended; ADR-0010's
+// 2026-10-06 amendment): [0][code] when every row of the chunk shares one
+// display scale, [1][numRows codes] otherwise. A chunk whose column carries
+// no display scale writes the carriers alone — the bytes it always wrote —
+// and a decoder that predates the section refuses a chunk that has one (its
+// length is not 16 × rows), never misreading it.
+func DataLenOK(typ parquet.TypeID, numRows, want, dataLen int) bool {
+	if want < 0 || dataLen == want {
+		return true
+	}
+	return typ == parquet.TypeDecimal && (dataLen == want+2 || dataLen == want+1+numRows)
+}
+
+// DecimalDScaleSection is the display-scale section's mode byte values.
+const (
+	DecimalDScaleUniform = 0
+	DecimalDScalePerRow  = 1
+)
+
 // FixedTypeLen returns the exact payload byte length for fixed-width
 // shuffle types, or one of the sentinels above for the variable-length
 // classes. Shared by the decoder, the streaming stage walk and the
