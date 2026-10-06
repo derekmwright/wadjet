@@ -36,9 +36,10 @@ import (
 // (d01-d03, d09, d10). A set operation of three arms, or a nested one, whose
 // marked arms came before a NUMERIC(10,2) arm printed that arm's `2.50` as
 // `2.5` on pgwire-coordinator alone and split its counts (d15-d24, round 6).
-// Each statement's answer is pinned once (PostgreSQL
-// 17.11's, or the kept r18 answer of a set operation over two
-// declarations) and every door must print it: pgwire single-process and
+// Each statement's answer is PostgreSQL 17.11's — since arc PS stage 1
+// (ADR-0024 §11) a set operation over two declarations prints each value's
+// own display scale, and its kept r18 answers are deleted — and every door
+// must print it: pgwire single-process and
 // coordinator, HTTP, HTTP async, gRPC coordinator and embedded. Rows are
 // rendered by column name (every statement aliases its columns), values as
 // the door's text, sorted.
@@ -163,34 +164,28 @@ var unibDoorCells = []struct{ name, sql, want, why string }{
 	{name: "d01", sql: "SELECT v AS x FROM un_t WHERE id = 3", want: "rows=1 x=1"},
 	{name: "d02", sql: "SELECT id AS i, v AS x FROM un_t", want: "rows=6 i=1,x=1.25 | i=2,x=0.755 | i=3,x=1 | i=4,x=NULL | i=5,x=1234567890 | i=6,x=2.5"},
 	{name: "d03", sql: "SELECT v AS x FROM (SELECT v FROM un_x GROUP BY v) q", want: "rows=5 x=0.0000000001 | x=1 | x=1.5 | x=7 | x=NULL"},
-	{name: "d04", sql: "SELECT CAST(v AS TEXT) AS x FROM (SELECT v FROM un_x UNION ALL SELECT v FROM rv_n) s", want: "rows=12 x=0.0000000000 | x=0.0000000001 | x=1.0000000000 | x=1.0000000000 | x=1.0000000000 | x=1.5000000000 | x=1.5000000000 | x=2.5000000000 | x=7.0000000000 | x=7.0000000000 | x=NULL | x=NULL", why: unibDoorR18},
-	{name: "d05", sql: "SELECT count(*) AS c FROM (SELECT v FROM un_x UNION ALL SELECT v FROM rv_n) s WHERE CAST(v AS TEXT) = '1'", want: "rows=1 c=0", why: unibDoorR18},
+	{name: "d04", sql: "SELECT CAST(v AS TEXT) AS x FROM (SELECT v FROM un_x UNION ALL SELECT v FROM rv_n) s", want: "rows=12 x=0.00 | x=0.0000000001 | x=1 | x=1 | x=1.00 | x=1.5 | x=1.50 | x=2.50 | x=7 | x=7.00 | x=NULL | x=NULL"},
+	{name: "d05", sql: "SELECT count(*) AS c FROM (SELECT v FROM un_x UNION ALL SELECT v FROM rv_n) s WHERE CAST(v AS TEXT) = '1'", want: "rows=1 c=2"},
 	{name: "d06", sql: "SELECT CAST(v AS TEXT) AS x FROM (SELECT v FROM un_x UNION ALL SELECT v FROM un_u) s", want: "rows=9 x=0.0000000001 | x=0.1 | x=1 | x=1 | x=1.25 | x=1.5 | x=7 | x=7 | x=NULL"},
 	{name: "d07", sql: "SELECT CAST(a.v AS TEXT) AS x, CAST(b.v AS TEXT) AS y FROM un_x a JOIN rv_n b ON a.id = b.id", want: "rows=6 x=0.0000000001,y=0.00 | x=1,y=1.00 | x=1,y=2.50 | x=1.5,y=1.50 | x=7,y=7.00 | x=NULL,y=NULL"},
 	{name: "d08", sql: "SELECT CAST(q.v AS TEXT) AS x, CAST(q.n AS TEXT) AS y FROM (SELECT v AS n, n AS v FROM un_t GROUP BY v, n) q", want: "rows=6 x=0.75,y=2.5 | x=1.25,y=1.25 | x=10.00,y=1234567890 | x=2.50,y=0.755 | x=3.33,y=NULL | x=NULL,y=1"},
 	{name: "d09", sql: "SELECT q.v AS x, r.v AS y FROM (SELECT v FROM un_x GROUP BY v) q JOIN rv_n r ON q.v = r.v", want: "rows=3 x=1,y=1.00 | x=1.5,y=1.50 | x=7,y=7.00"},
 	{name: "d10", sql: "WITH c AS (SELECT v FROM un_x GROUP BY v) SELECT CAST(c1.v AS TEXT) AS x, c2.v AS y FROM c c1 JOIN c c2 ON c1.v = c2.v", want: "rows=4 x=0.0000000001,y=0.0000000001 | x=1,y=1 | x=1.5,y=1.5 | x=7,y=7"},
-	{name: "d11", sql: "SELECT CAST(v AS TEXT) AS x FROM (SELECT v FROM un_x INTERSECT SELECT v FROM rv_n) s", want: "rows=4 x=1.0000000000 | x=1.5000000000 | x=7.0000000000 | x=NULL", why: unibDoorR18},
-	{name: "d12", sql: "SELECT CAST(v AS TEXT) AS x FROM (SELECT v FROM rv_n UNION ALL SELECT v FROM un_x) s WHERE v = 1.5", want: "rows=2 x=1.5000000000 | x=1.5000000000", why: unibDoorR18},
-	{name: "d13", sql: "SELECT v AS x FROM (SELECT v FROM un_x UNION ALL SELECT v FROM rv_n) s WHERE v = 1.5", want: "rows=2 x=1.5000000000 | x=1.5000000000", why: unibDoorR18},
+	{name: "d11", sql: "SELECT CAST(v AS TEXT) AS x FROM (SELECT v FROM un_x INTERSECT SELECT v FROM rv_n) s", want: "rows=4 x=1 | x=1.5 | x=7 | x=NULL"},
+	{name: "d12", sql: "SELECT CAST(v AS TEXT) AS x FROM (SELECT v FROM rv_n UNION ALL SELECT v FROM un_x) s WHERE v = 1.5", want: "rows=2 x=1.5 | x=1.50"},
+	{name: "d13", sql: "SELECT v AS x FROM (SELECT v FROM un_x UNION ALL SELECT v FROM rv_n) s WHERE v = 1.5", want: "rows=2 x=1.5 | x=1.50"},
 	{name: "d14", sql: "SELECT count(*) AS c FROM (SELECT v FROM un_x GROUP BY v) q WHERE CAST(v AS TEXT) = '1'", want: "rows=1 c=1"},
-	{name: "d15", sql: "SELECT v AS x FROM (SELECT v FROM (SELECT v FROM un_x UNION ALL SELECT v FROM un_u) a UNION ALL SELECT v FROM rv_n) s", want: "rows=15 x=0.0000000000 | x=0.0000000001 | x=0.1000000000 | x=1.0000000000 | x=1.0000000000 | x=1.0000000000 | x=1.2500000000 | x=1.5000000000 | x=1.5000000000 | x=2.5000000000 | x=7.0000000000 | x=7.0000000000 | x=7.0000000000 | x=NULL | x=NULL", why: unibDoorR18},
-	{name: "d16", sql: "SELECT CAST(v AS TEXT) AS t FROM (SELECT v FROM (SELECT v FROM un_x UNION ALL SELECT v FROM un_u) a UNION ALL SELECT v FROM rv_n) s", want: "rows=15 t=0.0000000000 | t=0.0000000001 | t=0.1000000000 | t=1.0000000000 | t=1.0000000000 | t=1.0000000000 | t=1.2500000000 | t=1.5000000000 | t=1.5000000000 | t=2.5000000000 | t=7.0000000000 | t=7.0000000000 | t=7.0000000000 | t=NULL | t=NULL", why: unibDoorR18},
-	{name: "d17", sql: "SELECT v AS x FROM (SELECT v FROM rv_n UNION ALL SELECT v FROM (SELECT v FROM un_x UNION ALL SELECT v FROM un_u) a) s", want: "rows=15 x=0.0000000000 | x=0.0000000001 | x=0.1000000000 | x=1.0000000000 | x=1.0000000000 | x=1.0000000000 | x=1.2500000000 | x=1.5000000000 | x=1.5000000000 | x=2.5000000000 | x=7.0000000000 | x=7.0000000000 | x=7.0000000000 | x=NULL | x=NULL", why: unibDoorR18},
-	{name: "d18", sql: "SELECT v AS x FROM (SELECT v FROM (SELECT v FROM un_x UNION SELECT v FROM un_u) a UNION SELECT v FROM rv_n) s", want: "rows=9 x=0.0000000000 | x=0.0000000001 | x=0.1000000000 | x=1.0000000000 | x=1.2500000000 | x=1.5000000000 | x=2.5000000000 | x=7.0000000000 | x=NULL", why: unibDoorR18},
-	{name: "d19", sql: "SELECT v AS x FROM (SELECT v FROM un_x UNION ALL SELECT v FROM un_u) a UNION ALL SELECT v FROM rv_n", want: "rows=15 x=0.0000000000 | x=0.0000000001 | x=0.1000000000 | x=1.0000000000 | x=1.0000000000 | x=1.0000000000 | x=1.2500000000 | x=1.5000000000 | x=1.5000000000 | x=2.5000000000 | x=7.0000000000 | x=7.0000000000 | x=7.0000000000 | x=NULL | x=NULL", why: unibDoorR18},
-	{name: "d20", sql: "SELECT count(*) AS c FROM (SELECT v FROM (SELECT v FROM un_x UNION ALL SELECT v FROM un_u) a UNION ALL SELECT v FROM rv_n) s WHERE CAST(v AS TEXT) = '1'", want: "rows=1 c=0", why: unibDoorR18},
-	{name: "d21", sql: "SELECT count(*) AS c FROM (SELECT v FROM (SELECT v FROM un_x UNION ALL SELECT v FROM un_u) a UNION ALL SELECT v FROM rv_n) s WHERE CAST(v AS TEXT) LIKE '%.%0'", want: "rows=1 c=12", why: unibDoorR18},
-	{name: "d22", sql: "SELECT v AS x FROM (SELECT v FROM un_x UNION ALL SELECT v FROM un_u UNION ALL SELECT v FROM rv_n) s", want: "rows=15 x=0.0000000000 | x=0.0000000001 | x=0.1000000000 | x=1.0000000000 | x=1.0000000000 | x=1.0000000000 | x=1.2500000000 | x=1.5000000000 | x=1.5000000000 | x=2.5000000000 | x=7.0000000000 | x=7.0000000000 | x=7.0000000000 | x=NULL | x=NULL", why: unibDoorR18},
-	{name: "d23", sql: "SELECT v AS x FROM (SELECT v FROM (SELECT v FROM un_x UNION ALL SELECT v FROM rv_n) a UNION ALL SELECT v FROM un_u) s", want: "rows=15 x=0.0000000000 | x=0.0000000001 | x=0.1000000000 | x=1.0000000000 | x=1.0000000000 | x=1.0000000000 | x=1.2500000000 | x=1.5000000000 | x=1.5000000000 | x=2.5000000000 | x=7.0000000000 | x=7.0000000000 | x=7.0000000000 | x=NULL | x=NULL", why: unibDoorR18},
-	{name: "d24", sql: "SELECT v AS x FROM (SELECT v FROM (SELECT v FROM un_x INTERSECT SELECT v FROM un_u) a INTERSECT SELECT v FROM rv_n) s", want: "rows=1 x=7.0000000000", why: unibDoorR18},
+	{name: "d15", sql: "SELECT v AS x FROM (SELECT v FROM (SELECT v FROM un_x UNION ALL SELECT v FROM un_u) a UNION ALL SELECT v FROM rv_n) s", want: "rows=15 x=0.00 | x=0.0000000001 | x=0.1 | x=1 | x=1 | x=1.00 | x=1.25 | x=1.5 | x=1.50 | x=2.50 | x=7 | x=7 | x=7.00 | x=NULL | x=NULL"},
+	{name: "d16", sql: "SELECT CAST(v AS TEXT) AS t FROM (SELECT v FROM (SELECT v FROM un_x UNION ALL SELECT v FROM un_u) a UNION ALL SELECT v FROM rv_n) s", want: "rows=15 t=0.00 | t=0.0000000001 | t=0.1 | t=1 | t=1 | t=1.00 | t=1.25 | t=1.5 | t=1.50 | t=2.50 | t=7 | t=7 | t=7.00 | t=NULL | t=NULL"},
+	{name: "d17", sql: "SELECT v AS x FROM (SELECT v FROM rv_n UNION ALL SELECT v FROM (SELECT v FROM un_x UNION ALL SELECT v FROM un_u) a) s", want: "rows=15 x=0.00 | x=0.0000000001 | x=0.1 | x=1 | x=1 | x=1.00 | x=1.25 | x=1.5 | x=1.50 | x=2.50 | x=7 | x=7 | x=7.00 | x=NULL | x=NULL"},
+	{name: "d18", sql: "SELECT v AS x FROM (SELECT v FROM (SELECT v FROM un_x UNION SELECT v FROM un_u) a UNION SELECT v FROM rv_n) s", want: "rows=9 x=0.00 | x=0.0000000001 | x=0.1 | x=1 | x=1.25 | x=1.5 | x=2.50 | x=7 | x=NULL"},
+	{name: "d19", sql: "SELECT v AS x FROM (SELECT v FROM un_x UNION ALL SELECT v FROM un_u) a UNION ALL SELECT v FROM rv_n", want: "rows=15 x=0.00 | x=0.0000000001 | x=0.1 | x=1 | x=1 | x=1.00 | x=1.25 | x=1.5 | x=1.50 | x=2.50 | x=7 | x=7 | x=7.00 | x=NULL | x=NULL"},
+	{name: "d20", sql: "SELECT count(*) AS c FROM (SELECT v FROM (SELECT v FROM un_x UNION ALL SELECT v FROM un_u) a UNION ALL SELECT v FROM rv_n) s WHERE CAST(v AS TEXT) = '1'", want: "rows=1 c=2"},
+	{name: "d21", sql: "SELECT count(*) AS c FROM (SELECT v FROM (SELECT v FROM un_x UNION ALL SELECT v FROM un_u) a UNION ALL SELECT v FROM rv_n) s WHERE CAST(v AS TEXT) LIKE '%.%0'", want: "rows=1 c=5"},
+	{name: "d22", sql: "SELECT v AS x FROM (SELECT v FROM un_x UNION ALL SELECT v FROM un_u UNION ALL SELECT v FROM rv_n) s", want: "rows=15 x=0.00 | x=0.0000000001 | x=0.1 | x=1 | x=1 | x=1.00 | x=1.25 | x=1.5 | x=1.50 | x=2.50 | x=7 | x=7 | x=7.00 | x=NULL | x=NULL"},
+	{name: "d23", sql: "SELECT v AS x FROM (SELECT v FROM (SELECT v FROM un_x UNION ALL SELECT v FROM rv_n) a UNION ALL SELECT v FROM un_u) s", want: "rows=15 x=0.00 | x=0.0000000001 | x=0.1 | x=1 | x=1 | x=1.00 | x=1.25 | x=1.5 | x=1.50 | x=2.50 | x=7 | x=7 | x=7.00 | x=NULL | x=NULL"},
+	{name: "d24", sql: "SELECT v AS x FROM (SELECT v FROM (SELECT v FROM un_x INTERSECT SELECT v FROM un_u) a INTERSECT SELECT v FROM rv_n) s", want: "rows=1 x=7"},
 }
-
-// unibDoorR18: a set operation over a NUMERIC(10,2) arm and a NUMERIC arm
-// is the union's DECIMAL(38,10), not marked, and prints that one scale on
-// every door (numeric-decimal r18); PostgreSQL prints each value at its own
-// arm's scale (d04: 2.50 and 2.5).
-const unibDoorR18 = "r18"
 
 func unibDoorRows(rows []map[string]string) string {
 	out := make([]string, 0, len(rows))

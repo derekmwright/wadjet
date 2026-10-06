@@ -83,13 +83,15 @@ func TestASetOperationDeclaresAnUnconstrainedNumericOnTheWire(t *testing.T) {
 		sql         string
 		typmod      int32
 		want, pgRow string
+		// alt is the other value of a tie PostgreSQL may also print.
+		alt string
 	}{
 		// The set operation IS the output. This spelling was already right:
 		// it goes through setOpWireUnconstrainedDecimal.
-		{"root", mixed + ` ORDER BY v LIMIT 1`, -1, "0.000001", "0.000001"},
+		{"root", mixed + ` ORDER BY v LIMIT 1`, -1, "0.000001", "0.000001", ""},
 		// The five spellings B1 measured as numeric(20,6) after #884.
 		{"derived_table", `SELECT v FROM (` + mixed + `) x ORDER BY v LIMIT 1`,
-			-1, "0.000001", "0.000001"},
+			-1, "0.000001", "0.000001", ""},
 		// `pgRow` is a TIE here and is annotated as one: 12.75 and 12.750000
 		// are the same number, so `ORDER BY v DESC LIMIT 1` may return either
 		// row on the server and both spellings have been observed (ADR-0013's
@@ -98,20 +100,20 @@ func TestASetOperationDeclaresAnUnconstrainedNumericOnTheWire(t *testing.T) {
 		// an assertion and `pgRow` is a note.
 		{"derived_table_order_by",
 			`SELECT v FROM (` + mixed + `) x ORDER BY v DESC LIMIT 1`,
-			-1, "12.750000", "12.75 or 12.750000 — a tie"},
+			-1, "12.75", "12.75 or 12.750000 — a tie", "12.750000"},
 		{"cte", `WITH c AS (` + mixed + `) SELECT v FROM c ORDER BY v LIMIT 1`,
-			-1, "0.000001", "0.000001"},
+			-1, "0.000001", "0.000001", ""},
 		{"except",
 			`SELECT v FROM (SELECT d92 AS v FROM h3st EXCEPT SELECT d206 FROM h3st) x ` +
-				`ORDER BY v LIMIT 1`, -1, "1.000000", "1.00"},
+				`ORDER BY v LIMIT 1`, -1, "1.00", "1.00", ""},
 		{"null_arm",
 			`SELECT v FROM (SELECT d92 AS v FROM h3st UNION ALL SELECT NULL) x ` +
-				`ORDER BY v LIMIT 1`, -1, "1.00", "1.00"},
+				`ORDER BY v LIMIT 1`, -1, "1.00", "1.00", ""},
 		// The CONTROL, and it is the half that says this is not "every set
 		// operation is unconstrained": arms carrying the SAME typmod keep it
 		// on the server (measured: atttypmod 589830 = numeric(9,2)).
 		{"same_typmod_arms", `SELECT v FROM (` + same + `) x ORDER BY v LIMIT 1`,
-			589830, "1.00", "1.00"},
+			589830, "1.00", "1.00", ""},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			res := conn.ExecParams(ctx, c.sql, nil, nil, nil, []int16{0}).Read()
@@ -128,7 +130,17 @@ func TestASetOperationDeclaresAnUnconstrainedNumericOnTheWire(t *testing.T) {
 					"keeps the modifier only when every arm carries the same one"+
 					"\n  SQL: %s", f.TypeModifier, c.typmod, c.sql)
 			}
-			if len(res.Rows) != 1 || string(res.Rows[0][0]) != c.want {
+			// Each value prints its own display scale (ADR-0024 §11): the
+			// d92 arm's 12.75 and 1.00, the d206 arm's 0.000001 — which the
+			// carrier holds only at the reconciled scale.
+			got := ""
+			if len(res.Rows) == 1 {
+				got = string(res.Rows[0][0])
+			}
+			if c.alt != "" && got == c.alt {
+				got = c.want
+			}
+			if len(res.Rows) != 1 || got != c.want {
 				t.Errorf("rendered %q, want %q (PostgreSQL 17.11: %s) — the CARRIER must "+
 					"still take the reconciled scale, so a fix that restores the typmod by "+
 					"dropping the reconciliation fails here\n  SQL: %s",
