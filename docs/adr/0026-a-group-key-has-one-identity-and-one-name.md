@@ -25,7 +25,13 @@ and what became unreachable is the PLAN-TIME erasure in front of it.
 
 ## 2026-10-06 amendment: a term is a key by its BINDING (ADR-0047 stage 1, #1524)
 
-§1's identity could not see a qualifier, so `SELECT 2 * t.n … FROM ss_t t GROUP BY 2 * n` matched at one site by a qualifier-erasing fallback and missed at the others (declared text; `ORDER BY 1` sorted `20.00` before `4.50`), and every bare-against-qualified pair over a join was 42803. §1a below states the rule as implemented: the binder records which column each reference resolves to, and every single-process match site compares those bindings (`plansql.GroupTermIdentity`). ADR-0047 is the program this is the first stage of.
+The embedded engine matches the qualified and bare forms of `2 * n` by
+column binding (`plansql.GroupTermIdentity`), including the key's numeric
+order and declared type. Over a join, `t.i + 1` and `i + 1` match when both
+refer to `t.i`. Gate rows: `pair/numeric/itemQual/ordinalUnaliased`,
+`pair/numeric/keyQual/sel`, `ci1/innerJoin*` in
+`coordinator.TestArcGKGroupKeySpellingEveryArm`. ADR-0047 records the
+stage-1 scope.
 
 ## 2026-10-05 amendment: MOD and percent share a grouping identity
 
@@ -110,7 +116,12 @@ keeps its own `String()` — the behaviour every caller had before.
 
 ### 1a. A term IS a key when its leaves resolve to the key's columns (2026-10-06, ADR-0047 stage 1)
 
-A SELECT item, a HAVING, QUALIFY or ORDER BY term, a window term or a GROUPING argument is GROUP BY key k when its tree equals k's tree after §1's three erasures AND each column reference in it resolves to the same column as the matching reference in k. The resolution is the binder's: `physical.bindRef` binds every reference of a block to a relation instance and a position (`plansql.ColRef.Bound`), and `plansql.GroupTermIdentity` renders a bound reference as that binding — a NUL-prefixed key no identifier or alias can spell. So, measured against PostgreSQL 17.11 over `coordinator.TestArcGKGroupKeySpellingEveryArm`'s 1,063 cells:
+For a block bound in full, a SELECT item, HAVING or ORDER BY term, window
+term or GROUPING argument matches a GROUP BY key when their expression trees
+match and corresponding column references carry the same binding. The gate
+is `coordinator.TestArcGKGroupKeySpellingEveryArm`: `pair/*`, `shape/*`,
+`alias/*`, `multi/*`, `g/grouping*` and `term/*` measure these positions
+against PostgreSQL 17.11:
 
 - `2 * t.n` and `2 * n` over `FROM ss_t t` are one key, in either direction, and the item is published with the key's value, order and declared type;
 - over a join `t.i + 1` and `i + 1` are one key when `i` is `t`'s, and `zzj.d92` and `zzp.d92` are two;
@@ -118,7 +129,15 @@ A SELECT item, a HAVING, QUALIFY or ORDER BY term, a window term or a GROUPING a
 - an output alias never licenses an input reference that spells its name: `SELECT count(*) AS n … GROUP BY 1 * n HAVING t.n …` is 42803;
 - commuted operands and constant-folded twins stay two identities (42803).
 
-Nothing is re-spelled: the term keeps the text the query wrote, and only the comparison changed. The rule holds where the binding is present — the embedded engine's doors, for every block the binder bound in full. A block it could not bind (an unenumerable source, a star output, a field path, a USING-merged name, a dotted name, an unfolded FROM-less subquery), an expression-subquery or LATERAL body (planned from a re-parse of its text), and every statement the coordinator plans (whose AST is not bound until ADR-0047 stage 5) keep §1's spelling comparison, with the single-relation qualifier erasure in `groupKeyRefLookup` and `groupCheck` for those blocks only.
+The rule applies to blocks bound in full on the embedded engine. The window
+term over an aggregate is still substituted in `logical.respellOverAggregate`;
+the bound tree decides the match, before its output text is written
+(`pair/*/window` and `wadjet.TestArcCI1BindingCensusOverTheGroupKeyTable`).
+The `qd/*`, `j/using*`, `corr/innerShadow`, `corr/lateralGrouped` and
+`corr/fromlessSubq*` rows keep their recorded spelling-based answers.
+Correlated references back to a bound containing block are checked against
+that block's grouped columns (`corr/subqInSelOuterKeyBare`, `corrMatrix/*`).
+The DAG rows keep their base answers until ADR-0047 stage 5.
 
 ### 2. A key has a PUBLISHED name and a RESOLUTION spelling, and a Stage carries both
 
