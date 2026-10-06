@@ -656,6 +656,19 @@ type Column struct {
 	// stored scale's trailing zeros. A record written without the field reads
 	// as false, which is every column created before the marker existed.
 	Unconstrained bool `json:"unconstrained,omitempty"`
+	// PGNumeric marks a DOUBLE PRECISION column CREATED from an expression
+	// PostgreSQL types numeric — `5 / 2.0 + id * 0`, `sqrt(6.25 + id * 0)`,
+	// `power(x, 1)`, `ln(exp(x))` — which this engine computes, and so
+	// stores, in a double (ADR-0024 §2c's declaration divergence). The type,
+	// the storage and the wire stay FLOAT64; the marker is the PostgreSQL
+	// category the plan gave the column (expr.DeclType.PGNumeric), so a
+	// reader of the stored column rounds it as PostgreSQL rounds its numeric
+	// column: half away from zero. It is metadata only: no encode, decode,
+	// statistics or allocation path reads it. Set only by the created-column
+	// declaration (physical.Planner.CreatedColumns); meaningful only on a
+	// FLOAT64 column. A record written without the field reads as false,
+	// which is every column created before the marker existed.
+	PGNumeric bool `json:"pg_numeric,omitempty"`
 }
 
 // Field returns c's named child field. It answers only for a ROW column:

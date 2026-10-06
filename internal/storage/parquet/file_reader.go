@@ -1021,6 +1021,14 @@ func overlayDeclaredLeaf(ic, dc *Column, n *SchemaNode) {
 		ic.Unconstrained = dc.Unconstrained
 		return
 	}
+	if ic.Type == TypeFloat64 && dc.Type == TypeFloat64 {
+		// The file's DOUBLE leaf decides the type; the blob adds only the
+		// PostgreSQL category the column was created with
+		// (Column.PGNumeric), a declaration fact no decode or allocation
+		// path reads.
+		ic.PGNumeric = dc.PGNumeric
+		return
+	}
 	if n.LogicalType != nil || n.ConvertedType != nil {
 		// The file annotated this leaf, so the file wins — with one
 		// exception: a UTF8 STRING leaf may carry back the name CIDR,
