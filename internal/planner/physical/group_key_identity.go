@@ -169,7 +169,7 @@ func (w *declWalk) groupKeyOutputs(agg *logical.Node) []groupKeyOut {
 			// its own spelling as its identity, which is what every site
 			// compared before identities existed.
 			if parsed, err := plansql.ParseExpression(gb); err == nil {
-				k.Identity = plansql.ExprIdentity(parsed)
+				k.Identity = plansql.GroupTermIdentity(parsed)
 			} else {
 				k.Identity = strings.ToLower(strings.TrimSpace(gb))
 			}
@@ -183,7 +183,7 @@ func (w *declWalk) groupKeyOutputs(agg *logical.Node) []groupKeyOut {
 			out[i] = k
 			continue
 		}
-		k.Identity = plansql.ExprIdentity(e)
+		k.Identity = plansql.GroupTermIdentity(e)
 		if _, isLit := e.(*plansql.Lit); isLit && nonLit > 0 {
 			k.Literal = true
 			// From the SAME allocator as a derived key. A literal's
@@ -197,6 +197,16 @@ func (w *declWalk) groupKeyOutputs(agg *logical.Node) []groupKeyOut {
 			// name. Recorded so a consumer can tell the two reasons apart —
 			// the DAG's stage carries ONE name and cannot express this one
 			// (#736).
+			k.PublishedBelow = true
+		} else if below := below[k.Identity]; !plain && below != "" && plansql.HoldsBinding(e) {
+			// The same, for a key of a BOUND block spelled apart from the
+			// key below it: `SELECT DISTINCT i + 1 … GROUP BY t.i + 1` lowers
+			// to an aggregate keyed `i + 1` over one that publishes `t.i + 1`.
+			// The bindings say they are one expression (ADR-0047), so this
+			// key reads that column under that column's name; materializing
+			// it would evaluate `i + 1` over an output that no longer has an
+			// `i`, and the whole table collapsed into one NULL group.
+			k.Name, k.Slot = below, below
 			k.PublishedBelow = true
 		} else if !plain {
 			k.Derived = true

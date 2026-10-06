@@ -421,9 +421,12 @@ func isInfixNode(n Node) bool {
 }
 
 // groupKeyRefLookup finds the published name for an expression that IS one of
-// the aggregate's group keys.
+// the aggregate's group keys. keys is keyed by GroupTermIdentity.
 //
-// It tries the ordinary identity first and the QUALIFIER-ERASED one second, so
+// A term of a BOUND block is the key when its binding identity is
+// (ADR-0047). A term of an UNBOUND block — a door that does not stamp, or a
+// block the binder could not bind in full — tries the ordinary identity
+// first and the QUALIFIER-ERASED one second, so
 // `SELECT typemx.g + 1 ... GROUP BY g + 1` substitutes (#738). The second
 // lookup is safe because the map only ever CONTAINS an unqualified entry when
 // the builder registered one, and it registers one only for a block whose FROM
@@ -432,8 +435,16 @@ func isInfixNode(n Node) bool {
 // nothing and the substitution declines, which is what keeps `GROUP BY zzj.d92`
 // from licensing `SELECT zzp.d92`.
 func groupKeyRefLookup(keys map[string]string, n Node) (string, bool) {
-	if name, ok := keys[ExprIdentity(n)]; ok {
+	ProbeMatchMap("sql.groupKeyRefLookup", n, keys)
+	if name, ok := keys[GroupTermIdentity(n)]; ok {
 		return name, true
+	}
+	if HoldsBinding(n) {
+		// A bound term is the key or it is not; the qualifier-erasing
+		// fallback below is the unbound block's approximation of exactly
+		// that question, and asking it of a bound term would compare a
+		// spelling with a binding.
+		return "", false
 	}
 	name, ok := keys[ExprIdentityUnqualified(n)]
 	return name, ok

@@ -286,7 +286,8 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 		// re-evaluating the expression (the original columns are gone).
 		var synSource string
 		if isOverAggregate && proj.ASTExpr != nil && !proj.IsAgg {
-			if synName, ok := gbExprToSyn[plansql.ExprIdentity(proj.ASTExpr)]; ok {
+			plansql.ProbeMatchMap("physical.buildProject", proj.ASTExpr, gbExprToSyn)
+			if synName, ok := gbExprToSyn[plansql.GroupTermIdentity(proj.ASTExpr)]; ok {
 				expression = exec.ColumnRef(synName)
 				synSource = synName
 			}
@@ -419,7 +420,7 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 			// respelled form reads the key's own declared type instead.
 			typeExpr := astExpr
 			if isOverAggregate {
-				if _, ok := gbExprToSyn[plansql.ExprIdentity(proj.ASTExpr)]; ok {
+				if _, ok := gbExprToSyn[plansql.GroupTermIdentity(proj.ASTExpr)]; ok {
 					// The WHOLE item is a key: a rename of a value computed
 					// BELOW the aggregate, so it types against the
 					// aggregate's input or the declared Float64 coerces the
