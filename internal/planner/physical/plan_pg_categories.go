@@ -3,6 +3,7 @@
 package physical
 
 import (
+	"sort"
 	"strings"
 
 	"github.com/derekmwright/wadjet/internal/engine/expr"
@@ -23,7 +24,8 @@ import (
 // receives an expression's TEXT can key on. A name two nodes emit under two
 // different categories — or a base column of a different category under the
 // same name — is left out and returned in conflicts, and a reader then keeps
-// the carrier's reading.
+// the carrier's reading. loss names the first left-out name that reading is
+// wrong for (planPGCategoryLoss): a reader of it must not run on this map.
 //
 // Only the entries that CHANGE a reading are returned: a stored column's
 // category is its declared type's (a FLOAT64 is float8, a DECIMAL numeric),
@@ -32,7 +34,7 @@ import (
 // rides because the batch's FLOAT64 cannot say it — and an integer
 // value rounds the same under either rule. A 500-column table read by one
 // column ships none of its columns (round-2 review P3).
-func PlanPGCategories(root *logical.Node) (cats map[string]expr.PGCategory, conflicts map[string]bool) {
+func PlanPGCategories(root *logical.Node) (cats map[string]expr.PGCategory, conflicts map[string]bool, loss string) {
 	seen := map[string]expr.PGCategory{}
 	stored := map[string]bool{}
 	conflict := map[string]bool{}
@@ -90,7 +92,52 @@ func PlanPGCategories(root *logical.Node) (cats map[string]expr.PGCategory, conf
 	if len(conflict) == 0 {
 		conflict = nil
 	}
-	return seen, conflict
+	return seen, conflict, planPGCategoryLoss(root, conflict)
+}
+
+// planPGCategoryLoss is the first name, in order, of conflicts — the names
+// PlanPGCategories leaves out — that some node of the plan emits under a
+// category its carrier does not read: a FLOAT64 PostgreSQL types numeric
+// (`sqrt(6.25 + id * 0) AS b`, a stored column created from one) or a DECIMAL
+// it types float8. A reader of such a name keeps the carrier's reading, which
+// for that column is the other rounding rule; "" when every left-out name
+// reads its carrier's category wherever it is emitted.
+func planPGCategoryLoss(root *logical.Node, conflicts map[string]bool) string {
+	if len(conflicts) == 0 {
+		return ""
+	}
+	var hit []string
+	visited := map[*logical.Node]bool{}
+	var walk func(n *logical.Node)
+	walk = func(n *logical.Node) {
+		if n == nil || visited[n] {
+			return
+		}
+		visited[n] = true
+		cats := emittedColPGCategory(n)
+		if len(cats) > 0 {
+			types := emittedColTypes(n)
+			for name, c := range cats {
+				name = strings.ToLower(strings.TrimSpace(name))
+				if !conflicts[name] {
+					continue
+				}
+				t, ok := lookupColType(types, name)
+				if ok && (t == parquet.TypeFloat64 && c == expr.PGCatNumeric || t == parquet.TypeDecimal && c == expr.PGCatFloat8) {
+					hit = append(hit, name)
+				}
+			}
+		}
+		for _, ch := range n.Children {
+			walk(ch)
+		}
+	}
+	walk(root)
+	if len(hit) == 0 {
+		return ""
+	}
+	sort.Strings(hit)
+	return hit[0]
 }
 
 // AggregatePGCategory is PostgreSQL's category of an aggregate's (or a

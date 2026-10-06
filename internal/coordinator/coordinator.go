@@ -1363,9 +1363,13 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 		return c.runUnreachableOutputLocal(ctx, queryID, logicalPlan, planStr, start, verr)
 	}
 
+	queryCats, catLoss := dagPGCategories(logicalPlan, physStages)
+	if catLoss != "" {
+		return c.runUnreachableOutputLocal(ctx, queryID, logicalPlan, planStr, start, errCategoryByName(catLoss))
+	}
 	c.logger.Info("routing to native DAG executor",
 		"query", queryID, "stages", len(physStages))
-	ctx = withQueryPGCategories(ctx, dagPGCategories(logicalPlan, physStages))
+	ctx = withQueryPGCategories(ctx, queryCats)
 	gr, gerr := c.executeStageDAG(ctx, queryID, sql, physStages, c.workers.Count())
 	if gerr != nil {
 		// ErrInputLost: a producer died before its background upload landed

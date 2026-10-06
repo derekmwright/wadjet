@@ -4,6 +4,7 @@ package coordinator
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
@@ -53,8 +54,8 @@ func queryPGCategoriesFromContext(ctx context.Context) map[string]uint8 {
 // dagPGCategories is the map a native-DAG query's tasks carry: the plan's
 // categories by name, plus each stage's aggregate and window outputs under
 // the names the stage planner gave them.
-func dagPGCategories(plan *logical.Node, stages []dagplan.Stage) map[string]uint8 {
-	cats, planConflicts := physical.PlanPGCategories(plan)
+func dagPGCategories(plan *logical.Node, stages []dagplan.Stage) (map[string]uint8, string) {
+	cats, planConflicts, loss := physical.PlanPGCategories(plan)
 	out := map[string]uint8{}
 	// A name the plan's own fold found under two categories stays out: an
 	// aggregate stage's output of that name (`avg(i) AS f` beside a float8
@@ -103,9 +104,25 @@ func dagPGCategories(plan *logical.Node, stages []dagplan.Stage) map[string]uint
 		}
 	}
 	if len(out) == 0 {
-		return nil
+		return nil, loss
 	}
-	return out
+	return out, loss
+}
+
+// errCategoryByName is the stage DAG's refusal of a plan whose category map
+// cannot name a column's category: a column is emitted under a category its
+// carrier does not read — a FLOAT64 PostgreSQL types numeric, a stored column
+// created from one (parquet.Column.PGNumeric) — and another column the plan
+// reads or computes under the same name has another category, so the name is
+// left out of the map and a stage reading it would take the batch's FLOAT64
+// for a float8: `round(b)` answering 2 where PostgreSQL answers 3. The map is
+// keyed by name until ADR-0047 stage 7 converts it to positions; until then
+// the plan runs on the coordinator-local pipeline, whose operators read their
+// own inputs' categories. It is ErrUnreachableGatherOutput's class (the local
+// route that refusal takes).
+func errCategoryByName(name string) error {
+	return fmt.Errorf("%w: column %q is numeric to PostgreSQL in one relation of this plan and not in another: "+
+		"the stage DAG keys a column's PostgreSQL category by name", dagplan.ErrUnreachableGatherOutput, name)
 }
 
 // stampTaskPGCategories gives a task its query's category map, unless a
