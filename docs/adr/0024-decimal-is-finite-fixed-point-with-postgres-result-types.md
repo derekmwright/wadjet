@@ -1499,9 +1499,15 @@ carrier:
   own scale leaves it uniform) — a DECIMAL box is its printed text, so a
   COALESCE / CASE / GREATEST / LEAST / NULLIF that answers a column's value
   hands on that value's display scale; an integer box records 0 (`CASE …
-  THEN 14 ELSE 13.25 END` prints 14); a choice that answers a numeric
-  literal answers the literal's spelling (`COALESCE(n, 1.50)` 1.50,
-  `COALESCE(n, 1.5)` 1.5); a stage-DAG set-operation arm brought to the
+  THEN 14 ELSE 13.25 END` prints 14); a choice with at least one column
+  operand that answers a numeric literal answers the literal's spelling
+  (`COALESCE(n, 1.50)` 1.50, `COALESCE(n, 1.5)` 1.5). A choice over
+  literals only is evaluated as a double, which has no spelling, and prints
+  the carrier scale until stage 2 (`CASE WHEN true THEN 2.50 ELSE 7.1234
+  END` 2.5000, `GREATEST(-2.50, 0.1)` 0.10, `GREATEST(1e3, 0.1)` 1000.0,
+  where PostgreSQL prints 2.50, 0.1 and 1000; beside a `NULL::numeric`
+  operand it prints trimmed, `COALESCE(NULL::numeric, 2.50, 7.1234)` 2.5
+  for PostgreSQL's 2.50); a stage-DAG set-operation arm brought to the
   result's declaration keeps its values' display scales
   (`exec.DecimalCoerce`: a value without one keeps the arm's carrier
   scale, an integer 0, a value leaving a marked column for an unmarked
@@ -1541,16 +1547,32 @@ set-operation fold still decides the result column's mark and typmod.
 
 **Still diverges after stage 1**, each with its stage: arithmetic over
 values of different display scales prints the carrier's zeros
-(`COALESCE(n, 1.5) + 0`; `v + 0` over a set operation's `2.5`: 2);
+(`COALESCE(n, 1.5) + 0`; `v + 0` over a set operation's `2.5`: 2), and so
+does a choice over literals only (`GREATEST(-2.50, 0.1)` 0.10: 2);
 `ARRAY[n, 1]` (3); quotient digits (4); every stored bare-NUMERIC cell —
 `2.50` reads 2.5, `v + 1` over a stored 2.50 prints 3.5000000000 (5); the
 precision rows r17, r19, r23 and comparison-membership r9 (§1's carrier,
 unchanged).
 
+**Cost** (medians of ns/op per 2,048 values, eb76eb97 → stage 1,
+alternating runs under one lock; the PS1 closure review's measurement):
+add −0.9 % uniform, +1.1 % varying; multiply −0.4 % uniform, −0.8 %
+varying; compare −0.2 %; SUM +0.4 %; the printer −0.6 % for a column with
+no display scales, +1.1 % for a marked column and +2.4 % for a varying one,
+where the printer reads each value's code and cuts the carrier's text to
+it. The bound for stage 1 is +3 % on the
+printer's marked and varying paths and not slower on its unmarked path. A
+column uniform at one display scale costs two bytes per column per chunk
+in the `.wshf` exchange and in the spill run, and none when that scale is
+the carrier's (`worker.TestWSHFAUniformDisplayScaleCostsTwoBytes`,
+`exec.TestSpillRunAUniformDisplayScaleCostsTwoBytes`).
+
 Gated by `coordinator.TestArcPSDisplayScaleEveryArm` (eleven arms),
 `pgwire.TestArcPSBinaryDscaleIsTheText`, `worker.TestWSHFDisplayScaleRoundTrip`,
 `worker.TestWSHFUnmarkedColumnsEncodeAsBase`,
 `worker.TestWSHFDecoderRefusesAnInvalidPrecisionByte`,
+`worker.TestWSHFEveryReaderRefusesABadDisplayScaleSection`,
+`batch.TestDecimalColumnAUniformFillCollapses`,
 `exec.TestSpillRunKeepsTheDisplayScale`, `exec.TestDisplayScaleIsNeverAKey`,
 `wadjet.TestArcPSDisplayScaleThroughEverySpill`,
 `server.TestArcPSDisplayScaleNeverPublishesAPolicedValue`,

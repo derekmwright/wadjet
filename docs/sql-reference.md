@@ -921,7 +921,10 @@ numeric `dscale` is the printed value's) — and every rendering
 (`CAST(x AS TEXT)`, `||`, `json_build_object`) reads the same text. `2.50`
 and `2.5` compare, join, group and deduplicate as one value. Arithmetic over
 values of different display scales answers at its declared scale
-(`COALESCE(n, 1.5) + 0` prints `1.50`), and so do a numeric array's elements.
+(`COALESCE(n, 1.5) + 0` prints `1.50`), and so do a numeric array's elements
+and a choice with no column operand (`GREATEST(-2.50, 0.1)` prints `0.10`,
+`CASE WHEN true THEN 2.50 ELSE 7.1234 END` prints `2.5000`; PostgreSQL
+prints `0.1` and `2.50`).
 
 ## CREATE TABLE AS SELECT
 
