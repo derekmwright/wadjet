@@ -3,6 +3,8 @@
 package physical
 
 import (
+	"reflect"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -101,7 +103,9 @@ func PlanPGCategories(root *logical.Node) (cats map[string]expr.PGCategory, conf
 // (`sqrt(6.25 + id * 0) AS b`, a stored column created from one) or a DECIMAL
 // it types float8. A reader of such a name keeps the carrier's reading, which
 // for that column is the other rounding rule; "" when every left-out name
-// reads its carrier's category wherever it is emitted.
+// reads its carrier's category wherever it is emitted, or when nothing in
+// the plan rounds (planHasRoundingSite): only a ROUND or an integer cast
+// reads a category, so a lost name with no such reader changes no answer.
 func planPGCategoryLoss(root *logical.Node, conflicts map[string]bool) string {
 	if len(conflicts) == 0 {
 		return ""
@@ -133,11 +137,84 @@ func planPGCategoryLoss(root *logical.Node, conflicts map[string]bool) string {
 		}
 	}
 	walk(root)
-	if len(hit) == 0 {
+	if len(hit) == 0 || !planHasRoundingSite(root) {
 		return ""
 	}
 	sort.Strings(hit)
 	return hit[0]
+}
+
+// roundingSiteText matches the spelling of every expression that reads a
+// column's category: ROUND and a cast to an integer or an integer array —
+// `CAST(… AS …)`, `::`, and the function-style integer casts. It is wider
+// than the rule (a cast to text matches too): a false match only keeps a
+// plan on the local route it took before, a missed one would let a stage
+// round a lost column by its carrier.
+var roundingSiteText = regexp.MustCompile(`(?i)\bround\s*\(|\bcast\s*\(|::|\b(int|int2|int4|int8|integer|smallint|bigint)\s*\(`)
+
+// planHasRoundingSite reports whether any expression of the plan rounds by
+// its operand's category (roundsHalfEven: ROUND, the integer cast, the
+// integer array cast). A plan without one reads no category, so a name its
+// map loses changes no answer and the stage DAG runs it (round-3 review N1,
+// FC15: a join or a semi join of a marked table with a float8 column of the
+// same name routed local with nothing rounding it).
+//
+// It reads EVERY string and every expression tree the plan's nodes hold,
+// through reflection rather than a list of the fields that carry an
+// expression today: a field added later is read too, and a field that is
+// not an expression (a table name) can only make the answer true.
+func planHasRoundingSite(root *logical.Node) bool {
+	seen := map[uintptr]bool{}
+	astType := reflect.TypeOf((*plansql.Node)(nil)).Elem()
+	var visit func(v reflect.Value) bool
+	visit = func(v reflect.Value) bool {
+		switch v.Kind() {
+		case reflect.String:
+			return roundingSiteText.MatchString(v.String())
+		case reflect.Interface:
+			if v.IsNil() {
+				return false
+			}
+			if v.Type().Implements(astType) && v.CanInterface() {
+				if n, ok := v.Interface().(plansql.Node); ok {
+					return roundingSiteText.MatchString(n.String())
+				}
+			}
+			return visit(v.Elem())
+		case reflect.Pointer:
+			if v.IsNil() || seen[v.Pointer()] {
+				return false
+			}
+			seen[v.Pointer()] = true
+			if v.Type().Implements(astType) && v.CanInterface() {
+				if n, ok := v.Interface().(plansql.Node); ok {
+					return roundingSiteText.MatchString(n.String())
+				}
+			}
+			return visit(v.Elem())
+		case reflect.Struct:
+			for i := 0; i < v.NumField(); i++ {
+				if visit(v.Field(i)) {
+					return true
+				}
+			}
+		case reflect.Slice, reflect.Array:
+			for i := 0; i < v.Len(); i++ {
+				if visit(v.Index(i)) {
+					return true
+				}
+			}
+		case reflect.Map:
+			it := v.MapRange()
+			for it.Next() {
+				if visit(it.Key()) || visit(it.Value()) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	return visit(reflect.ValueOf(root))
 }
 
 // AggregatePGCategory is PostgreSQL's category of an aggregate's (or a
