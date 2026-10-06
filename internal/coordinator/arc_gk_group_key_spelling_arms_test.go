@@ -348,6 +348,36 @@ func gkMoreCells(t *testing.T) []ssCell {
 // this engine's answer, and why.
 type gkKeep struct{ arms, want, why string }
 
+// gkSQLState separates the refusal class from its diagnostic text. An empty
+// engine SQLSTATE is recorded explicitly; an answered query is 00000.
+func gkSQLState(answer string) string {
+	if rest, ok := strings.CutPrefix(answer, "ERR "); ok {
+		state, _, _ := strings.Cut(rest, " ")
+		if state == "" {
+			return "unset"
+		}
+		return state
+	}
+	return "00000"
+}
+
+func gkBaseStates(t *testing.T) map[string]map[string]string {
+	t.Helper()
+	out := map[string]map[string]string{}
+	arms := []string{"single", "spilled512k", "dag", "dag-shuffled", "dag-morsel4"}
+	for name, rest := range gkReadTSV(t, "testdata/arc_ci1_base_sqlstates.tsv", 6) {
+		states := strings.Split(rest, "\t")
+		if len(states) != len(arms) {
+			t.Fatalf("base SQLSTATE row %s has %d arms", name, len(states))
+		}
+		out[name] = map[string]string{}
+		for i, arm := range arms {
+			out[name][arm] = states[i]
+		}
+	}
+	return out
+}
+
 func (k gkKeep) holdsOn(arm string) bool {
 	dag := strings.HasPrefix(arm, "dag")
 	switch k.arms {
@@ -394,7 +424,7 @@ func gkKeptLines(t *testing.T) map[string][]gkKeep {
 }
 
 // TestArcGKGroupKeySpellingEveryArm is the seam table on five arms (ADR-0047
-// stage 1, #1524): 742 generated cells (gkCells) and 321 measured probes
+// stage 1, #1524): generated cells (gkCells) and measured probes
 // (gkMoreCells) — a select item, HAVING, ORDER BY, window or GROUPING term
 // spelled apart from its GROUP BY key, over one relation, over a join, through
 // derived tables, CTEs, set operations, subqueries and LATERAL bodies.
@@ -426,6 +456,7 @@ func TestArcGKGroupKeySpellingEveryArm(t *testing.T) {
 		}
 	}
 	kept := gkKeptLines(t)
+	baseStates := gkBaseStates(t)
 	for name, ks := range kept {
 		if !seen[name] {
 			t.Fatalf("kept cell %s is not in the table", name)
@@ -477,10 +508,23 @@ func TestArcGKGroupKeySpellingEveryArm(t *testing.T) {
 			for i, arm := range arms {
 				want, why := pgWant, "PostgreSQL 17.11"
 				skip := false
+				baseState, measured := baseStates[tc.name][arm.name]
+				if !measured {
+					t.Fatalf("%s/%s has no measured base SQLSTATE", tc.name, arm.name)
+				}
 				for _, k := range ks {
 					if k.holdsOn(arm.name) {
 						want, why, skip = k.want, "kept: "+k.why, k.arms == "skip"
+						if strings.Contains(k.why, "base-identical") && gkSQLState(got[i]) != baseState {
+							t.Errorf("%s/%s: base-identical label has SQLSTATE %s, base %s", tc.name, arm.name, gkSQLState(got[i]), baseState)
+						}
 					}
+				}
+				if strings.HasPrefix(arm.name, "dag") && gkSQLState(got[i]) != baseState {
+					t.Errorf("%s/%s: DAG SQLSTATE %s, base %s", tc.name, arm.name, gkSQLState(got[i]), baseState)
+				}
+				if baseState == gkSQLState(pgWant) && gkSQLState(got[i]) != baseState {
+					t.Errorf("%s/%s: base matched PostgreSQL SQLSTATE %s, got %s", tc.name, arm.name, baseState, gkSQLState(got[i]))
 				}
 				if skip {
 					continue

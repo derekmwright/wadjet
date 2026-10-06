@@ -320,3 +320,122 @@ ci1/joinCteBody	true	WITH c AS (SELECT i + 1 AS k, count(*) AS n FROM ss_t t JOI
 ci1/joinUnionArm	true	SELECT t.i + 1 AS k FROM ss_t t JOIN ss_i u ON u.id = t.id GROUP BY i + 1 UNION ALL SELECT 100 ORDER BY 1
 ci1/joinDate	true	SELECT t.d + 1 AS k, count(*) AS c FROM ss_t t JOIN ss_i u ON u.id = t.id GROUP BY d + 1 ORDER BY 1
 ci1/joinText	true	SELECT upper(t.s) AS k, count(*) AS c FROM ss_t t JOIN ss_i u ON u.id = t.id GROUP BY upper(s) ORDER BY 1
+corrMatrix/select/scalar/ungrouped	false	SELECT count(*) AS c, (SELECT max(x.v) FROM ss_i x WHERE x.v > t.i) AS y FROM ss_t t GROUP BY t.i + 1
+corrMatrix/having/scalar/ungrouped	false	SELECT count(*) AS c FROM ss_t t GROUP BY t.i + 1 HAVING (SELECT max(x.v) FROM ss_i x WHERE x.v > t.i) IS NOT NULL
+corrMatrix/order/scalar/ungrouped	false	SELECT count(*) AS c FROM ss_t t GROUP BY t.i + 1 ORDER BY (SELECT max(x.v) FROM ss_i x WHERE x.v > t.i)
+corrMatrix/partition/scalar/ungrouped	false	SELECT count(*) AS c, rank() OVER (PARTITION BY (SELECT max(x.v) FROM ss_i x WHERE x.v > t.i)) AS w FROM ss_t t GROUP BY t.i + 1
+corrMatrix/windowOrder/scalar/ungrouped	false	SELECT count(*) AS c, rank() OVER (ORDER BY (SELECT max(x.v) FROM ss_i x WHERE x.v > t.i)) AS w FROM ss_t t GROUP BY t.i + 1
+corrMatrix/grouping/scalar/ungrouped	false	SELECT count(*) AS c, GROUPING((SELECT max(x.v) FROM ss_i x WHERE x.v > t.i)) AS g FROM ss_t t GROUP BY t.i + 1
+corrMatrix/windowArg/scalar/ungrouped	false	SELECT count(*) AS c, count((SELECT max(x.v) FROM ss_i x WHERE x.v > t.i)) OVER () AS w FROM ss_t t GROUP BY t.i + 1
+corrMatrix/select/exists/ungrouped	false	SELECT count(*) AS c, EXISTS (SELECT x.v FROM ss_i x WHERE x.v > t.i) AS y FROM ss_t t GROUP BY t.i + 1
+corrMatrix/having/exists/ungrouped	false	SELECT count(*) AS c FROM ss_t t GROUP BY t.i + 1 HAVING EXISTS (SELECT x.v FROM ss_i x WHERE x.v > t.i)
+corrMatrix/order/exists/ungrouped	false	SELECT count(*) AS c FROM ss_t t GROUP BY t.i + 1 ORDER BY EXISTS (SELECT x.v FROM ss_i x WHERE x.v > t.i)
+corrMatrix/partition/exists/ungrouped	false	SELECT count(*) AS c, rank() OVER (PARTITION BY EXISTS (SELECT x.v FROM ss_i x WHERE x.v > t.i)) AS w FROM ss_t t GROUP BY t.i + 1
+corrMatrix/windowOrder/exists/ungrouped	false	SELECT count(*) AS c, rank() OVER (ORDER BY EXISTS (SELECT x.v FROM ss_i x WHERE x.v > t.i)) AS w FROM ss_t t GROUP BY t.i + 1
+corrMatrix/grouping/exists/ungrouped	false	SELECT count(*) AS c, GROUPING(EXISTS (SELECT x.v FROM ss_i x WHERE x.v > t.i)) AS g FROM ss_t t GROUP BY t.i + 1
+corrMatrix/windowArg/exists/ungrouped	false	SELECT count(*) AS c, count(EXISTS (SELECT x.v FROM ss_i x WHERE x.v > t.i)) OVER () AS w FROM ss_t t GROUP BY t.i + 1
+corrMatrix/select/in/ungrouped	false	SELECT count(*) AS c, 1 IN (SELECT x.v FROM ss_i x WHERE x.v > t.i) AS y FROM ss_t t GROUP BY t.i + 1
+corrMatrix/having/in/ungrouped	false	SELECT count(*) AS c FROM ss_t t GROUP BY t.i + 1 HAVING 1 IN (SELECT x.v FROM ss_i x WHERE x.v > t.i)
+corrMatrix/order/in/ungrouped	false	SELECT count(*) AS c FROM ss_t t GROUP BY t.i + 1 ORDER BY 1 IN (SELECT x.v FROM ss_i x WHERE x.v > t.i)
+corrMatrix/partition/in/ungrouped	false	SELECT count(*) AS c, rank() OVER (PARTITION BY 1 IN (SELECT x.v FROM ss_i x WHERE x.v > t.i)) AS w FROM ss_t t GROUP BY t.i + 1
+corrMatrix/windowOrder/in/ungrouped	false	SELECT count(*) AS c, rank() OVER (ORDER BY 1 IN (SELECT x.v FROM ss_i x WHERE x.v > t.i)) AS w FROM ss_t t GROUP BY t.i + 1
+corrMatrix/grouping/in/ungrouped	false	SELECT count(*) AS c, GROUPING(1 IN (SELECT x.v FROM ss_i x WHERE x.v > t.i)) AS g FROM ss_t t GROUP BY t.i + 1
+corrMatrix/windowArg/in/ungrouped	false	SELECT count(*) AS c, count(1 IN (SELECT x.v FROM ss_i x WHERE x.v > t.i)) OVER () AS w FROM ss_t t GROUP BY t.i + 1
+corrMatrix/select/any/ungrouped	false	SELECT count(*) AS c, 1 = ANY (SELECT x.v FROM ss_i x WHERE x.v > t.i) AS y FROM ss_t t GROUP BY t.i + 1
+corrMatrix/having/any/ungrouped	false	SELECT count(*) AS c FROM ss_t t GROUP BY t.i + 1 HAVING 1 = ANY (SELECT x.v FROM ss_i x WHERE x.v > t.i)
+corrMatrix/order/any/ungrouped	false	SELECT count(*) AS c FROM ss_t t GROUP BY t.i + 1 ORDER BY 1 = ANY (SELECT x.v FROM ss_i x WHERE x.v > t.i)
+corrMatrix/partition/any/ungrouped	false	SELECT count(*) AS c, rank() OVER (PARTITION BY 1 = ANY (SELECT x.v FROM ss_i x WHERE x.v > t.i)) AS w FROM ss_t t GROUP BY t.i + 1
+corrMatrix/windowOrder/any/ungrouped	false	SELECT count(*) AS c, rank() OVER (ORDER BY 1 = ANY (SELECT x.v FROM ss_i x WHERE x.v > t.i)) AS w FROM ss_t t GROUP BY t.i + 1
+corrMatrix/grouping/any/ungrouped	false	SELECT count(*) AS c, GROUPING(1 = ANY (SELECT x.v FROM ss_i x WHERE x.v > t.i)) AS g FROM ss_t t GROUP BY t.i + 1
+corrMatrix/windowArg/any/ungrouped	false	SELECT count(*) AS c, count(1 = ANY (SELECT x.v FROM ss_i x WHERE x.v > t.i)) OVER () AS w FROM ss_t t GROUP BY t.i + 1
+corrMatrix/select/all/ungrouped	false	SELECT count(*) AS c, 1 < ALL (SELECT x.v FROM ss_i x WHERE x.v > t.i) AS y FROM ss_t t GROUP BY t.i + 1
+corrMatrix/having/all/ungrouped	false	SELECT count(*) AS c FROM ss_t t GROUP BY t.i + 1 HAVING 1 < ALL (SELECT x.v FROM ss_i x WHERE x.v > t.i)
+corrMatrix/order/all/ungrouped	false	SELECT count(*) AS c FROM ss_t t GROUP BY t.i + 1 ORDER BY 1 < ALL (SELECT x.v FROM ss_i x WHERE x.v > t.i)
+corrMatrix/partition/all/ungrouped	false	SELECT count(*) AS c, rank() OVER (PARTITION BY 1 < ALL (SELECT x.v FROM ss_i x WHERE x.v > t.i)) AS w FROM ss_t t GROUP BY t.i + 1
+corrMatrix/windowOrder/all/ungrouped	false	SELECT count(*) AS c, rank() OVER (ORDER BY 1 < ALL (SELECT x.v FROM ss_i x WHERE x.v > t.i)) AS w FROM ss_t t GROUP BY t.i + 1
+corrMatrix/grouping/all/ungrouped	false	SELECT count(*) AS c, GROUPING(1 < ALL (SELECT x.v FROM ss_i x WHERE x.v > t.i)) AS g FROM ss_t t GROUP BY t.i + 1
+corrMatrix/windowArg/all/ungrouped	false	SELECT count(*) AS c, count(1 < ALL (SELECT x.v FROM ss_i x WHERE x.v > t.i)) OVER () AS w FROM ss_t t GROUP BY t.i + 1
+corrMatrix/select/scalar/grouped	false	SELECT count(*) AS c, (SELECT max(x.v) FROM ss_i x WHERE x.v > t.i) AS y FROM ss_t t GROUP BY t.i
+corrMatrix/having/scalar/grouped	false	SELECT count(*) AS c FROM ss_t t GROUP BY t.i HAVING (SELECT max(x.v) FROM ss_i x WHERE x.v > t.i) IS NOT NULL
+corrMatrix/order/scalar/grouped	false	SELECT count(*) AS c FROM ss_t t GROUP BY t.i ORDER BY (SELECT max(x.v) FROM ss_i x WHERE x.v > t.i)
+corrMatrix/partition/scalar/grouped	false	SELECT count(*) AS c, rank() OVER (PARTITION BY (SELECT max(x.v) FROM ss_i x WHERE x.v > t.i)) AS w FROM ss_t t GROUP BY t.i
+corrMatrix/windowOrder/scalar/grouped	false	SELECT count(*) AS c, rank() OVER (ORDER BY (SELECT max(x.v) FROM ss_i x WHERE x.v > t.i)) AS w FROM ss_t t GROUP BY t.i
+corrMatrix/grouping/scalar/grouped	false	SELECT count(*) AS c, GROUPING((SELECT max(x.v) FROM ss_i x WHERE x.v > t.i)) AS g FROM ss_t t GROUP BY t.i
+corrMatrix/windowArg/scalar/grouped	false	SELECT count(*) AS c, count((SELECT max(x.v) FROM ss_i x WHERE x.v > t.i)) OVER () AS w FROM ss_t t GROUP BY t.i
+corrMatrix/select/exists/grouped	false	SELECT count(*) AS c, EXISTS (SELECT x.v FROM ss_i x WHERE x.v > t.i) AS y FROM ss_t t GROUP BY t.i
+corrMatrix/having/exists/grouped	false	SELECT count(*) AS c FROM ss_t t GROUP BY t.i HAVING EXISTS (SELECT x.v FROM ss_i x WHERE x.v > t.i)
+corrMatrix/order/exists/grouped	false	SELECT count(*) AS c FROM ss_t t GROUP BY t.i ORDER BY EXISTS (SELECT x.v FROM ss_i x WHERE x.v > t.i)
+corrMatrix/partition/exists/grouped	false	SELECT count(*) AS c, rank() OVER (PARTITION BY EXISTS (SELECT x.v FROM ss_i x WHERE x.v > t.i)) AS w FROM ss_t t GROUP BY t.i
+corrMatrix/windowOrder/exists/grouped	false	SELECT count(*) AS c, rank() OVER (ORDER BY EXISTS (SELECT x.v FROM ss_i x WHERE x.v > t.i)) AS w FROM ss_t t GROUP BY t.i
+corrMatrix/grouping/exists/grouped	false	SELECT count(*) AS c, GROUPING(EXISTS (SELECT x.v FROM ss_i x WHERE x.v > t.i)) AS g FROM ss_t t GROUP BY t.i
+corrMatrix/windowArg/exists/grouped	false	SELECT count(*) AS c, count(EXISTS (SELECT x.v FROM ss_i x WHERE x.v > t.i)) OVER () AS w FROM ss_t t GROUP BY t.i
+corrMatrix/select/in/grouped	false	SELECT count(*) AS c, 1 IN (SELECT x.v FROM ss_i x WHERE x.v > t.i) AS y FROM ss_t t GROUP BY t.i
+corrMatrix/having/in/grouped	false	SELECT count(*) AS c FROM ss_t t GROUP BY t.i HAVING 1 IN (SELECT x.v FROM ss_i x WHERE x.v > t.i)
+corrMatrix/order/in/grouped	false	SELECT count(*) AS c FROM ss_t t GROUP BY t.i ORDER BY 1 IN (SELECT x.v FROM ss_i x WHERE x.v > t.i)
+corrMatrix/partition/in/grouped	false	SELECT count(*) AS c, rank() OVER (PARTITION BY 1 IN (SELECT x.v FROM ss_i x WHERE x.v > t.i)) AS w FROM ss_t t GROUP BY t.i
+corrMatrix/windowOrder/in/grouped	false	SELECT count(*) AS c, rank() OVER (ORDER BY 1 IN (SELECT x.v FROM ss_i x WHERE x.v > t.i)) AS w FROM ss_t t GROUP BY t.i
+corrMatrix/grouping/in/grouped	false	SELECT count(*) AS c, GROUPING(1 IN (SELECT x.v FROM ss_i x WHERE x.v > t.i)) AS g FROM ss_t t GROUP BY t.i
+corrMatrix/windowArg/in/grouped	false	SELECT count(*) AS c, count(1 IN (SELECT x.v FROM ss_i x WHERE x.v > t.i)) OVER () AS w FROM ss_t t GROUP BY t.i
+corrMatrix/select/any/grouped	false	SELECT count(*) AS c, 1 = ANY (SELECT x.v FROM ss_i x WHERE x.v > t.i) AS y FROM ss_t t GROUP BY t.i
+corrMatrix/having/any/grouped	false	SELECT count(*) AS c FROM ss_t t GROUP BY t.i HAVING 1 = ANY (SELECT x.v FROM ss_i x WHERE x.v > t.i)
+corrMatrix/order/any/grouped	false	SELECT count(*) AS c FROM ss_t t GROUP BY t.i ORDER BY 1 = ANY (SELECT x.v FROM ss_i x WHERE x.v > t.i)
+corrMatrix/partition/any/grouped	false	SELECT count(*) AS c, rank() OVER (PARTITION BY 1 = ANY (SELECT x.v FROM ss_i x WHERE x.v > t.i)) AS w FROM ss_t t GROUP BY t.i
+corrMatrix/windowOrder/any/grouped	false	SELECT count(*) AS c, rank() OVER (ORDER BY 1 = ANY (SELECT x.v FROM ss_i x WHERE x.v > t.i)) AS w FROM ss_t t GROUP BY t.i
+corrMatrix/grouping/any/grouped	false	SELECT count(*) AS c, GROUPING(1 = ANY (SELECT x.v FROM ss_i x WHERE x.v > t.i)) AS g FROM ss_t t GROUP BY t.i
+corrMatrix/windowArg/any/grouped	false	SELECT count(*) AS c, count(1 = ANY (SELECT x.v FROM ss_i x WHERE x.v > t.i)) OVER () AS w FROM ss_t t GROUP BY t.i
+corrMatrix/select/all/grouped	false	SELECT count(*) AS c, 1 < ALL (SELECT x.v FROM ss_i x WHERE x.v > t.i) AS y FROM ss_t t GROUP BY t.i
+corrMatrix/having/all/grouped	false	SELECT count(*) AS c FROM ss_t t GROUP BY t.i HAVING 1 < ALL (SELECT x.v FROM ss_i x WHERE x.v > t.i)
+corrMatrix/order/all/grouped	false	SELECT count(*) AS c FROM ss_t t GROUP BY t.i ORDER BY 1 < ALL (SELECT x.v FROM ss_i x WHERE x.v > t.i)
+corrMatrix/partition/all/grouped	false	SELECT count(*) AS c, rank() OVER (PARTITION BY 1 < ALL (SELECT x.v FROM ss_i x WHERE x.v > t.i)) AS w FROM ss_t t GROUP BY t.i
+corrMatrix/windowOrder/all/grouped	false	SELECT count(*) AS c, rank() OVER (ORDER BY 1 < ALL (SELECT x.v FROM ss_i x WHERE x.v > t.i)) AS w FROM ss_t t GROUP BY t.i
+corrMatrix/grouping/all/grouped	false	SELECT count(*) AS c, GROUPING(1 < ALL (SELECT x.v FROM ss_i x WHERE x.v > t.i)) AS g FROM ss_t t GROUP BY t.i
+corrMatrix/windowArg/all/grouped	false	SELECT count(*) AS c, count(1 < ALL (SELECT x.v FROM ss_i x WHERE x.v > t.i)) OVER () AS w FROM ss_t t GROUP BY t.i
+corrMatrix/select/scalar/expression	false	SELECT count(*) AS c, (SELECT max(x.v) FROM ss_i x WHERE x.v > t.i + 1) AS y FROM ss_t t GROUP BY t.i + 1
+corrMatrix/having/scalar/expression	false	SELECT count(*) AS c FROM ss_t t GROUP BY t.i + 1 HAVING (SELECT max(x.v) FROM ss_i x WHERE x.v > t.i + 1) IS NOT NULL
+corrMatrix/order/scalar/expression	false	SELECT count(*) AS c FROM ss_t t GROUP BY t.i + 1 ORDER BY (SELECT max(x.v) FROM ss_i x WHERE x.v > t.i + 1)
+corrMatrix/partition/scalar/expression	false	SELECT count(*) AS c, rank() OVER (PARTITION BY (SELECT max(x.v) FROM ss_i x WHERE x.v > t.i + 1)) AS w FROM ss_t t GROUP BY t.i + 1
+corrMatrix/windowOrder/scalar/expression	false	SELECT count(*) AS c, rank() OVER (ORDER BY (SELECT max(x.v) FROM ss_i x WHERE x.v > t.i + 1)) AS w FROM ss_t t GROUP BY t.i + 1
+corrMatrix/grouping/scalar/expression	false	SELECT count(*) AS c, GROUPING((SELECT max(x.v) FROM ss_i x WHERE x.v > t.i + 1)) AS g FROM ss_t t GROUP BY t.i + 1
+corrMatrix/windowArg/scalar/expression	false	SELECT count(*) AS c, count((SELECT max(x.v) FROM ss_i x WHERE x.v > t.i + 1)) OVER () AS w FROM ss_t t GROUP BY t.i + 1
+corrMatrix/select/exists/expression	false	SELECT count(*) AS c, EXISTS (SELECT x.v FROM ss_i x WHERE x.v > t.i + 1) AS y FROM ss_t t GROUP BY t.i + 1
+corrMatrix/having/exists/expression	false	SELECT count(*) AS c FROM ss_t t GROUP BY t.i + 1 HAVING EXISTS (SELECT x.v FROM ss_i x WHERE x.v > t.i + 1)
+corrMatrix/order/exists/expression	false	SELECT count(*) AS c FROM ss_t t GROUP BY t.i + 1 ORDER BY EXISTS (SELECT x.v FROM ss_i x WHERE x.v > t.i + 1)
+corrMatrix/partition/exists/expression	false	SELECT count(*) AS c, rank() OVER (PARTITION BY EXISTS (SELECT x.v FROM ss_i x WHERE x.v > t.i + 1)) AS w FROM ss_t t GROUP BY t.i + 1
+corrMatrix/windowOrder/exists/expression	false	SELECT count(*) AS c, rank() OVER (ORDER BY EXISTS (SELECT x.v FROM ss_i x WHERE x.v > t.i + 1)) AS w FROM ss_t t GROUP BY t.i + 1
+corrMatrix/grouping/exists/expression	false	SELECT count(*) AS c, GROUPING(EXISTS (SELECT x.v FROM ss_i x WHERE x.v > t.i + 1)) AS g FROM ss_t t GROUP BY t.i + 1
+corrMatrix/windowArg/exists/expression	false	SELECT count(*) AS c, count(EXISTS (SELECT x.v FROM ss_i x WHERE x.v > t.i + 1)) OVER () AS w FROM ss_t t GROUP BY t.i + 1
+corrMatrix/select/in/expression	false	SELECT count(*) AS c, 1 IN (SELECT x.v FROM ss_i x WHERE x.v > t.i + 1) AS y FROM ss_t t GROUP BY t.i + 1
+corrMatrix/having/in/expression	false	SELECT count(*) AS c FROM ss_t t GROUP BY t.i + 1 HAVING 1 IN (SELECT x.v FROM ss_i x WHERE x.v > t.i + 1)
+corrMatrix/order/in/expression	false	SELECT count(*) AS c FROM ss_t t GROUP BY t.i + 1 ORDER BY 1 IN (SELECT x.v FROM ss_i x WHERE x.v > t.i + 1)
+corrMatrix/partition/in/expression	false	SELECT count(*) AS c, rank() OVER (PARTITION BY 1 IN (SELECT x.v FROM ss_i x WHERE x.v > t.i + 1)) AS w FROM ss_t t GROUP BY t.i + 1
+corrMatrix/windowOrder/in/expression	false	SELECT count(*) AS c, rank() OVER (ORDER BY 1 IN (SELECT x.v FROM ss_i x WHERE x.v > t.i + 1)) AS w FROM ss_t t GROUP BY t.i + 1
+corrMatrix/grouping/in/expression	false	SELECT count(*) AS c, GROUPING(1 IN (SELECT x.v FROM ss_i x WHERE x.v > t.i + 1)) AS g FROM ss_t t GROUP BY t.i + 1
+corrMatrix/windowArg/in/expression	false	SELECT count(*) AS c, count(1 IN (SELECT x.v FROM ss_i x WHERE x.v > t.i + 1)) OVER () AS w FROM ss_t t GROUP BY t.i + 1
+corrMatrix/select/any/expression	false	SELECT count(*) AS c, 1 = ANY (SELECT x.v FROM ss_i x WHERE x.v > t.i + 1) AS y FROM ss_t t GROUP BY t.i + 1
+corrMatrix/having/any/expression	false	SELECT count(*) AS c FROM ss_t t GROUP BY t.i + 1 HAVING 1 = ANY (SELECT x.v FROM ss_i x WHERE x.v > t.i + 1)
+corrMatrix/order/any/expression	false	SELECT count(*) AS c FROM ss_t t GROUP BY t.i + 1 ORDER BY 1 = ANY (SELECT x.v FROM ss_i x WHERE x.v > t.i + 1)
+corrMatrix/partition/any/expression	false	SELECT count(*) AS c, rank() OVER (PARTITION BY 1 = ANY (SELECT x.v FROM ss_i x WHERE x.v > t.i + 1)) AS w FROM ss_t t GROUP BY t.i + 1
+corrMatrix/windowOrder/any/expression	false	SELECT count(*) AS c, rank() OVER (ORDER BY 1 = ANY (SELECT x.v FROM ss_i x WHERE x.v > t.i + 1)) AS w FROM ss_t t GROUP BY t.i + 1
+corrMatrix/grouping/any/expression	false	SELECT count(*) AS c, GROUPING(1 = ANY (SELECT x.v FROM ss_i x WHERE x.v > t.i + 1)) AS g FROM ss_t t GROUP BY t.i + 1
+corrMatrix/windowArg/any/expression	false	SELECT count(*) AS c, count(1 = ANY (SELECT x.v FROM ss_i x WHERE x.v > t.i + 1)) OVER () AS w FROM ss_t t GROUP BY t.i + 1
+corrMatrix/select/all/expression	false	SELECT count(*) AS c, 1 < ALL (SELECT x.v FROM ss_i x WHERE x.v > t.i + 1) AS y FROM ss_t t GROUP BY t.i + 1
+corrMatrix/having/all/expression	false	SELECT count(*) AS c FROM ss_t t GROUP BY t.i + 1 HAVING 1 < ALL (SELECT x.v FROM ss_i x WHERE x.v > t.i + 1)
+corrMatrix/order/all/expression	false	SELECT count(*) AS c FROM ss_t t GROUP BY t.i + 1 ORDER BY 1 < ALL (SELECT x.v FROM ss_i x WHERE x.v > t.i + 1)
+corrMatrix/partition/all/expression	false	SELECT count(*) AS c, rank() OVER (PARTITION BY 1 < ALL (SELECT x.v FROM ss_i x WHERE x.v > t.i + 1)) AS w FROM ss_t t GROUP BY t.i + 1
+corrMatrix/windowOrder/all/expression	false	SELECT count(*) AS c, rank() OVER (ORDER BY 1 < ALL (SELECT x.v FROM ss_i x WHERE x.v > t.i + 1)) AS w FROM ss_t t GROUP BY t.i + 1
+corrMatrix/grouping/all/expression	false	SELECT count(*) AS c, GROUPING(1 < ALL (SELECT x.v FROM ss_i x WHERE x.v > t.i + 1)) AS g FROM ss_t t GROUP BY t.i + 1
+corrMatrix/windowArg/all/expression	false	SELECT count(*) AS c, count(1 < ALL (SELECT x.v FROM ss_i x WHERE x.v > t.i + 1)) OVER () AS w FROM ss_t t GROUP BY t.i + 1
+corrMatrix/from/lateral/ungrouped	false	SELECT count(*) FROM ss_t t, LATERAL (SELECT max(x.v) AS y FROM ss_i x WHERE x.v > t.i) l GROUP BY t.i + 1
+corrMatrix/from/lateral/grouped	false	SELECT count(*) FROM ss_t t, LATERAL (SELECT max(x.v) AS y FROM ss_i x WHERE x.v > t.i) l GROUP BY t.i
+corrMatrix/from/lateral/expression	false	SELECT count(*) FROM ss_t t, LATERAL (SELECT max(x.v) AS y FROM ss_i x WHERE x.v > t.i + 1) l GROUP BY t.i + 1
+corrcheck0_bare	false	SELECT i + 1 AS k, (SELECT max(x.v) FROM ss_i x WHERE x.v > i + 1) AS y FROM ss_t t GROUP BY t.i + 1
+corrcheck0_qual	false	SELECT i + 1 AS k, (SELECT max(x.v) FROM ss_i x WHERE x.v > t.i + 1) AS y FROM ss_t t GROUP BY t.i + 1
+corrcheck1_bare	false	SELECT i + 17 AS k, (SELECT max(x.v) FROM ss_i x WHERE x.v > i + 17) AS y FROM ss_t t GROUP BY t.i + 17
+corrcheck1_qual	false	SELECT i + 17 AS k, (SELECT max(x.v) FROM ss_i x WHERE x.v > t.i + 17) AS y FROM ss_t t GROUP BY t.i + 17
+corrScope/outerAggregate	false	SELECT (SELECT max(t.i) FROM ss_i x LIMIT 1) FROM ss_t t GROUP BY t.i + 1
+corrScope/mixedAggregate	false	SELECT (SELECT max(t.i + x.v) FROM ss_i x) FROM ss_t t GROUP BY t.i + 1
+corrScope/nestedAggregate	false	SELECT max((SELECT max(x.v) FROM ss_i x WHERE x.v > t.i)) FROM ss_t t GROUP BY t.i + 1
+corrScope/shadow	false	SELECT count(*), (SELECT max(t.i) FROM ss_t t) FROM ss_t t GROUP BY t.i + 1
+corrScope/union	false	SELECT count(*), EXISTS (SELECT v FROM ss_i WHERE v > t.i UNION ALL SELECT v FROM ss_i) FROM ss_t t GROUP BY t.i + 1
+corrScope/windowGroupedSubquery	false	SELECT rank() OVER (ORDER BY (SELECT max(v) FROM ss_i WHERE v > t.i)) FROM ss_t t GROUP BY (SELECT max(v) FROM ss_i WHERE v > t.i)
+corrScope/windowNestedAggregate	false	SELECT sum(sum((SELECT max(v) FROM ss_i WHERE v > t.i))) OVER () FROM ss_t t GROUP BY t.i + 1

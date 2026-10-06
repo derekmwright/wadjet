@@ -320,3 +320,122 @@ ci1/joinCteBody	{int,int} rows=2 -6,1 | 4,1
 ci1/joinUnionArm	{int} rows=3 -6 | 4 | 100
 ci1/joinDate	{date,int} rows=2 1970-01-02,1 | 2024-03-05,1
 ci1/joinText	{text,int} rows=2 ABC,1 | HELLO,1
+corrMatrix/select/scalar/ungrouped	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrMatrix/having/scalar/ungrouped	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrMatrix/order/scalar/ungrouped	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrMatrix/partition/scalar/ungrouped	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrMatrix/windowOrder/scalar/ungrouped	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrMatrix/grouping/scalar/ungrouped	ERR 42803 arguments to GROUPING must be grouping expressions of the associated query level
+corrMatrix/windowArg/scalar/ungrouped	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrMatrix/select/exists/ungrouped	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrMatrix/having/exists/ungrouped	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrMatrix/order/exists/ungrouped	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrMatrix/partition/exists/ungrouped	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrMatrix/windowOrder/exists/ungrouped	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrMatrix/grouping/exists/ungrouped	ERR 42803 arguments to GROUPING must be grouping expressions of the associated query level
+corrMatrix/windowArg/exists/ungrouped	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrMatrix/select/in/ungrouped	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrMatrix/having/in/ungrouped	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrMatrix/order/in/ungrouped	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrMatrix/partition/in/ungrouped	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrMatrix/windowOrder/in/ungrouped	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrMatrix/grouping/in/ungrouped	ERR 42803 arguments to GROUPING must be grouping expressions of the associated query level
+corrMatrix/windowArg/in/ungrouped	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrMatrix/select/any/ungrouped	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrMatrix/having/any/ungrouped	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrMatrix/order/any/ungrouped	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrMatrix/partition/any/ungrouped	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrMatrix/windowOrder/any/ungrouped	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrMatrix/grouping/any/ungrouped	ERR 42803 arguments to GROUPING must be grouping expressions of the associated query level
+corrMatrix/windowArg/any/ungrouped	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrMatrix/select/all/ungrouped	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrMatrix/having/all/ungrouped	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrMatrix/order/all/ungrouped	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrMatrix/partition/all/ungrouped	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrMatrix/windowOrder/all/ungrouped	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrMatrix/grouping/all/ungrouped	ERR 42803 arguments to GROUPING must be grouping expressions of the associated query level
+corrMatrix/windowArg/all/ungrouped	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrMatrix/select/scalar/grouped	{int,int} rows=6 1,6 | 1,6 | 1,6 | 1,6 | 1,6 | 1,NULL
+corrMatrix/having/scalar/grouped	{int} rows=5 1 | 1 | 1 | 1 | 1
+corrMatrix/order/scalar/grouped	{int} rows=6 1 | 1 | 1 | 1 | 1 | 1
+corrMatrix/partition/scalar/grouped	{int,int} rows=6 1,1 | 1,1 | 1,1 | 1,1 | 1,1 | 1,1
+corrMatrix/windowOrder/scalar/grouped	{int,int} rows=6 1,1 | 1,1 | 1,1 | 1,1 | 1,1 | 1,6
+corrMatrix/grouping/scalar/grouped	ERR 42803 arguments to GROUPING must be grouping expressions of the associated query level
+corrMatrix/windowArg/scalar/grouped	{int,int} rows=6 1,5 | 1,5 | 1,5 | 1,5 | 1,5 | 1,5
+corrMatrix/select/exists/grouped	{int,bool} rows=6 1,f | 1,t | 1,t | 1,t | 1,t | 1,t
+corrMatrix/having/exists/grouped	{int} rows=5 1 | 1 | 1 | 1 | 1
+corrMatrix/order/exists/grouped	{int} rows=6 1 | 1 | 1 | 1 | 1 | 1
+corrMatrix/partition/exists/grouped	{int,int} rows=6 1,1 | 1,1 | 1,1 | 1,1 | 1,1 | 1,1
+corrMatrix/windowOrder/exists/grouped	{int,int} rows=6 1,1 | 1,2 | 1,2 | 1,2 | 1,2 | 1,2
+corrMatrix/grouping/exists/grouped	ERR 42803 arguments to GROUPING must be grouping expressions of the associated query level
+corrMatrix/windowArg/exists/grouped	{int,int} rows=6 1,6 | 1,6 | 1,6 | 1,6 | 1,6 | 1,6
+corrMatrix/select/in/grouped	{int,bool} rows=6 1,f | 1,f | 1,f | 1,f | 1,f | 1,f
+corrMatrix/having/in/grouped	{int} rows=0
+corrMatrix/order/in/grouped	{int} rows=6 1 | 1 | 1 | 1 | 1 | 1
+corrMatrix/partition/in/grouped	{int,int} rows=6 1,1 | 1,1 | 1,1 | 1,1 | 1,1 | 1,1
+corrMatrix/windowOrder/in/grouped	{int,int} rows=6 1,1 | 1,1 | 1,1 | 1,1 | 1,1 | 1,1
+corrMatrix/grouping/in/grouped	ERR 42803 arguments to GROUPING must be grouping expressions of the associated query level
+corrMatrix/windowArg/in/grouped	{int,int} rows=6 1,6 | 1,6 | 1,6 | 1,6 | 1,6 | 1,6
+corrMatrix/select/any/grouped	{int,bool} rows=6 1,f | 1,f | 1,f | 1,f | 1,f | 1,f
+corrMatrix/having/any/grouped	{int} rows=0
+corrMatrix/order/any/grouped	{int} rows=6 1 | 1 | 1 | 1 | 1 | 1
+corrMatrix/partition/any/grouped	{int,int} rows=6 1,1 | 1,1 | 1,1 | 1,1 | 1,1 | 1,1
+corrMatrix/windowOrder/any/grouped	{int,int} rows=6 1,1 | 1,1 | 1,1 | 1,1 | 1,1 | 1,1
+corrMatrix/grouping/any/grouped	ERR 42803 arguments to GROUPING must be grouping expressions of the associated query level
+corrMatrix/windowArg/any/grouped	{int,int} rows=6 1,6 | 1,6 | 1,6 | 1,6 | 1,6 | 1,6
+corrMatrix/select/all/grouped	{int,bool} rows=6 1,t | 1,t | 1,t | 1,t | 1,t | 1,t
+corrMatrix/having/all/grouped	{int} rows=6 1 | 1 | 1 | 1 | 1 | 1
+corrMatrix/order/all/grouped	{int} rows=6 1 | 1 | 1 | 1 | 1 | 1
+corrMatrix/partition/all/grouped	{int,int} rows=6 1,1 | 1,1 | 1,1 | 1,1 | 1,1 | 1,1
+corrMatrix/windowOrder/all/grouped	{int,int} rows=6 1,1 | 1,1 | 1,1 | 1,1 | 1,1 | 1,1
+corrMatrix/grouping/all/grouped	ERR 42803 arguments to GROUPING must be grouping expressions of the associated query level
+corrMatrix/windowArg/all/grouped	{int,int} rows=6 1,6 | 1,6 | 1,6 | 1,6 | 1,6 | 1,6
+corrMatrix/select/scalar/expression	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrMatrix/having/scalar/expression	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrMatrix/order/scalar/expression	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrMatrix/partition/scalar/expression	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrMatrix/windowOrder/scalar/expression	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrMatrix/grouping/scalar/expression	ERR 42803 arguments to GROUPING must be grouping expressions of the associated query level
+corrMatrix/windowArg/scalar/expression	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrMatrix/select/exists/expression	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrMatrix/having/exists/expression	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrMatrix/order/exists/expression	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrMatrix/partition/exists/expression	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrMatrix/windowOrder/exists/expression	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrMatrix/grouping/exists/expression	ERR 42803 arguments to GROUPING must be grouping expressions of the associated query level
+corrMatrix/windowArg/exists/expression	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrMatrix/select/in/expression	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrMatrix/having/in/expression	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrMatrix/order/in/expression	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrMatrix/partition/in/expression	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrMatrix/windowOrder/in/expression	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrMatrix/grouping/in/expression	ERR 42803 arguments to GROUPING must be grouping expressions of the associated query level
+corrMatrix/windowArg/in/expression	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrMatrix/select/any/expression	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrMatrix/having/any/expression	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrMatrix/order/any/expression	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrMatrix/partition/any/expression	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrMatrix/windowOrder/any/expression	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrMatrix/grouping/any/expression	ERR 42803 arguments to GROUPING must be grouping expressions of the associated query level
+corrMatrix/windowArg/any/expression	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrMatrix/select/all/expression	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrMatrix/having/all/expression	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrMatrix/order/all/expression	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrMatrix/partition/all/expression	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrMatrix/windowOrder/all/expression	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrMatrix/grouping/all/expression	ERR 42803 arguments to GROUPING must be grouping expressions of the associated query level
+corrMatrix/windowArg/all/expression	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrMatrix/from/lateral/ungrouped	{int} rows=6 1 | 1 | 1 | 1 | 1 | 1
+corrMatrix/from/lateral/grouped	{int} rows=6 1 | 1 | 1 | 1 | 1 | 1
+corrMatrix/from/lateral/expression	{int} rows=6 1 | 1 | 1 | 1 | 1 | 1
+corrcheck0_bare	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrcheck0_qual	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrcheck1_bare	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrcheck1_qual	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrScope/outerAggregate	{int} rows=6 -7 | 0 | 1 | 3 | 5 | NULL
+corrScope/mixedAggregate	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrScope/nestedAggregate	{int} rows=6 6 | 6 | 6 | 6 | 6 | NULL
+corrScope/shadow	{int,int} rows=6 1,5 | 1,5 | 1,5 | 1,5 | 1,5 | 1,5
+corrScope/union	ERR 42803 subquery uses ungrouped column "t.i" from outer query
+corrScope/windowGroupedSubquery	{int} rows=2 1 | 2
+corrScope/windowNestedAggregate	{numeric} rows=6 30 | 30 | 30 | 30 | 30 | 30
