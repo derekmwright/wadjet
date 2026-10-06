@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/engine/expr"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
@@ -833,8 +834,40 @@ func setOpArmProjectionSpecs(arm *logical.Node, outNames []string) (SetOpArmPlan
 		// expression, so the worker builds the output vector from the
 		// declared type instead of copying a column (#554).
 		forwardedComputed := false
+		// declBelow is the relation an arm expression spelled in a
+		// shadowing derived table's definitions reads (below).
+		var declBelow *logical.Node
 		if below != nil {
-			if pr.ASTExpr != nil && !isSimpleColRefForRename(pr.ASTExpr) {
+			if pr.ASTExpr != nil && !isSimpleColRefForRename(pr.ASTExpr) && logical.ShadowingDerivedTable(below) != nil {
+				// A DERIVED TABLE THAT SHADOWS ITS INPUT (`SELECT CAST(f AS
+				// BIGINT) FROM (SELECT id, i / 2.0 AS f FROM t) s UNION ALL
+				// …`, t having an `f`): the table's projection emits no
+				// stage, so the arm's stream carries the SOURCE `f` under the
+				// name the item reads, and the rename substitution leaves a
+				// computed alias alone. Every DAG arm cast t.f where the
+				// single-process arms cast i / 2.0. Each reference is spelled
+				// in the table's definitions instead, and the item is
+				// declared against the relation they read; a reference the
+				// walk cannot spell refuses the arm, which routes the query
+				// to the coordinator-local pipeline.
+				out, _, complete := rewriteColRefs(pr.ASTExpr, func(ref *plansql.ColRef) (plansql.Node, bool) {
+					name := ref.String()
+					if sub, ok := setOpArmComputedSource(name, below); ok && sub != nil {
+						return &plansql.ParenNode{Inner: sub}, true
+					}
+					if src := resolveOutputRenameSource(strings.ToLower(name), below); src != "" && !strings.EqualFold(src, name) {
+						return &plansql.ColRef{Column: src}, true
+					}
+					return nil, false
+				})
+				if !complete || out == nil {
+					return SetOpArmPlan{}, fmt.Errorf("select item %d reads a derived table that computes a column "+
+						"under the name of a column of its own input, and cannot be spelled in its definitions", i+1)
+				}
+				ast = out
+				e = out.String()
+				declBelow = shadowChainBottom(below)
+			} else if pr.ASTExpr != nil && !isSimpleColRefForRename(pr.ASTExpr) {
 				if sub, ok := substituteNestedRenameRefs(pr.ASTExpr, below); ok && sub != nil {
 					ast = sub
 					e = sub.String()
@@ -868,6 +901,12 @@ func setOpArmProjectionSpecs(arm *logical.Node, outNames []string) (SetOpArmPlan
 			// A computed column's declared type IS its runtime type: the
 			// worker builds the output vector from it.
 			decl := inferProjectionDeclType(ast, parquet.TypeString, strictInt, colTypes)
+			if declBelow != nil {
+				if d, c := inferProjectionDeclTypeConf(ast, parquet.TypeString, strictIntArithCols(declBelow),
+					inputColDecls(declBelow)); c == expr.Decided {
+					decl = d
+				}
+			}
 			// A numeric LITERAL arm carries the (p,s) of its SPELLING, which
 			// PostgreSQL reads as numeric and this walk otherwise read as
 			// float8 — so `SELECT d FROM t UNION ALL SELECT 1.23456`
@@ -1123,4 +1162,21 @@ func setOpElementTarget(want, ct SetOpColType, name, op string) (*parquet.Column
 	}
 	return nil, sqlerr.New("42804", "%s types %s[] and %s[] cannot be matched: result column %q",
 		op, strings.ToLower(a.Type.String()), strings.ToLower(b.Type.String()), name)
+}
+
+// shadowChainBottom is the first node below n that is not a Project, filter,
+// sort or limit: the relation a shadowing derived table's definitions read.
+func shadowChainBottom(n *logical.Node) *logical.Node {
+	for n != nil {
+		switch n.Type {
+		case logical.NodeProject, logical.NodeFilter, logical.NodeSort, logical.NodeLimit:
+			if len(n.Children) != 1 {
+				return nil
+			}
+			n = n.Children[0]
+		default:
+			return n
+		}
+	}
+	return nil
 }

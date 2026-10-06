@@ -162,3 +162,31 @@ func WindowShadowedBlock(p *Node) bool {
 	}
 	return false
 }
+
+// ShadowingDerivedTable returns the first Project at or below n — through
+// Projects, filters, sorts and limits only — that computes a column under the
+// name of a column of its own input (`SELECT id, i / 2.0 AS f FROM t`, where t
+// has an `f`); nil when the chain has none.
+//
+// A reference from above such a table to `f` names the computed column, and
+// the stream below the table carries the SOURCE `f` under the same name: a
+// consumer that resolves the name against that stream reads the wrong column
+// unless the reference is first spelled in the table's definitions.
+func ShadowingDerivedTable(n *Node) *Node {
+	for n != nil && len(n.Children) == 1 {
+		switch n.Type {
+		case NodeFilter, NodeSort, NodeLimit:
+		case NodeProject:
+			if n.SecurityBarrier {
+				return nil
+			}
+			if projectShadowsItsInput(n) {
+				return n
+			}
+		default:
+			return nil
+		}
+		n = n.Children[0]
+	}
+	return nil
+}

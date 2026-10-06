@@ -514,6 +514,9 @@ func (p *StagePlanner) PlanDistributed(ctx context.Context, node *logical.Node) 
 	// applyOutputRenames can rename/drop but not evaluate. Attach the
 	// SELECT list to the scan so its fragment projects it worker-side.
 	stages = p.attachScanSelectProjections(node, stages)
+	if p.shadowRouteErr != nil {
+		return nil, p.shadowRouteErr
+	}
 	// A SELECT-list subquery the lowering above did not rewrite has no
 	// distributed lowering: the worker's expression compiler has no
 	// SubqueryRunner, so every task fails (#659). It is asked HERE rather

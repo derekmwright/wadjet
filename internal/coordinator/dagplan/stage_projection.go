@@ -3,6 +3,7 @@
 package dagplan
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/derekmwright/wadjet/internal/engine/expr"
@@ -271,6 +272,50 @@ func (p *StagePlanner) attachScanSelectProjections(root *logical.Node, stages []
 			continue
 		}
 		if proj[j].ASTExpr != nil && (!p.PlanContext.IsSimpleColRefForRename(proj[j].ASTExpr) || p.PlanContext.AstIsFieldPath(proj[j].ASTExpr, colTypes)) {
+			// A DERIVED TABLE THAT SHADOWS ITS INPUT (`SELECT round(f) FROM
+			// (SELECT id, i / 2.0 AS f FROM t) s`, t having an `f`): the
+			// table's projection emits no stage of its own, so the stream
+			// the item is evaluated over carries the SOURCE `f` under the
+			// name the item reads, and the rename substitution below leaves
+			// a computed alias alone ("the stage that evaluates it emits
+			// it"). Nothing evaluated it: every DAG arm answered the item
+			// over t.f, silently, where the single-process arms answer it
+			// over i / 2.0. The item is spelled in the table's definitions
+			// instead — the composition materializeWindowDeclaredInput
+			// applies below a window over such a table — and declared
+			// against the relation those definitions read. An item the
+			// composition cannot spell refuses the plan, which routes the
+			// query to the coordinator-local pipeline.
+			if logical.ShadowingDerivedTable(renameChild) != nil {
+				composed, ok := composeThroughDerivedTables(proj[j].ASTExpr, renameChild, 0)
+				if !ok {
+					if p.shadowRouteErr == nil {
+						p.shadowRouteErr = fmt.Errorf("%w: the SELECT item %q reads a derived table that "+
+							"computes a column under the name of a column of its own input, and the item "+
+							"cannot be spelled in that table's definitions", ErrUnreachableGatherOutput, proj[j].Expr)
+					}
+					continue
+				}
+				specs[j].Expr = composed.String()
+				decl, conf := expr.DeclType{}, expr.Undecided
+				if bottom := chainBottom(renameChild); bottom != nil {
+					decl, conf = p.PlanContext.InferProjectionDeclTypeConf(composed, parquet.TypeString,
+						p.PlanContext.StrictIntArithCols(bottom), p.PlanContext.InputColDecls(bottom))
+				}
+				if conf != expr.Decided {
+					if outer, oconf := p.PlanContext.InferProjectionDeclTypeConf(proj[j].ASTExpr, parquet.TypeString,
+						strictInt, colTypes); oconf == expr.Decided {
+						decl = outer
+					}
+				}
+				materialized := p.PlanContext.DeclTypeParts(decl)
+				specs[j].Type, specs[j].Precision, specs[j].Scale, specs[j].Fields = materialized.Type, materialized.Precision, materialized.Scale, materialized.Fields
+				specs[j].ElementType = materialized.ElementType
+				specs[j].Dimension = materialized.Dimension
+				specs[j].TypeKnown = true
+				anyNestedRename = true
+				continue
+			}
 			// #387: an EXPRESSION referencing a nested rename (`k + 1` over
 			// `r_regionkey AS k`) was attached verbatim, so the fragment
 			// compiled it against a schema with no `k` and the task

@@ -64,6 +64,12 @@ type StagePlanner struct {
 	// producer could compute (materializeWindowDeclaredInput).
 	windowRouteErr error
 
+	// shadowRouteErr refuses a plan whose SELECT list reads a derived table
+	// that computes a column under the name of a column of its own input,
+	// when an item cannot be spelled in the table's definitions
+	// (attachScanSelectProjections).
+	shadowRouteErr error
+
 	// projScalarProducers maps a SELECT-list placeholder to the producer
 	// stage that computes it and the type that producer declares (#659).
 	// The predicate path records its edges directly on the filter-carrying
