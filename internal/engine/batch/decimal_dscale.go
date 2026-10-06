@@ -76,11 +76,29 @@ func (c *DecimalColumn) HasDisplayScale() bool {
 }
 
 // SetDScaleCode records row i's code. A column whose rows all share one code
-// keeps no array (a uniform column costs nothing); the first row that
-// differs allocates one, every other row reading the uniform code.
+// keeps no array (a uniform column costs nothing): the first row that
+// differs allocates one, every other row reading the uniform code, and a
+// write to the column's first or last row — where a fill in either order
+// ends — collapses the array back into DAll when every row shares one code
+// again, so a column filled at one display scale other than the carrier's
+// (`2.50`, `7.00`, `1.25` into a scale-4 carrier) holds DAll and no array.
 func (c *DecimalColumn) SetDScaleCode(i int, code uint8) {
+	c.setDScaleCode(i, code)
+	if c.DScale != nil && (i == 0 || i == len(c.Data)-1) {
+		c.collapseDScale()
+	}
+}
+
+// setDScaleCode is SetDScaleCode without the collapse, for a loop that
+// writes many rows and collapses once at its end.
+func (c *DecimalColumn) setDScaleCode(i int, code uint8) {
 	if c.DScale == nil {
 		if code == dAllCode(c.DAll) {
+			return
+		}
+		if i == 0 && len(c.Data) <= 1 {
+			// The column's only row: it is uniform at its code.
+			c.DAll = dAllOf(code)
 			return
 		}
 		n := len(c.Data)
@@ -98,6 +116,40 @@ func (c *DecimalColumn) SetDScaleCode(i int, code uint8) {
 		c.growDScale(i + 1)
 	}
 	c.DScale[i] = code
+}
+
+// collapseDScale drops the per-row array when every row of the column
+// shares one code, which then becomes DAll. It stops at the first row that
+// differs from row 0, so a varying column costs a short scan.
+func (c *DecimalColumn) collapseDScale() {
+	n := len(c.Data)
+	if c.DScale == nil || n == 0 {
+		return
+	}
+	first := c.DScaleCode(0)
+	for k := 1; k < n; k++ {
+		if c.DScaleCode(k) != first {
+			return
+		}
+	}
+	c.DScale = nil
+	c.DAll = dAllOf(first)
+}
+
+// UniformDScaleOver reports the one code rows [0, n) share, for a writer
+// that serializes n rows: ok is false when they differ. It never allocates
+// and never changes the column.
+func (c *DecimalColumn) UniformDScaleOver(n int) (code uint8, ok bool) {
+	if c.DScale == nil || n <= 0 {
+		return dAllCode(c.DAll), true
+	}
+	first := c.DScaleCode(0)
+	for k := 1; k < n; k++ {
+		if c.DScaleCode(k) != first {
+			return 0, false
+		}
+	}
+	return first, true
 }
 
 // growDScale extends the per-row array to n entries, the new ones at the
@@ -164,8 +216,9 @@ func (c *DecimalColumn) copyCodes(di int, src *DecimalColumn, si, n int) {
 		return
 	}
 	for k := 0; k < n; k++ {
-		c.SetDScaleCode(di+k, src.DScaleCode(si+k))
+		c.setDScaleCode(di+k, src.DScaleCode(si+k))
 	}
+	c.collapseDScale()
 }
 
 // Gather writes src's rows sel[0..] into c's rows 0.., carriers and codes.
@@ -187,8 +240,9 @@ func (c *DecimalColumn) GatherCodes(src *DecimalColumn, sel []uint32) {
 		return
 	}
 	for i, idx := range sel {
-		c.SetDScaleCode(i, src.DScaleCode(int(idx)))
+		c.setDScaleCode(i, src.DScaleCode(int(idx)))
 	}
+	c.collapseDScale()
 }
 
 // AppendRow appends src's row si (carrier and code); a NULL row appends a
@@ -202,7 +256,9 @@ func (c *DecimalColumn) AppendRow(src *DecimalColumn, si int, isNull bool) {
 	}
 	c.Data = append(c.Data, x)
 	if c.DScale != nil || code != dAllCode(c.DAll) {
-		c.SetDScaleCode(len(c.Data)-1, code)
+		// An append never turns a varying column uniform, so no collapse:
+		// a uniform append fill keeps no array through the one-row rule.
+		c.setDScaleCode(len(c.Data)-1, code)
 	}
 }
 
@@ -335,6 +391,7 @@ func GatherDScaleCodesAt[T ~int | ~int32 | ~uint32 | ~int64](dst, src *DecimalCo
 		return
 	}
 	for di, si := range rows {
-		dst.SetDScaleCode(start+di, src.DScaleCode(int(si)))
+		dst.setDScaleCode(start+di, src.DScaleCode(int(si)))
 	}
+	dst.collapseDScale()
 }

@@ -186,3 +186,74 @@ func TestDisplayScaleNeverCutsADigit(t *testing.T) {
 		}
 	}
 }
+
+// TestDecimalColumnAUniformFillCollapses: a column whose every value ends
+// up at one display scale holds that scale in DAll and no per-row array —
+// after an indexed fill, an append fill, every row-copy helper and a fill
+// that overwrites a varying column — and a varying column keeps its array.
+// At 60f9f2d5 a column uniform at display scale 2 in a scale-4 carrier kept
+// DScale=[2 2 2] (PS1 closure review B4).
+func TestDecimalColumnAUniformFillCollapses(t *testing.T) {
+	col := parquet.Column{Name: "d", Type: parquet.TypeDecimal, Precision: 38, Scale: 4}
+	fill := func(texts ...string) *Vector {
+		v := NewColumnVector(col, len(texts))
+		for i, s := range texts {
+			if err := v.SetValueChecked(i, s); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return v
+	}
+	uniform := func(name string, d *DecimalColumn, code uint8) {
+		t.Helper()
+		if d.DScale != nil || d.UniformDScale() != code {
+			t.Errorf("%s: DScale=%v DAll code %d, want no array and code %d", name, d.DScale, d.UniformDScale(), code)
+		}
+	}
+	u := fill("2.50", "7.00", "1.25")
+	uniform("indexed fill", &u.DecimalData, 2)
+	if got := u.GetValueOf(1, false); fmt.Sprint(got) != "7.00" {
+		t.Errorf("indexed fill prints %v, want 7.00", got)
+	}
+	rev := NewColumnVector(col, 3)
+	for _, i := range []int{2, 1, 0} {
+		if err := rev.SetValueChecked(i, []string{"2.50", "7.00", "1.25"}[i]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	uniform("reverse fill", &rev.DecimalData, 2)
+	ap := NewVectorLike(u)
+	for _, i := range []int{0, 1, 2} {
+		ap.AppendFrom(u, i)
+	}
+	uniform("append fill", &ap.DecimalData, 2)
+
+	vary := fill("2.50", "7", "1.250")
+	if vary.DecimalData.DScale == nil {
+		t.Fatalf("a varying column holds no per-row array")
+	}
+	over := fill("2.50", "7", "1.250")
+	if err := over.SetValueChecked(1, "7.00"); err != nil {
+		t.Fatal(err)
+	}
+	if err := over.SetValueChecked(2, "1.25"); err != nil {
+		t.Fatal(err)
+	}
+	uniform("overwritten varying column", &over.DecimalData, 2)
+
+	two := fill("2.50", "7.00", "1.250")
+	cr := NewColumnVector(col, 3)
+	cr.DecimalData.CopyRange(0, &vary.DecimalData, 0, 3)
+	cr.DecimalData.CopyRange(0, &u.DecimalData, 0, 3)
+	uniform("CopyRange over a varying column", &cr.DecimalData, 2)
+	g := NewColumnVector(col, 2)
+	g.DecimalData.Gather(&two.DecimalData, []uint32{0, 1})
+	uniform("Gather of two rows sharing a scale", &g.DecimalData, 2)
+	row := NewColumnVector(col, 2)
+	row.DecimalData.CopyRow(0, &two.DecimalData, 2)
+	row.DecimalData.CopyRow(1, &two.DecimalData, 2)
+	uniform("CopyRow", &row.DecimalData, 3)
+	gc := NewColumnVector(col, 2)
+	GatherDScaleCodes(&gc.DecimalData, &two.DecimalData, []int{1, 0})
+	uniform("GatherDScaleCodes", &gc.DecimalData, 2)
+}
