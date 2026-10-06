@@ -1102,7 +1102,7 @@ The earlier rule evaluated a volatile CTE's body whole when its first reference 
 | other | [r25](0012-divergences/other.md#catalog) | Narrowed: a volatile body READ MORE THAN ONCE is evaluated once without the keywords | `coordinator.TestArcCMVolatileCTEReadTwiceIsEvaluatedOnce` ref1\_from/matrnd, nmatrnd |
 | other | [r27](0012-divergences/other.md#catalog) | Added: a CTE read once from a correlated subquery, or declared inside one, is evaluated per outer row (50; PostgreSQL 1) | `wadjet.TestArcCMCorrelatedReaderIsEvaluatedPerOuterRow` |
 
-## 2026-10-05: a column created from an unconstrained numeric (arc UN, #1541)
+## 2026-10-05: a column created from an unconstrained numeric (#1541)
 
 ADR-0024 §10 (Derek Wright's decision of 2026-10-05). At 8e681724 `CREATE TABLE d1 (v NUMERIC); INSERT INTO d1 VALUES (1.25)` stored 1 (DECIMAL(38,0)), and a CREATE TABLE AS column whose source PostgreSQL types as plain numeric took that source's (p,s): `CAST(b AS NUMERIC)` (38,0) stored a later 0.75 as 1, a literal `1.25` (3,2) refused a later 10 with 22003, `COALESCE` over numeric(10,2) and numeric(12,4) (12,4) refused 1234567890. Such a column is now DECIMAL(38, max(s, 10)) marked unconstrained (typmod −1, NULL numeric_precision / numeric_scale), its values print without trailing zeros, and a column created before the rule is unchanged (a store the 8e681724 binary wrote reads, writes and prints identically at the tip).
 
