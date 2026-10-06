@@ -540,3 +540,39 @@ func WideNumericLiteral(text string) (batch.DecimalType, string, bool) {
 	}
 	return t, v.FormatDecimal(t.Scale), true
 }
+
+// decimalArmSpelling is the box a DECIMAL choice answers when the chosen arm
+// is a numeric LITERAL: its own spelling, where Lit.Eval answers the double
+// compileLit boxed. The spelling is the literal's display scale (ADR-0024 §1
+// as amended: `COALESCE(n, 1.5)` prints 1.5 and `COALESCE(n, 1.50)` 1.50, as
+// on PostgreSQL); the double has none. Every other arm's box is its own.
+func decimalArmSpelling(mode choiceBoxMode, arm Expr, v any) any {
+	if mode != choiceBoxDecimal {
+		return v
+	}
+	if _, isFloat := v.(float64); !isFloat {
+		return v
+	}
+	if l, ok := arm.(*Lit); ok && plainDecimalSpelling(l.Text) {
+		return l.Text
+	}
+	return v
+}
+
+// plainDecimalSpelling reports whether s is a numeric literal spelled as
+// digits with an optional point: the spellings whose fraction digits ARE the
+// value's display scale.
+func plainDecimalSpelling(s string) bool {
+	digits, point := 0, false
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; {
+		case c >= '0' && c <= '9':
+			digits++
+		case c == '.' && !point:
+			point = true
+		default:
+			return false
+		}
+	}
+	return digits > 0
+}

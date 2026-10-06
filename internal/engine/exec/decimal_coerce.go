@@ -47,13 +47,19 @@ type DecimalCoerce struct {
 // differs — the carrier is already right, so the vectors pass through
 // untouched and only the schema is restated.
 type decimalCoercion struct {
-	idx       int
-	srcType   parquet.TypeID
-	srcScale  int
-	dstScale  int
-	dstPrec   int
-	name      string
-	rewrite   bool
+	idx      int
+	srcType  parquet.TypeID
+	srcScale int
+	dstScale int
+	dstPrec  int
+	name     string
+	rewrite  bool
+	// unmark: the arm's column carries ADR-0024 §10's mark and the result
+	// does not, so a value with no display scale of its own leaves the mark
+	// behind and must keep printing as the marked column printed it: it
+	// takes DScaleUnknown (printed trimmed) on the way through.
+	unmark    bool
+	srcMarked bool
 	shiftPow1 int // 10^shiftPow1 multiplies the unscaled carrier
 	// limit is 10^dstPrec, the exclusive bound on the coerced magnitude,
 	// resolved once per column rather than per row. Zero means the
@@ -93,6 +99,9 @@ func (d *DecimalCoerce) Execute(_ context.Context, in *batch.RecordBatch) (*batc
 	for i := range d.plan {
 		c := &d.plan[i]
 		if !c.rewrite {
+			if c.unmark {
+				out.Columns[c.idx] = unmarkDecimalVector(in.Columns[c.idx])
+			}
 			continue
 		}
 		v, err := coerceDecimalVector(in.Columns[c.idx], c)
@@ -142,7 +151,9 @@ func (d *DecimalCoerce) resolve(in *batch.RecordBatch) error {
 		c := decimalCoercion{
 			idx: idx, srcType: src.Type, srcScale: srcScale,
 			dstScale: want.Scale, dstPrec: want.Precision, name: want.Name,
+			srcMarked: src.Type == parquet.TypeDecimal && src.Unconstrained,
 		}
+		c.unmark = c.srcMarked && !want.Unconstrained
 		c.limit, _ = batch.DecimalPrecisionLimit(want.Precision)
 		switch src.Type {
 		case parquet.TypeDecimal:
@@ -227,8 +238,71 @@ func coerceDecimalVector(src *batch.Vector, c *decimalCoercion) (*batch.Vector, 
 				c.dstPrec, c.dstScale, c.dstPrec-c.dstScale)
 		}
 		out.DecimalData.Data[i] = shifted
+		out.DecimalData.SetDScaleCode(i, coercedDScaleCode(src, i, c))
 	}
 	return out, nil
+}
+
+// coercedDScaleCode is the display-scale code row i keeps when its carrier is
+// rescaled from c.srcScale to c.dstScale (ADR-0024 §1 as amended): the value
+// keeps the display scale it had — the carrier scale it was written at when
+// it had none of its own, DScaleUnknown when it leaves a marked column — so
+// `1.20` from a numeric(10,2) arm prints 1.20 in a DECIMAL(38,10) result, as
+// on PostgreSQL. An integer is display scale 0. A code is never larger than
+// the new carrier scale (invariant I1).
+func coercedDScaleCode(src *batch.Vector, i int, c *decimalCoercion) uint8 {
+	if c.srcType != parquet.TypeDecimal {
+		if c.dstScale == 0 {
+			return batch.DScaleCarrier
+		}
+		return 0
+	}
+	code := decimalSourceCode(src, i)
+	switch {
+	case code == batch.DScaleCarrier && c.srcMarked:
+		return batch.DScaleUnknown
+	case code == batch.DScaleCarrier:
+		code = uint8(c.srcScale)
+	case code == batch.DScaleUnknown:
+		return code
+	}
+	if int(code) >= c.dstScale {
+		return batch.DScaleCarrier
+	}
+	return code
+}
+
+// decimalSourceCode reads row i's display-scale code through a view.
+func decimalSourceCode(v *batch.Vector, i int) uint8 {
+	if v.Base != nil {
+		return v.Base.DecimalData.DScaleCode(int(v.Indices[i]))
+	}
+	return v.DecimalData.DScaleCode(i)
+}
+
+// unmarkDecimalVector is a marked arm's column passed through at its own
+// carrier scale into an unmarked result: the carriers are shared, and every
+// value with no display scale of its own takes DScaleUnknown, so it prints
+// as the marked column printed it.
+func unmarkDecimalVector(src *batch.Vector) *batch.Vector {
+	if src.Base != nil {
+		flat := *src
+		flat.Flatten()
+		src = &flat
+	}
+	out := *src
+	out.DecimalData.ResetDScale()
+	if !src.DecimalData.HasDisplayScale() {
+		out.DecimalData.SetUniformDScale(batch.DScaleUnknown)
+		return &out
+	}
+	out.DecimalData.SetUniformDScale(batch.DScaleUnknown)
+	for i := 0; i < src.Len; i++ {
+		if code := src.DecimalData.DScaleCode(i); code != batch.DScaleCarrier {
+			out.DecimalData.SetDScaleCode(i, code)
+		}
+	}
+	return &out
 }
 
 // decimalSourceCell reads row i's unscaled carrier, through a view when the

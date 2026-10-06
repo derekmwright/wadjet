@@ -1248,6 +1248,9 @@ func EvalDecimalInto(e Expr, b *batch.RecordBatch, row int, dst *batch.Vector, a
 			return false
 		}
 		dst.DecimalData.Data[at] = v
+		// A computed value: no display scale of its own (stage 1 of
+		// ADR-0024 §1 as amended keeps arithmetic at the carrier).
+		dst.DecimalData.SetDScaleCode(at, batch.DScaleCarrier)
 		return true
 	}
 	// A node with no exact accessor — the generic BinOp, a CASE, a COALESCE,
