@@ -1,22 +1,25 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: MIT
 
-package coordinator
+package wadjet
 
 import (
+	"bufio"
 	"context"
+	"os"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	"github.com/derekmwright/wadjet/internal/planner/physical"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 	"github.com/derekmwright/wadjet/internal/storage/catalog"
+	"github.com/derekmwright/wadjet/internal/storage/objstore"
 )
 
 // THE BINDER'S STAMP, COUNTED (ADR-0047 stage 1, RISKS M1 / M3 / M5) over the
-// group-key table — every cell of TestArcGKGroupKeySpellingEveryArm, on the
-// single-process engine, which is the door that stamps:
+// group-key table — every cell of coordinator.TestArcGKGroupKeySpellingEveryArm
+// (testdata/arc_ci1_census_cells.tsv), on the embedded engine, which is the
+// door that stamps, over the same ss_t / ss_i fixture:
 //
 //   - M1: no block is MIXED — bound in part, with the rest unbindable by its
 //     scope (an unenumerable source, a star output, a field path, an
@@ -29,13 +32,53 @@ import (
 //     publishes for it (logical.StarSourceColumns): the ordinal in a binding
 //     names the column the plan carries at that position.
 func TestArcCI1BindingCensusOverTheGroupKeyTable(t *testing.T) {
-	if testing.Short() {
-		t.Skip("-short: the binding census runs the group-key table")
+	ctx := context.Background()
+	db, err := Open(ctx, Config{Store: objstore.NewMemStore(), Bucket: "test"})
+	if err != nil {
+		t.Fatal(err)
 	}
-	cells := append(gkCells(), gkMoreCells(t)...)
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
-	t.Cleanup(cancel)
-	db := ssStandalone(t, ctx, 0)
+	t.Cleanup(func() { db.Close() })
+	for _, ddl := range []string{
+		"CREATE TABLE ss_t (id BIGINT, i INT, b BIGINT, f DOUBLE, n NUMERIC(10,2), s VARCHAR, o BOOLEAN, " +
+			"d DATE, ts TIMESTAMP, u UUID, a ARRAY(INT))",
+		"INSERT INTO ss_t VALUES " +
+			"(1, 3, 30, 1.5, 2.25, 'abc', true, DATE '2024-03-04', TIMESTAMP '2024-03-04 12:00:00', " +
+			"CAST('00000000-0000-4000-8000-000000000001' AS UUID), ARRAY[1,2]), " +
+			"(2, -7, -70, -2.5, -3.5, 'Hello', false, DATE '1970-01-01', TIMESTAMP '1970-01-01 00:00:00', " +
+			"CAST('00000000-0000-4000-8000-000000000002' AS UUID), ARRAY[3]), " +
+			"(3, 5, 9000000000, 0.25, 10.00, 'zz', true, DATE '9999-12-31', TIMESTAMP '9999-12-31 23:59:59.999', " +
+			"CAST('00000000-0000-4000-8000-000000000003' AS UUID), ARRAY[4,5,6]), " +
+			"(4, 0, 0, 0.0, 0.00, '', false, DATE '1000-01-01', TIMESTAMP '1000-01-01 00:00:00', " +
+			"CAST('00000000-0000-4000-8000-000000000004' AS UUID), ARRAY[7]), " +
+			"(5, 1, 1, 100.125, 0.01, 'x', true, DATE '1969-12-31', TIMESTAMP '1969-12-31 23:59:59.999', " +
+			"CAST('00000000-0000-4000-8000-000000000005' AS UUID), ARRAY[8]), " +
+			"(6, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)",
+		"CREATE TABLE ss_i (id BIGINT, v INT, g DOUBLE, m NUMERIC(10,2))",
+		"INSERT INTO ss_i VALUES (1, 5, 0.5, 1.25), (2, 6, 0.25, NULL)",
+	} {
+		if _, err := db.Query(ctx, ddl); err != nil {
+			t.Fatalf("%s: %v", ddl, err)
+		}
+	}
+	f, err := os.Open("testdata/arc_ci1_census_cells.tsv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	var cells [][2]string
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 1<<20), 1<<20)
+	for sc.Scan() {
+		line := sc.Text()
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		p := strings.SplitN(line, "\t", 3)
+		if len(p) != 3 {
+			t.Fatalf("malformed cell %q", line)
+		}
+		cells = append(cells, [2]string{p[0], p[2]})
+	}
 	var reps []physical.BlockBindingReport
 	var viol []string
 	physical.BindingProbe = func(r physical.BlockBindingReport) { reps = append(reps, r) }
@@ -46,9 +89,10 @@ func TestArcCI1BindingCensusOverTheGroupKeyTable(t *testing.T) {
 	}
 	t.Cleanup(func() { physical.BindingProbe = nil; plansql.MatchProbe = nil })
 	var blocks, stamped, declined, compared int
-	for _, tc := range cells {
+	for _, c := range cells {
+		name, sql := c[0], c[1]
 		reps, viol = nil, nil
-		_, _ = ssRunSingle(ctx, db, tc.sql, tc.ordered)
+		_, _ = db.Query(ctx, sql)
 		for _, r := range reps {
 			blocks++
 			if r.Stamped {
@@ -58,29 +102,29 @@ func TestArcCI1BindingCensusOverTheGroupKeyTable(t *testing.T) {
 				declined++
 			}
 			if r.Mixed {
-				t.Errorf("M1 %s: a MIXED block (%s): %s", tc.name, strings.Join(r.Unbound, ", "), r.Block)
+				t.Errorf("M1 %s: a MIXED block (%s): %s", name, strings.Join(r.Unbound, ", "), r.Block)
 			}
 		}
 		for _, v := range viol {
-			t.Errorf("M3 %s: %s", tc.name, v)
+			t.Errorf("M3 %s: %s", name, v)
 		}
 		// M5. A LATERAL body's scans carry the body's alias in the logical
 		// plan (setSubtreeAlias), so the plan's lookup by name answers the
 		// LATERAL relation for them — a naming of the plan's, not of the
 		// binding (stage 4); those cells are left out.
-		if strings.Contains(strings.ToUpper(tc.sql), "LATERAL") {
+		if strings.Contains(strings.ToUpper(sql), "LATERAL") {
 			continue
 		}
-		n, bad := ci1OrdinalCensus(ctx, t, db.Catalog(), tc.sql)
+		n, bad := ci1OrdinalCensus(ctx, t, db.Catalog(), sql)
 		compared += n
 		for _, b := range bad {
-			t.Errorf("M5 %s: %s", tc.name, b)
+			t.Errorf("M5 %s: %s", name, b)
 		}
 	}
-	t.Logf("M1: %d blocks, %d stamped, %d declined (a dotted name or an unfolded FROM-less subquery), 0 mixed; M3: 0 violations; M5: %d instances compared, 0 disagreements",
-		blocks, stamped, declined, compared)
-	if stamped == 0 || compared == 0 {
-		t.Fatalf("the census is vacuous: %d stamped blocks, %d compared instances", stamped, compared)
+	t.Logf("%d cells; M1: %d blocks, %d stamped, %d declined (a dotted name or an unfolded FROM-less subquery), 0 mixed; M3: 0 violations; M5: %d instances compared, 0 disagreements",
+		len(cells), blocks, stamped, declined, compared)
+	if len(cells) < 1000 || stamped == 0 || compared == 0 {
+		t.Fatalf("the census is vacuous: %d cells, %d stamped blocks, %d compared instances", len(cells), stamped, compared)
 	}
 }
 
