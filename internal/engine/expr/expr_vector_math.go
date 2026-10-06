@@ -85,6 +85,6 @@ func vecRoundHalfEven(args []*batch.Vector, out *batch.Vector, n int) {
 			out.Nulls.SetNull(i)
 			continue
 		}
-		out.Float64Data[i] = math.RoundToEven(vecReadFloat64(src, i)*pow) / pow
+		out.Float64Data[i] = roundHalfEvenScaled(vecReadFloat64(src, i), pow)
 	}
 }

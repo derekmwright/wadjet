@@ -171,3 +171,53 @@ func TestArcRERoundWithDigitsOverAFloatTakesTheFloatRule(t *testing.T) {
 		}
 	}
 }
+
+// The superset's BOUND (numeric-decimal r22): the rule needs 10ⁿ and x·10ⁿ to
+// be finite doubles. Past that — n ≥ 309, n ≥ 308 − log10|x|, n ≤ −324 — a
+// finite x has no answer under the rule, and the call refuses 22003 where
+// 89cea148 answered NaN (n = 400) or Infinity (n = 308) for 2.5. A NaN or
+// infinite x answers itself, and n = 307 or −301 inside the bound answers
+// the rule.
+func TestArcRERoundWithDigitsRefusesPastItsBound(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, Config{Store: objstore.NewMemStore(), Bucket: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, s := range []string{
+		"CREATE TABLE e_b (id BIGINT, f DOUBLE PRECISION)",
+		"INSERT INTO e_b VALUES (1, 2.5), (2, 1e300), (3, 'NaN'), (4, 'Infinity')",
+	} {
+		if _, err := db.Query(ctx, s); err != nil {
+			t.Fatalf("%s: %v", s, err)
+		}
+	}
+	for _, c := range []struct{ sql, want string }{
+		{"SELECT round(f, 400) FROM e_b WHERE id = 1", "ERR 22003"},
+		{"SELECT round(f, 308) FROM e_b WHERE id = 1", "ERR 22003"},
+		{"SELECT round(f, -400) FROM e_b WHERE id = 1", "ERR 22003"},
+		{"SELECT round(f, 10) FROM e_b WHERE id = 2", "ERR 22003"},
+		{"SELECT round(CAST(2.5 AS DOUBLE PRECISION), 400)", "ERR 22003"},
+		{"SELECT round(f, 307) FROM e_b WHERE id = 1", "2.5"},
+		{"SELECT round(f, -301) FROM e_b WHERE id = 2", "0"},
+		{"SELECT round(f, 400) FROM e_b WHERE id = 3", "NaN"},
+		{"SELECT round(f, 400) FROM e_b WHERE id = 4", "Infinity"},
+	} {
+		res, err := db.Query(ctx, c.sql)
+		if err != nil {
+			got := "ERR " + sqlerr.StateOf(err)
+			if got != c.want {
+				t.Errorf("%s\n  got  %s (%v)\n  want %s", c.sql, got, err, c.want)
+			}
+			continue
+		}
+		var rows []string
+		for i := range res.Rows {
+			rows = append(rows, reText(res.Cells(i)[0]))
+		}
+		if got := strings.Join(rows, "; "); got != c.want {
+			t.Errorf("%s\n  got  %s\n  want %s", c.sql, got, c.want)
+		}
+	}
+}

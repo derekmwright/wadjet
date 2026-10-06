@@ -74,8 +74,26 @@ func fnRoundHalfEven(args []any) any {
 	if len(args) >= 2 && args[1] != nil {
 		precision = int(ToFloat64(args[1]))
 	}
-	pow := math.Pow(10, float64(precision))
-	return math.RoundToEven(v*pow) / pow
+	return roundHalfEvenScaled(v, math.Pow(10, float64(precision)))
+}
+
+// roundHalfEvenScaled is v rounded half to even at the scale pow = 10ⁿ:
+// v·10ⁿ rounded and scaled back, the documented rule of the kept superset
+// round(double precision, n) (numeric-decimal r22; PostgreSQL has no such
+// function). Past the bound — 10ⁿ or v·10ⁿ not a finite double, which is
+// n ≥ 309, or n ≥ 308 − log10|v|, or n ≤ −324 — the rule has no answer for a
+// finite v, and the call refuses 22003 rather than answering the NaN or
+// ±Infinity the arithmetic produces (review round 1, P2). A NaN or infinite
+// v answers itself.
+func roundHalfEvenScaled(v, pow float64) float64 {
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		return v
+	}
+	r := math.RoundToEven(v*pow) / pow
+	if math.IsNaN(r) || math.IsInf(r, 0) {
+		raiseFloatOverflow()
+	}
+	return r
 }
 
 func fnPow(args []any) any {
