@@ -667,37 +667,20 @@ const (
 		"least 16 significant digits. Both engines divide EXACTLY and agree to min(both scales); " +
 		"they differ only in how many digits past that they print"
 
-	// setOpDecimalDigitsPin is a DELIBERATE difference of CARRIER, recorded in
-	// ADR-0012 item 12: PostgreSQL's numeric is variable-scale, so a set
-	// operation renders each arm's rows at that ARM's original scale
-	// ("-6.00" beside "-6.1875"); a wadjet DECIMAL column has ONE declared
-	// scale, so every row of the result prints at it. Same number, same row
-	// set, same class as AVG's digit count in item 9.
+	// The set-operation and choice-expression rendering pins are gone: since
+	// ADR-0024 §11 (arc PS stage 1) each value carries its own display scale
+	// through a set operation and a choice construct, and the wire prints
+	// PostgreSQL's text; deleting those pins is the proof.
 	//
-	// The digits differ in the OTHER direction today, for a second and
-	// temporary reason: this server takes the single-process path, which
-	// builds the result under the FIRST arm's schema and so renders the WIDER
-	// arm's rows too narrow (#532). When that lands the direction flips and
-	// this pin still holds — which is why it is a deliberate pin and not a bug
-	// pin. The typmod pin beside it is the one that must disappear.
-	setOpDecimalDigitsPin = "DELIBERATE (ADR-0012 item 12): PostgreSQL's variable-scale numeric renders " +
-		"each arm of a set operation at that arm's own scale; a wadjet DECIMAL column has one declared " +
-		"scale and renders every row at it. Same number, same row set. Today the difference also " +
-		"carries #532's narrowing on the single-process path, which is a defect and is pinned " +
-		"separately in the semantics corpus"
-
-	// choiceDecimalDigitsPin is setOpDecimalDigitsPin's twin for a CHOICE
-	// expression, and it is deliberate for the same reason: PostgreSQL's
-	// numeric carries a per-VALUE dscale, so COALESCE renders whichever
-	// branch won at THAT branch's scale, while a wadjet DECIMAL column has
-	// ONE declared scale — ADR-0024 item 2's common type — and renders every
-	// row at it. Same number, same row set, and the type modifier beside it
-	// is compared and agrees. It shows up on COALESCE and not on GREATEST
-	// over the same pair only because GREATEST's winner happens to be the
-	// wider column on every row of the fixture.
-	choiceDecimalDigitsPin = "DELIBERATE (ADR-0012 item 12, ADR-0024 item 2): PostgreSQL renders each " +
-		"numeric at the dscale of the value that produced it; a wadjet DECIMAL column has one declared " +
-		"scale — the common type of the branches — and renders every row at it. Same number, same rows"
+	// choiceDecimalDigitsPin is what remains of that class: a SUM over a
+	// choice is in-flight ARITHMETIC, whose result still takes the carrier's
+	// one scale until stage 2 of ADR-0024 §11 gives arithmetic PostgreSQL's
+	// result display scale. PostgreSQL prints the sum at the dscale of the
+	// values that produced it. Same number, and the type modifier beside it is
+	// compared and agrees.
+	choiceDecimalDigitsPin = "DELIBERATE until ADR-0024 §11 stage 2: PostgreSQL prints an arithmetic " +
+		"result over numeric at the display scale of its inputs' values; a wadjet sum prints at the " +
+		"carrier's one scale. Same number, same rows"
 
 	// noExactNumericPin is a DELIBERATE difference, documented rather than
 	// fixed. It USED to say "Wadjet has no exact numeric type … computes both
@@ -1209,18 +1192,15 @@ func wireCorpus() []wireCase {
 		// the candidate list off the registry's declaration rather than
 		// hand-listing the constructs.
 		{name: "DecimalChoiceIntegerLiteral",
-			sql:  `SELECT GREATEST(d_2, 0) AS v FROM dec_probe WHERE d_key IN (1, 2, 3) ORDER BY d_key`,
-			pins: map[string]string{wirePropFloatRender: choiceDecimalDigitsPin}},
+			sql: `SELECT GREATEST(d_2, 0) AS v FROM dec_probe WHERE d_key IN (1, 2, 3) ORDER BY d_key`},
 		{name: "DecimalChoiceIntegerLiteralZeroRows",
 			sql: `SELECT GREATEST(d_2, 0) AS v FROM dec_probe WHERE d_key = -1`},
 		{name: "DecimalChoiceCaseIntegerElse",
 			sql: `SELECT CASE WHEN d_grp < 3 THEN d_2 ELSE 0 END AS v FROM dec_probe
-				WHERE d_key IN (1, 2, 3) ORDER BY d_key`,
-			pins: map[string]string{wirePropFloatRender: choiceDecimalDigitsPin}},
+				WHERE d_key IN (1, 2, 3) ORDER BY d_key`},
 		{name: "DecimalChoiceFractionalLiteralElse",
 			sql: `SELECT CASE WHEN d_grp < 3 THEN d_2 ELSE 0.125 END AS v FROM dec_probe
-				WHERE d_key IN (1, 2, 3) ORDER BY d_key`,
-			pins: map[string]string{wirePropFloatRender: choiceDecimalDigitsPin}},
+				WHERE d_key IN (1, 2, 3) ORDER BY d_key`},
 		{name: "DecimalChoiceIntegerColumn",
 			sql: `SELECT LEAST(d_2, d_grp) AS v FROM dec_probe WHERE d_key IN (1, 2, 3) ORDER BY d_key`},
 		{name: "DecimalChoiceNullifIntegerLiteral",
@@ -1235,11 +1215,9 @@ func wireCorpus() []wireCase {
 		// against the column's own declaration. Invisible before #695, when
 		// the column declared int8 and had no numeric modifier at all.
 		{name: "DecimalChoiceNullifIntegerColumnFirst",
-			sql:  `SELECT NULLIF(d_key, d_2) AS v FROM dec_probe WHERE d_key IN (1, 2, 3) ORDER BY d_key`,
-			pins: map[string]string{wirePropFloatRender: choiceDecimalDigitsPin}},
+			sql: `SELECT NULLIF(d_key, d_2) AS v FROM dec_probe WHERE d_key IN (1, 2, 3) ORDER BY d_key`},
 		{name: "DecimalChoiceNullifIntegerLiteralFirst",
-			sql:  `SELECT NULLIF(0, d_2) AS v FROM dec_probe WHERE d_key IN (1, 2, 3) ORDER BY d_key`,
-			pins: map[string]string{wirePropFloatRender: choiceDecimalDigitsPin}},
+			sql: `SELECT NULLIF(0, d_2) AS v FROM dec_probe WHERE d_key IN (1, 2, 3) ORDER BY d_key`},
 		{name: "DecimalChoiceNullifIntegerColumnFirstZeroRows",
 			sql: `SELECT NULLIF(d_key, d_2) AS v FROM dec_probe WHERE d_key = -1`},
 		{name: "MinOverDecimalColumn", sql: `SELECT MIN(d_2) AS lo FROM dec_probe WHERE d_key IN (1, 2, 3)`},
@@ -1411,10 +1389,7 @@ func wireCorpus() []wireCase {
 		// other property of this statement stays gated.
 		{name: "SetOpAcrossDecimalScales",
 			sql: `SELECT d_2 AS v FROM dec_probe WHERE d_key IN (0, 4, 8)
-				UNION ALL SELECT d_4 FROM dec_probe WHERE d_key IN (0, 4, 8) ORDER BY 1`,
-			pins: map[string]string{
-				wirePropFloatRender: setOpDecimalDigitsPin,
-			}},
+				UNION ALL SELECT d_4 FROM dec_probe WHERE d_key IN (0, 4, 8) ORDER BY 1`},
 		// The control for the entry above: BOTH arms are the same column, so
 		// PostgreSQL KEEPS numeric(9,2) and wadjet agrees outright. It carries
 		// no pin, which is what proves the pinned entry is about the arms
@@ -1468,10 +1443,7 @@ func wireCorpus() []wireCase {
 		{name: "GreatestAcrossDecimalScales",
 			sql: `SELECT GREATEST(d_2, d_4) AS v FROM dec_probe WHERE d_key IN (1, 2, 3) ORDER BY d_key`},
 		{name: "CoalesceAcrossDecimalScales",
-			sql: `SELECT COALESCE(d_2, d_4) AS v FROM dec_probe WHERE d_key IN (1, 2, 3) ORDER BY d_key`,
-			pins: map[string]string{
-				wirePropFloatRender: choiceDecimalDigitsPin,
-			}},
+			sql: `SELECT COALESCE(d_2, d_4) AS v FROM dec_probe WHERE d_key IN (1, 2, 3) ORDER BY d_key`},
 		// A CASE with no ELSE: the implicit NULL branch is untyped, so the
 		// modifier goes the way CoalesceWithANullBranch's does.
 		{name: "CaseWithoutElseOverOneDecimalColumn",
@@ -1508,10 +1480,7 @@ func wireCorpus() []wireCase {
 				UNION ALL SELECT d_2 FROM dec_probe WHERE d_key IN (1, 2, 3) ORDER BY 1`},
 		{name: "SetOpOverAComputedArm",
 			sql: `SELECT COALESCE(d_2, d_4) AS v FROM dec_probe WHERE d_key IN (1, 2, 3)
-				UNION ALL SELECT d_4 FROM dec_probe WHERE d_key IN (1, 2, 3) ORDER BY 1`,
-			pins: map[string]string{
-				wirePropFloatRender: setOpDecimalDigitsPin,
-			}},
+				UNION ALL SELECT d_4 FROM dec_probe WHERE d_key IN (1, 2, 3) ORDER BY 1`},
 		{name: "ExceptSameDecimalScale",
 			sql: `SELECT d_2 AS v FROM dec_probe WHERE d_key IN (1, 2)
 				EXCEPT SELECT d_2 FROM dec_probe WHERE d_key IN (2, 3) ORDER BY 1`},

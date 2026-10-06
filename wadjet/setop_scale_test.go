@@ -83,14 +83,14 @@ func TestSetOpKeepsTheWiderArmsDecimalScale(t *testing.T) {
 		{
 			name: "narrow arm first",
 			sql:  "SELECT d FROM narrow UNION ALL SELECT d FROM wide",
-			want: []string{"12.7499", "12.7500", "12.7500", "12.7501", "3.0000"},
+			want: []string{"12.7499", "12.75", "12.7500", "12.7501", "3.00"}, // PostgreSQL 17.11 (ADR-0024 §11)
 		},
 		// The wide arm first: already correct, and it stays correct — the
 		// widening must never NARROW an arm.
 		{
 			name: "wide arm first",
 			sql:  "SELECT d FROM wide UNION ALL SELECT d FROM narrow",
-			want: []string{"12.7499", "12.7500", "12.7500", "12.7501", "3.0000"},
+			want: []string{"12.7499", "12.75", "12.7500", "12.7501", "3.00"}, // PostgreSQL 17.11 (ADR-0024 §11)
 		},
 		// Same scale on both sides: untouched.
 		{
@@ -119,7 +119,7 @@ func TestSetOpKeepsTheWiderArmsDecimalScale(t *testing.T) {
 			}
 			for i := range got {
 				if got[i] != tc.want[i] {
-					t.Errorf("%s\n  got  %v\n  want %v (live PostgreSQL 17 widens to the second arm's scale)",
+					t.Errorf("%s\n  got  %v\n  want %v (PostgreSQL 17.11: the carrier widens to the wider arm's scale and each value prints its own, ADR-0024 §11)",
 						tc.sql, got, tc.want)
 					break
 				}

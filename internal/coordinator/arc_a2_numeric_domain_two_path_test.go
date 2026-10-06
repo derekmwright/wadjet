@@ -180,12 +180,10 @@ func a2DomainCells() []a2DomainCell {
 		{issue: "#757", name: "nullif_integer_against_decimal",
 			sql: `SELECT id, NULLIF(n_i32, n_d152) AS v FROM numfold ORDER BY id`,
 			want: []string{
-				"id=int64:1|v=string:3.00", "id=int64:2|v=NULL",
-				"id=int64:3|v=string:16777217.00", "id=int64:4|v=string:-5.00"},
-			pgSays: "numeric, rendered `3` / `16777217` / `-5`. The TYPE agrees and the " +
-				"SCALE is ADR-0012 item 12's recorded class: PostgreSQL's numeric carries a " +
-				"per-VALUE dscale and takes the integer's 0, a wadjet DECIMAL column has one " +
-				"declared scale for the whole column and renders at it. Same number"},
+				"id=int64:1|v=string:3", "id=int64:2|v=NULL",
+				"id=int64:3|v=string:16777217", "id=int64:4|v=string:-5"},
+			pgSays: "numeric, rendered `3` / `16777217` / `-5`: the integer argument's own " +
+				"display scale, 0 (ADR-0024 §11, arc PS stage 1)"},
 
 		// ---- #758: GREATEST/LEAST hand over the winner at the fold's width ---
 		//
