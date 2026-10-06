@@ -1874,11 +1874,12 @@ func (s assignSource) assign(v any, col parquet.Column) (any, error) {
 // decimalDeclaredText is a DECIMAL-declared value carried in a float or an
 // integer box — a numeric constant under CASE / COALESCE / GREATEST in a
 // VALUES cell, a SET, a MERGE clause — as the text a DECIMAL column's box
-// already is: the numeric at its declared scale, so every door assigns what
-// the SELECT-list doors store from their DECIMAL vector (`2.50` into text, 3
+// already is, so every door assigns what the SELECT-list doors store from
+// their DECIMAL vector: a double at the declared scale (`2.50` into text, 3
 // into integer — numeric rounds half away from zero — never the double's
-// `2.5` / 2; arc VL, the earlier measurement B2). Any other box is returned as
-// it is.
+// `2.5` / 2; arc VL, the earlier measurement B2), an integer at display scale
+// 0, as the vector's boxed setter records it (ADR-0024 §11: `GREATEST(5,
+// 0.1)` into text is `5`, PostgreSQL's). Any other box is returned as it is.
 func decimalDeclaredText(v any, scale int) any {
 	switch x := v.(type) {
 	case float64:
@@ -1887,11 +1888,7 @@ func decimalDeclaredText(v any, scale int) any {
 		}
 		return strconv.FormatFloat(x, 'f', scale, 64)
 	case int64, int32, int:
-		text := fmt.Sprint(x)
-		if scale > 0 {
-			text += "." + strings.Repeat("0", scale)
-		}
-		return text
+		return fmt.Sprint(x)
 	}
 	return v
 }

@@ -154,15 +154,14 @@ func TestAssignmentExpressionSourcesAgreeWithPostgreSQL(t *testing.T) {
 
 // assignmentExprSourceDivergences are the cells where every door agrees and
 // the answer is not PostgreSQL's, each with its mechanism; a cell that starts
-// agreeing fails the gate until its entry is deleted. All three are ADR-0024's
-// recorded #764 class: PostgreSQL gives a numeric constant typmod -1, so a
-// choice over constants of different scales prints EACH value at its own
-// scale, while a wadjet DECIMAL column has one scale — the same number with
-// trailing zeros.
+// agreeing fails the gate until its entry is deleted. Since ADR-0024 §11 (arc
+// PS stage 1) a value prints its own display scale (`GREATEST(5, 0.1)` is 5
+// on every door, PostgreSQL's), but a choice whose every argument is a numeric
+// LITERAL resolves its box as a double, so the chosen literal's spelling is
+// not its display scale and the value prints at the call's one scale.
 var assignmentExprSourceDivergences = map[string]string{
-	"GREATEST(-2.50, 0.1) → s": "#764: one scale per column (0.10 for 0.1)",
-	"GREATEST(1e3, 0.1) → s":   "#764: one scale per column (1000.0 for 1000)",
-	"GREATEST(5, 0.1) → s":     "#764: one scale per column (5.0 for 5)",
+	"GREATEST(-2.50, 0.1) → s": "a choice over literals only boxes a double (0.10 for 0.1)",
+	"GREATEST(1e3, 0.1) → s":   "a choice over literals only boxes a double (1000.0 for 1000)",
 }
 
 type assignmentExprSourceCell struct{ src, tgt, want string }
