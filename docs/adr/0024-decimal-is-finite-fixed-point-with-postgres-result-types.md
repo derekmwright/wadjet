@@ -51,6 +51,13 @@ CREATE TABLE AS column PostgreSQL types as plain numeric — is
 DECIMAL(38, max(s, 10)) marked unconstrained: typmod −1 on the wire, NULL
 numeric_precision / numeric_scale, and a printed value without the stored
 scale's trailing zeros.
+Amended 2026-10-06 (arc PS stage 1, #1647 #764) with §11: a NUMERIC VALUE
+carries its own display scale beside the carrier. §1's carrier stays —
+Int128, 38 digits, one carrier scale per vector — and §1's "one scale per
+column" no longer decides what a value PRINTS: each value prints its own
+display scale, as PostgreSQL's numeric does, and §10's trim is left only
+for a value whose display scale was not recorded (a stored bare NUMERIC
+until stage 5).
 
 ## Context
 
@@ -94,6 +101,9 @@ Two facts that shaped the decision:
 ## Decision
 
 ### 1. The carrier stays finite: Int128, 38 digits, one scale per column
+
+*Amended 2026-10-06 (§11):* one CARRIER scale per column; a value's printed
+scale is its own display scale beside the carrier.
 
 Fixed 16-byte SoA is what ADR-0002's typed kernels, ADR-0006's memory
 accounting, ADR-0010's shuffle formats and the parquet leaf all assume. An
@@ -1435,6 +1445,124 @@ arms), `server.TestArcUNInBandMarkEveryDoor` (six doors),
 `exec.TestDecimalCoerceStatesTheResultMark`,
 `exec.TestSpillRunKeepsTheUnconstrainedMark` and
 `parquet.TestUnconstrainedNumericColumnIsOneDeclaration`.
+
+### 11. A NUMERIC value carries its display scale beside the carrier (amended 2026-10-06)
+
+Added 2026-10-06 (arc PS, stage 1 of the per-value-scale program; Derek
+Wright's go-ahead on the design of that date; #1647, #764). It replaces
+§1's "one scale per column" as the rule for what a value PRINTS, and leaves
+§1's carrier exactly where it was.
+
+**The position.** PostgreSQL's numeric keeps a display scale (`dscale`) on
+every VALUE: an unconstrained value — a literal, a COALESCE / CASE / LEAST
+over values of different scales, a set operation's result, a bare `NUMERIC`
+column — prints its own fraction digits (`2.50`, `1.5`, `7` in one column).
+One scale per column cannot print that: it printed every value at the
+widest scale (`12.7500000000000` for 12.75 beside a 13-digit literal,
+numeric-decimal r18, #764), or under §10's mark trimmed it, and a set
+operation that a literal spelled `2.50` vetoed printed `1.0000000000`, so
+`count(*) … WHERE CAST(v AS TEXT) LIKE '%0'` answered 7 where PostgreSQL
+answers 3 (#1647). Each value now carries a display scale beside its
+carrier:
+
+- **The carrier is §1's.** An Int128 at the vector's one carrier scale S,
+  which the plan computes as before (`batch.DecimalResultType`); 38 digits;
+  22003 past them.
+- **The display scale is per value** (`batch.DecimalColumn.DScale`, one
+  code per row, nil when every row shares `DAll`'s): `0..S` (the value
+  prints that many fraction digits; the carrier's digits past it are zero,
+  invariant I1), `DScaleCarrier` (no display scale of its own: prints at S,
+  or trimmed under §10's mark, as every value printed before) or
+  `DScaleUnknown` (prints trimmed). The zero value is `DScaleCarrier`, so a
+  vector nothing wrote a display scale into prints exactly as before, and a
+  uniform column allocates no array.
+- **One printer.** `batch.DecimalColumn.Text` — the carrier at S cut to the
+  display scale, never past a nonzero digit — is what `Vector.GetValueOf`
+  boxes, and every door reads that box: the text and extended protocols,
+  the binary numeric (whose dscale `pgNumericDigits` builds from the box's
+  fraction length), HTTP, gRPC, the asynchronous result, the embedded API,
+  and every expression that renders a value as text (`CAST(v AS TEXT)`,
+  `||`, `concat`, `json_build_object`). `Vector.GetValue` keeps the
+  canonical carrier-scale text, because that box is also a key.
+- **Nothing that compares reads it** (I5). Equal numbers keep equal
+  carriers at one scale, so `2.50 = 2.5` and they are one group, one
+  DISTINCT row, one join match, one set-operation member; every key — the
+  in-memory group and join key, the spill run's merge key (a DECIMAL box
+  read without its trailing zeros), the boxed coordinator key — is the
+  value's. Which of two equal values represents a group is the first one
+  met, as on PostgreSQL, where it depends on the plan: a new ADR-0013
+  class (the display scale of a representative of equal numeric values),
+  gated by value.
+- **Where a display scale comes from in stage 1.** A value written from
+  TEXT records the text's fraction digits (below S; text at the column's
+  own scale leaves it uniform) — a DECIMAL box is its printed text, so a
+  COALESCE / CASE / GREATEST / LEAST / NULLIF that answers a column's value
+  hands on that value's display scale; an integer box records 0 (`CASE …
+  THEN 14 ELSE 13.25 END` prints 14); a choice that answers a numeric
+  literal answers the literal's spelling (`COALESCE(n, 1.50)` 1.50,
+  `COALESCE(n, 1.5)` 1.5); a stage-DAG set-operation arm brought to the
+  result's declaration keeps its values' display scales
+  (`exec.DecimalCoerce`: a value without one keeps the arm's carrier
+  scale, an integer 0, a value leaving a marked column for an unmarked
+  result `DScaleUnknown`), and the single-process path moves each arm's
+  value as its printed text. A double's shortest spelling is not a display
+  scale and records none. Arithmetic answers at the carrier scale until
+  stage 2.
+- **Every carrier that moves a value moves its display scale**: the copy
+  helpers (`CopyRow`, `CopyRange`, `Gather`, `AppendRow`) under every
+  vector copy, view and flatten; the sort, join, window and projection
+  gathers; a group key (its first member's printed box); LAG / LEAD /
+  FIRST_VALUE / LAST_VALUE / NTH_VALUE; a column reference's box; the
+  coordinator's merge copy and the scalar subquery's substituted literal;
+  the columnar spill run (flag bit 4 and a section after the carriers);
+  and the `.wshf` exchange — a per-CHUNK section after a DECIMAL column's
+  carriers, announced by the chunk's data length (ADR-0010's 2026-10-06
+  amendment). The design placed that announcement in bit 6 of the header's
+  precision byte; the header is written when the first batch arrives, and
+  whether a column carries display scales is a property of each batch, so
+  the chunk says it. A column without display scales writes exactly the
+  bytes it wrote before in both formats, and the header's precision byte
+  refuses any bit but §10's mark (#1662).
+  `batch.TestDecimalCarrierMovesCarryTheDisplayScale` is the census: every
+  non-test line that moves a carrier between vectors goes through a helper
+  or names the statement that moves its codes (eb76eb97 has 21 such lines
+  in 11 files, none carrying one).
+
+**The stages** (arc PS's PLAN): 1, this one — the in-flight carrier, the
+sources above, the one printer, `.wshf`, spill; 2, PostgreSQL's
+display-scale rules in every kernel but `/` and AVG (`v + 1` over 2.50
+prints 3.50; SUM / MIN / MAX in every form); 3, container elements
+(`ARRAY[n, 1]`); 4, `/` and AVG at PostgreSQL's `select_div_scale` capped by
+the carrier; 5, storage: a bare-NUMERIC column's display scales in a
+parquet sibling leaf, so a stored `2.50` reads 2.50 (numeric-decimal r24).
+Until stage 5 a stored bare-NUMERIC column prints §10's trimmed text, and
+§10's mark decides how a value without a display scale prints; §10's
+set-operation fold still decides the result column's mark and typmod.
+
+**Still diverges after stage 1**, each with its stage: arithmetic over
+values of different display scales prints the carrier's zeros
+(`COALESCE(n, 1.5) + 0`; `v + 0` over a set operation's `2.5`: 2);
+`ARRAY[n, 1]` (3); quotient digits (4); every stored bare-NUMERIC cell —
+`2.50` reads 2.5, `v + 1` over a stored 2.50 prints 3.5000000000 (5); the
+precision rows r17, r19, r23 and comparison-membership r9 (§1's carrier,
+unchanged).
+
+Gated by `coordinator.TestArcPSDisplayScaleEveryArm` (eleven arms),
+`pgwire.TestArcPSBinaryDscaleIsTheText`, `worker.TestWSHFDisplayScaleRoundTrip`,
+`worker.TestWSHFUnmarkedColumnsEncodeAsBase`,
+`worker.TestWSHFDecoderRefusesAnInvalidPrecisionByte`,
+`exec.TestSpillRunKeepsTheDisplayScale`, `exec.TestDisplayScaleIsNeverAKey`,
+`wadjet.TestArcPSDisplayScaleThroughEverySpill`,
+`server.TestArcPSDisplayScaleNeverPublishesAPolicedValue`,
+`pgwire.TestArcPSDisplayScalePlanningDepth`,
+`batch.TestDecimalCarrierMovesCarryTheDisplayScale`,
+`batch.TestDisplayScaleNeverCutsADigit`, and the deleted pins of
+`coordinator.TestArcUNSetOperationMatrix`,
+`coordinator.TestArcUNInBandMarkEveryArm`,
+`coordinator.TestArcUNUnconstrainedColumnEveryArm`,
+`coordinator.TestArcNXNumericCarrierEveryArm`,
+`coordinator.TestArcGKGroupKeySpellingEveryArm` and
+`coordinator.TestLiteralScaleInADecimalFold`.
 
 ## Consequences
 
