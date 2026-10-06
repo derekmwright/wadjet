@@ -401,7 +401,7 @@ func (db *DB) declaredOutputFor(ctx context.Context, parsed *plansql.ParsedQuery
 	if err != nil {
 		return nil, err
 	}
-	if err := auth.ValidateStatementColumns(ctx, db.authProvider, db.catalog, selectInfo, "embedded"); err != nil {
+	if err := auth.BindStatementColumns(ctx, db.authProvider, db.catalog, selectInfo, "embedded"); err != nil {
 		return nil, err
 	}
 	logicalPlan, err := logical.BuildFromSelect(selectInfo)

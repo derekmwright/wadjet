@@ -34,6 +34,52 @@ type ColRef struct {
 	// stored column has to move the first and must not touch the second
 	// (#750, #694).
 	Slot bool
+	// Bound is the column the BINDER resolved this reference to (ADR-0047):
+	// a relation instance and a position in that instance's published list,
+	// not a spelling. Like Slot it is provenance — the parser never sets it,
+	// nothing a query can contain sets it, and re-parsing a rendered
+	// expression loses it by design. Nil means "not bound": a path the
+	// binder did not run on, or a block the binder could not bind
+	// completely (a block is bound in full or not at all).
+	Bound *Binding
+}
+
+// RelID names one relation INSTANCE of a statement: every occurrence of a
+// relation in a FROM list — a base table, a CTE reference, a derived table,
+// a table function — gets its own, assigned by the binder as it registers
+// the source. Two references to one table are two instances; an alias is a
+// spelling of an instance, never the instance. It is statement-scoped and
+// meaningless outside the statement that minted it.
+type RelID uint32
+
+// Binding is what the binder resolved a column reference to.
+//
+// An INPUT binding is (Rel, Ord): the Ord-th column (0-based) of the list
+// relation instance Rel publishes, Level query levels out from the
+// reference's own block (0 = its own FROM, 1 = the enclosing query, …).
+//
+// An OUTPUT binding (Output set) is the Ord-th SELECT item of the block whose
+// own id is Rel: the binding a bare ORDER BY name earns when it names an
+// output column, which PostgreSQL resolves before the input.
+type Binding struct {
+	Rel    RelID
+	Ord    int
+	Level  int
+	Output bool
+}
+
+// BindingKey renders a binding as a key no spelling can produce: it starts
+// with a NUL byte, which no identifier, quoted or not, can contain. An alias
+// resolver that compares names can therefore never capture it (ADR-0047 §1).
+func (b *Binding) BindingKey() string {
+	if b == nil {
+		return ""
+	}
+	kind := byte('c')
+	if b.Output {
+		kind = 'o'
+	}
+	return fmt.Sprintf("\x00%c%d.%d", kind, b.Rel, b.Ord)
 }
 
 func (*ColRef) nodeTag() {}

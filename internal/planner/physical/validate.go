@@ -61,7 +61,15 @@ func (p *Planner) ValidateColumns(ctx context.Context, info *plansql.SelectInfo)
 }
 
 func validateColumns(ctx context.Context, src tableColumnSource, info *plansql.SelectInfo) error {
-	b := &binder{ctx: ctx, src: src, ctes: map[string]cteEntry{}}
+	return bindColumns(ctx, src, info, false)
+}
+
+// bindColumns is validateColumns that, with stamp set, also RECORDS what each
+// reference resolved to on the AST it validated (ADR-0047; validate_binding.go).
+// A door stamps only when the plan it executes is built from that same AST by
+// consumers that read the stamp; every other door validates exactly as before.
+func bindColumns(ctx context.Context, src tableColumnSource, info *plansql.SelectInfo, stamp bool) error {
+	b := &binder{ctx: ctx, src: src, ctes: map[string]cteEntry{}, stamp: stamp}
 	return b.validateBlock(ctx, info, nil)
 }
 
@@ -186,6 +194,14 @@ type colScope struct {
 	// support (0A000), where one that names nothing at all is malformed
 	// (42P01). It never resolves anything (#614).
 	outerDiag *colScope
+	// insts is this block's FROM as relation INSTANCES, in FROM order, each
+	// with its ordered column list; up is the scope of the query level this
+	// one sits under; instOpen says one of this block's own sources could not
+	// be enumerated. They exist for BINDING (validate_binding.go): which
+	// instance and level a reference names, not only whether it names one.
+	insts    []*relInst
+	up       *colScope
+	instOpen bool
 }
 
 // typeAmbiguous marks a bare column name that two FROM sources declare with
@@ -425,6 +441,9 @@ func (s *colScope) clone() *colScope {
 		}
 	}
 	c.outerDiag = s.outerDiag
+	c.insts = append([]*relInst(nil), s.insts...)
+	c.up = s.up
+	c.instOpen = s.instOpen
 	c.relations = s.relations
 	c.parsedThrough = s.parsedThrough
 	c.siblingDiag = s.siblingDiag
@@ -686,6 +705,12 @@ type binder struct {
 	// the same way and for the same purpose: a derived table naming a SIBLING
 	// item earns PostgreSQL's LATERAL sentence rather than "missing".
 	siblingDiag *colScope
+	// stamp says this door's plan is built from the AST the binder binds, so
+	// the bindings are recorded on it (stampBlock). nextRel mints relation
+	// instance ids; blockRel is each block's own id, for an OUTPUT binding.
+	stamp    bool
+	nextRel  plansql.RelID
+	blockRel map[*plansql.SelectInfo]plansql.RelID
 }
 
 func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, outer *colScope) error {
@@ -816,6 +841,7 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 				// its left (and any outer scope).
 				lateralOuter = from.clone()
 				lateralOuter.merge(outer)
+				lateralOuter.up = outer
 			}
 			if err := b.resolveSource(ctx, ref, lateralOuter, from); err != nil {
 				return err
@@ -901,6 +927,7 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 	// item cannot reference its own output, and WHERE cannot see aliases.
 	resolve := from.clone()
 	resolve.merge(outer)
+	resolve.up = outer
 	if b.bodyScopes == nil {
 		b.bodyScopes = map[*plansql.SelectInfo][2]*colScope{}
 	}
@@ -1063,6 +1090,9 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 		}
 	}
 
+	// Every participant's binding, recorded when every one of them binds.
+	b.stampBlock(info, resolve)
+
 	// A bare column beside an aggregate with no GROUP BY has no defined
 	// answer — which n_name should the single aggregate row carry?
 	//
@@ -1082,7 +1112,12 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 		if sub == nil {
 			continue
 		}
-		if err := b.validateBlock(ctx, sub, resolve); err != nil {
+		// An expression subquery's body is planned from a PARSE OF ITS TEXT
+		// (SubqueryNode.SQL), never from this tree, so nothing the planner
+		// matches there carries a binding: the body is checked by the
+		// spelling rules its plan is matched by (ADR-0047 stage 1; the
+		// memoized, bound body is stage 3).
+		if err := b.unstamped(func() error { return b.validateBlock(ctx, sub, resolve) }); err != nil {
 			return err
 		}
 	}
@@ -1347,7 +1382,7 @@ func (b *binder) validatedBody(sql string, outer *colScope) *plansql.SelectInfo 
 		if ctx == nil {
 			ctx = context.Background()
 		}
-		if err := b.validateBlock(ctx, sub, outer); err != nil {
+		if err := b.unstamped(func() error { return b.validateBlock(ctx, sub, outer) }); err != nil {
 			sub = nil
 		}
 	}
@@ -1497,6 +1532,7 @@ func (b *binder) resolveSource(ctx context.Context, tr *plansql.TableRef, latera
 		if !known {
 			into.open = true
 			into.sourceOpen = true
+			into.addOpenInst(b, qual)
 			return nil
 		}
 		cols, err := applyFuncColumnAliases(cols, tr.ColumnAliases, qual)
@@ -1509,6 +1545,7 @@ func (b *binder) resolveSource(ctx context.Context, tr *plansql.TableRef, latera
 			into.addQualifiedTyped(qual, c.Name, c.Type)
 		}
 		into.noteSourceDuplicates(qual, names)
+		into.addInst(b, qual, names)
 		return nil
 	}
 
@@ -1522,6 +1559,7 @@ func (b *binder) resolveSource(ctx context.Context, tr *plansql.TableRef, latera
 		if perr != nil || inner == nil {
 			into.open = true
 			into.sourceOpen = true
+			into.addOpenInst(b, qual)
 			return nil
 		}
 		// Validate the derived block's internals. A LATERAL derived table
@@ -1532,7 +1570,16 @@ func (b *binder) resolveSource(ctx context.Context, tr *plansql.TableRef, latera
 		// already in place here, and it is what lets the body's scope tell a
 		// reference to an outer level (legal SQL, 0A000) from one that names
 		// nothing (42P01). See refuseOuterLevelReference (#614).
-		if err := b.validateBlock(ctx, inner, lateralOuter); err != nil {
+		validate := func() error { return b.validateBlock(ctx, inner, lateralOuter) }
+		if lateralOuter != nil {
+			// A LATERAL body is planned by the decorrelation, which rewrites
+			// it and records its GROUP BY as TEXT: like an expression
+			// subquery's, its terms reach the planner unbound, so it is
+			// checked by the spelling rules (stage 4 binds it).
+			if err := b.unstamped(validate); err != nil {
+				return err
+			}
+		} else if err := validate(); err != nil {
 			return err
 		}
 		// A LATERAL body's correlated equality is the decorrelated join's
@@ -1546,6 +1593,7 @@ func (b *binder) resolveSource(ctx context.Context, tr *plansql.TableRef, latera
 		if !known {
 			into.open = true
 			into.sourceOpen = true
+			into.addOpenInst(b, qual)
 			return nil
 		}
 		// The COLUMN-ALIAS LIST renames those outputs positionally, and this
@@ -1570,6 +1618,7 @@ func (b *binder) resolveSource(ctx context.Context, tr *plansql.TableRef, latera
 			}
 		}
 		into.noteSourceDuplicates(qual, names)
+		into.addInst(b, qual, names)
 		return nil
 	}
 
@@ -1578,6 +1627,7 @@ func (b *binder) resolveSource(ctx context.Context, tr *plansql.TableRef, latera
 		if e.open {
 			into.open = true
 			into.sourceOpen = true
+			into.addOpenInst(b, qual)
 			return nil
 		}
 		for i, n := range e.cols {
@@ -1587,6 +1637,7 @@ func (b *binder) resolveSource(ctx context.Context, tr *plansql.TableRef, latera
 			}
 		}
 		into.noteSourceDuplicates(qual, e.cols)
+		into.addInst(b, qual, e.cols)
 		return nil
 	}
 
@@ -1625,13 +1676,20 @@ func (b *binder) resolveSource(ctx context.Context, tr *plansql.TableRef, latera
 		}
 		into.open = true
 		into.sourceOpen = true
+		into.addOpenInst(b, qual)
 		return nil
 	}
 	if meta == nil {
 		into.open = true
 		into.sourceOpen = true
+		into.addOpenInst(b, qual)
 		return nil
 	}
+	storedCols := make([]string, 0, len(meta.Schema.Columns))
+	for _, c := range meta.Schema.Columns {
+		storedCols = append(storedCols, c.Name)
+	}
+	into.addInst(b, qual, storedCols)
 	for _, c := range meta.Schema.Columns {
 		// A STORED column is NEVER refused here. Reading a table is not
 		// minting a name: the column already exists, some binary wrote it, and

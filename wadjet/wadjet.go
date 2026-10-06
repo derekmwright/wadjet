@@ -697,7 +697,7 @@ func (db *DB) query(ctx context.Context, sql string, gatherBytes int64) (res *Qu
 	// It binds against the schema the CALLING IDENTITY can see: a column an
 	// ABAC policy denies is not in the table for this caller, so it is not in
 	// the "available:" hint either (#859).
-	if err := auth.ValidateStatementColumns(ctx, db.authProvider, db.catalog, selectInfo, "embedded"); err != nil {
+	if err := auth.BindStatementColumns(ctx, db.authProvider, db.catalog, selectInfo, "embedded"); err != nil {
 		return nil, err
 	}
 
@@ -862,7 +862,7 @@ func (db *DB) explain(ctx context.Context, parsed *plansql.ParsedQuery) (*QueryR
 	// Before the build, for the reason Query's own call site records: the
 	// builder's own refusals carry no SQLSTATE (#590). Under the calling
 	// identity's schema, for the reason it records too (#859).
-	if err := auth.ValidateStatementColumns(ctx, db.authProvider, db.catalog, selectInfo, "embedded"); err != nil {
+	if err := auth.BindStatementColumns(ctx, db.authProvider, db.catalog, selectInfo, "embedded"); err != nil {
 		return nil, err
 	}
 

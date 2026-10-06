@@ -263,6 +263,17 @@ func EnforceOptimizedPlan(ctx context.Context, cat *catalog.Catalog, plan *logic
 // is unchanged. Check table access only after the catalog finds the relation.
 // See docs/internals/auth-policy-aware-name-diagnostics.md for the design.
 func ValidateStatementColumns(ctx context.Context, provider *Provider, cat *catalog.Catalog, info *plansql.SelectInfo, protocol string) error {
+	return validateStatementColumns(ctx, provider, cat, info, protocol, false)
+}
+
+// BindStatementColumns is ValidateStatementColumns for a door that plans info
+// on the single-process engine: the binder also records each reference's
+// resolved column on the AST (physical.BindColumnsUnderPolicy, ADR-0047).
+func BindStatementColumns(ctx context.Context, provider *Provider, cat *catalog.Catalog, info *plansql.SelectInfo, protocol string) error {
+	return validateStatementColumns(ctx, provider, cat, info, protocol, true)
+}
+
+func validateStatementColumns(ctx context.Context, provider *Provider, cat *catalog.Catalog, info *plansql.SelectInfo, protocol string, stamp bool) error {
 	if cat == nil || info == nil {
 		return nil
 	}
@@ -281,6 +292,9 @@ func ValidateStatementColumns(ctx context.Context, provider *Provider, cat *cata
 		denyTable = func(table string) error {
 			return tableAccess(ctx, provider, table, ActionRead, protocol)
 		}
+	}
+	if stamp {
+		return physical.BindColumnsUnderPolicy(ctx, cat, info, deniedFor, denyTable)
 	}
 	return physical.ValidateColumnsUnderPolicy(ctx, cat, info, deniedFor, denyTable)
 }
