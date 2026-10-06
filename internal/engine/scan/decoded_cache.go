@@ -594,7 +594,7 @@ func copyChunkVector(dst, src *batch.Vector, numRows int) bool {
 			dst.DecimalData.Scale != src.DecimalData.Scale {
 			return false
 		}
-		copy(dst.DecimalData.Data, src.DecimalData.Data[:numRows])
+		dst.DecimalData.CopyRange(0, &src.DecimalData, 0, numRows)
 	default:
 		return false
 	}

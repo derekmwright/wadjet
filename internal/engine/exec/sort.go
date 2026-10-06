@@ -687,7 +687,7 @@ func copyVectorValue(dst *batch.Vector, di int, src *batch.Vector, si int) {
 	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
 		dst.BytesData.SetFrom(di, &src.BytesData, si)
 	case batch.TypeDecimal:
-		dst.DecimalData.Data[di] = src.DecimalData.Data[si]
+		dst.DecimalData.CopyRow(di, &src.DecimalData, si)
 	case batch.TypeVector:
 		dim := src.VectorDim
 		if dim > 0 {
@@ -808,6 +808,7 @@ func gatherVector(dst, src *batch.Vector, srcRows []int) {
 				}
 			}
 		}
+		batch.GatherDScaleCodes(&dst.DecimalData, &src.DecimalData, srcRows)
 	case batch.TypeVector:
 		dim := src.VectorDim
 		if dim > 0 {
@@ -959,7 +960,7 @@ func gatherSortVector(dst *batch.Vector, colIdx int, entries []sortEntry, batche
 			if srcHasNulls && src.Nulls.IsNullFast(si) {
 				dst.Nulls.SetNull(di)
 			} else {
-				dst.DecimalData.Data[di] = src.DecimalData.Data[si]
+				dst.DecimalData.CopyRow(di, &src.DecimalData, si)
 			}
 		}
 	case batch.TypeVector:

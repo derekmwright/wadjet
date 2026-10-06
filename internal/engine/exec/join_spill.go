@@ -452,8 +452,8 @@ func (sr *spillBatchReader) Close() error {
 
 // writeColumnarBatch writes a single RecordBatch in columnar binary format.
 // Format: [numRows:u32] [numCols:u32] per-column: [typeID:u8] [nameLen:u16] [name]
-// [decimal? scale:u8 precision:u8] [flags:u8 — 1 nullable, 2 unconstrained] [nested declaration] [hasNulls:u8]
-// [nullBitmap?] [data]
+// [decimal? scale:u8 precision:u8] [flags:u8 — 1 nullable, 2 unconstrained, 4 display scales]
+// [nested declaration] [hasNulls:u8] [nullBitmap?] [data] [display scales, when flag 4]
 func writeColumnarBatch(w *bufio.Writer, b *batch.RecordBatch) error {
 	var buf [8]byte
 	numRows := b.Len
@@ -496,6 +496,12 @@ func writeColumnarBatch(w *bufio.Writer, b *batch.RecordBatch) error {
 		if b.Schema[i].Unconstrained && col.Type == batch.TypeDecimal {
 			flags |= 2
 		}
+		// Bit 2: the column's values carry display scales (ADR-0024 §1 as
+		// amended), written after the data by writeDisplayScales. A column
+		// without them writes the bytes it always wrote.
+		if col.Type == batch.TypeDecimal && col.DecimalData.HasDisplayScale() {
+			flags |= 4
+		}
 		w.WriteByte(flags)
 
 		// The nested/parameterized part of the DECLARATION. The vector's own
@@ -529,6 +535,52 @@ func writeColumnarBatch(w *bufio.Writer, b *batch.RecordBatch) error {
 		if err := writeColumnData(w, col, numRows, buf[:]); err != nil {
 			return err
 		}
+		if flags&4 != 0 {
+			writeDisplayScales(w, &col.DecimalData, numRows)
+		}
+	}
+	return nil
+}
+
+// writeDisplayScales writes a DECIMAL column's display-scale codes after its
+// carriers: [0][code] when every row shares one, else [1][n codes]. The run
+// is written and read by this process within one query.
+func writeDisplayScales(w *bufio.Writer, d *batch.DecimalColumn, n int) {
+	if d.DScale == nil {
+		w.WriteByte(0)
+		w.WriteByte(d.UniformDScale())
+		return
+	}
+	w.WriteByte(1)
+	for i := 0; i < n; i++ {
+		w.WriteByte(d.DScaleCode(i))
+	}
+}
+
+// readDisplayScales mirrors writeDisplayScales.
+func readDisplayScales(r *bufio.Reader, d *batch.DecimalColumn, n int) error {
+	mode, err := r.ReadByte()
+	if err != nil {
+		return fmt.Errorf("reading display-scale mode: %w", err)
+	}
+	switch mode {
+	case 0:
+		code, err := r.ReadByte()
+		if err != nil {
+			return fmt.Errorf("reading display scale: %w", err)
+		}
+		d.SetUniformDScale(code)
+	case 1:
+		codes := make([]uint8, n)
+		if _, err := io.ReadFull(r, codes); err != nil {
+			return fmt.Errorf("reading display scales: %w", err)
+		}
+		d.ResetDScale()
+		for i, c := range codes {
+			d.SetDScaleCode(i, c)
+		}
+	default:
+		return fmt.Errorf("columnar spill: unknown display-scale mode %d", mode)
 	}
 	return nil
 }
@@ -965,6 +1017,11 @@ func readColumnarBatch(r *bufio.Reader) (*batch.RecordBatch, error) {
 		// Data
 		if err := readColumnData(r, col, numRows, buf[:]); err != nil {
 			return nil, fmt.Errorf("reading column %d data: %w", i, err)
+		}
+		if nullable&4 != 0 && typeID == parquet.TypeDecimal {
+			if err := readDisplayScales(r, &col.DecimalData, numRows); err != nil {
+				return nil, fmt.Errorf("reading column %d: %w", i, err)
+			}
 		}
 	}
 
@@ -1865,7 +1922,7 @@ func appendRows(dst, src *batch.RecordBatch, rows []int, dstStart int) int64 {
 				if col.Nulls.IsNullFast(si) {
 					d.Nulls.SetNull(dstStart + di)
 				} else {
-					d.DecimalData.Data[dstStart+di] = col.DecimalData.Data[si]
+					d.DecimalData.CopyRow(dstStart+di, &col.DecimalData, si)
 				}
 			}
 			dataBytes += n * 16

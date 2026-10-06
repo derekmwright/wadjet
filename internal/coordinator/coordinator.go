@@ -2927,7 +2927,7 @@ func copyVectorValue(dst *batch.Vector, dstRow int, src *batch.Vector, srcRow in
 		// Decimal has dedicated Int128 storage; the old switch silently
 		// wrote NOTHING for it, so merged Decimal group-by columns came
 		// back zero.
-		dst.DecimalData.Data[dstRow] = src.DecimalData.Data[srcRow]
+		dst.DecimalData.CopyRow(dstRow, &src.DecimalData, srcRow)
 	default:
 		// Nested and any future types: the typed nested-aware copier.
 		dst.CopyValueFrom(dstRow, src, srcRow)

@@ -1947,7 +1947,7 @@ func (h *HashJoin) consolidateBuild() {
 			case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
 				dst.BytesData.BulkCopy(off, &src.BytesData, 0, b.Len)
 			case batch.TypeDecimal:
-				copy(dst.DecimalData.Data[off:off+b.Len], src.DecimalData.Data[:b.Len])
+				dst.DecimalData.CopyRange(off, &src.DecimalData, 0, b.Len)
 			default:
 				// ARRAY, ROW, MAP, VECTOR. There was no arm and no default,
 				// so the null bitmap above was copied and the VALUES were
@@ -5328,7 +5328,7 @@ func gatherBuildVector(dst *batch.Vector, srcIdx int, pairs []matchPair, buildBa
 				if srcHasNulls && src.Nulls.IsNullFast(si) {
 					dst.Nulls.SetNull(di)
 				} else {
-					dst.DecimalData.Data[di] = src.DecimalData.Data[si]
+					dst.DecimalData.CopyRow(di, &src.DecimalData, si)
 				}
 			}
 		} else {
@@ -5346,7 +5346,7 @@ func gatherBuildVector(dst *batch.Vector, srcIdx int, pairs []matchPair, buildBa
 				if srcHasNulls && src.Nulls.IsNullFast(si) {
 					dst.Nulls.SetNull(di)
 				} else {
-					dst.DecimalData.Data[di] = src.DecimalData.Data[si]
+					dst.DecimalData.CopyRow(di, &src.DecimalData, si)
 				}
 			}
 		}
@@ -5448,7 +5448,7 @@ func gatherCrossBuildVector(dst *batch.Vector, srcIdx int, pairs []crossPair, bu
 				dst.Nulls.SetNull(di)
 			} else {
 				dst.Nulls.SetValid(di)
-				dst.DecimalData.Data[di] = src.DecimalData.Data[si]
+				dst.DecimalData.CopyRow(di, &src.DecimalData, si)
 			}
 		}
 	default:
