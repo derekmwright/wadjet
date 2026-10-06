@@ -56,6 +56,17 @@ CREATE TABLE transactions (
   more than 28 integer digits are `22003`, and the product of two such
   columns holds 18 integer digits (ADR-0024 §10). A nested
   `ARRAY(NUMERIC)` element is DECIMAL(38,0).
+- **What a value prints**: each numeric value carries its own display scale
+  beside the column's one carrier scale, as PostgreSQL's numeric does
+  (ADR-0024 §11): `COALESCE(numeric(15,2) column, 12.3456789012345)` prints
+  `12.75` and `12.3456789012345` in one column, a literal prints its spelling
+  (`1.50`, `1.5`), an integer `14`, and a set operation prints each arm's
+  value at that arm's scale. Equal values of different display scales are one
+  value to every comparison, join, GROUP BY and DISTINCT (`2.50 = 2.5`);
+  which of them represents a group is the first met. A stored column created
+  `NUMERIC` keeps no display scale per value yet and prints its values
+  without trailing zeros; arithmetic over values of different display scales
+  and a numeric array's elements print at one scale.
 - **Arithmetic**: SUM, AVG, MIN, MAX all use exact Int128 arithmetic through the aggregate pipeline
 - **Parquet storage**: Written as Parquet DECIMAL logical type for interoperability
 

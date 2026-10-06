@@ -150,6 +150,21 @@ named mechanism.
     window is the defect; `wadjet.TestWindowUnorderedRowNumberIsAPermutation`
     is the replacement, run with the scan forced wide so the reordering
     actually happens rather than holding vacuously.
+11. **Which of two equal numeric values represents a group prints its own
+    display scale** (added 2026-10-06, arc PS stage 1; ADR-0024 §11). A
+    numeric value carries its display scale, and `2.50 = 2.5`: GROUP BY,
+    DISTINCT, a deduplicating UNION / INTERSECT / EXCEPT, MIN / MAX over a
+    tie and a merge of partial states keep ONE of the equal values, the
+    first they meet — on PostgreSQL too, where which one that is depends on
+    the plan. A text predicate over such a result shows it: `count(*) FROM
+    (SELECT v FROM un_x INTERSECT SELECT v FROM rv_n) s WHERE CAST(v AS
+    TEXT) = '1'` is 0 on PostgreSQL 17.11, whose planner pushes the predicate
+    into each arm before the intersection, and 1 with the predicate fenced
+    above it (`… s OFFSET 0) q WHERE …`), which is this engine's answer
+    (the left arm's `1`). A gate asserts such a cell by VALUE, and records
+    its text separately; `coordinator.TestArcUNSetOperationMatrix` marks the
+    eighteen it holds `a13rep`, each with PostgreSQL's fenced answer
+    measured. A cell whose equal values print alike is not this class.
 
 ### Amendment 2026-09-12: a per-RUN difference in the ROW SET under a TOTAL key is never one of these classes, and the ARMS have to be separable (#1058)
 
