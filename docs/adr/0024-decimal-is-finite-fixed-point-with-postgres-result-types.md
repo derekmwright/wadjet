@@ -1291,7 +1291,8 @@ list or a rename; a computed wrapper such as `v + 0` is neutral):
 
 An unmarked mixed result prints its one stored scale where PostgreSQL prints
 each value's own (`2.5000000000` beside a `2.50` literal, `1.0000000000`
-beside a NUMERIC(10,2) column: set-operations r4, numeric-decimal r18).
+beside a NUMERIC(10,2) column: set-operations r4, numeric-decimal r18; closed
+2026-10-06 by §11, under which each value prints its own display scale).
 For the trailing-zero literal the choice was measured: marked, `2.50` would
 print `2.5`; unmarked it prints `2.5000000000`; neither is PostgreSQL's. Over
 the set-operation matrix (`coordinator.TestArcUNSetOperationMatrix`) the
