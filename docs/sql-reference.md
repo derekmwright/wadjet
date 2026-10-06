@@ -4524,7 +4524,7 @@ SELECT host, agent_version
 | `ABS(n)` | Absolute value | `ABS(bytes_in - bytes_out)` |
 | `CEIL(n)` | Round up | `CEIL(avg_latency)` |
 | `FLOOR(n)` | Round down | `FLOOR(avg_latency)` |
-| `ROUND(n)` | Round to nearest, a tie by `n`'s type as in PostgreSQL: half to even for a `double precision` or `real` value — a column, a cast, an expression, a parameter or a quoted literal (`ROUND(f)` over 2.5, 0.5, -2.5 is 2, 0, -2) — and half away from zero for a `numeric` one (`ROUND(2.5)` is 3) | `ROUND(ratio)` |
+| `ROUND(n)` | Round to nearest, a tie by `n`'s type as in PostgreSQL: half to even for a `double precision` or `real` value — a column, a cast, an expression, a parameter or a quoted literal (`ROUND(f)` over 2.5, 0.5, -2.5 is 2, 0, -2) — and half away from zero for a `numeric` one (`ROUND(2.5)` is 3), a column CREATE TABLE AS made from a numeric expression this engine computes in a double (`sqrt(6.25)`, `5 / 2.0`) included | `ROUND(ratio)` |
 | `ROUND(n, d)` | Round to `d` fraction digits. Over a `numeric` it is PostgreSQL's `round(numeric, integer)`; over a `double precision` or `real` PostgreSQL has no such function (42883) and this engine answers it, rounding `n`·10^`d` half to even (`ROUND(f, 1)` over 0.25 is 0.2), and raises 22003 where 10^`d` or `n`·10^`d` is not a finite double — see [PostgreSQL differences](postgres-differences.md) | `ROUND(ratio, 2)` |
 | `POW(base, exp)` / `POWER(base, exp)` | Exponentiation | `POW(2, 10)` |
 | `SQRT(n)` | Square root | `SQRT(variance)` |

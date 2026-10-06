@@ -479,6 +479,22 @@ INTEGER)` over a DISTINCT `5 / 2.0` is 3 on all five arms (2 at 89cea148,
 NX roundOrigin/distinct), and dml-assignment#r2 is closed. A name the plan
 emits under two categories keeps the carrier's reading.
 
+Amended 2026-10-06 (#381): a STORED column keeps its category. CREATE TABLE
+AS of a float-carried numeric creates the double precision column it always
+did, and Planner.CreatedColumns records the plan's category on it
+(parquet.Column.PGNumeric: the catalog record and the file footer's declared
+schema, metadata only, omitted when false). A scan reads it as its relation's
+category (ScanColPGCategory), so every reader of a plan column reads the
+stored one alike, and the write doors' walk reads it for an integer target:
+`round(b)` over a stored `sqrt(6.25 + id * 0)` is 3 after a reopen and a
+compaction (`wadjet.TestArcREStoredColumnKeepsItsCategoryAcrossReopenAndCompaction`).
+A scalar subquery's declared column carries its plan's category the same way,
+and a semi or anti join publishes its probe's categories alone. On the stage
+DAG the map stays keyed by name; a plan where a name it leaves out is a
+numeric FLOAT64 (or a float8 DECIMAL) somewhere runs on the coordinator-local
+pipeline instead of reading the carrier
+(`coordinator.TestArcREStoredColumnRoundsByItsCreatedCategoryOnEveryArm`).
+
 ### 3. The (p,s) of a computed result follows the finite-decimal industry rule
 
 PostgreSQL has no `(p,s)` rule — numeric is unbounded. A finite carrier needs
@@ -1398,7 +1414,8 @@ for a 1 that 8e681724 printed `1`, as PostgreSQL does); per-value scale
 (E64, deferred on cost). A float-carried numeric (§2c: `5 / 2.0 + id * 0`,
 `sqrt(n * n)`) keeps its double precision column under CREATE TABLE AS: its
 digits are not a fixed scale's, so a (38,10) column would round what
-8e681724 stored.
+8e681724 stored. The column records its numeric category instead (§2c,
+amended 2026-10-06), which is what rounds it as PostgreSQL's numeric column.
 
 Gated by `wadjet.TestArcUNUnconstrainedColumnEnumeration`,
 `wadjet.TestArcUNCreatedColumnKeepsPostgresTypmod`,
