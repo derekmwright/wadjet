@@ -122,6 +122,13 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 	allocGroupingSlot := func(fn *plansql.FuncCallNode) (string, error) {
 		args := make([]string, 0, len(fn.Args))
 		for _, a := range fn.Args {
+			if j, ok := boundGroupKeyIndex(a, info); ok {
+				// The argument IS key j by its binding (ADR-0047): it is
+				// recorded as that key, which is how the aggregate finds
+				// the key's bit, whatever either is spelled.
+				args = append(args, cleanExpr(info.GroupBy[j]))
+				continue
+			}
 			args = append(args, cleanExpr(plansql.Unparen(a).String()))
 		}
 		if len(args) == 0 {
@@ -3615,7 +3622,7 @@ func computedGroupKeyRefs(agg *Node) map[string]string {
 		if _, isLit := e.(*plansql.Lit); isLit {
 			continue
 		}
-		id := plansql.ExprIdentity(e)
+		id := plansql.GroupTermIdentity(e)
 		if id == "" {
 			continue
 		}

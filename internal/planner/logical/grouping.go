@@ -67,3 +67,20 @@ func checkGroupingArgs(args []string, info *plansql.SelectInfo) error {
 	}
 	return nil
 }
+
+// boundGroupKeyIndex is the GROUP BY term a GROUPING argument of a BOUND block
+// is, by binding: `GROUPING(t.i + 1)` under `ROLLUP (i + 1)` names the key
+// `i + 1` when both bind `t.i` (ADR-0047), at any FROM arity. ok is false
+// for an argument of an unbound block, which keeps matching by its text.
+func boundGroupKeyIndex(arg plansql.Node, info *plansql.SelectInfo) (int, bool) {
+	if !plansql.HoldsBinding(arg) || len(info.GroupByExprs) != len(info.GroupBy) {
+		return 0, false
+	}
+	id := plansql.GroupTermIdentity(arg)
+	for j, e := range info.GroupByExprs {
+		if e != nil && plansql.GroupTermIdentity(e) == id {
+			return j, true
+		}
+	}
+	return 0, false
+}

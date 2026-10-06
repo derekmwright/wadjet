@@ -525,18 +525,27 @@ func sortTermResolvesOverAggregate(ast plansql.Node, agg *Node) bool {
 	// comparing the renderings refused it with "only a grouped column, a
 	// grouping expression, or a select-list alias can be sorted on" for a
 	// query PostgreSQL answers (#723).
-	id := plansql.ExprIdentity(ast)
+	if plansql.MatchProbe != nil {
+		var keys []string
+		for _, gbe := range agg.GroupByExprs {
+			if gbe != nil {
+				keys = append(keys, plansql.GroupTermIdentity(gbe))
+			}
+		}
+		plansql.ProbeMatch("logical.sortTermResolvesOverAggregate", ast, keys)
+	}
+	id := plansql.GroupTermIdentity(ast)
 	for _, gb := range agg.GroupBy {
 		if strings.EqualFold(gb, id) {
 			return true
 		}
 		if parsed, err := plansql.ParseExpression(gb); err == nil &&
-			plansql.ExprIdentity(parsed) == id {
+			plansql.GroupTermIdentity(parsed) == id {
 			return true
 		}
 	}
 	for _, gbe := range agg.GroupByExprs {
-		if gbe != nil && plansql.ExprIdentity(gbe) == id {
+		if gbe != nil && plansql.GroupTermIdentity(gbe) == id {
 			return true
 		}
 	}

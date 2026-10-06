@@ -368,6 +368,15 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 	// one rule, so the two engines' aggregate output schemas cannot drift
 	// apart (#723).
 	keyOuts := groupKeyOutputs(node)
+	// A key the aggregate below already publishes is grouped BY that
+	// column: for a bound block the column may be spelled apart from the
+	// key's own text (groupKeyOutputs), and the slot is the spelling the
+	// input carries. For every other key Slot is the text above.
+	for i := range groupByCols {
+		if i < len(keyOuts) && keyOuts[i].PublishedBelow && keyOuts[i].Slot != "" {
+			groupByCols[i] = keyOuts[i].Slot
+		}
+	}
 	if len(node.GroupByExprs) == len(node.GroupBy) && len(node.GroupingSets) == 0 {
 		nonLit := 0
 		for _, gbExpr := range node.GroupByExprs {

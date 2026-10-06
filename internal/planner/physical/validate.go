@@ -1962,7 +1962,7 @@ func checkUngrouped(info *plansql.SelectInfo, from *colScope) error {
 	}
 
 	g := &groupCheck{from: from, keys: map[string]bool{}, idents: map[string]bool{}, bare: map[string]bool{},
-		originKeys: map[string]bool{},
+		originKeys: map[string]bool{}, boundKeys: map[string]bool{},
 		// One source in the FROM: a qualifier then names that source and
 		// nothing else, so it is spelling (#738).
 		unqualify: len(from.quals) == 1}
@@ -2022,9 +2022,16 @@ func checkUngrouped(info *plansql.SelectInfo, from *colScope) error {
 		return err
 	}
 	for _, ob := range info.OrderBy {
-		expr, err := plansql.ParseExpression(ob.Column)
-		if err != nil {
-			continue
+		// A BOUND block's sort term is its parsed tree, which carries the
+		// binder's bindings; re-parsing the text would hand the check an
+		// unbound copy of a term the rest of the block matches by binding.
+		expr := ob.Expr
+		if expr == nil || !plansql.HoldsBinding(expr) {
+			parsed, err := plansql.ParseExpression(ob.Column)
+			if err != nil {
+				continue
+			}
+			expr = parsed
 		}
 		if err := g.check(g.asWritten(expr, ob.UnfoldedFrom)); err != nil {
 			return err
@@ -2072,7 +2079,14 @@ type groupCheck struct {
 	// is over RESOLVED targetlist entries rather than over text. Matching that
 	// needs the resolution, not a wider text rule — which is why the bound is
 	// here and why the join case keeps its 42803, gated below.
+	//
+	// It is the UNBOUND block's rule only. A block the binder bound in full
+	// (ADR-0047) has the resolution: boundKeys holds the binding of every
+	// grouped term that is a plain column reference, and every term is
+	// matched by plansql.GroupTermIdentity, which compares bindings — the
+	// same answer at every FROM arity, the join included.
 	unqualify bool
+	boundKeys map[string]bool
 }
 
 // identKey renders a resolved (source, column) identity. Both halves are
@@ -2125,6 +2139,9 @@ func (g *groupCheck) addGroupTerms(info *plansql.SelectInfo) {
 			g.keys[k] = true
 		}
 		if ref, ok := unparen(n).(*plansql.ColRef); ok {
+			if ref.Bound != nil && !ref.Bound.Output {
+				g.boundKeys[ref.Bound.BindingKey()] = true
+			}
 			if c := strings.ToLower(ref.Column); c != "" {
 				if tbl, resolved := g.resolveOwnTable(ref); resolved {
 					g.idents[identKey(tbl, c)] = true
@@ -2275,13 +2292,26 @@ func (g *groupCheck) check(node plansql.Node) error {
 	// does not exist and every group's key came back NULL. A loud 42803 is the
 	// right disposition for a shape this engine cannot compute, and turning it
 	// into a plausible NULL would be the regression protocol method 8 names.
-	if g.unqualify {
+	if g.unqualify && !plansql.HoldsBinding(node) {
 		if k := plansql.ExprIdentityUnqualified(node); k != "" && g.keys[k] {
 			return nil
 		}
 	}
 	switch n := node.(type) {
 	case *plansql.ColRef:
+		if b := n.Bound; b != nil {
+			// What the binder resolved decides, and nothing spelled alike
+			// does: an OUTPUT name (a HAVING / ORDER BY alias) stands for
+			// an item the SELECT arm judged on its own; an OUTER reference
+			// is one value per group; an input column is grouped exactly
+			// when a key IS that column. An output alias that happens to
+			// spell the column's name licenses nothing here (GK-F1:
+			// `count(*) AS n … HAVING t.n …`).
+			if b.Output || b.Level > 0 || g.boundKeys[b.BindingKey()] {
+				return nil
+			}
+			return sqlerr.New("42803", "column %q must appear in the GROUP BY clause or be used in an aggregate function", n.String())
+		}
 		tbl, ok := g.resolveOwnTable(n)
 		if !ok {
 			// Not certainly one of this block's own columns (an outer
@@ -2442,7 +2472,7 @@ func groupTermKey(node plansql.Node) string {
 	if node == nil {
 		return ""
 	}
-	return plansql.ExprIdentity(node)
+	return plansql.GroupTermIdentity(node)
 }
 
 func unparen(node plansql.Node) plansql.Node {

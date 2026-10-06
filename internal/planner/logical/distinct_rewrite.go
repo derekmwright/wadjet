@@ -197,6 +197,7 @@ func projectionGroupKey(p Projection) (string, plansql.Node, bool) {
 	// DISTINCT n_name, 'x select y' FROM nation` inside a derived table was
 	// declined here and then REFUSED by refuseUnstageableDistinct, so a
 	// query PostgreSQL answers came back as an error on both paths.
+	plansql.ProbeMatch("logical.projectionGroupKey", ast, nil)
 	if _, isSub := ast.(*plansql.SubqueryNode); isSub {
 		return "", nil, false
 	}
