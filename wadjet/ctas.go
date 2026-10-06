@@ -416,7 +416,7 @@ func (db *DB) ctasPlan(ctx context.Context, parsed *plansql.ParsedQuery) (*physi
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	if err := auth.ValidateStatementColumns(ctx, db.authProvider, db.catalog, selectInfo, "embedded"); err != nil {
+	if err := auth.BindStatementColumns(ctx, db.authProvider, db.catalog, selectInfo, "embedded"); err != nil {
 		return nil, nil, nil, err
 	}
 	logicalPlan, err := logical.BuildFromSelect(selectInfo)

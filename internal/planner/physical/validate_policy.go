@@ -116,17 +116,32 @@ func (p policedColumnSource) AmbiguousTableNames(name string) []string {
 // Both nil, or a nil catalog, is the plain unfiltered validation.
 func ValidateColumnsUnderPolicy(ctx context.Context, cat *catalog.Catalog, info *plansql.SelectInfo,
 	deniedFor func(table string) map[string]bool, denyTable func(table string) error) error {
+	return validateUnderPolicy(ctx, cat, info, deniedFor, denyTable, false)
+}
+
+// BindColumnsUnderPolicy is ValidateColumnsUnderPolicy for a door whose plan
+// is built from info by the single-process planner: it also records, on every
+// column reference of every block it can bind in full, the relation instance
+// and column the reference resolved to (plansql.ColRef.Bound, ADR-0047). The
+// group-key match reads that binding instead of comparing spellings.
+func BindColumnsUnderPolicy(ctx context.Context, cat *catalog.Catalog, info *plansql.SelectInfo,
+	deniedFor func(table string) map[string]bool, denyTable func(table string) error) error {
+	return validateUnderPolicy(ctx, cat, info, deniedFor, denyTable, true)
+}
+
+func validateUnderPolicy(ctx context.Context, cat *catalog.Catalog, info *plansql.SelectInfo,
+	deniedFor func(table string) map[string]bool, denyTable func(table string) error, stamp bool) error {
 	if cat == nil || info == nil {
 		return nil
 	}
 	if deniedFor == nil && denyTable == nil {
-		return validateColumns(ctx, cat, info)
+		return bindColumns(ctx, cat, info, stamp)
 	}
 	if deniedFor == nil {
 		deniedFor = func(string) map[string]bool { return nil }
 	}
-	return validateColumns(ctx,
-		policedColumnSource{src: cat, deniedFor: deniedFor, denyTable: denyTable}, info)
+	return bindColumns(ctx,
+		policedColumnSource{src: cat, deniedFor: deniedFor, denyTable: denyTable}, info, stamp)
 }
 
 // applyContextColumnPolicies enforces policy on planner-built expression
