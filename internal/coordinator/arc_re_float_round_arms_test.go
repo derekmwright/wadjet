@@ -460,11 +460,8 @@ func reStandalone(t *testing.T, ctx context.Context, budget int64) *wadjet.DB {
 // entry is deleted — the proof — when one starts agreeing.
 func reStillDiverges(name string) (arms, why string) {
 	switch name {
-	// GROUP BY publishes the key -0 as 0 (#1489), and sum() over a lone -0
-	// answers 0 where PostgreSQL's float8pl keeps -0: round(-0.5) is -0 here
-	// as there, and the consumer loses the sign.
-	case "f8col/-0.5/group", "f4col/-0.5/group", "f8derived/-0.5/group", "f8cte/-0.5/group":
-		return "all", "#1489"
+	// sum() over a lone -0 answers 0 where PostgreSQL's float8pl keeps -0:
+	// round(-0.5) is -0 here as there, and the aggregate loses the sign.
 	case "f8col/-0.5/agg", "f4col/-0.5/agg", "f8derived/-0.5/agg", "f8cte/-0.5/agg":
 		return "all", "sum(-0)"
 	// A numeric literal past a double's digits loses them inside ARRAY[…]:
