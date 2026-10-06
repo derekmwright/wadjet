@@ -1,0 +1,55 @@
+# arc PS stage 1: a NUMERIC value carries its display scale (TestArcPSDisplayScaleEveryArm). Fixture: unPGFixture + unibFixture. r18_*: numeric-decimal r18's COALESCE / CASE sub-cells and #764's statements; r4_*: set-operations r4 incl. the 2.50-veto sub-cell; c1647*: #1647's statement and its companion; k_*: a column whose values carry different display scales through every consumer that materializes it; i5_*: equal values of different display scales compare, join, group and dedup as one.
+r18_coalesce_lit13	SELECT id, COALESCE(n, 12.3456789012345) FROM un_t
+r18_coalesce_15	SELECT id, COALESCE(n, 1.5) FROM un_t
+r18_coalesce_150	SELECT id, COALESCE(n, 1.50) FROM un_t
+r18_coalesce_q7	SELECT id, COALESCE(n, '7') FROM un_t
+r18_coalesce_q12	SELECT id, COALESCE(n, '12.3456789012345') FROM un_t
+r18_least_q05	SELECT id, LEAST(n, '0.5') FROM un_t
+r18_least_050	SELECT id, LEAST(n, 0.50), LEAST(n, 0.5) FROM un_t
+r18_greatest	SELECT id, GREATEST(n, 1.0) FROM un_t
+r18_nullif	SELECT id, NULLIF(n, 2.5) FROM un_t
+r18_case_int	SELECT id, CASE WHEN id < 3 THEN n ELSE 0 END FROM un_t
+r18_case_lits	SELECT id, CASE WHEN id = 1 THEN 1.50 WHEN id = 2 THEN 2.5 ELSE n END FROM un_t
+r18_case_simple	SELECT id, CASE id WHEN 1 THEN 7 ELSE n END FROM un_t
+r18_coalesce_bigint	SELECT id, COALESCE(b, 14.0000000000000000001) FROM un_t
+r18_case_choice	SELECT id, CASE WHEN 14.0000000000000000001 > 14 THEN 14 ELSE 13.25 END FROM un_u
+r18_coalesce_vn	SELECT id, COALESCE(v, n) FROM un_t
+r18_text	SELECT id, CAST(COALESCE(n, 1.5) AS TEXT), COALESCE(n, 1.5) || '' FROM un_t
+r4_n_15	SELECT n FROM un_t UNION ALL SELECT 1.5 FROM un_u WHERE id = 1
+r4_v_250	SELECT v FROM un_x UNION ALL SELECT 2.50 FROM un_u WHERE id = 1
+r4_v_250_text	SELECT CAST(v AS TEXT) FROM (SELECT v FROM un_x UNION ALL SELECT 2.50 AS v FROM un_u) s
+r4_v_rvn	SELECT v FROM un_x UNION ALL SELECT v FROM rv_n
+r4_v_n0	SELECT v FROM un_x UNION ALL SELECT n + 0 FROM un_t
+r4_n_1	SELECT n FROM un_t UNION ALL SELECT 1 FROM un_u WHERE id = 1
+r4_union_250	SELECT v FROM un_x UNION SELECT 2.50 FROM un_u
+r4_except	SELECT n FROM un_t EXCEPT SELECT 2.5 FROM un_u
+r4_nested	SELECT v FROM un_x UNION ALL (SELECT 2.50 AS v FROM un_u WHERE id = 1 UNION ALL SELECT v FROM rv_n)
+r4_three	SELECT v FROM un_u UNION ALL SELECT n FROM un_t UNION ALL SELECT 1.5 FROM un_x WHERE id = 1
+c1647	SELECT count(*) FROM (SELECT v FROM un_x UNION ALL SELECT 2.50 AS v FROM un_u) s WHERE CAST(v AS TEXT) LIKE '%0'
+c1647_companion	SELECT count(*) FROM (SELECT v FROM un_x UNION ALL SELECT v FROM rv_n) s WHERE CAST(v AS TEXT) LIKE '%0'
+k_filter	SELECT id, k FROM (SELECT id, COALESCE(n, 1.5) AS k FROM un_t) s WHERE k > 1
+k_order_limit	SELECT k FROM (SELECT COALESCE(n, 1.5) AS k FROM un_t) s ORDER BY k DESC LIMIT 3
+k_cte2	WITH c AS (SELECT id, COALESCE(n, 1.5) AS k FROM un_t) SELECT a.id, a.k, b.k FROM c a JOIN c b ON a.id = b.id
+k_join_payload	SELECT x.id, s.k FROM un_x x JOIN (SELECT id, COALESCE(n, 1.5) AS k FROM un_t) s ON s.id = x.id
+k_left_join	SELECT u.id, s.k FROM un_u u LEFT JOIN (SELECT id, COALESCE(n, 1.5) AS k FROM un_t) s ON s.id = u.id
+k_window	SELECT id, k, row_number() OVER (ORDER BY k, id) FROM (SELECT id, COALESCE(n, 1.5) AS k FROM un_t) s
+k_lag	SELECT id, lag(k) OVER (ORDER BY id) FROM (SELECT id, COALESCE(n, 1.5) AS k FROM un_t) s
+k_scalar	SELECT id, (SELECT COALESCE(n, 1.5) FROM un_t WHERE id = 3) FROM un_u WHERE id = 1
+k_derived_star	SELECT * FROM (SELECT id, COALESCE(n, 1.5) AS k FROM un_t) s
+k_big_text	SELECT count(*), sum(length(CAST(COALESCE(n, 1.5) AS TEXT))) FROM rv_big
+k_big_join	SELECT sum(length(CAST(s.k AS TEXT))) FROM rv_big b JOIN (SELECT id, COALESCE(n, 1.5) AS k FROM rv_big) s ON s.id = b.id
+k_big_union	SELECT sum(length(CAST(v AS TEXT))) FROM (SELECT v FROM rv_big UNION ALL SELECT n FROM rv_big) s
+k_big_window	SELECT sum(length(CAST(l AS TEXT))) FROM (SELECT lag(COALESCE(n, 1.5)) OVER (ORDER BY id) AS l FROM rv_big) s
+k_big_sorted	SELECT sum(length(CAST(k AS TEXT))) FROM (SELECT k FROM (SELECT id, COALESCE(n, 1.5) AS k FROM rv_big) s ORDER BY k, id LIMIT 1000) q
+k_big_groupkey_count	SELECT count(*) FROM (SELECT k FROM (SELECT COALESCE(n, 1.5) AS k FROM rv_big) s GROUP BY k) q
+i5_join	SELECT count(*) FROM (SELECT COALESCE(n, 2.5) AS k FROM un_t) a JOIN (SELECT 2.5 AS k FROM un_u WHERE id = 1 UNION ALL SELECT 2.50 FROM un_u WHERE id = 2) b ON a.k = b.k
+i5_group	SELECT count(*) FROM (SELECT k FROM (SELECT COALESCE(n, 2.5) AS k FROM un_t UNION ALL SELECT 2.5 FROM un_u WHERE id = 1) s GROUP BY k) q
+i5_distinct	SELECT count(DISTINCT k) FROM (SELECT COALESCE(n, 2.5) AS k FROM un_t UNION ALL SELECT 2.5 FROM un_u WHERE id = 1 UNION ALL SELECT 2.50 FROM un_u WHERE id = 2) s
+i5_union	SELECT count(*) FROM (SELECT COALESCE(n, 2.5) AS k FROM un_t UNION SELECT 2.5 FROM un_u UNION SELECT 2.50 FROM un_u) s
+i5_eq	SELECT count(*) FROM un_t WHERE COALESCE(n, 2.5) = 2.50
+i5_in	SELECT count(*) FROM un_t WHERE COALESCE(n, 1.5) IN (SELECT 1.50 FROM un_u WHERE id = 1 UNION ALL SELECT 2.5 FROM un_u WHERE id = 2)
+k_group_key	SELECT k, count(*) FROM (SELECT COALESCE(n, 1.5) AS k FROM un_t) s GROUP BY k
+k_distinct	SELECT DISTINCT k FROM (SELECT COALESCE(n, 1.5) AS k FROM un_t) s
+k_big_group_key	SELECT k, count(*) FROM (SELECT COALESCE(n, 2.5) AS k FROM rv_big) s GROUP BY k
+k_big_distinct	SELECT DISTINCT k FROM (SELECT COALESCE(n, 2.5) AS k FROM rv_big) s
+k_big_group_key_marked	SELECT v, count(*) FROM (SELECT v FROM rv_big UNION ALL SELECT 2.50 FROM un_u) s GROUP BY v
