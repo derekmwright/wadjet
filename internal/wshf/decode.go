@@ -64,7 +64,10 @@ func ParseHeader(c *Cursor) (schema []parquet.Column, numChunks uint32, err erro
 			// Bit 7 of the precision byte is the column's unconstrained
 			// mark (DecimalUnconstrainedBit, ADR-0024 §10): it lands on
 			// this column of every batch the file decodes to.
-			schema[i].Precision, schema[i].Unconstrained = SplitDecimalPrecisionByte(sp[1])
+			schema[i].Precision, schema[i].Unconstrained, err = SplitDecimalPrecisionByte(sp[1])
+			if err != nil {
+				return nil, 0, fmt.Errorf("column %d: %w", i, err)
+			}
 		}
 	}
 	return schema, n, nil

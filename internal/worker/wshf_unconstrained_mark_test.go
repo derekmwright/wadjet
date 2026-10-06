@@ -222,13 +222,16 @@ func TestWSHFMarkRoundTripsByPosition(t *testing.T) {
 }
 
 func TestWSHFPrecisionByteRefusesAPrecisionTheBitWouldCover(t *testing.T) {
-	for _, p := range []int{1, 38, 127} {
+	for _, p := range []int{0, 1, 38} {
 		if b, err := wshf.DecimalPrecisionByte(p, false); err != nil || int(b) != p {
 			t.Errorf("precision %d: byte %#x, %v", p, b, err)
 		}
 	}
-	if _, err := wshf.DecimalPrecisionByte(128, false); err == nil {
-		t.Errorf("precision 128 was written into the mark bit")
+	// #1662: past 38 the decoder refuses the byte, so the writer does too.
+	for _, p := range []int{39, 127, 128} {
+		if _, err := wshf.DecimalPrecisionByte(p, false); err == nil {
+			t.Errorf("precision %d was written into the header", p)
+		}
 	}
 	schema := []parquet.Column{{Name: "v", Type: parquet.TypeDecimal, Precision: 200, Scale: 2}}
 	var buf bytes.Buffer

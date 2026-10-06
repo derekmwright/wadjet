@@ -152,7 +152,11 @@ func (r *streamingShuffleReader) readHeader() error {
 			r.schema[i].Scale = int(r.hdr[0])
 			// Bit 7 of the precision byte is the column's unconstrained mark
 			// (wshf.DecimalUnconstrainedBit, ADR-0024 §10).
-			r.schema[i].Precision, r.schema[i].Unconstrained = wshf.SplitDecimalPrecisionByte(r.hdr[1])
+			var err error
+			r.schema[i].Precision, r.schema[i].Unconstrained, err = wshf.SplitDecimalPrecisionByte(r.hdr[1])
+			if err != nil {
+				return fmt.Errorf("column %d: %w", i, err)
+			}
 			r.headerEnd += 2
 		}
 	}
