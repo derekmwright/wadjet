@@ -167,7 +167,7 @@ jobs:
         # match it. Without this line the whole panic-boundary gate was dead
         # in CI while passing locally.
         run: |
-          go test -v -run 'TestTypeMatrix|TestQueryPanicBoundary' ./wadjet/ -timeout 15m
+          go test -v -run 'TestTypeMatrix|TestQueryPanicBoundary|TestArcRCRecursiveCTEAnswersItsWholeClosureOrFails' ./wadjet/ -timeout 15m
           go test -v -run 'TestTypeMatrix' ./internal/coordinator/ -timeout 15m
 
       - name: Fuzz Seed Corpora (parquet decoders)

@@ -22,6 +22,11 @@ import (
 // The iteration and working-table limits must fail without a partial result.
 // See ADR-0021 §1o-b.
 func TestArcRCRecursiveCTEAnswersItsWholeClosureOrFails(t *testing.T) {
+	// The whole closure runs in the type-matrix CI step; under -short it would
+	// take the Unit Tests step past its per-package timeout.
+	if testing.Short() {
+		t.Skip("runs in the type-matrix CI step")
+	}
 	type cell struct {
 		name, sql string
 		// want is the rendered answer, or "ERR <sqlstate>" optionally

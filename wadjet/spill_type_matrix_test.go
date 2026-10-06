@@ -68,6 +68,11 @@ import (
 //     failed, and it FAILS IF IT STARTS AGREEING — the ADR-0013 ratchet, so
 //     the pin cannot outlive its bug.
 func TestTypeMatrixAnswersTheSameUnderEveryMemoryBudget(t *testing.T) {
+	// The type-matrix CI step runs this gate on its own; under -short it would
+	// take the Unit Tests step past its per-package timeout.
+	if testing.Short() {
+		t.Skip("runs in the type-matrix CI step")
+	}
 	ctx := context.Background()
 	// The REFERENCE is taken before either forcing knob is armed, so the two
 	// sides of every comparison differ in the spill and in nothing else.
