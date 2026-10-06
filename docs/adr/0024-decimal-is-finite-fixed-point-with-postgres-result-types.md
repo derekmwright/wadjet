@@ -489,11 +489,15 @@ stored one alike, and the write doors' walk reads it for an integer target:
 `round(b)` over a stored `sqrt(6.25 + id * 0)` is 3 after a reopen and a
 compaction (`wadjet.TestArcREStoredColumnKeepsItsCategoryAcrossReopenAndCompaction`).
 A scalar subquery's declared column carries its plan's category the same way,
-and a semi or anti join publishes its probe's categories alone. On the stage
-DAG the map stays keyed by name; a plan where a name it leaves out is a
-numeric FLOAT64 (or a float8 DECIMAL) somewhere runs on the coordinator-local
-pipeline instead of reading the carrier
-(`coordinator.TestArcREStoredColumnRoundsByItsCreatedCategoryOnEveryArm`).
+and a semi or anti join publishes its outer relation's categories alone,
+whichever side the planner builds
+(`coordinator.TestArcRESwappedSemiJoinKeepsItsOuterCategoryOnEveryArm`). On
+the stage DAG the map stays keyed by name; a plan where a name it leaves out
+is a numeric FLOAT64 (or a float8 DECIMAL) somewhere, and that rounds or
+integer-casts, runs on the coordinator-local pipeline instead of reading the
+carrier (`coordinator.TestArcREStoredColumnRoundsByItsCreatedCategoryOnEveryArm`,
+`coordinator.TestArcRELostCategoryRoutesOnlyARoundingPlan`). A column created
+before the record existed carries none and reads as double precision.
 
 ### 3. The (p,s) of a computed result follows the finite-decimal industry rule
 
