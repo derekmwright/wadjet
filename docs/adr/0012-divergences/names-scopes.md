@@ -46,7 +46,7 @@ A column-alias list over a star is deferred to `ExpandStarProjections` (`logical
 | **r7** `SELECT * FROM a, b JOIN c ON a.k = c.k` | ERROR invalid reference to FROM-clause entry | answers: an ON sees relations the FROM clause declared earlier, comma items included | PG 42P01 | kept superset | 2026-09-23 · [E48](#e48), P065 | #617, #1220 | `physical.TestArcRSAQualifiedReferenceNamesOneRelationInScope`, `coordinator.TestArcRSAQualifiedReferenceNamesOneRelationOnEveryArm` |
 | **r8** `SELECT * FROM a FULL JOIN b ON a.n < b.n` | ERROR FULL JOIN is only supported with merge-joinable or hash-joinable join conditions | answers the defined result: a LEFT JOIN b ON p plus b rows no a row satisfies | PG 0A000 | kept superset | 2026-09-18 · [E29](#e29), P088 | #1153 | `coordinator.TestJRAOuterJoinOnResidualsAgreeOnFiveArms` |
 | **r9** `SELECT "?column?" FROM (SELECT g + 1 FROM typemx) d` | the column's value (the published name is also the reference name) | ERROR 42703 naming the column that exists; SELECT "g + 1" answers (measured) | 42703 | refusal | 2026-09-04 · [E07](#e07), [E52](#e52), P051 | #732 | `coordinator.TestAnUnnamedDerivedColumnCannotBeReferencedByItsPublishedName` |
-| **r10** `SELECT g + 1 FROM typemx GROUP BY typemx.g + 1` | answers | ERROR 42803; the mirror (qualified select item, bare key) answers | 42803 | refusal | 2026-09-03 · [E53](#e53), P071 | #738 | `coordinator.TestTheIdentityErasesAQualifierAndATypeSynonym` |
+| **r10** `SELECT g + 1 FROM typemx GROUP BY typemx.g + 1`; over a join, `SELECT i + 1 … FROM ss_t t JOIN ss_i u ON … GROUP BY t.i + 1` and `SELECT t.i + 1 … GROUP BY i + 1` | answers | the embedded engine (`wadjet.DB`, `wadjet serve`) answers PostgreSQL's rows (a term is the key by its binding, ADR-0047 stage 1); through the coordinator (the stage-DAG arms) ERROR 42803 until ADR-0047 stage 5 | 42803 (coordinator) | refusal | 2026-09-03 · [E53](#e53), P071; narrowed to the DAG arms 2026-10-06 | #738, #1524 | `coordinator.TestTheIdentityErasesAQualifierAndATypeSynonym`, `coordinator.TestArcGKGroupKeySpellingEveryArm` (j/*, ci1/innerJoin*) |
 | **r11** `CREATE TABLE "a/b" (x INT)` | creates the table (any identifier is legal) | ERROR 42602 invalid_name for /, \, NUL, a name that is . or .., or begins with . | 42602 | refusal | 2026-09-05 · [E08](#e08), P052 | — | `server.TestNoDoorCreatesARelationWhoseNameIsNotStorable`, `server.TestNoDoorCreatesAColumnWhoseNameIsNotStorable`, `objstore.TestEveryStoreRefusesABadKeyOnEveryOperation` |
 | **r12** `CREATE TABLE t_name_over_sixty_three_bytes_long_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa (x INT)` | creates it truncated to 63 bytes with NOTICE 42622 | ERROR 42622 name_too_long | 42622 | refusal | 2026-09-05 · [E08](#e08), P053 | — | `server.TestNoDoorCreatesARelationWhoseNameIsTooLong` |
 | **r13** `SELECT * FROM t a(k, k)` | accepts the list; 42702 at every reference to k (42P10 on a table function narrower than the list) | ERROR 42701 at the list | 42701 | refusal | 2026-09-18 · [E23](#e23), P039, P123 | #959, #1184 | `sql.TestArcPSParserReadsTheColumnAliasListGrammar` |
@@ -655,6 +655,15 @@ ADR lines 2045-2056. Catalog rows: r10. Stated in [Mechanisms](#mechanisms).
   beats a plausible NULL (correctness-protocol method 8). Gated by
   `coordinator.TestTheIdentityErasesAQualifierAndATypeSynonym`'s
   `boundary_qualified_key_bare_select_item`.
+- (Narrowed 2026-10-06, #1524, ADR-0047 stage 1.) The binder records which
+  column each reference names, and the group-key match compares those
+  bindings: on the single-process engine `g` and `typemx.g` are one column,
+  so the mirror answers PostgreSQL's rows (the alike spelling's, asserted by
+  the same test's `boundary_qualified_key_alike_control`), and so does the
+  bare-against-qualified pair over a JOIN (`coordinator.
+  TestArcGKGroupKeySpellingEveryArm` j/*, ci1/innerJoin*). The stage-DAG
+  arms plan an AST the coordinator does not bind and keep the 42803 until
+  ADR-0047 stage 5.
 
 ### E54
 
