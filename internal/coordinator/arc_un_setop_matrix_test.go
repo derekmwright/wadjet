@@ -27,7 +27,8 @@ import (
 //
 // Each statement's row in testdata/arc_un_setop_matrix.tsv names the answer
 // every arm that answers must give, how it stands to PostgreSQL's
-// (`pg` equal; `refused` a refusal the base gives too), PostgreSQL's own
+// (`pg` equal; `fenced` equal to PostgreSQL's answer with the set operation
+// fenced, below; `refused` a refusal the base gives too), PostgreSQL's own
 // answer, and the arms that refuse
 // (each one a
 // refusal identical at the base: the stage arms' ORDER BY over the text of a
@@ -42,19 +43,24 @@ import (
 // display scale: the 126 `r4r18` pins (the stored-scale text of an unmarked
 // mixed result, 52 text reads and 74 counts, #1647's 28 among them) are
 // deleted — 120 answer PostgreSQL's text on every arm, and the other six
-// answer PostgreSQL's configured oracle below, as do twelve more count cells.
+// answer PostgreSQL's fenced answer below, as do twelve more count cells.
 //
-// The ORACLE for a count read (`one`, `zero`) is configured (ADR-0012:
-// configure the oracle, never exempt): PostgreSQL's answer is measured with
-// the set operation fenced, `SELECT count(*) FROM (SELECT v FROM <body>
-// OFFSET 0) q WHERE <predicate>`. Unfenced, its planner pushes the text
-// predicate into each arm BEFORE the deduplication, so a UNION or INTERSECT
-// of the NUMERIC(10,2) arm with the unconstrained column counts whichever of
-// two equal values (`1` from un_x, `1.00` from rv_n) the predicate kept — a
-// different statement from the one asked. Fenced, the operation keeps the
-// first of the two it meets and the predicate reads that, which is this
-// engine's answer on every arm. 18 of the 648 count cells change with the
-// fence (all of them these); the other 630 answer alike (measured 17.11).
+// FENCED (ADR-0013 item 11, 2026-10-06): PostgreSQL's answer to a predicate
+// over the TEXT of a set operation's numeric output depends on its plan.
+// Unfenced, its planner pushes the predicate into each arm, so it tests each
+// arm's own text (`1` from un_x, `1.00` from the NUMERIC(10,2) rv_n) BEFORE
+// the UNION or INTERSECT forms its output and chooses one representative of
+// the equal values; fenced with `OFFSET 0` it tests the representative. This
+// engine evaluates the predicate over the set operation's output and prints
+// the representative's own display scale, so it answers the fenced
+// statement. The fence is PER STATEMENT: exactly the 18 count statements
+// whose answer it changes carry the disposition `fenced` and PostgreSQL's
+// answer to `SELECT count(*) FROM (SELECT v FROM <body> OFFSET 0) q WHERE
+// <predicate>` — u_fixed_{2_0,3_0,4_0}_one (unfenced 1, fenced 0),
+// u_fixed_{2_1,3_1,3_2,4_1,4_2,4_3}_zero (5, 2), i_fixed_{2_0,3_0,4_0}_zero
+// (0, 3), i_fixed_{2_1,3_1,3_2,4_1,4_2,4_3}_one (0, 1); the other 630 count
+// statements answer alike either way and carry the statement as written
+// (measured 17.11 over all 648).
 
 // The default run is a deterministic 300-statement subset that covers every
 // arm kind × position × operation × read; WADJET_UN_SETOP_MATRIX=full runs
@@ -77,8 +83,11 @@ func TestArcUNSetOperationMatrix(t *testing.T) {
 		if !ok {
 			t.Fatalf("%s: no row in testdata/arc_un_setop_matrix.tsv", c.id)
 		}
-		if exp.disposition != "pg" && exp.disposition != "refused" && exp.answer == exp.pg {
+		if exp.disposition != "pg" && exp.disposition != "refused" && exp.disposition != "fenced" && exp.answer == exp.pg {
 			t.Errorf("%s: pinned as %s but the pinned answer is PostgreSQL's: delete the pin", c.id, exp.disposition)
+		}
+		if exp.disposition == "fenced" && (exp.answer != exp.pg || !(strings.HasSuffix(c.id, "_one") || strings.HasSuffix(c.id, "_zero"))) {
+			t.Errorf("%s: `fenced` (ADR-0013 item 11) names a count read answering PostgreSQL's fenced answer", c.id)
 		}
 		var refused []string
 		for _, arm := range arms {
