@@ -224,7 +224,7 @@ func globalColIdxs(schema []parquet.Column, g windowSpecGroup, name func(WindowC
 // of the default column, nil (NULL) when there is no default (#1435).
 func (s *globalWindowStreamer) defaultAt(i int, b *batch.RecordBatch, r int) any {
 	if di := s.defaultIdxs[i]; di >= 0 && di < len(b.Columns) {
-		return b.Columns[di].GetValue(r)
+		return b.Columns[di].GetValueOf(r, false)
 	}
 	return nil
 }
@@ -340,16 +340,16 @@ func collectGlobalWindowStats(m *runMerger, schema []parquet.Column, g windowSpe
 					}
 				case WinFirstValue:
 					if rowIdx == 0 {
-						st.first[i] = b.Columns[ii].GetValue(r)
+						st.first[i] = b.Columns[ii].GetValueOf(r, false)
 					}
 				case WinLastValue:
 					if len(wc.OrderBy) == 0 {
-						st.last[i] = b.Columns[ii].GetValue(r)
+						st.last[i] = b.Columns[ii].GetValueOf(r, false)
 					}
 				case WinNthValue:
 					nth := wc.NthValueN
 					if rowIdx == int64(nth-1) {
-						st.nth[i] = b.Columns[ii].GetValue(r)
+						st.nth[i] = b.Columns[ii].GetValueOf(r, false)
 					}
 				}
 			}
@@ -788,7 +788,7 @@ func (s *globalWindowStreamer) computeImmediate(wc WindowColumn, i int, vec *bat
 			// LAG(x, 0) is the current row (#1399).
 			var cur any
 			if inVec != nil {
-				cur = inVec.GetValue(r)
+				cur = inVec.GetValueOf(r, false)
 			}
 			vec.SetValue(r, cur)
 			return nil
@@ -808,7 +808,7 @@ func (s *globalWindowStreamer) computeImmediate(wc WindowColumn, i int, vec *bat
 		}
 		var cur any
 		if inVec != nil {
-			cur = inVec.GetValue(r)
+			cur = inVec.GetValueOf(r, false)
 		}
 		ring[rowIdx%int64(off)] = cur
 
@@ -963,7 +963,7 @@ func (s *globalWindowStreamer) backfillPeerFrame(end int64) error {
 		case WinLastValue:
 			if pb, lr := s.locate(end - 1); pb != nil {
 				if ii := s.inputIdxs[i]; ii >= 0 && ii < numInput {
-					val = pb.b.Columns[ii].GetValue(lr)
+					val = pb.b.Columns[ii].GetValueOf(lr, false)
 				}
 			}
 		case WinNthValue:
@@ -1048,7 +1048,7 @@ func (s *globalWindowStreamer) resolveLeads() {
 			var v any
 			if srcPB != nil {
 				if ii := s.inputIdxs[i]; ii >= 0 {
-					v = srcPB.b.Columns[ii].GetValue(sr)
+					v = srcPB.b.Columns[ii].GetValueOf(sr, false)
 				}
 			}
 			// nil-safe SetValue keeps bytes offsets advancing on NULLs.
@@ -1108,7 +1108,7 @@ func (s *globalWindowStreamer) finishEOF() error {
 				var v any
 				if srcPB != nil {
 					if ii := s.inputIdxs[i]; ii >= 0 {
-						v = srcPB.b.Columns[ii].GetValue(sr)
+						v = srcPB.b.Columns[ii].GetValueOf(sr, false)
 					}
 				}
 				vec.SetValue(lr, v)

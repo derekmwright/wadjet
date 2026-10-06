@@ -1767,7 +1767,7 @@ func computePartitionColumnar(combined *batch.RecordBatch, winVec *batch.Vector,
 			lo, hi := fr.bounds(i)
 			var v any
 			if hi > lo {
-				v = inputVec.GetValue(start + lo)
+				v = inputVec.GetValueOf(start+lo, false)
 			}
 			if v != nil {
 				winVec.SetValue(start+i, v)
@@ -1781,7 +1781,7 @@ func computePartitionColumnar(combined *batch.RecordBatch, winVec *batch.Vector,
 			lo, hi := fr.bounds(i)
 			var v any
 			if hi > lo {
-				v = inputVec.GetValue(start + hi - 1)
+				v = inputVec.GetValueOf(start+hi-1, false)
 			}
 			if v != nil {
 				winVec.SetValue(start+i, v)
@@ -1855,7 +1855,7 @@ func computePartitionColumnar(combined *batch.RecordBatch, winVec *batch.Vector,
 			lo, hi := fr.bounds(i)
 			var v any
 			if pos := lo + nth - 1; pos < hi {
-				v = inputVec.GetValue(start + pos)
+				v = inputVec.GetValueOf(start+pos, false)
 			}
 			if v != nil {
 				winVec.SetValue(start+i, v)

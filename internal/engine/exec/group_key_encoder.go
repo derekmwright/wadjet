@@ -51,6 +51,16 @@ func appendGroupKeyColumn(buf []byte, v any, t batch.TypeID, meta *parquet.Colum
 				return appendKeyValue(buf, kernel.CidrOrderKey(s))
 			}
 		}
+		if t == batch.TypeDecimal {
+			// A DECIMAL group's key value is its member's printed text, which
+			// carries the member's display scale (ADR-0024 §1 as amended):
+			// `2.50` and `2.5` are one value and must be one key (I5), so the
+			// key is the text without its fraction's trailing zeros — the same
+			// for every spelling of one number, whatever the carrier scale.
+			if s, ok := v.(string); ok {
+				return appendKeyValue(buf, batch.TrimDecimalText(s))
+			}
+		}
 	}
 	return appendGroupKeyColumnMeta(buf, v, meta)
 }

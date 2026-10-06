@@ -382,6 +382,7 @@ func resetAccumulator(buf *batch.RecordBatch) {
 	for _, col := range buf.Columns {
 		col.Len = 0
 		col.Nulls.ResetNonNull(0)
+		col.DecimalData.ResetDScale()
 		switch col.Type {
 		case parquet.TypeString, parquet.TypeBytes, parquet.TypeIPv6, parquet.TypeCIDR, parquet.TypeUUID:
 			col.BytesData.Data = col.BytesData.Data[:0]

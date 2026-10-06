@@ -62,7 +62,7 @@ func (h *HashAggregate) consumeBatchCompactGroup(b *batch.RecordBatch) {
 		keyVals := make([]any, len(h.GroupByCols))
 		for ki, idx := range h.groupColIdx {
 			if idx >= 0 {
-				keyVals[ki] = b.Columns[idx].GetValue(row)
+				keyVals[ki] = b.Columns[idx].GetValueOf(row, false)
 			}
 		}
 		gs := h.gsPool.alloc()
@@ -390,7 +390,7 @@ func (h *HashAggregate) consumeBatchGenericSoA(b *batch.RecordBatch) {
 			keyVals := make([]any, len(h.GroupByCols))
 			for ki, idx := range h.groupColIdx {
 				if idx >= 0 {
-					keyVals[ki] = b.Columns[idx].GetValue(row)
+					keyVals[ki] = b.Columns[idx].GetValueOf(row, false)
 				}
 			}
 			gs.ensureExtras().keyValues = keyVals
@@ -570,7 +570,7 @@ func (h *HashAggregate) boxFloatMemberKey(b *batch.RecordBatch, row int, groupId
 	keyVals := make([]any, len(h.GroupByCols))
 	for ki, idx := range h.groupColIdx {
 		if idx >= 0 {
-			keyVals[ki] = b.Columns[idx].GetValue(row)
+			keyVals[ki] = b.Columns[idx].GetValueOf(row, false)
 		}
 	}
 	gs.ensureExtras().keyValues = keyVals
