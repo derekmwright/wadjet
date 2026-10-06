@@ -52,7 +52,10 @@ type Task struct {
 	// every expression the task compiles: a column a previous stage
 	// materialized is a bare FLOAT64 whether PostgreSQL calls it numeric
 	// (`5 / 2.0 AS x`) or float8, and ROUND and the integer cast round by
-	// which (#381). Stamped by Scheduler.PublishTasks.
+	// which (#381). Only the entries that change a reading ride: a stored
+	// column reads its declared type's category from the batch, and a name
+	// the plan publishes under two categories is left out. Stamped by
+	// Scheduler.PublishTasks.
 	PGCategories map[string]uint8 `json:"pg_categories,omitempty"`
 	// DegradedMemory is a WORKER-LOCAL flag, never serialized: the poison-
 	// task defense (#318) sets it before executing a redelivery whose prior

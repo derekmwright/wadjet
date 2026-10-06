@@ -149,13 +149,6 @@ func re2ShadowNorm(s string) string {
 // PostgreSQL's, each with its mechanism; the gate asserts they still disagree
 // there, so the entry is deleted — the proof — when one starts agreeing.
 func re2ShadowStillDiverges(name string) string {
-	// A UNION ALL of an avg() arm (numeric) and a float8 arm is float8 to
-	// PostgreSQL; the stage reading the union's output takes the column's
-	// category from a plan-wide map keyed by the bare name `f`, which holds
-	// the avg arm's numeric.
-	if strings.HasPrefix(name, "m_avg_union2/") {
-		return "name-keyed category"
-	}
 	return ""
 }
 
