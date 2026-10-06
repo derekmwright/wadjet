@@ -134,6 +134,14 @@ func emittedColPGCategory(n *logical.Node) map[string]pgCategory {
 		if len(n.Children) != 2 {
 			return nil
 		}
+		if jt := mapJoinType(n.JoinType); jt == "semi" || jt == "anti" {
+			// A semi or anti join publishes its probe alone (IN, EXISTS):
+			// a build column of the same name is not in its output, and
+			// merging it dropped the probe's own category — `round(b)`
+			// over a stored numeric b semi-joined to a table with a
+			// float8 b read the carrier.
+			return emittedColPGCategory(n.Children[0])
+		}
 		left, leftKnown := joinArmPGCategory(n.Children[0])
 		right, rightKnown := joinArmPGCategory(n.Children[1])
 		merged := mergeJoinSides(left, right)
