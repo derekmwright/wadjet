@@ -672,7 +672,7 @@ func projectCopyColumn(dst, src *batch.Vector, n int) {
 	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
 		dst.BytesData.BulkCopy(0, &src.BytesData, 0, n)
 	case batch.TypeDecimal:
-		copy(dst.DecimalData.Data[:n], src.DecimalData.Data[:n])
+		dst.DecimalData.CopyRange(0, &src.DecimalData, 0, n)
 	case batch.TypeVector:
 		dim := src.VectorDim
 		if dim > 0 {
@@ -730,9 +730,7 @@ func projectGatherColumn(dst, src *batch.Vector, sel []uint32) {
 			dst.BytesData.SetFrom(i, &src.BytesData, int(idx))
 		}
 	case batch.TypeDecimal:
-		for i, idx := range sel {
-			dst.DecimalData.Data[i] = src.DecimalData.Data[idx]
-		}
+		dst.DecimalData.Gather(&src.DecimalData, sel)
 	case batch.TypeVector:
 		dim := src.VectorDim
 		if dim > 0 {

@@ -555,6 +555,7 @@ func resetShuffleAccumBatch(rb *batch.RecordBatch) {
 	for i, col := range rb.Columns {
 		col.Len = 0
 		col.Nulls.ResetNonNull(0)
+		col.DecimalData.ResetDScale()
 		switch col.Type {
 		case parquet.TypeString, parquet.TypeBytes, parquet.TypeIPv6, parquet.TypeCIDR, parquet.TypeUUID:
 			col.BytesData.Data = col.BytesData.Data[:0]
@@ -768,8 +769,8 @@ func appendBatchRowsBulk(dst *batch.RecordBatch, b *batch.RecordBatch, srcRows [
 					}
 				}
 			}
+			batch.GatherDScaleCodesAt(&dstCol.DecimalData, &srcCol.DecimalData, start, rows)
 			bytesAdded += nRows * 16
-
 		case parquet.TypeArray, parquet.TypeMap, parquet.TypeRow, parquet.TypeVector:
 			// Container columns copy row-at-a-time through the engine's
 			// nested-aware typed primitive: offsets, child elements, ROW

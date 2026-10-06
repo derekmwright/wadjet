@@ -954,7 +954,7 @@ func windowCopyVectorRange(dst, src *batch.Vector, dstOff, srcOff, count int) {
 			}
 		}
 	case batch.TypeDecimal:
-		copy(dst.DecimalData.Data[dstOff:dstOff+count], src.DecimalData.Data[srcOff:srcOff+count])
+		dst.DecimalData.CopyRange(dstOff, &src.DecimalData, srcOff, count)
 	default:
 		// Typed per-value copy; handles VECTOR and nested ARRAY/MAP/ROW
 		// (sequential-dst contract holds at every call site — concat and
@@ -1035,6 +1035,7 @@ func windowGatherVector(dst, src *batch.Vector, perm []int) {
 				dst.DecimalData.Data[i] = src.DecimalData.Data[p]
 			}
 		}
+		batch.GatherDScaleCodes(&dst.DecimalData, &src.DecimalData, perm)
 	default:
 		// Typed per-value copy; handles VECTOR and nested ARRAY/MAP/ROW
 		// (perm gathers write dst sequentially).
@@ -1728,13 +1729,15 @@ func computePartitionColumnar(combined *batch.RecordBatch, winVec *batch.Vector,
 	// column reads back from the start of the arena — LAG's own leading NULL
 	// made the next row return the whole partition concatenated. The gather
 	// and range-copy helpers above already advance on null for this reason.
+	// The chosen value moves through its printed box (GetValueOf), so a
+	// DECIMAL keeps its display scale (ADR-0024 §1 as amended).
 	case WinLag:
 		offset := wc.LagLeadOffset
 		for i := 0; i < n; i++ {
 			if i-offset >= 0 && i-offset < n {
-				winVec.SetValue(start+i, inputVec.GetValue(start+i-offset))
+				winVec.SetValue(start+i, inputVec.GetValueOf(start+i-offset, false))
 			} else if defVec != nil {
-				winVec.SetValue(start+i, defVec.GetValue(start+i))
+				winVec.SetValue(start+i, defVec.GetValueOf(start+i, false))
 			} else {
 				winVec.WriteNullAt(start + i)
 			}
@@ -1744,9 +1747,9 @@ func computePartitionColumnar(combined *batch.RecordBatch, winVec *batch.Vector,
 		offset := wc.LagLeadOffset
 		for i := 0; i < n; i++ {
 			if i+offset < n && i+offset >= 0 {
-				winVec.SetValue(start+i, inputVec.GetValue(start+i+offset))
+				winVec.SetValue(start+i, inputVec.GetValueOf(start+i+offset, false))
 			} else if defVec != nil {
-				winVec.SetValue(start+i, defVec.GetValue(start+i))
+				winVec.SetValue(start+i, defVec.GetValueOf(start+i, false))
 			} else {
 				winVec.WriteNullAt(start + i)
 			}

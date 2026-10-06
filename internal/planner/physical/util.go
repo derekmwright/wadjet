@@ -1369,7 +1369,7 @@ func copyVecRange(dst *batch.Vector, dstOff int, src *batch.Vector, srcOff, coun
 	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
 		dst.BytesData.BulkCopy(dstOff, &src.BytesData, srcOff, count)
 	case batch.TypeDecimal:
-		copy(dst.DecimalData.Data[dstOff:dstOff+count], src.DecimalData.Data[srcOff:srcOff+count])
+		dst.DecimalData.CopyRange(dstOff, &src.DecimalData, srcOff, count)
 	}
 }
 
