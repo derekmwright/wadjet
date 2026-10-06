@@ -27,8 +27,8 @@ import (
 //
 // Each statement's row in testdata/arc_un_setop_matrix.tsv names the answer
 // every arm that answers must give, how it stands to PostgreSQL's
-// (`pg` equal; `a13rep` ADR-0013's representative class; `refused` a refusal
-// the base gives too), PostgreSQL's own answer, and the arms that refuse
+// (`pg` equal; `refused` a refusal the base gives too), PostgreSQL's own
+// answer, and the arms that refuse
 // (each one a
 // refusal identical at the base: the stage arms' ORDER BY over the text of a
 // UNION, the asynchronous door's rename, a quoted-first SUM, a scalar
@@ -41,16 +41,21 @@ import (
 // Since arc PS stage 1 (ADR-0024 §11, 2026-10-06) each value prints its own
 // display scale: the 126 `r4r18` pins (the stored-scale text of an unmarked
 // mixed result, 52 text reads and 74 counts, #1647's 28 among them) are
-// deleted — 120 answer PostgreSQL's text on every arm. Eighteen cells — a
-// UNION or INTERSECT of the NUMERIC(10,2) arm with the unconstrained column,
-// counted by a text predicate — are `a13rep`: the operation keeps the first
-// of two equal values it meets (`1` from un_x, `1.00` from rv_n), which is
-// PostgreSQL's own answer with the predicate fenced above the operation
-// (`… s OFFSET 0) q WHERE …`); unfenced, PostgreSQL's planner pushes the
-// text predicate into each arm before the deduplication and counts the
-// other value. Twelve of them answered PostgreSQL's count at the base only
-// because every value printed ten fraction digits.
+// deleted — 120 answer PostgreSQL's text on every arm, and the other six
+// answer PostgreSQL's configured oracle below, as do twelve more count cells.
 //
+// The ORACLE for a count read (`one`, `zero`) is configured (ADR-0012:
+// configure the oracle, never exempt): PostgreSQL's answer is measured with
+// the set operation fenced, `SELECT count(*) FROM (SELECT v FROM <body>
+// OFFSET 0) q WHERE <predicate>`. Unfenced, its planner pushes the text
+// predicate into each arm BEFORE the deduplication, so a UNION or INTERSECT
+// of the NUMERIC(10,2) arm with the unconstrained column counts whichever of
+// two equal values (`1` from un_x, `1.00` from rv_n) the predicate kept — a
+// different statement from the one asked. Fenced, the operation keeps the
+// first of the two it meets and the predicate reads that, which is this
+// engine's answer on every arm. 18 of the 648 count cells change with the
+// fence (all of them these); the other 630 answer alike (measured 17.11).
+
 // The default run is a deterministic 300-statement subset that covers every
 // arm kind × position × operation × read; WADJET_UN_SETOP_MATRIX=full runs
 // all 1,944.
