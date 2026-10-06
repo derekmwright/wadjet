@@ -39,6 +39,12 @@ import (
 // gives it. A mark set wrongly changes what a later write stores (1.255 kept
 // where PostgreSQL rounds to 1.26); a mark left unset is the declaration
 // this engine always used.
+//
+// A FLOAT64 column also records the PostgreSQL CATEGORY the plan gives it
+// (parquet.Column.PGNumeric): numeric where PostgreSQL creates a numeric
+// column from an expression this engine computes in a double, and unmarked
+// everywhere else, so the stored column is read under the category the same
+// expression has before it is stored.
 func (p *Planner) CreatedColumns(plan *logical.Node, declared []parquet.Column, planned bool) []parquet.Column {
 	out := make([]parquet.Column, len(declared))
 	copy(out, declared)
@@ -54,6 +60,26 @@ func (p *Planner) CreatedColumns(plan *logical.Node, declared []parquet.Column, 
 	mods := c.output(plan)
 	if len(mods) != len(out) {
 		mods = nil
+	}
+	// The category half of the declaration, positionally aligned with it
+	// (declaredOutputPGCategory); nil when the walk cannot line it up, which
+	// leaves every column unmarked — the declaration this engine always used.
+	cats := declaredOutputPGCategory(plan)
+	if cats == nil && findOutputProjectionNode(plan) == nil {
+		// A bare star publishes its source's columns, in the order the star's
+		// own declaration lists them: each takes the category its source
+		// emits it under — a marked column of the table, by the name the
+		// declaration gives it there.
+		if cols, ok := c.w.starOnlyDeclaredOutputSchema(plan, nil); ok {
+			emitted := emittedColPGCategory(plan)
+			cats = make([]pgCategory, len(cols))
+			for i, col := range cols {
+				cats[i] = lookupColPGCategory(emitted, col.Name)
+			}
+		}
+	}
+	if len(cats) != len(out) {
+		cats = nil
 	}
 	var asts []plansql.Node
 	if setOpRootOf(plan) == nil {
@@ -85,8 +111,17 @@ func (p *Planner) CreatedColumns(plan *logical.Node, declared []parquet.Column, 
 		case parquet.TypeFloat64:
 			// The planner carries a numeric typed NULL on the float rung.
 			out[i].Unconstrained = asts != nil && asts[i] != nil && typedNullNumeric(asts[i])
+			// A value PostgreSQL types numeric that this engine computes in
+			// a double — `5 / 2.0 + id * 0`, `sqrt(6.25 + id * 0)`, a bare
+			// copy of a column created from one — is created FLOAT64 marked
+			// with that category (ADR-0024 §2c), so a reader of the stored
+			// column rounds it as PostgreSQL rounds its numeric column.
+			out[i].PGNumeric = !out[i].Unconstrained && cats != nil && cats[i] == pgCatNumeric
 		default:
 			out[i].Unconstrained = false
+		}
+		if out[i].Type != parquet.TypeFloat64 {
+			out[i].PGNumeric = false
 		}
 	}
 	return out

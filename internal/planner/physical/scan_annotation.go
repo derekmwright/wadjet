@@ -74,7 +74,9 @@ func (p *Planner) annotateScanColumns(ctx context.Context, node *logical.Node) {
 		if known {
 			if renamed, err := applyFuncColumnAliases(cols, node.FuncColAliases, node.TableAlias); err == nil {
 				stampScanSchema(node, renamed)
-				node.ScanColPGCategory = tableFuncPGCategory(node.FuncName, node.FuncArgs, renamed)
+				if cats := tableFuncPGCategory(node.FuncName, node.FuncArgs, renamed); cats != nil {
+					node.ScanColPGCategory = cats
+				}
 			}
 		}
 	}
@@ -253,4 +255,24 @@ func stampScanSchema(node *logical.Node, columns []parquet.Column) {
 	node.ScanColDecimal = colDecimal
 	node.ScanColFields = colFields
 	node.ScanColElems = colElems
+	node.ScanColPGCategory = storedPGCategory(columns)
+}
+
+// storedPGCategory is the PostgreSQL category a relation's columns were
+// CREATED with where it is not their carrier's: a DOUBLE PRECISION column
+// CREATE TABLE AS made from an expression PostgreSQL types numeric
+// (parquet.Column.PGNumeric, set by Planner.CreatedColumns) is numeric, so
+// `round(b)` over the stored column rounds as `round(sqrt(6.25))` does.
+// nil when no column is marked.
+func storedPGCategory(columns []parquet.Column) map[string]pgCategory {
+	var out map[string]pgCategory
+	for _, c := range columns {
+		if c.Type == parquet.TypeFloat64 && c.PGNumeric {
+			if out == nil {
+				out = map[string]pgCategory{}
+			}
+			out[strings.ToLower(c.Name)] = pgCatNumeric
+		}
+	}
+	return out
 }

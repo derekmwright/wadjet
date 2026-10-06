@@ -1537,6 +1537,18 @@ func DeclaredTypeOfNodeWith(node plansql.Node, schema []parquet.Column, cat []ex
 			}
 		}
 	}
+	// A stored column created with the numeric category says so on its own
+	// declaration (parquet.Column.PGNumeric): `UPDATE t SET v = b` over a b
+	// CREATE TABLE AS made from sqrt(6.25) assigns a numeric, as PostgreSQL's
+	// numeric column does.
+	for name, c := range storedPGCategory(schema) {
+		if _, set := decls.pgCat[name]; !set {
+			if decls.pgCat == nil {
+				decls.pgCat = map[string]pgCategory{}
+			}
+			decls.pgCat[name] = c
+		}
+	}
 	if p != nil {
 		decls.subqueryDecl, decls.subqueryIntWidth, decls.subqueryPGCategory = subqueryResolvers(p.scalarSubqueryColumnDecl)
 	}

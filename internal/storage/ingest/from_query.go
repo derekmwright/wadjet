@@ -83,6 +83,9 @@ func TableSchemaForQuery(declared []parquet.Column, renames []string) (parquet.S
 		} else {
 			cols[i].Unconstrained = false
 		}
+		// The created column's PostgreSQL category rides only on the carrier
+		// it describes (parquet.Column.PGNumeric).
+		cols[i].PGNumeric = cols[i].PGNumeric && cols[i].Type == parquet.TypeFloat64
 	}
 
 	seen := make(map[string]string, len(cols))

@@ -213,7 +213,9 @@ type Node struct {
 	// (expr.DeclType.PGNumeric / PGFloat8): a recursive CTE reference whose
 	// anchor published `5 / 2.0`, an `unnest(0.5, 2.5)` over numeric literals.
 	// The carrier cannot say it; an absent entry is the carrier's reading,
-	// which for a catalog column is the catalog's type.
+	// which for a catalog column is the catalog's type — except a column
+	// CREATE TABLE AS made from an expression PostgreSQL types numeric, whose
+	// record carries that category (parquet.Column.PGNumeric).
 	ScanColPGCategory map[string]expr.PGCategory
 	// SubqueryColDecls is the declared output column of every SCALAR
 	// SUBQUERY this plan contains, keyed by the subquery's own SQL TEXT —
