@@ -288,7 +288,7 @@ var BindingProbe func(BlockBindingReport)
 // inside the items) — and records the bindings when, and only when, every one
 // of them binds. resolve is the block's input scope (its FROM and the levels
 // it sits under).
-func (b *binder) stampBlock(info *plansql.SelectInfo, resolve *colScope) {
+func (b *binder) stampBlock(info *plansql.SelectInfo, resolve *colScope) bool {
 	if b.blockRel == nil {
 		b.blockRel = map[*plansql.SelectInfo]plansql.RelID{}
 	}
@@ -451,6 +451,16 @@ func (b *binder) stampBlock(info *plansql.SelectInfo, resolve *colScope) {
 		}
 		BindingProbe(rep)
 	}
+	if rep.Stamped {
+		return true
+	}
+	// A policy recheck retains the first validation's stamps.
+	for _, p := range all {
+		if p.ref.Bound != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // unstamped runs fn with stamping off: the blocks it validates are checked as

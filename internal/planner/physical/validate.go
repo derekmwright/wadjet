@@ -892,7 +892,7 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 		dec := make([]parquet.TypeID, len(info.Columns))
 		for i, col := range info.Columns {
 			st[i], org[i], dec[i] = typeAmbiguous, typeAmbiguous, typeAmbiguous
-			if col.IsWindow || col.ASTExpr == nil {
+			if col.ASTExpr == nil {
 				continue
 			}
 			if t, ok := typeOf(col.ASTExpr); ok {
@@ -1091,7 +1091,7 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 	}
 
 	// Every participant's binding, recorded when every one of them binds.
-	b.stampBlock(info, resolve)
+	bound := b.stampBlock(info, resolve)
 
 	// A bare column beside an aggregate with no GROUP BY has no defined
 	// answer — which n_name should the single aggregate row carry?
@@ -1100,7 +1100,7 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 	// parseCheckAggregates runs once the whole block is transformed, so
 	// `SELECT * FROM t GROUP BY zz.id` is 42P01 there, not the 42803 its
 	// star would otherwise earn (#1233).
-	if err := checkUngrouped(info, from); err != nil {
+	if err := b.checkUngrouped(info, from, resolve, bound); err != nil {
 		return err
 	}
 
@@ -1934,7 +1934,7 @@ func (b *binder) registerCTE(ctx context.Context, cte *plansql.CTEDef) error {
 // one of this block's OWN sources is skipped too — it may be a correlated
 // outer reference (constant per group) or a niladic the parser reads as a
 // column.
-func checkUngrouped(info *plansql.SelectInfo, from *colScope) error {
+func (b *binder) checkUngrouped(info *plansql.SelectInfo, from, resolve *colScope, bound bool) error {
 	if from == nil || from.open {
 		return nil
 	}
@@ -1967,6 +1967,11 @@ func checkUngrouped(info *plansql.SelectInfo, from *colScope) error {
 		// nothing else, so it is spelling (#738).
 		unqualify: len(from.quals) == 1}
 	g.addGroupTerms(info)
+	if bound {
+		g.subquery = func(sql string) error {
+			return g.checkSubqueryRefs(b, b.validatedBody(sql, resolve))
+		}
+	}
 
 	// SELECT list. An output alias is NOT visible here — a select item cannot
 	// reference another item's alias — so this arm runs against the group
@@ -1987,7 +1992,7 @@ func checkUngrouped(info *plansql.SelectInfo, from *colScope) error {
 			}
 			continue
 		}
-		if col.IsWindow || col.ASTExpr == nil {
+		if col.ASTExpr == nil {
 			continue
 		}
 		// THE ITEM AS WRITTEN, when its spelling contains a term this block
@@ -2060,10 +2065,15 @@ func checkUngrouped(info *plansql.SelectInfo, from *colScope) error {
 // cannot resolve to a source is never judged, so the fallback only ever admits
 // more — it cannot turn a working query into a false rejection.
 type groupCheck struct {
-	from   *colScope
-	keys   map[string]bool
-	idents map[string]bool
-	bare   map[string]bool
+	// subquery checks only references back to this bound block. Unbound
+	// blocks retain their spelling checks, including the DAG interim.
+	subquery func(string) error
+	// Window arguments retain their ordinary-reference behavior in stage 1.
+	subqueriesOnly bool
+	from           *colScope
+	keys           map[string]bool
+	idents         map[string]bool
+	bare           map[string]bool
 	// originKeys are the keys of GROUP BY terms recorded as written before
 	// the FROM-less unfold rewrote them; a SELECT item is covered by one only
 	// when its OWN written spelling holds it.
@@ -2299,6 +2309,9 @@ func (g *groupCheck) check(node plansql.Node) error {
 	}
 	switch n := node.(type) {
 	case *plansql.ColRef:
+		if g.subqueriesOnly {
+			return nil
+		}
 		if b := n.Bound; b != nil {
 			// What the binder resolved decides, and nothing spelled alike
 			// does: an OUTPUT name (a HAVING / ORDER BY alias) stands for
@@ -2349,8 +2362,39 @@ func (g *groupCheck) check(node plansql.Node) error {
 		if err := expr.ResolveFuncName(n.Name); err != nil {
 			return err
 		}
-	case *plansql.SubqueryNode, *plansql.ExistsNode, *plansql.WindowFuncNode:
-		// Their own scope, validated on their own terms.
+	case *plansql.SubqueryNode:
+		if g.subquery != nil {
+			return g.subquery(n.SQL)
+		}
+		return nil
+	case *plansql.ExistsNode:
+		if g.subquery != nil {
+			return g.subquery(n.SQL)
+		}
+		return nil
+	case *plansql.WindowFuncNode:
+		// Preserve the ordinary window-argument check while examining
+		// subqueries in arguments, partition terms and order terms.
+		if g.subquery != nil {
+			window := *g
+			window.subqueriesOnly = true
+			terms := append([]plansql.Node(nil), n.Func.Args...)
+			terms = append(terms, n.PartitionBy...)
+			for _, term := range n.OrderBy {
+				terms = append(terms, term.Expr)
+			}
+			if n.Frame != nil {
+				terms = append(terms, n.Frame.Start.Offset)
+				if n.Frame.End != nil {
+					terms = append(terms, n.Frame.End.Offset)
+				}
+			}
+			for _, term := range terms {
+				if err := window.check(term); err != nil {
+					return err
+				}
+			}
+		}
 		return nil
 	}
 	for _, child := range exprOperands(node) {
