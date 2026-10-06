@@ -419,12 +419,22 @@ func (b *binder) stampBlock(info *plansql.SelectInfo, resolve *colScope) {
 	}
 	rep.Stamped = every && !rep.Declined && b.stamp
 	rep.Mixed = any && scopeMiss
-	for _, p := range all {
-		if rep.Stamped {
-			bd := p.b
-			p.ref.Bound = &bd
-		} else {
-			p.ref.Bound = nil
+	// A binder that does not stamp leaves the AST exactly as it found it.
+	// The embedded door validates a statement TWICE when a policy applies —
+	// once at the door, which stamps, and again under the policy's schema
+	// after the plan is built (auth.EnforcePlanPolicies) — and clearing the
+	// first pass's bindings there would hand the physical planner unbound
+	// terms of a block the logical builder matched by binding: the mixture
+	// RISKS R1 names. The second pass's own grouping check reads the
+	// bindings the first pass recorded, so both passes judge alike.
+	if b.stamp {
+		for _, p := range all {
+			if rep.Stamped {
+				bd := p.b
+				p.ref.Bound = &bd
+			} else {
+				p.ref.Bound = nil
+			}
 		}
 	}
 	if BindingProbe != nil {
