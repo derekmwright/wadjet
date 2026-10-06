@@ -1135,6 +1135,10 @@ Now `expr.translateAndCompile` is the one compile of a SQL-supplied pattern, in 
 
 2026-10-06: the dialect is chosen by the function's ORIGIN — PostgreSQL's constructs (`~ ~* !~ !~*`, SIMILAR TO, `substring(s FROM p)`, `regexp_replace`, `regexp_like`, `regexp_count`) read the ARE; the engine's own DuckDB-origin `regexp_extract`, `regexp_extract_all`, `regexp_split` and `payload_matches`, which PostgreSQL does not have, keep RE2 syntax with DuckDB as their oracle and answer as at 4256886b (`regexp_extract('the cat sat', '\bcat\b')` is cat, `regexp_like('the cat sat', '\bcat\b')` f) — `expr.TestArcRXEveryRegexFunctionDeclaresItsDialect`, `coordinator.TestArcRXRegexTableEveryArm` extract/\*, extractAll/\*, split/\*, payload/\*.
 
+## 2026-10-06: a select item is a GROUP BY key by its binding (#1524, ADR-0047 stage 1)
+
+[names-scopes r10](0012-divergences/names-scopes.md#catalog) narrowed to the stage-DAG arms: on the single-process engine a term spelled apart from its GROUP BY key — the qualifier on one side only, over one relation or over a join — is the key when both resolve to the same column, so `SELECT g + 1 FROM typemx GROUP BY typemx.g + 1` and `SELECT i + 1 … FROM ss_t t JOIN ss_i u ON u.id = t.id GROUP BY t.i + 1` answer PostgreSQL's rows there; the three stage-DAG arms keep ERROR 42803 until ADR-0047 stage 5 (`coordinator.TestTheIdentityErasesAQualifierAndATypeSynonym`, `coordinator.TestArcGKGroupKeySpellingEveryArm`).
+
 ## Dated markers inside the entries
 
 Every `Added` / `Amended` / `CLOSED` / `Corrected` / `narrowed` marker still inside an entry's retained text, in date order, with the entry that carries it.

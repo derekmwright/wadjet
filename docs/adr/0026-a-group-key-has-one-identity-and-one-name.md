@@ -23,6 +23,10 @@ never the reverse (#1028). `exec.ColumnIndexFallback` is NOT deleted — its
 qualifier strip is the join's own publication convention read back, measured —
 and what became unreachable is the PLAN-TIME erasure in front of it.
 
+## 2026-10-06 amendment: a term is a key by its BINDING (ADR-0047 stage 1, #1524)
+
+§1's identity could not see a qualifier, so `SELECT 2 * t.n … FROM ss_t t GROUP BY 2 * n` matched at one site by a qualifier-erasing fallback and missed at the others (declared text; `ORDER BY 1` sorted `20.00` before `4.50`), and every bare-against-qualified pair over a join was 42803. §1a below states the rule as implemented: the binder records which column each reference resolves to, and every single-process match site compares those bindings (`plansql.GroupTermIdentity`). ADR-0047 is the program this is the first stage of.
+
 ## 2026-10-05 amendment: MOD and percent share a grouping identity
 
 The parser lowers `a % b` to `mod(a, b)`, so the two spellings bind the same grouping key: `SELECT i % 2, count(*) FROM t GROUP BY mod(i, 2)` over integer rows 1, 2 and 3 answers `(0, 1)` and `(1, 2)` after ordering by the key, with the key declared integer (OID 23).
@@ -103,6 +107,18 @@ is wrong in the more dangerous direction than the defect being fixed.
 `g - 1 - 2` and `g - (1 - 2)` keep different identities, and stay two group
 keys, as PostgreSQL has them. A node kind the canonicaliser does not know
 keeps its own `String()` — the behaviour every caller had before.
+
+### 1a. A term IS a key when its leaves resolve to the key's columns (2026-10-06, ADR-0047 stage 1)
+
+A SELECT item, a HAVING, QUALIFY or ORDER BY term, a window term or a GROUPING argument is GROUP BY key k when its tree equals k's tree after §1's three erasures AND each column reference in it resolves to the same column as the matching reference in k. The resolution is the binder's: `physical.bindRef` binds every reference of a block to a relation instance and a position (`plansql.ColRef.Bound`), and `plansql.GroupTermIdentity` renders a bound reference as that binding — a NUL-prefixed key no identifier or alias can spell. So, measured against PostgreSQL 17.11 over `coordinator.TestArcGKGroupKeySpellingEveryArm`'s 1,063 cells:
+
+- `2 * t.n` and `2 * n` over `FROM ss_t t` are one key, in either direction, and the item is published with the key's value, order and declared type;
+- over a join `t.i + 1` and `i + 1` are one key when `i` is `t`'s, and `zzj.d92` and `zzp.d92` are two;
+- a bare ORDER BY name that names an OUTPUT column binds that output, so `ORDER BY t.i` beside `SELECT -t.i AS i … GROUP BY i` sorts by the key and `ORDER BY i` by the item;
+- an output alias never licenses an input reference that spells its name: `SELECT count(*) AS n … GROUP BY 1 * n HAVING t.n …` is 42803;
+- commuted operands and constant-folded twins stay two identities (42803).
+
+Nothing is re-spelled: the term keeps the text the query wrote, and only the comparison changed. The rule holds where the binding is present — the embedded engine's doors, for every block the binder bound in full. A block it could not bind (an unenumerable source, a star output, a field path, a USING-merged name, a dotted name, an unfolded FROM-less subquery), an expression-subquery or LATERAL body (planned from a re-parse of its text), and every statement the coordinator plans (whose AST is not bound until ADR-0047 stage 5) keep §1's spelling comparison, with the single-relation qualifier erasure in `groupKeyRefLookup` and `groupCheck` for those blocks only.
 
 ### 2. A key has a PUBLISHED name and a RESOLUTION spelling, and a Stage carries both
 
