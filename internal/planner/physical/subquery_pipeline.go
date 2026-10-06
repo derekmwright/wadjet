@@ -298,6 +298,17 @@ func (p *Planner) SubqueryOutputColumn(sql string) (col parquet.Column, ok bool)
 	col = schema[0]
 	w, _ := lookupColIntWidth(emittedColIntWidth(plan), col.Name)
 	col.Type = publishedIntegerType(col.Type, w)
+	// The category half, which an expression over the subquery reads through
+	// this declaration (declaredCategoryOf has nothing else to ask):
+	// `(SELECT sqrt(6.25 + id * 0) FROM t …)` and a subquery over a stored
+	// column created from one are numeric to PostgreSQL, computed in a double
+	// here, and ROUND and the integer CAST round them half away from zero.
+	col.PGNumeric = false
+	if col.Type == parquet.TypeFloat64 {
+		if pg := declaredOutputPGCategory(plan); len(pg) == 1 {
+			col.PGNumeric = pg[0] == pgCatNumeric
+		}
+	}
 	return col, true
 }
 

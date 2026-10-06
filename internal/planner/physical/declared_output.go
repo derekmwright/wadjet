@@ -1771,7 +1771,10 @@ func nodeDeclaredTypeOf(node plansql.Node, decls ColDecls) (expr.DeclType, expr.
 			}
 			return expr.DeclDecimal(col.Precision, col.Scale), expr.Decided
 		}
-		return expr.DeclType{ID: col.Type, Schema: &col}, expr.Decided
+		// The subquery's PostgreSQL category rides on its declaration
+		// (SubqueryOutputColumn): a FLOAT64-carried numeric is numeric.
+		return expr.DeclType{ID: col.Type, Schema: &col,
+			PGNumeric: col.Type == parquet.TypeFloat64 && col.PGNumeric}, expr.Decided
 	case *plansql.CmpExpr, *plansql.AndNode, *plansql.OrNode, *plansql.NotNode,
 		*plansql.IsExpr, *plansql.LikeExpr, *plansql.BetweenExpr,
 		*plansql.InExpr, *plansql.ExistsNode, *plansql.AnyAllExpr:

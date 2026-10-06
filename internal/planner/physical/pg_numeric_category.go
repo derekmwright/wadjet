@@ -138,6 +138,8 @@ func pgCategoryOfNode(n plansql.Node, decls ColDecls) pgCategory {
 				cat := pgCatUnknown
 				if decls.subqueryPGCategory != nil {
 					cat = decls.subqueryPGCategory(x.SQL)
+				} else if col.Type == parquet.TypeFloat64 && col.PGNumeric {
+					cat = pgCatNumeric
 				}
 				return pgCategoryOfDecl(withPGCategory(expr.Decl(col.Type), cat), expr.Decided)
 			}
