@@ -48,11 +48,84 @@ import (
 // `a * (b + c)` would make two DIFFERENT expressions one identity, which is
 // the wrong answer in the more dangerous direction.
 func ExprIdentity(n Node) string {
-	c := canonicalExpr(n, true)
+	c := canonicalExpr(n, canonFold)
 	if c == nil {
 		return ""
 	}
 	return c.String()
+}
+
+// canonMode says what canonicalExpr erases: canonFold folds identifier and
+// function-name case; canonBound renders a reference the binder resolved as
+// its binding rather than its spelling.
+type canonMode uint8
+
+const (
+	canonFold canonMode = 1 << iota
+	canonBound
+)
+
+// GroupTermIdentity is the identity under which a SELECT item, a HAVING or
+// ORDER BY term or a window term is matched to a GROUP BY key — the ONE
+// comparison every group-key match site makes (ADR-0047, stage 1).
+//
+// It is ExprIdentity with one difference: a column reference the binder
+// resolved (ColRef.Bound) renders as its BINDING, a key starting with a NUL
+// byte that no identifier and no alias can spell. Two terms are one key when
+// their trees are equal after ExprIdentity's three erasures AND their leaves
+// name the same columns: `2 * t.n` and `2 * n` over `FROM ss_t t` are one key
+// at any FROM arity, `zzj.d92` and `zzp.d92` two, and a bare `i` the alias
+// of `-t.i` claims can never be read as the column `i`. Commuted operands and
+// constant-folded twins stay two identities, which is PostgreSQL's 42803.
+//
+// A block the binder did not bind — a door that does not stamp, or a block
+// with a reference it could not bind with certainty, which is unbound in full
+// — renders exactly as ExprIdentity, so every such match is the spelling
+// comparison it was before.
+func GroupTermIdentity(n Node) string {
+	c := canonicalExpr(n, canonFold|canonBound)
+	if c == nil {
+		return ""
+	}
+	return c.String()
+}
+
+// HoldsBinding reports whether any column reference in n carries the
+// binder's stamp — that is, whether n belongs to a bound block.
+func HoldsBinding(n Node) bool {
+	found := false
+	WalkColRefs(n, func(r *ColRef) {
+		if r.Bound != nil {
+			found = true
+		}
+	})
+	return found
+}
+
+// MatchProbe, when set, is told every term a group-key match site compares
+// and the key identities it compares the term with (RISKS M3: a term of a
+// bound block whose leaves lost the binding — or a bound term matched against
+// keys that lost theirs — names a carrier that re-parsed text). A measurement
+// hook; nil in production.
+var MatchProbe func(site string, term Node, keys []string)
+
+// ProbeMatch reports a term and its keys to MatchProbe.
+func ProbeMatch(site string, term Node, keys []string) {
+	if MatchProbe != nil && term != nil {
+		MatchProbe(site, term, keys)
+	}
+}
+
+// ProbeMatchMap is ProbeMatch for a site whose keys are a map's keys.
+func ProbeMatchMap(site string, term Node, keys map[string]string) {
+	if MatchProbe == nil || term == nil {
+		return
+	}
+	ks := make([]string, 0, len(keys))
+	for k := range keys {
+		ks = append(ks, k)
+	}
+	MatchProbe(site, term, ks)
 }
 
 // ExprIdentityUnqualified is ExprIdentity with TABLE QUALIFIERS erased as
@@ -69,7 +142,7 @@ func ExprIdentity(n Node) string {
 // identity, which is the failure this file's header calls "the wrong answer in
 // the more dangerous direction".
 func ExprIdentityUnqualified(n Node) string {
-	c := canonicalExpr(stripQualifiers(n), true)
+	c := canonicalExpr(stripQualifiers(n), canonFold)
 	if c == nil {
 		return ""
 	}
@@ -156,14 +229,18 @@ func Unparen(n Node) Node {
 // guessed at. That is the conservative answer: an unrecognised expression
 // simply keeps whatever identity its own String() gives it, which is exactly
 // the behaviour every caller had before this function existed.
-func canonicalExpr(n Node, fold bool) Node {
+func canonicalExpr(n Node, fold canonMode) Node {
 	switch e := n.(type) {
 	case nil:
 		return nil
 	case *ParenNode:
 		return canonicalExpr(e.Inner, fold)
 	case *ColRef:
-		if !fold {
+		if fold&canonBound != 0 && e.Bound != nil {
+			// What the binder resolved, in a form no spelling can produce.
+			return &ColRef{Column: e.Bound.BindingKey()}
+		}
+		if fold&canonFold == 0 {
 			return e
 		}
 		return &ColRef{Table: strings.ToLower(e.Table), Column: strings.ToLower(e.Column)}
@@ -205,7 +282,7 @@ func canonicalExpr(n Node, fold bool) Node {
 		return out
 	case *FuncCallNode:
 		name := e.Name
-		if fold {
+		if fold&canonFold != 0 {
 			name = strings.ToLower(name)
 		}
 		out := &FuncCallNode{Name: name, Distinct: e.Distinct, Star: e.Star,
@@ -322,7 +399,7 @@ var typeNameSynonyms = map[string]string{
 // canonicalOperand is canonicalExpr for a position where the rendering must
 // stay unambiguous: an infix node's operand is re-wrapped in parentheses when
 // it is itself infix, so `(g - 1) - 2` and `g - (1 - 2)` render differently.
-func canonicalOperand(n Node, fold bool) Node {
+func canonicalOperand(n Node, fold canonMode) Node {
 	c := canonicalExpr(n, fold)
 	if isInfixNode(c) {
 		return &ParenNode{Inner: c}
@@ -546,4 +623,30 @@ func canonicalSubquerySQL(sql string, unqualify bool) string {
 		return "SELECT " + ExprIdentityUnqualified(inner)
 	}
 	return "SELECT " + ExprIdentity(inner)
+}
+
+// WalkColRefs calls f for every column reference of n's own block: through
+// every operator, call, CASE, cast and window call (its argument, PARTITION
+// BY, ORDER BY and frame offsets), and never into a subquery, whose
+// references are its own block's.
+func WalkColRefs(n Node, f func(*ColRef)) {
+	if w, ok := n.(*WindowFuncNode); ok {
+		if w.Func != nil {
+			WalkColRefs(w.Func, f)
+		}
+		for _, p := range w.PartitionBy {
+			WalkColRefs(p, f)
+		}
+		for _, o := range w.OrderBy {
+			WalkColRefs(o.Expr, f)
+		}
+		if w.Frame != nil {
+			WalkColRefs(w.Frame.Start.Offset, f)
+			if w.Frame.End != nil {
+				WalkColRefs(w.Frame.End.Offset, f)
+			}
+		}
+		return
+	}
+	walkColRefsWith(n, f, WalkColRefs)
 }

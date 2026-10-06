@@ -442,68 +442,74 @@ func resolvesInScope(n Node, scope map[string]bool, hasFrom bool) bool {
 // subquery nested inside a FROM-less one keeps its node until that block is
 // unfolded in its own right.
 func walkColRefs(n Node, f func(*ColRef)) {
+	walkColRefsWith(n, f, walkColRefs)
+}
+
+// walkColRefsWith is walkColRefs's node switch with the recursion supplied by
+// the caller, so WalkColRefs can add the window call and share the rest.
+func walkColRefsWith(n Node, f func(*ColRef), rec func(Node, func(*ColRef))) {
 	switch e := n.(type) {
 	case nil:
 		return
 	case *ColRef:
 		f(e)
 	case *ParenNode:
-		walkColRefs(e.Inner, f)
+		rec(e.Inner, f)
 	case *BinaryOp:
-		walkColRefs(e.Left, f)
-		walkColRefs(e.Right, f)
+		rec(e.Left, f)
+		rec(e.Right, f)
 	case *UnaryOp:
-		walkColRefs(e.Inner, f)
+		rec(e.Inner, f)
 	case *CmpExpr:
-		walkColRefs(e.Left, f)
-		walkColRefs(e.Right, f)
+		rec(e.Left, f)
+		rec(e.Right, f)
 	case *AndNode:
-		walkColRefs(e.Left, f)
-		walkColRefs(e.Right, f)
+		rec(e.Left, f)
+		rec(e.Right, f)
 	case *OrNode:
-		walkColRefs(e.Left, f)
-		walkColRefs(e.Right, f)
+		rec(e.Left, f)
+		rec(e.Right, f)
 	case *NotNode:
-		walkColRefs(e.Inner, f)
+		rec(e.Inner, f)
 	case *IsExpr:
-		walkColRefs(e.Left, f)
+		rec(e.Left, f)
 	case *LikeExpr:
-		walkColRefs(e.Left, f)
-		walkColRefs(e.Pattern, f)
+		rec(e.Left, f)
+		rec(e.Pattern, f)
 	case *BetweenExpr:
-		walkColRefs(e.Left, f)
-		walkColRefs(e.Low, f)
-		walkColRefs(e.High, f)
+		rec(e.Left, f)
+		rec(e.Low, f)
+		rec(e.High, f)
 	case *InExpr:
-		walkColRefs(e.Left, f)
+		rec(e.Left, f)
 		for _, v := range e.Values {
-			walkColRefs(v, f)
+			rec(v, f)
 		}
 	case *AnyAllExpr:
-		walkColRefs(e.Left, f)
+		rec(e.Left, f)
 		for _, v := range e.Values {
-			walkColRefs(v, f)
+			rec(v, f)
 		}
 	case *FuncCallNode:
 		for _, a := range e.Args {
-			walkColRefs(a, f)
+			rec(a, f)
 		}
 	case *CaseNode:
-		walkColRefs(e.Subject, f)
+		rec(e.Subject, f)
 		for _, w := range e.Whens {
-			walkColRefs(w.Cond, f)
-			walkColRefs(w.Result, f)
+			rec(w.Cond, f)
+			rec(w.Result, f)
 		}
-		walkColRefs(e.Else, f)
+		rec(e.Else, f)
 	case *CastNode:
-		walkColRefs(e.Inner, f)
+		rec(e.Inner, f)
 	case *ArrayLitNode:
 		for _, el := range e.Elements {
-			walkColRefs(el, f)
+			rec(el, f)
 		}
 	case *TupleNode:
 		for _, el := range e.Elements {
-			walkColRefs(el, f)
+			rec(el, f)
 		}
 	case *SubqueryNode, *ExistsNode:
 		// A nested block's references are that block's question.

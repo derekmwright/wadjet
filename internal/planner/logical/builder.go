@@ -564,6 +564,7 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 				OrderBy:     orderBy,
 				InputExpr:   windowArgNode(col.ASTExpr),
 			}
+			setWindowTermExprs(&we, col.ASTExpr)
 			if ws.Frame != nil {
 				we.Frame = convertFrame(ws.Frame)
 			}
@@ -579,12 +580,13 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 		for i := range winExprs {
 			winExprs[i].InputCol = respellWindowArguments(winExprs[i], winAggRefs, groupKeyRefs)
 			for j := range winExprs[i].PartitionBy {
-				winExprs[i].PartitionBy[j] = respellOverAggregate(
-					winExprs[i].PartitionBy[j], winAggRefs, groupKeyRefs)
+				winExprs[i].PartitionBy[j] = respellTermOverAggregate(winExprs[i].PartitionBy[j],
+					windowTermExpr(winExprs[i].PartitionByExprs, j), winAggRefs, groupKeyRefs)
 			}
 			for j := range winExprs[i].OrderBy {
 				before := winExprs[i].OrderBy[j].Column
-				after := respellOverAggregate(before, winAggRefs, groupKeyRefs)
+				after := respellTermOverAggregate(before, windowTermExpr(winExprs[i].OrderByExprs, j),
+					winAggRefs, groupKeyRefs)
 				winExprs[i].OrderBy[j].Column = after
 				// …and WHICH map re-spelled it, which is the CLASS the name
 				// itself can no longer carry once the aggregate emits it
@@ -1135,6 +1137,17 @@ func reuseOrAddAggregate(call *plansql.FuncCallNode, aggs *[]AggExpr, counter *i
 // strips the delimiters and binds the name; without them it materialized the
 // key by EVALUATING it and ordered by NULL on every row.
 func respellOverAggregate(term string, aggRefs, keyRefs map[string]string) string {
+	return respellTermOverAggregate(term, nil, aggRefs, keyRefs)
+}
+
+// respellTermOverAggregate is respellOverAggregate for a term whose PARSED
+// tree the caller holds. A tree of a bound block is matched as it is — with
+// the bindings the binder recorded on it — instead of as a re-parse of its
+// text, which carries none (ADR-0047: a block is matched by binding in full or
+// by spelling in full, never a mixture). The tree is used only when it renders
+// as the text's own parse does, so the two are one term; anything else, and
+// every term of an unbound block, is the text's parse exactly as before.
+func respellTermOverAggregate(term string, node plansql.Node, aggRefs, keyRefs map[string]string) string {
 	if term == "" || term == "*" || (len(aggRefs) == 0 && len(keyRefs) == 0) {
 		return term
 	}
@@ -1142,6 +1155,10 @@ func respellOverAggregate(term string, aggRefs, keyRefs map[string]string) strin
 	if err != nil || parsed == nil {
 		return term
 	}
+	if node != nil && plansql.HoldsBinding(node) && node.String() == parsed.String() {
+		parsed = node
+	}
+	plansql.ProbeMatchMap("logical.respellOverAggregate", parsed, keyRefs)
 	out := parsed
 	if len(aggRefs) > 0 {
 		out = plansql.ReplaceAllAggregates(out, aggRefs)
@@ -1164,12 +1181,43 @@ func respellOverAggregate(term string, aggRefs, keyRefs map[string]string) strin
 func respellWindowArguments(we WindowExpr, aggRefs, keyRefs map[string]string) string {
 	args := we.Arguments()
 	if len(args) < 2 {
-		return respellOverAggregate(we.InputCol, aggRefs, keyRefs)
+		return respellTermOverAggregate(we.InputCol, windowTermExpr(we.ArgExprs, 0), aggRefs, keyRefs)
 	}
 	for i, a := range args {
-		args[i] = respellOverAggregate(a, aggRefs, keyRefs)
+		args[i] = respellTermOverAggregate(a, windowTermExpr(we.ArgExprs, i), aggRefs, keyRefs)
 	}
 	return strings.Join(args, ", ")
+}
+
+// setWindowTermExprs records a window call's parsed terms on the WindowExpr
+// built from it, when n is that call and each list is as long as the text
+// list it parallels (WindowExpr.ArgExprs). A list that does not line up is
+// left nil, and the text is parsed as before.
+func setWindowTermExprs(we *WindowExpr, n plansql.Node) {
+	wfn, ok := n.(*plansql.WindowFuncNode)
+	if !ok {
+		return
+	}
+	if wfn.Func != nil && !wfn.Func.Star && len(wfn.Func.Args) == len(we.Arguments()) {
+		we.ArgExprs = append([]plansql.Node(nil), wfn.Func.Args...)
+	}
+	if len(wfn.PartitionBy) == len(we.PartitionBy) {
+		we.PartitionByExprs = append([]plansql.Node(nil), wfn.PartitionBy...)
+	}
+	if len(wfn.OrderBy) == len(we.OrderBy) {
+		we.OrderByExprs = make([]plansql.Node, len(wfn.OrderBy))
+		for i, ob := range wfn.OrderBy {
+			we.OrderByExprs[i] = ob.Expr
+		}
+	}
+}
+
+// windowTermExpr is exprs[i], or nil past its end.
+func windowTermExpr(exprs []plansql.Node, i int) plansql.Node {
+	if i < 0 || i >= len(exprs) {
+		return nil
+	}
+	return exprs[i]
 }
 
 // windowArgNode returns the AST of a window function's FIRST argument, for
@@ -1220,6 +1268,7 @@ func windowExprFromNode(wfn *plansql.WindowFuncNode, outputCol string) WindowExp
 		OrderBy:     orderBy,
 		InputExpr:   windowArgNode(wfn),
 	}
+	setWindowTermExprs(&we, wfn)
 	if wfn.Frame != nil {
 		we.Frame = convertFrame(wfn.Frame)
 	}
