@@ -28,13 +28,13 @@ Millisecond storage truncates `.123456` return as `.123`; PostgreSQL retains `.1
 
 No blank-padded type exists. `CAST('ab' AS CHAR(4))`: wadjet `ab`; PostgreSQL `ab  `. The OID is 1043, not 1042; bare CHAR is unconstrained, not CHAR(1). (catalog: [text-collation#r5, r6, r7](adr/0012-divergences/text-collation.md#catalog); #708-residual)
 
-**Decimal choices print one scale.**
+**A numeric array's elements share one scale, and arithmetic over values of different display scales prints the carrier's zeros.**
 
-Storage has one scale per column. `COALESCE(numeric(15,2), 12.3456789012345)`: the ADR’s column value prints `12.7500000000000` versus `12.75`, and the elements of a numeric[] array share one scale too: `ARRAY[n, 1]` over a numeric(10,2) prints `{2.25,1.00}` versus `{2.25,1}`. (catalog: [numeric-decimal#r18](adr/0012-divergences/numeric-decimal.md#catalog); #764)
+Each numeric value prints its own display scale (ADR-0024 §11): `COALESCE(numeric(15,2), 12.3456789012345)` prints `12.75` and `12.3456789012345` in one column, as PostgreSQL does, and so do CASE, GREATEST, LEAST, NULLIF and a set operation of a column and a literal. Two cases still print one scale: the elements of a numeric[] array — `ARRAY[n, 1]` over a numeric(10,2) prints `{2.25,1.00}` versus `{2.25,1}` — and arithmetic over values of different display scales, which answers at its carrier scale: `COALESCE(n, 1.5) + 0` prints `1.50` versus `1.5`. (catalog: [numeric-decimal#r18](adr/0012-divergences/numeric-decimal.md#catalog); #764)
 
 **A column created from an unconstrained numeric prints no trailing zeros.**
 
-Its values print without the stored scale's trailing zeros — `1.25`, `1`, `0.755`, as PostgreSQL prints them — so a trailing zero the source carried is not printed either: `CREATE TABLE t AS SELECT 2.50 AS v` prints `2.5` where PostgreSQL prints `2.50`. Every text rendering of the value prints the same text — `CAST(v AS TEXT)`, `v || ''`, `concat`, `format`, `json_build_object`. An expression over the column (`v + 1`, `SUM(v)`) prints at its one declared scale. (catalog: [numeric-decimal#r24](adr/0012-divergences/numeric-decimal.md#catalog); #1541)
+Its values print without the stored scale's trailing zeros — `1.25`, `1`, `0.755`, as PostgreSQL prints them — so a trailing zero the source carried is not printed either: `CREATE TABLE t AS SELECT 2.50 AS v` prints `2.5` where PostgreSQL prints `2.50`. Every text rendering of the value prints the same text — `CAST(v AS TEXT)`, `v || ''`, `concat`, `format`, `json_build_object`. An expression over the column (`v + 1`, `SUM(v)`) prints at its one declared scale. A stored value keeps no display scale of its own until a later stage records one; a value computed in the query prints its own (`v UNION ALL SELECT 2.50` prints the stored `1.25` and the literal's `2.50`). (catalog: [numeric-decimal#r24](adr/0012-divergences/numeric-decimal.md#catalog); #1541)
 
 **A CREATE TABLE AS column from `+n`, or from a CASE whose constant condition calls a function, keeps the plan's type.**
 
@@ -169,10 +169,6 @@ Arrays whose element types have NO common type — an integer array beside a tex
 `CAST(ARRAY[1,2] AS JSON)` is `[1,2]` — `to_json`'s text, which `json_array_length` and the other JSON functions read — where PostgreSQL has no cast from `integer[]` to `json` and raises 42846; a ROW is its `to_json` object. Every other non-text destination of a container is 42846 as on PostgreSQL. `CAST(ARRAY[1,2] AS VECTOR(2))` converts as pgvector's cast does. (ADR-0045)
 
 An array of `INTERVAL` has no text here: `CAST(ARRAY[INTERVAL '1 hour'] AS TEXT)` (and `AS JSON`, `AS TEXT[]`) raises 0A000 where PostgreSQL prints `{01:00:00}` — this engine has no interval text form for a container element (a scalar `INTERVAL` prints its own text, `1 day`). Everywhere else — a projection nothing reads, `=`, `<`, `GROUP BY`, `DISTINCT`, `UNION`, a hash or sort-merge join key, `MIN`/`MAX` — an INTERVAL element declares this engine's DURATION (nanoseconds; #351 above) and compares, groups and orders BY VALUE (PostgreSQL's own `interval_cmp`: a month is 30 days), never by its rendered text; a bare `SELECT ARRAY[INTERVAL '1 hour']` with no CAST answers that nanosecond count (`[3600000000000]`) rather than raising 42000 as it used to. An interval that already became text before the array was built (through a derived table or a scalar subquery) is that text. (catalog: [other#r3, r5, r6, r7, r8, r9, r10, r11](adr/0012-divergences/other.md#catalog); ADR-0045 §1)
-
-**Decimal set operations keep one declared scale.**
-
-Storage requires one scale. PostgreSQL declares unconstrained numeric; wadjet retains `(p,s)` and prints `12.7500` where PostgreSQL prints `12.75`. Beside a column created from an unconstrained `NUMERIC` the result prints that column's text, without trailing zeros, unless another arm is a `NUMERIC(p,s)` column, a CAST to one, or a literal spelled with trailing zeros (`2.50`): then every value prints the stored scale (`1.0000000000`, `2.5000000000`). (catalog: [set-operations#r4](adr/0012-divergences/set-operations.md#catalog); ADR-0012 §12/decimal-carrier)
 
 **Mixed int4-family sets declare bigint.**
 

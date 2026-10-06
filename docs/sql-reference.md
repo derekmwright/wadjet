@@ -912,6 +912,17 @@ digits and 18 integer digits (`v * v` over 1234567890 is `22003`; write
 are the declared type. A table created before this rule declared `NUMERIC`
 as DECIMAL(38,0) and keeps it. See ADR-0024 §10.
 
+A numeric value computed in a query prints its own display scale, as
+PostgreSQL's does (ADR-0024 §11): `SELECT COALESCE(n, 1.5) FROM t` over a
+`NUMERIC(10,2)` column prints `2.25` and `1.5`, `SELECT n FROM t UNION ALL
+SELECT 2.500 FROM u` prints `2.25` and `2.500`, `CASE … THEN 14 ELSE 13.25
+END` prints `14`, and every protocol — text, extended, binary (whose
+numeric `dscale` is the printed value's) — and every rendering
+(`CAST(x AS TEXT)`, `||`, `json_build_object`) reads the same text. `2.50`
+and `2.5` compare, join, group and deduplicate as one value. Arithmetic over
+values of different display scales answers at its declared scale
+(`COALESCE(n, 1.5) + 0` prints `1.50`), and so do a numeric array's elements.
+
 ## CREATE TABLE AS SELECT
 
 ```sql

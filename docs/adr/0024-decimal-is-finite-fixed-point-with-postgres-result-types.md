@@ -1291,7 +1291,8 @@ list or a rename; a computed wrapper such as `v + 0` is neutral):
 
 An unmarked mixed result prints its one stored scale where PostgreSQL prints
 each value's own (`2.5000000000` beside a `2.50` literal, `1.0000000000`
-beside a NUMERIC(10,2) column: set-operations r4, numeric-decimal r18).
+beside a NUMERIC(10,2) column: set-operations r4, numeric-decimal r18; closed
+2026-10-06 by §11, under which each value prints its own display scale).
 For the trailing-zero literal the choice was measured: marked, `2.50` would
 print `2.5`; unmarked it prints `2.5000000000`; neither is PostgreSQL's. Over
 the set-operation matrix (`coordinator.TestArcUNSetOperationMatrix`) the
@@ -1513,8 +1514,7 @@ carrier:
   vector copy, view and flatten; the sort, join, window and projection
   gathers; a group key (its first member's printed box); LAG / LEAD /
   FIRST_VALUE / LAST_VALUE / NTH_VALUE; a column reference's box; the
-  coordinator's merge copy and the scalar subquery's substituted literal;
-  the columnar spill run (flag bit 4 and a section after the carriers);
+  coordinator's merge copy; the columnar spill run (flag bit 4 and a section after the carriers);
   and the `.wshf` exchange — a per-CHUNK section after a DECIMAL column's
   carriers, announced by the chunk's data length (ADR-0010's 2026-10-06
   amendment). The design placed that announcement in bit 6 of the header's
