@@ -114,6 +114,12 @@ func TestArcREStoredColumnKeepsItsCategoryAcrossReopenAndCompaction(t *testing.T
 				}
 			}
 		}
+		// The declaration is ADR-0024 §2c's divergence and stays: the column
+		// is double precision here (numeric on PostgreSQL), its values the
+		// doubles the expression computed.
+		if res, err := db.Query(ctx, "SELECT data_type FROM information_schema.columns WHERE table_name = 'rs_h' AND column_name = 'b'"); err != nil || len(res.Rows) != 1 || reText(res.Cells(0)[0]) != "double precision" {
+			t.Errorf("%s: rs_h.b is not declared double precision (%v)", when, err)
+		}
 		sort.Strings(got)
 		if g := strings.Join(got, " "); g != marks {
 			t.Errorf("%s: the catalog marks %s, want %s", when, g, marks)
