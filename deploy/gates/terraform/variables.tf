@@ -37,7 +37,7 @@ variable "template_name" {
 }
 
 variable "instance_type" {
-  description = "ADR-0046 shape: one spot c7a.8xlarge (32 vCPU, 64 GiB) per request."
+  description = "ADR-0046 shape: one spot c7a.8xlarge (32 vCPU, 64 GiB) per request; on a capacity refusal tooling/gaterun.sh overrides the type with the 2026-10-06 fallback list (c6a / c7i / c6i .8xlarge)."
   type        = string
   default     = "c7a.8xlarge"
 }

@@ -34,3 +34,9 @@ The heavy gate set runs on an ephemeral AWS runner per request: one branch sha i
 `deploy/gates/runner.sh` publishes `gates/<sha>/<run>/summary.json`; the run component keeps separate invocations of one commit distinct.
 The gate-specific reaper is deployed by `deploy/gates/terraform/main.tf` using the shared reaper source with a 40-minute bound; the benchmark deployment retains its own two-hour bound.
 The release housekeeping smoke statement `SELECT 1` answers 1 on the tip binary; this checks the local SQL path only, and no runner was launched for that check.
+
+## 2026-10-06 amendment: a fallback list of equivalent spot pools
+
+The shape named one pool, `c7a.8xlarge`. Over 2026-10-02..06 that pool reclaimed five runs mid-flight and, on the evening of 2026-10-06, refused every launch in every us-east-2 subnet for over two hours while a landing waited. The pool was chosen for speed and price, never for its interruption rate.
+
+The dispatcher now tries, on a capacity refusal, each equivalent x86-64 32-vCPU / 64-GiB pool in turn — `c7a.8xlarge`, `c6a.8xlarge`, `c7i.8xlarge`, `c6i.8xlarge` — each across every default-VPC subnet, by overriding the launch template's instance type. Every other constant of the shape is unchanged: spot only, the same tags, the 40-minute terminate, four concurrent, the gate bucket. The lanes do not depend on the processor; the longest lane's 15-minute target holds on each (same core count and memory). On-demand is NOT a fallback: a run refused by every pool waits (Derek, 2026-10-06: a backup list, never waste). The lane table names the pool that ran.
