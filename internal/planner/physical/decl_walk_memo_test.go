@@ -42,7 +42,7 @@ func nestedDerivedPlan(t *testing.T, depth int) (root, base *logical.Node, nodes
 // those ran childDecls on ITS child, so `SELECT v FROM (…)` nested sixteen
 // deep planned in minutes (b69c2412; TestTCPFlagPlanningDepth's bound).
 func TestDeclWalkComputesEachNodeOnce(t *testing.T) {
-	for _, depth := range []int{1, 8, 16, 24} {
+	for _, depth := range []int{1, 8, 16, 24, 64} {
 		t.Run(fmt.Sprintf("depth%d", depth), func(t *testing.T) {
 			root, base, nodes := nestedDerivedPlan(t, depth)
 			want := emittedColDecls(base)
@@ -59,9 +59,13 @@ func TestDeclWalkComputesEachNodeOnce(t *testing.T) {
 					t.Errorf("%s computed %d times in one walk, want 1", k, c)
 				}
 			}
-			// Four memoized walks, each at most once per node.
-			if total > 4*nodes {
-				t.Errorf("depth %d: %d computations over %d nodes, want <= %d", depth, total, nodes, 4*nodes)
+			// Five memoized walks — the four name walks and the ordered one
+			// (outputs, ADR-0047 stage 2) — each at most once per node.
+			if total > 5*nodes {
+				t.Errorf("depth %d: %d computations over %d nodes, want <= %d", depth, total, nodes, 5*nodes)
+			}
+			if seen[fmt.Sprintf("outputs/%p", base)] != 1 {
+				t.Errorf("depth %d: the ordered walk did not declare the base projection once", depth)
 			}
 			// Every level forwards v, so the root declares it as the base
 			// Project does.

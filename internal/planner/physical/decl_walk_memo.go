@@ -48,6 +48,13 @@ type declWalk struct {
 	dec    map[*logical.Node]map[string]logical.DecimalMeta
 	shapes map[*logical.Node]map[string]parquet.Column
 	widths map[*logical.Node]map[string]intWidth
+	// outs and cols are the ORDERED walks (ADR-0047 stage 2): each node's
+	// output positions with their bindings (logical.OutputColumnsWith) and
+	// their declarations (outputs), computed once per node like the maps.
+	outs     map[*logical.Node][]declPos
+	outsDone map[*logical.Node]bool
+	cols     map[*logical.Node][]logical.OutputColumn
+	colsDone map[*logical.Node]bool
 	// computed, when a test sets it, is told each uncached computation.
 	computed func(kind string, n *logical.Node)
 }
@@ -67,6 +74,17 @@ func memoized[V any](w *declWalk, m *map[*logical.Node]map[string]V, n *logical.
 	}
 	(*m)[n] = maps.Clone(r)
 	return r
+}
+
+// memoView is memoized without the copy: the stored map itself, for a caller
+// that only READS it (the ordered walk's own positions). A miss computes and
+// stores as memoized does.
+func memoView[V any](w *declWalk, m *map[*logical.Node]map[string]V, n *logical.Node, kind string, compute func(*logical.Node) map[string]V) map[string]V {
+	if r, ok := (*m)[n]; ok {
+		return r
+	}
+	memoized(w, m, n, kind, compute)
+	return (*m)[n]
 }
 
 func (w *declWalk) emittedColTypes(n *logical.Node) map[string]parquet.TypeID {

@@ -461,6 +461,14 @@ func (w *declWalk) aggregateProjectionFields(project *logical.Node, p logical.Pr
 // raised — where the same expression as the query's own item declared
 // numeric. emittedColDecls is the same declarations with the integer width.
 func (w *declWalk) childDecls(child *logical.Node) ColDecls {
+	d := w.namedChildDecls(child)
+	d.pos, d.walk = w.outputs(child), w
+	return d
+}
+
+// namedChildDecls is childDecls' name index alone: what the ordered walk
+// (outputs) reads a node's OWN positions from.
+func (w *declWalk) namedChildDecls(child *logical.Node) ColDecls {
 	shapes := w.inputColShapes(child)
 	return ColDecls{
 		Types:  w.emittedColTypes(child),
@@ -911,7 +919,8 @@ func sameRowFields(a, b []parquet.Column) bool {
 // rather than passing inputColTypes alone, which cannot type a field path.
 func (w *declWalk) inputColDecls(n *logical.Node) ColDecls {
 	shapes := w.inputColShapes(n)
-	return ColDecls{Types: w.inputColTypes(n), Fields: shapeFields(shapes), Elems: shapeElems(shapes), Dec: w.inputColDecimal(n)}
+	return ColDecls{Types: w.inputColTypes(n), Fields: shapeFields(shapes), Elems: shapeElems(shapes), Dec: w.inputColDecimal(n),
+		pos: w.outputs(n), walk: w}
 }
 
 // windowOutputColTypes adds a Window node's own output SLOTS to the types its
@@ -1135,6 +1144,13 @@ type ColDecls struct {
 	// either; an absent entry is the carrier's reading, which for a base
 	// column IS the catalog's type.
 	pgCat map[string]pgCategory
+	// pos is the input's output IN ORDER, each position with the binding it
+	// is (logical.OutputColumns) and its declaration (declWalk.outputs). A
+	// bound reference resolves here first (boundPos); the maps above are the
+	// name index the unbound paths and the publication read. Nil where the
+	// builder of this ColDecls had no node to ask.
+	pos  []declPos
+	walk *declWalk
 	// pgMemo holds pgCategoryOf's answer per node for ONE declaration walk
 	// (installed by nodeDeclaredType when absent, shared by every recursive
 	// call through the struct copy). The declared-type walk re-resolves each
@@ -1213,36 +1229,29 @@ func (d ColDecls) colType(n *plansql.ColRef) (parquet.TypeID, bool) {
 // documents above, and reads the (p,s) out of the SAME key that answered the
 // type, so the two halves can never describe different columns.
 func (d ColDecls) colDecl(n *plansql.ColRef) (parquet.Column, bool) {
-	at := func(key string) (parquet.Column, bool) {
-		t, ok := d.Types[key]
-		if !ok {
-			return parquet.Column{}, false
+	// A BOUND reference names one position of the input's ordered output —
+	// the column the binder resolved it to — and is declared by that
+	// position, whatever its name (ADR-0047 stage 2). Only a reference the
+	// list does not hold falls to the name rules below.
+	if p, ok := d.boundPos(n); ok && p.ok {
+		if DeclIdentityProbe != nil {
+			byName, named := d.colDeclByName(n)
+			DeclIdentityProbe(n, p.Col, byName, named)
 		}
-		col := parquet.Column{Name: key, Type: t, Fields: d.Fields[key]}
-		e, ok := d.Elems[key]
-		if !ok {
-			// A QUALIFIED key (`c2.ad` over an aliased scan) whose type the
-			// map carries under the qualifier while the shape walk keys the
-			// column bare: the bare entry is this column's element, because
-			// a join's shape walk drops a bare name its sides declare
-			// differently (arc CW, B1 — a decorrelated LATERAL's
-			// `MAX(c2.ad)` declared no element).
-			if dot := strings.LastIndexByte(key, '.'); dot >= 0 {
-				e, ok = d.Elems[key[dot+1:]]
-			}
-		}
-		if ok && e.Type == t && e.ElementType != nil {
-			el := e.ElementType.Clone()
-			col.ElementType = &el
-		}
-		if t == parquet.TypeDecimal {
-			if m, ok := lookupColDecimal(d.Dec, key); ok {
-				col.Precision, col.Scale = m.Precision, m.Scale
-				col.Unconstrained = m.Unconstrained
-			}
-		}
-		return col, true
+		return p.Col, true
 	}
+	return d.colDeclByName(n)
+}
+
+// DeclIdentityProbe, when set, receives every reference declared by its
+// binding, with what the name rules would have answered beside it: a
+// measurement hook (the stage-2 census, ADR-0047); nil in production.
+var DeclIdentityProbe func(ref *plansql.ColRef, byBinding, byName parquet.Column, named bool)
+
+// colDeclByName is colDecl's name rules: the qualified spelling, a ROW field
+// path, then the bare name.
+func (d ColDecls) colDeclByName(n *plansql.ColRef) (parquet.Column, bool) {
+	at := d.atKey
 	if n.Table != "" {
 		if c, ok := at(strings.ToLower(n.Table + "." + n.Column)); ok {
 			return c, true
@@ -1266,6 +1275,38 @@ func (d ColDecls) colDecl(n *plansql.ColRef) (parquet.Column, bool) {
 	return parquet.Column{}, false
 }
 
+// atKey is the whole declaration the name index holds under key.
+func (d ColDecls) atKey(key string) (parquet.Column, bool) {
+	t, ok := d.Types[key]
+	if !ok {
+		return parquet.Column{}, false
+	}
+	col := parquet.Column{Name: key, Type: t, Fields: d.Fields[key]}
+	e, ok := d.Elems[key]
+	if !ok {
+		// A QUALIFIED key (`c2.ad` over an aliased scan) whose type the
+		// map carries under the qualifier while the shape walk keys the
+		// column bare: the bare entry is this column's element, because
+		// a join's shape walk drops a bare name its sides declare
+		// differently (arc CW, B1 — a decorrelated LATERAL's
+		// `MAX(c2.ad)` declared no element).
+		if dot := strings.LastIndexByte(key, '.'); dot >= 0 {
+			e, ok = d.Elems[key[dot+1:]]
+		}
+	}
+	if ok && e.Type == t && e.ElementType != nil {
+		el := e.ElementType.Clone()
+		col.ElementType = &el
+	}
+	if t == parquet.TypeDecimal {
+		if m, ok := lookupColDecimal(d.Dec, key); ok {
+			col.Precision, col.Scale = m.Precision, m.Scale
+			col.Unconstrained = m.Unconstrained
+		}
+	}
+	return col, true
+}
+
 // colIntWidth resolves a column reference to the PostgreSQL INTEGER WIDTH its
 // declaration carries, in exactly the order colDecl resolves the type — so the
 // width and the type can never describe two different columns, which is the
@@ -1275,6 +1316,11 @@ func (d ColDecls) colDecl(n *plansql.ColRef) (parquet.Column, bool) {
 // carrier. A ROW FIELD is deliberately not answered here: a field's width is
 // its own declared type's, which ColDecls.field already carries.
 func (d ColDecls) colIntWidth(n *plansql.ColRef) (intWidth, bool) {
+	if p, ok := d.boundPos(n); ok {
+		if wd, ok := d.walk.posWidth(p); ok {
+			return wd, true
+		}
+	}
 	if n == nil || len(d.intWidth) == 0 {
 		return intWidthUnknown, false
 	}
