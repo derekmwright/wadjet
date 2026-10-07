@@ -1,6 +1,6 @@
 # ADR-0047: A column reference has one resolved identity
 
-- Status: Accepted (2026-10-06), stage 1.
+- Status: Accepted (2026-10-06), stages 1 and 2.
 - Deciders: Derek Wright
 - Related: [ADR-0026](0026-a-group-key-has-one-identity-and-one-name.md), [names-scopes r10](0012-divergences/names-scopes.md#catalog).
 
@@ -70,6 +70,30 @@ and unfolded FROM-less forms retain the gate's recorded answers (`qd/*`,
   50 keys and a twelve-way join, each under the gate's two-second bound.
 - `go run ./tools/licensecheck .` and `TestAGPLPhysicalMemberBudget`:
   the existing package and physical-member budgets.
+
+## Stages
+
+| Stage | State | What reads the binding | What stays keyed by name, and where it moves |
+|---|---|---|---|
+| 1 | done (2026-10-06, #1524) | the single-process GROUP BY term match | — |
+| 2 | done (#1393) | the single-process declaration walk: a node's output is an ordered identity list (`logical.Node.OutputColumns` / `OutputIDs`, from the instance the binder records on the FROM item, `plansql.TableRef.Rel`); `physical.declWalk.outputs` declares each position once per walk; a bound reference — a projection's leaf, a GROUP BY key, LAG's default — is declared by the position its binding names; a GROUP BY key is read from its tree, never its text | the PostgreSQL category (`ColDecls.pgCat`) and the strict-integer set, by name; the rename chase that re-spells a computed key for execution (`resolveAggInputName`, stage 6); a node a rewrite rebuilt without its instance answers by name; the stage DAG's per-stage declarations (`GroupByTypes`, `GroupByDecimal`, stages 5 and 7) |
+
+Stage 2's gates: `coordinator.TestArcCI2DeclaredOutputByIdentityEveryArm`
+(1,573 cells × five arms: eight origins of a relation that publishes another
+relation's names at other types, nine expressions, thirteen consumer sites;
+the stage-DAG arms keep their base answers as kept lines),
+`pgwire.TestArcCI2DeclaredOutputOnTheWire` (#1393's statements and the
+grouped forms, text and binary, INSERT … SELECT *, CREATE TABLE … AS and
+MERGE), `wadjet.TestArcCI2DeclarationByIdentityCensus` (every reference
+declared by its binding is also asked by name; zero disagreements wherever
+the name rules answer) and `wadjet.TestArcCI2DeclarationPlanningBound`
+(derived tables nested 16 and 64 deep, 200 items over 50 keys, a twelve-way
+join, each under two seconds).
+
+The name lookups the walk keeps for unbound references resolve a qualified
+reference by its PARSED qualifier and column (`physical.lookupColRef`):
+cutting an expression's text at its last dot read `x + a.k` as the column
+`k`, which is #1393.
 
 ## Measurement record
 
