@@ -20,6 +20,19 @@ store/ctasGrouped	s	true	DROP TABLE IF EXISTS ci2_c ;; CREATE TABLE ci2_c AS SEL
 store/ctasSumGrouped	s	true	DROP TABLE IF EXISTS ci2_cs ;; CREATE TABLE ci2_cs AS SELECT sum(q.v) AS s FROM (SELECT f + a.i AS v FROM ss_t a GROUP BY f + a.i) q ;; SELECT s FROM ci2_cs	{701} rows=1 101.375
 store/merge	s	true	DROP TABLE IF EXISTS ci2_m ;; CREATE TABLE ci2_m (id BIGINT, v DOUBLE PRECISION) ;; MERGE INTO ci2_m USING (SELECT a.id, f + a.i AS v FROM ss_t a JOIN (SELECT id AS bid FROM ss_t) b ON a.id = b.bid) s2 ON ci2_m.id = s2.id WHEN NOT MATCHED THEN INSERT (id, v) VALUES (s2.id, s2.v) ;; SELECT id, v FROM ci2_m ORDER BY id	{20,701} rows=6 1,4.5 | 2,-9.5 | 3,5.25 | 4,0 | 5,101.125 | 6,NULL
 store/mergeGrouped	s	true	DROP TABLE IF EXISTS ci2_mg ;; CREATE TABLE ci2_mg (k DOUBLE PRECISION, c BIGINT) ;; MERGE INTO ci2_mg USING (SELECT f + a.i AS v, count(*) AS c FROM ss_t a GROUP BY f + a.i) s2 ON ci2_mg.k = s2.v WHEN NOT MATCHED THEN INSERT (k, c) VALUES (s2.v, s2.c) ;; SELECT k, c FROM ci2_mg ORDER BY k	{701,20} rows=6 -9.5,1 | 0,1 | 4.5,1 | 5.25,1 | 101.125,1 | NULL,1
+agg/D7a	s	true	SELECT sum(q.i) AS s FROM (SELECT f AS i FROM ss_t) q	{701} rows=1 99.375
+agg/D7b	s	true	SELECT sum(q.n) AS s FROM (SELECT f AS n FROM ss_t) q	{701} rows=1 99.375
+agg/D7c	s	true	SELECT sum(u.i) AS s FROM ss_t t JOIN (SELECT id, f AS i FROM ss_t) u ON t.id = u.id	{701} rows=1 99.375
+agg/D7d	s	true	SELECT avg(q.i) AS a FROM (SELECT f AS i FROM ss_t) q	{701} rows=1 19.875
+agg/D7e	s	true	SELECT q.o, sum(q.i) AS s FROM (SELECT o, f AS i FROM ss_t) q GROUP BY q.o ORDER BY 1	{16,701} rows=3 f,-2.5 | t,101.875 | NULL,NULL
+agg/D7f	s	true	SELECT sum(q.v) AS s FROM (SELECT g AS v FROM ss_i) q	{701} rows=1 0.75
+agg/D7g	s	true	SELECT max(q.i) + 0.5 AS m FROM (SELECT f AS i FROM ss_t) q	{701} rows=1 100.625
+agg/r04	s	true	SELECT sum(r.i) AS si, sum(r.f) AS sf FROM (SELECT q.id, q.f AS i, q.i AS f FROM (SELECT p.id, p.f AS i, p.i AS f FROM (SELECT id, i AS f, f AS i FROM ss_t) p) q) r	{701,20} rows=1 99.375,2
+agg/r12	s	true	SELECT sum(q.i) AS s FROM (SELECT DISTINCT p.f AS i FROM (SELECT f FROM ss_t) p) q	{701} rows=1 99.375
+agg/a05	s	true	SELECT sum(d.i) AS si, sum(d.f) AS sf FROM (SELECT f, i FROM ss_t) d(i, f)	{701,20} rows=1 99.375,2
+agg/v1	s	true	SELECT sum(q.i) AS s FROM (SELECT f AS i FROM ss_t) q	{701} rows=1 99.375
+agg/v2	s	true	SELECT sum(q.i) AS s FROM (SELECT p.f AS i FROM (SELECT f FROM ss_t) p) q	{701} rows=1 99.375
+agg/v12	s	true	SELECT sum(q.i) AS s FROM (SELECT f AS i FROM ss_t) q GROUP BY q.i IS NULL ORDER BY 1	{701} rows=2 99.375 | NULL
 issue/panic	e	true	SELECT x + a.i AS v FROM ss_t a JOIN (SELECT id, f AS x FROM ss_t) b ON a.id = b.id WHERE a.id = 1	{701} rows=1 4.5
 issue/noAlias	e	true	SELECT x + a.i FROM ss_t a JOIN (SELECT id, f AS x FROM ss_t) b ON a.id = b.id WHERE a.id = 1	{701} rows=1 4.5
 issue/zeroRow	e	true	SELECT x + a.i AS v FROM ss_t a JOIN (SELECT id, f AS x FROM ss_t) b ON a.id = b.id WHERE a.id = 99	{701} rows=0 
@@ -41,6 +54,19 @@ store/ctasGrouped	e	true	DROP TABLE IF EXISTS ci2_c ;; CREATE TABLE ci2_c AS SEL
 store/ctasSumGrouped	e	true	DROP TABLE IF EXISTS ci2_cs ;; CREATE TABLE ci2_cs AS SELECT sum(q.v) AS s FROM (SELECT f + a.i AS v FROM ss_t a GROUP BY f + a.i) q ;; SELECT s FROM ci2_cs	{701} rows=1 101.375
 store/merge	e	true	DROP TABLE IF EXISTS ci2_m ;; CREATE TABLE ci2_m (id BIGINT, v DOUBLE PRECISION) ;; MERGE INTO ci2_m USING (SELECT a.id, f + a.i AS v FROM ss_t a JOIN (SELECT id AS bid FROM ss_t) b ON a.id = b.bid) s2 ON ci2_m.id = s2.id WHEN NOT MATCHED THEN INSERT (id, v) VALUES (s2.id, s2.v) ;; SELECT id, v FROM ci2_m ORDER BY id	{20,701} rows=6 1,4.5 | 2,-9.5 | 3,5.25 | 4,0 | 5,101.125 | 6,NULL
 store/mergeGrouped	e	true	DROP TABLE IF EXISTS ci2_mg ;; CREATE TABLE ci2_mg (k DOUBLE PRECISION, c BIGINT) ;; MERGE INTO ci2_mg USING (SELECT f + a.i AS v, count(*) AS c FROM ss_t a GROUP BY f + a.i) s2 ON ci2_mg.k = s2.v WHEN NOT MATCHED THEN INSERT (k, c) VALUES (s2.v, s2.c) ;; SELECT k, c FROM ci2_mg ORDER BY k	{701,20} rows=6 -9.5,1 | 0,1 | 4.5,1 | 5.25,1 | 101.125,1 | NULL,1
+agg/D7a	e	true	SELECT sum(q.i) AS s FROM (SELECT f AS i FROM ss_t) q	{701} rows=1 99.375
+agg/D7b	e	true	SELECT sum(q.n) AS s FROM (SELECT f AS n FROM ss_t) q	{701} rows=1 99.375
+agg/D7c	e	true	SELECT sum(u.i) AS s FROM ss_t t JOIN (SELECT id, f AS i FROM ss_t) u ON t.id = u.id	{701} rows=1 99.375
+agg/D7d	e	true	SELECT avg(q.i) AS a FROM (SELECT f AS i FROM ss_t) q	{701} rows=1 19.875
+agg/D7e	e	true	SELECT q.o, sum(q.i) AS s FROM (SELECT o, f AS i FROM ss_t) q GROUP BY q.o ORDER BY 1	{16,701} rows=3 f,-2.5 | t,101.875 | NULL,NULL
+agg/D7f	e	true	SELECT sum(q.v) AS s FROM (SELECT g AS v FROM ss_i) q	{701} rows=1 0.75
+agg/D7g	e	true	SELECT max(q.i) + 0.5 AS m FROM (SELECT f AS i FROM ss_t) q	{701} rows=1 100.625
+agg/r04	e	true	SELECT sum(r.i) AS si, sum(r.f) AS sf FROM (SELECT q.id, q.f AS i, q.i AS f FROM (SELECT p.id, p.f AS i, p.i AS f FROM (SELECT id, i AS f, f AS i FROM ss_t) p) q) r	{701,20} rows=1 99.375,2
+agg/r12	e	true	SELECT sum(q.i) AS s FROM (SELECT DISTINCT p.f AS i FROM (SELECT f FROM ss_t) p) q	{701} rows=1 99.375
+agg/a05	e	true	SELECT sum(d.i) AS si, sum(d.f) AS sf FROM (SELECT f, i FROM ss_t) d(i, f)	{701,20} rows=1 99.375,2
+agg/v1	e	true	SELECT sum(q.i) AS s FROM (SELECT f AS i FROM ss_t) q	{701} rows=1 99.375
+agg/v2	e	true	SELECT sum(q.i) AS s FROM (SELECT p.f AS i FROM (SELECT f FROM ss_t) p) q	{701} rows=1 99.375
+agg/v12	e	true	SELECT sum(q.i) AS s FROM (SELECT f AS i FROM ss_t) q GROUP BY q.i IS NULL ORDER BY 1	{701} rows=2 99.375 | NULL
 issue/panic	b	true	SELECT x + a.i AS v FROM ss_t a JOIN (SELECT id, f AS x FROM ss_t) b ON a.id = b.id WHERE a.id = 1	{701} rows=1 4012000000000000
 issue/noAlias	b	true	SELECT x + a.i FROM ss_t a JOIN (SELECT id, f AS x FROM ss_t) b ON a.id = b.id WHERE a.id = 1	{701} rows=1 4012000000000000
 issue/zeroRow	b	true	SELECT x + a.i AS v FROM ss_t a JOIN (SELECT id, f AS x FROM ss_t) b ON a.id = b.id WHERE a.id = 99	{701} rows=0 
@@ -62,3 +88,16 @@ store/ctasGrouped	b	true	DROP TABLE IF EXISTS ci2_c ;; CREATE TABLE ci2_c AS SEL
 store/ctasSumGrouped	b	true	DROP TABLE IF EXISTS ci2_cs ;; CREATE TABLE ci2_cs AS SELECT sum(q.v) AS s FROM (SELECT f + a.i AS v FROM ss_t a GROUP BY f + a.i) q ;; SELECT s FROM ci2_cs	{701} rows=1 4059580000000000
 store/merge	b	true	DROP TABLE IF EXISTS ci2_m ;; CREATE TABLE ci2_m (id BIGINT, v DOUBLE PRECISION) ;; MERGE INTO ci2_m USING (SELECT a.id, f + a.i AS v FROM ss_t a JOIN (SELECT id AS bid FROM ss_t) b ON a.id = b.bid) s2 ON ci2_m.id = s2.id WHEN NOT MATCHED THEN INSERT (id, v) VALUES (s2.id, s2.v) ;; SELECT id, v FROM ci2_m ORDER BY id	{20,701} rows=6 0000000000000001,4012000000000000 | 0000000000000002,c023000000000000 | 0000000000000003,4015000000000000 | 0000000000000004,0000000000000000 | 0000000000000005,4059480000000000 | 0000000000000006,NULL
 store/mergeGrouped	b	true	DROP TABLE IF EXISTS ci2_mg ;; CREATE TABLE ci2_mg (k DOUBLE PRECISION, c BIGINT) ;; MERGE INTO ci2_mg USING (SELECT f + a.i AS v, count(*) AS c FROM ss_t a GROUP BY f + a.i) s2 ON ci2_mg.k = s2.v WHEN NOT MATCHED THEN INSERT (k, c) VALUES (s2.v, s2.c) ;; SELECT k, c FROM ci2_mg ORDER BY k	{701,20} rows=6 c023000000000000,0000000000000001 | 0000000000000000,0000000000000001 | 4012000000000000,0000000000000001 | 4015000000000000,0000000000000001 | 4059480000000000,0000000000000001 | NULL,0000000000000001
+agg/D7a	b	true	SELECT sum(q.i) AS s FROM (SELECT f AS i FROM ss_t) q	{701} rows=1 4058d80000000000
+agg/D7b	b	true	SELECT sum(q.n) AS s FROM (SELECT f AS n FROM ss_t) q	{701} rows=1 4058d80000000000
+agg/D7c	b	true	SELECT sum(u.i) AS s FROM ss_t t JOIN (SELECT id, f AS i FROM ss_t) u ON t.id = u.id	{701} rows=1 4058d80000000000
+agg/D7d	b	true	SELECT avg(q.i) AS a FROM (SELECT f AS i FROM ss_t) q	{701} rows=1 4033e00000000000
+agg/D7e	b	true	SELECT q.o, sum(q.i) AS s FROM (SELECT o, f AS i FROM ss_t) q GROUP BY q.o ORDER BY 1	{16,701} rows=3 00,c004000000000000 | 01,4059780000000000 | NULL,NULL
+agg/D7f	b	true	SELECT sum(q.v) AS s FROM (SELECT g AS v FROM ss_i) q	{701} rows=1 3fe8000000000000
+agg/D7g	b	true	SELECT max(q.i) + 0.5 AS m FROM (SELECT f AS i FROM ss_t) q	{701} rows=1 4059280000000000
+agg/r04	b	true	SELECT sum(r.i) AS si, sum(r.f) AS sf FROM (SELECT q.id, q.f AS i, q.i AS f FROM (SELECT p.id, p.f AS i, p.i AS f FROM (SELECT id, i AS f, f AS i FROM ss_t) p) q) r	{701,20} rows=1 4058d80000000000,0000000000000002
+agg/r12	b	true	SELECT sum(q.i) AS s FROM (SELECT DISTINCT p.f AS i FROM (SELECT f FROM ss_t) p) q	{701} rows=1 4058d80000000000
+agg/a05	b	true	SELECT sum(d.i) AS si, sum(d.f) AS sf FROM (SELECT f, i FROM ss_t) d(i, f)	{701,20} rows=1 4058d80000000000,0000000000000002
+agg/v1	b	true	SELECT sum(q.i) AS s FROM (SELECT f AS i FROM ss_t) q	{701} rows=1 4058d80000000000
+agg/v2	b	true	SELECT sum(q.i) AS s FROM (SELECT p.f AS i FROM (SELECT f FROM ss_t) p) q	{701} rows=1 4058d80000000000
+agg/v12	b	true	SELECT sum(q.i) AS s FROM (SELECT f AS i FROM ss_t) q GROUP BY q.i IS NULL ORDER BY 1	{701} rows=2 4058d80000000000 | NULL

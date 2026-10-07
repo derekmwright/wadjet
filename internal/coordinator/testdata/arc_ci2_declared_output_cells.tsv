@@ -1572,3 +1572,92 @@ f1650/dotAlias	true	SELECT coalesce("a.b".i, 29) AS k, count(*) FROM ss_t AS "a.
 f1650/dotAliasAlike	true	SELECT coalesce("a.b".i, 29) AS k, count(*) FROM ss_t AS "a.b" GROUP BY coalesce("a.b".i, 29) ORDER BY 1
 f1650/dotAliasItem	true	SELECT "a.b".i + 1 AS k FROM ss_t AS "a.b" ORDER BY 1
 f1650/dotDerivedSum	true	SELECT sum(q.k) AS s FROM (SELECT "a.b".f + "a.b".i AS k FROM ss_t AS "a.b" GROUP BY "a.b".f + "a.b".i) q
+agg/rev/D7a_scanColumnType	true	SELECT sum(q.i) AS s FROM (SELECT f AS i FROM ss_t) q
+agg/rev/D7b_scanColumnDecimal	true	SELECT sum(q.n) AS s FROM (SELECT f AS n FROM ss_t) q
+agg/rev/D7c_aggInputRefsJoin	true	SELECT sum(u.i) AS s FROM ss_t t JOIN (SELECT id, f AS i FROM ss_t) u ON t.id = u.id
+agg/rev/D7d_avg	true	SELECT avg(q.i) AS a FROM (SELECT f AS i FROM ss_t) q
+agg/rev/D7e_grouped	true	SELECT q.o, sum(q.i) AS s FROM (SELECT o, f AS i FROM ss_t) q GROUP BY q.o ORDER BY 1
+agg/rev/D7f_ssi	true	SELECT sum(q.v) AS s FROM (SELECT g AS v FROM ss_i) q
+agg/rev/D7g_maxPlus	true	SELECT max(q.i) + 0.5 AS m FROM (SELECT f AS i FROM ss_t) q
+agg/rev/r04	true	SELECT sum(r.i) AS si, sum(r.f) AS sf FROM (SELECT q.id, q.f AS i, q.i AS f FROM (SELECT p.id, p.f AS i, p.i AS f FROM (SELECT id, i AS f, f AS i FROM ss_t) p) q) r
+agg/rev/r12	true	SELECT sum(q.i) AS s FROM (SELECT DISTINCT p.f AS i FROM (SELECT f FROM ss_t) p) q
+agg/rev/a05	true	SELECT sum(d.i) AS si, sum(d.f) AS sf FROM (SELECT f, i FROM ss_t) d(i, f)
+agg/rev/v1	true	SELECT sum(q.i) AS s FROM (SELECT f AS i FROM ss_t) q
+agg/rev/v2	true	SELECT sum(q.i) AS s FROM (SELECT p.f AS i FROM (SELECT f FROM ss_t) p) q
+agg/rev/v12	true	SELECT sum(q.i) AS s FROM (SELECT f AS i FROM ss_t) q GROUP BY q.i IS NULL ORDER BY 1
+agg/der/sum_i	true	SELECT sum(q.i) AS s FROM (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) q
+agg/der/sum_i/grp	true	SELECT q.o, sum(q.i) AS s FROM (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) q GROUP BY q.o ORDER BY 1
+agg/der/avg_i	true	SELECT avg(q.i) AS s FROM (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) q
+agg/der/avg_i/grp	true	SELECT q.o, avg(q.i) AS s FROM (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) q GROUP BY q.o ORDER BY 1
+agg/der/max_i	true	SELECT max(q.i) + 0.5 AS s FROM (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) q
+agg/der/max_i/grp	true	SELECT q.o, max(q.i) + 0.5 AS s FROM (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) q GROUP BY q.o ORDER BY 1
+agg/der/min_f	true	SELECT min(q.f) + 2147483647 AS s FROM (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) q
+agg/der/min_f/grp	true	SELECT q.o, min(q.f) + 2147483647 AS s FROM (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) q GROUP BY q.o ORDER BY 1
+agg/der/sum_f	true	SELECT sum(q.f) AS s FROM (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) q
+agg/der/sum_f/grp	true	SELECT q.o, sum(q.f) AS s FROM (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) q GROUP BY q.o ORDER BY 1
+agg/der/sum_n	true	SELECT sum(q.n) AS s FROM (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) q
+agg/der/sum_n/grp	true	SELECT q.o, sum(q.n) AS s FROM (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) q GROUP BY q.o ORDER BY 1
+agg/der/avg_b	true	SELECT avg(q.b) AS s FROM (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) q
+agg/der/avg_b/grp	true	SELECT q.o, avg(q.b) AS s FROM (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) q GROUP BY q.o ORDER BY 1
+agg/der/sumd_i	true	SELECT sum(DISTINCT q.i) AS s FROM (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) q
+agg/der/sumd_i/grp	true	SELECT q.o, sum(DISTINCT q.i) AS s FROM (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) q GROUP BY q.o ORDER BY 1
+agg/der/cnt_i	true	SELECT count(q.i) AS s FROM (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) q
+agg/der/cnt_i/grp	true	SELECT q.o, count(q.i) AS s FROM (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) q GROUP BY q.o ORDER BY 1
+agg/der/having	true	SELECT q.o FROM (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) q GROUP BY q.o HAVING sum(q.i) > 100 ORDER BY 1
+agg/cte/sum_i	true	WITH c AS (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) SELECT sum(q.i) AS s FROM c q
+agg/cte/sum_i/grp	true	WITH c AS (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) SELECT q.o, sum(q.i) AS s FROM c q GROUP BY q.o ORDER BY 1
+agg/cte/avg_i	true	WITH c AS (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) SELECT avg(q.i) AS s FROM c q
+agg/cte/avg_i/grp	true	WITH c AS (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) SELECT q.o, avg(q.i) AS s FROM c q GROUP BY q.o ORDER BY 1
+agg/cte/max_i	true	WITH c AS (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) SELECT max(q.i) + 0.5 AS s FROM c q
+agg/cte/max_i/grp	true	WITH c AS (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) SELECT q.o, max(q.i) + 0.5 AS s FROM c q GROUP BY q.o ORDER BY 1
+agg/cte/min_f	true	WITH c AS (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) SELECT min(q.f) + 2147483647 AS s FROM c q
+agg/cte/min_f/grp	true	WITH c AS (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) SELECT q.o, min(q.f) + 2147483647 AS s FROM c q GROUP BY q.o ORDER BY 1
+agg/cte/sum_f	true	WITH c AS (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) SELECT sum(q.f) AS s FROM c q
+agg/cte/sum_f/grp	true	WITH c AS (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) SELECT q.o, sum(q.f) AS s FROM c q GROUP BY q.o ORDER BY 1
+agg/cte/sum_n	true	WITH c AS (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) SELECT sum(q.n) AS s FROM c q
+agg/cte/sum_n/grp	true	WITH c AS (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) SELECT q.o, sum(q.n) AS s FROM c q GROUP BY q.o ORDER BY 1
+agg/cte/avg_b	true	WITH c AS (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) SELECT avg(q.b) AS s FROM c q
+agg/cte/avg_b/grp	true	WITH c AS (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) SELECT q.o, avg(q.b) AS s FROM c q GROUP BY q.o ORDER BY 1
+agg/cte/sumd_i	true	WITH c AS (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) SELECT sum(DISTINCT q.i) AS s FROM c q
+agg/cte/sumd_i/grp	true	WITH c AS (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) SELECT q.o, sum(DISTINCT q.i) AS s FROM c q GROUP BY q.o ORDER BY 1
+agg/cte/cnt_i	true	WITH c AS (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) SELECT count(q.i) AS s FROM c q
+agg/cte/cnt_i/grp	true	WITH c AS (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) SELECT q.o, count(q.i) AS s FROM c q GROUP BY q.o ORDER BY 1
+agg/cte/having	true	WITH c AS (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) SELECT q.o FROM c q GROUP BY q.o HAVING sum(q.i) > 100 ORDER BY 1
+agg/nest/sum_i	true	SELECT sum(q.i) AS s FROM (SELECT * FROM (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) w) q
+agg/nest/sum_i/grp	true	SELECT q.o, sum(q.i) AS s FROM (SELECT * FROM (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) w) q GROUP BY q.o ORDER BY 1
+agg/nest/avg_i	true	SELECT avg(q.i) AS s FROM (SELECT * FROM (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) w) q
+agg/nest/avg_i/grp	true	SELECT q.o, avg(q.i) AS s FROM (SELECT * FROM (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) w) q GROUP BY q.o ORDER BY 1
+agg/nest/max_i	true	SELECT max(q.i) + 0.5 AS s FROM (SELECT * FROM (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) w) q
+agg/nest/max_i/grp	true	SELECT q.o, max(q.i) + 0.5 AS s FROM (SELECT * FROM (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) w) q GROUP BY q.o ORDER BY 1
+agg/nest/min_f	true	SELECT min(q.f) + 2147483647 AS s FROM (SELECT * FROM (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) w) q
+agg/nest/min_f/grp	true	SELECT q.o, min(q.f) + 2147483647 AS s FROM (SELECT * FROM (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) w) q GROUP BY q.o ORDER BY 1
+agg/nest/sum_f	true	SELECT sum(q.f) AS s FROM (SELECT * FROM (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) w) q
+agg/nest/sum_f/grp	true	SELECT q.o, sum(q.f) AS s FROM (SELECT * FROM (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) w) q GROUP BY q.o ORDER BY 1
+agg/nest/sum_n	true	SELECT sum(q.n) AS s FROM (SELECT * FROM (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) w) q
+agg/nest/sum_n/grp	true	SELECT q.o, sum(q.n) AS s FROM (SELECT * FROM (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) w) q GROUP BY q.o ORDER BY 1
+agg/nest/avg_b	true	SELECT avg(q.b) AS s FROM (SELECT * FROM (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) w) q
+agg/nest/avg_b/grp	true	SELECT q.o, avg(q.b) AS s FROM (SELECT * FROM (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) w) q GROUP BY q.o ORDER BY 1
+agg/nest/sumd_i	true	SELECT sum(DISTINCT q.i) AS s FROM (SELECT * FROM (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) w) q
+agg/nest/sumd_i/grp	true	SELECT q.o, sum(DISTINCT q.i) AS s FROM (SELECT * FROM (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) w) q GROUP BY q.o ORDER BY 1
+agg/nest/cnt_i	true	SELECT count(q.i) AS s FROM (SELECT * FROM (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) w) q
+agg/nest/cnt_i/grp	true	SELECT q.o, count(q.i) AS s FROM (SELECT * FROM (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) w) q GROUP BY q.o ORDER BY 1
+agg/nest/having	true	SELECT q.o FROM (SELECT * FROM (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) w) q GROUP BY q.o HAVING sum(q.i) > 100 ORDER BY 1
+agg/join/sum_i	true	SELECT sum(q.i) AS s FROM ss_t t JOIN (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) q ON t.id = q.id
+agg/join/sum_i/grp	true	SELECT q.o, sum(q.i) AS s FROM ss_t t JOIN (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) q ON t.id = q.id GROUP BY q.o ORDER BY 1
+agg/join/avg_i	true	SELECT avg(q.i) AS s FROM ss_t t JOIN (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) q ON t.id = q.id
+agg/join/avg_i/grp	true	SELECT q.o, avg(q.i) AS s FROM ss_t t JOIN (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) q ON t.id = q.id GROUP BY q.o ORDER BY 1
+agg/join/max_i	true	SELECT max(q.i) + 0.5 AS s FROM ss_t t JOIN (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) q ON t.id = q.id
+agg/join/max_i/grp	true	SELECT q.o, max(q.i) + 0.5 AS s FROM ss_t t JOIN (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) q ON t.id = q.id GROUP BY q.o ORDER BY 1
+agg/join/min_f	true	SELECT min(q.f) + 2147483647 AS s FROM ss_t t JOIN (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) q ON t.id = q.id
+agg/join/min_f/grp	true	SELECT q.o, min(q.f) + 2147483647 AS s FROM ss_t t JOIN (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) q ON t.id = q.id GROUP BY q.o ORDER BY 1
+agg/join/sum_f	true	SELECT sum(q.f) AS s FROM ss_t t JOIN (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) q ON t.id = q.id
+agg/join/sum_f/grp	true	SELECT q.o, sum(q.f) AS s FROM ss_t t JOIN (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) q ON t.id = q.id GROUP BY q.o ORDER BY 1
+agg/join/sum_n	true	SELECT sum(q.n) AS s FROM ss_t t JOIN (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) q ON t.id = q.id
+agg/join/sum_n/grp	true	SELECT q.o, sum(q.n) AS s FROM ss_t t JOIN (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) q ON t.id = q.id GROUP BY q.o ORDER BY 1
+agg/join/avg_b	true	SELECT avg(q.b) AS s FROM ss_t t JOIN (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) q ON t.id = q.id
+agg/join/avg_b/grp	true	SELECT q.o, avg(q.b) AS s FROM ss_t t JOIN (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) q ON t.id = q.id GROUP BY q.o ORDER BY 1
+agg/join/sumd_i	true	SELECT sum(DISTINCT q.i) AS s FROM ss_t t JOIN (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) q ON t.id = q.id
+agg/join/sumd_i/grp	true	SELECT q.o, sum(DISTINCT q.i) AS s FROM ss_t t JOIN (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) q ON t.id = q.id GROUP BY q.o ORDER BY 1
+agg/join/cnt_i	true	SELECT count(q.i) AS s FROM ss_t t JOIN (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) q ON t.id = q.id
+agg/join/cnt_i/grp	true	SELECT q.o, count(q.i) AS s FROM ss_t t JOIN (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) q ON t.id = q.id GROUP BY q.o ORDER BY 1
+agg/join/having	true	SELECT q.o FROM ss_t t JOIN (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) q ON t.id = q.id GROUP BY q.o HAVING sum(q.i) > 100 ORDER BY 1

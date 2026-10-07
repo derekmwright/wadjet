@@ -118,7 +118,7 @@ func TestArcCI2DeclaredOutputByIdentityEveryArm(t *testing.T) {
 			}
 		})
 	}
-	if len(cells) < 1500 {
+	if len(cells) < 1650 {
 		t.Fatalf("the table shrank: %d cells", len(cells))
 	}
 }

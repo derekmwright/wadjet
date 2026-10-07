@@ -11,7 +11,9 @@ package pgwire
 // arithmetic over the grouped derived table, and what INSERT … SELECT *, CREATE
 // TABLE … AS and MERGE store. At a0f0c322 the key's declaration was the column
 // its text named after the last dot: `x + a.i` declared int8 where PostgreSQL
-// declares float8, and SUM over `f + a.i` answered 98 for 101.375.
+// declares float8, and SUM over `f + a.i` answered 98 for 101.375; and an
+// aggregate's argument `sum(q.i)` over `(SELECT f AS i FROM ss_t) q` was
+// typed from the scan's integer `i`: bigint 99 for 99.375.
 //
 // PostgreSQL 17.11's answers (testdata/arc_ci2_declared_output_wire_pg17.tsv:
 // name, mode, ordered, sql, answer) are measured by this test with
@@ -61,6 +63,22 @@ func ci2WireCells() [][3]string {
 		{"store/mergeGrouped", "true", "DROP TABLE IF EXISTS ci2_mg ;; CREATE TABLE ci2_mg (k DOUBLE PRECISION, c BIGINT) ;; " +
 			"MERGE INTO ci2_mg USING (SELECT f + a.i AS v, count(*) AS c FROM ss_t a GROUP BY f + a.i) s2 ON ci2_mg.k = s2.v WHEN NOT MATCHED THEN INSERT (k, c) VALUES (s2.v, s2.c) ;; " +
 			"SELECT k, c FROM ci2_mg ORDER BY k"},
+		// An aggregate's argument over a derived column that shadows a scan
+		// column of another type (the closure review's B1: D7a–g, r04, r12,
+		// a05, v1, v2, v12).
+		{"agg/D7a", "true", "SELECT sum(q.i) AS s FROM (SELECT f AS i FROM ss_t) q"},
+		{"agg/D7b", "true", "SELECT sum(q.n) AS s FROM (SELECT f AS n FROM ss_t) q"},
+		{"agg/D7c", "true", "SELECT sum(u.i) AS s FROM ss_t t JOIN (SELECT id, f AS i FROM ss_t) u ON t.id = u.id"},
+		{"agg/D7d", "true", "SELECT avg(q.i) AS a FROM (SELECT f AS i FROM ss_t) q"},
+		{"agg/D7e", "true", "SELECT q.o, sum(q.i) AS s FROM (SELECT o, f AS i FROM ss_t) q GROUP BY q.o ORDER BY 1"},
+		{"agg/D7f", "true", "SELECT sum(q.v) AS s FROM (SELECT g AS v FROM ss_i) q"},
+		{"agg/D7g", "true", "SELECT max(q.i) + 0.5 AS m FROM (SELECT f AS i FROM ss_t) q"},
+		{"agg/r04", "true", "SELECT sum(r.i) AS si, sum(r.f) AS sf FROM (SELECT q.id, q.f AS i, q.i AS f FROM (SELECT p.id, p.f AS i, p.i AS f FROM (SELECT id, i AS f, f AS i FROM ss_t) p) q) r"},
+		{"agg/r12", "true", "SELECT sum(q.i) AS s FROM (SELECT DISTINCT p.f AS i FROM (SELECT f FROM ss_t) p) q"},
+		{"agg/a05", "true", "SELECT sum(d.i) AS si, sum(d.f) AS sf FROM (SELECT f, i FROM ss_t) d(i, f)"},
+		{"agg/v1", "true", "SELECT sum(q.i) AS s FROM (SELECT f AS i FROM ss_t) q"},
+		{"agg/v2", "true", "SELECT sum(q.i) AS s FROM (SELECT p.f AS i FROM (SELECT f FROM ss_t) p) q"},
+		{"agg/v12", "true", "SELECT sum(q.i) AS s FROM (SELECT f AS i FROM ss_t) q GROUP BY q.i IS NULL ORDER BY 1"},
 	}
 }
 
