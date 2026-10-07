@@ -1661,3 +1661,4 @@ agg/join/sumd_i/grp	{bool,float} rows=3 f,-2.5 | t,101.875 | NULL,NULL
 agg/join/cnt_i	{int} rows=1 5
 agg/join/cnt_i/grp	{bool,int} rows=3 f,2 | t,3 | NULL,0
 agg/join/having	{bool} rows=1 t
+agg/shadowRename	{int} rows=1 2
