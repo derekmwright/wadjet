@@ -254,12 +254,8 @@ func lookupColPGCategory(m map[string]pgCategory, name string) pgCategory {
 	if m == nil || name == "" {
 		return pgCatUnknown
 	}
-	lc := strings.ToLower(strings.TrimSpace(name))
-	if v, ok := m[lc]; ok {
+	if v, ok := lookupColRef(m, name); ok {
 		return v
-	}
-	if dot := strings.LastIndexByte(lc, '.'); dot >= 0 {
-		return m[lc[dot+1:]]
 	}
 	return pgCatUnknown
 }

@@ -993,8 +993,8 @@ func (d ColDecls) namedDecl(name string) (expr.DeclType, bool) {
 	}
 	key := strings.ToLower(strings.TrimSpace(name))
 	if _, direct := d.Types[key]; !direct {
-		if dot := strings.LastIndexByte(key, '.'); dot >= 0 {
-			key = key[dot+1:]
+		if ref, ok := colRefText(name); ok {
+			key = strings.ToLower(ref.Column)
 		}
 	}
 	col := parquet.Column{Type: t, Fields: d.Fields[key]}
@@ -1128,38 +1128,53 @@ func aggKeyRef(n *logical.Node, i int) (*plansql.ColRef, bool) {
 
 // lookupColDecimal is lookupColType's companion for a DECIMAL-meta map.
 func lookupColDecimal(decMeta map[string]logical.DecimalMeta, name string) (logical.DecimalMeta, bool) {
-	if decMeta == nil || name == "" {
-		return logical.DecimalMeta{}, false
-	}
-	lc := strings.ToLower(strings.TrimSpace(name))
-	if m, ok := decMeta[lc]; ok {
-		return m, true
-	}
-	if dot := strings.LastIndexByte(lc, '.'); dot >= 0 {
-		if m, ok := decMeta[lc[dot+1:]]; ok {
-			return m, true
-		}
-	}
-	return logical.DecimalMeta{}, false
+	return lookupColRef(decMeta, name)
 }
 
-// lookupColType resolves a possibly-qualified name against a column-type map,
-// falling back to the bare suffix the way every other name resolution in the
-// planner does.
+// lookupColType resolves a column reference's TEXT against a column-type map:
+// the whole spelling first, then — when the text IS a qualified column
+// reference — the column's own name.
 func lookupColType(colTypes map[string]parquet.TypeID, name string) (parquet.TypeID, bool) {
-	if colTypes == nil || name == "" {
-		return 0, false
+	return lookupColRef(colTypes, name)
+}
+
+// lookupColRef is the one name lookup the declaration walk's text readers
+// share. A qualified reference falls back to its COLUMN, read from the parsed
+// reference — never from the text after its last dot: an expression's text is
+// not a name, and `x + a.k` cut at its last dot named the integer `k`, which
+// declared the sum's output vector integer (#1393: an index-out-of-range
+// panic, OID 23 for 701, -2 0 2 stored for -2.5 0.5 2.5; through a GROUP BY
+// key, SUM over `f + a.k` answered 3 for 3.5). A dotted identifier (`"a.b".n`)
+// is one qualifier and one column, which only the parse can tell apart.
+func lookupColRef[V any](m map[string]V, name string) (V, bool) {
+	var zero V
+	if m == nil || strings.TrimSpace(name) == "" {
+		return zero, false
 	}
 	lc := strings.ToLower(strings.TrimSpace(name))
-	if t, ok := colTypes[lc]; ok {
-		return t, true
+	if v, ok := m[lc]; ok {
+		return v, true
 	}
-	if dot := strings.LastIndexByte(lc, '.'); dot >= 0 {
-		if t, ok := colTypes[lc[dot+1:]]; ok {
-			return t, true
-		}
+	ref, ok := colRefText(name)
+	if !ok || ref.Table == "" {
+		return zero, false
 	}
-	return 0, false
+	v, ok := m[strings.ToLower(ref.Column)]
+	return v, ok
+}
+
+// colRefText parses text that may be a column reference, parentheses allowed,
+// and answers the reference; anything else — an expression, a literal, text
+// that does not parse — is not one.
+func colRefText(text string) (*plansql.ColRef, bool) {
+	if !strings.ContainsRune(text, '.') {
+		return nil, false
+	}
+	n, err := plansql.ParseExpression(text)
+	if err != nil {
+		return nil, false
+	}
+	return bareColRefOf(n)
 }
 
 // emittedColTypes describes the columns a node EMITS, by name.
