@@ -1087,6 +1087,45 @@ func declaredFieldPath(proj logical.Projection, decls ColDecls) (parquet.Column,
 	return decls.field(cr)
 }
 
+// aggKeyColumn declares an aggregate's i-th GROUP BY key when the key IS a
+// column reference of its input: by the position the reference is bound to
+// (ColDecls.boundPos), or by its parsed qualifier and name — the key's tree,
+// never its text (ADR-0047 stage 2). A computed key, or a ROW field path, is
+// not one: the derived-key walk declares it.
+func (w *declWalk) aggKeyColumn(n *logical.Node, i int, in ColDecls) (parquet.Column, bool) {
+	ref, ok := aggKeyRef(n, i)
+	if !ok || in.isFieldPath(ref) {
+		return parquet.Column{}, false
+	}
+	return in.colDecl(ref)
+}
+
+// aggKeyAST is an aggregate's i-th GROUP BY key as a tree: the builder's
+// (GroupByExprs, which carries the binder's bindings) where it kept one, the
+// parse of its text where it did not.
+func aggKeyAST(n *logical.Node, i int) (plansql.Node, bool) {
+	if i < len(n.GroupByExprs) && n.GroupByExprs[i] != nil {
+		return n.GroupByExprs[i], true
+	}
+	if i >= len(n.GroupBy) {
+		return nil, false
+	}
+	ast, err := plansql.ParseExpression(n.GroupBy[i])
+	if err != nil || ast == nil {
+		return nil, false
+	}
+	return ast, true
+}
+
+// aggKeyRef is aggKeyAST when the key is a column reference.
+func aggKeyRef(n *logical.Node, i int) (*plansql.ColRef, bool) {
+	ast, ok := aggKeyAST(n, i)
+	if !ok {
+		return nil, false
+	}
+	return bareColRefOf(ast)
+}
+
 // lookupColDecimal is lookupColType's companion for a DECIMAL-meta map.
 func lookupColDecimal(decMeta map[string]logical.DecimalMeta, name string) (logical.DecimalMeta, bool) {
 	if decMeta == nil || name == "" {
@@ -1153,8 +1192,13 @@ func (w *declWalk) emittedColTypesUncached(n *logical.Node) map[string]parquet.T
 		// falls to the float rule — which reconciled a set operation to
 		// double where PostgreSQL resolves bigint (#656 R4). It is the same
 		// inference derivedGroupKeyTypes already puts on the wire.
-		derivedTypes, _ := w.derivedGroupKeyTypes(n.GroupBy, n.Children[0])
-		for _, g := range n.GroupBy {
+		derivedTypes, _ := w.derivedGroupKeyTypes(n.GroupBy, n.GroupByExprs, n.Children[0])
+		inDecls := w.childDecls(n.Children[0])
+		for i, g := range n.GroupBy {
+			if c, ok := w.aggKeyColumn(n, i, inDecls); ok {
+				out[strings.ToLower(g)] = c.Type
+				continue
+			}
 			if t, ok := lookupColType(in, g); ok {
 				out[strings.ToLower(g)] = t
 				continue
@@ -1428,8 +1472,19 @@ func (w *declWalk) emittedColDecimalUncached(n *logical.Node) map[string]logical
 		// and an expression written OVER it above the aggregate then falls
 		// to the float rule, which renders exact fixed point through a
 		// float64 (ADR-0024 item 2, ADR-0026).
-		_, derivedDec := w.derivedGroupKeyTypes(n.GroupBy, n.Children[0])
-		for _, g := range n.GroupBy {
+		_, derivedDec := w.derivedGroupKeyTypes(n.GroupBy, n.GroupByExprs, n.Children[0])
+		inDecls := w.childDecls(n.Children[0])
+		for i, g := range n.GroupBy {
+			if c, ok := w.aggKeyColumn(n, i, inDecls); ok {
+				if c.Type == parquet.TypeDecimal {
+					if c.Precision > 0 || c.Unconstrained {
+						out[strings.ToLower(g)] = logical.DecimalMeta{Precision: c.Precision, Scale: c.Scale, Unconstrained: c.Unconstrained}
+					} else if m, ok := lookupColDecimal(in, g); ok {
+						out[strings.ToLower(g)] = m
+					}
+				}
+				continue
+			}
 			if m, ok := lookupColDecimal(in, g); ok {
 				out[strings.ToLower(g)] = m
 				continue

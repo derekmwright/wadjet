@@ -49,10 +49,25 @@ func (w *declWalk) emittedColIntWidthUncached(n *logical.Node) map[string]intWid
 		// expression TEXT and so has no name in the input at all. Losing it
 		// there is how `SELECT SUM(k) FROM (SELECT id & 3 AS k … GROUP BY 1)`
 		// would read int8 for an int4 key.
-		for _, g := range n.GroupBy {
+		for i, g := range n.GroupBy {
 			name := strings.ToLower(strings.TrimSpace(g))
 			if name == "" {
 				continue
+			}
+			// A key that IS a column of the input keeps that column's width,
+			// read by its binding or its parsed name (aggKeyColumn), never by
+			// its text.
+			if ref, ok := aggKeyRef(n, i); ok && !in.isFieldPath(ref) {
+				if wd, ok := in.colIntWidth(ref); ok {
+					out[name] = wd
+					continue
+				}
+				if c, ok := in.colDecl(ref); ok {
+					if wd := catalogIntWidth(c.Type); wd != intWidthUnknown {
+						out[name] = wd
+					}
+					continue
+				}
 			}
 			// A key whose columns are all columns of the input is that
 			// expression over them, read as publishedExprName reads a

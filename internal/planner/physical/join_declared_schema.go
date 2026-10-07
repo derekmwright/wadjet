@@ -231,13 +231,19 @@ func (w *declWalk) declaredJoinSchema(n *logical.Node, want []string, published 
 			shapes := w.inputColShapes(cur)
 			published, resolve := w.groupKeyNames(cur, cur.Children[0])
 			emitted := emittedKeyNames(published, resolve, logicalAggOutNames(cur))
-			keyTypes, _ := w.derivedGroupKeyTypes(cur.GroupBy, cur.Children[0])
+			keyTypes, _ := w.derivedGroupKeyTypes(cur.GroupBy, cur.GroupByExprs, cur.Children[0])
 			for i, name := range emitted {
 				lc := strings.ToLower(name)
 				if seen[lc] || (len(wantSet) > 0 && !wantSet[lc]) {
 					continue
 				}
-				t, ok := lookupColType(in, cur.GroupBy[i])
+				var t parquet.TypeID
+				c, ok := w.aggKeyColumn(cur, i, w.childDecls(cur.Children[0]))
+				if ok {
+					t = c.Type
+				} else {
+					t, ok = lookupColType(in, cur.GroupBy[i])
+				}
 				if !ok {
 					t, ok = keyTypes[cur.GroupBy[i]]
 				}

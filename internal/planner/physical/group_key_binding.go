@@ -145,6 +145,16 @@ func (w *declWalk) derivedGroupKeyDecl(key string, node plansql.Node, child *log
 	// is dispatched re-spelled into source columns (AggDerivedGroupKey), and
 	// typing the spelling the query wrote instead types an expression nothing
 	// evaluates.
+	// A key whose every reference is BOUND to a column of the input is typed
+	// at the input, by those positions (ADR-0047 stage 2): the binding says
+	// which column each leaf is, so no re-spelling is needed to find it, and
+	// the re-spelled text — `v + 1` for `d.x + 1` over `(SELECT id, v AS x
+	// FROM ss_i) d` joined to ss_t — names a column no scope above the join
+	// emits, which fell to the float rule (#1649: double precision for
+	// PostgreSQL's integer, on every arm).
+	if in := w.childDecls(child); boundIntoEvery(node, in) {
+		return inferProjectionDeclType(node, parquet.TypeString, nil, withSubqueryDecls(in, child))
+	}
 	typed := node
 	if respelled, changed := w.aggDerivedGroupKey(key, child); changed {
 		if n, err := plansql.ParseExpression(respelled); err == nil {
@@ -287,6 +297,21 @@ func (w *declWalk) aggDerivedGroupKey(key string, child *logical.Node) (string, 
 	return out.String(), true
 }
 
+// boundIntoEvery reports whether node references at least one column and
+// every reference is bound to a position of decls' ordered input.
+func boundIntoEvery(node plansql.Node, decls ColDecls) bool {
+	refs := collectColRefs(node)
+	if len(refs) == 0 || len(decls.pos) == 0 {
+		return false
+	}
+	for _, r := range refs {
+		if _, ok := decls.boundPos(r); !ok {
+			return false
+		}
+	}
+	return true
+}
+
 // qualifiedColumn renders a column reference the way ResolveAggInputName
 // expects to receive it.
 func qualifiedColumn(ref *plansql.ColRef) string {
@@ -305,19 +330,29 @@ func qualifiedColumn(ref *plansql.ColRef) string {
 //
 // The map is keyed by the exact dispatched key text (post-dagplan.aggStageGroupKey),
 // because that text is what the worker parses and looks up (#379).
-func (w *declWalk) derivedGroupKeyTypes(groupBy []string, child *logical.Node) (map[string]parquet.TypeID, map[string]logical.DecimalMeta) {
+//
+// exprs, index-aligned with groupBy where the builder kept them, are the keys'
+// trees: a key is typed from its tree — which carries the binder's bindings —
+// and its text is parsed only where there is none (ADR-0047 stage 2).
+func (w *declWalk) derivedGroupKeyTypes(groupBy []string, exprs []plansql.Node, child *logical.Node) (map[string]parquet.TypeID, map[string]logical.DecimalMeta) {
 	var out map[string]parquet.TypeID
 	var dec map[string]logical.DecimalMeta
 	var colTypes ColDecls
 	var strictInt map[string]bool
 	resolved := false
-	for _, key := range groupBy {
+	for i, key := range groupBy {
 		if key == "" {
 			continue
 		}
-		node, err := plansql.ParseExpression(key)
-		if err != nil {
-			continue
+		var node plansql.Node
+		if i < len(exprs) && exprs[i] != nil {
+			node = exprs[i]
+		} else {
+			parsed, err := plansql.ParseExpression(key)
+			if err != nil {
+				continue
+			}
+			node = parsed
 		}
 		if !resolved {
 			colTypes = w.inputColDecls(child)

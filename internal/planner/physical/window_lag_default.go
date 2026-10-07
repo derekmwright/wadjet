@@ -71,9 +71,20 @@ func lagLeadDefaultArg(we logical.WindowExpr) plansql.Node {
 	if len(args) < 3 {
 		return nil
 	}
-	ast, err := plansql.ParseExpression(args[2])
-	if err != nil {
-		return nil
+	// The builder's tree where it still spells the argument: it carries the
+	// binder's bindings, so a default naming a column is declared by the
+	// column it is bound to (ADR-0047 stage 2); the text is parsed only where
+	// there is no tree, or a rewrite re-spelled the argument since.
+	var ast plansql.Node
+	if len(we.ArgExprs) > 2 && we.ArgExprs[2] != nil &&
+		strings.EqualFold(strings.TrimSpace(we.ArgExprs[2].String()), strings.TrimSpace(args[2])) {
+		ast = we.ArgExprs[2]
+	} else {
+		parsed, err := plansql.ParseExpression(args[2])
+		if err != nil {
+			return nil
+		}
+		ast = parsed
 	}
 	if lit, ok := plansql.Unparen(ast).(*plansql.Lit); ok && lit.Kind == plansql.LitNull {
 		return nil

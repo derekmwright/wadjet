@@ -71,11 +71,13 @@ func emittedColPGCategory(n *logical.Node) map[string]pgCategory {
 			if name == "" {
 				continue
 			}
-			if _, ok := lookupColType(in.Types, g); ok {
-				if cat := lookupColPGCategory(in.pgCat, g); cat != pgCatUnknown {
-					out[name] = cat
+			if ref, ok := aggKeyRef(n, i); ok && !in.isFieldPath(ref) {
+				if _, ok := in.colDecl(ref); ok {
+					if cat := pgCategoryOf(ref, in); cat != pgCatUnknown {
+						out[name] = cat
+					}
+					continue
 				}
-				continue
 			}
 			// The key's own AST where the builder kept it: its TEXT is a
 			// rendering, and `EXTRACT(EPOCH FROM ts)` renders as `epoch(ts)`,
