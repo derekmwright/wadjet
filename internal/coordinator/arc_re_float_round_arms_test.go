@@ -470,12 +470,17 @@ func reStillDiverges(name string) (arms, why string) {
 		return "all", "wide literal element"
 	}
 	switch {
-	// GROUP BY / PARTITION BY round(s.x) over a derived table's
-	// `<v> + t.id * 0` (a DECIMAL at run time) is declared FLOAT64, and the
-	// DECIMAL text it computes is refused by the #361 store guard on the
-	// single-process arms (NULL on the DAG arms; a failed window stage).
-	case strings.HasPrefix(name, "numderived/") && (strings.HasSuffix(name, "/group") || strings.HasSuffix(name, "/window")):
+	// PARTITION BY round(s.x) over a derived table's `<v> + t.id * 0` (a
+	// DECIMAL at run time) is declared FLOAT64, and the DECIMAL text it
+	// computes is refused by the #361 store guard on the single-process arms
+	// (a failed window stage on the DAG arms). The GROUP BY form answers on
+	// the single-process arms since the key is declared from its tree, not
+	// from the text after its last dot (ADR-0047 stage 2); the DAG arms still
+	// read it NULL.
+	case strings.HasPrefix(name, "numderived/") && strings.HasSuffix(name, "/window"):
 		return "all", "derived DECIMAL key declared FLOAT64"
+	case strings.HasPrefix(name, "numderived/") && strings.HasSuffix(name, "/group"):
+		return "dag", "derived DECIMAL key declared FLOAT64 on the stage DAG"
 	// GROUP BY round(s.x) over a DISTINCT derived table's float-carried
 	// numeric reads the key NULL on the stage DAG (the shape of NX-C2).
 	case strings.HasPrefix(name, "numdivderived/") && strings.HasSuffix(name, "/group"):
