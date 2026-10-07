@@ -45,23 +45,34 @@ type relInst struct {
 	open bool
 }
 
-// addInst registers one closed FROM source as a relation instance.
-func (s *colScope) addInst(b *binder, qual string, cols []string) {
+// addInst registers one closed FROM source as a relation instance. A
+// stamping binder records the instance on the reference too (TableRef.Rel,
+// RelCols), so the node the builder plans it as can say which bindings its
+// output columns are (logical.Node.OutputIDs, ADR-0047 stage 2).
+func (s *colScope) addInst(b *binder, tr *plansql.TableRef, qual string, cols []string) {
 	if s == nil || b == nil {
 		return
 	}
 	b.nextRel++
-	s.insts = append(s.insts, &relInst{id: b.nextRel, qual: qual, cols: append([]string(nil), cols...)})
+	in := &relInst{id: b.nextRel, qual: qual, cols: append([]string(nil), cols...)}
+	s.insts = append(s.insts, in)
+	if tr != nil && b.stamp {
+		tr.Rel, tr.RelCols = in.id, in.cols
+	}
 }
 
-// addOpenInst registers a FROM source whose columns cannot be enumerated.
-func (s *colScope) addOpenInst(b *binder, qual string) {
+// addOpenInst registers a FROM source whose columns cannot be enumerated. Its
+// reference records no instance: no binding can name one of its columns.
+func (s *colScope) addOpenInst(b *binder, tr *plansql.TableRef, qual string) {
 	if s == nil || b == nil {
 		return
 	}
 	s.instOpen = true
 	b.nextRel++
 	s.insts = append(s.insts, &relInst{id: b.nextRel, qual: qual, open: true})
+	if tr != nil && b.stamp {
+		tr.Rel, tr.RelCols = 0, nil
+	}
 }
 
 // bindCategory is why a reference did or did not bind (RISKS M1).

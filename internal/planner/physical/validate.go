@@ -1532,7 +1532,7 @@ func (b *binder) resolveSource(ctx context.Context, tr *plansql.TableRef, latera
 		if !known {
 			into.open = true
 			into.sourceOpen = true
-			into.addOpenInst(b, qual)
+			into.addOpenInst(b, tr, qual)
 			return nil
 		}
 		cols, err := applyFuncColumnAliases(cols, tr.ColumnAliases, qual)
@@ -1545,7 +1545,7 @@ func (b *binder) resolveSource(ctx context.Context, tr *plansql.TableRef, latera
 			into.addQualifiedTyped(qual, c.Name, c.Type)
 		}
 		into.noteSourceDuplicates(qual, names)
-		into.addInst(b, qual, names)
+		into.addInst(b, tr, qual, names)
 		return nil
 	}
 
@@ -1559,7 +1559,7 @@ func (b *binder) resolveSource(ctx context.Context, tr *plansql.TableRef, latera
 		if perr != nil || inner == nil {
 			into.open = true
 			into.sourceOpen = true
-			into.addOpenInst(b, qual)
+			into.addOpenInst(b, tr, qual)
 			return nil
 		}
 		// Validate the derived block's internals. A LATERAL derived table
@@ -1593,7 +1593,7 @@ func (b *binder) resolveSource(ctx context.Context, tr *plansql.TableRef, latera
 		if !known {
 			into.open = true
 			into.sourceOpen = true
-			into.addOpenInst(b, qual)
+			into.addOpenInst(b, tr, qual)
 			return nil
 		}
 		// The COLUMN-ALIAS LIST renames those outputs positionally, and this
@@ -1618,7 +1618,7 @@ func (b *binder) resolveSource(ctx context.Context, tr *plansql.TableRef, latera
 			}
 		}
 		into.noteSourceDuplicates(qual, names)
-		into.addInst(b, qual, names)
+		into.addInst(b, tr, qual, names)
 		return nil
 	}
 
@@ -1627,7 +1627,7 @@ func (b *binder) resolveSource(ctx context.Context, tr *plansql.TableRef, latera
 		if e.open {
 			into.open = true
 			into.sourceOpen = true
-			into.addOpenInst(b, qual)
+			into.addOpenInst(b, tr, qual)
 			return nil
 		}
 		for i, n := range e.cols {
@@ -1637,7 +1637,7 @@ func (b *binder) resolveSource(ctx context.Context, tr *plansql.TableRef, latera
 			}
 		}
 		into.noteSourceDuplicates(qual, e.cols)
-		into.addInst(b, qual, e.cols)
+		into.addInst(b, tr, qual, e.cols)
 		return nil
 	}
 
@@ -1676,20 +1676,20 @@ func (b *binder) resolveSource(ctx context.Context, tr *plansql.TableRef, latera
 		}
 		into.open = true
 		into.sourceOpen = true
-		into.addOpenInst(b, qual)
+		into.addOpenInst(b, tr, qual)
 		return nil
 	}
 	if meta == nil {
 		into.open = true
 		into.sourceOpen = true
-		into.addOpenInst(b, qual)
+		into.addOpenInst(b, tr, qual)
 		return nil
 	}
 	storedCols := make([]string, 0, len(meta.Schema.Columns))
 	for _, c := range meta.Schema.Columns {
 		storedCols = append(storedCols, c.Name)
 	}
-	into.addInst(b, qual, storedCols)
+	into.addInst(b, tr, qual, storedCols)
 	for _, c := range meta.Schema.Columns {
 		// A STORED column is NEVER refused here. Reading a table is not
 		// minting a name: the column already exists, some binary wrote it, and

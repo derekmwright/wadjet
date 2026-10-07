@@ -697,6 +697,16 @@ type TableRef struct {
 	// column-alias list is refused there rather than answered wrong.
 	ColumnAliasSource string
 
+	// Rel is the relation INSTANCE the binder registered this reference as,
+	// and RelCols the instance's column list in its own order — the list a
+	// ColRef.Bound's Ord indexes (ADR-0047). Like ColRef.Bound it is
+	// provenance: the parser never sets it, a re-parse loses it, and zero
+	// means "not registered by a stamping binder". The logical builder copies
+	// both onto the node this reference plans as (logical.Node.Rel), which is
+	// how a node's output reaches the bindings that name it (OutputIDs).
+	Rel     RelID
+	RelCols []string
+
 	// The DERIVED TABLE body, parsed at most once per reference. See
 	// sub_block.go: a nested block is parsed once so the binder and the
 	// logical builder reason about the same tree (#851).

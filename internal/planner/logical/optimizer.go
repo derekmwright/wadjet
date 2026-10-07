@@ -2239,6 +2239,9 @@ func pushdownPredicates(n *Node) *Node {
 			if n.DerivedAlias != "" {
 				root.DerivedAlias, n.DerivedAlias = n.DerivedAlias, ""
 			}
+			if n.Rel != 0 && root.Rel == 0 {
+				root.Rel, root.RelCols, n.Rel, n.RelCols = n.Rel, n.RelCols, 0, nil
+			}
 			if n.LateralSubtree {
 				root.LateralSubtree, n.LateralSubtree = true, false
 			}

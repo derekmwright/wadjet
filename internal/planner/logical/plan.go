@@ -577,6 +577,15 @@ type Node struct {
 	// the QUERY calls that arm (#751, #773).
 	DerivedAlias string
 
+	// Rel and RelCols are the relation INSTANCE the binder registered the
+	// FROM item this subtree plans (plansql.TableRef.Rel, RelCols; ADR-0047):
+	// set on the node resolveTableOrCTE returns — a base table's scan, a CTE
+	// reference, a derived table's root — and moved with DerivedAlias by every
+	// rewrite that moves the root. Zero when no stamping binder registered the
+	// item. OutputIDs reads them.
+	Rel     plansql.RelID
+	RelCols []string
+
 	// DeferredColumnAliases is a COLUMN-ALIAS LIST this Project owes its
 	// child, deferred because the child's SELECT list holds a `*` whose width
 	// the builder cannot count. DeferredAliasRelation and DeferredAliasKind

@@ -1772,6 +1772,15 @@ func recursiveCTEColumns(cte *plansql.CTEDef, earlier []plansql.CTEDef) []string
 // (#851) — and a copy would be planned from a tree that never heard the
 // answer. See plansql's sub_block.go.
 func resolveTableOrCTE(table *plansql.TableRef, ctes []plansql.CTEDef) (*Node, error) {
+	n, err := resolveTableOrCTESource(table, ctes)
+	if err == nil && n != nil && table.Rel != 0 {
+		// The node answers for the binder's instance (OutputIDs).
+		n.Rel, n.RelCols = table.Rel, table.RelCols
+	}
+	return n, err
+}
+
+func resolveTableOrCTESource(table *plansql.TableRef, ctes []plansql.CTEDef) (*Node, error) {
 	// An unqualified system-relation name is a WITH query's first: the
 	// parser resolved `pg_class` to pg_catalog's before it could see this
 	// scope (plansql.resolveSystemRelation).

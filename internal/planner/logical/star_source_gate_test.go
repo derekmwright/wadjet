@@ -261,6 +261,12 @@ func TestOnlyOnePathReadsAScanColumnListForAStar(t *testing.T) {
 		"logical.projectOutputNamesBelow": "publishes a Project's names first; Scan arm is unpoliced",
 		"logical.subtreeOutputNames":      "publishes a Project's names first; Scan arm is unpoliced",
 		"physical.cteOutputNames":         "publishes a Project's names first; Scan arm is unpoliced",
+		// Not an expansion: the ordered IDENTITY list a declaration lookup
+		// reads (ADR-0047 stage 2). It answers nil at an unexpanded star and
+		// publishes no column — a position is reached only by a binding the
+		// binder already resolved, and a policed scan's barrier is a Project
+		// whose own items are its positions.
+		"logical.OutputColumnsWith": "identity list for declarations; declines at a star, publishes nothing",
 	}
 	// Tokens that mean "this function is about star expansion".
 	starTokens := map[string]bool{
