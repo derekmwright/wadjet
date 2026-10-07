@@ -76,24 +76,27 @@ and unfolded FROM-less forms retain the gate's recorded answers (`qd/*`,
 | Stage | State | What reads the binding | What stays keyed by name, and where it moves |
 |---|---|---|---|
 | 1 | done (2026-10-06, #1524) | the single-process GROUP BY term match | — |
-| 2 | done (#1393) | the single-process declaration walk: a node's output is an ordered identity list (`logical.Node.OutputColumns` / `OutputIDs`, from the instance the binder records on the FROM item, `plansql.TableRef.Rel`); `physical.declWalk.outputs` declares each position once per walk; a bound reference — a projection's leaf, a GROUP BY key, LAG's default — is declared by the position its binding names; a GROUP BY key is read from its tree, never its text | the PostgreSQL category (`ColDecls.pgCat`) and the strict-integer set, by name; the rename chase that re-spells a computed key for execution (`resolveAggInputName`, stage 6); a node a rewrite rebuilt without its instance answers by name; the stage DAG's per-stage declarations (`GroupByTypes`, `GroupByDecimal`, stages 5 and 7) |
+| 2 | done (#1393) | the single-process declaration walk: a node's output is an ordered identity list (`logical.Node.OutputColumns` / `OutputIDs`, from the instance the binder records on the FROM item, `plansql.TableRef.Rel`); `physical.declWalk.outputs` declares each position once per walk; a bound reference — a projection's leaf, a bound GROUP BY key, LAG's default, an aggregate's argument — is declared by the position its binding names. Planning time stays in its measured degree: derived-table depth 16 / 32 / 64 / 128 plan in 8.9 / 34.5 / 247 / 1,689 ms at a0f0c322 and 10.3 / 39.7 / 303 / 2,291 ms here (fitted exponent 2.55 and 2.63; `wadjet.TestArcCI2DeclarationPlanningBound` holds depth 128 under three seconds) | an unbound GROUP BY key (a re-parse of its text) and an unbound aggregate argument (the stage DAG's re-spelled names, typed from the scans below first, `aggInputColumnType`); the PostgreSQL category (`ColDecls.pgCat`) and the strict-integer set, by name; the rename chase that re-spells a computed key for execution (`resolveAggInputName`, stage 6); a node a rewrite rebuilt without its instance answers by name; a dotted relation alias, which the binder does not bind (#1650); the stage DAG's per-stage declarations (`GroupByTypes`, `GroupByDecimal`, stages 5 and 7) |
 
 Stage 2's gates: `coordinator.TestArcCI2DeclaredOutputByIdentityEveryArm`
-(1,573 cells × five arms: eight origins of a relation that publishes another
-relation's names at other types, nine expressions, thirteen consumer sites;
-the stage-DAG arms keep their base answers as kept lines),
-`pgwire.TestArcCI2DeclaredOutputOnTheWire` (#1393's statements and the
-grouped forms, text and binary, INSERT … SELECT *, CREATE TABLE … AS and
+(1,662 cells × five arms: eight origins of a relation that publishes another
+relation's names at other types, nine expressions, thirteen consumer sites,
+and nine aggregates over a derived column that shadows a scan column of
+another type; the stage-DAG arms keep their base answers as kept lines),
+`pgwire.TestArcCI2DeclaredOutputOnTheWire` (#1393's statements, the
+grouped forms and the aggregate arguments, text and binary, INSERT … SELECT *, CREATE TABLE … AS and
 MERGE), `wadjet.TestArcCI2DeclarationByIdentityCensus` (every reference
 declared by its binding is also asked by name; zero disagreements wherever
 the name rules answer) and `wadjet.TestArcCI2DeclarationPlanningBound`
 (derived tables nested 16 and 64 deep, 200 items over 50 keys, a twelve-way
-join, each under two seconds).
+join, each under two seconds; depth 128 under three).
 
-The name lookups the walk keeps for unbound references resolve a qualified
-reference by its PARSED qualifier and column (`physical.lookupColRef`):
-cutting an expression's text at its last dot read `x + a.k` as the column
-`k`, which is #1393.
+The name lookups the walk keeps for unbound references — `physical.lookupColRef`
+and the aggregate argument's scan lookup (`scanColumnType`,
+`scanColumnDecimal`) — resolve a qualified reference by its PARSED qualifier
+and column: cutting an expression's text at its last dot read `x + a.k` as the
+column `k`, which is #1393 (`pgwire.TestArcCI2DeclaredOutputOnTheWire` grp/*;
+agg/* for the aggregate argument).
 
 ## Measurement record
 
