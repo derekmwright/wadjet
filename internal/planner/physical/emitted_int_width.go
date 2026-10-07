@@ -393,20 +393,10 @@ func declaredProjectionIntWidth(proj logical.Projection, decls ColDecls, strictI
 	return catalogIntWidth(declared.ID)
 }
 
-// lookupColIntWidth is lookupColType's width companion, resolving a name that
-// may still carry a qualifier the map is keyed without.
+// lookupColIntWidth is lookupColType's width companion.
 func lookupColIntWidth(widths map[string]intWidth, name string) (intWidth, bool) {
-	if widths == nil || name == "" {
-		return intWidthUnknown, false
-	}
-	lc := strings.ToLower(strings.TrimSpace(name))
-	if w, ok := widths[lc]; ok {
+	if w, ok := lookupColRef(widths, name); ok {
 		return w, true
-	}
-	if dot := strings.LastIndexByte(lc, '.'); dot >= 0 {
-		if w, ok := widths[lc[dot+1:]]; ok {
-			return w, true
-		}
 	}
 	return intWidthUnknown, false
 }
