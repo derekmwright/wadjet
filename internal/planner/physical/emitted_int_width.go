@@ -319,6 +319,17 @@ func aggArgIntWidth(agg logical.AggExpr, in ColDecls) (intWidth, bool) {
 			return intWidthUnknown, false
 		}
 	}
+	// A bound argument is the column its binding names (ADR-0047 stage 2).
+	if ref := aggInputRef(agg); ref != nil {
+		if _, ok := in.boundPos(ref); ok {
+			if w, ok := in.colIntWidth(ref); ok {
+				return w, true
+			}
+			if c, ok := in.colDecl(ref); ok {
+				return catalogIntWidth(c.Type), true
+			}
+		}
+	}
 	col := strings.TrimSpace(agg.InputCol)
 	if col == "" {
 		return intWidthUnknown, false

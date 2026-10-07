@@ -110,7 +110,7 @@ func aggDerivedGroupKey(key string, child *logical.Node) (string, bool) {
 }
 
 func aggInputColumnDecimal(node *logical.Node, col string) (logical.DecimalMeta, bool) {
-	return newDeclWalk().aggInputColumnDecimal(node, col)
+	return newDeclWalk().aggInputColumnDecimal(node, col, nil)
 }
 
 func aggOhlcvOutputFields(node *logical.Node, agg logical.AggExpr) ([]parquet.Column, bool) {
