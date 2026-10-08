@@ -186,8 +186,9 @@ consumer can sniff and decode, including mid-stream.
   needs none: a precision is 1..38 (`parquet.MaxDecimalDigits`), so bit 7 of
   its byte (`wshf.DecimalUnconstrainedBit`, 0x80) is never set by a
   precision. The writer sets it from `parquet.Column.Unconstrained`
-  (`wshf.DecimalPrecisionByte`, which refuses a precision of 128 or more
-  rather than write it into the bit); both header parsers — the one decoder
+  (`wshf.DecimalPrecisionByte`, which refuses a precision past 38 —
+  `parquet.MaxDecimalDigits`; 128 or more before 2026-10-06 — rather than
+  write it into the bit); both header parsers — the one decoder
   `wshf.ParseHeader` and the worker's streaming reader — mask it off the
   precision and set the decoded column's mark (`wshf.SplitDecimalPrecisionByte`).
   The mark is a property of the column's TYPE, so it travels where the type

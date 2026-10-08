@@ -1555,7 +1555,7 @@ precision rows r17, r19, r23 and comparison-membership r9 (§1's carrier,
 unchanged).
 
 **Cost** (medians of ns/op per 2,048 values, eb76eb97 → stage 1,
-alternating runs under one lock; the PS1 closure review's measurement):
+alternating runs under one lock, measured when the stage closed):
 add −0.9 % uniform, +1.1 % varying; multiply −0.4 % uniform, −0.8 %
 varying; compare −0.2 %; SUM +0.4 %; the printer −0.6 % for a column with
 no display scales, +1.1 % for a marked column and +2.4 % for a varying one,

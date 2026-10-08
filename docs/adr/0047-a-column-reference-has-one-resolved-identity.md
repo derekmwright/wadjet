@@ -105,6 +105,6 @@ SQLSTATEs that agree with PostgreSQL move away on any arm. The gate asserts
 this for each row, using the base states recorded in
 `testdata/arc_ci1_base_sqlstates.tsv`, independently of diagnostic text.
 
-Historical prototype counts and hook timings are retained in the arc's
-`ci1_landing_notes.md`. Current SQLSTATE comparisons are recorded in its
-`SUMMARY ROUND 2` and `ci1_author/r2/` tables.
+The base SQLSTATE of every row is the gate's own record,
+`testdata/arc_ci1_base_sqlstates.tsv`; the prototype counts and hook timings
+measured while the stage was built are not carried in the repository.
