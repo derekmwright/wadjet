@@ -13,7 +13,7 @@ import (
 )
 
 // A PREDICATE over exact arithmetic whose operand is a CHOICE, a CAST, a
-// scalar function or a negation, on four arms (#849 round-3 residual, #555).
+// scalar function or a negation, on four arms (#849, #555).
 //
 // `expr.BinOp` — the generic arithmetic node every operand with no typed
 // protocol compiles to — boxes an exact fixed-point result as a DECIMAL

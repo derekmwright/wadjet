@@ -336,7 +336,7 @@ func unTrim(s string) string {
 }
 
 // A COLUMN CREATED FROM AN UNCONSTRAINED NUMERIC KEEPS ITS PRINTER ACROSS AN
-// EXCHANGE (ADR-0024 §10, arc UN round 4). Read back after a GROUP BY key, a
+// EXCHANGE (ADR-0024 §10). Read back after a GROUP BY key, a
 // DISTINCT, a set-operation arm, a window's input, partition or order key, an
 // equi-join key or payload on either side, a sort + LIMIT or a CTE read twice,
 // the column's value renders as text — CAST, ||, concat, format,

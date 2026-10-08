@@ -96,9 +96,9 @@ func TestArcRCRecursiveCTEAnswersItsWholeClosureOrFails(t *testing.T) {
 			want: "n:FLOAT64 => 1.5|2.5|3.5"},
 		{name: "a NULL column carried through", sql: "WITH RECURSIVE r(n, s) AS (SELECT 1, NULL::text UNION ALL SELECT n+1, s FROM r WHERE n<3) SELECT n, s IS NULL AS z FROM r ORDER BY 1",
 			want: "n:INT32,z:BOOL => 1,true|2,true|3,true"},
-		// Round 2 (B1): PostgreSQL's UNION resolution with the seed first —
-		// an integer or NULL term the seed's type accepts is converted, never
-		// refused. Round 1 answered 42804 for both of the first two.
+		// PostgreSQL's UNION resolution with the seed first — an integer or
+		// NULL term the seed's type accepts is converted, never refused
+		// (42804 for both of the first two was the wrong answer).
 		{name: "an integer term under a numeric seed", sql: "WITH RECURSIVE r(n,k) AS (SELECT 1::numeric,1 UNION ALL SELECT 2,k+1 FROM r WHERE k<3) SELECT n FROM r ORDER BY k",
 			want: "n:DECIMAL => 1|2|2"},
 		{name: "a NULL term under an integer seed", sql: "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT NULL FROM r WHERE n IS NOT NULL) SELECT n FROM r ORDER BY n",
@@ -187,7 +187,7 @@ func TestArcRCRecursiveCTEAnswersItsWholeClosureOrFails(t *testing.T) {
 			want: "ERR 42P19 must not appear within a subquery"},
 		{name: "the self-reference in a scalar subquery", sql: "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT (SELECT max(n) FROM r) + 1 FROM lat_ord WHERE id = 1 AND false) SELECT n FROM r ORDER BY 1",
 			want: "ERR 42P19 must not appear within a subquery"},
-		// Round 2 (B2): the aggregate rule is per QUERY BLOCK — refused in a
+		// The aggregate rule is per QUERY BLOCK — refused in a
 		// block whose own FROM names the reference, at any depth; allowed in
 		// one that reads it only through a derived table.
 		{name: "an aggregate in a derived table over the reference", sql: "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n FROM (SELECT max(n)+1 AS n FROM r WHERE n<3) q WHERE n IS NOT NULL) SELECT n FROM r ORDER BY n",

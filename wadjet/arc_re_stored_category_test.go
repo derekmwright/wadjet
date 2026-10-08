@@ -15,8 +15,8 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// A STORED COLUMN KEEPS THE CATEGORY IT WAS CREATED WITH (#381, arc RE round
-// 3): read from storage, not from the session that created it.
+// A STORED COLUMN KEEPS THE CATEGORY IT WAS CREATED WITH (#381): read from
+// storage, not from the session that created it.
 //
 // CREATE TABLE AS of an expression PostgreSQL types numeric and this engine
 // computes in a double (`5 / 2.0 + id * 0`, `sqrt(6.25 + id * 0)`, `power`,

@@ -319,7 +319,7 @@ type Case struct {
 	// TEXT rather than a carrier (choice_decimal.go, #695).
 	dch decimalChoice
 	// cc moves a container branch into the branches' common shape
-	// (choice_container.go, arc CW round 5).
+	// (choice_container.go).
 	cc *containerChoice
 }
 

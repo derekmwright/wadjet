@@ -11,8 +11,8 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// TestDecimalLiteralIsNumericInEveryContext is the SELECT side of arc VL
-// round 5's decimal-literal declaration (round-4 review B2): a fractional
+// TestDecimalLiteralIsNumericInEveryContext is the SELECT side of the
+// decimal-literal declaration: a fractional
 // literal is PostgreSQL's numeric wherever it sits, and every context that
 // holds one keeps the VALUE PostgreSQL answers. PostgreSQL 17.11 values; the
 // `pg` column differs only where a numeric choice over constants of mixed

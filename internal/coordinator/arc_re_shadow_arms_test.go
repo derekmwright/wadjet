@@ -21,7 +21,7 @@ import (
 	"github.com/derekmwright/wadjet/wadjet"
 )
 
-// Arc RE round 2: a ROUNDING site (round, the integer CAST and `::`, an
+// A ROUNDING site (round, the integer CAST and `::`, an
 // array element cast) over a column whose NAME is shared by another column
 // of the query — a derived table that computes `f` over a table that has an
 // `f`, a UNION ALL arm, a self-join, a join of two relations each with `f`, a

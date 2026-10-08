@@ -26,7 +26,7 @@ import (
 // ADR-0010's 2026-10-05 amendment). A `.wshf` exchange file carries each
 // DECIMAL column's mark in its header's precision byte, so a stage reads the
 // mark of the column it reads — never of another column of the same name.
-// Round 4 carried the mark beside the file and stamped it back by NAME: a
+// A mark carried beside the file and stamped back by NAME failed: a
 // set operation whose arms publish `v` from a NUMERIC column and from a
 // NUMERIC(10,2) column printed the constrained arm's `2.50` as `2.5` on the
 // DAG arms, and the asynchronous door, which no stamp reached, printed a
@@ -38,7 +38,7 @@ import (
 // sides both publish `v` (one marked), a CTE read twice, renamed and swapped
 // columns, the asynchronous door's bare reads and its probe split, and set
 // operations of three arms flat and nested left- and right-deep whose marked
-// arms come before a NUMERIC(10,2) one (round 6: the inner operation's plan
+// arms come before a NUMERIC(10,2) one (where the inner operation's plan
 // type did not carry its mark, so its marked batches reached the union's
 // file uncoerced) — answers the same on eleven arms: single, spilled, dag,
 // dag-shuffled, dag-morsel4, dag-eager, dag-skew, dag-aggsplit, the fast

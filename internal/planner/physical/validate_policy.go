@@ -256,7 +256,7 @@ func (p *Planner) policyTableColumns(ctx context.Context, table string) []string
 // projection and its scan reads the stored column just as surely as one in the
 // outer plan, and the shape that does it — a derived table, a set operation or
 // a correlation inside the subquery — is one no per-shape teaching can
-// enumerate (#859 round 4).
+// enumerate (#859).
 func (p *Planner) CheckPolicyPlanOrderFromContext(ctx context.Context, plan *logical.Node) error {
 	pol := logical.ColumnPoliciesFromContext(ctx)
 	lookup := logical.PolicyLookupFromContext(ctx)

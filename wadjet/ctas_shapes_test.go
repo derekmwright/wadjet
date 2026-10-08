@@ -291,8 +291,7 @@ func TestWithNoDataDeclaresWithoutRunning(t *testing.T) {
 	// aliased or a bare column there is no `?column?` for the two arms to
 	// disagree about, and they DID disagree: `WITH NO DATA` named this column
 	// `"g + 1"` — its expression TEXT, which is what the plan-time walk names
-	// it — where `WITH DATA` and PostgreSQL 17.11 both name it `?column?`
-	// (round-2 review B7).
+	// it — where `WITH DATA` and PostgreSQL 17.11 both name it `?column?`.
 	res, err := db.Query(ctx, `CREATE TABLE nodata AS SELECT id, g + 1, d FROM shp WITH NO DATA`)
 	if err != nil {
 		t.Fatalf("WITH NO DATA: %v", err)
@@ -392,7 +391,7 @@ func ctasEqualStrings(a, b []string) bool {
 	return true
 }
 
-// The two arms of one statement declare ONE table (#1024 round-2 review B7).
+// The two arms of one statement declare ONE table (#1024).
 //
 // `WITH DATA` takes its columns from the EXECUTED plan's declared output;
 // `WITH NO DATA` takes them from the plan-time walk, because it does not run
@@ -422,13 +421,13 @@ func TestTheTwoArmsOfACreateDeclareOneTable(t *testing.T) {
 		`SELECT id, s FROM shp ORDER BY id DESC LIMIT 2`,
 		`SELECT id, s, d FROM shp WHERE 1 = 0`,
 		`SELECT CAST(id AS DECIMAL(18,4)), CAST(s AS STRING) FROM shp`,
-		// A STAR over a relation that is not a base table, which is where the
-		// round-2 fix stopped: `deriveColumns` names the items the OUTER
+		// A STAR over a relation that is not a base table, which is where an
+		// earlier fix stopped: `deriveColumns` names the items the OUTER
 		// select lists, and a star lists none, so these fell through to the
 		// plan-time walk — which spells an INNER unaliased item by its
 		// expression TEXT. PostgreSQL 17.11 declares `id, ?column?` for every
 		// one of them on BOTH arms (measured). A star over a base table was
-		// always fine, which is why the round-2 shapes above could not see it.
+		// always fine, which is why the shapes above could not see it.
 		`WITH c AS (SELECT id, g + 1 FROM shp) SELECT * FROM c`,
 		`SELECT * FROM (SELECT id, g + 1 FROM shp) x`,
 		`SELECT * FROM (SELECT id, s || 'x' FROM shp) x`,
@@ -444,8 +443,7 @@ func TestTheTwoArmsOfACreateDeclareOneTable(t *testing.T) {
 		// does not plan therefore could not resolve `c`, declined, and fell
 		// back to the untyped default: `(SELECT SUM(d) FROM c)` was
 		// DECIMAL(38,3) executed and FLOAT64 declared, and an append into the
-		// declared table stored ten significant digits fewer (round-4 review
-		// B1). The last of these is the control — the same subquery over a
+		// declared table stored ten significant digits fewer. The last of these is the control — the same subquery over a
 		// BASE table, which always agreed.
 		`WITH c AS (SELECT id, g FROM shp) SELECT id, (SELECT MAX(g) FROM c) FROM shp`,
 		`WITH c AS (SELECT id, g FROM shp) SELECT id, (SELECT MAX(g) FROM c) AS m FROM shp`,
@@ -490,7 +488,7 @@ func TestTheDuplicateNameRuleHoldsOnBothArms(t *testing.T) {
 		`SELECT g+1, g+1 FROM shp`,
 		// …and through a STAR, where the two unaliased items are the INNER
 		// relation's. `WITH NO DATA` CREATED these where `WITH DATA` and
-		// PostgreSQL both answer 42701 (round-2 review B1).
+		// PostgreSQL both answer 42701.
 		`WITH c AS (SELECT g+1, g+2 FROM shp) SELECT * FROM c`,
 		`SELECT * FROM (SELECT g+1, g+2 FROM shp) x`,
 	} {
@@ -510,7 +508,7 @@ func TestTheDuplicateNameRuleHoldsOnBothArms(t *testing.T) {
 	}
 }
 
-// The DECLARED form honours IF NOT EXISTS (#1024 round-2 review B3).
+// The DECLARED form honours IF NOT EXISTS (#1024).
 //
 // The grammar took the clause in this arc; the executor did not read it, so a
 // statement documented as a no-op raised the very 42P07 the documentation said
@@ -562,7 +560,7 @@ func TestIfNotExistsIsHonouredOnBothFormsOfCreateTable(t *testing.T) {
 	}
 }
 
-// A column DEFINITION list and a query cannot both be written (round-2 P1).
+// A column DEFINITION list and a query cannot both be written.
 //
 // `CREATE TABLE t (a INT64) AS SELECT 1` created an empty declared table and
 // dropped the query on the floor, reporting success. PostgreSQL 17.11:
@@ -642,10 +640,10 @@ func (s *ctasReadCounter) GetReaderAt(ctx context.Context, b, k string) (objstor
 }
 
 // WITH NO DATA DOES NOT RUN THE QUERY, and this asserts the ABSENCE of the
-// execution rather than the outcome (#1024 round-3 review B1/N4).
+// execution rather than the outcome (#1024).
 //
 // The outcome — an empty table with the right columns — is the same whether or
-// not the rows were read, which is exactly how a round-3 change that ran every
+// not the rows were read, which is exactly how a change that ran every
 // CTE body and every hash join's build side inside `WITH NO DATA` passed the
 // gate above. Planning is not a pure derivation: `physical.Planner.Plan`
 // materializes a CTE by RUNNING a pipeline over it and builds a join's build
@@ -687,7 +685,7 @@ func TestWithNoDataReadsNothingAndEvaluatesNothing(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Every shape the round-3 review measured a read on, plus the controls it
+	// Every shape a read was measured on, plus the controls it was
 	// measured zero on, so the cell that starts reading is named.
 	shapes := []struct{ name, query string }{
 		{"Plain", `SELECT id, g + 1 FROM big`},
@@ -707,7 +705,7 @@ func TestWithNoDataReadsNothingAndEvaluatesNothing(t *testing.T) {
 		{"PoisonedRowInDerived", `SELECT * FROM (SELECT id, 1 / (id - 5) AS x FROM big) y`},
 		{"PoisonedCastInCTE", `WITH c AS (SELECT CAST(s AS INT64) AS n FROM big) SELECT * FROM c`},
 		{"PoisonedRowInJoin", `SELECT a.id, 1 / (a.id - 5) AS x FROM big a JOIN big b ON b.id = a.id`},
-		// The scalar-subquery-over-a-CTE class (round-4 review B1). Its repair
+		// The scalar-subquery-over-a-CTE class. Its repair
 		// seeds the planner's WITH list so the DECLARATION can resolve `c`;
 		// seeding the NAMES must not run the BODIES, which is what this gate
 		// is here to say.

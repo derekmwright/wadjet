@@ -14,7 +14,7 @@ import (
 )
 
 // A SEMI OR ANTI JOIN THE PLANNER BUILDS FROM ITS OUTER SIDE STILL EMITS ITS
-// OUTER RELATION'S CATEGORIES (#381, arc RE round 4), on five arms.
+// OUTER RELATION'S CATEGORIES (#381), on five arms.
 //
 // When the inner relation of IN / EXISTS / NOT EXISTS is estimated more than
 // three times larger than the outer, buildJoin builds the outer side and

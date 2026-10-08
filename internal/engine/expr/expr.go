@@ -401,8 +401,8 @@ func init() {
 
 		// date_add / date_sub declare TIMESTAMP here and DATE for a DATE
 		// shifted by whole days — the argument-dependent half is
-		// physical.funcReturnType's, the same rule dateShift boxes by (arc VL
-		// round 3). to_date is a DATE.
+		// physical.funcReturnType's, the same rule dateShift boxes by. to_date
+		// is a DATE.
 		"date_add": {fnDateAdd, RetTimestamp},
 		"date_sub": {fnDateSub, RetTimestamp},
 		"to_date":  {fnToDate, RetTypeOf(batch.TypeDate)},
@@ -528,7 +528,7 @@ func init() {
 		// from_base and bit_count answer INTEGERS. Declaring them FLOAT64
 		// coerced an exact int64 through a double on the way out, so
 		// FROM_BASE('4000000000000012', 16) came back 4.611686018427388e+18
-		// (#966 round 2). PostgreSQL's own bit_count answers bigint.
+		// (#966). PostgreSQL's own bit_count answers bigint.
 		"from_base": {fnFromBase, RetInt64},
 		"to_base":   {fnToBase, RetString},
 		"bit_count": {fnBitCount, RetInt64},

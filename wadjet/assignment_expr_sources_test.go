@@ -15,18 +15,18 @@ import (
 )
 
 // TestAssignmentExpressionSourcesAgreeWithPostgreSQL is the SOURCE axis the
-// door-diff gate (TestAssignmentDoorsAgree) lacked (round-4 review B2): a
+// door-diff gate (TestAssignmentDoorsAgree) lacked: a
 // numeric constant INSIDE an expression — CASE, COALESCE, GREATEST, NULLIF,
 // arithmetic — and reached THROUGH a construct — a CTE, a derived table, a
 // VALUES list, MERGE's USING (SELECT …) — assigned to INTEGER, BIGINT,
 // DOUBLE, NUMERIC(10,2) and TEXT through every write door. Each cell must
 // store the same value on all nine doors AND that value must be PostgreSQL
 // 17.11's: a gate that compares the doors only cannot see every door being
-// equally wrong, which is what round 4 shipped (`CASE WHEN true THEN 2.50
+// equally wrong, which is what an earlier build did (`CASE WHEN true THEN 2.50
 // END` stored `2.5` into TEXT and 2 into INTEGER on every door — a decimal
 // constant was declared double precision one expression deeper than the bare
 // constant the assignment function read by its spelling). A decimal literal
-// now declares its spelling's numeric wherever it sits (arc VL round 5).
+// now declares its spelling's numeric wherever it sits.
 //
 // Cells measured on PostgreSQL 17.11 (wadjet-pg-vl) with these statements on
 // all nine doors; PostgreSQL itself splits on none.
@@ -166,7 +166,7 @@ var assignmentExprSourceDivergences = map[string]string{
 
 type assignmentExprSourceCell struct{ src, tgt, want string }
 
-// Measured on PostgreSQL 17.11 (wadjet-pg-vl) by arc VL round 5's generator.
+// Measured on PostgreSQL 17.11 (wadjet-pg-vl) by the cell generator.
 var assignmentExprSourceCells = []assignmentExprSourceCell{
 	{"2.50", "i", "ok 3"},
 	{"2.50", "n", "ok 3"},

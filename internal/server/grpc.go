@@ -240,7 +240,7 @@ func (g *GRPCServer) QueryStream(req *wadjetv1.QueryRequest, stream wadjetv1.Wad
 // the result meant the only way in was a live coordinator, so the class mapping
 // on this path was assertable only at the mapping function and the WIRING here
 // was not gated at all: restoring this line to a bare codes.Internal passed the
-// whole package (round-1 review P1). Ownership is unchanged — this function
+// whole package. Ownership is unchanged — this function
 // closes the stream it is handed, on every exit.
 func streamResultBatches(cs *chunkStreamer, stream coordinator.BatchStream) error {
 	defer stream.Close()
@@ -254,7 +254,7 @@ func streamResultBatches(cs *chunkStreamer, stream coordinator.BatchStream) erro
 			// plan-time estimates, so a `query_limit` obligation refuses before
 			// the result exists — but this was the one path in the two SQL RPCs
 			// where a 42501 would have crossed as Internal, and leaving one such
-			// path is how a class becomes "usually" (round-1 review P4).
+			// path is how a class becomes "usually".
 			return grpcResultError(err, "reading result batches")
 		}
 		if b == nil {
@@ -325,8 +325,8 @@ type chunkStreamer struct {
 // cannot hold two output columns that publish ONE NAME, and since #732
 // `SELECT g + 1, g + 2, g + 3` is three columns called `?column?`. Passing nil
 // here is what left the STREAMING RPC sending three column names beside a
-// one-key map with the LAST value in it, while the unary RPC sent all three
-// (round-2 review B1). It may be nil or short — the engine materialises the
+// one-key map with the LAST value in it, while the unary RPC sent all three.
+// It may be nil or short — the engine materialises the
 // positional form only when the names are not unique — and rowsToProtoWithValues
 // leaves `Row.values` empty for every row it does not cover.
 func (cs *chunkStreamer) pushRows(rows []map[string]any, values [][]any) error {
@@ -540,7 +540,7 @@ func (g *GRPCServer) CreateTable(ctx context.Context, req *wadjetv1.CreateTableR
 	// name does not resolve to anything yet, so a table-scoped rule has
 	// nothing to match and asking would decide about a relation that does not
 	// exist. PostgreSQL draws the same line — CREATE is a privilege on the
-	// SCHEMA, DROP is checked against the object (round-1 review P1).
+	// SCHEMA, DROP is checked against the object.
 	if err := grpcRequireWrite(g.authProvider, ctx); err != nil {
 		return nil, err
 	}
@@ -668,7 +668,7 @@ func (g *GRPCServer) DropTable(ctx context.Context, req *wadjetv1.DropTableReque
 	// destroy `secret`, and let an EXPLICIT ABAC deny on a relation be
 	// out-argued by the one operation that removes it — the same evaluator
 	// that refused to show the caller a column of it. A control that governs
-	// reading a row must govern destroying every row (round-1 review P1).
+	// reading a row must govern destroying every row.
 	//
 	// ActionWrite, not a new word: the permission vocabulary is read/write/admin
 	// and TableAccess maps write→create→drop onto `write` for the legacy arm,
@@ -788,7 +788,7 @@ func rowsToProto(rows []map[string]any) []*wadjetv1.Row {
 // nothing under the second. `values` is sent whenever the caller has the
 // positional form, which the engine materialises exactly when the names are not
 // unique (`CollectSink.ToRowValues`, #513). Nil elsewhere, so an ordinary
-// response is byte-identical to before (round-1 review B1).
+// response is byte-identical to before.
 func rowsToProtoWithValues(rows []map[string]any, values [][]any) []*wadjetv1.Row {
 	result := make([]*wadjetv1.Row, len(rows))
 	for i, row := range rows {

@@ -59,7 +59,7 @@ func dagPGCategories(plan *logical.Node, stages []dagplan.Stage) (map[string]uin
 	out := map[string]uint8{}
 	// A name the plan's own fold found under two categories stays out: an
 	// aggregate stage's output of that name (`avg(i) AS f` beside a float8
-	// `f`) is one of the two, not the answer (review round 1, m_avg_union2).
+	// `f`) is one of the two, not the answer (cell m_avg_union2).
 	conflict := map[string]bool{}
 	for name := range planConflicts {
 		conflict[name] = true

@@ -52,7 +52,7 @@ func (p *Planner) buildSetOp(ctx context.Context, node *logical.Node, op string)
 		leftFacts:   setOpAdapterArmFacts(node.Children[0]),
 		rightFacts:  setOpAdapterArmFacts(node.Children[1]),
 		// Each arm's DECLARED output, for an arm that produces no batch: its
-		// sink then still has the arm's names and types (round 4, N2). An
+		// sink then still has the arm's names and types. An
 		// empty FIRST arm left the operation with only the second arm's
 		// schema — ITS names — so the parent's reference to the first arm's
 		// name found no column and read NULL for every row.

@@ -35,7 +35,7 @@ import (
 // whose result no stamp reached, printed a marked column's stored scale
 // (d01-d03, d09, d10). A set operation of three arms, or a nested one, whose
 // marked arms came before a NUMERIC(10,2) arm printed that arm's `2.50` as
-// `2.5` on pgwire-coordinator alone and split its counts (d15-d24, round 6).
+// `2.5` on pgwire-coordinator alone and split its counts (d15-d24).
 // Each statement's answer is PostgreSQL 17.11's — since arc PS stage 1
 // (ADR-0024 §11) a set operation over two declarations prints each value's
 // own display scale, and its kept r18 answers are deleted — and every door

@@ -498,7 +498,7 @@ func (h *HashAggregate) updateGroup(gs *groupState, b *batch.RecordBatch, row in
 				continue
 			}
 			// One step, shared with MergeOhlcvStates, so the merge stage and
-			// the encoded/encoded face cannot drift apart (round-2 P3).
+			// the encoded/encoded face cannot drift apart.
 			absorbEncodedOhlcvState(ext.extraState[i].(*ohlcvState), s)
 
 		case AggMinBy, AggMaxBy:

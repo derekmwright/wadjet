@@ -13,13 +13,13 @@ import (
 )
 
 // ONLY A PLAN THAT ROUNDS TAKES THE LOCAL ROUTE FOR A CATEGORY THE STAGE
-// DAG'S NAME MAP LOSES (#381, arc RE round 4), on five arms.
+// DAG'S NAME MAP LOSES (#381), on five arms.
 //
 // rv_mf.f is a stored column created from `sqrt(6.25 + id * 0)` (numeric to
 // PostgreSQL 17.11, FLOAT64 here with the mark) and rv_a.f a double
 // precision: a plan reading both leaves f out of the map the stages key by
 // name (physical.PlanPGCategories), and a stage rounding f would take the
-// carrier's reading. Round 3 sent every such plan to the coordinator-local
+// carrier's reading. An earlier rule sent every such plan to the coordinator-local
 // pipeline (errCategoryByName), including the ones nothing in which rounds —
 // a semi join, a count, two sums, a bare UNION ALL, a bare join projection
 // ran on one process with no category to read. Now only a plan with a

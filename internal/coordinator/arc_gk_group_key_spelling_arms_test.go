@@ -324,9 +324,8 @@ func TestArcGKGenerate(t *testing.T) {
 	}
 }
 
-// gkMoreCells is the table's second half: the GK round-1 review's probes,
-// round 2's join / path / origin cells, the GK-F4 cells and arc CI1's own join
-// cells (testdata/arc_gk_group_key_spelling_more_cells.tsv), each measured on
+// gkMoreCells is the table's second half: the probe cells, the join / path /
+// origin cells, the GK-F4 cells and the ADR-0047 stage-1 join cells (testdata/arc_gk_group_key_spelling_more_cells.tsv), each measured on
 // PostgreSQL 17.11 (…_more_pg17.tsv).
 func gkMoreCells(t *testing.T) []ssCell {
 	t.Helper()
@@ -433,7 +432,7 @@ func gkKeptLines(t *testing.T) map[string][]gkKeep {
 // a kept line says otherwise; every such line is base-identical or the
 // ALIKE spelling's own catalogued answer. The three stage-DAG arms are PINNED
 // to the base's answer (e0f973e1) wherever that differs from PostgreSQL: the
-// coordinator does not stamp the AST it plans (ADR-0047 §6), so the DAG still
+// coordinator does not stamp the AST it plans (ADR-0047, Stages), so the DAG still
 // matches by spelling, and stage 5 brings the binding to it. A pin that
 // starts agreeing with PostgreSQL FAILS here and is deleted as the proof.
 func TestArcGKGroupKeySpellingEveryArm(t *testing.T) {

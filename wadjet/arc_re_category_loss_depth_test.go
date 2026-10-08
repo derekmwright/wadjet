@@ -14,8 +14,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 )
 
-// THE STAGE DAG'S CATEGORY FOLD STAYS CHEAP ON A DEEP OR WIDE PLAN (#381, arc
-// RE round 4; COMMON §34).
+// THE STAGE DAG'S CATEGORY FOLD STAYS CHEAP ON A DEEP OR WIDE PLAN (#381).
 //
 // physical.PlanPGCategories folds every node's emitted categories by name
 // for the stage DAG, and when a name is left out (a stored column created

@@ -17,8 +17,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// TestAssignmentDoorsAgree is arc VL round 4's door-diff gate (round-3 review
-// B2 / P2): every source × every target column, written through EVERY write
+// TestAssignmentDoorsAgree is the door-diff gate: every source × every target column, written through EVERY write
 // door — INSERT … VALUES, INSERT … SELECT, UPDATE … SET, MERGE … UPDATE SET,
 // MERGE … INSERT VALUES — must store the same value or raise the same
 // SQLSTATE on all of them (zero door differences), and that answer must be
@@ -32,7 +31,7 @@ import (
 // declared type and a value, and every door assigning the same constant into
 // a column of that type must store the same value.
 //
-// At round 3's tip the doors split: `2.50` / `1.10` into TEXT stored `2.5` /
+// Before this gate the doors split: `2.50` / `1.10` into TEXT stored `2.5` /
 // `1.1` on INSERT … SELECT only, `2.5` into INTEGER / BIGINT stored 2 there
 // and 3 elsewhere, `'t'` / `'yes'` into BOOLEAN were 42804 on INSERT … SELECT
 // and code-less strconv errors on the other doors.
@@ -252,7 +251,7 @@ var assignmentDoorDivergences = map[string]string{}
 // integer arithmetic and CAST(… AS INTEGER) are typed bigint where
 // PostgreSQL types integer (a width, the value is the same). A decimal
 // literal was on this list (typed double precision, so `2.50` stored 2.5)
-// until arc VL round 5 typed it numeric.
+// until it was typed numeric.
 var assignmentCTASDivergences = map[string]string{
 	"-5":                    "negated integer literal typed bigint",
 	"1 + 1":                 "integer arithmetic typed bigint",
@@ -270,8 +269,7 @@ type assignmentDoorCell struct{ src, tgt, kind, want string }
 
 type assignmentCTASCell struct{ src, kind, typ, want string }
 
-// Measured on PostgreSQL 17.11 (wadjet-pg-vl) by arc VL round 4's generator
-// (the same statements on the five doors; no PostgreSQL door split): source,
+// Measured on PostgreSQL 17.11 (wadjet-pg-vl) by the cell generator (the same statements on the five doors; no PostgreSQL door split): source,
 // target column, ok|err, the value read back as text or the SQLSTATE.
 var assignmentDoorCells = []assignmentDoorCell{
 	{"5", "i", "ok", "5"},

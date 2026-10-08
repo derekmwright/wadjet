@@ -40,7 +40,7 @@ func TestArcCI1GroupKeyByBindingNeverPublishesAPolicedValue(t *testing.T) {
 		// the direction (or over the join) the spelling rule refuses: the
 		// embedded engine's doors answer it by binding, every door through
 		// the coordinator or the http door's local path keeps the base 42803
-		// (ADR-0047 §6) — a refusal there that starts answering fails here.
+		// (ADR-0047, Stages: stage 5) — a refusal there that starts answering fails here.
 		mixed bool
 	}{
 		{"maskedKeyItemQual", `SELECT upper(e.ssn) AS k, count(*) AS c FROM e7emp e GROUP BY upper(ssn)`, "k", false},

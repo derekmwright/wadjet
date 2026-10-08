@@ -10,7 +10,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 )
 
-// A SCALAR SUBQUERY ROUNDS BY ITS OWN POSTGRESQL TYPE (#381, arc RE round 3).
+// A SCALAR SUBQUERY ROUNDS BY ITS OWN POSTGRESQL TYPE (#381).
 //
 // `(SELECT sqrt(6.25 + id * 0) FROM t …)` and `(SELECT 5 / 2.0 + id * 0 …)`
 // are numeric to PostgreSQL and a double here (ADR-0024 §2c). ROUND and the

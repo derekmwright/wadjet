@@ -15,7 +15,7 @@ import (
 )
 
 // EVERY TEXT RENDERING OF A COLUMN CREATED FROM AN UNCONSTRAINED NUMERIC IS
-// ONE PRINTER (ADR-0024 §10, arc UN round 3). A DECIMAL's box is its text,
+// ONE PRINTER (ADR-0024 §10). A DECIMAL's box is its text,
 // and batch.Vector.GetValueOf boxes a marked column's value as its printed
 // text (`1.5`, not `1.5000000000`); the result rows and every expression that
 // renders the value — CAST to TEXT, `||`, concat, concat_ws, format,

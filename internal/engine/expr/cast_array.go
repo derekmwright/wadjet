@@ -36,7 +36,7 @@ func ArrayCastElement(typeName string) (string, bool) {
 // the elements are written into one vector of that type and the scalar cast
 // reads them there, so a TIMESTAMP element converts as a timestamp (its text,
 // its date) and a DECIMAL one as a number — not as the epoch milliseconds or
-// the text its box holds (arc CW round 3: `CAST(ARRAY[ts] AS TEXT[])` was
+// the text its box holds (`CAST(ARRAY[ts] AS TEXT[])` was once
 // `{1704070800000}`).
 //
 // cat is the ELEMENT's PostgreSQL category (the array operand's, from the
@@ -52,8 +52,8 @@ func castToArray(v any, elem string, from *parquet.Column, cat PGCategory) any {
 		elems = tv
 	case string:
 		if MultiDimArrayText(tv) {
-			// Multi-dimensional input passes through as its text, as it did
-			// before arc CW (round 5; the planner declares it text): this
+			// Multi-dimensional input passes through as its text (the
+			// planner declares it text): this
 			// engine has no multi-dimensional array semantics to read it
 			// into (castToArray's array arm, above).
 			return tv
@@ -64,14 +64,14 @@ func castToArray(v any, elem string, from *parquet.Column, cat PGCategory) any {
 	}
 	// An element with no container text form here (an INTERVAL, which a
 	// container carries as a DURATION nanosecond count) is refused before
-	// any element is cast (arc CW round 3, ADR-0045 §2).
+	// any element is cast (ADR-0045 §2).
 	if textCastDest(strings.ToLower(strings.TrimSpace(elem))) {
 		refuseUnrenderable(elems)
 	}
-	// A MULTI-DIMENSIONAL array passes through unchanged, as it did before
-	// arc CW (arc CW round 5): this engine holds one as an array of arrays
-	// and does not have PostgreSQL's multi-dimensional semantics — its
-	// leaves, its dimensions, unnest over its leaves — so the round-4 cast
+	// A MULTI-DIMENSIONAL array passes through unchanged: this engine holds
+	// one as an array of arrays and does not have PostgreSQL's
+	// multi-dimensional semantics — its leaves, its dimensions, unnest over
+	// its leaves — so a cast
 	// that converted the leaves and kept the dimensions answered a shape the
 	// rest of the engine then read as the outer array's inner arrays
 	// (`unnest` returned `{1,2}` rows where PostgreSQL returns leaves). The

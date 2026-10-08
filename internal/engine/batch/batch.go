@@ -110,7 +110,7 @@ func NewRecordBatch(schema []parquet.Column, numRows int) *RecordBatch {
 // It runs at MINT and at SetColumn, and nowhere else — in particular NOT on
 // every pooled reuse, which is where it was and what it cost: re-stamping a
 // nested schema's whole tree on each Reset measured +18% on the nested pool
-// cycle (round-2 review P2) to re-establish something the mint had already
+// cycle to re-establish something the mint had already
 // established. A column is stamped when it JOINS the batch, which is the only
 // moment its state can be wrong.
 func stampClaimState(v *Vector, cs *claimState) {
@@ -169,7 +169,7 @@ func newVectorFromColumn(col parquet.Column, numRows int) *Vector {
 // not correct: the claim flag hangs off the vectors (see claimState), so a
 // vector minted elsewhere carries a different flag — or none — and a consumer
 // claiming it would set somebody else's while THIS batch is the one Reset
-// recycles. Round-2 review P1 measured that hole for all three ways a foreign
+// recycles. The hole was measured for all three ways a foreign
 // vector is minted (NewVectorLike, another pooled batch's column,
 // NewColumnVector).
 //

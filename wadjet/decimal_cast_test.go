@@ -194,7 +194,7 @@ func TestStringCastEnforcesItsLengthAndStillDropsTheDeclaration(t *testing.T) {
 		// rather than 0: it is not a length, it is the DECLARATION `character
 		// varying` at typmod -1, which is what the server describes it as
 		// (OID 1043) and what separates it from `text` below. 0 stays "not a
-		// string destination at all" (round-1 review, P2).
+		// string destination at all".
 		{"ctl_unparameterized", `SELECT CAST('abcdef' AS VARCHAR) AS v FROM decdecl WHERE id = 1`,
 			"abcdef", "abcdef", parquet.StringLengthUnconstrainedVarchar, "character varying"},
 		{"ctl_text", `SELECT CAST('abcdef' AS TEXT) AS v FROM decdecl WHERE id = 1`,

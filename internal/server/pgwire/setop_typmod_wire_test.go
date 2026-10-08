@@ -15,7 +15,7 @@ import (
 
 // A DECIMAL set operation whose arms disagree about (p,s) declares typmod -1
 // on the WIRE, in every spelling — not only when the set operation IS the
-// query's output (#884 round-1 B1).
+// query's output (#884).
 //
 // PostgreSQL 17.11, read through `pg_attribute` on a view (the only way to see
 // a typmod; `pg_typeof` cannot):

@@ -152,7 +152,7 @@ func coerceSetOpArmRows(rows []map[string]any, srcSchema, target []parquet.Colum
 func setOpArmNeedsMove(src, dst parquet.Column) bool {
 	switch dst.Type {
 	case parquet.TypeArray:
-		// An ARRAY arm whose ELEMENT the unification moved (arc CW round 5):
+		// An ARRAY arm whose ELEMENT the unification moved:
 		// the element's own rule, one level down, so `int[] ∪ float8[]`
 		// writes the int arm's leaves as doubles and the dedup key sees one
 		// value where `=` does.

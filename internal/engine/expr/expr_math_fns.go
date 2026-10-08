@@ -83,7 +83,7 @@ func fnRoundHalfEven(args []any) any {
 // function). Past the bound — 10ⁿ or v·10ⁿ not a finite double, which is
 // n ≥ 309, or n ≥ 308 − log10|v|, or n ≤ −324 — the rule has no answer for a
 // finite v, and the call refuses 22003 rather than answering the NaN or
-// ±Infinity the arithmetic produces (review round 1, P2). A NaN or infinite
+// ±Infinity the arithmetic produces. A NaN or infinite
 // v answers itself.
 func roundHalfEvenScaled(v, pow float64) float64 {
 	if math.IsNaN(v) || math.IsInf(v, 0) {

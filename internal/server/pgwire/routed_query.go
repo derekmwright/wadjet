@@ -60,8 +60,8 @@ func shouldRouteToRouter(sql string) bool {
 	// The SEPARATOR is any whitespace, not a space: psql sends a multi-line
 	// statement as typed, so `EXPLAIN` on its own line is an ordinary
 	// spelling, and testing `s[:8] == "EXPLAIN "` left it — and the tab
-	// spelling — on the unrouted path, which is round-2's two-door divergence
-	// surviving on a whitespace variant (round-3 review P1).
+	// spelling — on the unrouted path, a two-door divergence surviving on a
+	// whitespace variant.
 	if len(s) >= 8 && strings.EqualFold(s[:7], "EXPLAIN") && strings.ContainsRune(" \t\n\r", rune(s[7])) {
 		return !strings.HasPrefix(strings.ToUpper(strings.TrimLeft(s[8:], " \t\n\r")), "ANALYZE")
 	}
@@ -175,7 +175,7 @@ func routedColumnMetas(res queryroute.Result) []wadjet.ColumnMeta {
 	for i, name := range columns {
 		// The POSITION first where the schema carries this column's name
 		// there, for the reason nestedColumnFor gives: two output columns of
-		// one name declared the LAST one's OID for both (arc CW round 2, B2).
+		// one name declared the LAST one's OID for both.
 		var col parquet.Column
 		ok := false
 		if i < len(schema) && schema[i].Name == name {

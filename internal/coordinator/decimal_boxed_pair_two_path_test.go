@@ -41,7 +41,7 @@ func dbpSchema() parquet.Schema {
 		// text and so does this, and only the DECLARATION says which rule
 		// each one takes.
 		{Name: "s", Type: parquet.TypeString, Nullable: true},
-		// A FLOAT column beside the two DECIMALs (#646 round-3): no fixture
+		// A FLOAT column beside the two DECIMALs (#646): no fixture
 		// paired the two inside ONE composite, and that is exactly where the
 		// fold lands on the FLOAT rung while the VALUE arriving on half the
 		// rows is still a DECIMAL's rendered text. The values are chosen so
@@ -616,8 +616,8 @@ func runDecimalInACompositeTwoPath(t *testing.T, ctx context.Context, single *wa
 			`invalid input syntax for type double precision: "abc"`},
 		{"GarbageCoalesceDecFloatEmptyRange", "id > 100 AND COALESCE(a, f) = 'abc'",
 			`invalid input syntax for type double precision: "abc"`},
-		// The NUMERIC rung's own refusal, which round 3 had right and the
-		// arm-ordering regression made silent again. The empty-range form is
+		// The NUMERIC rung's own refusal, which an arm-ordering regression once
+		// made silent. The empty-range form is
 		// here for the same reason.
 		{"GarbageCoalesceDecInt", "COALESCE(a, id) = 'abc'",
 			`invalid input syntax for type numeric: "abc"`},

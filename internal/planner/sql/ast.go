@@ -70,7 +70,7 @@ type Binding struct {
 
 // BindingKey renders a binding as a key no spelling can produce: it starts
 // with a NUL byte, which no identifier, quoted or not, can contain. An alias
-// resolver that compares names can therefore never capture it (ADR-0047 §1).
+// resolver that compares names can therefore never capture it (ADR-0047).
 func (b *Binding) BindingKey() string {
 	if b == nil {
 		return ""

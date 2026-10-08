@@ -18,7 +18,7 @@ import (
 )
 
 // CASE-INSENSITIVE MATCHING AND THE EMBEDDED OPTIONS, IN EVERY CONSTRUCT
-// (#1499, arc RX round 2). Case-insensitivity — the `i` flag, `~*`, an
+// (#1499). Case-insensitivity — the `i` flag, `~*`, an
 // embedded `(?i)` — matches each pattern letter's lower- and upper-case
 // forms (towlower / towupper, as PostgreSQL does), whatever the script; the
 // newline options m n p w and the expanded syntax x answer with

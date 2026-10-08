@@ -15,7 +15,7 @@ import (
 )
 
 // A CREATE TABLE AS COLUMN DECLARES WHAT POSTGRESQL'S TYPMOD RULE SAYS
-// (ADR-0024 §10, arc UN round 3). The column is created unconstrained —
+// (ADR-0024 §10). The column is created unconstrained —
 // DECIMAL(38, max(s,10)), marked — only where PostgreSQL creates plain
 // numeric; a column whose source keeps a typmod (a column through a derived
 // table, a CTE, a scalar subquery, a set operation; a CASE / COALESCE /

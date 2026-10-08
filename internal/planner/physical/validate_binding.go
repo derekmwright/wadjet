@@ -29,8 +29,8 @@ import (
 // with certainty — an unenumerable source, a field path, a USING-merged bare
 // name, a name no level provides — leaves every reference of its block
 // unbound, so a consumer comparing two terms of one block never compares a
-// bound term with an unbound one (ADR-0047 §6; RISKS R1: a bound term against
-// an unbound copy of the same key never matches, and the consumer's "not a
+// bound term with an unbound one (ADR-0047's Decision: a block bound in full;
+// a bound term against an unbound copy of the same key never matches, and the consumer's "not a
 // key" path is #738's wrong value).
 
 // relInst is one relation instance of a block's FROM: the spelling it is

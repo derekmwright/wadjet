@@ -604,7 +604,7 @@ func spillMxCells() []spillMxCell {
 		// on the plain GROUP BY shapes: under a budget the drain lands where
 		// tracker timing puts it, and a merge law that is wrong only when a
 		// clone drains mid-batch is exactly the condition-triggered defect
-		// #790 was (round-2 review, P5). The bar carries an extraState, so a
+		// #790 was. The bar carries an extraState, so a
 		// drain re-folds partial states in an order no unforced run reaches.
 		if spillMxBarPrice(n) {
 			add(spillMxCell{name: "ohlcv_" + n, forcedDrainArm: true, sql: fmt.Sprintf(
@@ -673,8 +673,8 @@ func spillMxCells() []spillMxCell {
 			`SELECT COUNT(*) AS n, COUNT(a.%[1]s) AS nn FROM %[2]s a JOIN %[2]s b `+
 				`ON COALESCE(a.%[1]s, a.%[1]s) = COALESCE(b.%[1]s, b.%[1]s) `+
 				`WHERE a.id < 200 AND b.id < 200`, n, tbl)})
-		// The same cross join asked to carry a VALUE, not only a count
-		// (round-0 review, P4). Every cell above projects `COUNT(*)` and
+		// The same cross join asked to carry a VALUE, not only a count.
+		// Every cell above projects `COUNT(*)` and
 		// nothing else, so the family could not see what a cross join does to
 		// a value it has to materialize and order through its output. Here the
 		// keyed column travels as a value on BOTH sides and MIN/MAX read it

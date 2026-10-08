@@ -10,7 +10,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 )
 
-// A SEMI OR ANTI JOIN PUBLISHES ITS PROBE'S CATEGORIES (#381, arc RE round 3).
+// A SEMI OR ANTI JOIN PUBLISHES ITS PROBE'S CATEGORIES (#381).
 //
 // IN, EXISTS and NOT IN become a semi or anti join, which publishes the probe
 // side alone. The category walk merged the build side in as for any join, so

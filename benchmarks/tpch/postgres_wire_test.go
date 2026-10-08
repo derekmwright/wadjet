@@ -873,7 +873,7 @@ func wireCorpus() []wireCase {
 				wirePropTypeSizes: "same cause — the declared SIZE follows the OID",
 			}},
 		// A literal of each basic type, which is how a client probes a server.
-		// Gated whole since arc VL round 5: the integer literal is int4 (#1070)
+		// Gated whole: the integer literal is int4 (#1070)
 		// and the fractional one PostgreSQL's numeric (ADR-0024's 2026-09-24
 		// amendment), so its OIDs and sizes agree and the pins are gone.
 		{name: "LiteralTypes", sql: `SELECT 1 AS i, 'x' AS t, TRUE AS b, 1.5 AS f`},
@@ -1536,8 +1536,7 @@ func wireCorpus() []wireCase {
 		// …and two of DIFFERENT TYPES, which is the cell this corpus did not
 		// have. Every other duplicate-name entry here pairs two columns of one
 		// type, so a declaration resolved by NAME — giving column 0 the LAST
-		// column's OID — passed all of them while declaring an integer as TEXT
-		// (round-1 review B2).
+		// column's OID — passed all of them while declaring an integer as TEXT.
 		{name: "UnaliasedDuplicateNamesOfDifferentTypes",
 			sql: `SELECT supplier.s_suppkey + 1, supplier.s_name || 'x' FROM supplier ORDER BY supplier.s_suppkey LIMIT 2`,
 			pins: map[string]string{
@@ -1769,7 +1768,7 @@ func wireCorpus() []wireCase {
 		// that Describe, and wadjet answers it from the plan's declaration
 		// because running the statement with a NULL parameter would return
 		// the wrong rows. A star with no cell for $1 is how the door came to
-		// promise a RowDescription it could not keep (#846 round-1 B1), so
+		// promise a RowDescription it could not keep (#846), so
 		// the corpus carries both the matching and the non-matching bind.
 		{name: "StarParamMatching",
 			sql:       `SELECT * FROM nation WHERE n_nationkey = $1`,
@@ -1844,7 +1843,7 @@ func wireCorpus() []wireCase {
 		// before the bind is read (#846's shape, in the other format).
 		{name: "StarParamBinary", sql: `SELECT * FROM nation WHERE n_nationkey = $1`,
 			paramOIDs: []uint32{23}, params: [][]byte{int4Bin(3)}, paramFormats: binaryFormats(1), minRows: 1},
-		// The five OIDs the first pass left ungated (round-1 P1). `timestamp`
+		// Five more binary parameter OIDs. `timestamp`
 		// is the one that matters most: it is what pgx binds a time.Time to
 		// by default, and its decode is the 2000-epoch MICROSECOND conversion
 		// — the most error-prone arm in renderBinaryParam. None of the three
@@ -1857,7 +1856,7 @@ func wireCorpus() []wireCase {
 		// The ANSWER has to depend on the decoded value, or the cell gates
 		// nothing. `WHERE $1 = $1` — the first spelling here — is true under
 		// every decoding and `COUNT(*)` always returns one row, so a wrong
-		// endianness passed it (round-2 B3). PostgreSQL resolves
+		// endianness passed it. PostgreSQL resolves
 		// `integer = oid` and `integer < oid` through its implicit int4→oid
 		// cast, verified live, so the column comparison works on both sides.
 		{name: "ParamOIDBinary",
@@ -1882,7 +1881,7 @@ func wireCorpus() []wireCase {
 			sql:       `SELECT COUNT(*) AS c FROM nation WHERE CAST('12:34:56' AS time) = $1`,
 			paramOIDs: []uint32{1083}, params: [][]byte{timeBin(12, 34, 56)},
 			paramFormats: binaryFormats(1), minRows: 1},
-		// A MIXED Bind (round-1 P2): one parameter binary, one text, in the
+		// A MIXED Bind: one parameter binary, one text, in the
 		// format array Bind actually carries. A server that reads the FIRST
 		// format code and applies it to every parameter answers this wrong,
 		// and no all-binary or all-text cell can see that.
@@ -2091,15 +2090,14 @@ func runWireErrors(t *testing.T, ctx context.Context, wConn, pConn *pgconn.PgCon
 		{name: "FloatPrecisionTooLarge", sql: `SELECT CAST(1.0 AS float(54))`},
 		// A string type modifier the server refuses, on the CAST door. The
 		// DDL door gives the identical type name the identical code — one
-		// reading, `parquet.StringTypeLength` — which is what review round 0's
-		// B3 was about.
+		// reading, `parquet.StringTypeLength`, so the two doors cannot disagree.
 		{name: "VarcharZeroLength", sql: `SELECT CAST('x' AS varchar(0))`},
 		{name: "CharZeroLength", sql: `SELECT CAST('x' AS char(0))`},
 		{name: "VarcharLengthTooLarge", sql: `SELECT CAST('x' AS varchar(10485761))`},
 		// A float past an integer type's range CONVERTED with a wrap before
 		// the range check ran, so `CAST(1e30 AS bigint)` answered
 		// -9223372036854775808 while the int4 spelling raised — one
-		// destination family, two answers (review round 0, P2).
+		// destination family, two answers.
 		{name: "CastFloatPastBigintRange", sql: `SELECT CAST(1e30 AS bigint)`},
 		{name: "CastFloatPastIntegerRange", sql: `SELECT CAST(1e30 AS integer)`},
 		// ADR-0024 item 4 at the DECIMAL arithmetic and CAST sites: a value
@@ -2646,7 +2644,7 @@ func runWireCreatedTableSchema(t *testing.T, ctx context.Context, wConn, pConn *
 		{"Empty", `SELECT n_nationkey, n_name FROM nation WHERE n_nationkey < 0`},
 		// A STAR over a relation that is not a base table, with an UNALIASED
 		// item inside it. It is the one shape where the two arms of a CTAS
-		// derived their names differently (round-2 review B1), and the entry
+		// derived their names differently, and the entry
 		// above could not see it: every other case lists its items, so the
 		// outer SELECT's own names answer for them.
 		{"StarOverADerivedTable", `SELECT * FROM (SELECT n_nationkey, n_nationkey + 1 FROM nation WHERE n_nationkey < 3) x`},

@@ -17,8 +17,8 @@ import (
 	"github.com/derekmwright/wadjet/wadjet"
 )
 
-// A STORED COLUMN ROUNDS BY THE CATEGORY IT WAS CREATED WITH (#381, arc RE
-// round 3), on five arms.
+// A STORED COLUMN ROUNDS BY THE CATEGORY IT WAS CREATED WITH (#381), on five
+// arms.
 //
 // CREATE TABLE AS of `5 / 2.0 + id * 0`, `sqrt(6.25 + id * 0)`, `power(2.5 +
 // id * 0, 1)`, `sqrt(n * n)` or `ln(exp(2.5 + id * 0))` creates a numeric

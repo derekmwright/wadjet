@@ -181,8 +181,8 @@ func EnforcePlanPolicies(ctx context.Context, provider *Provider, cat *catalog.C
 	// The LOOKUP, always — even when nothing above was policed. The plan
 	// GROWS: a table named only inside `IN (SELECT … )` is SQL text here and
 	// becomes a Scan when the optimizer decorrelates it, and that scan came
-	// out with no projection and a predicate over the STORED column (#859
-	// round 3). Every later pass that meets a scan asks this.
+	// out with no projection and a predicate over the STORED column (#859).
+	// Every later pass that meets a scan asks this.
 	ctx = logical.ContextWithPolicyLookup(ctx, r.lookup)
 	// The `query_limit` obligations, as one ceiling on the context. The
 	// planner merges it with the deployment's guard where that guard runs, so
@@ -233,7 +233,7 @@ func EnforceOptimizedPlan(ctx context.Context, cat *catalog.Catalog, plan *logic
 	// every scan of a policed relation carries its projection, and no filter
 	// between that projection and the scan reads a policed column unless it
 	// is the policy's own. In-process is not exempt — the semi-join hole
-	// (#859 round 3) leaked there too, and a check that only ran on stages
+	// (#859) leaked there too, and a check that only ran on stages
 	// could not see it.
 	if err := logical.CheckPolicyPlanOrder(out, func(table string) []logical.ColumnPolicy {
 		if cols := pol.For(table); len(cols) > 0 {

@@ -27,7 +27,7 @@ type nfLit struct {
 }
 
 // TestLiteralScaleInADecimalFold settles what a LITERAL contributes to a
-// DECIMAL fold, which #724's review round 1 reopened.
+// DECIMAL fold (#724).
 //
 // PostgreSQL gives a numeric CONSTANT typmod -1, so select_common_typmod over
 // a column and a constant answers -1 — read off pg_attribute here: every
@@ -210,7 +210,7 @@ func TestLiteralScaleInADecimalFold(t *testing.T) {
 				// an entry whose `render` had been edited to equal `want`
 				// would go on passing the day the engine started printing
 				// PostgreSQL's own text, and the pin would quietly stop being
-				// one (round-2 review, N). Keyed on `c.render != ""` rather
+				// one. Keyed on `c.render != ""` rather
 				// than on the two strings, it cannot be edited away without
 				// deleting the pin outright — which is the fix's proof anyway.
 				if c.render != "" && got == c.want {

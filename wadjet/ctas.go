@@ -137,13 +137,12 @@ func (db *DB) executeCreateTableAs(ctx context.Context, ct *plansql.CreateTableI
 // name it renames or refuses, not one it repairs. The agreement is made
 // upstream, in `declaredOutputFor`, which takes the same published NAMES the
 // executed arm's sink applies — `physical.PublishedOutputNames`, a walk over
-// the logical plan — and its TYPES from `Planner.DeclaredOutputSchema`. Four
-// rounds of review were spent on those two lists: on a name taken from the type
-// walk (round-1 B7, round-2 B1), on reading the names from the wrong place —
-// asking `Plan` for the sink itself RUNS every CTE body and every hash join's
-// build side, on the arm documented not to execute the query (round-3 B1) — and
-// on a type the walk could not resolve because only `Plan` seeded the WITH list
-// (round-4 B1).
+// the logical plan — and its TYPES from `Planner.DeclaredOutputSchema`. Each
+// list has a trap: a name taken from the type walk is wrong; reading the names
+// from the wrong place — asking `Plan` for the sink itself — RUNS every CTE body
+// and every hash join's build side, on the arm documented not to execute the
+// query; and a type the walk cannot resolve unless the WITH list is seeded
+// falls back to the untyped default.
 func (db *DB) ctasSchema(ct *plansql.CreateTableInfo, declared []parquet.Column) (parquet.Schema, error) {
 	schema, err := ingest.TableSchemaForQuery(declared, ct.AsColumnNames)
 	if err != nil {
@@ -458,8 +457,7 @@ func (db *DB) declaredOutputFor(ctx context.Context, parsed *plansql.ParsedQuery
 	// declared two different tables: `WITH DATA` gave `?column?` and
 	// `WITH NO DATA` gave `"n + 1"`, and with it went the duplicate rule —
 	// `SELECT id, n+1, s||'x', 42 … WITH NO DATA` was CREATED where the same
-	// statement `WITH DATA` and PostgreSQL 17.11 both answer 42701 (measured;
-	// round-2 review B7).
+	// statement `WITH DATA` and PostgreSQL 17.11 both answer 42701 (measured).
 	//
 	// `deriveColumns` is that rule, and it is the SAME call `DB.Query` makes
 	// on the executed plan — asked here with no rows, which is exactly what
@@ -478,7 +476,7 @@ func (db *DB) declaredOutputFor(ctx context.Context, parsed *plansql.ParsedQuery
 	// executed arm publishes for a star too"; it is not. The executed arm
 	// publishes the SINK's names, and for `SELECT * FROM (SELECT id, n + 1
 	// FROM s) x` those are `id, ?column?` where the walk says `id, "n + 1"`
-	// (#732; round-2 review B1). The duplicate rule goes with it: the same
+	// (#732). The duplicate rule goes with it: the same
 	// star over `(SELECT n+1, n+2 …)` is 42701 on the executed arm and on
 	// PostgreSQL 17.11, and was CREATED here.
 	//
@@ -487,12 +485,12 @@ func (db *DB) declaredOutputFor(ctx context.Context, parsed *plansql.ParsedQuery
 	// stamps on the sink as `CollectSink.OutputNames` — and
 	// `physical.PublishedOutputNames` exports it.
 	//
-	// Asking `Plan` for them instead, which is what round 3 did, READS THE
+	// Asking `Plan` for them instead READS THE
 	// TABLE: `Plan` materializes every CTE body by RUNNING a pipeline
 	// (`materializeCTEs`) and builds every hash join's build side, so a
 	// statement documented not to execute the query executed the part of it
 	// that costs the most — measured at 2 data objects on five of nine shapes,
-	// 58 ms at 400k rows, 123 MiB peak (round-3 review B1). The clause exists
+	// 58 ms at 400k rows, 123 MiB peak. The clause exists
 	// so that a query which would fail on row five still declares its table;
 	// a declaration that reads the rows is not that clause.
 	//

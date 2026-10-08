@@ -1112,9 +1112,7 @@ type CollectSink struct {
 	// sound and not merely tolerated: the rename is applied positionally and
 	// only when the arity matches, the names come from the statement's own
 	// OUTPUT projection, and a fragment sink whose schema is not that list is
-	// left alone by the arity guard. An earlier version of this comment
-	// claimed the worker path never set it, which was not true of the code
-	// (round-1 review P3).
+	// left alone by the arity guard. The worker path sets it too.
 	OutputNames []string
 	namesDone   bool
 	// SchemaHintWireUnconstrainedPos and SchemaHintStringLengthPos are the
@@ -1159,7 +1157,7 @@ func (s *CollectSink) Init(_ context.Context) error {
 	s.rowsDone = false
 	// The published-name rename is per-RUN state like everything above it: a
 	// sink re-Init'd for a second plan would otherwise keep the first run's
-	// latch and publish the resolution spelling (#732, round-1 review P4).
+	// latch and publish the resolution spelling (#732).
 	s.namesDone = false
 	return nil
 }
@@ -1397,7 +1395,7 @@ func (s *CollectSink) applyOutputNames() {
 	// row map is built from. Schema() is reachable before any batch arrives
 	// (the plan-declared answer for a zero-row result), and latching there
 	// left convert() returning the resolution spelling for a result that then
-	// did have rows (round-1 review P4).
+	// did have rows.
 	if s.schema != nil || len(s.batches) > 0 {
 		s.namesDone = true
 	}

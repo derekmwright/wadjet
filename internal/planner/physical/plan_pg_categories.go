@@ -35,7 +35,7 @@ import (
 // created with the numeric category (parquet.Column.PGNumeric), whose entry
 // rides because the batch's FLOAT64 cannot say it — and an integer
 // value rounds the same under either rule. A 500-column table read by one
-// column ships none of its columns (round-2 review P3).
+// column ships none of its columns.
 func PlanPGCategories(root *logical.Node) (cats map[string]expr.PGCategory, conflicts map[string]bool, loss string) {
 	seen := map[string]expr.PGCategory{}
 	stored := map[string]bool{}
@@ -155,8 +155,7 @@ var roundingSiteText = regexp.MustCompile(`(?i)\bround\s*\(|\bcast\s*\(|::|\b(in
 // planHasRoundingSite reports whether any expression of the plan rounds by
 // its operand's category (roundsHalfEven: ROUND, the integer cast, the
 // integer array cast). A plan without one reads no category, so a name its
-// map loses changes no answer and the stage DAG runs it (round-3 review N1,
-// FC15: a join or a semi join of a marked table with a float8 column of the
+// map loses changes no answer and the stage DAG runs it (cell FC15: a join or a semi join of a marked table with a float8 column of the
 // same name routed local with nothing rounding it).
 //
 // It reads EVERY string and every expression tree the plan's nodes hold,
