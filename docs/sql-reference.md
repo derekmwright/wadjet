@@ -216,6 +216,11 @@ SELECT t.id + 1, COUNT(*) FROM ss_t t JOIN ss_i u ON u.id = t.id GROUP BY u.id +
 SELECT 1 + i, COUNT(*) FROM ss_t GROUP BY i + 1;
 ```
 
+A subquery that reads an outer column which is not a key is 42803 with
+PostgreSQL's message: `SELECT (SELECT max(x.v) FROM ss_i x WHERE x.v > t.i)
+FROM ss_t t GROUP BY t.g` raises `subquery uses ungrouped column "t.i" from
+outer query`.
+
 The numeric example above retains the key's numeric value, order and type
 (`pair/numeric/itemQual/ordinalUnaliased` in the group-key gate). Dotted
 names, USING names and unfolded FROM-less subqueries retain the gate's
@@ -3499,8 +3504,9 @@ answer, under a bare `CAST(… AS NUMERIC)` and in a window's argument:
 `COALESCE(14.0000000000000000001, 0)` is 14.0000000000000000001 and does not
 equal 14, as on PostgreSQL. An `ARRAY[…]` constructor does not keep them:
 `ARRAY[14.0000000000000000001, 1]` is `{14,1}` where PostgreSQL answers
-`{14.0000000000000000001,1}`. A choice over it and a column prints one
-scale for the column ([numeric-decimal#r18](adr/0012-divergences/numeric-decimal.md#catalog)).
+`{14.0000000000000000001,1}` ([numeric-decimal#r18](adr/0012-divergences/numeric-decimal.md#catalog)). A choice
+over it and a column prints each value at its own scale, as PostgreSQL does:
+`COALESCE(t.b, 14.0000000000000000001)` over a bigint 30 prints `30`.
 
 An explicit integer `CAST` rounds by its operand's PostgreSQL type: a
 `numeric` half away from zero, a `double precision` half to even.
@@ -3892,8 +3898,8 @@ SELECT id, LAG(s, 1, 2.5) OVER (ORDER BY id) FROM t;   -- ERROR 42883 lag(text, 
 ```
 
 A quoted default that does not read as the value's type is `22P02`
-(`LAG(b, 1, 'a')`, at offset 0 too). A numeric result carries one scale per
-column, so the shifted bigint values print `10.0` beside the default's `2.5`
+(`LAG(b, 1, 'a')`, at offset 0 too). A numeric LAG / LEAD result carries one
+scale for its column, so the shifted bigint values print `10.0` beside the default's `2.5`
 where PostgreSQL prints `10` (ADR-0012 catalog, numeric-decimal r18). The
 default is computed for every row before the window runs, so a default that
 raises on a row it does not fill raises the query (`LAG(b, 1, 10 / (id - 2))`
@@ -5582,8 +5588,9 @@ expressions on the five write doors (`wadjet.TestAssignmentDoorsAgree`), and
 numeric constants inside CASE / COALESCE / GREATEST / NULLIF / arithmetic and
 through a CTE, a derived table, a VALUES list and MERGE's `USING (SELECT …)`
 on nine (`wadjet.TestAssignmentExpressionSourcesAgreeWithPostgreSQL`; a choice
-over constants of different scales prints at one scale, `1.0` for `1` — the
-one listed difference):
+whose every argument is a numeric literal prints at one scale, `0.10` for the
+`0.1` of `GREATEST(-2.50, 0.1)` and `1000.0` for the `1e3` of
+`GREATEST(1e3, 0.1)` — the two listed differences):
 
 | Source (declared) | Target | Answer |
 |---|---|---|

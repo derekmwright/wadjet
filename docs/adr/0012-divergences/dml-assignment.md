@@ -45,7 +45,7 @@ The ADR-0012 §5 entries this family was built from, verbatim as they stood at 0
 
 ### E93
 
-ADR lines 4311-4351. Catalog rows: r1, r2, r3, r4, r5, r6, r7, r8, r9. Stated in [Mechanisms](#mechanisms).
+ADR lines 4311-4351. Catalog rows: r1, r3, r4, r5, r6, r7, r8, r9 (r2 retired 2026-10-04). Stated in [Mechanisms](#mechanisms).
 
 - **An integer assignment rounds by the source's PostgreSQL type; the
   writes PostgreSQL refuses are refused before a row is written, with
