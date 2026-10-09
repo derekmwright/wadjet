@@ -106,6 +106,17 @@ type compileContext struct {
 	// where it is written (forSubqueryNode, ADR-0047 stage 3). Nil: every
 	// subquery takes the compile's own.
 	scoping SubqueryScoping
+	// perRun is the scoped runner of a correlated subquery's re-runs
+	// (SubqueryHooks.PerRun); nil takes runner.
+	perRun SubqueryRunner
+}
+
+// rerunRunner is the runner a correlated subquery's per-row re-run calls.
+func (c *compileContext) rerunRunner() SubqueryRunner {
+	if c.perRun != nil {
+		return c.perRun
+	}
+	return c.runner
 }
 
 // SubqueryHooks are one expression subquery's runner and plan-time answers,
@@ -113,6 +124,9 @@ type compileContext struct {
 // replaces the compile's own for that subquery (a nil field keeps it).
 type SubqueryHooks struct {
 	Runner SubqueryRunner
+	// PerRun is the runner of a CORRELATED subquery's per-row re-runs: the
+	// WITH items it reads are read by every run (plansql.ReadPerRun).
+	PerRun SubqueryRunner
 	Decl   SubqueryDeclFunc
 	Cols   SubqueryColumnsFunc
 	Scope  plansql.TableColumns
@@ -141,6 +155,7 @@ func (c *compileContext) forSubqueryNode(n plansql.Node) *compileContext {
 	cp := *c
 	if cp.runner != nil && h.Runner != nil {
 		cp.runner = h.Runner
+		cp.perRun = h.PerRun
 	}
 	if cp.subqueryDecl != nil && h.Decl != nil {
 		cp.subqueryDecl = h.Decl
@@ -613,7 +628,7 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 								Scope:           ctx.subqueryScope,
 								Cols:            ctx.subqueryCols,
 								Expr:            left,
-								Runner:          ctx.runner,
+								Runner:          ctx.rerunRunner(),
 								Not:             n.Not,
 								OuterRefs:       refs,
 								OuterTables:     ctx.outerTables,
@@ -804,7 +819,7 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 						Scope: ctx.subqueryScope, Corr: &CorrelatedScalarSubquery{
 							Scope:           ctx.subqueryScope,
 							Cols:            ctx.subqueryCols,
-							Runner:          ctx.runner,
+							Runner:          ctx.rerunRunner(),
 							OuterRefs:       refs,
 							OuterTables:     ctx.outerTables,
 							ParsedInfo:      info,
@@ -815,7 +830,7 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 					cs := &CorrelatedScalarSubquery{
 						Scope:           ctx.subqueryScope,
 						Cols:            ctx.subqueryCols,
-						Runner:          ctx.runner,
+						Runner:          ctx.rerunRunner(),
 						OuterRefs:       refs,
 						OuterTables:     ctx.outerTables,
 						ParsedInfo:      info,
@@ -885,7 +900,7 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 				if info != nil {
 					return &CorrelatedExistsSubquery{
 						Scope:           ctx.subqueryScope,
-						Runner:          ctx.runner,
+						Runner:          ctx.rerunRunner(),
 						Not:             n.Not,
 						OuterRefs:       refs,
 						OuterTables:     ctx.outerTables,

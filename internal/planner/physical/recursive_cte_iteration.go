@@ -142,6 +142,13 @@ func (p *Planner) iterateRecursiveCTEAt(ctx context.Context, cte plansql.CTEDef,
 	if err != nil {
 		return fail(err)
 	}
+	// The recursive term is planned and run once per iteration, and every
+	// iteration reads the WITH items around it: a volatile one is the
+	// statement's ONE evaluation, served by its identity, and not one per
+	// iteration — PostgreSQL evaluates a WITH item once (#1599).
+	savedCtes := p.Ctes
+	p.Ctes = plansql.ReadPerRun(p.Ctes)
+	defer func() { p.Ctes = savedCtes }()
 	for iter := 0; work.Rows() > 0; iter++ {
 		if err := writer.add(ctx, work); err != nil {
 			work.Release()

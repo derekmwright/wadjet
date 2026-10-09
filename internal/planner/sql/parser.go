@@ -110,6 +110,11 @@ type CTEDef struct {
 	// whether its body is volatile.
 	reads    int
 	volatile bool
+	// rerun marks a copy of the item handed to a block that is RUN AGAIN
+	// within the statement — a correlated subquery's per-row re-run, a
+	// recursive term's iteration (ReadPerRun): every run reads the item, so
+	// it is read more than once whatever the text counts.
+	rerun bool
 
 	// The CTE body, parsed at most once per definition — see sub_block.go.
 	body     *SelectInfo
