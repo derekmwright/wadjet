@@ -720,6 +720,12 @@ type binder struct {
 	// enclosing block's scope closed it, and re-validating each body per
 	// entry would multiply per nesting level.
 	cteDone map[*plansql.CTEIdentity]cteEntry
+	// blockSubs is the block being validated's expression subqueries by
+	// text, for a question a comparison asks by text (validatedBody): it
+	// reads the node's memoized body, the one this block binds.
+	blockSubs map[string]plansql.Node
+	// memoBodies memoizes validatedMemo, as bodies memoizes validatedBody.
+	memoBodies map[memoKey]*plansql.SelectInfo
 }
 
 func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, outer *colScope) error {
@@ -951,6 +957,19 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 		b.bodyScopes = map[*plansql.SelectInfo][2]*colScope{}
 	}
 	b.bodyScopes[info] = [2]*colScope{from, resolve}
+	// This block's expression subqueries, for the questions its comparisons
+	// ask of a body by text (validatedBody).
+	subs := b.blockSubqueries(info)
+	savedSubs := b.blockSubs
+	b.blockSubs = make(map[string]plansql.Node, len(subs))
+	for _, sq := range subs {
+		if t := subqueryText(sq); t != "" {
+			if _, dup := b.blockSubs[t]; !dup {
+				b.blockSubs[t] = sq
+			}
+		}
+	}
+	defer func() { b.blockSubs = savedSubs }()
 
 	// GROUP BY / HAVING / ORDER BY / QUALIFY may additionally reference SELECT
 	// output aliases.
@@ -1126,22 +1145,66 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 	// Recurse into subqueries embedded in this block's expressions. They run in
 	// their own scope but can see this block's columns (correlation), so pass
 	// `resolve` as their outer scope.
-	for _, sql := range b.blockSubqueries(info) {
-		sub := parseSelect(sql)
+	//
+	// Each body is the node's MEMOIZED parse (SubqueryNode.Select, ADR-0032
+	// extended), the tree the planners plan, so the bindings recorded here
+	// are the ones they read (ADR-0047 stage 3). Every node is bound, two
+	// that share a text included: each is its own subquery with its own memo.
+	//
+	// The binder's resolution classifies the body (bodyOuterRefs) and the
+	// node records it, the classification the compiler and the
+	// decorrelators read (plansql.CorrelatedRefsOf). A body whose references
+	// reach the enclosing query — a CORRELATED subquery — or that the binder
+	// cannot classify is planned from TEXT (the per-row re-run's
+	// substitution, a decorrelation's private parse), which carries no
+	// binding: its bindings are cleared and it is judged again by the
+	// spelling rules that text is planned by, as at 542b4f37.
+	for _, sq := range subs {
+		sub := subqueryMemoBody(sq)
 		if sub == nil {
 			continue
 		}
-		// An expression subquery's body is planned from a PARSE OF ITS TEXT
-		// (SubqueryNode.SQL), never from this tree, so nothing the planner
-		// matches there carries a binding: the body is checked by the
-		// spelling rules its plan is matched by (ADR-0047 stage 1; the
-		// memoized, bound body is stage 3).
-		if err := b.unstamped(func() error { return b.validateBlock(ctx, sub, resolve) }); err != nil {
+		if err := b.validateBlock(ctx, sub, resolve); err != nil {
 			return err
+		}
+		refs, ok := b.bodyOuterRefs(sub)
+		if recordSubqueryOuterRefs(sq, refs, ok) && b.stamp {
+			plansql.ClearBindings(sub)
+			if err := b.unstamped(func() error { return b.validateBlock(ctx, sub, resolve) }); err != nil {
+				return err
+			}
 		}
 	}
 
 	return nil
+}
+
+// subqueryText is a SubqueryNode's or ExistsNode's text.
+func subqueryText(n plansql.Node) string {
+	switch q := n.(type) {
+	case *plansql.SubqueryNode:
+		return q.SQL
+	case *plansql.ExistsNode:
+		return q.SQL
+	}
+	return ""
+}
+
+// subqueryMemoBody is a SubqueryNode's or ExistsNode's memoized body, nil
+// when it does not parse (the parser and planner own that error).
+func subqueryMemoBody(n plansql.Node) *plansql.SelectInfo {
+	var info *plansql.SelectInfo
+	var err error
+	switch q := n.(type) {
+	case *plansql.SubqueryNode:
+		info, err = q.Select()
+	case *plansql.ExistsNode:
+		info, err = q.Select()
+	}
+	if err != nil {
+		return nil
+	}
+	return info
 }
 
 // checkExpr errors on the first column reference the scope refuses, and on the
@@ -1395,7 +1458,15 @@ func (b *binder) validatedBody(sql string, outer *colScope) *plansql.SelectInfo 
 	if sub, ok := b.bodies[k]; ok {
 		return sub
 	}
-	sub := parseSelect(sql)
+	// The block's own subquery of this text answers from its memoized body;
+	// a text no node of the block holds (an ORDER BY item's, which is kept
+	// as text) is parsed here.
+	var sub *plansql.SelectInfo
+	if n, ok := b.blockSubs[sql]; ok {
+		sub = subqueryMemoBody(n)
+	} else {
+		sub = parseSelect(sql)
+	}
 	if sub != nil {
 		ctx := b.ctx
 		if ctx == nil {
@@ -1410,6 +1481,38 @@ func (b *binder) validatedBody(sql string, outer *colScope) *plansql.SelectInfo 
 	}
 	b.bodies[k] = sub
 	return sub
+}
+
+// validatedMemo is validatedBody for a subquery NODE: its memoized body,
+// validated against outer once per (body, outer) pair, or nil when it does
+// not parse or validate.
+func (b *binder) validatedMemo(n plansql.Node, outer *colScope) *plansql.SelectInfo {
+	sub := subqueryMemoBody(n)
+	if sub == nil {
+		return nil
+	}
+	k := memoKey{sub, outer}
+	if v, ok := b.memoBodies[k]; ok {
+		return v
+	}
+	ctx := b.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	v := sub
+	if err := b.unstamped(func() error { return b.validateBlock(ctx, sub, outer) }); err != nil {
+		v = nil
+	}
+	if b.memoBodies == nil {
+		b.memoBodies = map[memoKey]*plansql.SelectInfo{}
+	}
+	b.memoBodies[k] = v
+	return v
+}
+
+type memoKey struct {
+	body  *plansql.SelectInfo
+	outer *colScope
 }
 
 // subqueryDeclaredTypes is a subquery body's output column types by
@@ -2639,8 +2742,8 @@ func exprOperands(node plansql.Node) []plansql.Node {
 // ORDER BY items are raw text — the parser keeps the spelling — so they are
 // parsed here exactly as validateBlock parses them for name resolution, and an
 // item that does not parse contributes nothing, which is that loop's rule too.
-func (b *binder) blockSubqueries(info *plansql.SelectInfo) []string {
-	var subs []string
+func (b *binder) blockSubqueries(info *plansql.SelectInfo) []plansql.Node {
+	var subs []plansql.Node
 	walkExpr(info.WhereExpr, nil, &subs, nil)
 	walkExpr(info.HavingExpr, nil, &subs, nil)
 	walkExpr(info.QualifyExpr, nil, &subs, nil)
@@ -2796,7 +2899,7 @@ func parseSelect(sql string) *plansql.SelectInfo {
 // It is this walk and not plansql.RewriteExpr because RewriteExpr deliberately
 // stops at an AGGREGATE call, and a function whose ARGUMENT is misspelled is
 // misspelled just as much under `SUM(...)` as beside it.
-func walkExpr(node plansql.Node, refs *[]*plansql.ColRef, subs *[]string, calls *[]*plansql.FuncCallNode) {
+func walkExpr(node plansql.Node, refs *[]*plansql.ColRef, subs *[]plansql.Node, calls *[]*plansql.FuncCallNode) {
 	switch n := node.(type) {
 	case nil:
 		return
@@ -2806,11 +2909,11 @@ func walkExpr(node plansql.Node, refs *[]*plansql.ColRef, subs *[]string, calls 
 		}
 	case *plansql.SubqueryNode:
 		if subs != nil {
-			*subs = append(*subs, n.SQL)
+			*subs = append(*subs, n)
 		}
 	case *plansql.ExistsNode:
 		if subs != nil {
-			*subs = append(*subs, n.SQL)
+			*subs = append(*subs, n)
 		}
 	case *plansql.BinaryOp:
 		walkExpr(n.Left, refs, subs, calls)
