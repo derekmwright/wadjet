@@ -56,13 +56,20 @@ aggregate's outputs by matching that tree: a group key by binding
 HAVING and the select list match theirs. The rewritten trees travel beside the
 published text (`WindowExpr.ArgExprs`, `PartitionByExprs`, `OrderByExprs`),
 and the column pruner and the argument's declaration read them. The grouped
-check judges every window term with the select item's rules: a key or an
-expression over keys passes, an aggregate call passes, any other column is
-42803. In a block the binder does not bind, a window term also passes when it
+check judges every window term, including a window call in QUALIFY or in
+the ORDER BY clause, with the select item's rules: a key or an expression
+over keys passes, an aggregate call passes, any other column is 42803; a
+window call's terms resolve against the block's input wherever the call
+sits, so an output alias is not visible inside OVER (…) in those clauses
+either. Every node above the window — the projection, and QUALIFY reading
+an item by its alias — reads an item holding both an aggregate and a
+window call with both replaced by their slots (`logical.itemRewrites`), and
+QUALIFY's own aggregates outside its window calls are computed by the
+aggregate. In a block the binder does not bind, a window term also passes when it
 spells a key with its qualifiers erased, which is the term the substitution
 replaces with the key. Gates: `coordinator.TestArcCWWindowTermsEveryArm`
-(284 cells × five arms), `pgwire.TestArcCWWindowTermsOnTheWire`, the
-group-key gate's `pair/*/window`, `term/winAggArg` and `ci1/joinWindow*`
+(328 cells × five arms, `qualify/*` and `qualifyMixed/*` among them),
+`pgwire.TestArcCWWindowTermsOnTheWire`, the group-key gate's `pair/*/window`, `term/winAggArg` and `ci1/joinWindow*`
 rows, and the binding census.
 
 Expression-subquery and LATERAL bodies retain the spelling comparison in
