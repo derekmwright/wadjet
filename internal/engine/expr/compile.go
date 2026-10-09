@@ -97,10 +97,6 @@ type compileContext struct {
 	// qualifier is an outer relation). Nil keeps the pre-#866 answer: every
 	// qualifier the subquery's FROM does not name is dangling.
 	subqueryScope plansql.TableColumns
-	// enclosingCTEs names the WITH items in scope AROUND a subquery, so a
-	// correlated subquery whose own WITH shadows one can be refused rather
-	// than re-run against the enclosing item (see refuseShadowingWith).
-	enclosingCTEs map[string]bool
 	// scoping answers, per expression subquery NODE, the plan-time answers
 	// and the runner for that subquery planned in the WITH chain in scope
 	// where it is written (forSubqueryNode, ADR-0047 stage 3). Nil: every
@@ -230,20 +226,6 @@ func Options(opts ...CompileOption) CompileOption {
 			if o != nil {
 				o(c)
 			}
-		}
-	}
-}
-
-// WithEnclosingCTEs supplies the WITH item names in scope around the
-// subqueries this compile meets (compileContext.enclosingCTEs).
-func WithEnclosingCTEs(names []string) CompileOption {
-	return func(c *compileContext) {
-		if len(names) == 0 {
-			return
-		}
-		c.enclosingCTEs = make(map[string]bool, len(names))
-		for _, n := range names {
-			c.enclosingCTEs[strings.ToLower(n)] = true
 		}
 	}
 }
@@ -616,10 +598,6 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 						if refusal := refuseOuterLevelAggregate("IN", sq.SQL, ctx.outerTables); refusal != nil {
 							return nil, refusal
 						}
-						// A body the rebuild cannot write back out (#1044).
-						if refusal := refuseShadowingWith("IN", sq.SQL, info, refs, ctx.enclosingCTEs); refusal != nil {
-							return nil, refusal
-						}
 						if refusal := refuseUnrebuildableBody("IN", sq.SQL, info, refs, ctx.outerTables); refusal != nil {
 							return nil, refusal
 						}
@@ -807,10 +785,6 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 				if refusal := refuseOuterLevelAggregate("scalar", n.SQL, ctx.outerTables); refusal != nil {
 					return nil, refusal
 				}
-				// A body the rebuild cannot write back out (#1044).
-				if refusal := refuseShadowingWith("scalar", n.SQL, info, refs, ctx.enclosingCTEs); refusal != nil {
-					return nil, refusal
-				}
 				if refusal := refuseUnrebuildableBody("scalar", n.SQL, info, refs, ctx.outerTables); refusal != nil {
 					return nil, refusal
 				}
@@ -888,10 +862,6 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 				}
 				// An aggregate the ENCLOSING query owns (#1044).
 				if refusal := refuseOuterLevelAggregate("EXISTS", n.SQL, ctx.outerTables); refusal != nil {
-					return nil, refusal
-				}
-				// A body the rebuild cannot write back out (#1044).
-				if refusal := refuseShadowingWith("EXISTS", n.SQL, info, refs, ctx.enclosingCTEs); refusal != nil {
 					return nil, refusal
 				}
 				if refusal := refuseUnrebuildableBody("EXISTS", n.SQL, info, refs, ctx.outerTables); refusal != nil {

@@ -4,7 +4,6 @@ package coordinator
 
 import (
 	"context"
-	"strings"
 	"testing"
 	"time"
 )
@@ -78,23 +77,22 @@ func TestArcDCAResidualWhoseSidesMergeRunsSingleProcessOnEveryArm(t *testing.T) 
 	})
 }
 
-// A CORRELATED SUBQUERY WHOSE OWN WITH SHADOWS AN ENCLOSING WITH ITEM IS
-// REFUSED BY NAME (review B2). PostgreSQL reads the subquery's own item; the
-// per-row re-run planned the body with the enclosing item's definition (the
-// builder's first-match walk over scopeCTEs, the physical CTE cache keyed by
-// name — docs/internals/nested-with-scope-precedence.md), so the round-4 decline
-// reached a missing-column refusal, and the same-schema spelling answered ZERO
-// rows / every row at base and at f20d5bd3. It is now 0A000 with the construct
-// named on every arm; PostgreSQL's row set is recorded beside each pin. A pin
-// that starts agreeing FAILS: assert the row set and delete the pin.
-func TestArcDCAShadowingBodyWithIsRefusedByNameOnEveryArm(t *testing.T) {
+// A CORRELATED SUBQUERY WHOSE OWN WITH SHADOWS AN ENCLOSING WITH ITEM READS
+// ITS OWN ITEM (review B2; ADR-0047 stage 3, #1606). PostgreSQL reads the
+// subquery's own item. The per-row re-run planned the body with the enclosing
+// item's definition (the builder's first-match walk, the physical CTE cache
+// keyed by name), so these were refused 0A000 by name from arc DC until the
+// CTE identity became scope-aware: the builder binds the innermost item of a
+// name and a materialization answers by identity. Each cell asserts
+// PostgreSQL 17.11's row set on every arm; they were pinned to the refusal
+// until then.
+func TestArcDCAShadowingBodyWithReadsItsOwnItemOnEveryArm(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: five arms")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
 	t.Cleanup(cancel)
 	arms := dcArms(t, ctx)
-	const refusal = "a WITH item inside a correlated subquery that shadows an outer WITH item is not supported"
 	for _, tc := range []dcRound3Case{
 		{name: "withshadow/outer/in",
 			sql:  "WITH d AS (SELECT k,amt FROM dc_in) SELECT o.id AS a FROM dc_out o WHERE o.id IN (WITH d AS (SELECT k,amt AS total FROM dc_in) SELECT b.k FROM d b JOIN dc_side c ON c.j=b.k AND total>100 WHERE b.k=o.id) ORDER BY a",
@@ -111,14 +109,8 @@ func TestArcDCAShadowingBodyWithIsRefusedByNameOnEveryArm(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, arm := range arms {
-				got := arm.run(tc.sql)
-				if got == tc.want {
-					t.Errorf("%s\n  arm  %s now AGREES with PostgreSQL (%s): delete this pin", tc.sql, arm.name, tc.want)
-					continue
-				}
-				if !strings.Contains(got, refusal) {
-					t.Errorf("%s\n  arm  %s\n  got  %s\n  want the refusal %q (PostgreSQL 17.11: %s)",
-						tc.sql, arm.name, got, refusal, tc.want)
+				if got := arm.run(tc.sql); got != tc.want {
+					t.Errorf("%s\n  arm  %s\n  got  %s\n  want %s (PostgreSQL 17.11)", tc.sql, arm.name, got, tc.want)
 				}
 			}
 		})
