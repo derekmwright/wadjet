@@ -104,6 +104,11 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 	// is its second: both are predicates ABOVE the aggregate, where a call is
 	// a NAME and not arithmetic (#1076).
 	havingReplacements := map[string]string{}
+	// qualifyAggRefs maps an aggregate CALL written in QUALIFY outside any
+	// window call to the aggregate output that computes it: the clause is
+	// evaluated over the windowed rows ABOVE the aggregate, where the call is
+	// a NAME (#1646's mechanism, the QUALIFY site).
+	qualifyAggRefs := map[string]string{}
 
 	// GROUP BY / aggregation
 	// GROUPING(...) anywhere in the SELECT list or HAVING (#804). Every call
@@ -390,6 +395,31 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 			}
 		}
 
+		// The same hoist for an aggregate QUALIFY names outside its window
+		// calls (`QUALIFY max(b) + row_number() OVER (…) > 50`): left as a
+		// call it was evaluated over the window's output rows, which carry
+		// no `b`, and the predicate was UNKNOWN on every row (#1646's
+		// mechanism, the QUALIFY site).
+		for _, qAgg := range qualifyOuterAggregates(info.QualifyExpr) {
+			if strings.EqualFold(qAgg.Name, "grouping") {
+				continue
+			}
+			qKey := strings.ToLower(qAgg.String())
+			if _, done := qualifyAggRefs[qKey]; done {
+				continue
+			}
+			if existing, ok := aggSyntheticNames[qKey]; ok {
+				qualifyAggRefs[qKey] = existing
+				continue
+			}
+			name, err := reuseOrAddAggregate(qAgg, &aggs, &aggCounter)
+			if err != nil {
+				return nil, err
+			}
+			qualifyAggRefs[qKey] = name
+			aggSyntheticNames[qKey] = name
+		}
+
 		// The same hoist for an aggregate inside a WINDOW's own spec.
 		//
 		// `SUM(COUNT(*)) OVER ()` and `ROW_NUMBER() OVER (ORDER BY COUNT(*))`
@@ -581,7 +611,11 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 		if err := refuseQualifyWithoutAWindow(info, windowed); err != nil {
 			return nil, err
 		}
-		pred := resolveQualifyNames(qual.pred, info.Columns, bareWinOutput, nestedWinRewrites, plan)
+		pred := resolveQualifyNames(qual.pred, info.Columns, bareWinOutput,
+			itemRewrites(nestedAggRewrites, nestedWinRewrites, nestedAggReplacements), plan)
+		if len(qualifyAggRefs) > 0 {
+			pred = plansql.ReplaceAllAggregates(pred, qualifyAggRefs)
+		}
 		if len(havingReplacements) > 0 {
 			pred = plansql.ReplaceAllAggregates(pred, havingReplacements)
 		}
@@ -649,6 +683,7 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 	var projectNode *Node
 	if !isStarOnly(info.Columns) || len(qual.windows) > 0 {
 		var projections []Projection
+		projRewrites := itemRewrites(nestedAggRewrites, nestedWinRewrites, nestedAggReplacements)
 		for i, col := range info.Columns {
 			if col.IsWindow {
 				// Window column: read the window's own output SLOT and
@@ -697,27 +732,13 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 			// the synthetic aggregate output column. The projection is no
 			// longer an aggregate — it's a regular expression that references
 			// the aggregate output column.
-			if rewritten, ok := nestedAggRewrites[i]; ok {
-				p.ASTExpr = rewritten
+			if _, ok := nestedAggRewrites[i]; ok {
 				p.IsAgg = false
 			}
-			// A nested window column (#610): the window has been extracted into
-			// a NodeWindow output column and the projection now evaluates the
-			// surrounding expression over that column's ColRef.
-			//
-			// An item holding BOTH — `MAX(b) * 2 + ROW_NUMBER() OVER (…)` —
-			// takes both substitutions on ONE tree: the windows' slots first
-			// (ReplaceWindowFuncs matches the item's own window nodes by
-			// pointer), then the aggregates' slots over what is left. Each
-			// rewrite used to start from the item's original tree and the
-			// second replaced the first, so the projection above the window
-			// evaluated `MAX(b)` as a call over rows that carry no `b` and
-			// answered NULL — under COALESCE or CASE a plausible wrong value
-			// (#1646).
-			if rewritten, ok := nestedWinRewrites[i]; ok {
-				if repl, both := nestedAggReplacements[i]; both {
-					rewritten = plansql.ReplaceAllAggregates(rewritten, repl)
-				}
+			// The item's tree as the projection above the window evaluates
+			// it: aggregates and windows both replaced by their slots
+			// (itemRewrites, #610, #1646).
+			if rewritten, ok := projRewrites[i]; ok {
 				p.ASTExpr = rewritten
 			}
 			if col.ColumnRef != "" {
@@ -3636,4 +3657,43 @@ func computedGroupKeyRefs(agg *Node) map[string]string {
 
 	}
 	return refs
+}
+
+// itemRewrites is each SELECT item's tree as the nodes ABOVE the window
+// evaluate it — the projection, and QUALIFY reading the item by its alias:
+// an item holding a window call has its windows replaced by their slots
+// (#610) and then, when it also holds an aggregate, the item's aggregate
+// substitution over what is left (#1646); an item holding only aggregates is
+// its aggregate rewrite. ReplaceWindowFuncs matches the item's own window
+// nodes by pointer, which is why the windows go first.
+func itemRewrites(aggRewrites, winRewrites map[int]plansql.Node, aggRepl map[int]map[string]string) map[int]plansql.Node {
+	out := make(map[int]plansql.Node, len(aggRewrites)+len(winRewrites))
+	for i, rw := range aggRewrites {
+		out[i] = rw
+	}
+	for i, rw := range winRewrites {
+		if repl, both := aggRepl[i]; both {
+			rw = plansql.ReplaceAllAggregates(rw, repl)
+		}
+		out[i] = rw
+	}
+	return out
+}
+
+// qualifyOuterAggregates is the aggregate calls a QUALIFY predicate holds
+// outside its window calls; an aggregate inside a window's own terms is the
+// window's (winAggRefs).
+func qualifyOuterAggregates(pred plansql.Node) []*plansql.FuncCallNode {
+	if pred == nil {
+		return nil
+	}
+	wfns := plansql.FindAllWindowFuncs(pred)
+	if len(wfns) > 0 {
+		repl := make(map[*plansql.WindowFuncNode]string, len(wfns))
+		for _, w := range wfns {
+			repl[w] = "__qualify_window"
+		}
+		pred = plansql.ReplaceWindowFuncs(pred, repl)
+	}
+	return plansql.FindAllAggregates(pred)
 }
