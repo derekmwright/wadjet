@@ -71,7 +71,7 @@ func (p *StagePlanner) lowerProjectionSubquery(stages *[]Stage, item *logical.Pr
 	// decline, not a fallback to plan-time execution: the whole point of the
 	// producer is that the value accumulates the way the outer query's does.
 	for _, d := range deferred {
-		producerID, valueType, typeKnown, err := p.emitScalarProducerStagesTyped(stages, d.SubquerySQL)
+		producerID, valueType, typeKnown, err := p.emitScalarProducerStagesTyped(stages, d)
 		if err != nil {
 			// A DECLINE routes the query to a path that can answer it. An
 			// authorization refusal has no such path — every one of them

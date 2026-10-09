@@ -1177,6 +1177,10 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 			for _, pred := range node.Predicates {
 				var exprStr, aliasStr string
 				var aliasNames []string
+				// The tree exprStr spells, where the plan holds one: its
+				// subquery nodes carry their memoized bodies and the WITH
+				// chain each is written in (ADR-0047 stage 3).
+				var exprTree plansql.Node
 				// A Project emits no stage here, so a predicate naming one of
 				// its RENAMED or computed outputs would reach the producing
 				// fragment as a column that fragment's schema does not carry
@@ -1187,7 +1191,7 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 				// shares.
 				if len(node.Children) == 1 {
 					if ast, names, ok := logical.ResolveFilterThroughProjects(pred, node.Children[0]); ok {
-						exprStr, aliasNames = ast.String(), names
+						exprStr, aliasNames, exprTree = ast.String(), names, ast
 					}
 				}
 				// The spelling the query wrote, kept alongside the resolved
@@ -1201,6 +1205,9 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 				}
 				if exprStr == "" {
 					exprStr = aliasStr
+				}
+				if exprTree == nil && pred.ASTExpr != nil {
+					exprTree = pred.ASTExpr
 				}
 				if exprStr == "" {
 					continue
@@ -1218,9 +1225,9 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 				if len(node.Children) == 1 {
 					filterDecls = p.PlanContext.InputColDecls(node.Children[0])
 				}
-				resolvedExpr, deferred := p.resolveFilterSubqueries(exprStr, filterDecls)
+				resolvedExpr, deferred := p.resolveFilterSubqueries(exprStr, exprTree, filterDecls)
 				for _, d := range deferred {
-					producerID, err := p.emitScalarProducerStages(stages, d.SubquerySQL)
+					producerID, err := p.emitScalarProducerStages(stages, d)
 					if err != nil {
 						// An AUTHORIZATION refusal is not a shape this
 						// planner could not express here: it is the query's
@@ -1239,7 +1246,9 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 						// correctness for CTE-drift cases but keeps the query
 						// running rather than failing outright.
 						start := time.Now()
+						restore := p.planInSubqueryChain(d.Node)
 						rows, schema, sErr := p.ExecuteSubquerySchema(p.PlanCtx, d.SubquerySQL)
+						restore()
 						slog.Warn("scalar producer emission failed; executed subquery on coordinator",
 							"duration", time.Since(start).Round(time.Millisecond),
 							"emit_error", err, "exec_error", sErr)
