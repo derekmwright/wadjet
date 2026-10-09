@@ -642,6 +642,29 @@ type SelectInfo struct {
 	Windows            []WindowSpec // window function specs extracted during pre-parse
 	CTEs               []CTEDef     // CTE definitions extracted during pre-parse
 	Union              *UnionInfo   // non-nil if this is a UNION query
+
+	// enclosing is the WITH chain in scope AROUND this block when it is
+	// planned on its own — an expression subquery's body, a producer stage's
+	// — set by the planner that plans it (SetEnclosingCTEs).
+	enclosing []CTEDef
+}
+
+// SetEnclosingCTEs records the WITH chain in scope around a block planned on
+// its own: a binder that validates the block alone resolves a reference to
+// one of those items as that item rather than as a relation that does not
+// exist.
+func (s *SelectInfo) SetEnclosingCTEs(chain []CTEDef) {
+	if s != nil {
+		s.enclosing = chain
+	}
+}
+
+// EnclosingCTEs is the chain SetEnclosingCTEs recorded.
+func (s *SelectInfo) EnclosingCTEs() []CTEDef {
+	if s == nil {
+		return nil
+	}
+	return s.enclosing
 }
 
 // TableRef is a reference to a table or table-producing function.

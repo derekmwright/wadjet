@@ -463,7 +463,9 @@ func (p *Planner) buildSubqueryPipelineForPlan(ctx context.Context, info *plansq
 		if denied := pol.DeniedColumns(); len(denied) > 0 {
 			// nil table hook: applyContextColumnPolicies below asks the
 			// ACCESS decision for every relation this plan reads (#945), so
-			// the binder's own refusal would be a second copy of it.
+			// the binder's own refusal would be a second copy of it. The WITH
+			// chain the body is planned in is in scope for it.
+			info.SetEnclosingCTEs(p.Ctes)
 			if err := ValidateColumnsUnderPolicy(ctx, p.Catalog, info, func(table string) map[string]bool {
 				return denied[strings.ToLower(table)]
 			}, nil); err != nil {
