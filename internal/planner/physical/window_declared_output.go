@@ -58,16 +58,28 @@ func windowValueFunc(fn string) bool {
 // Undecidable arguments keep windowOutputType's fallback.
 // See docs/internals/computed-window-argument-declarations.md for the design.
 func (w *declWalk) windowComputedArgDecl(node *logical.Node, we logical.WindowExpr) (expr.DeclType, bool, bool) {
-	if we.InputExpr == nil || node == nil || len(node.Children) == 0 {
+	arg := windowValueArgTree(we)
+	if arg == nil || node == nil || len(node.Children) == 0 {
 		return expr.DeclType{}, false, false
 	}
-	if _, bare := we.InputExpr.(*plansql.ColRef); bare {
+	if _, bare := arg.(*plansql.ColRef); bare {
 		return expr.DeclType{}, false, false
 	}
-	if cleanExpr(we.InputExpr.String()) != cleanExpr(we.InputCol) {
+	if cleanExpr(arg.String()) != cleanExpr(we.InputCol) {
 		return expr.DeclType{}, false, false
 	}
-	return w.windowArgExprDecl(node, we.InputExpr)
+	return w.windowArgExprDecl(node, arg)
+}
+
+// windowValueArgTree is the window's first argument as the window
+// evaluates it: over an aggregate the builder re-spells the argument onto
+// the aggregate's outputs and keeps that tree in ArgExprs, while InputExpr
+// stays the argument as written (the DAG's subquery refusal reads it).
+func windowValueArgTree(we logical.WindowExpr) plansql.Node {
+	if len(we.ArgExprs) > 0 && we.ArgExprs[0] != nil {
+		return we.ArgExprs[0]
+	}
+	return we.InputExpr
 }
 
 // windowArgExprDecl types a computed window argument from its AST against the

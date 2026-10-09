@@ -1140,9 +1140,11 @@ func respellWindowTerm(term string, node plansql.Node, aggRefs, keyRefs map[stri
 // respellWindowExprOverAggregate spells every term a window will EVALUATE —
 // each argument, each PARTITION BY and ORDER BY key — against what the
 // aggregate below it publishes, and keeps each term's tree beside its text:
-// ArgExprs, PartitionByExprs, OrderByExprs and InputExpr are the rewritten
-// trees, so a consumer asking "is this the tree of that text" is told yes
-// for a term over an aggregate too.
+// ArgExprs, PartitionByExprs and OrderByExprs are the rewritten trees, so a
+// consumer asking "is this the tree of that text" is told yes for a term
+// over an aggregate too. InputExpr stays the argument AS WRITTEN: the stage
+// DAG's subquery refusal reads it (dagplan.scalar_projection_refusal), and a
+// subquery inside an aggregate the window argument holds is found there.
 //
 // The argument list is rewritten ONE ARGUMENT AT A TIME. InputCol carries
 // the whole list — `SUM(b), 2, 2.5` — and parsing it as one expression kept
@@ -1168,9 +1170,6 @@ func respellWindowExprOverAggregate(we *WindowExpr, aggRefs, keyRefs map[string]
 			}
 		}
 		we.InputCol = strings.Join(args, ", ")
-	}
-	if len(we.ArgExprs) > 0 {
-		we.InputExpr = we.ArgExprs[0]
 	}
 	for j := range we.PartitionBy {
 		text, tree := respellWindowTerm(we.PartitionBy[j], windowTermExpr(we.PartitionByExprs, j), aggRefs, keyRefs)
