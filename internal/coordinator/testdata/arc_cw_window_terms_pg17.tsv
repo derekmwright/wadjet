@@ -1,0 +1,285 @@
+# PostgreSQL 17.11 answers for arc_cw_window_terms_arms_test.go (TestArcCWMeasure).
+arg/sum/key/bare	k:integer,w:bigint | 1,6; 2,6; 3,6
+arg/sum/key/nested	k:integer,w:bigint | 1,6; 2,6; 3,6
+arg/sum/keyQual/bare	k:integer,w:bigint | 1,6; 2,6; 3,6
+arg/sum/keyQual/nested	k:integer,w:bigint | 1,6; 2,6; 3,6
+arg/sum/keyExpr/bare	k:integer,w:bigint | 1,9; 2,9; 3,9
+arg/sum/keyExpr/nested	k:integer,w:bigint | 1,9; 2,9; 3,9
+arg/sum/agg/bare	k:integer,w:numeric | 1,130; 2,130; 3,130
+arg/sum/agg/nested	k:integer,w:numeric | 1,130; 2,130; 3,130
+arg/sum/aggExpr/bare	k:integer,w:numeric | 1,260; 2,260; 3,260
+arg/sum/aggExpr/nested	k:integer,w:numeric | 1,260; 2,260; 3,260
+arg/sum/ungrouped/bare	ERR 42803 b
+arg/sum/ungrouped/nested	ERR 42803 b
+arg/sum/ungroupedQual/bare	ERR 42803 b
+arg/sum/ungroupedQual/nested	ERR 42803 b
+arg/sum/ungroupedExpr/bare	ERR 42803 b
+arg/sum/ungroupedExpr/nested	ERR 42803 b
+arg/sum/outputAlias/bare	ERR 42703 k
+arg/sum/outputAlias/nested	ERR 42703 k
+arg/sumPart/key/bare	k:integer,w:bigint | 1,1; 2,2; 3,3
+arg/sumPart/key/nested	k:integer,w:bigint | 1,1; 2,2; 3,3
+arg/sumPart/keyQual/bare	k:integer,w:bigint | 1,1; 2,2; 3,3
+arg/sumPart/keyQual/nested	k:integer,w:bigint | 1,1; 2,2; 3,3
+arg/sumPart/keyExpr/bare	k:integer,w:bigint | 1,2; 2,3; 3,4
+arg/sumPart/keyExpr/nested	k:integer,w:bigint | 1,2; 2,3; 3,4
+arg/sumPart/agg/bare	k:integer,w:numeric | 1,20; 2,50; 3,60
+arg/sumPart/agg/nested	k:integer,w:numeric | 1,20; 2,50; 3,60
+arg/sumPart/aggExpr/bare	k:integer,w:numeric | 1,40; 2,100; 3,120
+arg/sumPart/aggExpr/nested	k:integer,w:numeric | 1,40; 2,100; 3,120
+arg/sumPart/ungrouped/bare	ERR 42803 b
+arg/sumPart/ungrouped/nested	ERR 42803 b
+arg/sumPart/ungroupedQual/bare	ERR 42803 b
+arg/sumPart/ungroupedQual/nested	ERR 42803 b
+arg/sumPart/ungroupedExpr/bare	ERR 42803 b
+arg/sumPart/ungroupedExpr/nested	ERR 42803 b
+arg/sumPart/outputAlias/bare	ERR 42703 k
+arg/sumPart/outputAlias/nested	ERR 42703 k
+arg/lag/key/bare	k:integer,w:integer | 1,0; 2,1; 3,2
+arg/lag/key/nested	k:integer,w:integer | 1,0; 2,1; 3,2
+arg/lag/keyQual/bare	k:integer,w:integer | 1,0; 2,1; 3,2
+arg/lag/keyQual/nested	k:integer,w:integer | 1,0; 2,1; 3,2
+arg/lag/keyExpr/bare	k:integer,w:integer | 1,0; 2,2; 3,3
+arg/lag/keyExpr/nested	k:integer,w:integer | 1,0; 2,2; 3,3
+arg/lag/agg/bare	k:integer,w:bigint | 1,0; 2,20; 3,50
+arg/lag/agg/nested	k:integer,w:bigint | 1,0; 2,20; 3,50
+arg/lag/aggExpr/bare	k:integer,w:bigint | 1,0; 2,40; 3,100
+arg/lag/aggExpr/nested	k:integer,w:bigint | 1,0; 2,40; 3,100
+arg/lag/ungrouped/bare	ERR 42803 b
+arg/lag/ungrouped/nested	ERR 42803 b
+arg/lag/ungroupedQual/bare	ERR 42803 b
+arg/lag/ungroupedQual/nested	ERR 42803 b
+arg/lag/ungroupedExpr/bare	ERR 42803 b
+arg/lag/ungroupedExpr/nested	ERR 42803 b
+arg/lag/outputAlias/bare	ERR 42703 k
+arg/lag/outputAlias/nested	ERR 42703 k
+arg/firstValue/key/bare	k:integer,w:integer | 1,1; 2,1; 3,1
+arg/firstValue/key/nested	k:integer,w:integer | 1,1; 2,1; 3,1
+arg/firstValue/keyQual/bare	k:integer,w:integer | 1,1; 2,1; 3,1
+arg/firstValue/keyQual/nested	k:integer,w:integer | 1,1; 2,1; 3,1
+arg/firstValue/keyExpr/bare	k:integer,w:integer | 1,2; 2,2; 3,2
+arg/firstValue/keyExpr/nested	k:integer,w:integer | 1,2; 2,2; 3,2
+arg/firstValue/agg/bare	k:integer,w:bigint | 1,20; 2,20; 3,20
+arg/firstValue/agg/nested	k:integer,w:bigint | 1,20; 2,20; 3,20
+arg/firstValue/aggExpr/bare	k:integer,w:bigint | 1,40; 2,40; 3,40
+arg/firstValue/aggExpr/nested	k:integer,w:bigint | 1,40; 2,40; 3,40
+arg/firstValue/ungrouped/bare	ERR 42803 b
+arg/firstValue/ungrouped/nested	ERR 42803 b
+arg/firstValue/ungroupedQual/bare	ERR 42803 b
+arg/firstValue/ungroupedQual/nested	ERR 42803 b
+arg/firstValue/ungroupedExpr/bare	ERR 42803 b
+arg/firstValue/ungroupedExpr/nested	ERR 42803 b
+arg/firstValue/outputAlias/bare	ERR 42703 k
+arg/firstValue/outputAlias/nested	ERR 42703 k
+arg/nthValue/key/bare	k:integer,w:integer | 1,2; 2,2; 3,2
+arg/nthValue/key/nested	k:integer,w:integer | 1,2; 2,2; 3,2
+arg/nthValue/keyQual/bare	k:integer,w:integer | 1,2; 2,2; 3,2
+arg/nthValue/keyQual/nested	k:integer,w:integer | 1,2; 2,2; 3,2
+arg/nthValue/keyExpr/bare	k:integer,w:integer | 1,3; 2,3; 3,3
+arg/nthValue/keyExpr/nested	k:integer,w:integer | 1,3; 2,3; 3,3
+arg/nthValue/agg/bare	k:integer,w:bigint | 1,50; 2,50; 3,50
+arg/nthValue/agg/nested	k:integer,w:bigint | 1,50; 2,50; 3,50
+arg/nthValue/aggExpr/bare	k:integer,w:bigint | 1,100; 2,100; 3,100
+arg/nthValue/aggExpr/nested	k:integer,w:bigint | 1,100; 2,100; 3,100
+arg/nthValue/ungrouped/bare	ERR 42803 b
+arg/nthValue/ungrouped/nested	ERR 42803 b
+arg/nthValue/ungroupedQual/bare	ERR 42803 b
+arg/nthValue/ungroupedQual/nested	ERR 42803 b
+arg/nthValue/ungroupedExpr/bare	ERR 42803 b
+arg/nthValue/ungroupedExpr/nested	ERR 42803 b
+arg/nthValue/outputAlias/bare	ERR 42703 k
+arg/nthValue/outputAlias/nested	ERR 42703 k
+default/lag/key/bare	k:integer,w:integer | 1,1; 2,1; 3,2
+default/lag/key/nested	k:integer,w:integer | 1,1; 2,1; 3,2
+default/lag/keyQual/bare	k:integer,w:integer | 1,1; 2,1; 3,2
+default/lag/keyQual/nested	k:integer,w:integer | 1,1; 2,1; 3,2
+default/lag/keyExpr/bare	k:integer,w:integer | 1,2; 2,1; 3,2
+default/lag/keyExpr/nested	k:integer,w:integer | 1,2; 2,1; 3,2
+default/lag/agg/bare	k:integer,w:bigint | 1,20; 2,1; 3,2
+default/lag/agg/nested	k:integer,w:bigint | 1,20; 2,1; 3,2
+default/lag/aggExpr/bare	k:integer,w:bigint | 1,40; 2,1; 3,2
+default/lag/aggExpr/nested	k:integer,w:bigint | 1,40; 2,1; 3,2
+default/lag/ungrouped/bare	ERR 42803 b
+default/lag/ungrouped/nested	ERR 42803 b
+default/lag/ungroupedQual/bare	ERR 42803 b
+default/lag/ungroupedQual/nested	ERR 42803 b
+default/lag/ungroupedExpr/bare	ERR 42803 b
+default/lag/ungroupedExpr/nested	ERR 42803 b
+default/lag/outputAlias/bare	ERR 42703 k
+default/lag/outputAlias/nested	ERR 42703 k
+partition/rank/key/bare	k:integer,w:bigint | 1,1; 2,1; 3,1
+partition/rank/key/nested	k:integer,w:bigint | 1,1; 2,1; 3,1
+partition/rank/keyQual/bare	k:integer,w:bigint | 1,1; 2,1; 3,1
+partition/rank/keyQual/nested	k:integer,w:bigint | 1,1; 2,1; 3,1
+partition/rank/keyExpr/bare	k:integer,w:bigint | 1,1; 2,1; 3,1
+partition/rank/keyExpr/nested	k:integer,w:bigint | 1,1; 2,1; 3,1
+partition/rank/agg/bare	k:integer,w:bigint | 1,1; 2,1; 3,1
+partition/rank/agg/nested	k:integer,w:bigint | 1,1; 2,1; 3,1
+partition/rank/aggExpr/bare	k:integer,w:bigint | 1,1; 2,1; 3,1
+partition/rank/aggExpr/nested	k:integer,w:bigint | 1,1; 2,1; 3,1
+partition/rank/ungrouped/bare	ERR 42803 b
+partition/rank/ungrouped/nested	ERR 42803 b
+partition/rank/ungroupedQual/bare	ERR 42803 b
+partition/rank/ungroupedQual/nested	ERR 42803 b
+partition/rank/ungroupedExpr/bare	ERR 42803 b
+partition/rank/ungroupedExpr/nested	ERR 42803 b
+partition/rank/outputAlias/bare	ERR 42703 k
+partition/rank/outputAlias/nested	ERR 42703 k
+partition/sum/key/bare	k:integer,w:bigint | 1,1; 2,2; 3,3
+partition/sum/key/nested	k:integer,w:bigint | 1,1; 2,2; 3,3
+partition/sum/keyQual/bare	k:integer,w:bigint | 1,1; 2,2; 3,3
+partition/sum/keyQual/nested	k:integer,w:bigint | 1,1; 2,2; 3,3
+partition/sum/keyExpr/bare	k:integer,w:bigint | 1,1; 2,2; 3,3
+partition/sum/keyExpr/nested	k:integer,w:bigint | 1,1; 2,2; 3,3
+partition/sum/agg/bare	k:integer,w:bigint | 1,1; 2,2; 3,3
+partition/sum/agg/nested	k:integer,w:bigint | 1,1; 2,2; 3,3
+partition/sum/aggExpr/bare	k:integer,w:bigint | 1,1; 2,2; 3,3
+partition/sum/aggExpr/nested	k:integer,w:bigint | 1,1; 2,2; 3,3
+partition/sum/ungrouped/bare	ERR 42803 b
+partition/sum/ungrouped/nested	ERR 42803 b
+partition/sum/ungroupedQual/bare	ERR 42803 b
+partition/sum/ungroupedQual/nested	ERR 42803 b
+partition/sum/ungroupedExpr/bare	ERR 42803 b
+partition/sum/ungroupedExpr/nested	ERR 42803 b
+partition/sum/outputAlias/bare	ERR 42703 k
+partition/sum/outputAlias/nested	ERR 42703 k
+order/rank/key/bare	k:integer,w:bigint | 1,1; 2,2; 3,3
+order/rank/key/nested	k:integer,w:bigint | 1,1; 2,2; 3,3
+order/rank/keyQual/bare	k:integer,w:bigint | 1,1; 2,2; 3,3
+order/rank/keyQual/nested	k:integer,w:bigint | 1,1; 2,2; 3,3
+order/rank/keyExpr/bare	k:integer,w:bigint | 1,1; 2,2; 3,3
+order/rank/keyExpr/nested	k:integer,w:bigint | 1,1; 2,2; 3,3
+order/rank/agg/bare	k:integer,w:bigint | 1,1; 2,2; 3,3
+order/rank/agg/nested	k:integer,w:bigint | 1,1; 2,2; 3,3
+order/rank/aggExpr/bare	k:integer,w:bigint | 1,1; 2,2; 3,3
+order/rank/aggExpr/nested	k:integer,w:bigint | 1,1; 2,2; 3,3
+order/rank/ungrouped/bare	ERR 42803 b
+order/rank/ungrouped/nested	ERR 42803 b
+order/rank/ungroupedQual/bare	ERR 42803 b
+order/rank/ungroupedQual/nested	ERR 42803 b
+order/rank/ungroupedExpr/bare	ERR 42803 b
+order/rank/ungroupedExpr/nested	ERR 42803 b
+order/rank/outputAlias/bare	ERR 42703 k
+order/rank/outputAlias/nested	ERR 42703 k
+order/sum/key/bare	k:integer,w:bigint | 1,1; 2,3; 3,6
+order/sum/key/nested	k:integer,w:bigint | 1,1; 2,3; 3,6
+order/sum/keyQual/bare	k:integer,w:bigint | 1,1; 2,3; 3,6
+order/sum/keyQual/nested	k:integer,w:bigint | 1,1; 2,3; 3,6
+order/sum/keyExpr/bare	k:integer,w:bigint | 1,1; 2,3; 3,6
+order/sum/keyExpr/nested	k:integer,w:bigint | 1,1; 2,3; 3,6
+order/sum/agg/bare	k:integer,w:bigint | 1,1; 2,3; 3,6
+order/sum/agg/nested	k:integer,w:bigint | 1,1; 2,3; 3,6
+order/sum/aggExpr/bare	k:integer,w:bigint | 1,1; 2,3; 3,6
+order/sum/aggExpr/nested	k:integer,w:bigint | 1,1; 2,3; 3,6
+order/sum/ungrouped/bare	ERR 42803 b
+order/sum/ungrouped/nested	ERR 42803 b
+order/sum/ungroupedQual/bare	ERR 42803 b
+order/sum/ungroupedQual/nested	ERR 42803 b
+order/sum/ungroupedExpr/bare	ERR 42803 b
+order/sum/ungroupedExpr/nested	ERR 42803 b
+order/sum/outputAlias/bare	ERR 42703 k
+order/sum/outputAlias/nested	ERR 42703 k
+order/rowNumberDesc/key/bare	k:integer,w:bigint | 1,3; 2,2; 3,1
+order/rowNumberDesc/key/nested	k:integer,w:bigint | 1,3; 2,2; 3,1
+order/rowNumberDesc/keyQual/bare	k:integer,w:bigint | 1,3; 2,2; 3,1
+order/rowNumberDesc/keyQual/nested	k:integer,w:bigint | 1,3; 2,2; 3,1
+order/rowNumberDesc/keyExpr/bare	k:integer,w:bigint | 1,3; 2,2; 3,1
+order/rowNumberDesc/keyExpr/nested	k:integer,w:bigint | 1,3; 2,2; 3,1
+order/rowNumberDesc/agg/bare	k:integer,w:bigint | 1,3; 2,2; 3,1
+order/rowNumberDesc/agg/nested	k:integer,w:bigint | 1,3; 2,2; 3,1
+order/rowNumberDesc/aggExpr/bare	k:integer,w:bigint | 1,3; 2,2; 3,1
+order/rowNumberDesc/aggExpr/nested	k:integer,w:bigint | 1,3; 2,2; 3,1
+order/rowNumberDesc/ungrouped/bare	ERR 42803 b
+order/rowNumberDesc/ungrouped/nested	ERR 42803 b
+order/rowNumberDesc/ungroupedQual/bare	ERR 42803 b
+order/rowNumberDesc/ungroupedQual/nested	ERR 42803 b
+order/rowNumberDesc/ungroupedExpr/bare	ERR 42803 b
+order/rowNumberDesc/ungroupedExpr/nested	ERR 42803 b
+order/rowNumberDesc/outputAlias/bare	ERR 42703 k
+order/rowNumberDesc/outputAlias/nested	ERR 42703 k
+order/lag/key/bare	k:integer,w:integer | 1,NULL; 2,1; 3,2
+order/lag/key/nested	k:integer,w:integer | 1,NULL; 2,1; 3,2
+order/lag/keyQual/bare	k:integer,w:integer | 1,NULL; 2,1; 3,2
+order/lag/keyQual/nested	k:integer,w:integer | 1,NULL; 2,1; 3,2
+order/lag/keyExpr/bare	k:integer,w:integer | 1,NULL; 2,1; 3,2
+order/lag/keyExpr/nested	k:integer,w:integer | 1,NULL; 2,1; 3,2
+order/lag/agg/bare	k:integer,w:integer | 1,NULL; 2,1; 3,2
+order/lag/agg/nested	k:integer,w:integer | 1,NULL; 2,1; 3,2
+order/lag/aggExpr/bare	k:integer,w:integer | 1,NULL; 2,1; 3,2
+order/lag/aggExpr/nested	k:integer,w:integer | 1,NULL; 2,1; 3,2
+order/lag/ungrouped/bare	ERR 42803 b
+order/lag/ungrouped/nested	ERR 42803 b
+order/lag/ungroupedQual/bare	ERR 42803 b
+order/lag/ungroupedQual/nested	ERR 42803 b
+order/lag/ungroupedExpr/bare	ERR 42803 b
+order/lag/ungroupedExpr/nested	ERR 42803 b
+order/lag/outputAlias/bare	ERR 42703 k
+order/lag/outputAlias/nested	ERR 42703 k
+frame/rows/key/bare	ERR 42P10
+frame/rows/key/nested	ERR 42P10
+frame/rows/keyQual/bare	ERR 42P10
+frame/rows/keyQual/nested	ERR 42P10
+frame/rows/keyExpr/bare	ERR 42P10
+frame/rows/keyExpr/nested	ERR 42P10
+frame/rows/agg/bare	ERR 42803
+frame/rows/agg/nested	ERR 42803
+frame/rows/aggExpr/bare	ERR 42803
+frame/rows/aggExpr/nested	ERR 42803
+frame/rows/ungrouped/bare	ERR 42P10
+frame/rows/ungrouped/nested	ERR 42P10
+frame/rows/ungroupedQual/bare	ERR 42P10
+frame/rows/ungroupedQual/nested	ERR 42P10
+frame/rows/ungroupedExpr/bare	ERR 42P10
+frame/rows/ungroupedExpr/nested	ERR 42P10
+frame/rows/outputAlias/bare	ERR 42703 k
+frame/rows/outputAlias/nested	ERR 42703 k
+grpExpr/arg/sum/keyIsExpr	k:integer,w:bigint | 2,9; 3,9; 4,9
+grpExpr/arg/sum/overKeyExpr	k:integer,w:bigint | 2,18; 3,18; 4,18
+grpExpr/arg/sum/columnUnderKey	ERR 42803 g
+grpExpr/arg/sum/agg	k:integer,w:numeric | 2,130; 3,130; 4,130
+grpExpr/partition/rank/keyIsExpr	k:integer,w:bigint | 2,1; 3,1; 4,1
+grpExpr/partition/rank/overKeyExpr	k:integer,w:bigint | 2,1; 3,1; 4,1
+grpExpr/partition/rank/columnUnderKey	ERR 42803 g
+grpExpr/partition/rank/agg	k:integer,w:bigint | 2,1; 3,1; 4,1
+grpExpr/order/rank/keyIsExpr	k:integer,w:bigint | 2,1; 3,2; 4,3
+grpExpr/order/rank/overKeyExpr	k:integer,w:bigint | 2,1; 3,2; 4,3
+grpExpr/order/rank/columnUnderKey	ERR 42803 g
+grpExpr/order/rank/agg	k:integer,w:bigint | 2,1; 3,2; 4,3
+grpExpr/default/lag/keyIsExpr	k:integer,w:integer | 2,2; 3,2; 4,3
+grpExpr/default/lag/overKeyExpr	k:integer,w:integer | 2,4; 3,2; 4,3
+grpExpr/default/lag/columnUnderKey	ERR 42803 g
+grpExpr/default/lag/agg	k:integer,w:bigint | 2,20; 3,2; 4,3
+implicit/aggArg	m:bigint,w:numeric | 60,60
+implicit/ungroupedArg	ERR 42803 b
+implicit/ungroupedOrder	ERR 42803 g
+implicit/countPlusRowNumber	w:bigint | 5
+implicit/windowOnly	w:numeric | 140; 140; 140; 140
+clause/orderByUngrouped	ERR 42803 b
+clause/orderByAggTerm	g:integer | 3; 2; 1
+clause/orderByKey	g:integer | 3; 2; 1
+mixed/issue	g:integer,w:bigint | 1,41; 2,102; 3,123
+mixed/windowFirst	g:integer,w:bigint | 1,3; 2,3; 3,4
+mixed/windowMinusAgg	g:integer,w:bigint | 1,-14; 2,-44; 3,-54
+mixed/coalesceRank	g:integer,w:bigint | 1,21; 2,52; 3,63
+mixed/aggPlusLagOfAgg	g:integer,w:bigint | 1,20; 2,70; 3,110
+mixed/twoAggsOneWindow	g:integer,w:bigint | 1,11; 2,2; 3,3
+mixed/aggTimesWindow	g:integer,w:numeric | 1,8; 2,4; 3,4
+mixed/keyPlusAggPlusWindow	g:integer,w:bigint | 1,22; 2,54; 3,66
+mixed/caseOverBoth	g:integer,w:bigint | 1,0; 2,2; 3,3
+mixed/ungroupedBeside	ERR 42803 b
+mixed/aggInsideWindow	g:integer,w:numeric | 1,40; 2,140; 3,260
+issue/1651/arg	ERR 42803 f
+issue/1651/argQual	ERR 42803 f
+issue/1651/partition	ERR 42803 f
+issue/1651/order	ERR 42803 f
+issue/1651/keyExpr	ERR 42803 i
+issue/ctl/frame	sum:bigint | 1; 3; 6
+issue/ctl/keyArg	w:bigint | 1; 2; 4
+issue/ctl/aggArg	i:integer,sum:double precision | 1,4.5; 2,4.5; 4,4.5
+issue/ctl/aggPartition	i:integer,row_number:bigint | 1,1; 2,1; 4,1
+issue/ctl/keyExprArg	sum:bigint | 10; 10; 10
+issue/ctl/keyExprArgExprKey	sum:bigint | 10; 10; 10
+issue/ctl/outputAlias	ERR 42703 k
+issue/1646/mixed	g:integer,w:bigint | 1,41; 2,102; 3,123
+issue/1646/aggInsideWindow	g:integer,w:numeric | 1,40; 2,140; 3,260
+issue/1651/filed	ERR 42803 b
