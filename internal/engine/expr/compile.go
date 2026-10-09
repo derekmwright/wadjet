@@ -527,13 +527,9 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 					return nil, fmt.Errorf("IN subquery requires a SubqueryRunner")
 				}
 				if len(ctx.outerTables) > 0 {
-					var refs []plansql.OuterRef
-					var err error
-					if len(ctx.outerCols) > 0 {
-						refs, err = plansql.FindCorrelatedRefsWithScope(sq.SQL, ctx.outerTables, ctx.outerCols, ctx.innerCols)
-					} else {
-						refs, err = plansql.FindCorrelatedRefs(sq.SQL, ctx.outerTables)
-					}
+					// Correlated iff a reference's BINDING reaches this query where the
+					// binder bound the body, by name otherwise (ADR-0021 §1k).
+					refs, err := plansql.CorrelatedRefsOf(sq, ctx.outerTables, ctx.outerCols, ctx.innerCols)
 					if err == nil && len(refs) > 0 {
 						parsed, _ := plansql.Parse(sq.SQL)
 						info, _ := plansql.ExtractSelect(parsed)
@@ -720,13 +716,9 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 			return nil, fmt.Errorf("subqueries require a SubqueryRunner")
 		}
 		if len(ctx.outerTables) > 0 {
-			var refs []plansql.OuterRef
-			var err error
-			if len(ctx.outerCols) > 0 {
-				refs, err = plansql.FindCorrelatedRefsWithScope(n.SQL, ctx.outerTables, ctx.outerCols, ctx.innerCols)
-			} else {
-				refs, err = plansql.FindCorrelatedRefs(n.SQL, ctx.outerTables)
-			}
+			// Correlated iff a reference's BINDING reaches this query where the
+			// binder bound the body, by name otherwise (ADR-0021 §1k).
+			refs, err := plansql.CorrelatedRefsOf(n, ctx.outerTables, ctx.outerCols, ctx.innerCols)
 			if err == nil && len(refs) > 0 {
 				parsed, _ := plansql.Parse(n.SQL)
 				info, _ := plansql.ExtractSelect(parsed)
@@ -807,13 +799,9 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 			return nil, fmt.Errorf("EXISTS subquery requires a SubqueryRunner")
 		}
 		if len(ctx.outerTables) > 0 {
-			var refs []plansql.OuterRef
-			var err error
-			if len(ctx.outerCols) > 0 {
-				refs, err = plansql.FindCorrelatedRefsWithScope(n.SQL, ctx.outerTables, ctx.outerCols, ctx.innerCols)
-			} else {
-				refs, err = plansql.FindCorrelatedRefs(n.SQL, ctx.outerTables)
-			}
+			// Correlated iff a reference's BINDING reaches this query where the
+			// binder bound the body, by name otherwise (ADR-0021 §1k).
+			refs, err := plansql.CorrelatedRefsOf(n, ctx.outerTables, ctx.outerCols, ctx.innerCols)
 			if err == nil && len(refs) > 0 {
 				parsed, _ := plansql.Parse(n.SQL)
 				info, _ := plansql.ExtractSelect(parsed)
