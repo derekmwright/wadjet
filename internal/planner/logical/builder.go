@@ -79,6 +79,10 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 	// Track columns that need AST rewriting for nested aggregates.
 	// Key: column index, Value: rewritten AST with aggregate replaced by ColRef.
 	nestedAggRewrites := map[int]plansql.Node{}
+	// nestedAggReplacements is the substitution nestedAggRewrites applied to
+	// each item, kept so an item that ALSO holds a window call can apply it
+	// to the window-rewritten tree (#1646, below).
+	nestedAggReplacements := map[int]map[string]string{}
 	// Map aggregate expression string → synthetic name (for ORDER BY resolution)
 	aggSyntheticNames := map[string]string{}
 
@@ -253,6 +257,7 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 						aggSyntheticNames[aggKey] = syntheticName
 					}
 					nestedAggRewrites[i] = plansql.ReplaceAllAggregates(col.ASTExpr, replacements)
+					nestedAggReplacements[i] = replacements
 				} else {
 					// Simple non-nested single aggregate
 					inputCol := cleanExpr(col.AggArg)
@@ -717,7 +722,20 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 			// A nested window column (#610): the window has been extracted into
 			// a NodeWindow output column and the projection now evaluates the
 			// surrounding expression over that column's ColRef.
+			//
+			// An item holding BOTH — `MAX(b) * 2 + ROW_NUMBER() OVER (…)` —
+			// takes both substitutions on ONE tree: the windows' slots first
+			// (ReplaceWindowFuncs matches the item's own window nodes by
+			// pointer), then the aggregates' slots over what is left. Each
+			// rewrite used to start from the item's original tree and the
+			// second replaced the first, so the projection above the window
+			// evaluated `MAX(b)` as a call over rows that carry no `b` and
+			// answered NULL — under COALESCE or CASE a plausible wrong value
+			// (#1646).
 			if rewritten, ok := nestedWinRewrites[i]; ok {
+				if repl, both := nestedAggReplacements[i]; both {
+					rewritten = plansql.ReplaceAllAggregates(rewritten, repl)
+				}
 				p.ASTExpr = rewritten
 			}
 			if col.ColumnRef != "" {
