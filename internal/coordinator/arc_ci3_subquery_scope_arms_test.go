@@ -150,4 +150,29 @@ var ci3ArmCells = []ci3ArmCell{
 	{"i1606/existsOwnWith", `WITH d AS (SELECT 1 AS k) SELECT t.id FROM tb_p t WHERE EXISTS (WITH d AS (SELECT 2 AS k) SELECT 1 FROM d WHERE d.k = t.id) ORDER BY 1`, "2", [5]string{"PG", "PG", "PG", "PG", "PG"}},
 	{"i1606/inOwnWith", `WITH d AS (SELECT 1 AS k) SELECT t.id FROM tb_p t WHERE t.id IN (WITH d AS (SELECT 2 AS k UNION ALL SELECT 3) SELECT k FROM d WHERE k >= t.id) ORDER BY 1`, "2; 3", [5]string{"PG", "PG", "PG", "PG", "PG"}},
 	{"i1606/ownWithDiffSchema", `WITH d AS (SELECT 1 AS k) SELECT t.id, (WITH d AS (SELECT 5 AS z) SELECT z + t.id FROM d) AS m FROM tb_p t ORDER BY 1`, "1,6; 2,7; 3,8", [5]string{"PG", "PG", "PG", "PG", "PG"}},
+	// Folded from the closure review's 152 statements (arc CI3 round 2,
+	// ci3_review_r1/ci3rev1_stmts.tsv s06–s17, v04, v07, f05–f08): twelve
+	// shadowing shapes, a statement CTE read through a derived table in a
+	// correlated body, and four more lifted-refusal forms; each moved from a
+	// wrong value or 0A000 at 542b4f37 to PostgreSQL's answer on all five
+	// arms. v07 (a volatile WITH inside a DERIVED TABLE inside a correlated
+	// subquery) is evaluated per outer row at 542b4f37 and here: KEEP 50,
+	// filing candidate CI3-F3 (PostgreSQL 1).
+	{"r2/shadow/subInSub", `WITH c AS (SELECT 1 AS id) SELECT (SELECT max(id) FROM (WITH c AS (SELECT 2 AS id) SELECT id FROM c) z), (SELECT max(id) FROM c)`, "2,1", [5]string{"PG", "PG", "PG", "PG", "PG"}},
+	{"r2/shadow/threeNested", `WITH c AS (SELECT 1 AS id) SELECT * FROM (WITH c AS (SELECT 2 AS id) SELECT (SELECT max(id) FROM (WITH c AS (SELECT 3 AS id) SELECT id FROM c) q) AS a, (SELECT max(id) FROM c) AS b) x`, "3,2", [5]string{"PG", "PG", "PG", "PG", "PG"}},
+	{"r2/shadow/inOwnWith", `WITH c AS (SELECT id FROM tb_d) SELECT t.id FROM tb_p t WHERE t.id IN (WITH c AS (SELECT id FROM tb_p WHERE id > 1) SELECT id FROM c) ORDER BY 1`, "2; 3", [5]string{"PG", "PG", "PG", "PG", "PG"}},
+	{"r2/shadow/notExists", `WITH c AS (SELECT 1 AS id) SELECT * FROM (WITH c AS (SELECT 2 AS id) SELECT id FROM tb_p WHERE NOT EXISTS (SELECT 1 FROM c WHERE c.id = tb_p.id)) d ORDER BY 1`, "1; 3", [5]string{"PG", "PG", "PG", "PG", "PG"}},
+	{"r2/shadow/eqAny", `WITH c AS (SELECT 1 AS id) SELECT * FROM (WITH c AS (SELECT 2 AS id) SELECT id FROM tb_p WHERE id = ANY (SELECT id FROM c)) d ORDER BY 1`, "2", [5]string{"PG", "PG", "PG", "PG", "PG"}},
+	{"r2/shadow/having", `WITH c AS (SELECT 1 AS id) SELECT * FROM (WITH c AS (SELECT 2 AS id) SELECT id, count(*) AS n FROM tb_p GROUP BY id HAVING id = (SELECT max(id) FROM c)) d ORDER BY 1`, "2,1", [5]string{"PG", "PG", "PG", "PG", "PG"}},
+	{"r2/shadow/orderBy", `WITH c AS (SELECT 1 AS id) SELECT * FROM (WITH c AS (SELECT 2 AS id) SELECT id FROM tb_p ORDER BY abs(id - (SELECT max(id) FROM c)), id LIMIT 1) d`, "2", [5]string{"PG", "PG", "PG", "PG", "PG"}},
+	{"r2/shadow/aggArg", `WITH c AS (SELECT 1 AS id) SELECT * FROM (WITH c AS (SELECT 2 AS id) SELECT sum((SELECT max(id) FROM c)) AS s FROM tb_p) d`, "6", [5]string{"PG", "PG", "PG", "PG", "PG"}},
+	{"r2/shadow/caseArm", `WITH c AS (SELECT 1 AS id) SELECT * FROM (WITH c AS (SELECT 2 AS id) SELECT id, CASE WHEN id = (SELECT max(id) FROM c) THEN 'hit' ELSE 'miss' END AS h FROM tb_p) d ORDER BY 1`, "1,miss; 2,hit; 3,miss", [5]string{"PG", "PG", "PG", "PG", "PG"}},
+	{"r2/shadow/correlatedInShadowed", `WITH c AS (SELECT 1 AS id) SELECT * FROM (WITH c AS (SELECT 2 AS id) SELECT t.id, (SELECT count(*) FROM c WHERE c.id <= t.id) AS n FROM tb_p t) d ORDER BY 1`, "1,0; 2,1; 3,1", [5]string{"PG", "PG", "PG", "PG", "PG"}},
+	{"r2/shadow/rootBesideDerived", `WITH c AS (SELECT 1 AS id) SELECT id, (SELECT max(id) FROM c) AS o FROM (WITH c AS (SELECT 2 AS id) SELECT id FROM c) d`, "2,1", [5]string{"PG", "PG", "PG", "PG", "PG"}},
+	{"r2/perRun/cteThroughDerived", `WITH s AS (SELECT random() r) SELECT count(DISTINCT (SELECT r + t.id*0 FROM (SELECT r FROM s) d)) FROM tb_big t WHERE t.id <= 50`, "1", [5]string{"PG", "PG", "PG", "PG", "PG"}},
+	{"r2/perRun/withInsideDerived", `SELECT count(DISTINCT (SELECT max(r) + t.id*0 FROM (WITH q AS (SELECT random() AS r) SELECT r FROM q) d)) FROM tb_big t WHERE t.id <= 50`, "1", [5]string{"KEEP 50", "KEEP 50", "KEEP 50", "KEEP 50", "KEEP 50"}},
+	{"r2/lifted/notExists", `WITH d AS (SELECT 1 AS k) SELECT t.id FROM tb_p t WHERE NOT EXISTS (WITH d AS (SELECT 2 AS k) SELECT 1 FROM d WHERE d.k = t.id) ORDER BY 1`, "1; 3", [5]string{"PG", "PG", "PG", "PG", "PG"}},
+	{"r2/lifted/countOwnItem", `WITH d AS (SELECT id AS k FROM tb_d) SELECT t.id, (WITH d AS (SELECT id AS k FROM tb_p) SELECT count(*) FROM d WHERE d.k < t.id) AS m FROM tb_p t ORDER BY 1`, "1,0; 2,1; 3,2", [5]string{"PG", "PG", "PG", "PG", "PG"}},
+	{"r2/lifted/ownPlusOuter", `WITH d AS (SELECT 1 AS k) SELECT t.id, (WITH d AS (SELECT 2 AS k) SELECT max(k) FROM d WHERE k > t.id) + (SELECT max(k) FROM d WHERE k >= t.id) AS m FROM tb_p t ORDER BY 1`, "1,3; 2,NULL; 3,NULL", [5]string{"PG", "PG", "PG", "PG", "PG"}},
+	{"r2/lifted/text", `WITH d AS (SELECT 1 AS k) SELECT t.id, (WITH d AS (SELECT 'x' AS k) SELECT max(k) || t.id::text FROM d) AS m FROM tb_p t ORDER BY 1`, "1,x1; 2,x2; 3,x3", [5]string{"PG", "PG", "PG", "PG", "PG"}},
 }
