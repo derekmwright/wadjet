@@ -2101,6 +2101,14 @@ type groupCheck struct {
 	// same answer at every FROM arity, the join included.
 	unqualify bool
 	boundKeys map[string]bool
+	// windowTerm is set while a window's own terms are judged. In an
+	// UNBOUND block a window term is licensed by the key it spells with
+	// its qualifiers erased, at any FROM arity, because that is the term
+	// the over-aggregate substitution replaces with the key's published
+	// column (plansql.ReplaceGroupKeyRefs' unbound fallback): over a join
+	// `sum(t.i + 1) OVER ()` above `GROUP BY i + 1` reads the key there.
+	// The check licenses exactly what the plan computes from the key.
+	windowTerm bool
 }
 
 // identKey renders a resolved (source, column) identity. Both halves are
@@ -2306,7 +2314,7 @@ func (g *groupCheck) check(node plansql.Node) error {
 	// does not exist and every group's key came back NULL. A loud 42803 is the
 	// right disposition for a shape this engine cannot compute, and turning it
 	// into a plausible NULL would be the regression protocol method 8 names.
-	if g.unqualify && !plansql.HoldsBinding(node) {
+	if (g.unqualify || g.windowTerm) && !plansql.HoldsBinding(node) {
 		if k := plansql.ExprIdentityUnqualified(node); k != "" && g.keys[k] {
 			return nil
 		}
@@ -2397,8 +2405,10 @@ func (g *groupCheck) check(node plansql.Node) error {
 				terms = append(terms, n.Frame.End.Offset)
 			}
 		}
+		window := *g
+		window.windowTerm = true
 		for _, term := range terms {
-			if err := g.check(term); err != nil {
+			if err := window.check(term); err != nil {
 				return err
 			}
 		}
