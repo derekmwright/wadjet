@@ -70,6 +70,16 @@ func validateColumns(ctx context.Context, src tableColumnSource, info *plansql.S
 // consumers that read the stamp; every other door validates exactly as before.
 func bindColumns(ctx context.Context, src tableColumnSource, info *plansql.SelectInfo, stamp bool) error {
 	b := &binder{ctx: ctx, src: src, ctes: map[string]cteEntry{}, stamp: stamp}
+	// A block validated ON ITS OWN — a subquery's body a planner builds, a
+	// producer stage's — sits inside a WITH chain the statement's validation
+	// already bound (ADR-0047 stage 3). Its items are in scope here as
+	// relations whose columns this pass does not re-derive (an open entry):
+	// re-validating every enclosing body per run is the per-row cost the
+	// statement's one binding exists to avoid, and the bodies were checked —
+	// under the same policy — where they are written.
+	for _, c := range info.EnclosingCTEs() {
+		b.ctes[strings.ToLower(c.Name)] = cteEntry{open: true, ident: c.Identity()}
+	}
 	return b.validateBlock(ctx, info, nil)
 }
 
