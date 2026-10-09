@@ -62,7 +62,22 @@ func cwtWireCells() [][2]string {
 		{"ctl/outputAlias", "SELECT i AS k, sum(i) OVER (PARTITION BY k) FROM rv_a a GROUP BY i ORDER BY i"},
 		{"ctl/aggExprArgNested", "SELECT g, sum(max(b) * 2) OVER () + 0 AS w FROM wd_t GROUP BY g ORDER BY g"},
 		{"ctl/lagAggExprNested", "SELECT g, lag(max(b) * 2, 1, 0) OVER (ORDER BY g) + 0 AS w FROM wd_t GROUP BY g ORDER BY g"},
+		{"qualify/mixedAlias", "SELECT g, max(b) + row_number() OVER (ORDER BY g) AS w FROM wd_t GROUP BY g QUALIFY w > 50 ORDER BY g"},
+		{"qualify/aggPlusWin", "SELECT g FROM wd_t GROUP BY g QUALIFY max(b) + row_number() OVER (ORDER BY g) > 50 ORDER BY g"},
+		{"qualify/lagUngrouped", "SELECT g FROM wd_t GROUP BY g QUALIFY lag(b) OVER (ORDER BY g) IS NULL ORDER BY g"},
+		{"qualify/partUngrouped", "SELECT g FROM wd_t GROUP BY g QUALIFY count(*) OVER (PARTITION BY b) = 1 ORDER BY g"},
+		{"qualify/rankUngrouped", "SELECT g FROM wd_t GROUP BY g QUALIFY rank() OVER (ORDER BY b) = 1 ORDER BY g"},
 	}
+}
+
+// cwtWireOracle is the statement PostgreSQL answers in a QUALIFY cell's place
+// (PostgreSQL has no QUALIFY): the same filter over a derived table.
+var cwtWireOracle = map[string]string{
+	"qualify/mixedAlias":    "SELECT g, w FROM (SELECT g, max(b) + row_number() OVER (ORDER BY g) AS w FROM wd_t GROUP BY g) s WHERE w > 50 ORDER BY g",
+	"qualify/aggPlusWin":    "SELECT g FROM (SELECT g, max(b) + row_number() OVER (ORDER BY g) AS q FROM wd_t GROUP BY g) s WHERE q > 50 ORDER BY g",
+	"qualify/lagUngrouped":  "SELECT g FROM (SELECT g, lag(b) OVER (ORDER BY g) AS q FROM wd_t GROUP BY g) s WHERE q IS NULL ORDER BY g",
+	"qualify/partUngrouped": "SELECT g FROM (SELECT g, count(*) OVER (PARTITION BY b) AS q FROM wd_t GROUP BY g) s WHERE q = 1 ORDER BY g",
+	"qualify/rankUngrouped": "SELECT g FROM (SELECT g, rank() OVER (ORDER BY b) AS q FROM wd_t GROUP BY g) s WHERE q = 1 ORDER BY g",
 }
 
 var cwtWireColumnRe = regexp.MustCompile(`column "([^"]+)"`)
@@ -150,7 +165,11 @@ func cwtWireMeasure(t *testing.T, ctx context.Context, dsn string) {
 			t.Fatal(err)
 		}
 		for _, c := range cwtWireCells() {
-			fmt.Fprintf(&b, "%s\t%s\t%s\t%s\n", c[0], mode, c[1], cwtWireCell(ctx, conn, c[1], mode == "b"))
+			q := c[1]
+			if o, ok := cwtWireOracle[c[0]]; ok {
+				q = o
+			}
+			fmt.Fprintf(&b, "%s\t%s\t%s\t%s\n", c[0], mode, c[1], cwtWireCell(ctx, conn, q, mode == "b"))
 		}
 		conn.Close(ctx)
 	}

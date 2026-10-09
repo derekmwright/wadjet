@@ -21,6 +21,11 @@ ctl/aggPartition	s	SELECT i, row_number() OVER (PARTITION BY max(f) ORDER BY i) 
 ctl/outputAlias	s	SELECT i AS k, sum(i) OVER (PARTITION BY k) FROM rv_a a GROUP BY i ORDER BY i	ERR 42703 k
 ctl/aggExprArgNested	s	SELECT g, sum(max(b) * 2) OVER () + 0 AS w FROM wd_t GROUP BY g ORDER BY g	{23,1700} rows=3 1,260 | 2,260 | 3,260
 ctl/lagAggExprNested	s	SELECT g, lag(max(b) * 2, 1, 0) OVER (ORDER BY g) + 0 AS w FROM wd_t GROUP BY g ORDER BY g	{23,20} rows=3 1,0 | 2,40 | 3,100
+qualify/mixedAlias	s	SELECT g, max(b) + row_number() OVER (ORDER BY g) AS w FROM wd_t GROUP BY g QUALIFY w > 50 ORDER BY g	{23,20} rows=2 2,52 | 3,63
+qualify/aggPlusWin	s	SELECT g FROM wd_t GROUP BY g QUALIFY max(b) + row_number() OVER (ORDER BY g) > 50 ORDER BY g	{23} rows=2 2 | 3
+qualify/lagUngrouped	s	SELECT g FROM wd_t GROUP BY g QUALIFY lag(b) OVER (ORDER BY g) IS NULL ORDER BY g	ERR 42803 b
+qualify/partUngrouped	s	SELECT g FROM wd_t GROUP BY g QUALIFY count(*) OVER (PARTITION BY b) = 1 ORDER BY g	ERR 42803 b
+qualify/rankUngrouped	s	SELECT g FROM wd_t GROUP BY g QUALIFY rank() OVER (ORDER BY b) = 1 ORDER BY g	ERR 42803 b
 1646/mixed	e	SELECT g, MAX(b) * 2 + ROW_NUMBER() OVER (ORDER BY g) AS w FROM wd_t GROUP BY g ORDER BY g	{23,20} rows=3 1,41 | 2,102 | 3,123
 1646/windowFirst	e	SELECT g, ROW_NUMBER() OVER (ORDER BY g) + COUNT(*) AS w FROM wd_t GROUP BY g ORDER BY g	{23,20} rows=3 1,3 | 2,3 | 3,4
 1646/coalesceRank	e	SELECT g, COALESCE(MAX(b), 0) + RANK() OVER (ORDER BY g) AS w FROM wd_t GROUP BY g ORDER BY g	{23,20} rows=3 1,21 | 2,52 | 3,63
@@ -43,6 +48,11 @@ ctl/aggPartition	e	SELECT i, row_number() OVER (PARTITION BY max(f) ORDER BY i) 
 ctl/outputAlias	e	SELECT i AS k, sum(i) OVER (PARTITION BY k) FROM rv_a a GROUP BY i ORDER BY i	ERR 42703 k
 ctl/aggExprArgNested	e	SELECT g, sum(max(b) * 2) OVER () + 0 AS w FROM wd_t GROUP BY g ORDER BY g	{23,1700} rows=3 1,260 | 2,260 | 3,260
 ctl/lagAggExprNested	e	SELECT g, lag(max(b) * 2, 1, 0) OVER (ORDER BY g) + 0 AS w FROM wd_t GROUP BY g ORDER BY g	{23,20} rows=3 1,0 | 2,40 | 3,100
+qualify/mixedAlias	e	SELECT g, max(b) + row_number() OVER (ORDER BY g) AS w FROM wd_t GROUP BY g QUALIFY w > 50 ORDER BY g	{23,20} rows=2 2,52 | 3,63
+qualify/aggPlusWin	e	SELECT g FROM wd_t GROUP BY g QUALIFY max(b) + row_number() OVER (ORDER BY g) > 50 ORDER BY g	{23} rows=2 2 | 3
+qualify/lagUngrouped	e	SELECT g FROM wd_t GROUP BY g QUALIFY lag(b) OVER (ORDER BY g) IS NULL ORDER BY g	ERR 42803 b
+qualify/partUngrouped	e	SELECT g FROM wd_t GROUP BY g QUALIFY count(*) OVER (PARTITION BY b) = 1 ORDER BY g	ERR 42803 b
+qualify/rankUngrouped	e	SELECT g FROM wd_t GROUP BY g QUALIFY rank() OVER (ORDER BY b) = 1 ORDER BY g	ERR 42803 b
 1646/mixed	b	SELECT g, MAX(b) * 2 + ROW_NUMBER() OVER (ORDER BY g) AS w FROM wd_t GROUP BY g ORDER BY g	{23,20} rows=3 00000001,0000000000000029 | 00000002,0000000000000066 | 00000003,000000000000007b
 1646/windowFirst	b	SELECT g, ROW_NUMBER() OVER (ORDER BY g) + COUNT(*) AS w FROM wd_t GROUP BY g ORDER BY g	{23,20} rows=3 00000001,0000000000000003 | 00000002,0000000000000003 | 00000003,0000000000000004
 1646/coalesceRank	b	SELECT g, COALESCE(MAX(b), 0) + RANK() OVER (ORDER BY g) AS w FROM wd_t GROUP BY g ORDER BY g	{23,20} rows=3 00000001,0000000000000015 | 00000002,0000000000000034 | 00000003,000000000000003f
@@ -65,3 +75,8 @@ ctl/aggPartition	b	SELECT i, row_number() OVER (PARTITION BY max(f) ORDER BY i) 
 ctl/outputAlias	b	SELECT i AS k, sum(i) OVER (PARTITION BY k) FROM rv_a a GROUP BY i ORDER BY i	ERR 42703 k
 ctl/aggExprArgNested	b	SELECT g, sum(max(b) * 2) OVER () + 0 AS w FROM wd_t GROUP BY g ORDER BY g	{23,1700} rows=3 00000001,00010000000000000104 | 00000002,00010000000000000104 | 00000003,00010000000000000104
 ctl/lagAggExprNested	b	SELECT g, lag(max(b) * 2, 1, 0) OVER (ORDER BY g) + 0 AS w FROM wd_t GROUP BY g ORDER BY g	{23,20} rows=3 00000001,0000000000000000 | 00000002,0000000000000028 | 00000003,0000000000000064
+qualify/mixedAlias	b	SELECT g, max(b) + row_number() OVER (ORDER BY g) AS w FROM wd_t GROUP BY g QUALIFY w > 50 ORDER BY g	{23,20} rows=2 00000002,0000000000000034 | 00000003,000000000000003f
+qualify/aggPlusWin	b	SELECT g FROM wd_t GROUP BY g QUALIFY max(b) + row_number() OVER (ORDER BY g) > 50 ORDER BY g	{23} rows=2 00000002 | 00000003
+qualify/lagUngrouped	b	SELECT g FROM wd_t GROUP BY g QUALIFY lag(b) OVER (ORDER BY g) IS NULL ORDER BY g	ERR 42803 b
+qualify/partUngrouped	b	SELECT g FROM wd_t GROUP BY g QUALIFY count(*) OVER (PARTITION BY b) = 1 ORDER BY g	ERR 42803 b
+qualify/rankUngrouped	b	SELECT g FROM wd_t GROUP BY g QUALIFY rank() OVER (ORDER BY b) = 1 ORDER BY g	ERR 42803 b

@@ -42,6 +42,7 @@ func TestArcCWWindowTermsNeverPublishAPolicedValue(t *testing.T) {
 		{"mixedMasked", `SELECT max(ssn) || CAST(row_number() OVER () AS VARCHAR) AS k FROM e7emp e`, "k", true},
 		{"mixedMaskedGrouped", `SELECT dept, max(e.ssn) || CAST(rank() OVER (ORDER BY dept) AS VARCHAR) AS k FROM e7emp e GROUP BY dept`, "k", true},
 		{"mixedMaskedNumeric", `SELECT dept, max(acct) + row_number() OVER (ORDER BY dept) AS k FROM e7emp e GROUP BY dept`, "", true},
+		{"qualifyMixedMasked", `SELECT dept, max(acct) + row_number() OVER (ORDER BY dept) AS k FROM e7emp e GROUP BY dept QUALIFY k > 0`, "", true},
 		{"windowOverMaskedAgg", `SELECT dept, max(max(ssn)) OVER () AS k FROM e7emp e GROUP BY dept`, "k", true},
 		{"windowKeyMaskedAgg", `SELECT dept, max(ssn) AS k, rank() OVER (ORDER BY max(ssn), dept) AS r FROM e7emp e GROUP BY dept`, "k", true},
 		{"mixedRowFiltered", `SELECT b.id, max(b.bal) + row_number() OVER (ORDER BY b.id) AS k FROM e7bal b GROUP BY b.id`, "", true},
@@ -84,6 +85,14 @@ func TestArcCWWindowTermsNeverPublishAPolicedValue(t *testing.T) {
 							t.Errorf("%s / %s: %s=%s is a policed value reaching the client\n  %s",
 								cell.name, door.name, c, v, cell.sql)
 						}
+					}
+				}
+				// acct masks to 0, so max(acct) + row_number() is the row
+				// number alone: anything else is a value the mask did not
+				// produce (a raw acct is in the 900000s).
+				if cell.name == "mixedMaskedNumeric" || cell.name == "qualifyMixedMasked" {
+					if v := row["k"]; v != "1" && v != "2" && v != "3" {
+						t.Errorf("%s / %s: k=%q is not the mask's 0 plus the row number\n  %s", cell.name, door.name, v, cell.sql)
 					}
 				}
 				if cell.maskCol != "" && !strings.Contains(row[cell.maskCol], pmMaskSSN) {

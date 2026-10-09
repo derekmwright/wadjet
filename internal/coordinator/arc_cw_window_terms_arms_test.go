@@ -76,6 +76,11 @@ INSERT INTO wd_t VALUES (1,1,20),(2,2,50),(3,3,60),(4,1,10);`
 
 type cwCell struct{ name, sql string }
 
+// cwOracle is the statement PostgreSQL answers in a cell's place where the
+// cell's own spelling has no PostgreSQL form (QUALIFY): the same filter over
+// a derived table. Filled by cwCells.
+var cwOracle = map[string]string{}
+
 // cwRefs are the reference classes over `wd_t w GROUP BY g`.
 var cwRefs = []struct{ name, x string }{
 	{"key", "g"}, {"keyQual", "w.g"}, {"keyExpr", "g + 1"},
@@ -153,6 +158,44 @@ func cwCells() []cwCell {
 		{"aggInsideWindow", "sum(MAX(b) * 2) OVER (ORDER BY g)"},
 	} {
 		out = append(out, cwCell{"mixed/" + m.name, "SELECT g, " + m.item + " AS w FROM wd_t GROUP BY g ORDER BY g"})
+	}
+	// QUALIFY (round 2): a window term in the clause is judged like one in
+	// the list, and a term mixing an aggregate and a window is computed.
+	// PostgreSQL has no QUALIFY, so each cell's oracle is the same filter
+	// over a derived table (cwOracle), measured on PostgreSQL.
+	for _, tp := range []struct{ name, win, cond string }{
+		{"rank", "rank() OVER (ORDER BY X)", "<= 2"},
+		{"lag", "lag(X) OVER (ORDER BY g)", "IS NULL"},
+		{"countPart", "count(*) OVER (PARTITION BY X)", "= 1"},
+		{"sumOrd", "sum(X) OVER (ORDER BY g)", "> 25"},
+	} {
+		for _, r := range cwRefs {
+			win := strings.ReplaceAll(tp.win, "X", r.x)
+			name := "qualify/" + tp.name + "/" + r.name
+			out = append(out, cwCell{name, "SELECT g AS k FROM wd_t w GROUP BY g QUALIFY " + win + " " + tp.cond + " ORDER BY g"})
+			cwOracle[name] = "SELECT k FROM (SELECT g AS k, " + win + " AS q FROM wd_t w GROUP BY g) s WHERE q " + tp.cond + " ORDER BY k"
+		}
+	}
+	for _, m := range []struct{ name, sql, oracle string }{
+		{"mixedAlias", "SELECT g, max(b) + row_number() OVER (ORDER BY g) AS w FROM wd_t GROUP BY g QUALIFY w > 50 ORDER BY g",
+			"SELECT g, w FROM (SELECT g, max(b) + row_number() OVER (ORDER BY g) AS w FROM wd_t GROUP BY g) s WHERE w > 50 ORDER BY g"},
+		{"winPlusAgg", "SELECT g FROM wd_t GROUP BY g QUALIFY row_number() OVER (ORDER BY g) + max(b) > 50 ORDER BY g",
+			"SELECT g FROM (SELECT g, row_number() OVER (ORDER BY g) + max(b) AS q FROM wd_t GROUP BY g) s WHERE q > 50 ORDER BY g"},
+		{"aggPlusWin", "SELECT g FROM wd_t GROUP BY g QUALIFY max(b) + row_number() OVER (ORDER BY g) > 50 ORDER BY g",
+			"SELECT g FROM (SELECT g, max(b) + row_number() OVER (ORDER BY g) AS q FROM wd_t GROUP BY g) s WHERE q > 50 ORDER BY g"},
+		{"aggSelectedAndQualified", "SELECT g, max(b) AS m FROM wd_t GROUP BY g QUALIFY max(b) + row_number() OVER (ORDER BY g) > 50 ORDER BY g",
+			"SELECT g, m FROM (SELECT g, max(b) AS m, max(b) + row_number() OVER (ORDER BY g) AS q FROM wd_t GROUP BY g) s WHERE q > 50 ORDER BY g"},
+		{"aggExprAlias", "SELECT g, max(b) * 2 AS m FROM wd_t GROUP BY g QUALIFY m > 50 AND row_number() OVER (ORDER BY g) > 0 ORDER BY g",
+			"SELECT g, m FROM (SELECT g, max(b) * 2 AS m, row_number() OVER (ORDER BY g) AS q FROM wd_t GROUP BY g) s WHERE m > 50 AND q > 0 ORDER BY g"},
+		{"winOverAgg", "SELECT g FROM wd_t GROUP BY g QUALIFY sum(max(b)) OVER (ORDER BY g) > 50 ORDER BY g",
+			"SELECT g FROM (SELECT g, sum(max(b)) OVER (ORDER BY g) AS q FROM wd_t GROUP BY g) s WHERE q > 50 ORDER BY g"},
+		{"mixedUngrouped", "SELECT g FROM wd_t GROUP BY g QUALIFY b + row_number() OVER (ORDER BY g) > 50 ORDER BY g",
+			"SELECT g FROM (SELECT g, b + row_number() OVER (ORDER BY g) AS q FROM wd_t GROUP BY g) s WHERE q > 50 ORDER BY g"},
+		{"ungroupedNoGroup", "SELECT id, b FROM wd_t QUALIFY b + row_number() OVER (ORDER BY id) > 50 ORDER BY id",
+			"SELECT id, b FROM (SELECT id, b, b + row_number() OVER (ORDER BY id) AS q FROM wd_t) s WHERE q > 50 ORDER BY id"},
+	} {
+		out = append(out, cwCell{"qualifyMixed/" + m.name, m.sql})
+		cwOracle["qualifyMixed/"+m.name] = m.oracle
 	}
 	// The two issues' statements and the brief's rows, verbatim.
 	out = append(out,
@@ -305,7 +348,11 @@ func TestArcCWMeasure(t *testing.T) {
 	var b strings.Builder
 	b.WriteString("# PostgreSQL 17.11 answers for arc_cw_window_terms_arms_test.go (TestArcCWMeasure).\n")
 	for _, c := range cwCells() {
-		r := conn.ExecParams(ctx, c.sql, nil, nil, nil, nil).Read()
+		q := c.sql
+		if o, ok := cwOracle[c.name]; ok {
+			q = o
+		}
+		r := conn.ExecParams(ctx, q, nil, nil, nil, nil).Read()
 		var ans string
 		if r.Err != nil {
 			pe, ok := r.Err.(*pgconn.PgError)

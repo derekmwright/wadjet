@@ -268,6 +268,50 @@ mixed/keyPlusAggPlusWindow	g:integer,w:bigint | 1,22; 2,54; 3,66
 mixed/caseOverBoth	g:integer,w:bigint | 1,0; 2,2; 3,3
 mixed/ungroupedBeside	ERR 42803 b
 mixed/aggInsideWindow	g:integer,w:numeric | 1,40; 2,140; 3,260
+qualify/rank/key	k:integer | 1; 2
+qualify/rank/keyQual	k:integer | 1; 2
+qualify/rank/keyExpr	k:integer | 1; 2
+qualify/rank/agg	k:integer | 1; 2
+qualify/rank/aggExpr	k:integer | 1; 2
+qualify/rank/ungrouped	ERR 42803 b
+qualify/rank/ungroupedQual	ERR 42803 b
+qualify/rank/ungroupedExpr	ERR 42803 b
+qualify/rank/outputAlias	ERR 42703 k
+qualify/lag/key	k:integer | 1
+qualify/lag/keyQual	k:integer | 1
+qualify/lag/keyExpr	k:integer | 1
+qualify/lag/agg	k:integer | 1
+qualify/lag/aggExpr	k:integer | 1
+qualify/lag/ungrouped	ERR 42803 b
+qualify/lag/ungroupedQual	ERR 42803 b
+qualify/lag/ungroupedExpr	ERR 42803 b
+qualify/lag/outputAlias	ERR 42703 k
+qualify/countPart/key	k:integer | 1; 2; 3
+qualify/countPart/keyQual	k:integer | 1; 2; 3
+qualify/countPart/keyExpr	k:integer | 1; 2; 3
+qualify/countPart/agg	k:integer | 1; 2; 3
+qualify/countPart/aggExpr	k:integer | 1; 2; 3
+qualify/countPart/ungrouped	ERR 42803 b
+qualify/countPart/ungroupedQual	ERR 42803 b
+qualify/countPart/ungroupedExpr	ERR 42803 b
+qualify/countPart/outputAlias	ERR 42703 k
+qualify/sumOrd/key	(0 rows)
+qualify/sumOrd/keyQual	(0 rows)
+qualify/sumOrd/keyExpr	(0 rows)
+qualify/sumOrd/agg	k:integer | 2; 3
+qualify/sumOrd/aggExpr	k:integer | 1; 2; 3
+qualify/sumOrd/ungrouped	ERR 42803 b
+qualify/sumOrd/ungroupedQual	ERR 42803 b
+qualify/sumOrd/ungroupedExpr	ERR 42803 b
+qualify/sumOrd/outputAlias	ERR 42703 k
+qualifyMixed/mixedAlias	g:integer,w:bigint | 2,52; 3,63
+qualifyMixed/winPlusAgg	g:integer | 2; 3
+qualifyMixed/aggPlusWin	g:integer | 2; 3
+qualifyMixed/aggSelectedAndQualified	g:integer,m:bigint | 2,50; 3,60
+qualifyMixed/aggExprAlias	g:integer,m:bigint | 2,100; 3,120
+qualifyMixed/winOverAgg	g:integer | 2; 3
+qualifyMixed/mixedUngrouped	ERR 42803 b
+qualifyMixed/ungroupedNoGroup	id:integer,b:bigint | 2,50; 3,60
 issue/1651/arg	ERR 42803 f
 issue/1651/argQual	ERR 42803 f
 issue/1651/partition	ERR 42803 f
