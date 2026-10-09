@@ -544,38 +544,14 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 	if windowed {
 		var winExprs []WindowExpr
 		for i, col := range info.Columns {
-			if !col.IsWindow || col.WindowSpec == nil {
+			wfn := windowItemNode(col)
+			if wfn == nil {
 				continue
-			}
-			ws := *col.WindowSpec
-			var orderBy []OrderExpr
-			for _, ob := range ws.OrderBy {
-				orderBy = append(orderBy, OrderExpr{
-					Column:     cleanExpr(ob.Column),
-					Desc:       ob.Desc,
-					NullsFirst: ob.NullsFirst,
-				})
-			}
-			partBy := make([]string, len(ws.PartitionBy))
-			for j, p := range ws.PartitionBy {
-				partBy[j] = cleanExpr(p)
 			}
 			syntheticName := plansql.SlotName(plansql.SlotWindowOutput, winCounter)
 			winCounter++
 			bareWinOutput[i] = syntheticName
-			we := WindowExpr{
-				Func:        ws.FuncName,
-				InputCol:    cleanExpr(ws.Args),
-				OutputCol:   syntheticName,
-				PartitionBy: partBy,
-				OrderBy:     orderBy,
-				InputExpr:   windowArgNode(col.ASTExpr),
-			}
-			setWindowTermExprs(&we, col.ASTExpr)
-			if ws.Frame != nil {
-				we.Frame = convertFrame(ws.Frame)
-			}
-			winExprs = append(winExprs, we)
+			winExprs = append(winExprs, windowExprFromNode(wfn, syntheticName))
 		}
 		winExprs = append(winExprs, nestedWinExprs...)
 		winExprs = append(winExprs, qual.windows...)
@@ -1028,48 +1004,34 @@ func rewriteExpr(node plansql.Node, cols []plansql.SelectColumn) plansql.Node {
 	}
 }
 
-// windowExprFromNode builds a logical WindowExpr directly from a parsed
-// WindowFuncNode, for a window function extracted out of a larger expression
-// (#610). It mirrors the WindowSpec→WindowExpr conversion the bare top-level
-// path performs above, reading the func name, argument list, PARTITION BY /
-// ORDER BY keys and frame straight off the AST node.
-// windowSpecTerms returns the parsed terms a SELECT-list item's WINDOWS will
+// windowItemNode is the WindowFuncNode a SELECT item that IS a window call
+// carries, or nil. The node is the window's one carrier: its terms are bound
+// by the binder and edited by every rewrite, and plansql.WindowSpec holds no
+// copy of them (ADR-0047 §Binding and window terms).
+func windowItemNode(col plansql.SelectColumn) *plansql.WindowFuncNode {
+	if !col.IsWindow || col.WindowSpec == nil {
+		return nil
+	}
+	wfn, _ := col.ASTExpr.(*plansql.WindowFuncNode)
+	if wfn == nil || wfn.Func == nil {
+		return nil
+	}
+	return wfn
+}
+
+// windowSpecTerms returns the terms a SELECT-list item's WINDOWS will
 // EVALUATE — the function's arguments, the PARTITION BY keys and the ORDER BY
-// keys — for both spellings: a BARE window column, whose spec the parser keeps
-// as text, and a window NESTED inside a larger expression, whose spec is
-// already an AST.
+// keys — as the item's own trees, with the bindings the binder recorded on
+// them. A bare window item IS its WindowFuncNode, so one walk serves it and a
+// window nested inside a larger expression alike.
 //
 // The window's own OUTPUT is deliberately not a term: it is what the operator
 // computes, not what it reads.
 func windowSpecTerms(col plansql.SelectColumn) []plansql.Node {
-	var out []plansql.Node
-	add := func(text string) {
-		text = strings.TrimSpace(text)
-		if text == "" || text == "*" {
-			return
-		}
-		if parsed, err := plansql.ParseExpression(text); err == nil && parsed != nil {
-			out = append(out, parsed)
-		}
-	}
-	if col.IsWindow && col.WindowSpec != nil {
-		// EVERY argument: Args is the whole list, and parsed as one
-		// expression it kept the first — an aggregate in LAG / LEAD's
-		// default (`LEAD(SUM(b), 1, SUM(d))`) was never computed (#1435).
-		for _, a := range (WindowExpr{InputCol: col.WindowSpec.Args}).Arguments() {
-			add(a)
-		}
-		for _, p := range col.WindowSpec.PartitionBy {
-			add(p)
-		}
-		for _, ob := range col.WindowSpec.OrderBy {
-			add(ob.Column)
-		}
-		return out
-	}
 	if col.ASTExpr == nil {
 		return nil
 	}
+	var out []plansql.Node
 	for _, wfn := range plansql.FindAllWindowFuncs(col.ASTExpr) {
 		if wfn.Func != nil {
 			out = append(out, wfn.Func.Args...)
@@ -1228,10 +1190,7 @@ func windowTermExpr(exprs []plansql.Node, i int) plansql.Node {
 }
 
 // windowArgNode returns the AST of a window function's FIRST argument, for
-// WindowExpr.InputExpr. It takes the SELECT item rather than the
-// WindowFuncNode so both construction sites — the bare SELECT-list window,
-// which holds a plansql.WindowSpec with no node on it, and the nested one,
-// which holds the node itself — can ask one function.
+// WindowExpr.InputExpr.
 //
 // nil for `COUNT(*)`, for a zero-argument rank function, and for anything that
 // is not a window node: a consumer must treat a missing node as "unknown", not
@@ -1244,6 +1203,10 @@ func windowArgNode(n plansql.Node) plansql.Node {
 	return wfn.Func.Args[0]
 }
 
+// windowExprFromNode builds a logical WindowExpr from a parsed WindowFuncNode
+// — a bare window item's own node and a window nested inside a larger
+// expression (#610) alike — reading the function's name, argument list,
+// PARTITION BY / ORDER BY keys and frame straight off the tree.
 func windowExprFromNode(wfn *plansql.WindowFuncNode, outputCol string) WindowExpr {
 	inputCol := ""
 	if wfn.Func.Star {
@@ -2912,8 +2875,9 @@ func lateralWindowsPerOuterRow(info *plansql.SelectInfo, correlatedParts []strin
 	var nodes []*plansql.WindowFuncNode
 	for i := range info.Columns {
 		c := &info.Columns[i]
-		if c.IsWindow && c.WindowSpec != nil {
+		if wfn := windowItemNode(*c); wfn != nil {
 			bare = append(bare, c)
+			nodes = append(nodes, wfn)
 			continue
 		}
 		if c.ASTExpr != nil {
@@ -2982,19 +2946,6 @@ func lateralWindowsPerOuterRow(info *plansql.SelectInfo, correlatedParts []strin
 			}
 		}
 		return false
-	}
-	for _, c := range bare {
-		ws := *c.WindowSpec
-		var lead []string
-		for _, k := range keys {
-			if !carries(ws.PartitionBy, k) {
-				lead = append(lead, k.String())
-			}
-		}
-		if len(lead) > 0 {
-			ws.PartitionBy = append(lead, ws.PartitionBy...)
-			c.WindowSpec = &ws
-		}
 	}
 	for _, w := range nodes {
 		have := make([]string, len(w.PartitionBy))

@@ -969,11 +969,20 @@ func TestParseWindowFunction(t *testing.T) {
 			if ws.FuncName != tt.winFunc {
 				t.Errorf("func: got %q, want %q", ws.FuncName, tt.winFunc)
 			}
-			if len(ws.PartitionBy) != tt.partBy {
-				t.Errorf("partition by: got %d, want %d", len(ws.PartitionBy), tt.partBy)
+			var wfn *WindowFuncNode
+			for _, c := range info.Columns {
+				if c.IsWindow {
+					wfn, _ = c.ASTExpr.(*WindowFuncNode)
+				}
 			}
-			if len(ws.OrderBy) != tt.orderBy {
-				t.Errorf("order by: got %d, want %d", len(ws.OrderBy), tt.orderBy)
+			if wfn == nil {
+				t.Fatal("the window item carries no WindowFuncNode")
+			}
+			if len(wfn.PartitionBy) != tt.partBy {
+				t.Errorf("partition by: got %d, want %d", len(wfn.PartitionBy), tt.partBy)
+			}
+			if len(wfn.OrderBy) != tt.orderBy {
+				t.Errorf("order by: got %d, want %d", len(wfn.OrderBy), tt.orderBy)
 			}
 		})
 	}

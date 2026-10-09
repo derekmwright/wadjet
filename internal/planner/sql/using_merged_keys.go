@@ -109,55 +109,36 @@ func bindMergedUsingKeys(info *SelectInfo) error {
 		info.OrderBy[i].Column = rewritten.String()
 	}
 
-	// WINDOW items live in TWO places that have to agree: the `WindowSpec`
-	// the planner reads, and the `WindowFuncNode` that spec is DERIVED from.
-	// Rewriting only the spec is thrown away — `unfoldFromlessScalars` rebuilds
-	// every window item's spec from its node one call later
-	// (fromless_scalar.go), which is how a RIGHT join's window key went back to
-	// the left arm and answered wrong VALUES on all five arms for a shape this
-	// pass claimed to bind (review round 2, B1-r2). Both are rewritten here,
-	// and parser.go runs this pass again after the rebuild.
+	// A WINDOW item's terms are its WindowFuncNode's (WindowSpec carries no
+	// copy of them), so the node is the one place this pass rewrites.
 	//
 	// A window's ARGUMENT carries the same bare reference — `SUM(id) OVER (…)`
 	// read the left arm's column and summed NULLs where PostgreSQL sums the
 	// merged key — and an argument is an EXPRESSION, so it takes the merged
 	// expression for a FULL join as readily as for a RIGHT one.
 	//
-	// A window KEY is not: its slot in `WindowSpec` holds a column NAME, so a
-	// RIGHT join's merged key (a plain qualified column) is written there and a
-	// FULL join's (a COALESCE) is REFUSED rather than silently bound to the
-	// left arm.
+	// A window KEY that IS the merged column is not: a RIGHT join's merged key
+	// (a plain qualified column) is written there and a FULL join's (a
+	// COALESCE) is REFUSED rather than silently bound to the left arm.
 	for i := range info.Columns {
-		ws := info.Columns[i].WindowSpec
-		if ws == nil {
+		if !info.Columns[i].IsWindow {
 			continue
-		}
-		if full {
-			for _, key := range ws.PartitionBy {
-				if name, ok := mergedWindowKey(key, merged); ok {
-					return refuseFullMergedWindowKey(name, "PARTITION BY", leftQual, rightQual)
-				}
-			}
-			for _, key := range ws.OrderBy {
-				if name, ok := mergedWindowKey(key.Column, merged); ok {
-					return refuseFullMergedWindowKey(name, "ORDER BY", leftQual, rightQual)
-				}
-			}
-		} else {
-			for j, key := range ws.PartitionBy {
-				if name, ok := mergedWindowKey(key, merged); ok {
-					ws.PartitionBy[j] = rightQual + "." + name
-				}
-			}
-			for j, key := range ws.OrderBy {
-				if name, ok := mergedWindowKey(key.Column, merged); ok {
-					ws.OrderBy[j].Column = rightQual + "." + name
-				}
-			}
 		}
 		wfn, ok := info.Columns[i].ASTExpr.(*WindowFuncNode)
 		if !ok {
 			continue
+		}
+		if full {
+			for _, key := range wfn.PartitionBy {
+				if name, ok := mergedWindowKey(key, merged); ok {
+					return refuseFullMergedWindowKey(name, "PARTITION BY", leftQual, rightQual)
+				}
+			}
+			for _, key := range wfn.OrderBy {
+				if name, ok := mergedWindowKey(key.Expr, merged); ok {
+					return refuseFullMergedWindowKey(name, "ORDER BY", leftQual, rightQual)
+				}
+			}
 		}
 		bind := func(n Node) Node {
 			if n == nil {
@@ -191,15 +172,19 @@ func bindMergedUsingKeys(info *SelectInfo) error {
 // mergedWindowKey reports whether a window key is a BARE reference to one of
 // the merged columns, and which one. A qualified key names a side and is left
 // alone; anything computed is not a bare reference.
-func mergedWindowKey(key string, merged map[string]bool) (string, bool) {
-	k := strings.ToLower(strings.TrimSpace(key))
-	if k == "" || strings.ContainsAny(k, ".( ") {
+func mergedWindowKey(key Node, merged map[string]bool) (string, bool) {
+	for {
+		p, ok := key.(*ParenNode)
+		if !ok {
+			break
+		}
+		key = p.Inner
+	}
+	cr, ok := key.(*ColRef)
+	if !ok || cr.Table != "" || !merged[strings.ToLower(cr.Column)] {
 		return "", false
 	}
-	if !merged[k] {
-		return "", false
-	}
-	return k, true
+	return strings.ToLower(cr.Column), true
 }
 
 // refuseFullMergedWindowKey is the one shape this pass cannot rewrite: a

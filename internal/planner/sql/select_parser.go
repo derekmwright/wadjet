@@ -4199,45 +4199,10 @@ func (p *selectParser) consumeTypeParams() string {
 	return buf.String()
 }
 
-// windowSpecFromNode converts a parsed WindowFuncNode into a WindowSpec
-// that the logical plan builder expects.
+// windowSpecFromNode records what a window item publishes beside its
+// WindowFuncNode: the function's name and the item's alias.
 func windowSpecFromNode(wfn *WindowFuncNode, alias string) *WindowSpec {
-	ws := &WindowSpec{
-		FuncName: wfn.Func.Name,
-		Alias:    alias,
-	}
-
-	// Build args string
-	if wfn.Func.Star {
-		ws.Args = "*"
-	} else if len(wfn.Func.Args) > 0 {
-		args := make([]string, len(wfn.Func.Args))
-		for i, a := range wfn.Func.Args {
-			args[i] = a.String()
-		}
-		ws.Args = strings.Join(args, ", ")
-	}
-
-	// Partition By
-	for _, pb := range wfn.PartitionBy {
-		ws.PartitionBy = append(ws.PartitionBy, pb.String())
-	}
-
-	// Order By
-	for _, ob := range wfn.OrderBy {
-		ws.OrderBy = append(ws.OrderBy, WindowOrderItem{
-			Column:     ob.Expr.String(),
-			Desc:       ob.Desc,
-			NullsFirst: ob.NullsFirst,
-		})
-	}
-
-	// Frame
-	if wfn.Frame != nil {
-		ws.Frame = wfn.Frame
-	}
-
-	return ws
+	return &WindowSpec{FuncName: wfn.Func.Name, Alias: alias, Frame: wfn.Frame}
 }
 
 // ParseExpression parses a single expression from a SQL string.
