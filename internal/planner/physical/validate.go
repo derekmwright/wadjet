@@ -1076,6 +1076,19 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 	if err := b.checkExpr(info.HavingExpr, withOut); err != nil {
 		return err
 	}
+	// A window call's own terms read the INPUT relation wherever the call
+	// sits: the SELECT list's output names are not visible inside OVER (…)
+	// in QUALIFY or in ORDER BY either, as on PostgreSQL (`… ORDER BY
+	// sum(g) OVER (ORDER BY c)` with `b AS c` is 42703 there). Asked before
+	// the clauses' own names, which do see the outputs.
+	if err := resolveWindowTermsInInput(info.QualifyExpr, resolve, mergedUsingNames(info)); err != nil {
+		return err
+	}
+	for _, ob := range info.OrderBy {
+		if err := resolveWindowTermsInInput(ob.Expr, resolve, mergedUsingNames(info)); err != nil {
+			return err
+		}
+	}
 	if err := b.checkExpr(info.QualifyExpr, withOut); err != nil {
 		return err
 	}
@@ -1458,6 +1471,30 @@ func resolveExprNamesExcept(expr plansql.Node, scope *colScope, skipBare map[str
 		}
 		if err := scope.resolveRef(r); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// resolveWindowTermsInInput resolves the terms of every window call in expr
+// — arguments, PARTITION BY, ORDER BY, frame offsets — against the block's
+// input scope, which holds no output alias. A bare name a `JOIN … USING`
+// merges is left to the window key's own binding, as for a window item
+// (resolveExprNamesExcept).
+func resolveWindowTermsInInput(expr plansql.Node, scope *colScope, merged map[string]bool) error {
+	for _, w := range plansql.FindAllWindowFuncs(expr) {
+		var terms []plansql.Node
+		if w.Func != nil {
+			terms = append(terms, w.Func.Args...)
+		}
+		terms = append(terms, w.PartitionBy...)
+		for _, ob := range w.OrderBy {
+			terms = append(terms, ob.Expr)
+		}
+		for _, t := range terms {
+			if err := resolveExprNamesExcept(t, scope, merged); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -2024,6 +2061,14 @@ func (b *binder) checkUngrouped(info *plansql.SelectInfo, from, resolve *colScop
 	// in its unfolded spelling while the unfolded key is deliberately not
 	// registered (P1).
 	if err := g.check(g.asWritten(info.HavingExpr, info.HavingUnfoldedFrom)); err != nil {
+		return err
+	}
+	// QUALIFY is evaluated over the same grouped rows, after the windows:
+	// its own terms see the SELECT list's output names as HAVING does
+	// (`QUALIFY w > 50`), and a window call in it is judged by the
+	// WindowFuncNode arm like one in the list, so `QUALIFY lag(b) OVER (…)
+	// IS NULL` above `GROUP BY g` is the 42803 the select list gives.
+	if err := g.check(info.QualifyExpr); err != nil {
 		return err
 	}
 	for _, ob := range info.OrderBy {
