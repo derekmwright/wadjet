@@ -103,6 +103,9 @@ func declaredIntWidth(node plansql.Node, decls ColDecls) intWidth {
 		// carrier it comes back in cannot say it: `(SELECT c & 3 FROM u)` is
 		// an int4-domain value in an int64 box, and SUM over it is bigint
 		// where SUM over an int8 one is numeric (#1018 measurement, P2).
+		if sd, ok := decls.subqueryNodeColumn(n); ok {
+			return declIntWidth(sd)
+		}
 		if decls.subqueryIntWidth == nil {
 			return intWidthUnknown
 		}

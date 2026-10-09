@@ -133,6 +133,9 @@ func pgCategoryOfNode(n plansql.Node, decls ColDecls) pgCategory {
 	case *plansql.FuncCallNode:
 		return funcPGCategory(x, decls)
 	case *plansql.SubqueryNode:
+		if sd, ok := decls.subqueryNodeColumn(x); ok && !x.Array {
+			return pgCategoryOfDecl(withPGCategory(expr.Decl(sd.Type), sd.PGCategory), expr.Decided)
+		}
 		if decls.subqueryDecl != nil && !x.Array {
 			if col, ok := decls.subqueryDecl(x.SQL); ok {
 				cat := pgCatUnknown

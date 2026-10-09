@@ -56,21 +56,20 @@ func planWithPlanner(t *testing.T, p *Planner, sql string) *PhysicalPlan {
 	return plan
 }
 
-// countingPlanner returns a planner whose subquery runner counts executions.
+// countingPlanner returns a planner that counts its subquery executions, at
+// the one seam every runner reaches (Planner.subqueryRuns): a subquery is run
+// by a runner scoped to its WITH chain (subqueryScopingIn), not by the
+// planner's own.
 // The count is the plan assertion this file cares about: an UNCORRELATED
 // scalar subquery runs exactly once for the whole query, a CORRELATED one runs
 // once per row. Asserting the count rather than the answer catches a
 // regression that merely makes the query slow again.
-func countingPlanner(t *testing.T, cat *catalog.Catalog) (*Planner, *int64) {
+func countingPlanner(t *testing.T, cat *catalog.Catalog) (*Planner, *atomic.Int64) {
 	t.Helper()
 	p := NewPlanner(cat)
-	var calls int64
-	inner := p.subqueryRunner
-	p.subqueryRunner = func(sql string) ([]map[string]any, error) {
-		atomic.AddInt64(&calls, 1)
-		return inner(sql)
-	}
-	return p, &calls
+	calls := &atomic.Int64{}
+	p.subqueryRuns = calls
+	return p, calls
 }
 
 // TestUncorrelatedSubqueryPlannedUncorrelated: an unqualified column inside a
@@ -100,7 +99,7 @@ func TestUncorrelatedSubqueryPlannedUncorrelated(t *testing.T) {
 			plan.Pipeline.Close()
 
 			// One execution for the whole query — not one per row.
-			if got := atomic.LoadInt64(calls); got > 1 {
+			if got := calls.Load(); got > 1 {
 				t.Errorf("subquery executed %d times: planned as correlated, "+
 					"but every column in it resolves in its own FROM", got)
 			}
@@ -125,7 +124,7 @@ func TestCorrelatedSubqueryStaysCorrelated(t *testing.T) {
 	}
 	plan.Pipeline.Close()
 
-	if got := atomic.LoadInt64(calls); got <= 1 {
+	if got := calls.Load(); got <= 1 {
 		t.Errorf("correlated subquery executed %d times, want one per row: the "+
 			"scoping fix over-corrected and dropped a real outer reference", got)
 	}

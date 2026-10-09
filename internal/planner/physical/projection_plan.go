@@ -194,10 +194,12 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 	// A CORRELATED one types its outer references as child's columns
 	// (subqueryOutputColumnIn, #1422).
 	childColTypes.subqueryDecl = p.subqueryOutputColumnIn(child)
+	childColTypes.subqueryNode = p.subqueryNodeDeclIn(child)
 	var aggInputColTypes ColDecls
 	if isOverAggregate && len(aggNode.Children) > 0 {
 		aggInputColTypes = inputColDecls(aggNode.Children[0])
 		aggInputColTypes.subqueryDecl = p.subqueryOutputColumnIn(aggNode.Children[0])
+		aggInputColTypes.subqueryNode = p.subqueryNodeDeclIn(aggNode.Children[0])
 
 	}
 

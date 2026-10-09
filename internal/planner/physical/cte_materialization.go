@@ -132,7 +132,7 @@ func (p *Planner) materializeCTEColumnar(ctx context.Context, sql string,
 		// Empty result: no batch ever arrived, so derive column names from
 		// the SQL like the boxed path did — downstream projection still
 		// needs the names to resolve.
-		schema = p.inferCTESchema(sql)
+		schema = p.inferCTESchema(sql, body)
 	}
 	return coll, schema, nil
 }
@@ -239,14 +239,18 @@ func (s *cteMaterializingSink) Close() error { return s.coll.Close() }
 // non-recursive materialization whose body produced no batch. The types are
 // not known here and are declared text; a recursive CTE never comes this way —
 // its schema is its seed's (recursive_cte_iteration.go).
-func (p *Planner) inferCTESchema(sql string) []parquet.Column {
-	pq, err := plansql.Parse(sql)
-	if err != nil {
-		return nil
-	}
-	info, err := plansql.ExtractSelect(pq)
-	if err != nil {
-		return nil
+func (p *Planner) inferCTESchema(sql string, body *plansql.SelectInfo) []parquet.Column {
+	// The memoized body (CTEDef.BodySelect, ADR-0032) where the caller holds
+	// it; a parse of the text otherwise.
+	info := body
+	if info == nil {
+		pq, err := plansql.Parse(sql)
+		if err != nil {
+			return nil
+		}
+		if info, err = plansql.ExtractSelect(pq); err != nil {
+			return nil
+		}
 	}
 	// A SET OPERATION publishes its LEFT arm's names, which is PostgreSQL's
 	// rule and the one `plansql.BlockOutputColumns` already states. The union

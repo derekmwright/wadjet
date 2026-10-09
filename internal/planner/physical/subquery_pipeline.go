@@ -87,7 +87,7 @@ func (p *Planner) subqueryDeclOption() expr.CompileOption {
 		names = append(names, c.Name)
 	}
 	return expr.Options(env, expr.WithSubqueryScope(p.SubqueryInnerColumns()),
-		expr.WithEnclosingCTEs(names))
+		expr.WithEnclosingCTEs(names), expr.WithSubqueryScoping(p.subqueryScopingIn(nil)))
 }
 
 // subqueryDeclOptionFor is subqueryDeclOption for a compile site whose outer
@@ -95,7 +95,8 @@ func (p *Planner) subqueryDeclOption() expr.CompileOption {
 // declared with its outer references typed as scope's columns
 // (expr.OuterTypedSubquerySQL, #1422).
 func (p *Planner) subqueryDeclOptionFor(scope *logical.Node) expr.CompileOption {
-	return expr.Options(p.subqueryDeclOption(), expr.WithSubqueryDeclTypes(p.subqueryOutputColumnIn(scope)))
+	return expr.Options(p.subqueryDeclOption(), expr.WithSubqueryDeclTypes(p.subqueryOutputColumnIn(scope)),
+		expr.WithSubqueryScoping(p.subqueryScopingIn(scope)))
 }
 
 // subqueryOutputColumnIn is SubqueryOutputColumn for a subquery that sits over
@@ -194,12 +195,9 @@ func (p *Planner) SubqueryOutputArity(sql string) (n int, ok bool) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	pq, err := plansql.Parse(sql)
-	if err != nil {
-		return 0, false
-	}
-	info, err := plansql.ExtractSelect(pq)
-	if err != nil {
+	info, release, err := p.subqueryBodyFor(sql)
+	defer release()
+	if err != nil || info == nil {
 		return 0, false
 	}
 	var plan *logical.Node
@@ -348,12 +346,9 @@ func (p *Planner) subqueryLogicalPlan(sql string) *logical.Node {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	pq, err := plansql.Parse(sql)
-	if err != nil {
-		return nil
-	}
-	info, err := plansql.ExtractSelect(pq)
-	if err != nil {
+	info, release, err := p.subqueryBodyFor(sql)
+	defer release()
+	if err != nil || info == nil {
 		return nil
 	}
 	var plan *logical.Node
@@ -394,6 +389,11 @@ func (p *Planner) buildSubqueryPipelineScopedFor(ctx context.Context, info *plan
 }
 
 func (p *Planner) buildSubqueryPipeline(ctx context.Context, sql string) (exec.Source, []exec.UnaryOperator, exec.Sink, error) {
+	// The node's memoized body where sql is its text (subqueryBodyFor).
+	if body, release, ok := memoBodyFor(p.memoSub, sql); ok {
+		defer release()
+		return p.buildSubqueryPipelineFor(ctx, body)
+	}
 	// Parse using our SQL parser
 	pq, err := plansql.Parse(sql)
 	if err != nil {
@@ -536,6 +536,9 @@ func (p *Planner) buildSubqueryPipelineForPlan(ctx context.Context, info *plansq
 
 // executeSubquery parses and executes a SQL subquery, returning result rows.
 func (p *Planner) executeSubquery(ctx context.Context, sql string) ([]map[string]any, error) {
+	if p.subqueryRuns != nil {
+		p.subqueryRuns.Add(1)
+	}
 	rows, _, err := p.ExecuteSubquerySchema(ctx, sql)
 	return rows, err
 }

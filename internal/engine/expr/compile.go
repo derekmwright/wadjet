@@ -101,6 +101,62 @@ type compileContext struct {
 	// correlated subquery whose own WITH shadows one can be refused rather
 	// than re-run against the enclosing item (see refuseShadowingWith).
 	enclosingCTEs map[string]bool
+	// scoping answers, per expression subquery NODE, the plan-time answers
+	// and the runner for that subquery planned in the WITH chain in scope
+	// where it is written (forSubqueryNode, ADR-0047 stage 3). Nil: every
+	// subquery takes the compile's own.
+	scoping SubqueryScoping
+}
+
+// SubqueryHooks are one expression subquery's runner and plan-time answers,
+// planned in the WITH chain in scope where the subquery is written: each
+// replaces the compile's own for that subquery (a nil field keeps it).
+type SubqueryHooks struct {
+	Runner SubqueryRunner
+	Decl   SubqueryDeclFunc
+	Cols   SubqueryColumnsFunc
+	Scope  plansql.TableColumns
+}
+
+// SubqueryScoping answers the hooks for one SubqueryNode or ExistsNode, or
+// ok=false when the node carries no scope of its own.
+type SubqueryScoping func(node plansql.Node) (SubqueryHooks, bool)
+
+// WithSubqueryScoping supplies compileContext.scoping.
+func WithSubqueryScoping(f SubqueryScoping) CompileOption {
+	return func(c *compileContext) { c.scoping = f }
+}
+
+// forSubqueryNode is the compile context one expression subquery is compiled
+// with: the compile's own, with each answer the planner scoped to the node's
+// WITH chain in its place.
+func (c *compileContext) forSubqueryNode(n plansql.Node) *compileContext {
+	if c == nil || c.scoping == nil {
+		return c
+	}
+	h, ok := c.scoping(n)
+	if !ok {
+		return c
+	}
+	cp := *c
+	if cp.runner != nil && h.Runner != nil {
+		cp.runner = h.Runner
+	}
+	if cp.subqueryDecl != nil && h.Decl != nil {
+		cp.subqueryDecl = h.Decl
+	}
+	if cp.subqueryCols != nil && h.Cols != nil {
+		cp.subqueryCols = h.Cols
+	}
+	if h.Scope != nil {
+		if cp.subqueryScope != nil {
+			cp.subqueryScope = h.Scope
+		}
+		if cp.innerCols != nil {
+			cp.innerCols = h.Scope
+		}
+	}
+	return &cp
 }
 
 // SubqueryDeclFunc resolves a scalar subquery's SQL to the declared column of
@@ -509,7 +565,7 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 		var setDecl *parquet.Column
 		if len(n.Values) == 1 {
 			if sq, ok := n.Values[0].(*plansql.SubqueryNode); ok && ctx.runner != nil {
-				setDecl = subquerySetDecl(sq.SQL, ctx)
+				setDecl = subquerySetDecl(sq.SQL, ctx.forSubqueryNode(sq))
 				var err error
 				if probeNode, err = memberProbe(n.Left, setDecl); err != nil {
 					return nil, err
@@ -523,6 +579,10 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 		// Check for subquery IN: single SubqueryNode in values
 		if len(n.Values) == 1 {
 			if sq, ok := n.Values[0].(*plansql.SubqueryNode); ok {
+				// The probe was compiled above in this block's context; the
+				// set is planned in the subquery's own WITH chain.
+				probeCtx := ctx
+				ctx := ctx.forSubqueryNode(sq)
 				if ctx.runner == nil {
 					return nil, fmt.Errorf("IN subquery requires a SubqueryRunner")
 				}
@@ -560,7 +620,7 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 								ParsedInfo:      info,
 								UnqualOuterCols: buildUnqualOuterCols(refs, ctx.outerCols),
 								SetBound:        ctx.setRowBound,
-								probeDecl:       newOperandDecl(probeNode, ctx),
+								probeDecl:       newOperandDecl(probeNode, probeCtx),
 								setDecl:         setDecl,
 							}, nil
 						}
@@ -569,7 +629,7 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 				in := &InSubquery{Expr: left, SQL: sq.SQL, Runner: ctx.runner, Not: n.Not,
 					Cols: ctx.subqueryCols, Scope: ctx.subqueryScope,
 					Budget: ctx.budget, SetBound: ctx.setRowBound}
-				in.probeDecl, in.setDecl = newOperandDecl(probeNode, ctx), setDecl
+				in.probeDecl, in.setDecl = newOperandDecl(probeNode, probeCtx), setDecl
 				if ctx.trackInSubquery != nil {
 					ctx.trackInSubquery(in)
 				}
@@ -711,7 +771,8 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 		return c, nil
 
 	case *plansql.SubqueryNode:
-		// Scalar subquery: (SELECT ...)
+		// Scalar subquery: (SELECT ...), planned in its own WITH chain.
+		ctx := ctx.forSubqueryNode(n)
 		if ctx.runner == nil {
 			return nil, fmt.Errorf("subqueries require a SubqueryRunner")
 		}
@@ -795,6 +856,7 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 		return sq, nil
 
 	case *plansql.ExistsNode:
+		ctx := ctx.forSubqueryNode(n)
 		if ctx.runner == nil {
 			return nil, fmt.Errorf("EXISTS subquery requires a SubqueryRunner")
 		}

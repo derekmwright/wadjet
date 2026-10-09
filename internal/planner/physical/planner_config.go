@@ -7,6 +7,7 @@ import (
 	"context"
 	"os"
 	"sync"
+	"sync/atomic"
 
 	"github.com/derekmwright/wadjet/internal/config"
 	"github.com/derekmwright/wadjet/internal/engine/batch"
@@ -30,6 +31,15 @@ type Planner struct {
 	PlanCtx     context.Context // context from the current Plan() call, used by subquery runner
 	catResolver *sysrows.Resolver
 	Ctes        []plansql.CTEDef // CTE definitions from the current query, for subquery resolution
+	// memoSub is the expression subquery node this planner was made for
+	// (subqueryScopingIn): a plan of exactly its text — or of its text with a
+	// read bound appended — plans the node's memoized, bound body
+	// (subqueryBodyFor) rather than a private parse.
+	memoSub plansql.Node
+	// subqueryRuns counts executeSubquery calls across every child planner
+	// (forSubquery copies the pointer): the seam a test counts a subquery's
+	// runs at, whichever scoped runner reached it. Nil counts nothing.
+	subqueryRuns *atomic.Int64
 	// onceCTEs serves every reference to a volatile CTE from one evaluation
 	// per statement (once_cte.go). Plan allocates it; forSubquery's copy
 	// shares the pointer; a planner Plan never ran (the stage DAG's) has none.
