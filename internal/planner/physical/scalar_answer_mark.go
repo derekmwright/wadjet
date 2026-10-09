@@ -31,6 +31,16 @@ func markScalarAnswer(n *logical.Node) {
 	}
 	for i := range n.WindowExprs {
 		n.WindowExprs[i].InputExpr = markAnswerExpr(n.WindowExprs[i].InputExpr)
+		// The argument trees the declaration reads where the argument was
+		// re-spelled over an aggregate (windowValueArgTree), into a new
+		// slice: the node's slice may be shared with another plan's.
+		if args := n.WindowExprs[i].ArgExprs; len(args) > 0 {
+			marked := make([]plansql.Node, len(args))
+			for j, a := range args {
+				marked[j] = markAnswerExpr(a)
+			}
+			n.WindowExprs[i].ArgExprs = marked
+		}
 	}
 	for _, c := range n.Children {
 		markScalarAnswer(c)
