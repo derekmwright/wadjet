@@ -47,6 +47,11 @@ func (p *StagePlanner) refuseInSubquery(err error) {
 // renders as an empty value list (nothing parses that), so they render as the
 // constant they are.
 func (p *StagePlanner) materializeInSubquery(ctx context.Context, in *plansql.InExpr, subq *plansql.SubqueryNode, decls physical.ColDecls) (plansql.Node, bool) {
+	// The set is planned in the WITH chain the subquery is written in
+	// (ADR-0047 stage 3): a subquery in a nested block reads that block's
+	// items, and one that reuses a name shadows the statement's (#1606).
+	restore := p.planInSubqueryChain(subq)
+	defer restore()
 	// A FLOAT32 PROBE cannot take this path at all, whatever the set holds.
 	// PostgreSQL's multi-element `real IN (…)` NARROWS its literals to real[]
 	// (#549) while `real = ANY(<subquery>)` widens the real to float8 — so
@@ -81,7 +86,7 @@ func (p *StagePlanner) materializeInSubquery(ctx context.Context, in *plansql.In
 	// That is the silent wrong answer #F1 removes, so the shape is REFUSED and
 	// routed to the coordinator-local pipeline, which materializes the
 	// recursive CTE and answers it.
-	if p.subqueryReadsRecursiveCTE(subq.SQL) {
+	if p.subqueryReadsRecursiveCTE(subq) {
 		p.refuseInSubquery(fmt.Errorf("%w: the subquery reads a recursive CTE, "+
 			"which has no set-producer lowering", ErrInSubqueryDistributed))
 		return nil, false
@@ -312,14 +317,20 @@ var NullAwareAntiForcedBroadcasts atomic.Int64
 // or in the subquery itself. Its logical twin is innerRelationsAreScannable's
 // CTE decline: the logical pass keeps a recursive CTE out of a semi/anti
 // join's build side, and this keeps it out of a materialized IN set.
-func (p *StagePlanner) subqueryReadsRecursiveCTE(sql string) bool {
+//
+// The names are scoped as the planners scope them: a later item of a name
+// shadows an earlier one, so a block's own non-recursive item that reuses an
+// enclosing recursive item's name is not a recursive read (ADR-0047 stage 3).
+func (p *StagePlanner) subqueryReadsRecursiveCTE(subq *plansql.SubqueryNode) bool {
 	recursive := make(map[string]bool, len(p.Ctes))
 	for _, c := range p.Ctes {
-		if c.Recursive {
-			recursive[strings.ToLower(c.Name)] = true
-		}
+		recursive[strings.ToLower(c.Name)] = c.Recursive
 	}
-	return sqlReadsRecursiveCTE(sql, recursive)
+	info, err := subq.Select()
+	if err != nil || info == nil {
+		return false
+	}
+	return infoReadsRecursiveCTE(info, recursive)
 }
 
 func sqlReadsRecursiveCTE(sql string, recursive map[string]bool) bool {
@@ -331,16 +342,18 @@ func sqlReadsRecursiveCTE(sql string, recursive map[string]bool) bool {
 	if err != nil || info == nil {
 		return false
 	}
+	return infoReadsRecursiveCTE(info, recursive)
+}
+
+func infoReadsRecursiveCTE(info *plansql.SelectInfo, recursive map[string]bool) bool {
 	scope := recursive
 	if len(info.CTEs) > 0 {
 		scope = make(map[string]bool, len(recursive)+len(info.CTEs))
-		for k := range recursive {
-			scope[k] = true
+		for k, v := range recursive {
+			scope[k] = v
 		}
 		for _, c := range info.CTEs {
-			if c.Recursive {
-				scope[strings.ToLower(c.Name)] = true
-			}
+			scope[strings.ToLower(c.Name)] = c.Recursive
 		}
 	}
 	for _, t := range info.Tables {

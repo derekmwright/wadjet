@@ -33,6 +33,10 @@ func ScalarSubqueriesAreDeferred() bool { return ScalarDeferToggle.On() }
 type deferredScalar struct {
 	Placeholder string // e.g. "scalar_1" (no leading colon)
 	SubquerySQL string // the subquery to execute as a producer stage
+	// Node is the subquery's node, when the expression the stage carries is
+	// the plan's own tree: its memoized body and the WITH chain it is
+	// written in are what the producer is planned from (ADR-0047 stage 3).
+	Node *plansql.SubqueryNode
 }
 
 // resolveFilterSubqueries finds embedded SQL subqueries in a filter expression
@@ -50,7 +54,7 @@ type deferredScalar struct {
 // Non-native-DAG mode keeps the legacy behavior: CTE-referencing subqueries
 // are left unresolved (worker re-executes via SubqueryRunner), others are
 // pre-computed and substituted in place.
-func (p *StagePlanner) resolveFilterSubqueries(exprStr string, decls physical.ColDecls) (string, []deferredScalar) {
+func (p *StagePlanner) resolveFilterSubqueries(exprStr string, tree plansql.Node, decls physical.ColDecls) (string, []deferredScalar) {
 	// Quick check: no subquery to resolve
 	if !strings.Contains(strings.ToUpper(exprStr), "SELECT") {
 		return exprStr, nil
@@ -61,10 +65,16 @@ func (p *StagePlanner) resolveFilterSubqueries(exprStr string, decls physical.Co
 		return exprStr, nil
 	}
 
-	// Parse the expression to find SubqueryNode elements
-	ast, err := plansql.ParseExpression(exprStr)
-	if err != nil {
-		return exprStr, nil
+	// The plan's own tree where it spells exprStr — its subquery nodes carry
+	// their memoized bodies and WITH chains — and a parse of the text
+	// otherwise.
+	ast := tree
+	if ast == nil || ast.String() != exprStr {
+		parsed, err := plansql.ParseExpression(exprStr)
+		if err != nil {
+			return exprStr, nil
+		}
+		ast = parsed
 	}
 
 	var deferred []deferredScalar
@@ -89,12 +99,8 @@ func (p *StagePlanner) resolveFilterSubqueries(exprStr string, decls physical.Co
 // Anything it cannot prove is false, and a false answer costs a plan-time
 // execution rather than a producer stage — the behaviour every scalar
 // subquery had before the deferral existed.
-func scalarSubqueryIsOneRow(sql string) bool {
-	parsed, err := plansql.Parse(sql)
-	if err != nil {
-		return false
-	}
-	info, err := plansql.ExtractSelect(parsed)
+func scalarSubqueryIsOneRow(n *plansql.SubqueryNode) bool {
+	info, err := n.Select()
 	if err != nil || info == nil {
 		return false
 	}
@@ -185,9 +191,14 @@ func (p *StagePlanner) resolveSubqueryAST(ctx context.Context, node plansql.Node
 		// The perf lever the deferral exists for is untouched: Q11's and
 		// Q22's subqueries are ungrouped aggregates, which is exactly the
 		// shape that still defers.
-		if scalarSubqueryIsOneRow(n.SQL) && (ScalarDeferToggle.On() || p.subqueryReferencesCTE(n.SQL)) {
+		// The WITH chain the subquery is written in: a subquery in a nested
+		// block reads that block's WITH items, and a nested item that reuses
+		// a name shadows the statement's (#1602, #1606).
+		restore := p.planInSubqueryChain(n)
+		defer restore()
+		if scalarSubqueryIsOneRow(n) && (ScalarDeferToggle.On() || p.subqueryReferencesCTE(n.SQL)) {
 			name := p.allocScalarPlaceholder()
-			*deferred = append(*deferred, deferredScalar{Placeholder: name, SubquerySQL: n.SQL})
+			*deferred = append(*deferred, deferredScalar{Placeholder: name, SubquerySQL: n.SQL, Node: n})
 			return &plansql.LiteralPlaceholder{Name: name}
 		}
 		start := time.Now()
@@ -267,7 +278,9 @@ func (p *StagePlanner) resolveSubqueryAST(ctx context.Context, node plansql.Node
 				ErrCorrelatedSubqueryDistributed, describeOuterRefs(dangling)))
 			return node
 		}
+		restore := p.planInSubqueryChain(n)
 		rows, _, err := p.ExecuteSubquerySchema(ctx, n.SQL)
+		restore()
 		if err != nil {
 			// A sample's 2202H, a 22003 its argument cannot hold, a 22012:
 			// the failure stands where the boolean would have and is raised
@@ -577,8 +590,8 @@ func (p *StagePlanner) resolveBooleanExists(ctx context.Context, node plansql.No
 // CTE definitions from the enclosing query are merged so the subquery can
 // resolve :CTE references. The terminal stage is forced to Tasks=1 so its
 // output is a single unpartitioned WSHF file suitable for scalar extraction.
-func (p *StagePlanner) emitScalarProducerStages(stages *[]Stage, subquerySQL string) (string, error) {
-	id, _, _, err := p.emitScalarProducerStagesTyped(stages, subquerySQL)
+func (p *StagePlanner) emitScalarProducerStages(stages *[]Stage, d deferredScalar) (string, error) {
+	id, _, _, err := p.emitScalarProducerStagesTyped(stages, d)
 	return id, err
 }
 
@@ -591,14 +604,28 @@ func (p *StagePlanner) emitScalarProducerStages(stages *[]Stage, subquerySQL str
 // uses it to DECIDE, not to declare: a value whose literal spelling does not
 // read back at the same type is not lowered at all (see
 // scalarProducerValueIsLiteralSafe).
-func (p *StagePlanner) emitScalarProducerStagesTyped(stages *[]Stage, subquerySQL string) (string, parquet.TypeID, bool, error) {
-	pq, err := plansql.Parse(subquerySQL)
-	if err != nil {
-		return "", 0, false, fmt.Errorf("parse subquery: %w", err)
-	}
-	info, err := plansql.ExtractSelect(pq)
-	if err != nil {
-		return "", 0, false, fmt.Errorf("extract subquery: %w", err)
+func (p *StagePlanner) emitScalarProducerStagesTyped(stages *[]Stage, d deferredScalar) (string, parquet.TypeID, bool, error) {
+	subquerySQL := d.SubquerySQL
+	// The producer is planned from the subquery's memoized body, in the WITH
+	// chain it is written in, where the stage holds its node.
+	restore := p.planInSubqueryChain(d.Node)
+	defer restore()
+	var info *plansql.SelectInfo
+	var err error
+	if d.Node != nil {
+		info, err = d.Node.Select()
+		if err != nil {
+			return "", 0, false, fmt.Errorf("parse subquery: %w", err)
+		}
+	} else {
+		pq, err := plansql.Parse(subquerySQL)
+		if err != nil {
+			return "", 0, false, fmt.Errorf("parse subquery: %w", err)
+		}
+		info, err = plansql.ExtractSelect(pq)
+		if err != nil {
+			return "", 0, false, fmt.Errorf("extract subquery: %w", err)
+		}
 	}
 	var logicalPlan *logical.Node
 	if len(p.Ctes) > 0 {
@@ -757,4 +784,28 @@ func scalarColType(schema []parquet.Column) (parquet.TypeID, bool) {
 		return 0, false
 	}
 	return schema[0].Type, true
+}
+
+// planInSubqueryChain sets the planner's WITH list to the chain a subquery
+// node records where it is written (plansql.StampSubqueryScopes) and returns
+// the restore; a nil node, or one that records none, leaves the statement's.
+func (p *StagePlanner) planInSubqueryChain(n plansql.Node) func() {
+	var chain []plansql.CTEDef
+	var ok bool
+	switch q := n.(type) {
+	case *plansql.SubqueryNode:
+		if q != nil {
+			chain, ok = q.CTEScope()
+		}
+	case *plansql.ExistsNode:
+		if q != nil {
+			chain, ok = q.CTEScope()
+		}
+	}
+	if !ok {
+		return func() {}
+	}
+	saved := p.Ctes
+	p.Ctes = chain
+	return func() { p.Ctes = saved }
 }
