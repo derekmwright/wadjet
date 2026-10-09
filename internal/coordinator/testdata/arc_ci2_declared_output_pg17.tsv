@@ -1662,3 +1662,6 @@ agg/join/cnt_i	{int} rows=1 5
 agg/join/cnt_i/grp	{bool,int} rows=3 f,2 | t,3 | NULL,0
 agg/join/having	{bool} rows=1 t
 agg/shadowRename	{int} rows=1 2
+agg/shadowExprRound	{numeric} rows=1 6
+agg/shadowExprRoundMax	{numeric,numeric} rows=1 6,4
+agg/shadowExprIntSum	{int} rows=1 4

@@ -1662,3 +1662,6 @@ agg/join/cnt_i	true	SELECT count(q.i) AS s FROM ss_t t JOIN (SELECT id, o, f AS 
 agg/join/cnt_i/grp	true	SELECT q.o, count(q.i) AS s FROM ss_t t JOIN (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) q ON t.id = q.id GROUP BY q.o ORDER BY 1
 agg/join/having	true	SELECT q.o FROM ss_t t JOIN (SELECT id, o, f AS i, i AS f, f AS n, n AS b FROM ss_t) q ON t.id = q.id GROUP BY q.o HAVING sum(q.i) > 100 ORDER BY 1
 agg/shadowRename	true	SELECT SUM(n) AS s FROM (SELECT i AS n, n AS other FROM ss_t WHERE id < 8) x
+agg/shadowExprRound	false	SELECT round(sum(f)) AS r FROM (SELECT id, i / 2.0 + 1 AS f FROM ss_t) s
+agg/shadowExprRoundMax	false	SELECT round(sum(f)) AS r, round(max(f)) AS m FROM (SELECT id, i / 2.0 + 1 AS f FROM ss_t) s
+agg/shadowExprIntSum	false	SELECT sum(f) AS s FROM (SELECT id, i * 2 AS f FROM ss_t) s
