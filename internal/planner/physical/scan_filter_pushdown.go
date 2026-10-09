@@ -477,11 +477,11 @@ func collectASTCols(n plansql.Node, out map[string]bool) {
 	// happened to push into the scan filter — the same disappearing
 	// correlated reference as #347, one layer down.
 	case *plansql.SubqueryNode:
-		for _, c := range plansql.OuterColumnCandidates(t.SQL) {
+		for _, c := range plansql.OuterColumnCandidatesOf(t) {
 			out[c] = true
 		}
 	case *plansql.ExistsNode:
-		for _, c := range plansql.OuterColumnCandidates(t.SQL) {
+		for _, c := range plansql.OuterColumnCandidatesOf(t) {
 			out[c] = true
 		}
 	case *plansql.AnyAllExpr:

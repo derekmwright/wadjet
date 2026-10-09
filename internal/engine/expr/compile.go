@@ -595,7 +595,7 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 							return nil, refusal
 						}
 						// An aggregate the ENCLOSING query owns (#1044).
-						if refusal := refuseOuterLevelAggregate("IN", sq.SQL, ctx.outerTables); refusal != nil {
+						if refusal := refuseOuterLevelAggregate("IN", sq.SQL, info, ctx.outerTables); refusal != nil {
 							return nil, refusal
 						}
 						if refusal := refuseUnrebuildableBody("IN", sq.SQL, info, refs, ctx.outerTables); refusal != nil {
@@ -619,7 +619,7 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 						}
 					}
 				}
-				in := &InSubquery{Expr: left, SQL: sq.SQL, Runner: ctx.runner, Not: n.Not,
+				in := &InSubquery{Expr: left, SQL: sq.SQL, Node: sq, Runner: ctx.runner, Not: n.Not,
 					Cols: ctx.subqueryCols, Scope: ctx.subqueryScope,
 					Budget: ctx.budget, SetBound: ctx.setRowBound}
 				in.probeDecl, in.setDecl = newOperandDecl(probeNode, probeCtx), setDecl
@@ -782,7 +782,7 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 					return nil, refusal
 				}
 				// An aggregate the ENCLOSING query owns (#1044).
-				if refusal := refuseOuterLevelAggregate("scalar", n.SQL, ctx.outerTables); refusal != nil {
+				if refusal := refuseOuterLevelAggregate("scalar", n.SQL, info, ctx.outerTables); refusal != nil {
 					return nil, refusal
 				}
 				if refusal := refuseUnrebuildableBody("scalar", n.SQL, info, refs, ctx.outerTables); refusal != nil {
@@ -827,10 +827,10 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 			}
 		}
 		if n.Array {
-			return &ArraySubquery{SQL: n.SQL, Runner: ctx.runner, Cols: ctx.subqueryCols,
+			return &ArraySubquery{SQL: n.SQL, Node: n, Runner: ctx.runner, Cols: ctx.subqueryCols,
 				Scope: ctx.subqueryScope}, nil
 		}
-		sq := &ScalarSubquery{SQL: n.SQL, Runner: ctx.runner, Cols: ctx.subqueryCols, Scope: ctx.subqueryScope,
+		sq := &ScalarSubquery{SQL: n.SQL, Node: n, Runner: ctx.runner, Cols: ctx.subqueryCols, Scope: ctx.subqueryScope,
 			answer: n.Answer}
 		// The subquery's OUTPUT declaration, so the boxed comparison can read
 		// this operand as the number it is rather than as the text it boxes
@@ -861,7 +861,7 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 					return nil, refusal
 				}
 				// An aggregate the ENCLOSING query owns (#1044).
-				if refusal := refuseOuterLevelAggregate("EXISTS", n.SQL, ctx.outerTables); refusal != nil {
+				if refusal := refuseOuterLevelAggregate("EXISTS", n.SQL, info, ctx.outerTables); refusal != nil {
 					return nil, refusal
 				}
 				if refusal := refuseUnrebuildableBody("EXISTS", n.SQL, info, refs, ctx.outerTables); refusal != nil {
@@ -880,7 +880,7 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 				}
 			}
 		}
-		return &ExistsSubquery{SQL: n.SQL, Runner: ctx.runner, Not: n.Not, Scope: ctx.subqueryScope}, nil
+		return &ExistsSubquery{SQL: n.SQL, Node: n, Runner: ctx.runner, Not: n.Not, Scope: ctx.subqueryScope}, nil
 
 	case *plansql.ArrayLitNode:
 		elems := make([]Expr, len(n.Elements))

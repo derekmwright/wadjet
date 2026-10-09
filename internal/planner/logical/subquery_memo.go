@@ -12,31 +12,46 @@ import plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 // in scope where the subquery is written, and a nested item that reuses a
 // name shadows the statement's (#1606).
 //
-// The tree is a PRIVATE parse of the node's text, not its memoized, bound
-// body: the rewrite spells the join keys it derives, and the HAVING and
-// aggregate terms it lifts, by NAME (stage 4), and a block that mixes those
-// with the binder's bindings is the mixed comparison the binding census
-// refuses (wadjet.TestArcCI1BindingCensusOverTheGroupKeyTable,
-// c738/outerWhereGrouped). The classification of the body's references
-// reads the bindings (plansql.CorrelatedRefsOf).
+// The tree is the node's MEMOIZED body (arc CI3 round 2): the decorrelation
+// reads the one parse every other requester reads. That is safe for the
+// rewrite's name-spelled terms (the join keys it derives, the HAVING and
+// aggregate terms it lifts, stage 4) because a body the rewrite decorrelates
+// is a CORRELATED one, and the binder clears a correlated body's bindings
+// (plansql.ClearBindings) — so no block mixes the two spellings, which is what
+// the binding census refuses (wadjet.TestArcCI1BindingCensusOverTheGroupKeyTable,
+// c738/outerWhereGrouped). An uncorrelated IN keeps its bindings and is
+// planned as a block, exactly as the planner plans it elsewhere. The
+// classification of the body's references reads the bindings
+// (plansql.CorrelatedRefsOf).
+//
+// The rewrite LIFTS an INNER join's ON conjunct that names the enclosing query
+// out of the join (liftBodyOuterConditions rewrites the join's condition in
+// place), and it may decline after doing so, leaving the subquery to the
+// per-row re-run. So the block it is handed is a copy of the memo's SelectInfo
+// with its own join list: the lift rewrites the copy's joins, and the memo —
+// which every other requester reads — keeps the body as written. Nothing else
+// in the block is written by the rewrite.
 func subqueryBodyIn(n plansql.Node, ctes []plansql.CTEDef) (*plansql.SelectInfo, []plansql.CTEDef, error) {
-	var sql string
+	var (
+		info *plansql.SelectInfo
+		err  error
+	)
 	chain, ok := []plansql.CTEDef(nil), false
 	switch q := n.(type) {
 	case *plansql.SubqueryNode:
-		sql = q.SQL
+		info, err = q.Select()
 		chain, ok = q.CTEScope()
 	case *plansql.ExistsNode:
-		sql = q.SQL
+		info, err = q.Select()
 		chain, ok = q.CTEScope()
 	}
 	if ok {
 		ctes = chain
 	}
-	parsed, err := plansql.Parse(sql)
-	if err != nil {
-		return nil, ctes, err
+	if info != nil {
+		cp := *info
+		cp.Joins = append([]plansql.JoinInfo(nil), info.Joins...)
+		info = &cp
 	}
-	info, err := plansql.ExtractSelect(parsed)
 	return info, ctes, err
 }

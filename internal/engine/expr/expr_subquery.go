@@ -34,7 +34,10 @@ type SubqueryRunner func(sql string) ([]map[string]any, error)
 // threshold, dropped every row of its batches, and the query answered a
 // different row count on every run (#398).
 type ScalarSubquery struct {
-	SQL    string
+	SQL string
+	// Node is the subquery's node, whose memo is the body of SQL (nil when
+	// the evaluator was built from text alone).
+	Node   plansql.Node
 	Runner SubqueryRunner
 	// Cols is the subquery's SELECT-list COLUMN COUNT, resolved from its own
 	// plan at compile time — see refuseMultiColumnSubqueryByPlan.
@@ -86,7 +89,7 @@ func (e *ScalarSubquery) resolveSlow() {
 	// reads no outer row. `WHERE (SELECT COUNT(*) FROM dim WHERE dim.k =
 	// u.did) > 0` over a CTE was planned here and answered a query-wide
 	// constant 0 on all four arms (#535).
-	refuseDanglingSubquery("scalar", e.SQL, e.Scope)
+	refuseDanglingSubquery("scalar", e.SQL, e.Scope, e.Node)
 	// BEFORE THE RUN: PostgreSQL decides the column count during parse
 	// analysis, so an EMPTY multi-column subquery is 42601 there too.
 	refuseMultiColumnSubqueryByPlan(e.Cols, e.SQL, false)
@@ -94,7 +97,7 @@ func (e *ScalarSubquery) resolveSlow() {
 	// so the read stops where the answer is known (plansql.AppendRowLimit).
 	// e.SQL — not the bounded text — is what every error below names, because
 	// the bound is this engine's business and the query is the user's.
-	rows, err := e.Runner(plansql.WithRowLimit(e.SQL, 2))
+	rows, err := e.Runner(rowLimited(e.SQL, e.Node, 2))
 	if err != nil {
 		failEval(subqueryRunFailed("scalar", e.SQL, err))
 	}
@@ -186,6 +189,8 @@ type MemoryAccountant interface {
 // Example: WHERE user_id IN (SELECT user_id FROM active_users)
 // Uncorrelated: executed once and result set cached in a hash set for O(1) lookup.
 type InSubquery struct {
+	// Node is the subquery's node (ScalarSubquery.Node).
+	Node plansql.Node
 	// Cols is the subquery's SELECT-list COLUMN COUNT — see
 	// refuseMultiColumnSubqueryByPlan.
 	Cols   SubqueryColumnsFunc
@@ -532,7 +537,7 @@ func (e *InSubquery) resolveSlow(promoteSet bool) {
 	e.probe.expr = e.Expr
 	// The same guard the other two uncorrelated evaluators carry: a set this
 	// resolves ONCE has to be one that reads no outer row (#734/#679/#535).
-	refuseDanglingSubquery("IN", e.SQL, e.Scope)
+	refuseDanglingSubquery("IN", e.SQL, e.Scope, e.Node)
 	refuseMultiColumnSubqueryByPlan(e.Cols, e.SQL, true)
 	rows, err := e.Runner(e.SQL)
 	if err != nil {
@@ -762,7 +767,9 @@ func (e *InSubquery) missAnswer() (bool, bool) {
 // Example: WHERE EXISTS (SELECT 1 FROM orders WHERE orders.user_id = users.id)
 // Uncorrelated: executed once and result cached.
 type ExistsSubquery struct {
-	SQL    string
+	SQL string
+	// Node is the subquery's node (ScalarSubquery.Node).
+	Node   plansql.Node
 	Runner SubqueryRunner
 	Not    bool
 	// Scope resolves a relation's COMPLETE column list, so the dangling-
@@ -804,9 +811,9 @@ func (e *ExistsSubquery) resolveSlow() {
 	// and rebinds it — so this answered a query-wide CONSTANT, TRUE or FALSE
 	// according to whether the two relations happened to share a column name.
 	// Checked once here, where it costs one parse per query (#734/#679/#535).
-	refuseDanglingSubquery("EXISTS", e.SQL, e.Scope)
+	refuseDanglingSubquery("EXISTS", e.SQL, e.Scope, e.Node)
 	// ONE ROW. EXISTS asks whether there is a row; the first one answers it.
-	rows, err := e.Runner(plansql.WithRowLimit(e.SQL, 1))
+	rows, err := e.Runner(rowLimited(e.SQL, e.Node, 1))
 	if err != nil {
 		// `err == nil && len(rows) > 0` made a failure indistinguishable
 		// from an empty result. They are not the same thing.

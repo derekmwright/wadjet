@@ -175,7 +175,7 @@ func exprCarriesSubquery(n plansql.Node) bool {
 // and replaced by a literal, and those two are not the same disposition.
 func countExprSubqueries(n plansql.Node) int {
 	count := 0
-	visitExprSubqueries(n, func(string, string) { count++ })
+	visitExprSubqueries(n, func(plansql.Node, string, string) { count++ })
 	return count
 }
 

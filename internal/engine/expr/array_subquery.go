@@ -20,7 +20,9 @@ import (
 // text a correlated scalar subquery is (Corr), with the same refusals for a
 // body that rebuild cannot write.
 type ArraySubquery struct {
-	SQL    string
+	SQL string
+	// Node is the subquery's node (ScalarSubquery.Node).
+	Node   plansql.Node
 	Runner SubqueryRunner
 	Cols   SubqueryColumnsFunc
 	Scope  plansql.TableColumns
@@ -45,7 +47,7 @@ func (e *ArraySubquery) Eval(b *batch.RecordBatch, row int) any {
 
 func (e *ArraySubquery) run(sql string) []any {
 	if e.Corr == nil {
-		refuseDanglingSubquery("ARRAY", sql, e.Scope)
+		refuseDanglingSubquery("ARRAY", sql, e.Scope, e.Node)
 	}
 	refuseMultiColumnSubqueryByPlan(e.Cols, sql, false)
 	rows, err := e.Runner(sql)

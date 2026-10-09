@@ -1112,9 +1112,9 @@ func collectASTColumnRefs(node plansql.Node, refs map[string]bool) {
 	// to have no case for a subquery node at all, so it kept none of them
 	// (#347). See plansql.OuterColumnCandidates for what counts as one.
 	case *plansql.SubqueryNode:
-		collectSubqueryOuterRefs(n.SQL, refs)
+		collectSubqueryOuterRefs(n, refs)
 	case *plansql.ExistsNode:
-		collectSubqueryOuterRefs(n.SQL, refs)
+		collectSubqueryOuterRefs(n, refs)
 	case *plansql.AnyAllExpr:
 		collectASTColumnRefs(n.Left, refs)
 		for _, v := range n.Values {
@@ -1141,8 +1141,8 @@ func collectASTColumnRefs(node plansql.Node, refs map[string]bool) {
 // reads to the needs set. Over-inclusive by design: a name the scan's schema
 // does not have is dropped by sanitizeScanNeeds, while a name it does have
 // and pruning discards is a correlated reference that resolves to nothing.
-func collectSubqueryOuterRefs(sql string, refs map[string]bool) {
-	for _, col := range plansql.OuterColumnCandidates(sql) {
+func collectSubqueryOuterRefs(n plansql.Node, refs map[string]bool) {
+	for _, col := range plansql.OuterColumnCandidatesOf(n) {
 		refs[col] = true
 	}
 }

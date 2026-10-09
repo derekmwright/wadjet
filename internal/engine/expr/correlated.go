@@ -676,10 +676,56 @@ func (e *DanglingSubqueryError) SQLState() string { return "0A000" }
 // STANDALONE, with no outer row — still names a relation it does not read.
 // Called once per query from the uncorrelated evaluators' resolveSlow, never
 // per row.
-func refuseDanglingSubquery(kind, sql string, scope plansql.TableColumns) {
-	if refs := plansql.DanglingTableRefsWithScope(sql, scope); len(refs) > 0 {
+//
+// node is the subquery's node when the evaluator has one: its memo is the body
+// when its text is sql, and then nothing is parsed (arc CI3 round 2).
+func refuseDanglingSubquery(kind, sql string, scope plansql.TableColumns, node plansql.Node) {
+	var refs []plansql.OuterRef
+	if info := memoBody(node, sql); info != nil {
+		refs = plansql.DanglingTableRefsOf(info, scope)
+	} else {
+		refs = plansql.DanglingTableRefsWithScope(sql, scope)
+	}
+	if len(refs) > 0 {
 		failEval(&DanglingSubqueryError{Kind: kind, SQL: sql, Refs: refs})
 	}
+}
+
+// memoBody is the parsed body memoized on a subquery node (a *SubqueryNode or
+// an *ExistsNode) whose text is sql, or nil: an evaluator whose text is not the
+// node's (a rebuilt or substituted statement) reads its own text.
+func memoBody(node plansql.Node, sql string) *plansql.SelectInfo {
+	var (
+		info *plansql.SelectInfo
+		err  error
+	)
+	switch q := node.(type) {
+	case *plansql.SubqueryNode:
+		if q == nil || q.SQL != sql {
+			return nil
+		}
+		info, err = q.Select()
+	case *plansql.ExistsNode:
+		if q == nil || q.SQL != sql {
+			return nil
+		}
+		info, err = q.Select()
+	default:
+		return nil
+	}
+	if err != nil {
+		return nil
+	}
+	return info
+}
+
+// rowLimited is plansql.WithRowLimit reading the node's memo when it is the
+// body of sql, so bounding the read parses nothing.
+func rowLimited(sql string, node plansql.Node, n int) string {
+	if info := memoBody(node, sql); info != nil {
+		return plansql.AppendRowLimit(sql, info, n)
+	}
+	return plansql.WithRowLimit(sql, n)
 }
 
 // WindowBorneCorrelationError reports a CORRELATED subquery whose body holds a
@@ -906,8 +952,15 @@ func (e *OuterLevelAggregateError) SQLState() string { return "0A000" }
 
 // refuseOuterLevelAggregate answers the error when a correlated subquery holds
 // an aggregate the ENCLOSING query owns, and nil otherwise.
-func refuseOuterLevelAggregate(kind, sql string, outerTables map[string]bool) error {
-	refs := plansql.AggregatesOverOnlyOuterRefs(sql, outerTables)
+//
+// info is the body's tree when the caller holds one (then nothing is parsed).
+func refuseOuterLevelAggregate(kind, sql string, info *plansql.SelectInfo, outerTables map[string]bool) error {
+	var refs []plansql.OuterRef
+	if info != nil {
+		refs = plansql.AggregatesOverOnlyOuterRefsIn(info, outerTables)
+	} else {
+		refs = plansql.AggregatesOverOnlyOuterRefs(sql, outerTables)
+	}
 	if len(refs) == 0 {
 		return nil
 	}
@@ -970,7 +1023,8 @@ func refuseUnrebuildableBody(kind, sql string, info *plansql.SelectInfo,
 	case plansql.HoldsSetOperation(info):
 		return &UnrebuildableBodyError{Kind: kind, SQL: sql, Refs: refs,
 			Reason: "its body is a SET OPERATION, which the rebuild renders no arm for"}
-	case plansql.AggregateBesideANestedSubquery(sql, outerTables):
+	case info != nil && plansql.AggregateBesideANestedSubqueryIn(info, outerTables),
+		info == nil && plansql.AggregateBesideANestedSubquery(sql, outerTables):
 		return &UnrebuildableBodyError{Kind: kind, SQL: sql, Refs: refs,
 			Reason: "a SELECT item holds an aggregate beside a nested subquery that names the " +
 				"enclosing query, which leaves the item with no type until the outer row is known"}

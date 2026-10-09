@@ -165,7 +165,7 @@ func (p *StagePlanner) resolveSubqueryAST(ctx context.Context, node plansql.Node
 		// producer's own re-walk). Parked, not returned — walkStages has no
 		// error path — and PlanDistributed turns it into the typed refusal
 		// the coordinator routes on.
-		if dangling := plansql.DanglingTableRefs(n.SQL); len(dangling) > 0 {
+		if dangling := plansql.DanglingTableRefsOfNode(n); len(dangling) > 0 {
 			p.refuseCorrelated(fmt.Errorf("%w: a scalar subquery references outer %s"+
 				" and cannot execute as a standalone producer stage",
 				ErrCorrelatedSubqueryDistributed, describeOuterRefs(dangling)))
@@ -202,7 +202,7 @@ func (p *StagePlanner) resolveSubqueryAST(ctx context.Context, node plansql.Node
 			return &plansql.LiteralPlaceholder{Name: name}
 		}
 		start := time.Now()
-		rows, schema, err := p.ExecuteSubquerySchema(ctx, n.SQL)
+		rows, schema, err := p.ExecuteSubquerySchema(ctx, n.SQL, n)
 		slog.Info("plan-time scalar subquery executed on coordinator",
 			"duration", time.Since(start).Round(time.Millisecond),
 			"rows", len(rows), "error", err != nil)
@@ -272,14 +272,14 @@ func (p *StagePlanner) resolveSubqueryAST(ctx context.Context, node plansql.Node
 		// be confidently wrong, so it takes the refusal the SubqueryNode arm
 		// above takes and the coordinator answers on its local pipeline
 		// (ADR-0021 §1c).
-		if dangling := plansql.DanglingTableRefs(n.SQL); len(dangling) > 0 {
+		if dangling := plansql.DanglingTableRefsOfNode(n); len(dangling) > 0 {
 			p.refuseCorrelated(fmt.Errorf("%w: an EXISTS subquery references outer %s"+
 				" and cannot be evaluated as a query-wide constant",
 				ErrCorrelatedSubqueryDistributed, describeOuterRefs(dangling)))
 			return node
 		}
 		restore := p.planInSubqueryChain(n)
-		rows, _, err := p.ExecuteSubquerySchema(ctx, n.SQL)
+		rows, _, err := p.ExecuteSubquerySchema(ctx, n.SQL, n)
 		restore()
 		if err != nil {
 			// A sample's 2202H, a 22003 its argument cannot hold, a 22012:

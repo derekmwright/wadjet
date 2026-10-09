@@ -1141,7 +1141,17 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 		return err
 	}
 	// ORDER BY — items are raw expression strings; parse and check what parses.
+	// A term that holds an expression subquery is checked as the parsed tree
+	// the item carries, so the binder's classification of the body lands on
+	// the node the planners read and the body is not parsed again for a
+	// throwaway copy (arc CI3 round 2).
 	for _, ob := range info.OrderBy {
+		if ob.Expr != nil && holdsSubquery(ob.Expr) {
+			if err := b.checkExpr(ob.Expr, withOut); err != nil {
+				return err
+			}
+			continue
+		}
 		expr, err := plansql.ParseExpression(ob.Column)
 		if err != nil {
 			continue
@@ -2235,8 +2245,10 @@ func (b *binder) checkUngrouped(info *plansql.SelectInfo, from, resolve *colScop
 		// collapses its OVER clause), so an unbound block's window sort term
 		// is judged on its tree: re-parsing it left `ORDER BY sum(b) OVER ()`
 		// unjudged on a door that does not stamp.
+		// A term holding a subquery is judged on its tree too: the parse
+		// would be a second parse of the body (arc CI3 round 2).
 		expr := ob.Expr
-		if expr == nil || !plansql.HoldsBinding(expr) {
+		if expr == nil || (!plansql.HoldsBinding(expr) && !holdsSubquery(expr)) {
 			parsed, err := plansql.ParseExpression(ob.Column)
 			switch {
 			case err == nil:
@@ -2814,6 +2826,7 @@ func exprOperands(node plansql.Node) []plansql.Node {
 // ORDER BY items are raw text — the parser keeps the spelling — so they are
 // parsed here exactly as validateBlock parses them for name resolution, and an
 // item that does not parse contributes nothing, which is that loop's rule too.
+// An item that holds a subquery is read as its own tree, as there.
 func (b *binder) blockSubqueries(info *plansql.SelectInfo) []plansql.Node {
 	var subs []plansql.Node
 	walkExpr(info.WhereExpr, nil, &subs, nil)
@@ -2830,6 +2843,13 @@ func (b *binder) blockSubqueries(info *plansql.SelectInfo) []plansql.Node {
 		walkExpr(gb, nil, &subs, nil)
 	}
 	for _, ob := range info.OrderBy {
+		// The item's own tree where it holds a subquery, as validateBlock
+		// checks it: the body validated is the memo on the node the
+		// planners read (arc CI3 round 2).
+		if ob.Expr != nil && holdsSubquery(ob.Expr) {
+			walkExpr(ob.Expr, nil, &subs, nil)
+			continue
+		}
 		parsed, err := plansql.ParseExpression(ob.Column)
 		if err != nil {
 			continue
@@ -3105,4 +3125,11 @@ var pgSystemColumns = map[string]bool{
 // become a 42703.
 func IsPGSystemColumn(name string) bool {
 	return pgSystemColumns[strings.ToLower(name)]
+}
+
+// holdsSubquery reports whether n holds an expression subquery node.
+func holdsSubquery(n plansql.Node) bool {
+	found := false
+	plansql.ForEachSubquery(n, func(plansql.Node) { found = true })
+	return found
 }

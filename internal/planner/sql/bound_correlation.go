@@ -27,17 +27,34 @@ func CorrelatedRefsOf(n Node, outerTables map[string]bool, outerCols map[string]
 	var sql string
 	var recorded []OuterRef
 	var ok bool
+	var body func() (*SelectInfo, error)
 	switch q := n.(type) {
 	case *SubqueryNode:
-		sql = q.SQL
+		sql, body = q.SQL, q.Select
 		recorded, ok = q.OuterRefs()
 	case *ExistsNode:
-		sql = q.SQL
+		sql, body = q.SQL, q.Select
 		recorded, ok = q.OuterRefs()
 	}
 	if ok && len(outerCols) > 0 {
 		if refs, spelled := spellOuterRefs(recorded, outerTables, outerCols); spelled {
 			return refs, nil
+		}
+	}
+	// By name over the node's memoized body: the walk reads names and not
+	// bindings, and the memo is the parse every other requester reads (arc
+	// CI3 round 2). A body that does not parse answers its error, as the
+	// text form does.
+	if body != nil {
+		info, err := body()
+		if err != nil {
+			return nil, err
+		}
+		if info != nil {
+			if len(outerCols) > 0 {
+				return findCorrelatedRefsIn(info, outerTables, outerCols, innerCols), nil
+			}
+			return findCorrelatedRefsIn(info, outerTables, nil, nil), nil
 		}
 	}
 	if len(outerCols) > 0 {

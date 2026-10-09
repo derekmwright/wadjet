@@ -327,16 +327,14 @@ func anyAnswerExtract(es []Expr) bool {
 	return false
 }
 
-// SubqueryAnswersIntegralExtract reports whether a scalar subquery's text
+// SubqueryAnswersIntegralExtract reports whether a scalar subquery's body
 // answers a bare integral EXTRACT field (`SELECT extract(year FROM o.d) …`,
 // or its rebuilt spelling `year(…)`): the one SELECT item, a call of one
 // argument whose name IntegralExtractField accepts.
-func SubqueryAnswersIntegralExtract(sql string) bool {
-	q, err := plansql.Parse(sql)
-	if err != nil {
-		return false
-	}
-	info, err := plansql.ExtractSelect(q)
+//
+// It reads the body memoized on the node and parses nothing (arc CI3 round 2).
+func SubqueryAnswersIntegralExtract(sq *plansql.SubqueryNode) bool {
+	info, err := sq.Select()
 	if err != nil || info == nil || len(info.Columns) != 1 {
 		return false
 	}

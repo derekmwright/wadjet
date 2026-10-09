@@ -552,7 +552,7 @@ func (p *Planner) executeSubquery(ctx context.Context, sql string) ([]map[string
 	if p.subqueryRuns != nil {
 		p.subqueryRuns.Add(1)
 	}
-	rows, _, err := p.ExecuteSubquerySchema(ctx, sql)
+	rows, _, err := p.ExecuteSubquerySchema(ctx, sql, nil)
 	return rows, err
 }
 
@@ -564,7 +564,12 @@ func (p *Planner) executeSubquery(ctx context.Context, sql string) ([]map[string
 // IN-set materializer, which inlines them into filter TEXT) needs the
 // declaration to tell them apart. That is ADR-0012 item 8's rule applied to
 // the one place the boxing happens on the PLANNER's side of the wire.
-func (p *Planner) ExecuteSubquerySchema(ctx context.Context, sql string) ([]map[string]any, []parquet.Column, error) {
+//
+// node is the expression subquery node sql is the body of, or nil: with a
+// node, the plan of sql reads the body memoized on it rather than parsing the
+// text again (arc CI3 round 2; the stage planner's plan-time runs).
+func (p *Planner) ExecuteSubquerySchema(ctx context.Context, sql string, node plansql.Node) ([]map[string]any, []parquet.Column, error) {
+	defer p.planMemoSubquery(node)()
 	// The text is a subquery's body, computed as its answer is declared
 	// (markScalarAnswer); a CTE body this planner materializes on the way is
 	// not, and the flag is this call's alone.

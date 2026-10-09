@@ -164,6 +164,49 @@ func DanglingTableRefsWithScope(subquerySQL string, resolve TableColumns) []Oute
 	if err != nil || info == nil {
 		return nil
 	}
+	return DanglingTableRefsOf(info, resolve)
+}
+
+// DanglingTableRefsOfNode is DanglingTableRefs for an expression subquery NODE
+// (a *SubqueryNode or an *ExistsNode): it reads the body memoized on the node
+// (arc CI3 round 2). A body that does not parse has no dangling reference, as
+// for the text form.
+func DanglingTableRefsOfNode(n Node) []OuterRef {
+	info, _ := nodeBody(n)
+	return DanglingTableRefsOf(info, nil)
+}
+
+// FindCorrelatedRefsWithScopeOf is FindCorrelatedRefsWithScope for an
+// expression subquery NODE: the same walk by name, over the body memoized on
+// the node (arc CI3 round 2).
+func FindCorrelatedRefsWithScopeOf(n Node, outerTables map[string]bool, outerCols map[string]string, innerCols TableColumns) ([]OuterRef, error) {
+	info, err := nodeBody(n)
+	if err != nil {
+		return nil, err
+	}
+	if info == nil {
+		return nil, nil
+	}
+	return findCorrelatedRefsIn(info, outerTables, outerCols, innerCols), nil
+}
+
+// nodeBody is the body memoized on a *SubqueryNode or an *ExistsNode.
+func nodeBody(n Node) (*SelectInfo, error) {
+	switch q := n.(type) {
+	case *SubqueryNode:
+		return q.Select()
+	case *ExistsNode:
+		return q.Select()
+	}
+	return nil, nil
+}
+
+// DanglingTableRefsOf is DanglingTableRefsWithScope over a body already parsed
+// — the memo on the subquery's node (arc CI3 round 2). It does not change info.
+func DanglingTableRefsOf(info *SelectInfo, resolve TableColumns) []OuterRef {
+	if info == nil {
+		return nil
+	}
 	scope := &outerRefScope{
 		anyOuter:    true,
 		innerTables: collectInnerTables(info),
@@ -232,7 +275,12 @@ func findCorrelatedRefs(subquerySQL string, outerTables map[string]bool, outerCo
 	if err != nil {
 		return nil, err
 	}
+	return findCorrelatedRefsIn(info, outerTables, outerCols, resolve), nil
+}
 
+// findCorrelatedRefsIn is findCorrelatedRefs over a body already parsed; it
+// does not change info.
+func findCorrelatedRefsIn(info *SelectInfo, outerTables map[string]bool, outerCols map[string]string, resolve TableColumns) []OuterRef {
 	resolve = blockScopeResolver(info, resolve)
 	scope := &outerRefScope{
 		outerTables: outerTables,
@@ -244,7 +292,7 @@ func findCorrelatedRefs(subquerySQL string, outerTables map[string]bool, outerCo
 
 	var refs []OuterRef
 	walkBlockForOuterRefs(info, scope, &refs)
-	return dedup(refs), nil
+	return dedup(refs)
 }
 
 // walkBlockForOuterRefs walks EVERY clause of one block that can carry a
@@ -1527,6 +1575,30 @@ func rebuildSQLFull(info *SelectInfo, cols []string, rewrittenWhere Node, having
 func OuterColumnCandidates(subquerySQL string) []string {
 	seen := make(map[string]bool, 4)
 	collectOuterCandidates(subquerySQL, seen)
+	return sortedCandidates(seen)
+}
+
+// OuterColumnCandidatesOf is OuterColumnCandidates for a subquery NODE (a
+// *SubqueryNode or an *ExistsNode): it reads the body memoized on the node and
+// parses nothing (arc CI3 round 2). Any other node yields no candidates.
+func OuterColumnCandidatesOf(n Node) []string {
+	seen := make(map[string]bool, 4)
+	collectOuterCandidatesNode(n, seen)
+	return sortedCandidates(seen)
+}
+
+func collectOuterCandidatesNode(n Node, out map[string]bool) {
+	var info *SelectInfo
+	switch q := n.(type) {
+	case *SubqueryNode:
+		info, _ = q.Select()
+	case *ExistsNode:
+		info, _ = q.Select()
+	}
+	collectOuterCandidatesBlock(info, out)
+}
+
+func sortedCandidates(seen map[string]bool) []string {
 	out := make([]string, 0, len(seen))
 	for c := range seen {
 		out = append(out, c)
@@ -1622,9 +1694,9 @@ func walkOuterCandidates(node Node, inner map[string]bool, out map[string]bool) 
 		// A reference the nested level attributes to ITS outer scope may
 		// belong to this level rather than to ours; keeping both is the
 		// over-inclusive direction and costs only a schema-filtered name.
-		collectOuterCandidates(n.SQL, out)
+		collectOuterCandidatesNode(n, out)
 	case *ExistsNode:
-		collectOuterCandidates(n.SQL, out)
+		collectOuterCandidatesNode(n, out)
 	case *AnyAllExpr:
 		walkOuterCandidates(n.Left, inner, out)
 		for _, v := range n.Values {
@@ -1781,6 +1853,15 @@ func AggregatesOverOnlyOuterRefs(subquerySQL string, outerTables map[string]bool
 	}
 	info, err := ExtractSelect(parsed)
 	if err != nil || info == nil {
+		return nil
+	}
+	return AggregatesOverOnlyOuterRefsIn(info, outerTables)
+}
+
+// AggregatesOverOnlyOuterRefsIn is AggregatesOverOnlyOuterRefs over a body
+// already parsed; it does not change info.
+func AggregatesOverOnlyOuterRefsIn(info *SelectInfo, outerTables map[string]bool) []OuterRef {
+	if info == nil {
 		return nil
 	}
 	inner := collectInnerTables(info)
@@ -2074,6 +2155,15 @@ func AggregateBesideANestedSubquery(subquerySQL string, outerTables map[string]b
 	}
 	info, err := ExtractSelect(parsed)
 	if err != nil || info == nil {
+		return false
+	}
+	return AggregateBesideANestedSubqueryIn(info, outerTables)
+}
+
+// AggregateBesideANestedSubqueryIn is AggregateBesideANestedSubquery over a
+// body already parsed; it does not change info.
+func AggregateBesideANestedSubqueryIn(info *SelectInfo, outerTables map[string]bool) bool {
+	if info == nil {
 		return false
 	}
 	for i := range info.Columns {

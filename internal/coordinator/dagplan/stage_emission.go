@@ -1247,7 +1247,7 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 						// running rather than failing outright.
 						start := time.Now()
 						restore := p.planInSubqueryChain(d.Node)
-						rows, schema, sErr := p.ExecuteSubquerySchema(p.PlanCtx, d.SubquerySQL)
+						rows, schema, sErr := p.ExecuteSubquerySchema(p.PlanCtx, d.SubquerySQL, d.Node)
 						restore()
 						slog.Warn("scalar producer emission failed; executed subquery on coordinator",
 							"duration", time.Since(start).Round(time.Millisecond),

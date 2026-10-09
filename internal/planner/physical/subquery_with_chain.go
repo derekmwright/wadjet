@@ -71,6 +71,29 @@ func (p *Planner) forSubqueryNode(n plansql.Node) (*Planner, bool) {
 	return sp, true
 }
 
+// planMemoSubquery makes n the expression subquery node this planner plans,
+// so a plan of n's text (ExecuteSubquerySchema, the stage planner's
+// plan-time runs) reads the body memoized on n rather than parsing the text
+// again (arc CI3 round 2). restore puts the previous node back; a nil n
+// leaves the planner as it is.
+func (p *Planner) planMemoSubquery(n plansql.Node) (restore func()) {
+	switch q := n.(type) {
+	case *plansql.SubqueryNode:
+		if q == nil {
+			return func() {}
+		}
+	case *plansql.ExistsNode:
+		if q == nil {
+			return func() {}
+		}
+	default:
+		return func() {}
+	}
+	saved := p.memoSub
+	p.memoSub = n
+	return func() { p.memoSub = saved }
+}
+
 // subqueryChain is the WITH chain a SubqueryNode or ExistsNode records.
 func subqueryChain(n plansql.Node) ([]plansql.CTEDef, bool) {
 	switch q := n.(type) {

@@ -72,7 +72,7 @@ func (p *StagePlanner) materializeInSubquery(ctx context.Context, in *plansql.In
 	// producer: its dangling outer reference resolves to no column and
 	// evaluates NULL, which is the silent 0 #359 is about. The correlated
 	// refusal owns that shape.
-	if dangling := plansql.DanglingTableRefs(subq.SQL); len(dangling) > 0 {
+	if dangling := plansql.DanglingTableRefsOfNode(subq); len(dangling) > 0 {
 		p.refuseCorrelated(fmt.Errorf("%w: an IN subquery references outer %s"+
 			" and cannot execute as a standalone set producer",
 			ErrCorrelatedSubqueryDistributed, describeOuterRefs(dangling)))
@@ -99,7 +99,7 @@ func (p *StagePlanner) materializeInSubquery(ctx context.Context, in *plansql.In
 	}
 
 	start := time.Now()
-	rows, setSchema, err := p.ExecuteSubquerySchema(ctx, subq.SQL)
+	rows, setSchema, err := p.ExecuteSubquerySchema(ctx, subq.SQL, subq)
 	if err != nil {
 		p.refuseInSubquery(fmt.Errorf("%w: executing the subquery as a set producer failed: %v",
 			ErrInSubqueryDistributed, err))

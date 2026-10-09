@@ -50,7 +50,7 @@ func refuseScalarSubqueryProjections(root *logical.Node, lowered map[*logical.Pr
 				if p.ASTExpr == nil || lowered[p] {
 					continue
 				}
-				visitExprSubqueries(p.ASTExpr, func(sql, construct string) {
+				visitExprSubqueries(p.ASTExpr, func(_ plansql.Node, sql, construct string) {
 					if found != nil {
 						return
 					}
@@ -82,7 +82,7 @@ func refuseScalarSubqueryProjections(root *logical.Node, lowered map[*logical.Pr
 		if n.Type == logical.NodeWindow {
 			for i := range n.WindowExprs {
 				we := &n.WindowExprs[i]
-				report := func(sql, construct string) {
+				report := func(_ plansql.Node, sql, construct string) {
 					if found != nil {
 						return
 					}

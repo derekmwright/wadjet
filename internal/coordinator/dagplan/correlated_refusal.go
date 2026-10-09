@@ -95,11 +95,12 @@ func (p *StagePlanner) refuseCorrelatedInExpr(ast plansql.Node, site string, out
 		return nil
 	}
 	var found error
-	visitExprSubqueries(ast, func(sql, construct string) {
+	visitExprSubqueries(ast, func(q plansql.Node, _, construct string) {
 		if found != nil {
 			return
 		}
-		refs, err := plansql.FindCorrelatedRefsWithScope(sql, outerTables, outerCols, p.SubqueryInnerColumns())
+		// By name, over the node's memoized body (arc CI3 round 2).
+		refs, err := plansql.FindCorrelatedRefsWithScopeOf(q, outerTables, outerCols, p.SubqueryInnerColumns())
 		if err != nil || len(refs) == 0 {
 			return
 		}
@@ -148,20 +149,20 @@ func (p *StagePlanner) refusePlanTimeAnswer(err error) {
 // subquery SQL itself: correlation analysis (FindCorrelatedRefsWithScope)
 // already recurses through nesting, so a two-deep correlation surfaces at the
 // outermost subquery.
-func visitExprSubqueries(n plansql.Node, visit func(sql, construct string)) {
+func visitExprSubqueries(n plansql.Node, visit func(q plansql.Node, sql, construct string)) {
 	if n == nil {
 		return
 	}
 	switch v := n.(type) {
 	case *plansql.SubqueryNode:
-		visit(v.SQL, "a scalar subquery")
+		visit(v, v.SQL, "a scalar subquery")
 	case *plansql.ExistsNode:
-		visit(v.SQL, "an EXISTS subquery")
+		visit(v, v.SQL, "an EXISTS subquery")
 	case *plansql.InExpr:
 		visitExprSubqueries(v.Left, visit)
 		for _, val := range v.Values {
 			if sq, ok := val.(*plansql.SubqueryNode); ok {
-				visit(sq.SQL, "an IN subquery")
+				visit(sq, sq.SQL, "an IN subquery")
 				continue
 			}
 			visitExprSubqueries(val, visit)
@@ -170,7 +171,7 @@ func visitExprSubqueries(n plansql.Node, visit func(sql, construct string)) {
 		visitExprSubqueries(v.Left, visit)
 		for _, val := range v.Values {
 			if sq, ok := val.(*plansql.SubqueryNode); ok {
-				visit(sq.SQL, "an ANY/ALL subquery")
+				visit(sq, sq.SQL, "an ANY/ALL subquery")
 				continue
 			}
 			visitExprSubqueries(val, visit)

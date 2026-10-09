@@ -276,7 +276,7 @@ func compileQuantified(n *plansql.AnyAllExpr, ctx *compileContext) (Expr, error)
 			}
 			if (op == CmpEq && !all) || (op == CmpNe && all) {
 				sctx := ctx.forSubqueryNode(sq)
-				return &InSubquery{Expr: left, SQL: sq.SQL, Runner: sctx.runner, Not: all,
+				return &InSubquery{Expr: left, SQL: sq.SQL, Node: sq, Runner: sctx.runner, Not: all,
 					Scope: sctx.subqueryScope, Budget: ctx.budget, SetBound: ctx.setRowBound,
 					probeDecl: newOperandDecl(probeNode, ctx), setDecl: setDecl}, nil
 			}

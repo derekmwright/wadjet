@@ -228,7 +228,19 @@ func unfoldIn(n Node, scope map[string]bool, hasFrom bool) Node {
 			// that a FROM-less body can be unfolded into.
 			return e
 		}
-		if repl, ok := fromlessScalarExpr(e.SQL, scope, hasFrom); ok {
+		// The node's memo answers whether the body CAN be unfolded, and an
+		// unfold takes the memo's tree (takeBody): the body is parsed once
+		// whether it keeps its node or not (arc CI3 round 2).
+		if info, err := e.Select(); err != nil || info == nil {
+			return e
+		} else if _, ok := fromlessScalarInfo(info, scope, hasFrom); !ok {
+			return e
+		}
+		info, err := e.takeBody()
+		if err != nil || info == nil {
+			return e
+		}
+		if repl, ok := fromlessScalarInfo(info, scope, hasFrom); ok {
 			// To a FIXED POINT: `(SELECT (SELECT u.x))` is `(SELECT u.x)` is
 			// `u.x`, and each unfold hands back a strictly shorter statement,
 			// so the recursion ends.
@@ -363,7 +375,12 @@ func fromlessScalarExpr(subSQL string, scope map[string]bool, hasFrom bool) (Nod
 	if err != nil || parsed == nil || parsed.SelectInfo == nil {
 		return nil, false
 	}
-	info := parsed.SelectInfo
+	return fromlessScalarInfo(parsed.SelectInfo, scope, hasFrom)
+}
+
+// fromlessScalarInfo is fromlessScalarExpr over a body already parsed. It does
+// not change info; the node it returns is info's own item.
+func fromlessScalarInfo(info *SelectInfo, scope map[string]bool, hasFrom bool) (Node, bool) {
 	if info.Union != nil || len(info.CTEs) > 0 {
 		return nil, false
 	}

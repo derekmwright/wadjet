@@ -71,7 +71,7 @@ func checkAggregatePlacement(info *plansql.SelectInfo) error {
 // those shapes at the subquery level. Do not turn that boundary into an earlier refusal.
 // See docs/internals/subquery-aggregate-placement-boundary.md for the design.
 func checkSubqueryAggregatePlacement(info *plansql.SelectInfo) error {
-	var sqls []string
+	var sqls []subqueryBlock
 	collectSubquerySQL(info.WhereExpr, &sqls)
 	collectSubquerySQL(info.HavingExpr, &sqls)
 	for _, col := range info.Columns {
@@ -83,14 +83,12 @@ func checkSubqueryAggregatePlacement(info *plansql.SelectInfo) error {
 	for _, j := range info.Joins {
 		collectSubquerySQL(j.CondExpr, &sqls)
 	}
-	for _, sql := range sqls {
-		parsed, err := plansql.Parse(sql)
-		if err != nil {
-			continue // not this check's business; the executor reports it
-		}
-		sub, err := plansql.ExtractSelect(parsed)
+	for _, q := range sqls {
+		// The node's memo is the body (arc CI3 round 2): this check reads the
+		// tree every other requester reads, and parses nothing.
+		sub, err := q.Select()
 		if err != nil || sub == nil {
-			continue
+			continue // not this check's business; the executor reports it
 		}
 		own := subqueryOwnRelations(sub)
 		if sub.WhereExpr != nil {
@@ -209,18 +207,24 @@ func walkColRefs(node plansql.Node, visit func(*plansql.ColRef)) {
 	}
 }
 
-// collectSubquerySQL gathers the SQL text of every subquery this expression
-// contains, at THIS level only — a subquery's own nested ones are collected
-// when it is itself examined.
-func collectSubquerySQL(node plansql.Node, out *[]string) {
+// subqueryBlock is an expression subquery's node: SubqueryNode or ExistsNode,
+// each answering its parsed body from the memo on the node.
+type subqueryBlock interface {
+	Select() (*plansql.SelectInfo, error)
+}
+
+// collectSubquerySQL gathers every subquery node this expression contains, at
+// THIS level only — a subquery's own nested ones are collected when it is
+// itself examined.
+func collectSubquerySQL(node plansql.Node, out *[]subqueryBlock) {
 	if node == nil {
 		return
 	}
 	switch n := node.(type) {
 	case *plansql.SubqueryNode:
-		*out = append(*out, n.SQL)
+		*out = append(*out, n)
 	case *plansql.ExistsNode:
-		*out = append(*out, n.SQL)
+		*out = append(*out, n)
 	case *plansql.ParenNode:
 		collectSubquerySQL(n.Inner, out)
 	case *plansql.NotNode:
