@@ -375,7 +375,7 @@ func (p *Planner) cteKeyColTypes(ref *logical.Node) (map[string]parquet.TypeID, 
 	if p == nil || ref == nil {
 		return nil, false
 	}
-	if mat, ok := p.cteCache[ref.CTEName]; ok && mat != nil && len(mat.schema) > 0 {
+	if mat, ok := p.cteCacheFor(ref); ok && mat != nil && len(mat.schema) > 0 {
 		out := make(map[string]parquet.TypeID, len(mat.schema))
 		for _, c := range mat.schema {
 			out[strings.ToLower(c.Name)] = c.Type

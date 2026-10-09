@@ -160,7 +160,7 @@ func (p *Planner) iterateRecursiveCTEAt(ctx context.Context, cte plansql.CTEDef,
 				cte.Name, recursiveIterationLimit))
 		}
 		// Seed the self-reference with the working table.
-		p.cteCache[cte.Name] = &cteMaterialized{schema: schema, coll: work, pgCat: anchorPG}
+		p.cteCache[cte.Name] = &cteMaterialized{schema: schema, coll: work, pgCat: anchorPG, ident: cte.Identity()}
 		// An error is the STATEMENT's error (#1041): a term that fails on
 		// iteration k does not make iterations 1..k-1 the answer.
 		termBatches, _, termLits, _, err := p.runRecursiveArm(ctx, recursiveSQL)
@@ -184,7 +184,7 @@ func (p *Planner) iterateRecursiveCTEAt(ctx context.Context, cte plansql.CTEDef,
 	if err := writer.flush(ctx); err != nil {
 		return fail(err)
 	}
-	p.cteCache[cte.Name] = &cteMaterialized{schema: schema, coll: closure, pgCat: anchorPG}
+	p.cteCache[cte.Name] = &cteMaterialized{schema: schema, coll: closure, pgCat: anchorPG, ident: cte.Identity()}
 	return nil
 }
 

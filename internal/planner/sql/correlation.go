@@ -675,9 +675,24 @@ func CTEColumnsWithFuncs(ctes []CTEDef, base TableColumns, fn FromItemColumns) T
 	}
 	// The definitions are read by POINTER into the caller's slice so a body's
 	// parse is memoized where every other reader sees it (ADR-0032).
-	index := make(map[string]int, len(ctes))
+	//
+	// A name may appear more than once: the chain is the enclosing scopes'
+	// items then each nested block's own, and the item a name binds at scope
+	// s is the LAST one of that name before s — a nested WITH that reuses a
+	// name shadows the enclosing item inside its block (#1606).
+	index := make(map[string][]int, len(ctes))
 	for i := range ctes {
-		index[strings.ToLower(ctes[i].Name)] = i
+		name := strings.ToLower(ctes[i].Name)
+		index[name] = append(index[name], i)
+	}
+	lookup := func(name string, scope int) (int, bool) {
+		at := index[strings.ToLower(name)]
+		for k := len(at) - 1; k >= 0; k-- {
+			if at[k] < scope {
+				return at[k], true
+			}
+		}
+		return -1, false
 	}
 	// The recursion terminates STRUCTURALLY and needs no depth bound: item i's
 	// body is resolved at scope i, so `scope` strictly decreases and an item's
@@ -689,8 +704,8 @@ func CTEColumnsWithFuncs(ctes []CTEDef, base TableColumns, fn FromItemColumns) T
 	var resolveAt func(scope int) TableColumns
 	resolveAt = func(scope int) TableColumns {
 		return func(table string) []string {
-			i, ok := index[strings.ToLower(table)]
-			if !ok || i >= scope {
+			i, ok := lookup(table, scope)
+			if !ok {
 				if base == nil {
 					return nil
 				}
