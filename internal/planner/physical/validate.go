@@ -2030,13 +2030,19 @@ func (b *binder) checkUngrouped(info *plansql.SelectInfo, from, resolve *colScop
 		// A BOUND block's sort term is its parsed tree, which carries the
 		// binder's bindings; re-parsing the text would hand the check an
 		// unbound copy of a term the rest of the block matches by binding.
+		// A window call's text does not parse at all (WindowFuncNode.String()
+		// collapses its OVER clause), so an unbound block's window sort term
+		// is judged on its tree: re-parsing it left `ORDER BY sum(b) OVER ()`
+		// unjudged on a door that does not stamp.
 		expr := ob.Expr
 		if expr == nil || !plansql.HoldsBinding(expr) {
 			parsed, err := plansql.ParseExpression(ob.Column)
-			if err != nil {
+			switch {
+			case err == nil:
+				expr = parsed
+			case expr == nil || len(plansql.FindAllWindowFuncs(expr)) == 0:
 				continue
 			}
-			expr = parsed
 		}
 		if err := g.check(g.asWritten(expr, ob.UnfoldedFrom)); err != nil {
 			return err
@@ -2068,12 +2074,10 @@ type groupCheck struct {
 	// subquery checks only references back to this bound block. Unbound
 	// blocks retain their spelling checks, including the DAG interim.
 	subquery func(string) error
-	// Window arguments retain their ordinary-reference behavior in stage 1.
-	subqueriesOnly bool
-	from           *colScope
-	keys           map[string]bool
-	idents         map[string]bool
-	bare           map[string]bool
+	from     *colScope
+	keys     map[string]bool
+	idents   map[string]bool
+	bare     map[string]bool
 	// originKeys are the keys of GROUP BY terms recorded as written before
 	// the FROM-less unfold rewrote them; a SELECT item is covered by one only
 	// when its OWN written spelling holds it.
@@ -2309,9 +2313,6 @@ func (g *groupCheck) check(node plansql.Node) error {
 	}
 	switch n := node.(type) {
 	case *plansql.ColRef:
-		if g.subqueriesOnly {
-			return nil
-		}
 		if b := n.Bound; b != nil {
 			// What the binder resolved decides, and nothing spelled alike
 			// does: an OUTPUT name (a HAVING / ORDER BY alias) stands for
@@ -2373,26 +2374,32 @@ func (g *groupCheck) check(node plansql.Node) error {
 		}
 		return nil
 	case *plansql.WindowFuncNode:
-		// Preserve the ordinary window-argument check while examining
-		// subqueries in arguments, partition terms and order terms.
-		if g.subquery != nil {
-			window := *g
-			window.subqueriesOnly = true
-			terms := append([]plansql.Node(nil), n.Func.Args...)
-			terms = append(terms, n.PartitionBy...)
-			for _, term := range n.OrderBy {
-				terms = append(terms, term.Expr)
+		// A window is evaluated over the GROUPED rows, so every term it
+		// reads — its arguments, PARTITION BY, ORDER BY and frame offsets —
+		// is judged exactly as a select item is: a key or an expression over
+		// keys passes, an aggregate call passes without its arguments being
+		// judged, and any other column is PostgreSQL's 42803. The window
+		// function itself is not an aggregate call here, which is why its
+		// arguments are walked rather than the call (`sum(f) OVER (…)` above
+		// `GROUP BY i` read f as NULL, #1651). A subquery inside a term takes
+		// the SubqueryNode arm below, as anywhere else.
+		var terms []plansql.Node
+		if n.Func != nil {
+			terms = append(terms, n.Func.Args...)
+		}
+		terms = append(terms, n.PartitionBy...)
+		for _, term := range n.OrderBy {
+			terms = append(terms, term.Expr)
+		}
+		if n.Frame != nil {
+			terms = append(terms, n.Frame.Start.Offset)
+			if n.Frame.End != nil {
+				terms = append(terms, n.Frame.End.Offset)
 			}
-			if n.Frame != nil {
-				terms = append(terms, n.Frame.Start.Offset)
-				if n.Frame.End != nil {
-					terms = append(terms, n.Frame.End.Offset)
-				}
-			}
-			for _, term := range terms {
-				if err := window.check(term); err != nil {
-					return err
-				}
+		}
+		for _, term := range terms {
+			if err := g.check(term); err != nil {
+				return err
 			}
 		}
 		return nil
