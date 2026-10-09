@@ -2755,7 +2755,9 @@ the exception: a recursive CTE's name IS visible inside its own body.
 
 A WITH list on a nested block — a derived table, a CTE body, a subquery — is
 in scope inside that block, and an item that reuses an enclosing item's name
-shadows it there. Every expression subquery (scalar, `IN`, `EXISTS`, `ANY` /
+shadows it there, with one exception: a nested WITH that reuses a recursive
+CTE's name inside that CTE's own recursive term is refused (42P19 on the
+single-process arms; PostgreSQL answers). Every expression subquery (scalar, `IN`, `EXISTS`, `ANY` /
 `ALL`) reads the items in scope where it is written:
 
 ```sql

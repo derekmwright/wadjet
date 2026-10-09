@@ -19,7 +19,9 @@ dependencies and no ScanFiles" (#684).
 
 A reference binds the LAST item of its name in that list — the innermost
 scope's — so a nested WITH that reuses an enclosing item's name shadows it
-inside its block, as PostgreSQL scopes it. The item's own body is planned with
+inside its block, as PostgreSQL scopes it (except inside a recursive CTE's own
+recursive term, where a nested item of the CTE's name is refused 42P19 where
+PostgreSQL answers — a recorded residual, not a shadowing). The item's own body is planned with
 the list BEFORE it (`ctes[:i]`): a non-recursive item is not in scope inside
 its own body, so one that shadows a base table or an enclosing item reads that
 table or item (#771: handing a CTE the whole list let one that shadows a base
