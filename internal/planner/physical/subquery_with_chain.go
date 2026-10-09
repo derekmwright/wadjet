@@ -39,8 +39,16 @@ func (p *Planner) subqueryScopingIn(scope *logical.Node) expr.SubqueryScoping {
 		if !ok {
 			return expr.SubqueryHooks{}, false
 		}
+		// A correlated subquery's re-runs read every WITH item once per run,
+		// and the statement evaluates a volatile one ONCE (#1599): the
+		// per-run planner's chain says so (plansql.ReadPerRun), and its own
+		// WITH items that read no outer row keep the body's identity.
+		rp := sp.forSubquery()
+		rp.Ctes = plansql.ReadPerRun(sp.Ctes)
+		rp.rerunBody = true
 		return expr.SubqueryHooks{
 			Runner: sp.makeSubqueryRunner(),
+			PerRun: rp.makeSubqueryRunner(),
 			Decl:   sp.subqueryOutputColumnOf(n, scope),
 			Cols:   sp.SubqueryOutputArity,
 			Scope:  sp.SubqueryInnerColumns(),

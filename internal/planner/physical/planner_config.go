@@ -36,6 +36,10 @@ type Planner struct {
 	// read bound appended — plans the node's memoized, bound body
 	// (subqueryBodyFor) rather than a private parse.
 	memoSub plansql.Node
+	// rerunBody says this planner runs memoSub's correlated RE-RUNS: a
+	// parse of a re-run's text adopts the body's run-invariant WITH items
+	// (plansql.AdoptRunInvariantItems).
+	rerunBody bool
 	// subqueryRuns counts executeSubquery calls across every child planner
 	// (forSubquery copies the pointer): the seam a test counts a subquery's
 	// runs at, whichever scoped runner reached it. Nil counts nothing.

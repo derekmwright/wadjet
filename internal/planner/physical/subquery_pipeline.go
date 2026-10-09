@@ -403,6 +403,11 @@ func (p *Planner) buildSubqueryPipeline(ctx context.Context, sql string) (exec.S
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("subquery extract error: %w", err)
 	}
+	if p.rerunBody {
+		if body, err := subqueryNodeBody(p.memoSub); err == nil && body != nil {
+			plansql.AdoptRunInvariantItems(info, body)
+		}
+	}
 	return p.buildSubqueryPipelineFor(ctx, info)
 }
 

@@ -172,7 +172,46 @@ func (c *CTEDef) Identity() *CTEIdentity {
 // recursive CTE is always materialized to its fixed point and is not this
 // rule's.
 func (c *CTEDef) EvaluatedOnce() bool {
-	return c != nil && !c.Recursive && c.ident != nil && c.volatile && c.reads >= 2
+	return c != nil && !c.Recursive && c.ident != nil && c.volatile && (c.reads >= 2 || c.rerun)
+}
+
+// ReadPerRun is the chain a block that is run more than once within the
+// statement plans with — a correlated subquery re-run per outer row, a
+// recursive term per iteration: each item marked as read by every run, so a
+// volatile one is the statement's ONE evaluation (EvaluatedOnce, served by
+// its identity) and not one per run. PostgreSQL evaluates a WITH item once
+// for the statement, wherever it is read from (#1599).
+func ReadPerRun(chain []CTEDef) []CTEDef {
+	if len(chain) == 0 {
+		return chain
+	}
+	out := make([]CTEDef, len(chain))
+	copy(out, chain)
+	for i := range out {
+		out[i].rerun = true
+	}
+	return out
+}
+
+// AdoptRunInvariantItems gives a re-run's own WITH items the IDENTITY of the
+// statement's: run is a parse of body's text after a correlated re-run's
+// substitution, and an item whose text the substitution left as it was reads
+// no outer row, so every run reads the one item — PostgreSQL evaluates it once
+// (#1599). An item whose text changed reads the outer row and keeps its own
+// identity: one evaluation per run — and so does every item after it, which
+// may read it. Items are matched by position, name and text; the adopted
+// items are marked as read by every run (ReadPerRun).
+func AdoptRunInvariantItems(run, body *SelectInfo) {
+	if run == nil || body == nil || len(run.CTEs) != len(body.CTEs) {
+		return
+	}
+	for i := range run.CTEs {
+		r, b := &run.CTEs[i], &body.CTEs[i]
+		if r.Name != b.Name || r.SQL != b.SQL || r.Recursive != b.Recursive || b.ident == nil {
+			return
+		}
+		r.ident, r.volatile, r.reads, r.rerun = b.ident, b.volatile, b.reads, true
+	}
 }
 
 // Reads is how many times the statement reads this WITH item (an upper
