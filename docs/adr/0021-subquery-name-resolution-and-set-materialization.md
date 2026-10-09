@@ -1095,6 +1095,32 @@ columns ADR-0012's #810 entry names. wrong → right on two arms and loud on two
 or wrong → loud on four, is within doctrine; each pin fails the day its gap
 closes.
 
+#### 2026-10-09: the correlation classifier asks the binding level (#1603)
+
+The rule above is unchanged; who applies it moved. The binder resolves every
+reference of an expression subquery's body — the node's memoized parse,
+ADR-0032 extended to `SubqueryNode` / `ExistsNode` — with the enclosing
+query's scope, and records the query level each binds (`ColRef.Bound.Level`,
+ADR-0047 stage 3). Where it bound the body in full, a reference is
+correlated exactly when its binding reaches the query the subquery is written
+in (`plansql.BoundCorrelatedRefs`, through `plansql.CorrelatedRefsOf` at the
+compiler's three sites, the decorrelators' and the declaration's outer-typed
+text); the resolver this section describes answers a body the binder did not
+bind in full — a door that does not bind (the coordinator), a derived table,
+a CTE body or a LATERAL item inside the body, a reference two levels out.
+The resolver itself reads a nested WITH item by scope: of two items of one
+name the innermost before the reader wins (`plansql.CTEColumns`). Gated by
+the cells above (`coordinator.TestArcI1AnUnqualifiedNameBindsTheInnerRelation`,
+`851/*` in `TestArcE3NamesAndScopesTwoPath`, the #1098 cells of
+`TestArcR1ACorrelatedBodyAnswersPostgresRowSetOnEveryArm`) and by
+`coordinator.TestArcCI3SubqueryBodyInItsScopeEveryArm`, whose #1603 cells
+(`sum((SELECT g FROM s WHERE g >= t.id LIMIT 1))` over a CTE: NULL at
+542b4f37, PostgreSQL's 6 now) read a CTE from a correlated subquery that is
+an aggregate's argument. That NULL was this section's question asked one pass
+too early: the subquery's DECLARATION was planned before the statement's
+WITH list was in scope, from a relation `s` no catalog has; it is now planned
+in the chain the node records.
+
 ### 1l. A FROM-less scalar subquery IS its SELECT expression, in the block that supplies the row — and a per-row re-run substitutes into every clause it rebuilds
 
 (Added 2026-09-12, #1044. Rewritten the same day after earlier implementation moved the
@@ -2386,10 +2412,16 @@ are still open, rather than a claim over all of them:
   coordinator runs the plan single-process. The planner keeps one decline, for
   the column-alias list over a catalog table, whose decorrelated build cannot
   be planned single-process at all.
-- A correlated subquery whose own WITH item shadows an enclosing one is
-  refused, 0A000, by name: the rerun plans the body with the enclosing item
-  first and the CTE cache is keyed by name (docs/internals/nested-with-scope-precedence.md),
-  so it read the enclosing relation — zero rows where PostgreSQL answers.
+- A correlated subquery whose own WITH item shadows an enclosing one was
+  refused, 0A000, by name: the rerun planned the body with the enclosing item
+  first and the CTE cache was keyed by name, so it read the enclosing
+  relation. Since ADR-0047 stage 3 (2026-10-09, #1606) the builder binds the
+  innermost item of a name and a CTE materialization answers by the item's
+  identity (docs/internals/nested-with-scope-precedence.md): the rerun reads
+  the body's own item, PostgreSQL's rows
+  (`coordinator.TestArcDCAShadowingBodyWithReadsItsOwnItemOnEveryArm`). The
+  decorrelation still declines such a body — its keys are spelled by name
+  (stage 4) — and the per-row re-run answers it.
 - Still open, filed: a name supplied by a table function's alias is read as
   outer; a `HAVING` or `LIMIT` inside an `EXISTS` body is ignored; a `LATERAL`
   item in the body answers no rows; a column-alias list over a catalog table
@@ -2947,12 +2979,19 @@ exactly as at c67ebf5b — inlined, pushed into, a single reference's error
 raised exactly where it was (EXPLAIN VERBOSE of eight single-reference shapes
 is the text c67ebf5b printed: `wadjet.TestArcCMSingleReferenceVolatileCTEPlansAsAtBase`).
 PostgreSQL materializes such a CTE too, and a single reader of a
-materialization reads the rows an inlined body yields — with one exception
-measured: a reference inside a CORRELATED subquery is re-run per outer row
-here, so `WITH s AS (SELECT random() r) SELECT count(DISTINCT (SELECT r +
-t.id*0 FROM s)) FROM cm_big t WHERE t.id <= 50` answers 50, PostgreSQL 1
-(R1; a WITH declared inside the correlated subquery likewise, R3; catalog
-[other#r27](0012-divergences/other.md#catalog)).
+materialization reads the rows an inlined body yields — except where the
+reader itself runs more than once. A block run again within the statement —
+a correlated subquery per outer row, a recursive term per iteration — plans
+with every WITH item it reads marked as read by every run
+(`plansql.ReadPerRun`), so a volatile one is the statement's one spool:
+`WITH s AS (SELECT random() r) SELECT count(DISTINCT (SELECT r + t.id*0 FROM
+s)) FROM cm_big t WHERE t.id <= 50` answers PostgreSQL's 1 (50 at 542b4f37),
+and so does a WITH declared inside the correlated subquery that reads no
+outer value — the re-run's own item keeps the body's identity while its text
+is unchanged (`plansql.AdoptRunInvariantItems`) — and a once-read volatile
+item a recursive term reads (4 at 542b4f37). Added 2026-10-09 (#1599,
+ADR-0047 stage 3); gated by `coordinator.TestArcCI3SubqueryBodyInItsScopeEveryArm`
+`i1599/*`.
 
 A volatile item read more than once is a SHARED SPOOL (`exec.SharedSpool`),
 keyed by an identity every copy of the item carries, whichever scope copied

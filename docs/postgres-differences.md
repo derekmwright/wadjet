@@ -106,7 +106,7 @@ With `t = 'hi'` and `b = '\x6869'`, `t || b` answers `hihi` (length 4) and `b ||
 
 **On a cluster, a volatile CTE read more than once is evaluated per consumer.**
 
-A CTE whose body calls `random()`, `rand()` or `uuid()` (directly or through a `CREATE FUNCTION` body) or samples a relation, and that the statement reads more than once, is evaluated once — filled on demand — by the embedded engine, `wadjet serve`, the asynchronous door and a statement a coordinator runs on its local pipeline: every reference reads the same rows, as on PostgreSQL. Read once from a correlated subquery, it is evaluated per outer row there (PostgreSQL: once; catalog [other#r27](adr/0012-divergences/other.md#catalog)). On the stage DAG it is evaluated once per consuming stage: `WITH s AS (SELECT id, random() AS r FROM t WHERE id <= 50) SELECT count(*) FROM (SELECT id, r FROM s EXCEPT SELECT id, r FROM s) u` answers 50 there, PostgreSQL 0. A sampled body agrees where the sample is drawn in the scan the consumers share. (catalog: [other#r24](adr/0012-divergences/other.md#catalog); ADR-0021 §2d; #1531)
+A CTE whose body calls `random()`, `rand()` or `uuid()` (directly or through a `CREATE FUNCTION` body) or samples a relation, and that the statement reads more than once, is evaluated once — filled on demand — by the embedded engine, `wadjet serve`, the asynchronous door and a statement a coordinator runs on its local pipeline: every reference reads the same rows, as on PostgreSQL — a correlated subquery's per-row runs and a recursive term's iterations included. On the stage DAG it is evaluated once per consuming stage: `WITH s AS (SELECT id, random() AS r FROM t WHERE id <= 50) SELECT count(*) FROM (SELECT id, r FROM s EXCEPT SELECT id, r FROM s) u` answers 50 there, PostgreSQL 0. A sampled body agrees where the sample is drawn in the scan the consumers share. (catalog: [other#r24](adr/0012-divergences/other.md#catalog); ADR-0021 §2d; #1531)
 
 **A text-typed parameter is a `TABLESAMPLE` percentage.**
 
@@ -731,10 +731,6 @@ Set-operation/LATERAL bodies and outer-level aggregates lack the required evalua
 **An UNQUALIFIED outer reference over a table function is refused in the subquery's WHERE.**
 
 An unqualified name inside a correlated subquery binds to the enclosing row when the subquery's own relations do not have it, as on PostgreSQL. When the subquery's FROM reads a table function, its columns are not known at that point: `o.id IN (SELECT b.k FROM dc_in b JOIN generate_series(1, 9) g(x) ON g.x = b.k WHERE total > 100)` fails with `filter column "total" does not exist in the input schema` where PostgreSQL answers. Write the qualifier — `o.total > 100`. (catalog: [lateral-subqueries#r8](adr/0012-divergences/lateral-subqueries.md#catalog); #1104, ADR-0021 §1r)
-
-**A correlated subquery's own WITH item that shadows an outer WITH item is refused.**
-
-`WITH d AS (…) SELECT … WHERE EXISTS (WITH d AS (…) SELECT 1 FROM d …)` reads the subquery's own `d` on PostgreSQL; here it is 0A000 `a WITH item inside a correlated subquery that shadows an outer WITH item is not supported`, because the per-row execution would read the outer `d`. Rename one of the two items. (catalog: [lateral-subqueries#r10](adr/0012-divergences/lateral-subqueries.md#catalog); ADR-0021 §1r)
 
 **Outer aggregates in subquery WHERE are refused.**
 
