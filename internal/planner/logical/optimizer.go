@@ -1267,13 +1267,9 @@ func tryDecorrelateScalarSubquery(pred Predicate, outerTables map[string]bool, o
 		return nil, pred, false
 	}
 
-	// Parse the subquery
-	parsed, err := plansql.Parse(subq.SQL)
-	if err != nil {
-		return nil, pred, false
-	}
-	info, err := plansql.ExtractSelect(parsed)
-	if err != nil {
+	// The subquery's memoized body, in the WITH chain it is written in.
+	info, ctes, err := subqueryBodyIn(subq, ctes)
+	if err != nil || info == nil {
 		return nil, pred, false
 	}
 
@@ -1884,12 +1880,8 @@ func innerGroupKey(info *plansql.SelectInfo, term string) KeyRef {
 // applies them per outer row — so the caller adds them to the enclosing
 // query's own predicate list (#1104, outerOnlyDisposition).
 func tryDecorrelateInSubquery(inExpr *plansql.InExpr, subq *plansql.SubqueryNode, outerTables map[string]bool, outerColMap map[string]string, ctes []plansql.CTEDef, annotate func(*Node), rowFields map[string][]parquet.Column) (*Node, []plansql.Node) {
-	parsed, err := plansql.Parse(subq.SQL)
-	if err != nil {
-		return nil, nil
-	}
-	info, err := plansql.ExtractSelect(parsed)
-	if err != nil {
+	info, ctes, err := subqueryBodyIn(subq, ctes)
+	if err != nil || info == nil {
 		return nil, nil
 	}
 
@@ -3472,12 +3464,8 @@ func decorrelateExists(n *Node, ctes []plansql.CTEDef, annotate func(*Node)) *No
 // They are not part of the join — PostgreSQL applies them per outer row — and
 // the caller conjoins them with it (#1104, outerOnlyDisposition).
 func tryDecorrelateExists(exists *plansql.ExistsNode, outerTables map[string]bool, outerColMap map[string]string, ctes []plansql.CTEDef, annotate func(*Node)) (*Node, []plansql.Node) {
-	parsed, err := plansql.Parse(exists.SQL)
-	if err != nil {
-		return nil, nil
-	}
-	info, err := plansql.ExtractSelect(parsed)
-	if err != nil {
+	info, ctes, err := subqueryBodyIn(exists, ctes)
+	if err != nil || info == nil {
 		return nil, nil
 	}
 
