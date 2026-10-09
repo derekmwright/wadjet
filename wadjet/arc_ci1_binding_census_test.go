@@ -131,10 +131,26 @@ func TestArcCI1BindingCensusOverTheGroupKeyTable(t *testing.T) {
 // ci1MatchViolation is RISKS M3's rule for one comparison: the term's own
 // leaves are all bound or all unbound, and the keys are on the same side.
 // A planner-minted slot (`__agg_0`) is not a reference the query wrote.
+// ci1MintedAggregateRef reports a reference the logical builder MINTS for an
+// aggregate's output above the aggregate (plansql.ReplaceAllAggregates names
+// it by the call's text, `"count(*)"`): a planner name, not a user reference,
+// as `__agg_N` is. A HAVING over one beside a bound computed key is the same
+// comparison at the statement's top level at 542b4f37 (`SELECT count(*) FROM
+// ss_t x GROUP BY 2 * n HAVING count(*) > 0`); ADR-0047 stage 3 binds
+// expression-subquery bodies, so the census now meets it in one
+// (c738/outerWhereGrouped). It names no key, and the lookup answers so.
+func ci1MintedAggregateRef(r *plansql.ColRef) bool {
+	if r.Table != "" {
+		return false
+	}
+	open := strings.IndexByte(r.Column, '(')
+	return open > 0 && strings.HasSuffix(r.Column, ")") && plansql.IsAggregate(r.Column[:open])
+}
+
 func ci1MatchViolation(term plansql.Node, keys []string) string {
 	tb, tu := false, false
 	plansql.WalkColRefs(term, func(r *plansql.ColRef) {
-		if r.Slot || strings.HasPrefix(r.Column, "__") {
+		if r.Slot || strings.HasPrefix(r.Column, "__") || ci1MintedAggregateRef(r) {
 			return
 		}
 		if r.Bound != nil {

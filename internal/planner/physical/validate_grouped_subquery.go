@@ -28,7 +28,7 @@ func (g *groupCheck) checkSubqueryRefs(b *binder, sub *plansql.SelectInfo) error
 	}
 	check := func(term plansql.Node) error {
 		var refs []*plansql.ColRef
-		var subs []string
+		var subs []plansql.Node
 		g.subqueryTermRefs(term, resolve, &refs, &subs)
 		for _, ref := range refs {
 			binding, category := bindRef(resolve, ref)
@@ -45,8 +45,8 @@ func (g *groupCheck) checkSubqueryRefs(b *binder, sub *plansql.SelectInfo) error
 				}
 			}
 		}
-		for _, sql := range subs {
-			if err := g.checkSubqueryRefs(b, b.validatedBody(sql, resolve)); err != nil {
+		for _, sq := range subs {
+			if err := g.checkSubqueryRefs(b, b.validatedMemo(sq, resolve)); err != nil {
 				return err
 			}
 		}
@@ -95,7 +95,7 @@ func (g *groupCheck) checkSubqueryRefs(b *binder, sub *plansql.SelectInfo) error
 // An aggregate whose nearest argument reference belongs to the containing
 // block aggregates that block's rows. Its argument is covered by the aggregate,
 // just as an aggregate written directly in the containing block covers it.
-func (g *groupCheck) subqueryTermRefs(node plansql.Node, scope *colScope, refs *[]*plansql.ColRef, subs *[]string) {
+func (g *groupCheck) subqueryTermRefs(node plansql.Node, scope *colScope, refs *[]*plansql.ColRef, subs *[]plansql.Node) {
 	if fn, ok := node.(*plansql.FuncCallNode); ok && plansql.IsAggregate(fn.Name) && !strings.EqualFold(fn.Name, "grouping") {
 		var args []*plansql.ColRef
 		walkExpr(fn, &args, nil, nil)

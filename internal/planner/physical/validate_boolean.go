@@ -274,7 +274,7 @@ func provableNonBooleanType(node plansql.Node, scope *colScope) (parquet.TypeID,
 		// bound the rest of the function keeps: an aggregate with a fixed
 		// result type. A subquery selecting a plain COLUMN is typed by its
 		// OWN relation, which this scope does not carry, and is left alone.
-		return subqueryItemType(n.SQL, scope)
+		return subqueryItemType(n, scope)
 	}
 	return 0, "", false
 }
@@ -282,8 +282,8 @@ func provableNonBooleanType(node plansql.Node, scope *colScope) (parquet.TypeID,
 // subqueryItemType types a scalar subquery by its single select item, when
 // this layer can. Its own FROM is a different scope, so only an item whose
 // type is fixed regardless of input — an aggregate like COUNT — is answered.
-func subqueryItemType(sql string, scope *colScope) (parquet.TypeID, string, bool) {
-	inner := parseSelect(sql)
+func subqueryItemType(n *plansql.SubqueryNode, scope *colScope) (parquet.TypeID, string, bool) {
+	inner := subqueryMemoBody(n)
 	if inner == nil || inner.Union != nil || len(inner.Columns) != 1 {
 		return 0, "", false
 	}
