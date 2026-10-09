@@ -98,8 +98,8 @@ func lagLeadDefaultArg(we logical.WindowExpr) plansql.Node {
 // aggregate's output column, and the tree would compute the aggregate again.
 func lagLeadValueArg(we logical.WindowExpr) plansql.Node {
 	text := strings.TrimSpace(we.InputColumn())
-	if we.InputExpr != nil && cleanExpr(we.InputExpr.String()) == cleanExpr(text) {
-		return we.InputExpr
+	if arg := windowValueArgTree(we); arg != nil && cleanExpr(arg.String()) == cleanExpr(text) {
+		return arg
 	}
 	ast, err := plansql.ParseExpression(text)
 	if err != nil {
@@ -170,8 +170,8 @@ func (w *declWalk) windowValueDecl(node *logical.Node, we logical.WindowExpr) (e
 	// typed. Undecided, nothing widened: `LAG(b * 2, 1, d)` answered bigint
 	// 1 where PostgreSQL answers double 1.5, and a REAL value's 2.5 default
 	// failed the write (#1435).
-	if we.InputExpr != nil && node != nil && len(node.Children) > 0 && cleanExpr(we.InputExpr.String()) == col {
-		if d, _, ok := w.windowArgExprDecl(node, we.InputExpr); ok {
+	if arg := windowValueArgTree(we); arg != nil && node != nil && len(node.Children) > 0 && cleanExpr(arg.String()) == col {
+		if d, _, ok := w.windowArgExprDecl(node, arg); ok {
 			return d, true
 		}
 	}
