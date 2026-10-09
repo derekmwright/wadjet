@@ -328,6 +328,40 @@ func OuterTypedSubquerySQL(sql string, outerTables map[string]bool, outerCols ma
 	return outerTypedSQL(info, refs, outerTables, buildUnqualOuterCols(refs, outerCols), outerDecl)
 }
 
+// OuterTypedSubqueryNodeSQL is OuterTypedSubquerySQL for a subquery NODE:
+// its outer references are the ones the per-row re-run substitutes for it
+// (plansql.CorrelatedRefsOf — the bindings on its memoized body where the
+// binder bound it, the names otherwise), so the declaration types exactly
+// the operands the re-run fills in.
+func OuterTypedSubqueryNodeSQL(n plansql.Node, outerTables map[string]bool, outerCols map[string]string,
+	innerCols plansql.TableColumns, outerDecl OuterDeclFunc) (string, bool) {
+	if outerDecl == nil || len(outerTables) == 0 {
+		return "", false
+	}
+	refs, err := plansql.CorrelatedRefsOf(n, outerTables, outerCols, innerCols)
+	if err != nil || len(refs) == 0 {
+		return "", false
+	}
+	var sql string
+	switch q := n.(type) {
+	case *plansql.SubqueryNode:
+		sql = q.SQL
+	case *plansql.ExistsNode:
+		sql = q.SQL
+	default:
+		return "", false
+	}
+	parsed, err := plansql.Parse(sql)
+	if err != nil {
+		return "", false
+	}
+	info, err := plansql.ExtractSelect(parsed)
+	if err != nil {
+		return "", false
+	}
+	return outerTypedSQL(info, refs, outerTables, buildUnqualOuterCols(refs, outerCols), outerDecl)
+}
+
 // outerTypedSQL is OuterTypedSubquerySQL over an already-parsed subquery,
 // substituted exactly as rerunSQL substitutes the per-row values.
 func outerTypedSQL(info *plansql.SelectInfo, refs []plansql.OuterRef, outerTables map[string]bool,

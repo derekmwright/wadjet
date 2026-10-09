@@ -1287,7 +1287,9 @@ func tryDecorrelateScalarSubquery(pred Predicate, outerTables map[string]bool, o
 	// a schema, and an unqualified name it supplies binds THERE (#955). This
 	// package has no catalog, so a base table's columns are still unknown here
 	// and the identifier-comparison fallback decides those.
-	refs, err := plansql.FindCorrelatedRefsWithScope(subq.SQL, outerTables, outerColMap,
+	// Where the binder bound the body, its bindings ARE the classification
+	// (plansql.CorrelatedRefsOf, ADR-0021 §1k).
+	refs, err := plansql.CorrelatedRefsOf(subq, outerTables, outerColMap,
 		plansql.CTEColumns(scopeCTEs(ctes, info.CTEs), nil))
 	if err != nil || len(refs) == 0 {
 		return nil, pred, false
@@ -1341,7 +1343,7 @@ func tryDecorrelateScalarSubquery(pred Predicate, outerTables map[string]bool, o
 		// not o.id = c.j) — and it is TPC-H Q2's rule: `ps_partkey` is the
 		// body's, `p_partkey` is not (arc DC, B2).
 		outerColMap = bodyOuter
-		if refs2, err2 := plansql.FindCorrelatedRefsWithScope(subq.SQL, outerTables, outerColMap,
+		if refs2, err2 := plansql.CorrelatedRefsOf(subq, outerTables, outerColMap,
 			plansql.CTEColumns(scopeCTEs(ctes, info.CTEs), nil)); err2 == nil {
 			outerRefCols = make(map[string]bool, len(refs2))
 			for _, ref := range refs2 {
@@ -3495,7 +3497,7 @@ func tryDecorrelateExists(exists *plansql.ExistsNode, outerTables map[string]boo
 	// Check for correlated references — use column-aware version to
 	// detect unqualified outer refs (e.g., c_custkey from customer), with the
 	// WITH items in scope as relations of their own (#955).
-	refs, err := plansql.FindCorrelatedRefsWithScope(exists.SQL, outerTables, outerColMap,
+	refs, err := plansql.CorrelatedRefsOf(exists, outerTables, outerColMap,
 		plansql.CTEColumns(scopeCTEs(ctes, info.CTEs), nil))
 	if err != nil || len(refs) == 0 {
 		return nil, nil // uncorrelated, keep as-is
