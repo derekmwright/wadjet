@@ -2986,10 +2986,16 @@ with every WITH item it reads marked as read by every run
 (`plansql.ReadPerRun`), so a volatile one is the statement's one spool:
 `WITH s AS (SELECT random() r) SELECT count(DISTINCT (SELECT r + t.id*0 FROM
 s)) FROM cm_big t WHERE t.id <= 50` answers PostgreSQL's 1 (50 at 542b4f37),
-and so does a WITH declared inside the correlated subquery that reads no
-outer value — the re-run's own item keeps the body's identity while its text
-is unchanged (`plansql.AdoptRunInvariantItems`) — and a once-read volatile
-item a recursive term reads (4 at 542b4f37). Added 2026-10-09 (#1599,
+and so does a WITH declared directly in the correlated subquery's block
+that reads no outer value — the re-run's own item keeps the body's identity
+while its text is unchanged (`plansql.AdoptRunInvariantItems`) — and a
+once-read volatile item a recursive term reads (4 at 542b4f37). A WITH
+declared one block further down — inside a derived table in the correlated
+body — is still evaluated per outer row: `SELECT count(DISTINCT (SELECT
+max(r) + t.id*0 FROM (WITH q AS (SELECT random() AS r) SELECT r FROM q) d))
+FROM tb_big t WHERE t.id <= 50` answers 50 on every arm at 542b4f37 and
+here, PostgreSQL 1 (the adoption does not reach a WITH list nested in the
+re-run body's FROM). Added 2026-10-09 (#1599,
 ADR-0047 stage 3); gated by `coordinator.TestArcCI3SubqueryBodyInItsScopeEveryArm`
 `i1599/*`.
 

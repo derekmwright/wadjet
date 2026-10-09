@@ -74,19 +74,47 @@ value-typed.
 
 ## 2026-10-09: an expression subquery's body is parsed once too (ADR-0047 stage 3)
 
-`SubqueryNode.Select()` and `ExistsNode.Select()` (`sub_block.go`) memoize an
-expression subquery's body on the NODE that names it, as `SubSelect` does on a
-derived table's reference, and the node records the WITH chain in scope where
-it is written (`CTEScope`, stamped by `plansql.StampSubqueryScopes` when the
-enclosing block is planned). The binder validates and binds that body with
-the enclosing query's scope; the physical planner's runner, declaration,
-column count and scope for one subquery are a child planner over the node's
-chain that plans its memoized body (`physical.subqueryScopingIn`); the stage
-DAG's eager runs and producer stages read the same body and chain. A plan
-built from substituted or bounded TEXT — a correlated re-run's per-row
-statement, a decorrelation's build side (whose keys are spelled by name,
-stage 4) — parses that text privately and plans it in the node's chain.
-Gated by `coordinator.TestArcCI3SubqueryBodyInItsScopeEveryArm`,
+The statement's reader parses a parenthesised body once, to check its syntax
+(`bodySyntax`), and that parse IS the body: it seeds the memo on the NODE that
+names the subquery (`SubqueryNode.Select()`, `ExistsNode.Select()`,
+`sub_block.go`), as `SubSelect` does on a derived table's reference, and the
+subqueries nested in the body were seeded by the same parse. The node records
+the WITH chain in scope where it is written (`CTEScope`, stamped by
+`plansql.StampSubqueryScopes`). Every requester reads that one tree: the
+binder (which validates and binds it with the enclosing query's scope, and
+reads an ORDER BY term that holds a subquery as the item's own tree), the
+aggregate-placement check, the outer-column candidates, the correlation
+classifier's by-name fallback, the dangling-reference guard, the evaluators'
+read bound, the integral-EXTRACT mark, the outer-level aggregate checks, the
+decorrelators, the physical planner's runner, declaration, column count and
+scope (a child planner over the node's chain, `physical.subqueryScopingIn`),
+and the stage DAG's correlation refusal, dangling guard, eager runs and
+producer stages. A FROM-less body unfolded into its item takes the memo's tree
+(`takeBody`) rather than parsing the text again. A declaration plans the body
+once — the answer column, the integer width and PostgreSQL's category come
+from one plan, where three plans each re-declared the nested bodies and a
+body at depth k was planned 3^k times.
+
+Parsed privately, from TEXT that is not the body as written:
+
+- a correlated re-run's per-row statement (the outer values substituted) and
+  its bounded form, and the tree its rebuild renders from (the compile's
+  `ParsedInfo`, which the per-row rewrite reads concurrently);
+- a correlated body's declaration text, its outer references typed as casts
+  (`expr.OuterTypedSubqueryNodeSQL`);
+- an enclosing expression the plan carries as TEXT and re-parses, which
+  re-parses the subqueries in it: on the stage DAG, an aggregate whose
+  argument holds a subquery is carried by its input's spelling, and four
+  readers re-parse it (`sum((SELECT max(id) FROM t))`: the body 5 times on the
+  DAG arms, once on the embedded door) — the text-carried plan, stage 4.
+
+Counted by `wadjet.TestArcCI3SubqueryBodyParsesOnce` through
+`plansql.SetParseProbe`: an uncorrelated body is parsed once per statement
+(7–16 times at a4054c18, 11–29 at 542b4f37); a correlated statement's parses
+are at or under 542b4f37's; a nested body parses once at every depth, and the
+statement's count grows linearly in depth (×3 per level at a4054c18). Planning
+time over nesting depth is held by `wadjet.TestArcCI3SubqueryNestingPlanningBound`.
+Answers are gated by `coordinator.TestArcCI3SubqueryBodyInItsScopeEveryArm`,
 `wadjet.TestArcCI3EmbeddedSubqueryBodyInItsScope`,
 `pgwire.TestArcCI3SubqueryScopeOnTheWire` and
 `server.TestArcCI3SubqueryBodyNeverPublishesAPolicedValue`.

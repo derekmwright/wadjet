@@ -743,8 +743,9 @@ stops early is spared: a reference with a filter below its `LIMIT` or
 operand reads the CTE reads on to the failing row and raises where PostgreSQL
 answers. A block that runs more than once reads it once too: a correlated
 subquery's per-row runs and a recursive term's iterations read the one
-evaluation, as do the runs of a WITH item declared inside a correlated
-subquery that reads no outer value. It is held under the
+evaluation, as do the runs of a WITH item declared directly in a correlated
+subquery's block that reads no outer value (one declared inside a derived
+table in the correlated body is still evaluated per outer row). It is held under the
 statement's memory budget and spills past it, and `EXPLAIN VERBOSE` names it
 (`CTE s: volatile, evaluated once; every reference reads that result`). A
 volatile CTE read once, and any deterministic CTE, is expanded into the plan
