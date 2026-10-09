@@ -2960,7 +2960,7 @@ func lateralWindowsPerOuterRow(info *plansql.SelectInfo, correlatedParts []strin
 			// publishes: a key the injection MINTED into a slot is read
 			// there, and any other key by its source column, which the
 			// window's own respelling over the aggregate maps onto the
-			// group key's output (respellOverAggregate).
+			// group key's output (respellWindowTerm).
 			term := strings.TrimSpace(inner)
 			if aggregates {
 				if slot, hit := mintedKeys[strings.ToLower(term)]; hit && slot != "" {

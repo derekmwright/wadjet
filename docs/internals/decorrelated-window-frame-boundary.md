@@ -21,8 +21,8 @@ expression> = <outer expression>` — the rows ONE outer row sees are exactly
 the inner rows whose key equals one value. A window partitioned by the keys
 (before its own PARTITION BY) therefore reads exactly those rows, so every
 window of the body is given the keys it does not already carry: a bare
-SELECT-list window (`WindowSpec.PartitionBy`), a window nested in a SELECT
-expression, in QUALIFY, HAVING or ORDER BY (`WindowFuncNode.PartitionBy`).
+SELECT-list window, a window nested in a SELECT expression, in QUALIFY,
+HAVING or ORDER BY — each its `WindowFuncNode.PartitionBy`.
 It is the per-key partition arc LT's bound mints
 (lateral-per-outer-row-bound.md), applied to the body's own windows. Over an
 aggregated body the window reads the aggregate's output, so a key the

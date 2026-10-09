@@ -1472,9 +1472,10 @@ a name to resolve to. Three exclusions, each with a cell:
 * a SUBQUERY is opaque — its references are its own FROM's;
 * the body's OWN output names are not outer columns (this parser resolves
   `ORDER BY 1` to the item's alias);
-* **every term is RESOLVED, not read as text.** `plansql.WindowSpec` carries a
-  window's PARTITION BY / ORDER BY terms as strings, and counting any non-empty
-  one as a column read made `OVER (ORDER BY 1)` and `OVER (PARTITION BY 1)` —
+* **every term is RESOLVED, not read as text.** A window's PARTITION BY /
+  ORDER BY terms were once carried as strings (`plansql.WindowSpec`; since
+  2026-10-09 they are the item's `WindowFuncNode`, ADR-0047), and counting any
+  non-empty one as a column read made `OVER (ORDER BY 1)` and `OVER (PARTITION BY 1)` —
   integer literals — "reads the outer row"; a window body is not a projection,
   so the shape was refused where the base answered PostgreSQL's rows (earlier implementation
   measurement, B1). A false positive here is not a lost optimization: the predicate

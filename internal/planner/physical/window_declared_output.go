@@ -357,7 +357,7 @@ func windowExecColumn(ctx context.Context, node *logical.Node, we logical.Window
 			// aggregate below publishes for its KEY as well — and the rank
 			// came back in the key's order beside a correct sum, on every arm
 			// (#968). The CLASS travels on the term (`NamesAggregateOutput`,
-			// set where respellOverAggregate rewrote it) and the POSITION is
+			// set where respellWindowTerm rewrote it) and the POSITION is
 			// read here, from the same `aggregateEmittedOutputNames` model the
 			// projection and the sort key use.
 			SlotPos: windowOrderKeySlot(node, keyName(ob.Column), ob.NamesAggregateOutput),
