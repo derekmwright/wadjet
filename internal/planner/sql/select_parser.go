@@ -1884,10 +1884,11 @@ func (p *selectParser) parseExists(not bool) (Node, error) {
 	if _, err := p.expect(TokenRParen); err != nil {
 		return nil, fmt.Errorf("expected ) after EXISTS subquery")
 	}
-	if err := bodySyntax(subSQL); err != nil {
+	body, err := bodySyntax(subSQL)
+	if err != nil {
 		return nil, err
 	}
-	return &ExistsNode{Not: not, SQL: subSQL}, nil
+	return &ExistsNode{Not: not, SQL: subSQL, body: body}, nil
 }
 
 // parseComparison is PostgreSQL's PREDICATE band, and it is a LOOP rather
@@ -2085,10 +2086,11 @@ func (p *selectParser) parsePredicateOperand() (Node, error) {
 			if _, err := p.expect(TokenRParen); err != nil {
 				return nil, fmt.Errorf("expected ) after IN subquery")
 			}
-			if err := bodySyntax(subSQL); err != nil {
+			body, err := bodySyntax(subSQL)
+			if err != nil {
 				return nil, err
 			}
-			return &InExpr{Left: left, Not: not, Values: []Node{&SubqueryNode{SQL: subSQL}}}, nil
+			return &InExpr{Left: left, Not: not, Values: []Node{&SubqueryNode{SQL: subSQL, body: body}}}, nil
 		}
 		// Value list
 		var values []Node
@@ -2263,7 +2265,8 @@ func (p *selectParser) finishComparison(left Node, op string) (Node, error) {
 				if _, err := p.expect(TokenRParen); err != nil {
 					return nil, fmt.Errorf("expected ) after %s subquery", upper)
 				}
-				if err := bodySyntax(subSQL); err != nil {
+				body, err := bodySyntax(subSQL)
+				if err != nil {
 					return nil, err
 				}
 				// `x = ANY (subquery)` IS `x IN (subquery)`, and
@@ -2278,11 +2281,11 @@ func (p *selectParser) finishComparison(left Node, op string) (Node, error) {
 				// arm). One node, one set of guarantees.
 				switch {
 				case (upper == "ANY" || upper == "SOME") && op == "=":
-					return &InExpr{Left: left, Values: []Node{&SubqueryNode{SQL: subSQL}}}, nil
+					return &InExpr{Left: left, Values: []Node{&SubqueryNode{SQL: subSQL, body: body}}}, nil
 				case upper == "ALL" && (op == "<>" || op == "!="):
-					return &InExpr{Left: left, Not: true, Values: []Node{&SubqueryNode{SQL: subSQL}}}, nil
+					return &InExpr{Left: left, Not: true, Values: []Node{&SubqueryNode{SQL: subSQL, body: body}}}, nil
 				}
-				return &AnyAllExpr{Left: left, Op: op, Modifier: upper, Values: []Node{&SubqueryNode{SQL: subSQL}}}, nil
+				return &AnyAllExpr{Left: left, Op: op, Modifier: upper, Values: []Node{&SubqueryNode{SQL: subSQL, body: body}}}, nil
 			}
 			// Value list
 			var values []Node
@@ -3005,10 +3008,11 @@ func (p *selectParser) parsePrimary() (Node, error) {
 			if _, err := p.expect(TokenRParen); err != nil {
 				return nil, fmt.Errorf("expected ) after subquery")
 			}
-			if err := bodySyntax(subSQL); err != nil {
+			body, err := bodySyntax(subSQL)
+			if err != nil {
 				return nil, err
 			}
-			return &SubqueryNode{SQL: subSQL}, nil
+			return &SubqueryNode{SQL: subSQL, body: body}, nil
 		}
 		inner, err := p.parseExpr()
 		if err != nil {
@@ -3148,10 +3152,11 @@ func (p *selectParser) parsePrimary() (Node, error) {
 			if _, err := p.expect(TokenRParen); err != nil {
 				return nil, fmt.Errorf("expected ) after ARRAY subquery")
 			}
-			if err := bodySyntax(subSQL); err != nil {
+			body, err := bodySyntax(subSQL)
+			if err != nil {
 				return nil, err
 			}
-			return &SubqueryNode{SQL: subSQL, Array: true}, nil
+			return &SubqueryNode{SQL: subSQL, Array: true, body: body}, nil
 		}
 		return p.parseIdentExpr()
 

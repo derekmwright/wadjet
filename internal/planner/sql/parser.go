@@ -322,6 +322,9 @@ const (
 // before it gets here (#711). See CheckSingleStatement for what "refused"
 // means and why the order matters.
 func Parse(sql string) (*ParsedQuery, error) {
+	if probe := parseProbe.Load(); probe != nil {
+		(*probe)(sql)
+	}
 	stmts := SplitStatements(sql)
 	if len(stmts) > 1 {
 		return nil, multiStatementError(stmts)

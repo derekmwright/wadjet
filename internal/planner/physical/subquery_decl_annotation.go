@@ -297,14 +297,32 @@ func (p *Planner) scalarSubqueryColumnDecl(sql string) (decl logical.SubqueryCol
 		}
 		return e.decl, e.ok
 	}
-	col, ok := p.SubqueryOutputColumn(sql)
+	// ONE plan of the body answers all three questions (arc CI3 round 2,
+	// B3): the integer width and PostgreSQL's category are read off the plan
+	// as built, and the answer column off the same plan once markScalarAnswer
+	// has marked it — the order the three separate plans had, each of which
+	// re-declared every subquery nested in the body.
+	plan := p.subqueryLogicalPlan(sql)
+	var (
+		width int
+		cat   = pgCatUnknown
+	)
+	if plan != nil {
+		width = p.intWidthOfPlan(plan)
+		cat = pgCategoryOfPlan(plan)
+		markScalarAnswer(plan)
+	}
+	col, ok := p.subqueryOutputColumnOfPlan(plan)
 	d := logical.SubqueryColumnDecl{}
 	if ok {
+		if !carriesIntWidth(col.Type) {
+			width = 0
+		}
 		d = logical.SubqueryColumnDecl{
 			Type: col.Type, Precision: col.Precision, Scale: col.Scale,
-			IntWidth:    p.subqueryOutputIntWidth(sql, col.Type),
+			IntWidth:    width,
 			ElementType: col.ElementType, Fields: col.Fields,
-			PGCategory: p.subqueryOutputPGCategory(sql),
+			PGCategory: cat,
 		}
 		// A DECIMAL without its scale is not a declaration: a vector built
 		// from it reads every value at the wrong power of ten, which is why
@@ -382,7 +400,12 @@ func (m *subqueryDeclMemo) store(sql string, e *subqueryDeclEntry) {
 // with a FROM rounded as a float8 into an integer column (#1353). Unknown —
 // the carrier's reading — for a plan the walk cannot read.
 func (p *Planner) subqueryOutputPGCategory(sql string) pgCategory {
-	pg := declaredOutputPGCategory(p.subqueryLogicalPlan(sql))
+	return pgCategoryOfPlan(p.subqueryLogicalPlan(sql))
+}
+
+// pgCategoryOfPlan is subqueryOutputPGCategory over a plan already built.
+func pgCategoryOfPlan(plan *logical.Node) pgCategory {
+	pg := declaredOutputPGCategory(plan)
 	if len(pg) != 1 {
 		return pgCatUnknown
 	}
@@ -398,7 +421,12 @@ func (p *Planner) subqueryOutputIntWidth(sql string, carrier parquet.TypeID) int
 	if !carriesIntWidth(carrier) {
 		return 0
 	}
-	plan := p.subqueryLogicalPlan(sql)
+	return p.intWidthOfPlan(p.subqueryLogicalPlan(sql))
+}
+
+// intWidthOfPlan is subqueryOutputIntWidth over a plan already built, for an
+// integer carrier.
+func (p *Planner) intWidthOfPlan(plan *logical.Node) int {
 	if plan == nil {
 		return 0
 	}

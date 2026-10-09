@@ -59,12 +59,16 @@ func (c *CTEDef) BodySelect() (*SelectInfo, error) {
 // rewritten (a correlated re-run's substitution builds a NEW node, never a
 // copy, but a copy is cheap to guard) parses its own text.
 type subqueryBody struct {
-	sql    string
-	parse  sync.Once
-	info   *SelectInfo
-	err    error
-	scope  []CTEDef
-	scoped bool
+	sql string
+	// parseMu guards done, info and err: the body is parsed on first use
+	// unless the statement's parse seeded it (bodySyntax), and a FROM-less
+	// unfold may take the tree away (takeBody).
+	parseMu sync.Mutex
+	done    bool
+	info    *SelectInfo
+	err     error
+	scope   []CTEDef
+	scoped  bool
 	// outer is the binder's classification of the body (SetOuterRefs).
 	outer    []OuterRef
 	outerSet bool
@@ -78,7 +82,7 @@ type subqueryBody struct {
 // subqueryBodyMu guards the memo's creation and its scope: a node is reached
 // from parallel pipeline goroutines at run time. The PARSE is not under it —
 // parsing a body checks the subqueries nested in it, whose memos take this
-// lock — and runs once per memo (subqueryBody.parse).
+// lock — and runs once per memo (subqueryBody.parseMu).
 var subqueryBodyMu sync.Mutex
 
 func memoSubqueryBody(slot **subqueryBody, sql string) *subqueryBody {
@@ -97,8 +101,35 @@ func memoSubqueryBody(slot **subqueryBody, sql string) *subqueryBody {
 }
 
 func (b *subqueryBody) parsed() (*SelectInfo, error) {
-	b.parse.Do(func() { b.info, b.err = parseBlockText(b.sql) })
+	b.parseMu.Lock()
+	defer b.parseMu.Unlock()
+	if !b.done {
+		b.info, b.err = parseBlockText(b.sql)
+		b.done = true
+	}
 	return b.info, b.err
+}
+
+// seeded is a memo whose body is the tree the statement's parse already built.
+func seeded(sql string, info *SelectInfo, err error) *subqueryBody {
+	return &subqueryBody{sql: sql, done: true, info: info, err: err}
+}
+
+// takeBody hands the memoized tree to a caller that SPLICES it into the
+// enclosing statement — a FROM-less body unfolded into its item
+// (unfoldFromlessScalars) — and leaves the memo unparsed, so the spliced tree
+// is never also the memo's: a requester that still reaches the node parses
+// the text again, privately.
+func (s *SubqueryNode) takeBody() (*SelectInfo, error) {
+	b := memoSubqueryBody(&s.body, s.SQL)
+	b.parseMu.Lock()
+	defer b.parseMu.Unlock()
+	if !b.done {
+		return parseBlockText(b.sql)
+	}
+	info, err := b.info, b.err
+	b.info, b.err, b.done = nil, nil, false
+	return info, err
 }
 
 // Select returns the subquery's parsed body, memoized on the node, and the
@@ -308,19 +339,32 @@ func parseBlockText(sql string) (*SelectInfo, error) {
 // statement is read: a body that cannot be parsed is the statement's syntax
 // error, worded as PostgreSQL words it for the statement the client sent — a
 // failure at the end of the body is at the ")" that closes it. Any other
-// failure is left for the planner that parses the body later, exactly as
+// failure is left for the planner that asks for the body later, exactly as
 // before; only the sentence of a syntax error is decided here (arc PC round
 // 3, B6: `x IN (SELECT … WHERE)` said "at end of input").
-func bodySyntax(sql string) error {
-	_, err := Parse(sql)
+//
+// The parse it makes is THE parse of the body (arc CI3 round 2, B1): the memo
+// it returns is seeded with the tree, so the node built from it answers
+// Select() without reading the text again, and the subqueries nested in the
+// body were seeded by the same parse. A body is therefore parsed once per
+// statement however many requesters ask for it.
+func bodySyntax(sql string) (*subqueryBody, error) {
+	parsed, err := Parse(sql)
 	var se *syntaxError
-	if !errors.As(err, &se) {
-		return nil
+	if errors.As(err, &se) {
+		if se.atEnd {
+			return nil, &syntaxError{code: se.code, msg: `syntax error at or near ")"`, err: se.err}
+		}
+		return nil, se
 	}
-	if se.atEnd {
-		return &syntaxError{code: se.code, msg: `syntax error at or near ")"`, err: se.err}
+	var info *SelectInfo
+	if err == nil {
+		info, err = ExtractSelect(parsed)
+		if err != nil {
+			info = nil
+		}
 	}
-	return se
+	return seeded(sql, info, err), nil
 }
 
 // BlockOutputColumns lists the column names one query block PUBLISHES, and

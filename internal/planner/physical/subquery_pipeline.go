@@ -274,7 +274,17 @@ func (p *Planner) SubqueryOutputColumn(sql string) (col parquet.Column, ok bool)
 			col, ok = parquet.Column{}, false
 		}
 	}()
-	plan := p.scalarAnswerPlan(sql)
+	return p.subqueryOutputColumnOfPlan(p.scalarAnswerPlan(sql))
+}
+
+// subqueryOutputColumnOfPlan is SubqueryOutputColumn over the scalar answer's
+// plan already built and marked (scalarAnswerPlan).
+func (p *Planner) subqueryOutputColumnOfPlan(plan *logical.Node) (col parquet.Column, ok bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			col, ok = parquet.Column{}, false
+		}
+	}()
 	if plan == nil {
 		return parquet.Column{}, false
 	}
