@@ -246,11 +246,11 @@ func outerOnlyDisposition(negated bool) (hoist bool) { return !negated }
 
 // bodyWithShadowsEnclosing reports whether the subquery's OWN WITH declares an
 // item with the name of an enclosing WITH item. Such a body is not
-// decorrelated: the build side would be planned with the enclosing item's
-// definition (scopeCTEs puts the body's items after the enclosing ones, and the
-// builder takes the first match), which is not the relation PostgreSQL reads.
-// Declined, the subquery reaches the per-row re-run, which refuses it by name
-// (expr.ShadowingWithError).
+// decorrelated: the rewrite derives the join's keys by NAME (ADR-0047 stage
+// 4), and a name two scopes' items publish is not one it can spell apart.
+// Declined, the subquery reaches the per-row re-run, which plans the body's
+// own item — the builder binds the innermost item of a name and the CTE
+// materializations answer by identity (ADR-0047 stage 3, #1606).
 func bodyWithShadowsEnclosing(info *plansql.SelectInfo, ctes []plansql.CTEDef) bool {
 	if info == nil || len(info.CTEs) == 0 || len(ctes) == 0 {
 		return false
