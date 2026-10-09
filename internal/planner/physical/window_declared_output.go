@@ -72,14 +72,18 @@ func (w *declWalk) windowComputedArgDecl(node *logical.Node, we logical.WindowEx
 }
 
 // windowValueArgTree is the window's first argument as the window
-// evaluates it: over an aggregate the builder re-spells the argument onto
-// the aggregate's outputs and keeps that tree in ArgExprs, while InputExpr
-// stays the argument as written (the DAG's subquery refusal reads it).
+// evaluates it: InputExpr, the argument as written, unless the builder
+// re-spelled the argument onto an aggregate's outputs, in which case the
+// re-spelled tree it keeps in ArgExprs (InputExpr stays as written because
+// the DAG's subquery refusal reads it there).
 func windowValueArgTree(we logical.WindowExpr) plansql.Node {
-	if len(we.ArgExprs) > 0 && we.ArgExprs[0] != nil {
-		return we.ArgExprs[0]
+	if len(we.ArgExprs) == 0 || we.ArgExprs[0] == nil {
+		return we.InputExpr
 	}
-	return we.InputExpr
+	if we.InputExpr != nil && cleanExpr(we.InputExpr.String()) == cleanExpr(we.ArgExprs[0].String()) {
+		return we.InputExpr
+	}
+	return we.ArgExprs[0]
 }
 
 // windowArgExprDecl types a computed window argument from its AST against the
