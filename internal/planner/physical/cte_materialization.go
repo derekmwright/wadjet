@@ -99,7 +99,7 @@ func (p *Planner) materializeCTEs(ctx context.Context, root *logical.Node) {
 			coll.Release()
 			continue
 		}
-		p.cteCache[cte.Name] = &cteMaterialized{schema: schema, coll: coll}
+		p.cteCache[cte.Name] = &cteMaterialized{schema: schema, coll: coll, ident: cte.Identity()}
 	}
 }
 
@@ -323,7 +323,7 @@ func (p *Planner) materializeRecursiveCTE(ctx context.Context, cte plansql.CTEDe
 			return errNoCTESchema(cte.Name)
 		}
 		p.cteCache[cte.Name] = &cteMaterialized{schema: schema, coll: coll,
-			pgCat: declaredOutputPGCategory(p.subqueryLogicalPlan(cte.SQL))}
+			pgCat: declaredOutputPGCategory(p.subqueryLogicalPlan(cte.SQL)), ident: cte.Identity()}
 		return nil
 	}
 

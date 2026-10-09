@@ -379,6 +379,30 @@ type cteMaterialized struct {
 	pgCat []pgCategory
 	rows  []map[string]any              // boxed form; nil when coll is set
 	coll  *exec.SpillableBatchCollector // columnar form; nil when rows is set
+	// ident is the WITH item materialized (plansql.CTEDef.Identity): the
+	// cache is keyed by name, and a nested WITH may reuse an enclosing
+	// item's name, so a reference reads an entry only when it is a reference
+	// to THAT item (cteCacheFor). Nil answers by name.
+	ident *plansql.CTEIdentity
+}
+
+// cteCacheFor is the materialization a CTE reference reads: the entry of its
+// name, when that entry is the item the reference binds (logical.Node.
+// CTEIdent). A reference to a nested WITH item that reuses an enclosing
+// item's name finds the enclosing item's entry under that name and does not
+// read it: it is planned from its own body (ADR-0047 stage 3, #1606).
+func (p *Planner) cteCacheFor(node *logical.Node) (*cteMaterialized, bool) {
+	if p == nil || node == nil || node.CTEName == "" {
+		return nil, false
+	}
+	mat, ok := p.cteCache[node.CTEName]
+	if !ok || mat == nil {
+		return mat, ok
+	}
+	if mat.ident != nil && node.CTEIdent != nil && mat.ident != node.CTEIdent {
+		return nil, false
+	}
+	return mat, true
 }
 
 // scanCached stores columnar scan results for a table that is scanned multiple

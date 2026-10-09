@@ -173,7 +173,7 @@ func (p *Planner) stampRecursiveReference(node *logical.Node) {
 	}
 	mat := p.nestedCTECache[node.RecursiveCTE]
 	if mat == nil {
-		mat = p.cteCache[node.CTEName]
+		mat, _ = p.cteCacheFor(node)
 	}
 	if mat == nil || len(mat.schema) == 0 {
 		return

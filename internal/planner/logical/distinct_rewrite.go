@@ -71,7 +71,7 @@ func inheritRootNaming(dst, src *Node) {
 		dst.Rel, dst.RelCols = src.Rel, src.RelCols
 	}
 	if dst.CTEName == "" {
-		dst.CTEName = src.CTEName
+		dst.CTEName, dst.CTEIdent = src.CTEName, src.CTEIdent
 		dst.OnceCTE, dst.OnceCTEScope = src.OnceCTE, src.OnceCTEScope
 	}
 	if dst.CTERefAlias == "" {

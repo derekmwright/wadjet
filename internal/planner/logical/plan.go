@@ -547,6 +547,12 @@ type Node struct {
 	// physical.subtreeNamesRelation reads so `c.gk` resolves to the SELECT
 	// item `gk` names (#653).
 	CTEName string
+	// CTEIdent is the IDENTITY of the WITH item this subtree is (plansql.
+	// CTEDef.Identity), set beside CTEName: a nested WITH may reuse an
+	// enclosing item's name, and a materialization of one item must never
+	// answer a reference to the other (ADR-0047 stage 3). Nil for an item the
+	// parser did not produce, which answers by name as before.
+	CTEIdent *plansql.CTEIdentity
 
 	// OnceCTE is set beside CTEName on a reference to a WITH item whose body
 	// is VOLATILE (plansql.CTEDef.EvaluatedOnce): the definition, carrying its

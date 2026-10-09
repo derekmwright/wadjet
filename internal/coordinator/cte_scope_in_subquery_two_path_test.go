@@ -36,8 +36,8 @@ import (
 //   - the ENCLOSING scope stays visible, so an outer CTE is still nameable
 //     inside a derived table that has a WITH of its own.
 //
-// One claim it does NOT make is pinned below: an item whose name equals an
-// ENCLOSING item's does not yet shadow it.
+// And, since ADR-0047 stage 3 (#1606), an item whose name equals an
+// ENCLOSING item's shadows it inside its block.
 type cteScopeCell struct {
 	issue, name, sql string
 	// want is the row multiset PostgreSQL 17.11 answers, measured live over
@@ -125,29 +125,16 @@ func cteScopeCells() []cteScopeCell {
 				`SELECT COUNT(*) AS n FROM c`,
 			want: []string{"2"}},
 
-		// --- the claim this fix does NOT make -----------------------------
-		//
-		// A block's own item does not yet SHADOW an enclosing item of the same
-		// name: `resolveTableOrCTE` takes the FIRST match of a flat list whose
-		// enclosing entries come first. Reversing that search fixes the DAG
-		// arms and NOT the single-process one — measured, both DAG arms answer
-		// PostgreSQL's 2 with the search reversed and the single-process arm
-		// still answers 4 — because that path materializes CTEs into
-		// `Planner.cteCache` keyed by NAME over the statement's top-level
-		// list, so the shadowing subtree, tagged with the same CTEName, reads
-		// the enclosing item's materialization whatever the builder resolved.
-		// One query answered two ways is worse than one answered wrongly the
-		// same way on both, so the divergence is pinned here whole: correct
-		// shadowing is that cache becoming scope-aware AND the search being
-		// reversed.
-		{issue: "#684", name: "an_inner_cte_does_not_yet_shadow_an_outer_one_of_the_same_name",
+		// A block's own item SHADOWS an enclosing item of the same name, as
+		// PostgreSQL scopes it: the builder binds the LAST item of a name in
+		// the chain (the innermost scope's), and the single-process planner's
+		// CTE materializations answer a reference by the item's identity, so
+		// the shadowing subtree never reads the enclosing item's rows
+		// (ADR-0047 stage 3, #1606). This cell was pinned at 4 until then.
+		{issue: "#1606", name: "an_inner_cte_shadows_an_outer_one_of_the_same_name",
 			sql: `WITH o AS (SELECT id, dx FROM setopdecja) SELECT COUNT(*) AS n FROM ` +
 				`(WITH o AS (SELECT id, dx FROM setopdecjb WHERE id <= 2) SELECT dx AS v FROM o) t`,
-			want: []string{"2"},
-			pin:  []string{"4"},
-			pinWhy: "the enclosing item wins the flat first-match search, and the single-process " +
-				"cteCache is keyed by NAME over the statement's top-level list besides",
-		},
+			want: []string{"2"}},
 		// The neighbouring shape that AGREES with PostgreSQL either way, and
 		// must keep agreeing: an item whose body names the enclosing item it
 		// would shadow reads that enclosing item — four rows — and not itself,

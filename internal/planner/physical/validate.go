@@ -659,6 +659,9 @@ type cteEntry struct {
 	decls []expr.DeclType
 	cols  []string
 	open  bool
+	// ident is the WITH item registered (plansql.CTEDef.Identity): a nested
+	// WITH that reuses a name replaces the enclosing entry inside its block.
+	ident *plansql.CTEIdentity
 }
 
 type binder struct {
@@ -711,6 +714,12 @@ type binder struct {
 	stamp    bool
 	nextRel  plansql.RelID
 	blockRel map[*plansql.SelectInfo]plansql.RelID
+	// cteDone is each WITH item's registration, by identity: a block
+	// validated more than once (a body asked by several comparisons, a
+	// derived table under several scopes) re-enters its WITH list after the
+	// enclosing block's scope closed it, and re-validating each body per
+	// entry would multiply per nesting level.
+	cteDone map[*plansql.CTEIdentity]cteEntry
 }
 
 func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, outer *colScope) error {
@@ -719,8 +728,18 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 	}
 
 	// Register this block's CTEs first so FROM sources and later CTEs can
-	// reference them. CTEs accumulate on the binder (additive scoping is only
-	// ever more lenient, never a source of false positives).
+	// reference them. The registry is LEXICAL: a block's items are in scope
+	// inside the block, a nested WITH that reuses a name shadows the
+	// enclosing item there, and both leave scope with the block — the scope
+	// the planners resolve the same names in (logical.resolveTableOrCTE, #1606).
+	if len(info.CTEs) > 0 {
+		saved := b.ctes
+		b.ctes = make(map[string]cteEntry, len(saved)+len(info.CTEs))
+		for k, v := range saved {
+			b.ctes[k] = v
+		}
+		defer func() { b.ctes = saved }()
+	}
 	for i := range info.CTEs {
 		if err := b.registerCTE(ctx, &info.CTEs[i]); err != nil {
 			return err
@@ -1836,9 +1855,33 @@ func (s *colScope) addRowColumn(c parquet.Column) {
 // references resolve. Any uncertainty registers it as open.
 func (b *binder) registerCTE(ctx context.Context, cte *plansql.CTEDef) error {
 	name := strings.ToLower(cte.Name)
-	if _, exists := b.ctes[name]; exists {
+	id := cte.Identity()
+	if e, exists := b.ctes[name]; exists && (id == nil || e.ident == id) {
 		return nil
 	}
+	if e, ok := b.cteDone[id]; ok && id != nil {
+		b.ctes[name] = e
+		return nil
+	}
+	if err := b.registerCTEBody(ctx, cte, name); err != nil {
+		return err
+	}
+	if e, ok := b.ctes[name]; ok {
+		e.ident = id
+		b.ctes[name] = e
+		if id != nil {
+			if b.cteDone == nil {
+				b.cteDone = map[*plansql.CTEIdentity]cteEntry{}
+			}
+			b.cteDone[id] = e
+		}
+	}
+	return nil
+}
+
+// registerCTEBody validates one WITH item's body and records its published
+// columns under name, replacing an enclosing item's entry of that name.
+func (b *binder) registerCTEBody(ctx context.Context, cte *plansql.CTEDef, name string) error {
 	// Register a recursive self-reference as open BEFORE validating its body.
 	// An unknown schema prevents column-name conclusions, not schema-free
 	// literal refusals. The existing block walk visits both UNION arms even

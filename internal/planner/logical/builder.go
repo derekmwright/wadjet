@@ -1747,29 +1747,17 @@ func buildFromClause(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*Node, er
 }
 
 // scopeCTEs supplies enclosing CTEs followed by the nested block's OWN WITH items (#684).
-// resolveTableOrCTE's first-match walk retains enclosing precedence; ctes[:i]
-// lets each item see ONLY earlier definitions, preventing self-recursion (#771).
-// This deliberately differs from PostgreSQL when an inner WITH shadows an outer one.
-// Do not reverse the search alone: Planner.cteCache is statement-wide and keyed by NAME,
-// so the single path would still read the outer materialization while the DAG differed.
-// Correct shadowing requires scope-aware cache identity AND reversed lookup;
-// TestAWithInsideASubqueryBlockIsInScopeThere pins this divergence.
+// resolveTableOrCTE binds the LAST item of a name — the innermost scope's — so a
+// nested WITH reusing a name shadows the enclosing item inside its block, as
+// PostgreSQL scopes it (#1606); ctes[:i] lets each item see ONLY earlier
+// definitions, preventing self-recursion (#771). The physical planner's CTE
+// materializations answer a reference by the item's IDENTITY (Node.CTEIdent),
+// so the two scopes' items never read each other's rows.
 // See docs/internals/nested-with-scope-precedence.md for the design.
 func scopeCTEs(outer, own []plansql.CTEDef) []plansql.CTEDef {
-	if len(own) == 0 {
-		return outer
-	}
-	out := make([]plansql.CTEDef, 0, len(outer)+len(own))
-	out = append(out, outer...)
-	return append(out, own...)
+	return plansql.ScopeChain(outer, own)
 }
 
-// recursiveCTEColumns is the column list a RECURSIVE WITH item publishes, or
-// nil when its body cannot be named exactly.
-//
-// earlier is the scope its body resolves a star against: the items BEFORE it and
-// not itself, which is PostgreSQL's rule and what keeps the item's own name out
-// of its own body (scopeCTEs' reason, #771).
 func recursiveCTEColumns(cte *plansql.CTEDef, earlier []plansql.CTEDef) []string {
 	body, err := cte.BodySelect()
 	if err != nil || body == nil {
@@ -1818,7 +1806,12 @@ func resolveTableOrCTESource(table *plansql.TableRef, ctes []plansql.CTEDef) (*N
 		}
 	}
 	nameLower := strings.ToLower(table.Name)
-	for i := range ctes {
+	// The LAST item of the name: the chain is the enclosing scopes' items
+	// then each nested block's own (scopeCTEs), so the last is the innermost
+	// scope's, and a nested WITH reusing a name shadows the enclosing item
+	// inside its block, as PostgreSQL scopes it (#1606). Its prefix ctes[:i]
+	// is the scope its body is planned in, as before.
+	for i := len(ctes) - 1; i >= 0; i-- {
 		cte := &ctes[i]
 		if cte.Name == nameLower {
 			// Recursive CTEs are materialized by the physical planner via
@@ -1829,6 +1822,7 @@ func resolveTableOrCTESource(table *plansql.TableRef, ctes []plansql.CTEDef) (*N
 			if cte.Recursive {
 				node := NewScan(cte.Name, table.Alias)
 				node.CTEName = cte.Name
+				node.CTEIdent = cte.Identity()
 				// The DEFINITION rides on the reference, so the block this
 				// reference sits in can be materialized where it is planned
 				// rather than only at the statement root (#1047). See
@@ -1889,6 +1883,7 @@ func resolveTableOrCTESource(table *plansql.TableRef, ctes []plansql.CTEDef) (*N
 			// Tag the sub-plan so the physical planner can detect CTE subtrees
 			// and materialize multi-referenced CTEs.
 			plan.CTEName = cte.Name
+			plan.CTEIdent = cte.Identity()
 			if cte.EvaluatedOnce() {
 				plan.OnceCTE = cte
 				plan.OnceCTEScope = ctes[:i]

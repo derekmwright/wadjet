@@ -340,7 +340,7 @@ func ElideUnstatedJoinStar(n *Node) *Node {
 		child.Rel, child.RelCols = n.Rel, n.RelCols
 	}
 	if child.CTEName == "" {
-		child.CTEName = n.CTEName
+		child.CTEName, child.CTEIdent = n.CTEName, n.CTEIdent
 		child.OnceCTE, child.OnceCTEScope = n.OnceCTE, n.OnceCTEScope
 	}
 	if child.CTERefAlias == "" {
