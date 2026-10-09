@@ -252,7 +252,7 @@ func compileQuantified(n *plansql.AnyAllExpr, ctx *compileContext) (Expr, error)
 	var setDecl *parquet.Column
 	if len(n.Values) == 1 && ((op == CmpEq && !all) || (op == CmpNe && all)) {
 		if sq, ok := n.Values[0].(*plansql.SubqueryNode); ok && ctx.runner != nil {
-			setDecl = subquerySetDecl(sq.SQL, ctx)
+			setDecl = subquerySetDecl(sq.SQL, ctx.forSubqueryNode(sq))
 			var err error
 			if probeNode, err = memberProbe(n.Left, setDecl); err != nil {
 				return nil, err
@@ -275,8 +275,9 @@ func compileQuantified(n *plansql.AnyAllExpr, ctx *compileContext) (Expr, error)
 				return nil, fmt.Errorf("%s subquery requires a SubqueryRunner", n.Modifier)
 			}
 			if (op == CmpEq && !all) || (op == CmpNe && all) {
-				return &InSubquery{Expr: left, SQL: sq.SQL, Runner: ctx.runner, Not: all,
-					Scope: ctx.subqueryScope, Budget: ctx.budget, SetBound: ctx.setRowBound,
+				sctx := ctx.forSubqueryNode(sq)
+				return &InSubquery{Expr: left, SQL: sq.SQL, Runner: sctx.runner, Not: all,
+					Scope: sctx.subqueryScope, Budget: ctx.budget, SetBound: ctx.setRowBound,
 					probeDecl: newOperandDecl(probeNode, ctx), setDecl: setDecl}, nil
 			}
 			return nil, sqlerr.New("0A000",

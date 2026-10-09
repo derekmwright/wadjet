@@ -3,6 +3,8 @@
 package physical
 
 import (
+	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/derekmwright/wadjet/internal/planner/logical"
@@ -42,7 +44,15 @@ func (p *Planner) annotateSubqueryColumnDecls(node *logical.Node) {
 	decls := map[string]logical.SubqueryColumnDecl{}
 	respelled := map[string]bool{}
 	for _, sq := range collectPlanSubqueries(node) {
-		declSQL := p.subqueryDeclSQLIn(sq.sql, sq.scope)
+		// Each subquery is declared in the WITH chain where it is written
+		// (subqueryScopingIn): this pass runs before Plan sets the
+		// statement's list, and a subquery in a nested block reads that
+		// block's items (#1603, #1602).
+		dp := p
+		if sp, ok := p.forSubqueryNode(sq.node); ok {
+			dp = sp
+		}
+		declSQL := dp.subqueryDeclSQLOf(sq.node, sq.scope)
 		// One text can be met twice: `SUM((SELECT c.i …))` is written in the
 		// Project ABOVE the aggregate, whose input has no `c.i`, and again as
 		// the aggregate's argument, over the relation that does. The reading
@@ -55,7 +65,7 @@ func (p *Planner) annotateSubqueryColumnDecls(node *logical.Node) {
 		// own reading (subqueryDeclOptionFor), so the vector a projection
 		// allocates and the operand the kernels classify are one type
 		// (#1422). The stamp stays keyed by the text as written.
-		d, ok := p.scalarSubqueryColumnDecl(declSQL)
+		d, ok := dp.scalarSubqueryColumnDecl(declSQL)
 		if !ok {
 			continue
 		}
@@ -66,7 +76,7 @@ func (p *Planner) annotateSubqueryColumnDecls(node *logical.Node) {
 		// has (numeric), which an INTEGER assignment rounds by (#1353). The
 		// respelled text answers only what the written one cannot.
 		if declSQL != sq.sql {
-			if cat := p.subqueryOutputPGCategory(sq.sql); cat != pgCatUnknown {
+			if cat := dp.subqueryOutputPGCategory(sq.sql); cat != pgCatUnknown {
 				d.PGCategory = cat
 			}
 		}
@@ -108,15 +118,15 @@ func collectPlanSubqueries(n *logical.Node) []planSubquery {
 		if len(n.Children) == 1 {
 			scope = n.Children[0]
 		}
-		var texts []string
+		var texts []*plansql.SubqueryNode
 		for _, proj := range n.Projections {
-			collectSubquerySQL(proj.ASTExpr, &texts)
+			collectSubqueryNodes(proj.ASTExpr, &texts)
 		}
 		for _, agg := range n.AggExprs {
-			collectSubquerySQL(agg.InputExpr, &texts)
+			collectSubqueryNodes(agg.InputExpr, &texts)
 		}
 		for _, we := range n.WindowExprs {
-			collectSubquerySQL(we.InputExpr, &texts)
+			collectSubqueryNodes(we.InputExpr, &texts)
 			// The PARTITION BY / ORDER BY terms are materialized keys too,
 			// compiled with these declarations (windowKeyProjections) from
 			// the same parse of their text; a subquery in one that was
@@ -125,17 +135,17 @@ func collectPlanSubqueries(n *logical.Node) []planSubquery {
 			// failed the key's store on every arm.
 			for _, term := range we.PartitionBy {
 				if ast, err := plansql.ParseExpression(term); err == nil {
-					collectSubquerySQL(ast, &texts)
+					collectSubqueryNodes(ast, &texts)
 				}
 			}
 			for _, ob := range we.OrderBy {
 				if ast, err := plansql.ParseExpression(ob.Column); err == nil {
-					collectSubquerySQL(ast, &texts)
+					collectSubqueryNodes(ast, &texts)
 				}
 			}
 		}
-		for _, sql := range texts {
-			out = append(out, planSubquery{sql: sql, scope: scope})
+		for _, sq := range texts {
+			out = append(out, planSubquery{sql: sq.SQL, node: sq, scope: scope})
 		}
 		for _, c := range n.Children {
 			walk(c)
@@ -145,45 +155,52 @@ func collectPlanSubqueries(n *logical.Node) []planSubquery {
 	return out
 }
 
-// planSubquery is one scalar subquery text and the relation it sits over.
+// planSubquery is one scalar subquery — its text and its node, which records
+// the WITH chain it is planned in — and the relation it sits over.
 type planSubquery struct {
 	sql   string
+	node  *plansql.SubqueryNode
 	scope *logical.Node
 }
 
-// collectSubquerySQL descends an expression for SubqueryNode texts. It is the
-// binder's walkExpr shape one package over, kept here because this package's
-// node set is the one the planner rewrites.
-func collectSubquerySQL(e plansql.Node, out *[]string) {
-	switch n := e.(type) {
-	case nil:
-		return
-	case *plansql.SubqueryNode:
-		*out = append(*out, n.SQL)
-	case *plansql.ParenNode:
-		collectSubquerySQL(n.Inner, out)
-	case *plansql.UnaryOp:
-		collectSubquerySQL(n.Inner, out)
-	case *plansql.CastNode:
-		collectSubquerySQL(n.Inner, out)
-	case *plansql.BinaryOp:
-		collectSubquerySQL(n.Left, out)
-		collectSubquerySQL(n.Right, out)
-	case *plansql.CmpExpr:
-		collectSubquerySQL(n.Left, out)
-		collectSubquerySQL(n.Right, out)
-	case *plansql.FuncCallNode:
-		for _, a := range n.Args {
-			collectSubquerySQL(a, out)
+// collectSubqueryNodes descends an expression for SubqueryNode NODES, whose
+// memo records the WITH chain each is declared in. It is the binder's
+// walkExpr shape one package over, kept here because this package's node set
+// is the one the planner rewrites.
+func collectSubqueryNodes(e plansql.Node, out *[]*plansql.SubqueryNode) {
+	var walk func(plansql.Node)
+	walk = func(e plansql.Node) {
+		switch n := e.(type) {
+		case nil:
+			return
+		case *plansql.SubqueryNode:
+			*out = append(*out, n)
+		case *plansql.ParenNode:
+			walk(n.Inner)
+		case *plansql.UnaryOp:
+			walk(n.Inner)
+		case *plansql.CastNode:
+			walk(n.Inner)
+		case *plansql.BinaryOp:
+			walk(n.Left)
+			walk(n.Right)
+		case *plansql.CmpExpr:
+			walk(n.Left)
+			walk(n.Right)
+		case *plansql.FuncCallNode:
+			for _, a := range n.Args {
+				walk(a)
+			}
+		case *plansql.CaseNode:
+			walk(n.Subject)
+			for _, w := range n.Whens {
+				walk(w.Cond)
+				walk(w.Result)
+			}
+			walk(n.Else)
 		}
-	case *plansql.CaseNode:
-		collectSubquerySQL(n.Subject, out)
-		for _, w := range n.Whens {
-			collectSubquerySQL(w.Cond, out)
-			collectSubquerySQL(w.Result, out)
-		}
-		collectSubquerySQL(n.Else, out)
 	}
+	walk(e)
 }
 
 // subqueryDeclsOf turns a node's stamped map into the three resolvers ColDecls
@@ -271,7 +288,10 @@ func (p *Planner) scalarSubqueryColumnDecl(sql string) (decl logical.SubqueryCol
 		p.subqueryDeclCache = &subqueryDeclMemo{}
 	}
 	memo := p.subqueryDeclCache
-	if e, seen := memo.claim(sql); seen {
+	// One text declares differently in two WITH chains (a nested item that
+	// reuses a name), so the memo is keyed by the chain it was planned in.
+	key := sql + cteChainKey(p.Ctes)
+	if e, seen := memo.claim(key); seen {
 		if e == nil {
 			return logical.SubqueryColumnDecl{}, false // in flight
 		}
@@ -293,8 +313,26 @@ func (p *Planner) scalarSubqueryColumnDecl(sql string) (decl logical.SubqueryCol
 			ok = false
 		}
 	}
-	memo.store(sql, &subqueryDeclEntry{decl: d, ok: ok})
+	memo.store(key, &subqueryDeclEntry{decl: d, ok: ok})
 	return d, ok
+}
+
+// cteChainKey names a WITH chain by its items' identities, for a memo key: two
+// chains that bind a name to different items never share an entry.
+func cteChainKey(chain []plansql.CTEDef) string {
+	if len(chain) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\x00")
+	for i := range chain {
+		if id := chain[i].Identity(); id != nil {
+			fmt.Fprintf(&b, "%p;", id)
+		} else {
+			b.WriteString(chain[i].Name + "\x01" + chain[i].SQL + ";")
+		}
+	}
+	return b.String()
 }
 
 // subqueryDeclEntry is one memo slot; a nil slot means "in flight".

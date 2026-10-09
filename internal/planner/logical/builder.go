@@ -20,6 +20,10 @@ func BuildFromSelect(info *plansql.SelectInfo) (*Node, error) {
 // BuildFromSelectWithCTEs constructs a logical plan, resolving CTE references
 // to inline sub-plans instead of table scans.
 func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*Node, error) {
+	// ctes is the WITH chain in scope inside info, its own items included;
+	// every expression subquery written in info's clauses is planned in it,
+	// wherever that subquery is later planned (ADR-0047 stage 3).
+	plansql.StampSubqueryScopes(info, ctes)
 	// Handle set operations (UNION, INTERSECT, EXCEPT)
 	if info.Union != nil {
 		return buildSetOpPlan(info, ctes)

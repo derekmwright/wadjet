@@ -82,9 +82,9 @@ e_sub_derived__k	SELECT id, (SELECT y FROM (SELECT t2.k AS y FROM t2 WHERE t2.id
 d_sub_derived__u	SELECT id, (SELECT y FROM (SELECT t2.u AS y FROM t2 WHERE t2.id = 1) s) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
 e_sub_derived__u	SELECT id, (SELECT y FROM (SELECT t2.u AS y FROM t2 WHERE t2.id = 1) s) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
 d_sub_cte__n	WITH c AS (SELECT t2.n AS y FROM t2 WHERE t2.id = 1) SELECT id, (SELECT y FROM c) AS x FROM t	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG
-e_sub_cte__n	WITH c AS (SELECT t2.n AS y FROM t2 WHERE t2.id = 1) SELECT id, (SELECT y FROM c) AS x FROM t WITH NO DATA	0.755 | 1.255	(10,2): 0.76 | 1.26	STRING: 0.755 | 1.255	=c23adbbb
+e_sub_cte__n	WITH c AS (SELECT t2.n AS y FROM t2 WHERE t2.id = 1) SELECT id, (SELECT y FROM c) AS x FROM t WITH NO DATA	0.76 | 1.26	(10,2): 0.76 | 1.26	STRING: 0.755 | 1.255	=PG
 d_sub_cte__k	WITH c AS (SELECT t2.k AS y FROM t2 WHERE t2.id = 1) SELECT id, (SELECT y FROM c) AS x FROM t	1 | 1	(5,0): 1 | 1	(5,0): 1 | 1	=PG
-e_sub_cte__k	WITH c AS (SELECT t2.k AS y FROM t2 WHERE t2.id = 1) SELECT id, (SELECT y FROM c) AS x FROM t WITH NO DATA	0.755 | 1.255	(5,0): 1 | 1	STRING: 0.755 | 1.255	=c23adbbb
+e_sub_cte__k	WITH c AS (SELECT t2.k AS y FROM t2 WHERE t2.id = 1) SELECT id, (SELECT y FROM c) AS x FROM t WITH NO DATA	1 | 1	(5,0): 1 | 1	STRING: 0.755 | 1.255	=PG
 d_sub_cte__u	WITH c AS (SELECT t2.u AS y FROM t2 WHERE t2.id = 1) SELECT id, (SELECT y FROM c) AS x FROM t	0.755 | 1.255	U: 0.755 | 1.255	(38,0): 1 | 1	=PG
 e_sub_cte__u	WITH c AS (SELECT t2.u AS y FROM t2 WHERE t2.id = 1) SELECT id, (SELECT y FROM c) AS x FROM t WITH NO DATA	0.755 | 1.255	U: 0.755 | 1.255	STRING: 0.755 | 1.255	=PG
 d_sub_case__n	SELECT id, (SELECT CASE WHEN t2.id > 0 THEN t2.n ELSE t2.n END FROM t2 WHERE t2.id = 1) AS x FROM t	0.76 | 1.26	(10,2): 0.76 | 1.26	(10,2): 0.76 | 1.26	=PG

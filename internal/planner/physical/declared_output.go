@@ -1192,6 +1192,11 @@ type ColDecls struct {
 	// category of the subquery's output. Set with the other two
 	// (withSubqueryDecls); nil reads as the carrier's.
 	subqueryPGCategory func(sql string) pgCategory
+	// subqueryNode declares a scalar subquery by its NODE — planned in the
+	// WITH chain it is written in (subqueryNodeDeclIn, ADR-0047 stage 3) —
+	// and is asked before the three text resolvers above, which answer for
+	// a node that records no chain and for a walk that holds no Planner.
+	subqueryNode func(*plansql.SubqueryNode) (logical.SubqueryColumnDecl, bool)
 	// PlaceholderTypes is the declared type of each `:scalar_N` deferred
 	// literal, keyed by the placeholder's NAME.
 	//
@@ -1597,6 +1602,7 @@ func DeclaredTypeOfNodeWith(node plansql.Node, schema []parquet.Column, cat []ex
 	}
 	if p != nil {
 		decls.subqueryDecl, decls.subqueryIntWidth, decls.subqueryPGCategory = subqueryResolvers(p.scalarSubqueryColumnDecl)
+		decls.subqueryNode = p.subqueryNodeDeclIn(nil)
 	}
 	return nodeDeclaredType(node, decls)
 }
@@ -1803,10 +1809,7 @@ func nodeDeclaredTypeOf(node plansql.Node, decls ColDecls) (expr.DeclType, expr.
 		// honest answer: a wrong declaration here builds an output vector
 		// that reads every value back wrong, and that is worse than the
 		// fallback (ADR-0012 item 8).
-		if decls.subqueryDecl == nil {
-			return expr.DeclType{}, expr.Undecided
-		}
-		col, ok := decls.subqueryDecl(n.SQL)
+		col, ok := decls.subqueryColumn(n)
 		if !ok {
 			return expr.DeclType{}, expr.Undecided
 		}
