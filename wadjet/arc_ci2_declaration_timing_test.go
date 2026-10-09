@@ -77,12 +77,22 @@ func TestArcCI2DeclarationPlanningBound(t *testing.T) {
 		}
 		return elapsed
 	}
+	// Each depth is the BEST of three runs: a single sample on a loaded host
+	// (a GC pause, another package's tests) moved the 128/64 ratio from its
+	// usual 6–7.5x to 10x at 1047d107 and 1b862e71 alike, with no change in
+	// the walk; the minimum of three is the walk's cost, and a memo that
+	// stopped caching still shows past 11x on minima.
 	for _, depth := range []int{16, 64, 128} {
 		q := "SELECT a.id, x + a.i AS v FROM ci2_d a JOIN (SELECT id, f AS x FROM ci2_d) b ON a.id = b.id"
 		for i := 0; i < depth; i++ {
 			q = fmt.Sprintf("SELECT q%d.id, q%d.v FROM (%s) q%d", i, i, q, i)
 		}
-		depthElapsed[depth] = timed(fmt.Sprintf("derivedDepth=%d", depth), q+" ORDER BY 1", "{int,float} 1,1.5 | 2,3.5")
+		for run := 0; run < 3; run++ {
+			e := timed(fmt.Sprintf("derivedDepth=%d", depth), q+" ORDER BY 1", "{int,float} 1,1.5 | 2,3.5")
+			if run == 0 || e < depthElapsed[depth] {
+				depthElapsed[depth] = e
+			}
+		}
 	}
 	if d64, d128 := depthElapsed[64], depthElapsed[128]; d64 > 50*time.Millisecond {
 		if ratio := float64(d128) / float64(d64); ratio > depthRatioLimit {
