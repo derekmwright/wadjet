@@ -57,6 +57,7 @@ func (w *declWalk) declaredOutputSchema(root *logical.Node,
 	if !ok {
 		return nil
 	}
+	keys := w.boundKeyNamesBelow(findOutputProjectionNode(root))
 	out := make([]parquet.Column, 0, len(projs))
 	for _, proj := range projs {
 		name := declaredProjectionName(proj)
@@ -68,6 +69,16 @@ func (w *declWalk) declaredOutputSchema(root *logical.Node,
 			return nil
 		}
 		d := declaredProjectionDecl(proj, childTypes, strictInt)
+		// A SELECT item that IS a GROUP BY key by its binding — spelled
+		// apart from it, `t.i + 1` over `GROUP BY i + 1` — is the key's
+		// published column, as the projection the planner builds reads it
+		// (projection_plan.go's gbExprToSyn): declared by the key, not
+		// re-derived from operands the aggregate does not emit.
+		if kn, ok := keys[groupTermIdentityOf(proj)]; ok && !proj.IsAgg {
+			if kd, ok := childTypes.namedDecl(kn); ok {
+				d = kd
+			}
+		}
 		col := parquet.Column{
 			Name:     name,
 			Type:     d.ID,
@@ -1618,4 +1629,43 @@ func (w *declWalk) emittedColDecimalUncached(n *logical.Node) map[string]logical
 		return withJoinArmQualifiers(n, left, right, mergeJoinSides(left, right))
 	}
 	return w.inputColDecimal(n)
+}
+
+// boundKeyNamesBelow maps the GROUP BY keys of the aggregate a projection
+// reads (through a HAVING filter, a sort or a limit), by their binding
+// identity (plansql.GroupTermIdentity), to the name each is published under.
+// Only keys that hold a binding are mapped: an unbound key is matched by its
+// spelling, as before. Nil when the projection reads no aggregate.
+func (w *declWalk) boundKeyNamesBelow(pn *logical.Node) map[string]string {
+	if pn == nil || len(pn.Children) != 1 {
+		return nil
+	}
+	n := pn.Children[0]
+	for n != nil && len(n.Children) == 1 &&
+		(n.Type == logical.NodeFilter || n.Type == logical.NodeSort || n.Type == logical.NodeLimit) {
+		n = n.Children[0]
+	}
+	if n == nil || n.Type != logical.NodeAggregate {
+		return nil
+	}
+	var out map[string]string
+	for i, k := range w.groupKeyOutputs(n) {
+		if i >= len(n.GroupByExprs) || n.GroupByExprs[i] == nil || !plansql.HoldsBinding(n.GroupByExprs[i]) {
+			continue
+		}
+		if out == nil {
+			out = map[string]string{}
+		}
+		out[k.Identity] = k.Name
+	}
+	return out
+}
+
+// groupTermIdentityOf is a projection's binding identity, or "" when it holds
+// no binding (nothing to match a bound key by).
+func groupTermIdentityOf(proj logical.Projection) string {
+	if proj.ASTExpr == nil || !plansql.HoldsBinding(proj.ASTExpr) {
+		return ""
+	}
+	return plansql.GroupTermIdentity(proj.ASTExpr)
 }
