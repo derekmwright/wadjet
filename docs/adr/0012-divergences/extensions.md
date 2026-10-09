@@ -295,15 +295,14 @@ ADR lines 3221-3435. Catalog rows: r9, r10, r11, r12, r13. Stated in [Mechanisms
   MERGE ON supports column equalities only (0A000). DML has no DAG planning
   path (0A000); its wire door executes locally. These are named residuals,
   not claims that every possible SQL expression reaches this walk.
-  The earlier implementation inventory also pins `cte_shadowed_body`: `registerCTE`'s
-  additive name map skips a nested body when its name already exists.
-  The unused shadowing-body fixture answers zero rows on all five arms
-  and both formats. It pins `set_order_by` too: validateBlock returns
-  after the UNION arms without checking the wrapper ORDER BY, and
-  buildSetOpPlan carries the term as a column name, not a compiled
-  expression. All five arms and both formats answer zero rows; the DAG
-  arms take UnreachableOutputLocalRoutes +1 before the local answer. Both reproduce with the earlier implementation binder fix removed. These are
-  scope/set-operation coverage residuals, not recursive-body regressions.
+  The earlier implementation inventory also pinned `cte_shadowed_body`
+  and `set_order_by` as coverage residuals. Both are closed: arc BR held a
+  set operation's ORDER BY to PostgreSQL's rule (`set_order_by` is
+  22023), and ADR-0047 stage 3 (2026-10-09) made the binder's WITH
+  registry lexical, so a nested item that reuses an enclosing name is
+  registered and its unused body checked as `cte_unused`'s is
+  (`cte_shadowed_body` is 22023 on both wire formats and five arms,
+  `TestTCPFlagASTCoverage`; it answered zero rows at 542b4f37).
 
   What stays per row is what is not knowable from the declaration: a name
   supplied by a COLUMN or by an expression, which is not a constant, and a

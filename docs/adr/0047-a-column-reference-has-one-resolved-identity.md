@@ -1,6 +1,6 @@
 # ADR-0047: A column reference has one resolved identity
 
-- Status: Accepted (2026-10-06), stages 1 and 2.
+- Status: Accepted (2026-10-06), stages 1 and 2; stage 3 2026-10-09.
 - Deciders: Derek Wright
 - Related: [ADR-0026](0026-a-group-key-has-one-identity-and-one-name.md), [names-scopes r10](0012-divergences/names-scopes.md#catalog).
 
@@ -51,8 +51,18 @@ The bound tree decides the match; the substitution's output text is not what
 that match reads. The group-key gate's `pair/*/window` rows and the binding
 census measure the result and the compared trees.
 
-Expression-subquery and LATERAL bodies retain the spelling comparison in
-stage 1 (`corr/innerShadow`, `corr/lateralGrouped`, `corr/inSubqGrouped`).
+Since stage 3 an UNCORRELATED expression subquery's body is the node's
+memoized parse, bound with the enclosing scope and planned from that tree, so
+its terms match their keys by binding on the single-process arms
+(`corr/innerShadow`, `c738/outerSameAliasInner`, `p/inSubqJoin/ord`,
+`p/scalarDirectItem/sel`, `p/scalarDirectJoin/sel`, PostgreSQL's answers). A
+CORRELATED body is run per outer row from its substituted text and
+decorrelated from a private parse, neither of which carries a binding, so the
+binder clears its bindings and judges it by spelling (`origin/outerRef/sel`,
+`corr/existsOuterGrouped`, `p/correlatedJoin/ord` keep 42803); so does a body
+the binder cannot classify — one holding a derived table, a WITH or a LATERAL
+item (`p/scalarSubqJoin/sel`) — and a LATERAL body keeps the spelling
+comparison (`corr/lateralGrouped`, `p/lateralBodyJoin`, stage 4).
 The grouped check separately uses the binder's body scopes to judge a
 subquery reference to the containing block (`corrMatrix/*`). Dotted names
 and unfolded FROM-less forms retain the gate's recorded answers (`qd/*`,
@@ -77,6 +87,14 @@ and unfolded FROM-less forms retain the gate's recorded answers (`qd/*`,
 |---|---|---|---|
 | 1 | done (2026-10-06, #1524) | the single-process GROUP BY term match | — |
 | 2 | done (#1393) | the single-process declaration walk: a node's output is an ordered identity list (`logical.Node.OutputColumns` / `OutputIDs`, from the instance the binder records on the FROM item, `plansql.TableRef.Rel`); `physical.declWalk.outputs` declares each position once per walk; a bound reference — a projection's leaf, a bound GROUP BY key, LAG's default, an aggregate's argument — is declared by the position its binding names. Planning time stays in its measured degree: derived-table depth 16 / 32 / 64 / 128 plan in 8.9 / 34.5 / 247 / 1,689 ms at a0f0c322 and 10.3 / 39.7 / 303 / 2,291 ms here (fitted exponent 2.55 and 2.63; `wadjet.TestArcCI2DeclarationPlanningBound` holds depth 128 under three seconds) | an unbound GROUP BY key (a re-parse of its text) and an unbound aggregate argument (the stage DAG's re-spelled names, typed from the scans below first, `aggInputColumnType`); the PostgreSQL category (`ColDecls.pgCat`) and the strict-integer set, by name; the rename chase that re-spells a computed key for execution (`resolveAggInputName`, stage 6); a node a rewrite rebuilt without its instance answers by name; a dotted relation alias, which the binder does not bind (#1650); the stage DAG's per-stage declarations (`GroupByTypes`, `GroupByDecimal`, stages 5 and 7) |
+| 3 | done (2026-10-09; #1602, #1603, #1606, #1599) | an expression subquery's body: `SubqueryNode.Select` / `ExistsNode.Select` memoize it on the node with the WITH chain in scope where it is written (`CTEScope`); the binder validates it with the enclosing scope, records the references whose binding reaches the enclosing query (`SetOuterRefs`, the correlation classifier ADR-0021 §1k now reads, `plansql.CorrelatedRefsOf`), and keeps an uncorrelated body's bindings; the physical runner, declaration, column count and inner scope of each subquery are a child planner over the node's chain that plans its memoized body (`physical.subqueryScopingIn`, `memoBodyFor`); the declaration pass and the declaration walk ask a subquery by its node (`subqueryNodeDeclIn`, `ColDecls.subqueryNode`); a WITH item binds the innermost item of its name and a CTE materialization answers by the item's identity (`logical.Node.CTEIdent`, `Planner.cteCacheFor`); a block run more than once reads a volatile WITH item's one evaluation (`plansql.ReadPerRun`); the stage DAG plans eager runs, IN sets and producer stages in the node's chain from its memo; the per-build policy binder resolves the body's WITH items against that chain (`SelectInfo.SetEnclosingCTEs`). Planning time (EXPLAIN, best of 5, SF0.01, ms, base → tip): Q02 3.57 → 4.79, Q04 0.71 → 1.04, Q17 1.08 → 1.74, Q20 4.77 → 4.11, Q21 3.11 → 3.33, Q22 1.14 → 1.10 | a CORRELATED body (run per outer row from substituted text, stage 8) and the decorrelated join keys a body yields (stage 4, `repairDecorrelatedSpelling`); a body holding a derived table, a WITH or a LATERAL item, which the binder does not classify (names, as before); an ORDER BY item's subquery the binder re-parses from text; the declaration stamp keyed by a subquery's text (`SubqueryColDecls`) for the walks that hold no Planner; the stage DAG's filter subqueries the plan carries only as text; the recursive term's arms, split from the body's text (ADR-0032) |
+
+A SELECT item that is a GROUP BY key by its binding but spelled apart from it
+(`t.i + 1` over `GROUP BY i + 1`) is declared by the key's published column
+(`declWalk.boundKeyNamesBelow`), as the projection the planner builds reads
+it: the zero-row RowDescription of `SELECT t.i + 1 FROM ss_t t WHERE false
+GROUP BY i + 1`, a CREATE TABLE AS from it and a scalar subquery over it were
+double precision at 542b4f37 and are the key's integer now.
 
 Stage 2's gates: `coordinator.TestArcCI2DeclaredOutputByIdentityEveryArm`
 (1,662 cells × five arms: eight origins of a relation that publishes another

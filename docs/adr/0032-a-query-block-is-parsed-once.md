@@ -72,6 +72,25 @@ is the one thing a reader has to know about the memo, and it is why
 `resolveTableOrCTE` and `joinRightRef` changed signature rather than staying
 value-typed.
 
+## 2026-10-09: an expression subquery's body is parsed once too (ADR-0047 stage 3)
+
+`SubqueryNode.Select()` and `ExistsNode.Select()` (`sub_block.go`) memoize an
+expression subquery's body on the NODE that names it, as `SubSelect` does on a
+derived table's reference, and the node records the WITH chain in scope where
+it is written (`CTEScope`, stamped by `plansql.StampSubqueryScopes` when the
+enclosing block is planned). The binder validates and binds that body with
+the enclosing query's scope; the physical planner's runner, declaration,
+column count and scope for one subquery are a child planner over the node's
+chain that plans its memoized body (`physical.subqueryScopingIn`); the stage
+DAG's eager runs and producer stages read the same body and chain. A plan
+built from substituted or bounded TEXT — a correlated re-run's per-row
+statement, a decorrelation's build side (whose keys are spelled by name,
+stage 4) — parses that text privately and plans it in the node's chain.
+Gated by `coordinator.TestArcCI3SubqueryBodyInItsScopeEveryArm`,
+`wadjet.TestArcCI3EmbeddedSubqueryBodyInItsScope`,
+`pgwire.TestArcCI3SubqueryScopeOnTheWire` and
+`server.TestArcCI3SubqueryBodyNeverPublishesAPolicedValue`.
+
 ## What this does NOT change
 
 - **The parser still substitutes unconditionally.** It has no schema; that is

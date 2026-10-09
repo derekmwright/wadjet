@@ -741,13 +741,14 @@ failing row raises where PostgreSQL answers. And only a reference that itself
 stops early is spared: a reference with a filter below its `LIMIT` or
 `EXISTS`, a `LIMIT` reference used as a join side, or an `OR` whose other
 operand reads the CTE reads on to the failing row and raises where PostgreSQL
-answers. A recursive term re-runs a volatile CTE it reads once on every
-iteration. It is held under the
+answers. A block that runs more than once reads it once too: a correlated
+subquery's per-row runs and a recursive term's iterations read the one
+evaluation, as do the runs of a WITH item declared inside a correlated
+subquery that reads no outer value. It is held under the
 statement's memory budget and spills past it, and `EXPLAIN VERBOSE` names it
 (`CTE s: volatile, evaluated once; every reference reads that result`). A
 volatile CTE read once, and any deterministic CTE, is expanded into the plan
-at its reference, as before; read once from a correlated subquery, it is
-therefore evaluated per outer row (PostgreSQL evaluates it once). On the
+at its reference, as before. On the
 stage DAG of a cluster a volatile CTE read more than once is still evaluated
 per consuming stage (see [PostgreSQL differences](postgres-differences.md)).
 `AS MATERIALIZED`, `AS NOT MATERIALIZED` and a WITH list before `INSERT` are
@@ -2751,6 +2752,20 @@ body, or a forward reference to a later item — is SQLSTATE `42P01`
 (`relation "..." does not exist`), as it is in PostgreSQL. `WITH RECURSIVE` is
 the exception: a recursive CTE's name IS visible inside its own body.
 
+A WITH list on a nested block — a derived table, a CTE body, a subquery — is
+in scope inside that block, and an item that reuses an enclosing item's name
+shadows it there. Every expression subquery (scalar, `IN`, `EXISTS`, `ANY` /
+`ALL`) reads the items in scope where it is written:
+
+```sql
+-- the derived table's (SELECT max(id) FROM c) reads ITS c (2); the outer
+-- WHERE reads the statement's c (1); one row, 2 | 2
+WITH c AS (SELECT 1 AS id)
+SELECT * FROM (WITH c AS (SELECT 2 AS id)
+               SELECT id, (SELECT max(id) FROM c) AS m FROM c) d
+WHERE id = (SELECT max(id) FROM c) + 1
+```
+
 A `WITH RECURSIVE` column list renames its body's columns BY POSITION, so a
 body that publishes two columns under one name is renamed apart by it and both
 values survive:
@@ -4730,9 +4745,10 @@ a MERGE WHEN clause no row reaches — a MATCHED UPDATE's SET or a MATCHED
 `AND … DELETE` condition over an ON that matches nothing — can return `MERGE 0`
 without checking its expressions (a NOT MATCHED VALUES tuple and a matching ON
 both refuse). An injected policy filter on an empty distributed stage
-may likewise never compile. Two further empty-input gaps remain: a shadowing CTE body can bypass the
-binder's name map, and an ORDER BY expression on a whole set operation is
-not validated. These remain coverage gaps (ADR-0012).
+may likewise never compile. These remain coverage gaps (ADR-0012). A
+shadowing CTE body and an ORDER BY over a whole set operation are validated
+like any other expression (`TestTCPFlagASTCoverage`'s `cte_shadowed_body` and
+`set_order_by`).
 
 A flag NAME may be any text expression, including a column. A name that is not
 a constant is refused where it first exists, per row; only literal names are
