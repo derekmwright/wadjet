@@ -642,6 +642,10 @@ type SubqueryNode struct {
 	// arithmetic, as the EXTRACT itself would be there. It is not part of
 	// the text.
 	Answer bool
+
+	// body is the memoized parse of SQL and the WITH items in scope where
+	// the subquery is written (sub_block.go, ADR-0032 extended).
+	body *subqueryBody
 }
 
 func (*SubqueryNode) nodeTag() {}
@@ -656,6 +660,9 @@ func (s *SubqueryNode) String() string {
 type ExistsNode struct {
 	Not bool
 	SQL string
+
+	// body: SubqueryNode.body's twin.
+	body *subqueryBody
 }
 
 func (*ExistsNode) nodeTag() {}

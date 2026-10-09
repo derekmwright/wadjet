@@ -36,3 +36,8 @@ func WithRowLimit(sql string, n int) string {
 	}
 	return AppendRowLimit(sql, info, n)
 }
+
+// RowLimitText is the LIMIT AppendRowLimit writes for n, as SelectInfo.Limit
+// holds it: a planner that reads a memoized body sets it there instead of
+// re-parsing the bounded text.
+func RowLimitText(n int) string { return strconv.Itoa(n) }
