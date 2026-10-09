@@ -96,9 +96,6 @@ func walkLateralBodyTerms(info *plansql.SelectInfo, visit func(plansql.Node)) {
 		for _, a := range c.AggArgs {
 			walkExprNodes(a, visit)
 		}
-		if c.WindowSpec != nil {
-			walkWindowSpecTerms(c.WindowSpec, visit)
-		}
 	}
 	walkExprNodes(info.WhereExpr, visit)
 	walkExprNodes(info.HavingExpr, visit)

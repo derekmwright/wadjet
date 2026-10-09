@@ -169,9 +169,6 @@ func walkBlockValueExprs(info *plansql.SelectInfo, visit func(plansql.Node)) {
 		for _, a := range c.AggArgs {
 			walkExprNodes(a, visit)
 		}
-		if c.WindowSpec != nil {
-			walkWindowSpecTerms(c.WindowSpec, visit)
-		}
 	}
 	walkExprNodes(info.WhereExpr, visit)
 	walkExprNodes(info.HavingExpr, visit)
@@ -181,36 +178,5 @@ func walkBlockValueExprs(info *plansql.SelectInfo, visit func(plansql.Node)) {
 	}
 	for i := range info.Joins {
 		walkExprNodes(info.Joins[i].CondExpr, visit)
-	}
-}
-
-// walkWindowSpecTerms visits a `plansql.WindowSpec`'s PARTITION BY and ORDER BY
-// terms, which that struct carries as TEXT rather than as an AST, by parsing
-// each one. A term that does not parse is reported to the caller as an opaque
-// marker node, so a caller asking "does this read anything" answers yes rather
-// than silently no.
-func walkWindowSpecTerms(w *plansql.WindowSpec, visit func(plansql.Node)) {
-	if w == nil {
-		return
-	}
-	term := func(s string) {
-		node, err := plansql.ParseExpression(s)
-		if err != nil || node == nil {
-			// Unparseable: hand the caller a bare reference to the text, which
-			// every caller treats as a read it cannot rule out.
-			visit(&plansql.ColRef{Column: s})
-			return
-		}
-		walkExprNodes(node, visit)
-	}
-	for _, pb := range w.PartitionBy {
-		if pb != "" {
-			term(pb)
-		}
-	}
-	for _, ob := range w.OrderBy {
-		if ob.Column != "" {
-			term(ob.Column)
-		}
 	}
 }

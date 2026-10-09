@@ -4,21 +4,18 @@ package sql
 
 import "strings"
 
-// WindowSpec describes a window function specification.
+// WindowSpec describes a SELECT-list item that IS a window call.
+//
+// The call's TERMS — its arguments, PARTITION BY and ORDER BY — are not
+// here: they are the item's own `*WindowFuncNode` (SelectColumn.ASTExpr),
+// the tree the binder stamps and every rewrite edits. A second, TEXT copy of
+// them was re-parsed by the planner with no binding on it, and had to be
+// kept in step by every pass that edited the tree (ADR-0047 §Binding and
+// window terms).
 type WindowSpec struct {
-	FuncName    string
-	Args        string // raw arg string (e.g., "amount", "*", "")
-	PartitionBy []string
-	OrderBy     []WindowOrderItem
-	Alias       string       // output column name
-	Frame       *WindowFrame // optional frame specification
-}
-
-// WindowOrderItem describes a column + direction in a window ORDER BY.
-type WindowOrderItem struct {
-	Column     string
-	Desc       bool
-	NullsFirst *bool
+	FuncName string
+	Alias    string       // output column name
+	Frame    *WindowFrame // optional frame specification (the node's own)
 }
 
 // WindowOutputName is the name a SELECT-list window column is published under.

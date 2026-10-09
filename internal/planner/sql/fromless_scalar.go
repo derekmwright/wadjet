@@ -97,16 +97,10 @@ func unfoldFromlessScalars(info *SelectInfo) {
 				}
 			}
 		}
-		// A WINDOW item's arguments are a THIRD place the same expression
-		// lives: WindowSpec is built from the node at parse time and is what
-		// the window planner reads, so rewriting only ASTExpr left
-		// `SUM((SELECT CAST(3 AS INT))) OVER ()` declaring text
-		// (pgwire.TestScalarSubqueryAggregateMatrix's /window cells).
-		if col.IsWindow && col.WindowSpec != nil {
-			if wfn, ok := col.ASTExpr.(*WindowFuncNode); ok {
-				col.WindowSpec = windowSpecFromNode(wfn, col.WindowSpec.Alias)
-			}
-		}
+		// A WINDOW item's arguments are its node's (WindowSpec carries no
+		// copy of them), so rewriting ASTExpr rewrites what the window
+		// planner reads: `SUM((SELECT CAST(3 AS INT))) OVER ()` declares the
+		// integer (pgwire.TestScalarSubqueryAggregateMatrix's /window cells).
 		// An AGGREGATE item's argument is a second tree, and the one the
 		// aggregate planner reads. It is rewritten whether or not the item
 		// also carries an ASTExpr, because a parsed aggregate carries its
