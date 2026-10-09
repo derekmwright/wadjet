@@ -120,7 +120,7 @@ func exprOutputName(n Node) string {
 		}
 		// A scalar subquery takes the name of its own single output column,
 		// which is that block's answer to this same question.
-		if name := subqueryOutputName(e.SQL); name != "" {
+		if name := subqueryOutputName(e); name != "" {
 			return name
 		}
 		return UnnamedOutputColumn
@@ -131,19 +131,20 @@ func exprOutputName(n Node) string {
 // subqueryOutputName is the published name of a scalar subquery's ONE output
 // column. It parses the block; a block that does not parse, or does not have
 // exactly one non-star item, has no name to lend.
-func subqueryOutputName(sql string) string {
-	sql = strings.TrimSpace(sql)
-	if sql == "" {
+// subqueryOutputName is a scalar subquery's own single output column's
+// name, read off its memoized body.
+func subqueryOutputName(n *SubqueryNode) string {
+	if strings.TrimSpace(n.SQL) == "" {
 		return ""
 	}
-	parsed, err := Parse(sql)
-	if err != nil || parsed == nil || parsed.SelectInfo == nil {
+	info, err := n.Select()
+	if err != nil || info == nil {
 		return ""
 	}
-	if len(parsed.SelectInfo.Columns) != 1 {
+	if len(info.Columns) != 1 {
 		return ""
 	}
-	return OutputColumnName(parsed.SelectInfo.Columns[0])
+	return OutputColumnName(info.Columns[0])
 }
 
 // castTypeOutputName is the label PostgreSQL gives a cast whose ARGUMENT has

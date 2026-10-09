@@ -314,20 +314,22 @@ func refuseWindowInANestedFilteringClause(n Node) error {
 			return
 		}
 		sql := ""
+		var body func() (*SelectInfo, error)
 		switch s := q.(type) {
 		case *SubqueryNode:
-			sql = s.SQL
+			sql, body = s.SQL, s.Select
 		case *ExistsNode:
-			sql = s.SQL
+			sql, body = s.SQL, s.Select
 		}
 		// A window function cannot be written without OVER, so a body without
 		// that text cannot hold one. The test is an over-approximation — the
-		// word can appear in a string literal or an identifier — and the cost
-		// of a false positive is one parse whose result is discarded.
-		if !strings.Contains(strings.ToLower(sql), "over") {
+		// word can appear in a string literal or an identifier — and a false
+		// positive costs the node's one parse (its memoized body, ADR-0032),
+		// which every later reader reuses.
+		if body == nil || !strings.Contains(strings.ToLower(sql), "over") {
 			return
 		}
-		if _, err := Parse(sql); err != nil && sqlerr.StateOf(err) == "42P20" {
+		if _, err := body(); err != nil && sqlerr.StateOf(err) == "42P20" {
 			found = err
 		}
 	})

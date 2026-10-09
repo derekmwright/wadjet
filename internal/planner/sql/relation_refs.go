@@ -77,8 +77,8 @@ func SublinkNamesRelation(info *SelectInfo, want string) bool {
 		exprs = append(exprs, j.CondExpr)
 	}
 	for _, e := range exprs {
-		for _, sql := range ExprSubqueryTexts(e) {
-			if subqueryTextNamesRelation(sql, want) {
+		for _, sq := range ExprSubqueries(e) {
+			if subqueryNamesRelation(sq, want) {
 				return true
 			}
 		}
@@ -98,34 +98,37 @@ func SublinkNamesRelation(info *SelectInfo, want string) bool {
 	return false
 }
 
-// subqueryTextNamesRelation: the subquery's own FROM names `want`, or one of
-// ITS subquery expressions does.
-func subqueryTextNamesRelation(sql, want string) bool {
-	parsed, err := Parse(sql)
-	if err != nil {
-		return false
+// subqueryNamesRelation: the subquery's own FROM names `want`, or one of ITS
+// subquery expressions does — read off the node's memoized body (ADR-0032,
+// extended to expression subqueries).
+func subqueryNamesRelation(n Node, want string) bool {
+	var sub *SelectInfo
+	var err error
+	switch q := n.(type) {
+	case *SubqueryNode:
+		sub, err = q.Select()
+	case *ExistsNode:
+		sub, err = q.Select()
 	}
-	sub, err := ExtractSelect(parsed)
 	if err != nil || sub == nil {
 		return false
 	}
 	return SelectNamesRelation(sub, want) || SublinkNamesRelation(sub, want)
 }
 
-// ExprSubqueryTexts collects the SQL of every subquery expression in n: a
-// scalar subquery, an EXISTS, and the subquery of an IN or a quantified
-// comparison.
-func ExprSubqueryTexts(n Node) []string {
-	var out []string
+// ExprSubqueries collects every subquery expression NODE in n: a scalar
+// subquery, an EXISTS, and the subquery of an IN or a quantified comparison.
+func ExprSubqueries(n Node) []Node {
+	var out []Node
 	var visit func(Node)
 	visit = func(n Node) {
 		RewriteExpr(n, func(x Node) (Node, bool) {
 			switch v := x.(type) {
 			case *SubqueryNode:
-				out = append(out, v.SQL)
+				out = append(out, v)
 				return x, true
 			case *ExistsNode:
-				out = append(out, v.SQL)
+				out = append(out, v)
 				return x, true
 			case *AnyAllExpr:
 				visit(v.Left)

@@ -602,20 +602,16 @@ func CanonicalSubqueryTerms(n Node, unqualify bool) Node {
 		if !ok {
 			return nil, false
 		}
-		return &SubqueryNode{SQL: canonicalSubquerySQL(sq.SQL, unqualify), Array: sq.Array, Answer: sq.Answer}, true
+		return &SubqueryNode{SQL: canonicalSubquerySQL(sq, unqualify), Array: sq.Array, Answer: sq.Answer}, true
 	})
 }
 
 // canonicalSubquerySQL renders one FROM-less scalar subquery's body from its
-// parse. Anything else comes back with its whitespace collapsed and nothing
-// else changed.
-func canonicalSubquerySQL(sql string, unqualify bool) string {
-	collapsed := strings.Join(strings.Fields(sql), " ")
-	parsed, err := Parse(sql)
-	if err != nil {
-		return collapsed
-	}
-	info, err := ExtractSelect(parsed)
+// parse — the node's memoized body (ADR-0032, extended). Anything else comes
+// back with its whitespace collapsed and nothing else changed.
+func canonicalSubquerySQL(sq *SubqueryNode, unqualify bool) string {
+	collapsed := strings.Join(strings.Fields(sq.SQL), " ")
+	info, err := sq.Select()
 	if err != nil || info == nil || info.Union != nil || len(info.Columns) != 1 {
 		return collapsed
 	}

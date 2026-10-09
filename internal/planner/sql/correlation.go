@@ -772,9 +772,9 @@ func walkForOuterRefs(node Node, s *outerRefScope, refs *[]OuterRef) {
 	// evaluator never substituted it, and the inner SQL went to the runner
 	// naming a table that is not in its FROM.
 	case *SubqueryNode:
-		walkNestedForOuterRefs(n.SQL, s, refs)
+		walkNestedForOuterRefs(n.Select, s, refs)
 	case *ExistsNode:
-		walkNestedForOuterRefs(n.SQL, s, refs)
+		walkNestedForOuterRefs(n.Select, s, refs)
 	case *AnyAllExpr:
 		walkForOuterRefs(n.Left, s, refs)
 		for _, v := range n.Values {
@@ -873,13 +873,10 @@ func walkForOuterRefs(node Node, s *outerRefScope, refs *[]OuterRef) {
 // walkNestedForOuterRefs analyses a subquery nested inside the one being
 // walked, under a scope where the enclosing level's names count as inner.
 // A subquery that does not parse contributes nothing: the compiler parses the
-// same text and declines to build a correlated evaluator for it.
-func walkNestedForOuterRefs(sql string, s *outerRefScope, refs *[]OuterRef) {
-	parsed, err := Parse(sql)
-	if err != nil {
-		return
-	}
-	info, err := ExtractSelect(parsed)
+// same text and declines to build a correlated evaluator for it. The body is
+// the nested node's memoized parse (ADR-0032, extended), read and not changed.
+func walkNestedForOuterRefs(body func() (*SelectInfo, error), s *outerRefScope, refs *[]OuterRef) {
+	info, err := body()
 	if err != nil || info == nil {
 		return
 	}
