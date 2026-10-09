@@ -986,7 +986,7 @@ func collectNodeColumnRefs(n *Node, refs map[string]bool) {
 			// read, and registering the path's text leaves it pruned away
 			// (#603).
 			if col := w.InputColumn(); col != "" && col != "*" {
-				collectWindowKeyRefs(col, refs)
+				collectWindowKeyRefs(col, windowTermExpr(w.ArgExprs, 0), refs)
 			}
 			// A window key is an EXPRESSION as often as it is a column
 			// (`PARTITION BY id % 3`, `PARTITION BY upper(s)`), and
@@ -995,17 +995,17 @@ func collectNodeColumnRefs(n *Node, refs map[string]bool) {
 			// computed the key over a column the scan had pruned away, every
 			// row got the same value, and the window ran over one partition
 			// (#585, the same shape as InputColumn's above).
-			for _, pb := range w.PartitionBy {
-				collectWindowKeyRefs(pb, refs)
+			for j, pb := range w.PartitionBy {
+				collectWindowKeyRefs(pb, windowTermExpr(w.PartitionByExprs, j), refs)
 			}
-			for _, ob := range w.OrderBy {
-				collectWindowKeyRefs(ob.Column, refs)
+			for j, ob := range w.OrderBy {
+				collectWindowKeyRefs(ob.Column, windowTermExpr(w.OrderByExprs, j), refs)
 			}
 			// LAG / LEAD's DEFAULT is an expression the operator reads per
 			// row (`LAG(x, 1, id)`), materialized like a key (#1435).
 			if fn := strings.ToLower(w.Func); fn == "lag" || fn == "lead" {
 				if args := w.Arguments(); len(args) >= 3 {
-					collectWindowKeyRefs(args[2], refs)
+					collectWindowKeyRefs(args[2], windowTermExpr(w.ArgExprs, 2), refs)
 				}
 			}
 		}
@@ -1022,15 +1022,23 @@ func collectNodeColumnRefs(n *Node, refs map[string]bool) {
 // costs nothing — the pruner keeps the columns it recognizes and ignores the
 // rest — and the alternative is a pruned-away ROW column and a key that is
 // NULL in every row.
-func collectWindowKeyRefs(term string, refs map[string]bool) {
+//
+// The term is read as its TREE (WindowExpr.ArgExprs / PartitionByExprs /
+// OrderByExprs, which the builder keeps in step with the text), and its text
+// is parsed only when the builder had no tree.
+func collectWindowKeyRefs(term string, node plansql.Node, refs map[string]bool) {
 	term = strings.TrimSpace(term)
 	if term == "" {
 		return
 	}
-	ast, err := plansql.ParseExpression(term)
-	if err != nil {
-		refs[strings.ToLower(term)] = true
-		return
+	ast := node
+	if ast == nil {
+		parsed, err := plansql.ParseExpression(term)
+		if err != nil {
+			refs[strings.ToLower(term)] = true
+			return
+		}
+		ast = parsed
 	}
 	collectASTColumnRefs(ast, refs)
 	if col, ok := ast.(*plansql.ColRef); ok && col.Table != "" {

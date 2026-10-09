@@ -566,25 +566,7 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 		// expression reads input columns the aggregate does not emit (#737).
 		// With no aggregate below, both maps are empty and this is a no-op.
 		for i := range winExprs {
-			winExprs[i].InputCol = respellWindowArguments(winExprs[i], winAggRefs, groupKeyRefs)
-			for j := range winExprs[i].PartitionBy {
-				winExprs[i].PartitionBy[j] = respellTermOverAggregate(winExprs[i].PartitionBy[j],
-					windowTermExpr(winExprs[i].PartitionByExprs, j), winAggRefs, groupKeyRefs)
-			}
-			for j := range winExprs[i].OrderBy {
-				before := winExprs[i].OrderBy[j].Column
-				after := respellTermOverAggregate(before, windowTermExpr(winExprs[i].OrderByExprs, j),
-					winAggRefs, groupKeyRefs)
-				winExprs[i].OrderBy[j].Column = after
-				// …and WHICH map re-spelled it, which is the CLASS the name
-				// itself can no longer carry once the aggregate emits it
-				// twice. Asking the aggregate map ALONE is the test: a term
-				// that names an aggregate CALL is re-spelled by it, and a
-				// group-key reference is not (#968).
-				if after != before && respellOverAggregate(before, winAggRefs, nil) == after {
-					winExprs[i].OrderBy[j].NamesAggregateOutput = true
-				}
-			}
+			respellWindowExprOverAggregate(&winExprs[i], winAggRefs, groupKeyRefs)
 		}
 		plan = NewWindow(plan, winExprs)
 	}
@@ -1111,10 +1093,16 @@ func reuseOrAddAggregate(call *plansql.FuncCallNode, aggs *[]AggExpr, counter *i
 	return name, nil
 }
 
-// respellOverAggregate rewrites one window-spec term so it names what the
+// respellWindowTerm rewrites one window-spec term so it names what the
 // aggregate below PUBLISHES: an aggregate call becomes the output column that
 // computes it, and a computed GROUP BY key becomes the column the key's value
-// is published under.
+// is published under. It returns the rewritten text and the rewritten tree.
+//
+// The term is matched as the TREE the builder holds — a bound block's terms
+// carry the binder's bindings (ADR-0047), and plansql.ReplaceGroupKeyRefs
+// compares a bound term with the keys by binding — and its text is parsed
+// only when there is no tree. A re-parse of the text carries no binding, and
+// matching it beside bound keys compared a spelling with a binding.
 //
 // The result is RENDERED, which for a published key means a DELIMITED
 // identifier: a computed key is published under its own canonical text, so
@@ -1123,57 +1111,93 @@ func reuseOrAddAggregate(call *plansql.FuncCallNode, aggs *[]AggExpr, counter *i
 // the direction a window's key resolver reads. `physical.resolveWindowKeys`
 // strips the delimiters and binds the name; without them it materialized the
 // key by EVALUATING it and ordered by NULL on every row.
-func respellOverAggregate(term string, aggRefs, keyRefs map[string]string) string {
-	return respellTermOverAggregate(term, nil, aggRefs, keyRefs)
-}
-
-// respellTermOverAggregate is respellOverAggregate for a term whose PARSED
-// tree the caller holds. A tree of a bound block is matched as it is — with
-// the bindings the binder recorded on it — instead of as a re-parse of its
-// text, which carries none (ADR-0047: a block is matched by binding in full or
-// by spelling in full, never a mixture). The tree is used only when it renders
-// as the text's own parse does, so the two are one term; anything else, and
-// every term of an unbound block, is the text's parse exactly as before.
-func respellTermOverAggregate(term string, node plansql.Node, aggRefs, keyRefs map[string]string) string {
+func respellWindowTerm(term string, node plansql.Node, aggRefs, keyRefs map[string]string) (string, plansql.Node) {
 	if term == "" || term == "*" || (len(aggRefs) == 0 && len(keyRefs) == 0) {
-		return term
+		return term, node
 	}
-	parsed, err := plansql.ParseExpression(term)
-	if err != nil || parsed == nil {
-		return term
+	tree := node
+	if tree == nil {
+		parsed, err := plansql.ParseExpression(term)
+		if err != nil || parsed == nil {
+			return term, nil
+		}
+		tree = parsed
 	}
-	if node != nil && plansql.HoldsBinding(node) && node.String() == parsed.String() {
-		parsed = node
-	}
-	plansql.ProbeMatchMap("logical.respellOverAggregate", parsed, keyRefs)
-	out := parsed
+	plansql.ProbeMatchMap("logical.respellOverAggregate", tree, keyRefs)
+	out := tree
 	if len(aggRefs) > 0 {
 		out = plansql.ReplaceAllAggregates(out, aggRefs)
 	}
 	if len(keyRefs) > 0 {
 		out = plansql.ReplaceGroupKeyRefs(out, keyRefs)
 	}
-	if out == nil || out == parsed {
-		return term
+	if out == nil || out == tree {
+		return term, node
 	}
-	return out.String()
+	return out.String(), out
 }
 
-// respellWindowArguments is respellOverAggregate over a window function's
-// argument list ONE ARGUMENT AT A TIME. InputCol carries the whole list —
-// `SUM(b), 2, 2.5` — and parsing it as one expression kept the first and
-// dropped the rest, so over a GROUP BY `LAG(SUM(b), 2, 2.5)` reached the
-// operator as `LAG(__agg_0)`: the offset read as 1, the default as none, and
-// NTH_VALUE's n as unset (arc WD, #1435).
-func respellWindowArguments(we WindowExpr, aggRefs, keyRefs map[string]string) string {
-	args := we.Arguments()
-	if len(args) < 2 {
-		return respellTermOverAggregate(we.InputCol, windowTermExpr(we.ArgExprs, 0), aggRefs, keyRefs)
+// respellWindowExprOverAggregate spells every term a window will EVALUATE —
+// each argument, each PARTITION BY and ORDER BY key — against what the
+// aggregate below it publishes, and keeps each term's tree beside its text:
+// ArgExprs, PartitionByExprs, OrderByExprs and InputExpr are the rewritten
+// trees, so a consumer asking "is this the tree of that text" is told yes
+// for a term over an aggregate too.
+//
+// The argument list is rewritten ONE ARGUMENT AT A TIME. InputCol carries
+// the whole list — `SUM(b), 2, 2.5` — and parsing it as one expression kept
+// the first and dropped the rest, so over a GROUP BY `LAG(SUM(b), 2, 2.5)`
+// reached the operator as `LAG(__agg_0)`: the offset read as 1, the default
+// as none, and NTH_VALUE's n as unset (arc WD, #1435).
+func respellWindowExprOverAggregate(we *WindowExpr, aggRefs, keyRefs map[string]string) {
+	if len(aggRefs) == 0 && len(keyRefs) == 0 {
+		return
 	}
-	for i, a := range args {
-		args[i] = respellTermOverAggregate(a, windowTermExpr(we.ArgExprs, i), aggRefs, keyRefs)
+	if args := we.Arguments(); len(args) < 2 {
+		text, tree := respellWindowTerm(we.InputCol, windowTermExpr(we.ArgExprs, 0), aggRefs, keyRefs)
+		we.InputCol = text
+		if len(we.ArgExprs) == 1 {
+			we.ArgExprs[0] = tree
+		}
+	} else {
+		for i, a := range args {
+			text, tree := respellWindowTerm(a, windowTermExpr(we.ArgExprs, i), aggRefs, keyRefs)
+			args[i] = text
+			if i < len(we.ArgExprs) {
+				we.ArgExprs[i] = tree
+			}
+		}
+		we.InputCol = strings.Join(args, ", ")
 	}
-	return strings.Join(args, ", ")
+	if len(we.ArgExprs) > 0 {
+		we.InputExpr = we.ArgExprs[0]
+	}
+	for j := range we.PartitionBy {
+		text, tree := respellWindowTerm(we.PartitionBy[j], windowTermExpr(we.PartitionByExprs, j), aggRefs, keyRefs)
+		we.PartitionBy[j] = text
+		if j < len(we.PartitionByExprs) {
+			we.PartitionByExprs[j] = tree
+		}
+	}
+	for j := range we.OrderBy {
+		node := windowTermExpr(we.OrderByExprs, j)
+		before := we.OrderBy[j].Column
+		after, tree := respellWindowTerm(before, node, aggRefs, keyRefs)
+		we.OrderBy[j].Column = after
+		if j < len(we.OrderByExprs) {
+			we.OrderByExprs[j] = tree
+		}
+		// …and WHICH map re-spelled it, which is the CLASS the name itself
+		// can no longer carry once the aggregate emits it twice. Asking the
+		// aggregate map ALONE, of the same tree, is the test: a term that
+		// names an aggregate CALL is re-spelled by it, and a group-key
+		// reference is not (#968).
+		if after != before {
+			if aggOnly, _ := respellWindowTerm(before, node, aggRefs, nil); aggOnly == after {
+				we.OrderBy[j].NamesAggregateOutput = true
+			}
+		}
+	}
 }
 
 // setWindowTermExprs records a window call's parsed terms on the WindowExpr
