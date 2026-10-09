@@ -43,10 +43,11 @@ Three guards keep it to the shapes it can see:
   - no node, or an undecided expression, declines. Unknown keeps the
     existing fallback rather than narrowing on a guess.
   - the node must still SPELL the argument the operator will evaluate.
-    respellOverAggregate rewrites InputCol when a window sits above an
-    aggregate, and a rewritten argument resolves its ColRefs against names
-    the stale AST does not carry — so a mismatch declines rather than
-    typing a spelling that no longer applies.
+    respellWindowTerm rewrites InputCol when a window sits above an
+    aggregate and keeps the rewritten tree in ArgExprs; the walk types that
+    tree (windowValueArgTree), and InputExpr stays the argument as written.
+    A tree that does not spell the text declines rather than typing a
+    spelling that no longer applies.
 
 #987 review B1: `SUM(CASE WHEN … THEN 1 ELSE 0 END) OVER ()` — TPC-H Q12's
 shape, bigint in PostgreSQL and bigint in the grouped spelling here — went

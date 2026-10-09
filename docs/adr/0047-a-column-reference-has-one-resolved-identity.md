@@ -45,11 +45,25 @@ mixtures, and the compared relation outputs for ordinal disagreement.
 `tpch.TestCI1BindingCensusTPCH` makes the same checks on its TPC-H corpus.
 These assertions describe those corpora and observed comparison sites.
 
-A window term over an aggregate is still substituted by
-`logical.respellOverAggregate` in `internal/planner/logical/builder.go`.
-The bound tree decides the match; the substitution's output text is not what
-that match reads. The group-key gate's `pair/*/window` rows and the binding
-census measure the result and the compared trees.
+A window's terms — its arguments, PARTITION BY and ORDER BY keys and frame
+offsets — are the select item's own `plansql.WindowFuncNode`; `plansql.WindowSpec`
+carries only the function's name, the alias and the frame. The binder stamps
+the terms in the block's input scope, so an output alias is not visible there
+(`SELECT i AS k, sum(i) OVER (PARTITION BY k) …` is 42703, as on PostgreSQL).
+Above a GROUP BY, `logical.respellWindowTerm` substitutes a term over the
+aggregate's outputs by matching that tree: a group key by binding
+(`plansql.ReplaceGroupKeyRefs`), an aggregate call by the call's text, as
+HAVING and the select list match theirs. The rewritten trees travel beside the
+published text (`WindowExpr.ArgExprs`, `PartitionByExprs`, `OrderByExprs`),
+and the column pruner and the argument's declaration read them. The grouped
+check judges every window term with the select item's rules: a key or an
+expression over keys passes, an aggregate call passes, any other column is
+42803. In a block the binder does not bind, a window term also passes when it
+spells a key with its qualifiers erased, which is the term the substitution
+replaces with the key. Gates: `coordinator.TestArcCWWindowTermsEveryArm`
+(284 cells × five arms), `pgwire.TestArcCWWindowTermsOnTheWire`, the
+group-key gate's `pair/*/window`, `term/winAggArg` and `ci1/joinWindow*`
+rows, and the binding census.
 
 Expression-subquery and LATERAL bodies retain the spelling comparison in
 stage 1 (`corr/innerShadow`, `corr/lateralGrouped`, `corr/inSubqGrouped`).
@@ -76,6 +90,7 @@ and unfolded FROM-less forms retain the gate's recorded answers (`qd/*`,
 | Stage | State | What reads the binding | What stays keyed by name, and where it moves |
 |---|---|---|---|
 | 1 | done (2026-10-06, #1524) | the single-process GROUP BY term match | — |
+| 1 (window terms) | done (2026-10-09, #1651, #1646; carrier C27) | a window's terms, read from the item's bound `WindowFuncNode`: the over-aggregate substitution, the column pruner, the argument's declaration and the grouped check | an aggregate call inside a window term is matched to its aggregate by its text; the stage DAG's window terms are the published text the logical plan writes (stages 5 and 6) |
 | 2 | done (#1393) | the single-process declaration walk: a node's output is an ordered identity list (`logical.Node.OutputColumns` / `OutputIDs`, from the instance the binder records on the FROM item, `plansql.TableRef.Rel`); `physical.declWalk.outputs` declares each position once per walk; a bound reference — a projection's leaf, a bound GROUP BY key, LAG's default, an aggregate's argument — is declared by the position its binding names. Planning time stays in its measured degree: derived-table depth 16 / 32 / 64 / 128 plan in 8.9 / 34.5 / 247 / 1,689 ms at a0f0c322 and 10.3 / 39.7 / 303 / 2,291 ms here (fitted exponent 2.55 and 2.63; `wadjet.TestArcCI2DeclarationPlanningBound` holds depth 128 under three seconds) | an unbound GROUP BY key (a re-parse of its text) and an unbound aggregate argument (the stage DAG's re-spelled names, typed from the scans below first, `aggInputColumnType`); the PostgreSQL category (`ColDecls.pgCat`) and the strict-integer set, by name; the rename chase that re-spells a computed key for execution (`resolveAggInputName`, stage 6); a node a rewrite rebuilt without its instance answers by name; a dotted relation alias, which the binder does not bind (#1650); the stage DAG's per-stage declarations (`GroupByTypes`, `GroupByDecimal`, stages 5 and 7) |
 
 Stage 2's gates: `coordinator.TestArcCI2DeclaredOutputByIdentityEveryArm`

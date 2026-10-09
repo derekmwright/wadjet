@@ -128,7 +128,7 @@ func TestArcK1AnOutputSlotHasOneIdentity(t *testing.T) {
 			// order beside a correct sum — wrong on ALL FOUR arms, the only
 			// consumer of this collision that was.
 			//
-			// The CLASS is recorded where respellOverAggregate rewrote the
+			// The CLASS is recorded where respellWindowTerm rewrote the
 			// term and the POSITION is read from `aggregateEmittedOutputNames`,
 			// which is 99cd49ab's rule at a second consumer; `exec.SortKey`
 			// already carried the slot and the window operator now asks for it.

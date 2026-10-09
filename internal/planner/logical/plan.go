@@ -858,7 +858,7 @@ type OrderExpr struct {
 	Position int
 	// NamesAggregateOutput records that this term named an AGGREGATE CALL
 	// before it was re-spelled over the aggregate below it
-	// (respellOverAggregate). It is the CLASS, kept because a name stops
+	// (respellWindowTerm). It is the CLASS, kept because a name stops
 	// being an address the moment the aggregate emits one twice: `GROUP BY
 	// x.a` beside `SUM(x.b) AS a` publishes two columns called `a`, and a
 	// WINDOW's `ORDER BY SUM(x.b)` — re-spelled to `a` — bound the group key

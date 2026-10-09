@@ -129,10 +129,11 @@ against PostgreSQL 17.11:
 - an output alias never licenses an input reference that spells its name: `SELECT count(*) AS n … GROUP BY 1 * n HAVING t.n …` is 42803;
 - commuted operands and constant-folded twins stay two identities (42803).
 
-The rule applies to blocks bound in full on the embedded engine. The window
-term over an aggregate is still substituted in `logical.respellOverAggregate`;
-the bound tree decides the match, before its output text is written
-(`pair/*/window` and `wadjet.TestArcCI1BindingCensusOverTheGroupKeyTable`).
+The rule applies to blocks bound in full on the embedded engine. A window
+term over an aggregate is substituted in `logical.respellWindowTerm` as the
+item's own bound tree, so its binding decides the match; the published name
+is that tree's rendering (`pair/*/window`,
+`coordinator.TestArcCWWindowTermsEveryArm`, 2026-10-09).
 The `qd/*`, `j/using*`, `corr/innerShadow`, `corr/lateralGrouped` and
 `corr/fromlessSubq*` rows keep their recorded spelling-based answers.
 Correlated references back to a bound containing block are checked against
