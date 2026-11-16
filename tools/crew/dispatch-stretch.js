@@ -21,6 +21,7 @@
 //   // An item may carry `resume: { commit, branch, note, ruling }` after the architect has
 //   // ruled on an escalation that the built commit stands: round 1 then skips the build and
 //   // goes to verification and review, and the reviewer is given the ruling.
+//   // A resume block names `round` when the resumed commit is not its item's first round.
 //   // A resume block names `base` when the resumed commit was cut from an earlier base than
 //   // the stretch's (verification checks descent from it).
 //   // A resume block may also carry `required: [...]`: the architect has ruled that a blocked
@@ -127,17 +128,27 @@ for (const item of items) {
   let build = null
   let required = []
   let prevCount = null
-  if (item.resume && Array.isArray(item.resume.required) && item.resume.required.length) {
-    build = { status: 'done', commit: item.resume.commit, branch: item.resume.branch, note: item.resume.note, files: [], claims: [] }
-    required = item.resume.required
-    prevCount = required.length
-    round = 1
+  // A resumed commit is round `resume.round` of its item (default 1); branch and note names
+  // of later rounds continue from there, so they never collide with an earlier round's.
+  let resumePending = false
+  if (item.resume) {
+    const resumedRound = item.resume.round || 1
+    if (Array.isArray(item.resume.required) && item.resume.required.length) {
+      build = { status: 'done', commit: item.resume.commit, branch: item.resume.branch, note: item.resume.note, files: [], claims: [] }
+      required = item.resume.required
+      prevCount = required.length
+      round = resumedRound
+    } else {
+      resumePending = true
+      round = resumedRound - 1
+    }
   }
   try {
     while (true) {
       round++
-      const fixing = round > 1
-      if (round === 1 && item.resume) {
+      const fixing = round > 1 && !resumePending
+      if (resumePending) {
+        resumePending = false
         build = { status: 'done', commit: item.resume.commit, branch: item.resume.branch, note: item.resume.note, files: [], claims: [] }
         ledger.push({ item: item.id, role: 'worker', model: workerModel, round, outcome: 'resumed-after-ruling' })
       } else {
