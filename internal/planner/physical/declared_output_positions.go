@@ -72,6 +72,9 @@ func (w *declWalk) outputs(n *logical.Node) []declPos {
 	if w.computed != nil {
 		w.computed("outputs", n)
 	}
+	if probe := declWalkProbe.Load(); probe != nil {
+		(*probe)("outputs")
+	}
 	out := w.outputsUncached(n)
 	if w.outs == nil {
 		w.outs = map[*logical.Node][]declPos{}
