@@ -15,6 +15,11 @@ other aggregates decomposed into re-aggregable partials. Level 2 groups
 by K: COUNT(x) over level-1 rows IS the distinct count (COUNT skips the
 NULL-x row, matching COUNT(DISTINCT) semantics), and the partials
 recombine (COUNT→SUM of counts, SUM→SUM of sums, MIN/MAX pass through).
+Ungrouped over zero input rows, level 1 has no groups and a SUM of
+counts answers NULL where COUNT answers 0, so the ungrouped form
+finalizes each recombined COUNT through COALESCE(…, 0) in the same
+projection above level 2 that AVG's division uses (#1584). Grouped, a
+group exists only when a row does, so no group sums zero rows.
 
 Why: profile-attributed (2026-08-17 c6a telemetry). The distinct-set
 path pays per-row map inserts into per-group Go maps; both levels of
