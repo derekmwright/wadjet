@@ -21,6 +21,8 @@
 //   // An item may carry `resume: { commit, branch, note, ruling }` after the architect has
 //   // ruled on an escalation that the built commit stands: round 1 then skips the build and
 //   // goes to verification and review, and the reviewer is given the ruling.
+//   // A resume block names `base` when the resumed commit was cut from an earlier base than
+//   // the stretch's (verification checks descent from it).
 //   // A resume block may also carry `required: [...]`: the architect has ruled that a blocked
 //   // review's findings are to be FIXED. The stretch then starts at fix round 2 from the
 //   // resumed commit, with those required changes.
@@ -170,11 +172,11 @@ If a trigger fires, return status "blocked" with its number and the reason.`,
       const check = await agent(
         `${AUTHORIZED}
 
-You are the DISPATCHER verifying a worker's hand-back for ${item.id}. A hand-back is model output, not truth: check each fact below with your own commands and report only what the commands show. Do not fix anything.
+You are the DISPATCHER verifying a worker's hand-back for ${item.id}. A hand-back is model output, not truth: check each fact below with your own commands and report only what the commands show. Do not fix anything. The failures list holds ONLY the checks that failed, one entry each; a check that passed, or something you did not check, does not go in it.
 
 Hand-back: ${JSON.stringify(build)}
 
-Check: (1) commit ${build.commit} exists and is the tip of ${build.branch}; (2) it descends from ${args.base}; (3) it touches only the files the hand-back or the note names; (4) the note ${build.note} exists and states a cause and its claims; (5) the note records a negative control; (6) no "Co-Authored-By" or AI trailer, and a Signed-off-by is present.
+Check: (1) commit ${build.commit} exists and is the tip of ${build.branch}; (2) it descends from ${(item.resume && item.resume.base) || args.base}; (3) it touches only the files the hand-back or the note names; (4) the note ${build.note} exists and states a cause and its claims; (5) the note records a negative control; (6) no "Co-Authored-By" or AI trailer, and a Signed-off-by is present.
 ${item.resume ? `\nThis build already escalated and the architect has ruled that it stands: ${item.resume.ruling || ''}\nDo not raise that escalation again, and skip check (3): the hand-back carries no file list on a resume. Report a trigger only for something the ruling does not cover.\n` : ''}
 ${TRIGGERS}`,
         { label: `verify:${item.id} r${round}`, phase: 'Verify', model: 'haiku', schema: CHECK })
