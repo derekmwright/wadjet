@@ -21,6 +21,9 @@
 //   // An item may carry `resume: { commit, branch, note, ruling }` after the architect has
 //   // ruled on an escalation that the built commit stands: round 1 then skips the build and
 //   // goes to verification and review, and the reviewer is given the ruling.
+//   // An item with `reviewOnly: true` (and a `resume` block) is verified and reviewed once and
+//   // the verdict returned in `reviews`; nothing is fixed or landed. Used for the seeded
+//   // review check (docs/testing/ROUTING.md).
 //   maxItems: 3,  // optional; a stretch is bounded
 //   land: false   // optional; build, verify and review only (a trial or a tier comparison)
 // }
@@ -107,6 +110,7 @@ const dropped = ((args && args.items) || []).slice(cap).map(i => i.id)
 if (dropped.length) log(`stretch is bounded at ${cap} items; not started: ${dropped.join(', ')}`)
 
 const landed = []
+const reviews = []
 const ledger = []
 let escalation = null
 
@@ -178,6 +182,10 @@ Edit nothing in the branch.`,
           { label: `review:${item.id} r${round}`, phase: 'Review', model: 'opus', isolation: 'worktree', schema: REVIEW })
         ledger.push({ item: item.id, role: 'reviewer', model: 'opus', round, outcome: review ? review.verdict : 'died', required: review ? review.required.length : null })
         if (!review) throw esc(5, `review for ${item.id} died in round ${round}`)
+        if (item.reviewOnly) {
+          reviews.push({ id: item.id, verdict: review.verdict, trigger: review.trigger || null, required: review.required, reason: review.reason || '' })
+          break
+        }
         if (review.trigger) throw esc(review.trigger, review.reason || review.required.join('; '))
         if (review.verdict === 'CLEAN') break
         required = review.required
@@ -194,6 +202,11 @@ Edit nothing in the branch.`,
       log(`${item.id}: round ${round} failed with ${required.length} required change(s); retrying`)
     }
 
+    if (item.reviewOnly) {
+      if (!reviews.some(r => r.id === item.id)) reviews.push({ id: item.id, verdict: 'NOT-REVIEWED', trigger: null, required: required, reason: 'verification failed before review' })
+      log(`${item.id}: review-only item done`)
+      continue
+    }
     if (args.land === false) {
       landed.push({ id: item.id, commit: build.commit, main: null, rounds: round, note: build.note, gate: 'not landed (land: false)' })
       log(`${item.id}: reviewed CLEAN after ${round} round(s); not landed`)
@@ -224,4 +237,4 @@ ${TRIGGERS}`,
 }
 
 const notStarted = items.slice(landed.length + (escalation ? 1 : 0)).map(i => i.id).concat(dropped)
-return { landed, escalation, notStarted, ledger }
+return { landed, reviews, escalation, notStarted, ledger }
