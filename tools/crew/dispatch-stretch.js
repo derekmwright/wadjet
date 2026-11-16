@@ -12,6 +12,7 @@
 //   base:     "<sha main is at when the stretch starts>",
 //   notesDir: "<absolute dir outside the repo for result notes>",
 //   items: [ { id: "1558", title: "...", builder: "haiku" | "sonnet" | "opus",
+//              class: "engine-defect", difficulty: { locate, spread, reach, oracle, side, gate },  // docs/testing/ROUTING.md; echoed into the ledger records
 //              brief: "<what to do, the repro, the files in scope, what is out>" } ],
 //   // builder is the architect's call per item (docs/testing/CREW.md, "Tiers are versions"):
 //   // "opus" for risky code, "sonnet" for scoped code, "haiku" for well-structured grunt
@@ -144,7 +145,7 @@ Rules:
 ${TRIGGERS}
 If a trigger fires, return status "blocked" with its number and the reason.`,
         { label: `build:${item.id} r${round}`, phase: 'Build', model: workerModel, isolation: 'worktree', schema: BUILD })
-      ledger.push({ item: item.id, role: 'worker', model: workerModel, round, outcome: build ? build.status : 'died' })
+      ledger.push({ item: item.id, role: 'worker', model: workerModel, class: item.class, difficulty: item.difficulty, round, outcome: build ? build.status : 'died' })
       }
       if (!build) throw esc(5, `worker for ${item.id} died in round ${round}`)
       if (build.status === 'blocked') throw esc(build.trigger || 6, build.reason || 'worker blocked without a reason')

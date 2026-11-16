@@ -165,12 +165,15 @@ A rule about what a tier can do is evidence about one model version and expires 
   forward. The September 2026 finding that mid-tier authoring rounds regressed or stalled was
   measured on Sonnet 5 and does not describe Sonnet 5.5.
 - The procedure for testing a tier, and every result so far, is in `TIER-BENCHMARK.md`.
+- How an item is scored and routed today, the ledger every attempt is recorded in, and the
+  benchmark set are in `ROUTING.md`. Until a profile cell has three rows, its conservative
+  rule decides, not the table above.
 
 ## Measurement
 
-Each stretch returns typed ledger records (role, model, round, outcome, required-change count,
-escalations); the architect appends them to the metrics ledger, where the SubagentStop hook
-already records tokens and duration per agent. Per release: issues filed against issues
+Each stretch returns typed records (role, model, round, outcome, required-change count,
+escalations); the architect turns them into one row per item in `tools/crew/ledger.jsonl`
+(`ROUTING.md`), with cost taken from the agents' transcripts (`tools/crew/ledger.py cost`). Per release: issues filed against issues
 closed, and lines checked out of total per epic.
 
 ## Adaptations from the gist
