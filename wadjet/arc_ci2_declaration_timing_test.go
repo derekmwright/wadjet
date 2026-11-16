@@ -6,21 +6,32 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/derekmwright/wadjet/internal/planner/physical"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 )
 
-// THE DECLARATION WALK STAYS LINEAR (ADR-0047 stage 2; RISKS R5): the walk was
-// 2^depth and then 5.5^depth in derived-table depth before its per-node memo
-// (#1034: 248 s at depth 16), and stage 2 re-keyed that memo by position. Each
-// shape is planned and answered on the embedded engine — the door that binds —
-// under the gate's two-second bound: a bound expression over a join, read
-// through derived tables nested 16, 64 and 128 deep (128 under three
-// seconds); 200 items over 50 grouped keys
-// read through a derived table; and a twelve-way join whose items are
-// qualified arithmetic over every arm.
+// THE DECLARATION WALK'S WORK IS BOUNDED AT ITS MEASURED DEGREE (ADR-0047
+// stage 2; RISKS R5; #1688): the walk was 2^depth and then 5.5^depth in
+// derived-table depth before its per-node memo (#1034: 248 s at depth 16), and
+// stage 2 re-keyed that memo by position. The walk is NOT linear in depth: it
+// is polynomial, measured here at 7,164 / 230,548 / 1,611,956 memo misses at
+// depth 16 / 64 / 128 (fitted exponent 2.5 from 16 to 64, 2.8 from 64 to 128;
+// each package-level spelling starts a fresh walk, so the misses are summed
+// over every walk of the statement). The gate counts those misses (the walk's
+// unit of work: one miss is one node's whole declaration; a hit is a lookup)
+// through physical.SetDeclWalkProbe and bounds each shape at its measured
+// count plus about 5%, so a memo that stopped caching, or a rise in degree,
+// fails; elapsed time is logged and never asserted (a 9x wall-clock ratio
+// bound sat inside the measured 7x-9.3x noise of the same walk). Each shape
+// is planned and answered on the embedded engine, the door that binds: a bound
+// expression over a join, read through derived tables nested 16, 64 and 128
+// deep; 200 items over 50 grouped keys (339 misses) read through a derived
+// table; and a twelve-way join (879 misses) whose items are qualified
+// arithmetic over every arm.
 func TestArcCI2DeclarationPlanningBound(t *testing.T) {
 	ctx := context.Background()
 	db, err := Open(ctx, Config{Store: objstore.NewMemStore(), Bucket: "test"})
@@ -48,56 +59,43 @@ func TestArcCI2DeclarationPlanningBound(t *testing.T) {
 			t.Fatalf("%s: %v", q, err)
 		}
 	}
-	const bound = 2 * time.Second
-	// The degree of the walk is what this gate guards, not a wall-clock figure:
-	// on a loaded gate runner the depth-128 query took 4.5 s where this host
-	// takes 2.3 s. At the measured exponent (2.55 at a0f0c322, 2.63 with the
-	// ordered walk) depth 128 costs about 6.5x depth 64; a memo that stopped
-	// caching would take it past 11x. The absolute limit only catches a stall.
-	const depthRatioLimit = 9.0
-	var depthElapsed = map[int]time.Duration{}
-	timed := func(name, q, want string) time.Duration {
+	// The walk's work is counted, not timed: every uncached computation of a
+	// declaration walk (a memo miss) is one unit, read through
+	// physical.SetDeclWalkProbe over the whole Query (plan and answer).
+	var mu sync.Mutex
+	var misses int
+	restore := physical.SetDeclWalkProbe(func(string) { mu.Lock(); misses++; mu.Unlock() })
+	t.Cleanup(restore)
+	counted := func(name, q, want string, bound int) int {
 		t.Helper()
+		mu.Lock()
+		misses = 0
+		mu.Unlock()
 		start := time.Now()
 		res, err := db.Query(ctx, q)
 		elapsed := time.Since(start)
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
-		t.Logf("%s elapsed=%s", name, elapsed)
-		limit := bound
-		if strings.HasSuffix(name, "=128") {
-			limit = 20 * time.Second
-		}
-		if elapsed > limit {
-			t.Errorf("%s took %s, want < %s: the declaration walk stalled", name, elapsed, limit)
+		mu.Lock()
+		n := misses
+		mu.Unlock()
+		t.Logf("%s misses=%d elapsed=%s (elapsed is logged, never asserted)", name, n, elapsed)
+		if n > bound {
+			t.Errorf("%s: the declaration walk computed %d times, want <= %d: its cost rose past its measured degree", name, n, bound)
 		}
 		if got := ssEmbeddedRender(res); want != "" && got != want {
 			t.Errorf("%s\n  got  %s\n  want %s", name, got, want)
 		}
-		return elapsed
+		return n
 	}
-	// Each depth is the BEST of three runs: a single sample on a loaded host
-	// (a GC pause, another package's tests) moved the 128/64 ratio from its
-	// usual 6–7.5x to 10x at 1047d107 and 1b862e71 alike, with no change in
-	// the walk; the minimum of three is the walk's cost, and a memo that
-	// stopped caching still shows past 11x on minima.
+	depthBound := map[int]int{16: 7500, 64: 242000, 128: 1700000}
 	for _, depth := range []int{16, 64, 128} {
 		q := "SELECT a.id, x + a.i AS v FROM ci2_d a JOIN (SELECT id, f AS x FROM ci2_d) b ON a.id = b.id"
 		for i := 0; i < depth; i++ {
 			q = fmt.Sprintf("SELECT q%d.id, q%d.v FROM (%s) q%d", i, i, q, i)
 		}
-		for run := 0; run < 3; run++ {
-			e := timed(fmt.Sprintf("derivedDepth=%d", depth), q+" ORDER BY 1", "{int,float} 1,1.5 | 2,3.5")
-			if run == 0 || e < depthElapsed[depth] {
-				depthElapsed[depth] = e
-			}
-		}
-	}
-	if d64, d128 := depthElapsed[64], depthElapsed[128]; d64 > 50*time.Millisecond {
-		if ratio := float64(d128) / float64(d64); ratio > depthRatioLimit {
-			t.Errorf("depth 128 / depth 64 = %.1fx (%s / %s), want <= %.0fx: the declaration walk's cost rose past its measured degree", ratio, d128, d64, depthRatioLimit)
-		}
+		counted(fmt.Sprintf("derivedDepth=%d", depth), q+" ORDER BY 1", "{int,float} 1,1.5 | 2,3.5", depthBound[depth])
 	}
 	var keys, items []string
 	for k := 0; k < 50; k++ {
@@ -110,13 +108,13 @@ func TestArcCI2DeclarationPlanningBound(t *testing.T) {
 	for k := 0; k < 50; k++ {
 		inner = append(inner, fmt.Sprintf("w.c%d + 1 AS k%d", k, k))
 	}
-	timed("items=200 keys=50", "SELECT "+strings.Join(items, ", ")+" FROM (SELECT "+strings.Join(inner, ", ")+
-		" FROM ci2_w w GROUP BY "+strings.Join(keys, ", ")+") g", "")
+	counted("items=200 keys=50", "SELECT "+strings.Join(items, ", ")+" FROM (SELECT "+strings.Join(inner, ", ")+
+		" FROM ci2_w w GROUP BY "+strings.Join(keys, ", ")+") g", "", 360)
 	from := "ci2_j0 j0"
 	sel := []string{"j0.v0 + j0.id"}
 	for j := 1; j < 12; j++ {
 		from += fmt.Sprintf(" JOIN ci2_j%d j%d ON j%d.id = j0.id", j, j, j)
 		sel = append(sel, fmt.Sprintf("j%d.v%d + j%d.id", j, j, j))
 	}
-	timed("join=12", "SELECT "+strings.Join(sel, ", ")+" FROM "+from+" ORDER BY 1", "")
+	counted("join=12", "SELECT "+strings.Join(sel, ", ")+" FROM "+from+" ORDER BY 1", "", 920)
 }
