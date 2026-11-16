@@ -150,6 +150,7 @@ dispatcher's own steps are fast decisions and run on the fast model.
 - When a new version of a tier ships, earlier limits on that tier are re-tested, not carried
   forward. The September 2026 finding that mid-tier authoring rounds regressed or stalled was
   measured on Sonnet 5 and does not describe Sonnet 5.5.
+- The procedure for testing a tier, and every result so far, is in `TIER-BENCHMARK.md`.
 
 ## Measurement
 
