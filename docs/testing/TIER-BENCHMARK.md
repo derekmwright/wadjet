@@ -70,6 +70,9 @@ Newest first. Each run names its item, base and brief so it can be repeated.
 
 ### 2026-11-16 — #1558, an aggregate-input fix (a harder item; still one data point)
 
+*Landed:* the Opus arm of each run below is on main (#1558 as `58d52152` + `379889c0`, #1584 as
+`db7afe99`). The other arms' branches and worktrees were deleted.
+
 `SUM(x op NULL)` answered a sum or 0 on the single-process path; PostgreSQL answers NULL. The
 brief did not name the file. Base `538d0d66`. Three arms, verification on `claude-haiku-5-5`,
 review on `claude-opus-5-5`. Contamination audit: exit 0 (the Haiku builder was shown the
