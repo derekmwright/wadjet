@@ -152,6 +152,10 @@ See `docs/testing/RELEASE.md` for the documentation-moves-with-the-code rule and
 
 See `docs/testing/BACKLOG.md`: every open issue is an **epic** (a checklist of acceptance lines that rides one release as its flagship) or a **standalone** (filler, movable). A finding in an open epic's family becomes a checklist line on that epic, not a new issue. Defects carry `priority:P0..P3` (data loss / leak, silent wrong answer, loud refusal, cosmetic). An epic ships incomplete only through the 80% `carry-over` escape hatch, which is the exception.
 
+### Agent Crew
+
+See `docs/testing/CREW.md`: the architect (the session talking to the maintainer) writes ADR skeletons, briefs the queue and rules on escalations; routine build → verify → review → land runs through the dispatcher Workflow script `tools/crew/dispatch-stretch.js`, one bounded stretch at a time; workers never push, never rerun a failed test, and hand back a result note. Six narrow escalation triggers and the three-round loop rule are in that file.
+
 ### What NOT to Do
 
 - Don't add SIMD intrinsics — the Go compiler handles vectorization.

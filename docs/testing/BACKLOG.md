@@ -42,6 +42,10 @@ An epic carries the priority of its highest unchecked line.
 2. **Otherwise** file one standalone issue, labeled at filing: kind, priority if a defect,
    `engine` or `distributed`.
 3. A finding that is neither is never left only in notes.
+4. Agents file **defects and decided work**. An observation goes on an existing checklist.
+   An idea waits until the maintainer says to file it.
+5. A defect found while working an issue, on the same code path or with the same cause, is a
+   task line on that issue. The issue stays open until every line is checked.
 
 A closed issue carrying the `folded` label was closed *into* an epic line. It is not fixed; its
 body is the repro for that line.
@@ -54,6 +58,13 @@ body is the repro for that line.
 - Open P0 work is scheduled before anything else.
 - Standalone issues are added as filler in priority order; a standalone that is not finished
   moves to the next milestone as-is (that is what makes it standalone).
+- **At most two design records in flight**: the flagship epic being built, and at most one
+  more in design (`CREW.md`, *Design records*). Finish before starting.
+- When parallel: the epic runs its slices serially; standalones fill the gaps on code that
+  does not overlap. Landing stays one at a time.
+- A patch release is capped and filled in order: P0/P1, other defects, polish, small features.
+- A parked line or slice is **decided, not left**: paused with a reason and a resume
+  condition written on it, or cut.
 - Before a line is worked, re-run its repro: some lines were fixed in passing by other work,
   and those are checked off with the commit that fixed them and a pinning test.
 
@@ -71,3 +82,16 @@ when all of these hold:
 A `carry-over` issue cannot be carried over again: it completes in that patch release. If
 carry-overs show up in consecutive releases, the epics are being scoped too large — fix the
 scoping, do not widen the hatch.
+
+## Audits
+
+- Hold broad audits while the queue is unsorted, and start no new audit while the last one's
+  packages are open. An audit that files faster than fixes land manufactures the parking lot.
+- An audit hands back **work packages, not issues**: one tracking issue, one task line per
+  finding with a size, and a milestone for the first package on the day it is filed.
+
+## The count goes down by finishing things
+
+Merging, folding and relabeling change what the list looks like, not what is left to do. A
+cleanup that does not end with work scheduled was bookkeeping. The measure of this process is
+lines checked and issues closed as completed per release, not the size of the open list.
