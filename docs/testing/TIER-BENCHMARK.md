@@ -33,12 +33,24 @@ a CLEAN review for fewer total tokens without more rounds.
 
    `builder` is `opus`, `sonnet` or `haiku`. Verification and review are the same for every arm, so the builder is the
    only variable. `land: false`: nothing reaches main.
-3. Record per arm, from the stretch's result and the workflow's usage figures: the exact model
+3. **Keep the arms blind to each other, and prove it.** Arms share one `.git` and one host,
+   so nothing physically stops a builder from reading another arm's branch, worktree or note.
+   Give each arm its own `notesDir`; remove the branches, worktrees and notes of any earlier
+   attempt at the same item before starting; and after the run, audit the builders'
+   transcripts:
+
+   ```
+   tools/crew/contamination-audit.py <arm>=<transcript dir> <arm>=<transcript dir> ...
+   ```
+
+   A builder call that names another arm voids that arm. A builder that was only *shown*
+   another arm's artifact in a listing is a leak in the setup: report it and fix the setup.
+4. Record per arm, from the stretch's result and the workflow's usage figures: the exact model
    id, rounds to CLEAN (or the escalation and its trigger), total tokens across build, verify
    and review, wall time, and the reviewer's required changes per round.
-4. Read the diffs. Two CLEAN arms can differ in where they fixed the defect; note which fix is
+5. Read the diffs. Two CLEAN arms can differ in where they fixed the defect; note which fix is
    at the cause.
-5. Land at most one arm, through a normal stretch. Delete the other arms' worktrees and
+6. Land at most one arm, through a normal stretch. Delete the other arms' worktrees and
    branches.
 
 ## Reading a result
@@ -91,6 +103,12 @@ What it shows:
 What it does not show: anything about items that are not this easy. Every arm converged in
 one round, so this run could not measure the thing the question is about, the cost of a
 cheaper builder needing an extra round. That needs harder items.
+
+Contamination audit (run after the fact, exit 0): no builder made a call naming another arm.
+The setup leaked once: all arms shared one notes directory, the stopped first attempt's note
+(which states the cause and the fix) was still in it, and the Haiku builder listed that
+directory and saw the file's name. It did not open it. The three arms reaching the same fix
+is therefore not explained by copying, but the arms were not isolated, only honest.
 
 Process defect found: the first Sonnet attempt ($0.48, 4.5 min) reached the same fix and
 stopped on escalation trigger 5, because an existing test pinned the plan shape the fix

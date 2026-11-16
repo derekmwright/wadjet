@@ -137,6 +137,7 @@ Rules:
 - Every new test has a negative control: revert the fix, watch the test fail for the right reason, restore. Report it.
 - A failed test is never rerun unchanged and never called a flake. If an existing test fails BECAUSE it pins the behaviour or plan shape your fix intentionally changes, update that pin and list it in the note (test name, old assertion, new assertion, why); the reviewer judges it. Any other failure, one your diff does not explain or in a test of something you did not mean to change, is trigger 5: stop and report.
 - Commit only the files you name (never "git add -A"); never push; never touch another branch.
+- Work only from the base and your own worktree. Never list, read, diff or search another agent's branch, worktree or note, including other files in the notes directory.
 - Before handing back, write a result note to ${args.notesDir}/${item.id}_r${round}.md: what changed, the cause, each claim with the test or measurement behind it, what you did NOT do.
 
 ${TRIGGERS}
