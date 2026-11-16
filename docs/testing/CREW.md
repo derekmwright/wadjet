@@ -41,7 +41,9 @@ Workflow({ scriptPath: "tools/crew/dispatch-stretch.js",
 
 A worker or the dispatcher stops and hands back to the architect when:
 
-1. a new ADR or an amendment to one is needed;
+1. a design decision has to be made or changed: a new ADR, or an amendment that changes what
+   one decides. (Bringing a record's factual sentence up to date when the brief asks for it,
+   such as what a gate measures, is not this.)
 2. an implementation loop fails its third round, or a judge and a reviewer disagree;
 3. the change alters what a user would see (an answer, an error, a wire type) beyond what the
    brief states, or drops user data;
