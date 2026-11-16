@@ -153,7 +153,7 @@ If a trigger fires, return status "blocked" with its number and the reason.`,
 Hand-back: ${JSON.stringify(build)}
 
 Check: (1) commit ${build.commit} exists and is the tip of ${build.branch}; (2) it descends from ${args.base}; (3) it touches only the files the hand-back or the note names; (4) the note ${build.note} exists and states a cause and its claims; (5) the note records a negative control; (6) no "Co-Authored-By" or AI trailer, and a Signed-off-by is present.
-
+${item.resume ? `\nThis build already escalated and the architect has ruled that it stands: ${item.resume.ruling || ''}\nDo not raise that escalation again, and skip check (3): the hand-back carries no file list on a resume. Report a trigger only for something the ruling does not cover.\n` : ''}
 ${TRIGGERS}`,
         { label: `verify:${item.id} r${round}`, phase: 'Verify', model: 'haiku', schema: CHECK })
       ledger.push({ item: item.id, role: 'dispatcher-verify', model: 'haiku', round, outcome: check ? (check.verified ? 'verified' : 'failed') : 'died' })
