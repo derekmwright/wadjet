@@ -11,12 +11,14 @@
 // args = {
 //   base:     "<sha main is at when the stretch starts>",
 //   notesDir: "<absolute dir outside the repo for result notes>",
-//   items: [ { id: "1558", title: "...", risk: "scoped" | "risky",
+//   items: [ { id: "1558", title: "...", risk: "docs" | "scoped" | "risky",
 //              brief: "<what to do, the repro, the files in scope, what is out>" } ],
 //   // risk is the architect's call per item: "risky" (a shared primitive, a pipeline breaker,
 //   // a planner seam, anything the brief cannot fully bound) builds on the strong coding
 //   // model; "scoped" (bounded files, a stated repro, a stated fix shape) builds on the
-//   // mid-tier model. Omitted = "risky". The reviewer is always the strong model.
+//   // mid-tier model; "docs" (documentation only, no code) builds on the fast model.
+//   // Omitted = "risky". The reviewer is always the strong model. The dispatcher's own
+//   // steps (verify a hand-back, land a commit) are fast decisions and run on the fast model.
 //   maxItems: 3   // optional; a stretch is bounded
 // }
 //
@@ -28,10 +30,10 @@ export const meta = {
   description: 'Run one bounded stretch of the queue: build, verify, review, land, one item at a time, stopping at the first escalation',
   whenToUse: 'The architect has a sorted, briefed list of ready items (standalone issues or the next slices of the flagship epic) and wants them built, reviewed and landed on local main without relaying each hand-back.',
   phases: [
-    { title: 'Build', detail: 'one worker per item, in its own worktree: strong model for risky items, mid-tier for scoped' },
-    { title: 'Verify', detail: 'dispatcher re-checks the hand-back with its own commands', model: 'sonnet' },
+    { title: 'Build', detail: 'one worker per item, in its own worktree: strong model for risky items, mid-tier for scoped, fast for docs' },
+    { title: 'Verify', detail: 'dispatcher re-checks the hand-back with its own commands', model: 'haiku' },
     { title: 'Review', detail: 'reviewer checks the note against the code', model: 'opus' },
-    { title: 'Land', detail: 'dispatcher lands on local main: no push, no tag', model: 'sonnet' },
+    { title: 'Land', detail: 'dispatcher lands on local main: no push, no tag', model: 'haiku' },
   ],
 }
 
@@ -107,7 +109,7 @@ let escalation = null
 
 for (const item of items) {
   let round = 0
-  const workerModel = item.risk === 'scoped' ? 'sonnet' : 'opus'
+  const workerModel = { docs: 'haiku', scoped: 'sonnet' }[item.risk] || 'opus'
   let build = null
   let required = []
   let prevCount = null
@@ -146,8 +148,8 @@ Hand-back: ${JSON.stringify(build)}
 Check: (1) commit ${build.commit} exists and is the tip of ${build.branch}; (2) it descends from ${args.base}; (3) it touches only the files the hand-back names; (4) the note ${build.note} exists and states a cause and its claims; (5) the note records a negative control; (6) no "Co-Authored-By" or AI trailer, and a Signed-off-by is present.
 
 ${TRIGGERS}`,
-        { label: `verify:${item.id} r${round}`, phase: 'Verify', model: 'sonnet', effort: 'low', schema: CHECK })
-      ledger.push({ item: item.id, role: 'dispatcher-verify', model: 'sonnet', round, outcome: check ? (check.verified ? 'verified' : 'failed') : 'died' })
+        { label: `verify:${item.id} r${round}`, phase: 'Verify', model: 'haiku', schema: CHECK })
+      ledger.push({ item: item.id, role: 'dispatcher-verify', model: 'haiku', round, outcome: check ? (check.verified ? 'verified' : 'failed') : 'died' })
       if (!check) throw esc(5, `verification for ${item.id} died in round ${round}`)
       if (check.trigger) throw esc(check.trigger, check.failures.join('; '))
 
@@ -191,8 +193,8 @@ Edit nothing in the branch.`,
 Do not push. Do not tag. Do not close issues or reword any public text.
 
 ${TRIGGERS}`,
-      { label: `land:${item.id}`, phase: 'Land', model: 'sonnet', schema: LAND })
-    ledger.push({ item: item.id, role: 'dispatcher-land', model: 'sonnet', round, outcome: land && land.landed ? 'landed' : 'not-landed' })
+      { label: `land:${item.id}`, phase: 'Land', model: 'haiku', schema: LAND })
+    ledger.push({ item: item.id, role: 'dispatcher-land', model: 'haiku', round, outcome: land && land.landed ? 'landed' : 'not-landed' })
     if (!land) throw esc(5, `landing agent for ${item.id} died`)
     if (!land.landed) throw esc(land.trigger || 5, land.reason || 'not landed, no reason given')
     landed.push({ id: item.id, commit: build.commit, main: land.main, rounds: round, note: build.note, gate: land.gate })

@@ -154,7 +154,7 @@ See `docs/testing/BACKLOG.md`: every open issue is an **epic** (a checklist of a
 
 ### Agent Crew
 
-See `docs/testing/CREW.md`: the architect (the session talking to the maintainer) writes ADR skeletons, briefs the queue and rules on escalations; routine build → verify → review → land runs through the dispatcher Workflow script `tools/crew/dispatch-stretch.js`, one bounded stretch at a time (strong model for risky items, mid-tier for scoped; a tier rule is evidence about one model version); workers never push, never rerun a failed test, and hand back a result note. Six narrow escalation triggers and the three-round loop rule are in that file.
+See `docs/testing/CREW.md`: the architect (the session talking to the maintainer) writes ADR skeletons, briefs the queue and rules on escalations; routine build → verify → review → land runs through the dispatcher Workflow script `tools/crew/dispatch-stretch.js`, one bounded stretch at a time (strong model for risky items, mid-tier for scoped, fast model for docs and the dispatcher's own steps; a tier rule is evidence about one model version); workers never push, never rerun a failed test, and hand back a result note. Six narrow escalation triggers and the three-round loop rule are in that file.
 
 ### What NOT to Do
 

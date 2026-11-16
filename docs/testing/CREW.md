@@ -11,17 +11,18 @@ reason. Backlog rules are in `BACKLOG.md`, gates in `GATES.md`, releases in `REL
 |---|---|---|---|
 | **Maintainer** | Derek | Sets direction, answers design questions, owns anything public or irreversible | Relay messages between agents |
 | **Architect** | the most capable model, the session that talks to the maintainer | Writes ADR skeletons, briefs and sorts the queue, rules on escalations, audits the process, pushes and tags when told | Dispatch routine work, read every hand-back |
-| **Dispatcher** | `tools/crew/dispatch-stretch.js`, a Workflow script whose judgment steps run on the mid-tier model | Runs one bounded stretch: starts workers, verifies their hand-backs, lands on local main | Decide design, reword public claims, push, tag |
-| **Workers** | the strong coding model for risky code, the mid-tier model for scoped work, each in its own worktree; reviewers are always the strong model | Build and review | Push, edit another agent's branch, rerun a failed test |
+| **Dispatcher** | `tools/crew/dispatch-stretch.js`, a Workflow script whose judgment steps run on the fast model | Runs one bounded stretch: starts workers, verifies their hand-backs, lands on local main | Decide design, reword public claims, push, tag |
+| **Workers** | the strong coding model for risky code, the mid-tier model for scoped work, the fast model for docs, each in its own worktree; reviewers are always the strong model | Build and review | Push, edit another agent's branch, rerun a failed test |
 | **Judge** | an independent model from another vendor, read-only | Attacks design records round by round | Edit anything |
 
 ### The dispatcher is a script, not a long-running agent
 
-A mid-tier model is reliable at one judgment at a time, and at a scoped piece of code, and
-unreliable at holding a long horizon: it loses the queue, the round count and its own stop
+The cheaper tiers are reliable at one judgment at a time (the fast model at a quick check or
+a docs change, the mid-tier model at a scoped piece of code) and unreliable at holding a long
+horizon: it loses the queue, the round count and its own stop
 conditions. So the loop is code.
 The script owns the order of work, the round counter, the stop conditions and the ledger; the
-mid-tier model is called only for single bounded steps (check this hand-back with your own
+fast model is called only for single bounded steps (check this hand-back with your own
 commands; land this reviewed commit) and returns a typed result. A stretch is bounded (three
 items by default), runs one item at a time, and stops at the first escalation, returning
 control to the architect.
@@ -109,8 +110,9 @@ or archived, never left to pile up.
 ## Tiers are versions, not names
 
 A rule about what a tier can do is evidence about one model version and expires with it. The
-architect marks each item `risky` or `scoped`; the script builds risky items on the strong
-coding model and scoped ones on the mid-tier model.
+architect marks each item `risky`, `scoped` or `docs`; the script builds risky items on the
+strong coding model, scoped ones on the mid-tier model and docs on the fast model. The
+dispatcher's own steps are fast decisions and run on the fast model.
 
 - An item is **scoped** when the brief can bound it: named files, a stated repro, a stated
   shape for the fix. Anything touching a shared primitive, a pipeline breaker's
@@ -130,7 +132,8 @@ closed, and lines checked out of total per epic.
 
 ## Adaptations from the gist
 
-- **The dispatcher is a Workflow script** (above). The gist describes a mid-tier agent.
+- **The dispatcher is a Workflow script** (above), with the fast model for its steps. The gist
+  describes a mid-tier agent.
 - **Result notes live outside the repo** (`notesDir`), not committed to it, so product history
   stays product.
 - **"Proven on a second platform" becomes "proven against PostgreSQL"**: the cross-check that
