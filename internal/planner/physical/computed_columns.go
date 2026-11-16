@@ -314,7 +314,20 @@ func (a *aggPreProject) Execute(_ context.Context, in *batch.RecordBatch) (*batc
 			} else if c.VecEval != nil {
 				c.VecEval(in, col, in.Len)
 			} else if c.VecFloat64Eval != nil {
-				c.VecFloat64Eval(in, col.Float64Data, in.Len)
+				// The bulk kernel's contract, honored the way exec.Project
+				// honors it: a true report means some row's slot holds a
+				// placeholder (0) for a NULL — or a zero divisor the loop
+				// cannot classify — and only the per-row kernel can say which.
+				// Ignoring the report summed `t.i + NULL` as the sum of t.i,
+				// `t.i / NULL` as 0 and counted every row (#1558), while the
+				// same expression projected answered NULL.
+				if c.VecFloat64Eval(in, col.Float64Data, in.Len) && c.Float64Eval != nil {
+					for i := 0; i < in.Len; i++ {
+						if _, ok := c.Float64Eval(in, i); !ok {
+							col.Nulls.SetNull(i)
+						}
+					}
+				}
 			} else if c.Float64Eval != nil {
 				for i := 0; i < in.Len; i++ {
 					v, ok := c.Float64Eval(in, i)
