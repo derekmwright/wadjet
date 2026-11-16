@@ -10,10 +10,15 @@ reason. Backlog rules are in `BACKLOG.md`, gates in `GATES.md`, releases in `REL
 | Role | Here | Does | Never does |
 |---|---|---|---|
 | **Maintainer** | Derek | Sets direction, answers design questions, owns anything public or irreversible | Relay messages between agents |
-| **Architect** | the most capable model, the session that talks to the maintainer | Writes ADR skeletons, briefs and sorts the queue, rules on escalations, audits the process, pushes and tags when told | Dispatch routine work, read every hand-back |
+| **Architect** | the most capable model, the session that talks to the maintainer; the **escalation agent** | Writes ADR skeletons, briefs and sorts the queue and names each item's builder, rules on every escalation, audits the process, pushes and tags when told | Build or review routine work, dispatch it by hand, read every hand-back |
 | **Dispatcher** | `tools/crew/dispatch-stretch.js`, a Workflow script whose judgment steps run on the fast model | Runs one bounded stretch: starts workers, verifies their hand-backs, lands on local main | Decide design, reword public claims, push, tag |
-| **Workers** | whichever of the three tiers the architect names for the item, each in its own worktree; reviewers are always the strong model | Build and review | Push, edit another agent's branch, rerun a failed test |
-| **Judge** | an independent model from another vendor, read-only | Attacks design records round by round | Edit anything |
+| **Senior engineer** | the strong coding model | Builds the risky code; **reviews every build**, whoever built it; judges an implementation dispute between a builder and the brief | Rule on design, or on anything a trigger names: that goes to the architect |
+| **Builders** | the mid-tier model for scoped code, the fast model for well-structured grunt work and docs, each in its own worktree | Build | Push, edit another agent's branch, rerun a failed test unchanged, review their own tier's work |
+| **Judge** | an independent model from another vendor, read-only | Attacks design records round by round until settled | Edit anything |
+
+The chain of judgment runs upward: a builder's work is judged by the senior engineer, a design
+record by the independent judge, and anything either of them cannot settle, or that a trigger
+names, by the architect. The architect is the top of the chain and is spent only there.
 
 ### The dispatcher is a script, not a long-running agent
 
