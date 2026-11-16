@@ -68,6 +68,22 @@ Newest first. Each run names its item, base and brief so it can be repeated.
 
 <!-- results -->
 
+### 2026-11-16 — seeded review check (the reviewer, not a builder)
+
+The Sonnet arm's commit from the #1558 run below (`5ad38378`) was handed to the reviewer
+again as an ordinary build, with its original note ("out of scope: not examined") and the
+tightened reviewer prompt. This is the commit a review had passed that day.
+
+Result: **BLOCK, trigger 3**, in 3.9 minutes. The reviewer measured base and commit, found
+that `SUM(t.n / '0')` and `SUM(t.i / 'abc')` moved from 0 to error 22012, noted the second
+differs from PostgreSQL's 22P02, and required a ruling and a corrected note. It also checked
+GROUP BY, WHERE and DOUBLE variants and five unrelated aggregate shapes, and reported which
+moved and which did not.
+
+One replay of one known escape: the prompt change catches the case it was written for. It is
+not evidence about side effects of a different kind. Rerun on a reviewer model change, and
+add a second seed of another shape when one turns up.
+
 ### 2026-11-16 — #1558, an aggregate-input fix (a harder item; still one data point)
 
 *Landed:* the Opus arm of each run below is on main (#1558 as `58d52152` + `379889c0`, #1584 as
