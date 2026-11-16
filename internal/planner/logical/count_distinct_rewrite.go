@@ -113,6 +113,11 @@ func rewriteCountDistinctTwoLevel(n *Node) *Node {
 	// with a single partial.
 	type avgDiv struct{ out, sum, cnt string }
 	var avgDivs []avgDiv
+	// countOuts names the outputs of non-distinct COUNTs, re-aggregated as
+	// SUM of per-(K,x) partials at level 2. Ungrouped over zero input rows,
+	// level 1 has no groups and that SUM answers NULL where a COUNT answers
+	// 0 (#1584); the finalization projection below restores the 0.
+	countOuts := map[string]bool{}
 	innerGroupBy := append(append([]string(nil), n.GroupBy...), x)
 	innerAggs := make([]AggExpr, 0, len(n.AggExprs)-1)
 	outerAggs := make([]AggExpr, 0, len(n.AggExprs))
@@ -147,6 +152,7 @@ func rewriteCountDistinctTwoLevel(n *Node) *Node {
 		switch strings.ToLower(a.Func) {
 		case "count":
 			outer.Func = "sum" // sum of per-(K,x) counts
+			countOuts[a.OutputCol] = true
 		case "sum":
 			outer.Func = "sum"
 		case "min":
@@ -168,10 +174,14 @@ func rewriteCountDistinctTwoLevel(n *Node) *Node {
 	}
 	outer := NewAggregate(inner, append([]string(nil), n.GroupBy...), outerAggs)
 	outer.GroupByExprs = n.GroupByExprs
-	if len(avgDivs) == 0 {
+	// Grouped, a group exists only when a row does, so the SUM of COUNT
+	// partials is never over zero rows; only the ungrouped form needs the 0.
+	zeroCounts := len(n.GroupBy) == 0 && len(countOuts) > 0
+	if len(avgDivs) == 0 && !zeroCounts {
 		return outer
 	}
-	// AVG finalization: project sum/count into the original output name,
+	// Finalization: project AVG's sum/count into the original output name
+	// and, ungrouped, a COUNT's summed partials through COALESCE(…, 0),
 	// passing every other output column through by name in the original
 	// order (group keys, then aggregates). Division by a zero count reads
 	// NULL — AVG over an all-NULL group (see expr arithDiv).
@@ -192,6 +202,20 @@ func rewriteCountDistinctTwoLevel(n *Node) *Node {
 					Left:  &plansql.ColRef{Column: d.sum},
 					Op:    "/",
 					Right: &plansql.ColRef{Column: d.cnt},
+				},
+			})
+			continue
+		}
+		if zeroCounts && countOuts[a.OutputCol] {
+			projs = append(projs, Projection{
+				Alias: a.OutputCol,
+				Expr:  fmt.Sprintf("coalesce(%s, 0)", a.OutputCol),
+				ASTExpr: &plansql.FuncCallNode{
+					Name: "coalesce",
+					Args: []plansql.Node{
+						&plansql.ColRef{Column: a.OutputCol},
+						&plansql.Lit{Value: "0", Kind: plansql.LitNumber},
+					},
 				},
 			})
 			continue

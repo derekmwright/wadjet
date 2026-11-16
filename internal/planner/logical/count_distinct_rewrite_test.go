@@ -21,6 +21,23 @@ func TestTwoLevelDistinctRewrite(t *testing.T) {
 		{Func: "min", InputCol: "v", OutputCol: "m"},
 	})
 	out := rewriteCountDistinctTwoLevel(n)
+	// Ungrouped, the summed COUNT partial is finalized through
+	// COALESCE(c, 0): over zero rows level 1 has no groups and the SUM
+	// answers NULL where COUNT answers 0 (#1584). Every other output passes
+	// through by name.
+	if out.Type != NodeProject || !out.PreservesAggOutputs || len(out.Children) != 1 {
+		t.Fatalf("expected a finalization Project, got %v", out.Type)
+	}
+	for _, p := range out.Projections {
+		if p.Alias == "c" {
+			if p.Expr != "coalesce(c, 0)" {
+				t.Fatalf("count finalization = %q, want coalesce(c, 0)", p.Expr)
+			}
+		} else if p.Column != p.Alias || p.Expr != "" {
+			t.Fatalf("projection %+v must pass its column through", p)
+		}
+	}
+	out = out.Children[0]
 	if out.Type != NodeAggregate || len(out.Children) != 1 || out.Children[0].Type != NodeAggregate {
 		t.Fatalf("expected two stacked aggregates, got %v over %v", out.Type, out.Children[0].Type)
 	}
