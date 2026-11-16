@@ -25,7 +25,7 @@ The heavy gate set runs on an ephemeral AWS runner per request: one branch sha i
 
 - The gate wait falls from hours of queue to about 15 minutes, independent across arcs; the host's timing pins stop tripping from load; three to five arcs can run in parallel bounded by measurement attention and usage, not the host.
 - The matching-commit rule (`tooling/REVIEWER_COMMON.md`) keeps its meaning: the summary names the sha it ran.
-- The landing battery becomes a gate request on the landing sha; `tooling/land.sh` keeps the pre-push hook as the last local check.
+- The landing battery becomes a gate request on the landing sha; `tooling/land.sh` keeps the pre-push hook as the last local check. (Superseded in part by the 2026-11-16 amendment: the hook keeps its trailer check and no longer runs tests.)
 - Logs leave the host: the evidence rule (every gate row names its log with the sha echoed) is met by the S3 path, mirrored into the arc directory by `gaterun.sh`.
 - Alternatives considered: GitHub-hosted runners (slow and metered for a 50-minute package); a second permanent host (idle cost, the same lock problem at 2× width); sharding only locally (CPU-bound on the same box).
 
@@ -40,3 +40,13 @@ The release housekeeping smoke statement `SELECT 1` answers 1 on the tip binary;
 The shape named one pool, `c7a.8xlarge`. Over 2026-10-02..06 that pool reclaimed five runs mid-flight and, on the evening of 2026-10-06, refused every launch in every us-east-2 subnet for over two hours while a landing waited. The pool was chosen for speed and price, never for its interruption rate.
 
 The dispatcher now tries, on a capacity refusal, each equivalent x86-64 32-vCPU / 64-GiB pool in turn — `c7a.8xlarge`, `c6a.8xlarge`, `c7i.8xlarge`, `c6i.8xlarge` — each across every default-VPC subnet, by overriding the launch template's instance type. Every other constant of the shape is unchanged: spot only, the same tags, the 40-minute terminate, four concurrent, the gate bucket. The lanes do not depend on the processor; the longest lane's 15-minute target holds on each (same core count and memory). On-demand is NOT a fallback: a run refused by every pool waits (Derek, 2026-10-06: a backup list, never waste). The lane table names the pool that ran.
+
+## 2026-11-16 amendment: the race pass leaves the pre-push hook
+
+The Consequences above say `tooling/land.sh` keeps the pre-push hook as the last local check. The hook did two things: refuse an AI attribution trailer, and run `go test -race -short ./internal/... -timeout 10m`. The second no longer fits where it ran. git opens the SSH connection before it runs a pre-push hook and holds it idle until the hook returns; on 2026-11-16 the pass took over eight minutes on a quiet host (`internal/server/pgwire` alone 497 to 559 s, against about 260 s in the October landing logs), GitHub closed the connection, and four pushes of a commit whose every test passed were refused. Under host load the same package crossed the hook's ten-minute timeout.
+
+The hook now only refuses the trailer. The race pass is lane HOOK of the gate runner, which already ran the identical command on the landing sha (`deploy/gates/runner.sh`), on a machine where it takes about six minutes and no connection waits on it.
+
+What this changes: lane HOOK is now the ONLY full race pass. CI runs `-race` only over tests named `Concurrent|Parallel|Race` in two packages. So the rule is no longer a habit: **no commit that changes Go code reaches main without a gate run on that sha whose HOOK lane is green** (`docs/testing/RELEASE.md`). A docs-only or tooling-only commit on top of a gated sha does not need a second run.
+
+Not decided here: why the pgwire race pass doubled. `TestRenderBinaryNumericResourceExhaustionShape` runs for seven minutes of it and has not been bisected.

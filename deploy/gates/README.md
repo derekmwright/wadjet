@@ -2,7 +2,7 @@
 # Gate runners (ADR-0046)
 
 The heavy gate set — the battery's lanes, `./internal/coordinator/` without `-short` split into four
-shards, the pre-push hook's race run and the two PostgreSQL oracle arms — runs for ONE commit on an
+shards, the race run that was the pre-push hook's until 2026-11-16 and the two PostgreSQL oracle arms — runs for ONE commit on an
 ephemeral spot `c7a.8xlarge` in us-east-2. One sha in; `summary.json` and one log per lane out, in
 `s3://wadjet-gates-use2/gates/<sha>/<run>/`, mirrored to the host. The decision, the caps and the
 standing approval are in [ADR-0046](../../docs/adr/0046-gate-runners-off-the-host.md).
