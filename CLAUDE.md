@@ -148,6 +148,10 @@ See `docs/testing/GATES.md` for the full gate catalogue — regression/unit test
 
 See `docs/testing/RELEASE.md` for the documentation-moves-with-the-code rule and the full pre-tag housekeeping pass (docs, doc comments, ADRs, issue closes, release notes, `task housekeeping`).
 
+### Issues & Backlog
+
+See `docs/testing/BACKLOG.md`: every open issue is an **epic** (a checklist of acceptance lines that rides one release as its flagship) or a **standalone** (filler, movable). A finding in an open epic's family becomes a checklist line on that epic, not a new issue. Defects carry `priority:P0..P3` (data loss / leak, silent wrong answer, loud refusal, cosmetic). An epic ships incomplete only through the 80% `carry-over` escape hatch, which is the exception.
+
 ### What NOT to Do
 
 - Don't add SIMD intrinsics — the Go compiler handles vectorization.
