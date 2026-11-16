@@ -134,6 +134,7 @@ ${fixing
 
 Rules:
 - Root cause over workaround: keep the reproduction, find the cause, record it.
+- "Out of scope" means do not fix it; it does not mean do not look. For every statement the brief names as related or out of scope that runs through the code you changed, measure its answer at the base and at your tip and report both in the note. One that moved is trigger 3.
 - Every new test has a negative control: revert the fix, watch the test fail for the right reason, restore. Report it.
 - A failed test is never rerun unchanged and never called a flake. If an existing test fails BECAUSE it pins the behaviour or plan shape your fix intentionally changes, update that pin and list it in the note (test name, old assertion, new assertion, why); the reviewer judges it. Any other failure, one your diff does not explain or in a test of something you did not mean to change, is trigger 5: stop and report.
 - Commit only the files you name (never "git add -A"); never push; never touch another branch.
@@ -169,7 +170,7 @@ ${TRIGGERS}`,
 Brief the worker was given:
 ${item.brief}
 
-Verify the builder's note (${build.note}) AGAINST THE CODE, not the code against the note. For each claim, find the test or measurement and confirm it shows what is claimed; revert the fix in a scratch checkout and confirm the new test fails for the stated reason. Only regressions, wrong values and unbacked claims block; style does not. ${item.resume && item.resume.ruling ? `The architect has ruled on an escalation from this build; treat the ruling as part of the brief and check the code against it: ${item.resume.ruling} ` : ''}${fixing ? `Round ${round - 1} required: ${required.join(' | ')} — say whether this round broke an earlier fix.` : ''}
+Verify the builder's note (${build.note}) AGAINST THE CODE, not the code against the note. For each claim, find the test or measurement and confirm it shows what is claimed; revert the fix in a scratch checkout and confirm the new test fails for the stated reason. Then find what else the diff changes: run the statements the brief names as related or out of scope, and any other statement that reaches the changed code, at the base and at the commit. An answer, error or wire type that differs beyond the brief's own cells is trigger 3 unless an architect's ruling below covers it, and "not examined" on a statement that shares the changed code path is a required change, never a pass. Only regressions, wrong values, unexamined behaviour changes and unbacked claims block; style does not. ${item.resume && item.resume.ruling ? `The architect has ruled on an escalation from this build; treat the ruling as part of the brief and check the code against it: ${item.resume.ruling} ` : ''}${fixing ? `Round ${round - 1} required: ${required.join(' | ')} — say whether this round broke an earlier fix.` : ''}
 
 ${TRIGGERS}
 Edit nothing in the branch.`,

@@ -68,6 +68,48 @@ Newest first. Each run names its item, base and brief so it can be repeated.
 
 <!-- results -->
 
+### 2026-11-16 — #1558, an aggregate-input fix (a harder item; still one data point)
+
+`SUM(x op NULL)` answered a sum or 0 on the single-process path; PostgreSQL answers NULL. The
+brief did not name the file. Base `538d0d66`. Three arms, verification on `claude-haiku-5-5`,
+review on `claude-opus-5-5`. Contamination audit: exit 0 (the Haiku builder was shown the
+other arms' branch names in a listing and opened neither).
+
+| Builder | Outcome | Rounds | Total | Wall | Noticed the behaviour change |
+|---|---|---|---|---|---|
+| `claude-opus-5-5` | CLEAN, after one escalation and the architect's ruling | 2 | **$4.23** | about 40 min | yes: escalated on trigger 3 |
+| `claude-sonnet-5-5` | reviewed CLEAN, **wrongly** | 1 | **$3.14** | 45 min | no: "not examined" |
+| `claude-haiku-5-5` | stopped before review, fix uncommitted | 1 | **$0.09** | 33 min | no: "not probed" |
+
+All three found the same cause (the aggregate pre-projection discards the bulk float kernel's
+"some row is NULL" report that `exec.Project` honours) and wrote the same hunk. What separated
+them was everything around the hunk:
+
+- **The same hunk changes two statements the brief called out of scope.** `SUM(t.n / '0')`
+  and `SUM(t.i / 'abc')` go from a silent 0 to error 22012 on the single-process path (the
+  second where PostgreSQL raises 22P02). Only the Opus builder measured them, and it escalated
+  rather than decide. The Sonnet builder shipped the change unexamined and **the Opus
+  reviewer passed it**, reading "out of scope" as "need not be looked at". That is an escape
+  through review, found only because another arm escalated.
+- **The Haiku builder did not follow the brief's test command.** It ran `./wadjet/` without
+  `-short`, the package ran past the 10-minute limit, and it stopped on trigger 5 naming the
+  test that happened to be running. Run alone at base that test passes in 0.04 s. Its stop
+  was correct by the rule; the cause was its own command.
+- **An extra round costs a build.** The Opus arm's second round only added two pinned cells
+  to a test and cost $1.78, against $2.01 for the first build, because the round re-ran the
+  package. Its review was $0.41.
+- Cost to the *same end state* is not what the table shows: the Sonnet arm is cheaper only
+  because it stopped short. Bringing it to where the Opus arm ended (cells measured, ruled on,
+  pinned) needs at least one more round.
+
+Checks added from this run: workers must measure related and out-of-scope statements that
+reach the code they changed, and report any that moved; reviewers must do the same and treat
+"not examined" there as a required change (`tools/crew/dispatch-stretch.js`). The
+architect-upheld resume path was added and fixed during this run (`CREW.md`).
+
+Cost of the harness's own defect: the first resume ran the verifier without the ruling and it
+re-raised the escalation ($0.01, 11 s).
+
 ### 2026-11-16 — #1584, a planner fix (one item: a data point, not a rule)
 
 `count(*)` beside `count(DISTINCT x)` over zero rows answered NULL; PostgreSQL answers 0.
