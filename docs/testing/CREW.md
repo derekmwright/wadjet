@@ -37,7 +37,7 @@ Workflow({ scriptPath: "tools/crew/dispatch-stretch.js",
 A worker or the dispatcher stops and hands back to the architect when:
 
 1. a new ADR or an amendment to one is needed;
-2. a loop fails its third round, or a judge and a reviewer disagree;
+2. an implementation loop fails its third round, or a judge and a reviewer disagree;
 3. the change alters what a user would see (an answer, an error, a wire type) beyond what the
    brief states, or drops user data;
 4. a public statement about quality, exactness or security would be written or reworded
@@ -55,21 +55,45 @@ No design change gets code before its ADR (`docs/adr/`) is accepted.
 1. The architect writes a **skeleton**: the governing rule, each decision in one line, what
    is explicitly out, and the replays the judge will run.
 2. An author fills it in and verifies every statement against the code.
-3. The judge attacks it; the author revises; repeat until the judge says settled.
+3. The judge attacks it; the author revises; repeat **until the judge says settled, however
+   many rounds that takes**. Six rounds here are cheap: a round costs one read-only judge run
+   and an edit to a document. Six rounds on an implementation are not.
 4. The maintainer answers the open questions, each written to be answerable in one line with
    its cost.
 5. Accepted. Only then does the first slice start.
+
+The judge is run by the architect as a read-only subprocess, at high reasoning effort, from
+the repo root:
+
+```sh
+codex exec -C . -s read-only -c model_reasoning_effort=high \
+  -o <verdict file> < <prompt: the record, the skeleton's replays, the previous verdict>
+```
+
+Its verdict names each attack with the line it attacks and ends SETTLED or NOT SETTLED. It
+never edits; the author applies the revisions.
 
 **No stopgaps for work already planned.** If an accepted record replaces something, nobody
 ships an interim version of it.
 
 ## The round-loop rule
 
-For every loop (judge verdicts, code reviews, gate fixes): rounds one and two get a fix and a
-retry. A third failed round stops the loop and goes to the architect: is the design wrong, or
-does a simpler rule remove the whole class of defect? Escalate earlier if a round finds more
-problems than the last, or breaks an earlier round's fix. The dispatcher script counts this;
-no agent is asked to remember it.
+Spend rounds on the record, not on the code. The two loops are bounded differently on purpose.
+
+**Design-record loop (judge and author): no cap.** It runs until settled. It still goes back
+to the architect when a round finds more problems than the last or breaks an earlier
+revision, because that means the skeleton is wrong, not the wording.
+
+**Implementation loops (code review, hand-back verification, gate fixes): three rounds.**
+Rounds one and two get a fix and a retry. A third failed round stops the loop and goes to the
+architect with one question: what did the record leave undecided? The answer is an amendment
+judged before more code is written, or a simpler rule that removes the whole class of defect.
+Escalate earlier if a round finds more problems than the last, or breaks an earlier round's
+fix. The dispatcher script counts this; no agent is asked to remember it.
+
+A lower tier that needs an extra implementation round has usually cost more than it saved:
+each round is a build, a verification and a strong-model review. Tier choices are judged on
+total cost to a clean review, not on the price of the first build.
 
 ## Engineering guardrails
 
@@ -84,7 +108,8 @@ no agent is asked to remember it.
 
 ## Testing rules
 
-- A failed test is never rerun and never called a flake. Stop and report.
+- A failed test is never rerun unchanged and never called a flake. Stop and report. After a
+  diagnosed fix the gate runs again on the new commit; that is a new run, not a rerun.
 - Every new test has a negative control: revert the fix, watch the test fail for the right
   reason, restore.
 - No wall-clock tests.
@@ -134,6 +159,8 @@ closed, and lines checked out of total per epic.
 
 - **The dispatcher is a Workflow script** (above), with the fast model for its steps. The gist
   describes a mid-tier agent.
+- **The design-record loop has no round cap.** The gist stops every loop at the third failed
+  round; here that applies to implementation loops only, on the maintainer's instruction.
 - **Result notes live outside the repo** (`notesDir`), not committed to it, so product history
   stays product.
 - **"Proven on a second platform" becomes "proven against PostgreSQL"**: the cross-check that

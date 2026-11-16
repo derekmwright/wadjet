@@ -19,7 +19,8 @@
 //   // mid-tier model; "docs" (documentation only, no code) builds on the fast model.
 //   // Omitted = "risky". The reviewer is always the strong model. The dispatcher's own
 //   // steps (verify a hand-back, land a commit) are fast decisions and run on the fast model.
-//   maxItems: 3   // optional; a stretch is bounded
+//   maxItems: 3,  // optional; a stretch is bounded
+//   land: false   // optional; build, verify and review only (a trial or a tier comparison)
 // }
 //
 // Returns { landed, escalation, dropped, ledger }. The architect appends
@@ -184,6 +185,11 @@ Edit nothing in the branch.`,
       log(`${item.id}: round ${round} failed with ${required.length} required change(s); retrying`)
     }
 
+    if (args.land === false) {
+      landed.push({ id: item.id, commit: build.commit, main: null, rounds: round, note: build.note, gate: 'not landed (land: false)' })
+      log(`${item.id}: reviewed CLEAN after ${round} round(s); not landed`)
+      continue
+    }
     const land = await agent(
       `You are the DISPATCHER landing ${item.id} on LOCAL main. Reviewed commit: ${build.commit}.
 
