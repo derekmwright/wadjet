@@ -11,14 +11,12 @@
 // args = {
 //   base:     "<sha main is at when the stretch starts>",
 //   notesDir: "<absolute dir outside the repo for result notes>",
-//   items: [ { id: "1558", title: "...", risk: "docs" | "scoped" | "risky",
+//   items: [ { id: "1558", title: "...", builder: "haiku" | "sonnet" | "opus",
 //              brief: "<what to do, the repro, the files in scope, what is out>" } ],
-//   // risk is the architect's call per item: "risky" (a shared primitive, a pipeline breaker,
-//   // a planner seam, anything the brief cannot fully bound) builds on the strong coding
-//   // model; "scoped" (bounded files, a stated repro, a stated fix shape) builds on the
-//   // mid-tier model; "docs" (documentation only, no code) builds on the fast model.
-//   // Omitted = "risky". The reviewer is always the strong model. The dispatcher's own
-//   // steps (verify a hand-back, land a commit) are fast decisions and run on the fast model.
+//   // builder is the architect's call per item (docs/testing/CREW.md, "Tiers are versions"):
+//   // "opus" for risky code, "sonnet" for scoped code, "haiku" for well-structured grunt
+//   // work and docs. Omitted = "opus". The reviewer is always the strong model, and the
+//   // dispatcher's own steps (verify a hand-back, land a commit) run on the fast model.
 //   maxItems: 3,  // optional; a stretch is bounded
 //   land: false   // optional; build, verify and review only (a trial or a tier comparison)
 // }
@@ -31,7 +29,7 @@ export const meta = {
   description: 'Run one bounded stretch of the queue: build, verify, review, land, one item at a time, stopping at the first escalation',
   whenToUse: 'The architect has a sorted, briefed list of ready items (standalone issues or the next slices of the flagship epic) and wants them built, reviewed and landed on local main without relaying each hand-back.',
   phases: [
-    { title: 'Build', detail: 'one worker per item, in its own worktree: strong model for risky items, mid-tier for scoped, fast for docs' },
+    { title: 'Build', detail: 'one worker per item, in its own worktree: the builder the architect chose for it' },
     { title: 'Verify', detail: 'dispatcher re-checks the hand-back with its own commands', model: 'haiku' },
     { title: 'Review', detail: 'reviewer checks the note against the code', model: 'opus' },
     { title: 'Land', detail: 'dispatcher lands on local main: no push, no tag', model: 'haiku' },
@@ -110,7 +108,7 @@ let escalation = null
 
 for (const item of items) {
   let round = 0
-  const workerModel = { docs: 'haiku', scoped: 'sonnet' }[item.risk] || 'opus'
+  const workerModel = ['haiku', 'sonnet', 'opus'].includes(item.builder) ? item.builder : 'opus'
   let build = null
   let required = []
   let prevCount = null
@@ -137,7 +135,7 @@ Rules:
 ${TRIGGERS}
 If a trigger fires, return status "blocked" with its number and the reason.`,
         { label: `build:${item.id} r${round}`, phase: 'Build', model: workerModel, isolation: 'worktree', schema: BUILD })
-      ledger.push({ item: item.id, role: 'worker', model: workerModel, risk: item.risk || 'risky', round, outcome: build ? build.status : 'died' })
+      ledger.push({ item: item.id, role: 'worker', model: workerModel, round, outcome: build ? build.status : 'died' })
       if (!build) throw esc(5, `worker for ${item.id} died in round ${round}`)
       if (build.status === 'blocked') throw esc(build.trigger || 6, build.reason || 'worker blocked without a reason')
 

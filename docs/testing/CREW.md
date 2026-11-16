@@ -12,7 +12,7 @@ reason. Backlog rules are in `BACKLOG.md`, gates in `GATES.md`, releases in `REL
 | **Maintainer** | Derek | Sets direction, answers design questions, owns anything public or irreversible | Relay messages between agents |
 | **Architect** | the most capable model, the session that talks to the maintainer | Writes ADR skeletons, briefs and sorts the queue, rules on escalations, audits the process, pushes and tags when told | Dispatch routine work, read every hand-back |
 | **Dispatcher** | `tools/crew/dispatch-stretch.js`, a Workflow script whose judgment steps run on the fast model | Runs one bounded stretch: starts workers, verifies their hand-backs, lands on local main | Decide design, reword public claims, push, tag |
-| **Workers** | the strong coding model for risky code, the mid-tier model for scoped work, the fast model for docs, each in its own worktree; reviewers are always the strong model | Build and review | Push, edit another agent's branch, rerun a failed test |
+| **Workers** | whichever of the three tiers the architect names for the item, each in its own worktree; reviewers are always the strong model | Build and review | Push, edit another agent's branch, rerun a failed test |
 | **Judge** | an independent model from another vendor, read-only | Attacks design records round by round | Edit anything |
 
 ### The dispatcher is a script, not a long-running agent
@@ -29,7 +29,7 @@ control to the architect.
 
 ```
 Workflow({ scriptPath: "tools/crew/dispatch-stretch.js",
-           args: { base, notesDir, items: [{ id, title, brief }] } })
+           args: { base, notesDir, items: [{ id, title, builder, brief }] } })
 ```
 
 ## Escalation triggers
@@ -137,15 +137,20 @@ or archived, never left to pile up.
 
 ## Tiers are versions, not names
 
-A rule about what a tier can do is evidence about one model version and expires with it. The
-architect marks each item `risky`, `scoped` or `docs`; the script builds risky items on the
-strong coding model, scoped ones on the mid-tier model and docs on the fast model. The
-dispatcher's own steps are fast decisions and run on the fast model.
+The architect writes each item's brief and names its builder. All three tiers build:
 
-- An item is **scoped** when the brief can bound it: named files, a stated repro, a stated
-  shape for the fix. Anything touching a shared primitive, a pipeline breaker's
-  spill/drain/merge path, a planner seam or the parquet package is **risky**, as is anything
-  the brief cannot fully bound.
+| Builder | Give it |
+|---|---|
+| strong coding model | risky code: a shared primitive, a pipeline breaker's spill/drain/merge path, a planner seam, the parquet package, anything the brief cannot fully bound |
+| mid-tier model | scoped code: named files, a stated repro, a stated shape for the fix |
+| fast model | well-structured grunt work: the brief names the cause or the exact edit, the change repeats a pattern across sites, or it is docs only |
+
+Review is always the strong model, whoever built. That is what makes a cheap build safe to
+take, and it is also the floor on cost: an extra round on a cheap builder costs a strong-model
+review, so pick the cheapest builder that will be clean in one round, not the cheapest one.
+
+A rule about what a tier can do is evidence about one model version and expires with it:
+
 - The ledger records the exact model id of every agent, so a tier's record is per version.
 - When a new version of a tier ships, earlier limits on that tier are re-tested, not carried
   forward. The September 2026 finding that mid-tier authoring rounds regressed or stalled was

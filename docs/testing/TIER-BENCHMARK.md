@@ -28,11 +28,10 @@ a CLEAN review for fewer total tokens without more rounds.
    ```
    Workflow({ scriptPath: "tools/crew/dispatch-stretch.js",
               args: { base, notesDir, land: false, maxItems: 1,
-                      items: [{ id: "<issue>-<tier>", risk, title, brief }] } })
+                      items: [{ id: "<issue>-<tier>", builder, title, brief }] } })
    ```
 
-   `risk` selects the builder: `risky` the strong model, `scoped` the mid-tier model, `docs`
-   the fast model. Verification and review are the same for every arm, so the builder is the
+   `builder` is `opus`, `sonnet` or `haiku`. Verification and review are the same for every arm, so the builder is the
    only variable. `land: false`: nothing reaches main.
 3. Record per arm, from the stretch's result and the workflow's usage figures: the exact model
    id, rounds to CLEAN (or the escalation and its trigger), total tokens across build, verify
