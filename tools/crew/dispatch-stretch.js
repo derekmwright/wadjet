@@ -17,6 +17,9 @@
 //   // "opus" for risky code, "sonnet" for scoped code, "haiku" for well-structured grunt
 //   // work and docs. Omitted = "opus". The reviewer is always the strong model, and the
 //   // dispatcher's own steps (verify a hand-back, land a commit) run on the fast model.
+//   // An item may carry `resume: { commit, branch, note, ruling }` after the architect has
+//   // ruled on an escalation that the built commit stands: round 1 then skips the build and
+//   // goes to verification and review, and the reviewer is given the ruling.
 //   maxItems: 3,  // optional; a stretch is bounded
 //   land: false   // optional; build, verify and review only (a trial or a tier comparison)
 // }
@@ -116,6 +119,10 @@ for (const item of items) {
     while (true) {
       round++
       const fixing = round > 1
+      if (round === 1 && item.resume) {
+        build = { status: 'done', commit: item.resume.commit, branch: item.resume.branch, note: item.resume.note, files: [], claims: [] }
+        ledger.push({ item: item.id, role: 'worker', model: workerModel, round, outcome: 'resumed-after-ruling' })
+      } else {
       build = await agent(
         `You are a WORKER on issue/line ${item.id}: ${item.title}
 
@@ -136,6 +143,7 @@ ${TRIGGERS}
 If a trigger fires, return status "blocked" with its number and the reason.`,
         { label: `build:${item.id} r${round}`, phase: 'Build', model: workerModel, isolation: 'worktree', schema: BUILD })
       ledger.push({ item: item.id, role: 'worker', model: workerModel, round, outcome: build ? build.status : 'died' })
+      }
       if (!build) throw esc(5, `worker for ${item.id} died in round ${round}`)
       if (build.status === 'blocked') throw esc(build.trigger || 6, build.reason || 'worker blocked without a reason')
 
@@ -144,7 +152,7 @@ If a trigger fires, return status "blocked" with its number and the reason.`,
 
 Hand-back: ${JSON.stringify(build)}
 
-Check: (1) commit ${build.commit} exists and is the tip of ${build.branch}; (2) it descends from ${args.base}; (3) it touches only the files the hand-back names; (4) the note ${build.note} exists and states a cause and its claims; (5) the note records a negative control; (6) no "Co-Authored-By" or AI trailer, and a Signed-off-by is present.
+Check: (1) commit ${build.commit} exists and is the tip of ${build.branch}; (2) it descends from ${args.base}; (3) it touches only the files the hand-back or the note names; (4) the note ${build.note} exists and states a cause and its claims; (5) the note records a negative control; (6) no "Co-Authored-By" or AI trailer, and a Signed-off-by is present.
 
 ${TRIGGERS}`,
         { label: `verify:${item.id} r${round}`, phase: 'Verify', model: 'haiku', schema: CHECK })
@@ -160,7 +168,7 @@ ${TRIGGERS}`,
 Brief the worker was given:
 ${item.brief}
 
-Verify the builder's note (${build.note}) AGAINST THE CODE, not the code against the note. For each claim, find the test or measurement and confirm it shows what is claimed; revert the fix in a scratch checkout and confirm the new test fails for the stated reason. Only regressions, wrong values and unbacked claims block; style does not. ${fixing ? `Round ${round - 1} required: ${required.join(' | ')} — say whether this round broke an earlier fix.` : ''}
+Verify the builder's note (${build.note}) AGAINST THE CODE, not the code against the note. For each claim, find the test or measurement and confirm it shows what is claimed; revert the fix in a scratch checkout and confirm the new test fails for the stated reason. Only regressions, wrong values and unbacked claims block; style does not. ${item.resume && item.resume.ruling ? `The architect has ruled on an escalation from this build; treat the ruling as part of the brief and check the code against it: ${item.resume.ruling} ` : ''}${fixing ? `Round ${round - 1} required: ${required.join(' | ')} — say whether this round broke an earlier fix.` : ''}
 
 ${TRIGGERS}
 Edit nothing in the branch.`,

@@ -53,6 +53,10 @@ A worker or the dispatcher stops and hands back to the architect when:
    in the note, and the reviewer judges it.)
 6. the brief and the runbooks do not cover the situation, or a rule would have to bend.
 
+When the architect rules that an escalated build stands, the item goes back into a stretch
+with `resume: { commit, branch, note, ruling }`: the build is not repeated, and the reviewer
+is given the ruling as part of the brief.
+
 Triggers are written narrowly on purpose: a vague one costs an agent and a round trip every
 time it fires wrongly.
 
