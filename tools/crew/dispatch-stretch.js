@@ -11,7 +11,12 @@
 // args = {
 //   base:     "<sha main is at when the stretch starts>",
 //   notesDir: "<absolute dir outside the repo for result notes>",
-//   items: [ { id: "1558", title: "...", brief: "<what to do, the repro, the files in scope, what is out>" } ],
+//   items: [ { id: "1558", title: "...", risk: "scoped" | "risky",
+//              brief: "<what to do, the repro, the files in scope, what is out>" } ],
+//   // risk is the architect's call per item: "risky" (a shared primitive, a pipeline breaker,
+//   // a planner seam, anything the brief cannot fully bound) builds on the strong coding
+//   // model; "scoped" (bounded files, a stated repro, a stated fix shape) builds on the
+//   // mid-tier model. Omitted = "risky". The reviewer is always the strong model.
 //   maxItems: 3   // optional; a stretch is bounded
 // }
 //
@@ -23,7 +28,7 @@ export const meta = {
   description: 'Run one bounded stretch of the queue: build, verify, review, land, one item at a time, stopping at the first escalation',
   whenToUse: 'The architect has a sorted, briefed list of ready items (standalone issues or the next slices of the flagship epic) and wants them built, reviewed and landed on local main without relaying each hand-back.',
   phases: [
-    { title: 'Build', detail: 'one worker per item, in its own worktree', model: 'opus' },
+    { title: 'Build', detail: 'one worker per item, in its own worktree: strong model for risky items, mid-tier for scoped' },
     { title: 'Verify', detail: 'dispatcher re-checks the hand-back with its own commands', model: 'sonnet' },
     { title: 'Review', detail: 'reviewer checks the note against the code', model: 'opus' },
     { title: 'Land', detail: 'dispatcher lands on local main: no push, no tag', model: 'sonnet' },
@@ -102,6 +107,7 @@ let escalation = null
 
 for (const item of items) {
   let round = 0
+  const workerModel = item.risk === 'scoped' ? 'sonnet' : 'opus'
   let build = null
   let required = []
   let prevCount = null
@@ -127,8 +133,8 @@ Rules:
 
 ${TRIGGERS}
 If a trigger fires, return status "blocked" with its number and the reason.`,
-        { label: `build:${item.id} r${round}`, phase: 'Build', model: 'opus', isolation: 'worktree', schema: BUILD })
-      ledger.push({ item: item.id, role: 'worker', model: 'opus', round, outcome: build ? build.status : 'died' })
+        { label: `build:${item.id} r${round}`, phase: 'Build', model: workerModel, isolation: 'worktree', schema: BUILD })
+      ledger.push({ item: item.id, role: 'worker', model: workerModel, risk: item.risk || 'risky', round, outcome: build ? build.status : 'died' })
       if (!build) throw esc(5, `worker for ${item.id} died in round ${round}`)
       if (build.status === 'blocked') throw esc(build.trigger || 6, build.reason || 'worker blocked without a reason')
 
