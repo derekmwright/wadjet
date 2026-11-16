@@ -21,6 +21,9 @@
 //   // An item may carry `resume: { commit, branch, note, ruling }` after the architect has
 //   // ruled on an escalation that the built commit stands: round 1 then skips the build and
 //   // goes to verification and review, and the reviewer is given the ruling.
+//   // A resume block may also carry `required: [...]`: the architect has ruled that a blocked
+//   // review's findings are to be FIXED. The stretch then starts at fix round 2 from the
+//   // resumed commit, with those required changes.
 //   // An item with `reviewOnly: true` (and a `resume` block) is verified and reviewed once and
 //   // the verdict returned in `reviews`; nothing is fixed or landed. Used for the seeded
 //   // review check (docs/testing/ROUTING.md).
@@ -122,6 +125,12 @@ for (const item of items) {
   let build = null
   let required = []
   let prevCount = null
+  if (item.resume && Array.isArray(item.resume.required) && item.resume.required.length) {
+    build = { status: 'done', commit: item.resume.commit, branch: item.resume.branch, note: item.resume.note, files: [], claims: [] }
+    required = item.resume.required
+    prevCount = required.length
+    round = 1
+  }
   try {
     while (true) {
       round++
