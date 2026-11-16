@@ -1264,6 +1264,16 @@ type ResultNotification struct {
 	// first attempt had not, so the retrier treats it the way it treats a
 	// recovered panic — terminal on the first failure.
 	PlanRefused bool `json:"plan_refused,omitempty"`
+
+	// Cancelled marks a failure whose error chain is a context cancellation
+	// (errors.Is(err, context.Canceled)): the attempt was STOPPED — by the
+	// query's cancel broadcast, by a worker shutting down, by a sibling
+	// operator's failure — and reached no verdict about the task of its own.
+	// Set from the error's TYPE, never from Error's text, for the reason
+	// Panicked is. The coordinator never lets such a failure stand for the
+	// stage when another task failed for a real reason, and does not retry it
+	// once the stage already holds a terminal failure (#1687).
+	Cancelled bool `json:"cancelled,omitempty"`
 }
 
 // UploadComplete (streaming exchange Phase B) is published by a worker when

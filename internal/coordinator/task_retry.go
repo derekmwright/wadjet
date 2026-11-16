@@ -41,6 +41,10 @@ type taskRetrier struct {
 	tasks    map[string]distributed.Task
 	order    []string // task IDs in dispatch order, for deterministic output assembly
 	terminal int
+	// failed counts tasks that reached a terminal FAILURE. Once it is
+	// nonzero the stage has failed whatever else happens, so a stopped
+	// (Cancelled) attempt arriving after that point is not retried (#1687).
+	failed int
 
 	retryEnabled bool
 	republish    func(distributed.Task)
@@ -91,8 +95,15 @@ type taskAttemptState struct {
 	panicked  bool
 	sqlState  string
 	sqlMsg    string
-	attempts  int
-	terminal  bool
+	// cancelled: the recorded failure is a stopped attempt
+	// (ResultNotification.Cancelled), not a verdict of the task's own.
+	cancelled bool
+	// realFailure holds the most recent failed attempt that was NOT a stopped
+	// one, so a later stopped attempt of the same task cannot replace it as
+	// the task's recorded failure (#1687).
+	realFailure *distributed.ResultNotification
+	attempts    int
+	terminal    bool
 }
 
 // taskFailure is one terminal task failure, carried as a value because the
@@ -222,8 +233,19 @@ func (tr *taskRetrier) Observe(r distributed.ResultNotification) (allDone bool) 
 	// PlanRefused is the same argument without the panic: the worker
 	// declined the task on the strength of the plan it was handed (#503's
 	// declared-schema guard), and the plan is what every retry carries.
+	//
+	// A STOPPED attempt (r.Cancelled) is retried like any failure while the
+	// stage can still succeed — a worker shutting down cancels its tasks, and
+	// those must run elsewhere — but not once the stage already holds a
+	// terminal failure: the stage has failed, and another attempt can only
+	// spend a worker slot to reach the same end (#1687).
+	stopped := r.Cancelled && tr.failed > 0
+	if !r.Cancelled {
+		rc := r
+		st.realFailure = &rc
+	}
 	fatalNow := r.Panicked || r.PlanRefused || isDeterministicRefusal(r) ||
-		(tr.fatal != nil && tr.fatal(r))
+		stopped || (tr.fatal != nil && tr.fatal(r))
 	if !fatalNow && tr.retryEnabled && st.attempts < maxTaskAttempts {
 		st.attempts++
 		task := tr.growEstimateLocked(r.TaskID)
@@ -240,18 +262,27 @@ func (tr *taskRetrier) Observe(r distributed.ResultNotification) (allDone bool) 
 		go tr.republish(task)
 		return false
 	}
-	st.errMsg = r.Error
-	st.panicked = r.Panicked
-	st.sqlState = r.SQLState
-	st.sqlMsg = r.SQLMessage
-	if r.MissingInputKey != "" {
+	// The task's recorded failure is this attempt's — unless this attempt was
+	// stopped and an earlier one failed for a real reason: a cancellation
+	// never replaces a verdict (#1687).
+	rec := r
+	if r.Cancelled && st.realFailure != nil {
+		rec = *st.realFailure
+	}
+	st.errMsg = rec.Error
+	st.panicked = rec.Panicked
+	st.sqlState = rec.SQLState
+	st.sqlMsg = rec.SQLMessage
+	st.cancelled = rec.Cancelled
+	if rec.MissingInputKey != "" {
 		// Tag both the fatal-classified case and attempts-exhausted-on-
 		// missing-input so ExecuteSQL's streaming-disabled re-execution
 		// triggers on either.
-		st.errMsg = inputLostMarker + " (" + r.MissingInputKey + "): " + r.Error
+		st.errMsg = inputLostMarker + " (" + rec.MissingInputKey + "): " + rec.Error
 	}
 	st.terminal = true
 	tr.terminal++
+	tr.failed++
 	done := tr.terminal >= len(tr.order)
 	tr.mu.Unlock()
 	if tr.logger != nil {
@@ -321,7 +352,13 @@ func (tr *taskRetrier) IsTerminal(taskID string) bool {
 	return ok && st.terminal
 }
 
-// FirstError returns the first terminal failure in dispatch order, if any.
+// FirstError returns the stage's failure, if any: the first terminal failure
+// in dispatch order that is not a stopped (cancelled) attempt, and only when
+// every terminal failure is a stopped one, the first of those (#1687). A
+// cancellation is what some OTHER cause did to a task — a sibling's failure,
+// the query's cancel, a worker's shutdown — so it never stands for the stage
+// beside a failure that says why; between real failures dispatch order still
+// decides, as it always has.
 //
 // The classification bits travel WITH the message rather than beside it:
 // Panicked and SQLState are the worker's own answers, read from its error's
@@ -329,13 +366,25 @@ func (tr *taskRetrier) IsTerminal(taskID string) bool {
 func (tr *taskRetrier) FirstError() (taskFailure, bool) {
 	tr.mu.Lock()
 	defer tr.mu.Unlock()
+	var stopped *taskFailure
 	for _, id := range tr.order {
-		if st := tr.states[id]; st.terminal && st.errMsg != "" {
-			return taskFailure{
-				TaskID: id, Message: st.errMsg,
-				Panicked: st.panicked, SQLState: st.sqlState, SQLMessage: st.sqlMsg,
-			}, true
+		st := tr.states[id]
+		if !st.terminal || st.errMsg == "" {
+			continue
 		}
+		f := taskFailure{
+			TaskID: id, Message: st.errMsg,
+			Panicked: st.panicked, SQLState: st.sqlState, SQLMessage: st.sqlMsg,
+		}
+		if !st.cancelled {
+			return f, true
+		}
+		if stopped == nil {
+			stopped = &f
+		}
+	}
+	if stopped != nil {
+		return *stopped, true
 	}
 	return taskFailure{}, false
 }

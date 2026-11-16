@@ -859,6 +859,9 @@ func (e *Executor) Execute(ctx context.Context, task distributed.Task, workerID 
 		if errors.As(err, &dsr) {
 			result.PlanRefused = true
 		}
+		// A stopped attempt, not a verdict: the coordinator ranks it below
+		// any real failure in the stage (#1687).
+		result.Cancelled = errors.Is(err, context.Canceled)
 	} else {
 		result.Success = true
 	}
