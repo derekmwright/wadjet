@@ -43,8 +43,12 @@ type broadcastJoinEntry struct {
 	hj       *exec.HashJoin
 	refcount int
 	ready    chan struct{} // closed once the builder completes
-	err      error         // set before ready closes; sticky
+	err      error         // set before ready closes
 	queryID  string        // for CleanupQuery scoping
+	// builderStopped is set with err when the builder's own context was
+	// done as the build failed: the failure is the builder's cancellation,
+	// not a verdict on the build, and a live waiter rebuilds (#1687).
+	builderStopped bool
 }
 
 func newBroadcastJoinCache() *broadcastJoinCache {
@@ -89,56 +93,80 @@ func computeBroadcastJoinKey(queryID string, spec distributed.OpSpec) string {
 // ctx cancellation aborts a waiter's block on the builder (it releases its
 // refcount and returns ctx.Err()), so a cancelled or deadlined probe task can
 // never strand a goroutine — or its concurrency slot — on a build that hangs.
+//
+// A build that failed because the BUILDER's own context was cancelled is not
+// handed to the waiters as their error (#1687). build() runs on the builder
+// task's context, and that task can be stopped for reasons that say nothing
+// about the build: its fragment builds its unary ops concurrently, and a
+// sibling op's failure (a refused filter compile) cancels the build
+// mid-flight. Inherited, that `join build cancelled: context canceled` became
+// the failure of every probe task waiting on the worker, and could outrank
+// the refusal that caused it as the query's error. A waiter whose own
+// context is still live builds again instead; one whose context is done
+// reports its own cancellation, as before.
 func (c *broadcastJoinCache) Acquire(ctx context.Context, key, queryID string, build func() (*exec.HashJoin, error)) (*exec.HashJoin, func(), error) {
-	c.mu.Lock()
-	if e, ok := c.entries[key]; ok {
-		e.refcount++
+	for {
+		c.mu.Lock()
+		if e, ok := c.entries[key]; ok {
+			e.refcount++
+			c.mu.Unlock()
+			select {
+			case <-e.ready:
+			case <-ctx.Done():
+				// Abandon the wait without leaking the refcount we just claimed.
+				c.release(key, e)
+				return nil, nil, ctx.Err()
+			}
+			if e.err != nil {
+				// The builder failed; this waiter drops the refcount it just
+				// claimed (hj is nil, so there is nothing to Close).
+				c.release(key, e)
+				if e.builderStopped && ctx.Err() == nil {
+					// The builder was stopped and the build reached no
+					// verdict: build it ourselves. The failed entry is already
+					// out of the map, so the next pass starts a fresh one.
+					continue
+				}
+				return nil, nil, e.err
+			}
+			return e.hj, c.releaseFnFor(key, e), nil
+		}
+		// First arrival: we are the builder.
+		e := &broadcastJoinEntry{
+			ready:    make(chan struct{}),
+			refcount: 1,
+			queryID:  queryID,
+		}
+		c.entries[key] = e
 		c.mu.Unlock()
-		select {
-		case <-e.ready:
-		case <-ctx.Done():
-			// Abandon the wait without leaking the refcount we just claimed.
-			c.release(key)
-			return nil, nil, ctx.Err()
+
+		// buildGuarded converts a panic in build() into an error so the path
+		// below ALWAYS reaches close(e.ready). A panic that unwound past
+		// close() would strand every concurrent and future waiter on this key
+		// forever (each holding a worker concurrency slot) — the root of the
+		// Q07 final_aggregate stall (#101).
+		hj, err := buildGuarded(build)
+
+		c.mu.Lock()
+		e.hj = hj
+		e.err = err
+		e.builderStopped = err != nil && ctx.Err() != nil
+		if err != nil && c.entries[key] == e {
+			// A failed entry leaves the map at once: an arrival after this
+			// point builds afresh instead of attaching to a dead build.
+			delete(c.entries, key)
 		}
-		if e.err != nil {
-			// The builder failed; this waiter inherits the error and decrements
-			// the refcount it just claimed. When refcount hits zero the entry
-			// is evicted (hj is nil so Close is skipped).
-			c.release(key)
-			return nil, nil, e.err
+		close(e.ready)
+		c.mu.Unlock()
+
+		if err != nil {
+			// Builder failed: release our own refcount and report. Other
+			// waiters (if any) will see e.err and release themselves.
+			c.release(key, e)
+			return nil, nil, err
 		}
-		return e.hj, c.releaseFnFor(key), nil
+		return hj, c.releaseFnFor(key, e), nil
 	}
-	// First arrival: we are the builder.
-	e := &broadcastJoinEntry{
-		ready:    make(chan struct{}),
-		refcount: 1,
-		queryID:  queryID,
-	}
-	c.entries[key] = e
-	c.mu.Unlock()
-
-	// buildGuarded converts a panic in build() into an error so the path below
-	// ALWAYS reaches close(e.ready). A panic that unwound past close() would
-	// strand every concurrent and future waiter on this key forever (each
-	// holding a worker concurrency slot) — the root of the Q07 final_aggregate
-	// stall (#101).
-	hj, err := buildGuarded(build)
-
-	c.mu.Lock()
-	e.hj = hj
-	e.err = err
-	close(e.ready)
-	c.mu.Unlock()
-
-	if err != nil {
-		// Builder failed: release our own refcount and report. Other waiters
-		// (if any) will see e.err and release themselves.
-		c.release(key)
-		return nil, nil, err
-	}
-	return hj, c.releaseFnFor(key), nil
 }
 
 // buildGuarded runs build, recovering a panic into an error (with stack) so the
@@ -154,18 +182,21 @@ func buildGuarded(build func() (*exec.HashJoin, error)) (hj *exec.HashJoin, err 
 	return build()
 }
 
-func (c *broadcastJoinCache) releaseFnFor(key string) func() {
-	return func() { c.release(key) }
+func (c *broadcastJoinCache) releaseFnFor(key string, e *broadcastJoinEntry) func() {
+	return func() { c.release(key, e) }
 }
 
-func (c *broadcastJoinCache) release(key string) {
+// release drops one reference to e. An entry no longer in the map under key
+// has already been dealt with — CleanupQuery closed its HashJoin, or its
+// build failed and it holds none — so only the count moves; in particular a
+// fresh entry that has since taken the key is never touched.
+func (c *broadcastJoinCache) release(key string, e *broadcastJoinEntry) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	e, ok := c.entries[key]
-	if !ok {
+	e.refcount--
+	if c.entries[key] != e {
 		return
 	}
-	e.refcount--
 	if e.refcount <= 0 {
 		if e.hj != nil {
 			_ = e.hj.Close()
