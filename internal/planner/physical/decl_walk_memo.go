@@ -68,6 +68,9 @@ func memoized[V any](w *declWalk, m *map[*logical.Node]map[string]V, n *logical.
 	if w.computed != nil {
 		w.computed(kind, n)
 	}
+	if probe := declWalkProbe.Load(); probe != nil {
+		(*probe)(kind)
+	}
 	r := compute(n)
 	if *m == nil {
 		*m = make(map[*logical.Node]map[string]V)
