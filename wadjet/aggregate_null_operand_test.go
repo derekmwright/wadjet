@@ -40,6 +40,16 @@ func TestAggregateOverNullOperand(t *testing.T) {
 		{"SELECT SUM(t.i + NULL), COUNT(t.n * NULL) FROM ss_t t WHERE t.id > 1", "NULL,0"},
 		{"SELECT COUNT(*) FROM (SELECT t.id, SUM(t.i + NULL) AS s FROM ss_t t GROUP BY t.id) q WHERE q.s IS NULL", "6"},
 		{"SELECT sum(v + NULL) FROM ss_i", "NULL"},
+		// The related arm split #1558 names: the bulk kernel's report also
+		// carries "a divisor is zero", which the pre-projection dropped too, so
+		// both cells answered a silent 0 on the single-process arms. A zero
+		// divisor now raises division by zero, as PostgreSQL and the DAG arms do.
+		{"SELECT SUM(t.n / '0') FROM ss_t t", "ERR 22012"},
+		// KNOWN RESIDUAL: PostgreSQL rejects the literal itself with 22P02
+		// (invalid input syntax for type integer); the engine coerces 'abc' to
+		// a zero divisor and raises 22012, the DAG arms' SQLSTATE. Pinned so a
+		// change to either side is seen, not because 22012 is PostgreSQL's.
+		{"SELECT SUM(t.i / 'abc') FROM ss_t t", "ERR 22012"},
 		// Controls: the same aggregate inputs with no NULL operand, one a
 		// float column whose sixth row is NULL so the bulk kernel reports a
 		// NULL row for a real reason.
@@ -75,12 +85,13 @@ func TestAggregateOverNullOperand(t *testing.T) {
 	}
 }
 
-// nullOperandRows renders a one-row answer as its comma-joined cells.
+// nullOperandRows renders a one-row answer as its comma-joined cells, or an
+// error as "ERR <SQLSTATE>".
 func nullOperandRows(t *testing.T, db *DB, sql string) string {
 	t.Helper()
 	s := moRun(db, sql)
 	if len(s) > 4 && s[:4] == "ERR " {
-		return s
+		return moState(s) // the SQLSTATE is the pin, not the message text
 	}
 	// moRun prefixes the declared types; the values are what PostgreSQL pins.
 	for i := 0; i < len(s); i++ {
