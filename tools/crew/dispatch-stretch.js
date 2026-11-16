@@ -43,7 +43,7 @@ const TRIGGERS = `Escalation triggers (stop and report; do not work around):
 2. (counted by the script, not by you);
 3. the change alters something a user would see in an answer, an error or a wire type beyond what the brief states, or drops user data;
 4. a public statement about quality, exactness or security would have to be written or reworded (README, docs claims, release notes);
-5. a gate or test failed, a conflict is not mechanical, or the branch you started from moved;
+5. a gate or test failed for a reason your own change does not explain, a conflict is not mechanical, or the branch you started from moved;
 6. the brief and the runbooks do not cover the situation, or a rule would have to bend.`
 
 const BUILD = {
@@ -130,7 +130,7 @@ ${fixing
 Rules:
 - Root cause over workaround: keep the reproduction, find the cause, record it.
 - Every new test has a negative control: revert the fix, watch the test fail for the right reason, restore. Report it.
-- A failed test is never rerun and never called a flake: stop and report (trigger 5).
+- A failed test is never rerun unchanged and never called a flake. If an existing test fails BECAUSE it pins the behaviour or plan shape your fix intentionally changes, update that pin and list it in the note (test name, old assertion, new assertion, why); the reviewer judges it. Any other failure, one your diff does not explain or in a test of something you did not mean to change, is trigger 5: stop and report.
 - Commit only the files you name (never "git add -A"); never push; never touch another branch.
 - Before handing back, write a result note to ${args.notesDir}/${item.id}_r${round}.md: what changed, the cause, each claim with the test or measurement behind it, what you did NOT do.
 

@@ -42,7 +42,10 @@ A worker or the dispatcher stops and hands back to the architect when:
    brief states, or drops user data;
 4. a public statement about quality, exactness or security would be written or reworded
    (README, docs claims, release notes);
-5. a gate or test failed, a conflict is not mechanical, or the base branch moved;
+5. a gate or test failed for a reason the change does not explain, a conflict is not
+   mechanical, or the base branch moved. (An existing test that pins the behaviour or plan
+   shape the fix intentionally changes is not this: the worker updates the pin and lists it
+   in the note, and the reviewer judges it.)
 6. the brief and the runbooks do not cover the situation, or a rule would have to bend.
 
 Triggers are written narrowly on purpose: a vague one costs an agent and a round trip every
