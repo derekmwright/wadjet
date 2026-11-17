@@ -80,6 +80,7 @@ const CHECK = {
     verified: { type: 'boolean' },
     failures: { type: 'array', items: { type: 'string' } },
     trigger: { type: 'integer', description: 'set only if an escalation trigger fired' },
+    reason: { type: 'string', description: 'when trigger is set: which trigger, and the fact that fired it' },
   },
   required: ['verified', 'failures'],
 }
@@ -193,7 +194,7 @@ ${TRIGGERS}`,
         { label: `verify:${item.id} r${round}`, phase: 'Verify', model: 'haiku', schema: CHECK })
       ledger.push({ item: item.id, role: 'dispatcher-verify', model: 'haiku', round, outcome: check ? (check.verified ? 'verified' : 'failed') : 'died' })
       if (!check) throw esc(5, `verification for ${item.id} died in round ${round}`)
-      if (check.trigger) throw esc(check.trigger, check.failures.join('; '))
+      if (check.trigger) throw esc(check.trigger, check.reason || check.failures.join('; ') || 'the verifier set a trigger and gave no reason')
 
       let brokeEarlier = false
       if (check.verified) {
