@@ -2403,6 +2403,11 @@ SELECT src_ip, dst_port, COUNT(*) FROM flow_logs GROUP BY src_ip, dst_port
 SELECT src_ip, dst_port, COUNT(*) FROM flow_logs GROUP BY 1, 2
 ```
 
+A position, or a SELECT alias, inside `ROLLUP`, `CUBE` or `GROUPING SETS`
+names the same select item it names in a plain `GROUP BY`: `GROUP BY ROLLUP
+(1, 2)` is `GROUP BY ROLLUP (src_ip, dst_port)`. A position outside the select
+list, 0 or negative included, is SQLSTATE 42P10, as in PostgreSQL.
+
 ### Which name a bare GROUP BY, HAVING or ORDER BY term binds
 
 A bare name in these three clauses can mean an INPUT column of the FROM

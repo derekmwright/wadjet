@@ -610,6 +610,12 @@ type SelectInfo struct {
 	GroupBy      []string
 	GroupByExprs []Node     // AST for GROUP BY expressions (parallel to GroupBy)
 	GroupingSets [][]string // GROUPING SETS / CUBE / ROLLUP (nil = simple GROUP BY)
+	// GroupingSetKeys is GroupingSets by POSITION: each set term's index in
+	// GroupBy, set by resolvePositionalRefs. The names in GroupingSets are
+	// re-derived from it whenever a GroupBy entry is resolved (an ordinal, an
+	// output alias) or reverted to an input column, so a set never names a
+	// term the key list no longer spells (#1480). nil for a plain GROUP BY.
+	GroupingSetKeys [][]int
 	// GroupByAliasOrigin records, per GROUP BY entry, the bare name the
 	// parser SUBSTITUTED a SELECT alias's expression for — "" where it did
 	// not. It exists because the substitution is PROVISIONAL: PostgreSQL
@@ -1407,7 +1413,17 @@ func resolvePositionalRefs(info *SelectInfo) error {
 		return resolveSetOpOrderBy(info)
 	}
 
-	// Resolve GROUP BY positional refs
+	// Resolve GROUP BY positional refs.
+	//
+	// ONE resolver for every GROUP BY term, whatever construct wrote it: a
+	// term of ROLLUP, CUBE or GROUPING SETS is an entry of info.GroupBy like a
+	// plain term, and is resolved here like one (#1480). The sets name their
+	// keys, so each set term's POSITION in info.GroupBy is taken before any
+	// term is rewritten and the sets are renamed from it afterwards.
+	// Without that, `ROLLUP (1)` grouped GroupBy by the select item while its
+	// set still said `1`, which named no key: every set collapsed to the grand
+	// total and the statement answered it twice.
+	info.GroupingSetKeys = groupingSetKeyPositions(info)
 	for i, gb := range info.GroupBy {
 		pos, err := strconv.Atoi(strings.TrimSpace(gb))
 		if err != nil {
@@ -1423,7 +1439,9 @@ func resolvePositionalRefs(info *SelectInfo) error {
 			continue
 		}
 		if pos < 1 || pos > len(info.Columns) {
-			return fmt.Errorf("GROUP BY position %d is out of range (1-%d)", pos, len(info.Columns))
+			// PostgreSQL 17.11's code and sentence, for 0 and a negative
+			// position as for one past the list.
+			return sqlerr.New("42P10", "GROUP BY position %d is not in select list", pos)
 		}
 		col := info.Columns[pos-1]
 		if col.Alias != "" {
@@ -1433,6 +1451,8 @@ func resolvePositionalRefs(info *SelectInfo) error {
 		}
 		substituteGroupByExpr(info, i, col)
 	}
+	renameGroupingSets(info)
+	dedupeGroupingSetKeys(info)
 
 	// Resolve ORDER BY positional refs
 	//
@@ -1602,6 +1622,106 @@ func resolveGroupByAliasRef(info *SelectInfo, i int, gb string) {
 	}
 }
 
+// groupingSetKeyPositions maps every term of every grouping set to the
+// position of its entry in info.GroupBy, which the parser recorded as the
+// deduped union of the sets' terms (groupTermSet) under the same canonical
+// names, matched without case as groupTermSet matched them. nil for a plain
+// GROUP BY.
+func groupingSetKeyPositions(info *SelectInfo) [][]int {
+	if len(info.GroupingSets) == 0 {
+		return nil
+	}
+	at := make(map[string]int, len(info.GroupBy))
+	for i, gb := range info.GroupBy {
+		if _, dup := at[strings.ToLower(gb)]; !dup {
+			at[strings.ToLower(gb)] = i
+		}
+	}
+	keys := make([][]int, len(info.GroupingSets))
+	for s, set := range info.GroupingSets {
+		keys[s] = make([]int, 0, len(set))
+		for _, term := range set {
+			if i, ok := at[strings.ToLower(term)]; ok {
+				keys[s] = append(keys[s], i)
+			}
+		}
+	}
+	return keys
+}
+
+// renameGroupingSets re-spells every grouping-set term as the GROUP BY entry
+// it is, after the entries have been resolved or reverted.
+func renameGroupingSets(info *SelectInfo) {
+	if info.GroupingSetKeys == nil {
+		return
+	}
+	sets := make([][]string, len(info.GroupingSetKeys))
+	for s, keys := range info.GroupingSetKeys {
+		sets[s] = make([]string, len(keys))
+		for j, i := range keys {
+			sets[s][j] = info.GroupBy[i]
+		}
+	}
+	info.GroupingSets = sets
+}
+
+// dedupeGroupingSetKeys folds GROUP BY entries that resolution made the SAME
+// key — `ROLLUP (1, t.i)` over `SELECT t.i …` — into one, so the key list
+// stays the deduped union every set indexes into (parseGroupingColList says
+// what a repeated key did to the physical planner). The sets keep their
+// terms per position: `ROLLUP (1, t.i)` is still the three sets
+// (t.i, t.i), (t.i) and (). Two entries fold only when neither or both came
+// from the same output alias, because RevertGroupByAliasesShadowedByInput may
+// still turn an alias entry back into an input column of that name.
+func dedupeGroupingSetKeys(info *SelectInfo) {
+	if info.GroupingSetKeys == nil {
+		return
+	}
+	origin := func(i int) string {
+		if i < len(info.GroupByAliasOrigin) {
+			return strings.ToLower(info.GroupByAliasOrigin[i])
+		}
+		return ""
+	}
+	type key struct{ name, origin string }
+	first := map[key]int{}
+	remap := make([]int, len(info.GroupBy))
+	var gb []string
+	var exprs []Node
+	var origins []string
+	for i, name := range info.GroupBy {
+		k := key{strings.ToLower(name), origin(i)}
+		if j, ok := first[k]; ok {
+			remap[i] = j
+			continue
+		}
+		first[k] = len(gb)
+		remap[i] = len(gb)
+		gb = append(gb, name)
+		if i < len(info.GroupByExprs) {
+			exprs = append(exprs, info.GroupByExprs[i])
+		}
+		if i < len(info.GroupByAliasOrigin) {
+			origins = append(origins, info.GroupByAliasOrigin[i])
+		}
+	}
+	if len(gb) == len(info.GroupBy) {
+		return
+	}
+	info.GroupBy = gb
+	if info.GroupByExprs != nil {
+		info.GroupByExprs = exprs
+	}
+	if info.GroupByAliasOrigin != nil {
+		info.GroupByAliasOrigin = origins
+	}
+	for _, keys := range info.GroupingSetKeys {
+		for j, i := range keys {
+			keys[j] = remap[i]
+		}
+	}
+}
+
 // recordGroupByAliasOrigin notes that GROUP BY entry i was a bare name the
 // parser replaced with a SELECT alias's expression, so the scope layer can
 // undo it where an INPUT COLUMN of that name exists — PostgreSQL's precedence
@@ -1640,6 +1760,8 @@ func RevertGroupByAliasesShadowedByInput(info *SelectInfo, provides func(bare st
 		info.GroupBy[i] = GroupKeyName(ref)
 		info.GroupByAliasOrigin[i] = ""
 	}
+	// A grouping set names the entry it holds, so it follows the entry back.
+	renameGroupingSets(info)
 }
 
 // substituteGroupByExpr replaces GROUP BY entry i with the select column's

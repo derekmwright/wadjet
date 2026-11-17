@@ -190,15 +190,13 @@ func TestGroupingSetsEmptyInputFilter(t *testing.T) {
 	}
 }
 
-// TestGroupingSetsEmptyInputOrdinalResidual pins GROUP BY ROLLUP (1), an
-// ordinal inside ROLLUP, over zero rows at what the engine answers today. It
-// is a known residual of #1480, NOT a statement of the right answer: the
-// engine expands ROLLUP (1) into the grand total twice (over non-empty input
-// it answers the grand-total row twice, which is #1480), so with the empty
-// grouping set now answering its row over zero input (#1335) the statement
-// moved from zero rows to two. PostgreSQL 17.11 answers one row. The day
-// #1480 is fixed this pin must change to it.
-func TestGroupingSetsEmptyInputOrdinalResidual(t *testing.T) {
+// TestGroupingSetsEmptyInputOrdinal pins GROUP BY ROLLUP (1), an ordinal
+// inside ROLLUP, over zero rows at PostgreSQL 17.11's one row. It was pinned
+// as a residual of #1480 at two rows: the ordinal was left unresolved in the
+// grouping set, so ROLLUP (1) was the grand total twice, and with the empty
+// grouping set answering its row over zero input (#1335) it answered that row
+// twice. The ordinal now names the select item in the set too (#1480).
+func TestGroupingSetsEmptyInputOrdinal(t *testing.T) {
 	ctx := context.Background()
 	for name, cfg := range map[string]Config{
 		"single":  {Store: objstore.NewMemStore(), Bucket: "test"},
@@ -219,9 +217,13 @@ func TestGroupingSetsEmptyInputOrdinalResidual(t *testing.T) {
 					t.Fatalf("%s: %v", ddl, err)
 				}
 			}
-			const sql, tip, pg = "SELECT g, MAX(x) FROM st WHERE id < 0 GROUP BY ROLLUP (1)", "NULL,NULL | NULL,NULL", "NULL,NULL"
-			if got := gseRows(db, sql); got != tip {
-				t.Errorf("%s\n got  %q\n pinned %q (known residual of #1480; PostgreSQL 17.11 answers %q)", sql, got, tip, pg)
+			for _, c := range []struct{ sql, want string }{
+				{"SELECT g, MAX(x) FROM st WHERE id < 0 GROUP BY ROLLUP (1)", "NULL,NULL"},
+				{"SELECT g, MAX(x) FROM st GROUP BY ROLLUP (1)", "1,20 | 2,30 | NULL,30"},
+			} {
+				if got := gseRows(db, c.sql); got != c.want {
+					t.Errorf("%s\n got  %q\n want %q (PostgreSQL 17.11)", c.sql, got, c.want)
+				}
 			}
 		})
 	}

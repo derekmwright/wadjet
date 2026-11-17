@@ -1,0 +1,890 @@
+# name	sql	PostgreSQL 17.11 answer	residual pin (empty: the engine must answer as PostgreSQL does)
+# Rows joined by " | " (sorted, or in the order PostgreSQL returned them when the statement has an ORDER BY), NULL spelled out, (none) for no rows; a refusal is ERR <SQLSTATE>. A statement with ORDER BY is compared as a multiset AND on the order of its first column, which is all ORDER BY 1 determines.
+plain/ord/base/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY 1	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1	
+plain/ord/base/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY 1	(none)	
+plain/ord/order/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY 1 ORDER BY 1	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1	
+plain/ord/order/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY 1 ORDER BY 1	(none)	
+plain/ord/having/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY 1 HAVING count(*) < 6	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1	
+plain/ord/having/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY 1 HAVING count(*) < 6	(none)	
+plain/ord/gcol/rows	SELECT t.i AS k, count(*) AS c, GROUPING(t.i) AS g FROM ss_t t GROUP BY 1	-7,1,0 | 0,1,0 | 1,1,0 | 3,1,0 | 5,1,0 | NULL,1,0	
+plain/ord/gcol/zero	SELECT t.i AS k, count(*) AS c, GROUPING(t.i) AS g FROM ss_z t GROUP BY 1	(none)	
+plain/ord/gord/rows	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY 1	ERR 42803	
+plain/ord/gord/zero	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY 1	ERR 42803	
+plain/col/base/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY i	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1	
+plain/col/base/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY i	(none)	
+plain/col/order/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY i ORDER BY 1	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1	
+plain/col/order/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY i ORDER BY 1	(none)	
+plain/col/having/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY i HAVING count(*) < 6	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1	
+plain/col/having/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY i HAVING count(*) < 6	(none)	
+plain/col/gcol/rows	SELECT t.i AS k, count(*) AS c, GROUPING(t.i) AS g FROM ss_t t GROUP BY i	-7,1,0 | 0,1,0 | 1,1,0 | 3,1,0 | 5,1,0 | NULL,1,0	
+plain/col/gcol/zero	SELECT t.i AS k, count(*) AS c, GROUPING(t.i) AS g FROM ss_z t GROUP BY i	(none)	
+plain/col/gord/rows	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY i	ERR 42803	
+plain/col/gord/zero	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY i	ERR 42803	
+plain/alias/base/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY k	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1	
+plain/alias/base/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY k	(none)	
+plain/alias/order/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY k ORDER BY 1	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1	
+plain/alias/order/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY k ORDER BY 1	(none)	
+plain/alias/having/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY k HAVING count(*) < 6	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1	
+plain/alias/having/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY k HAVING count(*) < 6	(none)	
+plain/alias/gcol/rows	SELECT t.i AS k, count(*) AS c, GROUPING(t.i) AS g FROM ss_t t GROUP BY k	-7,1,0 | 0,1,0 | 1,1,0 | 3,1,0 | 5,1,0 | NULL,1,0	
+plain/alias/gcol/zero	SELECT t.i AS k, count(*) AS c, GROUPING(t.i) AS g FROM ss_z t GROUP BY k	(none)	
+plain/alias/gord/rows	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY k	ERR 42803	
+plain/alias/gord/zero	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY k	ERR 42803	
+plain/qual/base/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY t.i	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1	
+plain/qual/base/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY t.i	(none)	
+plain/qual/order/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY t.i ORDER BY 1	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1	
+plain/qual/order/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY t.i ORDER BY 1	(none)	
+plain/qual/having/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY t.i HAVING count(*) < 6	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1	
+plain/qual/having/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY t.i HAVING count(*) < 6	(none)	
+plain/qual/gcol/rows	SELECT t.i AS k, count(*) AS c, GROUPING(t.i) AS g FROM ss_t t GROUP BY t.i	-7,1,0 | 0,1,0 | 1,1,0 | 3,1,0 | 5,1,0 | NULL,1,0	
+plain/qual/gcol/zero	SELECT t.i AS k, count(*) AS c, GROUPING(t.i) AS g FROM ss_z t GROUP BY t.i	(none)	
+plain/qual/gord/rows	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY t.i	ERR 42803	
+plain/qual/gord/zero	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY t.i	ERR 42803	
+plain/expr/base/rows	SELECT t.i + 1, count(*) AS c FROM ss_t t GROUP BY t.i + 1	-6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1	
+plain/expr/base/zero	SELECT t.i + 1, count(*) AS c FROM ss_z t GROUP BY t.i + 1	(none)	
+plain/expr/order/rows	SELECT t.i + 1, count(*) AS c FROM ss_t t GROUP BY t.i + 1 ORDER BY 1	-6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1	
+plain/expr/order/zero	SELECT t.i + 1, count(*) AS c FROM ss_z t GROUP BY t.i + 1 ORDER BY 1	(none)	
+plain/expr/having/rows	SELECT t.i + 1, count(*) AS c FROM ss_t t GROUP BY t.i + 1 HAVING count(*) < 6	-6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1	
+plain/expr/having/zero	SELECT t.i + 1, count(*) AS c FROM ss_z t GROUP BY t.i + 1 HAVING count(*) < 6	(none)	
+plain/expr/gcol/rows	SELECT t.i + 1, count(*) AS c, GROUPING(t.i + 1) AS g FROM ss_t t GROUP BY t.i + 1	-6,1,0 | 1,1,0 | 2,1,0 | 4,1,0 | 6,1,0 | NULL,1,0	
+plain/expr/gcol/zero	SELECT t.i + 1, count(*) AS c, GROUPING(t.i + 1) AS g FROM ss_z t GROUP BY t.i + 1	(none)	
+plain/expr/gord/rows	SELECT t.i + 1, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY t.i + 1	ERR 42803	
+plain/expr/gord/zero	SELECT t.i + 1, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY t.i + 1	ERR 42803	
+plain/ordExpr/base/rows	SELECT t.i + 1, count(*) AS c FROM ss_t t GROUP BY 1	-6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1	
+plain/ordExpr/base/zero	SELECT t.i + 1, count(*) AS c FROM ss_z t GROUP BY 1	(none)	
+plain/ordExpr/order/rows	SELECT t.i + 1, count(*) AS c FROM ss_t t GROUP BY 1 ORDER BY 1	-6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1	
+plain/ordExpr/order/zero	SELECT t.i + 1, count(*) AS c FROM ss_z t GROUP BY 1 ORDER BY 1	(none)	
+plain/ordExpr/having/rows	SELECT t.i + 1, count(*) AS c FROM ss_t t GROUP BY 1 HAVING count(*) < 6	-6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1	
+plain/ordExpr/having/zero	SELECT t.i + 1, count(*) AS c FROM ss_z t GROUP BY 1 HAVING count(*) < 6	(none)	
+plain/ordExpr/gcol/rows	SELECT t.i + 1, count(*) AS c, GROUPING(t.i + 1) AS g FROM ss_t t GROUP BY 1	-6,1,0 | 1,1,0 | 2,1,0 | 4,1,0 | 6,1,0 | NULL,1,0	
+plain/ordExpr/gcol/zero	SELECT t.i + 1, count(*) AS c, GROUPING(t.i + 1) AS g FROM ss_z t GROUP BY 1	(none)	
+plain/ordExpr/gord/rows	SELECT t.i + 1, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY 1	ERR 42803	
+plain/ordExpr/gord/zero	SELECT t.i + 1, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY 1	ERR 42803	
+plain/ordAgg/base/rows	SELECT count(*) AS c, t.i AS k FROM ss_t t GROUP BY 1	ERR 42803	
+plain/ordAgg/base/zero	SELECT count(*) AS c, t.i AS k FROM ss_z t GROUP BY 1	ERR 42803	
+plain/ordAgg/order/rows	SELECT count(*) AS c, t.i AS k FROM ss_t t GROUP BY 1 ORDER BY 1	ERR 42803	
+plain/ordAgg/order/zero	SELECT count(*) AS c, t.i AS k FROM ss_z t GROUP BY 1 ORDER BY 1	ERR 42803	
+plain/ordAgg/having/rows	SELECT count(*) AS c, t.i AS k FROM ss_t t GROUP BY 1 HAVING count(*) < 6	ERR 42803	
+plain/ordAgg/having/zero	SELECT count(*) AS c, t.i AS k FROM ss_z t GROUP BY 1 HAVING count(*) < 6	ERR 42803	
+plain/ordAgg/gord/rows	SELECT count(*) AS c, t.i AS k, GROUPING(1) AS g FROM ss_t t GROUP BY 1	ERR 42803	
+plain/ordAgg/gord/zero	SELECT count(*) AS c, t.i AS k, GROUPING(1) AS g FROM ss_z t GROUP BY 1	ERR 42803	
+plain/ordRange/base/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY 9	ERR 42P10	
+plain/ordRange/base/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY 9	ERR 42P10	
+plain/ordRange/order/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY 9 ORDER BY 1	ERR 42P10	
+plain/ordRange/order/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY 9 ORDER BY 1	ERR 42P10	
+plain/ordRange/having/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY 9 HAVING count(*) < 6	ERR 42P10	
+plain/ordRange/having/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY 9 HAVING count(*) < 6	ERR 42P10	
+plain/ordRange/gord/rows	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY 9	ERR 42P10	
+plain/ordRange/gord/zero	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY 9	ERR 42P10	
+plain/ord0/base/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY 0	ERR 42P10	
+plain/ord0/base/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY 0	ERR 42P10	
+plain/ord0/order/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY 0 ORDER BY 1	ERR 42P10	
+plain/ord0/order/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY 0 ORDER BY 1	ERR 42P10	
+plain/ord0/having/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY 0 HAVING count(*) < 6	ERR 42P10	
+plain/ord0/having/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY 0 HAVING count(*) < 6	ERR 42P10	
+plain/ord0/gord/rows	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY 0	ERR 42P10	
+plain/ord0/gord/zero	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY 0	ERR 42P10	
+plain/ordNeg/base/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY -1	ERR 42P10	
+plain/ordNeg/base/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY -1	ERR 42P10	
+plain/ordNeg/order/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY -1 ORDER BY 1	ERR 42P10	
+plain/ordNeg/order/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY -1 ORDER BY 1	ERR 42P10	
+plain/ordNeg/having/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY -1 HAVING count(*) < 6	ERR 42P10	
+plain/ordNeg/having/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY -1 HAVING count(*) < 6	ERR 42P10	
+plain/ordNeg/gord/rows	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY -1	ERR 42P10	
+plain/ordNeg/gord/zero	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY -1	ERR 42P10	
+plain/num/base/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY 1.0	ERR 42601	ERR 42803
+plain/num/base/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY 1.0	ERR 42601	ERR 42803
+plain/num/order/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY 1.0 ORDER BY 1	ERR 42601	ERR 42803
+plain/num/order/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY 1.0 ORDER BY 1	ERR 42601	ERR 42803
+plain/num/having/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY 1.0 HAVING count(*) < 6	ERR 42601	ERR 42803
+plain/num/having/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY 1.0 HAVING count(*) < 6	ERR 42601	ERR 42803
+plain/num/gord/rows	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY 1.0	ERR 42601	ERR 42803
+plain/num/gord/zero	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY 1.0	ERR 42601	ERR 42803
+plain/str/base/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY '1'	ERR 42601	NULL,6
+plain/str/base/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY '1'	ERR 42601	(none)
+plain/str/order/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY '1' ORDER BY 1	ERR 42601	NULL,6
+plain/str/order/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY '1' ORDER BY 1	ERR 42601	(none)
+plain/str/having/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY '1' HAVING count(*) < 6	ERR 42601	(none)
+plain/str/having/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY '1' HAVING count(*) < 6	ERR 42601	(none)
+plain/str/gord/rows	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY '1'	ERR 42601	ERR 42803
+plain/str/gord/zero	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY '1'	ERR 42601	ERR 42803
+plain/paren/base/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY ((1))	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1	
+plain/paren/base/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY ((1))	(none)	
+plain/paren/order/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY ((1)) ORDER BY 1	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1	
+plain/paren/order/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY ((1)) ORDER BY 1	(none)	
+plain/paren/having/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY ((1)) HAVING count(*) < 6	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1	
+plain/paren/having/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY ((1)) HAVING count(*) < 6	(none)	
+plain/paren/gcol/rows	SELECT t.i AS k, count(*) AS c, GROUPING(t.i) AS g FROM ss_t t GROUP BY ((1))	-7,1,0 | 0,1,0 | 1,1,0 | 3,1,0 | 5,1,0 | NULL,1,0	
+plain/paren/gcol/zero	SELECT t.i AS k, count(*) AS c, GROUPING(t.i) AS g FROM ss_z t GROUP BY ((1))	(none)	
+plain/paren/gord/rows	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY ((1))	ERR 42803	
+plain/paren/gord/zero	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY ((1))	ERR 42803	
+plain/comp/base/rows	SELECT t.i AS k, t.b, count(*) AS c FROM ss_t t GROUP BY (1, 2)	-7,-70,1 | 0,0,1 | 1,1,1 | 3,30,1 | 5,9000000000,1 | NULL,NULL,1	ERR 42803
+plain/comp/base/zero	SELECT t.i AS k, t.b, count(*) AS c FROM ss_z t GROUP BY (1, 2)	(none)	ERR 42803
+plain/comp/order/rows	SELECT t.i AS k, t.b, count(*) AS c FROM ss_t t GROUP BY (1, 2) ORDER BY 1	-7,-70,1 | 0,0,1 | 1,1,1 | 3,30,1 | 5,9000000000,1 | NULL,NULL,1	ERR 42803
+plain/comp/order/zero	SELECT t.i AS k, t.b, count(*) AS c FROM ss_z t GROUP BY (1, 2) ORDER BY 1	(none)	ERR 42803
+plain/comp/having/rows	SELECT t.i AS k, t.b, count(*) AS c FROM ss_t t GROUP BY (1, 2) HAVING count(*) < 6	-7,-70,1 | 0,0,1 | 1,1,1 | 3,30,1 | 5,9000000000,1 | NULL,NULL,1	ERR 42803
+plain/comp/having/zero	SELECT t.i AS k, t.b, count(*) AS c FROM ss_z t GROUP BY (1, 2) HAVING count(*) < 6	(none)	ERR 42803
+plain/comp/gcol/rows	SELECT t.i AS k, t.b, count(*) AS c, GROUPING(t.i) AS g FROM ss_t t GROUP BY (1, 2)	-7,-70,1,0 | 0,0,1,0 | 1,1,1,0 | 3,30,1,0 | 5,9000000000,1,0 | NULL,NULL,1,0	ERR 42803
+plain/comp/gcol/zero	SELECT t.i AS k, t.b, count(*) AS c, GROUPING(t.i) AS g FROM ss_z t GROUP BY (1, 2)	(none)	ERR 42803
+plain/comp/gord/rows	SELECT t.i AS k, t.b, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY (1, 2)	ERR 42803	
+plain/comp/gord/zero	SELECT t.i AS k, t.b, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY (1, 2)	ERR 42803	
+plain/compCol/base/rows	SELECT t.i AS k, t.b, count(*) AS c FROM ss_t t GROUP BY (t.i, t.b)	-7,-70,1 | 0,0,1 | 1,1,1 | 3,30,1 | 5,9000000000,1 | NULL,NULL,1	ERR 42803
+plain/compCol/base/zero	SELECT t.i AS k, t.b, count(*) AS c FROM ss_z t GROUP BY (t.i, t.b)	(none)	ERR 42803
+plain/compCol/order/rows	SELECT t.i AS k, t.b, count(*) AS c FROM ss_t t GROUP BY (t.i, t.b) ORDER BY 1	-7,-70,1 | 0,0,1 | 1,1,1 | 3,30,1 | 5,9000000000,1 | NULL,NULL,1	ERR 42803
+plain/compCol/order/zero	SELECT t.i AS k, t.b, count(*) AS c FROM ss_z t GROUP BY (t.i, t.b) ORDER BY 1	(none)	ERR 42803
+plain/compCol/having/rows	SELECT t.i AS k, t.b, count(*) AS c FROM ss_t t GROUP BY (t.i, t.b) HAVING count(*) < 6	-7,-70,1 | 0,0,1 | 1,1,1 | 3,30,1 | 5,9000000000,1 | NULL,NULL,1	ERR 42803
+plain/compCol/having/zero	SELECT t.i AS k, t.b, count(*) AS c FROM ss_z t GROUP BY (t.i, t.b) HAVING count(*) < 6	(none)	ERR 42803
+plain/compCol/gcol/rows	SELECT t.i AS k, t.b, count(*) AS c, GROUPING(t.i) AS g FROM ss_t t GROUP BY (t.i, t.b)	-7,-70,1,0 | 0,0,1,0 | 1,1,1,0 | 3,30,1,0 | 5,9000000000,1,0 | NULL,NULL,1,0	ERR 42803
+plain/compCol/gcol/zero	SELECT t.i AS k, t.b, count(*) AS c, GROUPING(t.i) AS g FROM ss_z t GROUP BY (t.i, t.b)	(none)	ERR 42803
+plain/compCol/gord/rows	SELECT t.i AS k, t.b, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY (t.i, t.b)	ERR 42803	
+plain/compCol/gord/zero	SELECT t.i AS k, t.b, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY (t.i, t.b)	ERR 42803	
+rollup/ord/base/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY ROLLUP (1)	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1 | NULL,6	
+rollup/ord/base/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY ROLLUP (1)	NULL,0	
+rollup/ord/order/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY ROLLUP (1) ORDER BY 1	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,6 | NULL,1	
+rollup/ord/order/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY ROLLUP (1) ORDER BY 1	NULL,0	
+rollup/ord/having/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY ROLLUP (1) HAVING count(*) < 6	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1	
+rollup/ord/having/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY ROLLUP (1) HAVING count(*) < 6	NULL,0	
+rollup/ord/gcol/rows	SELECT t.i AS k, count(*) AS c, GROUPING(t.i) AS g FROM ss_t t GROUP BY ROLLUP (1)	-7,1,0 | 0,1,0 | 1,1,0 | 3,1,0 | 5,1,0 | NULL,1,0 | NULL,6,1	
+rollup/ord/gcol/zero	SELECT t.i AS k, count(*) AS c, GROUPING(t.i) AS g FROM ss_z t GROUP BY ROLLUP (1)	NULL,0,1	
+rollup/ord/gord/rows	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY ROLLUP (1)	ERR 42803	
+rollup/ord/gord/zero	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY ROLLUP (1)	ERR 42803	
+rollup/col/base/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY ROLLUP (i)	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1 | NULL,6	
+rollup/col/base/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY ROLLUP (i)	NULL,0	
+rollup/col/order/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY ROLLUP (i) ORDER BY 1	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,6 | NULL,1	
+rollup/col/order/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY ROLLUP (i) ORDER BY 1	NULL,0	
+rollup/col/having/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY ROLLUP (i) HAVING count(*) < 6	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1	
+rollup/col/having/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY ROLLUP (i) HAVING count(*) < 6	NULL,0	
+rollup/col/gcol/rows	SELECT t.i AS k, count(*) AS c, GROUPING(t.i) AS g FROM ss_t t GROUP BY ROLLUP (i)	-7,1,0 | 0,1,0 | 1,1,0 | 3,1,0 | 5,1,0 | NULL,1,0 | NULL,6,1	
+rollup/col/gcol/zero	SELECT t.i AS k, count(*) AS c, GROUPING(t.i) AS g FROM ss_z t GROUP BY ROLLUP (i)	NULL,0,1	
+rollup/col/gord/rows	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY ROLLUP (i)	ERR 42803	
+rollup/col/gord/zero	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY ROLLUP (i)	ERR 42803	
+rollup/alias/base/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY ROLLUP (k)	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1 | NULL,6	
+rollup/alias/base/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY ROLLUP (k)	NULL,0	
+rollup/alias/order/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY ROLLUP (k) ORDER BY 1	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,6 | NULL,1	
+rollup/alias/order/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY ROLLUP (k) ORDER BY 1	NULL,0	
+rollup/alias/having/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY ROLLUP (k) HAVING count(*) < 6	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1	
+rollup/alias/having/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY ROLLUP (k) HAVING count(*) < 6	NULL,0	
+rollup/alias/gcol/rows	SELECT t.i AS k, count(*) AS c, GROUPING(t.i) AS g FROM ss_t t GROUP BY ROLLUP (k)	-7,1,0 | 0,1,0 | 1,1,0 | 3,1,0 | 5,1,0 | NULL,1,0 | NULL,6,1	
+rollup/alias/gcol/zero	SELECT t.i AS k, count(*) AS c, GROUPING(t.i) AS g FROM ss_z t GROUP BY ROLLUP (k)	NULL,0,1	
+rollup/alias/gord/rows	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY ROLLUP (k)	ERR 42803	
+rollup/alias/gord/zero	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY ROLLUP (k)	ERR 42803	
+rollup/qual/base/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY ROLLUP (t.i)	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1 | NULL,6	
+rollup/qual/base/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY ROLLUP (t.i)	NULL,0	
+rollup/qual/order/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY ROLLUP (t.i) ORDER BY 1	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,6 | NULL,1	
+rollup/qual/order/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY ROLLUP (t.i) ORDER BY 1	NULL,0	
+rollup/qual/having/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY ROLLUP (t.i) HAVING count(*) < 6	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1	
+rollup/qual/having/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY ROLLUP (t.i) HAVING count(*) < 6	NULL,0	
+rollup/qual/gcol/rows	SELECT t.i AS k, count(*) AS c, GROUPING(t.i) AS g FROM ss_t t GROUP BY ROLLUP (t.i)	-7,1,0 | 0,1,0 | 1,1,0 | 3,1,0 | 5,1,0 | NULL,1,0 | NULL,6,1	
+rollup/qual/gcol/zero	SELECT t.i AS k, count(*) AS c, GROUPING(t.i) AS g FROM ss_z t GROUP BY ROLLUP (t.i)	NULL,0,1	
+rollup/qual/gord/rows	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY ROLLUP (t.i)	ERR 42803	
+rollup/qual/gord/zero	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY ROLLUP (t.i)	ERR 42803	
+rollup/expr/base/rows	SELECT t.i + 1, count(*) AS c FROM ss_t t GROUP BY ROLLUP (t.i + 1)	-6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1 | NULL,6	
+rollup/expr/base/zero	SELECT t.i + 1, count(*) AS c FROM ss_z t GROUP BY ROLLUP (t.i + 1)	NULL,0	
+rollup/expr/order/rows	SELECT t.i + 1, count(*) AS c FROM ss_t t GROUP BY ROLLUP (t.i + 1) ORDER BY 1	-6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,6 | NULL,1	
+rollup/expr/order/zero	SELECT t.i + 1, count(*) AS c FROM ss_z t GROUP BY ROLLUP (t.i + 1) ORDER BY 1	NULL,0	
+rollup/expr/having/rows	SELECT t.i + 1, count(*) AS c FROM ss_t t GROUP BY ROLLUP (t.i + 1) HAVING count(*) < 6	-6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1	
+rollup/expr/having/zero	SELECT t.i + 1, count(*) AS c FROM ss_z t GROUP BY ROLLUP (t.i + 1) HAVING count(*) < 6	NULL,0	
+rollup/expr/gcol/rows	SELECT t.i + 1, count(*) AS c, GROUPING(t.i + 1) AS g FROM ss_t t GROUP BY ROLLUP (t.i + 1)	-6,1,0 | 1,1,0 | 2,1,0 | 4,1,0 | 6,1,0 | NULL,1,0 | NULL,6,1	
+rollup/expr/gcol/zero	SELECT t.i + 1, count(*) AS c, GROUPING(t.i + 1) AS g FROM ss_z t GROUP BY ROLLUP (t.i + 1)	NULL,0,1	
+rollup/expr/gord/rows	SELECT t.i + 1, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY ROLLUP (t.i + 1)	ERR 42803	
+rollup/expr/gord/zero	SELECT t.i + 1, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY ROLLUP (t.i + 1)	ERR 42803	
+rollup/ordExpr/base/rows	SELECT t.i + 1, count(*) AS c FROM ss_t t GROUP BY ROLLUP (1)	-6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1 | NULL,6	
+rollup/ordExpr/base/zero	SELECT t.i + 1, count(*) AS c FROM ss_z t GROUP BY ROLLUP (1)	NULL,0	
+rollup/ordExpr/order/rows	SELECT t.i + 1, count(*) AS c FROM ss_t t GROUP BY ROLLUP (1) ORDER BY 1	-6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,6 | NULL,1	
+rollup/ordExpr/order/zero	SELECT t.i + 1, count(*) AS c FROM ss_z t GROUP BY ROLLUP (1) ORDER BY 1	NULL,0	
+rollup/ordExpr/having/rows	SELECT t.i + 1, count(*) AS c FROM ss_t t GROUP BY ROLLUP (1) HAVING count(*) < 6	-6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1	
+rollup/ordExpr/having/zero	SELECT t.i + 1, count(*) AS c FROM ss_z t GROUP BY ROLLUP (1) HAVING count(*) < 6	NULL,0	
+rollup/ordExpr/gcol/rows	SELECT t.i + 1, count(*) AS c, GROUPING(t.i + 1) AS g FROM ss_t t GROUP BY ROLLUP (1)	-6,1,0 | 1,1,0 | 2,1,0 | 4,1,0 | 6,1,0 | NULL,1,0 | NULL,6,1	
+rollup/ordExpr/gcol/zero	SELECT t.i + 1, count(*) AS c, GROUPING(t.i + 1) AS g FROM ss_z t GROUP BY ROLLUP (1)	NULL,0,1	
+rollup/ordExpr/gord/rows	SELECT t.i + 1, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY ROLLUP (1)	ERR 42803	
+rollup/ordExpr/gord/zero	SELECT t.i + 1, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY ROLLUP (1)	ERR 42803	
+rollup/ordAgg/base/rows	SELECT count(*) AS c, t.i AS k FROM ss_t t GROUP BY ROLLUP (1)	ERR 42803	
+rollup/ordAgg/base/zero	SELECT count(*) AS c, t.i AS k FROM ss_z t GROUP BY ROLLUP (1)	ERR 42803	
+rollup/ordAgg/order/rows	SELECT count(*) AS c, t.i AS k FROM ss_t t GROUP BY ROLLUP (1) ORDER BY 1	ERR 42803	
+rollup/ordAgg/order/zero	SELECT count(*) AS c, t.i AS k FROM ss_z t GROUP BY ROLLUP (1) ORDER BY 1	ERR 42803	
+rollup/ordAgg/having/rows	SELECT count(*) AS c, t.i AS k FROM ss_t t GROUP BY ROLLUP (1) HAVING count(*) < 6	ERR 42803	
+rollup/ordAgg/having/zero	SELECT count(*) AS c, t.i AS k FROM ss_z t GROUP BY ROLLUP (1) HAVING count(*) < 6	ERR 42803	
+rollup/ordAgg/gord/rows	SELECT count(*) AS c, t.i AS k, GROUPING(1) AS g FROM ss_t t GROUP BY ROLLUP (1)	ERR 42803	
+rollup/ordAgg/gord/zero	SELECT count(*) AS c, t.i AS k, GROUPING(1) AS g FROM ss_z t GROUP BY ROLLUP (1)	ERR 42803	
+rollup/ordRange/base/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY ROLLUP (9)	ERR 42P10	
+rollup/ordRange/base/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY ROLLUP (9)	ERR 42P10	
+rollup/ordRange/order/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY ROLLUP (9) ORDER BY 1	ERR 42P10	
+rollup/ordRange/order/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY ROLLUP (9) ORDER BY 1	ERR 42P10	
+rollup/ordRange/having/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY ROLLUP (9) HAVING count(*) < 6	ERR 42P10	
+rollup/ordRange/having/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY ROLLUP (9) HAVING count(*) < 6	ERR 42P10	
+rollup/ordRange/gord/rows	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY ROLLUP (9)	ERR 42P10	
+rollup/ordRange/gord/zero	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY ROLLUP (9)	ERR 42P10	
+rollup/ord0/base/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY ROLLUP (0)	ERR 42P10	
+rollup/ord0/base/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY ROLLUP (0)	ERR 42P10	
+rollup/ord0/order/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY ROLLUP (0) ORDER BY 1	ERR 42P10	
+rollup/ord0/order/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY ROLLUP (0) ORDER BY 1	ERR 42P10	
+rollup/ord0/having/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY ROLLUP (0) HAVING count(*) < 6	ERR 42P10	
+rollup/ord0/having/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY ROLLUP (0) HAVING count(*) < 6	ERR 42P10	
+rollup/ord0/gord/rows	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY ROLLUP (0)	ERR 42P10	
+rollup/ord0/gord/zero	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY ROLLUP (0)	ERR 42P10	
+rollup/ordNeg/base/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY ROLLUP (-1)	ERR 42P10	
+rollup/ordNeg/base/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY ROLLUP (-1)	ERR 42P10	
+rollup/ordNeg/order/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY ROLLUP (-1) ORDER BY 1	ERR 42P10	
+rollup/ordNeg/order/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY ROLLUP (-1) ORDER BY 1	ERR 42P10	
+rollup/ordNeg/having/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY ROLLUP (-1) HAVING count(*) < 6	ERR 42P10	
+rollup/ordNeg/having/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY ROLLUP (-1) HAVING count(*) < 6	ERR 42P10	
+rollup/ordNeg/gord/rows	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY ROLLUP (-1)	ERR 42P10	
+rollup/ordNeg/gord/zero	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY ROLLUP (-1)	ERR 42P10	
+rollup/num/base/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY ROLLUP (1.0)	ERR 42601	ERR 42803
+rollup/num/base/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY ROLLUP (1.0)	ERR 42601	ERR 42803
+rollup/num/order/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY ROLLUP (1.0) ORDER BY 1	ERR 42601	ERR 42803
+rollup/num/order/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY ROLLUP (1.0) ORDER BY 1	ERR 42601	ERR 42803
+rollup/num/having/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY ROLLUP (1.0) HAVING count(*) < 6	ERR 42601	ERR 42803
+rollup/num/having/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY ROLLUP (1.0) HAVING count(*) < 6	ERR 42601	ERR 42803
+rollup/num/gord/rows	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY ROLLUP (1.0)	ERR 42601	ERR 42803
+rollup/num/gord/zero	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY ROLLUP (1.0)	ERR 42601	ERR 42803
+rollup/str/base/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY ROLLUP ('1')	ERR 42601	NULL,6 | NULL,6
+rollup/str/base/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY ROLLUP ('1')	ERR 42601	NULL,0
+rollup/str/order/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY ROLLUP ('1') ORDER BY 1	ERR 42601	NULL,6 | NULL,6
+rollup/str/order/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY ROLLUP ('1') ORDER BY 1	ERR 42601	NULL,0
+rollup/str/having/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY ROLLUP ('1') HAVING count(*) < 6	ERR 42601	(none)
+rollup/str/having/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY ROLLUP ('1') HAVING count(*) < 6	ERR 42601	NULL,0
+rollup/str/gord/rows	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY ROLLUP ('1')	ERR 42601	ERR 42803
+rollup/str/gord/zero	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY ROLLUP ('1')	ERR 42601	ERR 42803
+rollup/paren/base/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY ROLLUP (((1)))	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1 | NULL,6	
+rollup/paren/base/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY ROLLUP (((1)))	NULL,0	
+rollup/paren/order/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY ROLLUP (((1))) ORDER BY 1	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,6 | NULL,1	
+rollup/paren/order/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY ROLLUP (((1))) ORDER BY 1	NULL,0	
+rollup/paren/having/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY ROLLUP (((1))) HAVING count(*) < 6	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1	
+rollup/paren/having/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY ROLLUP (((1))) HAVING count(*) < 6	NULL,0	
+rollup/paren/gcol/rows	SELECT t.i AS k, count(*) AS c, GROUPING(t.i) AS g FROM ss_t t GROUP BY ROLLUP (((1)))	-7,1,0 | 0,1,0 | 1,1,0 | 3,1,0 | 5,1,0 | NULL,1,0 | NULL,6,1	
+rollup/paren/gcol/zero	SELECT t.i AS k, count(*) AS c, GROUPING(t.i) AS g FROM ss_z t GROUP BY ROLLUP (((1)))	NULL,0,1	
+rollup/paren/gord/rows	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY ROLLUP (((1)))	ERR 42803	
+rollup/paren/gord/zero	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY ROLLUP (((1)))	ERR 42803	
+rollup/comp/base/rows	SELECT t.i AS k, t.b, count(*) AS c FROM ss_t t GROUP BY ROLLUP ((1, 2))	-7,-70,1 | 0,0,1 | 1,1,1 | 3,30,1 | 5,9000000000,1 | NULL,NULL,1 | NULL,NULL,6	ERR 42803
+rollup/comp/base/zero	SELECT t.i AS k, t.b, count(*) AS c FROM ss_z t GROUP BY ROLLUP ((1, 2))	NULL,NULL,0	ERR 42803
+rollup/comp/order/rows	SELECT t.i AS k, t.b, count(*) AS c FROM ss_t t GROUP BY ROLLUP ((1, 2)) ORDER BY 1	-7,-70,1 | 0,0,1 | 1,1,1 | 3,30,1 | 5,9000000000,1 | NULL,NULL,6 | NULL,NULL,1	ERR 42803
+rollup/comp/order/zero	SELECT t.i AS k, t.b, count(*) AS c FROM ss_z t GROUP BY ROLLUP ((1, 2)) ORDER BY 1	NULL,NULL,0	ERR 42803
+rollup/comp/having/rows	SELECT t.i AS k, t.b, count(*) AS c FROM ss_t t GROUP BY ROLLUP ((1, 2)) HAVING count(*) < 6	-7,-70,1 | 0,0,1 | 1,1,1 | 3,30,1 | 5,9000000000,1 | NULL,NULL,1	ERR 42803
+rollup/comp/having/zero	SELECT t.i AS k, t.b, count(*) AS c FROM ss_z t GROUP BY ROLLUP ((1, 2)) HAVING count(*) < 6	NULL,NULL,0	ERR 42803
+rollup/comp/gcol/rows	SELECT t.i AS k, t.b, count(*) AS c, GROUPING(t.i) AS g FROM ss_t t GROUP BY ROLLUP ((1, 2))	-7,-70,1,0 | 0,0,1,0 | 1,1,1,0 | 3,30,1,0 | 5,9000000000,1,0 | NULL,NULL,1,0 | NULL,NULL,6,1	ERR 42803
+rollup/comp/gcol/zero	SELECT t.i AS k, t.b, count(*) AS c, GROUPING(t.i) AS g FROM ss_z t GROUP BY ROLLUP ((1, 2))	NULL,NULL,0,1	ERR 42803
+rollup/comp/gord/rows	SELECT t.i AS k, t.b, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY ROLLUP ((1, 2))	ERR 42803	
+rollup/comp/gord/zero	SELECT t.i AS k, t.b, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY ROLLUP ((1, 2))	ERR 42803	
+rollup/compCol/base/rows	SELECT t.i AS k, t.b, count(*) AS c FROM ss_t t GROUP BY ROLLUP ((t.i, t.b))	-7,-70,1 | 0,0,1 | 1,1,1 | 3,30,1 | 5,9000000000,1 | NULL,NULL,1 | NULL,NULL,6	ERR 42803
+rollup/compCol/base/zero	SELECT t.i AS k, t.b, count(*) AS c FROM ss_z t GROUP BY ROLLUP ((t.i, t.b))	NULL,NULL,0	ERR 42803
+rollup/compCol/order/rows	SELECT t.i AS k, t.b, count(*) AS c FROM ss_t t GROUP BY ROLLUP ((t.i, t.b)) ORDER BY 1	-7,-70,1 | 0,0,1 | 1,1,1 | 3,30,1 | 5,9000000000,1 | NULL,NULL,6 | NULL,NULL,1	ERR 42803
+rollup/compCol/order/zero	SELECT t.i AS k, t.b, count(*) AS c FROM ss_z t GROUP BY ROLLUP ((t.i, t.b)) ORDER BY 1	NULL,NULL,0	ERR 42803
+rollup/compCol/having/rows	SELECT t.i AS k, t.b, count(*) AS c FROM ss_t t GROUP BY ROLLUP ((t.i, t.b)) HAVING count(*) < 6	-7,-70,1 | 0,0,1 | 1,1,1 | 3,30,1 | 5,9000000000,1 | NULL,NULL,1	ERR 42803
+rollup/compCol/having/zero	SELECT t.i AS k, t.b, count(*) AS c FROM ss_z t GROUP BY ROLLUP ((t.i, t.b)) HAVING count(*) < 6	NULL,NULL,0	ERR 42803
+rollup/compCol/gcol/rows	SELECT t.i AS k, t.b, count(*) AS c, GROUPING(t.i) AS g FROM ss_t t GROUP BY ROLLUP ((t.i, t.b))	-7,-70,1,0 | 0,0,1,0 | 1,1,1,0 | 3,30,1,0 | 5,9000000000,1,0 | NULL,NULL,1,0 | NULL,NULL,6,1	ERR 42803
+rollup/compCol/gcol/zero	SELECT t.i AS k, t.b, count(*) AS c, GROUPING(t.i) AS g FROM ss_z t GROUP BY ROLLUP ((t.i, t.b))	NULL,NULL,0,1	ERR 42803
+rollup/compCol/gord/rows	SELECT t.i AS k, t.b, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY ROLLUP ((t.i, t.b))	ERR 42803	
+rollup/compCol/gord/zero	SELECT t.i AS k, t.b, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY ROLLUP ((t.i, t.b))	ERR 42803	
+cube/ord/base/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY CUBE (1)	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1 | NULL,6	
+cube/ord/base/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY CUBE (1)	NULL,0	
+cube/ord/order/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY CUBE (1) ORDER BY 1	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,6 | NULL,1	
+cube/ord/order/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY CUBE (1) ORDER BY 1	NULL,0	
+cube/ord/having/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY CUBE (1) HAVING count(*) < 6	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1	
+cube/ord/having/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY CUBE (1) HAVING count(*) < 6	NULL,0	
+cube/ord/gcol/rows	SELECT t.i AS k, count(*) AS c, GROUPING(t.i) AS g FROM ss_t t GROUP BY CUBE (1)	-7,1,0 | 0,1,0 | 1,1,0 | 3,1,0 | 5,1,0 | NULL,1,0 | NULL,6,1	
+cube/ord/gcol/zero	SELECT t.i AS k, count(*) AS c, GROUPING(t.i) AS g FROM ss_z t GROUP BY CUBE (1)	NULL,0,1	
+cube/ord/gord/rows	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY CUBE (1)	ERR 42803	
+cube/ord/gord/zero	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY CUBE (1)	ERR 42803	
+cube/col/base/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY CUBE (i)	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1 | NULL,6	
+cube/col/base/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY CUBE (i)	NULL,0	
+cube/col/order/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY CUBE (i) ORDER BY 1	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,6 | NULL,1	
+cube/col/order/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY CUBE (i) ORDER BY 1	NULL,0	
+cube/col/having/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY CUBE (i) HAVING count(*) < 6	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1	
+cube/col/having/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY CUBE (i) HAVING count(*) < 6	NULL,0	
+cube/col/gcol/rows	SELECT t.i AS k, count(*) AS c, GROUPING(t.i) AS g FROM ss_t t GROUP BY CUBE (i)	-7,1,0 | 0,1,0 | 1,1,0 | 3,1,0 | 5,1,0 | NULL,1,0 | NULL,6,1	
+cube/col/gcol/zero	SELECT t.i AS k, count(*) AS c, GROUPING(t.i) AS g FROM ss_z t GROUP BY CUBE (i)	NULL,0,1	
+cube/col/gord/rows	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY CUBE (i)	ERR 42803	
+cube/col/gord/zero	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY CUBE (i)	ERR 42803	
+cube/alias/base/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY CUBE (k)	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1 | NULL,6	
+cube/alias/base/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY CUBE (k)	NULL,0	
+cube/alias/order/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY CUBE (k) ORDER BY 1	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,6 | NULL,1	
+cube/alias/order/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY CUBE (k) ORDER BY 1	NULL,0	
+cube/alias/having/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY CUBE (k) HAVING count(*) < 6	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1	
+cube/alias/having/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY CUBE (k) HAVING count(*) < 6	NULL,0	
+cube/alias/gcol/rows	SELECT t.i AS k, count(*) AS c, GROUPING(t.i) AS g FROM ss_t t GROUP BY CUBE (k)	-7,1,0 | 0,1,0 | 1,1,0 | 3,1,0 | 5,1,0 | NULL,1,0 | NULL,6,1	
+cube/alias/gcol/zero	SELECT t.i AS k, count(*) AS c, GROUPING(t.i) AS g FROM ss_z t GROUP BY CUBE (k)	NULL,0,1	
+cube/alias/gord/rows	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY CUBE (k)	ERR 42803	
+cube/alias/gord/zero	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY CUBE (k)	ERR 42803	
+cube/qual/base/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY CUBE (t.i)	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1 | NULL,6	
+cube/qual/base/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY CUBE (t.i)	NULL,0	
+cube/qual/order/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY CUBE (t.i) ORDER BY 1	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,6 | NULL,1	
+cube/qual/order/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY CUBE (t.i) ORDER BY 1	NULL,0	
+cube/qual/having/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY CUBE (t.i) HAVING count(*) < 6	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1	
+cube/qual/having/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY CUBE (t.i) HAVING count(*) < 6	NULL,0	
+cube/qual/gcol/rows	SELECT t.i AS k, count(*) AS c, GROUPING(t.i) AS g FROM ss_t t GROUP BY CUBE (t.i)	-7,1,0 | 0,1,0 | 1,1,0 | 3,1,0 | 5,1,0 | NULL,1,0 | NULL,6,1	
+cube/qual/gcol/zero	SELECT t.i AS k, count(*) AS c, GROUPING(t.i) AS g FROM ss_z t GROUP BY CUBE (t.i)	NULL,0,1	
+cube/qual/gord/rows	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY CUBE (t.i)	ERR 42803	
+cube/qual/gord/zero	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY CUBE (t.i)	ERR 42803	
+cube/expr/base/rows	SELECT t.i + 1, count(*) AS c FROM ss_t t GROUP BY CUBE (t.i + 1)	-6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1 | NULL,6	
+cube/expr/base/zero	SELECT t.i + 1, count(*) AS c FROM ss_z t GROUP BY CUBE (t.i + 1)	NULL,0	
+cube/expr/order/rows	SELECT t.i + 1, count(*) AS c FROM ss_t t GROUP BY CUBE (t.i + 1) ORDER BY 1	-6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,6 | NULL,1	
+cube/expr/order/zero	SELECT t.i + 1, count(*) AS c FROM ss_z t GROUP BY CUBE (t.i + 1) ORDER BY 1	NULL,0	
+cube/expr/having/rows	SELECT t.i + 1, count(*) AS c FROM ss_t t GROUP BY CUBE (t.i + 1) HAVING count(*) < 6	-6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1	
+cube/expr/having/zero	SELECT t.i + 1, count(*) AS c FROM ss_z t GROUP BY CUBE (t.i + 1) HAVING count(*) < 6	NULL,0	
+cube/expr/gcol/rows	SELECT t.i + 1, count(*) AS c, GROUPING(t.i + 1) AS g FROM ss_t t GROUP BY CUBE (t.i + 1)	-6,1,0 | 1,1,0 | 2,1,0 | 4,1,0 | 6,1,0 | NULL,1,0 | NULL,6,1	
+cube/expr/gcol/zero	SELECT t.i + 1, count(*) AS c, GROUPING(t.i + 1) AS g FROM ss_z t GROUP BY CUBE (t.i + 1)	NULL,0,1	
+cube/expr/gord/rows	SELECT t.i + 1, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY CUBE (t.i + 1)	ERR 42803	
+cube/expr/gord/zero	SELECT t.i + 1, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY CUBE (t.i + 1)	ERR 42803	
+cube/ordExpr/base/rows	SELECT t.i + 1, count(*) AS c FROM ss_t t GROUP BY CUBE (1)	-6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1 | NULL,6	
+cube/ordExpr/base/zero	SELECT t.i + 1, count(*) AS c FROM ss_z t GROUP BY CUBE (1)	NULL,0	
+cube/ordExpr/order/rows	SELECT t.i + 1, count(*) AS c FROM ss_t t GROUP BY CUBE (1) ORDER BY 1	-6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,6 | NULL,1	
+cube/ordExpr/order/zero	SELECT t.i + 1, count(*) AS c FROM ss_z t GROUP BY CUBE (1) ORDER BY 1	NULL,0	
+cube/ordExpr/having/rows	SELECT t.i + 1, count(*) AS c FROM ss_t t GROUP BY CUBE (1) HAVING count(*) < 6	-6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1	
+cube/ordExpr/having/zero	SELECT t.i + 1, count(*) AS c FROM ss_z t GROUP BY CUBE (1) HAVING count(*) < 6	NULL,0	
+cube/ordExpr/gcol/rows	SELECT t.i + 1, count(*) AS c, GROUPING(t.i + 1) AS g FROM ss_t t GROUP BY CUBE (1)	-6,1,0 | 1,1,0 | 2,1,0 | 4,1,0 | 6,1,0 | NULL,1,0 | NULL,6,1	
+cube/ordExpr/gcol/zero	SELECT t.i + 1, count(*) AS c, GROUPING(t.i + 1) AS g FROM ss_z t GROUP BY CUBE (1)	NULL,0,1	
+cube/ordExpr/gord/rows	SELECT t.i + 1, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY CUBE (1)	ERR 42803	
+cube/ordExpr/gord/zero	SELECT t.i + 1, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY CUBE (1)	ERR 42803	
+cube/ordAgg/base/rows	SELECT count(*) AS c, t.i AS k FROM ss_t t GROUP BY CUBE (1)	ERR 42803	
+cube/ordAgg/base/zero	SELECT count(*) AS c, t.i AS k FROM ss_z t GROUP BY CUBE (1)	ERR 42803	
+cube/ordAgg/order/rows	SELECT count(*) AS c, t.i AS k FROM ss_t t GROUP BY CUBE (1) ORDER BY 1	ERR 42803	
+cube/ordAgg/order/zero	SELECT count(*) AS c, t.i AS k FROM ss_z t GROUP BY CUBE (1) ORDER BY 1	ERR 42803	
+cube/ordAgg/having/rows	SELECT count(*) AS c, t.i AS k FROM ss_t t GROUP BY CUBE (1) HAVING count(*) < 6	ERR 42803	
+cube/ordAgg/having/zero	SELECT count(*) AS c, t.i AS k FROM ss_z t GROUP BY CUBE (1) HAVING count(*) < 6	ERR 42803	
+cube/ordAgg/gord/rows	SELECT count(*) AS c, t.i AS k, GROUPING(1) AS g FROM ss_t t GROUP BY CUBE (1)	ERR 42803	
+cube/ordAgg/gord/zero	SELECT count(*) AS c, t.i AS k, GROUPING(1) AS g FROM ss_z t GROUP BY CUBE (1)	ERR 42803	
+cube/ordRange/base/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY CUBE (9)	ERR 42P10	
+cube/ordRange/base/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY CUBE (9)	ERR 42P10	
+cube/ordRange/order/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY CUBE (9) ORDER BY 1	ERR 42P10	
+cube/ordRange/order/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY CUBE (9) ORDER BY 1	ERR 42P10	
+cube/ordRange/having/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY CUBE (9) HAVING count(*) < 6	ERR 42P10	
+cube/ordRange/having/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY CUBE (9) HAVING count(*) < 6	ERR 42P10	
+cube/ordRange/gord/rows	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY CUBE (9)	ERR 42P10	
+cube/ordRange/gord/zero	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY CUBE (9)	ERR 42P10	
+cube/ord0/base/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY CUBE (0)	ERR 42P10	
+cube/ord0/base/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY CUBE (0)	ERR 42P10	
+cube/ord0/order/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY CUBE (0) ORDER BY 1	ERR 42P10	
+cube/ord0/order/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY CUBE (0) ORDER BY 1	ERR 42P10	
+cube/ord0/having/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY CUBE (0) HAVING count(*) < 6	ERR 42P10	
+cube/ord0/having/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY CUBE (0) HAVING count(*) < 6	ERR 42P10	
+cube/ord0/gord/rows	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY CUBE (0)	ERR 42P10	
+cube/ord0/gord/zero	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY CUBE (0)	ERR 42P10	
+cube/ordNeg/base/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY CUBE (-1)	ERR 42P10	
+cube/ordNeg/base/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY CUBE (-1)	ERR 42P10	
+cube/ordNeg/order/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY CUBE (-1) ORDER BY 1	ERR 42P10	
+cube/ordNeg/order/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY CUBE (-1) ORDER BY 1	ERR 42P10	
+cube/ordNeg/having/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY CUBE (-1) HAVING count(*) < 6	ERR 42P10	
+cube/ordNeg/having/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY CUBE (-1) HAVING count(*) < 6	ERR 42P10	
+cube/ordNeg/gord/rows	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY CUBE (-1)	ERR 42P10	
+cube/ordNeg/gord/zero	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY CUBE (-1)	ERR 42P10	
+cube/num/base/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY CUBE (1.0)	ERR 42601	ERR 42803
+cube/num/base/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY CUBE (1.0)	ERR 42601	ERR 42803
+cube/num/order/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY CUBE (1.0) ORDER BY 1	ERR 42601	ERR 42803
+cube/num/order/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY CUBE (1.0) ORDER BY 1	ERR 42601	ERR 42803
+cube/num/having/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY CUBE (1.0) HAVING count(*) < 6	ERR 42601	ERR 42803
+cube/num/having/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY CUBE (1.0) HAVING count(*) < 6	ERR 42601	ERR 42803
+cube/num/gord/rows	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY CUBE (1.0)	ERR 42601	ERR 42803
+cube/num/gord/zero	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY CUBE (1.0)	ERR 42601	ERR 42803
+cube/str/base/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY CUBE ('1')	ERR 42601	NULL,6 | NULL,6
+cube/str/base/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY CUBE ('1')	ERR 42601	NULL,0
+cube/str/order/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY CUBE ('1') ORDER BY 1	ERR 42601	NULL,6 | NULL,6
+cube/str/order/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY CUBE ('1') ORDER BY 1	ERR 42601	NULL,0
+cube/str/having/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY CUBE ('1') HAVING count(*) < 6	ERR 42601	(none)
+cube/str/having/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY CUBE ('1') HAVING count(*) < 6	ERR 42601	NULL,0
+cube/str/gord/rows	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY CUBE ('1')	ERR 42601	ERR 42803
+cube/str/gord/zero	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY CUBE ('1')	ERR 42601	ERR 42803
+cube/paren/base/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY CUBE (((1)))	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1 | NULL,6	
+cube/paren/base/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY CUBE (((1)))	NULL,0	
+cube/paren/order/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY CUBE (((1))) ORDER BY 1	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,6 | NULL,1	
+cube/paren/order/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY CUBE (((1))) ORDER BY 1	NULL,0	
+cube/paren/having/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY CUBE (((1))) HAVING count(*) < 6	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1	
+cube/paren/having/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY CUBE (((1))) HAVING count(*) < 6	NULL,0	
+cube/paren/gcol/rows	SELECT t.i AS k, count(*) AS c, GROUPING(t.i) AS g FROM ss_t t GROUP BY CUBE (((1)))	-7,1,0 | 0,1,0 | 1,1,0 | 3,1,0 | 5,1,0 | NULL,1,0 | NULL,6,1	
+cube/paren/gcol/zero	SELECT t.i AS k, count(*) AS c, GROUPING(t.i) AS g FROM ss_z t GROUP BY CUBE (((1)))	NULL,0,1	
+cube/paren/gord/rows	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY CUBE (((1)))	ERR 42803	
+cube/paren/gord/zero	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY CUBE (((1)))	ERR 42803	
+cube/comp/base/rows	SELECT t.i AS k, t.b, count(*) AS c FROM ss_t t GROUP BY CUBE ((1, 2))	-7,-70,1 | 0,0,1 | 1,1,1 | 3,30,1 | 5,9000000000,1 | NULL,NULL,1 | NULL,NULL,6	ERR 42803
+cube/comp/base/zero	SELECT t.i AS k, t.b, count(*) AS c FROM ss_z t GROUP BY CUBE ((1, 2))	NULL,NULL,0	ERR 42803
+cube/comp/order/rows	SELECT t.i AS k, t.b, count(*) AS c FROM ss_t t GROUP BY CUBE ((1, 2)) ORDER BY 1	-7,-70,1 | 0,0,1 | 1,1,1 | 3,30,1 | 5,9000000000,1 | NULL,NULL,6 | NULL,NULL,1	ERR 42803
+cube/comp/order/zero	SELECT t.i AS k, t.b, count(*) AS c FROM ss_z t GROUP BY CUBE ((1, 2)) ORDER BY 1	NULL,NULL,0	ERR 42803
+cube/comp/having/rows	SELECT t.i AS k, t.b, count(*) AS c FROM ss_t t GROUP BY CUBE ((1, 2)) HAVING count(*) < 6	-7,-70,1 | 0,0,1 | 1,1,1 | 3,30,1 | 5,9000000000,1 | NULL,NULL,1	ERR 42803
+cube/comp/having/zero	SELECT t.i AS k, t.b, count(*) AS c FROM ss_z t GROUP BY CUBE ((1, 2)) HAVING count(*) < 6	NULL,NULL,0	ERR 42803
+cube/comp/gcol/rows	SELECT t.i AS k, t.b, count(*) AS c, GROUPING(t.i) AS g FROM ss_t t GROUP BY CUBE ((1, 2))	-7,-70,1,0 | 0,0,1,0 | 1,1,1,0 | 3,30,1,0 | 5,9000000000,1,0 | NULL,NULL,1,0 | NULL,NULL,6,1	ERR 42803
+cube/comp/gcol/zero	SELECT t.i AS k, t.b, count(*) AS c, GROUPING(t.i) AS g FROM ss_z t GROUP BY CUBE ((1, 2))	NULL,NULL,0,1	ERR 42803
+cube/comp/gord/rows	SELECT t.i AS k, t.b, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY CUBE ((1, 2))	ERR 42803	
+cube/comp/gord/zero	SELECT t.i AS k, t.b, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY CUBE ((1, 2))	ERR 42803	
+cube/compCol/base/rows	SELECT t.i AS k, t.b, count(*) AS c FROM ss_t t GROUP BY CUBE ((t.i, t.b))	-7,-70,1 | 0,0,1 | 1,1,1 | 3,30,1 | 5,9000000000,1 | NULL,NULL,1 | NULL,NULL,6	ERR 42803
+cube/compCol/base/zero	SELECT t.i AS k, t.b, count(*) AS c FROM ss_z t GROUP BY CUBE ((t.i, t.b))	NULL,NULL,0	ERR 42803
+cube/compCol/order/rows	SELECT t.i AS k, t.b, count(*) AS c FROM ss_t t GROUP BY CUBE ((t.i, t.b)) ORDER BY 1	-7,-70,1 | 0,0,1 | 1,1,1 | 3,30,1 | 5,9000000000,1 | NULL,NULL,6 | NULL,NULL,1	ERR 42803
+cube/compCol/order/zero	SELECT t.i AS k, t.b, count(*) AS c FROM ss_z t GROUP BY CUBE ((t.i, t.b)) ORDER BY 1	NULL,NULL,0	ERR 42803
+cube/compCol/having/rows	SELECT t.i AS k, t.b, count(*) AS c FROM ss_t t GROUP BY CUBE ((t.i, t.b)) HAVING count(*) < 6	-7,-70,1 | 0,0,1 | 1,1,1 | 3,30,1 | 5,9000000000,1 | NULL,NULL,1	ERR 42803
+cube/compCol/having/zero	SELECT t.i AS k, t.b, count(*) AS c FROM ss_z t GROUP BY CUBE ((t.i, t.b)) HAVING count(*) < 6	NULL,NULL,0	ERR 42803
+cube/compCol/gcol/rows	SELECT t.i AS k, t.b, count(*) AS c, GROUPING(t.i) AS g FROM ss_t t GROUP BY CUBE ((t.i, t.b))	-7,-70,1,0 | 0,0,1,0 | 1,1,1,0 | 3,30,1,0 | 5,9000000000,1,0 | NULL,NULL,1,0 | NULL,NULL,6,1	ERR 42803
+cube/compCol/gcol/zero	SELECT t.i AS k, t.b, count(*) AS c, GROUPING(t.i) AS g FROM ss_z t GROUP BY CUBE ((t.i, t.b))	NULL,NULL,0,1	ERR 42803
+cube/compCol/gord/rows	SELECT t.i AS k, t.b, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY CUBE ((t.i, t.b))	ERR 42803	
+cube/compCol/gord/zero	SELECT t.i AS k, t.b, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY CUBE ((t.i, t.b))	ERR 42803	
+sets/ord/base/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS ((1), ())	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1 | NULL,6	
+sets/ord/base/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS ((1), ())	NULL,0	
+sets/ord/order/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS ((1), ()) ORDER BY 1	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,6 | NULL,1	
+sets/ord/order/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS ((1), ()) ORDER BY 1	NULL,0	
+sets/ord/having/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS ((1), ()) HAVING count(*) < 6	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1	
+sets/ord/having/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS ((1), ()) HAVING count(*) < 6	NULL,0	
+sets/ord/gcol/rows	SELECT t.i AS k, count(*) AS c, GROUPING(t.i) AS g FROM ss_t t GROUP BY GROUPING SETS ((1), ())	-7,1,0 | 0,1,0 | 1,1,0 | 3,1,0 | 5,1,0 | NULL,1,0 | NULL,6,1	
+sets/ord/gcol/zero	SELECT t.i AS k, count(*) AS c, GROUPING(t.i) AS g FROM ss_z t GROUP BY GROUPING SETS ((1), ())	NULL,0,1	
+sets/ord/gord/rows	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY GROUPING SETS ((1), ())	ERR 42803	
+sets/ord/gord/zero	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY GROUPING SETS ((1), ())	ERR 42803	
+sets/col/base/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS ((i), ())	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1 | NULL,6	
+sets/col/base/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS ((i), ())	NULL,0	
+sets/col/order/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS ((i), ()) ORDER BY 1	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,6 | NULL,1	
+sets/col/order/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS ((i), ()) ORDER BY 1	NULL,0	
+sets/col/having/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS ((i), ()) HAVING count(*) < 6	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1	
+sets/col/having/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS ((i), ()) HAVING count(*) < 6	NULL,0	
+sets/col/gcol/rows	SELECT t.i AS k, count(*) AS c, GROUPING(t.i) AS g FROM ss_t t GROUP BY GROUPING SETS ((i), ())	-7,1,0 | 0,1,0 | 1,1,0 | 3,1,0 | 5,1,0 | NULL,1,0 | NULL,6,1	
+sets/col/gcol/zero	SELECT t.i AS k, count(*) AS c, GROUPING(t.i) AS g FROM ss_z t GROUP BY GROUPING SETS ((i), ())	NULL,0,1	
+sets/col/gord/rows	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY GROUPING SETS ((i), ())	ERR 42803	
+sets/col/gord/zero	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY GROUPING SETS ((i), ())	ERR 42803	
+sets/alias/base/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS ((k), ())	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1 | NULL,6	
+sets/alias/base/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS ((k), ())	NULL,0	
+sets/alias/order/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS ((k), ()) ORDER BY 1	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,6 | NULL,1	
+sets/alias/order/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS ((k), ()) ORDER BY 1	NULL,0	
+sets/alias/having/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS ((k), ()) HAVING count(*) < 6	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1	
+sets/alias/having/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS ((k), ()) HAVING count(*) < 6	NULL,0	
+sets/alias/gcol/rows	SELECT t.i AS k, count(*) AS c, GROUPING(t.i) AS g FROM ss_t t GROUP BY GROUPING SETS ((k), ())	-7,1,0 | 0,1,0 | 1,1,0 | 3,1,0 | 5,1,0 | NULL,1,0 | NULL,6,1	
+sets/alias/gcol/zero	SELECT t.i AS k, count(*) AS c, GROUPING(t.i) AS g FROM ss_z t GROUP BY GROUPING SETS ((k), ())	NULL,0,1	
+sets/alias/gord/rows	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY GROUPING SETS ((k), ())	ERR 42803	
+sets/alias/gord/zero	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY GROUPING SETS ((k), ())	ERR 42803	
+sets/qual/base/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS ((t.i), ())	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1 | NULL,6	
+sets/qual/base/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS ((t.i), ())	NULL,0	
+sets/qual/order/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS ((t.i), ()) ORDER BY 1	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,6 | NULL,1	
+sets/qual/order/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS ((t.i), ()) ORDER BY 1	NULL,0	
+sets/qual/having/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS ((t.i), ()) HAVING count(*) < 6	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1	
+sets/qual/having/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS ((t.i), ()) HAVING count(*) < 6	NULL,0	
+sets/qual/gcol/rows	SELECT t.i AS k, count(*) AS c, GROUPING(t.i) AS g FROM ss_t t GROUP BY GROUPING SETS ((t.i), ())	-7,1,0 | 0,1,0 | 1,1,0 | 3,1,0 | 5,1,0 | NULL,1,0 | NULL,6,1	
+sets/qual/gcol/zero	SELECT t.i AS k, count(*) AS c, GROUPING(t.i) AS g FROM ss_z t GROUP BY GROUPING SETS ((t.i), ())	NULL,0,1	
+sets/qual/gord/rows	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY GROUPING SETS ((t.i), ())	ERR 42803	
+sets/qual/gord/zero	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY GROUPING SETS ((t.i), ())	ERR 42803	
+sets/expr/base/rows	SELECT t.i + 1, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS ((t.i + 1), ())	-6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1 | NULL,6	
+sets/expr/base/zero	SELECT t.i + 1, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS ((t.i + 1), ())	NULL,0	
+sets/expr/order/rows	SELECT t.i + 1, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS ((t.i + 1), ()) ORDER BY 1	-6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,6 | NULL,1	
+sets/expr/order/zero	SELECT t.i + 1, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS ((t.i + 1), ()) ORDER BY 1	NULL,0	
+sets/expr/having/rows	SELECT t.i + 1, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS ((t.i + 1), ()) HAVING count(*) < 6	-6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1	
+sets/expr/having/zero	SELECT t.i + 1, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS ((t.i + 1), ()) HAVING count(*) < 6	NULL,0	
+sets/expr/gcol/rows	SELECT t.i + 1, count(*) AS c, GROUPING(t.i + 1) AS g FROM ss_t t GROUP BY GROUPING SETS ((t.i + 1), ())	-6,1,0 | 1,1,0 | 2,1,0 | 4,1,0 | 6,1,0 | NULL,1,0 | NULL,6,1	
+sets/expr/gcol/zero	SELECT t.i + 1, count(*) AS c, GROUPING(t.i + 1) AS g FROM ss_z t GROUP BY GROUPING SETS ((t.i + 1), ())	NULL,0,1	
+sets/expr/gord/rows	SELECT t.i + 1, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY GROUPING SETS ((t.i + 1), ())	ERR 42803	
+sets/expr/gord/zero	SELECT t.i + 1, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY GROUPING SETS ((t.i + 1), ())	ERR 42803	
+sets/ordExpr/base/rows	SELECT t.i + 1, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS ((1), ())	-6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1 | NULL,6	
+sets/ordExpr/base/zero	SELECT t.i + 1, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS ((1), ())	NULL,0	
+sets/ordExpr/order/rows	SELECT t.i + 1, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS ((1), ()) ORDER BY 1	-6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,6 | NULL,1	
+sets/ordExpr/order/zero	SELECT t.i + 1, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS ((1), ()) ORDER BY 1	NULL,0	
+sets/ordExpr/having/rows	SELECT t.i + 1, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS ((1), ()) HAVING count(*) < 6	-6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1	
+sets/ordExpr/having/zero	SELECT t.i + 1, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS ((1), ()) HAVING count(*) < 6	NULL,0	
+sets/ordExpr/gcol/rows	SELECT t.i + 1, count(*) AS c, GROUPING(t.i + 1) AS g FROM ss_t t GROUP BY GROUPING SETS ((1), ())	-6,1,0 | 1,1,0 | 2,1,0 | 4,1,0 | 6,1,0 | NULL,1,0 | NULL,6,1	
+sets/ordExpr/gcol/zero	SELECT t.i + 1, count(*) AS c, GROUPING(t.i + 1) AS g FROM ss_z t GROUP BY GROUPING SETS ((1), ())	NULL,0,1	
+sets/ordExpr/gord/rows	SELECT t.i + 1, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY GROUPING SETS ((1), ())	ERR 42803	
+sets/ordExpr/gord/zero	SELECT t.i + 1, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY GROUPING SETS ((1), ())	ERR 42803	
+sets/ordAgg/base/rows	SELECT count(*) AS c, t.i AS k FROM ss_t t GROUP BY GROUPING SETS ((1), ())	ERR 42803	
+sets/ordAgg/base/zero	SELECT count(*) AS c, t.i AS k FROM ss_z t GROUP BY GROUPING SETS ((1), ())	ERR 42803	
+sets/ordAgg/order/rows	SELECT count(*) AS c, t.i AS k FROM ss_t t GROUP BY GROUPING SETS ((1), ()) ORDER BY 1	ERR 42803	
+sets/ordAgg/order/zero	SELECT count(*) AS c, t.i AS k FROM ss_z t GROUP BY GROUPING SETS ((1), ()) ORDER BY 1	ERR 42803	
+sets/ordAgg/having/rows	SELECT count(*) AS c, t.i AS k FROM ss_t t GROUP BY GROUPING SETS ((1), ()) HAVING count(*) < 6	ERR 42803	
+sets/ordAgg/having/zero	SELECT count(*) AS c, t.i AS k FROM ss_z t GROUP BY GROUPING SETS ((1), ()) HAVING count(*) < 6	ERR 42803	
+sets/ordAgg/gord/rows	SELECT count(*) AS c, t.i AS k, GROUPING(1) AS g FROM ss_t t GROUP BY GROUPING SETS ((1), ())	ERR 42803	
+sets/ordAgg/gord/zero	SELECT count(*) AS c, t.i AS k, GROUPING(1) AS g FROM ss_z t GROUP BY GROUPING SETS ((1), ())	ERR 42803	
+sets/ordRange/base/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS ((9), ())	ERR 42P10	
+sets/ordRange/base/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS ((9), ())	ERR 42P10	
+sets/ordRange/order/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS ((9), ()) ORDER BY 1	ERR 42P10	
+sets/ordRange/order/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS ((9), ()) ORDER BY 1	ERR 42P10	
+sets/ordRange/having/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS ((9), ()) HAVING count(*) < 6	ERR 42P10	
+sets/ordRange/having/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS ((9), ()) HAVING count(*) < 6	ERR 42P10	
+sets/ordRange/gord/rows	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY GROUPING SETS ((9), ())	ERR 42P10	
+sets/ordRange/gord/zero	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY GROUPING SETS ((9), ())	ERR 42P10	
+sets/ord0/base/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS ((0), ())	ERR 42P10	
+sets/ord0/base/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS ((0), ())	ERR 42P10	
+sets/ord0/order/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS ((0), ()) ORDER BY 1	ERR 42P10	
+sets/ord0/order/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS ((0), ()) ORDER BY 1	ERR 42P10	
+sets/ord0/having/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS ((0), ()) HAVING count(*) < 6	ERR 42P10	
+sets/ord0/having/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS ((0), ()) HAVING count(*) < 6	ERR 42P10	
+sets/ord0/gord/rows	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY GROUPING SETS ((0), ())	ERR 42P10	
+sets/ord0/gord/zero	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY GROUPING SETS ((0), ())	ERR 42P10	
+sets/ordNeg/base/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS ((-1), ())	ERR 42P10	
+sets/ordNeg/base/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS ((-1), ())	ERR 42P10	
+sets/ordNeg/order/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS ((-1), ()) ORDER BY 1	ERR 42P10	
+sets/ordNeg/order/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS ((-1), ()) ORDER BY 1	ERR 42P10	
+sets/ordNeg/having/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS ((-1), ()) HAVING count(*) < 6	ERR 42P10	
+sets/ordNeg/having/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS ((-1), ()) HAVING count(*) < 6	ERR 42P10	
+sets/ordNeg/gord/rows	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY GROUPING SETS ((-1), ())	ERR 42P10	
+sets/ordNeg/gord/zero	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY GROUPING SETS ((-1), ())	ERR 42P10	
+sets/num/base/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS ((1.0), ())	ERR 42601	ERR 42803
+sets/num/base/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS ((1.0), ())	ERR 42601	ERR 42803
+sets/num/order/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS ((1.0), ()) ORDER BY 1	ERR 42601	ERR 42803
+sets/num/order/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS ((1.0), ()) ORDER BY 1	ERR 42601	ERR 42803
+sets/num/having/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS ((1.0), ()) HAVING count(*) < 6	ERR 42601	ERR 42803
+sets/num/having/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS ((1.0), ()) HAVING count(*) < 6	ERR 42601	ERR 42803
+sets/num/gord/rows	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY GROUPING SETS ((1.0), ())	ERR 42601	ERR 42803
+sets/num/gord/zero	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY GROUPING SETS ((1.0), ())	ERR 42601	ERR 42803
+sets/str/base/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS (('1'), ())	ERR 42601	NULL,6 | NULL,6
+sets/str/base/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS (('1'), ())	ERR 42601	NULL,0
+sets/str/order/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS (('1'), ()) ORDER BY 1	ERR 42601	NULL,6 | NULL,6
+sets/str/order/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS (('1'), ()) ORDER BY 1	ERR 42601	NULL,0
+sets/str/having/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS (('1'), ()) HAVING count(*) < 6	ERR 42601	(none)
+sets/str/having/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS (('1'), ()) HAVING count(*) < 6	ERR 42601	NULL,0
+sets/str/gord/rows	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY GROUPING SETS (('1'), ())	ERR 42601	ERR 42803
+sets/str/gord/zero	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY GROUPING SETS (('1'), ())	ERR 42601	ERR 42803
+sets/paren/base/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS ((((1))), ())	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1 | NULL,6	
+sets/paren/base/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS ((((1))), ())	NULL,0	
+sets/paren/order/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS ((((1))), ()) ORDER BY 1	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,6 | NULL,1	
+sets/paren/order/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS ((((1))), ()) ORDER BY 1	NULL,0	
+sets/paren/having/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS ((((1))), ()) HAVING count(*) < 6	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1	
+sets/paren/having/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS ((((1))), ()) HAVING count(*) < 6	NULL,0	
+sets/paren/gcol/rows	SELECT t.i AS k, count(*) AS c, GROUPING(t.i) AS g FROM ss_t t GROUP BY GROUPING SETS ((((1))), ())	-7,1,0 | 0,1,0 | 1,1,0 | 3,1,0 | 5,1,0 | NULL,1,0 | NULL,6,1	
+sets/paren/gcol/zero	SELECT t.i AS k, count(*) AS c, GROUPING(t.i) AS g FROM ss_z t GROUP BY GROUPING SETS ((((1))), ())	NULL,0,1	
+sets/paren/gord/rows	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY GROUPING SETS ((((1))), ())	ERR 42803	
+sets/paren/gord/zero	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY GROUPING SETS ((((1))), ())	ERR 42803	
+sets/comp/base/rows	SELECT t.i AS k, t.b, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS ((1, 2), ())	-7,-70,1 | 0,0,1 | 1,1,1 | 3,30,1 | 5,9000000000,1 | NULL,NULL,1 | NULL,NULL,6	
+sets/comp/base/zero	SELECT t.i AS k, t.b, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS ((1, 2), ())	NULL,NULL,0	
+sets/comp/order/rows	SELECT t.i AS k, t.b, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS ((1, 2), ()) ORDER BY 1	-7,-70,1 | 0,0,1 | 1,1,1 | 3,30,1 | 5,9000000000,1 | NULL,NULL,6 | NULL,NULL,1	
+sets/comp/order/zero	SELECT t.i AS k, t.b, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS ((1, 2), ()) ORDER BY 1	NULL,NULL,0	
+sets/comp/having/rows	SELECT t.i AS k, t.b, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS ((1, 2), ()) HAVING count(*) < 6	-7,-70,1 | 0,0,1 | 1,1,1 | 3,30,1 | 5,9000000000,1 | NULL,NULL,1	
+sets/comp/having/zero	SELECT t.i AS k, t.b, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS ((1, 2), ()) HAVING count(*) < 6	NULL,NULL,0	
+sets/comp/gcol/rows	SELECT t.i AS k, t.b, count(*) AS c, GROUPING(t.i) AS g FROM ss_t t GROUP BY GROUPING SETS ((1, 2), ())	-7,-70,1,0 | 0,0,1,0 | 1,1,1,0 | 3,30,1,0 | 5,9000000000,1,0 | NULL,NULL,1,0 | NULL,NULL,6,1	
+sets/comp/gcol/zero	SELECT t.i AS k, t.b, count(*) AS c, GROUPING(t.i) AS g FROM ss_z t GROUP BY GROUPING SETS ((1, 2), ())	NULL,NULL,0,1	
+sets/comp/gord/rows	SELECT t.i AS k, t.b, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY GROUPING SETS ((1, 2), ())	ERR 42803	
+sets/comp/gord/zero	SELECT t.i AS k, t.b, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY GROUPING SETS ((1, 2), ())	ERR 42803	
+sets/compCol/base/rows	SELECT t.i AS k, t.b, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS ((t.i, t.b), ())	-7,-70,1 | 0,0,1 | 1,1,1 | 3,30,1 | 5,9000000000,1 | NULL,NULL,1 | NULL,NULL,6	
+sets/compCol/base/zero	SELECT t.i AS k, t.b, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS ((t.i, t.b), ())	NULL,NULL,0	
+sets/compCol/order/rows	SELECT t.i AS k, t.b, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS ((t.i, t.b), ()) ORDER BY 1	-7,-70,1 | 0,0,1 | 1,1,1 | 3,30,1 | 5,9000000000,1 | NULL,NULL,6 | NULL,NULL,1	
+sets/compCol/order/zero	SELECT t.i AS k, t.b, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS ((t.i, t.b), ()) ORDER BY 1	NULL,NULL,0	
+sets/compCol/having/rows	SELECT t.i AS k, t.b, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS ((t.i, t.b), ()) HAVING count(*) < 6	-7,-70,1 | 0,0,1 | 1,1,1 | 3,30,1 | 5,9000000000,1 | NULL,NULL,1	
+sets/compCol/having/zero	SELECT t.i AS k, t.b, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS ((t.i, t.b), ()) HAVING count(*) < 6	NULL,NULL,0	
+sets/compCol/gcol/rows	SELECT t.i AS k, t.b, count(*) AS c, GROUPING(t.i) AS g FROM ss_t t GROUP BY GROUPING SETS ((t.i, t.b), ())	-7,-70,1,0 | 0,0,1,0 | 1,1,1,0 | 3,30,1,0 | 5,9000000000,1,0 | NULL,NULL,1,0 | NULL,NULL,6,1	
+sets/compCol/gcol/zero	SELECT t.i AS k, t.b, count(*) AS c, GROUPING(t.i) AS g FROM ss_z t GROUP BY GROUPING SETS ((t.i, t.b), ())	NULL,NULL,0,1	
+sets/compCol/gord/rows	SELECT t.i AS k, t.b, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY GROUPING SETS ((t.i, t.b), ())	ERR 42803	
+sets/compCol/gord/zero	SELECT t.i AS k, t.b, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY GROUPING SETS ((t.i, t.b), ())	ERR 42803	
+nested/ord/base/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS (ROLLUP (1), ())	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1 | NULL,6 | NULL,6	ERR 42601
+nested/ord/base/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS (ROLLUP (1), ())	NULL,0 | NULL,0	ERR 42601
+nested/ord/order/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS (ROLLUP (1), ()) ORDER BY 1	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,6 | NULL,1 | NULL,6	ERR 42601
+nested/ord/order/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS (ROLLUP (1), ()) ORDER BY 1	NULL,0 | NULL,0	ERR 42601
+nested/ord/having/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS (ROLLUP (1), ()) HAVING count(*) < 6	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1	ERR 42601
+nested/ord/having/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS (ROLLUP (1), ()) HAVING count(*) < 6	NULL,0 | NULL,0	ERR 42601
+nested/ord/gcol/rows	SELECT t.i AS k, count(*) AS c, GROUPING(t.i) AS g FROM ss_t t GROUP BY GROUPING SETS (ROLLUP (1), ())	-7,1,0 | 0,1,0 | 1,1,0 | 3,1,0 | 5,1,0 | NULL,1,0 | NULL,6,1 | NULL,6,1	ERR 42601
+nested/ord/gcol/zero	SELECT t.i AS k, count(*) AS c, GROUPING(t.i) AS g FROM ss_z t GROUP BY GROUPING SETS (ROLLUP (1), ())	NULL,0,1 | NULL,0,1	ERR 42601
+nested/ord/gord/rows	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY GROUPING SETS (ROLLUP (1), ())	ERR 42803	ERR 42601
+nested/ord/gord/zero	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY GROUPING SETS (ROLLUP (1), ())	ERR 42803	ERR 42601
+nested/col/base/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS (ROLLUP (i), ())	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1 | NULL,6 | NULL,6	ERR 42601
+nested/col/base/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS (ROLLUP (i), ())	NULL,0 | NULL,0	ERR 42601
+nested/col/order/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS (ROLLUP (i), ()) ORDER BY 1	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,6 | NULL,1 | NULL,6	ERR 42601
+nested/col/order/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS (ROLLUP (i), ()) ORDER BY 1	NULL,0 | NULL,0	ERR 42601
+nested/col/having/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS (ROLLUP (i), ()) HAVING count(*) < 6	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1	ERR 42601
+nested/col/having/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS (ROLLUP (i), ()) HAVING count(*) < 6	NULL,0 | NULL,0	ERR 42601
+nested/col/gcol/rows	SELECT t.i AS k, count(*) AS c, GROUPING(t.i) AS g FROM ss_t t GROUP BY GROUPING SETS (ROLLUP (i), ())	-7,1,0 | 0,1,0 | 1,1,0 | 3,1,0 | 5,1,0 | NULL,1,0 | NULL,6,1 | NULL,6,1	ERR 42601
+nested/col/gcol/zero	SELECT t.i AS k, count(*) AS c, GROUPING(t.i) AS g FROM ss_z t GROUP BY GROUPING SETS (ROLLUP (i), ())	NULL,0,1 | NULL,0,1	ERR 42601
+nested/col/gord/rows	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY GROUPING SETS (ROLLUP (i), ())	ERR 42803	ERR 42601
+nested/col/gord/zero	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY GROUPING SETS (ROLLUP (i), ())	ERR 42803	ERR 42601
+nested/alias/base/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS (ROLLUP (k), ())	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1 | NULL,6 | NULL,6	ERR 42601
+nested/alias/base/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS (ROLLUP (k), ())	NULL,0 | NULL,0	ERR 42601
+nested/alias/order/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS (ROLLUP (k), ()) ORDER BY 1	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,6 | NULL,1 | NULL,6	ERR 42601
+nested/alias/order/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS (ROLLUP (k), ()) ORDER BY 1	NULL,0 | NULL,0	ERR 42601
+nested/alias/having/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS (ROLLUP (k), ()) HAVING count(*) < 6	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1	ERR 42601
+nested/alias/having/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS (ROLLUP (k), ()) HAVING count(*) < 6	NULL,0 | NULL,0	ERR 42601
+nested/alias/gcol/rows	SELECT t.i AS k, count(*) AS c, GROUPING(t.i) AS g FROM ss_t t GROUP BY GROUPING SETS (ROLLUP (k), ())	-7,1,0 | 0,1,0 | 1,1,0 | 3,1,0 | 5,1,0 | NULL,1,0 | NULL,6,1 | NULL,6,1	ERR 42601
+nested/alias/gcol/zero	SELECT t.i AS k, count(*) AS c, GROUPING(t.i) AS g FROM ss_z t GROUP BY GROUPING SETS (ROLLUP (k), ())	NULL,0,1 | NULL,0,1	ERR 42601
+nested/alias/gord/rows	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY GROUPING SETS (ROLLUP (k), ())	ERR 42803	ERR 42601
+nested/alias/gord/zero	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY GROUPING SETS (ROLLUP (k), ())	ERR 42803	ERR 42601
+nested/qual/base/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS (ROLLUP (t.i), ())	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1 | NULL,6 | NULL,6	ERR 42601
+nested/qual/base/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS (ROLLUP (t.i), ())	NULL,0 | NULL,0	ERR 42601
+nested/qual/order/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS (ROLLUP (t.i), ()) ORDER BY 1	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,6 | NULL,1 | NULL,6	ERR 42601
+nested/qual/order/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS (ROLLUP (t.i), ()) ORDER BY 1	NULL,0 | NULL,0	ERR 42601
+nested/qual/having/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS (ROLLUP (t.i), ()) HAVING count(*) < 6	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1	ERR 42601
+nested/qual/having/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS (ROLLUP (t.i), ()) HAVING count(*) < 6	NULL,0 | NULL,0	ERR 42601
+nested/qual/gcol/rows	SELECT t.i AS k, count(*) AS c, GROUPING(t.i) AS g FROM ss_t t GROUP BY GROUPING SETS (ROLLUP (t.i), ())	-7,1,0 | 0,1,0 | 1,1,0 | 3,1,0 | 5,1,0 | NULL,1,0 | NULL,6,1 | NULL,6,1	ERR 42601
+nested/qual/gcol/zero	SELECT t.i AS k, count(*) AS c, GROUPING(t.i) AS g FROM ss_z t GROUP BY GROUPING SETS (ROLLUP (t.i), ())	NULL,0,1 | NULL,0,1	ERR 42601
+nested/qual/gord/rows	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY GROUPING SETS (ROLLUP (t.i), ())	ERR 42803	ERR 42601
+nested/qual/gord/zero	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY GROUPING SETS (ROLLUP (t.i), ())	ERR 42803	ERR 42601
+nested/expr/base/rows	SELECT t.i + 1, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS (ROLLUP (t.i + 1), ())	-6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1 | NULL,6 | NULL,6	ERR 42601
+nested/expr/base/zero	SELECT t.i + 1, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS (ROLLUP (t.i + 1), ())	NULL,0 | NULL,0	ERR 42601
+nested/expr/order/rows	SELECT t.i + 1, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS (ROLLUP (t.i + 1), ()) ORDER BY 1	-6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,6 | NULL,1 | NULL,6	ERR 42601
+nested/expr/order/zero	SELECT t.i + 1, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS (ROLLUP (t.i + 1), ()) ORDER BY 1	NULL,0 | NULL,0	ERR 42601
+nested/expr/having/rows	SELECT t.i + 1, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS (ROLLUP (t.i + 1), ()) HAVING count(*) < 6	-6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1	ERR 42601
+nested/expr/having/zero	SELECT t.i + 1, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS (ROLLUP (t.i + 1), ()) HAVING count(*) < 6	NULL,0 | NULL,0	ERR 42601
+nested/expr/gcol/rows	SELECT t.i + 1, count(*) AS c, GROUPING(t.i + 1) AS g FROM ss_t t GROUP BY GROUPING SETS (ROLLUP (t.i + 1), ())	-6,1,0 | 1,1,0 | 2,1,0 | 4,1,0 | 6,1,0 | NULL,1,0 | NULL,6,1 | NULL,6,1	ERR 42601
+nested/expr/gcol/zero	SELECT t.i + 1, count(*) AS c, GROUPING(t.i + 1) AS g FROM ss_z t GROUP BY GROUPING SETS (ROLLUP (t.i + 1), ())	NULL,0,1 | NULL,0,1	ERR 42601
+nested/expr/gord/rows	SELECT t.i + 1, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY GROUPING SETS (ROLLUP (t.i + 1), ())	ERR 42803	ERR 42601
+nested/expr/gord/zero	SELECT t.i + 1, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY GROUPING SETS (ROLLUP (t.i + 1), ())	ERR 42803	ERR 42601
+nested/ordExpr/base/rows	SELECT t.i + 1, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS (ROLLUP (1), ())	-6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1 | NULL,6 | NULL,6	ERR 42601
+nested/ordExpr/base/zero	SELECT t.i + 1, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS (ROLLUP (1), ())	NULL,0 | NULL,0	ERR 42601
+nested/ordExpr/order/rows	SELECT t.i + 1, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS (ROLLUP (1), ()) ORDER BY 1	-6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,6 | NULL,1 | NULL,6	ERR 42601
+nested/ordExpr/order/zero	SELECT t.i + 1, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS (ROLLUP (1), ()) ORDER BY 1	NULL,0 | NULL,0	ERR 42601
+nested/ordExpr/having/rows	SELECT t.i + 1, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS (ROLLUP (1), ()) HAVING count(*) < 6	-6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1	ERR 42601
+nested/ordExpr/having/zero	SELECT t.i + 1, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS (ROLLUP (1), ()) HAVING count(*) < 6	NULL,0 | NULL,0	ERR 42601
+nested/ordExpr/gcol/rows	SELECT t.i + 1, count(*) AS c, GROUPING(t.i + 1) AS g FROM ss_t t GROUP BY GROUPING SETS (ROLLUP (1), ())	-6,1,0 | 1,1,0 | 2,1,0 | 4,1,0 | 6,1,0 | NULL,1,0 | NULL,6,1 | NULL,6,1	ERR 42601
+nested/ordExpr/gcol/zero	SELECT t.i + 1, count(*) AS c, GROUPING(t.i + 1) AS g FROM ss_z t GROUP BY GROUPING SETS (ROLLUP (1), ())	NULL,0,1 | NULL,0,1	ERR 42601
+nested/ordExpr/gord/rows	SELECT t.i + 1, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY GROUPING SETS (ROLLUP (1), ())	ERR 42803	ERR 42601
+nested/ordExpr/gord/zero	SELECT t.i + 1, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY GROUPING SETS (ROLLUP (1), ())	ERR 42803	ERR 42601
+nested/ordAgg/base/rows	SELECT count(*) AS c, t.i AS k FROM ss_t t GROUP BY GROUPING SETS (ROLLUP (1), ())	ERR 42803	ERR 42601
+nested/ordAgg/base/zero	SELECT count(*) AS c, t.i AS k FROM ss_z t GROUP BY GROUPING SETS (ROLLUP (1), ())	ERR 42803	ERR 42601
+nested/ordAgg/order/rows	SELECT count(*) AS c, t.i AS k FROM ss_t t GROUP BY GROUPING SETS (ROLLUP (1), ()) ORDER BY 1	ERR 42803	ERR 42601
+nested/ordAgg/order/zero	SELECT count(*) AS c, t.i AS k FROM ss_z t GROUP BY GROUPING SETS (ROLLUP (1), ()) ORDER BY 1	ERR 42803	ERR 42601
+nested/ordAgg/having/rows	SELECT count(*) AS c, t.i AS k FROM ss_t t GROUP BY GROUPING SETS (ROLLUP (1), ()) HAVING count(*) < 6	ERR 42803	ERR 42601
+nested/ordAgg/having/zero	SELECT count(*) AS c, t.i AS k FROM ss_z t GROUP BY GROUPING SETS (ROLLUP (1), ()) HAVING count(*) < 6	ERR 42803	ERR 42601
+nested/ordAgg/gord/rows	SELECT count(*) AS c, t.i AS k, GROUPING(1) AS g FROM ss_t t GROUP BY GROUPING SETS (ROLLUP (1), ())	ERR 42803	ERR 42601
+nested/ordAgg/gord/zero	SELECT count(*) AS c, t.i AS k, GROUPING(1) AS g FROM ss_z t GROUP BY GROUPING SETS (ROLLUP (1), ())	ERR 42803	ERR 42601
+nested/ordRange/base/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS (ROLLUP (9), ())	ERR 42P10	ERR 42601
+nested/ordRange/base/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS (ROLLUP (9), ())	ERR 42P10	ERR 42601
+nested/ordRange/order/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS (ROLLUP (9), ()) ORDER BY 1	ERR 42P10	ERR 42601
+nested/ordRange/order/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS (ROLLUP (9), ()) ORDER BY 1	ERR 42P10	ERR 42601
+nested/ordRange/having/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS (ROLLUP (9), ()) HAVING count(*) < 6	ERR 42P10	ERR 42601
+nested/ordRange/having/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS (ROLLUP (9), ()) HAVING count(*) < 6	ERR 42P10	ERR 42601
+nested/ordRange/gord/rows	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY GROUPING SETS (ROLLUP (9), ())	ERR 42P10	ERR 42601
+nested/ordRange/gord/zero	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY GROUPING SETS (ROLLUP (9), ())	ERR 42P10	ERR 42601
+nested/ord0/base/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS (ROLLUP (0), ())	ERR 42P10	ERR 42601
+nested/ord0/base/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS (ROLLUP (0), ())	ERR 42P10	ERR 42601
+nested/ord0/order/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS (ROLLUP (0), ()) ORDER BY 1	ERR 42P10	ERR 42601
+nested/ord0/order/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS (ROLLUP (0), ()) ORDER BY 1	ERR 42P10	ERR 42601
+nested/ord0/having/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS (ROLLUP (0), ()) HAVING count(*) < 6	ERR 42P10	ERR 42601
+nested/ord0/having/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS (ROLLUP (0), ()) HAVING count(*) < 6	ERR 42P10	ERR 42601
+nested/ord0/gord/rows	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY GROUPING SETS (ROLLUP (0), ())	ERR 42P10	ERR 42601
+nested/ord0/gord/zero	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY GROUPING SETS (ROLLUP (0), ())	ERR 42P10	ERR 42601
+nested/ordNeg/base/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS (ROLLUP (-1), ())	ERR 42P10	ERR 42601
+nested/ordNeg/base/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS (ROLLUP (-1), ())	ERR 42P10	ERR 42601
+nested/ordNeg/order/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS (ROLLUP (-1), ()) ORDER BY 1	ERR 42P10	ERR 42601
+nested/ordNeg/order/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS (ROLLUP (-1), ()) ORDER BY 1	ERR 42P10	ERR 42601
+nested/ordNeg/having/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS (ROLLUP (-1), ()) HAVING count(*) < 6	ERR 42P10	ERR 42601
+nested/ordNeg/having/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS (ROLLUP (-1), ()) HAVING count(*) < 6	ERR 42P10	ERR 42601
+nested/ordNeg/gord/rows	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY GROUPING SETS (ROLLUP (-1), ())	ERR 42P10	ERR 42601
+nested/ordNeg/gord/zero	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY GROUPING SETS (ROLLUP (-1), ())	ERR 42P10	ERR 42601
+nested/num/base/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS (ROLLUP (1.0), ())	ERR 42601	
+nested/num/base/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS (ROLLUP (1.0), ())	ERR 42601	
+nested/num/order/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS (ROLLUP (1.0), ()) ORDER BY 1	ERR 42601	
+nested/num/order/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS (ROLLUP (1.0), ()) ORDER BY 1	ERR 42601	
+nested/num/having/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS (ROLLUP (1.0), ()) HAVING count(*) < 6	ERR 42601	
+nested/num/having/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS (ROLLUP (1.0), ()) HAVING count(*) < 6	ERR 42601	
+nested/num/gord/rows	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY GROUPING SETS (ROLLUP (1.0), ())	ERR 42601	
+nested/num/gord/zero	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY GROUPING SETS (ROLLUP (1.0), ())	ERR 42601	
+nested/str/base/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS (ROLLUP ('1'), ())	ERR 42601	
+nested/str/base/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS (ROLLUP ('1'), ())	ERR 42601	
+nested/str/order/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS (ROLLUP ('1'), ()) ORDER BY 1	ERR 42601	
+nested/str/order/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS (ROLLUP ('1'), ()) ORDER BY 1	ERR 42601	
+nested/str/having/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS (ROLLUP ('1'), ()) HAVING count(*) < 6	ERR 42601	
+nested/str/having/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS (ROLLUP ('1'), ()) HAVING count(*) < 6	ERR 42601	
+nested/str/gord/rows	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY GROUPING SETS (ROLLUP ('1'), ())	ERR 42601	
+nested/str/gord/zero	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY GROUPING SETS (ROLLUP ('1'), ())	ERR 42601	
+nested/paren/base/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS (ROLLUP (((1))), ())	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1 | NULL,6 | NULL,6	ERR 42601
+nested/paren/base/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS (ROLLUP (((1))), ())	NULL,0 | NULL,0	ERR 42601
+nested/paren/order/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS (ROLLUP (((1))), ()) ORDER BY 1	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,6 | NULL,1 | NULL,6	ERR 42601
+nested/paren/order/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS (ROLLUP (((1))), ()) ORDER BY 1	NULL,0 | NULL,0	ERR 42601
+nested/paren/having/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS (ROLLUP (((1))), ()) HAVING count(*) < 6	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1	ERR 42601
+nested/paren/having/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS (ROLLUP (((1))), ()) HAVING count(*) < 6	NULL,0 | NULL,0	ERR 42601
+nested/paren/gcol/rows	SELECT t.i AS k, count(*) AS c, GROUPING(t.i) AS g FROM ss_t t GROUP BY GROUPING SETS (ROLLUP (((1))), ())	-7,1,0 | 0,1,0 | 1,1,0 | 3,1,0 | 5,1,0 | NULL,1,0 | NULL,6,1 | NULL,6,1	ERR 42601
+nested/paren/gcol/zero	SELECT t.i AS k, count(*) AS c, GROUPING(t.i) AS g FROM ss_z t GROUP BY GROUPING SETS (ROLLUP (((1))), ())	NULL,0,1 | NULL,0,1	ERR 42601
+nested/paren/gord/rows	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY GROUPING SETS (ROLLUP (((1))), ())	ERR 42803	ERR 42601
+nested/paren/gord/zero	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY GROUPING SETS (ROLLUP (((1))), ())	ERR 42803	ERR 42601
+nested/comp/base/rows	SELECT t.i AS k, t.b, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS (ROLLUP ((1, 2)), ())	-7,-70,1 | 0,0,1 | 1,1,1 | 3,30,1 | 5,9000000000,1 | NULL,NULL,1 | NULL,NULL,6 | NULL,NULL,6	ERR 42601
+nested/comp/base/zero	SELECT t.i AS k, t.b, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS (ROLLUP ((1, 2)), ())	NULL,NULL,0 | NULL,NULL,0	ERR 42601
+nested/comp/order/rows	SELECT t.i AS k, t.b, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS (ROLLUP ((1, 2)), ()) ORDER BY 1	-7,-70,1 | 0,0,1 | 1,1,1 | 3,30,1 | 5,9000000000,1 | NULL,NULL,6 | NULL,NULL,1 | NULL,NULL,6	ERR 42601
+nested/comp/order/zero	SELECT t.i AS k, t.b, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS (ROLLUP ((1, 2)), ()) ORDER BY 1	NULL,NULL,0 | NULL,NULL,0	ERR 42601
+nested/comp/having/rows	SELECT t.i AS k, t.b, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS (ROLLUP ((1, 2)), ()) HAVING count(*) < 6	-7,-70,1 | 0,0,1 | 1,1,1 | 3,30,1 | 5,9000000000,1 | NULL,NULL,1	ERR 42601
+nested/comp/having/zero	SELECT t.i AS k, t.b, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS (ROLLUP ((1, 2)), ()) HAVING count(*) < 6	NULL,NULL,0 | NULL,NULL,0	ERR 42601
+nested/comp/gcol/rows	SELECT t.i AS k, t.b, count(*) AS c, GROUPING(t.i) AS g FROM ss_t t GROUP BY GROUPING SETS (ROLLUP ((1, 2)), ())	-7,-70,1,0 | 0,0,1,0 | 1,1,1,0 | 3,30,1,0 | 5,9000000000,1,0 | NULL,NULL,1,0 | NULL,NULL,6,1 | NULL,NULL,6,1	ERR 42601
+nested/comp/gcol/zero	SELECT t.i AS k, t.b, count(*) AS c, GROUPING(t.i) AS g FROM ss_z t GROUP BY GROUPING SETS (ROLLUP ((1, 2)), ())	NULL,NULL,0,1 | NULL,NULL,0,1	ERR 42601
+nested/comp/gord/rows	SELECT t.i AS k, t.b, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY GROUPING SETS (ROLLUP ((1, 2)), ())	ERR 42803	ERR 42601
+nested/comp/gord/zero	SELECT t.i AS k, t.b, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY GROUPING SETS (ROLLUP ((1, 2)), ())	ERR 42803	ERR 42601
+nested/compCol/base/rows	SELECT t.i AS k, t.b, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS (ROLLUP ((t.i, t.b)), ())	-7,-70,1 | 0,0,1 | 1,1,1 | 3,30,1 | 5,9000000000,1 | NULL,NULL,1 | NULL,NULL,6 | NULL,NULL,6	ERR 42601
+nested/compCol/base/zero	SELECT t.i AS k, t.b, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS (ROLLUP ((t.i, t.b)), ())	NULL,NULL,0 | NULL,NULL,0	ERR 42601
+nested/compCol/order/rows	SELECT t.i AS k, t.b, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS (ROLLUP ((t.i, t.b)), ()) ORDER BY 1	-7,-70,1 | 0,0,1 | 1,1,1 | 3,30,1 | 5,9000000000,1 | NULL,NULL,6 | NULL,NULL,1 | NULL,NULL,6	ERR 42601
+nested/compCol/order/zero	SELECT t.i AS k, t.b, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS (ROLLUP ((t.i, t.b)), ()) ORDER BY 1	NULL,NULL,0 | NULL,NULL,0	ERR 42601
+nested/compCol/having/rows	SELECT t.i AS k, t.b, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS (ROLLUP ((t.i, t.b)), ()) HAVING count(*) < 6	-7,-70,1 | 0,0,1 | 1,1,1 | 3,30,1 | 5,9000000000,1 | NULL,NULL,1	ERR 42601
+nested/compCol/having/zero	SELECT t.i AS k, t.b, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS (ROLLUP ((t.i, t.b)), ()) HAVING count(*) < 6	NULL,NULL,0 | NULL,NULL,0	ERR 42601
+nested/compCol/gcol/rows	SELECT t.i AS k, t.b, count(*) AS c, GROUPING(t.i) AS g FROM ss_t t GROUP BY GROUPING SETS (ROLLUP ((t.i, t.b)), ())	-7,-70,1,0 | 0,0,1,0 | 1,1,1,0 | 3,30,1,0 | 5,9000000000,1,0 | NULL,NULL,1,0 | NULL,NULL,6,1 | NULL,NULL,6,1	ERR 42601
+nested/compCol/gcol/zero	SELECT t.i AS k, t.b, count(*) AS c, GROUPING(t.i) AS g FROM ss_z t GROUP BY GROUPING SETS (ROLLUP ((t.i, t.b)), ())	NULL,NULL,0,1 | NULL,NULL,0,1	ERR 42601
+nested/compCol/gord/rows	SELECT t.i AS k, t.b, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY GROUPING SETS (ROLLUP ((t.i, t.b)), ())	ERR 42803	ERR 42601
+nested/compCol/gord/zero	SELECT t.i AS k, t.b, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY GROUPING SETS (ROLLUP ((t.i, t.b)), ())	ERR 42803	ERR 42601
+mixed/ord/base/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY t.id / 4, ROLLUP (1)	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1 | NULL,3 | NULL,3	ERR 42601
+mixed/ord/base/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY t.id / 4, ROLLUP (1)	(none)	ERR 42601
+mixed/ord/order/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY t.id / 4, ROLLUP (1) ORDER BY 1	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1 | NULL,3 | NULL,3	ERR 42601
+mixed/ord/order/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY t.id / 4, ROLLUP (1) ORDER BY 1	(none)	ERR 42601
+mixed/ord/having/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY t.id / 4, ROLLUP (1) HAVING count(*) < 6	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1 | NULL,3 | NULL,3	ERR 42601
+mixed/ord/having/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY t.id / 4, ROLLUP (1) HAVING count(*) < 6	(none)	ERR 42601
+mixed/ord/gcol/rows	SELECT t.i AS k, count(*) AS c, GROUPING(t.i) AS g FROM ss_t t GROUP BY t.id / 4, ROLLUP (1)	-7,1,0 | 0,1,0 | 1,1,0 | 3,1,0 | 5,1,0 | NULL,1,0 | NULL,3,1 | NULL,3,1	ERR 42601
+mixed/ord/gcol/zero	SELECT t.i AS k, count(*) AS c, GROUPING(t.i) AS g FROM ss_z t GROUP BY t.id / 4, ROLLUP (1)	(none)	ERR 42601
+mixed/ord/gord/rows	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY t.id / 4, ROLLUP (1)	ERR 42803	ERR 42601
+mixed/ord/gord/zero	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY t.id / 4, ROLLUP (1)	ERR 42803	ERR 42601
+mixed/col/base/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY t.id / 4, ROLLUP (i)	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1 | NULL,3 | NULL,3	ERR 42601
+mixed/col/base/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY t.id / 4, ROLLUP (i)	(none)	ERR 42601
+mixed/col/order/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY t.id / 4, ROLLUP (i) ORDER BY 1	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1 | NULL,3 | NULL,3	ERR 42601
+mixed/col/order/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY t.id / 4, ROLLUP (i) ORDER BY 1	(none)	ERR 42601
+mixed/col/having/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY t.id / 4, ROLLUP (i) HAVING count(*) < 6	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1 | NULL,3 | NULL,3	ERR 42601
+mixed/col/having/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY t.id / 4, ROLLUP (i) HAVING count(*) < 6	(none)	ERR 42601
+mixed/col/gcol/rows	SELECT t.i AS k, count(*) AS c, GROUPING(t.i) AS g FROM ss_t t GROUP BY t.id / 4, ROLLUP (i)	-7,1,0 | 0,1,0 | 1,1,0 | 3,1,0 | 5,1,0 | NULL,1,0 | NULL,3,1 | NULL,3,1	ERR 42601
+mixed/col/gcol/zero	SELECT t.i AS k, count(*) AS c, GROUPING(t.i) AS g FROM ss_z t GROUP BY t.id / 4, ROLLUP (i)	(none)	ERR 42601
+mixed/col/gord/rows	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY t.id / 4, ROLLUP (i)	ERR 42803	ERR 42601
+mixed/col/gord/zero	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY t.id / 4, ROLLUP (i)	ERR 42803	ERR 42601
+mixed/alias/base/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY t.id / 4, ROLLUP (k)	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1 | NULL,3 | NULL,3	ERR 42601
+mixed/alias/base/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY t.id / 4, ROLLUP (k)	(none)	ERR 42601
+mixed/alias/order/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY t.id / 4, ROLLUP (k) ORDER BY 1	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1 | NULL,3 | NULL,3	ERR 42601
+mixed/alias/order/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY t.id / 4, ROLLUP (k) ORDER BY 1	(none)	ERR 42601
+mixed/alias/having/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY t.id / 4, ROLLUP (k) HAVING count(*) < 6	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1 | NULL,3 | NULL,3	ERR 42601
+mixed/alias/having/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY t.id / 4, ROLLUP (k) HAVING count(*) < 6	(none)	ERR 42601
+mixed/alias/gcol/rows	SELECT t.i AS k, count(*) AS c, GROUPING(t.i) AS g FROM ss_t t GROUP BY t.id / 4, ROLLUP (k)	-7,1,0 | 0,1,0 | 1,1,0 | 3,1,0 | 5,1,0 | NULL,1,0 | NULL,3,1 | NULL,3,1	ERR 42601
+mixed/alias/gcol/zero	SELECT t.i AS k, count(*) AS c, GROUPING(t.i) AS g FROM ss_z t GROUP BY t.id / 4, ROLLUP (k)	(none)	ERR 42601
+mixed/alias/gord/rows	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY t.id / 4, ROLLUP (k)	ERR 42803	ERR 42601
+mixed/alias/gord/zero	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY t.id / 4, ROLLUP (k)	ERR 42803	ERR 42601
+mixed/qual/base/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY t.id / 4, ROLLUP (t.i)	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1 | NULL,3 | NULL,3	ERR 42601
+mixed/qual/base/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY t.id / 4, ROLLUP (t.i)	(none)	ERR 42601
+mixed/qual/order/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY t.id / 4, ROLLUP (t.i) ORDER BY 1	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1 | NULL,3 | NULL,3	ERR 42601
+mixed/qual/order/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY t.id / 4, ROLLUP (t.i) ORDER BY 1	(none)	ERR 42601
+mixed/qual/having/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY t.id / 4, ROLLUP (t.i) HAVING count(*) < 6	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1 | NULL,3 | NULL,3	ERR 42601
+mixed/qual/having/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY t.id / 4, ROLLUP (t.i) HAVING count(*) < 6	(none)	ERR 42601
+mixed/qual/gcol/rows	SELECT t.i AS k, count(*) AS c, GROUPING(t.i) AS g FROM ss_t t GROUP BY t.id / 4, ROLLUP (t.i)	-7,1,0 | 0,1,0 | 1,1,0 | 3,1,0 | 5,1,0 | NULL,1,0 | NULL,3,1 | NULL,3,1	ERR 42601
+mixed/qual/gcol/zero	SELECT t.i AS k, count(*) AS c, GROUPING(t.i) AS g FROM ss_z t GROUP BY t.id / 4, ROLLUP (t.i)	(none)	ERR 42601
+mixed/qual/gord/rows	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY t.id / 4, ROLLUP (t.i)	ERR 42803	ERR 42601
+mixed/qual/gord/zero	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY t.id / 4, ROLLUP (t.i)	ERR 42803	ERR 42601
+mixed/expr/base/rows	SELECT t.i + 1, count(*) AS c FROM ss_t t GROUP BY t.id / 4, ROLLUP (t.i + 1)	-6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1 | NULL,3 | NULL,3	ERR 42601
+mixed/expr/base/zero	SELECT t.i + 1, count(*) AS c FROM ss_z t GROUP BY t.id / 4, ROLLUP (t.i + 1)	(none)	ERR 42601
+mixed/expr/order/rows	SELECT t.i + 1, count(*) AS c FROM ss_t t GROUP BY t.id / 4, ROLLUP (t.i + 1) ORDER BY 1	-6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1 | NULL,3 | NULL,3	ERR 42601
+mixed/expr/order/zero	SELECT t.i + 1, count(*) AS c FROM ss_z t GROUP BY t.id / 4, ROLLUP (t.i + 1) ORDER BY 1	(none)	ERR 42601
+mixed/expr/having/rows	SELECT t.i + 1, count(*) AS c FROM ss_t t GROUP BY t.id / 4, ROLLUP (t.i + 1) HAVING count(*) < 6	-6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1 | NULL,3 | NULL,3	ERR 42601
+mixed/expr/having/zero	SELECT t.i + 1, count(*) AS c FROM ss_z t GROUP BY t.id / 4, ROLLUP (t.i + 1) HAVING count(*) < 6	(none)	ERR 42601
+mixed/expr/gcol/rows	SELECT t.i + 1, count(*) AS c, GROUPING(t.i + 1) AS g FROM ss_t t GROUP BY t.id / 4, ROLLUP (t.i + 1)	-6,1,0 | 1,1,0 | 2,1,0 | 4,1,0 | 6,1,0 | NULL,1,0 | NULL,3,1 | NULL,3,1	ERR 42601
+mixed/expr/gcol/zero	SELECT t.i + 1, count(*) AS c, GROUPING(t.i + 1) AS g FROM ss_z t GROUP BY t.id / 4, ROLLUP (t.i + 1)	(none)	ERR 42601
+mixed/expr/gord/rows	SELECT t.i + 1, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY t.id / 4, ROLLUP (t.i + 1)	ERR 42803	ERR 42601
+mixed/expr/gord/zero	SELECT t.i + 1, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY t.id / 4, ROLLUP (t.i + 1)	ERR 42803	ERR 42601
+mixed/ordExpr/base/rows	SELECT t.i + 1, count(*) AS c FROM ss_t t GROUP BY t.id / 4, ROLLUP (1)	-6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1 | NULL,3 | NULL,3	ERR 42601
+mixed/ordExpr/base/zero	SELECT t.i + 1, count(*) AS c FROM ss_z t GROUP BY t.id / 4, ROLLUP (1)	(none)	ERR 42601
+mixed/ordExpr/order/rows	SELECT t.i + 1, count(*) AS c FROM ss_t t GROUP BY t.id / 4, ROLLUP (1) ORDER BY 1	-6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1 | NULL,3 | NULL,3	ERR 42601
+mixed/ordExpr/order/zero	SELECT t.i + 1, count(*) AS c FROM ss_z t GROUP BY t.id / 4, ROLLUP (1) ORDER BY 1	(none)	ERR 42601
+mixed/ordExpr/having/rows	SELECT t.i + 1, count(*) AS c FROM ss_t t GROUP BY t.id / 4, ROLLUP (1) HAVING count(*) < 6	-6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1 | NULL,3 | NULL,3	ERR 42601
+mixed/ordExpr/having/zero	SELECT t.i + 1, count(*) AS c FROM ss_z t GROUP BY t.id / 4, ROLLUP (1) HAVING count(*) < 6	(none)	ERR 42601
+mixed/ordExpr/gcol/rows	SELECT t.i + 1, count(*) AS c, GROUPING(t.i + 1) AS g FROM ss_t t GROUP BY t.id / 4, ROLLUP (1)	-6,1,0 | 1,1,0 | 2,1,0 | 4,1,0 | 6,1,0 | NULL,1,0 | NULL,3,1 | NULL,3,1	ERR 42601
+mixed/ordExpr/gcol/zero	SELECT t.i + 1, count(*) AS c, GROUPING(t.i + 1) AS g FROM ss_z t GROUP BY t.id / 4, ROLLUP (1)	(none)	ERR 42601
+mixed/ordExpr/gord/rows	SELECT t.i + 1, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY t.id / 4, ROLLUP (1)	ERR 42803	ERR 42601
+mixed/ordExpr/gord/zero	SELECT t.i + 1, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY t.id / 4, ROLLUP (1)	ERR 42803	ERR 42601
+mixed/ordAgg/base/rows	SELECT count(*) AS c, t.i AS k FROM ss_t t GROUP BY t.id / 4, ROLLUP (1)	ERR 42803	ERR 42601
+mixed/ordAgg/base/zero	SELECT count(*) AS c, t.i AS k FROM ss_z t GROUP BY t.id / 4, ROLLUP (1)	ERR 42803	ERR 42601
+mixed/ordAgg/order/rows	SELECT count(*) AS c, t.i AS k FROM ss_t t GROUP BY t.id / 4, ROLLUP (1) ORDER BY 1	ERR 42803	ERR 42601
+mixed/ordAgg/order/zero	SELECT count(*) AS c, t.i AS k FROM ss_z t GROUP BY t.id / 4, ROLLUP (1) ORDER BY 1	ERR 42803	ERR 42601
+mixed/ordAgg/having/rows	SELECT count(*) AS c, t.i AS k FROM ss_t t GROUP BY t.id / 4, ROLLUP (1) HAVING count(*) < 6	ERR 42803	ERR 42601
+mixed/ordAgg/having/zero	SELECT count(*) AS c, t.i AS k FROM ss_z t GROUP BY t.id / 4, ROLLUP (1) HAVING count(*) < 6	ERR 42803	ERR 42601
+mixed/ordAgg/gord/rows	SELECT count(*) AS c, t.i AS k, GROUPING(1) AS g FROM ss_t t GROUP BY t.id / 4, ROLLUP (1)	ERR 42803	ERR 42601
+mixed/ordAgg/gord/zero	SELECT count(*) AS c, t.i AS k, GROUPING(1) AS g FROM ss_z t GROUP BY t.id / 4, ROLLUP (1)	ERR 42803	ERR 42601
+mixed/ordRange/base/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY t.id / 4, ROLLUP (9)	ERR 42P10	ERR 42601
+mixed/ordRange/base/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY t.id / 4, ROLLUP (9)	ERR 42P10	ERR 42601
+mixed/ordRange/order/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY t.id / 4, ROLLUP (9) ORDER BY 1	ERR 42P10	ERR 42601
+mixed/ordRange/order/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY t.id / 4, ROLLUP (9) ORDER BY 1	ERR 42P10	ERR 42601
+mixed/ordRange/having/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY t.id / 4, ROLLUP (9) HAVING count(*) < 6	ERR 42P10	ERR 42601
+mixed/ordRange/having/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY t.id / 4, ROLLUP (9) HAVING count(*) < 6	ERR 42P10	ERR 42601
+mixed/ordRange/gord/rows	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY t.id / 4, ROLLUP (9)	ERR 42P10	ERR 42601
+mixed/ordRange/gord/zero	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY t.id / 4, ROLLUP (9)	ERR 42P10	ERR 42601
+mixed/ord0/base/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY t.id / 4, ROLLUP (0)	ERR 42P10	ERR 42601
+mixed/ord0/base/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY t.id / 4, ROLLUP (0)	ERR 42P10	ERR 42601
+mixed/ord0/order/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY t.id / 4, ROLLUP (0) ORDER BY 1	ERR 42P10	ERR 42601
+mixed/ord0/order/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY t.id / 4, ROLLUP (0) ORDER BY 1	ERR 42P10	ERR 42601
+mixed/ord0/having/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY t.id / 4, ROLLUP (0) HAVING count(*) < 6	ERR 42P10	ERR 42601
+mixed/ord0/having/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY t.id / 4, ROLLUP (0) HAVING count(*) < 6	ERR 42P10	ERR 42601
+mixed/ord0/gord/rows	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY t.id / 4, ROLLUP (0)	ERR 42P10	ERR 42601
+mixed/ord0/gord/zero	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY t.id / 4, ROLLUP (0)	ERR 42P10	ERR 42601
+mixed/ordNeg/base/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY t.id / 4, ROLLUP (-1)	ERR 42P10	ERR 42601
+mixed/ordNeg/base/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY t.id / 4, ROLLUP (-1)	ERR 42P10	ERR 42601
+mixed/ordNeg/order/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY t.id / 4, ROLLUP (-1) ORDER BY 1	ERR 42P10	ERR 42601
+mixed/ordNeg/order/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY t.id / 4, ROLLUP (-1) ORDER BY 1	ERR 42P10	ERR 42601
+mixed/ordNeg/having/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY t.id / 4, ROLLUP (-1) HAVING count(*) < 6	ERR 42P10	ERR 42601
+mixed/ordNeg/having/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY t.id / 4, ROLLUP (-1) HAVING count(*) < 6	ERR 42P10	ERR 42601
+mixed/ordNeg/gord/rows	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY t.id / 4, ROLLUP (-1)	ERR 42P10	ERR 42601
+mixed/ordNeg/gord/zero	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY t.id / 4, ROLLUP (-1)	ERR 42P10	ERR 42601
+mixed/num/base/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY t.id / 4, ROLLUP (1.0)	ERR 42601	
+mixed/num/base/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY t.id / 4, ROLLUP (1.0)	ERR 42601	
+mixed/num/order/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY t.id / 4, ROLLUP (1.0) ORDER BY 1	ERR 42601	
+mixed/num/order/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY t.id / 4, ROLLUP (1.0) ORDER BY 1	ERR 42601	
+mixed/num/having/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY t.id / 4, ROLLUP (1.0) HAVING count(*) < 6	ERR 42601	
+mixed/num/having/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY t.id / 4, ROLLUP (1.0) HAVING count(*) < 6	ERR 42601	
+mixed/num/gord/rows	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY t.id / 4, ROLLUP (1.0)	ERR 42601	
+mixed/num/gord/zero	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY t.id / 4, ROLLUP (1.0)	ERR 42601	
+mixed/str/base/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY t.id / 4, ROLLUP ('1')	ERR 42601	
+mixed/str/base/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY t.id / 4, ROLLUP ('1')	ERR 42601	
+mixed/str/order/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY t.id / 4, ROLLUP ('1') ORDER BY 1	ERR 42601	
+mixed/str/order/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY t.id / 4, ROLLUP ('1') ORDER BY 1	ERR 42601	
+mixed/str/having/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY t.id / 4, ROLLUP ('1') HAVING count(*) < 6	ERR 42601	
+mixed/str/having/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY t.id / 4, ROLLUP ('1') HAVING count(*) < 6	ERR 42601	
+mixed/str/gord/rows	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY t.id / 4, ROLLUP ('1')	ERR 42601	
+mixed/str/gord/zero	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY t.id / 4, ROLLUP ('1')	ERR 42601	
+mixed/paren/base/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY t.id / 4, ROLLUP (((1)))	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1 | NULL,3 | NULL,3	ERR 42601
+mixed/paren/base/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY t.id / 4, ROLLUP (((1)))	(none)	ERR 42601
+mixed/paren/order/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY t.id / 4, ROLLUP (((1))) ORDER BY 1	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1 | NULL,3 | NULL,3	ERR 42601
+mixed/paren/order/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY t.id / 4, ROLLUP (((1))) ORDER BY 1	(none)	ERR 42601
+mixed/paren/having/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY t.id / 4, ROLLUP (((1))) HAVING count(*) < 6	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1 | NULL,3 | NULL,3	ERR 42601
+mixed/paren/having/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY t.id / 4, ROLLUP (((1))) HAVING count(*) < 6	(none)	ERR 42601
+mixed/paren/gcol/rows	SELECT t.i AS k, count(*) AS c, GROUPING(t.i) AS g FROM ss_t t GROUP BY t.id / 4, ROLLUP (((1)))	-7,1,0 | 0,1,0 | 1,1,0 | 3,1,0 | 5,1,0 | NULL,1,0 | NULL,3,1 | NULL,3,1	ERR 42601
+mixed/paren/gcol/zero	SELECT t.i AS k, count(*) AS c, GROUPING(t.i) AS g FROM ss_z t GROUP BY t.id / 4, ROLLUP (((1)))	(none)	ERR 42601
+mixed/paren/gord/rows	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY t.id / 4, ROLLUP (((1)))	ERR 42803	ERR 42601
+mixed/paren/gord/zero	SELECT t.i AS k, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY t.id / 4, ROLLUP (((1)))	ERR 42803	ERR 42601
+mixed/comp/base/rows	SELECT t.i AS k, t.b, count(*) AS c FROM ss_t t GROUP BY t.id / 4, ROLLUP ((1, 2))	-7,-70,1 | 0,0,1 | 1,1,1 | 3,30,1 | 5,9000000000,1 | NULL,NULL,1 | NULL,NULL,3 | NULL,NULL,3	ERR 42601
+mixed/comp/base/zero	SELECT t.i AS k, t.b, count(*) AS c FROM ss_z t GROUP BY t.id / 4, ROLLUP ((1, 2))	(none)	ERR 42601
+mixed/comp/order/rows	SELECT t.i AS k, t.b, count(*) AS c FROM ss_t t GROUP BY t.id / 4, ROLLUP ((1, 2)) ORDER BY 1	-7,-70,1 | 0,0,1 | 1,1,1 | 3,30,1 | 5,9000000000,1 | NULL,NULL,1 | NULL,NULL,3 | NULL,NULL,3	ERR 42601
+mixed/comp/order/zero	SELECT t.i AS k, t.b, count(*) AS c FROM ss_z t GROUP BY t.id / 4, ROLLUP ((1, 2)) ORDER BY 1	(none)	ERR 42601
+mixed/comp/having/rows	SELECT t.i AS k, t.b, count(*) AS c FROM ss_t t GROUP BY t.id / 4, ROLLUP ((1, 2)) HAVING count(*) < 6	-7,-70,1 | 0,0,1 | 1,1,1 | 3,30,1 | 5,9000000000,1 | NULL,NULL,1 | NULL,NULL,3 | NULL,NULL,3	ERR 42601
+mixed/comp/having/zero	SELECT t.i AS k, t.b, count(*) AS c FROM ss_z t GROUP BY t.id / 4, ROLLUP ((1, 2)) HAVING count(*) < 6	(none)	ERR 42601
+mixed/comp/gcol/rows	SELECT t.i AS k, t.b, count(*) AS c, GROUPING(t.i) AS g FROM ss_t t GROUP BY t.id / 4, ROLLUP ((1, 2))	-7,-70,1,0 | 0,0,1,0 | 1,1,1,0 | 3,30,1,0 | 5,9000000000,1,0 | NULL,NULL,1,0 | NULL,NULL,3,1 | NULL,NULL,3,1	ERR 42601
+mixed/comp/gcol/zero	SELECT t.i AS k, t.b, count(*) AS c, GROUPING(t.i) AS g FROM ss_z t GROUP BY t.id / 4, ROLLUP ((1, 2))	(none)	ERR 42601
+mixed/comp/gord/rows	SELECT t.i AS k, t.b, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY t.id / 4, ROLLUP ((1, 2))	ERR 42803	ERR 42601
+mixed/comp/gord/zero	SELECT t.i AS k, t.b, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY t.id / 4, ROLLUP ((1, 2))	ERR 42803	ERR 42601
+mixed/compCol/base/rows	SELECT t.i AS k, t.b, count(*) AS c FROM ss_t t GROUP BY t.id / 4, ROLLUP ((t.i, t.b))	-7,-70,1 | 0,0,1 | 1,1,1 | 3,30,1 | 5,9000000000,1 | NULL,NULL,1 | NULL,NULL,3 | NULL,NULL,3	ERR 42601
+mixed/compCol/base/zero	SELECT t.i AS k, t.b, count(*) AS c FROM ss_z t GROUP BY t.id / 4, ROLLUP ((t.i, t.b))	(none)	ERR 42601
+mixed/compCol/order/rows	SELECT t.i AS k, t.b, count(*) AS c FROM ss_t t GROUP BY t.id / 4, ROLLUP ((t.i, t.b)) ORDER BY 1	-7,-70,1 | 0,0,1 | 1,1,1 | 3,30,1 | 5,9000000000,1 | NULL,NULL,1 | NULL,NULL,3 | NULL,NULL,3	ERR 42601
+mixed/compCol/order/zero	SELECT t.i AS k, t.b, count(*) AS c FROM ss_z t GROUP BY t.id / 4, ROLLUP ((t.i, t.b)) ORDER BY 1	(none)	ERR 42601
+mixed/compCol/having/rows	SELECT t.i AS k, t.b, count(*) AS c FROM ss_t t GROUP BY t.id / 4, ROLLUP ((t.i, t.b)) HAVING count(*) < 6	-7,-70,1 | 0,0,1 | 1,1,1 | 3,30,1 | 5,9000000000,1 | NULL,NULL,1 | NULL,NULL,3 | NULL,NULL,3	ERR 42601
+mixed/compCol/having/zero	SELECT t.i AS k, t.b, count(*) AS c FROM ss_z t GROUP BY t.id / 4, ROLLUP ((t.i, t.b)) HAVING count(*) < 6	(none)	ERR 42601
+mixed/compCol/gcol/rows	SELECT t.i AS k, t.b, count(*) AS c, GROUPING(t.i) AS g FROM ss_t t GROUP BY t.id / 4, ROLLUP ((t.i, t.b))	-7,-70,1,0 | 0,0,1,0 | 1,1,1,0 | 3,30,1,0 | 5,9000000000,1,0 | NULL,NULL,1,0 | NULL,NULL,3,1 | NULL,NULL,3,1	ERR 42601
+mixed/compCol/gcol/zero	SELECT t.i AS k, t.b, count(*) AS c, GROUPING(t.i) AS g FROM ss_z t GROUP BY t.id / 4, ROLLUP ((t.i, t.b))	(none)	ERR 42601
+mixed/compCol/gord/rows	SELECT t.i AS k, t.b, count(*) AS c, GROUPING(1) AS g FROM ss_t t GROUP BY t.id / 4, ROLLUP ((t.i, t.b))	ERR 42803	ERR 42601
+mixed/compCol/gord/zero	SELECT t.i AS k, t.b, count(*) AS c, GROUPING(1) AS g FROM ss_z t GROUP BY t.id / 4, ROLLUP ((t.i, t.b))	ERR 42803	ERR 42601
+x/mixedOrdOrd/rows	SELECT t.id / 4 AS p, t.i AS k, count(*) AS c FROM ss_t t GROUP BY 1, ROLLUP (2)	0,-7,1 | 0,3,1 | 0,5,1 | 0,NULL,3 | 1,0,1 | 1,1,1 | 1,NULL,1 | 1,NULL,3	ERR 42601
+x/null/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY NULL	ERR 42601	ERR 42803
+x/rollupNull/rows	SELECT count(*) AS c FROM ss_t t GROUP BY ROLLUP (NULL)	ERR 42601	6 | 6
+x/cast/rows	SELECT count(*) AS c FROM ss_t t GROUP BY 1::int	6	
+x/rollupCast/rows	SELECT count(*) AS c FROM ss_t t GROUP BY ROLLUP (1::int)	6 | 6	
+x/plus/rows	SELECT count(*) AS c FROM ss_t t GROUP BY +1	6	
+x/true/rows	SELECT count(*) AS c FROM ss_t t GROUP BY ROLLUP (true)	ERR 42601	6 | 6
+x/aliasExprRollup/rows	SELECT t.i + 1 AS e, count(*) AS c FROM ss_t t GROUP BY ROLLUP (e)	-6,1 | 1,1 | 2,1 | 4,1 | 6,1 | NULL,1 | NULL,6	
+x/aliasExprCube2/rows	SELECT t.i + 1 AS e, t.b AS bb, count(*) AS c FROM ss_t t GROUP BY CUBE (e, bb)	-6,-70,1 | -6,NULL,1 | 1,0,1 | 1,NULL,1 | 2,1,1 | 2,NULL,1 | 4,30,1 | 4,NULL,1 | 6,9000000000,1 | 6,NULL,1 | NULL,-70,1 | NULL,0,1 | NULL,1,1 | NULL,30,1 | NULL,9000000000,1 | NULL,NULL,1 | NULL,NULL,1 | NULL,NULL,1 | NULL,NULL,6	
+x/aliasSets/rows	SELECT t.i AS k, t.b AS bb, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS ((k, bb), (bb), ())	-7,-70,1 | 0,0,1 | 1,1,1 | 3,30,1 | 5,9000000000,1 | NULL,-70,1 | NULL,0,1 | NULL,1,1 | NULL,30,1 | NULL,9000000000,1 | NULL,NULL,1 | NULL,NULL,1 | NULL,NULL,6	
+x/ordSetsHavingG/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY ROLLUP (1) HAVING GROUPING(t.i) = 1	NULL,6	
+x/plainOrd2/rows	SELECT t.i AS k, t.b, count(*) AS c FROM ss_t t GROUP BY 1, 2	-7,-70,1 | 0,0,1 | 1,1,1 | 3,30,1 | 5,9000000000,1 | NULL,NULL,1	
+x/aliasDupCol/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY ROLLUP (k, t.i)	-7,1 | -7,1 | 0,1 | 0,1 | 1,1 | 1,1 | 3,1 | 3,1 | 5,1 | 5,1 | NULL,1 | NULL,1 | NULL,6	
+x/aliasShadowDup/rows	SELECT t.b AS i, count(*) AS c FROM ss_t t GROUP BY ROLLUP (i, 1)	-70,1 | 0,1 | 1,1 | 30,1 | 9000000000,1 | NULL,1 | NULL,1 | NULL,1 | NULL,1 | NULL,1 | NULL,1 | NULL,1 | NULL,6	
+x/caseMix/rows	SELECT t.i AS K, count(*) AS c FROM ss_t t GROUP BY ROLLUP (k, I, 1)	-7,1 | -7,1 | -7,1 | 0,1 | 0,1 | 0,1 | 1,1 | 1,1 | 1,1 | 3,1 | 3,1 | 3,1 | 5,1 | 5,1 | 5,1 | NULL,1 | NULL,1 | NULL,1 | NULL,6	
+x/cubeOrdAlias/rows	SELECT t.i AS k, t.b AS bb, count(*) AS c, GROUPING(t.i, t.b) AS g FROM ss_t t GROUP BY CUBE (1, bb) ORDER BY 1, 2, 4	-7,-70,1,0 | -7,NULL,1,1 | 0,0,1,0 | 0,NULL,1,1 | 1,1,1,0 | 1,NULL,1,1 | 3,30,1,0 | 3,NULL,1,1 | 5,9000000000,1,0 | 5,NULL,1,1 | NULL,-70,1,2 | NULL,0,1,2 | NULL,1,1,2 | NULL,30,1,2 | NULL,9000000000,1,2 | NULL,NULL,1,0 | NULL,NULL,1,1 | NULL,NULL,1,2 | NULL,NULL,6,3	
+x/setsOrdDupSets/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS ((1), (k), (t.i))	-7,1 | -7,1 | -7,1 | 0,1 | 0,1 | 0,1 | 1,1 | 1,1 | 1,1 | 3,1 | 3,1 | 3,1 | 5,1 | 5,1 | 5,1 | NULL,1 | NULL,1 | NULL,1	
+x/plainOrdDup/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY 1, i	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1	
+x/rollup2/rows	SELECT t.i AS k, t.b, count(*) AS c FROM ss_t t GROUP BY ROLLUP (1, 2)	-7,-70,1 | -7,NULL,1 | 0,0,1 | 0,NULL,1 | 1,1,1 | 1,NULL,1 | 3,30,1 | 3,NULL,1 | 5,9000000000,1 | 5,NULL,1 | NULL,NULL,1 | NULL,NULL,1 | NULL,NULL,6	
+x/rollup2g/rows	SELECT t.i AS k, t.b, count(*) AS c, GROUPING(t.i, t.b) AS g FROM ss_t t GROUP BY ROLLUP (1, 2)	-7,-70,1,0 | -7,NULL,1,1 | 0,0,1,0 | 0,NULL,1,1 | 1,1,1,0 | 1,NULL,1,1 | 3,30,1,0 | 3,NULL,1,1 | 5,9000000000,1,0 | 5,NULL,1,1 | NULL,NULL,1,0 | NULL,NULL,1,1 | NULL,NULL,6,3	
+x/cube21/rows	SELECT t.i AS k, t.b, count(*) AS c FROM ss_t t GROUP BY CUBE (2, 1)	-7,-70,1 | -7,NULL,1 | 0,0,1 | 0,NULL,1 | 1,1,1 | 1,NULL,1 | 3,30,1 | 3,NULL,1 | 5,9000000000,1 | 5,NULL,1 | NULL,-70,1 | NULL,0,1 | NULL,1,1 | NULL,30,1 | NULL,9000000000,1 | NULL,NULL,1 | NULL,NULL,1 | NULL,NULL,1 | NULL,NULL,6	
+x/setsMix/rows	SELECT t.i AS k, t.b, count(*) AS c FROM ss_t t GROUP BY GROUPING SETS ((1), (t.b), ())	-7,NULL,1 | 0,NULL,1 | 1,NULL,1 | 3,NULL,1 | 5,NULL,1 | NULL,-70,1 | NULL,0,1 | NULL,1,1 | NULL,30,1 | NULL,9000000000,1 | NULL,NULL,1 | NULL,NULL,1 | NULL,NULL,6	
+x/rollupOrdCol/rows	SELECT t.i AS k, t.b, count(*) AS c FROM ss_t t GROUP BY ROLLUP (1, t.b)	-7,-70,1 | -7,NULL,1 | 0,0,1 | 0,NULL,1 | 1,1,1 | 1,NULL,1 | 3,30,1 | 3,NULL,1 | 5,9000000000,1 | 5,NULL,1 | NULL,NULL,1 | NULL,NULL,1 | NULL,NULL,6	
+x/dupOrdCol/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY ROLLUP (1, t.i)	-7,1 | -7,1 | 0,1 | 0,1 | 1,1 | 1,1 | 3,1 | 3,1 | 5,1 | 5,1 | NULL,1 | NULL,1 | NULL,6	
+x/rollupOrdMax/rows	SELECT t.i AS k, max(t.b) AS m FROM ss_t t GROUP BY ROLLUP (1)	-7,-70 | 0,0 | 1,1 | 3,30 | 5,9000000000 | NULL,9000000000 | NULL,NULL	
+x/issue/rows	SELECT t.i AS k, count(*) FROM ss_t t GROUP BY ROLLUP (1)	-7,1 | 0,1 | 1,1 | 3,1 | 5,1 | NULL,1 | NULL,6	
+x/orderDesc/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY ROLLUP (1) ORDER BY 1 DESC, 2	NULL,1 | NULL,6 | 5,1 | 3,1 | 1,1 | 0,1 | -7,1	
+x/aliasCollide/rows	SELECT t.b AS i, count(*) AS c FROM ss_t t GROUP BY ROLLUP (1)	-70,1 | 0,1 | 1,1 | 30,1 | 9000000000,1 | NULL,1 | NULL,6	
+x/aliasCollideName/rows	SELECT t.b AS i, count(*) AS c FROM ss_t t GROUP BY ROLLUP (i)	ERR 42803	
+x/plain1cube/rows	SELECT t.i AS k, count(*) AS c FROM ss_t t GROUP BY 1, CUBE (t.b)	-7,1 | -7,1 | 0,1 | 0,1 | 1,1 | 1,1 | 3,1 | 3,1 | 5,1 | 5,1 | NULL,1 | NULL,1	ERR 42601
+x/mixedOrdOrd/zero	SELECT t.id / 4 AS p, t.i AS k, count(*) AS c FROM ss_z t GROUP BY 1, ROLLUP (2)	(none)	ERR 42601
+x/null/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY NULL	ERR 42601	ERR 42803
+x/rollupNull/zero	SELECT count(*) AS c FROM ss_z t GROUP BY ROLLUP (NULL)	ERR 42601	0
+x/cast/zero	SELECT count(*) AS c FROM ss_z t GROUP BY 1::int	(none)	
+x/rollupCast/zero	SELECT count(*) AS c FROM ss_z t GROUP BY ROLLUP (1::int)	0	
+x/plus/zero	SELECT count(*) AS c FROM ss_z t GROUP BY +1	(none)	
+x/true/zero	SELECT count(*) AS c FROM ss_z t GROUP BY ROLLUP (true)	ERR 42601	0
+x/aliasExprRollup/zero	SELECT t.i + 1 AS e, count(*) AS c FROM ss_z t GROUP BY ROLLUP (e)	NULL,0	
+x/aliasExprCube2/zero	SELECT t.i + 1 AS e, t.b AS bb, count(*) AS c FROM ss_z t GROUP BY CUBE (e, bb)	NULL,NULL,0	
+x/aliasSets/zero	SELECT t.i AS k, t.b AS bb, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS ((k, bb), (bb), ())	NULL,NULL,0	
+x/ordSetsHavingG/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY ROLLUP (1) HAVING GROUPING(t.i) = 1	NULL,0	
+x/plainOrd2/zero	SELECT t.i AS k, t.b, count(*) AS c FROM ss_z t GROUP BY 1, 2	(none)	
+x/aliasDupCol/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY ROLLUP (k, t.i)	NULL,0	
+x/aliasShadowDup/zero	SELECT t.b AS i, count(*) AS c FROM ss_z t GROUP BY ROLLUP (i, 1)	NULL,0	
+x/caseMix/zero	SELECT t.i AS K, count(*) AS c FROM ss_z t GROUP BY ROLLUP (k, I, 1)	NULL,0	
+x/cubeOrdAlias/zero	SELECT t.i AS k, t.b AS bb, count(*) AS c, GROUPING(t.i, t.b) AS g FROM ss_z t GROUP BY CUBE (1, bb) ORDER BY 1, 2, 4	NULL,NULL,0,3	
+x/setsOrdDupSets/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS ((1), (k), (t.i))	(none)	
+x/plainOrdDup/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY 1, i	(none)	
+x/rollup2/zero	SELECT t.i AS k, t.b, count(*) AS c FROM ss_z t GROUP BY ROLLUP (1, 2)	NULL,NULL,0	
+x/rollup2g/zero	SELECT t.i AS k, t.b, count(*) AS c, GROUPING(t.i, t.b) AS g FROM ss_z t GROUP BY ROLLUP (1, 2)	NULL,NULL,0,3	
+x/cube21/zero	SELECT t.i AS k, t.b, count(*) AS c FROM ss_z t GROUP BY CUBE (2, 1)	NULL,NULL,0	
+x/setsMix/zero	SELECT t.i AS k, t.b, count(*) AS c FROM ss_z t GROUP BY GROUPING SETS ((1), (t.b), ())	NULL,NULL,0	
+x/rollupOrdCol/zero	SELECT t.i AS k, t.b, count(*) AS c FROM ss_z t GROUP BY ROLLUP (1, t.b)	NULL,NULL,0	
+x/dupOrdCol/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY ROLLUP (1, t.i)	NULL,0	
+x/rollupOrdMax/zero	SELECT t.i AS k, max(t.b) AS m FROM ss_z t GROUP BY ROLLUP (1)	NULL,NULL	
+x/issue/zero	SELECT t.i AS k, count(*) FROM ss_z t GROUP BY ROLLUP (1)	NULL,0	
+x/orderDesc/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY ROLLUP (1) ORDER BY 1 DESC, 2	NULL,0	
+x/aliasCollide/zero	SELECT t.b AS i, count(*) AS c FROM ss_z t GROUP BY ROLLUP (1)	NULL,0	
+x/aliasCollideName/zero	SELECT t.b AS i, count(*) AS c FROM ss_z t GROUP BY ROLLUP (i)	ERR 42803	
+x/plain1cube/zero	SELECT t.i AS k, count(*) AS c FROM ss_z t GROUP BY 1, CUBE (t.b)	(none)	ERR 42601
