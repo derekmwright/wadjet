@@ -63,9 +63,10 @@ func TestApproxDistinctFiveArmsAgree(t *testing.T) {
 		cell{"grp/fewStr", "SELECT g, approx_distinct(c_str) AS v FROM typemx GROUP BY g", ""},
 		cell{"grp/many", "SELECT id % 500 AS k, approx_distinct(c_proto) AS v FROM typemx GROUP BY id % 500", ""},
 		cell{"grp/manyCol", "SELECT c_proto, approx_distinct(c_i64) AS v FROM typemx GROUP BY c_proto", ""},
-		// Zero input rows: the single arm answers NULL here (one all-NULL
-		// row answers 0); the DAG must answer what it answers.
-		cell{"filter/zero", "SELECT approx_distinct(c_i32) AS v FROM typemx WHERE id < 0", ""},
+		// Zero input rows: the ungrouped identity row answers 0 on all five
+		// arms (it answered NULL before #1691, as PostgreSQL's analogous
+		// count(distinct) never does).
+		cell{"filter/zero", "SELECT approx_distinct(c_i32) AS v FROM typemx WHERE id < 0", "rows=1 0"},
 		cell{"filter/zeroGrouped", "SELECT g, approx_distinct(c_i32) AS v FROM typemx WHERE id < 0 GROUP BY g", "rows=0 "},
 		cell{"filter/all", "SELECT approx_distinct(c_i32) AS v FROM typemx WHERE id >= 0", "rows=1 4828"},
 		cell{"beside/countStar", "SELECT COUNT(*) AS n, approx_distinct(c_i32) AS v FROM typemx WHERE id < 300", ""},
