@@ -62,7 +62,7 @@ func (h *HashAggregate) nextOwn(_ context.Context) (*batch.RecordBatch, error) {
 	// Standard SQL: COUNT over empty → 0; SUM/AVG/MIN/MAX over empty → NULL.
 	// This happens when all input batches were filtered out before reaching the
 	// aggregate.
-	if len(h.GroupByCols) == 0 && len(h.Aggs) > 0 && h.outputPos == 0 && len(h.keys) == 0 &&
+	if len(h.GroupByCols) == 0 && len(h.GroupingSets) == 0 && len(h.Aggs) > 0 && h.outputPos == 0 && len(h.keys) == 0 &&
 		!h.useIntGroupKey && !h.usePackedGroupKey && !h.useCompactGroupKey {
 		h.outputPos = 1
 		out := batch.NewRecordBatch(h.emitOutputSchema(), 1)
@@ -81,6 +81,12 @@ func (h *HashAggregate) nextOwn(_ context.Context) (*batch.RecordBatch, error) {
 	totalGroups := len(h.strGroupStates)
 	if h.useIntGroupKey || h.usePackedGroupKey || h.useCompactGroupKey {
 		totalGroups = h.numIntGroups
+	}
+	if totalGroups == 0 && h.outputPos == 0 && len(h.GroupingSets) > 0 {
+		if out := h.emptyInputGroupingSetRows(); out != nil {
+			h.outputPos = 1
+			return out, nil
+		}
 	}
 	if h.outputPos >= totalGroups {
 		return nil, nil
@@ -489,6 +495,14 @@ func (h *HashAggregate) outputSchema() []parquet.Column {
 			// A key is a bare copy of its column (ADR-0024 §10).
 			out.Unconstrained = meta.Unconstrained
 		}
+		// A key no batch ever resolved (the aggregate consumed nothing) is
+		// declared by the plan, not guessed as STRING: the one row an empty
+		// grouping set answers over no input carries the key columns, and a
+		// batch's schema outranks the plan's hint (#1335).
+		if (i >= len(h.groupColIdx) || h.groupColIdx[i] < 0) && i < len(h.GroupKeyDecls) && h.GroupKeyDecls[i].Name != "" {
+			out = h.GroupKeyDecls[i]
+			out.Name, out.Nullable = name, true
+		}
 		cols = append(cols, out)
 	}
 	for i, agg := range h.Aggs {
@@ -778,6 +792,55 @@ func AggOutputNames(aggs []AggColumn) []string {
 	out := make([]string, 0, len(aggs))
 	for _, a := range aggs {
 		out = append(out, a.OutputCol)
+	}
+	return out
+}
+
+// emptyInputGroupingSetRows is the answer of a GROUPING SETS / ROLLUP / CUBE
+// aggregate that consumed no rows (#1335). A non-empty grouping set answers
+// nothing over no input, because it has no group; an EMPTY set (the grand
+// total of ROLLUP and CUBE, an explicit `()`) is a single group of every row
+// and so answers ONE row over none, exactly as an ungrouped aggregate does.
+// PostgreSQL emits one such row per empty set the query lists, duplicates
+// included (`GROUPING SETS ((), ())` is two).
+//
+// The row is the ungrouped identity row (COUNT and COUNT(DISTINCT) 0, every
+// other aggregate NULL) with every key NULL, and its GROUPING(...) bits all
+// set for a key the set excludes. It is built here, not from group state,
+// because nothing was consumed to resolve a group's state from. Returns nil
+// when no listed set is empty.
+func (h *HashAggregate) emptyInputGroupingSetRows() *batch.RecordBatch {
+	var emptySets []int
+	for s, set := range h.GroupingSets {
+		if len(set) == 0 {
+			emptySets = append(emptySets, s)
+		}
+	}
+	if len(emptySets) == 0 {
+		return nil
+	}
+	out := batch.NewRecordBatch(h.emitOutputSchema(), len(emptySets))
+	gMasks := h.groupingMasks()
+	base := len(h.GroupByCols) + len(h.Aggs)
+	for i, set := range emptySets {
+		for j := range h.GroupByCols {
+			out.Columns[j].Nulls.SetNull(i)
+		}
+		for j, agg := range h.Aggs {
+			switch agg.Func {
+			case AggCount, AggCountDistinct, AggApproxDistinct:
+				out.Columns[len(h.GroupByCols)+j].SetValue(i, int64(0))
+			default:
+				out.Columns[len(h.GroupByCols)+j].Nulls.SetNull(i)
+			}
+		}
+		if gMasks != nil {
+			for k, mask := range gMasks[set] {
+				if base+k < len(out.Columns) {
+					out.Columns[base+k].SetValue(i, mask)
+				}
+			}
+		}
 	}
 	return out
 }
