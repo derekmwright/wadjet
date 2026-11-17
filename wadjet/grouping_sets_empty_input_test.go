@@ -190,6 +190,43 @@ func TestGroupingSetsEmptyInputFilterResidual(t *testing.T) {
 	}
 }
 
+// TestGroupingSetsEmptyInputOrdinalResidual pins GROUP BY ROLLUP (1), an
+// ordinal inside ROLLUP, over zero rows at what the engine answers today. It
+// is a known residual of #1480, NOT a statement of the right answer: the
+// engine expands ROLLUP (1) into the grand total twice (over non-empty input
+// it answers the grand-total row twice, which is #1480), so with the empty
+// grouping set now answering its row over zero input (#1335) the statement
+// moved from zero rows to two. PostgreSQL 17.11 answers one row. The day
+// #1480 is fixed this pin must change to it.
+func TestGroupingSetsEmptyInputOrdinalResidual(t *testing.T) {
+	ctx := context.Background()
+	for name, cfg := range map[string]Config{
+		"single":  {Store: objstore.NewMemStore(), Bucket: "test"},
+		"spilled": {Store: objstore.NewMemStore(), Bucket: "test", MemoryBudget: 1 << 16},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg.SpillDir = t.TempDir()
+			db, err := Open(ctx, cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { db.Close() })
+			for _, ddl := range []string{
+				"CREATE TABLE st (id INT, g INT, x INT)",
+				"INSERT INTO st VALUES (1,1,10),(2,1,20),(3,2,30)",
+			} {
+				if _, err := db.Query(ctx, ddl); err != nil {
+					t.Fatalf("%s: %v", ddl, err)
+				}
+			}
+			const sql, tip, pg = "SELECT g, MAX(x) FROM st WHERE id < 0 GROUP BY ROLLUP (1)", "NULL,NULL | NULL,NULL", "NULL,NULL"
+			if got := gseRows(db, sql); got != tip {
+				t.Errorf("%s\n got  %q\n pinned %q (known residual of #1480; PostgreSQL 17.11 answers %q)", sql, got, tip, pg)
+			}
+		})
+	}
+}
+
 // gseRows renders a statement's rows sorted and joined by " | ", NULL spelled
 // out, or "ERR <message>".
 func gseRows(db *DB, sql string) string {
