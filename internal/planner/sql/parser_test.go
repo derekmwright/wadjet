@@ -108,7 +108,8 @@ func TestAggregateFilter(t *testing.T) {
 }
 
 func TestAggregateFilterRewrite(t *testing.T) {
-	// COUNT(*) FILTER (WHERE cond) should rewrite to SUM(CASE WHEN cond THEN 1 ELSE 0 END)
+	// COUNT(*) FILTER (WHERE cond) rewrites to COUNT(CASE WHEN cond THEN 1 END): it stays a
+	// COUNT, so it answers 0 over zero rows (#1690). It used to become a SUM.
 	parsed, err := Parse("SELECT COUNT(*) FILTER (WHERE severity = 'critical') AS critical FROM findings")
 	if err != nil {
 		t.Fatal(err)
@@ -121,12 +122,12 @@ func TestAggregateFilterRewrite(t *testing.T) {
 		t.Fatalf("expected 1 column, got %d", len(info.Columns))
 	}
 	col := info.Columns[0]
-	// Should be rewritten to SUM aggregate
+	// Should stay a COUNT aggregate over the CASE
 	if !col.IsAgg {
 		t.Fatal("expected aggregate column")
 	}
-	if col.AggFunc != "sum" {
-		t.Fatalf("expected rewritten to SUM, got %q", col.AggFunc)
+	if col.AggFunc != "count" {
+		t.Fatalf("expected rewritten to COUNT, got %q", col.AggFunc)
 	}
 	if col.Alias != "critical" {
 		t.Fatalf("expected alias 'critical', got %q", col.Alias)

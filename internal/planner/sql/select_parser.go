@@ -3385,8 +3385,8 @@ func columnValueLiteral(n Node) bool {
 // maybeParseFilterAndOver checks for FILTER (WHERE ...) and OVER (...) after
 // a function call. FILTER is rewritten to CASE WHEN at the AST level:
 //
-//	COUNT(*) FILTER (WHERE cond) → SUM(CASE WHEN cond THEN 1 ELSE 0 END)
-//	AGG(expr) FILTER (WHERE cond) → AGG(CASE WHEN cond THEN expr END)
+//	COUNT(*) FILTER (WHERE cond) → COUNT(CASE WHEN cond THEN 1 END)
+//	AGG(expr, rest...) FILTER (WHERE cond) → AGG(CASE WHEN cond THEN expr END, rest...)
 func (p *selectParser) maybeParseOver(fn *FuncCallNode) (Node, error) {
 	// Check for FILTER (WHERE ...) — standard SQL aggregate filtering
 	if p.peek() == TokenIdent && !p.cur.quoted && strings.EqualFold(p.cur.val, "FILTER") {
@@ -3425,31 +3425,43 @@ func (p *selectParser) parseAggFilter(fn *FuncCallNode) (*FuncCallNode, error) {
 		return nil, fmt.Errorf("expected ) after FILTER(WHERE ...)")
 	}
 
-	// Rewrite: COUNT(*) FILTER (WHERE cond) → SUM(CASE WHEN cond THEN 1 ELSE 0 END)
-	if fn.Star && strings.ToLower(fn.Name) == "count" {
+	// ONE rule: a row the predicate rejects contributes NULL as the
+	// aggregate's value argument, and every aggregate this parser accepts
+	// FILTER on skips a NULL value argument. The aggregate itself is never
+	// swapped for another, so each keeps its own answer over no rows
+	// (COUNT 0; SUM, AVG, MIN, MAX NULL) and its own declared type.
+	//
+	//	AGG(a, rest...) FILTER (WHERE p) → AGG(CASE WHEN p THEN a END, rest...)
+	//	COUNT(*)        FILTER (WHERE p) → COUNT(CASE WHEN p THEN 1 END)
+	//
+	// COUNT(*) has no argument to null, so it counts a literal 1 that only
+	// matching rows carry. It used to become SUM(CASE WHEN p THEN 1 ELSE 0
+	// END), which answers NULL over zero rows where COUNT answers 0 and
+	// declares SUM's type (#1690). The arguments after the first (the
+	// separator of STRING_AGG, the second column of CORR) are not per-row
+	// values to null and pass through unchanged.
+	if fn.Star && strings.EqualFold(fn.Name, "count") {
 		return &FuncCallNode{
-			Name: "sum",
+			Name: fn.Name,
 			Args: []Node{
 				&CaseNode{
 					Whens: []WhenClause{{Cond: cond, Result: &Lit{Value: "1", Kind: LitNumber}}},
-					Else:  &Lit{Value: "0", Kind: LitNumber},
 				},
 			},
 		}, nil
 	}
 
-	// Rewrite: AGG(expr) FILTER (WHERE cond) → AGG(CASE WHEN cond THEN expr END)
-	// NULL values from non-matching rows are ignored by all standard aggregates.
 	if len(fn.Args) >= 1 {
+		args := make([]Node, len(fn.Args))
+		copy(args, fn.Args)
+		args[0] = &CaseNode{
+			Whens: []WhenClause{{Cond: cond, Result: fn.Args[0]}},
+			Else:  nil, // NULL → excluded by aggregates
+		}
 		return &FuncCallNode{
 			Name:     fn.Name,
 			Distinct: fn.Distinct,
-			Args: []Node{
-				&CaseNode{
-					Whens: []WhenClause{{Cond: cond, Result: fn.Args[0]}},
-					Else:  nil, // NULL → excluded by aggregates
-				},
-			},
+			Args:     args,
 		}, nil
 	}
 
