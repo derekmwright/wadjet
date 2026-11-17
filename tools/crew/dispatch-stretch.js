@@ -21,6 +21,8 @@
 //   // An item may carry `resume: { commit, branch, note, ruling }` after the architect has
 //   // ruled on an escalation that the built commit stands: round 1 then skips the build and
 //   // goes to verification and review, and the reviewer is given the ruling.
+//   // An item names `base` when its branch is cut from a commit other than the stretch base.
+//   // A resume block names `reviewFails` (blocked reviews so far) so the three-round rule carries over.
 //   // A resume block names `round` when the resumed commit is not its item's first round.
 //   // A resume block names `base` when the resumed commit was cut from an earlier base than
 //   // the stretch's (verification checks descent from it).
@@ -129,6 +131,8 @@ for (const item of items) {
   let build = null
   let required = []
   let prevCount = null
+  let reviewFails = (item.resume && item.resume.reviewFails) || 0 // blocked REVIEWS so far: the three-round rule counts these
+  let verifyFails = 0 // failed hand-back checks: clerical, counted apart
   // A resumed commit is round `resume.round` of its item (default 1); branch and note names
   // of later rounds continue from there, so they never collide with an earlier round's.
   let resumePending = false
@@ -139,6 +143,7 @@ for (const item of items) {
       required = item.resume.required
       prevCount = required.length
       round = resumedRound
+      if (!reviewFails) reviewFails = 1
     } else {
       resumePending = true
       round = resumedRound - 1
@@ -188,7 +193,7 @@ You are the DISPATCHER verifying a worker's hand-back for ${item.id}. A hand-bac
 
 Hand-back: ${JSON.stringify(build)}
 
-Check: (1) commit ${build.commit} exists and is the tip of ${build.branch}; (2) it descends from ${(item.resume && item.resume.base) || args.base}; (3) it touches only the files the hand-back or the note names; (4) the note ${build.note} exists and states a cause and its claims; (5) the note records a negative control; (6) no "Co-Authored-By" or AI trailer, and a Signed-off-by is present.
+Check: (1) commit ${build.commit} exists and is the tip of ${build.branch}; (2) it descends from ${(item.resume && item.resume.base) || item.base || args.base}; (3) it changes at least one file inside the repository (list them with git; a hand-back or note that names fewer files than the commit touches is NOT a failure); (4) the note ${build.note} exists and states a cause and its claims; (5) the note records a negative control; (6) no "Co-Authored-By" or AI trailer, and a Signed-off-by is present.
 ${item.resume ? `\nThis build already escalated and the architect has ruled that it stands: ${item.resume.ruling || ''}\nDo not raise that escalation again, and skip check (3): the hand-back carries no file list on a resume. Report a trigger only for something the ruling does not cover.\n` : ''}
 ${TRIGGERS}`,
         { label: `verify:${item.id} r${round}`, phase: 'Verify', model: 'haiku', schema: CHECK })
@@ -222,11 +227,18 @@ Edit nothing in the branch.`,
         required = review.required
         brokeEarlier = !!review.brokeEarlierFix
       } else {
+        // A failed hand-back check is clerical (a missing note, a trailer, a wrong base): it gets
+        // a fix round but is not a blocked review and does not count toward the three-round rule.
+        verifyFails++
         required = check.failures
+        if (verifyFails >= 3) throw esc(6, `the hand-back for ${item.id} failed verification three times: ${required.join('; ')}`)
+        log(`${item.id}: round ${round} hand-back failed verification (${required.length}); retrying`)
+        continue
       }
 
-      // The round-loop rule: rounds one and two get a fix and a retry.
-      if (round >= 3) throw esc(2, `third failed round on ${item.id}: ${required.join('; ')}`)
+      // The round-loop rule, counted in blocked REVIEWS: the first and second get a fix and a retry.
+      reviewFails++
+      if (reviewFails >= 3) throw esc(2, `third blocked review on ${item.id}: ${required.join('; ')}`)
       if (brokeEarlier) throw esc(2, `round ${round} on ${item.id} broke an earlier round's fix`)
       if (prevCount !== null && required.length > prevCount) throw esc(2, `round ${round} on ${item.id} found more problems (${required.length}) than the last (${prevCount})`)
       prevCount = required.length

@@ -103,7 +103,12 @@ Rounds one and two get a fix and a retry. A third failed round stops the loop an
 architect with one question: what did the record leave undecided? The answer is an amendment
 judged before more code is written, or a simpler rule that removes the whole class of defect.
 Escalate earlier if a round finds more problems than the last, or breaks an earlier round's
-fix. The dispatcher script counts this; no agent is asked to remember it.
+fix. The dispatcher script counts this, in blocked REVIEWS; a hand-back that fails the
+dispatcher's clerical checks (a missing note, a trailer, a wrong base) gets its own fix round
+and its own limit, and is not a blocked review. No agent is asked to remember any of it.
+
+The script has a self-test, `node tools/crew/dispatch-stretch.selftest.js`, which runs it
+against a scripted mock. Run it after any edit to the script or its prompts.
 
 A lower tier that needs an extra implementation round has usually cost more than it saved:
 each round is a build, a verification and a strong-model review. Tier choices are judged on
