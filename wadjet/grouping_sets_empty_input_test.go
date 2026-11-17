@@ -152,12 +152,12 @@ func TestGroupingSetsEmptyInputBig(t *testing.T) {
 	}
 }
 
-// TestGroupingSetsEmptyInputFilterResidual pins the COUNT(*) FILTER cells over
-// zero rows at what the engine answers today. They are a known residual of
-// #1690, NOT a statement of the right answer: PostgreSQL 17.11 answers the
-// value in each cell's pg field, and the day #1690 is fixed these pins must
-// change to it.
-func TestGroupingSetsEmptyInputFilterResidual(t *testing.T) {
+// TestGroupingSetsEmptyInputFilter pins the COUNT(*) FILTER cells over zero
+// rows at PostgreSQL 17.11's answer. They were a known residual of #1690: the
+// FILTER clause was rewritten to SUM(CASE WHEN p THEN 1 ELSE 0 END), and the
+// one row an empty grouping set answers over no input carried that SUM's NULL
+// where a COUNT answers 0. The rewrite is COUNT(CASE WHEN p THEN 1 END) now.
+func TestGroupingSetsEmptyInputFilter(t *testing.T) {
 	ctx := context.Background()
 	for name, cfg := range map[string]Config{
 		"single":  {Store: objstore.NewMemStore(), Bucket: "test"},
@@ -178,12 +178,12 @@ func TestGroupingSetsEmptyInputFilterResidual(t *testing.T) {
 					t.Fatalf("%s: %v", ddl, err)
 				}
 			}
-			for _, c := range []struct{ sql, tip, pg string }{
-				{"SELECT g, COUNT(*) FILTER (WHERE x > 10) FROM st WHERE id < 0 GROUP BY ROLLUP(g)", "NULL,NULL", "NULL,0"},
-				{"SELECT COUNT(*) FILTER (WHERE x > 10) FROM st WHERE id < 0 GROUP BY GROUPING SETS ((), ())", "NULL | NULL", "0 | 0"},
+			for _, c := range []struct{ sql, want string }{
+				{"SELECT g, COUNT(*) FILTER (WHERE x > 10) FROM st WHERE id < 0 GROUP BY ROLLUP(g)", "NULL,0"},
+				{"SELECT COUNT(*) FILTER (WHERE x > 10) FROM st WHERE id < 0 GROUP BY GROUPING SETS ((), ())", "0 | 0"},
 			} {
-				if got := gseRows(db, c.sql); got != c.tip {
-					t.Errorf("%s\n got  %q\n pinned %q (known residual of #1690; PostgreSQL 17.11 answers %q)", c.sql, got, c.tip, c.pg)
+				if got := gseRows(db, c.sql); got != c.want {
+					t.Errorf("%s\n got  %q\n want %q (PostgreSQL 17.11)", c.sql, got, c.want)
 				}
 			}
 		})

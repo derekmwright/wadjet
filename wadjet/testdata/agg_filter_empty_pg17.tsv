@@ -1,0 +1,681 @@
+count(*)|zero|s1	SELECT count(*) FILTER (WHERE x > 10) FROM st WHERE id < 0	0	INT64
+count(*)|zero|s2	SELECT g, count(*) FILTER (WHERE x > 10) FROM st WHERE id < 0 GROUP BY g		INT32,INT64
+count(*)|zero|s3	SELECT g, count(*) FILTER (WHERE x > 10) FROM st WHERE id < 0 GROUP BY ROLLUP(g)	NULL,0	INT32,INT64
+count(*)|zero|s4	SELECT count(*) FILTER (WHERE x > 10) FROM st WHERE id < 0 GROUP BY GROUPING SETS ((), ())	0 | 0	INT64
+count(*)|zero|s5	SELECT count(*) FILTER (WHERE x > 10), count(*) FILTER (WHERE x > 15) FROM st WHERE id < 0	0,0	INT64,INT64
+count(*)|zero|s6	SELECT count(*) FILTER (WHERE x > 10), count(*) FROM st WHERE id < 0	0,0	INT64,INT64
+count(*)|zero|s7	SELECT count(*) FILTER (WHERE id > 1) FROM st WHERE id < 0	0	INT64
+count(*)|zero|s8	SELECT g, count(*) FILTER (WHERE x > 10) OVER (PARTITION BY g) FROM st WHERE id < 0		INT32,INT64
+count(*)|none|s1	SELECT count(*) FILTER (WHERE x > 100) FROM st WHERE true	0	INT64
+count(*)|none|s2	SELECT g, count(*) FILTER (WHERE x > 100) FROM st WHERE true GROUP BY g	1,0 | 2,0	INT32,INT64
+count(*)|none|s3	SELECT g, count(*) FILTER (WHERE x > 100) FROM st WHERE true GROUP BY ROLLUP(g)	1,0 | 2,0 | NULL,0	INT32,INT64
+count(*)|none|s4	SELECT count(*) FILTER (WHERE x > 100) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	0 | 0	INT64
+count(*)|none|s5	SELECT count(*) FILTER (WHERE x > 100), count(*) FILTER (WHERE x > 15) FROM st WHERE true	0,2	INT64,INT64
+count(*)|none|s6	SELECT count(*) FILTER (WHERE x > 100), count(*) FROM st WHERE true	0,4	INT64,INT64
+count(*)|none|s7	SELECT count(*) FILTER (WHERE id > 1) FROM st WHERE true	3	INT64
+count(*)|none|s8	SELECT g, count(*) FILTER (WHERE x > 100) OVER (PARTITION BY g) FROM st WHERE true	1,0 | 1,0 | 2,0 | 2,0	INT32,INT64
+count(*)|some|s1	SELECT count(*) FILTER (WHERE x > 10) FROM st WHERE true	2	INT64
+count(*)|some|s2	SELECT g, count(*) FILTER (WHERE x > 10) FROM st WHERE true GROUP BY g	1,1 | 2,1	INT32,INT64
+count(*)|some|s3	SELECT g, count(*) FILTER (WHERE x > 10) FROM st WHERE true GROUP BY ROLLUP(g)	1,1 | 2,1 | NULL,2	INT32,INT64
+count(*)|some|s4	SELECT count(*) FILTER (WHERE x > 10) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	2 | 2	INT64
+count(*)|some|s5	SELECT count(*) FILTER (WHERE x > 10), count(*) FILTER (WHERE x > 15) FROM st WHERE true	2,2	INT64,INT64
+count(*)|some|s6	SELECT count(*) FILTER (WHERE x > 10), count(*) FROM st WHERE true	2,4	INT64,INT64
+count(*)|some|s7	SELECT count(*) FILTER (WHERE id > 1) FROM st WHERE true	3	INT64
+count(*)|some|s8	SELECT g, count(*) FILTER (WHERE x > 10) OVER (PARTITION BY g) FROM st WHERE true	1,1 | 1,1 | 2,1 | 2,1	INT32,INT64
+count(*)|all|s1	SELECT count(*) FILTER (WHERE id > 0) FROM st WHERE true	4	INT64
+count(*)|all|s2	SELECT g, count(*) FILTER (WHERE id > 0) FROM st WHERE true GROUP BY g	1,2 | 2,2	INT32,INT64
+count(*)|all|s3	SELECT g, count(*) FILTER (WHERE id > 0) FROM st WHERE true GROUP BY ROLLUP(g)	1,2 | 2,2 | NULL,4	INT32,INT64
+count(*)|all|s4	SELECT count(*) FILTER (WHERE id > 0) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	4 | 4	INT64
+count(*)|all|s5	SELECT count(*) FILTER (WHERE id > 0), count(*) FILTER (WHERE x > 15) FROM st WHERE true	4,2	INT64,INT64
+count(*)|all|s6	SELECT count(*) FILTER (WHERE id > 0), count(*) FROM st WHERE true	4,4	INT64,INT64
+count(*)|all|s7	SELECT count(*) FILTER (WHERE id > 1) FROM st WHERE true	3	INT64
+count(*)|all|s8	SELECT g, count(*) FILTER (WHERE id > 0) OVER (PARTITION BY g) FROM st WHERE true	1,2 | 1,2 | 2,2 | 2,2	INT32,INT64
+count(*)|nullx|s1	SELECT count(*) FILTER (WHERE x IS NULL) FROM st WHERE true	1	INT64
+count(*)|nullx|s2	SELECT g, count(*) FILTER (WHERE x IS NULL) FROM st WHERE true GROUP BY g	1,0 | 2,1	INT32,INT64
+count(*)|nullx|s3	SELECT g, count(*) FILTER (WHERE x IS NULL) FROM st WHERE true GROUP BY ROLLUP(g)	1,0 | 2,1 | NULL,1	INT32,INT64
+count(*)|nullx|s4	SELECT count(*) FILTER (WHERE x IS NULL) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	1 | 1	INT64
+count(*)|nullx|s5	SELECT count(*) FILTER (WHERE x IS NULL), count(*) FILTER (WHERE x > 15) FROM st WHERE true	1,2	INT64,INT64
+count(*)|nullx|s6	SELECT count(*) FILTER (WHERE x IS NULL), count(*) FROM st WHERE true	1,4	INT64,INT64
+count(*)|nullx|s7	SELECT count(*) FILTER (WHERE id > 1) FROM st WHERE true	3	INT64
+count(*)|nullx|s8	SELECT g, count(*) FILTER (WHERE x IS NULL) OVER (PARTITION BY g) FROM st WHERE true	1,0 | 1,0 | 2,1 | 2,1	INT32,INT64
+count(x)|zero|s1	SELECT count(x) FILTER (WHERE x > 10) FROM st WHERE id < 0	0	INT64
+count(x)|zero|s2	SELECT g, count(x) FILTER (WHERE x > 10) FROM st WHERE id < 0 GROUP BY g		INT32,INT64
+count(x)|zero|s3	SELECT g, count(x) FILTER (WHERE x > 10) FROM st WHERE id < 0 GROUP BY ROLLUP(g)	NULL,0	INT32,INT64
+count(x)|zero|s4	SELECT count(x) FILTER (WHERE x > 10) FROM st WHERE id < 0 GROUP BY GROUPING SETS ((), ())	0 | 0	INT64
+count(x)|zero|s5	SELECT count(x) FILTER (WHERE x > 10), count(x) FILTER (WHERE x > 15) FROM st WHERE id < 0	0,0	INT64,INT64
+count(x)|zero|s6	SELECT count(x) FILTER (WHERE x > 10), count(x) FROM st WHERE id < 0	0,0	INT64,INT64
+count(x)|zero|s7	SELECT count(x) FILTER (WHERE id > 1) FROM st WHERE id < 0	0	INT64
+count(x)|zero|s8	SELECT g, count(x) FILTER (WHERE x > 10) OVER (PARTITION BY g) FROM st WHERE id < 0		INT32,INT64
+count(x)|none|s1	SELECT count(x) FILTER (WHERE x > 100) FROM st WHERE true	0	INT64
+count(x)|none|s2	SELECT g, count(x) FILTER (WHERE x > 100) FROM st WHERE true GROUP BY g	1,0 | 2,0	INT32,INT64
+count(x)|none|s3	SELECT g, count(x) FILTER (WHERE x > 100) FROM st WHERE true GROUP BY ROLLUP(g)	1,0 | 2,0 | NULL,0	INT32,INT64
+count(x)|none|s4	SELECT count(x) FILTER (WHERE x > 100) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	0 | 0	INT64
+count(x)|none|s5	SELECT count(x) FILTER (WHERE x > 100), count(x) FILTER (WHERE x > 15) FROM st WHERE true	0,2	INT64,INT64
+count(x)|none|s6	SELECT count(x) FILTER (WHERE x > 100), count(x) FROM st WHERE true	0,3	INT64,INT64
+count(x)|none|s7	SELECT count(x) FILTER (WHERE id > 1) FROM st WHERE true	2	INT64
+count(x)|none|s8	SELECT g, count(x) FILTER (WHERE x > 100) OVER (PARTITION BY g) FROM st WHERE true	1,0 | 1,0 | 2,0 | 2,0	INT32,INT64
+count(x)|some|s1	SELECT count(x) FILTER (WHERE x > 10) FROM st WHERE true	2	INT64
+count(x)|some|s2	SELECT g, count(x) FILTER (WHERE x > 10) FROM st WHERE true GROUP BY g	1,1 | 2,1	INT32,INT64
+count(x)|some|s3	SELECT g, count(x) FILTER (WHERE x > 10) FROM st WHERE true GROUP BY ROLLUP(g)	1,1 | 2,1 | NULL,2	INT32,INT64
+count(x)|some|s4	SELECT count(x) FILTER (WHERE x > 10) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	2 | 2	INT64
+count(x)|some|s5	SELECT count(x) FILTER (WHERE x > 10), count(x) FILTER (WHERE x > 15) FROM st WHERE true	2,2	INT64,INT64
+count(x)|some|s6	SELECT count(x) FILTER (WHERE x > 10), count(x) FROM st WHERE true	2,3	INT64,INT64
+count(x)|some|s7	SELECT count(x) FILTER (WHERE id > 1) FROM st WHERE true	2	INT64
+count(x)|some|s8	SELECT g, count(x) FILTER (WHERE x > 10) OVER (PARTITION BY g) FROM st WHERE true	1,1 | 1,1 | 2,1 | 2,1	INT32,INT64
+count(x)|all|s1	SELECT count(x) FILTER (WHERE id > 0) FROM st WHERE true	3	INT64
+count(x)|all|s2	SELECT g, count(x) FILTER (WHERE id > 0) FROM st WHERE true GROUP BY g	1,2 | 2,1	INT32,INT64
+count(x)|all|s3	SELECT g, count(x) FILTER (WHERE id > 0) FROM st WHERE true GROUP BY ROLLUP(g)	1,2 | 2,1 | NULL,3	INT32,INT64
+count(x)|all|s4	SELECT count(x) FILTER (WHERE id > 0) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	3 | 3	INT64
+count(x)|all|s5	SELECT count(x) FILTER (WHERE id > 0), count(x) FILTER (WHERE x > 15) FROM st WHERE true	3,2	INT64,INT64
+count(x)|all|s6	SELECT count(x) FILTER (WHERE id > 0), count(x) FROM st WHERE true	3,3	INT64,INT64
+count(x)|all|s7	SELECT count(x) FILTER (WHERE id > 1) FROM st WHERE true	2	INT64
+count(x)|all|s8	SELECT g, count(x) FILTER (WHERE id > 0) OVER (PARTITION BY g) FROM st WHERE true	1,2 | 1,2 | 2,1 | 2,1	INT32,INT64
+count(x)|nullx|s1	SELECT count(x) FILTER (WHERE x IS NULL) FROM st WHERE true	0	INT64
+count(x)|nullx|s2	SELECT g, count(x) FILTER (WHERE x IS NULL) FROM st WHERE true GROUP BY g	1,0 | 2,0	INT32,INT64
+count(x)|nullx|s3	SELECT g, count(x) FILTER (WHERE x IS NULL) FROM st WHERE true GROUP BY ROLLUP(g)	1,0 | 2,0 | NULL,0	INT32,INT64
+count(x)|nullx|s4	SELECT count(x) FILTER (WHERE x IS NULL) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	0 | 0	INT64
+count(x)|nullx|s5	SELECT count(x) FILTER (WHERE x IS NULL), count(x) FILTER (WHERE x > 15) FROM st WHERE true	0,2	INT64,INT64
+count(x)|nullx|s6	SELECT count(x) FILTER (WHERE x IS NULL), count(x) FROM st WHERE true	0,3	INT64,INT64
+count(x)|nullx|s7	SELECT count(x) FILTER (WHERE id > 1) FROM st WHERE true	2	INT64
+count(x)|nullx|s8	SELECT g, count(x) FILTER (WHERE x IS NULL) OVER (PARTITION BY g) FROM st WHERE true	1,0 | 1,0 | 2,0 | 2,0	INT32,INT64
+count(distinct x)|zero|s1	SELECT count(distinct x) FILTER (WHERE x > 10) FROM st WHERE id < 0	0	INT64
+count(distinct x)|zero|s2	SELECT g, count(distinct x) FILTER (WHERE x > 10) FROM st WHERE id < 0 GROUP BY g		INT32,INT64
+count(distinct x)|zero|s3	SELECT g, count(distinct x) FILTER (WHERE x > 10) FROM st WHERE id < 0 GROUP BY ROLLUP(g)	NULL,0	INT32,INT64
+count(distinct x)|zero|s4	SELECT count(distinct x) FILTER (WHERE x > 10) FROM st WHERE id < 0 GROUP BY GROUPING SETS ((), ())	0 | 0	INT64
+count(distinct x)|zero|s5	SELECT count(distinct x) FILTER (WHERE x > 10), count(distinct x) FILTER (WHERE x > 15) FROM st WHERE id < 0	0,0	INT64,INT64
+count(distinct x)|zero|s6	SELECT count(distinct x) FILTER (WHERE x > 10), count(distinct x) FROM st WHERE id < 0	0,0	INT64,INT64
+count(distinct x)|zero|s7	SELECT count(distinct x) FILTER (WHERE id > 1) FROM st WHERE id < 0	0	INT64
+count(distinct x)|none|s1	SELECT count(distinct x) FILTER (WHERE x > 100) FROM st WHERE true	0	INT64
+count(distinct x)|none|s2	SELECT g, count(distinct x) FILTER (WHERE x > 100) FROM st WHERE true GROUP BY g	1,0 | 2,0	INT32,INT64
+count(distinct x)|none|s3	SELECT g, count(distinct x) FILTER (WHERE x > 100) FROM st WHERE true GROUP BY ROLLUP(g)	1,0 | 2,0 | NULL,0	INT32,INT64
+count(distinct x)|none|s4	SELECT count(distinct x) FILTER (WHERE x > 100) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	0 | 0	INT64
+count(distinct x)|none|s5	SELECT count(distinct x) FILTER (WHERE x > 100), count(distinct x) FILTER (WHERE x > 15) FROM st WHERE true	0,2	INT64,INT64
+count(distinct x)|none|s6	SELECT count(distinct x) FILTER (WHERE x > 100), count(distinct x) FROM st WHERE true	0,3	INT64,INT64
+count(distinct x)|none|s7	SELECT count(distinct x) FILTER (WHERE id > 1) FROM st WHERE true	2	INT64
+count(distinct x)|some|s2	SELECT g, count(distinct x) FILTER (WHERE x > 10) FROM st WHERE true GROUP BY g	1,1 | 2,1	INT32,INT64
+count(distinct x)|some|s3	SELECT g, count(distinct x) FILTER (WHERE x > 10) FROM st WHERE true GROUP BY ROLLUP(g)	1,1 | 2,1 | NULL,2	INT32,INT64
+count(distinct x)|some|s4	SELECT count(distinct x) FILTER (WHERE x > 10) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	2 | 2	INT64
+count(distinct x)|some|s5	SELECT count(distinct x) FILTER (WHERE x > 10), count(distinct x) FILTER (WHERE x > 15) FROM st WHERE true	2,2	INT64,INT64
+count(distinct x)|some|s6	SELECT count(distinct x) FILTER (WHERE x > 10), count(distinct x) FROM st WHERE true	2,3	INT64,INT64
+count(distinct x)|some|s7	SELECT count(distinct x) FILTER (WHERE id > 1) FROM st WHERE true	2	INT64
+count(distinct x)|all|s1	SELECT count(distinct x) FILTER (WHERE id > 0) FROM st WHERE true	3	-
+count(distinct x)|all|s2	SELECT g, count(distinct x) FILTER (WHERE id > 0) FROM st WHERE true GROUP BY g	1,2 | 2,1	INT32,INT64
+count(distinct x)|all|s3	SELECT g, count(distinct x) FILTER (WHERE id > 0) FROM st WHERE true GROUP BY ROLLUP(g)	1,2 | 2,1 | NULL,3	INT32,INT64
+count(distinct x)|all|s4	SELECT count(distinct x) FILTER (WHERE id > 0) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	3 | 3	INT64
+count(distinct x)|all|s5	SELECT count(distinct x) FILTER (WHERE id > 0), count(distinct x) FILTER (WHERE x > 15) FROM st WHERE true	3,2	INT64,INT64
+count(distinct x)|all|s6	SELECT count(distinct x) FILTER (WHERE id > 0), count(distinct x) FROM st WHERE true	3,3	INT64,INT64
+count(distinct x)|all|s7	SELECT count(distinct x) FILTER (WHERE id > 1) FROM st WHERE true	2	INT64
+count(distinct x)|nullx|s1	SELECT count(distinct x) FILTER (WHERE x IS NULL) FROM st WHERE true	0	INT64
+count(distinct x)|nullx|s2	SELECT g, count(distinct x) FILTER (WHERE x IS NULL) FROM st WHERE true GROUP BY g	1,0 | 2,0	INT32,INT64
+count(distinct x)|nullx|s3	SELECT g, count(distinct x) FILTER (WHERE x IS NULL) FROM st WHERE true GROUP BY ROLLUP(g)	1,0 | 2,0 | NULL,0	INT32,INT64
+count(distinct x)|nullx|s4	SELECT count(distinct x) FILTER (WHERE x IS NULL) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	0 | 0	INT64
+count(distinct x)|nullx|s5	SELECT count(distinct x) FILTER (WHERE x IS NULL), count(distinct x) FILTER (WHERE x > 15) FROM st WHERE true	0,2	INT64,INT64
+count(distinct x)|nullx|s6	SELECT count(distinct x) FILTER (WHERE x IS NULL), count(distinct x) FROM st WHERE true	0,3	INT64,INT64
+count(distinct x)|nullx|s7	SELECT count(distinct x) FILTER (WHERE id > 1) FROM st WHERE true	2	INT64
+sum(x)|zero|s1	SELECT sum(x) FILTER (WHERE x > 10) FROM st WHERE id < 0	NULL	-
+sum(x)|zero|s2	SELECT g, sum(x) FILTER (WHERE x > 10) FROM st WHERE id < 0 GROUP BY g		INT32,INT64
+sum(x)|zero|s3	SELECT g, sum(x) FILTER (WHERE x > 10) FROM st WHERE id < 0 GROUP BY ROLLUP(g)	NULL,NULL	INT32,INT64
+sum(x)|zero|s4	SELECT sum(x) FILTER (WHERE x > 10) FROM st WHERE id < 0 GROUP BY GROUPING SETS ((), ())	NULL | NULL	INT64
+sum(x)|zero|s5	SELECT sum(x) FILTER (WHERE x > 10), sum(x) FILTER (WHERE x > 15) FROM st WHERE id < 0	NULL,NULL	INT64,INT64
+sum(x)|zero|s6	SELECT sum(x) FILTER (WHERE x > 10), sum(x) FROM st WHERE id < 0	NULL,NULL	INT64,INT64
+sum(x)|zero|s7	SELECT sum(x) FILTER (WHERE id > 1) FROM st WHERE id < 0	NULL	INT64
+sum(x)|zero|s8	SELECT g, sum(x) FILTER (WHERE x > 10) OVER (PARTITION BY g) FROM st WHERE id < 0		INT32,INT64
+sum(x)|none|s1	SELECT sum(x) FILTER (WHERE x > 100) FROM st WHERE true	NULL	INT64
+sum(x)|none|s2	SELECT g, sum(x) FILTER (WHERE x > 100) FROM st WHERE true GROUP BY g	1,NULL | 2,NULL	INT32,INT64
+sum(x)|none|s3	SELECT g, sum(x) FILTER (WHERE x > 100) FROM st WHERE true GROUP BY ROLLUP(g)	1,NULL | 2,NULL | NULL,NULL	INT32,INT64
+sum(x)|none|s4	SELECT sum(x) FILTER (WHERE x > 100) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	NULL | NULL	INT64
+sum(x)|none|s5	SELECT sum(x) FILTER (WHERE x > 100), sum(x) FILTER (WHERE x > 15) FROM st WHERE true	NULL,50	INT64,INT64
+sum(x)|none|s6	SELECT sum(x) FILTER (WHERE x > 100), sum(x) FROM st WHERE true	NULL,60	INT64,INT64
+sum(x)|none|s7	SELECT sum(x) FILTER (WHERE id > 1) FROM st WHERE true	50	INT64
+sum(x)|none|s8	SELECT g, sum(x) FILTER (WHERE x > 100) OVER (PARTITION BY g) FROM st WHERE true	1,NULL | 1,NULL | 2,NULL | 2,NULL	INT32,INT64
+sum(x)|some|s1	SELECT sum(x) FILTER (WHERE x > 10) FROM st WHERE true	50	INT64
+sum(x)|some|s2	SELECT g, sum(x) FILTER (WHERE x > 10) FROM st WHERE true GROUP BY g	1,20 | 2,30	INT32,INT64
+sum(x)|some|s3	SELECT g, sum(x) FILTER (WHERE x > 10) FROM st WHERE true GROUP BY ROLLUP(g)	1,20 | 2,30 | NULL,50	INT32,INT64
+sum(x)|some|s4	SELECT sum(x) FILTER (WHERE x > 10) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	50 | 50	INT64
+sum(x)|some|s5	SELECT sum(x) FILTER (WHERE x > 10), sum(x) FILTER (WHERE x > 15) FROM st WHERE true	50,50	INT64,INT64
+sum(x)|some|s6	SELECT sum(x) FILTER (WHERE x > 10), sum(x) FROM st WHERE true	50,60	INT64,INT64
+sum(x)|some|s7	SELECT sum(x) FILTER (WHERE id > 1) FROM st WHERE true	50	INT64
+sum(x)|some|s8	SELECT g, sum(x) FILTER (WHERE x > 10) OVER (PARTITION BY g) FROM st WHERE true	1,20 | 1,20 | 2,30 | 2,30	INT32,INT64
+sum(x)|all|s1	SELECT sum(x) FILTER (WHERE id > 0) FROM st WHERE true	60	INT64
+sum(x)|all|s2	SELECT g, sum(x) FILTER (WHERE id > 0) FROM st WHERE true GROUP BY g	1,30 | 2,30	INT32,INT64
+sum(x)|all|s3	SELECT g, sum(x) FILTER (WHERE id > 0) FROM st WHERE true GROUP BY ROLLUP(g)	1,30 | 2,30 | NULL,60	INT32,INT64
+sum(x)|all|s4	SELECT sum(x) FILTER (WHERE id > 0) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	60 | 60	INT64
+sum(x)|all|s5	SELECT sum(x) FILTER (WHERE id > 0), sum(x) FILTER (WHERE x > 15) FROM st WHERE true	60,50	INT64,INT64
+sum(x)|all|s6	SELECT sum(x) FILTER (WHERE id > 0), sum(x) FROM st WHERE true	60,60	INT64,INT64
+sum(x)|all|s7	SELECT sum(x) FILTER (WHERE id > 1) FROM st WHERE true	50	INT64
+sum(x)|all|s8	SELECT g, sum(x) FILTER (WHERE id > 0) OVER (PARTITION BY g) FROM st WHERE true	1,30 | 1,30 | 2,30 | 2,30	INT32,INT64
+sum(x)|nullx|s1	SELECT sum(x) FILTER (WHERE x IS NULL) FROM st WHERE true	NULL	INT64
+sum(x)|nullx|s2	SELECT g, sum(x) FILTER (WHERE x IS NULL) FROM st WHERE true GROUP BY g	1,NULL | 2,NULL	INT32,INT64
+sum(x)|nullx|s3	SELECT g, sum(x) FILTER (WHERE x IS NULL) FROM st WHERE true GROUP BY ROLLUP(g)	1,NULL | 2,NULL | NULL,NULL	INT32,INT64
+sum(x)|nullx|s4	SELECT sum(x) FILTER (WHERE x IS NULL) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	NULL | NULL	INT64
+sum(x)|nullx|s5	SELECT sum(x) FILTER (WHERE x IS NULL), sum(x) FILTER (WHERE x > 15) FROM st WHERE true	NULL,50	INT64,INT64
+sum(x)|nullx|s6	SELECT sum(x) FILTER (WHERE x IS NULL), sum(x) FROM st WHERE true	NULL,60	INT64,INT64
+sum(x)|nullx|s7	SELECT sum(x) FILTER (WHERE id > 1) FROM st WHERE true	50	INT64
+sum(x)|nullx|s8	SELECT g, sum(x) FILTER (WHERE x IS NULL) OVER (PARTITION BY g) FROM st WHERE true	1,NULL | 1,NULL | 2,NULL | 2,NULL	INT32,INT64
+avg(x)|zero|s1	SELECT avg(x) FILTER (WHERE x > 10) FROM st WHERE id < 0	NULL	DECIMAL
+avg(x)|zero|s2	SELECT g, avg(x) FILTER (WHERE x > 10) FROM st WHERE id < 0 GROUP BY g		INT32,DECIMAL
+avg(x)|zero|s3	SELECT g, avg(x) FILTER (WHERE x > 10) FROM st WHERE id < 0 GROUP BY ROLLUP(g)	NULL,NULL	INT32,DECIMAL
+avg(x)|zero|s4	SELECT avg(x) FILTER (WHERE x > 10) FROM st WHERE id < 0 GROUP BY GROUPING SETS ((), ())	NULL | NULL	DECIMAL
+avg(x)|zero|s5	SELECT avg(x) FILTER (WHERE x > 10), avg(x) FILTER (WHERE x > 15) FROM st WHERE id < 0	NULL,NULL	DECIMAL,DECIMAL
+avg(x)|zero|s6	SELECT avg(x) FILTER (WHERE x > 10), avg(x) FROM st WHERE id < 0	NULL,NULL	DECIMAL,DECIMAL
+avg(x)|zero|s7	SELECT avg(x) FILTER (WHERE id > 1) FROM st WHERE id < 0	NULL	DECIMAL
+avg(x)|zero|s8	SELECT g, avg(x) FILTER (WHERE x > 10) OVER (PARTITION BY g) FROM st WHERE id < 0		INT32,DECIMAL
+avg(x)|none|s1	SELECT avg(x) FILTER (WHERE x > 100) FROM st WHERE true	NULL	DECIMAL
+avg(x)|none|s2	SELECT g, avg(x) FILTER (WHERE x > 100) FROM st WHERE true GROUP BY g	1,NULL | 2,NULL	INT32,DECIMAL
+avg(x)|none|s3	SELECT g, avg(x) FILTER (WHERE x > 100) FROM st WHERE true GROUP BY ROLLUP(g)	1,NULL | 2,NULL | NULL,NULL	INT32,DECIMAL
+avg(x)|none|s4	SELECT avg(x) FILTER (WHERE x > 100) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	NULL | NULL	DECIMAL
+avg(x)|none|s5	SELECT avg(x) FILTER (WHERE x > 100), avg(x) FILTER (WHERE x > 15) FROM st WHERE true	NULL,25	DECIMAL,DECIMAL
+avg(x)|none|s6	SELECT avg(x) FILTER (WHERE x > 100), avg(x) FROM st WHERE true	NULL,20	DECIMAL,DECIMAL
+avg(x)|none|s7	SELECT avg(x) FILTER (WHERE id > 1) FROM st WHERE true	25	DECIMAL
+avg(x)|none|s8	SELECT g, avg(x) FILTER (WHERE x > 100) OVER (PARTITION BY g) FROM st WHERE true	1,NULL | 1,NULL | 2,NULL | 2,NULL	INT32,DECIMAL
+avg(x)|some|s1	SELECT avg(x) FILTER (WHERE x > 10) FROM st WHERE true	25	DECIMAL
+avg(x)|some|s2	SELECT g, avg(x) FILTER (WHERE x > 10) FROM st WHERE true GROUP BY g	1,20 | 2,30	INT32,DECIMAL
+avg(x)|some|s3	SELECT g, avg(x) FILTER (WHERE x > 10) FROM st WHERE true GROUP BY ROLLUP(g)	1,20 | 2,30 | NULL,25	INT32,DECIMAL
+avg(x)|some|s4	SELECT avg(x) FILTER (WHERE x > 10) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	25 | 25	DECIMAL
+avg(x)|some|s5	SELECT avg(x) FILTER (WHERE x > 10), avg(x) FILTER (WHERE x > 15) FROM st WHERE true	25,25	DECIMAL,DECIMAL
+avg(x)|some|s6	SELECT avg(x) FILTER (WHERE x > 10), avg(x) FROM st WHERE true	25,20	DECIMAL,DECIMAL
+avg(x)|some|s7	SELECT avg(x) FILTER (WHERE id > 1) FROM st WHERE true	25	DECIMAL
+avg(x)|some|s8	SELECT g, avg(x) FILTER (WHERE x > 10) OVER (PARTITION BY g) FROM st WHERE true	1,20 | 1,20 | 2,30 | 2,30	INT32,DECIMAL
+avg(x)|all|s1	SELECT avg(x) FILTER (WHERE id > 0) FROM st WHERE true	20	DECIMAL
+avg(x)|all|s2	SELECT g, avg(x) FILTER (WHERE id > 0) FROM st WHERE true GROUP BY g	1,15 | 2,30	INT32,DECIMAL
+avg(x)|all|s3	SELECT g, avg(x) FILTER (WHERE id > 0) FROM st WHERE true GROUP BY ROLLUP(g)	1,15 | 2,30 | NULL,20	INT32,DECIMAL
+avg(x)|all|s4	SELECT avg(x) FILTER (WHERE id > 0) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	20 | 20	DECIMAL
+avg(x)|all|s5	SELECT avg(x) FILTER (WHERE id > 0), avg(x) FILTER (WHERE x > 15) FROM st WHERE true	20,25	DECIMAL,DECIMAL
+avg(x)|all|s6	SELECT avg(x) FILTER (WHERE id > 0), avg(x) FROM st WHERE true	20,20	DECIMAL,DECIMAL
+avg(x)|all|s7	SELECT avg(x) FILTER (WHERE id > 1) FROM st WHERE true	25	DECIMAL
+avg(x)|all|s8	SELECT g, avg(x) FILTER (WHERE id > 0) OVER (PARTITION BY g) FROM st WHERE true	1,15 | 1,15 | 2,30 | 2,30	INT32,DECIMAL
+avg(x)|nullx|s1	SELECT avg(x) FILTER (WHERE x IS NULL) FROM st WHERE true	NULL	DECIMAL
+avg(x)|nullx|s2	SELECT g, avg(x) FILTER (WHERE x IS NULL) FROM st WHERE true GROUP BY g	1,NULL | 2,NULL	INT32,DECIMAL
+avg(x)|nullx|s3	SELECT g, avg(x) FILTER (WHERE x IS NULL) FROM st WHERE true GROUP BY ROLLUP(g)	1,NULL | 2,NULL | NULL,NULL	INT32,DECIMAL
+avg(x)|nullx|s4	SELECT avg(x) FILTER (WHERE x IS NULL) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	NULL | NULL	DECIMAL
+avg(x)|nullx|s5	SELECT avg(x) FILTER (WHERE x IS NULL), avg(x) FILTER (WHERE x > 15) FROM st WHERE true	NULL,25	DECIMAL,DECIMAL
+avg(x)|nullx|s6	SELECT avg(x) FILTER (WHERE x IS NULL), avg(x) FROM st WHERE true	NULL,20	DECIMAL,DECIMAL
+avg(x)|nullx|s7	SELECT avg(x) FILTER (WHERE id > 1) FROM st WHERE true	25	DECIMAL
+avg(x)|nullx|s8	SELECT g, avg(x) FILTER (WHERE x IS NULL) OVER (PARTITION BY g) FROM st WHERE true	1,NULL | 1,NULL | 2,NULL | 2,NULL	INT32,DECIMAL
+min(x)|zero|s1	SELECT min(x) FILTER (WHERE x > 10) FROM st WHERE id < 0	NULL	INT32
+min(x)|zero|s2	SELECT g, min(x) FILTER (WHERE x > 10) FROM st WHERE id < 0 GROUP BY g		INT32,INT32
+min(x)|zero|s3	SELECT g, min(x) FILTER (WHERE x > 10) FROM st WHERE id < 0 GROUP BY ROLLUP(g)	NULL,NULL	INT32,INT32
+min(x)|zero|s4	SELECT min(x) FILTER (WHERE x > 10) FROM st WHERE id < 0 GROUP BY GROUPING SETS ((), ())	NULL | NULL	INT32
+min(x)|zero|s5	SELECT min(x) FILTER (WHERE x > 10), min(x) FILTER (WHERE x > 15) FROM st WHERE id < 0	NULL,NULL	INT32,INT32
+min(x)|zero|s6	SELECT min(x) FILTER (WHERE x > 10), min(x) FROM st WHERE id < 0	NULL,NULL	INT32,INT32
+min(x)|zero|s7	SELECT min(x) FILTER (WHERE id > 1) FROM st WHERE id < 0	NULL	INT32
+min(x)|zero|s8	SELECT g, min(x) FILTER (WHERE x > 10) OVER (PARTITION BY g) FROM st WHERE id < 0		INT32,INT32
+min(x)|none|s1	SELECT min(x) FILTER (WHERE x > 100) FROM st WHERE true	NULL	INT32
+min(x)|none|s2	SELECT g, min(x) FILTER (WHERE x > 100) FROM st WHERE true GROUP BY g	1,NULL | 2,NULL	INT32,INT32
+min(x)|none|s3	SELECT g, min(x) FILTER (WHERE x > 100) FROM st WHERE true GROUP BY ROLLUP(g)	1,NULL | 2,NULL | NULL,NULL	INT32,INT32
+min(x)|none|s4	SELECT min(x) FILTER (WHERE x > 100) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	NULL | NULL	INT32
+min(x)|none|s5	SELECT min(x) FILTER (WHERE x > 100), min(x) FILTER (WHERE x > 15) FROM st WHERE true	NULL,20	INT32,INT32
+min(x)|none|s6	SELECT min(x) FILTER (WHERE x > 100), min(x) FROM st WHERE true	NULL,10	INT32,INT32
+min(x)|none|s7	SELECT min(x) FILTER (WHERE id > 1) FROM st WHERE true	20	INT32
+min(x)|none|s8	SELECT g, min(x) FILTER (WHERE x > 100) OVER (PARTITION BY g) FROM st WHERE true	1,NULL | 1,NULL | 2,NULL | 2,NULL	INT32,INT32
+min(x)|some|s1	SELECT min(x) FILTER (WHERE x > 10) FROM st WHERE true	20	INT32
+min(x)|some|s2	SELECT g, min(x) FILTER (WHERE x > 10) FROM st WHERE true GROUP BY g	1,20 | 2,30	INT32,INT32
+min(x)|some|s3	SELECT g, min(x) FILTER (WHERE x > 10) FROM st WHERE true GROUP BY ROLLUP(g)	1,20 | 2,30 | NULL,20	INT32,INT32
+min(x)|some|s4	SELECT min(x) FILTER (WHERE x > 10) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	20 | 20	INT32
+min(x)|some|s5	SELECT min(x) FILTER (WHERE x > 10), min(x) FILTER (WHERE x > 15) FROM st WHERE true	20,20	INT32,INT32
+min(x)|some|s6	SELECT min(x) FILTER (WHERE x > 10), min(x) FROM st WHERE true	20,10	INT32,INT32
+min(x)|some|s7	SELECT min(x) FILTER (WHERE id > 1) FROM st WHERE true	20	INT32
+min(x)|some|s8	SELECT g, min(x) FILTER (WHERE x > 10) OVER (PARTITION BY g) FROM st WHERE true	1,20 | 1,20 | 2,30 | 2,30	INT32,INT32
+min(x)|all|s1	SELECT min(x) FILTER (WHERE id > 0) FROM st WHERE true	10	INT32
+min(x)|all|s2	SELECT g, min(x) FILTER (WHERE id > 0) FROM st WHERE true GROUP BY g	1,10 | 2,30	INT32,INT32
+min(x)|all|s3	SELECT g, min(x) FILTER (WHERE id > 0) FROM st WHERE true GROUP BY ROLLUP(g)	1,10 | 2,30 | NULL,10	INT32,INT32
+min(x)|all|s4	SELECT min(x) FILTER (WHERE id > 0) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	10 | 10	INT32
+min(x)|all|s5	SELECT min(x) FILTER (WHERE id > 0), min(x) FILTER (WHERE x > 15) FROM st WHERE true	10,20	INT32,INT32
+min(x)|all|s6	SELECT min(x) FILTER (WHERE id > 0), min(x) FROM st WHERE true	10,10	INT32,INT32
+min(x)|all|s7	SELECT min(x) FILTER (WHERE id > 1) FROM st WHERE true	20	INT32
+min(x)|all|s8	SELECT g, min(x) FILTER (WHERE id > 0) OVER (PARTITION BY g) FROM st WHERE true	1,10 | 1,10 | 2,30 | 2,30	INT32,INT32
+min(x)|nullx|s1	SELECT min(x) FILTER (WHERE x IS NULL) FROM st WHERE true	NULL	INT32
+min(x)|nullx|s2	SELECT g, min(x) FILTER (WHERE x IS NULL) FROM st WHERE true GROUP BY g	1,NULL | 2,NULL	INT32,INT32
+min(x)|nullx|s3	SELECT g, min(x) FILTER (WHERE x IS NULL) FROM st WHERE true GROUP BY ROLLUP(g)	1,NULL | 2,NULL | NULL,NULL	INT32,INT32
+min(x)|nullx|s4	SELECT min(x) FILTER (WHERE x IS NULL) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	NULL | NULL	INT32
+min(x)|nullx|s5	SELECT min(x) FILTER (WHERE x IS NULL), min(x) FILTER (WHERE x > 15) FROM st WHERE true	NULL,20	INT32,INT32
+min(x)|nullx|s6	SELECT min(x) FILTER (WHERE x IS NULL), min(x) FROM st WHERE true	NULL,10	INT32,INT32
+min(x)|nullx|s7	SELECT min(x) FILTER (WHERE id > 1) FROM st WHERE true	20	INT32
+min(x)|nullx|s8	SELECT g, min(x) FILTER (WHERE x IS NULL) OVER (PARTITION BY g) FROM st WHERE true	1,NULL | 1,NULL | 2,NULL | 2,NULL	INT32,INT32
+max(x)|zero|s1	SELECT max(x) FILTER (WHERE x > 10) FROM st WHERE id < 0	NULL	INT32
+max(x)|zero|s2	SELECT g, max(x) FILTER (WHERE x > 10) FROM st WHERE id < 0 GROUP BY g		INT32,INT32
+max(x)|zero|s3	SELECT g, max(x) FILTER (WHERE x > 10) FROM st WHERE id < 0 GROUP BY ROLLUP(g)	NULL,NULL	INT32,INT32
+max(x)|zero|s4	SELECT max(x) FILTER (WHERE x > 10) FROM st WHERE id < 0 GROUP BY GROUPING SETS ((), ())	NULL | NULL	INT32
+max(x)|zero|s5	SELECT max(x) FILTER (WHERE x > 10), max(x) FILTER (WHERE x > 15) FROM st WHERE id < 0	NULL,NULL	INT32,INT32
+max(x)|zero|s6	SELECT max(x) FILTER (WHERE x > 10), max(x) FROM st WHERE id < 0	NULL,NULL	INT32,INT32
+max(x)|zero|s7	SELECT max(x) FILTER (WHERE id > 1) FROM st WHERE id < 0	NULL	INT32
+max(x)|zero|s8	SELECT g, max(x) FILTER (WHERE x > 10) OVER (PARTITION BY g) FROM st WHERE id < 0		INT32,INT32
+max(x)|none|s1	SELECT max(x) FILTER (WHERE x > 100) FROM st WHERE true	NULL	INT32
+max(x)|none|s2	SELECT g, max(x) FILTER (WHERE x > 100) FROM st WHERE true GROUP BY g	1,NULL | 2,NULL	INT32,INT32
+max(x)|none|s3	SELECT g, max(x) FILTER (WHERE x > 100) FROM st WHERE true GROUP BY ROLLUP(g)	1,NULL | 2,NULL | NULL,NULL	INT32,INT32
+max(x)|none|s4	SELECT max(x) FILTER (WHERE x > 100) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	NULL | NULL	INT32
+max(x)|none|s5	SELECT max(x) FILTER (WHERE x > 100), max(x) FILTER (WHERE x > 15) FROM st WHERE true	NULL,30	INT32,INT32
+max(x)|none|s6	SELECT max(x) FILTER (WHERE x > 100), max(x) FROM st WHERE true	NULL,30	INT32,INT32
+max(x)|none|s7	SELECT max(x) FILTER (WHERE id > 1) FROM st WHERE true	30	INT32
+max(x)|none|s8	SELECT g, max(x) FILTER (WHERE x > 100) OVER (PARTITION BY g) FROM st WHERE true	1,NULL | 1,NULL | 2,NULL | 2,NULL	INT32,INT32
+max(x)|some|s1	SELECT max(x) FILTER (WHERE x > 10) FROM st WHERE true	30	INT32
+max(x)|some|s2	SELECT g, max(x) FILTER (WHERE x > 10) FROM st WHERE true GROUP BY g	1,20 | 2,30	INT32,INT32
+max(x)|some|s3	SELECT g, max(x) FILTER (WHERE x > 10) FROM st WHERE true GROUP BY ROLLUP(g)	1,20 | 2,30 | NULL,30	INT32,INT32
+max(x)|some|s4	SELECT max(x) FILTER (WHERE x > 10) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	30 | 30	INT32
+max(x)|some|s5	SELECT max(x) FILTER (WHERE x > 10), max(x) FILTER (WHERE x > 15) FROM st WHERE true	30,30	INT32,INT32
+max(x)|some|s6	SELECT max(x) FILTER (WHERE x > 10), max(x) FROM st WHERE true	30,30	INT32,INT32
+max(x)|some|s7	SELECT max(x) FILTER (WHERE id > 1) FROM st WHERE true	30	INT32
+max(x)|some|s8	SELECT g, max(x) FILTER (WHERE x > 10) OVER (PARTITION BY g) FROM st WHERE true	1,20 | 1,20 | 2,30 | 2,30	INT32,INT32
+max(x)|all|s1	SELECT max(x) FILTER (WHERE id > 0) FROM st WHERE true	30	INT32
+max(x)|all|s2	SELECT g, max(x) FILTER (WHERE id > 0) FROM st WHERE true GROUP BY g	1,20 | 2,30	INT32,INT32
+max(x)|all|s3	SELECT g, max(x) FILTER (WHERE id > 0) FROM st WHERE true GROUP BY ROLLUP(g)	1,20 | 2,30 | NULL,30	INT32,INT32
+max(x)|all|s4	SELECT max(x) FILTER (WHERE id > 0) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	30 | 30	INT32
+max(x)|all|s5	SELECT max(x) FILTER (WHERE id > 0), max(x) FILTER (WHERE x > 15) FROM st WHERE true	30,30	INT32,INT32
+max(x)|all|s6	SELECT max(x) FILTER (WHERE id > 0), max(x) FROM st WHERE true	30,30	INT32,INT32
+max(x)|all|s7	SELECT max(x) FILTER (WHERE id > 1) FROM st WHERE true	30	INT32
+max(x)|all|s8	SELECT g, max(x) FILTER (WHERE id > 0) OVER (PARTITION BY g) FROM st WHERE true	1,20 | 1,20 | 2,30 | 2,30	INT32,INT32
+max(x)|nullx|s1	SELECT max(x) FILTER (WHERE x IS NULL) FROM st WHERE true	NULL	INT32
+max(x)|nullx|s2	SELECT g, max(x) FILTER (WHERE x IS NULL) FROM st WHERE true GROUP BY g	1,NULL | 2,NULL	INT32,INT32
+max(x)|nullx|s3	SELECT g, max(x) FILTER (WHERE x IS NULL) FROM st WHERE true GROUP BY ROLLUP(g)	1,NULL | 2,NULL | NULL,NULL	INT32,INT32
+max(x)|nullx|s4	SELECT max(x) FILTER (WHERE x IS NULL) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	NULL | NULL	INT32
+max(x)|nullx|s5	SELECT max(x) FILTER (WHERE x IS NULL), max(x) FILTER (WHERE x > 15) FROM st WHERE true	NULL,30	INT32,INT32
+max(x)|nullx|s6	SELECT max(x) FILTER (WHERE x IS NULL), max(x) FROM st WHERE true	NULL,30	INT32,INT32
+max(x)|nullx|s7	SELECT max(x) FILTER (WHERE id > 1) FROM st WHERE true	30	INT32
+max(x)|nullx|s8	SELECT g, max(x) FILTER (WHERE x IS NULL) OVER (PARTITION BY g) FROM st WHERE true	1,NULL | 1,NULL | 2,NULL | 2,NULL	INT32,INT32
+bool_and(x > 10)|zero|s1	SELECT bool_and(x > 10) FILTER (WHERE x > 10) FROM st WHERE id < 0	NULL	BOOL
+bool_and(x > 10)|zero|s2	SELECT g, bool_and(x > 10) FILTER (WHERE x > 10) FROM st WHERE id < 0 GROUP BY g		INT32,BOOL
+bool_and(x > 10)|zero|s3	SELECT g, bool_and(x > 10) FILTER (WHERE x > 10) FROM st WHERE id < 0 GROUP BY ROLLUP(g)	NULL,NULL	INT32,BOOL
+bool_and(x > 10)|zero|s4	SELECT bool_and(x > 10) FILTER (WHERE x > 10) FROM st WHERE id < 0 GROUP BY GROUPING SETS ((), ())	NULL | NULL	BOOL
+bool_and(x > 10)|zero|s5	SELECT bool_and(x > 10) FILTER (WHERE x > 10), bool_and(x > 10) FILTER (WHERE x > 15) FROM st WHERE id < 0	NULL,NULL	BOOL,BOOL
+bool_and(x > 10)|zero|s6	SELECT bool_and(x > 10) FILTER (WHERE x > 10), bool_and(x > 10) FROM st WHERE id < 0	NULL,NULL	BOOL,BOOL
+bool_and(x > 10)|zero|s7	SELECT bool_and(x > 10) FILTER (WHERE id > 1) FROM st WHERE id < 0	NULL	BOOL
+bool_and(x > 10)|none|s1	SELECT bool_and(x > 10) FILTER (WHERE x > 100) FROM st WHERE true	NULL	BOOL
+bool_and(x > 10)|none|s2	SELECT g, bool_and(x > 10) FILTER (WHERE x > 100) FROM st WHERE true GROUP BY g	1,NULL | 2,NULL	INT32,BOOL
+bool_and(x > 10)|none|s3	SELECT g, bool_and(x > 10) FILTER (WHERE x > 100) FROM st WHERE true GROUP BY ROLLUP(g)	1,NULL | 2,NULL | NULL,NULL	INT32,BOOL
+bool_and(x > 10)|none|s4	SELECT bool_and(x > 10) FILTER (WHERE x > 100) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	NULL | NULL	BOOL
+bool_and(x > 10)|none|s5	SELECT bool_and(x > 10) FILTER (WHERE x > 100), bool_and(x > 10) FILTER (WHERE x > 15) FROM st WHERE true	NULL,true	BOOL,BOOL
+bool_and(x > 10)|none|s6	SELECT bool_and(x > 10) FILTER (WHERE x > 100), bool_and(x > 10) FROM st WHERE true	NULL,false	BOOL,BOOL
+bool_and(x > 10)|none|s7	SELECT bool_and(x > 10) FILTER (WHERE id > 1) FROM st WHERE true	true	BOOL
+bool_and(x > 10)|some|s1	SELECT bool_and(x > 10) FILTER (WHERE x > 10) FROM st WHERE true	true	BOOL
+bool_and(x > 10)|some|s2	SELECT g, bool_and(x > 10) FILTER (WHERE x > 10) FROM st WHERE true GROUP BY g	1,true | 2,true	INT32,BOOL
+bool_and(x > 10)|some|s3	SELECT g, bool_and(x > 10) FILTER (WHERE x > 10) FROM st WHERE true GROUP BY ROLLUP(g)	1,true | 2,true | NULL,true	INT32,BOOL
+bool_and(x > 10)|some|s4	SELECT bool_and(x > 10) FILTER (WHERE x > 10) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	true | true	BOOL
+bool_and(x > 10)|some|s5	SELECT bool_and(x > 10) FILTER (WHERE x > 10), bool_and(x > 10) FILTER (WHERE x > 15) FROM st WHERE true	true,true	BOOL,BOOL
+bool_and(x > 10)|some|s6	SELECT bool_and(x > 10) FILTER (WHERE x > 10), bool_and(x > 10) FROM st WHERE true	true,false	BOOL,BOOL
+bool_and(x > 10)|some|s7	SELECT bool_and(x > 10) FILTER (WHERE id > 1) FROM st WHERE true	true	BOOL
+bool_and(x > 10)|all|s1	SELECT bool_and(x > 10) FILTER (WHERE id > 0) FROM st WHERE true	false	BOOL
+bool_and(x > 10)|all|s2	SELECT g, bool_and(x > 10) FILTER (WHERE id > 0) FROM st WHERE true GROUP BY g	1,false | 2,true	INT32,BOOL
+bool_and(x > 10)|all|s3	SELECT g, bool_and(x > 10) FILTER (WHERE id > 0) FROM st WHERE true GROUP BY ROLLUP(g)	1,false | 2,true | NULL,false	INT32,BOOL
+bool_and(x > 10)|all|s4	SELECT bool_and(x > 10) FILTER (WHERE id > 0) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	false | false	BOOL
+bool_and(x > 10)|all|s5	SELECT bool_and(x > 10) FILTER (WHERE id > 0), bool_and(x > 10) FILTER (WHERE x > 15) FROM st WHERE true	false,true	BOOL,BOOL
+bool_and(x > 10)|all|s6	SELECT bool_and(x > 10) FILTER (WHERE id > 0), bool_and(x > 10) FROM st WHERE true	false,false	BOOL,BOOL
+bool_and(x > 10)|all|s7	SELECT bool_and(x > 10) FILTER (WHERE id > 1) FROM st WHERE true	true	BOOL
+bool_and(x > 10)|nullx|s1	SELECT bool_and(x > 10) FILTER (WHERE x IS NULL) FROM st WHERE true	NULL	BOOL
+bool_and(x > 10)|nullx|s2	SELECT g, bool_and(x > 10) FILTER (WHERE x IS NULL) FROM st WHERE true GROUP BY g	1,NULL | 2,NULL	INT32,BOOL
+bool_and(x > 10)|nullx|s3	SELECT g, bool_and(x > 10) FILTER (WHERE x IS NULL) FROM st WHERE true GROUP BY ROLLUP(g)	1,NULL | 2,NULL | NULL,NULL	INT32,BOOL
+bool_and(x > 10)|nullx|s4	SELECT bool_and(x > 10) FILTER (WHERE x IS NULL) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	NULL | NULL	BOOL
+bool_and(x > 10)|nullx|s5	SELECT bool_and(x > 10) FILTER (WHERE x IS NULL), bool_and(x > 10) FILTER (WHERE x > 15) FROM st WHERE true	NULL,true	BOOL,BOOL
+bool_and(x > 10)|nullx|s6	SELECT bool_and(x > 10) FILTER (WHERE x IS NULL), bool_and(x > 10) FROM st WHERE true	NULL,false	BOOL,BOOL
+bool_and(x > 10)|nullx|s7	SELECT bool_and(x > 10) FILTER (WHERE id > 1) FROM st WHERE true	true	BOOL
+bool_or(x > 10)|zero|s1	SELECT bool_or(x > 10) FILTER (WHERE x > 10) FROM st WHERE id < 0	NULL	BOOL
+bool_or(x > 10)|zero|s2	SELECT g, bool_or(x > 10) FILTER (WHERE x > 10) FROM st WHERE id < 0 GROUP BY g		INT32,BOOL
+bool_or(x > 10)|zero|s3	SELECT g, bool_or(x > 10) FILTER (WHERE x > 10) FROM st WHERE id < 0 GROUP BY ROLLUP(g)	NULL,NULL	INT32,BOOL
+bool_or(x > 10)|zero|s4	SELECT bool_or(x > 10) FILTER (WHERE x > 10) FROM st WHERE id < 0 GROUP BY GROUPING SETS ((), ())	NULL | NULL	BOOL
+bool_or(x > 10)|zero|s5	SELECT bool_or(x > 10) FILTER (WHERE x > 10), bool_or(x > 10) FILTER (WHERE x > 15) FROM st WHERE id < 0	NULL,NULL	BOOL,BOOL
+bool_or(x > 10)|zero|s6	SELECT bool_or(x > 10) FILTER (WHERE x > 10), bool_or(x > 10) FROM st WHERE id < 0	NULL,NULL	BOOL,BOOL
+bool_or(x > 10)|zero|s7	SELECT bool_or(x > 10) FILTER (WHERE id > 1) FROM st WHERE id < 0	NULL	BOOL
+bool_or(x > 10)|none|s1	SELECT bool_or(x > 10) FILTER (WHERE x > 100) FROM st WHERE true	NULL	BOOL
+bool_or(x > 10)|none|s2	SELECT g, bool_or(x > 10) FILTER (WHERE x > 100) FROM st WHERE true GROUP BY g	1,NULL | 2,NULL	INT32,BOOL
+bool_or(x > 10)|none|s3	SELECT g, bool_or(x > 10) FILTER (WHERE x > 100) FROM st WHERE true GROUP BY ROLLUP(g)	1,NULL | 2,NULL | NULL,NULL	INT32,BOOL
+bool_or(x > 10)|none|s4	SELECT bool_or(x > 10) FILTER (WHERE x > 100) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	NULL | NULL	BOOL
+bool_or(x > 10)|none|s5	SELECT bool_or(x > 10) FILTER (WHERE x > 100), bool_or(x > 10) FILTER (WHERE x > 15) FROM st WHERE true	NULL,true	BOOL,BOOL
+bool_or(x > 10)|none|s6	SELECT bool_or(x > 10) FILTER (WHERE x > 100), bool_or(x > 10) FROM st WHERE true	NULL,true	BOOL,BOOL
+bool_or(x > 10)|none|s7	SELECT bool_or(x > 10) FILTER (WHERE id > 1) FROM st WHERE true	true	BOOL
+bool_or(x > 10)|some|s1	SELECT bool_or(x > 10) FILTER (WHERE x > 10) FROM st WHERE true	true	BOOL
+bool_or(x > 10)|some|s2	SELECT g, bool_or(x > 10) FILTER (WHERE x > 10) FROM st WHERE true GROUP BY g	1,true | 2,true	INT32,BOOL
+bool_or(x > 10)|some|s3	SELECT g, bool_or(x > 10) FILTER (WHERE x > 10) FROM st WHERE true GROUP BY ROLLUP(g)	1,true | 2,true | NULL,true	INT32,BOOL
+bool_or(x > 10)|some|s4	SELECT bool_or(x > 10) FILTER (WHERE x > 10) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	true | true	BOOL
+bool_or(x > 10)|some|s5	SELECT bool_or(x > 10) FILTER (WHERE x > 10), bool_or(x > 10) FILTER (WHERE x > 15) FROM st WHERE true	true,true	BOOL,BOOL
+bool_or(x > 10)|some|s6	SELECT bool_or(x > 10) FILTER (WHERE x > 10), bool_or(x > 10) FROM st WHERE true	true,true	BOOL,BOOL
+bool_or(x > 10)|some|s7	SELECT bool_or(x > 10) FILTER (WHERE id > 1) FROM st WHERE true	true	BOOL
+bool_or(x > 10)|all|s1	SELECT bool_or(x > 10) FILTER (WHERE id > 0) FROM st WHERE true	true	BOOL
+bool_or(x > 10)|all|s2	SELECT g, bool_or(x > 10) FILTER (WHERE id > 0) FROM st WHERE true GROUP BY g	1,true | 2,true	INT32,BOOL
+bool_or(x > 10)|all|s3	SELECT g, bool_or(x > 10) FILTER (WHERE id > 0) FROM st WHERE true GROUP BY ROLLUP(g)	1,true | 2,true | NULL,true	INT32,BOOL
+bool_or(x > 10)|all|s4	SELECT bool_or(x > 10) FILTER (WHERE id > 0) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	true | true	BOOL
+bool_or(x > 10)|all|s5	SELECT bool_or(x > 10) FILTER (WHERE id > 0), bool_or(x > 10) FILTER (WHERE x > 15) FROM st WHERE true	true,true	BOOL,BOOL
+bool_or(x > 10)|all|s6	SELECT bool_or(x > 10) FILTER (WHERE id > 0), bool_or(x > 10) FROM st WHERE true	true,true	BOOL,BOOL
+bool_or(x > 10)|all|s7	SELECT bool_or(x > 10) FILTER (WHERE id > 1) FROM st WHERE true	true	BOOL
+bool_or(x > 10)|nullx|s1	SELECT bool_or(x > 10) FILTER (WHERE x IS NULL) FROM st WHERE true	NULL	BOOL
+bool_or(x > 10)|nullx|s2	SELECT g, bool_or(x > 10) FILTER (WHERE x IS NULL) FROM st WHERE true GROUP BY g	1,NULL | 2,NULL	INT32,BOOL
+bool_or(x > 10)|nullx|s3	SELECT g, bool_or(x > 10) FILTER (WHERE x IS NULL) FROM st WHERE true GROUP BY ROLLUP(g)	1,NULL | 2,NULL | NULL,NULL	INT32,BOOL
+bool_or(x > 10)|nullx|s4	SELECT bool_or(x > 10) FILTER (WHERE x IS NULL) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	NULL | NULL	BOOL
+bool_or(x > 10)|nullx|s5	SELECT bool_or(x > 10) FILTER (WHERE x IS NULL), bool_or(x > 10) FILTER (WHERE x > 15) FROM st WHERE true	NULL,true	BOOL,BOOL
+bool_or(x > 10)|nullx|s6	SELECT bool_or(x > 10) FILTER (WHERE x IS NULL), bool_or(x > 10) FROM st WHERE true	NULL,true	BOOL,BOOL
+bool_or(x > 10)|nullx|s7	SELECT bool_or(x > 10) FILTER (WHERE id > 1) FROM st WHERE true	true	BOOL
+string_agg(x::text, ',')|zero|s1	SELECT string_agg(x::text, ',') FILTER (WHERE x > 10) FROM st WHERE id < 0	NULL	STRING
+string_agg(x::text, ',')|zero|s2	SELECT g, string_agg(x::text, ',') FILTER (WHERE x > 10) FROM st WHERE id < 0 GROUP BY g		INT32,STRING
+string_agg(x::text, ',')|zero|s3	SELECT g, string_agg(x::text, ',') FILTER (WHERE x > 10) FROM st WHERE id < 0 GROUP BY ROLLUP(g)	NULL,NULL	INT32,STRING
+string_agg(x::text, ',')|zero|s4	SELECT string_agg(x::text, ',') FILTER (WHERE x > 10) FROM st WHERE id < 0 GROUP BY GROUPING SETS ((), ())	NULL | NULL	STRING
+string_agg(x::text, ',')|zero|s5	SELECT string_agg(x::text, ',') FILTER (WHERE x > 10), string_agg(x::text, ',') FILTER (WHERE x > 15) FROM st WHERE id < 0	NULL,NULL	STRING,STRING
+string_agg(x::text, ',')|zero|s6	SELECT string_agg(x::text, ',') FILTER (WHERE x > 10), string_agg(x::text, ',') FROM st WHERE id < 0	NULL,NULL	STRING,STRING
+string_agg(x::text, ',')|zero|s7	SELECT string_agg(x::text, ',') FILTER (WHERE id > 1) FROM st WHERE id < 0	NULL	STRING
+string_agg(x::text, ',')|none|s1	SELECT string_agg(x::text, ',') FILTER (WHERE x > 100) FROM st WHERE true	NULL	STRING
+string_agg(x::text, ',')|none|s2	SELECT g, string_agg(x::text, ',') FILTER (WHERE x > 100) FROM st WHERE true GROUP BY g	1,NULL | 2,NULL	INT32,STRING
+string_agg(x::text, ',')|none|s3	SELECT g, string_agg(x::text, ',') FILTER (WHERE x > 100) FROM st WHERE true GROUP BY ROLLUP(g)	1,NULL | 2,NULL | NULL,NULL	INT32,STRING
+string_agg(x::text, ',')|none|s4	SELECT string_agg(x::text, ',') FILTER (WHERE x > 100) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	NULL | NULL	STRING
+string_agg(x::text, ',')|none|s5	SELECT string_agg(x::text, ',') FILTER (WHERE x > 100), string_agg(x::text, ',') FILTER (WHERE x > 15) FROM st WHERE true	NULL,20,30	STRING,STRING
+string_agg(x::text, ',')|none|s6	SELECT string_agg(x::text, ',') FILTER (WHERE x > 100), string_agg(x::text, ',') FROM st WHERE true	NULL,10,20,30	STRING,STRING
+string_agg(x::text, ',')|none|s7	SELECT string_agg(x::text, ',') FILTER (WHERE id > 1) FROM st WHERE true	20,30	STRING
+string_agg(x::text, ',')|some|s1	SELECT string_agg(x::text, ',') FILTER (WHERE x > 10) FROM st WHERE true	20,30	STRING
+string_agg(x::text, ',')|some|s2	SELECT g, string_agg(x::text, ',') FILTER (WHERE x > 10) FROM st WHERE true GROUP BY g	1,20 | 2,30	INT32,STRING
+string_agg(x::text, ',')|some|s3	SELECT g, string_agg(x::text, ',') FILTER (WHERE x > 10) FROM st WHERE true GROUP BY ROLLUP(g)	1,20 | 2,30 | NULL,20,30	INT32,STRING
+string_agg(x::text, ',')|some|s4	SELECT string_agg(x::text, ',') FILTER (WHERE x > 10) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	20,30 | 20,30	STRING
+string_agg(x::text, ',')|some|s5	SELECT string_agg(x::text, ',') FILTER (WHERE x > 10), string_agg(x::text, ',') FILTER (WHERE x > 15) FROM st WHERE true	20,30,20,30	STRING,STRING
+string_agg(x::text, ',')|some|s6	SELECT string_agg(x::text, ',') FILTER (WHERE x > 10), string_agg(x::text, ',') FROM st WHERE true	20,30,10,20,30	STRING,STRING
+string_agg(x::text, ',')|some|s7	SELECT string_agg(x::text, ',') FILTER (WHERE id > 1) FROM st WHERE true	20,30	STRING
+string_agg(x::text, ',')|all|s1	SELECT string_agg(x::text, ',') FILTER (WHERE id > 0) FROM st WHERE true	10,20,30	STRING
+string_agg(x::text, ',')|all|s2	SELECT g, string_agg(x::text, ',') FILTER (WHERE id > 0) FROM st WHERE true GROUP BY g	1,10,20 | 2,30	INT32,STRING
+string_agg(x::text, ',')|all|s3	SELECT g, string_agg(x::text, ',') FILTER (WHERE id > 0) FROM st WHERE true GROUP BY ROLLUP(g)	1,10,20 | 2,30 | NULL,10,20,30	INT32,STRING
+string_agg(x::text, ',')|all|s4	SELECT string_agg(x::text, ',') FILTER (WHERE id > 0) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	10,20,30 | 10,20,30	STRING
+string_agg(x::text, ',')|all|s5	SELECT string_agg(x::text, ',') FILTER (WHERE id > 0), string_agg(x::text, ',') FILTER (WHERE x > 15) FROM st WHERE true	10,20,30,20,30	STRING,STRING
+string_agg(x::text, ',')|all|s6	SELECT string_agg(x::text, ',') FILTER (WHERE id > 0), string_agg(x::text, ',') FROM st WHERE true	10,20,30,10,20,30	STRING,STRING
+string_agg(x::text, ',')|all|s7	SELECT string_agg(x::text, ',') FILTER (WHERE id > 1) FROM st WHERE true	20,30	STRING
+string_agg(x::text, ',')|nullx|s1	SELECT string_agg(x::text, ',') FILTER (WHERE x IS NULL) FROM st WHERE true	NULL	STRING
+string_agg(x::text, ',')|nullx|s2	SELECT g, string_agg(x::text, ',') FILTER (WHERE x IS NULL) FROM st WHERE true GROUP BY g	1,NULL | 2,NULL	INT32,STRING
+string_agg(x::text, ',')|nullx|s3	SELECT g, string_agg(x::text, ',') FILTER (WHERE x IS NULL) FROM st WHERE true GROUP BY ROLLUP(g)	1,NULL | 2,NULL | NULL,NULL	INT32,STRING
+string_agg(x::text, ',')|nullx|s4	SELECT string_agg(x::text, ',') FILTER (WHERE x IS NULL) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	NULL | NULL	STRING
+string_agg(x::text, ',')|nullx|s5	SELECT string_agg(x::text, ',') FILTER (WHERE x IS NULL), string_agg(x::text, ',') FILTER (WHERE x > 15) FROM st WHERE true	NULL,20,30	STRING,STRING
+string_agg(x::text, ',')|nullx|s6	SELECT string_agg(x::text, ',') FILTER (WHERE x IS NULL), string_agg(x::text, ',') FROM st WHERE true	NULL,10,20,30	STRING,STRING
+string_agg(x::text, ',')|nullx|s7	SELECT string_agg(x::text, ',') FILTER (WHERE id > 1) FROM st WHERE true	20,30	STRING
+stddev(x)|zero|s1	SELECT stddev(x) FILTER (WHERE x > 10) FROM st WHERE id < 0	NULL	-
+stddev(x)|zero|s2	SELECT g, stddev(x) FILTER (WHERE x > 10) FROM st WHERE id < 0 GROUP BY g		-
+stddev(x)|zero|s3	SELECT g, stddev(x) FILTER (WHERE x > 10) FROM st WHERE id < 0 GROUP BY ROLLUP(g)	NULL,NULL	-
+stddev(x)|zero|s4	SELECT stddev(x) FILTER (WHERE x > 10) FROM st WHERE id < 0 GROUP BY GROUPING SETS ((), ())	NULL | NULL	-
+stddev(x)|zero|s5	SELECT stddev(x) FILTER (WHERE x > 10), stddev(x) FILTER (WHERE x > 15) FROM st WHERE id < 0	NULL,NULL	-
+stddev(x)|zero|s6	SELECT stddev(x) FILTER (WHERE x > 10), stddev(x) FROM st WHERE id < 0	NULL,NULL	-
+stddev(x)|zero|s7	SELECT stddev(x) FILTER (WHERE id > 1) FROM st WHERE id < 0	NULL	-
+stddev(x)|none|s1	SELECT stddev(x) FILTER (WHERE x > 100) FROM st WHERE true	NULL	-
+stddev(x)|none|s2	SELECT g, stddev(x) FILTER (WHERE x > 100) FROM st WHERE true GROUP BY g	1,NULL | 2,NULL	-
+stddev(x)|none|s3	SELECT g, stddev(x) FILTER (WHERE x > 100) FROM st WHERE true GROUP BY ROLLUP(g)	1,NULL | 2,NULL | NULL,NULL	-
+stddev(x)|none|s4	SELECT stddev(x) FILTER (WHERE x > 100) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	NULL | NULL	-
+stddev(x)|none|s5	SELECT stddev(x) FILTER (WHERE x > 100), stddev(x) FILTER (WHERE x > 15) FROM st WHERE true	NULL,7.0711	-
+stddev(x)|none|s6	SELECT stddev(x) FILTER (WHERE x > 100), stddev(x) FROM st WHERE true	NULL,10	-
+stddev(x)|none|s7	SELECT stddev(x) FILTER (WHERE id > 1) FROM st WHERE true	7.0711	-
+stddev(x)|some|s1	SELECT stddev(x) FILTER (WHERE x > 10) FROM st WHERE true	7.0711	-
+stddev(x)|some|s2	SELECT g, stddev(x) FILTER (WHERE x > 10) FROM st WHERE true GROUP BY g	1,NULL | 2,NULL	-
+stddev(x)|some|s3	SELECT g, stddev(x) FILTER (WHERE x > 10) FROM st WHERE true GROUP BY ROLLUP(g)	1,NULL | 2,NULL | NULL,7.0711	-
+stddev(x)|some|s4	SELECT stddev(x) FILTER (WHERE x > 10) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	7.0711 | 7.0711	-
+stddev(x)|some|s5	SELECT stddev(x) FILTER (WHERE x > 10), stddev(x) FILTER (WHERE x > 15) FROM st WHERE true	7.0711,7.0711	-
+stddev(x)|some|s6	SELECT stddev(x) FILTER (WHERE x > 10), stddev(x) FROM st WHERE true	7.0711,10	-
+stddev(x)|some|s7	SELECT stddev(x) FILTER (WHERE id > 1) FROM st WHERE true	7.0711	-
+stddev(x)|all|s1	SELECT stddev(x) FILTER (WHERE id > 0) FROM st WHERE true	10	-
+stddev(x)|all|s2	SELECT g, stddev(x) FILTER (WHERE id > 0) FROM st WHERE true GROUP BY g	1,7.0711 | 2,NULL	-
+stddev(x)|all|s3	SELECT g, stddev(x) FILTER (WHERE id > 0) FROM st WHERE true GROUP BY ROLLUP(g)	1,7.0711 | 2,NULL | NULL,10	-
+stddev(x)|all|s4	SELECT stddev(x) FILTER (WHERE id > 0) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	10 | 10	-
+stddev(x)|all|s5	SELECT stddev(x) FILTER (WHERE id > 0), stddev(x) FILTER (WHERE x > 15) FROM st WHERE true	10,7.0711	-
+stddev(x)|all|s6	SELECT stddev(x) FILTER (WHERE id > 0), stddev(x) FROM st WHERE true	10,10	-
+stddev(x)|all|s7	SELECT stddev(x) FILTER (WHERE id > 1) FROM st WHERE true	7.0711	-
+stddev(x)|nullx|s1	SELECT stddev(x) FILTER (WHERE x IS NULL) FROM st WHERE true	NULL	-
+stddev(x)|nullx|s2	SELECT g, stddev(x) FILTER (WHERE x IS NULL) FROM st WHERE true GROUP BY g	1,NULL | 2,NULL	-
+stddev(x)|nullx|s3	SELECT g, stddev(x) FILTER (WHERE x IS NULL) FROM st WHERE true GROUP BY ROLLUP(g)	1,NULL | 2,NULL | NULL,NULL	-
+stddev(x)|nullx|s4	SELECT stddev(x) FILTER (WHERE x IS NULL) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	NULL | NULL	-
+stddev(x)|nullx|s5	SELECT stddev(x) FILTER (WHERE x IS NULL), stddev(x) FILTER (WHERE x > 15) FROM st WHERE true	NULL,7.0711	-
+stddev(x)|nullx|s6	SELECT stddev(x) FILTER (WHERE x IS NULL), stddev(x) FROM st WHERE true	NULL,10	-
+stddev(x)|nullx|s7	SELECT stddev(x) FILTER (WHERE id > 1) FROM st WHERE true	7.0711	-
+variance(x)|zero|s1	SELECT variance(x) FILTER (WHERE x > 10) FROM st WHERE id < 0	NULL	-
+variance(x)|zero|s2	SELECT g, variance(x) FILTER (WHERE x > 10) FROM st WHERE id < 0 GROUP BY g		-
+variance(x)|zero|s3	SELECT g, variance(x) FILTER (WHERE x > 10) FROM st WHERE id < 0 GROUP BY ROLLUP(g)	NULL,NULL	-
+variance(x)|zero|s4	SELECT variance(x) FILTER (WHERE x > 10) FROM st WHERE id < 0 GROUP BY GROUPING SETS ((), ())	NULL | NULL	-
+variance(x)|zero|s5	SELECT variance(x) FILTER (WHERE x > 10), variance(x) FILTER (WHERE x > 15) FROM st WHERE id < 0	NULL,NULL	-
+variance(x)|zero|s6	SELECT variance(x) FILTER (WHERE x > 10), variance(x) FROM st WHERE id < 0	NULL,NULL	-
+variance(x)|zero|s7	SELECT variance(x) FILTER (WHERE id > 1) FROM st WHERE id < 0	NULL	-
+variance(x)|none|s1	SELECT variance(x) FILTER (WHERE x > 100) FROM st WHERE true	NULL	-
+variance(x)|none|s2	SELECT g, variance(x) FILTER (WHERE x > 100) FROM st WHERE true GROUP BY g	1,NULL | 2,NULL	-
+variance(x)|none|s3	SELECT g, variance(x) FILTER (WHERE x > 100) FROM st WHERE true GROUP BY ROLLUP(g)	1,NULL | 2,NULL | NULL,NULL	-
+variance(x)|none|s4	SELECT variance(x) FILTER (WHERE x > 100) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	NULL | NULL	-
+variance(x)|none|s5	SELECT variance(x) FILTER (WHERE x > 100), variance(x) FILTER (WHERE x > 15) FROM st WHERE true	NULL,50	-
+variance(x)|none|s6	SELECT variance(x) FILTER (WHERE x > 100), variance(x) FROM st WHERE true	NULL,100	-
+variance(x)|none|s7	SELECT variance(x) FILTER (WHERE id > 1) FROM st WHERE true	50	-
+variance(x)|some|s1	SELECT variance(x) FILTER (WHERE x > 10) FROM st WHERE true	50	-
+variance(x)|some|s2	SELECT g, variance(x) FILTER (WHERE x > 10) FROM st WHERE true GROUP BY g	1,NULL | 2,NULL	-
+variance(x)|some|s3	SELECT g, variance(x) FILTER (WHERE x > 10) FROM st WHERE true GROUP BY ROLLUP(g)	1,NULL | 2,NULL | NULL,50	-
+variance(x)|some|s4	SELECT variance(x) FILTER (WHERE x > 10) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	50 | 50	-
+variance(x)|some|s5	SELECT variance(x) FILTER (WHERE x > 10), variance(x) FILTER (WHERE x > 15) FROM st WHERE true	50,50	-
+variance(x)|some|s6	SELECT variance(x) FILTER (WHERE x > 10), variance(x) FROM st WHERE true	50,100	-
+variance(x)|some|s7	SELECT variance(x) FILTER (WHERE id > 1) FROM st WHERE true	50	-
+variance(x)|all|s1	SELECT variance(x) FILTER (WHERE id > 0) FROM st WHERE true	100	-
+variance(x)|all|s2	SELECT g, variance(x) FILTER (WHERE id > 0) FROM st WHERE true GROUP BY g	1,50 | 2,NULL	-
+variance(x)|all|s3	SELECT g, variance(x) FILTER (WHERE id > 0) FROM st WHERE true GROUP BY ROLLUP(g)	1,50 | 2,NULL | NULL,100	-
+variance(x)|all|s4	SELECT variance(x) FILTER (WHERE id > 0) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	100 | 100	-
+variance(x)|all|s5	SELECT variance(x) FILTER (WHERE id > 0), variance(x) FILTER (WHERE x > 15) FROM st WHERE true	100,50	-
+variance(x)|all|s6	SELECT variance(x) FILTER (WHERE id > 0), variance(x) FROM st WHERE true	100,100	-
+variance(x)|all|s7	SELECT variance(x) FILTER (WHERE id > 1) FROM st WHERE true	50	-
+variance(x)|nullx|s1	SELECT variance(x) FILTER (WHERE x IS NULL) FROM st WHERE true	NULL	-
+variance(x)|nullx|s2	SELECT g, variance(x) FILTER (WHERE x IS NULL) FROM st WHERE true GROUP BY g	1,NULL | 2,NULL	-
+variance(x)|nullx|s3	SELECT g, variance(x) FILTER (WHERE x IS NULL) FROM st WHERE true GROUP BY ROLLUP(g)	1,NULL | 2,NULL | NULL,NULL	-
+variance(x)|nullx|s4	SELECT variance(x) FILTER (WHERE x IS NULL) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	NULL | NULL	-
+variance(x)|nullx|s5	SELECT variance(x) FILTER (WHERE x IS NULL), variance(x) FILTER (WHERE x > 15) FROM st WHERE true	NULL,50	-
+variance(x)|nullx|s6	SELECT variance(x) FILTER (WHERE x IS NULL), variance(x) FROM st WHERE true	NULL,100	-
+variance(x)|nullx|s7	SELECT variance(x) FILTER (WHERE id > 1) FROM st WHERE true	50	-
+corr(x, id)|zero|s1	SELECT corr(x, id) FILTER (WHERE x > 10) FROM st WHERE id < 0	NULL	FLOAT64
+corr(x, id)|zero|s2	SELECT g, corr(x, id) FILTER (WHERE x > 10) FROM st WHERE id < 0 GROUP BY g		INT32,FLOAT64
+corr(x, id)|zero|s3	SELECT g, corr(x, id) FILTER (WHERE x > 10) FROM st WHERE id < 0 GROUP BY ROLLUP(g)	NULL,NULL	INT32,FLOAT64
+corr(x, id)|zero|s4	SELECT corr(x, id) FILTER (WHERE x > 10) FROM st WHERE id < 0 GROUP BY GROUPING SETS ((), ())	NULL | NULL	FLOAT64
+corr(x, id)|zero|s5	SELECT corr(x, id) FILTER (WHERE x > 10), corr(x, id) FILTER (WHERE x > 15) FROM st WHERE id < 0	NULL,NULL	FLOAT64,FLOAT64
+corr(x, id)|zero|s6	SELECT corr(x, id) FILTER (WHERE x > 10), corr(x, id) FROM st WHERE id < 0	NULL,NULL	FLOAT64,FLOAT64
+corr(x, id)|zero|s7	SELECT corr(x, id) FILTER (WHERE id > 1) FROM st WHERE id < 0	NULL	FLOAT64
+corr(x, id)|none|s1	SELECT corr(x, id) FILTER (WHERE x > 100) FROM st WHERE true	NULL	FLOAT64
+corr(x, id)|none|s2	SELECT g, corr(x, id) FILTER (WHERE x > 100) FROM st WHERE true GROUP BY g	1,NULL | 2,NULL	INT32,FLOAT64
+corr(x, id)|none|s3	SELECT g, corr(x, id) FILTER (WHERE x > 100) FROM st WHERE true GROUP BY ROLLUP(g)	1,NULL | 2,NULL | NULL,NULL	INT32,FLOAT64
+corr(x, id)|none|s4	SELECT corr(x, id) FILTER (WHERE x > 100) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	NULL | NULL	FLOAT64
+corr(x, id)|none|s5	SELECT corr(x, id) FILTER (WHERE x > 100), corr(x, id) FILTER (WHERE x > 15) FROM st WHERE true	NULL,1	FLOAT64,FLOAT64
+corr(x, id)|none|s6	SELECT corr(x, id) FILTER (WHERE x > 100), corr(x, id) FROM st WHERE true	NULL,1	FLOAT64,FLOAT64
+corr(x, id)|none|s7	SELECT corr(x, id) FILTER (WHERE id > 1) FROM st WHERE true	1	FLOAT64
+corr(x, id)|some|s1	SELECT corr(x, id) FILTER (WHERE x > 10) FROM st WHERE true	1	FLOAT64
+corr(x, id)|some|s2	SELECT g, corr(x, id) FILTER (WHERE x > 10) FROM st WHERE true GROUP BY g	1,NULL | 2,NULL	INT32,FLOAT64
+corr(x, id)|some|s3	SELECT g, corr(x, id) FILTER (WHERE x > 10) FROM st WHERE true GROUP BY ROLLUP(g)	1,NULL | 2,NULL | NULL,1	INT32,FLOAT64
+corr(x, id)|some|s4	SELECT corr(x, id) FILTER (WHERE x > 10) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	1 | 1	FLOAT64
+corr(x, id)|some|s5	SELECT corr(x, id) FILTER (WHERE x > 10), corr(x, id) FILTER (WHERE x > 15) FROM st WHERE true	1,1	FLOAT64,FLOAT64
+corr(x, id)|some|s6	SELECT corr(x, id) FILTER (WHERE x > 10), corr(x, id) FROM st WHERE true	1,1	FLOAT64,FLOAT64
+corr(x, id)|some|s7	SELECT corr(x, id) FILTER (WHERE id > 1) FROM st WHERE true	1	FLOAT64
+corr(x, id)|all|s1	SELECT corr(x, id) FILTER (WHERE id > 0) FROM st WHERE true	1	FLOAT64
+corr(x, id)|all|s2	SELECT g, corr(x, id) FILTER (WHERE id > 0) FROM st WHERE true GROUP BY g	1,1 | 2,NULL	INT32,FLOAT64
+corr(x, id)|all|s3	SELECT g, corr(x, id) FILTER (WHERE id > 0) FROM st WHERE true GROUP BY ROLLUP(g)	1,1 | 2,NULL | NULL,1	INT32,FLOAT64
+corr(x, id)|all|s4	SELECT corr(x, id) FILTER (WHERE id > 0) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	1 | 1	FLOAT64
+corr(x, id)|all|s5	SELECT corr(x, id) FILTER (WHERE id > 0), corr(x, id) FILTER (WHERE x > 15) FROM st WHERE true	1,1	FLOAT64,FLOAT64
+corr(x, id)|all|s6	SELECT corr(x, id) FILTER (WHERE id > 0), corr(x, id) FROM st WHERE true	1,1	FLOAT64,FLOAT64
+corr(x, id)|all|s7	SELECT corr(x, id) FILTER (WHERE id > 1) FROM st WHERE true	1	FLOAT64
+corr(x, id)|nullx|s1	SELECT corr(x, id) FILTER (WHERE x IS NULL) FROM st WHERE true	NULL	FLOAT64
+corr(x, id)|nullx|s2	SELECT g, corr(x, id) FILTER (WHERE x IS NULL) FROM st WHERE true GROUP BY g	1,NULL | 2,NULL	INT32,FLOAT64
+corr(x, id)|nullx|s3	SELECT g, corr(x, id) FILTER (WHERE x IS NULL) FROM st WHERE true GROUP BY ROLLUP(g)	1,NULL | 2,NULL | NULL,NULL	INT32,FLOAT64
+corr(x, id)|nullx|s4	SELECT corr(x, id) FILTER (WHERE x IS NULL) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	NULL | NULL	FLOAT64
+corr(x, id)|nullx|s5	SELECT corr(x, id) FILTER (WHERE x IS NULL), corr(x, id) FILTER (WHERE x > 15) FROM st WHERE true	NULL,1	FLOAT64,FLOAT64
+corr(x, id)|nullx|s6	SELECT corr(x, id) FILTER (WHERE x IS NULL), corr(x, id) FROM st WHERE true	NULL,1	FLOAT64,FLOAT64
+corr(x, id)|nullx|s7	SELECT corr(x, id) FILTER (WHERE id > 1) FROM st WHERE true	1	FLOAT64
+sum(distinct x)|zero|s1	SELECT sum(distinct x) FILTER (WHERE x > 10) FROM st WHERE id < 0	NULL	INT64
+sum(distinct x)|zero|s2	SELECT g, sum(distinct x) FILTER (WHERE x > 10) FROM st WHERE id < 0 GROUP BY g		INT32,INT64
+sum(distinct x)|zero|s3	SELECT g, sum(distinct x) FILTER (WHERE x > 10) FROM st WHERE id < 0 GROUP BY ROLLUP(g)	NULL,NULL	INT32,INT64
+sum(distinct x)|zero|s4	SELECT sum(distinct x) FILTER (WHERE x > 10) FROM st WHERE id < 0 GROUP BY GROUPING SETS ((), ())	NULL | NULL	INT64
+sum(distinct x)|zero|s5	SELECT sum(distinct x) FILTER (WHERE x > 10), sum(distinct x) FILTER (WHERE x > 15) FROM st WHERE id < 0	NULL,NULL	INT64,INT64
+sum(distinct x)|zero|s6	SELECT sum(distinct x) FILTER (WHERE x > 10), sum(distinct x) FROM st WHERE id < 0	NULL,NULL	INT64,INT64
+sum(distinct x)|zero|s7	SELECT sum(distinct x) FILTER (WHERE id > 1) FROM st WHERE id < 0	NULL	INT64
+sum(distinct x)|none|s2	SELECT g, sum(distinct x) FILTER (WHERE x > 100) FROM st WHERE true GROUP BY g	1,NULL | 2,NULL	INT32,INT64
+sum(distinct x)|none|s3	SELECT g, sum(distinct x) FILTER (WHERE x > 100) FROM st WHERE true GROUP BY ROLLUP(g)	1,NULL | 2,NULL | NULL,NULL	INT32,INT64
+sum(distinct x)|none|s4	SELECT sum(distinct x) FILTER (WHERE x > 100) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	NULL | NULL	INT64
+sum(distinct x)|none|s5	SELECT sum(distinct x) FILTER (WHERE x > 100), sum(distinct x) FILTER (WHERE x > 15) FROM st WHERE true	NULL,50	INT64,INT64
+sum(distinct x)|none|s6	SELECT sum(distinct x) FILTER (WHERE x > 100), sum(distinct x) FROM st WHERE true	NULL,60	INT64,INT64
+sum(distinct x)|none|s7	SELECT sum(distinct x) FILTER (WHERE id > 1) FROM st WHERE true	50	INT64
+sum(distinct x)|some|s1	SELECT sum(distinct x) FILTER (WHERE x > 10) FROM st WHERE true	50	INT64
+sum(distinct x)|some|s2	SELECT g, sum(distinct x) FILTER (WHERE x > 10) FROM st WHERE true GROUP BY g	1,20 | 2,30	INT32,INT64
+sum(distinct x)|some|s3	SELECT g, sum(distinct x) FILTER (WHERE x > 10) FROM st WHERE true GROUP BY ROLLUP(g)	1,20 | 2,30 | NULL,50	INT32,INT64
+sum(distinct x)|some|s4	SELECT sum(distinct x) FILTER (WHERE x > 10) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	50 | 50	INT64
+sum(distinct x)|some|s5	SELECT sum(distinct x) FILTER (WHERE x > 10), sum(distinct x) FILTER (WHERE x > 15) FROM st WHERE true	50,50	INT64,INT64
+sum(distinct x)|some|s6	SELECT sum(distinct x) FILTER (WHERE x > 10), sum(distinct x) FROM st WHERE true	50,60	INT64,INT64
+sum(distinct x)|some|s7	SELECT sum(distinct x) FILTER (WHERE id > 1) FROM st WHERE true	50	INT64
+sum(distinct x)|all|s1	SELECT sum(distinct x) FILTER (WHERE id > 0) FROM st WHERE true	60	-
+sum(distinct x)|all|s2	SELECT g, sum(distinct x) FILTER (WHERE id > 0) FROM st WHERE true GROUP BY g	1,30 | 2,30	INT32,INT64
+sum(distinct x)|all|s3	SELECT g, sum(distinct x) FILTER (WHERE id > 0) FROM st WHERE true GROUP BY ROLLUP(g)	1,30 | 2,30 | NULL,60	INT32,INT64
+sum(distinct x)|all|s4	SELECT sum(distinct x) FILTER (WHERE id > 0) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	60 | 60	INT64
+sum(distinct x)|all|s5	SELECT sum(distinct x) FILTER (WHERE id > 0), sum(distinct x) FILTER (WHERE x > 15) FROM st WHERE true	60,50	INT64,INT64
+sum(distinct x)|all|s6	SELECT sum(distinct x) FILTER (WHERE id > 0), sum(distinct x) FROM st WHERE true	60,60	INT64,INT64
+sum(distinct x)|all|s7	SELECT sum(distinct x) FILTER (WHERE id > 1) FROM st WHERE true	50	INT64
+sum(distinct x)|nullx|s1	SELECT sum(distinct x) FILTER (WHERE x IS NULL) FROM st WHERE true	NULL	INT64
+sum(distinct x)|nullx|s2	SELECT g, sum(distinct x) FILTER (WHERE x IS NULL) FROM st WHERE true GROUP BY g	1,NULL | 2,NULL	INT32,INT64
+sum(distinct x)|nullx|s3	SELECT g, sum(distinct x) FILTER (WHERE x IS NULL) FROM st WHERE true GROUP BY ROLLUP(g)	1,NULL | 2,NULL | NULL,NULL	INT32,INT64
+sum(distinct x)|nullx|s4	SELECT sum(distinct x) FILTER (WHERE x IS NULL) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	NULL | NULL	INT64
+sum(distinct x)|nullx|s5	SELECT sum(distinct x) FILTER (WHERE x IS NULL), sum(distinct x) FILTER (WHERE x > 15) FROM st WHERE true	NULL,50	INT64,INT64
+sum(distinct x)|nullx|s6	SELECT sum(distinct x) FILTER (WHERE x IS NULL), sum(distinct x) FROM st WHERE true	NULL,60	INT64,INT64
+sum(distinct x)|nullx|s7	SELECT sum(distinct x) FILTER (WHERE id > 1) FROM st WHERE true	50	INT64
+count(x + id)|zero|s2	SELECT g, count(x + id) FILTER (WHERE x > 10) FROM st WHERE id < 0 GROUP BY g		INT32,INT64
+count(x + id)|zero|s3	SELECT g, count(x + id) FILTER (WHERE x > 10) FROM st WHERE id < 0 GROUP BY ROLLUP(g)	NULL,0	INT32,INT64
+count(x + id)|zero|s4	SELECT count(x + id) FILTER (WHERE x > 10) FROM st WHERE id < 0 GROUP BY GROUPING SETS ((), ())	0 | 0	INT64
+count(x + id)|zero|s5	SELECT count(x + id) FILTER (WHERE x > 10), count(x + id) FILTER (WHERE x > 15) FROM st WHERE id < 0	0,0	INT64,INT64
+count(x + id)|zero|s6	SELECT count(x + id) FILTER (WHERE x > 10), count(x + id) FROM st WHERE id < 0	0,0	INT64,INT64
+count(x + id)|zero|s7	SELECT count(x + id) FILTER (WHERE id > 1) FROM st WHERE id < 0	0	INT64
+count(x + id)|zero|s8	SELECT g, count(x + id) FILTER (WHERE x > 10) OVER (PARTITION BY g) FROM st WHERE id < 0		INT32,INT64
+count(x + id)|none|s1	SELECT count(x + id) FILTER (WHERE x > 100) FROM st WHERE true	0	INT64
+count(x + id)|none|s2	SELECT g, count(x + id) FILTER (WHERE x > 100) FROM st WHERE true GROUP BY g	1,0 | 2,0	INT32,INT64
+count(x + id)|none|s3	SELECT g, count(x + id) FILTER (WHERE x > 100) FROM st WHERE true GROUP BY ROLLUP(g)	1,0 | 2,0 | NULL,0	INT32,INT64
+count(x + id)|none|s4	SELECT count(x + id) FILTER (WHERE x > 100) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	0 | 0	INT64
+count(x + id)|none|s5	SELECT count(x + id) FILTER (WHERE x > 100), count(x + id) FILTER (WHERE x > 15) FROM st WHERE true	0,2	INT64,INT64
+count(x + id)|none|s6	SELECT count(x + id) FILTER (WHERE x > 100), count(x + id) FROM st WHERE true	0,3	INT64,INT64
+count(x + id)|none|s7	SELECT count(x + id) FILTER (WHERE id > 1) FROM st WHERE true	2	INT64
+count(x + id)|none|s8	SELECT g, count(x + id) FILTER (WHERE x > 100) OVER (PARTITION BY g) FROM st WHERE true	1,0 | 1,0 | 2,0 | 2,0	INT32,INT64
+count(x + id)|some|s1	SELECT count(x + id) FILTER (WHERE x > 10) FROM st WHERE true	2	INT64
+count(x + id)|some|s2	SELECT g, count(x + id) FILTER (WHERE x > 10) FROM st WHERE true GROUP BY g	1,1 | 2,1	INT32,INT64
+count(x + id)|some|s3	SELECT g, count(x + id) FILTER (WHERE x > 10) FROM st WHERE true GROUP BY ROLLUP(g)	1,1 | 2,1 | NULL,2	INT32,INT64
+count(x + id)|some|s4	SELECT count(x + id) FILTER (WHERE x > 10) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	2 | 2	INT64
+count(x + id)|some|s5	SELECT count(x + id) FILTER (WHERE x > 10), count(x + id) FILTER (WHERE x > 15) FROM st WHERE true	2,2	INT64,INT64
+count(x + id)|some|s6	SELECT count(x + id) FILTER (WHERE x > 10), count(x + id) FROM st WHERE true	2,3	INT64,INT64
+count(x + id)|some|s7	SELECT count(x + id) FILTER (WHERE id > 1) FROM st WHERE true	2	INT64
+count(x + id)|some|s8	SELECT g, count(x + id) FILTER (WHERE x > 10) OVER (PARTITION BY g) FROM st WHERE true	1,1 | 1,1 | 2,1 | 2,1	INT32,INT64
+count(x + id)|all|s1	SELECT count(x + id) FILTER (WHERE id > 0) FROM st WHERE true	3	INT64
+count(x + id)|all|s2	SELECT g, count(x + id) FILTER (WHERE id > 0) FROM st WHERE true GROUP BY g	1,2 | 2,1	INT32,INT64
+count(x + id)|all|s3	SELECT g, count(x + id) FILTER (WHERE id > 0) FROM st WHERE true GROUP BY ROLLUP(g)	1,2 | 2,1 | NULL,3	INT32,INT64
+count(x + id)|all|s4	SELECT count(x + id) FILTER (WHERE id > 0) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	3 | 3	INT64
+count(x + id)|all|s5	SELECT count(x + id) FILTER (WHERE id > 0), count(x + id) FILTER (WHERE x > 15) FROM st WHERE true	3,2	INT64,INT64
+count(x + id)|all|s6	SELECT count(x + id) FILTER (WHERE id > 0), count(x + id) FROM st WHERE true	3,3	INT64,INT64
+count(x + id)|all|s7	SELECT count(x + id) FILTER (WHERE id > 1) FROM st WHERE true	2	INT64
+count(x + id)|all|s8	SELECT g, count(x + id) FILTER (WHERE id > 0) OVER (PARTITION BY g) FROM st WHERE true	1,2 | 1,2 | 2,1 | 2,1	INT32,INT64
+count(x + id)|nullx|s1	SELECT count(x + id) FILTER (WHERE x IS NULL) FROM st WHERE true	0	INT64
+count(x + id)|nullx|s2	SELECT g, count(x + id) FILTER (WHERE x IS NULL) FROM st WHERE true GROUP BY g	1,0 | 2,0	INT32,INT64
+count(x + id)|nullx|s3	SELECT g, count(x + id) FILTER (WHERE x IS NULL) FROM st WHERE true GROUP BY ROLLUP(g)	1,0 | 2,0 | NULL,0	INT32,INT64
+count(x + id)|nullx|s4	SELECT count(x + id) FILTER (WHERE x IS NULL) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	0 | 0	INT64
+count(x + id)|nullx|s5	SELECT count(x + id) FILTER (WHERE x IS NULL), count(x + id) FILTER (WHERE x > 15) FROM st WHERE true	0,2	INT64,INT64
+count(x + id)|nullx|s6	SELECT count(x + id) FILTER (WHERE x IS NULL), count(x + id) FROM st WHERE true	0,3	INT64,INT64
+count(x + id)|nullx|s7	SELECT count(x + id) FILTER (WHERE id > 1) FROM st WHERE true	2	INT64
+count(x + id)|nullx|s8	SELECT g, count(x + id) FILTER (WHERE x IS NULL) OVER (PARTITION BY g) FROM st WHERE true	1,0 | 1,0 | 2,0 | 2,0	INT32,INT64
+every(x > 10)|zero|s1	SELECT every(x > 10) FILTER (WHERE x > 10) FROM st WHERE id < 0	NULL	BOOL
+every(x > 10)|zero|s2	SELECT g, every(x > 10) FILTER (WHERE x > 10) FROM st WHERE id < 0 GROUP BY g		INT32,BOOL
+every(x > 10)|zero|s3	SELECT g, every(x > 10) FILTER (WHERE x > 10) FROM st WHERE id < 0 GROUP BY ROLLUP(g)	NULL,NULL	INT32,BOOL
+every(x > 10)|zero|s4	SELECT every(x > 10) FILTER (WHERE x > 10) FROM st WHERE id < 0 GROUP BY GROUPING SETS ((), ())	NULL | NULL	BOOL
+every(x > 10)|zero|s5	SELECT every(x > 10) FILTER (WHERE x > 10), every(x > 10) FILTER (WHERE x > 15) FROM st WHERE id < 0	NULL,NULL	BOOL,BOOL
+every(x > 10)|zero|s6	SELECT every(x > 10) FILTER (WHERE x > 10), every(x > 10) FROM st WHERE id < 0	NULL,NULL	BOOL,BOOL
+every(x > 10)|zero|s7	SELECT every(x > 10) FILTER (WHERE id > 1) FROM st WHERE id < 0	NULL	BOOL
+every(x > 10)|none|s1	SELECT every(x > 10) FILTER (WHERE x > 100) FROM st WHERE true	NULL	BOOL
+every(x > 10)|none|s2	SELECT g, every(x > 10) FILTER (WHERE x > 100) FROM st WHERE true GROUP BY g	1,NULL | 2,NULL	INT32,BOOL
+every(x > 10)|none|s3	SELECT g, every(x > 10) FILTER (WHERE x > 100) FROM st WHERE true GROUP BY ROLLUP(g)	1,NULL | 2,NULL | NULL,NULL	INT32,BOOL
+every(x > 10)|none|s4	SELECT every(x > 10) FILTER (WHERE x > 100) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	NULL | NULL	BOOL
+every(x > 10)|none|s5	SELECT every(x > 10) FILTER (WHERE x > 100), every(x > 10) FILTER (WHERE x > 15) FROM st WHERE true	NULL,true	BOOL,BOOL
+every(x > 10)|none|s6	SELECT every(x > 10) FILTER (WHERE x > 100), every(x > 10) FROM st WHERE true	NULL,false	BOOL,BOOL
+every(x > 10)|none|s7	SELECT every(x > 10) FILTER (WHERE id > 1) FROM st WHERE true	true	BOOL
+every(x > 10)|some|s1	SELECT every(x > 10) FILTER (WHERE x > 10) FROM st WHERE true	true	BOOL
+every(x > 10)|some|s2	SELECT g, every(x > 10) FILTER (WHERE x > 10) FROM st WHERE true GROUP BY g	1,true | 2,true	INT32,BOOL
+every(x > 10)|some|s3	SELECT g, every(x > 10) FILTER (WHERE x > 10) FROM st WHERE true GROUP BY ROLLUP(g)	1,true | 2,true | NULL,true	INT32,BOOL
+every(x > 10)|some|s4	SELECT every(x > 10) FILTER (WHERE x > 10) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	true | true	BOOL
+every(x > 10)|some|s5	SELECT every(x > 10) FILTER (WHERE x > 10), every(x > 10) FILTER (WHERE x > 15) FROM st WHERE true	true,true	BOOL,BOOL
+every(x > 10)|some|s6	SELECT every(x > 10) FILTER (WHERE x > 10), every(x > 10) FROM st WHERE true	true,false	BOOL,BOOL
+every(x > 10)|some|s7	SELECT every(x > 10) FILTER (WHERE id > 1) FROM st WHERE true	true	BOOL
+every(x > 10)|all|s1	SELECT every(x > 10) FILTER (WHERE id > 0) FROM st WHERE true	false	BOOL
+every(x > 10)|all|s2	SELECT g, every(x > 10) FILTER (WHERE id > 0) FROM st WHERE true GROUP BY g	1,false | 2,true	INT32,BOOL
+every(x > 10)|all|s3	SELECT g, every(x > 10) FILTER (WHERE id > 0) FROM st WHERE true GROUP BY ROLLUP(g)	1,false | 2,true | NULL,false	INT32,BOOL
+every(x > 10)|all|s4	SELECT every(x > 10) FILTER (WHERE id > 0) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	false | false	BOOL
+every(x > 10)|all|s5	SELECT every(x > 10) FILTER (WHERE id > 0), every(x > 10) FILTER (WHERE x > 15) FROM st WHERE true	false,true	BOOL,BOOL
+every(x > 10)|all|s6	SELECT every(x > 10) FILTER (WHERE id > 0), every(x > 10) FROM st WHERE true	false,false	BOOL,BOOL
+every(x > 10)|all|s7	SELECT every(x > 10) FILTER (WHERE id > 1) FROM st WHERE true	true	BOOL
+every(x > 10)|nullx|s1	SELECT every(x > 10) FILTER (WHERE x IS NULL) FROM st WHERE true	NULL	BOOL
+every(x > 10)|nullx|s2	SELECT g, every(x > 10) FILTER (WHERE x IS NULL) FROM st WHERE true GROUP BY g	1,NULL | 2,NULL	INT32,BOOL
+every(x > 10)|nullx|s3	SELECT g, every(x > 10) FILTER (WHERE x IS NULL) FROM st WHERE true GROUP BY ROLLUP(g)	1,NULL | 2,NULL | NULL,NULL	INT32,BOOL
+every(x > 10)|nullx|s4	SELECT every(x > 10) FILTER (WHERE x IS NULL) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	NULL | NULL	BOOL
+every(x > 10)|nullx|s5	SELECT every(x > 10) FILTER (WHERE x IS NULL), every(x > 10) FILTER (WHERE x > 15) FROM st WHERE true	NULL,true	BOOL,BOOL
+every(x > 10)|nullx|s6	SELECT every(x > 10) FILTER (WHERE x IS NULL), every(x > 10) FROM st WHERE true	NULL,false	BOOL,BOOL
+every(x > 10)|nullx|s7	SELECT every(x > 10) FILTER (WHERE id > 1) FROM st WHERE true	true	BOOL
+extra|0|e	SELECT SUM(CASE WHEN x > 10 THEN 1 ELSE 0 END) FROM st WHERE id < 0	NULL	INT64
+extra|1|e	SELECT COUNT(*), COUNT(DISTINCT x) FROM st WHERE id < 0	0,0	-
+extra|2|e	SELECT COUNT(*) FILTER (WHERE x>10), COUNT(DISTINCT x) FROM st WHERE id < 0	0,0	-
+extra|3|e	SELECT COUNT(*) FROM st WHERE id < 0	0	INT64
+extra|4|e	SELECT COUNT(x), SUM(x), AVG(x), MIN(x), MAX(x) FROM st WHERE id < 0	0,NULL,NULL,NULL,NULL	INT64,INT64,DECIMAL,INT32,INT32
+extra|5|e	SELECT COUNT(*) FILTER (WHERE x>10) FROM st WHERE id < 0 HAVING COUNT(*) FILTER (WHERE x>10) = 0	0	INT64
+extra|6|e	SELECT g FROM st GROUP BY g HAVING COUNT(*) FILTER (WHERE x>10) = 1	1 | 2	INT32
+extra|7|e	SELECT g, COUNT(*) FILTER (WHERE x>10) AS c FROM st GROUP BY g ORDER BY COUNT(*) FILTER (WHERE x>10), g	1,1 | 2,1	INT32,INT64
+extra|8|e	SELECT COUNT(*) FILTER (WHERE x>10) + 1 FROM st WHERE id < 0	1	INT64
+extra|9|e	SELECT COALESCE(COUNT(*) FILTER (WHERE x>10), -1) FROM st WHERE id < 0	0	INT64
+extra|10|e	SELECT COUNT(*) FILTER (WHERE x>10) OVER () FROM st WHERE id < 0		INT64
+extra|11|e	SELECT string_agg(x::text, '-') FILTER (WHERE x > 10) FROM st	20-30	STRING
+extra|14|e	SELECT COUNT(*) FILTER (WHERE x>10) FROM (SELECT * FROM st WHERE id < 0) d	0	INT64
+extra|15|e	SELECT (SELECT COUNT(*) FILTER (WHERE x>10) FROM st WHERE id < 0)	0	INT64
+extra|16|e	SELECT COUNT(*) FILTER (WHERE x>10) FROM st WHERE id < 0 UNION ALL SELECT 5	0 | 5	INT64
+extra|17|e	SELECT g, COUNT(*) FILTER (WHERE x>10) FROM st WHERE id < 0 GROUP BY CUBE(g)	NULL,0	INT32,INT64
+extra|18|e	SELECT COUNT(1) FILTER (WHERE x>10) FROM st WHERE id < 0	0	INT64
+extra|19|e	SELECT COUNT(DISTINCT x) FILTER (WHERE x>10), COUNT(*) FROM st WHERE id < 0	0,0	INT64,INT64
+extra|20|e	SELECT COUNT(*) FILTER (WHERE x>10) FROM st WHERE id < 0 GROUP BY g		INT64
+string_agg(x::text, '-')|zero|s1	SELECT string_agg(x::text, '-') FILTER (WHERE x > 10) FROM st WHERE id < 0	NULL	STRING
+string_agg(x::text, '-')|zero|s2	SELECT g, string_agg(x::text, '-') FILTER (WHERE x > 10) FROM st WHERE id < 0 GROUP BY g		INT32,STRING
+string_agg(x::text, '-')|zero|s3	SELECT g, string_agg(x::text, '-') FILTER (WHERE x > 10) FROM st WHERE id < 0 GROUP BY ROLLUP(g)	NULL,NULL	INT32,STRING
+string_agg(x::text, '-')|zero|s4	SELECT string_agg(x::text, '-') FILTER (WHERE x > 10) FROM st WHERE id < 0 GROUP BY GROUPING SETS ((), ())	NULL | NULL	STRING
+string_agg(x::text, '-')|zero|s5	SELECT string_agg(x::text, '-') FILTER (WHERE x > 10), string_agg(x::text, '-') FILTER (WHERE x > 15) FROM st WHERE id < 0	NULL,NULL	STRING,STRING
+string_agg(x::text, '-')|zero|s6	SELECT string_agg(x::text, '-') FILTER (WHERE x > 10), string_agg(x::text, '-') FROM st WHERE id < 0	NULL,NULL	STRING,STRING
+string_agg(x::text, '-')|zero|s7	SELECT string_agg(x::text, '-') FILTER (WHERE id > 1) FROM st WHERE id < 0	NULL	STRING
+string_agg(x::text, '-')|none|s1	SELECT string_agg(x::text, '-') FILTER (WHERE x > 100) FROM st WHERE true	NULL	STRING
+string_agg(x::text, '-')|none|s2	SELECT g, string_agg(x::text, '-') FILTER (WHERE x > 100) FROM st WHERE true GROUP BY g	1,NULL | 2,NULL	INT32,STRING
+string_agg(x::text, '-')|none|s3	SELECT g, string_agg(x::text, '-') FILTER (WHERE x > 100) FROM st WHERE true GROUP BY ROLLUP(g)	1,NULL | 2,NULL | NULL,NULL	INT32,STRING
+string_agg(x::text, '-')|none|s4	SELECT string_agg(x::text, '-') FILTER (WHERE x > 100) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	NULL | NULL	STRING
+string_agg(x::text, '-')|none|s5	SELECT string_agg(x::text, '-') FILTER (WHERE x > 100), string_agg(x::text, '-') FILTER (WHERE x > 15) FROM st WHERE true	NULL,20-30	STRING,STRING
+string_agg(x::text, '-')|none|s6	SELECT string_agg(x::text, '-') FILTER (WHERE x > 100), string_agg(x::text, '-') FROM st WHERE true	NULL,10-20-30	STRING,STRING
+string_agg(x::text, '-')|none|s7	SELECT string_agg(x::text, '-') FILTER (WHERE id > 1) FROM st WHERE true	20-30	STRING
+string_agg(x::text, '-')|some|s1	SELECT string_agg(x::text, '-') FILTER (WHERE x > 10) FROM st WHERE true	20-30	STRING
+string_agg(x::text, '-')|some|s2	SELECT g, string_agg(x::text, '-') FILTER (WHERE x > 10) FROM st WHERE true GROUP BY g	1,20 | 2,30	INT32,STRING
+string_agg(x::text, '-')|some|s3	SELECT g, string_agg(x::text, '-') FILTER (WHERE x > 10) FROM st WHERE true GROUP BY ROLLUP(g)	1,20 | 2,30 | NULL,20-30	INT32,STRING
+string_agg(x::text, '-')|some|s4	SELECT string_agg(x::text, '-') FILTER (WHERE x > 10) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	20-30 | 20-30	STRING
+string_agg(x::text, '-')|some|s5	SELECT string_agg(x::text, '-') FILTER (WHERE x > 10), string_agg(x::text, '-') FILTER (WHERE x > 15) FROM st WHERE true	20-30,20-30	STRING,STRING
+string_agg(x::text, '-')|some|s6	SELECT string_agg(x::text, '-') FILTER (WHERE x > 10), string_agg(x::text, '-') FROM st WHERE true	20-30,10-20-30	STRING,STRING
+string_agg(x::text, '-')|some|s7	SELECT string_agg(x::text, '-') FILTER (WHERE id > 1) FROM st WHERE true	20-30	STRING
+string_agg(x::text, '-')|all|s1	SELECT string_agg(x::text, '-') FILTER (WHERE id > 0) FROM st WHERE true	10-20-30	STRING
+string_agg(x::text, '-')|all|s2	SELECT g, string_agg(x::text, '-') FILTER (WHERE id > 0) FROM st WHERE true GROUP BY g	1,10-20 | 2,30	INT32,STRING
+string_agg(x::text, '-')|all|s3	SELECT g, string_agg(x::text, '-') FILTER (WHERE id > 0) FROM st WHERE true GROUP BY ROLLUP(g)	1,10-20 | 2,30 | NULL,10-20-30	INT32,STRING
+string_agg(x::text, '-')|all|s4	SELECT string_agg(x::text, '-') FILTER (WHERE id > 0) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	10-20-30 | 10-20-30	STRING
+string_agg(x::text, '-')|all|s5	SELECT string_agg(x::text, '-') FILTER (WHERE id > 0), string_agg(x::text, '-') FILTER (WHERE x > 15) FROM st WHERE true	10-20-30,20-30	STRING,STRING
+string_agg(x::text, '-')|all|s6	SELECT string_agg(x::text, '-') FILTER (WHERE id > 0), string_agg(x::text, '-') FROM st WHERE true	10-20-30,10-20-30	STRING,STRING
+string_agg(x::text, '-')|all|s7	SELECT string_agg(x::text, '-') FILTER (WHERE id > 1) FROM st WHERE true	20-30	STRING
+string_agg(x::text, '-')|nullx|s1	SELECT string_agg(x::text, '-') FILTER (WHERE x IS NULL) FROM st WHERE true	NULL	STRING
+string_agg(x::text, '-')|nullx|s2	SELECT g, string_agg(x::text, '-') FILTER (WHERE x IS NULL) FROM st WHERE true GROUP BY g	1,NULL | 2,NULL	INT32,STRING
+string_agg(x::text, '-')|nullx|s3	SELECT g, string_agg(x::text, '-') FILTER (WHERE x IS NULL) FROM st WHERE true GROUP BY ROLLUP(g)	1,NULL | 2,NULL | NULL,NULL	INT32,STRING
+string_agg(x::text, '-')|nullx|s4	SELECT string_agg(x::text, '-') FILTER (WHERE x IS NULL) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	NULL | NULL	STRING
+string_agg(x::text, '-')|nullx|s5	SELECT string_agg(x::text, '-') FILTER (WHERE x IS NULL), string_agg(x::text, '-') FILTER (WHERE x > 15) FROM st WHERE true	NULL,20-30	STRING,STRING
+string_agg(x::text, '-')|nullx|s6	SELECT string_agg(x::text, '-') FILTER (WHERE x IS NULL), string_agg(x::text, '-') FROM st WHERE true	NULL,10-20-30	STRING,STRING
+string_agg(x::text, '-')|nullx|s7	SELECT string_agg(x::text, '-') FILTER (WHERE id > 1) FROM st WHERE true	20-30	STRING
+string_agg(x::text, ' / ')|zero|s1	SELECT string_agg(x::text, ' / ') FILTER (WHERE x > 10) FROM st WHERE id < 0	NULL	STRING
+string_agg(x::text, ' / ')|zero|s2	SELECT g, string_agg(x::text, ' / ') FILTER (WHERE x > 10) FROM st WHERE id < 0 GROUP BY g		INT32,STRING
+string_agg(x::text, ' / ')|zero|s3	SELECT g, string_agg(x::text, ' / ') FILTER (WHERE x > 10) FROM st WHERE id < 0 GROUP BY ROLLUP(g)	NULL,NULL	INT32,STRING
+string_agg(x::text, ' / ')|zero|s4	SELECT string_agg(x::text, ' / ') FILTER (WHERE x > 10) FROM st WHERE id < 0 GROUP BY GROUPING SETS ((), ())	NULL | NULL	STRING
+string_agg(x::text, ' / ')|zero|s5	SELECT string_agg(x::text, ' / ') FILTER (WHERE x > 10), string_agg(x::text, ' / ') FILTER (WHERE x > 15) FROM st WHERE id < 0	NULL,NULL	STRING,STRING
+string_agg(x::text, ' / ')|zero|s6	SELECT string_agg(x::text, ' / ') FILTER (WHERE x > 10), string_agg(x::text, ' / ') FROM st WHERE id < 0	NULL,NULL	STRING,STRING
+string_agg(x::text, ' / ')|zero|s7	SELECT string_agg(x::text, ' / ') FILTER (WHERE id > 1) FROM st WHERE id < 0	NULL	STRING
+string_agg(x::text, ' / ')|none|s1	SELECT string_agg(x::text, ' / ') FILTER (WHERE x > 100) FROM st WHERE true	NULL	STRING
+string_agg(x::text, ' / ')|none|s2	SELECT g, string_agg(x::text, ' / ') FILTER (WHERE x > 100) FROM st WHERE true GROUP BY g	1,NULL | 2,NULL	INT32,STRING
+string_agg(x::text, ' / ')|none|s3	SELECT g, string_agg(x::text, ' / ') FILTER (WHERE x > 100) FROM st WHERE true GROUP BY ROLLUP(g)	1,NULL | 2,NULL | NULL,NULL	INT32,STRING
+string_agg(x::text, ' / ')|none|s4	SELECT string_agg(x::text, ' / ') FILTER (WHERE x > 100) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	NULL | NULL	STRING
+string_agg(x::text, ' / ')|none|s5	SELECT string_agg(x::text, ' / ') FILTER (WHERE x > 100), string_agg(x::text, ' / ') FILTER (WHERE x > 15) FROM st WHERE true	NULL,20 / 30	STRING,STRING
+string_agg(x::text, ' / ')|none|s6	SELECT string_agg(x::text, ' / ') FILTER (WHERE x > 100), string_agg(x::text, ' / ') FROM st WHERE true	NULL,10 / 20 / 30	STRING,STRING
+string_agg(x::text, ' / ')|none|s7	SELECT string_agg(x::text, ' / ') FILTER (WHERE id > 1) FROM st WHERE true	20 / 30	STRING
+string_agg(x::text, ' / ')|some|s1	SELECT string_agg(x::text, ' / ') FILTER (WHERE x > 10) FROM st WHERE true	20 / 30	STRING
+string_agg(x::text, ' / ')|some|s2	SELECT g, string_agg(x::text, ' / ') FILTER (WHERE x > 10) FROM st WHERE true GROUP BY g	1,20 | 2,30	INT32,STRING
+string_agg(x::text, ' / ')|some|s3	SELECT g, string_agg(x::text, ' / ') FILTER (WHERE x > 10) FROM st WHERE true GROUP BY ROLLUP(g)	1,20 | 2,30 | NULL,20 / 30	INT32,STRING
+string_agg(x::text, ' / ')|some|s4	SELECT string_agg(x::text, ' / ') FILTER (WHERE x > 10) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	20 / 30 | 20 / 30	STRING
+string_agg(x::text, ' / ')|some|s5	SELECT string_agg(x::text, ' / ') FILTER (WHERE x > 10), string_agg(x::text, ' / ') FILTER (WHERE x > 15) FROM st WHERE true	20 / 30,20 / 30	STRING,STRING
+string_agg(x::text, ' / ')|some|s6	SELECT string_agg(x::text, ' / ') FILTER (WHERE x > 10), string_agg(x::text, ' / ') FROM st WHERE true	20 / 30,10 / 20 / 30	STRING,STRING
+string_agg(x::text, ' / ')|some|s7	SELECT string_agg(x::text, ' / ') FILTER (WHERE id > 1) FROM st WHERE true	20 / 30	STRING
+string_agg(x::text, ' / ')|all|s1	SELECT string_agg(x::text, ' / ') FILTER (WHERE id > 0) FROM st WHERE true	10 / 20 / 30	STRING
+string_agg(x::text, ' / ')|all|s2	SELECT g, string_agg(x::text, ' / ') FILTER (WHERE id > 0) FROM st WHERE true GROUP BY g	1,10 / 20 | 2,30	INT32,STRING
+string_agg(x::text, ' / ')|all|s3	SELECT g, string_agg(x::text, ' / ') FILTER (WHERE id > 0) FROM st WHERE true GROUP BY ROLLUP(g)	1,10 / 20 | 2,30 | NULL,10 / 20 / 30	INT32,STRING
+string_agg(x::text, ' / ')|all|s4	SELECT string_agg(x::text, ' / ') FILTER (WHERE id > 0) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	10 / 20 / 30 | 10 / 20 / 30	STRING
+string_agg(x::text, ' / ')|all|s5	SELECT string_agg(x::text, ' / ') FILTER (WHERE id > 0), string_agg(x::text, ' / ') FILTER (WHERE x > 15) FROM st WHERE true	10 / 20 / 30,20 / 30	STRING,STRING
+string_agg(x::text, ' / ')|all|s6	SELECT string_agg(x::text, ' / ') FILTER (WHERE id > 0), string_agg(x::text, ' / ') FROM st WHERE true	10 / 20 / 30,10 / 20 / 30	STRING,STRING
+string_agg(x::text, ' / ')|all|s7	SELECT string_agg(x::text, ' / ') FILTER (WHERE id > 1) FROM st WHERE true	20 / 30	STRING
+string_agg(x::text, ' / ')|nullx|s1	SELECT string_agg(x::text, ' / ') FILTER (WHERE x IS NULL) FROM st WHERE true	NULL	STRING
+string_agg(x::text, ' / ')|nullx|s2	SELECT g, string_agg(x::text, ' / ') FILTER (WHERE x IS NULL) FROM st WHERE true GROUP BY g	1,NULL | 2,NULL	INT32,STRING
+string_agg(x::text, ' / ')|nullx|s3	SELECT g, string_agg(x::text, ' / ') FILTER (WHERE x IS NULL) FROM st WHERE true GROUP BY ROLLUP(g)	1,NULL | 2,NULL | NULL,NULL	INT32,STRING
+string_agg(x::text, ' / ')|nullx|s4	SELECT string_agg(x::text, ' / ') FILTER (WHERE x IS NULL) FROM st WHERE true GROUP BY GROUPING SETS ((), ())	NULL | NULL	STRING
+string_agg(x::text, ' / ')|nullx|s5	SELECT string_agg(x::text, ' / ') FILTER (WHERE x IS NULL), string_agg(x::text, ' / ') FILTER (WHERE x > 15) FROM st WHERE true	NULL,20 / 30	STRING,STRING
+string_agg(x::text, ' / ')|nullx|s6	SELECT string_agg(x::text, ' / ') FILTER (WHERE x IS NULL), string_agg(x::text, ' / ') FROM st WHERE true	NULL,10 / 20 / 30	STRING,STRING
+string_agg(x::text, ' / ')|nullx|s7	SELECT string_agg(x::text, ' / ') FILTER (WHERE id > 1) FROM st WHERE true	20 / 30	STRING
