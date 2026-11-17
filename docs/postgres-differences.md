@@ -64,9 +64,9 @@ Integer arguments arrive widened. `TO_HEX(int32_col)` for −1 returns `ffffffff
 
 Declared CREATE/DROP TABLE uses row results; PostgreSQL sends DDL tags without rows. (catalog: [dml-assignment#r10](adr/0012-divergences/dml-assignment.md#catalog); ADR-0012 §13/#1024-tags)
 
-**Two `LIKE` operands over BYTES are typed differently.**
+**A FROM-less subquery's literal beside a BYTES `LIKE` operand is read as bytea.**
 
-`bytea LIKE bytea` reads bytea's own matcher, chosen from the operands' declared types, and two shapes reach it with a type PostgreSQL does not give them. A FROM-less scalar subquery over a quoted literal (`vb LIKE (SELECT 'A%')`) is folded into the literal before planning, so the literal is read as bytea where PostgreSQL types the subquery's column text and raises 42883; and a `CREATE FUNCTION` body's LIKE has untyped parameters, so it reads the text matcher over BYTES arguments. Every other LIKE, over text or bytea, takes the backslash as its default escape and reads `LIKE … ESCAPE` as PostgreSQL 17.11 does (#1209, #1593). (catalog: [text-collation#r27](adr/0012-divergences/text-collation.md#catalog); #1593)
+`bytea LIKE bytea` reads bytea's own matcher, chosen from the operands' declared types. A FROM-less scalar subquery over a quoted literal (`vb LIKE (SELECT 'A%')`) is folded into the literal before planning, so the literal is read as bytea where PostgreSQL types the subquery's column text and raises 42883 (#1593). (catalog: [text-collation#r27](adr/0012-divergences/text-collation.md#catalog); #1593)
 
 **`LOCALTIMESTAMP(p)`'s precision is accepted and ignored.**
 

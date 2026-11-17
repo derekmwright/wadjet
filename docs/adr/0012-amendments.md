@@ -1215,6 +1215,7 @@ Five matchers implemented the text LIKE pattern language (the scan's pushed filt
 | family | row | change | gate |
 |---|---|---|---|
 | text-collation | r16 | CLOSED (PostgreSQL's answer now): `'a%b' LIKE 'a\%b'` `t` (b0e0f116 `f`); `'abcd' LIKE 'abc\'` 22025 (b0e0f116 `f`); `'a%b' LIKE 'aé%b' ESCAPE 'é'` `t` (b0e0f116 `f`); `NULL LIKE 'a' ESCAPE '!!'` 22025 (b0e0f116 NULL); `'abc' LIKE 'abc!' ESCAPE '!'` `f` (unchanged, #1204) | `wadjet.TestTextLike1209Matrix`, `scan.TestTextLikeSeam1209` |
+| text-collation | [r27](0012-divergences/text-collation.md#catalog) | Narrowed (measured): a `CREATE FUNCTION` body's LIKE over BYTES arguments still reads the text matcher, which now takes the backslash escape byte by byte as bytea's does, so `f(decode('5c41','hex'), decode('5c41','hex'))` answers `f`, PostgreSQL's answer (b0e0f116 `t`; the `udf-body-bytes` pin of `wadjet.TestByteaLike1593Shapes` is deleted); the FROM-less scalar subquery half is unchanged | `wadjet.TestByteaLike1593Shapes` |
 
 ## Dated markers inside the entries
 

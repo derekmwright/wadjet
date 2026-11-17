@@ -98,12 +98,12 @@ func lkShapeAnswer(r lkRunner, sql string) string {
 // `id IN (SELECT '12')` answer as `id IN ('12')`, docs/postgres-differences.md).
 // The answer is the one the base tree gave; this change did not move it.
 //
-// `udf-body-bytes` is a CREATE FUNCTION body's LIKE: the engine's function
-// parameters are untyped, so the body has no declared operand type and reads
-// the text matcher (`t` for 5c41 LIKE 5c41, PostgreSQL's declared bytea
-// parameters read bytea's, `f`). Also the base's answer.
+// `udf-body-bytes`, a CREATE FUNCTION body's LIKE, was pinned here at `t`: the
+// engine's function parameters are untyped, so the body reads the TEXT
+// matcher, which read the backslash as an ordinary character. Since #1209 the
+// text matcher takes the backslash as its escape, byte by byte as bytea's
+// does, so the shape answers PostgreSQL's `f` and its pin is deleted.
 var lkShapeResidual = map[string]string{
-	"udf-body-bytes":          "true",
 	"scalar-subquery-literal": "1;2;5;7;11;13;14;20;21;22;26;27;28;29;32;33;34;35;36",
 }
 
