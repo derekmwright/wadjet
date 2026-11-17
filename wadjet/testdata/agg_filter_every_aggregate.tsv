@@ -1,0 +1,398 @@
+# key	SQL	want	declared type (- = not pinned)	oracle	control SQL (- = none)
+count(*)|FA	SELECT count(*) FILTER (WHERE id >= 4) FROM pt	2	INT64	pg	SELECT count(*) FROM (SELECT * FROM pt WHERE id >= 4) q
+count(*)|FB	SELECT count(*) FILTER (WHERE id IN (2, 3)) FROM pt	2	INT64	pg	SELECT count(*) FROM (SELECT * FROM pt WHERE id IN (2, 3)) q
+count(*)|FC	SELECT count(*) FILTER (WHERE id IN (3, 4)) FROM pt	2	INT64	pg	SELECT count(*) FROM (SELECT * FROM pt WHERE id IN (3, 4)) q
+count(*)|FD	SELECT count(*) FILTER (WHERE id IN (2, 4, 5)) FROM pt	3	INT64	pg	SELECT count(*) FROM (SELECT * FROM pt WHERE id IN (2, 4, 5)) q
+count(*)|FN	SELECT count(*) FILTER (WHERE id < 0) FROM pt	0	INT64	pg	SELECT count(*) FROM (SELECT * FROM pt WHERE id < 0) q
+count(*)|FZ	SELECT count(*) FILTER (WHERE id >= 4) FROM pt WHERE id < 0	0	INT64	pg	-
+count(*)|FG	SELECT g, count(*) FILTER (WHERE id >= 2) FROM pt GROUP BY g	1,2 | 2,2	INT32,INT64	pg	-
+count(*)|FZG	SELECT g, count(*) FILTER (WHERE id >= 4) FROM pt WHERE id < 0 GROUP BY ROLLUP(g)	NULL,0	INT32,INT64	pg	-
+count(x)|FA	SELECT count(x) FILTER (WHERE id >= 4) FROM pt	2	INT64	pg	SELECT count(x) FROM (SELECT * FROM pt WHERE id >= 4) q
+count(x)|FB	SELECT count(x) FILTER (WHERE id IN (2, 3)) FROM pt	1	INT64	pg	SELECT count(x) FROM (SELECT * FROM pt WHERE id IN (2, 3)) q
+count(x)|FC	SELECT count(x) FILTER (WHERE id IN (3, 4)) FROM pt	1	INT64	pg	SELECT count(x) FROM (SELECT * FROM pt WHERE id IN (3, 4)) q
+count(x)|FD	SELECT count(x) FILTER (WHERE id IN (2, 4, 5)) FROM pt	3	INT64	pg	SELECT count(x) FROM (SELECT * FROM pt WHERE id IN (2, 4, 5)) q
+count(x)|FN	SELECT count(x) FILTER (WHERE id < 0) FROM pt	0	INT64	pg	SELECT count(x) FROM (SELECT * FROM pt WHERE id < 0) q
+count(x)|FZ	SELECT count(x) FILTER (WHERE id >= 4) FROM pt WHERE id < 0	0	INT64	pg	-
+count(x)|FG	SELECT g, count(x) FILTER (WHERE id >= 2) FROM pt GROUP BY g	1,2 | 2,1	INT32,INT64	pg	-
+count(x)|FZG	SELECT g, count(x) FILTER (WHERE id >= 4) FROM pt WHERE id < 0 GROUP BY ROLLUP(g)	NULL,0	INT32,INT64	pg	-
+count(distinct x)|FA	SELECT count(distinct x) FILTER (WHERE id >= 4) FROM pt	2	INT64	pg	SELECT count(distinct x) FROM (SELECT * FROM pt WHERE id >= 4) q
+count(distinct x)|FB	SELECT count(distinct x) FILTER (WHERE id IN (2, 3)) FROM pt	1	INT64	pg	SELECT count(distinct x) FROM (SELECT * FROM pt WHERE id IN (2, 3)) q
+count(distinct x)|FC	SELECT count(distinct x) FILTER (WHERE id IN (3, 4)) FROM pt	1	INT64	pg	SELECT count(distinct x) FROM (SELECT * FROM pt WHERE id IN (3, 4)) q
+count(distinct x)|FD	SELECT count(distinct x) FILTER (WHERE id IN (2, 4, 5)) FROM pt	3	INT64	pg	SELECT count(distinct x) FROM (SELECT * FROM pt WHERE id IN (2, 4, 5)) q
+count(distinct x)|FN	SELECT count(distinct x) FILTER (WHERE id < 0) FROM pt	0	INT64	pg	SELECT count(distinct x) FROM (SELECT * FROM pt WHERE id < 0) q
+count(distinct x)|FZ	SELECT count(distinct x) FILTER (WHERE id >= 4) FROM pt WHERE id < 0	0	INT64	pg	-
+count(distinct x)|FG	SELECT g, count(distinct x) FILTER (WHERE id >= 2) FROM pt GROUP BY g	1,2 | 2,1	INT32,INT64	pg	-
+count(distinct x)|FZG	SELECT g, count(distinct x) FILTER (WHERE id >= 4) FROM pt WHERE id < 0 GROUP BY ROLLUP(g)	NULL,0	INT32,INT64	pg	-
+count(distinct x, y)|FA	SELECT count(distinct x, y) FILTER (WHERE id >= 4) FROM pt	2	INT64	prefilter	SELECT count(distinct x, y) FROM (SELECT * FROM pt WHERE id >= 4) q
+count(distinct x, y)|FB	SELECT count(distinct x, y) FILTER (WHERE id IN (2, 3)) FROM pt	1	INT64	prefilter	SELECT count(distinct x, y) FROM (SELECT * FROM pt WHERE id IN (2, 3)) q
+count(distinct x, y)|FC	SELECT count(distinct x, y) FILTER (WHERE id IN (3, 4)) FROM pt	1	INT64	prefilter	SELECT count(distinct x, y) FROM (SELECT * FROM pt WHERE id IN (3, 4)) q
+count(distinct x, y)|FD	SELECT count(distinct x, y) FILTER (WHERE id IN (2, 4, 5)) FROM pt	3	INT64	prefilter	SELECT count(distinct x, y) FROM (SELECT * FROM pt WHERE id IN (2, 4, 5)) q
+count(distinct x, y)|FN	SELECT count(distinct x, y) FILTER (WHERE id < 0) FROM pt	0	INT64	prefilter	SELECT count(distinct x, y) FROM (SELECT * FROM pt WHERE id < 0) q
+count(distinct x, y)|FZ	SELECT count(distinct x, y) FILTER (WHERE id >= 4) FROM pt WHERE id < 0	0	INT64	engine	-
+count(distinct x, y)|FG	SELECT g, count(distinct x, y) FILTER (WHERE id >= 2) FROM pt GROUP BY g	1,2 | 2,1	INT32,INT64	engine	-
+count(distinct x, y)|FZG	SELECT g, count(distinct x, y) FILTER (WHERE id >= 4) FROM pt WHERE id < 0 GROUP BY ROLLUP(g)	NULL,0	INT32,INT64	engine	-
+sum(x)|FA	SELECT sum(x) FILTER (WHERE id >= 4) FROM pt	90	INT64	pg	SELECT sum(x) FROM (SELECT * FROM pt WHERE id >= 4) q
+sum(x)|FB	SELECT sum(x) FILTER (WHERE id IN (2, 3)) FROM pt	20	INT64	pg	SELECT sum(x) FROM (SELECT * FROM pt WHERE id IN (2, 3)) q
+sum(x)|FC	SELECT sum(x) FILTER (WHERE id IN (3, 4)) FROM pt	40	INT64	pg	SELECT sum(x) FROM (SELECT * FROM pt WHERE id IN (3, 4)) q
+sum(x)|FD	SELECT sum(x) FILTER (WHERE id IN (2, 4, 5)) FROM pt	110	INT64	pg	SELECT sum(x) FROM (SELECT * FROM pt WHERE id IN (2, 4, 5)) q
+sum(x)|FN	SELECT sum(x) FILTER (WHERE id < 0) FROM pt	NULL	INT64	pg	SELECT sum(x) FROM (SELECT * FROM pt WHERE id < 0) q
+sum(x)|FZ	SELECT sum(x) FILTER (WHERE id >= 4) FROM pt WHERE id < 0	NULL	INT64	pg	-
+sum(x)|FG	SELECT g, sum(x) FILTER (WHERE id >= 2) FROM pt GROUP BY g	1,70 | 2,40	INT32,INT64	pg	-
+sum(x)|FZG	SELECT g, sum(x) FILTER (WHERE id >= 4) FROM pt WHERE id < 0 GROUP BY ROLLUP(g)	NULL,NULL	INT32,INT64	pg	-
+sum(distinct x)|FA	SELECT sum(distinct x) FILTER (WHERE id >= 4) FROM pt	90	INT64	pg	SELECT sum(distinct x) FROM (SELECT * FROM pt WHERE id >= 4) q
+sum(distinct x)|FB	SELECT sum(distinct x) FILTER (WHERE id IN (2, 3)) FROM pt	20	INT64	pg	SELECT sum(distinct x) FROM (SELECT * FROM pt WHERE id IN (2, 3)) q
+sum(distinct x)|FC	SELECT sum(distinct x) FILTER (WHERE id IN (3, 4)) FROM pt	40	INT64	pg	SELECT sum(distinct x) FROM (SELECT * FROM pt WHERE id IN (3, 4)) q
+sum(distinct x)|FD	SELECT sum(distinct x) FILTER (WHERE id IN (2, 4, 5)) FROM pt	110	INT64	pg	SELECT sum(distinct x) FROM (SELECT * FROM pt WHERE id IN (2, 4, 5)) q
+sum(distinct x)|FN	SELECT sum(distinct x) FILTER (WHERE id < 0) FROM pt	NULL	INT64	pg	SELECT sum(distinct x) FROM (SELECT * FROM pt WHERE id < 0) q
+sum(distinct x)|FZ	SELECT sum(distinct x) FILTER (WHERE id >= 4) FROM pt WHERE id < 0	NULL	INT64	pg	-
+sum(distinct x)|FG	SELECT g, sum(distinct x) FILTER (WHERE id >= 2) FROM pt GROUP BY g	1,70 | 2,40	INT32,INT64	pg	-
+sum(distinct x)|FZG	SELECT g, sum(distinct x) FILTER (WHERE id >= 4) FROM pt WHERE id < 0 GROUP BY ROLLUP(g)	NULL,NULL	INT32,INT64	pg	-
+avg(x)|FA	SELECT avg(x) FILTER (WHERE id >= 4) FROM pt	45	DECIMAL	pg	SELECT avg(x) FROM (SELECT * FROM pt WHERE id >= 4) q
+avg(x)|FB	SELECT avg(x) FILTER (WHERE id IN (2, 3)) FROM pt	20	DECIMAL	pg	SELECT avg(x) FROM (SELECT * FROM pt WHERE id IN (2, 3)) q
+avg(x)|FC	SELECT avg(x) FILTER (WHERE id IN (3, 4)) FROM pt	40	DECIMAL	pg	SELECT avg(x) FROM (SELECT * FROM pt WHERE id IN (3, 4)) q
+avg(x)|FD	SELECT avg(x) FILTER (WHERE id IN (2, 4, 5)) FROM pt	36.667	DECIMAL	pg	SELECT avg(x) FROM (SELECT * FROM pt WHERE id IN (2, 4, 5)) q
+avg(x)|FN	SELECT avg(x) FILTER (WHERE id < 0) FROM pt	NULL	DECIMAL	pg	SELECT avg(x) FROM (SELECT * FROM pt WHERE id < 0) q
+avg(x)|FZ	SELECT avg(x) FILTER (WHERE id >= 4) FROM pt WHERE id < 0	NULL	DECIMAL	pg	-
+avg(x)|FG	SELECT g, avg(x) FILTER (WHERE id >= 2) FROM pt GROUP BY g	1,35 | 2,40	INT32,DECIMAL	pg	-
+avg(x)|FZG	SELECT g, avg(x) FILTER (WHERE id >= 4) FROM pt WHERE id < 0 GROUP BY ROLLUP(g)	NULL,NULL	INT32,DECIMAL	pg	-
+avg(distinct x)|FA	SELECT avg(distinct x) FILTER (WHERE id >= 4) FROM pt	45	DECIMAL	pg	SELECT avg(distinct x) FROM (SELECT * FROM pt WHERE id >= 4) q
+avg(distinct x)|FB	SELECT avg(distinct x) FILTER (WHERE id IN (2, 3)) FROM pt	20	DECIMAL	pg	SELECT avg(distinct x) FROM (SELECT * FROM pt WHERE id IN (2, 3)) q
+avg(distinct x)|FC	SELECT avg(distinct x) FILTER (WHERE id IN (3, 4)) FROM pt	40	DECIMAL	pg	SELECT avg(distinct x) FROM (SELECT * FROM pt WHERE id IN (3, 4)) q
+avg(distinct x)|FD	SELECT avg(distinct x) FILTER (WHERE id IN (2, 4, 5)) FROM pt	36.667	DECIMAL	pg	SELECT avg(distinct x) FROM (SELECT * FROM pt WHERE id IN (2, 4, 5)) q
+avg(distinct x)|FN	SELECT avg(distinct x) FILTER (WHERE id < 0) FROM pt	NULL	DECIMAL	pg	SELECT avg(distinct x) FROM (SELECT * FROM pt WHERE id < 0) q
+avg(distinct x)|FZ	SELECT avg(distinct x) FILTER (WHERE id >= 4) FROM pt WHERE id < 0	NULL	DECIMAL	pg	-
+avg(distinct x)|FG	SELECT g, avg(distinct x) FILTER (WHERE id >= 2) FROM pt GROUP BY g	1,35 | 2,40	INT32,DECIMAL	pg	-
+avg(distinct x)|FZG	SELECT g, avg(distinct x) FILTER (WHERE id >= 4) FROM pt WHERE id < 0 GROUP BY ROLLUP(g)	NULL,NULL	INT32,DECIMAL	pg	-
+min(x)|FA	SELECT min(x) FILTER (WHERE id >= 4) FROM pt	40	INT32	pg	SELECT min(x) FROM (SELECT * FROM pt WHERE id >= 4) q
+min(x)|FB	SELECT min(x) FILTER (WHERE id IN (2, 3)) FROM pt	20	INT32	pg	SELECT min(x) FROM (SELECT * FROM pt WHERE id IN (2, 3)) q
+min(x)|FC	SELECT min(x) FILTER (WHERE id IN (3, 4)) FROM pt	40	INT32	pg	SELECT min(x) FROM (SELECT * FROM pt WHERE id IN (3, 4)) q
+min(x)|FD	SELECT min(x) FILTER (WHERE id IN (2, 4, 5)) FROM pt	20	INT32	pg	SELECT min(x) FROM (SELECT * FROM pt WHERE id IN (2, 4, 5)) q
+min(x)|FN	SELECT min(x) FILTER (WHERE id < 0) FROM pt	NULL	INT32	pg	SELECT min(x) FROM (SELECT * FROM pt WHERE id < 0) q
+min(x)|FZ	SELECT min(x) FILTER (WHERE id >= 4) FROM pt WHERE id < 0	NULL	INT32	pg	-
+min(x)|FG	SELECT g, min(x) FILTER (WHERE id >= 2) FROM pt GROUP BY g	1,20 | 2,40	INT32,INT32	pg	-
+min(x)|FZG	SELECT g, min(x) FILTER (WHERE id >= 4) FROM pt WHERE id < 0 GROUP BY ROLLUP(g)	NULL,NULL	INT32,INT32	pg	-
+max(x)|FA	SELECT max(x) FILTER (WHERE id >= 4) FROM pt	50	INT32	pg	SELECT max(x) FROM (SELECT * FROM pt WHERE id >= 4) q
+max(x)|FB	SELECT max(x) FILTER (WHERE id IN (2, 3)) FROM pt	20	INT32	pg	SELECT max(x) FROM (SELECT * FROM pt WHERE id IN (2, 3)) q
+max(x)|FC	SELECT max(x) FILTER (WHERE id IN (3, 4)) FROM pt	40	INT32	pg	SELECT max(x) FROM (SELECT * FROM pt WHERE id IN (3, 4)) q
+max(x)|FD	SELECT max(x) FILTER (WHERE id IN (2, 4, 5)) FROM pt	50	INT32	pg	SELECT max(x) FROM (SELECT * FROM pt WHERE id IN (2, 4, 5)) q
+max(x)|FN	SELECT max(x) FILTER (WHERE id < 0) FROM pt	NULL	INT32	pg	SELECT max(x) FROM (SELECT * FROM pt WHERE id < 0) q
+max(x)|FZ	SELECT max(x) FILTER (WHERE id >= 4) FROM pt WHERE id < 0	NULL	INT32	pg	-
+max(x)|FG	SELECT g, max(x) FILTER (WHERE id >= 2) FROM pt GROUP BY g	1,50 | 2,40	INT32,INT32	pg	-
+max(x)|FZG	SELECT g, max(x) FILTER (WHERE id >= 4) FROM pt WHERE id < 0 GROUP BY ROLLUP(g)	NULL,NULL	INT32,INT32	pg	-
+min(s)|FA	SELECT min(s) FILTER (WHERE id >= 4) FROM pt	d	STRING	pg	SELECT min(s) FROM (SELECT * FROM pt WHERE id >= 4) q
+min(s)|FB	SELECT min(s) FILTER (WHERE id IN (2, 3)) FROM pt	b	STRING	pg	SELECT min(s) FROM (SELECT * FROM pt WHERE id IN (2, 3)) q
+min(s)|FC	SELECT min(s) FILTER (WHERE id IN (3, 4)) FROM pt	d	STRING	pg	SELECT min(s) FROM (SELECT * FROM pt WHERE id IN (3, 4)) q
+min(s)|FD	SELECT min(s) FILTER (WHERE id IN (2, 4, 5)) FROM pt	b	STRING	pg	SELECT min(s) FROM (SELECT * FROM pt WHERE id IN (2, 4, 5)) q
+min(s)|FN	SELECT min(s) FILTER (WHERE id < 0) FROM pt	NULL	STRING	pg	SELECT min(s) FROM (SELECT * FROM pt WHERE id < 0) q
+min(s)|FZ	SELECT min(s) FILTER (WHERE id >= 4) FROM pt WHERE id < 0	NULL	STRING	pg	-
+min(s)|FG	SELECT g, min(s) FILTER (WHERE id >= 2) FROM pt GROUP BY g	1,b | 2,d	INT32,STRING	pg	-
+min(s)|FZG	SELECT g, min(s) FILTER (WHERE id >= 4) FROM pt WHERE id < 0 GROUP BY ROLLUP(g)	NULL,NULL	INT32,STRING	pg	-
+max(distinct x)|FA	SELECT max(distinct x) FILTER (WHERE id >= 4) FROM pt	50	INT32	pg	SELECT max(distinct x) FROM (SELECT * FROM pt WHERE id >= 4) q
+max(distinct x)|FB	SELECT max(distinct x) FILTER (WHERE id IN (2, 3)) FROM pt	20	INT32	pg	SELECT max(distinct x) FROM (SELECT * FROM pt WHERE id IN (2, 3)) q
+max(distinct x)|FC	SELECT max(distinct x) FILTER (WHERE id IN (3, 4)) FROM pt	40	INT32	pg	SELECT max(distinct x) FROM (SELECT * FROM pt WHERE id IN (3, 4)) q
+max(distinct x)|FD	SELECT max(distinct x) FILTER (WHERE id IN (2, 4, 5)) FROM pt	50	INT32	pg	SELECT max(distinct x) FROM (SELECT * FROM pt WHERE id IN (2, 4, 5)) q
+max(distinct x)|FN	SELECT max(distinct x) FILTER (WHERE id < 0) FROM pt	NULL	INT32	pg	SELECT max(distinct x) FROM (SELECT * FROM pt WHERE id < 0) q
+max(distinct x)|FZ	SELECT max(distinct x) FILTER (WHERE id >= 4) FROM pt WHERE id < 0	NULL	INT32	pg	-
+max(distinct x)|FG	SELECT g, max(distinct x) FILTER (WHERE id >= 2) FROM pt GROUP BY g	1,50 | 2,40	INT32,INT32	pg	-
+max(distinct x)|FZG	SELECT g, max(distinct x) FILTER (WHERE id >= 4) FROM pt WHERE id < 0 GROUP BY ROLLUP(g)	NULL,NULL	INT32,INT32	pg	-
+string_agg(s, ',')|FA	SELECT string_agg(s, ',') FILTER (WHERE id >= 4) FROM pt	d,e	STRING	pg	SELECT string_agg(s, ',') FROM (SELECT * FROM pt WHERE id >= 4) q
+string_agg(s, ',')|FB	SELECT string_agg(s, ',') FILTER (WHERE id IN (2, 3)) FROM pt	b	STRING	pg	SELECT string_agg(s, ',') FROM (SELECT * FROM pt WHERE id IN (2, 3)) q
+string_agg(s, ',')|FC	SELECT string_agg(s, ',') FILTER (WHERE id IN (3, 4)) FROM pt	d	STRING	pg	SELECT string_agg(s, ',') FROM (SELECT * FROM pt WHERE id IN (3, 4)) q
+string_agg(s, ',')|FD	SELECT string_agg(s, ',') FILTER (WHERE id IN (2, 4, 5)) FROM pt	b,d,e	STRING	pg	SELECT string_agg(s, ',') FROM (SELECT * FROM pt WHERE id IN (2, 4, 5)) q
+string_agg(s, ',')|FN	SELECT string_agg(s, ',') FILTER (WHERE id < 0) FROM pt	NULL	STRING	pg	SELECT string_agg(s, ',') FROM (SELECT * FROM pt WHERE id < 0) q
+string_agg(s, ',')|FZ	SELECT string_agg(s, ',') FILTER (WHERE id >= 4) FROM pt WHERE id < 0	NULL	STRING	pg	-
+string_agg(s, ',')|FG	SELECT g, string_agg(s, ',') FILTER (WHERE id >= 2) FROM pt GROUP BY g	1,b,e | 2,d	INT32,STRING	pg	-
+string_agg(s, ',')|FZG	SELECT g, string_agg(s, ',') FILTER (WHERE id >= 4) FROM pt WHERE id < 0 GROUP BY ROLLUP(g)	NULL,NULL	INT32,STRING	pg	-
+string_agg(s, '-')|FA	SELECT string_agg(s, '-') FILTER (WHERE id >= 4) FROM pt	d-e	STRING	pg	SELECT string_agg(s, '-') FROM (SELECT * FROM pt WHERE id >= 4) q
+string_agg(s, '-')|FB	SELECT string_agg(s, '-') FILTER (WHERE id IN (2, 3)) FROM pt	b	STRING	pg	SELECT string_agg(s, '-') FROM (SELECT * FROM pt WHERE id IN (2, 3)) q
+string_agg(s, '-')|FC	SELECT string_agg(s, '-') FILTER (WHERE id IN (3, 4)) FROM pt	d	STRING	pg	SELECT string_agg(s, '-') FROM (SELECT * FROM pt WHERE id IN (3, 4)) q
+string_agg(s, '-')|FD	SELECT string_agg(s, '-') FILTER (WHERE id IN (2, 4, 5)) FROM pt	b-d-e	STRING	pg	SELECT string_agg(s, '-') FROM (SELECT * FROM pt WHERE id IN (2, 4, 5)) q
+string_agg(s, '-')|FN	SELECT string_agg(s, '-') FILTER (WHERE id < 0) FROM pt	NULL	STRING	pg	SELECT string_agg(s, '-') FROM (SELECT * FROM pt WHERE id < 0) q
+string_agg(s, '-')|FZ	SELECT string_agg(s, '-') FILTER (WHERE id >= 4) FROM pt WHERE id < 0	NULL	STRING	pg	-
+string_agg(s, '-')|FG	SELECT g, string_agg(s, '-') FILTER (WHERE id >= 2) FROM pt GROUP BY g	1,b-e | 2,d	INT32,STRING	pg	-
+string_agg(s, '-')|FZG	SELECT g, string_agg(s, '-') FILTER (WHERE id >= 4) FROM pt WHERE id < 0 GROUP BY ROLLUP(g)	NULL,NULL	INT32,STRING	pg	-
+string_agg(distinct s, '-')|FA	SELECT string_agg(distinct s, '-') FILTER (WHERE id >= 4) FROM pt	d-e	STRING	pg	SELECT string_agg(distinct s, '-') FROM (SELECT * FROM pt WHERE id >= 4) q
+string_agg(distinct s, '-')|FB	SELECT string_agg(distinct s, '-') FILTER (WHERE id IN (2, 3)) FROM pt	b	STRING	pg	SELECT string_agg(distinct s, '-') FROM (SELECT * FROM pt WHERE id IN (2, 3)) q
+string_agg(distinct s, '-')|FC	SELECT string_agg(distinct s, '-') FILTER (WHERE id IN (3, 4)) FROM pt	d	STRING	pg	SELECT string_agg(distinct s, '-') FROM (SELECT * FROM pt WHERE id IN (3, 4)) q
+string_agg(distinct s, '-')|FD	SELECT string_agg(distinct s, '-') FILTER (WHERE id IN (2, 4, 5)) FROM pt	b-d-e	STRING	pg	SELECT string_agg(distinct s, '-') FROM (SELECT * FROM pt WHERE id IN (2, 4, 5)) q
+string_agg(distinct s, '-')|FN	SELECT string_agg(distinct s, '-') FILTER (WHERE id < 0) FROM pt	NULL	STRING	pg	SELECT string_agg(distinct s, '-') FROM (SELECT * FROM pt WHERE id < 0) q
+string_agg(distinct s, '-')|FZ	SELECT string_agg(distinct s, '-') FILTER (WHERE id >= 4) FROM pt WHERE id < 0	NULL	STRING	pg	-
+string_agg(distinct s, '-')|FG	SELECT g, string_agg(distinct s, '-') FILTER (WHERE id >= 2) FROM pt GROUP BY g	1,b-e | 2,d	INT32,STRING	pg	-
+string_agg(distinct s, '-')|FZG	SELECT g, string_agg(distinct s, '-') FILTER (WHERE id >= 4) FROM pt WHERE id < 0 GROUP BY ROLLUP(g)	NULL,NULL	INT32,STRING	pg	-
+string_agg(s)|FA	SELECT string_agg(s) FILTER (WHERE id >= 4) FROM pt	d,e	STRING	prefilter	SELECT string_agg(s) FROM (SELECT * FROM pt WHERE id >= 4) q
+string_agg(s)|FB	SELECT string_agg(s) FILTER (WHERE id IN (2, 3)) FROM pt	b	STRING	prefilter	SELECT string_agg(s) FROM (SELECT * FROM pt WHERE id IN (2, 3)) q
+string_agg(s)|FC	SELECT string_agg(s) FILTER (WHERE id IN (3, 4)) FROM pt	d	STRING	prefilter	SELECT string_agg(s) FROM (SELECT * FROM pt WHERE id IN (3, 4)) q
+string_agg(s)|FD	SELECT string_agg(s) FILTER (WHERE id IN (2, 4, 5)) FROM pt	b,d,e	STRING	prefilter	SELECT string_agg(s) FROM (SELECT * FROM pt WHERE id IN (2, 4, 5)) q
+string_agg(s)|FN	SELECT string_agg(s) FILTER (WHERE id < 0) FROM pt	NULL	STRING	prefilter	SELECT string_agg(s) FROM (SELECT * FROM pt WHERE id < 0) q
+string_agg(s)|FZ	SELECT string_agg(s) FILTER (WHERE id >= 4) FROM pt WHERE id < 0	NULL	STRING	engine	-
+string_agg(s)|FG	SELECT g, string_agg(s) FILTER (WHERE id >= 2) FROM pt GROUP BY g	1,b,e | 2,d	INT32,STRING	engine	-
+string_agg(s)|FZG	SELECT g, string_agg(s) FILTER (WHERE id >= 4) FROM pt WHERE id < 0 GROUP BY ROLLUP(g)	NULL,NULL	INT32,STRING	engine	-
+bool_and(b)|FA	SELECT bool_and(b) FILTER (WHERE id >= 4) FROM pt	false	BOOL	pg	SELECT bool_and(b) FROM (SELECT * FROM pt WHERE id >= 4) q
+bool_and(b)|FB	SELECT bool_and(b) FILTER (WHERE id IN (2, 3)) FROM pt	false	BOOL	pg	SELECT bool_and(b) FROM (SELECT * FROM pt WHERE id IN (2, 3)) q
+bool_and(b)|FC	SELECT bool_and(b) FILTER (WHERE id IN (3, 4)) FROM pt	true	BOOL	pg	SELECT bool_and(b) FROM (SELECT * FROM pt WHERE id IN (3, 4)) q
+bool_and(b)|FD	SELECT bool_and(b) FILTER (WHERE id IN (2, 4, 5)) FROM pt	false	BOOL	pg	SELECT bool_and(b) FROM (SELECT * FROM pt WHERE id IN (2, 4, 5)) q
+bool_and(b)|FN	SELECT bool_and(b) FILTER (WHERE id < 0) FROM pt	NULL	BOOL	pg	SELECT bool_and(b) FROM (SELECT * FROM pt WHERE id < 0) q
+bool_and(b)|FZ	SELECT bool_and(b) FILTER (WHERE id >= 4) FROM pt WHERE id < 0	NULL	BOOL	pg	-
+bool_and(b)|FG	SELECT g, bool_and(b) FILTER (WHERE id >= 2) FROM pt GROUP BY g	1,false | 2,true	INT32,BOOL	pg	-
+bool_and(b)|FZG	SELECT g, bool_and(b) FILTER (WHERE id >= 4) FROM pt WHERE id < 0 GROUP BY ROLLUP(g)	NULL,NULL	INT32,BOOL	pg	-
+bool_or(b)|FA	SELECT bool_or(b) FILTER (WHERE id >= 4) FROM pt	true	BOOL	pg	SELECT bool_or(b) FROM (SELECT * FROM pt WHERE id >= 4) q
+bool_or(b)|FB	SELECT bool_or(b) FILTER (WHERE id IN (2, 3)) FROM pt	false	BOOL	pg	SELECT bool_or(b) FROM (SELECT * FROM pt WHERE id IN (2, 3)) q
+bool_or(b)|FC	SELECT bool_or(b) FILTER (WHERE id IN (3, 4)) FROM pt	true	BOOL	pg	SELECT bool_or(b) FROM (SELECT * FROM pt WHERE id IN (3, 4)) q
+bool_or(b)|FD	SELECT bool_or(b) FILTER (WHERE id IN (2, 4, 5)) FROM pt	true	BOOL	pg	SELECT bool_or(b) FROM (SELECT * FROM pt WHERE id IN (2, 4, 5)) q
+bool_or(b)|FN	SELECT bool_or(b) FILTER (WHERE id < 0) FROM pt	NULL	BOOL	pg	SELECT bool_or(b) FROM (SELECT * FROM pt WHERE id < 0) q
+bool_or(b)|FZ	SELECT bool_or(b) FILTER (WHERE id >= 4) FROM pt WHERE id < 0	NULL	BOOL	pg	-
+bool_or(b)|FG	SELECT g, bool_or(b) FILTER (WHERE id >= 2) FROM pt GROUP BY g	1,false | 2,true	INT32,BOOL	pg	-
+bool_or(b)|FZG	SELECT g, bool_or(b) FILTER (WHERE id >= 4) FROM pt WHERE id < 0 GROUP BY ROLLUP(g)	NULL,NULL	INT32,BOOL	pg	-
+every(b)|FA	SELECT every(b) FILTER (WHERE id >= 4) FROM pt	false	BOOL	pg	SELECT every(b) FROM (SELECT * FROM pt WHERE id >= 4) q
+every(b)|FB	SELECT every(b) FILTER (WHERE id IN (2, 3)) FROM pt	false	BOOL	pg	SELECT every(b) FROM (SELECT * FROM pt WHERE id IN (2, 3)) q
+every(b)|FC	SELECT every(b) FILTER (WHERE id IN (3, 4)) FROM pt	true	BOOL	pg	SELECT every(b) FROM (SELECT * FROM pt WHERE id IN (3, 4)) q
+every(b)|FD	SELECT every(b) FILTER (WHERE id IN (2, 4, 5)) FROM pt	false	BOOL	pg	SELECT every(b) FROM (SELECT * FROM pt WHERE id IN (2, 4, 5)) q
+every(b)|FN	SELECT every(b) FILTER (WHERE id < 0) FROM pt	NULL	BOOL	pg	SELECT every(b) FROM (SELECT * FROM pt WHERE id < 0) q
+every(b)|FZ	SELECT every(b) FILTER (WHERE id >= 4) FROM pt WHERE id < 0	NULL	BOOL	pg	-
+every(b)|FG	SELECT g, every(b) FILTER (WHERE id >= 2) FROM pt GROUP BY g	1,false | 2,true	INT32,BOOL	pg	-
+every(b)|FZG	SELECT g, every(b) FILTER (WHERE id >= 4) FROM pt WHERE id < 0 GROUP BY ROLLUP(g)	NULL,NULL	INT32,BOOL	pg	-
+stddev(x)|FA	SELECT stddev(x) FILTER (WHERE id >= 4) FROM pt	7.0711	FLOAT64	pg	SELECT stddev(x) FROM (SELECT * FROM pt WHERE id >= 4) q
+stddev(x)|FB	SELECT stddev(x) FILTER (WHERE id IN (2, 3)) FROM pt	NULL	FLOAT64	pg	SELECT stddev(x) FROM (SELECT * FROM pt WHERE id IN (2, 3)) q
+stddev(x)|FC	SELECT stddev(x) FILTER (WHERE id IN (3, 4)) FROM pt	NULL	FLOAT64	pg	SELECT stddev(x) FROM (SELECT * FROM pt WHERE id IN (3, 4)) q
+stddev(x)|FD	SELECT stddev(x) FILTER (WHERE id IN (2, 4, 5)) FROM pt	15.275	FLOAT64	pg	SELECT stddev(x) FROM (SELECT * FROM pt WHERE id IN (2, 4, 5)) q
+stddev(x)|FN	SELECT stddev(x) FILTER (WHERE id < 0) FROM pt	NULL	FLOAT64	pg	SELECT stddev(x) FROM (SELECT * FROM pt WHERE id < 0) q
+stddev(x)|FZ	SELECT stddev(x) FILTER (WHERE id >= 4) FROM pt WHERE id < 0	NULL	FLOAT64	pg	-
+stddev(x)|FG	SELECT g, stddev(x) FILTER (WHERE id >= 2) FROM pt GROUP BY g	1,21.213 | 2,NULL	INT32,FLOAT64	pg	-
+stddev(x)|FZG	SELECT g, stddev(x) FILTER (WHERE id >= 4) FROM pt WHERE id < 0 GROUP BY ROLLUP(g)	NULL,NULL	INT32,FLOAT64	pg	-
+stddev_samp(x)|FA	SELECT stddev_samp(x) FILTER (WHERE id >= 4) FROM pt	7.0711	FLOAT64	pg	SELECT stddev_samp(x) FROM (SELECT * FROM pt WHERE id >= 4) q
+stddev_samp(x)|FB	SELECT stddev_samp(x) FILTER (WHERE id IN (2, 3)) FROM pt	NULL	FLOAT64	pg	SELECT stddev_samp(x) FROM (SELECT * FROM pt WHERE id IN (2, 3)) q
+stddev_samp(x)|FC	SELECT stddev_samp(x) FILTER (WHERE id IN (3, 4)) FROM pt	NULL	FLOAT64	pg	SELECT stddev_samp(x) FROM (SELECT * FROM pt WHERE id IN (3, 4)) q
+stddev_samp(x)|FD	SELECT stddev_samp(x) FILTER (WHERE id IN (2, 4, 5)) FROM pt	15.275	FLOAT64	pg	SELECT stddev_samp(x) FROM (SELECT * FROM pt WHERE id IN (2, 4, 5)) q
+stddev_samp(x)|FN	SELECT stddev_samp(x) FILTER (WHERE id < 0) FROM pt	NULL	FLOAT64	pg	SELECT stddev_samp(x) FROM (SELECT * FROM pt WHERE id < 0) q
+stddev_samp(x)|FZ	SELECT stddev_samp(x) FILTER (WHERE id >= 4) FROM pt WHERE id < 0	NULL	FLOAT64	pg	-
+stddev_samp(x)|FG	SELECT g, stddev_samp(x) FILTER (WHERE id >= 2) FROM pt GROUP BY g	1,21.213 | 2,NULL	INT32,FLOAT64	pg	-
+stddev_samp(x)|FZG	SELECT g, stddev_samp(x) FILTER (WHERE id >= 4) FROM pt WHERE id < 0 GROUP BY ROLLUP(g)	NULL,NULL	INT32,FLOAT64	pg	-
+stddev_pop(x)|FA	SELECT stddev_pop(x) FILTER (WHERE id >= 4) FROM pt	5	FLOAT64	pg	SELECT stddev_pop(x) FROM (SELECT * FROM pt WHERE id >= 4) q
+stddev_pop(x)|FB	SELECT stddev_pop(x) FILTER (WHERE id IN (2, 3)) FROM pt	0	FLOAT64	pg	SELECT stddev_pop(x) FROM (SELECT * FROM pt WHERE id IN (2, 3)) q
+stddev_pop(x)|FC	SELECT stddev_pop(x) FILTER (WHERE id IN (3, 4)) FROM pt	0	FLOAT64	pg	SELECT stddev_pop(x) FROM (SELECT * FROM pt WHERE id IN (3, 4)) q
+stddev_pop(x)|FD	SELECT stddev_pop(x) FILTER (WHERE id IN (2, 4, 5)) FROM pt	12.472	FLOAT64	pg	SELECT stddev_pop(x) FROM (SELECT * FROM pt WHERE id IN (2, 4, 5)) q
+stddev_pop(x)|FN	SELECT stddev_pop(x) FILTER (WHERE id < 0) FROM pt	NULL	FLOAT64	pg	SELECT stddev_pop(x) FROM (SELECT * FROM pt WHERE id < 0) q
+stddev_pop(x)|FZ	SELECT stddev_pop(x) FILTER (WHERE id >= 4) FROM pt WHERE id < 0	NULL	FLOAT64	pg	-
+stddev_pop(x)|FG	SELECT g, stddev_pop(x) FILTER (WHERE id >= 2) FROM pt GROUP BY g	1,15 | 2,0	INT32,FLOAT64	pg	-
+stddev_pop(x)|FZG	SELECT g, stddev_pop(x) FILTER (WHERE id >= 4) FROM pt WHERE id < 0 GROUP BY ROLLUP(g)	NULL,NULL	INT32,FLOAT64	pg	-
+variance(x)|FA	SELECT variance(x) FILTER (WHERE id >= 4) FROM pt	50	FLOAT64	pg	SELECT variance(x) FROM (SELECT * FROM pt WHERE id >= 4) q
+variance(x)|FB	SELECT variance(x) FILTER (WHERE id IN (2, 3)) FROM pt	NULL	FLOAT64	pg	SELECT variance(x) FROM (SELECT * FROM pt WHERE id IN (2, 3)) q
+variance(x)|FC	SELECT variance(x) FILTER (WHERE id IN (3, 4)) FROM pt	NULL	FLOAT64	pg	SELECT variance(x) FROM (SELECT * FROM pt WHERE id IN (3, 4)) q
+variance(x)|FD	SELECT variance(x) FILTER (WHERE id IN (2, 4, 5)) FROM pt	233.33	FLOAT64	pg	SELECT variance(x) FROM (SELECT * FROM pt WHERE id IN (2, 4, 5)) q
+variance(x)|FN	SELECT variance(x) FILTER (WHERE id < 0) FROM pt	NULL	FLOAT64	pg	SELECT variance(x) FROM (SELECT * FROM pt WHERE id < 0) q
+variance(x)|FZ	SELECT variance(x) FILTER (WHERE id >= 4) FROM pt WHERE id < 0	NULL	FLOAT64	pg	-
+variance(x)|FG	SELECT g, variance(x) FILTER (WHERE id >= 2) FROM pt GROUP BY g	1,450 | 2,NULL	INT32,FLOAT64	pg	-
+variance(x)|FZG	SELECT g, variance(x) FILTER (WHERE id >= 4) FROM pt WHERE id < 0 GROUP BY ROLLUP(g)	NULL,NULL	INT32,FLOAT64	pg	-
+var_samp(x)|FA	SELECT var_samp(x) FILTER (WHERE id >= 4) FROM pt	50	FLOAT64	pg	SELECT var_samp(x) FROM (SELECT * FROM pt WHERE id >= 4) q
+var_samp(x)|FB	SELECT var_samp(x) FILTER (WHERE id IN (2, 3)) FROM pt	NULL	FLOAT64	pg	SELECT var_samp(x) FROM (SELECT * FROM pt WHERE id IN (2, 3)) q
+var_samp(x)|FC	SELECT var_samp(x) FILTER (WHERE id IN (3, 4)) FROM pt	NULL	FLOAT64	pg	SELECT var_samp(x) FROM (SELECT * FROM pt WHERE id IN (3, 4)) q
+var_samp(x)|FD	SELECT var_samp(x) FILTER (WHERE id IN (2, 4, 5)) FROM pt	233.33	FLOAT64	pg	SELECT var_samp(x) FROM (SELECT * FROM pt WHERE id IN (2, 4, 5)) q
+var_samp(x)|FN	SELECT var_samp(x) FILTER (WHERE id < 0) FROM pt	NULL	FLOAT64	pg	SELECT var_samp(x) FROM (SELECT * FROM pt WHERE id < 0) q
+var_samp(x)|FZ	SELECT var_samp(x) FILTER (WHERE id >= 4) FROM pt WHERE id < 0	NULL	FLOAT64	pg	-
+var_samp(x)|FG	SELECT g, var_samp(x) FILTER (WHERE id >= 2) FROM pt GROUP BY g	1,450 | 2,NULL	INT32,FLOAT64	pg	-
+var_samp(x)|FZG	SELECT g, var_samp(x) FILTER (WHERE id >= 4) FROM pt WHERE id < 0 GROUP BY ROLLUP(g)	NULL,NULL	INT32,FLOAT64	pg	-
+var_pop(x)|FA	SELECT var_pop(x) FILTER (WHERE id >= 4) FROM pt	25	FLOAT64	pg	SELECT var_pop(x) FROM (SELECT * FROM pt WHERE id >= 4) q
+var_pop(x)|FB	SELECT var_pop(x) FILTER (WHERE id IN (2, 3)) FROM pt	0	FLOAT64	pg	SELECT var_pop(x) FROM (SELECT * FROM pt WHERE id IN (2, 3)) q
+var_pop(x)|FC	SELECT var_pop(x) FILTER (WHERE id IN (3, 4)) FROM pt	0	FLOAT64	pg	SELECT var_pop(x) FROM (SELECT * FROM pt WHERE id IN (3, 4)) q
+var_pop(x)|FD	SELECT var_pop(x) FILTER (WHERE id IN (2, 4, 5)) FROM pt	155.56	FLOAT64	pg	SELECT var_pop(x) FROM (SELECT * FROM pt WHERE id IN (2, 4, 5)) q
+var_pop(x)|FN	SELECT var_pop(x) FILTER (WHERE id < 0) FROM pt	NULL	FLOAT64	pg	SELECT var_pop(x) FROM (SELECT * FROM pt WHERE id < 0) q
+var_pop(x)|FZ	SELECT var_pop(x) FILTER (WHERE id >= 4) FROM pt WHERE id < 0	NULL	FLOAT64	pg	-
+var_pop(x)|FG	SELECT g, var_pop(x) FILTER (WHERE id >= 2) FROM pt GROUP BY g	1,225 | 2,0	INT32,FLOAT64	pg	-
+var_pop(x)|FZG	SELECT g, var_pop(x) FILTER (WHERE id >= 4) FROM pt WHERE id < 0 GROUP BY ROLLUP(g)	NULL,NULL	INT32,FLOAT64	pg	-
+approx_distinct(x)|FA	SELECT approx_distinct(x) FILTER (WHERE id >= 4) FROM pt	2	INT64	pg	SELECT approx_distinct(x) FROM (SELECT * FROM pt WHERE id >= 4) q
+approx_distinct(x)|FB	SELECT approx_distinct(x) FILTER (WHERE id IN (2, 3)) FROM pt	1	INT64	pg	SELECT approx_distinct(x) FROM (SELECT * FROM pt WHERE id IN (2, 3)) q
+approx_distinct(x)|FC	SELECT approx_distinct(x) FILTER (WHERE id IN (3, 4)) FROM pt	1	INT64	pg	SELECT approx_distinct(x) FROM (SELECT * FROM pt WHERE id IN (3, 4)) q
+approx_distinct(x)|FD	SELECT approx_distinct(x) FILTER (WHERE id IN (2, 4, 5)) FROM pt	3	INT64	pg	SELECT approx_distinct(x) FROM (SELECT * FROM pt WHERE id IN (2, 4, 5)) q
+approx_distinct(x)|FN	SELECT approx_distinct(x) FILTER (WHERE id < 0) FROM pt	0	INT64	pg	SELECT approx_distinct(x) FROM (SELECT * FROM pt WHERE id < 0) q
+approx_distinct(x)|FZ	SELECT approx_distinct(x) FILTER (WHERE id >= 4) FROM pt WHERE id < 0	0	INT64	pg	-
+approx_distinct(x)|FG	SELECT g, approx_distinct(x) FILTER (WHERE id >= 2) FROM pt GROUP BY g	1,2 | 2,1	INT32,INT64	pg	-
+approx_distinct(x)|FZG	SELECT g, approx_distinct(x) FILTER (WHERE id >= 4) FROM pt WHERE id < 0 GROUP BY ROLLUP(g)	NULL,0	INT32,INT64	pg	-
+corr(x, y)|FA	SELECT corr(x, y) FILTER (WHERE id >= 4) FROM pt	1	FLOAT64	pg	SELECT corr(x, y) FROM (SELECT * FROM pt WHERE id >= 4) q
+corr(x, y)|FB	SELECT corr(x, y) FILTER (WHERE id IN (2, 3)) FROM pt	NULL	FLOAT64	pg	SELECT corr(x, y) FROM (SELECT * FROM pt WHERE id IN (2, 3)) q
+corr(x, y)|FC	SELECT corr(x, y) FILTER (WHERE id IN (3, 4)) FROM pt	NULL	FLOAT64	pg	SELECT corr(x, y) FROM (SELECT * FROM pt WHERE id IN (3, 4)) q
+corr(x, y)|FD	SELECT corr(x, y) FILTER (WHERE id IN (2, 4, 5)) FROM pt	1	FLOAT64	pg	SELECT corr(x, y) FROM (SELECT * FROM pt WHERE id IN (2, 4, 5)) q
+corr(x, y)|FN	SELECT corr(x, y) FILTER (WHERE id < 0) FROM pt	NULL	FLOAT64	pg	SELECT corr(x, y) FROM (SELECT * FROM pt WHERE id < 0) q
+corr(x, y)|FZ	SELECT corr(x, y) FILTER (WHERE id >= 4) FROM pt WHERE id < 0	NULL	FLOAT64	pg	-
+corr(x, y)|FG	SELECT g, corr(x, y) FILTER (WHERE id >= 2) FROM pt GROUP BY g	1,NULL | 2,NULL	INT32,FLOAT64	pg	-
+corr(x, y)|FZG	SELECT g, corr(x, y) FILTER (WHERE id >= 4) FROM pt WHERE id < 0 GROUP BY ROLLUP(g)	NULL,NULL	INT32,FLOAT64	pg	-
+corr(y, x)|FA	SELECT corr(y, x) FILTER (WHERE id >= 4) FROM pt	1	FLOAT64	pg	SELECT corr(y, x) FROM (SELECT * FROM pt WHERE id >= 4) q
+corr(y, x)|FB	SELECT corr(y, x) FILTER (WHERE id IN (2, 3)) FROM pt	NULL	FLOAT64	pg	SELECT corr(y, x) FROM (SELECT * FROM pt WHERE id IN (2, 3)) q
+corr(y, x)|FC	SELECT corr(y, x) FILTER (WHERE id IN (3, 4)) FROM pt	NULL	FLOAT64	pg	SELECT corr(y, x) FROM (SELECT * FROM pt WHERE id IN (3, 4)) q
+corr(y, x)|FD	SELECT corr(y, x) FILTER (WHERE id IN (2, 4, 5)) FROM pt	1	FLOAT64	pg	SELECT corr(y, x) FROM (SELECT * FROM pt WHERE id IN (2, 4, 5)) q
+corr(y, x)|FN	SELECT corr(y, x) FILTER (WHERE id < 0) FROM pt	NULL	FLOAT64	pg	SELECT corr(y, x) FROM (SELECT * FROM pt WHERE id < 0) q
+corr(y, x)|FZ	SELECT corr(y, x) FILTER (WHERE id >= 4) FROM pt WHERE id < 0	NULL	FLOAT64	pg	-
+corr(y, x)|FG	SELECT g, corr(y, x) FILTER (WHERE id >= 2) FROM pt GROUP BY g	1,NULL | 2,NULL	INT32,FLOAT64	pg	-
+corr(y, x)|FZG	SELECT g, corr(y, x) FILTER (WHERE id >= 4) FROM pt WHERE id < 0 GROUP BY ROLLUP(g)	NULL,NULL	INT32,FLOAT64	pg	-
+covar_samp(x, y)|FA	SELECT covar_samp(x, y) FILTER (WHERE id >= 4) FROM pt	500	FLOAT64	pg	SELECT covar_samp(x, y) FROM (SELECT * FROM pt WHERE id >= 4) q
+covar_samp(x, y)|FB	SELECT covar_samp(x, y) FILTER (WHERE id IN (2, 3)) FROM pt	NULL	FLOAT64	pg	SELECT covar_samp(x, y) FROM (SELECT * FROM pt WHERE id IN (2, 3)) q
+covar_samp(x, y)|FC	SELECT covar_samp(x, y) FILTER (WHERE id IN (3, 4)) FROM pt	NULL	FLOAT64	pg	SELECT covar_samp(x, y) FROM (SELECT * FROM pt WHERE id IN (3, 4)) q
+covar_samp(x, y)|FD	SELECT covar_samp(x, y) FILTER (WHERE id IN (2, 4, 5)) FROM pt	500	FLOAT64	pg	SELECT covar_samp(x, y) FROM (SELECT * FROM pt WHERE id IN (2, 4, 5)) q
+covar_samp(x, y)|FN	SELECT covar_samp(x, y) FILTER (WHERE id < 0) FROM pt	NULL	FLOAT64	pg	SELECT covar_samp(x, y) FROM (SELECT * FROM pt WHERE id < 0) q
+covar_samp(x, y)|FZ	SELECT covar_samp(x, y) FILTER (WHERE id >= 4) FROM pt WHERE id < 0	NULL	FLOAT64	pg	-
+covar_samp(x, y)|FG	SELECT g, covar_samp(x, y) FILTER (WHERE id >= 2) FROM pt GROUP BY g	1,NULL | 2,NULL	INT32,FLOAT64	pg	-
+covar_samp(x, y)|FZG	SELECT g, covar_samp(x, y) FILTER (WHERE id >= 4) FROM pt WHERE id < 0 GROUP BY ROLLUP(g)	NULL,NULL	INT32,FLOAT64	pg	-
+covar_pop(x, y)|FA	SELECT covar_pop(x, y) FILTER (WHERE id >= 4) FROM pt	250	FLOAT64	pg	SELECT covar_pop(x, y) FROM (SELECT * FROM pt WHERE id >= 4) q
+covar_pop(x, y)|FB	SELECT covar_pop(x, y) FILTER (WHERE id IN (2, 3)) FROM pt	NULL	FLOAT64	pg	SELECT covar_pop(x, y) FROM (SELECT * FROM pt WHERE id IN (2, 3)) q
+covar_pop(x, y)|FC	SELECT covar_pop(x, y) FILTER (WHERE id IN (3, 4)) FROM pt	0	FLOAT64	pg	SELECT covar_pop(x, y) FROM (SELECT * FROM pt WHERE id IN (3, 4)) q
+covar_pop(x, y)|FD	SELECT covar_pop(x, y) FILTER (WHERE id IN (2, 4, 5)) FROM pt	250	FLOAT64	pg	SELECT covar_pop(x, y) FROM (SELECT * FROM pt WHERE id IN (2, 4, 5)) q
+covar_pop(x, y)|FN	SELECT covar_pop(x, y) FILTER (WHERE id < 0) FROM pt	NULL	FLOAT64	pg	SELECT covar_pop(x, y) FROM (SELECT * FROM pt WHERE id < 0) q
+covar_pop(x, y)|FZ	SELECT covar_pop(x, y) FILTER (WHERE id >= 4) FROM pt WHERE id < 0	NULL	FLOAT64	pg	-
+covar_pop(x, y)|FG	SELECT g, covar_pop(x, y) FILTER (WHERE id >= 2) FROM pt GROUP BY g	1,0 | 2,0	INT32,FLOAT64	pg	-
+covar_pop(x, y)|FZG	SELECT g, covar_pop(x, y) FILTER (WHERE id >= 4) FROM pt WHERE id < 0 GROUP BY ROLLUP(g)	NULL,NULL	INT32,FLOAT64	pg	-
+covar_samp(y, x)|FA	SELECT covar_samp(y, x) FILTER (WHERE id >= 4) FROM pt	500	FLOAT64	pg	SELECT covar_samp(y, x) FROM (SELECT * FROM pt WHERE id >= 4) q
+covar_samp(y, x)|FB	SELECT covar_samp(y, x) FILTER (WHERE id IN (2, 3)) FROM pt	NULL	FLOAT64	pg	SELECT covar_samp(y, x) FROM (SELECT * FROM pt WHERE id IN (2, 3)) q
+covar_samp(y, x)|FC	SELECT covar_samp(y, x) FILTER (WHERE id IN (3, 4)) FROM pt	NULL	FLOAT64	pg	SELECT covar_samp(y, x) FROM (SELECT * FROM pt WHERE id IN (3, 4)) q
+covar_samp(y, x)|FD	SELECT covar_samp(y, x) FILTER (WHERE id IN (2, 4, 5)) FROM pt	500	FLOAT64	pg	SELECT covar_samp(y, x) FROM (SELECT * FROM pt WHERE id IN (2, 4, 5)) q
+covar_samp(y, x)|FN	SELECT covar_samp(y, x) FILTER (WHERE id < 0) FROM pt	NULL	FLOAT64	pg	SELECT covar_samp(y, x) FROM (SELECT * FROM pt WHERE id < 0) q
+covar_samp(y, x)|FZ	SELECT covar_samp(y, x) FILTER (WHERE id >= 4) FROM pt WHERE id < 0	NULL	FLOAT64	pg	-
+covar_samp(y, x)|FG	SELECT g, covar_samp(y, x) FILTER (WHERE id >= 2) FROM pt GROUP BY g	1,NULL | 2,NULL	INT32,FLOAT64	pg	-
+covar_samp(y, x)|FZG	SELECT g, covar_samp(y, x) FILTER (WHERE id >= 4) FROM pt WHERE id < 0 GROUP BY ROLLUP(g)	NULL,NULL	INT32,FLOAT64	pg	-
+covar_pop(y, x)|FA	SELECT covar_pop(y, x) FILTER (WHERE id >= 4) FROM pt	250	FLOAT64	pg	SELECT covar_pop(y, x) FROM (SELECT * FROM pt WHERE id >= 4) q
+covar_pop(y, x)|FB	SELECT covar_pop(y, x) FILTER (WHERE id IN (2, 3)) FROM pt	NULL	FLOAT64	pg	SELECT covar_pop(y, x) FROM (SELECT * FROM pt WHERE id IN (2, 3)) q
+covar_pop(y, x)|FC	SELECT covar_pop(y, x) FILTER (WHERE id IN (3, 4)) FROM pt	0	FLOAT64	pg	SELECT covar_pop(y, x) FROM (SELECT * FROM pt WHERE id IN (3, 4)) q
+covar_pop(y, x)|FD	SELECT covar_pop(y, x) FILTER (WHERE id IN (2, 4, 5)) FROM pt	250	FLOAT64	pg	SELECT covar_pop(y, x) FROM (SELECT * FROM pt WHERE id IN (2, 4, 5)) q
+covar_pop(y, x)|FN	SELECT covar_pop(y, x) FILTER (WHERE id < 0) FROM pt	NULL	FLOAT64	pg	SELECT covar_pop(y, x) FROM (SELECT * FROM pt WHERE id < 0) q
+covar_pop(y, x)|FZ	SELECT covar_pop(y, x) FILTER (WHERE id >= 4) FROM pt WHERE id < 0	NULL	FLOAT64	pg	-
+covar_pop(y, x)|FG	SELECT g, covar_pop(y, x) FILTER (WHERE id >= 2) FROM pt GROUP BY g	1,0 | 2,0	INT32,FLOAT64	pg	-
+covar_pop(y, x)|FZG	SELECT g, covar_pop(y, x) FILTER (WHERE id >= 4) FROM pt WHERE id < 0 GROUP BY ROLLUP(g)	NULL,NULL	INT32,FLOAT64	pg	-
+percentile_cont(0.5, x)|FA	SELECT percentile_cont(0.5, x) FILTER (WHERE id >= 4) FROM pt	45	FLOAT64	pg	SELECT percentile_cont(0.5, x) FROM (SELECT * FROM pt WHERE id >= 4) q
+percentile_cont(0.5, x)|FB	SELECT percentile_cont(0.5, x) FILTER (WHERE id IN (2, 3)) FROM pt	20	FLOAT64	pg	SELECT percentile_cont(0.5, x) FROM (SELECT * FROM pt WHERE id IN (2, 3)) q
+percentile_cont(0.5, x)|FC	SELECT percentile_cont(0.5, x) FILTER (WHERE id IN (3, 4)) FROM pt	40	FLOAT64	pg	SELECT percentile_cont(0.5, x) FROM (SELECT * FROM pt WHERE id IN (3, 4)) q
+percentile_cont(0.5, x)|FD	SELECT percentile_cont(0.5, x) FILTER (WHERE id IN (2, 4, 5)) FROM pt	40	FLOAT64	pg	SELECT percentile_cont(0.5, x) FROM (SELECT * FROM pt WHERE id IN (2, 4, 5)) q
+percentile_cont(0.5, x)|FN	SELECT percentile_cont(0.5, x) FILTER (WHERE id < 0) FROM pt	NULL	FLOAT64	pg	SELECT percentile_cont(0.5, x) FROM (SELECT * FROM pt WHERE id < 0) q
+percentile_cont(0.5, x)|FZ	SELECT percentile_cont(0.5, x) FILTER (WHERE id >= 4) FROM pt WHERE id < 0	NULL	FLOAT64	pg	-
+percentile_cont(0.5, x)|FG	SELECT g, percentile_cont(0.5, x) FILTER (WHERE id >= 2) FROM pt GROUP BY g	1,35 | 2,40	INT32,FLOAT64	pg	-
+percentile_cont(0.5, x)|FZG	SELECT g, percentile_cont(0.5, x) FILTER (WHERE id >= 4) FROM pt WHERE id < 0 GROUP BY ROLLUP(g)	NULL,NULL	INT32,FLOAT64	pg	-
+percentile_disc(0.5, x)|FA	SELECT percentile_disc(0.5, x) FILTER (WHERE id >= 4) FROM pt	40	FLOAT64	pg	SELECT percentile_disc(0.5, x) FROM (SELECT * FROM pt WHERE id >= 4) q
+percentile_disc(0.5, x)|FB	SELECT percentile_disc(0.5, x) FILTER (WHERE id IN (2, 3)) FROM pt	20	FLOAT64	pg	SELECT percentile_disc(0.5, x) FROM (SELECT * FROM pt WHERE id IN (2, 3)) q
+percentile_disc(0.5, x)|FC	SELECT percentile_disc(0.5, x) FILTER (WHERE id IN (3, 4)) FROM pt	40	FLOAT64	pg	SELECT percentile_disc(0.5, x) FROM (SELECT * FROM pt WHERE id IN (3, 4)) q
+percentile_disc(0.5, x)|FD	SELECT percentile_disc(0.5, x) FILTER (WHERE id IN (2, 4, 5)) FROM pt	40	FLOAT64	pg	SELECT percentile_disc(0.5, x) FROM (SELECT * FROM pt WHERE id IN (2, 4, 5)) q
+percentile_disc(0.5, x)|FN	SELECT percentile_disc(0.5, x) FILTER (WHERE id < 0) FROM pt	NULL	FLOAT64	pg	SELECT percentile_disc(0.5, x) FROM (SELECT * FROM pt WHERE id < 0) q
+percentile_disc(0.5, x)|FZ	SELECT percentile_disc(0.5, x) FILTER (WHERE id >= 4) FROM pt WHERE id < 0	NULL	FLOAT64	pg	-
+percentile_disc(0.5, x)|FG	SELECT g, percentile_disc(0.5, x) FILTER (WHERE id >= 2) FROM pt GROUP BY g	1,20 | 2,40	INT32,FLOAT64	pg	-
+percentile_disc(0.5, x)|FZG	SELECT g, percentile_disc(0.5, x) FILTER (WHERE id >= 4) FROM pt WHERE id < 0 GROUP BY ROLLUP(g)	NULL,NULL	INT32,FLOAT64	pg	-
+percentile_cont(0.25, x)|FA	SELECT percentile_cont(0.25, x) FILTER (WHERE id >= 4) FROM pt	42.5	FLOAT64	pg	SELECT percentile_cont(0.25, x) FROM (SELECT * FROM pt WHERE id >= 4) q
+percentile_cont(0.25, x)|FB	SELECT percentile_cont(0.25, x) FILTER (WHERE id IN (2, 3)) FROM pt	20	FLOAT64	pg	SELECT percentile_cont(0.25, x) FROM (SELECT * FROM pt WHERE id IN (2, 3)) q
+percentile_cont(0.25, x)|FC	SELECT percentile_cont(0.25, x) FILTER (WHERE id IN (3, 4)) FROM pt	40	FLOAT64	pg	SELECT percentile_cont(0.25, x) FROM (SELECT * FROM pt WHERE id IN (3, 4)) q
+percentile_cont(0.25, x)|FD	SELECT percentile_cont(0.25, x) FILTER (WHERE id IN (2, 4, 5)) FROM pt	30	FLOAT64	pg	SELECT percentile_cont(0.25, x) FROM (SELECT * FROM pt WHERE id IN (2, 4, 5)) q
+percentile_cont(0.25, x)|FN	SELECT percentile_cont(0.25, x) FILTER (WHERE id < 0) FROM pt	NULL	FLOAT64	pg	SELECT percentile_cont(0.25, x) FROM (SELECT * FROM pt WHERE id < 0) q
+percentile_cont(0.25, x)|FZ	SELECT percentile_cont(0.25, x) FILTER (WHERE id >= 4) FROM pt WHERE id < 0	NULL	FLOAT64	pg	-
+percentile_cont(0.25, x)|FG	SELECT g, percentile_cont(0.25, x) FILTER (WHERE id >= 2) FROM pt GROUP BY g	1,27.5 | 2,40	INT32,FLOAT64	pg	-
+percentile_cont(0.25, x)|FZG	SELECT g, percentile_cont(0.25, x) FILTER (WHERE id >= 4) FROM pt WHERE id < 0 GROUP BY ROLLUP(g)	NULL,NULL	INT32,FLOAT64	pg	-
+quantile_cont(x, 0.5)|FA	SELECT quantile_cont(x, 0.5) FILTER (WHERE id >= 4) FROM pt	45	FLOAT64	pg	SELECT quantile_cont(x, 0.5) FROM (SELECT * FROM pt WHERE id >= 4) q
+quantile_cont(x, 0.5)|FB	SELECT quantile_cont(x, 0.5) FILTER (WHERE id IN (2, 3)) FROM pt	20	FLOAT64	pg	SELECT quantile_cont(x, 0.5) FROM (SELECT * FROM pt WHERE id IN (2, 3)) q
+quantile_cont(x, 0.5)|FC	SELECT quantile_cont(x, 0.5) FILTER (WHERE id IN (3, 4)) FROM pt	40	FLOAT64	pg	SELECT quantile_cont(x, 0.5) FROM (SELECT * FROM pt WHERE id IN (3, 4)) q
+quantile_cont(x, 0.5)|FD	SELECT quantile_cont(x, 0.5) FILTER (WHERE id IN (2, 4, 5)) FROM pt	40	FLOAT64	pg	SELECT quantile_cont(x, 0.5) FROM (SELECT * FROM pt WHERE id IN (2, 4, 5)) q
+quantile_cont(x, 0.5)|FN	SELECT quantile_cont(x, 0.5) FILTER (WHERE id < 0) FROM pt	NULL	FLOAT64	pg	SELECT quantile_cont(x, 0.5) FROM (SELECT * FROM pt WHERE id < 0) q
+quantile_cont(x, 0.5)|FZ	SELECT quantile_cont(x, 0.5) FILTER (WHERE id >= 4) FROM pt WHERE id < 0	NULL	FLOAT64	pg	-
+quantile_cont(x, 0.5)|FG	SELECT g, quantile_cont(x, 0.5) FILTER (WHERE id >= 2) FROM pt GROUP BY g	1,35 | 2,40	INT32,FLOAT64	pg	-
+quantile_cont(x, 0.5)|FZG	SELECT g, quantile_cont(x, 0.5) FILTER (WHERE id >= 4) FROM pt WHERE id < 0 GROUP BY ROLLUP(g)	NULL,NULL	INT32,FLOAT64	pg	-
+quantile_disc(x, 0.5)|FA	SELECT quantile_disc(x, 0.5) FILTER (WHERE id >= 4) FROM pt	40	FLOAT64	pg	SELECT quantile_disc(x, 0.5) FROM (SELECT * FROM pt WHERE id >= 4) q
+quantile_disc(x, 0.5)|FB	SELECT quantile_disc(x, 0.5) FILTER (WHERE id IN (2, 3)) FROM pt	20	FLOAT64	pg	SELECT quantile_disc(x, 0.5) FROM (SELECT * FROM pt WHERE id IN (2, 3)) q
+quantile_disc(x, 0.5)|FC	SELECT quantile_disc(x, 0.5) FILTER (WHERE id IN (3, 4)) FROM pt	40	FLOAT64	pg	SELECT quantile_disc(x, 0.5) FROM (SELECT * FROM pt WHERE id IN (3, 4)) q
+quantile_disc(x, 0.5)|FD	SELECT quantile_disc(x, 0.5) FILTER (WHERE id IN (2, 4, 5)) FROM pt	40	FLOAT64	pg	SELECT quantile_disc(x, 0.5) FROM (SELECT * FROM pt WHERE id IN (2, 4, 5)) q
+quantile_disc(x, 0.5)|FN	SELECT quantile_disc(x, 0.5) FILTER (WHERE id < 0) FROM pt	NULL	FLOAT64	pg	SELECT quantile_disc(x, 0.5) FROM (SELECT * FROM pt WHERE id < 0) q
+quantile_disc(x, 0.5)|FZ	SELECT quantile_disc(x, 0.5) FILTER (WHERE id >= 4) FROM pt WHERE id < 0	NULL	FLOAT64	pg	-
+quantile_disc(x, 0.5)|FG	SELECT g, quantile_disc(x, 0.5) FILTER (WHERE id >= 2) FROM pt GROUP BY g	1,20 | 2,40	INT32,FLOAT64	pg	-
+quantile_disc(x, 0.5)|FZG	SELECT g, quantile_disc(x, 0.5) FILTER (WHERE id >= 4) FROM pt WHERE id < 0 GROUP BY ROLLUP(g)	NULL,NULL	INT32,FLOAT64	pg	-
+quantile_cont(x, 0.25)|FA	SELECT quantile_cont(x, 0.25) FILTER (WHERE id >= 4) FROM pt	42.5	FLOAT64	pg	SELECT quantile_cont(x, 0.25) FROM (SELECT * FROM pt WHERE id >= 4) q
+quantile_cont(x, 0.25)|FB	SELECT quantile_cont(x, 0.25) FILTER (WHERE id IN (2, 3)) FROM pt	20	FLOAT64	pg	SELECT quantile_cont(x, 0.25) FROM (SELECT * FROM pt WHERE id IN (2, 3)) q
+quantile_cont(x, 0.25)|FC	SELECT quantile_cont(x, 0.25) FILTER (WHERE id IN (3, 4)) FROM pt	40	FLOAT64	pg	SELECT quantile_cont(x, 0.25) FROM (SELECT * FROM pt WHERE id IN (3, 4)) q
+quantile_cont(x, 0.25)|FD	SELECT quantile_cont(x, 0.25) FILTER (WHERE id IN (2, 4, 5)) FROM pt	30	FLOAT64	pg	SELECT quantile_cont(x, 0.25) FROM (SELECT * FROM pt WHERE id IN (2, 4, 5)) q
+quantile_cont(x, 0.25)|FN	SELECT quantile_cont(x, 0.25) FILTER (WHERE id < 0) FROM pt	NULL	FLOAT64	pg	SELECT quantile_cont(x, 0.25) FROM (SELECT * FROM pt WHERE id < 0) q
+quantile_cont(x, 0.25)|FZ	SELECT quantile_cont(x, 0.25) FILTER (WHERE id >= 4) FROM pt WHERE id < 0	NULL	FLOAT64	pg	-
+quantile_cont(x, 0.25)|FG	SELECT g, quantile_cont(x, 0.25) FILTER (WHERE id >= 2) FROM pt GROUP BY g	1,27.5 | 2,40	INT32,FLOAT64	pg	-
+quantile_cont(x, 0.25)|FZG	SELECT g, quantile_cont(x, 0.25) FILTER (WHERE id >= 4) FROM pt WHERE id < 0 GROUP BY ROLLUP(g)	NULL,NULL	INT32,FLOAT64	pg	-
+mode(x)|FA	SELECT mode(x) FILTER (WHERE id >= 4) FROM pt	40	FLOAT64	pg	SELECT mode(x) FROM (SELECT * FROM pt WHERE id >= 4) q
+mode(x)|FB	SELECT mode(x) FILTER (WHERE id IN (2, 3)) FROM pt	20	FLOAT64	pg	SELECT mode(x) FROM (SELECT * FROM pt WHERE id IN (2, 3)) q
+mode(x)|FC	SELECT mode(x) FILTER (WHERE id IN (3, 4)) FROM pt	40	FLOAT64	pg	SELECT mode(x) FROM (SELECT * FROM pt WHERE id IN (3, 4)) q
+mode(x)|FD	SELECT mode(x) FILTER (WHERE id IN (2, 4, 5)) FROM pt	20	FLOAT64	pg	SELECT mode(x) FROM (SELECT * FROM pt WHERE id IN (2, 4, 5)) q
+mode(x)|FN	SELECT mode(x) FILTER (WHERE id < 0) FROM pt	NULL	FLOAT64	pg	SELECT mode(x) FROM (SELECT * FROM pt WHERE id < 0) q
+mode(x)|FZ	SELECT mode(x) FILTER (WHERE id >= 4) FROM pt WHERE id < 0	NULL	FLOAT64	pg	-
+mode(x)|FG	SELECT g, mode(x) FILTER (WHERE id >= 2) FROM pt GROUP BY g	1,20 | 2,40	INT32,FLOAT64	pg	-
+mode(x)|FZG	SELECT g, mode(x) FILTER (WHERE id >= 4) FROM pt WHERE id < 0 GROUP BY ROLLUP(g)	NULL,NULL	INT32,FLOAT64	pg	-
+median(x)|FA	SELECT median(x) FILTER (WHERE id >= 4) FROM pt	45	FLOAT64	pg	SELECT median(x) FROM (SELECT * FROM pt WHERE id >= 4) q
+median(x)|FB	SELECT median(x) FILTER (WHERE id IN (2, 3)) FROM pt	20	FLOAT64	pg	SELECT median(x) FROM (SELECT * FROM pt WHERE id IN (2, 3)) q
+median(x)|FC	SELECT median(x) FILTER (WHERE id IN (3, 4)) FROM pt	40	FLOAT64	pg	SELECT median(x) FROM (SELECT * FROM pt WHERE id IN (3, 4)) q
+median(x)|FD	SELECT median(x) FILTER (WHERE id IN (2, 4, 5)) FROM pt	40	FLOAT64	pg	SELECT median(x) FROM (SELECT * FROM pt WHERE id IN (2, 4, 5)) q
+median(x)|FN	SELECT median(x) FILTER (WHERE id < 0) FROM pt	NULL	FLOAT64	pg	SELECT median(x) FROM (SELECT * FROM pt WHERE id < 0) q
+median(x)|FZ	SELECT median(x) FILTER (WHERE id >= 4) FROM pt WHERE id < 0	NULL	FLOAT64	pg	-
+median(x)|FG	SELECT g, median(x) FILTER (WHERE id >= 2) FROM pt GROUP BY g	1,35 | 2,40	INT32,FLOAT64	pg	-
+median(x)|FZG	SELECT g, median(x) FILTER (WHERE id >= 4) FROM pt WHERE id < 0 GROUP BY ROLLUP(g)	NULL,NULL	INT32,FLOAT64	pg	-
+min_by(x, y)|FA	SELECT min_by(x, y) FILTER (WHERE id >= 4) FROM pt	40	INT32	prefilter	SELECT min_by(x, y) FROM (SELECT * FROM pt WHERE id >= 4) q
+min_by(x, y)|FB	SELECT min_by(x, y) FILTER (WHERE id IN (2, 3)) FROM pt	NULL	INT32	prefilter	SELECT min_by(x, y) FROM (SELECT * FROM pt WHERE id IN (2, 3)) q
+min_by(x, y)|FC	SELECT min_by(x, y) FILTER (WHERE id IN (3, 4)) FROM pt	40	INT32	prefilter	SELECT min_by(x, y) FROM (SELECT * FROM pt WHERE id IN (3, 4)) q
+min_by(x, y)|FD	SELECT min_by(x, y) FILTER (WHERE id IN (2, 4, 5)) FROM pt	40	INT32	prefilter	SELECT min_by(x, y) FROM (SELECT * FROM pt WHERE id IN (2, 4, 5)) q
+min_by(x, y)|FN	SELECT min_by(x, y) FILTER (WHERE id < 0) FROM pt	NULL	INT32	prefilter	SELECT min_by(x, y) FROM (SELECT * FROM pt WHERE id < 0) q
+min_by(x, y)|FZ	SELECT min_by(x, y) FILTER (WHERE id >= 4) FROM pt WHERE id < 0	NULL	INT32	engine	-
+min_by(x, y)|FG	SELECT g, min_by(x, y) FILTER (WHERE id >= 2) FROM pt GROUP BY g	1,50 | 2,40	INT32,INT32	engine	-
+min_by(x, y)|FZG	SELECT g, min_by(x, y) FILTER (WHERE id >= 4) FROM pt WHERE id < 0 GROUP BY ROLLUP(g)	NULL,NULL	INT32,INT32	engine	-
+max_by(x, y)|FA	SELECT max_by(x, y) FILTER (WHERE id >= 4) FROM pt	50	INT32	prefilter	SELECT max_by(x, y) FROM (SELECT * FROM pt WHERE id >= 4) q
+max_by(x, y)|FB	SELECT max_by(x, y) FILTER (WHERE id IN (2, 3)) FROM pt	NULL	INT32	prefilter	SELECT max_by(x, y) FROM (SELECT * FROM pt WHERE id IN (2, 3)) q
+max_by(x, y)|FC	SELECT max_by(x, y) FILTER (WHERE id IN (3, 4)) FROM pt	40	INT32	prefilter	SELECT max_by(x, y) FROM (SELECT * FROM pt WHERE id IN (3, 4)) q
+max_by(x, y)|FD	SELECT max_by(x, y) FILTER (WHERE id IN (2, 4, 5)) FROM pt	50	INT32	prefilter	SELECT max_by(x, y) FROM (SELECT * FROM pt WHERE id IN (2, 4, 5)) q
+max_by(x, y)|FN	SELECT max_by(x, y) FILTER (WHERE id < 0) FROM pt	NULL	INT32	prefilter	SELECT max_by(x, y) FROM (SELECT * FROM pt WHERE id < 0) q
+max_by(x, y)|FZ	SELECT max_by(x, y) FILTER (WHERE id >= 4) FROM pt WHERE id < 0	NULL	INT32	engine	-
+max_by(x, y)|FG	SELECT g, max_by(x, y) FILTER (WHERE id >= 2) FROM pt GROUP BY g	1,50 | 2,40	INT32,INT32	engine	-
+max_by(x, y)|FZG	SELECT g, max_by(x, y) FILTER (WHERE id >= 4) FROM pt WHERE id < 0 GROUP BY ROLLUP(g)	NULL,NULL	INT32,INT32	engine	-
+min_by(y, x)|FA	SELECT min_by(y, x) FILTER (WHERE id >= 4) FROM pt	400	INT32	prefilter	SELECT min_by(y, x) FROM (SELECT * FROM pt WHERE id >= 4) q
+min_by(y, x)|FB	SELECT min_by(y, x) FILTER (WHERE id IN (2, 3)) FROM pt	NULL	INT32	prefilter	SELECT min_by(y, x) FROM (SELECT * FROM pt WHERE id IN (2, 3)) q
+min_by(y, x)|FC	SELECT min_by(y, x) FILTER (WHERE id IN (3, 4)) FROM pt	400	INT32	prefilter	SELECT min_by(y, x) FROM (SELECT * FROM pt WHERE id IN (3, 4)) q
+min_by(y, x)|FD	SELECT min_by(y, x) FILTER (WHERE id IN (2, 4, 5)) FROM pt	400	INT32	prefilter	SELECT min_by(y, x) FROM (SELECT * FROM pt WHERE id IN (2, 4, 5)) q
+min_by(y, x)|FN	SELECT min_by(y, x) FILTER (WHERE id < 0) FROM pt	NULL	INT32	prefilter	SELECT min_by(y, x) FROM (SELECT * FROM pt WHERE id < 0) q
+min_by(y, x)|FZ	SELECT min_by(y, x) FILTER (WHERE id >= 4) FROM pt WHERE id < 0	NULL	INT32	engine	-
+min_by(y, x)|FG	SELECT g, min_by(y, x) FILTER (WHERE id >= 2) FROM pt GROUP BY g	1,500 | 2,400	INT32,INT32	engine	-
+min_by(y, x)|FZG	SELECT g, min_by(y, x) FILTER (WHERE id >= 4) FROM pt WHERE id < 0 GROUP BY ROLLUP(g)	NULL,NULL	INT32,INT32	engine	-
+max_by(y, x)|FA	SELECT max_by(y, x) FILTER (WHERE id >= 4) FROM pt	500	INT32	prefilter	SELECT max_by(y, x) FROM (SELECT * FROM pt WHERE id >= 4) q
+max_by(y, x)|FB	SELECT max_by(y, x) FILTER (WHERE id IN (2, 3)) FROM pt	NULL	INT32	prefilter	SELECT max_by(y, x) FROM (SELECT * FROM pt WHERE id IN (2, 3)) q
+max_by(y, x)|FC	SELECT max_by(y, x) FILTER (WHERE id IN (3, 4)) FROM pt	400	INT32	prefilter	SELECT max_by(y, x) FROM (SELECT * FROM pt WHERE id IN (3, 4)) q
+max_by(y, x)|FD	SELECT max_by(y, x) FILTER (WHERE id IN (2, 4, 5)) FROM pt	500	INT32	prefilter	SELECT max_by(y, x) FROM (SELECT * FROM pt WHERE id IN (2, 4, 5)) q
+max_by(y, x)|FN	SELECT max_by(y, x) FILTER (WHERE id < 0) FROM pt	NULL	INT32	prefilter	SELECT max_by(y, x) FROM (SELECT * FROM pt WHERE id < 0) q
+max_by(y, x)|FZ	SELECT max_by(y, x) FILTER (WHERE id >= 4) FROM pt WHERE id < 0	NULL	INT32	engine	-
+max_by(y, x)|FG	SELECT g, max_by(y, x) FILTER (WHERE id >= 2) FROM pt GROUP BY g	1,500 | 2,400	INT32,INT32	engine	-
+max_by(y, x)|FZG	SELECT g, max_by(y, x) FILTER (WHERE id >= 4) FROM pt WHERE id < 0 GROUP BY ROLLUP(g)	NULL,NULL	INT32,INT32	engine	-
+max_by(s, x)|FA	SELECT max_by(s, x) FILTER (WHERE id >= 4) FROM pt	e	STRING	prefilter	SELECT max_by(s, x) FROM (SELECT * FROM pt WHERE id >= 4) q
+max_by(s, x)|FB	SELECT max_by(s, x) FILTER (WHERE id IN (2, 3)) FROM pt	b	STRING	prefilter	SELECT max_by(s, x) FROM (SELECT * FROM pt WHERE id IN (2, 3)) q
+max_by(s, x)|FC	SELECT max_by(s, x) FILTER (WHERE id IN (3, 4)) FROM pt	d	STRING	prefilter	SELECT max_by(s, x) FROM (SELECT * FROM pt WHERE id IN (3, 4)) q
+max_by(s, x)|FD	SELECT max_by(s, x) FILTER (WHERE id IN (2, 4, 5)) FROM pt	e	STRING	prefilter	SELECT max_by(s, x) FROM (SELECT * FROM pt WHERE id IN (2, 4, 5)) q
+max_by(s, x)|FN	SELECT max_by(s, x) FILTER (WHERE id < 0) FROM pt	NULL	STRING	prefilter	SELECT max_by(s, x) FROM (SELECT * FROM pt WHERE id < 0) q
+max_by(s, x)|FZ	SELECT max_by(s, x) FILTER (WHERE id >= 4) FROM pt WHERE id < 0	NULL	STRING	engine	-
+max_by(s, x)|FG	SELECT g, max_by(s, x) FILTER (WHERE id >= 2) FROM pt GROUP BY g	1,e | 2,d	INT32,STRING	engine	-
+max_by(s, x)|FZG	SELECT g, max_by(s, x) FILTER (WHERE id >= 4) FROM pt WHERE id < 0 GROUP BY ROLLUP(g)	NULL,NULL	INT32,STRING	engine	-
+ohlcv(t, x, y)|FA	SELECT ohlcv(t, x, y) FILTER (WHERE id >= 4) FROM pt	map[close:50 high:50 low:50 open:50 volume:500 vwap:50.0000]	ROW	prefilter	SELECT ohlcv(t, x, y) FROM (SELECT * FROM pt WHERE id >= 4) q
+ohlcv(t, x, y)|FB	SELECT ohlcv(t, x, y) FILTER (WHERE id IN (2, 3)) FROM pt	NULL	ROW	prefilter	SELECT ohlcv(t, x, y) FROM (SELECT * FROM pt WHERE id IN (2, 3)) q
+ohlcv(t, x, y)|FC	SELECT ohlcv(t, x, y) FILTER (WHERE id IN (3, 4)) FROM pt	NULL	ROW	prefilter	SELECT ohlcv(t, x, y) FROM (SELECT * FROM pt WHERE id IN (3, 4)) q
+ohlcv(t, x, y)|FD	SELECT ohlcv(t, x, y) FILTER (WHERE id IN (2, 4, 5)) FROM pt	map[close:50 high:50 low:50 open:50 volume:500 vwap:50.0000]	ROW	prefilter	SELECT ohlcv(t, x, y) FROM (SELECT * FROM pt WHERE id IN (2, 4, 5)) q
+ohlcv(t, x, y)|FN	SELECT ohlcv(t, x, y) FILTER (WHERE id < 0) FROM pt	NULL	ROW	prefilter	SELECT ohlcv(t, x, y) FROM (SELECT * FROM pt WHERE id < 0) q
+ohlcv(t, x, y)|FZ	SELECT ohlcv(t, x, y) FILTER (WHERE id >= 4) FROM pt WHERE id < 0	NULL	ROW	engine	-
+ohlcv(t, x, y)|FG	SELECT g, ohlcv(t, x, y) FILTER (WHERE id >= 2) FROM pt GROUP BY g	1,map[close:50 high:50 low:50 open:50 volume:500 vwap:50.0000] | 2,NULL	INT32,ROW	engine	-
+ohlcv(t, x, y)|FZG	SELECT g, ohlcv(t, x, y) FILTER (WHERE id >= 4) FROM pt WHERE id < 0 GROUP BY ROLLUP(g)	NULL,NULL	INT32,ROW	engine	-
+ohlcv(t, y, x)|FA	SELECT ohlcv(t, y, x) FILTER (WHERE id >= 4) FROM pt	map[close:500 high:500 low:500 open:500 volume:50 vwap:500.0000]	ROW	prefilter	SELECT ohlcv(t, y, x) FROM (SELECT * FROM pt WHERE id >= 4) q
+ohlcv(t, y, x)|FB	SELECT ohlcv(t, y, x) FILTER (WHERE id IN (2, 3)) FROM pt	NULL	ROW	prefilter	SELECT ohlcv(t, y, x) FROM (SELECT * FROM pt WHERE id IN (2, 3)) q
+ohlcv(t, y, x)|FC	SELECT ohlcv(t, y, x) FILTER (WHERE id IN (3, 4)) FROM pt	NULL	ROW	prefilter	SELECT ohlcv(t, y, x) FROM (SELECT * FROM pt WHERE id IN (3, 4)) q
+ohlcv(t, y, x)|FD	SELECT ohlcv(t, y, x) FILTER (WHERE id IN (2, 4, 5)) FROM pt	map[close:500 high:500 low:500 open:500 volume:50 vwap:500.0000]	ROW	prefilter	SELECT ohlcv(t, y, x) FROM (SELECT * FROM pt WHERE id IN (2, 4, 5)) q
+ohlcv(t, y, x)|FN	SELECT ohlcv(t, y, x) FILTER (WHERE id < 0) FROM pt	NULL	ROW	prefilter	SELECT ohlcv(t, y, x) FROM (SELECT * FROM pt WHERE id < 0) q
+ohlcv(t, y, x)|FZ	SELECT ohlcv(t, y, x) FILTER (WHERE id >= 4) FROM pt WHERE id < 0	NULL	ROW	engine	-
+ohlcv(t, y, x)|FG	SELECT g, ohlcv(t, y, x) FILTER (WHERE id >= 2) FROM pt GROUP BY g	1,map[close:500 high:500 low:500 open:500 volume:50 vwap:500.0000] | 2,NULL	INT32,ROW	engine	-
+ohlcv(t, y, x)|FZG	SELECT g, ohlcv(t, y, x) FILTER (WHERE id >= 4) FROM pt WHERE id < 0 GROUP BY ROLLUP(g)	NULL,NULL	INT32,ROW	engine	-
+refuse/grouping	SELECT g, grouping(g) FILTER (WHERE id >= 4) FROM pt GROUP BY ROLLUP(g)	ERR 0A000 grouping	-	pg-refusal	-
+refuse/lag	SELECT id, lag(x) FILTER (WHERE id >= 4) OVER (ORDER BY id) FROM pt	ERR 0A000 non-aggregate window	-	pg-refusal	-
+refuse/first_value	SELECT id, first_value(x) FILTER (WHERE id >= 4) OVER (ORDER BY id) FROM pt	ERR 0A000 non-aggregate window	-	pg-refusal	-
+refuse/row_number	SELECT id, row_number() FILTER (WHERE id >= 4) OVER (ORDER BY id) FROM pt	ERR 0A000 non-aggregate window	-	pg-refusal	-
+refuse/ntile	SELECT id, ntile(2) FILTER (WHERE id >= 4) OVER (ORDER BY id) FROM pt	ERR 0A000 non-aggregate window	-	pg-refusal	-
+refuse/abs	SELECT abs(x) FILTER (WHERE id >= 4) FROM pt	ERR 42809 abs	-	pg-refusal	-
+refuse/lower	SELECT lower(s) FILTER (WHERE id >= 4) FROM pt	ERR 42809 lower	-	pg-refusal	-
+refuse/coalesce	SELECT coalesce(x, 0) FILTER (WHERE id >= 4) FROM pt	ERR 42809 coalesce	-	pg-refusal	-
+refuse/array_agg	SELECT array_agg(x) FILTER (WHERE id >= 4) FROM pt	ERR 42883 array_agg	-	pg-answers	-
+refuse/json_agg	SELECT json_agg(x) FILTER (WHERE id >= 4) FROM pt	ERR 42883 json_agg	-	pg-answers	-
+refuse/unknownFn	SELECT no_such_fn(x) FILTER (WHERE id >= 4) FROM pt	ERR 42883 no_such_fn	-	pg-refusal	-
+refuse/stringAggOrderBy	SELECT string_agg(s, ',' ORDER BY s) FILTER (WHERE id >= 4) FROM pt	ERR 42601 ORDER	-	pg-answers	-
+refuse/percentileOneArg	SELECT percentile_cont(x) FILTER (WHERE id >= 4) FROM pt	ERR - percentile_cont	-	pg-refusal	-
+refuse/ohlcvTwoArgs	SELECT ohlcv(t, x) FILTER (WHERE id >= 4) FROM pt	ERR - ohlcv	-	pg-refusal	-
+window/sum	SELECT id, sum(x) FILTER (WHERE id >= 4) OVER (ORDER BY id) FROM pt	1,NULL | 2,NULL | 3,NULL | 4,40 | 5,90	INT32,INT64	pg	-
+window/countStar	SELECT id, count(*) FILTER (WHERE id >= 4) OVER (ORDER BY id) FROM pt	1,0 | 2,0 | 3,0 | 4,1 | 5,2	INT32,INT64	pg	-
+keep/userSumCase	SELECT SUM(CASE WHEN x > 10 THEN 1 ELSE 0 END) FROM pt WHERE id < 0	NULL	INT64	pg	-
+keep/countBesideDistinct	SELECT COUNT(*), COUNT(DISTINCT x) FROM pt WHERE id < 0	0,0	DECIMAL,INT64	pg	-
+keep/unfilteredZero	SELECT COUNT(x), SUM(x), MIN(x), MAX(x), AVG(x), string_agg(s, '-'), bool_and(b), corr(x, y), covar_samp(x, y), min_by(x, y), percentile_cont(0.5, x), quantile_cont(x, 0.5), median(x), mode(x), stddev(x) FROM pt WHERE id < 0	0,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL	INT64,INT64,INT32,INT32,DECIMAL,STRING,BOOL,FLOAT64,FLOAT64,INT32,FLOAT64,FLOAT64,FLOAT64,FLOAT64,FLOAT64	engine	-
+sep/some	SELECT string_agg(s, '-') FILTER (WHERE id >= 2) FROM pt	b-d-e	STRING	pg	-
+sep/grouped	SELECT g, string_agg(s, ' / ') FILTER (WHERE id >= 2) FROM pt GROUP BY g	1,b / e | 2,d	INT32,STRING	pg	-

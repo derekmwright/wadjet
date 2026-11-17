@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 )
 
@@ -250,4 +251,109 @@ func aggFilterNorm(s string) string {
 		rows[i] = strings.Join(cells, ",")
 	}
 	return strings.Join(rows, " | ")
+}
+
+// TestAggregateFilterEveryAggregate holds FILTER to the ruling for EVERY
+// aggregate the parser registers (plansql.knownAggregates), in each argument
+// order it takes (#1690, round 4): FILTER answers what the same aggregate
+// answers over the rows the predicate keeps, value and declared type, or it is
+// refused cleanly.
+//
+// testdata/agg_filter_every_aggregate.tsv is the table. Its rows, per
+// aggregate: predicates keeping rows whose arguments are non-NULL (A), rows
+// whose arguments are themselves NULL (B, C, D: x NULL at id 3, y at 2, t at
+// 4), none (N); zero input rows (FZ); GROUP BY (FG); ROLLUP over zero rows
+// (FZG). Columns: key, SQL, want, declared type, the oracle, and the control:
+// the same aggregate over a pre-filtered subquery, which must answer the same
+// row and type on the same engine. The oracle is PostgreSQL 17.11 ("pg")
+// wherever it has the function (MODE, MEDIAN and both percentile spellings
+// as its ordered-set aggregates, APPROX_DISTINCT as count(DISTINCT)); for
+// MIN_BY, MAX_BY, OHLCV, the one-argument STRING_AGG and the two-argument
+// COUNT(DISTINCT), which PostgreSQL has not, the control is the oracle
+// ("prefilter").
+//
+// A refusal's want is "ERR <SQLSTATE> <word>": the error carries that
+// SQLSTATE ("-" for none) and names the word. The refusals: GROUPING (0A000,
+// it has no FILTER property), the non-aggregate window functions (0A000,
+// PostgreSQL's), scalar functions (42809, PostgreSQL's; they used to answer
+// the function of a CASE, one value per row), and the names already refused
+// before FILTER is looked at (42883, 42601, the arity check), unmoved.
+func TestAggregateFilterEveryAggregate(t *testing.T) {
+	raw, err := os.ReadFile("testdata/agg_filter_every_aggregate.tsv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	for name, cfg := range map[string]Config{
+		"single":  {Store: objstore.NewMemStore(), Bucket: "test"},
+		"spilled": {Store: objstore.NewMemStore(), Bucket: "test", MemoryBudget: 1 << 16},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg.SpillDir = t.TempDir()
+			db, err := Open(ctx, cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { db.Close() })
+			for _, ddl := range []string{
+				"CREATE TABLE pt (id INT, g INT, x INT, y INT, t TIMESTAMP, s TEXT, b BOOLEAN)",
+				"INSERT INTO pt VALUES (1,1,10,100,TIMESTAMP '2024-01-01 00:00:01','a',true)," +
+					"(2,1,20,NULL,TIMESTAMP '2024-01-01 00:00:02','b',false)," +
+					"(3,2,NULL,300,TIMESTAMP '2024-01-01 00:00:03',NULL,NULL)," +
+					"(4,2,40,400,NULL,'d',true)," +
+					"(5,1,50,500,TIMESTAMP '2024-01-01 00:00:05','e',false)",
+			} {
+				if _, err := db.Query(ctx, ddl); err != nil {
+					t.Fatalf("%s: %v", ddl, err)
+				}
+			}
+			cells, refusals := 0, 0
+			for _, line := range strings.Split(string(raw), "\n") {
+				if line == "" || strings.HasPrefix(line, "#") {
+					continue
+				}
+				f := strings.Split(line, "\t")
+				if len(f) != 6 {
+					t.Fatalf("malformed cell %q", line)
+				}
+				cells++
+				key, sql, want, wantType, oracle, control := f[0], f[1], f[2], f[3], f[4], f[5]
+				if rest, ok := strings.CutPrefix(want, "ERR "); ok {
+					refusals++
+					state, word, _ := strings.Cut(rest, " ")
+					if state == "-" {
+						state = ""
+					}
+					_, err := db.Query(ctx, sql)
+					if err == nil {
+						t.Errorf("%s\n  %s\n  answered %q, want a refusal %s naming %q", key, sql, gseRows(db, sql), state, word)
+						continue
+					}
+					if got := sqlerr.StateOf(err); got != state || !strings.Contains(err.Error(), word) {
+						t.Errorf("%s\n  %s\n  refused %s %q, want %s naming %q", key, sql, got, err.Error(), state, word)
+					}
+					continue
+				}
+				got := aggFilterNorm(gseRows(db, sql))
+				if got != want {
+					t.Errorf("%s\n  %s\n  got  %q\n  want %q (%s)", key, sql, got, want, oracle)
+				}
+				gotType := gseTypes(db, sql)
+				if wantType != "-" && gotType != wantType {
+					t.Errorf("%s\n  %s\n  declared %q, want %q", key, sql, gotType, wantType)
+				}
+				if control != "-" {
+					if c := aggFilterNorm(gseRows(db, control)); c != got {
+						t.Errorf("%s\n  FILTER answers %q, the same aggregate over the pre-filtered rows %q\n  %s\n  %s", key, got, c, sql, control)
+					}
+					if ct := gseTypes(db, control); ct != gotType {
+						t.Errorf("%s\n  FILTER declares %q, the pre-filtered control %q", key, gotType, ct)
+					}
+				}
+			}
+			if cells < 390 || refusals < 14 {
+				t.Fatalf("only %d cells (%d refusals) read: the table is not the one the test pins", cells, refusals)
+			}
+		})
+	}
 }
