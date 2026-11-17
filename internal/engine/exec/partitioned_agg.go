@@ -761,16 +761,27 @@ func consumePartitionItem(ctx context.Context, sink Sink, it partitionItem) erro
 // drainPartitionQueue consumes remaining deliveries until the queue closes
 // (all producers done). On cancellation it keeps draining WITHOUT
 // consuming, releasing references so shared batches aren't leaked.
-func drainPartitionQueue(ctx context.Context, sink Sink, q chan partitionItem) {
+//
+// A consume that fails here is REPORTED (fail records it and cancels the
+// pipeline), and the queue is then drained without consuming. This worker
+// has stopped producing, so nobody else will ever see the error: the comment
+// this replaced said it "is surfaced by the worker that hit it first (or by
+// Finalize)", and neither was true. A partition owner whose FIRST batch
+// arrives here fails resolving its columns and stays unresolved, its Finalize
+// emits no group, and the query answered no rows in silence where the same
+// aggregate ungrouped refused: `max_by(x, CASE ... END) ... GROUP BY g` over
+// one batch routed every group to a worker that had already stopped
+// producing (#1694).
+func drainPartitionQueue(ctx context.Context, sink Sink, q chan partitionItem, fail func(error)) {
+	failed := false
 	for it := range q {
-		if ctx.Err() != nil {
+		if failed || ctx.Err() != nil {
 			it.src.release()
 			continue
 		}
 		if err := consumePartitionItem(ctx, sink, it); err != nil {
-			// The error is surfaced by the worker that hit it first (or by
-			// Finalize); keep draining to release references.
-			continue
+			failed = true
+			fail(err)
 		}
 	}
 }

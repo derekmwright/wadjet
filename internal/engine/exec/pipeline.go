@@ -720,7 +720,10 @@ func (p *Pipeline) runParallel(ctx context.Context) error {
 				if producing {
 					producing = false
 					producersWG.Done()
-					drainPartitionQueue(workerCtx, sink, partQueues[workerID])
+					drainPartitionQueue(workerCtx, sink, partQueues[workerID], func(err error) {
+						firstErr.Set(err)
+						cancel()
+					})
 				}
 			}
 			// Per-worker routing scratch (histogram + per-row hash buffer).
