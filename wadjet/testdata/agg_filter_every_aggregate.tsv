@@ -396,3 +396,6 @@ keep/countBesideDistinct	SELECT COUNT(*), COUNT(DISTINCT x) FROM pt WHERE id < 0
 keep/unfilteredZero	SELECT COUNT(x), SUM(x), MIN(x), MAX(x), AVG(x), string_agg(s, '-'), bool_and(b), corr(x, y), covar_samp(x, y), min_by(x, y), percentile_cont(0.5, x), quantile_cont(x, 0.5), median(x), mode(x), stddev(x) FROM pt WHERE id < 0	0,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL	INT64,INT64,INT32,INT32,DECIMAL,STRING,BOOL,FLOAT64,FLOAT64,INT32,FLOAT64,FLOAT64,FLOAT64,FLOAT64,FLOAT64	engine	-
 sep/some	SELECT string_agg(s, '-') FILTER (WHERE id >= 2) FROM pt	b-d-e	STRING	pg	-
 sep/grouped	SELECT g, string_agg(s, ' / ') FILTER (WHERE id >= 2) FROM pt GROUP BY g	1,b / e | 2,d	INT32,STRING	pg	-
+refuse/rowNumberNoOver	SELECT row_number() FILTER (WHERE id >= 4) FROM pt	ERR 42883 row_number	-	pg-42809-requires-OVER	-
+refuse/rankNoOver	SELECT rank() FILTER (WHERE id >= 4) FROM pt	ERR 42883 rank	-	pg-42809-requires-OVER	-
+refuse/now	SELECT now() FILTER (WHERE id >= 4) FROM pt	ERR 42809 now	-	pg-refusal	-
