@@ -1,0 +1,263 @@
+# name	PostgreSQL 17.11 answer (sorted rows joined by " | "; ERR <SQLSTATE> for a refusal)
+plain/scalarCount/match	1,2 | 2,1
+plain/scalarCount/nomatch	3,0 | 4,0
+plain/scalarSum/match	1,3 | 2,1
+plain/scalarSum/nomatch	3,NULL | 4,NULL
+plain/scalarDirect/match	1,2 | 2,1
+plain/scalarDirect/nomatch	3,NULL | 4,NULL
+plain/existsSelect/match	1,f | 2,f
+plain/existsSelect/nomatch	3,f | 4,f
+plain/existsWhere/match	(none)
+plain/existsWhere/nomatch	(none)
+plain/inDirect/match	1,f | 2,f
+plain/inDirect/nomatch	3,f | 4,f
+plain/inWhere/match	(none)
+plain/inWhere/nomatch	(none)
+plain/whereCompare/match	(none)
+plain/whereCompare/nomatch	(none)
+plain/lateral/match	1,1 | 1,2 | 2,1
+plain/lateral/nomatch	(none)
+plain/lateralLeft/match	1,1 | 1,2 | 2,1
+plain/lateralLeft/nomatch	3,NULL | 4,NULL
+plain/uncorrScalar/match	2,3
+plain/uncorrScalar/nomatch	0,NULL
+plain/derived/match	1 | 2
+plain/derived/nomatch	(none)
+plain/cteTwice/match	2,3
+plain/cteTwice/nomatch	0,NULL
+plain/cteCorrelated/match	1,2 | 2,1
+plain/cteCorrelated/nomatch	3,0 | 4,0
+nogroup/scalarCount/match	1,1 | 2,1
+nogroup/scalarCount/nomatch	3,1 | 4,1
+nogroup/scalarSum/match	1,3 | 2,1
+nogroup/scalarSum/nomatch	3,0 | 4,0
+nogroup/scalarDirect/match	1,3 | 2,1
+nogroup/scalarDirect/nomatch	3,0 | 4,0
+nogroup/existsSelect/match	1,t | 2,f
+nogroup/existsSelect/nomatch	3,t | 4,t
+nogroup/existsWhere/match	1
+nogroup/existsWhere/nomatch	3 | 4
+nogroup/inDirect/match	1,t | 2,f
+nogroup/inDirect/nomatch	3,t | 4,t
+nogroup/inWhere/match	1
+nogroup/inWhere/nomatch	3 | 4
+nogroup/whereCompare/match	1
+nogroup/whereCompare/nomatch	3 | 4
+nogroup/lateral/match	1,3 | 2,1
+nogroup/lateral/nomatch	3,0 | 4,0
+nogroup/lateralLeft/match	1,3 | 2,1
+nogroup/lateralLeft/nomatch	3,0 | 4,0
+nogroup/uncorrScalar/match	1,3
+nogroup/uncorrScalar/nomatch	1,0
+nogroup/derived/match	3
+nogroup/derived/nomatch	0
+nogroup/cteTwice/match	1,3
+nogroup/cteTwice/nomatch	1,0
+nogroup/cteCorrelated/match	1,1 | 2,1
+nogroup/cteCorrelated/nomatch	3,1 | 4,0
+rollupA/scalarCount/match	1,3 | 2,2
+rollupA/scalarCount/nomatch	3,1 | 4,1
+rollupA/scalarSum/match	1,6 | 2,2
+rollupA/scalarSum/nomatch	3,0 | 4,0
+rollupA/scalarDirect/match	1,3 | 2,1
+rollupA/scalarDirect/nomatch	3,0 | 4,0
+rollupA/existsSelect/match	1,t | 2,f
+rollupA/existsSelect/nomatch	3,t | 4,t
+rollupA/existsWhere/match	1
+rollupA/existsWhere/nomatch	3 | 4
+rollupA/inDirect/match	1,t | 2,f
+rollupA/inDirect/nomatch	3,t | 4,t
+rollupA/inWhere/match	1
+rollupA/inWhere/nomatch	3 | 4
+rollupA/whereCompare/match	1
+rollupA/whereCompare/nomatch	3 | 4
+rollupA/lateral/match	1,1 | 1,2 | 1,3 | 2,1 | 2,1
+rollupA/lateral/nomatch	3,0 | 4,0
+rollupA/lateralLeft/match	1,1 | 1,2 | 1,3 | 2,1 | 2,1
+rollupA/lateralLeft/nomatch	3,0 | 4,0
+rollupA/uncorrScalar/match	3,6
+rollupA/uncorrScalar/nomatch	1,0
+rollupA/derived/match	1 | 2 | 3
+rollupA/derived/nomatch	0
+rollupA/cteTwice/match	3,6
+rollupA/cteTwice/nomatch	1,0
+rollupA/cteCorrelated/match	1,3 | 2,2
+rollupA/cteCorrelated/nomatch	3,1 | 4,0
+rollupAB/scalarCount/match	1,6 | 2,3
+rollupAB/scalarCount/nomatch	3,1 | 4,1
+rollupAB/scalarSum/match	1,9 | 2,3
+rollupAB/scalarSum/nomatch	3,0 | 4,0
+rollupAB/scalarDirect/match	1,3 | 2,1
+rollupAB/scalarDirect/nomatch	3,0 | 4,0
+rollupAB/existsSelect/match	1,t | 2,f
+rollupAB/existsSelect/nomatch	3,t | 4,t
+rollupAB/existsWhere/match	1
+rollupAB/existsWhere/nomatch	3 | 4
+rollupAB/inDirect/match	1,t | 2,f
+rollupAB/inDirect/nomatch	3,t | 4,t
+rollupAB/inWhere/match	1
+rollupAB/inWhere/nomatch	3 | 4
+rollupAB/whereCompare/match	1
+rollupAB/whereCompare/nomatch	3 | 4
+rollupAB/lateral/match	1,1 | 1,1 | 1,1 | 1,1 | 1,2 | 1,3 | 2,1 | 2,1 | 2,1
+rollupAB/lateral/nomatch	3,0 | 4,0
+rollupAB/lateralLeft/match	1,1 | 1,1 | 1,1 | 1,1 | 1,2 | 1,3 | 2,1 | 2,1 | 2,1
+rollupAB/lateralLeft/nomatch	3,0 | 4,0
+rollupAB/uncorrScalar/match	6,9
+rollupAB/uncorrScalar/nomatch	1,0
+rollupAB/derived/match	1 | 1 | 1 | 1 | 2 | 3
+rollupAB/derived/nomatch	0
+rollupAB/cteTwice/match	6,9
+rollupAB/cteTwice/nomatch	1,0
+rollupAB/cteCorrelated/match	1,6 | 2,2
+rollupAB/cteCorrelated/nomatch	3,1 | 4,0
+cubeAB/scalarCount/match	1,8 | 2,4
+cubeAB/scalarCount/nomatch	3,1 | 4,1
+cubeAB/scalarSum/match	1,12 | 2,4
+cubeAB/scalarSum/nomatch	3,0 | 4,0
+cubeAB/scalarDirect/match	1,3 | 2,1
+cubeAB/scalarDirect/nomatch	3,0 | 4,0
+cubeAB/existsSelect/match	1,t | 2,f
+cubeAB/existsSelect/nomatch	3,t | 4,t
+cubeAB/existsWhere/match	1
+cubeAB/existsWhere/nomatch	3 | 4
+cubeAB/inDirect/match	1,t | 2,f
+cubeAB/inDirect/nomatch	3,t | 4,t
+cubeAB/inWhere/match	1
+cubeAB/inWhere/nomatch	3 | 4
+cubeAB/whereCompare/match	1
+cubeAB/whereCompare/nomatch	3 | 4
+cubeAB/lateral/match	1,1 | 1,1 | 1,1 | 1,1 | 1,1 | 1,2 | 1,2 | 1,3 | 2,1 | 2,1 | 2,1 | 2,1
+cubeAB/lateral/nomatch	3,0 | 4,0
+cubeAB/lateralLeft/match	1,1 | 1,1 | 1,1 | 1,1 | 1,1 | 1,2 | 1,2 | 1,3 | 2,1 | 2,1 | 2,1 | 2,1
+cubeAB/lateralLeft/nomatch	3,0 | 4,0
+cubeAB/uncorrScalar/match	8,12
+cubeAB/uncorrScalar/nomatch	1,0
+cubeAB/derived/match	1 | 1 | 1 | 1 | 1 | 2 | 2 | 3
+cubeAB/derived/nomatch	0
+cubeAB/cteTwice/match	8,12
+cubeAB/cteTwice/nomatch	1,0
+cubeAB/cteCorrelated/match	1,8 | 2,3
+cubeAB/cteCorrelated/nomatch	3,1 | 4,0
+setsABE/scalarCount/match	1,5 | 2,3
+setsABE/scalarCount/nomatch	3,1 | 4,1
+setsABE/scalarSum/match	1,9 | 2,3
+setsABE/scalarSum/nomatch	3,0 | 4,0
+setsABE/scalarDirect/match	1,3 | 2,1
+setsABE/scalarDirect/nomatch	3,0 | 4,0
+setsABE/existsSelect/match	1,t | 2,f
+setsABE/existsSelect/nomatch	3,t | 4,t
+setsABE/existsWhere/match	1
+setsABE/existsWhere/nomatch	3 | 4
+setsABE/inDirect/match	1,t | 2,f
+setsABE/inDirect/nomatch	3,t | 4,t
+setsABE/inWhere/match	1
+setsABE/inWhere/nomatch	3 | 4
+setsABE/whereCompare/match	1
+setsABE/whereCompare/nomatch	3 | 4
+setsABE/lateral/match	1,1 | 1,1 | 1,2 | 1,2 | 1,3 | 2,1 | 2,1 | 2,1
+setsABE/lateral/nomatch	3,0 | 4,0
+setsABE/lateralLeft/match	1,1 | 1,1 | 1,2 | 1,2 | 1,3 | 2,1 | 2,1 | 2,1
+setsABE/lateralLeft/nomatch	3,0 | 4,0
+setsABE/uncorrScalar/match	5,9
+setsABE/uncorrScalar/nomatch	1,0
+setsABE/derived/match	1 | 1 | 2 | 2 | 3
+setsABE/derived/nomatch	0
+setsABE/cteTwice/match	5,9
+setsABE/cteTwice/nomatch	1,0
+setsABE/cteCorrelated/match	1,5 | 2,3
+setsABE/cteCorrelated/nomatch	3,1 | 4,0
+setsEE/scalarCount/match	1,2 | 2,2
+setsEE/scalarCount/nomatch	3,2 | 4,2
+setsEE/scalarSum/match	1,6 | 2,2
+setsEE/scalarSum/nomatch	3,0 | 4,0
+setsEE/scalarDirect/match	1,3 | 2,1
+setsEE/scalarDirect/nomatch	3,0 | 4,0
+setsEE/existsSelect/match	1,t | 2,f
+setsEE/existsSelect/nomatch	3,t | 4,t
+setsEE/existsWhere/match	1
+setsEE/existsWhere/nomatch	3 | 4
+setsEE/inDirect/match	1,t | 2,f
+setsEE/inDirect/nomatch	3,t | 4,t
+setsEE/inWhere/match	1
+setsEE/inWhere/nomatch	3 | 4
+setsEE/whereCompare/match	1
+setsEE/whereCompare/nomatch	3 | 4
+setsEE/lateral/match	1,3 | 1,3 | 2,1 | 2,1
+setsEE/lateral/nomatch	3,0 | 3,0 | 4,0 | 4,0
+setsEE/lateralLeft/match	1,3 | 1,3 | 2,1 | 2,1
+setsEE/lateralLeft/nomatch	3,0 | 3,0 | 4,0 | 4,0
+setsEE/uncorrScalar/match	2,6
+setsEE/uncorrScalar/nomatch	2,0
+setsEE/derived/match	3 | 3
+setsEE/derived/nomatch	0 | 0
+setsEE/cteTwice/match	2,6
+setsEE/cteTwice/nomatch	2,0
+setsEE/cteCorrelated/match	1,2 | 2,2
+setsEE/cteCorrelated/nomatch	3,2 | 4,0
+groupingFn/scalarCount/match	1,3 | 2,2
+groupingFn/scalarCount/nomatch	3,1 | 4,1
+groupingFn/scalarSum/match	1,6 | 2,2
+groupingFn/scalarSum/nomatch	3,0 | 4,0
+groupingFn/existsSelect/match	1,t | 2,f
+groupingFn/existsSelect/nomatch	3,t | 4,t
+groupingFn/existsWhere/match	1
+groupingFn/existsWhere/nomatch	3 | 4
+groupingFn/inWhere/match	1
+groupingFn/inWhere/nomatch	3 | 4
+groupingFn/lateral/match	1,1 | 1,2 | 1,3 | 2,1 | 2,1
+groupingFn/lateral/nomatch	3,0 | 4,0
+groupingFn/lateralLeft/match	1,1 | 1,2 | 1,3 | 2,1 | 2,1
+groupingFn/lateralLeft/nomatch	3,0 | 4,0
+groupingFn/uncorrScalar/match	3,6
+groupingFn/uncorrScalar/nomatch	1,0
+groupingFn/derived/match	1 | 2 | 3
+groupingFn/derived/nomatch	0
+groupingFn/cteTwice/match	3,6
+groupingFn/cteTwice/nomatch	1,0
+groupingFn/cteCorrelated/match	1,3 | 2,2
+groupingFn/cteCorrelated/nomatch	3,1 | 4,0
+rollupOrdinal/scalarCount/match	1,3 | 2,2
+rollupOrdinal/scalarCount/nomatch	3,1 | 4,1
+rollupOrdinal/scalarSum/match	1,6 | 2,2
+rollupOrdinal/scalarSum/nomatch	3,0 | 4,0
+rollupOrdinal/existsSelect/match	1,t | 2,f
+rollupOrdinal/existsSelect/nomatch	3,t | 4,t
+rollupOrdinal/existsWhere/match	1
+rollupOrdinal/existsWhere/nomatch	3 | 4
+rollupOrdinal/inWhere/match	1
+rollupOrdinal/inWhere/nomatch	3 | 4
+rollupOrdinal/lateral/match	1,1 | 1,2 | 1,3 | 2,1 | 2,1
+rollupOrdinal/lateral/nomatch	3,0 | 4,0
+rollupOrdinal/lateralLeft/match	1,1 | 1,2 | 1,3 | 2,1 | 2,1
+rollupOrdinal/lateralLeft/nomatch	3,0 | 4,0
+rollupOrdinal/uncorrScalar/match	3,6
+rollupOrdinal/uncorrScalar/nomatch	1,0
+rollupOrdinal/derived/match	1 | 2 | 3
+rollupOrdinal/derived/nomatch	0
+rollupOrdinal/cteTwice/match	3,6
+rollupOrdinal/cteTwice/nomatch	1,0
+rollupOrdinal/cteCorrelated/match	1,3 | 2,2
+rollupOrdinal/cteCorrelated/nomatch	3,1 | 4,0
+rollupAlias/scalarCount/match	1,3 | 2,2
+rollupAlias/scalarCount/nomatch	3,1 | 4,1
+rollupAlias/scalarSum/match	1,6 | 2,2
+rollupAlias/scalarSum/nomatch	3,0 | 4,0
+rollupAlias/existsSelect/match	1,t | 2,f
+rollupAlias/existsSelect/nomatch	3,t | 4,t
+rollupAlias/existsWhere/match	1
+rollupAlias/existsWhere/nomatch	3 | 4
+rollupAlias/inWhere/match	1
+rollupAlias/inWhere/nomatch	3 | 4
+rollupAlias/lateral/match	1,1 | 1,2 | 1,3 | 2,1 | 2,1
+rollupAlias/lateral/nomatch	3,0 | 4,0
+rollupAlias/lateralLeft/match	1,1 | 1,2 | 1,3 | 2,1 | 2,1
+rollupAlias/lateralLeft/nomatch	3,0 | 4,0
+rollupAlias/uncorrScalar/match	3,6
+rollupAlias/uncorrScalar/nomatch	1,0
+rollupAlias/derived/match	1 | 2 | 3
+rollupAlias/derived/nomatch	0
+rollupAlias/cteTwice/match	3,6
+rollupAlias/cteTwice/nomatch	1,0
+rollupAlias/cteCorrelated/match	1,3 | 2,2
+rollupAlias/cteCorrelated/nomatch	3,1 | 4,0

@@ -1516,7 +1516,10 @@ func rebuildSQLFull(info *SelectInfo, cols []string, rewrittenWhere Node, having
 	if groupBy != nil {
 		gb = groupBy
 	}
-	if len(gb) > 0 {
+	if len(info.GroupingSets) > 0 {
+		sb.WriteString(" GROUP BY ")
+		sb.WriteString(groupingSetsClause(info, gb))
+	} else if len(gb) > 0 {
 		sb.WriteString(" GROUP BY ")
 		sb.WriteString(strings.Join(gb, ", "))
 	}
@@ -1561,6 +1564,52 @@ func rebuildSQLFull(info *SelectInfo, cols []string, rewrittenWhere Node, having
 		sb.WriteString(info.Offset)
 	}
 
+	return sb.String()
+}
+
+// A GROUPING CONSTRUCT IS RENDERED AS THE SETS IT IS (#1700).
+//
+// The rebuild wrote a ROLLUP, CUBE or GROUPING SETS body's key list as a plain
+// GROUP BY — info.GroupBy is the deduped UNION of the sets' terms — so every
+// statement re-run from the rebuilt text grouped by that union and lost the
+// subtotal and grand-total rows. A correlated subquery answered the plain
+// GROUP BY's rows, silently, on all five arms: `(SELECT count(*) AS c FROM
+// gs_i x WHERE x.k = o.k GROUP BY ROLLUP (a) ORDER BY c DESC LIMIT 1)` was 2
+// where PostgreSQL 17.11 answers the grand total 3, and NULL where it answers
+// 0 for an outer row that matches nothing (ROLLUP's empty set still yields one
+// row over an empty input).
+//
+// groupingSetsClause writes `GROUPING SETS ((t, u), (t), ())`: the expanded
+// sets the parser recorded, one set per entry and in order, each term the
+// key-list text gb holds at that term's position (so a term the re-run
+// substituted is written substituted). ROLLUP and CUBE are written as the
+// sets they expand to, which is the same grouping: PostgreSQL defines both as
+// that GROUPING SETS list, and GROUPING() reads which keys a row's set holds,
+// not how the construct was spelled. A repeated term stays repeated
+// (`ROLLUP (g, g)` is three sets), and an empty set is `()`.
+func groupingSetsClause(info *SelectInfo, gb []string) string {
+	keys := info.GroupingSetKeys
+	if len(keys) != len(info.GroupingSets) {
+		// The positions are recorded by resolvePositionalRefs; a block it did
+		// not visit is mapped from the set names exactly as it maps them.
+		keys = groupingSetKeyPositions(info)
+	}
+	var sb strings.Builder
+	sb.WriteString("GROUPING SETS (")
+	for s, set := range keys {
+		if s > 0 {
+			sb.WriteString(", ")
+		}
+		sb.WriteString("(")
+		for j, i := range set {
+			if j > 0 {
+				sb.WriteString(", ")
+			}
+			sb.WriteString(gb[i])
+		}
+		sb.WriteString(")")
+	}
+	sb.WriteString(")")
 	return sb.String()
 }
 
