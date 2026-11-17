@@ -100,6 +100,9 @@ func absorbAggregateOutputProjection(project *logical.Node, stage *Stage) map[st
 			return nil
 		}
 		src, computed, ok := aggregateProjectionSource(p, alias, groupKeys, aggOuts, keyIdentity, emittedAll, emittedIdentity)
+		if !ok && project.PreservesAggOutputs {
+			src, computed, ok = rewriteFinalizationSource(p, emittedAll, emittedIdentity)
+		}
 		if !ok {
 			return nil
 		}
@@ -243,6 +246,36 @@ func aggregateProjectionSource(p *logical.Projection, name string, groupKeys, ag
 		return "", false, false
 	}
 	return rewritten.String(), true, true
+}
+
+// rewriteFinalizationSource maps the one function call a rewrite's own
+// finalizing Project carries (logical.Node.PreservesAggOutputs) onto the
+// aggregate stage's outputs: the two-level DISTINCT rewrite's
+// `coalesce(<count>, 0)`, which restores the 0 an ungrouped COUNT answers over
+// zero rows after its partials were re-summed (#1584).
+//
+// requoteAggOutputRefsIdx declines every function call, and for a user's
+// SELECT list that is safe: the item then names nothing the stage emits and
+// the gather check refuses the plan onto the single-process path. This item
+// does not get that refusal, because the rewrite publishes it under the SAME
+// name as the SUM it wraps — so declining it left the bare SUM's NULL in the
+// column and all three DAG arms answered NULL where PostgreSQL answers 0
+// (#1692). Only coalesce is taken, and only here, so no user-written call
+// changes path.
+func rewriteFinalizationSource(p *logical.Projection, emitted, emittedIdentity map[string]string) (string, bool, bool) {
+	call, isCall := p.ASTExpr.(*plansql.FuncCallNode)
+	if !isCall || !strings.EqualFold(call.Name, "coalesce") || call.Distinct || call.Star {
+		return "", false, false
+	}
+	args := make([]plansql.Node, len(call.Args))
+	for i, a := range call.Args {
+		r, ok := requoteAggOutputRefsIdx(a, emitted, emittedIdentity)
+		if !ok {
+			return "", false, false
+		}
+		args[i] = r
+	}
+	return (&plansql.FuncCallNode{Name: call.Name, Args: args}).String(), true, true
 }
 
 // requoteAggOutputRefs checks that every column reference in an expression

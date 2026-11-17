@@ -49,15 +49,6 @@ func TestDistinctCountFilterZeroRowsFiveArms(t *testing.T) {
 	arms := brArms(t, ctx)
 
 	type cell struct{ name, sql, want string }
-	// dagResidual: the answer the three DAG arms give for a cell instead of
-	// want, a KNOWN RESIDUAL pinned so it cannot move unseen (#1692).
-	dagResidual := map[string]string{
-		"keep/countBesideDistinct":       "rows=1 NULL,0",
-		"keep/countBesideDistinctTypemx": "rows=1 NULL,0",
-		// The same statement with the distinct column aliased (the matrix
-		// generates it): measured NULL,0 on the three DAG arms.
-		"countDistinct/zero/plain/ungroupedBesideCount": "rows=1 NULL,0",
-	}
 	var cells []cell
 
 	type input struct {
@@ -145,11 +136,9 @@ func TestDistinctCountFilterZeroRowsFiveArms(t *testing.T) {
 		// Must not move: a user-written SUM is a SUM (NULL over zero rows),
 		// and a COUNT beside a COUNT(DISTINCT) answers 0.
 		cell{"keep/userSumCase", "SELECT SUM(CASE WHEN id > 1 THEN 1 ELSE 0 END) FROM lat_ord WHERE id < 0", "rows=1 NULL"},
-		// KNOWN RESIDUAL (#1692, not fixed here, wrong at the base 197385ed
-		// too): PostgreSQL 17.11 answers 0,0; the single and spilled arms
-		// answer 0,0; the DAG arms answer NULL,0 (the COUNT(*) beside a
-		// COUNT(DISTINCT) merges to NULL over zero rows). When #1692 is fixed
-		// this pin fails and its dagResidual entry is deleted.
+		// PostgreSQL 17.11 answers 0,0 on all five arms; the DAG arms answered
+		// NULL,0 until #1692 (the stage planner dropped the two-level
+		// rewrite's coalesce over the re-summed COUNT).
 		cell{"keep/countBesideDistinct", "SELECT COUNT(*), COUNT(DISTINCT id) FROM lat_ord WHERE id < 0", "rows=1 0,0"},
 		cell{"keep/countBesideDistinctTypemx", "SELECT COUNT(*) AS n, COUNT(DISTINCT c_i32) FROM typemx WHERE id < 0", "rows=1 0,0"},
 		cell{"keep/unfilteredZero", "SELECT COUNT(id), SUM(id), MIN(id), MAX(id), AVG(id) FROM lat_ord WHERE id < 0", "rows=1 0,NULL,NULL,NULL,NULL"},
@@ -171,12 +160,8 @@ func TestDistinctCountFilterZeroRowsFiveArms(t *testing.T) {
 				}
 				got := brRender(res)
 				t.Logf("%-14s %s", arm.name, got)
-				want := tc.want
-				if r := dagResidual[tc.name]; r != "" && strings.HasPrefix(arm.name, "dag") {
-					want = r
-				}
-				if got != want {
-					t.Errorf("%s\n  arm  %s\n  got  %s\n  want %s (PostgreSQL 17.11: %s)", tc.sql, arm.name, got, want, tc.want)
+				if got != tc.want {
+					t.Errorf("%s\n  arm  %s\n  got  %s\n  want %s (PostgreSQL 17.11)", tc.sql, arm.name, got, tc.want)
 				}
 			}
 		})
