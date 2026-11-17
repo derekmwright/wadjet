@@ -158,8 +158,12 @@ and a MERGE action's bytea parameter travels as its hex text, which the
 target column's input reads back as the same bytes. A `BYTES` value
 assigned to a text column stores bytea's hex output, `\x6869`, as on
 PostgreSQL; a `VARCHAR(n)` column keeps no length here, so the hex text is
-stored whole where PostgreSQL raises 22001 past `n`. `LIKE` over `BYTES`
-does not read `\` as an escape.
+stored whole where PostgreSQL raises 22001 past `n`. `LIKE` over `BYTES` is
+bytea's own bytewise matcher: the backslash is its escape (`\%`, `\_` and `\\`
+are the literals, a pattern that reaches a lone trailing backslash is 22025),
+`LIKE … ESCAPE` over bytea is `like_escape(bytea, bytea)`, a quoted literal
+beside a `BYTES` operand is read as bytea, and a text operand beside one (or
+`ILIKE` over `BYTES`) is 42883, as on PostgreSQL 17.11 (#1593).
 
 **Functions over `BYTES` follow PostgreSQL's catalog**, which means BYTES, not
 characters:
