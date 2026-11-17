@@ -1149,11 +1149,16 @@ SELECT * FROM syslog WHERE hostname LIKE 'fw-%'
 SELECT * FROM syslog WHERE message NOT LIKE '%debug%'
 SELECT * FROM syslog WHERE message ILIKE '%ERROR%'
 
--- ESCAPE names the character that makes the NEXT one literal, so a pattern
--- can match a per cent sign or an underscore. An escape string longer than
--- one character is SQLSTATE 22025; the empty string disables escaping. A LIKE
--- pattern that ENDS with the escape is 22025 as well, where the matcher
--- reaches it; SIMILAR TO reads a dangling escape as contributing nothing.
+-- The backslash is LIKE's default escape: it makes the NEXT character
+-- literal, so `\%` is a per cent sign, `\_` an underscore and `\\` a
+-- backslash (string literals keep their backslashes, as with PostgreSQL's
+-- standard_conforming_strings). ESCAPE names another escape character; an
+-- escape string longer than one character is SQLSTATE 22025, and the empty
+-- string disables escaping, so every backslash is ordinary. A LIKE pattern
+-- that ENDS with its escape is 22025 as well, where the matcher reaches it
+-- ('abc' LIKE 'abc\' is false); SIMILAR TO reads a dangling escape as
+-- contributing nothing.
+SELECT * FROM syslog WHERE path LIKE 'a\%b'
 SELECT * FROM syslog WHERE path LIKE 'a!%b' ESCAPE '!'
 
 -- SIMILAR TO is the SQL standard's own pattern language, and it is neither
