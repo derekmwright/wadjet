@@ -270,6 +270,13 @@ func (h *HashAggregate) Consume(_ context.Context, b *batch.RecordBatch) error {
 		}
 		// Legacy raw-row spill (extra-state aggs, grouping sets):
 		// buffer rows on disk and re-aggregate in Finalize.
+		//
+		// A forced drain that lands here is counted like one that lands on
+		// the external-merge branch: grouping sets always come this way, and
+		// a gate over them asserting the knob engaged read zero (#1700).
+		if forcedDrain {
+			ForcedAggDrains.Add(1)
+		}
 		rows := b.ToRows()
 		h.spillBuffer = append(h.spillBuffer, rows...)
 		// CHARGE what this buffer now holds. The rows are ours: `ToRows`

@@ -135,6 +135,18 @@ func (h *HashAggregate) mergeSinkState(o *HashAggregate) {
 		h.spillBufferBytes += o.spillBufferBytes
 		o.spillBuffer, o.spillBufferBytes = nil, 0
 	}
+	// The rows above are boxed by column NAME, and Finalize rebuilds them
+	// into a batch under h.inputSchema. A primary that never consumed a batch
+	// itself — the morsel pipeline's warmup batch was empty, so every row went
+	// to a clone — has no schema of its own, and the rows came back as a
+	// batch with no columns: COUNT(*) over GROUPING SETS (()) answered 0 and a
+	// ROLLUP key was "not a column of its input" (#1700). The raw-row branch is
+	// the one grouping sets always take, so a forced drain reached it on every
+	// such query. The schema travels with the rows it describes; every clone
+	// is fed the same plan, so the first one to carry rows decides it.
+	if h.inputSchema == nil && (len(h.spillFiles) > 0 || len(h.spillBuffer) > 0) {
+		h.inputSchema = o.inputSchema
+	}
 
 	// When the parent (h) was never fed a batch — runParallel's warmup batch
 	// gets consumed when present, but if the warmup row group is fully
