@@ -1,0 +1,1303 @@
+# PostgreSQL 17.11 answers for count_distinct_agg_expr_arms_test.go (TestCountDistinctAggExprMeasure).
+all/avg/bare/alone/countDistinct/ungrouped	a:numeric,b:bigint | 23.3333333333333333,4
+all/avg/bare/alone/countDistinct/grouped	g:integer,a:numeric,b:bigint | 1,10.0000000000000000,1; 2,25.0000000000000000,2; 3,30.0000000000000000,1; NULL,40.0000000000000000,1
+all/avg/bare/alone/twoCountDistinct/ungrouped	a:numeric,b:bigint,d:bigint | 23.3333333333333333,4,4
+all/avg/bare/alone/twoCountDistinct/grouped	g:integer,a:numeric,b:bigint,d:bigint | 1,10.0000000000000000,1,1; 2,25.0000000000000000,2,2; 3,30.0000000000000000,1,1; NULL,40.0000000000000000,1,1
+all/avg/bare/alone/sumDistinct/ungrouped	a:numeric,b:bigint | 23.3333333333333333,100
+all/avg/bare/alone/sumDistinct/grouped	g:integer,a:numeric,b:bigint | 1,10.0000000000000000,10; 2,25.0000000000000000,50; 3,30.0000000000000000,30; NULL,40.0000000000000000,40
+all/avg/bare/besideCount/countDistinct/ungrouped	a:numeric,c:bigint,b:bigint | 23.3333333333333333,6,4
+all/avg/bare/besideCount/countDistinct/grouped	g:integer,a:numeric,c:bigint,b:bigint | 1,10.0000000000000000,2,1; 2,25.0000000000000000,2,2; 3,30.0000000000000000,1,1; NULL,40.0000000000000000,1,1
+all/avg/bare/besideCount/twoCountDistinct/ungrouped	a:numeric,c:bigint,b:bigint,d:bigint | 23.3333333333333333,6,4,4
+all/avg/bare/besideCount/twoCountDistinct/grouped	g:integer,a:numeric,c:bigint,b:bigint,d:bigint | 1,10.0000000000000000,2,1,1; 2,25.0000000000000000,2,2,2; 3,30.0000000000000000,1,1,1; NULL,40.0000000000000000,1,1,1
+all/avg/bare/besideCount/sumDistinct/ungrouped	a:numeric,c:bigint,b:bigint | 23.3333333333333333,6,100
+all/avg/bare/besideCount/sumDistinct/grouped	g:integer,a:numeric,c:bigint,b:bigint | 1,10.0000000000000000,2,10; 2,25.0000000000000000,2,50; 3,30.0000000000000000,1,30; NULL,40.0000000000000000,1,40
+all/avg/arith/alone/countDistinct/ungrouped	a:numeric,b:bigint | 24.3333333333333333,4
+all/avg/arith/alone/countDistinct/grouped	g:integer,a:numeric,b:bigint | 1,11.0000000000000000,1; 2,26.0000000000000000,2; 3,31.0000000000000000,1; NULL,41.0000000000000000,1
+all/avg/arith/alone/twoCountDistinct/ungrouped	a:numeric,b:bigint,d:bigint | 24.3333333333333333,4,4
+all/avg/arith/alone/twoCountDistinct/grouped	g:integer,a:numeric,b:bigint,d:bigint | 1,11.0000000000000000,1,1; 2,26.0000000000000000,2,2; 3,31.0000000000000000,1,1; NULL,41.0000000000000000,1,1
+all/avg/arith/alone/sumDistinct/ungrouped	a:numeric,b:bigint | 24.3333333333333333,100
+all/avg/arith/alone/sumDistinct/grouped	g:integer,a:numeric,b:bigint | 1,11.0000000000000000,10; 2,26.0000000000000000,50; 3,31.0000000000000000,30; NULL,41.0000000000000000,40
+all/avg/arith/besideCount/countDistinct/ungrouped	a:numeric,c:bigint,b:bigint | 24.3333333333333333,6,4
+all/avg/arith/besideCount/countDistinct/grouped	g:integer,a:numeric,c:bigint,b:bigint | 1,11.0000000000000000,2,1; 2,26.0000000000000000,2,2; 3,31.0000000000000000,1,1; NULL,41.0000000000000000,1,1
+all/avg/arith/besideCount/twoCountDistinct/ungrouped	a:numeric,c:bigint,b:bigint,d:bigint | 24.3333333333333333,6,4,4
+all/avg/arith/besideCount/twoCountDistinct/grouped	g:integer,a:numeric,c:bigint,b:bigint,d:bigint | 1,11.0000000000000000,2,1,1; 2,26.0000000000000000,2,2,2; 3,31.0000000000000000,1,1,1; NULL,41.0000000000000000,1,1,1
+all/avg/arith/besideCount/sumDistinct/ungrouped	a:numeric,c:bigint,b:bigint | 24.3333333333333333,6,100
+all/avg/arith/besideCount/sumDistinct/grouped	g:integer,a:numeric,c:bigint,b:bigint | 1,11.0000000000000000,2,10; 2,26.0000000000000000,2,50; 3,31.0000000000000000,1,30; NULL,41.0000000000000000,1,40
+all/avg/func/alone/countDistinct/ungrouped	a:numeric,b:bigint | 23.3333333333333333,4
+all/avg/func/alone/countDistinct/grouped	g:integer,a:numeric,b:bigint | 1,10.0000000000000000,1; 2,25.0000000000000000,2; 3,30.0000000000000000,1; NULL,40.0000000000000000,1
+all/avg/func/alone/twoCountDistinct/ungrouped	a:numeric,b:bigint,d:bigint | 23.3333333333333333,4,4
+all/avg/func/alone/twoCountDistinct/grouped	g:integer,a:numeric,b:bigint,d:bigint | 1,10.0000000000000000,1,1; 2,25.0000000000000000,2,2; 3,30.0000000000000000,1,1; NULL,40.0000000000000000,1,1
+all/avg/func/alone/sumDistinct/ungrouped	a:numeric,b:bigint | 23.3333333333333333,100
+all/avg/func/alone/sumDistinct/grouped	g:integer,a:numeric,b:bigint | 1,10.0000000000000000,10; 2,25.0000000000000000,50; 3,30.0000000000000000,30; NULL,40.0000000000000000,40
+all/avg/func/besideCount/countDistinct/ungrouped	a:numeric,c:bigint,b:bigint | 23.3333333333333333,6,4
+all/avg/func/besideCount/countDistinct/grouped	g:integer,a:numeric,c:bigint,b:bigint | 1,10.0000000000000000,2,1; 2,25.0000000000000000,2,2; 3,30.0000000000000000,1,1; NULL,40.0000000000000000,1,1
+all/avg/func/besideCount/twoCountDistinct/ungrouped	a:numeric,c:bigint,b:bigint,d:bigint | 23.3333333333333333,6,4,4
+all/avg/func/besideCount/twoCountDistinct/grouped	g:integer,a:numeric,c:bigint,b:bigint,d:bigint | 1,10.0000000000000000,2,1,1; 2,25.0000000000000000,2,2,2; 3,30.0000000000000000,1,1,1; NULL,40.0000000000000000,1,1,1
+all/avg/func/besideCount/sumDistinct/ungrouped	a:numeric,c:bigint,b:bigint | 23.3333333333333333,6,100
+all/avg/func/besideCount/sumDistinct/grouped	g:integer,a:numeric,c:bigint,b:bigint | 1,10.0000000000000000,2,10; 2,25.0000000000000000,2,50; 3,30.0000000000000000,1,30; NULL,40.0000000000000000,1,40
+all/avg/case/alone/countDistinct/ungrouped	a:text,b:bigint | hi,4
+all/avg/case/alone/countDistinct/grouped	g:integer,a:text,b:bigint | 1,lo,1; 2,hi,2; 3,hi,1; NULL,hi,1
+all/avg/case/alone/twoCountDistinct/ungrouped	a:text,b:bigint,d:bigint | hi,4,4
+all/avg/case/alone/twoCountDistinct/grouped	g:integer,a:text,b:bigint,d:bigint | 1,lo,1,1; 2,hi,2,2; 3,hi,1,1; NULL,hi,1,1
+all/avg/case/alone/sumDistinct/ungrouped	a:text,b:bigint | hi,100
+all/avg/case/alone/sumDistinct/grouped	g:integer,a:text,b:bigint | 1,lo,10; 2,hi,50; 3,hi,30; NULL,hi,40
+all/avg/case/besideCount/countDistinct/ungrouped	a:text,c:bigint,b:bigint | hi,6,4
+all/avg/case/besideCount/countDistinct/grouped	g:integer,a:text,c:bigint,b:bigint | 1,lo,2,1; 2,hi,2,2; 3,hi,1,1; NULL,hi,1,1
+all/avg/case/besideCount/twoCountDistinct/ungrouped	a:text,c:bigint,b:bigint,d:bigint | hi,6,4,4
+all/avg/case/besideCount/twoCountDistinct/grouped	g:integer,a:text,c:bigint,b:bigint,d:bigint | 1,lo,2,1,1; 2,hi,2,2,2; 3,hi,1,1,1; NULL,hi,1,1,1
+all/avg/case/besideCount/sumDistinct/ungrouped	a:text,c:bigint,b:bigint | hi,6,100
+all/avg/case/besideCount/sumDistinct/grouped	g:integer,a:text,c:bigint,b:bigint | 1,lo,2,10; 2,hi,2,50; 3,hi,1,30; NULL,hi,1,40
+all/avg/cast/alone/countDistinct/ungrouped	a:bigint,b:bigint | 23,4
+all/avg/cast/alone/countDistinct/grouped	g:integer,a:bigint,b:bigint | 1,10,1; 2,25,2; 3,30,1; NULL,40,1
+all/avg/cast/alone/twoCountDistinct/ungrouped	a:bigint,b:bigint,d:bigint | 23,4,4
+all/avg/cast/alone/twoCountDistinct/grouped	g:integer,a:bigint,b:bigint,d:bigint | 1,10,1,1; 2,25,2,2; 3,30,1,1; NULL,40,1,1
+all/avg/cast/alone/sumDistinct/ungrouped	a:bigint,b:bigint | 23,100
+all/avg/cast/alone/sumDistinct/grouped	g:integer,a:bigint,b:bigint | 1,10,10; 2,25,50; 3,30,30; NULL,40,40
+all/avg/cast/besideCount/countDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 23,6,4
+all/avg/cast/besideCount/countDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint | 1,10,2,1; 2,25,2,2; 3,30,1,1; NULL,40,1,1
+all/avg/cast/besideCount/twoCountDistinct/ungrouped	a:bigint,c:bigint,b:bigint,d:bigint | 23,6,4,4
+all/avg/cast/besideCount/twoCountDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint,d:bigint | 1,10,2,1,1; 2,25,2,2,2; 3,30,1,1,1; NULL,40,1,1,1
+all/avg/cast/besideCount/sumDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 23,6,100
+all/avg/cast/besideCount/sumDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint | 1,10,2,10; 2,25,2,50; 3,30,1,30; NULL,40,1,40
+all/avg/plusCount/alone/countDistinct/ungrouped	a:numeric,b:bigint | 29.3333333333333333,4
+all/avg/plusCount/alone/countDistinct/grouped	g:integer,a:numeric,b:bigint | 1,12.0000000000000000,1; 2,27.0000000000000000,2; 3,31.0000000000000000,1; NULL,41.0000000000000000,1
+all/avg/plusCount/alone/twoCountDistinct/ungrouped	a:numeric,b:bigint,d:bigint | 29.3333333333333333,4,4
+all/avg/plusCount/alone/twoCountDistinct/grouped	g:integer,a:numeric,b:bigint,d:bigint | 1,12.0000000000000000,1,1; 2,27.0000000000000000,2,2; 3,31.0000000000000000,1,1; NULL,41.0000000000000000,1,1
+all/avg/plusCount/alone/sumDistinct/ungrouped	a:numeric,b:bigint | 29.3333333333333333,100
+all/avg/plusCount/alone/sumDistinct/grouped	g:integer,a:numeric,b:bigint | 1,12.0000000000000000,10; 2,27.0000000000000000,50; 3,31.0000000000000000,30; NULL,41.0000000000000000,40
+all/avg/plusCount/besideCount/countDistinct/ungrouped	a:numeric,c:bigint,b:bigint | 29.3333333333333333,6,4
+all/avg/plusCount/besideCount/countDistinct/grouped	g:integer,a:numeric,c:bigint,b:bigint | 1,12.0000000000000000,2,1; 2,27.0000000000000000,2,2; 3,31.0000000000000000,1,1; NULL,41.0000000000000000,1,1
+all/avg/plusCount/besideCount/twoCountDistinct/ungrouped	a:numeric,c:bigint,b:bigint,d:bigint | 29.3333333333333333,6,4,4
+all/avg/plusCount/besideCount/twoCountDistinct/grouped	g:integer,a:numeric,c:bigint,b:bigint,d:bigint | 1,12.0000000000000000,2,1,1; 2,27.0000000000000000,2,2,2; 3,31.0000000000000000,1,1,1; NULL,41.0000000000000000,1,1,1
+all/avg/plusCount/besideCount/sumDistinct/ungrouped	a:numeric,c:bigint,b:bigint | 29.3333333333333333,6,100
+all/avg/plusCount/besideCount/sumDistinct/grouped	g:integer,a:numeric,c:bigint,b:bigint | 1,12.0000000000000000,2,10; 2,27.0000000000000000,2,50; 3,31.0000000000000000,1,30; NULL,41.0000000000000000,1,40
+all/sum/bare/alone/countDistinct/ungrouped	a:bigint,b:bigint | 140,4
+all/sum/bare/alone/countDistinct/grouped	g:integer,a:bigint,b:bigint | 1,20,1; 2,50,2; 3,30,1; NULL,40,1
+all/sum/bare/alone/twoCountDistinct/ungrouped	a:bigint,b:bigint,d:bigint | 140,4,4
+all/sum/bare/alone/twoCountDistinct/grouped	g:integer,a:bigint,b:bigint,d:bigint | 1,20,1,1; 2,50,2,2; 3,30,1,1; NULL,40,1,1
+all/sum/bare/alone/sumDistinct/ungrouped	a:bigint,b:bigint | 140,100
+all/sum/bare/alone/sumDistinct/grouped	g:integer,a:bigint,b:bigint | 1,20,10; 2,50,50; 3,30,30; NULL,40,40
+all/sum/bare/besideCount/countDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 140,6,4
+all/sum/bare/besideCount/countDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint | 1,20,2,1; 2,50,2,2; 3,30,1,1; NULL,40,1,1
+all/sum/bare/besideCount/twoCountDistinct/ungrouped	a:bigint,c:bigint,b:bigint,d:bigint | 140,6,4,4
+all/sum/bare/besideCount/twoCountDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint,d:bigint | 1,20,2,1,1; 2,50,2,2,2; 3,30,1,1,1; NULL,40,1,1,1
+all/sum/bare/besideCount/sumDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 140,6,100
+all/sum/bare/besideCount/sumDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint | 1,20,2,10; 2,50,2,50; 3,30,1,30; NULL,40,1,40
+all/sum/arith/alone/countDistinct/ungrouped	a:bigint,b:bigint | 141,4
+all/sum/arith/alone/countDistinct/grouped	g:integer,a:bigint,b:bigint | 1,21,1; 2,51,2; 3,31,1; NULL,41,1
+all/sum/arith/alone/twoCountDistinct/ungrouped	a:bigint,b:bigint,d:bigint | 141,4,4
+all/sum/arith/alone/twoCountDistinct/grouped	g:integer,a:bigint,b:bigint,d:bigint | 1,21,1,1; 2,51,2,2; 3,31,1,1; NULL,41,1,1
+all/sum/arith/alone/sumDistinct/ungrouped	a:bigint,b:bigint | 141,100
+all/sum/arith/alone/sumDistinct/grouped	g:integer,a:bigint,b:bigint | 1,21,10; 2,51,50; 3,31,30; NULL,41,40
+all/sum/arith/besideCount/countDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 141,6,4
+all/sum/arith/besideCount/countDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint | 1,21,2,1; 2,51,2,2; 3,31,1,1; NULL,41,1,1
+all/sum/arith/besideCount/twoCountDistinct/ungrouped	a:bigint,c:bigint,b:bigint,d:bigint | 141,6,4,4
+all/sum/arith/besideCount/twoCountDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint,d:bigint | 1,21,2,1,1; 2,51,2,2,2; 3,31,1,1,1; NULL,41,1,1,1
+all/sum/arith/besideCount/sumDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 141,6,100
+all/sum/arith/besideCount/sumDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint | 1,21,2,10; 2,51,2,50; 3,31,1,30; NULL,41,1,40
+all/sum/func/alone/countDistinct/ungrouped	a:bigint,b:bigint | 140,4
+all/sum/func/alone/countDistinct/grouped	g:integer,a:bigint,b:bigint | 1,20,1; 2,50,2; 3,30,1; NULL,40,1
+all/sum/func/alone/twoCountDistinct/ungrouped	a:bigint,b:bigint,d:bigint | 140,4,4
+all/sum/func/alone/twoCountDistinct/grouped	g:integer,a:bigint,b:bigint,d:bigint | 1,20,1,1; 2,50,2,2; 3,30,1,1; NULL,40,1,1
+all/sum/func/alone/sumDistinct/ungrouped	a:bigint,b:bigint | 140,100
+all/sum/func/alone/sumDistinct/grouped	g:integer,a:bigint,b:bigint | 1,20,10; 2,50,50; 3,30,30; NULL,40,40
+all/sum/func/besideCount/countDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 140,6,4
+all/sum/func/besideCount/countDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint | 1,20,2,1; 2,50,2,2; 3,30,1,1; NULL,40,1,1
+all/sum/func/besideCount/twoCountDistinct/ungrouped	a:bigint,c:bigint,b:bigint,d:bigint | 140,6,4,4
+all/sum/func/besideCount/twoCountDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint,d:bigint | 1,20,2,1,1; 2,50,2,2,2; 3,30,1,1,1; NULL,40,1,1,1
+all/sum/func/besideCount/sumDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 140,6,100
+all/sum/func/besideCount/sumDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint | 1,20,2,10; 2,50,2,50; 3,30,1,30; NULL,40,1,40
+all/sum/case/alone/countDistinct/ungrouped	a:text,b:bigint | hi,4
+all/sum/case/alone/countDistinct/grouped	g:integer,a:text,b:bigint | 1,hi,1; 2,hi,2; 3,hi,1; NULL,hi,1
+all/sum/case/alone/twoCountDistinct/ungrouped	a:text,b:bigint,d:bigint | hi,4,4
+all/sum/case/alone/twoCountDistinct/grouped	g:integer,a:text,b:bigint,d:bigint | 1,hi,1,1; 2,hi,2,2; 3,hi,1,1; NULL,hi,1,1
+all/sum/case/alone/sumDistinct/ungrouped	a:text,b:bigint | hi,100
+all/sum/case/alone/sumDistinct/grouped	g:integer,a:text,b:bigint | 1,hi,10; 2,hi,50; 3,hi,30; NULL,hi,40
+all/sum/case/besideCount/countDistinct/ungrouped	a:text,c:bigint,b:bigint | hi,6,4
+all/sum/case/besideCount/countDistinct/grouped	g:integer,a:text,c:bigint,b:bigint | 1,hi,2,1; 2,hi,2,2; 3,hi,1,1; NULL,hi,1,1
+all/sum/case/besideCount/twoCountDistinct/ungrouped	a:text,c:bigint,b:bigint,d:bigint | hi,6,4,4
+all/sum/case/besideCount/twoCountDistinct/grouped	g:integer,a:text,c:bigint,b:bigint,d:bigint | 1,hi,2,1,1; 2,hi,2,2,2; 3,hi,1,1,1; NULL,hi,1,1,1
+all/sum/case/besideCount/sumDistinct/ungrouped	a:text,c:bigint,b:bigint | hi,6,100
+all/sum/case/besideCount/sumDistinct/grouped	g:integer,a:text,c:bigint,b:bigint | 1,hi,2,10; 2,hi,2,50; 3,hi,1,30; NULL,hi,1,40
+all/sum/cast/alone/countDistinct/ungrouped	a:bigint,b:bigint | 140,4
+all/sum/cast/alone/countDistinct/grouped	g:integer,a:bigint,b:bigint | 1,20,1; 2,50,2; 3,30,1; NULL,40,1
+all/sum/cast/alone/twoCountDistinct/ungrouped	a:bigint,b:bigint,d:bigint | 140,4,4
+all/sum/cast/alone/twoCountDistinct/grouped	g:integer,a:bigint,b:bigint,d:bigint | 1,20,1,1; 2,50,2,2; 3,30,1,1; NULL,40,1,1
+all/sum/cast/alone/sumDistinct/ungrouped	a:bigint,b:bigint | 140,100
+all/sum/cast/alone/sumDistinct/grouped	g:integer,a:bigint,b:bigint | 1,20,10; 2,50,50; 3,30,30; NULL,40,40
+all/sum/cast/besideCount/countDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 140,6,4
+all/sum/cast/besideCount/countDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint | 1,20,2,1; 2,50,2,2; 3,30,1,1; NULL,40,1,1
+all/sum/cast/besideCount/twoCountDistinct/ungrouped	a:bigint,c:bigint,b:bigint,d:bigint | 140,6,4,4
+all/sum/cast/besideCount/twoCountDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint,d:bigint | 1,20,2,1,1; 2,50,2,2,2; 3,30,1,1,1; NULL,40,1,1,1
+all/sum/cast/besideCount/sumDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 140,6,100
+all/sum/cast/besideCount/sumDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint | 1,20,2,10; 2,50,2,50; 3,30,1,30; NULL,40,1,40
+all/sum/plusCount/alone/countDistinct/ungrouped	a:bigint,b:bigint | 146,4
+all/sum/plusCount/alone/countDistinct/grouped	g:integer,a:bigint,b:bigint | 1,22,1; 2,52,2; 3,31,1; NULL,41,1
+all/sum/plusCount/alone/twoCountDistinct/ungrouped	a:bigint,b:bigint,d:bigint | 146,4,4
+all/sum/plusCount/alone/twoCountDistinct/grouped	g:integer,a:bigint,b:bigint,d:bigint | 1,22,1,1; 2,52,2,2; 3,31,1,1; NULL,41,1,1
+all/sum/plusCount/alone/sumDistinct/ungrouped	a:bigint,b:bigint | 146,100
+all/sum/plusCount/alone/sumDistinct/grouped	g:integer,a:bigint,b:bigint | 1,22,10; 2,52,50; 3,31,30; NULL,41,40
+all/sum/plusCount/besideCount/countDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 146,6,4
+all/sum/plusCount/besideCount/countDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint | 1,22,2,1; 2,52,2,2; 3,31,1,1; NULL,41,1,1
+all/sum/plusCount/besideCount/twoCountDistinct/ungrouped	a:bigint,c:bigint,b:bigint,d:bigint | 146,6,4,4
+all/sum/plusCount/besideCount/twoCountDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint,d:bigint | 1,22,2,1,1; 2,52,2,2,2; 3,31,1,1,1; NULL,41,1,1,1
+all/sum/plusCount/besideCount/sumDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 146,6,100
+all/sum/plusCount/besideCount/sumDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint | 1,22,2,10; 2,52,2,50; 3,31,1,30; NULL,41,1,40
+all/min/bare/alone/countDistinct/ungrouped	a:integer,b:bigint | 10,4
+all/min/bare/alone/countDistinct/grouped	g:integer,a:integer,b:bigint | 1,10,1; 2,20,2; 3,30,1; NULL,40,1
+all/min/bare/alone/twoCountDistinct/ungrouped	a:integer,b:bigint,d:bigint | 10,4,4
+all/min/bare/alone/twoCountDistinct/grouped	g:integer,a:integer,b:bigint,d:bigint | 1,10,1,1; 2,20,2,2; 3,30,1,1; NULL,40,1,1
+all/min/bare/alone/sumDistinct/ungrouped	a:integer,b:bigint | 10,100
+all/min/bare/alone/sumDistinct/grouped	g:integer,a:integer,b:bigint | 1,10,10; 2,20,50; 3,30,30; NULL,40,40
+all/min/bare/besideCount/countDistinct/ungrouped	a:integer,c:bigint,b:bigint | 10,6,4
+all/min/bare/besideCount/countDistinct/grouped	g:integer,a:integer,c:bigint,b:bigint | 1,10,2,1; 2,20,2,2; 3,30,1,1; NULL,40,1,1
+all/min/bare/besideCount/twoCountDistinct/ungrouped	a:integer,c:bigint,b:bigint,d:bigint | 10,6,4,4
+all/min/bare/besideCount/twoCountDistinct/grouped	g:integer,a:integer,c:bigint,b:bigint,d:bigint | 1,10,2,1,1; 2,20,2,2,2; 3,30,1,1,1; NULL,40,1,1,1
+all/min/bare/besideCount/sumDistinct/ungrouped	a:integer,c:bigint,b:bigint | 10,6,100
+all/min/bare/besideCount/sumDistinct/grouped	g:integer,a:integer,c:bigint,b:bigint | 1,10,2,10; 2,20,2,50; 3,30,1,30; NULL,40,1,40
+all/min/arith/alone/countDistinct/ungrouped	a:integer,b:bigint | 11,4
+all/min/arith/alone/countDistinct/grouped	g:integer,a:integer,b:bigint | 1,11,1; 2,21,2; 3,31,1; NULL,41,1
+all/min/arith/alone/twoCountDistinct/ungrouped	a:integer,b:bigint,d:bigint | 11,4,4
+all/min/arith/alone/twoCountDistinct/grouped	g:integer,a:integer,b:bigint,d:bigint | 1,11,1,1; 2,21,2,2; 3,31,1,1; NULL,41,1,1
+all/min/arith/alone/sumDistinct/ungrouped	a:integer,b:bigint | 11,100
+all/min/arith/alone/sumDistinct/grouped	g:integer,a:integer,b:bigint | 1,11,10; 2,21,50; 3,31,30; NULL,41,40
+all/min/arith/besideCount/countDistinct/ungrouped	a:integer,c:bigint,b:bigint | 11,6,4
+all/min/arith/besideCount/countDistinct/grouped	g:integer,a:integer,c:bigint,b:bigint | 1,11,2,1; 2,21,2,2; 3,31,1,1; NULL,41,1,1
+all/min/arith/besideCount/twoCountDistinct/ungrouped	a:integer,c:bigint,b:bigint,d:bigint | 11,6,4,4
+all/min/arith/besideCount/twoCountDistinct/grouped	g:integer,a:integer,c:bigint,b:bigint,d:bigint | 1,11,2,1,1; 2,21,2,2,2; 3,31,1,1,1; NULL,41,1,1,1
+all/min/arith/besideCount/sumDistinct/ungrouped	a:integer,c:bigint,b:bigint | 11,6,100
+all/min/arith/besideCount/sumDistinct/grouped	g:integer,a:integer,c:bigint,b:bigint | 1,11,2,10; 2,21,2,50; 3,31,1,30; NULL,41,1,40
+all/min/func/alone/countDistinct/ungrouped	a:integer,b:bigint | 10,4
+all/min/func/alone/countDistinct/grouped	g:integer,a:integer,b:bigint | 1,10,1; 2,20,2; 3,30,1; NULL,40,1
+all/min/func/alone/twoCountDistinct/ungrouped	a:integer,b:bigint,d:bigint | 10,4,4
+all/min/func/alone/twoCountDistinct/grouped	g:integer,a:integer,b:bigint,d:bigint | 1,10,1,1; 2,20,2,2; 3,30,1,1; NULL,40,1,1
+all/min/func/alone/sumDistinct/ungrouped	a:integer,b:bigint | 10,100
+all/min/func/alone/sumDistinct/grouped	g:integer,a:integer,b:bigint | 1,10,10; 2,20,50; 3,30,30; NULL,40,40
+all/min/func/besideCount/countDistinct/ungrouped	a:integer,c:bigint,b:bigint | 10,6,4
+all/min/func/besideCount/countDistinct/grouped	g:integer,a:integer,c:bigint,b:bigint | 1,10,2,1; 2,20,2,2; 3,30,1,1; NULL,40,1,1
+all/min/func/besideCount/twoCountDistinct/ungrouped	a:integer,c:bigint,b:bigint,d:bigint | 10,6,4,4
+all/min/func/besideCount/twoCountDistinct/grouped	g:integer,a:integer,c:bigint,b:bigint,d:bigint | 1,10,2,1,1; 2,20,2,2,2; 3,30,1,1,1; NULL,40,1,1,1
+all/min/func/besideCount/sumDistinct/ungrouped	a:integer,c:bigint,b:bigint | 10,6,100
+all/min/func/besideCount/sumDistinct/grouped	g:integer,a:integer,c:bigint,b:bigint | 1,10,2,10; 2,20,2,50; 3,30,1,30; NULL,40,1,40
+all/min/case/alone/countDistinct/ungrouped	a:text,b:bigint | lo,4
+all/min/case/alone/countDistinct/grouped	g:integer,a:text,b:bigint | 1,lo,1; 2,hi,2; 3,hi,1; NULL,hi,1
+all/min/case/alone/twoCountDistinct/ungrouped	a:text,b:bigint,d:bigint | lo,4,4
+all/min/case/alone/twoCountDistinct/grouped	g:integer,a:text,b:bigint,d:bigint | 1,lo,1,1; 2,hi,2,2; 3,hi,1,1; NULL,hi,1,1
+all/min/case/alone/sumDistinct/ungrouped	a:text,b:bigint | lo,100
+all/min/case/alone/sumDistinct/grouped	g:integer,a:text,b:bigint | 1,lo,10; 2,hi,50; 3,hi,30; NULL,hi,40
+all/min/case/besideCount/countDistinct/ungrouped	a:text,c:bigint,b:bigint | lo,6,4
+all/min/case/besideCount/countDistinct/grouped	g:integer,a:text,c:bigint,b:bigint | 1,lo,2,1; 2,hi,2,2; 3,hi,1,1; NULL,hi,1,1
+all/min/case/besideCount/twoCountDistinct/ungrouped	a:text,c:bigint,b:bigint,d:bigint | lo,6,4,4
+all/min/case/besideCount/twoCountDistinct/grouped	g:integer,a:text,c:bigint,b:bigint,d:bigint | 1,lo,2,1,1; 2,hi,2,2,2; 3,hi,1,1,1; NULL,hi,1,1,1
+all/min/case/besideCount/sumDistinct/ungrouped	a:text,c:bigint,b:bigint | lo,6,100
+all/min/case/besideCount/sumDistinct/grouped	g:integer,a:text,c:bigint,b:bigint | 1,lo,2,10; 2,hi,2,50; 3,hi,1,30; NULL,hi,1,40
+all/min/cast/alone/countDistinct/ungrouped	a:bigint,b:bigint | 10,4
+all/min/cast/alone/countDistinct/grouped	g:integer,a:bigint,b:bigint | 1,10,1; 2,20,2; 3,30,1; NULL,40,1
+all/min/cast/alone/twoCountDistinct/ungrouped	a:bigint,b:bigint,d:bigint | 10,4,4
+all/min/cast/alone/twoCountDistinct/grouped	g:integer,a:bigint,b:bigint,d:bigint | 1,10,1,1; 2,20,2,2; 3,30,1,1; NULL,40,1,1
+all/min/cast/alone/sumDistinct/ungrouped	a:bigint,b:bigint | 10,100
+all/min/cast/alone/sumDistinct/grouped	g:integer,a:bigint,b:bigint | 1,10,10; 2,20,50; 3,30,30; NULL,40,40
+all/min/cast/besideCount/countDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 10,6,4
+all/min/cast/besideCount/countDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint | 1,10,2,1; 2,20,2,2; 3,30,1,1; NULL,40,1,1
+all/min/cast/besideCount/twoCountDistinct/ungrouped	a:bigint,c:bigint,b:bigint,d:bigint | 10,6,4,4
+all/min/cast/besideCount/twoCountDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint,d:bigint | 1,10,2,1,1; 2,20,2,2,2; 3,30,1,1,1; NULL,40,1,1,1
+all/min/cast/besideCount/sumDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 10,6,100
+all/min/cast/besideCount/sumDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint | 1,10,2,10; 2,20,2,50; 3,30,1,30; NULL,40,1,40
+all/min/plusCount/alone/countDistinct/ungrouped	a:bigint,b:bigint | 16,4
+all/min/plusCount/alone/countDistinct/grouped	g:integer,a:bigint,b:bigint | 1,12,1; 2,22,2; 3,31,1; NULL,41,1
+all/min/plusCount/alone/twoCountDistinct/ungrouped	a:bigint,b:bigint,d:bigint | 16,4,4
+all/min/plusCount/alone/twoCountDistinct/grouped	g:integer,a:bigint,b:bigint,d:bigint | 1,12,1,1; 2,22,2,2; 3,31,1,1; NULL,41,1,1
+all/min/plusCount/alone/sumDistinct/ungrouped	a:bigint,b:bigint | 16,100
+all/min/plusCount/alone/sumDistinct/grouped	g:integer,a:bigint,b:bigint | 1,12,10; 2,22,50; 3,31,30; NULL,41,40
+all/min/plusCount/besideCount/countDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 16,6,4
+all/min/plusCount/besideCount/countDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint | 1,12,2,1; 2,22,2,2; 3,31,1,1; NULL,41,1,1
+all/min/plusCount/besideCount/twoCountDistinct/ungrouped	a:bigint,c:bigint,b:bigint,d:bigint | 16,6,4,4
+all/min/plusCount/besideCount/twoCountDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint,d:bigint | 1,12,2,1,1; 2,22,2,2,2; 3,31,1,1,1; NULL,41,1,1,1
+all/min/plusCount/besideCount/sumDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 16,6,100
+all/min/plusCount/besideCount/sumDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint | 1,12,2,10; 2,22,2,50; 3,31,1,30; NULL,41,1,40
+all/max/bare/alone/countDistinct/ungrouped	a:integer,b:bigint | 40,4
+all/max/bare/alone/countDistinct/grouped	g:integer,a:integer,b:bigint | 1,10,1; 2,30,2; 3,30,1; NULL,40,1
+all/max/bare/alone/twoCountDistinct/ungrouped	a:integer,b:bigint,d:bigint | 40,4,4
+all/max/bare/alone/twoCountDistinct/grouped	g:integer,a:integer,b:bigint,d:bigint | 1,10,1,1; 2,30,2,2; 3,30,1,1; NULL,40,1,1
+all/max/bare/alone/sumDistinct/ungrouped	a:integer,b:bigint | 40,100
+all/max/bare/alone/sumDistinct/grouped	g:integer,a:integer,b:bigint | 1,10,10; 2,30,50; 3,30,30; NULL,40,40
+all/max/bare/besideCount/countDistinct/ungrouped	a:integer,c:bigint,b:bigint | 40,6,4
+all/max/bare/besideCount/countDistinct/grouped	g:integer,a:integer,c:bigint,b:bigint | 1,10,2,1; 2,30,2,2; 3,30,1,1; NULL,40,1,1
+all/max/bare/besideCount/twoCountDistinct/ungrouped	a:integer,c:bigint,b:bigint,d:bigint | 40,6,4,4
+all/max/bare/besideCount/twoCountDistinct/grouped	g:integer,a:integer,c:bigint,b:bigint,d:bigint | 1,10,2,1,1; 2,30,2,2,2; 3,30,1,1,1; NULL,40,1,1,1
+all/max/bare/besideCount/sumDistinct/ungrouped	a:integer,c:bigint,b:bigint | 40,6,100
+all/max/bare/besideCount/sumDistinct/grouped	g:integer,a:integer,c:bigint,b:bigint | 1,10,2,10; 2,30,2,50; 3,30,1,30; NULL,40,1,40
+all/max/arith/alone/countDistinct/ungrouped	a:integer,b:bigint | 41,4
+all/max/arith/alone/countDistinct/grouped	g:integer,a:integer,b:bigint | 1,11,1; 2,31,2; 3,31,1; NULL,41,1
+all/max/arith/alone/twoCountDistinct/ungrouped	a:integer,b:bigint,d:bigint | 41,4,4
+all/max/arith/alone/twoCountDistinct/grouped	g:integer,a:integer,b:bigint,d:bigint | 1,11,1,1; 2,31,2,2; 3,31,1,1; NULL,41,1,1
+all/max/arith/alone/sumDistinct/ungrouped	a:integer,b:bigint | 41,100
+all/max/arith/alone/sumDistinct/grouped	g:integer,a:integer,b:bigint | 1,11,10; 2,31,50; 3,31,30; NULL,41,40
+all/max/arith/besideCount/countDistinct/ungrouped	a:integer,c:bigint,b:bigint | 41,6,4
+all/max/arith/besideCount/countDistinct/grouped	g:integer,a:integer,c:bigint,b:bigint | 1,11,2,1; 2,31,2,2; 3,31,1,1; NULL,41,1,1
+all/max/arith/besideCount/twoCountDistinct/ungrouped	a:integer,c:bigint,b:bigint,d:bigint | 41,6,4,4
+all/max/arith/besideCount/twoCountDistinct/grouped	g:integer,a:integer,c:bigint,b:bigint,d:bigint | 1,11,2,1,1; 2,31,2,2,2; 3,31,1,1,1; NULL,41,1,1,1
+all/max/arith/besideCount/sumDistinct/ungrouped	a:integer,c:bigint,b:bigint | 41,6,100
+all/max/arith/besideCount/sumDistinct/grouped	g:integer,a:integer,c:bigint,b:bigint | 1,11,2,10; 2,31,2,50; 3,31,1,30; NULL,41,1,40
+all/max/func/alone/countDistinct/ungrouped	a:integer,b:bigint | 40,4
+all/max/func/alone/countDistinct/grouped	g:integer,a:integer,b:bigint | 1,10,1; 2,30,2; 3,30,1; NULL,40,1
+all/max/func/alone/twoCountDistinct/ungrouped	a:integer,b:bigint,d:bigint | 40,4,4
+all/max/func/alone/twoCountDistinct/grouped	g:integer,a:integer,b:bigint,d:bigint | 1,10,1,1; 2,30,2,2; 3,30,1,1; NULL,40,1,1
+all/max/func/alone/sumDistinct/ungrouped	a:integer,b:bigint | 40,100
+all/max/func/alone/sumDistinct/grouped	g:integer,a:integer,b:bigint | 1,10,10; 2,30,50; 3,30,30; NULL,40,40
+all/max/func/besideCount/countDistinct/ungrouped	a:integer,c:bigint,b:bigint | 40,6,4
+all/max/func/besideCount/countDistinct/grouped	g:integer,a:integer,c:bigint,b:bigint | 1,10,2,1; 2,30,2,2; 3,30,1,1; NULL,40,1,1
+all/max/func/besideCount/twoCountDistinct/ungrouped	a:integer,c:bigint,b:bigint,d:bigint | 40,6,4,4
+all/max/func/besideCount/twoCountDistinct/grouped	g:integer,a:integer,c:bigint,b:bigint,d:bigint | 1,10,2,1,1; 2,30,2,2,2; 3,30,1,1,1; NULL,40,1,1,1
+all/max/func/besideCount/sumDistinct/ungrouped	a:integer,c:bigint,b:bigint | 40,6,100
+all/max/func/besideCount/sumDistinct/grouped	g:integer,a:integer,c:bigint,b:bigint | 1,10,2,10; 2,30,2,50; 3,30,1,30; NULL,40,1,40
+all/max/case/alone/countDistinct/ungrouped	a:text,b:bigint | hi,4
+all/max/case/alone/countDistinct/grouped	g:integer,a:text,b:bigint | 1,lo,1; 2,hi,2; 3,hi,1; NULL,hi,1
+all/max/case/alone/twoCountDistinct/ungrouped	a:text,b:bigint,d:bigint | hi,4,4
+all/max/case/alone/twoCountDistinct/grouped	g:integer,a:text,b:bigint,d:bigint | 1,lo,1,1; 2,hi,2,2; 3,hi,1,1; NULL,hi,1,1
+all/max/case/alone/sumDistinct/ungrouped	a:text,b:bigint | hi,100
+all/max/case/alone/sumDistinct/grouped	g:integer,a:text,b:bigint | 1,lo,10; 2,hi,50; 3,hi,30; NULL,hi,40
+all/max/case/besideCount/countDistinct/ungrouped	a:text,c:bigint,b:bigint | hi,6,4
+all/max/case/besideCount/countDistinct/grouped	g:integer,a:text,c:bigint,b:bigint | 1,lo,2,1; 2,hi,2,2; 3,hi,1,1; NULL,hi,1,1
+all/max/case/besideCount/twoCountDistinct/ungrouped	a:text,c:bigint,b:bigint,d:bigint | hi,6,4,4
+all/max/case/besideCount/twoCountDistinct/grouped	g:integer,a:text,c:bigint,b:bigint,d:bigint | 1,lo,2,1,1; 2,hi,2,2,2; 3,hi,1,1,1; NULL,hi,1,1,1
+all/max/case/besideCount/sumDistinct/ungrouped	a:text,c:bigint,b:bigint | hi,6,100
+all/max/case/besideCount/sumDistinct/grouped	g:integer,a:text,c:bigint,b:bigint | 1,lo,2,10; 2,hi,2,50; 3,hi,1,30; NULL,hi,1,40
+all/max/cast/alone/countDistinct/ungrouped	a:bigint,b:bigint | 40,4
+all/max/cast/alone/countDistinct/grouped	g:integer,a:bigint,b:bigint | 1,10,1; 2,30,2; 3,30,1; NULL,40,1
+all/max/cast/alone/twoCountDistinct/ungrouped	a:bigint,b:bigint,d:bigint | 40,4,4
+all/max/cast/alone/twoCountDistinct/grouped	g:integer,a:bigint,b:bigint,d:bigint | 1,10,1,1; 2,30,2,2; 3,30,1,1; NULL,40,1,1
+all/max/cast/alone/sumDistinct/ungrouped	a:bigint,b:bigint | 40,100
+all/max/cast/alone/sumDistinct/grouped	g:integer,a:bigint,b:bigint | 1,10,10; 2,30,50; 3,30,30; NULL,40,40
+all/max/cast/besideCount/countDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 40,6,4
+all/max/cast/besideCount/countDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint | 1,10,2,1; 2,30,2,2; 3,30,1,1; NULL,40,1,1
+all/max/cast/besideCount/twoCountDistinct/ungrouped	a:bigint,c:bigint,b:bigint,d:bigint | 40,6,4,4
+all/max/cast/besideCount/twoCountDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint,d:bigint | 1,10,2,1,1; 2,30,2,2,2; 3,30,1,1,1; NULL,40,1,1,1
+all/max/cast/besideCount/sumDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 40,6,100
+all/max/cast/besideCount/sumDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint | 1,10,2,10; 2,30,2,50; 3,30,1,30; NULL,40,1,40
+all/max/plusCount/alone/countDistinct/ungrouped	a:bigint,b:bigint | 46,4
+all/max/plusCount/alone/countDistinct/grouped	g:integer,a:bigint,b:bigint | 1,12,1; 2,32,2; 3,31,1; NULL,41,1
+all/max/plusCount/alone/twoCountDistinct/ungrouped	a:bigint,b:bigint,d:bigint | 46,4,4
+all/max/plusCount/alone/twoCountDistinct/grouped	g:integer,a:bigint,b:bigint,d:bigint | 1,12,1,1; 2,32,2,2; 3,31,1,1; NULL,41,1,1
+all/max/plusCount/alone/sumDistinct/ungrouped	a:bigint,b:bigint | 46,100
+all/max/plusCount/alone/sumDistinct/grouped	g:integer,a:bigint,b:bigint | 1,12,10; 2,32,50; 3,31,30; NULL,41,40
+all/max/plusCount/besideCount/countDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 46,6,4
+all/max/plusCount/besideCount/countDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint | 1,12,2,1; 2,32,2,2; 3,31,1,1; NULL,41,1,1
+all/max/plusCount/besideCount/twoCountDistinct/ungrouped	a:bigint,c:bigint,b:bigint,d:bigint | 46,6,4,4
+all/max/plusCount/besideCount/twoCountDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint,d:bigint | 1,12,2,1,1; 2,32,2,2,2; 3,31,1,1,1; NULL,41,1,1,1
+all/max/plusCount/besideCount/sumDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 46,6,100
+all/max/plusCount/besideCount/sumDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint | 1,12,2,10; 2,32,2,50; 3,31,1,30; NULL,41,1,40
+all/count/bare/alone/countDistinct/ungrouped	a:bigint,b:bigint | 6,4
+all/count/bare/alone/countDistinct/grouped	g:integer,a:bigint,b:bigint | 1,2,1; 2,2,2; 3,1,1; NULL,1,1
+all/count/bare/alone/twoCountDistinct/ungrouped	a:bigint,b:bigint,d:bigint | 6,4,4
+all/count/bare/alone/twoCountDistinct/grouped	g:integer,a:bigint,b:bigint,d:bigint | 1,2,1,1; 2,2,2,2; 3,1,1,1; NULL,1,1,1
+all/count/bare/alone/sumDistinct/ungrouped	a:bigint,b:bigint | 6,100
+all/count/bare/alone/sumDistinct/grouped	g:integer,a:bigint,b:bigint | 1,2,10; 2,2,50; 3,1,30; NULL,1,40
+all/count/bare/besideCount/countDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 6,6,4
+all/count/bare/besideCount/countDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint | 1,2,2,1; 2,2,2,2; 3,1,1,1; NULL,1,1,1
+all/count/bare/besideCount/twoCountDistinct/ungrouped	a:bigint,c:bigint,b:bigint,d:bigint | 6,6,4,4
+all/count/bare/besideCount/twoCountDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint,d:bigint | 1,2,2,1,1; 2,2,2,2,2; 3,1,1,1,1; NULL,1,1,1,1
+all/count/bare/besideCount/sumDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 6,6,100
+all/count/bare/besideCount/sumDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint | 1,2,2,10; 2,2,2,50; 3,1,1,30; NULL,1,1,40
+all/count/arith/alone/countDistinct/ungrouped	a:bigint,b:bigint | 7,4
+all/count/arith/alone/countDistinct/grouped	g:integer,a:bigint,b:bigint | 1,3,1; 2,3,2; 3,2,1; NULL,2,1
+all/count/arith/alone/twoCountDistinct/ungrouped	a:bigint,b:bigint,d:bigint | 7,4,4
+all/count/arith/alone/twoCountDistinct/grouped	g:integer,a:bigint,b:bigint,d:bigint | 1,3,1,1; 2,3,2,2; 3,2,1,1; NULL,2,1,1
+all/count/arith/alone/sumDistinct/ungrouped	a:bigint,b:bigint | 7,100
+all/count/arith/alone/sumDistinct/grouped	g:integer,a:bigint,b:bigint | 1,3,10; 2,3,50; 3,2,30; NULL,2,40
+all/count/arith/besideCount/countDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 7,6,4
+all/count/arith/besideCount/countDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint | 1,3,2,1; 2,3,2,2; 3,2,1,1; NULL,2,1,1
+all/count/arith/besideCount/twoCountDistinct/ungrouped	a:bigint,c:bigint,b:bigint,d:bigint | 7,6,4,4
+all/count/arith/besideCount/twoCountDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint,d:bigint | 1,3,2,1,1; 2,3,2,2,2; 3,2,1,1,1; NULL,2,1,1,1
+all/count/arith/besideCount/sumDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 7,6,100
+all/count/arith/besideCount/sumDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint | 1,3,2,10; 2,3,2,50; 3,2,1,30; NULL,2,1,40
+all/count/func/alone/countDistinct/ungrouped	a:bigint,b:bigint | 6,4
+all/count/func/alone/countDistinct/grouped	g:integer,a:bigint,b:bigint | 1,2,1; 2,2,2; 3,1,1; NULL,1,1
+all/count/func/alone/twoCountDistinct/ungrouped	a:bigint,b:bigint,d:bigint | 6,4,4
+all/count/func/alone/twoCountDistinct/grouped	g:integer,a:bigint,b:bigint,d:bigint | 1,2,1,1; 2,2,2,2; 3,1,1,1; NULL,1,1,1
+all/count/func/alone/sumDistinct/ungrouped	a:bigint,b:bigint | 6,100
+all/count/func/alone/sumDistinct/grouped	g:integer,a:bigint,b:bigint | 1,2,10; 2,2,50; 3,1,30; NULL,1,40
+all/count/func/besideCount/countDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 6,6,4
+all/count/func/besideCount/countDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint | 1,2,2,1; 2,2,2,2; 3,1,1,1; NULL,1,1,1
+all/count/func/besideCount/twoCountDistinct/ungrouped	a:bigint,c:bigint,b:bigint,d:bigint | 6,6,4,4
+all/count/func/besideCount/twoCountDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint,d:bigint | 1,2,2,1,1; 2,2,2,2,2; 3,1,1,1,1; NULL,1,1,1,1
+all/count/func/besideCount/sumDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 6,6,100
+all/count/func/besideCount/sumDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint | 1,2,2,10; 2,2,2,50; 3,1,1,30; NULL,1,1,40
+all/count/case/alone/countDistinct/ungrouped	a:text,b:bigint | lo,4
+all/count/case/alone/countDistinct/grouped	g:integer,a:text,b:bigint | 1,lo,1; 2,lo,2; 3,lo,1; NULL,lo,1
+all/count/case/alone/twoCountDistinct/ungrouped	a:text,b:bigint,d:bigint | lo,4,4
+all/count/case/alone/twoCountDistinct/grouped	g:integer,a:text,b:bigint,d:bigint | 1,lo,1,1; 2,lo,2,2; 3,lo,1,1; NULL,lo,1,1
+all/count/case/alone/sumDistinct/ungrouped	a:text,b:bigint | lo,100
+all/count/case/alone/sumDistinct/grouped	g:integer,a:text,b:bigint | 1,lo,10; 2,lo,50; 3,lo,30; NULL,lo,40
+all/count/case/besideCount/countDistinct/ungrouped	a:text,c:bigint,b:bigint | lo,6,4
+all/count/case/besideCount/countDistinct/grouped	g:integer,a:text,c:bigint,b:bigint | 1,lo,2,1; 2,lo,2,2; 3,lo,1,1; NULL,lo,1,1
+all/count/case/besideCount/twoCountDistinct/ungrouped	a:text,c:bigint,b:bigint,d:bigint | lo,6,4,4
+all/count/case/besideCount/twoCountDistinct/grouped	g:integer,a:text,c:bigint,b:bigint,d:bigint | 1,lo,2,1,1; 2,lo,2,2,2; 3,lo,1,1,1; NULL,lo,1,1,1
+all/count/case/besideCount/sumDistinct/ungrouped	a:text,c:bigint,b:bigint | lo,6,100
+all/count/case/besideCount/sumDistinct/grouped	g:integer,a:text,c:bigint,b:bigint | 1,lo,2,10; 2,lo,2,50; 3,lo,1,30; NULL,lo,1,40
+all/count/cast/alone/countDistinct/ungrouped	a:bigint,b:bigint | 6,4
+all/count/cast/alone/countDistinct/grouped	g:integer,a:bigint,b:bigint | 1,2,1; 2,2,2; 3,1,1; NULL,1,1
+all/count/cast/alone/twoCountDistinct/ungrouped	a:bigint,b:bigint,d:bigint | 6,4,4
+all/count/cast/alone/twoCountDistinct/grouped	g:integer,a:bigint,b:bigint,d:bigint | 1,2,1,1; 2,2,2,2; 3,1,1,1; NULL,1,1,1
+all/count/cast/alone/sumDistinct/ungrouped	a:bigint,b:bigint | 6,100
+all/count/cast/alone/sumDistinct/grouped	g:integer,a:bigint,b:bigint | 1,2,10; 2,2,50; 3,1,30; NULL,1,40
+all/count/cast/besideCount/countDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 6,6,4
+all/count/cast/besideCount/countDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint | 1,2,2,1; 2,2,2,2; 3,1,1,1; NULL,1,1,1
+all/count/cast/besideCount/twoCountDistinct/ungrouped	a:bigint,c:bigint,b:bigint,d:bigint | 6,6,4,4
+all/count/cast/besideCount/twoCountDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint,d:bigint | 1,2,2,1,1; 2,2,2,2,2; 3,1,1,1,1; NULL,1,1,1,1
+all/count/cast/besideCount/sumDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 6,6,100
+all/count/cast/besideCount/sumDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint | 1,2,2,10; 2,2,2,50; 3,1,1,30; NULL,1,1,40
+all/count/plusCount/alone/countDistinct/ungrouped	a:bigint,b:bigint | 12,4
+all/count/plusCount/alone/countDistinct/grouped	g:integer,a:bigint,b:bigint | 1,4,1; 2,4,2; 3,2,1; NULL,2,1
+all/count/plusCount/alone/twoCountDistinct/ungrouped	a:bigint,b:bigint,d:bigint | 12,4,4
+all/count/plusCount/alone/twoCountDistinct/grouped	g:integer,a:bigint,b:bigint,d:bigint | 1,4,1,1; 2,4,2,2; 3,2,1,1; NULL,2,1,1
+all/count/plusCount/alone/sumDistinct/ungrouped	a:bigint,b:bigint | 12,100
+all/count/plusCount/alone/sumDistinct/grouped	g:integer,a:bigint,b:bigint | 1,4,10; 2,4,50; 3,2,30; NULL,2,40
+all/count/plusCount/besideCount/countDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 12,6,4
+all/count/plusCount/besideCount/countDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint | 1,4,2,1; 2,4,2,2; 3,2,1,1; NULL,2,1,1
+all/count/plusCount/besideCount/twoCountDistinct/ungrouped	a:bigint,c:bigint,b:bigint,d:bigint | 12,6,4,4
+all/count/plusCount/besideCount/twoCountDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint,d:bigint | 1,4,2,1,1; 2,4,2,2,2; 3,2,1,1,1; NULL,2,1,1,1
+all/count/plusCount/besideCount/sumDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 12,6,100
+all/count/plusCount/besideCount/sumDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint | 1,4,2,10; 2,4,2,50; 3,2,1,30; NULL,2,1,40
+all/stddev/bare/alone/countDistinct/ungrouped	a:numeric,b:bigint | 12.1106014163899667,4
+all/stddev/bare/alone/countDistinct/grouped	g:integer,a:numeric,b:bigint | 1,0,1; 2,7.0710678118654752,2; 3,NULL,1; NULL,NULL,1
+all/stddev/bare/alone/twoCountDistinct/ungrouped	a:numeric,b:bigint,d:bigint | 12.1106014163899667,4,4
+all/stddev/bare/alone/twoCountDistinct/grouped	g:integer,a:numeric,b:bigint,d:bigint | 1,0,1,1; 2,7.0710678118654752,2,2; 3,NULL,1,1; NULL,NULL,1,1
+all/stddev/bare/alone/sumDistinct/ungrouped	a:numeric,b:bigint | 12.1106014163899667,100
+all/stddev/bare/alone/sumDistinct/grouped	g:integer,a:numeric,b:bigint | 1,0,10; 2,7.0710678118654752,50; 3,NULL,30; NULL,NULL,40
+all/stddev/bare/besideCount/countDistinct/ungrouped	a:numeric,c:bigint,b:bigint | 12.1106014163899667,6,4
+all/stddev/bare/besideCount/countDistinct/grouped	g:integer,a:numeric,c:bigint,b:bigint | 1,0,2,1; 2,7.0710678118654752,2,2; 3,NULL,1,1; NULL,NULL,1,1
+all/stddev/bare/besideCount/twoCountDistinct/ungrouped	a:numeric,c:bigint,b:bigint,d:bigint | 12.1106014163899667,6,4,4
+all/stddev/bare/besideCount/twoCountDistinct/grouped	g:integer,a:numeric,c:bigint,b:bigint,d:bigint | 1,0,2,1,1; 2,7.0710678118654752,2,2,2; 3,NULL,1,1,1; NULL,NULL,1,1,1
+all/stddev/bare/besideCount/sumDistinct/ungrouped	a:numeric,c:bigint,b:bigint | 12.1106014163899667,6,100
+all/stddev/bare/besideCount/sumDistinct/grouped	g:integer,a:numeric,c:bigint,b:bigint | 1,0,2,10; 2,7.0710678118654752,2,50; 3,NULL,1,30; NULL,NULL,1,40
+all/stddev/arith/alone/countDistinct/ungrouped	a:numeric,b:bigint | 13.1106014163899667,4
+all/stddev/arith/alone/countDistinct/grouped	g:integer,a:numeric,b:bigint | 1,1,1; 2,8.0710678118654752,2; 3,NULL,1; NULL,NULL,1
+all/stddev/arith/alone/twoCountDistinct/ungrouped	a:numeric,b:bigint,d:bigint | 13.1106014163899667,4,4
+all/stddev/arith/alone/twoCountDistinct/grouped	g:integer,a:numeric,b:bigint,d:bigint | 1,1,1,1; 2,8.0710678118654752,2,2; 3,NULL,1,1; NULL,NULL,1,1
+all/stddev/arith/alone/sumDistinct/ungrouped	a:numeric,b:bigint | 13.1106014163899667,100
+all/stddev/arith/alone/sumDistinct/grouped	g:integer,a:numeric,b:bigint | 1,1,10; 2,8.0710678118654752,50; 3,NULL,30; NULL,NULL,40
+all/stddev/arith/besideCount/countDistinct/ungrouped	a:numeric,c:bigint,b:bigint | 13.1106014163899667,6,4
+all/stddev/arith/besideCount/countDistinct/grouped	g:integer,a:numeric,c:bigint,b:bigint | 1,1,2,1; 2,8.0710678118654752,2,2; 3,NULL,1,1; NULL,NULL,1,1
+all/stddev/arith/besideCount/twoCountDistinct/ungrouped	a:numeric,c:bigint,b:bigint,d:bigint | 13.1106014163899667,6,4,4
+all/stddev/arith/besideCount/twoCountDistinct/grouped	g:integer,a:numeric,c:bigint,b:bigint,d:bigint | 1,1,2,1,1; 2,8.0710678118654752,2,2,2; 3,NULL,1,1,1; NULL,NULL,1,1,1
+all/stddev/arith/besideCount/sumDistinct/ungrouped	a:numeric,c:bigint,b:bigint | 13.1106014163899667,6,100
+all/stddev/arith/besideCount/sumDistinct/grouped	g:integer,a:numeric,c:bigint,b:bigint | 1,1,2,10; 2,8.0710678118654752,2,50; 3,NULL,1,30; NULL,NULL,1,40
+all/stddev/func/alone/countDistinct/ungrouped	a:numeric,b:bigint | 12.1106014163899667,4
+all/stddev/func/alone/countDistinct/grouped	g:integer,a:numeric,b:bigint | 1,0,1; 2,7.0710678118654752,2; 3,NULL,1; NULL,NULL,1
+all/stddev/func/alone/twoCountDistinct/ungrouped	a:numeric,b:bigint,d:bigint | 12.1106014163899667,4,4
+all/stddev/func/alone/twoCountDistinct/grouped	g:integer,a:numeric,b:bigint,d:bigint | 1,0,1,1; 2,7.0710678118654752,2,2; 3,NULL,1,1; NULL,NULL,1,1
+all/stddev/func/alone/sumDistinct/ungrouped	a:numeric,b:bigint | 12.1106014163899667,100
+all/stddev/func/alone/sumDistinct/grouped	g:integer,a:numeric,b:bigint | 1,0,10; 2,7.0710678118654752,50; 3,NULL,30; NULL,NULL,40
+all/stddev/func/besideCount/countDistinct/ungrouped	a:numeric,c:bigint,b:bigint | 12.1106014163899667,6,4
+all/stddev/func/besideCount/countDistinct/grouped	g:integer,a:numeric,c:bigint,b:bigint | 1,0,2,1; 2,7.0710678118654752,2,2; 3,NULL,1,1; NULL,NULL,1,1
+all/stddev/func/besideCount/twoCountDistinct/ungrouped	a:numeric,c:bigint,b:bigint,d:bigint | 12.1106014163899667,6,4,4
+all/stddev/func/besideCount/twoCountDistinct/grouped	g:integer,a:numeric,c:bigint,b:bigint,d:bigint | 1,0,2,1,1; 2,7.0710678118654752,2,2,2; 3,NULL,1,1,1; NULL,NULL,1,1,1
+all/stddev/func/besideCount/sumDistinct/ungrouped	a:numeric,c:bigint,b:bigint | 12.1106014163899667,6,100
+all/stddev/func/besideCount/sumDistinct/grouped	g:integer,a:numeric,c:bigint,b:bigint | 1,0,2,10; 2,7.0710678118654752,2,50; 3,NULL,1,30; NULL,NULL,1,40
+all/stddev/case/alone/countDistinct/ungrouped	a:text,b:bigint | lo,4
+all/stddev/case/alone/countDistinct/grouped	g:integer,a:text,b:bigint | 1,lo,1; 2,lo,2; 3,lo,1; NULL,lo,1
+all/stddev/case/alone/twoCountDistinct/ungrouped	a:text,b:bigint,d:bigint | lo,4,4
+all/stddev/case/alone/twoCountDistinct/grouped	g:integer,a:text,b:bigint,d:bigint | 1,lo,1,1; 2,lo,2,2; 3,lo,1,1; NULL,lo,1,1
+all/stddev/case/alone/sumDistinct/ungrouped	a:text,b:bigint | lo,100
+all/stddev/case/alone/sumDistinct/grouped	g:integer,a:text,b:bigint | 1,lo,10; 2,lo,50; 3,lo,30; NULL,lo,40
+all/stddev/case/besideCount/countDistinct/ungrouped	a:text,c:bigint,b:bigint | lo,6,4
+all/stddev/case/besideCount/countDistinct/grouped	g:integer,a:text,c:bigint,b:bigint | 1,lo,2,1; 2,lo,2,2; 3,lo,1,1; NULL,lo,1,1
+all/stddev/case/besideCount/twoCountDistinct/ungrouped	a:text,c:bigint,b:bigint,d:bigint | lo,6,4,4
+all/stddev/case/besideCount/twoCountDistinct/grouped	g:integer,a:text,c:bigint,b:bigint,d:bigint | 1,lo,2,1,1; 2,lo,2,2,2; 3,lo,1,1,1; NULL,lo,1,1,1
+all/stddev/case/besideCount/sumDistinct/ungrouped	a:text,c:bigint,b:bigint | lo,6,100
+all/stddev/case/besideCount/sumDistinct/grouped	g:integer,a:text,c:bigint,b:bigint | 1,lo,2,10; 2,lo,2,50; 3,lo,1,30; NULL,lo,1,40
+all/stddev/cast/alone/countDistinct/ungrouped	a:bigint,b:bigint | 12,4
+all/stddev/cast/alone/countDistinct/grouped	g:integer,a:bigint,b:bigint | 1,0,1; 2,7,2; 3,NULL,1; NULL,NULL,1
+all/stddev/cast/alone/twoCountDistinct/ungrouped	a:bigint,b:bigint,d:bigint | 12,4,4
+all/stddev/cast/alone/twoCountDistinct/grouped	g:integer,a:bigint,b:bigint,d:bigint | 1,0,1,1; 2,7,2,2; 3,NULL,1,1; NULL,NULL,1,1
+all/stddev/cast/alone/sumDistinct/ungrouped	a:bigint,b:bigint | 12,100
+all/stddev/cast/alone/sumDistinct/grouped	g:integer,a:bigint,b:bigint | 1,0,10; 2,7,50; 3,NULL,30; NULL,NULL,40
+all/stddev/cast/besideCount/countDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 12,6,4
+all/stddev/cast/besideCount/countDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint | 1,0,2,1; 2,7,2,2; 3,NULL,1,1; NULL,NULL,1,1
+all/stddev/cast/besideCount/twoCountDistinct/ungrouped	a:bigint,c:bigint,b:bigint,d:bigint | 12,6,4,4
+all/stddev/cast/besideCount/twoCountDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint,d:bigint | 1,0,2,1,1; 2,7,2,2,2; 3,NULL,1,1,1; NULL,NULL,1,1,1
+all/stddev/cast/besideCount/sumDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 12,6,100
+all/stddev/cast/besideCount/sumDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint | 1,0,2,10; 2,7,2,50; 3,NULL,1,30; NULL,NULL,1,40
+all/stddev/plusCount/alone/countDistinct/ungrouped	a:numeric,b:bigint | 18.1106014163899667,4
+all/stddev/plusCount/alone/countDistinct/grouped	g:integer,a:numeric,b:bigint | 1,2,1; 2,9.0710678118654752,2; 3,NULL,1; NULL,NULL,1
+all/stddev/plusCount/alone/twoCountDistinct/ungrouped	a:numeric,b:bigint,d:bigint | 18.1106014163899667,4,4
+all/stddev/plusCount/alone/twoCountDistinct/grouped	g:integer,a:numeric,b:bigint,d:bigint | 1,2,1,1; 2,9.0710678118654752,2,2; 3,NULL,1,1; NULL,NULL,1,1
+all/stddev/plusCount/alone/sumDistinct/ungrouped	a:numeric,b:bigint | 18.1106014163899667,100
+all/stddev/plusCount/alone/sumDistinct/grouped	g:integer,a:numeric,b:bigint | 1,2,10; 2,9.0710678118654752,50; 3,NULL,30; NULL,NULL,40
+all/stddev/plusCount/besideCount/countDistinct/ungrouped	a:numeric,c:bigint,b:bigint | 18.1106014163899667,6,4
+all/stddev/plusCount/besideCount/countDistinct/grouped	g:integer,a:numeric,c:bigint,b:bigint | 1,2,2,1; 2,9.0710678118654752,2,2; 3,NULL,1,1; NULL,NULL,1,1
+all/stddev/plusCount/besideCount/twoCountDistinct/ungrouped	a:numeric,c:bigint,b:bigint,d:bigint | 18.1106014163899667,6,4,4
+all/stddev/plusCount/besideCount/twoCountDistinct/grouped	g:integer,a:numeric,c:bigint,b:bigint,d:bigint | 1,2,2,1,1; 2,9.0710678118654752,2,2,2; 3,NULL,1,1,1; NULL,NULL,1,1,1
+all/stddev/plusCount/besideCount/sumDistinct/ungrouped	a:numeric,c:bigint,b:bigint | 18.1106014163899667,6,100
+all/stddev/plusCount/besideCount/sumDistinct/grouped	g:integer,a:numeric,c:bigint,b:bigint | 1,2,2,10; 2,9.0710678118654752,2,50; 3,NULL,1,30; NULL,NULL,1,40
+one/avg/bare/alone/countDistinct/ungrouped	a:numeric,b:bigint | 10.0000000000000000,1
+one/avg/bare/alone/countDistinct/grouped	g:integer,a:numeric,b:bigint | 1,10.0000000000000000,1
+one/avg/bare/alone/twoCountDistinct/ungrouped	a:numeric,b:bigint,d:bigint | 10.0000000000000000,1,1
+one/avg/bare/alone/twoCountDistinct/grouped	g:integer,a:numeric,b:bigint,d:bigint | 1,10.0000000000000000,1,1
+one/avg/bare/alone/sumDistinct/ungrouped	a:numeric,b:bigint | 10.0000000000000000,10
+one/avg/bare/alone/sumDistinct/grouped	g:integer,a:numeric,b:bigint | 1,10.0000000000000000,10
+one/avg/bare/besideCount/countDistinct/ungrouped	a:numeric,c:bigint,b:bigint | 10.0000000000000000,1,1
+one/avg/bare/besideCount/countDistinct/grouped	g:integer,a:numeric,c:bigint,b:bigint | 1,10.0000000000000000,1,1
+one/avg/bare/besideCount/twoCountDistinct/ungrouped	a:numeric,c:bigint,b:bigint,d:bigint | 10.0000000000000000,1,1,1
+one/avg/bare/besideCount/twoCountDistinct/grouped	g:integer,a:numeric,c:bigint,b:bigint,d:bigint | 1,10.0000000000000000,1,1,1
+one/avg/bare/besideCount/sumDistinct/ungrouped	a:numeric,c:bigint,b:bigint | 10.0000000000000000,1,10
+one/avg/bare/besideCount/sumDistinct/grouped	g:integer,a:numeric,c:bigint,b:bigint | 1,10.0000000000000000,1,10
+one/avg/arith/alone/countDistinct/ungrouped	a:numeric,b:bigint | 11.0000000000000000,1
+one/avg/arith/alone/countDistinct/grouped	g:integer,a:numeric,b:bigint | 1,11.0000000000000000,1
+one/avg/arith/alone/twoCountDistinct/ungrouped	a:numeric,b:bigint,d:bigint | 11.0000000000000000,1,1
+one/avg/arith/alone/twoCountDistinct/grouped	g:integer,a:numeric,b:bigint,d:bigint | 1,11.0000000000000000,1,1
+one/avg/arith/alone/sumDistinct/ungrouped	a:numeric,b:bigint | 11.0000000000000000,10
+one/avg/arith/alone/sumDistinct/grouped	g:integer,a:numeric,b:bigint | 1,11.0000000000000000,10
+one/avg/arith/besideCount/countDistinct/ungrouped	a:numeric,c:bigint,b:bigint | 11.0000000000000000,1,1
+one/avg/arith/besideCount/countDistinct/grouped	g:integer,a:numeric,c:bigint,b:bigint | 1,11.0000000000000000,1,1
+one/avg/arith/besideCount/twoCountDistinct/ungrouped	a:numeric,c:bigint,b:bigint,d:bigint | 11.0000000000000000,1,1,1
+one/avg/arith/besideCount/twoCountDistinct/grouped	g:integer,a:numeric,c:bigint,b:bigint,d:bigint | 1,11.0000000000000000,1,1,1
+one/avg/arith/besideCount/sumDistinct/ungrouped	a:numeric,c:bigint,b:bigint | 11.0000000000000000,1,10
+one/avg/arith/besideCount/sumDistinct/grouped	g:integer,a:numeric,c:bigint,b:bigint | 1,11.0000000000000000,1,10
+one/avg/func/alone/countDistinct/ungrouped	a:numeric,b:bigint | 10.0000000000000000,1
+one/avg/func/alone/countDistinct/grouped	g:integer,a:numeric,b:bigint | 1,10.0000000000000000,1
+one/avg/func/alone/twoCountDistinct/ungrouped	a:numeric,b:bigint,d:bigint | 10.0000000000000000,1,1
+one/avg/func/alone/twoCountDistinct/grouped	g:integer,a:numeric,b:bigint,d:bigint | 1,10.0000000000000000,1,1
+one/avg/func/alone/sumDistinct/ungrouped	a:numeric,b:bigint | 10.0000000000000000,10
+one/avg/func/alone/sumDistinct/grouped	g:integer,a:numeric,b:bigint | 1,10.0000000000000000,10
+one/avg/func/besideCount/countDistinct/ungrouped	a:numeric,c:bigint,b:bigint | 10.0000000000000000,1,1
+one/avg/func/besideCount/countDistinct/grouped	g:integer,a:numeric,c:bigint,b:bigint | 1,10.0000000000000000,1,1
+one/avg/func/besideCount/twoCountDistinct/ungrouped	a:numeric,c:bigint,b:bigint,d:bigint | 10.0000000000000000,1,1,1
+one/avg/func/besideCount/twoCountDistinct/grouped	g:integer,a:numeric,c:bigint,b:bigint,d:bigint | 1,10.0000000000000000,1,1,1
+one/avg/func/besideCount/sumDistinct/ungrouped	a:numeric,c:bigint,b:bigint | 10.0000000000000000,1,10
+one/avg/func/besideCount/sumDistinct/grouped	g:integer,a:numeric,c:bigint,b:bigint | 1,10.0000000000000000,1,10
+one/avg/case/alone/countDistinct/ungrouped	a:text,b:bigint | lo,1
+one/avg/case/alone/countDistinct/grouped	g:integer,a:text,b:bigint | 1,lo,1
+one/avg/case/alone/twoCountDistinct/ungrouped	a:text,b:bigint,d:bigint | lo,1,1
+one/avg/case/alone/twoCountDistinct/grouped	g:integer,a:text,b:bigint,d:bigint | 1,lo,1,1
+one/avg/case/alone/sumDistinct/ungrouped	a:text,b:bigint | lo,10
+one/avg/case/alone/sumDistinct/grouped	g:integer,a:text,b:bigint | 1,lo,10
+one/avg/case/besideCount/countDistinct/ungrouped	a:text,c:bigint,b:bigint | lo,1,1
+one/avg/case/besideCount/countDistinct/grouped	g:integer,a:text,c:bigint,b:bigint | 1,lo,1,1
+one/avg/case/besideCount/twoCountDistinct/ungrouped	a:text,c:bigint,b:bigint,d:bigint | lo,1,1,1
+one/avg/case/besideCount/twoCountDistinct/grouped	g:integer,a:text,c:bigint,b:bigint,d:bigint | 1,lo,1,1,1
+one/avg/case/besideCount/sumDistinct/ungrouped	a:text,c:bigint,b:bigint | lo,1,10
+one/avg/case/besideCount/sumDistinct/grouped	g:integer,a:text,c:bigint,b:bigint | 1,lo,1,10
+one/avg/cast/alone/countDistinct/ungrouped	a:bigint,b:bigint | 10,1
+one/avg/cast/alone/countDistinct/grouped	g:integer,a:bigint,b:bigint | 1,10,1
+one/avg/cast/alone/twoCountDistinct/ungrouped	a:bigint,b:bigint,d:bigint | 10,1,1
+one/avg/cast/alone/twoCountDistinct/grouped	g:integer,a:bigint,b:bigint,d:bigint | 1,10,1,1
+one/avg/cast/alone/sumDistinct/ungrouped	a:bigint,b:bigint | 10,10
+one/avg/cast/alone/sumDistinct/grouped	g:integer,a:bigint,b:bigint | 1,10,10
+one/avg/cast/besideCount/countDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 10,1,1
+one/avg/cast/besideCount/countDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint | 1,10,1,1
+one/avg/cast/besideCount/twoCountDistinct/ungrouped	a:bigint,c:bigint,b:bigint,d:bigint | 10,1,1,1
+one/avg/cast/besideCount/twoCountDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint,d:bigint | 1,10,1,1,1
+one/avg/cast/besideCount/sumDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 10,1,10
+one/avg/cast/besideCount/sumDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint | 1,10,1,10
+one/avg/plusCount/alone/countDistinct/ungrouped	a:numeric,b:bigint | 11.0000000000000000,1
+one/avg/plusCount/alone/countDistinct/grouped	g:integer,a:numeric,b:bigint | 1,11.0000000000000000,1
+one/avg/plusCount/alone/twoCountDistinct/ungrouped	a:numeric,b:bigint,d:bigint | 11.0000000000000000,1,1
+one/avg/plusCount/alone/twoCountDistinct/grouped	g:integer,a:numeric,b:bigint,d:bigint | 1,11.0000000000000000,1,1
+one/avg/plusCount/alone/sumDistinct/ungrouped	a:numeric,b:bigint | 11.0000000000000000,10
+one/avg/plusCount/alone/sumDistinct/grouped	g:integer,a:numeric,b:bigint | 1,11.0000000000000000,10
+one/avg/plusCount/besideCount/countDistinct/ungrouped	a:numeric,c:bigint,b:bigint | 11.0000000000000000,1,1
+one/avg/plusCount/besideCount/countDistinct/grouped	g:integer,a:numeric,c:bigint,b:bigint | 1,11.0000000000000000,1,1
+one/avg/plusCount/besideCount/twoCountDistinct/ungrouped	a:numeric,c:bigint,b:bigint,d:bigint | 11.0000000000000000,1,1,1
+one/avg/plusCount/besideCount/twoCountDistinct/grouped	g:integer,a:numeric,c:bigint,b:bigint,d:bigint | 1,11.0000000000000000,1,1,1
+one/avg/plusCount/besideCount/sumDistinct/ungrouped	a:numeric,c:bigint,b:bigint | 11.0000000000000000,1,10
+one/avg/plusCount/besideCount/sumDistinct/grouped	g:integer,a:numeric,c:bigint,b:bigint | 1,11.0000000000000000,1,10
+one/sum/bare/alone/countDistinct/ungrouped	a:bigint,b:bigint | 10,1
+one/sum/bare/alone/countDistinct/grouped	g:integer,a:bigint,b:bigint | 1,10,1
+one/sum/bare/alone/twoCountDistinct/ungrouped	a:bigint,b:bigint,d:bigint | 10,1,1
+one/sum/bare/alone/twoCountDistinct/grouped	g:integer,a:bigint,b:bigint,d:bigint | 1,10,1,1
+one/sum/bare/alone/sumDistinct/ungrouped	a:bigint,b:bigint | 10,10
+one/sum/bare/alone/sumDistinct/grouped	g:integer,a:bigint,b:bigint | 1,10,10
+one/sum/bare/besideCount/countDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 10,1,1
+one/sum/bare/besideCount/countDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint | 1,10,1,1
+one/sum/bare/besideCount/twoCountDistinct/ungrouped	a:bigint,c:bigint,b:bigint,d:bigint | 10,1,1,1
+one/sum/bare/besideCount/twoCountDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint,d:bigint | 1,10,1,1,1
+one/sum/bare/besideCount/sumDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 10,1,10
+one/sum/bare/besideCount/sumDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint | 1,10,1,10
+one/sum/arith/alone/countDistinct/ungrouped	a:bigint,b:bigint | 11,1
+one/sum/arith/alone/countDistinct/grouped	g:integer,a:bigint,b:bigint | 1,11,1
+one/sum/arith/alone/twoCountDistinct/ungrouped	a:bigint,b:bigint,d:bigint | 11,1,1
+one/sum/arith/alone/twoCountDistinct/grouped	g:integer,a:bigint,b:bigint,d:bigint | 1,11,1,1
+one/sum/arith/alone/sumDistinct/ungrouped	a:bigint,b:bigint | 11,10
+one/sum/arith/alone/sumDistinct/grouped	g:integer,a:bigint,b:bigint | 1,11,10
+one/sum/arith/besideCount/countDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 11,1,1
+one/sum/arith/besideCount/countDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint | 1,11,1,1
+one/sum/arith/besideCount/twoCountDistinct/ungrouped	a:bigint,c:bigint,b:bigint,d:bigint | 11,1,1,1
+one/sum/arith/besideCount/twoCountDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint,d:bigint | 1,11,1,1,1
+one/sum/arith/besideCount/sumDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 11,1,10
+one/sum/arith/besideCount/sumDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint | 1,11,1,10
+one/sum/func/alone/countDistinct/ungrouped	a:bigint,b:bigint | 10,1
+one/sum/func/alone/countDistinct/grouped	g:integer,a:bigint,b:bigint | 1,10,1
+one/sum/func/alone/twoCountDistinct/ungrouped	a:bigint,b:bigint,d:bigint | 10,1,1
+one/sum/func/alone/twoCountDistinct/grouped	g:integer,a:bigint,b:bigint,d:bigint | 1,10,1,1
+one/sum/func/alone/sumDistinct/ungrouped	a:bigint,b:bigint | 10,10
+one/sum/func/alone/sumDistinct/grouped	g:integer,a:bigint,b:bigint | 1,10,10
+one/sum/func/besideCount/countDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 10,1,1
+one/sum/func/besideCount/countDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint | 1,10,1,1
+one/sum/func/besideCount/twoCountDistinct/ungrouped	a:bigint,c:bigint,b:bigint,d:bigint | 10,1,1,1
+one/sum/func/besideCount/twoCountDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint,d:bigint | 1,10,1,1,1
+one/sum/func/besideCount/sumDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 10,1,10
+one/sum/func/besideCount/sumDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint | 1,10,1,10
+one/sum/case/alone/countDistinct/ungrouped	a:text,b:bigint | lo,1
+one/sum/case/alone/countDistinct/grouped	g:integer,a:text,b:bigint | 1,lo,1
+one/sum/case/alone/twoCountDistinct/ungrouped	a:text,b:bigint,d:bigint | lo,1,1
+one/sum/case/alone/twoCountDistinct/grouped	g:integer,a:text,b:bigint,d:bigint | 1,lo,1,1
+one/sum/case/alone/sumDistinct/ungrouped	a:text,b:bigint | lo,10
+one/sum/case/alone/sumDistinct/grouped	g:integer,a:text,b:bigint | 1,lo,10
+one/sum/case/besideCount/countDistinct/ungrouped	a:text,c:bigint,b:bigint | lo,1,1
+one/sum/case/besideCount/countDistinct/grouped	g:integer,a:text,c:bigint,b:bigint | 1,lo,1,1
+one/sum/case/besideCount/twoCountDistinct/ungrouped	a:text,c:bigint,b:bigint,d:bigint | lo,1,1,1
+one/sum/case/besideCount/twoCountDistinct/grouped	g:integer,a:text,c:bigint,b:bigint,d:bigint | 1,lo,1,1,1
+one/sum/case/besideCount/sumDistinct/ungrouped	a:text,c:bigint,b:bigint | lo,1,10
+one/sum/case/besideCount/sumDistinct/grouped	g:integer,a:text,c:bigint,b:bigint | 1,lo,1,10
+one/sum/cast/alone/countDistinct/ungrouped	a:bigint,b:bigint | 10,1
+one/sum/cast/alone/countDistinct/grouped	g:integer,a:bigint,b:bigint | 1,10,1
+one/sum/cast/alone/twoCountDistinct/ungrouped	a:bigint,b:bigint,d:bigint | 10,1,1
+one/sum/cast/alone/twoCountDistinct/grouped	g:integer,a:bigint,b:bigint,d:bigint | 1,10,1,1
+one/sum/cast/alone/sumDistinct/ungrouped	a:bigint,b:bigint | 10,10
+one/sum/cast/alone/sumDistinct/grouped	g:integer,a:bigint,b:bigint | 1,10,10
+one/sum/cast/besideCount/countDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 10,1,1
+one/sum/cast/besideCount/countDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint | 1,10,1,1
+one/sum/cast/besideCount/twoCountDistinct/ungrouped	a:bigint,c:bigint,b:bigint,d:bigint | 10,1,1,1
+one/sum/cast/besideCount/twoCountDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint,d:bigint | 1,10,1,1,1
+one/sum/cast/besideCount/sumDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 10,1,10
+one/sum/cast/besideCount/sumDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint | 1,10,1,10
+one/sum/plusCount/alone/countDistinct/ungrouped	a:bigint,b:bigint | 11,1
+one/sum/plusCount/alone/countDistinct/grouped	g:integer,a:bigint,b:bigint | 1,11,1
+one/sum/plusCount/alone/twoCountDistinct/ungrouped	a:bigint,b:bigint,d:bigint | 11,1,1
+one/sum/plusCount/alone/twoCountDistinct/grouped	g:integer,a:bigint,b:bigint,d:bigint | 1,11,1,1
+one/sum/plusCount/alone/sumDistinct/ungrouped	a:bigint,b:bigint | 11,10
+one/sum/plusCount/alone/sumDistinct/grouped	g:integer,a:bigint,b:bigint | 1,11,10
+one/sum/plusCount/besideCount/countDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 11,1,1
+one/sum/plusCount/besideCount/countDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint | 1,11,1,1
+one/sum/plusCount/besideCount/twoCountDistinct/ungrouped	a:bigint,c:bigint,b:bigint,d:bigint | 11,1,1,1
+one/sum/plusCount/besideCount/twoCountDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint,d:bigint | 1,11,1,1,1
+one/sum/plusCount/besideCount/sumDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 11,1,10
+one/sum/plusCount/besideCount/sumDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint | 1,11,1,10
+one/min/bare/alone/countDistinct/ungrouped	a:integer,b:bigint | 10,1
+one/min/bare/alone/countDistinct/grouped	g:integer,a:integer,b:bigint | 1,10,1
+one/min/bare/alone/twoCountDistinct/ungrouped	a:integer,b:bigint,d:bigint | 10,1,1
+one/min/bare/alone/twoCountDistinct/grouped	g:integer,a:integer,b:bigint,d:bigint | 1,10,1,1
+one/min/bare/alone/sumDistinct/ungrouped	a:integer,b:bigint | 10,10
+one/min/bare/alone/sumDistinct/grouped	g:integer,a:integer,b:bigint | 1,10,10
+one/min/bare/besideCount/countDistinct/ungrouped	a:integer,c:bigint,b:bigint | 10,1,1
+one/min/bare/besideCount/countDistinct/grouped	g:integer,a:integer,c:bigint,b:bigint | 1,10,1,1
+one/min/bare/besideCount/twoCountDistinct/ungrouped	a:integer,c:bigint,b:bigint,d:bigint | 10,1,1,1
+one/min/bare/besideCount/twoCountDistinct/grouped	g:integer,a:integer,c:bigint,b:bigint,d:bigint | 1,10,1,1,1
+one/min/bare/besideCount/sumDistinct/ungrouped	a:integer,c:bigint,b:bigint | 10,1,10
+one/min/bare/besideCount/sumDistinct/grouped	g:integer,a:integer,c:bigint,b:bigint | 1,10,1,10
+one/min/arith/alone/countDistinct/ungrouped	a:integer,b:bigint | 11,1
+one/min/arith/alone/countDistinct/grouped	g:integer,a:integer,b:bigint | 1,11,1
+one/min/arith/alone/twoCountDistinct/ungrouped	a:integer,b:bigint,d:bigint | 11,1,1
+one/min/arith/alone/twoCountDistinct/grouped	g:integer,a:integer,b:bigint,d:bigint | 1,11,1,1
+one/min/arith/alone/sumDistinct/ungrouped	a:integer,b:bigint | 11,10
+one/min/arith/alone/sumDistinct/grouped	g:integer,a:integer,b:bigint | 1,11,10
+one/min/arith/besideCount/countDistinct/ungrouped	a:integer,c:bigint,b:bigint | 11,1,1
+one/min/arith/besideCount/countDistinct/grouped	g:integer,a:integer,c:bigint,b:bigint | 1,11,1,1
+one/min/arith/besideCount/twoCountDistinct/ungrouped	a:integer,c:bigint,b:bigint,d:bigint | 11,1,1,1
+one/min/arith/besideCount/twoCountDistinct/grouped	g:integer,a:integer,c:bigint,b:bigint,d:bigint | 1,11,1,1,1
+one/min/arith/besideCount/sumDistinct/ungrouped	a:integer,c:bigint,b:bigint | 11,1,10
+one/min/arith/besideCount/sumDistinct/grouped	g:integer,a:integer,c:bigint,b:bigint | 1,11,1,10
+one/min/func/alone/countDistinct/ungrouped	a:integer,b:bigint | 10,1
+one/min/func/alone/countDistinct/grouped	g:integer,a:integer,b:bigint | 1,10,1
+one/min/func/alone/twoCountDistinct/ungrouped	a:integer,b:bigint,d:bigint | 10,1,1
+one/min/func/alone/twoCountDistinct/grouped	g:integer,a:integer,b:bigint,d:bigint | 1,10,1,1
+one/min/func/alone/sumDistinct/ungrouped	a:integer,b:bigint | 10,10
+one/min/func/alone/sumDistinct/grouped	g:integer,a:integer,b:bigint | 1,10,10
+one/min/func/besideCount/countDistinct/ungrouped	a:integer,c:bigint,b:bigint | 10,1,1
+one/min/func/besideCount/countDistinct/grouped	g:integer,a:integer,c:bigint,b:bigint | 1,10,1,1
+one/min/func/besideCount/twoCountDistinct/ungrouped	a:integer,c:bigint,b:bigint,d:bigint | 10,1,1,1
+one/min/func/besideCount/twoCountDistinct/grouped	g:integer,a:integer,c:bigint,b:bigint,d:bigint | 1,10,1,1,1
+one/min/func/besideCount/sumDistinct/ungrouped	a:integer,c:bigint,b:bigint | 10,1,10
+one/min/func/besideCount/sumDistinct/grouped	g:integer,a:integer,c:bigint,b:bigint | 1,10,1,10
+one/min/case/alone/countDistinct/ungrouped	a:text,b:bigint | lo,1
+one/min/case/alone/countDistinct/grouped	g:integer,a:text,b:bigint | 1,lo,1
+one/min/case/alone/twoCountDistinct/ungrouped	a:text,b:bigint,d:bigint | lo,1,1
+one/min/case/alone/twoCountDistinct/grouped	g:integer,a:text,b:bigint,d:bigint | 1,lo,1,1
+one/min/case/alone/sumDistinct/ungrouped	a:text,b:bigint | lo,10
+one/min/case/alone/sumDistinct/grouped	g:integer,a:text,b:bigint | 1,lo,10
+one/min/case/besideCount/countDistinct/ungrouped	a:text,c:bigint,b:bigint | lo,1,1
+one/min/case/besideCount/countDistinct/grouped	g:integer,a:text,c:bigint,b:bigint | 1,lo,1,1
+one/min/case/besideCount/twoCountDistinct/ungrouped	a:text,c:bigint,b:bigint,d:bigint | lo,1,1,1
+one/min/case/besideCount/twoCountDistinct/grouped	g:integer,a:text,c:bigint,b:bigint,d:bigint | 1,lo,1,1,1
+one/min/case/besideCount/sumDistinct/ungrouped	a:text,c:bigint,b:bigint | lo,1,10
+one/min/case/besideCount/sumDistinct/grouped	g:integer,a:text,c:bigint,b:bigint | 1,lo,1,10
+one/min/cast/alone/countDistinct/ungrouped	a:bigint,b:bigint | 10,1
+one/min/cast/alone/countDistinct/grouped	g:integer,a:bigint,b:bigint | 1,10,1
+one/min/cast/alone/twoCountDistinct/ungrouped	a:bigint,b:bigint,d:bigint | 10,1,1
+one/min/cast/alone/twoCountDistinct/grouped	g:integer,a:bigint,b:bigint,d:bigint | 1,10,1,1
+one/min/cast/alone/sumDistinct/ungrouped	a:bigint,b:bigint | 10,10
+one/min/cast/alone/sumDistinct/grouped	g:integer,a:bigint,b:bigint | 1,10,10
+one/min/cast/besideCount/countDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 10,1,1
+one/min/cast/besideCount/countDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint | 1,10,1,1
+one/min/cast/besideCount/twoCountDistinct/ungrouped	a:bigint,c:bigint,b:bigint,d:bigint | 10,1,1,1
+one/min/cast/besideCount/twoCountDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint,d:bigint | 1,10,1,1,1
+one/min/cast/besideCount/sumDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 10,1,10
+one/min/cast/besideCount/sumDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint | 1,10,1,10
+one/min/plusCount/alone/countDistinct/ungrouped	a:bigint,b:bigint | 11,1
+one/min/plusCount/alone/countDistinct/grouped	g:integer,a:bigint,b:bigint | 1,11,1
+one/min/plusCount/alone/twoCountDistinct/ungrouped	a:bigint,b:bigint,d:bigint | 11,1,1
+one/min/plusCount/alone/twoCountDistinct/grouped	g:integer,a:bigint,b:bigint,d:bigint | 1,11,1,1
+one/min/plusCount/alone/sumDistinct/ungrouped	a:bigint,b:bigint | 11,10
+one/min/plusCount/alone/sumDistinct/grouped	g:integer,a:bigint,b:bigint | 1,11,10
+one/min/plusCount/besideCount/countDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 11,1,1
+one/min/plusCount/besideCount/countDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint | 1,11,1,1
+one/min/plusCount/besideCount/twoCountDistinct/ungrouped	a:bigint,c:bigint,b:bigint,d:bigint | 11,1,1,1
+one/min/plusCount/besideCount/twoCountDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint,d:bigint | 1,11,1,1,1
+one/min/plusCount/besideCount/sumDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 11,1,10
+one/min/plusCount/besideCount/sumDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint | 1,11,1,10
+one/max/bare/alone/countDistinct/ungrouped	a:integer,b:bigint | 10,1
+one/max/bare/alone/countDistinct/grouped	g:integer,a:integer,b:bigint | 1,10,1
+one/max/bare/alone/twoCountDistinct/ungrouped	a:integer,b:bigint,d:bigint | 10,1,1
+one/max/bare/alone/twoCountDistinct/grouped	g:integer,a:integer,b:bigint,d:bigint | 1,10,1,1
+one/max/bare/alone/sumDistinct/ungrouped	a:integer,b:bigint | 10,10
+one/max/bare/alone/sumDistinct/grouped	g:integer,a:integer,b:bigint | 1,10,10
+one/max/bare/besideCount/countDistinct/ungrouped	a:integer,c:bigint,b:bigint | 10,1,1
+one/max/bare/besideCount/countDistinct/grouped	g:integer,a:integer,c:bigint,b:bigint | 1,10,1,1
+one/max/bare/besideCount/twoCountDistinct/ungrouped	a:integer,c:bigint,b:bigint,d:bigint | 10,1,1,1
+one/max/bare/besideCount/twoCountDistinct/grouped	g:integer,a:integer,c:bigint,b:bigint,d:bigint | 1,10,1,1,1
+one/max/bare/besideCount/sumDistinct/ungrouped	a:integer,c:bigint,b:bigint | 10,1,10
+one/max/bare/besideCount/sumDistinct/grouped	g:integer,a:integer,c:bigint,b:bigint | 1,10,1,10
+one/max/arith/alone/countDistinct/ungrouped	a:integer,b:bigint | 11,1
+one/max/arith/alone/countDistinct/grouped	g:integer,a:integer,b:bigint | 1,11,1
+one/max/arith/alone/twoCountDistinct/ungrouped	a:integer,b:bigint,d:bigint | 11,1,1
+one/max/arith/alone/twoCountDistinct/grouped	g:integer,a:integer,b:bigint,d:bigint | 1,11,1,1
+one/max/arith/alone/sumDistinct/ungrouped	a:integer,b:bigint | 11,10
+one/max/arith/alone/sumDistinct/grouped	g:integer,a:integer,b:bigint | 1,11,10
+one/max/arith/besideCount/countDistinct/ungrouped	a:integer,c:bigint,b:bigint | 11,1,1
+one/max/arith/besideCount/countDistinct/grouped	g:integer,a:integer,c:bigint,b:bigint | 1,11,1,1
+one/max/arith/besideCount/twoCountDistinct/ungrouped	a:integer,c:bigint,b:bigint,d:bigint | 11,1,1,1
+one/max/arith/besideCount/twoCountDistinct/grouped	g:integer,a:integer,c:bigint,b:bigint,d:bigint | 1,11,1,1,1
+one/max/arith/besideCount/sumDistinct/ungrouped	a:integer,c:bigint,b:bigint | 11,1,10
+one/max/arith/besideCount/sumDistinct/grouped	g:integer,a:integer,c:bigint,b:bigint | 1,11,1,10
+one/max/func/alone/countDistinct/ungrouped	a:integer,b:bigint | 10,1
+one/max/func/alone/countDistinct/grouped	g:integer,a:integer,b:bigint | 1,10,1
+one/max/func/alone/twoCountDistinct/ungrouped	a:integer,b:bigint,d:bigint | 10,1,1
+one/max/func/alone/twoCountDistinct/grouped	g:integer,a:integer,b:bigint,d:bigint | 1,10,1,1
+one/max/func/alone/sumDistinct/ungrouped	a:integer,b:bigint | 10,10
+one/max/func/alone/sumDistinct/grouped	g:integer,a:integer,b:bigint | 1,10,10
+one/max/func/besideCount/countDistinct/ungrouped	a:integer,c:bigint,b:bigint | 10,1,1
+one/max/func/besideCount/countDistinct/grouped	g:integer,a:integer,c:bigint,b:bigint | 1,10,1,1
+one/max/func/besideCount/twoCountDistinct/ungrouped	a:integer,c:bigint,b:bigint,d:bigint | 10,1,1,1
+one/max/func/besideCount/twoCountDistinct/grouped	g:integer,a:integer,c:bigint,b:bigint,d:bigint | 1,10,1,1,1
+one/max/func/besideCount/sumDistinct/ungrouped	a:integer,c:bigint,b:bigint | 10,1,10
+one/max/func/besideCount/sumDistinct/grouped	g:integer,a:integer,c:bigint,b:bigint | 1,10,1,10
+one/max/case/alone/countDistinct/ungrouped	a:text,b:bigint | lo,1
+one/max/case/alone/countDistinct/grouped	g:integer,a:text,b:bigint | 1,lo,1
+one/max/case/alone/twoCountDistinct/ungrouped	a:text,b:bigint,d:bigint | lo,1,1
+one/max/case/alone/twoCountDistinct/grouped	g:integer,a:text,b:bigint,d:bigint | 1,lo,1,1
+one/max/case/alone/sumDistinct/ungrouped	a:text,b:bigint | lo,10
+one/max/case/alone/sumDistinct/grouped	g:integer,a:text,b:bigint | 1,lo,10
+one/max/case/besideCount/countDistinct/ungrouped	a:text,c:bigint,b:bigint | lo,1,1
+one/max/case/besideCount/countDistinct/grouped	g:integer,a:text,c:bigint,b:bigint | 1,lo,1,1
+one/max/case/besideCount/twoCountDistinct/ungrouped	a:text,c:bigint,b:bigint,d:bigint | lo,1,1,1
+one/max/case/besideCount/twoCountDistinct/grouped	g:integer,a:text,c:bigint,b:bigint,d:bigint | 1,lo,1,1,1
+one/max/case/besideCount/sumDistinct/ungrouped	a:text,c:bigint,b:bigint | lo,1,10
+one/max/case/besideCount/sumDistinct/grouped	g:integer,a:text,c:bigint,b:bigint | 1,lo,1,10
+one/max/cast/alone/countDistinct/ungrouped	a:bigint,b:bigint | 10,1
+one/max/cast/alone/countDistinct/grouped	g:integer,a:bigint,b:bigint | 1,10,1
+one/max/cast/alone/twoCountDistinct/ungrouped	a:bigint,b:bigint,d:bigint | 10,1,1
+one/max/cast/alone/twoCountDistinct/grouped	g:integer,a:bigint,b:bigint,d:bigint | 1,10,1,1
+one/max/cast/alone/sumDistinct/ungrouped	a:bigint,b:bigint | 10,10
+one/max/cast/alone/sumDistinct/grouped	g:integer,a:bigint,b:bigint | 1,10,10
+one/max/cast/besideCount/countDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 10,1,1
+one/max/cast/besideCount/countDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint | 1,10,1,1
+one/max/cast/besideCount/twoCountDistinct/ungrouped	a:bigint,c:bigint,b:bigint,d:bigint | 10,1,1,1
+one/max/cast/besideCount/twoCountDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint,d:bigint | 1,10,1,1,1
+one/max/cast/besideCount/sumDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 10,1,10
+one/max/cast/besideCount/sumDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint | 1,10,1,10
+one/max/plusCount/alone/countDistinct/ungrouped	a:bigint,b:bigint | 11,1
+one/max/plusCount/alone/countDistinct/grouped	g:integer,a:bigint,b:bigint | 1,11,1
+one/max/plusCount/alone/twoCountDistinct/ungrouped	a:bigint,b:bigint,d:bigint | 11,1,1
+one/max/plusCount/alone/twoCountDistinct/grouped	g:integer,a:bigint,b:bigint,d:bigint | 1,11,1,1
+one/max/plusCount/alone/sumDistinct/ungrouped	a:bigint,b:bigint | 11,10
+one/max/plusCount/alone/sumDistinct/grouped	g:integer,a:bigint,b:bigint | 1,11,10
+one/max/plusCount/besideCount/countDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 11,1,1
+one/max/plusCount/besideCount/countDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint | 1,11,1,1
+one/max/plusCount/besideCount/twoCountDistinct/ungrouped	a:bigint,c:bigint,b:bigint,d:bigint | 11,1,1,1
+one/max/plusCount/besideCount/twoCountDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint,d:bigint | 1,11,1,1,1
+one/max/plusCount/besideCount/sumDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 11,1,10
+one/max/plusCount/besideCount/sumDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint | 1,11,1,10
+one/count/bare/alone/countDistinct/ungrouped	a:bigint,b:bigint | 1,1
+one/count/bare/alone/countDistinct/grouped	g:integer,a:bigint,b:bigint | 1,1,1
+one/count/bare/alone/twoCountDistinct/ungrouped	a:bigint,b:bigint,d:bigint | 1,1,1
+one/count/bare/alone/twoCountDistinct/grouped	g:integer,a:bigint,b:bigint,d:bigint | 1,1,1,1
+one/count/bare/alone/sumDistinct/ungrouped	a:bigint,b:bigint | 1,10
+one/count/bare/alone/sumDistinct/grouped	g:integer,a:bigint,b:bigint | 1,1,10
+one/count/bare/besideCount/countDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 1,1,1
+one/count/bare/besideCount/countDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint | 1,1,1,1
+one/count/bare/besideCount/twoCountDistinct/ungrouped	a:bigint,c:bigint,b:bigint,d:bigint | 1,1,1,1
+one/count/bare/besideCount/twoCountDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint,d:bigint | 1,1,1,1,1
+one/count/bare/besideCount/sumDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 1,1,10
+one/count/bare/besideCount/sumDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint | 1,1,1,10
+one/count/arith/alone/countDistinct/ungrouped	a:bigint,b:bigint | 2,1
+one/count/arith/alone/countDistinct/grouped	g:integer,a:bigint,b:bigint | 1,2,1
+one/count/arith/alone/twoCountDistinct/ungrouped	a:bigint,b:bigint,d:bigint | 2,1,1
+one/count/arith/alone/twoCountDistinct/grouped	g:integer,a:bigint,b:bigint,d:bigint | 1,2,1,1
+one/count/arith/alone/sumDistinct/ungrouped	a:bigint,b:bigint | 2,10
+one/count/arith/alone/sumDistinct/grouped	g:integer,a:bigint,b:bigint | 1,2,10
+one/count/arith/besideCount/countDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 2,1,1
+one/count/arith/besideCount/countDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint | 1,2,1,1
+one/count/arith/besideCount/twoCountDistinct/ungrouped	a:bigint,c:bigint,b:bigint,d:bigint | 2,1,1,1
+one/count/arith/besideCount/twoCountDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint,d:bigint | 1,2,1,1,1
+one/count/arith/besideCount/sumDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 2,1,10
+one/count/arith/besideCount/sumDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint | 1,2,1,10
+one/count/func/alone/countDistinct/ungrouped	a:bigint,b:bigint | 1,1
+one/count/func/alone/countDistinct/grouped	g:integer,a:bigint,b:bigint | 1,1,1
+one/count/func/alone/twoCountDistinct/ungrouped	a:bigint,b:bigint,d:bigint | 1,1,1
+one/count/func/alone/twoCountDistinct/grouped	g:integer,a:bigint,b:bigint,d:bigint | 1,1,1,1
+one/count/func/alone/sumDistinct/ungrouped	a:bigint,b:bigint | 1,10
+one/count/func/alone/sumDistinct/grouped	g:integer,a:bigint,b:bigint | 1,1,10
+one/count/func/besideCount/countDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 1,1,1
+one/count/func/besideCount/countDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint | 1,1,1,1
+one/count/func/besideCount/twoCountDistinct/ungrouped	a:bigint,c:bigint,b:bigint,d:bigint | 1,1,1,1
+one/count/func/besideCount/twoCountDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint,d:bigint | 1,1,1,1,1
+one/count/func/besideCount/sumDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 1,1,10
+one/count/func/besideCount/sumDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint | 1,1,1,10
+one/count/case/alone/countDistinct/ungrouped	a:text,b:bigint | lo,1
+one/count/case/alone/countDistinct/grouped	g:integer,a:text,b:bigint | 1,lo,1
+one/count/case/alone/twoCountDistinct/ungrouped	a:text,b:bigint,d:bigint | lo,1,1
+one/count/case/alone/twoCountDistinct/grouped	g:integer,a:text,b:bigint,d:bigint | 1,lo,1,1
+one/count/case/alone/sumDistinct/ungrouped	a:text,b:bigint | lo,10
+one/count/case/alone/sumDistinct/grouped	g:integer,a:text,b:bigint | 1,lo,10
+one/count/case/besideCount/countDistinct/ungrouped	a:text,c:bigint,b:bigint | lo,1,1
+one/count/case/besideCount/countDistinct/grouped	g:integer,a:text,c:bigint,b:bigint | 1,lo,1,1
+one/count/case/besideCount/twoCountDistinct/ungrouped	a:text,c:bigint,b:bigint,d:bigint | lo,1,1,1
+one/count/case/besideCount/twoCountDistinct/grouped	g:integer,a:text,c:bigint,b:bigint,d:bigint | 1,lo,1,1,1
+one/count/case/besideCount/sumDistinct/ungrouped	a:text,c:bigint,b:bigint | lo,1,10
+one/count/case/besideCount/sumDistinct/grouped	g:integer,a:text,c:bigint,b:bigint | 1,lo,1,10
+one/count/cast/alone/countDistinct/ungrouped	a:bigint,b:bigint | 1,1
+one/count/cast/alone/countDistinct/grouped	g:integer,a:bigint,b:bigint | 1,1,1
+one/count/cast/alone/twoCountDistinct/ungrouped	a:bigint,b:bigint,d:bigint | 1,1,1
+one/count/cast/alone/twoCountDistinct/grouped	g:integer,a:bigint,b:bigint,d:bigint | 1,1,1,1
+one/count/cast/alone/sumDistinct/ungrouped	a:bigint,b:bigint | 1,10
+one/count/cast/alone/sumDistinct/grouped	g:integer,a:bigint,b:bigint | 1,1,10
+one/count/cast/besideCount/countDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 1,1,1
+one/count/cast/besideCount/countDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint | 1,1,1,1
+one/count/cast/besideCount/twoCountDistinct/ungrouped	a:bigint,c:bigint,b:bigint,d:bigint | 1,1,1,1
+one/count/cast/besideCount/twoCountDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint,d:bigint | 1,1,1,1,1
+one/count/cast/besideCount/sumDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 1,1,10
+one/count/cast/besideCount/sumDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint | 1,1,1,10
+one/count/plusCount/alone/countDistinct/ungrouped	a:bigint,b:bigint | 2,1
+one/count/plusCount/alone/countDistinct/grouped	g:integer,a:bigint,b:bigint | 1,2,1
+one/count/plusCount/alone/twoCountDistinct/ungrouped	a:bigint,b:bigint,d:bigint | 2,1,1
+one/count/plusCount/alone/twoCountDistinct/grouped	g:integer,a:bigint,b:bigint,d:bigint | 1,2,1,1
+one/count/plusCount/alone/sumDistinct/ungrouped	a:bigint,b:bigint | 2,10
+one/count/plusCount/alone/sumDistinct/grouped	g:integer,a:bigint,b:bigint | 1,2,10
+one/count/plusCount/besideCount/countDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 2,1,1
+one/count/plusCount/besideCount/countDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint | 1,2,1,1
+one/count/plusCount/besideCount/twoCountDistinct/ungrouped	a:bigint,c:bigint,b:bigint,d:bigint | 2,1,1,1
+one/count/plusCount/besideCount/twoCountDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint,d:bigint | 1,2,1,1,1
+one/count/plusCount/besideCount/sumDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 2,1,10
+one/count/plusCount/besideCount/sumDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint | 1,2,1,10
+one/stddev/bare/alone/countDistinct/ungrouped	a:numeric,b:bigint | NULL,1
+one/stddev/bare/alone/countDistinct/grouped	g:integer,a:numeric,b:bigint | 1,NULL,1
+one/stddev/bare/alone/twoCountDistinct/ungrouped	a:numeric,b:bigint,d:bigint | NULL,1,1
+one/stddev/bare/alone/twoCountDistinct/grouped	g:integer,a:numeric,b:bigint,d:bigint | 1,NULL,1,1
+one/stddev/bare/alone/sumDistinct/ungrouped	a:numeric,b:bigint | NULL,10
+one/stddev/bare/alone/sumDistinct/grouped	g:integer,a:numeric,b:bigint | 1,NULL,10
+one/stddev/bare/besideCount/countDistinct/ungrouped	a:numeric,c:bigint,b:bigint | NULL,1,1
+one/stddev/bare/besideCount/countDistinct/grouped	g:integer,a:numeric,c:bigint,b:bigint | 1,NULL,1,1
+one/stddev/bare/besideCount/twoCountDistinct/ungrouped	a:numeric,c:bigint,b:bigint,d:bigint | NULL,1,1,1
+one/stddev/bare/besideCount/twoCountDistinct/grouped	g:integer,a:numeric,c:bigint,b:bigint,d:bigint | 1,NULL,1,1,1
+one/stddev/bare/besideCount/sumDistinct/ungrouped	a:numeric,c:bigint,b:bigint | NULL,1,10
+one/stddev/bare/besideCount/sumDistinct/grouped	g:integer,a:numeric,c:bigint,b:bigint | 1,NULL,1,10
+one/stddev/arith/alone/countDistinct/ungrouped	a:numeric,b:bigint | NULL,1
+one/stddev/arith/alone/countDistinct/grouped	g:integer,a:numeric,b:bigint | 1,NULL,1
+one/stddev/arith/alone/twoCountDistinct/ungrouped	a:numeric,b:bigint,d:bigint | NULL,1,1
+one/stddev/arith/alone/twoCountDistinct/grouped	g:integer,a:numeric,b:bigint,d:bigint | 1,NULL,1,1
+one/stddev/arith/alone/sumDistinct/ungrouped	a:numeric,b:bigint | NULL,10
+one/stddev/arith/alone/sumDistinct/grouped	g:integer,a:numeric,b:bigint | 1,NULL,10
+one/stddev/arith/besideCount/countDistinct/ungrouped	a:numeric,c:bigint,b:bigint | NULL,1,1
+one/stddev/arith/besideCount/countDistinct/grouped	g:integer,a:numeric,c:bigint,b:bigint | 1,NULL,1,1
+one/stddev/arith/besideCount/twoCountDistinct/ungrouped	a:numeric,c:bigint,b:bigint,d:bigint | NULL,1,1,1
+one/stddev/arith/besideCount/twoCountDistinct/grouped	g:integer,a:numeric,c:bigint,b:bigint,d:bigint | 1,NULL,1,1,1
+one/stddev/arith/besideCount/sumDistinct/ungrouped	a:numeric,c:bigint,b:bigint | NULL,1,10
+one/stddev/arith/besideCount/sumDistinct/grouped	g:integer,a:numeric,c:bigint,b:bigint | 1,NULL,1,10
+one/stddev/func/alone/countDistinct/ungrouped	a:numeric,b:bigint | NULL,1
+one/stddev/func/alone/countDistinct/grouped	g:integer,a:numeric,b:bigint | 1,NULL,1
+one/stddev/func/alone/twoCountDistinct/ungrouped	a:numeric,b:bigint,d:bigint | NULL,1,1
+one/stddev/func/alone/twoCountDistinct/grouped	g:integer,a:numeric,b:bigint,d:bigint | 1,NULL,1,1
+one/stddev/func/alone/sumDistinct/ungrouped	a:numeric,b:bigint | NULL,10
+one/stddev/func/alone/sumDistinct/grouped	g:integer,a:numeric,b:bigint | 1,NULL,10
+one/stddev/func/besideCount/countDistinct/ungrouped	a:numeric,c:bigint,b:bigint | NULL,1,1
+one/stddev/func/besideCount/countDistinct/grouped	g:integer,a:numeric,c:bigint,b:bigint | 1,NULL,1,1
+one/stddev/func/besideCount/twoCountDistinct/ungrouped	a:numeric,c:bigint,b:bigint,d:bigint | NULL,1,1,1
+one/stddev/func/besideCount/twoCountDistinct/grouped	g:integer,a:numeric,c:bigint,b:bigint,d:bigint | 1,NULL,1,1,1
+one/stddev/func/besideCount/sumDistinct/ungrouped	a:numeric,c:bigint,b:bigint | NULL,1,10
+one/stddev/func/besideCount/sumDistinct/grouped	g:integer,a:numeric,c:bigint,b:bigint | 1,NULL,1,10
+one/stddev/case/alone/countDistinct/ungrouped	a:text,b:bigint | lo,1
+one/stddev/case/alone/countDistinct/grouped	g:integer,a:text,b:bigint | 1,lo,1
+one/stddev/case/alone/twoCountDistinct/ungrouped	a:text,b:bigint,d:bigint | lo,1,1
+one/stddev/case/alone/twoCountDistinct/grouped	g:integer,a:text,b:bigint,d:bigint | 1,lo,1,1
+one/stddev/case/alone/sumDistinct/ungrouped	a:text,b:bigint | lo,10
+one/stddev/case/alone/sumDistinct/grouped	g:integer,a:text,b:bigint | 1,lo,10
+one/stddev/case/besideCount/countDistinct/ungrouped	a:text,c:bigint,b:bigint | lo,1,1
+one/stddev/case/besideCount/countDistinct/grouped	g:integer,a:text,c:bigint,b:bigint | 1,lo,1,1
+one/stddev/case/besideCount/twoCountDistinct/ungrouped	a:text,c:bigint,b:bigint,d:bigint | lo,1,1,1
+one/stddev/case/besideCount/twoCountDistinct/grouped	g:integer,a:text,c:bigint,b:bigint,d:bigint | 1,lo,1,1,1
+one/stddev/case/besideCount/sumDistinct/ungrouped	a:text,c:bigint,b:bigint | lo,1,10
+one/stddev/case/besideCount/sumDistinct/grouped	g:integer,a:text,c:bigint,b:bigint | 1,lo,1,10
+one/stddev/cast/alone/countDistinct/ungrouped	a:bigint,b:bigint | NULL,1
+one/stddev/cast/alone/countDistinct/grouped	g:integer,a:bigint,b:bigint | 1,NULL,1
+one/stddev/cast/alone/twoCountDistinct/ungrouped	a:bigint,b:bigint,d:bigint | NULL,1,1
+one/stddev/cast/alone/twoCountDistinct/grouped	g:integer,a:bigint,b:bigint,d:bigint | 1,NULL,1,1
+one/stddev/cast/alone/sumDistinct/ungrouped	a:bigint,b:bigint | NULL,10
+one/stddev/cast/alone/sumDistinct/grouped	g:integer,a:bigint,b:bigint | 1,NULL,10
+one/stddev/cast/besideCount/countDistinct/ungrouped	a:bigint,c:bigint,b:bigint | NULL,1,1
+one/stddev/cast/besideCount/countDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint | 1,NULL,1,1
+one/stddev/cast/besideCount/twoCountDistinct/ungrouped	a:bigint,c:bigint,b:bigint,d:bigint | NULL,1,1,1
+one/stddev/cast/besideCount/twoCountDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint,d:bigint | 1,NULL,1,1,1
+one/stddev/cast/besideCount/sumDistinct/ungrouped	a:bigint,c:bigint,b:bigint | NULL,1,10
+one/stddev/cast/besideCount/sumDistinct/grouped	g:integer,a:bigint,c:bigint,b:bigint | 1,NULL,1,10
+one/stddev/plusCount/alone/countDistinct/ungrouped	a:numeric,b:bigint | NULL,1
+one/stddev/plusCount/alone/countDistinct/grouped	g:integer,a:numeric,b:bigint | 1,NULL,1
+one/stddev/plusCount/alone/twoCountDistinct/ungrouped	a:numeric,b:bigint,d:bigint | NULL,1,1
+one/stddev/plusCount/alone/twoCountDistinct/grouped	g:integer,a:numeric,b:bigint,d:bigint | 1,NULL,1,1
+one/stddev/plusCount/alone/sumDistinct/ungrouped	a:numeric,b:bigint | NULL,10
+one/stddev/plusCount/alone/sumDistinct/grouped	g:integer,a:numeric,b:bigint | 1,NULL,10
+one/stddev/plusCount/besideCount/countDistinct/ungrouped	a:numeric,c:bigint,b:bigint | NULL,1,1
+one/stddev/plusCount/besideCount/countDistinct/grouped	g:integer,a:numeric,c:bigint,b:bigint | 1,NULL,1,1
+one/stddev/plusCount/besideCount/twoCountDistinct/ungrouped	a:numeric,c:bigint,b:bigint,d:bigint | NULL,1,1,1
+one/stddev/plusCount/besideCount/twoCountDistinct/grouped	g:integer,a:numeric,c:bigint,b:bigint,d:bigint | 1,NULL,1,1,1
+one/stddev/plusCount/besideCount/sumDistinct/ungrouped	a:numeric,c:bigint,b:bigint | NULL,1,10
+one/stddev/plusCount/besideCount/sumDistinct/grouped	g:integer,a:numeric,c:bigint,b:bigint | 1,NULL,1,10
+zero/avg/bare/alone/countDistinct/ungrouped	a:numeric,b:bigint | NULL,0
+zero/avg/bare/alone/countDistinct/grouped	(0 rows)
+zero/avg/bare/alone/twoCountDistinct/ungrouped	a:numeric,b:bigint,d:bigint | NULL,0,0
+zero/avg/bare/alone/twoCountDistinct/grouped	(0 rows)
+zero/avg/bare/alone/sumDistinct/ungrouped	a:numeric,b:bigint | NULL,NULL
+zero/avg/bare/alone/sumDistinct/grouped	(0 rows)
+zero/avg/bare/besideCount/countDistinct/ungrouped	a:numeric,c:bigint,b:bigint | NULL,0,0
+zero/avg/bare/besideCount/countDistinct/grouped	(0 rows)
+zero/avg/bare/besideCount/twoCountDistinct/ungrouped	a:numeric,c:bigint,b:bigint,d:bigint | NULL,0,0,0
+zero/avg/bare/besideCount/twoCountDistinct/grouped	(0 rows)
+zero/avg/bare/besideCount/sumDistinct/ungrouped	a:numeric,c:bigint,b:bigint | NULL,0,NULL
+zero/avg/bare/besideCount/sumDistinct/grouped	(0 rows)
+zero/avg/arith/alone/countDistinct/ungrouped	a:numeric,b:bigint | NULL,0
+zero/avg/arith/alone/countDistinct/grouped	(0 rows)
+zero/avg/arith/alone/twoCountDistinct/ungrouped	a:numeric,b:bigint,d:bigint | NULL,0,0
+zero/avg/arith/alone/twoCountDistinct/grouped	(0 rows)
+zero/avg/arith/alone/sumDistinct/ungrouped	a:numeric,b:bigint | NULL,NULL
+zero/avg/arith/alone/sumDistinct/grouped	(0 rows)
+zero/avg/arith/besideCount/countDistinct/ungrouped	a:numeric,c:bigint,b:bigint | NULL,0,0
+zero/avg/arith/besideCount/countDistinct/grouped	(0 rows)
+zero/avg/arith/besideCount/twoCountDistinct/ungrouped	a:numeric,c:bigint,b:bigint,d:bigint | NULL,0,0,0
+zero/avg/arith/besideCount/twoCountDistinct/grouped	(0 rows)
+zero/avg/arith/besideCount/sumDistinct/ungrouped	a:numeric,c:bigint,b:bigint | NULL,0,NULL
+zero/avg/arith/besideCount/sumDistinct/grouped	(0 rows)
+zero/avg/func/alone/countDistinct/ungrouped	a:numeric,b:bigint | NULL,0
+zero/avg/func/alone/countDistinct/grouped	(0 rows)
+zero/avg/func/alone/twoCountDistinct/ungrouped	a:numeric,b:bigint,d:bigint | NULL,0,0
+zero/avg/func/alone/twoCountDistinct/grouped	(0 rows)
+zero/avg/func/alone/sumDistinct/ungrouped	a:numeric,b:bigint | NULL,NULL
+zero/avg/func/alone/sumDistinct/grouped	(0 rows)
+zero/avg/func/besideCount/countDistinct/ungrouped	a:numeric,c:bigint,b:bigint | NULL,0,0
+zero/avg/func/besideCount/countDistinct/grouped	(0 rows)
+zero/avg/func/besideCount/twoCountDistinct/ungrouped	a:numeric,c:bigint,b:bigint,d:bigint | NULL,0,0,0
+zero/avg/func/besideCount/twoCountDistinct/grouped	(0 rows)
+zero/avg/func/besideCount/sumDistinct/ungrouped	a:numeric,c:bigint,b:bigint | NULL,0,NULL
+zero/avg/func/besideCount/sumDistinct/grouped	(0 rows)
+zero/avg/case/alone/countDistinct/ungrouped	a:text,b:bigint | lo,0
+zero/avg/case/alone/countDistinct/grouped	(0 rows)
+zero/avg/case/alone/twoCountDistinct/ungrouped	a:text,b:bigint,d:bigint | lo,0,0
+zero/avg/case/alone/twoCountDistinct/grouped	(0 rows)
+zero/avg/case/alone/sumDistinct/ungrouped	a:text,b:bigint | lo,NULL
+zero/avg/case/alone/sumDistinct/grouped	(0 rows)
+zero/avg/case/besideCount/countDistinct/ungrouped	a:text,c:bigint,b:bigint | lo,0,0
+zero/avg/case/besideCount/countDistinct/grouped	(0 rows)
+zero/avg/case/besideCount/twoCountDistinct/ungrouped	a:text,c:bigint,b:bigint,d:bigint | lo,0,0,0
+zero/avg/case/besideCount/twoCountDistinct/grouped	(0 rows)
+zero/avg/case/besideCount/sumDistinct/ungrouped	a:text,c:bigint,b:bigint | lo,0,NULL
+zero/avg/case/besideCount/sumDistinct/grouped	(0 rows)
+zero/avg/cast/alone/countDistinct/ungrouped	a:bigint,b:bigint | NULL,0
+zero/avg/cast/alone/countDistinct/grouped	(0 rows)
+zero/avg/cast/alone/twoCountDistinct/ungrouped	a:bigint,b:bigint,d:bigint | NULL,0,0
+zero/avg/cast/alone/twoCountDistinct/grouped	(0 rows)
+zero/avg/cast/alone/sumDistinct/ungrouped	a:bigint,b:bigint | NULL,NULL
+zero/avg/cast/alone/sumDistinct/grouped	(0 rows)
+zero/avg/cast/besideCount/countDistinct/ungrouped	a:bigint,c:bigint,b:bigint | NULL,0,0
+zero/avg/cast/besideCount/countDistinct/grouped	(0 rows)
+zero/avg/cast/besideCount/twoCountDistinct/ungrouped	a:bigint,c:bigint,b:bigint,d:bigint | NULL,0,0,0
+zero/avg/cast/besideCount/twoCountDistinct/grouped	(0 rows)
+zero/avg/cast/besideCount/sumDistinct/ungrouped	a:bigint,c:bigint,b:bigint | NULL,0,NULL
+zero/avg/cast/besideCount/sumDistinct/grouped	(0 rows)
+zero/avg/plusCount/alone/countDistinct/ungrouped	a:numeric,b:bigint | NULL,0
+zero/avg/plusCount/alone/countDistinct/grouped	(0 rows)
+zero/avg/plusCount/alone/twoCountDistinct/ungrouped	a:numeric,b:bigint,d:bigint | NULL,0,0
+zero/avg/plusCount/alone/twoCountDistinct/grouped	(0 rows)
+zero/avg/plusCount/alone/sumDistinct/ungrouped	a:numeric,b:bigint | NULL,NULL
+zero/avg/plusCount/alone/sumDistinct/grouped	(0 rows)
+zero/avg/plusCount/besideCount/countDistinct/ungrouped	a:numeric,c:bigint,b:bigint | NULL,0,0
+zero/avg/plusCount/besideCount/countDistinct/grouped	(0 rows)
+zero/avg/plusCount/besideCount/twoCountDistinct/ungrouped	a:numeric,c:bigint,b:bigint,d:bigint | NULL,0,0,0
+zero/avg/plusCount/besideCount/twoCountDistinct/grouped	(0 rows)
+zero/avg/plusCount/besideCount/sumDistinct/ungrouped	a:numeric,c:bigint,b:bigint | NULL,0,NULL
+zero/avg/plusCount/besideCount/sumDistinct/grouped	(0 rows)
+zero/sum/bare/alone/countDistinct/ungrouped	a:bigint,b:bigint | NULL,0
+zero/sum/bare/alone/countDistinct/grouped	(0 rows)
+zero/sum/bare/alone/twoCountDistinct/ungrouped	a:bigint,b:bigint,d:bigint | NULL,0,0
+zero/sum/bare/alone/twoCountDistinct/grouped	(0 rows)
+zero/sum/bare/alone/sumDistinct/ungrouped	a:bigint,b:bigint | NULL,NULL
+zero/sum/bare/alone/sumDistinct/grouped	(0 rows)
+zero/sum/bare/besideCount/countDistinct/ungrouped	a:bigint,c:bigint,b:bigint | NULL,0,0
+zero/sum/bare/besideCount/countDistinct/grouped	(0 rows)
+zero/sum/bare/besideCount/twoCountDistinct/ungrouped	a:bigint,c:bigint,b:bigint,d:bigint | NULL,0,0,0
+zero/sum/bare/besideCount/twoCountDistinct/grouped	(0 rows)
+zero/sum/bare/besideCount/sumDistinct/ungrouped	a:bigint,c:bigint,b:bigint | NULL,0,NULL
+zero/sum/bare/besideCount/sumDistinct/grouped	(0 rows)
+zero/sum/arith/alone/countDistinct/ungrouped	a:bigint,b:bigint | NULL,0
+zero/sum/arith/alone/countDistinct/grouped	(0 rows)
+zero/sum/arith/alone/twoCountDistinct/ungrouped	a:bigint,b:bigint,d:bigint | NULL,0,0
+zero/sum/arith/alone/twoCountDistinct/grouped	(0 rows)
+zero/sum/arith/alone/sumDistinct/ungrouped	a:bigint,b:bigint | NULL,NULL
+zero/sum/arith/alone/sumDistinct/grouped	(0 rows)
+zero/sum/arith/besideCount/countDistinct/ungrouped	a:bigint,c:bigint,b:bigint | NULL,0,0
+zero/sum/arith/besideCount/countDistinct/grouped	(0 rows)
+zero/sum/arith/besideCount/twoCountDistinct/ungrouped	a:bigint,c:bigint,b:bigint,d:bigint | NULL,0,0,0
+zero/sum/arith/besideCount/twoCountDistinct/grouped	(0 rows)
+zero/sum/arith/besideCount/sumDistinct/ungrouped	a:bigint,c:bigint,b:bigint | NULL,0,NULL
+zero/sum/arith/besideCount/sumDistinct/grouped	(0 rows)
+zero/sum/func/alone/countDistinct/ungrouped	a:bigint,b:bigint | NULL,0
+zero/sum/func/alone/countDistinct/grouped	(0 rows)
+zero/sum/func/alone/twoCountDistinct/ungrouped	a:bigint,b:bigint,d:bigint | NULL,0,0
+zero/sum/func/alone/twoCountDistinct/grouped	(0 rows)
+zero/sum/func/alone/sumDistinct/ungrouped	a:bigint,b:bigint | NULL,NULL
+zero/sum/func/alone/sumDistinct/grouped	(0 rows)
+zero/sum/func/besideCount/countDistinct/ungrouped	a:bigint,c:bigint,b:bigint | NULL,0,0
+zero/sum/func/besideCount/countDistinct/grouped	(0 rows)
+zero/sum/func/besideCount/twoCountDistinct/ungrouped	a:bigint,c:bigint,b:bigint,d:bigint | NULL,0,0,0
+zero/sum/func/besideCount/twoCountDistinct/grouped	(0 rows)
+zero/sum/func/besideCount/sumDistinct/ungrouped	a:bigint,c:bigint,b:bigint | NULL,0,NULL
+zero/sum/func/besideCount/sumDistinct/grouped	(0 rows)
+zero/sum/case/alone/countDistinct/ungrouped	a:text,b:bigint | lo,0
+zero/sum/case/alone/countDistinct/grouped	(0 rows)
+zero/sum/case/alone/twoCountDistinct/ungrouped	a:text,b:bigint,d:bigint | lo,0,0
+zero/sum/case/alone/twoCountDistinct/grouped	(0 rows)
+zero/sum/case/alone/sumDistinct/ungrouped	a:text,b:bigint | lo,NULL
+zero/sum/case/alone/sumDistinct/grouped	(0 rows)
+zero/sum/case/besideCount/countDistinct/ungrouped	a:text,c:bigint,b:bigint | lo,0,0
+zero/sum/case/besideCount/countDistinct/grouped	(0 rows)
+zero/sum/case/besideCount/twoCountDistinct/ungrouped	a:text,c:bigint,b:bigint,d:bigint | lo,0,0,0
+zero/sum/case/besideCount/twoCountDistinct/grouped	(0 rows)
+zero/sum/case/besideCount/sumDistinct/ungrouped	a:text,c:bigint,b:bigint | lo,0,NULL
+zero/sum/case/besideCount/sumDistinct/grouped	(0 rows)
+zero/sum/cast/alone/countDistinct/ungrouped	a:bigint,b:bigint | NULL,0
+zero/sum/cast/alone/countDistinct/grouped	(0 rows)
+zero/sum/cast/alone/twoCountDistinct/ungrouped	a:bigint,b:bigint,d:bigint | NULL,0,0
+zero/sum/cast/alone/twoCountDistinct/grouped	(0 rows)
+zero/sum/cast/alone/sumDistinct/ungrouped	a:bigint,b:bigint | NULL,NULL
+zero/sum/cast/alone/sumDistinct/grouped	(0 rows)
+zero/sum/cast/besideCount/countDistinct/ungrouped	a:bigint,c:bigint,b:bigint | NULL,0,0
+zero/sum/cast/besideCount/countDistinct/grouped	(0 rows)
+zero/sum/cast/besideCount/twoCountDistinct/ungrouped	a:bigint,c:bigint,b:bigint,d:bigint | NULL,0,0,0
+zero/sum/cast/besideCount/twoCountDistinct/grouped	(0 rows)
+zero/sum/cast/besideCount/sumDistinct/ungrouped	a:bigint,c:bigint,b:bigint | NULL,0,NULL
+zero/sum/cast/besideCount/sumDistinct/grouped	(0 rows)
+zero/sum/plusCount/alone/countDistinct/ungrouped	a:bigint,b:bigint | NULL,0
+zero/sum/plusCount/alone/countDistinct/grouped	(0 rows)
+zero/sum/plusCount/alone/twoCountDistinct/ungrouped	a:bigint,b:bigint,d:bigint | NULL,0,0
+zero/sum/plusCount/alone/twoCountDistinct/grouped	(0 rows)
+zero/sum/plusCount/alone/sumDistinct/ungrouped	a:bigint,b:bigint | NULL,NULL
+zero/sum/plusCount/alone/sumDistinct/grouped	(0 rows)
+zero/sum/plusCount/besideCount/countDistinct/ungrouped	a:bigint,c:bigint,b:bigint | NULL,0,0
+zero/sum/plusCount/besideCount/countDistinct/grouped	(0 rows)
+zero/sum/plusCount/besideCount/twoCountDistinct/ungrouped	a:bigint,c:bigint,b:bigint,d:bigint | NULL,0,0,0
+zero/sum/plusCount/besideCount/twoCountDistinct/grouped	(0 rows)
+zero/sum/plusCount/besideCount/sumDistinct/ungrouped	a:bigint,c:bigint,b:bigint | NULL,0,NULL
+zero/sum/plusCount/besideCount/sumDistinct/grouped	(0 rows)
+zero/min/bare/alone/countDistinct/ungrouped	a:integer,b:bigint | NULL,0
+zero/min/bare/alone/countDistinct/grouped	(0 rows)
+zero/min/bare/alone/twoCountDistinct/ungrouped	a:integer,b:bigint,d:bigint | NULL,0,0
+zero/min/bare/alone/twoCountDistinct/grouped	(0 rows)
+zero/min/bare/alone/sumDistinct/ungrouped	a:integer,b:bigint | NULL,NULL
+zero/min/bare/alone/sumDistinct/grouped	(0 rows)
+zero/min/bare/besideCount/countDistinct/ungrouped	a:integer,c:bigint,b:bigint | NULL,0,0
+zero/min/bare/besideCount/countDistinct/grouped	(0 rows)
+zero/min/bare/besideCount/twoCountDistinct/ungrouped	a:integer,c:bigint,b:bigint,d:bigint | NULL,0,0,0
+zero/min/bare/besideCount/twoCountDistinct/grouped	(0 rows)
+zero/min/bare/besideCount/sumDistinct/ungrouped	a:integer,c:bigint,b:bigint | NULL,0,NULL
+zero/min/bare/besideCount/sumDistinct/grouped	(0 rows)
+zero/min/arith/alone/countDistinct/ungrouped	a:integer,b:bigint | NULL,0
+zero/min/arith/alone/countDistinct/grouped	(0 rows)
+zero/min/arith/alone/twoCountDistinct/ungrouped	a:integer,b:bigint,d:bigint | NULL,0,0
+zero/min/arith/alone/twoCountDistinct/grouped	(0 rows)
+zero/min/arith/alone/sumDistinct/ungrouped	a:integer,b:bigint | NULL,NULL
+zero/min/arith/alone/sumDistinct/grouped	(0 rows)
+zero/min/arith/besideCount/countDistinct/ungrouped	a:integer,c:bigint,b:bigint | NULL,0,0
+zero/min/arith/besideCount/countDistinct/grouped	(0 rows)
+zero/min/arith/besideCount/twoCountDistinct/ungrouped	a:integer,c:bigint,b:bigint,d:bigint | NULL,0,0,0
+zero/min/arith/besideCount/twoCountDistinct/grouped	(0 rows)
+zero/min/arith/besideCount/sumDistinct/ungrouped	a:integer,c:bigint,b:bigint | NULL,0,NULL
+zero/min/arith/besideCount/sumDistinct/grouped	(0 rows)
+zero/min/func/alone/countDistinct/ungrouped	a:integer,b:bigint | NULL,0
+zero/min/func/alone/countDistinct/grouped	(0 rows)
+zero/min/func/alone/twoCountDistinct/ungrouped	a:integer,b:bigint,d:bigint | NULL,0,0
+zero/min/func/alone/twoCountDistinct/grouped	(0 rows)
+zero/min/func/alone/sumDistinct/ungrouped	a:integer,b:bigint | NULL,NULL
+zero/min/func/alone/sumDistinct/grouped	(0 rows)
+zero/min/func/besideCount/countDistinct/ungrouped	a:integer,c:bigint,b:bigint | NULL,0,0
+zero/min/func/besideCount/countDistinct/grouped	(0 rows)
+zero/min/func/besideCount/twoCountDistinct/ungrouped	a:integer,c:bigint,b:bigint,d:bigint | NULL,0,0,0
+zero/min/func/besideCount/twoCountDistinct/grouped	(0 rows)
+zero/min/func/besideCount/sumDistinct/ungrouped	a:integer,c:bigint,b:bigint | NULL,0,NULL
+zero/min/func/besideCount/sumDistinct/grouped	(0 rows)
+zero/min/case/alone/countDistinct/ungrouped	a:text,b:bigint | lo,0
+zero/min/case/alone/countDistinct/grouped	(0 rows)
+zero/min/case/alone/twoCountDistinct/ungrouped	a:text,b:bigint,d:bigint | lo,0,0
+zero/min/case/alone/twoCountDistinct/grouped	(0 rows)
+zero/min/case/alone/sumDistinct/ungrouped	a:text,b:bigint | lo,NULL
+zero/min/case/alone/sumDistinct/grouped	(0 rows)
+zero/min/case/besideCount/countDistinct/ungrouped	a:text,c:bigint,b:bigint | lo,0,0
+zero/min/case/besideCount/countDistinct/grouped	(0 rows)
+zero/min/case/besideCount/twoCountDistinct/ungrouped	a:text,c:bigint,b:bigint,d:bigint | lo,0,0,0
+zero/min/case/besideCount/twoCountDistinct/grouped	(0 rows)
+zero/min/case/besideCount/sumDistinct/ungrouped	a:text,c:bigint,b:bigint | lo,0,NULL
+zero/min/case/besideCount/sumDistinct/grouped	(0 rows)
+zero/min/cast/alone/countDistinct/ungrouped	a:bigint,b:bigint | NULL,0
+zero/min/cast/alone/countDistinct/grouped	(0 rows)
+zero/min/cast/alone/twoCountDistinct/ungrouped	a:bigint,b:bigint,d:bigint | NULL,0,0
+zero/min/cast/alone/twoCountDistinct/grouped	(0 rows)
+zero/min/cast/alone/sumDistinct/ungrouped	a:bigint,b:bigint | NULL,NULL
+zero/min/cast/alone/sumDistinct/grouped	(0 rows)
+zero/min/cast/besideCount/countDistinct/ungrouped	a:bigint,c:bigint,b:bigint | NULL,0,0
+zero/min/cast/besideCount/countDistinct/grouped	(0 rows)
+zero/min/cast/besideCount/twoCountDistinct/ungrouped	a:bigint,c:bigint,b:bigint,d:bigint | NULL,0,0,0
+zero/min/cast/besideCount/twoCountDistinct/grouped	(0 rows)
+zero/min/cast/besideCount/sumDistinct/ungrouped	a:bigint,c:bigint,b:bigint | NULL,0,NULL
+zero/min/cast/besideCount/sumDistinct/grouped	(0 rows)
+zero/min/plusCount/alone/countDistinct/ungrouped	a:bigint,b:bigint | NULL,0
+zero/min/plusCount/alone/countDistinct/grouped	(0 rows)
+zero/min/plusCount/alone/twoCountDistinct/ungrouped	a:bigint,b:bigint,d:bigint | NULL,0,0
+zero/min/plusCount/alone/twoCountDistinct/grouped	(0 rows)
+zero/min/plusCount/alone/sumDistinct/ungrouped	a:bigint,b:bigint | NULL,NULL
+zero/min/plusCount/alone/sumDistinct/grouped	(0 rows)
+zero/min/plusCount/besideCount/countDistinct/ungrouped	a:bigint,c:bigint,b:bigint | NULL,0,0
+zero/min/plusCount/besideCount/countDistinct/grouped	(0 rows)
+zero/min/plusCount/besideCount/twoCountDistinct/ungrouped	a:bigint,c:bigint,b:bigint,d:bigint | NULL,0,0,0
+zero/min/plusCount/besideCount/twoCountDistinct/grouped	(0 rows)
+zero/min/plusCount/besideCount/sumDistinct/ungrouped	a:bigint,c:bigint,b:bigint | NULL,0,NULL
+zero/min/plusCount/besideCount/sumDistinct/grouped	(0 rows)
+zero/max/bare/alone/countDistinct/ungrouped	a:integer,b:bigint | NULL,0
+zero/max/bare/alone/countDistinct/grouped	(0 rows)
+zero/max/bare/alone/twoCountDistinct/ungrouped	a:integer,b:bigint,d:bigint | NULL,0,0
+zero/max/bare/alone/twoCountDistinct/grouped	(0 rows)
+zero/max/bare/alone/sumDistinct/ungrouped	a:integer,b:bigint | NULL,NULL
+zero/max/bare/alone/sumDistinct/grouped	(0 rows)
+zero/max/bare/besideCount/countDistinct/ungrouped	a:integer,c:bigint,b:bigint | NULL,0,0
+zero/max/bare/besideCount/countDistinct/grouped	(0 rows)
+zero/max/bare/besideCount/twoCountDistinct/ungrouped	a:integer,c:bigint,b:bigint,d:bigint | NULL,0,0,0
+zero/max/bare/besideCount/twoCountDistinct/grouped	(0 rows)
+zero/max/bare/besideCount/sumDistinct/ungrouped	a:integer,c:bigint,b:bigint | NULL,0,NULL
+zero/max/bare/besideCount/sumDistinct/grouped	(0 rows)
+zero/max/arith/alone/countDistinct/ungrouped	a:integer,b:bigint | NULL,0
+zero/max/arith/alone/countDistinct/grouped	(0 rows)
+zero/max/arith/alone/twoCountDistinct/ungrouped	a:integer,b:bigint,d:bigint | NULL,0,0
+zero/max/arith/alone/twoCountDistinct/grouped	(0 rows)
+zero/max/arith/alone/sumDistinct/ungrouped	a:integer,b:bigint | NULL,NULL
+zero/max/arith/alone/sumDistinct/grouped	(0 rows)
+zero/max/arith/besideCount/countDistinct/ungrouped	a:integer,c:bigint,b:bigint | NULL,0,0
+zero/max/arith/besideCount/countDistinct/grouped	(0 rows)
+zero/max/arith/besideCount/twoCountDistinct/ungrouped	a:integer,c:bigint,b:bigint,d:bigint | NULL,0,0,0
+zero/max/arith/besideCount/twoCountDistinct/grouped	(0 rows)
+zero/max/arith/besideCount/sumDistinct/ungrouped	a:integer,c:bigint,b:bigint | NULL,0,NULL
+zero/max/arith/besideCount/sumDistinct/grouped	(0 rows)
+zero/max/func/alone/countDistinct/ungrouped	a:integer,b:bigint | NULL,0
+zero/max/func/alone/countDistinct/grouped	(0 rows)
+zero/max/func/alone/twoCountDistinct/ungrouped	a:integer,b:bigint,d:bigint | NULL,0,0
+zero/max/func/alone/twoCountDistinct/grouped	(0 rows)
+zero/max/func/alone/sumDistinct/ungrouped	a:integer,b:bigint | NULL,NULL
+zero/max/func/alone/sumDistinct/grouped	(0 rows)
+zero/max/func/besideCount/countDistinct/ungrouped	a:integer,c:bigint,b:bigint | NULL,0,0
+zero/max/func/besideCount/countDistinct/grouped	(0 rows)
+zero/max/func/besideCount/twoCountDistinct/ungrouped	a:integer,c:bigint,b:bigint,d:bigint | NULL,0,0,0
+zero/max/func/besideCount/twoCountDistinct/grouped	(0 rows)
+zero/max/func/besideCount/sumDistinct/ungrouped	a:integer,c:bigint,b:bigint | NULL,0,NULL
+zero/max/func/besideCount/sumDistinct/grouped	(0 rows)
+zero/max/case/alone/countDistinct/ungrouped	a:text,b:bigint | lo,0
+zero/max/case/alone/countDistinct/grouped	(0 rows)
+zero/max/case/alone/twoCountDistinct/ungrouped	a:text,b:bigint,d:bigint | lo,0,0
+zero/max/case/alone/twoCountDistinct/grouped	(0 rows)
+zero/max/case/alone/sumDistinct/ungrouped	a:text,b:bigint | lo,NULL
+zero/max/case/alone/sumDistinct/grouped	(0 rows)
+zero/max/case/besideCount/countDistinct/ungrouped	a:text,c:bigint,b:bigint | lo,0,0
+zero/max/case/besideCount/countDistinct/grouped	(0 rows)
+zero/max/case/besideCount/twoCountDistinct/ungrouped	a:text,c:bigint,b:bigint,d:bigint | lo,0,0,0
+zero/max/case/besideCount/twoCountDistinct/grouped	(0 rows)
+zero/max/case/besideCount/sumDistinct/ungrouped	a:text,c:bigint,b:bigint | lo,0,NULL
+zero/max/case/besideCount/sumDistinct/grouped	(0 rows)
+zero/max/cast/alone/countDistinct/ungrouped	a:bigint,b:bigint | NULL,0
+zero/max/cast/alone/countDistinct/grouped	(0 rows)
+zero/max/cast/alone/twoCountDistinct/ungrouped	a:bigint,b:bigint,d:bigint | NULL,0,0
+zero/max/cast/alone/twoCountDistinct/grouped	(0 rows)
+zero/max/cast/alone/sumDistinct/ungrouped	a:bigint,b:bigint | NULL,NULL
+zero/max/cast/alone/sumDistinct/grouped	(0 rows)
+zero/max/cast/besideCount/countDistinct/ungrouped	a:bigint,c:bigint,b:bigint | NULL,0,0
+zero/max/cast/besideCount/countDistinct/grouped	(0 rows)
+zero/max/cast/besideCount/twoCountDistinct/ungrouped	a:bigint,c:bigint,b:bigint,d:bigint | NULL,0,0,0
+zero/max/cast/besideCount/twoCountDistinct/grouped	(0 rows)
+zero/max/cast/besideCount/sumDistinct/ungrouped	a:bigint,c:bigint,b:bigint | NULL,0,NULL
+zero/max/cast/besideCount/sumDistinct/grouped	(0 rows)
+zero/max/plusCount/alone/countDistinct/ungrouped	a:bigint,b:bigint | NULL,0
+zero/max/plusCount/alone/countDistinct/grouped	(0 rows)
+zero/max/plusCount/alone/twoCountDistinct/ungrouped	a:bigint,b:bigint,d:bigint | NULL,0,0
+zero/max/plusCount/alone/twoCountDistinct/grouped	(0 rows)
+zero/max/plusCount/alone/sumDistinct/ungrouped	a:bigint,b:bigint | NULL,NULL
+zero/max/plusCount/alone/sumDistinct/grouped	(0 rows)
+zero/max/plusCount/besideCount/countDistinct/ungrouped	a:bigint,c:bigint,b:bigint | NULL,0,0
+zero/max/plusCount/besideCount/countDistinct/grouped	(0 rows)
+zero/max/plusCount/besideCount/twoCountDistinct/ungrouped	a:bigint,c:bigint,b:bigint,d:bigint | NULL,0,0,0
+zero/max/plusCount/besideCount/twoCountDistinct/grouped	(0 rows)
+zero/max/plusCount/besideCount/sumDistinct/ungrouped	a:bigint,c:bigint,b:bigint | NULL,0,NULL
+zero/max/plusCount/besideCount/sumDistinct/grouped	(0 rows)
+zero/count/bare/alone/countDistinct/ungrouped	a:bigint,b:bigint | 0,0
+zero/count/bare/alone/countDistinct/grouped	(0 rows)
+zero/count/bare/alone/twoCountDistinct/ungrouped	a:bigint,b:bigint,d:bigint | 0,0,0
+zero/count/bare/alone/twoCountDistinct/grouped	(0 rows)
+zero/count/bare/alone/sumDistinct/ungrouped	a:bigint,b:bigint | 0,NULL
+zero/count/bare/alone/sumDistinct/grouped	(0 rows)
+zero/count/bare/besideCount/countDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 0,0,0
+zero/count/bare/besideCount/countDistinct/grouped	(0 rows)
+zero/count/bare/besideCount/twoCountDistinct/ungrouped	a:bigint,c:bigint,b:bigint,d:bigint | 0,0,0,0
+zero/count/bare/besideCount/twoCountDistinct/grouped	(0 rows)
+zero/count/bare/besideCount/sumDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 0,0,NULL
+zero/count/bare/besideCount/sumDistinct/grouped	(0 rows)
+zero/count/arith/alone/countDistinct/ungrouped	a:bigint,b:bigint | 1,0
+zero/count/arith/alone/countDistinct/grouped	(0 rows)
+zero/count/arith/alone/twoCountDistinct/ungrouped	a:bigint,b:bigint,d:bigint | 1,0,0
+zero/count/arith/alone/twoCountDistinct/grouped	(0 rows)
+zero/count/arith/alone/sumDistinct/ungrouped	a:bigint,b:bigint | 1,NULL
+zero/count/arith/alone/sumDistinct/grouped	(0 rows)
+zero/count/arith/besideCount/countDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 1,0,0
+zero/count/arith/besideCount/countDistinct/grouped	(0 rows)
+zero/count/arith/besideCount/twoCountDistinct/ungrouped	a:bigint,c:bigint,b:bigint,d:bigint | 1,0,0,0
+zero/count/arith/besideCount/twoCountDistinct/grouped	(0 rows)
+zero/count/arith/besideCount/sumDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 1,0,NULL
+zero/count/arith/besideCount/sumDistinct/grouped	(0 rows)
+zero/count/func/alone/countDistinct/ungrouped	a:bigint,b:bigint | 0,0
+zero/count/func/alone/countDistinct/grouped	(0 rows)
+zero/count/func/alone/twoCountDistinct/ungrouped	a:bigint,b:bigint,d:bigint | 0,0,0
+zero/count/func/alone/twoCountDistinct/grouped	(0 rows)
+zero/count/func/alone/sumDistinct/ungrouped	a:bigint,b:bigint | 0,NULL
+zero/count/func/alone/sumDistinct/grouped	(0 rows)
+zero/count/func/besideCount/countDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 0,0,0
+zero/count/func/besideCount/countDistinct/grouped	(0 rows)
+zero/count/func/besideCount/twoCountDistinct/ungrouped	a:bigint,c:bigint,b:bigint,d:bigint | 0,0,0,0
+zero/count/func/besideCount/twoCountDistinct/grouped	(0 rows)
+zero/count/func/besideCount/sumDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 0,0,NULL
+zero/count/func/besideCount/sumDistinct/grouped	(0 rows)
+zero/count/case/alone/countDistinct/ungrouped	a:text,b:bigint | lo,0
+zero/count/case/alone/countDistinct/grouped	(0 rows)
+zero/count/case/alone/twoCountDistinct/ungrouped	a:text,b:bigint,d:bigint | lo,0,0
+zero/count/case/alone/twoCountDistinct/grouped	(0 rows)
+zero/count/case/alone/sumDistinct/ungrouped	a:text,b:bigint | lo,NULL
+zero/count/case/alone/sumDistinct/grouped	(0 rows)
+zero/count/case/besideCount/countDistinct/ungrouped	a:text,c:bigint,b:bigint | lo,0,0
+zero/count/case/besideCount/countDistinct/grouped	(0 rows)
+zero/count/case/besideCount/twoCountDistinct/ungrouped	a:text,c:bigint,b:bigint,d:bigint | lo,0,0,0
+zero/count/case/besideCount/twoCountDistinct/grouped	(0 rows)
+zero/count/case/besideCount/sumDistinct/ungrouped	a:text,c:bigint,b:bigint | lo,0,NULL
+zero/count/case/besideCount/sumDistinct/grouped	(0 rows)
+zero/count/cast/alone/countDistinct/ungrouped	a:bigint,b:bigint | 0,0
+zero/count/cast/alone/countDistinct/grouped	(0 rows)
+zero/count/cast/alone/twoCountDistinct/ungrouped	a:bigint,b:bigint,d:bigint | 0,0,0
+zero/count/cast/alone/twoCountDistinct/grouped	(0 rows)
+zero/count/cast/alone/sumDistinct/ungrouped	a:bigint,b:bigint | 0,NULL
+zero/count/cast/alone/sumDistinct/grouped	(0 rows)
+zero/count/cast/besideCount/countDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 0,0,0
+zero/count/cast/besideCount/countDistinct/grouped	(0 rows)
+zero/count/cast/besideCount/twoCountDistinct/ungrouped	a:bigint,c:bigint,b:bigint,d:bigint | 0,0,0,0
+zero/count/cast/besideCount/twoCountDistinct/grouped	(0 rows)
+zero/count/cast/besideCount/sumDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 0,0,NULL
+zero/count/cast/besideCount/sumDistinct/grouped	(0 rows)
+zero/count/plusCount/alone/countDistinct/ungrouped	a:bigint,b:bigint | 0,0
+zero/count/plusCount/alone/countDistinct/grouped	(0 rows)
+zero/count/plusCount/alone/twoCountDistinct/ungrouped	a:bigint,b:bigint,d:bigint | 0,0,0
+zero/count/plusCount/alone/twoCountDistinct/grouped	(0 rows)
+zero/count/plusCount/alone/sumDistinct/ungrouped	a:bigint,b:bigint | 0,NULL
+zero/count/plusCount/alone/sumDistinct/grouped	(0 rows)
+zero/count/plusCount/besideCount/countDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 0,0,0
+zero/count/plusCount/besideCount/countDistinct/grouped	(0 rows)
+zero/count/plusCount/besideCount/twoCountDistinct/ungrouped	a:bigint,c:bigint,b:bigint,d:bigint | 0,0,0,0
+zero/count/plusCount/besideCount/twoCountDistinct/grouped	(0 rows)
+zero/count/plusCount/besideCount/sumDistinct/ungrouped	a:bigint,c:bigint,b:bigint | 0,0,NULL
+zero/count/plusCount/besideCount/sumDistinct/grouped	(0 rows)
+zero/stddev/bare/alone/countDistinct/ungrouped	a:numeric,b:bigint | NULL,0
+zero/stddev/bare/alone/countDistinct/grouped	(0 rows)
+zero/stddev/bare/alone/twoCountDistinct/ungrouped	a:numeric,b:bigint,d:bigint | NULL,0,0
+zero/stddev/bare/alone/twoCountDistinct/grouped	(0 rows)
+zero/stddev/bare/alone/sumDistinct/ungrouped	a:numeric,b:bigint | NULL,NULL
+zero/stddev/bare/alone/sumDistinct/grouped	(0 rows)
+zero/stddev/bare/besideCount/countDistinct/ungrouped	a:numeric,c:bigint,b:bigint | NULL,0,0
+zero/stddev/bare/besideCount/countDistinct/grouped	(0 rows)
+zero/stddev/bare/besideCount/twoCountDistinct/ungrouped	a:numeric,c:bigint,b:bigint,d:bigint | NULL,0,0,0
+zero/stddev/bare/besideCount/twoCountDistinct/grouped	(0 rows)
+zero/stddev/bare/besideCount/sumDistinct/ungrouped	a:numeric,c:bigint,b:bigint | NULL,0,NULL
+zero/stddev/bare/besideCount/sumDistinct/grouped	(0 rows)
+zero/stddev/arith/alone/countDistinct/ungrouped	a:numeric,b:bigint | NULL,0
+zero/stddev/arith/alone/countDistinct/grouped	(0 rows)
+zero/stddev/arith/alone/twoCountDistinct/ungrouped	a:numeric,b:bigint,d:bigint | NULL,0,0
+zero/stddev/arith/alone/twoCountDistinct/grouped	(0 rows)
+zero/stddev/arith/alone/sumDistinct/ungrouped	a:numeric,b:bigint | NULL,NULL
+zero/stddev/arith/alone/sumDistinct/grouped	(0 rows)
+zero/stddev/arith/besideCount/countDistinct/ungrouped	a:numeric,c:bigint,b:bigint | NULL,0,0
+zero/stddev/arith/besideCount/countDistinct/grouped	(0 rows)
+zero/stddev/arith/besideCount/twoCountDistinct/ungrouped	a:numeric,c:bigint,b:bigint,d:bigint | NULL,0,0,0
+zero/stddev/arith/besideCount/twoCountDistinct/grouped	(0 rows)
+zero/stddev/arith/besideCount/sumDistinct/ungrouped	a:numeric,c:bigint,b:bigint | NULL,0,NULL
+zero/stddev/arith/besideCount/sumDistinct/grouped	(0 rows)
+zero/stddev/func/alone/countDistinct/ungrouped	a:numeric,b:bigint | NULL,0
+zero/stddev/func/alone/countDistinct/grouped	(0 rows)
+zero/stddev/func/alone/twoCountDistinct/ungrouped	a:numeric,b:bigint,d:bigint | NULL,0,0
+zero/stddev/func/alone/twoCountDistinct/grouped	(0 rows)
+zero/stddev/func/alone/sumDistinct/ungrouped	a:numeric,b:bigint | NULL,NULL
+zero/stddev/func/alone/sumDistinct/grouped	(0 rows)
+zero/stddev/func/besideCount/countDistinct/ungrouped	a:numeric,c:bigint,b:bigint | NULL,0,0
+zero/stddev/func/besideCount/countDistinct/grouped	(0 rows)
+zero/stddev/func/besideCount/twoCountDistinct/ungrouped	a:numeric,c:bigint,b:bigint,d:bigint | NULL,0,0,0
+zero/stddev/func/besideCount/twoCountDistinct/grouped	(0 rows)
+zero/stddev/func/besideCount/sumDistinct/ungrouped	a:numeric,c:bigint,b:bigint | NULL,0,NULL
+zero/stddev/func/besideCount/sumDistinct/grouped	(0 rows)
+zero/stddev/case/alone/countDistinct/ungrouped	a:text,b:bigint | lo,0
+zero/stddev/case/alone/countDistinct/grouped	(0 rows)
+zero/stddev/case/alone/twoCountDistinct/ungrouped	a:text,b:bigint,d:bigint | lo,0,0
+zero/stddev/case/alone/twoCountDistinct/grouped	(0 rows)
+zero/stddev/case/alone/sumDistinct/ungrouped	a:text,b:bigint | lo,NULL
+zero/stddev/case/alone/sumDistinct/grouped	(0 rows)
+zero/stddev/case/besideCount/countDistinct/ungrouped	a:text,c:bigint,b:bigint | lo,0,0
+zero/stddev/case/besideCount/countDistinct/grouped	(0 rows)
+zero/stddev/case/besideCount/twoCountDistinct/ungrouped	a:text,c:bigint,b:bigint,d:bigint | lo,0,0,0
+zero/stddev/case/besideCount/twoCountDistinct/grouped	(0 rows)
+zero/stddev/case/besideCount/sumDistinct/ungrouped	a:text,c:bigint,b:bigint | lo,0,NULL
+zero/stddev/case/besideCount/sumDistinct/grouped	(0 rows)
+zero/stddev/cast/alone/countDistinct/ungrouped	a:bigint,b:bigint | NULL,0
+zero/stddev/cast/alone/countDistinct/grouped	(0 rows)
+zero/stddev/cast/alone/twoCountDistinct/ungrouped	a:bigint,b:bigint,d:bigint | NULL,0,0
+zero/stddev/cast/alone/twoCountDistinct/grouped	(0 rows)
+zero/stddev/cast/alone/sumDistinct/ungrouped	a:bigint,b:bigint | NULL,NULL
+zero/stddev/cast/alone/sumDistinct/grouped	(0 rows)
+zero/stddev/cast/besideCount/countDistinct/ungrouped	a:bigint,c:bigint,b:bigint | NULL,0,0
+zero/stddev/cast/besideCount/countDistinct/grouped	(0 rows)
+zero/stddev/cast/besideCount/twoCountDistinct/ungrouped	a:bigint,c:bigint,b:bigint,d:bigint | NULL,0,0,0
+zero/stddev/cast/besideCount/twoCountDistinct/grouped	(0 rows)
+zero/stddev/cast/besideCount/sumDistinct/ungrouped	a:bigint,c:bigint,b:bigint | NULL,0,NULL
+zero/stddev/cast/besideCount/sumDistinct/grouped	(0 rows)
+zero/stddev/plusCount/alone/countDistinct/ungrouped	a:numeric,b:bigint | NULL,0
+zero/stddev/plusCount/alone/countDistinct/grouped	(0 rows)
+zero/stddev/plusCount/alone/twoCountDistinct/ungrouped	a:numeric,b:bigint,d:bigint | NULL,0,0
+zero/stddev/plusCount/alone/twoCountDistinct/grouped	(0 rows)
+zero/stddev/plusCount/alone/sumDistinct/ungrouped	a:numeric,b:bigint | NULL,NULL
+zero/stddev/plusCount/alone/sumDistinct/grouped	(0 rows)
+zero/stddev/plusCount/besideCount/countDistinct/ungrouped	a:numeric,c:bigint,b:bigint | NULL,0,0
+zero/stddev/plusCount/besideCount/countDistinct/grouped	(0 rows)
+zero/stddev/plusCount/besideCount/twoCountDistinct/ungrouped	a:numeric,c:bigint,b:bigint,d:bigint | NULL,0,0,0
+zero/stddev/plusCount/besideCount/twoCountDistinct/grouped	(0 rows)
+zero/stddev/plusCount/besideCount/sumDistinct/ungrouped	a:numeric,c:bigint,b:bigint | NULL,0,NULL
+zero/stddev/plusCount/besideCount/sumDistinct/grouped	(0 rows)
+consumer/coalesce	a:bigint,b:bigint | 0,0
+consumer/case	a:text,b:bigint | empty,0
+consumer/derivedWhere	a:bigint,b:bigint | 0,0
+consumer/crossJoin	id:integer,a:bigint | 1,0; 2,0
+consumer/scalarHaving	a:boolean | t
+consumer/scalarHavingFilter	id:integer | 1; 2

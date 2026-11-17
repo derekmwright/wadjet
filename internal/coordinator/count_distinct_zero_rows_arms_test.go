@@ -283,7 +283,13 @@ type czKeptLine struct{ want, why string }
 // why-code; keyed "<name>@<arms>".
 func czReadKept(t *testing.T) map[string]czKeptLine {
 	t.Helper()
-	f, err := os.Open(czKeptPath)
+	return czReadKeptFrom(t, czKeptPath)
+}
+
+// czReadKeptFrom is czReadKept over another table's kept file.
+func czReadKeptFrom(t *testing.T, path string) map[string]czKeptLine {
+	t.Helper()
+	f, err := os.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
