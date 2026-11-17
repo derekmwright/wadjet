@@ -792,13 +792,13 @@ var knownAggregates = map[string]bool{
 //     planner reads as a property of the aggregate: the per-row value is the
 //     second argument;
 //   - OHLCV(ts, price, volume) skips a row any of whose three is NULL; the
-//     price is the argument the planner materializes as a computed input
-//     (a computed ts or volume is not a column of the aggregate's input, and
-//     answered no rows, grouped, before this table).
+//     price is the one nulled.
 //
-// The argument chosen is always the one the logical plan carries as the
-// aggregate's computed input (InputExpr): a CASE in any other position is not
-// materialized below the aggregate.
+// The argument chosen is the one the logical plan carries as the aggregate's
+// first computed input (InputExpr). When this table was written that was the
+// only position materialized below the aggregate; since #1694 every argument
+// that is not a bare column is, so the choice is no longer forced, and it is
+// kept because each entry is the measured one.
 //
 // An aggregate absent from this map refuses FILTER with 0A000 naming it
 // (GROUPING is not an aggregate over rows at all). TestAggFilterArgCoversRegistry

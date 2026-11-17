@@ -738,7 +738,16 @@ type AggExpr struct {
 	// (#965). It travels beside InputCol2 through every layer for the same
 	// reason: an aggregate whose argument list is trimmed answers something
 	// plausible instead of failing (#713).
-	InputCol3  string
+	InputCol3 string
+	// InputExpr2 and InputExpr3 are the parsed trees InputCol2 and InputCol3
+	// were rendered from, as InputExpr is InputCol's, and nil where the
+	// builder had none. The physical planner materializes every argument that
+	// is not a bare column below the aggregate (buildAggregate), whichever
+	// position it holds: before they were carried, only the FIRST argument
+	// was, and a computed second or third one was looked up as a column name
+	// and refused, or answered no rows grouped (#1694).
+	InputExpr2 plansql.Node
+	InputExpr3 plansql.Node
 	Separator  string
 	Percentile float64
 }

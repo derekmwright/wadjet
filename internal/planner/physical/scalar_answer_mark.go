@@ -27,7 +27,10 @@ func markScalarAnswer(n *logical.Node) {
 		n.Projections[i].ASTExpr = markAnswerExpr(n.Projections[i].ASTExpr)
 	}
 	for i := range n.AggExprs {
+		// Every argument position, each one materialized alike (#1694).
 		n.AggExprs[i].InputExpr = markAnswerExpr(n.AggExprs[i].InputExpr)
+		n.AggExprs[i].InputExpr2 = markAnswerExpr(n.AggExprs[i].InputExpr2)
+		n.AggExprs[i].InputExpr3 = markAnswerExpr(n.AggExprs[i].InputExpr3)
 	}
 	for i := range n.WindowExprs {
 		n.WindowExprs[i].InputExpr = markAnswerExpr(n.WindowExprs[i].InputExpr)

@@ -73,13 +73,20 @@ func (w *declWalk) aggOhlcvOutputFields(node *logical.Node, agg logical.AggExpr)
 		}
 		price = parquet.Column{Name: agg.InputCol, Type: t, Precision: prec, Scale: scale}
 	}
-	// The VOLUME must be a bare column: a computed one is refused on every arm
-	// (the pre-aggregate projection carries a reference and declines an
-	// expression, #713), so there is no shape where this declines and the
-	// query answers.
+	// The VOLUME, the same two ways: a column, or a COMPUTED argument the
+	// single-process path materializes below the aggregate like any other
+	// argument (#1694), typed from its own expression. (The stage DAG's
+	// pre-aggregate projection still declines a computed volume, #713, and
+	// refuses the query.)
 	vol, ok := col(agg.InputCol3)
 	if !ok {
-		return nil, false
+		va := agg
+		va.InputExpr = agg.InputExpr3
+		t, prec, scale, known := w.aggComputedInputExprDecl(node, va)
+		if !known {
+			return nil, false
+		}
+		vol = parquet.Column{Name: agg.InputCol3, Type: t, Precision: prec, Scale: scale}
 	}
 	return exec.OhlcvOutputFields(price, vol)
 }

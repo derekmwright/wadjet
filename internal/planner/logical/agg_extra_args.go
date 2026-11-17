@@ -41,6 +41,7 @@ func parseAggExtraArgs(a *AggExpr, args []plansql.Node) error {
 		// (x, y) for the correlation family; (value, ordering) for
 		// MIN_BY/MAX_BY, whose first argument is the one returned.
 		a.InputCol2 = cleanExpr(args[1].String())
+		a.InputExpr2 = args[1]
 	case "percentile_cont", "percentile_disc", "quantile_cont", "quantile_disc":
 		// Two spellings, one function. PERCENTILE_CONT puts the fraction
 		// first (PERCENTILE_CONT(0.5, col)); QUANTILE_CONT is DuckDB's, and
@@ -52,7 +53,12 @@ func parseAggExtraArgs(a *AggExpr, args []plansql.Node) error {
 		}
 		lit, ok := args[fracIdx].(*plansql.Lit)
 		if !ok || lit.Kind != plansql.LitNumber {
-			return fmt.Errorf("%s: argument %d must be a numeric fraction literal, got %s", fn, fracIdx+1, args[fracIdx].String())
+			// The one argument position that is NOT a per-row value, and so
+			// the one that is not materialized below the aggregate (#1694).
+			// PostgreSQL accepts a constant expression here; this engine
+			// reads the literal only, and says so with a class a client can
+			// act on rather than none.
+			return sqlerr.New("0A000", "%s: argument %d must be a numeric fraction literal, got %s", fn, fracIdx+1, args[fracIdx].String())
 		}
 		p, err := strconv.ParseFloat(lit.Value, 64)
 		if err != nil {
@@ -87,9 +93,11 @@ func parseAggExtraArgs(a *AggExpr, args []plansql.Node) error {
 		// and what the pre-aggregate projection already materializes (#713).
 		// PERCENTILE_CONT repoints its own InputCol for the same reason.
 		a.InputCol2 = cleanExpr(args[0].String())
+		a.InputExpr2 = args[0]
 		a.InputCol = cleanExpr(args[1].String())
 		a.InputExpr = args[1]
 		a.InputCol3 = cleanExpr(args[2].String())
+		a.InputExpr3 = args[2]
 	case "string_agg":
 		// STRING_AGG(col) is legal and means the default separator.
 		if len(args) < 2 {
@@ -100,7 +108,11 @@ func parseAggExtraArgs(a *AggExpr, args []plansql.Node) error {
 		}
 		lit, ok := args[1].(*plansql.Lit)
 		if !ok || lit.Kind != plansql.LitString {
-			return fmt.Errorf("string_agg: separator must be a string literal, got %s", args[1].String())
+			// PostgreSQL takes a per-row separator expression; this engine
+			// carries the separator as a property of the aggregate, so a
+			// computed one is refused with 0A000, the percentile fraction's
+			// class, rather than materialized like a value argument (#1694).
+			return sqlerr.New("0A000", "string_agg: separator must be a string literal, got %s", args[1].String())
 		}
 		a.Separator = lit.Value
 	}

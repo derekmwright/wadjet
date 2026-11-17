@@ -12,12 +12,16 @@ single-process path answers (#713). A projection NARROWS to its
 outputs: every argument the aggregate will read has to be one of them.
 
 Only a bare column REFERENCE is passed through. A computed second
-argument (`MIN_BY(a, id*2)`) is materialized by no engine — the
-single-process pre-aggregate projection does not carry it either, and
-both paths fail loud with the same message and the same class — so
-emitting a pass-through of a name nothing produces would replace one
-engine's loud failure with a column of NULLs, which is the trade this
-file exists to refuse.
+argument (`MIN_BY(a, id*2)`) is not materialized by this projection,
+so emitting a pass-through of a name nothing produces would replace a
+loud failure with a column of NULLs, which is the trade this file
+exists to refuse. The stage DAG therefore refuses such a call
+(`aggregate input "id * 2" is not a column of its input`). The
+single-process path materializes every argument that is not a bare
+column below the aggregate since #1694 (physical buildAggregate) and
+answers it; carrying the same rule to the worker needs the extra
+arguments' expressions and declared types on the stage spec, which it
+does not have yet.
 InputCol2 and InputCol3 take the SAME rule, spelled once: a name the
 expression parser cannot read at all is still passed through (a
 delimited identifier reaches here as its bare spelling), and only a

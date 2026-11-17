@@ -935,8 +935,13 @@ func collectNodeColumnRefs(n *Node, refs map[string]bool) {
 			if agg.InputCol2 != "" {
 				refs[strings.ToLower(agg.InputCol2)] = true
 			}
-			if agg.InputExpr != nil {
-				collectASTColumnRefs(agg.InputExpr, refs)
+			// Every argument's tree, not only the first: a computed second or
+			// third argument is materialized below the aggregate from the
+			// columns it reads (#1694).
+			for _, e := range []plansql.Node{agg.InputExpr, agg.InputExpr2, agg.InputExpr3} {
+				if e != nil {
+					collectASTColumnRefs(e, refs)
+				}
 			}
 		}
 	case NodeJoin:

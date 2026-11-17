@@ -56,7 +56,10 @@ func (p *Planner) typeMemberLiterals(root *logical.Node) {
 			p.typeMemberLiteralsIn(ctes, n.LateralDualItems[i].ASTExpr)
 		}
 		for i := range n.AggExprs {
+			// Every argument position: each one is materialized (#1694).
 			p.typeMemberLiteralsIn(ctes, n.AggExprs[i].InputExpr)
+			p.typeMemberLiteralsIn(ctes, n.AggExprs[i].InputExpr2)
+			p.typeMemberLiteralsIn(ctes, n.AggExprs[i].InputExpr3)
 		}
 		for i := range n.WindowExprs {
 			p.typeMemberLiteralsIn(ctes, n.WindowExprs[i].InputExpr)

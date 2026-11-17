@@ -46,8 +46,10 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 	// CSE: deduplicate identical expressions by their string representation.
 	var preProjectCols []exec.ProjectColumn
 	var preProjectMeta []parquet.Column
-	syntheticNames := make(map[int]string) // agg index → synthetic column name
-	exprDedup := make(map[string]string)   // expr string → synthetic column name
+	// (agg index, argument position) → synthetic column name. Position 0 is
+	// InputCol, 1 InputCol2, 2 InputCol3.
+	syntheticNames := make(map[[2]int]string)
+	exprDedup := make(map[string]string) // expr string → synthetic column name
 	// synDecl is the DECLARATION each synthetic column is materialized under —
 	// the same triple the stage DAG carries as AggSpec.InputType/Precision/
 	// Scale. The aggregate's OUTPUT declaration is read off it below, so this
@@ -79,15 +81,30 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 	// the column through the Project.
 	aggInputDecls = withSubqueryDecls(aggInputDecls, node)
 
+	// ONE RULE FOR EVERY ARGUMENT POSITION (#1694): an aggregate argument that
+	// is not a bare column is materialized below the aggregate as a synthetic
+	// column, and the aggregate reads that column. Only the FIRST argument
+	// used to be: a computed second or third one (`max_by(x, CASE ... END)`,
+	// `corr(x, y + 0)`, `ohlcv(ts, px, vol * 2)`) went to the operator as its
+	// TEXT, which no input carries, and was refused ungrouped and answered no
+	// rows grouped. The literal arguments that are properties of the aggregate
+	// (a percentile's fraction, string_agg's separator) are not per-row
+	// arguments and never reach here: the logical builder holds them as
+	// literals or refuses them (parseAggExtraArgs).
 	for i, agg := range node.AggExprs {
-		if agg.InputExpr != nil && (!isSimpleColRef(agg.InputExpr) || astIsFieldPath(agg.InputExpr, aggInputDecls)) {
-			exprStr := agg.InputExpr.String()
-			if existing, ok := exprDedup[exprStr]; ok {
-				// Reuse previously compiled expression
-				syntheticNames[i] = existing
+		for k, argExpr := range []plansql.Node{agg.InputExpr, agg.InputExpr2, agg.InputExpr3} {
+			if argExpr == nil || (isSimpleColRef(argExpr) && !astIsFieldPath(argExpr, aggInputDecls)) {
 				continue
 			}
-			synName := slotName(slotAggInput, i)
+			exprStr := argExpr.String()
+			if existing, ok := exprDedup[exprStr]; ok {
+				// Reuse previously compiled expression
+				syntheticNames[[2]int{i, k}] = existing
+				continue
+			}
+			// Position 0 keeps the name it always had; the later positions
+			// take the slots past every aggregate's first.
+			synName := slotName(slotAggInput, k*len(node.AggExprs)+i)
 			// WITH THE OUTER SCOPE, exactly as the SELECT-list projection
 			// site compiles its own expressions (see the CompileWith*
 			// ladder above). Without it this site asked for none, so a
@@ -104,18 +121,18 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 			var compiled expr.Expr
 			var compErr error
 			if len(aggOuterTables) > 0 {
-				compiled, compErr = expr.CompileWithScopeResolver(agg.InputExpr, p.subqueryRunner,
+				compiled, compErr = expr.CompileWithScopeResolver(argExpr, p.subqueryRunner,
 					aggOuterTables, aggOuterCols, p.SubqueryInnerColumns(),
 					p.subqueryDeclOptionFor(node.Children[0]), p.subqueryBudgetOption(), p.statementOption(), aggInputCats)
 			} else {
-				compiled, compErr = expr.CompileWithRunner(agg.InputExpr, p.subqueryRunner,
+				compiled, compErr = expr.CompileWithRunner(argExpr, p.subqueryRunner,
 					p.subqueryDeclOption(), p.subqueryBudgetOption(), p.statementOption(), aggInputCats)
 			}
 			if expr.IsCompileRefusal(compErr) {
 				return nil, nil, nil, compErr
 			}
 			if compErr == nil {
-				aggDecl := inferProjectionDeclType(agg.InputExpr, parquet.TypeFloat64, nil, aggInputDecls)
+				aggDecl := inferProjectionDeclType(argExpr, parquet.TypeFloat64, nil, aggInputDecls)
 				pc := exec.ProjectColumn{
 					Name: synName,
 					// Aggregate inputs are usually numeric, so Float64 is the
@@ -213,7 +230,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 				// (#568).
 				meta := parquet.Column{Name: synName, Type: pc.Type, Nullable: true,
 					Precision: pc.Precision, Scale: pc.Scale, Fields: pc.Fields, ElementType: pc.ElementType}
-				if fc, ok := aggInputDecls.field(fieldPathColRef(agg.InputExpr)); ok {
+				if fc, ok := aggInputDecls.field(fieldPathColRef(argExpr)); ok {
 					meta = fc
 					meta.Name, meta.Nullable = synName, true
 					pc.Type = fc.Type
@@ -228,7 +245,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 				}
 				preProjectCols = append(preProjectCols, pc)
 				preProjectMeta = append(preProjectMeta, meta)
-				syntheticNames[i] = synName
+				syntheticNames[[2]int{i, k}] = synName
 				exprDedup[exprStr] = synName
 				synDecl[synName] = meta
 			}
@@ -256,9 +273,17 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 		// columnIndexFallback still resolves the qualified name against a
 		// scan that emits the column bare via its qualified->bare fallback.
 		inputCol := plansql.NormalizeIdentRef(strings.TrimSpace(agg.InputCol))
-		// Use synthetic column name if the input was an expression
-		if synName, ok := syntheticNames[i]; ok {
+		// Use synthetic column name if the input was an expression — in
+		// every argument position, the same rule (#1694).
+		if synName, ok := syntheticNames[[2]int{i, 0}]; ok {
 			inputCol = synName
+		}
+		inputCol2, inputCol3 := agg.InputCol2, agg.InputCol3
+		if synName, ok := syntheticNames[[2]int{i, 1}]; ok {
+			inputCol2 = synName
+		}
+		if synName, ok := syntheticNames[[2]int{i, 2}]; ok {
+			inputCol3 = synName
 		}
 		// Prefer the resolved declaration (MIN/MAX carry their input
 		// column's type) so this pipeline and the stage DAG declare the
@@ -278,8 +303,8 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 		ac := exec.AggColumn{
 			Func:       fn,
 			InputCol:   inputCol,
-			InputCol2:  agg.InputCol2,
-			InputCol3:  agg.InputCol3,
+			InputCol2:  inputCol2,
+			InputCol3:  inputCol3,
 			Separator:  agg.Separator,
 			Percentile: agg.Percentile,
 			OutputCol:  agg.OutputCol,
@@ -325,7 +350,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 		// materializes it under, which is the DAG's rule read off the local
 		// equivalent of AggSpec.InputType/Precision/Scale. Without it a
 		// zero-row SUM(a * (1 - b)) declared float64 here and DECIMAL there.
-		if synName, ok := syntheticNames[i]; ok {
+		if synName, ok := syntheticNames[[2]int{i, 0}]; ok {
 			if d, ok := synDecl[synName]; ok {
 				if t, prec, sc, known := aggOutputFromInputDecl(
 					agg.Func, agg.Distinct, d.Type, d.Precision, d.Scale,

@@ -55,6 +55,10 @@ type ohlcvCell struct {
 	want      []string
 	// wantErrLikeAll is a refusal EVERY arm must give.
 	wantErrLikeAll string
+	// wantErrLikeDAG is a refusal both DAG arms give while the single arm
+	// answers want: a computed ordering key or volume, which the single path
+	// materializes since #1694 and the DAG's pre-aggregate projection does not.
+	wantErrLikeDAG string
 	pgSays         string
 }
 
@@ -301,24 +305,25 @@ func ohlcvCells() []ohlcvCell {
 			      FROM (SELECT ohlcv(ts, px_f64, vol_i64) AS b FROM ` + ohlcvTable + `) t`,
 			want:   []string{"o=float:10|h=float:21|v=24|w=float:14.5833"},
 			pgSays: "min(float8) is double; sum(int8) is numeric; the quotient is double"},
-		// THE BOUNDARY, from both sides. A computed ORDERING key or a computed
-		// VOLUME is materialized by NO engine — the pre-aggregate projection
-		// carries a bare column reference and declines an expression, which is
-		// #713's rule for MIN_BY's second argument and applies here to the
-		// second AND the third. Both fail loud, on every arm, with the same
-		// message; the fix deliberately does not invent a pass-through for a
-		// name nothing produces, which would replace one engine's loud failure
-		// with a column of NULLs.
-		{name: "a_computed_ordering_key_is_loud_on_every_arm",
+		// THE BOUNDARY. A computed ORDERING key or a computed VOLUME: the
+		// single-process path materializes every argument that is not a bare
+		// column below the aggregate since #1694 and answers the bar; the
+		// stage DAG's pre-aggregate projection carries a bare column reference
+		// and declines an expression (#713's rule for MIN_BY's second
+		// argument, applied to the second AND the third), and fails loud
+		// rather than invent a pass-through for a name nothing produces.
+		{name: "a_computed_ordering_key_answers_single_loud_on_dag",
 			// A computed TIMESTAMP (`ts + 0` was one before arc VL round 3
 			// refused a timestamp plus a number, 42883, as PostgreSQL does).
 			sql:            `SELECT ohlcv(ts + INTERVAL '1 second', px_f64, vol_i64) AS b FROM ` + ohlcvTable,
-			wantErrLikeAll: "is not a column of its input",
-			pgSays:         "PostgreSQL answers it; no wadjet engine materializes a computed second argument"},
-		{name: "a_computed_volume_is_loud_on_every_arm",
+			want:           []string{"b=map[string]interface {}:map[close:21 high:21 low:7 open:10 volume:24 vwap:14.583333333333334]"},
+			wantErrLikeDAG: "is not a column of its input",
+			pgSays:         "a uniform shift of the instant keeps every tiebreak: the bare bar, open 10 high 21 low 7 close 21 volume 24"},
+		{name: "a_computed_volume_answers_single_loud_on_dag",
 			sql:            `SELECT ohlcv(ts, px_f64, vol_i64*2) AS b FROM ` + ohlcvTable,
-			wantErrLikeAll: "is not a column of its input",
-			pgSays:         "PostgreSQL answers it; same boundary, one argument over"},
+			want:           []string{"b=map[string]interface {}:map[close:21 high:21 low:7 open:10 volume:48 vwap:14.583333333333334]"},
+			wantErrLikeDAG: "is not a column of its input",
+			pgSays:         "the bare bar with SUM(vol*2) = 48 and the weighted mean unchanged"},
 		// THE BOUNDARY, from both sides. An argument type that has no bar is
 		// refused on every arm with the same sentence, never answered as an
 		// empty bar.
@@ -373,6 +378,16 @@ func TestTheBarIsTheSameOnEveryArm(t *testing.T) {
 				{"dag-shuffled", func() ([]string, error) { return na2Run(tmdRunDAG(ctx, coordB, tc.sql)) }},
 			} {
 				got, err := arm.run()
+				if tc.wantErrLikeDAG != "" && arm.name != "single" {
+					if err == nil {
+						t.Errorf("%s arm: ANSWERED %v — the stage DAG now materializes this "+
+							"argument; assert the single arm's value here.\n  SQL: %s", arm.name, got, tc.sql)
+					} else if !strings.Contains(err.Error(), tc.wantErrLikeDAG) {
+						t.Errorf("%s arm: %v\n  want one containing %q\n  SQL: %s",
+							arm.name, err, tc.wantErrLikeDAG, tc.sql)
+					}
+					continue
+				}
 				if tc.wantErrLikeAll != "" {
 					if err == nil {
 						t.Errorf("%s arm: ANSWERED %v — this shape is refused on the other arms. "+
