@@ -12,7 +12,9 @@ just points here; this is the full text, verbatim, unchanged.
 
 - **No commit that changes Go code reaches main without a gate run on that sha whose HOOK lane is green** (`tooling/gaterun.sh <sha>`; ADR-0046 and its 2026-11-16 amendment). The pre-push hook refuses AI attribution trailers and nothing else; it does not run tests. The gate runner's HOOK lane is the only full race-detector pass there is, so skipping the gate run skips the race detector.
 - A docs-only or tooling-only commit on top of a gated sha needs no second run.
-- A red lane is diagnosed, not rerun: the failing test is run alone on the base and on the candidate, the cause is written down, and a failure the change does not explain is filed before the maintainer decides whether to land.
+- A fully green gate run is pushed, and its issues closed, without asking.
+- A red lane is diagnosed, not rerun: the failing test is run alone on the base and on the candidate and the cause is written down. The architect lands without asking only when ALL of these hold, and reports it afterwards: exactly one lane is red and the HOOK lane is green; the failing test passes at least three times out of three alone on both the base and the candidate; the mechanism is identified and does not involve the code being landed; an issue for it is open before the push. Anything else goes to the maintainer.
+- A test that reddens a lane this way is hunted, not tolerated: its issue goes on the current patch milestone and is dispatched promptly, and the fix sweeps for siblings of the same kind (an order-sensitive pin on a result nothing sorts, a wall-clock bound, an error whose identity is a race).
 
 ### Release Housekeeping
 
