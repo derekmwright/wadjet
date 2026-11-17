@@ -214,7 +214,10 @@ func makeLikeRowPred(canon map[string]string, colType map[string]parquet.TypeID,
 		return scan.RowPred{}, "", false
 	}
 	switch colType[strings.ToLower(cr.Column)] {
-	case parquet.TypeString, parquet.TypeBytes:
+	case parquet.TypeString:
+	// A BYTES column's LIKE is the bytea reading (backslash escape, a quoted
+	// literal read by byteain), which the byte-wise scan matcher is not: it
+	// stays a residual filter (#1593).
 	default:
 		return scan.RowPred{}, "", false
 	}

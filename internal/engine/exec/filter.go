@@ -1404,6 +1404,11 @@ type LikeFilter struct {
 	resolved    bool
 	useFallback bool
 	inner       *Filter
+	// byteaPat is the pattern read as bytea when the column is BYTES: the
+	// bytea reading takes the backslash as its escape, so it is not the text
+	// kernel (kernel.ByteaLike, #1593).
+	byteaPat []byte
+	bytea    bool
 }
 
 func NewLikeFilter(colName, pattern string, negate bool) *LikeFilter {
@@ -1430,11 +1435,22 @@ func (f *LikeFilter) Execute(ctx context.Context, in *batch.RecordBatch) (*batch
 				f.inner = NewFilter(f.RowFallback)
 			}
 		}
-		if f.colIdx >= 0 {
+		if f.colIdx >= 0 && in.Columns[f.colIdx].Type == batch.TypeBytes {
+			// A quoted literal beside a bytea is read by byteain, as
+			// PostgreSQL coerces it (22P02 on a bad one).
+			pat, err := kernel.ByteaIn(f.Pattern)
+			if err != nil {
+				return nil, err
+			}
+			f.bytea, f.byteaPat = true, pat
+		} else if f.colIdx >= 0 {
 			f.kern = kernel.ResolveLikeFilterKernel(in.Columns[f.colIdx].Type, f.Pattern, f.Negate)
 		}
 		f.outSel = make([]uint32, 0, in.Len)
 		f.resolved = true
+	}
+	if f.bytea {
+		return f.executeBytea(in)
 	}
 	if f.useFallback {
 		return f.inner.Execute(ctx, in)
@@ -1458,6 +1474,52 @@ func (f *LikeFilter) Execute(ctx context.Context, in *batch.RecordBatch) (*batch
 		return nil, nil
 	}
 	in.Sel = sel
+	return in, nil
+}
+
+// executeBytea filters a BYTES column by the bytea reading of the pattern.
+func (f *LikeFilter) executeBytea(in *batch.RecordBatch) (*batch.RecordBatch, error) {
+	col := in.Columns[f.colIdx]
+	out := f.outSel[:0]
+	if in.Sel != nil {
+		out = in.Sel[:0]
+	}
+	var firstErr error
+	keep := func(i int) bool {
+		if col.Nulls.IsNullFast(i) {
+			return false
+		}
+		m, err := kernel.ByteaLike(col.BytesData.Value(i), f.byteaPat)
+		if err != nil {
+			firstErr = err
+			return false
+		}
+		return m != f.Negate
+	}
+	// out may alias in.Sel: it is written no faster than it is read.
+	if in.Sel != nil {
+		for _, idx := range in.Sel {
+			if keep(int(idx)) {
+				out = append(out, idx)
+			}
+			if firstErr != nil {
+				return nil, firstErr
+			}
+		}
+	} else {
+		for i := 0; i < in.Len; i++ {
+			if keep(i) {
+				out = append(out, uint32(i))
+			}
+			if firstErr != nil {
+				return nil, firstErr
+			}
+		}
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	in.Sel = out
 	return in, nil
 }
 

@@ -672,7 +672,7 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 		if err != nil {
 			return nil, err
 		}
-		return &Like{Expr: left, Pattern: right, Not: n.Not}, nil
+		return newLike(n, left, right, ctx), nil
 
 	case *plansql.IsExpr:
 		operand, err := compileWithCtx(n.Left, ctx)
@@ -1494,6 +1494,16 @@ func compileFuncCallNamed(n *plansql.FuncCallNode, ctx *compileContext, checked 
 		for _, a := range n.Args {
 			fc.argDecls = append(fc.argDecls, newOperandDecl(a, ctx))
 		}
+	}
+	// `x LIKE p ESCAPE e` reads bytea when the declared operands call for it
+	// (bytea_like.go, #1593); fc is the text reading, untouched.
+	if name == "like_escape" && len(args) == 3 && len(n.Args) == 3 {
+		ln := &likeEscapeNode{fallback: fc}
+		for i := range ln.args {
+			ln.args[i] = args[i]
+			ln.ops[i] = newLikeOperand(n.Args[i], ctx)
+		}
+		return ln, nil
 	}
 	// ROUND rounds by its operand's declared type: half to even over a
 	// double precision or real, half away from zero over a numeric — the

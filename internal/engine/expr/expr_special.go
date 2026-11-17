@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
+	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
 
 // --- Special SQL expressions ---
@@ -233,6 +234,20 @@ type Like struct {
 	Expr    Expr
 	Pattern Expr
 	Not     bool
+
+	// vop / pop declare the two operands for the bytea reading (bytea_like.go,
+	// #1593); a Like built without them reads text, as it always did.
+	vop, pop likeOperand
+	// textOnly is set once the declarations showed no BYTES operand: the
+	// schema is fixed for the life of a compiled expression, so the text
+	// reading then skips the declaration lookup.
+	textOnly atomic.Bool
+}
+
+// newLike is the compiler's Like: it keeps the operands' declaration sources.
+func newLike(n *plansql.LikeExpr, left, right Expr, ctx *compileContext) *Like {
+	return &Like{Expr: left, Pattern: right, Not: n.Not,
+		vop: newLikeOperand(n.Left, ctx), pop: newLikeOperand(n.Pattern, ctx)}
 }
 
 func (e *Like) Eval(b *batch.RecordBatch, row int) any {
@@ -250,6 +265,24 @@ func (e *Like) EvalBool(b *batch.RecordBatch, row int) bool {
 func (e *Like) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool) {
 	v := e.Expr.Eval(b, row)
 	p := e.Pattern.Eval(b, row)
+	if !e.textOnly.Load() && (e.vop.decl != nil || e.pop.decl != nil) {
+		cv := e.vop.class(b, row, e.Expr)
+		cp := e.pop.class(b, row, e.Pattern)
+		reading := likeReadingOf(cv, cp)
+		if reading == likeReadRefuse {
+			panic(fatalEval{likeOperatorError(cv, cp)})
+		}
+		if reading == likeReadBytea {
+			vb, pb, isNull := byteaLikeOperands(cv, cp, v, p)
+			if isNull {
+				return false, true
+			}
+			return byteaLikeResult(vb, pb, e.Not)
+		}
+		if b != nil && cv != likeClassX && cp != likeClassX {
+			e.textOnly.Store(true)
+		}
+	}
 	if v == nil || p == nil {
 		return false, true
 	}

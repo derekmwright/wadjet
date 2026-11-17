@@ -207,7 +207,7 @@ var textDomains = map[string][]ArgDomain{
 	"soundex":          {ArgText},
 	"normalize":        {ArgText, ArgText},
 	"overlay":          {ArgText, ArgText, ArgAny, ArgAny},
-	"like_escape":      {ArgText, ArgText, ArgText},
+	"like_escape":      {ArgTextOrBytes, ArgTextOrBytes, ArgTextOrBytes},
 	"similar_to":       {ArgText, ArgText, ArgText},
 	"codepoint":        {ArgText},
 	"regexp_like":      {ArgText, ArgText, ArgText},
