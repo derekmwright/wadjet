@@ -1,0 +1,101 @@
+# name	SQL	PostgreSQL 17.11 answer	residual pin (empty: none)
+orderBy/past	SELECT a, b FROM ot ORDER BY 9	ERR 42P10	
+groupBy/past	SELECT a, count(*) FROM ot GROUP BY 9	ERR 42P10	
+orderOverGroup/past	SELECT a, count(*) FROM ot GROUP BY a ORDER BY 9	ERR 42P10	
+derivedOrderBy/past	SELECT * FROM (SELECT a, b FROM ot ORDER BY 9) s	ERR 42P10	
+derivedGroupBy/past	SELECT * FROM (SELECT a, count(*) AS c FROM ot GROUP BY 9) s	ERR 42P10	
+scalarOrderBy/past	SELECT (SELECT a FROM ot ORDER BY 9 LIMIT 1) AS x	ERR 42P10	
+correlatedOrderBy/past	SELECT o.a, (SELECT i.b FROM ot i WHERE i.a = o.a ORDER BY 9 LIMIT 1) AS x FROM ot o	ERR 42P10	
+existsGroupBy/past	SELECT o.a FROM ot o WHERE EXISTS (SELECT i.a, count(*) FROM ot i WHERE i.a = o.a GROUP BY 9)	ERR 42P10	
+cteOrderBy/past	WITH s AS (SELECT a, b FROM ot ORDER BY 9) SELECT * FROM s	ERR 42P10	
+setOpOrderBy/past	SELECT a FROM ot UNION SELECT b FROM ot ORDER BY 9	ERR 42P10	
+orderBy/zero	SELECT a, b FROM ot ORDER BY 0	ERR 42P10	
+groupBy/zero	SELECT a, count(*) FROM ot GROUP BY 0	ERR 42P10	
+orderOverGroup/zero	SELECT a, count(*) FROM ot GROUP BY a ORDER BY 0	ERR 42P10	
+derivedOrderBy/zero	SELECT * FROM (SELECT a, b FROM ot ORDER BY 0) s	ERR 42P10	
+derivedGroupBy/zero	SELECT * FROM (SELECT a, count(*) AS c FROM ot GROUP BY 0) s	ERR 42P10	
+scalarOrderBy/zero	SELECT (SELECT a FROM ot ORDER BY 0 LIMIT 1) AS x	ERR 42P10	
+correlatedOrderBy/zero	SELECT o.a, (SELECT i.b FROM ot i WHERE i.a = o.a ORDER BY 0 LIMIT 1) AS x FROM ot o	ERR 42P10	
+existsGroupBy/zero	SELECT o.a FROM ot o WHERE EXISTS (SELECT i.a, count(*) FROM ot i WHERE i.a = o.a GROUP BY 0)	ERR 42P10	
+cteOrderBy/zero	WITH s AS (SELECT a, b FROM ot ORDER BY 0) SELECT * FROM s	ERR 42P10	
+setOpOrderBy/zero	SELECT a FROM ot UNION SELECT b FROM ot ORDER BY 0	ERR 42P10	
+orderBy/negative	SELECT a, b FROM ot ORDER BY -1	ERR 42P10	
+groupBy/negative	SELECT a, count(*) FROM ot GROUP BY -1	ERR 42P10	
+orderOverGroup/negative	SELECT a, count(*) FROM ot GROUP BY a ORDER BY -1	ERR 42P10	
+derivedOrderBy/negative	SELECT * FROM (SELECT a, b FROM ot ORDER BY -1) s	ERR 42P10	
+derivedGroupBy/negative	SELECT * FROM (SELECT a, count(*) AS c FROM ot GROUP BY -1) s	ERR 42P10	
+scalarOrderBy/negative	SELECT (SELECT a FROM ot ORDER BY -1 LIMIT 1) AS x	ERR 42P10	
+correlatedOrderBy/negative	SELECT o.a, (SELECT i.b FROM ot i WHERE i.a = o.a ORDER BY -1 LIMIT 1) AS x FROM ot o	ERR 42P10	
+existsGroupBy/negative	SELECT o.a FROM ot o WHERE EXISTS (SELECT i.a, count(*) FROM ot i WHERE i.a = o.a GROUP BY -1)	ERR 42P10	
+cteOrderBy/negative	WITH s AS (SELECT a, b FROM ot ORDER BY -1) SELECT * FROM s	ERR 42P10	
+setOpOrderBy/negative	SELECT a FROM ot UNION SELECT b FROM ot ORDER BY -1	ERR 42P10	
+orderBy/negZero	SELECT a, b FROM ot ORDER BY -0	ERR 42P10	
+groupBy/negZero	SELECT a, count(*) FROM ot GROUP BY -0	ERR 42P10	
+orderOverGroup/negZero	SELECT a, count(*) FROM ot GROUP BY a ORDER BY -0	ERR 42P10	
+derivedOrderBy/negZero	SELECT * FROM (SELECT a, b FROM ot ORDER BY -0) s	ERR 42P10	
+derivedGroupBy/negZero	SELECT * FROM (SELECT a, count(*) AS c FROM ot GROUP BY -0) s	ERR 42P10	
+scalarOrderBy/negZero	SELECT (SELECT a FROM ot ORDER BY -0 LIMIT 1) AS x	ERR 42P10	
+correlatedOrderBy/negZero	SELECT o.a, (SELECT i.b FROM ot i WHERE i.a = o.a ORDER BY -0 LIMIT 1) AS x FROM ot o	ERR 42P10	
+existsGroupBy/negZero	SELECT o.a FROM ot o WHERE EXISTS (SELECT i.a, count(*) FROM ot i WHERE i.a = o.a GROUP BY -0)	ERR 42P10	
+cteOrderBy/negZero	WITH s AS (SELECT a, b FROM ot ORDER BY -0) SELECT * FROM s	ERR 42P10	
+setOpOrderBy/negZero	SELECT a FROM ot UNION SELECT b FROM ot ORDER BY -0	ERR 42P10	
+orderBy/float	SELECT a, b FROM ot ORDER BY 1.0	ERR 42601	ERR 42P10
+groupBy/float	SELECT a, count(*) FROM ot GROUP BY 1.0	ERR 42601	ERR 42803
+orderOverGroup/float	SELECT a, count(*) FROM ot GROUP BY a ORDER BY 1.0	ERR 42601	ERR 42P10
+derivedOrderBy/float	SELECT * FROM (SELECT a, b FROM ot ORDER BY 1.0) s	ERR 42601	ERR 42P10
+derivedGroupBy/float	SELECT * FROM (SELECT a, count(*) AS c FROM ot GROUP BY 1.0) s	ERR 42601	ERR 42803
+scalarOrderBy/float	SELECT (SELECT a FROM ot ORDER BY 1.0 LIMIT 1) AS x	ERR 42601	ERR 42P10
+correlatedOrderBy/float	SELECT o.a, (SELECT i.b FROM ot i WHERE i.a = o.a ORDER BY 1.0 LIMIT 1) AS x FROM ot o	ERR 42601	1,20 | 2,10 | 3,30
+existsGroupBy/float	SELECT o.a FROM ot o WHERE EXISTS (SELECT i.a, count(*) FROM ot i WHERE i.a = o.a GROUP BY 1.0)	ERR 42601	ERR 42803
+cteOrderBy/float	WITH s AS (SELECT a, b FROM ot ORDER BY 1.0) SELECT * FROM s	ERR 42601	ERR 42P10
+setOpOrderBy/float	SELECT a FROM ot UNION SELECT b FROM ot ORDER BY 1.0	ERR 42601	ERR 0A000
+orderBy/fraction	SELECT a, b FROM ot ORDER BY 2.5	ERR 42601	ERR 42P10
+groupBy/fraction	SELECT a, count(*) FROM ot GROUP BY 2.5	ERR 42601	ERR 42803
+orderOverGroup/fraction	SELECT a, count(*) FROM ot GROUP BY a ORDER BY 2.5	ERR 42601	ERR 42P10
+derivedOrderBy/fraction	SELECT * FROM (SELECT a, b FROM ot ORDER BY 2.5) s	ERR 42601	ERR 42P10
+derivedGroupBy/fraction	SELECT * FROM (SELECT a, count(*) AS c FROM ot GROUP BY 2.5) s	ERR 42601	ERR 42803
+scalarOrderBy/fraction	SELECT (SELECT a FROM ot ORDER BY 2.5 LIMIT 1) AS x	ERR 42601	ERR 42P10
+correlatedOrderBy/fraction	SELECT o.a, (SELECT i.b FROM ot i WHERE i.a = o.a ORDER BY 2.5 LIMIT 1) AS x FROM ot o	ERR 42601	1,20 | 2,10 | 3,30
+existsGroupBy/fraction	SELECT o.a FROM ot o WHERE EXISTS (SELECT i.a, count(*) FROM ot i WHERE i.a = o.a GROUP BY 2.5)	ERR 42601	ERR 42803
+cteOrderBy/fraction	WITH s AS (SELECT a, b FROM ot ORDER BY 2.5) SELECT * FROM s	ERR 42601	ERR 42P10
+setOpOrderBy/fraction	SELECT a FROM ot UNION SELECT b FROM ot ORDER BY 2.5	ERR 42601	ERR 0A000
+orderBy/string	SELECT a, b FROM ot ORDER BY '1'	ERR 42601	1,20 | 2,10 | 3,30
+groupBy/string	SELECT a, count(*) FROM ot GROUP BY '1'	ERR 42601	NULL,3
+orderOverGroup/string	SELECT a, count(*) FROM ot GROUP BY a ORDER BY '1'	ERR 42601	ERR 0A000
+derivedOrderBy/string	SELECT * FROM (SELECT a, b FROM ot ORDER BY '1') s	ERR 42601	1,20 | 2,10 | 3,30
+derivedGroupBy/string	SELECT * FROM (SELECT a, count(*) AS c FROM ot GROUP BY '1') s	ERR 42601	NULL,3
+scalarOrderBy/string	SELECT (SELECT a FROM ot ORDER BY '1' LIMIT 1) AS x	ERR 42601	1
+correlatedOrderBy/string	SELECT o.a, (SELECT i.b FROM ot i WHERE i.a = o.a ORDER BY '1' LIMIT 1) AS x FROM ot o	ERR 42601	1,20 | 2,10 | 3,30
+existsGroupBy/string	SELECT o.a FROM ot o WHERE EXISTS (SELECT i.a, count(*) FROM ot i WHERE i.a = o.a GROUP BY '1')	ERR 42601	1 | 2 | 3
+cteOrderBy/string	WITH s AS (SELECT a, b FROM ot ORDER BY '1') SELECT * FROM s	ERR 42601	1,20 | 2,10 | 3,30
+setOpOrderBy/string	SELECT a FROM ot UNION SELECT b FROM ot ORDER BY '1'	ERR 42601	ERR 0A000
+orderBy/plus	SELECT a, b FROM ot ORDER BY +1	1,20 | 2,10 | 3,30	
+groupBy/plus	SELECT a, count(*) FROM ot GROUP BY +1	ERR 42803	1,1 | 2,1 | 3,1
+orderOverGroup/plus	SELECT a, count(*) FROM ot GROUP BY a ORDER BY +1	1,1 | 2,1 | 3,1	
+derivedOrderBy/plus	SELECT * FROM (SELECT a, b FROM ot ORDER BY +1) s	1,20 | 2,10 | 3,30	
+derivedGroupBy/plus	SELECT * FROM (SELECT a, count(*) AS c FROM ot GROUP BY +1) s	ERR 42803	1,1 | 2,1 | 3,1
+scalarOrderBy/plus	SELECT (SELECT a FROM ot ORDER BY +1 LIMIT 1) AS x	1	
+correlatedOrderBy/plus	SELECT o.a, (SELECT i.b FROM ot i WHERE i.a = o.a ORDER BY +1 LIMIT 1) AS x FROM ot o	1,20 | 2,10 | 3,30	
+existsGroupBy/plus	SELECT o.a FROM ot o WHERE EXISTS (SELECT i.a, count(*) FROM ot i WHERE i.a = o.a GROUP BY +1)	ERR 42803	1 | 2 | 3
+cteOrderBy/plus	WITH s AS (SELECT a, b FROM ot ORDER BY +1) SELECT * FROM s	1,20 | 2,10 | 3,30	
+setOpOrderBy/plus	SELECT a FROM ot UNION SELECT b FROM ot ORDER BY +1	ERR 0A000	1 | 10 | 2 | 20 | 3 | 30
+orderBy/paren	SELECT a, b FROM ot ORDER BY (1)	1,20 | 2,10 | 3,30	ERR 42P10
+groupBy/paren	SELECT a, count(*) FROM ot GROUP BY (1)	1,1 | 2,1 | 3,1	
+orderOverGroup/paren	SELECT a, count(*) FROM ot GROUP BY a ORDER BY (1)	1,1 | 2,1 | 3,1	ERR 42P10
+derivedOrderBy/paren	SELECT * FROM (SELECT a, b FROM ot ORDER BY (1)) s	1,20 | 2,10 | 3,30	ERR 42P10
+derivedGroupBy/paren	SELECT * FROM (SELECT a, count(*) AS c FROM ot GROUP BY (1)) s	1,1 | 2,1 | 3,1	
+scalarOrderBy/paren	SELECT (SELECT a FROM ot ORDER BY (1) LIMIT 1) AS x	1	ERR 42P10
+correlatedOrderBy/paren	SELECT o.a, (SELECT i.b FROM ot i WHERE i.a = o.a ORDER BY (1) LIMIT 1) AS x FROM ot o	1,20 | 2,10 | 3,30	
+existsGroupBy/paren	SELECT o.a FROM ot o WHERE EXISTS (SELECT i.a, count(*) FROM ot i WHERE i.a = o.a GROUP BY (1))	1 | 2 | 3	
+cteOrderBy/paren	WITH s AS (SELECT a, b FROM ot ORDER BY (1)) SELECT * FROM s	1,20 | 2,10 | 3,30	ERR 42P10
+setOpOrderBy/paren	SELECT a FROM ot UNION SELECT b FROM ot ORDER BY (1)	1 | 10 | 2 | 20 | 3 | 30	ERR 0A000
+orderBy/inRange	SELECT a, b FROM ot ORDER BY 1	1,20 | 2,10 | 3,30	
+groupBy/inRange	SELECT a, count(*) FROM ot GROUP BY 1	1,1 | 2,1 | 3,1	
+orderOverGroup/inRange	SELECT a, count(*) FROM ot GROUP BY a ORDER BY 1	1,1 | 2,1 | 3,1	
+derivedOrderBy/inRange	SELECT * FROM (SELECT a, b FROM ot ORDER BY 1) s	1,20 | 2,10 | 3,30	
+derivedGroupBy/inRange	SELECT * FROM (SELECT a, count(*) AS c FROM ot GROUP BY 1) s	1,1 | 2,1 | 3,1	
+scalarOrderBy/inRange	SELECT (SELECT a FROM ot ORDER BY 1 LIMIT 1) AS x	1	
+correlatedOrderBy/inRange	SELECT o.a, (SELECT i.b FROM ot i WHERE i.a = o.a ORDER BY 1 LIMIT 1) AS x FROM ot o	1,20 | 2,10 | 3,30	
+existsGroupBy/inRange	SELECT o.a FROM ot o WHERE EXISTS (SELECT i.a, count(*) FROM ot i WHERE i.a = o.a GROUP BY 1)	1 | 2 | 3	
+cteOrderBy/inRange	WITH s AS (SELECT a, b FROM ot ORDER BY 1) SELECT * FROM s	1,20 | 2,10 | 3,30	
+setOpOrderBy/inRange	SELECT a FROM ot UNION SELECT b FROM ot ORDER BY 1	1 | 10 | 2 | 20 | 3 | 30	

@@ -1404,6 +1404,15 @@ func columnNameListHint(columns []ColumnDef) string {
 	return strings.Join(names, ", ")
 }
 
+// orderByPositionOutOfRange is the refusal of an ORDER BY position past the
+// select list, 0 or negative, at the top level, in any subquery and on a set
+// operation alike. It carries PostgreSQL 17.11's code, 42P10, as the GROUP BY
+// position beside it does; it was uncoded, and reached a client as the
+// default 42601 (#1700).
+func orderByPositionOutOfRange(pos, n int) error {
+	return sqlerr.New("42P10", "ORDER BY position %d is out of range (1-%d)", pos, n)
+}
+
 // resolvePositionalRefs replaces numeric positional references in GROUP BY
 // and ORDER BY with the corresponding SELECT column expression (1-indexed),
 // and resolves GROUP BY references to SELECT aliases of computed expressions.
@@ -1477,13 +1486,13 @@ func resolvePositionalRefs(info *SelectInfo) error {
 			continue // not a number, leave as-is
 		}
 		if pos < 1 {
-			return fmt.Errorf("ORDER BY position %d is out of range (1-%d)", pos, len(info.Columns))
+			return orderByPositionOutOfRange(pos, len(info.Columns))
 		}
 		if firstStar >= 0 && pos > firstStar {
 			continue // not countable here; resolved after the star expands
 		}
 		if pos > len(info.Columns) {
-			return fmt.Errorf("ORDER BY position %d is out of range (1-%d)", pos, len(info.Columns))
+			return orderByPositionOutOfRange(pos, len(info.Columns))
 		}
 		col := info.Columns[pos-1]
 		if col.IsWindow {
@@ -1551,13 +1560,13 @@ func resolveSetOpOrderBy(info *SelectInfo) error {
 			continue // not an ordinal, leave as written
 		}
 		if pos < 1 {
-			return fmt.Errorf("ORDER BY position %d is out of range (1-%d)", pos, len(cols.Columns))
+			return orderByPositionOutOfRange(pos, len(cols.Columns))
 		}
 		if firstStar >= 0 && pos > firstStar {
 			continue // not countable here; resolved after the star expands
 		}
 		if pos > len(cols.Columns) {
-			return fmt.Errorf("ORDER BY position %d is out of range (1-%d)", pos, len(cols.Columns))
+			return orderByPositionOutOfRange(pos, len(cols.Columns))
 		}
 		col := cols.Columns[pos-1]
 		if col.IsWindow {
