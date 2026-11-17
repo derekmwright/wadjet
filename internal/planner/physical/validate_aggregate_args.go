@@ -30,6 +30,13 @@ const (
 	aggArgText
 	// aggArgOrdered is every type with a defined order — everything but ROW.
 	aggArgOrdered
+	// aggArgOrderKey is MIN_BY/MAX_BY's ordering key: the types that
+	// kernel orders (exec.orderKeyPromotable — it compares a key through a
+	// float64). Any other key skipped every row and answered NULL: TEXT,
+	// BYTEA, the address types, UUID and the containers (#1694). Those are
+	// refused 0A000 rather than answered — they have an order, this kernel
+	// cannot apply it.
+	aggArgOrderKey
 )
 
 // aggArgPositions names, per aggregate, the class each argument position must
@@ -49,7 +56,7 @@ var aggArgPositions = map[string][]aggArgClass{
 	"quantile_cont": {aggArgNumeric}, "quantile_disc": {aggArgNumeric},
 	"percentile_cont": {aggArgAny, aggArgNumeric}, "percentile_disc": {aggArgAny, aggArgNumeric},
 	"min": {aggArgOrdered}, "max": {aggArgOrdered},
-	"min_by": {aggArgAny, aggArgOrdered}, "max_by": {aggArgAny, aggArgOrdered},
+	"min_by": {aggArgAny, aggArgOrderKey}, "max_by": {aggArgAny, aggArgOrderKey},
 }
 
 // aggUnknownIsNotUnique are the aggregates whose `unknown` argument PostgreSQL
@@ -93,6 +100,15 @@ func aggArgFits(c aggArgClass, t parquet.TypeID) bool {
 		return false
 	case aggArgOrdered:
 		return t != parquet.TypeRow
+	case aggArgOrderKey:
+		switch t {
+		case parquet.TypeBool, parquet.TypeInt32, parquet.TypeInt64, parquet.TypeFloat32,
+			parquet.TypeFloat64, parquet.TypeDecimal, parquet.TypePort, parquet.TypeProtocol,
+			parquet.TypeDuration, parquet.TypeDate, parquet.TypeTimestamp, parquet.TypeIPv4,
+			parquet.TypeMAC:
+			return true
+		}
+		return false
 	}
 	return true
 }
@@ -127,6 +143,26 @@ func refuseAggregateArgument(fc *plansql.FuncCallNode, typeOf func(plansql.Node)
 		return nil
 	}
 	name := strings.ToLower(strings.TrimSpace(fc.Name))
+	if name == "ohlcv" {
+		// The instant and the volume reach the pre-aggregate projection
+		// since #1694, and a CASE over a VECTOR column fails there uncoded
+		// (its declaration declines; the projection writes []float32 into
+		// a FLOAT64 vector). No bar is built over a vector — the operator
+		// says so for the bare column — so the binder says it for the CASE.
+		// The price position is left as it was.
+		for _, i := range []int{0, 2} {
+			if i >= len(fc.Args) {
+				continue
+			}
+			if _, decided := typeOf(fc.Args[i]); decided {
+				continue
+			}
+			if t, ok := caseBranchMisfit(plansql.Unparen(fc.Args[i]), aggArgNumeric, typeOf); ok && t == parquet.TypeVector {
+				return sqlerr.New("42883", "ohlcv(ts, price, volume): no bar over a %s of type vector",
+					[]string{"ts", "", "volume"}[i])
+			}
+		}
+	}
 	positions, ok := aggArgPositions[name]
 	if !ok {
 		return nil
@@ -145,6 +181,11 @@ func refuseAggregateArgument(fc *plansql.FuncCallNode, typeOf func(plansql.Node)
 		arg := plansql.Unparen(fc.Args[i])
 		if lit, ok := arg.(*plansql.Lit); ok && (lit.Kind == plansql.LitString || lit.Kind == plansql.LitNull) {
 			switch {
+			case class == aggArgOrderKey && lit.Kind == plansql.LitString:
+				// A quoted key is text, which the kernel cannot order: it
+				// answered NULL (#1694). A NULL key orders no row, and its
+				// NULL is the answer.
+				return orderKeyRefusal(name, "text")
 			case aggOrderedSet[name]:
 				return orderedSetRefusal(name)
 			case aggUnknownIsNotUnique[name]:
@@ -171,8 +212,21 @@ func refuseAggregateArgument(fc *plansql.FuncCallNode, typeOf func(plansql.Node)
 			continue
 		}
 		t, ok := typeOf(fc.Args[i])
+		if !ok && i > 0 {
+			// An undecided CASE in a later position: the declaration
+			// declines a CASE over a VECTOR column, whose projection then
+			// fails uncoded (`cannot store []float32 into FLOAT64 vector`)
+			// before the operator's backstop can name the argument. A later
+			// argument reaches that projection since #1694; a branch of a
+			// type the position refuses decides it here instead. The first
+			// position is left as it was.
+			t, ok = caseBranchMisfit(arg, class, typeOf)
+		}
 		if !ok || aggArgFits(class, t) {
 			continue
+		}
+		if class == aggArgOrderKey {
+			return orderKeyRefusal(name, pgTypeName(t))
 		}
 		if name == "string_agg" && t == parquet.TypeBytes {
 			// PostgreSQL has string_agg(bytea, bytea) and answers it; this
@@ -201,6 +255,35 @@ func refuseAggregateArgument(fc *plansql.FuncCallNode, typeOf func(plansql.Node)
 // while MODE and PERCENTILE_DISC (polymorphic) reach the WITHIN GROUP check
 // (measured on 17.11, br_codex2/pg_percentile_cont.log).
 var aggOrderedSet = map[string]bool{"mode": true, "percentile_disc": true}
+
+// caseBranchMisfit is the type of the first THEN / ELSE result of a CASE
+// that does not fit class, or false.
+func caseBranchMisfit(n plansql.Node, class aggArgClass, typeOf func(plansql.Node) (parquet.TypeID, bool)) (parquet.TypeID, bool) {
+	c, ok := n.(*plansql.CaseNode)
+	if !ok {
+		return 0, false
+	}
+	results := make([]plansql.Node, 0, len(c.Whens)+1)
+	for _, w := range c.Whens {
+		results = append(results, w.Result)
+	}
+	if c.Else != nil {
+		results = append(results, c.Else)
+	}
+	for _, r := range results {
+		if t, ok := typeOf(r); ok && !aggArgFits(class, t) {
+			return t, true
+		}
+	}
+	return 0, false
+}
+
+// orderKeyRefusal is MIN_BY/MAX_BY over a key the kernel cannot order
+// (aggArgOrderKey). PostgreSQL has neither aggregate; the key has an order
+// there and in DuckDB, so this is a capability refusal, not a type error.
+func orderKeyRefusal(name, typ string) error {
+	return sqlerr.New("0A000", "%s over an ordering key of type %s is not supported", name, typ)
+}
 
 func orderedSetRefusal(name string) error {
 	return sqlerr.New("42809", "WITHIN GROUP is required for ordered-set aggregate %s", name)

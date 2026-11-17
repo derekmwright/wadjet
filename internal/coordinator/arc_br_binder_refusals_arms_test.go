@@ -371,7 +371,7 @@ func brAggregateCells() []brArmCell {
 		brArmCell{name: "aggRow/windowMin", sql: "SELECT id, MIN(c_row) OVER () AS v FROM typemx_nested WHERE id < 3",
 			state: "42883", msg: "function min(record) does not exist"},
 		brArmCell{name: "aggRow/minByOrdering", sql: "SELECT min_by(id, c_row) AS v FROM typemx_nested WHERE id < 10",
-			state: "42883", msg: "function min_by(bigint, record) does not exist"},
+			state: "0A000", msg: "min_by over an ordering key of type record is not supported"},
 		brArmCell{name: "aggRowOk/maxByValue", sql: "SELECT max_by(c_row, id) AS v FROM typemx_nested WHERE id < 10", same: true},
 		brArmCell{name: "aggUnknown/sumQuoted", sql: "SELECT SUM('5') AS v",
 			state: "42725", msg: "function sum(unknown) is not unique"},

@@ -326,8 +326,10 @@ func TestCovarianceState(t *testing.T) {
 		s := &covarianceState{}
 		s.update(5, 1)
 		s.update(5, 2) // x constant => m2x = 0
-		if s.correlation() != 0 {
-			t.Fatal("expected 0 for zero variance")
+		// PostgreSQL's float8_corr answers NULL for a vertical line; this
+		// pinned 0 until #1694.
+		if r, ok := s.correlation(); ok {
+			t.Fatalf("expected NULL for zero variance, got %v", r)
 		}
 	})
 
@@ -337,7 +339,7 @@ func TestCovarianceState(t *testing.T) {
 		for i := 1.0; i <= 10; i++ {
 			s.update(i, i*2)
 		}
-		corr := s.correlation()
+		corr, _ := s.correlation()
 		if math.Abs(corr-1.0) > 0.001 {
 			t.Fatalf("expected correlation ~1.0, got %f", corr)
 		}

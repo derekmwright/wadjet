@@ -52,7 +52,9 @@ func numericFloat64(v *batch.Vector, i int) (float64, bool) {
 //
 // Left out: the byte-backed types (STRING, BYTES, IPV6, CIDR, UUID) and the
 // containers. Those order fine, but not through a float64, so MIN_BY over such
-// an ordering key still answers NULL. Tracked separately.
+// an ordering key is refused 0A000: by the binder (physical aggArgOrderKey,
+// which names this same set) and, for a key it could not type, by the
+// operator (#1694). It answered NULL before.
 func orderKeyFloat64(v *batch.Vector, i int) (float64, bool) {
 	switch v.Type {
 	case batch.TypeIPv4, batch.TypeMAC:
@@ -64,6 +66,23 @@ func orderKeyFloat64(v *batch.Vector, i int) (float64, bool) {
 		return 0, true
 	}
 	return numericFloat64(v, i)
+}
+
+// orderKeyExact is an ordering key's EXACT form, where its float64 reading is
+// not: the int64-backed types (a BIGINT past 2^53, a TIMESTAMP's microseconds
+// near year 9999) and DECIMAL's 128-bit carrier, with its scale. Two keys of
+// the same scale compare by it; anything else compares by orderKeyFloat64,
+// which is exact for the 32-bit types and the float order for the floats.
+// Through the float alone, BIGINT keys 2^53 and 2^53 + 1 tied and MAX_BY
+// returned whichever row it read first (#1694).
+func orderKeyExact(v *batch.Vector, i int) (batch.Int128, int, bool) {
+	switch v.Type {
+	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeDuration, batch.TypeIPv4, batch.TypeMAC:
+		return batch.Int128From(v.Int64Data[i]), 0, true
+	case batch.TypeDecimal:
+		return v.DecimalData.Data[i], v.DecimalData.Scale, true
+	}
+	return batch.Int128{}, 0, false
 }
 
 func orderKeyPromotable(typ batch.TypeID) bool {

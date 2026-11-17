@@ -230,10 +230,10 @@ func (h *HashAggregate) nextOwn(_ context.Context) (*batch.RecordBatch, error) {
 				out.Columns[colIdx].SetValue(i, int64(ext.distinctSets[j].count()))
 			case AggCorr:
 				state := ext.extraState[j].(*covarianceState)
-				if state.count < 2 {
-					out.Columns[colIdx].SetValue(i, nil)
+				if r, ok := state.correlation(); ok {
+					out.Columns[colIdx].SetValue(i, r)
 				} else {
-					out.Columns[colIdx].SetValue(i, state.correlation())
+					out.Columns[colIdx].SetValue(i, nil)
 				}
 			case AggCovarSamp:
 				state := ext.extraState[j].(*covarianceState)

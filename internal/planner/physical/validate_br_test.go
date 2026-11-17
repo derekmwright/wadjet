@@ -293,12 +293,16 @@ func TestArcBRAggregateArgumentClassMatchesPostgres(t *testing.T) {
 				cells = append(cells, brCell{sql, "42883", "function " + f + "("})
 			}
 		}
-		// min_by's ORDERING argument is the ordered position.
+		// min_by's ORDERING argument is the ordered position, and the
+		// kernel orders only these keys (measured per type, #1694): every
+		// other one, ROW among them, answered NULL and is refused 0A000.
 		sql := "SELECT min_by(id, " + c + ") AS v FROM tm"
-		if c == "c_row" || c == "c_rownest" {
-			cells = append(cells, brCell{sql, "42883", "function min_by(bigint, record)"})
-		} else {
+		switch c {
+		case "c_bool", "c_i32", "c_i64", "c_f32", "c_f64", "c_ts", "c_ipv4", "c_mac",
+			"c_port", "c_proto", "c_dur", "c_date", "c_dec":
 			cells = append(cells, brCell{sql, "", ""})
+		default:
+			cells = append(cells, brCell{sql, "0A000", "min_by over an ordering key of type"})
 		}
 	}
 	cells = append(cells,

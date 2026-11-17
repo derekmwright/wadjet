@@ -113,11 +113,12 @@ func TestCovarianceStateMergeUnequalSlices(t *testing.T) {
 	if merged.count != int64(len(xs)) {
 		t.Fatalf("merged count %d, want %d", merged.count, len(xs))
 	}
+	gotCorr, _ := merged.correlation()
 	for _, tc := range []struct {
 		name      string
 		got, want float64
 	}{
-		{"CORR", merged.correlation(), wantCorr},
+		{"CORR", gotCorr, wantCorr},
 		{"COVAR_SAMP", merged.covarSamp(), wantSamp},
 		{"COVAR_POP", merged.covarPop(), wantPop},
 	} {

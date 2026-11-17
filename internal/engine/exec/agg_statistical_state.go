@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
 )
 
 // stringAggState accumulates strings with a separator.
@@ -213,11 +214,16 @@ func (s *covarianceState) covarSamp() float64 {
 	return s.c / float64(s.count-1)
 }
 
-func (s *covarianceState) correlation() float64 {
-	if s.count < 2 || s.m2x == 0 || s.m2y == 0 {
-		return 0
+// correlation is CORR's answer; ok=false is SQL NULL. PostgreSQL's
+// float8_corr: no rows is NULL, and so is a horizontal or vertical line — an
+// argument whose squared deviations sum to zero (one row, or every pair
+// carrying the same x, or the same y). This answered 0 there (#1694); the
+// sample has no correlation, and 0 claims it measured none.
+func (s *covarianceState) correlation() (float64, bool) {
+	if s.count < 1 || s.m2x == 0 || s.m2y == 0 {
+		return 0, false
 	}
-	return s.c / math.Sqrt(s.m2x*s.m2y)
+	return s.c / math.Sqrt(s.m2x*s.m2y), true
 }
 
 // covarianceStateWidth is the encoded width of a covariance partial state:
@@ -270,8 +276,9 @@ const (
 
 // FinalizeCovarianceState decodes a merged partial state and finishes it as
 // the named kind. ok=false means SQL NULL, on the same thresholds the
-// single-process finalization applies: fewer than two rows for CORR and
-// COVAR_SAMP, no rows at all for COVAR_POP.
+// single-process finalization applies: fewer than two rows for COVAR_SAMP, no
+// rows at all for COVAR_POP, and for CORR a zero sum of squared deviations in
+// either argument (correlation).
 //
 // Used by the distributed final-aggregate fold (worker/var_fold.go).
 func FinalizeCovarianceState(encoded, kind string) (float64, bool) {
@@ -281,10 +288,7 @@ func FinalizeCovarianceState(encoded, kind string) (float64, bool) {
 	}
 	switch kind {
 	case CovarKindCorr:
-		if st.count < 2 {
-			return 0, false
-		}
-		return st.correlation(), true
+		return st.correlation()
 	case CovarKindCovarSamp:
 		if st.count < 2 {
 			return 0, false
@@ -360,10 +364,31 @@ type collectState struct {
 type minMaxByState struct {
 	// Field order packs this to 32 B (was 40) and puts the pointer prefix first:
 	// one per group for MIN_BY/MAX_BY.
-	bestVal  any     // the return column value at that row
-	bestCmp  float64 // the comparison column value (min or max)
-	hasValue bool
-	isMin    bool
+	bestVal   any     // the return column value at that row
+	bestCmp   float64 // the comparison column value (min or max)
+	bestKey   batch.Int128
+	bestScale int  // bestKey's scale
+	exact     bool // bestKey holds the key's exact form (orderKeyExact)
+	hasValue  bool
+	isMin     bool
+}
+
+// beats reports whether a candidate key replaces the best one: by the exact
+// form when both have one at one scale, by the float order otherwise.
+func (s *minMaxByState) beats(f float64, k batch.Int128, scale int, exact bool) bool {
+	if !s.hasValue {
+		return true
+	}
+	var c int
+	if exact && s.exact && scale == s.bestScale {
+		c = k.Cmp(s.bestKey)
+	} else {
+		c = kernel.CompareFloat64(f, s.bestCmp)
+	}
+	if s.isMin {
+		return c < 0
+	}
+	return c > 0
 }
 
 // boxContainerMemBytes estimates the retained heap footprint of a value

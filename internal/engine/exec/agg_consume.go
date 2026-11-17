@@ -611,6 +611,18 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) error {
 			// never becomes the answer, so it takes the wider table.
 			if idx := h.aggColIdx2[i]; idx >= 0 {
 				h.aggF64Extract2[i] = resolveOrderKeyExtractor(b.Columns[idx].Type)
+				if h.aggF64Extract2[i] == nil {
+					// A key this kernel cannot order skipped every row and
+					// answered NULL (#1694). The binder refuses it
+					// (physical aggArgOrderKey); this is the backstop for a
+					// key whose type the binder could not decide.
+					name := "max_by"
+					if agg.Func == AggMinBy {
+						name = "min_by"
+					}
+					return sqlerr.New("0A000", "%s over an ordering key of type %s is not supported",
+						name, b.Columns[idx].Type)
+				}
 			}
 		case AggOhlcv, AggOhlcvState:
 			// The bar's CARRIER, resolved from the vectors the operator will

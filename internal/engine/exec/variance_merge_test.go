@@ -182,13 +182,15 @@ func TestCovarianceStateMergePairwise(t *testing.T) {
 	if merged.count != ref.count {
 		t.Fatalf("count %d, want %d", merged.count, ref.count)
 	}
+	mergedCorr, _ := merged.correlation()
+	refCorr, _ := ref.correlation()
 	for _, f := range []struct {
 		name      string
 		got, want float64
 	}{
 		{"covar_samp", merged.covarSamp(), ref.covarSamp()},
 		{"covar_pop", merged.covarPop(), ref.covarPop()},
-		{"corr", merged.correlation(), ref.correlation()},
+		{"corr", mergedCorr, refCorr},
 		{"meanX", merged.meanX, ref.meanX},
 		{"meanY", merged.meanY, ref.meanY},
 	} {

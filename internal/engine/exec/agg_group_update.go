@@ -518,12 +518,12 @@ func (h *HashAggregate) updateGroup(gs *groupState, b *batch.RecordBatch, row in
 			}
 			state := ext.extraState[i].(*minMaxByState)
 			cmpVal := extract2(v2, row)
-			if !state.hasValue ||
-				(state.isMin && kernel.CompareFloat64(cmpVal, state.bestCmp) < 0) ||
-				(!state.isMin && kernel.CompareFloat64(cmpVal, state.bestCmp) > 0) {
+			key, scale, exact := orderKeyExact(v2, row)
+			if state.beats(cmpVal, key, scale, exact) {
 				before := boxContainerMemBytes(state.bestVal)
 				state.hasValue = true
 				state.bestCmp = cmpVal
+				state.bestKey, state.bestScale, state.exact = key, scale, exact
 				state.bestVal = v1.GetValue(row)
 				h.extraStateBytes += boxContainerMemBytes(state.bestVal) - before
 			}

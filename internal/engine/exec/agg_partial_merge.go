@@ -441,9 +441,10 @@ func (h *HashAggregate) mergeExtraState(dst, src *groupStateExtras) {
 			if !s.hasValue {
 				continue
 			}
-			if !d.hasValue || (d.isMin && kernel.CompareFloat64(s.bestCmp, d.bestCmp) < 0) || (!d.isMin && kernel.CompareFloat64(s.bestCmp, d.bestCmp) > 0) {
+			if d.beats(s.bestCmp, s.bestKey, s.bestScale, s.exact) {
 				before := boxContainerMemBytes(d.bestVal)
 				d.bestVal, d.bestCmp, d.hasValue = s.bestVal, s.bestCmp, true
+				d.bestKey, d.bestScale, d.exact = s.bestKey, s.bestScale, s.exact
 				h.extraStateBytes += boxContainerMemBytes(d.bestVal) - before
 			}
 		case *containerMinMaxState:
