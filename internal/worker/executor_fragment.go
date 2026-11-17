@@ -2450,6 +2450,16 @@ func (e *Executor) buildFragmentHashAggregate(ctx context.Context, spec distribu
 			if fn == exec.AggCount {
 				fn = exec.AggSum
 			}
+			// An approx_distinct partial is a COUNT (its exact distinct set
+			// does not travel), and approx_distinct over per-task counts is
+			// the number of distinct counts — 2 for two tasks of unequal size
+			// (#1288). There is no merge to do, so refuse rather than answer
+			// it: the planner gates approx_distinct onto the one-level
+			// RawInputAggregate shape, which never reaches merge mode.
+			if fn == exec.AggApproxDistinct {
+				return nil, fmt.Errorf("hash_aggregate: approx_distinct %q cannot be merged from partial counts; "+
+					"it must run as a raw-input aggregate", a.OutputCol)
+			}
 			// The partial emitted an encoded (count, mean, M2) triple per
 			// group; merging reads those triples and combines them pairwise
 			// instead of accumulating raw values (which is what AggVarState

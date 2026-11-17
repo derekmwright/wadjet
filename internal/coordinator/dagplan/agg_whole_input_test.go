@@ -13,7 +13,9 @@ func TestAggNeedsWholeInput_Classification(t *testing.T) {
 		"median", "percentile_cont", "percentile_disc",
 		"quantile_cont", "quantile_disc",
 		"mode", "min_by", "max_by", "string_agg",
-		"MEDIAN", " Min_By ",
+		// An exact distinct set whose partial is its COUNT (#1288).
+		"approx_distinct",
+		"MEDIAN", " Min_By ", "APPROX_DISTINCT",
 	} {
 		if !aggNeedsWholeInput(fn) {
 			t.Errorf("%q is not gated, so it would run partial-then-merge and answer from partials", fn)
@@ -54,6 +56,11 @@ func TestAggWholeInputGate_RawInputAggregate(t *testing.T) {
 		{"min_by", "SELECT MIN_BY(o_orderpriority, o_totalprice) AS m FROM orders"},
 		{"max_by grouped", "SELECT o_orderstatus AS k, MAX_BY(o_orderpriority, o_totalprice) AS m FROM orders GROUP BY o_orderstatus"},
 		{"string_agg", "SELECT STRING_AGG(o_orderpriority, '::') AS s FROM orders"},
+		// #1288: a merge of approx_distinct partials counted the distinct
+		// per-task COUNTS (2 for two tasks of unequal size).
+		{"approx_distinct", "SELECT APPROX_DISTINCT(o_custkey) AS d FROM orders"},
+		{"approx_distinct grouped", "SELECT o_orderstatus AS k, APPROX_DISTINCT(o_custkey) AS d FROM orders GROUP BY o_orderstatus"},
+		{"approx_distinct beside count", "SELECT COUNT(*) AS n, APPROX_DISTINCT(o_custkey) AS d FROM orders"},
 		// One gated aggregate in the list is enough: the others ride the
 		// same stage, so the whole aggregate has to take the gated route.
 		{"mixed with sum", "SELECT SUM(o_totalprice) AS s, MEDIAN(o_totalprice) AS m FROM orders"},

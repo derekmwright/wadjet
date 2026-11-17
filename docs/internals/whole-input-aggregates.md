@@ -50,3 +50,20 @@ Source: internal/coordinator/dagplan/agg_whole_input.go — aggNeedsWholeInput, 
 // Correctness over scalability is the right way round here: the alternative
 // on offer is a wrong number that looks right.
 ```
+
+## approx_distinct (#1288)
+
+`approx_distinct` joined the gated list in v0.25.6. Its accumulator is an
+exact distinct set (`exec.distinctSet`, the one `COUNT(DISTINCT)` uses), not a
+sketch, and the partial a task writes is that set's `count()` — an INT64, the
+set itself never leaves the task. Split into partial-then-merge, the merge
+stage re-ran `approx_distinct` over the per-task counts and answered the
+number of distinct COUNTS: `SELECT approx_distinct(c_i32) FROM typemx WHERE
+id < 20` answered 2 on every DAG arm (two tasks holding unequal shares of the
+20 rows) and 1 over the whole table, where the single-process engine answers
+20 and 4828. Gated, every arm runs the same exact set over the same rows and
+answers the same value. The worker also refuses a merge-mode `approx_distinct`
+outright (`buildFragmentHashAggregate`), since there is no correct merge of
+counts. Pins: `dagplan.TestAggWholeInputGate_RawInputAggregate`,
+`worker.TestBuildFragmentHashAggregateRefusesApproxDistinctMerge`, and the
+five-arm `coordinator.TestApproxDistinctFiveArmsAgree`.

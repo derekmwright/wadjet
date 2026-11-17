@@ -329,11 +329,12 @@ func brAggregateCells() []brArmCell {
 			default:
 				cell.state, cell.msg = "42883", "function "+agg+"("
 			}
-			// approx_distinct answers a different count on the DAG arms, and
-			// AVG over REAL a different float, at base and at this tip — both
-			// PostgreSQL-valid shapes, recorded as filing candidates in arc
-			// BR's notes; this table asserts only that they ANSWER.
-			if agg == "approx_distinct" || (agg == "avg" && c == "c_f32") {
+			// AVG over REAL answers a different float on the DAG arms, at
+			// base and at this tip — a PostgreSQL-valid shape, recorded as a
+			// filing candidate in arc BR's notes; this table asserts only
+			// that it ANSWERS. (approx_distinct used to sit here too; #1288
+			// made every arm agree, so it is a `same` control now.)
+			if agg == "avg" && c == "c_f32" {
 				cell.same, cell.answers = false, true
 			}
 			out = append(out, cell)
