@@ -333,6 +333,49 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
    settles everything downstream of it; check for the commitment before
    drafting the question.
 
+   **The procedure (amended 2026-11-17, the maintainer's words: "What does
+   PostgreSQL do? Our default is PostgreSQL compatibility, not inventing new
+   semantics. ... Don't ask me to define SQL semantics from scratch.").** A
+   question of the form "what should this statement answer" is answered by
+   MEASUREMENT, never by a position and never by what seems more useful:
+
+   1. Run a differential matrix on the reference installation, under its
+      actual configuration: PostgreSQL 17.11, `postgres:17-alpine`, `initdb
+      --locale=C --encoding=UTF8` (database collate `C`, ctype `C`; the
+      `pg-oracle` task in `Taskfile.yml`). The matrix covers representative
+      inputs of the class in question, not the one statement that raised it,
+      through every evaluation position the engine has for it (a value in the
+      select list, a filter, a pushed-down filter, a group or join key, a
+      constant fold) and on every arm.
+   2. Record the PostgreSQL version, locale and collation, PostgreSQL's
+      answers and this engine's answers, beside each other, where the work is
+      tracked (the issue line, with the evidence files it names).
+   3. The reference's answer IS the answer. Where this engine differs it is a
+      defect with the reference's answer as its done-condition, filed at its
+      priority; it is not put to the maintainer.
+   4. Where PostgreSQL's behaviour varies with a mode this engine does not
+      have (a collation, a locale, a setting, a type it lacks), measure the
+      variants too, name the gap explicitly, and recommend ONE of: a bounded
+      implementation of the reference configuration's behaviour, or a clear
+      refusal with PostgreSQL's SQLSTATE where it has one. The other modes'
+      behaviour is a feature that arrives with support for the mode, not a
+      variant of the fix.
+   5. A decision reaches the maintainer ONLY when there is an architectural
+      tradeoff the reference behaviour cannot settle (a cost in memory, wire
+      format, latency or structure between two ways of producing the
+      reference's answer; or a construct PostgreSQL cannot express at all).
+      The question then states the measured reference behaviour, the
+      alternatives and each one's cost. A question that asks the maintainer
+      what the SQL should mean is malformed and is not sent.
+
+   The case that produced this amendment: `ILIKE` over non-ASCII text was
+   brought to the maintainer as "a position", with a recommendation (keep
+   Unicode folding, reconfigure the oracle) reasoned from usefulness. The
+   measurement, run afterwards, settled it in an hour: under the reference's
+   C locale PostgreSQL folds ASCII only in `lower`, `upper`, `initcap`,
+   `ILIKE` and `~*`; this engine's `lower()` agreed as a value and disagreed
+   inside a comparison, which was a defect nobody had seen (#1209).
+
 8. **Float ordering follows PostgreSQL, not IEEE754, in every ORDER/
    PARTITION/peer/key context; a boxed value's comparison order follows the
    column's declaration, not the box's Go type.** (Added 2026-08-23, #444/

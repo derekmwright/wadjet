@@ -50,6 +50,11 @@ const check = (name, ok, got) => { console.log((ok ? 'ok   ' : 'FAIL ') + name +
   t = await run(base([{ id: '1', title: 't', brief: 'b' }]), (o, p) => p.startsWith('You were launched by the architect') ? (o.phase === 'Build' ? B : o.phase === 'Verify' ? V : C) : null)
   check('every agent prompt opens with the authorization preamble', t.r.landed.length === 1, t.r)
 
+  // ADR-0012 item 7 (carved in 2026-11-17): what SQL should mean is measured on the reference
+  // installation, never escalated as a decision. The builder and the reviewer must both be told.
+  t = await run(base([{ id: '1', title: 't', brief: 'b' }]), (o, p) => (o.phase === 'Verify' || (p.includes('ADR-0012 item 7') && p.includes('--locale=C --encoding=UTF8'))) ? (o.phase === 'Build' ? B : o.phase === 'Verify' ? V : C) : null)
+  check('builder and reviewer prompts carry the measure-the-reference rule', t.r.landed.length === 1, t.r)
+
   t = await run(base([{ id: '1', title: 't', brief: 'b' }, { id: '2', title: 't', brief: 'b' }, { id: '3', title: 't', brief: 'b' }], { maxItems: 2 }), o => o.phase === 'Build' ? B : o.phase === 'Verify' ? V : C)
   check('a stretch is bounded and reports what it did not start', t.r.landed.length === 2 && t.r.notStarted.join() === '3', t.r)
 

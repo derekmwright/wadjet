@@ -62,6 +62,23 @@ is given the ruling as part of the brief.
 Triggers are written narrowly on purpose: a vague one costs an agent and a round trip every
 time it fires wrongly.
 
+### What never goes to the maintainer: what SQL should mean
+
+ADR-0012 item 7 is binding on every role. "What should this statement answer?" is not a
+design decision and is not trigger 1. The worker, the reviewer or the architect, whoever meets
+it, **measures the reference installation** (PostgreSQL 17.11, `postgres:17-alpine`,
+`--locale=C --encoding=UTF8`) with a matrix over the class of inputs, records version, locale,
+collation, PostgreSQL's answers and this engine's answers on the tracking line, and treats the
+reference's answer as the done-condition. Where PostgreSQL varies by a mode this engine lacks
+(a collation, a setting), the gap is named and one of a bounded implementation or a clear
+refusal is recommended.
+
+The architect brings the maintainer a decision only for an architectural tradeoff the
+reference behaviour cannot settle, stated with the measured behaviour and each alternative's
+cost. Before sending any question about behaviour, the architect checks it against this
+paragraph: if a measurement could answer it, the measurement is run instead. A recommendation
+about semantics that was reasoned and not measured is not sent.
+
 ## Design records
 
 No design change gets code before its ADR (`docs/adr/`) is accepted.

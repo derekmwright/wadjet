@@ -162,6 +162,7 @@ See `docs/testing/CREW.md`: the architect (the session talking to the maintainer
 - Don't mock the object store in tests — use `objstore.NewMemStore()`.
 - Don't add features to the SQL parser using a parser generator — it's recursive descent by design.
 - Don't skip pgwire compatibility — tools like Superset, psql, and JDBC depend on it.
+- Don't ask the maintainer what SQL should mean, and don't reason your way to a semantics recommendation. PostgreSQL decides (ADR-0012 item 7): measure the reference installation (PostgreSQL 17.11, `postgres:17-alpine`, `--locale=C --encoding=UTF8`) over the class of inputs, record version, locale, collation and both sides' answers, and fix to its answer. Where PostgreSQL varies by a mode Wadjet lacks, name the gap and recommend a bounded implementation or a clear refusal. Only an architectural tradeoff the reference cannot settle is a question for the maintainer.
 
 ## Run Modes
 
