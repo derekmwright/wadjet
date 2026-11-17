@@ -1,0 +1,769 @@
+# PostgreSQL 17.11 answers for count_distinct_zero_rows_arms_test.go (TestCountDistinctZeroRowsMeasure).
+zero/countStar/countDistinct/ungrouped	a:bigint,b:bigint | 0,0
+zero/countStar/countDistinct/grouped	(0 rows)
+zero/countStar/countDistinct/rollup	g:integer,a:bigint,b:bigint | NULL,0,0
+zero/countStar/countDistinct/emptySets	a:bigint,b:bigint | 0,0; 0,0
+zero/countStar/countDistinct/having	a:bigint,b:bigint | 0,0
+zero/countStar/countDistinct/filter	a:bigint,b:bigint | 0,0
+zero/countStar/countDistinct/scalarSubquery	a:bigint | 0
+zero/countStar/countDistinct/unionAll	a:bigint,b:bigint | 0,0; 0,0
+zero/countStar/countDistinctExpr/ungrouped	a:bigint,b:bigint | 0,0
+zero/countStar/countDistinctExpr/grouped	(0 rows)
+zero/countStar/countDistinctExpr/rollup	g:integer,a:bigint,b:bigint | NULL,0,0
+zero/countStar/countDistinctExpr/emptySets	a:bigint,b:bigint | 0,0; 0,0
+zero/countStar/countDistinctExpr/having	a:bigint,b:bigint | 0,0
+zero/countStar/countDistinctExpr/filter	a:bigint,b:bigint | 0,0
+zero/countStar/countDistinctExpr/scalarSubquery	a:bigint | 0
+zero/countStar/countDistinctExpr/unionAll	a:bigint,b:bigint | 0,0; 0,0
+zero/countStar/twoCountDistinct/ungrouped	a:bigint,b:bigint,c:bigint | 0,0,0
+zero/countStar/twoCountDistinct/grouped	(0 rows)
+zero/countStar/twoCountDistinct/rollup	g:integer,a:bigint,b:bigint,c:bigint | NULL,0,0,0
+zero/countStar/twoCountDistinct/emptySets	a:bigint,b:bigint,c:bigint | 0,0,0; 0,0,0
+zero/countStar/twoCountDistinct/having	a:bigint,b:bigint,c:bigint | 0,0,0
+zero/countStar/twoCountDistinct/filter	a:bigint,b:bigint,c:bigint | 0,0,0
+zero/countStar/twoCountDistinct/scalarSubquery	a:bigint | 0
+zero/countStar/twoCountDistinct/unionAll	a:bigint,b:bigint,c:bigint | 0,0,0; 0,0,0
+zero/countStar/sumDistinct/ungrouped	a:bigint,b:bigint | 0,NULL
+zero/countStar/sumDistinct/grouped	(0 rows)
+zero/countStar/sumDistinct/rollup	g:integer,a:bigint,b:bigint | NULL,0,NULL
+zero/countStar/sumDistinct/emptySets	a:bigint,b:bigint | 0,NULL; 0,NULL
+zero/countStar/sumDistinct/having	a:bigint,b:bigint | 0,NULL
+zero/countStar/sumDistinct/filter	a:bigint,b:bigint | 0,NULL
+zero/countStar/sumDistinct/scalarSubquery	a:bigint | 0
+zero/countStar/sumDistinct/unionAll	a:bigint,b:bigint | 0,NULL; 0,NULL
+zero/countX/countDistinct/ungrouped	a:bigint,b:bigint | 0,0
+zero/countX/countDistinct/grouped	(0 rows)
+zero/countX/countDistinct/rollup	g:integer,a:bigint,b:bigint | NULL,0,0
+zero/countX/countDistinct/emptySets	a:bigint,b:bigint | 0,0; 0,0
+zero/countX/countDistinct/having	a:bigint,b:bigint | 0,0
+zero/countX/countDistinct/filter	a:bigint,b:bigint | 0,0
+zero/countX/countDistinct/scalarSubquery	a:bigint | 0
+zero/countX/countDistinct/unionAll	a:bigint,b:bigint | 0,0; 0,0
+zero/countX/countDistinctExpr/ungrouped	a:bigint,b:bigint | 0,0
+zero/countX/countDistinctExpr/grouped	(0 rows)
+zero/countX/countDistinctExpr/rollup	g:integer,a:bigint,b:bigint | NULL,0,0
+zero/countX/countDistinctExpr/emptySets	a:bigint,b:bigint | 0,0; 0,0
+zero/countX/countDistinctExpr/having	a:bigint,b:bigint | 0,0
+zero/countX/countDistinctExpr/filter	a:bigint,b:bigint | 0,0
+zero/countX/countDistinctExpr/scalarSubquery	a:bigint | 0
+zero/countX/countDistinctExpr/unionAll	a:bigint,b:bigint | 0,0; 0,0
+zero/countX/twoCountDistinct/ungrouped	a:bigint,b:bigint,c:bigint | 0,0,0
+zero/countX/twoCountDistinct/grouped	(0 rows)
+zero/countX/twoCountDistinct/rollup	g:integer,a:bigint,b:bigint,c:bigint | NULL,0,0,0
+zero/countX/twoCountDistinct/emptySets	a:bigint,b:bigint,c:bigint | 0,0,0; 0,0,0
+zero/countX/twoCountDistinct/having	a:bigint,b:bigint,c:bigint | 0,0,0
+zero/countX/twoCountDistinct/filter	a:bigint,b:bigint,c:bigint | 0,0,0
+zero/countX/twoCountDistinct/scalarSubquery	a:bigint | 0
+zero/countX/twoCountDistinct/unionAll	a:bigint,b:bigint,c:bigint | 0,0,0; 0,0,0
+zero/countX/sumDistinct/ungrouped	a:bigint,b:bigint | 0,NULL
+zero/countX/sumDistinct/grouped	(0 rows)
+zero/countX/sumDistinct/rollup	g:integer,a:bigint,b:bigint | NULL,0,NULL
+zero/countX/sumDistinct/emptySets	a:bigint,b:bigint | 0,NULL; 0,NULL
+zero/countX/sumDistinct/having	a:bigint,b:bigint | 0,NULL
+zero/countX/sumDistinct/filter	a:bigint,b:bigint | 0,NULL
+zero/countX/sumDistinct/scalarSubquery	a:bigint | 0
+zero/countX/sumDistinct/unionAll	a:bigint,b:bigint | 0,NULL; 0,NULL
+zero/sumX/countDistinct/ungrouped	a:bigint,b:bigint | NULL,0
+zero/sumX/countDistinct/grouped	(0 rows)
+zero/sumX/countDistinct/rollup	g:integer,a:bigint,b:bigint | NULL,NULL,0
+zero/sumX/countDistinct/emptySets	a:bigint,b:bigint | NULL,0; NULL,0
+zero/sumX/countDistinct/having	a:bigint,b:bigint | NULL,0
+zero/sumX/countDistinct/filter	a:bigint,b:bigint | NULL,0
+zero/sumX/countDistinct/scalarSubquery	a:bigint | NULL
+zero/sumX/countDistinct/unionAll	a:bigint,b:bigint | NULL,0; NULL,0
+zero/sumX/countDistinctExpr/ungrouped	a:bigint,b:bigint | NULL,0
+zero/sumX/countDistinctExpr/grouped	(0 rows)
+zero/sumX/countDistinctExpr/rollup	g:integer,a:bigint,b:bigint | NULL,NULL,0
+zero/sumX/countDistinctExpr/emptySets	a:bigint,b:bigint | NULL,0; NULL,0
+zero/sumX/countDistinctExpr/having	a:bigint,b:bigint | NULL,0
+zero/sumX/countDistinctExpr/filter	a:bigint,b:bigint | NULL,0
+zero/sumX/countDistinctExpr/scalarSubquery	a:bigint | NULL
+zero/sumX/countDistinctExpr/unionAll	a:bigint,b:bigint | NULL,0; NULL,0
+zero/sumX/twoCountDistinct/ungrouped	a:bigint,b:bigint,c:bigint | NULL,0,0
+zero/sumX/twoCountDistinct/grouped	(0 rows)
+zero/sumX/twoCountDistinct/rollup	g:integer,a:bigint,b:bigint,c:bigint | NULL,NULL,0,0
+zero/sumX/twoCountDistinct/emptySets	a:bigint,b:bigint,c:bigint | NULL,0,0; NULL,0,0
+zero/sumX/twoCountDistinct/having	a:bigint,b:bigint,c:bigint | NULL,0,0
+zero/sumX/twoCountDistinct/filter	a:bigint,b:bigint,c:bigint | NULL,0,0
+zero/sumX/twoCountDistinct/scalarSubquery	a:bigint | NULL
+zero/sumX/twoCountDistinct/unionAll	a:bigint,b:bigint,c:bigint | NULL,0,0; NULL,0,0
+zero/sumX/sumDistinct/ungrouped	a:bigint,b:bigint | NULL,NULL
+zero/sumX/sumDistinct/grouped	(0 rows)
+zero/sumX/sumDistinct/rollup	g:integer,a:bigint,b:bigint | NULL,NULL,NULL
+zero/sumX/sumDistinct/emptySets	a:bigint,b:bigint | NULL,NULL; NULL,NULL
+zero/sumX/sumDistinct/having	a:bigint,b:bigint | NULL,NULL
+zero/sumX/sumDistinct/filter	a:bigint,b:bigint | NULL,NULL
+zero/sumX/sumDistinct/scalarSubquery	a:bigint | NULL
+zero/sumX/sumDistinct/unionAll	a:bigint,b:bigint | NULL,NULL; NULL,NULL
+zero/minX/countDistinct/ungrouped	a:integer,b:bigint | NULL,0
+zero/minX/countDistinct/grouped	(0 rows)
+zero/minX/countDistinct/rollup	g:integer,a:integer,b:bigint | NULL,NULL,0
+zero/minX/countDistinct/emptySets	a:integer,b:bigint | NULL,0; NULL,0
+zero/minX/countDistinct/having	a:integer,b:bigint | NULL,0
+zero/minX/countDistinct/filter	a:integer,b:bigint | NULL,0
+zero/minX/countDistinct/scalarSubquery	a:integer | NULL
+zero/minX/countDistinct/unionAll	a:integer,b:bigint | NULL,0; NULL,0
+zero/minX/countDistinctExpr/ungrouped	a:integer,b:bigint | NULL,0
+zero/minX/countDistinctExpr/grouped	(0 rows)
+zero/minX/countDistinctExpr/rollup	g:integer,a:integer,b:bigint | NULL,NULL,0
+zero/minX/countDistinctExpr/emptySets	a:integer,b:bigint | NULL,0; NULL,0
+zero/minX/countDistinctExpr/having	a:integer,b:bigint | NULL,0
+zero/minX/countDistinctExpr/filter	a:integer,b:bigint | NULL,0
+zero/minX/countDistinctExpr/scalarSubquery	a:integer | NULL
+zero/minX/countDistinctExpr/unionAll	a:integer,b:bigint | NULL,0; NULL,0
+zero/minX/twoCountDistinct/ungrouped	a:integer,b:bigint,c:bigint | NULL,0,0
+zero/minX/twoCountDistinct/grouped	(0 rows)
+zero/minX/twoCountDistinct/rollup	g:integer,a:integer,b:bigint,c:bigint | NULL,NULL,0,0
+zero/minX/twoCountDistinct/emptySets	a:integer,b:bigint,c:bigint | NULL,0,0; NULL,0,0
+zero/minX/twoCountDistinct/having	a:integer,b:bigint,c:bigint | NULL,0,0
+zero/minX/twoCountDistinct/filter	a:integer,b:bigint,c:bigint | NULL,0,0
+zero/minX/twoCountDistinct/scalarSubquery	a:integer | NULL
+zero/minX/twoCountDistinct/unionAll	a:integer,b:bigint,c:bigint | NULL,0,0; NULL,0,0
+zero/minX/sumDistinct/ungrouped	a:integer,b:bigint | NULL,NULL
+zero/minX/sumDistinct/grouped	(0 rows)
+zero/minX/sumDistinct/rollup	g:integer,a:integer,b:bigint | NULL,NULL,NULL
+zero/minX/sumDistinct/emptySets	a:integer,b:bigint | NULL,NULL; NULL,NULL
+zero/minX/sumDistinct/having	a:integer,b:bigint | NULL,NULL
+zero/minX/sumDistinct/filter	a:integer,b:bigint | NULL,NULL
+zero/minX/sumDistinct/scalarSubquery	a:integer | NULL
+zero/minX/sumDistinct/unionAll	a:integer,b:bigint | NULL,NULL; NULL,NULL
+zero/avgX/countDistinct/ungrouped	a:numeric,b:bigint | NULL,0
+zero/avgX/countDistinct/grouped	(0 rows)
+zero/avgX/countDistinct/rollup	g:integer,a:numeric,b:bigint | NULL,NULL,0
+zero/avgX/countDistinct/emptySets	a:numeric,b:bigint | NULL,0; NULL,0
+zero/avgX/countDistinct/having	a:numeric,b:bigint | NULL,0
+zero/avgX/countDistinct/filter	a:numeric,b:bigint | NULL,0
+zero/avgX/countDistinct/scalarSubquery	a:numeric | NULL
+zero/avgX/countDistinct/unionAll	a:numeric,b:bigint | NULL,0; NULL,0
+zero/avgX/countDistinctExpr/ungrouped	a:numeric,b:bigint | NULL,0
+zero/avgX/countDistinctExpr/grouped	(0 rows)
+zero/avgX/countDistinctExpr/rollup	g:integer,a:numeric,b:bigint | NULL,NULL,0
+zero/avgX/countDistinctExpr/emptySets	a:numeric,b:bigint | NULL,0; NULL,0
+zero/avgX/countDistinctExpr/having	a:numeric,b:bigint | NULL,0
+zero/avgX/countDistinctExpr/filter	a:numeric,b:bigint | NULL,0
+zero/avgX/countDistinctExpr/scalarSubquery	a:numeric | NULL
+zero/avgX/countDistinctExpr/unionAll	a:numeric,b:bigint | NULL,0; NULL,0
+zero/avgX/twoCountDistinct/ungrouped	a:numeric,b:bigint,c:bigint | NULL,0,0
+zero/avgX/twoCountDistinct/grouped	(0 rows)
+zero/avgX/twoCountDistinct/rollup	g:integer,a:numeric,b:bigint,c:bigint | NULL,NULL,0,0
+zero/avgX/twoCountDistinct/emptySets	a:numeric,b:bigint,c:bigint | NULL,0,0; NULL,0,0
+zero/avgX/twoCountDistinct/having	a:numeric,b:bigint,c:bigint | NULL,0,0
+zero/avgX/twoCountDistinct/filter	a:numeric,b:bigint,c:bigint | NULL,0,0
+zero/avgX/twoCountDistinct/scalarSubquery	a:numeric | NULL
+zero/avgX/twoCountDistinct/unionAll	a:numeric,b:bigint,c:bigint | NULL,0,0; NULL,0,0
+zero/avgX/sumDistinct/ungrouped	a:numeric,b:bigint | NULL,NULL
+zero/avgX/sumDistinct/grouped	(0 rows)
+zero/avgX/sumDistinct/rollup	g:integer,a:numeric,b:bigint | NULL,NULL,NULL
+zero/avgX/sumDistinct/emptySets	a:numeric,b:bigint | NULL,NULL; NULL,NULL
+zero/avgX/sumDistinct/having	a:numeric,b:bigint | NULL,NULL
+zero/avgX/sumDistinct/filter	a:numeric,b:bigint | NULL,NULL
+zero/avgX/sumDistinct/scalarSubquery	a:numeric | NULL
+zero/avgX/sumDistinct/unionAll	a:numeric,b:bigint | NULL,NULL; NULL,NULL
+zero/avgXAndCountStar/countDistinct/ungrouped	v:numeric,a:bigint,b:bigint | NULL,0,0
+zero/avgXAndCountStar/countDistinct/grouped	(0 rows)
+zero/avgXAndCountStar/countDistinct/rollup	g:integer,v:numeric,a:bigint,b:bigint | NULL,NULL,0,0
+zero/avgXAndCountStar/countDistinct/emptySets	v:numeric,a:bigint,b:bigint | NULL,0,0; NULL,0,0
+zero/avgXAndCountStar/countDistinct/having	v:numeric,a:bigint,b:bigint | NULL,0,0
+zero/avgXAndCountStar/countDistinct/filter	v:numeric,a:bigint,b:bigint | NULL,0,0
+zero/avgXAndCountStar/countDistinct/scalarSubquery	a:bigint | 0
+zero/avgXAndCountStar/countDistinct/unionAll	v:numeric,a:bigint,b:bigint | NULL,0,0; NULL,0,0
+zero/avgXAndCountStar/countDistinctExpr/ungrouped	v:numeric,a:bigint,b:bigint | NULL,0,0
+zero/avgXAndCountStar/countDistinctExpr/grouped	(0 rows)
+zero/avgXAndCountStar/countDistinctExpr/rollup	g:integer,v:numeric,a:bigint,b:bigint | NULL,NULL,0,0
+zero/avgXAndCountStar/countDistinctExpr/emptySets	v:numeric,a:bigint,b:bigint | NULL,0,0; NULL,0,0
+zero/avgXAndCountStar/countDistinctExpr/having	v:numeric,a:bigint,b:bigint | NULL,0,0
+zero/avgXAndCountStar/countDistinctExpr/filter	v:numeric,a:bigint,b:bigint | NULL,0,0
+zero/avgXAndCountStar/countDistinctExpr/scalarSubquery	a:bigint | 0
+zero/avgXAndCountStar/countDistinctExpr/unionAll	v:numeric,a:bigint,b:bigint | NULL,0,0; NULL,0,0
+zero/avgXAndCountStar/twoCountDistinct/ungrouped	v:numeric,a:bigint,b:bigint,c:bigint | NULL,0,0,0
+zero/avgXAndCountStar/twoCountDistinct/grouped	(0 rows)
+zero/avgXAndCountStar/twoCountDistinct/rollup	g:integer,v:numeric,a:bigint,b:bigint,c:bigint | NULL,NULL,0,0,0
+zero/avgXAndCountStar/twoCountDistinct/emptySets	v:numeric,a:bigint,b:bigint,c:bigint | NULL,0,0,0; NULL,0,0,0
+zero/avgXAndCountStar/twoCountDistinct/having	v:numeric,a:bigint,b:bigint,c:bigint | NULL,0,0,0
+zero/avgXAndCountStar/twoCountDistinct/filter	v:numeric,a:bigint,b:bigint,c:bigint | NULL,0,0,0
+zero/avgXAndCountStar/twoCountDistinct/scalarSubquery	a:bigint | 0
+zero/avgXAndCountStar/twoCountDistinct/unionAll	v:numeric,a:bigint,b:bigint,c:bigint | NULL,0,0,0; NULL,0,0,0
+zero/avgXAndCountStar/sumDistinct/ungrouped	v:numeric,a:bigint,b:bigint | NULL,0,NULL
+zero/avgXAndCountStar/sumDistinct/grouped	(0 rows)
+zero/avgXAndCountStar/sumDistinct/rollup	g:integer,v:numeric,a:bigint,b:bigint | NULL,NULL,0,NULL
+zero/avgXAndCountStar/sumDistinct/emptySets	v:numeric,a:bigint,b:bigint | NULL,0,NULL; NULL,0,NULL
+zero/avgXAndCountStar/sumDistinct/having	v:numeric,a:bigint,b:bigint | NULL,0,NULL
+zero/avgXAndCountStar/sumDistinct/filter	v:numeric,a:bigint,b:bigint | NULL,0,NULL
+zero/avgXAndCountStar/sumDistinct/scalarSubquery	a:bigint | 0
+zero/avgXAndCountStar/sumDistinct/unionAll	v:numeric,a:bigint,b:bigint | NULL,0,NULL; NULL,0,NULL
+one/countStar/countDistinct/ungrouped	a:bigint,b:bigint | 1,1
+one/countStar/countDistinct/grouped	g:integer,a:bigint,b:bigint | 1,1,1
+one/countStar/countDistinct/rollup	g:integer,a:bigint,b:bigint | 1,1,1; NULL,1,1
+one/countStar/countDistinct/emptySets	a:bigint,b:bigint | 1,1; 1,1
+one/countStar/countDistinct/having	a:bigint,b:bigint | 1,1
+one/countStar/countDistinct/filter	a:bigint,b:bigint | 1,1
+one/countStar/countDistinct/scalarSubquery	a:bigint | 1
+one/countStar/countDistinct/unionAll	a:bigint,b:bigint | 0,0; 1,1
+one/countStar/countDistinctExpr/ungrouped	a:bigint,b:bigint | 1,1
+one/countStar/countDistinctExpr/grouped	g:integer,a:bigint,b:bigint | 1,1,1
+one/countStar/countDistinctExpr/rollup	g:integer,a:bigint,b:bigint | 1,1,1; NULL,1,1
+one/countStar/countDistinctExpr/emptySets	a:bigint,b:bigint | 1,1; 1,1
+one/countStar/countDistinctExpr/having	a:bigint,b:bigint | 1,1
+one/countStar/countDistinctExpr/filter	a:bigint,b:bigint | 1,1
+one/countStar/countDistinctExpr/scalarSubquery	a:bigint | 1
+one/countStar/countDistinctExpr/unionAll	a:bigint,b:bigint | 0,0; 1,1
+one/countStar/twoCountDistinct/ungrouped	a:bigint,b:bigint,c:bigint | 1,1,1
+one/countStar/twoCountDistinct/grouped	g:integer,a:bigint,b:bigint,c:bigint | 1,1,1,1
+one/countStar/twoCountDistinct/rollup	g:integer,a:bigint,b:bigint,c:bigint | 1,1,1,1; NULL,1,1,1
+one/countStar/twoCountDistinct/emptySets	a:bigint,b:bigint,c:bigint | 1,1,1; 1,1,1
+one/countStar/twoCountDistinct/having	a:bigint,b:bigint,c:bigint | 1,1,1
+one/countStar/twoCountDistinct/filter	a:bigint,b:bigint,c:bigint | 1,1,1
+one/countStar/twoCountDistinct/scalarSubquery	a:bigint | 1
+one/countStar/twoCountDistinct/unionAll	a:bigint,b:bigint,c:bigint | 0,0,0; 1,1,1
+one/countStar/sumDistinct/ungrouped	a:bigint,b:bigint | 1,10
+one/countStar/sumDistinct/grouped	g:integer,a:bigint,b:bigint | 1,1,10
+one/countStar/sumDistinct/rollup	g:integer,a:bigint,b:bigint | 1,1,10; NULL,1,10
+one/countStar/sumDistinct/emptySets	a:bigint,b:bigint | 1,10; 1,10
+one/countStar/sumDistinct/having	a:bigint,b:bigint | 1,10
+one/countStar/sumDistinct/filter	a:bigint,b:bigint | 1,10
+one/countStar/sumDistinct/scalarSubquery	a:bigint | 1
+one/countStar/sumDistinct/unionAll	a:bigint,b:bigint | 0,NULL; 1,10
+one/countX/countDistinct/ungrouped	a:bigint,b:bigint | 1,1
+one/countX/countDistinct/grouped	g:integer,a:bigint,b:bigint | 1,1,1
+one/countX/countDistinct/rollup	g:integer,a:bigint,b:bigint | 1,1,1; NULL,1,1
+one/countX/countDistinct/emptySets	a:bigint,b:bigint | 1,1; 1,1
+one/countX/countDistinct/having	a:bigint,b:bigint | 1,1
+one/countX/countDistinct/filter	a:bigint,b:bigint | 1,1
+one/countX/countDistinct/scalarSubquery	a:bigint | 1
+one/countX/countDistinct/unionAll	a:bigint,b:bigint | 0,0; 1,1
+one/countX/countDistinctExpr/ungrouped	a:bigint,b:bigint | 1,1
+one/countX/countDistinctExpr/grouped	g:integer,a:bigint,b:bigint | 1,1,1
+one/countX/countDistinctExpr/rollup	g:integer,a:bigint,b:bigint | 1,1,1; NULL,1,1
+one/countX/countDistinctExpr/emptySets	a:bigint,b:bigint | 1,1; 1,1
+one/countX/countDistinctExpr/having	a:bigint,b:bigint | 1,1
+one/countX/countDistinctExpr/filter	a:bigint,b:bigint | 1,1
+one/countX/countDistinctExpr/scalarSubquery	a:bigint | 1
+one/countX/countDistinctExpr/unionAll	a:bigint,b:bigint | 0,0; 1,1
+one/countX/twoCountDistinct/ungrouped	a:bigint,b:bigint,c:bigint | 1,1,1
+one/countX/twoCountDistinct/grouped	g:integer,a:bigint,b:bigint,c:bigint | 1,1,1,1
+one/countX/twoCountDistinct/rollup	g:integer,a:bigint,b:bigint,c:bigint | 1,1,1,1; NULL,1,1,1
+one/countX/twoCountDistinct/emptySets	a:bigint,b:bigint,c:bigint | 1,1,1; 1,1,1
+one/countX/twoCountDistinct/having	a:bigint,b:bigint,c:bigint | 1,1,1
+one/countX/twoCountDistinct/filter	a:bigint,b:bigint,c:bigint | 1,1,1
+one/countX/twoCountDistinct/scalarSubquery	a:bigint | 1
+one/countX/twoCountDistinct/unionAll	a:bigint,b:bigint,c:bigint | 0,0,0; 1,1,1
+one/countX/sumDistinct/ungrouped	a:bigint,b:bigint | 1,10
+one/countX/sumDistinct/grouped	g:integer,a:bigint,b:bigint | 1,1,10
+one/countX/sumDistinct/rollup	g:integer,a:bigint,b:bigint | 1,1,10; NULL,1,10
+one/countX/sumDistinct/emptySets	a:bigint,b:bigint | 1,10; 1,10
+one/countX/sumDistinct/having	a:bigint,b:bigint | 1,10
+one/countX/sumDistinct/filter	a:bigint,b:bigint | 1,10
+one/countX/sumDistinct/scalarSubquery	a:bigint | 1
+one/countX/sumDistinct/unionAll	a:bigint,b:bigint | 0,NULL; 1,10
+one/sumX/countDistinct/ungrouped	a:bigint,b:bigint | 10,1
+one/sumX/countDistinct/grouped	g:integer,a:bigint,b:bigint | 1,10,1
+one/sumX/countDistinct/rollup	g:integer,a:bigint,b:bigint | 1,10,1; NULL,10,1
+one/sumX/countDistinct/emptySets	a:bigint,b:bigint | 10,1; 10,1
+one/sumX/countDistinct/having	a:bigint,b:bigint | 10,1
+one/sumX/countDistinct/filter	a:bigint,b:bigint | 10,1
+one/sumX/countDistinct/scalarSubquery	a:bigint | 10
+one/sumX/countDistinct/unionAll	a:bigint,b:bigint | 10,1; NULL,0
+one/sumX/countDistinctExpr/ungrouped	a:bigint,b:bigint | 10,1
+one/sumX/countDistinctExpr/grouped	g:integer,a:bigint,b:bigint | 1,10,1
+one/sumX/countDistinctExpr/rollup	g:integer,a:bigint,b:bigint | 1,10,1; NULL,10,1
+one/sumX/countDistinctExpr/emptySets	a:bigint,b:bigint | 10,1; 10,1
+one/sumX/countDistinctExpr/having	a:bigint,b:bigint | 10,1
+one/sumX/countDistinctExpr/filter	a:bigint,b:bigint | 10,1
+one/sumX/countDistinctExpr/scalarSubquery	a:bigint | 10
+one/sumX/countDistinctExpr/unionAll	a:bigint,b:bigint | 10,1; NULL,0
+one/sumX/twoCountDistinct/ungrouped	a:bigint,b:bigint,c:bigint | 10,1,1
+one/sumX/twoCountDistinct/grouped	g:integer,a:bigint,b:bigint,c:bigint | 1,10,1,1
+one/sumX/twoCountDistinct/rollup	g:integer,a:bigint,b:bigint,c:bigint | 1,10,1,1; NULL,10,1,1
+one/sumX/twoCountDistinct/emptySets	a:bigint,b:bigint,c:bigint | 10,1,1; 10,1,1
+one/sumX/twoCountDistinct/having	a:bigint,b:bigint,c:bigint | 10,1,1
+one/sumX/twoCountDistinct/filter	a:bigint,b:bigint,c:bigint | 10,1,1
+one/sumX/twoCountDistinct/scalarSubquery	a:bigint | 10
+one/sumX/twoCountDistinct/unionAll	a:bigint,b:bigint,c:bigint | 10,1,1; NULL,0,0
+one/sumX/sumDistinct/ungrouped	a:bigint,b:bigint | 10,10
+one/sumX/sumDistinct/grouped	g:integer,a:bigint,b:bigint | 1,10,10
+one/sumX/sumDistinct/rollup	g:integer,a:bigint,b:bigint | 1,10,10; NULL,10,10
+one/sumX/sumDistinct/emptySets	a:bigint,b:bigint | 10,10; 10,10
+one/sumX/sumDistinct/having	a:bigint,b:bigint | 10,10
+one/sumX/sumDistinct/filter	a:bigint,b:bigint | 10,10
+one/sumX/sumDistinct/scalarSubquery	a:bigint | 10
+one/sumX/sumDistinct/unionAll	a:bigint,b:bigint | 10,10; NULL,NULL
+one/minX/countDistinct/ungrouped	a:integer,b:bigint | 10,1
+one/minX/countDistinct/grouped	g:integer,a:integer,b:bigint | 1,10,1
+one/minX/countDistinct/rollup	g:integer,a:integer,b:bigint | 1,10,1; NULL,10,1
+one/minX/countDistinct/emptySets	a:integer,b:bigint | 10,1; 10,1
+one/minX/countDistinct/having	a:integer,b:bigint | 10,1
+one/minX/countDistinct/filter	a:integer,b:bigint | 10,1
+one/minX/countDistinct/scalarSubquery	a:integer | 10
+one/minX/countDistinct/unionAll	a:integer,b:bigint | 10,1; NULL,0
+one/minX/countDistinctExpr/ungrouped	a:integer,b:bigint | 10,1
+one/minX/countDistinctExpr/grouped	g:integer,a:integer,b:bigint | 1,10,1
+one/minX/countDistinctExpr/rollup	g:integer,a:integer,b:bigint | 1,10,1; NULL,10,1
+one/minX/countDistinctExpr/emptySets	a:integer,b:bigint | 10,1; 10,1
+one/minX/countDistinctExpr/having	a:integer,b:bigint | 10,1
+one/minX/countDistinctExpr/filter	a:integer,b:bigint | 10,1
+one/minX/countDistinctExpr/scalarSubquery	a:integer | 10
+one/minX/countDistinctExpr/unionAll	a:integer,b:bigint | 10,1; NULL,0
+one/minX/twoCountDistinct/ungrouped	a:integer,b:bigint,c:bigint | 10,1,1
+one/minX/twoCountDistinct/grouped	g:integer,a:integer,b:bigint,c:bigint | 1,10,1,1
+one/minX/twoCountDistinct/rollup	g:integer,a:integer,b:bigint,c:bigint | 1,10,1,1; NULL,10,1,1
+one/minX/twoCountDistinct/emptySets	a:integer,b:bigint,c:bigint | 10,1,1; 10,1,1
+one/minX/twoCountDistinct/having	a:integer,b:bigint,c:bigint | 10,1,1
+one/minX/twoCountDistinct/filter	a:integer,b:bigint,c:bigint | 10,1,1
+one/minX/twoCountDistinct/scalarSubquery	a:integer | 10
+one/minX/twoCountDistinct/unionAll	a:integer,b:bigint,c:bigint | 10,1,1; NULL,0,0
+one/minX/sumDistinct/ungrouped	a:integer,b:bigint | 10,10
+one/minX/sumDistinct/grouped	g:integer,a:integer,b:bigint | 1,10,10
+one/minX/sumDistinct/rollup	g:integer,a:integer,b:bigint | 1,10,10; NULL,10,10
+one/minX/sumDistinct/emptySets	a:integer,b:bigint | 10,10; 10,10
+one/minX/sumDistinct/having	a:integer,b:bigint | 10,10
+one/minX/sumDistinct/filter	a:integer,b:bigint | 10,10
+one/minX/sumDistinct/scalarSubquery	a:integer | 10
+one/minX/sumDistinct/unionAll	a:integer,b:bigint | 10,10; NULL,NULL
+one/avgX/countDistinct/ungrouped	a:numeric,b:bigint | 10.0000000000000000,1
+one/avgX/countDistinct/grouped	g:integer,a:numeric,b:bigint | 1,10.0000000000000000,1
+one/avgX/countDistinct/rollup	g:integer,a:numeric,b:bigint | 1,10.0000000000000000,1; NULL,10.0000000000000000,1
+one/avgX/countDistinct/emptySets	a:numeric,b:bigint | 10.0000000000000000,1; 10.0000000000000000,1
+one/avgX/countDistinct/having	a:numeric,b:bigint | 10.0000000000000000,1
+one/avgX/countDistinct/filter	a:numeric,b:bigint | 10.0000000000000000,1
+one/avgX/countDistinct/scalarSubquery	a:numeric | 10.0000000000000000
+one/avgX/countDistinct/unionAll	a:numeric,b:bigint | 10.0000000000000000,1; NULL,0
+one/avgX/countDistinctExpr/ungrouped	a:numeric,b:bigint | 10.0000000000000000,1
+one/avgX/countDistinctExpr/grouped	g:integer,a:numeric,b:bigint | 1,10.0000000000000000,1
+one/avgX/countDistinctExpr/rollup	g:integer,a:numeric,b:bigint | 1,10.0000000000000000,1; NULL,10.0000000000000000,1
+one/avgX/countDistinctExpr/emptySets	a:numeric,b:bigint | 10.0000000000000000,1; 10.0000000000000000,1
+one/avgX/countDistinctExpr/having	a:numeric,b:bigint | 10.0000000000000000,1
+one/avgX/countDistinctExpr/filter	a:numeric,b:bigint | 10.0000000000000000,1
+one/avgX/countDistinctExpr/scalarSubquery	a:numeric | 10.0000000000000000
+one/avgX/countDistinctExpr/unionAll	a:numeric,b:bigint | 10.0000000000000000,1; NULL,0
+one/avgX/twoCountDistinct/ungrouped	a:numeric,b:bigint,c:bigint | 10.0000000000000000,1,1
+one/avgX/twoCountDistinct/grouped	g:integer,a:numeric,b:bigint,c:bigint | 1,10.0000000000000000,1,1
+one/avgX/twoCountDistinct/rollup	g:integer,a:numeric,b:bigint,c:bigint | 1,10.0000000000000000,1,1; NULL,10.0000000000000000,1,1
+one/avgX/twoCountDistinct/emptySets	a:numeric,b:bigint,c:bigint | 10.0000000000000000,1,1; 10.0000000000000000,1,1
+one/avgX/twoCountDistinct/having	a:numeric,b:bigint,c:bigint | 10.0000000000000000,1,1
+one/avgX/twoCountDistinct/filter	a:numeric,b:bigint,c:bigint | 10.0000000000000000,1,1
+one/avgX/twoCountDistinct/scalarSubquery	a:numeric | 10.0000000000000000
+one/avgX/twoCountDistinct/unionAll	a:numeric,b:bigint,c:bigint | 10.0000000000000000,1,1; NULL,0,0
+one/avgX/sumDistinct/ungrouped	a:numeric,b:bigint | 10.0000000000000000,10
+one/avgX/sumDistinct/grouped	g:integer,a:numeric,b:bigint | 1,10.0000000000000000,10
+one/avgX/sumDistinct/rollup	g:integer,a:numeric,b:bigint | 1,10.0000000000000000,10; NULL,10.0000000000000000,10
+one/avgX/sumDistinct/emptySets	a:numeric,b:bigint | 10.0000000000000000,10; 10.0000000000000000,10
+one/avgX/sumDistinct/having	a:numeric,b:bigint | 10.0000000000000000,10
+one/avgX/sumDistinct/filter	a:numeric,b:bigint | 10.0000000000000000,10
+one/avgX/sumDistinct/scalarSubquery	a:numeric | 10.0000000000000000
+one/avgX/sumDistinct/unionAll	a:numeric,b:bigint | 10.0000000000000000,10; NULL,NULL
+one/avgXAndCountStar/countDistinct/ungrouped	v:numeric,a:bigint,b:bigint | 10.0000000000000000,1,1
+one/avgXAndCountStar/countDistinct/grouped	g:integer,v:numeric,a:bigint,b:bigint | 1,10.0000000000000000,1,1
+one/avgXAndCountStar/countDistinct/rollup	g:integer,v:numeric,a:bigint,b:bigint | 1,10.0000000000000000,1,1; NULL,10.0000000000000000,1,1
+one/avgXAndCountStar/countDistinct/emptySets	v:numeric,a:bigint,b:bigint | 10.0000000000000000,1,1; 10.0000000000000000,1,1
+one/avgXAndCountStar/countDistinct/having	v:numeric,a:bigint,b:bigint | 10.0000000000000000,1,1
+one/avgXAndCountStar/countDistinct/filter	v:numeric,a:bigint,b:bigint | 10.0000000000000000,1,1
+one/avgXAndCountStar/countDistinct/scalarSubquery	a:bigint | 1
+one/avgXAndCountStar/countDistinct/unionAll	v:numeric,a:bigint,b:bigint | 10.0000000000000000,1,1; NULL,0,0
+one/avgXAndCountStar/countDistinctExpr/ungrouped	v:numeric,a:bigint,b:bigint | 10.0000000000000000,1,1
+one/avgXAndCountStar/countDistinctExpr/grouped	g:integer,v:numeric,a:bigint,b:bigint | 1,10.0000000000000000,1,1
+one/avgXAndCountStar/countDistinctExpr/rollup	g:integer,v:numeric,a:bigint,b:bigint | 1,10.0000000000000000,1,1; NULL,10.0000000000000000,1,1
+one/avgXAndCountStar/countDistinctExpr/emptySets	v:numeric,a:bigint,b:bigint | 10.0000000000000000,1,1; 10.0000000000000000,1,1
+one/avgXAndCountStar/countDistinctExpr/having	v:numeric,a:bigint,b:bigint | 10.0000000000000000,1,1
+one/avgXAndCountStar/countDistinctExpr/filter	v:numeric,a:bigint,b:bigint | 10.0000000000000000,1,1
+one/avgXAndCountStar/countDistinctExpr/scalarSubquery	a:bigint | 1
+one/avgXAndCountStar/countDistinctExpr/unionAll	v:numeric,a:bigint,b:bigint | 10.0000000000000000,1,1; NULL,0,0
+one/avgXAndCountStar/twoCountDistinct/ungrouped	v:numeric,a:bigint,b:bigint,c:bigint | 10.0000000000000000,1,1,1
+one/avgXAndCountStar/twoCountDistinct/grouped	g:integer,v:numeric,a:bigint,b:bigint,c:bigint | 1,10.0000000000000000,1,1,1
+one/avgXAndCountStar/twoCountDistinct/rollup	g:integer,v:numeric,a:bigint,b:bigint,c:bigint | 1,10.0000000000000000,1,1,1; NULL,10.0000000000000000,1,1,1
+one/avgXAndCountStar/twoCountDistinct/emptySets	v:numeric,a:bigint,b:bigint,c:bigint | 10.0000000000000000,1,1,1; 10.0000000000000000,1,1,1
+one/avgXAndCountStar/twoCountDistinct/having	v:numeric,a:bigint,b:bigint,c:bigint | 10.0000000000000000,1,1,1
+one/avgXAndCountStar/twoCountDistinct/filter	v:numeric,a:bigint,b:bigint,c:bigint | 10.0000000000000000,1,1,1
+one/avgXAndCountStar/twoCountDistinct/scalarSubquery	a:bigint | 1
+one/avgXAndCountStar/twoCountDistinct/unionAll	v:numeric,a:bigint,b:bigint,c:bigint | 10.0000000000000000,1,1,1; NULL,0,0,0
+one/avgXAndCountStar/sumDistinct/ungrouped	v:numeric,a:bigint,b:bigint | 10.0000000000000000,1,10
+one/avgXAndCountStar/sumDistinct/grouped	g:integer,v:numeric,a:bigint,b:bigint | 1,10.0000000000000000,1,10
+one/avgXAndCountStar/sumDistinct/rollup	g:integer,v:numeric,a:bigint,b:bigint | 1,10.0000000000000000,1,10; NULL,10.0000000000000000,1,10
+one/avgXAndCountStar/sumDistinct/emptySets	v:numeric,a:bigint,b:bigint | 10.0000000000000000,1,10; 10.0000000000000000,1,10
+one/avgXAndCountStar/sumDistinct/having	v:numeric,a:bigint,b:bigint | 10.0000000000000000,1,10
+one/avgXAndCountStar/sumDistinct/filter	v:numeric,a:bigint,b:bigint | 10.0000000000000000,1,10
+one/avgXAndCountStar/sumDistinct/scalarSubquery	a:bigint | 1
+one/avgXAndCountStar/sumDistinct/unionAll	v:numeric,a:bigint,b:bigint | 10.0000000000000000,1,10; NULL,0,NULL
+all/countStar/countDistinct/ungrouped	a:bigint,b:bigint | 6,4
+all/countStar/countDistinct/grouped	g:integer,a:bigint,b:bigint | 1,2,1; 2,2,2; 3,1,1; NULL,1,1
+all/countStar/countDistinct/rollup	g:integer,a:bigint,b:bigint | 1,2,1; 2,2,2; 3,1,1; NULL,1,1; NULL,6,4
+all/countStar/countDistinct/emptySets	a:bigint,b:bigint | 6,4; 6,4
+all/countStar/countDistinct/having	a:bigint,b:bigint | 6,4
+all/countStar/countDistinct/filter	a:bigint,b:bigint | 3,4
+all/countStar/countDistinct/scalarSubquery	a:bigint | 6
+all/countStar/countDistinct/unionAll	a:bigint,b:bigint | 0,0; 6,4
+all/countStar/countDistinctExpr/ungrouped	a:bigint,b:bigint | 6,3
+all/countStar/countDistinctExpr/grouped	g:integer,a:bigint,b:bigint | 1,2,1; 2,2,2; 3,1,1; NULL,1,1
+all/countStar/countDistinctExpr/rollup	g:integer,a:bigint,b:bigint | 1,2,1; 2,2,2; 3,1,1; NULL,1,1; NULL,6,3
+all/countStar/countDistinctExpr/emptySets	a:bigint,b:bigint | 6,3; 6,3
+all/countStar/countDistinctExpr/having	a:bigint,b:bigint | 6,3
+all/countStar/countDistinctExpr/filter	a:bigint,b:bigint | 3,3
+all/countStar/countDistinctExpr/scalarSubquery	a:bigint | 6
+all/countStar/countDistinctExpr/unionAll	a:bigint,b:bigint | 0,0; 6,3
+all/countStar/twoCountDistinct/ungrouped	a:bigint,b:bigint,c:bigint | 6,4,4
+all/countStar/twoCountDistinct/grouped	g:integer,a:bigint,b:bigint,c:bigint | 1,2,1,1; 2,2,2,2; 3,1,1,1; NULL,1,1,1
+all/countStar/twoCountDistinct/rollup	g:integer,a:bigint,b:bigint,c:bigint | 1,2,1,1; 2,2,2,2; 3,1,1,1; NULL,1,1,1; NULL,6,4,4
+all/countStar/twoCountDistinct/emptySets	a:bigint,b:bigint,c:bigint | 6,4,4; 6,4,4
+all/countStar/twoCountDistinct/having	a:bigint,b:bigint,c:bigint | 6,4,4
+all/countStar/twoCountDistinct/filter	a:bigint,b:bigint,c:bigint | 3,4,4
+all/countStar/twoCountDistinct/scalarSubquery	a:bigint | 6
+all/countStar/twoCountDistinct/unionAll	a:bigint,b:bigint,c:bigint | 0,0,0; 6,4,4
+all/countStar/sumDistinct/ungrouped	a:bigint,b:bigint | 6,100
+all/countStar/sumDistinct/grouped	g:integer,a:bigint,b:bigint | 1,2,10; 2,2,50; 3,1,30; NULL,1,40
+all/countStar/sumDistinct/rollup	g:integer,a:bigint,b:bigint | 1,2,10; 2,2,50; 3,1,30; NULL,1,40; NULL,6,100
+all/countStar/sumDistinct/emptySets	a:bigint,b:bigint | 6,100; 6,100
+all/countStar/sumDistinct/having	a:bigint,b:bigint | 6,100
+all/countStar/sumDistinct/filter	a:bigint,b:bigint | 3,100
+all/countStar/sumDistinct/scalarSubquery	a:bigint | 6
+all/countStar/sumDistinct/unionAll	a:bigint,b:bigint | 0,NULL; 6,100
+all/countX/countDistinct/ungrouped	a:bigint,b:bigint | 6,4
+all/countX/countDistinct/grouped	g:integer,a:bigint,b:bigint | 1,2,1; 2,2,2; 3,1,1; NULL,1,1
+all/countX/countDistinct/rollup	g:integer,a:bigint,b:bigint | 1,2,1; 2,2,2; 3,1,1; NULL,1,1; NULL,6,4
+all/countX/countDistinct/emptySets	a:bigint,b:bigint | 6,4; 6,4
+all/countX/countDistinct/having	a:bigint,b:bigint | 6,4
+all/countX/countDistinct/filter	a:bigint,b:bigint | 3,4
+all/countX/countDistinct/scalarSubquery	a:bigint | 6
+all/countX/countDistinct/unionAll	a:bigint,b:bigint | 0,0; 6,4
+all/countX/countDistinctExpr/ungrouped	a:bigint,b:bigint | 6,3
+all/countX/countDistinctExpr/grouped	g:integer,a:bigint,b:bigint | 1,2,1; 2,2,2; 3,1,1; NULL,1,1
+all/countX/countDistinctExpr/rollup	g:integer,a:bigint,b:bigint | 1,2,1; 2,2,2; 3,1,1; NULL,1,1; NULL,6,3
+all/countX/countDistinctExpr/emptySets	a:bigint,b:bigint | 6,3; 6,3
+all/countX/countDistinctExpr/having	a:bigint,b:bigint | 6,3
+all/countX/countDistinctExpr/filter	a:bigint,b:bigint | 3,3
+all/countX/countDistinctExpr/scalarSubquery	a:bigint | 6
+all/countX/countDistinctExpr/unionAll	a:bigint,b:bigint | 0,0; 6,3
+all/countX/twoCountDistinct/ungrouped	a:bigint,b:bigint,c:bigint | 6,4,4
+all/countX/twoCountDistinct/grouped	g:integer,a:bigint,b:bigint,c:bigint | 1,2,1,1; 2,2,2,2; 3,1,1,1; NULL,1,1,1
+all/countX/twoCountDistinct/rollup	g:integer,a:bigint,b:bigint,c:bigint | 1,2,1,1; 2,2,2,2; 3,1,1,1; NULL,1,1,1; NULL,6,4,4
+all/countX/twoCountDistinct/emptySets	a:bigint,b:bigint,c:bigint | 6,4,4; 6,4,4
+all/countX/twoCountDistinct/having	a:bigint,b:bigint,c:bigint | 6,4,4
+all/countX/twoCountDistinct/filter	a:bigint,b:bigint,c:bigint | 3,4,4
+all/countX/twoCountDistinct/scalarSubquery	a:bigint | 6
+all/countX/twoCountDistinct/unionAll	a:bigint,b:bigint,c:bigint | 0,0,0; 6,4,4
+all/countX/sumDistinct/ungrouped	a:bigint,b:bigint | 6,100
+all/countX/sumDistinct/grouped	g:integer,a:bigint,b:bigint | 1,2,10; 2,2,50; 3,1,30; NULL,1,40
+all/countX/sumDistinct/rollup	g:integer,a:bigint,b:bigint | 1,2,10; 2,2,50; 3,1,30; NULL,1,40; NULL,6,100
+all/countX/sumDistinct/emptySets	a:bigint,b:bigint | 6,100; 6,100
+all/countX/sumDistinct/having	a:bigint,b:bigint | 6,100
+all/countX/sumDistinct/filter	a:bigint,b:bigint | 3,100
+all/countX/sumDistinct/scalarSubquery	a:bigint | 6
+all/countX/sumDistinct/unionAll	a:bigint,b:bigint | 0,NULL; 6,100
+all/sumX/countDistinct/ungrouped	a:bigint,b:bigint | 140,4
+all/sumX/countDistinct/grouped	g:integer,a:bigint,b:bigint | 1,20,1; 2,50,2; 3,30,1; NULL,40,1
+all/sumX/countDistinct/rollup	g:integer,a:bigint,b:bigint | 1,20,1; 2,50,2; 3,30,1; NULL,140,4; NULL,40,1
+all/sumX/countDistinct/emptySets	a:bigint,b:bigint | 140,4; 140,4
+all/sumX/countDistinct/having	a:bigint,b:bigint | 140,4
+all/sumX/countDistinct/filter	a:bigint,b:bigint | 60,4
+all/sumX/countDistinct/scalarSubquery	a:bigint | 140
+all/sumX/countDistinct/unionAll	a:bigint,b:bigint | 140,4; NULL,0
+all/sumX/countDistinctExpr/ungrouped	a:bigint,b:bigint | 140,3
+all/sumX/countDistinctExpr/grouped	g:integer,a:bigint,b:bigint | 1,20,1; 2,50,2; 3,30,1; NULL,40,1
+all/sumX/countDistinctExpr/rollup	g:integer,a:bigint,b:bigint | 1,20,1; 2,50,2; 3,30,1; NULL,140,3; NULL,40,1
+all/sumX/countDistinctExpr/emptySets	a:bigint,b:bigint | 140,3; 140,3
+all/sumX/countDistinctExpr/having	a:bigint,b:bigint | 140,3
+all/sumX/countDistinctExpr/filter	a:bigint,b:bigint | 60,3
+all/sumX/countDistinctExpr/scalarSubquery	a:bigint | 140
+all/sumX/countDistinctExpr/unionAll	a:bigint,b:bigint | 140,3; NULL,0
+all/sumX/twoCountDistinct/ungrouped	a:bigint,b:bigint,c:bigint | 140,4,4
+all/sumX/twoCountDistinct/grouped	g:integer,a:bigint,b:bigint,c:bigint | 1,20,1,1; 2,50,2,2; 3,30,1,1; NULL,40,1,1
+all/sumX/twoCountDistinct/rollup	g:integer,a:bigint,b:bigint,c:bigint | 1,20,1,1; 2,50,2,2; 3,30,1,1; NULL,140,4,4; NULL,40,1,1
+all/sumX/twoCountDistinct/emptySets	a:bigint,b:bigint,c:bigint | 140,4,4; 140,4,4
+all/sumX/twoCountDistinct/having	a:bigint,b:bigint,c:bigint | 140,4,4
+all/sumX/twoCountDistinct/filter	a:bigint,b:bigint,c:bigint | 60,4,4
+all/sumX/twoCountDistinct/scalarSubquery	a:bigint | 140
+all/sumX/twoCountDistinct/unionAll	a:bigint,b:bigint,c:bigint | 140,4,4; NULL,0,0
+all/sumX/sumDistinct/ungrouped	a:bigint,b:bigint | 140,100
+all/sumX/sumDistinct/grouped	g:integer,a:bigint,b:bigint | 1,20,10; 2,50,50; 3,30,30; NULL,40,40
+all/sumX/sumDistinct/rollup	g:integer,a:bigint,b:bigint | 1,20,10; 2,50,50; 3,30,30; NULL,140,100; NULL,40,40
+all/sumX/sumDistinct/emptySets	a:bigint,b:bigint | 140,100; 140,100
+all/sumX/sumDistinct/having	a:bigint,b:bigint | 140,100
+all/sumX/sumDistinct/filter	a:bigint,b:bigint | 60,100
+all/sumX/sumDistinct/scalarSubquery	a:bigint | 140
+all/sumX/sumDistinct/unionAll	a:bigint,b:bigint | 140,100; NULL,NULL
+all/minX/countDistinct/ungrouped	a:integer,b:bigint | 10,4
+all/minX/countDistinct/grouped	g:integer,a:integer,b:bigint | 1,10,1; 2,20,2; 3,30,1; NULL,40,1
+all/minX/countDistinct/rollup	g:integer,a:integer,b:bigint | 1,10,1; 2,20,2; 3,30,1; NULL,10,4; NULL,40,1
+all/minX/countDistinct/emptySets	a:integer,b:bigint | 10,4; 10,4
+all/minX/countDistinct/having	a:integer,b:bigint | 10,4
+all/minX/countDistinct/filter	a:integer,b:bigint | 10,4
+all/minX/countDistinct/scalarSubquery	a:integer | 10
+all/minX/countDistinct/unionAll	a:integer,b:bigint | 10,4; NULL,0
+all/minX/countDistinctExpr/ungrouped	a:integer,b:bigint | 10,3
+all/minX/countDistinctExpr/grouped	g:integer,a:integer,b:bigint | 1,10,1; 2,20,2; 3,30,1; NULL,40,1
+all/minX/countDistinctExpr/rollup	g:integer,a:integer,b:bigint | 1,10,1; 2,20,2; 3,30,1; NULL,10,3; NULL,40,1
+all/minX/countDistinctExpr/emptySets	a:integer,b:bigint | 10,3; 10,3
+all/minX/countDistinctExpr/having	a:integer,b:bigint | 10,3
+all/minX/countDistinctExpr/filter	a:integer,b:bigint | 10,3
+all/minX/countDistinctExpr/scalarSubquery	a:integer | 10
+all/minX/countDistinctExpr/unionAll	a:integer,b:bigint | 10,3; NULL,0
+all/minX/twoCountDistinct/ungrouped	a:integer,b:bigint,c:bigint | 10,4,4
+all/minX/twoCountDistinct/grouped	g:integer,a:integer,b:bigint,c:bigint | 1,10,1,1; 2,20,2,2; 3,30,1,1; NULL,40,1,1
+all/minX/twoCountDistinct/rollup	g:integer,a:integer,b:bigint,c:bigint | 1,10,1,1; 2,20,2,2; 3,30,1,1; NULL,10,4,4; NULL,40,1,1
+all/minX/twoCountDistinct/emptySets	a:integer,b:bigint,c:bigint | 10,4,4; 10,4,4
+all/minX/twoCountDistinct/having	a:integer,b:bigint,c:bigint | 10,4,4
+all/minX/twoCountDistinct/filter	a:integer,b:bigint,c:bigint | 10,4,4
+all/minX/twoCountDistinct/scalarSubquery	a:integer | 10
+all/minX/twoCountDistinct/unionAll	a:integer,b:bigint,c:bigint | 10,4,4; NULL,0,0
+all/minX/sumDistinct/ungrouped	a:integer,b:bigint | 10,100
+all/minX/sumDistinct/grouped	g:integer,a:integer,b:bigint | 1,10,10; 2,20,50; 3,30,30; NULL,40,40
+all/minX/sumDistinct/rollup	g:integer,a:integer,b:bigint | 1,10,10; 2,20,50; 3,30,30; NULL,10,100; NULL,40,40
+all/minX/sumDistinct/emptySets	a:integer,b:bigint | 10,100; 10,100
+all/minX/sumDistinct/having	a:integer,b:bigint | 10,100
+all/minX/sumDistinct/filter	a:integer,b:bigint | 10,100
+all/minX/sumDistinct/scalarSubquery	a:integer | 10
+all/minX/sumDistinct/unionAll	a:integer,b:bigint | 10,100; NULL,NULL
+all/avgX/countDistinct/ungrouped	a:numeric,b:bigint | 23.3333333333333333,4
+all/avgX/countDistinct/grouped	g:integer,a:numeric,b:bigint | 1,10.0000000000000000,1; 2,25.0000000000000000,2; 3,30.0000000000000000,1; NULL,40.0000000000000000,1
+all/avgX/countDistinct/rollup	g:integer,a:numeric,b:bigint | 1,10.0000000000000000,1; 2,25.0000000000000000,2; 3,30.0000000000000000,1; NULL,23.3333333333333333,4; NULL,40.0000000000000000,1
+all/avgX/countDistinct/emptySets	a:numeric,b:bigint | 23.3333333333333333,4; 23.3333333333333333,4
+all/avgX/countDistinct/having	a:numeric,b:bigint | 23.3333333333333333,4
+all/avgX/countDistinct/filter	a:numeric,b:bigint | 20.0000000000000000,4
+all/avgX/countDistinct/scalarSubquery	a:numeric | 23.3333333333333333
+all/avgX/countDistinct/unionAll	a:numeric,b:bigint | 23.3333333333333333,4; NULL,0
+all/avgX/countDistinctExpr/ungrouped	a:numeric,b:bigint | 23.3333333333333333,3
+all/avgX/countDistinctExpr/grouped	g:integer,a:numeric,b:bigint | 1,10.0000000000000000,1; 2,25.0000000000000000,2; 3,30.0000000000000000,1; NULL,40.0000000000000000,1
+all/avgX/countDistinctExpr/rollup	g:integer,a:numeric,b:bigint | 1,10.0000000000000000,1; 2,25.0000000000000000,2; 3,30.0000000000000000,1; NULL,23.3333333333333333,3; NULL,40.0000000000000000,1
+all/avgX/countDistinctExpr/emptySets	a:numeric,b:bigint | 23.3333333333333333,3; 23.3333333333333333,3
+all/avgX/countDistinctExpr/having	a:numeric,b:bigint | 23.3333333333333333,3
+all/avgX/countDistinctExpr/filter	a:numeric,b:bigint | 20.0000000000000000,3
+all/avgX/countDistinctExpr/scalarSubquery	a:numeric | 23.3333333333333333
+all/avgX/countDistinctExpr/unionAll	a:numeric,b:bigint | 23.3333333333333333,3; NULL,0
+all/avgX/twoCountDistinct/ungrouped	a:numeric,b:bigint,c:bigint | 23.3333333333333333,4,4
+all/avgX/twoCountDistinct/grouped	g:integer,a:numeric,b:bigint,c:bigint | 1,10.0000000000000000,1,1; 2,25.0000000000000000,2,2; 3,30.0000000000000000,1,1; NULL,40.0000000000000000,1,1
+all/avgX/twoCountDistinct/rollup	g:integer,a:numeric,b:bigint,c:bigint | 1,10.0000000000000000,1,1; 2,25.0000000000000000,2,2; 3,30.0000000000000000,1,1; NULL,23.3333333333333333,4,4; NULL,40.0000000000000000,1,1
+all/avgX/twoCountDistinct/emptySets	a:numeric,b:bigint,c:bigint | 23.3333333333333333,4,4; 23.3333333333333333,4,4
+all/avgX/twoCountDistinct/having	a:numeric,b:bigint,c:bigint | 23.3333333333333333,4,4
+all/avgX/twoCountDistinct/filter	a:numeric,b:bigint,c:bigint | 20.0000000000000000,4,4
+all/avgX/twoCountDistinct/scalarSubquery	a:numeric | 23.3333333333333333
+all/avgX/twoCountDistinct/unionAll	a:numeric,b:bigint,c:bigint | 23.3333333333333333,4,4; NULL,0,0
+all/avgX/sumDistinct/ungrouped	a:numeric,b:bigint | 23.3333333333333333,100
+all/avgX/sumDistinct/grouped	g:integer,a:numeric,b:bigint | 1,10.0000000000000000,10; 2,25.0000000000000000,50; 3,30.0000000000000000,30; NULL,40.0000000000000000,40
+all/avgX/sumDistinct/rollup	g:integer,a:numeric,b:bigint | 1,10.0000000000000000,10; 2,25.0000000000000000,50; 3,30.0000000000000000,30; NULL,23.3333333333333333,100; NULL,40.0000000000000000,40
+all/avgX/sumDistinct/emptySets	a:numeric,b:bigint | 23.3333333333333333,100; 23.3333333333333333,100
+all/avgX/sumDistinct/having	a:numeric,b:bigint | 23.3333333333333333,100
+all/avgX/sumDistinct/filter	a:numeric,b:bigint | 20.0000000000000000,100
+all/avgX/sumDistinct/scalarSubquery	a:numeric | 23.3333333333333333
+all/avgX/sumDistinct/unionAll	a:numeric,b:bigint | 23.3333333333333333,100; NULL,NULL
+all/avgXAndCountStar/countDistinct/ungrouped	v:numeric,a:bigint,b:bigint | 23.3333333333333333,6,4
+all/avgXAndCountStar/countDistinct/grouped	g:integer,v:numeric,a:bigint,b:bigint | 1,10.0000000000000000,2,1; 2,25.0000000000000000,2,2; 3,30.0000000000000000,1,1; NULL,40.0000000000000000,1,1
+all/avgXAndCountStar/countDistinct/rollup	g:integer,v:numeric,a:bigint,b:bigint | 1,10.0000000000000000,2,1; 2,25.0000000000000000,2,2; 3,30.0000000000000000,1,1; NULL,23.3333333333333333,6,4; NULL,40.0000000000000000,1,1
+all/avgXAndCountStar/countDistinct/emptySets	v:numeric,a:bigint,b:bigint | 23.3333333333333333,6,4; 23.3333333333333333,6,4
+all/avgXAndCountStar/countDistinct/having	v:numeric,a:bigint,b:bigint | 23.3333333333333333,6,4
+all/avgXAndCountStar/countDistinct/filter	v:numeric,a:bigint,b:bigint | 23.3333333333333333,3,4
+all/avgXAndCountStar/countDistinct/scalarSubquery	a:bigint | 6
+all/avgXAndCountStar/countDistinct/unionAll	v:numeric,a:bigint,b:bigint | 23.3333333333333333,6,4; NULL,0,0
+all/avgXAndCountStar/countDistinctExpr/ungrouped	v:numeric,a:bigint,b:bigint | 23.3333333333333333,6,3
+all/avgXAndCountStar/countDistinctExpr/grouped	g:integer,v:numeric,a:bigint,b:bigint | 1,10.0000000000000000,2,1; 2,25.0000000000000000,2,2; 3,30.0000000000000000,1,1; NULL,40.0000000000000000,1,1
+all/avgXAndCountStar/countDistinctExpr/rollup	g:integer,v:numeric,a:bigint,b:bigint | 1,10.0000000000000000,2,1; 2,25.0000000000000000,2,2; 3,30.0000000000000000,1,1; NULL,23.3333333333333333,6,3; NULL,40.0000000000000000,1,1
+all/avgXAndCountStar/countDistinctExpr/emptySets	v:numeric,a:bigint,b:bigint | 23.3333333333333333,6,3; 23.3333333333333333,6,3
+all/avgXAndCountStar/countDistinctExpr/having	v:numeric,a:bigint,b:bigint | 23.3333333333333333,6,3
+all/avgXAndCountStar/countDistinctExpr/filter	v:numeric,a:bigint,b:bigint | 23.3333333333333333,3,3
+all/avgXAndCountStar/countDistinctExpr/scalarSubquery	a:bigint | 6
+all/avgXAndCountStar/countDistinctExpr/unionAll	v:numeric,a:bigint,b:bigint | 23.3333333333333333,6,3; NULL,0,0
+all/avgXAndCountStar/twoCountDistinct/ungrouped	v:numeric,a:bigint,b:bigint,c:bigint | 23.3333333333333333,6,4,4
+all/avgXAndCountStar/twoCountDistinct/grouped	g:integer,v:numeric,a:bigint,b:bigint,c:bigint | 1,10.0000000000000000,2,1,1; 2,25.0000000000000000,2,2,2; 3,30.0000000000000000,1,1,1; NULL,40.0000000000000000,1,1,1
+all/avgXAndCountStar/twoCountDistinct/rollup	g:integer,v:numeric,a:bigint,b:bigint,c:bigint | 1,10.0000000000000000,2,1,1; 2,25.0000000000000000,2,2,2; 3,30.0000000000000000,1,1,1; NULL,23.3333333333333333,6,4,4; NULL,40.0000000000000000,1,1,1
+all/avgXAndCountStar/twoCountDistinct/emptySets	v:numeric,a:bigint,b:bigint,c:bigint | 23.3333333333333333,6,4,4; 23.3333333333333333,6,4,4
+all/avgXAndCountStar/twoCountDistinct/having	v:numeric,a:bigint,b:bigint,c:bigint | 23.3333333333333333,6,4,4
+all/avgXAndCountStar/twoCountDistinct/filter	v:numeric,a:bigint,b:bigint,c:bigint | 23.3333333333333333,3,4,4
+all/avgXAndCountStar/twoCountDistinct/scalarSubquery	a:bigint | 6
+all/avgXAndCountStar/twoCountDistinct/unionAll	v:numeric,a:bigint,b:bigint,c:bigint | 23.3333333333333333,6,4,4; NULL,0,0,0
+all/avgXAndCountStar/sumDistinct/ungrouped	v:numeric,a:bigint,b:bigint | 23.3333333333333333,6,100
+all/avgXAndCountStar/sumDistinct/grouped	g:integer,v:numeric,a:bigint,b:bigint | 1,10.0000000000000000,2,10; 2,25.0000000000000000,2,50; 3,30.0000000000000000,1,30; NULL,40.0000000000000000,1,40
+all/avgXAndCountStar/sumDistinct/rollup	g:integer,v:numeric,a:bigint,b:bigint | 1,10.0000000000000000,2,10; 2,25.0000000000000000,2,50; 3,30.0000000000000000,1,30; NULL,23.3333333333333333,6,100; NULL,40.0000000000000000,1,40
+all/avgXAndCountStar/sumDistinct/emptySets	v:numeric,a:bigint,b:bigint | 23.3333333333333333,6,100; 23.3333333333333333,6,100
+all/avgXAndCountStar/sumDistinct/having	v:numeric,a:bigint,b:bigint | 23.3333333333333333,6,100
+all/avgXAndCountStar/sumDistinct/filter	v:numeric,a:bigint,b:bigint | 23.3333333333333333,3,100
+all/avgXAndCountStar/sumDistinct/scalarSubquery	a:bigint | 6
+all/avgXAndCountStar/sumDistinct/unionAll	v:numeric,a:bigint,b:bigint | 23.3333333333333333,6,100; NULL,0,NULL
+nulls/countStar/countDistinct/ungrouped	a:bigint,b:bigint | 6,4
+nulls/countStar/countDistinct/grouped	g:integer,a:bigint,b:bigint | 1,2,1; 2,2,1; 3,1,1; NULL,1,1
+nulls/countStar/countDistinct/rollup	g:integer,a:bigint,b:bigint | 1,2,1; 2,2,1; 3,1,1; NULL,1,1; NULL,6,4
+nulls/countStar/countDistinct/emptySets	a:bigint,b:bigint | 6,4; 6,4
+nulls/countStar/countDistinct/having	a:bigint,b:bigint | 6,4
+nulls/countStar/countDistinct/filter	a:bigint,b:bigint | 3,4
+nulls/countStar/countDistinct/scalarSubquery	a:bigint | 6
+nulls/countStar/countDistinct/unionAll	a:bigint,b:bigint | 0,0; 6,4
+nulls/countStar/countDistinctExpr/ungrouped	a:bigint,b:bigint | 6,3
+nulls/countStar/countDistinctExpr/grouped	g:integer,a:bigint,b:bigint | 1,2,1; 2,2,1; 3,1,1; NULL,1,1
+nulls/countStar/countDistinctExpr/rollup	g:integer,a:bigint,b:bigint | 1,2,1; 2,2,1; 3,1,1; NULL,1,1; NULL,6,3
+nulls/countStar/countDistinctExpr/emptySets	a:bigint,b:bigint | 6,3; 6,3
+nulls/countStar/countDistinctExpr/having	a:bigint,b:bigint | 6,3
+nulls/countStar/countDistinctExpr/filter	a:bigint,b:bigint | 3,3
+nulls/countStar/countDistinctExpr/scalarSubquery	a:bigint | 6
+nulls/countStar/countDistinctExpr/unionAll	a:bigint,b:bigint | 0,0; 6,3
+nulls/countStar/twoCountDistinct/ungrouped	a:bigint,b:bigint,c:bigint | 6,4,4
+nulls/countStar/twoCountDistinct/grouped	g:integer,a:bigint,b:bigint,c:bigint | 1,2,1,1; 2,2,1,2; 3,1,1,1; NULL,1,1,1
+nulls/countStar/twoCountDistinct/rollup	g:integer,a:bigint,b:bigint,c:bigint | 1,2,1,1; 2,2,1,2; 3,1,1,1; NULL,1,1,1; NULL,6,4,4
+nulls/countStar/twoCountDistinct/emptySets	a:bigint,b:bigint,c:bigint | 6,4,4; 6,4,4
+nulls/countStar/twoCountDistinct/having	a:bigint,b:bigint,c:bigint | 6,4,4
+nulls/countStar/twoCountDistinct/filter	a:bigint,b:bigint,c:bigint | 3,4,4
+nulls/countStar/twoCountDistinct/scalarSubquery	a:bigint | 6
+nulls/countStar/twoCountDistinct/unionAll	a:bigint,b:bigint,c:bigint | 0,0,0; 6,4,4
+nulls/countStar/sumDistinct/ungrouped	a:bigint,b:bigint | 6,100
+nulls/countStar/sumDistinct/grouped	g:integer,a:bigint,b:bigint | 1,2,10; 2,2,20; 3,1,30; NULL,1,40
+nulls/countStar/sumDistinct/rollup	g:integer,a:bigint,b:bigint | 1,2,10; 2,2,20; 3,1,30; NULL,1,40; NULL,6,100
+nulls/countStar/sumDistinct/emptySets	a:bigint,b:bigint | 6,100; 6,100
+nulls/countStar/sumDistinct/having	a:bigint,b:bigint | 6,100
+nulls/countStar/sumDistinct/filter	a:bigint,b:bigint | 3,100
+nulls/countStar/sumDistinct/scalarSubquery	a:bigint | 6
+nulls/countStar/sumDistinct/unionAll	a:bigint,b:bigint | 0,NULL; 6,100
+nulls/countX/countDistinct/ungrouped	a:bigint,b:bigint | 4,4
+nulls/countX/countDistinct/grouped	g:integer,a:bigint,b:bigint | 1,1,1; 2,1,1; 3,1,1; NULL,1,1
+nulls/countX/countDistinct/rollup	g:integer,a:bigint,b:bigint | 1,1,1; 2,1,1; 3,1,1; NULL,1,1; NULL,4,4
+nulls/countX/countDistinct/emptySets	a:bigint,b:bigint | 4,4; 4,4
+nulls/countX/countDistinct/having	a:bigint,b:bigint | 4,4
+nulls/countX/countDistinct/filter	a:bigint,b:bigint | 3,4
+nulls/countX/countDistinct/scalarSubquery	a:bigint | 4
+nulls/countX/countDistinct/unionAll	a:bigint,b:bigint | 0,0; 4,4
+nulls/countX/countDistinctExpr/ungrouped	a:bigint,b:bigint | 4,3
+nulls/countX/countDistinctExpr/grouped	g:integer,a:bigint,b:bigint | 1,1,1; 2,1,1; 3,1,1; NULL,1,1
+nulls/countX/countDistinctExpr/rollup	g:integer,a:bigint,b:bigint | 1,1,1; 2,1,1; 3,1,1; NULL,1,1; NULL,4,3
+nulls/countX/countDistinctExpr/emptySets	a:bigint,b:bigint | 4,3; 4,3
+nulls/countX/countDistinctExpr/having	a:bigint,b:bigint | 4,3
+nulls/countX/countDistinctExpr/filter	a:bigint,b:bigint | 3,3
+nulls/countX/countDistinctExpr/scalarSubquery	a:bigint | 4
+nulls/countX/countDistinctExpr/unionAll	a:bigint,b:bigint | 0,0; 4,3
+nulls/countX/twoCountDistinct/ungrouped	a:bigint,b:bigint,c:bigint | 4,4,4
+nulls/countX/twoCountDistinct/grouped	g:integer,a:bigint,b:bigint,c:bigint | 1,1,1,1; 2,1,1,2; 3,1,1,1; NULL,1,1,1
+nulls/countX/twoCountDistinct/rollup	g:integer,a:bigint,b:bigint,c:bigint | 1,1,1,1; 2,1,1,2; 3,1,1,1; NULL,1,1,1; NULL,4,4,4
+nulls/countX/twoCountDistinct/emptySets	a:bigint,b:bigint,c:bigint | 4,4,4; 4,4,4
+nulls/countX/twoCountDistinct/having	a:bigint,b:bigint,c:bigint | 4,4,4
+nulls/countX/twoCountDistinct/filter	a:bigint,b:bigint,c:bigint | 3,4,4
+nulls/countX/twoCountDistinct/scalarSubquery	a:bigint | 4
+nulls/countX/twoCountDistinct/unionAll	a:bigint,b:bigint,c:bigint | 0,0,0; 4,4,4
+nulls/countX/sumDistinct/ungrouped	a:bigint,b:bigint | 4,100
+nulls/countX/sumDistinct/grouped	g:integer,a:bigint,b:bigint | 1,1,10; 2,1,20; 3,1,30; NULL,1,40
+nulls/countX/sumDistinct/rollup	g:integer,a:bigint,b:bigint | 1,1,10; 2,1,20; 3,1,30; NULL,1,40; NULL,4,100
+nulls/countX/sumDistinct/emptySets	a:bigint,b:bigint | 4,100; 4,100
+nulls/countX/sumDistinct/having	a:bigint,b:bigint | 4,100
+nulls/countX/sumDistinct/filter	a:bigint,b:bigint | 3,100
+nulls/countX/sumDistinct/scalarSubquery	a:bigint | 4
+nulls/countX/sumDistinct/unionAll	a:bigint,b:bigint | 0,NULL; 4,100
+nulls/sumX/countDistinct/ungrouped	a:bigint,b:bigint | 100,4
+nulls/sumX/countDistinct/grouped	g:integer,a:bigint,b:bigint | 1,10,1; 2,20,1; 3,30,1; NULL,40,1
+nulls/sumX/countDistinct/rollup	g:integer,a:bigint,b:bigint | 1,10,1; 2,20,1; 3,30,1; NULL,100,4; NULL,40,1
+nulls/sumX/countDistinct/emptySets	a:bigint,b:bigint | 100,4; 100,4
+nulls/sumX/countDistinct/having	a:bigint,b:bigint | 100,4
+nulls/sumX/countDistinct/filter	a:bigint,b:bigint | 60,4
+nulls/sumX/countDistinct/scalarSubquery	a:bigint | 100
+nulls/sumX/countDistinct/unionAll	a:bigint,b:bigint | 100,4; NULL,0
+nulls/sumX/countDistinctExpr/ungrouped	a:bigint,b:bigint | 100,3
+nulls/sumX/countDistinctExpr/grouped	g:integer,a:bigint,b:bigint | 1,10,1; 2,20,1; 3,30,1; NULL,40,1
+nulls/sumX/countDistinctExpr/rollup	g:integer,a:bigint,b:bigint | 1,10,1; 2,20,1; 3,30,1; NULL,100,3; NULL,40,1
+nulls/sumX/countDistinctExpr/emptySets	a:bigint,b:bigint | 100,3; 100,3
+nulls/sumX/countDistinctExpr/having	a:bigint,b:bigint | 100,3
+nulls/sumX/countDistinctExpr/filter	a:bigint,b:bigint | 60,3
+nulls/sumX/countDistinctExpr/scalarSubquery	a:bigint | 100
+nulls/sumX/countDistinctExpr/unionAll	a:bigint,b:bigint | 100,3; NULL,0
+nulls/sumX/twoCountDistinct/ungrouped	a:bigint,b:bigint,c:bigint | 100,4,4
+nulls/sumX/twoCountDistinct/grouped	g:integer,a:bigint,b:bigint,c:bigint | 1,10,1,1; 2,20,1,2; 3,30,1,1; NULL,40,1,1
+nulls/sumX/twoCountDistinct/rollup	g:integer,a:bigint,b:bigint,c:bigint | 1,10,1,1; 2,20,1,2; 3,30,1,1; NULL,100,4,4; NULL,40,1,1
+nulls/sumX/twoCountDistinct/emptySets	a:bigint,b:bigint,c:bigint | 100,4,4; 100,4,4
+nulls/sumX/twoCountDistinct/having	a:bigint,b:bigint,c:bigint | 100,4,4
+nulls/sumX/twoCountDistinct/filter	a:bigint,b:bigint,c:bigint | 60,4,4
+nulls/sumX/twoCountDistinct/scalarSubquery	a:bigint | 100
+nulls/sumX/twoCountDistinct/unionAll	a:bigint,b:bigint,c:bigint | 100,4,4; NULL,0,0
+nulls/sumX/sumDistinct/ungrouped	a:bigint,b:bigint | 100,100
+nulls/sumX/sumDistinct/grouped	g:integer,a:bigint,b:bigint | 1,10,10; 2,20,20; 3,30,30; NULL,40,40
+nulls/sumX/sumDistinct/rollup	g:integer,a:bigint,b:bigint | 1,10,10; 2,20,20; 3,30,30; NULL,100,100; NULL,40,40
+nulls/sumX/sumDistinct/emptySets	a:bigint,b:bigint | 100,100; 100,100
+nulls/sumX/sumDistinct/having	a:bigint,b:bigint | 100,100
+nulls/sumX/sumDistinct/filter	a:bigint,b:bigint | 60,100
+nulls/sumX/sumDistinct/scalarSubquery	a:bigint | 100
+nulls/sumX/sumDistinct/unionAll	a:bigint,b:bigint | 100,100; NULL,NULL
+nulls/minX/countDistinct/ungrouped	a:integer,b:bigint | 10,4
+nulls/minX/countDistinct/grouped	g:integer,a:integer,b:bigint | 1,10,1; 2,20,1; 3,30,1; NULL,40,1
+nulls/minX/countDistinct/rollup	g:integer,a:integer,b:bigint | 1,10,1; 2,20,1; 3,30,1; NULL,10,4; NULL,40,1
+nulls/minX/countDistinct/emptySets	a:integer,b:bigint | 10,4; 10,4
+nulls/minX/countDistinct/having	a:integer,b:bigint | 10,4
+nulls/minX/countDistinct/filter	a:integer,b:bigint | 10,4
+nulls/minX/countDistinct/scalarSubquery	a:integer | 10
+nulls/minX/countDistinct/unionAll	a:integer,b:bigint | 10,4; NULL,0
+nulls/minX/countDistinctExpr/ungrouped	a:integer,b:bigint | 10,3
+nulls/minX/countDistinctExpr/grouped	g:integer,a:integer,b:bigint | 1,10,1; 2,20,1; 3,30,1; NULL,40,1
+nulls/minX/countDistinctExpr/rollup	g:integer,a:integer,b:bigint | 1,10,1; 2,20,1; 3,30,1; NULL,10,3; NULL,40,1
+nulls/minX/countDistinctExpr/emptySets	a:integer,b:bigint | 10,3; 10,3
+nulls/minX/countDistinctExpr/having	a:integer,b:bigint | 10,3
+nulls/minX/countDistinctExpr/filter	a:integer,b:bigint | 10,3
+nulls/minX/countDistinctExpr/scalarSubquery	a:integer | 10
+nulls/minX/countDistinctExpr/unionAll	a:integer,b:bigint | 10,3; NULL,0
+nulls/minX/twoCountDistinct/ungrouped	a:integer,b:bigint,c:bigint | 10,4,4
+nulls/minX/twoCountDistinct/grouped	g:integer,a:integer,b:bigint,c:bigint | 1,10,1,1; 2,20,1,2; 3,30,1,1; NULL,40,1,1
+nulls/minX/twoCountDistinct/rollup	g:integer,a:integer,b:bigint,c:bigint | 1,10,1,1; 2,20,1,2; 3,30,1,1; NULL,10,4,4; NULL,40,1,1
+nulls/minX/twoCountDistinct/emptySets	a:integer,b:bigint,c:bigint | 10,4,4; 10,4,4
+nulls/minX/twoCountDistinct/having	a:integer,b:bigint,c:bigint | 10,4,4
+nulls/minX/twoCountDistinct/filter	a:integer,b:bigint,c:bigint | 10,4,4
+nulls/minX/twoCountDistinct/scalarSubquery	a:integer | 10
+nulls/minX/twoCountDistinct/unionAll	a:integer,b:bigint,c:bigint | 10,4,4; NULL,0,0
+nulls/minX/sumDistinct/ungrouped	a:integer,b:bigint | 10,100
+nulls/minX/sumDistinct/grouped	g:integer,a:integer,b:bigint | 1,10,10; 2,20,20; 3,30,30; NULL,40,40
+nulls/minX/sumDistinct/rollup	g:integer,a:integer,b:bigint | 1,10,10; 2,20,20; 3,30,30; NULL,10,100; NULL,40,40
+nulls/minX/sumDistinct/emptySets	a:integer,b:bigint | 10,100; 10,100
+nulls/minX/sumDistinct/having	a:integer,b:bigint | 10,100
+nulls/minX/sumDistinct/filter	a:integer,b:bigint | 10,100
+nulls/minX/sumDistinct/scalarSubquery	a:integer | 10
+nulls/minX/sumDistinct/unionAll	a:integer,b:bigint | 10,100; NULL,NULL
+nulls/avgX/countDistinct/ungrouped	a:numeric,b:bigint | 25.0000000000000000,4
+nulls/avgX/countDistinct/grouped	g:integer,a:numeric,b:bigint | 1,10.0000000000000000,1; 2,20.0000000000000000,1; 3,30.0000000000000000,1; NULL,40.0000000000000000,1
+nulls/avgX/countDistinct/rollup	g:integer,a:numeric,b:bigint | 1,10.0000000000000000,1; 2,20.0000000000000000,1; 3,30.0000000000000000,1; NULL,25.0000000000000000,4; NULL,40.0000000000000000,1
+nulls/avgX/countDistinct/emptySets	a:numeric,b:bigint | 25.0000000000000000,4; 25.0000000000000000,4
+nulls/avgX/countDistinct/having	a:numeric,b:bigint | 25.0000000000000000,4
+nulls/avgX/countDistinct/filter	a:numeric,b:bigint | 20.0000000000000000,4
+nulls/avgX/countDistinct/scalarSubquery	a:numeric | 25.0000000000000000
+nulls/avgX/countDistinct/unionAll	a:numeric,b:bigint | 25.0000000000000000,4; NULL,0
+nulls/avgX/countDistinctExpr/ungrouped	a:numeric,b:bigint | 25.0000000000000000,3
+nulls/avgX/countDistinctExpr/grouped	g:integer,a:numeric,b:bigint | 1,10.0000000000000000,1; 2,20.0000000000000000,1; 3,30.0000000000000000,1; NULL,40.0000000000000000,1
+nulls/avgX/countDistinctExpr/rollup	g:integer,a:numeric,b:bigint | 1,10.0000000000000000,1; 2,20.0000000000000000,1; 3,30.0000000000000000,1; NULL,25.0000000000000000,3; NULL,40.0000000000000000,1
+nulls/avgX/countDistinctExpr/emptySets	a:numeric,b:bigint | 25.0000000000000000,3; 25.0000000000000000,3
+nulls/avgX/countDistinctExpr/having	a:numeric,b:bigint | 25.0000000000000000,3
+nulls/avgX/countDistinctExpr/filter	a:numeric,b:bigint | 20.0000000000000000,3
+nulls/avgX/countDistinctExpr/scalarSubquery	a:numeric | 25.0000000000000000
+nulls/avgX/countDistinctExpr/unionAll	a:numeric,b:bigint | 25.0000000000000000,3; NULL,0
+nulls/avgX/twoCountDistinct/ungrouped	a:numeric,b:bigint,c:bigint | 25.0000000000000000,4,4
+nulls/avgX/twoCountDistinct/grouped	g:integer,a:numeric,b:bigint,c:bigint | 1,10.0000000000000000,1,1; 2,20.0000000000000000,1,2; 3,30.0000000000000000,1,1; NULL,40.0000000000000000,1,1
+nulls/avgX/twoCountDistinct/rollup	g:integer,a:numeric,b:bigint,c:bigint | 1,10.0000000000000000,1,1; 2,20.0000000000000000,1,2; 3,30.0000000000000000,1,1; NULL,25.0000000000000000,4,4; NULL,40.0000000000000000,1,1
+nulls/avgX/twoCountDistinct/emptySets	a:numeric,b:bigint,c:bigint | 25.0000000000000000,4,4; 25.0000000000000000,4,4
+nulls/avgX/twoCountDistinct/having	a:numeric,b:bigint,c:bigint | 25.0000000000000000,4,4
+nulls/avgX/twoCountDistinct/filter	a:numeric,b:bigint,c:bigint | 20.0000000000000000,4,4
+nulls/avgX/twoCountDistinct/scalarSubquery	a:numeric | 25.0000000000000000
+nulls/avgX/twoCountDistinct/unionAll	a:numeric,b:bigint,c:bigint | 25.0000000000000000,4,4; NULL,0,0
+nulls/avgX/sumDistinct/ungrouped	a:numeric,b:bigint | 25.0000000000000000,100
+nulls/avgX/sumDistinct/grouped	g:integer,a:numeric,b:bigint | 1,10.0000000000000000,10; 2,20.0000000000000000,20; 3,30.0000000000000000,30; NULL,40.0000000000000000,40
+nulls/avgX/sumDistinct/rollup	g:integer,a:numeric,b:bigint | 1,10.0000000000000000,10; 2,20.0000000000000000,20; 3,30.0000000000000000,30; NULL,25.0000000000000000,100; NULL,40.0000000000000000,40
+nulls/avgX/sumDistinct/emptySets	a:numeric,b:bigint | 25.0000000000000000,100; 25.0000000000000000,100
+nulls/avgX/sumDistinct/having	a:numeric,b:bigint | 25.0000000000000000,100
+nulls/avgX/sumDistinct/filter	a:numeric,b:bigint | 20.0000000000000000,100
+nulls/avgX/sumDistinct/scalarSubquery	a:numeric | 25.0000000000000000
+nulls/avgX/sumDistinct/unionAll	a:numeric,b:bigint | 25.0000000000000000,100; NULL,NULL
+nulls/avgXAndCountStar/countDistinct/ungrouped	v:numeric,a:bigint,b:bigint | 25.0000000000000000,6,4
+nulls/avgXAndCountStar/countDistinct/grouped	g:integer,v:numeric,a:bigint,b:bigint | 1,10.0000000000000000,2,1; 2,20.0000000000000000,2,1; 3,30.0000000000000000,1,1; NULL,40.0000000000000000,1,1
+nulls/avgXAndCountStar/countDistinct/rollup	g:integer,v:numeric,a:bigint,b:bigint | 1,10.0000000000000000,2,1; 2,20.0000000000000000,2,1; 3,30.0000000000000000,1,1; NULL,25.0000000000000000,6,4; NULL,40.0000000000000000,1,1
+nulls/avgXAndCountStar/countDistinct/emptySets	v:numeric,a:bigint,b:bigint | 25.0000000000000000,6,4; 25.0000000000000000,6,4
+nulls/avgXAndCountStar/countDistinct/having	v:numeric,a:bigint,b:bigint | 25.0000000000000000,6,4
+nulls/avgXAndCountStar/countDistinct/filter	v:numeric,a:bigint,b:bigint | 25.0000000000000000,3,4
+nulls/avgXAndCountStar/countDistinct/scalarSubquery	a:bigint | 6
+nulls/avgXAndCountStar/countDistinct/unionAll	v:numeric,a:bigint,b:bigint | 25.0000000000000000,6,4; NULL,0,0
+nulls/avgXAndCountStar/countDistinctExpr/ungrouped	v:numeric,a:bigint,b:bigint | 25.0000000000000000,6,3
+nulls/avgXAndCountStar/countDistinctExpr/grouped	g:integer,v:numeric,a:bigint,b:bigint | 1,10.0000000000000000,2,1; 2,20.0000000000000000,2,1; 3,30.0000000000000000,1,1; NULL,40.0000000000000000,1,1
+nulls/avgXAndCountStar/countDistinctExpr/rollup	g:integer,v:numeric,a:bigint,b:bigint | 1,10.0000000000000000,2,1; 2,20.0000000000000000,2,1; 3,30.0000000000000000,1,1; NULL,25.0000000000000000,6,3; NULL,40.0000000000000000,1,1
+nulls/avgXAndCountStar/countDistinctExpr/emptySets	v:numeric,a:bigint,b:bigint | 25.0000000000000000,6,3; 25.0000000000000000,6,3
+nulls/avgXAndCountStar/countDistinctExpr/having	v:numeric,a:bigint,b:bigint | 25.0000000000000000,6,3
+nulls/avgXAndCountStar/countDistinctExpr/filter	v:numeric,a:bigint,b:bigint | 25.0000000000000000,3,3
+nulls/avgXAndCountStar/countDistinctExpr/scalarSubquery	a:bigint | 6
+nulls/avgXAndCountStar/countDistinctExpr/unionAll	v:numeric,a:bigint,b:bigint | 25.0000000000000000,6,3; NULL,0,0
+nulls/avgXAndCountStar/twoCountDistinct/ungrouped	v:numeric,a:bigint,b:bigint,c:bigint | 25.0000000000000000,6,4,4
+nulls/avgXAndCountStar/twoCountDistinct/grouped	g:integer,v:numeric,a:bigint,b:bigint,c:bigint | 1,10.0000000000000000,2,1,1; 2,20.0000000000000000,2,1,2; 3,30.0000000000000000,1,1,1; NULL,40.0000000000000000,1,1,1
+nulls/avgXAndCountStar/twoCountDistinct/rollup	g:integer,v:numeric,a:bigint,b:bigint,c:bigint | 1,10.0000000000000000,2,1,1; 2,20.0000000000000000,2,1,2; 3,30.0000000000000000,1,1,1; NULL,25.0000000000000000,6,4,4; NULL,40.0000000000000000,1,1,1
+nulls/avgXAndCountStar/twoCountDistinct/emptySets	v:numeric,a:bigint,b:bigint,c:bigint | 25.0000000000000000,6,4,4; 25.0000000000000000,6,4,4
+nulls/avgXAndCountStar/twoCountDistinct/having	v:numeric,a:bigint,b:bigint,c:bigint | 25.0000000000000000,6,4,4
+nulls/avgXAndCountStar/twoCountDistinct/filter	v:numeric,a:bigint,b:bigint,c:bigint | 25.0000000000000000,3,4,4
+nulls/avgXAndCountStar/twoCountDistinct/scalarSubquery	a:bigint | 6
+nulls/avgXAndCountStar/twoCountDistinct/unionAll	v:numeric,a:bigint,b:bigint,c:bigint | 25.0000000000000000,6,4,4; NULL,0,0,0
+nulls/avgXAndCountStar/sumDistinct/ungrouped	v:numeric,a:bigint,b:bigint | 25.0000000000000000,6,100
+nulls/avgXAndCountStar/sumDistinct/grouped	g:integer,v:numeric,a:bigint,b:bigint | 1,10.0000000000000000,2,10; 2,20.0000000000000000,2,20; 3,30.0000000000000000,1,30; NULL,40.0000000000000000,1,40
+nulls/avgXAndCountStar/sumDistinct/rollup	g:integer,v:numeric,a:bigint,b:bigint | 1,10.0000000000000000,2,10; 2,20.0000000000000000,2,20; 3,30.0000000000000000,1,30; NULL,25.0000000000000000,6,100; NULL,40.0000000000000000,1,40
+nulls/avgXAndCountStar/sumDistinct/emptySets	v:numeric,a:bigint,b:bigint | 25.0000000000000000,6,100; 25.0000000000000000,6,100
+nulls/avgXAndCountStar/sumDistinct/having	v:numeric,a:bigint,b:bigint | 25.0000000000000000,6,100
+nulls/avgXAndCountStar/sumDistinct/filter	v:numeric,a:bigint,b:bigint | 25.0000000000000000,3,100
+nulls/avgXAndCountStar/sumDistinct/scalarSubquery	a:bigint | 6
+nulls/avgXAndCountStar/sumDistinct/unionAll	v:numeric,a:bigint,b:bigint | 25.0000000000000000,6,100; NULL,0,NULL

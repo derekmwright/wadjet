@@ -21,6 +21,15 @@ finalizes each recombined COUNT through COALESCE(…, 0) in the same
 projection above level 2 that AVG's division uses (#1584). Grouped, a
 group exists only when a row does, so no group sums zero rows.
 
+On the stage DAG that projection rides the level-2 final aggregate stage
+as its ProjectExprs (dagplan absorbAggregateOutputProjection). The
+COALESCE is published under the same name as the SUM it wraps, so a
+projection the stage planner declined would leave the bare SUM's NULL in
+place with nothing downstream to notice; the planner therefore carries
+the rewrite's `coalesce` call for a Project marked PreservesAggOutputs
+(rewriteFinalizationSource), where it declines every function call in a
+user's SELECT list (#1692).
+
 Why: profile-attributed (2026-08-17 c6a telemetry). The distinct-set
 path pays per-row map inserts into per-group Go maps; both levels of
 the rewritten form land on the typed SoA aggregation paths and the

@@ -1,0 +1,353 @@
+# Cells whose answer here is not PostgreSQL 17.11's, for count_distinct_zero_rows_arms_test.go. Every line is a residual:
+# wrong at the base b0e0f116 too, where the #1692 cells answered NULL / no row on the DAG arms besides the type below.
+# name<TAB>arms (all | dag | single: the two single-process arms)<TAB>this engine's answer<TAB>why-code.
+# A kept line whose arm starts answering PostgreSQL FAILS: re-measure and delete it. The why-codes:
+#   type: R1 declared type (#1692 second line, not this seam): the two-level DISTINCT rewrite re-aggregates a COUNT (and a SUM over an integer) as SUM over BIGINT partials, which declares numeric (DECIMAL(38,0)); PostgreSQL declares bigint
+#   scale: R2 display scale (per-value scale program): AVG over an integer answers fewer fraction digits than PostgreSQL's numeric (16 for an integral mean)
+#   typeScale: R1 + R2: the rewrite's COUNT declares numeric where PostgreSQL declares bigint, and AVG answers fewer fraction digits
+#   scalarErr: R3: a scalar subquery over a rewritten aggregate is refused on every arm (batch: cannot store string into INT64 vector, #361 silent-write guard); only beside the rewrite; mechanism not located (suspected: R1, the subquery declaring the COUNT bigint)
+#   scalarScaleErr: R5: a scalar subquery over a rewritten AVG is refused on every arm (numeric field overflow: 23.333333 does not fit a DECIMAL at scale 4); mechanism not located
+#   union346: R4 (#346): a UNION ALL arm that selects an aggregate is refused by the DAG planner (the union stage cannot project the SELECT list over the arm's aggregate stage)
+zero/countStar/countDistinct/ungrouped	all	a:numeric,b:bigint | 0,0	type
+zero/countStar/countDistinct/having	all	a:numeric,b:bigint | 0,0	type
+zero/countStar/countDistinct/filter	all	a:numeric,b:bigint | 0,0	type
+zero/countStar/countDistinct/scalarSubquery	all	ERR -	scalarErr
+zero/countStar/countDistinct/unionAll	single	a:numeric,b:bigint | 0,0; 0,0	type
+zero/countStar/countDistinct/unionAll	dag	ERR -	union346
+zero/countStar/countDistinctExpr/unionAll	dag	ERR -	union346
+zero/countStar/twoCountDistinct/unionAll	dag	ERR -	union346
+zero/countStar/sumDistinct/unionAll	dag	ERR -	union346
+zero/countX/countDistinct/ungrouped	all	a:numeric,b:bigint | 0,0	type
+zero/countX/countDistinct/having	all	a:numeric,b:bigint | 0,0	type
+zero/countX/countDistinct/filter	all	a:numeric,b:bigint | 0,0	type
+zero/countX/countDistinct/scalarSubquery	all	ERR -	scalarErr
+zero/countX/countDistinct/unionAll	single	a:numeric,b:bigint | 0,0; 0,0	type
+zero/countX/countDistinct/unionAll	dag	ERR -	union346
+zero/countX/countDistinctExpr/unionAll	dag	ERR -	union346
+zero/countX/twoCountDistinct/unionAll	dag	ERR -	union346
+zero/countX/sumDistinct/unionAll	dag	ERR -	union346
+zero/sumX/countDistinct/ungrouped	all	a:numeric,b:bigint | NULL,0	type
+zero/sumX/countDistinct/having	all	a:numeric,b:bigint | NULL,0	type
+zero/sumX/countDistinct/filter	all	a:numeric,b:bigint | NULL,0	type
+zero/sumX/countDistinct/unionAll	single	a:numeric,b:bigint | NULL,0; NULL,0	type
+zero/sumX/countDistinct/unionAll	dag	ERR -	union346
+zero/sumX/countDistinctExpr/unionAll	dag	ERR -	union346
+zero/sumX/twoCountDistinct/unionAll	dag	ERR -	union346
+zero/sumX/sumDistinct/unionAll	dag	ERR -	union346
+zero/minX/countDistinct/unionAll	dag	ERR -	union346
+zero/minX/countDistinctExpr/unionAll	dag	ERR -	union346
+zero/minX/twoCountDistinct/unionAll	dag	ERR -	union346
+zero/minX/sumDistinct/unionAll	dag	ERR -	union346
+zero/avgX/countDistinct/unionAll	dag	ERR -	union346
+zero/avgX/countDistinctExpr/unionAll	dag	ERR -	union346
+zero/avgX/twoCountDistinct/unionAll	dag	ERR -	union346
+zero/avgX/sumDistinct/unionAll	dag	ERR -	union346
+zero/avgXAndCountStar/countDistinct/ungrouped	all	v:numeric,a:numeric,b:bigint | NULL,0,0	type
+zero/avgXAndCountStar/countDistinct/having	all	v:numeric,a:numeric,b:bigint | NULL,0,0	type
+zero/avgXAndCountStar/countDistinct/filter	all	v:numeric,a:numeric,b:bigint | NULL,0,0	type
+zero/avgXAndCountStar/countDistinct/scalarSubquery	all	ERR -	scalarErr
+zero/avgXAndCountStar/countDistinct/unionAll	single	v:numeric,a:numeric,b:bigint | NULL,0,0; NULL,0,0	type
+zero/avgXAndCountStar/countDistinct/unionAll	dag	ERR -	union346
+zero/avgXAndCountStar/countDistinctExpr/unionAll	dag	ERR -	union346
+zero/avgXAndCountStar/twoCountDistinct/unionAll	dag	ERR -	union346
+zero/avgXAndCountStar/sumDistinct/unionAll	dag	ERR -	union346
+one/countStar/countDistinct/ungrouped	all	a:numeric,b:bigint | 1,1	type
+one/countStar/countDistinct/having	all	a:numeric,b:bigint | 1,1	type
+one/countStar/countDistinct/filter	all	a:numeric,b:bigint | 1,1	type
+one/countStar/countDistinct/scalarSubquery	all	ERR -	scalarErr
+one/countStar/countDistinct/unionAll	single	a:numeric,b:bigint | 0,0; 1,1	type
+one/countStar/countDistinct/unionAll	dag	ERR -	union346
+one/countStar/countDistinctExpr/unionAll	dag	ERR -	union346
+one/countStar/twoCountDistinct/unionAll	dag	ERR -	union346
+one/countStar/sumDistinct/unionAll	dag	ERR -	union346
+one/countX/countDistinct/ungrouped	all	a:numeric,b:bigint | 1,1	type
+one/countX/countDistinct/having	all	a:numeric,b:bigint | 1,1	type
+one/countX/countDistinct/filter	all	a:numeric,b:bigint | 1,1	type
+one/countX/countDistinct/scalarSubquery	all	ERR -	scalarErr
+one/countX/countDistinct/unionAll	single	a:numeric,b:bigint | 0,0; 1,1	type
+one/countX/countDistinct/unionAll	dag	ERR -	union346
+one/countX/countDistinctExpr/unionAll	dag	ERR -	union346
+one/countX/twoCountDistinct/unionAll	dag	ERR -	union346
+one/countX/sumDistinct/unionAll	dag	ERR -	union346
+one/sumX/countDistinct/ungrouped	all	a:numeric,b:bigint | 10,1	type
+one/sumX/countDistinct/having	all	a:numeric,b:bigint | 10,1	type
+one/sumX/countDistinct/filter	all	a:numeric,b:bigint | 10,1	type
+one/sumX/countDistinct/scalarSubquery	all	ERR -	scalarErr
+one/sumX/countDistinct/unionAll	single	a:numeric,b:bigint | 10,1; NULL,0	type
+one/sumX/countDistinct/unionAll	dag	ERR -	union346
+one/sumX/countDistinctExpr/unionAll	dag	ERR -	union346
+one/sumX/twoCountDistinct/unionAll	dag	ERR -	union346
+one/sumX/sumDistinct/unionAll	dag	ERR -	union346
+one/minX/countDistinct/unionAll	dag	ERR -	union346
+one/minX/countDistinctExpr/unionAll	dag	ERR -	union346
+one/minX/twoCountDistinct/unionAll	dag	ERR -	union346
+one/minX/sumDistinct/unionAll	dag	ERR -	union346
+one/avgX/countDistinct/ungrouped	all	a:numeric,b:bigint | 10.000000,1	scale
+one/avgX/countDistinct/grouped	all	g:integer,a:numeric,b:bigint | 1,10.0000,1	scale
+one/avgX/countDistinct/rollup	all	g:integer,a:numeric,b:bigint | 1,10.0000,1; NULL,10.0000,1	scale
+one/avgX/countDistinct/emptySets	all	a:numeric,b:bigint | 10.0000,1; 10.0000,1	scale
+one/avgX/countDistinct/having	all	a:numeric,b:bigint | 10.000000,1	scale
+one/avgX/countDistinct/filter	all	a:numeric,b:bigint | 10.000000,1	scale
+one/avgX/countDistinct/scalarSubquery	all	a:numeric | 10.0000	scale
+one/avgX/countDistinct/unionAll	single	a:numeric,b:bigint | 10.000000,1; NULL,0	scale
+one/avgX/countDistinct/unionAll	dag	ERR -	union346
+one/avgX/countDistinctExpr/ungrouped	all	a:numeric,b:bigint | 10.0000,1	scale
+one/avgX/countDistinctExpr/grouped	all	g:integer,a:numeric,b:bigint | 1,10.0000,1	scale
+one/avgX/countDistinctExpr/rollup	all	g:integer,a:numeric,b:bigint | 1,10.0000,1; NULL,10.0000,1	scale
+one/avgX/countDistinctExpr/emptySets	all	a:numeric,b:bigint | 10.0000,1; 10.0000,1	scale
+one/avgX/countDistinctExpr/having	all	a:numeric,b:bigint | 10.0000,1	scale
+one/avgX/countDistinctExpr/filter	all	a:numeric,b:bigint | 10.0000,1	scale
+one/avgX/countDistinctExpr/scalarSubquery	all	a:numeric | 10.0000	scale
+one/avgX/countDistinctExpr/unionAll	single	a:numeric,b:bigint | 10.0000,1; NULL,0	scale
+one/avgX/countDistinctExpr/unionAll	dag	ERR -	union346
+one/avgX/twoCountDistinct/ungrouped	all	a:numeric,b:bigint,c:bigint | 10.0000,1,1	scale
+one/avgX/twoCountDistinct/grouped	all	g:integer,a:numeric,b:bigint,c:bigint | 1,10.0000,1,1	scale
+one/avgX/twoCountDistinct/rollup	all	g:integer,a:numeric,b:bigint,c:bigint | 1,10.0000,1,1; NULL,10.0000,1,1	scale
+one/avgX/twoCountDistinct/emptySets	all	a:numeric,b:bigint,c:bigint | 10.0000,1,1; 10.0000,1,1	scale
+one/avgX/twoCountDistinct/having	all	a:numeric,b:bigint,c:bigint | 10.0000,1,1	scale
+one/avgX/twoCountDistinct/filter	all	a:numeric,b:bigint,c:bigint | 10.0000,1,1	scale
+one/avgX/twoCountDistinct/scalarSubquery	all	a:numeric | 10.0000	scale
+one/avgX/twoCountDistinct/unionAll	single	a:numeric,b:bigint,c:bigint | 10.0000,1,1; NULL,0,0	scale
+one/avgX/twoCountDistinct/unionAll	dag	ERR -	union346
+one/avgX/sumDistinct/ungrouped	all	a:numeric,b:bigint | 10.0000,10	scale
+one/avgX/sumDistinct/grouped	all	g:integer,a:numeric,b:bigint | 1,10.0000,10	scale
+one/avgX/sumDistinct/rollup	all	g:integer,a:numeric,b:bigint | 1,10.0000,10; NULL,10.0000,10	scale
+one/avgX/sumDistinct/emptySets	all	a:numeric,b:bigint | 10.0000,10; 10.0000,10	scale
+one/avgX/sumDistinct/having	all	a:numeric,b:bigint | 10.0000,10	scale
+one/avgX/sumDistinct/filter	all	a:numeric,b:bigint | 10.0000,10	scale
+one/avgX/sumDistinct/scalarSubquery	all	a:numeric | 10.0000	scale
+one/avgX/sumDistinct/unionAll	single	a:numeric,b:bigint | 10.0000,10; NULL,NULL	scale
+one/avgX/sumDistinct/unionAll	dag	ERR -	union346
+one/avgXAndCountStar/countDistinct/ungrouped	all	v:numeric,a:numeric,b:bigint | 10.000000,1,1	typeScale
+one/avgXAndCountStar/countDistinct/grouped	all	g:integer,v:numeric,a:bigint,b:bigint | 1,10.0000,1,1	scale
+one/avgXAndCountStar/countDistinct/rollup	all	g:integer,v:numeric,a:bigint,b:bigint | 1,10.0000,1,1; NULL,10.0000,1,1	scale
+one/avgXAndCountStar/countDistinct/emptySets	all	v:numeric,a:bigint,b:bigint | 10.0000,1,1; 10.0000,1,1	scale
+one/avgXAndCountStar/countDistinct/having	all	v:numeric,a:numeric,b:bigint | 10.000000,1,1	typeScale
+one/avgXAndCountStar/countDistinct/filter	all	v:numeric,a:numeric,b:bigint | 10.000000,1,1	typeScale
+one/avgXAndCountStar/countDistinct/scalarSubquery	all	ERR -	scalarErr
+one/avgXAndCountStar/countDistinct/unionAll	single	v:numeric,a:numeric,b:bigint | 10.000000,1,1; NULL,0,0	typeScale
+one/avgXAndCountStar/countDistinct/unionAll	dag	ERR -	union346
+one/avgXAndCountStar/countDistinctExpr/ungrouped	all	v:numeric,a:bigint,b:bigint | 10.0000,1,1	scale
+one/avgXAndCountStar/countDistinctExpr/grouped	all	g:integer,v:numeric,a:bigint,b:bigint | 1,10.0000,1,1	scale
+one/avgXAndCountStar/countDistinctExpr/rollup	all	g:integer,v:numeric,a:bigint,b:bigint | 1,10.0000,1,1; NULL,10.0000,1,1	scale
+one/avgXAndCountStar/countDistinctExpr/emptySets	all	v:numeric,a:bigint,b:bigint | 10.0000,1,1; 10.0000,1,1	scale
+one/avgXAndCountStar/countDistinctExpr/having	all	v:numeric,a:bigint,b:bigint | 10.0000,1,1	scale
+one/avgXAndCountStar/countDistinctExpr/filter	all	v:numeric,a:bigint,b:bigint | 10.0000,1,1	scale
+one/avgXAndCountStar/countDistinctExpr/unionAll	single	v:numeric,a:bigint,b:bigint | 10.0000,1,1; NULL,0,0	scale
+one/avgXAndCountStar/countDistinctExpr/unionAll	dag	ERR -	union346
+one/avgXAndCountStar/twoCountDistinct/ungrouped	all	v:numeric,a:bigint,b:bigint,c:bigint | 10.0000,1,1,1	scale
+one/avgXAndCountStar/twoCountDistinct/grouped	all	g:integer,v:numeric,a:bigint,b:bigint,c:bigint | 1,10.0000,1,1,1	scale
+one/avgXAndCountStar/twoCountDistinct/rollup	all	g:integer,v:numeric,a:bigint,b:bigint,c:bigint | 1,10.0000,1,1,1; NULL,10.0000,1,1,1	scale
+one/avgXAndCountStar/twoCountDistinct/emptySets	all	v:numeric,a:bigint,b:bigint,c:bigint | 10.0000,1,1,1; 10.0000,1,1,1	scale
+one/avgXAndCountStar/twoCountDistinct/having	all	v:numeric,a:bigint,b:bigint,c:bigint | 10.0000,1,1,1	scale
+one/avgXAndCountStar/twoCountDistinct/filter	all	v:numeric,a:bigint,b:bigint,c:bigint | 10.0000,1,1,1	scale
+one/avgXAndCountStar/twoCountDistinct/unionAll	single	v:numeric,a:bigint,b:bigint,c:bigint | 10.0000,1,1,1; NULL,0,0,0	scale
+one/avgXAndCountStar/twoCountDistinct/unionAll	dag	ERR -	union346
+one/avgXAndCountStar/sumDistinct/ungrouped	all	v:numeric,a:bigint,b:bigint | 10.0000,1,10	scale
+one/avgXAndCountStar/sumDistinct/grouped	all	g:integer,v:numeric,a:bigint,b:bigint | 1,10.0000,1,10	scale
+one/avgXAndCountStar/sumDistinct/rollup	all	g:integer,v:numeric,a:bigint,b:bigint | 1,10.0000,1,10; NULL,10.0000,1,10	scale
+one/avgXAndCountStar/sumDistinct/emptySets	all	v:numeric,a:bigint,b:bigint | 10.0000,1,10; 10.0000,1,10	scale
+one/avgXAndCountStar/sumDistinct/having	all	v:numeric,a:bigint,b:bigint | 10.0000,1,10	scale
+one/avgXAndCountStar/sumDistinct/filter	all	v:numeric,a:bigint,b:bigint | 10.0000,1,10	scale
+one/avgXAndCountStar/sumDistinct/unionAll	single	v:numeric,a:bigint,b:bigint | 10.0000,1,10; NULL,0,NULL	scale
+one/avgXAndCountStar/sumDistinct/unionAll	dag	ERR -	union346
+all/countStar/countDistinct/ungrouped	all	a:numeric,b:bigint | 6,4	type
+all/countStar/countDistinct/having	all	a:numeric,b:bigint | 6,4	type
+all/countStar/countDistinct/filter	all	a:numeric,b:bigint | 3,4	type
+all/countStar/countDistinct/scalarSubquery	all	ERR -	scalarErr
+all/countStar/countDistinct/unionAll	single	a:numeric,b:bigint | 0,0; 6,4	type
+all/countStar/countDistinct/unionAll	dag	ERR -	union346
+all/countStar/countDistinctExpr/unionAll	dag	ERR -	union346
+all/countStar/twoCountDistinct/unionAll	dag	ERR -	union346
+all/countStar/sumDistinct/unionAll	dag	ERR -	union346
+all/countX/countDistinct/ungrouped	all	a:numeric,b:bigint | 6,4	type
+all/countX/countDistinct/having	all	a:numeric,b:bigint | 6,4	type
+all/countX/countDistinct/filter	all	a:numeric,b:bigint | 3,4	type
+all/countX/countDistinct/scalarSubquery	all	ERR -	scalarErr
+all/countX/countDistinct/unionAll	single	a:numeric,b:bigint | 0,0; 6,4	type
+all/countX/countDistinct/unionAll	dag	ERR -	union346
+all/countX/countDistinctExpr/unionAll	dag	ERR -	union346
+all/countX/twoCountDistinct/unionAll	dag	ERR -	union346
+all/countX/sumDistinct/unionAll	dag	ERR -	union346
+all/sumX/countDistinct/ungrouped	all	a:numeric,b:bigint | 140,4	type
+all/sumX/countDistinct/having	all	a:numeric,b:bigint | 140,4	type
+all/sumX/countDistinct/filter	all	a:numeric,b:bigint | 60,4	type
+all/sumX/countDistinct/scalarSubquery	all	ERR -	scalarErr
+all/sumX/countDistinct/unionAll	single	a:numeric,b:bigint | 140,4; NULL,0	type
+all/sumX/countDistinct/unionAll	dag	ERR -	union346
+all/sumX/countDistinctExpr/unionAll	dag	ERR -	union346
+all/sumX/twoCountDistinct/unionAll	dag	ERR -	union346
+all/sumX/sumDistinct/unionAll	dag	ERR -	union346
+all/minX/countDistinct/unionAll	dag	ERR -	union346
+all/minX/countDistinctExpr/unionAll	dag	ERR -	union346
+all/minX/twoCountDistinct/unionAll	dag	ERR -	union346
+all/minX/sumDistinct/unionAll	dag	ERR -	union346
+all/avgX/countDistinct/ungrouped	all	a:numeric,b:bigint | 23.333333,4	scale
+all/avgX/countDistinct/grouped	all	g:integer,a:numeric,b:bigint | 1,10.0000,1; 2,25.0000,2; 3,30.0000,1; NULL,40.0000,1	scale
+all/avgX/countDistinct/rollup	all	g:integer,a:numeric,b:bigint | 1,10.0000,1; 2,25.0000,2; 3,30.0000,1; NULL,23.3333,4; NULL,40.0000,1	scale
+all/avgX/countDistinct/emptySets	all	a:numeric,b:bigint | 23.3333,4; 23.3333,4	scale
+all/avgX/countDistinct/having	all	a:numeric,b:bigint | 23.333333,4	scale
+all/avgX/countDistinct/filter	all	a:numeric,b:bigint | 20.000000,4	scale
+all/avgX/countDistinct/scalarSubquery	all	ERR 22003	scalarScaleErr
+all/avgX/countDistinct/unionAll	single	a:numeric,b:bigint | 23.333333,4; NULL,0	scale
+all/avgX/countDistinct/unionAll	dag	ERR -	union346
+all/avgX/countDistinctExpr/ungrouped	all	a:numeric,b:bigint | 23.3333,3	scale
+all/avgX/countDistinctExpr/grouped	all	g:integer,a:numeric,b:bigint | 1,10.0000,1; 2,25.0000,2; 3,30.0000,1; NULL,40.0000,1	scale
+all/avgX/countDistinctExpr/rollup	all	g:integer,a:numeric,b:bigint | 1,10.0000,1; 2,25.0000,2; 3,30.0000,1; NULL,23.3333,3; NULL,40.0000,1	scale
+all/avgX/countDistinctExpr/emptySets	all	a:numeric,b:bigint | 23.3333,3; 23.3333,3	scale
+all/avgX/countDistinctExpr/having	all	a:numeric,b:bigint | 23.3333,3	scale
+all/avgX/countDistinctExpr/filter	all	a:numeric,b:bigint | 20.0000,3	scale
+all/avgX/countDistinctExpr/scalarSubquery	all	a:numeric | 23.3333	scale
+all/avgX/countDistinctExpr/unionAll	single	a:numeric,b:bigint | 23.3333,3; NULL,0	scale
+all/avgX/countDistinctExpr/unionAll	dag	ERR -	union346
+all/avgX/twoCountDistinct/ungrouped	all	a:numeric,b:bigint,c:bigint | 23.3333,4,4	scale
+all/avgX/twoCountDistinct/grouped	all	g:integer,a:numeric,b:bigint,c:bigint | 1,10.0000,1,1; 2,25.0000,2,2; 3,30.0000,1,1; NULL,40.0000,1,1	scale
+all/avgX/twoCountDistinct/rollup	all	g:integer,a:numeric,b:bigint,c:bigint | 1,10.0000,1,1; 2,25.0000,2,2; 3,30.0000,1,1; NULL,23.3333,4,4; NULL,40.0000,1,1	scale
+all/avgX/twoCountDistinct/emptySets	all	a:numeric,b:bigint,c:bigint | 23.3333,4,4; 23.3333,4,4	scale
+all/avgX/twoCountDistinct/having	all	a:numeric,b:bigint,c:bigint | 23.3333,4,4	scale
+all/avgX/twoCountDistinct/filter	all	a:numeric,b:bigint,c:bigint | 20.0000,4,4	scale
+all/avgX/twoCountDistinct/scalarSubquery	all	a:numeric | 23.3333	scale
+all/avgX/twoCountDistinct/unionAll	single	a:numeric,b:bigint,c:bigint | 23.3333,4,4; NULL,0,0	scale
+all/avgX/twoCountDistinct/unionAll	dag	ERR -	union346
+all/avgX/sumDistinct/ungrouped	all	a:numeric,b:bigint | 23.3333,100	scale
+all/avgX/sumDistinct/grouped	all	g:integer,a:numeric,b:bigint | 1,10.0000,10; 2,25.0000,50; 3,30.0000,30; NULL,40.0000,40	scale
+all/avgX/sumDistinct/rollup	all	g:integer,a:numeric,b:bigint | 1,10.0000,10; 2,25.0000,50; 3,30.0000,30; NULL,23.3333,100; NULL,40.0000,40	scale
+all/avgX/sumDistinct/emptySets	all	a:numeric,b:bigint | 23.3333,100; 23.3333,100	scale
+all/avgX/sumDistinct/having	all	a:numeric,b:bigint | 23.3333,100	scale
+all/avgX/sumDistinct/filter	all	a:numeric,b:bigint | 20.0000,100	scale
+all/avgX/sumDistinct/scalarSubquery	all	a:numeric | 23.3333	scale
+all/avgX/sumDistinct/unionAll	single	a:numeric,b:bigint | 23.3333,100; NULL,NULL	scale
+all/avgX/sumDistinct/unionAll	dag	ERR -	union346
+all/avgXAndCountStar/countDistinct/ungrouped	all	v:numeric,a:numeric,b:bigint | 23.333333,6,4	typeScale
+all/avgXAndCountStar/countDistinct/grouped	all	g:integer,v:numeric,a:bigint,b:bigint | 1,10.0000,2,1; 2,25.0000,2,2; 3,30.0000,1,1; NULL,40.0000,1,1	scale
+all/avgXAndCountStar/countDistinct/rollup	all	g:integer,v:numeric,a:bigint,b:bigint | 1,10.0000,2,1; 2,25.0000,2,2; 3,30.0000,1,1; NULL,23.3333,6,4; NULL,40.0000,1,1	scale
+all/avgXAndCountStar/countDistinct/emptySets	all	v:numeric,a:bigint,b:bigint | 23.3333,6,4; 23.3333,6,4	scale
+all/avgXAndCountStar/countDistinct/having	all	v:numeric,a:numeric,b:bigint | 23.333333,6,4	typeScale
+all/avgXAndCountStar/countDistinct/filter	all	v:numeric,a:numeric,b:bigint | 23.333333,3,4	typeScale
+all/avgXAndCountStar/countDistinct/scalarSubquery	all	ERR -	scalarErr
+all/avgXAndCountStar/countDistinct/unionAll	single	v:numeric,a:numeric,b:bigint | 23.333333,6,4; NULL,0,0	typeScale
+all/avgXAndCountStar/countDistinct/unionAll	dag	ERR -	union346
+all/avgXAndCountStar/countDistinctExpr/ungrouped	all	v:numeric,a:bigint,b:bigint | 23.3333,6,3	scale
+all/avgXAndCountStar/countDistinctExpr/grouped	all	g:integer,v:numeric,a:bigint,b:bigint | 1,10.0000,2,1; 2,25.0000,2,2; 3,30.0000,1,1; NULL,40.0000,1,1	scale
+all/avgXAndCountStar/countDistinctExpr/rollup	all	g:integer,v:numeric,a:bigint,b:bigint | 1,10.0000,2,1; 2,25.0000,2,2; 3,30.0000,1,1; NULL,23.3333,6,3; NULL,40.0000,1,1	scale
+all/avgXAndCountStar/countDistinctExpr/emptySets	all	v:numeric,a:bigint,b:bigint | 23.3333,6,3; 23.3333,6,3	scale
+all/avgXAndCountStar/countDistinctExpr/having	all	v:numeric,a:bigint,b:bigint | 23.3333,6,3	scale
+all/avgXAndCountStar/countDistinctExpr/filter	all	v:numeric,a:bigint,b:bigint | 23.3333,3,3	scale
+all/avgXAndCountStar/countDistinctExpr/unionAll	single	v:numeric,a:bigint,b:bigint | 23.3333,6,3; NULL,0,0	scale
+all/avgXAndCountStar/countDistinctExpr/unionAll	dag	ERR -	union346
+all/avgXAndCountStar/twoCountDistinct/ungrouped	all	v:numeric,a:bigint,b:bigint,c:bigint | 23.3333,6,4,4	scale
+all/avgXAndCountStar/twoCountDistinct/grouped	all	g:integer,v:numeric,a:bigint,b:bigint,c:bigint | 1,10.0000,2,1,1; 2,25.0000,2,2,2; 3,30.0000,1,1,1; NULL,40.0000,1,1,1	scale
+all/avgXAndCountStar/twoCountDistinct/rollup	all	g:integer,v:numeric,a:bigint,b:bigint,c:bigint | 1,10.0000,2,1,1; 2,25.0000,2,2,2; 3,30.0000,1,1,1; NULL,23.3333,6,4,4; NULL,40.0000,1,1,1	scale
+all/avgXAndCountStar/twoCountDistinct/emptySets	all	v:numeric,a:bigint,b:bigint,c:bigint | 23.3333,6,4,4; 23.3333,6,4,4	scale
+all/avgXAndCountStar/twoCountDistinct/having	all	v:numeric,a:bigint,b:bigint,c:bigint | 23.3333,6,4,4	scale
+all/avgXAndCountStar/twoCountDistinct/filter	all	v:numeric,a:bigint,b:bigint,c:bigint | 23.3333,3,4,4	scale
+all/avgXAndCountStar/twoCountDistinct/unionAll	single	v:numeric,a:bigint,b:bigint,c:bigint | 23.3333,6,4,4; NULL,0,0,0	scale
+all/avgXAndCountStar/twoCountDistinct/unionAll	dag	ERR -	union346
+all/avgXAndCountStar/sumDistinct/ungrouped	all	v:numeric,a:bigint,b:bigint | 23.3333,6,100	scale
+all/avgXAndCountStar/sumDistinct/grouped	all	g:integer,v:numeric,a:bigint,b:bigint | 1,10.0000,2,10; 2,25.0000,2,50; 3,30.0000,1,30; NULL,40.0000,1,40	scale
+all/avgXAndCountStar/sumDistinct/rollup	all	g:integer,v:numeric,a:bigint,b:bigint | 1,10.0000,2,10; 2,25.0000,2,50; 3,30.0000,1,30; NULL,23.3333,6,100; NULL,40.0000,1,40	scale
+all/avgXAndCountStar/sumDistinct/emptySets	all	v:numeric,a:bigint,b:bigint | 23.3333,6,100; 23.3333,6,100	scale
+all/avgXAndCountStar/sumDistinct/having	all	v:numeric,a:bigint,b:bigint | 23.3333,6,100	scale
+all/avgXAndCountStar/sumDistinct/filter	all	v:numeric,a:bigint,b:bigint | 23.3333,3,100	scale
+all/avgXAndCountStar/sumDistinct/unionAll	single	v:numeric,a:bigint,b:bigint | 23.3333,6,100; NULL,0,NULL	scale
+all/avgXAndCountStar/sumDistinct/unionAll	dag	ERR -	union346
+nulls/countStar/countDistinct/ungrouped	all	a:numeric,b:bigint | 6,4	type
+nulls/countStar/countDistinct/having	all	a:numeric,b:bigint | 6,4	type
+nulls/countStar/countDistinct/filter	all	a:numeric,b:bigint | 3,4	type
+nulls/countStar/countDistinct/scalarSubquery	all	ERR -	scalarErr
+nulls/countStar/countDistinct/unionAll	single	a:numeric,b:bigint | 0,0; 6,4	type
+nulls/countStar/countDistinct/unionAll	dag	ERR -	union346
+nulls/countStar/countDistinctExpr/unionAll	dag	ERR -	union346
+nulls/countStar/twoCountDistinct/unionAll	dag	ERR -	union346
+nulls/countStar/sumDistinct/unionAll	dag	ERR -	union346
+nulls/countX/countDistinct/ungrouped	all	a:numeric,b:bigint | 4,4	type
+nulls/countX/countDistinct/having	all	a:numeric,b:bigint | 4,4	type
+nulls/countX/countDistinct/filter	all	a:numeric,b:bigint | 3,4	type
+nulls/countX/countDistinct/scalarSubquery	all	ERR -	scalarErr
+nulls/countX/countDistinct/unionAll	single	a:numeric,b:bigint | 0,0; 4,4	type
+nulls/countX/countDistinct/unionAll	dag	ERR -	union346
+nulls/countX/countDistinctExpr/unionAll	dag	ERR -	union346
+nulls/countX/twoCountDistinct/unionAll	dag	ERR -	union346
+nulls/countX/sumDistinct/unionAll	dag	ERR -	union346
+nulls/sumX/countDistinct/ungrouped	all	a:numeric,b:bigint | 100,4	type
+nulls/sumX/countDistinct/having	all	a:numeric,b:bigint | 100,4	type
+nulls/sumX/countDistinct/filter	all	a:numeric,b:bigint | 60,4	type
+nulls/sumX/countDistinct/scalarSubquery	all	ERR -	scalarErr
+nulls/sumX/countDistinct/unionAll	single	a:numeric,b:bigint | 100,4; NULL,0	type
+nulls/sumX/countDistinct/unionAll	dag	ERR -	union346
+nulls/sumX/countDistinctExpr/unionAll	dag	ERR -	union346
+nulls/sumX/twoCountDistinct/unionAll	dag	ERR -	union346
+nulls/sumX/sumDistinct/unionAll	dag	ERR -	union346
+nulls/minX/countDistinct/unionAll	dag	ERR -	union346
+nulls/minX/countDistinctExpr/unionAll	dag	ERR -	union346
+nulls/minX/twoCountDistinct/unionAll	dag	ERR -	union346
+nulls/minX/sumDistinct/unionAll	dag	ERR -	union346
+nulls/avgX/countDistinct/ungrouped	all	a:numeric,b:bigint | 25.000000,4	scale
+nulls/avgX/countDistinct/grouped	all	g:integer,a:numeric,b:bigint | 1,10.0000,1; 2,20.0000,1; 3,30.0000,1; NULL,40.0000,1	scale
+nulls/avgX/countDistinct/rollup	all	g:integer,a:numeric,b:bigint | 1,10.0000,1; 2,20.0000,1; 3,30.0000,1; NULL,25.0000,4; NULL,40.0000,1	scale
+nulls/avgX/countDistinct/emptySets	all	a:numeric,b:bigint | 25.0000,4; 25.0000,4	scale
+nulls/avgX/countDistinct/having	all	a:numeric,b:bigint | 25.000000,4	scale
+nulls/avgX/countDistinct/filter	all	a:numeric,b:bigint | 20.000000,4	scale
+nulls/avgX/countDistinct/scalarSubquery	all	a:numeric | 25.0000	scale
+nulls/avgX/countDistinct/unionAll	single	a:numeric,b:bigint | 25.000000,4; NULL,0	scale
+nulls/avgX/countDistinct/unionAll	dag	ERR -	union346
+nulls/avgX/countDistinctExpr/ungrouped	all	a:numeric,b:bigint | 25.0000,3	scale
+nulls/avgX/countDistinctExpr/grouped	all	g:integer,a:numeric,b:bigint | 1,10.0000,1; 2,20.0000,1; 3,30.0000,1; NULL,40.0000,1	scale
+nulls/avgX/countDistinctExpr/rollup	all	g:integer,a:numeric,b:bigint | 1,10.0000,1; 2,20.0000,1; 3,30.0000,1; NULL,25.0000,3; NULL,40.0000,1	scale
+nulls/avgX/countDistinctExpr/emptySets	all	a:numeric,b:bigint | 25.0000,3; 25.0000,3	scale
+nulls/avgX/countDistinctExpr/having	all	a:numeric,b:bigint | 25.0000,3	scale
+nulls/avgX/countDistinctExpr/filter	all	a:numeric,b:bigint | 20.0000,3	scale
+nulls/avgX/countDistinctExpr/scalarSubquery	all	a:numeric | 25.0000	scale
+nulls/avgX/countDistinctExpr/unionAll	single	a:numeric,b:bigint | 25.0000,3; NULL,0	scale
+nulls/avgX/countDistinctExpr/unionAll	dag	ERR -	union346
+nulls/avgX/twoCountDistinct/ungrouped	all	a:numeric,b:bigint,c:bigint | 25.0000,4,4	scale
+nulls/avgX/twoCountDistinct/grouped	all	g:integer,a:numeric,b:bigint,c:bigint | 1,10.0000,1,1; 2,20.0000,1,2; 3,30.0000,1,1; NULL,40.0000,1,1	scale
+nulls/avgX/twoCountDistinct/rollup	all	g:integer,a:numeric,b:bigint,c:bigint | 1,10.0000,1,1; 2,20.0000,1,2; 3,30.0000,1,1; NULL,25.0000,4,4; NULL,40.0000,1,1	scale
+nulls/avgX/twoCountDistinct/emptySets	all	a:numeric,b:bigint,c:bigint | 25.0000,4,4; 25.0000,4,4	scale
+nulls/avgX/twoCountDistinct/having	all	a:numeric,b:bigint,c:bigint | 25.0000,4,4	scale
+nulls/avgX/twoCountDistinct/filter	all	a:numeric,b:bigint,c:bigint | 20.0000,4,4	scale
+nulls/avgX/twoCountDistinct/scalarSubquery	all	a:numeric | 25.0000	scale
+nulls/avgX/twoCountDistinct/unionAll	single	a:numeric,b:bigint,c:bigint | 25.0000,4,4; NULL,0,0	scale
+nulls/avgX/twoCountDistinct/unionAll	dag	ERR -	union346
+nulls/avgX/sumDistinct/ungrouped	all	a:numeric,b:bigint | 25.0000,100	scale
+nulls/avgX/sumDistinct/grouped	all	g:integer,a:numeric,b:bigint | 1,10.0000,10; 2,20.0000,20; 3,30.0000,30; NULL,40.0000,40	scale
+nulls/avgX/sumDistinct/rollup	all	g:integer,a:numeric,b:bigint | 1,10.0000,10; 2,20.0000,20; 3,30.0000,30; NULL,25.0000,100; NULL,40.0000,40	scale
+nulls/avgX/sumDistinct/emptySets	all	a:numeric,b:bigint | 25.0000,100; 25.0000,100	scale
+nulls/avgX/sumDistinct/having	all	a:numeric,b:bigint | 25.0000,100	scale
+nulls/avgX/sumDistinct/filter	all	a:numeric,b:bigint | 20.0000,100	scale
+nulls/avgX/sumDistinct/scalarSubquery	all	a:numeric | 25.0000	scale
+nulls/avgX/sumDistinct/unionAll	single	a:numeric,b:bigint | 25.0000,100; NULL,NULL	scale
+nulls/avgX/sumDistinct/unionAll	dag	ERR -	union346
+nulls/avgXAndCountStar/countDistinct/ungrouped	all	v:numeric,a:numeric,b:bigint | 25.000000,6,4	typeScale
+nulls/avgXAndCountStar/countDistinct/grouped	all	g:integer,v:numeric,a:bigint,b:bigint | 1,10.0000,2,1; 2,20.0000,2,1; 3,30.0000,1,1; NULL,40.0000,1,1	scale
+nulls/avgXAndCountStar/countDistinct/rollup	all	g:integer,v:numeric,a:bigint,b:bigint | 1,10.0000,2,1; 2,20.0000,2,1; 3,30.0000,1,1; NULL,25.0000,6,4; NULL,40.0000,1,1	scale
+nulls/avgXAndCountStar/countDistinct/emptySets	all	v:numeric,a:bigint,b:bigint | 25.0000,6,4; 25.0000,6,4	scale
+nulls/avgXAndCountStar/countDistinct/having	all	v:numeric,a:numeric,b:bigint | 25.000000,6,4	typeScale
+nulls/avgXAndCountStar/countDistinct/filter	all	v:numeric,a:numeric,b:bigint | 25.000000,3,4	typeScale
+nulls/avgXAndCountStar/countDistinct/scalarSubquery	all	ERR -	scalarErr
+nulls/avgXAndCountStar/countDistinct/unionAll	single	v:numeric,a:numeric,b:bigint | 25.000000,6,4; NULL,0,0	typeScale
+nulls/avgXAndCountStar/countDistinct/unionAll	dag	ERR -	union346
+nulls/avgXAndCountStar/countDistinctExpr/ungrouped	all	v:numeric,a:bigint,b:bigint | 25.0000,6,3	scale
+nulls/avgXAndCountStar/countDistinctExpr/grouped	all	g:integer,v:numeric,a:bigint,b:bigint | 1,10.0000,2,1; 2,20.0000,2,1; 3,30.0000,1,1; NULL,40.0000,1,1	scale
+nulls/avgXAndCountStar/countDistinctExpr/rollup	all	g:integer,v:numeric,a:bigint,b:bigint | 1,10.0000,2,1; 2,20.0000,2,1; 3,30.0000,1,1; NULL,25.0000,6,3; NULL,40.0000,1,1	scale
+nulls/avgXAndCountStar/countDistinctExpr/emptySets	all	v:numeric,a:bigint,b:bigint | 25.0000,6,3; 25.0000,6,3	scale
+nulls/avgXAndCountStar/countDistinctExpr/having	all	v:numeric,a:bigint,b:bigint | 25.0000,6,3	scale
+nulls/avgXAndCountStar/countDistinctExpr/filter	all	v:numeric,a:bigint,b:bigint | 25.0000,3,3	scale
+nulls/avgXAndCountStar/countDistinctExpr/unionAll	single	v:numeric,a:bigint,b:bigint | 25.0000,6,3; NULL,0,0	scale
+nulls/avgXAndCountStar/countDistinctExpr/unionAll	dag	ERR -	union346
+nulls/avgXAndCountStar/twoCountDistinct/ungrouped	all	v:numeric,a:bigint,b:bigint,c:bigint | 25.0000,6,4,4	scale
+nulls/avgXAndCountStar/twoCountDistinct/grouped	all	g:integer,v:numeric,a:bigint,b:bigint,c:bigint | 1,10.0000,2,1,1; 2,20.0000,2,1,2; 3,30.0000,1,1,1; NULL,40.0000,1,1,1	scale
+nulls/avgXAndCountStar/twoCountDistinct/rollup	all	g:integer,v:numeric,a:bigint,b:bigint,c:bigint | 1,10.0000,2,1,1; 2,20.0000,2,1,2; 3,30.0000,1,1,1; NULL,25.0000,6,4,4; NULL,40.0000,1,1,1	scale
+nulls/avgXAndCountStar/twoCountDistinct/emptySets	all	v:numeric,a:bigint,b:bigint,c:bigint | 25.0000,6,4,4; 25.0000,6,4,4	scale
+nulls/avgXAndCountStar/twoCountDistinct/having	all	v:numeric,a:bigint,b:bigint,c:bigint | 25.0000,6,4,4	scale
+nulls/avgXAndCountStar/twoCountDistinct/filter	all	v:numeric,a:bigint,b:bigint,c:bigint | 25.0000,3,4,4	scale
+nulls/avgXAndCountStar/twoCountDistinct/unionAll	single	v:numeric,a:bigint,b:bigint,c:bigint | 25.0000,6,4,4; NULL,0,0,0	scale
+nulls/avgXAndCountStar/twoCountDistinct/unionAll	dag	ERR -	union346
+nulls/avgXAndCountStar/sumDistinct/ungrouped	all	v:numeric,a:bigint,b:bigint | 25.0000,6,100	scale
+nulls/avgXAndCountStar/sumDistinct/grouped	all	g:integer,v:numeric,a:bigint,b:bigint | 1,10.0000,2,10; 2,20.0000,2,20; 3,30.0000,1,30; NULL,40.0000,1,40	scale
+nulls/avgXAndCountStar/sumDistinct/rollup	all	g:integer,v:numeric,a:bigint,b:bigint | 1,10.0000,2,10; 2,20.0000,2,20; 3,30.0000,1,30; NULL,25.0000,6,100; NULL,40.0000,1,40	scale
+nulls/avgXAndCountStar/sumDistinct/emptySets	all	v:numeric,a:bigint,b:bigint | 25.0000,6,100; 25.0000,6,100	scale
+nulls/avgXAndCountStar/sumDistinct/having	all	v:numeric,a:bigint,b:bigint | 25.0000,6,100	scale
+nulls/avgXAndCountStar/sumDistinct/filter	all	v:numeric,a:bigint,b:bigint | 25.0000,3,100	scale
+nulls/avgXAndCountStar/sumDistinct/unionAll	single	v:numeric,a:bigint,b:bigint | 25.0000,6,100; NULL,0,NULL	scale
+nulls/avgXAndCountStar/sumDistinct/unionAll	dag	ERR -	union346
