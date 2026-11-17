@@ -1,0 +1,316 @@
+# Cells whose answer here is not PostgreSQL 17.11's, for count_distinct_recombined_arms_test.go (#1696). Every line is a residual,
+# wrong at the base f0b84410 too (TestCountDistinctRecombinedDump at the base, compared cell by cell).
+# name<TAB>arms (all | dag | single: the two single-process arms)<TAB>this engine's answer<TAB>why-code.
+# A kept line whose arm starts answering PostgreSQL FAILS: re-measure and delete it. The why-codes:
+#   scale: display scale (per-value scale program): AVG answers fewer fraction digits than PostgreSQL's numeric
+#   scalarScaleErr: a scalar subquery over a rewritten AVG(int) is refused on every arm (numeric field overflow: 23.333333 does not fit a DECIMAL at scale 4). The subquery's column is declared from its UNOPTIMIZED plan (physical subqueryLogicalPlan, no two-level rewrite: AVG(int) DECIMAL(38,4)) while the executed plan is optimized (the rewrite's division, scale 6)
+#   union346: (#346) a UNION ALL arm that selects an aggregate is refused by the DAG planner
+#   cteDupName: a CTE column-alias list over a body that publishes one name twice reads the FIRST column for both on the single-process path (logical applyColumnAliasProject renames by name); with or without the rewrite (the grouped cells), and on the DAG arms where the plan routes to that path
+#   unionArmType: a UNION ALL of grouped arms whose outputs share a name declares MIN/MAX of an integer bigint where PostgreSQL declares integer, on the single-process arms; the rewrite declines these (grouped, not lone)
+#   finalDropped: the stage planner declines the rewrite's finalizing projection when it would publish one name twice, and the plan goes on without it (#1692's first remaining line); the DAG then reads a shared name's first column for both, or a column no stage publishes
+oneDistinct/top/distinctAliases/avgInt/ungrouped/rows	all	a:numeric,b:bigint | 23.333333,4	scale
+oneDistinct/top/distinctAliases/avgInt/grouped/rows	all	a:numeric,b:bigint | 10.0000,1; 25.0000,2; 30.0000,1; 40.0000,1	scale
+oneDistinct/top/distinctAliases/avgDec/ungrouped/rows	all	a:numeric,b:bigint | 2.320000,4	scale
+oneDistinct/top/distinctAliases/avgDec/grouped/rows	all	a:numeric,b:bigint | 0.100000,1; 1.875000,1; 3.750000,2; 4.000000,1	scale
+oneDistinct/top/sharedAlias/avgInt/ungrouped/rows	all	a:numeric,a:bigint | 23.333333,4	scale
+oneDistinct/top/sharedAlias/avgInt/grouped/rows	all	a:numeric,a:bigint | 10.0000,1; 25.0000,2; 30.0000,1; 40.0000,1	scale
+oneDistinct/top/sharedAlias/avgDec/ungrouped/rows	all	a:numeric,a:bigint | 2.320000,4	scale
+oneDistinct/top/sharedAlias/avgDec/grouped/rows	all	a:numeric,a:bigint | 0.100000,1; 1.875000,1; 3.750000,2; 4.000000,1	scale
+oneDistinct/top/columnName/avgInt/ungrouped/rows	all	x:numeric,b:bigint | 23.333333,4	scale
+oneDistinct/top/columnName/avgInt/grouped/rows	all	x:numeric,b:bigint | 10.0000,1; 25.0000,2; 30.0000,1; 40.0000,1	scale
+oneDistinct/top/columnName/avgDec/ungrouped/rows	all	x:numeric,b:bigint | 2.320000,4	scale
+oneDistinct/top/columnName/avgDec/grouped/rows	all	x:numeric,b:bigint | 0.100000,1; 1.875000,1; 3.750000,2; 4.000000,1	scale
+oneDistinct/top/noAliases/avgInt/ungrouped/rows	all	avg:numeric,count:bigint | 23.333333,4	scale
+oneDistinct/top/noAliases/avgInt/grouped/rows	all	avg:numeric,count:bigint | 10.0000,1; 25.0000,2; 30.0000,1; 40.0000,1	scale
+oneDistinct/top/noAliases/avgDec/ungrouped/rows	all	avg:numeric,count:bigint | 2.320000,4	scale
+oneDistinct/top/noAliases/avgDec/grouped/rows	all	avg:numeric,count:bigint | 0.100000,1; 1.875000,1; 3.750000,2; 4.000000,1	scale
+oneDistinct/scalarSelect/distinctAliases/avgInt/ungrouped/rows	all	ERR 22003	scalarScaleErr
+oneDistinct/scalarSelect/distinctAliases/avgInt/grouped/rows	all	s:numeric | 10.0000	scale
+oneDistinct/scalarSelect/distinctAliases/avgDec/ungrouped/rows	all	s:numeric | 2.320000	scale
+oneDistinct/scalarSelect/distinctAliases/avgDec/grouped/rows	all	s:numeric | 0.100000	scale
+oneDistinct/scalarSelect/sharedAlias/avgInt/ungrouped/rows	all	ERR 22003	scalarScaleErr
+oneDistinct/scalarSelect/sharedAlias/avgInt/grouped/rows	all	s:numeric | 10.0000	scale
+oneDistinct/scalarSelect/sharedAlias/avgDec/ungrouped/rows	all	s:numeric | 2.320000	scale
+oneDistinct/scalarSelect/sharedAlias/avgDec/grouped/rows	all	s:numeric | 0.100000	scale
+oneDistinct/scalarSelect/columnName/avgInt/ungrouped/rows	all	ERR 22003	scalarScaleErr
+oneDistinct/scalarSelect/columnName/avgInt/grouped/rows	all	s:numeric | 10.0000	scale
+oneDistinct/scalarSelect/columnName/avgDec/ungrouped/rows	all	s:numeric | 2.320000	scale
+oneDistinct/scalarSelect/columnName/avgDec/grouped/rows	all	s:numeric | 0.100000	scale
+oneDistinct/scalarSelect/noAliases/avgInt/ungrouped/rows	all	ERR 22003	scalarScaleErr
+oneDistinct/scalarSelect/noAliases/avgInt/grouped/rows	all	s:numeric | 10.0000	scale
+oneDistinct/scalarSelect/noAliases/avgDec/ungrouped/rows	all	s:numeric | 2.320000	scale
+oneDistinct/scalarSelect/noAliases/avgDec/grouped/rows	all	s:numeric | 0.100000	scale
+oneDistinct/derived/distinctAliases/avgInt/ungrouped/rows	all	c1:numeric,c2:bigint | 23.333333,4	scale
+oneDistinct/derived/distinctAliases/avgInt/grouped/rows	all	c1:numeric,c2:bigint | 10.0000,1; 25.0000,2; 30.0000,1; 40.0000,1	scale
+oneDistinct/derived/distinctAliases/avgDec/ungrouped/rows	all	c1:numeric,c2:bigint | 2.320000,4	scale
+oneDistinct/derived/distinctAliases/avgDec/grouped/rows	all	c1:numeric,c2:bigint | 0.100000,1; 1.875000,1; 3.750000,2; 4.000000,1	scale
+oneDistinct/derived/sharedAlias/avgInt/ungrouped/rows	all	c1:numeric,c2:bigint | 23.333333,4	scale
+oneDistinct/derived/sharedAlias/avgInt/grouped/rows	all	c1:numeric,c2:bigint | 10.0000,1; 25.0000,2; 30.0000,1; 40.0000,1	scale
+oneDistinct/derived/sharedAlias/avgDec/ungrouped/rows	all	c1:numeric,c2:bigint | 2.320000,4	scale
+oneDistinct/derived/sharedAlias/avgDec/grouped/rows	all	c1:numeric,c2:bigint | 0.100000,1; 1.875000,1; 3.750000,2; 4.000000,1	scale
+oneDistinct/derived/columnName/avgInt/ungrouped/rows	all	c1:numeric,c2:bigint | 23.333333,4	scale
+oneDistinct/derived/columnName/avgInt/grouped/rows	all	c1:numeric,c2:bigint | 10.0000,1; 25.0000,2; 30.0000,1; 40.0000,1	scale
+oneDistinct/derived/columnName/avgDec/ungrouped/rows	all	c1:numeric,c2:bigint | 2.320000,4	scale
+oneDistinct/derived/columnName/avgDec/grouped/rows	all	c1:numeric,c2:bigint | 0.100000,1; 1.875000,1; 3.750000,2; 4.000000,1	scale
+oneDistinct/derived/noAliases/avgInt/ungrouped/rows	all	c1:numeric,c2:bigint | 23.333333,4	scale
+oneDistinct/derived/noAliases/avgInt/grouped/rows	all	c1:numeric,c2:bigint | 10.0000,1; 25.0000,2; 30.0000,1; 40.0000,1	scale
+oneDistinct/derived/noAliases/avgDec/ungrouped/rows	all	c1:numeric,c2:bigint | 2.320000,4	scale
+oneDistinct/derived/noAliases/avgDec/grouped/rows	all	c1:numeric,c2:bigint | 0.100000,1; 1.875000,1; 3.750000,2; 4.000000,1	scale
+oneDistinct/cte/distinctAliases/avgInt/ungrouped/rows	all	c1:numeric,c2:bigint | 23.333333,4	scale
+oneDistinct/cte/distinctAliases/avgInt/grouped/rows	all	c1:numeric,c2:bigint | 10.0000,1; 25.0000,2; 30.0000,1; 40.0000,1	scale
+oneDistinct/cte/distinctAliases/avgDec/ungrouped/rows	all	c1:numeric,c2:bigint | 2.320000,4	scale
+oneDistinct/cte/distinctAliases/avgDec/grouped/rows	all	c1:numeric,c2:bigint | 0.100000,1; 1.875000,1; 3.750000,2; 4.000000,1	scale
+oneDistinct/cte/sharedAlias/countStar/ungrouped/rows	all	c1:bigint,c2:bigint | 6,6	cteDupName
+oneDistinct/cte/sharedAlias/countStar/grouped/rows	single	c1:bigint,c2:bigint | 1,1; 1,1; 2,2; 2,2	cteDupName
+oneDistinct/cte/sharedAlias/countX/ungrouped/rows	all	c1:bigint,c2:bigint | 6,6	cteDupName
+oneDistinct/cte/sharedAlias/countX/grouped/rows	single	c1:bigint,c2:bigint | 1,1; 1,1; 2,2; 2,2	cteDupName
+oneDistinct/cte/sharedAlias/sumInt/ungrouped/rows	single	c1:bigint,c2:bigint | 140,140	cteDupName
+oneDistinct/cte/sharedAlias/sumInt/ungrouped/zero	single	c1:bigint,c2:bigint | NULL,NULL	cteDupName
+oneDistinct/cte/sharedAlias/sumInt/grouped/rows	single	c1:bigint,c2:bigint | 20,20; 30,30; 40,40; 50,50	cteDupName
+oneDistinct/cte/sharedAlias/sumBig/ungrouped/rows	single	c1:numeric,c2:numeric | 10000000085,10000000085	cteDupName
+oneDistinct/cte/sharedAlias/sumBig/ungrouped/zero	single	c1:numeric,c2:numeric | NULL,NULL	cteDupName
+oneDistinct/cte/sharedAlias/sumBig/grouped/rows	single	c1:numeric,c2:numeric | -5,-5; 10000000000,10000000000; 40,40; 50,50	cteDupName
+oneDistinct/cte/sharedAlias/sumDec/ungrouped/rows	single	c1:numeric,c2:numeric | 11.60,11.60	cteDupName
+oneDistinct/cte/sharedAlias/sumDec/ungrouped/zero	single	c1:numeric,c2:numeric | NULL,NULL	cteDupName
+oneDistinct/cte/sharedAlias/sumDec/grouped/rows	single	c1:numeric,c2:numeric | 0.10,0.10; 3.75,3.75; 3.75,3.75; 4.00,4.00	cteDupName
+oneDistinct/cte/sharedAlias/sumFloat/ungrouped/rows	single	c1:double precision,c2:double precision | 7.375,7.375	cteDupName
+oneDistinct/cte/sharedAlias/sumFloat/ungrouped/zero	single	c1:double precision,c2:double precision | NULL,NULL	cteDupName
+oneDistinct/cte/sharedAlias/sumFloat/grouped/rows	single	c1:double precision,c2:double precision | 0.125,0.125; 0.5,0.5; 3,3; 3.75,3.75	cteDupName
+oneDistinct/cte/sharedAlias/avgInt/ungrouped/rows	all	c1:numeric,c2:numeric | 23.333333,23.333333	cteDupName
+oneDistinct/cte/sharedAlias/avgInt/ungrouped/zero	all	c1:numeric,c2:numeric | NULL,NULL	cteDupName
+oneDistinct/cte/sharedAlias/avgInt/grouped/rows	single	c1:numeric,c2:numeric | 10.0000,10.0000; 25.0000,25.0000; 30.0000,30.0000; 40.0000,40.0000	cteDupName
+oneDistinct/cte/sharedAlias/avgInt/grouped/rows	dag	c1:numeric,c2:bigint | 10.0000,1; 25.0000,2; 30.0000,1; 40.0000,1	scale
+oneDistinct/cte/sharedAlias/avgDec/ungrouped/rows	all	c1:numeric,c2:numeric | 2.320000,2.320000	cteDupName
+oneDistinct/cte/sharedAlias/avgDec/ungrouped/zero	all	c1:numeric,c2:numeric | NULL,NULL	cteDupName
+oneDistinct/cte/sharedAlias/avgDec/grouped/rows	single	c1:numeric,c2:numeric | 0.100000,0.100000; 1.875000,1.875000; 3.750000,3.750000; 4.000000,4.000000	cteDupName
+oneDistinct/cte/sharedAlias/avgDec/grouped/rows	dag	c1:numeric,c2:bigint | 0.100000,1; 1.875000,1; 3.750000,2; 4.000000,1	scale
+oneDistinct/cte/sharedAlias/min/ungrouped/rows	single	c1:integer,c2:integer | 10,10	cteDupName
+oneDistinct/cte/sharedAlias/min/ungrouped/zero	single	c1:integer,c2:integer | NULL,NULL	cteDupName
+oneDistinct/cte/sharedAlias/min/grouped/rows	single	c1:integer,c2:integer | 10,10; 20,20; 30,30; 40,40	cteDupName
+oneDistinct/cte/sharedAlias/max/ungrouped/rows	single	c1:integer,c2:integer | 40,40	cteDupName
+oneDistinct/cte/sharedAlias/max/ungrouped/zero	single	c1:integer,c2:integer | NULL,NULL	cteDupName
+oneDistinct/cte/sharedAlias/max/grouped/rows	single	c1:integer,c2:integer | 10,10; 30,30; 30,30; 40,40	cteDupName
+oneDistinct/cte/columnName/avgInt/ungrouped/rows	all	c1:numeric,c2:bigint | 23.333333,4	scale
+oneDistinct/cte/columnName/avgInt/grouped/rows	all	c1:numeric,c2:bigint | 10.0000,1; 25.0000,2; 30.0000,1; 40.0000,1	scale
+oneDistinct/cte/columnName/avgDec/ungrouped/rows	all	c1:numeric,c2:bigint | 2.320000,4	scale
+oneDistinct/cte/columnName/avgDec/grouped/rows	all	c1:numeric,c2:bigint | 0.100000,1; 1.875000,1; 3.750000,2; 4.000000,1	scale
+oneDistinct/cte/noAliases/avgInt/ungrouped/rows	all	c1:numeric,c2:bigint | 23.333333,4	scale
+oneDistinct/cte/noAliases/avgInt/grouped/rows	all	c1:numeric,c2:bigint | 10.0000,1; 25.0000,2; 30.0000,1; 40.0000,1	scale
+oneDistinct/cte/noAliases/avgDec/ungrouped/rows	all	c1:numeric,c2:bigint | 2.320000,4	scale
+oneDistinct/cte/noAliases/avgDec/grouped/rows	all	c1:numeric,c2:bigint | 0.100000,1; 1.875000,1; 3.750000,2; 4.000000,1	scale
+oneDistinct/unionAll/distinctAliases/countStar/ungrouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/distinctAliases/countStar/ungrouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/distinctAliases/countStar/grouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/distinctAliases/countStar/grouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/distinctAliases/countX/ungrouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/distinctAliases/countX/ungrouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/distinctAliases/countX/grouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/distinctAliases/countX/grouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/distinctAliases/sumInt/ungrouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/distinctAliases/sumInt/ungrouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/distinctAliases/sumInt/grouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/distinctAliases/sumInt/grouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/distinctAliases/sumBig/ungrouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/distinctAliases/sumBig/ungrouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/distinctAliases/sumBig/grouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/distinctAliases/sumBig/grouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/distinctAliases/sumDec/ungrouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/distinctAliases/sumDec/ungrouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/distinctAliases/sumDec/grouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/distinctAliases/sumDec/grouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/distinctAliases/sumFloat/ungrouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/distinctAliases/sumFloat/ungrouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/distinctAliases/sumFloat/grouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/distinctAliases/sumFloat/grouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/distinctAliases/avgInt/ungrouped/rows	single	a:numeric,b:bigint | 23.333333,4; NULL,0	scale
+oneDistinct/unionAll/distinctAliases/avgInt/ungrouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/distinctAliases/avgInt/ungrouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/distinctAliases/avgInt/grouped/rows	single	a:numeric,b:bigint | 10.0000,1; 25.0000,2; 30.0000,1; 40.0000,1	scale
+oneDistinct/unionAll/distinctAliases/avgInt/grouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/distinctAliases/avgInt/grouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/distinctAliases/avgDec/ungrouped/rows	single	a:numeric,b:bigint | 2.320000,4; NULL,0	scale
+oneDistinct/unionAll/distinctAliases/avgDec/ungrouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/distinctAliases/avgDec/ungrouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/distinctAliases/avgDec/grouped/rows	single	a:numeric,b:bigint | 0.100000,1; 1.875000,1; 3.750000,2; 4.000000,1	scale
+oneDistinct/unionAll/distinctAliases/avgDec/grouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/distinctAliases/avgDec/grouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/distinctAliases/min/ungrouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/distinctAliases/min/ungrouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/distinctAliases/min/grouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/distinctAliases/min/grouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/distinctAliases/max/ungrouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/distinctAliases/max/ungrouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/distinctAliases/max/grouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/distinctAliases/max/grouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/sharedAlias/countStar/ungrouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/sharedAlias/countStar/ungrouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/sharedAlias/countStar/grouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/sharedAlias/countStar/grouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/sharedAlias/countX/ungrouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/sharedAlias/countX/ungrouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/sharedAlias/countX/grouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/sharedAlias/countX/grouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/sharedAlias/sumInt/ungrouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/sharedAlias/sumInt/ungrouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/sharedAlias/sumInt/grouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/sharedAlias/sumInt/grouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/sharedAlias/sumBig/ungrouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/sharedAlias/sumBig/ungrouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/sharedAlias/sumBig/grouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/sharedAlias/sumBig/grouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/sharedAlias/sumDec/ungrouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/sharedAlias/sumDec/ungrouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/sharedAlias/sumDec/grouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/sharedAlias/sumDec/grouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/sharedAlias/sumFloat/ungrouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/sharedAlias/sumFloat/ungrouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/sharedAlias/sumFloat/grouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/sharedAlias/sumFloat/grouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/sharedAlias/avgInt/ungrouped/rows	single	a:numeric,a:bigint | 23.333333,4; NULL,0	scale
+oneDistinct/unionAll/sharedAlias/avgInt/ungrouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/sharedAlias/avgInt/ungrouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/sharedAlias/avgInt/grouped/rows	single	a:numeric,a:bigint | 10.0000,1; 25.0000,2; 30.0000,1; 40.0000,1	scale
+oneDistinct/unionAll/sharedAlias/avgInt/grouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/sharedAlias/avgInt/grouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/sharedAlias/avgDec/ungrouped/rows	single	a:numeric,a:bigint | 2.320000,4; NULL,0	scale
+oneDistinct/unionAll/sharedAlias/avgDec/ungrouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/sharedAlias/avgDec/ungrouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/sharedAlias/avgDec/grouped/rows	single	a:numeric,a:bigint | 0.100000,1; 1.875000,1; 3.750000,2; 4.000000,1	scale
+oneDistinct/unionAll/sharedAlias/avgDec/grouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/sharedAlias/avgDec/grouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/sharedAlias/min/ungrouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/sharedAlias/min/ungrouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/sharedAlias/min/grouped/rows	single	a:bigint,a:bigint | 10,1; 20,2; 30,1; 40,1	unionArmType
+oneDistinct/unionAll/sharedAlias/min/grouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/sharedAlias/min/grouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/sharedAlias/max/ungrouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/sharedAlias/max/ungrouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/sharedAlias/max/grouped/rows	single	a:bigint,a:bigint | 10,1; 30,1; 30,2; 40,1	unionArmType
+oneDistinct/unionAll/sharedAlias/max/grouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/sharedAlias/max/grouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/columnName/countStar/ungrouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/columnName/countStar/ungrouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/columnName/countStar/grouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/columnName/countStar/grouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/columnName/countX/ungrouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/columnName/countX/ungrouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/columnName/countX/grouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/columnName/countX/grouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/columnName/sumInt/ungrouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/columnName/sumInt/ungrouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/columnName/sumInt/grouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/columnName/sumInt/grouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/columnName/sumBig/ungrouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/columnName/sumBig/ungrouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/columnName/sumBig/grouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/columnName/sumBig/grouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/columnName/sumDec/ungrouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/columnName/sumDec/ungrouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/columnName/sumDec/grouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/columnName/sumDec/grouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/columnName/sumFloat/ungrouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/columnName/sumFloat/ungrouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/columnName/sumFloat/grouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/columnName/sumFloat/grouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/columnName/avgInt/ungrouped/rows	single	x:numeric,b:bigint | 23.333333,4; NULL,0	scale
+oneDistinct/unionAll/columnName/avgInt/ungrouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/columnName/avgInt/ungrouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/columnName/avgInt/grouped/rows	single	x:numeric,b:bigint | 10.0000,1; 25.0000,2; 30.0000,1; 40.0000,1	scale
+oneDistinct/unionAll/columnName/avgInt/grouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/columnName/avgInt/grouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/columnName/avgDec/ungrouped/rows	single	x:numeric,b:bigint | 2.320000,4; NULL,0	scale
+oneDistinct/unionAll/columnName/avgDec/ungrouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/columnName/avgDec/ungrouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/columnName/avgDec/grouped/rows	single	x:numeric,b:bigint | 0.100000,1; 1.875000,1; 3.750000,2; 4.000000,1	scale
+oneDistinct/unionAll/columnName/avgDec/grouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/columnName/avgDec/grouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/columnName/min/ungrouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/columnName/min/ungrouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/columnName/min/grouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/columnName/min/grouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/columnName/max/ungrouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/columnName/max/ungrouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/columnName/max/grouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/columnName/max/grouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/noAliases/countStar/ungrouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/noAliases/countStar/ungrouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/noAliases/countStar/grouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/noAliases/countStar/grouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/noAliases/countX/ungrouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/noAliases/countX/ungrouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/noAliases/countX/grouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/noAliases/countX/grouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/noAliases/sumInt/ungrouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/noAliases/sumInt/ungrouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/noAliases/sumInt/grouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/noAliases/sumInt/grouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/noAliases/sumBig/ungrouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/noAliases/sumBig/ungrouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/noAliases/sumBig/grouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/noAliases/sumBig/grouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/noAliases/sumDec/ungrouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/noAliases/sumDec/ungrouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/noAliases/sumDec/grouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/noAliases/sumDec/grouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/noAliases/sumFloat/ungrouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/noAliases/sumFloat/ungrouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/noAliases/sumFloat/grouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/noAliases/sumFloat/grouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/noAliases/avgInt/ungrouped/rows	single	avg:numeric,count:bigint | 23.333333,4; NULL,0	scale
+oneDistinct/unionAll/noAliases/avgInt/ungrouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/noAliases/avgInt/ungrouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/noAliases/avgInt/grouped/rows	single	avg:numeric,count:bigint | 10.0000,1; 25.0000,2; 30.0000,1; 40.0000,1	scale
+oneDistinct/unionAll/noAliases/avgInt/grouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/noAliases/avgInt/grouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/noAliases/avgDec/ungrouped/rows	single	avg:numeric,count:bigint | 2.320000,4; NULL,0	scale
+oneDistinct/unionAll/noAliases/avgDec/ungrouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/noAliases/avgDec/ungrouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/noAliases/avgDec/grouped/rows	single	avg:numeric,count:bigint | 0.100000,1; 1.875000,1; 3.750000,2; 4.000000,1	scale
+oneDistinct/unionAll/noAliases/avgDec/grouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/noAliases/avgDec/grouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/noAliases/min/ungrouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/noAliases/min/ungrouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/noAliases/min/grouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/noAliases/min/grouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/noAliases/max/ungrouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/noAliases/max/ungrouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/noAliases/max/grouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/noAliases/max/grouped/zero	dag	ERR -	union346
+twoDistinct/top/distinctAliases/avgInt/ungrouped/rows	all	a:numeric,b:bigint,c:bigint | 23.3333,4,5	scale
+twoDistinct/top/distinctAliases/avgInt/grouped/rows	all	a:numeric,b:bigint,c:bigint | 10.0000,1,1; 25.0000,2,2; 30.0000,1,1; 40.0000,1,1	scale
+twoDistinct/top/distinctAliases/avgDec/ungrouped/rows	all	a:numeric,b:bigint,c:bigint | 2.320000,4,5	scale
+twoDistinct/top/distinctAliases/avgDec/grouped/rows	all	a:numeric,b:bigint,c:bigint | 0.100000,1,1; 1.875000,1,1; 3.750000,2,2; 4.000000,1,1	scale
+twoDistinct/top/sharedAlias/avgInt/ungrouped/rows	all	a:numeric,a:bigint,a:bigint | 23.3333,4,5	scale
+twoDistinct/top/sharedAlias/avgInt/grouped/rows	all	a:numeric,a:bigint,a:bigint | 10.0000,1,1; 25.0000,2,2; 30.0000,1,1; 40.0000,1,1	scale
+twoDistinct/top/sharedAlias/avgDec/ungrouped/rows	all	a:numeric,a:bigint,a:bigint | 2.320000,4,5	scale
+twoDistinct/top/sharedAlias/avgDec/grouped/rows	all	a:numeric,a:bigint,a:bigint | 0.100000,1,1; 1.875000,1,1; 3.750000,2,2; 4.000000,1,1	scale
+twoDistinct/scalarSelect/distinctAliases/avgInt/ungrouped/rows	all	s:numeric | 23.3333	scale
+twoDistinct/scalarSelect/distinctAliases/avgInt/grouped/rows	all	s:numeric | 10.0000	scale
+twoDistinct/scalarSelect/distinctAliases/avgDec/ungrouped/rows	all	s:numeric | 2.320000	scale
+twoDistinct/scalarSelect/distinctAliases/avgDec/grouped/rows	all	s:numeric | 0.100000	scale
+twoDistinct/scalarSelect/sharedAlias/avgInt/ungrouped/rows	all	s:numeric | 23.3333	scale
+twoDistinct/scalarSelect/sharedAlias/avgInt/grouped/rows	all	s:numeric | 10.0000	scale
+twoDistinct/scalarSelect/sharedAlias/avgDec/ungrouped/rows	all	s:numeric | 2.320000	scale
+twoDistinct/scalarSelect/sharedAlias/avgDec/grouped/rows	all	s:numeric | 0.100000	scale
+plainAlone/top/distinctAliases/avgInt/ungrouped/rows	all	a:numeric,b:bigint | 23.3333,6	scale
+plainAlone/top/distinctAliases/avgInt/grouped/rows	all	a:numeric,b:bigint | 10.0000,2; 25.0000,2; 30.0000,1; 40.0000,1	scale
+plainAlone/top/distinctAliases/avgDec/ungrouped/rows	all	a:numeric,b:bigint | 2.320000,6	scale
+plainAlone/top/distinctAliases/avgDec/grouped/rows	all	a:numeric,b:bigint | 0.100000,1; 1.875000,2; 3.750000,2; 4.000000,1	scale
+plainAlone/top/sharedAlias/avgInt/ungrouped/rows	all	a:numeric,a:bigint | 23.3333,6	scale
+plainAlone/top/sharedAlias/avgInt/grouped/rows	all	a:numeric,a:bigint | 10.0000,2; 25.0000,2; 30.0000,1; 40.0000,1	scale
+plainAlone/top/sharedAlias/avgDec/ungrouped/rows	all	a:numeric,a:bigint | 2.320000,6	scale
+plainAlone/top/sharedAlias/avgDec/grouped/rows	all	a:numeric,a:bigint | 0.100000,1; 1.875000,2; 3.750000,2; 4.000000,1	scale
+plainAlone/scalarSelect/distinctAliases/avgInt/ungrouped/rows	all	s:numeric | 23.3333	scale
+plainAlone/scalarSelect/distinctAliases/avgInt/grouped/rows	all	s:numeric | 10.0000	scale
+plainAlone/scalarSelect/distinctAliases/avgDec/ungrouped/rows	all	s:numeric | 2.320000	scale
+plainAlone/scalarSelect/distinctAliases/avgDec/grouped/rows	all	s:numeric | 0.100000	scale
+plainAlone/scalarSelect/sharedAlias/avgInt/ungrouped/rows	all	s:numeric | 23.3333	scale
+plainAlone/scalarSelect/sharedAlias/avgInt/grouped/rows	all	s:numeric | 10.0000	scale
+plainAlone/scalarSelect/sharedAlias/avgDec/ungrouped/rows	all	s:numeric | 2.320000	scale
+plainAlone/scalarSelect/sharedAlias/avgDec/grouped/rows	all	s:numeric | 0.100000	scale
+extra/avgBesidePair/rows	all	v:numeric,a:bigint,a:bigint | 23.333333,140,4	scale
+extra/avgSharedWithDistinct/rows	all	a:numeric,c:bigint,a:bigint | 23.333333,6,4	scale
+extra/distinctFirst/rows	dag	a:bigint,a:bigint | 4,4	finalDropped
+extra/cteTwiceShared/rows	single	c1:bigint,c2:bigint | 6,6	cteDupName
+extra/cteTwiceShared/rows	dag	PANIC runtime error: invalid memory address or nil pointer dereference	finalDropped
+extra/cteTwiceShared/zero	dag	PANIC runtime error: invalid memory address or nil pointer dereference	finalDropped

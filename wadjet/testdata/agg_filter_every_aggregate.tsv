@@ -392,7 +392,7 @@ refuse/ohlcvTwoArgs	SELECT ohlcv(t, x) FILTER (WHERE id >= 4) FROM pt	ERR - ohlc
 window/sum	SELECT id, sum(x) FILTER (WHERE id >= 4) OVER (ORDER BY id) FROM pt	1,NULL | 2,NULL | 3,NULL | 4,40 | 5,90	INT32,INT64	pg	-
 window/countStar	SELECT id, count(*) FILTER (WHERE id >= 4) OVER (ORDER BY id) FROM pt	1,0 | 2,0 | 3,0 | 4,1 | 5,2	INT32,INT64	pg	-
 keep/userSumCase	SELECT SUM(CASE WHEN x > 10 THEN 1 ELSE 0 END) FROM pt WHERE id < 0	NULL	INT64	pg	-
-keep/countBesideDistinct	SELECT COUNT(*), COUNT(DISTINCT x) FROM pt WHERE id < 0	0,0	DECIMAL,INT64	pg	-
+keep/countBesideDistinct	SELECT COUNT(*), COUNT(DISTINCT x) FROM pt WHERE id < 0	0,0	INT64,INT64	pg	-
 keep/unfilteredZero	SELECT COUNT(x), SUM(x), MIN(x), MAX(x), AVG(x), string_agg(s, '-'), bool_and(b), corr(x, y), covar_samp(x, y), min_by(x, y), percentile_cont(0.5, x), quantile_cont(x, 0.5), median(x), mode(x), stddev(x) FROM pt WHERE id < 0	0,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL	INT64,INT64,INT32,INT32,DECIMAL,STRING,BOOL,FLOAT64,FLOAT64,INT32,FLOAT64,FLOAT64,FLOAT64,FLOAT64,FLOAT64	engine	-
 sep/some	SELECT string_agg(s, '-') FILTER (WHERE id >= 2) FROM pt	b-d-e	STRING	pg	-
 sep/grouped	SELECT g, string_agg(s, ' / ') FILTER (WHERE id >= 2) FROM pt GROUP BY g	1,b / e | 2,d	INT32,STRING	pg	-

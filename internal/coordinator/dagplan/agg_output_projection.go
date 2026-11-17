@@ -72,6 +72,17 @@ func absorbAggregateOutputProjection(project *logical.Node, stage *Stage) map[st
 	if aggregatePublishesADuplicateName(groupKeys, aggOuts, stage) {
 		return nil
 	}
+	// And the same rule one step up, for a rewrite's finalization: carried, it
+	// would publish ONE NAME TWICE (`COUNT(*) AS a, COUNT(DISTINCT x) AS a`
+	// over the two-level DISTINCT rewrite's slots), and the consumers above an
+	// OpProject — the gather's renames, a sort key, a filter — address its
+	// outputs by name, so both would read the first. Positions would suffice
+	// only if those consumers carried them; none does. Declined, as the
+	// aggregate stage itself declined before the rewrite minted its slots
+	// (#1696).
+	if project.PreservesAggOutputs && projectionPublishesADuplicateName(project) {
+		return nil
+	}
 	decls := bareGroupKeyDecls(aggregateStageDecls(stage), stage, project)
 	// The identity indexes, built once. Each re-parses every published name,
 	// and the walk below asks them at every node of every SELECT item.
@@ -143,6 +154,25 @@ func absorbAggregateOutputProjection(project *logical.Node, stage *Stage) map[st
 				Expr: plansql.QuoteIdent(src), Name: strings.ToLower(alias),
 			})
 			declareGroupKeySpec(&specs[len(specs)-1], src, decls)
+			renamed[strings.ToLower(src)] = strings.ToLower(alias)
+			needed = true
+		case project.PreservesAggOutputs && !strings.EqualFold(src, alias):
+			// A rewrite's finalization publishing an aggregate's SLOT under
+			// the user's name. The slot is the rewrite's own spelling, which
+			// nothing above the projection knows: an expression the gather
+			// evaluates over the user's name (`SUM(x) + 1` reads `__agg_0`)
+			// would find no such column and read NULL, so the alias is
+			// emitted, typed from the aggregate's own declaration (#1696).
+			aggDecls, complete := stageAggregateDecls(stage, decls)
+			if t, ok := aggDecls.Types[strings.ToLower(src)]; ok && t == parquet.TypeDecimal && !complete {
+				if _, has := aggDecls.Dec[strings.ToLower(src)]; !has {
+					return nil
+				}
+			}
+			specs = append(specs, physical.ProjectExprSpec{
+				Expr: src, Name: strings.ToLower(alias),
+			})
+			declareGroupKeySpec(&specs[len(specs)-1], src, aggDecls)
 			renamed[strings.ToLower(src)] = strings.ToLower(alias)
 			needed = true
 		default:
@@ -375,6 +405,20 @@ func aggregatePublishesADuplicateName(groupKeys, aggOuts map[string]string, stag
 		if low == "" {
 			continue
 		}
+		if seen[low] {
+			return true
+		}
+		seen[low] = true
+	}
+	return false
+}
+
+// projectionPublishesADuplicateName reports whether a projection publishes two
+// outputs under one name.
+func projectionPublishesADuplicateName(project *logical.Node) bool {
+	seen := make(map[string]bool, len(project.Projections))
+	for i := range project.Projections {
+		low := strings.ToLower(localPlanFacts.ProjectionOutputName(project.Projections[i]))
 		if seen[low] {
 			return true
 		}

@@ -22,19 +22,26 @@ func TestTwoLevelDistinctRewrite(t *testing.T) {
 	})
 	out := rewriteCountDistinctTwoLevel(n)
 	// Ungrouped, the summed COUNT partial is finalized through
-	// COALESCE(c, 0): over zero rows level 1 has no groups and the SUM
-	// answers NULL where COUNT answers 0 (#1584). Every other output passes
-	// through by name.
+	// COALESCE(…, 0): over zero rows level 1 has no groups and the SUM
+	// answers NULL where COUNT answers 0 (#1584). Level 2 publishes every
+	// aggregate under a slot the rewrite mints, and the projection publishes
+	// each under the user's name, in order (#1696).
 	if out.Type != NodeProject || !out.PreservesAggOutputs || len(out.Children) != 1 {
 		t.Fatalf("expected a finalization Project, got %v", out.Type)
 	}
-	for _, p := range out.Projections {
-		if p.Alias == "c" {
-			if p.Expr != "coalesce(c, 0)" {
-				t.Fatalf("count finalization = %q, want coalesce(c, 0)", p.Expr)
-			}
-		} else if p.Column != p.Alias || p.Expr != "" {
-			t.Fatalf("projection %+v must pass its column through", p)
+	wantProj := []struct{ alias, column, expr string }{
+		{"d", "__tl_distinct_0", ""},
+		{"s", "__tl_sum_1", ""},
+		{"c", "", "coalesce(__tl_count_2, 0)"},
+		{"m", "__tl_min_3", ""},
+	}
+	if len(out.Projections) != len(wantProj) {
+		t.Fatalf("projections = %+v", out.Projections)
+	}
+	for i, w := range wantProj {
+		p := out.Projections[i]
+		if p.Alias != w.alias || p.Column != w.column || p.Expr != w.expr {
+			t.Fatalf("projection %d = %+v, want alias %s column %q expr %q", i, p, w.alias, w.column, w.expr)
 		}
 	}
 	out = out.Children[0]
@@ -60,16 +67,18 @@ func TestTwoLevelDistinctRewrite(t *testing.T) {
 		}
 		byOut[a.OutputCol] = a
 	}
-	if a := byOut["d"]; a.Func != "count" || a.InputCol != "x" {
+	if a := byOut["__tl_distinct_0"]; a.Func != "count" || a.InputCol != "x" {
 		t.Fatalf("distinct became %+v, want count(x)", a)
 	}
-	if a := byOut["s"]; a.Func != "sum" {
+	// The recombining SUMs are marked, so they declare their partial's type
+	// (bigint for a COUNT) rather than SUM-over-bigint's numeric (#1696).
+	if a := byOut["__tl_sum_1"]; a.Func != "sum" || !a.Recombines {
 		t.Fatalf("sum recombine = %+v", a)
 	}
-	if a := byOut["c"]; a.Func != "sum" {
-		t.Fatalf("count recombine = %+v, want sum of partial counts", a)
+	if a := byOut["__tl_count_2"]; a.Func != "sum" || !a.Recombines {
+		t.Fatalf("count recombine = %+v, want a recombining sum of partial counts", a)
 	}
-	if a := byOut["m"]; a.Func != "min" {
+	if a := byOut["__tl_min_3"]; a.Func != "min" {
 		t.Fatalf("min recombine = %+v", a)
 	}
 }
@@ -175,8 +184,8 @@ func TestTwoLevelDistinctAvgRewrite(t *testing.T) {
 	if len(out.Projections) != 2 {
 		t.Fatalf("projections = %+v, want [d a]", out.Projections)
 	}
-	if p := out.Projections[0]; p.Column != "d" {
-		t.Fatalf("proj[0] = %+v, want d passthrough", p)
+	if p := out.Projections[0]; p.Column != "__tl_distinct_0" || p.Alias != "d" {
+		t.Fatalf("proj[0] = %+v, want the distinct slot published as d", p)
 	}
 	if p := out.Projections[1]; p.Alias != "a" || p.ASTExpr == nil {
 		t.Fatalf("proj[1] = %+v, want division aliased to a", p)

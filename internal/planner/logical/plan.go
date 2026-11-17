@@ -750,6 +750,13 @@ type AggExpr struct {
 	InputExpr3 plansql.Node
 	Separator  string
 	Percentile float64
+	// Recombines marks a SUM that adds up PARTIALS of one aggregate rather
+	// than values: the two-level DISTINCT rewrite's level-2 SUM over the
+	// per-(K, x) COUNTs or SUMs of level 1. A sum of sums has the partial's
+	// own type, so it declares its input's declaration — bigint for a COUNT
+	// or a SUM(int4), what the original aggregate declares — where a SUM
+	// over a bigint VALUE declares numeric (#1696).
+	Recombines bool
 }
 
 // WindowFrameSpec describes a window frame specification.

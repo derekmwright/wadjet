@@ -194,7 +194,7 @@ func TestCountDistinctZeroRowsMeasure(t *testing.T) {
 	}
 }
 
-func czStandalone(t *testing.T, ctx context.Context, budget int64) *wadjet.DB {
+func czStandalone(t *testing.T, ctx context.Context, budget int64, tbl tmdTable) *wadjet.DB {
 	t.Helper()
 	cfg := wadjet.Config{Store: objstore.NewMemStore(), Bucket: "test"}
 	if budget > 0 {
@@ -206,7 +206,6 @@ func czStandalone(t *testing.T, ctx context.Context, budget int64) *wadjet.DB {
 		t.Fatalf("open standalone: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
-	tbl := czTable()
 	if err := db.CreateTable(ctx, tbl.name, tbl.schema, nil); err != nil {
 		t.Fatalf("create %s: %v", tbl.name, err)
 	}
@@ -223,15 +222,21 @@ func czStandalone(t *testing.T, ctx context.Context, budget int64) *wadjet.DB {
 // czArms is cwArms over cz_t: the five arms, every answer row-sorted.
 func czArms(t *testing.T, ctx context.Context) []cwArm {
 	t.Helper()
+	return czArmsOver(t, ctx, czTable())
+}
+
+// czArmsOver is czArms over another one-table fixture.
+func czArmsOver(t *testing.T, ctx context.Context, tbl tmdTable) []cwArm {
+	t.Helper()
 	stand := func(wcfg func(*worker.Config), opts ...func(*Config)) *Coordinator {
 		infra := tmdInfra(t, ctx)
-		tmdWriteTableList(t, ctx, infra, nil, []tmdTable{czTable()})
+		tmdWriteTableList(t, ctx, infra, nil, []tmdTable{tbl})
 		if wcfg != nil {
 			return tmdCoordinatorWithWorkers(t, ctx, infra, wcfg, opts...)
 		}
 		return tmdCoordinator(t, ctx, infra, opts...)
 	}
-	single, spilled := czStandalone(t, ctx, 0), czStandalone(t, ctx, 512*1024)
+	single, spilled := czStandalone(t, ctx, 0, tbl), czStandalone(t, ctx, 512*1024, tbl)
 	coord := stand(nil)
 	coordB := stand(nil, func(c *Config) { c.BroadcastBytesOverride = 1 })
 	coordM := stand(func(w *worker.Config) { w.MorselWorkers = 4 })

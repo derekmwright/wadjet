@@ -93,6 +93,14 @@ func (w *declWalk) aggOhlcvOutputFields(node *logical.Node, agg logical.AggExpr)
 
 func (w *declWalk) aggSpecOutputType(node *logical.Node, agg logical.AggExpr) (parquet.TypeID, bool) {
 	fn := strings.ToLower(strings.TrimSpace(agg.Func))
+	// A SUM that recombines partials declares its input's own type: a sum of
+	// bigint COUNTs is a bigint, as the COUNT it recombines (#1696). The
+	// input is always a bare partial column the level below emits.
+	if agg.Recombines && fn == "sum" {
+		if in, ok := w.aggInputColumnType(node, agg.InputCol, aggInputRef(agg)); ok {
+			return in, true
+		}
+	}
 	// SUM and AVG join the input-dependent list for ONE input type: over a
 	// DECIMAL column they answer in DECIMAL, exactly (#455). Over everything
 	// else they are still float64, and an input this cannot resolve — a
@@ -265,6 +273,14 @@ func (w *declWalk) aggSpecOutputDecimal(node *logical.Node, agg logical.AggExpr)
 	case "min", "max", "min_by", "max_by", "sum", "avg":
 	default:
 		return logical.DecimalMeta{}, false
+	}
+	// AggSpecOutputType's recombining rule, for the (p,s) half: a DECIMAL
+	// partial keeps SUM's (carrier, input scale) below; an integer partial has
+	// no (p,s) to declare, because its sum is that integer (#1696).
+	if agg.Recombines && fn == "sum" {
+		if in, ok := w.aggInputColumnType(node, agg.InputCol, aggInputRef(agg)); ok && in != parquet.TypeDecimal {
+			return logical.DecimalMeta{}, false
+		}
 	}
 	if agg.InputExpr != nil {
 		if _, bare := agg.InputExpr.(*plansql.ColRef); !bare {
@@ -915,6 +931,22 @@ func namesMatchProjections(names []string, projections []logical.Projection) boo
 		}
 	}
 	return true
+}
+
+// finalizationProjectBelow is the synthetic finalization Project (logical.Node.
+// PreservesAggOutputs) findAggregateAncestor walks through on its way to the
+// aggregate, or nil when there is none.
+func finalizationProjectBelow(node *logical.Node) *logical.Node {
+	for node != nil && node.Type != logical.NodeAggregate {
+		if node.Type == logical.NodeProject && node.PreservesAggOutputs {
+			return node
+		}
+		if !aggScopePreservingWrapper(node.Type) || len(node.Children) != 1 {
+			return nil
+		}
+		node = node.Children[0]
+	}
+	return nil
 }
 
 // findAggregateAncestor returns the Aggregate node if the given node is one,

@@ -1,0 +1,1313 @@
+# PostgreSQL 17.11 answers for count_distinct_recombined_arms_test.go (TestCountDistinctRecombinedMeasure).
+oneDistinct/top/distinctAliases/countStar/ungrouped/rows	a:bigint,b:bigint | 6,4
+oneDistinct/top/distinctAliases/countStar/ungrouped/zero	a:bigint,b:bigint | 0,0
+oneDistinct/top/distinctAliases/countStar/grouped/rows	a:bigint,b:bigint | 1,1; 1,1; 2,1; 2,2
+oneDistinct/top/distinctAliases/countStar/grouped/zero	(0 rows)
+oneDistinct/top/distinctAliases/countX/ungrouped/rows	a:bigint,b:bigint | 6,4
+oneDistinct/top/distinctAliases/countX/ungrouped/zero	a:bigint,b:bigint | 0,0
+oneDistinct/top/distinctAliases/countX/grouped/rows	a:bigint,b:bigint | 1,1; 1,1; 2,1; 2,2
+oneDistinct/top/distinctAliases/countX/grouped/zero	(0 rows)
+oneDistinct/top/distinctAliases/sumInt/ungrouped/rows	a:bigint,b:bigint | 140,4
+oneDistinct/top/distinctAliases/sumInt/ungrouped/zero	a:bigint,b:bigint | NULL,0
+oneDistinct/top/distinctAliases/sumInt/grouped/rows	a:bigint,b:bigint | 20,1; 30,1; 40,1; 50,2
+oneDistinct/top/distinctAliases/sumInt/grouped/zero	(0 rows)
+oneDistinct/top/distinctAliases/sumBig/ungrouped/rows	a:numeric,b:bigint | 10000000085,4
+oneDistinct/top/distinctAliases/sumBig/ungrouped/zero	a:numeric,b:bigint | NULL,0
+oneDistinct/top/distinctAliases/sumBig/grouped/rows	a:numeric,b:bigint | -5,1; 10000000000,1; 40,1; 50,2
+oneDistinct/top/distinctAliases/sumBig/grouped/zero	(0 rows)
+oneDistinct/top/distinctAliases/sumDec/ungrouped/rows	a:numeric,b:bigint | 11.60,4
+oneDistinct/top/distinctAliases/sumDec/ungrouped/zero	a:numeric,b:bigint | NULL,0
+oneDistinct/top/distinctAliases/sumDec/grouped/rows	a:numeric,b:bigint | 0.10,1; 3.75,1; 3.75,2; 4.00,1
+oneDistinct/top/distinctAliases/sumDec/grouped/zero	(0 rows)
+oneDistinct/top/distinctAliases/sumFloat/ungrouped/rows	a:double precision,b:bigint | 7.375,4
+oneDistinct/top/distinctAliases/sumFloat/ungrouped/zero	a:double precision,b:bigint | NULL,0
+oneDistinct/top/distinctAliases/sumFloat/grouped/rows	a:double precision,b:bigint | 0.125,1; 0.5,1; 3,1; 3.75,2
+oneDistinct/top/distinctAliases/sumFloat/grouped/zero	(0 rows)
+oneDistinct/top/distinctAliases/avgInt/ungrouped/rows	a:numeric,b:bigint | 23.3333333333333333,4
+oneDistinct/top/distinctAliases/avgInt/ungrouped/zero	a:numeric,b:bigint | NULL,0
+oneDistinct/top/distinctAliases/avgInt/grouped/rows	a:numeric,b:bigint | 10.0000000000000000,1; 25.0000000000000000,2; 30.0000000000000000,1; 40.0000000000000000,1
+oneDistinct/top/distinctAliases/avgInt/grouped/zero	(0 rows)
+oneDistinct/top/distinctAliases/avgDec/ungrouped/rows	a:numeric,b:bigint | 2.3200000000000000,4
+oneDistinct/top/distinctAliases/avgDec/ungrouped/zero	a:numeric,b:bigint | NULL,0
+oneDistinct/top/distinctAliases/avgDec/grouped/rows	a:numeric,b:bigint | 0.10000000000000000000,1; 1.8750000000000000,1; 3.7500000000000000,2; 4.0000000000000000,1
+oneDistinct/top/distinctAliases/avgDec/grouped/zero	(0 rows)
+oneDistinct/top/distinctAliases/min/ungrouped/rows	a:integer,b:bigint | 10,4
+oneDistinct/top/distinctAliases/min/ungrouped/zero	a:integer,b:bigint | NULL,0
+oneDistinct/top/distinctAliases/min/grouped/rows	a:integer,b:bigint | 10,1; 20,2; 30,1; 40,1
+oneDistinct/top/distinctAliases/min/grouped/zero	(0 rows)
+oneDistinct/top/distinctAliases/max/ungrouped/rows	a:integer,b:bigint | 40,4
+oneDistinct/top/distinctAliases/max/ungrouped/zero	a:integer,b:bigint | NULL,0
+oneDistinct/top/distinctAliases/max/grouped/rows	a:integer,b:bigint | 10,1; 30,1; 30,2; 40,1
+oneDistinct/top/distinctAliases/max/grouped/zero	(0 rows)
+oneDistinct/top/sharedAlias/countStar/ungrouped/rows	a:bigint,a:bigint | 6,4
+oneDistinct/top/sharedAlias/countStar/ungrouped/zero	a:bigint,a:bigint | 0,0
+oneDistinct/top/sharedAlias/countStar/grouped/rows	a:bigint,a:bigint | 1,1; 1,1; 2,1; 2,2
+oneDistinct/top/sharedAlias/countStar/grouped/zero	(0 rows)
+oneDistinct/top/sharedAlias/countX/ungrouped/rows	a:bigint,a:bigint | 6,4
+oneDistinct/top/sharedAlias/countX/ungrouped/zero	a:bigint,a:bigint | 0,0
+oneDistinct/top/sharedAlias/countX/grouped/rows	a:bigint,a:bigint | 1,1; 1,1; 2,1; 2,2
+oneDistinct/top/sharedAlias/countX/grouped/zero	(0 rows)
+oneDistinct/top/sharedAlias/sumInt/ungrouped/rows	a:bigint,a:bigint | 140,4
+oneDistinct/top/sharedAlias/sumInt/ungrouped/zero	a:bigint,a:bigint | NULL,0
+oneDistinct/top/sharedAlias/sumInt/grouped/rows	a:bigint,a:bigint | 20,1; 30,1; 40,1; 50,2
+oneDistinct/top/sharedAlias/sumInt/grouped/zero	(0 rows)
+oneDistinct/top/sharedAlias/sumBig/ungrouped/rows	a:numeric,a:bigint | 10000000085,4
+oneDistinct/top/sharedAlias/sumBig/ungrouped/zero	a:numeric,a:bigint | NULL,0
+oneDistinct/top/sharedAlias/sumBig/grouped/rows	a:numeric,a:bigint | -5,1; 10000000000,1; 40,1; 50,2
+oneDistinct/top/sharedAlias/sumBig/grouped/zero	(0 rows)
+oneDistinct/top/sharedAlias/sumDec/ungrouped/rows	a:numeric,a:bigint | 11.60,4
+oneDistinct/top/sharedAlias/sumDec/ungrouped/zero	a:numeric,a:bigint | NULL,0
+oneDistinct/top/sharedAlias/sumDec/grouped/rows	a:numeric,a:bigint | 0.10,1; 3.75,1; 3.75,2; 4.00,1
+oneDistinct/top/sharedAlias/sumDec/grouped/zero	(0 rows)
+oneDistinct/top/sharedAlias/sumFloat/ungrouped/rows	a:double precision,a:bigint | 7.375,4
+oneDistinct/top/sharedAlias/sumFloat/ungrouped/zero	a:double precision,a:bigint | NULL,0
+oneDistinct/top/sharedAlias/sumFloat/grouped/rows	a:double precision,a:bigint | 0.125,1; 0.5,1; 3,1; 3.75,2
+oneDistinct/top/sharedAlias/sumFloat/grouped/zero	(0 rows)
+oneDistinct/top/sharedAlias/avgInt/ungrouped/rows	a:numeric,a:bigint | 23.3333333333333333,4
+oneDistinct/top/sharedAlias/avgInt/ungrouped/zero	a:numeric,a:bigint | NULL,0
+oneDistinct/top/sharedAlias/avgInt/grouped/rows	a:numeric,a:bigint | 10.0000000000000000,1; 25.0000000000000000,2; 30.0000000000000000,1; 40.0000000000000000,1
+oneDistinct/top/sharedAlias/avgInt/grouped/zero	(0 rows)
+oneDistinct/top/sharedAlias/avgDec/ungrouped/rows	a:numeric,a:bigint | 2.3200000000000000,4
+oneDistinct/top/sharedAlias/avgDec/ungrouped/zero	a:numeric,a:bigint | NULL,0
+oneDistinct/top/sharedAlias/avgDec/grouped/rows	a:numeric,a:bigint | 0.10000000000000000000,1; 1.8750000000000000,1; 3.7500000000000000,2; 4.0000000000000000,1
+oneDistinct/top/sharedAlias/avgDec/grouped/zero	(0 rows)
+oneDistinct/top/sharedAlias/min/ungrouped/rows	a:integer,a:bigint | 10,4
+oneDistinct/top/sharedAlias/min/ungrouped/zero	a:integer,a:bigint | NULL,0
+oneDistinct/top/sharedAlias/min/grouped/rows	a:integer,a:bigint | 10,1; 20,2; 30,1; 40,1
+oneDistinct/top/sharedAlias/min/grouped/zero	(0 rows)
+oneDistinct/top/sharedAlias/max/ungrouped/rows	a:integer,a:bigint | 40,4
+oneDistinct/top/sharedAlias/max/ungrouped/zero	a:integer,a:bigint | NULL,0
+oneDistinct/top/sharedAlias/max/grouped/rows	a:integer,a:bigint | 10,1; 30,1; 30,2; 40,1
+oneDistinct/top/sharedAlias/max/grouped/zero	(0 rows)
+oneDistinct/top/columnName/countStar/ungrouped/rows	x:bigint,b:bigint | 6,4
+oneDistinct/top/columnName/countStar/ungrouped/zero	x:bigint,b:bigint | 0,0
+oneDistinct/top/columnName/countStar/grouped/rows	x:bigint,b:bigint | 1,1; 1,1; 2,1; 2,2
+oneDistinct/top/columnName/countStar/grouped/zero	(0 rows)
+oneDistinct/top/columnName/countX/ungrouped/rows	x:bigint,b:bigint | 6,4
+oneDistinct/top/columnName/countX/ungrouped/zero	x:bigint,b:bigint | 0,0
+oneDistinct/top/columnName/countX/grouped/rows	x:bigint,b:bigint | 1,1; 1,1; 2,1; 2,2
+oneDistinct/top/columnName/countX/grouped/zero	(0 rows)
+oneDistinct/top/columnName/sumInt/ungrouped/rows	x:bigint,b:bigint | 140,4
+oneDistinct/top/columnName/sumInt/ungrouped/zero	x:bigint,b:bigint | NULL,0
+oneDistinct/top/columnName/sumInt/grouped/rows	x:bigint,b:bigint | 20,1; 30,1; 40,1; 50,2
+oneDistinct/top/columnName/sumInt/grouped/zero	(0 rows)
+oneDistinct/top/columnName/sumBig/ungrouped/rows	x:numeric,b:bigint | 10000000085,4
+oneDistinct/top/columnName/sumBig/ungrouped/zero	x:numeric,b:bigint | NULL,0
+oneDistinct/top/columnName/sumBig/grouped/rows	x:numeric,b:bigint | -5,1; 10000000000,1; 40,1; 50,2
+oneDistinct/top/columnName/sumBig/grouped/zero	(0 rows)
+oneDistinct/top/columnName/sumDec/ungrouped/rows	x:numeric,b:bigint | 11.60,4
+oneDistinct/top/columnName/sumDec/ungrouped/zero	x:numeric,b:bigint | NULL,0
+oneDistinct/top/columnName/sumDec/grouped/rows	x:numeric,b:bigint | 0.10,1; 3.75,1; 3.75,2; 4.00,1
+oneDistinct/top/columnName/sumDec/grouped/zero	(0 rows)
+oneDistinct/top/columnName/sumFloat/ungrouped/rows	x:double precision,b:bigint | 7.375,4
+oneDistinct/top/columnName/sumFloat/ungrouped/zero	x:double precision,b:bigint | NULL,0
+oneDistinct/top/columnName/sumFloat/grouped/rows	x:double precision,b:bigint | 0.125,1; 0.5,1; 3,1; 3.75,2
+oneDistinct/top/columnName/sumFloat/grouped/zero	(0 rows)
+oneDistinct/top/columnName/avgInt/ungrouped/rows	x:numeric,b:bigint | 23.3333333333333333,4
+oneDistinct/top/columnName/avgInt/ungrouped/zero	x:numeric,b:bigint | NULL,0
+oneDistinct/top/columnName/avgInt/grouped/rows	x:numeric,b:bigint | 10.0000000000000000,1; 25.0000000000000000,2; 30.0000000000000000,1; 40.0000000000000000,1
+oneDistinct/top/columnName/avgInt/grouped/zero	(0 rows)
+oneDistinct/top/columnName/avgDec/ungrouped/rows	x:numeric,b:bigint | 2.3200000000000000,4
+oneDistinct/top/columnName/avgDec/ungrouped/zero	x:numeric,b:bigint | NULL,0
+oneDistinct/top/columnName/avgDec/grouped/rows	x:numeric,b:bigint | 0.10000000000000000000,1; 1.8750000000000000,1; 3.7500000000000000,2; 4.0000000000000000,1
+oneDistinct/top/columnName/avgDec/grouped/zero	(0 rows)
+oneDistinct/top/columnName/min/ungrouped/rows	x:integer,b:bigint | 10,4
+oneDistinct/top/columnName/min/ungrouped/zero	x:integer,b:bigint | NULL,0
+oneDistinct/top/columnName/min/grouped/rows	x:integer,b:bigint | 10,1; 20,2; 30,1; 40,1
+oneDistinct/top/columnName/min/grouped/zero	(0 rows)
+oneDistinct/top/columnName/max/ungrouped/rows	x:integer,b:bigint | 40,4
+oneDistinct/top/columnName/max/ungrouped/zero	x:integer,b:bigint | NULL,0
+oneDistinct/top/columnName/max/grouped/rows	x:integer,b:bigint | 10,1; 30,1; 30,2; 40,1
+oneDistinct/top/columnName/max/grouped/zero	(0 rows)
+oneDistinct/top/noAliases/countStar/ungrouped/rows	count:bigint,count:bigint | 6,4
+oneDistinct/top/noAliases/countStar/ungrouped/zero	count:bigint,count:bigint | 0,0
+oneDistinct/top/noAliases/countStar/grouped/rows	count:bigint,count:bigint | 1,1; 1,1; 2,1; 2,2
+oneDistinct/top/noAliases/countStar/grouped/zero	(0 rows)
+oneDistinct/top/noAliases/countX/ungrouped/rows	count:bigint,count:bigint | 6,4
+oneDistinct/top/noAliases/countX/ungrouped/zero	count:bigint,count:bigint | 0,0
+oneDistinct/top/noAliases/countX/grouped/rows	count:bigint,count:bigint | 1,1; 1,1; 2,1; 2,2
+oneDistinct/top/noAliases/countX/grouped/zero	(0 rows)
+oneDistinct/top/noAliases/sumInt/ungrouped/rows	sum:bigint,count:bigint | 140,4
+oneDistinct/top/noAliases/sumInt/ungrouped/zero	sum:bigint,count:bigint | NULL,0
+oneDistinct/top/noAliases/sumInt/grouped/rows	sum:bigint,count:bigint | 20,1; 30,1; 40,1; 50,2
+oneDistinct/top/noAliases/sumInt/grouped/zero	(0 rows)
+oneDistinct/top/noAliases/sumBig/ungrouped/rows	sum:numeric,count:bigint | 10000000085,4
+oneDistinct/top/noAliases/sumBig/ungrouped/zero	sum:numeric,count:bigint | NULL,0
+oneDistinct/top/noAliases/sumBig/grouped/rows	sum:numeric,count:bigint | -5,1; 10000000000,1; 40,1; 50,2
+oneDistinct/top/noAliases/sumBig/grouped/zero	(0 rows)
+oneDistinct/top/noAliases/sumDec/ungrouped/rows	sum:numeric,count:bigint | 11.60,4
+oneDistinct/top/noAliases/sumDec/ungrouped/zero	sum:numeric,count:bigint | NULL,0
+oneDistinct/top/noAliases/sumDec/grouped/rows	sum:numeric,count:bigint | 0.10,1; 3.75,1; 3.75,2; 4.00,1
+oneDistinct/top/noAliases/sumDec/grouped/zero	(0 rows)
+oneDistinct/top/noAliases/sumFloat/ungrouped/rows	sum:double precision,count:bigint | 7.375,4
+oneDistinct/top/noAliases/sumFloat/ungrouped/zero	sum:double precision,count:bigint | NULL,0
+oneDistinct/top/noAliases/sumFloat/grouped/rows	sum:double precision,count:bigint | 0.125,1; 0.5,1; 3,1; 3.75,2
+oneDistinct/top/noAliases/sumFloat/grouped/zero	(0 rows)
+oneDistinct/top/noAliases/avgInt/ungrouped/rows	avg:numeric,count:bigint | 23.3333333333333333,4
+oneDistinct/top/noAliases/avgInt/ungrouped/zero	avg:numeric,count:bigint | NULL,0
+oneDistinct/top/noAliases/avgInt/grouped/rows	avg:numeric,count:bigint | 10.0000000000000000,1; 25.0000000000000000,2; 30.0000000000000000,1; 40.0000000000000000,1
+oneDistinct/top/noAliases/avgInt/grouped/zero	(0 rows)
+oneDistinct/top/noAliases/avgDec/ungrouped/rows	avg:numeric,count:bigint | 2.3200000000000000,4
+oneDistinct/top/noAliases/avgDec/ungrouped/zero	avg:numeric,count:bigint | NULL,0
+oneDistinct/top/noAliases/avgDec/grouped/rows	avg:numeric,count:bigint | 0.10000000000000000000,1; 1.8750000000000000,1; 3.7500000000000000,2; 4.0000000000000000,1
+oneDistinct/top/noAliases/avgDec/grouped/zero	(0 rows)
+oneDistinct/top/noAliases/min/ungrouped/rows	min:integer,count:bigint | 10,4
+oneDistinct/top/noAliases/min/ungrouped/zero	min:integer,count:bigint | NULL,0
+oneDistinct/top/noAliases/min/grouped/rows	min:integer,count:bigint | 10,1; 20,2; 30,1; 40,1
+oneDistinct/top/noAliases/min/grouped/zero	(0 rows)
+oneDistinct/top/noAliases/max/ungrouped/rows	max:integer,count:bigint | 40,4
+oneDistinct/top/noAliases/max/ungrouped/zero	max:integer,count:bigint | NULL,0
+oneDistinct/top/noAliases/max/grouped/rows	max:integer,count:bigint | 10,1; 30,1; 30,2; 40,1
+oneDistinct/top/noAliases/max/grouped/zero	(0 rows)
+oneDistinct/scalarSelect/distinctAliases/countStar/ungrouped/rows	s:bigint | 6
+oneDistinct/scalarSelect/distinctAliases/countStar/ungrouped/zero	s:bigint | 0
+oneDistinct/scalarSelect/distinctAliases/countStar/grouped/rows	s:bigint | 1
+oneDistinct/scalarSelect/distinctAliases/countStar/grouped/zero	s:bigint | NULL
+oneDistinct/scalarSelect/distinctAliases/countX/ungrouped/rows	s:bigint | 6
+oneDistinct/scalarSelect/distinctAliases/countX/ungrouped/zero	s:bigint | 0
+oneDistinct/scalarSelect/distinctAliases/countX/grouped/rows	s:bigint | 1
+oneDistinct/scalarSelect/distinctAliases/countX/grouped/zero	s:bigint | NULL
+oneDistinct/scalarSelect/distinctAliases/sumInt/ungrouped/rows	s:bigint | 140
+oneDistinct/scalarSelect/distinctAliases/sumInt/ungrouped/zero	s:bigint | NULL
+oneDistinct/scalarSelect/distinctAliases/sumInt/grouped/rows	s:bigint | 20
+oneDistinct/scalarSelect/distinctAliases/sumInt/grouped/zero	s:bigint | NULL
+oneDistinct/scalarSelect/distinctAliases/sumBig/ungrouped/rows	s:numeric | 10000000085
+oneDistinct/scalarSelect/distinctAliases/sumBig/ungrouped/zero	s:numeric | NULL
+oneDistinct/scalarSelect/distinctAliases/sumBig/grouped/rows	s:numeric | -5
+oneDistinct/scalarSelect/distinctAliases/sumBig/grouped/zero	s:numeric | NULL
+oneDistinct/scalarSelect/distinctAliases/sumDec/ungrouped/rows	s:numeric | 11.60
+oneDistinct/scalarSelect/distinctAliases/sumDec/ungrouped/zero	s:numeric | NULL
+oneDistinct/scalarSelect/distinctAliases/sumDec/grouped/rows	s:numeric | 0.10
+oneDistinct/scalarSelect/distinctAliases/sumDec/grouped/zero	s:numeric | NULL
+oneDistinct/scalarSelect/distinctAliases/sumFloat/ungrouped/rows	s:double precision | 7.375
+oneDistinct/scalarSelect/distinctAliases/sumFloat/ungrouped/zero	s:double precision | NULL
+oneDistinct/scalarSelect/distinctAliases/sumFloat/grouped/rows	s:double precision | 0.125
+oneDistinct/scalarSelect/distinctAliases/sumFloat/grouped/zero	s:double precision | NULL
+oneDistinct/scalarSelect/distinctAliases/avgInt/ungrouped/rows	s:numeric | 23.3333333333333333
+oneDistinct/scalarSelect/distinctAliases/avgInt/ungrouped/zero	s:numeric | NULL
+oneDistinct/scalarSelect/distinctAliases/avgInt/grouped/rows	s:numeric | 10.0000000000000000
+oneDistinct/scalarSelect/distinctAliases/avgInt/grouped/zero	s:numeric | NULL
+oneDistinct/scalarSelect/distinctAliases/avgDec/ungrouped/rows	s:numeric | 2.3200000000000000
+oneDistinct/scalarSelect/distinctAliases/avgDec/ungrouped/zero	s:numeric | NULL
+oneDistinct/scalarSelect/distinctAliases/avgDec/grouped/rows	s:numeric | 0.10000000000000000000
+oneDistinct/scalarSelect/distinctAliases/avgDec/grouped/zero	s:numeric | NULL
+oneDistinct/scalarSelect/distinctAliases/min/ungrouped/rows	s:integer | 10
+oneDistinct/scalarSelect/distinctAliases/min/ungrouped/zero	s:integer | NULL
+oneDistinct/scalarSelect/distinctAliases/min/grouped/rows	s:integer | 10
+oneDistinct/scalarSelect/distinctAliases/min/grouped/zero	s:integer | NULL
+oneDistinct/scalarSelect/distinctAliases/max/ungrouped/rows	s:integer | 40
+oneDistinct/scalarSelect/distinctAliases/max/ungrouped/zero	s:integer | NULL
+oneDistinct/scalarSelect/distinctAliases/max/grouped/rows	s:integer | 10
+oneDistinct/scalarSelect/distinctAliases/max/grouped/zero	s:integer | NULL
+oneDistinct/scalarSelect/sharedAlias/countStar/ungrouped/rows	s:bigint | 6
+oneDistinct/scalarSelect/sharedAlias/countStar/ungrouped/zero	s:bigint | 0
+oneDistinct/scalarSelect/sharedAlias/countStar/grouped/rows	s:bigint | 1
+oneDistinct/scalarSelect/sharedAlias/countStar/grouped/zero	s:bigint | NULL
+oneDistinct/scalarSelect/sharedAlias/countX/ungrouped/rows	s:bigint | 6
+oneDistinct/scalarSelect/sharedAlias/countX/ungrouped/zero	s:bigint | 0
+oneDistinct/scalarSelect/sharedAlias/countX/grouped/rows	s:bigint | 1
+oneDistinct/scalarSelect/sharedAlias/countX/grouped/zero	s:bigint | NULL
+oneDistinct/scalarSelect/sharedAlias/sumInt/ungrouped/rows	s:bigint | 140
+oneDistinct/scalarSelect/sharedAlias/sumInt/ungrouped/zero	s:bigint | NULL
+oneDistinct/scalarSelect/sharedAlias/sumInt/grouped/rows	s:bigint | 20
+oneDistinct/scalarSelect/sharedAlias/sumInt/grouped/zero	s:bigint | NULL
+oneDistinct/scalarSelect/sharedAlias/sumBig/ungrouped/rows	s:numeric | 10000000085
+oneDistinct/scalarSelect/sharedAlias/sumBig/ungrouped/zero	s:numeric | NULL
+oneDistinct/scalarSelect/sharedAlias/sumBig/grouped/rows	s:numeric | -5
+oneDistinct/scalarSelect/sharedAlias/sumBig/grouped/zero	s:numeric | NULL
+oneDistinct/scalarSelect/sharedAlias/sumDec/ungrouped/rows	s:numeric | 11.60
+oneDistinct/scalarSelect/sharedAlias/sumDec/ungrouped/zero	s:numeric | NULL
+oneDistinct/scalarSelect/sharedAlias/sumDec/grouped/rows	s:numeric | 0.10
+oneDistinct/scalarSelect/sharedAlias/sumDec/grouped/zero	s:numeric | NULL
+oneDistinct/scalarSelect/sharedAlias/sumFloat/ungrouped/rows	s:double precision | 7.375
+oneDistinct/scalarSelect/sharedAlias/sumFloat/ungrouped/zero	s:double precision | NULL
+oneDistinct/scalarSelect/sharedAlias/sumFloat/grouped/rows	s:double precision | 0.125
+oneDistinct/scalarSelect/sharedAlias/sumFloat/grouped/zero	s:double precision | NULL
+oneDistinct/scalarSelect/sharedAlias/avgInt/ungrouped/rows	s:numeric | 23.3333333333333333
+oneDistinct/scalarSelect/sharedAlias/avgInt/ungrouped/zero	s:numeric | NULL
+oneDistinct/scalarSelect/sharedAlias/avgInt/grouped/rows	s:numeric | 10.0000000000000000
+oneDistinct/scalarSelect/sharedAlias/avgInt/grouped/zero	s:numeric | NULL
+oneDistinct/scalarSelect/sharedAlias/avgDec/ungrouped/rows	s:numeric | 2.3200000000000000
+oneDistinct/scalarSelect/sharedAlias/avgDec/ungrouped/zero	s:numeric | NULL
+oneDistinct/scalarSelect/sharedAlias/avgDec/grouped/rows	s:numeric | 0.10000000000000000000
+oneDistinct/scalarSelect/sharedAlias/avgDec/grouped/zero	s:numeric | NULL
+oneDistinct/scalarSelect/sharedAlias/min/ungrouped/rows	s:integer | 10
+oneDistinct/scalarSelect/sharedAlias/min/ungrouped/zero	s:integer | NULL
+oneDistinct/scalarSelect/sharedAlias/min/grouped/rows	s:integer | 10
+oneDistinct/scalarSelect/sharedAlias/min/grouped/zero	s:integer | NULL
+oneDistinct/scalarSelect/sharedAlias/max/ungrouped/rows	s:integer | 40
+oneDistinct/scalarSelect/sharedAlias/max/ungrouped/zero	s:integer | NULL
+oneDistinct/scalarSelect/sharedAlias/max/grouped/rows	s:integer | 10
+oneDistinct/scalarSelect/sharedAlias/max/grouped/zero	s:integer | NULL
+oneDistinct/scalarSelect/columnName/countStar/ungrouped/rows	s:bigint | 6
+oneDistinct/scalarSelect/columnName/countStar/ungrouped/zero	s:bigint | 0
+oneDistinct/scalarSelect/columnName/countStar/grouped/rows	s:bigint | 1
+oneDistinct/scalarSelect/columnName/countStar/grouped/zero	s:bigint | NULL
+oneDistinct/scalarSelect/columnName/countX/ungrouped/rows	s:bigint | 6
+oneDistinct/scalarSelect/columnName/countX/ungrouped/zero	s:bigint | 0
+oneDistinct/scalarSelect/columnName/countX/grouped/rows	s:bigint | 1
+oneDistinct/scalarSelect/columnName/countX/grouped/zero	s:bigint | NULL
+oneDistinct/scalarSelect/columnName/sumInt/ungrouped/rows	s:bigint | 140
+oneDistinct/scalarSelect/columnName/sumInt/ungrouped/zero	s:bigint | NULL
+oneDistinct/scalarSelect/columnName/sumInt/grouped/rows	s:bigint | 20
+oneDistinct/scalarSelect/columnName/sumInt/grouped/zero	s:bigint | NULL
+oneDistinct/scalarSelect/columnName/sumBig/ungrouped/rows	s:numeric | 10000000085
+oneDistinct/scalarSelect/columnName/sumBig/ungrouped/zero	s:numeric | NULL
+oneDistinct/scalarSelect/columnName/sumBig/grouped/rows	s:numeric | -5
+oneDistinct/scalarSelect/columnName/sumBig/grouped/zero	s:numeric | NULL
+oneDistinct/scalarSelect/columnName/sumDec/ungrouped/rows	s:numeric | 11.60
+oneDistinct/scalarSelect/columnName/sumDec/ungrouped/zero	s:numeric | NULL
+oneDistinct/scalarSelect/columnName/sumDec/grouped/rows	s:numeric | 0.10
+oneDistinct/scalarSelect/columnName/sumDec/grouped/zero	s:numeric | NULL
+oneDistinct/scalarSelect/columnName/sumFloat/ungrouped/rows	s:double precision | 7.375
+oneDistinct/scalarSelect/columnName/sumFloat/ungrouped/zero	s:double precision | NULL
+oneDistinct/scalarSelect/columnName/sumFloat/grouped/rows	s:double precision | 0.125
+oneDistinct/scalarSelect/columnName/sumFloat/grouped/zero	s:double precision | NULL
+oneDistinct/scalarSelect/columnName/avgInt/ungrouped/rows	s:numeric | 23.3333333333333333
+oneDistinct/scalarSelect/columnName/avgInt/ungrouped/zero	s:numeric | NULL
+oneDistinct/scalarSelect/columnName/avgInt/grouped/rows	s:numeric | 10.0000000000000000
+oneDistinct/scalarSelect/columnName/avgInt/grouped/zero	s:numeric | NULL
+oneDistinct/scalarSelect/columnName/avgDec/ungrouped/rows	s:numeric | 2.3200000000000000
+oneDistinct/scalarSelect/columnName/avgDec/ungrouped/zero	s:numeric | NULL
+oneDistinct/scalarSelect/columnName/avgDec/grouped/rows	s:numeric | 0.10000000000000000000
+oneDistinct/scalarSelect/columnName/avgDec/grouped/zero	s:numeric | NULL
+oneDistinct/scalarSelect/columnName/min/ungrouped/rows	s:integer | 10
+oneDistinct/scalarSelect/columnName/min/ungrouped/zero	s:integer | NULL
+oneDistinct/scalarSelect/columnName/min/grouped/rows	s:integer | 10
+oneDistinct/scalarSelect/columnName/min/grouped/zero	s:integer | NULL
+oneDistinct/scalarSelect/columnName/max/ungrouped/rows	s:integer | 40
+oneDistinct/scalarSelect/columnName/max/ungrouped/zero	s:integer | NULL
+oneDistinct/scalarSelect/columnName/max/grouped/rows	s:integer | 10
+oneDistinct/scalarSelect/columnName/max/grouped/zero	s:integer | NULL
+oneDistinct/scalarSelect/noAliases/countStar/ungrouped/rows	s:bigint | 6
+oneDistinct/scalarSelect/noAliases/countStar/ungrouped/zero	s:bigint | 0
+oneDistinct/scalarSelect/noAliases/countStar/grouped/rows	s:bigint | 1
+oneDistinct/scalarSelect/noAliases/countStar/grouped/zero	s:bigint | NULL
+oneDistinct/scalarSelect/noAliases/countX/ungrouped/rows	s:bigint | 6
+oneDistinct/scalarSelect/noAliases/countX/ungrouped/zero	s:bigint | 0
+oneDistinct/scalarSelect/noAliases/countX/grouped/rows	s:bigint | 1
+oneDistinct/scalarSelect/noAliases/countX/grouped/zero	s:bigint | NULL
+oneDistinct/scalarSelect/noAliases/sumInt/ungrouped/rows	s:bigint | 140
+oneDistinct/scalarSelect/noAliases/sumInt/ungrouped/zero	s:bigint | NULL
+oneDistinct/scalarSelect/noAliases/sumInt/grouped/rows	s:bigint | 20
+oneDistinct/scalarSelect/noAliases/sumInt/grouped/zero	s:bigint | NULL
+oneDistinct/scalarSelect/noAliases/sumBig/ungrouped/rows	s:numeric | 10000000085
+oneDistinct/scalarSelect/noAliases/sumBig/ungrouped/zero	s:numeric | NULL
+oneDistinct/scalarSelect/noAliases/sumBig/grouped/rows	s:numeric | -5
+oneDistinct/scalarSelect/noAliases/sumBig/grouped/zero	s:numeric | NULL
+oneDistinct/scalarSelect/noAliases/sumDec/ungrouped/rows	s:numeric | 11.60
+oneDistinct/scalarSelect/noAliases/sumDec/ungrouped/zero	s:numeric | NULL
+oneDistinct/scalarSelect/noAliases/sumDec/grouped/rows	s:numeric | 0.10
+oneDistinct/scalarSelect/noAliases/sumDec/grouped/zero	s:numeric | NULL
+oneDistinct/scalarSelect/noAliases/sumFloat/ungrouped/rows	s:double precision | 7.375
+oneDistinct/scalarSelect/noAliases/sumFloat/ungrouped/zero	s:double precision | NULL
+oneDistinct/scalarSelect/noAliases/sumFloat/grouped/rows	s:double precision | 0.125
+oneDistinct/scalarSelect/noAliases/sumFloat/grouped/zero	s:double precision | NULL
+oneDistinct/scalarSelect/noAliases/avgInt/ungrouped/rows	s:numeric | 23.3333333333333333
+oneDistinct/scalarSelect/noAliases/avgInt/ungrouped/zero	s:numeric | NULL
+oneDistinct/scalarSelect/noAliases/avgInt/grouped/rows	s:numeric | 10.0000000000000000
+oneDistinct/scalarSelect/noAliases/avgInt/grouped/zero	s:numeric | NULL
+oneDistinct/scalarSelect/noAliases/avgDec/ungrouped/rows	s:numeric | 2.3200000000000000
+oneDistinct/scalarSelect/noAliases/avgDec/ungrouped/zero	s:numeric | NULL
+oneDistinct/scalarSelect/noAliases/avgDec/grouped/rows	s:numeric | 0.10000000000000000000
+oneDistinct/scalarSelect/noAliases/avgDec/grouped/zero	s:numeric | NULL
+oneDistinct/scalarSelect/noAliases/min/ungrouped/rows	s:integer | 10
+oneDistinct/scalarSelect/noAliases/min/ungrouped/zero	s:integer | NULL
+oneDistinct/scalarSelect/noAliases/min/grouped/rows	s:integer | 10
+oneDistinct/scalarSelect/noAliases/min/grouped/zero	s:integer | NULL
+oneDistinct/scalarSelect/noAliases/max/ungrouped/rows	s:integer | 40
+oneDistinct/scalarSelect/noAliases/max/ungrouped/zero	s:integer | NULL
+oneDistinct/scalarSelect/noAliases/max/grouped/rows	s:integer | 10
+oneDistinct/scalarSelect/noAliases/max/grouped/zero	s:integer | NULL
+oneDistinct/scalarWhere/distinctAliases/countStar/ungrouped/rows	id:integer | 1; 2; 3; 4; 5; 6
+oneDistinct/scalarWhere/distinctAliases/countStar/ungrouped/zero	id:integer | 1; 2
+oneDistinct/scalarWhere/distinctAliases/countStar/grouped/rows	id:integer | 1; 2; 3
+oneDistinct/scalarWhere/distinctAliases/countStar/grouped/zero	(0 rows)
+oneDistinct/scalarWhere/distinctAliases/countX/ungrouped/rows	id:integer | 1; 2; 3; 4; 5; 6
+oneDistinct/scalarWhere/distinctAliases/countX/ungrouped/zero	id:integer | 1; 2
+oneDistinct/scalarWhere/distinctAliases/countX/grouped/rows	id:integer | 1; 2; 3
+oneDistinct/scalarWhere/distinctAliases/countX/grouped/zero	(0 rows)
+oneDistinct/scalarWhere/distinctAliases/sumInt/ungrouped/rows	id:integer | 1; 2; 3; 4; 5; 6
+oneDistinct/scalarWhere/distinctAliases/sumInt/ungrouped/zero	(0 rows)
+oneDistinct/scalarWhere/distinctAliases/sumInt/grouped/rows	id:integer | 1; 2; 3; 4; 5; 6
+oneDistinct/scalarWhere/distinctAliases/sumInt/grouped/zero	(0 rows)
+oneDistinct/scalarWhere/distinctAliases/sumBig/ungrouped/rows	id:integer | 1; 2; 3; 4; 5; 6
+oneDistinct/scalarWhere/distinctAliases/sumBig/ungrouped/zero	(0 rows)
+oneDistinct/scalarWhere/distinctAliases/sumBig/grouped/rows	(0 rows)
+oneDistinct/scalarWhere/distinctAliases/sumBig/grouped/zero	(0 rows)
+oneDistinct/scalarWhere/distinctAliases/sumDec/ungrouped/rows	id:integer | 1; 2; 3; 4; 5; 6
+oneDistinct/scalarWhere/distinctAliases/sumDec/ungrouped/zero	(0 rows)
+oneDistinct/scalarWhere/distinctAliases/sumDec/grouped/rows	id:integer | 1; 2; 3
+oneDistinct/scalarWhere/distinctAliases/sumDec/grouped/zero	(0 rows)
+oneDistinct/scalarWhere/distinctAliases/sumFloat/ungrouped/rows	id:integer | 1; 2; 3; 4; 5; 6
+oneDistinct/scalarWhere/distinctAliases/sumFloat/ungrouped/zero	(0 rows)
+oneDistinct/scalarWhere/distinctAliases/sumFloat/grouped/rows	id:integer | 1; 2; 3
+oneDistinct/scalarWhere/distinctAliases/sumFloat/grouped/zero	(0 rows)
+oneDistinct/scalarWhere/distinctAliases/avgInt/ungrouped/rows	id:integer | 1; 2; 3; 4; 5; 6
+oneDistinct/scalarWhere/distinctAliases/avgInt/ungrouped/zero	(0 rows)
+oneDistinct/scalarWhere/distinctAliases/avgInt/grouped/rows	id:integer | 1; 2; 3; 4; 5; 6
+oneDistinct/scalarWhere/distinctAliases/avgInt/grouped/zero	(0 rows)
+oneDistinct/scalarWhere/distinctAliases/avgDec/ungrouped/rows	id:integer | 1; 2; 3; 4; 5
+oneDistinct/scalarWhere/distinctAliases/avgDec/ungrouped/zero	(0 rows)
+oneDistinct/scalarWhere/distinctAliases/avgDec/grouped/rows	id:integer | 1; 2; 3
+oneDistinct/scalarWhere/distinctAliases/avgDec/grouped/zero	(0 rows)
+oneDistinct/scalarWhere/distinctAliases/min/ungrouped/rows	id:integer | 1; 2; 3; 4; 5; 6
+oneDistinct/scalarWhere/distinctAliases/min/ungrouped/zero	(0 rows)
+oneDistinct/scalarWhere/distinctAliases/min/grouped/rows	id:integer | 1; 2; 3; 4; 5; 6
+oneDistinct/scalarWhere/distinctAliases/min/grouped/zero	(0 rows)
+oneDistinct/scalarWhere/distinctAliases/max/ungrouped/rows	id:integer | 1; 2; 3; 4; 5; 6
+oneDistinct/scalarWhere/distinctAliases/max/ungrouped/zero	(0 rows)
+oneDistinct/scalarWhere/distinctAliases/max/grouped/rows	id:integer | 1; 2; 3; 4; 5; 6
+oneDistinct/scalarWhere/distinctAliases/max/grouped/zero	(0 rows)
+oneDistinct/scalarWhere/sharedAlias/countStar/ungrouped/rows	id:integer | 1; 2; 3; 4; 5; 6
+oneDistinct/scalarWhere/sharedAlias/countStar/ungrouped/zero	id:integer | 1; 2
+oneDistinct/scalarWhere/sharedAlias/countStar/grouped/rows	id:integer | 1; 2; 3
+oneDistinct/scalarWhere/sharedAlias/countStar/grouped/zero	(0 rows)
+oneDistinct/scalarWhere/sharedAlias/countX/ungrouped/rows	id:integer | 1; 2; 3; 4; 5; 6
+oneDistinct/scalarWhere/sharedAlias/countX/ungrouped/zero	id:integer | 1; 2
+oneDistinct/scalarWhere/sharedAlias/countX/grouped/rows	id:integer | 1; 2; 3
+oneDistinct/scalarWhere/sharedAlias/countX/grouped/zero	(0 rows)
+oneDistinct/scalarWhere/sharedAlias/sumInt/ungrouped/rows	id:integer | 1; 2; 3; 4; 5; 6
+oneDistinct/scalarWhere/sharedAlias/sumInt/ungrouped/zero	(0 rows)
+oneDistinct/scalarWhere/sharedAlias/sumInt/grouped/rows	id:integer | 1; 2; 3; 4; 5; 6
+oneDistinct/scalarWhere/sharedAlias/sumInt/grouped/zero	(0 rows)
+oneDistinct/scalarWhere/sharedAlias/sumBig/ungrouped/rows	id:integer | 1; 2; 3; 4; 5; 6
+oneDistinct/scalarWhere/sharedAlias/sumBig/ungrouped/zero	(0 rows)
+oneDistinct/scalarWhere/sharedAlias/sumBig/grouped/rows	(0 rows)
+oneDistinct/scalarWhere/sharedAlias/sumBig/grouped/zero	(0 rows)
+oneDistinct/scalarWhere/sharedAlias/sumDec/ungrouped/rows	id:integer | 1; 2; 3; 4; 5; 6
+oneDistinct/scalarWhere/sharedAlias/sumDec/ungrouped/zero	(0 rows)
+oneDistinct/scalarWhere/sharedAlias/sumDec/grouped/rows	id:integer | 1; 2; 3
+oneDistinct/scalarWhere/sharedAlias/sumDec/grouped/zero	(0 rows)
+oneDistinct/scalarWhere/sharedAlias/sumFloat/ungrouped/rows	id:integer | 1; 2; 3; 4; 5; 6
+oneDistinct/scalarWhere/sharedAlias/sumFloat/ungrouped/zero	(0 rows)
+oneDistinct/scalarWhere/sharedAlias/sumFloat/grouped/rows	id:integer | 1; 2; 3
+oneDistinct/scalarWhere/sharedAlias/sumFloat/grouped/zero	(0 rows)
+oneDistinct/scalarWhere/sharedAlias/avgInt/ungrouped/rows	id:integer | 1; 2; 3; 4; 5; 6
+oneDistinct/scalarWhere/sharedAlias/avgInt/ungrouped/zero	(0 rows)
+oneDistinct/scalarWhere/sharedAlias/avgInt/grouped/rows	id:integer | 1; 2; 3; 4; 5; 6
+oneDistinct/scalarWhere/sharedAlias/avgInt/grouped/zero	(0 rows)
+oneDistinct/scalarWhere/sharedAlias/avgDec/ungrouped/rows	id:integer | 1; 2; 3; 4; 5
+oneDistinct/scalarWhere/sharedAlias/avgDec/ungrouped/zero	(0 rows)
+oneDistinct/scalarWhere/sharedAlias/avgDec/grouped/rows	id:integer | 1; 2; 3
+oneDistinct/scalarWhere/sharedAlias/avgDec/grouped/zero	(0 rows)
+oneDistinct/scalarWhere/sharedAlias/min/ungrouped/rows	id:integer | 1; 2; 3; 4; 5; 6
+oneDistinct/scalarWhere/sharedAlias/min/ungrouped/zero	(0 rows)
+oneDistinct/scalarWhere/sharedAlias/min/grouped/rows	id:integer | 1; 2; 3; 4; 5; 6
+oneDistinct/scalarWhere/sharedAlias/min/grouped/zero	(0 rows)
+oneDistinct/scalarWhere/sharedAlias/max/ungrouped/rows	id:integer | 1; 2; 3; 4; 5; 6
+oneDistinct/scalarWhere/sharedAlias/max/ungrouped/zero	(0 rows)
+oneDistinct/scalarWhere/sharedAlias/max/grouped/rows	id:integer | 1; 2; 3; 4; 5; 6
+oneDistinct/scalarWhere/sharedAlias/max/grouped/zero	(0 rows)
+oneDistinct/scalarWhere/columnName/countStar/ungrouped/rows	id:integer | 1; 2; 3; 4; 5; 6
+oneDistinct/scalarWhere/columnName/countStar/ungrouped/zero	id:integer | 1; 2
+oneDistinct/scalarWhere/columnName/countStar/grouped/rows	id:integer | 1; 2; 3
+oneDistinct/scalarWhere/columnName/countStar/grouped/zero	(0 rows)
+oneDistinct/scalarWhere/columnName/countX/ungrouped/rows	id:integer | 1; 2; 3; 4; 5; 6
+oneDistinct/scalarWhere/columnName/countX/ungrouped/zero	id:integer | 1; 2
+oneDistinct/scalarWhere/columnName/countX/grouped/rows	id:integer | 1; 2; 3
+oneDistinct/scalarWhere/columnName/countX/grouped/zero	(0 rows)
+oneDistinct/scalarWhere/columnName/sumInt/ungrouped/rows	id:integer | 1; 2; 3; 4; 5; 6
+oneDistinct/scalarWhere/columnName/sumInt/ungrouped/zero	(0 rows)
+oneDistinct/scalarWhere/columnName/sumInt/grouped/rows	id:integer | 1; 2; 3; 4; 5; 6
+oneDistinct/scalarWhere/columnName/sumInt/grouped/zero	(0 rows)
+oneDistinct/scalarWhere/columnName/sumBig/ungrouped/rows	id:integer | 1; 2; 3; 4; 5; 6
+oneDistinct/scalarWhere/columnName/sumBig/ungrouped/zero	(0 rows)
+oneDistinct/scalarWhere/columnName/sumBig/grouped/rows	(0 rows)
+oneDistinct/scalarWhere/columnName/sumBig/grouped/zero	(0 rows)
+oneDistinct/scalarWhere/columnName/sumDec/ungrouped/rows	id:integer | 1; 2; 3; 4; 5; 6
+oneDistinct/scalarWhere/columnName/sumDec/ungrouped/zero	(0 rows)
+oneDistinct/scalarWhere/columnName/sumDec/grouped/rows	id:integer | 1; 2; 3
+oneDistinct/scalarWhere/columnName/sumDec/grouped/zero	(0 rows)
+oneDistinct/scalarWhere/columnName/sumFloat/ungrouped/rows	id:integer | 1; 2; 3; 4; 5; 6
+oneDistinct/scalarWhere/columnName/sumFloat/ungrouped/zero	(0 rows)
+oneDistinct/scalarWhere/columnName/sumFloat/grouped/rows	id:integer | 1; 2; 3
+oneDistinct/scalarWhere/columnName/sumFloat/grouped/zero	(0 rows)
+oneDistinct/scalarWhere/columnName/avgInt/ungrouped/rows	id:integer | 1; 2; 3; 4; 5; 6
+oneDistinct/scalarWhere/columnName/avgInt/ungrouped/zero	(0 rows)
+oneDistinct/scalarWhere/columnName/avgInt/grouped/rows	id:integer | 1; 2; 3; 4; 5; 6
+oneDistinct/scalarWhere/columnName/avgInt/grouped/zero	(0 rows)
+oneDistinct/scalarWhere/columnName/avgDec/ungrouped/rows	id:integer | 1; 2; 3; 4; 5
+oneDistinct/scalarWhere/columnName/avgDec/ungrouped/zero	(0 rows)
+oneDistinct/scalarWhere/columnName/avgDec/grouped/rows	id:integer | 1; 2; 3
+oneDistinct/scalarWhere/columnName/avgDec/grouped/zero	(0 rows)
+oneDistinct/scalarWhere/columnName/min/ungrouped/rows	id:integer | 1; 2; 3; 4; 5; 6
+oneDistinct/scalarWhere/columnName/min/ungrouped/zero	(0 rows)
+oneDistinct/scalarWhere/columnName/min/grouped/rows	id:integer | 1; 2; 3; 4; 5; 6
+oneDistinct/scalarWhere/columnName/min/grouped/zero	(0 rows)
+oneDistinct/scalarWhere/columnName/max/ungrouped/rows	id:integer | 1; 2; 3; 4; 5; 6
+oneDistinct/scalarWhere/columnName/max/ungrouped/zero	(0 rows)
+oneDistinct/scalarWhere/columnName/max/grouped/rows	id:integer | 1; 2; 3; 4; 5; 6
+oneDistinct/scalarWhere/columnName/max/grouped/zero	(0 rows)
+oneDistinct/scalarWhere/noAliases/countStar/ungrouped/rows	id:integer | 1; 2; 3; 4; 5; 6
+oneDistinct/scalarWhere/noAliases/countStar/ungrouped/zero	id:integer | 1; 2
+oneDistinct/scalarWhere/noAliases/countStar/grouped/rows	id:integer | 1; 2; 3
+oneDistinct/scalarWhere/noAliases/countStar/grouped/zero	(0 rows)
+oneDistinct/scalarWhere/noAliases/countX/ungrouped/rows	id:integer | 1; 2; 3; 4; 5; 6
+oneDistinct/scalarWhere/noAliases/countX/ungrouped/zero	id:integer | 1; 2
+oneDistinct/scalarWhere/noAliases/countX/grouped/rows	id:integer | 1; 2; 3
+oneDistinct/scalarWhere/noAliases/countX/grouped/zero	(0 rows)
+oneDistinct/scalarWhere/noAliases/sumInt/ungrouped/rows	id:integer | 1; 2; 3; 4; 5; 6
+oneDistinct/scalarWhere/noAliases/sumInt/ungrouped/zero	(0 rows)
+oneDistinct/scalarWhere/noAliases/sumInt/grouped/rows	id:integer | 1; 2; 3; 4; 5; 6
+oneDistinct/scalarWhere/noAliases/sumInt/grouped/zero	(0 rows)
+oneDistinct/scalarWhere/noAliases/sumBig/ungrouped/rows	id:integer | 1; 2; 3; 4; 5; 6
+oneDistinct/scalarWhere/noAliases/sumBig/ungrouped/zero	(0 rows)
+oneDistinct/scalarWhere/noAliases/sumBig/grouped/rows	(0 rows)
+oneDistinct/scalarWhere/noAliases/sumBig/grouped/zero	(0 rows)
+oneDistinct/scalarWhere/noAliases/sumDec/ungrouped/rows	id:integer | 1; 2; 3; 4; 5; 6
+oneDistinct/scalarWhere/noAliases/sumDec/ungrouped/zero	(0 rows)
+oneDistinct/scalarWhere/noAliases/sumDec/grouped/rows	id:integer | 1; 2; 3
+oneDistinct/scalarWhere/noAliases/sumDec/grouped/zero	(0 rows)
+oneDistinct/scalarWhere/noAliases/sumFloat/ungrouped/rows	id:integer | 1; 2; 3; 4; 5; 6
+oneDistinct/scalarWhere/noAliases/sumFloat/ungrouped/zero	(0 rows)
+oneDistinct/scalarWhere/noAliases/sumFloat/grouped/rows	id:integer | 1; 2; 3
+oneDistinct/scalarWhere/noAliases/sumFloat/grouped/zero	(0 rows)
+oneDistinct/scalarWhere/noAliases/avgInt/ungrouped/rows	id:integer | 1; 2; 3; 4; 5; 6
+oneDistinct/scalarWhere/noAliases/avgInt/ungrouped/zero	(0 rows)
+oneDistinct/scalarWhere/noAliases/avgInt/grouped/rows	id:integer | 1; 2; 3; 4; 5; 6
+oneDistinct/scalarWhere/noAliases/avgInt/grouped/zero	(0 rows)
+oneDistinct/scalarWhere/noAliases/avgDec/ungrouped/rows	id:integer | 1; 2; 3; 4; 5
+oneDistinct/scalarWhere/noAliases/avgDec/ungrouped/zero	(0 rows)
+oneDistinct/scalarWhere/noAliases/avgDec/grouped/rows	id:integer | 1; 2; 3
+oneDistinct/scalarWhere/noAliases/avgDec/grouped/zero	(0 rows)
+oneDistinct/scalarWhere/noAliases/min/ungrouped/rows	id:integer | 1; 2; 3; 4; 5; 6
+oneDistinct/scalarWhere/noAliases/min/ungrouped/zero	(0 rows)
+oneDistinct/scalarWhere/noAliases/min/grouped/rows	id:integer | 1; 2; 3; 4; 5; 6
+oneDistinct/scalarWhere/noAliases/min/grouped/zero	(0 rows)
+oneDistinct/scalarWhere/noAliases/max/ungrouped/rows	id:integer | 1; 2; 3; 4; 5; 6
+oneDistinct/scalarWhere/noAliases/max/ungrouped/zero	(0 rows)
+oneDistinct/scalarWhere/noAliases/max/grouped/rows	id:integer | 1; 2; 3; 4; 5; 6
+oneDistinct/scalarWhere/noAliases/max/grouped/zero	(0 rows)
+oneDistinct/derived/distinctAliases/countStar/ungrouped/rows	c1:bigint,c2:bigint | 6,4
+oneDistinct/derived/distinctAliases/countStar/ungrouped/zero	c1:bigint,c2:bigint | 0,0
+oneDistinct/derived/distinctAliases/countStar/grouped/rows	c1:bigint,c2:bigint | 1,1; 1,1; 2,1; 2,2
+oneDistinct/derived/distinctAliases/countStar/grouped/zero	(0 rows)
+oneDistinct/derived/distinctAliases/countX/ungrouped/rows	c1:bigint,c2:bigint | 6,4
+oneDistinct/derived/distinctAliases/countX/ungrouped/zero	c1:bigint,c2:bigint | 0,0
+oneDistinct/derived/distinctAliases/countX/grouped/rows	c1:bigint,c2:bigint | 1,1; 1,1; 2,1; 2,2
+oneDistinct/derived/distinctAliases/countX/grouped/zero	(0 rows)
+oneDistinct/derived/distinctAliases/sumInt/ungrouped/rows	c1:bigint,c2:bigint | 140,4
+oneDistinct/derived/distinctAliases/sumInt/ungrouped/zero	c1:bigint,c2:bigint | NULL,0
+oneDistinct/derived/distinctAliases/sumInt/grouped/rows	c1:bigint,c2:bigint | 20,1; 30,1; 40,1; 50,2
+oneDistinct/derived/distinctAliases/sumInt/grouped/zero	(0 rows)
+oneDistinct/derived/distinctAliases/sumBig/ungrouped/rows	c1:numeric,c2:bigint | 10000000085,4
+oneDistinct/derived/distinctAliases/sumBig/ungrouped/zero	c1:numeric,c2:bigint | NULL,0
+oneDistinct/derived/distinctAliases/sumBig/grouped/rows	c1:numeric,c2:bigint | -5,1; 10000000000,1; 40,1; 50,2
+oneDistinct/derived/distinctAliases/sumBig/grouped/zero	(0 rows)
+oneDistinct/derived/distinctAliases/sumDec/ungrouped/rows	c1:numeric,c2:bigint | 11.60,4
+oneDistinct/derived/distinctAliases/sumDec/ungrouped/zero	c1:numeric,c2:bigint | NULL,0
+oneDistinct/derived/distinctAliases/sumDec/grouped/rows	c1:numeric,c2:bigint | 0.10,1; 3.75,1; 3.75,2; 4.00,1
+oneDistinct/derived/distinctAliases/sumDec/grouped/zero	(0 rows)
+oneDistinct/derived/distinctAliases/sumFloat/ungrouped/rows	c1:double precision,c2:bigint | 7.375,4
+oneDistinct/derived/distinctAliases/sumFloat/ungrouped/zero	c1:double precision,c2:bigint | NULL,0
+oneDistinct/derived/distinctAliases/sumFloat/grouped/rows	c1:double precision,c2:bigint | 0.125,1; 0.5,1; 3,1; 3.75,2
+oneDistinct/derived/distinctAliases/sumFloat/grouped/zero	(0 rows)
+oneDistinct/derived/distinctAliases/avgInt/ungrouped/rows	c1:numeric,c2:bigint | 23.3333333333333333,4
+oneDistinct/derived/distinctAliases/avgInt/ungrouped/zero	c1:numeric,c2:bigint | NULL,0
+oneDistinct/derived/distinctAliases/avgInt/grouped/rows	c1:numeric,c2:bigint | 10.0000000000000000,1; 25.0000000000000000,2; 30.0000000000000000,1; 40.0000000000000000,1
+oneDistinct/derived/distinctAliases/avgInt/grouped/zero	(0 rows)
+oneDistinct/derived/distinctAliases/avgDec/ungrouped/rows	c1:numeric,c2:bigint | 2.3200000000000000,4
+oneDistinct/derived/distinctAliases/avgDec/ungrouped/zero	c1:numeric,c2:bigint | NULL,0
+oneDistinct/derived/distinctAliases/avgDec/grouped/rows	c1:numeric,c2:bigint | 0.10000000000000000000,1; 1.8750000000000000,1; 3.7500000000000000,2; 4.0000000000000000,1
+oneDistinct/derived/distinctAliases/avgDec/grouped/zero	(0 rows)
+oneDistinct/derived/distinctAliases/min/ungrouped/rows	c1:integer,c2:bigint | 10,4
+oneDistinct/derived/distinctAliases/min/ungrouped/zero	c1:integer,c2:bigint | NULL,0
+oneDistinct/derived/distinctAliases/min/grouped/rows	c1:integer,c2:bigint | 10,1; 20,2; 30,1; 40,1
+oneDistinct/derived/distinctAliases/min/grouped/zero	(0 rows)
+oneDistinct/derived/distinctAliases/max/ungrouped/rows	c1:integer,c2:bigint | 40,4
+oneDistinct/derived/distinctAliases/max/ungrouped/zero	c1:integer,c2:bigint | NULL,0
+oneDistinct/derived/distinctAliases/max/grouped/rows	c1:integer,c2:bigint | 10,1; 30,1; 30,2; 40,1
+oneDistinct/derived/distinctAliases/max/grouped/zero	(0 rows)
+oneDistinct/derived/sharedAlias/countStar/ungrouped/rows	c1:bigint,c2:bigint | 6,4
+oneDistinct/derived/sharedAlias/countStar/ungrouped/zero	c1:bigint,c2:bigint | 0,0
+oneDistinct/derived/sharedAlias/countStar/grouped/rows	c1:bigint,c2:bigint | 1,1; 1,1; 2,1; 2,2
+oneDistinct/derived/sharedAlias/countStar/grouped/zero	(0 rows)
+oneDistinct/derived/sharedAlias/countX/ungrouped/rows	c1:bigint,c2:bigint | 6,4
+oneDistinct/derived/sharedAlias/countX/ungrouped/zero	c1:bigint,c2:bigint | 0,0
+oneDistinct/derived/sharedAlias/countX/grouped/rows	c1:bigint,c2:bigint | 1,1; 1,1; 2,1; 2,2
+oneDistinct/derived/sharedAlias/countX/grouped/zero	(0 rows)
+oneDistinct/derived/sharedAlias/sumInt/ungrouped/rows	c1:bigint,c2:bigint | 140,4
+oneDistinct/derived/sharedAlias/sumInt/ungrouped/zero	c1:bigint,c2:bigint | NULL,0
+oneDistinct/derived/sharedAlias/sumInt/grouped/rows	c1:bigint,c2:bigint | 20,1; 30,1; 40,1; 50,2
+oneDistinct/derived/sharedAlias/sumInt/grouped/zero	(0 rows)
+oneDistinct/derived/sharedAlias/sumBig/ungrouped/rows	c1:numeric,c2:bigint | 10000000085,4
+oneDistinct/derived/sharedAlias/sumBig/ungrouped/zero	c1:numeric,c2:bigint | NULL,0
+oneDistinct/derived/sharedAlias/sumBig/grouped/rows	c1:numeric,c2:bigint | -5,1; 10000000000,1; 40,1; 50,2
+oneDistinct/derived/sharedAlias/sumBig/grouped/zero	(0 rows)
+oneDistinct/derived/sharedAlias/sumDec/ungrouped/rows	c1:numeric,c2:bigint | 11.60,4
+oneDistinct/derived/sharedAlias/sumDec/ungrouped/zero	c1:numeric,c2:bigint | NULL,0
+oneDistinct/derived/sharedAlias/sumDec/grouped/rows	c1:numeric,c2:bigint | 0.10,1; 3.75,1; 3.75,2; 4.00,1
+oneDistinct/derived/sharedAlias/sumDec/grouped/zero	(0 rows)
+oneDistinct/derived/sharedAlias/sumFloat/ungrouped/rows	c1:double precision,c2:bigint | 7.375,4
+oneDistinct/derived/sharedAlias/sumFloat/ungrouped/zero	c1:double precision,c2:bigint | NULL,0
+oneDistinct/derived/sharedAlias/sumFloat/grouped/rows	c1:double precision,c2:bigint | 0.125,1; 0.5,1; 3,1; 3.75,2
+oneDistinct/derived/sharedAlias/sumFloat/grouped/zero	(0 rows)
+oneDistinct/derived/sharedAlias/avgInt/ungrouped/rows	c1:numeric,c2:bigint | 23.3333333333333333,4
+oneDistinct/derived/sharedAlias/avgInt/ungrouped/zero	c1:numeric,c2:bigint | NULL,0
+oneDistinct/derived/sharedAlias/avgInt/grouped/rows	c1:numeric,c2:bigint | 10.0000000000000000,1; 25.0000000000000000,2; 30.0000000000000000,1; 40.0000000000000000,1
+oneDistinct/derived/sharedAlias/avgInt/grouped/zero	(0 rows)
+oneDistinct/derived/sharedAlias/avgDec/ungrouped/rows	c1:numeric,c2:bigint | 2.3200000000000000,4
+oneDistinct/derived/sharedAlias/avgDec/ungrouped/zero	c1:numeric,c2:bigint | NULL,0
+oneDistinct/derived/sharedAlias/avgDec/grouped/rows	c1:numeric,c2:bigint | 0.10000000000000000000,1; 1.8750000000000000,1; 3.7500000000000000,2; 4.0000000000000000,1
+oneDistinct/derived/sharedAlias/avgDec/grouped/zero	(0 rows)
+oneDistinct/derived/sharedAlias/min/ungrouped/rows	c1:integer,c2:bigint | 10,4
+oneDistinct/derived/sharedAlias/min/ungrouped/zero	c1:integer,c2:bigint | NULL,0
+oneDistinct/derived/sharedAlias/min/grouped/rows	c1:integer,c2:bigint | 10,1; 20,2; 30,1; 40,1
+oneDistinct/derived/sharedAlias/min/grouped/zero	(0 rows)
+oneDistinct/derived/sharedAlias/max/ungrouped/rows	c1:integer,c2:bigint | 40,4
+oneDistinct/derived/sharedAlias/max/ungrouped/zero	c1:integer,c2:bigint | NULL,0
+oneDistinct/derived/sharedAlias/max/grouped/rows	c1:integer,c2:bigint | 10,1; 30,1; 30,2; 40,1
+oneDistinct/derived/sharedAlias/max/grouped/zero	(0 rows)
+oneDistinct/derived/columnName/countStar/ungrouped/rows	c1:bigint,c2:bigint | 6,4
+oneDistinct/derived/columnName/countStar/ungrouped/zero	c1:bigint,c2:bigint | 0,0
+oneDistinct/derived/columnName/countStar/grouped/rows	c1:bigint,c2:bigint | 1,1; 1,1; 2,1; 2,2
+oneDistinct/derived/columnName/countStar/grouped/zero	(0 rows)
+oneDistinct/derived/columnName/countX/ungrouped/rows	c1:bigint,c2:bigint | 6,4
+oneDistinct/derived/columnName/countX/ungrouped/zero	c1:bigint,c2:bigint | 0,0
+oneDistinct/derived/columnName/countX/grouped/rows	c1:bigint,c2:bigint | 1,1; 1,1; 2,1; 2,2
+oneDistinct/derived/columnName/countX/grouped/zero	(0 rows)
+oneDistinct/derived/columnName/sumInt/ungrouped/rows	c1:bigint,c2:bigint | 140,4
+oneDistinct/derived/columnName/sumInt/ungrouped/zero	c1:bigint,c2:bigint | NULL,0
+oneDistinct/derived/columnName/sumInt/grouped/rows	c1:bigint,c2:bigint | 20,1; 30,1; 40,1; 50,2
+oneDistinct/derived/columnName/sumInt/grouped/zero	(0 rows)
+oneDistinct/derived/columnName/sumBig/ungrouped/rows	c1:numeric,c2:bigint | 10000000085,4
+oneDistinct/derived/columnName/sumBig/ungrouped/zero	c1:numeric,c2:bigint | NULL,0
+oneDistinct/derived/columnName/sumBig/grouped/rows	c1:numeric,c2:bigint | -5,1; 10000000000,1; 40,1; 50,2
+oneDistinct/derived/columnName/sumBig/grouped/zero	(0 rows)
+oneDistinct/derived/columnName/sumDec/ungrouped/rows	c1:numeric,c2:bigint | 11.60,4
+oneDistinct/derived/columnName/sumDec/ungrouped/zero	c1:numeric,c2:bigint | NULL,0
+oneDistinct/derived/columnName/sumDec/grouped/rows	c1:numeric,c2:bigint | 0.10,1; 3.75,1; 3.75,2; 4.00,1
+oneDistinct/derived/columnName/sumDec/grouped/zero	(0 rows)
+oneDistinct/derived/columnName/sumFloat/ungrouped/rows	c1:double precision,c2:bigint | 7.375,4
+oneDistinct/derived/columnName/sumFloat/ungrouped/zero	c1:double precision,c2:bigint | NULL,0
+oneDistinct/derived/columnName/sumFloat/grouped/rows	c1:double precision,c2:bigint | 0.125,1; 0.5,1; 3,1; 3.75,2
+oneDistinct/derived/columnName/sumFloat/grouped/zero	(0 rows)
+oneDistinct/derived/columnName/avgInt/ungrouped/rows	c1:numeric,c2:bigint | 23.3333333333333333,4
+oneDistinct/derived/columnName/avgInt/ungrouped/zero	c1:numeric,c2:bigint | NULL,0
+oneDistinct/derived/columnName/avgInt/grouped/rows	c1:numeric,c2:bigint | 10.0000000000000000,1; 25.0000000000000000,2; 30.0000000000000000,1; 40.0000000000000000,1
+oneDistinct/derived/columnName/avgInt/grouped/zero	(0 rows)
+oneDistinct/derived/columnName/avgDec/ungrouped/rows	c1:numeric,c2:bigint | 2.3200000000000000,4
+oneDistinct/derived/columnName/avgDec/ungrouped/zero	c1:numeric,c2:bigint | NULL,0
+oneDistinct/derived/columnName/avgDec/grouped/rows	c1:numeric,c2:bigint | 0.10000000000000000000,1; 1.8750000000000000,1; 3.7500000000000000,2; 4.0000000000000000,1
+oneDistinct/derived/columnName/avgDec/grouped/zero	(0 rows)
+oneDistinct/derived/columnName/min/ungrouped/rows	c1:integer,c2:bigint | 10,4
+oneDistinct/derived/columnName/min/ungrouped/zero	c1:integer,c2:bigint | NULL,0
+oneDistinct/derived/columnName/min/grouped/rows	c1:integer,c2:bigint | 10,1; 20,2; 30,1; 40,1
+oneDistinct/derived/columnName/min/grouped/zero	(0 rows)
+oneDistinct/derived/columnName/max/ungrouped/rows	c1:integer,c2:bigint | 40,4
+oneDistinct/derived/columnName/max/ungrouped/zero	c1:integer,c2:bigint | NULL,0
+oneDistinct/derived/columnName/max/grouped/rows	c1:integer,c2:bigint | 10,1; 30,1; 30,2; 40,1
+oneDistinct/derived/columnName/max/grouped/zero	(0 rows)
+oneDistinct/derived/noAliases/countStar/ungrouped/rows	c1:bigint,c2:bigint | 6,4
+oneDistinct/derived/noAliases/countStar/ungrouped/zero	c1:bigint,c2:bigint | 0,0
+oneDistinct/derived/noAliases/countStar/grouped/rows	c1:bigint,c2:bigint | 1,1; 1,1; 2,1; 2,2
+oneDistinct/derived/noAliases/countStar/grouped/zero	(0 rows)
+oneDistinct/derived/noAliases/countX/ungrouped/rows	c1:bigint,c2:bigint | 6,4
+oneDistinct/derived/noAliases/countX/ungrouped/zero	c1:bigint,c2:bigint | 0,0
+oneDistinct/derived/noAliases/countX/grouped/rows	c1:bigint,c2:bigint | 1,1; 1,1; 2,1; 2,2
+oneDistinct/derived/noAliases/countX/grouped/zero	(0 rows)
+oneDistinct/derived/noAliases/sumInt/ungrouped/rows	c1:bigint,c2:bigint | 140,4
+oneDistinct/derived/noAliases/sumInt/ungrouped/zero	c1:bigint,c2:bigint | NULL,0
+oneDistinct/derived/noAliases/sumInt/grouped/rows	c1:bigint,c2:bigint | 20,1; 30,1; 40,1; 50,2
+oneDistinct/derived/noAliases/sumInt/grouped/zero	(0 rows)
+oneDistinct/derived/noAliases/sumBig/ungrouped/rows	c1:numeric,c2:bigint | 10000000085,4
+oneDistinct/derived/noAliases/sumBig/ungrouped/zero	c1:numeric,c2:bigint | NULL,0
+oneDistinct/derived/noAliases/sumBig/grouped/rows	c1:numeric,c2:bigint | -5,1; 10000000000,1; 40,1; 50,2
+oneDistinct/derived/noAliases/sumBig/grouped/zero	(0 rows)
+oneDistinct/derived/noAliases/sumDec/ungrouped/rows	c1:numeric,c2:bigint | 11.60,4
+oneDistinct/derived/noAliases/sumDec/ungrouped/zero	c1:numeric,c2:bigint | NULL,0
+oneDistinct/derived/noAliases/sumDec/grouped/rows	c1:numeric,c2:bigint | 0.10,1; 3.75,1; 3.75,2; 4.00,1
+oneDistinct/derived/noAliases/sumDec/grouped/zero	(0 rows)
+oneDistinct/derived/noAliases/sumFloat/ungrouped/rows	c1:double precision,c2:bigint | 7.375,4
+oneDistinct/derived/noAliases/sumFloat/ungrouped/zero	c1:double precision,c2:bigint | NULL,0
+oneDistinct/derived/noAliases/sumFloat/grouped/rows	c1:double precision,c2:bigint | 0.125,1; 0.5,1; 3,1; 3.75,2
+oneDistinct/derived/noAliases/sumFloat/grouped/zero	(0 rows)
+oneDistinct/derived/noAliases/avgInt/ungrouped/rows	c1:numeric,c2:bigint | 23.3333333333333333,4
+oneDistinct/derived/noAliases/avgInt/ungrouped/zero	c1:numeric,c2:bigint | NULL,0
+oneDistinct/derived/noAliases/avgInt/grouped/rows	c1:numeric,c2:bigint | 10.0000000000000000,1; 25.0000000000000000,2; 30.0000000000000000,1; 40.0000000000000000,1
+oneDistinct/derived/noAliases/avgInt/grouped/zero	(0 rows)
+oneDistinct/derived/noAliases/avgDec/ungrouped/rows	c1:numeric,c2:bigint | 2.3200000000000000,4
+oneDistinct/derived/noAliases/avgDec/ungrouped/zero	c1:numeric,c2:bigint | NULL,0
+oneDistinct/derived/noAliases/avgDec/grouped/rows	c1:numeric,c2:bigint | 0.10000000000000000000,1; 1.8750000000000000,1; 3.7500000000000000,2; 4.0000000000000000,1
+oneDistinct/derived/noAliases/avgDec/grouped/zero	(0 rows)
+oneDistinct/derived/noAliases/min/ungrouped/rows	c1:integer,c2:bigint | 10,4
+oneDistinct/derived/noAliases/min/ungrouped/zero	c1:integer,c2:bigint | NULL,0
+oneDistinct/derived/noAliases/min/grouped/rows	c1:integer,c2:bigint | 10,1; 20,2; 30,1; 40,1
+oneDistinct/derived/noAliases/min/grouped/zero	(0 rows)
+oneDistinct/derived/noAliases/max/ungrouped/rows	c1:integer,c2:bigint | 40,4
+oneDistinct/derived/noAliases/max/ungrouped/zero	c1:integer,c2:bigint | NULL,0
+oneDistinct/derived/noAliases/max/grouped/rows	c1:integer,c2:bigint | 10,1; 30,1; 30,2; 40,1
+oneDistinct/derived/noAliases/max/grouped/zero	(0 rows)
+oneDistinct/cte/distinctAliases/countStar/ungrouped/rows	c1:bigint,c2:bigint | 6,4
+oneDistinct/cte/distinctAliases/countStar/ungrouped/zero	c1:bigint,c2:bigint | 0,0
+oneDistinct/cte/distinctAliases/countStar/grouped/rows	c1:bigint,c2:bigint | 1,1; 1,1; 2,1; 2,2
+oneDistinct/cte/distinctAliases/countStar/grouped/zero	(0 rows)
+oneDistinct/cte/distinctAliases/countX/ungrouped/rows	c1:bigint,c2:bigint | 6,4
+oneDistinct/cte/distinctAliases/countX/ungrouped/zero	c1:bigint,c2:bigint | 0,0
+oneDistinct/cte/distinctAliases/countX/grouped/rows	c1:bigint,c2:bigint | 1,1; 1,1; 2,1; 2,2
+oneDistinct/cte/distinctAliases/countX/grouped/zero	(0 rows)
+oneDistinct/cte/distinctAliases/sumInt/ungrouped/rows	c1:bigint,c2:bigint | 140,4
+oneDistinct/cte/distinctAliases/sumInt/ungrouped/zero	c1:bigint,c2:bigint | NULL,0
+oneDistinct/cte/distinctAliases/sumInt/grouped/rows	c1:bigint,c2:bigint | 20,1; 30,1; 40,1; 50,2
+oneDistinct/cte/distinctAliases/sumInt/grouped/zero	(0 rows)
+oneDistinct/cte/distinctAliases/sumBig/ungrouped/rows	c1:numeric,c2:bigint | 10000000085,4
+oneDistinct/cte/distinctAliases/sumBig/ungrouped/zero	c1:numeric,c2:bigint | NULL,0
+oneDistinct/cte/distinctAliases/sumBig/grouped/rows	c1:numeric,c2:bigint | -5,1; 10000000000,1; 40,1; 50,2
+oneDistinct/cte/distinctAliases/sumBig/grouped/zero	(0 rows)
+oneDistinct/cte/distinctAliases/sumDec/ungrouped/rows	c1:numeric,c2:bigint | 11.60,4
+oneDistinct/cte/distinctAliases/sumDec/ungrouped/zero	c1:numeric,c2:bigint | NULL,0
+oneDistinct/cte/distinctAliases/sumDec/grouped/rows	c1:numeric,c2:bigint | 0.10,1; 3.75,1; 3.75,2; 4.00,1
+oneDistinct/cte/distinctAliases/sumDec/grouped/zero	(0 rows)
+oneDistinct/cte/distinctAliases/sumFloat/ungrouped/rows	c1:double precision,c2:bigint | 7.375,4
+oneDistinct/cte/distinctAliases/sumFloat/ungrouped/zero	c1:double precision,c2:bigint | NULL,0
+oneDistinct/cte/distinctAliases/sumFloat/grouped/rows	c1:double precision,c2:bigint | 0.125,1; 0.5,1; 3,1; 3.75,2
+oneDistinct/cte/distinctAliases/sumFloat/grouped/zero	(0 rows)
+oneDistinct/cte/distinctAliases/avgInt/ungrouped/rows	c1:numeric,c2:bigint | 23.3333333333333333,4
+oneDistinct/cte/distinctAliases/avgInt/ungrouped/zero	c1:numeric,c2:bigint | NULL,0
+oneDistinct/cte/distinctAliases/avgInt/grouped/rows	c1:numeric,c2:bigint | 10.0000000000000000,1; 25.0000000000000000,2; 30.0000000000000000,1; 40.0000000000000000,1
+oneDistinct/cte/distinctAliases/avgInt/grouped/zero	(0 rows)
+oneDistinct/cte/distinctAliases/avgDec/ungrouped/rows	c1:numeric,c2:bigint | 2.3200000000000000,4
+oneDistinct/cte/distinctAliases/avgDec/ungrouped/zero	c1:numeric,c2:bigint | NULL,0
+oneDistinct/cte/distinctAliases/avgDec/grouped/rows	c1:numeric,c2:bigint | 0.10000000000000000000,1; 1.8750000000000000,1; 3.7500000000000000,2; 4.0000000000000000,1
+oneDistinct/cte/distinctAliases/avgDec/grouped/zero	(0 rows)
+oneDistinct/cte/distinctAliases/min/ungrouped/rows	c1:integer,c2:bigint | 10,4
+oneDistinct/cte/distinctAliases/min/ungrouped/zero	c1:integer,c2:bigint | NULL,0
+oneDistinct/cte/distinctAliases/min/grouped/rows	c1:integer,c2:bigint | 10,1; 20,2; 30,1; 40,1
+oneDistinct/cte/distinctAliases/min/grouped/zero	(0 rows)
+oneDistinct/cte/distinctAliases/max/ungrouped/rows	c1:integer,c2:bigint | 40,4
+oneDistinct/cte/distinctAliases/max/ungrouped/zero	c1:integer,c2:bigint | NULL,0
+oneDistinct/cte/distinctAliases/max/grouped/rows	c1:integer,c2:bigint | 10,1; 30,1; 30,2; 40,1
+oneDistinct/cte/distinctAliases/max/grouped/zero	(0 rows)
+oneDistinct/cte/sharedAlias/countStar/ungrouped/rows	c1:bigint,c2:bigint | 6,4
+oneDistinct/cte/sharedAlias/countStar/ungrouped/zero	c1:bigint,c2:bigint | 0,0
+oneDistinct/cte/sharedAlias/countStar/grouped/rows	c1:bigint,c2:bigint | 1,1; 1,1; 2,1; 2,2
+oneDistinct/cte/sharedAlias/countStar/grouped/zero	(0 rows)
+oneDistinct/cte/sharedAlias/countX/ungrouped/rows	c1:bigint,c2:bigint | 6,4
+oneDistinct/cte/sharedAlias/countX/ungrouped/zero	c1:bigint,c2:bigint | 0,0
+oneDistinct/cte/sharedAlias/countX/grouped/rows	c1:bigint,c2:bigint | 1,1; 1,1; 2,1; 2,2
+oneDistinct/cte/sharedAlias/countX/grouped/zero	(0 rows)
+oneDistinct/cte/sharedAlias/sumInt/ungrouped/rows	c1:bigint,c2:bigint | 140,4
+oneDistinct/cte/sharedAlias/sumInt/ungrouped/zero	c1:bigint,c2:bigint | NULL,0
+oneDistinct/cte/sharedAlias/sumInt/grouped/rows	c1:bigint,c2:bigint | 20,1; 30,1; 40,1; 50,2
+oneDistinct/cte/sharedAlias/sumInt/grouped/zero	(0 rows)
+oneDistinct/cte/sharedAlias/sumBig/ungrouped/rows	c1:numeric,c2:bigint | 10000000085,4
+oneDistinct/cte/sharedAlias/sumBig/ungrouped/zero	c1:numeric,c2:bigint | NULL,0
+oneDistinct/cte/sharedAlias/sumBig/grouped/rows	c1:numeric,c2:bigint | -5,1; 10000000000,1; 40,1; 50,2
+oneDistinct/cte/sharedAlias/sumBig/grouped/zero	(0 rows)
+oneDistinct/cte/sharedAlias/sumDec/ungrouped/rows	c1:numeric,c2:bigint | 11.60,4
+oneDistinct/cte/sharedAlias/sumDec/ungrouped/zero	c1:numeric,c2:bigint | NULL,0
+oneDistinct/cte/sharedAlias/sumDec/grouped/rows	c1:numeric,c2:bigint | 0.10,1; 3.75,1; 3.75,2; 4.00,1
+oneDistinct/cte/sharedAlias/sumDec/grouped/zero	(0 rows)
+oneDistinct/cte/sharedAlias/sumFloat/ungrouped/rows	c1:double precision,c2:bigint | 7.375,4
+oneDistinct/cte/sharedAlias/sumFloat/ungrouped/zero	c1:double precision,c2:bigint | NULL,0
+oneDistinct/cte/sharedAlias/sumFloat/grouped/rows	c1:double precision,c2:bigint | 0.125,1; 0.5,1; 3,1; 3.75,2
+oneDistinct/cte/sharedAlias/sumFloat/grouped/zero	(0 rows)
+oneDistinct/cte/sharedAlias/avgInt/ungrouped/rows	c1:numeric,c2:bigint | 23.3333333333333333,4
+oneDistinct/cte/sharedAlias/avgInt/ungrouped/zero	c1:numeric,c2:bigint | NULL,0
+oneDistinct/cte/sharedAlias/avgInt/grouped/rows	c1:numeric,c2:bigint | 10.0000000000000000,1; 25.0000000000000000,2; 30.0000000000000000,1; 40.0000000000000000,1
+oneDistinct/cte/sharedAlias/avgInt/grouped/zero	(0 rows)
+oneDistinct/cte/sharedAlias/avgDec/ungrouped/rows	c1:numeric,c2:bigint | 2.3200000000000000,4
+oneDistinct/cte/sharedAlias/avgDec/ungrouped/zero	c1:numeric,c2:bigint | NULL,0
+oneDistinct/cte/sharedAlias/avgDec/grouped/rows	c1:numeric,c2:bigint | 0.10000000000000000000,1; 1.8750000000000000,1; 3.7500000000000000,2; 4.0000000000000000,1
+oneDistinct/cte/sharedAlias/avgDec/grouped/zero	(0 rows)
+oneDistinct/cte/sharedAlias/min/ungrouped/rows	c1:integer,c2:bigint | 10,4
+oneDistinct/cte/sharedAlias/min/ungrouped/zero	c1:integer,c2:bigint | NULL,0
+oneDistinct/cte/sharedAlias/min/grouped/rows	c1:integer,c2:bigint | 10,1; 20,2; 30,1; 40,1
+oneDistinct/cte/sharedAlias/min/grouped/zero	(0 rows)
+oneDistinct/cte/sharedAlias/max/ungrouped/rows	c1:integer,c2:bigint | 40,4
+oneDistinct/cte/sharedAlias/max/ungrouped/zero	c1:integer,c2:bigint | NULL,0
+oneDistinct/cte/sharedAlias/max/grouped/rows	c1:integer,c2:bigint | 10,1; 30,1; 30,2; 40,1
+oneDistinct/cte/sharedAlias/max/grouped/zero	(0 rows)
+oneDistinct/cte/columnName/countStar/ungrouped/rows	c1:bigint,c2:bigint | 6,4
+oneDistinct/cte/columnName/countStar/ungrouped/zero	c1:bigint,c2:bigint | 0,0
+oneDistinct/cte/columnName/countStar/grouped/rows	c1:bigint,c2:bigint | 1,1; 1,1; 2,1; 2,2
+oneDistinct/cte/columnName/countStar/grouped/zero	(0 rows)
+oneDistinct/cte/columnName/countX/ungrouped/rows	c1:bigint,c2:bigint | 6,4
+oneDistinct/cte/columnName/countX/ungrouped/zero	c1:bigint,c2:bigint | 0,0
+oneDistinct/cte/columnName/countX/grouped/rows	c1:bigint,c2:bigint | 1,1; 1,1; 2,1; 2,2
+oneDistinct/cte/columnName/countX/grouped/zero	(0 rows)
+oneDistinct/cte/columnName/sumInt/ungrouped/rows	c1:bigint,c2:bigint | 140,4
+oneDistinct/cte/columnName/sumInt/ungrouped/zero	c1:bigint,c2:bigint | NULL,0
+oneDistinct/cte/columnName/sumInt/grouped/rows	c1:bigint,c2:bigint | 20,1; 30,1; 40,1; 50,2
+oneDistinct/cte/columnName/sumInt/grouped/zero	(0 rows)
+oneDistinct/cte/columnName/sumBig/ungrouped/rows	c1:numeric,c2:bigint | 10000000085,4
+oneDistinct/cte/columnName/sumBig/ungrouped/zero	c1:numeric,c2:bigint | NULL,0
+oneDistinct/cte/columnName/sumBig/grouped/rows	c1:numeric,c2:bigint | -5,1; 10000000000,1; 40,1; 50,2
+oneDistinct/cte/columnName/sumBig/grouped/zero	(0 rows)
+oneDistinct/cte/columnName/sumDec/ungrouped/rows	c1:numeric,c2:bigint | 11.60,4
+oneDistinct/cte/columnName/sumDec/ungrouped/zero	c1:numeric,c2:bigint | NULL,0
+oneDistinct/cte/columnName/sumDec/grouped/rows	c1:numeric,c2:bigint | 0.10,1; 3.75,1; 3.75,2; 4.00,1
+oneDistinct/cte/columnName/sumDec/grouped/zero	(0 rows)
+oneDistinct/cte/columnName/sumFloat/ungrouped/rows	c1:double precision,c2:bigint | 7.375,4
+oneDistinct/cte/columnName/sumFloat/ungrouped/zero	c1:double precision,c2:bigint | NULL,0
+oneDistinct/cte/columnName/sumFloat/grouped/rows	c1:double precision,c2:bigint | 0.125,1; 0.5,1; 3,1; 3.75,2
+oneDistinct/cte/columnName/sumFloat/grouped/zero	(0 rows)
+oneDistinct/cte/columnName/avgInt/ungrouped/rows	c1:numeric,c2:bigint | 23.3333333333333333,4
+oneDistinct/cte/columnName/avgInt/ungrouped/zero	c1:numeric,c2:bigint | NULL,0
+oneDistinct/cte/columnName/avgInt/grouped/rows	c1:numeric,c2:bigint | 10.0000000000000000,1; 25.0000000000000000,2; 30.0000000000000000,1; 40.0000000000000000,1
+oneDistinct/cte/columnName/avgInt/grouped/zero	(0 rows)
+oneDistinct/cte/columnName/avgDec/ungrouped/rows	c1:numeric,c2:bigint | 2.3200000000000000,4
+oneDistinct/cte/columnName/avgDec/ungrouped/zero	c1:numeric,c2:bigint | NULL,0
+oneDistinct/cte/columnName/avgDec/grouped/rows	c1:numeric,c2:bigint | 0.10000000000000000000,1; 1.8750000000000000,1; 3.7500000000000000,2; 4.0000000000000000,1
+oneDistinct/cte/columnName/avgDec/grouped/zero	(0 rows)
+oneDistinct/cte/columnName/min/ungrouped/rows	c1:integer,c2:bigint | 10,4
+oneDistinct/cte/columnName/min/ungrouped/zero	c1:integer,c2:bigint | NULL,0
+oneDistinct/cte/columnName/min/grouped/rows	c1:integer,c2:bigint | 10,1; 20,2; 30,1; 40,1
+oneDistinct/cte/columnName/min/grouped/zero	(0 rows)
+oneDistinct/cte/columnName/max/ungrouped/rows	c1:integer,c2:bigint | 40,4
+oneDistinct/cte/columnName/max/ungrouped/zero	c1:integer,c2:bigint | NULL,0
+oneDistinct/cte/columnName/max/grouped/rows	c1:integer,c2:bigint | 10,1; 30,1; 30,2; 40,1
+oneDistinct/cte/columnName/max/grouped/zero	(0 rows)
+oneDistinct/cte/noAliases/countStar/ungrouped/rows	c1:bigint,c2:bigint | 6,4
+oneDistinct/cte/noAliases/countStar/ungrouped/zero	c1:bigint,c2:bigint | 0,0
+oneDistinct/cte/noAliases/countStar/grouped/rows	c1:bigint,c2:bigint | 1,1; 1,1; 2,1; 2,2
+oneDistinct/cte/noAliases/countStar/grouped/zero	(0 rows)
+oneDistinct/cte/noAliases/countX/ungrouped/rows	c1:bigint,c2:bigint | 6,4
+oneDistinct/cte/noAliases/countX/ungrouped/zero	c1:bigint,c2:bigint | 0,0
+oneDistinct/cte/noAliases/countX/grouped/rows	c1:bigint,c2:bigint | 1,1; 1,1; 2,1; 2,2
+oneDistinct/cte/noAliases/countX/grouped/zero	(0 rows)
+oneDistinct/cte/noAliases/sumInt/ungrouped/rows	c1:bigint,c2:bigint | 140,4
+oneDistinct/cte/noAliases/sumInt/ungrouped/zero	c1:bigint,c2:bigint | NULL,0
+oneDistinct/cte/noAliases/sumInt/grouped/rows	c1:bigint,c2:bigint | 20,1; 30,1; 40,1; 50,2
+oneDistinct/cte/noAliases/sumInt/grouped/zero	(0 rows)
+oneDistinct/cte/noAliases/sumBig/ungrouped/rows	c1:numeric,c2:bigint | 10000000085,4
+oneDistinct/cte/noAliases/sumBig/ungrouped/zero	c1:numeric,c2:bigint | NULL,0
+oneDistinct/cte/noAliases/sumBig/grouped/rows	c1:numeric,c2:bigint | -5,1; 10000000000,1; 40,1; 50,2
+oneDistinct/cte/noAliases/sumBig/grouped/zero	(0 rows)
+oneDistinct/cte/noAliases/sumDec/ungrouped/rows	c1:numeric,c2:bigint | 11.60,4
+oneDistinct/cte/noAliases/sumDec/ungrouped/zero	c1:numeric,c2:bigint | NULL,0
+oneDistinct/cte/noAliases/sumDec/grouped/rows	c1:numeric,c2:bigint | 0.10,1; 3.75,1; 3.75,2; 4.00,1
+oneDistinct/cte/noAliases/sumDec/grouped/zero	(0 rows)
+oneDistinct/cte/noAliases/sumFloat/ungrouped/rows	c1:double precision,c2:bigint | 7.375,4
+oneDistinct/cte/noAliases/sumFloat/ungrouped/zero	c1:double precision,c2:bigint | NULL,0
+oneDistinct/cte/noAliases/sumFloat/grouped/rows	c1:double precision,c2:bigint | 0.125,1; 0.5,1; 3,1; 3.75,2
+oneDistinct/cte/noAliases/sumFloat/grouped/zero	(0 rows)
+oneDistinct/cte/noAliases/avgInt/ungrouped/rows	c1:numeric,c2:bigint | 23.3333333333333333,4
+oneDistinct/cte/noAliases/avgInt/ungrouped/zero	c1:numeric,c2:bigint | NULL,0
+oneDistinct/cte/noAliases/avgInt/grouped/rows	c1:numeric,c2:bigint | 10.0000000000000000,1; 25.0000000000000000,2; 30.0000000000000000,1; 40.0000000000000000,1
+oneDistinct/cte/noAliases/avgInt/grouped/zero	(0 rows)
+oneDistinct/cte/noAliases/avgDec/ungrouped/rows	c1:numeric,c2:bigint | 2.3200000000000000,4
+oneDistinct/cte/noAliases/avgDec/ungrouped/zero	c1:numeric,c2:bigint | NULL,0
+oneDistinct/cte/noAliases/avgDec/grouped/rows	c1:numeric,c2:bigint | 0.10000000000000000000,1; 1.8750000000000000,1; 3.7500000000000000,2; 4.0000000000000000,1
+oneDistinct/cte/noAliases/avgDec/grouped/zero	(0 rows)
+oneDistinct/cte/noAliases/min/ungrouped/rows	c1:integer,c2:bigint | 10,4
+oneDistinct/cte/noAliases/min/ungrouped/zero	c1:integer,c2:bigint | NULL,0
+oneDistinct/cte/noAliases/min/grouped/rows	c1:integer,c2:bigint | 10,1; 20,2; 30,1; 40,1
+oneDistinct/cte/noAliases/min/grouped/zero	(0 rows)
+oneDistinct/cte/noAliases/max/ungrouped/rows	c1:integer,c2:bigint | 40,4
+oneDistinct/cte/noAliases/max/ungrouped/zero	c1:integer,c2:bigint | NULL,0
+oneDistinct/cte/noAliases/max/grouped/rows	c1:integer,c2:bigint | 10,1; 30,1; 30,2; 40,1
+oneDistinct/cte/noAliases/max/grouped/zero	(0 rows)
+oneDistinct/unionAll/distinctAliases/countStar/ungrouped/rows	a:bigint,b:bigint | 0,0; 6,4
+oneDistinct/unionAll/distinctAliases/countStar/ungrouped/zero	a:bigint,b:bigint | 0,0; 0,0
+oneDistinct/unionAll/distinctAliases/countStar/grouped/rows	a:bigint,b:bigint | 1,1; 1,1; 2,1; 2,2
+oneDistinct/unionAll/distinctAliases/countStar/grouped/zero	(0 rows)
+oneDistinct/unionAll/distinctAliases/countX/ungrouped/rows	a:bigint,b:bigint | 0,0; 6,4
+oneDistinct/unionAll/distinctAliases/countX/ungrouped/zero	a:bigint,b:bigint | 0,0; 0,0
+oneDistinct/unionAll/distinctAliases/countX/grouped/rows	a:bigint,b:bigint | 1,1; 1,1; 2,1; 2,2
+oneDistinct/unionAll/distinctAliases/countX/grouped/zero	(0 rows)
+oneDistinct/unionAll/distinctAliases/sumInt/ungrouped/rows	a:bigint,b:bigint | 140,4; NULL,0
+oneDistinct/unionAll/distinctAliases/sumInt/ungrouped/zero	a:bigint,b:bigint | NULL,0; NULL,0
+oneDistinct/unionAll/distinctAliases/sumInt/grouped/rows	a:bigint,b:bigint | 20,1; 30,1; 40,1; 50,2
+oneDistinct/unionAll/distinctAliases/sumInt/grouped/zero	(0 rows)
+oneDistinct/unionAll/distinctAliases/sumBig/ungrouped/rows	a:numeric,b:bigint | 10000000085,4; NULL,0
+oneDistinct/unionAll/distinctAliases/sumBig/ungrouped/zero	a:numeric,b:bigint | NULL,0; NULL,0
+oneDistinct/unionAll/distinctAliases/sumBig/grouped/rows	a:numeric,b:bigint | -5,1; 10000000000,1; 40,1; 50,2
+oneDistinct/unionAll/distinctAliases/sumBig/grouped/zero	(0 rows)
+oneDistinct/unionAll/distinctAliases/sumDec/ungrouped/rows	a:numeric,b:bigint | 11.60,4; NULL,0
+oneDistinct/unionAll/distinctAliases/sumDec/ungrouped/zero	a:numeric,b:bigint | NULL,0; NULL,0
+oneDistinct/unionAll/distinctAliases/sumDec/grouped/rows	a:numeric,b:bigint | 0.10,1; 3.75,1; 3.75,2; 4.00,1
+oneDistinct/unionAll/distinctAliases/sumDec/grouped/zero	(0 rows)
+oneDistinct/unionAll/distinctAliases/sumFloat/ungrouped/rows	a:double precision,b:bigint | 7.375,4; NULL,0
+oneDistinct/unionAll/distinctAliases/sumFloat/ungrouped/zero	a:double precision,b:bigint | NULL,0; NULL,0
+oneDistinct/unionAll/distinctAliases/sumFloat/grouped/rows	a:double precision,b:bigint | 0.125,1; 0.5,1; 3,1; 3.75,2
+oneDistinct/unionAll/distinctAliases/sumFloat/grouped/zero	(0 rows)
+oneDistinct/unionAll/distinctAliases/avgInt/ungrouped/rows	a:numeric,b:bigint | 23.3333333333333333,4; NULL,0
+oneDistinct/unionAll/distinctAliases/avgInt/ungrouped/zero	a:numeric,b:bigint | NULL,0; NULL,0
+oneDistinct/unionAll/distinctAliases/avgInt/grouped/rows	a:numeric,b:bigint | 10.0000000000000000,1; 25.0000000000000000,2; 30.0000000000000000,1; 40.0000000000000000,1
+oneDistinct/unionAll/distinctAliases/avgInt/grouped/zero	(0 rows)
+oneDistinct/unionAll/distinctAliases/avgDec/ungrouped/rows	a:numeric,b:bigint | 2.3200000000000000,4; NULL,0
+oneDistinct/unionAll/distinctAliases/avgDec/ungrouped/zero	a:numeric,b:bigint | NULL,0; NULL,0
+oneDistinct/unionAll/distinctAliases/avgDec/grouped/rows	a:numeric,b:bigint | 0.10000000000000000000,1; 1.8750000000000000,1; 3.7500000000000000,2; 4.0000000000000000,1
+oneDistinct/unionAll/distinctAliases/avgDec/grouped/zero	(0 rows)
+oneDistinct/unionAll/distinctAliases/min/ungrouped/rows	a:integer,b:bigint | 10,4; NULL,0
+oneDistinct/unionAll/distinctAliases/min/ungrouped/zero	a:integer,b:bigint | NULL,0; NULL,0
+oneDistinct/unionAll/distinctAliases/min/grouped/rows	a:integer,b:bigint | 10,1; 20,2; 30,1; 40,1
+oneDistinct/unionAll/distinctAliases/min/grouped/zero	(0 rows)
+oneDistinct/unionAll/distinctAliases/max/ungrouped/rows	a:integer,b:bigint | 40,4; NULL,0
+oneDistinct/unionAll/distinctAliases/max/ungrouped/zero	a:integer,b:bigint | NULL,0; NULL,0
+oneDistinct/unionAll/distinctAliases/max/grouped/rows	a:integer,b:bigint | 10,1; 30,1; 30,2; 40,1
+oneDistinct/unionAll/distinctAliases/max/grouped/zero	(0 rows)
+oneDistinct/unionAll/sharedAlias/countStar/ungrouped/rows	a:bigint,a:bigint | 0,0; 6,4
+oneDistinct/unionAll/sharedAlias/countStar/ungrouped/zero	a:bigint,a:bigint | 0,0; 0,0
+oneDistinct/unionAll/sharedAlias/countStar/grouped/rows	a:bigint,a:bigint | 1,1; 1,1; 2,1; 2,2
+oneDistinct/unionAll/sharedAlias/countStar/grouped/zero	(0 rows)
+oneDistinct/unionAll/sharedAlias/countX/ungrouped/rows	a:bigint,a:bigint | 0,0; 6,4
+oneDistinct/unionAll/sharedAlias/countX/ungrouped/zero	a:bigint,a:bigint | 0,0; 0,0
+oneDistinct/unionAll/sharedAlias/countX/grouped/rows	a:bigint,a:bigint | 1,1; 1,1; 2,1; 2,2
+oneDistinct/unionAll/sharedAlias/countX/grouped/zero	(0 rows)
+oneDistinct/unionAll/sharedAlias/sumInt/ungrouped/rows	a:bigint,a:bigint | 140,4; NULL,0
+oneDistinct/unionAll/sharedAlias/sumInt/ungrouped/zero	a:bigint,a:bigint | NULL,0; NULL,0
+oneDistinct/unionAll/sharedAlias/sumInt/grouped/rows	a:bigint,a:bigint | 20,1; 30,1; 40,1; 50,2
+oneDistinct/unionAll/sharedAlias/sumInt/grouped/zero	(0 rows)
+oneDistinct/unionAll/sharedAlias/sumBig/ungrouped/rows	a:numeric,a:bigint | 10000000085,4; NULL,0
+oneDistinct/unionAll/sharedAlias/sumBig/ungrouped/zero	a:numeric,a:bigint | NULL,0; NULL,0
+oneDistinct/unionAll/sharedAlias/sumBig/grouped/rows	a:numeric,a:bigint | -5,1; 10000000000,1; 40,1; 50,2
+oneDistinct/unionAll/sharedAlias/sumBig/grouped/zero	(0 rows)
+oneDistinct/unionAll/sharedAlias/sumDec/ungrouped/rows	a:numeric,a:bigint | 11.60,4; NULL,0
+oneDistinct/unionAll/sharedAlias/sumDec/ungrouped/zero	a:numeric,a:bigint | NULL,0; NULL,0
+oneDistinct/unionAll/sharedAlias/sumDec/grouped/rows	a:numeric,a:bigint | 0.10,1; 3.75,1; 3.75,2; 4.00,1
+oneDistinct/unionAll/sharedAlias/sumDec/grouped/zero	(0 rows)
+oneDistinct/unionAll/sharedAlias/sumFloat/ungrouped/rows	a:double precision,a:bigint | 7.375,4; NULL,0
+oneDistinct/unionAll/sharedAlias/sumFloat/ungrouped/zero	a:double precision,a:bigint | NULL,0; NULL,0
+oneDistinct/unionAll/sharedAlias/sumFloat/grouped/rows	a:double precision,a:bigint | 0.125,1; 0.5,1; 3,1; 3.75,2
+oneDistinct/unionAll/sharedAlias/sumFloat/grouped/zero	(0 rows)
+oneDistinct/unionAll/sharedAlias/avgInt/ungrouped/rows	a:numeric,a:bigint | 23.3333333333333333,4; NULL,0
+oneDistinct/unionAll/sharedAlias/avgInt/ungrouped/zero	a:numeric,a:bigint | NULL,0; NULL,0
+oneDistinct/unionAll/sharedAlias/avgInt/grouped/rows	a:numeric,a:bigint | 10.0000000000000000,1; 25.0000000000000000,2; 30.0000000000000000,1; 40.0000000000000000,1
+oneDistinct/unionAll/sharedAlias/avgInt/grouped/zero	(0 rows)
+oneDistinct/unionAll/sharedAlias/avgDec/ungrouped/rows	a:numeric,a:bigint | 2.3200000000000000,4; NULL,0
+oneDistinct/unionAll/sharedAlias/avgDec/ungrouped/zero	a:numeric,a:bigint | NULL,0; NULL,0
+oneDistinct/unionAll/sharedAlias/avgDec/grouped/rows	a:numeric,a:bigint | 0.10000000000000000000,1; 1.8750000000000000,1; 3.7500000000000000,2; 4.0000000000000000,1
+oneDistinct/unionAll/sharedAlias/avgDec/grouped/zero	(0 rows)
+oneDistinct/unionAll/sharedAlias/min/ungrouped/rows	a:integer,a:bigint | 10,4; NULL,0
+oneDistinct/unionAll/sharedAlias/min/ungrouped/zero	a:integer,a:bigint | NULL,0; NULL,0
+oneDistinct/unionAll/sharedAlias/min/grouped/rows	a:integer,a:bigint | 10,1; 20,2; 30,1; 40,1
+oneDistinct/unionAll/sharedAlias/min/grouped/zero	(0 rows)
+oneDistinct/unionAll/sharedAlias/max/ungrouped/rows	a:integer,a:bigint | 40,4; NULL,0
+oneDistinct/unionAll/sharedAlias/max/ungrouped/zero	a:integer,a:bigint | NULL,0; NULL,0
+oneDistinct/unionAll/sharedAlias/max/grouped/rows	a:integer,a:bigint | 10,1; 30,1; 30,2; 40,1
+oneDistinct/unionAll/sharedAlias/max/grouped/zero	(0 rows)
+oneDistinct/unionAll/columnName/countStar/ungrouped/rows	x:bigint,b:bigint | 0,0; 6,4
+oneDistinct/unionAll/columnName/countStar/ungrouped/zero	x:bigint,b:bigint | 0,0; 0,0
+oneDistinct/unionAll/columnName/countStar/grouped/rows	x:bigint,b:bigint | 1,1; 1,1; 2,1; 2,2
+oneDistinct/unionAll/columnName/countStar/grouped/zero	(0 rows)
+oneDistinct/unionAll/columnName/countX/ungrouped/rows	x:bigint,b:bigint | 0,0; 6,4
+oneDistinct/unionAll/columnName/countX/ungrouped/zero	x:bigint,b:bigint | 0,0; 0,0
+oneDistinct/unionAll/columnName/countX/grouped/rows	x:bigint,b:bigint | 1,1; 1,1; 2,1; 2,2
+oneDistinct/unionAll/columnName/countX/grouped/zero	(0 rows)
+oneDistinct/unionAll/columnName/sumInt/ungrouped/rows	x:bigint,b:bigint | 140,4; NULL,0
+oneDistinct/unionAll/columnName/sumInt/ungrouped/zero	x:bigint,b:bigint | NULL,0; NULL,0
+oneDistinct/unionAll/columnName/sumInt/grouped/rows	x:bigint,b:bigint | 20,1; 30,1; 40,1; 50,2
+oneDistinct/unionAll/columnName/sumInt/grouped/zero	(0 rows)
+oneDistinct/unionAll/columnName/sumBig/ungrouped/rows	x:numeric,b:bigint | 10000000085,4; NULL,0
+oneDistinct/unionAll/columnName/sumBig/ungrouped/zero	x:numeric,b:bigint | NULL,0; NULL,0
+oneDistinct/unionAll/columnName/sumBig/grouped/rows	x:numeric,b:bigint | -5,1; 10000000000,1; 40,1; 50,2
+oneDistinct/unionAll/columnName/sumBig/grouped/zero	(0 rows)
+oneDistinct/unionAll/columnName/sumDec/ungrouped/rows	x:numeric,b:bigint | 11.60,4; NULL,0
+oneDistinct/unionAll/columnName/sumDec/ungrouped/zero	x:numeric,b:bigint | NULL,0; NULL,0
+oneDistinct/unionAll/columnName/sumDec/grouped/rows	x:numeric,b:bigint | 0.10,1; 3.75,1; 3.75,2; 4.00,1
+oneDistinct/unionAll/columnName/sumDec/grouped/zero	(0 rows)
+oneDistinct/unionAll/columnName/sumFloat/ungrouped/rows	x:double precision,b:bigint | 7.375,4; NULL,0
+oneDistinct/unionAll/columnName/sumFloat/ungrouped/zero	x:double precision,b:bigint | NULL,0; NULL,0
+oneDistinct/unionAll/columnName/sumFloat/grouped/rows	x:double precision,b:bigint | 0.125,1; 0.5,1; 3,1; 3.75,2
+oneDistinct/unionAll/columnName/sumFloat/grouped/zero	(0 rows)
+oneDistinct/unionAll/columnName/avgInt/ungrouped/rows	x:numeric,b:bigint | 23.3333333333333333,4; NULL,0
+oneDistinct/unionAll/columnName/avgInt/ungrouped/zero	x:numeric,b:bigint | NULL,0; NULL,0
+oneDistinct/unionAll/columnName/avgInt/grouped/rows	x:numeric,b:bigint | 10.0000000000000000,1; 25.0000000000000000,2; 30.0000000000000000,1; 40.0000000000000000,1
+oneDistinct/unionAll/columnName/avgInt/grouped/zero	(0 rows)
+oneDistinct/unionAll/columnName/avgDec/ungrouped/rows	x:numeric,b:bigint | 2.3200000000000000,4; NULL,0
+oneDistinct/unionAll/columnName/avgDec/ungrouped/zero	x:numeric,b:bigint | NULL,0; NULL,0
+oneDistinct/unionAll/columnName/avgDec/grouped/rows	x:numeric,b:bigint | 0.10000000000000000000,1; 1.8750000000000000,1; 3.7500000000000000,2; 4.0000000000000000,1
+oneDistinct/unionAll/columnName/avgDec/grouped/zero	(0 rows)
+oneDistinct/unionAll/columnName/min/ungrouped/rows	x:integer,b:bigint | 10,4; NULL,0
+oneDistinct/unionAll/columnName/min/ungrouped/zero	x:integer,b:bigint | NULL,0; NULL,0
+oneDistinct/unionAll/columnName/min/grouped/rows	x:integer,b:bigint | 10,1; 20,2; 30,1; 40,1
+oneDistinct/unionAll/columnName/min/grouped/zero	(0 rows)
+oneDistinct/unionAll/columnName/max/ungrouped/rows	x:integer,b:bigint | 40,4; NULL,0
+oneDistinct/unionAll/columnName/max/ungrouped/zero	x:integer,b:bigint | NULL,0; NULL,0
+oneDistinct/unionAll/columnName/max/grouped/rows	x:integer,b:bigint | 10,1; 30,1; 30,2; 40,1
+oneDistinct/unionAll/columnName/max/grouped/zero	(0 rows)
+oneDistinct/unionAll/noAliases/countStar/ungrouped/rows	count:bigint,count:bigint | 0,0; 6,4
+oneDistinct/unionAll/noAliases/countStar/ungrouped/zero	count:bigint,count:bigint | 0,0; 0,0
+oneDistinct/unionAll/noAliases/countStar/grouped/rows	count:bigint,count:bigint | 1,1; 1,1; 2,1; 2,2
+oneDistinct/unionAll/noAliases/countStar/grouped/zero	(0 rows)
+oneDistinct/unionAll/noAliases/countX/ungrouped/rows	count:bigint,count:bigint | 0,0; 6,4
+oneDistinct/unionAll/noAliases/countX/ungrouped/zero	count:bigint,count:bigint | 0,0; 0,0
+oneDistinct/unionAll/noAliases/countX/grouped/rows	count:bigint,count:bigint | 1,1; 1,1; 2,1; 2,2
+oneDistinct/unionAll/noAliases/countX/grouped/zero	(0 rows)
+oneDistinct/unionAll/noAliases/sumInt/ungrouped/rows	sum:bigint,count:bigint | 140,4; NULL,0
+oneDistinct/unionAll/noAliases/sumInt/ungrouped/zero	sum:bigint,count:bigint | NULL,0; NULL,0
+oneDistinct/unionAll/noAliases/sumInt/grouped/rows	sum:bigint,count:bigint | 20,1; 30,1; 40,1; 50,2
+oneDistinct/unionAll/noAliases/sumInt/grouped/zero	(0 rows)
+oneDistinct/unionAll/noAliases/sumBig/ungrouped/rows	sum:numeric,count:bigint | 10000000085,4; NULL,0
+oneDistinct/unionAll/noAliases/sumBig/ungrouped/zero	sum:numeric,count:bigint | NULL,0; NULL,0
+oneDistinct/unionAll/noAliases/sumBig/grouped/rows	sum:numeric,count:bigint | -5,1; 10000000000,1; 40,1; 50,2
+oneDistinct/unionAll/noAliases/sumBig/grouped/zero	(0 rows)
+oneDistinct/unionAll/noAliases/sumDec/ungrouped/rows	sum:numeric,count:bigint | 11.60,4; NULL,0
+oneDistinct/unionAll/noAliases/sumDec/ungrouped/zero	sum:numeric,count:bigint | NULL,0; NULL,0
+oneDistinct/unionAll/noAliases/sumDec/grouped/rows	sum:numeric,count:bigint | 0.10,1; 3.75,1; 3.75,2; 4.00,1
+oneDistinct/unionAll/noAliases/sumDec/grouped/zero	(0 rows)
+oneDistinct/unionAll/noAliases/sumFloat/ungrouped/rows	sum:double precision,count:bigint | 7.375,4; NULL,0
+oneDistinct/unionAll/noAliases/sumFloat/ungrouped/zero	sum:double precision,count:bigint | NULL,0; NULL,0
+oneDistinct/unionAll/noAliases/sumFloat/grouped/rows	sum:double precision,count:bigint | 0.125,1; 0.5,1; 3,1; 3.75,2
+oneDistinct/unionAll/noAliases/sumFloat/grouped/zero	(0 rows)
+oneDistinct/unionAll/noAliases/avgInt/ungrouped/rows	avg:numeric,count:bigint | 23.3333333333333333,4; NULL,0
+oneDistinct/unionAll/noAliases/avgInt/ungrouped/zero	avg:numeric,count:bigint | NULL,0; NULL,0
+oneDistinct/unionAll/noAliases/avgInt/grouped/rows	avg:numeric,count:bigint | 10.0000000000000000,1; 25.0000000000000000,2; 30.0000000000000000,1; 40.0000000000000000,1
+oneDistinct/unionAll/noAliases/avgInt/grouped/zero	(0 rows)
+oneDistinct/unionAll/noAliases/avgDec/ungrouped/rows	avg:numeric,count:bigint | 2.3200000000000000,4; NULL,0
+oneDistinct/unionAll/noAliases/avgDec/ungrouped/zero	avg:numeric,count:bigint | NULL,0; NULL,0
+oneDistinct/unionAll/noAliases/avgDec/grouped/rows	avg:numeric,count:bigint | 0.10000000000000000000,1; 1.8750000000000000,1; 3.7500000000000000,2; 4.0000000000000000,1
+oneDistinct/unionAll/noAliases/avgDec/grouped/zero	(0 rows)
+oneDistinct/unionAll/noAliases/min/ungrouped/rows	min:integer,count:bigint | 10,4; NULL,0
+oneDistinct/unionAll/noAliases/min/ungrouped/zero	min:integer,count:bigint | NULL,0; NULL,0
+oneDistinct/unionAll/noAliases/min/grouped/rows	min:integer,count:bigint | 10,1; 20,2; 30,1; 40,1
+oneDistinct/unionAll/noAliases/min/grouped/zero	(0 rows)
+oneDistinct/unionAll/noAliases/max/ungrouped/rows	max:integer,count:bigint | 40,4; NULL,0
+oneDistinct/unionAll/noAliases/max/ungrouped/zero	max:integer,count:bigint | NULL,0; NULL,0
+oneDistinct/unionAll/noAliases/max/grouped/rows	max:integer,count:bigint | 10,1; 30,1; 30,2; 40,1
+oneDistinct/unionAll/noAliases/max/grouped/zero	(0 rows)
+twoDistinct/top/distinctAliases/countStar/ungrouped/rows	a:bigint,b:bigint,c:bigint | 6,4,5
+twoDistinct/top/distinctAliases/countStar/ungrouped/zero	a:bigint,b:bigint,c:bigint | 0,0,0
+twoDistinct/top/distinctAliases/countStar/grouped/rows	a:bigint,b:bigint,c:bigint | 1,1,1; 1,1,1; 2,1,1; 2,2,2
+twoDistinct/top/distinctAliases/countStar/grouped/zero	(0 rows)
+twoDistinct/top/distinctAliases/countX/ungrouped/rows	a:bigint,b:bigint,c:bigint | 6,4,5
+twoDistinct/top/distinctAliases/countX/ungrouped/zero	a:bigint,b:bigint,c:bigint | 0,0,0
+twoDistinct/top/distinctAliases/countX/grouped/rows	a:bigint,b:bigint,c:bigint | 1,1,1; 1,1,1; 2,1,1; 2,2,2
+twoDistinct/top/distinctAliases/countX/grouped/zero	(0 rows)
+twoDistinct/top/distinctAliases/sumInt/ungrouped/rows	a:bigint,b:bigint,c:bigint | 140,4,5
+twoDistinct/top/distinctAliases/sumInt/ungrouped/zero	a:bigint,b:bigint,c:bigint | NULL,0,0
+twoDistinct/top/distinctAliases/sumInt/grouped/rows	a:bigint,b:bigint,c:bigint | 20,1,1; 30,1,1; 40,1,1; 50,2,2
+twoDistinct/top/distinctAliases/sumInt/grouped/zero	(0 rows)
+twoDistinct/top/distinctAliases/sumBig/ungrouped/rows	a:numeric,b:bigint,c:bigint | 10000000085,4,5
+twoDistinct/top/distinctAliases/sumBig/ungrouped/zero	a:numeric,b:bigint,c:bigint | NULL,0,0
+twoDistinct/top/distinctAliases/sumBig/grouped/rows	a:numeric,b:bigint,c:bigint | -5,1,1; 10000000000,1,1; 40,1,1; 50,2,2
+twoDistinct/top/distinctAliases/sumBig/grouped/zero	(0 rows)
+twoDistinct/top/distinctAliases/sumDec/ungrouped/rows	a:numeric,b:bigint,c:bigint | 11.60,4,5
+twoDistinct/top/distinctAliases/sumDec/ungrouped/zero	a:numeric,b:bigint,c:bigint | NULL,0,0
+twoDistinct/top/distinctAliases/sumDec/grouped/rows	a:numeric,b:bigint,c:bigint | 0.10,1,1; 3.75,1,1; 3.75,2,2; 4.00,1,1
+twoDistinct/top/distinctAliases/sumDec/grouped/zero	(0 rows)
+twoDistinct/top/distinctAliases/sumFloat/ungrouped/rows	a:double precision,b:bigint,c:bigint | 7.375,4,5
+twoDistinct/top/distinctAliases/sumFloat/ungrouped/zero	a:double precision,b:bigint,c:bigint | NULL,0,0
+twoDistinct/top/distinctAliases/sumFloat/grouped/rows	a:double precision,b:bigint,c:bigint | 0.125,1,1; 0.5,1,1; 3,1,1; 3.75,2,2
+twoDistinct/top/distinctAliases/sumFloat/grouped/zero	(0 rows)
+twoDistinct/top/distinctAliases/avgInt/ungrouped/rows	a:numeric,b:bigint,c:bigint | 23.3333333333333333,4,5
+twoDistinct/top/distinctAliases/avgInt/ungrouped/zero	a:numeric,b:bigint,c:bigint | NULL,0,0
+twoDistinct/top/distinctAliases/avgInt/grouped/rows	a:numeric,b:bigint,c:bigint | 10.0000000000000000,1,1; 25.0000000000000000,2,2; 30.0000000000000000,1,1; 40.0000000000000000,1,1
+twoDistinct/top/distinctAliases/avgInt/grouped/zero	(0 rows)
+twoDistinct/top/distinctAliases/avgDec/ungrouped/rows	a:numeric,b:bigint,c:bigint | 2.3200000000000000,4,5
+twoDistinct/top/distinctAliases/avgDec/ungrouped/zero	a:numeric,b:bigint,c:bigint | NULL,0,0
+twoDistinct/top/distinctAliases/avgDec/grouped/rows	a:numeric,b:bigint,c:bigint | 0.10000000000000000000,1,1; 1.8750000000000000,1,1; 3.7500000000000000,2,2; 4.0000000000000000,1,1
+twoDistinct/top/distinctAliases/avgDec/grouped/zero	(0 rows)
+twoDistinct/top/distinctAliases/min/ungrouped/rows	a:integer,b:bigint,c:bigint | 10,4,5
+twoDistinct/top/distinctAliases/min/ungrouped/zero	a:integer,b:bigint,c:bigint | NULL,0,0
+twoDistinct/top/distinctAliases/min/grouped/rows	a:integer,b:bigint,c:bigint | 10,1,1; 20,2,2; 30,1,1; 40,1,1
+twoDistinct/top/distinctAliases/min/grouped/zero	(0 rows)
+twoDistinct/top/distinctAliases/max/ungrouped/rows	a:integer,b:bigint,c:bigint | 40,4,5
+twoDistinct/top/distinctAliases/max/ungrouped/zero	a:integer,b:bigint,c:bigint | NULL,0,0
+twoDistinct/top/distinctAliases/max/grouped/rows	a:integer,b:bigint,c:bigint | 10,1,1; 30,1,1; 30,2,2; 40,1,1
+twoDistinct/top/distinctAliases/max/grouped/zero	(0 rows)
+twoDistinct/top/sharedAlias/countStar/ungrouped/rows	a:bigint,a:bigint,a:bigint | 6,4,5
+twoDistinct/top/sharedAlias/countStar/ungrouped/zero	a:bigint,a:bigint,a:bigint | 0,0,0
+twoDistinct/top/sharedAlias/countStar/grouped/rows	a:bigint,a:bigint,a:bigint | 1,1,1; 1,1,1; 2,1,1; 2,2,2
+twoDistinct/top/sharedAlias/countStar/grouped/zero	(0 rows)
+twoDistinct/top/sharedAlias/countX/ungrouped/rows	a:bigint,a:bigint,a:bigint | 6,4,5
+twoDistinct/top/sharedAlias/countX/ungrouped/zero	a:bigint,a:bigint,a:bigint | 0,0,0
+twoDistinct/top/sharedAlias/countX/grouped/rows	a:bigint,a:bigint,a:bigint | 1,1,1; 1,1,1; 2,1,1; 2,2,2
+twoDistinct/top/sharedAlias/countX/grouped/zero	(0 rows)
+twoDistinct/top/sharedAlias/sumInt/ungrouped/rows	a:bigint,a:bigint,a:bigint | 140,4,5
+twoDistinct/top/sharedAlias/sumInt/ungrouped/zero	a:bigint,a:bigint,a:bigint | NULL,0,0
+twoDistinct/top/sharedAlias/sumInt/grouped/rows	a:bigint,a:bigint,a:bigint | 20,1,1; 30,1,1; 40,1,1; 50,2,2
+twoDistinct/top/sharedAlias/sumInt/grouped/zero	(0 rows)
+twoDistinct/top/sharedAlias/sumBig/ungrouped/rows	a:numeric,a:bigint,a:bigint | 10000000085,4,5
+twoDistinct/top/sharedAlias/sumBig/ungrouped/zero	a:numeric,a:bigint,a:bigint | NULL,0,0
+twoDistinct/top/sharedAlias/sumBig/grouped/rows	a:numeric,a:bigint,a:bigint | -5,1,1; 10000000000,1,1; 40,1,1; 50,2,2
+twoDistinct/top/sharedAlias/sumBig/grouped/zero	(0 rows)
+twoDistinct/top/sharedAlias/sumDec/ungrouped/rows	a:numeric,a:bigint,a:bigint | 11.60,4,5
+twoDistinct/top/sharedAlias/sumDec/ungrouped/zero	a:numeric,a:bigint,a:bigint | NULL,0,0
+twoDistinct/top/sharedAlias/sumDec/grouped/rows	a:numeric,a:bigint,a:bigint | 0.10,1,1; 3.75,1,1; 3.75,2,2; 4.00,1,1
+twoDistinct/top/sharedAlias/sumDec/grouped/zero	(0 rows)
+twoDistinct/top/sharedAlias/sumFloat/ungrouped/rows	a:double precision,a:bigint,a:bigint | 7.375,4,5
+twoDistinct/top/sharedAlias/sumFloat/ungrouped/zero	a:double precision,a:bigint,a:bigint | NULL,0,0
+twoDistinct/top/sharedAlias/sumFloat/grouped/rows	a:double precision,a:bigint,a:bigint | 0.125,1,1; 0.5,1,1; 3,1,1; 3.75,2,2
+twoDistinct/top/sharedAlias/sumFloat/grouped/zero	(0 rows)
+twoDistinct/top/sharedAlias/avgInt/ungrouped/rows	a:numeric,a:bigint,a:bigint | 23.3333333333333333,4,5
+twoDistinct/top/sharedAlias/avgInt/ungrouped/zero	a:numeric,a:bigint,a:bigint | NULL,0,0
+twoDistinct/top/sharedAlias/avgInt/grouped/rows	a:numeric,a:bigint,a:bigint | 10.0000000000000000,1,1; 25.0000000000000000,2,2; 30.0000000000000000,1,1; 40.0000000000000000,1,1
+twoDistinct/top/sharedAlias/avgInt/grouped/zero	(0 rows)
+twoDistinct/top/sharedAlias/avgDec/ungrouped/rows	a:numeric,a:bigint,a:bigint | 2.3200000000000000,4,5
+twoDistinct/top/sharedAlias/avgDec/ungrouped/zero	a:numeric,a:bigint,a:bigint | NULL,0,0
+twoDistinct/top/sharedAlias/avgDec/grouped/rows	a:numeric,a:bigint,a:bigint | 0.10000000000000000000,1,1; 1.8750000000000000,1,1; 3.7500000000000000,2,2; 4.0000000000000000,1,1
+twoDistinct/top/sharedAlias/avgDec/grouped/zero	(0 rows)
+twoDistinct/top/sharedAlias/min/ungrouped/rows	a:integer,a:bigint,a:bigint | 10,4,5
+twoDistinct/top/sharedAlias/min/ungrouped/zero	a:integer,a:bigint,a:bigint | NULL,0,0
+twoDistinct/top/sharedAlias/min/grouped/rows	a:integer,a:bigint,a:bigint | 10,1,1; 20,2,2; 30,1,1; 40,1,1
+twoDistinct/top/sharedAlias/min/grouped/zero	(0 rows)
+twoDistinct/top/sharedAlias/max/ungrouped/rows	a:integer,a:bigint,a:bigint | 40,4,5
+twoDistinct/top/sharedAlias/max/ungrouped/zero	a:integer,a:bigint,a:bigint | NULL,0,0
+twoDistinct/top/sharedAlias/max/grouped/rows	a:integer,a:bigint,a:bigint | 10,1,1; 30,1,1; 30,2,2; 40,1,1
+twoDistinct/top/sharedAlias/max/grouped/zero	(0 rows)
+twoDistinct/scalarSelect/distinctAliases/countStar/ungrouped/rows	s:bigint | 6
+twoDistinct/scalarSelect/distinctAliases/countStar/ungrouped/zero	s:bigint | 0
+twoDistinct/scalarSelect/distinctAliases/countStar/grouped/rows	s:bigint | 1
+twoDistinct/scalarSelect/distinctAliases/countStar/grouped/zero	s:bigint | NULL
+twoDistinct/scalarSelect/distinctAliases/countX/ungrouped/rows	s:bigint | 6
+twoDistinct/scalarSelect/distinctAliases/countX/ungrouped/zero	s:bigint | 0
+twoDistinct/scalarSelect/distinctAliases/countX/grouped/rows	s:bigint | 1
+twoDistinct/scalarSelect/distinctAliases/countX/grouped/zero	s:bigint | NULL
+twoDistinct/scalarSelect/distinctAliases/sumInt/ungrouped/rows	s:bigint | 140
+twoDistinct/scalarSelect/distinctAliases/sumInt/ungrouped/zero	s:bigint | NULL
+twoDistinct/scalarSelect/distinctAliases/sumInt/grouped/rows	s:bigint | 20
+twoDistinct/scalarSelect/distinctAliases/sumInt/grouped/zero	s:bigint | NULL
+twoDistinct/scalarSelect/distinctAliases/sumBig/ungrouped/rows	s:numeric | 10000000085
+twoDistinct/scalarSelect/distinctAliases/sumBig/ungrouped/zero	s:numeric | NULL
+twoDistinct/scalarSelect/distinctAliases/sumBig/grouped/rows	s:numeric | -5
+twoDistinct/scalarSelect/distinctAliases/sumBig/grouped/zero	s:numeric | NULL
+twoDistinct/scalarSelect/distinctAliases/sumDec/ungrouped/rows	s:numeric | 11.60
+twoDistinct/scalarSelect/distinctAliases/sumDec/ungrouped/zero	s:numeric | NULL
+twoDistinct/scalarSelect/distinctAliases/sumDec/grouped/rows	s:numeric | 0.10
+twoDistinct/scalarSelect/distinctAliases/sumDec/grouped/zero	s:numeric | NULL
+twoDistinct/scalarSelect/distinctAliases/sumFloat/ungrouped/rows	s:double precision | 7.375
+twoDistinct/scalarSelect/distinctAliases/sumFloat/ungrouped/zero	s:double precision | NULL
+twoDistinct/scalarSelect/distinctAliases/sumFloat/grouped/rows	s:double precision | 0.125
+twoDistinct/scalarSelect/distinctAliases/sumFloat/grouped/zero	s:double precision | NULL
+twoDistinct/scalarSelect/distinctAliases/avgInt/ungrouped/rows	s:numeric | 23.3333333333333333
+twoDistinct/scalarSelect/distinctAliases/avgInt/ungrouped/zero	s:numeric | NULL
+twoDistinct/scalarSelect/distinctAliases/avgInt/grouped/rows	s:numeric | 10.0000000000000000
+twoDistinct/scalarSelect/distinctAliases/avgInt/grouped/zero	s:numeric | NULL
+twoDistinct/scalarSelect/distinctAliases/avgDec/ungrouped/rows	s:numeric | 2.3200000000000000
+twoDistinct/scalarSelect/distinctAliases/avgDec/ungrouped/zero	s:numeric | NULL
+twoDistinct/scalarSelect/distinctAliases/avgDec/grouped/rows	s:numeric | 0.10000000000000000000
+twoDistinct/scalarSelect/distinctAliases/avgDec/grouped/zero	s:numeric | NULL
+twoDistinct/scalarSelect/distinctAliases/min/ungrouped/rows	s:integer | 10
+twoDistinct/scalarSelect/distinctAliases/min/ungrouped/zero	s:integer | NULL
+twoDistinct/scalarSelect/distinctAliases/min/grouped/rows	s:integer | 10
+twoDistinct/scalarSelect/distinctAliases/min/grouped/zero	s:integer | NULL
+twoDistinct/scalarSelect/distinctAliases/max/ungrouped/rows	s:integer | 40
+twoDistinct/scalarSelect/distinctAliases/max/ungrouped/zero	s:integer | NULL
+twoDistinct/scalarSelect/distinctAliases/max/grouped/rows	s:integer | 10
+twoDistinct/scalarSelect/distinctAliases/max/grouped/zero	s:integer | NULL
+twoDistinct/scalarSelect/sharedAlias/countStar/ungrouped/rows	s:bigint | 6
+twoDistinct/scalarSelect/sharedAlias/countStar/ungrouped/zero	s:bigint | 0
+twoDistinct/scalarSelect/sharedAlias/countStar/grouped/rows	s:bigint | 1
+twoDistinct/scalarSelect/sharedAlias/countStar/grouped/zero	s:bigint | NULL
+twoDistinct/scalarSelect/sharedAlias/countX/ungrouped/rows	s:bigint | 6
+twoDistinct/scalarSelect/sharedAlias/countX/ungrouped/zero	s:bigint | 0
+twoDistinct/scalarSelect/sharedAlias/countX/grouped/rows	s:bigint | 1
+twoDistinct/scalarSelect/sharedAlias/countX/grouped/zero	s:bigint | NULL
+twoDistinct/scalarSelect/sharedAlias/sumInt/ungrouped/rows	s:bigint | 140
+twoDistinct/scalarSelect/sharedAlias/sumInt/ungrouped/zero	s:bigint | NULL
+twoDistinct/scalarSelect/sharedAlias/sumInt/grouped/rows	s:bigint | 20
+twoDistinct/scalarSelect/sharedAlias/sumInt/grouped/zero	s:bigint | NULL
+twoDistinct/scalarSelect/sharedAlias/sumBig/ungrouped/rows	s:numeric | 10000000085
+twoDistinct/scalarSelect/sharedAlias/sumBig/ungrouped/zero	s:numeric | NULL
+twoDistinct/scalarSelect/sharedAlias/sumBig/grouped/rows	s:numeric | -5
+twoDistinct/scalarSelect/sharedAlias/sumBig/grouped/zero	s:numeric | NULL
+twoDistinct/scalarSelect/sharedAlias/sumDec/ungrouped/rows	s:numeric | 11.60
+twoDistinct/scalarSelect/sharedAlias/sumDec/ungrouped/zero	s:numeric | NULL
+twoDistinct/scalarSelect/sharedAlias/sumDec/grouped/rows	s:numeric | 0.10
+twoDistinct/scalarSelect/sharedAlias/sumDec/grouped/zero	s:numeric | NULL
+twoDistinct/scalarSelect/sharedAlias/sumFloat/ungrouped/rows	s:double precision | 7.375
+twoDistinct/scalarSelect/sharedAlias/sumFloat/ungrouped/zero	s:double precision | NULL
+twoDistinct/scalarSelect/sharedAlias/sumFloat/grouped/rows	s:double precision | 0.125
+twoDistinct/scalarSelect/sharedAlias/sumFloat/grouped/zero	s:double precision | NULL
+twoDistinct/scalarSelect/sharedAlias/avgInt/ungrouped/rows	s:numeric | 23.3333333333333333
+twoDistinct/scalarSelect/sharedAlias/avgInt/ungrouped/zero	s:numeric | NULL
+twoDistinct/scalarSelect/sharedAlias/avgInt/grouped/rows	s:numeric | 10.0000000000000000
+twoDistinct/scalarSelect/sharedAlias/avgInt/grouped/zero	s:numeric | NULL
+twoDistinct/scalarSelect/sharedAlias/avgDec/ungrouped/rows	s:numeric | 2.3200000000000000
+twoDistinct/scalarSelect/sharedAlias/avgDec/ungrouped/zero	s:numeric | NULL
+twoDistinct/scalarSelect/sharedAlias/avgDec/grouped/rows	s:numeric | 0.10000000000000000000
+twoDistinct/scalarSelect/sharedAlias/avgDec/grouped/zero	s:numeric | NULL
+twoDistinct/scalarSelect/sharedAlias/min/ungrouped/rows	s:integer | 10
+twoDistinct/scalarSelect/sharedAlias/min/ungrouped/zero	s:integer | NULL
+twoDistinct/scalarSelect/sharedAlias/min/grouped/rows	s:integer | 10
+twoDistinct/scalarSelect/sharedAlias/min/grouped/zero	s:integer | NULL
+twoDistinct/scalarSelect/sharedAlias/max/ungrouped/rows	s:integer | 40
+twoDistinct/scalarSelect/sharedAlias/max/ungrouped/zero	s:integer | NULL
+twoDistinct/scalarSelect/sharedAlias/max/grouped/rows	s:integer | 10
+twoDistinct/scalarSelect/sharedAlias/max/grouped/zero	s:integer | NULL
+plainAlone/top/distinctAliases/countStar/ungrouped/rows	a:bigint,b:bigint | 6,6
+plainAlone/top/distinctAliases/countStar/ungrouped/zero	a:bigint,b:bigint | 0,0
+plainAlone/top/distinctAliases/countStar/grouped/rows	a:bigint,b:bigint | 1,1; 1,1; 2,2; 2,2
+plainAlone/top/distinctAliases/countStar/grouped/zero	(0 rows)
+plainAlone/top/distinctAliases/countX/ungrouped/rows	a:bigint,b:bigint | 6,6
+plainAlone/top/distinctAliases/countX/ungrouped/zero	a:bigint,b:bigint | 0,0
+plainAlone/top/distinctAliases/countX/grouped/rows	a:bigint,b:bigint | 1,1; 1,1; 2,2; 2,2
+plainAlone/top/distinctAliases/countX/grouped/zero	(0 rows)
+plainAlone/top/distinctAliases/sumInt/ungrouped/rows	a:bigint,b:bigint | 140,6
+plainAlone/top/distinctAliases/sumInt/ungrouped/zero	a:bigint,b:bigint | NULL,0
+plainAlone/top/distinctAliases/sumInt/grouped/rows	a:bigint,b:bigint | 20,2; 30,1; 40,1; 50,2
+plainAlone/top/distinctAliases/sumInt/grouped/zero	(0 rows)
+plainAlone/top/distinctAliases/sumBig/ungrouped/rows	a:numeric,b:bigint | 10000000085,6
+plainAlone/top/distinctAliases/sumBig/ungrouped/zero	a:numeric,b:bigint | NULL,0
+plainAlone/top/distinctAliases/sumBig/grouped/rows	a:numeric,b:bigint | -5,1; 10000000000,2; 40,1; 50,2
+plainAlone/top/distinctAliases/sumBig/grouped/zero	(0 rows)
+plainAlone/top/distinctAliases/sumDec/ungrouped/rows	a:numeric,b:bigint | 11.60,6
+plainAlone/top/distinctAliases/sumDec/ungrouped/zero	a:numeric,b:bigint | NULL,0
+plainAlone/top/distinctAliases/sumDec/grouped/rows	a:numeric,b:bigint | 0.10,1; 3.75,2; 3.75,2; 4.00,1
+plainAlone/top/distinctAliases/sumDec/grouped/zero	(0 rows)
+plainAlone/top/distinctAliases/sumFloat/ungrouped/rows	a:double precision,b:bigint | 7.375,6
+plainAlone/top/distinctAliases/sumFloat/ungrouped/zero	a:double precision,b:bigint | NULL,0
+plainAlone/top/distinctAliases/sumFloat/grouped/rows	a:double precision,b:bigint | 0.125,1; 0.5,2; 3,1; 3.75,2
+plainAlone/top/distinctAliases/sumFloat/grouped/zero	(0 rows)
+plainAlone/top/distinctAliases/avgInt/ungrouped/rows	a:numeric,b:bigint | 23.3333333333333333,6
+plainAlone/top/distinctAliases/avgInt/ungrouped/zero	a:numeric,b:bigint | NULL,0
+plainAlone/top/distinctAliases/avgInt/grouped/rows	a:numeric,b:bigint | 10.0000000000000000,2; 25.0000000000000000,2; 30.0000000000000000,1; 40.0000000000000000,1
+plainAlone/top/distinctAliases/avgInt/grouped/zero	(0 rows)
+plainAlone/top/distinctAliases/avgDec/ungrouped/rows	a:numeric,b:bigint | 2.3200000000000000,6
+plainAlone/top/distinctAliases/avgDec/ungrouped/zero	a:numeric,b:bigint | NULL,0
+plainAlone/top/distinctAliases/avgDec/grouped/rows	a:numeric,b:bigint | 0.10000000000000000000,1; 1.8750000000000000,2; 3.7500000000000000,2; 4.0000000000000000,1
+plainAlone/top/distinctAliases/avgDec/grouped/zero	(0 rows)
+plainAlone/top/distinctAliases/min/ungrouped/rows	a:integer,b:bigint | 10,6
+plainAlone/top/distinctAliases/min/ungrouped/zero	a:integer,b:bigint | NULL,0
+plainAlone/top/distinctAliases/min/grouped/rows	a:integer,b:bigint | 10,2; 20,2; 30,1; 40,1
+plainAlone/top/distinctAliases/min/grouped/zero	(0 rows)
+plainAlone/top/distinctAliases/max/ungrouped/rows	a:integer,b:bigint | 40,6
+plainAlone/top/distinctAliases/max/ungrouped/zero	a:integer,b:bigint | NULL,0
+plainAlone/top/distinctAliases/max/grouped/rows	a:integer,b:bigint | 10,2; 30,1; 30,2; 40,1
+plainAlone/top/distinctAliases/max/grouped/zero	(0 rows)
+plainAlone/top/sharedAlias/countStar/ungrouped/rows	a:bigint,a:bigint | 6,6
+plainAlone/top/sharedAlias/countStar/ungrouped/zero	a:bigint,a:bigint | 0,0
+plainAlone/top/sharedAlias/countStar/grouped/rows	a:bigint,a:bigint | 1,1; 1,1; 2,2; 2,2
+plainAlone/top/sharedAlias/countStar/grouped/zero	(0 rows)
+plainAlone/top/sharedAlias/countX/ungrouped/rows	a:bigint,a:bigint | 6,6
+plainAlone/top/sharedAlias/countX/ungrouped/zero	a:bigint,a:bigint | 0,0
+plainAlone/top/sharedAlias/countX/grouped/rows	a:bigint,a:bigint | 1,1; 1,1; 2,2; 2,2
+plainAlone/top/sharedAlias/countX/grouped/zero	(0 rows)
+plainAlone/top/sharedAlias/sumInt/ungrouped/rows	a:bigint,a:bigint | 140,6
+plainAlone/top/sharedAlias/sumInt/ungrouped/zero	a:bigint,a:bigint | NULL,0
+plainAlone/top/sharedAlias/sumInt/grouped/rows	a:bigint,a:bigint | 20,2; 30,1; 40,1; 50,2
+plainAlone/top/sharedAlias/sumInt/grouped/zero	(0 rows)
+plainAlone/top/sharedAlias/sumBig/ungrouped/rows	a:numeric,a:bigint | 10000000085,6
+plainAlone/top/sharedAlias/sumBig/ungrouped/zero	a:numeric,a:bigint | NULL,0
+plainAlone/top/sharedAlias/sumBig/grouped/rows	a:numeric,a:bigint | -5,1; 10000000000,2; 40,1; 50,2
+plainAlone/top/sharedAlias/sumBig/grouped/zero	(0 rows)
+plainAlone/top/sharedAlias/sumDec/ungrouped/rows	a:numeric,a:bigint | 11.60,6
+plainAlone/top/sharedAlias/sumDec/ungrouped/zero	a:numeric,a:bigint | NULL,0
+plainAlone/top/sharedAlias/sumDec/grouped/rows	a:numeric,a:bigint | 0.10,1; 3.75,2; 3.75,2; 4.00,1
+plainAlone/top/sharedAlias/sumDec/grouped/zero	(0 rows)
+plainAlone/top/sharedAlias/sumFloat/ungrouped/rows	a:double precision,a:bigint | 7.375,6
+plainAlone/top/sharedAlias/sumFloat/ungrouped/zero	a:double precision,a:bigint | NULL,0
+plainAlone/top/sharedAlias/sumFloat/grouped/rows	a:double precision,a:bigint | 0.125,1; 0.5,2; 3,1; 3.75,2
+plainAlone/top/sharedAlias/sumFloat/grouped/zero	(0 rows)
+plainAlone/top/sharedAlias/avgInt/ungrouped/rows	a:numeric,a:bigint | 23.3333333333333333,6
+plainAlone/top/sharedAlias/avgInt/ungrouped/zero	a:numeric,a:bigint | NULL,0
+plainAlone/top/sharedAlias/avgInt/grouped/rows	a:numeric,a:bigint | 10.0000000000000000,2; 25.0000000000000000,2; 30.0000000000000000,1; 40.0000000000000000,1
+plainAlone/top/sharedAlias/avgInt/grouped/zero	(0 rows)
+plainAlone/top/sharedAlias/avgDec/ungrouped/rows	a:numeric,a:bigint | 2.3200000000000000,6
+plainAlone/top/sharedAlias/avgDec/ungrouped/zero	a:numeric,a:bigint | NULL,0
+plainAlone/top/sharedAlias/avgDec/grouped/rows	a:numeric,a:bigint | 0.10000000000000000000,1; 1.8750000000000000,2; 3.7500000000000000,2; 4.0000000000000000,1
+plainAlone/top/sharedAlias/avgDec/grouped/zero	(0 rows)
+plainAlone/top/sharedAlias/min/ungrouped/rows	a:integer,a:bigint | 10,6
+plainAlone/top/sharedAlias/min/ungrouped/zero	a:integer,a:bigint | NULL,0
+plainAlone/top/sharedAlias/min/grouped/rows	a:integer,a:bigint | 10,2; 20,2; 30,1; 40,1
+plainAlone/top/sharedAlias/min/grouped/zero	(0 rows)
+plainAlone/top/sharedAlias/max/ungrouped/rows	a:integer,a:bigint | 40,6
+plainAlone/top/sharedAlias/max/ungrouped/zero	a:integer,a:bigint | NULL,0
+plainAlone/top/sharedAlias/max/grouped/rows	a:integer,a:bigint | 10,2; 30,1; 30,2; 40,1
+plainAlone/top/sharedAlias/max/grouped/zero	(0 rows)
+plainAlone/scalarSelect/distinctAliases/countStar/ungrouped/rows	s:bigint | 6
+plainAlone/scalarSelect/distinctAliases/countStar/ungrouped/zero	s:bigint | 0
+plainAlone/scalarSelect/distinctAliases/countStar/grouped/rows	s:bigint | 1
+plainAlone/scalarSelect/distinctAliases/countStar/grouped/zero	s:bigint | NULL
+plainAlone/scalarSelect/distinctAliases/countX/ungrouped/rows	s:bigint | 6
+plainAlone/scalarSelect/distinctAliases/countX/ungrouped/zero	s:bigint | 0
+plainAlone/scalarSelect/distinctAliases/countX/grouped/rows	s:bigint | 1
+plainAlone/scalarSelect/distinctAliases/countX/grouped/zero	s:bigint | NULL
+plainAlone/scalarSelect/distinctAliases/sumInt/ungrouped/rows	s:bigint | 140
+plainAlone/scalarSelect/distinctAliases/sumInt/ungrouped/zero	s:bigint | NULL
+plainAlone/scalarSelect/distinctAliases/sumInt/grouped/rows	s:bigint | 20
+plainAlone/scalarSelect/distinctAliases/sumInt/grouped/zero	s:bigint | NULL
+plainAlone/scalarSelect/distinctAliases/sumBig/ungrouped/rows	s:numeric | 10000000085
+plainAlone/scalarSelect/distinctAliases/sumBig/ungrouped/zero	s:numeric | NULL
+plainAlone/scalarSelect/distinctAliases/sumBig/grouped/rows	s:numeric | -5
+plainAlone/scalarSelect/distinctAliases/sumBig/grouped/zero	s:numeric | NULL
+plainAlone/scalarSelect/distinctAliases/sumDec/ungrouped/rows	s:numeric | 11.60
+plainAlone/scalarSelect/distinctAliases/sumDec/ungrouped/zero	s:numeric | NULL
+plainAlone/scalarSelect/distinctAliases/sumDec/grouped/rows	s:numeric | 0.10
+plainAlone/scalarSelect/distinctAliases/sumDec/grouped/zero	s:numeric | NULL
+plainAlone/scalarSelect/distinctAliases/sumFloat/ungrouped/rows	s:double precision | 7.375
+plainAlone/scalarSelect/distinctAliases/sumFloat/ungrouped/zero	s:double precision | NULL
+plainAlone/scalarSelect/distinctAliases/sumFloat/grouped/rows	s:double precision | 0.125
+plainAlone/scalarSelect/distinctAliases/sumFloat/grouped/zero	s:double precision | NULL
+plainAlone/scalarSelect/distinctAliases/avgInt/ungrouped/rows	s:numeric | 23.3333333333333333
+plainAlone/scalarSelect/distinctAliases/avgInt/ungrouped/zero	s:numeric | NULL
+plainAlone/scalarSelect/distinctAliases/avgInt/grouped/rows	s:numeric | 10.0000000000000000
+plainAlone/scalarSelect/distinctAliases/avgInt/grouped/zero	s:numeric | NULL
+plainAlone/scalarSelect/distinctAliases/avgDec/ungrouped/rows	s:numeric | 2.3200000000000000
+plainAlone/scalarSelect/distinctAliases/avgDec/ungrouped/zero	s:numeric | NULL
+plainAlone/scalarSelect/distinctAliases/avgDec/grouped/rows	s:numeric | 0.10000000000000000000
+plainAlone/scalarSelect/distinctAliases/avgDec/grouped/zero	s:numeric | NULL
+plainAlone/scalarSelect/distinctAliases/min/ungrouped/rows	s:integer | 10
+plainAlone/scalarSelect/distinctAliases/min/ungrouped/zero	s:integer | NULL
+plainAlone/scalarSelect/distinctAliases/min/grouped/rows	s:integer | 10
+plainAlone/scalarSelect/distinctAliases/min/grouped/zero	s:integer | NULL
+plainAlone/scalarSelect/distinctAliases/max/ungrouped/rows	s:integer | 40
+plainAlone/scalarSelect/distinctAliases/max/ungrouped/zero	s:integer | NULL
+plainAlone/scalarSelect/distinctAliases/max/grouped/rows	s:integer | 10
+plainAlone/scalarSelect/distinctAliases/max/grouped/zero	s:integer | NULL
+plainAlone/scalarSelect/sharedAlias/countStar/ungrouped/rows	s:bigint | 6
+plainAlone/scalarSelect/sharedAlias/countStar/ungrouped/zero	s:bigint | 0
+plainAlone/scalarSelect/sharedAlias/countStar/grouped/rows	s:bigint | 1
+plainAlone/scalarSelect/sharedAlias/countStar/grouped/zero	s:bigint | NULL
+plainAlone/scalarSelect/sharedAlias/countX/ungrouped/rows	s:bigint | 6
+plainAlone/scalarSelect/sharedAlias/countX/ungrouped/zero	s:bigint | 0
+plainAlone/scalarSelect/sharedAlias/countX/grouped/rows	s:bigint | 1
+plainAlone/scalarSelect/sharedAlias/countX/grouped/zero	s:bigint | NULL
+plainAlone/scalarSelect/sharedAlias/sumInt/ungrouped/rows	s:bigint | 140
+plainAlone/scalarSelect/sharedAlias/sumInt/ungrouped/zero	s:bigint | NULL
+plainAlone/scalarSelect/sharedAlias/sumInt/grouped/rows	s:bigint | 20
+plainAlone/scalarSelect/sharedAlias/sumInt/grouped/zero	s:bigint | NULL
+plainAlone/scalarSelect/sharedAlias/sumBig/ungrouped/rows	s:numeric | 10000000085
+plainAlone/scalarSelect/sharedAlias/sumBig/ungrouped/zero	s:numeric | NULL
+plainAlone/scalarSelect/sharedAlias/sumBig/grouped/rows	s:numeric | -5
+plainAlone/scalarSelect/sharedAlias/sumBig/grouped/zero	s:numeric | NULL
+plainAlone/scalarSelect/sharedAlias/sumDec/ungrouped/rows	s:numeric | 11.60
+plainAlone/scalarSelect/sharedAlias/sumDec/ungrouped/zero	s:numeric | NULL
+plainAlone/scalarSelect/sharedAlias/sumDec/grouped/rows	s:numeric | 0.10
+plainAlone/scalarSelect/sharedAlias/sumDec/grouped/zero	s:numeric | NULL
+plainAlone/scalarSelect/sharedAlias/sumFloat/ungrouped/rows	s:double precision | 7.375
+plainAlone/scalarSelect/sharedAlias/sumFloat/ungrouped/zero	s:double precision | NULL
+plainAlone/scalarSelect/sharedAlias/sumFloat/grouped/rows	s:double precision | 0.125
+plainAlone/scalarSelect/sharedAlias/sumFloat/grouped/zero	s:double precision | NULL
+plainAlone/scalarSelect/sharedAlias/avgInt/ungrouped/rows	s:numeric | 23.3333333333333333
+plainAlone/scalarSelect/sharedAlias/avgInt/ungrouped/zero	s:numeric | NULL
+plainAlone/scalarSelect/sharedAlias/avgInt/grouped/rows	s:numeric | 10.0000000000000000
+plainAlone/scalarSelect/sharedAlias/avgInt/grouped/zero	s:numeric | NULL
+plainAlone/scalarSelect/sharedAlias/avgDec/ungrouped/rows	s:numeric | 2.3200000000000000
+plainAlone/scalarSelect/sharedAlias/avgDec/ungrouped/zero	s:numeric | NULL
+plainAlone/scalarSelect/sharedAlias/avgDec/grouped/rows	s:numeric | 0.10000000000000000000
+plainAlone/scalarSelect/sharedAlias/avgDec/grouped/zero	s:numeric | NULL
+plainAlone/scalarSelect/sharedAlias/min/ungrouped/rows	s:integer | 10
+plainAlone/scalarSelect/sharedAlias/min/ungrouped/zero	s:integer | NULL
+plainAlone/scalarSelect/sharedAlias/min/grouped/rows	s:integer | 10
+plainAlone/scalarSelect/sharedAlias/min/grouped/zero	s:integer | NULL
+plainAlone/scalarSelect/sharedAlias/max/ungrouped/rows	s:integer | 40
+plainAlone/scalarSelect/sharedAlias/max/ungrouped/zero	s:integer | NULL
+plainAlone/scalarSelect/sharedAlias/max/grouped/rows	s:integer | 10
+plainAlone/scalarSelect/sharedAlias/max/grouped/zero	s:integer | NULL
+loneDistinct/top/rows	a:bigint | 4
+loneDistinct/scalarSelect/rows	s:bigint | 4
+loneDistinct/top/zero	a:bigint | 0
+loneDistinct/scalarSelect/zero	s:bigint | 0
+extra/countBesidePair/rows	c:bigint,a:integer,a:bigint | 6,10,4
+extra/avgBesidePair/rows	v:numeric,a:bigint,a:bigint | 23.3333333333333333,140,4
+extra/avgSharedWithDistinct/rows	a:numeric,c:bigint,a:bigint | 23.3333333333333333,6,4
+extra/twoCountsShared/rows	a:bigint,a:bigint,b:bigint | 6,6,4
+extra/distinctFirst/rows	a:bigint,a:bigint | 4,6
+extra/sharedHaving/rows	a:bigint,a:bigint | 6,4
+extra/cteTwice/rows	a:bigint,b:bigint | 6,4
+extra/cteTwiceShared/rows	c1:bigint,c2:bigint | 6,4
+extra/countBesidePair/zero	c:bigint,a:integer,a:bigint | 0,NULL,0
+extra/avgBesidePair/zero	v:numeric,a:bigint,a:bigint | NULL,NULL,0
+extra/avgSharedWithDistinct/zero	a:numeric,c:bigint,a:bigint | NULL,0,0
+extra/twoCountsShared/zero	a:bigint,a:bigint,b:bigint | 0,0,0
+extra/distinctFirst/zero	a:bigint,a:bigint | 0,0
+extra/sharedHaving/zero	a:bigint,a:bigint | 0,0
+extra/cteTwice/zero	a:bigint,b:bigint | 0,0
+extra/cteTwiceShared/zero	c1:bigint,c2:bigint | 0,0
+arith/sumDiv3/rows	a:bigint,b:bigint | 46,4
+arith/countDiv4/rows	a:bigint,b:bigint | 1,4
+arith/countTimes4e18/rows	a:numeric,b:bigint | 24000000000000000000,4
+arith/countTimesBigint/rows	ERR 22003
+arith/sumDivDistinct/rows	a:bigint | 35
+arith/scalarSumDiv3/rows	s:bigint | 46
+arith/sumDiv3/zero	a:bigint,b:bigint | NULL,0
+arith/countDiv4/zero	a:bigint,b:bigint | 0,0
+arith/countTimes4e18/zero	a:numeric,b:bigint | 0,0
+arith/countTimesBigint/zero	a:bigint,b:bigint | 0,0
+arith/sumDivDistinct/zero	a:bigint | NULL
+arith/scalarSumDiv3/zero	s:bigint | NULL
