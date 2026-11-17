@@ -3386,7 +3386,9 @@ func columnValueLiteral(n Node) bool {
 // a function call. FILTER is rewritten to CASE WHEN at the AST level:
 //
 //	COUNT(*) FILTER (WHERE cond) → COUNT(CASE WHEN cond THEN 1 END)
-//	AGG(expr, rest...) FILTER (WHERE cond) → AGG(CASE WHEN cond THEN expr END, rest...)
+//	AGG(.., a_i, ..) FILTER (WHERE cond) → AGG(.., CASE WHEN cond THEN a_i END, ..)
+//
+// where a_i is the argument aggFilterArg declares for AGG (parseAggFilter).
 func (p *selectParser) maybeParseOver(fn *FuncCallNode) (Node, error) {
 	// Check for FILTER (WHERE ...) — standard SQL aggregate filtering
 	if p.peek() == TokenIdent && !p.cur.quoted && strings.EqualFold(p.cur.val, "FILTER") {
@@ -3425,22 +3427,48 @@ func (p *selectParser) parseAggFilter(fn *FuncCallNode) (*FuncCallNode, error) {
 		return nil, fmt.Errorf("expected ) after FILTER(WHERE ...)")
 	}
 
-	// ONE rule: a row the predicate rejects contributes NULL as the
-	// aggregate's value argument, and every aggregate this parser accepts
-	// FILTER on skips a NULL value argument. The aggregate itself is never
-	// swapped for another, so each keeps its own answer over no rows
-	// (COUNT 0; SUM, AVG, MIN, MAX NULL) and its own declared type.
+	// ONE rule: a row the predicate rejects contributes NULL in the argument
+	// aggFilterArg declares for the aggregate, and the aggregate skips a row
+	// whose declared argument is NULL. The aggregate itself is never swapped
+	// for another, so each keeps its own answer over no rows (COUNT 0; SUM,
+	// AVG, MIN, MAX NULL) and its own declared type.
 	//
-	//	AGG(a, rest...) FILTER (WHERE p) → AGG(CASE WHEN p THEN a END, rest...)
-	//	COUNT(*)        FILTER (WHERE p) → COUNT(CASE WHEN p THEN 1 END)
+	//	AGG(.., a_i, ..) FILTER (WHERE p) → AGG(.., CASE WHEN p THEN a_i END, ..)
+	//	COUNT(*)         FILTER (WHERE p) → COUNT(CASE WHEN p THEN 1 END)
 	//
 	// COUNT(*) has no argument to null, so it counts a literal 1 that only
 	// matching rows carry. It used to become SUM(CASE WHEN p THEN 1 ELSE 0
 	// END), which answers NULL over zero rows where COUNT answers 0 and
-	// declares SUM's type (#1690). The arguments after the first (the
-	// separator of STRING_AGG, the second column of CORR) are not per-row
-	// values to null and pass through unchanged.
-	if fn.Star && strings.EqualFold(fn.Name, "count") {
+	// declares SUM's type (#1690). Every other argument (STRING_AGG's
+	// separator, PERCENTILE_CONT's fraction, CORR's second column) passes
+	// through unchanged. A call without the property is refused, never
+	// rewritten on a guess: nulling the first argument of a function that does
+	// not skip a NULL there answers a value, not an exclusion (`lag(x) FILTER`,
+	// `coalesce(x, 0) FILTER`, `percentile_cont(0.5, x) FILTER`).
+	name := strings.ToLower(fn.Name)
+	idx, ok := aggFilterArg[name]
+	if !ok {
+		if IsAggregate(name) || aggFilterRefused[name] {
+			return nil, sqlerr.New("0A000", "FILTER is not supported for the aggregate %s", name)
+		}
+		// Not an aggregate: PostgreSQL's own refusals. Before OVER it is a
+		// window function (LAG, ROW_NUMBER, ...). Otherwise an unknown or
+		// unimplemented name answers the compiler's own 42883 first, as
+		// PostgreSQL resolves the function before it looks at FILTER.
+		if p.isKeyword(TokenKWOver) {
+			return nil, sqlerr.New("0A000", "FILTER is not implemented for non-aggregate window functions")
+		}
+		if ResolveFunction != nil {
+			if err := ResolveFunction(name); err != nil {
+				return nil, err
+			}
+		}
+		return nil, sqlerr.New("42809", "FILTER specified, but %s is not an aggregate function", name)
+	}
+	if fn.Star {
+		if name != "count" {
+			return nil, sqlerr.New("0A000", "FILTER is not supported for the aggregate %s(*)", name)
+		}
 		return &FuncCallNode{
 			Name: fn.Name,
 			Args: []Node{
@@ -3450,22 +3478,23 @@ func (p *selectParser) parseAggFilter(fn *FuncCallNode) (*FuncCallNode, error) {
 			},
 		}, nil
 	}
-
-	if len(fn.Args) >= 1 {
-		args := make([]Node, len(fn.Args))
-		copy(args, fn.Args)
-		args[0] = &CaseNode{
-			Whens: []WhenClause{{Cond: cond, Result: fn.Args[0]}},
-			Else:  nil, // NULL → excluded by aggregates
-		}
-		return &FuncCallNode{
-			Name:     fn.Name,
-			Distinct: fn.Distinct,
-			Args:     args,
-		}, nil
+	if len(fn.Args) == 0 {
+		return nil, sqlerr.New("0A000", "FILTER clause on %s() with no arguments", fn.Name)
 	}
-
-	return nil, sqlerr.New("0A000", "FILTER clause on %s() with no arguments", fn.Name)
+	if idx >= len(fn.Args) {
+		// Too few arguments to carry the declared one: the call is left as
+		// written and the planner's arity check refuses it, with or without
+		// FILTER (aggArity names every aggregate whose idx is past 0).
+		return fn, nil
+	}
+	out := *fn
+	out.Args = make([]Node, len(fn.Args))
+	copy(out.Args, fn.Args)
+	out.Args[idx] = &CaseNode{
+		Whens: []WhenClause{{Cond: cond, Result: fn.Args[idx]}},
+		Else:  nil, // NULL → the aggregate skips the row
+	}
+	return &out, nil
 }
 
 // parseWindowFunc parses OVER (...) after a function call.

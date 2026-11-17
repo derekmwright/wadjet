@@ -127,6 +127,10 @@ func checkKnown(name string) error {
 // unimplemented-aggregate wording included.
 func ResolveFuncName(name string) error { return checkKnown(strings.ToLower(name)) }
 
+// The parser refuses FILTER on a name that is not an aggregate, and asks this
+// first so an unknown name keeps its 42883 (plansql.ResolveFunction, #1690).
+func init() { plansql.ResolveFunction = ResolveFuncName }
+
 // UnknownFuncError names a function the registry cannot resolve.
 //
 // It is a distinct type because the physical planner's compile sites are

@@ -773,6 +773,60 @@ var knownAggregates = map[string]bool{
 	"ohlcv": true,
 }
 
+// aggFilterArg declares, for every aggregate a FILTER clause may be written
+// on, the argument the clause nulls for a row the predicate rejects. It is the
+// one property parseAggFilter reads: `AGG(..., a_i, ...) FILTER (WHERE p)` is
+// `AGG(..., CASE WHEN p THEN a_i END, ...)`, which is the same aggregate over
+// the rows p keeps ONLY when the aggregate skips the whole row whenever a_i is
+// NULL. Each entry below was measured against the same aggregate over a
+// pre-filtered subquery, kept rows whose argument is itself NULL included
+// (#1690):
+//
+//   - the one-argument aggregates skip a NULL argument (COUNT(DISTINCT) and
+//     APPROX_DISTINCT count only non-NULL values; STRING_AGG skips a NULL
+//     value and its separator; MODE, MEDIAN and the QUANTILE spelling collect
+//     non-NULL values only);
+//   - CORR, COVAR_SAMP, COVAR_POP and MIN_BY, MAX_BY skip a row whose first OR
+//     second argument is NULL (exec's updateGroup), so the first does;
+//   - PERCENTILE_CONT and PERCENTILE_DISC put the FRACTION first, a literal the
+//     planner reads as a property of the aggregate: the per-row value is the
+//     second argument;
+//   - OHLCV(ts, price, volume) skips a row any of whose three is NULL; the
+//     price is the argument the planner materializes as a computed input
+//     (a computed ts or volume is not a column of the aggregate's input, and
+//     answered no rows, grouped, before this table).
+//
+// The argument chosen is always the one the logical plan carries as the
+// aggregate's computed input (InputExpr): a CASE in any other position is not
+// materialized below the aggregate.
+//
+// An aggregate absent from this map refuses FILTER with 0A000 naming it
+// (GROUPING is not an aggregate over rows at all). TestAggFilterArgCoversRegistry
+// holds every knownAggregates entry to one side or the other.
+var aggFilterArg = map[string]int{
+	"count": 0, "sum": 0, "avg": 0, "min": 0, "max": 0,
+	"string_agg": 0, "bool_and": 0, "bool_or": 0, "every": 0,
+	"stddev": 0, "stddev_samp": 0, "stddev_pop": 0,
+	"variance": 0, "var_samp": 0, "var_pop": 0,
+	"approx_distinct": 0, "mode": 0, "median": 0,
+	"quantile_cont": 0, "quantile_disc": 0,
+	"corr": 0, "covar_samp": 0, "covar_pop": 0,
+	"min_by": 0, "max_by": 0,
+	"percentile_cont": 1, "percentile_disc": 1,
+	"ohlcv": 1,
+}
+
+// aggFilterRefused are the registered aggregates FILTER is refused on.
+var aggFilterRefused = map[string]bool{"grouping": true}
+
+// ResolveFunction, when set, answers whether a function name resolves to
+// something this engine implements, with the error the expression compiler
+// raises when it does not (42883). internal/engine/expr installs it. The FILTER
+// refusal of a name that is not an aggregate asks it first, because
+// PostgreSQL resolves the function before it checks FILTER: an unknown or
+// unimplemented name answers the same 42883 with FILTER as without it.
+var ResolveFunction func(name string) error
+
 // IsAggregate returns true if the function name is a known aggregate.
 func IsAggregate(name string) bool {
 	return knownAggregates[strings.ToLower(name)]
