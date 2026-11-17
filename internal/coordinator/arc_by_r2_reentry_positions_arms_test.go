@@ -109,7 +109,7 @@ INSERT INTO by_v VALUES (1, '\x6869'), (2, '\x610062'), (3, '\x27'), (4, '\x5c')
 // that starts agreeing FAILS: delete its line.
 func byR2Kept(name, arm string) (want, msg, reason string, ok bool) {
 	parts := strings.Split(name, "/")
-	src, pos, val := parts[0], parts[1], parts[2]
+	src, pos := parts[0], parts[1]
 	dag := strings.HasPrefix(arm, "dag")
 	switch {
 	case src == "correlated" && pos == "agg":
@@ -120,13 +120,6 @@ func byR2Kept(name, arm string) (want, msg, reason string, ok bool) {
 		return "ERR 0A000", "", "a window call in a correlated re-run (lateral-subqueries)", true
 	case pos == "table-fn":
 		return "ERR 0A000", "", "a table function takes constant arguments", true
-	case pos == "like" && val == "5c":
-		if src == "correlated" {
-			return "rows=1 4,1", "", "a bytea LIKE pattern ending in its escape answers (PostgreSQL 22025; BY-C10)", true
-		}
-		if !dag {
-			return "rows=1 1", "", "a bytea LIKE pattern ending in its escape answers (PostgreSQL 22025; BY-C10)", true
-		}
 	case src == "scalar" && pos == "substring":
 		return "ERR 42883", "", "substring over a scalar subquery's BYTES declares text (BY-C11)", true
 	}

@@ -83,10 +83,6 @@ func byR2WireKept(name string) (string, bool) {
 		// LIMIT reads a constant: a bytea there is 42601 here, 42804 on
 		// PostgreSQL (BY-C12).
 		return "ERR 42601", true
-	case strings.HasPrefix(name, "like/") && strings.HasSuffix(name, "/5c"):
-		// A bytea LIKE pattern ending in its escape answers here; PostgreSQL
-		// raises 22025 (BY-C10).
-		return "rows=1 1", true
 	}
 	return "", false
 }
