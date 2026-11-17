@@ -999,8 +999,10 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) error {
 		}
 	}
 
-	// Resolve batch-level kernels for scalar aggregate fast path
-	if len(h.GroupByCols) == 0 {
+	// Resolve batch-level kernels for scalar aggregate fast path. Grouping
+	// sets are not scalar even when no key is named: `GROUPING SETS ((), ())`
+	// is two groups, and the scalar path would collapse them to one (#1335).
+	if len(h.GroupByCols) == 0 && len(h.GroupingSets) == 0 {
 		h.batchAggKernels = make([]kernel.BatchAggKernel, len(h.Aggs))
 		allBatchable := true
 		for i, agg := range h.Aggs {

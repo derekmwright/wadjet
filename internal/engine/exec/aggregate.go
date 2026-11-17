@@ -218,7 +218,14 @@ type HashAggregate struct {
 	// a key that is NULL because its set excluded it is indistinguishable, in
 	// the output, from a key that is NULL in the data. That is the whole
 	// reason SQL has the function.
-	GroupingCalls     [][]int
+	GroupingCalls [][]int
+	// GroupKeyDecls declares each GROUP BY key's output column, by position in
+	// GroupByCols, for the case no batch resolves one from: a grouping-sets
+	// aggregate over zero input rows still answers the empty set's row, and
+	// that row's key columns need the type PostgreSQL declares for them. An
+	// entry with an empty Name declares nothing. Set by the planner only for
+	// grouping sets that contain an empty set (#1335).
+	GroupKeyDecls     []parquet.Column
 	GroupingCallNames []string
 	InputRowHint      int64 // estimated input rows for pre-sizing hash table
 	// GroupNDVHint is the planner's HLL-based estimate of GROUP-KEY

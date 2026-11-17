@@ -562,6 +562,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 			}
 		}
 		if len(node.GroupingSets) > 0 {
+			hashAgg.GroupKeyDecls = groupingSetKeyDecls(node, groupByCols, aggChildColTypes)
 			sets := make([][]int, len(node.GroupingSets))
 			for i, set := range node.GroupingSets {
 				indices := make([]int, 0, len(set))
@@ -642,4 +643,37 @@ func replaceAggWithColRef(node plansql.Node, target *plansql.FuncCallNode, colNa
 	default:
 		return node
 	}
+}
+
+// groupingSetKeyDecls declares each key's output column for a grouping-sets
+// aggregate that has an EMPTY set, whose one row over zero input rows has no
+// batch to take its key types from (#1335). Nil when no set is empty, so every
+// other aggregate keeps the schema it resolves at run time. A key the plan
+// cannot declare is left unnamed and falls back to what exec would have done.
+// Grouping sets never elide a literal key, so groupByCols lines up with
+// node.GroupBy position for position.
+func groupingSetKeyDecls(node *logical.Node, groupByCols []string, in ColDecls) []parquet.Column {
+	hasEmpty := false
+	for _, set := range node.GroupingSets {
+		hasEmpty = hasEmpty || len(set) == 0
+	}
+	if !hasEmpty || len(groupByCols) != len(node.GroupBy) {
+		return nil
+	}
+	w := newDeclWalk()
+	decls := make([]parquet.Column, len(groupByCols))
+	for i := range groupByCols {
+		if c, ok := w.aggKeyColumn(node, i, in); ok {
+			c.Name = groupByCols[i]
+			decls[i] = c
+			continue
+		}
+		if i < len(node.GroupByExprs) && node.GroupByExprs[i] != nil {
+			d := derivedGroupKeyDecl(node.GroupBy[i], node.GroupByExprs[i], node.Children[0])
+			parts := declTypeParts(d)
+			decls[i] = parquet.Column{Name: groupByCols[i], Type: d.ID, Precision: d.Precision, Scale: d.Scale,
+				Fields: parts.Fields, ElementType: parts.ElementType}
+		}
+	}
+	return decls
 }
