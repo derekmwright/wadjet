@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -345,7 +346,48 @@ func gkMoreCells(t *testing.T) []ssCell {
 // single-process arms), `dag` (the three stage-DAG arms), one DAG arm by name,
 // `all`, or `skip` (an answer the statement leaves to the engine, ADR-0013) —
 // this engine's answer, and why.
-type gkKeep struct{ arms, want, why string }
+type gkKeep struct {
+	arms, want, why string
+	// unordered marks a kept pin whose statement has an ORDER BY the arm
+	// does not apply: the rows come back in whatever order scheduling
+	// produces, so the pin compares them as a multiset (#1689). It is set
+	// only from gkKeptUnsorted.
+	unordered bool
+}
+
+// gkKeptUnsorted names the kept cells whose DAG-arm answer is NOT sorted by
+// the statement's ORDER BY, by any key: the pinned order is one run's
+// scheduling and no two DAG arms agree on it. Each entry is the cell name and
+// the evidence. A kept cell whose arm does sort (by the wrong key, or with
+// wrong values) keeps its exact comparison and is not listed here (#1689).
+var gkKeptUnsorted = map[string]string{
+	"alias/aggNumOrd": "ORDER BY t.n * 2 DESC: the stage DAG neither applies it nor sorts by another key; dag and dag-morsel4 pin different orders of the same six rows",
+}
+
+// gkMultisetMatches is ssMatches with the row order set aside: the same
+// header, the same rows with the same multiplicities, in any order. An
+// answer that is not a row list (an error) compares exactly.
+func gkMultisetMatches(got, want string) bool {
+	if strings.HasPrefix(want, "ERR ") || strings.HasPrefix(got, "ERR ") {
+		return ssMatches(got, want)
+	}
+	split := func(a string) (string, []string, bool) {
+		head, rows, ok := strings.Cut(strings.TrimSpace(a), " rows=")
+		if !ok {
+			return "", nil, false
+		}
+		_, list, _ := strings.Cut(rows, " ")
+		parts := strings.Split(list, " | ")
+		sort.Strings(parts)
+		return head, parts, true
+	}
+	gh, gr, gok := split(got)
+	wh, wr, wok := split(want)
+	if !gok || !wok {
+		return ssMatches(got, want)
+	}
+	return gh == wh && slices.Equal(gr, wr)
+}
 
 // gkSQLState separates the refusal class from its diagnostic text. An empty
 // engine SQLSTATE is recorded explicitly; an answered query is 00000.
@@ -414,7 +456,11 @@ func gkKeptLines(t *testing.T) map[string][]gkKeep {
 		default:
 			t.Fatalf("kept line for %s: arms %q", p[0], p[1])
 		}
-		out[p[0]] = append(out[p[0]], gkKeep{arms: p[1], want: p[2], why: p[3]})
+		k := gkKeep{arms: p[1], want: p[2], why: p[3]}
+		if _, ok := gkKeptUnsorted[p[0]]; ok && k.arms != "skip" && k.arms != "single" {
+			k.unordered = true
+		}
+		out[p[0]] = append(out[p[0]], k)
 	}
 	if err := sc.Err(); err != nil {
 		t.Fatal(err)
@@ -506,14 +552,14 @@ func TestArcGKGroupKeySpellingEveryArm(t *testing.T) {
 			}
 			for i, arm := range arms {
 				want, why := pgWant, "PostgreSQL 17.11"
-				skip := false
+				skip, unordered := false, false
 				baseState, measured := baseStates[tc.name][arm.name]
 				if !measured {
 					t.Fatalf("%s/%s has no measured base SQLSTATE", tc.name, arm.name)
 				}
 				for _, k := range ks {
 					if k.holdsOn(arm.name) {
-						want, why, skip = k.want, "kept: "+k.why, k.arms == "skip"
+						want, why, skip, unordered = k.want, "kept: "+k.why, k.arms == "skip", k.unordered
 						if strings.Contains(k.why, "base-identical") && gkSQLState(got[i]) != baseState {
 							t.Errorf("%s/%s: base-identical label has SQLSTATE %s, base %s", tc.name, arm.name, gkSQLState(got[i]), baseState)
 						}
@@ -528,7 +574,11 @@ func TestArcGKGroupKeySpellingEveryArm(t *testing.T) {
 				if skip {
 					continue
 				}
-				if !ssMatches(got[i], want) {
+				match := ssMatches
+				if unordered {
+					match = gkMultisetMatches
+				}
+				if !match(got[i], want) {
 					t.Errorf("%s\n  arm  %s\n  got  %s\n  want %s (%s)", tc.sql, arm.name, got[i], want, why)
 				}
 			}
