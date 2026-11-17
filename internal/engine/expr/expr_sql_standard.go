@@ -5,6 +5,7 @@ package expr
 import (
 	"strings"
 
+	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
@@ -82,91 +83,34 @@ func fnOverlay(args []any) any {
 // silently answer the UNESCAPED pattern — the same reason BETWEEN SYMMETRIC
 // and ILIKE are expanded at parse time rather than flagged.
 //
-// PostgreSQL's rules, measured: an escape string of more than one character
-// is 22025 (`invalid escape string`), the same class as a pattern that ends
-// with the escape; the EMPTY string disables escaping entirely; a NULL escape
-// (or a NULL operand, or a NULL pattern) makes the whole predicate NULL.
+// It is PostgreSQL's `x ~~ like_escape(pattern, escape)`: kernel.LikeEscape
+// rewrites the pattern into the backslash form and kernel.LikeMatch, the one
+// text matcher (#1209), reads it. PostgreSQL's rules, measured: an escape
+// string of more than one character is 22025 (`invalid escape string`), and is
+// raised whatever x is, because like_escape runs before ~~ sees x; the EMPTY
+// string disables escaping entirely; a NULL escape or a NULL pattern makes the
+// whole predicate NULL, and so does a NULL x; a pattern that ends in its escape
+// is 22025 only where the matcher reaches it (`'abc' LIKE 'abc!' ESCAPE '!'`
+// is false, #1204).
 func fnLikeEscape(args []any) any {
 	if len(args) < 3 {
 		return nil
 	}
-	if args[0] == nil || args[1] == nil || args[2] == nil {
+	if args[1] == nil || args[2] == nil {
 		return nil
 	}
-	esc := toString(args[2])
-	if len([]rune(esc)) > 1 {
-		panic(fatalEval{sqlerr.New("22025", "invalid escape string")})
+	pat, err := kernel.LikeEscape(toString(args[1]), toString(args[2]))
+	if err != nil {
+		panic(fatalEval{err})
 	}
-	var e byte
-	if esc != "" {
-		e = esc[0]
+	if args[0] == nil {
+		return nil
 	}
-	return matchLikeEscape(toString(args[0]), toString(args[1]), esc != "", e)
-}
-
-// matchLikeEscape is matchLike with an escape character: the character before
-// a `%`, a `_` or another escape makes it a literal.
-//
-// It is byte-oriented exactly as matchLike is, so the ESCAPE spelling answers
-// what the plain spelling answers for every pattern that has no escape in it.
-func matchLikeEscape(s, pattern string, hasEsc bool, esc byte) bool {
-	return matchLikeEscRecur(s, pattern, 0, 0, hasEsc, esc)
-}
-
-func matchLikeEscRecur(s, pattern string, si, pi int, hasEsc bool, esc byte) bool {
-	for pi < len(pattern) {
-		c := pattern[pi]
-		if hasEsc && c == esc {
-			// The escape character makes the NEXT character literal. A
-			// trailing escape is 22025 on the server ("LIKE pattern must not
-			// end with escape character") — but only where the matcher
-			// REACHES it: PostgreSQL short-circuits to FALSE when the string
-			// is exhausted first, so `'abc' LIKE 'abc!' ESCAPE '!'` is `f`
-			// there and was a refusal here (N6).
-			if pi+1 >= len(pattern) {
-				if si >= len(s) {
-					return false
-				}
-				panic(fatalEval{sqlerr.New("22025",
-					"LIKE pattern must not end with escape character")})
-			}
-			if si >= len(s) || s[si] != pattern[pi+1] {
-				return false
-			}
-			si++
-			pi += 2
-			continue
-		}
-		switch c {
-		case '%':
-			pi++
-			for pi < len(pattern) && pattern[pi] == '%' {
-				pi++
-			}
-			if pi == len(pattern) {
-				return true
-			}
-			for i := si; i <= len(s); i++ {
-				if matchLikeEscRecur(s, pattern, i, pi, hasEsc, esc) {
-					return true
-				}
-			}
-			return false
-		case '_':
-			if si >= len(s) {
-				return false
-			}
-			si++
-			pi++
-		default:
-			if si >= len(s) || s[si] != c {
-				return false
-			}
-			si++
-			pi++
-		}
+	m, err := kernel.LikeMatch(toString(args[0]), pat)
+	if err != nil {
+		panic(fatalEval{err})
 	}
-	return si == len(s)
+	return m
 }
 
 // fnLocalTimestamp is LOCALTIMESTAMP: the current instant as a TIMESTAMP

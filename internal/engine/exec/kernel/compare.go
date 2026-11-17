@@ -1797,11 +1797,16 @@ func inFilterKeyed(set map[string]struct{}, keyOf func(string) (string, bool), n
 
 // --- LIKE filter kernel ---
 
-// ResolveLikeFilterKernel compiles SQL %/_ patterns and resolves a row-text
-// renderer once per column, with no per-row type switch (#497).
+// ResolveLikeFilterKernel compiles a LIKE pattern (CompileLike: the backslash
+// is its escape, #1209) and resolves a row-text renderer once per column, with
+// no per-row type switch (#497).
 // Storage is not display: numeric network encodings and raw IPv6/UUID bytes
 // must render before matching, never blindly index BytesData.
 // ARRAY/ROW/MAP/VECTOR return nil; exec.LikeFilter raises 42883 (#522).
+// A pattern that can raise 22025 (CompileLike(pattern).MayRaise(): it ends in a
+// lone backslash) also returns nil, because a FilterKernel cannot report an
+// error: exec.LikeFilter checks MayRaise first and matches such a pattern row
+// by row through LikeTextRenderer and LikePattern.Match.
 // Do not invent fmt.Sprint container LIKE semantics.
 // See docs/internals/kernel-like-type-and-rendering-boundary.md for the design.
 func ResolveLikeFilterKernel(typ batch.TypeID, pattern string, negate bool) FilterKernel {
@@ -1809,7 +1814,10 @@ func ResolveLikeFilterKernel(typ batch.TypeID, pattern string, negate bool) Filt
 	case batch.TypeArray, batch.TypeRow, batch.TypeMap, batch.TypeVector:
 		return nil
 	}
-	matcher := compileLikePattern(pattern)
+	matcher, ok := CompileLike(pattern).Matcher()
+	if !ok {
+		return nil
+	}
 	render := likeTextRenderer(typ)
 	return func(vec *batch.Vector, sel []uint32, vecLen int, outSel []uint32) []uint32 {
 		out := outSel[:0]
@@ -1835,6 +1843,17 @@ func ResolveLikeFilterKernel(typ batch.TypeID, pattern string, negate bool) Filt
 		}
 		return out
 	}
+}
+
+// LikeTextRenderer is the row-text renderer ResolveLikeFilterKernel matches
+// against, for the caller that matches a raising pattern row by row. nil for
+// the four container types.
+func LikeTextRenderer(typ batch.TypeID) func(*batch.Vector, int) string {
+	switch typ {
+	case batch.TypeArray, batch.TypeRow, batch.TypeMap, batch.TypeVector:
+		return nil
+	}
+	return likeTextRenderer(typ)
 }
 
 // likeTextRenderer defines LIKE's display text, shared with CAST/scalar
@@ -1923,62 +1942,6 @@ func likeFormatUUID(b []byte) string {
 	return string(buf[:])
 }
 
-// compileLikePattern converts a SQL LIKE pattern to an optimized match function.
-// Handles common cases with specialized string operations instead of regex.
-func compileLikePattern(pattern string) func(string) bool {
-	// Optimize common patterns:
-	// '%suffix' → strings.HasSuffix
-	// 'prefix%' → strings.HasPrefix
-	// '%contains%' → strings.Contains
-	// 'prefix%suffix' → HasPrefix + HasSuffix + len check
-	hasLeadingWild := len(pattern) > 0 && pattern[0] == '%'
-	hasTrailingWild := len(pattern) > 0 && pattern[len(pattern)-1] == '%'
-
-	// Check if the pattern has any special chars beyond leading/trailing %
-	inner := pattern
-	if hasLeadingWild {
-		inner = inner[1:]
-	}
-	if hasTrailingWild && len(inner) > 0 {
-		inner = inner[:len(inner)-1]
-	}
-
-	// If inner has no wildcards, use fast string operations
-	hasInnerWild := false
-	for _, c := range inner {
-		if c == '%' || c == '_' {
-			hasInnerWild = true
-			break
-		}
-	}
-
-	if !hasInnerWild {
-		switch {
-		case hasLeadingWild && hasTrailingWild:
-			// %contains%
-			return func(s string) bool {
-				return len(s) >= len(inner) && containsStr(s, inner)
-			}
-		case hasLeadingWild:
-			// %suffix
-			return func(s string) bool {
-				return len(s) >= len(inner) && s[len(s)-len(inner):] == inner
-			}
-		case hasTrailingWild:
-			// prefix%
-			return func(s string) bool {
-				return len(s) >= len(inner) && s[:len(inner)] == inner
-			}
-		default:
-			// exact match
-			return func(s string) bool { return s == inner }
-		}
-	}
-
-	// Fallback: recursive matching for complex patterns
-	return func(s string) bool { return matchLike(s, pattern) }
-}
-
 // containsStr is a simple string contains check (avoids strings import in kernel).
 // containsStr delegates to strings.Contains: the stdlib uses the SIMD
 // bytealg index (AVX2 on amd64) plus Rabin-Karp fallback. The previous
@@ -1986,41 +1949,6 @@ func compileLikePattern(pattern string) func(string) bool {
 // ClickBench Q23 (LIKE '%Google%' over 100M titles/URLs).
 func containsStr(s, substr string) bool {
 	return strings.Contains(s, substr)
-}
-
-// matchLike implements recursive SQL LIKE pattern matching.
-func matchLike(s, pattern string) bool {
-	for len(pattern) > 0 {
-		switch pattern[0] {
-		case '%':
-			// Skip consecutive %
-			for len(pattern) > 0 && pattern[0] == '%' {
-				pattern = pattern[1:]
-			}
-			if len(pattern) == 0 {
-				return true
-			}
-			for i := 0; i <= len(s); i++ {
-				if matchLike(s[i:], pattern) {
-					return true
-				}
-			}
-			return false
-		case '_':
-			if len(s) == 0 {
-				return false
-			}
-			s = s[1:]
-			pattern = pattern[1:]
-		default:
-			if len(s) == 0 || s[0] != pattern[0] {
-				return false
-			}
-			s = s[1:]
-			pattern = pattern[1:]
-		}
-	}
-	return len(s) == 0
 }
 
 // --- Type conversion helpers ---

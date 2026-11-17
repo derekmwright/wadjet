@@ -2,7 +2,12 @@
 
 package scan
 
-import "bytes"
+import (
+	"fmt"
+	"unsafe"
+
+	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
+)
 
 // LIKE pushdown (extends the Level-3 scan filter to pattern predicates).
 //
@@ -12,11 +17,14 @@ import "bytes"
 // comparison preds — ONCE per dictionary entry on dict pages, per value
 // on plain pages — so non-matching strings never materialize.
 //
-// Semantics parity: the matcher is byte-wise and case-sensitive, exactly
-// expr.matchLike ('%' = any run, '_' = any single byte, no ESCAPE); the
-// planner only pushes literal patterns over string/bytes columns. NULL
-// never matches LIKE or NOT LIKE (SQL three-valued logic — the page
-// walkers already treat null rows as non-matching for every pred).
+// Semantics parity: the matcher is kernel.CompileLike, the ONE text LIKE
+// implementation the exec filter, its kernel and the expression evaluator call
+// too (#1209): byte-wise and case-sensitive, '%' any run, '_' any single byte,
+// and the BACKSLASH as the escape. The planner only pushes literal patterns
+// over string columns, and never a pattern that can raise 22025 (one ending in
+// a lone backslash, which only the matcher reaching it may report). NULL
+// never matches LIKE or NOT LIKE (SQL three-valued logic — the page walkers
+// already treat null rows as non-matching for every pred).
 
 // RowPred.Op values for pattern predicates.
 const (
@@ -24,73 +32,25 @@ const (
 	OpNotLike = "not_like"
 )
 
-// compileLike builds a matcher for a LIKE pattern, specialized for the
-// wildcard shapes that dominate real predicates.
-func compileLike(pattern string, negate bool) func([]byte) bool {
-	var base func([]byte) bool
-	inner := pattern
-	hasUnderscore := bytes.IndexByte([]byte(pattern), '_') >= 0
-	switch {
-	case !hasUnderscore && !bytes.ContainsAny([]byte(pattern), "%"):
-		want := []byte(pattern)
-		base = func(s []byte) bool { return bytes.Equal(s, want) }
-	case !hasUnderscore && len(inner) >= 2 && inner[0] == '%' && inner[len(inner)-1] == '%' &&
-		!bytes.ContainsAny([]byte(inner[1:len(inner)-1]), "%"):
-		needle := []byte(inner[1 : len(inner)-1])
-		base = func(s []byte) bool { return bytes.Contains(s, needle) }
-	case !hasUnderscore && len(inner) >= 1 && inner[len(inner)-1] == '%' &&
-		!bytes.ContainsAny([]byte(inner[:len(inner)-1]), "%"):
-		prefix := []byte(inner[:len(inner)-1])
-		base = func(s []byte) bool { return bytes.HasPrefix(s, prefix) }
-	case !hasUnderscore && len(inner) >= 1 && inner[0] == '%' &&
-		!bytes.ContainsAny([]byte(inner[1:]), "%"):
-		suffix := []byte(inner[1:])
-		base = func(s []byte) bool { return bytes.HasSuffix(s, suffix) }
-	default:
-		p := []byte(pattern)
-		base = func(s []byte) bool { return likeMatchBytes(s, p, 0, 0) }
+// compileLike builds a matcher for a LIKE pattern; kernel.CompileLike
+// specializes the wildcard shapes that dominate real predicates (equality,
+// prefix, suffix, contains) on the UNESCAPED literal. A pattern that can raise
+// 22025 is refused rather than matched without its error: the planner does not
+// push one (physical.makeLikeRowPred), so reaching here with one is a bug.
+func compileLike(pattern string, negate bool) (func([]byte) bool, error) {
+	m, ok := kernel.CompileLike(pattern).Matcher()
+	if !ok {
+		return nil, fmt.Errorf("scan filter: LIKE pattern %q can raise 22025 and is not pushable", pattern)
 	}
 	if negate {
-		return func(s []byte) bool { return !base(s) }
+		return func(s []byte) bool { return !m(bytesView(s)) }, nil
 	}
-	return base
+	return func(s []byte) bool { return m(bytesView(s)) }, nil
 }
 
-// likeMatchBytes mirrors expr.matchLikeRecur byte-for-byte so pushed and
-// residual evaluation agree on every input.
-func likeMatchBytes(s, pattern []byte, si, pi int) bool {
-	for pi < len(pattern) {
-		switch pattern[pi] {
-		case '%':
-			pi++
-			for pi < len(pattern) && pattern[pi] == '%' {
-				pi++
-			}
-			if pi == len(pattern) {
-				return true
-			}
-			for i := si; i <= len(s); i++ {
-				if likeMatchBytes(s, pattern, i, pi) {
-					return true
-				}
-			}
-			return false
-		case '_':
-			if si >= len(s) {
-				return false
-			}
-			si++
-			pi++
-		default:
-			if si >= len(s) || s[si] != pattern[pi] {
-				return false
-			}
-			si++
-			pi++
-		}
-	}
-	return si == len(s)
-}
+// bytesView reads a page value as a string without copying it; the matcher
+// does not retain it.
+func bytesView(b []byte) string { return unsafe.String(unsafe.SliceData(b), len(b)) }
 
 // isLikeOp reports whether a RowPred is a pattern predicate.
 func isLikeOp(op string) bool { return op == OpLike || op == OpNotLike }

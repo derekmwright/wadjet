@@ -489,10 +489,14 @@ func parseIPv6FilterVal(value any) string {
 	return ""
 }
 
-// ColumnLike creates a predicate that evaluates col LIKE pattern using SQL LIKE semantics.
-// The pattern uses % for any sequence of characters and _ for any single character.
+// ColumnLike creates a predicate that evaluates col LIKE pattern using SQL LIKE
+// semantics: kernel.CompileLike's language, whose escape is the backslash
+// (#1209). A Predicate cannot report an error, so a pattern that can raise
+// 22025 (it ends in a lone backslash) panics with it as a FatalEvalPanic, the
+// class the pipeline drivers turn back into the query's error.
 func ColumnLike(colName, pattern string, not bool) Predicate {
 	col := &lazyColIdx{}
+	cp := kernel.CompileLike(pattern)
 	return func(b *batch.RecordBatch, row int) bool {
 		idx := col.get(b, colName)
 		if idx < 0 {
@@ -503,48 +507,15 @@ func ColumnLike(colName, pattern string, not bool) Predicate {
 			return false
 		}
 		s := v.BytesData.UnsafeStringValue(row)
-		result := matchLike(s, pattern)
+		result, err := cp.Match(s)
+		if err != nil {
+			panic(fatalEvalError{err})
+		}
 		if not {
 			return !result
 		}
 		return result
 	}
-}
-
-// matchLike implements SQL LIKE pattern matching.
-// % matches any sequence of characters, _ matches any single character.
-func matchLike(s, pattern string) bool {
-	return matchLikeRecur(s, pattern, 0, 0)
-}
-
-func matchLikeRecur(s, pattern string, si, pi int) bool {
-	for pi < len(pattern) {
-		if pattern[pi] == '%' {
-			pi++
-			for pi < len(pattern) && pattern[pi] == '%' {
-				pi++
-			}
-			if pi == len(pattern) {
-				return true
-			}
-			for i := si; i <= len(s); i++ {
-				if matchLikeRecur(s, pattern, i, pi) {
-					return true
-				}
-			}
-			return false
-		}
-		if si >= len(s) {
-			return false
-		}
-		if pattern[pi] == '_' || pattern[pi] == s[si] {
-			si++
-			pi++
-		} else {
-			return false
-		}
-	}
-	return si == len(s)
 }
 
 // And combines predicates with logical AND.
@@ -1409,6 +1380,12 @@ type LikeFilter struct {
 	// kernel (kernel.ByteaLike, #1593).
 	byteaPat []byte
 	bytea    bool
+	// raising is a text pattern that can raise 22025 (it ends in a lone
+	// backslash, #1209): a FilterKernel cannot report an error, so such a
+	// pattern is matched row by row through textPat and render.
+	raising bool
+	textPat kernel.LikePattern
+	render  func(*batch.Vector, int) string
 }
 
 func NewLikeFilter(colName, pattern string, negate bool) *LikeFilter {
@@ -1444,13 +1421,25 @@ func (f *LikeFilter) Execute(ctx context.Context, in *batch.RecordBatch) (*batch
 			}
 			f.bytea, f.byteaPat = true, pat
 		} else if f.colIdx >= 0 {
-			f.kern = kernel.ResolveLikeFilterKernel(in.Columns[f.colIdx].Type, f.Pattern, f.Negate)
+			typ := in.Columns[f.colIdx].Type
+			if cp := kernel.CompileLike(f.Pattern); cp.MayRaise() {
+				if render := kernel.LikeTextRenderer(typ); render != nil {
+					f.raising, f.textPat, f.render = true, cp, render
+				}
+			} else {
+				f.kern = kernel.ResolveLikeFilterKernel(typ, f.Pattern, f.Negate)
+			}
 		}
 		f.outSel = make([]uint32, 0, in.Len)
 		f.resolved = true
 	}
 	if f.bytea {
 		return f.executeBytea(in)
+	}
+	if f.raising {
+		return f.executeRows(in, func(i int) (bool, error) {
+			return f.textPat.Match(f.render(in.Columns[f.colIdx], i))
+		})
 	}
 	if f.useFallback {
 		return f.inner.Execute(ctx, in)
@@ -1480,6 +1469,16 @@ func (f *LikeFilter) Execute(ctx context.Context, in *batch.RecordBatch) (*batch
 // executeBytea filters a BYTES column by the bytea reading of the pattern.
 func (f *LikeFilter) executeBytea(in *batch.RecordBatch) (*batch.RecordBatch, error) {
 	col := in.Columns[f.colIdx]
+	return f.executeRows(in, func(i int) (bool, error) {
+		return kernel.ByteaLike(col.BytesData.Value(i), f.byteaPat)
+	})
+}
+
+// executeRows filters row by row with a matcher that can fail: the bytea
+// reading, and a text pattern that can raise 22025. The first error stops the
+// batch, as the server stops at the first row that raises.
+func (f *LikeFilter) executeRows(in *batch.RecordBatch, match func(int) (bool, error)) (*batch.RecordBatch, error) {
+	col := in.Columns[f.colIdx]
 	out := f.outSel[:0]
 	if in.Sel != nil {
 		out = in.Sel[:0]
@@ -1489,7 +1488,7 @@ func (f *LikeFilter) executeBytea(in *batch.RecordBatch) (*batch.RecordBatch, er
 		if col.Nulls.IsNullFast(i) {
 			return false
 		}
-		m, err := kernel.ByteaLike(col.BytesData.Value(i), f.byteaPat)
+		m, err := match(i)
 		if err != nil {
 			firstErr = err
 			return false

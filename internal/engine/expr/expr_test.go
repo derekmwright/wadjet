@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
@@ -497,8 +498,8 @@ func TestMatchLike(t *testing.T) {
 		{"abc", "____", false},
 	}
 	for _, tt := range tests {
-		got := matchLike(tt.s, tt.pattern)
-		if got != tt.want {
+		got, err := kernel.LikeMatch(tt.s, tt.pattern)
+		if err != nil || got != tt.want {
 			t.Errorf("matchLike(%q, %q) = %v, want %v", tt.s, tt.pattern, got, tt.want)
 		}
 	}

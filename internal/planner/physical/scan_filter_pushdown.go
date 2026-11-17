@@ -221,6 +221,12 @@ func makeLikeRowPred(canon map[string]string, colType map[string]parquet.TypeID,
 	default:
 		return scan.RowPred{}, "", false
 	}
+	// A pattern ending in a lone backslash can raise 22025, and only where
+	// the matcher reaches it (#1209): the scan's page walkers have no error
+	// channel per value, so it stays a residual filter, which raises.
+	if kernel.CompileLike(lit.Value).MayRaise() {
+		return scan.RowPred{}, "", false
+	}
 	op := scan.OpLike
 	if le.Not {
 		op = scan.OpNotLike

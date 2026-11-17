@@ -432,7 +432,10 @@ func evalPredOnDict(dict *pqt.DictionaryData, p RowPred) ([]bool, error) {
 		}
 		data, offs := d.ByteArray()
 		if isLikeOp(p.Op) {
-			match := compileLike(want, p.Op == OpNotLike)
+			match, err := compileLike(want, p.Op == OpNotLike)
+			if err != nil {
+				return nil, err
+			}
 			for i := 0; i < n && i+1 < len(offs); i++ {
 				mask[i] = match(data[offs[i]:offs[i+1]])
 			}
@@ -464,7 +467,11 @@ func andPlainPage(bm *rowBitmap, base, n int, page *pqt.PageData, p RowPred) err
 			return fmt.Errorf("scan filter: LIKE on non-string page type %v", d.PhysType())
 		}
 		if pat, ok := p.Value.(string); ok {
-			likeFn = compileLike(pat, p.Op == OpNotLike)
+			fn, err := compileLike(pat, p.Op == OpNotLike)
+			if err != nil {
+				return err
+			}
+			likeFn = fn
 		}
 	}
 	if isFlagOp(p.Op) {

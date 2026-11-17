@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
 
@@ -289,7 +290,13 @@ func (e *Like) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool) {
 	if kind, ok := containerLikeKind(e.Expr, v); ok {
 		raiseNoLikeOperator(kind)
 	}
-	result := matchLike(toString(boxedTextOperand(b, row, e.Expr, v)), toString(p))
+	// kernel.LikeMatch is the one text LIKE matcher (#1209): the backslash is
+	// its escape, and a pattern the matcher reads past its end on a lone
+	// trailing backslash is 22025.
+	result, err := kernel.LikeMatch(toString(boxedTextOperand(b, row, e.Expr, v)), toString(p))
+	if err != nil {
+		panic(fatalEval{err})
+	}
 	if e.Not {
 		return !result, false
 	}
