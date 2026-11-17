@@ -188,7 +188,7 @@ func TestGroupingSetDrainEveryArm(t *testing.T) {
 		{"dag-morsel4-forced", forced(dag(coordM))},
 	}
 	measure := os.Getenv("GSD_MEASURE") != ""
-	before := exec.ForcedAggDrains.Load()
+	before := exec.ForcedRawRowDrains.Load()
 	for _, c := range cells {
 		for _, arm := range arms {
 			got := arm.run(c.sql)
@@ -209,7 +209,7 @@ func TestGroupingSetDrainEveryArm(t *testing.T) {
 			}
 		}
 	}
-	if exec.ForcedAggDrains.Load() == before {
-		t.Error("no aggregate drain was forced: the spilled arms did not exercise the drain")
+	if exec.ForcedRawRowDrains.Load() == before {
+		t.Error("no raw-row drain was forced: the spilled arms did not exercise the drain")
 	}
 }

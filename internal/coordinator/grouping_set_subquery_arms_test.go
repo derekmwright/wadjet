@@ -361,7 +361,7 @@ func TestGroupingSetSubqueryEveryArm(t *testing.T) {
 	answers := gsPGAnswers(t)
 	arms := gsArms(t, ctx)
 	measure := os.Getenv("GS_MEASURE") != ""
-	before := exec.ForcedAggDrains.Load()
+	before := exec.ForcedRawRowDrains.Load()
 	only := os.Getenv("GS_ONLY")
 	for _, c := range gsCells() {
 		if only != "" && !strings.Contains(c.name, only) {
@@ -398,8 +398,8 @@ func TestGroupingSetSubqueryEveryArm(t *testing.T) {
 			}
 		}
 	}
-	if exec.ForcedAggDrains.Load() == before {
-		t.Error("no aggregate drained to disk: the spilled arm did not exercise the spill path")
+	if exec.ForcedRawRowDrains.Load() == before {
+		t.Error("no raw-row drain was forced: the spilled arm did not exercise the drain")
 	}
 }
 

@@ -324,12 +324,12 @@ func TestGroupingSetDrain(t *testing.T) {
 	t.Run("forced", func(t *testing.T) {
 		db := gsdOpen(t, ctx, 1<<20)
 		defer exec.ForceAggDrainEvery(exec.ForceAggDrainEvery(1))
-		before := exec.ForcedAggDrains.Load()
+		before := exec.ForcedRawRowDrains.Load()
 		for _, c := range cells {
 			check(t, "forced", c, gsdAnswer(ctx, db, c.sql))
 		}
-		if exec.ForcedAggDrains.Load() == before {
-			t.Error("no aggregate drain was forced: the arm did not exercise the drain")
+		if exec.ForcedRawRowDrains.Load() == before {
+			t.Error("no raw-row drain was forced: the arm did not exercise the drain")
 		}
 	})
 	t.Run("budget", func(t *testing.T) {

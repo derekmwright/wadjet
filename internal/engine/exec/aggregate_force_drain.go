@@ -38,6 +38,13 @@ func ForceAggDrainEvery(n int64) int64 {
 // silently failed to engage turns the gate it arms into a no-op.
 var ForcedAggDrains atomic.Int64
 
+// ForcedRawRowDrains counts Consume calls on which the forcing knob was due
+// and the aggregate took the legacy raw-row branch (grouping sets, extra-state
+// aggregates) instead of the external-merge drain ForcedAggDrains counts. It
+// is a separate counter so ForcedAggDrains keeps meaning "an external-merge
+// drain was forced", which some gates read as a class boundary. TEST ONLY.
+var ForcedRawRowDrains atomic.Int64
+
 // forcedDrainDue reports whether this Consume is the Nth since the knob was
 // armed, and therefore owes a drain. Caller holds h.mu.
 func (h *HashAggregate) forcedDrainDue() bool {
