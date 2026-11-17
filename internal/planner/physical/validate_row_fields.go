@@ -61,6 +61,12 @@ func (s *colScope) addFieldDecl(qual, name string, d expr.DeclType) {
 
 func refuseInvalidRowFields(node plansql.Node, scope *colScope) error {
 	decls := rowFieldScopeDecls(scope)
+	// The bytea LIKE rule (#1593), on this walk for the reason the signature
+	// check below is: a refusal PostgreSQL gives at analysis must not wait for
+	// a row.
+	if err := refuseByteaLikes(node, decls); err != nil {
+		return err
+	}
 	var calls []*plansql.FuncCallNode
 	walkExpr(node, nil, nil, &calls)
 	for _, fc := range calls {
