@@ -67,9 +67,15 @@ func (h *HashAggregate) nextOwn(_ context.Context) (*batch.RecordBatch, error) {
 		h.outputPos = 1
 		out := batch.NewRecordBatch(h.emitOutputSchema(), 1)
 		for j, agg := range h.Aggs {
-			if agg.Func == AggCount {
+			// The same set emptyInputGroupingSetRows answers 0: a computed
+			// COUNT(DISTINCT expr) is AggCountDistinct here, and it answered
+			// NULL over zero rows where PostgreSQL answers 0 (found by the
+			// #1690 enumeration: COUNT(DISTINCT x) FILTER (WHERE p) hands the
+			// aggregate a CASE expression).
+			switch agg.Func {
+			case AggCount, AggCountDistinct, AggApproxDistinct:
 				out.Columns[j].SetValue(0, int64(0))
-			} else {
+			default:
 				out.Columns[j].Nulls.SetNull(0)
 			}
 		}
