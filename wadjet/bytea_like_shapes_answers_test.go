@@ -1,0 +1,58 @@
+// SPDX-License-Identifier: MIT
+
+package wadjet
+
+// lkShapePG is PostgreSQL 17.11's answer to each statement shape of
+// bytea_like_shapes_test.go (#1593), measured with LK_SHAPES_DUMP and LK_PG_DSN
+// against postgres:17-alpine. A shape whose engine answer differs is in
+// lkShapeResidual, with its cause.
+var lkShapePG = map[string]string{
+	"aggregate-filter":            "19",
+	"case-pattern":                "1;2;7;11;14;22;29;32;34",
+	"case-value":                  "0;1;1;0;0;1;0;1;0;0;0;1;0;1;1;0;0;0;0;0;1;1;1;0;0;0;1;1;1;1;0;0;1;1;1;1;1;0",
+	"coalesce-pattern":            "1;2;7;11;14;22;29;32;34",
+	"concat-pattern":              "1;2;5;7;11;13;14;20;21;22;26;27;28;29;32;33;34;35;36",
+	"cte":                         "false",
+	"cte-text-pattern":            "ERR 42883",
+	"derived-table":               "false",
+	"derived-table-where":         "",
+	"empty-table-bytes":           "",
+	"empty-table-mixed":           "ERR 42883",
+	"group-by-key":                "false|19;true|19",
+	"having":                      "1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1",
+	"in-subquery":                 "1;2;5;7;11;13;14;20;21;22;26;27;28;29;32;33;34;35;36",
+	"join-on":                     "4",
+	"null-value-column":           "",
+	"order-by-like":               "0;3;4;6;8;9;10;12;15;16;17;18;19;23;24;25;30;31;37;1;2;5;7;11;13;14;20;21;22;26;27;28;29;32;33;34;35;36",
+	"scalar-subquery-literal":     "ERR 42883",
+	"udf-body-bytes":              "false",
+	"scalar-subquery-lone-escape": "ERR 22025",
+	"scalar-subquery-pattern":     "4",
+	"scalar-subquery-text":        "ERR 42883",
+	"scalar-subquery-value":       "false",
+	"scan-any-one-byte":           "1;2;4;6;7;8;10;11;14;15;16;18;19;22;29;32;34;37",
+	"scan-any-run":                "0;1;2;3;4;5;6;7;8;9;10;11;12;13;14;15;16;17;18;19;20;21;22;23;24;25;26;27;28;29;30;31;32;33;34;35;36;37",
+	"scan-bad-literal":            "ERR 22P02",
+	"scan-contains":               "0;1;2;5;7;11;13;14;17;20;21;22;26;27;28;29;30;32;33;34;35;36",
+	"scan-empty-pattern":          "12;23;24;25",
+	"scan-escape-bang":            "ERR 42883",
+	"scan-escape-bytes":           "1;2;7;11;14;22;29;32;34",
+	"scan-escape-empty":           "ERR 42883",
+	"scan-escaped-backslash":      "8;10",
+	"scan-escaped-percent":        "4",
+	"scan-escaped-underscore":     "6",
+	"scan-exact":                  "1;2;7;11;14;22;29;32;34",
+	"scan-ilike":                  "ERR 42883",
+	"scan-int-pattern":            "ERR 42883",
+	"scan-not-like":               "0;3;4;6;8;9;10;12;15;16;17;18;19;23;24;25;30;31;37",
+	"scan-prefix":                 "1;2;5;7;11;13;14;20;21;22;26;27;28;29;32;33;34;35;36",
+	"scan-prefix-qlit":            "1;2;5;7;11;13;14;20;21;22;26;27;28;29;32;33;34;35;36",
+	"scan-suffix":                 "0;1;2;3;4;5;6;7;8;9;10;11;13;14;15;16;17;18;19;20;21;22;26;27;28;29;30;31;32;33;34;35;36;37",
+	"scan-text-column-pattern":    "ERR 42883",
+	"scan-text-control":           "1;2;5;7;11;13;14;22;26;27;28;29;32;34;35;36",
+	"scan-text-pattern":           "ERR 42883",
+	"scan-text-value":             "ERR 42883",
+	"scan-trailing-escape":        "ERR 22025",
+	"where-false-bad-literal":     "ERR 22P02",
+	"where-false-mixed":           "ERR 42883",
+}
