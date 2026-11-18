@@ -44,6 +44,9 @@ const check = (name, ok, got) => { console.log((ok ? 'ok   ' : 'FAIL ') + name +
   t = await run(base([{ id: 's', title: 't', brief: 'b', reviewOnly: true, resume: { commit: 'cc', branch: 'br', note: '/n/n' } }]), o => o.phase === 'Verify' ? V : { verdict: 'BLOCK', required: ['x'], trigger: 3 })
   check('review-only item returns the verdict and neither fixes nor escalates', t.r.reviews[0].verdict === 'BLOCK' && !t.r.escalation && t.calls.length === 2, t.r)
 
+  t = await run(base([{ id: 's', title: 't', brief: 'b', reviewOnly: true, resume: { commit: 'cc', branch: 'br', note: '/n/n' } }]), o => o.phase === 'Verify' ? { verified: false, failures: ['bad'] } : C)
+  check('review-only item whose hand-back check fails builds nothing and reports NOT-REVIEWED', t.r.reviews.length === 1 && t.r.reviews[0].verdict === 'NOT-REVIEWED' && !t.r.escalation && t.calls.length === 1, t)
+
   t = await run(base([{ id: '1', title: 't', brief: 'b' }]), o => o.phase === 'Build' ? B : { verified: true, failures: [], trigger: 3, reason: 'WHY' })
   check('a verifier trigger carries its reason', t.r.escalation.reason === 'WHY', t.r.escalation)
 

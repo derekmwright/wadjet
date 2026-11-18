@@ -229,6 +229,13 @@ Edit nothing in the branch.`,
       } else {
         // A failed hand-back check is clerical (a missing note, a trailer, a wrong base): it gets
         // a fix round but is not a blocked review and does not count toward the three-round rule.
+        // A review-only item is never built on: a failed hand-back check ends it with the
+        // failures reported. (It used to start a fix round here; one such stretch ran six agents
+        // where two were asked for, 2026-11-18.)
+        if (item.reviewOnly) {
+          reviews.push({ id: item.id, verdict: 'NOT-REVIEWED', trigger: check.trigger || null, required: check.failures, reason: check.reason || 'the hand-back check failed; nothing was built or reviewed' })
+          break
+        }
         verifyFails++
         required = check.failures
         if (verifyFails >= 3) throw esc(6, `the hand-back for ${item.id} failed verification three times: ${required.join('; ')}`)
