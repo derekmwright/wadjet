@@ -58,6 +58,10 @@ const check = (name, ok, got) => { console.log((ok ? 'ok   ' : 'FAIL ') + name +
   t = await run(base([{ id: '1', title: 't', brief: 'b' }]), (o, p) => (o.phase === 'Verify' || (p.includes('ADR-0012 item 7') && p.includes('--locale=C --encoding=UTF8'))) ? (o.phase === 'Build' ? B : o.phase === 'Verify' ? V : C) : null)
   check('builder and reviewer prompts carry the measure-the-reference rule', t.r.landed.length === 1, t.r)
 
+  // Adversarial self-correction before commitment (2026-11-18): builder and reviewer are both told.
+  t = await run(base([{ id: '1', title: 't', brief: 'b' }]), (o, p) => (o.phase === 'Verify' || (p.includes('EVIDENCE TO EXAMINE') && p.includes('REACHES the code'))) ? (o.phase === 'Build' ? B : o.phase === 'Verify' ? V : C) : null)
+  check('builder and reviewer prompts carry the falsify-before-commit rule', t.r.landed.length === 1, t.r)
+
   t = await run(base([{ id: '1', title: 't', brief: 'b' }, { id: '2', title: 't', brief: 'b' }, { id: '3', title: 't', brief: 'b' }], { maxItems: 2 }), o => o.phase === 'Build' ? B : o.phase === 'Verify' ? V : C)
   check('a stretch is bounded and reports what it did not start', t.r.landed.length === 2 && t.r.notStarted.join() === '3', t.r)
 

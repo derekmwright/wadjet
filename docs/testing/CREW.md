@@ -79,6 +79,49 @@ cost. Before sending any question about behaviour, the architect checks it again
 paragraph: if a measurement could answer it, the measurement is run instead. A recommendation
 about semantics that was reasoned and not measured is not sent.
 
+## Before a ruling: adversarial self-correction
+
+The architect's job is not to defend a first explanation; it is to eliminate wrong explanations
+before they become code. Before prescribing a fix, choosing a fallback, escalating a design
+decision or accepting another agent's account of a cause, the architect does these, and the
+dispatcher gives the builder and the reviewer the same list (`FALSIFY` in
+`tools/crew/dispatch-stretch.js`, held there by a selftest):
+
+1. **Evidence apart from inference.** Observed behaviour, source-verified mechanism, inferred
+   explanation and open question are kept apart in what is written. A builder's diagnosis is
+   evidence to examine, never an established fact, and is not copied into the next brief as one.
+2. **Falsify the leading explanation** with the cheapest test that could prove it wrong:
+   instrumentation, a negative control, a counterexample, a base-versus-tip measurement.
+3. **The actual execution boundary.** Show the failing statement reaches the code about to be
+   changed, and name where the answer goes wrong (parsing, binding, logical planning, physical
+   planning, execution, result materialization). No guard at an unverified boundary.
+4. **Counterexamples before generalizing:** one legitimate behaviour the rule might break, one
+   nearby defect it might miss; the most informative cases, not a number of them.
+5. **Existing authority:** PostgreSQL for SQL semantics (ADR-0012 item 7), accepted ADRs for
+   architectural contracts, the issue records for known defects. An unaccepted ADR is not
+   authority, and neither is a preference nobody measured.
+6. **The whole fallback.** A refusal or a single-process route is recommended only once the
+   fallback is shown to give PostgreSQL's answer, the guard to cover the demonstrated failures,
+   and legitimate statements to keep the path they have.
+7. **One challenge:** "what evidence would make this recommendation wrong?" If it is cheap to
+   get, it is got first.
+8. **Uncertainty stays labelled.** An unverified mechanism is a hypothesis with a bounded
+   experiment attached, never a confident implementation brief.
+9. **The record is corrected explicitly:** the original claim, the evidence against it, the
+   revised conclusion, and the instructions, tests and issue lines it affects.
+
+Bounds: the smallest experiment that separates the competing explanations; effort in
+proportion to the risk of a silent wrong answer, the blast radius of the change and the cost of
+reversing it. This is not permission for open-ended investigation, wider issue scope or more
+review rounds. If the evidence in hand is enough, proceed; if a cheap falsifying test exists,
+run it; if the uncertainty is material and cannot be settled inside the authorized scope, stop
+and report.
+
+Where this came from (2026-11-17): twice on one item the architect put a mechanism or a
+property from a builder's note into the next brief unverified (a rename "lost at the shared
+CTE terminal"; a guard that was "structural, not a comparison of spellings"). Both were false,
+and each cost a build before a builder or reviewer disproved it.
+
 ## Design records
 
 No design change gets code before its ADR (`docs/adr/`) is accepted.
