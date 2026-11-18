@@ -31,25 +31,24 @@ the declaration, so it is now PostgreSQL's integer arithmetic:
 `SUM(x) / 3` beside a COUNT(DISTINCT) is bigint 46 where it was numeric
 46.666667, and `COUNT(*) * 4000000000000000000` raises 22003.
 
-When that finalizing projection is built, level 2 publishes every
-aggregate under a slot the rewrite mints (`__tl_count_2`,
-`__tl_distinct_0`, AVG's `__tl_avgsum_1`/`__tl_avgcnt_1`), and the
-projection alone publishes the user's names, in order. The projection
-reads level 2 by name, and the user's names need not be unique:
-`COUNT(*) AS a, COUNT(DISTINCT x) AS a` read by its shared name answered
-the COUNT twice (#1696). A projection above the finalization pins a
-duplicated name to its slot by position (physical buildProject, through
-finalizationProjectBelow).
+Not when two outputs share a name and the finalizing projection is built
+(`COUNT(*) AS a, COUNT(DISTINCT x) AS a`): that projection reads level 2
+by name and so reads the first same-named column for both. On the
+single-process path the second output's declaration disagreeing with
+that column is what refuses the query (the #361 store guard); declared
+bigint beside the bigint distinct count, the refusal would become the
+COUNT answered twice. There the recombined aggregates keep SUM's own
+declaration and the statement behaves exactly as before; telling the two
+outputs apart is #1692's shared-name line.
 
 On the stage DAG that projection rides the level-2 final aggregate stage
-as its ProjectExprs (dagplan absorbAggregateOutputProjection): the
-rewrite's `coalesce` call is carried for a Project marked
-PreservesAggOutputs (rewriteFinalizationSource), where every function
-call in a user's SELECT list is declined (#1692), and each slot is
-emitted under the user's name, because an expression the gather
-evaluates over that name would otherwise find no column. A finalization
-that would publish a name twice is declined, because every consumer above
-an OpProject addresses its outputs by name.
+as its ProjectExprs (dagplan absorbAggregateOutputProjection). The
+COALESCE is published under the same name as the SUM it wraps, so a
+projection the stage planner declined would leave the bare SUM's NULL in
+place with nothing downstream to notice; the planner therefore carries
+the rewrite's `coalesce` call for a Project marked PreservesAggOutputs
+(rewriteFinalizationSource), where it declines every function call in a
+user's SELECT list (#1692).
 
 Why: profile-attributed (2026-08-17 c6a telemetry). The distinct-set
 path pays per-row map inserts into per-group Go maps; both levels of

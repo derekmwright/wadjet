@@ -933,22 +933,6 @@ func namesMatchProjections(names []string, projections []logical.Projection) boo
 	return true
 }
 
-// finalizationProjectBelow is the synthetic finalization Project (logical.Node.
-// PreservesAggOutputs) findAggregateAncestor walks through on its way to the
-// aggregate, or nil when there is none.
-func finalizationProjectBelow(node *logical.Node) *logical.Node {
-	for node != nil && node.Type != logical.NodeAggregate {
-		if node.Type == logical.NodeProject && node.PreservesAggOutputs {
-			return node
-		}
-		if !aggScopePreservingWrapper(node.Type) || len(node.Children) != 1 {
-			return nil
-		}
-		node = node.Children[0]
-	}
-	return nil
-}
-
 // findAggregateAncestor returns the Aggregate node if the given node is one,
 // or traverses through the nodes that leave the aggregate's own output columns
 // visible to find it: a HAVING Filter, a Sort, a LIMIT, a WINDOW

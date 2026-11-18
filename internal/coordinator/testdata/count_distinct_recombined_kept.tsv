@@ -1,20 +1,32 @@
 # Cells whose answer here is not PostgreSQL 17.11's, for count_distinct_recombined_arms_test.go (#1696). Every line is a residual,
-# wrong at the base f0b84410 too (TestCountDistinctRecombinedDump at the base, compared cell by cell).
+# wrong at the base f0b84410 too (TestCountDistinctRecombinedDump at the base, compared cell by cell), and every line answers exactly
+# what the base answers, value and declared type, except two: cteDupName sumInt/ungrouped on the single-process arms keeps the base's
+# wrong VALUE (the first column read twice) and now declares PostgreSQL's bigint where the base declared numeric.
 # name<TAB>arms (all | dag | single: the two single-process arms)<TAB>this engine's answer<TAB>why-code.
 # A kept line whose arm starts answering PostgreSQL FAILS: re-measure and delete it. The why-codes:
 #   scale: display scale (per-value scale program): AVG answers fewer fraction digits than PostgreSQL's numeric
 #   scalarScaleErr: a scalar subquery over a rewritten AVG(int) is refused on every arm (numeric field overflow: 23.333333 does not fit a DECIMAL at scale 4). The subquery's column is declared from its UNOPTIMIZED plan (physical subqueryLogicalPlan, no two-level rewrite: AVG(int) DECIMAL(38,4)) while the executed plan is optimized (the rewrite's division, scale 6)
-#   union346: (#346) a UNION ALL arm that selects an aggregate is refused by the DAG planner
+#   union346: (#346) a UNION ALL arm that selects an aggregate is refused by the DAG planner; on an `all` line the single-process arms are refused for sharedNameFinal's reason
 #   cteDupName: a CTE column-alias list over a body that publishes one name twice reads the FIRST column for both on the single-process path (logical applyColumnAliasProject renames by name); with or without the rewrite (the grouped cells), and on the DAG arms where the plan routes to that path
 #   unionArmType: a UNION ALL of grouped arms whose outputs share a name declares MIN/MAX of an integer bigint where PostgreSQL declares integer, on the single-process arms; the rewrite declines these (grouped, not lone)
-#   finalDropped: the stage planner declines the rewrite's finalizing projection when it would publish one name twice, and the plan goes on without it (#1692's first remaining line); the DAG then reads a shared name's first column for both, or a column no stage publishes
+#   sharedNameFinal: (#1692's shared-name line) two outputs share a name and the rewrite builds its finalizing projection (an ungrouped COUNT or an AVG beside the COUNT(DISTINCT)); that projection reads level 2 by NAME. On the single-process arms it reads the first same-named column for both: refused where the second output's declaration disagrees with that column (#361 store guard), answered twice otherwise. On the DAG the stage planner declines the projection (aggregatePublishesADuplicateName) and the plan goes on without it: a dropped COALESCE answers NULL for a zero-row COUNT. The recombined aggregates there keep the base's numeric declaration, so that the guard's refusal is not turned into the first value answered twice
 oneDistinct/top/distinctAliases/avgInt/ungrouped/rows	all	a:numeric,b:bigint | 23.333333,4	scale
 oneDistinct/top/distinctAliases/avgInt/grouped/rows	all	a:numeric,b:bigint | 10.0000,1; 25.0000,2; 30.0000,1; 40.0000,1	scale
 oneDistinct/top/distinctAliases/avgDec/ungrouped/rows	all	a:numeric,b:bigint | 2.320000,4	scale
 oneDistinct/top/distinctAliases/avgDec/grouped/rows	all	a:numeric,b:bigint | 0.100000,1; 1.875000,1; 3.750000,2; 4.000000,1	scale
-oneDistinct/top/sharedAlias/avgInt/ungrouped/rows	all	a:numeric,a:bigint | 23.333333,4	scale
+oneDistinct/top/sharedAlias/countStar/ungrouped/rows	single	ERR -	sharedNameFinal
+oneDistinct/top/sharedAlias/countStar/ungrouped/rows	dag	a:numeric,a:bigint | 6,4	sharedNameFinal
+oneDistinct/top/sharedAlias/countStar/ungrouped/zero	single	ERR -	sharedNameFinal
+oneDistinct/top/sharedAlias/countStar/ungrouped/zero	dag	a:numeric,a:bigint | NULL,0	sharedNameFinal
+oneDistinct/top/sharedAlias/countX/ungrouped/rows	single	ERR -	sharedNameFinal
+oneDistinct/top/sharedAlias/countX/ungrouped/rows	dag	a:numeric,a:bigint | 6,4	sharedNameFinal
+oneDistinct/top/sharedAlias/countX/ungrouped/zero	single	ERR -	sharedNameFinal
+oneDistinct/top/sharedAlias/countX/ungrouped/zero	dag	a:numeric,a:bigint | NULL,0	sharedNameFinal
+oneDistinct/top/sharedAlias/avgInt/ungrouped/rows	all	a:numeric,a:numeric | 23.333333,23.333333	sharedNameFinal
+oneDistinct/top/sharedAlias/avgInt/ungrouped/zero	all	a:numeric,a:numeric | NULL,NULL	sharedNameFinal
 oneDistinct/top/sharedAlias/avgInt/grouped/rows	all	a:numeric,a:bigint | 10.0000,1; 25.0000,2; 30.0000,1; 40.0000,1	scale
-oneDistinct/top/sharedAlias/avgDec/ungrouped/rows	all	a:numeric,a:bigint | 2.320000,4	scale
+oneDistinct/top/sharedAlias/avgDec/ungrouped/rows	all	a:numeric,a:numeric | 2.320000,2.320000	sharedNameFinal
+oneDistinct/top/sharedAlias/avgDec/ungrouped/zero	all	a:numeric,a:numeric | NULL,NULL	sharedNameFinal
 oneDistinct/top/sharedAlias/avgDec/grouped/rows	all	a:numeric,a:bigint | 0.100000,1; 1.875000,1; 3.750000,2; 4.000000,1	scale
 oneDistinct/top/columnName/avgInt/ungrouped/rows	all	x:numeric,b:bigint | 23.333333,4	scale
 oneDistinct/top/columnName/avgInt/grouped/rows	all	x:numeric,b:bigint | 10.0000,1; 25.0000,2; 30.0000,1; 40.0000,1	scale
@@ -28,9 +40,9 @@ oneDistinct/scalarSelect/distinctAliases/avgInt/ungrouped/rows	all	ERR 22003	sca
 oneDistinct/scalarSelect/distinctAliases/avgInt/grouped/rows	all	s:numeric | 10.0000	scale
 oneDistinct/scalarSelect/distinctAliases/avgDec/ungrouped/rows	all	s:numeric | 2.320000	scale
 oneDistinct/scalarSelect/distinctAliases/avgDec/grouped/rows	all	s:numeric | 0.100000	scale
-oneDistinct/scalarSelect/sharedAlias/avgInt/ungrouped/rows	all	ERR 22003	scalarScaleErr
+oneDistinct/scalarSelect/sharedAlias/avgInt/ungrouped/rows	all	ERR 22003	sharedNameFinal
 oneDistinct/scalarSelect/sharedAlias/avgInt/grouped/rows	all	s:numeric | 10.0000	scale
-oneDistinct/scalarSelect/sharedAlias/avgDec/ungrouped/rows	all	s:numeric | 2.320000	scale
+oneDistinct/scalarSelect/sharedAlias/avgDec/ungrouped/rows	all	s:numeric | 2.320000	sharedNameFinal
 oneDistinct/scalarSelect/sharedAlias/avgDec/grouped/rows	all	s:numeric | 0.100000	scale
 oneDistinct/scalarSelect/columnName/avgInt/ungrouped/rows	all	ERR 22003	scalarScaleErr
 oneDistinct/scalarSelect/columnName/avgInt/grouped/rows	all	s:numeric | 10.0000	scale
@@ -44,9 +56,9 @@ oneDistinct/derived/distinctAliases/avgInt/ungrouped/rows	all	c1:numeric,c2:bigi
 oneDistinct/derived/distinctAliases/avgInt/grouped/rows	all	c1:numeric,c2:bigint | 10.0000,1; 25.0000,2; 30.0000,1; 40.0000,1	scale
 oneDistinct/derived/distinctAliases/avgDec/ungrouped/rows	all	c1:numeric,c2:bigint | 2.320000,4	scale
 oneDistinct/derived/distinctAliases/avgDec/grouped/rows	all	c1:numeric,c2:bigint | 0.100000,1; 1.875000,1; 3.750000,2; 4.000000,1	scale
-oneDistinct/derived/sharedAlias/avgInt/ungrouped/rows	all	c1:numeric,c2:bigint | 23.333333,4	scale
+oneDistinct/derived/sharedAlias/avgInt/ungrouped/rows	all	c1:numeric,c2:bigint | 23.333333,4	sharedNameFinal
 oneDistinct/derived/sharedAlias/avgInt/grouped/rows	all	c1:numeric,c2:bigint | 10.0000,1; 25.0000,2; 30.0000,1; 40.0000,1	scale
-oneDistinct/derived/sharedAlias/avgDec/ungrouped/rows	all	c1:numeric,c2:bigint | 2.320000,4	scale
+oneDistinct/derived/sharedAlias/avgDec/ungrouped/rows	all	c1:numeric,c2:bigint | 2.320000,4	sharedNameFinal
 oneDistinct/derived/sharedAlias/avgDec/grouped/rows	all	c1:numeric,c2:bigint | 0.100000,1; 1.875000,1; 3.750000,2; 4.000000,1	scale
 oneDistinct/derived/columnName/avgInt/ungrouped/rows	all	c1:numeric,c2:bigint | 23.333333,4	scale
 oneDistinct/derived/columnName/avgInt/grouped/rows	all	c1:numeric,c2:bigint | 10.0000,1; 25.0000,2; 30.0000,1; 40.0000,1	scale
@@ -60,9 +72,15 @@ oneDistinct/cte/distinctAliases/avgInt/ungrouped/rows	all	c1:numeric,c2:bigint |
 oneDistinct/cte/distinctAliases/avgInt/grouped/rows	all	c1:numeric,c2:bigint | 10.0000,1; 25.0000,2; 30.0000,1; 40.0000,1	scale
 oneDistinct/cte/distinctAliases/avgDec/ungrouped/rows	all	c1:numeric,c2:bigint | 2.320000,4	scale
 oneDistinct/cte/distinctAliases/avgDec/grouped/rows	all	c1:numeric,c2:bigint | 0.100000,1; 1.875000,1; 3.750000,2; 4.000000,1	scale
-oneDistinct/cte/sharedAlias/countStar/ungrouped/rows	all	c1:bigint,c2:bigint | 6,6	cteDupName
+oneDistinct/cte/sharedAlias/countStar/ungrouped/rows	single	ERR -	sharedNameFinal
+oneDistinct/cte/sharedAlias/countStar/ungrouped/rows	dag	c1:numeric,c2:bigint | 6,4	sharedNameFinal
+oneDistinct/cte/sharedAlias/countStar/ungrouped/zero	single	ERR -	sharedNameFinal
+oneDistinct/cte/sharedAlias/countStar/ungrouped/zero	dag	c1:numeric,c2:bigint | NULL,0	sharedNameFinal
 oneDistinct/cte/sharedAlias/countStar/grouped/rows	single	c1:bigint,c2:bigint | 1,1; 1,1; 2,2; 2,2	cteDupName
-oneDistinct/cte/sharedAlias/countX/ungrouped/rows	all	c1:bigint,c2:bigint | 6,6	cteDupName
+oneDistinct/cte/sharedAlias/countX/ungrouped/rows	single	ERR -	sharedNameFinal
+oneDistinct/cte/sharedAlias/countX/ungrouped/rows	dag	c1:numeric,c2:bigint | 6,4	sharedNameFinal
+oneDistinct/cte/sharedAlias/countX/ungrouped/zero	single	ERR -	sharedNameFinal
+oneDistinct/cte/sharedAlias/countX/ungrouped/zero	dag	c1:numeric,c2:bigint | NULL,0	sharedNameFinal
 oneDistinct/cte/sharedAlias/countX/grouped/rows	single	c1:bigint,c2:bigint | 1,1; 1,1; 2,2; 2,2	cteDupName
 oneDistinct/cte/sharedAlias/sumInt/ungrouped/rows	single	c1:bigint,c2:bigint | 140,140	cteDupName
 oneDistinct/cte/sharedAlias/sumInt/ungrouped/zero	single	c1:bigint,c2:bigint | NULL,NULL	cteDupName
@@ -76,12 +94,12 @@ oneDistinct/cte/sharedAlias/sumDec/grouped/rows	single	c1:numeric,c2:numeric | 0
 oneDistinct/cte/sharedAlias/sumFloat/ungrouped/rows	single	c1:double precision,c2:double precision | 7.375,7.375	cteDupName
 oneDistinct/cte/sharedAlias/sumFloat/ungrouped/zero	single	c1:double precision,c2:double precision | NULL,NULL	cteDupName
 oneDistinct/cte/sharedAlias/sumFloat/grouped/rows	single	c1:double precision,c2:double precision | 0.125,0.125; 0.5,0.5; 3,3; 3.75,3.75	cteDupName
-oneDistinct/cte/sharedAlias/avgInt/ungrouped/rows	all	c1:numeric,c2:numeric | 23.333333,23.333333	cteDupName
-oneDistinct/cte/sharedAlias/avgInt/ungrouped/zero	all	c1:numeric,c2:numeric | NULL,NULL	cteDupName
+oneDistinct/cte/sharedAlias/avgInt/ungrouped/rows	all	c1:numeric,c2:numeric | 23.333333,23.333333	sharedNameFinal
+oneDistinct/cte/sharedAlias/avgInt/ungrouped/zero	all	c1:numeric,c2:numeric | NULL,NULL	sharedNameFinal
 oneDistinct/cte/sharedAlias/avgInt/grouped/rows	single	c1:numeric,c2:numeric | 10.0000,10.0000; 25.0000,25.0000; 30.0000,30.0000; 40.0000,40.0000	cteDupName
 oneDistinct/cte/sharedAlias/avgInt/grouped/rows	dag	c1:numeric,c2:bigint | 10.0000,1; 25.0000,2; 30.0000,1; 40.0000,1	scale
-oneDistinct/cte/sharedAlias/avgDec/ungrouped/rows	all	c1:numeric,c2:numeric | 2.320000,2.320000	cteDupName
-oneDistinct/cte/sharedAlias/avgDec/ungrouped/zero	all	c1:numeric,c2:numeric | NULL,NULL	cteDupName
+oneDistinct/cte/sharedAlias/avgDec/ungrouped/rows	all	c1:numeric,c2:numeric | 2.320000,2.320000	sharedNameFinal
+oneDistinct/cte/sharedAlias/avgDec/ungrouped/zero	all	c1:numeric,c2:numeric | NULL,NULL	sharedNameFinal
 oneDistinct/cte/sharedAlias/avgDec/grouped/rows	single	c1:numeric,c2:numeric | 0.100000,0.100000; 1.875000,1.875000; 3.750000,3.750000; 4.000000,4.000000	cteDupName
 oneDistinct/cte/sharedAlias/avgDec/grouped/rows	dag	c1:numeric,c2:bigint | 0.100000,1; 1.875000,1; 3.750000,2; 4.000000,1	scale
 oneDistinct/cte/sharedAlias/min/ungrouped/rows	single	c1:integer,c2:integer | 10,10	cteDupName
@@ -142,12 +160,12 @@ oneDistinct/unionAll/distinctAliases/max/ungrouped/rows	dag	ERR -	union346
 oneDistinct/unionAll/distinctAliases/max/ungrouped/zero	dag	ERR -	union346
 oneDistinct/unionAll/distinctAliases/max/grouped/rows	dag	ERR -	union346
 oneDistinct/unionAll/distinctAliases/max/grouped/zero	dag	ERR -	union346
-oneDistinct/unionAll/sharedAlias/countStar/ungrouped/rows	dag	ERR -	union346
-oneDistinct/unionAll/sharedAlias/countStar/ungrouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/sharedAlias/countStar/ungrouped/rows	all	ERR -	union346
+oneDistinct/unionAll/sharedAlias/countStar/ungrouped/zero	all	ERR -	union346
 oneDistinct/unionAll/sharedAlias/countStar/grouped/rows	dag	ERR -	union346
 oneDistinct/unionAll/sharedAlias/countStar/grouped/zero	dag	ERR -	union346
-oneDistinct/unionAll/sharedAlias/countX/ungrouped/rows	dag	ERR -	union346
-oneDistinct/unionAll/sharedAlias/countX/ungrouped/zero	dag	ERR -	union346
+oneDistinct/unionAll/sharedAlias/countX/ungrouped/rows	all	ERR -	union346
+oneDistinct/unionAll/sharedAlias/countX/ungrouped/zero	all	ERR -	union346
 oneDistinct/unionAll/sharedAlias/countX/grouped/rows	dag	ERR -	union346
 oneDistinct/unionAll/sharedAlias/countX/grouped/zero	dag	ERR -	union346
 oneDistinct/unionAll/sharedAlias/sumInt/ungrouped/rows	dag	ERR -	union346
@@ -166,14 +184,16 @@ oneDistinct/unionAll/sharedAlias/sumFloat/ungrouped/rows	dag	ERR -	union346
 oneDistinct/unionAll/sharedAlias/sumFloat/ungrouped/zero	dag	ERR -	union346
 oneDistinct/unionAll/sharedAlias/sumFloat/grouped/rows	dag	ERR -	union346
 oneDistinct/unionAll/sharedAlias/sumFloat/grouped/zero	dag	ERR -	union346
-oneDistinct/unionAll/sharedAlias/avgInt/ungrouped/rows	single	a:numeric,a:bigint | 23.333333,4; NULL,0	scale
+oneDistinct/unionAll/sharedAlias/avgInt/ungrouped/rows	single	a:numeric,a:numeric | 23.333333,23.333333; NULL,NULL	sharedNameFinal
 oneDistinct/unionAll/sharedAlias/avgInt/ungrouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/sharedAlias/avgInt/ungrouped/zero	single	a:numeric,a:numeric | NULL,NULL; NULL,NULL	sharedNameFinal
 oneDistinct/unionAll/sharedAlias/avgInt/ungrouped/zero	dag	ERR -	union346
 oneDistinct/unionAll/sharedAlias/avgInt/grouped/rows	single	a:numeric,a:bigint | 10.0000,1; 25.0000,2; 30.0000,1; 40.0000,1	scale
 oneDistinct/unionAll/sharedAlias/avgInt/grouped/rows	dag	ERR -	union346
 oneDistinct/unionAll/sharedAlias/avgInt/grouped/zero	dag	ERR -	union346
-oneDistinct/unionAll/sharedAlias/avgDec/ungrouped/rows	single	a:numeric,a:bigint | 2.320000,4; NULL,0	scale
+oneDistinct/unionAll/sharedAlias/avgDec/ungrouped/rows	single	a:numeric,a:numeric | 2.320000,2.320000; NULL,NULL	sharedNameFinal
 oneDistinct/unionAll/sharedAlias/avgDec/ungrouped/rows	dag	ERR -	union346
+oneDistinct/unionAll/sharedAlias/avgDec/ungrouped/zero	single	a:numeric,a:numeric | NULL,NULL; NULL,NULL	sharedNameFinal
 oneDistinct/unionAll/sharedAlias/avgDec/ungrouped/zero	dag	ERR -	union346
 oneDistinct/unionAll/sharedAlias/avgDec/grouped/rows	single	a:numeric,a:bigint | 0.100000,1; 1.875000,1; 3.750000,2; 4.000000,1	scale
 oneDistinct/unionAll/sharedAlias/avgDec/grouped/rows	dag	ERR -	union346
@@ -308,9 +328,26 @@ plainAlone/scalarSelect/sharedAlias/avgInt/ungrouped/rows	all	s:numeric | 23.333
 plainAlone/scalarSelect/sharedAlias/avgInt/grouped/rows	all	s:numeric | 10.0000	scale
 plainAlone/scalarSelect/sharedAlias/avgDec/ungrouped/rows	all	s:numeric | 2.320000	scale
 plainAlone/scalarSelect/sharedAlias/avgDec/grouped/rows	all	s:numeric | 0.100000	scale
-extra/avgBesidePair/rows	all	v:numeric,a:bigint,a:bigint | 23.333333,140,4	scale
-extra/avgSharedWithDistinct/rows	all	a:numeric,c:bigint,a:bigint | 23.333333,6,4	scale
-extra/distinctFirst/rows	dag	a:bigint,a:bigint | 4,4	finalDropped
-extra/cteTwiceShared/rows	single	c1:bigint,c2:bigint | 6,6	cteDupName
-extra/cteTwiceShared/rows	dag	PANIC runtime error: invalid memory address or nil pointer dereference	finalDropped
-extra/cteTwiceShared/zero	dag	PANIC runtime error: invalid memory address or nil pointer dereference	finalDropped
+extra/countBesidePair/rows	single	c:numeric,a:integer,a:integer | 6,10,10	sharedNameFinal
+extra/countBesidePair/rows	dag	c:numeric,a:integer,a:bigint | 6,10,4	sharedNameFinal
+extra/avgBesidePair/rows	all	v:numeric,a:numeric,a:numeric | 23.333333,140,140	sharedNameFinal
+extra/avgSharedWithDistinct/rows	all	a:numeric,c:numeric,a:numeric | 23.333333,6,23.333333	sharedNameFinal
+extra/twoCountsShared/rows	all	a:numeric,a:numeric,b:bigint | 6,6,4	sharedNameFinal
+extra/distinctFirst/rows	single	a:numeric,a:numeric | 4,4	sharedNameFinal
+extra/distinctFirst/rows	dag	a:bigint,a:numeric | 4,6	sharedNameFinal
+extra/sharedHaving/rows	single	ERR -	sharedNameFinal
+extra/sharedHaving/rows	dag	a:numeric,a:bigint | 6,4	sharedNameFinal
+extra/cteTwiceShared/rows	single	ERR -	sharedNameFinal
+extra/cteTwiceShared/rows	dag	c1:numeric,c2:bigint | 6,4	sharedNameFinal
+extra/countBesidePair/zero	single	c:numeric,a:integer,a:integer | 0,NULL,NULL	sharedNameFinal
+extra/countBesidePair/zero	dag	c:numeric,a:integer,a:bigint | NULL,NULL,0	sharedNameFinal
+extra/avgBesidePair/zero	all	v:numeric,a:numeric,a:numeric | NULL,NULL,NULL	sharedNameFinal
+extra/avgSharedWithDistinct/zero	all	a:numeric,c:numeric,a:numeric | NULL,0,NULL	sharedNameFinal
+extra/twoCountsShared/zero	single	a:numeric,a:numeric,b:bigint | 0,0,0	sharedNameFinal
+extra/twoCountsShared/zero	dag	a:numeric,a:numeric,b:bigint | NULL,NULL,0	sharedNameFinal
+extra/distinctFirst/zero	single	a:numeric,a:numeric | 0,0	sharedNameFinal
+extra/distinctFirst/zero	dag	a:bigint,a:numeric | 0,NULL	sharedNameFinal
+extra/sharedHaving/zero	single	ERR -	sharedNameFinal
+extra/sharedHaving/zero	dag	(0 rows)	sharedNameFinal
+extra/cteTwiceShared/zero	single	ERR -	sharedNameFinal
+extra/cteTwiceShared/zero	dag	c1:numeric,c2:bigint | NULL,0	sharedNameFinal

@@ -227,29 +227,12 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 		// output batch answer to, and a key the planner spells `x.a` is a
 		// column the operator calls `a` (#968).
 		if full, ok := aggregateEmittedOutputNames(child); ok {
-			aggOuts := make([]string, len(aggNode.AggExprs))
-			for j := range aggNode.AggExprs {
-				aggOuts[j] = aggNode.AggExprs[j].OutputCol
-			}
-			// Through a rewrite's finalization projection the aggregate
-			// outputs are the PROJECTION's, one per original aggregate in
-			// order: the two-level DISTINCT rewrite publishes each one from a
-			// slot of its own (an AVG from two), so the aggregate below has
-			// other names and, with an AVG, another count (#1696).
-			if fin := finalizationProjectBelow(child); fin != nil {
-				if nk := len(aggNode.GroupBy); nk <= len(fin.Projections) {
-					aggOuts = aggOuts[:0]
-					for _, pr := range fin.Projections[nk:] {
-						aggOuts = append(aggOuts, projectionOutputName(pr))
-					}
-				}
-			}
-			nAgg := len(aggOuts)
+			nAgg := len(aggNode.AggExprs)
 			nKey := len(full) - nAgg
 			clean := nKey >= 0
 			for j := 0; clean && j < nAgg; j++ {
 				if !strings.EqualFold(strings.TrimSpace(full[nKey+j]),
-					strings.TrimSpace(aggOuts[j])) {
+					strings.TrimSpace(aggNode.AggExprs[j].OutputCol)) {
 					clean = false
 				}
 			}

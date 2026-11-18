@@ -109,29 +109,19 @@ func rewriteCountDistinctTwoLevel(n *Node) *Node {
 
 	// Level 1: GROUP BY K + x, partials for the non-distinct aggregates.
 	// AVG decomposes into SUM+COUNT partials at both levels and a division
-	// projection above level 2; everything else re-aggregates with a single
-	// partial.
-	//
-	// fins[i] is how the finalization projection, when one is built,
-	// publishes original aggregate i: the level-2 output it reads, and whether
-	// it is AVG's division or a COUNT's coalesce. Indexed by POSITION, never
-	// by output name: two aggregates may share one (`COUNT(*) AS a,
-	// COUNT(DISTINCT x) AS a`).
-	type finItem struct {
-		slot     string // the level-2 output this aggregate reads (AVG: its SUM leg)
-		cnt      string // AVG only: the level-2 COUNT leg
-		avg      bool
-		zeroable bool // a non-distinct COUNT, re-summed at level 2 (#1584)
-	}
-	fins := make([]finItem, len(n.AggExprs))
-	// outerIdx[i] is aggregate i's index in outerAggs (AVG: its SUM leg).
-	outerIdx := make([]int, len(n.AggExprs))
-	hasAvg, hasCount := false, false
+	// projection above level 2 (avgDivs); everything else re-aggregates
+	// with a single partial.
+	type avgDiv struct{ out, sum, cnt string }
+	var avgDivs []avgDiv
+	// countOuts names the outputs of non-distinct COUNTs, re-aggregated as
+	// SUM of per-(K,x) partials at level 2. Ungrouped over zero input rows,
+	// level 1 has no groups and that SUM answers NULL where a COUNT answers
+	// 0 (#1584); the finalization projection below restores the 0.
+	countOuts := map[string]bool{}
 	innerGroupBy := append(append([]string(nil), n.GroupBy...), x)
 	innerAggs := make([]AggExpr, 0, len(n.AggExprs)-1)
 	outerAggs := make([]AggExpr, 0, len(n.AggExprs))
 	for i, a := range n.AggExprs {
-		outerIdx[i] = len(outerAggs)
 		if i == distinctIdx {
 			// Level 2 counts the distinct column itself over level-1 rows.
 			outerAggs = append(outerAggs, AggExpr{
@@ -139,7 +129,6 @@ func rewriteCountDistinctTwoLevel(n *Node) *Node {
 				InputCol:  x,
 				OutputCol: a.OutputCol,
 			})
-			fins[i] = finItem{slot: fmt.Sprintf("%sdistinct_%d", plansql.SlotTwoLevel, i)}
 			continue
 		}
 		if strings.EqualFold(a.Func, "avg") {
@@ -152,8 +141,7 @@ func rewriteCountDistinctTwoLevel(n *Node) *Node {
 			outerAggs = append(outerAggs,
 				AggExpr{Func: "sum", InputCol: sumP, OutputCol: sumP},
 				AggExpr{Func: "sum", InputCol: cntP, OutputCol: cntP})
-			fins[i] = finItem{slot: sumP, cnt: cntP, avg: true}
-			hasAvg = true
+			avgDivs = append(avgDivs, avgDiv{out: a.OutputCol, sum: sumP, cnt: cntP})
 			continue
 		}
 		partial := fmt.Sprintf("%s%s_%d", plansql.SlotTwoLevel, strings.ToLower(a.Func), i)
@@ -161,19 +149,11 @@ func rewriteCountDistinctTwoLevel(n *Node) *Node {
 		inner.OutputCol = partial
 		innerAggs = append(innerAggs, inner)
 		outer := AggExpr{InputCol: partial, OutputCol: a.OutputCol}
-		fins[i] = finItem{slot: partial}
-		// The recombining SUM declares what the ORIGINAL aggregate declares,
-		// which is its partial's own type: bigint for a COUNT and a SUM(int4),
-		// numeric for a SUM(int8) or SUM(numeric), the float for a float SUM.
-		// Declared as a SUM over its bigint input, it said numeric where the
-		// original and PostgreSQL say bigint (#1696). AVG's two legs are not
-		// marked: its division declares the AVG.
 		switch strings.ToLower(a.Func) {
 		case "count":
 			outer.Func = "sum" // sum of per-(K,x) counts
 			outer.Recombines = true
-			fins[i].zeroable = true
-			hasCount = true
+			countOuts[a.OutputCol] = true
 		case "sum":
 			outer.Func = "sum"
 			outer.Recombines = true
@@ -186,21 +166,26 @@ func rewriteCountDistinctTwoLevel(n *Node) *Node {
 	}
 	// Grouped, a group exists only when a row does, so the SUM of COUNT
 	// partials is never over zero rows; only the ungrouped form needs the 0.
-	zeroCounts := len(n.GroupBy) == 0 && hasCount
-	finalize := hasAvg || zeroCounts
-	if finalize {
-		// The finalization projection reads level 2 by NAME, so every name it
-		// reads must be one level 2 publishes exactly once. The user's names
-		// need not be: two aggregates may share an alias, and a COUNT's
-		// coalesce used to be published under the very name of the SUM it
-		// wraps. So level 2 publishes each aggregate under a slot only this
-		// rewrite mints (AVG's legs always did), and the projection alone
-		// publishes the user's names. Read by a shared name, `COUNT(*) AS a,
-		// COUNT(DISTINCT x) AS a` answered the COUNT twice (#1696).
-		for i := range n.AggExprs {
-			if !fins[i].avg {
-				outerAggs[outerIdx[i]].OutputCol = fins[i].slot
-			}
+	zeroCounts := len(n.GroupBy) == 0 && len(countOuts) > 0
+	finalize := len(avgDivs) > 0 || zeroCounts
+
+	// The recombining SUM declares what the ORIGINAL aggregate declares,
+	// which is its partial's own type: bigint for a COUNT and a SUM(int4),
+	// numeric for a SUM(int8) or SUM(numeric), the float for a float SUM.
+	// Declared as a SUM over its bigint input, it said numeric where the
+	// original and PostgreSQL say bigint (#1692, #1696). AVG's two legs are
+	// not marked: its division declares the AVG.
+	//
+	// Not where the finalization projection below reads a name level 2
+	// publishes twice (`COUNT(*) AS a, COUNT(DISTINCT x) AS a`): it reads the
+	// first column for both, and the second output's declaration disagreeing
+	// with that column is what refuses the query today (the #361 store
+	// guard). Declaring both bigint would turn that refusal into the first
+	// value answered twice. Telling the two apart is #1692's shared-name
+	// line, not this one.
+	if finalize && aggregateOutputsShareAName(n) {
+		for i := range outerAggs {
+			outerAggs[i].Recombines = false
 		}
 	}
 
@@ -218,43 +203,47 @@ func rewriteCountDistinctTwoLevel(n *Node) *Node {
 	if !finalize {
 		return outer
 	}
-	// Finalization: AVG's sum/count divided, and, ungrouped, a COUNT's summed
-	// partials through COALESCE(…, 0); every other aggregate's slot is
-	// published under its original name. The original order holds (group
-	// keys, then aggregates). Division by a zero count reads NULL — AVG over
-	// an all-NULL group (see expr arithDiv).
+	// Finalization: project AVG's sum/count into the original output name
+	// and, ungrouped, a COUNT's summed partials through COALESCE(…, 0),
+	// passing every other output column through by name in the original
+	// order (group keys, then aggregates). Division by a zero count reads
+	// NULL — AVG over an all-NULL group (see expr arithDiv).
+	div := make(map[string]avgDiv, len(avgDivs))
+	for _, d := range avgDivs {
+		div[d.out] = d
+	}
 	projs := make([]Projection, 0, len(n.GroupBy)+len(n.AggExprs))
 	for _, k := range n.GroupBy {
 		projs = append(projs, Projection{Column: k, Alias: k})
 	}
-	for i, a := range n.AggExprs {
-		f := fins[i]
-		switch {
-		case f.avg:
+	for _, a := range n.AggExprs {
+		if d, ok := div[a.OutputCol]; ok {
 			projs = append(projs, Projection{
-				Alias: a.OutputCol,
-				Expr:  fmt.Sprintf("%s / %s", f.slot, f.cnt),
+				Alias: d.out,
+				Expr:  fmt.Sprintf("%s / %s", d.sum, d.cnt),
 				ASTExpr: &plansql.BinaryOp{
-					Left:  &plansql.ColRef{Column: f.slot},
+					Left:  &plansql.ColRef{Column: d.sum},
 					Op:    "/",
-					Right: &plansql.ColRef{Column: f.cnt},
+					Right: &plansql.ColRef{Column: d.cnt},
 				},
 			})
-		case f.zeroable && zeroCounts:
+			continue
+		}
+		if zeroCounts && countOuts[a.OutputCol] {
 			projs = append(projs, Projection{
 				Alias: a.OutputCol,
-				Expr:  fmt.Sprintf("coalesce(%s, 0)", f.slot),
+				Expr:  fmt.Sprintf("coalesce(%s, 0)", a.OutputCol),
 				ASTExpr: &plansql.FuncCallNode{
 					Name: "coalesce",
 					Args: []plansql.Node{
-						&plansql.ColRef{Column: f.slot},
+						&plansql.ColRef{Column: a.OutputCol},
 						&plansql.Lit{Value: "0", Kind: plansql.LitNumber},
 					},
 				},
 			})
-		default:
-			projs = append(projs, Projection{Column: f.slot, Alias: a.OutputCol})
+			continue
 		}
+		projs = append(projs, Projection{Column: a.OutputCol, Alias: a.OutputCol})
 	}
 	fin := NewProject(outer, projs)
 	fin.PreservesAggOutputs = true
@@ -279,4 +268,22 @@ func scanIntCols(n *Node) map[string]bool {
 		}
 	}
 	return nil
+}
+
+// aggregateOutputsShareAName reports whether two of an aggregate's outputs —
+// group keys and aggregates alike — are published under one name, compared
+// as the planner resolves names, without regard to case.
+func aggregateOutputsShareAName(n *Node) bool {
+	seen := make(map[string]bool, len(n.GroupBy)+len(n.AggExprs))
+	for _, k := range n.GroupBy {
+		seen[strings.ToLower(k)] = true
+	}
+	for _, a := range n.AggExprs {
+		low := strings.ToLower(a.OutputCol)
+		if seen[low] {
+			return true
+		}
+		seen[low] = true
+	}
+	return false
 }
