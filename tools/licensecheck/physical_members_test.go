@@ -91,7 +91,21 @@ import (
 // 222 → 224 (2026-10-04, arc RE, #381): `PlanPGCategories` and
 // `AggregatePGCategory` — the same two package-scope functions the reference
 // budget above records, and for the same reason.
-const maxAGPLPhysicalMembers = 224
+// 224 → 227 (2026-11-19, ADR-0050 slice 2, #1678): `PlanContext.WithIncarnationGuard`,
+// `PlanContext.VerifyIncarnations` and `PlanContext.IsIncarnationChanged` —
+// the statement's incarnation guard, which refuses with 40001 a statement an
+// authorization decision of which was about another incarnation of the table
+// than the manifest it pinned (ADR-0050 §3, C1-C4). The guard lives on the MIT
+// side beside the manifest pin it brackets, because internal/auth (MIT) pins
+// before every decision; the coordinator is the only door that supplies its
+// own pin, so it is the AGPL side that turns the guard on, verifies at each
+// point where a plan could take effect, and must tell the refusal (final, never
+// retried on the DAG) from a catalog read failure. Reached through the context
+// value, as WithManifestSnapshot is, so the reference budget does not move.
+// Not crossing: the pin's existence test (the attach is idempotent through
+// NewPlannerForContext, already counted) and the refusal's type (the tests
+// name it by its SQLSTATE).
+const maxAGPLPhysicalMembers = 227
 
 // measuredPhysicalMembers are the members reached through values. With the 16
 // package-scope names of measuredPhysicalNames they are the whole surface, and
@@ -164,6 +178,7 @@ PlanContext.InferProjectionDeclType
 PlanContext.InferProjectionDeclTypeConf
 PlanContext.InlinedInSetRowCap
 PlanContext.InputColDecls
+PlanContext.IsIncarnationChanged
 PlanContext.IsSimpleColRefForRename
 PlanContext.IsSortMergeSource
 PlanContext.JoinArmAlias
@@ -229,10 +244,12 @@ PlanContext.StrictIntArithColsThroughRenames
 PlanContext.SubstituteNestedRenameRefs
 PlanContext.SubtreeNamingOf
 PlanContext.ValidateColumnsUnderPolicy
+PlanContext.VerifyIncarnations
 PlanContext.WantBareName
 PlanContext.WindowExecColumn
 PlanContext.WindowKeySpecs
 PlanContext.WindowSpecOutputType
+PlanContext.WithIncarnationGuard
 PlanContext.WithManifestSnapshot
 PlanContext.WrapsAWindow
 PlanPGCategories

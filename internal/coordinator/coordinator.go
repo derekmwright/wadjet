@@ -232,6 +232,11 @@ func (c *Coordinator) resolveQueryLimits(ctx context.Context) *config.QueryLimit
 // auth.bindSwapTestHook pattern). Nil in every non-test build.
 var statementStepTestHook func(step string)
 
+// statementGuard reaches the statement's incarnation guard (ADR-0050 §3),
+// which lives on the engine side beside the manifest pin it brackets: the
+// operations are methods of physical.PlanContext, as WithManifestSnapshot is.
+var statementGuard physical.PlanContext
+
 func statementStep(step string) {
 	if statementStepTestHook != nil {
 		statementStepTestHook(step)
@@ -1060,10 +1065,10 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 	//
 	// A re-execution of the SAME statement (the ErrInputLost rerun, which
 	// re-enters here) keeps the pin it was accepted with: one pin per
-	// statement, shared by every planning run (ADR-0050 C4).
-	if !physical.HasManifestSnapshot(ctx) {
-		ctx = dagplan.WithManifestSnapshot(ctx, physical.NewManifestSnapshot())
-	}
+	// statement, shared by every planning run (ADR-0050 C4):
+	// NewPlannerForContext hands back the snapshot ctx already carries, and a
+	// fresh one when it carries none, so the attach below is idempotent.
+	ctx = dagplan.WithManifestSnapshot(ctx, physical.NewPlannerForContext(ctx, c.catalog).ManifestSnapshot)
 
 	// Start OTel span for the query if tracing is enabled
 	if c.otel != nil {
@@ -1154,10 +1159,10 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 	// A mismatch refuses the statement with 40001 and nothing else is tried
 	// (C3). No decision is taken without an enabled provider, so this reads
 	// nothing then.
-	ctx = physical.WithIncarnationGuard(ctx, c.catalog)
+	ctx = statementGuard.WithIncarnationGuard(ctx, c.catalog)
 	defer func() {
-		verr := physical.VerifyIncarnations(ctx)
-		if verr == nil || (err != nil && !physical.IsIncarnationChanged(verr)) {
+		verr := statementGuard.VerifyIncarnations(ctx)
+		if verr == nil || (err != nil && !statementGuard.IsIncarnationChanged(verr)) {
 			return
 		}
 		if res != nil {
@@ -1235,7 +1240,7 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 	statementStep("optimized")
 	// C2 for every decision enforcement took, the late ones the optimizer
 	// asked included, before any plan is physically planned or run.
-	if err := physical.VerifyIncarnations(ctx); err != nil {
+	if err := statementGuard.VerifyIncarnations(ctx); err != nil {
 		return nil, err
 	}
 	statementStep("verified")
@@ -1453,7 +1458,7 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 	ctx = withQueryPGCategories(ctx, queryCats)
 	// C2 for the decisions the stage planner took, before anything is
 	// dispatched (ADR-0050).
-	if err := physical.VerifyIncarnations(ctx); err != nil {
+	if err := statementGuard.VerifyIncarnations(ctx); err != nil {
 		return nil, err
 	}
 	gr, gerr := c.executeStageDAG(ctx, queryID, sql, physStages, c.workers.Count())

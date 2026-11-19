@@ -43,7 +43,7 @@ func guardRecreate(t *testing.T, cat *catalog.Catalog, name string, cols ...stri
 
 func guardCtx(cat *catalog.Catalog) context.Context {
 	ctx := PlanContext{}.WithManifestSnapshot(context.Background(), NewManifestSnapshot())
-	return WithIncarnationGuard(ctx, cat)
+	return withIncarnationGuard(ctx, cat)
 }
 
 // TestIncarnationGuardBrackets is C1-C3 at the primitive: a decision pinned
@@ -56,17 +56,17 @@ func TestIncarnationGuardBrackets(t *testing.T) {
 	ctx := guardCtx(cat)
 
 	PinForDecision(ctx, "t")
-	if err := VerifyIncarnations(ctx); err != nil {
+	if err := verifyIncarnations(ctx); err != nil {
 		t.Fatalf("nothing changed, verify refused: %v", err)
 	}
 	guardRecreate(t, cat, "t", "id", "ssn")
 	// No decision since the last verify: nothing is asked, nothing refused.
-	if err := VerifyIncarnations(ctx); err != nil {
+	if err := verifyIncarnations(ctx); err != nil {
 		t.Fatalf("a verify with no decision since the last one refused: %v", err)
 	}
 	PinForDecision(ctx, "t") // a decision about t, after the re-create
-	err := VerifyIncarnations(ctx)
-	if !IsIncarnationChanged(err) || sqlerr.StateOf(err) != "40001" {
+	err := verifyIncarnations(ctx)
+	if !isIncarnationChanged(err) || sqlerr.StateOf(err) != "40001" {
 		t.Fatalf("got %v (state %q), want the 40001 refusal", err, sqlerr.StateOf(err))
 	}
 	if want := `table "t" was dropped or re-created under this statement; retry it`; err.Error() != want {
@@ -86,26 +86,26 @@ func TestIncarnationGuardEdges(t *testing.T) {
 	if err := cat.DropTable(context.Background(), "t"); err != nil {
 		t.Fatal(err)
 	}
-	if err := VerifyIncarnations(ctx); !IsIncarnationChanged(err) {
+	if err := verifyIncarnations(ctx); !isIncarnationChanged(err) {
 		t.Fatalf("a table dropped under the decision verified as %v", err)
 	}
 
 	ctx = guardCtx(cat)
 	PinForDecision(ctx, "nope") // no such relation: the pin is the 42P01
 	guardCreate(t, cat, "nope", "id")
-	if err := VerifyIncarnations(ctx); err != nil {
+	if err := verifyIncarnations(ctx); err != nil {
 		t.Fatalf("a name pinned with no manifest was compared: %v", err)
 	}
 
-	if WithIncarnationGuard(ctx, cat) != ctx {
+	if withIncarnationGuard(ctx, cat) != ctx {
 		t.Fatal("a re-execution took a second guard")
 	}
-	bare := WithIncarnationGuard(context.Background(), cat)
+	bare := withIncarnationGuard(context.Background(), cat)
 	if incarnationGuardFrom(bare) != nil {
 		t.Fatal("a guard was installed with no manifest pin to bracket against")
 	}
 	PinForDecision(context.Background(), "t")
-	if err := VerifyIncarnations(context.Background()); err != nil {
+	if err := verifyIncarnations(context.Background()); err != nil {
 		t.Fatalf("no guard, verify refused: %v", err)
 	}
 }
@@ -134,12 +134,12 @@ func TestIncarnationGuardLegacyTables(t *testing.T) {
 	}
 	ctx := guardCtx(cat)
 	PinForDecision(ctx, "legacy")
-	if err := VerifyIncarnations(ctx); err != nil {
+	if err := verifyIncarnations(ctx); err != nil {
 		t.Fatalf("a legacy table was refused: %v", err)
 	}
 	guardRecreate(t, cat, "legacy", "id")
 	PinForDecision(ctx, "legacy")
-	if err := VerifyIncarnations(ctx); !IsIncarnationChanged(err) {
+	if err := verifyIncarnations(ctx); !isIncarnationChanged(err) {
 		t.Fatalf("a re-created legacy table verified as %v", err)
 	}
 }
@@ -169,7 +169,7 @@ func TestIncarnationGuardDecisionSitesInPhysical(t *testing.T) {
 			guardRecreate(t, cat, "t", "id", "ssn")
 			defer guardRecreate(t, cat, "t", "id")
 			site(ctx)
-			if err := VerifyIncarnations(ctx); !IsIncarnationChanged(err) {
+			if err := verifyIncarnations(ctx); !isIncarnationChanged(err) {
 				t.Fatalf("the %s read was not bracketed: verify = %v", name, err)
 			}
 		})

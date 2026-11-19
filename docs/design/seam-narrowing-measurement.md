@@ -939,7 +939,12 @@ members that carry a container column's element and a VECTOR's width across
 the stage and wire specs, ADR-0045 §1) and 21/224 (arc RE,
 `PlanPGCategories` and `AggregatePGCategory` — the plan's PostgreSQL numeric
 category of the columns a stage reads from text, which ROUND and the
-integer cast round by, #381). The change log lives with the
+integer cast round by, #381) and 21/227 (ADR-0050 slice 2, #1678,
+`PlanContext.WithIncarnationGuard`, `PlanContext.VerifyIncarnations` and
+`PlanContext.IsIncarnationChanged` — the guard that refuses with 40001 a
+statement whose authorization decision was about another incarnation of the
+table than the one it pinned, turned on and verified by the coordinator, the
+one door that supplies its own pin). The change log lives with the
 constants because that is where the next raise is written.
 
 ## Test placement and declaration renames

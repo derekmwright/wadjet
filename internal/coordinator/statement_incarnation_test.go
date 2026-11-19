@@ -18,6 +18,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/auth"
 	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/catalog"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
@@ -619,9 +620,23 @@ func TestAnIncarnationRefusalBeforeTheDAGDispatches(t *testing.T) {
 }
 
 // TestClassifyLocalFailureIncarnationRefusalIsFinal: the refusal is never
-// retried on the DAG, whatever the strict setting (C3).
+// retried on the DAG, whatever the strict setting (C3). The refusal is the
+// one a statement actually gets (the first cell of
+// TestADecisionAboutAnotherIncarnationRefuses), named by its SQLSTATE.
 func TestClassifyLocalFailureIncarnationRefusalIsFinal(t *testing.T) {
-	err := fmt.Errorf("local: %w", &physical.IncarnationChangedError{Table: "t"})
+	if testing.Short() {
+		t.Skip("-short: stands up an embedded NATS cluster")
+	}
+	f := newIncFixture(t, nil)
+	var refusal error
+	fired := atStep("annotated", func() { f.recreateAs(t, incSchemaC) }, func() {
+		_, refusal = f.dag.ExecuteSQL(f.ctx, "SELECT * FROM inc_t")
+	})
+	f.restoreA(t)
+	if !fired || sqlerr.StateOf(refusal) != "40001" {
+		t.Fatalf("the statement was not refused 40001 (step fired: %v): %v", fired, refusal)
+	}
+	err := fmt.Errorf("local: %w", refusal)
 	for _, strict := range []bool{true, false} {
 		if got := classifyLocalFailure(err, nil, strict); got != reportToClient {
 			t.Errorf("strict=%v: the incarnation refusal was classified %v", strict, got)

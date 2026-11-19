@@ -110,18 +110,18 @@ func TestEveryDecisionSiteIsBracketed(t *testing.T) {
 				p.Update(p.Authenticator(), p.Authorizer(), nil)
 			}
 			ctx := physical.PlanContext{}.WithManifestSnapshot(base, physical.NewManifestSnapshot())
-			ctx = physical.WithIncarnationGuard(ctx, cat)
+			ctx = (physical.PlanContext{}).WithIncarnationGuard(ctx, cat)
 			if s.prepare != nil {
 				ctx = s.prepare(t, ctx, p, cat)
 			} else {
 				physical.PinForDecision(ctx, "pe_emp")
 			}
-			if err := physical.VerifyIncarnations(ctx); err != nil {
+			if err := (physical.PlanContext{}).VerifyIncarnations(ctx); err != nil {
 				t.Fatalf("nothing changed, verify refused: %v", err)
 			}
 			guardRecreateEmp(t, cat, "id", "ssn")
 			s.decision(t, ctx, p, cat)
-			if err := physical.VerifyIncarnations(ctx); !physical.IsIncarnationChanged(err) {
+			if err := (physical.PlanContext{}).VerifyIncarnations(ctx); !(physical.PlanContext{}).IsIncarnationChanged(err) {
 				t.Fatalf("the %s decision was not bracketed: verify = %v", s.name, err)
 			}
 		})
@@ -146,7 +146,7 @@ func TestNoGuardNoChange(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a door with no pin was refused: %v", err)
 	}
-	if err := physical.VerifyIncarnations(out); err != nil {
+	if err := (physical.PlanContext{}).VerifyIncarnations(out); err != nil {
 		t.Fatalf("a door with no pin verified: %v", err)
 	}
 }

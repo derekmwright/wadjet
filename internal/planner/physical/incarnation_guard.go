@@ -32,8 +32,8 @@ func (e *IncarnationChangedError) Error() string {
 // SQLState makes the refusal a coded one (sqlerr.Coder).
 func (e *IncarnationChangedError) SQLState() string { return "40001" }
 
-// IsIncarnationChanged reports whether err is (or wraps) the refusal.
-func IsIncarnationChanged(err error) bool {
+// isIncarnationChanged reports whether err is (or wraps) the refusal.
+func isIncarnationChanged(err error) bool {
 	var ic *IncarnationChangedError
 	return errors.As(err, &ic)
 }
@@ -69,16 +69,16 @@ type incarnationGuard struct {
 
 type incarnationGuardKey struct{}
 
-// WithIncarnationGuard turns the guard on for the statement ctx carries. The
+// withIncarnationGuard turns the guard on for the statement ctx carries. The
 // statement's ManifestSnapshot must already be on ctx (it is the pin); without
 // one there is nothing to bracket against and ctx is returned unchanged. A
 // ctx that already carries a guard keeps it — a re-execution of the same
 // statement shares its pins (ADR-0050 C4).
 //
 // Only a door that supplies its own pin turns this on (the coordinator's
-// ExecuteSQL). Every other door reaches PinForDecision and VerifyIncarnations
+// ExecuteSQL). Every other door reaches PinForDecision and verifyIncarnations
 // with no guard on its context, where both do nothing.
-func WithIncarnationGuard(ctx context.Context, cat *catalog.Catalog) context.Context {
+func withIncarnationGuard(ctx context.Context, cat *catalog.Catalog) context.Context {
 	if cat == nil || incarnationGuardFrom(ctx) != nil {
 		return ctx
 	}
@@ -90,13 +90,6 @@ func WithIncarnationGuard(ctx context.Context, cat *catalog.Catalog) context.Con
 		cat: cat, snap: snap,
 		resolved: map[string]string{}, isDirt: map[string]bool{},
 	})
-}
-
-// HasManifestSnapshot reports whether ctx carries a statement's manifest pin
-// (WithManifestSnapshot), so a re-execution of the same statement can keep it
-// rather than attach a new one (ADR-0050 C4).
-func HasManifestSnapshot(ctx context.Context) bool {
-	return manifestSnapshotFromContext(ctx) != nil
 }
 
 func incarnationGuardFrom(ctx context.Context) *incarnationGuard {
@@ -115,7 +108,7 @@ var incarnationGuardTestHook func(table string)
 // PinForDecision is C1: call it BEFORE an authorization decision about table,
 // and before the decision reads the table's record. It pins the table's
 // manifest in the statement's snapshot (a no-op read when a planner already
-// did) and marks the table for the next VerifyIncarnations. Without a guard
+// did) and marks the table for the next verifyIncarnations. Without a guard
 // on ctx it does nothing.
 func PinForDecision(ctx context.Context, table string) {
 	g := incarnationGuardFrom(ctx)
@@ -145,7 +138,7 @@ func PinForDecision(ctx context.Context, table string) {
 	}
 }
 
-// VerifyIncarnations is C2: call it after decisions, before their effect can
+// verifyIncarnations is C2: call it after decisions, before their effect can
 // reach the client. For each table decided since the last verify it reads the
 // table's record once and compares its incarnation with the pinned
 // manifest's. A mismatch — or a record that is gone while the pin holds a
@@ -160,7 +153,7 @@ func PinForDecision(ctx context.Context, table string) {
 // Legacy tables, whose record and manifest were written before incarnations
 // existed, carry "" on both and compare equal; once dropped and re-created,
 // the record carries a minted incarnation and the pinned manifest still "".
-func VerifyIncarnations(ctx context.Context) error {
+func verifyIncarnations(ctx context.Context) error {
 	g := incarnationGuardFrom(ctx)
 	if g == nil {
 		return nil
@@ -201,4 +194,26 @@ func (g *incarnationGuard) redirty(tables []string) {
 			g.dirty = append(g.dirty, name)
 		}
 	}
+}
+
+// The guard's operations as the AGPL side reaches them: through the
+// PlanContext value, as it reaches WithManifestSnapshot (the seam's
+// established shape; tools/licensecheck counts each as a member of the seam).
+// PinForDecision stays a package-scope function: only the MIT side
+// (internal/auth, and this package's policy reads) calls it.
+
+// WithIncarnationGuard turns the guard on for the statement ctx carries
+// (withIncarnationGuard).
+func (PlanContext) WithIncarnationGuard(ctx context.Context, cat *catalog.Catalog) context.Context {
+	return withIncarnationGuard(ctx, cat)
+}
+
+// VerifyIncarnations is C2 (verifyIncarnations).
+func (PlanContext) VerifyIncarnations(ctx context.Context) error {
+	return verifyIncarnations(ctx)
+}
+
+// IsIncarnationChanged reports whether err is (or wraps) the C3 refusal.
+func (PlanContext) IsIncarnationChanged(err error) bool {
+	return isIncarnationChanged(err)
 }

@@ -68,7 +68,7 @@ func classifyLocalFailure(err, ctxErr error, strict bool) localOutcome {
 		// An authorization refusal is final (ADR-0050 A3), whatever the
 		// strict setting: no other plan is run in its place.
 		return reportToClient
-	case physical.IsIncarnationChanged(err):
+	case statementGuard.IsIncarnationChanged(err):
 		// So is a decision about another relation than the one the
 		// statement reads (ADR-0050 C3).
 		return reportToClient
@@ -202,7 +202,7 @@ func (c *Coordinator) tryLocalFastPath(ctx context.Context, queryID string, logi
 		}
 		// Nor is a statement whose decisions were about another relation
 		// handed to a second plan (ADR-0050 C3).
-		if verr := physical.VerifyIncarnations(ctx); verr != nil {
+		if verr := statementGuard.VerifyIncarnations(ctx); verr != nil {
 			return nil, true, verr
 		}
 		c.logger.Warn("local fast path plan failed, routing to DAG",
@@ -216,7 +216,7 @@ func (c *Coordinator) tryLocalFastPath(ctx context.Context, queryID string, logi
 	sink, ok := pipeline.Sink.(*exec.CollectSink)
 	if !ok {
 		pipeline.Close()
-		if verr := physical.VerifyIncarnations(ctx); verr != nil {
+		if verr := statementGuard.VerifyIncarnations(ctx); verr != nil {
 			return nil, true, verr // ADR-0050 C3
 		}
 		c.logger.Warn("local fast path: unexpected sink type, routing to DAG",
@@ -254,7 +254,7 @@ func (c *Coordinator) tryLocalFastPath(ctx context.Context, queryID string, logi
 		// The bail-out hands the statement to the DAG: the decisions this
 		// attempt took are verified first, and a mismatch refuses it here
 		// rather than letting another plan answer (ADR-0050 C3).
-		if verr := physical.VerifyIncarnations(ctx); verr != nil {
+		if verr := statementGuard.VerifyIncarnations(ctx); verr != nil {
 			return nil, true, verr
 		}
 		if budget {
