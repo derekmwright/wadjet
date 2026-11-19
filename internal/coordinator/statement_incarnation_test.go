@@ -389,27 +389,38 @@ func TestNoIncarnationRefusalWhenNothingChanged(t *testing.T) {
 	f.create(t, ctx, "inc_empty", incSchemaA, nil)
 
 	// A legacy table: record and manifest without an incarnation, as written
-	// before #919.
-	f.create(t, ctx, "inc_legacy", incSchemaA, incRowsA())
-	cid := f.infra.cat.ClusterID()
-	for _, key := range []string{cid + ".table.inc_legacy", cid + ".manifest.inc_legacy"} {
-		raw, _, err := f.infra.kv.Get(key)
-		if err != nil {
-			t.Fatal(err)
+	// before #919. Each arm consumes the legacy shape (its last cell
+	// re-creates the table, which mints an incarnation), so each arm starts
+	// from a freshly legacy table.
+	legacy := func() {
+		t.Helper()
+		if _, err := f.infra.cat.GetTable(ctx, "inc_legacy"); err == nil {
+			if err := f.infra.cat.DropTable(ctx, "inc_legacy"); err != nil {
+				t.Fatal(err)
+			}
 		}
-		var m map[string]any
-		if err := json.Unmarshal(raw, &m); err != nil {
-			t.Fatal(err)
+		f.create(t, ctx, "inc_legacy", incSchemaA, incRowsA())
+		cid := f.infra.cat.ClusterID()
+		for _, key := range []string{cid + ".table.inc_legacy", cid + ".manifest.inc_legacy"} {
+			raw, _, err := f.infra.kv.Get(key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var m map[string]any
+			if err := json.Unmarshal(raw, &m); err != nil {
+				t.Fatal(err)
+			}
+			delete(m, "incarnation")
+			out, _ := json.Marshal(m)
+			if _, err := f.infra.kv.Put(key, out); err != nil {
+				t.Fatal(err)
+			}
 		}
-		delete(m, "incarnation")
-		out, _ := json.Marshal(m)
-		if _, err := f.infra.kv.Put(key, out); err != nil {
-			t.Fatal(err)
+		if inc, _ := f.infra.cat.TableIncarnation(ctx, "inc_legacy"); inc != "" {
+			t.Fatalf("the legacy record still carries incarnation %q", inc)
 		}
 	}
-	if inc, _ := f.infra.cat.TableIncarnation(ctx, "inc_legacy"); inc != "" {
-		t.Fatalf("the legacy record still carries incarnation %q", inc)
-	}
+	legacy()
 	authn, authz := f.provider.Authenticator(), f.provider.Authorizer()
 	f.provider.UpdateWithEvaluator(authn, authz, nil, incPolicy("inc_legacy", "inc_empty"))
 	if err := f.provider.BindError(); err != nil {
@@ -417,18 +428,36 @@ func TestNoIncarnationRefusalWhenNothingChanged(t *testing.T) {
 	}
 
 	stable := map[string]string{
-		"SELECT id, owner FROM inc_empty":                                                        "",
 		"SELECT id, owner FROM inc_legacy WHERE id = 1":                                          "id=1;owner=***;",
 		"SELECT id, owner FROM inc_t WHERE id = 2":                                               "id=2;owner=***;",
 		"SELECT id FROM inc_t WHERE id IN (SELECT id FROM inc_t WHERE owner = '***') AND id = 3": "id=3;",
 	}
-	for _, arm := range []struct {
+	const emptySQL = "SELECT id, owner FROM inc_empty"
+	for i, arm := range []struct {
 		name string
 		c    *Coordinator
 	}{{"fastpath", f.fast}, {"dag", f.dag}} {
+		if i > 0 {
+			legacy()
+		}
 		for sql, want := range stable {
 			if got := pinAnswer(arm.c, f.ctx, sql); got != want {
 				t.Errorf("%s: %s answered %q, want %q", arm.name, sql, got, want)
+			}
+		}
+		// A never-written table (no manifest): the fast path answers no rows.
+		// The stage DAG refuses it with an uncoded error that predates this
+		// guard (measured at base 826565cc, #1678 epic line): recorded here so
+		// a change to either answer is seen, not asserted as correct.
+		got := pinAnswer(arm.c, f.ctx, emptySQL)
+		switch arm.name {
+		case "fastpath":
+			if got != "" {
+				t.Errorf("%s: %s answered %q, want no rows", arm.name, emptySQL, got)
+			}
+		case "dag":
+			if !strings.HasPrefix(got, "ERROR : ") || !strings.Contains(got, "has no dependencies and no ScanFiles") {
+				t.Errorf("%s: %s answered %q, want the base DAG's uncoded no-ScanFiles error", arm.name, emptySQL, got)
 			}
 		}
 		// A system relation has no table identity: it reads the catalog's
@@ -446,7 +475,7 @@ func TestNoIncarnationRefusalWhenNothingChanged(t *testing.T) {
 		// The legacy table, dropped and re-created between the pin and the
 		// decision: the record now carries a minted incarnation and the
 		// pinned manifest none.
-		var got string
+		got = ""
 		fired := atStep("annotated", func() {
 			if err := f.infra.cat.DropTable(ctx, "inc_legacy"); err != nil {
 				t.Fatal(err)
@@ -456,11 +485,6 @@ func TestNoIncarnationRefusalWhenNothingChanged(t *testing.T) {
 		if !fired || !strings.HasPrefix(got, "ERROR 40001: ") {
 			t.Errorf("%s: a re-created legacy table answered %q", arm.name, got)
 		}
-		if err := f.infra.cat.DropTable(ctx, "inc_legacy"); err != nil {
-			t.Fatal(err)
-		}
-		f.create(t, ctx, "inc_legacy", incSchemaA, incRowsA())
-		break // the legacy shape is consumed (re-created with an incarnation)
 	}
 }
 
