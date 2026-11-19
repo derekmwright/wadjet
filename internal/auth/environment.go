@@ -47,6 +47,21 @@ func DecisionEnvironment(ctx context.Context, protocol string) Environment {
 	return env
 }
 
+// WithDecisionTime stamps t as the decision time of every policy decision
+// taken under ctx (DecisionEnvironment), unless the context already carries
+// one. A statement stamps it ONCE, when it is accepted, so the decisions it
+// takes later — the lookups and guards enforcement installs for the plan to
+// ask as it grows — evaluate `env.time` and `env.hour` at the same instant as
+// the first (ADR-0050 A2). Nothing else of the attached environment changes.
+func WithDecisionTime(ctx context.Context, t time.Time) context.Context {
+	env := EnvironmentFromContext(ctx)
+	if !env.Time.IsZero() {
+		return ctx
+	}
+	env.Time = t
+	return context.WithValue(ctx, environmentKey{}, env)
+}
+
 // hostOnly strips the port from a socket address, leaving an address that has
 // none untouched (a bare IPv4, a bare IPv6, an empty string).
 func hostOnly(addr string) string {

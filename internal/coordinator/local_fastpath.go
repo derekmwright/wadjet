@@ -64,6 +64,10 @@ func classifyLocalFailure(err, ctxErr error, strict bool) localOutcome {
 	case errors.Is(err, memory.ErrMemoryExceeded):
 		// The coordinator budgets one process; the fleet has more.
 		return retryOnDAG
+	case sqlerr.StateOf(err) == "42501":
+		// An authorization refusal is final (ADR-0050 A3), whatever the
+		// strict setting: no other plan is run in its place.
+		return reportToClient
 	case errors.Is(err, objstore.ErrCircuitOpen):
 		// S3 unavailable to THIS process — a worker may still reach it.
 		return retryOnDAG
@@ -184,6 +188,13 @@ func (c *Coordinator) tryLocalFastPath(ctx context.Context, queryID string, logi
 		// misleading "routing to DAG" for a deliberate refusal (#803).
 		if sqlerr.StateOf(err) == physical.QueryLimitSQLState {
 			return nil, true, err
+		}
+		// An AUTHORIZATION refusal is final (ADR-0050 A3): the statement is
+		// refused, with the decision's own sentence, and no other plan is
+		// built or run in its place. Routing it to the DAG asked a second
+		// planner the question the first had already answered no to.
+		if refusal, ok := authorizationRefusal(err); ok {
+			return nil, true, refusal
 		}
 		c.logger.Warn("local fast path plan failed, routing to DAG",
 			"query", queryID, "error", err)

@@ -225,6 +225,39 @@ func (c *Coordinator) resolveQueryLimits(ctx context.Context) *config.QueryLimit
 	return c.queryLimits
 }
 
+// statementStepTestHook runs at the named steps of ExecuteSQL's decision
+// sequence ("accepted", "validated", "enforced", "optimized",
+// "distributed"). Tests set it to reload the live provider BETWEEN two steps
+// of one statement, a schedule no scheduler can be relied on to produce (the
+// auth.bindSwapTestHook pattern). Nil in every non-test build.
+var statementStepTestHook func(step string)
+
+func statementStep(step string) {
+	if statementStepTestHook != nil {
+		statementStepTestHook(step)
+	}
+}
+
+// statementAuthKey carries a statement's pinned authorization state on its
+// context, so a re-execution of the SAME statement (the ErrInputLost rerun,
+// which re-enters ExecuteSQL) decides under the state it was accepted with.
+// The value is a *auth.Provider, possibly a typed nil (no provider), which
+// the type assertion still reports as present.
+type statementAuthKey struct{}
+
+// statementAuth returns the statement's pinned authorization state, taking it
+// — the one read of the live provider on the ExecuteSQL path — when ctx does
+// not carry one yet, and stamps the statement's decision time on ctx with it
+// (ADR-0050 A1, A2). A nil provider pins nil: no authorization, as before.
+func (c *Coordinator) statementAuth(ctx context.Context) (context.Context, *auth.Provider) {
+	if pinned, ok := ctx.Value(statementAuthKey{}).(*auth.Provider); ok {
+		return ctx, pinned
+	}
+	pinned := c.authProvider.Pin()
+	ctx = auth.WithDecisionTime(ctx, time.Now())
+	return context.WithValue(ctx, statementAuthKey{}, pinned), pinned
+}
+
 // EnforcesABAC reports whether ExecuteSQL enforces access policies itself.
 // pgwire uses this to decide that routing authed connections through the
 // coordinator is safe (canBypassDB).
@@ -1097,11 +1130,20 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 		res.Error = err.Error()
 	}()
 
+	// ONE authorization state and ONE decision time for the whole statement
+	// (ADR-0050 A1, A2): every decision below — and every lookup and guard
+	// enforcement installs for the plan to ask later — is taken against this
+	// pinned copy, never against the live provider, so a policy reload while
+	// the statement plans or runs applies from the next statement (A4).
+	var stmtAuth *auth.Provider
+	ctx, stmtAuth = c.statementAuth(ctx)
+	statementStep("accepted")
+
 	// The table-function CAPABILITY, BEFORE the binder and before the scan
 	// annotation (ADR-0034, ADR-0039 §3). A denied identity is refused here
 	// with nothing opened, and the context this returns is what lets the
 	// planner read a reader's schema at all.
-	ctx, err = auth.AuthorizeTableFunctions(ctx, c.authProvider, "coordinator", selectInfo)
+	ctx, err = auth.AuthorizeTableFunctions(ctx, stmtAuth, "coordinator", selectInfo)
 	if err != nil {
 		return nil, err
 	}
@@ -1110,9 +1152,10 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 	// binding), against the schema the CALLING IDENTITY can see — a column an
 	// ABAC policy denies is not in this caller's table, so it is not in the
 	// error's "available:" hint either (#859).
-	if err := auth.ValidateStatementColumns(ctx, c.authProvider, c.catalog, selectInfo, "coordinator"); err != nil {
+	if err := auth.ValidateStatementColumns(ctx, stmtAuth, c.catalog, selectInfo, "coordinator"); err != nil {
 		return nil, err
 	}
+	statementStep("validated")
 
 	// Build logical plan
 	logicalPlan, err := logical.BuildFromSelect(selectInfo)
@@ -1136,11 +1179,11 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 	// distributed and local-fast-path executions. Runs BEFORE Optimize so
 	// every downstream consumer (PlanDistributed and tryLocalFastPath)
 	// sees the enforced plan.
-	if c.EnforcesABAC() {
+	if stmtAuth != nil && stmtAuth.Enabled() {
 		// ctx is REBOUND: it carries the column policies onward so the
 		// physical planner applies the same projection to an expression
 		// subquery, which it plans on its own (#859).
-		ctx, logicalPlan, err = auth.EnforcePlanPolicies(ctx, c.authProvider, c.catalog, selectInfo, logicalPlan, "coordinator")
+		ctx, logicalPlan, err = auth.EnforcePlanPolicies(ctx, stmtAuth, c.catalog, selectInfo, logicalPlan, "coordinator")
 		if err != nil {
 			return nil, err
 		}
@@ -1152,6 +1195,7 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 			logicalPlan = logical.InjectRowFilter(logicalPlan, table, filter)
 		}
 	}
+	statementStep("enforced")
 
 	logicalPlan = logical.OptimizeWith(logicalPlan, c.logicalOptions(), scanAnnotator)
 	// The optimizer MINTS scans; those are created after enforcement (#859).
@@ -1159,6 +1203,7 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 	if err != nil {
 		return nil, err
 	}
+	statementStep("optimized")
 	planStr := logicalPlan.PrettyPrint(0)
 
 	// EXPLAIN is answered here, not executed. The statement's whole result is
@@ -1186,6 +1231,7 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 		return res, err
 	}
 
+	statementStep("distributed")
 	// The distributed planner: the local planner with the stage emitter's own
 	// state beside it (dagplan.StagePlanner). Fields the DAG owns —
 	// WorkerCount, the broadcast threshold, dynamic filters — are set on it;

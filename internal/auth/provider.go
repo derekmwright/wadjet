@@ -4,6 +4,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync/atomic"
@@ -48,6 +49,9 @@ type Provider struct {
 	// re-attach that rewrites state is a lost update waiting for a hot reload
 	// to land inside it.
 	bound atomic.Pointer[authState]
+	// pinned marks a per-statement copy made by Pin. Nothing writes one:
+	// BindToCatalog and installState refuse on it (ADR-0050 A1).
+	pinned bool
 }
 
 // bindSwapAttempts bounds the CAS retry in BindToCatalog. A retry happens only
@@ -73,6 +77,9 @@ var bindSwapTestHook func()
 func (p *Provider) BindToCatalog(ctx context.Context, cat *catalog.Catalog) error {
 	if p == nil || cat == nil {
 		return nil
+	}
+	if p.pinned {
+		return errPinnedProvider
 	}
 	for attempt := 0; attempt < bindSwapAttempts; attempt++ {
 		st := p.state.Load()
@@ -124,6 +131,55 @@ func (p *Provider) BindToCatalog(ctx context.Context, cat *catalog.Catalog) erro
 	p.cat.Store(cat)
 	p.bindErr.Store(&err)
 	return err
+}
+
+// errPinnedProvider refuses a write to a per-statement copy (Pin).
+var errPinnedProvider = errors.New("auth: a pinned per-statement authorization state is never " +
+	"updated; install policy sets on the live provider")
+
+// pinReadTestHook runs between Pin's first state load and its verdict load.
+// Tests set it to land a real install inside the read. Nil in every non-test
+// build (the bindSwapTestHook pattern).
+var pinReadTestHook func()
+
+// Pin returns a per-statement copy of p: ONE policy state and the bind verdict
+// that belongs to it, which nothing updates afterwards (ADR-0050 A1). It
+// shares p's audit logger and logger and nothing mutable, so every decision a
+// statement takes through the copy is made against the same state however
+// often the live provider is reloaded meanwhile.
+//
+// The pair is CONSISTENT: it is the provider's (state, verdict) at one instant
+// of the read. It is read state, verdict, state again, and retried when the
+// state moved. The plain two-load read is not enough: a writer installs the
+// state first and clears the verdict second (installState, BindToCatalog), so
+// a reader holding an OLD state that then loads a NEWLY cleared verdict gets
+// (old state, no refusal) — a pair that held at no moment, and fails open when
+// the old state was being refused. With the re-check the verdict was loaded
+// while the state was still the one returned; no writer ever re-stores a state
+// pointer, so equal pointers mean the state did not move in between. The one
+// pair the writers' own store order can expose is (new state, the previous
+// refusal), between an install's state store and its verdict clear: a
+// transient refusal, which fails closed.
+//
+// Pin of a nil provider is nil; Pin of a pinned copy is the copy itself.
+func (p *Provider) Pin() *Provider {
+	if p == nil || p.pinned {
+		return p
+	}
+	for {
+		st := p.state.Load()
+		if pinReadTestHook != nil {
+			pinReadTestHook()
+		}
+		be := p.bindErr.Load()
+		if p.state.Load() != st {
+			continue
+		}
+		c := &Provider{logger: p.logger, audit: p.audit, pinned: true}
+		c.state.Store(st)
+		c.bindErr.Store(be)
+		return c
+	}
 }
 
 // AttachProvider binds p to cat from a constructor that has no error return.
@@ -232,6 +288,9 @@ func (p *Provider) Enabled() bool {
 // attached to a catalog is the documented embedded shape, and refusing there
 // would take a working deployment down rather than close a hole.
 func (p *Provider) installState(st *authState) error {
+	if p.pinned {
+		return errPinnedProvider
+	}
 	cat := p.cat.Load()
 	if cat == nil {
 		p.state.Store(st)
