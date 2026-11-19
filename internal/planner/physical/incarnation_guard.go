@@ -38,8 +38,22 @@ func isIncarnationChanged(err error) bool {
 	return errors.As(err, &ic)
 }
 
-// incarnationGuard brackets every authorization decision a statement takes
-// about a base table (ADR-0050 §3):
+// incarnationGuard holds a coordinator statement to one relation per table
+// name (ADR-0050 §3, amended 2026-11-19: every statement, with or without an
+// authorization provider). Two halves share it.
+//
+// Every READ of a table's record under the statement (the binder's column
+// list and star expansion, the scan annotation, the physical planner's
+// declared schema, the stage planner, a route's local pipeline, a subquery
+// planned while the plan runs) is observed (catalog.TableReadObserver). The
+// first read of a table pins its manifest in the statement's snapshot before
+// the record reaches its reader (C1), and every read compares the record's
+// incarnation with the pin's; a mismatch, or a record gone under a pinned
+// relation, is kept and refused at the next verify (C2, C3). This reads no
+// extra record: the record compared is the one the reader asked for.
+//
+// The authorization decisions bracket themselves too, as slice 2 built them,
+// because a decision can be taken by name without reading the record:
 //
 //   - C1, pin first: PinForDecision reads the table's manifest through the
 //     statement's ManifestSnapshot — the pin every planner and scan of the
@@ -65,6 +79,10 @@ type incarnationGuard struct {
 	// in first-decision order so a refusal names the first relation it finds.
 	dirty  []string
 	isDirt map[string]bool
+	// changed is the first table a record read found under another
+	// incarnation than the statement pinned (or gone under a pinned
+	// relation). Never cleared: the refusal is final (C3).
+	changed string
 }
 
 type incarnationGuardKey struct{}
@@ -86,10 +104,47 @@ func withIncarnationGuard(ctx context.Context, cat *catalog.Catalog) context.Con
 	if snap == nil {
 		return ctx
 	}
-	return context.WithValue(ctx, incarnationGuardKey{}, &incarnationGuard{
+	g := &incarnationGuard{
 		cat: cat, snap: snap,
 		resolved: map[string]string{}, isDirt: map[string]bool{},
-	})
+	}
+	ctx = context.WithValue(ctx, incarnationGuardKey{}, g)
+	return catalog.WithTableReadObserver(ctx, g.observeRead)
+}
+
+// observeRead sees every table-record read the statement makes. A record
+// read pins the table's manifest (a memoized no-op once anything has) and
+// must name the pinned incarnation. A read that found no record refuses only
+// when a relation is pinned under the name: the table was dropped under the
+// statement. A name with no record (a system relation, a spelling probe)
+// pins nothing.
+//
+// A table whose pin is itself an error (no manifest under the name) is not
+// compared: no relation's files can be read under it in this statement.
+func (g *incarnationGuard) observeRead(ctx context.Context, name string, meta *catalog.TableMeta, err error) {
+	switch {
+	case err == nil && meta != nil:
+		// The pin. Its own reads are not observed.
+		m, merr := g.snap.Get(catalog.WithoutTableReadObserver(ctx), g.cat, name)
+		if merr != nil || m == nil || m.Incarnation == meta.Incarnation {
+			return
+		}
+	case errors.Is(err, catalog.ErrTableNotFound):
+		g.snap.mu.Lock()
+		e := g.snap.byTbl[name]
+		g.snap.mu.Unlock()
+		if e == nil || e.err != nil || e.manifest == nil {
+			return
+		}
+	default:
+		// The catalog could not answer: the reader sees that error itself.
+		return
+	}
+	g.mu.Lock()
+	if g.changed == "" {
+		g.changed = name
+	}
+	g.mu.Unlock()
 }
 
 func incarnationGuardFrom(ctx context.Context) *incarnationGuard {
@@ -159,6 +214,11 @@ func verifyIncarnations(ctx context.Context) error {
 		return nil
 	}
 	g.mu.Lock()
+	if g.changed != "" {
+		name := g.changed
+		g.mu.Unlock()
+		return &IncarnationChangedError{Table: name}
+	}
 	tables := g.dirty
 	g.dirty = nil
 	g.isDirt = map[string]bool{}

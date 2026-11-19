@@ -175,7 +175,10 @@ func userTableCols(ctx context.Context, cat *catalog.Catalog, name string) ([]co
 			return v.(tableDesc).cols, true
 		}
 	}
-	meta, err := cat.GetTable(ctx, name)
+	// A listing, not a read of the relation: a system relation describes
+	// every table and reads none of their files, so it is outside a
+	// statement's table-incarnation check (ADR-0050 §3) and pins nothing.
+	meta, err := cat.GetTable(catalog.WithoutTableReadObserver(ctx), name)
 	if err != nil || meta == nil {
 		return nil, false
 	}

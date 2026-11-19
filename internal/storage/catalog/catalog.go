@@ -665,8 +665,18 @@ func AmbiguousTableError(name string, candidates []string) error {
 		name, len(candidates), strings.Join(candidates, ", "))
 }
 
-// GetTable returns the metadata for a table.
-func (c *Catalog) GetTable(_ context.Context, name string) (*TableMeta, error) {
+// GetTable returns the metadata for a table. A context carrying a
+// TableReadObserver is told of the read and its outcome before the caller
+// sees it (table_read_observer.go).
+func (c *Catalog) GetTable(ctx context.Context, name string) (*TableMeta, error) {
+	meta, err := c.getTable(name)
+	if obs := tableReadObserverFrom(ctx); obs != nil {
+		obs(ctx, name, meta, err)
+	}
+	return meta, err
+}
+
+func (c *Catalog) getTable(name string) (*TableMeta, error) {
 	var meta TableMeta
 	if err := c.getJSON(c.key("table."+name), &meta); err != nil {
 		if err == ErrKeyNotFound {

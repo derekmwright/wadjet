@@ -92,6 +92,22 @@ type incFixture struct {
 
 func newIncFixture(t *testing.T, kvWrap func(catalog.MetaKV) catalog.MetaKV) *incFixture {
 	t.Helper()
+	return newIncFixtureMode(t, kvWrap, incProviderEnabled)
+}
+
+// The three authorization configurations ADR-0050 §3 (amended) covers: the
+// incarnation check runs for every coordinator statement, with an enabled
+// provider, a disabled one, and none at all.
+const (
+	incProviderEnabled  = "enabled"
+	incProviderDisabled = "disabled"
+	incProviderNone     = "none"
+)
+
+var incProviderModes = []string{incProviderNone, incProviderDisabled, incProviderEnabled}
+
+func newIncFixtureMode(t *testing.T, kvWrap func(catalog.MetaKV) catalog.MetaKV, mode string) *incFixture {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	t.Cleanup(cancel)
 	logs := &syncBuf{}
@@ -111,6 +127,24 @@ func newIncFixture(t *testing.T, kvWrap func(catalog.MetaKV) catalog.MetaKV) *in
 		[]map[string]any{{"id": int64(2)}, {"id": int64(3)}})
 	f.fast = tmdCoordinator(t, ctx, infra, func(c *Config) { c.LocalFastPathBytes = DefaultLocalFastPathBytes })
 	f.dag = tmdCoordinator(t, ctx, infra)
+	switch mode {
+	case incProviderNone:
+		f.ctx = ctx
+		return f
+	case incProviderDisabled:
+		authn, authz := auth.New(auth.Config{Enabled: false})
+		f.provider = auth.NewProvider(authn, authz, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		if f.provider.Enabled() {
+			t.Fatal("the disabled provider reports enabled")
+		}
+		for _, c := range []*Coordinator{f.fast, f.dag} {
+			if err := c.SetAuthProvider(f.provider); err != nil {
+				t.Fatal(err)
+			}
+		}
+		f.ctx = ctx
+		return f
+	}
 	authn, authz := auth.New(auth.Config{
 		Enabled: true,
 		APIKeys: []auth.APIKeyDef{{Key: "k", Name: "analyst", Role: "analyst"}},

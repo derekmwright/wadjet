@@ -1149,16 +1149,16 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 	var stmtAuth *auth.Provider
 	ctx, stmtAuth = c.statementAuth(ctx)
 
-	// Every authorization decision about a base table is about the relation
-	// the statement reads (ADR-0050 §3): the decision pins the table's
-	// manifest first (C1), and the decisions are verified against the table
-	// record after (C2) — once below, after enforcement, before anything
-	// runs; wherever the fast path would hand the statement to another
-	// plan; before the DAG dispatches; and here, once more, for the
-	// decisions taken while the chosen plan was physically planned and run.
-	// A mismatch refuses the statement with 40001 and nothing else is tried
-	// (C3). No decision is taken without an enabled provider, so this reads
-	// nothing then.
+	// The statement reads one relation per table name (ADR-0050 §3, amended
+	// 2026-11-19: with an authorization provider enabled, disabled or
+	// absent). Every read of a table's record under ctx pins the table's
+	// manifest first (C1) and is compared with that pin; every authorization
+	// decision pins first too, and is verified against the record after.
+	// Both are checked (C2) once below, after enforcement, before anything
+	// runs; wherever the fast path would hand the statement to another plan;
+	// before the DAG dispatches; and here, once more, for what the chosen
+	// plan read while it was physically planned and run. A mismatch refuses
+	// the statement with 40001 and nothing else is tried (C3).
 	ctx = statementGuard.WithIncarnationGuard(ctx, c.catalog)
 	defer func() {
 		verr := statementGuard.VerifyIncarnations(ctx)
