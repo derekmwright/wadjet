@@ -367,7 +367,9 @@ func testAFastPathAuthorizationRefusalIsFinal(t *testing.T) {
 			if len(steps) > 0 {
 				last = steps[len(steps)-1]
 			}
-			if last != "optimized" && last != "distributed" {
+			// "verified" (ADR-0050 slice 2) is the step after enforcement
+			// was verified, the last before the fast path plans.
+			if last != "verified" && last != "distributed" {
 				t.Fatalf("refused before physical planning (last step %q): the cell no longer "+
 					"exercises the fast path's refusal: %v", last, err)
 			}

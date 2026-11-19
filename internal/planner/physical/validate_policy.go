@@ -55,6 +55,9 @@ type policedColumnSource struct {
 }
 
 func (p policedColumnSource) GetTable(ctx context.Context, name string) (*catalog.TableMeta, error) {
+	// The binder's read of the schema is the first read the table decision
+	// below is made over: the statement's pin comes first (ADR-0050 C1).
+	PinForDecision(ctx, name)
 	meta, err := p.src.GetTable(ctx, name)
 	if err != nil || meta == nil {
 		return meta, err
@@ -235,6 +238,8 @@ func (p *Planner) policyTableColumns(ctx context.Context, table string) []string
 	if p.Catalog == nil {
 		return nil
 	}
+	// The column list a policy projection is built over (ADR-0050 C1).
+	PinForDecision(ctx, table)
 	meta, err := p.Catalog.GetTable(ctx, table)
 	if err != nil || meta == nil {
 		return nil

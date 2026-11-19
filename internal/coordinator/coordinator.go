@@ -226,8 +226,8 @@ func (c *Coordinator) resolveQueryLimits(ctx context.Context) *config.QueryLimit
 }
 
 // statementStepTestHook runs at the named steps of ExecuteSQL's decision
-// sequence ("accepted", "validated", "enforced", "optimized",
-// "distributed"). Tests set it to reload the live provider BETWEEN two steps
+// sequence ("accepted", "validated", "annotated", "enforced", "optimized",
+// "verified", "distributed"). Tests set it to reload the live provider BETWEEN two steps
 // of one statement, a schedule no scheduler can be relied on to produce (the
 // auth.bindSwapTestHook pattern). Nil in every non-test build.
 var statementStepTestHook func(step string)
@@ -1057,7 +1057,13 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 	// OWN physical.Planner below, and physical.NewPlannerForContext is what
 	// makes them share this one snapshot instead of each reading the
 	// catalog independently.
-	ctx = dagplan.WithManifestSnapshot(ctx, physical.NewManifestSnapshot())
+	//
+	// A re-execution of the SAME statement (the ErrInputLost rerun, which
+	// re-enters here) keeps the pin it was accepted with: one pin per
+	// statement, shared by every planning run (ADR-0050 C4).
+	if !physical.HasManifestSnapshot(ctx) {
+		ctx = dagplan.WithManifestSnapshot(ctx, physical.NewManifestSnapshot())
+	}
 
 	// Start OTel span for the query if tracing is enabled
 	if c.otel != nil {
@@ -1137,6 +1143,28 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 	// the statement plans or runs applies from the next statement (A4).
 	var stmtAuth *auth.Provider
 	ctx, stmtAuth = c.statementAuth(ctx)
+
+	// Every authorization decision about a base table is about the relation
+	// the statement reads (ADR-0050 §3): the decision pins the table's
+	// manifest first (C1), and the decisions are verified against the table
+	// record after (C2) — once below, after enforcement, before anything
+	// runs; wherever the fast path would hand the statement to another
+	// plan; before the DAG dispatches; and here, once more, for the
+	// decisions taken while the chosen plan was physically planned and run.
+	// A mismatch refuses the statement with 40001 and nothing else is tried
+	// (C3). No decision is taken without an enabled provider, so this reads
+	// nothing then.
+	ctx = physical.WithIncarnationGuard(ctx, c.catalog)
+	defer func() {
+		verr := physical.VerifyIncarnations(ctx)
+		if verr == nil || (err != nil && !physical.IsIncarnationChanged(verr)) {
+			return
+		}
+		if res != nil {
+			_ = res.Close()
+		}
+		res, err = nil, verr
+	}()
 	statementStep("accepted")
 
 	// The table-function CAPABILITY, BEFORE the binder and before the scan
@@ -1172,6 +1200,7 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 		physical.NewPlannerForContext(ctx, c.catalog).AnnotateScanColumns(ctx, plan)
 	}
 	scanAnnotator(logicalPlan)
+	statementStep("annotated")
 
 	// ABAC enforcement at plan level — the same auth.EnforcePlanPolicies
 	// the embedded engine applies (table denial, row filters, column
@@ -1204,6 +1233,12 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 		return nil, err
 	}
 	statementStep("optimized")
+	// C2 for every decision enforcement took, the late ones the optimizer
+	// asked included, before any plan is physically planned or run.
+	if err := physical.VerifyIncarnations(ctx); err != nil {
+		return nil, err
+	}
+	statementStep("verified")
 	planStr := logicalPlan.PrettyPrint(0)
 
 	// EXPLAIN is answered here, not executed. The statement's whole result is
@@ -1416,6 +1451,11 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 	c.logger.Info("routing to native DAG executor",
 		"query", queryID, "stages", len(physStages))
 	ctx = withQueryPGCategories(ctx, queryCats)
+	// C2 for the decisions the stage planner took, before anything is
+	// dispatched (ADR-0050).
+	if err := physical.VerifyIncarnations(ctx); err != nil {
+		return nil, err
+	}
 	gr, gerr := c.executeStageDAG(ctx, queryID, sql, physStages, c.workers.Count())
 	if gerr != nil {
 		// ErrInputLost: a producer died before its background upload landed

@@ -68,6 +68,10 @@ func classifyLocalFailure(err, ctxErr error, strict bool) localOutcome {
 		// An authorization refusal is final (ADR-0050 A3), whatever the
 		// strict setting: no other plan is run in its place.
 		return reportToClient
+	case physical.IsIncarnationChanged(err):
+		// So is a decision about another relation than the one the
+		// statement reads (ADR-0050 C3).
+		return reportToClient
 	case errors.Is(err, objstore.ErrCircuitOpen):
 		// S3 unavailable to THIS process — a worker may still reach it.
 		return retryOnDAG
@@ -196,6 +200,11 @@ func (c *Coordinator) tryLocalFastPath(ctx context.Context, queryID string, logi
 		if refusal, ok := authorizationRefusal(err); ok {
 			return nil, true, refusal
 		}
+		// Nor is a statement whose decisions were about another relation
+		// handed to a second plan (ADR-0050 C3).
+		if verr := physical.VerifyIncarnations(ctx); verr != nil {
+			return nil, true, verr
+		}
 		c.logger.Warn("local fast path plan failed, routing to DAG",
 			"query", queryID, "error", err)
 		return nil, false, nil
@@ -207,6 +216,9 @@ func (c *Coordinator) tryLocalFastPath(ctx context.Context, queryID string, logi
 	sink, ok := pipeline.Sink.(*exec.CollectSink)
 	if !ok {
 		pipeline.Close()
+		if verr := physical.VerifyIncarnations(ctx); verr != nil {
+			return nil, true, verr // ADR-0050 C3
+		}
 		c.logger.Warn("local fast path: unexpected sink type, routing to DAG",
 			"query", queryID)
 		return nil, false, nil
@@ -235,8 +247,17 @@ func (c *Coordinator) tryLocalFastPath(ctx context.Context, queryID string, logi
 				"note", "set WADJET_FASTPATH_STRICT=0 to retry such failures on the DAG")
 			return nil, true, err
 		}
-		if errors.Is(err, exec.ErrCollectBudget) {
+		budget := errors.Is(err, exec.ErrCollectBudget)
+		if budget {
 			c.localBails.Add(1)
+		}
+		// The bail-out hands the statement to the DAG: the decisions this
+		// attempt took are verified first, and a mismatch refuses it here
+		// rather than letting another plan answer (ADR-0050 C3).
+		if verr := physical.VerifyIncarnations(ctx); verr != nil {
+			return nil, true, verr
+		}
+		if budget {
 			c.logger.Info("local fast path result over budget, re-dispatching as DAG",
 				"query", queryID, "budget_bytes", sink.MaxBytes)
 		} else {

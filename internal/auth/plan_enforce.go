@@ -92,6 +92,11 @@ func EnforcePlanPolicies(ctx context.Context, provider *Provider, cat *catalog.C
 		// carried the RULE ID, which tells a refused caller the name of the
 		// control that stopped them; that belongs in the audit log and
 		// nowhere else.
+		//
+		// Pinned first: the decision below is about the relation whose
+		// manifest the statement reads (ADR-0050 C1; the coordinator's
+		// statement verifies after, C2 — a no-op on a door with no pin).
+		physical.PinForDecision(ctx, tableName)
 		if err := tableAccess(ctx, provider, tableName, ActionRead, protocol); err != nil {
 			return ctx, nil, err
 		}
@@ -130,6 +135,7 @@ func EnforcePlanPolicies(ctx context.Context, provider *Provider, cat *catalog.C
 		base := ctx
 		ctx = logical.ContextWithPolicyLookup(ctx,
 			func(table string) ([]logical.ColumnPolicy, string, error) {
+				physical.PinForDecision(base, table) // ADR-0050 C1
 				if err := tableAccess(base, provider, table, ActionRead, protocol); err != nil {
 					return nil, "", err
 				}
@@ -213,6 +219,7 @@ func EnforceOptimizedPlan(ctx context.Context, cat *catalog.Catalog, plan *logic
 		if cat == nil {
 			return nil
 		}
+		physical.PinForDecision(ctx, table) // ADR-0050 C1
 		meta, cerr := cat.GetTable(ctx, table)
 		if cerr != nil || meta == nil {
 			return nil
@@ -431,6 +438,10 @@ func (r *policyResolver) columnPolicies(table string) ([]logical.ColumnPolicy, e
 // table access, then the column obligations, then the row filter — so a
 // relation discovered later is policed exactly as one discovered early.
 func (r *policyResolver) lookup(table string) ([]logical.ColumnPolicy, string, error) {
+	// A LATE decision — asked when a pass meets a scan after enforcement —
+	// is pinned first like every other (ADR-0050 C1); the statement verifies
+	// it after (C2).
+	physical.PinForDecision(r.ctx, table)
 	td := r.decide(table)
 	if !td.Allowed {
 		return nil, "", sqlerr.New("42501", "permission denied for table %q", table)
@@ -493,6 +504,7 @@ func (r *policyResolver) tableColumns(table string) []string {
 	}
 	var cols []string
 	if r.cat != nil {
+		physical.PinForDecision(r.ctx, table) // ADR-0050 C1
 		// `GetTable` keys BYTE-EXACTLY, and the name here is whichever
 		// spelling the statement carried — folded, for an unquoted reference
 		// (#731) — while the catalog holds the parquet file's spelling. A
@@ -610,6 +622,7 @@ func (r *policyResolver) maskExpression(explicit, table, column string) string {
 		return explicit
 	}
 	if r.cat != nil {
+		physical.PinForDecision(r.ctx, table) // ADR-0050 C1
 		if meta, err := r.cat.GetTable(r.ctx, table); err == nil && meta != nil {
 			for _, c := range meta.Schema.Columns {
 				if !strings.EqualFold(c.Name, column) {
