@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/derekmwright/wadjet/internal/engine/exec"
+	"github.com/derekmwright/wadjet/internal/planner/physical"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/ingest"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
@@ -338,9 +339,13 @@ func TestGroupingSetDrain(t *testing.T) {
 		// clones never spill, so only the cells whose rows reach the primary
 		// can). ForceSmallSpillRuns lowers the raw-row flush target below its
 		// 64 MiB floor. The arm asserts that cells spilled and how many; the
-		// forced arm above is the deterministic one.
+		// forced arm above is the deterministic one. At this budget nearly
+		// every row-group load waits out the file-load admission wait (2s)
+		// before it is forced; across 440 cells that alone ran past CI's 8m
+		// package timeout, so the arm forces at once instead.
 		db := gsdOpen(t, ctx, 1<<20)
 		defer exec.ForceSmallSpillRuns(4096)()
+		defer physical.ForceFileLoadReserveWait(0)()
 		spilled, ran := 0, 0
 		for _, c := range cells {
 			if !strings.HasPrefix(c.name, "gsd_b/") {

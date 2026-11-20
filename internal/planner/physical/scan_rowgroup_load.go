@@ -243,7 +243,7 @@ func (s *rgSlabs) advance() error {
 	// same call the whole-file load uses, at row-group granularity, and
 	// released at row-group granularity. A scan holding nothing never waits:
 	// the floor that makes this deadlock-free.
-	wait := fileLoadReserveWait
+	wait := fileLoadReserveWait()
 	if s.inner.residentSlabs.Load() == 0 {
 		wait = 0
 	}

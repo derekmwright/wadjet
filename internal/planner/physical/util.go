@@ -500,7 +500,7 @@ func (s *fileSlot) ensureLoaded(inner *scanSourceInner, ctx context.Context) (*p
 	// paths) or releaseRG (with the buffer).
 	if inner.memTracker != nil && s.entry.SizeBytes > 0 {
 		if memory.ReserveOrForce(ctx, inner.memTracker, inner.spillMgr, s.entry.SizeBytes,
-			fileLoadReserveWait, memory.ForceScanFileLoad) {
+			fileLoadReserveWait(), memory.ForceScanFileLoad) {
 			s.forcedBytes = s.entry.SizeBytes
 		}
 		s.chargedBytes = s.entry.SizeBytes
@@ -567,10 +567,33 @@ func (s *fileSlot) ensureLoaded(inner *scanSourceInner, ctx context.Context) (*p
 	return s.nativeReader, nil
 }
 
-// fileLoadReserveWait bounds how long a file load waits for a clean
+// defaultFileLoadReserveWait bounds how long a file load waits for a clean
 // reservation after asking operators for relief. Past it the reservation
 // is forced — the load is never failed or deadlocked on the budget.
-const fileLoadReserveWait = 2 * time.Second
+const defaultFileLoadReserveWait = 2 * time.Second
+
+// fileLoadReserveWaitNanos is the wait in force; tests lower it with
+// ForceFileLoadReserveWait. Read with fileLoadReserveWait.
+var fileLoadReserveWaitNanos atomic.Int64
+
+func init() { fileLoadReserveWaitNanos.Store(int64(defaultFileLoadReserveWait)) }
+
+// fileLoadReserveWait is how long a file or row-group load waits for a clean
+// reservation before forcing it.
+func fileLoadReserveWait() time.Duration {
+	return time.Duration(fileLoadReserveWaitNanos.Load())
+}
+
+// ForceFileLoadReserveWait sets the file-load admission wait and returns the
+// restore. TEST-ONLY: a gate that runs hundreds of queries under a budget too
+// small for a single row group pays the full wait on nearly every row-group
+// load (TestGroupingSetDrain's budget arm took longer than CI's 8m package
+// timeout). The wait changes only how long a load waits before it is forced,
+// never whether it is admitted, so a gate's answers do not depend on it.
+func ForceFileLoadReserveWait(d time.Duration) func() {
+	prev := fileLoadReserveWaitNanos.Swap(int64(d))
+	return func() { fileLoadReserveWaitNanos.Store(prev) }
+}
 
 // releaseCharge releases the memTracker reservation made for this slot's
 // data buffer. Caller must hold s.mu.
