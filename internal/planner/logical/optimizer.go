@@ -1290,6 +1290,11 @@ func tryDecorrelateScalarSubquery(pred Predicate, outerTables map[string]bool, o
 	if len(info.Columns) != 1 || len(info.Tables) == 0 {
 		return nil, pred, false
 	}
+	// ...whose body is one ungrouped aggregate: a clause this rewrite has no
+	// place for declines it to the per-row re-run (#1701).
+	if !scalarBodyIsReproduced(info) {
+		return nil, pred, false
+	}
 
 	// Check for correlated references. The WITH items in scope are part of
 	// the resolver: a CTE reference in the subquery's FROM is a relation with
@@ -1461,6 +1466,10 @@ func tryDecorrelateScalarSubquery(pred Predicate, outerTables map[string]bool, o
 	if aggFunc == nil {
 		return nil, pred, false
 	}
+	emptyValue, coalesceEmpty, declineEmpty := emptyMatchValue(aggFunc.Name)
+	if declineEmpty {
+		return nil, pred, false
+	}
 
 	// Build aggregate expression
 	aggOutputCol := plansql.SlotName(plansql.SlotScalar, idx)
@@ -1496,6 +1505,11 @@ func tryDecorrelateScalarSubquery(pred Predicate, outerTables map[string]bool, o
 	// For MIN(x) → ColRef("__scalar_0")
 	// For 0.2 * AVG(x) → BinaryOp(0.2, *, ColRef("__scalar_0"))
 	replacementExpr := plansql.ReplaceAggregate(selectAST, aggOutputCol)
+	// An outer row whose key matches no inner row reads the LEFT join's NULL
+	// pad; COUNT over that empty match is 0, not NULL (#1701).
+	if coalesceEmpty {
+		replacementExpr = coalesceSlot(replacementExpr, aggOutputCol, emptyValue)
+	}
 
 	// Build LEFT JOIN condition. The keys ride on the node so
 	// repairDecorrelatedSpelling settles the probe side's text once

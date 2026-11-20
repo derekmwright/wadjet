@@ -418,21 +418,18 @@ var gsKept = map[string]struct {
 	"plain/scalarSum/nomatch":           {want: "ERR 0A000", why: gsWhyDerived},
 	"plain/inWhere/match":               {want: "ERR 0A000", why: gsWhyDerived},
 	"plain/inWhere/nomatch":             {want: "ERR 0A000", why: gsWhyDerived},
-	"plain/whereCompare/match":          {want: "1", why: gsWhy1701},
 	"nogroup/scalarCount/match":         {want: "ERR 0A000", why: gsWhyDerived},
 	"nogroup/scalarCount/nomatch":       {want: "ERR 0A000", why: gsWhyDerived},
 	"nogroup/scalarSum/match":           {want: "ERR 0A000", why: gsWhyDerived},
 	"nogroup/scalarSum/nomatch":         {want: "ERR 0A000", why: gsWhyDerived},
 	"nogroup/inWhere/match":             {want: "ERR 0A000", why: gsWhyDerived},
 	"nogroup/inWhere/nomatch":           {want: "ERR 0A000", why: gsWhyDerived},
-	"nogroup/whereCompare/nomatch":      {want: "(none)", why: gsWhy1701},
 	"rollupA/scalarCount/match":         {want: "ERR 0A000", why: gsWhyDerived},
 	"rollupA/scalarCount/nomatch":       {want: "ERR 0A000", why: gsWhyDerived},
 	"rollupA/scalarSum/match":           {want: "ERR 0A000", why: gsWhyDerived},
 	"rollupA/scalarSum/nomatch":         {want: "ERR 0A000", why: gsWhyDerived},
 	"rollupA/inWhere/match":             {want: "ERR 0A000", why: gsWhyDerived},
 	"rollupA/inWhere/nomatch":           {want: "ERR 0A000", why: gsWhyDerived},
-	"rollupA/whereCompare/nomatch":      {want: "(none)", why: gsWhy1701},
 	"rollupA/lateral/match":             {want: "(none)", why: gsWhy1702},
 	"rollupA/lateral/nomatch":           {want: "(none)", why: gsWhy1702},
 	"rollupA/lateralLeft/match":         {want: "1,NULL | 2,NULL", why: gsWhy1702},
@@ -443,7 +440,6 @@ var gsKept = map[string]struct {
 	"rollupAB/scalarSum/nomatch":        {want: "ERR 0A000", why: gsWhyDerived},
 	"rollupAB/inWhere/match":            {want: "ERR 0A000", why: gsWhyDerived},
 	"rollupAB/inWhere/nomatch":          {want: "ERR 0A000", why: gsWhyDerived},
-	"rollupAB/whereCompare/nomatch":     {want: "(none)", why: gsWhy1701},
 	"rollupAB/lateral/match":            {want: "(none)", why: gsWhy1702},
 	"rollupAB/lateral/nomatch":          {want: "(none)", why: gsWhy1702},
 	"rollupAB/lateralLeft/match":        {want: "1,NULL | 2,NULL", why: gsWhy1702},
@@ -454,7 +450,6 @@ var gsKept = map[string]struct {
 	"cubeAB/scalarSum/nomatch":          {want: "ERR 0A000", why: gsWhyDerived},
 	"cubeAB/inWhere/match":              {want: "ERR 0A000", why: gsWhyDerived},
 	"cubeAB/inWhere/nomatch":            {want: "ERR 0A000", why: gsWhyDerived},
-	"cubeAB/whereCompare/nomatch":       {want: "(none)", why: gsWhy1701},
 	"cubeAB/lateral/match":              {want: "(none)", why: gsWhy1702},
 	"cubeAB/lateral/nomatch":            {want: "(none)", why: gsWhy1702},
 	"cubeAB/lateralLeft/match":          {want: "1,NULL | 2,NULL", why: gsWhy1702},
@@ -465,7 +460,6 @@ var gsKept = map[string]struct {
 	"setsABE/scalarSum/nomatch":         {want: "ERR 0A000", why: gsWhyDerived},
 	"setsABE/inWhere/match":             {want: "ERR 0A000", why: gsWhyDerived},
 	"setsABE/inWhere/nomatch":           {want: "ERR 0A000", why: gsWhyDerived},
-	"setsABE/whereCompare/nomatch":      {want: "(none)", why: gsWhy1701},
 	"setsABE/lateral/match":             {want: "(none)", why: gsWhy1702},
 	"setsABE/lateral/nomatch":           {want: "(none)", why: gsWhy1702},
 	"setsABE/lateralLeft/match":         {want: "1,NULL | 2,NULL", why: gsWhy1702},
@@ -476,7 +470,6 @@ var gsKept = map[string]struct {
 	"setsEE/scalarSum/nomatch":          {want: "ERR 0A000", why: gsWhyDerived},
 	"setsEE/inWhere/match":              {want: "ERR 0A000", why: gsWhyDerived},
 	"setsEE/inWhere/nomatch":            {want: "ERR 0A000", why: gsWhyDerived},
-	"setsEE/whereCompare/nomatch":       {want: "(none)", why: gsWhy1701},
 	"setsEE/lateral/match":              {want: "1,0 | 2,0", why: gsWhy1702},
 	"setsEE/lateral/nomatch":            {want: "3,0 | 4,0", why: gsWhy1702},
 	"setsEE/lateralLeft/match":          {want: "1,0 | 2,0", why: gsWhy1702},
@@ -514,12 +507,10 @@ var gsKept = map[string]struct {
 }
 
 const (
-	// #1701: a correlated scalar subquery compared in WHERE is decorrelated to
-	// a join plus an aggregate grouped by the correlation key, which drops
-	// the body's GROUP BY / ORDER BY / LIMIT and answers NULL for a COUNT over
-	// an empty match. Not specific to grouping sets: the plain and ungrouped
-	// controls are pinned too.
-	gsWhy1701 = "#1701, WHERE-comparison scalar decorrelation drops the body's clauses"
+	// The whereCompare cells (#1701) are no longer kept: a grouped body
+	// declines the WHERE-comparison decorrelation and a COUNT reads 0 over an
+	// empty match (where_compare_scalar_arms_test.go).
+	//
 	// #1702: LATERAL decorrelation adds the correlation key to the GROUP BY
 	// list but not to the grouping sets, so every set emits the key as NULL
 	// and the join matches nothing (INNER: no rows; LEFT: NULL pads).
