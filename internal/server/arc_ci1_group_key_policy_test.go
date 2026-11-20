@@ -38,9 +38,11 @@ func TestArcCI1GroupKeyByBindingNeverPublishesAPolicedValue(t *testing.T) {
 		maskCol string
 		// mixed marks a key and a term spelled one qualified and one bare in
 		// the direction (or over the join) the spelling rule refuses: the
-		// embedded engine's doors answer it by binding, every door through
-		// the coordinator or the http door's local path keeps the base 42803
-		// (ADR-0047, Stages: stage 5) — a refusal there that starts answering fails here.
+		// embedded engine's doors answer it by binding, and so does the
+		// coordinator's local fast path, which plans the bound statement
+		// (ADR-0050 section 1). Every door that reaches the stage DAG or the
+		// http door's local path keeps the base 42803 (ADR-0047, Stages:
+		// stage 5) — a refusal there that starts answering fails here.
 		mixed bool
 	}{
 		{"maskedKeyItemQual", `SELECT upper(e.ssn) AS k, count(*) AS c FROM e7emp e GROUP BY upper(ssn)`, "k", false},
@@ -55,7 +57,11 @@ func TestArcCI1GroupKeyByBindingNeverPublishesAPolicedValue(t *testing.T) {
 		{"deniedKey", `SELECT e.salary + 1 AS k, count(*) AS c FROM e7emp e GROUP BY salary + 1`, "", false},
 		{"deniedKeyOverJoin", `SELECT salary + 1 AS k, count(*) AS c FROM e7emp e JOIN e7other o ON o.id = e.id GROUP BY e.salary + 1`, "", false},
 	}
-	embeddedDoors := map[string]bool{"embedded/single": true, "embedded/spilled": true, "pgwire/single": true}
+	// The doors that plan the statement bound. embedded/dag-fastpath joined
+	// them with ADR-0050 section 1 (2026-11-20): before it, that door refused
+	// the mixed cells 42803. Its answers pass through the same leak and mask
+	// assertions below as every other answered pair.
+	embeddedDoors := map[string]bool{"embedded/single": true, "embedded/spilled": true, "pgwire/single": true, "embedded/dag-fastpath": true}
 	answered, mixedAnswered := 0, 0
 	for _, cell := range cells {
 		for _, door := range rig.doors {
@@ -63,7 +69,7 @@ func TestArcCI1GroupKeyByBindingNeverPublishesAPolicedValue(t *testing.T) {
 			if cell.mixed {
 				switch {
 				case embeddedDoors[door.name] && err != nil:
-					t.Errorf("%s / %s: refused %v — the embedded engine matches the key by binding and PostgreSQL answers\n  %s",
+					t.Errorf("%s / %s: refused %v — this door plans the bound statement, matches the key by binding, and PostgreSQL answers\n  %s",
 						cell.name, door.name, err, cell.sql)
 				case !embeddedDoors[door.name] && (err == nil || !strings.Contains(err.Error(), "must appear in the GROUP BY clause")):
 					t.Errorf("%s / %s: %v — this door matches by spelling until ADR-0047 stage 5 and keeps the base 42803\n  %s",
