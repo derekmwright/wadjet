@@ -2735,3 +2735,4035 @@ setsEmpty/left/joinOn/m1	2,1
 setsEmpty/left/joinOn/mn	1,3
 setsEmpty/left/joinOn/nm	3,0
 setsEmpty/left/joinOn/nk	NULL,0
+gkCount/eq/alone/m1	2,1
+gkCount/eq/alone/mn	1,3
+gkCount/eq/alone/nm	(none)
+gkCount/eq/alone/nk	(none)
+gkCount/eq/and/m1	2,1
+gkCount/eq/and/mn	1,3
+gkCount/eq/and/nm	(none)
+gkCount/eq/and/nk	(none)
+gkCount/eq/or/m1	2,0 | 2,1
+gkCount/eq/or/mn	1,0 | 1,3
+gkCount/eq/or/nm	3,0
+gkCount/eq/or/nk	NULL,0
+gkCount/eq/not/m1	2,0 | 2,2 | 2,3
+gkCount/eq/not/mn	1,0 | 1,1 | 1,2
+gkCount/eq/not/nm	(none)
+gkCount/eq/not/nk	(none)
+gkCount/eq/having/m1	2,1
+gkCount/eq/having/mn	1,3
+gkCount/eq/having/nm	(none)
+gkCount/eq/having/nk	(none)
+gkCount/eq/joinOn/m1	2,1
+gkCount/eq/joinOn/mn	1,3
+gkCount/eq/joinOn/nm	(none)
+gkCount/eq/joinOn/nk	(none)
+gkCount/ne/alone/m1	2,0 | 2,2 | 2,3
+gkCount/ne/alone/mn	1,0 | 1,1 | 1,2
+gkCount/ne/alone/nm	(none)
+gkCount/ne/alone/nk	(none)
+gkCount/ne/and/m1	2,2 | 2,3
+gkCount/ne/and/mn	1,1 | 1,2
+gkCount/ne/and/nm	(none)
+gkCount/ne/and/nk	(none)
+gkCount/ne/or/m1	2,0 | 2,2 | 2,3
+gkCount/ne/or/mn	1,0 | 1,1 | 1,2
+gkCount/ne/or/nm	3,0
+gkCount/ne/or/nk	NULL,0
+gkCount/ne/not/m1	2,1
+gkCount/ne/not/mn	1,3
+gkCount/ne/not/nm	(none)
+gkCount/ne/not/nk	(none)
+gkCount/ne/having/m1	2,0 | 2,2 | 2,3
+gkCount/ne/having/mn	1,0 | 1,1 | 1,2
+gkCount/ne/having/nm	(none)
+gkCount/ne/having/nk	(none)
+gkCount/ne/joinOn/m1	2,0 | 2,2 | 2,3
+gkCount/ne/joinOn/mn	1,0 | 1,1 | 1,2
+gkCount/ne/joinOn/nm	(none)
+gkCount/ne/joinOn/nk	(none)
+gkCount/lt/alone/m1	2,0
+gkCount/lt/alone/mn	1,0 | 1,1 | 1,2
+gkCount/lt/alone/nm	(none)
+gkCount/lt/alone/nk	(none)
+gkCount/lt/and/m1	(none)
+gkCount/lt/and/mn	1,1 | 1,2
+gkCount/lt/and/nm	(none)
+gkCount/lt/and/nk	(none)
+gkCount/lt/or/m1	2,0
+gkCount/lt/or/mn	1,0 | 1,1 | 1,2
+gkCount/lt/or/nm	3,0
+gkCount/lt/or/nk	NULL,0
+gkCount/lt/not/m1	2,1 | 2,2 | 2,3
+gkCount/lt/not/mn	1,3
+gkCount/lt/not/nm	(none)
+gkCount/lt/not/nk	(none)
+gkCount/lt/having/m1	2,0
+gkCount/lt/having/mn	1,0 | 1,1 | 1,2
+gkCount/lt/having/nm	(none)
+gkCount/lt/having/nk	(none)
+gkCount/lt/joinOn/m1	2,0
+gkCount/lt/joinOn/mn	1,0 | 1,1 | 1,2
+gkCount/lt/joinOn/nm	(none)
+gkCount/lt/joinOn/nk	(none)
+gkCount/ge/alone/m1	2,1 | 2,2 | 2,3
+gkCount/ge/alone/mn	1,3
+gkCount/ge/alone/nm	(none)
+gkCount/ge/alone/nk	(none)
+gkCount/ge/and/m1	2,1 | 2,2 | 2,3
+gkCount/ge/and/mn	1,3
+gkCount/ge/and/nm	(none)
+gkCount/ge/and/nk	(none)
+gkCount/ge/or/m1	2,0 | 2,1 | 2,2 | 2,3
+gkCount/ge/or/mn	1,0 | 1,3
+gkCount/ge/or/nm	3,0
+gkCount/ge/or/nk	NULL,0
+gkCount/ge/not/m1	2,0
+gkCount/ge/not/mn	1,0 | 1,1 | 1,2
+gkCount/ge/not/nm	(none)
+gkCount/ge/not/nk	(none)
+gkCount/ge/having/m1	2,1 | 2,2 | 2,3
+gkCount/ge/having/mn	1,3
+gkCount/ge/having/nm	(none)
+gkCount/ge/having/nk	(none)
+gkCount/ge/joinOn/m1	2,1 | 2,2 | 2,3
+gkCount/ge/joinOn/mn	1,3
+gkCount/ge/joinOn/nm	(none)
+gkCount/ge/joinOn/nk	(none)
+gkCount/isnd/alone/m1	2,1
+gkCount/isnd/alone/mn	1,3
+gkCount/isnd/alone/nm	3,NULL
+gkCount/isnd/alone/nk	NULL,NULL
+gkCount/isnd/and/m1	2,1
+gkCount/isnd/and/mn	1,3
+gkCount/isnd/and/nm	(none)
+gkCount/isnd/and/nk	(none)
+gkCount/isnd/or/m1	2,0 | 2,1
+gkCount/isnd/or/mn	1,0 | 1,3
+gkCount/isnd/or/nm	3,0 | 3,NULL
+gkCount/isnd/or/nk	NULL,0 | NULL,NULL
+gkCount/isnd/not/m1	2,0 | 2,2 | 2,3 | 2,NULL
+gkCount/isnd/not/mn	1,0 | 1,1 | 1,2 | 1,NULL
+gkCount/isnd/not/nm	3,0 | 3,1 | 3,2 | 3,3
+gkCount/isnd/not/nk	NULL,0 | NULL,1 | NULL,2 | NULL,3
+gkCount/isnd/having/m1	2,1
+gkCount/isnd/having/mn	1,3
+gkCount/isnd/having/nm	3,NULL
+gkCount/isnd/having/nk	NULL,NULL
+gkCount/isnd/joinOn/m1	2,1
+gkCount/isnd/joinOn/mn	1,3
+gkCount/isnd/joinOn/nm	3,NULL
+gkCount/isnd/joinOn/nk	NULL,NULL
+gkCount/left/alone/m1	2,1
+gkCount/left/alone/mn	1,3
+gkCount/left/alone/nm	(none)
+gkCount/left/alone/nk	(none)
+gkCount/left/and/m1	2,1
+gkCount/left/and/mn	1,3
+gkCount/left/and/nm	(none)
+gkCount/left/and/nk	(none)
+gkCount/left/or/m1	2,0 | 2,1
+gkCount/left/or/mn	1,0 | 1,3
+gkCount/left/or/nm	3,0
+gkCount/left/or/nk	NULL,0
+gkCount/left/not/m1	2,0 | 2,2 | 2,3
+gkCount/left/not/mn	1,0 | 1,1 | 1,2
+gkCount/left/not/nm	(none)
+gkCount/left/not/nk	(none)
+gkCount/left/having/m1	2,1
+gkCount/left/having/mn	1,3
+gkCount/left/having/nm	(none)
+gkCount/left/having/nk	(none)
+gkCount/left/joinOn/m1	2,1
+gkCount/left/joinOn/mn	1,3
+gkCount/left/joinOn/nm	(none)
+gkCount/left/joinOn/nk	(none)
+gkSum/eq/alone/m1	2,2
+gkSum/eq/alone/mn	(none)
+gkSum/eq/alone/nm	(none)
+gkSum/eq/alone/nk	(none)
+gkSum/eq/and/m1	2,2
+gkSum/eq/and/mn	(none)
+gkSum/eq/and/nm	(none)
+gkSum/eq/and/nk	(none)
+gkSum/eq/or/m1	2,0 | 2,2
+gkSum/eq/or/mn	1,0
+gkSum/eq/or/nm	3,0
+gkSum/eq/or/nk	NULL,0
+gkSum/eq/not/m1	2,0 | 2,1 | 2,3
+gkSum/eq/not/mn	1,0 | 1,1 | 1,2 | 1,3
+gkSum/eq/not/nm	(none)
+gkSum/eq/not/nk	(none)
+gkSum/eq/having/m1	2,2
+gkSum/eq/having/mn	(none)
+gkSum/eq/having/nm	(none)
+gkSum/eq/having/nk	(none)
+gkSum/eq/joinOn/m1	2,2
+gkSum/eq/joinOn/mn	(none)
+gkSum/eq/joinOn/nm	(none)
+gkSum/eq/joinOn/nk	(none)
+gkSum/ne/alone/m1	2,0 | 2,1 | 2,3
+gkSum/ne/alone/mn	1,0 | 1,1 | 1,2 | 1,3
+gkSum/ne/alone/nm	(none)
+gkSum/ne/alone/nk	(none)
+gkSum/ne/and/m1	2,1 | 2,3
+gkSum/ne/and/mn	1,1 | 1,2 | 1,3
+gkSum/ne/and/nm	(none)
+gkSum/ne/and/nk	(none)
+gkSum/ne/or/m1	2,0 | 2,1 | 2,3
+gkSum/ne/or/mn	1,0 | 1,1 | 1,2 | 1,3
+gkSum/ne/or/nm	3,0
+gkSum/ne/or/nk	NULL,0
+gkSum/ne/not/m1	2,2
+gkSum/ne/not/mn	(none)
+gkSum/ne/not/nm	(none)
+gkSum/ne/not/nk	(none)
+gkSum/ne/having/m1	2,0 | 2,1 | 2,3
+gkSum/ne/having/mn	1,0 | 1,1 | 1,2 | 1,3
+gkSum/ne/having/nm	(none)
+gkSum/ne/having/nk	(none)
+gkSum/ne/joinOn/m1	2,0 | 2,1 | 2,3
+gkSum/ne/joinOn/mn	1,0 | 1,1 | 1,2 | 1,3
+gkSum/ne/joinOn/nm	(none)
+gkSum/ne/joinOn/nk	(none)
+gkSum/lt/alone/m1	2,0 | 2,1
+gkSum/lt/alone/mn	1,0 | 1,1 | 1,2 | 1,3
+gkSum/lt/alone/nm	(none)
+gkSum/lt/alone/nk	(none)
+gkSum/lt/and/m1	2,1
+gkSum/lt/and/mn	1,1 | 1,2 | 1,3
+gkSum/lt/and/nm	(none)
+gkSum/lt/and/nk	(none)
+gkSum/lt/or/m1	2,0 | 2,1
+gkSum/lt/or/mn	1,0 | 1,1 | 1,2 | 1,3
+gkSum/lt/or/nm	3,0
+gkSum/lt/or/nk	NULL,0
+gkSum/lt/not/m1	2,2 | 2,3
+gkSum/lt/not/mn	(none)
+gkSum/lt/not/nm	(none)
+gkSum/lt/not/nk	(none)
+gkSum/lt/having/m1	2,0 | 2,1
+gkSum/lt/having/mn	1,0 | 1,1 | 1,2 | 1,3
+gkSum/lt/having/nm	(none)
+gkSum/lt/having/nk	(none)
+gkSum/lt/joinOn/m1	2,0 | 2,1
+gkSum/lt/joinOn/mn	1,0 | 1,1 | 1,2 | 1,3
+gkSum/lt/joinOn/nm	(none)
+gkSum/lt/joinOn/nk	(none)
+gkSum/ge/alone/m1	2,2 | 2,3
+gkSum/ge/alone/mn	(none)
+gkSum/ge/alone/nm	(none)
+gkSum/ge/alone/nk	(none)
+gkSum/ge/and/m1	2,2 | 2,3
+gkSum/ge/and/mn	(none)
+gkSum/ge/and/nm	(none)
+gkSum/ge/and/nk	(none)
+gkSum/ge/or/m1	2,0 | 2,2 | 2,3
+gkSum/ge/or/mn	1,0
+gkSum/ge/or/nm	3,0
+gkSum/ge/or/nk	NULL,0
+gkSum/ge/not/m1	2,0 | 2,1
+gkSum/ge/not/mn	1,0 | 1,1 | 1,2 | 1,3
+gkSum/ge/not/nm	(none)
+gkSum/ge/not/nk	(none)
+gkSum/ge/having/m1	2,2 | 2,3
+gkSum/ge/having/mn	(none)
+gkSum/ge/having/nm	(none)
+gkSum/ge/having/nk	(none)
+gkSum/ge/joinOn/m1	2,2 | 2,3
+gkSum/ge/joinOn/mn	(none)
+gkSum/ge/joinOn/nm	(none)
+gkSum/ge/joinOn/nk	(none)
+gkSum/isnd/alone/m1	2,2
+gkSum/isnd/alone/mn	(none)
+gkSum/isnd/alone/nm	3,NULL
+gkSum/isnd/alone/nk	NULL,NULL
+gkSum/isnd/and/m1	2,2
+gkSum/isnd/and/mn	(none)
+gkSum/isnd/and/nm	(none)
+gkSum/isnd/and/nk	(none)
+gkSum/isnd/or/m1	2,0 | 2,2
+gkSum/isnd/or/mn	1,0
+gkSum/isnd/or/nm	3,0 | 3,NULL
+gkSum/isnd/or/nk	NULL,0 | NULL,NULL
+gkSum/isnd/not/m1	2,0 | 2,1 | 2,3 | 2,NULL
+gkSum/isnd/not/mn	1,0 | 1,1 | 1,2 | 1,3 | 1,NULL
+gkSum/isnd/not/nm	3,0 | 3,1 | 3,2 | 3,3
+gkSum/isnd/not/nk	NULL,0 | NULL,1 | NULL,2 | NULL,3
+gkSum/isnd/having/m1	2,2
+gkSum/isnd/having/mn	(none)
+gkSum/isnd/having/nm	3,NULL
+gkSum/isnd/having/nk	NULL,NULL
+gkSum/isnd/joinOn/m1	2,2
+gkSum/isnd/joinOn/mn	(none)
+gkSum/isnd/joinOn/nm	3,NULL
+gkSum/isnd/joinOn/nk	NULL,NULL
+gkSum/left/alone/m1	2,2
+gkSum/left/alone/mn	(none)
+gkSum/left/alone/nm	(none)
+gkSum/left/alone/nk	(none)
+gkSum/left/and/m1	2,2
+gkSum/left/and/mn	(none)
+gkSum/left/and/nm	(none)
+gkSum/left/and/nk	(none)
+gkSum/left/or/m1	2,0 | 2,2
+gkSum/left/or/mn	1,0
+gkSum/left/or/nm	3,0
+gkSum/left/or/nk	NULL,0
+gkSum/left/not/m1	2,0 | 2,1 | 2,3
+gkSum/left/not/mn	1,0 | 1,1 | 1,2 | 1,3
+gkSum/left/not/nm	(none)
+gkSum/left/not/nk	(none)
+gkSum/left/having/m1	2,2
+gkSum/left/having/mn	(none)
+gkSum/left/having/nm	(none)
+gkSum/left/having/nk	(none)
+gkSum/left/joinOn/m1	2,2
+gkSum/left/joinOn/mn	(none)
+gkSum/left/joinOn/nm	(none)
+gkSum/left/joinOn/nk	(none)
+gkMax/eq/alone/m1	2,2
+gkMax/eq/alone/mn	1,3
+gkMax/eq/alone/nm	(none)
+gkMax/eq/alone/nk	(none)
+gkMax/eq/and/m1	2,2
+gkMax/eq/and/mn	1,3
+gkMax/eq/and/nm	(none)
+gkMax/eq/and/nk	(none)
+gkMax/eq/or/m1	2,0 | 2,2
+gkMax/eq/or/mn	1,0 | 1,3
+gkMax/eq/or/nm	3,0
+gkMax/eq/or/nk	NULL,0
+gkMax/eq/not/m1	2,0 | 2,1 | 2,3
+gkMax/eq/not/mn	1,0 | 1,1 | 1,2
+gkMax/eq/not/nm	(none)
+gkMax/eq/not/nk	(none)
+gkMax/eq/having/m1	2,2
+gkMax/eq/having/mn	1,3
+gkMax/eq/having/nm	(none)
+gkMax/eq/having/nk	(none)
+gkMax/eq/joinOn/m1	2,2
+gkMax/eq/joinOn/mn	1,3
+gkMax/eq/joinOn/nm	(none)
+gkMax/eq/joinOn/nk	(none)
+gkMax/ne/alone/m1	2,0 | 2,1 | 2,3
+gkMax/ne/alone/mn	1,0 | 1,1 | 1,2
+gkMax/ne/alone/nm	(none)
+gkMax/ne/alone/nk	(none)
+gkMax/ne/and/m1	2,1 | 2,3
+gkMax/ne/and/mn	1,1 | 1,2
+gkMax/ne/and/nm	(none)
+gkMax/ne/and/nk	(none)
+gkMax/ne/or/m1	2,0 | 2,1 | 2,3
+gkMax/ne/or/mn	1,0 | 1,1 | 1,2
+gkMax/ne/or/nm	3,0
+gkMax/ne/or/nk	NULL,0
+gkMax/ne/not/m1	2,2
+gkMax/ne/not/mn	1,3
+gkMax/ne/not/nm	(none)
+gkMax/ne/not/nk	(none)
+gkMax/ne/having/m1	2,0 | 2,1 | 2,3
+gkMax/ne/having/mn	1,0 | 1,1 | 1,2
+gkMax/ne/having/nm	(none)
+gkMax/ne/having/nk	(none)
+gkMax/ne/joinOn/m1	2,0 | 2,1 | 2,3
+gkMax/ne/joinOn/mn	1,0 | 1,1 | 1,2
+gkMax/ne/joinOn/nm	(none)
+gkMax/ne/joinOn/nk	(none)
+gkMax/lt/alone/m1	2,0 | 2,1
+gkMax/lt/alone/mn	1,0 | 1,1 | 1,2
+gkMax/lt/alone/nm	(none)
+gkMax/lt/alone/nk	(none)
+gkMax/lt/and/m1	2,1
+gkMax/lt/and/mn	1,1 | 1,2
+gkMax/lt/and/nm	(none)
+gkMax/lt/and/nk	(none)
+gkMax/lt/or/m1	2,0 | 2,1
+gkMax/lt/or/mn	1,0 | 1,1 | 1,2
+gkMax/lt/or/nm	3,0
+gkMax/lt/or/nk	NULL,0
+gkMax/lt/not/m1	2,2 | 2,3
+gkMax/lt/not/mn	1,3
+gkMax/lt/not/nm	(none)
+gkMax/lt/not/nk	(none)
+gkMax/lt/having/m1	2,0 | 2,1
+gkMax/lt/having/mn	1,0 | 1,1 | 1,2
+gkMax/lt/having/nm	(none)
+gkMax/lt/having/nk	(none)
+gkMax/lt/joinOn/m1	2,0 | 2,1
+gkMax/lt/joinOn/mn	1,0 | 1,1 | 1,2
+gkMax/lt/joinOn/nm	(none)
+gkMax/lt/joinOn/nk	(none)
+gkMax/ge/alone/m1	2,2 | 2,3
+gkMax/ge/alone/mn	1,3
+gkMax/ge/alone/nm	(none)
+gkMax/ge/alone/nk	(none)
+gkMax/ge/and/m1	2,2 | 2,3
+gkMax/ge/and/mn	1,3
+gkMax/ge/and/nm	(none)
+gkMax/ge/and/nk	(none)
+gkMax/ge/or/m1	2,0 | 2,2 | 2,3
+gkMax/ge/or/mn	1,0 | 1,3
+gkMax/ge/or/nm	3,0
+gkMax/ge/or/nk	NULL,0
+gkMax/ge/not/m1	2,0 | 2,1
+gkMax/ge/not/mn	1,0 | 1,1 | 1,2
+gkMax/ge/not/nm	(none)
+gkMax/ge/not/nk	(none)
+gkMax/ge/having/m1	2,2 | 2,3
+gkMax/ge/having/mn	1,3
+gkMax/ge/having/nm	(none)
+gkMax/ge/having/nk	(none)
+gkMax/ge/joinOn/m1	2,2 | 2,3
+gkMax/ge/joinOn/mn	1,3
+gkMax/ge/joinOn/nm	(none)
+gkMax/ge/joinOn/nk	(none)
+gkMax/isnd/alone/m1	2,2
+gkMax/isnd/alone/mn	1,3
+gkMax/isnd/alone/nm	3,NULL
+gkMax/isnd/alone/nk	NULL,NULL
+gkMax/isnd/and/m1	2,2
+gkMax/isnd/and/mn	1,3
+gkMax/isnd/and/nm	(none)
+gkMax/isnd/and/nk	(none)
+gkMax/isnd/or/m1	2,0 | 2,2
+gkMax/isnd/or/mn	1,0 | 1,3
+gkMax/isnd/or/nm	3,0 | 3,NULL
+gkMax/isnd/or/nk	NULL,0 | NULL,NULL
+gkMax/isnd/not/m1	2,0 | 2,1 | 2,3 | 2,NULL
+gkMax/isnd/not/mn	1,0 | 1,1 | 1,2 | 1,NULL
+gkMax/isnd/not/nm	3,0 | 3,1 | 3,2 | 3,3
+gkMax/isnd/not/nk	NULL,0 | NULL,1 | NULL,2 | NULL,3
+gkMax/isnd/having/m1	2,2
+gkMax/isnd/having/mn	1,3
+gkMax/isnd/having/nm	3,NULL
+gkMax/isnd/having/nk	NULL,NULL
+gkMax/isnd/joinOn/m1	2,2
+gkMax/isnd/joinOn/mn	1,3
+gkMax/isnd/joinOn/nm	3,NULL
+gkMax/isnd/joinOn/nk	NULL,NULL
+gkMax/left/alone/m1	2,2
+gkMax/left/alone/mn	1,3
+gkMax/left/alone/nm	(none)
+gkMax/left/alone/nk	(none)
+gkMax/left/and/m1	2,2
+gkMax/left/and/mn	1,3
+gkMax/left/and/nm	(none)
+gkMax/left/and/nk	(none)
+gkMax/left/or/m1	2,0 | 2,2
+gkMax/left/or/mn	1,0 | 1,3
+gkMax/left/or/nm	3,0
+gkMax/left/or/nk	NULL,0
+gkMax/left/not/m1	2,0 | 2,1 | 2,3
+gkMax/left/not/mn	1,0 | 1,1 | 1,2
+gkMax/left/not/nm	(none)
+gkMax/left/not/nk	(none)
+gkMax/left/having/m1	2,2
+gkMax/left/having/mn	1,3
+gkMax/left/having/nm	(none)
+gkMax/left/having/nk	(none)
+gkMax/left/joinOn/m1	2,2
+gkMax/left/joinOn/mn	1,3
+gkMax/left/joinOn/nm	(none)
+gkMax/left/joinOn/nk	(none)
+gkCountOrderLimit/eq/alone/m1	2,1
+gkCountOrderLimit/eq/alone/mn	1,3
+gkCountOrderLimit/eq/alone/nm	(none)
+gkCountOrderLimit/eq/alone/nk	(none)
+gkCountOrderLimit/eq/and/m1	2,1
+gkCountOrderLimit/eq/and/mn	1,3
+gkCountOrderLimit/eq/and/nm	(none)
+gkCountOrderLimit/eq/and/nk	(none)
+gkCountOrderLimit/eq/or/m1	2,0 | 2,1
+gkCountOrderLimit/eq/or/mn	1,0 | 1,3
+gkCountOrderLimit/eq/or/nm	3,0
+gkCountOrderLimit/eq/or/nk	NULL,0
+gkCountOrderLimit/eq/not/m1	2,0 | 2,2 | 2,3
+gkCountOrderLimit/eq/not/mn	1,0 | 1,1 | 1,2
+gkCountOrderLimit/eq/not/nm	(none)
+gkCountOrderLimit/eq/not/nk	(none)
+gkCountOrderLimit/eq/having/m1	2,1
+gkCountOrderLimit/eq/having/mn	1,3
+gkCountOrderLimit/eq/having/nm	(none)
+gkCountOrderLimit/eq/having/nk	(none)
+gkCountOrderLimit/eq/joinOn/m1	2,1
+gkCountOrderLimit/eq/joinOn/mn	1,3
+gkCountOrderLimit/eq/joinOn/nm	(none)
+gkCountOrderLimit/eq/joinOn/nk	(none)
+gkCountOrderLimit/ne/alone/m1	2,0 | 2,2 | 2,3
+gkCountOrderLimit/ne/alone/mn	1,0 | 1,1 | 1,2
+gkCountOrderLimit/ne/alone/nm	(none)
+gkCountOrderLimit/ne/alone/nk	(none)
+gkCountOrderLimit/ne/and/m1	2,2 | 2,3
+gkCountOrderLimit/ne/and/mn	1,1 | 1,2
+gkCountOrderLimit/ne/and/nm	(none)
+gkCountOrderLimit/ne/and/nk	(none)
+gkCountOrderLimit/ne/or/m1	2,0 | 2,2 | 2,3
+gkCountOrderLimit/ne/or/mn	1,0 | 1,1 | 1,2
+gkCountOrderLimit/ne/or/nm	3,0
+gkCountOrderLimit/ne/or/nk	NULL,0
+gkCountOrderLimit/ne/not/m1	2,1
+gkCountOrderLimit/ne/not/mn	1,3
+gkCountOrderLimit/ne/not/nm	(none)
+gkCountOrderLimit/ne/not/nk	(none)
+gkCountOrderLimit/ne/having/m1	2,0 | 2,2 | 2,3
+gkCountOrderLimit/ne/having/mn	1,0 | 1,1 | 1,2
+gkCountOrderLimit/ne/having/nm	(none)
+gkCountOrderLimit/ne/having/nk	(none)
+gkCountOrderLimit/ne/joinOn/m1	2,0 | 2,2 | 2,3
+gkCountOrderLimit/ne/joinOn/mn	1,0 | 1,1 | 1,2
+gkCountOrderLimit/ne/joinOn/nm	(none)
+gkCountOrderLimit/ne/joinOn/nk	(none)
+gkCountOrderLimit/lt/alone/m1	2,0
+gkCountOrderLimit/lt/alone/mn	1,0 | 1,1 | 1,2
+gkCountOrderLimit/lt/alone/nm	(none)
+gkCountOrderLimit/lt/alone/nk	(none)
+gkCountOrderLimit/lt/and/m1	(none)
+gkCountOrderLimit/lt/and/mn	1,1 | 1,2
+gkCountOrderLimit/lt/and/nm	(none)
+gkCountOrderLimit/lt/and/nk	(none)
+gkCountOrderLimit/lt/or/m1	2,0
+gkCountOrderLimit/lt/or/mn	1,0 | 1,1 | 1,2
+gkCountOrderLimit/lt/or/nm	3,0
+gkCountOrderLimit/lt/or/nk	NULL,0
+gkCountOrderLimit/lt/not/m1	2,1 | 2,2 | 2,3
+gkCountOrderLimit/lt/not/mn	1,3
+gkCountOrderLimit/lt/not/nm	(none)
+gkCountOrderLimit/lt/not/nk	(none)
+gkCountOrderLimit/lt/having/m1	2,0
+gkCountOrderLimit/lt/having/mn	1,0 | 1,1 | 1,2
+gkCountOrderLimit/lt/having/nm	(none)
+gkCountOrderLimit/lt/having/nk	(none)
+gkCountOrderLimit/lt/joinOn/m1	2,0
+gkCountOrderLimit/lt/joinOn/mn	1,0 | 1,1 | 1,2
+gkCountOrderLimit/lt/joinOn/nm	(none)
+gkCountOrderLimit/lt/joinOn/nk	(none)
+gkCountOrderLimit/ge/alone/m1	2,1 | 2,2 | 2,3
+gkCountOrderLimit/ge/alone/mn	1,3
+gkCountOrderLimit/ge/alone/nm	(none)
+gkCountOrderLimit/ge/alone/nk	(none)
+gkCountOrderLimit/ge/and/m1	2,1 | 2,2 | 2,3
+gkCountOrderLimit/ge/and/mn	1,3
+gkCountOrderLimit/ge/and/nm	(none)
+gkCountOrderLimit/ge/and/nk	(none)
+gkCountOrderLimit/ge/or/m1	2,0 | 2,1 | 2,2 | 2,3
+gkCountOrderLimit/ge/or/mn	1,0 | 1,3
+gkCountOrderLimit/ge/or/nm	3,0
+gkCountOrderLimit/ge/or/nk	NULL,0
+gkCountOrderLimit/ge/not/m1	2,0
+gkCountOrderLimit/ge/not/mn	1,0 | 1,1 | 1,2
+gkCountOrderLimit/ge/not/nm	(none)
+gkCountOrderLimit/ge/not/nk	(none)
+gkCountOrderLimit/ge/having/m1	2,1 | 2,2 | 2,3
+gkCountOrderLimit/ge/having/mn	1,3
+gkCountOrderLimit/ge/having/nm	(none)
+gkCountOrderLimit/ge/having/nk	(none)
+gkCountOrderLimit/ge/joinOn/m1	2,1 | 2,2 | 2,3
+gkCountOrderLimit/ge/joinOn/mn	1,3
+gkCountOrderLimit/ge/joinOn/nm	(none)
+gkCountOrderLimit/ge/joinOn/nk	(none)
+gkCountOrderLimit/isnd/alone/m1	2,1
+gkCountOrderLimit/isnd/alone/mn	1,3
+gkCountOrderLimit/isnd/alone/nm	3,NULL
+gkCountOrderLimit/isnd/alone/nk	NULL,NULL
+gkCountOrderLimit/isnd/and/m1	2,1
+gkCountOrderLimit/isnd/and/mn	1,3
+gkCountOrderLimit/isnd/and/nm	(none)
+gkCountOrderLimit/isnd/and/nk	(none)
+gkCountOrderLimit/isnd/or/m1	2,0 | 2,1
+gkCountOrderLimit/isnd/or/mn	1,0 | 1,3
+gkCountOrderLimit/isnd/or/nm	3,0 | 3,NULL
+gkCountOrderLimit/isnd/or/nk	NULL,0 | NULL,NULL
+gkCountOrderLimit/isnd/not/m1	2,0 | 2,2 | 2,3 | 2,NULL
+gkCountOrderLimit/isnd/not/mn	1,0 | 1,1 | 1,2 | 1,NULL
+gkCountOrderLimit/isnd/not/nm	3,0 | 3,1 | 3,2 | 3,3
+gkCountOrderLimit/isnd/not/nk	NULL,0 | NULL,1 | NULL,2 | NULL,3
+gkCountOrderLimit/isnd/having/m1	2,1
+gkCountOrderLimit/isnd/having/mn	1,3
+gkCountOrderLimit/isnd/having/nm	3,NULL
+gkCountOrderLimit/isnd/having/nk	NULL,NULL
+gkCountOrderLimit/isnd/joinOn/m1	2,1
+gkCountOrderLimit/isnd/joinOn/mn	1,3
+gkCountOrderLimit/isnd/joinOn/nm	3,NULL
+gkCountOrderLimit/isnd/joinOn/nk	NULL,NULL
+gkCountOrderLimit/left/alone/m1	2,1
+gkCountOrderLimit/left/alone/mn	1,3
+gkCountOrderLimit/left/alone/nm	(none)
+gkCountOrderLimit/left/alone/nk	(none)
+gkCountOrderLimit/left/and/m1	2,1
+gkCountOrderLimit/left/and/mn	1,3
+gkCountOrderLimit/left/and/nm	(none)
+gkCountOrderLimit/left/and/nk	(none)
+gkCountOrderLimit/left/or/m1	2,0 | 2,1
+gkCountOrderLimit/left/or/mn	1,0 | 1,3
+gkCountOrderLimit/left/or/nm	3,0
+gkCountOrderLimit/left/or/nk	NULL,0
+gkCountOrderLimit/left/not/m1	2,0 | 2,2 | 2,3
+gkCountOrderLimit/left/not/mn	1,0 | 1,1 | 1,2
+gkCountOrderLimit/left/not/nm	(none)
+gkCountOrderLimit/left/not/nk	(none)
+gkCountOrderLimit/left/having/m1	2,1
+gkCountOrderLimit/left/having/mn	1,3
+gkCountOrderLimit/left/having/nm	(none)
+gkCountOrderLimit/left/having/nk	(none)
+gkCountOrderLimit/left/joinOn/m1	2,1
+gkCountOrderLimit/left/joinOn/mn	1,3
+gkCountOrderLimit/left/joinOn/nm	(none)
+gkCountOrderLimit/left/joinOn/nk	(none)
+gkSumOrderLimit/eq/alone/m1	2,2
+gkSumOrderLimit/eq/alone/mn	(none)
+gkSumOrderLimit/eq/alone/nm	(none)
+gkSumOrderLimit/eq/alone/nk	(none)
+gkSumOrderLimit/eq/and/m1	2,2
+gkSumOrderLimit/eq/and/mn	(none)
+gkSumOrderLimit/eq/and/nm	(none)
+gkSumOrderLimit/eq/and/nk	(none)
+gkSumOrderLimit/eq/or/m1	2,0 | 2,2
+gkSumOrderLimit/eq/or/mn	1,0
+gkSumOrderLimit/eq/or/nm	3,0
+gkSumOrderLimit/eq/or/nk	NULL,0
+gkSumOrderLimit/eq/not/m1	2,0 | 2,1 | 2,3
+gkSumOrderLimit/eq/not/mn	1,0 | 1,1 | 1,2 | 1,3
+gkSumOrderLimit/eq/not/nm	(none)
+gkSumOrderLimit/eq/not/nk	(none)
+gkSumOrderLimit/eq/having/m1	2,2
+gkSumOrderLimit/eq/having/mn	(none)
+gkSumOrderLimit/eq/having/nm	(none)
+gkSumOrderLimit/eq/having/nk	(none)
+gkSumOrderLimit/eq/joinOn/m1	2,2
+gkSumOrderLimit/eq/joinOn/mn	(none)
+gkSumOrderLimit/eq/joinOn/nm	(none)
+gkSumOrderLimit/eq/joinOn/nk	(none)
+gkSumOrderLimit/ne/alone/m1	2,0 | 2,1 | 2,3
+gkSumOrderLimit/ne/alone/mn	1,0 | 1,1 | 1,2 | 1,3
+gkSumOrderLimit/ne/alone/nm	(none)
+gkSumOrderLimit/ne/alone/nk	(none)
+gkSumOrderLimit/ne/and/m1	2,1 | 2,3
+gkSumOrderLimit/ne/and/mn	1,1 | 1,2 | 1,3
+gkSumOrderLimit/ne/and/nm	(none)
+gkSumOrderLimit/ne/and/nk	(none)
+gkSumOrderLimit/ne/or/m1	2,0 | 2,1 | 2,3
+gkSumOrderLimit/ne/or/mn	1,0 | 1,1 | 1,2 | 1,3
+gkSumOrderLimit/ne/or/nm	3,0
+gkSumOrderLimit/ne/or/nk	NULL,0
+gkSumOrderLimit/ne/not/m1	2,2
+gkSumOrderLimit/ne/not/mn	(none)
+gkSumOrderLimit/ne/not/nm	(none)
+gkSumOrderLimit/ne/not/nk	(none)
+gkSumOrderLimit/ne/having/m1	2,0 | 2,1 | 2,3
+gkSumOrderLimit/ne/having/mn	1,0 | 1,1 | 1,2 | 1,3
+gkSumOrderLimit/ne/having/nm	(none)
+gkSumOrderLimit/ne/having/nk	(none)
+gkSumOrderLimit/ne/joinOn/m1	2,0 | 2,1 | 2,3
+gkSumOrderLimit/ne/joinOn/mn	1,0 | 1,1 | 1,2 | 1,3
+gkSumOrderLimit/ne/joinOn/nm	(none)
+gkSumOrderLimit/ne/joinOn/nk	(none)
+gkSumOrderLimit/lt/alone/m1	2,0 | 2,1
+gkSumOrderLimit/lt/alone/mn	1,0 | 1,1 | 1,2 | 1,3
+gkSumOrderLimit/lt/alone/nm	(none)
+gkSumOrderLimit/lt/alone/nk	(none)
+gkSumOrderLimit/lt/and/m1	2,1
+gkSumOrderLimit/lt/and/mn	1,1 | 1,2 | 1,3
+gkSumOrderLimit/lt/and/nm	(none)
+gkSumOrderLimit/lt/and/nk	(none)
+gkSumOrderLimit/lt/or/m1	2,0 | 2,1
+gkSumOrderLimit/lt/or/mn	1,0 | 1,1 | 1,2 | 1,3
+gkSumOrderLimit/lt/or/nm	3,0
+gkSumOrderLimit/lt/or/nk	NULL,0
+gkSumOrderLimit/lt/not/m1	2,2 | 2,3
+gkSumOrderLimit/lt/not/mn	(none)
+gkSumOrderLimit/lt/not/nm	(none)
+gkSumOrderLimit/lt/not/nk	(none)
+gkSumOrderLimit/lt/having/m1	2,0 | 2,1
+gkSumOrderLimit/lt/having/mn	1,0 | 1,1 | 1,2 | 1,3
+gkSumOrderLimit/lt/having/nm	(none)
+gkSumOrderLimit/lt/having/nk	(none)
+gkSumOrderLimit/lt/joinOn/m1	2,0 | 2,1
+gkSumOrderLimit/lt/joinOn/mn	1,0 | 1,1 | 1,2 | 1,3
+gkSumOrderLimit/lt/joinOn/nm	(none)
+gkSumOrderLimit/lt/joinOn/nk	(none)
+gkSumOrderLimit/ge/alone/m1	2,2 | 2,3
+gkSumOrderLimit/ge/alone/mn	(none)
+gkSumOrderLimit/ge/alone/nm	(none)
+gkSumOrderLimit/ge/alone/nk	(none)
+gkSumOrderLimit/ge/and/m1	2,2 | 2,3
+gkSumOrderLimit/ge/and/mn	(none)
+gkSumOrderLimit/ge/and/nm	(none)
+gkSumOrderLimit/ge/and/nk	(none)
+gkSumOrderLimit/ge/or/m1	2,0 | 2,2 | 2,3
+gkSumOrderLimit/ge/or/mn	1,0
+gkSumOrderLimit/ge/or/nm	3,0
+gkSumOrderLimit/ge/or/nk	NULL,0
+gkSumOrderLimit/ge/not/m1	2,0 | 2,1
+gkSumOrderLimit/ge/not/mn	1,0 | 1,1 | 1,2 | 1,3
+gkSumOrderLimit/ge/not/nm	(none)
+gkSumOrderLimit/ge/not/nk	(none)
+gkSumOrderLimit/ge/having/m1	2,2 | 2,3
+gkSumOrderLimit/ge/having/mn	(none)
+gkSumOrderLimit/ge/having/nm	(none)
+gkSumOrderLimit/ge/having/nk	(none)
+gkSumOrderLimit/ge/joinOn/m1	2,2 | 2,3
+gkSumOrderLimit/ge/joinOn/mn	(none)
+gkSumOrderLimit/ge/joinOn/nm	(none)
+gkSumOrderLimit/ge/joinOn/nk	(none)
+gkSumOrderLimit/isnd/alone/m1	2,2
+gkSumOrderLimit/isnd/alone/mn	(none)
+gkSumOrderLimit/isnd/alone/nm	3,NULL
+gkSumOrderLimit/isnd/alone/nk	NULL,NULL
+gkSumOrderLimit/isnd/and/m1	2,2
+gkSumOrderLimit/isnd/and/mn	(none)
+gkSumOrderLimit/isnd/and/nm	(none)
+gkSumOrderLimit/isnd/and/nk	(none)
+gkSumOrderLimit/isnd/or/m1	2,0 | 2,2
+gkSumOrderLimit/isnd/or/mn	1,0
+gkSumOrderLimit/isnd/or/nm	3,0 | 3,NULL
+gkSumOrderLimit/isnd/or/nk	NULL,0 | NULL,NULL
+gkSumOrderLimit/isnd/not/m1	2,0 | 2,1 | 2,3 | 2,NULL
+gkSumOrderLimit/isnd/not/mn	1,0 | 1,1 | 1,2 | 1,3 | 1,NULL
+gkSumOrderLimit/isnd/not/nm	3,0 | 3,1 | 3,2 | 3,3
+gkSumOrderLimit/isnd/not/nk	NULL,0 | NULL,1 | NULL,2 | NULL,3
+gkSumOrderLimit/isnd/having/m1	2,2
+gkSumOrderLimit/isnd/having/mn	(none)
+gkSumOrderLimit/isnd/having/nm	3,NULL
+gkSumOrderLimit/isnd/having/nk	NULL,NULL
+gkSumOrderLimit/isnd/joinOn/m1	2,2
+gkSumOrderLimit/isnd/joinOn/mn	(none)
+gkSumOrderLimit/isnd/joinOn/nm	3,NULL
+gkSumOrderLimit/isnd/joinOn/nk	NULL,NULL
+gkSumOrderLimit/left/alone/m1	2,2
+gkSumOrderLimit/left/alone/mn	(none)
+gkSumOrderLimit/left/alone/nm	(none)
+gkSumOrderLimit/left/alone/nk	(none)
+gkSumOrderLimit/left/and/m1	2,2
+gkSumOrderLimit/left/and/mn	(none)
+gkSumOrderLimit/left/and/nm	(none)
+gkSumOrderLimit/left/and/nk	(none)
+gkSumOrderLimit/left/or/m1	2,0 | 2,2
+gkSumOrderLimit/left/or/mn	1,0
+gkSumOrderLimit/left/or/nm	3,0
+gkSumOrderLimit/left/or/nk	NULL,0
+gkSumOrderLimit/left/not/m1	2,0 | 2,1 | 2,3
+gkSumOrderLimit/left/not/mn	1,0 | 1,1 | 1,2 | 1,3
+gkSumOrderLimit/left/not/nm	(none)
+gkSumOrderLimit/left/not/nk	(none)
+gkSumOrderLimit/left/having/m1	2,2
+gkSumOrderLimit/left/having/mn	(none)
+gkSumOrderLimit/left/having/nm	(none)
+gkSumOrderLimit/left/having/nk	(none)
+gkSumOrderLimit/left/joinOn/m1	2,2
+gkSumOrderLimit/left/joinOn/mn	(none)
+gkSumOrderLimit/left/joinOn/nm	(none)
+gkSumOrderLimit/left/joinOn/nk	(none)
+gkMaxOrderLimit/eq/alone/m1	2,2
+gkMaxOrderLimit/eq/alone/mn	1,3
+gkMaxOrderLimit/eq/alone/nm	(none)
+gkMaxOrderLimit/eq/alone/nk	(none)
+gkMaxOrderLimit/eq/and/m1	2,2
+gkMaxOrderLimit/eq/and/mn	1,3
+gkMaxOrderLimit/eq/and/nm	(none)
+gkMaxOrderLimit/eq/and/nk	(none)
+gkMaxOrderLimit/eq/or/m1	2,0 | 2,2
+gkMaxOrderLimit/eq/or/mn	1,0 | 1,3
+gkMaxOrderLimit/eq/or/nm	3,0
+gkMaxOrderLimit/eq/or/nk	NULL,0
+gkMaxOrderLimit/eq/not/m1	2,0 | 2,1 | 2,3
+gkMaxOrderLimit/eq/not/mn	1,0 | 1,1 | 1,2
+gkMaxOrderLimit/eq/not/nm	(none)
+gkMaxOrderLimit/eq/not/nk	(none)
+gkMaxOrderLimit/eq/having/m1	2,2
+gkMaxOrderLimit/eq/having/mn	1,3
+gkMaxOrderLimit/eq/having/nm	(none)
+gkMaxOrderLimit/eq/having/nk	(none)
+gkMaxOrderLimit/eq/joinOn/m1	2,2
+gkMaxOrderLimit/eq/joinOn/mn	1,3
+gkMaxOrderLimit/eq/joinOn/nm	(none)
+gkMaxOrderLimit/eq/joinOn/nk	(none)
+gkMaxOrderLimit/ne/alone/m1	2,0 | 2,1 | 2,3
+gkMaxOrderLimit/ne/alone/mn	1,0 | 1,1 | 1,2
+gkMaxOrderLimit/ne/alone/nm	(none)
+gkMaxOrderLimit/ne/alone/nk	(none)
+gkMaxOrderLimit/ne/and/m1	2,1 | 2,3
+gkMaxOrderLimit/ne/and/mn	1,1 | 1,2
+gkMaxOrderLimit/ne/and/nm	(none)
+gkMaxOrderLimit/ne/and/nk	(none)
+gkMaxOrderLimit/ne/or/m1	2,0 | 2,1 | 2,3
+gkMaxOrderLimit/ne/or/mn	1,0 | 1,1 | 1,2
+gkMaxOrderLimit/ne/or/nm	3,0
+gkMaxOrderLimit/ne/or/nk	NULL,0
+gkMaxOrderLimit/ne/not/m1	2,2
+gkMaxOrderLimit/ne/not/mn	1,3
+gkMaxOrderLimit/ne/not/nm	(none)
+gkMaxOrderLimit/ne/not/nk	(none)
+gkMaxOrderLimit/ne/having/m1	2,0 | 2,1 | 2,3
+gkMaxOrderLimit/ne/having/mn	1,0 | 1,1 | 1,2
+gkMaxOrderLimit/ne/having/nm	(none)
+gkMaxOrderLimit/ne/having/nk	(none)
+gkMaxOrderLimit/ne/joinOn/m1	2,0 | 2,1 | 2,3
+gkMaxOrderLimit/ne/joinOn/mn	1,0 | 1,1 | 1,2
+gkMaxOrderLimit/ne/joinOn/nm	(none)
+gkMaxOrderLimit/ne/joinOn/nk	(none)
+gkMaxOrderLimit/lt/alone/m1	2,0 | 2,1
+gkMaxOrderLimit/lt/alone/mn	1,0 | 1,1 | 1,2
+gkMaxOrderLimit/lt/alone/nm	(none)
+gkMaxOrderLimit/lt/alone/nk	(none)
+gkMaxOrderLimit/lt/and/m1	2,1
+gkMaxOrderLimit/lt/and/mn	1,1 | 1,2
+gkMaxOrderLimit/lt/and/nm	(none)
+gkMaxOrderLimit/lt/and/nk	(none)
+gkMaxOrderLimit/lt/or/m1	2,0 | 2,1
+gkMaxOrderLimit/lt/or/mn	1,0 | 1,1 | 1,2
+gkMaxOrderLimit/lt/or/nm	3,0
+gkMaxOrderLimit/lt/or/nk	NULL,0
+gkMaxOrderLimit/lt/not/m1	2,2 | 2,3
+gkMaxOrderLimit/lt/not/mn	1,3
+gkMaxOrderLimit/lt/not/nm	(none)
+gkMaxOrderLimit/lt/not/nk	(none)
+gkMaxOrderLimit/lt/having/m1	2,0 | 2,1
+gkMaxOrderLimit/lt/having/mn	1,0 | 1,1 | 1,2
+gkMaxOrderLimit/lt/having/nm	(none)
+gkMaxOrderLimit/lt/having/nk	(none)
+gkMaxOrderLimit/lt/joinOn/m1	2,0 | 2,1
+gkMaxOrderLimit/lt/joinOn/mn	1,0 | 1,1 | 1,2
+gkMaxOrderLimit/lt/joinOn/nm	(none)
+gkMaxOrderLimit/lt/joinOn/nk	(none)
+gkMaxOrderLimit/ge/alone/m1	2,2 | 2,3
+gkMaxOrderLimit/ge/alone/mn	1,3
+gkMaxOrderLimit/ge/alone/nm	(none)
+gkMaxOrderLimit/ge/alone/nk	(none)
+gkMaxOrderLimit/ge/and/m1	2,2 | 2,3
+gkMaxOrderLimit/ge/and/mn	1,3
+gkMaxOrderLimit/ge/and/nm	(none)
+gkMaxOrderLimit/ge/and/nk	(none)
+gkMaxOrderLimit/ge/or/m1	2,0 | 2,2 | 2,3
+gkMaxOrderLimit/ge/or/mn	1,0 | 1,3
+gkMaxOrderLimit/ge/or/nm	3,0
+gkMaxOrderLimit/ge/or/nk	NULL,0
+gkMaxOrderLimit/ge/not/m1	2,0 | 2,1
+gkMaxOrderLimit/ge/not/mn	1,0 | 1,1 | 1,2
+gkMaxOrderLimit/ge/not/nm	(none)
+gkMaxOrderLimit/ge/not/nk	(none)
+gkMaxOrderLimit/ge/having/m1	2,2 | 2,3
+gkMaxOrderLimit/ge/having/mn	1,3
+gkMaxOrderLimit/ge/having/nm	(none)
+gkMaxOrderLimit/ge/having/nk	(none)
+gkMaxOrderLimit/ge/joinOn/m1	2,2 | 2,3
+gkMaxOrderLimit/ge/joinOn/mn	1,3
+gkMaxOrderLimit/ge/joinOn/nm	(none)
+gkMaxOrderLimit/ge/joinOn/nk	(none)
+gkMaxOrderLimit/isnd/alone/m1	2,2
+gkMaxOrderLimit/isnd/alone/mn	1,3
+gkMaxOrderLimit/isnd/alone/nm	3,NULL
+gkMaxOrderLimit/isnd/alone/nk	NULL,NULL
+gkMaxOrderLimit/isnd/and/m1	2,2
+gkMaxOrderLimit/isnd/and/mn	1,3
+gkMaxOrderLimit/isnd/and/nm	(none)
+gkMaxOrderLimit/isnd/and/nk	(none)
+gkMaxOrderLimit/isnd/or/m1	2,0 | 2,2
+gkMaxOrderLimit/isnd/or/mn	1,0 | 1,3
+gkMaxOrderLimit/isnd/or/nm	3,0 | 3,NULL
+gkMaxOrderLimit/isnd/or/nk	NULL,0 | NULL,NULL
+gkMaxOrderLimit/isnd/not/m1	2,0 | 2,1 | 2,3 | 2,NULL
+gkMaxOrderLimit/isnd/not/mn	1,0 | 1,1 | 1,2 | 1,NULL
+gkMaxOrderLimit/isnd/not/nm	3,0 | 3,1 | 3,2 | 3,3
+gkMaxOrderLimit/isnd/not/nk	NULL,0 | NULL,1 | NULL,2 | NULL,3
+gkMaxOrderLimit/isnd/having/m1	2,2
+gkMaxOrderLimit/isnd/having/mn	1,3
+gkMaxOrderLimit/isnd/having/nm	3,NULL
+gkMaxOrderLimit/isnd/having/nk	NULL,NULL
+gkMaxOrderLimit/isnd/joinOn/m1	2,2
+gkMaxOrderLimit/isnd/joinOn/mn	1,3
+gkMaxOrderLimit/isnd/joinOn/nm	3,NULL
+gkMaxOrderLimit/isnd/joinOn/nk	NULL,NULL
+gkMaxOrderLimit/left/alone/m1	2,2
+gkMaxOrderLimit/left/alone/mn	1,3
+gkMaxOrderLimit/left/alone/nm	(none)
+gkMaxOrderLimit/left/alone/nk	(none)
+gkMaxOrderLimit/left/and/m1	2,2
+gkMaxOrderLimit/left/and/mn	1,3
+gkMaxOrderLimit/left/and/nm	(none)
+gkMaxOrderLimit/left/and/nk	(none)
+gkMaxOrderLimit/left/or/m1	2,0 | 2,2
+gkMaxOrderLimit/left/or/mn	1,0 | 1,3
+gkMaxOrderLimit/left/or/nm	3,0
+gkMaxOrderLimit/left/or/nk	NULL,0
+gkMaxOrderLimit/left/not/m1	2,0 | 2,1 | 2,3
+gkMaxOrderLimit/left/not/mn	1,0 | 1,1 | 1,2
+gkMaxOrderLimit/left/not/nm	(none)
+gkMaxOrderLimit/left/not/nk	(none)
+gkMaxOrderLimit/left/having/m1	2,2
+gkMaxOrderLimit/left/having/mn	1,3
+gkMaxOrderLimit/left/having/nm	(none)
+gkMaxOrderLimit/left/having/nk	(none)
+gkMaxOrderLimit/left/joinOn/m1	2,2
+gkMaxOrderLimit/left/joinOn/mn	1,3
+gkMaxOrderLimit/left/joinOn/nm	(none)
+gkMaxOrderLimit/left/joinOn/nk	(none)
+gkCountLimit/eq/alone/m1	2,1
+gkCountLimit/eq/alone/mn	1,3
+gkCountLimit/eq/alone/nm	(none)
+gkCountLimit/eq/alone/nk	(none)
+gkCountLimit/eq/and/m1	2,1
+gkCountLimit/eq/and/mn	1,3
+gkCountLimit/eq/and/nm	(none)
+gkCountLimit/eq/and/nk	(none)
+gkCountLimit/eq/or/m1	2,0 | 2,1
+gkCountLimit/eq/or/mn	1,0 | 1,3
+gkCountLimit/eq/or/nm	3,0
+gkCountLimit/eq/or/nk	NULL,0
+gkCountLimit/eq/not/m1	2,0 | 2,2 | 2,3
+gkCountLimit/eq/not/mn	1,0 | 1,1 | 1,2
+gkCountLimit/eq/not/nm	(none)
+gkCountLimit/eq/not/nk	(none)
+gkCountLimit/eq/having/m1	2,1
+gkCountLimit/eq/having/mn	1,3
+gkCountLimit/eq/having/nm	(none)
+gkCountLimit/eq/having/nk	(none)
+gkCountLimit/eq/joinOn/m1	2,1
+gkCountLimit/eq/joinOn/mn	1,3
+gkCountLimit/eq/joinOn/nm	(none)
+gkCountLimit/eq/joinOn/nk	(none)
+gkCountLimit/ne/alone/m1	2,0 | 2,2 | 2,3
+gkCountLimit/ne/alone/mn	1,0 | 1,1 | 1,2
+gkCountLimit/ne/alone/nm	(none)
+gkCountLimit/ne/alone/nk	(none)
+gkCountLimit/ne/and/m1	2,2 | 2,3
+gkCountLimit/ne/and/mn	1,1 | 1,2
+gkCountLimit/ne/and/nm	(none)
+gkCountLimit/ne/and/nk	(none)
+gkCountLimit/ne/or/m1	2,0 | 2,2 | 2,3
+gkCountLimit/ne/or/mn	1,0 | 1,1 | 1,2
+gkCountLimit/ne/or/nm	3,0
+gkCountLimit/ne/or/nk	NULL,0
+gkCountLimit/ne/not/m1	2,1
+gkCountLimit/ne/not/mn	1,3
+gkCountLimit/ne/not/nm	(none)
+gkCountLimit/ne/not/nk	(none)
+gkCountLimit/ne/having/m1	2,0 | 2,2 | 2,3
+gkCountLimit/ne/having/mn	1,0 | 1,1 | 1,2
+gkCountLimit/ne/having/nm	(none)
+gkCountLimit/ne/having/nk	(none)
+gkCountLimit/ne/joinOn/m1	2,0 | 2,2 | 2,3
+gkCountLimit/ne/joinOn/mn	1,0 | 1,1 | 1,2
+gkCountLimit/ne/joinOn/nm	(none)
+gkCountLimit/ne/joinOn/nk	(none)
+gkCountLimit/lt/alone/m1	2,0
+gkCountLimit/lt/alone/mn	1,0 | 1,1 | 1,2
+gkCountLimit/lt/alone/nm	(none)
+gkCountLimit/lt/alone/nk	(none)
+gkCountLimit/lt/and/m1	(none)
+gkCountLimit/lt/and/mn	1,1 | 1,2
+gkCountLimit/lt/and/nm	(none)
+gkCountLimit/lt/and/nk	(none)
+gkCountLimit/lt/or/m1	2,0
+gkCountLimit/lt/or/mn	1,0 | 1,1 | 1,2
+gkCountLimit/lt/or/nm	3,0
+gkCountLimit/lt/or/nk	NULL,0
+gkCountLimit/lt/not/m1	2,1 | 2,2 | 2,3
+gkCountLimit/lt/not/mn	1,3
+gkCountLimit/lt/not/nm	(none)
+gkCountLimit/lt/not/nk	(none)
+gkCountLimit/lt/having/m1	2,0
+gkCountLimit/lt/having/mn	1,0 | 1,1 | 1,2
+gkCountLimit/lt/having/nm	(none)
+gkCountLimit/lt/having/nk	(none)
+gkCountLimit/lt/joinOn/m1	2,0
+gkCountLimit/lt/joinOn/mn	1,0 | 1,1 | 1,2
+gkCountLimit/lt/joinOn/nm	(none)
+gkCountLimit/lt/joinOn/nk	(none)
+gkCountLimit/ge/alone/m1	2,1 | 2,2 | 2,3
+gkCountLimit/ge/alone/mn	1,3
+gkCountLimit/ge/alone/nm	(none)
+gkCountLimit/ge/alone/nk	(none)
+gkCountLimit/ge/and/m1	2,1 | 2,2 | 2,3
+gkCountLimit/ge/and/mn	1,3
+gkCountLimit/ge/and/nm	(none)
+gkCountLimit/ge/and/nk	(none)
+gkCountLimit/ge/or/m1	2,0 | 2,1 | 2,2 | 2,3
+gkCountLimit/ge/or/mn	1,0 | 1,3
+gkCountLimit/ge/or/nm	3,0
+gkCountLimit/ge/or/nk	NULL,0
+gkCountLimit/ge/not/m1	2,0
+gkCountLimit/ge/not/mn	1,0 | 1,1 | 1,2
+gkCountLimit/ge/not/nm	(none)
+gkCountLimit/ge/not/nk	(none)
+gkCountLimit/ge/having/m1	2,1 | 2,2 | 2,3
+gkCountLimit/ge/having/mn	1,3
+gkCountLimit/ge/having/nm	(none)
+gkCountLimit/ge/having/nk	(none)
+gkCountLimit/ge/joinOn/m1	2,1 | 2,2 | 2,3
+gkCountLimit/ge/joinOn/mn	1,3
+gkCountLimit/ge/joinOn/nm	(none)
+gkCountLimit/ge/joinOn/nk	(none)
+gkCountLimit/isnd/alone/m1	2,1
+gkCountLimit/isnd/alone/mn	1,3
+gkCountLimit/isnd/alone/nm	3,NULL
+gkCountLimit/isnd/alone/nk	NULL,NULL
+gkCountLimit/isnd/and/m1	2,1
+gkCountLimit/isnd/and/mn	1,3
+gkCountLimit/isnd/and/nm	(none)
+gkCountLimit/isnd/and/nk	(none)
+gkCountLimit/isnd/or/m1	2,0 | 2,1
+gkCountLimit/isnd/or/mn	1,0 | 1,3
+gkCountLimit/isnd/or/nm	3,0 | 3,NULL
+gkCountLimit/isnd/or/nk	NULL,0 | NULL,NULL
+gkCountLimit/isnd/not/m1	2,0 | 2,2 | 2,3 | 2,NULL
+gkCountLimit/isnd/not/mn	1,0 | 1,1 | 1,2 | 1,NULL
+gkCountLimit/isnd/not/nm	3,0 | 3,1 | 3,2 | 3,3
+gkCountLimit/isnd/not/nk	NULL,0 | NULL,1 | NULL,2 | NULL,3
+gkCountLimit/isnd/having/m1	2,1
+gkCountLimit/isnd/having/mn	1,3
+gkCountLimit/isnd/having/nm	3,NULL
+gkCountLimit/isnd/having/nk	NULL,NULL
+gkCountLimit/isnd/joinOn/m1	2,1
+gkCountLimit/isnd/joinOn/mn	1,3
+gkCountLimit/isnd/joinOn/nm	3,NULL
+gkCountLimit/isnd/joinOn/nk	NULL,NULL
+gkCountLimit/left/alone/m1	2,1
+gkCountLimit/left/alone/mn	1,3
+gkCountLimit/left/alone/nm	(none)
+gkCountLimit/left/alone/nk	(none)
+gkCountLimit/left/and/m1	2,1
+gkCountLimit/left/and/mn	1,3
+gkCountLimit/left/and/nm	(none)
+gkCountLimit/left/and/nk	(none)
+gkCountLimit/left/or/m1	2,0 | 2,1
+gkCountLimit/left/or/mn	1,0 | 1,3
+gkCountLimit/left/or/nm	3,0
+gkCountLimit/left/or/nk	NULL,0
+gkCountLimit/left/not/m1	2,0 | 2,2 | 2,3
+gkCountLimit/left/not/mn	1,0 | 1,1 | 1,2
+gkCountLimit/left/not/nm	(none)
+gkCountLimit/left/not/nk	(none)
+gkCountLimit/left/having/m1	2,1
+gkCountLimit/left/having/mn	1,3
+gkCountLimit/left/having/nm	(none)
+gkCountLimit/left/having/nk	(none)
+gkCountLimit/left/joinOn/m1	2,1
+gkCountLimit/left/joinOn/mn	1,3
+gkCountLimit/left/joinOn/nm	(none)
+gkCountLimit/left/joinOn/nk	(none)
+gkParen/eq/alone/m1	2,1
+gkParen/eq/alone/mn	1,3
+gkParen/eq/alone/nm	(none)
+gkParen/eq/alone/nk	(none)
+gkParen/eq/and/m1	2,1
+gkParen/eq/and/mn	1,3
+gkParen/eq/and/nm	(none)
+gkParen/eq/and/nk	(none)
+gkParen/eq/or/m1	2,0 | 2,1
+gkParen/eq/or/mn	1,0 | 1,3
+gkParen/eq/or/nm	3,0
+gkParen/eq/or/nk	NULL,0
+gkParen/eq/not/m1	2,0 | 2,2 | 2,3
+gkParen/eq/not/mn	1,0 | 1,1 | 1,2
+gkParen/eq/not/nm	(none)
+gkParen/eq/not/nk	(none)
+gkParen/eq/having/m1	2,1
+gkParen/eq/having/mn	1,3
+gkParen/eq/having/nm	(none)
+gkParen/eq/having/nk	(none)
+gkParen/eq/joinOn/m1	2,1
+gkParen/eq/joinOn/mn	1,3
+gkParen/eq/joinOn/nm	(none)
+gkParen/eq/joinOn/nk	(none)
+gkParen/ne/alone/m1	2,0 | 2,2 | 2,3
+gkParen/ne/alone/mn	1,0 | 1,1 | 1,2
+gkParen/ne/alone/nm	(none)
+gkParen/ne/alone/nk	(none)
+gkParen/ne/and/m1	2,2 | 2,3
+gkParen/ne/and/mn	1,1 | 1,2
+gkParen/ne/and/nm	(none)
+gkParen/ne/and/nk	(none)
+gkParen/ne/or/m1	2,0 | 2,2 | 2,3
+gkParen/ne/or/mn	1,0 | 1,1 | 1,2
+gkParen/ne/or/nm	3,0
+gkParen/ne/or/nk	NULL,0
+gkParen/ne/not/m1	2,1
+gkParen/ne/not/mn	1,3
+gkParen/ne/not/nm	(none)
+gkParen/ne/not/nk	(none)
+gkParen/ne/having/m1	2,0 | 2,2 | 2,3
+gkParen/ne/having/mn	1,0 | 1,1 | 1,2
+gkParen/ne/having/nm	(none)
+gkParen/ne/having/nk	(none)
+gkParen/ne/joinOn/m1	2,0 | 2,2 | 2,3
+gkParen/ne/joinOn/mn	1,0 | 1,1 | 1,2
+gkParen/ne/joinOn/nm	(none)
+gkParen/ne/joinOn/nk	(none)
+gkParen/lt/alone/m1	2,0
+gkParen/lt/alone/mn	1,0 | 1,1 | 1,2
+gkParen/lt/alone/nm	(none)
+gkParen/lt/alone/nk	(none)
+gkParen/lt/and/m1	(none)
+gkParen/lt/and/mn	1,1 | 1,2
+gkParen/lt/and/nm	(none)
+gkParen/lt/and/nk	(none)
+gkParen/lt/or/m1	2,0
+gkParen/lt/or/mn	1,0 | 1,1 | 1,2
+gkParen/lt/or/nm	3,0
+gkParen/lt/or/nk	NULL,0
+gkParen/lt/not/m1	2,1 | 2,2 | 2,3
+gkParen/lt/not/mn	1,3
+gkParen/lt/not/nm	(none)
+gkParen/lt/not/nk	(none)
+gkParen/lt/having/m1	2,0
+gkParen/lt/having/mn	1,0 | 1,1 | 1,2
+gkParen/lt/having/nm	(none)
+gkParen/lt/having/nk	(none)
+gkParen/lt/joinOn/m1	2,0
+gkParen/lt/joinOn/mn	1,0 | 1,1 | 1,2
+gkParen/lt/joinOn/nm	(none)
+gkParen/lt/joinOn/nk	(none)
+gkParen/ge/alone/m1	2,1 | 2,2 | 2,3
+gkParen/ge/alone/mn	1,3
+gkParen/ge/alone/nm	(none)
+gkParen/ge/alone/nk	(none)
+gkParen/ge/and/m1	2,1 | 2,2 | 2,3
+gkParen/ge/and/mn	1,3
+gkParen/ge/and/nm	(none)
+gkParen/ge/and/nk	(none)
+gkParen/ge/or/m1	2,0 | 2,1 | 2,2 | 2,3
+gkParen/ge/or/mn	1,0 | 1,3
+gkParen/ge/or/nm	3,0
+gkParen/ge/or/nk	NULL,0
+gkParen/ge/not/m1	2,0
+gkParen/ge/not/mn	1,0 | 1,1 | 1,2
+gkParen/ge/not/nm	(none)
+gkParen/ge/not/nk	(none)
+gkParen/ge/having/m1	2,1 | 2,2 | 2,3
+gkParen/ge/having/mn	1,3
+gkParen/ge/having/nm	(none)
+gkParen/ge/having/nk	(none)
+gkParen/ge/joinOn/m1	2,1 | 2,2 | 2,3
+gkParen/ge/joinOn/mn	1,3
+gkParen/ge/joinOn/nm	(none)
+gkParen/ge/joinOn/nk	(none)
+gkParen/isnd/alone/m1	2,1
+gkParen/isnd/alone/mn	1,3
+gkParen/isnd/alone/nm	3,NULL
+gkParen/isnd/alone/nk	NULL,NULL
+gkParen/isnd/and/m1	2,1
+gkParen/isnd/and/mn	1,3
+gkParen/isnd/and/nm	(none)
+gkParen/isnd/and/nk	(none)
+gkParen/isnd/or/m1	2,0 | 2,1
+gkParen/isnd/or/mn	1,0 | 1,3
+gkParen/isnd/or/nm	3,0 | 3,NULL
+gkParen/isnd/or/nk	NULL,0 | NULL,NULL
+gkParen/isnd/not/m1	2,0 | 2,2 | 2,3 | 2,NULL
+gkParen/isnd/not/mn	1,0 | 1,1 | 1,2 | 1,NULL
+gkParen/isnd/not/nm	3,0 | 3,1 | 3,2 | 3,3
+gkParen/isnd/not/nk	NULL,0 | NULL,1 | NULL,2 | NULL,3
+gkParen/isnd/having/m1	2,1
+gkParen/isnd/having/mn	1,3
+gkParen/isnd/having/nm	3,NULL
+gkParen/isnd/having/nk	NULL,NULL
+gkParen/isnd/joinOn/m1	2,1
+gkParen/isnd/joinOn/mn	1,3
+gkParen/isnd/joinOn/nm	3,NULL
+gkParen/isnd/joinOn/nk	NULL,NULL
+gkParen/left/alone/m1	2,1
+gkParen/left/alone/mn	1,3
+gkParen/left/alone/nm	(none)
+gkParen/left/alone/nk	(none)
+gkParen/left/and/m1	2,1
+gkParen/left/and/mn	1,3
+gkParen/left/and/nm	(none)
+gkParen/left/and/nk	(none)
+gkParen/left/or/m1	2,0 | 2,1
+gkParen/left/or/mn	1,0 | 1,3
+gkParen/left/or/nm	3,0
+gkParen/left/or/nk	NULL,0
+gkParen/left/not/m1	2,0 | 2,2 | 2,3
+gkParen/left/not/mn	1,0 | 1,1 | 1,2
+gkParen/left/not/nm	(none)
+gkParen/left/not/nk	(none)
+gkParen/left/having/m1	2,1
+gkParen/left/having/mn	1,3
+gkParen/left/having/nm	(none)
+gkParen/left/having/nk	(none)
+gkParen/left/joinOn/m1	2,1
+gkParen/left/joinOn/mn	1,3
+gkParen/left/joinOn/nm	(none)
+gkParen/left/joinOn/nk	(none)
+gkDup/eq/alone/m1	2,1
+gkDup/eq/alone/mn	1,3
+gkDup/eq/alone/nm	(none)
+gkDup/eq/alone/nk	(none)
+gkDup/eq/and/m1	2,1
+gkDup/eq/and/mn	1,3
+gkDup/eq/and/nm	(none)
+gkDup/eq/and/nk	(none)
+gkDup/eq/or/m1	2,0 | 2,1
+gkDup/eq/or/mn	1,0 | 1,3
+gkDup/eq/or/nm	3,0
+gkDup/eq/or/nk	NULL,0
+gkDup/eq/not/m1	2,0 | 2,2 | 2,3
+gkDup/eq/not/mn	1,0 | 1,1 | 1,2
+gkDup/eq/not/nm	(none)
+gkDup/eq/not/nk	(none)
+gkDup/eq/having/m1	2,1
+gkDup/eq/having/mn	1,3
+gkDup/eq/having/nm	(none)
+gkDup/eq/having/nk	(none)
+gkDup/eq/joinOn/m1	2,1
+gkDup/eq/joinOn/mn	1,3
+gkDup/eq/joinOn/nm	(none)
+gkDup/eq/joinOn/nk	(none)
+gkDup/ne/alone/m1	2,0 | 2,2 | 2,3
+gkDup/ne/alone/mn	1,0 | 1,1 | 1,2
+gkDup/ne/alone/nm	(none)
+gkDup/ne/alone/nk	(none)
+gkDup/ne/and/m1	2,2 | 2,3
+gkDup/ne/and/mn	1,1 | 1,2
+gkDup/ne/and/nm	(none)
+gkDup/ne/and/nk	(none)
+gkDup/ne/or/m1	2,0 | 2,2 | 2,3
+gkDup/ne/or/mn	1,0 | 1,1 | 1,2
+gkDup/ne/or/nm	3,0
+gkDup/ne/or/nk	NULL,0
+gkDup/ne/not/m1	2,1
+gkDup/ne/not/mn	1,3
+gkDup/ne/not/nm	(none)
+gkDup/ne/not/nk	(none)
+gkDup/ne/having/m1	2,0 | 2,2 | 2,3
+gkDup/ne/having/mn	1,0 | 1,1 | 1,2
+gkDup/ne/having/nm	(none)
+gkDup/ne/having/nk	(none)
+gkDup/ne/joinOn/m1	2,0 | 2,2 | 2,3
+gkDup/ne/joinOn/mn	1,0 | 1,1 | 1,2
+gkDup/ne/joinOn/nm	(none)
+gkDup/ne/joinOn/nk	(none)
+gkDup/lt/alone/m1	2,0
+gkDup/lt/alone/mn	1,0 | 1,1 | 1,2
+gkDup/lt/alone/nm	(none)
+gkDup/lt/alone/nk	(none)
+gkDup/lt/and/m1	(none)
+gkDup/lt/and/mn	1,1 | 1,2
+gkDup/lt/and/nm	(none)
+gkDup/lt/and/nk	(none)
+gkDup/lt/or/m1	2,0
+gkDup/lt/or/mn	1,0 | 1,1 | 1,2
+gkDup/lt/or/nm	3,0
+gkDup/lt/or/nk	NULL,0
+gkDup/lt/not/m1	2,1 | 2,2 | 2,3
+gkDup/lt/not/mn	1,3
+gkDup/lt/not/nm	(none)
+gkDup/lt/not/nk	(none)
+gkDup/lt/having/m1	2,0
+gkDup/lt/having/mn	1,0 | 1,1 | 1,2
+gkDup/lt/having/nm	(none)
+gkDup/lt/having/nk	(none)
+gkDup/lt/joinOn/m1	2,0
+gkDup/lt/joinOn/mn	1,0 | 1,1 | 1,2
+gkDup/lt/joinOn/nm	(none)
+gkDup/lt/joinOn/nk	(none)
+gkDup/ge/alone/m1	2,1 | 2,2 | 2,3
+gkDup/ge/alone/mn	1,3
+gkDup/ge/alone/nm	(none)
+gkDup/ge/alone/nk	(none)
+gkDup/ge/and/m1	2,1 | 2,2 | 2,3
+gkDup/ge/and/mn	1,3
+gkDup/ge/and/nm	(none)
+gkDup/ge/and/nk	(none)
+gkDup/ge/or/m1	2,0 | 2,1 | 2,2 | 2,3
+gkDup/ge/or/mn	1,0 | 1,3
+gkDup/ge/or/nm	3,0
+gkDup/ge/or/nk	NULL,0
+gkDup/ge/not/m1	2,0
+gkDup/ge/not/mn	1,0 | 1,1 | 1,2
+gkDup/ge/not/nm	(none)
+gkDup/ge/not/nk	(none)
+gkDup/ge/having/m1	2,1 | 2,2 | 2,3
+gkDup/ge/having/mn	1,3
+gkDup/ge/having/nm	(none)
+gkDup/ge/having/nk	(none)
+gkDup/ge/joinOn/m1	2,1 | 2,2 | 2,3
+gkDup/ge/joinOn/mn	1,3
+gkDup/ge/joinOn/nm	(none)
+gkDup/ge/joinOn/nk	(none)
+gkDup/isnd/alone/m1	2,1
+gkDup/isnd/alone/mn	1,3
+gkDup/isnd/alone/nm	3,NULL
+gkDup/isnd/alone/nk	NULL,NULL
+gkDup/isnd/and/m1	2,1
+gkDup/isnd/and/mn	1,3
+gkDup/isnd/and/nm	(none)
+gkDup/isnd/and/nk	(none)
+gkDup/isnd/or/m1	2,0 | 2,1
+gkDup/isnd/or/mn	1,0 | 1,3
+gkDup/isnd/or/nm	3,0 | 3,NULL
+gkDup/isnd/or/nk	NULL,0 | NULL,NULL
+gkDup/isnd/not/m1	2,0 | 2,2 | 2,3 | 2,NULL
+gkDup/isnd/not/mn	1,0 | 1,1 | 1,2 | 1,NULL
+gkDup/isnd/not/nm	3,0 | 3,1 | 3,2 | 3,3
+gkDup/isnd/not/nk	NULL,0 | NULL,1 | NULL,2 | NULL,3
+gkDup/isnd/having/m1	2,1
+gkDup/isnd/having/mn	1,3
+gkDup/isnd/having/nm	3,NULL
+gkDup/isnd/having/nk	NULL,NULL
+gkDup/isnd/joinOn/m1	2,1
+gkDup/isnd/joinOn/mn	1,3
+gkDup/isnd/joinOn/nm	3,NULL
+gkDup/isnd/joinOn/nk	NULL,NULL
+gkDup/left/alone/m1	2,1
+gkDup/left/alone/mn	1,3
+gkDup/left/alone/nm	(none)
+gkDup/left/alone/nk	(none)
+gkDup/left/and/m1	2,1
+gkDup/left/and/mn	1,3
+gkDup/left/and/nm	(none)
+gkDup/left/and/nk	(none)
+gkDup/left/or/m1	2,0 | 2,1
+gkDup/left/or/mn	1,0 | 1,3
+gkDup/left/or/nm	3,0
+gkDup/left/or/nk	NULL,0
+gkDup/left/not/m1	2,0 | 2,2 | 2,3
+gkDup/left/not/mn	1,0 | 1,1 | 1,2
+gkDup/left/not/nm	(none)
+gkDup/left/not/nk	(none)
+gkDup/left/having/m1	2,1
+gkDup/left/having/mn	1,3
+gkDup/left/having/nm	(none)
+gkDup/left/having/nk	(none)
+gkDup/left/joinOn/m1	2,1
+gkDup/left/joinOn/mn	1,3
+gkDup/left/joinOn/nm	(none)
+gkDup/left/joinOn/nk	(none)
+gkUnqual/eq/alone/m1	2,1
+gkUnqual/eq/alone/mn	1,3
+gkUnqual/eq/alone/nm	(none)
+gkUnqual/eq/alone/nk	(none)
+gkUnqual/eq/and/m1	2,1
+gkUnqual/eq/and/mn	1,3
+gkUnqual/eq/and/nm	(none)
+gkUnqual/eq/and/nk	(none)
+gkUnqual/eq/or/m1	2,0 | 2,1
+gkUnqual/eq/or/mn	1,0 | 1,3
+gkUnqual/eq/or/nm	3,0
+gkUnqual/eq/or/nk	NULL,0
+gkUnqual/eq/not/m1	2,0 | 2,2 | 2,3
+gkUnqual/eq/not/mn	1,0 | 1,1 | 1,2
+gkUnqual/eq/not/nm	(none)
+gkUnqual/eq/not/nk	(none)
+gkUnqual/eq/having/m1	2,1
+gkUnqual/eq/having/mn	1,3
+gkUnqual/eq/having/nm	(none)
+gkUnqual/eq/having/nk	(none)
+gkUnqual/eq/joinOn/m1	2,1
+gkUnqual/eq/joinOn/mn	1,3
+gkUnqual/eq/joinOn/nm	(none)
+gkUnqual/eq/joinOn/nk	(none)
+gkUnqual/ne/alone/m1	2,0 | 2,2 | 2,3
+gkUnqual/ne/alone/mn	1,0 | 1,1 | 1,2
+gkUnqual/ne/alone/nm	(none)
+gkUnqual/ne/alone/nk	(none)
+gkUnqual/ne/and/m1	2,2 | 2,3
+gkUnqual/ne/and/mn	1,1 | 1,2
+gkUnqual/ne/and/nm	(none)
+gkUnqual/ne/and/nk	(none)
+gkUnqual/ne/or/m1	2,0 | 2,2 | 2,3
+gkUnqual/ne/or/mn	1,0 | 1,1 | 1,2
+gkUnqual/ne/or/nm	3,0
+gkUnqual/ne/or/nk	NULL,0
+gkUnqual/ne/not/m1	2,1
+gkUnqual/ne/not/mn	1,3
+gkUnqual/ne/not/nm	(none)
+gkUnqual/ne/not/nk	(none)
+gkUnqual/ne/having/m1	2,0 | 2,2 | 2,3
+gkUnqual/ne/having/mn	1,0 | 1,1 | 1,2
+gkUnqual/ne/having/nm	(none)
+gkUnqual/ne/having/nk	(none)
+gkUnqual/ne/joinOn/m1	2,0 | 2,2 | 2,3
+gkUnqual/ne/joinOn/mn	1,0 | 1,1 | 1,2
+gkUnqual/ne/joinOn/nm	(none)
+gkUnqual/ne/joinOn/nk	(none)
+gkUnqual/lt/alone/m1	2,0
+gkUnqual/lt/alone/mn	1,0 | 1,1 | 1,2
+gkUnqual/lt/alone/nm	(none)
+gkUnqual/lt/alone/nk	(none)
+gkUnqual/lt/and/m1	(none)
+gkUnqual/lt/and/mn	1,1 | 1,2
+gkUnqual/lt/and/nm	(none)
+gkUnqual/lt/and/nk	(none)
+gkUnqual/lt/or/m1	2,0
+gkUnqual/lt/or/mn	1,0 | 1,1 | 1,2
+gkUnqual/lt/or/nm	3,0
+gkUnqual/lt/or/nk	NULL,0
+gkUnqual/lt/not/m1	2,1 | 2,2 | 2,3
+gkUnqual/lt/not/mn	1,3
+gkUnqual/lt/not/nm	(none)
+gkUnqual/lt/not/nk	(none)
+gkUnqual/lt/having/m1	2,0
+gkUnqual/lt/having/mn	1,0 | 1,1 | 1,2
+gkUnqual/lt/having/nm	(none)
+gkUnqual/lt/having/nk	(none)
+gkUnqual/lt/joinOn/m1	2,0
+gkUnqual/lt/joinOn/mn	1,0 | 1,1 | 1,2
+gkUnqual/lt/joinOn/nm	(none)
+gkUnqual/lt/joinOn/nk	(none)
+gkUnqual/ge/alone/m1	2,1 | 2,2 | 2,3
+gkUnqual/ge/alone/mn	1,3
+gkUnqual/ge/alone/nm	(none)
+gkUnqual/ge/alone/nk	(none)
+gkUnqual/ge/and/m1	2,1 | 2,2 | 2,3
+gkUnqual/ge/and/mn	1,3
+gkUnqual/ge/and/nm	(none)
+gkUnqual/ge/and/nk	(none)
+gkUnqual/ge/or/m1	2,0 | 2,1 | 2,2 | 2,3
+gkUnqual/ge/or/mn	1,0 | 1,3
+gkUnqual/ge/or/nm	3,0
+gkUnqual/ge/or/nk	NULL,0
+gkUnqual/ge/not/m1	2,0
+gkUnqual/ge/not/mn	1,0 | 1,1 | 1,2
+gkUnqual/ge/not/nm	(none)
+gkUnqual/ge/not/nk	(none)
+gkUnqual/ge/having/m1	2,1 | 2,2 | 2,3
+gkUnqual/ge/having/mn	1,3
+gkUnqual/ge/having/nm	(none)
+gkUnqual/ge/having/nk	(none)
+gkUnqual/ge/joinOn/m1	2,1 | 2,2 | 2,3
+gkUnqual/ge/joinOn/mn	1,3
+gkUnqual/ge/joinOn/nm	(none)
+gkUnqual/ge/joinOn/nk	(none)
+gkUnqual/isnd/alone/m1	2,1
+gkUnqual/isnd/alone/mn	1,3
+gkUnqual/isnd/alone/nm	3,NULL
+gkUnqual/isnd/alone/nk	NULL,NULL
+gkUnqual/isnd/and/m1	2,1
+gkUnqual/isnd/and/mn	1,3
+gkUnqual/isnd/and/nm	(none)
+gkUnqual/isnd/and/nk	(none)
+gkUnqual/isnd/or/m1	2,0 | 2,1
+gkUnqual/isnd/or/mn	1,0 | 1,3
+gkUnqual/isnd/or/nm	3,0 | 3,NULL
+gkUnqual/isnd/or/nk	NULL,0 | NULL,NULL
+gkUnqual/isnd/not/m1	2,0 | 2,2 | 2,3 | 2,NULL
+gkUnqual/isnd/not/mn	1,0 | 1,1 | 1,2 | 1,NULL
+gkUnqual/isnd/not/nm	3,0 | 3,1 | 3,2 | 3,3
+gkUnqual/isnd/not/nk	NULL,0 | NULL,1 | NULL,2 | NULL,3
+gkUnqual/isnd/having/m1	2,1
+gkUnqual/isnd/having/mn	1,3
+gkUnqual/isnd/having/nm	3,NULL
+gkUnqual/isnd/having/nk	NULL,NULL
+gkUnqual/isnd/joinOn/m1	2,1
+gkUnqual/isnd/joinOn/mn	1,3
+gkUnqual/isnd/joinOn/nm	3,NULL
+gkUnqual/isnd/joinOn/nk	NULL,NULL
+gkUnqual/left/alone/m1	2,1
+gkUnqual/left/alone/mn	1,3
+gkUnqual/left/alone/nm	(none)
+gkUnqual/left/alone/nk	(none)
+gkUnqual/left/and/m1	2,1
+gkUnqual/left/and/mn	1,3
+gkUnqual/left/and/nm	(none)
+gkUnqual/left/and/nk	(none)
+gkUnqual/left/or/m1	2,0 | 2,1
+gkUnqual/left/or/mn	1,0 | 1,3
+gkUnqual/left/or/nm	3,0
+gkUnqual/left/or/nk	NULL,0
+gkUnqual/left/not/m1	2,0 | 2,2 | 2,3
+gkUnqual/left/not/mn	1,0 | 1,1 | 1,2
+gkUnqual/left/not/nm	(none)
+gkUnqual/left/not/nk	(none)
+gkUnqual/left/having/m1	2,1
+gkUnqual/left/having/mn	1,3
+gkUnqual/left/having/nm	(none)
+gkUnqual/left/having/nk	(none)
+gkUnqual/left/joinOn/m1	2,1
+gkUnqual/left/joinOn/mn	1,3
+gkUnqual/left/joinOn/nm	(none)
+gkUnqual/left/joinOn/nk	(none)
+gkNoAliasBare/eq/alone/m1	2,1
+gkNoAliasBare/eq/alone/mn	1,3
+gkNoAliasBare/eq/alone/nm	(none)
+gkNoAliasBare/eq/alone/nk	(none)
+gkNoAliasBare/eq/and/m1	2,1
+gkNoAliasBare/eq/and/mn	1,3
+gkNoAliasBare/eq/and/nm	(none)
+gkNoAliasBare/eq/and/nk	(none)
+gkNoAliasBare/eq/or/m1	2,0 | 2,1
+gkNoAliasBare/eq/or/mn	1,0 | 1,3
+gkNoAliasBare/eq/or/nm	3,0
+gkNoAliasBare/eq/or/nk	NULL,0
+gkNoAliasBare/eq/not/m1	2,0 | 2,2 | 2,3
+gkNoAliasBare/eq/not/mn	1,0 | 1,1 | 1,2
+gkNoAliasBare/eq/not/nm	(none)
+gkNoAliasBare/eq/not/nk	(none)
+gkNoAliasBare/eq/having/m1	2,1
+gkNoAliasBare/eq/having/mn	1,3
+gkNoAliasBare/eq/having/nm	(none)
+gkNoAliasBare/eq/having/nk	(none)
+gkNoAliasBare/eq/joinOn/m1	2,1
+gkNoAliasBare/eq/joinOn/mn	1,3
+gkNoAliasBare/eq/joinOn/nm	(none)
+gkNoAliasBare/eq/joinOn/nk	(none)
+gkNoAliasBare/ne/alone/m1	2,0 | 2,2 | 2,3
+gkNoAliasBare/ne/alone/mn	1,0 | 1,1 | 1,2
+gkNoAliasBare/ne/alone/nm	(none)
+gkNoAliasBare/ne/alone/nk	(none)
+gkNoAliasBare/ne/and/m1	2,2 | 2,3
+gkNoAliasBare/ne/and/mn	1,1 | 1,2
+gkNoAliasBare/ne/and/nm	(none)
+gkNoAliasBare/ne/and/nk	(none)
+gkNoAliasBare/ne/or/m1	2,0 | 2,2 | 2,3
+gkNoAliasBare/ne/or/mn	1,0 | 1,1 | 1,2
+gkNoAliasBare/ne/or/nm	3,0
+gkNoAliasBare/ne/or/nk	NULL,0
+gkNoAliasBare/ne/not/m1	2,1
+gkNoAliasBare/ne/not/mn	1,3
+gkNoAliasBare/ne/not/nm	(none)
+gkNoAliasBare/ne/not/nk	(none)
+gkNoAliasBare/ne/having/m1	2,0 | 2,2 | 2,3
+gkNoAliasBare/ne/having/mn	1,0 | 1,1 | 1,2
+gkNoAliasBare/ne/having/nm	(none)
+gkNoAliasBare/ne/having/nk	(none)
+gkNoAliasBare/ne/joinOn/m1	2,0 | 2,2 | 2,3
+gkNoAliasBare/ne/joinOn/mn	1,0 | 1,1 | 1,2
+gkNoAliasBare/ne/joinOn/nm	(none)
+gkNoAliasBare/ne/joinOn/nk	(none)
+gkNoAliasBare/lt/alone/m1	2,0
+gkNoAliasBare/lt/alone/mn	1,0 | 1,1 | 1,2
+gkNoAliasBare/lt/alone/nm	(none)
+gkNoAliasBare/lt/alone/nk	(none)
+gkNoAliasBare/lt/and/m1	(none)
+gkNoAliasBare/lt/and/mn	1,1 | 1,2
+gkNoAliasBare/lt/and/nm	(none)
+gkNoAliasBare/lt/and/nk	(none)
+gkNoAliasBare/lt/or/m1	2,0
+gkNoAliasBare/lt/or/mn	1,0 | 1,1 | 1,2
+gkNoAliasBare/lt/or/nm	3,0
+gkNoAliasBare/lt/or/nk	NULL,0
+gkNoAliasBare/lt/not/m1	2,1 | 2,2 | 2,3
+gkNoAliasBare/lt/not/mn	1,3
+gkNoAliasBare/lt/not/nm	(none)
+gkNoAliasBare/lt/not/nk	(none)
+gkNoAliasBare/lt/having/m1	2,0
+gkNoAliasBare/lt/having/mn	1,0 | 1,1 | 1,2
+gkNoAliasBare/lt/having/nm	(none)
+gkNoAliasBare/lt/having/nk	(none)
+gkNoAliasBare/lt/joinOn/m1	2,0
+gkNoAliasBare/lt/joinOn/mn	1,0 | 1,1 | 1,2
+gkNoAliasBare/lt/joinOn/nm	(none)
+gkNoAliasBare/lt/joinOn/nk	(none)
+gkNoAliasBare/ge/alone/m1	2,1 | 2,2 | 2,3
+gkNoAliasBare/ge/alone/mn	1,3
+gkNoAliasBare/ge/alone/nm	(none)
+gkNoAliasBare/ge/alone/nk	(none)
+gkNoAliasBare/ge/and/m1	2,1 | 2,2 | 2,3
+gkNoAliasBare/ge/and/mn	1,3
+gkNoAliasBare/ge/and/nm	(none)
+gkNoAliasBare/ge/and/nk	(none)
+gkNoAliasBare/ge/or/m1	2,0 | 2,1 | 2,2 | 2,3
+gkNoAliasBare/ge/or/mn	1,0 | 1,3
+gkNoAliasBare/ge/or/nm	3,0
+gkNoAliasBare/ge/or/nk	NULL,0
+gkNoAliasBare/ge/not/m1	2,0
+gkNoAliasBare/ge/not/mn	1,0 | 1,1 | 1,2
+gkNoAliasBare/ge/not/nm	(none)
+gkNoAliasBare/ge/not/nk	(none)
+gkNoAliasBare/ge/having/m1	2,1 | 2,2 | 2,3
+gkNoAliasBare/ge/having/mn	1,3
+gkNoAliasBare/ge/having/nm	(none)
+gkNoAliasBare/ge/having/nk	(none)
+gkNoAliasBare/ge/joinOn/m1	2,1 | 2,2 | 2,3
+gkNoAliasBare/ge/joinOn/mn	1,3
+gkNoAliasBare/ge/joinOn/nm	(none)
+gkNoAliasBare/ge/joinOn/nk	(none)
+gkNoAliasBare/isnd/alone/m1	2,1
+gkNoAliasBare/isnd/alone/mn	1,3
+gkNoAliasBare/isnd/alone/nm	3,NULL
+gkNoAliasBare/isnd/alone/nk	NULL,NULL
+gkNoAliasBare/isnd/and/m1	2,1
+gkNoAliasBare/isnd/and/mn	1,3
+gkNoAliasBare/isnd/and/nm	(none)
+gkNoAliasBare/isnd/and/nk	(none)
+gkNoAliasBare/isnd/or/m1	2,0 | 2,1
+gkNoAliasBare/isnd/or/mn	1,0 | 1,3
+gkNoAliasBare/isnd/or/nm	3,0 | 3,NULL
+gkNoAliasBare/isnd/or/nk	NULL,0 | NULL,NULL
+gkNoAliasBare/isnd/not/m1	2,0 | 2,2 | 2,3 | 2,NULL
+gkNoAliasBare/isnd/not/mn	1,0 | 1,1 | 1,2 | 1,NULL
+gkNoAliasBare/isnd/not/nm	3,0 | 3,1 | 3,2 | 3,3
+gkNoAliasBare/isnd/not/nk	NULL,0 | NULL,1 | NULL,2 | NULL,3
+gkNoAliasBare/isnd/having/m1	2,1
+gkNoAliasBare/isnd/having/mn	1,3
+gkNoAliasBare/isnd/having/nm	3,NULL
+gkNoAliasBare/isnd/having/nk	NULL,NULL
+gkNoAliasBare/isnd/joinOn/m1	2,1
+gkNoAliasBare/isnd/joinOn/mn	1,3
+gkNoAliasBare/isnd/joinOn/nm	3,NULL
+gkNoAliasBare/isnd/joinOn/nk	NULL,NULL
+gkNoAliasBare/left/alone/m1	2,1
+gkNoAliasBare/left/alone/mn	1,3
+gkNoAliasBare/left/alone/nm	(none)
+gkNoAliasBare/left/alone/nk	(none)
+gkNoAliasBare/left/and/m1	2,1
+gkNoAliasBare/left/and/mn	1,3
+gkNoAliasBare/left/and/nm	(none)
+gkNoAliasBare/left/and/nk	(none)
+gkNoAliasBare/left/or/m1	2,0 | 2,1
+gkNoAliasBare/left/or/mn	1,0 | 1,3
+gkNoAliasBare/left/or/nm	3,0
+gkNoAliasBare/left/or/nk	NULL,0
+gkNoAliasBare/left/not/m1	2,0 | 2,2 | 2,3
+gkNoAliasBare/left/not/mn	1,0 | 1,1 | 1,2
+gkNoAliasBare/left/not/nm	(none)
+gkNoAliasBare/left/not/nk	(none)
+gkNoAliasBare/left/having/m1	2,1
+gkNoAliasBare/left/having/mn	1,3
+gkNoAliasBare/left/having/nm	(none)
+gkNoAliasBare/left/having/nk	(none)
+gkNoAliasBare/left/joinOn/m1	2,1
+gkNoAliasBare/left/joinOn/mn	1,3
+gkNoAliasBare/left/joinOn/nm	(none)
+gkNoAliasBare/left/joinOn/nk	(none)
+gkNoAliasQual/eq/alone/m1	2,1
+gkNoAliasQual/eq/alone/mn	1,3
+gkNoAliasQual/eq/alone/nm	(none)
+gkNoAliasQual/eq/alone/nk	(none)
+gkNoAliasQual/eq/and/m1	2,1
+gkNoAliasQual/eq/and/mn	1,3
+gkNoAliasQual/eq/and/nm	(none)
+gkNoAliasQual/eq/and/nk	(none)
+gkNoAliasQual/eq/or/m1	2,0 | 2,1
+gkNoAliasQual/eq/or/mn	1,0 | 1,3
+gkNoAliasQual/eq/or/nm	3,0
+gkNoAliasQual/eq/or/nk	NULL,0
+gkNoAliasQual/eq/not/m1	2,0 | 2,2 | 2,3
+gkNoAliasQual/eq/not/mn	1,0 | 1,1 | 1,2
+gkNoAliasQual/eq/not/nm	(none)
+gkNoAliasQual/eq/not/nk	(none)
+gkNoAliasQual/eq/having/m1	2,1
+gkNoAliasQual/eq/having/mn	1,3
+gkNoAliasQual/eq/having/nm	(none)
+gkNoAliasQual/eq/having/nk	(none)
+gkNoAliasQual/eq/joinOn/m1	2,1
+gkNoAliasQual/eq/joinOn/mn	1,3
+gkNoAliasQual/eq/joinOn/nm	(none)
+gkNoAliasQual/eq/joinOn/nk	(none)
+gkNoAliasQual/ne/alone/m1	2,0 | 2,2 | 2,3
+gkNoAliasQual/ne/alone/mn	1,0 | 1,1 | 1,2
+gkNoAliasQual/ne/alone/nm	(none)
+gkNoAliasQual/ne/alone/nk	(none)
+gkNoAliasQual/ne/and/m1	2,2 | 2,3
+gkNoAliasQual/ne/and/mn	1,1 | 1,2
+gkNoAliasQual/ne/and/nm	(none)
+gkNoAliasQual/ne/and/nk	(none)
+gkNoAliasQual/ne/or/m1	2,0 | 2,2 | 2,3
+gkNoAliasQual/ne/or/mn	1,0 | 1,1 | 1,2
+gkNoAliasQual/ne/or/nm	3,0
+gkNoAliasQual/ne/or/nk	NULL,0
+gkNoAliasQual/ne/not/m1	2,1
+gkNoAliasQual/ne/not/mn	1,3
+gkNoAliasQual/ne/not/nm	(none)
+gkNoAliasQual/ne/not/nk	(none)
+gkNoAliasQual/ne/having/m1	2,0 | 2,2 | 2,3
+gkNoAliasQual/ne/having/mn	1,0 | 1,1 | 1,2
+gkNoAliasQual/ne/having/nm	(none)
+gkNoAliasQual/ne/having/nk	(none)
+gkNoAliasQual/ne/joinOn/m1	2,0 | 2,2 | 2,3
+gkNoAliasQual/ne/joinOn/mn	1,0 | 1,1 | 1,2
+gkNoAliasQual/ne/joinOn/nm	(none)
+gkNoAliasQual/ne/joinOn/nk	(none)
+gkNoAliasQual/lt/alone/m1	2,0
+gkNoAliasQual/lt/alone/mn	1,0 | 1,1 | 1,2
+gkNoAliasQual/lt/alone/nm	(none)
+gkNoAliasQual/lt/alone/nk	(none)
+gkNoAliasQual/lt/and/m1	(none)
+gkNoAliasQual/lt/and/mn	1,1 | 1,2
+gkNoAliasQual/lt/and/nm	(none)
+gkNoAliasQual/lt/and/nk	(none)
+gkNoAliasQual/lt/or/m1	2,0
+gkNoAliasQual/lt/or/mn	1,0 | 1,1 | 1,2
+gkNoAliasQual/lt/or/nm	3,0
+gkNoAliasQual/lt/or/nk	NULL,0
+gkNoAliasQual/lt/not/m1	2,1 | 2,2 | 2,3
+gkNoAliasQual/lt/not/mn	1,3
+gkNoAliasQual/lt/not/nm	(none)
+gkNoAliasQual/lt/not/nk	(none)
+gkNoAliasQual/lt/having/m1	2,0
+gkNoAliasQual/lt/having/mn	1,0 | 1,1 | 1,2
+gkNoAliasQual/lt/having/nm	(none)
+gkNoAliasQual/lt/having/nk	(none)
+gkNoAliasQual/lt/joinOn/m1	2,0
+gkNoAliasQual/lt/joinOn/mn	1,0 | 1,1 | 1,2
+gkNoAliasQual/lt/joinOn/nm	(none)
+gkNoAliasQual/lt/joinOn/nk	(none)
+gkNoAliasQual/ge/alone/m1	2,1 | 2,2 | 2,3
+gkNoAliasQual/ge/alone/mn	1,3
+gkNoAliasQual/ge/alone/nm	(none)
+gkNoAliasQual/ge/alone/nk	(none)
+gkNoAliasQual/ge/and/m1	2,1 | 2,2 | 2,3
+gkNoAliasQual/ge/and/mn	1,3
+gkNoAliasQual/ge/and/nm	(none)
+gkNoAliasQual/ge/and/nk	(none)
+gkNoAliasQual/ge/or/m1	2,0 | 2,1 | 2,2 | 2,3
+gkNoAliasQual/ge/or/mn	1,0 | 1,3
+gkNoAliasQual/ge/or/nm	3,0
+gkNoAliasQual/ge/or/nk	NULL,0
+gkNoAliasQual/ge/not/m1	2,0
+gkNoAliasQual/ge/not/mn	1,0 | 1,1 | 1,2
+gkNoAliasQual/ge/not/nm	(none)
+gkNoAliasQual/ge/not/nk	(none)
+gkNoAliasQual/ge/having/m1	2,1 | 2,2 | 2,3
+gkNoAliasQual/ge/having/mn	1,3
+gkNoAliasQual/ge/having/nm	(none)
+gkNoAliasQual/ge/having/nk	(none)
+gkNoAliasQual/ge/joinOn/m1	2,1 | 2,2 | 2,3
+gkNoAliasQual/ge/joinOn/mn	1,3
+gkNoAliasQual/ge/joinOn/nm	(none)
+gkNoAliasQual/ge/joinOn/nk	(none)
+gkNoAliasQual/isnd/alone/m1	2,1
+gkNoAliasQual/isnd/alone/mn	1,3
+gkNoAliasQual/isnd/alone/nm	3,NULL
+gkNoAliasQual/isnd/alone/nk	NULL,NULL
+gkNoAliasQual/isnd/and/m1	2,1
+gkNoAliasQual/isnd/and/mn	1,3
+gkNoAliasQual/isnd/and/nm	(none)
+gkNoAliasQual/isnd/and/nk	(none)
+gkNoAliasQual/isnd/or/m1	2,0 | 2,1
+gkNoAliasQual/isnd/or/mn	1,0 | 1,3
+gkNoAliasQual/isnd/or/nm	3,0 | 3,NULL
+gkNoAliasQual/isnd/or/nk	NULL,0 | NULL,NULL
+gkNoAliasQual/isnd/not/m1	2,0 | 2,2 | 2,3 | 2,NULL
+gkNoAliasQual/isnd/not/mn	1,0 | 1,1 | 1,2 | 1,NULL
+gkNoAliasQual/isnd/not/nm	3,0 | 3,1 | 3,2 | 3,3
+gkNoAliasQual/isnd/not/nk	NULL,0 | NULL,1 | NULL,2 | NULL,3
+gkNoAliasQual/isnd/having/m1	2,1
+gkNoAliasQual/isnd/having/mn	1,3
+gkNoAliasQual/isnd/having/nm	3,NULL
+gkNoAliasQual/isnd/having/nk	NULL,NULL
+gkNoAliasQual/isnd/joinOn/m1	2,1
+gkNoAliasQual/isnd/joinOn/mn	1,3
+gkNoAliasQual/isnd/joinOn/nm	3,NULL
+gkNoAliasQual/isnd/joinOn/nk	NULL,NULL
+gkNoAliasQual/left/alone/m1	2,1
+gkNoAliasQual/left/alone/mn	1,3
+gkNoAliasQual/left/alone/nm	(none)
+gkNoAliasQual/left/alone/nk	(none)
+gkNoAliasQual/left/and/m1	2,1
+gkNoAliasQual/left/and/mn	1,3
+gkNoAliasQual/left/and/nm	(none)
+gkNoAliasQual/left/and/nk	(none)
+gkNoAliasQual/left/or/m1	2,0 | 2,1
+gkNoAliasQual/left/or/mn	1,0 | 1,3
+gkNoAliasQual/left/or/nm	3,0
+gkNoAliasQual/left/or/nk	NULL,0
+gkNoAliasQual/left/not/m1	2,0 | 2,2 | 2,3
+gkNoAliasQual/left/not/mn	1,0 | 1,1 | 1,2
+gkNoAliasQual/left/not/nm	(none)
+gkNoAliasQual/left/not/nk	(none)
+gkNoAliasQual/left/having/m1	2,1
+gkNoAliasQual/left/having/mn	1,3
+gkNoAliasQual/left/having/nm	(none)
+gkNoAliasQual/left/having/nk	(none)
+gkNoAliasQual/left/joinOn/m1	2,1
+gkNoAliasQual/left/joinOn/mn	1,3
+gkNoAliasQual/left/joinOn/nm	(none)
+gkNoAliasQual/left/joinOn/nk	(none)
+gk2Both/eq/alone/m1	2,1
+gk2Both/eq/alone/mn	1,2
+gk2Both/eq/alone/nm	(none)
+gk2Both/eq/alone/nk	(none)
+gk2Both/eq/and/m1	2,1
+gk2Both/eq/and/mn	1,2
+gk2Both/eq/and/nm	(none)
+gk2Both/eq/and/nk	(none)
+gk2Both/eq/or/m1	2,0 | 2,1
+gk2Both/eq/or/mn	1,0 | 1,2
+gk2Both/eq/or/nm	3,0
+gk2Both/eq/or/nk	NULL,0
+gk2Both/eq/not/m1	2,0 | 2,2 | 2,3
+gk2Both/eq/not/mn	1,0 | 1,1 | 1,3
+gk2Both/eq/not/nm	(none)
+gk2Both/eq/not/nk	(none)
+gk2Both/eq/having/m1	ERR 42803
+gk2Both/eq/having/mn	ERR 42803
+gk2Both/eq/having/nm	ERR 42803
+gk2Both/eq/having/nk	ERR 42803
+gk2Both/eq/joinOn/m1	2,1
+gk2Both/eq/joinOn/mn	1,2
+gk2Both/eq/joinOn/nm	(none)
+gk2Both/eq/joinOn/nk	(none)
+gk2Both/ne/alone/m1	2,0 | 2,2 | 2,3
+gk2Both/ne/alone/mn	1,0 | 1,1 | 1,3
+gk2Both/ne/alone/nm	(none)
+gk2Both/ne/alone/nk	(none)
+gk2Both/ne/and/m1	2,2 | 2,3
+gk2Both/ne/and/mn	1,1 | 1,3
+gk2Both/ne/and/nm	(none)
+gk2Both/ne/and/nk	(none)
+gk2Both/ne/or/m1	2,0 | 2,2 | 2,3
+gk2Both/ne/or/mn	1,0 | 1,1 | 1,3
+gk2Both/ne/or/nm	3,0
+gk2Both/ne/or/nk	NULL,0
+gk2Both/ne/not/m1	2,1
+gk2Both/ne/not/mn	1,2
+gk2Both/ne/not/nm	(none)
+gk2Both/ne/not/nk	(none)
+gk2Both/ne/having/m1	ERR 42803
+gk2Both/ne/having/mn	ERR 42803
+gk2Both/ne/having/nm	ERR 42803
+gk2Both/ne/having/nk	ERR 42803
+gk2Both/ne/joinOn/m1	2,0 | 2,2 | 2,3
+gk2Both/ne/joinOn/mn	1,0 | 1,1 | 1,3
+gk2Both/ne/joinOn/nm	(none)
+gk2Both/ne/joinOn/nk	(none)
+gk2Both/lt/alone/m1	2,0
+gk2Both/lt/alone/mn	1,0 | 1,1
+gk2Both/lt/alone/nm	(none)
+gk2Both/lt/alone/nk	(none)
+gk2Both/lt/and/m1	(none)
+gk2Both/lt/and/mn	1,1
+gk2Both/lt/and/nm	(none)
+gk2Both/lt/and/nk	(none)
+gk2Both/lt/or/m1	2,0
+gk2Both/lt/or/mn	1,0 | 1,1
+gk2Both/lt/or/nm	3,0
+gk2Both/lt/or/nk	NULL,0
+gk2Both/lt/not/m1	2,1 | 2,2 | 2,3
+gk2Both/lt/not/mn	1,2 | 1,3
+gk2Both/lt/not/nm	(none)
+gk2Both/lt/not/nk	(none)
+gk2Both/lt/having/m1	ERR 42803
+gk2Both/lt/having/mn	ERR 42803
+gk2Both/lt/having/nm	ERR 42803
+gk2Both/lt/having/nk	ERR 42803
+gk2Both/lt/joinOn/m1	2,0
+gk2Both/lt/joinOn/mn	1,0 | 1,1
+gk2Both/lt/joinOn/nm	(none)
+gk2Both/lt/joinOn/nk	(none)
+gk2Both/ge/alone/m1	2,1 | 2,2 | 2,3
+gk2Both/ge/alone/mn	1,2 | 1,3
+gk2Both/ge/alone/nm	(none)
+gk2Both/ge/alone/nk	(none)
+gk2Both/ge/and/m1	2,1 | 2,2 | 2,3
+gk2Both/ge/and/mn	1,2 | 1,3
+gk2Both/ge/and/nm	(none)
+gk2Both/ge/and/nk	(none)
+gk2Both/ge/or/m1	2,0 | 2,1 | 2,2 | 2,3
+gk2Both/ge/or/mn	1,0 | 1,2 | 1,3
+gk2Both/ge/or/nm	3,0
+gk2Both/ge/or/nk	NULL,0
+gk2Both/ge/not/m1	2,0
+gk2Both/ge/not/mn	1,0 | 1,1
+gk2Both/ge/not/nm	(none)
+gk2Both/ge/not/nk	(none)
+gk2Both/ge/having/m1	ERR 42803
+gk2Both/ge/having/mn	ERR 42803
+gk2Both/ge/having/nm	ERR 42803
+gk2Both/ge/having/nk	ERR 42803
+gk2Both/ge/joinOn/m1	2,1 | 2,2 | 2,3
+gk2Both/ge/joinOn/mn	1,2 | 1,3
+gk2Both/ge/joinOn/nm	(none)
+gk2Both/ge/joinOn/nk	(none)
+gk2Both/isnd/alone/m1	2,1
+gk2Both/isnd/alone/mn	1,2
+gk2Both/isnd/alone/nm	3,NULL
+gk2Both/isnd/alone/nk	NULL,NULL
+gk2Both/isnd/and/m1	2,1
+gk2Both/isnd/and/mn	1,2
+gk2Both/isnd/and/nm	(none)
+gk2Both/isnd/and/nk	(none)
+gk2Both/isnd/or/m1	2,0 | 2,1
+gk2Both/isnd/or/mn	1,0 | 1,2
+gk2Both/isnd/or/nm	3,0 | 3,NULL
+gk2Both/isnd/or/nk	NULL,0 | NULL,NULL
+gk2Both/isnd/not/m1	2,0 | 2,2 | 2,3 | 2,NULL
+gk2Both/isnd/not/mn	1,0 | 1,1 | 1,3 | 1,NULL
+gk2Both/isnd/not/nm	3,0 | 3,1 | 3,2 | 3,3
+gk2Both/isnd/not/nk	NULL,0 | NULL,1 | NULL,2 | NULL,3
+gk2Both/isnd/having/m1	ERR 42803
+gk2Both/isnd/having/mn	ERR 42803
+gk2Both/isnd/having/nm	ERR 42803
+gk2Both/isnd/having/nk	ERR 42803
+gk2Both/isnd/joinOn/m1	2,1
+gk2Both/isnd/joinOn/mn	1,2
+gk2Both/isnd/joinOn/nm	3,NULL
+gk2Both/isnd/joinOn/nk	NULL,NULL
+gk2Both/left/alone/m1	2,1
+gk2Both/left/alone/mn	1,2
+gk2Both/left/alone/nm	(none)
+gk2Both/left/alone/nk	(none)
+gk2Both/left/and/m1	2,1
+gk2Both/left/and/mn	1,2
+gk2Both/left/and/nm	(none)
+gk2Both/left/and/nk	(none)
+gk2Both/left/or/m1	2,0 | 2,1
+gk2Both/left/or/mn	1,0 | 1,2
+gk2Both/left/or/nm	3,0
+gk2Both/left/or/nk	NULL,0
+gk2Both/left/not/m1	2,0 | 2,2 | 2,3
+gk2Both/left/not/mn	1,0 | 1,1 | 1,3
+gk2Both/left/not/nm	(none)
+gk2Both/left/not/nk	(none)
+gk2Both/left/having/m1	ERR 42803
+gk2Both/left/having/mn	ERR 42803
+gk2Both/left/having/nm	ERR 42803
+gk2Both/left/having/nk	ERR 42803
+gk2Both/left/joinOn/m1	2,1
+gk2Both/left/joinOn/mn	1,2
+gk2Both/left/joinOn/nm	(none)
+gk2Both/left/joinOn/nk	(none)
+gk2BothMax/eq/alone/m1	2,2
+gk2BothMax/eq/alone/mn	1,2
+gk2BothMax/eq/alone/nm	(none)
+gk2BothMax/eq/alone/nk	(none)
+gk2BothMax/eq/and/m1	2,2
+gk2BothMax/eq/and/mn	1,2
+gk2BothMax/eq/and/nm	(none)
+gk2BothMax/eq/and/nk	(none)
+gk2BothMax/eq/or/m1	2,0 | 2,2
+gk2BothMax/eq/or/mn	1,0 | 1,2
+gk2BothMax/eq/or/nm	3,0
+gk2BothMax/eq/or/nk	NULL,0
+gk2BothMax/eq/not/m1	2,0 | 2,1 | 2,3
+gk2BothMax/eq/not/mn	1,0 | 1,1 | 1,3
+gk2BothMax/eq/not/nm	(none)
+gk2BothMax/eq/not/nk	(none)
+gk2BothMax/eq/having/m1	ERR 42803
+gk2BothMax/eq/having/mn	ERR 42803
+gk2BothMax/eq/having/nm	ERR 42803
+gk2BothMax/eq/having/nk	ERR 42803
+gk2BothMax/eq/joinOn/m1	2,2
+gk2BothMax/eq/joinOn/mn	1,2
+gk2BothMax/eq/joinOn/nm	(none)
+gk2BothMax/eq/joinOn/nk	(none)
+gk2BothMax/ne/alone/m1	2,0 | 2,1 | 2,3
+gk2BothMax/ne/alone/mn	1,0 | 1,1 | 1,3
+gk2BothMax/ne/alone/nm	(none)
+gk2BothMax/ne/alone/nk	(none)
+gk2BothMax/ne/and/m1	2,1 | 2,3
+gk2BothMax/ne/and/mn	1,1 | 1,3
+gk2BothMax/ne/and/nm	(none)
+gk2BothMax/ne/and/nk	(none)
+gk2BothMax/ne/or/m1	2,0 | 2,1 | 2,3
+gk2BothMax/ne/or/mn	1,0 | 1,1 | 1,3
+gk2BothMax/ne/or/nm	3,0
+gk2BothMax/ne/or/nk	NULL,0
+gk2BothMax/ne/not/m1	2,2
+gk2BothMax/ne/not/mn	1,2
+gk2BothMax/ne/not/nm	(none)
+gk2BothMax/ne/not/nk	(none)
+gk2BothMax/ne/having/m1	ERR 42803
+gk2BothMax/ne/having/mn	ERR 42803
+gk2BothMax/ne/having/nm	ERR 42803
+gk2BothMax/ne/having/nk	ERR 42803
+gk2BothMax/ne/joinOn/m1	2,0 | 2,1 | 2,3
+gk2BothMax/ne/joinOn/mn	1,0 | 1,1 | 1,3
+gk2BothMax/ne/joinOn/nm	(none)
+gk2BothMax/ne/joinOn/nk	(none)
+gk2BothMax/lt/alone/m1	2,0 | 2,1
+gk2BothMax/lt/alone/mn	1,0 | 1,1
+gk2BothMax/lt/alone/nm	(none)
+gk2BothMax/lt/alone/nk	(none)
+gk2BothMax/lt/and/m1	2,1
+gk2BothMax/lt/and/mn	1,1
+gk2BothMax/lt/and/nm	(none)
+gk2BothMax/lt/and/nk	(none)
+gk2BothMax/lt/or/m1	2,0 | 2,1
+gk2BothMax/lt/or/mn	1,0 | 1,1
+gk2BothMax/lt/or/nm	3,0
+gk2BothMax/lt/or/nk	NULL,0
+gk2BothMax/lt/not/m1	2,2 | 2,3
+gk2BothMax/lt/not/mn	1,2 | 1,3
+gk2BothMax/lt/not/nm	(none)
+gk2BothMax/lt/not/nk	(none)
+gk2BothMax/lt/having/m1	ERR 42803
+gk2BothMax/lt/having/mn	ERR 42803
+gk2BothMax/lt/having/nm	ERR 42803
+gk2BothMax/lt/having/nk	ERR 42803
+gk2BothMax/lt/joinOn/m1	2,0 | 2,1
+gk2BothMax/lt/joinOn/mn	1,0 | 1,1
+gk2BothMax/lt/joinOn/nm	(none)
+gk2BothMax/lt/joinOn/nk	(none)
+gk2BothMax/ge/alone/m1	2,2 | 2,3
+gk2BothMax/ge/alone/mn	1,2 | 1,3
+gk2BothMax/ge/alone/nm	(none)
+gk2BothMax/ge/alone/nk	(none)
+gk2BothMax/ge/and/m1	2,2 | 2,3
+gk2BothMax/ge/and/mn	1,2 | 1,3
+gk2BothMax/ge/and/nm	(none)
+gk2BothMax/ge/and/nk	(none)
+gk2BothMax/ge/or/m1	2,0 | 2,2 | 2,3
+gk2BothMax/ge/or/mn	1,0 | 1,2 | 1,3
+gk2BothMax/ge/or/nm	3,0
+gk2BothMax/ge/or/nk	NULL,0
+gk2BothMax/ge/not/m1	2,0 | 2,1
+gk2BothMax/ge/not/mn	1,0 | 1,1
+gk2BothMax/ge/not/nm	(none)
+gk2BothMax/ge/not/nk	(none)
+gk2BothMax/ge/having/m1	ERR 42803
+gk2BothMax/ge/having/mn	ERR 42803
+gk2BothMax/ge/having/nm	ERR 42803
+gk2BothMax/ge/having/nk	ERR 42803
+gk2BothMax/ge/joinOn/m1	2,2 | 2,3
+gk2BothMax/ge/joinOn/mn	1,2 | 1,3
+gk2BothMax/ge/joinOn/nm	(none)
+gk2BothMax/ge/joinOn/nk	(none)
+gk2BothMax/isnd/alone/m1	2,2
+gk2BothMax/isnd/alone/mn	1,2
+gk2BothMax/isnd/alone/nm	3,NULL
+gk2BothMax/isnd/alone/nk	NULL,NULL
+gk2BothMax/isnd/and/m1	2,2
+gk2BothMax/isnd/and/mn	1,2
+gk2BothMax/isnd/and/nm	(none)
+gk2BothMax/isnd/and/nk	(none)
+gk2BothMax/isnd/or/m1	2,0 | 2,2
+gk2BothMax/isnd/or/mn	1,0 | 1,2
+gk2BothMax/isnd/or/nm	3,0 | 3,NULL
+gk2BothMax/isnd/or/nk	NULL,0 | NULL,NULL
+gk2BothMax/isnd/not/m1	2,0 | 2,1 | 2,3 | 2,NULL
+gk2BothMax/isnd/not/mn	1,0 | 1,1 | 1,3 | 1,NULL
+gk2BothMax/isnd/not/nm	3,0 | 3,1 | 3,2 | 3,3
+gk2BothMax/isnd/not/nk	NULL,0 | NULL,1 | NULL,2 | NULL,3
+gk2BothMax/isnd/having/m1	ERR 42803
+gk2BothMax/isnd/having/mn	ERR 42803
+gk2BothMax/isnd/having/nm	ERR 42803
+gk2BothMax/isnd/having/nk	ERR 42803
+gk2BothMax/isnd/joinOn/m1	2,2
+gk2BothMax/isnd/joinOn/mn	1,2
+gk2BothMax/isnd/joinOn/nm	3,NULL
+gk2BothMax/isnd/joinOn/nk	NULL,NULL
+gk2BothMax/left/alone/m1	2,2
+gk2BothMax/left/alone/mn	1,2
+gk2BothMax/left/alone/nm	(none)
+gk2BothMax/left/alone/nk	(none)
+gk2BothMax/left/and/m1	2,2
+gk2BothMax/left/and/mn	1,2
+gk2BothMax/left/and/nm	(none)
+gk2BothMax/left/and/nk	(none)
+gk2BothMax/left/or/m1	2,0 | 2,2
+gk2BothMax/left/or/mn	1,0 | 1,2
+gk2BothMax/left/or/nm	3,0
+gk2BothMax/left/or/nk	NULL,0
+gk2BothMax/left/not/m1	2,0 | 2,1 | 2,3
+gk2BothMax/left/not/mn	1,0 | 1,1 | 1,3
+gk2BothMax/left/not/nm	(none)
+gk2BothMax/left/not/nk	(none)
+gk2BothMax/left/having/m1	ERR 42803
+gk2BothMax/left/having/mn	ERR 42803
+gk2BothMax/left/having/nm	ERR 42803
+gk2BothMax/left/having/nk	ERR 42803
+gk2BothMax/left/joinOn/m1	2,2
+gk2BothMax/left/joinOn/mn	1,2
+gk2BothMax/left/joinOn/nm	(none)
+gk2BothMax/left/joinOn/nk	(none)
+gkReadsKey/eq/alone/m1	2,3
+gkReadsKey/eq/alone/mn	(none)
+gkReadsKey/eq/alone/nm	(none)
+gkReadsKey/eq/alone/nk	(none)
+gkReadsKey/eq/and/m1	2,3
+gkReadsKey/eq/and/mn	(none)
+gkReadsKey/eq/and/nm	(none)
+gkReadsKey/eq/and/nk	(none)
+gkReadsKey/eq/or/m1	2,0 | 2,3
+gkReadsKey/eq/or/mn	1,0
+gkReadsKey/eq/or/nm	3,0
+gkReadsKey/eq/or/nk	NULL,0
+gkReadsKey/eq/not/m1	2,0 | 2,1 | 2,2
+gkReadsKey/eq/not/mn	1,0 | 1,1 | 1,2 | 1,3
+gkReadsKey/eq/not/nm	(none)
+gkReadsKey/eq/not/nk	(none)
+gkReadsKey/eq/having/m1	2,3
+gkReadsKey/eq/having/mn	(none)
+gkReadsKey/eq/having/nm	(none)
+gkReadsKey/eq/having/nk	(none)
+gkReadsKey/eq/joinOn/m1	2,3
+gkReadsKey/eq/joinOn/mn	(none)
+gkReadsKey/eq/joinOn/nm	(none)
+gkReadsKey/eq/joinOn/nk	(none)
+gkReadsKey/ne/alone/m1	2,0 | 2,1 | 2,2
+gkReadsKey/ne/alone/mn	1,0 | 1,1 | 1,2 | 1,3
+gkReadsKey/ne/alone/nm	(none)
+gkReadsKey/ne/alone/nk	(none)
+gkReadsKey/ne/and/m1	2,1 | 2,2
+gkReadsKey/ne/and/mn	1,1 | 1,2 | 1,3
+gkReadsKey/ne/and/nm	(none)
+gkReadsKey/ne/and/nk	(none)
+gkReadsKey/ne/or/m1	2,0 | 2,1 | 2,2
+gkReadsKey/ne/or/mn	1,0 | 1,1 | 1,2 | 1,3
+gkReadsKey/ne/or/nm	3,0
+gkReadsKey/ne/or/nk	NULL,0
+gkReadsKey/ne/not/m1	2,3
+gkReadsKey/ne/not/mn	(none)
+gkReadsKey/ne/not/nm	(none)
+gkReadsKey/ne/not/nk	(none)
+gkReadsKey/ne/having/m1	2,0 | 2,1 | 2,2
+gkReadsKey/ne/having/mn	1,0 | 1,1 | 1,2 | 1,3
+gkReadsKey/ne/having/nm	(none)
+gkReadsKey/ne/having/nk	(none)
+gkReadsKey/ne/joinOn/m1	2,0 | 2,1 | 2,2
+gkReadsKey/ne/joinOn/mn	1,0 | 1,1 | 1,2 | 1,3
+gkReadsKey/ne/joinOn/nm	(none)
+gkReadsKey/ne/joinOn/nk	(none)
+gkReadsKey/lt/alone/m1	2,0 | 2,1 | 2,2
+gkReadsKey/lt/alone/mn	1,0 | 1,1 | 1,2 | 1,3
+gkReadsKey/lt/alone/nm	(none)
+gkReadsKey/lt/alone/nk	(none)
+gkReadsKey/lt/and/m1	2,1 | 2,2
+gkReadsKey/lt/and/mn	1,1 | 1,2 | 1,3
+gkReadsKey/lt/and/nm	(none)
+gkReadsKey/lt/and/nk	(none)
+gkReadsKey/lt/or/m1	2,0 | 2,1 | 2,2
+gkReadsKey/lt/or/mn	1,0 | 1,1 | 1,2 | 1,3
+gkReadsKey/lt/or/nm	3,0
+gkReadsKey/lt/or/nk	NULL,0
+gkReadsKey/lt/not/m1	2,3
+gkReadsKey/lt/not/mn	(none)
+gkReadsKey/lt/not/nm	(none)
+gkReadsKey/lt/not/nk	(none)
+gkReadsKey/lt/having/m1	2,0 | 2,1 | 2,2
+gkReadsKey/lt/having/mn	1,0 | 1,1 | 1,2 | 1,3
+gkReadsKey/lt/having/nm	(none)
+gkReadsKey/lt/having/nk	(none)
+gkReadsKey/lt/joinOn/m1	2,0 | 2,1 | 2,2
+gkReadsKey/lt/joinOn/mn	1,0 | 1,1 | 1,2 | 1,3
+gkReadsKey/lt/joinOn/nm	(none)
+gkReadsKey/lt/joinOn/nk	(none)
+gkReadsKey/ge/alone/m1	2,3
+gkReadsKey/ge/alone/mn	(none)
+gkReadsKey/ge/alone/nm	(none)
+gkReadsKey/ge/alone/nk	(none)
+gkReadsKey/ge/and/m1	2,3
+gkReadsKey/ge/and/mn	(none)
+gkReadsKey/ge/and/nm	(none)
+gkReadsKey/ge/and/nk	(none)
+gkReadsKey/ge/or/m1	2,0 | 2,3
+gkReadsKey/ge/or/mn	1,0
+gkReadsKey/ge/or/nm	3,0
+gkReadsKey/ge/or/nk	NULL,0
+gkReadsKey/ge/not/m1	2,0 | 2,1 | 2,2
+gkReadsKey/ge/not/mn	1,0 | 1,1 | 1,2 | 1,3
+gkReadsKey/ge/not/nm	(none)
+gkReadsKey/ge/not/nk	(none)
+gkReadsKey/ge/having/m1	2,3
+gkReadsKey/ge/having/mn	(none)
+gkReadsKey/ge/having/nm	(none)
+gkReadsKey/ge/having/nk	(none)
+gkReadsKey/ge/joinOn/m1	2,3
+gkReadsKey/ge/joinOn/mn	(none)
+gkReadsKey/ge/joinOn/nm	(none)
+gkReadsKey/ge/joinOn/nk	(none)
+gkReadsKey/isnd/alone/m1	2,3
+gkReadsKey/isnd/alone/mn	(none)
+gkReadsKey/isnd/alone/nm	3,NULL
+gkReadsKey/isnd/alone/nk	NULL,NULL
+gkReadsKey/isnd/and/m1	2,3
+gkReadsKey/isnd/and/mn	(none)
+gkReadsKey/isnd/and/nm	(none)
+gkReadsKey/isnd/and/nk	(none)
+gkReadsKey/isnd/or/m1	2,0 | 2,3
+gkReadsKey/isnd/or/mn	1,0
+gkReadsKey/isnd/or/nm	3,0 | 3,NULL
+gkReadsKey/isnd/or/nk	NULL,0 | NULL,NULL
+gkReadsKey/isnd/not/m1	2,0 | 2,1 | 2,2 | 2,NULL
+gkReadsKey/isnd/not/mn	1,0 | 1,1 | 1,2 | 1,3 | 1,NULL
+gkReadsKey/isnd/not/nm	3,0 | 3,1 | 3,2 | 3,3
+gkReadsKey/isnd/not/nk	NULL,0 | NULL,1 | NULL,2 | NULL,3
+gkReadsKey/isnd/having/m1	2,3
+gkReadsKey/isnd/having/mn	(none)
+gkReadsKey/isnd/having/nm	3,NULL
+gkReadsKey/isnd/having/nk	NULL,NULL
+gkReadsKey/isnd/joinOn/m1	2,3
+gkReadsKey/isnd/joinOn/mn	(none)
+gkReadsKey/isnd/joinOn/nm	3,NULL
+gkReadsKey/isnd/joinOn/nk	NULL,NULL
+gkReadsKey/left/alone/m1	2,3
+gkReadsKey/left/alone/mn	(none)
+gkReadsKey/left/alone/nm	(none)
+gkReadsKey/left/alone/nk	(none)
+gkReadsKey/left/and/m1	2,3
+gkReadsKey/left/and/mn	(none)
+gkReadsKey/left/and/nm	(none)
+gkReadsKey/left/and/nk	(none)
+gkReadsKey/left/or/m1	2,0 | 2,3
+gkReadsKey/left/or/mn	1,0
+gkReadsKey/left/or/nm	3,0
+gkReadsKey/left/or/nk	NULL,0
+gkReadsKey/left/not/m1	2,0 | 2,1 | 2,2
+gkReadsKey/left/not/mn	1,0 | 1,1 | 1,2 | 1,3
+gkReadsKey/left/not/nm	(none)
+gkReadsKey/left/not/nk	(none)
+gkReadsKey/left/having/m1	2,3
+gkReadsKey/left/having/mn	(none)
+gkReadsKey/left/having/nm	(none)
+gkReadsKey/left/having/nk	(none)
+gkReadsKey/left/joinOn/m1	2,3
+gkReadsKey/left/joinOn/mn	(none)
+gkReadsKey/left/joinOn/nm	(none)
+gkReadsKey/left/joinOn/nk	(none)
+gk2One/eq/alone/m1	2,1
+gk2One/eq/alone/mn	1,2
+gk2One/eq/alone/nm	(none)
+gk2One/eq/alone/nk	(none)
+gk2One/eq/and/m1	2,1
+gk2One/eq/and/mn	1,2
+gk2One/eq/and/nm	(none)
+gk2One/eq/and/nk	(none)
+gk2One/eq/or/m1	2,0 | 2,1
+gk2One/eq/or/mn	1,0 | 1,2
+gk2One/eq/or/nm	3,0
+gk2One/eq/or/nk	NULL,0
+gk2One/eq/not/m1	2,0 | 2,2 | 2,3
+gk2One/eq/not/mn	1,0 | 1,1 | 1,3
+gk2One/eq/not/nm	(none)
+gk2One/eq/not/nk	(none)
+gk2One/eq/having/m1	ERR 42803
+gk2One/eq/having/mn	ERR 42803
+gk2One/eq/having/nm	ERR 42803
+gk2One/eq/having/nk	ERR 42803
+gk2One/eq/joinOn/m1	2,1
+gk2One/eq/joinOn/mn	1,2
+gk2One/eq/joinOn/nm	(none)
+gk2One/eq/joinOn/nk	(none)
+gk2One/ne/alone/m1	2,0 | 2,2 | 2,3
+gk2One/ne/alone/mn	1,0 | 1,1 | 1,3
+gk2One/ne/alone/nm	(none)
+gk2One/ne/alone/nk	(none)
+gk2One/ne/and/m1	2,2 | 2,3
+gk2One/ne/and/mn	1,1 | 1,3
+gk2One/ne/and/nm	(none)
+gk2One/ne/and/nk	(none)
+gk2One/ne/or/m1	2,0 | 2,2 | 2,3
+gk2One/ne/or/mn	1,0 | 1,1 | 1,3
+gk2One/ne/or/nm	3,0
+gk2One/ne/or/nk	NULL,0
+gk2One/ne/not/m1	2,1
+gk2One/ne/not/mn	1,2
+gk2One/ne/not/nm	(none)
+gk2One/ne/not/nk	(none)
+gk2One/ne/having/m1	ERR 42803
+gk2One/ne/having/mn	ERR 42803
+gk2One/ne/having/nm	ERR 42803
+gk2One/ne/having/nk	ERR 42803
+gk2One/ne/joinOn/m1	2,0 | 2,2 | 2,3
+gk2One/ne/joinOn/mn	1,0 | 1,1 | 1,3
+gk2One/ne/joinOn/nm	(none)
+gk2One/ne/joinOn/nk	(none)
+gk2One/lt/alone/m1	2,0
+gk2One/lt/alone/mn	1,0 | 1,1
+gk2One/lt/alone/nm	(none)
+gk2One/lt/alone/nk	(none)
+gk2One/lt/and/m1	(none)
+gk2One/lt/and/mn	1,1
+gk2One/lt/and/nm	(none)
+gk2One/lt/and/nk	(none)
+gk2One/lt/or/m1	2,0
+gk2One/lt/or/mn	1,0 | 1,1
+gk2One/lt/or/nm	3,0
+gk2One/lt/or/nk	NULL,0
+gk2One/lt/not/m1	2,1 | 2,2 | 2,3
+gk2One/lt/not/mn	1,2 | 1,3
+gk2One/lt/not/nm	(none)
+gk2One/lt/not/nk	(none)
+gk2One/lt/having/m1	ERR 42803
+gk2One/lt/having/mn	ERR 42803
+gk2One/lt/having/nm	ERR 42803
+gk2One/lt/having/nk	ERR 42803
+gk2One/lt/joinOn/m1	2,0
+gk2One/lt/joinOn/mn	1,0 | 1,1
+gk2One/lt/joinOn/nm	(none)
+gk2One/lt/joinOn/nk	(none)
+gk2One/ge/alone/m1	2,1 | 2,2 | 2,3
+gk2One/ge/alone/mn	1,2 | 1,3
+gk2One/ge/alone/nm	(none)
+gk2One/ge/alone/nk	(none)
+gk2One/ge/and/m1	2,1 | 2,2 | 2,3
+gk2One/ge/and/mn	1,2 | 1,3
+gk2One/ge/and/nm	(none)
+gk2One/ge/and/nk	(none)
+gk2One/ge/or/m1	2,0 | 2,1 | 2,2 | 2,3
+gk2One/ge/or/mn	1,0 | 1,2 | 1,3
+gk2One/ge/or/nm	3,0
+gk2One/ge/or/nk	NULL,0
+gk2One/ge/not/m1	2,0
+gk2One/ge/not/mn	1,0 | 1,1
+gk2One/ge/not/nm	(none)
+gk2One/ge/not/nk	(none)
+gk2One/ge/having/m1	ERR 42803
+gk2One/ge/having/mn	ERR 42803
+gk2One/ge/having/nm	ERR 42803
+gk2One/ge/having/nk	ERR 42803
+gk2One/ge/joinOn/m1	2,1 | 2,2 | 2,3
+gk2One/ge/joinOn/mn	1,2 | 1,3
+gk2One/ge/joinOn/nm	(none)
+gk2One/ge/joinOn/nk	(none)
+gk2One/isnd/alone/m1	2,1
+gk2One/isnd/alone/mn	1,2
+gk2One/isnd/alone/nm	3,NULL
+gk2One/isnd/alone/nk	NULL,NULL
+gk2One/isnd/and/m1	2,1
+gk2One/isnd/and/mn	1,2
+gk2One/isnd/and/nm	(none)
+gk2One/isnd/and/nk	(none)
+gk2One/isnd/or/m1	2,0 | 2,1
+gk2One/isnd/or/mn	1,0 | 1,2
+gk2One/isnd/or/nm	3,0 | 3,NULL
+gk2One/isnd/or/nk	NULL,0 | NULL,NULL
+gk2One/isnd/not/m1	2,0 | 2,2 | 2,3 | 2,NULL
+gk2One/isnd/not/mn	1,0 | 1,1 | 1,3 | 1,NULL
+gk2One/isnd/not/nm	3,0 | 3,1 | 3,2 | 3,3
+gk2One/isnd/not/nk	NULL,0 | NULL,1 | NULL,2 | NULL,3
+gk2One/isnd/having/m1	ERR 42803
+gk2One/isnd/having/mn	ERR 42803
+gk2One/isnd/having/nm	ERR 42803
+gk2One/isnd/having/nk	ERR 42803
+gk2One/isnd/joinOn/m1	2,1
+gk2One/isnd/joinOn/mn	1,2
+gk2One/isnd/joinOn/nm	3,NULL
+gk2One/isnd/joinOn/nk	NULL,NULL
+gk2One/left/alone/m1	2,1
+gk2One/left/alone/mn	1,2
+gk2One/left/alone/nm	(none)
+gk2One/left/alone/nk	(none)
+gk2One/left/and/m1	2,1
+gk2One/left/and/mn	1,2
+gk2One/left/and/nm	(none)
+gk2One/left/and/nk	(none)
+gk2One/left/or/m1	2,0 | 2,1
+gk2One/left/or/mn	1,0 | 1,2
+gk2One/left/or/nm	3,0
+gk2One/left/or/nk	NULL,0
+gk2One/left/not/m1	2,0 | 2,2 | 2,3
+gk2One/left/not/mn	1,0 | 1,1 | 1,3
+gk2One/left/not/nm	(none)
+gk2One/left/not/nk	(none)
+gk2One/left/having/m1	ERR 42803
+gk2One/left/having/mn	ERR 42803
+gk2One/left/having/nm	ERR 42803
+gk2One/left/having/nk	ERR 42803
+gk2One/left/joinOn/m1	2,1
+gk2One/left/joinOn/mn	1,2
+gk2One/left/joinOn/nm	(none)
+gk2One/left/joinOn/nk	(none)
+gkKeyPlusOther/eq/alone/m1	2,1
+gkKeyPlusOther/eq/alone/mn	ERR 21000
+gkKeyPlusOther/eq/alone/nm	(none)
+gkKeyPlusOther/eq/alone/nk	(none)
+gkKeyPlusOther/eq/and/m1	2,1
+gkKeyPlusOther/eq/and/mn	ERR 21000
+gkKeyPlusOther/eq/and/nm	(none)
+gkKeyPlusOther/eq/and/nk	(none)
+gkKeyPlusOther/eq/or/m1	2,0 | 2,1
+gkKeyPlusOther/eq/or/mn	ERR 21000
+gkKeyPlusOther/eq/or/nm	3,0
+gkKeyPlusOther/eq/or/nk	NULL,0
+gkKeyPlusOther/eq/not/m1	2,0 | 2,2 | 2,3
+gkKeyPlusOther/eq/not/mn	ERR 21000
+gkKeyPlusOther/eq/not/nm	(none)
+gkKeyPlusOther/eq/not/nk	(none)
+gkKeyPlusOther/eq/having/m1	2,1
+gkKeyPlusOther/eq/having/mn	ERR 21000
+gkKeyPlusOther/eq/having/nm	(none)
+gkKeyPlusOther/eq/having/nk	(none)
+gkKeyPlusOther/eq/joinOn/m1	2,1
+gkKeyPlusOther/eq/joinOn/mn	ERR 21000
+gkKeyPlusOther/eq/joinOn/nm	(none)
+gkKeyPlusOther/eq/joinOn/nk	(none)
+gkKeyPlusOther/ne/alone/m1	2,0 | 2,2 | 2,3
+gkKeyPlusOther/ne/alone/mn	ERR 21000
+gkKeyPlusOther/ne/alone/nm	(none)
+gkKeyPlusOther/ne/alone/nk	(none)
+gkKeyPlusOther/ne/and/m1	2,2 | 2,3
+gkKeyPlusOther/ne/and/mn	ERR 21000
+gkKeyPlusOther/ne/and/nm	(none)
+gkKeyPlusOther/ne/and/nk	(none)
+gkKeyPlusOther/ne/or/m1	2,0 | 2,2 | 2,3
+gkKeyPlusOther/ne/or/mn	ERR 21000
+gkKeyPlusOther/ne/or/nm	3,0
+gkKeyPlusOther/ne/or/nk	NULL,0
+gkKeyPlusOther/ne/not/m1	2,1
+gkKeyPlusOther/ne/not/mn	ERR 21000
+gkKeyPlusOther/ne/not/nm	(none)
+gkKeyPlusOther/ne/not/nk	(none)
+gkKeyPlusOther/ne/having/m1	2,0 | 2,2 | 2,3
+gkKeyPlusOther/ne/having/mn	ERR 21000
+gkKeyPlusOther/ne/having/nm	(none)
+gkKeyPlusOther/ne/having/nk	(none)
+gkKeyPlusOther/ne/joinOn/m1	2,0 | 2,2 | 2,3
+gkKeyPlusOther/ne/joinOn/mn	ERR 21000
+gkKeyPlusOther/ne/joinOn/nm	(none)
+gkKeyPlusOther/ne/joinOn/nk	(none)
+gkKeyPlusOther/lt/alone/m1	2,0
+gkKeyPlusOther/lt/alone/mn	ERR 21000
+gkKeyPlusOther/lt/alone/nm	(none)
+gkKeyPlusOther/lt/alone/nk	(none)
+gkKeyPlusOther/lt/and/m1	(none)
+gkKeyPlusOther/lt/and/mn	ERR 21000
+gkKeyPlusOther/lt/and/nm	(none)
+gkKeyPlusOther/lt/and/nk	(none)
+gkKeyPlusOther/lt/or/m1	2,0
+gkKeyPlusOther/lt/or/mn	ERR 21000
+gkKeyPlusOther/lt/or/nm	3,0
+gkKeyPlusOther/lt/or/nk	NULL,0
+gkKeyPlusOther/lt/not/m1	2,1 | 2,2 | 2,3
+gkKeyPlusOther/lt/not/mn	ERR 21000
+gkKeyPlusOther/lt/not/nm	(none)
+gkKeyPlusOther/lt/not/nk	(none)
+gkKeyPlusOther/lt/having/m1	2,0
+gkKeyPlusOther/lt/having/mn	ERR 21000
+gkKeyPlusOther/lt/having/nm	(none)
+gkKeyPlusOther/lt/having/nk	(none)
+gkKeyPlusOther/lt/joinOn/m1	2,0
+gkKeyPlusOther/lt/joinOn/mn	ERR 21000
+gkKeyPlusOther/lt/joinOn/nm	(none)
+gkKeyPlusOther/lt/joinOn/nk	(none)
+gkKeyPlusOther/ge/alone/m1	2,1 | 2,2 | 2,3
+gkKeyPlusOther/ge/alone/mn	ERR 21000
+gkKeyPlusOther/ge/alone/nm	(none)
+gkKeyPlusOther/ge/alone/nk	(none)
+gkKeyPlusOther/ge/and/m1	2,1 | 2,2 | 2,3
+gkKeyPlusOther/ge/and/mn	ERR 21000
+gkKeyPlusOther/ge/and/nm	(none)
+gkKeyPlusOther/ge/and/nk	(none)
+gkKeyPlusOther/ge/or/m1	2,0 | 2,1 | 2,2 | 2,3
+gkKeyPlusOther/ge/or/mn	ERR 21000
+gkKeyPlusOther/ge/or/nm	3,0
+gkKeyPlusOther/ge/or/nk	NULL,0
+gkKeyPlusOther/ge/not/m1	2,0
+gkKeyPlusOther/ge/not/mn	ERR 21000
+gkKeyPlusOther/ge/not/nm	(none)
+gkKeyPlusOther/ge/not/nk	(none)
+gkKeyPlusOther/ge/having/m1	2,1 | 2,2 | 2,3
+gkKeyPlusOther/ge/having/mn	ERR 21000
+gkKeyPlusOther/ge/having/nm	(none)
+gkKeyPlusOther/ge/having/nk	(none)
+gkKeyPlusOther/ge/joinOn/m1	2,1 | 2,2 | 2,3
+gkKeyPlusOther/ge/joinOn/mn	ERR 21000
+gkKeyPlusOther/ge/joinOn/nm	(none)
+gkKeyPlusOther/ge/joinOn/nk	(none)
+gkKeyPlusOther/isnd/alone/m1	2,1
+gkKeyPlusOther/isnd/alone/mn	ERR 21000
+gkKeyPlusOther/isnd/alone/nm	3,NULL
+gkKeyPlusOther/isnd/alone/nk	NULL,NULL
+gkKeyPlusOther/isnd/and/m1	2,1
+gkKeyPlusOther/isnd/and/mn	ERR 21000
+gkKeyPlusOther/isnd/and/nm	(none)
+gkKeyPlusOther/isnd/and/nk	(none)
+gkKeyPlusOther/isnd/or/m1	2,0 | 2,1
+gkKeyPlusOther/isnd/or/mn	ERR 21000
+gkKeyPlusOther/isnd/or/nm	3,0 | 3,NULL
+gkKeyPlusOther/isnd/or/nk	NULL,0 | NULL,NULL
+gkKeyPlusOther/isnd/not/m1	2,0 | 2,2 | 2,3 | 2,NULL
+gkKeyPlusOther/isnd/not/mn	ERR 21000
+gkKeyPlusOther/isnd/not/nm	3,0 | 3,1 | 3,2 | 3,3
+gkKeyPlusOther/isnd/not/nk	NULL,0 | NULL,1 | NULL,2 | NULL,3
+gkKeyPlusOther/isnd/having/m1	2,1
+gkKeyPlusOther/isnd/having/mn	ERR 21000
+gkKeyPlusOther/isnd/having/nm	3,NULL
+gkKeyPlusOther/isnd/having/nk	NULL,NULL
+gkKeyPlusOther/isnd/joinOn/m1	2,1
+gkKeyPlusOther/isnd/joinOn/mn	ERR 21000
+gkKeyPlusOther/isnd/joinOn/nm	3,NULL
+gkKeyPlusOther/isnd/joinOn/nk	NULL,NULL
+gkKeyPlusOther/left/alone/m1	2,1
+gkKeyPlusOther/left/alone/mn	ERR 21000
+gkKeyPlusOther/left/alone/nm	(none)
+gkKeyPlusOther/left/alone/nk	(none)
+gkKeyPlusOther/left/and/m1	2,1
+gkKeyPlusOther/left/and/mn	ERR 21000
+gkKeyPlusOther/left/and/nm	(none)
+gkKeyPlusOther/left/and/nk	(none)
+gkKeyPlusOther/left/or/m1	2,0 | 2,1
+gkKeyPlusOther/left/or/mn	ERR 21000
+gkKeyPlusOther/left/or/nm	3,0
+gkKeyPlusOther/left/or/nk	NULL,0
+gkKeyPlusOther/left/not/m1	2,0 | 2,2 | 2,3
+gkKeyPlusOther/left/not/mn	ERR 21000
+gkKeyPlusOther/left/not/nm	(none)
+gkKeyPlusOther/left/not/nk	(none)
+gkKeyPlusOther/left/having/m1	2,1
+gkKeyPlusOther/left/having/mn	ERR 21000
+gkKeyPlusOther/left/having/nm	(none)
+gkKeyPlusOther/left/having/nk	(none)
+gkKeyPlusOther/left/joinOn/m1	2,1
+gkKeyPlusOther/left/joinOn/mn	ERR 21000
+gkKeyPlusOther/left/joinOn/nm	(none)
+gkKeyPlusOther/left/joinOn/nk	(none)
+gkExpr/eq/alone/m1	2,1
+gkExpr/eq/alone/mn	1,3
+gkExpr/eq/alone/nm	(none)
+gkExpr/eq/alone/nk	(none)
+gkExpr/eq/and/m1	2,1
+gkExpr/eq/and/mn	1,3
+gkExpr/eq/and/nm	(none)
+gkExpr/eq/and/nk	(none)
+gkExpr/eq/or/m1	2,0 | 2,1
+gkExpr/eq/or/mn	1,0 | 1,3
+gkExpr/eq/or/nm	3,0
+gkExpr/eq/or/nk	NULL,0
+gkExpr/eq/not/m1	2,0 | 2,2 | 2,3
+gkExpr/eq/not/mn	1,0 | 1,1 | 1,2
+gkExpr/eq/not/nm	(none)
+gkExpr/eq/not/nk	(none)
+gkExpr/eq/having/m1	2,1
+gkExpr/eq/having/mn	1,3
+gkExpr/eq/having/nm	(none)
+gkExpr/eq/having/nk	(none)
+gkExpr/eq/joinOn/m1	2,1
+gkExpr/eq/joinOn/mn	1,3
+gkExpr/eq/joinOn/nm	(none)
+gkExpr/eq/joinOn/nk	(none)
+gkExpr/ne/alone/m1	2,0 | 2,2 | 2,3
+gkExpr/ne/alone/mn	1,0 | 1,1 | 1,2
+gkExpr/ne/alone/nm	(none)
+gkExpr/ne/alone/nk	(none)
+gkExpr/ne/and/m1	2,2 | 2,3
+gkExpr/ne/and/mn	1,1 | 1,2
+gkExpr/ne/and/nm	(none)
+gkExpr/ne/and/nk	(none)
+gkExpr/ne/or/m1	2,0 | 2,2 | 2,3
+gkExpr/ne/or/mn	1,0 | 1,1 | 1,2
+gkExpr/ne/or/nm	3,0
+gkExpr/ne/or/nk	NULL,0
+gkExpr/ne/not/m1	2,1
+gkExpr/ne/not/mn	1,3
+gkExpr/ne/not/nm	(none)
+gkExpr/ne/not/nk	(none)
+gkExpr/ne/having/m1	2,0 | 2,2 | 2,3
+gkExpr/ne/having/mn	1,0 | 1,1 | 1,2
+gkExpr/ne/having/nm	(none)
+gkExpr/ne/having/nk	(none)
+gkExpr/ne/joinOn/m1	2,0 | 2,2 | 2,3
+gkExpr/ne/joinOn/mn	1,0 | 1,1 | 1,2
+gkExpr/ne/joinOn/nm	(none)
+gkExpr/ne/joinOn/nk	(none)
+gkExpr/lt/alone/m1	2,0
+gkExpr/lt/alone/mn	1,0 | 1,1 | 1,2
+gkExpr/lt/alone/nm	(none)
+gkExpr/lt/alone/nk	(none)
+gkExpr/lt/and/m1	(none)
+gkExpr/lt/and/mn	1,1 | 1,2
+gkExpr/lt/and/nm	(none)
+gkExpr/lt/and/nk	(none)
+gkExpr/lt/or/m1	2,0
+gkExpr/lt/or/mn	1,0 | 1,1 | 1,2
+gkExpr/lt/or/nm	3,0
+gkExpr/lt/or/nk	NULL,0
+gkExpr/lt/not/m1	2,1 | 2,2 | 2,3
+gkExpr/lt/not/mn	1,3
+gkExpr/lt/not/nm	(none)
+gkExpr/lt/not/nk	(none)
+gkExpr/lt/having/m1	2,0
+gkExpr/lt/having/mn	1,0 | 1,1 | 1,2
+gkExpr/lt/having/nm	(none)
+gkExpr/lt/having/nk	(none)
+gkExpr/lt/joinOn/m1	2,0
+gkExpr/lt/joinOn/mn	1,0 | 1,1 | 1,2
+gkExpr/lt/joinOn/nm	(none)
+gkExpr/lt/joinOn/nk	(none)
+gkExpr/ge/alone/m1	2,1 | 2,2 | 2,3
+gkExpr/ge/alone/mn	1,3
+gkExpr/ge/alone/nm	(none)
+gkExpr/ge/alone/nk	(none)
+gkExpr/ge/and/m1	2,1 | 2,2 | 2,3
+gkExpr/ge/and/mn	1,3
+gkExpr/ge/and/nm	(none)
+gkExpr/ge/and/nk	(none)
+gkExpr/ge/or/m1	2,0 | 2,1 | 2,2 | 2,3
+gkExpr/ge/or/mn	1,0 | 1,3
+gkExpr/ge/or/nm	3,0
+gkExpr/ge/or/nk	NULL,0
+gkExpr/ge/not/m1	2,0
+gkExpr/ge/not/mn	1,0 | 1,1 | 1,2
+gkExpr/ge/not/nm	(none)
+gkExpr/ge/not/nk	(none)
+gkExpr/ge/having/m1	2,1 | 2,2 | 2,3
+gkExpr/ge/having/mn	1,3
+gkExpr/ge/having/nm	(none)
+gkExpr/ge/having/nk	(none)
+gkExpr/ge/joinOn/m1	2,1 | 2,2 | 2,3
+gkExpr/ge/joinOn/mn	1,3
+gkExpr/ge/joinOn/nm	(none)
+gkExpr/ge/joinOn/nk	(none)
+gkExpr/isnd/alone/m1	2,1
+gkExpr/isnd/alone/mn	1,3
+gkExpr/isnd/alone/nm	3,NULL
+gkExpr/isnd/alone/nk	NULL,NULL
+gkExpr/isnd/and/m1	2,1
+gkExpr/isnd/and/mn	1,3
+gkExpr/isnd/and/nm	(none)
+gkExpr/isnd/and/nk	(none)
+gkExpr/isnd/or/m1	2,0 | 2,1
+gkExpr/isnd/or/mn	1,0 | 1,3
+gkExpr/isnd/or/nm	3,0 | 3,NULL
+gkExpr/isnd/or/nk	NULL,0 | NULL,NULL
+gkExpr/isnd/not/m1	2,0 | 2,2 | 2,3 | 2,NULL
+gkExpr/isnd/not/mn	1,0 | 1,1 | 1,2 | 1,NULL
+gkExpr/isnd/not/nm	3,0 | 3,1 | 3,2 | 3,3
+gkExpr/isnd/not/nk	NULL,0 | NULL,1 | NULL,2 | NULL,3
+gkExpr/isnd/having/m1	2,1
+gkExpr/isnd/having/mn	1,3
+gkExpr/isnd/having/nm	3,NULL
+gkExpr/isnd/having/nk	NULL,NULL
+gkExpr/isnd/joinOn/m1	2,1
+gkExpr/isnd/joinOn/mn	1,3
+gkExpr/isnd/joinOn/nm	3,NULL
+gkExpr/isnd/joinOn/nk	NULL,NULL
+gkExpr/left/alone/m1	2,1
+gkExpr/left/alone/mn	1,3
+gkExpr/left/alone/nm	(none)
+gkExpr/left/alone/nk	(none)
+gkExpr/left/and/m1	2,1
+gkExpr/left/and/mn	1,3
+gkExpr/left/and/nm	(none)
+gkExpr/left/and/nk	(none)
+gkExpr/left/or/m1	2,0 | 2,1
+gkExpr/left/or/mn	1,0 | 1,3
+gkExpr/left/or/nm	3,0
+gkExpr/left/or/nk	NULL,0
+gkExpr/left/not/m1	2,0 | 2,2 | 2,3
+gkExpr/left/not/mn	1,0 | 1,1 | 1,2
+gkExpr/left/not/nm	(none)
+gkExpr/left/not/nk	(none)
+gkExpr/left/having/m1	2,1
+gkExpr/left/having/mn	1,3
+gkExpr/left/having/nm	(none)
+gkExpr/left/having/nk	(none)
+gkExpr/left/joinOn/m1	2,1
+gkExpr/left/joinOn/mn	1,3
+gkExpr/left/joinOn/nm	(none)
+gkExpr/left/joinOn/nk	(none)
+gkConst/eq/alone/m1	2,1
+gkConst/eq/alone/mn	1,3
+gkConst/eq/alone/nm	(none)
+gkConst/eq/alone/nk	(none)
+gkConst/eq/and/m1	2,1
+gkConst/eq/and/mn	1,3
+gkConst/eq/and/nm	(none)
+gkConst/eq/and/nk	(none)
+gkConst/eq/or/m1	2,0 | 2,1
+gkConst/eq/or/mn	1,0 | 1,3
+gkConst/eq/or/nm	3,0
+gkConst/eq/or/nk	NULL,0
+gkConst/eq/not/m1	2,0 | 2,2 | 2,3
+gkConst/eq/not/mn	1,0 | 1,1 | 1,2
+gkConst/eq/not/nm	(none)
+gkConst/eq/not/nk	(none)
+gkConst/eq/having/m1	2,1
+gkConst/eq/having/mn	1,3
+gkConst/eq/having/nm	(none)
+gkConst/eq/having/nk	(none)
+gkConst/eq/joinOn/m1	2,1
+gkConst/eq/joinOn/mn	1,3
+gkConst/eq/joinOn/nm	(none)
+gkConst/eq/joinOn/nk	(none)
+gkConst/ne/alone/m1	2,0 | 2,2 | 2,3
+gkConst/ne/alone/mn	1,0 | 1,1 | 1,2
+gkConst/ne/alone/nm	(none)
+gkConst/ne/alone/nk	(none)
+gkConst/ne/and/m1	2,2 | 2,3
+gkConst/ne/and/mn	1,1 | 1,2
+gkConst/ne/and/nm	(none)
+gkConst/ne/and/nk	(none)
+gkConst/ne/or/m1	2,0 | 2,2 | 2,3
+gkConst/ne/or/mn	1,0 | 1,1 | 1,2
+gkConst/ne/or/nm	3,0
+gkConst/ne/or/nk	NULL,0
+gkConst/ne/not/m1	2,1
+gkConst/ne/not/mn	1,3
+gkConst/ne/not/nm	(none)
+gkConst/ne/not/nk	(none)
+gkConst/ne/having/m1	2,0 | 2,2 | 2,3
+gkConst/ne/having/mn	1,0 | 1,1 | 1,2
+gkConst/ne/having/nm	(none)
+gkConst/ne/having/nk	(none)
+gkConst/ne/joinOn/m1	2,0 | 2,2 | 2,3
+gkConst/ne/joinOn/mn	1,0 | 1,1 | 1,2
+gkConst/ne/joinOn/nm	(none)
+gkConst/ne/joinOn/nk	(none)
+gkConst/lt/alone/m1	2,0
+gkConst/lt/alone/mn	1,0 | 1,1 | 1,2
+gkConst/lt/alone/nm	(none)
+gkConst/lt/alone/nk	(none)
+gkConst/lt/and/m1	(none)
+gkConst/lt/and/mn	1,1 | 1,2
+gkConst/lt/and/nm	(none)
+gkConst/lt/and/nk	(none)
+gkConst/lt/or/m1	2,0
+gkConst/lt/or/mn	1,0 | 1,1 | 1,2
+gkConst/lt/or/nm	3,0
+gkConst/lt/or/nk	NULL,0
+gkConst/lt/not/m1	2,1 | 2,2 | 2,3
+gkConst/lt/not/mn	1,3
+gkConst/lt/not/nm	(none)
+gkConst/lt/not/nk	(none)
+gkConst/lt/having/m1	2,0
+gkConst/lt/having/mn	1,0 | 1,1 | 1,2
+gkConst/lt/having/nm	(none)
+gkConst/lt/having/nk	(none)
+gkConst/lt/joinOn/m1	2,0
+gkConst/lt/joinOn/mn	1,0 | 1,1 | 1,2
+gkConst/lt/joinOn/nm	(none)
+gkConst/lt/joinOn/nk	(none)
+gkConst/ge/alone/m1	2,1 | 2,2 | 2,3
+gkConst/ge/alone/mn	1,3
+gkConst/ge/alone/nm	(none)
+gkConst/ge/alone/nk	(none)
+gkConst/ge/and/m1	2,1 | 2,2 | 2,3
+gkConst/ge/and/mn	1,3
+gkConst/ge/and/nm	(none)
+gkConst/ge/and/nk	(none)
+gkConst/ge/or/m1	2,0 | 2,1 | 2,2 | 2,3
+gkConst/ge/or/mn	1,0 | 1,3
+gkConst/ge/or/nm	3,0
+gkConst/ge/or/nk	NULL,0
+gkConst/ge/not/m1	2,0
+gkConst/ge/not/mn	1,0 | 1,1 | 1,2
+gkConst/ge/not/nm	(none)
+gkConst/ge/not/nk	(none)
+gkConst/ge/having/m1	2,1 | 2,2 | 2,3
+gkConst/ge/having/mn	1,3
+gkConst/ge/having/nm	(none)
+gkConst/ge/having/nk	(none)
+gkConst/ge/joinOn/m1	2,1 | 2,2 | 2,3
+gkConst/ge/joinOn/mn	1,3
+gkConst/ge/joinOn/nm	(none)
+gkConst/ge/joinOn/nk	(none)
+gkConst/isnd/alone/m1	2,1
+gkConst/isnd/alone/mn	1,3
+gkConst/isnd/alone/nm	3,NULL
+gkConst/isnd/alone/nk	NULL,NULL
+gkConst/isnd/and/m1	2,1
+gkConst/isnd/and/mn	1,3
+gkConst/isnd/and/nm	(none)
+gkConst/isnd/and/nk	(none)
+gkConst/isnd/or/m1	2,0 | 2,1
+gkConst/isnd/or/mn	1,0 | 1,3
+gkConst/isnd/or/nm	3,0 | 3,NULL
+gkConst/isnd/or/nk	NULL,0 | NULL,NULL
+gkConst/isnd/not/m1	2,0 | 2,2 | 2,3 | 2,NULL
+gkConst/isnd/not/mn	1,0 | 1,1 | 1,2 | 1,NULL
+gkConst/isnd/not/nm	3,0 | 3,1 | 3,2 | 3,3
+gkConst/isnd/not/nk	NULL,0 | NULL,1 | NULL,2 | NULL,3
+gkConst/isnd/having/m1	2,1
+gkConst/isnd/having/mn	1,3
+gkConst/isnd/having/nm	3,NULL
+gkConst/isnd/having/nk	NULL,NULL
+gkConst/isnd/joinOn/m1	2,1
+gkConst/isnd/joinOn/mn	1,3
+gkConst/isnd/joinOn/nm	3,NULL
+gkConst/isnd/joinOn/nk	NULL,NULL
+gkConst/left/alone/m1	2,1
+gkConst/left/alone/mn	1,3
+gkConst/left/alone/nm	(none)
+gkConst/left/alone/nk	(none)
+gkConst/left/and/m1	2,1
+gkConst/left/and/mn	1,3
+gkConst/left/and/nm	(none)
+gkConst/left/and/nk	(none)
+gkConst/left/or/m1	2,0 | 2,1
+gkConst/left/or/mn	1,0 | 1,3
+gkConst/left/or/nm	3,0
+gkConst/left/or/nk	NULL,0
+gkConst/left/not/m1	2,0 | 2,2 | 2,3
+gkConst/left/not/mn	1,0 | 1,1 | 1,2
+gkConst/left/not/nm	(none)
+gkConst/left/not/nk	(none)
+gkConst/left/having/m1	2,1
+gkConst/left/having/mn	1,3
+gkConst/left/having/nm	(none)
+gkConst/left/having/nk	(none)
+gkConst/left/joinOn/m1	2,1
+gkConst/left/joinOn/mn	1,3
+gkConst/left/joinOn/nm	(none)
+gkConst/left/joinOn/nk	(none)
+gkOuter/eq/alone/m1	2,1
+gkOuter/eq/alone/mn	1,3
+gkOuter/eq/alone/nm	(none)
+gkOuter/eq/alone/nk	(none)
+gkOuter/eq/and/m1	2,1
+gkOuter/eq/and/mn	1,3
+gkOuter/eq/and/nm	(none)
+gkOuter/eq/and/nk	(none)
+gkOuter/eq/or/m1	2,0 | 2,1
+gkOuter/eq/or/mn	1,0 | 1,3
+gkOuter/eq/or/nm	3,0
+gkOuter/eq/or/nk	NULL,0
+gkOuter/eq/not/m1	2,0 | 2,2 | 2,3
+gkOuter/eq/not/mn	1,0 | 1,1 | 1,2
+gkOuter/eq/not/nm	(none)
+gkOuter/eq/not/nk	(none)
+gkOuter/eq/having/m1	2,1
+gkOuter/eq/having/mn	1,3
+gkOuter/eq/having/nm	(none)
+gkOuter/eq/having/nk	(none)
+gkOuter/eq/joinOn/m1	2,1
+gkOuter/eq/joinOn/mn	1,3
+gkOuter/eq/joinOn/nm	(none)
+gkOuter/eq/joinOn/nk	(none)
+gkOuter/ne/alone/m1	2,0 | 2,2 | 2,3
+gkOuter/ne/alone/mn	1,0 | 1,1 | 1,2
+gkOuter/ne/alone/nm	(none)
+gkOuter/ne/alone/nk	(none)
+gkOuter/ne/and/m1	2,2 | 2,3
+gkOuter/ne/and/mn	1,1 | 1,2
+gkOuter/ne/and/nm	(none)
+gkOuter/ne/and/nk	(none)
+gkOuter/ne/or/m1	2,0 | 2,2 | 2,3
+gkOuter/ne/or/mn	1,0 | 1,1 | 1,2
+gkOuter/ne/or/nm	3,0
+gkOuter/ne/or/nk	NULL,0
+gkOuter/ne/not/m1	2,1
+gkOuter/ne/not/mn	1,3
+gkOuter/ne/not/nm	(none)
+gkOuter/ne/not/nk	(none)
+gkOuter/ne/having/m1	2,0 | 2,2 | 2,3
+gkOuter/ne/having/mn	1,0 | 1,1 | 1,2
+gkOuter/ne/having/nm	(none)
+gkOuter/ne/having/nk	(none)
+gkOuter/ne/joinOn/m1	2,0 | 2,2 | 2,3
+gkOuter/ne/joinOn/mn	1,0 | 1,1 | 1,2
+gkOuter/ne/joinOn/nm	(none)
+gkOuter/ne/joinOn/nk	(none)
+gkOuter/lt/alone/m1	2,0
+gkOuter/lt/alone/mn	1,0 | 1,1 | 1,2
+gkOuter/lt/alone/nm	(none)
+gkOuter/lt/alone/nk	(none)
+gkOuter/lt/and/m1	(none)
+gkOuter/lt/and/mn	1,1 | 1,2
+gkOuter/lt/and/nm	(none)
+gkOuter/lt/and/nk	(none)
+gkOuter/lt/or/m1	2,0
+gkOuter/lt/or/mn	1,0 | 1,1 | 1,2
+gkOuter/lt/or/nm	3,0
+gkOuter/lt/or/nk	NULL,0
+gkOuter/lt/not/m1	2,1 | 2,2 | 2,3
+gkOuter/lt/not/mn	1,3
+gkOuter/lt/not/nm	(none)
+gkOuter/lt/not/nk	(none)
+gkOuter/lt/having/m1	2,0
+gkOuter/lt/having/mn	1,0 | 1,1 | 1,2
+gkOuter/lt/having/nm	(none)
+gkOuter/lt/having/nk	(none)
+gkOuter/lt/joinOn/m1	2,0
+gkOuter/lt/joinOn/mn	1,0 | 1,1 | 1,2
+gkOuter/lt/joinOn/nm	(none)
+gkOuter/lt/joinOn/nk	(none)
+gkOuter/ge/alone/m1	2,1 | 2,2 | 2,3
+gkOuter/ge/alone/mn	1,3
+gkOuter/ge/alone/nm	(none)
+gkOuter/ge/alone/nk	(none)
+gkOuter/ge/and/m1	2,1 | 2,2 | 2,3
+gkOuter/ge/and/mn	1,3
+gkOuter/ge/and/nm	(none)
+gkOuter/ge/and/nk	(none)
+gkOuter/ge/or/m1	2,0 | 2,1 | 2,2 | 2,3
+gkOuter/ge/or/mn	1,0 | 1,3
+gkOuter/ge/or/nm	3,0
+gkOuter/ge/or/nk	NULL,0
+gkOuter/ge/not/m1	2,0
+gkOuter/ge/not/mn	1,0 | 1,1 | 1,2
+gkOuter/ge/not/nm	(none)
+gkOuter/ge/not/nk	(none)
+gkOuter/ge/having/m1	2,1 | 2,2 | 2,3
+gkOuter/ge/having/mn	1,3
+gkOuter/ge/having/nm	(none)
+gkOuter/ge/having/nk	(none)
+gkOuter/ge/joinOn/m1	2,1 | 2,2 | 2,3
+gkOuter/ge/joinOn/mn	1,3
+gkOuter/ge/joinOn/nm	(none)
+gkOuter/ge/joinOn/nk	(none)
+gkOuter/isnd/alone/m1	2,1
+gkOuter/isnd/alone/mn	1,3
+gkOuter/isnd/alone/nm	3,NULL
+gkOuter/isnd/alone/nk	NULL,NULL
+gkOuter/isnd/and/m1	2,1
+gkOuter/isnd/and/mn	1,3
+gkOuter/isnd/and/nm	(none)
+gkOuter/isnd/and/nk	(none)
+gkOuter/isnd/or/m1	2,0 | 2,1
+gkOuter/isnd/or/mn	1,0 | 1,3
+gkOuter/isnd/or/nm	3,0 | 3,NULL
+gkOuter/isnd/or/nk	NULL,0 | NULL,NULL
+gkOuter/isnd/not/m1	2,0 | 2,2 | 2,3 | 2,NULL
+gkOuter/isnd/not/mn	1,0 | 1,1 | 1,2 | 1,NULL
+gkOuter/isnd/not/nm	3,0 | 3,1 | 3,2 | 3,3
+gkOuter/isnd/not/nk	NULL,0 | NULL,1 | NULL,2 | NULL,3
+gkOuter/isnd/having/m1	2,1
+gkOuter/isnd/having/mn	1,3
+gkOuter/isnd/having/nm	3,NULL
+gkOuter/isnd/having/nk	NULL,NULL
+gkOuter/isnd/joinOn/m1	2,1
+gkOuter/isnd/joinOn/mn	1,3
+gkOuter/isnd/joinOn/nm	3,NULL
+gkOuter/isnd/joinOn/nk	NULL,NULL
+gkOuter/left/alone/m1	2,1
+gkOuter/left/alone/mn	1,3
+gkOuter/left/alone/nm	(none)
+gkOuter/left/alone/nk	(none)
+gkOuter/left/and/m1	2,1
+gkOuter/left/and/mn	1,3
+gkOuter/left/and/nm	(none)
+gkOuter/left/and/nk	(none)
+gkOuter/left/or/m1	2,0 | 2,1
+gkOuter/left/or/mn	1,0 | 1,3
+gkOuter/left/or/nm	3,0
+gkOuter/left/or/nk	NULL,0
+gkOuter/left/not/m1	2,0 | 2,2 | 2,3
+gkOuter/left/not/mn	1,0 | 1,1 | 1,2
+gkOuter/left/not/nm	(none)
+gkOuter/left/not/nk	(none)
+gkOuter/left/having/m1	2,1
+gkOuter/left/having/mn	1,3
+gkOuter/left/having/nm	(none)
+gkOuter/left/having/nk	(none)
+gkOuter/left/joinOn/m1	2,1
+gkOuter/left/joinOn/mn	1,3
+gkOuter/left/joinOn/nm	(none)
+gkOuter/left/joinOn/nk	(none)
+gkHaving/eq/alone/m1	(none)
+gkHaving/eq/alone/mn	1,3
+gkHaving/eq/alone/nm	(none)
+gkHaving/eq/alone/nk	(none)
+gkHaving/eq/and/m1	(none)
+gkHaving/eq/and/mn	1,3
+gkHaving/eq/and/nm	(none)
+gkHaving/eq/and/nk	(none)
+gkHaving/eq/or/m1	2,0
+gkHaving/eq/or/mn	1,0 | 1,3
+gkHaving/eq/or/nm	3,0
+gkHaving/eq/or/nk	NULL,0
+gkHaving/eq/not/m1	(none)
+gkHaving/eq/not/mn	1,0 | 1,1 | 1,2
+gkHaving/eq/not/nm	(none)
+gkHaving/eq/not/nk	(none)
+gkHaving/eq/having/m1	(none)
+gkHaving/eq/having/mn	1,3
+gkHaving/eq/having/nm	(none)
+gkHaving/eq/having/nk	(none)
+gkHaving/eq/joinOn/m1	(none)
+gkHaving/eq/joinOn/mn	1,3
+gkHaving/eq/joinOn/nm	(none)
+gkHaving/eq/joinOn/nk	(none)
+gkHaving/ne/alone/m1	(none)
+gkHaving/ne/alone/mn	1,0 | 1,1 | 1,2
+gkHaving/ne/alone/nm	(none)
+gkHaving/ne/alone/nk	(none)
+gkHaving/ne/and/m1	(none)
+gkHaving/ne/and/mn	1,1 | 1,2
+gkHaving/ne/and/nm	(none)
+gkHaving/ne/and/nk	(none)
+gkHaving/ne/or/m1	2,0
+gkHaving/ne/or/mn	1,0 | 1,1 | 1,2
+gkHaving/ne/or/nm	3,0
+gkHaving/ne/or/nk	NULL,0
+gkHaving/ne/not/m1	(none)
+gkHaving/ne/not/mn	1,3
+gkHaving/ne/not/nm	(none)
+gkHaving/ne/not/nk	(none)
+gkHaving/ne/having/m1	(none)
+gkHaving/ne/having/mn	1,0 | 1,1 | 1,2
+gkHaving/ne/having/nm	(none)
+gkHaving/ne/having/nk	(none)
+gkHaving/ne/joinOn/m1	(none)
+gkHaving/ne/joinOn/mn	1,0 | 1,1 | 1,2
+gkHaving/ne/joinOn/nm	(none)
+gkHaving/ne/joinOn/nk	(none)
+gkHaving/lt/alone/m1	(none)
+gkHaving/lt/alone/mn	1,0 | 1,1 | 1,2
+gkHaving/lt/alone/nm	(none)
+gkHaving/lt/alone/nk	(none)
+gkHaving/lt/and/m1	(none)
+gkHaving/lt/and/mn	1,1 | 1,2
+gkHaving/lt/and/nm	(none)
+gkHaving/lt/and/nk	(none)
+gkHaving/lt/or/m1	2,0
+gkHaving/lt/or/mn	1,0 | 1,1 | 1,2
+gkHaving/lt/or/nm	3,0
+gkHaving/lt/or/nk	NULL,0
+gkHaving/lt/not/m1	(none)
+gkHaving/lt/not/mn	1,3
+gkHaving/lt/not/nm	(none)
+gkHaving/lt/not/nk	(none)
+gkHaving/lt/having/m1	(none)
+gkHaving/lt/having/mn	1,0 | 1,1 | 1,2
+gkHaving/lt/having/nm	(none)
+gkHaving/lt/having/nk	(none)
+gkHaving/lt/joinOn/m1	(none)
+gkHaving/lt/joinOn/mn	1,0 | 1,1 | 1,2
+gkHaving/lt/joinOn/nm	(none)
+gkHaving/lt/joinOn/nk	(none)
+gkHaving/ge/alone/m1	(none)
+gkHaving/ge/alone/mn	1,3
+gkHaving/ge/alone/nm	(none)
+gkHaving/ge/alone/nk	(none)
+gkHaving/ge/and/m1	(none)
+gkHaving/ge/and/mn	1,3
+gkHaving/ge/and/nm	(none)
+gkHaving/ge/and/nk	(none)
+gkHaving/ge/or/m1	2,0
+gkHaving/ge/or/mn	1,0 | 1,3
+gkHaving/ge/or/nm	3,0
+gkHaving/ge/or/nk	NULL,0
+gkHaving/ge/not/m1	(none)
+gkHaving/ge/not/mn	1,0 | 1,1 | 1,2
+gkHaving/ge/not/nm	(none)
+gkHaving/ge/not/nk	(none)
+gkHaving/ge/having/m1	(none)
+gkHaving/ge/having/mn	1,3
+gkHaving/ge/having/nm	(none)
+gkHaving/ge/having/nk	(none)
+gkHaving/ge/joinOn/m1	(none)
+gkHaving/ge/joinOn/mn	1,3
+gkHaving/ge/joinOn/nm	(none)
+gkHaving/ge/joinOn/nk	(none)
+gkHaving/isnd/alone/m1	2,NULL
+gkHaving/isnd/alone/mn	1,3
+gkHaving/isnd/alone/nm	3,NULL
+gkHaving/isnd/alone/nk	NULL,NULL
+gkHaving/isnd/and/m1	(none)
+gkHaving/isnd/and/mn	1,3
+gkHaving/isnd/and/nm	(none)
+gkHaving/isnd/and/nk	(none)
+gkHaving/isnd/or/m1	2,0 | 2,NULL
+gkHaving/isnd/or/mn	1,0 | 1,3
+gkHaving/isnd/or/nm	3,0 | 3,NULL
+gkHaving/isnd/or/nk	NULL,0 | NULL,NULL
+gkHaving/isnd/not/m1	2,0 | 2,1 | 2,2 | 2,3
+gkHaving/isnd/not/mn	1,0 | 1,1 | 1,2 | 1,NULL
+gkHaving/isnd/not/nm	3,0 | 3,1 | 3,2 | 3,3
+gkHaving/isnd/not/nk	NULL,0 | NULL,1 | NULL,2 | NULL,3
+gkHaving/isnd/having/m1	2,NULL
+gkHaving/isnd/having/mn	1,3
+gkHaving/isnd/having/nm	3,NULL
+gkHaving/isnd/having/nk	NULL,NULL
+gkHaving/isnd/joinOn/m1	2,NULL
+gkHaving/isnd/joinOn/mn	1,3
+gkHaving/isnd/joinOn/nm	3,NULL
+gkHaving/isnd/joinOn/nk	NULL,NULL
+gkHaving/left/alone/m1	(none)
+gkHaving/left/alone/mn	1,3
+gkHaving/left/alone/nm	(none)
+gkHaving/left/alone/nk	(none)
+gkHaving/left/and/m1	(none)
+gkHaving/left/and/mn	1,3
+gkHaving/left/and/nm	(none)
+gkHaving/left/and/nk	(none)
+gkHaving/left/or/m1	2,0
+gkHaving/left/or/mn	1,0 | 1,3
+gkHaving/left/or/nm	3,0
+gkHaving/left/or/nk	NULL,0
+gkHaving/left/not/m1	(none)
+gkHaving/left/not/mn	1,0 | 1,1 | 1,2
+gkHaving/left/not/nm	(none)
+gkHaving/left/not/nk	(none)
+gkHaving/left/having/m1	(none)
+gkHaving/left/having/mn	1,3
+gkHaving/left/having/nm	(none)
+gkHaving/left/having/nk	(none)
+gkHaving/left/joinOn/m1	(none)
+gkHaving/left/joinOn/mn	1,3
+gkHaving/left/joinOn/nm	(none)
+gkHaving/left/joinOn/nk	(none)
+approxDistinct/eq/alone/m1	2,1
+approxDistinct/eq/alone/mn	1,3
+approxDistinct/eq/alone/nm	3,0
+approxDistinct/eq/alone/nk	NULL,0
+approxDistinct/eq/and/m1	2,1
+approxDistinct/eq/and/mn	1,3
+approxDistinct/eq/and/nm	(none)
+approxDistinct/eq/and/nk	(none)
+approxDistinct/eq/or/m1	2,0 | 2,1
+approxDistinct/eq/or/mn	1,0 | 1,3
+approxDistinct/eq/or/nm	3,0
+approxDistinct/eq/or/nk	NULL,0
+approxDistinct/eq/not/m1	2,0 | 2,2 | 2,3
+approxDistinct/eq/not/mn	1,0 | 1,1 | 1,2
+approxDistinct/eq/not/nm	3,1 | 3,2 | 3,3
+approxDistinct/eq/not/nk	NULL,1 | NULL,2 | NULL,3
+approxDistinct/eq/having/m1	2,1
+approxDistinct/eq/having/mn	1,3
+approxDistinct/eq/having/nm	3,0
+approxDistinct/eq/having/nk	NULL,0
+approxDistinct/eq/joinOn/m1	2,1
+approxDistinct/eq/joinOn/mn	1,3
+approxDistinct/eq/joinOn/nm	3,0
+approxDistinct/eq/joinOn/nk	NULL,0
+approxDistinct/ne/alone/m1	2,0 | 2,2 | 2,3
+approxDistinct/ne/alone/mn	1,0 | 1,1 | 1,2
+approxDistinct/ne/alone/nm	3,1 | 3,2 | 3,3
+approxDistinct/ne/alone/nk	NULL,1 | NULL,2 | NULL,3
+approxDistinct/ne/and/m1	2,2 | 2,3
+approxDistinct/ne/and/mn	1,1 | 1,2
+approxDistinct/ne/and/nm	3,1 | 3,2 | 3,3
+approxDistinct/ne/and/nk	NULL,1 | NULL,2 | NULL,3
+approxDistinct/ne/or/m1	2,0 | 2,2 | 2,3
+approxDistinct/ne/or/mn	1,0 | 1,1 | 1,2
+approxDistinct/ne/or/nm	3,0 | 3,1 | 3,2 | 3,3
+approxDistinct/ne/or/nk	NULL,0 | NULL,1 | NULL,2 | NULL,3
+approxDistinct/ne/not/m1	2,1
+approxDistinct/ne/not/mn	1,3
+approxDistinct/ne/not/nm	3,0
+approxDistinct/ne/not/nk	NULL,0
+approxDistinct/ne/having/m1	2,0 | 2,2 | 2,3
+approxDistinct/ne/having/mn	1,0 | 1,1 | 1,2
+approxDistinct/ne/having/nm	3,1 | 3,2 | 3,3
+approxDistinct/ne/having/nk	NULL,1 | NULL,2 | NULL,3
+approxDistinct/ne/joinOn/m1	2,0 | 2,2 | 2,3
+approxDistinct/ne/joinOn/mn	1,0 | 1,1 | 1,2
+approxDistinct/ne/joinOn/nm	3,1 | 3,2 | 3,3
+approxDistinct/ne/joinOn/nk	NULL,1 | NULL,2 | NULL,3
+approxDistinct/lt/alone/m1	2,0
+approxDistinct/lt/alone/mn	1,0 | 1,1 | 1,2
+approxDistinct/lt/alone/nm	(none)
+approxDistinct/lt/alone/nk	(none)
+approxDistinct/lt/and/m1	(none)
+approxDistinct/lt/and/mn	1,1 | 1,2
+approxDistinct/lt/and/nm	(none)
+approxDistinct/lt/and/nk	(none)
+approxDistinct/lt/or/m1	2,0
+approxDistinct/lt/or/mn	1,0 | 1,1 | 1,2
+approxDistinct/lt/or/nm	3,0
+approxDistinct/lt/or/nk	NULL,0
+approxDistinct/lt/not/m1	2,1 | 2,2 | 2,3
+approxDistinct/lt/not/mn	1,3
+approxDistinct/lt/not/nm	3,0 | 3,1 | 3,2 | 3,3
+approxDistinct/lt/not/nk	NULL,0 | NULL,1 | NULL,2 | NULL,3
+approxDistinct/lt/having/m1	2,0
+approxDistinct/lt/having/mn	1,0 | 1,1 | 1,2
+approxDistinct/lt/having/nm	(none)
+approxDistinct/lt/having/nk	(none)
+approxDistinct/lt/joinOn/m1	2,0
+approxDistinct/lt/joinOn/mn	1,0 | 1,1 | 1,2
+approxDistinct/lt/joinOn/nm	(none)
+approxDistinct/lt/joinOn/nk	(none)
+approxDistinct/ge/alone/m1	2,1 | 2,2 | 2,3
+approxDistinct/ge/alone/mn	1,3
+approxDistinct/ge/alone/nm	3,0 | 3,1 | 3,2 | 3,3
+approxDistinct/ge/alone/nk	NULL,0 | NULL,1 | NULL,2 | NULL,3
+approxDistinct/ge/and/m1	2,1 | 2,2 | 2,3
+approxDistinct/ge/and/mn	1,3
+approxDistinct/ge/and/nm	3,1 | 3,2 | 3,3
+approxDistinct/ge/and/nk	NULL,1 | NULL,2 | NULL,3
+approxDistinct/ge/or/m1	2,0 | 2,1 | 2,2 | 2,3
+approxDistinct/ge/or/mn	1,0 | 1,3
+approxDistinct/ge/or/nm	3,0 | 3,1 | 3,2 | 3,3
+approxDistinct/ge/or/nk	NULL,0 | NULL,1 | NULL,2 | NULL,3
+approxDistinct/ge/not/m1	2,0
+approxDistinct/ge/not/mn	1,0 | 1,1 | 1,2
+approxDistinct/ge/not/nm	(none)
+approxDistinct/ge/not/nk	(none)
+approxDistinct/ge/having/m1	2,1 | 2,2 | 2,3
+approxDistinct/ge/having/mn	1,3
+approxDistinct/ge/having/nm	3,0 | 3,1 | 3,2 | 3,3
+approxDistinct/ge/having/nk	NULL,0 | NULL,1 | NULL,2 | NULL,3
+approxDistinct/ge/joinOn/m1	2,1 | 2,2 | 2,3
+approxDistinct/ge/joinOn/mn	1,3
+approxDistinct/ge/joinOn/nm	3,0 | 3,1 | 3,2 | 3,3
+approxDistinct/ge/joinOn/nk	NULL,0 | NULL,1 | NULL,2 | NULL,3
+approxDistinct/isnd/alone/m1	2,1
+approxDistinct/isnd/alone/mn	1,3
+approxDistinct/isnd/alone/nm	3,0
+approxDistinct/isnd/alone/nk	NULL,0
+approxDistinct/isnd/and/m1	2,1
+approxDistinct/isnd/and/mn	1,3
+approxDistinct/isnd/and/nm	(none)
+approxDistinct/isnd/and/nk	(none)
+approxDistinct/isnd/or/m1	2,0 | 2,1
+approxDistinct/isnd/or/mn	1,0 | 1,3
+approxDistinct/isnd/or/nm	3,0
+approxDistinct/isnd/or/nk	NULL,0
+approxDistinct/isnd/not/m1	2,0 | 2,2 | 2,3 | 2,NULL
+approxDistinct/isnd/not/mn	1,0 | 1,1 | 1,2 | 1,NULL
+approxDistinct/isnd/not/nm	3,1 | 3,2 | 3,3 | 3,NULL
+approxDistinct/isnd/not/nk	NULL,1 | NULL,2 | NULL,3 | NULL,NULL
+approxDistinct/isnd/having/m1	2,1
+approxDistinct/isnd/having/mn	1,3
+approxDistinct/isnd/having/nm	3,0
+approxDistinct/isnd/having/nk	NULL,0
+approxDistinct/isnd/joinOn/m1	2,1
+approxDistinct/isnd/joinOn/mn	1,3
+approxDistinct/isnd/joinOn/nm	3,0
+approxDistinct/isnd/joinOn/nk	NULL,0
+approxDistinct/left/alone/m1	2,1
+approxDistinct/left/alone/mn	1,3
+approxDistinct/left/alone/nm	3,0
+approxDistinct/left/alone/nk	NULL,0
+approxDistinct/left/and/m1	2,1
+approxDistinct/left/and/mn	1,3
+approxDistinct/left/and/nm	(none)
+approxDistinct/left/and/nk	(none)
+approxDistinct/left/or/m1	2,0 | 2,1
+approxDistinct/left/or/mn	1,0 | 1,3
+approxDistinct/left/or/nm	3,0
+approxDistinct/left/or/nk	NULL,0
+approxDistinct/left/not/m1	2,0 | 2,2 | 2,3
+approxDistinct/left/not/mn	1,0 | 1,1 | 1,2
+approxDistinct/left/not/nm	3,1 | 3,2 | 3,3
+approxDistinct/left/not/nk	NULL,1 | NULL,2 | NULL,3
+approxDistinct/left/having/m1	2,1
+approxDistinct/left/having/mn	1,3
+approxDistinct/left/having/nm	3,0
+approxDistinct/left/having/nk	NULL,0
+approxDistinct/left/joinOn/m1	2,1
+approxDistinct/left/joinOn/mn	1,3
+approxDistinct/left/joinOn/nm	3,0
+approxDistinct/left/joinOn/nk	NULL,0
+countDistinct/eq/alone/m1	2,1
+countDistinct/eq/alone/mn	1,3
+countDistinct/eq/alone/nm	3,0
+countDistinct/eq/alone/nk	NULL,0
+countDistinct/eq/and/m1	2,1
+countDistinct/eq/and/mn	1,3
+countDistinct/eq/and/nm	(none)
+countDistinct/eq/and/nk	(none)
+countDistinct/eq/or/m1	2,0 | 2,1
+countDistinct/eq/or/mn	1,0 | 1,3
+countDistinct/eq/or/nm	3,0
+countDistinct/eq/or/nk	NULL,0
+countDistinct/eq/not/m1	2,0 | 2,2 | 2,3
+countDistinct/eq/not/mn	1,0 | 1,1 | 1,2
+countDistinct/eq/not/nm	3,1 | 3,2 | 3,3
+countDistinct/eq/not/nk	NULL,1 | NULL,2 | NULL,3
+countDistinct/eq/having/m1	2,1
+countDistinct/eq/having/mn	1,3
+countDistinct/eq/having/nm	3,0
+countDistinct/eq/having/nk	NULL,0
+countDistinct/eq/joinOn/m1	2,1
+countDistinct/eq/joinOn/mn	1,3
+countDistinct/eq/joinOn/nm	3,0
+countDistinct/eq/joinOn/nk	NULL,0
+countDistinct/ne/alone/m1	2,0 | 2,2 | 2,3
+countDistinct/ne/alone/mn	1,0 | 1,1 | 1,2
+countDistinct/ne/alone/nm	3,1 | 3,2 | 3,3
+countDistinct/ne/alone/nk	NULL,1 | NULL,2 | NULL,3
+countDistinct/ne/and/m1	2,2 | 2,3
+countDistinct/ne/and/mn	1,1 | 1,2
+countDistinct/ne/and/nm	3,1 | 3,2 | 3,3
+countDistinct/ne/and/nk	NULL,1 | NULL,2 | NULL,3
+countDistinct/ne/or/m1	2,0 | 2,2 | 2,3
+countDistinct/ne/or/mn	1,0 | 1,1 | 1,2
+countDistinct/ne/or/nm	3,0 | 3,1 | 3,2 | 3,3
+countDistinct/ne/or/nk	NULL,0 | NULL,1 | NULL,2 | NULL,3
+countDistinct/ne/not/m1	2,1
+countDistinct/ne/not/mn	1,3
+countDistinct/ne/not/nm	3,0
+countDistinct/ne/not/nk	NULL,0
+countDistinct/ne/having/m1	2,0 | 2,2 | 2,3
+countDistinct/ne/having/mn	1,0 | 1,1 | 1,2
+countDistinct/ne/having/nm	3,1 | 3,2 | 3,3
+countDistinct/ne/having/nk	NULL,1 | NULL,2 | NULL,3
+countDistinct/ne/joinOn/m1	2,0 | 2,2 | 2,3
+countDistinct/ne/joinOn/mn	1,0 | 1,1 | 1,2
+countDistinct/ne/joinOn/nm	3,1 | 3,2 | 3,3
+countDistinct/ne/joinOn/nk	NULL,1 | NULL,2 | NULL,3
+countDistinct/lt/alone/m1	2,0
+countDistinct/lt/alone/mn	1,0 | 1,1 | 1,2
+countDistinct/lt/alone/nm	(none)
+countDistinct/lt/alone/nk	(none)
+countDistinct/lt/and/m1	(none)
+countDistinct/lt/and/mn	1,1 | 1,2
+countDistinct/lt/and/nm	(none)
+countDistinct/lt/and/nk	(none)
+countDistinct/lt/or/m1	2,0
+countDistinct/lt/or/mn	1,0 | 1,1 | 1,2
+countDistinct/lt/or/nm	3,0
+countDistinct/lt/or/nk	NULL,0
+countDistinct/lt/not/m1	2,1 | 2,2 | 2,3
+countDistinct/lt/not/mn	1,3
+countDistinct/lt/not/nm	3,0 | 3,1 | 3,2 | 3,3
+countDistinct/lt/not/nk	NULL,0 | NULL,1 | NULL,2 | NULL,3
+countDistinct/lt/having/m1	2,0
+countDistinct/lt/having/mn	1,0 | 1,1 | 1,2
+countDistinct/lt/having/nm	(none)
+countDistinct/lt/having/nk	(none)
+countDistinct/lt/joinOn/m1	2,0
+countDistinct/lt/joinOn/mn	1,0 | 1,1 | 1,2
+countDistinct/lt/joinOn/nm	(none)
+countDistinct/lt/joinOn/nk	(none)
+countDistinct/ge/alone/m1	2,1 | 2,2 | 2,3
+countDistinct/ge/alone/mn	1,3
+countDistinct/ge/alone/nm	3,0 | 3,1 | 3,2 | 3,3
+countDistinct/ge/alone/nk	NULL,0 | NULL,1 | NULL,2 | NULL,3
+countDistinct/ge/and/m1	2,1 | 2,2 | 2,3
+countDistinct/ge/and/mn	1,3
+countDistinct/ge/and/nm	3,1 | 3,2 | 3,3
+countDistinct/ge/and/nk	NULL,1 | NULL,2 | NULL,3
+countDistinct/ge/or/m1	2,0 | 2,1 | 2,2 | 2,3
+countDistinct/ge/or/mn	1,0 | 1,3
+countDistinct/ge/or/nm	3,0 | 3,1 | 3,2 | 3,3
+countDistinct/ge/or/nk	NULL,0 | NULL,1 | NULL,2 | NULL,3
+countDistinct/ge/not/m1	2,0
+countDistinct/ge/not/mn	1,0 | 1,1 | 1,2
+countDistinct/ge/not/nm	(none)
+countDistinct/ge/not/nk	(none)
+countDistinct/ge/having/m1	2,1 | 2,2 | 2,3
+countDistinct/ge/having/mn	1,3
+countDistinct/ge/having/nm	3,0 | 3,1 | 3,2 | 3,3
+countDistinct/ge/having/nk	NULL,0 | NULL,1 | NULL,2 | NULL,3
+countDistinct/ge/joinOn/m1	2,1 | 2,2 | 2,3
+countDistinct/ge/joinOn/mn	1,3
+countDistinct/ge/joinOn/nm	3,0 | 3,1 | 3,2 | 3,3
+countDistinct/ge/joinOn/nk	NULL,0 | NULL,1 | NULL,2 | NULL,3
+countDistinct/isnd/alone/m1	2,1
+countDistinct/isnd/alone/mn	1,3
+countDistinct/isnd/alone/nm	3,0
+countDistinct/isnd/alone/nk	NULL,0
+countDistinct/isnd/and/m1	2,1
+countDistinct/isnd/and/mn	1,3
+countDistinct/isnd/and/nm	(none)
+countDistinct/isnd/and/nk	(none)
+countDistinct/isnd/or/m1	2,0 | 2,1
+countDistinct/isnd/or/mn	1,0 | 1,3
+countDistinct/isnd/or/nm	3,0
+countDistinct/isnd/or/nk	NULL,0
+countDistinct/isnd/not/m1	2,0 | 2,2 | 2,3 | 2,NULL
+countDistinct/isnd/not/mn	1,0 | 1,1 | 1,2 | 1,NULL
+countDistinct/isnd/not/nm	3,1 | 3,2 | 3,3 | 3,NULL
+countDistinct/isnd/not/nk	NULL,1 | NULL,2 | NULL,3 | NULL,NULL
+countDistinct/isnd/having/m1	2,1
+countDistinct/isnd/having/mn	1,3
+countDistinct/isnd/having/nm	3,0
+countDistinct/isnd/having/nk	NULL,0
+countDistinct/isnd/joinOn/m1	2,1
+countDistinct/isnd/joinOn/mn	1,3
+countDistinct/isnd/joinOn/nm	3,0
+countDistinct/isnd/joinOn/nk	NULL,0
+countDistinct/left/alone/m1	2,1
+countDistinct/left/alone/mn	1,3
+countDistinct/left/alone/nm	3,0
+countDistinct/left/alone/nk	NULL,0
+countDistinct/left/and/m1	2,1
+countDistinct/left/and/mn	1,3
+countDistinct/left/and/nm	(none)
+countDistinct/left/and/nk	(none)
+countDistinct/left/or/m1	2,0 | 2,1
+countDistinct/left/or/mn	1,0 | 1,3
+countDistinct/left/or/nm	3,0
+countDistinct/left/or/nk	NULL,0
+countDistinct/left/not/m1	2,0 | 2,2 | 2,3
+countDistinct/left/not/mn	1,0 | 1,1 | 1,2
+countDistinct/left/not/nm	3,1 | 3,2 | 3,3
+countDistinct/left/not/nk	NULL,1 | NULL,2 | NULL,3
+countDistinct/left/having/m1	2,1
+countDistinct/left/having/mn	1,3
+countDistinct/left/having/nm	3,0
+countDistinct/left/having/nk	NULL,0
+countDistinct/left/joinOn/m1	2,1
+countDistinct/left/joinOn/mn	1,3
+countDistinct/left/joinOn/nm	3,0
+countDistinct/left/joinOn/nk	NULL,0
+multiAgg/eq/alone/m1	2,0
+multiAgg/eq/alone/mn	1,2
+multiAgg/eq/alone/nm	(none)
+multiAgg/eq/alone/nk	(none)
+multiAgg/eq/and/m1	(none)
+multiAgg/eq/and/mn	1,2
+multiAgg/eq/and/nm	(none)
+multiAgg/eq/and/nk	(none)
+multiAgg/eq/or/m1	2,0
+multiAgg/eq/or/mn	1,0 | 1,2
+multiAgg/eq/or/nm	3,0
+multiAgg/eq/or/nk	NULL,0
+multiAgg/eq/not/m1	2,1 | 2,2 | 2,3
+multiAgg/eq/not/mn	1,0 | 1,1 | 1,3
+multiAgg/eq/not/nm	(none)
+multiAgg/eq/not/nk	(none)
+multiAgg/eq/having/m1	2,0
+multiAgg/eq/having/mn	1,2
+multiAgg/eq/having/nm	(none)
+multiAgg/eq/having/nk	(none)
+multiAgg/eq/joinOn/m1	2,0
+multiAgg/eq/joinOn/mn	1,2
+multiAgg/eq/joinOn/nm	(none)
+multiAgg/eq/joinOn/nk	(none)
+multiAgg/ne/alone/m1	2,1 | 2,2 | 2,3
+multiAgg/ne/alone/mn	1,0 | 1,1 | 1,3
+multiAgg/ne/alone/nm	(none)
+multiAgg/ne/alone/nk	(none)
+multiAgg/ne/and/m1	2,1 | 2,2 | 2,3
+multiAgg/ne/and/mn	1,1 | 1,3
+multiAgg/ne/and/nm	(none)
+multiAgg/ne/and/nk	(none)
+multiAgg/ne/or/m1	2,0 | 2,1 | 2,2 | 2,3
+multiAgg/ne/or/mn	1,0 | 1,1 | 1,3
+multiAgg/ne/or/nm	3,0
+multiAgg/ne/or/nk	NULL,0
+multiAgg/ne/not/m1	2,0
+multiAgg/ne/not/mn	1,2
+multiAgg/ne/not/nm	(none)
+multiAgg/ne/not/nk	(none)
+multiAgg/ne/having/m1	2,1 | 2,2 | 2,3
+multiAgg/ne/having/mn	1,0 | 1,1 | 1,3
+multiAgg/ne/having/nm	(none)
+multiAgg/ne/having/nk	(none)
+multiAgg/ne/joinOn/m1	2,1 | 2,2 | 2,3
+multiAgg/ne/joinOn/mn	1,0 | 1,1 | 1,3
+multiAgg/ne/joinOn/nm	(none)
+multiAgg/ne/joinOn/nk	(none)
+multiAgg/lt/alone/m1	(none)
+multiAgg/lt/alone/mn	1,0 | 1,1
+multiAgg/lt/alone/nm	(none)
+multiAgg/lt/alone/nk	(none)
+multiAgg/lt/and/m1	(none)
+multiAgg/lt/and/mn	1,1
+multiAgg/lt/and/nm	(none)
+multiAgg/lt/and/nk	(none)
+multiAgg/lt/or/m1	2,0
+multiAgg/lt/or/mn	1,0 | 1,1
+multiAgg/lt/or/nm	3,0
+multiAgg/lt/or/nk	NULL,0
+multiAgg/lt/not/m1	2,0 | 2,1 | 2,2 | 2,3
+multiAgg/lt/not/mn	1,2 | 1,3
+multiAgg/lt/not/nm	(none)
+multiAgg/lt/not/nk	(none)
+multiAgg/lt/having/m1	(none)
+multiAgg/lt/having/mn	1,0 | 1,1
+multiAgg/lt/having/nm	(none)
+multiAgg/lt/having/nk	(none)
+multiAgg/lt/joinOn/m1	(none)
+multiAgg/lt/joinOn/mn	1,0 | 1,1
+multiAgg/lt/joinOn/nm	(none)
+multiAgg/lt/joinOn/nk	(none)
+multiAgg/ge/alone/m1	2,0 | 2,1 | 2,2 | 2,3
+multiAgg/ge/alone/mn	1,2 | 1,3
+multiAgg/ge/alone/nm	(none)
+multiAgg/ge/alone/nk	(none)
+multiAgg/ge/and/m1	2,1 | 2,2 | 2,3
+multiAgg/ge/and/mn	1,2 | 1,3
+multiAgg/ge/and/nm	(none)
+multiAgg/ge/and/nk	(none)
+multiAgg/ge/or/m1	2,0 | 2,1 | 2,2 | 2,3
+multiAgg/ge/or/mn	1,0 | 1,2 | 1,3
+multiAgg/ge/or/nm	3,0
+multiAgg/ge/or/nk	NULL,0
+multiAgg/ge/not/m1	(none)
+multiAgg/ge/not/mn	1,0 | 1,1
+multiAgg/ge/not/nm	(none)
+multiAgg/ge/not/nk	(none)
+multiAgg/ge/having/m1	2,0 | 2,1 | 2,2 | 2,3
+multiAgg/ge/having/mn	1,2 | 1,3
+multiAgg/ge/having/nm	(none)
+multiAgg/ge/having/nk	(none)
+multiAgg/ge/joinOn/m1	2,0 | 2,1 | 2,2 | 2,3
+multiAgg/ge/joinOn/mn	1,2 | 1,3
+multiAgg/ge/joinOn/nm	(none)
+multiAgg/ge/joinOn/nk	(none)
+multiAgg/isnd/alone/m1	2,0
+multiAgg/isnd/alone/mn	1,2
+multiAgg/isnd/alone/nm	3,NULL
+multiAgg/isnd/alone/nk	NULL,NULL
+multiAgg/isnd/and/m1	(none)
+multiAgg/isnd/and/mn	1,2
+multiAgg/isnd/and/nm	(none)
+multiAgg/isnd/and/nk	(none)
+multiAgg/isnd/or/m1	2,0
+multiAgg/isnd/or/mn	1,0 | 1,2
+multiAgg/isnd/or/nm	3,0 | 3,NULL
+multiAgg/isnd/or/nk	NULL,0 | NULL,NULL
+multiAgg/isnd/not/m1	2,1 | 2,2 | 2,3 | 2,NULL
+multiAgg/isnd/not/mn	1,0 | 1,1 | 1,3 | 1,NULL
+multiAgg/isnd/not/nm	3,0 | 3,1 | 3,2 | 3,3
+multiAgg/isnd/not/nk	NULL,0 | NULL,1 | NULL,2 | NULL,3
+multiAgg/isnd/having/m1	2,0
+multiAgg/isnd/having/mn	1,2
+multiAgg/isnd/having/nm	3,NULL
+multiAgg/isnd/having/nk	NULL,NULL
+multiAgg/isnd/joinOn/m1	2,0
+multiAgg/isnd/joinOn/mn	1,2
+multiAgg/isnd/joinOn/nm	3,NULL
+multiAgg/isnd/joinOn/nk	NULL,NULL
+multiAgg/left/alone/m1	2,0
+multiAgg/left/alone/mn	1,2
+multiAgg/left/alone/nm	(none)
+multiAgg/left/alone/nk	(none)
+multiAgg/left/and/m1	(none)
+multiAgg/left/and/mn	1,2
+multiAgg/left/and/nm	(none)
+multiAgg/left/and/nk	(none)
+multiAgg/left/or/m1	2,0
+multiAgg/left/or/mn	1,0 | 1,2
+multiAgg/left/or/nm	3,0
+multiAgg/left/or/nk	NULL,0
+multiAgg/left/not/m1	2,1 | 2,2 | 2,3
+multiAgg/left/not/mn	1,0 | 1,1 | 1,3
+multiAgg/left/not/nm	(none)
+multiAgg/left/not/nk	(none)
+multiAgg/left/having/m1	2,0
+multiAgg/left/having/mn	1,2
+multiAgg/left/having/nm	(none)
+multiAgg/left/having/nk	(none)
+multiAgg/left/joinOn/m1	2,0
+multiAgg/left/joinOn/mn	1,2
+multiAgg/left/joinOn/nm	(none)
+multiAgg/left/joinOn/nk	(none)
+caseAgg/eq/alone/m1	2,1
+caseAgg/eq/alone/mn	1,1
+caseAgg/eq/alone/nm	3,2
+caseAgg/eq/alone/nk	NULL,2
+caseAgg/eq/and/m1	2,1
+caseAgg/eq/and/mn	1,1
+caseAgg/eq/and/nm	3,2
+caseAgg/eq/and/nk	NULL,2
+caseAgg/eq/or/m1	2,0 | 2,1
+caseAgg/eq/or/mn	1,0 | 1,1
+caseAgg/eq/or/nm	3,0 | 3,2
+caseAgg/eq/or/nk	NULL,0 | NULL,2
+caseAgg/eq/not/m1	2,0 | 2,2 | 2,3
+caseAgg/eq/not/mn	1,0 | 1,2 | 1,3
+caseAgg/eq/not/nm	3,0 | 3,1 | 3,3
+caseAgg/eq/not/nk	NULL,0 | NULL,1 | NULL,3
+caseAgg/eq/having/m1	2,1
+caseAgg/eq/having/mn	1,1
+caseAgg/eq/having/nm	3,2
+caseAgg/eq/having/nk	NULL,2
+caseAgg/eq/joinOn/m1	2,1
+caseAgg/eq/joinOn/mn	1,1
+caseAgg/eq/joinOn/nm	3,2
+caseAgg/eq/joinOn/nk	NULL,2
+caseAgg/ne/alone/m1	2,0 | 2,2 | 2,3
+caseAgg/ne/alone/mn	1,0 | 1,2 | 1,3
+caseAgg/ne/alone/nm	3,0 | 3,1 | 3,3
+caseAgg/ne/alone/nk	NULL,0 | NULL,1 | NULL,3
+caseAgg/ne/and/m1	2,2 | 2,3
+caseAgg/ne/and/mn	1,2 | 1,3
+caseAgg/ne/and/nm	3,1 | 3,3
+caseAgg/ne/and/nk	NULL,1 | NULL,3
+caseAgg/ne/or/m1	2,0 | 2,2 | 2,3
+caseAgg/ne/or/mn	1,0 | 1,2 | 1,3
+caseAgg/ne/or/nm	3,0 | 3,1 | 3,3
+caseAgg/ne/or/nk	NULL,0 | NULL,1 | NULL,3
+caseAgg/ne/not/m1	2,1
+caseAgg/ne/not/mn	1,1
+caseAgg/ne/not/nm	3,2
+caseAgg/ne/not/nk	NULL,2
+caseAgg/ne/having/m1	2,0 | 2,2 | 2,3
+caseAgg/ne/having/mn	1,0 | 1,2 | 1,3
+caseAgg/ne/having/nm	3,0 | 3,1 | 3,3
+caseAgg/ne/having/nk	NULL,0 | NULL,1 | NULL,3
+caseAgg/ne/joinOn/m1	2,0 | 2,2 | 2,3
+caseAgg/ne/joinOn/mn	1,0 | 1,2 | 1,3
+caseAgg/ne/joinOn/nm	3,0 | 3,1 | 3,3
+caseAgg/ne/joinOn/nk	NULL,0 | NULL,1 | NULL,3
+caseAgg/lt/alone/m1	2,0
+caseAgg/lt/alone/mn	1,0
+caseAgg/lt/alone/nm	3,0 | 3,1
+caseAgg/lt/alone/nk	NULL,0 | NULL,1
+caseAgg/lt/and/m1	(none)
+caseAgg/lt/and/mn	(none)
+caseAgg/lt/and/nm	3,1
+caseAgg/lt/and/nk	NULL,1
+caseAgg/lt/or/m1	2,0
+caseAgg/lt/or/mn	1,0
+caseAgg/lt/or/nm	3,0 | 3,1
+caseAgg/lt/or/nk	NULL,0 | NULL,1
+caseAgg/lt/not/m1	2,1 | 2,2 | 2,3
+caseAgg/lt/not/mn	1,1 | 1,2 | 1,3
+caseAgg/lt/not/nm	3,2 | 3,3
+caseAgg/lt/not/nk	NULL,2 | NULL,3
+caseAgg/lt/having/m1	2,0
+caseAgg/lt/having/mn	1,0
+caseAgg/lt/having/nm	3,0 | 3,1
+caseAgg/lt/having/nk	NULL,0 | NULL,1
+caseAgg/lt/joinOn/m1	2,0
+caseAgg/lt/joinOn/mn	1,0
+caseAgg/lt/joinOn/nm	3,0 | 3,1
+caseAgg/lt/joinOn/nk	NULL,0 | NULL,1
+caseAgg/ge/alone/m1	2,1 | 2,2 | 2,3
+caseAgg/ge/alone/mn	1,1 | 1,2 | 1,3
+caseAgg/ge/alone/nm	3,2 | 3,3
+caseAgg/ge/alone/nk	NULL,2 | NULL,3
+caseAgg/ge/and/m1	2,1 | 2,2 | 2,3
+caseAgg/ge/and/mn	1,1 | 1,2 | 1,3
+caseAgg/ge/and/nm	3,2 | 3,3
+caseAgg/ge/and/nk	NULL,2 | NULL,3
+caseAgg/ge/or/m1	2,0 | 2,1 | 2,2 | 2,3
+caseAgg/ge/or/mn	1,0 | 1,1 | 1,2 | 1,3
+caseAgg/ge/or/nm	3,0 | 3,2 | 3,3
+caseAgg/ge/or/nk	NULL,0 | NULL,2 | NULL,3
+caseAgg/ge/not/m1	2,0
+caseAgg/ge/not/mn	1,0
+caseAgg/ge/not/nm	3,0 | 3,1
+caseAgg/ge/not/nk	NULL,0 | NULL,1
+caseAgg/ge/having/m1	2,1 | 2,2 | 2,3
+caseAgg/ge/having/mn	1,1 | 1,2 | 1,3
+caseAgg/ge/having/nm	3,2 | 3,3
+caseAgg/ge/having/nk	NULL,2 | NULL,3
+caseAgg/ge/joinOn/m1	2,1 | 2,2 | 2,3
+caseAgg/ge/joinOn/mn	1,1 | 1,2 | 1,3
+caseAgg/ge/joinOn/nm	3,2 | 3,3
+caseAgg/ge/joinOn/nk	NULL,2 | NULL,3
+caseAgg/isnd/alone/m1	2,1
+caseAgg/isnd/alone/mn	1,1
+caseAgg/isnd/alone/nm	3,2
+caseAgg/isnd/alone/nk	NULL,2
+caseAgg/isnd/and/m1	2,1
+caseAgg/isnd/and/mn	1,1
+caseAgg/isnd/and/nm	3,2
+caseAgg/isnd/and/nk	NULL,2
+caseAgg/isnd/or/m1	2,0 | 2,1
+caseAgg/isnd/or/mn	1,0 | 1,1
+caseAgg/isnd/or/nm	3,0 | 3,2
+caseAgg/isnd/or/nk	NULL,0 | NULL,2
+caseAgg/isnd/not/m1	2,0 | 2,2 | 2,3 | 2,NULL
+caseAgg/isnd/not/mn	1,0 | 1,2 | 1,3 | 1,NULL
+caseAgg/isnd/not/nm	3,0 | 3,1 | 3,3 | 3,NULL
+caseAgg/isnd/not/nk	NULL,0 | NULL,1 | NULL,3 | NULL,NULL
+caseAgg/isnd/having/m1	2,1
+caseAgg/isnd/having/mn	1,1
+caseAgg/isnd/having/nm	3,2
+caseAgg/isnd/having/nk	NULL,2
+caseAgg/isnd/joinOn/m1	2,1
+caseAgg/isnd/joinOn/mn	1,1
+caseAgg/isnd/joinOn/nm	3,2
+caseAgg/isnd/joinOn/nk	NULL,2
+caseAgg/left/alone/m1	2,1
+caseAgg/left/alone/mn	1,1
+caseAgg/left/alone/nm	3,2
+caseAgg/left/alone/nk	NULL,2
+caseAgg/left/and/m1	2,1
+caseAgg/left/and/mn	1,1
+caseAgg/left/and/nm	3,2
+caseAgg/left/and/nk	NULL,2
+caseAgg/left/or/m1	2,0 | 2,1
+caseAgg/left/or/mn	1,0 | 1,1
+caseAgg/left/or/nm	3,0 | 3,2
+caseAgg/left/or/nk	NULL,0 | NULL,2
+caseAgg/left/not/m1	2,0 | 2,2 | 2,3
+caseAgg/left/not/mn	1,0 | 1,2 | 1,3
+caseAgg/left/not/nm	3,0 | 3,1 | 3,3
+caseAgg/left/not/nk	NULL,0 | NULL,1 | NULL,3
+caseAgg/left/having/m1	2,1
+caseAgg/left/having/mn	1,1
+caseAgg/left/having/nm	3,2
+caseAgg/left/having/nk	NULL,2
+caseAgg/left/joinOn/m1	2,1
+caseAgg/left/joinOn/mn	1,1
+caseAgg/left/joinOn/nm	3,2
+caseAgg/left/joinOn/nk	NULL,2
+nestedAbs/eq/alone/m1	2,2
+nestedAbs/eq/alone/mn	1,3
+nestedAbs/eq/alone/nm	(none)
+nestedAbs/eq/alone/nk	(none)
+nestedAbs/eq/and/m1	2,2
+nestedAbs/eq/and/mn	1,3
+nestedAbs/eq/and/nm	(none)
+nestedAbs/eq/and/nk	(none)
+nestedAbs/eq/or/m1	2,0 | 2,2
+nestedAbs/eq/or/mn	1,0 | 1,3
+nestedAbs/eq/or/nm	3,0
+nestedAbs/eq/or/nk	NULL,0
+nestedAbs/eq/not/m1	2,0 | 2,1 | 2,3
+nestedAbs/eq/not/mn	1,0 | 1,1 | 1,2
+nestedAbs/eq/not/nm	(none)
+nestedAbs/eq/not/nk	(none)
+nestedAbs/eq/having/m1	2,2
+nestedAbs/eq/having/mn	1,3
+nestedAbs/eq/having/nm	(none)
+nestedAbs/eq/having/nk	(none)
+nestedAbs/eq/joinOn/m1	2,2
+nestedAbs/eq/joinOn/mn	1,3
+nestedAbs/eq/joinOn/nm	(none)
+nestedAbs/eq/joinOn/nk	(none)
+nestedAbs/ne/alone/m1	2,0 | 2,1 | 2,3
+nestedAbs/ne/alone/mn	1,0 | 1,1 | 1,2
+nestedAbs/ne/alone/nm	(none)
+nestedAbs/ne/alone/nk	(none)
+nestedAbs/ne/and/m1	2,1 | 2,3
+nestedAbs/ne/and/mn	1,1 | 1,2
+nestedAbs/ne/and/nm	(none)
+nestedAbs/ne/and/nk	(none)
+nestedAbs/ne/or/m1	2,0 | 2,1 | 2,3
+nestedAbs/ne/or/mn	1,0 | 1,1 | 1,2
+nestedAbs/ne/or/nm	3,0
+nestedAbs/ne/or/nk	NULL,0
+nestedAbs/ne/not/m1	2,2
+nestedAbs/ne/not/mn	1,3
+nestedAbs/ne/not/nm	(none)
+nestedAbs/ne/not/nk	(none)
+nestedAbs/ne/having/m1	2,0 | 2,1 | 2,3
+nestedAbs/ne/having/mn	1,0 | 1,1 | 1,2
+nestedAbs/ne/having/nm	(none)
+nestedAbs/ne/having/nk	(none)
+nestedAbs/ne/joinOn/m1	2,0 | 2,1 | 2,3
+nestedAbs/ne/joinOn/mn	1,0 | 1,1 | 1,2
+nestedAbs/ne/joinOn/nm	(none)
+nestedAbs/ne/joinOn/nk	(none)
+nestedAbs/lt/alone/m1	2,0 | 2,1
+nestedAbs/lt/alone/mn	1,0 | 1,1 | 1,2
+nestedAbs/lt/alone/nm	(none)
+nestedAbs/lt/alone/nk	(none)
+nestedAbs/lt/and/m1	2,1
+nestedAbs/lt/and/mn	1,1 | 1,2
+nestedAbs/lt/and/nm	(none)
+nestedAbs/lt/and/nk	(none)
+nestedAbs/lt/or/m1	2,0 | 2,1
+nestedAbs/lt/or/mn	1,0 | 1,1 | 1,2
+nestedAbs/lt/or/nm	3,0
+nestedAbs/lt/or/nk	NULL,0
+nestedAbs/lt/not/m1	2,2 | 2,3
+nestedAbs/lt/not/mn	1,3
+nestedAbs/lt/not/nm	(none)
+nestedAbs/lt/not/nk	(none)
+nestedAbs/lt/having/m1	2,0 | 2,1
+nestedAbs/lt/having/mn	1,0 | 1,1 | 1,2
+nestedAbs/lt/having/nm	(none)
+nestedAbs/lt/having/nk	(none)
+nestedAbs/lt/joinOn/m1	2,0 | 2,1
+nestedAbs/lt/joinOn/mn	1,0 | 1,1 | 1,2
+nestedAbs/lt/joinOn/nm	(none)
+nestedAbs/lt/joinOn/nk	(none)
+nestedAbs/ge/alone/m1	2,2 | 2,3
+nestedAbs/ge/alone/mn	1,3
+nestedAbs/ge/alone/nm	(none)
+nestedAbs/ge/alone/nk	(none)
+nestedAbs/ge/and/m1	2,2 | 2,3
+nestedAbs/ge/and/mn	1,3
+nestedAbs/ge/and/nm	(none)
+nestedAbs/ge/and/nk	(none)
+nestedAbs/ge/or/m1	2,0 | 2,2 | 2,3
+nestedAbs/ge/or/mn	1,0 | 1,3
+nestedAbs/ge/or/nm	3,0
+nestedAbs/ge/or/nk	NULL,0
+nestedAbs/ge/not/m1	2,0 | 2,1
+nestedAbs/ge/not/mn	1,0 | 1,1 | 1,2
+nestedAbs/ge/not/nm	(none)
+nestedAbs/ge/not/nk	(none)
+nestedAbs/ge/having/m1	2,2 | 2,3
+nestedAbs/ge/having/mn	1,3
+nestedAbs/ge/having/nm	(none)
+nestedAbs/ge/having/nk	(none)
+nestedAbs/ge/joinOn/m1	2,2 | 2,3
+nestedAbs/ge/joinOn/mn	1,3
+nestedAbs/ge/joinOn/nm	(none)
+nestedAbs/ge/joinOn/nk	(none)
+nestedAbs/isnd/alone/m1	2,2
+nestedAbs/isnd/alone/mn	1,3
+nestedAbs/isnd/alone/nm	3,NULL
+nestedAbs/isnd/alone/nk	NULL,NULL
+nestedAbs/isnd/and/m1	2,2
+nestedAbs/isnd/and/mn	1,3
+nestedAbs/isnd/and/nm	(none)
+nestedAbs/isnd/and/nk	(none)
+nestedAbs/isnd/or/m1	2,0 | 2,2
+nestedAbs/isnd/or/mn	1,0 | 1,3
+nestedAbs/isnd/or/nm	3,0 | 3,NULL
+nestedAbs/isnd/or/nk	NULL,0 | NULL,NULL
+nestedAbs/isnd/not/m1	2,0 | 2,1 | 2,3 | 2,NULL
+nestedAbs/isnd/not/mn	1,0 | 1,1 | 1,2 | 1,NULL
+nestedAbs/isnd/not/nm	3,0 | 3,1 | 3,2 | 3,3
+nestedAbs/isnd/not/nk	NULL,0 | NULL,1 | NULL,2 | NULL,3
+nestedAbs/isnd/having/m1	2,2
+nestedAbs/isnd/having/mn	1,3
+nestedAbs/isnd/having/nm	3,NULL
+nestedAbs/isnd/having/nk	NULL,NULL
+nestedAbs/isnd/joinOn/m1	2,2
+nestedAbs/isnd/joinOn/mn	1,3
+nestedAbs/isnd/joinOn/nm	3,NULL
+nestedAbs/isnd/joinOn/nk	NULL,NULL
+nestedAbs/left/alone/m1	2,2
+nestedAbs/left/alone/mn	1,3
+nestedAbs/left/alone/nm	(none)
+nestedAbs/left/alone/nk	(none)
+nestedAbs/left/and/m1	2,2
+nestedAbs/left/and/mn	1,3
+nestedAbs/left/and/nm	(none)
+nestedAbs/left/and/nk	(none)
+nestedAbs/left/or/m1	2,0 | 2,2
+nestedAbs/left/or/mn	1,0 | 1,3
+nestedAbs/left/or/nm	3,0
+nestedAbs/left/or/nk	NULL,0
+nestedAbs/left/not/m1	2,0 | 2,1 | 2,3
+nestedAbs/left/not/mn	1,0 | 1,1 | 1,2
+nestedAbs/left/not/nm	(none)
+nestedAbs/left/not/nk	(none)
+nestedAbs/left/having/m1	2,2
+nestedAbs/left/having/mn	1,3
+nestedAbs/left/having/nm	(none)
+nestedAbs/left/having/nk	(none)
+nestedAbs/left/joinOn/m1	2,2
+nestedAbs/left/joinOn/mn	1,3
+nestedAbs/left/joinOn/nm	(none)
+nestedAbs/left/joinOn/nk	(none)
+nestedCoalesce/eq/alone/m1	2,1
+nestedCoalesce/eq/alone/mn	1,3
+nestedCoalesce/eq/alone/nm	3,0
+nestedCoalesce/eq/alone/nk	NULL,0
+nestedCoalesce/eq/and/m1	2,1
+nestedCoalesce/eq/and/mn	1,3
+nestedCoalesce/eq/and/nm	(none)
+nestedCoalesce/eq/and/nk	(none)
+nestedCoalesce/eq/or/m1	2,0 | 2,1
+nestedCoalesce/eq/or/mn	1,0 | 1,3
+nestedCoalesce/eq/or/nm	3,0
+nestedCoalesce/eq/or/nk	NULL,0
+nestedCoalesce/eq/not/m1	2,0 | 2,2 | 2,3
+nestedCoalesce/eq/not/mn	1,0 | 1,1 | 1,2
+nestedCoalesce/eq/not/nm	3,1 | 3,2 | 3,3
+nestedCoalesce/eq/not/nk	NULL,1 | NULL,2 | NULL,3
+nestedCoalesce/eq/having/m1	2,1
+nestedCoalesce/eq/having/mn	1,3
+nestedCoalesce/eq/having/nm	3,0
+nestedCoalesce/eq/having/nk	NULL,0
+nestedCoalesce/eq/joinOn/m1	2,1
+nestedCoalesce/eq/joinOn/mn	1,3
+nestedCoalesce/eq/joinOn/nm	3,0
+nestedCoalesce/eq/joinOn/nk	NULL,0
+nestedCoalesce/ne/alone/m1	2,0 | 2,2 | 2,3
+nestedCoalesce/ne/alone/mn	1,0 | 1,1 | 1,2
+nestedCoalesce/ne/alone/nm	3,1 | 3,2 | 3,3
+nestedCoalesce/ne/alone/nk	NULL,1 | NULL,2 | NULL,3
+nestedCoalesce/ne/and/m1	2,2 | 2,3
+nestedCoalesce/ne/and/mn	1,1 | 1,2
+nestedCoalesce/ne/and/nm	3,1 | 3,2 | 3,3
+nestedCoalesce/ne/and/nk	NULL,1 | NULL,2 | NULL,3
+nestedCoalesce/ne/or/m1	2,0 | 2,2 | 2,3
+nestedCoalesce/ne/or/mn	1,0 | 1,1 | 1,2
+nestedCoalesce/ne/or/nm	3,0 | 3,1 | 3,2 | 3,3
+nestedCoalesce/ne/or/nk	NULL,0 | NULL,1 | NULL,2 | NULL,3
+nestedCoalesce/ne/not/m1	2,1
+nestedCoalesce/ne/not/mn	1,3
+nestedCoalesce/ne/not/nm	3,0
+nestedCoalesce/ne/not/nk	NULL,0
+nestedCoalesce/ne/having/m1	2,0 | 2,2 | 2,3
+nestedCoalesce/ne/having/mn	1,0 | 1,1 | 1,2
+nestedCoalesce/ne/having/nm	3,1 | 3,2 | 3,3
+nestedCoalesce/ne/having/nk	NULL,1 | NULL,2 | NULL,3
+nestedCoalesce/ne/joinOn/m1	2,0 | 2,2 | 2,3
+nestedCoalesce/ne/joinOn/mn	1,0 | 1,1 | 1,2
+nestedCoalesce/ne/joinOn/nm	3,1 | 3,2 | 3,3
+nestedCoalesce/ne/joinOn/nk	NULL,1 | NULL,2 | NULL,3
+nestedCoalesce/lt/alone/m1	2,0
+nestedCoalesce/lt/alone/mn	1,0 | 1,1 | 1,2
+nestedCoalesce/lt/alone/nm	(none)
+nestedCoalesce/lt/alone/nk	(none)
+nestedCoalesce/lt/and/m1	(none)
+nestedCoalesce/lt/and/mn	1,1 | 1,2
+nestedCoalesce/lt/and/nm	(none)
+nestedCoalesce/lt/and/nk	(none)
+nestedCoalesce/lt/or/m1	2,0
+nestedCoalesce/lt/or/mn	1,0 | 1,1 | 1,2
+nestedCoalesce/lt/or/nm	3,0
+nestedCoalesce/lt/or/nk	NULL,0
+nestedCoalesce/lt/not/m1	2,1 | 2,2 | 2,3
+nestedCoalesce/lt/not/mn	1,3
+nestedCoalesce/lt/not/nm	3,0 | 3,1 | 3,2 | 3,3
+nestedCoalesce/lt/not/nk	NULL,0 | NULL,1 | NULL,2 | NULL,3
+nestedCoalesce/lt/having/m1	2,0
+nestedCoalesce/lt/having/mn	1,0 | 1,1 | 1,2
+nestedCoalesce/lt/having/nm	(none)
+nestedCoalesce/lt/having/nk	(none)
+nestedCoalesce/lt/joinOn/m1	2,0
+nestedCoalesce/lt/joinOn/mn	1,0 | 1,1 | 1,2
+nestedCoalesce/lt/joinOn/nm	(none)
+nestedCoalesce/lt/joinOn/nk	(none)
+nestedCoalesce/ge/alone/m1	2,1 | 2,2 | 2,3
+nestedCoalesce/ge/alone/mn	1,3
+nestedCoalesce/ge/alone/nm	3,0 | 3,1 | 3,2 | 3,3
+nestedCoalesce/ge/alone/nk	NULL,0 | NULL,1 | NULL,2 | NULL,3
+nestedCoalesce/ge/and/m1	2,1 | 2,2 | 2,3
+nestedCoalesce/ge/and/mn	1,3
+nestedCoalesce/ge/and/nm	3,1 | 3,2 | 3,3
+nestedCoalesce/ge/and/nk	NULL,1 | NULL,2 | NULL,3
+nestedCoalesce/ge/or/m1	2,0 | 2,1 | 2,2 | 2,3
+nestedCoalesce/ge/or/mn	1,0 | 1,3
+nestedCoalesce/ge/or/nm	3,0 | 3,1 | 3,2 | 3,3
+nestedCoalesce/ge/or/nk	NULL,0 | NULL,1 | NULL,2 | NULL,3
+nestedCoalesce/ge/not/m1	2,0
+nestedCoalesce/ge/not/mn	1,0 | 1,1 | 1,2
+nestedCoalesce/ge/not/nm	(none)
+nestedCoalesce/ge/not/nk	(none)
+nestedCoalesce/ge/having/m1	2,1 | 2,2 | 2,3
+nestedCoalesce/ge/having/mn	1,3
+nestedCoalesce/ge/having/nm	3,0 | 3,1 | 3,2 | 3,3
+nestedCoalesce/ge/having/nk	NULL,0 | NULL,1 | NULL,2 | NULL,3
+nestedCoalesce/ge/joinOn/m1	2,1 | 2,2 | 2,3
+nestedCoalesce/ge/joinOn/mn	1,3
+nestedCoalesce/ge/joinOn/nm	3,0 | 3,1 | 3,2 | 3,3
+nestedCoalesce/ge/joinOn/nk	NULL,0 | NULL,1 | NULL,2 | NULL,3
+nestedCoalesce/isnd/alone/m1	2,1
+nestedCoalesce/isnd/alone/mn	1,3
+nestedCoalesce/isnd/alone/nm	3,0
+nestedCoalesce/isnd/alone/nk	NULL,0
+nestedCoalesce/isnd/and/m1	2,1
+nestedCoalesce/isnd/and/mn	1,3
+nestedCoalesce/isnd/and/nm	(none)
+nestedCoalesce/isnd/and/nk	(none)
+nestedCoalesce/isnd/or/m1	2,0 | 2,1
+nestedCoalesce/isnd/or/mn	1,0 | 1,3
+nestedCoalesce/isnd/or/nm	3,0
+nestedCoalesce/isnd/or/nk	NULL,0
+nestedCoalesce/isnd/not/m1	2,0 | 2,2 | 2,3 | 2,NULL
+nestedCoalesce/isnd/not/mn	1,0 | 1,1 | 1,2 | 1,NULL
+nestedCoalesce/isnd/not/nm	3,1 | 3,2 | 3,3 | 3,NULL
+nestedCoalesce/isnd/not/nk	NULL,1 | NULL,2 | NULL,3 | NULL,NULL
+nestedCoalesce/isnd/having/m1	2,1
+nestedCoalesce/isnd/having/mn	1,3
+nestedCoalesce/isnd/having/nm	3,0
+nestedCoalesce/isnd/having/nk	NULL,0
+nestedCoalesce/isnd/joinOn/m1	2,1
+nestedCoalesce/isnd/joinOn/mn	1,3
+nestedCoalesce/isnd/joinOn/nm	3,0
+nestedCoalesce/isnd/joinOn/nk	NULL,0
+nestedCoalesce/left/alone/m1	2,1
+nestedCoalesce/left/alone/mn	1,3
+nestedCoalesce/left/alone/nm	3,0
+nestedCoalesce/left/alone/nk	NULL,0
+nestedCoalesce/left/and/m1	2,1
+nestedCoalesce/left/and/mn	1,3
+nestedCoalesce/left/and/nm	(none)
+nestedCoalesce/left/and/nk	(none)
+nestedCoalesce/left/or/m1	2,0 | 2,1
+nestedCoalesce/left/or/mn	1,0 | 1,3
+nestedCoalesce/left/or/nm	3,0
+nestedCoalesce/left/or/nk	NULL,0
+nestedCoalesce/left/not/m1	2,0 | 2,2 | 2,3
+nestedCoalesce/left/not/mn	1,0 | 1,1 | 1,2
+nestedCoalesce/left/not/nm	3,1 | 3,2 | 3,3
+nestedCoalesce/left/not/nk	NULL,1 | NULL,2 | NULL,3
+nestedCoalesce/left/having/m1	2,1
+nestedCoalesce/left/having/mn	1,3
+nestedCoalesce/left/having/nm	3,0
+nestedCoalesce/left/having/nk	NULL,0
+nestedCoalesce/left/joinOn/m1	2,1
+nestedCoalesce/left/joinOn/mn	1,3
+nestedCoalesce/left/joinOn/nm	3,0
+nestedCoalesce/left/joinOn/nk	NULL,0
+sameAggTwice/eq/alone/m1	2,1
+sameAggTwice/eq/alone/mn	1,1
+sameAggTwice/eq/alone/nm	(none)
+sameAggTwice/eq/alone/nk	(none)
+sameAggTwice/eq/and/m1	2,1
+sameAggTwice/eq/and/mn	1,1
+sameAggTwice/eq/and/nm	(none)
+sameAggTwice/eq/and/nk	(none)
+sameAggTwice/eq/or/m1	2,0 | 2,1
+sameAggTwice/eq/or/mn	1,0 | 1,1
+sameAggTwice/eq/or/nm	3,0
+sameAggTwice/eq/or/nk	NULL,0
+sameAggTwice/eq/not/m1	2,0 | 2,2 | 2,3
+sameAggTwice/eq/not/mn	1,0 | 1,2 | 1,3
+sameAggTwice/eq/not/nm	(none)
+sameAggTwice/eq/not/nk	(none)
+sameAggTwice/eq/having/m1	2,1
+sameAggTwice/eq/having/mn	1,1
+sameAggTwice/eq/having/nm	(none)
+sameAggTwice/eq/having/nk	(none)
+sameAggTwice/eq/joinOn/m1	2,1
+sameAggTwice/eq/joinOn/mn	1,1
+sameAggTwice/eq/joinOn/nm	(none)
+sameAggTwice/eq/joinOn/nk	(none)
+sameAggTwice/ne/alone/m1	2,0 | 2,2 | 2,3
+sameAggTwice/ne/alone/mn	1,0 | 1,2 | 1,3
+sameAggTwice/ne/alone/nm	(none)
+sameAggTwice/ne/alone/nk	(none)
+sameAggTwice/ne/and/m1	2,2 | 2,3
+sameAggTwice/ne/and/mn	1,2 | 1,3
+sameAggTwice/ne/and/nm	(none)
+sameAggTwice/ne/and/nk	(none)
+sameAggTwice/ne/or/m1	2,0 | 2,2 | 2,3
+sameAggTwice/ne/or/mn	1,0 | 1,2 | 1,3
+sameAggTwice/ne/or/nm	3,0
+sameAggTwice/ne/or/nk	NULL,0
+sameAggTwice/ne/not/m1	2,1
+sameAggTwice/ne/not/mn	1,1
+sameAggTwice/ne/not/nm	(none)
+sameAggTwice/ne/not/nk	(none)
+sameAggTwice/ne/having/m1	2,0 | 2,2 | 2,3
+sameAggTwice/ne/having/mn	1,0 | 1,2 | 1,3
+sameAggTwice/ne/having/nm	(none)
+sameAggTwice/ne/having/nk	(none)
+sameAggTwice/ne/joinOn/m1	2,0 | 2,2 | 2,3
+sameAggTwice/ne/joinOn/mn	1,0 | 1,2 | 1,3
+sameAggTwice/ne/joinOn/nm	(none)
+sameAggTwice/ne/joinOn/nk	(none)
+sameAggTwice/lt/alone/m1	2,0
+sameAggTwice/lt/alone/mn	1,0
+sameAggTwice/lt/alone/nm	(none)
+sameAggTwice/lt/alone/nk	(none)
+sameAggTwice/lt/and/m1	(none)
+sameAggTwice/lt/and/mn	(none)
+sameAggTwice/lt/and/nm	(none)
+sameAggTwice/lt/and/nk	(none)
+sameAggTwice/lt/or/m1	2,0
+sameAggTwice/lt/or/mn	1,0
+sameAggTwice/lt/or/nm	3,0
+sameAggTwice/lt/or/nk	NULL,0
+sameAggTwice/lt/not/m1	2,1 | 2,2 | 2,3
+sameAggTwice/lt/not/mn	1,1 | 1,2 | 1,3
+sameAggTwice/lt/not/nm	(none)
+sameAggTwice/lt/not/nk	(none)
+sameAggTwice/lt/having/m1	2,0
+sameAggTwice/lt/having/mn	1,0
+sameAggTwice/lt/having/nm	(none)
+sameAggTwice/lt/having/nk	(none)
+sameAggTwice/lt/joinOn/m1	2,0
+sameAggTwice/lt/joinOn/mn	1,0
+sameAggTwice/lt/joinOn/nm	(none)
+sameAggTwice/lt/joinOn/nk	(none)
+sameAggTwice/ge/alone/m1	2,1 | 2,2 | 2,3
+sameAggTwice/ge/alone/mn	1,1 | 1,2 | 1,3
+sameAggTwice/ge/alone/nm	(none)
+sameAggTwice/ge/alone/nk	(none)
+sameAggTwice/ge/and/m1	2,1 | 2,2 | 2,3
+sameAggTwice/ge/and/mn	1,1 | 1,2 | 1,3
+sameAggTwice/ge/and/nm	(none)
+sameAggTwice/ge/and/nk	(none)
+sameAggTwice/ge/or/m1	2,0 | 2,1 | 2,2 | 2,3
+sameAggTwice/ge/or/mn	1,0 | 1,1 | 1,2 | 1,3
+sameAggTwice/ge/or/nm	3,0
+sameAggTwice/ge/or/nk	NULL,0
+sameAggTwice/ge/not/m1	2,0
+sameAggTwice/ge/not/mn	1,0
+sameAggTwice/ge/not/nm	(none)
+sameAggTwice/ge/not/nk	(none)
+sameAggTwice/ge/having/m1	2,1 | 2,2 | 2,3
+sameAggTwice/ge/having/mn	1,1 | 1,2 | 1,3
+sameAggTwice/ge/having/nm	(none)
+sameAggTwice/ge/having/nk	(none)
+sameAggTwice/ge/joinOn/m1	2,1 | 2,2 | 2,3
+sameAggTwice/ge/joinOn/mn	1,1 | 1,2 | 1,3
+sameAggTwice/ge/joinOn/nm	(none)
+sameAggTwice/ge/joinOn/nk	(none)
+sameAggTwice/isnd/alone/m1	2,1
+sameAggTwice/isnd/alone/mn	1,1
+sameAggTwice/isnd/alone/nm	3,NULL
+sameAggTwice/isnd/alone/nk	NULL,NULL
+sameAggTwice/isnd/and/m1	2,1
+sameAggTwice/isnd/and/mn	1,1
+sameAggTwice/isnd/and/nm	(none)
+sameAggTwice/isnd/and/nk	(none)
+sameAggTwice/isnd/or/m1	2,0 | 2,1
+sameAggTwice/isnd/or/mn	1,0 | 1,1
+sameAggTwice/isnd/or/nm	3,0 | 3,NULL
+sameAggTwice/isnd/or/nk	NULL,0 | NULL,NULL
+sameAggTwice/isnd/not/m1	2,0 | 2,2 | 2,3 | 2,NULL
+sameAggTwice/isnd/not/mn	1,0 | 1,2 | 1,3 | 1,NULL
+sameAggTwice/isnd/not/nm	3,0 | 3,1 | 3,2 | 3,3
+sameAggTwice/isnd/not/nk	NULL,0 | NULL,1 | NULL,2 | NULL,3
+sameAggTwice/isnd/having/m1	2,1
+sameAggTwice/isnd/having/mn	1,1
+sameAggTwice/isnd/having/nm	3,NULL
+sameAggTwice/isnd/having/nk	NULL,NULL
+sameAggTwice/isnd/joinOn/m1	2,1
+sameAggTwice/isnd/joinOn/mn	1,1
+sameAggTwice/isnd/joinOn/nm	3,NULL
+sameAggTwice/isnd/joinOn/nk	NULL,NULL
+sameAggTwice/left/alone/m1	2,1
+sameAggTwice/left/alone/mn	1,1
+sameAggTwice/left/alone/nm	(none)
+sameAggTwice/left/alone/nk	(none)
+sameAggTwice/left/and/m1	2,1
+sameAggTwice/left/and/mn	1,1
+sameAggTwice/left/and/nm	(none)
+sameAggTwice/left/and/nk	(none)
+sameAggTwice/left/or/m1	2,0 | 2,1
+sameAggTwice/left/or/mn	1,0 | 1,1
+sameAggTwice/left/or/nm	3,0
+sameAggTwice/left/or/nk	NULL,0
+sameAggTwice/left/not/m1	2,0 | 2,2 | 2,3
+sameAggTwice/left/not/mn	1,0 | 1,2 | 1,3
+sameAggTwice/left/not/nm	(none)
+sameAggTwice/left/not/nk	(none)
+sameAggTwice/left/having/m1	2,1
+sameAggTwice/left/having/mn	1,1
+sameAggTwice/left/having/nm	(none)
+sameAggTwice/left/having/nk	(none)
+sameAggTwice/left/joinOn/m1	2,1
+sameAggTwice/left/joinOn/mn	1,1
+sameAggTwice/left/joinOn/nm	(none)
+sameAggTwice/left/joinOn/nk	(none)

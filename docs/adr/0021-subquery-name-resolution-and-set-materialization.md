@@ -2514,8 +2514,13 @@ operation — after stripping what existence is invariant under (`LIMIT n`, n �
 1, with no OFFSET); the compiled-predicate rerun answers, at 10.9 ms per outer
 row over a 1 000 000-row inner relation (linear; recorded). `EXISTS (… LIMIT
 0)` answered rows and `EXISTS (… GROUP BY … HAVING …)` ignored its HAVING on
-all five arms before (#1238, #1274). IN / NOT IN and the scalar rewrite
-already declined a bound; a QUALIFY or a set operation in their body is
+all five arms before (#1238, #1274). IN / NOT IN already declined a bound.
+The WHERE-comparison scalar rewrite did not (corrected 2026-11-20, #1701:
+this sentence said it did; it decorrelated a `LIMIT 0`, an OFFSET, a GROUP
+BY, a HAVING and a grouping-construct body and answered as if the clause
+were absent, on all five arms). Since that fix it declines them to the
+per-row rerun, keeping only a GROUP BY on exactly the correlation key, which
+forms one group per matched key; a QUALIFY or a set operation in their body is
 declined by the shared build side since the earlier measurement. The rerun's own
 boundaries stand: a correlated body holding a window function, or a set
 operation, is refused by the rerun's rebuild (§1m) on every consumer. A LATERAL has no per-row runner: a bound with a

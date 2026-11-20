@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -29,17 +30,17 @@ import (
 // The WHERE-comparison decorrelation (logical.tryDecorrelateScalarSubquery)
 // rewrites `p OP (SELECT agg FROM i WHERE i.k = o.k ...)` into a LEFT join
 // against the aggregate grouped by the correlation key. That is the body's
-// meaning only when the body is ONE ungrouped aggregate over its filtered
-// rows; any clause that changes which row, or how many rows, the body
-// answers was dropped. Every want is PostgreSQL 17.11's
+// meaning only when the body is ONE aggregate over its filtered rows,
+// ungrouped or grouped on exactly the correlation key; any clause that
+// changes which row, or how many rows, the body answers was dropped. Every want is PostgreSQL 17.11's
 // (testdata/where_compare_scalar_pg17.tsv, regenerated with
 // WC_PG_DSN=<dsn> -run TestWhereCompareScalarGenerate).
 //
 //	wc_i:  k int | a int | c int   (1,10,1) (1,10,2) (1,20,3) (2,30,2) (NULL,40,1)
-//	wc_m1: k = 2    (one inner row)        p in 0,1,2,3,NULL
-//	wc_mn: k = 1    (three inner rows)     p in 0,1,2,3,NULL
-//	wc_nm: k = 3    (no inner row)         p in 0,1,2,3,NULL
-//	wc_nk: k NULL   (matches nothing)      p in 0,1,2,3,NULL
+//	wc_m1: k = 2, a = 30   (one inner row; one on (k, a))       p in 0,1,2,3,NULL
+//	wc_mn: k = 1, a = 10   (three inner rows; two on (k, a))    p in 0,1,2,3,NULL
+//	wc_nm: k = 3, a = 10   (no inner row)                       p in 0,1,2,3,NULL
+//	wc_nk: k NULL, a = 10  (matches nothing)                    p in 0,1,2,3,NULL
 //	wc_one: u int   (one row, a JOIN ON partner)
 
 func wcTables() []tmdTable {
@@ -51,6 +52,7 @@ func wcTables() []tmdTable {
 	}}
 	oSchema := parquet.Schema{Columns: []parquet.Column{
 		{Name: "k", Type: parquet.TypeInt32, Nullable: true},
+		{Name: "a", Type: parquet.TypeInt32, Nullable: true},
 		{Name: "p", Type: parquet.TypeInt32, Nullable: true},
 	}}
 	uSchema := parquet.Schema{Columns: []parquet.Column{{Name: "u", Type: parquet.TypeInt32, Nullable: true}}}
@@ -61,19 +63,19 @@ func wcTables() []tmdTable {
 		{"k": i32(2), "a": i32(30), "c": i32(2)},
 		{"k": nil, "a": i32(40), "c": i32(1)},
 	}
-	outer := func(k any) []map[string]any {
+	outer := func(k, a any) []map[string]any {
 		var rows []map[string]any
 		for _, p := range []any{i32(0), i32(1), i32(2), i32(3), nil} {
-			rows = append(rows, map[string]any{"k": k, "p": p})
+			rows = append(rows, map[string]any{"k": k, "a": a, "p": p})
 		}
 		return rows
 	}
 	return []tmdTable{
 		{"wc_i", iSchema, iRows},
-		{"wc_m1", oSchema, outer(i32(2))},
-		{"wc_mn", oSchema, outer(i32(1))},
-		{"wc_nm", oSchema, outer(i32(3))},
-		{"wc_nk", oSchema, outer(nil)},
+		{"wc_m1", oSchema, outer(i32(2), i32(30))},
+		{"wc_mn", oSchema, outer(i32(1), i32(10))},
+		{"wc_nm", oSchema, outer(i32(3), i32(10))},
+		{"wc_nk", oSchema, outer(nil, i32(10))},
 		{"wc_one", uSchema, []map[string]any{{"u": i32(1)}}},
 	}
 }
@@ -81,16 +83,16 @@ func wcTables() []tmdTable {
 const wcPGFixture = `DROP TABLE IF EXISTS wc_i; DROP TABLE IF EXISTS wc_m1; DROP TABLE IF EXISTS wc_mn;
 DROP TABLE IF EXISTS wc_nm; DROP TABLE IF EXISTS wc_nk; DROP TABLE IF EXISTS wc_one;
 CREATE TABLE wc_i (k integer, a integer, c integer);
-CREATE TABLE wc_m1 (k integer, p integer);
-CREATE TABLE wc_mn (k integer, p integer);
-CREATE TABLE wc_nm (k integer, p integer);
-CREATE TABLE wc_nk (k integer, p integer);
+CREATE TABLE wc_m1 (k integer, a integer, p integer);
+CREATE TABLE wc_mn (k integer, a integer, p integer);
+CREATE TABLE wc_nm (k integer, a integer, p integer);
+CREATE TABLE wc_nk (k integer, a integer, p integer);
 CREATE TABLE wc_one (u integer);
 INSERT INTO wc_i VALUES (1,10,1),(1,10,2),(1,20,3),(2,30,2),(NULL,40,1);
-INSERT INTO wc_m1 VALUES (2,0),(2,1),(2,2),(2,3),(2,NULL);
-INSERT INTO wc_mn VALUES (1,0),(1,1),(1,2),(1,3),(1,NULL);
-INSERT INTO wc_nm VALUES (3,0),(3,1),(3,2),(3,3),(3,NULL);
-INSERT INTO wc_nk VALUES (NULL,0),(NULL,1),(NULL,2),(NULL,3),(NULL,NULL);
+INSERT INTO wc_m1 VALUES (2,30,0),(2,30,1),(2,30,2),(2,30,3),(2,30,NULL);
+INSERT INTO wc_mn VALUES (1,10,0),(1,10,1),(1,10,2),(1,10,3),(1,10,NULL);
+INSERT INTO wc_nm VALUES (3,10,0),(3,10,1),(3,10,2),(3,10,3),(3,10,NULL);
+INSERT INTO wc_nk VALUES (NULL,10,0),(NULL,10,1),(NULL,10,2),(NULL,10,3),(NULL,10,NULL);
 INSERT INTO wc_one VALUES (1)`
 
 // wcCells is the enumeration: body clause x comparison x context x outer
@@ -120,6 +122,47 @@ func wcCells() []gsCell {
 		{"aggDistinct", "SELECT DISTINCT max(x.c)" + from},
 		{"rollupOrderLimit", "SELECT count(*)" + from + " GROUP BY ROLLUP (x.a) ORDER BY count(*) DESC LIMIT 1"},
 		{"setsEmpty", "SELECT count(*)" + from + " GROUP BY GROUPING SETS (())"},
+		// GROUP BY exactly the correlation key (round 2): one group when a
+		// row matches, none (NULL, COUNT included) when nothing does. The
+		// rewrite keeps these.
+		{"gkCount", "SELECT count(*)" + from + " GROUP BY x.k"},
+		{"gkSum", "SELECT sum(x.c)" + from + " GROUP BY x.k"},
+		{"gkMax", "SELECT max(x.c)" + from + " GROUP BY x.k"},
+		{"gkCountOrderLimit", "SELECT count(*)" + from + " GROUP BY x.k ORDER BY count(*) DESC LIMIT 1"},
+		{"gkSumOrderLimit", "SELECT sum(x.c)" + from + " GROUP BY x.k ORDER BY 1 LIMIT 1"},
+		{"gkMaxOrderLimit", "SELECT max(x.c)" + from + " GROUP BY x.k ORDER BY 1 DESC LIMIT 1"},
+		{"gkCountLimit", "SELECT count(*)" + from + " GROUP BY x.k LIMIT 1"},
+		{"gkParen", "SELECT count(*)" + from + " GROUP BY (x.k)"},
+		{"gkDup", "SELECT count(*)" + from + " GROUP BY x.k, x.k"},
+		{"gkUnqual", "SELECT count(*)" + from + " GROUP BY k"},
+		{"gkNoAliasBare", "SELECT count(*) FROM wc_i WHERE wc_i.k = o.k GROUP BY k"},
+		{"gkNoAliasQual", "SELECT count(*) FROM wc_i WHERE k = o.k GROUP BY wc_i.k"},
+		{"gk2Both", "SELECT count(*)" + from + " AND x.a = o.a GROUP BY x.k, x.a"},
+		{"gk2BothMax", "SELECT max(x.c)" + from + " AND x.a = o.a GROUP BY x.a, x.k"},
+		{"gkReadsKey", "SELECT count(*) + x.k" + from + " GROUP BY x.k"},
+		// ...and grouped bodies the rewrite declines to the per-row path: a
+		// strict subset of the keys, another column, an expression or a
+		// constant beside the key (`GROUP BY x.k, random()` forms several
+		// groups, PostgreSQL 21000), an enclosing column, a HAVING.
+		{"gk2One", "SELECT count(*)" + from + " AND x.a = o.a GROUP BY x.k"},
+		{"gkKeyPlusOther", "SELECT count(*)" + from + " GROUP BY x.k, x.a"},
+		{"gkExpr", "SELECT count(*)" + from + " GROUP BY x.k + 1"},
+		{"gkConst", "SELECT count(*)" + from + " GROUP BY x.k, 1 + 0"},
+		{"gkOuter", "SELECT count(*)" + from + " GROUP BY o.k"},
+		{"gkHaving", "SELECT count(*)" + from + " GROUP BY x.k HAVING count(*) > 1"},
+		// APPROX_DISTINCT is answered as COUNT(DISTINCT x) (#1691):
+		// PostgreSQL has no approx_distinct, so its want is the PostgreSQL
+		// answer to the same statement with count(DISTINCT x.c) written in
+		// its place (wcPGStatement).
+		{"approxDistinct", "SELECT approx_distinct(x.c)" + from},
+		{"countDistinct", "SELECT count(DISTINCT x.c)" + from},
+		// The rewrite computes ONE aggregate: two different ones, or one
+		// under a CASE, decline; one under a function stays decorrelated.
+		{"multiAgg", "SELECT max(x.c) - min(x.c)" + from},
+		{"caseAgg", "SELECT CASE WHEN count(*) = 0 THEN 2 ELSE 1 END" + from},
+		{"nestedAbs", "SELECT abs(max(x.c))" + from},
+		{"nestedCoalesce", "SELECT coalesce(count(*), 5)" + from},
+		{"sameAggTwice", "SELECT sum(x.c) / sum(x.c)" + from},
 	}
 	cmps := []struct{ name, tmpl string }{
 		{"eq", "o.p = ({B})"},
@@ -183,7 +226,7 @@ func TestWhereCompareScalarGenerate(t *testing.T) {
 	b.WriteString("# name\tPostgreSQL 17.11 answer (sorted rows joined by \" | \"; ERR <SQLSTATE> for a refusal)\n")
 	for _, c := range wcCells() {
 		ans := func() string {
-			rows, err := conn.Query(ctx, c.sql)
+			rows, err := conn.Query(ctx, wcPGStatement(c.sql))
 			if err != nil {
 				return gsPGErr(err)
 			}
@@ -216,6 +259,13 @@ func TestWhereCompareScalarGenerate(t *testing.T) {
 	if err := os.WriteFile("testdata/where_compare_scalar_pg17.tsv", []byte(b.String()), 0o644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// wcPGStatement is the statement PostgreSQL is asked for a cell: the cell's
+// own, with approx_distinct(x) written as count(DISTINCT x), the function
+// this engine answers it as (#1691).
+func wcPGStatement(sql string) string {
+	return strings.ReplaceAll(sql, "approx_distinct(", "count(DISTINCT ")
 }
 
 func wcArms(t *testing.T, ctx context.Context) []gsArm {
@@ -289,7 +339,7 @@ func wcArms(t *testing.T, ctx context.Context) []gsArm {
 }
 
 // TestWhereCompareScalarEveryArm is the table on five arms. WC_MEASURE=1
-// logs every cell instead of asserting; WC_ONLY=<substring> narrows it.
+// logs every cell instead of asserting; WC_ONLY=<regexp> narrows it.
 func TestWhereCompareScalarEveryArm(t *testing.T) {
 	if testing.Short() && os.Getenv("WC_ARMS") == "" {
 		t.Skip("-short: five arms over the WHERE-comparison scalar subquery table (WC_ARMS=1 runs it)")
@@ -299,9 +349,12 @@ func TestWhereCompareScalarEveryArm(t *testing.T) {
 	answers := wcPGAnswers(t)
 	arms := wcArms(t, ctx)
 	measure := os.Getenv("WC_MEASURE") != ""
-	only := os.Getenv("WC_ONLY")
+	var only *regexp.Regexp
+	if s := os.Getenv("WC_ONLY"); s != "" {
+		only = regexp.MustCompile(s)
+	}
 	for _, c := range wcCells() {
-		if only != "" && !strings.Contains(c.name, only) {
+		if only != nil && !only.MatchString(c.name) {
 			continue
 		}
 		pg, ok := answers[c.name]

@@ -1290,9 +1290,11 @@ func tryDecorrelateScalarSubquery(pred Predicate, outerTables map[string]bool, o
 	if len(info.Columns) != 1 || len(info.Tables) == 0 {
 		return nil, pred, false
 	}
-	// ...whose body is one ungrouped aggregate: a clause this rewrite has no
-	// place for declines it to the per-row re-run (#1701).
-	if !scalarBodyIsReproduced(info) {
+	// ...whose body is one aggregate, ungrouped or grouped on exactly the
+	// correlation key (checked once the keys are known): a clause this
+	// rewrite has no place for declines it to the per-row re-run (#1701).
+	bodyOK, grouped := scalarBodyIsReproduced(info)
+	if !bodyOK {
 		return nil, pred, false
 	}
 
@@ -1384,7 +1386,7 @@ func tryDecorrelateScalarSubquery(pred Predicate, outerTables map[string]bool, o
 	// fixture #1098 was measured over. The INNER side stays bare: it is the
 	// aggregate's GROUP BY term, and an aggregate emits a group key with the
 	// qualifier stripped (aggregateGroupOutputNames).
-	type corrKey struct{ innerCol string }
+	type corrKey struct{ innerCol, innerQual string }
 	var correlationKeys []corrKey
 	var outerRefs []KeyRef
 	var innerFilterNodes []plansql.Node
@@ -1420,21 +1422,21 @@ func tryDecorrelateScalarSubquery(pred Predicate, outerTables map[string]bool, o
 			// decide, which is what this pass did for every shape before.
 			_, leftIsOuter := getColRefInfo(cmpNode.Left, outerTables, innerTableSet, outerColMap)
 			_, rightIsOuter := getColRefInfo(cmpNode.Right, outerTables, innerTableSet, outerColMap)
-			outerSide, innerCol := cmpNode.Left, rightCol
+			outerSide, innerSide, innerCol := cmpNode.Left, cmpNode.Right, rightCol
 			switch {
 			case leftIsOuter && !rightIsOuter:
 			case rightIsOuter && !leftIsOuter:
-				outerSide, innerCol = cmpNode.Right, leftCol
+				outerSide, innerSide, innerCol = cmpNode.Right, cmpNode.Left, leftCol
 			default:
 				if !outerRefCols[strings.ToLower(leftCol)] {
-					outerSide, innerCol = cmpNode.Right, leftCol
+					outerSide, innerSide, innerCol = cmpNode.Right, cmpNode.Left, leftCol
 				}
 			}
 			ref, ok := outerProbeKey(outerSide)
 			if !ok {
 				return nil, pred, false
 			}
-			correlationKeys = append(correlationKeys, corrKey{innerCol: innerCol})
+			correlationKeys = append(correlationKeys, corrKey{innerCol: innerCol, innerQual: innerSide.(*plansql.ColRef).Table})
 			outerRefs = append(outerRefs, ref)
 		} else {
 			innerFilterNodes = append(innerFilterNodes, node)
@@ -1443,6 +1445,17 @@ func tryDecorrelateScalarSubquery(pred Predicate, outerTables map[string]bool, o
 
 	if len(correlationKeys) == 0 {
 		return nil, pred, false
+	}
+	if grouped {
+		ownCols := bodyOwnColumns(info, ctes, annotate)
+		innerCols := make([]scalarKeyCol, len(correlationKeys))
+		for i, ck := range correlationKeys {
+			innerCols[i] = scalarKeyCol{Qual: ck.innerQual, Col: ck.innerCol}
+		}
+		single := len(info.Tables) == 1 && len(info.Joins) == 0
+		if !groupedOnCorrelationKey(info, innerTableSet, ownCols, innerCols, single) {
+			return nil, pred, false
+		}
 	}
 
 	// The build side is the subquery's OWN FROM clause as a plan, with its
@@ -1466,9 +1479,11 @@ func tryDecorrelateScalarSubquery(pred Predicate, outerTables map[string]bool, o
 	if aggFunc == nil {
 		return nil, pred, false
 	}
-	emptyValue, coalesceEmpty, declineEmpty := emptyMatchValue(aggFunc.Name)
-	if declineEmpty {
-		return nil, pred, false
+	// A grouped body over an empty match forms no group: the scalar subquery
+	// is NULL, which is the LEFT join's pad, for COUNT too.
+	emptyValue, coalesceEmpty := emptyMatchValue(aggFunc.Name)
+	if grouped {
+		coalesceEmpty = false
 	}
 
 	// Build aggregate expression
@@ -1505,6 +1520,11 @@ func tryDecorrelateScalarSubquery(pred Predicate, outerTables map[string]bool, o
 	// For MIN(x) → ColRef("__scalar_0")
 	// For 0.2 * AVG(x) → BinaryOp(0.2, *, ColRef("__scalar_0"))
 	replacementExpr := plansql.ReplaceAggregate(selectAST, aggOutputCol)
+	// The plan computes ONE aggregate: a select expression holding another,
+	// or one ReplaceAggregate cannot reach, declines (#1701).
+	if !rewritesEveryAggregate(selectAST, replacementExpr) {
+		return nil, pred, false
+	}
 	// An outer row whose key matches no inner row reads the LEFT join's NULL
 	// pad; COUNT over that empty match is 0, not NULL (#1701).
 	if coalesceEmpty {

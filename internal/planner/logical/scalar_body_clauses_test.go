@@ -12,10 +12,12 @@ import (
 // TestScalarDecorrelationKeepsOrDeclinesBodyClauses pins which correlated
 // scalar subquery bodies the WHERE-comparison rewrite takes (#1701). A body
 // whose clause the LEFT join + per-key aggregate cannot carry declines and
-// stays a per-row subquery; one ungrouped aggregate still decorrelates, and
-// a COUNT reads its slot through COALESCE(slot, 0). The answers are pinned
-// against PostgreSQL 17.11 by internal/coordinator's
-// TestWhereCompareScalarEveryArm.
+// stays a per-row subquery; one aggregate, ungrouped or grouped on exactly
+// the correlation key, still decorrelates, and an ungrouped COUNT or
+// APPROX_DISTINCT reads its slot through COALESCE(slot, 0). Every body of
+// internal/coordinator's TestWhereCompareScalarEveryArm matrix, which pins
+// the answers against PostgreSQL 17.11, has a case here, so a body that
+// silently leaves (or joins) the decorrelated path fails this test.
 func TestScalarDecorrelationKeepsOrDeclinesBodyClauses(t *testing.T) {
 	ann := func(n *Node) {
 		var walk func(*Node)
@@ -27,7 +29,7 @@ func TestScalarDecorrelationKeepsOrDeclinesBodyClauses(t *testing.T) {
 				if n.TableName == "sb_i" {
 					n.ScanColumns = []string{"k", "a", "c"}
 				} else {
-					n.ScanColumns = []string{"k", "p"}
+					n.ScanColumns = []string{"k", "a", "p"}
 				}
 			}
 			for _, c := range n.Children {
@@ -58,7 +60,47 @@ func TestScalarDecorrelationKeepsOrDeclinesBodyClauses(t *testing.T) {
 		{"SELECT DISTINCT count(*)" + from + " GROUP BY x.c", false, ""},
 		{"SELECT count(*)" + from + " GROUP BY ROLLUP (x.a) ORDER BY count(*) DESC LIMIT 1", false, ""},
 		{"SELECT count(*)" + from + " GROUP BY GROUPING SETS (())", false, ""},
-		{"SELECT approx_distinct(x.c)" + from, false, ""},
+		// APPROX_DISTINCT answers as COUNT(DISTINCT x) does over an empty
+		// match: 0 (#1691).
+		{"SELECT approx_distinct(x.c)" + from, true, "o.p = coalesce(__scalar_0, 0)"},
+		{"SELECT count(DISTINCT x.c)" + from, true, "o.p = coalesce(__scalar_0, 0)"},
+		// GROUP BY exactly the correlation key: one group per matched key,
+		// none (NULL, no COALESCE) for an unmatched one.
+		{"SELECT count(*)" + from + " GROUP BY x.k", true, "o.p = __scalar_0"},
+		{"SELECT sum(x.c)" + from + " GROUP BY x.k", true, "o.p = __scalar_0"},
+		{"SELECT max(x.c)" + from + " GROUP BY x.k", true, "o.p = __scalar_0"},
+		{"SELECT count(*)" + from + " GROUP BY x.k ORDER BY count(*) DESC LIMIT 1", true, "o.p = __scalar_0"},
+		{"SELECT max(x.c)" + from + " GROUP BY x.k ORDER BY 1 LIMIT 1", true, "o.p = __scalar_0"},
+		{"SELECT count(*)" + from + " GROUP BY (x.k)", true, "o.p = __scalar_0"},
+		{"SELECT count(*)" + from + " GROUP BY x.k, x.k", true, "o.p = __scalar_0"},
+		{"SELECT count(*)" + from + " GROUP BY k", true, "o.p = __scalar_0"},
+		{"SELECT count(*) FROM sb_i WHERE sb_i.k = o.k GROUP BY k", true, "o.p = __scalar_0"},
+		{"SELECT count(*) FROM sb_i WHERE k = o.k GROUP BY sb_i.k", true, "o.p = __scalar_0"},
+		{"SELECT count(*)" + from + " AND x.a = o.a GROUP BY x.k, x.a", true, "o.p = __scalar_0"},
+		// ...and anything else grouped declines.
+		{"SELECT count(*)" + from + " AND x.a = o.a GROUP BY x.k", false, ""},
+		{"SELECT count(*)" + from + " GROUP BY x.k, x.a", false, ""},
+		{"SELECT count(*)" + from + " GROUP BY x.k + 1", false, ""},
+		{"SELECT count(*)" + from + " GROUP BY x.k, 1 + 0", false, ""},
+		{"SELECT count(*)" + from + " GROUP BY o.k", false, ""},
+		{"SELECT count(*)" + from + " GROUP BY x.k HAVING count(*) > 1", false, ""},
+		{"SELECT count(*) + x.k" + from + " GROUP BY x.k", true, "o.p = __scalar_0 + x.k"},
+		// The plan computes one aggregate: a second one, or one under a CASE
+		// that ReplaceAggregate does not reach, declines; one aggregate
+		// under a function or arithmetic still decorrelates.
+		{"SELECT max(x.c) - min(x.c)" + from, false, ""},
+		{"SELECT CASE WHEN count(*) = 0 THEN 2 ELSE 1 END" + from, false, ""},
+		{"SELECT abs(max(x.c))" + from, true, "o.p = abs(__scalar_0)"},
+		{"SELECT coalesce(count(*), 5)" + from, true, "coalesce(coalesce(__scalar_0, 0), 5)"},
+		{"SELECT sum(x.c) / sum(x.c)" + from, true, "o.p = __scalar_0 / __scalar_0"},
+		// Bodies the WHERE-comparison rule never decorrelated.
+		{"SELECT x.c" + from, false, ""},
+		{"SELECT x.c" + from + " ORDER BY x.c DESC LIMIT 1", false, ""},
+		{"SELECT x.c" + from + " ORDER BY x.c DESC LIMIT 1 OFFSET 1", false, ""},
+		{"SELECT count(*)" + from + " GROUP BY x.a ORDER BY count(*) DESC LIMIT 1 OFFSET 1", false, ""},
+		{"SELECT count(*) FROM sb_i x WHERE x.k = o.k GROUP BY x.k LIMIT 1", true, "o.p = __scalar_0"},
+		{"SELECT sum(x.c)" + from + " GROUP BY x.k ORDER BY 1 LIMIT 1", true, "o.p = __scalar_0"},
+		{"SELECT max(x.c)" + from + " AND x.a = o.a GROUP BY x.a, x.k", true, "o.p = __scalar_0"},
 	}
 	for _, c := range cases {
 		q := "SELECT o.k, o.p FROM sb_o o WHERE o.p = (" + c.body + ")"
