@@ -78,12 +78,22 @@ size, so small queries pay a latency floor the local pipeline doesn't have
 tiny-scale TPC-H suite runs row-identical through either path).
 
 Facts that matter when touching this:
-- Both paths consume the **identical optimized logical plan** (post
-  RLS-injection, post `logical.Optimize`) — result and policy parity is by
-  construction. A local PLAN error falls back to the DAG (which covers
-  shapes the local pipeline declines); an EXECUTION error falls back only
-  when it is unrelated to the query's meaning — see `classifyLocalFailure`
-  and `FastPathStrict` in coordinator/local_fastpath.go (#308).
+- The two paths consume **two plans of one statement** (ADR-0050 §1,
+  `coordinator/statement_plan.go`). The statement's bound validation
+  (`auth.BindStatementColumns`) runs first on every synchronous path, fast
+  path on or off, any size, distributed EXPLAIN included; if it refuses, the
+  statement is refused (a veto, not a claim the refusal is right). The fast
+  path and every refused-plan route then run the BOUND plan `L`, planned as
+  the embedded engine plans it and continuing from that validation; the stage
+  DAG and distributed EXPLAIN plan the UNBOUND plan `D`, as before. Both are
+  planned under one pinned authorization state, one manifest pin and one
+  incarnation guard, but they are not one plan, so where the stage planner
+  has a defect the bound plan does not, a statement both accept can answer
+  differently by path. A failure of `L` after validation skips the fast path
+  and the DAG plans `D`; the refusals that end the statement are named by
+  provenance (`terminalProvenances`). An EXECUTION error falls back only when
+  it is unrelated to the query's meaning — see `classifyLocalFailure` and
+  `FastPathStrict` in coordinator/local_fastpath.go (#308).
 - Unestimable plans (unknown table = table functions, residual subquery
   expressions in Raw predicate/projection text) route to the DAG.
 - Concurrency-capped (`localSem`); overflow routes to the DAG, never queues.
@@ -110,8 +120,9 @@ With an auth provider wired (`Coordinator.SetAuthProvider`, done by
 policies itself via `auth.EnforcePlanPolicies` — the same helper the
 embedded engine calls — table denial, row-filter injection, and column
 deny/mask, applied to the logical plan after scan annotation and before
-`Optimize`, so both the local fast path and the DAG consume the enforced
-plan. This is what lets pgwire route **authenticated** connections through
+`Optimize`, in each planning run of the statement (the bound plan the local
+fast path and the routes run, the unbound one the DAG runs), every run under
+the statement's one pinned authorization state. This is what lets pgwire route **authenticated** connections through
 the coordinator (`canBypassDB` accepts when `coord.EnforcesABAC()`);
 previously every authed connection fell back to the legacy single-process
 `db.Query` path — no distribution, no fast path.

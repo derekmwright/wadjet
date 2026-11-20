@@ -352,7 +352,14 @@ func TestAnIncarnationRefusalAfterAFastPathBailOutIsFinal(t *testing.T) {
 	if c.LocalFastPathBails() == b0 {
 		t.Fatalf("the statement did not bail out of the fast path (%s): the cell tests nothing", base)
 	}
-	if baseSteps[len(baseSteps)-1] != "distributed" {
+	// The stage planner is reached; the route it chooses then plans a fresh
+	// bound plan (ADR-0050 §1 item 4: the fast path consumed the first), so
+	// "distributed" is no longer the last step.
+	reachedStage := false
+	for _, s := range baseSteps {
+		reachedStage = reachedStage || s == "distributed"
+	}
+	if !reachedStage {
 		t.Fatalf("with nothing changed the bail-out did not reach the stage planner: %v", baseSteps)
 	}
 

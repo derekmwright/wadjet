@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 
 	"github.com/derekmwright/wadjet/internal/storage/catalog"
@@ -245,6 +246,33 @@ func verifyIncarnations(ctx context.Context) error {
 	return nil
 }
 
+// verifyEveryPinned is verifyIncarnations over EVERY relation the statement
+// has pinned, not only the tables decided since the last verify: it reads the
+// record of each once. A coordinator statement calls it where another plan is
+// about to be planned or run after work of a first one (a route's entry, the
+// stage DAG after the fast path planned or ran its plan, the input-lost
+// re-execution), so a table re-created since the statement last read its
+// record refuses there even when nothing has read the record since
+// (ADR-0050 §3, "Where the check must run"). It costs one record read per
+// pinned relation; the other verifies stay as cheap as before.
+func verifyEveryPinned(ctx context.Context) error {
+	g := incarnationGuardFrom(ctx)
+	if g == nil {
+		return nil
+	}
+	g.snap.mu.Lock()
+	pinned := make([]string, 0, len(g.snap.byTbl))
+	for name, e := range g.snap.byTbl {
+		if e != nil && e.err == nil && e.manifest != nil {
+			pinned = append(pinned, name)
+		}
+	}
+	g.snap.mu.Unlock()
+	sort.Strings(pinned)
+	g.redirty(pinned)
+	return verifyIncarnations(ctx)
+}
+
 func (g *incarnationGuard) redirty(tables []string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -271,6 +299,12 @@ func (PlanContext) WithIncarnationGuard(ctx context.Context, cat *catalog.Catalo
 // VerifyIncarnations is C2 (verifyIncarnations).
 func (PlanContext) VerifyIncarnations(ctx context.Context) error {
 	return verifyIncarnations(ctx)
+}
+
+// VerifyEveryPinnedIncarnation is C2 over every pinned relation
+// (verifyEveryPinned).
+func (PlanContext) VerifyEveryPinnedIncarnation(ctx context.Context) error {
+	return verifyEveryPinned(ctx)
 }
 
 // IsIncarnationChanged reports whether err is (or wraps) the C3 refusal.

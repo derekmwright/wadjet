@@ -391,6 +391,7 @@ func unibArms(t *testing.T, ctx context.Context) []wdArm {
 				if r := recover(); r != nil {
 					err = fmt.Errorf("PANIC: %v", r)
 				}
+				armDumpRecord(c, sql, res.schema, fmt.Sprintf("%v", res.rows), err)
 			}()
 			out, qerr := c.ExecuteSQL(ctx, sql)
 			if qerr != nil {
@@ -405,6 +406,7 @@ func unibArms(t *testing.T, ctx context.Context) []wdArm {
 				if r := recover(); r != nil {
 					err = fmt.Errorf("PANIC: %v", r)
 				}
+				armDumpRecord(c, sql, res.schema, fmt.Sprintf("%v", res.rows), err)
 			}()
 			if probeSplit {
 				o := dagplan.ProbeSplitMinBytes
@@ -446,15 +448,15 @@ func unibArms(t *testing.T, ctx context.Context) []wdArm {
 	return []wdArm{
 		{"single", single(0), nil},
 		{"spilled512k", single(512 * 1024), nil},
-		{"dag", runDAG(stand(nil)), nil},
-		{"dag-shuffled", runDAG(stand(nil, func(c *Config) { c.BroadcastBytesOverride = 1 })), nil},
-		{"dag-morsel4", runDAG(stand(func(w *worker.Config) { w.MorselWorkers = 4 })), nil},
-		{"dag-eager", runDAG(eager), nil},
-		{"dag-skew", runDAG(stand(nil, func(c *Config) { c.BroadcastBytesOverride = 1; c.SkewSplit = true })), nil},
-		{"dag-aggsplit", runDAG(stand(nil, func(c *Config) { c.AggPartialSplit = true })), nil},
-		{"fastpath", runDAG(stand(nil, func(c *Config) { c.LocalFastPathBytes = 64 << 20 })), nil},
-		{"async", runAsync(asyncCoord(), false), nil},
-		{"async-probesplit", runAsync(asyncCoord(), true), nil},
+		{"dag", runDAG(armDumpNamed("dag", stand(nil))), nil},
+		{"dag-shuffled", runDAG(armDumpNamed("dag-shuffled", stand(nil, func(c *Config) { c.BroadcastBytesOverride = 1 }))), nil},
+		{"dag-morsel4", runDAG(armDumpNamed("dag-morsel4", stand(func(w *worker.Config) { w.MorselWorkers = 4 }))), nil},
+		{"dag-eager", runDAG(armDumpNamed("dag-eager", eager)), nil},
+		{"dag-skew", runDAG(armDumpNamed("dag-skew", stand(nil, func(c *Config) { c.BroadcastBytesOverride = 1; c.SkewSplit = true }))), nil},
+		{"dag-aggsplit", runDAG(armDumpNamed("dag-aggsplit", stand(nil, func(c *Config) { c.AggPartialSplit = true }))), nil},
+		{"fastpath", runDAG(armDumpNamed("fastpath", stand(nil, func(c *Config) { c.LocalFastPathBytes = 64 << 20 }))), nil},
+		{"async", runAsync(armDumpNamed("async", asyncCoord()), false), nil},
+		{"async-probesplit", runAsync(armDumpNamed("async-probesplit", asyncCoord()), true), nil},
 	}
 }
 

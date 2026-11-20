@@ -145,6 +145,10 @@ func cmArms(t *testing.T, ctx context.Context) []cmArm {
 	coordB := stand(nil, func(c *Config) { c.BroadcastBytesOverride = 1 })
 	coordM := stand(func(w *worker.Config) { w.MorselWorkers = 4 })
 	coordS := stand(nil, func(c *Config) { c.LocalFastPathBytes = 64 << 10 })
+	armDumpName(coord, "dag")
+	armDumpName(coordB, "dag-shuffled")
+	armDumpName(coordM, "dag-morsel4")
+	armDumpName(coordS, "dag-fastpath64k")
 	execDB := func(db *wadjet.DB) func(string) string {
 		return func(s string) string {
 			if _, err := db.Execute(ctx, s); err != nil {

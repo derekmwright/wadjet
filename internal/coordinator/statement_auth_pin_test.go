@@ -419,7 +419,8 @@ func TestAFastPathPlanningAuthorizationRefusalIsFinal(t *testing.T) {
 	// the plan is admitted; the guard runs before anything is opened.
 	plan := &logical.Node{Type: logical.NodeScan, TableName: "pin_t", IsTableFunc: true,
 		FuncName: "read_csv", FuncArgs: []string{"'/nonexistent/pin.csv'"}}
-	res, handled, err := c.tryLocalFastPath(ctx, "q-a3-plan", plan, "", time.Now())
+	lp := &statementPlan{ctx: ctx, node: plan, bound: true, opts: c.statementPlanOptions(ctx)}
+	res, handled, err := c.tryLocalFastPath("q-a3-plan", lp, time.Now())
 	if asked == 0 {
 		t.Fatal("the planner never asked the guard: the plan did not reach physical planning")
 	}

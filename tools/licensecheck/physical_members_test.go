@@ -105,7 +105,15 @@ import (
 // Not crossing: the pin's existence test (the attach is idempotent through
 // NewPlannerForContext, already counted) and the refusal's type (the tests
 // name it by its SQLSTATE).
-const maxAGPLPhysicalMembers = 227
+// 227 → 228 (2026-11-20, ADR-0050 §1 revised, #1678):
+// `PlanContext.VerifyEveryPinnedIncarnation` — the incarnation check over
+// every relation the statement pinned, which the coordinator runs at the
+// transitions that follow another plan's work (a route's entry, the stage DAG
+// after the fast path planned or ran its plan, the input-lost re-execution),
+// so a table re-created since its record was last read refuses there before
+// the next plan is built or run (§3, "Where the check must run"). Reached
+// through the context value, as VerifyIncarnations is.
+const maxAGPLPhysicalMembers = 228
 
 // measuredPhysicalMembers are the members reached through values. With the 16
 // package-scope names of measuredPhysicalNames they are the whole surface, and
@@ -244,6 +252,7 @@ PlanContext.StrictIntArithColsThroughRenames
 PlanContext.SubstituteNestedRenameRefs
 PlanContext.SubtreeNamingOf
 PlanContext.ValidateColumnsUnderPolicy
+PlanContext.VerifyEveryPinnedIncarnation
 PlanContext.VerifyIncarnations
 PlanContext.WantBareName
 PlanContext.WindowExecColumn

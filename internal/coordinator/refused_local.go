@@ -3,14 +3,12 @@
 package coordinator
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"sync/atomic"
 	"time"
 
 	"github.com/derekmwright/wadjet/internal/engine/exec"
-	"github.com/derekmwright/wadjet/internal/planner/logical"
 	"github.com/derekmwright/wadjet/internal/planner/physical"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
@@ -24,16 +22,19 @@ import (
 // what names the construct in messages; counter is the per-class routing counter
 // that distributed suites must assert beside rows to prove engagement.
 // See docs/internals/refused-dag-local-execution-contract.md for the design.
+//
+// lp is the statement's BOUND plan L (ADR-0050 §1 item 4), never the stage
+// DAG's: the route answers from it alone — its rows, its columns, its declared
+// types and its plan text — under the context its own enforcement rebound.
 func (c *Coordinator) runRefusedLocal(
-	ctx context.Context,
 	queryID string,
-	logicalPlan *logical.Node,
-	planStr string,
+	lp *statementPlan,
 	start time.Time,
 	refusal error,
 	what string,
 	counter *atomic.Int64,
 ) (*SQLResult, error) {
+	ctx := lp.ctx
 	select {
 	case c.localSem <- struct{}{}:
 		defer func() { <-c.localSem }()
@@ -53,10 +54,11 @@ func (c *Coordinator) runRefusedLocal(
 	// PlanDistributed's failed attempt already read is not read again here.
 	planner := physical.NewPlannerForContext(ctx, c.catalog)
 	planner.MemoryBudget = 8 * base
-	planner.SortMergeJoinBytes = c.config.SortMergeJoinBytes
-	planner.LateMaterialization = c.config.LateMaterialization
-	planner.BushyJoinReorder = c.config.BushyJoinReorder
-	planner.QueryLimits = c.resolveQueryLimits(ctx)
+	lp.opts.applyLocal(planner)
+	logicalPlan, err := lp.consume(what + " route")
+	if err != nil {
+		return nil, err
+	}
 	physPlan, err := planner.Plan(ctx, logicalPlan)
 	if err != nil {
 		if refusal, ok := authorizationRefusal(err); ok {
@@ -110,7 +112,7 @@ func (c *Coordinator) runRefusedLocal(
 		Batches:   batches,
 		TotalRows: totalRows,
 		Elapsed:   time.Since(start),
-		Plan:      planStr,
+		Plan:      lp.text,
 		// The sink's schema, not the batches': a zero-row result has no
 		// batch to read the types off, and pgwire still has to declare
 		// them. Without this the coord path fell back to OID 25 (text) for

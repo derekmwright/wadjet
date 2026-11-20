@@ -913,7 +913,8 @@ func r1Single(ctx context.Context, db *wadjet.DB, sql string) string {
 	return r1RenderRows(all)
 }
 
-func r1DAG(ctx context.Context, c *Coordinator, sql string) string {
+func r1DAG(ctx context.Context, c *Coordinator, sql string) (got string) {
+	defer func() { armDumpRecord(c, sql, nil, got, nil) }()
 	out, err := c.ExecuteSQL(ctx, sql)
 	if err != nil {
 		return "ERR " + err.Error()

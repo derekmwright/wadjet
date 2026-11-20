@@ -170,7 +170,14 @@ func TestEveryStatementRefusesAfterAFastPathBailOut(t *testing.T) {
 			statementStepTestHook = func(s string) { baseSteps = append(baseSteps, s) }
 			base := pinAnswer(c, f.ctx, sql)
 			statementStepTestHook = nil
-			if c.LocalFastPathBails() == b0 || baseSteps[len(baseSteps)-1] != "distributed" {
+			// The stage planner is reached; the route it chooses then plans a
+			// fresh bound plan (ADR-0050 §1.3 item 4: the fast path consumed
+			// the first), so "distributed" is no longer the last step.
+			reachedStage := false
+			for _, s := range baseSteps {
+				reachedStage = reachedStage || s == "distributed"
+			}
+			if c.LocalFastPathBails() == b0 || !reachedStage {
 				t.Fatalf("with nothing changed the statement did not bail out to the stage planner (%s, %v)", base, baseSteps)
 			}
 			var steps []string
@@ -204,8 +211,11 @@ func TestEveryStatementRefusesAfterAFastPathBailOut(t *testing.T) {
 
 // TestEveryStatementRefusesOnARefusedPlanRoute: the stage planner refuses
 // the plan (a subquery in a window key has no stage) and the statement is
-// routed to the local pipeline, which reads inc_t's record when it first
-// evaluates the key. Re-created before that read: refused.
+// routed to the local pipeline. inc_t, which the statement's bound validation
+// read (and so pinned), is re-created before the stage planner runs: the
+// check at the route's entry refuses, and the route does not run (ADR-0050
+// §3 as revised 2026-11-20; before it, the route planned and ran to
+// completion and only its result was discarded).
 func TestEveryStatementRefusesOnARefusedPlanRoute(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: stands up an embedded NATS cluster")
@@ -230,8 +240,8 @@ func TestEveryStatementRefusesOnARefusedPlanRoute(t *testing.T) {
 			if got != incRefusal {
 				t.Fatalf("a route over another incarnation answered %s (nothing changed: %s)", got, want)
 			}
-			if c.ScalarProjectionLocalRoutes() == r1 {
-				t.Error("the refusal came before the route: the cell no longer exercises it")
+			if c.ScalarProjectionLocalRoutes() != r1 {
+				t.Error("the route ran after inc_t was re-created: the check at its entry did not refuse")
 			}
 		})
 	}

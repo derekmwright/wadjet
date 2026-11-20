@@ -47,6 +47,9 @@ func TestArcJP5LateralBodyIsRightPerOuterRow(t *testing.T) {
 	dag := coord()
 	shuffled := coord(func(c *Config) { c.BroadcastBytesOverride = 1 })
 	fast := coord(func(c *Config) { c.LocalFastPathBytes = DefaultLocalFastPathBytes })
+	armDumpName(dag, "dag")
+	armDumpName(shuffled, "dag-shuffled")
+	armDumpName(fast, "fastpath")
 	routes := func(c *Coordinator) int64 {
 		var n int64
 		for _, v := range a2fReadRoutes(c).values {

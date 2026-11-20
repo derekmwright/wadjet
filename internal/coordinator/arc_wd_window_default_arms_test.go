@@ -618,6 +618,7 @@ func wdArms(t *testing.T, ctx context.Context) []wdArm {
 				if r := recover(); r != nil {
 					err = fmt.Errorf("PANIC: %v", r)
 				}
+				armDumpRecord(c, sql, res.schema, fmt.Sprintf("%v", res.rows), err)
 			}()
 			out, qerr := c.ExecuteSQL(ctx, sql)
 			if qerr != nil {
@@ -659,6 +660,9 @@ func wdArms(t *testing.T, ctx context.Context) []wdArm {
 	dag := stand(nil)
 	shuffled := stand(nil, func(c *Config) { c.BroadcastBytesOverride = 1 })
 	morsel := stand(func(w *worker.Config) { w.MorselWorkers = 4 })
+	armDumpName(dag, "dag")
+	armDumpName(shuffled, "dag-shuffled")
+	armDumpName(morsel, "dag-morsel4")
 	return []wdArm{
 		{"single", runSingle(single), nil},
 		{"spilled512k", runSingle(spilled), nil},

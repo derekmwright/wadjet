@@ -2,12 +2,7 @@
 
 package coordinator
 
-import (
-	"context"
-	"time"
-
-	"github.com/derekmwright/wadjet/internal/planner/logical"
-)
+import "time"
 
 // runCorrelatedLocal executes a query the stage DAG refused
 // (dagplan.ErrCorrelatedSubqueryDistributed) on the coordinator-local
@@ -18,8 +13,8 @@ import (
 // A ROUTE, not a fallback; see runRefusedLocal for the guards and the
 // reasoning they encode. Before the refusal, a correlated scalar answered 0
 // silently on the DAG (#359).
-func (c *Coordinator) runCorrelatedLocal(ctx context.Context, queryID string, logicalPlan *logical.Node, planStr string, start time.Time, refusal error) (*SQLResult, error) {
-	return c.runRefusedLocal(ctx, queryID, logicalPlan, planStr, start, refusal,
+func (c *Coordinator) runCorrelatedLocal(queryID string, lp *statementPlan, start time.Time, refusal error) (*SQLResult, error) {
+	return c.runRefusedLocal(queryID, lp, start, refusal,
 		"correlated subquery", &c.localCorrelated)
 }
 
@@ -34,8 +29,8 @@ func (c *Coordinator) runCorrelatedLocal(ctx context.Context, queryID string, lo
 // dropping them (#466), but the query still has an answer and one engine in
 // this process can compute it — so route it there instead of handing the
 // client an error, exactly as #359 does for correlated subqueries.
-func (c *Coordinator) runDistinctLocal(ctx context.Context, queryID string, logicalPlan *logical.Node, planStr string, start time.Time, refusal error) (*SQLResult, error) {
-	return c.runRefusedLocal(ctx, queryID, logicalPlan, planStr, start, refusal,
+func (c *Coordinator) runDistinctLocal(queryID string, lp *statementPlan, start time.Time, refusal error) (*SQLResult, error) {
+	return c.runRefusedLocal(queryID, lp, start, refusal,
 		"DISTINCT with no distributed stage", &c.localDistinct)
 }
 
@@ -51,8 +46,8 @@ func (c *Coordinator) runDistinctLocal(ctx context.Context, queryID string, logi
 // Silently, and for plain column keys as much as computed ones. Refusing beat
 // that (#778); routing beats handing the client an error, exactly as #359 does
 // for correlated subqueries and #466 for DISTINCT.
-func (c *Coordinator) runGroupingSetsLocal(ctx context.Context, queryID string, logicalPlan *logical.Node, planStr string, start time.Time, refusal error) (*SQLResult, error) {
-	return c.runRefusedLocal(ctx, queryID, logicalPlan, planStr, start, refusal,
+func (c *Coordinator) runGroupingSetsLocal(queryID string, lp *statementPlan, start time.Time, refusal error) (*SQLResult, error) {
+	return c.runRefusedLocal(queryID, lp, start, refusal,
 		"GROUPING SETS with no distributed stage", &c.localGroupingSets)
 }
 
@@ -69,8 +64,8 @@ func (c *Coordinator) runGroupingSetsLocal(ctx context.Context, queryID string, 
 // one of the aggregate's own outputs (the KEY's value under the aggregate's
 // alias). Refusing beat both (#736); routing beats handing the client an error,
 // exactly as #359 does for correlated subqueries.
-func (c *Coordinator) runGroupKeyLocal(ctx context.Context, queryID string, logicalPlan *logical.Node, planStr string, start time.Time, refusal error) (*SQLResult, error) {
-	return c.runRefusedLocal(ctx, queryID, logicalPlan, planStr, start, refusal,
+func (c *Coordinator) runGroupKeyLocal(queryID string, lp *statementPlan, start time.Time, refusal error) (*SQLResult, error) {
+	return c.runRefusedLocal(queryID, lp, start, refusal,
 		"GROUP BY key with no distributed published name", &c.localGroupKey)
 }
 
@@ -86,8 +81,8 @@ func (c *Coordinator) runGroupKeyLocal(ctx context.Context, queryID string, logi
 // like any other filter. Refusing beat shipping the subquery to a worker that
 // has no SubqueryRunner (#524), and routing beats handing the client an error,
 // exactly as #359 does for correlated subqueries.
-func (c *Coordinator) runInSubqueryLocal(ctx context.Context, queryID string, logicalPlan *logical.Node, planStr string, start time.Time, refusal error) (*SQLResult, error) {
-	return c.runRefusedLocal(ctx, queryID, logicalPlan, planStr, start, refusal,
+func (c *Coordinator) runInSubqueryLocal(queryID string, lp *statementPlan, start time.Time, refusal error) (*SQLResult, error) {
+	return c.runRefusedLocal(queryID, lp, start, refusal,
 		"IN subquery with no distributed stage", &c.localInSubquery)
 }
 
@@ -100,8 +95,8 @@ func (c *Coordinator) runInSubqueryLocal(ctx context.Context, queryID string, lo
 // the SELECT list reached the worker as expression text and failed every task
 // (#659). Refusing at plan time and routing here turns a hard failure into
 // the answer, exactly as #359 does for correlated subqueries.
-func (c *Coordinator) runScalarProjectionLocal(ctx context.Context, queryID string, logicalPlan *logical.Node, planStr string, start time.Time, refusal error) (*SQLResult, error) {
-	return c.runRefusedLocal(ctx, queryID, logicalPlan, planStr, start, refusal,
+func (c *Coordinator) runScalarProjectionLocal(queryID string, lp *statementPlan, start time.Time, refusal error) (*SQLResult, error) {
+	return c.runRefusedLocal(queryID, lp, start, refusal,
 		"SELECT-list subquery with no distributed stage", &c.localScalarProjection)
 }
 
@@ -118,8 +113,8 @@ func (c *Coordinator) runScalarProjectionLocal(ctx context.Context, queryID stri
 // `NOT EXISTS` twin would, silently (#507). walkStages forces such a join
 // onto the broadcast path; the invariant is what says the forcing survived
 // every later pass, and this is where a plan that cannot show it goes.
-func (c *Coordinator) runNullAwareAntiLocal(ctx context.Context, queryID string, logicalPlan *logical.Node, planStr string, start time.Time, refusal error) (*SQLResult, error) {
-	return c.runRefusedLocal(ctx, queryID, logicalPlan, planStr, start, refusal,
+func (c *Coordinator) runNullAwareAntiLocal(queryID string, lp *statementPlan, start time.Time, refusal error) (*SQLResult, error) {
+	return c.runRefusedLocal(queryID, lp, start, refusal,
 		"null-aware anti join whose build is not replicated", &c.localNullAwareAnti)
 }
 
@@ -140,8 +135,8 @@ func (c *Coordinator) NullAwareAntiLocalRoutes() int64 {
 // answered those with the producer's raw columns under their source names,
 // which is a wrong RESULT SET rather than a wrong value; routing here is what
 // turns it into the right one (#656 F2).
-func (c *Coordinator) runUnreachableOutputLocal(ctx context.Context, queryID string, logicalPlan *logical.Node, planStr string, start time.Time, refusal error) (*SQLResult, error) {
-	return c.runRefusedLocal(ctx, queryID, logicalPlan, planStr, start, refusal,
+func (c *Coordinator) runUnreachableOutputLocal(queryID string, lp *statementPlan, start time.Time, refusal error) (*SQLResult, error) {
+	return c.runRefusedLocal(queryID, lp, start, refusal,
 		"SELECT list no stage computes", &c.localUnreachableOutput)
 }
 
@@ -157,8 +152,8 @@ func (c *Coordinator) runUnreachableOutputLocal(ctx context.Context, queryID str
 // handing the client an error, exactly as #359 does for correlated subqueries;
 // and unlike those, this one gives up no parallelism, because the answer is
 // one row.
-func (c *Coordinator) runTableLessLocal(ctx context.Context, queryID string, logicalPlan *logical.Node, planStr string, start time.Time, refusal error) (*SQLResult, error) {
-	return c.runRefusedLocal(ctx, queryID, logicalPlan, planStr, start, refusal,
+func (c *Coordinator) runTableLessLocal(queryID string, lp *statementPlan, start time.Time, refusal error) (*SQLResult, error) {
+	return c.runRefusedLocal(queryID, lp, start, refusal,
 		"table-less SELECT with no distributed stage", &c.localTableLess)
 }
 
@@ -183,8 +178,8 @@ func (c *Coordinator) TableLessLocalRoutes() int64 {
 // Routing beats handing the client `stage sort-4 has no dependencies and no
 // ScanFiles`, which is an internal message about the planner's own output and
 // carries no SQLSTATE at all.
-func (c *Coordinator) runUnbuildableStageLocal(ctx context.Context, queryID string, logicalPlan *logical.Node, planStr string, start time.Time, refusal error) (*SQLResult, error) {
-	return c.runRefusedLocal(ctx, queryID, logicalPlan, planStr, start, refusal,
+func (c *Coordinator) runUnbuildableStageLocal(queryID string, lp *statementPlan, start time.Time, refusal error) (*SQLResult, error) {
+	return c.runRefusedLocal(queryID, lp, start, refusal,
 		"a stage with no dependencies and no scan files", &c.localUnbuildableStage)
 }
 
@@ -217,8 +212,8 @@ func (c *Coordinator) UnreachableOutputLocalRoutes() int64 {
 //
 // Scoped to a star, so a named SELECT list over the same block stays
 // distributed — the gather resolves those by name and they are already right.
-func (c *Coordinator) runLateralProjectionLocal(ctx context.Context, queryID string, logicalPlan *logical.Node, planStr string, start time.Time, refusal error) (*SQLResult, error) {
-	return c.runRefusedLocal(ctx, queryID, logicalPlan, planStr, start, refusal,
+func (c *Coordinator) runLateralProjectionLocal(queryID string, lp *statementPlan, start time.Time, refusal error) (*SQLResult, error) {
+	return c.runRefusedLocal(queryID, lp, start, refusal,
 		"a star over a LATERAL whose projection no stage publishes", &c.localLateralProjection)
 }
 
@@ -281,8 +276,8 @@ func (c *Coordinator) GroupKeyLocalRoutes() int64 {
 // residual's stage re-spelling mapped its two sides to one column
 // (dagplan.ErrResidualSidesMergedDistributed) on the coordinator-local
 // single-process pipeline.
-func (c *Coordinator) runResidualSidesLocal(ctx context.Context, queryID string, logicalPlan *logical.Node, planStr string, start time.Time, refusal error) (*SQLResult, error) {
-	return c.runRefusedLocal(ctx, queryID, logicalPlan, planStr, start, refusal,
+func (c *Coordinator) runResidualSidesLocal(queryID string, lp *statementPlan, start time.Time, refusal error) (*SQLResult, error) {
+	return c.runRefusedLocal(queryID, lp, start, refusal,
 		"a join residual whose two sides re-spell to one stage column", &c.localResidualSides)
 }
 
@@ -295,8 +290,8 @@ func (c *Coordinator) ResidualSidesLocalRoutes() int64 {
 // runPolicedWindowLocal runs a plan the stage DAG refused for a window over a
 // policed scan feeding a join (dagplan.ErrPolicedWindowUnderJoinDistributed)
 // on the coordinator-local single-process pipeline, which answers the mask.
-func (c *Coordinator) runPolicedWindowLocal(ctx context.Context, queryID string, logicalPlan *logical.Node, planStr string, start time.Time, refusal error) (*SQLResult, error) {
-	return c.runRefusedLocal(ctx, queryID, logicalPlan, planStr, start, refusal,
+func (c *Coordinator) runPolicedWindowLocal(queryID string, lp *statementPlan, start time.Time, refusal error) (*SQLResult, error) {
+	return c.runRefusedLocal(queryID, lp, start, refusal,
 		"a window over a policed relation feeding a join", &c.localPolicedWindow)
 }
 
@@ -309,8 +304,8 @@ func (c *Coordinator) PolicedWindowLocalRoutes() int64 {
 // runWindowOverLateralLocal runs a plan the stage DAG refused for a window
 // above a LATERAL join (dagplan.ErrWindowOverLateralDistributed) on the
 // coordinator-local single-process pipeline.
-func (c *Coordinator) runWindowOverLateralLocal(ctx context.Context, queryID string, logicalPlan *logical.Node, planStr string, start time.Time, refusal error) (*SQLResult, error) {
-	return c.runRefusedLocal(ctx, queryID, logicalPlan, planStr, start, refusal,
+func (c *Coordinator) runWindowOverLateralLocal(queryID string, lp *statementPlan, start time.Time, refusal error) (*SQLResult, error) {
+	return c.runRefusedLocal(queryID, lp, start, refusal,
 		"a window above a LATERAL join", &c.localWindowOverLateral)
 }
 
@@ -324,8 +319,8 @@ func (c *Coordinator) WindowOverLateralLocalRoutes() int64 {
 // LATERAL whose arm shares a column name with another relation
 // (dagplan.ErrLateralIdentityDistributed) on the coordinator-local
 // single-process pipeline, which runs the body as written.
-func (c *Coordinator) runLateralIdentityLocal(ctx context.Context, queryID string, logicalPlan *logical.Node, planStr string, start time.Time, refusal error) (*SQLResult, error) {
-	return c.runRefusedLocal(ctx, queryID, logicalPlan, planStr, start, refusal,
+func (c *Coordinator) runLateralIdentityLocal(queryID string, lp *statementPlan, start time.Time, refusal error) (*SQLResult, error) {
+	return c.runRefusedLocal(queryID, lp, start, refusal,
 		"a LATERAL whose arm shares a column name with another relation", &c.localLateralIdentity)
 }
 

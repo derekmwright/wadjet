@@ -226,11 +226,18 @@ func (c *Coordinator) resolveQueryLimits(ctx context.Context) *config.QueryLimit
 }
 
 // statementStepTestHook runs at the named steps of ExecuteSQL's decision
-// sequence ("accepted", "validated", "annotated", "enforced", "optimized",
-// "verified", "distributed"). Tests set it to reload the live provider BETWEEN two steps
+// sequence ("accepted", "validated", "vetoed", "annotated", "enforced",
+// "optimized", "verified", "dag-planning", "distributed"; a planning run's
+// steps repeat for each run). Tests set it to reload the live provider BETWEEN two steps
 // of one statement, a schedule no scheduler can be relied on to produce (the
 // auth.bindSwapTestHook pattern). Nil in every non-test build.
 var statementStepTestHook func(step string)
+
+// stageDAGResultTestHook replaces the stage DAG's error in ExecuteSQL, so a
+// test can hand the statement an input-lost failure (the re-execution's
+// trigger) no in-process cluster produces on demand. Nil in every non-test
+// build.
+var stageDAGResultTestHook func(err error) error
 
 // statementGuard reaches the statement's incarnation guard (ADR-0050 §3),
 // which lives on the engine side beside the manifest pin it brackets: the
@@ -418,6 +425,24 @@ type Coordinator struct {
 	// DAG (#308) — every increment is a query the two paths might have
 	// answered differently.
 	localStrictFails atomic.Int64
+	// The dispatch outcomes of a statement's bound plan L (ADR-0050 §1), for
+	// tests and observability beside localHits and localBails:
+	// localSaturated — the fast path's concurrency cap was full;
+	// localSizeDeclined — the scan estimate was unknown or over threshold;
+	// localFellThrough — L was physically planned (and maybe run) and the
+	// statement still went on to the stage DAG (a planning failure, a bail-out
+	// of any kind);
+	// localBuildFailed — L could not be built (any reason, final or not);
+	// routeFreshLocal — a route rebuilt L because the fast path consumed it;
+	// planRuns — complete planning runs (L, D and rebuilt L alike);
+	// vetoRefusals — statements the bound validation refused (§1.1).
+	localSaturated    atomic.Int64
+	localSizeDeclined atomic.Int64
+	localFellThrough  atomic.Int64
+	localBuildFailed  atomic.Int64
+	routeFreshLocal   atomic.Int64
+	planRuns          atomic.Int64
+	vetoRefusals      atomic.Int64
 	// localResultBudgetOverride replaces localResultBudget's derivation in
 	// tests (0 = derive from the routing threshold).
 	localResultBudgetOverride int64
@@ -1117,11 +1142,6 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 		return nil, err
 	}
 
-	selectInfo, err := plansql.ExtractSelect(parsed)
-	if err != nil {
-		return nil, fmt.Errorf("extract: %w", err)
-	}
-
 	// AN EMPTY COLUMN LIST IS NEVER AN ANSWER (sqlerr.EmptyResultColumns).
 	//
 	// Registered HERE and not at the top: above this line the entry still
@@ -1145,9 +1165,10 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 	// (ADR-0050 A1, A2): every decision below — and every lookup and guard
 	// enforcement installs for the plan to ask later — is taken against this
 	// pinned copy, never against the live provider, so a policy reload while
-	// the statement plans or runs applies from the next statement (A4).
-	var stmtAuth *auth.Provider
-	ctx, stmtAuth = c.statementAuth(ctx)
+	// the statement plans or runs applies from the next statement (A4). Every
+	// planning run reads it off ctx (planStatement), so L, D and a rebuilt L
+	// decide under the same one.
+	ctx, _ = c.statementAuth(ctx)
 
 	// The statement reads one relation per table name (ADR-0050 §3, amended
 	// 2026-11-19: with an authorization provider enabled, disabled or
@@ -1172,103 +1193,123 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 	}()
 	statementStep("accepted")
 
-	// The table-function CAPABILITY, BEFORE the binder and before the scan
-	// annotation (ADR-0034, ADR-0039 §3). A denied identity is refused here
-	// with nothing opened, and the context this returns is what lets the
-	// planner read a reader's schema at all.
-	ctx, err = auth.AuthorizeTableFunctions(ctx, stmtAuth, "coordinator", selectInfo)
-	if err != nil {
-		return nil, err
-	}
-
-	// Reject references to columns that resolve to no source (plan-time name
-	// binding), against the schema the CALLING IDENTITY can see — a column an
-	// ABAC policy denies is not in this caller's table, so it is not in the
-	// error's "available:" hint either (#859).
-	if err := auth.ValidateStatementColumns(ctx, stmtAuth, c.catalog, selectInfo, "coordinator"); err != nil {
-		return nil, err
-	}
-	statementStep("validated")
-
-	// Build logical plan
-	logicalPlan, err := logical.BuildFromSelect(selectInfo)
-	if err != nil {
-		if sqlerr.StateOf(err) != "" {
-			// A coded refusal is its own sentence (#1145).
-			return nil, err
-		}
-		return nil, fmt.Errorf("logical plan: %w", err)
-	}
-
-	// Annotate scan columns and optimize — pass scan annotator for IN decorrelation
-	scanAnnotator := func(plan *logical.Node) {
-		physical.NewPlannerForContext(ctx, c.catalog).AnnotateScanColumns(ctx, plan)
-	}
-	scanAnnotator(logicalPlan)
-	statementStep("annotated")
-
-	// ABAC enforcement at plan level — the same auth.EnforcePlanPolicies
-	// the embedded engine applies (table denial, row filters, column
-	// deny/mask), so identities see identical policy behavior on the
-	// distributed and local-fast-path executions. Runs BEFORE Optimize so
-	// every downstream consumer (PlanDistributed and tryLocalFastPath)
-	// sees the enforced plan.
-	if stmtAuth != nil && stmtAuth.Enabled() {
-		// ctx is REBOUND: it carries the column policies onward so the
-		// physical planner applies the same projection to an expression
-		// subquery, which it plans on its own (#859).
-		ctx, logicalPlan, err = auth.EnforcePlanPolicies(ctx, stmtAuth, c.catalog, selectInfo, logicalPlan, "coordinator")
-		if err != nil {
-			return nil, err
-		}
-	} else if rowFilters := auth.RowFiltersFromContext(ctx); len(rowFilters) > 0 {
-		// Legacy path for deployments without a provider wired into the
-		// coordinator: the HTTP server pre-evaluates policies and passes
-		// row filters through context.
-		for table, filter := range rowFilters {
-			logicalPlan = logical.InjectRowFilter(logicalPlan, table, filter)
-		}
-	}
-	statementStep("enforced")
-
-	logicalPlan = logical.OptimizeWith(logicalPlan, c.logicalOptions(), scanAnnotator)
-	// The optimizer MINTS scans; those are created after enforcement (#859).
-	logicalPlan, err = auth.EnforceOptimizedPlan(ctx, c.catalog, logicalPlan)
-	if err != nil {
-		return nil, err
-	}
-	statementStep("optimized")
-	// C2 for every decision enforcement took, the late ones the optimizer
-	// asked included, before any plan is physically planned or run.
-	if err := statementGuard.VerifyIncarnations(ctx); err != nil {
-		return nil, err
-	}
-	statementStep("verified")
-	planStr := logicalPlan.PrettyPrint(0)
-
+	// The statement's planner configuration, read once and given to every
+	// planning run and every physical planner below (ADR-0050 §1 item 1).
+	opts := c.statementPlanOptions(ctx)
 	// EXPLAIN is answered here, not executed. The statement's whole result is
 	// the plan text, and on a server with a coordinator that text has to be
 	// the DAG this coordinator would dispatch — which is why the wire door
-	// routes EXPLAIN to the router at all (explain.go).
-	//
-	// EXPLAIN ANALYZE is not routed: it RUNS the statement and reports what it
-	// measured, which the embedded database still does.
-	if parsed.Type == plansql.QueryExplain && parsed.Explain != nil && !parsed.Explain.Analyze {
-		return c.explainResult(ctx, physical.NewPlannerForContext(ctx, c.catalog),
-			logicalPlan, planStr, parsed.Explain.Verbose), nil
-	}
+	// routes EXPLAIN to the router at all (explain.go). EXPLAIN ANALYZE is not
+	// routed: it RUNS the statement and reports what it measured, which the
+	// embedded database still does. Read off the parse before a planning run
+	// takes it.
+	explain := parsed.Type == plansql.QueryExplain && parsed.Explain != nil && !parsed.Explain.Analyze
+	explainVerbose := explain && parsed.Explain.Verbose
 
+	// THE VETO (ADR-0050 §1.1, maintainer's ruling 2026-11-20): the bound
+	// validation runs first, under the pinned authorization state, on every
+	// synchronous path — the fast path on or off, any size, distributed
+	// EXPLAIN included. If it refuses, the statement is refused: the
+	// coordinator does not go on to answer it from a plan built without
+	// bindings. It is a conservative safeguard, not a claim that the refusal
+	// is right (the validator's false refusals are defects on #1678). An
+	// accepted validation is the first step of L's planning run, which
+	// continues from its parse, bindings and table-function context.
+	veto := c.validateBound(ctx, parsed)
+	// The incarnation check, immediately after the veto, whatever comes next
+	// (§3): the validation can observe a re-created table and record the
+	// mismatch without returning it.
+	if err := checkTransition(ctx, transitionAfterVeto); err != nil {
+		return nil, err
+	}
+	switch veto.outcome {
+	case vetoRefused:
+		c.vetoRefusals.Add(1)
+		return nil, veto.err
+	case vetoAccepted:
+		// Every later run of the statement (D, a rebuilt L) shares the
+		// table-function context the veto took, so a reader input is read
+		// once per statement (the reader-schema probe's cache).
+		ctx = veto.ctx
+	}
+	statementStep("vetoed")
+
+	// L, the BOUND plan (ADR-0050 §1.3 item 2): the plan the embedded engine
+	// builds, for the local paths. It is completed when a local path will
+	// consume it: here when the fast path is enabled, and otherwise by the
+	// route that needs it (localPlans.forRoute). EXPLAIN answers the stage
+	// DAG's plan.
+	//
 	// Small-query fast path: when the plan's total post-pruning scan bytes
 	// stay under the routing threshold, execute in-process on the
-	// coordinator instead of dispatching a stage DAG. The DAG's fixed
-	// costs (task dispatch, object-store materialization per stage
-	// boundary) dominate small queries; the local pipeline answers in
-	// milliseconds. Both paths consume the identical optimized logical
-	// plan, so results and policy enforcement match by construction. A
-	// local failure falls through to the DAG only when it says nothing
-	// about the query's meaning (#308) — see FastPathStrict.
-	if res, handled, err := c.tryLocalFastPath(ctx, queryID, logicalPlan, planStr, start); handled {
-		return res, err
+	// coordinator instead of dispatching a stage DAG. The DAG's fixed costs
+	// (task dispatch, object-store materialization per stage boundary)
+	// dominate small queries; the local pipeline answers in milliseconds. The
+	// two paths consume two plans of the same statement under the same
+	// authorization state, manifest pin and incarnation guard; each answer
+	// comes from one of them whole. A local failure falls through to the DAG
+	// only when it says nothing about the query's meaning (#308) — see
+	// FastPathStrict.
+	local := &localPlans{c: c, ctx: ctx, sql: sql, opts: opts}
+	if veto.outcome == vetoAccepted {
+		local.veto = veto
+	} else {
+		// Not applicable: L could not be planned either; D's run reports why.
+		local.err = veto.err
+	}
+	dTransition := transitionDDirect
+	switch {
+	case explain:
+		dTransition = transitionDExplain
+	case c.localFastPathBytes() > 0 && local.err == nil:
+		local.build()
+		if local.err != nil {
+			// The refusals that end the statement (§1.2) are final. Any
+			// other failure of L after validation skips the fast path, and
+			// the stage DAG plans D as it did before L existed.
+			if final, ok := finalPlanningError(ctx, local.err); ok {
+				return nil, final
+			}
+			c.logger.Debug("bound plan failed to build, skipping the local fast path",
+				"query", queryID, "error", local.err)
+			dTransition = transitionDAfterLFailed
+		} else if res, handled, err := c.tryLocalFastPath(queryID, local.plan, start); handled {
+			return res, err
+		} else if local.plan.consumedBy != "" {
+			// The fast path physically planned L (and maybe ran it), then
+			// handed the statement on: a planning failure or a bail-out.
+			dTransition = transitionDAfterLocalRun
+		} else {
+			dTransition = transitionDAfterDeclined
+		}
+	}
+
+	// D, the UNBOUND plan, for the stage DAG and distributed EXPLAIN (§1.3
+	// item 3): exactly the plan the stage planner has always been given. The
+	// incarnation check runs before it is planned, whichever way the
+	// statement got here (§3).
+	statementStep("dag-planning")
+	if err := checkTransition(ctx, dTransition); err != nil {
+		return nil, err
+	}
+	dplan, err := c.planStatement(ctx, sql, false, opts)
+	if err != nil {
+		return nil, err
+	}
+	// From here down the statement is D's: its rebound context, its text.
+	ctx = dplan.ctx
+	planStr := dplan.text
+	if explain {
+		node, err := dplan.consume("distributed EXPLAIN")
+		if err != nil {
+			return nil, err
+		}
+		return c.explainResult(ctx, physical.NewPlannerForContext(ctx, c.catalog),
+			node, planStr, explainVerbose), nil
+	}
+	logicalPlan, err := dplan.consume("the stage planner")
+	if err != nil {
+		return nil, err
 	}
 
 	statementStep("distributed")
@@ -1283,130 +1324,18 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 	if c.config.BroadcastBytesOverride != 0 {
 		planner.BroadcastBytesThreshold = c.config.BroadcastBytesOverride
 	}
-	planner.SortMergeJoinBytes = c.config.SortMergeJoinBytes
-	planner.LateMaterialization = c.config.LateMaterialization
-	planner.BushyJoinReorder = c.config.BushyJoinReorder
+	planner.SortMergeJoinBytes = opts.sortMergeJoinBytes
+	planner.LateMaterialization = opts.lateMaterialization
+	planner.BushyJoinReorder = opts.bushyJoinReorder
 	planner.DynamicFiltersEnabled = c.config.DynamicFilters
-	planner.QueryLimits = c.resolveQueryLimits(ctx)
+	planner.QueryLimits = opts.queryLimits
 	physStages, err := planner.PlanDistributed(ctx, logicalPlan)
 	if err != nil {
-		// A per-row correlated subquery has no distributed lowering — the
-		// planner refuses it with a typed error rather than letting the
-		// scalar-deferral path answer 0 silently (#359). Route it onto the
-		// coordinator-local single-process pipeline, which owns
-		// correlated-subquery semantics; any failure THERE is the query's
-		// outcome (no DAG plan exists to fall back to).
-		if errors.Is(err, dagplan.ErrCorrelatedSubqueryDistributed) {
-			return c.runCorrelatedLocal(ctx, queryID, logicalPlan, planStr, start, err)
-		}
-		// Same shape one construct over: a DISTINCT the DAG has no stage
-		// for and the post-gather dedup cannot see. The refusal exists so
-		// the DISTINCT is not silently DROPPED (#466) — but the query has
-		// an answer, and the single-process pipeline applies a Distinct
-		// wherever it sits, so route it there rather than erroring.
-		// And a null-aware anti join whose build the plan cannot show every
-		// task sees whole. A partitioned build splits NOT IN's three-valued
-		// fact and the query silently answers its NOT EXISTS twin (#507), so
-		// the invariant refuses rather than dispatch — and the single-process
-		// pipeline, whose one join holds the whole build by construction,
-		// answers it (#539).
-		if errors.Is(err, dagplan.ErrNullAwareAntiBuildNotReplicated) {
-			return c.runNullAwareAntiLocal(ctx, queryID, logicalPlan, planStr, start, err)
-		}
-		if errors.Is(err, dagplan.ErrDistinctDistributed) {
-			return c.runDistinctLocal(ctx, queryID, logicalPlan, planStr, start, err)
-		}
-		// And once more for GROUPING SETS / ROLLUP / CUBE, which the DAG has no
-		// Stage field, no wire tag and no worker read for — so it answered
-		// their union as a plain GROUP BY and dropped every super-aggregate
-		// row, silently (#778). The single-process HashAggregate is the only
-		// operator in the process that knows what a grouping set is.
-		if errors.Is(err, dagplan.ErrGroupingSetsDistributed) {
-			return c.runGroupingSetsLocal(ctx, queryID, logicalPlan, planStr, start, err)
-		}
-		// And a GROUP BY key that needs its resolution name and its published
-		// name to be two different things, which one `Stage.GroupByCols` entry
-		// cannot be. The single-process pipeline carries them separately —
-		// a hidden slot and exec.HashAggregate.GroupByOutNames (ADR-0026 §2) —
-		// so the query has an answer here (#736).
-		if errors.Is(err, dagplan.ErrGroupKeyDistributed) {
-			return c.runGroupKeyLocal(ctx, queryID, logicalPlan, planStr, start, err)
-		}
-		// And once more for an IN-subquery the planner could not materialize
-		// into a literal set — too many rows, or a value with no literal
-		// spelling. The single-process pipeline resolves the set once through
-		// expr.InSubquery and caches it, so the query has an answer here even
-		// though the DAG has no stage for the predicate (#524).
-		if errors.Is(err, dagplan.ErrInSubqueryDistributed) {
-			return c.runInSubqueryLocal(ctx, queryID, logicalPlan, planStr, start, err)
-		}
-		// And a subquery in the SELECT list, whose only distributed lowering
-		// was to ship the SQL text to a worker with no SubqueryRunner and
-		// fail every task (#659). The single-process pipeline compiles it
-		// against a real runner.
-		if errors.Is(err, dagplan.ErrScalarSubqueryProjectionDistributed) {
-			return c.runScalarProjectionLocal(ctx, queryID, logicalPlan, planStr, start, err)
-		}
-		// And a SELECT list no stage computed. The DAG would hand the client
-		// the producer's raw columns under their source names; the
-		// single-process pipeline runs the Project as a real operator
-		// (#656 F2).
-		if errors.Is(err, dagplan.ErrUnreachableGatherOutput) {
-			return c.runUnreachableOutputLocal(ctx, queryID, logicalPlan, planStr, start, err)
-		}
-		// And a star over a derived block whose projection no stage could be
-		// made to publish. Arc K3 materializes that projection onto the stage
-		// for every block it can state (#984); this is the residue — a
-		// computed item with no plan-time type, a producer that cannot carry a
-		// projection — where the star would otherwise publish the STREAM. One
-		// spelling failed loudly under ADR-0010 and the other silently dropped
-		// a column PostgreSQL sends; the single-process pipeline runs the
-		// block's Project as a real operator.
-		if errors.Is(err, dagplan.ErrLateralProjectionDistributed) {
-			return c.runLateralProjectionLocal(ctx, queryID, logicalPlan, planStr, start, err)
-		}
-		// And a SELECT that reads no table at all. Its `dual` stage has no
-		// dependencies and no scan files, so the dispatcher could not build
-		// task inputs for it and every table-less SELECT FAILED on the DAG
-		// (#806). There is nothing to distribute — the answer is one row —
-		// and the dual stage's own comment already says it runs here.
-		if errors.Is(err, dagplan.ErrTableLessSelectDistributed) {
-			return c.runTableLessLocal(ctx, queryID, logicalPlan, planStr, start, err)
-		}
-		// And a stage the dispatcher could not build task inputs for. #806
-		// was one producer of that shape and #812 is another — a scalar
-		// subquery over a CTE in a WHERE clause, whose substitution leaves a
-		// stage naming neither a dependency nor a table. The query answers
-		// here, where the CTE is a real operator, instead of failing three
-		// task attempts later with an internal message and no SQLSTATE.
-		if errors.Is(err, dagplan.ErrUnbuildableStageDistributed) {
-			return c.runUnbuildableStageLocal(ctx, queryID, logicalPlan, planStr, start, err)
-		}
-		// And a join residual whose stage re-spelling would read both of the
-		// sides it compares from ONE arm (arc DC): emitted, EXISTS
-		// answered no rows and NOT EXISTS every row. The single-process
-		// pipeline binds each leaf through its own arm.
-		if errors.Is(err, dagplan.ErrResidualSidesMergedDistributed) {
-			return c.runResidualSidesLocal(ctx, queryID, logicalPlan, planStr, start, err)
-		}
-		// And a window over a policed scan that feeds a join (arc LT): the
-		// four DAG doors answered the STORED column's pairing under the mask.
-		// The single-process pipeline answers the mask on every door.
-		if errors.Is(err, dagplan.ErrPolicedWindowUnderJoinDistributed) {
-			return c.runPolicedWindowLocal(ctx, queryID, logicalPlan, planStr, start, err)
-		}
-		// And a window above a LATERAL join (arc LT): the DAG binds
-		// its key to the outer occurrence; the single-process pipeline
-		// answers PostgreSQL's rows.
-		if errors.Is(err, dagplan.ErrWindowOverLateralDistributed) {
-			return c.runWindowOverLateralLocal(ctx, queryID, logicalPlan, planStr, start, err)
-		}
-		// And a correlated LATERAL whose arm shares a column name with another
-		// relation (arc JP): the DAG re-spells the body's names onto
-		// its scan stream and a lost qualifier binds the other relation's
-		// column. The single-process pipeline runs the body as written.
-		if errors.Is(err, dagplan.ErrLateralIdentityDistributed) {
-			return c.runLateralIdentityLocal(ctx, queryID, logicalPlan, planStr, start, err)
+		// A plan the stage DAG refused, for a construct the single-process
+		// pipeline answers, runs there: on the statement's bound plan L
+		// (ADR-0050 §1 item 4; dagRefusalRoute names each construct).
+		if route := c.dagRefusalRoute(err); route != nil {
+			return c.runRoute(local, queryID, start, err, route)
 		}
 		// An authorization refusal is not a planning narrative: it reaches
 		// the client as the decision's own sentence, the same one the
@@ -1446,12 +1375,12 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 	// which is the same accounting that put these checks on every plan.
 	if verr := dagplan.ValidateNativeDAGShape(physStages); verr != nil &&
 		errors.Is(verr, dagplan.ErrUnreachableGatherOutput) {
-		return c.runUnreachableOutputLocal(ctx, queryID, logicalPlan, planStr, start, verr)
+		return c.runRoute(local, queryID, start, verr, c.runUnreachableOutputLocal)
 	}
 
 	queryCats, catLoss := dagPGCategories(logicalPlan, physStages)
 	if catLoss != "" {
-		return c.runUnreachableOutputLocal(ctx, queryID, logicalPlan, planStr, start, errCategoryByName(catLoss))
+		return c.runRoute(local, queryID, start, errCategoryByName(catLoss), c.runUnreachableOutputLocal)
 	}
 	c.logger.Info("routing to native DAG executor",
 		"query", queryID, "stages", len(physStages))
@@ -1462,6 +1391,9 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 		return nil, err
 	}
 	gr, gerr := c.executeStageDAG(ctx, queryID, sql, physStages, c.workers.Count())
+	if stageDAGResultTestHook != nil {
+		gerr = stageDAGResultTestHook(gerr)
+	}
 	if gerr != nil {
 		// ErrInputLost: a producer died before its background upload landed
 		// and its output is unrecoverable by task retry. Reads are
@@ -1470,6 +1402,10 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 		// disabled — the fast-path bail-out pattern one level up. The ctx
 		// flag caps the depth at one.
 		if IsInputLostErr(gerr) && c.peerFiles != nil && !streamingExchangeDisabled(ctx) {
+			// The incarnation check before it re-enters (ADR-0050 §3).
+			if err := checkTransition(ctx, transitionInputLostRerun); err != nil {
+				return nil, err
+			}
 			c.streamingReruns.Add(1)
 			c.logger.Warn("streaming-exchange input lost; re-executing query with streaming disabled",
 				"query", queryID, "error", gerr)

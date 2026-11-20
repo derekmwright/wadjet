@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"sync/atomic"
 
 	"github.com/derekmwright/wadjet/internal/storage/catalog"
@@ -52,6 +53,13 @@ type Provider struct {
 	// pinned marks a per-statement copy made by Pin. Nothing writes one:
 	// BindToCatalog and installState refuse on it (ADR-0050 A1).
 	pinned bool
+	// audited remembers, on a pinned copy only, the column-policy decisions
+	// already recorded for its statement. A coordinator statement can run
+	// enforcement more than once (a bound plan for its local paths, an
+	// unbound one for the stage DAG, a fresh bound one for a route), and
+	// every run decides from this one state, so a second record would only
+	// repeat the first: one audit record per statement (ADR-0050 §2).
+	audited *sync.Map
 }
 
 // bindSwapAttempts bounds the CAS retry in BindToCatalog. A retry happens only
@@ -175,7 +183,7 @@ func (p *Provider) Pin() *Provider {
 		if p.state.Load() != st {
 			continue
 		}
-		c := &Provider{logger: p.logger, audit: p.audit, pinned: true}
+		c := &Provider{logger: p.logger, audit: p.audit, pinned: true, audited: &sync.Map{}}
 		c.state.Store(st)
 		c.bindErr.Store(be)
 		return c

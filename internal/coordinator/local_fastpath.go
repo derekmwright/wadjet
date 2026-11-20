@@ -3,7 +3,6 @@
 package coordinator
 
 import (
-	"context"
 	"errors"
 	"time"
 
@@ -11,7 +10,6 @@ import (
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/engine/memory"
 	"github.com/derekmwright/wadjet/internal/optswitch"
-	"github.com/derekmwright/wadjet/internal/planner/logical"
 	"github.com/derekmwright/wadjet/internal/planner/physical"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
@@ -147,10 +145,14 @@ func (c *Coordinator) LocalFastPathStrictFailures() int64 {
 // input size is unestimable or over threshold, local PLANNING failed, or
 // execution failed in a way unrelated to the query's meaning.
 //
-// The logical plan passed here is the final optimized plan — identical to
-// what PlanDistributed would consume — so both paths see the same RLS row
-// filters and rewrites, and answer identically by construction.
-func (c *Coordinator) tryLocalFastPath(ctx context.Context, queryID string, logicalPlan *logical.Node, planStr string, start time.Time) (*SQLResult, bool, error) {
+// lp is the statement's BOUND plan L (ADR-0050 §1 item 2), planned the way
+// the embedded engine plans it, and run under the context its own enforcement
+// rebound. Physical planning consumes it: once the fast path has planned it,
+// a route that needs L builds a fresh one (localPlans.forRoute). The scan
+// estimate only reads the plan (EstimatePlanScanBytes walks it and mutates
+// nothing), so a size-declined L is left unconsumed for a route to run.
+func (c *Coordinator) tryLocalFastPath(queryID string, lp *statementPlan, start time.Time) (*SQLResult, bool, error) {
+	ctx := lp.ctx
 	threshold := c.localFastPathBytes()
 	if threshold <= 0 {
 		return nil, false, nil
@@ -159,6 +161,7 @@ func (c *Coordinator) tryLocalFastPath(ctx context.Context, queryID string, logi
 	case c.localSem <- struct{}{}:
 		defer func() { <-c.localSem }()
 	default:
+		c.localSaturated.Add(1)
 		c.logger.Debug("local fast path saturated, routing to DAG", "query", queryID)
 		return nil, false, nil
 	}
@@ -170,8 +173,9 @@ func (c *Coordinator) tryLocalFastPath(ctx context.Context, queryID string, logi
 	// re-reading the catalog for every table this fast-path attempt
 	// touches.
 	planner := physical.NewPlannerForContext(ctx, c.catalog)
-	estBytes, ok := planner.EstimatePlanScanBytes(ctx, logicalPlan)
+	estBytes, ok := planner.EstimatePlanScanBytes(ctx, lp.node)
 	if !ok || estBytes > threshold {
+		c.localSizeDeclined.Add(1)
 		return nil, false, nil
 	}
 
@@ -179,32 +183,31 @@ func (c *Coordinator) tryLocalFastPath(ctx context.Context, queryID string, logi
 	// resident operator state, so a misestimate degrades to disk instead
 	// of coordinator OOM.
 	planner.MemoryBudget = 8 * threshold
-	planner.SortMergeJoinBytes = c.config.SortMergeJoinBytes
-	planner.LateMaterialization = c.config.LateMaterialization
-	planner.BushyJoinReorder = c.config.BushyJoinReorder
-	planner.QueryLimits = c.resolveQueryLimits(ctx)
+	lp.opts.applyLocal(planner)
+	logicalPlan, err := lp.consume("the local fast path")
+	if err != nil {
+		return nil, true, err
+	}
 	physPlan, err := planner.Plan(ctx, logicalPlan)
 	if err != nil {
-		// A cost-guard rejection is the one planning failure that is a
-		// DECISION, not a shape the DAG might cover: the same limits are
-		// installed on the distributed planner, so re-planning there
-		// reproduces it exactly. Report it here instead of logging a
-		// misleading "routing to DAG" for a deliberate refusal (#803).
-		if sqlerr.StateOf(err) == physical.QueryLimitSQLState {
-			return nil, true, err
-		}
-		// An AUTHORIZATION refusal is final (ADR-0050 A3): the statement is
-		// refused, with the decision's own sentence, and no other plan is
-		// built or run in its place. Routing it to the DAG asked a second
-		// planner the question the first had already answered no to.
-		if refusal, ok := authorizationRefusal(err); ok {
-			return nil, true, refusal
+		// The refusals that end the statement once observed (ADR-0050 §1.2):
+		//   - a cost-guard rejection is a DECISION, not a shape the DAG might
+		//     cover: the same limits are installed on the distributed
+		//     planner, so re-planning there reproduces it exactly; it is
+		//     reported here instead of a misleading "routing to DAG" (#803);
+		//   - an AUTHORIZATION refusal (A3), with the decision's own sentence:
+		//     routing it to the DAG asked a second planner the question the
+		//     first had already answered no to;
+		//   - the incarnation refusal (C3) and the statement's cancellation.
+		if final, _, ok := terminalPlanningRefusal(err, ctx.Err()); ok {
+			return nil, true, final
 		}
 		// Nor is a statement whose decisions were about another relation
 		// handed to a second plan (ADR-0050 C3).
 		if verr := statementGuard.VerifyIncarnations(ctx); verr != nil {
 			return nil, true, verr
 		}
+		c.localFellThrough.Add(1)
 		c.logger.Warn("local fast path plan failed, routing to DAG",
 			"query", queryID, "error", err)
 		return nil, false, nil
@@ -219,6 +222,7 @@ func (c *Coordinator) tryLocalFastPath(ctx context.Context, queryID string, logi
 		if verr := statementGuard.VerifyIncarnations(ctx); verr != nil {
 			return nil, true, verr // ADR-0050 C3
 		}
+		c.localFellThrough.Add(1)
 		c.logger.Warn("local fast path: unexpected sink type, routing to DAG",
 			"query", queryID)
 		return nil, false, nil
@@ -257,6 +261,7 @@ func (c *Coordinator) tryLocalFastPath(ctx context.Context, queryID string, logi
 		if verr := statementGuard.VerifyIncarnations(ctx); verr != nil {
 			return nil, true, verr
 		}
+		c.localFellThrough.Add(1)
 		if budget {
 			c.logger.Info("local fast path result over budget, re-dispatching as DAG",
 				"query", queryID, "budget_bytes", sink.MaxBytes)
@@ -287,7 +292,7 @@ func (c *Coordinator) tryLocalFastPath(ctx context.Context, queryID string, logi
 		Batches:   batches,
 		TotalRows: totalRows,
 		Elapsed:   time.Since(start),
-		Plan:      planStr,
+		Plan:      lp.text,
 		// The sink's schema, not the batches': a zero-row result has no
 		// batch to read it off, and the wire still has to declare types.
 		Schema: sink.Schema(),

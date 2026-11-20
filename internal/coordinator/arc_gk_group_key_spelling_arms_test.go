@@ -419,6 +419,28 @@ func gkBaseStates(t *testing.T) map[string]map[string]string {
 	return out
 }
 
+// gkMovedDAGStates is the DAG arms' SQLSTATE for the cells ADR-0050 §1
+// (revised 2026-11-20) moved: a statement the bound validation refuses is
+// refused on the stage DAG too, and a routed statement runs the bound plan.
+// Measured at its build; the base file stays as it was measured, and a DAG arm
+// listed here is compared with this line instead of the base's.
+func gkMovedDAGStates(t *testing.T) map[string]map[string]string {
+	t.Helper()
+	out := map[string]map[string]string{}
+	arms := []string{"dag", "dag-shuffled", "dag-morsel4"}
+	for name, rest := range gkReadTSV(t, "testdata/arc_gk_adr0050_dag_sqlstates.tsv", 4) {
+		states := strings.Split(rest, "\t")
+		if len(states) != len(arms) {
+			t.Fatalf("moved DAG SQLSTATE row %s has %d arms", name, len(states))
+		}
+		out[name] = map[string]string{}
+		for i, arm := range arms {
+			out[name][arm] = states[i]
+		}
+	}
+	return out
+}
+
 func (k gkKeep) holdsOn(arm string) bool {
 	dag := strings.HasPrefix(arm, "dag")
 	switch k.arms {
@@ -502,6 +524,7 @@ func TestArcGKGroupKeySpellingEveryArm(t *testing.T) {
 	}
 	kept := gkKeptLines(t)
 	baseStates := gkBaseStates(t)
+	movedStates := gkMovedDAGStates(t)
 	for name, ks := range kept {
 		if !seen[name] {
 			t.Fatalf("kept cell %s is not in the table", name)
@@ -557,6 +580,10 @@ func TestArcGKGroupKeySpellingEveryArm(t *testing.T) {
 				if !measured {
 					t.Fatalf("%s/%s has no measured base SQLSTATE", tc.name, arm.name)
 				}
+				dagState := baseState
+				if s, ok := movedStates[tc.name][arm.name]; ok {
+					dagState = s
+				}
 				for _, k := range ks {
 					if k.holdsOn(arm.name) {
 						want, why, skip, unordered = k.want, "kept: "+k.why, k.arms == "skip", k.unordered
@@ -565,8 +592,8 @@ func TestArcGKGroupKeySpellingEveryArm(t *testing.T) {
 						}
 					}
 				}
-				if strings.HasPrefix(arm.name, "dag") && gkSQLState(got[i]) != baseState {
-					t.Errorf("%s/%s: DAG SQLSTATE %s, base %s", tc.name, arm.name, gkSQLState(got[i]), baseState)
+				if strings.HasPrefix(arm.name, "dag") && gkSQLState(got[i]) != dagState {
+					t.Errorf("%s/%s: DAG SQLSTATE %s, measured %s", tc.name, arm.name, gkSQLState(got[i]), dagState)
 				}
 				if baseState == gkSQLState(pgWant) && gkSQLState(got[i]) != baseState {
 					t.Errorf("%s/%s: base matched PostgreSQL SQLSTATE %s, got %s", tc.name, arm.name, baseState, gkSQLState(got[i]))

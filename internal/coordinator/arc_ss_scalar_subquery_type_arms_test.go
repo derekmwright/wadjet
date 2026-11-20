@@ -530,12 +530,17 @@ func ssRunSingle(ctx context.Context, db *wadjet.DB, sql string, ordered bool) (
 }
 
 func ssRunDAG(ctx context.Context, coord *Coordinator, sql string, ordered bool) (out string, err error) {
+	var dumpSchema []parquet.Column
 	defer func() {
 		if r := recover(); r != nil {
 			out, err = "", fmt.Errorf("PANIC: %v", r)
 		}
+		armDumpRecord(coord, sql, dumpSchema, out, err)
 	}()
 	res, qerr := coord.ExecuteSQL(ctx, sql)
+	if qerr == nil && res != nil {
+		dumpSchema = res.OutputSchema()
+	}
 	if qerr != nil {
 		return "", qerr
 	}
@@ -588,6 +593,9 @@ func ssArms(t *testing.T, ctx context.Context) []ssArm {
 	coord := stand(nil)
 	coordB := stand(nil, func(c *Config) { c.BroadcastBytesOverride = 1 })
 	coordM := stand(func(w *worker.Config) { w.MorselWorkers = 4 })
+	armDumpName(coord, "dag")
+	armDumpName(coordB, "dag-shuffled")
+	armDumpName(coordM, "dag-morsel4")
 	s := func(db *wadjet.DB) func(string, bool) (string, error) {
 		return func(sql string, o bool) (string, error) { return ssRunSingle(ctx, db, sql, o) }
 	}

@@ -322,6 +322,15 @@ func auditColumnDecision(provider *Provider, identity *Identity, table string, c
 			masked = append(masked, p.Column)
 		}
 	}
+	// A pinned per-statement state records each decision once, however many
+	// planning runs of its statement take it (Provider.audited).
+	if provider.audited != nil {
+		key := strings.Join([]string{identity.Name, identity.Role, strings.ToLower(table),
+			strings.Join(masked, ","), strings.Join(denied, ",")}, "\x00")
+		if _, seen := provider.audited.LoadOrStore(key, struct{}{}); seen {
+			return
+		}
+	}
 	audit.LogColumnPolicy(identity, table, masked, denied)
 }
 

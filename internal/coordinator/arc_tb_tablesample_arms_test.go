@@ -623,6 +623,7 @@ func tbRunDAG(ctx context.Context, c *Coordinator, sql string) (out string) {
 		if r := recover(); r != nil {
 			out = fmt.Sprintf("PANIC %v", r)
 		}
+		armDumpRecord(c, sql, nil, out, nil)
 	}()
 	res, err := c.ExecuteSQL(ctx, sql)
 	if err != nil {
