@@ -143,7 +143,20 @@ The repair is not this record's: an enforceable restore boundary that excludes c
 
 **Doors not covered (measured or read at the extension's landing, f6f62320).** The embedded doors and the HTTP door's own local path show the same race, measured (`SELECT id, owner` answers `owner = NULL`). The async door's workers re-plan the statement's text at task time against the live catalog, so a coordinator-side check cannot prove the rows there; covering it needs each task to carry the pinned incarnation. Both are lines on #1676.
 
-**Where the check sits.** At the catalog's table-record read, under the statement's context: a record read pins the manifest and compares that exact record's incarnation with the pin's, so any record the statement uses was of the pinned incarnation, whichever of the two reads came first. Measured cost: no added catalog read per statement, and no measurable planning time on the 22 TPC-H statements.
+**Where the check sits.** At the catalog's table-record read, under the statement's context: a record read pins the manifest and compares that exact record's incarnation with the pin's, so any record the statement uses was of the pinned incarnation, whichever of the two reads came first. Measured cost of this mechanism alone, at its landing (f6f62320): no added catalog read per statement, and no measurable planning time on the 22 TPC-H statements.
+
+**Cost of the statement as section 1 builds it** (measured on the build, 2026-11-20; the sentence above is not true of a whole statement any more). The veto's bound validation reads each table's record and metadata before `D`'s own validation reads them again. Catalog reads per statement, base to build (table-record reads / metadata reads; manifest reads unchanged):
+
+| | Single table | Three-table join |
+|---|---|---|
+| Fast path, no provider or provider disabled | 6 / 5, unchanged | 18 / 15, unchanged |
+| Fast path, provider enabled | 11 / 13 to 12 / 13 | 29 / 37 to 32 / 37 |
+| Stage DAG, no provider or provider disabled | 6 / 6 to 7 / 8 | 21 / 18 to 24 / 24 |
+| Stage DAG, provider enabled | 11 / 14 to 13 / 18 | 31 / 40 to 37 / 52 |
+
+With the veto's bind removed, the stage-DAG rows return exactly to the base figures, so those reads are the veto's. The one added record read per table on the fast path under an enabled provider is not explained (a hypothesis only: the bind now sits outside `L`'s run and no longer shares a read). Planning time on TPC-H SF0.01, base to build: fast path off, median of per-query medians 3.93 to 5.52 ms, worst 10.6 to 21.6 ms; fast path on, 4.17 to 4.77 ms, worst 12.4 to 9.7 ms. These were measured against an in-process catalog store; against a remote store each read is a network round trip, so the read counts, not the milliseconds, are the figure to carry.
+
+At a route's entry, at `D` after a local run and at the input-lost re-execution, the check re-reads the record of every pinned table: a table read only by the veto is otherwise not read again before the route's pipeline reads it, and the route would run. That is one record read per pinned table on routed and fall-through statements only; the figure is read from the source and not measured. The other transitions directly follow a validation's or a planning run's reads and add none.
 
 ## What is out
 
