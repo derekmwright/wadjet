@@ -196,9 +196,13 @@ func nearestFunc(name string) string {
 		// The `||` OPERATOR's implementation is in the registry but is not a
 		// function anyone may call (checkKnown refuses it), so suggesting it
 		// answered `unknown function: || (did you mean ||?)` — the index
-		// proposing the very name it had just refused. Nothing else in the
-		// registry is unspellable, so this is the whole exclusion (#609).
-		if cand == ConcatOpFunc {
+		// proposing the very name it had just refused (#609). The registry
+		// key of like_escape(text, text) is the other unspellable name: the
+		// parser refuses it as written and reaches it only from PostgreSQL's
+		// `like_escape(p, e)`, so suggesting it named an internal key the
+		// query could not use (#1209). Nothing else in the registry is
+		// unspellable, so these two are the whole exclusion.
+		if cand == ConcatOpFunc || cand == plansql.LikeEscapeTextFunc {
 			continue
 		}
 		// Length alone rules out most of a 300-entry registry.

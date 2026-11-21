@@ -200,6 +200,38 @@ func TestNearestFuncSuggestion(t *testing.T) {
 	}
 }
 
+// TestNearestFuncNeverSuggestsAnUnspellableKey: the registry holds two names a
+// query cannot call — the `||` operator's implementation and the key of
+// like_escape(text, text) — and the did-you-mean index must propose neither.
+// A misspelling near the like_escape key answered `unknown function:
+// like_escape_text (did you mean __like_escape_text?)`, naming a key the
+// parser refuses as written (#1209). A misspelling of like_escape itself still
+// gets like_escape, the name PostgreSQL's function is called by.
+func TestNearestFuncNeverSuggestsAnUnspellableKey(t *testing.T) {
+	if !DefaultRegistry.Has(plansql.LikeEscapeTextFunc) {
+		t.Fatalf("%s is not registered; this test would pass vacuously", plansql.LikeEscapeTextFunc)
+	}
+	for _, name := range []string{
+		"like_escape_text", "_like_escape_text", "__like_escape_tex",
+		"__like_escape_texts", "_like_escape_tex", "__like_escape_tet",
+	} {
+		err := checkKnown(name)
+		if err == nil {
+			t.Errorf("%s must fail", name)
+			continue
+		}
+		if strings.Contains(err.Error(), "did you mean "+plansql.LikeEscapeTextFunc) {
+			t.Errorf("%s: the message suggests the registry key: %q", name, err.Error())
+		}
+	}
+	for _, name := range []string{"like_escap", "like_escapes", "lik_escape"} {
+		err := checkKnown(name)
+		if err == nil || !strings.Contains(err.Error(), "(did you mean like_escape?)") {
+			t.Errorf("%s: want a like_escape suggestion, got %v", name, err)
+		}
+	}
+}
+
 // TestPgCompatShimsRegistered pins the introspection surface the #341
 // inventory found reaching the compiler. Each of these answered NULL before,
 // and each would START ERRORING without a shim — that is the blast radius the
