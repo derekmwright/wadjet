@@ -718,7 +718,15 @@ hook still orders: the base's verdict, kept live),
 
 **What it costs.** Under a budget, a scan that defers once loses its decode
 overlap for the rest of its life: its row groups decode serially on the
-consumer's goroutine. [[COST]] Verdicts move only from refusal to answer on
+consumer's goroutine. Measured on TPC-H SF0.01, 22 queries, three interleaved
+base/tip rounds of two passes each: with NO budget 555 ms base against 547 ms
+tip (the rule is one branch there); at 8 MiB 750 against 711 ms; at 2 MiB
+1.95-8.01 s with one query refused in five of six passes at the base, against
+1.57-1.70 s with none refused at the tip — the base's time there was the load
+admission's 2 s waits behind its read-ahead. The micro-benchmarks of the
+changed packages (`internal/planner/physical`, the `HashJoin` benchmarks of
+`internal/engine/exec`) moved within their noise (no benchmark at p < 0.05,
+geomean +3% on a shared host). Verdicts move only from refusal to answer on
 what was measured: the embedded `forced_refusal` fixture (a 60,000-row
 self-join), which refused at every budget from 384 KiB down at the base — every
 refusal `largest: … by "scan decoded batch"` — answers at every budget from
