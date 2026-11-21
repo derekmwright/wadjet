@@ -14,8 +14,10 @@
 #
 # The lanes are tooling/battery_run.sh's, run as separate parallel processes
 # with one log each, plus: lane F (./internal/coordinator/ no -short) split
-# into four round-robin -run shards F1..F4, and HOOK, the pre-push hook's
-# command. The two PostgreSQL oracle arms (PG1, PG2) run after the lanes, as
+# into eight round-robin -run shards F1..F8 (four until 2026-11-21, when the
+# slowest shard reached 33 of the soft watchdog's 35 minutes), FCOVER, which
+# fails unless every listed coordinator test name is in exactly one shard, and
+# HOOK, the pre-push hook's command. The two PostgreSQL oracle arms (PG1, PG2) run after the lanes, as
 # the battery runs them, in parallel with each other (each starts its own
 # uniquely named container on an ephemeral port).
 #
@@ -208,13 +210,32 @@ want B B && lane B go test -count=1 -p 2 ./internal/engine/... ./internal/planne
 want C C && lane C bash -c "go test -count=1 -run 'TestTPCHQueries$|TestTPCHOptimizationInvariance$|TestTPCHStageDumpGolden|TestTPCH_EnsureDistribution_Snapshot|TestTPCHDistributionConsistency|TestDuckDBCompare' ./benchmarks/tpch/ -timeout 20m && go test -count=1 -run 'TestTPCHQueriesDecimal|TestTPCHDecimalDeclaredTypes|TestTPCHOptimizationInvarianceDecimal|TestTwoPathInvarianceDecimal' ./benchmarks/tpch/ -timeout 20m"
 want D D && lane D bash -c "go test -count=1 -run TestStandaloneVsDistributedDifferential ./internal/coordinator/ -timeout 20m && go test -count=1 -run 'TestTypeMatrix|TestNumericArc2' ./internal/coordinator/ -timeout 25m"
 want E E && lane E go test -count=1 -run 'TestTypeMatrix|TestQueryPanicBoundary' ./wadjet/ -timeout 25m
-if want F1 F || want F2 F || want F3 F || want F4 F; then
-  # Lane F sharded: every top-level test/fuzz/example name, round-robin into four -run lists.
+FSHARDS=8
+want_any_f() { local k; for k in $(seq 1 "$FSHARDS"); do want "F$k" F && return 0; done; return 1; }
+if want_any_f; then
+  # Lane F sharded: every top-level test/fuzz/example name, round-robin into FSHARDS -run lists.
   go test -list . ./internal/coordinator/ 2>"$OUT/logs/F-list.log" | grep -E '^(Test|Fuzz|Example)' > "$OUT/F.names"
   echo "$(wc -l < "$OUT/F.names") coordinator test names" >> "$OUT/logs/F-list.log"
-  for k in 1 2 3 4; do
+  for k in $(seq 1 "$FSHARDS"); do
+    awk -v k="$k" -v n="$FSHARDS" 'NR % n == k % n' "$OUT/F.names" > "$OUT/F.names.$k"
+    echo "F$k: $(wc -l < "$OUT/F.names.$k") names" >> "$OUT/logs/F-list.log"
+  done
+  # FCOVER: the shards together are the list, each name once, and the list is not empty.
+  # A sharding mistake must turn the gate red, never leave tests silently unrun.
+  want FCOVER F && lane FCOVER bash -c '
+    out=$0
+    [ -s "$out/F.names" ] || { echo "the coordinator test list is empty"; exit 1; }
+    cat "$out"/F.names.[0-9]* | sort > "$out/F.shards.sorted"
+    sort "$out/F.names" > "$out/F.names.sorted"
+    dup=$(uniq -d "$out/F.shards.sorted" | wc -l)
+    cmp -s "$out/F.shards.sorted" "$out/F.names.sorted" && [ "$dup" = 0 ] && {
+      echo "$(wc -l < "$out/F.names.sorted") names, each in exactly one shard"; exit 0; }
+    echo "shards do not cover the list exactly once (duplicates: $dup)"
+    diff "$out/F.names.sorted" "$out/F.shards.sorted" | head -40
+    exit 1' "$OUT"
+  for k in $(seq 1 "$FSHARDS"); do
     want "F$k" F || continue
-    re=$(awk -v k="$k" 'NR % 4 == k % 4' "$OUT/F.names" | paste -sd'|')
+    re=$(paste -sd'|' "$OUT/F.names.$k")
     [ -n "$re" ] && lane "F$k" go test -count=1 -run "^($re)\$" ./internal/coordinator/ -timeout 60m
   done
 fi

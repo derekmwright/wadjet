@@ -69,10 +69,12 @@ gaterun.sh [--evidence DIR] [--rerun-flakes[=T1,T2]] <sha> [lanes]
 - `<sha>`: any commit in the repository (a branch tip in any worktree). It is pushed as the plain ref
   `refs/gates/<sha>` (no branch; `--no-verify` because the box runs the hook's race command itself;
   the hook's AI-trailer refusal is repeated first).
-- `lanes`: `all` (default) or a comma list of `gofmt A B C D E F F1 F2 F3 F4 G HOOK PG PG1 PG2`
-  (`F` = the four coordinator shards, `PG` = both oracle arms). Lanes A–G and gofmt are
-  `tooling/battery_run.sh`'s commands verbatim; `F1..F4` are lane F split round-robin over
-  `go test -list . ./internal/coordinator/`; `HOOK` is `go test -race -short ./internal/... -timeout 10m`;
+- `lanes`: `all` (default) or a comma list of `gofmt A B C D E F F1 … F8 FCOVER G HOOK PG PG1 PG2`
+  (`F` = the eight coordinator shards and `FCOVER`, `PG` = both oracle arms). Lanes A–G and gofmt are
+  `tooling/battery_run.sh`'s commands verbatim; `F1..F8` are lane F split round-robin over
+  `go test -list . ./internal/coordinator/` (four shards until 2026-11-21, when the slowest reached 33 of
+  the soft watchdog's 35 minutes); `FCOVER` fails unless every listed test name is in exactly one shard,
+  so a sharding mistake reddens the gate instead of leaving tests unrun; `HOOK` is `go test -race -short ./internal/... -timeout 10m`;
   `PG1`/`PG2` are `task pg-oracle:test` and `task pg-oracle:test-decimal`, run after the other lanes
   (an arm that SKIPs for want of PostgreSQL is recorded as a failure).
 - `--rerun-flakes`: a listed test that fails is rerun ALONE on the same box after all lanes; a lane
