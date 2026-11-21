@@ -95,6 +95,18 @@ func refuseByteaLiterals(e plansql.Node, scope *colScope) error {
 // refuseByteaAmong raises byteain's refusal of the first quoted literal among
 // ops when every other operand is provably bytea (at least one).
 func refuseByteaAmong(scope *colScope, ops []plansql.Node) error {
+	// No quoted literal among them: nothing to refuse, and no operand is
+	// typed to find that out.
+	anyLit := false
+	for _, o := range ops {
+		if l, ok := unwrapParens(o).(*plansql.Lit); ok && l.Kind == plansql.LitString {
+			anyLit = true
+			break
+		}
+	}
+	if !anyLit {
+		return nil
+	}
 	bytea := false
 	var lits []*plansql.Lit
 	for _, o := range ops {

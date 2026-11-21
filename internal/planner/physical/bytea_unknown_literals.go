@@ -40,6 +40,15 @@ import (
 // reason: every entry calls it, the optimizer calls it again after its
 // rewrites, and a typed literal is a CAST no rule here matches again, so a
 // second run changes nothing.
+//
+// FREE FOR A STATEMENT IT CANNOT CHANGE: a declaration is computed only for
+// a construct that holds a quoted literal as one of the operands it would
+// cast (byteaLiteralCandidate, a syntactic test over the expression; for a
+// set operation, a quoted-literal select item in an arm), and every
+// declaration it does compute is one walk's, memoized for the pass. A join
+// computed both sides' declarations for every join of every statement, which
+// a twelve-way join paid as 264 declaration computations on top of its
+// planning (TestArcCI2DeclarationPlanningBound, #1590 r4).
 func (p *Planner) typeByteaLiterals(root *logical.Node) {
 	if p == nil || root == nil {
 		return
@@ -89,7 +98,7 @@ func (p *Planner) typeByteaLiterals(root *logical.Node) {
 				return false
 			}
 			changed := keys.respell(e)
-			if !hasQuotedLiteral(e) {
+			if !byteaLiteralCandidate(e) {
 				return changed
 			}
 			return typeByteaLiteralsIn(e, in()) || changed
@@ -118,13 +127,23 @@ func (p *Planner) typeByteaLiterals(root *logical.Node) {
 		// over a derived `COALESCE(b, '\x6869') AS x` compared a typed value
 		// with a spelled one.
 		if n.Type == logical.NodeJoin {
-			jd := joinSideDecls(w, n)
+			// The sides' declarations only for a text that holds a
+			// candidate literal: a join whose condition and keys hold none
+			// computes nothing.
+			var jd ColDecls
+			jdReady := false
 			typeText := func(s string) string {
 				if s == "" || !strings.Contains(s, "'") {
 					return s
 				}
 				e := parseJoinCondExpr(s)
-				if e == nil || !typeByteaLiteralsIn(e, jd) {
+				if e == nil || !byteaLiteralCandidate(e) {
+					return s
+				}
+				if !jdReady {
+					jd, jdReady = joinSideDecls(w, n), true
+				}
+				if !typeByteaLiteralsIn(e, jd) {
 					return s
 				}
 				return e.String()
@@ -182,7 +201,7 @@ func (p *Planner) typeByteaLiterals(root *logical.Node) {
 		if n.Type == logical.NodeAggregate {
 			keys = nil
 			for i, g := range n.GroupByExprs {
-				if g == nil || !hasQuotedLiteral(g) {
+				if g == nil || !byteaLiteralCandidate(g) {
 					continue
 				}
 				before := g.String()
@@ -310,17 +329,52 @@ func (k *byteaGroupKeys) respell(e plansql.Node) bool {
 	return changed
 }
 
-// hasQuotedLiteral is the cheap gate: an expression with no quoted literal is
-// left without a declaration walk.
-func hasQuotedLiteral(e plansql.Node) bool {
+// byteaLiteralCandidate is the cheap gate, syntactic only: it reports that
+// some construct in e which typeByteaLiteralsIn would type holds a quoted
+// literal among the very operands it would cast. typeByteaLiteralsIn casts
+// nothing else (castByteaLiterals replaces only a direct, unparenthesized
+// quoted literal operand of those constructs), so an expression this rejects
+// is one it cannot change, and it is left without asking for a declaration.
+// It walks the operands typeByteaLiteralsIn walks, through exprOperands.
+func byteaLiteralCandidate(e plansql.Node) bool {
+	quoted := func(ops ...plansql.Node) bool {
+		for _, o := range ops {
+			if o == nil {
+				continue
+			}
+			if l, ok := plansql.Unparen(o).(*plansql.Lit); ok && l.Kind == plansql.LitString {
+				return true
+			}
+		}
+		return false
+	}
 	found := false
 	var walk func(plansql.Node)
 	walk = func(n plansql.Node) {
 		if n == nil || found {
 			return
 		}
-		if lit, ok := n.(*plansql.Lit); ok && lit.Kind == plansql.LitString {
-			found = true
+		switch v := n.(type) {
+		case *plansql.FuncCallNode:
+			switch strings.ToLower(v.Name) {
+			case "coalesce", "ifnull", "greatest", "least", "nullif", "position", "strpos":
+				found = quoted(v.Args...)
+			}
+		case *plansql.CaseNode:
+			for _, w := range v.Whens {
+				found = found || quoted(w.Result) || (v.Subject != nil && quoted(w.Cond))
+			}
+			found = found || quoted(v.Else) || (v.Subject != nil && quoted(v.Subject))
+		case *plansql.CmpExpr:
+			found = quoted(v.Left, v.Right)
+		case *plansql.InExpr:
+			found = quoted(v.Left) || quoted(v.Values...)
+		case *plansql.BetweenExpr:
+			found = quoted(v.Left, v.Low, v.High)
+		case *plansql.BinaryOp:
+			found = v.Op == "||" && quoted(v.Left, v.Right)
+		}
+		if found {
 			return
 		}
 		for _, c := range exprOperands(n) {
@@ -508,6 +562,25 @@ func byteaLiteralCast(l *plansql.Lit) plansql.Node {
 // select_common_type over the arms, the literal taking the result's type).
 // A VALUES list is the same rule over its rows.
 func typeByteaSetOpArms(n *logical.Node) {
+	// Only an arm's own quoted-literal select item is ever cast below, so an
+	// operation none of whose arms holds one is left before the arms' types
+	// are asked for.
+	lit := false
+	for _, child := range n.Children {
+		if isSetOpNode(setOpUnwrap(child)) {
+			continue
+		}
+		if proj := findOutputProjectionNode(child); proj != nil {
+			for _, pr := range proj.Projections {
+				if l, ok := plansql.Unparen(pr.ASTExpr).(*plansql.Lit); ok && l.Kind == plansql.LitString {
+					lit = true
+				}
+			}
+		}
+	}
+	if !lit {
+		return
+	}
 	outNames := setOpOutputNames(n.Children[0])
 	if len(outNames) == 0 {
 		return
