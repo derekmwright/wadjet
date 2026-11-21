@@ -705,6 +705,8 @@ func pushColumnNeeds(n *Node, parentNeeds map[string]bool) {
 					probeNeeds[col] = true
 					buildNeeds[col] = true
 				}
+				var leftSlots, rightSlots map[string]bool
+				slotsKnown := false
 				for col := range needs {
 					if leftAvail[col] {
 						probeNeeds[col] = true
@@ -713,6 +715,24 @@ func pushColumnNeeds(n *Node, parentNeeds map[string]bool) {
 						buildNeeds[col] = true
 					}
 					if leftAvail[col] || rightAvail[col] {
+						continue
+					}
+					// A lower decorrelated scalar join's slot: claimed by
+					// neither side's published columns, and dropped by the
+					// lower join's OutputFilter without this (#1701,
+					// decorrelatedScalarSlots).
+					if !slotsKnown {
+						leftSlots = decorrelatedScalarSlots(n.Children[0])
+						rightSlots = decorrelatedScalarSlots(n.Children[1])
+						slotsKnown = true
+					}
+					if leftSlots[col] || rightSlots[col] {
+						if leftSlots[col] {
+							probeNeeds[col] = true
+						}
+						if rightSlots[col] {
+							buildNeeds[col] = true
+						}
 						continue
 					}
 					// A ROW FIELD PATH is supplied by the side that publishes

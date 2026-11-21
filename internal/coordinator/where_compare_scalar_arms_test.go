@@ -42,6 +42,8 @@ import (
 //	wc_nm: k = 3, a = 10   (no inner row)                       p in 0,1,2,3,NULL
 //	wc_nk: k NULL, a = 10  (matches nothing)                    p in 0,1,2,3,NULL
 //	wc_one: u int   (one row, a JOIN ON partner)
+//	wc_j:  k int | c int   (1,1) (1,2) (2,1) (2,3) (NULL,2)   (a second inner
+//	       table, read only by the stacked cells, where_compare_stacked_arms_test.go)
 
 func wcTables() []tmdTable {
 	i32 := func(v int) any { return int32(v) }
@@ -56,6 +58,10 @@ func wcTables() []tmdTable {
 		{Name: "p", Type: parquet.TypeInt32, Nullable: true},
 	}}
 	uSchema := parquet.Schema{Columns: []parquet.Column{{Name: "u", Type: parquet.TypeInt32, Nullable: true}}}
+	jSchema := parquet.Schema{Columns: []parquet.Column{
+		{Name: "k", Type: parquet.TypeInt32, Nullable: true},
+		{Name: "c", Type: parquet.TypeInt32, Nullable: true},
+	}}
 	iRows := []map[string]any{
 		{"k": i32(1), "a": i32(10), "c": i32(1)},
 		{"k": i32(1), "a": i32(10), "c": i32(2)},
@@ -77,23 +83,30 @@ func wcTables() []tmdTable {
 		{"wc_nm", oSchema, outer(i32(3), i32(10))},
 		{"wc_nk", oSchema, outer(nil, i32(10))},
 		{"wc_one", uSchema, []map[string]any{{"u": i32(1)}}},
+		{"wc_j", jSchema, []map[string]any{
+			{"k": i32(1), "c": i32(1)}, {"k": i32(1), "c": i32(2)},
+			{"k": i32(2), "c": i32(1)}, {"k": i32(2), "c": i32(3)},
+			{"k": nil, "c": i32(2)},
+		}},
 	}
 }
 
 const wcPGFixture = `DROP TABLE IF EXISTS wc_i; DROP TABLE IF EXISTS wc_m1; DROP TABLE IF EXISTS wc_mn;
-DROP TABLE IF EXISTS wc_nm; DROP TABLE IF EXISTS wc_nk; DROP TABLE IF EXISTS wc_one;
+DROP TABLE IF EXISTS wc_nm; DROP TABLE IF EXISTS wc_nk; DROP TABLE IF EXISTS wc_one; DROP TABLE IF EXISTS wc_j;
 CREATE TABLE wc_i (k integer, a integer, c integer);
 CREATE TABLE wc_m1 (k integer, a integer, p integer);
 CREATE TABLE wc_mn (k integer, a integer, p integer);
 CREATE TABLE wc_nm (k integer, a integer, p integer);
 CREATE TABLE wc_nk (k integer, a integer, p integer);
 CREATE TABLE wc_one (u integer);
+CREATE TABLE wc_j (k integer, c integer);
 INSERT INTO wc_i VALUES (1,10,1),(1,10,2),(1,20,3),(2,30,2),(NULL,40,1);
 INSERT INTO wc_m1 VALUES (2,30,0),(2,30,1),(2,30,2),(2,30,3),(2,30,NULL);
 INSERT INTO wc_mn VALUES (1,10,0),(1,10,1),(1,10,2),(1,10,3),(1,10,NULL);
 INSERT INTO wc_nm VALUES (3,10,0),(3,10,1),(3,10,2),(3,10,3),(3,10,NULL);
 INSERT INTO wc_nk VALUES (NULL,10,0),(NULL,10,1),(NULL,10,2),(NULL,10,3),(NULL,10,NULL);
-INSERT INTO wc_one VALUES (1)`
+INSERT INTO wc_one VALUES (1);
+INSERT INTO wc_j VALUES (1,1),(1,2),(2,1),(2,3),(NULL,2)`
 
 // wcCells is the enumeration: body clause x comparison x context x outer
 // input.

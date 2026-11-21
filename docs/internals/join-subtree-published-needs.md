@@ -38,3 +38,18 @@ down a need that used to be dropped and never withhold one. A name pushed to
 a side that cannot supply it is already tolerated: it is dropped again at the
 scan by sanitizeScanNeeds, and deleted at the window that mints it by
 pushColumnNeeds' NodeWindow arm (#694 R1).
+
+The same gap for a decorrelated scalar subquery's slot (#1701). Each
+correlated scalar subquery a Filter decorrelates becomes a LEFT join against
+an Aggregate publishing `__scalar_N`, and two or three in one Filter stack
+those joins one above the other. An aggregate's outputs are deliberately not
+claimed by collectMintedNames (Q17's plan, above), so at the UPPER join the
+LOWER join's slot was in neither available set, the lower join's
+NeededColumns lacked it, its single-process OutputFilter dropped it, and the
+Filter's reference read NULL: `o.p = (SELECT max(c) …) AND 0 <= (SELECT
+max(c) …)` kept no row, the first slot of two (the first two of three) lost.
+decorrelatedScalarSlots names the slots a subtree's decorrelated joins
+publish (stopping at a Project or an Aggregate, probe side only under a semi
+or anti join), and the partition consults it only for a need neither side
+claims, so every need routed before is routed as it was. The TPC-H join
+needs are unchanged by it (no TPC-H query stacks two decorrelated joins).
