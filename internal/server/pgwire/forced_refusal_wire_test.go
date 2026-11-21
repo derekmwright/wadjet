@@ -50,7 +50,7 @@ func TestAForcedRefusalReachesTheWire(t *testing.T) {
 		rows.Close()
 	}
 	if err == nil {
-		t.Fatal("the query answered over the wire at 256 KiB; this cell needs a refusal " +
+		t.Fatal("the query answered over the wire at 8 KiB; this cell needs a refusal " +
 			"to read, so the fixture has stopped meeting its own condition")
 	}
 	if !wireForcedSuffix.MatchString(err.Error()) {
@@ -62,9 +62,12 @@ func TestAForcedRefusalReachesTheWire(t *testing.T) {
 func setupForcedRefusalServer(t *testing.T) *Server {
 	t.Helper()
 	ctx := context.Background()
+	// The embedded twin's budget, for the reason its comment gives: 256 KiB
+	// refused only on the scan's decoded read-ahead, which #1706 bounded; 8 KiB
+	// refuses on the join's own forced floor.
 	db, err := wadjet.Open(ctx, wadjet.Config{
 		Store: objstore.NewMemStore(), Bucket: "test",
-		MemoryBudget: 256 << 10, SpillDir: t.TempDir(),
+		MemoryBudget: 8 << 10, SpillDir: t.TempDir(),
 	})
 	if err != nil {
 		t.Fatal(err)

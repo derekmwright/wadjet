@@ -710,8 +710,9 @@ func (s *fileSlot) drainAbandoned(inner *scanSourceInner) {
 
 // prefetchResult holds a speculatively read row group batch and its unit index.
 type prefetchResult struct {
-	idx   int
-	batch *batch.RecordBatch
+	idx      int
+	batch    *batch.RecordBatch
+	deferred bool // not decoded: its read-ahead was not admitted, the consumer decodes it
 }
 
 // buildRGUnits enumerates row groups from every file in the scan WITHOUT
@@ -1100,6 +1101,8 @@ func (inner *scanSourceInner) rgWorker(ctx context.Context) {
 	// contract is identical and leaving it unguarded would just move the
 	// process killer.
 	defer inner.recoverWorkerPanic(ctx, "scan row-group worker")
+	inner.liveWorkers.Add(1)
+	defer inner.liveWorkers.Add(-1)
 
 	var prefetched *prefetchResult
 
@@ -1110,62 +1113,40 @@ func (inner *scanSourceInner) rgWorker(ctx context.Context) {
 
 		var idx int
 		var b *batch.RecordBatch
+		var deferred bool
 
 		if prefetched != nil {
 			idx = prefetched.idx
 			b = prefetched.batch
+			deferred = prefetched.deferred
 			prefetched = nil
 		} else {
 			idx = int(atomic.AddInt64(&inner.rgIdx, 1) - 1)
 			if idx >= len(inner.rgUnits) {
 				return
 			}
-			b = inner.readRG(ctx, idx)
+			b, deferred = inner.decodeOrDefer(ctx, idx)
 		}
 
-		if b == nil || b.Len == 0 {
-			inner.releaseScanBatch(b)
+		if deferred {
+			// Not admitted ahead of the consumer: hand it over undecoded, and
+			// the consumer decodes it when it asks (scan_decode_admission.go).
+			// This send blocks like any other, which is the back-pressure the
+			// channel already gives; nothing here waits on the budget.
+			marker := &batch.RecordBatch{}
+			inner.deferred.Store(marker, idx)
+			if !inner.send(ctx, marker) {
+				return
+			}
 			continue
 		}
 
-		// Apply delete markers with row offset adjustment
-		unit := inner.rgUnits[idx]
-		if delSet := inner.deleteMarkers[unit.slot.entry.Path]; len(delSet) > 0 {
-			// Intersect with any selection the scan-level filter already
-			// applied — overwriting it would resurrect filtered rows.
-			var sel []uint32
-			if b.Sel != nil {
-				sel = make([]uint32, 0, len(b.Sel))
-				for _, i := range b.Sel {
-					absRow := unit.rgRowOffset + int64(i)
-					if !delSet[absRow] {
-						sel = append(sel, i)
-					}
-				}
-			} else {
-				sel = make([]uint32, 0, b.Len)
-				for i := 0; i < b.Len; i++ {
-					absRow := unit.rgRowOffset + int64(i)
-					if !delSet[absRow] {
-						sel = append(sel, uint32(i))
-					}
-				}
-			}
-			if len(sel) == 0 {
-				inner.releaseScanBatch(b)
-				continue
-			}
-			if len(sel) < b.Len || b.Sel != nil {
-				b.Sel = sel
-			}
+		if b = inner.finishRG(idx, b); b == nil {
+			continue
 		}
 
-		atomic.AddInt64(&inner.rowsScanned, int64(b.ActiveLen()))
-
 		// Send batch downstream FIRST, then prefetch while consumer processes.
-		select {
-		case inner.batchCh <- b:
-		case <-ctx.Done():
+		if !inner.send(ctx, b) {
 			return
 		}
 
@@ -1175,13 +1156,70 @@ func (inner *scanSourceInner) rgWorker(ctx context.Context) {
 		if prefetched == nil {
 			nextIdx := int(atomic.AddInt64(&inner.rgIdx, 1) - 1)
 			if nextIdx < len(inner.rgUnits) {
-				prefetched = &prefetchResult{
-					idx:   nextIdx,
-					batch: inner.readRG(ctx, nextIdx),
-				}
+				pb, pdef := inner.decodeOrDefer(ctx, nextIdx)
+				prefetched = &prefetchResult{idx: nextIdx, batch: pb, deferred: pdef}
 			}
 		}
 	}
+}
+
+// send puts one item on batchCh, or reports false when the scan is torn down
+// first.
+func (inner *scanSourceInner) send(ctx context.Context, b *batch.RecordBatch) bool {
+	inner.sending.Add(1)
+	defer inner.sending.Add(-1)
+	select {
+	case inner.batchCh <- b:
+		inner.sent.Add(1)
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// finishRG applies row group idx's delete markers to its decoded batch and
+// counts its rows. It returns nil, with the batch's charge released, when
+// nothing of it survives.
+func (inner *scanSourceInner) finishRG(idx int, b *batch.RecordBatch) *batch.RecordBatch {
+	if b == nil || b.Len == 0 {
+		inner.releaseScanBatch(b)
+		return nil
+	}
+
+	// Apply delete markers with row offset adjustment
+	unit := inner.rgUnits[idx]
+	if delSet := inner.deleteMarkers[unit.slot.entry.Path]; len(delSet) > 0 {
+		// Intersect with any selection the scan-level filter already
+		// applied — overwriting it would resurrect filtered rows.
+		var sel []uint32
+		if b.Sel != nil {
+			sel = make([]uint32, 0, len(b.Sel))
+			for _, i := range b.Sel {
+				absRow := unit.rgRowOffset + int64(i)
+				if !delSet[absRow] {
+					sel = append(sel, i)
+				}
+			}
+		} else {
+			sel = make([]uint32, 0, b.Len)
+			for i := 0; i < b.Len; i++ {
+				absRow := unit.rgRowOffset + int64(i)
+				if !delSet[absRow] {
+					sel = append(sel, uint32(i))
+				}
+			}
+		}
+		if len(sel) == 0 {
+			inner.releaseScanBatch(b)
+			return nil
+		}
+		if len(sel) < b.Len || b.Sel != nil {
+			b.Sel = sel
+		}
+	}
+
+	atomic.AddInt64(&inner.rowsScanned, int64(b.ActiveLen()))
+	return b
 }
 
 // readRG reads a row group using the native page decoder. Loads the file's

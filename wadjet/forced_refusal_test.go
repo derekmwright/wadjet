@@ -32,16 +32,25 @@ var forcedSuffix = regexp.MustCompile(
 // forcedRefusalSQL is a self-join whose build cannot fit the budget below.
 const forcedRefusalSQL = `SELECT a.id, b.pad FROM refuse a JOIN refuse b ON a.id = b.id`
 
-// forcedRefusalBudget refuses on this fixture; 512 MiB below answers. Measured
-// across 1 MiB / 768 / 512 / 384 / 256 / 192 / 128 KiB: the first three answer,
-// the rest refuse, all four refusals carrying the suffix.
-const forcedRefusalBudget = 256 << 10
+// forcedRefusalBudget refuses on this fixture; 512 MiB below answers.
+//
+// It was 256 KiB, and every refusal from 384 KiB down was the scan's decoded
+// read-ahead (`largest: … by "scan decoded batch"`), #789's decode half. With
+// the read-ahead admitted by what its decode holds (#1706) the query answers at
+// every budget from 1 MiB down to 12 KiB, measured 30 of 30 runs each. What
+// refuses now is the join's own floor: 64 grace partitions' headers (5,632
+// bytes, forced as `hash join index`) beside a minimum arrival chunk, which
+// does not fit from 10 KiB down — 30 of 30 runs at 10, 8 and 6 KiB, all
+// carrying the suffix. 8 KiB is the middle of that band; at 4 KiB the refusal
+// comes before anything is forced and carries no suffix, which is the case
+// `memory.TestARefusalWithNothingForcedIsUnchanged` covers.
+const forcedRefusalBudget = 8 << 10
 
 func TestAQueryThatRefusesNamesWhatWasForced(t *testing.T) {
 	db := refuseOpen(t, forcedRefusalBudget)
 	_, err := db.Query(context.Background(), forcedRefusalSQL)
 	if err == nil {
-		t.Fatal("the query answered at 256 KiB; this cell needs a refusal to read, so the " +
+		t.Fatal("the query answered at 8 KiB; this cell needs a refusal to read, so the " +
 			"fixture has stopped meeting its own condition")
 	}
 	if !forcedSuffix.MatchString(err.Error()) {

@@ -72,3 +72,20 @@ func noteJoinFloor(t *memory.Tracker) {
 		JoinIndex:        t.ForcedFor(memory.ForceJoinIndex),
 	})
 }
+
+// arrivalReserveHook runs at the top of every arrival (and arrival-chunk)
+// reservation of a grace build. nil in production.
+var arrivalReserveHook atomic.Pointer[func()]
+
+// SetArrivalReserveHook installs f to run before each arrival reservation of
+// a grace build, with the join's lock released, and returns the restore.
+// TEST-ONLY: it is how a gate orders another goroutine's charge BEFORE the
+// build's reservation on every run (#1706) instead of sampling the scheduler.
+func SetArrivalReserveHook(f func()) func() {
+	var p *func()
+	if f != nil {
+		p = &f
+	}
+	prev := arrivalReserveHook.Swap(p)
+	return func() { arrivalReserveHook.Store(prev) }
+}

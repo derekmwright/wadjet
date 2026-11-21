@@ -156,6 +156,15 @@ const minArrivalChunkRows = 32
 // Per-partition fixed overhead must not over-release or leak the arrival charge (#789).
 // See docs/internals/join-arrival-reservation-reconciliation.md for the design.
 func (h *HashJoin) absorbArrivalBatch(b *batch.RecordBatch) error {
+	if f := arrivalReserveHook.Load(); f != nil {
+		// TEST-ONLY (SetArrivalReserveHook), disarmed in production: one
+		// relaxed load. h.mu is released around it for the reason the relief
+		// call in spillUntilCanReserve releases it — what the hook waits for
+		// may itself need this join's SpillSome.
+		h.mu.Unlock()
+		(*f)()
+		h.mu.Lock()
+	}
 	cost := hashBuildBytes(b)
 	if joinFloorArmed.Load() {
 		// One relaxed load per arrival batch, disarmed in production. It is

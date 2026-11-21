@@ -141,6 +141,22 @@ type scanSourceInner struct {
 	// batch leaves through next(), is dropped on a filter path, or is
 	// drained at Close. LoadAndDelete makes every release idempotent.
 	batchCharges sync.Map
+
+	// onDemand is set the first time a worker's read-ahead decode is not
+	// admitted (scan_decode_admission.go): from then on every remaining row
+	// group is handed to the consumer undecoded and decoded on its goroutine.
+	onDemand atomic.Bool
+	// deferred maps the placeholder a worker sends for an undecoded row group
+	// to that row group's rgUnits index.
+	deferred sync.Map
+
+	// What the test-only read-ahead ordering hook (ForceScanReadAheadOrder)
+	// reads: sent = items the workers put on batchCh, demands = receives the
+	// consumer has begun, sending = workers parked on a send, liveWorkers =
+	// row-group workers running, workersDone = every worker has exited.
+	sent, demands        atomic.Int64
+	sending, liveWorkers atomic.Int32
+	workersDone          atomic.Bool
 }
 
 // trackScanBatch charges a freshly decoded batch's footprint to the memory
@@ -533,12 +549,14 @@ func (s *scannerExecSource) Init(ctx context.Context) error {
 		for i := 0; i < workers; i++ {
 			go inner.rgWorker(scanCtx)
 		}
+		registerOrderedScan(inner)
 	}
 
 	// Close batchCh when all workers are done
 	go func() {
 		defer inner.recoverWorkerPanic(ctx, "scan batch-channel closer")
 		inner.wg.Wait()
+		inner.workersDone.Store(true)
 		close(inner.batchCh)
 	}()
 
@@ -601,6 +619,7 @@ func (s *scannerExecSource) Close() error {
 		// Workers observe the cancel at the loop head and in every blocking
 		// select, so this wait is bounded by one in-flight row-group decode.
 		s.scanner.wg.Wait()
+		unregisterOrderedScan(s.scanner)
 		s.scanner.drainBatchCharges()
 		s.scanner.drainSlotCharges()
 		s.scanner.releasePooledBufs()
@@ -743,24 +762,40 @@ func (inner *scanSourceInner) readSchema() []parquet.Column {
 }
 
 func (inner *scanSourceInner) next(ctx context.Context) (*batch.RecordBatch, error) {
-	select {
-	case b, ok := <-inner.batchCh:
-		if !ok {
-			// Channel closed, check for errors
-			select {
-			case err := <-inner.errCh:
-				return nil, err
-			default:
-				return nil, nil
+	for {
+		inner.demands.Add(1)
+		select {
+		case b, ok := <-inner.batchCh:
+			if !ok {
+				// Channel closed, check for errors
+				select {
+				case err := <-inner.errCh:
+					return nil, err
+				default:
+					return nil, nil
+				}
 			}
+			if v, isDeferred := inner.deferred.LoadAndDelete(b); isDeferred {
+				// A row group whose read-ahead was not admitted: decode it
+				// here, now that it is asked for. The floor — a decode the
+				// consumer is waiting for is never refused and never waits on
+				// the budget — is the ordinary decode path.
+				idx := v.(int)
+				db := inner.finishRG(idx, inner.readRG(ctx, idx))
+				if db == nil {
+					continue
+				}
+				inner.releaseScanBatch(db)
+				return db, nil
+			}
+			// The batch leaves the scan source here — downstream operators that
+			// retain it account for it themselves (TrackBatch et al).
+			inner.releaseScanBatch(b)
+			return b, nil
+		case err := <-inner.errCh:
+			return nil, err
+		case <-ctx.Done():
+			return nil, ctx.Err()
 		}
-		// The batch leaves the scan source here — downstream operators that
-		// retain it account for it themselves (TrackBatch et al).
-		inner.releaseScanBatch(b)
-		return b, nil
-	case err := <-inner.errCh:
-		return nil, err
-	case <-ctx.Done():
-		return nil, ctx.Err()
 	}
 }

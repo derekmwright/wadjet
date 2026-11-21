@@ -1,6 +1,6 @@
 # ADR-0006: Never-OOM memory — shared pool, ownership ledger, spill-everywhere
 
-Status: Accepted (accounting overhaul landed 2026-05-30, 35f6730; recorded 2026-07-25; amended 2026-08-17, 2026-09-03, 2026-09-04, 2026-09-18 and 2026-09-19 — see Amendments)
+Status: Accepted (accounting overhaul landed 2026-05-30, 35f6730; recorded 2026-07-25; amended 2026-08-17, 2026-09-03, 2026-09-04, 2026-09-18, 2026-09-19 and 2026-11-21 — see Amendments)
 
 ## Context
 
@@ -592,3 +592,143 @@ operator cells, the eviction asserted), `exec.TestArcSJReplayNamesBuildColumnsAs
 and without the forcing knob), `coordinator.TestArcSJEmptySideJoinEveryArm`
 (five arms), `server.TestArcSJAnEmptySidedSpilledJoinPublishesThePolicysValueOnEveryDoor`
 (nine doors).
+
+### 2026-11-21: a scan's read-ahead is admitted by what its decode will hold (#1706, #789's decode half CLOSED)
+
+**The mechanism, measured.** At a 512 KiB budget, `SELECT DISTINCT * FROM typemx
+a JOIN typemx b ON b.id = a.id ORDER BY a.id DESC LIMIT 3000` — #1706's
+statement, the spilled arm of `coordinator.TestM1AMergedOrderIsTheQuerysOrderAtScale`
+— answered or refused on the same data depending on which of two goroutines
+reached the query's tracker first. One decoded row group of that 22-column
+`SELECT *` is 250,628 bytes, 48% of the budget. The scan's worker decodes the
+next row group while the hash join build is still taking the last one, and
+charges it AFTER the decode, forced (producer 3); the build `Reserve`s for the
+batch it has just taken (294,628 bytes). When the read-ahead's charge landed
+first, the build's reservation did not fit, eviction had nothing built to free,
+the build split the batch, and a SECOND read-ahead row group — admitted by its
+load because its COMPRESSED bytes (88,195) fit beside a still-small build —
+landed between the chunks: two decoded row groups held 502,758 bytes and the
+build refused with `forced=508390, largest 502758 "scan decoded batch"`. When
+the build's reservation landed first, the read-ahead's charge went over the
+budget instead, the next load's reservation asked the build for relief, and the
+query answered.
+
+The two events were ordered without a sleep by a test-only hook
+(`physical.ForceScanReadAheadOrder`): DecodeFirst lets every scan worker run
+ahead as far as it can before EACH arrival reservation of the grace build;
+ConsumerFirst lets a worker decode only what its consumer has asked for. At the
+base, DecodeFirst refused the two #1706 statements and a wide `SELECT *`
+self-join under a LIMIT on 20 of 20 runs each, and ConsumerFirst answered 20 of
+20 — the same pair the diagnosis measured with a 2 ms sleep on either side
+(40/40 and 0/40). Free, the base refused [[BASE_RATES]].
+
+**Why compressed-byte admission let the read-ahead take the budget.** The load
+admission (`rgSlabs.advance`, `ReserveOrForce`) was the only gate in front of a
+decode, and it admitted a row group on its byte range, 35% of what the decode
+then forced; and its floor — "a scan holding nothing never waits" — counted
+resident row-group BUFFERS, which are released when the decode ends, so a single
+decode worker always looked empty and was always admitted. Nothing in front of
+the decode measured the decode.
+
+**The rule now** (`planner/physical/scan_decode_admission.go`, one rule for the
+row-group and the whole-file load). A worker may decode a row group AHEAD of its
+consumer only when the room for what that decode will hold exists now — the
+bytes it still has to land, plus the decoded batch, plus the decode's transient.
+The admission is a DECISION, not a reservation: an admitted decode takes exactly
+the charges it took before (the load's, then the decoded batch's), so admitting
+it puts nothing on the ledger the base did not. A first form that reserved the
+estimate for the length of the decode was measured and dropped: a reservation
+standing in for a decode, sized for its peak, refused a CROSS join's build —
+which cannot spill — on `SELECT COUNT(*) FROM typemx a JOIN typemx b ON
+UPPER(a.c_str) = UPPER(b.c_str)` at 512 KiB in 2 of 10 runs, and eleven
+computed-key cells of `wadjet.TestTypeMatrixAnswersTheSameUnderEveryMemoryBudget`,
+all of which answer at the base. When the room is not there, or the footer
+cannot bound the decode, the worker neither waits nor forces: it hands the row
+group to the consumer undecoded, the consumer decodes it on its own goroutine
+when it asks for it, and the scan decodes every remaining row group on demand.
+The floor is unchanged: a decode the consumer is waiting for is never refused
+and never waits on the budget — the same load, the same forced and REPORTED
+`scan decoded batch` charge as before. Without a budget the rule does not touch
+the ledger. Kill switch `WADJET_SCAN_READAHEAD_ADMISSION=0`.
+
+The estimate is the footer's, and it covers the PEAK, not the final batch:
+per projected column, the decoded vector (fixed width × rows, or offsets plus
+the chunk's uncompressed bytes for a PLAIN byte array) and its null bitmap,
+plus a transient of `3 × uncompressed + 16 × rows` for each of the GOMAXPROCS
+largest columns, because the native decoder decodes that many columns at once.
+Measured per column type, one row group, everything the decode ALLOCATED
+(garbage included) against the estimate: every flat type of the type matrix,
+all-NULL string / BIGINT / DECIMAL(38,10) columns, 512-byte strings and the
+DuckDB-written TPC-H customer file's PLAIN columns are covered, the decoded half
+exactly (it equals `MemBytes` for a PLAIN chunk) and the whole at 1.2-1.5x what
+the decode allocated (the tightest, `c_str`: 74,352 against 58,656). A whole
+22-column row group allocated 652,096-690,640 bytes across GOMAXPROCS 1-24
+against an estimate of 428,171 at 1 and 1,373,276 at 24: at low parallelism
+the allocation total counts columns' garbage that is never live together, so
+there the per-column measurement and the decoder's concurrency limit are what
+bound the live peak — inferred from those two, not sampled. A byte-array chunk
+with a DICTIONARY page has no estimate — its decoded bytes are the entries
+expanded per row, which no footer field carries (DuckDB's `c_mktsegment`:
+2,514 uncompressed bytes decoding to 21,196) — and a scan that meets one is on
+demand. A wrong estimate stays safe: the decode is still charged, forced and
+reported, after it, exactly as before.
+
+**How it differs from the two attempts refused above.** Both reserved before
+the decode and WAITED for the budget — on a clock, or until the source held no
+untaken decoded bytes — so a decode that did not fit stalled the scan (156 s and
+~90 s against 0.25 s) and, because the second form resumed the moment the
+consumer TOOK the previous batch, the decode still raced the consumer's
+reservation for it (17-19 of 20). This rule waits for nothing: a decode that
+does not fit is moved to the consumer's goroutine, where it runs after the
+consumer has finished with the previous batch, reservation included — the one
+order that answered. The pinned overdraw shape those attempts were measured on
+(4,000 rows of 512-byte strings, 1 MiB) now answers 20 of 20 in 1.3 s, with the
+unbudgeted engine's answer, in both forced orders
+(`wadjet.TestAScansDecodedReadAheadNoLongerOverdrawsTheBudget`, which replaces
+`TestAScansDecodedReadAheadStillOverdrawsTheBudget` and keeps its refusal as
+the kill-switch-off contrast arm).
+
+**Correction.** "What #789 has left" above says the property that must not vary
+at a fixed budget — the VERDICT — is decided by the query, not the scheduler,
+gated by `wadjet.TestAJoinAtAFixedBudgetIsDecidedByTheQueryNotTheScheduler`.
+That was true for the narrow projections that gate and its floor twin measure
+(the floor gate holds 35,776 decoded bytes at the build's first reserve) and
+FALSE at the base whenever one decoded row group was a
+large part of the budget: the wide shapes above. With this rule it holds for
+them too: [[CONSISTENCY]]. Gates:
+`wadjet.TestAWideScansVerdictAtAFixedBudgetDoesNotFollowTheReadAheadOrder` (five
+wide shapes, both forced orders and the scheduler free, against the unbudgeted
+engine), `wadjet.TestWithoutReadAheadAdmissionTheDecodeFirstOrderRefuses` (the
+hook still orders: the base's verdict, kept live),
+`physical.TestTheFooterEstimateCoversADecodesPeak`,
+`physical.TestADictionaryEncodedByteArrayHasNoFooterEstimate`,
+`physical.TestWithoutABudgetEveryReadAheadIsAdmittedForFree`.
+
+**What it costs.** Under a budget, a scan that defers once loses its decode
+overlap for the rest of its life: its row groups decode serially on the
+consumer's goroutine. [[COST]] Verdicts move only from refusal to answer on
+what was measured: the embedded `forced_refusal` fixture (a 60,000-row
+self-join), which refused at every budget from 384 KiB down at the base — every
+refusal `largest: … by "scan decoded batch"` — answers at every budget from
+1 MiB down to 12 KiB, 30 of 30 runs each with the unbudgeted row count, and
+refuses from 10 KiB down on the join's own forced partition headers;
+`wadjet.TestAQueryThatRefusesNamesWhatWasForced` and
+`pgwire.TestAForcedRefusalReachesTheWire` read their refusal at 8 KiB now.
+
+**What it does not cover.** The file-level scan that nested (ARRAY / ROW / MAP)
+projections and pushed-down LIMITs take (`scanWorker`) decodes a whole FILE per
+batch and is unchanged; it has no row-group read-ahead to admit. The forced
+charge itself is unchanged — producer 3 still charges after the decode, and a
+decode on demand can still carry a query past its budget when the consumer
+leaves no room for one row group; that charge now lands on the consumer's own
+goroutine, after its reservations, so the scheduler no longer orders the two.
+A read-ahead admitted while a consumer has taken a batch and not yet reserved
+for it still races that reservation, once: the admission sees the room the
+consumer is about to claim. A further decode is then admitted only against room
+that exists beside the first — the base admitted it on its compressed bytes
+alone, which is what its refusals needed — and the measured shapes answer in
+both orders — but the window is narrowed, not closed, for a consumer that
+cannot proceed in the budget minus one row group. The refusal `coordinator.TestF1AKeylessJoinAsksForWhatItNeeds/480`
+pins is not this mechanism: it refuses at the build's first arrival against
+3.5 MB of forced `spill tracking` held by the finished DISTINCT aggregate's
+partition states, on every run at the base and the tip, in both orders.
