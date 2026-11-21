@@ -102,13 +102,20 @@ func TestTheDocumentedSignatureIsTheDeclaredArity(t *testing.T) {
 	for _, m := range row.FindAllStringSubmatch(string(body), -1) {
 		for _, c := range spell.FindAllStringSubmatch(m[1], -1) {
 			name := strings.ToLower(c[1])
-			sig, ok := SignatureOf(name)
-			if !ok {
-				continue // an aggregate, a window function, a statement form
-			}
 			lo, hi, ok := documentedArity(c[2])
 			if !ok {
 				continue
+			}
+			if name == "like_escape" && lo == 2 && hi == 2 {
+				// The parser reads a two-argument like_escape(…) as
+				// PostgreSQL's like_escape(text, text), registered under
+				// plansql.LikeEscapeTextFunc; three arguments are the engine's
+				// LIKE … ESCAPE predicate (#1209).
+				name = plansql.LikeEscapeTextFunc
+			}
+			sig, ok := SignatureOf(name)
+			if !ok {
+				continue // an aggregate, a window function, a statement form
 			}
 			if strings.TrimSpace(c[2]) == "\u2026" {
 				// `EXTRACT(\u2026)` in the operator-precedence table is a
