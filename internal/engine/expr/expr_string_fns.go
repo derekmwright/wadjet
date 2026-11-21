@@ -10,18 +10,23 @@ import (
 
 // --- String function implementations ---
 
+// fnUpper / fnLower are upper() and lower() a value at a time, under the C
+// locale's case mapping (cUpperString / cLowerString, pg_case_forms.go), the
+// one vecUpper / vecLower apply to a column: ASCII letters only, so
+// upper('é') is 'é' and lower('ÉCOLE') is 'École' wherever the call is
+// evaluated (#1209).
 func fnUpper(args []any) any {
 	if len(args) < 1 || args[0] == nil {
 		return nil
 	}
-	return strings.ToUpper(toString(args[0]))
+	return cUpperString(toString(args[0]))
 }
 
 func fnLower(args []any) any {
 	if len(args) < 1 || args[0] == nil {
 		return nil
 	}
-	return strings.ToLower(toString(args[0]))
+	return cLowerString(toString(args[0]))
 }
 
 // ConcatOpFunc is the registry name of the `||` OPERATOR's implementation.

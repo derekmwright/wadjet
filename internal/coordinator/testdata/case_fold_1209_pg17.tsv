@@ -1,0 +1,387 @@
+# #1209 line 3: PostgreSQL 17.11, datcollate C, datctype C, UTF8 (TestCaseFold1209MeasurePostgres)
+V/lower(u)/proj	rows=19 1,66983bea8fc1df977a17a4fc78c4cc73 | 10,f7781178736ff46aa7a41a60734731eb | 11,03c7c0ace395d80182db07ae2c30f034 | 12,4c8f9afce2ef023c28cf3dcd6bfbe3ac | 13,446694cd8928a5173bb0f4f346a82bae | 14,e15d65e70b5d407993d9dd17bf0aa20d | 15,0cc175b9c0f1b6a831c399e269772661 | 16,5526861fbb1e71a1bda6ac364310a807 | 17,56bc0fa9ec3ce7a8592414870acf0adb | 18,f752505ebb7f5e3c999dd92f834c23a6 | 19,NULL | 2,d327227a68a38e78989336d1fb4f0f37 | 3,e15c0eb40e61adefe95778c26e7840f6 | 4,e15c0eb40e61adefe95778c26e7840f6 | 5,1a313f370a5ba8fd5dad6f793d84ff21 | 6,865c0c0b4ab0e063e5caa3387c1a8741 | 7,872400d7c46eb2c00e9f97e2f4cc7099 | 8,a5fd9cd60f9795aadb209b1fdf976cb6 | 9,6759cfd5ff11c9af6d7508309dc3d135
+V/lower(u)/group	rows=18 03c7c0ace395d80182db07ae2c30f034,1 | 0cc175b9c0f1b6a831c399e269772661,1 | 1a313f370a5ba8fd5dad6f793d84ff21,1 | 446694cd8928a5173bb0f4f346a82bae,1 | 4c8f9afce2ef023c28cf3dcd6bfbe3ac,1 | 5526861fbb1e71a1bda6ac364310a807,1 | 56bc0fa9ec3ce7a8592414870acf0adb,1 | 66983bea8fc1df977a17a4fc78c4cc73,1 | 6759cfd5ff11c9af6d7508309dc3d135,1 | 865c0c0b4ab0e063e5caa3387c1a8741,1 | 872400d7c46eb2c00e9f97e2f4cc7099,1 | NULL,1 | a5fd9cd60f9795aadb209b1fdf976cb6,1 | d327227a68a38e78989336d1fb4f0f37,1 | e15c0eb40e61adefe95778c26e7840f6,2 | e15d65e70b5d407993d9dd17bf0aa20d,1 | f752505ebb7f5e3c999dd92f834c23a6,1 | f7781178736ff46aa7a41a60734731eb,1
+V/lower(u)/sort	rows=19 1,5 | 10,16 | 11,4 | 12,7 | 13,8 | 14,18 | 15,1 | 16,2 | 17,13 | 18,14 | 19,19 | 2,15 | 3,9 | 4,10 | 5,6 | 6,3 | 7,11 | 8,12 | 9,17
+V/lower(u)/derived	rows=19 1,66983bea8fc1df977a17a4fc78c4cc73 | 10,f7781178736ff46aa7a41a60734731eb | 11,03c7c0ace395d80182db07ae2c30f034 | 12,4c8f9afce2ef023c28cf3dcd6bfbe3ac | 13,446694cd8928a5173bb0f4f346a82bae | 14,e15d65e70b5d407993d9dd17bf0aa20d | 15,0cc175b9c0f1b6a831c399e269772661 | 16,5526861fbb1e71a1bda6ac364310a807 | 17,56bc0fa9ec3ce7a8592414870acf0adb | 18,f752505ebb7f5e3c999dd92f834c23a6 | 19,NULL | 2,d327227a68a38e78989336d1fb4f0f37 | 3,e15c0eb40e61adefe95778c26e7840f6 | 4,e15c0eb40e61adefe95778c26e7840f6 | 5,1a313f370a5ba8fd5dad6f793d84ff21 | 6,865c0c0b4ab0e063e5caa3387c1a8741 | 7,872400d7c46eb2c00e9f97e2f4cc7099 | 8,a5fd9cd60f9795aadb209b1fdf976cb6 | 9,6759cfd5ff11c9af6d7508309dc3d135
+V/upper(l)/proj	rows=19 1,66ddcd97cfdeabb2f6fb8a999b4bc76f | 10,a5f3c6a11b03839d46af9fb43c97c188 | 11,b69dc897f2759bf0e03dbd705177ddf9 | 12,92504965dec3e15864724a5a01ef74db | 13,92504965dec3e15864724a5a01ef74db | 14,2dfa58646bc344f7723acfcca41f460b | 15,7fc56270e7a70fa81a5935b72eacbe29 | 16,d5b14f404fdce2a1a134cc9f6ca86ece | 17,9ea890d675ab9c0772cf8b9ebe6cf092 | 18,f4004f9401191b523c3cdc9b984afc6e | 19,NULL | 2,e11ce22edb052b40813b1e145b704775 | 3,3122c41ebe889f745cb9bbe1c92165c3 | 4,a6db33b476ff58d692ba3954759025ff | 5,dd7536794b63bf90eccfd37f9b147d7f | 6,8ded568231f5e3b7f6e65ae73f6f9a81 | 7,260c083151ff2017393742c9e7d9fe21 | 8,a6fdaa20605ca142bc36e9784f44e53e | 9,f9c7826bf915dd62672f5a5ba5cff8c5
+V/upper(l)/group	rows=18 260c083151ff2017393742c9e7d9fe21,1 | 2dfa58646bc344f7723acfcca41f460b,1 | 3122c41ebe889f745cb9bbe1c92165c3,1 | 66ddcd97cfdeabb2f6fb8a999b4bc76f,1 | 7fc56270e7a70fa81a5935b72eacbe29,1 | 8ded568231f5e3b7f6e65ae73f6f9a81,1 | 92504965dec3e15864724a5a01ef74db,2 | 9ea890d675ab9c0772cf8b9ebe6cf092,1 | NULL,1 | a5f3c6a11b03839d46af9fb43c97c188,1 | a6db33b476ff58d692ba3954759025ff,1 | a6fdaa20605ca142bc36e9784f44e53e,1 | b69dc897f2759bf0e03dbd705177ddf9,1 | d5b14f404fdce2a1a134cc9f6ca86ece,1 | dd7536794b63bf90eccfd37f9b147d7f,1 | e11ce22edb052b40813b1e145b704775,1 | f4004f9401191b523c3cdc9b984afc6e,1 | f9c7826bf915dd62672f5a5ba5cff8c5,1
+V/upper(l)/sort	rows=19 1,6 | 10,4 | 11,8 | 12,9 | 13,10 | 14,18 | 15,1 | 16,2 | 17,16 | 18,15 | 19,19 | 2,5 | 3,12 | 4,11 | 5,3 | 6,7 | 7,13 | 8,14 | 9,17
+V/upper(l)/derived	rows=19 1,66ddcd97cfdeabb2f6fb8a999b4bc76f | 10,a5f3c6a11b03839d46af9fb43c97c188 | 11,b69dc897f2759bf0e03dbd705177ddf9 | 12,92504965dec3e15864724a5a01ef74db | 13,92504965dec3e15864724a5a01ef74db | 14,2dfa58646bc344f7723acfcca41f460b | 15,7fc56270e7a70fa81a5935b72eacbe29 | 16,d5b14f404fdce2a1a134cc9f6ca86ece | 17,9ea890d675ab9c0772cf8b9ebe6cf092 | 18,f4004f9401191b523c3cdc9b984afc6e | 19,NULL | 2,e11ce22edb052b40813b1e145b704775 | 3,3122c41ebe889f745cb9bbe1c92165c3 | 4,a6db33b476ff58d692ba3954759025ff | 5,dd7536794b63bf90eccfd37f9b147d7f | 6,8ded568231f5e3b7f6e65ae73f6f9a81 | 7,260c083151ff2017393742c9e7d9fe21 | 8,a6fdaa20605ca142bc36e9784f44e53e | 9,f9c7826bf915dd62672f5a5ba5cff8c5
+V/upper(u)/proj	rows=19 1,66983bea8fc1df977a17a4fc78c4cc73 | 10,f7781178736ff46aa7a41a60734731eb | 11,5dbc98dcc983a70728bd082d1a47546e | 12,4c8f9afce2ef023c28cf3dcd6bfbe3ac | 13,446694cd8928a5173bb0f4f346a82bae | 14,e15d65e70b5d407993d9dd17bf0aa20d | 15,7fc56270e7a70fa81a5935b72eacbe29 | 16,d5b14f404fdce2a1a134cc9f6ca86ece | 17,56bc0fa9ec3ce7a8592414870acf0adb | 18,f752505ebb7f5e3c999dd92f834c23a6 | 19,NULL | 2,d327227a68a38e78989336d1fb4f0f37 | 3,e15c0eb40e61adefe95778c26e7840f6 | 4,e15c0eb40e61adefe95778c26e7840f6 | 5,1a313f370a5ba8fd5dad6f793d84ff21 | 6,dd7536794b63bf90eccfd37f9b147d7f | 7,872400d7c46eb2c00e9f97e2f4cc7099 | 8,a5fd9cd60f9795aadb209b1fdf976cb6 | 9,6759cfd5ff11c9af6d7508309dc3d135
+V/upper(u)/group	rows=18 1a313f370a5ba8fd5dad6f793d84ff21,1 | 446694cd8928a5173bb0f4f346a82bae,1 | 4c8f9afce2ef023c28cf3dcd6bfbe3ac,1 | 56bc0fa9ec3ce7a8592414870acf0adb,1 | 5dbc98dcc983a70728bd082d1a47546e,1 | 66983bea8fc1df977a17a4fc78c4cc73,1 | 6759cfd5ff11c9af6d7508309dc3d135,1 | 7fc56270e7a70fa81a5935b72eacbe29,1 | 872400d7c46eb2c00e9f97e2f4cc7099,1 | NULL,1 | a5fd9cd60f9795aadb209b1fdf976cb6,1 | d327227a68a38e78989336d1fb4f0f37,1 | d5b14f404fdce2a1a134cc9f6ca86ece,1 | dd7536794b63bf90eccfd37f9b147d7f,1 | e15c0eb40e61adefe95778c26e7840f6,2 | e15d65e70b5d407993d9dd17bf0aa20d,1 | f752505ebb7f5e3c999dd92f834c23a6,1 | f7781178736ff46aa7a41a60734731eb,1
+V/upper(u)/sort	rows=19 1,5 | 10,16 | 11,4 | 12,7 | 13,8 | 14,18 | 15,1 | 16,2 | 17,13 | 18,14 | 19,19 | 2,15 | 3,9 | 4,10 | 5,6 | 6,3 | 7,11 | 8,12 | 9,17
+V/upper(u)/derived	rows=19 1,66983bea8fc1df977a17a4fc78c4cc73 | 10,f7781178736ff46aa7a41a60734731eb | 11,5dbc98dcc983a70728bd082d1a47546e | 12,4c8f9afce2ef023c28cf3dcd6bfbe3ac | 13,446694cd8928a5173bb0f4f346a82bae | 14,e15d65e70b5d407993d9dd17bf0aa20d | 15,7fc56270e7a70fa81a5935b72eacbe29 | 16,d5b14f404fdce2a1a134cc9f6ca86ece | 17,56bc0fa9ec3ce7a8592414870acf0adb | 18,f752505ebb7f5e3c999dd92f834c23a6 | 19,NULL | 2,d327227a68a38e78989336d1fb4f0f37 | 3,e15c0eb40e61adefe95778c26e7840f6 | 4,e15c0eb40e61adefe95778c26e7840f6 | 5,1a313f370a5ba8fd5dad6f793d84ff21 | 6,dd7536794b63bf90eccfd37f9b147d7f | 7,872400d7c46eb2c00e9f97e2f4cc7099 | 8,a5fd9cd60f9795aadb209b1fdf976cb6 | 9,6759cfd5ff11c9af6d7508309dc3d135
+V/lower(l)/proj	rows=19 1,66ddcd97cfdeabb2f6fb8a999b4bc76f | 10,8ce4b16b22b58894aa86c421e8759df3 | 11,b69dc897f2759bf0e03dbd705177ddf9 | 12,92504965dec3e15864724a5a01ef74db | 13,92504965dec3e15864724a5a01ef74db | 14,2dfa58646bc344f7723acfcca41f460b | 15,0cc175b9c0f1b6a831c399e269772661 | 16,5526861fbb1e71a1bda6ac364310a807 | 17,9ea890d675ab9c0772cf8b9ebe6cf092 | 18,f4004f9401191b523c3cdc9b984afc6e | 19,NULL | 2,e11ce22edb052b40813b1e145b704775 | 3,3122c41ebe889f745cb9bbe1c92165c3 | 4,a6db33b476ff58d692ba3954759025ff | 5,865c0c0b4ab0e063e5caa3387c1a8741 | 6,8ded568231f5e3b7f6e65ae73f6f9a81 | 7,260c083151ff2017393742c9e7d9fe21 | 8,a6fdaa20605ca142bc36e9784f44e53e | 9,f9c7826bf915dd62672f5a5ba5cff8c5
+V/lower(l)/group	rows=18 0cc175b9c0f1b6a831c399e269772661,1 | 260c083151ff2017393742c9e7d9fe21,1 | 2dfa58646bc344f7723acfcca41f460b,1 | 3122c41ebe889f745cb9bbe1c92165c3,1 | 5526861fbb1e71a1bda6ac364310a807,1 | 66ddcd97cfdeabb2f6fb8a999b4bc76f,1 | 865c0c0b4ab0e063e5caa3387c1a8741,1 | 8ce4b16b22b58894aa86c421e8759df3,1 | 8ded568231f5e3b7f6e65ae73f6f9a81,1 | 92504965dec3e15864724a5a01ef74db,2 | 9ea890d675ab9c0772cf8b9ebe6cf092,1 | NULL,1 | a6db33b476ff58d692ba3954759025ff,1 | a6fdaa20605ca142bc36e9784f44e53e,1 | b69dc897f2759bf0e03dbd705177ddf9,1 | e11ce22edb052b40813b1e145b704775,1 | f4004f9401191b523c3cdc9b984afc6e,1 | f9c7826bf915dd62672f5a5ba5cff8c5,1
+V/lower(l)/sort	rows=19 1,6 | 10,4 | 11,8 | 12,9 | 13,10 | 14,18 | 15,1 | 16,2 | 17,16 | 18,15 | 19,19 | 2,5 | 3,12 | 4,11 | 5,3 | 6,7 | 7,13 | 8,14 | 9,17
+V/lower(l)/derived	rows=19 1,66ddcd97cfdeabb2f6fb8a999b4bc76f | 10,8ce4b16b22b58894aa86c421e8759df3 | 11,b69dc897f2759bf0e03dbd705177ddf9 | 12,92504965dec3e15864724a5a01ef74db | 13,92504965dec3e15864724a5a01ef74db | 14,2dfa58646bc344f7723acfcca41f460b | 15,0cc175b9c0f1b6a831c399e269772661 | 16,5526861fbb1e71a1bda6ac364310a807 | 17,9ea890d675ab9c0772cf8b9ebe6cf092 | 18,f4004f9401191b523c3cdc9b984afc6e | 19,NULL | 2,e11ce22edb052b40813b1e145b704775 | 3,3122c41ebe889f745cb9bbe1c92165c3 | 4,a6db33b476ff58d692ba3954759025ff | 5,865c0c0b4ab0e063e5caa3387c1a8741 | 6,8ded568231f5e3b7f6e65ae73f6f9a81 | 7,260c083151ff2017393742c9e7d9fe21 | 8,a6fdaa20605ca142bc36e9784f44e53e | 9,f9c7826bf915dd62672f5a5ba5cff8c5
+V/lower(u||COLE)/proj	rows=19 1,cbffa38a265e4f5425aa329b45ee62b4 | 10,af887fcaf1748aa670cba47db1cf5de2 | 11,a930272d64c252026071376cdd3cf304 | 12,8ad4bde7b4ed34f9f2432cbe5728828b | 13,d94adec53c771b10d6f04560e13345e0 | 14,b39d1273af8b11b2e3197a39f4b0bf01 | 15,defb0b72bb259a6ab22cb8f5b21d4037 | 16,7b3523bfabb2407cb1b9b51232ca7950 | 17,00eef114b64e108d0bde6e9e2ab05062 | 18,ffda403920be1a46f94a6993d7b3e474 | 19,NULL | 2,8dfb38ee83d8e5b5f4c9bf0680f23254 | 3,deed27d5e2b337f188c3b61f3ed1e21b | 4,deed27d5e2b337f188c3b61f3ed1e21b | 5,419f8105590f75e819a95f8f17c4e3d8 | 6,ce81e372716ceda389008c01ec9263fd | 7,5431878b8cbe02b3fbaf2a644afe056d | 8,f89c04469651d0f491d2e46ecebdaf1a | 9,91ba0940c0b3cf8080b9b8b4fb593e2b
+V/lower(u||COLE)/group	rows=18 00eef114b64e108d0bde6e9e2ab05062,1 | 419f8105590f75e819a95f8f17c4e3d8,1 | 5431878b8cbe02b3fbaf2a644afe056d,1 | 7b3523bfabb2407cb1b9b51232ca7950,1 | 8ad4bde7b4ed34f9f2432cbe5728828b,1 | 8dfb38ee83d8e5b5f4c9bf0680f23254,1 | 91ba0940c0b3cf8080b9b8b4fb593e2b,1 | NULL,1 | a930272d64c252026071376cdd3cf304,1 | af887fcaf1748aa670cba47db1cf5de2,1 | b39d1273af8b11b2e3197a39f4b0bf01,1 | cbffa38a265e4f5425aa329b45ee62b4,1 | ce81e372716ceda389008c01ec9263fd,1 | d94adec53c771b10d6f04560e13345e0,1 | deed27d5e2b337f188c3b61f3ed1e21b,2 | defb0b72bb259a6ab22cb8f5b21d4037,1 | f89c04469651d0f491d2e46ecebdaf1a,1 | ffda403920be1a46f94a6993d7b3e474,1
+V/lower(u||COLE)/sort	rows=19 1,5 | 10,16 | 11,4 | 12,7 | 13,8 | 14,18 | 15,1 | 16,2 | 17,13 | 18,14 | 19,19 | 2,15 | 3,9 | 4,10 | 5,6 | 6,3 | 7,11 | 8,12 | 9,17
+V/lower(u||COLE)/derived	rows=19 1,cbffa38a265e4f5425aa329b45ee62b4 | 10,af887fcaf1748aa670cba47db1cf5de2 | 11,a930272d64c252026071376cdd3cf304 | 12,8ad4bde7b4ed34f9f2432cbe5728828b | 13,d94adec53c771b10d6f04560e13345e0 | 14,b39d1273af8b11b2e3197a39f4b0bf01 | 15,defb0b72bb259a6ab22cb8f5b21d4037 | 16,7b3523bfabb2407cb1b9b51232ca7950 | 17,00eef114b64e108d0bde6e9e2ab05062 | 18,ffda403920be1a46f94a6993d7b3e474 | 19,NULL | 2,8dfb38ee83d8e5b5f4c9bf0680f23254 | 3,deed27d5e2b337f188c3b61f3ed1e21b | 4,deed27d5e2b337f188c3b61f3ed1e21b | 5,419f8105590f75e819a95f8f17c4e3d8 | 6,ce81e372716ceda389008c01ec9263fd | 7,5431878b8cbe02b3fbaf2a644afe056d | 8,f89c04469651d0f491d2e46ecebdaf1a | 9,91ba0940c0b3cf8080b9b8b4fb593e2b
+V/replace_i/proj	rows=19 1,66983bea8fc1df977a17a4fc78c4cc73 | 10,f7781178736ff46aa7a41a60734731eb | 11,5dbc98dcc983a70728bd082d1a47546e | 12,4c8f9afce2ef023c28cf3dcd6bfbe3ac | 13,446694cd8928a5173bb0f4f346a82bae | 14,e15d65e70b5d407993d9dd17bf0aa20d | 15,01abfc750a0c942167651c40d088531d | 16,01abfc750a0c942167651c40d088531d | 17,56bc0fa9ec3ce7a8592414870acf0adb | 18,f752505ebb7f5e3c999dd92f834c23a6 | 19,NULL | 2,d327227a68a38e78989336d1fb4f0f37 | 3,e15c0eb40e61adefe95778c26e7840f6 | 4,e15c0eb40e61adefe95778c26e7840f6 | 5,1a313f370a5ba8fd5dad6f793d84ff21 | 6,dd7536794b63bf90eccfd37f9b147d7f | 7,872400d7c46eb2c00e9f97e2f4cc7099 | 8,a5fd9cd60f9795aadb209b1fdf976cb6 | 9,6759cfd5ff11c9af6d7508309dc3d135
+V/replace_i/group	rows=17 01abfc750a0c942167651c40d088531d,2 | 1a313f370a5ba8fd5dad6f793d84ff21,1 | 446694cd8928a5173bb0f4f346a82bae,1 | 4c8f9afce2ef023c28cf3dcd6bfbe3ac,1 | 56bc0fa9ec3ce7a8592414870acf0adb,1 | 5dbc98dcc983a70728bd082d1a47546e,1 | 66983bea8fc1df977a17a4fc78c4cc73,1 | 6759cfd5ff11c9af6d7508309dc3d135,1 | 872400d7c46eb2c00e9f97e2f4cc7099,1 | NULL,1 | a5fd9cd60f9795aadb209b1fdf976cb6,1 | d327227a68a38e78989336d1fb4f0f37,1 | dd7536794b63bf90eccfd37f9b147d7f,1 | e15c0eb40e61adefe95778c26e7840f6,2 | e15d65e70b5d407993d9dd17bf0aa20d,1 | f752505ebb7f5e3c999dd92f834c23a6,1 | f7781178736ff46aa7a41a60734731eb,1
+V/replace_i/sort	rows=19 1,5 | 10,16 | 11,4 | 12,7 | 13,8 | 14,18 | 15,1 | 16,2 | 17,13 | 18,14 | 19,19 | 2,15 | 3,9 | 4,10 | 5,6 | 6,3 | 7,11 | 8,12 | 9,17
+V/replace_i/derived	rows=19 1,66983bea8fc1df977a17a4fc78c4cc73 | 10,f7781178736ff46aa7a41a60734731eb | 11,5dbc98dcc983a70728bd082d1a47546e | 12,4c8f9afce2ef023c28cf3dcd6bfbe3ac | 13,446694cd8928a5173bb0f4f346a82bae | 14,e15d65e70b5d407993d9dd17bf0aa20d | 15,01abfc750a0c942167651c40d088531d | 16,01abfc750a0c942167651c40d088531d | 17,56bc0fa9ec3ce7a8592414870acf0adb | 18,f752505ebb7f5e3c999dd92f834c23a6 | 19,NULL | 2,d327227a68a38e78989336d1fb4f0f37 | 3,e15c0eb40e61adefe95778c26e7840f6 | 4,e15c0eb40e61adefe95778c26e7840f6 | 5,1a313f370a5ba8fd5dad6f793d84ff21 | 6,dd7536794b63bf90eccfd37f9b147d7f | 7,872400d7c46eb2c00e9f97e2f4cc7099 | 8,a5fd9cd60f9795aadb209b1fdf976cb6 | 9,6759cfd5ff11c9af6d7508309dc3d135
+P/u ILIKE l||%/proj	rows=19 1,f | 10,f | 11,f | 12,f | 13,f | 14,f | 15,t | 16,t | 17,f | 18,f | 19,NULL | 2,f | 3,f | 4,f | 5,f | 6,f | 7,f | 8,f | 9,f
+P/u ILIKE l||%/where	rows=2 15 | 16
+P/u ILIKE l||%/case	rows=2 15 | 16
+P/u ILIKE l||%/group	rows=3 NULL,1 | f,16 | t,2
+P/u ILIKE l||%/const/1	rows=1 f
+P/u ILIKE l||%/const/2	rows=1 f
+P/u ILIKE l||%/const/3	rows=1 f
+P/u ILIKE l||%/const/4	rows=1 f
+P/u ILIKE l||%/const/5	rows=1 f
+P/u ILIKE l||%/const/6	rows=1 f
+P/u ILIKE l||%/const/7	rows=1 f
+P/u ILIKE l||%/const/8	rows=1 f
+P/u ILIKE l||%/const/9	rows=1 f
+P/u ILIKE l||%/const/10	rows=1 f
+P/u ILIKE l||%/const/11	rows=1 f
+P/u ILIKE l||%/const/12	rows=1 f
+P/u ILIKE l||%/const/13	rows=1 f
+P/u ILIKE l||%/const/14	rows=1 f
+P/u ILIKE l||%/const/15	rows=1 t
+P/u ILIKE l||%/const/16	rows=1 t
+P/u ILIKE l||%/const/17	rows=1 f
+P/u ILIKE l||%/const/18	rows=1 f
+P/upper(u)=upper(l)/proj	rows=19 1,f | 10,f | 11,f | 12,f | 13,f | 14,f | 15,t | 16,t | 17,f | 18,f | 19,NULL | 2,f | 3,f | 4,f | 5,f | 6,f | 7,f | 8,f | 9,f
+P/upper(u)=upper(l)/where	rows=2 15 | 16
+P/upper(u)=upper(l)/case	rows=2 15 | 16
+P/upper(u)=upper(l)/group	rows=3 NULL,1 | f,16 | t,2
+P/upper(u)=upper(l)/const/1	rows=1 f
+P/upper(u)=upper(l)/const/2	rows=1 f
+P/upper(u)=upper(l)/const/3	rows=1 f
+P/upper(u)=upper(l)/const/4	rows=1 f
+P/upper(u)=upper(l)/const/5	rows=1 f
+P/upper(u)=upper(l)/const/6	rows=1 f
+P/upper(u)=upper(l)/const/7	rows=1 f
+P/upper(u)=upper(l)/const/8	rows=1 f
+P/upper(u)=upper(l)/const/9	rows=1 f
+P/upper(u)=upper(l)/const/10	rows=1 f
+P/upper(u)=upper(l)/const/11	rows=1 f
+P/upper(u)=upper(l)/const/12	rows=1 f
+P/upper(u)=upper(l)/const/13	rows=1 f
+P/upper(u)=upper(l)/const/14	rows=1 f
+P/upper(u)=upper(l)/const/15	rows=1 t
+P/upper(u)=upper(l)/const/16	rows=1 t
+P/upper(u)=upper(l)/const/17	rows=1 f
+P/upper(u)=upper(l)/const/18	rows=1 f
+P/lower(u)=l/proj	rows=19 1,f | 10,f | 11,f | 12,f | 13,f | 14,f | 15,t | 16,t | 17,f | 18,f | 19,NULL | 2,f | 3,f | 4,f | 5,f | 6,f | 7,f | 8,f | 9,f
+P/lower(u)=l/where	rows=2 15 | 16
+P/lower(u)=l/case	rows=2 15 | 16
+P/lower(u)=l/group	rows=3 NULL,1 | f,16 | t,2
+P/lower(u)=l/const/1	rows=1 f
+P/lower(u)=l/const/2	rows=1 f
+P/lower(u)=l/const/3	rows=1 f
+P/lower(u)=l/const/4	rows=1 f
+P/lower(u)=l/const/5	rows=1 f
+P/lower(u)=l/const/6	rows=1 f
+P/lower(u)=l/const/7	rows=1 f
+P/lower(u)=l/const/8	rows=1 f
+P/lower(u)=l/const/9	rows=1 f
+P/lower(u)=l/const/10	rows=1 f
+P/lower(u)=l/const/11	rows=1 f
+P/lower(u)=l/const/12	rows=1 f
+P/lower(u)=l/const/13	rows=1 f
+P/lower(u)=l/const/14	rows=1 f
+P/lower(u)=l/const/15	rows=1 t
+P/lower(u)=l/const/16	rows=1 t
+P/lower(u)=l/const/17	rows=1 f
+P/lower(u)=l/const/18	rows=1 f
+P/u ILIKE l/proj	rows=19 1,f | 10,f | 11,f | 12,f | 13,f | 14,f | 15,t | 16,t | 17,f | 18,f | 19,NULL | 2,f | 3,f | 4,f | 5,f | 6,f | 7,f | 8,f | 9,f
+P/u ILIKE l/where	rows=2 15 | 16
+P/u ILIKE l/case	rows=2 15 | 16
+P/u ILIKE l/group	rows=3 NULL,1 | f,16 | t,2
+P/u ILIKE l/const/1	rows=1 f
+P/u ILIKE l/const/2	rows=1 f
+P/u ILIKE l/const/3	rows=1 f
+P/u ILIKE l/const/4	rows=1 f
+P/u ILIKE l/const/5	rows=1 f
+P/u ILIKE l/const/6	rows=1 f
+P/u ILIKE l/const/7	rows=1 f
+P/u ILIKE l/const/8	rows=1 f
+P/u ILIKE l/const/9	rows=1 f
+P/u ILIKE l/const/10	rows=1 f
+P/u ILIKE l/const/11	rows=1 f
+P/u ILIKE l/const/12	rows=1 f
+P/u ILIKE l/const/13	rows=1 f
+P/u ILIKE l/const/14	rows=1 f
+P/u ILIKE l/const/15	rows=1 t
+P/u ILIKE l/const/16	rows=1 t
+P/u ILIKE l/const/17	rows=1 f
+P/u ILIKE l/const/18	rows=1 f
+P/u ILIKE l ESCAPE !/proj	rows=19 1,f | 10,f | 11,f | 12,f | 13,f | 14,f | 15,t | 16,t | 17,f | 18,f | 19,NULL | 2,f | 3,f | 4,f | 5,f | 6,f | 7,f | 8,f | 9,f
+P/u ILIKE l ESCAPE !/where	rows=2 15 | 16
+P/u ILIKE l ESCAPE !/case	rows=2 15 | 16
+P/u ILIKE l ESCAPE !/group	rows=3 NULL,1 | f,16 | t,2
+P/u ILIKE l ESCAPE !/const/1	rows=1 f
+P/u ILIKE l ESCAPE !/const/2	rows=1 f
+P/u ILIKE l ESCAPE !/const/3	rows=1 f
+P/u ILIKE l ESCAPE !/const/4	rows=1 f
+P/u ILIKE l ESCAPE !/const/5	rows=1 f
+P/u ILIKE l ESCAPE !/const/6	rows=1 f
+P/u ILIKE l ESCAPE !/const/7	rows=1 f
+P/u ILIKE l ESCAPE !/const/8	rows=1 f
+P/u ILIKE l ESCAPE !/const/9	rows=1 f
+P/u ILIKE l ESCAPE !/const/10	rows=1 f
+P/u ILIKE l ESCAPE !/const/11	rows=1 f
+P/u ILIKE l ESCAPE !/const/12	rows=1 f
+P/u ILIKE l ESCAPE !/const/13	rows=1 f
+P/u ILIKE l ESCAPE !/const/14	rows=1 f
+P/u ILIKE l ESCAPE !/const/15	rows=1 t
+P/u ILIKE l ESCAPE !/const/16	rows=1 t
+P/u ILIKE l ESCAPE !/const/17	rows=1 f
+P/u ILIKE l ESCAPE !/const/18	rows=1 f
+P/u ~~* l/proj	rows=19 1,f | 10,f | 11,f | 12,f | 13,f | 14,f | 15,t | 16,t | 17,f | 18,f | 19,NULL | 2,f | 3,f | 4,f | 5,f | 6,f | 7,f | 8,f | 9,f
+P/u ~~* l/where	rows=2 15 | 16
+P/u ~~* l/case	rows=2 15 | 16
+P/u ~~* l/group	rows=3 NULL,1 | f,16 | t,2
+P/u ~~* l/const/1	rows=1 f
+P/u ~~* l/const/2	rows=1 f
+P/u ~~* l/const/3	rows=1 f
+P/u ~~* l/const/4	rows=1 f
+P/u ~~* l/const/5	rows=1 f
+P/u ~~* l/const/6	rows=1 f
+P/u ~~* l/const/7	rows=1 f
+P/u ~~* l/const/8	rows=1 f
+P/u ~~* l/const/9	rows=1 f
+P/u ~~* l/const/10	rows=1 f
+P/u ~~* l/const/11	rows=1 f
+P/u ~~* l/const/12	rows=1 f
+P/u ~~* l/const/13	rows=1 f
+P/u ~~* l/const/14	rows=1 f
+P/u ~~* l/const/15	rows=1 t
+P/u ~~* l/const/16	rows=1 t
+P/u ~~* l/const/17	rows=1 f
+P/u ~~* l/const/18	rows=1 f
+P/upper(l)=u/proj	rows=19 1,f | 10,f | 11,f | 12,f | 13,f | 14,f | 15,t | 16,t | 17,f | 18,f | 19,NULL | 2,f | 3,f | 4,f | 5,f | 6,f | 7,f | 8,f | 9,f
+P/upper(l)=u/where	rows=2 15 | 16
+P/upper(l)=u/case	rows=2 15 | 16
+P/upper(l)=u/group	rows=3 NULL,1 | f,16 | t,2
+P/upper(l)=u/const/1	rows=1 f
+P/upper(l)=u/const/2	rows=1 f
+P/upper(l)=u/const/3	rows=1 f
+P/upper(l)=u/const/4	rows=1 f
+P/upper(l)=u/const/5	rows=1 f
+P/upper(l)=u/const/6	rows=1 f
+P/upper(l)=u/const/7	rows=1 f
+P/upper(l)=u/const/8	rows=1 f
+P/upper(l)=u/const/9	rows=1 f
+P/upper(l)=u/const/10	rows=1 f
+P/upper(l)=u/const/11	rows=1 f
+P/upper(l)=u/const/12	rows=1 f
+P/upper(l)=u/const/13	rows=1 f
+P/upper(l)=u/const/14	rows=1 f
+P/upper(l)=u/const/15	rows=1 t
+P/upper(l)=u/const/16	rows=1 t
+P/upper(l)=u/const/17	rows=1 f
+P/upper(l)=u/const/18	rows=1 f
+P/u NOT ILIKE l/proj	rows=19 1,t | 10,t | 11,t | 12,t | 13,t | 14,t | 15,f | 16,f | 17,t | 18,t | 19,NULL | 2,t | 3,t | 4,t | 5,t | 6,t | 7,t | 8,t | 9,t
+P/u NOT ILIKE l/where	rows=16 1 | 10 | 11 | 12 | 13 | 14 | 17 | 18 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
+P/u NOT ILIKE l/case	rows=16 1 | 10 | 11 | 12 | 13 | 14 | 17 | 18 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
+P/u NOT ILIKE l/group	rows=3 NULL,1 | f,2 | t,16
+P/u NOT ILIKE l/const/1	rows=1 t
+P/u NOT ILIKE l/const/2	rows=1 t
+P/u NOT ILIKE l/const/3	rows=1 t
+P/u NOT ILIKE l/const/4	rows=1 t
+P/u NOT ILIKE l/const/5	rows=1 t
+P/u NOT ILIKE l/const/6	rows=1 t
+P/u NOT ILIKE l/const/7	rows=1 t
+P/u NOT ILIKE l/const/8	rows=1 t
+P/u NOT ILIKE l/const/9	rows=1 t
+P/u NOT ILIKE l/const/10	rows=1 t
+P/u NOT ILIKE l/const/11	rows=1 t
+P/u NOT ILIKE l/const/12	rows=1 t
+P/u NOT ILIKE l/const/13	rows=1 t
+P/u NOT ILIKE l/const/14	rows=1 t
+P/u NOT ILIKE l/const/15	rows=1 f
+P/u NOT ILIKE l/const/16	rows=1 f
+P/u NOT ILIKE l/const/17	rows=1 t
+P/u NOT ILIKE l/const/18	rows=1 t
+P/u||x ILIKE l||%/proj	rows=19 1,f | 10,f | 11,f | 12,f | 13,f | 14,f | 15,t | 16,t | 17,f | 18,f | 19,NULL | 2,f | 3,f | 4,f | 5,f | 6,f | 7,f | 8,f | 9,f
+P/u||x ILIKE l||%/where	rows=2 15 | 16
+P/u||x ILIKE l||%/case	rows=2 15 | 16
+P/u||x ILIKE l||%/group	rows=3 NULL,1 | f,16 | t,2
+P/u||x ILIKE l||%/const/1	rows=1 f
+P/u||x ILIKE l||%/const/2	rows=1 f
+P/u||x ILIKE l||%/const/3	rows=1 f
+P/u||x ILIKE l||%/const/4	rows=1 f
+P/u||x ILIKE l||%/const/5	rows=1 f
+P/u||x ILIKE l||%/const/6	rows=1 f
+P/u||x ILIKE l||%/const/7	rows=1 f
+P/u||x ILIKE l||%/const/8	rows=1 f
+P/u||x ILIKE l||%/const/9	rows=1 f
+P/u||x ILIKE l||%/const/10	rows=1 f
+P/u||x ILIKE l||%/const/11	rows=1 f
+P/u||x ILIKE l||%/const/12	rows=1 f
+P/u||x ILIKE l||%/const/13	rows=1 f
+P/u||x ILIKE l||%/const/14	rows=1 f
+P/u||x ILIKE l||%/const/15	rows=1 t
+P/u||x ILIKE l||%/const/16	rows=1 t
+P/u||x ILIKE l||%/const/17	rows=1 f
+P/u||x ILIKE l||%/const/18	rows=1 f
+P/u ~* l/proj	rows=19 1,f | 10,f | 11,f | 12,f | 13,f | 14,f | 15,t | 16,t | 17,f | 18,f | 19,NULL | 2,f | 3,f | 4,f | 5,f | 6,f | 7,f | 8,f | 9,f
+P/u ~* l/where	rows=2 15 | 16
+P/u ~* l/case	rows=2 15 | 16
+P/u ~* l/group	rows=3 NULL,1 | f,16 | t,2
+P/u ~* l/const/1	rows=1 f
+P/u ~* l/const/2	rows=1 f
+P/u ~* l/const/3	rows=1 f
+P/u ~* l/const/4	rows=1 f
+P/u ~* l/const/5	rows=1 f
+P/u ~* l/const/6	rows=1 f
+P/u ~* l/const/7	rows=1 f
+P/u ~* l/const/8	rows=1 f
+P/u ~* l/const/9	rows=1 f
+P/u ~* l/const/10	rows=1 f
+P/u ~* l/const/11	rows=1 f
+P/u ~* l/const/12	rows=1 f
+P/u ~* l/const/13	rows=1 f
+P/u ~* l/const/14	rows=1 f
+P/u ~* l/const/15	rows=1 t
+P/u ~* l/const/16	rows=1 t
+P/u ~* l/const/17	rows=1 f
+P/u ~* l/const/18	rows=1 f
+P/u !~* l/proj	rows=19 1,t | 10,t | 11,t | 12,t | 13,t | 14,t | 15,f | 16,f | 17,t | 18,t | 19,NULL | 2,t | 3,t | 4,t | 5,t | 6,t | 7,t | 8,t | 9,t
+P/u !~* l/where	rows=16 1 | 10 | 11 | 12 | 13 | 14 | 17 | 18 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
+P/u !~* l/case	rows=16 1 | 10 | 11 | 12 | 13 | 14 | 17 | 18 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
+P/u !~* l/group	rows=3 NULL,1 | f,2 | t,16
+P/u !~* l/const/1	rows=1 t
+P/u !~* l/const/2	rows=1 t
+P/u !~* l/const/3	rows=1 t
+P/u !~* l/const/4	rows=1 t
+P/u !~* l/const/5	rows=1 t
+P/u !~* l/const/6	rows=1 t
+P/u !~* l/const/7	rows=1 t
+P/u !~* l/const/8	rows=1 t
+P/u !~* l/const/9	rows=1 t
+P/u !~* l/const/10	rows=1 t
+P/u !~* l/const/11	rows=1 t
+P/u !~* l/const/12	rows=1 t
+P/u !~* l/const/13	rows=1 t
+P/u !~* l/const/14	rows=1 t
+P/u !~* l/const/15	rows=1 f
+P/u !~* l/const/16	rows=1 f
+P/u !~* l/const/17	rows=1 t
+P/u !~* l/const/18	rows=1 t
+P/regexp_like_i/proj	rows=19 1,f | 10,f | 11,f | 12,f | 13,f | 14,f | 15,t | 16,t | 17,f | 18,f | 19,NULL | 2,f | 3,f | 4,f | 5,f | 6,f | 7,f | 8,f | 9,f
+P/regexp_like_i/where	rows=2 15 | 16
+P/regexp_like_i/case	rows=2 15 | 16
+P/regexp_like_i/group	rows=3 NULL,1 | f,16 | t,2
+P/regexp_like_i/const/1	rows=1 f
+P/regexp_like_i/const/2	rows=1 f
+P/regexp_like_i/const/3	rows=1 f
+P/regexp_like_i/const/4	rows=1 f
+P/regexp_like_i/const/5	rows=1 f
+P/regexp_like_i/const/6	rows=1 f
+P/regexp_like_i/const/7	rows=1 f
+P/regexp_like_i/const/8	rows=1 f
+P/regexp_like_i/const/9	rows=1 f
+P/regexp_like_i/const/10	rows=1 f
+P/regexp_like_i/const/11	rows=1 f
+P/regexp_like_i/const/12	rows=1 f
+P/regexp_like_i/const/13	rows=1 f
+P/regexp_like_i/const/14	rows=1 f
+P/regexp_like_i/const/15	rows=1 t
+P/regexp_like_i/const/16	rows=1 t
+P/regexp_like_i/const/17	rows=1 f
+P/regexp_like_i/const/18	rows=1 f
+P/embedded_i/proj	rows=19 1,f | 10,f | 11,f | 12,f | 13,f | 14,f | 15,t | 16,t | 17,f | 18,f | 19,NULL | 2,f | 3,f | 4,f | 5,f | 6,f | 7,f | 8,f | 9,f
+P/embedded_i/where	rows=2 15 | 16
+P/embedded_i/case	rows=2 15 | 16
+P/embedded_i/group	rows=3 NULL,1 | f,16 | t,2
+P/embedded_i/const/1	rows=1 f
+P/embedded_i/const/2	rows=1 f
+P/embedded_i/const/3	rows=1 f
+P/embedded_i/const/4	rows=1 f
+P/embedded_i/const/5	rows=1 f
+P/embedded_i/const/6	rows=1 f
+P/embedded_i/const/7	rows=1 f
+P/embedded_i/const/8	rows=1 f
+P/embedded_i/const/9	rows=1 f
+P/embedded_i/const/10	rows=1 f
+P/embedded_i/const/11	rows=1 f
+P/embedded_i/const/12	rows=1 f
+P/embedded_i/const/13	rows=1 f
+P/embedded_i/const/14	rows=1 f
+P/embedded_i/const/15	rows=1 t
+P/embedded_i/const/16	rows=1 t
+P/embedded_i/const/17	rows=1 f
+P/embedded_i/const/18	rows=1 f
+P/lower(u)=lower(l)/proj	rows=19 1,f | 10,f | 11,f | 12,f | 13,f | 14,f | 15,t | 16,t | 17,f | 18,f | 19,NULL | 2,f | 3,f | 4,f | 5,f | 6,f | 7,f | 8,f | 9,f
+P/lower(u)=lower(l)/where	rows=2 15 | 16
+P/lower(u)=lower(l)/case	rows=2 15 | 16
+P/lower(u)=lower(l)/group	rows=3 NULL,1 | f,16 | t,2
+P/lower(u)=lower(l)/const/1	rows=1 f
+P/lower(u)=lower(l)/const/2	rows=1 f
+P/lower(u)=lower(l)/const/3	rows=1 f
+P/lower(u)=lower(l)/const/4	rows=1 f
+P/lower(u)=lower(l)/const/5	rows=1 f
+P/lower(u)=lower(l)/const/6	rows=1 f
+P/lower(u)=lower(l)/const/7	rows=1 f
+P/lower(u)=lower(l)/const/8	rows=1 f
+P/lower(u)=lower(l)/const/9	rows=1 f
+P/lower(u)=lower(l)/const/10	rows=1 f
+P/lower(u)=lower(l)/const/11	rows=1 f
+P/lower(u)=lower(l)/const/12	rows=1 f
+P/lower(u)=lower(l)/const/13	rows=1 f
+P/lower(u)=lower(l)/const/14	rows=1 f
+P/lower(u)=lower(l)/const/15	rows=1 t
+P/lower(u)=lower(l)/const/16	rows=1 t
+P/lower(u)=lower(l)/const/17	rows=1 f
+P/lower(u)=lower(l)/const/18	rows=1 f
+P/l ILIKE u/proj	rows=19 1,f | 10,f | 11,f | 12,f | 13,f | 14,f | 15,t | 16,t | 17,f | 18,f | 19,NULL | 2,f | 3,f | 4,f | 5,f | 6,f | 7,f | 8,f | 9,f
+P/l ILIKE u/where	rows=2 15 | 16
+P/l ILIKE u/case	rows=2 15 | 16
+P/l ILIKE u/group	rows=3 NULL,1 | f,16 | t,2
+P/l ILIKE u/const/1	rows=1 f
+P/l ILIKE u/const/2	rows=1 f
+P/l ILIKE u/const/3	rows=1 f
+P/l ILIKE u/const/4	rows=1 f
+P/l ILIKE u/const/5	rows=1 f
+P/l ILIKE u/const/6	rows=1 f
+P/l ILIKE u/const/7	rows=1 f
+P/l ILIKE u/const/8	rows=1 f
+P/l ILIKE u/const/9	rows=1 f
+P/l ILIKE u/const/10	rows=1 f
+P/l ILIKE u/const/11	rows=1 f
+P/l ILIKE u/const/12	rows=1 f
+P/l ILIKE u/const/13	rows=1 f
+P/l ILIKE u/const/14	rows=1 f
+P/l ILIKE u/const/15	rows=1 t
+P/l ILIKE u/const/16	rows=1 t
+P/l ILIKE u/const/17	rows=1 f
+P/l ILIKE u/const/18	rows=1 f
+P/l ~* u/proj	rows=19 1,f | 10,f | 11,f | 12,f | 13,f | 14,f | 15,t | 16,t | 17,f | 18,f | 19,NULL | 2,f | 3,f | 4,f | 5,f | 6,f | 7,f | 8,f | 9,f
+P/l ~* u/where	rows=2 15 | 16
+P/l ~* u/case	rows=2 15 | 16
+P/l ~* u/group	rows=3 NULL,1 | f,16 | t,2
+P/l ~* u/const/1	rows=1 f
+P/l ~* u/const/2	rows=1 f
+P/l ~* u/const/3	rows=1 f
+P/l ~* u/const/4	rows=1 f
+P/l ~* u/const/5	rows=1 f
+P/l ~* u/const/6	rows=1 f
+P/l ~* u/const/7	rows=1 f
+P/l ~* u/const/8	rows=1 f
+P/l ~* u/const/9	rows=1 f
+P/l ~* u/const/10	rows=1 f
+P/l ~* u/const/11	rows=1 f
+P/l ~* u/const/12	rows=1 f
+P/l ~* u/const/13	rows=1 f
+P/l ~* u/const/14	rows=1 f
+P/l ~* u/const/15	rows=1 t
+P/l ~* u/const/16	rows=1 t
+P/l ~* u/const/17	rows=1 f
+P/l ~* u/const/18	rows=1 f
+J/lower(a.u)=b.l	rows=3 15,15 | 16,16 | 6,5
+J/lower(a.u)=lower(b.l)	rows=3 15,15 | 16,16 | 6,5
+J/upper(a.l)=b.u	rows=3 15,15 | 16,16 | 5,6
+J/a.u ILIKE b.l	rows=3 15,15 | 16,16 | 6,5
+J/a.u ~* b.l	rows=3 15,15 | 16,16 | 6,5
+J/derived-key	rows=3 15,15 | 16,16 | 6,5
+C/select-both	rows=19 1,f,66983bea8fc1df977a17a4fc78c4cc73 | 10,f,f7781178736ff46aa7a41a60734731eb | 11,f,03c7c0ace395d80182db07ae2c30f034 | 12,f,4c8f9afce2ef023c28cf3dcd6bfbe3ac | 13,f,446694cd8928a5173bb0f4f346a82bae | 14,f,e15d65e70b5d407993d9dd17bf0aa20d | 15,t,0cc175b9c0f1b6a831c399e269772661 | 16,t,5526861fbb1e71a1bda6ac364310a807 | 17,f,56bc0fa9ec3ce7a8592414870acf0adb | 18,f,f752505ebb7f5e3c999dd92f834c23a6 | 19,NULL,NULL | 2,f,d327227a68a38e78989336d1fb4f0f37 | 3,f,e15c0eb40e61adefe95778c26e7840f6 | 4,f,e15c0eb40e61adefe95778c26e7840f6 | 5,f,1a313f370a5ba8fd5dad6f793d84ff21 | 6,f,865c0c0b4ab0e063e5caa3387c1a8741 | 7,f,872400d7c46eb2c00e9f97e2f4cc7099 | 8,f,a5fd9cd60f9795aadb209b1fdf976cb6 | 9,f,6759cfd5ff11c9af6d7508309dc3d135
+C/where	rows=2 15,0cc175b9c0f1b6a831c399e269772661 | 16,5526861fbb1e71a1bda6ac364310a807
+C/group	rows=18 03c7c0ace395d80182db07ae2c30f034,1 | 0cc175b9c0f1b6a831c399e269772661,1 | 1a313f370a5ba8fd5dad6f793d84ff21,1 | 446694cd8928a5173bb0f4f346a82bae,1 | 4c8f9afce2ef023c28cf3dcd6bfbe3ac,1 | 5526861fbb1e71a1bda6ac364310a807,1 | 56bc0fa9ec3ce7a8592414870acf0adb,1 | 66983bea8fc1df977a17a4fc78c4cc73,1 | 6759cfd5ff11c9af6d7508309dc3d135,1 | 865c0c0b4ab0e063e5caa3387c1a8741,1 | 872400d7c46eb2c00e9f97e2f4cc7099,1 | NULL,1 | a5fd9cd60f9795aadb209b1fdf976cb6,1 | d327227a68a38e78989336d1fb4f0f37,1 | e15c0eb40e61adefe95778c26e7840f6,2 | e15d65e70b5d407993d9dd17bf0aa20d,1 | f752505ebb7f5e3c999dd92f834c23a6,1 | f7781178736ff46aa7a41a60734731eb,1
+C/ecole	rows=2 1,f | 15,f

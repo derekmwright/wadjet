@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
+	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
 
 // Expr evaluates an expression against a record batch row, returning a typed value.
@@ -95,7 +96,7 @@ var stringInputFuncs = map[string]bool{
 	"left": true, "right": true, "starts_with": true, "ends_with": true,
 	"contains": true, "split_part": true, "strpos": true, "lpad": true,
 	"rpad": true, "cast_string": true,
-	"overlay": true, "like_escape": true, "similar_to": true,
+	"overlay": true, "like_escape": true, "similar_to": true, plansql.LikeEscapeTextFunc: true,
 	// `format` renders its arguments, so a TIMESTAMP/DATE/IPv4/MAC column
 	// reaching it must arrive as the text the wire carries rather than as its
 	// raw box: `FORMAT('%s', c_ts)` answered `%!s(int64=1700000000000)` — the
@@ -286,7 +287,9 @@ func init() {
 		// `x LIKE p ESCAPE e`, `x SIMILAR TO p [ESCAPE e]`.
 		"overlay":     {fnOverlay, RetString},
 		"like_escape": {fnLikeEscape, RetBool},
-		"similar_to":  {fnSimilarTo, RetBool},
+		// PostgreSQL's like_escape(text, text); see plansql.LikeEscapeTextFunc.
+		plansql.LikeEscapeTextFunc: {fnLikeEscapeText, RetString},
+		"similar_to":               {fnSimilarTo, RetBool},
 
 		// Math functions
 		"abs":   {fnAbs, RetFloat64},

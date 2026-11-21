@@ -290,24 +290,18 @@ func ltOpen(t *testing.T, budget int64) (lkRunner, bool) {
 //
 // `_` matches one BYTE here and one CHARACTER on PostgreSQL, so `'é' LIKE '_'`
 // is false (é is two bytes in UTF-8): wrong at the base and kept, because a
-// LIKE without a backslash or an ESCAPE must not change in #1209. ILIKE lowers
-// with this engine's lower(), which folds every Unicode letter, where the
-// oracle's C-locale lower() folds only ASCII ('ÉCOLE' ILIKE 'é%'). ILIKE
-// ... ESCAPE 'X' lowers the pattern BEFORE like_escape reads it, so an upper-
-// case escape character no longer names itself (PostgreSQL applies like_escape
-// first). All three were wrong at the base.
+// LIKE without a backslash or an ESCAPE must not change in #1209 (held, #1209
+// line 1). The two other residuals this table once pinned answer as
+// PostgreSQL now: ILIKE folds ASCII only, as the C locale does ('ÉCOLE' ILIKE
+// 'é%' is f, pair 42), and ILIKE ... ESCAPE reads the escape in the pattern
+// as written before folding it ('a' ILIKE 'Xa' ESCAPE 'X' is t, pairs 43 and
+// 44).
 func ltResidual(c ltCell, arm ltArm) (byte, bool) {
 	switch {
 	case c.id == 35 && (c.op == "LIKE" || c.op == "ILIKE" || strings.HasPrefix(c.op, "LIKE ESCAPE") || strings.HasPrefix(c.op, "ILIKE ESCAPE")) && c.vk != "null" && c.pk != "null" && c.op != "LIKE ESCAPE NULL" && c.op != "LIKE ESCAPE '!!'":
 		return 'f', true
 	case c.id == 35 && (c.op == "NOT LIKE" || c.op == "NOT ILIKE" || strings.HasPrefix(c.op, "NOT LIKE ESCAPE") || strings.HasPrefix(c.op, "NOT ILIKE ESCAPE")) && c.vk != "null" && c.pk != "null":
 		return 't', true
-	case c.id == 42 && (c.op == "ILIKE" || c.op == "ILIKE ESCAPE '!'" || c.op == "ILIKE ESCAPE 'X'") && c.vk != "null" && c.pk != "null":
-		return 't', true
-	case c.id == 42 && (c.op == "NOT ILIKE" || c.op == "NOT ILIKE ESCAPE '!'") && c.vk != "null" && c.pk != "null":
-		return 'f', true
-	case (c.id == 43 || c.id == 44) && c.op == "ILIKE ESCAPE 'X'" && c.vk != "null" && c.pk != "null":
-		return 'f', true
 	}
 	return 0, false
 }

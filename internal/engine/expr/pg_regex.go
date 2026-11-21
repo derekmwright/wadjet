@@ -546,8 +546,9 @@ func aregexToRE2(p string, m reMode) (string, error) {
 			case i+2 < len(runes) && runes[i+1] == '-' && runes[i+2] != ']':
 				// A range. Under case-insensitivity PostgreSQL folds it
 				// letter by letter: the other cases of every letter INSIDE it
-				// join the set, so `[A-_]` takes a-z, `[Z-a]` takes z and A,
-				// and `[à-æ]` takes À-Æ (measured on 17.11).
+				// join the set, so `[A-_]` takes a-z and `[Z-a]` takes z and
+				// A, while `[à-æ]` takes no À-Æ, the C locale mapping ASCII
+				// only (measured on 17.11, --locale=C).
 				lo, hi := r, runes[i+2]
 				b.WriteString(bracketLiteral(lo) + "-" + bracketLiteral(hi))
 				if icase {
@@ -906,21 +907,11 @@ func escapedAt(runes []rune, i int) bool {
 	return n%2 == 1
 }
 
-// caseForms is r's lower- and upper-case forms as PostgreSQL's oracle reads
-// them: Go's unicode.ToLower / ToUpper, except where the oracle's C library
-// differs (libcCaseForms, measured).
-func caseForms(r rune) (lower, upper rune) {
-	if f, ok := libcCaseForms[r]; ok {
-		return f[0], f[1]
-	}
-	return unicode.ToLower(r), unicode.ToUpper(r)
-}
-
 // caseVariants is r followed by its lower- and upper-case forms, distinct:
-// the characters a case-insensitive ARE matches for r. PostgreSQL takes
-// exactly these (towlower / towupper), not the whole case-folding orbit:
-// 'ς' ~* 'σ' is false there (σ's forms are σ and Σ), and 'İ' ~* 'i' false
-// while 'i' ~* 'İ' is true.
+// the characters a case-insensitive ARE matches for r. The forms are the C
+// locale's (caseForms, pg_case_forms.go): an ASCII letter matches its other
+// case and every other character only itself, so 'É' ~* 'é', 'Σ' ~* 'σ' and
+// 'i' ~* 'İ' are all false on the reference (PostgreSQL 17.11, --locale=C).
 func caseVariants(r rune) []rune {
 	out := []rune{r}
 	lo, up := caseForms(r)

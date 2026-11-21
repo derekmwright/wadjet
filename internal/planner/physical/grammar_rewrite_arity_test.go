@@ -204,7 +204,10 @@ func grammarRewriteSpellings() []grammarRewrite {
 		// one stays the node the scan can push (#1169).
 		{"like_escape", `s LIKE 'a' ESCAPE '#'`, "like_escape", 3},
 		{"not_like_escape", `s NOT LIKE 'a' ESCAPE '#'`, "like_escape", 3},
-		{"ilike_escape", `s ILIKE 'A' ESCAPE '#'`, "like_escape", 3},
+		// ILIKE ... ESCAPE reads its escape in the pattern as written, then
+		// folds: lower(x) LIKE lower(like_escape(p, e)) (#1209).
+		{"ilike_escape", `s ILIKE 'A' ESCAPE '#'`, plansql.LikeEscapeTextFunc, 2},
+		{"not_ilike_escape", `s NOT ILIKE 'A' ESCAPE '#'`, plansql.LikeEscapeTextFunc, 2},
 		// --- the pattern-match operators and their OPERATOR() spelling, and
 		// the reg* casts a catalog query writes (arc PC).
 		{"regex_match", `s ~ 'a'`, "textregexeq", 2},

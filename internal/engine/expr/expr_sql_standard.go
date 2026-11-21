@@ -113,6 +113,23 @@ func fnLikeEscape(args []any) any {
 	return m
 }
 
+// fnLikeEscapeText is PostgreSQL's like_escape(text, text)
+// (plansql.LikeEscapeTextFunc): kernel.LikeEscape, the rewrite `LIKE p ESCAPE
+// e` already reads its pattern through. Measured on PostgreSQL 17.11: a NULL
+// pattern or escape is NULL, an empty escape doubles every backslash, an
+// escape of more than one character is 22025. `x ILIKE p ESCAPE e` lowers
+// this function's result, never its input (#1209).
+func fnLikeEscapeText(args []any) any {
+	if len(args) < 2 || args[0] == nil || args[1] == nil {
+		return nil
+	}
+	pat, err := kernel.LikeEscape(toString(args[0]), toString(args[1]))
+	if err != nil {
+		panic(fatalEval{err})
+	}
+	return pat
+}
+
 // fnLocalTimestamp is LOCALTIMESTAMP: the current instant as a TIMESTAMP
 // WITHOUT TIME ZONE.
 //

@@ -478,6 +478,12 @@ func (f *FuncCallNode) String() string {
 	if f.Star {
 		return f.Name + "(*)"
 	}
+	name := f.Name
+	if name == LikeEscapeTextFunc {
+		// The registry's key for like_escape(text, text) is spelled as the
+		// query spelled it, which parseFuncCall reads back into this key.
+		name = "like_escape"
+	}
 	args := make([]string, len(f.Args))
 	for i, a := range f.Args {
 		args[i] = a.String()
@@ -486,8 +492,25 @@ func (f *FuncCallNode) String() string {
 	if f.Distinct {
 		distinct = "distinct "
 	}
-	return f.Name + "(" + distinct + strings.Join(args, ", ") + ")"
+	return name + "(" + distinct + strings.Join(args, ", ") + ")"
 }
+
+// LikeEscapeTextFunc is the registry key of PostgreSQL's two-argument
+// like_escape(text, text), which rewrites a pattern that names its own escape
+// into the backslash form: `like_escape('a!%', '!')` is `a\%`.
+//
+// It needs a key of its own because `like_escape` with THREE arguments is this
+// engine's spelling of the `x LIKE p ESCAPE e` predicate (likeEscapeCall), a
+// boolean, and the registry declares one return type per name. parseFuncCall
+// turns every two-argument `like_escape(…)` into this key and String spells it
+// back as `like_escape(…)`, so the key never appears in any SQL text, a stage
+// filter's included; a query that writes the key itself is refused there
+// (42883), so the only name a query can reach it by is PostgreSQL's.
+//
+// `x ILIKE p ESCAPE e` is `lower(x) LIKE lower(like_escape(p, e))`, which is
+// PostgreSQL's `x ~~* like_escape(p, e)`: the escape is read in the pattern as
+// written, before any case folding (#1209).
+const LikeEscapeTextFunc = "__like_escape_text"
 
 // --- CASE WHEN ---
 

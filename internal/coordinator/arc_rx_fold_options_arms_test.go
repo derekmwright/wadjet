@@ -20,7 +20,9 @@ import (
 // CASE-INSENSITIVE MATCHING AND THE EMBEDDED OPTIONS, IN EVERY CONSTRUCT
 // (#1499). Case-insensitivity — the `i` flag, `~*`, an
 // embedded `(?i)` — matches each pattern letter's lower- and upper-case
-// forms (towlower / towupper, as PostgreSQL does), whatever the script; the
+// forms under the C locale, ASCII letters only, as the reference does
+// (PostgreSQL 17.11, --locale=C; #1209 re-measured the oracle file, first
+// measured on an en_US.utf8 server); the
 // newline options m n p w and the expanded syntax x answer with
 // PostgreSQL's meaning, embedded or as a flags argument. Construct × spelling
 // × subject script / option on five arms against PostgreSQL 17.11; the

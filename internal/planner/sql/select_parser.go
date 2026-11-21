@@ -2166,12 +2166,17 @@ func (p *selectParser) parsePredicateOperand() (Node, error) {
 			return nil, err
 		}
 		lowered := &FuncCallNode{Name: "lower", Args: []Node{left}}
-		loweredPattern := &FuncCallNode{Name: "lower", Args: []Node{pattern}}
 		if esc, ok, err := p.parseEscapeClause(); err != nil {
 			return nil, err
 		} else if ok {
-			return likeEscapeCall(lowered, loweredPattern, esc, not), nil
+			// PostgreSQL's `x ~~* like_escape(p, e)`: the escape is read in
+			// the pattern AS WRITTEN and the rewritten pattern is lowered
+			// after, so `'a' ILIKE 'Xa' ESCAPE 'X'` is true and the
+			// lower-case x of `'xa' ILIKE 'xa' ESCAPE 'X'` stays a literal.
+			// Lowering the pattern first lost an upper-case escape (#1209).
+			pattern = &FuncCallNode{Name: LikeEscapeTextFunc, Args: []Node{pattern, esc}}
 		}
+		loweredPattern := &FuncCallNode{Name: "lower", Args: []Node{pattern}}
 		return &LikeExpr{
 			Left:    lowered,
 			Not:     not,
@@ -3330,8 +3335,24 @@ func (p *selectParser) parseFuncCall(name string) (Node, error) {
 	if d, ok := deferredErrorCall(fn); ok {
 		return d, nil
 	}
+	if fn.Name == LikeEscapeTextFunc {
+		// The registry key is the planner's, never a query's: the only
+		// spelling of like_escape(text, text) is PostgreSQL's own.
+		return nil, sqlerr.New("42883", "unknown function: %s", fn.Name)
+	}
 
-	return p.maybeParseOver(fn)
+	n, err := p.maybeParseOver(fn)
+	if err != nil {
+		return nil, err
+	}
+	// A plain two-argument like_escape(…) call is PostgreSQL's
+	// like_escape(text, text) (LikeEscapeTextFunc). Under OVER or FILTER the
+	// call keeps the name the query wrote, so the refusal names like_escape,
+	// never the registry key.
+	if f, ok := n.(*FuncCallNode); ok && f == fn && fn.Name == "like_escape" && len(fn.Args) == 2 && !fn.Distinct && !fn.Star {
+		fn.Name = LikeEscapeTextFunc
+	}
+	return n, nil
 }
 
 // columnValueCast reads `__column_value(cast(<literal> as <type>))` back as

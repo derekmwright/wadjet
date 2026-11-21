@@ -68,16 +68,22 @@ func TestArcRXTranslateAndCompileRows(t *testing.T) {
 		{`a[^x]b`, reFlags{nlStop: true}, "a\nb", "f"},
 		{`a\Wb`, reFlags{nlStop: true}, "a\nb", "t"},
 		{`(?b)a`, reFlags{}, "a", "E:0A000"},
-		{`äbc`, reFlags{icase: true}, "ÄBC", "t"},
+		// Case-insensitivity maps ASCII letters only, as the C locale of the
+		// reference does (PostgreSQL 17.11, --locale=C, measured #1209; an
+		// en_US.utf8 server answers t on the non-ASCII rows).
+		{`abc`, reFlags{icase: true}, "ABC", "t"},
+		{`\u0041BC`, reFlags{icase: true}, "abc", "t"},
+		{`[^b]`, reFlags{icase: true}, "B", "f"},
+		{`äbc`, reFlags{icase: true}, "ÄBC", "f"},
 		{`σ`, reFlags{icase: true}, "ς", "f"},
-		{`ς`, reFlags{icase: true}, "Σ", "t"},
+		{`ς`, reFlags{icase: true}, "Σ", "f"},
 		{`i`, reFlags{icase: true}, "İ", "f"},
-		{`İ`, reFlags{icase: true}, "i", "t"},
-		{`ß`, reFlags{icase: true}, "ẞ", "t"},
-		{`[à-æ]`, reFlags{icase: true}, "À", "t"},
-		{`[^ä]`, reFlags{icase: true}, "Ä", "f"},
-		{`\u00e4`, reFlags{icase: true}, "Ä", "t"},
-		{`äbc`, reFlags{icase: true, literal: true}, "ÄBC", "t"},
+		{`İ`, reFlags{icase: true}, "i", "f"},
+		{`ß`, reFlags{icase: true}, "ẞ", "f"},
+		{`[à-æ]`, reFlags{icase: true}, "À", "f"},
+		{`[^ä]`, reFlags{icase: true}, "Ä", "t"},
+		{`\u00e4`, reFlags{icase: true}, "Ä", "f"},
+		{`äbc`, reFlags{icase: true, literal: true}, "ÄBC", "f"},
 		{`[[:alpha:]][[:digit:]]`, reFlags{}, "a1", "t"}, // POSIX classes
 	}
 	for _, c := range cells {
@@ -210,9 +216,13 @@ func TestArcRXCacheEvictsOneEntryAtATime(t *testing.T) {
 
 // TestArcRXCaseFormsArePostgresTowlowerTowupper: for every character in
 // U+0000..U+1FFFF, the lower- and upper-case forms case-insensitive matching
-// takes are the oracle's (testdata/pg17_case_pairs.csv: `SELECT c,
-// ascii(lower(chr(c))), ascii(upper(chr(c)))` on PostgreSQL 17.11, the rows
-// with a mapping; a character absent from it maps to itself).
+// takes are the reference's (testdata/pg17_case_pairs.csv: `SELECT c,
+// ascii(lower(chr(c))), ascii(upper(chr(c)))` on PostgreSQL 17.11,
+// postgres:17-alpine, `initdb --locale=C --encoding=UTF8`, the rows with a
+// mapping; a character absent from it maps to itself). Under the C locale
+// only the 52 ASCII letters map. The file was first measured on an
+// en_US.utf8 server (musl's towlower / towupper, 2,742 rows), which is not
+// the reference; #1209 re-measured it.
 func TestArcRXCaseFormsArePostgresTowlowerTowupper(t *testing.T) {
 	raw, err := os.ReadFile("testdata/pg17_case_pairs.csv")
 	if err != nil {

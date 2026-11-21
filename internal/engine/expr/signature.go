@@ -208,14 +208,16 @@ var textDomains = map[string][]ArgDomain{
 	"normalize":        {ArgText, ArgText},
 	"overlay":          {ArgText, ArgText, ArgAny, ArgAny},
 	"like_escape":      {ArgTextOrBytes, ArgTextOrBytes, ArgTextOrBytes},
-	"similar_to":       {ArgText, ArgText, ArgText},
-	"codepoint":        {ArgText},
-	"regexp_like":      {ArgText, ArgText, ArgText},
-	"regexp_extract":   {ArgText, ArgText, ArgAny},
-	"regexp_replace":   {ArgText, ArgText, ArgText, ArgAny},
-	"regexp_count":     {ArgText, ArgText, ArgAny, ArgText},
-	"regexp_split":     {ArgText, ArgText},
-	"split":            {ArgText, ArgText},
+	// like_escape(text, text): the bytea overload is not implemented.
+	plansql.LikeEscapeTextFunc: {ArgText, ArgText},
+	"similar_to":               {ArgText, ArgText, ArgText},
+	"codepoint":                {ArgText},
+	"regexp_like":              {ArgText, ArgText, ArgText},
+	"regexp_extract":           {ArgText, ArgText, ArgAny},
+	"regexp_replace":           {ArgText, ArgText, ArgText, ArgAny},
+	"regexp_count":             {ArgText, ArgText, ArgAny, ArgText},
+	"regexp_split":             {ArgText, ArgText},
+	"split":                    {ArgText, ArgText},
 	// --- Text or bytes: the accept-set PostgreSQL has over bytea ---
 	"length":       {ArgTextOrBytes},
 	"len":          {ArgTextOrBytes},
@@ -530,6 +532,7 @@ var funcSignatures = map[string]Signature{
 	"localtimestamp":                  {Min: 0, Max: 0},
 	"overlay":                         {Min: 3, Max: 4},
 	"like_escape":                     {Min: 3, Max: 3},
+	plansql.LikeEscapeTextFunc:        {Min: 2, Max: 2},
 	"similar_to":                      {Min: 2, Max: 3},
 	"nullif":                          {Min: 2, Max: 2},
 	"obj_description":                 {Min: 1, Max: 2},
@@ -759,6 +762,11 @@ func RefuseUnresolvableCall(n *plansql.FuncCallNode, decl func(plansql.Node) (De
 		return nil
 	}
 	types := callArgTypeNames(n.Args, decl)
+	if name == plansql.LikeEscapeTextFunc {
+		// The registry key is the planner's; the function is PostgreSQL's
+		// like_escape(text, text), and the refusal names it so.
+		name = "like_escape"
+	}
 	if !sig.accepts(len(n.Args)) {
 		return &WrongSignatureError{Name: name, Args: types}
 	}

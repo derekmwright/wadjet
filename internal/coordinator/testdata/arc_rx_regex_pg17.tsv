@@ -53,9 +53,9 @@ like/dotNewline/where	rows=1 5
 like/invalid/proj	ERR 2201B ERROR: invalid regular expression: parentheses () not balanced (SQLSTATE 2201B)
 like/invalid/group	ERR 2201B ERROR: invalid regular expression: parentheses () not balanced (SQLSTATE 2201B)
 like/invalid/where	ERR 2201B ERROR: invalid regular expression: parentheses () not balanced (SQLSTATE 2201B)
-like/wordNonASCII/proj	rows=10 1,t | 10,NULL | 2,t | 3,t | 4,t | 5,t | 6,t | 7,t | 8,t | 9,f
-like/wordNonASCII/group	rows=3 NULL,1 | f,1 | t,8
-like/wordNonASCII/where	rows=8 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8
+like/wordNonASCII/proj	rows=10 1,t | 10,NULL | 2,t | 3,t | 4,t | 5,t | 6,f | 7,t | 8,t | 9,f
+like/wordNonASCII/group	rows=3 NULL,1 | f,2 | t,7
+like/wordNonASCII/where	rows=7 1 | 2 | 3 | 4 | 5 | 7 | 8
 substring/lazy/proj	rows=10 1, | 10,NULL | 2, | 3, | 4,NULL | 5,NULL | 6, | 7, | 8, | 9,NULL
 substring/lazy/group	rows=2 ,6 | NULL,4
 substring/lazy/where	rows=0 
@@ -101,8 +101,8 @@ countStart/null/where	rows=0
 countStart/past/proj	rows=10 1,0 | 10,NULL | 2,0 | 3,0 | 4,0 | 5,0 | 6,0 | 7,0 | 8,0 | 9,0
 countStart/past/group	rows=2 0,9 | NULL,1
 countStart/past/where	rows=0 
-countStart/wordY/proj	rows=10 1,0 | 10,NULL | 2,0 | 3,0 | 4,0 | 5,0 | 6,0 | 7,0 | 8,0 | 9,0
-countStart/wordY/group	rows=2 0,9 | NULL,1
+countStart/wordY/proj	rows=10 1,0 | 10,NULL | 2,0 | 3,0 | 4,0 | 5,0 | 6,2 | 7,0 | 8,0 | 9,0
+countStart/wordY/group	rows=3 0,8 | 2,1 | NULL,1
 countStart/wordY/where	rows=0 
 similar/underscore/proj	rows=10 1,f | 10,NULL | 2,f | 3,f | 4,f | 5,t | 6,f | 7,f | 8,f | 9,f
 similar/underscore/group	rows=3 NULL,1 | f,8 | t,1

@@ -31,6 +31,9 @@ func vecReadFloat64(v *batch.Vector, i int) float64 {
 	}
 }
 
+// vecUpper / vecLower are upper() and lower() over a column, under the C
+// locale's case mapping (cUpperBytes / cLowerBytes, pg_case_forms.go), the one
+// fnUpper / fnLower apply a value at a time (#1209).
 func vecUpper(args []*batch.Vector, out *batch.Vector, n int) {
 	src := args[0]
 	hasNulls := src.Nulls.HasNulls()
@@ -46,12 +49,7 @@ func vecUpper(args []*batch.Vector, out *batch.Vector, n int) {
 		b := src.BytesData.Value(i)
 		start := len(out.BytesData.Data)
 		out.BytesData.Data = append(out.BytesData.Data, b...)
-		for j := start; j < len(out.BytesData.Data); j++ {
-			c := out.BytesData.Data[j]
-			if c >= 'a' && c <= 'z' {
-				out.BytesData.Data[j] = c - 32
-			}
-		}
+		cUpperBytes(out.BytesData.Data[start:])
 		out.BytesData.Offsets[i+1] = uint32(len(out.BytesData.Data))
 	}
 }
@@ -71,12 +69,7 @@ func vecLower(args []*batch.Vector, out *batch.Vector, n int) {
 		b := src.BytesData.Value(i)
 		start := len(out.BytesData.Data)
 		out.BytesData.Data = append(out.BytesData.Data, b...)
-		for j := start; j < len(out.BytesData.Data); j++ {
-			c := out.BytesData.Data[j]
-			if c >= 'A' && c <= 'Z' {
-				out.BytesData.Data[j] = c + 32
-			}
-		}
+		cLowerBytes(out.BytesData.Data[start:])
 		out.BytesData.Offsets[i+1] = uint32(len(out.BytesData.Data))
 	}
 }

@@ -4217,7 +4217,7 @@ FROM flow_logs
 
 ## Built-in Functions
 
-Wadjet includes 417 built-in scalar functions across several categories.
+Wadjet includes 418 built-in scalar functions across several categories.
 
 ### A call is resolved by its name AND its arguments
 
@@ -4251,8 +4251,8 @@ see the Encoding Functions section.
 
 | Function | Description | Example |
 |----------|-------------|---------|
-| `UPPER(s)` | Uppercase | `UPPER(protocol)` |
-| `LOWER(s)` | Lowercase | `LOWER(hostname)` |
+| `UPPER(s)` | Uppercase, under the C locale's case mapping: ASCII `a`-`z` only, every other character unchanged (`UPPER('école')` → `'éCOLE'`), as PostgreSQL in a `C` database. `ILIKE`, `~*` and the regex `i` flag take the same mapping | `UPPER(protocol)` |
+| `LOWER(s)` | Lowercase, under the same C-locale mapping: ASCII `A`-`Z` only (`LOWER('ÉCOLE')` → `'École'`, so `LOWER('ÉCOLE') = 'école'` is false) | `LOWER(hostname)` |
 | `CONCAT(a, b, ...)` | Concatenate strings; **NULL arguments are ignored** (all-NULL gives `''`, never NULL) — `\|\|` propagates NULL instead | `CONCAT(src_ip, ':', src_port)` |
 | `LENGTH(s)` / `LEN(s)` | String length in **characters**, the synonym of `CHAR_LENGTH` (use `OCTET_LENGTH` for bytes). Over a `BYTES` argument it is the **byte** count, as `length(bytea)` is on the server — for a bare column and a derived value alike | `LENGTH(message)` |
 | `SUBSTR(s, start, len)` / `SUBSTRING` | Extract substring; `start` and `len` count **characters**, and a negative `len` is SQLSTATE 22011. Over a `BYTES` argument it returns `BYTES` and counts **bytes** | `SUBSTR(message, 1, 50)` |
@@ -4260,6 +4260,7 @@ see the Encoding Functions section.
 | `LTRIM(s [, characters])` | Remove leading whitespace, or every leading character in the given SET. `TRIM(LEADING [characters] FROM s)` is the same function | `LTRIM(message)`, `LTRIM('007', '0')` → `'7'` |
 | `RTRIM(s [, characters])` | Remove trailing whitespace, or every trailing character in the given SET. `TRIM(TRAILING [characters] FROM s)` is the same function | `RTRIM(message)`, `RTRIM('007', '0')` → `'007'` |
 | `REPLACE(s, old, new)` | Replace occurrences | `REPLACE(message, 'error', 'ERROR')` |
+| `LIKE_ESCAPE(pattern, escape)` | PostgreSQL's `like_escape(text, text)`: rewrites a LIKE pattern that names its own escape character into the backslash form; an empty escape doubles every backslash, an escape of more than one character is SQLSTATE 22025, NULL in gives NULL. `x ILIKE p ESCAPE e` reads the escape this way before it folds case. The `bytea` overload is not implemented (42883) | `LIKE_ESCAPE('a!%', '!')` → `'a\%'` |
 | `REVERSE(s)` | Reverse string, by character | `REVERSE(hostname)` |
 | `LEFT(s, n)` | First n characters | `LEFT(hostname, 3)` |
 | `RIGHT(s, n)` | Last n characters | `RIGHT(hostname, 2)` |

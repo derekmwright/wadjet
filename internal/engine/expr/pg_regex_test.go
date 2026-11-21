@@ -177,7 +177,8 @@ func TestPatternMatchOperatorsAnswerAsPostgreSQL(t *testing.T) {
 		{"a", "[a-a]", "~", "true"},
 		{"-", "[a\\-z]", "~", "true"},
 		{"b", "[a\\-z]", "~", "false"},
-		{"\u00c9", "\u00e9", "~*", "true"}, // en_US.utf8: towupper(é) is É
+		{"\u00c9", "\u00e9", "~*", "false"}, // --locale=C maps ASCII only (#1209; en_US.utf8 answers true)
+		{"\u0414", "\u0434", "~*", "false"}, // likewise Cyrillic
 		{"stra\u00dfe", "STRASSE", "~*", "false"},
 	}
 	fn := map[string]string{"~": "textregexeq", "~*": "texticregexeq", "!~": "textregexne", "!~*": "texticregexne"}

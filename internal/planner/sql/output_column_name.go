@@ -209,5 +209,8 @@ func funcOutputLabel(name string) string {
 	if n == "trim" {
 		return "btrim"
 	}
+	if n == LikeEscapeTextFunc {
+		return "like_escape"
+	}
 	return n
 }
