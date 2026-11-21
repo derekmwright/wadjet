@@ -12,7 +12,7 @@ import (
 )
 
 // typeByteaLiterals gives an UNKNOWN-typed (quoted) literal that a construct
-// resolves to bytea its bytea type IN THE PLAN, as `CAST('…' AS BYTES)` — the
+// resolves to bytea its bytea type IN THE PLAN, as `CAST('…' AS bytes)` — the
 // one reading of a text as bytea, byteain (kernel.ByteaIn), which the CAST
 // already applies on every arm (#1590).
 //
@@ -51,7 +51,8 @@ func (p *Planner) typeByteaLiterals(root *logical.Node) {
 	// its key: by the key's own subtree (`SELECT COALESCE(b, 'hi') … GROUP BY
 	// COALESCE(b, 'hi')`), typed here under the Aggregate's declarations; or
 	// by a column reference to the slot the key is published under, whose
-	// name is the key's lowercased TEXT (a HAVING term is lowered to one),
+	// name is the key's TEXT exactly as GroupBy holds it (the logical
+	// builder's computedGroupKeyRefs; a HAVING term is lowered to one),
 	// renamed here to the typed key's. The key's text itself (GroupBy) is
 	// re-spelled too, because the stage DAG computes a key no select item
 	// spells from that text. They travel up the single-input chain only.
@@ -196,7 +197,14 @@ func (p *Planner) typeByteaLiterals(root *logical.Node) {
 					oldText := n.GroupBy[i]
 					old := strings.ToLower(oldText)
 					n.GroupBy[i] = g.String()
-					keys.names[old] = strings.ToLower(n.GroupBy[i])
+					// The new slot name is the typed text AS WRITTEN, the name
+					// the Aggregate publishes the key and its distribution
+					// under: the stage DAG compares a window's PARTITION BY
+					// with that distribution byte for byte (dagplan keysEqual),
+					// and `cast(… as bytes)` against `cast(… as BYTES)` refused
+					// the plan's exchange consistency. The old name stays the
+					// folded lookup key, as a reference is matched folded.
+					keys.names[old] = n.GroupBy[i]
 					// A grouping set and a GROUPING(...) argument name a
 					// key by the same TEXT (aggregate_plan.go's keyIndex),
 					// so each follows the key it names: a set left on the
@@ -483,8 +491,16 @@ func castByteaLiterals(ops []plansql.Node) bool {
 	return changed
 }
 
+// byteaLiteralCast is the literal's CAST to bytea spelled as the parser
+// spells a written `CAST('…' AS BYTES)`: type name lower-cased. The typed
+// text becomes a key the stage DAG compares byte for byte (an Aggregate's
+// distribution, a window's PARTITION BY, an exchange's keys), and a planner
+// walk that folds a name to lower case on the way (a derived table's alias
+// resolved to its source) then still meets the same text. Spelled `BYTES`,
+// `GROUP BY COALESCE(b, '\x6869')` under a window over the derived table
+// refused its exchange consistency where the written CAST runs.
 func byteaLiteralCast(l *plansql.Lit) plansql.Node {
-	return &plansql.CastNode{Inner: l, TypeName: "BYTES"}
+	return &plansql.CastNode{Inner: l, TypeName: "bytes"}
 }
 
 // typeByteaSetOpArms types a set operation's unknown-literal select items

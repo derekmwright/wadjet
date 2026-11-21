@@ -290,6 +290,25 @@ var u1590Consumers = []struct{ name, sql string }{
 	{"k/co/outer-ref-coalesce-cast", `SELECT id, (SELECT COALESCE(o.b, CAST('\x6869' AS BYTES)) FROM u_k WHERE u_k.id = 1) AS v FROM u_t o`},
 	{"k/co/outer-ref-eq-lit", `SELECT id, (SELECT count(*) FROM u_k WHERE o.b = '\x6869') AS v FROM u_t o`},
 	{"k/co/repeat-limit-cast", `SELECT id FROM u_t o WHERE COALESCE(b, CAST('\x6869' AS BYTES)) = (SELECT kb FROM u_k WHERE kb = COALESCE(o.b, CAST('\x6869' AS BYTES)) LIMIT 1)`},
+	// Round 3: a window PARTITION BY over a typed GROUP BY key. The window
+	// reads the key's slot, and on the stage DAG its PARTITION BY must be the
+	// SAME text as the Aggregate's distribution key (dagplan keysEqual): a
+	// slot renamed to the key's lowercased text (`cast(… as bytes)` against
+	// the published `cast(… as BYTES)`) refused the plan's exchange
+	// consistency on the three DAG arms, as did a derived table's alias,
+	// which the stage planner resolves to its source text lower-cased. The
+	// upper-case literal cells hold the slot name to the key's text as
+	// written, not folded.
+	{"k/wgk/sum-over-count", `SELECT COALESCE(b, '\x6869') AS k, count(*) AS n, sum(count(*)) OVER (PARTITION BY COALESCE(b, '\x6869')) AS s FROM u_t GROUP BY COALESCE(b, '\x6869')`},
+	{"k/wgk/sum-over-count-concat", `SELECT b || '\x41' AS k, count(*) AS n, sum(count(*)) OVER (PARTITION BY b || '\x41') AS s FROM u_t GROUP BY b || '\x41'`},
+	{"k/wgk/count-over", `SELECT COALESCE(b, '\x6869') AS k, count(*) AS n, count(*) OVER (PARTITION BY COALESCE(b, '\x6869')) AS c FROM u_t GROUP BY COALESCE(b, '\x6869')`},
+	{"k/wgk/row-number", `SELECT COALESCE(b, '\x6869') AS k, row_number() OVER (PARTITION BY COALESCE(b, '\x6869') ORDER BY count(*)) AS r FROM u_t GROUP BY COALESCE(b, '\x6869')`},
+	{"k/wgk/lag", `SELECT COALESCE(b, '\x6869') AS k, lag(count(*)) OVER (PARTITION BY COALESCE(b, '\x6869') ORDER BY count(*)) AS l FROM u_t GROUP BY COALESCE(b, '\x6869')`},
+	{"k/wgk/group-ordinal", `SELECT COALESCE(b, '\x6869') AS k, count(*) AS n, sum(count(*)) OVER (PARTITION BY COALESCE(b, '\x6869')) AS s FROM u_t GROUP BY 1`},
+	{"k/wgk/derived", `SELECT k, n, sum(n) OVER (PARTITION BY k) AS s FROM (SELECT COALESCE(b, '\x6869') AS k, count(*) AS n FROM u_t GROUP BY COALESCE(b, '\x6869')) q`},
+	{"k/wgk/upper-escape", `SELECT COALESCE(b, 'Hi') AS k, count(*) AS n, sum(count(*)) OVER (PARTITION BY COALESCE(b, 'Hi')) AS s FROM u_t GROUP BY COALESCE(b, 'Hi')`},
+	{"k/wgk/upper-hex-row-number", `SELECT COALESCE(b, '\x4A') AS k, row_number() OVER (PARTITION BY COALESCE(b, '\x4A') ORDER BY count(*)) AS r FROM u_t GROUP BY COALESCE(b, '\x4A')`},
+	{"k/wgk/derived-cast", `SELECT k, n, sum(n) OVER (PARTITION BY k) AS s FROM (SELECT COALESCE(b, CAST('\x6869' AS BYTES)) AS k, count(*) AS n FROM u_t GROUP BY COALESCE(b, CAST('\x6869' AS BYTES))) q`},
 }
 
 type u1590Cell struct {
