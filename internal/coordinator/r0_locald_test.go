@@ -82,6 +82,9 @@ type r0LocalDRecord struct {
 	BoundRefs int
 	// LateSubplan names why the status is late-subplan.
 	LateSubplan string
+	// PlanTime is planStatement's wall time for D (parse to optimized,
+	// enforced plan); StagePlanTime is PlanDistributed's on the copy.
+	PlanTime, StagePlanTime time.Duration
 	// Options, Snapshot and Policy record the planning state used.
 	Options  string
 	Snapshot string
@@ -157,7 +160,9 @@ func r0LocalD(c *Coordinator, ctx context.Context, sql string) (res *SQLResult, 
 	if f, _ := r0LocalDFault.Load().(string); f == "bound" {
 		stamp = true
 	}
+	planStart := time.Now()
 	dplan, err := c.planStatement(ctx, sql, stamp, opts)
+	rec.PlanTime = time.Since(planStart)
 	if err != nil {
 		rec.Status = "planning-failed"
 		return nil, rec, err
@@ -191,7 +196,9 @@ func r0LocalD(c *Coordinator, ctx context.Context, sql string) (res *SQLResult, 
 	planner.BushyJoinReorder = opts.bushyJoinReorder
 	planner.DynamicFiltersEnabled = c.config.DynamicFilters
 	planner.QueryLimits = opts.queryLimits
+	stageStart := time.Now()
 	stages, perr := planner.PlanDistributed(dplan.ctx, gCopy)
+	rec.StagePlanTime = time.Since(stageStart)
 	rec.Stages = stages
 	if perr != nil {
 		rec.DAGPlanErr = perr.Error()

@@ -1,0 +1,27 @@
+# TestR0TPCHDifferential's pinned classification per TPC-H SF0.01 query at 33560b12 (epic #1678, ADR-0051 R0).
+# query<TAB>class: agree (DAG and localD give one answer, floats to 1e-9) | differ(<what>) | routed (the DAG arm
+# answered from the bound plan L: not DAG evidence) | localD-not-established(<status>) (D carries a plan the stage
+# planner builds after D, a deferred scalar producer D'; the localD run is not evidence about D alone).
+# A change in either direction fails: a stage that changes a class re-pins it with the reason.
+Q01	agree
+Q02	agree
+Q03	agree
+Q04	agree
+Q05	agree
+Q06	agree
+Q07	agree
+Q08	agree
+Q09	agree
+Q10	agree
+Q11	localD-not-established(late-subplan)
+Q12	agree
+Q13	agree
+Q14	agree
+Q15	localD-not-established(late-subplan)
+Q16	agree
+Q17	agree
+Q18	agree
+Q19	agree
+Q20	agree
+Q21	agree
+Q22	localD-not-established(late-subplan)
