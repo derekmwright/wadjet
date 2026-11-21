@@ -620,7 +620,9 @@ ConsumerFirst lets a worker decode only what its consumer has asked for. At the
 base, DecodeFirst refused the two #1706 statements and a wide `SELECT *`
 self-join under a LIMIT on 20 of 20 runs each, and ConsumerFirst answered 20 of
 20 — the same pair the diagnosis measured with a 2 ms sleep on either side
-(40/40 and 0/40). Free, the base refused [[BASE_RATES]].
+(40/40 and 0/40). Free, the base refused 146 of 4,800 runs of those three
+statements — 0 to 18 of 200 per statement across GOMAXPROCS 1, 2, 4 and 24,
+with and without busy goroutines.
 
 **Why compressed-byte admission let the read-ahead take the budget.** The load
 admission (`rgSlabs.advance`, `ReserveOrForce`) was the only gate in front of a
@@ -646,9 +648,16 @@ all of which answer at the base. When the room is not there, or the footer
 cannot bound the decode, the worker neither waits nor forces: it hands the row
 group to the consumer undecoded, the consumer decodes it on its own goroutine
 when it asks for it, and the scan decodes every remaining row group on demand.
-The floor is unchanged: a decode the consumer is waiting for is never refused
-and never waits on the budget — the same load, the same forced and REPORTED
-`scan decoded batch` charge as before. Without a budget the rule does not touch
+The floor: a decode the consumer is waiting for is never refused and never
+waits on the budget — the same load, the same forced and REPORTED `scan decoded
+batch` charge as before, except that a scan on demand also skips the load
+admission's bounded wait (2 s, then force; `rgSlabs.advance` and the whole-file
+`fileSlot.ensureLoaded`) and takes the relief-then-force path at once. That
+wait was there to overlap a READ-AHEAD load with the consumer's work; on the
+consumer's own goroutine it is the pipeline stalling for the whole wait.
+Measured on TPC-H SF0.01 at a 2 MiB budget before that change: Q05, Q08, Q09
+and Q10 took 2.06, 4.05, 4.07 and 4.09 s — whole multiples of the wait —
+against 48, 41, 38 and 338 ms at the base; after it, 35, 43, 41 and 91 ms. Without a budget the rule does not touch
 the ledger. Kill switch `WADJET_SCAN_READAHEAD_ADMISSION=0`.
 
 The estimate is the footer's, and it covers the PEAK, not the final batch:
@@ -682,8 +691,9 @@ reservation for it (17-19 of 20). This rule waits for nothing: a decode that
 does not fit is moved to the consumer's goroutine, where it runs after the
 consumer has finished with the previous batch, reservation included — the one
 order that answered. The pinned overdraw shape those attempts were measured on
-(4,000 rows of 512-byte strings, 1 MiB) now answers 20 of 20 in 1.3 s, with the
-unbudgeted engine's answer, in both forced orders
+(4,000 rows of 512-byte strings, 1 MiB) now answers 20 of 20 free and in both
+forced orders, with the unbudgeted engine's answer, the whole gate (26 budgeted
+runs, an unbudgeted reference and the contrast) in under 4 s
 (`wadjet.TestAScansDecodedReadAheadNoLongerOverdrawsTheBudget`, which replaces
 `TestAScansDecodedReadAheadStillOverdrawsTheBudget` and keeps its refusal as
 the kill-switch-off contrast arm).
@@ -695,7 +705,9 @@ That was true for the narrow projections that gate and its floor twin measure
 (the floor gate holds 35,776 decoded bytes at the build's first reserve) and
 FALSE at the base whenever one decoded row group was a
 large part of the budget: the wide shapes above. With this rule it holds for
-them too: [[CONSISTENCY]]. Gates:
+them too: over the same eight configurations, 0 refusals in 8,800 runs — 200
+per statement free, 50 per statement in each forced order, plus the aggregate,
+the sort and two cross joins — every answer the unbudgeted engine's. Gates:
 `wadjet.TestAWideScansVerdictAtAFixedBudgetDoesNotFollowTheReadAheadOrder` (five
 wide shapes, both forced orders and the scheduler free, against the unbudgeted
 engine), `wadjet.TestWithoutReadAheadAdmissionTheDecodeFirstOrderRefuses` (the

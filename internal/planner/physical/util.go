@@ -499,8 +499,15 @@ func (s *fileSlot) ensureLoaded(inner *scanSourceInner, ctx context.Context) (*p
 	// forced and the ledger stays honest. Released by releaseCharge (error
 	// paths) or releaseRG (with the buffer).
 	if inner.memTracker != nil && s.entry.SizeBytes > 0 {
+		// A scan on demand (scan_decode_admission.go) loads on its consumer's
+		// goroutine, and a demand does not wait on the budget — the same floor
+		// as rgSlabs.advance.
+		wait := fileLoadReserveWait()
+		if inner.onDemand.Load() {
+			wait = 0
+		}
 		if memory.ReserveOrForce(ctx, inner.memTracker, inner.spillMgr, s.entry.SizeBytes,
-			fileLoadReserveWait(), memory.ForceScanFileLoad) {
+			wait, memory.ForceScanFileLoad) {
 			s.forcedBytes = s.entry.SizeBytes
 		}
 		s.chargedBytes = s.entry.SizeBytes

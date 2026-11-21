@@ -46,9 +46,12 @@ import (
 // first, where the base admitted it on its compressed bytes alone — which is
 // what the refusals needed. ADR-0006 records the window.)
 //
-// The floor is unchanged: a decode the consumer is waiting for is never refused
-// and never waits on the budget — it is the same load and the same forced,
-// reported decoded charge as before. Without a budget the rule costs nothing:
+// The floor: a decode the consumer is waiting for is never refused and never
+// waits on the budget — it is the same load and the same forced, reported
+// decoded charge as before, and once the scan is on demand its loads skip the
+// load admission's bounded wait too (rgSlabs.advance, fileSlot.ensureLoaded):
+// that wait overlapped a read-ahead load with the consumer's work, and on the
+// consumer's own goroutine it would stall the pipeline for the whole of it. Without a budget the rule costs nothing:
 // every read-ahead is admitted without touching the ledger.
 
 // scanReadAheadAdmission is the kill switch. Off, a worker decodes every row

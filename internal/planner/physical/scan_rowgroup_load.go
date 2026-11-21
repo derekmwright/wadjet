@@ -243,8 +243,14 @@ func (s *rgSlabs) advance() error {
 	// same call the whole-file load uses, at row-group granularity, and
 	// released at row-group granularity. A scan holding nothing never waits:
 	// the floor that makes this deadlock-free.
+	//
+	// Nor does a scan whose read-ahead was not admitted
+	// (scan_decode_admission.go): from then on its loads are its consumer's
+	// demand, made on the consumer's goroutine, and a demand never waits on the
+	// budget — waiting there stalls the pipeline for the whole wait, which is
+	// what the wait in front of a read-ahead load was only meant to overlap.
 	wait := fileLoadReserveWait()
-	if s.inner.residentSlabs.Load() == 0 {
+	if s.inner.residentSlabs.Load() == 0 || s.inner.onDemand.Load() {
 		wait = 0
 	}
 	forced := memory.ReserveOrForce(s.ctx, s.inner.memTracker, s.inner.spillMgr, n, wait,
