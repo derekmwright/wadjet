@@ -94,7 +94,3 @@ rx/posixCaptures/group	all	rows=6 NULL,1 | [a\pbcd\p],1 | [a\pbcd\p]Hello,1 | [a
 rx/posixCaptures/order	all	rows=6 3 | 4 | 5 | 1 | 2 | 6	value divergence (ADR-0012 text-collation#r24, arc RN): among equal-length matches the groups are RE2 leftmost-first, not the ARE subexpression rule
 rx/posixCaptures/proj	all	rows=6 1,[a\pbcd\p]q"b\\s\nl<>&é | 2,[a\pbcd\p]Hello | 3,[a\pbcd\p]z0z0 | 4,[a\pbcd\p] | 5,[a\pbcd\p]ÀÉ x | 6,NULL	value divergence (ADR-0012 text-collation#r24, arc RN): among equal-length matches the groups are RE2 leftmost-first, not the ARE subexpression rule
 rx/posixCaptures/where	all	rows=0	value divergence (ADR-0012 text-collation#r24, arc RN): among equal-length matches the groups are RE2 leftmost-first, not the ARE subexpression rule
-rx/wordY/group	all	rows=6 #Hello#,1 | #q#"#b#\\#s#\n#l#<>&é,1 | #z0z0#,1 | ,1 | NULL,1 | ÀÉ #x#,1	value divergence (ADR-0012 text-collation#r4): \y treats ASCII letters, digits and underscore as word characters only
-rx/wordY/order	all	rows=6 2 | 3 | 5 | 4 | 1 | 6	value divergence (ADR-0012 text-collation#r4): \y treats ASCII letters, digits and underscore as word characters only
-rx/wordY/proj	all	rows=6 1,#q#"#b#\\#s#\n#l#<>&é | 2,#Hello# | 3,#z0z0# | 4, | 5,ÀÉ #x# | 6,NULL	value divergence (ADR-0012 text-collation#r4): \y treats ASCII letters, digits and underscore as word characters only
-rx/wordY/where	all	rows=0	value divergence (ADR-0012 text-collation#r4): \y treats ASCII letters, digits and underscore as word characters only
