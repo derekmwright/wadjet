@@ -274,8 +274,35 @@ func awaitReadAheadParked() {
 			if inner.workersDone.Load() {
 				return true
 			}
+			// "sending == live and the buffer full" is not enough (#1706 r2):
+			// a receive from a full batchCh moves a blocked sender's item into
+			// the buffer and makes the sender runnable, but until it runs it
+			// is still counted as sending and has not counted its item as
+			// sent. On one P it need not run before this check, and the hook
+			// returned with that worker's next decode not started: with the
+			// rule off, GOMAXPROCS=1 answered 20 of 20 where the order it
+			// promises refuses. So, read in this order:
+			//   1. receivesDone, then demands LAST (7): equal means no receive
+			//      was in flight or began anywhere in between, so received
+			//      is exact and no new hand-off can start in the window;
+			//   3-4. sent, then the buffer: equal to sent-received means no
+			//      hand-off is pending at 4 (a pending one is in the buffer
+			//      and not yet in sent) and no send completed between 3 and 4;
+			//   5-6. from 4 on the buffer is full and nobody receives, so no
+			//      send can complete: a worker counted sending at 6 is
+			//      blocked, and one that is not is decoding.
+			// Every worker must also have started, or a worker not yet run
+			// would be missing from live. A stale read only reads unsettled.
+			done := inner.receivesDone.Load()
+			received := inner.received.Load()
+			sent := inner.sent.Load()
+			queued := len(inner.batchCh)
 			live := inner.liveWorkers.Load()
-			if live > 0 && inner.sending.Load() >= live && len(inner.batchCh) == cap(inner.batchCh) {
+			sending := inner.sending.Load()
+			begun := inner.demands.Load()
+			if begun == done && inner.startedWorkers.Load() == inner.spawnedWorkers.Load() &&
+				queued == cap(inner.batchCh) && int64(queued) == sent-received &&
+				live > 0 && sending >= live {
 				return true
 			}
 			settled = false

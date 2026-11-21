@@ -10,7 +10,8 @@ import (
 	"github.com/derekmwright/wadjet/internal/planner/physical"
 )
 
-// #789's last half is CLOSED (#1706, 2026-11-21); this file holds the proof.
+// #789's last half is narrowed, not closed (#1706, 2026-11-21; ADR-0006 records
+// the window left); this file holds the proof for the shape it pins.
 //
 // The defect was: at a fixed budget, on fixed data, the same join reached
 // different outcomes on different runs. Two charges made the floor move. The

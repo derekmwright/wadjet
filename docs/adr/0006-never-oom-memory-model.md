@@ -593,7 +593,7 @@ and without the forcing knob), `coordinator.TestArcSJEmptySideJoinEveryArm`
 (five arms), `server.TestArcSJAnEmptySidedSpilledJoinPublishesThePolicysValueOnEveryDoor`
 (nine doors).
 
-### 2026-11-21: a scan's read-ahead is admitted by what its decode will hold (#1706, #789's decode half CLOSED)
+### 2026-11-21: a scan's read-ahead is admitted by what its decode will hold (#1706; #789's decode half narrowed, not closed)
 
 **The mechanism, measured.** At a 512 KiB budget, `SELECT DISTINCT * FROM typemx
 a JOIN typemx b ON b.id = a.id ORDER BY a.id DESC LIMIT 3000` — #1706's
@@ -616,13 +616,31 @@ query answered.
 The two events were ordered without a sleep by a test-only hook
 (`physical.ForceScanReadAheadOrder`): DecodeFirst lets every scan worker run
 ahead as far as it can before EACH arrival reservation of the grace build;
-ConsumerFirst lets a worker decode only what its consumer has asked for. At the
-base, DecodeFirst refused the two #1706 statements and a wide `SELECT *`
-self-join under a LIMIT on 20 of 20 runs each, and ConsumerFirst answered 20 of
-20 — the same pair the diagnosis measured with a 2 ms sleep on either side
-(40/40 and 0/40). Free, the base refused 146 of 4,800 runs of those three
-statements — 0 to 18 of 200 per statement across GOMAXPROCS 1, 2, 4 and 24,
-with and without busy goroutines.
+ConsumerFirst lets a worker decode only what its consumer has asked for. With
+the base's read-ahead (the rule's kill switch off, where every read-ahead is
+admitted as it was at the base), DecodeFirst refused the two #1706 statements
+and a wide `SELECT *` self-join under a LIMIT on 50 of 50 runs each, and
+ConsumerFirst answered 50 of 50, in EACH of eight configurations — GOMAXPROCS
+1, 2, 4 and 24, each with and without busy goroutines — the same pair the
+diagnosis measured with a 2 ms sleep on either side (40/40 and 0/40). Free, the
+base refused 146 of 4,800 runs of those three statements — 0 to 18 of 200 per
+statement across the same eight configurations.
+
+The hook's first form did not order every run, and the figures above are the
+corrected hook's. It counted a worker as parked when it was inside a send on a
+full channel; but a receive from a full channel moves the blocked sender's item
+into the buffer and makes the sender runnable while it still counts as sending,
+and on one P the sender need not run before the check, so the hook returned
+with that worker's next decode not started. With the kill switch off,
+DecodeFirst then ANSWERED in 15 of 15 fresh processes at GOMAXPROCS 1, and in 11
+of 20 at GOMAXPROCS 24 under 24 busy loops. The DecodeFirst cells first measured
+with it at GOMAXPROCS 1 proved nothing: there the evidence was the free order
+alone, the base refusing 32 of 600 runs and the rule 0 of 600. The hook now also
+requires that no receive is in flight, that the buffer holds exactly the items
+sent and not yet received, and that every worker has started; with it the
+kill-switch-off contrast refused in 30 of 30 fresh processes and 20 of 20 warm
+runs at each of GOMAXPROCS 1, 2, 4 and 24, and in every fresh process under busy
+loops at each.
 
 **Why compressed-byte admission let the read-ahead take the budget.** The load
 admission (`rgSlabs.advance`, `ReserveOrForce`) was the only gate in front of a
@@ -706,8 +724,10 @@ That was true for the narrow projections that gate and its floor twin measure
 FALSE at the base whenever one decoded row group was a
 large part of the budget: the wide shapes above. With this rule it holds for
 them too: over the same eight configurations, 0 refusals in 8,800 runs — 200
-per statement free, 50 per statement in each forced order, plus the aggregate,
-the sort and two cross joins — every answer the unbudgeted engine's. Gates:
+per statement free, 50 per statement in each forced order (measured with the
+corrected hook, against the base's 50 of 50 DecodeFirst refusals in every
+configuration), plus 50 each of the aggregate, the sort and two cross joins,
+free — every answer the unbudgeted engine's. Gates:
 `wadjet.TestAWideScansVerdictAtAFixedBudgetDoesNotFollowTheReadAheadOrder` (five
 wide shapes, both forced orders and the scheduler free, against the unbudgeted
 engine), `wadjet.TestWithoutReadAheadAdmissionTheDecodeFirstOrderRefuses` (the

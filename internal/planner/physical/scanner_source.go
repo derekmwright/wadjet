@@ -152,11 +152,15 @@ type scanSourceInner struct {
 
 	// What the test-only read-ahead ordering hook (ForceScanReadAheadOrder)
 	// reads: sent = items the workers put on batchCh, demands = receives the
-	// consumer has begun, sending = workers parked on a send, liveWorkers =
-	// row-group workers running, workersDone = every worker has exited.
-	sent, demands        atomic.Int64
-	sending, liveWorkers atomic.Int32
-	workersDone          atomic.Bool
+	// consumer has begun, receivesDone = receives that have ended, however,
+	// received = those that returned an item (counted before receivesDone),
+	// sending = workers inside a send, liveWorkers = row-group workers running,
+	// spawnedWorkers / startedWorkers = workers spawned by Init / that have
+	// begun running, workersDone = every worker has exited.
+	sent, demands, received, receivesDone atomic.Int64
+	sending, liveWorkers                  atomic.Int32
+	spawnedWorkers, startedWorkers        atomic.Int32
+	workersDone                           atomic.Bool
 }
 
 // trackScanBatch charges a freshly decoded batch's footprint to the memory
@@ -546,6 +550,7 @@ func (s *scannerExecSource) Init(ctx context.Context) error {
 			workers = 1
 		}
 		inner.wg.Add(workers)
+		inner.spawnedWorkers.Store(int32(workers))
 		for i := 0; i < workers; i++ {
 			go inner.rgWorker(scanCtx)
 		}
@@ -767,6 +772,7 @@ func (inner *scanSourceInner) next(ctx context.Context) (*batch.RecordBatch, err
 		select {
 		case b, ok := <-inner.batchCh:
 			if !ok {
+				inner.receivesDone.Add(1)
 				// Channel closed, check for errors
 				select {
 				case err := <-inner.errCh:
@@ -775,6 +781,8 @@ func (inner *scanSourceInner) next(ctx context.Context) (*batch.RecordBatch, err
 					return nil, nil
 				}
 			}
+			inner.received.Add(1)
+			inner.receivesDone.Add(1)
 			if v, isDeferred := inner.deferred.LoadAndDelete(b); isDeferred {
 				// A row group whose read-ahead was not admitted: decode it
 				// here, now that it is asked for. The floor — a decode the
@@ -793,8 +801,10 @@ func (inner *scanSourceInner) next(ctx context.Context) (*batch.RecordBatch, err
 			inner.releaseScanBatch(b)
 			return b, nil
 		case err := <-inner.errCh:
+			inner.receivesDone.Add(1)
 			return nil, err
 		case <-ctx.Done():
+			inner.receivesDone.Add(1)
 			return nil, ctx.Err()
 		}
 	}

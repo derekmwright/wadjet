@@ -1109,6 +1109,7 @@ func (inner *scanSourceInner) rgWorker(ctx context.Context) {
 	// process killer.
 	defer inner.recoverWorkerPanic(ctx, "scan row-group worker")
 	inner.liveWorkers.Add(1)
+	inner.startedWorkers.Add(1)
 	defer inner.liveWorkers.Add(-1)
 
 	var prefetched *prefetchResult
