@@ -191,6 +191,107 @@ var u1590Fixed = []struct{ name, sql string }{
 	{"x/greatest-b-s", `SELECT id, GREATEST(b, s) AS v FROM u_t`},
 }
 
+// u1590Consumers are #1590 round 2's cells: every consumer that matches or
+// re-derives the TEXT of a construct the plan types (GROUP BY and GROUPING
+// SETS / ROLLUP / CUBE / GROUPING(), the DISTINCT lowering, HAVING slots, ORDER
+// BY by expression / alias / ordinal, window PARTITION BY and ORDER BY, join
+// ON and USING, set-operation arms, a simple CASE's subject and WHEN operands,
+// a select item repeated in GROUP BY, an expression repeated in a correlated
+// subquery, CTE and derived-table references, nested aggregates over the
+// stage DAG), the review's statements verbatim among them (gs/rollup-concat,
+// gs/rollup-mixed, gs/grouping-fn, case/coalesce-subject,
+// case/greatest-subject, ref/strpos, ref/min-concat), with explicit-CAST
+// controls. Each runs on all five arms.
+var u1590Consumers = []struct{ name, sql string }{
+	{"k/gs/rollup-concat", `SELECT count(*) FROM u_t GROUP BY ROLLUP (b || '\x41')`},
+	{"k/gs/rollup-concat-key", `SELECT b || '\x41' AS k, count(*) AS n FROM u_t GROUP BY ROLLUP (b || '\x41')`},
+	{"k/gs/rollup-concat-cast", `SELECT count(*) FROM u_t GROUP BY ROLLUP (b || CAST('\x41' AS BYTES))`},
+	{"k/gs/rollup-coalesce-key", `SELECT COALESCE(b, '\x6869') AS k, count(*) AS n FROM u_t GROUP BY ROLLUP (COALESCE(b, '\x6869'))`},
+	{"k/gs/cube", `SELECT count(*) FROM u_t GROUP BY CUBE (COALESCE(b, '\x6869'))`},
+	{"k/gs/cube-key", `SELECT COALESCE(b, '\x6869') AS k, count(*) AS n FROM u_t GROUP BY CUBE (COALESCE(b, '\x6869'))`},
+	{"k/gs/cube-two", `SELECT count(*) FROM u_t GROUP BY CUBE (id % 2, b || '\x41')`},
+	{"k/gs/sets", `SELECT count(*) FROM u_t GROUP BY GROUPING SETS ((COALESCE(b, '\x6869')), ())`},
+	{"k/gs/sets-key", `SELECT COALESCE(b, '\x6869') AS k, count(*) AS n FROM u_t GROUP BY GROUPING SETS ((COALESCE(b, '\x6869')), ())`},
+	{"k/gs/sets-two", `SELECT count(*) FROM u_t GROUP BY GROUPING SETS ((id % 2), (b || '\x41'))`},
+	{"k/gs/rollup-mixed", `SELECT count(*) FROM u_t GROUP BY ROLLUP (id % 2, COALESCE(b,'\x6869'))`},
+	{"k/gs/rollup-mixed-key", `SELECT id % 2 AS m, COALESCE(b,'\x6869') AS k, count(*) AS n FROM u_t GROUP BY ROLLUP (id % 2, COALESCE(b,'\x6869'))`},
+	{"k/gs/grouping-fn", `SELECT GROUPING(COALESCE(b,'\x6869')) AS g, count(*) AS n FROM u_t GROUP BY ROLLUP (COALESCE(b,'\x6869'))`},
+	{"k/gs/grouping-fn-cast", `SELECT GROUPING(COALESCE(b,CAST('\x6869' AS BYTES))) AS g, count(*) AS n FROM u_t GROUP BY ROLLUP (COALESCE(b,CAST('\x6869' AS BYTES)))`},
+	{"k/gs/rollup-having", `SELECT count(*) AS n FROM u_t GROUP BY ROLLUP (COALESCE(b, '\x6869')) HAVING count(*) > 1`},
+	{"k/gs/rollup-plain-col", `SELECT b, count(*) AS n FROM u_t GROUP BY ROLLUP (b)`},
+	{"k/dist/distinct-concat", `SELECT DISTINCT b || '\x41' AS v FROM u_t`},
+	{"k/dist/distinct-coalesce-count", `SELECT count(*) FROM (SELECT DISTINCT COALESCE(b, '\x6869') AS v FROM u_t) q`},
+	{"k/dist/count-distinct-concat", `SELECT count(DISTINCT b || '\x41') AS v FROM u_t`},
+	{"k/dist/distinct-on", `SELECT DISTINCT ON (COALESCE(b, '\x6869')) id FROM u_t ORDER BY COALESCE(b, '\x6869'), id`},
+	{"k/dist/distinct-two", `SELECT DISTINCT id % 2 AS m, COALESCE(b, '\x6869') AS k FROM u_t`},
+	{"k/hav/concat-eq", `SELECT count(*) AS n FROM u_t GROUP BY b || '\x41' HAVING b || '\x41' = '\x4141'`},
+	{"k/hav/length", `SELECT count(*) AS n FROM u_t GROUP BY COALESCE(b, '\x6869') HAVING length(COALESCE(b, '\x6869')) = 2`},
+	{"k/hav/agg-of-key", `SELECT count(*) AS n FROM u_t GROUP BY COALESCE(b, '\x6869') HAVING max(COALESCE(b, '\x6869')) = '\x6869'`},
+	{"k/hav/spacing", `SELECT count(*) AS n FROM u_t GROUP BY COALESCE(b,'\x6869') HAVING COALESCE(b, '\x6869') = '\x6869'`},
+	{"k/ord/expr", `SELECT id FROM u_t ORDER BY b || '\x41' DESC, id`},
+	{"k/ord/alias", `SELECT id, b || '\x41' AS v FROM u_t ORDER BY v DESC, id`},
+	{"k/ord/ordinal", `SELECT id, COALESCE(b, '\x6869') AS v FROM u_t ORDER BY 2 DESC, 1 LIMIT 3`},
+	{"k/ord/expr-limit", `SELECT id FROM u_t ORDER BY COALESCE(b, '\x6869'), id LIMIT 2`},
+	{"k/ord/group-ordinal", `SELECT COALESCE(b, '\x6869') AS v, count(*) AS n FROM u_t GROUP BY 1 ORDER BY 1`},
+	{"k/ord/group-alias", `SELECT COALESCE(b, '\x6869') AS v, count(*) AS n FROM u_t GROUP BY v ORDER BY v`},
+	{"k/ord/group-agg", `SELECT COALESCE(b, '\x6869') AS v, count(*) AS n FROM u_t GROUP BY COALESCE(b, '\x6869') ORDER BY count(*) DESC, 1`},
+	{"k/win/partition", `SELECT id, count(*) OVER (PARTITION BY COALESCE(b, '\x6869')) AS c FROM u_t`},
+	{"k/win/order", `SELECT id, row_number() OVER (ORDER BY COALESCE(b, '\x6869') DESC, id) AS r FROM u_t`},
+	{"k/win/partition-concat", `SELECT id, count(*) OVER (PARTITION BY b || '\x41') AS c FROM u_t`},
+	{"k/win/order-concat", `SELECT id, rank() OVER (ORDER BY b || '\x41') AS r FROM u_t`},
+	{"k/win/arg", `SELECT id, max(COALESCE(b, '\x6869')) OVER (ORDER BY id) AS m FROM u_t`},
+	{"k/win/agg-arg", `SELECT id, count(COALESCE(b, '\x6869')) OVER () AS m FROM u_t`},
+	{"k/win/group-then-window", `SELECT COALESCE(b, '\x6869') AS k, rank() OVER (ORDER BY COALESCE(b, '\x6869')) AS r FROM u_t GROUP BY COALESCE(b, '\x6869')`},
+	{"k/join/on-concat", `SELECT u_t.id, u_k.id FROM u_t JOIN u_k ON b || '\x41' = kb || '\x41'`},
+	{"k/join/on-coalesce-left", `SELECT u_t.id, u_k.id FROM u_t LEFT JOIN u_k ON COALESCE(b, '\x6869') = kb`},
+	{"k/join/using", `SELECT a.id, x FROM (SELECT id, COALESCE(b, '\x6869') AS x FROM u_t) a JOIN (SELECT kb AS x FROM u_k) c USING (x)`},
+	{"k/join/derived-key", `SELECT a.id, u_k.id FROM (SELECT id, b || '\x41' AS x FROM u_t) a JOIN u_k ON a.x = kb || '\x41'`},
+	{"k/set/union-concat", `SELECT b || '\x41' AS v FROM u_t UNION SELECT kb FROM u_k`},
+	{"k/set/intersect-coalesce", `SELECT COALESCE(b, '\x6869') AS v FROM u_t INTERSECT SELECT kb FROM u_k`},
+	{"k/set/except-coalesce", `SELECT kb AS v FROM u_k EXCEPT SELECT COALESCE(b, '\x6869') FROM u_t`},
+	{"k/set/union-all-group", `SELECT v, count(*) AS n FROM (SELECT COALESCE(b, '\x6869') AS v FROM u_t UNION ALL SELECT kb FROM u_k) q GROUP BY v`},
+	{"k/case/coalesce-subject", `SELECT id, CASE COALESCE(b, '\x41') WHEN '\x6869' THEN 1 ELSE 0 END AS v FROM u_t`},
+	{"k/case/greatest-subject", `SELECT id, CASE GREATEST(b, '\x41') WHEN '\x6869' THEN 1 ELSE 0 END AS v FROM u_t`},
+	{"k/case/cast-subject", `SELECT id, CASE COALESCE(b, CAST('\x41' AS BYTES)) WHEN '\x6869' THEN 1 ELSE 0 END AS v FROM u_t`},
+	{"k/case/cast-subject-bare", `SELECT id, CASE CAST(b AS BYTES) WHEN '\x6869' THEN 1 ELSE 0 END AS v FROM u_t`},
+	{"k/case/concat-subject", `SELECT id, CASE b || '\x41' WHEN '\x6941' THEN 1 ELSE 0 END AS v FROM u_t`},
+	{"k/case/concat-subject-hit", `SELECT id, CASE b || '\x41' WHEN '\x686941' THEN 1 ELSE 0 END AS v FROM u_t`},
+	{"k/case/col-subject", `SELECT id, CASE b WHEN '\x6869' THEN 1 ELSE 0 END AS v FROM u_t`},
+	{"k/case/coalesce-subject-two", `SELECT id, CASE COALESCE(b, '\x41') WHEN '\x6869' THEN 1 WHEN '\x41' THEN 2 ELSE 0 END AS v FROM u_t`},
+	{"k/case/coalesce-subject-where", `SELECT id FROM u_t WHERE CASE COALESCE(b, '\x41') WHEN '\x41' THEN true ELSE false END`},
+	{"k/grp/repeat-spacing", `SELECT COALESCE(b,'\x6869') AS v, count(*) AS n FROM u_t GROUP BY COALESCE(b, '\x6869')`},
+	{"k/grp/repeat-concat", `SELECT b || '\x41' AS v, count(*) AS n FROM u_t GROUP BY b || '\x41'`},
+	{"k/grp/repeat-inside", `SELECT length(COALESCE(b, '\x6869')) AS l, count(*) AS n FROM u_t GROUP BY COALESCE(b, '\x6869')`},
+	{"k/grp/repeat-two-keys", `SELECT id % 2 AS m, b || '\x41' AS v, count(*) AS n FROM u_t GROUP BY id % 2, b || '\x41'`},
+	{"k/grp/agg-over-expr", `SELECT max(length(COALESCE(b, '\x6869'))) AS v FROM u_t`},
+	{"k/grp/sum-length", `SELECT sum(length(b || '\x41')) AS v FROM u_t`},
+	{"k/corr/scalar", `SELECT id, (SELECT count(*) FROM u_k WHERE kb = COALESCE(u_t.b, '\x6869')) AS c FROM u_t`},
+	{"k/corr/exists", `SELECT id FROM u_t WHERE EXISTS (SELECT 1 FROM u_k WHERE kb = COALESCE(u_t.b, '\x6869'))`},
+	{"k/corr/in", `SELECT id FROM u_t WHERE COALESCE(b, '\x6869') IN (SELECT kb FROM u_k)`},
+	{"k/corr/repeat", `SELECT id FROM u_t o WHERE COALESCE(b, '\x6869') = (SELECT max(kb) FROM u_k WHERE kb = COALESCE(o.b, '\x6869'))`},
+	{"k/cte/ref", `WITH c AS (SELECT id, COALESCE(b, '\x6869') AS x FROM u_t) SELECT id, length(x) AS l FROM c`},
+	{"k/cte/group", `WITH c AS (SELECT COALESCE(b, '\x6869') AS x FROM u_t) SELECT x, count(*) AS n FROM c GROUP BY x`},
+	{"k/cte/unaliased", `SELECT "coalesce" FROM (SELECT COALESCE(b, '\x6869') FROM u_t) q`},
+	{"k/cte/derived-group", `SELECT x, count(*) AS n FROM (SELECT b || '\x41' AS x FROM u_t) q GROUP BY x`},
+	{"k/cte/derived-filter", `SELECT count(*) FROM (SELECT b || '\x41' AS x FROM u_t) q WHERE x = '\x4141'`},
+	{"k/nest/count-of-group", `SELECT count(*) FROM (SELECT b || '\x41' AS x, count(*) AS n FROM u_t GROUP BY b || '\x41') q`},
+	{"k/nest/count-of-group-coalesce", `SELECT count(*) FROM (SELECT count(*) AS n FROM u_t GROUP BY COALESCE(b, '\x6869')) q`},
+	{"k/nest/max-of-group", `SELECT max(n) FROM (SELECT count(*) AS n FROM u_t GROUP BY COALESCE(b, '\x6869')) q`},
+	{"k/nest/sum-of-group", `SELECT sum(n) FROM (SELECT count(*) AS n FROM u_t GROUP BY b || '\x41') q`},
+	{"k/nest/count-of-group-cast", `SELECT count(*) FROM (SELECT count(*) AS n FROM u_t GROUP BY COALESCE(b, CAST('\x6869' AS BYTES))) q`},
+	{"k/ref/strpos", `SELECT id, strpos(b, '\x41') AS v FROM u_t`},
+	{"k/ref/min-concat", `SELECT min(b || '\x41') AS v FROM u_t`},
+	{"k/ref/max-concat", `SELECT max(b || '\x41') AS v FROM u_t`},
+	{"k/hav/agg-of-key-count", `SELECT count(*) AS n FROM u_t GROUP BY COALESCE(b, '\x6869') HAVING count(COALESCE(b, '\x6869')) = 2`},
+	{"k/win/arg-first", `SELECT id, first_value(COALESCE(b, '\x6869')) OVER (ORDER BY id DESC) AS m FROM u_t`},
+	{"k/corr/repeat-limit", `SELECT id FROM u_t o WHERE COALESCE(b, '\x6869') = (SELECT kb FROM u_k WHERE kb = COALESCE(o.b, '\x6869') LIMIT 1)`},
+	{"k/co/outer-ref-proj", `SELECT id, (SELECT o.b FROM u_k WHERE u_k.id = 1) AS v FROM u_t o`},
+	{"k/co/outer-ref-len", `SELECT id, (SELECT length(o.b) FROM u_k WHERE u_k.id = 1) AS v FROM u_t o`},
+	{"k/co/outer-ref-coalesce-cast", `SELECT id, (SELECT COALESCE(o.b, CAST('\x6869' AS BYTES)) FROM u_k WHERE u_k.id = 1) AS v FROM u_t o`},
+	{"k/co/outer-ref-eq-lit", `SELECT id, (SELECT count(*) FROM u_k WHERE o.b = '\x6869') AS v FROM u_t o`},
+	{"k/co/repeat-limit-cast", `SELECT id FROM u_t o WHERE COALESCE(b, CAST('\x6869' AS BYTES)) = (SELECT kb FROM u_k WHERE kb = COALESCE(o.b, CAST('\x6869' AS BYTES)) LIMIT 1)`},
+}
+
 type u1590Cell struct {
 	name, sql string
 	fiveArms  bool // the representative subset run through the coordinator arms
@@ -218,6 +319,9 @@ func u1590Cells() []u1590Cell {
 		}
 	}
 	for _, c := range u1590Fixed {
+		out = append(out, u1590Cell{name: c.name, sql: c.sql, fiveArms: true})
+	}
+	for _, c := range u1590Consumers {
 		out = append(out, u1590Cell{name: c.name, sql: c.sql, fiveArms: true})
 	}
 	return out
@@ -263,6 +367,23 @@ var u1590Residual = func() map[string]string {
 		"x/greatest-b-s":        "no 42804 for GREATEST bytea/text",
 		"x/concat-b-s":          "bytea || text concatenates bytes, not text || anynonarray",
 	}
+	// Round 2's consumer cells still wrong at tip; none was PostgreSQL's
+	// answer at base.
+	for _, n := range []string{"k/hav/agg-of-key", "k/win/arg", "k/corr/repeat", "k/ref/min-concat", "k/ref/max-concat"} {
+		// min / max over bytea answer here; PostgreSQL 17.11 has no
+		// min(bytea) / max(bytea) and raises 42883 (loud there, silent here).
+		m[n] = "min/max(bytea) answered where PostgreSQL raises 42883"
+	}
+	// strpos has no bytea signature in PostgreSQL (42883); answered here.
+	m["k/ref/strpos"] = "strpos(bytea, unknown) answered where PostgreSQL raises 42883"
+	// DISTINCT ON is not parsed (42601, loud).
+	m["k/dist/distinct-on"] = "DISTINCT ON unsupported (loud)"
+	// JOIN ... USING over two derived tables reports the merged column as
+	// ambiguous (42702, loud).
+	m["k/join/using"] = "USING over derived tables refused 42702 (loud)"
+	// A correlated scalar subquery returning a bytea OUTER value answers it
+	// as text (silent; no literal is involved).
+	m["k/co/outer-ref-proj"] = "correlated scalar subquery answers a bytea outer value as text"
 	// string_agg over BYTES is refused outright here ("string_agg over bytea
 	// is not supported"), whatever the delimiter: loud.
 	for _, l := range u1590Literals {

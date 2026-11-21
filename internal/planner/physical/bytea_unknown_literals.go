@@ -111,6 +111,68 @@ func (p *Planner) typeByteaLiterals(root *logical.Node) {
 				n.Projections[i].Expr = n.Projections[i].ASTExpr.String()
 			}
 		}
+		// A join's condition and keys are TEXT the join planners parse
+		// (parseJoinKeys, the stage DAG's key lists), so a typed construct
+		// there is written back as text — or `a.x = COALESCE(kb, '\x6869')`
+		// over a derived `COALESCE(b, '\x6869') AS x` compared a typed value
+		// with a spelled one.
+		if n.Type == logical.NodeJoin {
+			jd := joinSideDecls(w, n)
+			typeText := func(s string) string {
+				if s == "" || !strings.Contains(s, "'") {
+					return s
+				}
+				e := parseJoinCondExpr(s)
+				if e == nil || !typeByteaLiteralsIn(e, jd) {
+					return s
+				}
+				return e.String()
+			}
+			n.JoinCond = typeText(n.JoinCond)
+			n.JoinFilter = typeText(n.JoinFilter)
+			for i := range n.LeftKeys {
+				n.LeftKeys[i] = typeText(n.LeftKeys[i])
+			}
+			for i := range n.RightKeys {
+				n.RightKeys[i] = typeText(n.RightKeys[i])
+			}
+		}
+		// A window's PARTITION BY and ORDER BY terms are text the window
+		// operator computes (or, over an Aggregate, reads as the key's
+		// slot), with the parsed term beside it; both follow.
+		for i := range n.WindowExprs {
+			we := &n.WindowExprs[i]
+			for j := range we.PartitionBy {
+				var term plansql.Node
+				if j < len(we.PartitionByExprs) {
+					term = we.PartitionByExprs[j]
+				}
+				if term == nil {
+					term = parseJoinCondExpr(we.PartitionBy[j])
+				}
+				if term != nil && typeIn(term) {
+					we.PartitionBy[j] = term.String()
+					if j < len(we.PartitionByExprs) {
+						we.PartitionByExprs[j] = term
+					}
+				}
+			}
+			for j := range we.OrderBy {
+				var term plansql.Node
+				if j < len(we.OrderByExprs) {
+					term = we.OrderByExprs[j]
+				}
+				if term == nil {
+					term = parseJoinCondExpr(we.OrderBy[j].Column)
+				}
+				if term != nil && typeIn(term) {
+					we.OrderBy[j].Column = term.String()
+					if j < len(we.OrderByExprs) {
+						we.OrderByExprs[j] = term
+					}
+				}
+			}
+		}
 		for i := range n.AggExprs {
 			for _, e := range []plansql.Node{n.AggExprs[i].InputExpr, n.AggExprs[i].InputExpr2, n.AggExprs[i].InputExpr3} {
 				typeIn(e)
@@ -131,9 +193,24 @@ func (p *Planner) typeByteaLiterals(root *logical.Node) {
 				}
 				keys.decls[before] = in()
 				if i < len(n.GroupBy) && strings.EqualFold(cleanExpr(n.GroupBy[i]), cleanExpr(before)) {
-					old := strings.ToLower(n.GroupBy[i])
+					oldText := n.GroupBy[i]
+					old := strings.ToLower(oldText)
 					n.GroupBy[i] = g.String()
 					keys.names[old] = strings.ToLower(n.GroupBy[i])
+					// A grouping set and a GROUPING(...) argument name a
+					// key by the same TEXT (aggregate_plan.go's keyIndex),
+					// so each follows the key it names: a set left on the
+					// old spelling matched no key and became empty, which
+					// turned ROLLUP (b || '\x41') into two grand totals,
+					// and GROUPING(...) on it a 42803.
+					respellKeyText(n.GroupingSets, oldText, n.GroupBy[i])
+					for c := range n.GroupingCalls {
+						for a, arg := range n.GroupingCalls[c].Args {
+							if sameKeyText(arg, oldText) {
+								n.GroupingCalls[c].Args[a] = n.GroupBy[i]
+							}
+						}
+					}
 				}
 			}
 		} else if len(n.Children) != 1 {
@@ -142,6 +219,45 @@ func (p *Planner) typeByteaLiterals(root *logical.Node) {
 		return keys
 	}
 	node(root)
+}
+
+// joinSideDecls is what a join's condition can name: each side's emitted
+// declarations, merged, a name the two sides type differently dropped (the
+// rule inputColTypes applies to two scans). inputColTypes itself stops at a
+// derived table's Project, which is the side a join over a derived
+// `COALESCE(b, '\x6869') AS x` has.
+func joinSideDecls(w *declWalk, n *logical.Node) ColDecls {
+	merged := map[string]parquet.TypeID{}
+	drop := map[string]bool{}
+	for _, c := range n.Children {
+		for k, t := range w.childDecls(c).Types {
+			if prev, dup := merged[k]; dup && prev != t {
+				drop[k] = true
+			}
+			merged[k] = t
+		}
+	}
+	for k := range drop {
+		delete(merged, k)
+	}
+	return ColDecls{Types: merged, walk: w}
+}
+
+// sameKeyText is the comparison aggregate_plan.go's keyIndex makes between a
+// key's text and a grouping set's or GROUPING argument's: trimmed, folded.
+func sameKeyText(a, b string) bool {
+	return strings.EqualFold(strings.TrimSpace(a), strings.TrimSpace(b))
+}
+
+// respellKeyText renames every grouping-set entry spelling old to new.
+func respellKeyText(sets [][]string, old, new string) {
+	for s := range sets {
+		for c, col := range sets[s] {
+			if sameKeyText(col, old) {
+				sets[s][c] = new
+			}
+		}
+	}
 }
 
 // byteaGroupKeys is what an Aggregate's typed GROUP BY keys hand the terms
@@ -249,6 +365,26 @@ func typeByteaLiteralsIn(e plansql.Node, decls ColDecls) bool {
 					v.Else = results[len(results)-1]
 				}
 				changed = true
+			}
+			// A simple CASE compares its subject with each WHEN operand
+			// (PostgreSQL resolves `subject = operand` per arm). A bytea
+			// subject that is an EXPRESSION — COALESCE(b, '\x41') once typed
+			// above, GREATEST(…), CAST(b AS BYTES) — met a quoted WHEN
+			// operand as its spelling; a bare column subject is already
+			// compared through byteain (the comparison kernels, #582) and is
+			// left as it is, as byteaCompared leaves a column comparison.
+			if v.Subject != nil {
+				ops := []plansql.Node{v.Subject}
+				for _, w := range v.Whens {
+					ops = append(ops, w.Cond)
+				}
+				if byteaCompared(ops, decls) && castByteaLiterals(ops) {
+					v.Subject = ops[0]
+					for i := range v.Whens {
+						v.Whens[i].Cond = ops[i+1]
+					}
+					changed = true
+				}
 			}
 		case *plansql.CmpExpr:
 			pair := []plansql.Node{v.Left, v.Right}

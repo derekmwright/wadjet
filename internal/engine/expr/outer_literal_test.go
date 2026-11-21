@@ -117,9 +117,13 @@ func TestOuterLiteralRendersNullForEveryType(t *testing.T) {
 		{batch.TypeTimestamp, "__column_value(cast(null as timestamp))"},
 		{batch.TypeDate, "__column_value(cast(null as date))"},
 		{batch.TypeDecimal, "__column_value(cast(null as decimal(38, 0)))"},
+		// A BYTES value's spelling is a CAST (BytesValueLiteral, #1501), so
+		// its NULL is one too: an untyped null beside a quoted literal made
+		// the literal TEXT in the re-run (#1590).
+		{batch.TypeBytes, "__column_value(cast(null as BYTES))"},
 		// An ARRAY vector with no element declaration has no cast spelling.
 		{batch.TypeArray, "null"},
-		{batch.TypeString, "null"}, {batch.TypeBytes, "null"}, {batch.TypeUUID, "null"},
+		{batch.TypeString, "null"}, {batch.TypeUUID, "null"},
 		{batch.TypeIPv4, "null"}, {batch.TypeIPv6, "null"}, {batch.TypeCIDR, "null"},
 		{batch.TypeMAC, "null"}, {batch.TypePort, "null"}, {batch.TypeProtocol, "null"},
 		{batch.TypeDuration, "null"}, {batch.TypeRow, "null"}, {batch.TypeMap, "null"},

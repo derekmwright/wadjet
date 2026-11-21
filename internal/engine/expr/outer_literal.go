@@ -233,6 +233,13 @@ func outerNull(v *batch.Vector, precision int) plansql.Node {
 		if n, ok := outerStandIn(col); ok {
 			return n
 		}
+	case batch.TypeBytes:
+		// A NULL BYTES outer value stays BYTES, as its non-NULL value does
+		// (BytesValueLiteral): an untyped NULL beside a quoted literal —
+		// `COALESCE(o.b, '\x6869')` re-run as `COALESCE(null, '\x6869')` —
+		// resolved the literal to TEXT, its spelling, where the outer query's
+		// own COALESCE(b, '\x6869') reads it as bytea (#1590).
+		return &plansql.CastNode{Inner: untyped, TypeName: "BYTES", Column: true}
 	}
 	return untyped
 }

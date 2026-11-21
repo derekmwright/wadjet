@@ -1835,3 +1835,90 @@ x/eq-b-s	ERR 42883 operator does not exist: bytea = text
 x/union-b-s	ERR 42804 UNION types bytea and text cannot be matched
 x/case-b-casttext	ERR 42804 CASE types bytea and text cannot be matched
 x/greatest-b-s	ERR 42804 GREATEST types bytea and text cannot be matched
+k/gs/rollup-concat	rows=7 1 | 1 | 1 | 1 | 1 | 1 | 6
+k/gs/rollup-concat-key	rows=7 NULL,1 | NULL,6 | \x4141,1 | \x5c78343141,1 | \x615c5c6241,1 | \x686941,1 | \x7a41,1
+k/gs/rollup-concat-cast	rows=7 1 | 1 | 1 | 1 | 1 | 1 | 6
+k/gs/rollup-coalesce-key	rows=6 NULL,6 | \x41,1 | \x5c783431,1 | \x615c5c62,1 | \x6869,2 | \x7a,1
+k/gs/cube	rows=6 1 | 1 | 1 | 1 | 2 | 6
+k/gs/cube-key	rows=6 NULL,6 | \x41,1 | \x5c783431,1 | \x615c5c62,1 | \x6869,2 | \x7a,1
+k/gs/cube-two	rows=15 1 | 1 | 1 | 1 | 1 | 1 | 1 | 1 | 1 | 1 | 1 | 1 | 3 | 3 | 6
+k/gs/sets	rows=6 1 | 1 | 1 | 1 | 2 | 6
+k/gs/sets-key	rows=6 NULL,6 | \x41,1 | \x5c783431,1 | \x615c5c62,1 | \x6869,2 | \x7a,1
+k/gs/sets-two	rows=8 1 | 1 | 1 | 1 | 1 | 1 | 3 | 3
+k/gs/rollup-mixed	rows=8 1 | 1 | 1 | 1 | 2 | 3 | 3 | 6
+k/gs/rollup-mixed-key	rows=8 0,NULL,3 | 0,\x5c783431,1 | 0,\x615c5c62,1 | 0,\x7a,1 | 1,NULL,3 | 1,\x41,1 | 1,\x6869,2 | NULL,NULL,6
+k/gs/grouping-fn	rows=6 0,1 | 0,1 | 0,1 | 0,1 | 0,2 | 1,6
+k/gs/grouping-fn-cast	rows=6 0,1 | 0,1 | 0,1 | 0,1 | 0,2 | 1,6
+k/gs/rollup-having	rows=2 2 | 6
+k/gs/rollup-plain-col	rows=7 NULL,1 | NULL,6 | \x41,1 | \x5c783431,1 | \x615c5c62,1 | \x6869,1 | \x7a,1
+k/dist/distinct-concat	rows=6 NULL | \x4141 | \x5c78343141 | \x615c5c6241 | \x686941 | \x7a41
+k/dist/distinct-coalesce-count	rows=1 5
+k/dist/count-distinct-concat	rows=1 5
+k/dist/distinct-on	rows=5 1 | 2 | 3 | 4 | 6
+k/dist/distinct-two	rows=5 0,\x5c783431 | 0,\x615c5c62 | 0,\x7a | 1,\x41 | 1,\x6869
+k/hav/concat-eq	rows=1 1
+k/hav/length	rows=1 2
+k/hav/agg-of-key	ERR 42883 function max(bytea) does not exist
+k/hav/spacing	rows=1 2
+k/ord/expr	rows=6 1 | 2 | 3 | 4 | 5 | 6
+k/ord/alias	rows=6 1,\x686941 | 2,\x5c78343141 | 3,\x4141 | 4,\x615c5c6241 | 5,NULL | 6,\x7a41
+k/ord/ordinal	rows=3 1,\x6869 | 5,\x6869 | 6,\x7a
+k/ord/expr-limit	rows=2 2 | 3
+k/ord/group-ordinal	rows=5 \x41,1 | \x5c783431,1 | \x615c5c62,1 | \x6869,2 | \x7a,1
+k/ord/group-alias	rows=5 \x41,1 | \x5c783431,1 | \x615c5c62,1 | \x6869,2 | \x7a,1
+k/ord/group-agg	rows=5 \x41,1 | \x5c783431,1 | \x615c5c62,1 | \x6869,2 | \x7a,1
+k/win/partition	rows=6 1,2 | 2,1 | 3,1 | 4,1 | 5,2 | 6,1
+k/win/order	rows=6 1,2 | 2,5 | 3,6 | 4,4 | 5,3 | 6,1
+k/win/partition-concat	rows=6 1,1 | 2,1 | 3,1 | 4,1 | 5,1 | 6,1
+k/win/order-concat	rows=6 1,4 | 2,2 | 3,1 | 4,3 | 5,6 | 6,5
+k/win/arg	ERR 42883 function max(bytea) does not exist
+k/win/agg-arg	rows=6 1,6 | 2,6 | 3,6 | 4,6 | 5,6 | 6,6
+k/win/group-then-window	rows=5 \x41,1 | \x5c783431,2 | \x615c5c62,3 | \x6869,4 | \x7a,5
+k/join/on-concat	rows=3 1,1 | 3,2 | 6,3
+k/join/on-coalesce-left	rows=6 1,1 | 2,NULL | 3,2 | 4,NULL | 5,1 | 6,3
+k/join/using	rows=4 1,\x6869 | 3,\x41 | 5,\x6869 | 6,\x7a
+k/join/derived-key	rows=3 1,1 | 3,2 | 6,3
+k/set/union-concat	rows=10 NULL | \x41 | \x4141 | \x5c78343141 | \x5c7836383639 | \x615c5c6241 | \x6869 | \x686941 | \x7a | \x7a41
+k/set/intersect-coalesce	rows=3 \x41 | \x6869 | \x7a
+k/set/except-coalesce	rows=1 \x5c7836383639
+k/set/union-all-group	rows=6 \x41,2 | \x5c783431,1 | \x5c7836383639,1 | \x615c5c62,1 | \x6869,3 | \x7a,2
+k/case/coalesce-subject	rows=6 1,1 | 2,0 | 3,0 | 4,0 | 5,0 | 6,0
+k/case/greatest-subject	rows=6 1,1 | 2,0 | 3,0 | 4,0 | 5,0 | 6,0
+k/case/cast-subject	rows=6 1,1 | 2,0 | 3,0 | 4,0 | 5,0 | 6,0
+k/case/cast-subject-bare	rows=6 1,1 | 2,0 | 3,0 | 4,0 | 5,0 | 6,0
+k/case/concat-subject	rows=6 1,0 | 2,0 | 3,0 | 4,0 | 5,0 | 6,0
+k/case/concat-subject-hit	rows=6 1,1 | 2,0 | 3,0 | 4,0 | 5,0 | 6,0
+k/case/col-subject	rows=6 1,1 | 2,0 | 3,0 | 4,0 | 5,0 | 6,0
+k/case/coalesce-subject-two	rows=6 1,1 | 2,0 | 3,2 | 4,0 | 5,2 | 6,0
+k/case/coalesce-subject-where	rows=2 3 | 5
+k/grp/repeat-spacing	rows=5 \x41,1 | \x5c783431,1 | \x615c5c62,1 | \x6869,2 | \x7a,1
+k/grp/repeat-concat	rows=6 NULL,1 | \x4141,1 | \x5c78343141,1 | \x615c5c6241,1 | \x686941,1 | \x7a41,1
+k/grp/repeat-inside	rows=5 1,1 | 1,1 | 2,2 | 4,1 | 4,1
+k/grp/repeat-two-keys	rows=6 0,\x5c78343141,1 | 0,\x615c5c6241,1 | 0,\x7a41,1 | 1,NULL,1 | 1,\x4141,1 | 1,\x686941,1
+k/grp/agg-over-expr	rows=1 4
+k/grp/sum-length	rows=1 17
+k/corr/scalar	rows=6 1,1 | 2,0 | 3,1 | 4,0 | 5,1 | 6,1
+k/corr/exists	rows=4 1 | 3 | 5 | 6
+k/corr/in	rows=4 1 | 3 | 5 | 6
+k/corr/repeat	ERR 42883 function max(bytea) does not exist
+k/cte/ref	rows=6 1,2 | 2,4 | 3,1 | 4,4 | 5,2 | 6,1
+k/cte/group	rows=5 \x41,1 | \x5c783431,1 | \x615c5c62,1 | \x6869,2 | \x7a,1
+k/cte/unaliased	rows=6 \x41 | \x5c783431 | \x615c5c62 | \x6869 | \x6869 | \x7a
+k/cte/derived-group	rows=6 NULL,1 | \x4141,1 | \x5c78343141,1 | \x615c5c6241,1 | \x686941,1 | \x7a41,1
+k/cte/derived-filter	rows=1 1
+k/nest/count-of-group	rows=1 6
+k/nest/count-of-group-coalesce	rows=1 5
+k/nest/max-of-group	rows=1 2
+k/nest/sum-of-group	rows=1 6
+k/nest/count-of-group-cast	rows=1 5
+k/ref/strpos	ERR 42883 function strpos(bytea, unknown) does not exist
+k/ref/min-concat	ERR 42883 function min(bytea) does not exist
+k/ref/max-concat	ERR 42883 function max(bytea) does not exist
+k/hav/agg-of-key-count	rows=1 2
+k/win/arg-first	rows=6 1,\x7a | 2,\x7a | 3,\x7a | 4,\x7a | 5,\x7a | 6,\x7a
+k/corr/repeat-limit	rows=4 1 | 3 | 5 | 6
+k/co/outer-ref-proj	rows=6 1,\x6869 | 2,\x5c783431 | 3,\x41 | 4,\x615c5c62 | 5,NULL | 6,\x7a
+k/co/outer-ref-len	rows=6 1,2 | 2,4 | 3,1 | 4,4 | 5,NULL | 6,1
+k/co/outer-ref-coalesce-cast	rows=6 1,\x6869 | 2,\x5c783431 | 3,\x41 | 4,\x615c5c62 | 5,\x6869 | 6,\x7a
+k/co/outer-ref-eq-lit	rows=6 1,4 | 2,0 | 3,0 | 4,0 | 5,0 | 6,0
+k/co/repeat-limit-cast	rows=4 1 | 3 | 5 | 6
