@@ -14,8 +14,10 @@
 #
 # The lanes are tooling/battery_run.sh's, run as separate parallel processes
 # with one log each, plus: lane F (./internal/coordinator/ no -short) split
-# into eight round-robin -run shards F1..F8 (four until 2026-11-21, when the
-# slowest shard reached 33 of the soft watchdog's 35 minutes), FCOVER, which
+# into six round-robin -run shards F1..F6 (four until 2026-11-21, when the
+# slowest shard reached 33 of the soft watchdog's 35 minutes; eight was
+# measured the same day and slowed every other lane by 40 to 55 percent on
+# the runner's 32 vCPUs, tripping two load-sensitive tests), FCOVER, which
 # fails unless every listed coordinator test name is in exactly one shard, and
 # HOOK, the pre-push hook's command. The two PostgreSQL oracle arms (PG1, PG2) run after the lanes, as
 # the battery runs them, in parallel with each other (each starts its own
@@ -210,7 +212,7 @@ want B B && lane B go test -count=1 -p 2 ./internal/engine/... ./internal/planne
 want C C && lane C bash -c "go test -count=1 -run 'TestTPCHQueries$|TestTPCHOptimizationInvariance$|TestTPCHStageDumpGolden|TestTPCH_EnsureDistribution_Snapshot|TestTPCHDistributionConsistency|TestDuckDBCompare' ./benchmarks/tpch/ -timeout 20m && go test -count=1 -run 'TestTPCHQueriesDecimal|TestTPCHDecimalDeclaredTypes|TestTPCHOptimizationInvarianceDecimal|TestTwoPathInvarianceDecimal' ./benchmarks/tpch/ -timeout 20m"
 want D D && lane D bash -c "go test -count=1 -run TestStandaloneVsDistributedDifferential ./internal/coordinator/ -timeout 20m && go test -count=1 -run 'TestTypeMatrix|TestNumericArc2' ./internal/coordinator/ -timeout 25m"
 want E E && lane E go test -count=1 -run 'TestTypeMatrix|TestQueryPanicBoundary' ./wadjet/ -timeout 25m
-FSHARDS=8
+FSHARDS=6
 want_any_f() { local k; for k in $(seq 1 "$FSHARDS"); do want "F$k" F && return 0; done; return 1; }
 if want_any_f; then
   # Lane F sharded: every top-level test/fuzz/example name, round-robin into FSHARDS -run lists.
