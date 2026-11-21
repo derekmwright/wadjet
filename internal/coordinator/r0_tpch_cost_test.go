@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -43,15 +44,19 @@ type r0Rendered struct {
 	rows  [][]string
 }
 
+// r0TaskIDs blanks the task ids a DAG failure's message names, which differ
+// per run.
+var r0TaskIDs = regexp.MustCompile(`task [0-9a-f]{8}`)
+
 func r0Render(res *SQLResult, err error) r0Rendered {
 	if err != nil {
-		return r0Rendered{err: tbErr(err)}
+		return r0Rendered{err: r0TaskIDs.ReplaceAllString(tbErr(err), "task ?")}
 	}
 	if res == nil {
 		return r0Rendered{err: "nil result"}
 	}
 	if res.Error != "" {
-		return r0Rendered{err: "ERR (uncoded) " + res.Error}
+		return r0Rendered{err: r0TaskIDs.ReplaceAllString("ERR (uncoded) "+res.Error, "task ?")}
 	}
 	var out r0Rendered
 	for _, c := range res.OutputSchema() {

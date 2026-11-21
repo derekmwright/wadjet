@@ -43,6 +43,7 @@ func armDumpNamed(name string, c *Coordinator) *Coordinator {
 
 // armDumpRecord appends one cell when ARM_DUMP is set.
 func armDumpRecord(c *Coordinator, sql string, schema []parquet.Column, answer string, err error) {
+	r0ArmDiffRecord(c, sql) // R0's DAG-versus-localD report; a no-op unless R0_ARMDIFF is set
 	path := os.Getenv("ARM_DUMP")
 	if path == "" {
 		return

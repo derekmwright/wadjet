@@ -98,6 +98,20 @@ var r0LocalDFault atomic.Value // string
 // r0LocalD plans sql as ExecuteSQL plans it for the stage DAG and runs that D
 // on the coordinator-local single-process pipeline.
 func r0LocalD(c *Coordinator, ctx context.Context, sql string) (res *SQLResult, rec *r0LocalDRecord, err error) {
+	stamp := false
+	if f, _ := r0LocalDFault.Load().(string); f == "bound" {
+		stamp = true
+	}
+	return r0Statement(c, ctx, sql, stamp, false)
+}
+
+// r0Statement is the seam's body. stamp plans the statement BOUND where
+// ExecuteSQL plans D unbound (the test-only binding switch of
+// r0_boundd_test.go, and the seam's own fault); execDAG executes the captured
+// stage graph on the cluster instead of running the plan single-process (the
+// replica of ExecuteSQL's tail, r0ExecuteStages), so a bound D can be put on
+// the stage DAG without a production change.
+func r0Statement(c *Coordinator, ctx context.Context, sql string, stamp, execDAG bool) (res *SQLResult, rec *r0LocalDRecord, err error) {
 	rec = &r0LocalDRecord{Status: "refused-before-planning"}
 	// --- ExecuteSQL's preamble (coordinator.go:1035-1260), copied. ---
 	ctx = expr.StartStatement(ctx)
@@ -155,10 +169,6 @@ func r0LocalD(c *Coordinator, ctx context.Context, sql string) (res *SQLResult, 
 	}
 	if err := checkTransition(ctx, transitionDDirect); err != nil {
 		return nil, rec, err
-	}
-	stamp := false
-	if f, _ := r0LocalDFault.Load().(string); f == "bound" {
-		stamp = true
 	}
 	planStart := time.Now()
 	dplan, err := c.planStatement(ctx, sql, stamp, opts)
@@ -221,6 +231,16 @@ func r0LocalD(c *Coordinator, ctx context.Context, sql string) (res *SQLResult, 
 	rec.Status = "established"
 	if rec.LateSubplan != "" {
 		rec.Status = "late-subplan"
+	}
+	if execDAG {
+		rec.FrozenText = r0PlanText(rec.Frozen.PrettyPrint(0))
+		if rec.DAGRoute != "" || perr != nil {
+			// A routed statement is answered from L, which is not the
+			// question this mode asks: report the route, run nothing.
+			return nil, rec, perr
+		}
+		res, err = r0ExecuteStages(c, dplan.ctx, queryID, sql, start, gCopy, stages)
+		return res, rec, err
 	}
 	var counter atomic.Int64
 	res, err = c.runRefusedLocal(queryID, dplan, start, errors.New("r0 localD: D on the local pipeline"), "r0-localD", &counter)

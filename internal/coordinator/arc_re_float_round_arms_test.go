@@ -342,6 +342,7 @@ func reRunDAG(ctx context.Context, c *Coordinator, sql string) (out string) {
 		if r := recover(); r != nil {
 			out = fmt.Sprintf("PANIC %v", r)
 		}
+		r0ArmDiffRecord(c, sql) // R0's DAG-versus-localD report; a no-op unless R0_ARMDIFF is set
 	}()
 	res, err := c.ExecuteSQL(ctx, sql)
 	if err != nil {
