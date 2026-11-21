@@ -1,0 +1,49 @@
+# PostgreSQL 17.11 (postgres:17-alpine, initdb --locale=C --encoding=UTF8) answers for TestArc1590ByteaUnknownParamOnTheWire: $1 sent untyped (OID 0, text format); param=<ParamOIDs Describe reports>, then rows or ERR <SQLSTATE>. Printed by U1590_PG_DSN.
+bytes/coalesce/hex	param=[17] rows=3 1,6869/2 | 2,6869/2 | 3,41/1
+bytes/coalesce/esc	param=[17] rows=3 1,6869/2 | 2,6869/2 | 3,41/1
+bytes/coalesce/badhex	param=[17] ERR 22023
+bytes/nullif/hex	param=[17] rows=3 1,NULL | 2,6869 | 3,6869
+bytes/nullif/esc	param=[17] rows=3 1,NULL | 2,6869 | 3,6869
+bytes/nullif/badhex	param=[17] ERR 22023
+bytes/case/hex	param=[17] rows=3 1,6869 | 2,6869 | 3,41
+bytes/case/esc	param=[17] rows=3 1,6869 | 2,6869 | 3,41
+bytes/case/badhex	param=[17] ERR 22023
+bytes/greatest/hex	param=[17] rows=3 1,6869 | 2,6869 | 3,6869
+bytes/greatest/esc	param=[17] rows=3 1,6869 | 2,6869 | 3,6869
+bytes/greatest/badhex	param=[17] ERR 22023
+bytes/concat/hex	param=[17] rows=3 1,68696869 | 2,NULL | 3,416869
+bytes/concat/esc	param=[17] rows=3 1,68696869 | 2,NULL | 3,416869
+bytes/concat/badhex	param=[17] ERR 22023
+bytes/eq/hex	param=[17] rows=1 1
+bytes/eq/esc	param=[17] rows=1 1
+bytes/eq/badhex	param=[17] ERR 22023
+bytes/lag-default/hex	param=[17] rows=3 1,6869 | 2,6869 | 3,NULL
+bytes/lag-default/esc	param=[17] rows=3 1,6869 | 2,6869 | 3,NULL
+bytes/lag-default/badhex	param=[17] ERR 22023
+bytes/position/hex	param=[17] rows=3 1,1 | 2,NULL | 3,0
+bytes/position/esc	param=[17] rows=3 1,1 | 2,NULL | 3,0
+bytes/position/badhex	param=[17] ERR 22023
+text/coalesce/hex	param=[25] rows=3 1,hi/2 | 2,\x6869/6 | 3,A/1
+text/coalesce/esc	param=[25] rows=3 1,hi/2 | 2,hi/2 | 3,A/1
+text/coalesce/badhex	param=[25] rows=3 1,hi/2 | 2,\x68zz/6 | 3,A/1
+text/nullif/hex	param=[25] rows=3 1,\x6869 | 2,\x6869 | 3,\x6869
+text/nullif/esc	param=[25] rows=3 1,NULL | 2,hi | 3,hi
+text/nullif/badhex	param=[25] rows=3 1,\x68zz | 2,\x68zz | 3,\x68zz
+text/case/hex	param=[25] rows=3 1,hi | 2,\x6869 | 3,A
+text/case/esc	param=[25] rows=3 1,hi | 2,hi | 3,A
+text/case/badhex	param=[25] rows=3 1,hi | 2,\x68zz | 3,A
+text/greatest/hex	param=[25] rows=3 1,hi | 2,\x6869 | 3,\x6869
+text/greatest/esc	param=[25] rows=3 1,hi | 2,hi | 3,hi
+text/greatest/badhex	param=[25] rows=3 1,hi | 2,\x68zz | 3,\x68zz
+text/concat/hex	param=[25] rows=3 1,hi\x6869 | 2,NULL | 3,A\x6869
+text/concat/esc	param=[25] rows=3 1,hihi | 2,NULL | 3,Ahi
+text/concat/badhex	param=[25] rows=3 1,hi\x68zz | 2,NULL | 3,A\x68zz
+text/eq/hex	param=[25] rows=0 
+text/eq/esc	param=[25] rows=1 1
+text/eq/badhex	param=[25] rows=0 
+text/lag-default/hex	param=[25] rows=3 1,\x6869 | 2,hi | 3,NULL
+text/lag-default/esc	param=[25] rows=3 1,hi | 2,hi | 3,NULL
+text/lag-default/badhex	param=[25] rows=3 1,\x68zz | 2,hi | 3,NULL
+text/position/hex	param=[25] rows=3 1,0 | 2,NULL | 3,0
+text/position/esc	param=[25] rows=3 1,1 | 2,NULL | 3,0
+text/position/badhex	param=[25] rows=3 1,0 | 2,NULL | 3,0

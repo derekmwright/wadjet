@@ -136,6 +136,14 @@ func (w *declWalk) lagLeadWidening(node *logical.Node, we logical.WindowExpr) (l
 		}
 	}
 	spelled, spellable := castSpelling(out)
+	if cast && out.ID == batch.TypeBytes && v.ID == batch.TypeBytes && d.Quoted {
+		// A bytea value's QUOTED default is unknown-typed and takes bytea,
+		// read by byteain (#1590): `LAG(b, 1, '\x6869')` fills with the two
+		// bytes `hi`, not the six of its spelling. Only that pair: a text
+		// default beside a bytea value has no common type in PostgreSQL, and
+		// castSpelling names BYTES for no other reader.
+		spelled, spellable = "BYTES", true
+	}
 	r := lagLeadWidening{out: out}
 	if !cast || !spellable {
 		// Nothing to coerce TO: the default is materialized as written and

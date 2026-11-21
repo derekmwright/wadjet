@@ -33,6 +33,9 @@ func (p *Planner) AnnotateScanColumns(ctx context.Context, node *logical.Node) {
 	// A membership's literal outer value takes the subquery's type IN
 	// THE PLAN, so every arm reads one typed node (member_literal_types.go).
 	p.typeMemberLiterals(node)
+	// An unknown literal a construct resolves to bytea is read by byteain IN
+	// THE PLAN, the same way (bytea_unknown_literals.go, #1590).
+	p.typeByteaLiterals(node)
 }
 
 func (p *Planner) annotateScanColumns(ctx context.Context, node *logical.Node) {

@@ -140,10 +140,14 @@ cannot cast type … to bytea`. A value already stored is read as the bytes it
 holds: rows written before #1501 hold the text's own characters
 (`'\x6869'` stored six bytes) and keep reading as those bytes.
 
-Not yet: a quoted literal that becomes `BYTES` inside an expression —
-`COALESCE(b, '\x41')`, `CASE … THEN '\x41' ELSE b END`, a set operation,
-`GREATEST`, `b || '\x41'`, a `LAG` / `LEAD` default — keeps its spelling
-(`length(COALESCE(NULLIF(b, b), '\x6869'))` is 6 here, 2 on PostgreSQL), and
+A quoted literal that becomes `BYTES` inside an expression is read the same
+way — `COALESCE(b, '\x41')`, `NULLIF`, `CASE … THEN '\x41' ELSE b END`,
+`GREATEST` / `LEAST`, `b || '\x41'`, `position('\x41' in b)`, a comparison
+with a `BYTES` expression, a set operation or `VALUES` column, a `LAG` /
+`LEAD` default (`length(COALESCE(NULLIF(b, b), '\x6869'))` is 2, as on
+PostgreSQL), and text `byteain` refuses there is refused when the query is
+planned (#1590). Not yet: a `BYTES` operand beside a `TEXT`-typed one in
+`COALESCE` / `CASE` / `GREATEST` answers where PostgreSQL raises 42804, and
 the packet, payload, DNS, TLS and JA3 functions read their own hex text.
 
 A `BYTES` value that has to travel as SQL text — a bound bytea parameter, a

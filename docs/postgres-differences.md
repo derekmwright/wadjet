@@ -96,10 +96,6 @@ Over a real column holding 16777216, `(r + 1.0::real) + 1.0::real` answers 16777
 
 With `t = 'hi'` and `b = '\x6869'`, `t || b` answers `hihi` (length 4) and `b || t` answers `hihi`; PostgreSQL renders the bytea operand through its hex output and answers `hi\x6869` (length 8) and `\x6869hi`. Both declare text. Write `t || encode(b, 'hex')` to control the rendering explicitly. (catalog: [text-collation#r12, r13](adr/0012-divergences/text-collation.md#catalog))
 
-**A quoted literal beside a bytea `||` contributes its spelling.**
-
-`b || '\x41'` appends the four characters `\`, `x`, `4`, `1` here (`\x68695c783431`), where PostgreSQL reads the unknown literal as bytea and appends one byte (`\x686941`). Write `b || DECODE('41', 'hex')` to append the byte. (catalog: [text-collation#r14](adr/0012-divergences/text-collation.md#catalog))
-
 **`TABLESAMPLE SYSTEM` samples blocks of rows, not pages.**
 
 `SYSTEM (50)` keeps or drops each block of 2048 rows, as the scan reads them, as a whole — on a cluster each worker's scan task samples its own files the same way; PostgreSQL keeps or drops heap pages. Both answer a random subset; `SYSTEM (0)` and `SYSTEM (100)` answer no row and every row on both. (catalog: [other#r20](adr/0012-divergences/other.md#catalog); #1411)

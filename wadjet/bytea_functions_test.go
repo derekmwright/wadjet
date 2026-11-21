@@ -69,17 +69,15 @@ func TestByteaFunctionsAnswerInBytes(t *testing.T) {
 		{"concat_literal", `b || 'x'`, 1, []byte{0x68, 0x69, 0x78}, parquet.TypeBytes},
 		{"concat_column", `b || b`, 2, []byte{0xff, 0xfe, 0x00, 0x41, 0xff, 0xfe, 0x00, 0x41},
 			parquet.TypeBytes},
-		// RESIDUAL, pinned: an unknown-typed LITERAL beside a bytea operand
-		// of `||` still contributes its own SPELLING, so `b || '\x41'`
-		// appends the four characters and PostgreSQL appends the one byte
-		// 0x41. It is #582's rule one layer up — at a function ARGUMENT
-		// rather than at a comparison — and closing it means resolving a
-		// literal argument from its sibling's declared type in the compile
-		// layer, which is where the literal is still a *Lit. The COLUMN and
-		// the ordinary-spelling literal cells above are the ones #583 was
-		// filed for. Delete this pin when the argument rule lands.
-		{"residual_concat_hex_spelled_literal", `b || '\x41'`, 2,
-			[]byte{0xff, 0xfe, 0x00, 0x41, 0x5c, 0x78, 0x34, 0x31}, parquet.TypeBytes},
+		// An unknown-typed LITERAL beside a bytea operand of `||` is read by
+		// byteain, so `b || '\x41'` appends the one byte 0x41, as PostgreSQL
+		// 17.11 does (`'\xfffe0041'::bytea || '\x41'` is `\xfffe004141`).
+		// It was a residual pin appending the four characters of the
+		// spelling until the plan typed the literal (#1590,
+		// physical.typeByteaLiterals; every arm in
+		// coordinator.TestArc1590ByteaUnknownLiteralMatrix).
+		{"concat_hex_spelled_literal", `b || '\x41'`, 2,
+			[]byte{0xff, 0xfe, 0x00, 0x41, 0x41}, parquet.TypeBytes},
 		// `text || bytea` is TEXT on the server — it resolves through
 		// `text || anynonarray`, which RENDERS the bytea and concatenates as
 		// text — while `bytea || bytea` and `bytea || <unknown literal>` are

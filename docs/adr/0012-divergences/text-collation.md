@@ -44,7 +44,6 @@ Rendering the bytea operand through `bytea_out` needs the operand's declared typ
 | **r11** `SELECT STRPOS(b, DECODE('69','hex')) FROM bt` | ERROR 42883 function strpos(bytea, bytea) does not exist | 2 (measured): POSITION(sub IN b), which PostgreSQL answers, is rewritten into strpos | — | kept superset | 2026-09-18 · [E63](#e63), P074 | #583 | — |
 | **r12** `SELECT t \|\| b, LENGTH(t \|\| b) FROM bt` | hi\x6869, 8 (the bytea operand rendered through bytea_out) | hihi, 4 (measured): the raw bytes are spliced; declared text on both | — | value divergence | 2026-09-05 · [E63](#e63) | #583 | `wadjet.TestByteaFunctionsAnswerInBytes` |
 | **r13** `SELECT b \|\| t FROM bt` | \x6869hi | hihi (measured) | — | value divergence | 2026-09-05 · [E63](#e63) | #583 | `wadjet.TestByteaFunctionsAnswerInBytes` |
-| **r14** `SELECT b \|\| '\x41' FROM bt` | \x686941 (the literal is one byte) | \x68695c783431 (measured): the unknown literal contributes its four-character spelling | — | value divergence | 2026-09-05 · [E63](#e63) | #583 | `wadjet.TestByteaFunctionsAnswerInBytes` |
 | **r15** `SELECT SUBSTR(d, 1, 4), UPPER(n) FROM dt` | ERROR 42883 function substr(date, integer, integer) does not exist | 2024, 7 (measured): a non-text column is rendered as text first; a numeric literal is 42883 on both | — | kept superset | — · P075 | #500, #1056 | — |
 | **r17** `SELECT SUBSTRING('foobar' SIMILAR '%#"o_b#"%' ESCAPE '#')` | oob | ERROR 0A000 SUBSTRING(text SIMILAR pattern ESCAPE escape) is not supported (measured) | 0A000 | refusal | — · P037 | #1169 | — |
 | **r18** `SELECT 'abc' SIMILAR TO '*'` | ERROR 2201B naming the regex engine's complaint | ERROR 2201B the SIMILAR TO pattern "*" cannot be matched (measured) | 2201B | value divergence | — · P038 | #1168 | — |
@@ -204,7 +203,7 @@ ADR lines 2574-2581. Stated in [Mechanisms](#mechanisms).
 
 ### E63
 
-ADR lines 2582-2647. Catalog rows: r11, r12, r13, r14. Stated in [Mechanisms](#mechanisms).
+ADR lines 2582-2647. Catalog rows: r11, r12, r13 (r14, the unknown literal beside a bytea `||`, closed 2026-11-20 by #1590). Stated in [Mechanisms](#mechanisms).
 
 - **A text-only function over a BYTES argument raises 42883.** (Added
   2026-09-05, #583; CLOSED 2026-09-18.) `upper(b)`, `lower(b)`,
@@ -242,13 +241,15 @@ ADR lines 2582-2647. Catalog rows: r11, r12, r13, r14. Stated in [Mechanisms](#m
   the same call as the backstop for the doors that walk does not see
   (2026-09-18).
 
-  TWO value divergences ride with it, both pinned by
+  TWO value divergences rode with it (the first closed 2026-11-20), both pinned by
   `wadjet.TestByteaFunctionsAnswerInBytes`.
 
   `residual_concat_hex_spelled_literal`: an unknown-typed LITERAL beside a
-  bytea operand of `||` contributes its own SPELLING, so `b || '\x41'`
-  appends four characters where the server appends one byte. That is
-  #582's rule at a function ARGUMENT rather than at a comparison.
+  bytea operand of `||` contributed its own SPELLING, so `b || '\x41'`
+  appended four characters where the server appends one byte. CLOSED
+  2026-11-20 (#1590): the plan types the literal `CAST('\x41' AS BYTES)`
+  (`physical.typeByteaLiterals`), and the cell is now
+  `concat_hex_spelled_literal`, PostgreSQL's one byte.
 
   `residual_text_concat_bytea_value` (×3, added 2026-09-05 in earlier implementation —
   the earlier implementation cells asserted these values as PostgreSQL's, which they are

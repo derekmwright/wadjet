@@ -698,9 +698,17 @@ func (pt *paramTyper) expr(n plansql.Node, sc *scope) {
 		pt.expr(e.Right, sc)
 	case *plansql.BinaryOp:
 		if e.Op == "||" {
-			for _, side := range []plansql.Node{e.Left, e.Right} {
+			sides := []plansql.Node{e.Left, e.Right}
+			for i, side := range sides {
 				if k := pt.sentinelNum(side); k > 0 {
-					pt.assign(k, oidText)
+					// `bytea || unknown` resolves the unknown to bytea on
+					// 17.11 (Describe says 17), every other pair to text
+					// (#1590).
+					oid := uint32(oidText)
+					if other := sides[1-i]; pt.sentinelNum(other) == 0 && pt.typeOf(other, sc) == oidBytea {
+						oid = oidBytea
+					}
+					pt.assign(k, oid)
 				}
 			}
 		} else if pt.sentinelNum(e.Left) == 0 || pt.sentinelNum(e.Right) == 0 {

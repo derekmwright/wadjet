@@ -796,8 +796,18 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 			if out[i].Untyped && i < len(right) {
 				out[i] = right[i]
 			}
+			// A quoted literal in the LEFT arm is unknown-typed and takes a
+			// bytea right arm's type, read by byteain (#1590): `SELECT '\x6869'
+			// UNION ALL SELECT b` is a bytea column. Bytea only; every other
+			// type keeps the left arm's declaration here.
+			if i < len(right) && out[i].Quoted && !right[i].Untyped && !right[i].Quoted && right[i].ID == parquet.TypeBytes {
+				out[i] = right[i]
+			}
 		}
 		b.outputDecls[info] = out
+		if err := refuseByteaSetOpLiterals(info.Union.Left, info.Union.Right, left, right); err != nil {
+			return err
+		}
 		if b.structural == nil {
 			b.structural = map[*plansql.SelectInfo][]parquet.TypeID{}
 		}
@@ -1353,6 +1363,11 @@ func (b *binder) checkExpr(expr plansql.Node, scope *colScope) error {
 			return structural(n)
 		}
 		if err := RefuseTemporalTextBesideTypedOperand(expr, typeOf); err != nil {
+			return err
+		}
+		// A quoted literal a construct resolves to bytea is read by byteain
+		// here, where PostgreSQL coerces it (validate_bytea_literal.go, #1590).
+		if err := refuseByteaLiterals(expr, scope); err != nil {
 			return err
 		}
 	}
