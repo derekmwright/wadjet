@@ -203,12 +203,13 @@ type HashJoin struct {
 	// decorrelated-EXISTS self-inequality class). When both are set on a
 	// semi/anti join, Build collapses to a distinct-pair table — see
 	// join_semianti_ne.go. SemiAntiFilter stays wired as the fallback for
-	// shapes the runtime can't activate (non-int value column).
+	// shapes the runtime can't activate (a non-int value column, or a value
+	// pair whose integer storage is not PostgreSQL's comparison: neExactPair).
 	SemiAntiNEProbeCol string
 	SemiAntiNEBuildCol string
 	neActive           bool
 	neValIdx           int
-	neValInt32         bool
+	neValType          batch.TypeID
 	nePairs            []nePair
 	neProbeValIdx      int
 
@@ -4191,6 +4192,15 @@ func (p *HashJoinProbe) executeSemiAntiJoin(in *batch.RecordBatch) (*batch.Recor
 		keyIdx := h.probeKeyIdx[0]
 		valIdx := columnIndexFallback(in, h.SemiAntiNEProbeCol)
 		if keyIdx >= 0 && valIdx >= 0 {
+			// The build enabled on the probe value's DECLARED type. A probe
+			// stream that carries another type would be compared as integer
+			// storage, which is not PostgreSQL's comparison (#1681, 1681c),
+			// and the batches the generic path needs were never stored:
+			// refuse rather than answer.
+			if pt := in.Columns[valIdx].Type; !neExactPair(h.neValType, pt) {
+				return nil, fmt.Errorf("semi/anti <> probe column %q is %v where the plan declared a type that compares exactly with the build's %v",
+					h.SemiAntiNEProbeCol, pt, h.neValType)
+			}
 			sel = h.probeNESemiAnti(in, keyIdx, valIdx, isSemi, sel)
 			goto done
 		}

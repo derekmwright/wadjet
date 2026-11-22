@@ -37,9 +37,21 @@ compares. No closure, no chain walk.
   literals, and other operators stay on the generic closure path. Wired
   at both HashJoin construction sites (worker fragment executor,
   single-process planner); `SemiAntiFilter` stays set as the fallback.
-- **Activation** (`exec.neTryEnable`, first build batch): requires the
-  int-key fast path and an integer value vector. On failure the build
-  falls through to the generic filtered path unchanged.
+- **Activation** (`exec.semiAntiNEEligible` before the build, then
+  `exec.neTryEnable` on the first build batch): requires the int-key fast
+  path, an integer value vector, and a pair of value types the integer
+  storage compares as PostgreSQL does (`neExactPair`): int4/int8 against
+  int4/int8, or a date, port or protocol against its own type. The probe
+  value's type is read from the plan-declared probe schema
+  (`ProbeSchemaHint`), since the build finishes before a probe batch is
+  seen; an undeclared probe value does not enable. Any other pair — an
+  integer against a float or numeric, a date against a timestamp — is not
+  an integer comparison (int8 against float8 compares in float8, where
+  2^60 and 2^60+3 are equal, so two distinct integers are not two distinct
+  values), and keeps the generic filtered path, whose residual is the
+  engine's own comparison (#1681). On failure the build falls through to
+  the generic filtered path unchanged. A probe stream whose value type
+  disagrees with the declaration is refused, not read as integers.
 - **Build** (`insertNEBatch`): keyOnly-class flat path — the
   partition-on-arrival spill machinery is skipped exactly as
   `SemiAntiKeyOnly` skips it, because the state is bounded-compact.

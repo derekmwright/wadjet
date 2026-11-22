@@ -1,6 +1,6 @@
-# epic #1681 lines 1681a+1681b: PostgreSQL answers for TestArc1681aSemiAntiNullResidualEveryArm's generated cells over nr_p / nr_s / nr_n.
+# epic #1681 lines 1681a+1681b+1681c: PostgreSQL answers for TestArc1681aSemiAntiNullResidualEveryArm's generated cells over nr_p / nr_s / nr_n.
 # PostgreSQL 17.11 on x86_64-pc-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit; datcollate/datctype/encoding C C UTF8 (postgres:17-alpine, initdb --locale=C --encoding=UTF8).
-# name<TAB>rows=N <sorted rows> | ERR <SQLSTATE>. Regenerate: NR_GEN=<cells> NR_PGDDL=<ddl> go test -run TestArc1681aGenerate; then pg_run.py (1681b evidence).
+# name<TAB>rows=N <sorted rows> | ERR <SQLSTATE>. Regenerate: NR_GEN=<cells> NR_PGDDL=<ddl> go test -run TestArc1681aGenerate; then pg_run.py (1681b / 1681c evidence).
 type/c_i32/gt/exists	rows=3 1 | 5 | 6
 type/c_i32/gt/notExists	rows=10 10 | 11 | 12 | 13 | 2 | 3 | 4 | 7 | 8 | 9
 type/c_i32/gt/in	rows=3 1 | 5 | 6
@@ -651,6 +651,44 @@ mixed/decbig_dec/ne/exists	rows=7 1 | 10 | 12 | 13 | 5 | 6 | 8
 mixed/decbig_dec/ne/notExists	rows=6 11 | 2 | 3 | 4 | 7 | 9
 mixed/decbig_dec/idf/exists	rows=10 1 | 10 | 12 | 13 | 2 | 3 | 5 | 6 | 8 | 9
 mixed/decbig_dec/idf/notExists	rows=3 11 | 4 | 7
+ne/i64b_f64i/exists	rows=6 1 | 10 | 12 | 13 | 5 | 6
+ne/i64b_f64i/notExists	rows=7 11 | 2 | 3 | 4 | 7 | 8 | 9
+ne/i64b_f64i/in	rows=6 1 | 10 | 12 | 13 | 5 | 6
+ne/i64b_f64i/notIn	rows=3 2 | 4 | 9
+ne/i64b_f32i/exists	rows=6 1 | 10 | 12 | 13 | 5 | 6
+ne/i64b_f32i/notExists	rows=7 11 | 2 | 3 | 4 | 7 | 8 | 9
+ne/i64b_f32/exists	rows=7 1 | 10 | 12 | 13 | 5 | 6 | 8
+ne/i64b_f32/notExists	rows=6 11 | 2 | 3 | 4 | 7 | 9
+ne/i32_f64i/exists	rows=6 1 | 10 | 12 | 13 | 5 | 6
+ne/i32_f64i/notExists	rows=7 11 | 2 | 3 | 4 | 7 | 8 | 9
+ne/i32_f32i/exists	rows=6 1 | 10 | 12 | 13 | 5 | 6
+ne/i32_f32i/notExists	rows=7 11 | 2 | 3 | 4 | 7 | 8 | 9
+ne/i32_deci/exists	rows=6 1 | 10 | 12 | 13 | 5 | 6
+ne/i32_deci/notExists	rows=7 11 | 2 | 3 | 4 | 7 | 8 | 9
+ne/i64b_deci/exists	rows=6 1 | 10 | 12 | 13 | 5 | 6
+ne/i64b_deci/notExists	rows=7 11 | 2 | 3 | 4 | 7 | 8 | 9
+ne/i64b_dec0/exists	rows=6 1 | 10 | 12 | 13 | 5 | 6
+ne/i64b_dec0/notExists	rows=7 11 | 2 | 3 | 4 | 7 | 8 | 9
+ne/i64b_decbig/exists	rows=7 1 | 10 | 12 | 13 | 5 | 6 | 8
+ne/i64b_decbig/notExists	rows=6 11 | 2 | 3 | 4 | 7 | 9
+ne/big_bigf/exists	rows=0 
+ne/big_bigf/notExists	rows=13 1 | 10 | 11 | 12 | 13 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
+ne/big_bigf/in	rows=0 
+ne/big_bigf/notIn	rows=13 1 | 10 | 11 | 12 | 13 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
+ne/bigf_big/exists	rows=0 
+ne/bigf_big/notExists	rows=13 1 | 10 | 11 | 12 | 13 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
+ne/dt_tsd/exists	rows=6 1 | 10 | 12 | 13 | 5 | 6
+ne/dt_tsd/notExists	rows=7 11 | 2 | 3 | 4 | 7 | 8 | 9
+ne/i64b_i32/exists	rows=6 1 | 10 | 12 | 13 | 5 | 6
+ne/i64b_i32/notExists	rows=7 11 | 2 | 3 | 4 | 7 | 8 | 9
+ne/i64b_ts/exists	ERR 42883
+ne/i64b_ts/notExists	ERR 42883
+ne/i64b_iv/exists	ERR 42883
+ne/i64b_iv/notExists	ERR 42883
+ne/dt_i32/exists	ERR 42883
+ne/dt_i32/notExists	ERR 42883
+ne/flip_i64b_f64i/exists	rows=6 1 | 10 | 12 | 13 | 5 | 6
+ne/flip_i64b_f64i/notExists	rows=7 11 | 2 | 3 | 4 | 7 | 8 | 9
 res2/mixIdf/exists	rows=2 1 | 5
 res2/mixIdf/notExists	rows=11 10 | 11 | 12 | 13 | 2 | 3 | 4 | 6 | 7 | 8 | 9
 res2/mixIdfRev/exists	rows=2 1 | 5

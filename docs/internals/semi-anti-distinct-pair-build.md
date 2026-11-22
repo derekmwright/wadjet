@@ -15,6 +15,14 @@ table (batches + arena + per-candidate filter closure walks) to
 key → (v1, v2, n≤2): no batch storage, no arena, probe = one lookup
 plus at most two integer compares.
 
+That argument holds only where comparing the integer storage IS the
+comparison: int4/int8 against int4/int8, or date/port/protocol against
+the same type (`neExactPair`). Against a float, a numeric or a timestamp
+PostgreSQL compares in another domain (int8 vs float8 in float8, where
+two distinct integers can both equal x), so the path does not enable for
+those pairs; the probe value's type comes from the plan-declared probe
+schema, and an undeclared one does not enable either (#1681, 1681c).
+
 NULL semantics (SQL three-valued, matching the closure path):
   - build rows with NULL value can never satisfy `<>` — skipped at
     insert (a key whose every value is NULL behaves as absent: EXISTS

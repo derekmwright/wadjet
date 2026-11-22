@@ -4,6 +4,7 @@ package exec
 
 import (
 	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // For a semi/anti join with exactly one residual probe.col <> build.col, retain
@@ -28,23 +29,69 @@ type nePair struct {
 // Callers use it for engagement logging — the A/B marker for this path.
 func (h *HashJoin) NEActive() bool { return h.neActive }
 
+// neExactPair reports whether comparing the build value and the probe value
+// as their integer storage is PostgreSQL's comparison of the two types, so
+// that the distinct-pair state answers `probe <> build` exactly. That holds
+// for int4 / int8 against int4 / int8 (PostgreSQL's cross-type integer
+// operators are exact) and for a date, port or protocol against its own type.
+// It does not hold for anything else the int reader accepts or the build
+// keys: int8 against float8 compares in float8, where 2^60 and 2^60+3 are
+// equal; a numeric or float is not an integer at all; a date against a
+// timestamp compares the timestamp at midnight, not a day count against
+// microseconds (#1681, line 1681c). Two distinct integers are also not
+// "two distinct values" in such a comparison, so the pair cannot be made to
+// answer those types; they keep the generic filtered build, whose residual
+// is the engine's own comparison.
+func neExactPair(build, probe batch.TypeID) bool {
+	switch build {
+	case batch.TypeInt32, batch.TypeInt64:
+		return probe == batch.TypeInt32 || probe == batch.TypeInt64
+	case batch.TypeDate, batch.TypePort, batch.TypeProtocol:
+		return probe == build
+	}
+	return false
+}
+
+// neHintType resolves col in a plan-declared side schema; ok is false when
+// the declaration is absent or does not name it once.
+func neHintType(hint []parquet.Column, col string) (batch.TypeID, bool) {
+	if len(hint) == 0 {
+		return 0, false
+	}
+	i := columnIndexFallback(&batch.RecordBatch{Schema: hint}, col)
+	if i < 0 {
+		return 0, false
+	}
+	return hint[i].Type, true
+}
+
 // semiAntiNEEligible reports whether the planner recognized this join's
-// filter as a single `<>` condition (wiring sets both columns together).
-// Build-path dispatch uses it BEFORE the first batch arrives, so it must
-// not depend on runtime resolution — neActive is the post-first-batch
-// truth.
+// filter as a single `<>` condition (wiring sets both columns together)
+// AND the plan declares both value columns with a pair of types the
+// distinct-pair state compares exactly (neExactPair). Build-path dispatch
+// uses it BEFORE the first batch arrives, so it reads the declarations,
+// not the batches — neActive is the post-first-batch truth. An undeclared
+// pair is not eligible: the optimization never enables where it cannot
+// show the comparison is exact.
 func (h *HashJoin) semiAntiNEEligible() bool {
-	return (h.JoinType == SemiJoin || h.JoinType == AntiJoin) &&
-		h.SemiAntiNEProbeCol != "" && h.SemiAntiNEBuildCol != ""
+	if (h.JoinType != SemiJoin && h.JoinType != AntiJoin) ||
+		h.SemiAntiNEProbeCol == "" || h.SemiAntiNEBuildCol == "" {
+		return false
+	}
+	pt, ok := neHintType(h.ProbeSchemaHint, h.SemiAntiNEProbeCol)
+	if !ok {
+		return false
+	}
+	bt, ok := neHintType(h.BuildSchemaHint, h.SemiAntiNEBuildCol)
+	return ok && neExactPair(bt, pt)
 }
 
 // neTryEnable resolves the build-side value column on the first build
 // batch and activates the distinct-pair path when both the key fast path
-// and an integer value vector are available. Called under h.mu with
+// and an integer value vector are available, and that vector's type pairs
+// exactly with the probe value's declared type. Called under h.mu with
 // buildSchema/tryEnableIntKey already settled. On failure the build
-// falls through to the generic filtered path (correct, just slower) —
-// the planner's catalog type gate makes that a defensive branch, not an
-// expected one.
+// falls through to the generic filtered path (correct, just slower).
 func (h *HashJoin) neTryEnable(b *batch.RecordBatch) {
 	if !h.semiAntiNEEligible() || !h.useIntKey {
 		return
@@ -53,14 +100,11 @@ func (h *HashJoin) neTryEnable(b *batch.RecordBatch) {
 	if idx < 0 {
 		return
 	}
-	switch b.Columns[idx].Type {
-	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
-		h.neValInt32 = true
-	case batch.TypeInt64:
-		h.neValInt32 = false
-	default:
+	pt, _ := neHintType(h.ProbeSchemaHint, h.SemiAntiNEProbeCol)
+	if !neExactPair(b.Columns[idx].Type, pt) {
 		return
 	}
+	h.neValType = b.Columns[idx].Type
 	h.neValIdx = idx
 	h.neActive = true
 	if h.BuildRowHint > 0 {

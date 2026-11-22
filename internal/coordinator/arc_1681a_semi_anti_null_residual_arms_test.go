@@ -177,6 +177,65 @@ func nrTypes() []nrType {
 	}
 }
 
+// nr1681cCols are fixture columns for the `<>` pairs of two types (line
+// 1681c), outside nrTypes so the per-family cells do not grow: a float and a
+// numeric holding v exactly (3 against 3.0 is equal, 3 against 3.25 is not),
+// a timestamp at midnight of day v (equal to the date of day v), and int8
+// values 2^60+v that float8 cannot tell apart, beside a float8 holding 2^60
+// (PostgreSQL compares int8 with float8 in float8, so every one is equal).
+func nr1681cCols() []nrType {
+	col := func(n string, t parquet.TypeID) parquet.Column {
+		return parquet.Column{Name: n, Type: t, Nullable: true}
+	}
+	deci := col("c_deci", parquet.TypeDecimal)
+	deci.Precision, deci.Scale = 18, 4
+	dec0 := col("c_dec0", parquet.TypeDecimal)
+	dec0.Precision, dec0.Scale = 18, 0
+	const two60 = int64(1) << 60
+	return []nrType{
+		{col: "c_f64i", pg: "float8", pq: col("c_f64i", parquet.TypeFloat64), float: true,
+			val: func(v int, nan bool) any {
+				if nan {
+					return math.NaN()
+				}
+				return float64(v)
+			},
+			pgLit: func(v int, nan bool) string {
+				if nan {
+					return "'NaN'"
+				}
+				return fmt.Sprint(v)
+			}},
+		{col: "c_f32i", pg: "float4", pq: col("c_f32i", parquet.TypeFloat32), float: true,
+			val: func(v int, nan bool) any {
+				if nan {
+					return float32(math.NaN())
+				}
+				return float32(v)
+			},
+			pgLit: func(v int, nan bool) string {
+				if nan {
+					return "'NaN'"
+				}
+				return fmt.Sprint(v)
+			}},
+		{col: "c_deci", pg: "numeric(18,4)", pq: deci,
+			val: func(v int, _ bool) any { return fmt.Sprintf("%d.0000", v) }, pgLit: func(v int, _ bool) string { return fmt.Sprintf("%d.0000", v) }},
+		{col: "c_dec0", pg: "numeric(18,0)", pq: dec0,
+			val: func(v int, _ bool) any { return fmt.Sprint(v) }, pgLit: func(v int, _ bool) string { return fmt.Sprint(v) }},
+		{col: "c_tsd", pg: "timestamp", pq: col("c_tsd", parquet.TypeTimestamp),
+			val:   func(v int, _ bool) any { return time.Date(2024, 1, v, 0, 0, 0, 0, time.UTC) },
+			pgLit: func(v int, _ bool) string { return fmt.Sprintf("'2024-01-%02d 00:00:00'", v) }},
+		{col: "c_big", pg: "int8", pq: col("c_big", parquet.TypeInt64),
+			val: func(v int, _ bool) any { return two60 + int64(v) }, pgLit: func(v int, _ bool) string { return fmt.Sprint(two60 + int64(v)) }},
+		{col: "c_bigf", pg: "float8", pq: col("c_bigf", parquet.TypeFloat64),
+			val: func(int, bool) any { return float64(two60) }, pgLit: func(int, bool) string { return fmt.Sprint(two60) }},
+	}
+}
+
+// nrFixtureCols is every value column of nr_p / nr_s, in fixture order.
+func nrFixtureCols() []nrType { return append(nrTypes(), nr1681cCols()...) }
+
 // nrTxt2 varies length and case: in the C collation 'A' < 'B' < 'a' < 'aB' < 'ab' < 'b'.
 var nrTxt2 = map[int]string{2: "B", 3: "ab", 5: "a", 6: "A", 7: "Ab", 9: "b", 12: "aB"}
 
@@ -228,13 +287,13 @@ func nrTables() []tmdTable {
 	i64 := func(n string) parquet.Column { return parquet.Column{Name: n, Type: parquet.TypeInt64, Nullable: true} }
 	mk := func(name, keyCol string, rows []nrRow) tmdTable {
 		cols := []parquet.Column{i64(keyCol), i64("id"), i64("id2"), i64("w")}
-		for _, ty := range nrTypes() {
+		for _, ty := range nrFixtureCols() {
 			cols = append(cols, ty.pq)
 		}
 		t := tmdTable{name: name, schema: parquet.Schema{Columns: cols}}
 		for _, r := range rows {
 			m := map[string]any{keyCol: int64(r.key), "id": nrIntOrNil(r.id), "id2": nrIntOrNil(r.id2), "w": nrIntOrNil(r.w)}
-			for _, ty := range nrTypes() {
+			for _, ty := range nrFixtureCols() {
 				if r.v == nil {
 					m[ty.col] = nil
 					continue
@@ -260,13 +319,13 @@ func nrPGFixture() string {
 		rows      []nrRow
 	}{{"nr_p", "rid", nrOuter}, {"nr_s", "sid", nrInner}} {
 		fmt.Fprintf(&b, "CREATE TABLE %s (%s int8, id int8, id2 int8, w int8", tb.name, tb.key)
-		for _, ty := range nrTypes() {
+		for _, ty := range nrFixtureCols() {
 			fmt.Fprintf(&b, ", %s %s", ty.col, ty.pg)
 		}
 		b.WriteString(");\n")
 		for _, r := range tb.rows {
 			fmt.Fprintf(&b, "INSERT INTO %s VALUES (%d, %s, %s, %s", tb.name, r.key, nrPGInt(r.id), nrPGInt(r.id2), nrPGInt(r.w))
-			for _, ty := range nrTypes() {
+			for _, ty := range nrFixtureCols() {
 				if r.v == nil {
 					b.WriteString(", NULL")
 					continue
@@ -394,6 +453,31 @@ func nrCells() []nrCell {
 				out = append(out, nrCell{"mixed/" + m.name + "/" + op.name + "/" + c.name, nrAt(c.f, s, r)})
 			}
 		}
+	}
+	// 1681c: `<>` with an integer-class build value (the distinct-pair build
+	// keys int32/int64/date values) against every probe type PostgreSQL
+	// compares it with, by values that tell a numeric comparison from an
+	// integer-key one, and the pairs PostgreSQL refuses.
+	nePairs := []struct{ name, s, p string }{
+		{"i64b_f64i", "c_i64b", "c_f64i"}, {"i64b_f32i", "c_i64b", "c_f32i"}, {"i64b_f32", "c_i64b", "c_f32"},
+		{"i32_f64i", "c_i32", "c_f64i"}, {"i32_f32i", "c_i32", "c_f32i"}, {"i32_deci", "c_i32", "c_deci"},
+		{"i64b_deci", "c_i64b", "c_deci"}, {"i64b_dec0", "c_i64b", "c_dec0"}, {"i64b_decbig", "c_i64b", "c_decbig"},
+		{"big_bigf", "c_big", "c_bigf"}, {"bigf_big", "c_bigf", "c_big"}, {"dt_tsd", "c_dt", "c_tsd"},
+		{"i64b_i32", "c_i64b", "c_i32"}, {"i64b_ts", "c_i64b", "c_ts"}, {"i64b_iv", "c_i64b", "c_iv"},
+		{"dt_i32", "c_dt", "c_i32"},
+	}
+	for _, m := range nePairs {
+		r := "s." + m.s + " <> p." + m.p
+		n := 2
+		if m.name == "i64b_f64i" || m.name == "big_bigf" {
+			n = 4
+		}
+		for _, c := range cons[:n] {
+			out = append(out, nrCell{"ne/" + m.name + "/" + c.name, nrAt(c.f, s, r)})
+		}
+	}
+	for _, c := range cons[:2] {
+		out = append(out, nrCell{"ne/flip_i64b_f64i/" + c.name, nrAt(c.f, s, "p.c_f64i <> s.c_i64b")})
 	}
 	// 1681b: residual shapes the decorrelation either carries (two or three
 	// conjuncts, one of them IS DISTINCT FROM; parentheses) or declines to
@@ -620,13 +704,13 @@ func nrKnown(name, arm string) (verdict, cause string, known bool) {
 		}
 		return false
 	}
-	if p[0] == "mixed" && in(p[1], "i64b_f64", "i64b_dec") && p[2] == "ne" {
-		// 1681b, found by the extended matrix and NOT fixed there (outside its
-		// four lines): parseSemiAntiNE wires the distinct-pair `<>` build,
-		// which keys an INT64 build value and reads the FLOAT64 / NUMERIC
-		// probe value through intKeyFromVector — not an integer, so read as
-		// NULL, and no pair matches (exec/join_semianti_ne.go).
-		return "wrong", "a <> residual with an integer build value and a float/numeric probe value: the distinct-pair path reads the probe value as NULL", true
+	if p[0] == "ne" && p[1] == "i64b_f64i" && in(p[2], "in", "notIn") {
+		return "refused", "the per-row correlated re-run has no literal for a float outer value", true
+	}
+	if p[0] == "ne" && p[1] == "i64b_iv" {
+		// 1681c, outside the residual: PostgreSQL has no bigint <> interval
+		// operator (42883); this engine accepts the comparison.
+		return "wrong", "bigint <> interval is accepted where PostgreSQL raises 42883", true
 	}
 	if p[0] != "type" {
 		return "", "", false

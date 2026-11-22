@@ -33,6 +33,8 @@ func runSemiAntiNE(t *testing.T, jt JoinType, ne bool, keyType parquet.TypeID,
 	if ne {
 		hj.SemiAntiNEProbeCol = "pv"
 		hj.SemiAntiNEBuildCol = "v"
+		// The distinct-pair build enables on the DECLARED value types (1681c).
+		hj.ProbeSchemaHint, hj.BuildSchemaHint = probeSchema, buildSchema
 	}
 	if err := hj.Build(context.Background(), NewSliceSource(buildSchema, buildRows)); err != nil {
 		t.Fatal(err)
@@ -214,6 +216,7 @@ func BenchmarkSemiAntiNEProbe(b *testing.B) {
 			hj.SemiAntiFilter = BuildNETestFilter("pv", "v")
 			if ne {
 				hj.SemiAntiNEProbeCol, hj.SemiAntiNEBuildCol = "pv", "v"
+				hj.ProbeSchemaHint, hj.BuildSchemaHint = probeSchema, buildSchema
 			}
 			if err := hj.Build(context.Background(), NewSliceSource(buildSchema, buildRows)); err != nil {
 				b.Fatal(err)
@@ -252,6 +255,8 @@ func BenchmarkSemiAntiNEBuild(b *testing.B) {
 				hj.SemiAntiFilter = BuildNETestFilter("pv", "v")
 				if ne {
 					hj.SemiAntiNEProbeCol, hj.SemiAntiNEBuildCol = "pv", "v"
+					hj.ProbeSchemaHint = []parquet.Column{{Name: "pv", Type: parquet.TypeInt64}}
+					hj.BuildSchemaHint = buildSchema
 				}
 				if err := hj.Build(context.Background(), NewSliceSource(buildSchema, buildRows)); err != nil {
 					b.Fatal(err)
