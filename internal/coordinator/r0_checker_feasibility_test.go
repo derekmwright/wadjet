@@ -5,7 +5,6 @@ package coordinator
 import (
 	"context"
 	"fmt"
-	"os"
 	"reflect"
 	"sort"
 	"strings"
@@ -29,7 +28,8 @@ import (
 // only by spelling, which the brief forbids. It also counts the emitted
 // stage-expression leaves the other half would have to resolve.
 //
-// R0_CHECKER_REPORT=<path> writes the per-statement counts. The kept assertion
+// R0_CHECKER_REPORT=1 writes the per-statement counts as r0_checker_report.tsv
+// in a fresh directory whose path the test logs (r0WriteArtifact). The kept assertion
 // is the measurement that stopped the checker: no D reference carries a
 // binding, so "intent not established" covers every leaf.
 
@@ -103,7 +103,7 @@ func r0EmittedLeaves(stages []dagplan.Stage) (leaves, unparsable int) {
 }
 
 func TestR0CheckerFeasibility(t *testing.T) {
-	r0RefuseCommittedEnv(t, "R0_CHECKER_REPORT")
+	r0RequireWriterUsage(t, "R0_CHECKER_REPORT")
 	if testing.Short() {
 		t.Skip("-short: stands clusters up")
 	}
@@ -147,9 +147,7 @@ func TestR0CheckerFeasibility(t *testing.T) {
 	summary := fmt.Sprintf("checker summary: %d statements planned; D column references %d, bound %d; emitted stage-expression leaves %d (%d expression strings unparsable); leaves checked exact 0; intent not established %d (reason: D unbound)",
 		planned, dTotal, dBound, emitted, unparsable, dTotal-dBound)
 	t.Log(summary)
-	if p := os.Getenv("R0_CHECKER_REPORT"); p != "" {
-		r0AppendFile(t, p, summary+"\n"+strings.Join(lines, "\n")+"\n")
-	}
+	r0WriteArtifact(t, "R0_CHECKER_REPORT", "r0_checker_report.tsv", summary+"\n"+strings.Join(lines, "\n")+"\n")
 	if dBound != 0 {
 		t.Errorf("%d references of D carry a binding: the checker's intent side may now be buildable (re-measure deliverable 4)", dBound)
 	}

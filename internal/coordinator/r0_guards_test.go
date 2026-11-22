@@ -276,6 +276,21 @@ const r0FixturePGPath = "testdata/r0_fixture_pg17.tsv"
 // dag-morsel4's four consumers (width 1+capacity >= 4).
 const r0MorselProcs = 6
 
+// r0RestoreGOMAXPROCS undoes the engagement test's capacity raise. Calling
+// runtime.GOMAXPROCS(n) turns off the runtime's automatic capacity updates,
+// and calling it again with the old number leaves them off (runtime/debug.go,
+// Go 1.25+). So when the GOMAXPROCS environment variable is absent (the
+// process started on the runtime's default, automatic updates on) the default
+// is restored with runtime.SetDefaultGOMAXPROCS; when it is set (updates were
+// already off) the saved number is restored.
+func r0RestoreGOMAXPROCS(prev int) {
+	if _, set := os.LookupEnv("GOMAXPROCS"); !set {
+		runtime.SetDefaultGOMAXPROCS()
+		return
+	}
+	runtime.GOMAXPROCS(prev)
+}
+
 // r0FixtureTables names each fixture's tables.
 func r0FixtureTables(fx string) []string {
 	tables, _ := r0Fixture(fx)
@@ -300,23 +315,21 @@ func r0FixtureDigest(r r0Result) string {
 // DELETEs; every one of the six arms must read the same bag. The committed
 // oracle is read FIRST and is the only reference this test compares against;
 // the test never modifies it. With WADJET_PG_DSN set the digests are also
-// re-measured live and compared with the committed ones; R0_FIXTURE_WRITE=<path>
-// then writes that live measurement as a separate artifact, and refuses any
-// target under the repository's testdata (r0ArtifactTarget): re-pinning is a
-// deliberate two-step act, write the artifact, review it, copy it.
+// re-measured live and compared with the committed ones; R0_FIXTURE_WRITE=1
+// then writes that live measurement as r0_fixture_pg17.tsv in a fresh
+// directory whose path the test logs (r0WriteArtifact: a writer takes no path,
+// and any value other than 1 fails the test before it connects). Re-pinning
+// is a deliberate two-step act: run with the switch set to 1, review the
+// artifact at the logged path, copy it into testdata/ by hand.
 func TestR0FixtureRowsMatchPostgres(t *testing.T) {
+	r0RequireWriterUsage(t, "R0_FIXTURE_WRITE") // before measuring or connecting
 	if testing.Short() {
 		t.Skip("-short: six arms per fixture")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 	want := r0ReadKV(t, r0FixturePGPath)
-	if dsn, out := os.Getenv("WADJET_PG_DSN"), os.Getenv("R0_FIXTURE_WRITE"); dsn != "" {
-		if out != "" {
-			if err := r0ArtifactTarget(out); err != nil {
-				t.Fatal(err) // before measuring: a committed oracle is never a target
-			}
-		}
+	if dsn := os.Getenv("WADJET_PG_DSN"); dsn != "" {
 		conn, err := pgconn.Connect(ctx, dsn)
 		if err != nil {
 			t.Fatal(err)
@@ -343,9 +356,7 @@ func TestR0FixtureRowsMatchPostgres(t *testing.T) {
 				t.Errorf("PostgreSQL now holds %s as %s, the committed digest is %s", k, d, want[k])
 			}
 		}
-		if out != "" {
-			r0WriteArtifact(t, out, b.String())
-		}
+		r0WriteArtifact(t, "R0_FIXTURE_WRITE", "r0_fixture_pg17.tsv", b.String())
 	}
 	checked := 0
 	for _, fx := range []string{"own", "uniq", "dup"} {
@@ -388,7 +399,8 @@ func TestR0FixtureRowsMatchPostgres(t *testing.T) {
 // at width 1+capacity <= 1 (executor_fragment.go), so at GOMAXPROCS <= 2 the
 // arm named dag-morsel4 executes serial. This test establishes its own
 // prerequisite: it raises GOMAXPROCS to r0MorselProcs for its duration
-// (before the workers are built, restored after), so the morsel engagement
+// (before the workers are built; restored after by r0RestoreGOMAXPROCS, to
+// the runtime default when GOMAXPROCS is unset), so the morsel engagement
 // is verified on a small CI runner too. The corpus tests do not do this:
 // their dag-morsel4 pins hold at the process's own capacity (ADR-0051).
 func TestR0ConfiguredArmsActuallyEngage(t *testing.T) {
@@ -397,7 +409,7 @@ func TestR0ConfiguredArmsActuallyEngage(t *testing.T) {
 	}
 	if prev := runtime.GOMAXPROCS(0); prev < r0MorselProcs {
 		runtime.GOMAXPROCS(r0MorselProcs)
-		t.Cleanup(func() { runtime.GOMAXPROCS(prev) })
+		t.Cleanup(func() { r0RestoreGOMAXPROCS(prev) })
 	}
 	if got := runtime.GOMAXPROCS(0); got-2 < 3 {
 		t.Fatalf("GOMAXPROCS=%d gives a worker %d CPU tokens; dag-morsel4 needs 3 for its four consumers: the morsel engagement cannot be verified", got, got-2)

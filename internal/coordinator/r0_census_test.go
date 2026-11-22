@@ -5,7 +5,6 @@ package coordinator
 import (
 	"context"
 	"fmt"
-	"os"
 	"reflect"
 	"sort"
 	"strings"
@@ -26,8 +25,9 @@ import (
 // with the identity it was given. D, the stage planner's plan, carries no
 // stamp at all (r0LocalDRecord.BoundRefs, asserted 0 on every corpus cell).
 //
-// R0_CENSUS=<path> writes every reference (statement, clause path, spelling,
-// binding). The kept assertion is the census's headline, so it moves when the
+// R0_CENSUS=1 writes every reference (statement, clause path, spelling,
+// binding) as r0_census.tsv in a fresh directory whose path the test logs
+// (r0WriteArtifact; a writer takes no path). The kept assertion is the census's headline, so it moves when the
 // binder's scope moves (stage W stamps WHERE and ON): no reference under a
 // WHERE or a join condition carries a stamp today, and SELECT-list references
 // do.
@@ -141,7 +141,7 @@ func r0CensusClause(path string) string {
 }
 
 func TestR0BindingCensus(t *testing.T) {
-	r0RefuseCommittedEnv(t, "R0_CENSUS")
+	r0RequireWriterUsage(t, "R0_CENSUS")
 	if testing.Short() {
 		t.Skip("-short: stands clusters up")
 	}
@@ -241,9 +241,7 @@ func TestR0BindingCensus(t *testing.T) {
 	}
 	sort.Strings(summary)
 	t.Logf("census by clause:\n  %s", strings.Join(summary, "\n  "))
-	if p := os.Getenv("R0_CENSUS"); p != "" {
-		r0AppendFile(t, p, strings.Join(append(summary, lines...), "\n")+"\n")
-	}
+	r0WriteArtifact(t, "R0_CENSUS", "r0_census.tsv", strings.Join(append(summary, lines...), "\n")+"\n")
 	// The headline, kept: nothing under WHERE or a join condition is stamped
 	// (the binder's scope, physical/validate_binding.go), and the SELECT list
 	// is. Stage W moves the first: it re-pins this assertion.

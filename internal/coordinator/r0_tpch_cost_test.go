@@ -32,9 +32,11 @@ import (
 // testdata/r0_tpch_pins.tsv, not that differences are zero. Float values are
 // compared to a relative 1e-9 (ADR-0013 classes 4 and 9: summation order).
 //
-// R0_TPCH_REPORT=<path> writes the report; R0_COST_WRITE=<path> writes the
-// cost baseline rows (testdata/r0_cost_baseline.tsv's format), which is
-// recorded, not asserted: planning time is wall time.
+// R0_TPCH_REPORT=1 writes the report as r0_tpch_report.tsv; R0_COST_WRITE=1
+// writes the cost baseline rows (testdata/r0_cost_baseline.tsv's format, no
+// header) as r0_cost_baseline_tpch.tsv, which is recorded, not asserted:
+// planning time is wall time. Each goes to a fresh directory whose path the
+// test logs (r0WriteArtifact; a writer takes no path).
 
 // r0Rendered is an in-process result: column names, declared types, rows.
 type r0Rendered struct {
@@ -235,7 +237,7 @@ func r0ReadKV(t *testing.T, path string) map[string]string {
 }
 
 func TestR0TPCHDifferential(t *testing.T) {
-	r0RefuseCommittedEnv(t, "R0_TPCH_REPORT", "R0_COST_WRITE")
+	r0RequireWriterUsage(t, "R0_TPCH_REPORT", "R0_COST_WRITE")
 	if testing.Short() {
 		t.Skip("-short: TPC-H SF0.01 on the DAG and on localD")
 	}
@@ -289,22 +291,17 @@ func TestR0TPCHDifferential(t *testing.T) {
 			float64(rec.PlanTime.Microseconds())/1000, float64(rec.StagePlanTime.Microseconds())/1000))
 	}
 	t.Logf("TPC-H SF0.01: %v of %d", counts, len(qs))
-	if p := os.Getenv("R0_TPCH_REPORT"); p != "" {
-		r0AppendFile(t, p, strings.Join(report, "\n")+"\n")
-	}
-	if p := os.Getenv("R0_COST_WRITE"); p != "" {
-		r0AppendFile(t, p, strings.Join(cost, "\n")+"\n")
-	}
+	r0WriteArtifact(t, "R0_TPCH_REPORT", "r0_tpch_report.tsv", strings.Join(report, "\n")+"\n")
+	r0WriteArtifact(t, "R0_COST_WRITE", "r0_cost_baseline_tpch.tsv", strings.Join(cost, "\n")+"\n")
 }
 
 // TestR0CorpusCostBaseline writes the corpus statements' cost rows
-// (R0_COST_WRITE) from the stage graph localD captures on the dag arm's
+// (R0_COST_WRITE=1: r0_cost_baseline_corpus.tsv) from the stage graph localD captures on the dag arm's
 // configuration. Recorded, not asserted.
 func TestR0CorpusCostBaseline(t *testing.T) {
-	r0RefuseCommittedEnv(t, "R0_COST_WRITE")
-	p := os.Getenv("R0_COST_WRITE")
-	if p == "" || testing.Short() {
-		t.Skip("R0_COST_WRITE unset")
+	r0RequireWriterUsage(t, "R0_COST_WRITE")
+	if !r0Writer(t, "R0_COST_WRITE") || testing.Short() {
+		t.Skip("R0_COST_WRITE not 1")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
@@ -325,7 +322,7 @@ func TestR0CorpusCostBaseline(t *testing.T) {
 				float64(rec.PlanTime.Microseconds())/1000, float64(rec.StagePlanTime.Microseconds())/1000))
 		}
 	}
-	r0AppendFile(t, p, strings.Join(rows, "\n")+"\n")
+	r0WriteArtifact(t, "R0_COST_WRITE", "r0_cost_baseline_corpus.tsv", strings.Join(rows, "\n")+"\n")
 }
 
 // TestR0PartitionPruningThroughDerivedAlias keeps the judge's probe 5 as a

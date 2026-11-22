@@ -55,15 +55,20 @@ import (
 //
 // Run modes (all skip under -short):
 //   - default: compare every cell with testdata/r0_corpus_pg17.tsv and the pins;
-//   - WADJET_PG_DSN + R0_PG_WRITE=<path>: TestR0CorpusMeasurePostgres loads the
-//     fixtures into PostgreSQL and writes its answers to <path>;
-//   - R0_PINS_WRITE=<path>: write the measured verdicts as a pin file;
-//   - R0_REPORT=<path>: write the differential report (deliverable 3).
+//   - WADJET_PG_DSN + R0_PG_WRITE=1: TestR0CorpusMeasurePostgres loads the
+//     fixtures into PostgreSQL and writes its answers as r0_corpus_pg17.tsv;
+//   - R0_PINS_WRITE=1: write each fixture's measured verdicts as
+//     r0_corpus_pins_<fixture>.tsv (pin rows, no header);
+//   - R0_REPORT=1: write the differential report (deliverable 3) as
+//     r0_report_<fixture>.tsv.
 //
-// Every writer (R0_PG_WRITE, R0_PINS_WRITE, R0_FIXTURE_WRITE, R0_COST_WRITE and
-// the report switches) refuses a target under the repository's testdata
-// (r0ArtifactTarget): re-pinning is a deliberate two-step act, write an
-// artifact, review it, copy it.
+// Every writer switch (R0_PG_WRITE, R0_PINS_WRITE, R0_FIXTURE_WRITE,
+// R0_COST_WRITE and the report switches) takes NO path: it is 1 or unset, and
+// any other value fails the test before it measures. The test writes into a
+// fresh directory it makes under os.TempDir() and logs the artifact's path
+// (r0WriteArtifact). Re-pinning is a deliberate two-step act: run with the
+// switch set to 1, review the artifact at the logged path, copy it into
+// testdata/ by hand.
 
 type r0Cell struct {
 	name, aliases, sources string
@@ -691,7 +696,7 @@ type r0CellOutcome struct {
 
 // r0RunFixture runs every cell of one fixture on the six doors.
 func r0RunFixture(t *testing.T, fx string) {
-	r0RefuseCommittedEnv(t, "R0_PINS_WRITE", "R0_REPORT")
+	r0RequireWriterUsage(t, "R0_PINS_WRITE", "R0_REPORT")
 	if testing.Short() {
 		t.Skip("-short: six arms over the R0 corpus")
 	}
@@ -794,11 +799,9 @@ func r0RunFixture(t *testing.T, fx string) {
 			}
 		}
 	}
-	if p := os.Getenv("R0_PINS_WRITE"); p != "" {
-		r0AppendFile(t, p, strings.Join(pinLines, "\n")+"\n")
-	}
-	if p := os.Getenv("R0_REPORT"); p != "" {
-		r0AppendFile(t, p, r0Report(outcomes, pg))
+	r0WriteArtifact(t, "R0_PINS_WRITE", "r0_corpus_pins_"+fx+".tsv", strings.Join(pinLines, "\n")+"\n")
+	if r0Writer(t, "R0_REPORT") {
+		r0WriteArtifact(t, "R0_REPORT", "r0_report_"+fx+".tsv", r0Report(outcomes, pg))
 	}
 }
 
@@ -811,20 +814,85 @@ func containsString(xs []string, s string) bool {
 	return false
 }
 
-var r0FileMu sync.Mutex
+// R0's writer switches (epic #1678, ADR-0051; the third independent review of
+// R0, section B). A writer takes NO path: the caller only turns it on (=1) and
+// the test chooses the destination, a fresh uniquely named directory it makes
+// under os.TempDir() with a fixed file name inside, created O_CREATE|O_EXCL,
+// and logs the full path. No spelling of any path (relative, absolute,
+// symbolic or hard link, a link followed by "..") is accepted, so no existing
+// file, committed or not, is ever opened for writing. Re-pinning is a
+// deliberate two-step act: run with the switch set to 1, review the artifact
+// at the logged path, copy it into testdata/ by hand.
 
-// r0AppendFile appends s to a measurement ARTIFACT at path. Every R0 writer
-// goes through r0ArtifactTarget first, so none of them can write a committed
-// oracle, pin or baseline file: re-pinning is a deliberate two-step act (write
-// an artifact, review it, copy it into testdata/).
-func r0AppendFile(t *testing.T, path, s string) {
+// r0WriterUsage is the refusal's explanation of the switch's usage.
+const r0WriterUsage = "an R0 writer takes no path; set it to 1 (or leave it unset). " +
+	"With %s=1 the test writes its artifact into a fresh directory it creates under os.TempDir() " +
+	"and logs the full path; review the artifact there, then copy it into testdata/ by hand"
+
+// r0WriterOn reports whether writer switch name is on: unset or empty is off,
+// "1" is on, and any other value (a path left over from the old usage, "true",
+// "0") is refused with the usage, never read as a path or as off.
+func r0WriterOn(name string) (bool, error) {
+	switch v := os.Getenv(name); v {
+	case "":
+		return false, nil
+	case "1":
+		return true, nil
+	default:
+		return false, fmt.Errorf("R0 writer switch %s=%q refused: %s", name, v, fmt.Sprintf(r0WriterUsage, name))
+	}
+}
+
+// r0RequireWriterUsage fails the test at its start, before any measurement or
+// connection, when any named writer switch holds a value other than 1.
+func r0RequireWriterUsage(t *testing.T, names ...string) {
 	t.Helper()
-	if err := r0ArtifactTarget(path); err != nil {
+	for _, n := range names {
+		if _, err := r0WriterOn(n); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// r0Writer reports whether switch name is on, failing the test on a value
+// other than 1.
+func r0Writer(t *testing.T, name string) bool {
+	t.Helper()
+	on, err := r0WriterOn(name)
+	if err != nil {
 		t.Fatal(err)
 	}
-	r0FileMu.Lock()
-	defer r0FileMu.Unlock()
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	return on
+}
+
+// r0NewArtifact creates a fresh, uniquely named directory under os.TempDir()
+// and the file named file inside it, O_CREATE|O_EXCL: it can only create a new
+// file, never open an existing one. It returns the open file and its absolute
+// path.
+func r0NewArtifact(name, file string) (*os.File, string, error) {
+	dir, err := os.MkdirTemp("", "wadjet-r0-"+strings.ToLower(name)+"-")
+	if err != nil {
+		return nil, "", fmt.Errorf("%s: making the artifact directory: %w", name, err)
+	}
+	path, err := filepath.Abs(filepath.Join(dir, file))
+	if err != nil {
+		return nil, "", fmt.Errorf("%s: %w", name, err)
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	if err != nil {
+		return nil, "", fmt.Errorf("%s: creating the artifact: %w", name, err)
+	}
+	return f, path, nil
+}
+
+// r0WriteArtifact writes s as switch name's artifact when the switch is on: a
+// new file named file in a fresh directory (r0NewArtifact), its path logged.
+func r0WriteArtifact(t *testing.T, name, file, s string) {
+	t.Helper()
+	if !r0Writer(t, name) {
+		return
+	}
+	f, path, err := r0NewArtifact(name, file)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -835,125 +903,7 @@ func r0AppendFile(t *testing.T, path, s string) {
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
-}
-
-// r0RefuseCommittedEnv fails the test at its start when any of the named
-// writer switches points at a committed file (r0ArtifactTarget), before any
-// measurement runs.
-func r0RefuseCommittedEnv(t *testing.T, names ...string) {
-	t.Helper()
-	for _, n := range names {
-		if p := os.Getenv(n); p != "" {
-			if err := r0ArtifactTarget(p); err != nil {
-				t.Fatalf("%s: %v", n, err)
-			}
-		}
-	}
-}
-
-// r0WriteArtifact replaces a measurement artifact at path, behind the same
-// target guard as r0AppendFile.
-func r0WriteArtifact(t *testing.T, path, s string) {
-	t.Helper()
-	if err := r0ArtifactTarget(path); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, []byte(s), 0o644); err != nil {
-		t.Fatal(err)
-	}
-}
-
-// r0ArtifactTarget refuses an output path that resolves, after cleaning,
-// relative forms and symbolic links, to a file under any testdata directory
-// of the repository, or that is the same file (a hard link) as one in this
-// package's testdata/. A writer may only produce a separate artifact.
-func r0ArtifactTarget(path string) error {
-	refuse := func(why string) error {
-		return fmt.Errorf("R0 writer target %q refused: %s; write a separate artifact, review it, then copy it into testdata/", path, why)
-	}
-	if path == "" {
-		return refuse("empty path")
-	}
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return refuse(err.Error())
-	}
-	resolved, err := r0ResolvePath(abs)
-	if err != nil {
-		return refuse(err.Error())
-	}
-	cwd, err := os.Getwd()
-	if err != nil {
-		return refuse(err.Error())
-	}
-	root := cwd
-	for {
-		if _, err := os.Stat(filepath.Join(root, "go.mod")); err == nil {
-			break
-		}
-		parent := filepath.Dir(root)
-		if parent == root {
-			return refuse("no go.mod above " + cwd)
-		}
-		root = parent
-	}
-	realRoot, err := filepath.EvalSymlinks(root)
-	if err != nil {
-		return refuse(err.Error())
-	}
-	underTestdata := func(base, p string) bool {
-		rel, err := filepath.Rel(base, p)
-		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			return false
-		}
-		for _, part := range strings.Split(rel, string(filepath.Separator)) {
-			if part == "testdata" {
-				return true
-			}
-		}
-		return false
-	}
-	for _, c := range [][2]string{{root, abs}, {realRoot, resolved}, {root, resolved}, {realRoot, abs}} {
-		if underTestdata(c[0], c[1]) {
-			return refuse("it resolves to " + resolved + ", under the repository's testdata")
-		}
-	}
-	if fi, err := os.Stat(resolved); err == nil {
-		entries, _ := os.ReadDir(filepath.Join(cwd, "testdata"))
-		for _, e := range entries {
-			if ci, err := os.Stat(filepath.Join(cwd, "testdata", e.Name())); err == nil && os.SameFile(fi, ci) {
-				return refuse("it is the same file as testdata/" + e.Name())
-			}
-		}
-	}
-	return nil
-}
-
-// r0ResolvePath resolves symbolic links in abs, including a final component
-// or parent directories that do not exist yet (the longest existing prefix is
-// resolved and the rest appended). A dangling symbolic link is refused: a
-// write would follow it to a target this guard cannot see.
-func r0ResolvePath(abs string) (string, error) {
-	if fi, err := os.Lstat(abs); err == nil && fi.Mode()&os.ModeSymlink != 0 {
-		r, err := filepath.EvalSymlinks(abs)
-		if err != nil {
-			return "", fmt.Errorf("dangling symbolic link: %w", err)
-		}
-		return r, nil
-	}
-	rest := []string{}
-	p := abs
-	for {
-		if r, err := filepath.EvalSymlinks(p); err == nil {
-			return filepath.Join(append([]string{r}, rest...)...), nil
-		}
-		parent := filepath.Dir(p)
-		if parent == p {
-			return abs, nil
-		}
-		rest = append([]string{filepath.Base(p)}, rest...)
-		p = parent
-	}
+	t.Logf("%s: wrote the artifact %s (review it, then copy it into testdata/ by hand)", name, path)
 }
 
 // r0DiffClass is ADR-0051 §4.2's classification of one DAG arm against
@@ -1023,12 +973,10 @@ func TestR0CorpusDup(t *testing.T)  { r0RunFixture(t, "dup") }
 // over the fixtures above and writes R0_PG_WRITE in r0_corpus_pg17.tsv's
 // format, with the server's version, locale and collation in its header.
 func TestR0CorpusMeasurePostgres(t *testing.T) {
-	dsn, out := os.Getenv("WADJET_PG_DSN"), os.Getenv("R0_PG_WRITE")
-	if dsn == "" || out == "" {
-		t.Skip("WADJET_PG_DSN and R0_PG_WRITE unset")
-	}
-	if err := r0ArtifactTarget(out); err != nil {
-		t.Fatal(err) // before measuring: a committed oracle is never a target
+	r0RequireWriterUsage(t, "R0_PG_WRITE") // before connecting: a writer takes no path
+	dsn := os.Getenv("WADJET_PG_DSN")
+	if dsn == "" || !r0Writer(t, "R0_PG_WRITE") {
+		t.Skip("WADJET_PG_DSN unset or R0_PG_WRITE not 1")
 	}
 	ctx := context.Background()
 	conn, err := pgconn.Connect(ctx, dsn)
@@ -1066,7 +1014,7 @@ func TestR0CorpusMeasurePostgres(t *testing.T) {
 			fmt.Fprintf(&b, "%s\t%s\t%s\n", fx, c.name, j)
 		}
 	}
-	r0WriteArtifact(t, out, b.String())
+	r0WriteArtifact(t, "R0_PG_WRITE", "r0_corpus_pg17.tsv", b.String())
 }
 
 // TestR0ComparatorRejectsEachDifference is the comparator's own negative

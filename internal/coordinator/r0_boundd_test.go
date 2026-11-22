@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"sort"
 	"strings"
 	"testing"
@@ -241,10 +240,11 @@ func r0RunBindingSwitch(c *Coordinator, ctx context.Context, sql string) r0Bindi
 // switch's corpus measurement: with D unbound the replica answers every
 // corpus cell (on the dag arm's configuration) exactly as ExecuteSQL does; with
 // D bound, every cell whose answer moves is reported with its cause, against
-// PostgreSQL's answer (R0_BINDING_REPORT=<path>). Report mode: it asserts the
+// PostgreSQL's answer (R0_BINDING_REPORT=1: r0_binding_report_corpus.tsv in a
+// fresh directory whose path the test logs). Report mode: it asserts the
 // control, not the movements.
 func TestR0BindingSwitchReplicaIsExecuteSQL(t *testing.T) {
-	r0RefuseCommittedEnv(t, "R0_BINDING_REPORT")
+	r0RequireWriterUsage(t, "R0_BINDING_REPORT")
 	if testing.Short() {
 		t.Skip("-short: stands clusters up")
 	}
@@ -309,9 +309,7 @@ func TestR0BindingSwitchReplicaIsExecuteSQL(t *testing.T) {
 	}
 	t.Logf("corpus (dag arm's configuration only): %v", counts)
 	t.Logf("corpus cells whose dag answer or route moves when D is bound, by cause: %v", moved)
-	if p := os.Getenv("R0_BINDING_REPORT"); p != "" {
-		r0AppendFile(t, p, strings.Join(report, "\n")+"\n")
-	}
+	r0WriteArtifact(t, "R0_BINDING_REPORT", "r0_binding_report_corpus.tsv", strings.Join(report, "\n")+"\n")
 }
 
 func r0RouteTag(route string) string {
@@ -343,13 +341,14 @@ func r0RenderedText(r r0Rendered) string {
 // "routed", its answer is the route's (L run single-process, as production
 // runs it) and is executed and matched too (routed-right / routed-wrong /
 // routed-refused); a planning-refusal route is never counted as a refusal.
-// Report mode (R0_BINDING_REPORT); it asserts the production control: on
+// Report mode (R0_BINDING_REPORT=1: r0_binding_report_gk.tsv in a fresh
+// directory whose path the test logs); it asserts the production control: on
 // every cell and arm the unbound mode's outcome (route or not, and the
 // answer, or the SQLSTATE of a refusal) is ExecuteSQL's.
 func TestR0BindingSwitchGroupKeyTable(t *testing.T) {
-	r0RefuseCommittedEnv(t, "R0_BINDING_REPORT")
-	if testing.Short() || os.Getenv("R0_BINDING_REPORT") == "" {
-		t.Skip("R0_BINDING_REPORT unset")
+	r0RequireWriterUsage(t, "R0_BINDING_REPORT")
+	if testing.Short() || !r0Writer(t, "R0_BINDING_REPORT") {
+		t.Skip("R0_BINDING_REPORT not 1")
 	}
 	answers := gkPGAnswers(t)
 	for name, a := range gkReadTSV(t, "testdata/arc_gk_group_key_spelling_more_pg17.tsv", 2) {
@@ -500,5 +499,5 @@ func TestR0BindingSwitchGroupKeyTable(t *testing.T) {
 	}
 	t.Logf("group-key table, production control (unbound replica vs ExecuteSQL): %v", control)
 	t.Logf("group-key table, transitions when D is bound: %v", trans)
-	r0AppendFile(t, os.Getenv("R0_BINDING_REPORT"), strings.Join(report, "\n")+"\n")
+	r0WriteArtifact(t, "R0_BINDING_REPORT", "r0_binding_report_gk.tsv", strings.Join(report, "\n")+"\n")
 }

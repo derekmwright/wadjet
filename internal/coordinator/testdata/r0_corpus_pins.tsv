@@ -11,10 +11,11 @@
 # A pin of "wrong" or "refused" is a RECORDED KNOWN DEFECT on issue #1678 (or the issue its class names),
 # NOT an acceptance. The test fails when a cell's verdict differs from its pin in EITHER direction: the
 # stage that repairs a cell re-pins it with the reason; nothing updates itself.
-# Re-pinning is a deliberate two-step act: R0_PINS_WRITE=<path> writes the measured verdicts to a separate
-# artifact, which is reviewed and then copied here by hand. Every R0 writer (R0_PINS_WRITE, R0_PG_WRITE,
-# R0_FIXTURE_WRITE, R0_COST_WRITE, the report switches) refuses a target under the repository's testdata
-# (r0ArtifactTarget; TestR0WritersRefuseCommittedTargets).
+# Re-pinning is a deliberate two-step act: (1) run TestR0Corpus{Own,Uniq,Dup} with R0_PINS_WRITE=1; each
+# writes its fixture's measured verdicts to r0_corpus_pins_<fixture>.tsv in a fresh directory it creates under
+# os.TempDir() and logs the full path; (2) review those artifacts and copy the rows here by hand. No R0 writer
+# (R0_PINS_WRITE, R0_PG_WRITE, R0_FIXTURE_WRITE, R0_COST_WRITE, the report switches) takes a path: any value
+# but 1 fails the test before it measures (TestR0WritersRefuseCommittedTargets).
 #
 # CPU capacity: the arm NAMED dag-morsel4 is measured under whatever capacity the test process has. A worker's
 # token pool is GOMAXPROCS-2, and a fragment runs serial at width 1+capacity <= 1, so with GOMAXPROCS <= 2 that
