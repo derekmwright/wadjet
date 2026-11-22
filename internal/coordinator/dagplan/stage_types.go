@@ -250,10 +250,15 @@ type Stage struct {
 	BuildFilterExprs []string
 
 	// JoinProbeSchema / JoinBuildSchema are the plan-declared columns of each
-	// join side (physical.PlanContext.DeclaredJoinSchema). The worker reads them only for
-	// the side that turns out to be empty, where there is no batch to learn a
-	// schema from and an outer join still owes the rows that side shapes
-	// (#348/#352).
+	// join side (physical.PlanContext.DeclaredJoinSchema). The worker reads them
+	// for the side that turns out to be empty, where there is no batch to learn
+	// a schema from and an outer join still owes the rows that side shapes
+	// (#348/#352). The semi/anti `<>` distinct-pair build also reads both
+	// value columns' declared types before the build and stays off when either
+	// is undeclared (exec.HashJoin.semiAntiNEEligible): a missing declaration
+	// costs that optimization, never an answer. FusedJoinSpec and
+	// ChainedJoinSpec carry no probe declaration, so an absorbed `<>` semi/anti
+	// join runs the generic filtered build (epic #1681, 1681c r2).
 	JoinProbeSchema []parquet.Column
 	JoinBuildSchema []parquet.Column
 
