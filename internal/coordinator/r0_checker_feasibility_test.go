@@ -103,6 +103,7 @@ func r0EmittedLeaves(stages []dagplan.Stage) (leaves, unparsable int) {
 }
 
 func TestR0CheckerFeasibility(t *testing.T) {
+	r0RefuseCommittedEnv(t, "R0_CHECKER_REPORT")
 	if testing.Short() {
 		t.Skip("-short: stands clusters up")
 	}

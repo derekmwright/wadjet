@@ -235,6 +235,7 @@ func r0ReadKV(t *testing.T, path string) map[string]string {
 }
 
 func TestR0TPCHDifferential(t *testing.T) {
+	r0RefuseCommittedEnv(t, "R0_TPCH_REPORT", "R0_COST_WRITE")
 	if testing.Short() {
 		t.Skip("-short: TPC-H SF0.01 on the DAG and on localD")
 	}
@@ -300,6 +301,7 @@ func TestR0TPCHDifferential(t *testing.T) {
 // (R0_COST_WRITE) from the stage graph localD captures on the dag arm's
 // configuration. Recorded, not asserted.
 func TestR0CorpusCostBaseline(t *testing.T) {
+	r0RefuseCommittedEnv(t, "R0_COST_WRITE")
 	p := os.Getenv("R0_COST_WRITE")
 	if p == "" || testing.Short() {
 		t.Skip("R0_COST_WRITE unset")

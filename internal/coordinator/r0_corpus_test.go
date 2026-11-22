@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"path/filepath"
 	"reflect"
 	"regexp"
 	"sort"
@@ -58,6 +59,11 @@ import (
 //     fixtures into PostgreSQL and writes its answers to <path>;
 //   - R0_PINS_WRITE=<path>: write the measured verdicts as a pin file;
 //   - R0_REPORT=<path>: write the differential report (deliverable 3).
+//
+// Every writer (R0_PG_WRITE, R0_PINS_WRITE, R0_FIXTURE_WRITE, R0_COST_WRITE and
+// the report switches) refuses a target under the repository's testdata
+// (r0ArtifactTarget): re-pinning is a deliberate two-step act, write an
+// artifact, review it, copy it.
 
 type r0Cell struct {
 	name, aliases, sources string
@@ -685,6 +691,7 @@ type r0CellOutcome struct {
 
 // r0RunFixture runs every cell of one fixture on the six doors.
 func r0RunFixture(t *testing.T, fx string) {
+	r0RefuseCommittedEnv(t, "R0_PINS_WRITE", "R0_REPORT")
 	if testing.Short() {
 		t.Skip("-short: six arms over the R0 corpus")
 	}
@@ -806,16 +813,146 @@ func containsString(xs []string, s string) bool {
 
 var r0FileMu sync.Mutex
 
+// r0AppendFile appends s to a measurement ARTIFACT at path. Every R0 writer
+// goes through r0ArtifactTarget first, so none of them can write a committed
+// oracle, pin or baseline file: re-pinning is a deliberate two-step act (write
+// an artifact, review it, copy it into testdata/).
 func r0AppendFile(t *testing.T, path, s string) {
+	t.Helper()
+	if err := r0ArtifactTarget(path); err != nil {
+		t.Fatal(err)
+	}
 	r0FileMu.Lock()
 	defer r0FileMu.Unlock()
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
 	if _, err := f.WriteString(s); err != nil {
+		f.Close()
 		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// r0RefuseCommittedEnv fails the test at its start when any of the named
+// writer switches points at a committed file (r0ArtifactTarget), before any
+// measurement runs.
+func r0RefuseCommittedEnv(t *testing.T, names ...string) {
+	t.Helper()
+	for _, n := range names {
+		if p := os.Getenv(n); p != "" {
+			if err := r0ArtifactTarget(p); err != nil {
+				t.Fatalf("%s: %v", n, err)
+			}
+		}
+	}
+}
+
+// r0WriteArtifact replaces a measurement artifact at path, behind the same
+// target guard as r0AppendFile.
+func r0WriteArtifact(t *testing.T, path, s string) {
+	t.Helper()
+	if err := r0ArtifactTarget(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(s), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// r0ArtifactTarget refuses an output path that resolves, after cleaning,
+// relative forms and symbolic links, to a file under any testdata directory
+// of the repository, or that is the same file (a hard link) as one in this
+// package's testdata/. A writer may only produce a separate artifact.
+func r0ArtifactTarget(path string) error {
+	refuse := func(why string) error {
+		return fmt.Errorf("R0 writer target %q refused: %s; write a separate artifact, review it, then copy it into testdata/", path, why)
+	}
+	if path == "" {
+		return refuse("empty path")
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return refuse(err.Error())
+	}
+	resolved, err := r0ResolvePath(abs)
+	if err != nil {
+		return refuse(err.Error())
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return refuse(err.Error())
+	}
+	root := cwd
+	for {
+		if _, err := os.Stat(filepath.Join(root, "go.mod")); err == nil {
+			break
+		}
+		parent := filepath.Dir(root)
+		if parent == root {
+			return refuse("no go.mod above " + cwd)
+		}
+		root = parent
+	}
+	realRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return refuse(err.Error())
+	}
+	underTestdata := func(base, p string) bool {
+		rel, err := filepath.Rel(base, p)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return false
+		}
+		for _, part := range strings.Split(rel, string(filepath.Separator)) {
+			if part == "testdata" {
+				return true
+			}
+		}
+		return false
+	}
+	for _, c := range [][2]string{{root, abs}, {realRoot, resolved}, {root, resolved}, {realRoot, abs}} {
+		if underTestdata(c[0], c[1]) {
+			return refuse("it resolves to " + resolved + ", under the repository's testdata")
+		}
+	}
+	if fi, err := os.Stat(resolved); err == nil {
+		entries, _ := os.ReadDir(filepath.Join(cwd, "testdata"))
+		for _, e := range entries {
+			if ci, err := os.Stat(filepath.Join(cwd, "testdata", e.Name())); err == nil && os.SameFile(fi, ci) {
+				return refuse("it is the same file as testdata/" + e.Name())
+			}
+		}
+	}
+	return nil
+}
+
+// r0ResolvePath resolves symbolic links in abs, including a final component
+// or parent directories that do not exist yet (the longest existing prefix is
+// resolved and the rest appended). A dangling symbolic link is refused: a
+// write would follow it to a target this guard cannot see.
+func r0ResolvePath(abs string) (string, error) {
+	if fi, err := os.Lstat(abs); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		r, err := filepath.EvalSymlinks(abs)
+		if err != nil {
+			return "", fmt.Errorf("dangling symbolic link: %w", err)
+		}
+		return r, nil
+	}
+	rest := []string{}
+	p := abs
+	for {
+		if r, err := filepath.EvalSymlinks(p); err == nil {
+			return filepath.Join(append([]string{r}, rest...)...), nil
+		}
+		parent := filepath.Dir(p)
+		if parent == p {
+			return abs, nil
+		}
+		rest = append([]string{filepath.Base(p)}, rest...)
+		p = parent
 	}
 }
 
@@ -890,6 +1027,9 @@ func TestR0CorpusMeasurePostgres(t *testing.T) {
 	if dsn == "" || out == "" {
 		t.Skip("WADJET_PG_DSN and R0_PG_WRITE unset")
 	}
+	if err := r0ArtifactTarget(out); err != nil {
+		t.Fatal(err) // before measuring: a committed oracle is never a target
+	}
 	ctx := context.Background()
 	conn, err := pgconn.Connect(ctx, dsn)
 	if err != nil {
@@ -926,9 +1066,7 @@ func TestR0CorpusMeasurePostgres(t *testing.T) {
 			fmt.Fprintf(&b, "%s\t%s\t%s\n", fx, c.name, j)
 		}
 	}
-	if err := os.WriteFile(out, []byte(b.String()), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	r0WriteArtifact(t, out, b.String())
 }
 
 // TestR0ComparatorRejectsEachDifference is the comparator's own negative

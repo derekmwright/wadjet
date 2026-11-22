@@ -141,6 +141,7 @@ func r0CensusClause(path string) string {
 }
 
 func TestR0BindingCensus(t *testing.T) {
+	r0RefuseCommittedEnv(t, "R0_CENSUS")
 	if testing.Short() {
 		t.Skip("-short: stands clusters up")
 	}

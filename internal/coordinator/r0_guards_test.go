@@ -12,6 +12,7 @@ import (
 	"go/token"
 	"os"
 	"reflect"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -270,6 +271,11 @@ func TestR0CorpusMembershipAndPinCompleteness(t *testing.T) {
 
 const r0FixturePGPath = "testdata/r0_fixture_pg17.tsv"
 
+// r0MorselProcs is the GOMAXPROCS TestR0ConfiguredArmsActuallyEngage runs at
+// when the process has less: 6 gives each worker 4 CPU tokens, enough for
+// dag-morsel4's four consumers (width 1+capacity >= 4).
+const r0MorselProcs = 6
+
 // r0FixtureTables names each fixture's tables.
 func r0FixtureTables(fx string) []string {
 	tables, _ := r0Fixture(fx)
@@ -291,16 +297,26 @@ func r0FixtureDigest(r r0Result) string {
 // TestR0FixtureRowsMatchPostgres: the rows every arm reads are the rows
 // PostgreSQL read. testdata/r0_fixture_pg17.tsv holds each fixture table's
 // full content digest as measured on PostgreSQL 17.11 after the same load and
-// DELETEs (WADJET_PG_DSN + R0_FIXTURE_WRITE=<path> re-measures it); every one
-// of the six arms must read the same bag. With WADJET_PG_DSN set the digests
-// are also re-measured live and compared.
+// DELETEs; every one of the six arms must read the same bag. The committed
+// oracle is read FIRST and is the only reference this test compares against;
+// the test never modifies it. With WADJET_PG_DSN set the digests are also
+// re-measured live and compared with the committed ones; R0_FIXTURE_WRITE=<path>
+// then writes that live measurement as a separate artifact, and refuses any
+// target under the repository's testdata (r0ArtifactTarget): re-pinning is a
+// deliberate two-step act, write the artifact, review it, copy it.
 func TestR0FixtureRowsMatchPostgres(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: six arms per fixture")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
+	want := r0ReadKV(t, r0FixturePGPath)
 	if dsn, out := os.Getenv("WADJET_PG_DSN"), os.Getenv("R0_FIXTURE_WRITE"); dsn != "" {
+		if out != "" {
+			if err := r0ArtifactTarget(out); err != nil {
+				t.Fatal(err) // before measuring: a committed oracle is never a target
+			}
+		}
 		conn, err := pgconn.Connect(ctx, dsn)
 		if err != nil {
 			t.Fatal(err)
@@ -322,18 +338,15 @@ func TestR0FixtureRowsMatchPostgres(t *testing.T) {
 				fmt.Fprintf(&b, "%s/%s\t%s\n", fx, tb, d)
 			}
 		}
-		if out != "" {
-			if err := os.WriteFile(out, []byte(b.String()), 0o644); err != nil {
-				t.Fatal(err)
+		for k, d := range live {
+			if want[k] != d {
+				t.Errorf("PostgreSQL now holds %s as %s, the committed digest is %s", k, d, want[k])
 			}
 		}
-		for k, d := range live {
-			if want := r0ReadKV(t, r0FixturePGPath)[k]; want != d {
-				t.Errorf("PostgreSQL now holds %s as %s, the committed digest is %s", k, d, want)
-			}
+		if out != "" {
+			r0WriteArtifact(t, out, b.String())
 		}
 	}
-	want := r0ReadKV(t, r0FixturePGPath)
 	checked := 0
 	for _, fx := range []string{"own", "uniq", "dup"} {
 		doors := r0Doors(t, ctx, fx)
@@ -368,9 +381,26 @@ func TestR0FixtureRowsMatchPostgres(t *testing.T) {
 // breakers morsel-parallel (worker.MorselParallelBreakerRuns) where dag does
 // not; dag-shuffled's stage graph repartitions both join inputs where dag's
 // broadcasts, and its statement reaches the coordinator unrouted.
+//
+// Morsel width is bounded by CPU capacity, not by MorselWorkers alone: a
+// worker's token pool is GOMAXPROCS-2 at construction
+// (worker/cpu_tokens.go defaultCPUTokenCapacity) and a fragment runs serial
+// at width 1+capacity <= 1 (executor_fragment.go), so at GOMAXPROCS <= 2 the
+// arm named dag-morsel4 executes serial. This test establishes its own
+// prerequisite: it raises GOMAXPROCS to r0MorselProcs for its duration
+// (before the workers are built, restored after), so the morsel engagement
+// is verified on a small CI runner too. The corpus tests do not do this:
+// their dag-morsel4 pins hold at the process's own capacity (ADR-0051).
 func TestR0ConfiguredArmsActuallyEngage(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: six arms")
+	}
+	if prev := runtime.GOMAXPROCS(0); prev < r0MorselProcs {
+		runtime.GOMAXPROCS(r0MorselProcs)
+		t.Cleanup(func() { runtime.GOMAXPROCS(prev) })
+	}
+	if got := runtime.GOMAXPROCS(0); got-2 < 3 {
+		t.Fatalf("GOMAXPROCS=%d gives a worker %d CPU tokens; dag-morsel4 needs 3 for its four consumers: the morsel engagement cannot be verified", got, got-2)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
@@ -403,7 +433,9 @@ func TestR0ConfiguredArmsActuallyEngage(t *testing.T) {
 		t.Errorf("single: %s evicted %d hash-join partitions with no budget", cell.name, n)
 	}
 	if n := delta(&worker.MorselParallelBreakerRuns, "dag-morsel4"); n == 0 {
-		t.Errorf("dag-morsel4: %s ran no breaker morsel-parallel", cell.name)
+		t.Errorf("dag-morsel4: %s ran no breaker morsel-parallel (GOMAXPROCS=%d)", cell.name, runtime.GOMAXPROCS(0))
+	} else {
+		t.Logf("dag-morsel4: %s ran %d breakers morsel-parallel at GOMAXPROCS=%d", cell.name, n, runtime.GOMAXPROCS(0))
 	}
 	if n := delta(&worker.MorselParallelBreakerRuns, "dag"); n != 0 {
 		t.Errorf("dag: %s ran %d breakers morsel-parallel with MorselWorkers unset", cell.name, n)

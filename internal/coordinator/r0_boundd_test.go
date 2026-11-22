@@ -244,6 +244,7 @@ func r0RunBindingSwitch(c *Coordinator, ctx context.Context, sql string) r0Bindi
 // PostgreSQL's answer (R0_BINDING_REPORT=<path>). Report mode: it asserts the
 // control, not the movements.
 func TestR0BindingSwitchReplicaIsExecuteSQL(t *testing.T) {
+	r0RefuseCommittedEnv(t, "R0_BINDING_REPORT")
 	if testing.Short() {
 		t.Skip("-short: stands clusters up")
 	}
@@ -346,6 +347,7 @@ func r0RenderedText(r r0Rendered) string {
 // every cell and arm the unbound mode's outcome (route or not, and the
 // answer, or the SQLSTATE of a refusal) is ExecuteSQL's.
 func TestR0BindingSwitchGroupKeyTable(t *testing.T) {
+	r0RefuseCommittedEnv(t, "R0_BINDING_REPORT")
 	if testing.Short() || os.Getenv("R0_BINDING_REPORT") == "" {
 		t.Skip("R0_BINDING_REPORT unset")
 	}

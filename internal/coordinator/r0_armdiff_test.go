@@ -29,7 +29,15 @@ var r0ArmDiffMu sync.Mutex
 
 func r0ArmDiffRecord(c *Coordinator, sql string) {
 	path := os.Getenv("R0_ARMDIFF")
-	if path == "" || c == nil {
+	if path == "" {
+		return
+	}
+	// The hook has no *testing.T: a refused target or a failed write panics,
+	// which fails the arm table that called it, rather than being ignored.
+	if err := r0ArtifactTarget(path); err != nil {
+		panic(err)
+	}
+	if c == nil {
 		return
 	}
 	if os.Getenv("ARM_DUMP") != "" {
@@ -66,8 +74,13 @@ func r0ArmDiffRecord(c *Coordinator, sql string) {
 		flat.Replace(sql), routes, flat.Replace(dag.err), flat.Replace(ld.err))
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
-		return
+		panic(fmt.Errorf("R0_ARMDIFF: %w", err))
 	}
-	defer f.Close()
-	_, _ = f.WriteString(line)
+	if _, err := f.WriteString(line); err != nil {
+		f.Close()
+		panic(fmt.Errorf("R0_ARMDIFF: %w", err))
+	}
+	if err := f.Close(); err != nil {
+		panic(fmt.Errorf("R0_ARMDIFF: %w", err))
+	}
 }
