@@ -1,0 +1,11 @@
+# The R0 fixtures as PostgreSQL holds them after load and DELETEs, measured by TestR0FixtureRowsMatchPostgres
+# (PostgreSQL 17.11, postgres:17-alpine, initdb --locale=C --encoding=UTF8): fixture/table<TAB>row count, SHA-256 of the canonical bag text, names and types.
+own/tb_d	rows=8 sha256=25d5ca8208588a172b31e6b6be921f8f3a5af5d991022822ef5d24ff948042b2 id,v,int8,float8
+own/tb_bd	rows=6 sha256=2eeed291e35a611488f808ac90dad8f901926e9f734e21d02274c6b5fb2f6e0d id,v,int8,float8
+own/tb_big	rows=7 sha256=472f42f6c7b753ae6521f715c825af56b978abaa8d2e31045d642343fb771390 id,v,int8,float8
+uniq/tb_d	rows=11 sha256=2dd28512d92b04386fb0e46b0d0f289fe5e85ee0ea26270ea0b861afdfde07c3 id,v,int8,float8
+uniq/tb_big	rows=20000 sha256=ba1798930710cbe58c3fc11f86b51b2ce1d28e10c238b3ebcee129b9b23d1b23 id,v,int8,float8
+uniq/tb_bd	rows=10000 sha256=5224a2d7d1f099915f886769b0fae334a6c965bf49df9a698e63397a8d8ca36b id,v,int8,float8
+dup/tb_d	rows=22 sha256=c3c3ddff0e22846f0f7351c7dd5ca53d7a0cac22ff688a37cdabfbcd108210b7 id,v,int8,float8
+dup/tb_big	rows=20000 sha256=ba1798930710cbe58c3fc11f86b51b2ce1d28e10c238b3ebcee129b9b23d1b23 id,v,int8,float8
+dup/tb_bd	rows=10000 sha256=5224a2d7d1f099915f886769b0fae334a6c965bf49df9a698e63397a8d8ca36b id,v,int8,float8

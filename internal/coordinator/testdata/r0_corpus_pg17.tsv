@@ -102,7 +102,7 @@ own	l_error_over_limit3	{"err":"22012","msg":"division by zero"}
 own	ordered_logical	{"cols":["id"],"types":["int8"],"rows":[["1"],["1"],["2"],["2"],["3"],["4"],["5"],[null]]}
 own	error_project_before_filter	{"err":"22012","msg":"division by zero"}
 own	error_project_after_filter	{"cols":["?column?"],"types":["int8"],"rows":[["10"],["10"],["5"],["3"],["2"]]}
-own	zero_row_decl	{}
+own	zero_row_decl	{"cols":["client_name"],"types":["numeric(12,2)"]}
 own	t2_logical	{"err":"22012","msg":"division by zero"}
 own	t2_composed	{"cols":["r"],"types":["int8"],"rows":[["10"],["10"],["5"],["3"],["2"]]}
 uniq	S1	{"cols":["count"],"types":["int8"],"rows":[["0"]]}

@@ -1,5 +1,12 @@
 # R0 corpus BASE VERDICTS at 33560b12 (epic #1678, ADR-0051), measured by TestR0Corpus{Own,Uniq,Dup}.
 # fixture<TAB>statement<TAB>arm<TAB>verdict<TAB>class<TAB>note
+# Re-pinned at R0 fix round 5 (the independent review's items 2/4 and 3(d)), each with its reason:
+#   own/outer_nonstrict_rows on dag, dag-shuffled, dag-morsel4: digest only, wrong:414af4440568 -> wrong:564413ecb116.
+#     The arms answer zero rows; the capture now keeps a zero-row result's RowDescription (r0Query), so the
+#     digest of the wrong answer includes its declaration (cols=["id"] types=["int8"]). Verdict and class unchanged.
+#   uniq and dup h2_base2_control on spilled512k: unpinned-flap -> flap:refused:42000 (bounded). Measured at
+#     dc980141+R0 over 20 fresh runs per fixture: 19 x refused 42000 "memory budget exceeded" (hash join build),
+#     1 x PostgreSQL's answer, on each fixture.
 #
 # A pin of "wrong" or "refused" is a RECORDED KNOWN DEFECT on issue #1678 (or the issue its class names),
 # NOT an acceptance. The test fails when a cell's verdict differs from its pin in EITHER direction: the
@@ -7,8 +14,10 @@
 #
 # verdict: right | wrong:<digest of the arm's canonical answer> | refused:<SQLSTATE> (PostgreSQL answered,
 #   or raised another SQLSTATE) | routed-right | routed-wrong:<digest> (a DAG arm that routed to the bound
-#   plan L: L's answer, not evidence about the DAG) | unpinned-flap (measured differently across runs: reported,
-#   not pinned; the note names the class).
+#   plan L: L's answer, not evidence about the DAG) | flap:refused:<SQLSTATE> (a cell measured to alternate
+#   between PostgreSQL's answer and ONE named resource refusal; its class column is "-|<refusal class>"; it
+#   accepts exactly PostgreSQL's answer or that refusal with the memory-budget message class (r0FlapAccepts),
+#   and any other outcome, a wrong successful answer included, fails).
 # class (mechanical, r0Class): capability (every arm refuses alike with a SQLSTATE PostgreSQL does not raise);
 #   error-domain (r2's 18 and the judge's error pairs where PostgreSQL or the arm raises 22012: D4, the
 #   maintainer's ruling 2026-11-21, disposition undecided, PostgreSQL's result kept in r0_corpus_pg17.tsv);
@@ -325,9 +334,9 @@ own	outer_constant	dag-morsel4	refused:42000	emission	-
 own	outer_constant	localD	right	-	status=established
 own	outer_nonstrict_rows	single	right	-	-
 own	outer_nonstrict_rows	spilled512k	right	-	-
-own	outer_nonstrict_rows	dag	wrong:414af4440568	emission	-
-own	outer_nonstrict_rows	dag-shuffled	wrong:414af4440568	emission	-
-own	outer_nonstrict_rows	dag-morsel4	wrong:414af4440568	emission	-
+own	outer_nonstrict_rows	dag	wrong:564413ecb116	emission	-
+own	outer_nonstrict_rows	dag-shuffled	wrong:564413ecb116	emission	-
+own	outer_nonstrict_rows	dag-morsel4	wrong:564413ecb116	emission	-
 own	outer_nonstrict_rows	localD	right	-	status=established
 own	one_arm_respelling	single	right	-	-
 own	one_arm_respelling	spilled512k	right	-	-
@@ -768,7 +777,7 @@ uniq	h2_cte2_pushed	dag-shuffled	wrong:a8f0538aa13e	logical	-
 uniq	h2_cte2_pushed	dag-morsel4	wrong:a8f0538aa13e	logical	-
 uniq	h2_cte2_pushed	localD	wrong:a8f0538aa13e	logical	status=established
 uniq	h2_base2_control	single	right	-	-
-uniq	h2_base2_control	spilled512k	unpinned-flap	-	#1706 class: spilled512k refuses 42000 memory budget exceeded (hash join build) on some runs and answers right on others
+uniq	h2_base2_control	spilled512k	flap:refused:42000	-|executor	bounded flap: PostgreSQL's answer or 42000 memory budget exceeded, nothing else
 uniq	h2_base2_control	dag	right	-	-
 uniq	h2_base2_control	dag-shuffled	right	-	-
 uniq	h2_base2_control	dag-morsel4	right	-	-
@@ -1182,7 +1191,7 @@ dup	h2_cte2_pushed	dag-shuffled	wrong:a8f0538aa13e	logical	-
 dup	h2_cte2_pushed	dag-morsel4	wrong:a8f0538aa13e	logical	-
 dup	h2_cte2_pushed	localD	wrong:a8f0538aa13e	logical	status=established
 dup	h2_base2_control	single	right	-	-
-dup	h2_base2_control	spilled512k	unpinned-flap	-	#1706 class: spilled512k refuses 42000 memory budget exceeded (hash join build) on some runs and answers right on others
+dup	h2_base2_control	spilled512k	flap:refused:42000	-|executor	bounded flap: PostgreSQL's answer or 42000 memory budget exceeded, nothing else
 dup	h2_base2_control	dag	right	-	-
 dup	h2_base2_control	dag-shuffled	right	-	-
 dup	h2_base2_control	dag-morsel4	right	-	-

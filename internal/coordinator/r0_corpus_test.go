@@ -13,6 +13,7 @@ import (
 	"math"
 	"os"
 	"reflect"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -206,29 +207,38 @@ func r0TypeName(oid uint32, typmod int32) string {
 }
 
 // r0Query runs sql over conn with the simple query protocol.
+//
+// The RowDescription is read from the ResultReader BEFORE the rows are
+// drained: pgconn's ResultReader.Read copies FieldDescriptions only inside its
+// NextRow loop (pgx v5.9.2 pgconn.go:1665-1690), so a zero-row result read
+// through Read loses its column names, OIDs and typmods although the server
+// sent them (the R0 review's item 2: zero_row_decl was captured as {} on
+// PostgreSQL and on every arm). TestR0ZeroRowWireDeclaration holds this.
 func r0Query(ctx context.Context, conn *pgconn.PgConn, sql string) r0Result {
 	mrr := conn.Exec(ctx, sql)
 	var out r0Result
 	for mrr.NextResult() {
 		rr := mrr.ResultReader()
-		res := rr.Read()
-		if res.Err != nil {
-			break
-		}
-		out = r0Result{}
-		for _, fd := range res.FieldDescriptions {
-			out.Cols = append(out.Cols, fd.Name)
-			out.Types = append(out.Types, r0TypeName(fd.DataTypeOID, fd.TypeModifier))
-		}
-		for _, r := range res.Rows {
-			row := make([]*string, len(r))
-			for j, v := range r {
+		fds := append([]pgconn.FieldDescription(nil), rr.FieldDescriptions()...)
+		var rows [][]*string
+		for rr.NextRow() {
+			vals := rr.Values()
+			row := make([]*string, len(vals))
+			for j, v := range vals {
 				if v != nil {
 					s := string(v)
 					row[j] = &s
 				}
 			}
-			out.Rows = append(out.Rows, row)
+			rows = append(rows, row)
+		}
+		if _, err := rr.Close(); err != nil {
+			break
+		}
+		out = r0Result{Rows: rows}
+		for _, fd := range fds {
+			out.Cols = append(out.Cols, fd.Name)
+			out.Types = append(out.Types, r0TypeName(fd.DataTypeOID, fd.TypeModifier))
 		}
 	}
 	if err := mrr.Close(); err != nil {
@@ -330,6 +340,36 @@ func r0Verdict(want, got r0Result, mode string, routed bool) string {
 		return "refused:" + got.Err
 	}
 	return "wrong:" + r0Digest(got, mode)
+}
+
+// r0FlapMsgClass is the one resource refusal a bounded-flap pin admits: the
+// memory budget's own refusal (SQLSTATE 42000, "memory budget exceeded").
+var r0FlapMsgClass = regexp.MustCompile(`memory budget exceeded`)
+
+// r0FlapAccepts judges a cell pinned "flap:refused:<SQLSTATE>" (a cell measured
+// to alternate between PostgreSQL's answer and one named resource refusal):
+// it accepts exactly (a) PostgreSQL's answer (verdict right, class "-") or (b)
+// that refusal, with its SQLSTATE and the memory-budget message class, and the
+// class the pin names for it. Anything else, a wrong successful answer
+// included, is reported ("" means accepted). The R0 review's item 3(d): the
+// former unpinned-flap exemption accepted any result.
+func r0FlapAccepts(p r0Pin, v, cls, note string, got r0Result) string {
+	state := strings.TrimPrefix(p.verdict, "flap:refused:")
+	if state == p.verdict || state == "" {
+		return "malformed flap pin " + p.verdict
+	}
+	classes := strings.Split(p.class, "|")
+	if len(classes) != 2 || classes[0] != "-" {
+		return "malformed flap pin class " + p.class + " (want -|<refusal class>)"
+	}
+	switch {
+	case v == "right" && cls == "-" && note == "-":
+		return ""
+	case v == "refused:"+state && got.Err == state && r0FlapMsgClass.MatchString(got.Msg) && cls == classes[1] && note == "-":
+		return ""
+	}
+	return fmt.Sprintf("verdict %s class %s (%s %q) is neither PostgreSQL's answer nor the pinned flap's refusal %s/%s %q",
+		v, cls, got.Err, got.Msg, state, classes[1], r0FlapMsgClass.String())
 }
 
 // --- doors ---
@@ -540,6 +580,9 @@ func r0ReadPG(t *testing.T) map[string]r0Result {
 		if err := json.Unmarshal([]byte(p[2]), &r); err != nil {
 			t.Fatalf("%s: %v", line, err)
 		}
+		if _, dup := out[p[0]+"|"+p[1]]; dup {
+			t.Fatalf("%s: duplicate PostgreSQL answer for %s/%s (a later line would silently override)", r0PGPath, p[0], p[1])
+		}
 		out[p[0]+"|"+p[1]] = r
 	}
 	return out
@@ -568,6 +611,9 @@ func r0ReadPins(t *testing.T) map[string]r0Pin {
 		p := strings.Split(line, "\t")
 		if len(p) != 6 {
 			t.Fatalf("malformed pin %q", line)
+		}
+		if _, dup := out[p[0]+"|"+p[1]+"|"+p[2]]; dup {
+			t.Fatalf("%s: duplicate pin for %s/%s/%s (a later line would silently override)", r0PinsPath, p[0], p[1], p[2])
 		}
 		out[p[0]+"|"+p[1]+"|"+p[2]] = r0Pin{p[3], p[4], p[5]}
 	}
@@ -690,6 +736,12 @@ func r0RunFixture(t *testing.T, fx string) {
 		if o.locald != nil && o.locald.DText != "" && !execs["dag"].routed && o.dagPlan != "" && o.dagPlan != o.locald.DText {
 			t.Errorf("%s/%s: localD planned a different D than the dag arm:\nlocalD:\n%s\ndag:\n%s", fx, c.name, o.locald.DText, o.dagPlan)
 		}
+		// The guard must not go vacuous: a dag arm that answered unrouted
+		// reports the plan it ran, so an empty one means SQLResult.Plan
+		// disappeared and the comparison above stopped comparing.
+		if o.locald != nil && o.locald.DText != "" && !execs["dag"].routed && o.got["dag"].Err == "" && o.dagPlan == "" {
+			t.Errorf("%s/%s: the dag arm answered without reporting its plan: the localD drift guard has nothing to compare", fx, c.name)
+		}
 		if o.locald != nil && o.locald.Frozen != nil && o.locald.BoundRefs != 0 {
 			t.Errorf("%s/%s: the plan localD executed carries %d binder stamps: it is not the unbound D", fx, c.name, o.locald.BoundRefs)
 		}
@@ -722,8 +774,13 @@ func r0RunFixture(t *testing.T, fx string) {
 			switch {
 			case !ok:
 				t.Errorf("%s: no pin (measured %s %s %s)", key, v, cls, note)
-			case p.verdict == "unpinned-flap":
-				t.Logf("%s: not pinned (flaps, %s); measured %s", key, p.note, v)
+			case strings.HasPrefix(p.verdict, "flap:"):
+				if why := r0FlapAccepts(p, v, cls, note, o.got[a]); why != "" {
+					t.Errorf("%s: %s\n  got  %s\n  want %s (PostgreSQL 17.11)", key, why,
+						r0Canon(o.got[a], o.cell.mode), r0Canon(pg[o.fx+"|"+o.cell.name], o.cell.mode))
+				} else {
+					t.Logf("%s: bounded flap (%s); measured %s %q", key, p.note, v, o.got[a].Msg)
+				}
 			case p.verdict != v || p.class != cls || p.note != note:
 				t.Errorf("%s: verdict %s class %s note %s, pinned %s %s %s\n  got  %s\n  want %s (PostgreSQL 17.11)", key, v, cls, note,
 					p.verdict, p.class, p.note, r0Canon(o.got[a], o.cell.mode), r0Canon(pg[o.fx+"|"+o.cell.name], o.cell.mode))
@@ -901,6 +958,13 @@ func TestR0ComparatorRejectsEachDifference(t *testing.T) {
 		got              r0Result
 		expected         r0Result
 	}{
+		// Multiplicity and width (the R0 review's item 4): a bag counts
+		// duplicates, and a row or column more or fewer is a difference.
+		{"duplicate row", "bag", "values", base, doctor(func(r *r0Result) { r.Rows = append(r.Rows, r.Rows[0]) })},
+		{"missing row", "bag", "values", base, doctor(func(r *r0Result) { r.Rows = r.Rows[:1] })},
+		{"extra column", "bag", "names", base, doctor(func(r *r0Result) { r.Cols = append(r.Cols, "extra") })},
+		{"missing column", "bag", "names", base, doctor(func(r *r0Result) { r.Cols = r.Cols[:1] })},
+		{"missing cell", "bag", "values", base, doctor(func(r *r0Result) { r.Rows[0] = r.Rows[0][:1] })},
 		{"names", "bag", "names", base, doctor(func(r *r0Result) { r.Cols[1] = "z" })},
 		{"types", "bag", "types", base, doctor(func(r *r0Result) { r.Types[1] = "numeric(12,3)" })},
 		{"value text (display scale)", "bag", "values", base, doctor(func(r *r0Result) { r.Rows[0][1] = s("1.0") })},

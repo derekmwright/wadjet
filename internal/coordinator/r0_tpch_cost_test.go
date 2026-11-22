@@ -167,6 +167,25 @@ func r0SameRendered(a, b r0Rendered, ordered bool) string {
 	return ""
 }
 
+// r0TPCHClass classifies one TPC-H query DAG-versus-localD. A refusal both
+// paths share is "refused-alike", never "agree" (TestR0TPCHCommonRefusalFails):
+// two equal errors are not an agreement about an answer.
+func r0TPCHClass(routed bool, status string, dag, ld r0Rendered, ordered bool) string {
+	switch {
+	case routed:
+		return "routed"
+	case status != "established":
+		return "localD-not-established(" + status + ")"
+	case dag.err != "" && dag.err == ld.err:
+		return "refused-alike"
+	case dag.err != "" || ld.err != "":
+		return "differ(error)"
+	case r0SameRendered(dag, ld, ordered) == "":
+		return "agree"
+	}
+	return "differ(" + r0SameRendered(dag, ld, ordered) + ")"
+}
+
 // r0Cost is one statement's cost baseline from its stage graph.
 func r0Cost(stages []dagplan.Stage) string {
 	var exch, scans, files, tasks int
@@ -243,17 +262,7 @@ func TestR0TPCHDifferential(t *testing.T) {
 		lres, rec, lerr := r0LocalD(coord, ctx, q.SQL)
 		ld := r0Render(lres, lerr)
 		ordered := strings.Contains(strings.ToUpper(q.SQL), "ORDER BY")
-		var class string
-		switch {
-		case after != before:
-			class = "routed"
-		case rec.Status != "established":
-			class = "localD-not-established(" + rec.Status + ")"
-		case r0SameRendered(dag, ld, ordered) == "":
-			class = "agree"
-		default:
-			class = "differ(" + r0SameRendered(dag, ld, ordered) + ")"
-		}
+		class := r0TPCHClass(after != before, rec.Status, dag, ld, ordered)
 		counts[strings.SplitN(class, "(", 2)[0]]++
 		cmp := r0SameRendered(dag, ld, ordered)
 		if cmp == "" {

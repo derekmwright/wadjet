@@ -173,18 +173,43 @@ func r0StageDiffFields(a, b []dagplan.Stage) string {
 // r0BindingSwitchCell runs one statement on a DAG coordinator twice through
 // the replica (D unbound, D bound) and classifies what moved.
 type r0BindingSwitchCell struct {
-	unbound, bound         r0Rendered
-	unboundRec, boundRec   *r0LocalDRecord
-	unboundErr, boundErr   error
-	cause, stageFieldsDiff string
+	unbound, bound           r0Rendered
+	unboundRoute, boundRoute string // the route the planning run took, "" when it did not route
+	unboundRec, boundRec     *r0LocalDRecord
+	unboundErr, boundErr     error
+	cause, stageFieldsDiff   string
+}
+
+// r0RouteAnswer is what production answers for a statement whose stage plan
+// ROUTES: every route runs the statement's bound plan L on the
+// coordinator-local single-process pipeline (runRoute -> localPlans.forRoute
+// -> planStatement(stamp=true) -> a runRefusedLocal wrapper,
+// dag_routes.go:16-33, statement_plan.go:414-440), which is what
+// r0Statement(stamp=true, execDAG=false) runs. L does not depend on whether D
+// was bound, so both modes' routes answer from the same L.
+func r0RouteAnswer(c *Coordinator, ctx context.Context, sql string) (*SQLResult, error) {
+	res, _, err := r0Statement(c, ctx, sql, true, false)
+	return res, err
+}
+
+// r0SwitchRun is one mode of the switch, ROUTE BEFORE ERROR: r0Statement
+// returns the stage planner's refusal beside the route it names
+// (r0_locald_test.go, execDAG), and a route is not a refusal: production runs
+// it. The R0 review's item 8(b): the earlier renderer checked the error first
+// and counted every planning-refusal route as a refusal.
+func r0SwitchRun(c *Coordinator, ctx context.Context, sql string, stamp bool) (r0Rendered, string, *r0LocalDRecord, error) {
+	res, rec, err := r0Statement(c, ctx, sql, stamp, true)
+	if rec != nil && rec.DAGRoute != "" {
+		return r0Render(r0RouteAnswer(c, ctx, sql)), rec.DAGRoute, rec, err
+	}
+	return r0Render(res, err), "", rec, err
 }
 
 func r0RunBindingSwitch(c *Coordinator, ctx context.Context, sql string) r0BindingSwitchCell {
 	var out r0BindingSwitchCell
-	ures, urec, uerr := r0Statement(c, ctx, sql, false, true)
-	bres, brec, berr := r0Statement(c, ctx, sql, true, true)
-	out.unbound, out.bound = r0Render(ures, uerr), r0Render(bres, berr)
-	out.unboundRec, out.boundRec, out.unboundErr, out.boundErr = urec, brec, uerr, berr
+	out.unbound, out.unboundRoute, out.unboundRec, out.unboundErr = r0SwitchRun(c, ctx, sql, false)
+	out.bound, out.boundRoute, out.boundRec, out.boundErr = r0SwitchRun(c, ctx, sql, true)
+	urec, brec := out.unboundRec, out.boundRec
 	// The cause, mechanically: validation (the bound planning run refused
 	// where the unbound one planned, or the reverse); meaning (the optimized
 	// logical plans print differently); route (one routes, the other not); a
@@ -227,33 +252,72 @@ func TestR0BindingSwitchReplicaIsExecuteSQL(t *testing.T) {
 	cells := r0ReadCells(t)
 	var report []string
 	moved := map[string]int{}
+	counts := map[string]int{}
 	for _, fx := range []string{"own", "uniq", "dup"} {
 		c := r0Cluster(t, ctx, fx, nil)
 		for _, cell := range cells {
 			if !containsString(cell.fixtures, fx) {
 				continue
 			}
+			ordered := cell.mode == "ordered"
+			before, _ := r0RouteSum(c)
 			ref := r0Render(c.ExecuteSQL(ctx, cell.sql))
+			after, _ := r0RouteSum(c)
+			prodRouted := after != before
 			sw := r0RunBindingSwitch(c, ctx, cell.sql)
-			routed := sw.unboundRec.DAGRoute != "" || sw.unboundRec.DAGPlanErr != ""
-			if !routed && sw.unboundRec.Frozen != nil {
-				if why := r0SameRendered(ref, sw.unbound, cell.mode == "ordered"); why != "" {
+			// The control, route-aware: an unbound replica that routes is
+			// production routing (and answering from L); one that plans and
+			// does not route is production executing the stage DAG.
+			switch {
+			case sw.unboundRoute != "":
+				counts["unbound routed (route answer executed, compared with ExecuteSQL)"]++
+				if !prodRouted {
+					t.Errorf("%s/%s: the replica routes (%s) where ExecuteSQL does not", fx, cell.name, sw.unboundRoute)
+				}
+				if why := r0SameRendered(ref, sw.unbound, ordered); why != "" {
+					t.Errorf("%s/%s: the replica's route answer differs from ExecuteSQL's (%s):\n  replica %+v\n  ExecuteSQL %+v", fx, cell.name, why, sw.unbound, ref)
+				}
+			case sw.unboundRec.Frozen != nil && sw.unboundRec.DAGPlanErr == "":
+				counts["unbound executed on the stage DAG (compared with ExecuteSQL)"]++
+				if prodRouted {
+					t.Errorf("%s/%s: ExecuteSQL routes where the replica executes the stage DAG", fx, cell.name)
+				}
+				if why := r0SameRendered(ref, sw.unbound, ordered); why != "" {
 					t.Errorf("%s/%s: the replica (D unbound) differs from ExecuteSQL (%s):\n  replica %+v\n  ExecuteSQL %+v", fx, cell.name, why, sw.unbound, ref)
 				}
+			default:
+				counts["unbound not planned or stage-planning refused without a route (not compared)"]++
+				if prodRouted {
+					t.Errorf("%s/%s: ExecuteSQL routes where the replica reports no route", fx, cell.name)
+				}
 			}
-			same := r0SameRendered(sw.unbound, sw.bound, cell.mode == "ordered")
-			if same == "" {
+			if sw.boundRoute != "" {
+				counts["bound routed (route answer executed)"]++
+			}
+			same := r0SameRendered(sw.unbound, sw.bound, ordered)
+			if same == "" && (sw.unboundRoute != "") == (sw.boundRoute != "") {
 				continue
 			}
+			if same == "" {
+				same = "route-only"
+			}
 			moved[sw.cause]++
-			report = append(report, fmt.Sprintf("binding-switch\tcorpus/%s\t%s\tdiff=%s\tcause=%s\tunbound=%s\tbound=%s", fx, cell.name, same, sw.cause,
-				r0RenderedText(sw.unbound), r0RenderedText(sw.bound)))
+			report = append(report, fmt.Sprintf("binding-switch\tcorpus/%s\t%s\tdiff=%s\tcause=%s\tunbound=%s%s\tbound=%s%s", fx, cell.name, same, sw.cause,
+				r0RouteTag(sw.unboundRoute), r0RenderedText(sw.unbound), r0RouteTag(sw.boundRoute), r0RenderedText(sw.bound)))
 		}
 	}
-	t.Logf("corpus cells whose dag answer moves when D is bound, by cause: %v", moved)
+	t.Logf("corpus (dag arm's configuration only): %v", counts)
+	t.Logf("corpus cells whose dag answer or route moves when D is bound, by cause: %v", moved)
 	if p := os.Getenv("R0_BINDING_REPORT"); p != "" {
 		r0AppendFile(t, p, strings.Join(report, "\n")+"\n")
 	}
+}
+
+func r0RouteTag(route string) string {
+	if route == "" {
+		return ""
+	}
+	return "ROUTED(" + strings.NewReplacer("\t", " ", "\n", " ").Replace(route) + ") "
 }
 
 func r0RenderedText(r r0Rendered) string {
@@ -272,10 +336,15 @@ func r0RenderedText(r r0Rendered) string {
 // measurement ("binding D moves stage-DAG cells the wrong way", ADR-0050
 // "Bind the one plan and give it to the stage planner too") on the group-key
 // table's cells, on the three DAG arms, through the switch: for every cell,
-// the DAG answer with D unbound and with D bound, each matched against
+// the DAG outcome with D unbound and with D bound, each matched against
 // PostgreSQL's answer with the table's own matcher, and every transition
-// classified by cause. Report mode (R0_BINDING_REPORT); asserts only the
-// replica control.
+// classified by cause. ROUTE BEFORE ERROR: a mode whose stage plan routes is
+// "routed", its answer is the route's (L run single-process, as production
+// runs it) and is executed and matched too (routed-right / routed-wrong /
+// routed-refused); a planning-refusal route is never counted as a refusal.
+// Report mode (R0_BINDING_REPORT); it asserts the production control: on
+// every cell and arm the unbound mode's outcome (route or not, and the
+// answer, or the SQLSTATE of a refusal) is ExecuteSQL's.
 func TestR0BindingSwitchGroupKeyTable(t *testing.T) {
 	if testing.Short() || os.Getenv("R0_BINDING_REPORT") == "" {
 		t.Skip("R0_BINDING_REPORT unset")
@@ -300,43 +369,113 @@ func TestR0BindingSwitchGroupKeyTable(t *testing.T) {
 			arms[a] = tmdCoordinatorWithWorkers(t, ctx, infra, func(w *worker.Config) { w.MorselWorkers = 4 })
 		}
 	}
-	render := func(c *Coordinator, sql string, stamp, ordered bool) (string, *r0LocalDRecord) {
-		res, rec, err := r0Statement(c, ctx, sql, stamp, true)
+	renderRes := func(res *SQLResult, err error, ordered bool) string {
 		if err != nil {
-			return "ERR " + sqlerr.StateOf(err) + " " + strings.ReplaceAll(err.Error(), "\n", " "), rec
-		}
-		if rec.DAGRoute != "" {
-			return "ROUTED", rec
+			return "ERR " + sqlerr.StateOf(err) + " " + strings.ReplaceAll(err.Error(), "\n", " ")
 		}
 		out, rerr := ssRenderResult(ctx, res, ordered)
 		if rerr != nil {
-			return "ERR " + sqlerr.StateOf(rerr) + " " + rerr.Error(), rec
+			return "ERR " + sqlerr.StateOf(rerr) + " " + strings.ReplaceAll(rerr.Error(), "\n", " ")
 		}
-		return out, rec
+		return out
+	}
+	// render is one mode's outcome: "ROUTED <route answer>" when the stage
+	// plan routes (checked FIRST), else the DAG's answer or "ERR ...".
+	render := func(c *Coordinator, sql string, stamp, ordered bool) (string, *r0LocalDRecord) {
+		res, rec, err := r0Statement(c, ctx, sql, stamp, true)
+		if rec != nil && rec.DAGRoute != "" {
+			lres, lerr := r0RouteAnswer(c, ctx, sql)
+			return "ROUTED " + renderRes(lres, lerr, ordered), rec
+		}
+		return renderRes(res, err, ordered), rec
+	}
+	// same compares two outcomes as the control does: route or not, then a
+	// refusal by SQLSTATE (the replica's message omits ExecuteSQL's own
+	// wrapping), an answer by its rendering.
+	same := func(a, b string) bool {
+		ar, br := strings.HasPrefix(a, "ROUTED "), strings.HasPrefix(b, "ROUTED ")
+		if ar != br {
+			return false
+		}
+		a, b = strings.TrimPrefix(a, "ROUTED "), strings.TrimPrefix(b, "ROUTED ")
+		if strings.HasPrefix(a, "ERR ") || strings.HasPrefix(b, "ERR ") {
+			sa := strings.SplitN(a, " ", 3)
+			sb := strings.SplitN(b, " ", 3)
+			return len(sa) > 1 && len(sb) > 1 && sa[0] == sb[0] && sa[1] == sb[1]
+		}
+		return a == b
+	}
+	// The table's own legal-nondeterminism cells (ADR-0013, the kept file's
+	// "skip" lines: a LIMIT 1 with no ORDER BY picks any row): their answer
+	// may differ run to run on every path, so the control compares only
+	// whether they route and whether they refuse, and a difference between
+	// the two modes is reported apart, never as a direction.
+	skip := map[string]bool{}
+	for name, k := range gkReadTSV(t, "testdata/arc_gk_group_key_spelling_kept.tsv", 2) {
+		if strings.HasPrefix(k, "skip") {
+			skip[name] = true
+		}
+	}
+	shape := func(s string) string {
+		r, routed := strings.CutPrefix(s, "ROUTED ")
+		out := "answer"
+		if strings.HasPrefix(r, "ERR ") {
+			out = strings.Join(strings.SplitN(r, " ", 3)[:2], " ")
+		}
+		if routed {
+			out = "ROUTED " + out
+		}
+		return out
 	}
 	trans := map[string]int{}
+	control := map[string]int{}
 	var report []string
 	for _, a := range []string{"dag", "dag-shuffled", "dag-morsel4"} {
 		c := arms[a]
 		for _, tc := range cells {
 			want := answers[tc.name]
+			before, _ := r0RouteSum(c)
+			pres, perr := c.ExecuteSQL(ctx, tc.sql)
+			after, _ := r0RouteSum(c)
+			prod := renderRes(pres, perr, tc.ordered)
+			if after != before {
+				prod = "ROUTED " + prod
+			}
 			u, urec := render(c, tc.sql, false, tc.ordered)
 			b, brec := render(c, tc.sql, true, tc.ordered)
+			if skip[tc.name] {
+				if shape(u) == shape(prod) {
+					control[a+" agrees (legal-nondeterminism cell: route and refusal only)"]++
+				} else {
+					control[a+" differs"]++
+					t.Errorf("%s/%s: the replica's unbound outcome is not ExecuteSQL's in kind: %s vs %s", a, tc.name, shape(u), shape(prod))
+				}
+			} else if same(u, prod) {
+				control[a+" agrees"]++
+			} else {
+				control[a+" differs"]++
+				t.Errorf("%s/%s: the replica's unbound outcome is not ExecuteSQL's:\n  replica    %.300s\n  ExecuteSQL %.300s", a, tc.name, u, prod)
+			}
 			if u == b {
 				continue
 			}
 			verdict := func(s string) string {
-				switch {
-				case s == "ROUTED":
-					return "routed"
-				case ssMatches(s, want):
-					return "right"
-				case strings.HasPrefix(s, "ERR"):
-					return "refused"
+				prefix := ""
+				if r, ok := strings.CutPrefix(s, "ROUTED "); ok {
+					prefix, s = "routed-", r
 				}
-				return "wrong"
+				switch {
+				case ssMatches(s, want):
+					return prefix + "right"
+				case strings.HasPrefix(s, "ERR"):
+					return prefix + "refused"
+				}
+				return prefix + "wrong"
 			}
 			tr := verdict(u) + "->" + verdict(b)
+			if skip[tc.name] {
+				tr = "legal-nondeterminism(" + shape(u) + "->" + shape(b) + ")"
+			}
 			cause := "?"
 			switch {
 			case (urec.Frozen == nil) != (brec.Frozen == nil):
@@ -357,6 +496,7 @@ func TestR0BindingSwitchGroupKeyTable(t *testing.T) {
 				strings.ReplaceAll(u, "\t", " "), strings.ReplaceAll(b, "\t", " "), strings.ReplaceAll(want, "\t", " ")))
 		}
 	}
+	t.Logf("group-key table, production control (unbound replica vs ExecuteSQL): %v", control)
 	t.Logf("group-key table, transitions when D is bound: %v", trans)
 	r0AppendFile(t, os.Getenv("R0_BINDING_REPORT"), strings.Join(report, "\n")+"\n")
 }
