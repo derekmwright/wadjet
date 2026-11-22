@@ -65,6 +65,18 @@ func neHintType(hint []parquet.Column, col string) (batch.TypeID, bool) {
 	return hint[i].Type, true
 }
 
+// SemiAntiNEDeclaredTypes resolves the probe and build value columns of a
+// recognized `<>` residual in the plan-declared side schemas, exactly as the
+// distinct-pair enabling does (semiAntiNEEligible, neTryEnable). They are
+// the plan's inputs to the choice between the distinct-pair build and the
+// generic filtered one, so a build cache must not share a build between two
+// joins that declare them differently. ok reports each resolution.
+func SemiAntiNEDeclaredTypes(probeCol, buildCol string, probeHint, buildHint []parquet.Column) (probe batch.TypeID, probeOK bool, build batch.TypeID, buildOK bool) {
+	probe, probeOK = neHintType(probeHint, probeCol)
+	build, buildOK = neHintType(buildHint, buildCol)
+	return probe, probeOK, build, buildOK
+}
+
 // semiAntiNEEligible reports whether the planner recognized this join's
 // filter as a single `<>` condition (wiring sets both columns together)
 // AND the plan declares both value columns with a pair of types the

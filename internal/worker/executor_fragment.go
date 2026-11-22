@@ -2993,7 +2993,7 @@ func (e *Executor) buildFragmentJoinProbe(ctx context.Context, task distributed.
 				// Distinct-pair fast path for `probe.col <> build.col`
 				// filters (exec/join_semianti_ne.go): the build collapses
 				// to key -> ≤2 distinct values, no batch storage.
-				if pc, bc, ok := (physical.PlanContext{}).ParseSemiAntiNE(spec.JoinFilter); ok {
+				if pc, bc, ok := semiAntiNECols(spec); ok {
 					hj.SemiAntiNEProbeCol, hj.SemiAntiNEBuildCol = pc, bc
 				}
 			}

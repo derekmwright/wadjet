@@ -13,6 +13,7 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/distributed"
 	"github.com/derekmwright/wadjet/internal/engine/exec"
+	"github.com/derekmwright/wadjet/internal/planner/physical"
 )
 
 // broadcastJoinCache is a worker-local, query-scoped cache that lets multiple
@@ -55,14 +56,45 @@ func newBroadcastJoinCache() *broadcastJoinCache {
 	return &broadcastJoinCache{entries: make(map[string]*broadcastJoinEntry)}
 }
 
+// semiAntiNECols reports the `<>` residual columns the broadcast build wires
+// into exec.HashJoin.SemiAntiNEProbeCol / SemiAntiNEBuildCol: a semi or anti
+// join (not an outer join's ON residual) whose JoinFilter is one recognized
+// `probe <> build`. The build (buildFragmentJoinProbe) and the cache key read
+// this one helper, so the key covers exactly the joins that can take the
+// distinct-pair build.
+func semiAntiNECols(spec distributed.OpSpec) (probeCol, buildCol string, ok bool) {
+	if spec.JoinFilter == "" {
+		return "", "", false
+	}
+	if jt := mapJoinTypeString(spec.JoinType); jt != exec.SemiJoin && jt != exec.AntiJoin {
+		return "", "", false
+	}
+	return (physical.PlanContext{}).ParseSemiAntiNE(spec.JoinFilter)
+}
+
 // computeBroadcastJoinKey hashes the build-side identity of a broadcast probe
 // OpSpec. Probe tasks for the same broadcast (same query, same build files +
 // alias + join shape) produce the same key; different broadcasts (different
 // aliases or file lists) produce different keys.
+//
+// For a semi/anti join whose residual is a recognized `<>`, the key also
+// carries the two DECLARED value types the distinct-pair build is enabled
+// from (exec.SemiAntiNEDeclaredTypes): since #1681 line 1681c they decide
+// whether the cached build is a distinct-pair build or the generic filtered
+// one, and the probe's declaration is not otherwise in the key. A stage's
+// declared primary `<>` join and an absorbed fused / chained one (no probe
+// declaration) over the same build files and residual must not share: the
+// absorbed join would probe a distinct-pair build it never chose (refused
+// outright when its probe value is not an integer), or the primary join the
+// generic build.
 func computeBroadcastJoinKey(queryID string, spec distributed.OpSpec) string {
 	h := sha1.New()
 	fmt.Fprintf(h, "q:%s\x00a:%s\x00j:%s\x00s:%t\x00f:%s",
 		queryID, spec.BuildAlias, spec.JoinType, spec.SemiAntiKeyOnly, spec.JoinFilter)
+	if pc, bc, ok := semiAntiNECols(spec); ok {
+		pt, pok, bt, bok := exec.SemiAntiNEDeclaredTypes(pc, bc, execColumns(spec.ProbeSchema), execColumns(spec.BuildSchema))
+		fmt.Fprintf(h, "\x00NE:%t:%d:%t:%d", pok, pt, bok, bt)
+	}
 	for _, k := range spec.RightKeys {
 		fmt.Fprintf(h, "\x00R:%s", k)
 	}
