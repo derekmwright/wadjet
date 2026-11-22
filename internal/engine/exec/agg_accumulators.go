@@ -202,6 +202,7 @@ func (h *HashAggregate) initFlatAccums(b *batch.RecordBatch) {
 		}
 		initCap = est
 	}
+	initCap = h.presizeBound(initCap)
 
 	// Count-array plan: which aggregates need a count[] of their own, and
 	// which can read another aggregate's. See planCountArrays for the

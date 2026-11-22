@@ -1736,19 +1736,19 @@ func (h *HashAggregate) resetGroupStateAfterSpill() {
 	// next fill re-converts if it grows back past the threshold
 	// (two_level_hash.go). Exactly one of the two stays non-nil per mode.
 	if h.intGroupIndex != nil || h.intTwoLevel != nil {
-		h.intGroupIndex = newIntHashTable(4096)
+		h.intGroupIndex = newIntHashTable(h.presizeBound(4096))
 		h.intTwoLevel = nil
 	}
 	if h.packedIdx != nil || h.packedTwoLevel != nil {
-		h.packedIdx = newPackedHashTable(4096)
+		h.packedIdx = newPackedHashTable(h.presizeBound(4096))
 		h.packedTwoLevel = nil
 	}
 	if h.strGroupIndex != nil {
-		h.strGroupIndex = newStrHashTable(4096)
+		h.strGroupIndex = newStrHashTable(h.presizeBound(4096))
 	}
 	// Typed-generic lookup state: slot indices are dead after a full reset.
 	if h.genKeyIdx != nil {
-		h.genKeyIdx = newIntHashTable(4096)
+		h.genKeyIdx = newIntHashTable(h.presizeBound(4096))
 	}
 	h.genKeyNext = nil
 	h.intGroupStates = nil
