@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -65,20 +66,49 @@ func waitForIntakeToDrain(t *testing.T, ctx context.Context, js jetstream.JetStr
 			t.Fatalf("%s consumer info: %v", lane, err)
 		}
 		if info.NumRedelivered != 0 {
-			t.Fatalf("%s intake redelivered %d messages — a first delivery was dropped unacked%s",
-				lane, info.NumRedelivered, streamStateNote(ctx, js, consumer))
+			t.Fatalf("%s intake redelivered %d messages — a first delivery was dropped unacked%s%s",
+				lane, info.NumRedelivered, intakeSignatureNote(lane, info), streamStateNote(ctx, js, consumer))
 		}
 		if info.Delivered.Consumer >= burst && info.NumPending == 0 && info.NumAckPending == 0 {
 			return
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("%s intake did not drain: delivered=%d of %d, pending=%d ack_pending=%d "+
-				"redelivered=%d%s",
+				"redelivered=%d%s%s",
 				lane, info.Delivered.Consumer, burst, info.NumPending, info.NumAckPending,
-				info.NumRedelivered, streamStateNote(ctx, js, consumer))
+				info.NumRedelivered, intakeSignatureNote(lane, info), streamStateNote(ctx, js, consumer))
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+}
+
+// intakeSignatureLine renders, on ONE line in a fixed format, the four consumer
+// counters that identify the nats.go lost wake-up (nats-io/nats.go#2240), read
+// from the same ConsumerInfo the failure is reported from:
+//
+//	INTAKE-SIGNATURE lane=<lane> pending=<n> ack_pending=<n> redelivered=<n> num_waiting=<n> lost_wakeup_signature=<yes|no>
+//
+// num_waiting is the number of pull requests waiting at the server. The race
+// lane's landing exception (docs/testing/RELEASE.md, "Race-lane exception for
+// the nats.go lost wake-up") greps this line; keep the format stable.
+// lost_wakeup_signature is computed from the four numbers alone and is a
+// convenience: the numbers are the evidence.
+func intakeSignatureLine(lane string, info *jetstream.ConsumerInfo) string {
+	verdict := "no"
+	if info.NumPending > 0 && info.NumAckPending == 0 && info.NumRedelivered == 0 && info.NumWaiting == 0 {
+		verdict = "yes"
+	}
+	return fmt.Sprintf("INTAKE-SIGNATURE lane=%s pending=%d ack_pending=%d redelivered=%d num_waiting=%d lost_wakeup_signature=%s",
+		lane, info.NumPending, info.NumAckPending, info.NumRedelivered, info.NumWaiting, verdict)
+}
+
+// intakeSignatureNote is the signature line plus the sentence that says how to
+// read it, as it is appended to a drain failure.
+func intakeSignatureNote(lane string, info *jetstream.ConsumerInfo) string {
+	return "\n  " + intakeSignatureLine(lane, info) +
+		"\n  pending > 0 with ack_pending 0, redelivered 0 and num_waiting 0 is the signature of the " +
+		"nats.go lost wake-up (nats-io/nats.go#2240, #857): tasks queued and no pull request outstanding; " +
+		"any other combination is NOT that signature."
 }
 
 // streamStateNote renders what the consumer's counters cannot say: whether the
@@ -416,4 +446,67 @@ func TestPriorityLaneDrains(t *testing.T) {
 	// Same wait, same reason: this loop carried the identical predicate and
 	// so the identical false exit (#857).
 	waitForIntakeToDrain(t, ctx, js, consumer, burst, "pri-leaf")
+}
+
+// TestIntakeSignatureLineCarriesEveryField pins the drain failure's greppable
+// signature line: every one of the four counters, the lane and the computed
+// verdict on one line, in the fixed key=value format the race lane's landing
+// exception reads. Distinct values per field so a swapped or dropped field
+// cannot pass.
+func TestIntakeSignatureLineCarriesEveryField(t *testing.T) {
+	parse := func(t *testing.T, line string) map[string]string {
+		t.Helper()
+		if strings.Contains(line, "\n") {
+			t.Fatalf("signature is not one line: %q", line)
+		}
+		fields := strings.Fields(line)
+		if len(fields) == 0 || fields[0] != "INTAKE-SIGNATURE" {
+			t.Fatalf("signature does not start with INTAKE-SIGNATURE: %q", line)
+		}
+		kv := make(map[string]string)
+		for _, f := range fields[1:] {
+			k, v, ok := strings.Cut(f, "=")
+			if !ok {
+				t.Fatalf("field %q in %q is not key=value", f, line)
+			}
+			kv[k] = v
+		}
+		return kv
+	}
+	info := &jetstream.ConsumerInfo{NumPending: 45, NumAckPending: 7, NumRedelivered: 3, NumWaiting: 2}
+	got := parse(t, intakeSignatureLine("pri-leaf", info))
+	want := map[string]string{
+		"lane": "pri-leaf", "pending": "45", "ack_pending": "7", "redelivered": "3",
+		"num_waiting": "2", "lost_wakeup_signature": "no",
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("field %s = %q, want %q (line fields %v)", k, got[k], v, got)
+		}
+	}
+	if len(got) != len(want) {
+		t.Errorf("line has fields %v, want exactly %v", got, want)
+	}
+
+	// The verdict: yes only for pending > 0 with the other three at 0.
+	cases := []struct {
+		name string
+		info jetstream.ConsumerInfo
+		want string
+	}{
+		{"lost wake-up", jetstream.ConsumerInfo{NumPending: 45}, "yes"},
+		{"drained", jetstream.ConsumerInfo{}, "no"},
+		{"pull outstanding", jetstream.ConsumerInfo{NumPending: 45, NumWaiting: 1}, "no"},
+		{"delivered unacked", jetstream.ConsumerInfo{NumPending: 45, NumAckPending: 1}, "no"},
+		{"redelivered", jetstream.ConsumerInfo{NumPending: 45, NumRedelivered: 1}, "no"},
+	}
+	for _, c := range cases {
+		if v := parse(t, intakeSignatureLine("main", &c.info))["lost_wakeup_signature"]; v != c.want {
+			t.Errorf("%s: lost_wakeup_signature=%s, want %s", c.name, v, c.want)
+		}
+	}
+	if note := intakeSignatureNote("main", info); !strings.Contains(note, "NOT that signature") ||
+		!strings.Contains(note, "nats-io/nats.go#2240") {
+		t.Errorf("note lacks the reading sentence: %q", note)
+	}
 }
