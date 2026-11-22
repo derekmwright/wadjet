@@ -217,6 +217,19 @@ func extractFilterBuildColumns(filter string) []string {
 		return nil
 	}
 	seen := make(map[string]bool)
+	// The residual's own conjunct reading first, so the build stores every
+	// column the residual evaluates — IS [NOT] DISTINCT FROM included, which
+	// the operator list below does not know (#1681).
+	if conjs, err := parseSemiAntiConjuncts(filter); err == nil {
+		cols := make([]string, 0, len(conjs))
+		for _, c := range conjs {
+			if !seen[c.buildCol] {
+				seen[c.buildCol] = true
+				cols = append(cols, c.buildCol)
+			}
+		}
+		return cols
+	}
 	parts := strings.Split(strings.ToLower(filter), " and ")
 	for _, part := range parts {
 		part = strings.TrimSpace(part)

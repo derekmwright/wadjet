@@ -67,7 +67,10 @@ func TestSemiAntiFilterNullOperandIsUnknown(t *testing.T) {
 				// slot is below it).
 				probe.Columns[1].SetValue(0, nil)
 				build.Columns[1].SetValue(0, fam.hi)
-				f := buildSemiAntiFilter(tc.filter)
+				f, err := buildSemiAntiFilter(tc.filter)
+				if err != nil {
+					t.Fatal(err)
+				}
 				if f == nil {
 					t.Fatalf("filter %q compiled to nothing", tc.filter)
 				}
@@ -126,7 +129,7 @@ func BenchmarkSemiAntiFilterProbe(b *testing.B) {
 		name := map[exec.JoinType]string{exec.SemiJoin: "semi", exec.AntiJoin: "anti"}[jt]
 		b.Run(name, func(b *testing.B) {
 			hj := exec.NewHashJoin(jt, []string{"k"}, []string{"k"})
-			hj.SemiAntiFilter = buildSemiAntiFilter("pv < v")
+			hj.SemiAntiFilter, _ = buildSemiAntiFilter("pv < v")
 			if err := hj.Build(context.Background(), exec.NewSliceSource(buildSchema, buildRows)); err != nil {
 				b.Fatal(err)
 			}
@@ -154,7 +157,7 @@ func BenchmarkSemiAntiFilterClosure(b *testing.B) {
 		probe.Columns[0].SetValue(i, int64(rng.Intn(8)))
 		build.Columns[0].SetValue(i, int64(rng.Intn(8)))
 	}
-	f := buildSemiAntiFilter("pv < v")
+	f, _ := buildSemiAntiFilter("pv < v")
 	b.ResetTimer()
 	matched := 0
 	for i := 0; i < b.N; i++ {

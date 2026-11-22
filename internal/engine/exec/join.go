@@ -2251,16 +2251,36 @@ func (h *HashJoin) PruneBuildColumns(keepCols []string) {
 			keptIdx[i] = true
 		}
 	}
+	// The KEY columns stay, and buildKeyIdx follows them into the pruned
+	// schema. Pruning to the filter's columns alone left buildKeyIdx naming a
+	// position in the OLD schema, so the probe's key check read a residual
+	// column as the key: `EXISTS (… s.id = p.id AND s.f <> p.f)` over a float
+	// f refused "join key id is INT64 on the probe side and FLOAT64 on the
+	// build side" (#1681), and the two-key probe reads build keys by that
+	// index too.
+	for _, bi := range h.buildKeyIdx {
+		if bi >= 0 && bi < len(keptIdx) {
+			keptIdx[bi] = true
+		}
+	}
 	var newSchema []parquet.Column
 	var colIdx []int
+	newPos := make([]int, len(h.buildSchema))
 	for i, col := range h.buildSchema {
+		newPos[i] = -1
 		if keptIdx[i] {
+			newPos[i] = len(newSchema)
 			newSchema = append(newSchema, col)
 			colIdx = append(colIdx, i)
 		}
 	}
 	if len(newSchema) == len(h.buildSchema) {
 		return // nothing to prune
+	}
+	for i, bi := range h.buildKeyIdx {
+		if bi >= 0 && bi < len(newPos) {
+			h.buildKeyIdx[i] = newPos[bi]
+		}
 	}
 
 	h.buildSchema = newSchema

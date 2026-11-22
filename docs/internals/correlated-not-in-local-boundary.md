@@ -31,11 +31,15 @@ neither needs #539's replicated build. It was built and measured, and it
 does not work TODAY for a reason that is not in this package: a
 semi/anti join's residual is compiled by physical.PlanContext.BuildSemiAntiFilter,
 which reads the filter as TEXT — split on " and ", then find one of six
-comparison operators — so an OR and an IS NULL compile to NOTHING and
-are dropped in SILENCE, and physical.extractFilterBuildColumns narrows
+comparison operators — so an OR and an IS NULL compiled to NOTHING and
+were dropped in SILENCE, and physical.extractFilterBuildColumns narrowed
 the stored build by the same text split and would delete the very column
 the residual reads. Measured with the two-join form in place: 0 rows for
-PostgreSQL's 9. That is #562's defect class one layer down.
+PostgreSQL's 9. That is #562's defect class one layer down. (Since #1681
+line 1681b the evaluator accepts every comparison operator, IS [NOT]
+DISTINCT FROM included, and REFUSES a conjunct it cannot read (SQLSTATE
+0A000) instead of dropping it; an OR or an IS NULL residual is still not
+something it evaluates, so the lowering above stays blocked.)
 
 So the honest lowering is none: leave the IN a subquery predicate, where
 expr.CorrelatedInSubquery.EvalBoolNull already carries the exact rule per

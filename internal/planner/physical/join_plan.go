@@ -407,7 +407,12 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 		keepCols = extractFilterBuildColumns(node.JoinFilter)
 	}
 	if (joinType == exec.SemiJoin || joinType == exec.AntiJoin) && node.JoinFilter != "" {
-		hj.SemiAntiFilter = buildSemiAntiFilter(node.JoinFilter)
+		f, err := buildSemiAntiFilter(node.JoinFilter)
+		if err != nil {
+			// A residual it cannot evaluate is refused, never dropped (#1681).
+			return nil, nil, nil, err
+		}
+		hj.SemiAntiFilter = f
 		if pc, bc, ok := parseSemiAntiNE(node.JoinFilter); ok {
 			hj.SemiAntiNEProbeCol, hj.SemiAntiNEBuildCol = pc, bc
 		}

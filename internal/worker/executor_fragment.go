@@ -2978,7 +2978,12 @@ func (e *Executor) buildFragmentJoinProbe(ctx context.Context, task distributed.
 			}
 			hj.NewResidual = newResidual
 		case spec.JoinFilter != "":
-			hj.SemiAntiFilter = (physical.PlanContext{}).BuildSemiAntiFilter(spec.JoinFilter)
+			semiAntiFilter, err := (physical.PlanContext{}).BuildSemiAntiFilter(spec.JoinFilter)
+			if err != nil {
+				// A residual it cannot evaluate is refused, never dropped (#1681).
+				return nil, fmt.Errorf("hash_join_probe: %w", err)
+			}
+			hj.SemiAntiFilter = semiAntiFilter
 			// Filtered semi/anti builds store only keys + filter columns —
 			// the worker has no post-build prune at all, so without this a
 			// broadcast lineitem build retains every scanned column.

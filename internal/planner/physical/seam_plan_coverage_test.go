@@ -228,15 +228,17 @@ func TestMatchesPartitionFilter(t *testing.T) {
 	}
 }
 
-func TestEvalFilterTyped(t *testing.T) {
-	const (
-		opNE = iota
-		opGT
-		opLT
-		opGE
-		opLE
-		opEQ
-	)
+// The typed kernels the semi/anti residual resolves once per join
+// (semiAntiTypedKernel; evalFilterTyped's per-row switch before #1681).
+func TestSemiAntiTypedKernel(t *testing.T) {
+	k := func(pt, bt batch.TypeID, op string) semiAntiKernel {
+		t.Helper()
+		f := semiAntiTypedKernel(pt, bt, op)
+		if f == nil {
+			t.Fatalf("no typed kernel for %s %s %s", pt, op, bt)
+		}
+		return f
+	}
 
 	// Test int32 comparisons
 	pv := batch.NewVector(batch.TypeInt32, 2)
@@ -245,34 +247,51 @@ func TestEvalFilterTyped(t *testing.T) {
 	pv.Int32Data[1] = 20
 	bv.Int32Data[0] = 20
 	bv.Int32Data[1] = 20
-	if !evalFilterTyped(pv, bv, 0, 0, opNE) {
+	if !k(batch.TypeInt32, batch.TypeInt32, "!=")(pv, bv, 0, 0) {
 		t.Error("10 != 20 should be true")
 	}
-	if evalFilterTyped(pv, bv, 1, 1, opNE) {
+	if k(batch.TypeInt32, batch.TypeInt32, "!=")(pv, bv, 1, 1) {
 		t.Error("20 != 20 should be false")
 	}
-	if !evalFilterTyped(pv, bv, 0, 0, opLT) {
+	if !k(batch.TypeInt32, batch.TypeInt32, "<")(pv, bv, 0, 0) {
 		t.Error("10 < 20 should be true")
 	}
-	if !evalFilterTyped(pv, bv, 1, 1, opEQ) {
+	if !k(batch.TypeInt32, batch.TypeInt32, "=")(pv, bv, 1, 1) {
 		t.Error("20 == 20 should be true")
 	}
 
-	// Test string comparisons via fallback
+	// Test string comparisons
 	sv := batch.NewVector(batch.TypeString, 2)
 	sv.BytesData.Set(0, []byte("a"))
 	sv.BytesData.Set(1, []byte("b"))
 	tv := batch.NewVector(batch.TypeString, 2)
 	tv.BytesData.Set(0, []byte("b"))
 	tv.BytesData.Set(1, []byte("b"))
-	if !evalFilterTyped(sv, tv, 0, 0, opNE) {
+	if !k(batch.TypeString, batch.TypeString, "!=")(sv, tv, 0, 0) {
 		t.Error("a != b should be true")
 	}
-	if evalFilterTyped(sv, tv, 1, 1, opNE) {
+	if k(batch.TypeString, batch.TypeString, "!=")(sv, tv, 1, 1) {
 		t.Error("b != b should be false")
 	}
-	if !evalFilterTyped(sv, tv, 0, 0, opLT) {
+	if !k(batch.TypeString, batch.TypeString, "<")(sv, tv, 0, 0) {
 		t.Error("a < b should be true")
+	}
+
+	// No typed kernel where the slot does not order as PostgreSQL does.
+	for _, c := range []struct {
+		pt, bt batch.TypeID
+		op     string
+	}{
+		{batch.TypeInt32, batch.TypeInt64, ">"},
+		{batch.TypeInt64, batch.TypeFloat64, ">"},
+		{batch.TypeDecimal, batch.TypeDecimal, ">"},
+		{batch.TypeBytes, batch.TypeBytes, ">"},
+		{batch.TypeIPv4, batch.TypeIPv4, ">"},
+		{batch.TypeInt64, batch.TypeInt64, "is distinct from"},
+	} {
+		if semiAntiTypedKernel(c.pt, c.bt, c.op) != nil {
+			t.Errorf("%s %s %s: typed kernel, want the engine's comparison", c.pt, c.op, c.bt)
+		}
 	}
 }
 

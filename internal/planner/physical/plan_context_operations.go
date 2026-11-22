@@ -451,7 +451,7 @@ func (PlanContext) SetReverseBloomInnerThreshold(n int64) { ReverseBloomInnerThr
 func (PlanContext) SemiAntiNE() *atomic.Bool              { return &semiAntiNE }
 func (PlanContext) SortMergeJoinsPlanned() *atomic.Int64  { return &SortMergeJoinsPlanned }
 
-func (PlanContext) BuildSemiAntiFilter(filter string) func(*batch.RecordBatch, int, *batch.RecordBatch, int) bool {
+func (PlanContext) BuildSemiAntiFilter(filter string) (func(*batch.RecordBatch, int, *batch.RecordBatch, int) bool, error) {
 	return buildSemiAntiFilter(filter)
 }
 func (PlanContext) SemiAntiBuildStoreCols(keys []string, filter string) []string {

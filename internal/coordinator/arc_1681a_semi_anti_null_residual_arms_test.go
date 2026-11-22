@@ -96,6 +96,10 @@ func nrTypes() []nrType {
 	}
 	dec := col("c_dec", parquet.TypeDecimal)
 	dec.Precision, dec.Scale = 18, 4
+	dec2 := col("c_dec2", parquet.TypeDecimal)
+	dec2.Precision, dec2.Scale = 10, 2
+	decbig := col("c_decbig", parquet.TypeDecimal)
+	decbig.Precision, decbig.Scale = 38, 10
 	return []nrType{
 		{col: "c_i32", pg: "int4", pq: col("c_i32", parquet.TypeInt32), arith: true, coal0: "0", before: "4",
 			val: func(v int, _ bool) any { return int32(v) }, pgLit: func(v int, _ bool) string { return fmt.Sprint(v) }},
@@ -145,7 +149,63 @@ func nrTypes() []nrType {
 		{col: "c_uu", pg: "uuid", pq: col("c_uu", parquet.TypeUUID), before: "'00000000-0000-4000-8000-000000000004'::uuid",
 			val:   func(v int, _ bool) any { return fmt.Sprintf("00000000-0000-4000-8000-%012x", v) },
 			pgLit: func(v int, _ bool) string { return fmt.Sprintf("'00000000-0000-4000-8000-%012x'", v) }},
+		// 1681b: the families below have no kernel of their own, or probe
+		// what the typed slot gets wrong — negative values, text ordering
+		// across lengths and case, a second numeric scale, a numeric beyond
+		// 64 bits, IPv6, CIDR, MAC and interval.
+		{col: "c_i64b", pg: "int8", pq: col("c_i64b", parquet.TypeInt64), arith: true, coal0: "0", before: "4",
+			val: func(v int, _ bool) any { return int64(v) }, pgLit: func(v int, _ bool) string { return fmt.Sprint(v) }},
+		{col: "c_neg", pg: "int8", pq: col("c_neg", parquet.TypeInt64), arith: true, coal0: "0", before: "-10",
+			val: func(v int, _ bool) any { return int64((v - 6) * 7) }, pgLit: func(v int, _ bool) string { return fmt.Sprint((v - 6) * 7) }},
+		{col: "c_dec2", pg: "numeric(10,2)", pq: dec2, arith: true, coal0: "0", before: "4",
+			val: func(v int, _ bool) any { return fmt.Sprintf("%d.50", v) }, pgLit: func(v int, _ bool) string { return fmt.Sprintf("%d.50", v) }},
+		{col: "c_decbig", pg: "numeric(38,10)", pq: decbig, arith: true, coal0: "0", before: "0",
+			val: func(v int, _ bool) any { return nrDecBig(v) }, pgLit: func(v int, _ bool) string { return nrDecBig(v) }},
+		{col: "c_txt2", pg: "text", pq: col("c_txt2", parquet.TypeString), coal0: "''", before: "'A'",
+			val: func(v int, _ bool) any { return nrTxt2[v] }, pgLit: func(v int, _ bool) string { return "'" + nrTxt2[v] + "'" }},
+		{col: "c_by2", pg: "bytea", pq: col("c_by2", parquet.TypeBytes), before: "decode('04','hex')",
+			val:   func(v int, _ bool) any { return nrBy2(v) },
+			pgLit: func(v int, _ bool) string { return fmt.Sprintf("decode('%x','hex')", nrBy2(v)) }},
+		{col: "c_ip6", pg: "inet", pq: col("c_ip6", parquet.TypeIPv6), before: "'2001:db8::4'::inet",
+			val: func(v int, _ bool) any { return fmt.Sprintf("2001:db8::%d", v) }, pgLit: func(v int, _ bool) string { return fmt.Sprintf("'2001:db8::%d'", v) }},
+		{col: "c_cidr", pg: "cidr", pq: col("c_cidr", parquet.TypeCIDR), before: "'10.4.0.0/16'::cidr",
+			val: func(v int, _ bool) any { return nrCIDR(v) }, pgLit: func(v int, _ bool) string { return "'" + nrCIDR(v) + "'" }},
+		{col: "c_mac", pg: "macaddr", pq: col("c_mac", parquet.TypeMAC), before: "'00:00:00:00:00:04'::macaddr",
+			val: func(v int, _ bool) any { return fmt.Sprintf("00:00:00:00:00:%02d", v) }, pgLit: func(v int, _ bool) string { return fmt.Sprintf("'00:00:00:00:00:%02d'", v) }},
+		{col: "c_iv", pg: "interval", pq: col("c_iv", parquet.TypeDuration), before: "INTERVAL '4 hours'",
+			val: func(v int, _ bool) any { return int64(v) * int64(time.Hour) }, pgLit: func(v int, _ bool) string { return fmt.Sprintf("'%d hours'", v) }},
 	}
+}
+
+// nrTxt2 varies length and case: in the C collation 'A' < 'B' < 'a' < 'aB' < 'ab' < 'b'.
+var nrTxt2 = map[int]string{2: "B", 3: "ab", 5: "a", 6: "A", 7: "Ab", 9: "b", 12: "aB"}
+
+// nrBy2 is v repeated (v%4)+1 times: lengths differ between rows.
+func nrBy2(v int) []byte {
+	b := make([]byte, v%4+1)
+	for i := range b {
+		b[i] = byte(v)
+	}
+	return b
+}
+
+// nrCIDR is 10.v.0.0 with a /16 or /24 mask.
+func nrCIDR(v int) string {
+	mask := 24
+	if v%2 == 0 {
+		mask = 16
+	}
+	return fmt.Sprintf("10.%d.0.0/%d", v, mask)
+}
+
+// nrDecBig is (v-6)·10^20 + v·10^-10: 31 significant digits, past int64.
+func nrDecBig(v int) string {
+	n := v - 6
+	sign := ""
+	if n < 0 {
+		sign, n = "-", -n
+	}
+	return fmt.Sprintf("%s%d00000000000000000000.%010d", sign, n, v)
 }
 
 func nrIntOrNil(p *int) any {
@@ -285,6 +345,10 @@ func nrCells() []nrCell {
 		for _, c := range cons[:2] {
 			out = append(out, nrCell{"type/" + ty.col + "/idf/" + c.name, nrAt(c.f, s, r)})
 		}
+		r = "s." + ty.col + " IS NOT DISTINCT FROM p." + ty.col
+		for _, c := range cons[:2] {
+			out = append(out, nrCell{"type/" + ty.col + "/indf/" + c.name, nrAt(c.f, s, r)})
+		}
 		r = "s." + ty.col + " > " + ty.before
 		for _, c := range cons[:2] {
 			out = append(out, nrCell{"type/" + ty.col + "/innerOnly/" + c.name, nrAt(c.f, s, r)})
@@ -315,6 +379,44 @@ func nrCells() []nrCell {
 	for _, f := range forms {
 		for _, c := range cons {
 			out = append(out, nrCell{"res/" + f.name + "/" + c.name, nrAt(c.f, s, f.r)})
+		}
+	}
+	// 1681b: operands of two types (s.X OP p.Y), every operator family.
+	mixed := []struct{ name, s, p string }{
+		{"i32_i64b", "c_i32", "c_i64b"}, {"i64b_f64", "c_i64b", "c_f64"}, {"f64_i64b", "c_f64", "c_i64b"},
+		{"i64b_dec", "c_i64b", "c_dec"}, {"dec2_dec", "c_dec2", "c_dec"}, {"f32_f64", "c_f32", "c_f64"},
+		{"f64_dec", "c_f64", "c_dec"}, {"dt_ts", "c_dt", "c_ts"}, {"decbig_dec", "c_decbig", "c_dec"},
+	}
+	for _, m := range mixed {
+		for _, op := range []struct{ name, op string }{{"gt", ">"}, {"le", "<="}, {"ne", "<>"}, {"idf", "IS DISTINCT FROM"}} {
+			r := "s." + m.s + " " + op.op + " p." + m.p
+			for _, c := range cons[:2] {
+				out = append(out, nrCell{"mixed/" + m.name + "/" + op.name + "/" + c.name, nrAt(c.f, s, r)})
+			}
+		}
+	}
+	// 1681b: residual shapes the decorrelation either carries (two or three
+	// conjuncts, one of them IS DISTINCT FROM; parentheses) or declines to
+	// the per-row path (a cast, an IN list, a function, a literal operand).
+	forms2 := []struct{ name, r string }{
+		{"mixIdf", "s.c_i64 > p.c_i64 AND s.w IS DISTINCT FROM p.w"},
+		{"mixIdfRev", "s.w IS DISTINCT FROM p.w AND s.c_i64 > p.c_i64"},
+		{"mixIndf", "s.c_dec > p.c_dec AND s.w IS NOT DISTINCT FROM p.w"},
+		{"three", "s.c_i64 > p.c_i64 AND s.w < p.w AND s.c_txt > p.c_txt"},
+		{"threeTyped", "s.c_ip > p.c_ip AND s.c_by >= p.c_by AND s.c_f64 > p.c_f64"},
+		{"paren", "(s.c_dec > p.c_dec)"},
+		{"cast", "CAST(s.c_i32 AS BIGINT) > p.c_i64b"},
+		{"inList", "s.c_i64 IN (p.c_i64, 5000)"},
+		{"isNull", "s.c_i64 IS NULL"},
+		{"boolCol", "s.c_b"},
+		{"boolNe", "s.c_b <> p.c_b"},
+		{"boolGt", "s.c_b > p.c_b"},
+		{"func", "abs(s.c_neg) > p.c_i64b"},
+		{"litLeft", "5000 < s.c_i64"},
+	}
+	for _, f := range forms2 {
+		for _, c := range cons[:2] {
+			out = append(out, nrCell{"res2/" + f.name + "/" + c.name, nrAt(c.f, s, f.r)})
 		}
 	}
 	gt := "s.c_i64 > p.c_i64"
@@ -502,9 +604,9 @@ func nrVerdict(want string, res *oracle.Result, err error) (string, string) {
 }
 
 // nrKnown names every cell that is still not PostgreSQL's answer on an arm,
-// with its verdict and cause; each cause is its own defect, outside the NULL
-// operand this table was built for (1681a's result note lists them for epic
-// #1681). The test fails when a known cell starts answering as PostgreSQL does
+// with its verdict and cause; each cause is its own defect, outside the
+// residual comparison this table was built for (the 1681a and 1681b result
+// notes list them for epic #1681). The test fails when a known cell starts answering as PostgreSQL does
 // (delete its rule), changes verdict, or when any other cell is not
 // PostgreSQL's.
 func nrKnown(name, arm string) (verdict, cause string, known bool) {
@@ -518,29 +620,29 @@ func nrKnown(name, arm string) (verdict, cause string, known bool) {
 		}
 		return false
 	}
-	if p[0] == "res" && in(p[1], "idf", "indf") && in(p[2], "exists", "notExists") {
-		return "wrong", "an IS [NOT] DISTINCT FROM residual is dropped: buildSemiAntiFilter finds no operator it knows and returns no filter", true
+	if p[0] == "mixed" && in(p[1], "i64b_f64", "i64b_dec") && p[2] == "ne" {
+		// 1681b, found by the extended matrix and NOT fixed there (outside its
+		// four lines): parseSemiAntiNE wires the distinct-pair `<>` build,
+		// which keys an INT64 build value and reads the FLOAT64 / NUMERIC
+		// probe value through intKeyFromVector — not an integer, so read as
+		// NULL, and no pair matches (exec/join_semianti_ne.go).
+		return "wrong", "a <> residual with an integer build value and a float/numeric probe value: the distinct-pair path reads the probe value as NULL", true
 	}
 	if p[0] != "type" {
 		return "", "", false
 	}
 	col, op, con := p[1], p[2], p[3]
-	cmp := in(op, "gt", "ge", "lt", "le", "flipLt")
 	switch {
-	case op == "idf":
-		return "wrong", "an IS DISTINCT FROM residual is dropped (see res/idf)", true
-	case cmp && in(con, "exists", "notExists") && in(col, "c_f64", "c_f32"):
-		return "wrong", "NaN: the typed float kernel compares IEEE-style; PostgreSQL orders NaN above every value", true
-	case cmp && in(con, "exists", "notExists") && in(col, "c_dec", "c_by", "c_ip"):
-		return "wrong", "the generic kernel compares fmt.Sprint text: 12.25 < 9.25", true
-	case op == "ne" && single && in(col, "c_f64", "c_f32", "c_dec"):
-		return "refused", "a <> residual on a float/decimal column: the single-process join keys the INT64 id against a FLOAT64/DECIMAL build", true
 	case (op == "arith" || (op == "gt" && in(con, "in", "notIn"))) && in(col, "c_f64", "c_f32"):
 		return "refused", "the per-row correlated re-run has no literal for a float outer value", true
 	case op == "gt" && in(con, "in", "notIn") && col == "c_b":
 		return "wrong", "a BOOL comparison in a correlated IN body re-run per outer row", true
-	case op == "innerOnly" && in(col, "c_by", "c_ip"):
+	case op == "innerOnly" && in(col, "c_by", "c_ip", "c_ip6"):
 		return "refused", "the ::bytea / ::inet cast spelling in the body: type does not exist", true
+	case op == "innerOnly" && col == "c_iv" && single:
+		return "refused", "an INTERVAL literal in an inner-only body filter: invalid input syntax for type duration \"04:00:00\"", true
+	case op == "innerOnly" && col == "c_iv":
+		return "wrong", "an INTERVAL literal in an inner-only body filter on the DAG", true
 	case op == "innerOnly" && col == "c_b" && single:
 		return "wrong", "an inner-only BOOL comparison with false on the single-process path", true
 	}
@@ -553,6 +655,16 @@ func nrKnown(name, arm string) (verdict, cause string, known bool) {
 // such as `s.v > p.v` with p.v NULL read the NULL slot's zero value, so
 // EXISTS kept the row and NOT EXISTS dropped it, on the embedded engine and
 // every DAG arm alike.
+//
+// AND COMPARES ITS OPERANDS AS POSTGRESQL DOES (line 1681b). At 9d476ca6 the
+// residual compiler dropped an IS [NOT] DISTINCT FROM conjunct (existence
+// only), compared numeric, bytea and the network types by printed text,
+// compared NaN IEEE-style, read the wrong array for operands of two types,
+// and a `<>` residual on a float / numeric column refused on the embedded
+// engine because PruneBuildColumns left the build key index naming a pruned
+// position. The matrix grew the 1681b families (negative, multi-length,
+// second-scale and 38-digit numeric, IPv6, CIDR, MAC, interval), IS NOT
+// DISTINCT FROM per family, operand pairs of two types, and residual shapes.
 func TestArc1681aSemiAntiNullResidualEveryArm(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: five arms over the 1681a matrix")

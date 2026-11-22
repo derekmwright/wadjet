@@ -168,13 +168,41 @@ func TestHashJoinPruneBuildColumns(t *testing.T) {
 	hj := NewHashJoin(SemiJoin, []string{"id"}, []string{"id"})
 	hj.BuildFromRows(schema, rows)
 
-	// Prune to keep only "name"
+	// Prune to keep only "name": the key column "id" stays too, and the key
+	// index follows it into the pruned schema (#1681 — a stale index read the
+	// filter column as the key).
 	hj.PruneBuildColumns([]string{"name"})
-	if len(hj.buildSchema) != 1 {
-		t.Fatalf("expected 1 column after prune, got %d", len(hj.buildSchema))
+	if len(hj.buildSchema) != 2 {
+		t.Fatalf("expected 2 columns (key + kept) after prune, got %d", len(hj.buildSchema))
 	}
-	if hj.buildSchema[0].Name != "name" {
-		t.Fatalf("expected 'name' column, got %q", hj.buildSchema[0].Name)
+	if hj.buildSchema[0].Name != "id" || hj.buildSchema[1].Name != "name" {
+		t.Fatalf("expected [id name], got [%q %q]", hj.buildSchema[0].Name, hj.buildSchema[1].Name)
+	}
+	if got := hj.buildSchema[hj.buildKeyIdx[0]].Name; got != "id" {
+		t.Fatalf("build key index names %q after prune, want id", got)
+	}
+}
+
+// The key index follows a key that sits AFTER a pruned column.
+func TestHashJoinPruneBuildColumnsRemapsKeyIndex(t *testing.T) {
+	schema := []parquet.Column{
+		{Name: "extra", Type: parquet.TypeString},
+		{Name: "f", Type: parquet.TypeFloat64},
+		{Name: "id", Type: parquet.TypeInt64},
+	}
+	rows := []map[string]any{{"extra": "x", "f": 1.5, "id": int64(1)}}
+	hj := NewHashJoin(SemiJoin, []string{"id"}, []string{"id"})
+	hj.BuildFromRows(schema, rows)
+	hj.PruneBuildColumns([]string{"f"})
+	if len(hj.buildSchema) != 2 {
+		t.Fatalf("expected [f id] after prune, got %d columns", len(hj.buildSchema))
+	}
+	bt, ok := hj.buildKeyType(0)
+	if !ok || bt != batch.TypeInt64 {
+		t.Fatalf("build key type after prune = %v (ok=%v), want INT64: the index still names the old schema", bt, ok)
+	}
+	if got := hj.buildBatches[0].Columns[hj.buildKeyIdx[0]].Type; got != batch.TypeInt64 {
+		t.Fatalf("build key vector after prune is %v, want INT64", got)
 	}
 }
 
