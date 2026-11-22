@@ -16,6 +16,22 @@ just points here; this is the full text, verbatim, unchanged.
 - A red lane is diagnosed, not rerun: the failing test is run alone on the base and on the candidate and the cause is written down. The architect lands without asking only when ALL of these hold, and reports it afterwards: exactly one lane is red and the HOOK lane is green; the failing test passes at least three times out of three alone on both the base and the candidate; the mechanism is identified and does not involve the code being landed; an issue for it is open before the push. Anything else goes to the maintainer.
 - A test that reddens a lane this way is hunted, not tolerated: its issue goes on the current patch milestone and is dispatched promptly, and the fix sweeps for siblings of the same kind (an order-sensitive pin on a result nothing sorts, a wall-clock bound, an error whose identity is a race).
 
+### Race-lane exception for the nats.go lost wake-up
+
+Maintainer ruling, 2026-11-22 (issue #857). The worker's JetStream intake can stall about 31 s with tasks queued because of a lost wake-up in the nats.go pull iterator (nats-io/nats.go#2240, fix in PR #2241, unreleased); see [the intake section of the worker delivery document](../internals/worker-poison-task-delivery-defense.md#jetstream-intake-the-lost-wake-up-stall). The intake tests allow 30 s, so a stall fails them. This exception is narrow:
+
+- **No rerun-based waiver.** A clean rerun of a failed intake test is not landing evidence.
+- A red race lane (the gate's HOOK lane) may be excepted only when EVERY condition holds:
+  1. the only failing tests in the lane are `TestTaskIntakeDeliversAllWithoutLoss`, `TestTaskIntakeDeliversTasksPublishedBeforeItBinds` and `TestPriorityLaneDrains`;
+  2. each failure message carries the complete upstream-race signature on its `INTAKE-SIGNATURE` line: `pending` greater than 0, `ack_pending=0`, `redelivered=0` and `num_waiting=0` (tasks still pending in the stream, nothing awaiting ack, nothing redelivered, no pull request waiting at the server);
+  3. every other test in the lane passed in that same run;
+  4. the candidate changes none of the worker's intake loop, the NATS connection code, task dispatch or dependency versions.
+- Anything else blocks landing: another failing test, a different failure signature, a message without the `INTAKE-SIGNATURE` line, or a candidate that touches those paths.
+- A candidate that touches the intake loop, the NATS connection code, task dispatch or dependency versions needs forced-window evidence on the base and on the candidate (the instrumented nats.go copy through `-modfile`, issue #857), not an isolated clean rerun.
+- Every use of the exception is recorded on issue #857 and in the landing report.
+- The exception ends when the validated upstream fix is adopted (a released nats.go containing the fix, validated by the forced-window reproduction); this section is then removed.
+- It does not extend to coordinator end-to-end tests; that would need a separate decision.
+
 ### Release Housekeeping
 
 - **Every tag is preceded by a housekeeping pass over the whole bundle.** Arcs merge tag-less; a release batches them into something cohesive, and before `release.sh` runs, one pass over the bundle's diff checks what no single arc can see: (1) every flag, default, config key, type rule, refusal, supported statement or benchmark number the bundle touched is reflected in `docs/*.md` and the README, and `go run ./tools/docscheck .` is green; (2) the doc comment of every function the bundle changed states the CURRENT invariant, boundary and pointers — no stale claim, and the count of comment blocks over twenty lines in touched files does not grow; (3) every settled position has an ADR, new or amended, superseded ADRs say `Status: Superseded by ADR-NNNN`, ADR-0012's divergence catalog (`docs/adr/0012-divergences/`) and the differences page agree row for row (every `kept superset` and `value divergence` row is on the page, every page entry names its row) with the amendment log current, and ADR-0013's nondeterminism classes are current; (4) every issue the bundle closes is closed with a comment and every filing candidate from the landing notes is filed and labeled; (5) the release notes read as a user would read them, one section per arc, no process narration; (6) gofmt, `go vet`, `go mod tidy` are no-ops and no stray binary or orphaned worktree remains. The mechanical checks are `task housekeeping`; the judgement checks are an authored pass reviewed like any other arc (Derek, 2026-09-11).

@@ -1657,6 +1657,12 @@ func (w *Worker) taskLoop(ctx context.Context, consumer jetstream.Consumer, sem 
 	// dedup-safe: task outputs are TaskID-idempotent and the coordinator's
 	// taskRetrier ignores duplicate terminal results). The old batch-fetch
 	// round-trip amortization is irrelevant against multi-second tasks.
+	//
+	// Known limitation (#857): a lost wake-up in the nats.go pull iterator
+	// (nats-io/nats.go#2240, fix in PR #2241, unreleased) can idle this lane
+	// about 31 s with tasks queued, until the missing-heartbeat error below.
+	// See docs/internals/worker-poison-task-delivery-defense.md, "JetStream
+	// intake: the lost wake-up stall".
 	it, err := consumer.Messages(jetstream.PullMaxMessages(1))
 	if err != nil {
 		w.logger.Error("task intake: creating messages iterator", "error", err)
