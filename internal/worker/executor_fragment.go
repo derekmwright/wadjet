@@ -2942,7 +2942,8 @@ func (e *Executor) buildFragmentJoinProbe(ctx context.Context, task distributed.
 		hj.BuildTableAlias = spec.BuildAlias
 		hj.QualifyAllBuildCols = spec.QualifyAllBuildCols
 		hj.BuildColOrigins = spec.BuildColOrigins
-		// Plan-declared side schemas, read only when a side is empty.
+		// Plan-declared side schemas: they shape a side that is empty and gate
+		// the semi/anti `<>` distinct-pair build (exec.HashJoin.semiAntiNEEligible).
 		hj.BuildSchemaHint = execColumns(spec.BuildSchema)
 		hj.ProbeSchemaHint = execColumns(spec.ProbeSchema)
 		if spec.BuildRowHint > 0 {

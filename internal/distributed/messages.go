@@ -220,7 +220,8 @@ type Task struct {
 	// insertion (exchange subsumption dedup).
 	BuildFilterExprs []string `json:"build_filter_exprs,omitempty"`
 	// JoinBuildSchema / JoinProbeSchema are the plan-declared columns of the
-	// two join sides, used only when a side is empty (see OpSpec.BuildSchema).
+	// two join sides: they shape a side that turns out to be empty and gate
+	// the semi/anti `<>` distinct-pair build (see OpSpec.BuildSchema).
 	JoinBuildSchema []ColumnSpec `json:"join_build_schema,omitempty"`
 	JoinProbeSchema []ColumnSpec `json:"join_probe_schema,omitempty"`
 	// HiddenJoinColumns are the join's OWN materialized columns — a
@@ -616,9 +617,11 @@ type OpSpec struct {
 	DropMarker      bool                  `json:"drop_marker,omitempty"`
 	LateMaterialize bool                  `json:"late_materialize,omitempty"` // emit view-column join output (deferred gather)
 	// BuildSchema / ProbeSchema are the plan-declared columns of each side,
-	// read ONLY when that side turns out to be empty — an outer join still
-	// owes the rows the empty side shapes and cannot name their columns
-	// otherwise. Same idea as AggSpec.OutputType (#329): declare on the wire
+	// read when that side turns out to be empty — an outer join still owes
+	// the rows the empty side shapes and cannot name their columns otherwise
+	// — and before the build by the semi/anti `<>` distinct-pair gate, which
+	// stays off unless both value columns are declared with an exactly
+	// comparable type pair (exec.HashJoin.semiAntiNEEligible). Same idea as AggSpec.OutputType (#329): declare on the wire
 	// what the worker can no longer read off a batch. See
 	// physical.declaredJoinSchema, exec.HashJoin.BuildSchemaHint.
 	BuildSchema []ColumnSpec `json:"build_schema,omitempty"`
@@ -1156,8 +1159,10 @@ type FusedJoinSpec struct {
 	BuildColOrigins map[string]string `json:"build_col_origins,omitempty"` // bare build col → owning scan alias (multi-table builds only)
 	JoinFilter      string            `json:"join_filter,omitempty"`
 	FilterExprs     []string          `json:"filter_exprs,omitempty"` // post-join filters for this step
-	// BuildSchema declares this fused build's columns, read only when its
-	// file list turns out to be empty (see OpSpec.BuildSchema).
+	// BuildSchema declares this fused build's columns, read when its file
+	// list turns out to be empty (see OpSpec.BuildSchema). There is no probe
+	// declaration here, so a fused `<>` semi/anti join never enables the
+	// distinct-pair build and runs the generic filtered build (epic #1681).
 	BuildSchema []ColumnSpec `json:"build_schema,omitempty"`
 }
 

@@ -313,9 +313,10 @@ func (d *subplanDeduper) fingerprintAs(id, joinTypeOverride string) (string, boo
 	// Declared side schemas are projection-derived, exactly like Columns
 	// above: two structurally identical legs can carry different column
 	// subsets (Q11's outer leg needs ps_partkey, its scalar-subquery twin
-	// does not) and are still interchangeable subtrees. They are advisory —
-	// read only when a join side turns out to be empty — so the survivor's
-	// copy standing for both degrades at worst to the un-declared behaviour.
+	// does not) and are still interchangeable subtrees. Only this
+	// fingerprint copy is cleared: the surviving stage runs with its own
+	// declarations (which shape an empty side and gate the `<>` distinct-pair
+	// build), so dedup changes neither.
 	c.JoinProbeSchema = nil
 	c.JoinBuildSchema = nil
 	if joinTypeOverride != "" {

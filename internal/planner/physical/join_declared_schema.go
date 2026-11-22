@@ -13,9 +13,11 @@ import (
 // declaredJoinSchema derives one join side's plan-time schema from annotated
 // scan names/order/types, narrowed by want (NeededColumns plus join keys).
 // Empty want retains every scan column. Match buildReadSchema order: table
-// schema per scan, then scans in walk order. exec.HashJoin consults this
-// advisory schema only when the side produces no batch, so approximations for
-// untypable subtrees do not affect non-empty joins. Empty outer-join sides
+// schema per scan, then scans in walk order. exec.HashJoin takes a side's
+// columns from this schema only when the side produces no batch, so
+// approximations for untypable subtrees do not reshape non-empty joins; its
+// semi/anti `<>` distinct-pair gate also reads the declared value types and
+// stays off unless they pair exactly (semiAntiNEEligible). Empty outer-join sides
 // must have present NULL columns, not absent columns (#348, #352).
 func (w *declWalk) declaredJoinSchema(n *logical.Node, want []string, published map[*logical.Node]bool,
 	subqueryDecl func(string) (parquet.Column, bool)) []parquet.Column {

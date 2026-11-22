@@ -249,9 +249,12 @@ type HashJoin struct {
 	// rather than NULL, so `COUNT(o.o_orderstatus)` counted 1500 of them and
 	// `WHERE r.r_regionkey IS NULL` matched none (#348).
 	//
-	// The hints are only consulted when the side produced nothing; a real
-	// batch's schema always wins, so an imprecise hint cannot corrupt a
-	// non-empty join.
+	// For the schema of a side, a real batch's schema always wins: the hint
+	// names a side's columns only when that side produced nothing. The hints
+	// are also read before the build by the semi/anti `<>` distinct-pair
+	// gate (semiAntiNEEligible, join_semianti_ne.go), which enables only when
+	// both value columns are declared with an exactly comparable type pair; an
+	// absent hint keeps that optimization off and never changes an answer.
 	BuildSchemaHint []parquet.Column
 	ProbeSchemaHint []parquet.Column
 

@@ -708,7 +708,8 @@ func preservesBuildSide(jt exec.JoinType) bool {
 //
 // Two declarations arrive this way and both are the plan saying something the
 // worker cannot read off its input: OpSpec.BuildSchema/ProbeSchema shape a
-// join side that turns out to be empty, and OpSpec.ColumnTypes says what a
+// join side that turns out to be empty (and gate the `<>` distinct-pair
+// build), and OpSpec.ColumnTypes says what a
 // scanned file's columns really are when the file itself cannot (#423). The
 // DECIMAL and VECTOR parameters ride along because the second caller needs
 // them — a VECTOR's storage is sized from its dimension — and they are zero

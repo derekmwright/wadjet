@@ -344,9 +344,10 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 		hj.BuildColOrigins = subtreeNamingOf(node.Children[1]).MaterializedBuildColOrigins()
 	}
 
-	// Plan-declared schemas for the two sides, read only when a side delivers
-	// no batch at all: an outer join still owes the rows the empty side
-	// shapes and cannot name their columns without this (#348/#352). Computed
+	// Plan-declared schemas for the two sides, read when a side delivers no
+	// batch at all (an outer join still owes the rows the empty side shapes
+	// and cannot name their columns without this, #348/#352) and by the
+	// semi/anti `<>` distinct-pair gate before the build. Computed
 	// after the semi/anti swap above so the sides are final.
 	// Declared by what each side PUBLISHES. On this path a derived block's
 	// Project is a real operator, so a hint read from the scan below it
