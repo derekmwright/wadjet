@@ -7,6 +7,8 @@
 #   uniq and dup h2_base2_control on spilled512k: unpinned-flap -> flap:refused:42000 (bounded). Measured at
 #     dc980141+R0 over 20 fresh runs per fixture: 19 x refused 42000 "memory budget exceeded" (hash join build),
 #     1 x PostgreSQL's answer, on each fixture.
+# Re-pinned at #1681 line 1681a (a semi/anti residual with a NULL operand is UNKNOWN, not its zero value):
+#   own/semi, semi_rows, semi_base, anti, anti_rows on all six arms: wrong:<digest> executor -> right (30 cells).
 #
 # A pin of "wrong" or "refused" is a RECORDED KNOWN DEFECT on issue #1678 (or the issue its class names),
 # NOT an acceptance. The test fails when a cell's verdict differs from its pin in EITHER direction: the
@@ -177,18 +179,18 @@ own	expr_key	dag	wrong:2bef14a67cc3	emission	-
 own	expr_key	dag-shuffled	wrong:2bef14a67cc3	emission	-
 own	expr_key	dag-morsel4	wrong:2bef14a67cc3	emission	-
 own	expr_key	localD	right	-	status=established
-own	anti	single	wrong:e8b2533f1fd3	executor	-
-own	anti	spilled512k	wrong:e8b2533f1fd3	executor	-
-own	anti	dag	wrong:e8b2533f1fd3	executor	-
-own	anti	dag-shuffled	wrong:e8b2533f1fd3	executor	-
-own	anti	dag-morsel4	wrong:e8b2533f1fd3	executor	-
-own	anti	localD	wrong:e8b2533f1fd3	executor	status=established
-own	semi	single	wrong:e8b2533f1fd3	executor	-
-own	semi	spilled512k	wrong:e8b2533f1fd3	executor	-
-own	semi	dag	wrong:e8b2533f1fd3	executor	-
-own	semi	dag-shuffled	wrong:e8b2533f1fd3	executor	-
-own	semi	dag-morsel4	wrong:e8b2533f1fd3	executor	-
-own	semi	localD	wrong:e8b2533f1fd3	executor	status=established
+own	anti	single	right	-	-
+own	anti	spilled512k	right	-	-
+own	anti	dag	right	-	-
+own	anti	dag-shuffled	right	-	-
+own	anti	dag-morsel4	right	-	-
+own	anti	localD	right	-	status=established
+own	semi	single	right	-	-
+own	semi	spilled512k	right	-	-
+own	semi	dag	right	-	-
+own	semi	dag-shuffled	right	-	-
+own	semi	dag-morsel4	right	-	-
+own	semi	localD	right	-	status=established
 own	lateral	single	right	-	-
 own	lateral	spilled512k	right	-	-
 own	lateral	dag	routed-right	-	-
@@ -219,24 +221,24 @@ own	join3	dag	wrong:8b2f8a1e4396	emission	-
 own	join3	dag-shuffled	wrong:8b2f8a1e4396	emission	-
 own	join3	dag-morsel4	wrong:8b2f8a1e4396	emission	-
 own	join3	localD	right	-	status=established
-own	semi_rows	single	wrong:11ea1e3365f1	executor	-
-own	semi_rows	spilled512k	wrong:11ea1e3365f1	executor	-
-own	semi_rows	dag	wrong:11ea1e3365f1	executor	-
-own	semi_rows	dag-shuffled	wrong:11ea1e3365f1	executor	-
-own	semi_rows	dag-morsel4	wrong:11ea1e3365f1	executor	-
-own	semi_rows	localD	wrong:11ea1e3365f1	executor	status=established
-own	anti_rows	single	wrong:ddf7806b8572	executor	-
-own	anti_rows	spilled512k	wrong:ddf7806b8572	executor	-
-own	anti_rows	dag	wrong:ddf7806b8572	executor	-
-own	anti_rows	dag-shuffled	wrong:ddf7806b8572	executor	-
-own	anti_rows	dag-morsel4	wrong:ddf7806b8572	executor	-
-own	anti_rows	localD	wrong:ddf7806b8572	executor	status=established
-own	semi_base	single	wrong:11ea1e3365f1	executor	-
-own	semi_base	spilled512k	wrong:11ea1e3365f1	executor	-
-own	semi_base	dag	wrong:11ea1e3365f1	executor	-
-own	semi_base	dag-shuffled	wrong:11ea1e3365f1	executor	-
-own	semi_base	dag-morsel4	wrong:11ea1e3365f1	executor	-
-own	semi_base	localD	wrong:11ea1e3365f1	executor	status=established
+own	semi_rows	single	right	-	-
+own	semi_rows	spilled512k	right	-	-
+own	semi_rows	dag	right	-	-
+own	semi_rows	dag-shuffled	right	-	-
+own	semi_rows	dag-morsel4	right	-	-
+own	semi_rows	localD	right	-	status=established
+own	anti_rows	single	right	-	-
+own	anti_rows	spilled512k	right	-	-
+own	anti_rows	dag	right	-	-
+own	anti_rows	dag-shuffled	right	-	-
+own	anti_rows	dag-morsel4	right	-	-
+own	anti_rows	localD	right	-	status=established
+own	semi_base	single	right	-	-
+own	semi_base	spilled512k	right	-	-
+own	semi_base	dag	right	-	-
+own	semi_base	dag-shuffled	right	-	-
+own	semi_base	dag-morsel4	right	-	-
+own	semi_base	localD	right	-	status=established
 own	semi_nonull	single	right	-	-
 own	semi_nonull	spilled512k	right	-	-
 own	semi_nonull	dag	right	-	-

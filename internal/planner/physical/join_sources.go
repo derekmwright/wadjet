@@ -579,6 +579,16 @@ func buildSemiAntiFilter(filter string) func(probe *batch.RecordBatch, probeRow 
 			if !evalFilterTyped(pv, bv, probeRow, buildRow, ops[i]) {
 				return false
 			}
+			// A comparison with a NULL operand is UNKNOWN, and the filter is
+			// a conjunction that must be TRUE for the pair to match, so the
+			// pair does not match. evalFilterTyped reads the typed slot
+			// without the bitmap — a NULL slot holds its zero value, which
+			// it compares as a value (#1681) — so a TRUE from it stands only
+			// when neither operand is NULL. (Asked after the comparison: a
+			// FALSE fails the pair whatever the bitmap says.)
+			if filterOperandNull(pv, probeRow) || filterOperandNull(bv, buildRow) {
+				return false
+			}
 		}
 		return true
 	}
@@ -592,6 +602,17 @@ func buildSemiAntiFilter(filter string) func(probe *batch.RecordBatch, probeRow 
 // EXISTS/IN residuals use folded tier, so reverting delegation owns no cells.
 func filterColumnIndex(b *batch.RecordBatch, name string) int {
 	return exec.ColumnIndexFallback(b, name)
+}
+
+// filterOperandNull reports whether row of v is SQL NULL, reading the bitmap
+// as GetValue does: a view's own bit first, then its base's through Indices.
+// Read-only — build batches are shared by concurrent probe workers, so this
+// must not touch Bitmap.HasNulls' cache.
+func filterOperandNull(v *batch.Vector, row int) bool {
+	if v.Nulls.IsNullFast(row) {
+		return true
+	}
+	return v.Base != nil && v.Base.Nulls.IsNullFast(int(v.Indices[row]))
 }
 
 // evalFilterTyped compares two vector values at given rows using typed dispatch.
