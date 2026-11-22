@@ -182,14 +182,21 @@ func TestR0WritersRefuseCommittedTargets(t *testing.T) {
 	if bad := r0SameTree(before, after); len(bad) > 0 {
 		t.Errorf("the writer opened pre-existing files under testdata/ for writing:\n  %s", strings.Join(bad, "\n  "))
 	}
+	oldDirs := map[string]bool{td: true}
+	for p := range before {
+		for d := filepath.Dir(p); d != td && strings.HasPrefix(d, td); d = filepath.Dir(d) {
+			oldDirs[d] = true
+		}
+	}
 	newDirs := map[string]bool{}
 	for p := range after {
 		if _, ok := before[p]; ok {
 			continue
 		}
 		dir := filepath.Dir(p)
-		if filepath.Dir(dir) != td || !strings.HasPrefix(filepath.Base(dir), "wadjet-r0-") || newDirs[dir] {
+		if oldDirs[dir] || filepath.Dir(dir) != td || !strings.HasPrefix(filepath.Base(dir), "wadjet-r0-") || newDirs[dir] {
 			t.Errorf("unexpected new file %s (want one file per fresh wadjet-r0-* directory)", p)
+			continue // never removed: only a verified fresh directory is cleaned up
 		}
 		newDirs[dir] = true
 	}
