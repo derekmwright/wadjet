@@ -144,11 +144,18 @@ SQL reference with the deadline that bounds it.
   the lateral spellings, deterministically for the user-written `GROUP BY …
   QUALIFY` block under a LEFT join, identically at base. The five-arm gate
   bounds those cells' spilled arm to {PostgreSQL's rows, that refusal}; the
-  other four arms assert the rows. Filing candidate (exec/memory). The
-  lateral spellings' refusal over small inputs was the aggregate clones'
-  4096-slot presize charged as `spill tracking` while a sibling join built;
-  under a budget the presize is now capped by the input estimate (ADR-0006,
-  2026-11-22), which leaves the class open for inputs above that estimate.
+  other four arms assert the rows. Filing candidate (exec/memory). Under a
+  budget an aggregate's presize is now capped by its input estimate
+  (ADR-0006, 2026-11-22), and over this gate's tiny `lt_i` fixture that
+  closed the grouped cells only: the spilled arm refused the `groupLimit/eq`
+  cells (LATERAL, LEFT, comma) in each of 6 runs before the cap (3, 3 and 2
+  of the three in the runs counted cell by cell) and in none of 6 runs after
+  it. The DISTINCT lateral cells still refuse after it, on a subset that
+  changes from run to run: `distinct/eq` and `distinct/mixed` under LATERAL,
+  LEFT and comma refused 6, 5, 4, 6, 4 and 3 of those six cells over 6 runs
+  at the cap (5, 5 and 3 in the base runs counted cell by cell). Their
+  mechanism is not diagnosed and the cap does not explain them, so the class
+  stays open over small inputs too, not only above the estimate.
 - A window above a lateral join runs on the single-process pipeline when
   requested through the DAG. `refuseWindowOverDependentJoin` handles the
   bounded and unbounded shapes; `WindowOverLateralLocalRoutes` measures the

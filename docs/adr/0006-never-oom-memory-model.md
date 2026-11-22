@@ -807,7 +807,18 @@ over the same configurations, free and in all four forced orders. Gate:
 **What it does not cover.** The class is wider than the presize: a forced
 `spill tracking` charge held by one breaker's clones when a concurrently
 building join first reserves decides that join's verdict, and the cap removes
-it only where the input estimate is small. Measured at this change, not fixed:
+the presize part of it, not every refusal over a small input. Measured at this
+change, not fixed:
+
+- `coordinator.TestArcLTACorrelatedBodyIsEvaluatedPerOuterRowOnEveryArm` over
+  its tiny `lt_i` fixture, spilled arm: the cap closed the `groupLimit/eq`
+  cells (refused in each of 6 runs before it, in none of 6 after), but the
+  DISTINCT lateral cells (`distinct/eq`, `distinct/mixed` under LATERAL, LEFT
+  and comma) still refuse `memory budget exceeded` at the tip on a subset that
+  changes from run to run: 6, 5, 4, 6, 4 and 3 of those six cells over 6 runs
+  (5, 5 and 3 in the base runs counted cell by cell). The input estimate is
+  small there, so this is a counterexample to "small estimate, closed"; its
+  mechanism is unresolved;
 
 - the same two statements over a 10,000-row `lat_item` (six groups; the
   estimate is above 4096, so the presize stands) answer free and refuse 10 of
