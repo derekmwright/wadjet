@@ -235,6 +235,12 @@ type HashAggregate struct {
 	// clones (each owns a disjoint 1/k of the key space).
 	GroupNDVHint    int64
 	cloneNDVDivisor int
+	// presizeRowCap is a clone's copy of its parent's InputRowHint, read
+	// ONLY as the cap presizeBound applies under a budget (a clone consumes
+	// a subset of its parent's input). It never sizes a clone upward:
+	// clones keep InputRowHint at zero so k clones do not each presize for
+	// the whole input.
+	presizeRowCap int64
 
 	mu             sync.Mutex
 	keys           [][]any

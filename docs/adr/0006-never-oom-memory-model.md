@@ -1,6 +1,6 @@
 # ADR-0006: Never-OOM memory — shared pool, ownership ledger, spill-everywhere
 
-Status: Accepted (accounting overhaul landed 2026-05-30, 35f6730; recorded 2026-07-25; amended 2026-08-17, 2026-09-03, 2026-09-04, 2026-09-18, 2026-09-19 and 2026-11-21 — see Amendments)
+Status: Accepted (accounting overhaul landed 2026-05-30, 35f6730; recorded 2026-07-25; amended 2026-08-17, 2026-09-03, 2026-09-04, 2026-09-18, 2026-09-19, 2026-11-21 and 2026-11-22 — see Amendments)
 
 ## Context
 
@@ -772,3 +772,55 @@ cannot proceed in the budget minus one row group. The refusal `coordinator.TestF
 pins is not this mechanism: it refuses at the build's first arrival against
 3.5 MB of forced `spill tracking` held by the finished DISTINCT aggregate's
 partition states, on every run at the base and the tip, in both orders.
+
+### 2026-11-22: an aggregate's presize under a budget is bounded by its input estimate (#1706, the third site)
+
+Producer 7 (`spill tracking`) is charged by `HashAggregate.reconcileGroupMemory`
+at the CAPACITY of the group state, and the unhinted presize is 4096 slots. On
+the typed-generic path (a STRING key beside an INT64 key) that is 458,796
+bytes, 88% of a 512 KiB budget, for a table holding two groups. A partitioned
+aggregate runs one clone per worker, and every hash join's build runs on its
+own goroutine, so the two grouped LATERAL bodies of
+`coordinator.TestN1ATwoGroupedLateralsPublishTheirOwnColumns` ran six clones
+at once: each charged 458,796 on its first two-row batch, crossed its own
+clone drain bound, wrote a run file and released. A join build whose first
+arrival reservation landed inside that window refused with the gate's exact
+figures (`used=1376347, requested=24692, … forced=1376347 by "spill
+tracking"`); one landing after it answered. Holding one aggregate's release
+for 100 ms refused 319 of 320 runs (either aggregate, both statements,
+GOMAXPROCS 1, 2, 4 and 24, 20 runs each); delaying the join's reservation
+50 ms instead answered 160 of 160. The verdict was the scheduler's.
+
+This is the rule this record already applies to producer 5 ("a charge for
+memory that does not exist yet", 2026-09-03): pre-sized capacity the input
+cannot fill. Under a budget the aggregate's initial capacity — its group
+index, key mirrors, typed-key index and flat accumulators, and the tables a
+drain resets to — is now capped at the planner's input-row estimate
+(`HashAggregate.presizeBound`; a clone inherits its parent's estimate as a cap
+only). It is a cap on an allocation, not a share or a new constant: every
+structure still grows on demand, and an estimate that is low costs doublings,
+never an answer. Without a budget nothing changes. With it the two statements'
+clones charge about 750 bytes each, never drain, and answered 800 of 800 runs
+over the same configurations, free and in all four forced orders. Gate:
+`exec.TestABudgetedAggregatePresizesNoMoreThanItsInputCanFill`.
+
+**What it does not cover.** The class is wider than the presize: a forced
+`spill tracking` charge held by one breaker's clones when a concurrently
+building join first reserves decides that join's verdict, and the cap removes
+it only where the input estimate is small. Measured at this change, not fixed:
+
+- the same two statements over a 10,000-row `lat_item` (six groups; the
+  estimate is above 4096, so the presize stands) answer free and refuse 10 of
+  10 with one aggregate's release held;
+- `coordinator.TestF1AKeylessJoinAsksForWhatItNeeds/480`'s pinned refusal is
+  this class with REAL group state (DISTINCT `c_i32` over 5,000 rows, about
+  118 KB per clone): free it refused 10 of 10; with the join's reservation
+  delayed 100 ms it answered PostgreSQL's 3 in 4 of 10. The 2026-11-21
+  amendment's "on every run at the base and the tip, in both orders" held for
+  the two read-ahead orders it measured and is false for this one; the one
+  sighting of that pin answering is this ordering, not an unexplained
+  accounting drift.
+
+Making those verdicts independent of the order — what a join's first
+reservation may wait for, or what an upstream breaker's clones may hold
+while a sibling build admits — is a decision this record has not taken.

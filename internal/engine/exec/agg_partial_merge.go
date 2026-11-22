@@ -50,6 +50,12 @@ func (h *HashAggregate) CloneSink() SinkSource {
 	// by the clone count — morsel clones take dynamic row slices, and a
 	// bound that over-states only ever keeps the adaptive path.
 	clone.inputRowBound = h.inputRowBound
+	// The parent's input estimate caps a clone's initial capacity under a
+	// budget (presizeBound); it is not an upward presize for the clone.
+	clone.presizeRowCap = h.InputRowHint
+	if clone.presizeRowCap <= 0 {
+		clone.presizeRowCap = h.presizeRowCap
+	}
 	return clone
 }
 

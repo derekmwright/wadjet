@@ -144,7 +144,11 @@ SQL reference with the deadline that bounds it.
   the lateral spellings, deterministically for the user-written `GROUP BY …
   QUALIFY` block under a LEFT join, identically at base. The five-arm gate
   bounds those cells' spilled arm to {PostgreSQL's rows, that refusal}; the
-  other four arms assert the rows. Filing candidate (exec/memory).
+  other four arms assert the rows. Filing candidate (exec/memory). The
+  lateral spellings' refusal over small inputs was the aggregate clones'
+  4096-slot presize charged as `spill tracking` while a sibling join built;
+  under a budget the presize is now capped by the input estimate (ADR-0006,
+  2026-11-22), which leaves the class open for inputs above that estimate.
 - A window above a lateral join runs on the single-process pipeline when
   requested through the DAG. `refuseWindowOverDependentJoin` handles the
   bounded and unbounded shapes; `WindowOverLateralLocalRoutes` measures the

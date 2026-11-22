@@ -410,7 +410,7 @@ func (h *HashAggregate) consumeBatchGenericSoA(b *batch.RecordBatch) {
 		h.keySerCols = buildKeySerCols(h.keySerCols, b, h.groupColIdx, h.groupColTypes)
 		kcols := h.keySerCols
 		if h.genKeyIdx == nil {
-			h.genKeyIdx = newIntHashTable(4096)
+			h.genKeyIdx = newIntHashTable(h.presizeBound(4096))
 		}
 		h.genKeyNext = ensureAppendCap(h.genKeyNext, batchRows)
 
@@ -552,7 +552,7 @@ func packKeyInt64(b []byte) int64 {
 // construction now that Init no longer hands out a fixed 4096-slot table.
 func (h *HashAggregate) strIndexForRow() *strHashTable {
 	if h.strGroupIndex == nil {
-		h.strGroupIndex = newStrHashTable(4096)
+		h.strGroupIndex = newStrHashTable(h.presizeBound(4096))
 	}
 	return h.strGroupIndex
 }
