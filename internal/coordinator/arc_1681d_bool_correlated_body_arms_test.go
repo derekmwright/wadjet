@@ -166,17 +166,6 @@ func bcKnown(name, arm string) (verdict, cause string, known bool) {
 	return "", "", false
 }
 
-// bcBudgetBounded: on the 512 KiB arm a LATERAL cell may refuse `memory
-// budget exceeded` (forced by spill tracking) or answer PostgreSQL's rows,
-// and nothing else. Which of the `outer/<col>/eq/lateral` cells refuse varies
-// from run to run at the base and at the fix alike (seven, then three, then
-// six of seven): the #1706 nondeterminism, the class arc LT's
-// ltBudgetBounded allows, not a wrong value. The other arms assert the rows.
-func bcBudgetBounded(name, arm, verdict, got string) bool {
-	return arm == "spilled512k" && strings.HasSuffix(name, "/lateral") &&
-		verdict == "refused" && strings.Contains(got, "memory budget exceeded")
-}
-
 // A COMPARISON OVER BOOLEAN VALUES INSIDE A CORRELATED SUBQUERY BODY IS
 // POSTGRESQL'S ANSWER ON EVERY ARM (epic #1681, line 1681d). The generated
 // matrix (bcCells) against PostgreSQL 17.11's sorted rows, on the 1681a
@@ -191,6 +180,21 @@ func bcBudgetBounded(name, arm, verdict, got string) bool {
 // body on the coordinator's local pipeline); an inner-only `s.c_b > false`
 // was wrong on the embedded engine only, because the DAG worker compiles a
 // scan filter through the row evaluator, which ordered booleans right.
+//
+// The spilled arm asserts the LATERAL cells too. Until #1706's fourth site it
+// was allowed to refuse them with `memory budget exceeded … forced by "spill
+// tracking"` (bcBudgetBounded): every partitioned clone of the LATERAL
+// count(*) charged a 4096-slot group-state chunk (about 107 KB for one group),
+// six or seven clones held more than the 512 KiB budget, and which cells
+// refused depended on how many had released before the join first reserved
+// (4 to 7 of the eight `outer/<col>/eq/lateral` cells that ever refused in
+// every free base run, 7 or 8 with the releases held). With the chunk bounded
+// by the input estimate a clone charges about 9 KB and all 24 together fit
+// beside the join's first arrival, so no `outer/<col>/eq/lateral` cell
+// refused in 210 runs over GOMAXPROCS 1, 2, 4 and the default and both forced
+// orders (the join's first reservation delayed, every aggregate release
+// held); the rows are PostgreSQL 17.11's, re-measured over the 59 LATERAL
+// cells (postgres:17-alpine, --locale=C).
 func TestArc1681dBoolCorrelatedBodyEveryArm(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: five arms over the 1681d matrix")
@@ -237,8 +241,6 @@ func TestArc1681dBoolCorrelatedBodyEveryArm(t *testing.T) {
 				}
 				kv, cause, known := bcKnown(tc.name, arm.name)
 				switch {
-				case bcBudgetBounded(tc.name, arm.name, verdict, got):
-					t.Logf("%s: %s refused within its budget bound (#1706): %s", tc.name, arm.name, got)
 				case verdict == "right" && known:
 					t.Errorf("%s\n  arm  %s\n  now answers as PostgreSQL 17.11 does (%s): delete its bcKnown rule (%s)", tc.sql, arm.name, want, cause)
 				case verdict != "right" && !known:

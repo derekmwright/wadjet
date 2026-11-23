@@ -1575,62 +1575,21 @@ var ltRefuses = map[string]string{
 	"LEFTLATERAL/ordinalLimit/none":     ltKeylessLeftJoin,
 }
 
-// ltBudgetBounded names the cells whose SPILLED arm may refuse with a memory
-// budget refusal instead of answering: a hash aggregate (DISTINCT, GROUP BY,
-// an ungrouped aggregate) or a window over one on a hash join's build side
-// at 512 KiB may refuse with `hash join build: memory budget exceeded …
-// forced by "spill tracking"` — the upstream breaker's forced spill-tracking
-// bytes fill the budget before the build's first reserve. It is
-// nondeterministic for the lateral spellings and deterministic for the
-// user-written `GROUP BY … QUALIFY` block under a LEFT join, identically at
-// 51addfb6: a pre-existing exec/memory defect recorded in arc LT's notes as a
-// filing candidate, not a wrong VALUE. The arm either answers PostgreSQL's
-// rows or refuses loudly, and this map allows exactly that pair and nothing
-// else; the single arm and the three DAG arms assert the rows unconditionally.
-//
-// The three `groupLimit/eq` lateral cells left this map when the aggregate
-// presize cap closed their refusal (#1706, daad0ddd): their clones charged a
-// 4096-slot presize as forced spill tracking. At the base at least two of them
-// refused in each of the four runs measured cell by cell; at the cap all three
-// answered in 30 of 30 runs (GOMAXPROCS 1, 2, 4 and the default) with
-// PostgreSQL 17.11's rows (postgres:17-alpine, --locale=C, re-measured over
-// the lt_o/lt_i rows), so the spilled arm asserts them now.
-var ltBudgetBounded = map[string]bool{
-
-	"LATERAL/distinct/eq":             true,
-	"LEFTLATERAL/distinct/eq":         true,
-	"COMMALATERAL/distinct/eq":        true,
-	"LATERAL/distinct/ineq":           true,
-	"LEFTLATERAL/distinct/ineq":       true,
-	"COMMALATERAL/distinct/ineq":      true,
-	"LATERAL/distinct/mixed":          true,
-	"LEFTLATERAL/distinct/mixed":      true,
-	"COMMALATERAL/distinct/mixed":     true,
-	"LATERAL/distinct/none":           true,
-	"COMMALATERAL/distinct/none":      true,
-	"LATERAL/distinctOther/eq":        true,
-	"LEFTLATERAL/distinctOther/eq":    true,
-	"COMMALATERAL/distinctOther/eq":   true,
-	"LATERAL/distinctOther/none":      true,
-	"COMMALATERAL/distinctOther/none": true,
-	"LATERAL/groupHaving/eq":          true,
-	"LEFTLATERAL/groupHaving/eq":      true,
-	"COMMALATERAL/groupHaving/eq":     true,
-	"LATERAL/groupHaving/none":        true,
-	"COMMALATERAL/groupHaving/none":   true,
-	"LATERAL/groupLimit/none":         true,
-	"COMMALATERAL/groupLimit/none":    true,
-	"LATERAL/ungroupedAgg/eq":         true,
-	"LEFTLATERAL/ungroupedAgg/eq":     true,
-	"COMMALATERAL/ungroupedAgg/eq":    true,
-	"LATERAL/ungroupedAgg/none":       true,
-	"COMMALATERAL/ungroupedAgg/none":  true,
-	"LATERAL/aggHaving/eq":            true,
-	"LEFTLATERAL/aggHaving/eq":        true,
-	"COMMALATERAL/aggHaving/eq":       true,
-	"LATERAL/aggHaving/none":          true,
-	"COMMALATERAL/aggHaving/none":     true,
-}
+// The spilled arm asserts every cell's rows. Until #1706's fourth site an
+// ltBudgetBounded map let it refuse 33 aggregated LATERAL cells (DISTINCT,
+// GROUP BY, an ungrouped aggregate) with `hash join build: memory budget
+// exceeded … forced by "spill tracking"`. The `groupLimit/eq` cells left it
+// with the aggregate presize cap (daad0ddd). The last refusals, `distinct/eq`
+// and `distinct/mixed` under LATERAL, LEFT and comma, were every partitioned
+// clone of the DISTINCT charging a 4096-slot group-state chunk (about 107 KB
+// for one group): six clones exceeded 512 KiB, and which cells refused
+// depended on how many had released before the join first reserved (3 to 6
+// of the six in every free base run). With the chunk bounded by the input
+// estimate none of the 33 cells refused in 180 runs over GOMAXPROCS 1, 2, 4
+// and the default and both forced orders (the join's first reservation
+// delayed, every aggregate release held), and the other 27 refused in no
+// base run either; PostgreSQL 17.11's rows were re-measured for all 33
+// (postgres:17-alpine, --locale=C, over the lt_o/lt_i rows).
 
 // ltArmPins records a disposition that is NOT the same on every arm, per
 // arm, with the mechanism. A lifted predicate over a column the enclosing
@@ -1687,10 +1646,6 @@ func TestArcLTACorrelatedBodyIsEvaluatedPerOuterRowOnEveryArm(t *testing.T) {
 							"if it answers now, assert PostgreSQL's row set %s and delete this cell's refusal",
 							tc.sql, arm.name, got, class, want)
 					}
-					continue
-				}
-				if ltBudgetBounded[tc.name] && arm.name == "spilled512k" &&
-					strings.HasPrefix(got, "ERR ") && strings.Contains(got, "memory budget exceeded") {
 					continue
 				}
 				if got != want {
