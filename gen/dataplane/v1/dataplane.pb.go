@@ -345,13 +345,21 @@ func (x *Welcome) GetServerTime() int64 {
 // If err is non-empty, the task failed and the partial output (if any)
 // is discarded by the receiver.
 type ResultBatch struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	QueryId       string                 `protobuf:"bytes,1,opt,name=query_id,json=queryId,proto3" json:"query_id,omitempty"`
-	WorkerId      string                 `protobuf:"bytes,2,opt,name=worker_id,json=workerId,proto3" json:"worker_id,omitempty"`
-	Terminal      bool                   `protobuf:"varint,3,opt,name=terminal,proto3" json:"terminal,omitempty"`
-	RowCount      int32                  `protobuf:"varint,4,opt,name=row_count,json=rowCount,proto3" json:"row_count,omitempty"`
-	Payload       []byte                 `protobuf:"bytes,5,opt,name=payload,proto3" json:"payload,omitempty"` // WSHF-encoded
-	Err           string                 `protobuf:"bytes,6,opt,name=err,proto3" json:"err,omitempty"`         // non-empty on task failure (terminal=true)
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	QueryId  string                 `protobuf:"bytes,1,opt,name=query_id,json=queryId,proto3" json:"query_id,omitempty"`
+	WorkerId string                 `protobuf:"bytes,2,opt,name=worker_id,json=workerId,proto3" json:"worker_id,omitempty"`
+	Terminal bool                   `protobuf:"varint,3,opt,name=terminal,proto3" json:"terminal,omitempty"`
+	RowCount int32                  `protobuf:"varint,4,opt,name=row_count,json=rowCount,proto3" json:"row_count,omitempty"`
+	Payload  []byte                 `protobuf:"bytes,5,opt,name=payload,proto3" json:"payload,omitempty"` // WSHF-encoded
+	Err      string                 `protobuf:"bytes,6,opt,name=err,proto3" json:"err,omitempty"`         // non-empty on task failure (terminal=true)
+	// task_id / execution_id name the task and the one execution of it
+	// that sent this message; seq numbers that execution's batches from 1,
+	// and batch_count (terminal only) is how many it sent. Mirrors
+	// distributed.GatherBatchMsg (#1709).
+	TaskId        string `protobuf:"bytes,7,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
+	ExecutionId   string `protobuf:"bytes,8,opt,name=execution_id,json=executionId,proto3" json:"execution_id,omitempty"`
+	Seq           uint64 `protobuf:"varint,9,opt,name=seq,proto3" json:"seq,omitempty"`
+	BatchCount    uint64 `protobuf:"varint,10,opt,name=batch_count,json=batchCount,proto3" json:"batch_count,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -426,6 +434,34 @@ func (x *ResultBatch) GetErr() string {
 		return x.Err
 	}
 	return ""
+}
+
+func (x *ResultBatch) GetTaskId() string {
+	if x != nil {
+		return x.TaskId
+	}
+	return ""
+}
+
+func (x *ResultBatch) GetExecutionId() string {
+	if x != nil {
+		return x.ExecutionId
+	}
+	return ""
+}
+
+func (x *ResultBatch) GetSeq() uint64 {
+	if x != nil {
+		return x.Seq
+	}
+	return 0
+}
+
+func (x *ResultBatch) GetBatchCount() uint64 {
+	if x != nil {
+		return x.BatchCount
+	}
+	return 0
 }
 
 // TaskDispatch is one unit of work coord pushes to a worker. The body
@@ -649,14 +685,20 @@ const file_dataplane_v1_dataplane_proto_rawDesc = "" +
 	"\n" +
 	"cluster_id\x18\x01 \x01(\tR\tclusterId\x12\x1f\n" +
 	"\vserver_time\x18\x02 \x01(\x03R\n" +
-	"serverTime\"\xaa\x01\n" +
+	"serverTime\"\x99\x02\n" +
 	"\vResultBatch\x12\x19\n" +
 	"\bquery_id\x18\x01 \x01(\tR\aqueryId\x12\x1b\n" +
 	"\tworker_id\x18\x02 \x01(\tR\bworkerId\x12\x1a\n" +
 	"\bterminal\x18\x03 \x01(\bR\bterminal\x12\x1b\n" +
 	"\trow_count\x18\x04 \x01(\x05R\browCount\x12\x18\n" +
 	"\apayload\x18\x05 \x01(\fR\apayload\x12\x10\n" +
-	"\x03err\x18\x06 \x01(\tR\x03err\"\xa8\x01\n" +
+	"\x03err\x18\x06 \x01(\tR\x03err\x12\x17\n" +
+	"\atask_id\x18\a \x01(\tR\x06taskId\x12!\n" +
+	"\fexecution_id\x18\b \x01(\tR\vexecutionId\x12\x10\n" +
+	"\x03seq\x18\t \x01(\x04R\x03seq\x12\x1f\n" +
+	"\vbatch_count\x18\n" +
+	" \x01(\x04R\n" +
+	"batchCount\"\xa8\x01\n" +
 	"\fTaskDispatch\x12\x17\n" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12\x19\n" +
 	"\bquery_id\x18\x02 \x01(\tR\aqueryId\x12\x19\n" +

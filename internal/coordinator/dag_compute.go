@@ -814,14 +814,19 @@ func (c *Coordinator) dispatchComputeStage(
 	c.logger.Info("dispatching compute stage",
 		"stage_id", stage.ID, "stage_type", stage.Type,
 		"tasks", len(tasks), "subject", subject)
-	// Arm gather-fusion terminal count before publish so workers can't race
-	// the count past the receiver. Every task in this stage emits an
-	// OpGatherSink terminal (canMigrateAggregate fires for the entire batch
-	// when fusion is set — canFuseJoin is mutually exclusive on stage type,
-	// canFuseGather requires no SortKeys/Limit). Tasks count == terminals
-	// expected.
+	// Register the gather-fused task set before publish: the receiver
+	// rejects a stream from a task it was not told about, and completes
+	// only when every one of these tasks' bound executions has finished
+	// (#1709). Every task in this stage emits an OpGatherSink terminal
+	// (canMigrateAggregate fires for the entire batch when fusion is set —
+	// canFuseJoin is mutually exclusive on stage type, canFuseGather
+	// requires no SortKeys/Limit).
 	if fusion != nil {
-		fusion.recv.SetExpectedTerminals(len(tasks))
+		ids := make([]string, len(tasks))
+		for i := range tasks {
+			ids[i] = tasks[i].ID
+		}
+		fusion.recv.expectTasks(ids)
 	}
 	if err := c.scheduler.PublishTasks(ctx, publishNow); err != nil {
 		return StageOutput{}, fmt.Errorf("stage %s: publish: %w", stage.ID, err)

@@ -6,6 +6,7 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -448,13 +449,15 @@ func TestBuildAggregateFragment_GatherSink(t *testing.T) {
 	})
 }
 
-// TestGatherReceiver_SetExpectedTerminalsRace covers the race where every
-// fragment task publishes its terminal BEFORE the dispatcher returns from
-// PublishTasks (and thus before SetExpectedTerminals is called). Without
-// the post-set re-check, recv.wait would hang forever because done is only
-// signaled inside handle(). With the check, SetExpectedTerminals(N) trips
-// done as soon as the threshold is met retroactively.
-func TestGatherReceiver_SetExpectedTerminalsRace(t *testing.T) {
+// TestGatherReceiver_RegisteredTasksOverNATS: the fused path subscribes
+// early and registers its task set before publishing (#1709). Identified
+// terminals for every registered task, over a real NATS subscription,
+// complete the receiver; a terminal for a task that was never registered —
+// which is what a message arriving before registration would be — fails the
+// statement instead of counting toward completion. (Replaces the
+// SetExpectedTerminals re-arm race test: registration now precedes publish
+// structurally, and an unregistered terminal is rejected, not banked.)
+func TestGatherReceiver_RegisteredTasksOverNATS(t *testing.T) {
 	cfg := distributed.DefaultNATSConfig()
 	cfg.Port = -1
 	cfg.StoreDir = t.TempDir()
@@ -470,17 +473,8 @@ func TestGatherReceiver_SetExpectedTerminalsRace(t *testing.T) {
 	}
 	t.Cleanup(func() { nc.Close() })
 
-	const subject = "test.gather.race"
-	recv, err := subscribeGather(nc, subject, 0, nil, 0)
-	if err != nil {
-		t.Fatalf("subscribeGather: %v", err)
-	}
-
-	// Publish 3 terminals BEFORE setting expectedTerminals, simulating
-	// fast workers that finished while the dispatcher is still in
-	// PublishTasks.
-	for i := 0; i < 3; i++ {
-		data, err := distributed.Marshal(distributed.GatherBatchMsg{Terminal: true, WorkerID: "w"})
+	publish := func(subject string, m distributed.GatherBatchMsg) {
+		data, err := distributed.Marshal(m)
 		if err != nil {
 			t.Fatalf("marshal: %v", err)
 		}
@@ -488,40 +482,44 @@ func TestGatherReceiver_SetExpectedTerminalsRace(t *testing.T) {
 			t.Fatalf("publish: %v", err)
 		}
 	}
-	if err := nc.Flush(); err != nil {
-		t.Fatalf("flush: %v", err)
-	}
-	// Spin until handler has observed all three. Avoids a fixed sleep.
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && recv.msgCount.Load() < 3 {
-		time.Sleep(5 * time.Millisecond)
-	}
-	if got := recv.msgCount.Load(); got < 3 {
-		t.Fatalf("only %d/3 terminals seen by handler", got)
-	}
 
-	// Now set the threshold. wait() must return immediately (well within
-	// the 2-second guard), proving the post-set re-arm path fires.
-	recv.SetExpectedTerminals(3)
-	type waitOut struct {
-		res *gatherResult
-		err error
-	}
-	out := make(chan waitOut, 1)
-	go func() {
-		res, err := recv.wait(context.Background(), 2*time.Second)
-		out <- waitOut{res, err}
-	}()
-	select {
-	case r := <-out:
-		if r.err != nil {
-			t.Fatalf("wait returned err: %v", r.err)
+	t.Run("registered", func(t *testing.T) {
+		const subject = "test.gather.registered"
+		recv, err := subscribeGather(nc, subject, nil, 0)
+		if err != nil {
+			t.Fatalf("subscribeGather: %v", err)
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatalf("wait did not unblock after SetExpectedTerminals; race not handled")
-	}
-	// Sanity: msgCount didn't double-count.
-	if got := recv.msgCount.Load(); got != 3 {
-		t.Errorf("msgCount: got %d, want 3", got)
-	}
+		defer recv.discard()
+		ids := []string{"a", "b", "c"}
+		recv.expectTasks(ids)
+		for _, id := range ids {
+			publish(subject, distributed.GatherBatchMsg{Terminal: true, WorkerID: "w", TaskID: id, ExecutionID: "x-" + id})
+		}
+		if err := nc.Flush(); err != nil {
+			t.Fatalf("flush: %v", err)
+		}
+		if _, err := recv.wait(context.Background(), 2*time.Second); err != nil {
+			t.Fatalf("wait: %v", err)
+		}
+		if got := recv.msgCount.Load(); got != 3 {
+			t.Errorf("msgCount: got %d, want 3", got)
+		}
+	})
+
+	t.Run("unregistered", func(t *testing.T) {
+		const subject = "test.gather.unregistered"
+		recv, err := subscribeGather(nc, subject, nil, 0)
+		if err != nil {
+			t.Fatalf("subscribeGather: %v", err)
+		}
+		defer recv.discard()
+		publish(subject, distributed.GatherBatchMsg{Terminal: true, WorkerID: "w", TaskID: "a", ExecutionID: "x-a"})
+		if err := nc.Flush(); err != nil {
+			t.Fatalf("flush: %v", err)
+		}
+		_, err = recv.wait(context.Background(), 2*time.Second)
+		if err == nil || !strings.Contains(err.Error(), "did not dispatch") {
+			t.Fatalf("wait = %v, want the unknown-task failure", err)
+		}
+	})
 }

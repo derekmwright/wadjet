@@ -36,6 +36,12 @@ type ResultBatch struct {
 	RowCount int32
 	Payload  []byte // WSHF-encoded
 	Err      string
+	// TaskID, ExecutionID, Seq and BatchCount mirror the same fields of
+	// distributed.GatherBatchMsg (#1709).
+	TaskID      string
+	ExecutionID string
+	Seq         uint64
+	BatchCount  uint64
 }
 
 // ResultHandler consumes ResultBatch messages for a single query.
@@ -281,6 +287,11 @@ func (s *Server) dispatchResultBatch(rb *dpv1.ResultBatch) {
 		RowCount: rb.GetRowCount(),
 		Payload:  rb.GetPayload(),
 		Err:      rb.GetErr(),
+
+		TaskID:      rb.GetTaskId(),
+		ExecutionID: rb.GetExecutionId(),
+		Seq:         rb.GetSeq(),
+		BatchCount:  rb.GetBatchCount(),
 	})
 }
 

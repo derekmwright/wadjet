@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
-	"github.com/derekmwright/wadjet/internal/distributed"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -69,18 +68,14 @@ func drainReplay(tb testing.TB, s BatchStream) []int64 {
 // of failing the query (PR #142's interim behavior) or OOMing the process
 // (the original sweep finding #14).
 func TestGatherReceiver_BudgetSpillsAndReplays(t *testing.T) {
-	r := &gatherReceiver{
-		expectedTerminals: 1,
-		budget:            32 * 1024, // 32 KiB — a few 2048-row int64 payloads
-		done:              make(chan struct{}, 1),
-	}
+	r, gs := newTestGatherReceiver(32 * 1024) // 32 KiB — a few 2048-row int64 payloads
 
 	const rowsPerMsg = 2048
 	for i := 0; i < 5; i++ {
 		payload := wshfInt64Payload(t, rowsPerMsg, int64(i*rowsPerMsg))
-		r.handleParsed(&distributed.GatherBatchMsg{Payload: payload, RowCount: rowsPerMsg, WorkerID: "w"})
+		r.handleParsed(gs.batch(payload, rowsPerMsg))
 	}
-	r.handleParsed(&distributed.GatherBatchMsg{Terminal: true, WorkerID: "w"})
+	r.handleParsed(gs.terminal())
 
 	r.mu.Lock()
 	if r.workerErr != "" {
@@ -139,15 +134,11 @@ func TestGatherReceiver_BudgetSpillsAndReplays(t *testing.T) {
 // Close before exhaustion must remove the scratch file (the alerts path
 // stops at its row limit; pgwire clients can disconnect mid-stream).
 func TestGatherReplayStream_CloseRemovesScratch(t *testing.T) {
-	r := &gatherReceiver{
-		expectedTerminals: 1,
-		budget:            1, // decode exactly one payload, spill the rest
-		done:              make(chan struct{}, 1),
-	}
+	r, gs := newTestGatherReceiver(1) // decode exactly one payload, spill the rest
 	for i := 0; i < 3; i++ {
-		r.handleParsed(&distributed.GatherBatchMsg{Payload: wshfInt64Payload(t, 64, 0), RowCount: 64, WorkerID: "w"})
+		r.handleParsed(gs.batch(wshfInt64Payload(t, 64, 0), 64))
 	}
-	r.handleParsed(&distributed.GatherBatchMsg{Terminal: true, WorkerID: "w"})
+	r.handleParsed(gs.terminal())
 	gr, err := r.wait(context.Background(), time.Second)
 	if err != nil {
 		t.Fatalf("wait: %v", err)
@@ -170,13 +161,9 @@ func TestGatherReplayStream_CloseRemovesScratch(t *testing.T) {
 // discard() without a claiming wait() must remove scratch (dispatch error
 // paths) — and a late frame after discard must not recreate it.
 func TestGatherReceiver_DiscardRemovesScratch(t *testing.T) {
-	r := &gatherReceiver{
-		expectedTerminals: 1,
-		budget:            1,
-		done:              make(chan struct{}, 1),
-	}
+	r, gs := newTestGatherReceiver(1)
 	for i := 0; i < 2; i++ {
-		r.handleParsed(&distributed.GatherBatchMsg{Payload: wshfInt64Payload(t, 64, 0), RowCount: 64, WorkerID: "w"})
+		r.handleParsed(gs.batch(wshfInt64Payload(t, 64, 0), 64))
 	}
 	r.mu.Lock()
 	path := r.spillPath
@@ -189,7 +176,7 @@ func TestGatherReceiver_DiscardRemovesScratch(t *testing.T) {
 		t.Fatalf("scratch not removed by discard: %v", statErr)
 	}
 	// Late frame after discard: must not recreate scratch.
-	r.handleParsed(&distributed.GatherBatchMsg{Payload: wshfInt64Payload(t, 64, 0), RowCount: 64, WorkerID: "w"})
+	r.handleParsed(gs.batch(wshfInt64Payload(t, 64, 0), 64))
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.spillPath != "" || r.spillFile != nil {
@@ -208,13 +195,9 @@ func TestGatherReceiver_SpillWriteFailureFailsQueryCleanly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := &gatherReceiver{
-		expectedTerminals: 1,
-		budget:            1,
-		done:              make(chan struct{}, 1),
-	}
+	r, gs := newTestGatherReceiver(1)
 	// First payload decodes (fills the prefix past budget=1).
-	r.handleParsed(&distributed.GatherBatchMsg{Payload: wshfInt64Payload(t, 64, 0), RowCount: 64, WorkerID: "w"})
+	r.handleParsed(gs.batch(wshfInt64Payload(t, 64, 0), 64))
 	// Force the spill file to the read-only handle, with a tiny buffer so
 	// the write surfaces immediately (payload > 16 bytes forces a flush).
 	r.mu.Lock()
@@ -222,8 +205,8 @@ func TestGatherReceiver_SpillWriteFailureFailsQueryCleanly(t *testing.T) {
 	r.spillPath = scratch
 	r.spillW = bufio.NewWriterSize(f, 16)
 	r.mu.Unlock()
-	r.handleParsed(&distributed.GatherBatchMsg{Payload: wshfInt64Payload(t, 64, 0), RowCount: 64, WorkerID: "w"})
-	r.handleParsed(&distributed.GatherBatchMsg{Terminal: true, WorkerID: "w"})
+	r.handleParsed(gs.batch(wshfInt64Payload(t, 64, 0), 64))
+	r.handleParsed(gs.terminal())
 
 	r.mu.Lock()
 	if !r.spillFailed {
@@ -246,13 +229,9 @@ func TestGatherReceiver_SpillWriteFailureFailsQueryCleanly(t *testing.T) {
 }
 
 func TestGatherReceiver_UnderBudgetUnaffected(t *testing.T) {
-	r := &gatherReceiver{
-		expectedTerminals: 1,
-		budget:            1 << 20,
-		done:              make(chan struct{}, 1),
-	}
-	r.handleParsed(&distributed.GatherBatchMsg{Payload: wshfInt64Payload(t, 100, 0), RowCount: 100, WorkerID: "w"})
-	r.handleParsed(&distributed.GatherBatchMsg{Terminal: true, WorkerID: "w"})
+	r, gs := newTestGatherReceiver(1 << 20)
+	r.handleParsed(gs.batch(wshfInt64Payload(t, 100, 0), 100))
+	r.handleParsed(gs.terminal())
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -271,15 +250,11 @@ func TestGatherReceiver_UnderBudgetUnaffected(t *testing.T) {
 // same as to the in-memory prefix — schema names diverging mid-stream would
 // be silent wrong results for any over-budget query with SELECT aliases.
 func TestGatherReplayStream_AppliesRenames(t *testing.T) {
-	r := &gatherReceiver{
-		expectedTerminals: 1,
-		budget:            1,
-		done:              make(chan struct{}, 1),
-	}
+	r, gs := newTestGatherReceiver(1)
 	for i := 0; i < 2; i++ {
-		r.handleParsed(&distributed.GatherBatchMsg{Payload: wshfInt64Payload(t, 8, 0), RowCount: 8, WorkerID: "w"})
+		r.handleParsed(gs.batch(wshfInt64Payload(t, 8, 0), 8))
 	}
-	r.handleParsed(&distributed.GatherBatchMsg{Terminal: true, WorkerID: "w"})
+	r.handleParsed(gs.terminal())
 	gr, err := r.wait(context.Background(), time.Second)
 	if err != nil {
 		t.Fatalf("wait: %v", err)

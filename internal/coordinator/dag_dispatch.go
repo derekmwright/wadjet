@@ -300,20 +300,27 @@ func (c *Coordinator) executeStageDAG(
 	// gather task dispatch + the unpartitioned .wshf upload+download hop the
 	// gather task would otherwise perform.
 	//
-	// Subscribed early (with expectedTerminals=0 sentinel) so no per-task
-	// terminal can race past us; SetExpectedTerminals is called from the
-	// upstream stage's dispatcher once numTasks is known. Defer Unsubscribe
+	// Subscribed early so no per-task message can race past us; the
+	// upstream stage's dispatcher registers its task set (expectTasks)
+	// before publishing. A gather-acceptance failure (#1709) cancels
+	// dagCtx, so it interrupts the DAG wait below instead of waiting to be
+	// read after it. Defer Unsubscribe
 	// covers any error path that returns before recv.wait() fires (wait()
 	// also unsubscribes; nats Unsubscribe is idempotent).
+	dagCtx, cancelDAG := context.WithCancelCause(ctx)
+	defer cancelDAG(nil)
 	var fusion *gatherFusion
 	var fuseStageID string
 	if depID, ok := canFuseGather(gatherStage, pending); ok {
 		replySubject := fmt.Sprintf("wadjet.gather.%s", queryID)
-		recv, err := subscribeGather(c.nc, replySubject, 0, c.workers, c.gatherResultBudget())
+		recv, err := subscribeGather(c.nc, replySubject, c.workers, c.gatherResultBudget())
 		if err != nil {
 			c.logger.Warn("gather fusion: subscribe failed; falling back to legacy gather",
 				"query", queryID, "fuse_stage_id", depID, "error", err)
 		} else {
+			recv.mu.Lock()
+			recv.onFail = cancelDAG
+			recv.mu.Unlock()
 			fusion = &gatherFusion{recv: recv, replySubject: replySubject}
 			fuseStageID = depID
 			c.logger.Info("gather fusion enabled",
@@ -389,7 +396,7 @@ func (c *Coordinator) executeStageDAG(
 		"stages", len(pending), "dispatch_concurrency", dispatchSlots,
 		"dispatch_source", dispatchSource)
 
-	g, gctx := errgroup.WithContext(ctx)
+	g, gctx := errgroup.WithContext(dagCtx)
 	for _, s := range pending {
 		s := s
 		g.Go(func() error {
@@ -709,6 +716,13 @@ func (c *Coordinator) executeStageDAG(
 		})
 	}
 	if err := g.Wait(); err != nil {
+		// A gather-acceptance failure cancelled the DAG: the stage error is
+		// that cancellation's echo, the anomaly is the statement's error.
+		if fusion != nil {
+			if ferr := fusion.recv.failure(); ferr != nil {
+				return nil, ferr
+			}
+		}
 		return nil, err
 	}
 

@@ -274,7 +274,7 @@ func (c *Coordinator) dispatchFinalAggregateFanout(
 	}
 	finalTask.Operators = finalOps
 	if fusion != nil {
-		fusion.recv.SetExpectedTerminals(1)
+		fusion.recv.expectTasks([]string{finalTask.ID})
 	}
 	if clusterID := c.catalog.ClusterID(); clusterID != "" {
 		finalTask.ClusterID = clusterID

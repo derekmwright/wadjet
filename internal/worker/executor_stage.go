@@ -116,7 +116,7 @@ func (e *Executor) executeGatherStage(ctx context.Context, task distributed.Task
 		bucket = task.ResultBucket
 	}
 
-	sink := newGatherReplySink(e.nc, task.ReplySubject, result.WorkerID, nil).withDataPlane(e.dpClient)
+	sink := newGatherReplySink(e.nc, task.ReplySubject, result.WorkerID, task, nil).withDataPlane(e.dpClient)
 	if err := sink.Init(ctx); err != nil {
 		return fmt.Errorf("gather task %s: sink init: %w", task.ID, err)
 	}
@@ -389,7 +389,7 @@ func (e *Executor) writeStageOutput(ctx context.Context, task distributed.Task, 
 		if e.nc == nil {
 			return fmt.Errorf("stage task %s: ReplySubject set but executor has no NATS connection", task.ID)
 		}
-		sink := newGatherReplySink(e.nc, task.ReplySubject, result.WorkerID, schema).withDataPlane(e.dpClient)
+		sink := newGatherReplySink(e.nc, task.ReplySubject, result.WorkerID, task, schema).withDataPlane(e.dpClient)
 		if err := sink.Init(ctx); err != nil {
 			return fmt.Errorf("stage task %s: gather sink init: %w", task.ID, err)
 		}

@@ -130,7 +130,7 @@ func (c *Coordinator) dispatchGatherStage(
 	// fired).
 	c.logger.Info("gather: subscribing",
 		"query_id", queryID, "reply_subject", replySubject)
-	recv, err := subscribeGather(c.nc, replySubject, 1, c.workers, c.gatherResultBudget())
+	recv, err := subscribeGather(c.nc, replySubject, c.workers, c.gatherResultBudget())
 	if err != nil {
 		return nil, fmt.Errorf("subscribing gather reply: %w", err)
 	}
@@ -138,6 +138,7 @@ func (c *Coordinator) dispatchGatherStage(
 	// wait() hands the result off. No-op after a successful wait().
 	defer recv.discard()
 	defer recv.registerWithDataPlane(c.dpSrv, queryID)()
+	recv.expectTasks([]string{task.ID})
 	c.logger.Info("gather: publishing task",
 		"query_id", queryID, "task_id", task.ID, "reply_subject", replySubject,
 		"input_files", len(task.Inputs[alias]))

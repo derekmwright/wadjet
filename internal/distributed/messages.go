@@ -64,6 +64,15 @@ type Task struct {
 	// machinery (ADR-0006: spill early, degrade gracefully) engages far
 	// below the heap ceiling that killed the previous attempt.
 	DegradedMemory bool `json:"-"`
+	// ExecutionID is a WORKER-LOCAL nonce, never serialized: Executor.Execute
+	// draws a fresh one for every actual execution of the task (a JetStream
+	// redelivery, a restart replaying unacked work, a Nak, a duplicate
+	// publish, or two copies overlapping on one worker each get their own),
+	// and every gather message that execution's sink sends carries it
+	// unchanged, so the coordinator can bind a task's streamed rows to ONE
+	// execution and refuse a second (#1709). Neither WorkerID nor Attempt
+	// distinguishes executions: a redelivery keeps both.
+	ExecutionID string `json:"-"`
 	// EstimatedBytes is the coordinator's estimate of this task's input
 	// footprint, used for memory-aware admission (worker holds the task
 	// start until the shared pool has room for it) and coordinator-side
@@ -995,9 +1004,24 @@ type GatherBatchMsg struct {
 	Payload  []byte `json:"payload,omitempty"` // WSHF-encoded single-chunk batch
 	Err      string `json:"err,omitempty"`     // non-empty on terminal failure
 	// WorkerID lets coord count gather batches as worker-liveness signals
-	// (multi-signal liveness — see WorkerRegistry.MarkWorkerSeen). Optional;
-	// older workers leave it empty.
+	// (multi-signal liveness — see WorkerRegistry.MarkWorkerSeen).
 	WorkerID string `json:"worker_id,omitempty"`
+	// TaskID and ExecutionID name the task and the ONE execution of it that
+	// sent this message (Task.ExecutionID). Required on every message,
+	// batches and terminals alike: the coordinator binds each registered
+	// task to the first execution it observes and fails the statement on a
+	// message from any other, on an unknown task, and on a message missing
+	// either field (#1709).
+	TaskID      string `json:"task_id,omitempty"`
+	ExecutionID string `json:"execution_id,omitempty"`
+	// Seq numbers one execution's batch messages 1, 2, 3, … in send order;
+	// a terminal carries BatchCount, the number of batch messages that
+	// execution sent. Neither transport guarantees a batch sent before a
+	// reconnect arrives (or arrives before a later one), so the coordinator
+	// fails the statement on a gap, a reorder or a count mismatch rather
+	// than return a stream with rows missing.
+	Seq        uint64 `json:"seq,omitempty"`
+	BatchCount uint64 `json:"batch_count,omitempty"`
 }
 
 // SortKeySpec defines a sort key in a task.

@@ -84,6 +84,14 @@ message ResultBatch {
   int32  row_count = 4;
   bytes  payload   = 5; // WSHF-encoded
   string err       = 6; // non-empty on task failure (terminal=true)
+  // task_id / execution_id name the task and the one execution of it
+  // that sent this message; seq numbers that execution's batches from 1,
+  // and batch_count (terminal only) is how many it sent. Mirrors
+  // distributed.GatherBatchMsg (#1709).
+  string task_id      = 7;
+  string execution_id = 8;
+  uint64 seq          = 9;
+  uint64 batch_count  = 10;
 }
 
 // TaskDispatch is one unit of work coord pushes to a worker. The body

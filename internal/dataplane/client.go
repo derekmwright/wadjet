@@ -279,6 +279,11 @@ func (c *Client) SendResultBatch(rb ResultBatch) error {
 				RowCount: rb.RowCount,
 				Payload:  rb.Payload,
 				Err:      rb.Err,
+
+				TaskId:      rb.TaskID,
+				ExecutionId: rb.ExecutionID,
+				Seq:         rb.Seq,
+				BatchCount:  rb.BatchCount,
 			},
 		},
 	}

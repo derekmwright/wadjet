@@ -1902,6 +1902,10 @@ func (w *Worker) executeIncomingTaskDelivery(ctx context.Context, task distribut
 		return
 	}
 
+	if h := taskDeliveryHook.Load(); h != nil {
+		(*h)(&task, delivery, w.config.WorkerID, msg.InProgress)
+	}
+
 	// Track active task for heartbeat progress reporting
 	w.trackTaskStart(task.ID)
 	defer w.trackTaskEnd(task.ID)
@@ -2126,6 +2130,11 @@ func (w *Worker) executeIncomingTaskDelivery(ctx context.Context, task distribut
 			time.Sleep(time.Duration(attempt) * 2 * time.Second)
 			w.logger.Warn("retrying result publish",
 				"task_id", task.ID, "attempt", attempt+1)
+		}
+		if h := resultPublishHook.Load(); h != nil {
+			if publishErr = (*h)(task, attempt); publishErr != nil {
+				continue
+			}
 		}
 		_, publishErr = w.nc.Request(subject, data, 10*time.Second)
 		if publishErr == nil {

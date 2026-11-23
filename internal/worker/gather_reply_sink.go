@@ -5,8 +5,11 @@ package worker
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/nats-io/nats.go"
 
@@ -30,15 +33,26 @@ import (
 type gatherReplySink struct {
 	// marks holds every batch to the file header's unconstrained marks
 	// (markGuard, ADR-0024 §10).
-	marks     markGuard
-	nc        *nats.Conn
-	dpClient  *dataplane.Client // optional gRPC delivery; nil = NATS only
-	subject   string
-	queryID   string // derived from subject; used for gRPC routing
-	workerID  string // stamped on each GatherBatchMsg for coord-side liveness
-	schema    []parquet.Column
-	err       error
-	finalized bool
+	marks    markGuard
+	nc       *nats.Conn
+	dpClient *dataplane.Client // optional gRPC delivery; nil = NATS only
+	subject  string
+	queryID  string // derived from subject; used for gRPC routing
+	workerID string // stamped on each GatherBatchMsg for coord-side liveness
+	// taskID and executionID are this execution's identity, stamped
+	// unchanged on every message (#1709): the coordinator binds the task's
+	// rows to the first execution it sees and fails the statement on any
+	// other. executionID is Task.ExecutionID, drawn once per execution by
+	// Executor.Execute — never per sink or per batch.
+	taskID      string
+	executionID string
+	schema      []parquet.Column
+	err         error
+	finalized   bool
+	// sendMu makes "number the message, then send it" one step, so the
+	// sequence the coordinator checks is the order messages left here.
+	sendMu sync.Mutex
+	sent   uint64 // batch messages sent so far; the last Seq stamped
 }
 
 // gatherMaxRowsPerMessage caps the number of rows packed into a single
@@ -50,13 +64,30 @@ type gatherReplySink struct {
 // reply subject until query timeout.
 const gatherMaxRowsPerMessage = batch.DefaultBatchSize
 
-func newGatherReplySink(nc *nats.Conn, subject, workerID string, schema []parquet.Column) *gatherReplySink {
+// newExecutionID draws the identity of one execution of a task: 64 random
+// bits, hex-encoded (16 bytes on the wire). It only has to differ between
+// the executions of ONE task id within one query, so 64 bits leaves no
+// realistic collision; crypto/rand keeps two workers that start at the same
+// instant from drawing the same value.
+func newExecutionID() string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// crypto/rand does not fail on supported platforms (Go 1.24+ panics
+		// instead of returning an error); keep the signature total anyway.
+		panic(fmt.Sprintf("drawing a task execution id: %v", err))
+	}
+	return hex.EncodeToString(b[:])
+}
+
+func newGatherReplySink(nc *nats.Conn, subject, workerID string, task distributed.Task, schema []parquet.Column) *gatherReplySink {
 	return &gatherReplySink{
-		nc:       nc,
-		subject:  subject,
-		queryID:  strings.TrimPrefix(subject, "wadjet.gather."),
-		workerID: workerID,
-		schema:   schema,
+		nc:          nc,
+		subject:     subject,
+		queryID:     strings.TrimPrefix(subject, "wadjet.gather."),
+		workerID:    workerID,
+		taskID:      task.ID,
+		executionID: task.ExecutionID,
+		schema:      schema,
 	}
 }
 
@@ -151,6 +182,16 @@ func (s *gatherReplySink) Consume(_ context.Context, b *batch.RecordBatch) error
 // a single query writing to both NATS and gRPC would force the receiver
 // to subscribe to both forever.
 func (s *gatherReplySink) sendBatch(msg distributed.GatherBatchMsg) error {
+	s.sendMu.Lock()
+	defer s.sendMu.Unlock()
+	msg.TaskID = s.taskID
+	msg.ExecutionID = s.executionID
+	if msg.Terminal {
+		msg.BatchCount = s.sent
+	} else {
+		s.sent++
+		msg.Seq = s.sent
+	}
 	if s.dpClient != nil {
 		if err := s.dpClient.SendResultBatch(dataplane.ResultBatch{
 			QueryID:  s.queryID,
@@ -159,6 +200,11 @@ func (s *gatherReplySink) sendBatch(msg distributed.GatherBatchMsg) error {
 			RowCount: msg.RowCount,
 			Payload:  msg.Payload,
 			Err:      msg.Err,
+
+			TaskID:      msg.TaskID,
+			ExecutionID: msg.ExecutionID,
+			Seq:         msg.Seq,
+			BatchCount:  msg.BatchCount,
 		}); err != nil {
 			return fmt.Errorf("gather: dataplane send: %w", err)
 		}
@@ -184,6 +230,9 @@ func (s *gatherReplySink) Finalize(_ context.Context) error {
 		return nil
 	}
 	s.finalized = true
+	if h := gatherFinalizeHook.Load(); h != nil {
+		(*h)(distributed.Task{ID: s.taskID, QueryID: s.queryID, ExecutionID: s.executionID})
+	}
 	msg := distributed.GatherBatchMsg{Terminal: true, WorkerID: s.workerID}
 	if s.err != nil {
 		msg.Err = s.err.Error()

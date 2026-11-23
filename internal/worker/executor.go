@@ -757,6 +757,12 @@ func (e *Executor) newSpillManagerScaled(taskID string, joinCount int) (*memory.
 // Execute runs a task and returns the result notification.
 func (e *Executor) Execute(ctx context.Context, task distributed.Task, workerID string) distributed.ResultNotification {
 	start := time.Now()
+	// One fresh identity per ACTUAL execution (#1709): every gather message
+	// this execution streams carries it, so the coordinator can tell this
+	// copy of the task from any other — a redelivery, a replay after a
+	// restart, a Nak, a duplicate publish, or an overlapping copy on this
+	// same worker. Drawn here, once, and never per sink or per batch.
+	task.ExecutionID = newExecutionID()
 	// Foreground-activity signal for the background-upload QoS gate
 	// (upload_manager.go): while any task executes, drains yield — but
 	// only inside the protection window a NEW root query's first task
@@ -1203,7 +1209,7 @@ func (e *Executor) executePipeline(ctx context.Context, task distributed.Task, r
 		if e.nc == nil {
 			return fmt.Errorf("gather task requires NATS connection")
 		}
-		pipeline.Sink = newGatherReplySink(e.nc, task.ReplySubject, result.WorkerID, nil).withDataPlane(e.dpClient)
+		pipeline.Sink = newGatherReplySink(e.nc, task.ReplySubject, result.WorkerID, task, nil).withDataPlane(e.dpClient)
 		if err := pipeline.Run(ctx); err != nil {
 			return fmt.Errorf("gather pipeline: %w", err)
 		}

@@ -23,6 +23,36 @@ import (
 // TestGatherReplySink publishes two batches and a terminal to a NATS reply
 // subject, then asserts the subscriber receives the WSHF-encoded payloads
 // and can decode them back to the original rows.
+// testGatherTask is the execution identity the sink tests stamp.
+var testGatherTask = distributed.Task{ID: "task-1709", ExecutionID: "exec-1709"}
+
+// assertGatherIdentity holds every message of one execution's stream to the
+// #1709 contract: the task and execution id on every message, batches
+// numbered 1..n in send order, and the terminal (last) carrying n.
+func assertGatherIdentity(t *testing.T, msgs []distributed.GatherBatchMsg) {
+	t.Helper()
+	if len(msgs) == 0 || !msgs[len(msgs)-1].Terminal {
+		t.Fatalf("stream does not end in a terminal: %d messages", len(msgs))
+	}
+	for i, m := range msgs {
+		if m.TaskID != testGatherTask.ID || m.ExecutionID != testGatherTask.ExecutionID {
+			t.Errorf("message %d: identity (%q, %q), want (%q, %q)", i, m.TaskID, m.ExecutionID, testGatherTask.ID, testGatherTask.ExecutionID)
+		}
+		if m.Terminal {
+			if i != len(msgs)-1 {
+				t.Errorf("message %d is a terminal before the end of the stream", i)
+			}
+			if m.BatchCount != uint64(len(msgs)-1) || m.Seq != 0 {
+				t.Errorf("terminal: batch_count=%d seq=%d, want batch_count=%d seq=0", m.BatchCount, m.Seq, len(msgs)-1)
+			}
+			continue
+		}
+		if m.Seq != uint64(i+1) || m.BatchCount != 0 {
+			t.Errorf("batch %d: seq=%d batch_count=%d, want seq=%d batch_count=0", i, m.Seq, m.BatchCount, i+1)
+		}
+	}
+}
+
 func TestGatherReplySink(t *testing.T) {
 	cfg := distributed.DefaultNATSConfig()
 	cfg.Port = -1
@@ -81,7 +111,7 @@ func TestGatherReplySink(t *testing.T) {
 	b2.Columns[1].BytesData.Set(0, []byte("dave"))
 	b2.Columns[1].BytesData.Set(1, []byte("eve"))
 
-	sink := newGatherReplySink(nc, subject, "test-worker", schema)
+	sink := newGatherReplySink(nc, subject, "test-worker", testGatherTask, schema)
 	ctx := context.Background()
 	if err := sink.Init(ctx); err != nil {
 		t.Fatalf("Init: %v", err)
@@ -112,6 +142,10 @@ func TestGatherReplySink(t *testing.T) {
 	}
 	if received[0].RowCount != 3 || received[1].RowCount != 2 {
 		t.Errorf("row counts: got %d,%d want 3,2", received[0].RowCount, received[1].RowCount)
+	}
+	assertGatherIdentity(t, received)
+	if received[0].WorkerID != "test-worker" || received[2].WorkerID != "test-worker" {
+		t.Errorf("worker id: got %q / %q, want test-worker", received[0].WorkerID, received[2].WorkerID)
 	}
 
 	// Decode payloads via wshf.ChunkReader and verify round-trip.
@@ -215,7 +249,7 @@ func TestGatherReplySinkChunksOversizedBatch(t *testing.T) {
 		wantSum += int64(i + 1)
 	}
 
-	sink := newGatherReplySink(nc, subject, "test-worker", schema)
+	sink := newGatherReplySink(nc, subject, "test-worker", testGatherTask, schema)
 	ctx := context.Background()
 	if err := sink.Init(ctx); err != nil {
 		t.Fatalf("Init: %v", err)
@@ -318,7 +352,7 @@ func TestGatherReplySinkConsumeError(t *testing.T) {
 	}
 	defer sub.Unsubscribe()
 
-	sink := newGatherReplySink(nc, "gather.err.test", "test-worker", schema)
+	sink := newGatherReplySink(nc, "gather.err.test", "test-worker", testGatherTask, schema)
 	if err := sink.Consume(context.Background(), b); err == nil {
 		t.Fatal("expected Consume to fail on unsupported type")
 	}
@@ -382,7 +416,15 @@ func TestGatherReplySinkDataPlaneOnly(t *testing.T) {
 	// Coord-side: register a ResultHandler and count incoming batches.
 	var grpcCount atomic.Int32
 	var terminalSeen atomic.Bool
+	var grpcMu sync.Mutex
+	var grpcMsgs []distributed.GatherBatchMsg
 	srv.RegisterResultHandler(queryID, func(rb *dataplane.ResultBatch) {
+		grpcMu.Lock()
+		grpcMsgs = append(grpcMsgs, distributed.GatherBatchMsg{
+			Terminal: rb.Terminal, WorkerID: rb.WorkerID,
+			TaskID: rb.TaskID, ExecutionID: rb.ExecutionID, Seq: rb.Seq, BatchCount: rb.BatchCount,
+		})
+		grpcMu.Unlock()
 		grpcCount.Add(1)
 		if rb.Terminal {
 			terminalSeen.Store(true)
@@ -418,7 +460,7 @@ func TestGatherReplySinkDataPlaneOnly(t *testing.T) {
 	b := batch.NewRecordBatch(schema, 3)
 	b.Columns[0].Int64Data[0], b.Columns[0].Int64Data[1], b.Columns[0].Int64Data[2] = 10, 20, 30
 
-	sink := newGatherReplySink(nc, subject, "phaseD-worker", schema).withDataPlane(client)
+	sink := newGatherReplySink(nc, subject, "phaseD-worker", testGatherTask, schema).withDataPlane(client)
 	if err := sink.Init(ctx); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
@@ -439,6 +481,12 @@ func TestGatherReplySinkDataPlaneOnly(t *testing.T) {
 	if !terminalSeen.Load() {
 		t.Error("terminal batch was not seen via gRPC")
 	}
+	// The identity and the stream numbering survive the proto round trip
+	// (#1709): a field dropped in translation reads as a missing identity
+	// at the coordinator and fails every statement on this transport.
+	grpcMu.Lock()
+	assertGatherIdentity(t, grpcMsgs)
+	grpcMu.Unlock()
 	if got := natsCount.Load(); got != 0 {
 		t.Errorf("NATS subscriber received %d messages — expected 0 (gRPC-only mode)", got)
 	}
@@ -494,7 +542,7 @@ func TestGatherReplySinkDataPlaneDisconnected(t *testing.T) {
 
 	// nc is nil — only dpClient is set, so a NATS fallback would panic.
 	// Confirms we never reach the NATS path.
-	sink := newGatherReplySink(nil, "wadjet.gather.dead", "phaseD-d-worker", schema).withDataPlane(client)
+	sink := newGatherReplySink(nil, "wadjet.gather.dead", "phaseD-d-worker", testGatherTask, schema).withDataPlane(client)
 	if err := sink.Init(ctx); err != nil {
 		t.Fatalf("Init: %v", err)
 	}

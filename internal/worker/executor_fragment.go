@@ -433,7 +433,7 @@ func (e *Executor) executeFragment(ctx context.Context, task distributed.Task, r
 		}
 		if !emptyScalarAgg && !emptyProbeOuterJoin {
 			if sinkSpec.Type == distributed.OpGatherSink {
-				sink, err := e.openFragmentSink(task, sinkSpec)
+				sink, err := e.openFragmentSink(task, sinkSpec, result.WorkerID)
 				if err != nil {
 					return fmt.Errorf("fragment task %s: open gather sink (empty source): %w", task.ID, err)
 				}
@@ -465,7 +465,7 @@ func (e *Executor) executeFragment(ctx context.Context, task distributed.Task, r
 	// Build the sink. Schema-discovery is lazy for the partitioned/
 	// unpartitioned sinks; we capture the first batch's schema and construct
 	// on demand.
-	sink, err := e.openFragmentSink(task, sinkSpec)
+	sink, err := e.openFragmentSink(task, sinkSpec, result.WorkerID)
 	if err != nil {
 		return fmt.Errorf("fragment task %s: sink: %w", task.ID, err)
 	}
@@ -3151,7 +3151,7 @@ type fragmentSink interface {
 	close()
 }
 
-func (e *Executor) openFragmentSink(task distributed.Task, spec distributed.OpSpec) (fragmentSink, error) {
+func (e *Executor) openFragmentSink(task distributed.Task, spec distributed.OpSpec, workerID string) (fragmentSink, error) {
 	switch spec.Type {
 	case distributed.OpExchangeSender:
 		if spec.NumPartitions <= 0 {
@@ -3190,7 +3190,7 @@ func (e *Executor) openFragmentSink(task distributed.Task, spec distributed.OpSp
 		// Schema is captured on first Consume so we don't need to plumb it
 		// through openFragmentSink. nil here is the same shape gather uses
 		// in writeStageOutput.
-		s := newGatherReplySink(e.nc, spec.ReplySubject, "", nil).withDataPlane(e.dpClient)
+		s := newGatherReplySink(e.nc, spec.ReplySubject, workerID, task, nil).withDataPlane(e.dpClient)
 		return &fragmentGatherSink{sink: s}, nil
 
 	default:
