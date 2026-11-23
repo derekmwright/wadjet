@@ -456,6 +456,21 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 					winAggRefs[wKey] = existing
 					continue
 				}
+				// GROUPING(...) in a window's spec reads its bitmask slot,
+				// as it does in the SELECT list and HAVING. Hoisted as an
+				// aggregate it was published as one, and the physical
+				// planner maps a name it does not know to COUNT: the window
+				// partitioned on count(k) per group, not on the grouping
+				// set (#1590).
+				if strings.EqualFold(wAgg.Name, "grouping") {
+					slot, err := allocGroupingSlot(wAgg)
+					if err != nil {
+						return nil, err
+					}
+					winAggRefs[wKey] = slot
+					aggSyntheticNames[wKey] = slot
+					continue
+				}
 				name, err := reuseOrAddAggregate(wAgg, &aggs, &aggCounter)
 				if err != nil {
 					return nil, err
