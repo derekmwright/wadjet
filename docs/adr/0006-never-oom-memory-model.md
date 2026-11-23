@@ -1,6 +1,6 @@
 # ADR-0006: Never-OOM memory — shared pool, ownership ledger, spill-everywhere
 
-Status: Accepted (accounting overhaul landed 2026-05-30, 35f6730; recorded 2026-07-25; amended 2026-08-17, 2026-09-03, 2026-09-04, 2026-09-18, 2026-09-19, 2026-11-21, 2026-11-22 and 2026-11-23 — see Amendments)
+Status: Accepted (accounting overhaul landed 2026-05-30, 35f6730; recorded 2026-07-25; amended 2026-08-17, 2026-09-03, 2026-09-04, 2026-09-18, 2026-09-19, 2026-11-21, 2026-11-22 and 2026-11-23 (twice) — see Amendments)
 
 ## Context
 
@@ -796,8 +796,10 @@ memory that does not exist yet", 2026-09-03): pre-sized capacity the input
 cannot fill. Under a budget the aggregate's initial capacity — its group
 index, key mirrors, typed-key index and flat accumulators, and the tables a
 drain resets to — is now capped at the planner's input-row estimate
-(`HashAggregate.presizeBound`; a clone inherits its parent's estimate as a cap
-only). It is a cap on an allocation, not a share or a new constant: every
+(`HashAggregate.presizeBound`; since the second 2026-11-23 amendment, each of
+the k partitions of a partitioned aggregate — the primary and its clones — is
+capped at its share of that estimate, ceil(estimate / k), as a cap only). It is
+a cap on an allocation, not a bound on the groups or a new constant: every
 structure still grows on demand, and an estimate that is low costs doublings,
 never an answer. Without a budget nothing changes. With it the two statements'
 clones charge about 750 bytes each, never drain, and answered 800 of 800 runs
@@ -863,7 +865,8 @@ refused; two: `used=428380`, answered). The 2026-11-22 amendment's
 state there is one group of a few bytes per clone; the charge was the pool.
 
 **The rule now.** Under a budget the pool's first chunk is the aggregate's
-`presizeBound(4096)` (the input estimate, or a clone's parent estimate), and
+`presizeBound(4096)` (the input estimate, or a clone's parent estimate; for a
+partitioned aggregate, its share of it since the second 2026-11-23 amendment), and
 later chunks double from it up to 4096; without a budget, or with an estimate
 of 4096 or more, the chunks are exactly the base's. A clone of those cells now
 charges 9,173 bytes, so even all 24 clones and the join's first arrival fit
@@ -919,3 +922,83 @@ at the base (`480 the same rows DESCENDING`, GOMAXPROCS 1) and one at this
 change (`480 the same join with its rows ORDERED`, GOMAXPROCS 2), each with
 PostgreSQL's 12 rows, which fails the pinned refusal — about 1 in 360 free
 runs, at the base and this change alike, too rare for a 30-run row to see.
+
+### 2026-11-23 (second): a partitioned aggregate's presize cap is its share of the estimate (#1706, line 1706f)
+
+**What was true.** The 2026-11-22 rule capped a budgeted aggregate's initial
+capacity at its input estimate, and "a clone inherits its parent's estimate as
+a cap only": every one of the k sinks of a partitioned aggregate — the primary
+(`workerSinks[0]`) and its k-1 clones, each owning a hash partition of the key
+space — was capped at the WHOLE estimate. A LATERAL body over the 5,000-row
+`typemx` therefore kept the 4096-slot presize in every partition: each clone
+that received one of the seven groups force-charged about 107 KB of `spill
+tracking` (the 98,304-byte pool chunk and the index; about 238 KB where the
+string-keyed index keeps its 4096 slots too) for ONE group, five to seven of
+them were outstanding when the hash join above made its first reservation, and
+the verdict was how many had been released by then (line 1706e).
+
+**The rule now.** Under a budget, a partitioned aggregate's cap is each sink's
+share of the estimate, ceil(estimate / k), computed once in
+`HashAggregate.presizeBound` from `cloneNDVDivisor` (which the pipeline sets on
+the primary before cloning and `CloneSink` copies only to partitioned clones),
+so the primary is covered and nothing is divided twice. A positive estimate
+never rounds to the zero that means "unknown"; an unknown estimate stays
+unknown; a non-partitioned aggregate keeps the whole estimate (its clones may
+each see every key). Only the sizing cap is divided: `InputRowHint`, the exact
+`inputRowBound` and the epoch byte cap keep their meaning, and the share is not
+a bound on a partition's groups. Under skew one partition receives every group
+and grows, and is charged for its growth, as an aggregate whose estimate was
+low does (gate: every presizing path — typed integer, packed, compact, string,
+typed-generic and the generic map over the group-state pool — as primary and
+as clone, all 6,000 groups into one partition, answers the whole-estimate
+presize's rows with its tracked charge equal to its measured state after every
+batch). Without a budget, allocation is byte for byte unchanged (gated on every
+path). An engine given no budget still has one: the planner's spill manager
+falls back to `memory.DetectBudget`, else 75% of physical memory, so the share
+(like the 2026-11-22 cap) acts in the default configuration too. TPC-H SF0.01
+wall, base against this change interleaved, six runs each: 537 / 515 ms
+(medians) at that default, 1,783 / 1,732 ms at 2 MiB and 759 / 715 ms at
+8 MiB, every query's row count unchanged; a skewed budgeted partition (100,000
+groups into one of 24, estimate 200,000) showed no time change over the noise
+and, on its string-keyed shape, 3% (8 MiB) and 16% (64 MiB) fewer bytes
+allocated. Gates: `exec.TestAPartitionedAggregatesPresizeCapIsItsShareOfTheEstimate`,
+`…ShareBindsOnEveryPresizingPathAndSkewStillAnswers`,
+`exec.TestAnUnbudgetedPartitionedAggregateAllocatesWhatItDid`,
+`exec.TestARealPartitionedPipelineSizesEveryPartitionToItsShare`.
+
+**Measured.** Base against this change, 30 fresh processes per cell at
+GOMAXPROCS 1, 2, 4 and the default, in three orders: free; the join's first
+arrival reservation delayed 100 ms (the releases first); and every adopted
+clone's release held 100 ms (the join first, with every clone's charge
+outstanding). The 21 budgeted cells of `coordinator.TestArcH1A…`,
+`TestArcJ1A…` and `TestArcJ1TheReservedNamespace…`, CW2's `lateral-aggregate`
+and CW3's `lateral-aggregate` and `left-join-aggregate` over rows refused in
+2,853 of 2,880 (cell, run) pairs free, 451 of 2,880 delayed and 2,880 of
+2,880 held at the base, and in none of the 8,640 at this change; every answer is
+PostgreSQL's (re-measured on 17.11, `--locale=C`). Those cells' tolerance of
+the refusal is removed and their spilled arms assert the rows.
+
+**What it does not cover.** This narrows the window in which a join's first
+reservation races partitions' releases; it does not remove the class. A
+partitioned aggregate whose REAL state per clone is large still holds it,
+force-charged, until each clone's Close: CW3's `left-join-lateral` over rows
+(5,000 groups over 24 clones) refused every free and every held run at the
+base and at this change alike and answered every delayed run; at the refusal
+the clones held about 2.0 MB forced where the whole-estimate presize held 5.1
+to 7.5 MB. It stays tolerated (`cw3CloneStateRefusal`). Larger estimates,
+under-estimates, skew and several concurrent aggregates can again leave enough
+forced charges outstanding to make a join's first reservation depend on
+release order. `coordinator.TestF1AKeylessJoinAsksForWhatItNeeds` reaches
+this code (its DISTINCT aggregates' 24 clones now take a 209-slot first chunk,
+not the 4096 the 2026-11-23 amendment above describes) and its pins did not
+change verdict: over 120 fresh processes per GOMAXPROCS (1, 2, 4, default)
+per binary, base and this change interleaved, the five cross-join pins and
+the 480 control refused in every run but three, all at GOMAXPROCS 1 and each
+with PostgreSQL's rows — at the base the 480 control once (#1706's original
+sighting, reproduced), at this change `480 the same shape spelled DISTINCT`
+once and `480 the same rows DESCENDING` once: the same rare order-dependent
+answer, at the base and this change alike. The R0 `h2_base2_control` flap pins do not reach this
+code (no partitioned aggregate presizes there) and keep their rates. Making
+these verdicts independent of the order — what a join's first reservation may
+wait for, or what a clone that cannot drain may hold — is still the decision
+the 2026-11-22 amendment left open; this change does not take it.
