@@ -36,10 +36,15 @@ import (
 // Every Want below is live PostgreSQL 17 over the same rows (`j1_fixture.sql`
 // in the arc's scratch dir reproduces the fixtures).
 //
-// The SPILLED arm tolerates exactly one refusal where marked `budgeted`:
-// budgetedClonePresizeRefusal (arc_h1_lateral_two_path_test.go), the
-// partitioned aggregate's per-clone presize charge against the join's first
-// reservation, whose verdict follows the release order (#1706).
+// The SPILLED arm asserts PostgreSQL's rows on every cell. Its 15 cells over
+// typemx used to tolerate one refusal: each partitioned clone of the lateral
+// body force-charged a presize sized for the WHOLE 5,000-row estimate, and the
+// join's first reservation refused or not by how many clones had released
+// (#1706). Since each partition's presize is its share of the estimate (line
+// 1706f) they answered in every one of 30 fresh runs at GOMAXPROCS 1, 2, 4
+// and the default, free, with the join's first reservation delayed 100 ms,
+// and with every clone's release held 100 ms (the base refused all 450 runs
+// of that last order).
 func TestArcJ1ALateralKeyIsPublishedUnderAHiddenSlot(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: this gate stands up an embedded NATS cluster")
@@ -53,7 +58,6 @@ func TestArcJ1ALateralKeyIsPublishedUnderAHiddenSlot(t *testing.T) {
 
 	for _, tc := range []struct {
 		name, sql, want string
-		budgeted        bool
 		// wantErrLike, when non-empty, is a substring of the refusal this
 		// shape must carry on EVERY arm. A cell that answers instead fails,
 		// which is how the entry gets deleted if the disposition moves again.
@@ -70,23 +74,23 @@ func TestArcJ1ALateralKeyIsPublishedUnderAHiddenSlot(t *testing.T) {
 		// key" from "bound to the aggregate": MAX/SUM/COUNT answer numbers
 		// far from the key, and MIN over this fixture answers the key's own
 		// value, which is why it is a CONTROL and not a cell.
-		{name: "956/max-aliased-like-the-key", budgeted: true,
+		{name: "956/max-aliased-like-the-key",
 			sql: `SELECT d.k AS k, s.g AS g, s.c AS c FROM typemx_dim d JOIN LATERAL (` +
 				`SELECT MAX(t.id) AS g, COUNT(*) AS c FROM typemx t WHERE t.g = d.k) s ON true ` +
 				`ORDER BY d.k`,
 			// Single-process since arc JP round 3: the join pads a grouped arm
 			// (dagplan.ErrLateralIdentityDistributed).
 			want: eightGroups, routes: "lateral identity"},
-		{name: "956/sum-aliased-like-the-key", budgeted: true,
+		{name: "956/sum-aliased-like-the-key",
 			sql: `SELECT d.k AS k, s.g AS g FROM typemx_dim d JOIN LATERAL (` +
 				`SELECT SUM(t.id) AS g FROM typemx t WHERE t.g = d.k) s ON true ORDER BY d.k`,
 			want: `k,g | 0,1647415 | 1,1648845 | 2,1645275 | 3,1646704 | 4,1648133 | ` +
 				`5,1649562 | 6,1650990 | 7,NULL`, routes: "lateral identity"},
-		{name: "956/count-aliased-like-the-key", budgeted: true,
+		{name: "956/count-aliased-like-the-key",
 			sql: `SELECT d.k AS k, s.g AS g FROM typemx_dim d JOIN LATERAL (` +
 				`SELECT COUNT(*) AS g FROM typemx t WHERE t.g = d.k) s ON true ORDER BY d.k`,
 			want: `k,g | 0,660 | 1,660 | 2,659 | 3,659 | 4,659 | 5,659 | 6,660 | 7,0`, routes: "lateral identity"},
-		{name: "956/the-LEFT-spelling", budgeted: true,
+		{name: "956/the-LEFT-spelling",
 			sql: `SELECT d.k AS k, s.g AS g, s.c AS c FROM typemx_dim d LEFT JOIN LATERAL (` +
 				`SELECT MAX(t.id) AS g, COUNT(*) AS c FROM typemx t WHERE t.g = d.k) s ON true ` +
 				`ORDER BY d.k`,
@@ -96,11 +100,11 @@ func TestArcJ1ALateralKeyIsPublishedUnderAHiddenSlot(t *testing.T) {
 				`SELECT MAX(amount) AS order_id FROM lat_item WHERE order_id = o.id) s ON true ` +
 				`ORDER BY o.customer`,
 			want: `cu,oi | Alice,100 | Bob,125 | Carol,NULL`, routes: "lateral identity"},
-		{name: "956/ctl-MIN-answers-the-key-s-own-value", budgeted: true,
+		{name: "956/ctl-MIN-answers-the-key-s-own-value",
 			sql: `SELECT d.k AS k, s.g AS g FROM typemx_dim d JOIN LATERAL (` +
 				`SELECT MIN(t.id) AS g FROM typemx t WHERE t.g = d.k) s ON true ORDER BY d.k`,
 			want: `k,g | 0,0 | 1,1 | 2,2 | 3,3 | 4,4 | 5,5 | 6,6 | 7,NULL`, routes: "lateral identity"},
-		{name: "956/ctl-aggregate-under-its-own-alias", budgeted: true,
+		{name: "956/ctl-aggregate-under-its-own-alias",
 			sql: `SELECT d.k AS k, s.mx AS mx FROM typemx_dim d JOIN LATERAL (` +
 				`SELECT MAX(t.id) AS mx FROM typemx t WHERE t.g = d.k) s ON true ORDER BY d.k`,
 			want: `k,mx | 0,4998 | 1,4999 | 2,4993 | 3,4994 | 4,4995 | 5,4996 | 6,4997 | 7,NULL`, routes: "lateral identity"},
@@ -132,7 +136,7 @@ func TestArcJ1ALateralKeyIsPublishedUnderAHiddenSlot(t *testing.T) {
 		// now: both DAG arms failed with `column "s.c" does not exist in the
 		// input schema` (with an ORDER BY) or an ADR-0010 `.wshf` width /
 		// type mismatch (without one), at `UnreachableOutputLocalRoutes +0`.
-		{name: "767/dag-LEFT-aliased-key-ORDER-BY", budgeted: true,
+		{name: "767/dag-LEFT-aliased-key-ORDER-BY",
 			sql: `SELECT d.k AS k, s.gg AS gg, s.c AS c FROM typemx_dim d LEFT JOIN LATERAL (` +
 				`SELECT t.g AS gg, COUNT(*) AS c FROM typemx t WHERE t.g = d.k GROUP BY t.g) s ` +
 				`ON true ORDER BY d.k`,
@@ -144,22 +148,22 @@ func TestArcJ1ALateralKeyIsPublishedUnderAHiddenSlot(t *testing.T) {
 			// §1c). It FAILED at base; the values are PostgreSQL's on every
 			// arm now, and the counter says which engine produced them.
 			routes: "lateral identity"},
-		{name: "767/dag-LEFT-key-under-its-own-name-ORDER-BY", budgeted: true,
+		{name: "767/dag-LEFT-key-under-its-own-name-ORDER-BY",
 			sql: `SELECT d.k AS k, s.g AS g, s.c AS c FROM typemx_dim d LEFT JOIN LATERAL (` +
 				`SELECT t.g, COUNT(*) AS c FROM typemx t WHERE t.g = d.k GROUP BY t.g) s ` +
 				`ON true ORDER BY d.k`,
 			want: `k,g,c | 0,0,660 | 1,1,660 | 2,2,659 | 3,3,659 | 4,4,659 | 5,5,659 | ` +
 				`6,6,660 | 7,NULL,NULL`, routes: "lateral identity"},
-		{name: "767/dag-INNER-key-under-its-own-name-ORDER-BY", budgeted: true,
+		{name: "767/dag-INNER-key-under-its-own-name-ORDER-BY",
 			sql: `SELECT d.k AS k, s.g AS g, s.c AS c FROM typemx_dim d JOIN LATERAL (` +
 				`SELECT t.g, COUNT(*) AS c FROM typemx t WHERE t.g = d.k GROUP BY t.g) s ` +
 				`ON true ORDER BY d.k`,
 			want: `k,g,c | 0,0,660 | 1,1,660 | 2,2,659 | 3,3,659 | 4,4,659 | 5,5,659 | 6,6,660`},
-		{name: "767/ctl-key-published-under-its-own-name", budgeted: true,
+		{name: "767/ctl-key-published-under-its-own-name",
 			sql: `SELECT COUNT(*) AS n FROM typemx_dim d JOIN LATERAL (` +
 				`SELECT t.g, COUNT(*) AS c FROM typemx t WHERE t.g = d.k GROUP BY t.g) s ON true`,
 			want: `n | 7`},
-		{name: "767/ctl-key-not-published-at-all", budgeted: true,
+		{name: "767/ctl-key-not-published-at-all",
 			sql: `SELECT COUNT(*) AS n FROM typemx_dim d JOIN LATERAL (` +
 				`SELECT COUNT(*) AS c FROM typemx t WHERE t.g = d.k GROUP BY t.g) s ON true`,
 			want: `n | 7`},
@@ -193,7 +197,7 @@ func TestArcJ1ALateralKeyIsPublishedUnderAHiddenSlot(t *testing.T) {
 		// the join keeps keying on what the LIST publishes (`gk`) — nothing
 		// is added to the lateral's output, because the list already carries
 		// the key.
-		{name: "956/the-list-publishes-the-key-under-another-name", budgeted: true,
+		{name: "956/the-list-publishes-the-key-under-another-name",
 			sql: `SELECT d.k AS k, s.gk AS gk, s.g AS g FROM typemx_dim d JOIN LATERAL (` +
 				`SELECT t.g AS gk, MAX(t.id) AS g FROM typemx t WHERE t.g = d.k ` +
 				`GROUP BY t.g) s ON true ORDER BY d.k`,
@@ -205,7 +209,7 @@ func TestArcJ1ALateralKeyIsPublishedUnderAHiddenSlot(t *testing.T) {
 			// gather's rename of the lateral's ALIAS names a column no stage
 			// emits. Stated, because rows alone cannot tell the two apart.
 			routes: "unreachable output"},
-		{name: "956/the-same-LEFT", budgeted: true,
+		{name: "956/the-same-LEFT",
 			sql: `SELECT d.k AS k, s.gk AS gk, s.g AS g FROM typemx_dim d LEFT JOIN LATERAL (` +
 				`SELECT t.g AS gk, MAX(t.id) AS g FROM typemx t WHERE t.g = d.k ` +
 				`GROUP BY t.g) s ON true ORDER BY d.k`,
@@ -228,7 +232,7 @@ func TestArcJ1ALateralKeyIsPublishedUnderAHiddenSlot(t *testing.T) {
 		// lateral's projection is ELIDED over its aggregate, so the join
 		// keys on what the AGGREGATE emits and a rename would take the key
 		// out of the shuffle's schema ("key \"s.g\" not in schema").
-		{name: "956/ctl-no-collision-so-no-rename", budgeted: true,
+		{name: "956/ctl-no-collision-so-no-rename",
 			sql: `SELECT d.k AS k, s.g AS g, s.c AS c FROM typemx_dim d JOIN LATERAL (` +
 				`SELECT t.g, COUNT(*) AS c FROM typemx t WHERE t.g = d.k ` +
 				`GROUP BY t.g) s ON true ORDER BY d.k`,
@@ -240,12 +244,12 @@ func TestArcJ1ALateralKeyIsPublishedUnderAHiddenSlot(t *testing.T) {
 		// which one being a property of the mint rather than of the query.
 		// A reference into a relation that publishes one name twice names
 		// neither column, and it is refused now, on every arm.
-		{name: "956/ambiguous-own-name-is-refused", budgeted: true,
+		{name: "956/ambiguous-own-name-is-refused",
 			sql: `SELECT d.k AS k, s.g AS g FROM typemx_dim d JOIN LATERAL (` +
 				`SELECT t.g, MAX(t.id) AS g FROM typemx t WHERE t.g = d.k ` +
 				`GROUP BY t.g) s ON true ORDER BY d.k`,
 			wantErrLike: `column reference "g" is ambiguous`},
-		{name: "767/ctl-aliased-key-H1-s-published-name-path", budgeted: true,
+		{name: "767/ctl-aliased-key-H1-s-published-name-path",
 			sql: `SELECT d.k AS k, s.gg AS gg, s.c AS c FROM typemx_dim d JOIN LATERAL (` +
 				`SELECT t.g AS gg, COUNT(*) AS c FROM typemx t WHERE t.g = d.k GROUP BY t.g) s ` +
 				`ON true ORDER BY d.k`,
@@ -266,9 +270,6 @@ func TestArcJ1ALateralKeyIsPublishedUnderAHiddenSlot(t *testing.T) {
 				}
 				cols, rows, err := arm.run(tc.sql)
 				if err != nil {
-					if tc.budgeted && arm.name == spilledArm && budgetedClonePresizeRefusal(err) {
-						continue
-					}
 					if tc.wantErrLike != "" {
 						if !strings.Contains(err.Error(), tc.wantErrLike) {
 							t.Fatalf("%s arm: refused with %v\n  want a refusal naming %q\n  SQL: %s",
@@ -456,9 +457,6 @@ func TestArcJ1TheReservedNamespaceRefusesOnlyMinting(t *testing.T) {
 	for _, tc := range []struct {
 		name, sql, want string
 		refused         bool
-		// budgeted tolerates on the SPILLED arm exactly one refusal besides
-		// PostgreSQL's rows: budgetedClonePresizeRefusal (#1706).
-		budgeted bool
 	}{
 		{name: "an-output-alias-in-the-new-family-is-refused",
 			sql:     `SELECT amount AS __key_0 FROM lat_item ORDER BY 1`,
@@ -487,7 +485,6 @@ func TestArcJ1TheReservedNamespaceRefusesOnlyMinting(t *testing.T) {
 		{name: "reading-it-across-a-lateral-that-mints-a-slot",
 			sql: `SELECT * FROM wintab0 w JOIN LATERAL (SELECT MAX(t.id) AS mx ` +
 				`FROM typemx t WHERE t.g = w.id) s ON true ORDER BY w.id`,
-			budgeted: true,
 			want: `id,__win_0,plain,mx | 1,100,1000,4999 | 2,200,2000,4993 | ` +
 				`3,300,3000,4994 | 4,400,4000,4995`},
 	} {
@@ -495,9 +492,6 @@ func TestArcJ1TheReservedNamespaceRefusesOnlyMinting(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, arm := range arms {
 				cols, rows, err := arm.run(tc.sql)
-				if tc.budgeted && arm.name == spilledArm && budgetedClonePresizeRefusal(err) {
-					continue
-				}
 				if tc.refused {
 					if err == nil {
 						t.Fatalf("%s arm ANSWERED %s — the reservation is gone, and every "+

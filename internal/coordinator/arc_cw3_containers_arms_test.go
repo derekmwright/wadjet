@@ -5,6 +5,7 @@ package coordinator
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -276,7 +277,7 @@ func TestArcCW3NullPaddedSideDeclaresItsContainerOnEveryArm(t *testing.T) {
 		notOn string
 		// rowsFlapOnSpilled tolerates on the SPILLED arm, over the side WITH
 		// rows only, exactly one outcome besides the declaration:
-		// budgetedClonePresizeRefusal, because there the verdict follows the
+		// cw3CloneStateRefusal, because there the verdict follows the
 		// release order. Its empty side asserts like every arm.
 		rowsFlapOnSpilled bool
 	}{
@@ -297,25 +298,32 @@ func TestArcCW3NullPaddedSideDeclaresItsContainerOnEveryArm(t *testing.T) {
 		{"full-join-computed", `SELECT a.id, b.x FROM (SELECT id FROM typemx WHERE id < 4) a FULL JOIN (SELECT id, ARRAY[c_date] AS x FROM typemx WHERE %s) b ON a.id = b.id`,
 			arr(parquet.TypeDate), spilledArm, false},
 		// The three shapes below aggregate the whole 5,000-row table on the
-		// side with rows, partitioned, and each clone that receives a group
-		// force-charges its 4096-slot presize (about 238 KB here: the pool's
-		// first chunk and the string index) before the join above it first
-		// reserves (#1706, budgetedClonePresizeRefusal). They used to be
-		// dropped from the spilled arm whole (notOn); measured at #1706 line
-		// 1706e (30 fresh runs at each of GOMAXPROCS 1, 2, 4 and the default)
-		// every EMPTY side answered there, so the spilled arm asserts those.
-		// Over rows, the two seven-group aggregates answered in 10 and 17 of
-		// those 120 runs (never at GOMAXPROCS 1) and refused in the rest: the
-		// release order decides, so that one refusal is tolerated and nothing
-		// else. The LEFT lateral keyed on `id` holds 5,000 groups over 24
-		// clones (1.0 to 8.1 MB forced) and refused in all 120 free runs, but
-		// with the join's first reservation delayed 100 ms it answered 10 of
-		// 10: the same order class, so it is tolerated the same way, not
-		// pinned.
+		// side with rows, partitioned. They used to be dropped from the
+		// spilled arm whole (notOn); measured at #1706 line 1706e every EMPTY
+		// side answered, so the spilled arm asserts those.
+		//
+		// Over rows, each clone of the two seven-group aggregates that
+		// received a group used to force-charge a presize sized for the WHOLE
+		// 5,000-row estimate (about 238 KB: the pool's first chunk and the
+		// string index) for one group, before the join above it first
+		// reserved, and the release order decided (1706e: answered 10 and 17
+		// of 120 free runs). Each partition's presize is now its share of the
+		// estimate (line 1706f): both answered every one of 30 fresh runs at
+		// GOMAXPROCS 1, 2, 4 and the default, free, with the join's first
+		// reservation delayed 100 ms, and with every clone's release held
+		// 100 ms (the base refused all 120 of those), so they assert the
+		// declaration (PostgreSQL 17.11: numeric[], timestamp[]; 4 rows).
 		{"left-join-aggregate", `SELECT a.id, b.m FROM typemx a LEFT JOIN (SELECT g, MAX(ARRAY[c_dec]) AS m FROM typemx WHERE %s GROUP BY g) b ON a.g = b.g WHERE a.id < 4`,
-			arr(parquet.TypeDecimal), "", true},
+			arr(parquet.TypeDecimal), "", false},
 		{"lateral-aggregate", `SELECT t.id, l.m FROM typemx t, LATERAL (SELECT MAX(ARRAY[u.c_ts]) AS m FROM typemx u WHERE u.g = t.g AND %s) l WHERE t.id < 4`,
-			arr(parquet.TypeTimestamp), "", true},
+			arr(parquet.TypeTimestamp), "", false},
+		// The LEFT lateral keyed on `id` holds REAL state: 5,000 groups over
+		// 24 clones. It refused in every free run and every run with the
+		// clones' releases held, at the base and at 1706f alike, and answered
+		// every run with the join's first reservation delayed 100 ms: the
+		// same order class with a smaller charge (1706f's traces: about 2.0 MB
+		// forced where the base held 5.1 to 7.5 MB), so it is tolerated, not
+		// pinned (cw3CloneStateRefusal).
 		{"left-join-lateral", `SELECT t.id, l.m FROM typemx t LEFT JOIN LATERAL (SELECT MIN(u.c_arr) AS m FROM typemx_nested u WHERE u.id = t.id AND %s) l ON true WHERE t.id < 4`,
 			arr(parquet.TypeString), "", true},
 	}
@@ -335,7 +343,7 @@ func TestArcCW3NullPaddedSideDeclaresItsContainerOnEveryArm(t *testing.T) {
 				want++
 				schema, rows, err := arm.run(sql)
 				if s.rowsFlapOnSpilled && arm.name == spilledArm && side.name == "rows" &&
-					budgetedClonePresizeRefusal(err) {
+					cw3CloneStateRefusal(err) {
 					answered++
 					continue
 				}
@@ -385,6 +393,34 @@ func TestArcCW3NullPaddedSideDeclaresItsContainerOnEveryArm(t *testing.T) {
 // order disagrees), a prefix, a NULL element, an empty array, equal arrays, a
 // DECIMAL element (boxed as its text — only its declaration orders it as a
 // number), text, dates, timestamps, a nested array.
+// cw3CloneStateRefusal is the ONE refusal the `left-join-lateral` shape's side
+// with rows may give on the 512 KiB arm instead of the declaration, matched
+// whole: the join build above the decorrelated aggregate refuses its first
+// arrival with nothing built, against a floor that is entirely forced `spill
+// tracking`.
+//
+// The mechanism (#1706, traced at line 1706e, re-measured at line 1706f): the
+// lateral body groups the 5,000-row typemx_nested by `id`, partitioned over
+// 24 clones that each hold about 208 REAL groups, charged as `spill tracking`
+// and released in HashAggregate.Close as the drain emits — concurrently with
+// the join's first arrival reservation. Whether that reservation fits follows
+// how many clones have released by then. Each partition's presize is now its
+// share of the estimate, so the charge is the groups themselves (about 2.0 MB
+// forced at the refusal, where the whole-estimate presize held 5.1 to 7.5 MB),
+// and the class remains: over 30 fresh runs at each of GOMAXPROCS 1, 2, 4 and
+// the default it refused every free run and every run with the clones'
+// releases held 100 ms, and answered every run with the join's first
+// reservation delayed 100 ms. Neither side is pinned; ordering a join's first
+// reservation after an upstream breaker's releases, or what a clone that
+// cannot drain may hold, is a decision ADR-0006 has not taken.
+func cw3CloneStateRefusal(err error) bool {
+	return err != nil && cw3CloneStateRE.MatchString(err.Error())
+}
+
+var cw3CloneStateRE = regexp.MustCompile(`^building physical plan: building hash table: hash join build: ` +
+	`query: memory budget exceeded \(used=\d+, requested=\d+, budget=524288, of which forced=\d+ ` +
+	`by "spill tracking"\) \(build_rows=0, batches=0\)$`)
+
 func TestArcCW3EveryComparatorOrdersArraysOneWay(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: this gate stands up an embedded NATS cluster")

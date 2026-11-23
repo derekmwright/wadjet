@@ -4,7 +4,6 @@ package coordinator
 
 import (
 	"context"
-	"regexp"
 	"testing"
 	"time"
 )
@@ -35,7 +34,18 @@ import (
 // answers an obvious zero — protocol item 8. That one is still pinned in the
 // D5 census as `boundary_inner_alias_shadowing_the_key_answers_nothing`.
 //
-// Every Want is live PostgreSQL 17 over the same rows.
+// Every Want is live PostgreSQL 17 over the same rows (re-measured on
+// PostgreSQL 17.11, --locale=C, at #1706 line 1706f).
+//
+// The SPILLED arm asserts them too. The five cells over typemx used to
+// tolerate one refusal: each partitioned clone of the lateral body
+// force-charged a presize sized for the WHOLE 5,000-row estimate (about 107 KB
+// for one group), and the join's first reservation refused or not by how many
+// clones had released (#1706, line 1706e). Each partition's presize is now its
+// share of the estimate (line 1706f); over 30 fresh runs at GOMAXPROCS 1, 2, 4
+// and the default they answered every run free, with the join's first
+// reservation delayed 100 ms, and with every clone's release held 100 ms
+// (where the base refused all 600).
 func TestArcH1ALateralKeysOnThePublishedName(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: this gate stands up an embedded NATS cluster")
@@ -46,18 +56,14 @@ func TestArcH1ALateralKeysOnThePublishedName(t *testing.T) {
 
 	for _, tc := range []struct {
 		name, sql, want string
-		// budgeted, when true, tolerates on the SPILLED arm exactly one
-		// outcome besides PostgreSQL's rows: budgetedClonePresizeRefusal
-		// (see there for the mechanism and why it is not pinned either way).
-		budgeted bool
 	}{
 		// THE DEFECT: the group key is SELECTED under an alias.
-		{name: "grouped-lateral-selecting-its-key-under-an-alias", budgeted: true,
+		{name: "grouped-lateral-selecting-its-key-under-an-alias",
 			sql: `SELECT d.k AS k, s.gg AS gg, s.c AS c FROM typemx_dim d JOIN LATERAL (` +
 				`SELECT t.g AS gg, COUNT(*) AS c FROM typemx t WHERE t.g = d.k GROUP BY t.g) s ` +
 				`ON true ORDER BY d.k`,
 			want: `k,gg,c | 0,0,660 | 1,1,660 | 2,2,659 | 3,3,659 | 4,4,659 | 5,5,659 | 6,6,660`},
-		{name: "counted", budgeted: true,
+		{name: "counted",
 			sql: `SELECT COUNT(*) AS n FROM typemx_dim d JOIN LATERAL (` +
 				`SELECT t.g AS gg, COUNT(*) AS c FROM typemx t WHERE t.g = d.k GROUP BY t.g) s ON true`,
 			want: `n | 7`},
@@ -66,7 +72,7 @@ func TestArcH1ALateralKeysOnThePublishedName(t *testing.T) {
 		// matches a single row, so it cannot fail on revert and cannot see
 		// the DAG defect either. The shape that can is
 		// TestArcH1ALeftLateralOverAGroupedSubqueryStillFailsOnTheDAG below.
-		{name: "ctl-left-spelling-count-keeps-every-outer-row", budgeted: true,
+		{name: "ctl-left-spelling-count-keeps-every-outer-row",
 			sql: `SELECT COUNT(*) AS n FROM typemx_dim d LEFT JOIN LATERAL (` +
 				`SELECT t.g AS gg, COUNT(*) AS c FROM typemx t WHERE t.g = d.k GROUP BY t.g) s ON true`,
 			want: `n | 8`},
@@ -81,11 +87,11 @@ func TestArcH1ALateralKeysOnThePublishedName(t *testing.T) {
 		// THE CONTROLS. The key published under its OWN name, the key not
 		// published at all (the injection fires), and the two shapes the D5
 		// census already covers — none of them may move.
-		{name: "ctl-key-published-under-its-own-name", budgeted: true,
+		{name: "ctl-key-published-under-its-own-name",
 			sql: `SELECT COUNT(*) AS n FROM typemx_dim d JOIN LATERAL (` +
 				`SELECT t.g, COUNT(*) AS c FROM typemx t WHERE t.g = d.k GROUP BY t.g) s ON true`,
 			want: `n | 7`},
-		{name: "ctl-key-not-published-at-all", budgeted: true,
+		{name: "ctl-key-not-published-at-all",
 			sql: `SELECT COUNT(*) AS n FROM typemx_dim d JOIN LATERAL (` +
 				`SELECT COUNT(*) AS c FROM typemx t WHERE t.g = d.k GROUP BY t.g) s ON true`,
 			want: `n | 7`},
@@ -110,9 +116,6 @@ func TestArcH1ALateralKeysOnThePublishedName(t *testing.T) {
 			for _, arm := range arms {
 				cols, rows, err := arm.run(tc.sql)
 				if err != nil {
-					if tc.budgeted && arm.name == spilledArm && budgetedClonePresizeRefusal(err) {
-						continue
-					}
 					t.Fatalf("%s arm: %v\n  want %s (live PostgreSQL 17)\n  SQL: %s",
 						arm.name, err, tc.want, tc.sql)
 				}
@@ -124,38 +127,3 @@ func TestArcH1ALateralKeysOnThePublishedName(t *testing.T) {
 		})
 	}
 }
-
-// budgetedClonePresizeRefusal is the ONE refusal the budgeted cells of the arc
-// H1 / J1 lateral gates (and the CW2 / CW3 container cells that aggregate the
-// same table) may give on the 512 KiB arm instead of PostgreSQL's answer,
-// matched whole: the join build above the decorrelated aggregate refuses
-// its first arrival with nothing built, against a floor that is entirely
-// forced `spill tracking`.
-//
-// The mechanism, traced at #1706 line 1706e (it is not the CROSS-join build
-// these gates' comments used to name): the lateral body aggregates the
-// 5,000-row typemx, so its input estimate is 5,000 and the presize and
-// group-state pool bounds of ADR-0006 (2026-11-22, 2026-11-23) leave the
-// 4096-slot capacity in place. The aggregate runs partitioned, and each of the
-// seven clones that receives one of the seven `g` groups force-charges about
-// 107 KB (98,304 of it the pool's first chunk) for ONE group (about 238 KB in
-// the CW cells, whose string-keyed index keeps its 4096 slots too). They
-// release in HashAggregate.Close as the drain emits, concurrently with the
-// join's first arrival reservation: every refusal measured had five to seven
-// still outstanding (535,465 to 751,332 bytes); with four or fewer the
-// reservation fits the budget.
-// Free, over 30 fresh runs at each of GOMAXPROCS 1, 2, 4 and the default, the
-// 21 budgeted cells of H1A, J1A and J1B refused 2,510 of 2,520 times and
-// answered PostgreSQL's rows 10 times (at 2, 4 and the default, never at 1);
-// with the join's first reservation delayed 100 ms half or more answer. The
-// verdict is the release order, so neither side is pinned;
-// sizing a partitioned clone below its parent's estimate, or ordering the
-// join's reservation after the drain's releases, is a decision ADR-0006 has
-// not taken (#1706).
-func budgetedClonePresizeRefusal(err error) bool {
-	return err != nil && budgetedClonePresizeRE.MatchString(err.Error())
-}
-
-var budgetedClonePresizeRE = regexp.MustCompile(`^building physical plan: building hash table: hash join build: ` +
-	`query: memory budget exceeded \(used=\d+, requested=\d+, budget=524288, of which forced=\d+ ` +
-	`by "spill tracking"\) \(build_rows=0, batches=0\)$`)

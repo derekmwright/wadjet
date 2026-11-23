@@ -115,52 +115,48 @@ func TestArcCW2ZeroRowPublishersDeclareTheElementOnEveryArm(t *testing.T) {
 		name string
 		sql  string
 		want []decl
-		// flapsOnSpilled tolerates on the SPILLED arm exactly one outcome
-		// besides the declaration: budgetedClonePresizeRefusal, with the
-		// reason at the cell.
-		flapsOnSpilled bool
 	}{
-		{"scalar-min", `SELECT MIN(ARRAY[c_i64]) AS a FROM typemx WHERE id < 0`, []decl{arr(parquet.TypeInt64)}, false},
-		{"scalar-max-stored", `SELECT MAX(c_arr) AS a FROM typemx_nested WHERE id < 0`, []decl{arr(parquet.TypeString)}, false},
+		{"scalar-min", `SELECT MIN(ARRAY[c_i64]) AS a FROM typemx WHERE id < 0`, []decl{arr(parquet.TypeInt64)}},
+		{"scalar-max-stored", `SELECT MAX(c_arr) AS a FROM typemx_nested WHERE id < 0`, []decl{arr(parquet.TypeString)}},
 		{"scalar-min-beside-count", `SELECT MIN(ARRAY[c_ts]) AS a, COUNT(*) AS n FROM typemx WHERE id < 0`,
-			[]decl{arr(parquet.TypeTimestamp), i64}, false},
-		{"grouped", `SELECT g, MAX(ARRAY[c_ts]) AS a FROM typemx WHERE id < 0 GROUP BY g`, []decl{i32, arr(parquet.TypeTimestamp)}, false},
+			[]decl{arr(parquet.TypeTimestamp), i64}},
+		{"grouped", `SELECT g, MAX(ARRAY[c_ts]) AS a FROM typemx WHERE id < 0 GROUP BY g`, []decl{i32, arr(parquet.TypeTimestamp)}},
 		{"having", `SELECT g, MIN(ARRAY[c_str]) AS a FROM typemx GROUP BY g HAVING COUNT(*) > 1000000`,
-			[]decl{i32, arr(parquet.TypeString)}, false},
-		{"window-min", `SELECT MIN(ARRAY[c_date]) OVER () AS a FROM typemx WHERE id < 0`, []decl{arr(parquet.TypeDate)}, false},
+			[]decl{i32, arr(parquet.TypeString)}},
+		{"window-min", `SELECT MIN(ARRAY[c_date]) OVER () AS a FROM typemx WHERE id < 0`, []decl{arr(parquet.TypeDate)}},
 		{"window-first-value", `SELECT FIRST_VALUE(ARRAY[c_i64]) OVER (ORDER BY id) AS a FROM typemx WHERE id < 0`,
-			[]decl{arr(parquet.TypeInt64)}, false},
-		{"window-lag-stored", `SELECT LAG(c_arr) OVER (ORDER BY id) AS a FROM typemx_nested WHERE id < 0`, []decl{arr(parquet.TypeString)}, false},
-		{"scalar-subquery", `SELECT (SELECT MAX(ARRAY[c_ts]) FROM typemx WHERE id < 0) AS a`, []decl{arr(parquet.TypeTimestamp)}, false},
-		{"derived-aggregate", `SELECT q.a FROM (SELECT MIN(ARRAY[c_i64]) AS a FROM typemx WHERE id < 0) q`, []decl{arr(parquet.TypeInt64)}, false},
-		{"distinct-stored", `SELECT DISTINCT c_arr AS a FROM typemx_nested WHERE id < 0`, []decl{arr(parquet.TypeString)}, false},
-		{"group-by-key", `SELECT c_arr FROM typemx_nested WHERE id < 0 GROUP BY c_arr`, []decl{arr(parquet.TypeString)}, false},
+			[]decl{arr(parquet.TypeInt64)}},
+		{"window-lag-stored", `SELECT LAG(c_arr) OVER (ORDER BY id) AS a FROM typemx_nested WHERE id < 0`, []decl{arr(parquet.TypeString)}},
+		{"scalar-subquery", `SELECT (SELECT MAX(ARRAY[c_ts]) FROM typemx WHERE id < 0) AS a`, []decl{arr(parquet.TypeTimestamp)}},
+		{"derived-aggregate", `SELECT q.a FROM (SELECT MIN(ARRAY[c_i64]) AS a FROM typemx WHERE id < 0) q`, []decl{arr(parquet.TypeInt64)}},
+		{"distinct-stored", `SELECT DISTINCT c_arr AS a FROM typemx_nested WHERE id < 0`, []decl{arr(parquet.TypeString)}},
+		{"group-by-key", `SELECT c_arr FROM typemx_nested WHERE id < 0 GROUP BY c_arr`, []decl{arr(parquet.TypeString)}},
 		{"distinct-derived-qualified", `SELECT DISTINCT q.a FROM (SELECT c_arr AS a, id FROM typemx_nested) q WHERE q.id < 0`,
-			[]decl{arr(parquet.TypeString)}, false},
+			[]decl{arr(parquet.TypeString)}},
 		{"lateral-aggregate", `SELECT t.id, l.a FROM typemx t, LATERAL (SELECT MAX(ARRAY[u.c_date]) AS a FROM typemx u WHERE u.g = t.g) l WHERE t.id < 0`,
 			// The decorrelated LATERAL aggregates the whole 5,000-row table,
-			// partitioned, and each clone that receives one of the seven
-			// groups force-charges its 4096-slot presize (about 238 KB) before
-			// the join above it first reserves (#1706). It used to be dropped
-			// from the spilled arm; measured at #1706 line 1706e (30 fresh runs
-			// at each of GOMAXPROCS 1, 2, 4 and the default) it answered in 20
-			// of 120 (never at 1) and refused in the rest: the release order
-			// decides, so that one refusal is tolerated and nothing else.
-			[]decl{i64, arr(parquet.TypeDate)}, true},
+			// partitioned. Each clone that received one of the seven groups
+			// used to force-charge a presize sized for the WHOLE estimate
+			// (about 238 KB) before the join above it first reserved, and the
+			// spilled arm refused or answered by the release order (#1706,
+			// line 1706e: answered 20 of 120). Each partition's presize is now
+			// its share of the estimate (line 1706f): it answered every one of
+			// 30 fresh runs at GOMAXPROCS 1, 2, 4 and the default, free, with
+			// the join's first reservation delayed 100 ms, and with every
+			// clone's release held 100 ms (the base refused all 120 of those),
+			// so the spilled arm asserts the declaration (PostgreSQL 17.11:
+			// bigint, date[]).
+			[]decl{i64, arr(parquet.TypeDate)}},
 		{"coalesce-over-aggregate", `SELECT COALESCE(MIN(ARRAY[c_i64]), CAST(ARRAY[] AS BIGINT[])) AS a FROM typemx WHERE id < 0`,
-			[]decl{arr(parquet.TypeInt64)}, false},
-		{"cte-aggregate", `WITH c AS (SELECT MAX(ARRAY[c_str]) AS a FROM typemx WHERE id < 0) SELECT a FROM c`, []decl{arr(parquet.TypeString)}, false},
+			[]decl{arr(parquet.TypeInt64)}},
+		{"cte-aggregate", `WITH c AS (SELECT MAX(ARRAY[c_str]) AS a FROM typemx WHERE id < 0) SELECT a FROM c`, []decl{arr(parquet.TypeString)}},
 		// Control: a plain container column, right since round 1.
-		{"control-column", `SELECT ARRAY[c_i64] AS a FROM typemx WHERE id < 0`, []decl{arr(parquet.TypeInt64)}, false},
+		{"control-column", `SELECT ARRAY[c_i64] AS a FROM typemx WHERE id < 0`, []decl{arr(parquet.TypeInt64)}},
 	}
 	decided := 0
 	for _, c := range cells {
 		for _, arm := range arms {
 			got, _, err := arm.run(c.sql)
-			if c.flapsOnSpilled && arm.name == spilledArm && budgetedClonePresizeRefusal(err) {
-				decided++
-				continue
-			}
 			if err != nil {
 				t.Errorf("%s / %s: %s refused: %v", c.name, arm.name, c.sql, err)
 				continue
