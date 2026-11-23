@@ -719,16 +719,12 @@ func nrKnown(name, arm string) (verdict, cause string, known bool) {
 	switch {
 	case (op == "arith" || (op == "gt" && in(con, "in", "notIn"))) && in(col, "c_f64", "c_f32"):
 		return "refused", "the per-row correlated re-run has no literal for a float outer value", true
-	case op == "gt" && in(con, "in", "notIn") && col == "c_b":
-		return "wrong", "a BOOL comparison in a correlated IN body re-run per outer row", true
 	case op == "innerOnly" && in(col, "c_by", "c_ip", "c_ip6"):
 		return "refused", "the ::bytea / ::inet cast spelling in the body: type does not exist", true
 	case op == "innerOnly" && col == "c_iv" && single:
 		return "refused", "an INTERVAL literal in an inner-only body filter: invalid input syntax for type duration \"04:00:00\"", true
 	case op == "innerOnly" && col == "c_iv":
 		return "wrong", "an INTERVAL literal in an inner-only body filter on the DAG", true
-	case op == "innerOnly" && col == "c_b" && single:
-		return "wrong", "an inner-only BOOL comparison with false on the single-process path", true
 	}
 	return "", "", false
 }
