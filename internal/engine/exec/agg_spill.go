@@ -52,7 +52,12 @@ func (h *HashAggregate) Finalize(_ context.Context) error {
 	// Once Finalize starts, the aggregate is no longer a viable cooperative
 	// spill target — it's about to drain its in-memory state into the merger.
 	// Deregister here so peer operators don't waste a RequestRelief call on
-	// us mid-finalize. Close still calls unregister as a backstop.
+	// us mid-finalize. Close still calls unregister as a backstop. A call the
+	// registry already selected can still land after the unregister, so the
+	// table is closed to relief first, under mu (#1706, line 1706k).
+	h.mu.Lock()
+	h.reliefClosed = true
+	h.mu.Unlock()
 	if h.unregisterAccounted != nil {
 		h.accState.Store(int32(memory.OpClosed))
 		h.unregisterAccounted()
@@ -174,6 +179,9 @@ func (h *HashAggregate) Close() error {
 		ap.Close()
 	}
 	h.adoptedPartitions = nil
+	h.mu.Lock()
+	h.reliefClosed = true
+	h.mu.Unlock()
 	if h.unregisterAccounted != nil {
 		h.accState.Store(int32(memory.OpClosed))
 		h.unregisterAccounted()
@@ -344,7 +352,7 @@ func (h *HashAggregate) accName() string {
 // the SpillManager never targets state that is being merged back in. Caller
 // holds h.mu.
 func (h *HashAggregate) spillableBytesLocked() int64 {
-	if h.Spill == nil || !h.canUseExternalMerge() {
+	if h.Spill == nil || h.reliefClosed || !h.canUseExternalMerge() {
 		return 0
 	}
 	if h.partialMerger != nil {
@@ -437,10 +445,17 @@ func (h *HashAggregate) selfSpillReliefTarget() int64 {
 // Implements memory.Spillable and memory.AccountedOperator. The OpSpilling
 // state is published for the duration so a concurrent RequestRelief snapshot
 // skips this instance rather than double-dispatching.
+//
+// The registry calls it outside its own lock, so it can land after Finalize
+// or Close; reliefClosed, read here under mu, refuses it then without writing
+// the accounted state (#1706, line 1706k).
 func (h *HashAggregate) SpillSome(target int64) (int64, error) {
-	h.accState.Store(int32(memory.OpSpilling))
-	defer h.accState.CompareAndSwap(int32(memory.OpSpilling), int32(memory.OpActive))
 	h.mu.Lock()
+	if h.reliefClosed || !beginRelief(&h.accState) {
+		h.mu.Unlock()
+		return 0, nil
+	}
+	defer endRelief(&h.accState)
 	defer h.mu.Unlock()
 	if h.Spill == nil || !h.canUseExternalMerge() {
 		return 0, nil

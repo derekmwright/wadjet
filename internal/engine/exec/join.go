@@ -299,6 +299,16 @@ type HashJoin struct {
 	// by Inspect off the pipeline goroutine.
 	accInstanceID uint64
 	accState      atomic.Int32
+	// reliefClosed, guarded by mu, is set once this join's partitions stop
+	// being safely evictable by a relief call: at Build's return on every
+	// path (before the unregister), and at Close. After it the matched
+	// bitmaps, the probe's unlocked reads of spilledParts / parts /
+	// buildBatches, BloomPushdownOp's spilledParts read, FixKeyAssignment's
+	// one-part rebuild and Close's teardown all assume nothing is evicted, and
+	// a relief call the registry selected before the unregister can still land
+	// (#1706, line 1706k). Every relief entry point reads it under mu and frees
+	// nothing once it is set.
+	reliefClosed bool
 
 	// forcedEvictSeen counts arriving build batches for the TEST-ONLY
 	// eviction forcing knob (join_force_spill.go). Written under h.mu on the
@@ -1098,6 +1108,13 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 		h.accState.Store(int32(memory.OpActive))
 		unregisterAccounted := h.Spill.RegisterAccounted(h)
 		defer func() {
+			// Close relief eligibility under mu BEFORE unregistering: the
+			// registry may already hold this join for a SpillSome it calls
+			// after the unregister. Unregistering takes the registry lock and
+			// then mu (Inspect), so mu is released first.
+			h.mu.Lock()
+			h.reliefClosed = true
+			h.mu.Unlock()
 			h.accState.Store(int32(memory.OpClosed))
 			unregisterAccounted()
 		}()
@@ -4737,6 +4754,11 @@ func (p *HashJoinProbe) Close() error {
 // thresholds fire prematurely. With many concurrent broadcast joins (e.g.,
 // TPC-H Q02), phantom reservations accumulate query-over-query.
 func (h *HashJoin) Close() error {
+	// A relief call selected before the build's unregister may land here or
+	// later; it must find nothing to evict (#1706, line 1706k).
+	h.mu.Lock()
+	h.reliefClosed = true
+	h.mu.Unlock()
 	if h.MemTracker != nil && h.trackedMem > 0 {
 		// Give each bucket back under the purpose it was charged with, so the
 		// forced census returns to zero rather than describing memory that is

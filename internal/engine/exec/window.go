@@ -737,14 +737,18 @@ func (w *Window) EstimateRelief(target int64) int64 {
 // SpillSome implements memory.AccountedOperator: drains all buffered input
 // batches to disk and releases the freed bytes — a sorted columnar run on
 // the external path, a raw-row file on the nested-type fallback.
+//
+// As for Sort: a call landing after Finalize/Close frees nothing (finalized,
+// or the zeroed trackedMem), and beginRelief keeps it from rewriting OpClosed
+// (#1706, line 1706k).
 func (w *Window) SpillSome(_ int64) (int64, error) {
-	w.accState.Store(int32(memory.OpSpilling))
-	defer w.accState.CompareAndSwap(int32(memory.OpSpilling), int32(memory.OpActive))
 	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.Spill == nil || w.finalized {
+	if w.Spill == nil || w.finalized || !beginRelief(&w.accState) {
+		w.mu.Unlock()
 		return 0, nil
 	}
+	defer endRelief(&w.accState)
+	defer w.mu.Unlock()
 	return w.flushSpillLocked()
 }
 

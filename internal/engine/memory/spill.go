@@ -999,6 +999,40 @@ const reliefCooldown = 30 * time.Second
 // advance time deterministically without sleeping.
 var nowFunc = time.Now
 
+// ReliefSite names the registry path that is about to call an operator's
+// SpillSome, for the test-only relief-call hook.
+type ReliefSite string
+
+const (
+	ReliefSiteRequest      ReliefSite = "RequestRelief"
+	ReliefSiteForceLargest ReliefSite = "forceSpillLargestOwned"
+)
+
+// reliefCallHook runs after the registry has selected an operator and released
+// its lock, immediately before that operator's SpillSome. nil in production.
+var reliefCallHook atomic.Pointer[func(ReliefSite, AccountedOperator)]
+
+// SetReliefCallHook installs f to run between a relief path's selection of an
+// operator and its SpillSome call, and returns the restore. TEST-ONLY: the
+// registry calls a selected operator outside its lock, so the operator can
+// unregister, start its next phase or close in between (#1706, line 1706k); a
+// gate holds the call here to land it at a chosen point of the victim's
+// lifecycle on every run instead of sampling the scheduler.
+func SetReliefCallHook(f func(ReliefSite, AccountedOperator)) func() {
+	var p *func(ReliefSite, AccountedOperator)
+	if f != nil {
+		p = &f
+	}
+	prev := reliefCallHook.Swap(p)
+	return func() { reliefCallHook.Store(prev) }
+}
+
+func runReliefCallHook(site ReliefSite, op AccountedOperator) {
+	if f := reliefCallHook.Load(); f != nil {
+		(*f)(site, op)
+	}
+}
+
 // RequestRelief asks registered AccountedOperators to free at least target
 // bytes by spilling. It ranks candidates by SpillableBytes descending and
 // ACCUMULATES relief across all willing operators — it never skips an operator
@@ -1039,6 +1073,7 @@ func (sm *SpillManager) RequestRelief(target int64) (int64, error) {
 				continue
 			}
 			before := op.Inspect().OwnedBytes
+			runReliefCallHook(ReliefSiteRequest, op)
 			n, err := op.SpillSome(want)
 			if err != nil {
 				return freed, err
@@ -1198,6 +1233,7 @@ func (sm *SpillManager) forceSpillLargestOwned(target int64) int64 {
 	if best == nil {
 		return 0
 	}
+	runReliefCallHook(ReliefSiteForceLargest, best)
 	n, _ := best.SpillSome(target)
 	return n
 }

@@ -596,14 +596,19 @@ func (s *Sort) EstimateRelief(target int64) int64 {
 // pre-sort, so there's no partial state to keep.
 //
 // Implements memory.Spillable and memory.AccountedOperator.
+//
+// A call the registry selected before Finalize/Close unregistered can land
+// after them: finalized (Finalize) and the emptied buffer (Close) already make
+// it free nothing, and beginRelief keeps it from rewriting OpClosed (#1706,
+// line 1706k).
 func (s *Sort) SpillSome(_ int64) (int64, error) {
-	s.accState.Store(int32(memory.OpSpilling))
-	defer s.accState.CompareAndSwap(int32(memory.OpSpilling), int32(memory.OpActive))
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.Spill == nil || s.finalized {
+	if s.Spill == nil || s.finalized || !beginRelief(&s.accState) {
+		s.mu.Unlock()
 		return 0, nil
 	}
+	defer endRelief(&s.accState)
+	defer s.mu.Unlock()
 	return s.flushSpillLocked()
 }
 

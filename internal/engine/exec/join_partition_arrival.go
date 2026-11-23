@@ -851,7 +851,7 @@ func (h *HashJoin) accName() string {
 // spillState==nil and reports 0: it can't evict a partition without a rebuild,
 // matching existing semantics. Caller holds h.mu.
 func (h *HashJoin) spillableBytesLocked() int64 {
-	if h.spillState == nil {
+	if h.spillState == nil || h.reliefClosed {
 		return 0
 	}
 	var total int64
@@ -876,13 +876,27 @@ func (h *HashJoin) EstimateRelief(target int64) int64 {
 // SpillSome attempts to free at least target bytes from this join's in-memory
 // partitions. Picks the largest partition repeatedly until target is met or
 // no partitions remain. Implements memory.Spillable.
+//
+// The registry calls it outside its own lock, so it can land after this join's
+// build returned and unregistered — after the probe matched rows, after
+// FixKeyAssignment rebuilt the index into one part, after Close. Evicting then
+// returned wrong rows for RIGHT, FULL, RIGHT SEMI and RIGHT ANTI (the matched
+// bitmap goes with the partition and the replay starts a fresh one), raced the
+// probe's unlocked routing reads, freed the whole collapsed index, or indexed a
+// torn-down build (#1706, line 1706k). The decision is made under mu, under
+// which Build sets reliefClosed before it returns (so before any of those) and
+// Close sets it again; a refused call writes nothing — not the accounted
+// state, not the published owned bytes.
 func (h *HashJoin) SpillSome(target int64) (int64, error) {
 	if target <= 0 {
 		return 0, nil
 	}
-	h.accState.Store(int32(memory.OpSpilling))
-	defer h.accState.CompareAndSwap(int32(memory.OpSpilling), int32(memory.OpActive))
 	h.mu.Lock()
+	if h.reliefClosed || !beginRelief(&h.accState) {
+		h.mu.Unlock()
+		return 0, nil
+	}
+	defer endRelief(&h.accState)
 	defer h.mu.Unlock()
 	var freed int64
 	for freed < target {

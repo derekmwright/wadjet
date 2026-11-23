@@ -450,6 +450,13 @@ type HashAggregate struct {
 	accInstanceID       uint64
 	accState            atomic.Int32
 	unregisterAccounted func()
+	// reliefClosed, guarded by mu, is set when Finalize starts and at Close:
+	// from then on the group table belongs to the emission (or the merge),
+	// and a relief call the registry selected before Finalize's unregister —
+	// which it calls outside its own lock — must drain nothing. Draining
+	// then wrote the table to a run nothing reads: a GROUP BY answered 0 of
+	// 5,000 groups (#1706, line 1706k).
+	reliefClosed bool
 	// partialMerger, when non-nil, drives streaming Next() from the
 	// k-way merge of partial-spill runs. Set by finalizeViaPartialMerge
 	// (streaming variant); each Next() pulls one batch's worth of merged

@@ -870,14 +870,18 @@ func (j *SortMergeJoin) EstimateRelief(target int64) int64 {
 // SpillSome drains buffered batches to sorted runs, larger side first,
 // stopping once target is met. Implements memory.Spillable and
 // memory.AccountedOperator.
+//
+// As for Sort: a call landing after Finalize/Close frees nothing (finalized,
+// or the torn-down sides), and beginRelief keeps it from rewriting OpClosed
+// (#1706, line 1706k).
 func (j *SortMergeJoin) SpillSome(target int64) (int64, error) {
-	j.accState.Store(int32(memory.OpSpilling))
-	defer j.accState.CompareAndSwap(int32(memory.OpSpilling), int32(memory.OpActive))
 	j.mu.Lock()
-	defer j.mu.Unlock()
-	if j.Spill == nil || j.finalized {
+	if j.Spill == nil || j.finalized || !beginRelief(&j.accState) {
+		j.mu.Unlock()
 		return 0, nil
 	}
+	defer endRelief(&j.accState)
+	defer j.mu.Unlock()
 	larger, smaller := j.sidesBySizeLocked()
 	freed, err := j.flushSideLocked(larger)
 	if err != nil {
