@@ -415,6 +415,10 @@ func (h *HashAggregate) Next(ctx context.Context) (*batch.RecordBatch, error) {
 			return b, err
 		}
 		h.adoptedPartitions[0].Close()
+		// Clear the slot before reslicing: the backing array outlives the
+		// front reslice, so the closed partition would otherwise stay
+		// reachable until this aggregate's own Close (#1706).
+		h.adoptedPartitions[0] = nil
 		h.adoptedPartitions = h.adoptedPartitions[1:]
 	}
 	return nil, nil

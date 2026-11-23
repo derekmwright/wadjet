@@ -261,7 +261,15 @@ func (sm *SpillManager) RegisterAccounted(op AccountedOperator) func() {
 				} else {
 					sm.departed[f.Name] = &departedFootprint{f: f, count: 1}
 				}
-				sm.accounted = append(sm.accounted[:i], sm.accounted[i+1:]...)
+				// Delete without leaving the vacated tail slot aliasing an
+				// operator: an append-deletion keeps the departed operator
+				// reachable from the backing array until a later register
+				// overwrites the slot — on a worker's shared manager, possibly
+				// never (#1706).
+				last := len(sm.accounted) - 1
+				copy(sm.accounted[i:], sm.accounted[i+1:])
+				sm.accounted[last] = nil
+				sm.accounted = sm.accounted[:last]
 				// Drop this instance's published owned-byte counter so OwnedTotal
 				// reflects only LIVE operators. Without this, every closed
 				// instance leaks its last value into OwnedTotal for the worker's
@@ -271,6 +279,13 @@ func (sm *SpillManager) RegisterAccounted(op AccountedOperator) func() {
 					sm.tracker.UnpublishOwned(f.InstanceID)
 				}
 				delete(sm.accountedPeak, f.InstanceID)
+				// The relief cooldown entry likewise belongs to a live
+				// instance only; left behind, the table grows by one entry
+				// per instance that ever entered cooldown, for the manager's
+				// lifetime. reliefMu is never held while taking accountedMu.
+				sm.reliefMu.Lock()
+				delete(sm.lastReliefAt, f.InstanceID)
+				sm.reliefMu.Unlock()
 				return
 			}
 		}
