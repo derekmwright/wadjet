@@ -16,10 +16,29 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
+// censusGoodRowGroups is the valid file's row-group count. A failed scan's
+// error reaches the consumer through a select that also offers the queued
+// batches, and Go picks uniformly among ready cases, so each Next before the
+// error has an even chance of taking a batch instead. The error surfaces with
+// a batch still outstanding unless the consumer takes every one of these
+// first: a chance of about 2^-64 per scan.
+const censusGoodRowGroups = 64
+
+// censusCorruptPath is the corrupt file of a failed scan's table.
+const censusCorruptPath = "tables/items/chunk_000.parquet"
+
 // censusFixture is a table of one valid many-row-group file and, when
-// withCorrupt is set, a second file whose first page header is overwritten,
-// so a scan of the table decodes the valid file's row groups and FAILS on the
-// corrupt one.
+// withCorrupt is set, a corrupt file whose first page header is overwritten,
+// listed FIRST, so a scan of the table fails on its first row group and goes
+// on decoding the valid file's row groups behind the error.
+//
+// The corrupt file comes first so that the decode error is posted without the
+// consumer draining anything, at every scan worker count: the worker that
+// claims row group 0 posts it. Listed after a 16-row-group valid file it was
+// reached only when the queue (one slot per worker) plus the one batch each
+// worker holds blocked on the full queue covered every valid row group, so one
+// to eight workers parked on the full queue and never claimed it (#1685c: the
+// 2-to-4-core CI runner, WADJET_SCAN_WORKERS=1, taskset -c 0,1).
 func censusFixture(t *testing.T, withCorrupt bool) *catalog.Catalog {
 	t.Helper()
 	ctx := context.Background()
@@ -27,7 +46,7 @@ func censusFixture(t *testing.T, withCorrupt bool) *catalog.Catalog {
 		{Name: "id", Type: parquet.TypeInt64},
 		{Name: "value", Type: parquet.TypeString},
 	}}
-	sets := make([][]map[string]any, 16)
+	sets := make([][]map[string]any, censusGoodRowGroups)
 	for i := range sets {
 		sets[i] = testRows(64, i*64)
 	}
@@ -47,15 +66,16 @@ func censusFixture(t *testing.T, withCorrupt bool) *catalog.Catalog {
 		}
 		return catalog.FileEntry{Path: path, SizeBytes: int64(len(data)), NumRows: rows}
 	}
-	entries := []catalog.FileEntry{put("tables/items/chunk_001.parquet", good, 16*64)}
+	var entries []catalog.FileEntry
 	if withCorrupt {
 		bad := writeTestParquetMultiRG(t, schema, testRows(64, 0), testRows(64, 64))
 		bad = append([]byte(nil), bad...)
 		for i := 4; i < 36 && i < len(bad); i++ {
 			bad[i] = 0xFF // the first column chunk's page header
 		}
-		entries = append(entries, put("tables/items/chunk_002.parquet", bad, 128))
+		entries = append(entries, put(censusCorruptPath, bad, 128))
 	}
+	entries = append(entries, put("tables/items/chunk_001.parquet", good, censusGoodRowGroups*64))
 	if err := cat.AddFiles(ctx, "items", map[string]string{}, "tables/items/", entries); err != nil {
 		t.Fatalf("add files: %v", err)
 	}
@@ -110,10 +130,14 @@ func runAbandonedScan(t *testing.T, cat *catalog.Catalog, parent *memory.Tracker
 		t.Fatalf("init: %v", err)
 	}
 	if fail {
-		// The decode error is posted and the workers have filled the channel.
+		// Row group 0 is the corrupt file's, so its worker posts the decode
+		// error without the consumer draining anything (see censusFixture).
+		if units := src.scanner.rgUnits; len(units) == 0 || units[0].slot.entry.Path != censusCorruptPath {
+			t.Fatal("the scan's first row group is not the corrupt file's")
+		}
 		waitFor(t, "the scan's decode error", func() bool { return len(src.scanner.errCh) == 1 })
 		var err error
-		for i := 0; i < 64 && err == nil; i++ {
+		for i := 0; i <= censusGoodRowGroups+2 && err == nil; i++ {
 			var b any
 			b, err = src.Next(ctx)
 			if err == nil && b == nil {
