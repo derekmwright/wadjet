@@ -301,5 +301,15 @@ consumer can sniff and decode, including mid-stream.
   deploy costs the query, where before the guard it cost the answer. Either way
   the worker ignoring the field does not answer correctly, which is the test.
 
+  **The gather messages' execution identity is the fourth entry** (#1709,
+  2026-11-23). `GatherBatchMsg` and `dpv1.ResultBatch` carry `task_id`,
+  `execution_id`, `seq` and `batch_count`, and the coordinator REJECTS a
+  gather message without the identity: a worker that predates the fields,
+  rolled against a new coordinator, fails every statement whose result it
+  streams (`XX000`, "carries no task or execution identity"). That is the
+  intended outcome — accepting an unidentified stream is exactly the
+  duplicated-rows defect the fields exist to stop. No deployment exists to
+  migrate; coordinator and workers deploy together.
+
 References: `docs/design/peer-wire-compression.md`,
 `docs/design/exchange-streaming-consumption.md`.

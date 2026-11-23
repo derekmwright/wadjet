@@ -27,7 +27,10 @@ streaming directly to the coordinator's NATS reply subscription instead
 of an unpartitioned .wshf upload — fuses the downstream gather stage
 into this fragment, eliminating one S3 PUT/GET hop and one coord round-
 trip. Each task publishes its own terminal marker; coord pre-subscribes
-with expectedTerminals = numTasks.
+and registers the stage's task ids before publishing them (expectTasks),
+and completes only when every registered task's one accepted execution
+has finished — see gather-receiver-budget-and-scratch.md §Identity-aware
+acceptance.
 inputRowBound is the exact upper bound on the rows this task will read
 (aggregateInputRowBound), or 0 when no exact bound exists. It rides the
 OpHashAggregate spec and decides the group-index layout on the worker.
