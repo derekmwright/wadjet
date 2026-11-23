@@ -233,14 +233,17 @@ func TestArcK1AnOutputSlotHasOneIdentity(t *testing.T) {
 				"shuffle between; CLOSED by #1078 and the two pins deleted with it",
 		},
 		{
+			// PostgreSQL 17.11 (postgres:17-alpine, --locale=C --encoding=UTF8)
+			// over the nine decpair rows, measured again when the spilled arm's
+			// pin was lifted: 4 rows (-0.0100,-0.01 | 0.0000,0.00 |
+			// 10.0000,2.00 | 38.2500,12.75), declared a1 numeric, b2
+			// numeric(9,2) — wadjet's DECIMAL(38,4) for the SUM is ADR-0024's
+			// recorded width.
 			name: "968 PINNED a CTE of the collision consumed twice in one join",
 			sql: `WITH g AS (SELECT x.a AS b, SUM(x.b) AS a FROM decpair x GROUP BY x.a) ` +
 				`SELECT g1.a AS a1, g2.b AS b2 FROM g g1 JOIN g g2 ON g1.b = g2.b ORDER BY a1`,
 			want: "cols=[a1:DECIMAL(38,4) b2:DECIMAL(9,2)] rows=4 | -0.0100,-0.01 | " +
 				"0.0000,0.00 | 10.0000,2.00 | 38.2500,12.75",
-			pin: map[string]string{
-				spilledArm: "ERR building physical plan: building hash table",
-			},
 			why: "#1078 moved this one from wrong VALUES to a wrong ROW COUNT, and the " +
 				"row count is CLOSED too (#1099, arc R2): the join key `g1.b` names the " +
 				"CTE's rename of the GROUP KEY, and resolving it to the bare `a` bound " +
@@ -250,7 +253,12 @@ func TestArcK1AnOutputSlotHasOneIdentity(t *testing.T) {
 				"now (`x.a`), which is the spelling the aggregate publishes its key " +
 				"under when an output takes the stripped name. The two DAG pins are " +
 				"deleted, which is the proof. The SPILLED arm's refusal is the 512 KiB " +
-				"budget on a self-join, identical at bb8635a4",
+				"budget on a self-join, identical at bb8635a4. That refusal is CLOSED " +
+				"by the aggregate presize cap (#1706, daad0ddd): the CTE's aggregate " +
+				"held 434,913 bytes of forced spill tracking for five groups while the " +
+				"self-join built, 326,992 of them a 4096-slot presize; capped at its " +
+				"9-row input estimate the join fits, so the spilled arm answers " +
+				"PostgreSQL's four rows like the others",
 		},
 		{
 			name: "968 ctl the same CTE consumed ONCE",

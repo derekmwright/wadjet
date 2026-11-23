@@ -1587,6 +1587,14 @@ var ltRefuses = map[string]string{
 // filing candidate, not a wrong VALUE. The arm either answers PostgreSQL's
 // rows or refuses loudly, and this map allows exactly that pair and nothing
 // else; the single arm and the three DAG arms assert the rows unconditionally.
+//
+// The three `groupLimit/eq` lateral cells left this map when the aggregate
+// presize cap closed their refusal (#1706, daad0ddd): their clones charged a
+// 4096-slot presize as forced spill tracking. At the base at least two of them
+// refused in each of the four runs measured cell by cell; at the cap all three
+// answered in 30 of 30 runs (GOMAXPROCS 1, 2, 4 and the default) with
+// PostgreSQL 17.11's rows (postgres:17-alpine, --locale=C, re-measured over
+// the lt_o/lt_i rows), so the spilled arm asserts them now.
 var ltBudgetBounded = map[string]bool{
 
 	"LATERAL/distinct/eq":             true,
@@ -1610,9 +1618,6 @@ var ltBudgetBounded = map[string]bool{
 	"COMMALATERAL/groupHaving/eq":     true,
 	"LATERAL/groupHaving/none":        true,
 	"COMMALATERAL/groupHaving/none":   true,
-	"LATERAL/groupLimit/eq":           true,
-	"LEFTLATERAL/groupLimit/eq":       true,
-	"COMMALATERAL/groupLimit/eq":      true,
 	"LATERAL/groupLimit/none":         true,
 	"COMMALATERAL/groupLimit/none":    true,
 	"LATERAL/ungroupedAgg/eq":         true,
