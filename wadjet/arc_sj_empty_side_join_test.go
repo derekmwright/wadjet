@@ -142,9 +142,20 @@ var sjArms = []struct {
 // That is the never-OOM contract's loud outcome (ADR-0006), it is the same at
 // the arc's base, and it is not this arc's seam; a refusal anywhere else, and
 // any answer other than PostgreSQL's, fails the cell.
+//
+// It is matched as that refusal and no other: a hash join build refusing with
+// the forced floor named "scan decoded batch". Measured at #1706 line 1706e
+// (30 fresh runs at each of GOMAXPROCS 1, 2, 4 and the default): every refusal
+// it absorbed named it, with 215 KB to 1.05 MB of decoded batches forced against
+// the 256 or 512 KiB budget; most (cell, budget) pairs refused in every run
+// and 57 of the 256 answered PostgreSQL's rows in 1 to 4 of 120 runs (all at
+// GOMAXPROCS 1 or 2; at 4 and the default every run refused), so the verdict at
+// the margin follows the scheduler and is not pinned either way (ADR-0006
+// 2026-11-21 leaves the decode half of #789 narrowed, not closed).
 func sjBudgetRefusal(budget int64, c sjCell, got string) bool {
 	return budget > 0 && budget <= 512<<10 && c.shape == "b20000" && c.buildsPreserved() &&
-		strings.HasPrefix(got, "ERR ") && strings.Contains(got, "memory budget exceeded")
+		strings.HasPrefix(got, "ERR ") && strings.Contains(got, "hash join build: query: memory budget exceeded") &&
+		strings.Contains(got, `by "scan decoded batch"`)
 }
 
 type sjCell struct {
