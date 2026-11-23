@@ -339,12 +339,10 @@ func ColumnCompareLit(colName string, op CompareOp, value any, litText string) P
 			if !boolOK {
 				panic(fatalEvalError{sqlerr.New("22P02", "invalid input syntax for type boolean: %q", strVal)})
 			}
-			if op == OpEq {
-				return v.BoolData[row] == boolVal
-			}
-			if op == OpNe {
-				return v.BoolData[row] != boolVal
-			}
+			// Ordered false < true, as PostgreSQL orders booleans: this arm
+			// read only = and <> and answered no row for the other four
+			// (line 1681d, the twin of kernel.compareFilterBool's defect).
+			return compareInt64(boolOrdinal(v.BoolData[row]), boolOrdinal(boolVal), op)
 		case batch.TypeIPv4:
 			return compareInt64(v.Int64Data[row], ipv4Val, op)
 		case batch.TypeMAC:
@@ -540,6 +538,14 @@ func Or(preds ...Predicate) Predicate {
 		}
 		return false
 	}
+}
+
+// boolOrdinal places a boolean in PostgreSQL's order, false < true.
+func boolOrdinal(b bool) int64 {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 func compareInt64(a, b int64, op CompareOp) bool {

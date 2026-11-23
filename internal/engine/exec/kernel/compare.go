@@ -259,10 +259,30 @@ func getInt32Data(v *batch.Vector) []int32     { return v.Int32Data }
 func getFloat64Data(v *batch.Vector) []float64 { return v.Float64Data }
 func getFloat32Data(v *batch.Vector) []float32 { return v.Float32Data }
 
-// compareFilterBool creates a FilterKernel for boolean columns.
-// Only Eq and Ne are meaningful for booleans.
+// compareFilterBool creates a FilterKernel for boolean columns. Booleans are
+// ORDERED as PostgreSQL orders them, false < true, so every operator selects
+// one of four sets of non-NULL values: none, the FALSE rows, the TRUE rows, or
+// both. Resolving the set once here keeps the loop free of the operator.
+//
+// It used to read only = and <>: every other operator left wantTrue false and
+// selected the FALSE rows, so `c_b > false` answered the rows holding false.
+// The per-row re-run of a correlated body spells its outer boolean as such a
+// literal, which made `p.id IN (SELECT s.id ... WHERE s.c_b > p.c_b)` wrong on
+// every arm (epic #1681, line 1681d).
 func compareFilterBool(op CompareOp, val bool) FilterKernel {
-	wantTrue := (op == OpEq && val) || (op == OpNe && !val)
+	cmp := resolveCompare[int64](op)
+	c := int64(0)
+	if val {
+		c = 1
+	}
+	keepFalse, keepTrue := cmp(0, c), cmp(1, c)
+	switch {
+	case !keepFalse && !keepTrue:
+		return matchNothingKernel
+	case keepFalse && keepTrue:
+		return boolNonNullKernel
+	}
+	wantTrue := keepTrue
 	return func(vec *batch.Vector, sel []uint32, vecLen int, outSel []uint32) []uint32 {
 		data := vec.BoolData
 		out := outSel[:0]
@@ -298,6 +318,27 @@ func compareFilterBool(op CompareOp, val bool) FilterKernel {
 		}
 		return out
 	}
+}
+
+// boolNonNullKernel selects every row whose boolean is not NULL: the set
+// `c_b >= false` and `c_b <= true` name.
+func boolNonNullKernel(vec *batch.Vector, sel []uint32, vecLen int, outSel []uint32) []uint32 {
+	out := outSel[:0]
+	hasNulls := vec.Nulls.HasNulls()
+	if sel != nil {
+		for _, idx := range sel {
+			if !hasNulls || !vec.Nulls.IsNullFast(int(idx)) {
+				out = append(out, idx)
+			}
+		}
+		return out
+	}
+	for i := 0; i < vecLen; i++ {
+		if !hasNulls || !vec.Nulls.IsNullFast(i) {
+			out = append(out, uint32(i))
+		}
+	}
+	return out
 }
 
 // ResolveFilterKernel creates a FilterKernel for comparing a column of the
