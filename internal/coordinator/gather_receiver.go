@@ -147,7 +147,7 @@ func (r *gatherReceiver) handle(m *nats.Msg) {
 // must be identical for both transports.
 func (r *gatherReceiver) handleParsed(msg *distributed.GatherBatchMsg) {
 	if h := gatherParsedTestHook.Load(); h != nil {
-		(*h)(msg)
+		(*h)(*msg) // a copy: handing the hook the pointer would make msg escape
 	}
 	if r.workers != nil {
 		r.workers.MarkWorkerSeen(msg.WorkerID)
@@ -220,8 +220,9 @@ func (r *gatherReceiver) handleParsed(msg *distributed.GatherBatchMsg) {
 
 // gatherParsedTestHook, when set, sees every gather message before
 // acceptance; the #1709 redelivery regressions use it to observe execution
-// ids and order deliveries. Nil outside tests: one atomic load per message.
-var gatherParsedTestHook atomic.Pointer[func(msg *distributed.GatherBatchMsg)]
+// ids and order deliveries (and may delay the subscription goroutine). Nil
+// outside tests: one atomic load per message.
+var gatherParsedTestHook atomic.Pointer[func(msg distributed.GatherBatchMsg)]
 
 // gatherTaskState is one registered task's acceptance state.
 type gatherTaskState struct {
@@ -416,9 +417,10 @@ func (r *gatherReceiver) expectTasks(ids []string) {
 	if r.tasks == nil {
 		r.tasks = make(map[string]*gatherTaskState, len(ids))
 	}
-	for _, id := range ids {
+	states := make([]gatherTaskState, len(ids)) // one allocation for the set
+	for i, id := range ids {
 		if _, ok := r.tasks[id]; !ok {
-			r.tasks[id] = &gatherTaskState{}
+			r.tasks[id] = &states[i]
 		}
 	}
 	if !r.closed && r.completed == len(r.tasks) {

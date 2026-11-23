@@ -497,7 +497,7 @@ func (c *rdCtl) onResultPublish(task distributed.Task, attempt int) error {
 	return nil
 }
 
-func (c *rdCtl) onParsed(msg *distributed.GatherBatchMsg) {
+func (c *rdCtl) onParsed(msg distributed.GatherBatchMsg) {
 	c.mu.Lock()
 	if msg.TaskID != "" {
 		ex := c.execs[msg.TaskID]
@@ -595,7 +595,7 @@ func TestGatherRedelivery_SingleDeliveryMatchesPostgres(t *testing.T) {
 	defer cancel()
 	cl := newRDCluster(t, ctx, 3)
 	var batches, maxSeq atomic.Int64
-	h := func(msg *distributed.GatherBatchMsg) {
+	h := func(msg distributed.GatherBatchMsg) {
 		if !msg.Terminal {
 			batches.Add(1)
 			for {
