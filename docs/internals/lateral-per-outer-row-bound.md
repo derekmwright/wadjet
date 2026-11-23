@@ -153,7 +153,9 @@ SQL reference with the deadline that bounds it.
   free base run, and none of the 33 aggregated lateral cells refused in any of
   180 runs after it, free and in both forced orders. The class stays open above
   the estimate: F1A/480's DISTINCT over 5,000 rows, whose clones cannot drain on
-  the generic map, refuses or answers by the release order.
+  the generic map, refuses or answers by the worker count and the release
+  order (with one scan worker it answers PostgreSQL's row; with two or four
+  it refuses; ADR-0006, 2026-11-23).
 - A window above a lateral join runs on the single-process pipeline when
   requested through the DAG. `refuseWindowOverDependentJoin` handles the
   bounded and unbounded shapes; `WindowOverLateralLocalRoutes` measures the

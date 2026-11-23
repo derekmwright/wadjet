@@ -898,12 +898,24 @@ aggregates' charges are byte-identical in the trace) it refused every free
 run (30 at each GOMAXPROCS) and every run with the releases held, and with
 the join's arrival delayed 100 ms answered PostgreSQL's 3 in 12 of 30 base
 and 22 of 30 tip runs, 13 and 16 of 30 when the two were interleaved in one
-binary; with one pipeline worker
-(`WADJET_SCAN_WORKERS=1`) the serial aggregate spills, holds 336 KB and the
-build refuses, with two or four it answered. Its verdict therefore follows
-the worker count and the release order, and making it independent of them —
-bounding a generic-path clone (a drain for the generic map), not partitioning
-an aggregate that cannot drain under a budget, or ordering a join's first
-reservation after an upstream breaker's release — is the decision the
-2026-11-22 amendment left open; it is still not taken. The pin stays a
-refusal; it is the order class, not an accounting drift.
+binary. With one pipeline worker (`WADJET_SCAN_WORKERS=1`) it answers
+PostgreSQL's 3: in 30 of 30 runs at the base and 30 of 30 at this change, and
+in the run traced, where the serial aggregate holds 336,340 bytes forced, the
+join build spills partitions until it can reserve and the statement answers
+(which fails the pinned refusal). With two or four workers it refuses, 15 of
+15 runs each at the base and at this change. Its verdict therefore follows
+the worker count and the release order. The measurement suggests that not
+partitioning an aggregate that cannot drain under a budget would give this
+statement a deterministic answer, not a refusal; that is measured at one
+statement and decides nothing. Making the verdict independent of the worker
+count and the release order — bounding a generic-path clone (a drain for the
+generic map), not partitioning an aggregate that cannot drain under a budget,
+or ordering a join's first reservation after an upstream breaker's release —
+is the decision the 2026-11-22 amendment left open; it is still not taken.
+The pin stays a refusal; it is the order class, not an accounting drift. Nor
+do the same test's cross-join refusal pins hold in every free run: in 360
+fresh processes per binary (GOMAXPROCS 1, 2, 4 and the default) one answered
+at the base (`480 the same rows DESCENDING`, GOMAXPROCS 1) and one at this
+change (`480 the same join with its rows ORDERED`, GOMAXPROCS 2), each with
+PostgreSQL's 12 rows, which fails the pinned refusal — about 1 in 360 free
+runs, at the base and this change alike, too rare for a 30-run row to see.
