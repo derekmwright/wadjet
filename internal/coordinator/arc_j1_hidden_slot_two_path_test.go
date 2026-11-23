@@ -36,10 +36,10 @@ import (
 // Every Want below is live PostgreSQL 17 over the same rows (`j1_fixture.sql`
 // in the arc's scratch dir reproduces the fixtures).
 //
-// The SPILLED arm's `memory budget exceeded` is tolerated where marked: a
-// LATERAL over the 5000-row fixture builds a hash join whose build side does
-// not fit 512 KiB, and a CROSS-shaped build refuses rather than spilling
-// (ADR-0006's routed-probe amendment). It is a CONDITION and it is loud.
+// The SPILLED arm tolerates exactly one refusal where marked `budgeted`:
+// budgetedClonePresizeRefusal (arc_h1_lateral_two_path_test.go), the
+// partitioned aggregate's per-clone presize charge against the join's first
+// reservation, whose verdict follows the release order (#1706).
 func TestArcJ1ALateralKeyIsPublishedUnderAHiddenSlot(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: this gate stands up an embedded NATS cluster")
@@ -266,8 +266,7 @@ func TestArcJ1ALateralKeyIsPublishedUnderAHiddenSlot(t *testing.T) {
 				}
 				cols, rows, err := arm.run(tc.sql)
 				if err != nil {
-					if tc.budgeted && arm.name == spilledArm &&
-						strings.Contains(err.Error(), "memory budget exceeded") {
+					if tc.budgeted && arm.name == spilledArm && budgetedClonePresizeRefusal(err) {
 						continue
 					}
 					if tc.wantErrLike != "" {
@@ -457,9 +456,8 @@ func TestArcJ1TheReservedNamespaceRefusesOnlyMinting(t *testing.T) {
 	for _, tc := range []struct {
 		name, sql, want string
 		refused         bool
-		// budgeted tolerates the SPILLED arm's `memory budget exceeded` —
-		// a CROSS-shaped lateral build over the 5 000-row fixture does not
-		// fit 512 KiB and refuses rather than spilling (ADR-0006).
+		// budgeted tolerates on the SPILLED arm exactly one refusal besides
+		// PostgreSQL's rows: budgetedClonePresizeRefusal (#1706).
 		budgeted bool
 	}{
 		{name: "an-output-alias-in-the-new-family-is-refused",
@@ -497,8 +495,7 @@ func TestArcJ1TheReservedNamespaceRefusesOnlyMinting(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, arm := range arms {
 				cols, rows, err := arm.run(tc.sql)
-				if tc.budgeted && arm.name == spilledArm && err != nil &&
-					strings.Contains(err.Error(), "memory budget exceeded") {
+				if tc.budgeted && arm.name == spilledArm && budgetedClonePresizeRefusal(err) {
 					continue
 				}
 				if tc.refused {

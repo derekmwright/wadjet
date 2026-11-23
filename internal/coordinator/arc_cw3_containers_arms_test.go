@@ -274,35 +274,50 @@ func TestArcCW3NullPaddedSideDeclaresItsContainerOnEveryArm(t *testing.T) {
 		want decl   // the declaration of column 2
 		// notOn names an arm the shape does not run on, with the reason.
 		notOn string
+		// rowsFlapOnSpilled tolerates on the SPILLED arm, over the side WITH
+		// rows only, exactly one outcome besides the declaration:
+		// budgetedClonePresizeRefusal, because there the verdict follows the
+		// release order. Its empty side asserts like every arm.
+		rowsFlapOnSpilled bool
 	}{
 		{"left-join-stored", `SELECT a.id, b.c_arr FROM typemx_nested a LEFT JOIN (SELECT id, c_arr FROM typemx_nested WHERE %s) b ON a.id = b.id WHERE a.id < 4`,
-			arr(parquet.TypeString), ""},
+			arr(parquet.TypeString), "", false},
 		// A RIGHT or FULL join whose other side is empty intermittently
 		// loses the PRESERVED side's values on the spilled arm (id NULL in
 		// 3-5 of 30 runs, a scalar computed column too, the same at main
 		// 6cbe2041) — a spill-path defect outside this arc, filed; the
 		// shapes run on the three arms that answer deterministically.
 		{"right-join-computed", `SELECT b.id, a.x FROM (SELECT id, ARRAY[c_ts] AS x FROM typemx WHERE %s) a RIGHT JOIN typemx b ON a.id = b.id WHERE b.id < 4`,
-			arr(parquet.TypeTimestamp), spilledArm},
+			arr(parquet.TypeTimestamp), spilledArm, false},
 		// The computed alias SHADOWS a column of the scan below (`c_i64`):
 		// the side publishes the array under that name, and the empty side
 		// declared the scan's bigint instead (qualified `a.c_i64`).
 		{"right-join-shadowing-alias", `SELECT b.id, a.c_i64 FROM (SELECT id, ARRAY[c_ts] AS c_i64 FROM typemx WHERE %s) a RIGHT JOIN typemx b ON a.id = b.id WHERE b.id < 4`,
-			arr(parquet.TypeTimestamp), spilledArm},
+			arr(parquet.TypeTimestamp), spilledArm, false},
 		{"full-join-computed", `SELECT a.id, b.x FROM (SELECT id FROM typemx WHERE id < 4) a FULL JOIN (SELECT id, ARRAY[c_date] AS x FROM typemx WHERE %s) b ON a.id = b.id`,
-			arr(parquet.TypeDate), spilledArm},
-		// The aggregate build over the whole table refuses at the spilled
-		// arm's 512 KiB budget (memory budget exceeded) — loud, not a
-		// declaration.
+			arr(parquet.TypeDate), spilledArm, false},
+		// The three shapes below aggregate the whole 5,000-row table on the
+		// side with rows, partitioned, and each clone that receives a group
+		// force-charges its 4096-slot presize (about 238 KB here: the pool's
+		// first chunk and the string index) before the join above it first
+		// reserves (#1706, budgetedClonePresizeRefusal). They used to be
+		// dropped from the spilled arm whole (notOn); measured at #1706 line
+		// 1706e (30 fresh runs at each of GOMAXPROCS 1, 2, 4 and the default)
+		// every EMPTY side answered there, so the spilled arm asserts those.
+		// Over rows, the two seven-group aggregates answered in 10 and 17 of
+		// those 120 runs (never at GOMAXPROCS 1) and refused in the rest: the
+		// release order decides, so that one refusal is tolerated and nothing
+		// else. The LEFT lateral keyed on `id` holds 5,000 groups over 24
+		// clones (1.0 to 8.1 MB forced) and refused in all 120 free runs, but
+		// with the join's first reservation delayed 100 ms it answered 10 of
+		// 10: the same order class, so it is tolerated the same way, not
+		// pinned.
 		{"left-join-aggregate", `SELECT a.id, b.m FROM typemx a LEFT JOIN (SELECT g, MAX(ARRAY[c_dec]) AS m FROM typemx WHERE %s GROUP BY g) b ON a.g = b.g WHERE a.id < 4`,
-			arr(parquet.TypeDecimal), spilledArm},
-		// The decorrelated LATERAL's hash-join build refuses at the spilled
-		// arm's 512 KiB budget (memory budget exceeded) — loud, and the same
-		// at main; it is not a declaration.
+			arr(parquet.TypeDecimal), "", true},
 		{"lateral-aggregate", `SELECT t.id, l.m FROM typemx t, LATERAL (SELECT MAX(ARRAY[u.c_ts]) AS m FROM typemx u WHERE u.g = t.g AND %s) l WHERE t.id < 4`,
-			arr(parquet.TypeTimestamp), spilledArm},
+			arr(parquet.TypeTimestamp), "", true},
 		{"left-join-lateral", `SELECT t.id, l.m FROM typemx t LEFT JOIN LATERAL (SELECT MIN(u.c_arr) AS m FROM typemx_nested u WHERE u.id = t.id AND %s) l ON true WHERE t.id < 4`,
-			arr(parquet.TypeString), spilledArm},
+			arr(parquet.TypeString), "", true},
 	}
 	sides := []struct{ name, filter string }{{"empty", "id < 0"}, {"rows", "id >= 0"}}
 
@@ -319,6 +334,11 @@ func TestArcCW3NullPaddedSideDeclaresItsContainerOnEveryArm(t *testing.T) {
 				}
 				want++
 				schema, rows, err := arm.run(sql)
+				if s.rowsFlapOnSpilled && arm.name == spilledArm && side.name == "rows" &&
+					budgetedClonePresizeRefusal(err) {
+					answered++
+					continue
+				}
 				if err != nil {
 					t.Errorf("%s / %s / %s: %s refused: %v", s.name, side.name, arm.name, sql, err)
 					continue

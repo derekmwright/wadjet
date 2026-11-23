@@ -27,11 +27,11 @@ import (
 //
 // Every cell runs all four unless it says otherwise in the field that does it
 // (skipBudgetedArm), and every cell that says otherwise gives its own reason
-// there. Two reasons exist: the 18 GENERATED per-type rendering cells, where a
+// there. One reason exists: the 18 GENERATED per-type rendering cells, where a
 // per-row re-run under a budget spends seconds per row in forced-reservation
-// backoff and the rendering they gate is decided before any budget exists; and
-// one #852 cell whose plan's memory floor sits ON the arm's budget, where
-// either outcome would be a coin flip.
+// backoff and the rendering they gate is decided before any budget exists. (A
+// second, the #852 cell whose budgeted arm both answered and refused, is gone:
+// see that cell.)
 //
 // Every DAG cell asserts the ROUTING COUNTERS beside the rows (protocol rule
 // 11). Rows alone cannot tell "the DAG executed this" from "the DAG refused
@@ -62,35 +62,20 @@ type arcD5Cell struct {
 	// still reachable and a census that cannot say it drops the shape instead.
 	wantErrLikeSpilled string
 	// skipBudgetedArm drops the 512 KiB arm for this cell. EVERY cell that
-	// sets it states its own reason at the cell, because there are now two
-	// different reasons and a field whose doc names only one of them is how a
-	// cell ends up opting out silently:
+	// sets it states its own reason at the cell, so a cell cannot opt out
+	// silently. Today the only cells that set it are the 18 GENERATED per-type
+	// rendering cells, for the cost measured below.
 	//
-	//   - the 18 GENERATED per-type rendering cells, for the cost measured
-	//     below;
-	//   - `#852/correlated_scalar_over_a_derived_table`, whose plan's memory
-	//     floor sits ON the arm's budget rather than under or over it: five
-	//     replicates went 2 answered / 3 refused on v0.18.31 and 4 / 1 here,
-	//     and pinning either outcome would be pinning a coin flip (ADR-0027:
-	//     which batch crosses a budget is a CONDITION, not a shape).
-	//
-	//     WHAT MAKES IT A COIN FLIP IS NOW KNOWN, and it is not this shape's
-	//     doing. Several HashAggregate units charge the tracker, not one: the
-	//     primary plus one morsel clone per key-space partition, on a
-	//     TrackingOnlyView, each paying its hash table's presized CAPACITY
-	//     (~107 KB) for a forty-row input. The charge per unit is constant and
-	//     the COUNT follows the budget — 5 / 4 / 3 units at 512 / 384 / 256
-	//     KiB, i.e. `used` of 535822 / 428725 / 321628 — so the 535,822 the
-	//     refusal reports as `forced=… by "spill tracking"` is this budget's
-	//     number rather than the shape's. Each unit releases at
-	//     HashAggregate.Close, which the parallel emit runs on that unit's own
-	//     goroutine as it finishes draining — concurrently with the hash
-	//     join's first arrival reservation. So the floor the join is admitted
-	//     against is how many units have finished draining, a scheduling fact.
-	//     TestAMorselFannedAggregateIsWhatPutsTheCorrelatedScalarPastItsBudget
-	//     holds the measurement and asserts the half that IS deterministic:
-	//     with the fan-out off, five replicates out of five answer. Re-arm
-	//     this arm the day that gate's ON arm stops refusing.
+	// It was also set on `#852/correlated_scalar_over_a_derived_table`, whose
+	// budgeted arm went 2 answered / 3 refused on v0.18.31: every
+	// HashAggregate clone charged its presized capacity (~107 KB) for a
+	// forty-row input and released it on its own drain goroutine,
+	// concurrently with the join's first reservation. Under a budget the
+	// presize and the group-state pool's first chunk are bounded by the input
+	// estimate now (#1706, ADR-0006 2026-11-22 and 2026-11-23), the cell
+	// answered in every run measured, and its arm is re-armed
+	// (TestAMorselFannedAggregateNoLongerPutsTheCorrelatedScalarPastItsBudget
+	// holds the measurement).
 	//
 	// The generated cells' reason is measured, not assumed, and it is the same
 	// fact this arc is about:
@@ -1623,32 +1608,28 @@ func arcD5DerivedInnerCells() []arcD5Cell {
 			sql: `WITH b AS (SELECT s, n FROM mk_inner) SELECT COUNT(*) AS n FROM mk_outer a ` +
 				`WHERE a.s IN (SELECT b.s FROM b WHERE b.n = a.n)`,
 			want: []string{"n=int64:27"}},
-		// The scalar spelling adds an Aggregate and a LEFT JOIN to the plan,
-		// and at 512 KiB that sits ON the floor rather than under or over it:
-		// the scans FORCE their row-group loads past the budget (ADR-0006's
-		// forced producers) and the join, which honours it, then refuses with
-		// `used` already past the limit before it has reserved anything —
-		// `used=535822, requested=72, build_rows=0`. A re-run built neither
-		// operator, so this is a cost the lowering added.
+		// The scalar spelling adds an Aggregate and a LEFT JOIN to the plan (a
+		// re-run built neither operator, so this is a cost the lowering added).
 		//
-		// The arm is DROPPED rather than pinned either way, and the reason is
-		// the measurement: across census runs it both answered and refused.
-		// Which batch crosses a budget is a CONDITION and not a shape
-		// (ADR-0027), so pinning either outcome here would be pinning a coin
-		// flip. It answers at 1 MiB.
-		//
-		// RE-MEASURED on v0.18.31, after the per-partition index reclaim
-		// (#823) promoted the four #616 comma cells below: five replicates of
-		// this cell went 2 answered / 3 refused, with the refusal still
+		// The arm was DROPPED for a while because across census runs it both
+		// answered and refused (2 answered / 3 refused on v0.18.31, the refusal
 		// `used=535822, requested=72, budget=524288, of which forced=535822 by
-		// "spill tracking"`. The reclaim did not move it, because what fills
-		// the budget here is the FORCED producer loads and not an index. The
-		// arm stays dropped, and the reason it is dropped is unchanged.
+		// "spill tracking"`, `build_rows=0`). An earlier reading blamed the
+		// scans' forced row-group loads; the forced floor was in fact five
+		// HashAggregate units (the primary and its morsel clones) each charging
+		// its presized capacity, ~107 KB, for a forty-row input, released on
+		// their drain goroutines concurrently with the join's first
+		// reservation. Under a budget that presize and the group-state pool's
+		// first chunk follow the input estimate now (#1706, ADR-0006 2026-11-22
+		// and 2026-11-23); a clone charges about 9.4 KB, the five fit in any
+		// order, and the arm is re-armed: it answered PostgreSQL's 40 in every
+		// run measured at #1706 line 1706e (30 fresh processes at each of
+		// GOMAXPROCS 1, 2, 4 and the default, through
+		// TestAMorselFannedAggregateNoLongerPutsTheCorrelatedScalarPastItsBudget).
 		{issue: "#852", name: "correlated_scalar_over_a_derived_table",
 			sql: `SELECT COUNT(*) AS n FROM mk_outer a WHERE a.n = (` +
 				`SELECT MAX(b.n) FROM (SELECT s, n FROM mk_inner) b WHERE b.n = a.n)`,
-			want:            []string{"n=int64:40"},
-			skipBudgetedArm: true},
+			want: []string{"n=int64:40"}},
 		// THE KEY-ATTRIBUTION CELL. A derived table that RENAMES its column,
 		// with the OUTER key sharing the source column's name — which is what
 		// happens whenever both sides read the same table. The build root

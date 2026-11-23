@@ -141,10 +141,6 @@ func TestArcJP5LateralBodyIsRightPerOuterRow(t *testing.T) {
 					}
 					continue
 				}
-				if a.name == "spilled512k" && strings.HasPrefix(got, "ERR ") &&
-					(strings.Contains(got, "memory budget") || strings.Contains(got, "cross join")) {
-					continue // the 512 KiB budget's documented loud refusal
-				}
 				if got != w {
 					t.Errorf("%s\n  arm  %s\n  got  %s\n  want %s (PostgreSQL 17.11)", tc.sql, a.name, got, w)
 				}

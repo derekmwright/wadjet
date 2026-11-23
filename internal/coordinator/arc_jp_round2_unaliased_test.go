@@ -39,8 +39,13 @@ import (
 // aggregate-published slot as its own name (filter_project_pushdown.go).
 //
 // Loud, never wrong: a bounded DISTINCT body not over the key alone refuses
-// on every arm (arc LT's documented refusal); the 512 KiB arm may refuse a
-// build its budget cannot hold (documented). A bare-key LEFT lateral over a
+// on every arm (arc LT's documented refusal). The 512 KiB arm asserts
+// PostgreSQL's rows like every other arm: it used to tolerate a `memory budget
+// exceeded` refusal, which was the budgeted aggregate's presize and group-state
+// pool charged per clone for capacity a few rows cannot fill (#1706, ADR-0006
+// 2026-11-22 and 2026-11-23); after those two bounds it absorbed no refusal in
+// 30 fresh runs at each of GOMAXPROCS 1, 2, 4 and the default (#1706 line
+// 1706e), so it is gone, here and in rounds 3 to 5. A bare-key LEFT lateral over a
 // DISTINCT body, which failed loudly on the stage DAG with ADR-0010's schema
 // check, runs single-process since arc JP round 3 (a LEFT join padding a
 // grouped arm, dagplan.ErrLateralIdentityDistributed) and answers.
@@ -77,10 +82,6 @@ func TestArcJPBLateralBodyNamesNeverBindTheOuterRelationOnEveryArm(t *testing.T)
 						t.Errorf("%s\n  arm  %s\n  got  %s\n  must refuse with %q (PostgreSQL answers %s)", tc.sql, arm.name, got, class, w)
 					}
 					continue
-				}
-				if arm.name == "spilled512k" && strings.HasPrefix(got, "ERR ") &&
-					(strings.Contains(got, "memory budget") || strings.Contains(got, "cross join")) {
-					continue // the 512 KiB budget's documented loud refusal
 				}
 				if got != w {
 					t.Errorf("%s\n  arm  %s\n  got  %s\n  want %s (PostgreSQL 17.11)", tc.sql, arm.name, got, w)
