@@ -63,7 +63,10 @@ func VisibleProjections(projs []Projection) []Projection {
 // node is the child the caller should hang the Sort on, which differs from the
 // one passed in only when a `SELECT *` query needed a projection created for
 // it.
-func resolveOrderBy(child, project *Node, info *plansql.SelectInfo) (*Node, []OrderExpr, error) {
+//
+// groupingSlots maps a GROUPING call written in ORDER BY to the slot the
+// aggregate publishes its bitmask under (BuildFromSelect's allocGroupingSlot).
+func resolveOrderBy(child, project *Node, info *plansql.SelectInfo, groupingSlots map[*plansql.FuncCallNode]string) (*Node, []OrderExpr, error) {
 	outputs, items := selectOutputNames(info)
 	starOnly := isStarOnly(info.Columns)
 
@@ -116,7 +119,7 @@ func resolveOrderBy(child, project *Node, info *plansql.SelectInfo) (*Node, []Or
 		if !ok {
 			continue // the family is exhausted; leave the term as written
 		}
-		proj, err := hiddenSortProjection(ob, child, project, name, starOnly)
+		proj, err := hiddenSortProjection(ob, child, project, name, starOnly, groupingSlots)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -151,7 +154,7 @@ func resolveOrderBy(child, project *Node, info *plansql.SelectInfo) (*Node, []Or
 // term, or explains why this shape cannot have one. Every return path here is
 // deliberate and named: an ORDER BY the engine cannot honour must fail loudly,
 // never come back as an arbitrary order (#320).
-func hiddenSortProjection(ob plansql.OrderByItem, child, project *Node, name string, starOnly bool) (Projection, error) {
+func hiddenSortProjection(ob plansql.OrderByItem, child, project *Node, name string, starOnly bool, groupingSlots map[*plansql.FuncCallNode]string) (Projection, error) {
 	if ob.Expr == nil {
 		return Projection{}, orderByError(ob, "42601",
 			"the term did not parse into an expression the planner can evaluate")
@@ -232,6 +235,21 @@ func hiddenSortProjection(ob plansql.OrderByItem, child, project *Node, name str
 		// below is really about — the DAG's sort runs between the aggregate
 		// and the gather with nothing in between to evaluate it — and it stays
 		// refused, with a fixture that attempts it.
+		// A bare GROUPING(...) is a NAME too: the aggregate publishes its
+		// bitmask under the slot the builder allocated for this very call,
+		// and the hidden key reads that slot exactly as it reads an
+		// aggregate output (#1590). Matched by the call node, not by text.
+		if fn := bareGroupingCall(ob.Expr); fn != nil {
+			if slot := groupingSlots[fn]; slot != "" && aggregatePublishesGroupingSlot(agg, slot) {
+				return Projection{
+					Expr:    slot,
+					Column:  slot,
+					Alias:   name,
+					ASTExpr: &plansql.ColRef{Column: slot},
+					Hidden:  true,
+				}, nil
+			}
+		}
 		if call, ok := bareAggregateCall(ob.Expr); ok {
 			if out := aggregateOutputForCall(call, agg); out != "" {
 				return Projection{
@@ -648,4 +666,15 @@ func aggregateOutputForCall(call *plansql.FuncCallNode, agg *Node) string {
 		}
 	}
 	return ""
+}
+
+// aggregatePublishesGroupingSlot reports whether the Aggregate node carries the
+// GROUPING call published under slot.
+func aggregatePublishesGroupingSlot(agg *Node, slot string) bool {
+	for _, gc := range agg.GroupingCalls {
+		if gc.OutputCol == slot {
+			return true
+		}
+	}
+	return false
 }

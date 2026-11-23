@@ -188,21 +188,33 @@ func TestGroupingFunctionMatchesPostgresOnEveryArm(t *testing.T) {
 	}
 }
 
-// TestGroupingInOrderByIsRefused is the DEFERRAL, pinned in the corpus rather
-// than left to be discovered. PostgreSQL accepts `ORDER BY GROUPING(g)` over a
-// grouping-set query; wadjet refuses it, because ORDER BY resolution rejects
-// any aggregate expression that is not itself a select item and GROUPING is
-// carried through that machinery as one. The disposition is a LOUD refusal,
-// not a wrong order, and selecting the call and ordering by its alias works —
-// the suite above does exactly that. This test fails when the refusal is
-// lifted, which is the signal to delete it.
-func TestGroupingInOrderByIsRefused(t *testing.T) {
+// TestGroupingInOrderBySortsOnTheGroupingSet was the DEFERRAL pin
+// (TestGroupingInOrderByIsRefused): `ORDER BY GROUPING(g)` with no GROUPING(g)
+// in the SELECT list was refused 0A000. It now sorts on GROUPING's slot
+// (#1590); the five-arm matrix against PostgreSQL 17.11 is
+// TestArc1590bGroupingInWindowEveryArm (its o/* and f*/g*/h* cells). Here:
+// the statement answers, and the ROLLUP's total row (GROUPING = 1) sorts
+// last, carrying the sum of the other rows' counts.
+func TestGroupingInOrderBySortsOnTheGroupingSet(t *testing.T) {
 	ctx := context.Background()
 	single := tmdStandalone(t, ctx)
 
 	const sql = "SELECT g, COUNT(*) AS n FROM collslot GROUP BY ROLLUP(g) ORDER BY GROUPING(g), g"
-	if _, err := tmdRunSingle(ctx, single, sql); err == nil {
-		t.Fatal("ORDER BY GROUPING(...) now works — lift the deferral and delete this pin")
+	res, err := tmdRunSingle(ctx, single, sql)
+	if err != nil {
+		t.Fatalf("ORDER BY GROUPING(g): %v", err)
+	}
+	rows := brCells(res)
+	if len(rows) < 2 {
+		t.Fatalf("got %d rows, want the groups and the total", len(rows))
+	}
+	last := rows[len(rows)-1]
+	var sum int64
+	for _, r := range rows[:len(rows)-1] {
+		sum += r[1].(int64)
+	}
+	if last[0] != nil || last[1].(int64) != sum {
+		t.Errorf("last row %v, want the total row (NULL, %d) last: ORDER BY GROUPING(g) did not sort on the grouping set", last, sum)
 	}
 }
 

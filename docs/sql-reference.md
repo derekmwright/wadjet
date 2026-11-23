@@ -2532,9 +2532,12 @@ Two shapes are refused that PostgreSQL answers, both loudly with `42803`:
 
 **Two deliberate divergences from PostgreSQL, both loud:**
 
-- `ORDER BY GROUPING(a)` is **not accepted** (PostgreSQL accepts it). Select
-  the call and order by its alias instead:
-  `SELECT GROUPING(a) AS g, ... ORDER BY g`.
+- `ORDER BY GROUPING(a)` is accepted, but a sort key COMPUTED from it —
+  `ORDER BY GROUPING(a) + 0`, `ORDER BY CASE WHEN GROUPING(a) = 1 ...` — is
+  refused with 0A000 (PostgreSQL accepts it), like any sort expression computed
+  from an aggregate that is not a select item. Select the expression and order
+  by its alias instead: `SELECT CASE WHEN GROUPING(a) = 1 ... END AS o, ...
+  ORDER BY o`.
 - `GROUP BY GROUPING(a)` reports a syntax error (42601) where PostgreSQL
   reports 42803. The statement is rejected either way; only the code differs.
 

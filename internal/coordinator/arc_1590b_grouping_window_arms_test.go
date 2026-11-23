@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/derekmwright/wadjet/internal/oracle"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -34,7 +35,14 @@ import (
 // both, the window's argument, beside the window in the SELECT list, HAVING,
 // the query's ORDER BY, the CASE total-row idiom, a derived table) and the
 // data (a real NULL group, duplicates, one group, no rows), with the window
-// replaced by a plain projection as controls. testdata/
+// replaced by a plain projection as controls. Round 3 adds the query's ORDER BY
+// GROUPING (alone, beside a window-spec GROUPING, with and without the call in
+// the SELECT list, DESC / NULLS / secondary / ordinal / alias, compared in
+// order), GROUPING in QUALIFY, nested windows, CTEs and derived tables, the
+// statements PostgreSQL refuses, and every statement the round-2 review probed
+// outside the first matrix (e*, f*, g*, h*). An ORDER BY GROUPING(k) with no
+// GROUPING(k) in the SELECT list sorts on GROUPING's slot; it used to be
+// refused, or — beside a window-spec GROUPING — sorted on count(k). testdata/
 // arc_1590b_grouping_window_pg17.tsv holds PostgreSQL 17.11's answer for every
 // cell (postgres:17-alpine, initdb --locale=C --encoding=UTF8).
 
@@ -77,82 +85,211 @@ var u1590bKeys = []struct{ name, k, g string }{
 }
 
 // u1590bKeyTemplates run per key.
-var u1590bKeyTemplates = []struct{ name, q string }{
+var u1590bKeyTemplates = []u1590bCell{
 	// the failing position, with and without GROUPING in the SELECT list
-	{"w/part", `SELECT GROUPING({G}) AS g, count(*) AS n, count(*) OVER (PARTITION BY GROUPING({G})) AS c FROM gw_t GROUP BY ROLLUP ({K})`},
-	{"w/part-only", `SELECT count(*) AS n, count(*) OVER (PARTITION BY GROUPING({G})) AS c FROM gw_t GROUP BY ROLLUP ({K})`},
-	{"w/part-key", `SELECT {K} AS k, count(*) AS n, count(*) OVER (PARTITION BY GROUPING({G})) AS c FROM gw_t GROUP BY ROLLUP ({K})`},
-	{"w/order", `SELECT {K} AS k, row_number() OVER (ORDER BY GROUPING({G}), {K}) AS r FROM gw_t GROUP BY ROLLUP ({K})`},
-	{"w/sum-count", `SELECT {K} AS k, sum(count(*)) OVER (PARTITION BY GROUPING({G})) AS c FROM gw_t GROUP BY ROLLUP ({K})`},
-	{"w/arg-sum", `SELECT {K} AS k, sum(GROUPING({G})) OVER () AS c FROM gw_t GROUP BY ROLLUP ({K})`},
-	{"w/cube", `SELECT {K} AS k, count(*) OVER (PARTITION BY GROUPING({G})) AS c FROM gw_t GROUP BY CUBE ({K})`},
-	{"w/sets-empty", `SELECT {K} AS k, count(*) OVER (PARTITION BY GROUPING({G})) AS c FROM gw_t GROUP BY GROUPING SETS (({K}), ())`},
-	{"w/plain", `SELECT {K} AS k, count(*) OVER (PARTITION BY GROUPING({G})) AS c FROM gw_t GROUP BY {K}`},
+	{name: "w/part", sql: `SELECT GROUPING({G}) AS g, count(*) AS n, count(*) OVER (PARTITION BY GROUPING({G})) AS c FROM gw_t GROUP BY ROLLUP ({K})`},
+	{name: "w/part-only", sql: `SELECT count(*) AS n, count(*) OVER (PARTITION BY GROUPING({G})) AS c FROM gw_t GROUP BY ROLLUP ({K})`},
+	{name: "w/part-key", sql: `SELECT {K} AS k, count(*) AS n, count(*) OVER (PARTITION BY GROUPING({G})) AS c FROM gw_t GROUP BY ROLLUP ({K})`},
+	{name: "w/order", sql: `SELECT {K} AS k, row_number() OVER (ORDER BY GROUPING({G}), {K}) AS r FROM gw_t GROUP BY ROLLUP ({K})`},
+	{name: "w/sum-count", sql: `SELECT {K} AS k, sum(count(*)) OVER (PARTITION BY GROUPING({G})) AS c FROM gw_t GROUP BY ROLLUP ({K})`},
+	{name: "w/arg-sum", sql: `SELECT {K} AS k, sum(GROUPING({G})) OVER () AS c FROM gw_t GROUP BY ROLLUP ({K})`},
+	{name: "w/cube", sql: `SELECT {K} AS k, count(*) OVER (PARTITION BY GROUPING({G})) AS c FROM gw_t GROUP BY CUBE ({K})`},
+	{name: "w/sets-empty", sql: `SELECT {K} AS k, count(*) OVER (PARTITION BY GROUPING({G})) AS c FROM gw_t GROUP BY GROUPING SETS (({K}), ())`},
+	{name: "w/plain", sql: `SELECT {K} AS k, count(*) OVER (PARTITION BY GROUPING({G})) AS c FROM gw_t GROUP BY {K}`},
 	// controls: GROUPING() projected, no window
-	{"p/proj", `SELECT {K} AS k, GROUPING({G}) AS g, count(*) AS n FROM gw_t GROUP BY ROLLUP ({K})`},
-	{"p/having", `SELECT {K} AS k, count(*) AS n FROM gw_t GROUP BY ROLLUP ({K}) HAVING GROUPING({G}) = 0`},
-	{"p/order", `SELECT GROUPING({G}) AS g, count(*) AS n FROM gw_t GROUP BY ROLLUP ({K}) ORDER BY GROUPING({G}) DESC, count(*) DESC LIMIT 2`},
+	{name: "p/proj", sql: `SELECT {K} AS k, GROUPING({G}) AS g, count(*) AS n FROM gw_t GROUP BY ROLLUP ({K})`},
+	{name: "p/having", sql: `SELECT {K} AS k, count(*) AS n FROM gw_t GROUP BY ROLLUP ({K}) HAVING GROUPING({G}) = 0`},
+	{name: "p/order", sql: `SELECT GROUPING({G}) AS g, count(*) AS n FROM gw_t GROUP BY ROLLUP ({K}) ORDER BY GROUPING({G}) DESC, count(*) DESC LIMIT 2`},
+	// Round 3. The query's ORDER BY, alone and beside a window-spec
+	// GROUPING, with and without the same call in the SELECT list: compared
+	// in ORDER, every order total.
+	{name: "o/only", ordered: true, sql: `SELECT {K} AS k, count(*) AS n FROM gw_t GROUP BY ROLLUP ({K}) ORDER BY GROUPING({G}) DESC, {K} NULLS FIRST`},
+	{name: "o/beside-win", ordered: true, sql: `SELECT {K} AS k, count(*) OVER (PARTITION BY GROUPING({G})) AS c FROM gw_t GROUP BY ROLLUP ({K}) ORDER BY GROUPING({G}), {K} NULLS FIRST`},
+	{name: "o/beside-win-sel", ordered: true, sql: `SELECT {K} AS k, GROUPING({G}) AS g, count(*) OVER (PARTITION BY GROUPING({G})) AS c FROM gw_t GROUP BY ROLLUP ({K}) ORDER BY GROUPING({G}), {K} NULLS FIRST`},
+	{name: "o/secondary", ordered: true, sql: `SELECT {K} AS k, count(*) AS n FROM gw_t GROUP BY ROLLUP ({K}) ORDER BY {K} NULLS FIRST, GROUPING({G}) DESC`},
+	// QUALIFY: PostgreSQL has none, so its answer is measured on the
+	// derived-table spelling of the same filter.
+	{name: "q/part", sql: `SELECT {K} AS k FROM gw_t GROUP BY ROLLUP ({K}) QUALIFY count(*) OVER (PARTITION BY GROUPING({G})) > 1`,
+		pg: `SELECT k FROM (SELECT {K} AS k, count(*) OVER (PARTITION BY GROUPING({G})) AS c FROM gw_t GROUP BY ROLLUP ({K})) q WHERE c > 1`},
+	// a window nested in an expression; a CTE carrying the grouped rows with
+	// the window above it; a CTE with the window inside it
+	{name: "n/nested-win", sql: `SELECT {K} AS k, 1 + count(*) OVER (PARTITION BY GROUPING({G})) AS c FROM gw_t GROUP BY ROLLUP ({K})`},
+	{name: "c/cte-above", sql: `WITH q AS (SELECT {K} AS k, count(*) AS n, GROUPING({G}) AS g FROM gw_t GROUP BY ROLLUP ({K})) SELECT k, n, count(*) OVER (PARTITION BY g) AS c FROM q`},
+	{name: "c/cte-inside", sql: `WITH q AS (SELECT {K} AS k, count(*) OVER (PARTITION BY GROUPING({G})) AS c FROM gw_t GROUP BY ROLLUP ({K})) SELECT c, count(*) AS m FROM q GROUP BY c`},
 }
 
 // u1590bFixed are the cells outside the per-key grid.
-var u1590bFixed = []struct{ name, sql string }{
+var u1590bFixed = []u1590bCell{
 	// two and three keys
-	{"x/rollup2-part-s", `SELECT s, t, count(*) OVER (PARTITION BY GROUPING(s)) AS c FROM gw_t GROUP BY ROLLUP (s, t)`},
-	{"x/rollup2-part-t", `SELECT COALESCE(s,'hi') AS k, t, count(*) OVER (PARTITION BY GROUPING(t)) AS c FROM gw_t GROUP BY ROLLUP (COALESCE(s,'hi'), t)`},
-	{"x/rollup2-part-two-args", `SELECT GROUPING(s, t) AS g, count(*) OVER (PARTITION BY GROUPING(s, t)) AS c FROM gw_t GROUP BY ROLLUP (s, t)`},
-	{"x/rollup2-part-two-args-rev", `SELECT GROUPING(t, s) AS g, count(*) OVER (PARTITION BY GROUPING(t, s)) AS c FROM gw_t GROUP BY ROLLUP (s, t)`},
-	{"x/rollup2-part-two-computed", `SELECT count(*) OVER (PARTITION BY GROUPING(COALESCE(s,'hi'), lower(t))) AS c, count(*) AS n FROM gw_t GROUP BY ROLLUP (COALESCE(s,'hi'), lower(t))`},
-	{"x/rollup3-part", `SELECT t, id % 2 AS m, count(*) AS n, count(*) OVER (PARTITION BY GROUPING(COALESCE(s,'hi'))) AS c FROM gw_t GROUP BY ROLLUP (t, COALESCE(s,'hi'), id % 2)`},
-	{"x/rollup3-part-proj", `SELECT t, id % 2 AS m, count(*) AS n, GROUPING(COALESCE(s,'hi')) AS g FROM gw_t GROUP BY ROLLUP (t, COALESCE(s,'hi'), id % 2)`},
-	{"x/sets-missing-key", `SELECT s, t, count(*) OVER (PARTITION BY GROUPING(t)) AS c FROM gw_t GROUP BY GROUPING SETS ((s), (t))`},
-	{"x/sets-missing-key-proj", `SELECT s, t, GROUPING(t) AS g FROM gw_t GROUP BY GROUPING SETS ((s), (t))`},
-	{"x/sets-no-empty", `SELECT COALESCE(s,'hi') AS k, count(*) OVER (PARTITION BY GROUPING(COALESCE(s,'hi'))) AS c FROM gw_t GROUP BY GROUPING SETS ((COALESCE(s,'hi')))`},
-	{"x/cube2-part", `SELECT s, t, count(*) OVER (PARTITION BY GROUPING(s, t)) AS c FROM gw_t GROUP BY CUBE (s, t)`},
+	{name: "x/rollup2-part-s", sql: `SELECT s, t, count(*) OVER (PARTITION BY GROUPING(s)) AS c FROM gw_t GROUP BY ROLLUP (s, t)`},
+	{name: "x/rollup2-part-t", sql: `SELECT COALESCE(s,'hi') AS k, t, count(*) OVER (PARTITION BY GROUPING(t)) AS c FROM gw_t GROUP BY ROLLUP (COALESCE(s,'hi'), t)`},
+	{name: "x/rollup2-part-two-args", sql: `SELECT GROUPING(s, t) AS g, count(*) OVER (PARTITION BY GROUPING(s, t)) AS c FROM gw_t GROUP BY ROLLUP (s, t)`},
+	{name: "x/rollup2-part-two-args-rev", sql: `SELECT GROUPING(t, s) AS g, count(*) OVER (PARTITION BY GROUPING(t, s)) AS c FROM gw_t GROUP BY ROLLUP (s, t)`},
+	{name: "x/rollup2-part-two-computed", sql: `SELECT count(*) OVER (PARTITION BY GROUPING(COALESCE(s,'hi'), lower(t))) AS c, count(*) AS n FROM gw_t GROUP BY ROLLUP (COALESCE(s,'hi'), lower(t))`},
+	{name: "x/rollup3-part", sql: `SELECT t, id % 2 AS m, count(*) AS n, count(*) OVER (PARTITION BY GROUPING(COALESCE(s,'hi'))) AS c FROM gw_t GROUP BY ROLLUP (t, COALESCE(s,'hi'), id % 2)`},
+	{name: "x/rollup3-part-proj", sql: `SELECT t, id % 2 AS m, count(*) AS n, GROUPING(COALESCE(s,'hi')) AS g FROM gw_t GROUP BY ROLLUP (t, COALESCE(s,'hi'), id % 2)`},
+	{name: "x/sets-missing-key", sql: `SELECT s, t, count(*) OVER (PARTITION BY GROUPING(t)) AS c FROM gw_t GROUP BY GROUPING SETS ((s), (t))`},
+	{name: "x/sets-missing-key-proj", sql: `SELECT s, t, GROUPING(t) AS g FROM gw_t GROUP BY GROUPING SETS ((s), (t))`},
+	{name: "x/sets-no-empty", sql: `SELECT COALESCE(s,'hi') AS k, count(*) OVER (PARTITION BY GROUPING(COALESCE(s,'hi'))) AS c FROM gw_t GROUP BY GROUPING SETS ((COALESCE(s,'hi')))`},
+	{name: "x/cube2-part", sql: `SELECT s, t, count(*) OVER (PARTITION BY GROUPING(s, t)) AS c FROM gw_t GROUP BY CUBE (s, t)`},
 	// alias, ordinal
-	{"x/alias-group", `SELECT COALESCE(s,'hi') AS k, count(*) OVER (PARTITION BY GROUPING(COALESCE(s,'hi'))) AS c FROM gw_t GROUP BY ROLLUP (k)`},
-	{"x/alias-grouping", `SELECT COALESCE(s,'hi') AS k, count(*) OVER (PARTITION BY GROUPING(k)) AS c FROM gw_t GROUP BY ROLLUP (k)`},
-	{"x/ordinal-group", `SELECT COALESCE(s,'hi') AS k, count(*) OVER (PARTITION BY GROUPING(COALESCE(s,'hi'))) AS c FROM gw_t GROUP BY ROLLUP (1)`},
-	{"x/ordinal-group-proj", `SELECT COALESCE(s,'hi') AS k, GROUPING(COALESCE(s,'hi')) AS g FROM gw_t GROUP BY ROLLUP (1)`},
+	{name: "x/alias-group", sql: `SELECT COALESCE(s,'hi') AS k, count(*) OVER (PARTITION BY GROUPING(COALESCE(s,'hi'))) AS c FROM gw_t GROUP BY ROLLUP (k)`},
+	{name: "x/alias-grouping", sql: `SELECT COALESCE(s,'hi') AS k, count(*) OVER (PARTITION BY GROUPING(k)) AS c FROM gw_t GROUP BY ROLLUP (k)`},
+	{name: "x/ordinal-group", sql: `SELECT COALESCE(s,'hi') AS k, count(*) OVER (PARTITION BY GROUPING(COALESCE(s,'hi'))) AS c FROM gw_t GROUP BY ROLLUP (1)`},
+	{name: "x/ordinal-group-proj", sql: `SELECT COALESCE(s,'hi') AS k, GROUPING(COALESCE(s,'hi')) AS g FROM gw_t GROUP BY ROLLUP (1)`},
 	// both positions, rank, first_value, a frame, the argument
-	{"x/both-rank", `SELECT COALESCE(s,'hi') AS k, rank() OVER (PARTITION BY GROUPING(COALESCE(s,'hi')) ORDER BY count(*) DESC) AS r FROM gw_t GROUP BY ROLLUP (COALESCE(s,'hi'))`},
-	{"x/both-row-number", `SELECT s, row_number() OVER (PARTITION BY GROUPING(s) ORDER BY GROUPING(s), s) AS r FROM gw_t GROUP BY ROLLUP (s)`},
-	{"x/first-value", `SELECT s, first_value(count(*)) OVER (PARTITION BY GROUPING(s) ORDER BY count(*) DESC, s) AS f FROM gw_t GROUP BY ROLLUP (s)`},
-	{"x/first-value-arg", `SELECT s, first_value(GROUPING(s)) OVER (PARTITION BY s ORDER BY count(*)) AS f FROM gw_t GROUP BY ROLLUP (s)`},
-	{"x/frame", `SELECT s, sum(count(*)) OVER (PARTITION BY GROUPING(s) ORDER BY s ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS f FROM gw_t GROUP BY ROLLUP (s)`},
-	{"x/max-arg-part", `SELECT s, max(GROUPING(s)) OVER (PARTITION BY s) AS m FROM gw_t GROUP BY ROLLUP (s)`},
-	{"x/arg-plus", `SELECT s, sum(GROUPING(s) + 1) OVER () AS m FROM gw_t GROUP BY ROLLUP (s)`},
+	{name: "x/both-rank", sql: `SELECT COALESCE(s,'hi') AS k, rank() OVER (PARTITION BY GROUPING(COALESCE(s,'hi')) ORDER BY count(*) DESC) AS r FROM gw_t GROUP BY ROLLUP (COALESCE(s,'hi'))`},
+	{name: "x/both-row-number", sql: `SELECT s, row_number() OVER (PARTITION BY GROUPING(s) ORDER BY GROUPING(s), s) AS r FROM gw_t GROUP BY ROLLUP (s)`},
+	{name: "x/first-value", sql: `SELECT s, first_value(count(*)) OVER (PARTITION BY GROUPING(s) ORDER BY count(*) DESC, s) AS f FROM gw_t GROUP BY ROLLUP (s)`},
+	{name: "x/first-value-arg", sql: `SELECT s, first_value(GROUPING(s)) OVER (PARTITION BY s ORDER BY count(*)) AS f FROM gw_t GROUP BY ROLLUP (s)`},
+	{name: "x/frame", sql: `SELECT s, sum(count(*)) OVER (PARTITION BY GROUPING(s) ORDER BY s ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS f FROM gw_t GROUP BY ROLLUP (s)`},
+	{name: "x/max-arg-part", sql: `SELECT s, max(GROUPING(s)) OVER (PARTITION BY s) AS m FROM gw_t GROUP BY ROLLUP (s)`},
+	{name: "x/arg-plus", sql: `SELECT s, sum(GROUPING(s) + 1) OVER () AS m FROM gw_t GROUP BY ROLLUP (s)`},
 	// GROUPING inside an expression in the window spec, and the CASE idiom
-	{"x/case-part", `SELECT s, count(*) OVER (PARTITION BY CASE WHEN GROUPING(s) = 1 THEN 'ALL' ELSE 'one' END) AS c FROM gw_t GROUP BY ROLLUP (s)`},
-	{"x/expr-part", `SELECT COALESCE(s,'hi') AS k, count(*) OVER (PARTITION BY GROUPING(COALESCE(s,'hi')) + 1) AS c FROM gw_t GROUP BY ROLLUP (COALESCE(s,'hi'))`},
-	{"x/case-label", `SELECT CASE WHEN GROUPING(COALESCE(s,'hi')) = 1 THEN 'ALL' ELSE COALESCE(s,'hi') END AS k, count(*) AS n FROM gw_t GROUP BY ROLLUP (COALESCE(s,'hi'))`},
-	{"x/case-label-col", `SELECT CASE WHEN GROUPING(s) = 1 THEN 'ALL' ELSE s END AS k, count(*) AS n FROM gw_t GROUP BY ROLLUP (s)`},
-	{"x/case-label-window", `SELECT CASE WHEN GROUPING(s) = 1 THEN 'ALL' ELSE s END AS k, count(*) AS n, sum(count(*)) OVER (PARTITION BY GROUPING(s)) AS tot FROM gw_t GROUP BY ROLLUP (s)`},
-	{"x/case-label-share", `SELECT CASE WHEN GROUPING(s) = 1 THEN 'ALL' ELSE s END AS k, count(*) * 100 / sum(count(*)) OVER (PARTITION BY GROUPING(s)) AS pct FROM gw_t GROUP BY ROLLUP (s)`},
-	{"x/case-label-share-int", `SELECT CASE WHEN GROUPING(s) = 1 THEN 'ALL' ELSE s END AS k, count(*) * 100 / CAST(sum(count(*)) OVER (PARTITION BY GROUPING(s)) AS BIGINT) AS pct FROM gw_t GROUP BY ROLLUP (s)`},
+	{name: "x/case-part", sql: `SELECT s, count(*) OVER (PARTITION BY CASE WHEN GROUPING(s) = 1 THEN 'ALL' ELSE 'one' END) AS c FROM gw_t GROUP BY ROLLUP (s)`},
+	{name: "x/expr-part", sql: `SELECT COALESCE(s,'hi') AS k, count(*) OVER (PARTITION BY GROUPING(COALESCE(s,'hi')) + 1) AS c FROM gw_t GROUP BY ROLLUP (COALESCE(s,'hi'))`},
+	{name: "x/case-label", sql: `SELECT CASE WHEN GROUPING(COALESCE(s,'hi')) = 1 THEN 'ALL' ELSE COALESCE(s,'hi') END AS k, count(*) AS n FROM gw_t GROUP BY ROLLUP (COALESCE(s,'hi'))`},
+	{name: "x/case-label-col", sql: `SELECT CASE WHEN GROUPING(s) = 1 THEN 'ALL' ELSE s END AS k, count(*) AS n FROM gw_t GROUP BY ROLLUP (s)`},
+	{name: "x/case-label-window", sql: `SELECT CASE WHEN GROUPING(s) = 1 THEN 'ALL' ELSE s END AS k, count(*) AS n, sum(count(*)) OVER (PARTITION BY GROUPING(s)) AS tot FROM gw_t GROUP BY ROLLUP (s)`},
+	{name: "x/case-label-share", sql: `SELECT CASE WHEN GROUPING(s) = 1 THEN 'ALL' ELSE s END AS k, count(*) * 100 / sum(count(*)) OVER (PARTITION BY GROUPING(s)) AS pct FROM gw_t GROUP BY ROLLUP (s)`},
+	{name: "x/case-label-share-int", sql: `SELECT CASE WHEN GROUPING(s) = 1 THEN 'ALL' ELSE s END AS k, count(*) * 100 / CAST(sum(count(*)) OVER (PARTITION BY GROUPING(s)) AS BIGINT) AS pct FROM gw_t GROUP BY ROLLUP (s)`},
 	// a derived table over the grouped rows
-	{"x/derived-agg", `SELECT g, count(*) AS rows_, sum(n) AS n FROM (SELECT GROUPING(COALESCE(s,'hi')) AS g, count(*) AS n FROM gw_t GROUP BY ROLLUP (COALESCE(s,'hi'))) q GROUP BY g`},
-	{"x/derived-window", `SELECT g, n, count(*) OVER (PARTITION BY g) AS c FROM (SELECT GROUPING(s) AS g, count(*) AS n FROM gw_t GROUP BY ROLLUP (s)) q`},
+	{name: "x/derived-agg", sql: `SELECT g, count(*) AS rows_, sum(n) AS n FROM (SELECT GROUPING(COALESCE(s,'hi')) AS g, count(*) AS n FROM gw_t GROUP BY ROLLUP (COALESCE(s,'hi'))) q GROUP BY g`},
+	{name: "x/derived-window", sql: `SELECT g, n, count(*) OVER (PARTITION BY g) AS c FROM (SELECT GROUPING(s) AS g, count(*) AS n FROM gw_t GROUP BY ROLLUP (s)) q`},
 	// data: one group, a NULL-only group, no rows
-	{"d/one-group", `SELECT s, count(*) AS n, count(*) OVER (PARTITION BY GROUPING(s)) AS c FROM gw_t WHERE id IN (1, 7) GROUP BY ROLLUP (s)`},
-	{"d/null-group", `SELECT s, count(*) AS n, count(*) OVER (PARTITION BY GROUPING(s)) AS c FROM gw_t WHERE id = 5 GROUP BY ROLLUP (s)`},
-	{"d/null-group-proj", `SELECT s, count(*) AS n, GROUPING(s) AS g FROM gw_t WHERE id = 5 GROUP BY ROLLUP (s)`},
-	{"d/empty", `SELECT s, count(*) AS n, count(*) OVER (PARTITION BY GROUPING(s)) AS c FROM gw_t WHERE id > 100 GROUP BY ROLLUP (s)`},
-	{"d/empty-proj", `SELECT s, count(*) AS n, GROUPING(s) AS g FROM gw_t WHERE id > 100 GROUP BY ROLLUP (s)`},
-	{"d/empty-plain", `SELECT s, count(*) OVER (PARTITION BY GROUPING(s)) AS c FROM gw_t WHERE id > 100 GROUP BY s`},
+	{name: "d/one-group", sql: `SELECT s, count(*) AS n, count(*) OVER (PARTITION BY GROUPING(s)) AS c FROM gw_t WHERE id IN (1, 7) GROUP BY ROLLUP (s)`},
+	{name: "d/null-group", sql: `SELECT s, count(*) AS n, count(*) OVER (PARTITION BY GROUPING(s)) AS c FROM gw_t WHERE id = 5 GROUP BY ROLLUP (s)`},
+	{name: "d/null-group-proj", sql: `SELECT s, count(*) AS n, GROUPING(s) AS g FROM gw_t WHERE id = 5 GROUP BY ROLLUP (s)`},
+	{name: "d/empty", sql: `SELECT s, count(*) AS n, count(*) OVER (PARTITION BY GROUPING(s)) AS c FROM gw_t WHERE id > 100 GROUP BY ROLLUP (s)`},
+	{name: "d/empty-proj", sql: `SELECT s, count(*) AS n, GROUPING(s) AS g FROM gw_t WHERE id > 100 GROUP BY ROLLUP (s)`},
+	{name: "d/empty-plain", sql: `SELECT s, count(*) OVER (PARTITION BY GROUPING(s)) AS c FROM gw_t WHERE id > 100 GROUP BY s`},
 	// the issue's statement, over TEXT
-	{"i/issue-text", `SELECT GROUPING(COALESCE(s,'\x6869')) AS g, count(*) AS n, count(*) OVER (PARTITION BY GROUPING(COALESCE(s,'\x6869'))) AS c FROM gw_t GROUP BY ROLLUP (COALESCE(s,'\x6869'))`},
-	{"i/issue-cast", `SELECT GROUPING(COALESCE(s,CAST('hi' AS TEXT))) AS g, count(*) AS n, count(*) OVER (PARTITION BY GROUPING(COALESCE(s,CAST('hi' AS TEXT)))) AS c FROM gw_t GROUP BY ROLLUP (COALESCE(s,CAST('hi' AS TEXT)))`},
+	{name: "i/issue-text", sql: `SELECT GROUPING(COALESCE(s,'\x6869')) AS g, count(*) AS n, count(*) OVER (PARTITION BY GROUPING(COALESCE(s,'\x6869'))) AS c FROM gw_t GROUP BY ROLLUP (COALESCE(s,'\x6869'))`},
+	{name: "i/issue-cast", sql: `SELECT GROUPING(COALESCE(s,CAST('hi' AS TEXT))) AS g, count(*) AS n, count(*) OVER (PARTITION BY GROUPING(COALESCE(s,CAST('hi' AS TEXT)))) AS c FROM gw_t GROUP BY ROLLUP (COALESCE(s,CAST('hi' AS TEXT)))`},
+
+	// Round 3: every statement the round-2 review probed outside the first
+	// matrix (e*, f*, g*, h*), then the positions it did not cover.
+	// No GROUP BY: PostgreSQL raises 42803 for every one.
+	{name: "e01-nogroup", sql: `SELECT count(*) OVER (PARTITION BY GROUPING(s)) AS c FROM gw_t`},
+	{name: "e02-nogroup-agg", sql: `SELECT count(*) AS n, count(*) OVER (PARTITION BY GROUPING(s)) AS c FROM gw_t`},
+	{name: "e03-nonkey", sql: `SELECT s, count(*) OVER (PARTITION BY GROUPING(t)) AS c FROM gw_t GROUP BY ROLLUP (s)`},
+	{name: "e04-nested-win", sql: `SELECT s, 1 + count(*) OVER (PARTITION BY GROUPING(s)) AS c FROM gw_t GROUP BY ROLLUP (s)`},
+	{name: "e05-named-win", sql: `SELECT s, count(*) OVER w AS c FROM gw_t GROUP BY ROLLUP (s) WINDOW w AS (PARTITION BY GROUPING(s))`},
+	{name: "e06-having", sql: `SELECT s, count(*) OVER (PARTITION BY GROUPING(s)) AS c FROM gw_t GROUP BY ROLLUP (s) HAVING GROUPING(s) = 1 OR count(*) > 1`},
+	{name: "e07-cte", sql: `WITH q AS (SELECT s, count(*) OVER (PARTITION BY GROUPING(s)) AS c FROM gw_t GROUP BY ROLLUP (s)) SELECT c, count(*) AS m FROM q GROUP BY c`},
+	{name: "e08-orderby", ordered: true, sql: `SELECT s, count(*) OVER (PARTITION BY GROUPING(s)) AS c FROM gw_t GROUP BY ROLLUP (s) ORDER BY GROUPING(s) DESC, s LIMIT 3`},
+	{name: "e09-two-windows", sql: `SELECT s, t, count(*) OVER (PARTITION BY GROUPING(s)) AS a, count(*) OVER (PARTITION BY GROUPING(t)) AS b FROM gw_t GROUP BY ROLLUP (s, t)`},
+	{name: "e11-distinct", sql: `SELECT DISTINCT count(*) OVER (PARTITION BY GROUPING(s)) AS c FROM gw_t GROUP BY ROLLUP (s)`},
+	{name: "e12-case-spell", sql: `SELECT Grouping(s) AS g, count(*) OVER (PARTITION BY grouping(s)) AS c FROM gw_t GROUP BY ROLLUP (s)`},
+	{name: "e13-qualify", sql: `SELECT s FROM gw_t GROUP BY ROLLUP (s) QUALIFY count(*) OVER (PARTITION BY GROUPING(s)) > 1`,
+		pg: `SELECT s FROM (SELECT s, count(*) OVER (PARTITION BY GROUPING(s)) AS c FROM gw_t GROUP BY ROLLUP (s)) q WHERE c > 1`},
+	{name: "e14-qualified", sql: `SELECT gw_t.s, count(*) OVER (PARTITION BY GROUPING(gw_t.s)) AS c FROM gw_t GROUP BY ROLLUP (gw_t.s)`},
+	{name: "e15-join", sql: `SELECT a.s, count(*) OVER (PARTITION BY GROUPING(a.s)) AS c FROM gw_t a JOIN gw_t b ON a.id = b.id GROUP BY ROLLUP (a.s)`},
+	{name: "e16-plain-nokey", sql: `SELECT count(*) OVER (PARTITION BY GROUPING(s)) AS c FROM gw_t GROUP BY s`},
+	{name: "e17-lag", sql: `SELECT s, lag(GROUPING(s)) OVER (ORDER BY GROUPING(s), s) AS l FROM gw_t GROUP BY ROLLUP (s)`},
+	{name: "e18-count-arg", sql: `SELECT s, count(GROUPING(s)) OVER () AS c FROM gw_t GROUP BY ROLLUP (s)`},
+	{name: "e19-sel-agg-grouping-key", sql: `SELECT s, sum(n) AS sn, sum(sum(n)) OVER (PARTITION BY GROUPING(s)) AS tot FROM gw_t GROUP BY ROLLUP (s)`},
+	{name: "e20-key-alias-in-select-and-grouping-of-other", sql: `SELECT s AS k, count(*) OVER (PARTITION BY GROUPING(s), s) AS c FROM gw_t GROUP BY ROLLUP (s)`},
+	{name: "f1-orderby-nowin", ordered: true, sql: `SELECT s, count(*) AS n FROM gw_t GROUP BY ROLLUP (s) ORDER BY GROUPING(s) DESC, s LIMIT 3`},
+	{name: "f2-orderby-win-sel", ordered: true, sql: `SELECT s, GROUPING(s) AS g, count(*) OVER (PARTITION BY GROUPING(s)) AS c FROM gw_t GROUP BY ROLLUP (s) ORDER BY GROUPING(s) DESC, s LIMIT 3`},
+	{name: "f3-orderby-win-alias", ordered: true, sql: `SELECT s, count(*) OVER (PARTITION BY GROUPING(s)) AS c FROM gw_t GROUP BY ROLLUP (s) ORDER BY c, s LIMIT 3`},
+	{name: "f4-orderby-win-plain", ordered: true, sql: `SELECT s, count(*) OVER (PARTITION BY GROUPING(s)) AS c FROM gw_t GROUP BY s ORDER BY GROUPING(s), s LIMIT 3`},
+	{name: "f5-orderby-count-win", ordered: true, sql: `SELECT s, count(*) OVER (PARTITION BY GROUPING(s)) AS c FROM gw_t GROUP BY ROLLUP (s) ORDER BY count(*) DESC, s LIMIT 3`},
+	{name: "f6-orderby-nowin-plain", ordered: true, sql: `SELECT s FROM gw_t GROUP BY s ORDER BY GROUPING(s), s LIMIT 3`},
+	{name: "f7-orderby-win-desc-only", sql: `SELECT s, count(*) OVER (PARTITION BY GROUPING(s)) AS c FROM gw_t GROUP BY ROLLUP (s) ORDER BY GROUPING(s) DESC`},
+	{name: "g1-coincide-orderby", ordered: true, sql: `SELECT id % 2 AS m, count(*) OVER (PARTITION BY GROUPING(id % 2)) AS c FROM gw_t WHERE id IN (1, 2, 3, 4) GROUP BY ROLLUP (id % 2) ORDER BY GROUPING(id % 2), id % 2`},
+	{name: "g2-coincide-orderby-only", sql: `SELECT id % 2 AS m, count(*) AS n, count(*) OVER (PARTITION BY GROUPING(id % 2)) AS c FROM gw_t WHERE id IN (1, 2, 3, 4) GROUP BY ROLLUP (id % 2) ORDER BY GROUPING(id % 2) DESC`},
+	{name: "g3-plain-nonnull-orderby", ordered: true, sql: `SELECT id AS k, count(*) OVER (PARTITION BY GROUPING(id)) AS c FROM gw_t GROUP BY id ORDER BY GROUPING(id), id`},
+	{name: "h1-label-orderby", ordered: true, sql: `SELECT CASE WHEN GROUPING(s) = 1 THEN 'ALL' ELSE s END AS k, count(*) AS n FROM gw_t GROUP BY ROLLUP (s) ORDER BY GROUPING(s), s`},
+	{name: "h2-label-window-orderby", ordered: true, sql: `SELECT CASE WHEN GROUPING(s) = 1 THEN 'ALL' ELSE s END AS k, count(*) AS n, sum(count(*)) OVER (PARTITION BY GROUPING(s)) AS tot FROM gw_t GROUP BY ROLLUP (s) ORDER BY GROUPING(s), s`},
+	{name: "h3-window-orderby", ordered: true, sql: `SELECT s, count(*) AS n, sum(count(*)) OVER (PARTITION BY GROUPING(s)) AS tot FROM gw_t GROUP BY ROLLUP (s) ORDER BY GROUPING(s), s`},
+	{name: "h4-label-window-orderby-coalesce", sql: `SELECT CASE WHEN GROUPING(COALESCE(s,'hi')) = 1 THEN 'ALL' ELSE COALESCE(s,'hi') END AS k, sum(count(*)) OVER (PARTITION BY GROUPING(COALESCE(s,'hi'))) AS tot FROM gw_t GROUP BY ROLLUP (COALESCE(s,'hi')) ORDER BY GROUPING(COALESCE(s,'hi'))`},
+	// ORDER BY GROUPING: DESC / NULLS FIRST, as a secondary key, by ordinal
+	// and by alias, two arguments, CUBE, OFFSET, a computed key
+	{name: "o/desc-nulls-first", ordered: true, sql: `SELECT s, count(*) AS n FROM gw_t GROUP BY ROLLUP (s) ORDER BY GROUPING(s) DESC NULLS FIRST, s NULLS FIRST`},
+	{name: "o/asc-nulls-last", ordered: true, sql: `SELECT s, count(*) AS n FROM gw_t GROUP BY ROLLUP (s) ORDER BY GROUPING(s) ASC NULLS LAST, s DESC`},
+	{name: "o/secondary-asc", ordered: true, sql: `SELECT s, count(*) AS n FROM gw_t GROUP BY ROLLUP (s) ORDER BY s NULLS FIRST, GROUPING(s)`},
+	{name: "o/secondary-beside-win", ordered: true, sql: `SELECT s, count(*) OVER (PARTITION BY GROUPING(s)) AS c FROM gw_t GROUP BY ROLLUP (s) ORDER BY s NULLS FIRST, GROUPING(s) DESC`},
+	{name: "o/ordinal", ordered: true, sql: `SELECT s, GROUPING(s) AS g FROM gw_t GROUP BY ROLLUP (s) ORDER BY 2 DESC, 1`},
+	{name: "o/alias", ordered: true, sql: `SELECT s, GROUPING(s) AS g FROM gw_t GROUP BY ROLLUP (s) ORDER BY g DESC, s`},
+	{name: "o/alias-beside-win", ordered: true, sql: `SELECT s, GROUPING(s) AS g, count(*) OVER (PARTITION BY GROUPING(s)) AS c FROM gw_t GROUP BY ROLLUP (s) ORDER BY g, s`},
+	{name: "o/ordinal-beside-win", ordered: true, sql: `SELECT s, GROUPING(s) AS g, count(*) OVER (PARTITION BY GROUPING(s)) AS c FROM gw_t GROUP BY ROLLUP (s) ORDER BY 2, 1`},
+	{name: "o/two-args", ordered: true, sql: `SELECT s, t, count(*) AS n FROM gw_t GROUP BY ROLLUP (s, t) ORDER BY GROUPING(s, t), s, t`},
+	{name: "o/two-calls-cube", ordered: true, sql: `SELECT s, t FROM gw_t GROUP BY CUBE (s, t) ORDER BY GROUPING(t), GROUPING(s), s, t`},
+	{name: "o/sets-missing-key", ordered: true, sql: `SELECT s, t FROM gw_t GROUP BY GROUPING SETS ((s), (t)) ORDER BY GROUPING(t), s, t`},
+	{name: "o/offset", ordered: true, sql: `SELECT s, count(*) AS n FROM gw_t GROUP BY ROLLUP (s) ORDER BY GROUPING(s) DESC, s LIMIT 2 OFFSET 1`},
+	{name: "o/computed-two-keys", ordered: true, sql: `SELECT COALESCE(s,'hi') AS k, lower(t) AS u, count(*) AS n FROM gw_t GROUP BY ROLLUP (COALESCE(s,'hi'), lower(t)) ORDER BY GROUPING(lower(t)) DESC, GROUPING(COALESCE(s,'hi')), k, u`},
+	{name: "o/computed-ordinal-group", ordered: true, sql: `SELECT COALESCE(s,'hi') AS k, count(*) AS n FROM gw_t GROUP BY ROLLUP (1) ORDER BY GROUPING(COALESCE(s,'hi')) DESC, k`},
+	{name: "o/plain-computed", ordered: true, sql: `SELECT n + 1 AS k FROM gw_t GROUP BY n + 1 ORDER BY GROUPING(n + 1), k`},
+	{name: "o/empty-input", ordered: true, sql: `SELECT s, count(*) AS n FROM gw_t WHERE id > 100 GROUP BY ROLLUP (s) ORDER BY GROUPING(s)`},
+	// ORDER BY GROUPING inside a larger expression (PostgreSQL answers)
+	{name: "o/expr-plus", ordered: true, sql: `SELECT s, count(*) AS n FROM gw_t GROUP BY ROLLUP (s) ORDER BY GROUPING(s) + 0 DESC, s`},
+	{name: "o/expr-case", ordered: true, sql: `SELECT s, count(*) AS n FROM gw_t GROUP BY ROLLUP (s) ORDER BY CASE WHEN GROUPING(s) = 1 THEN 0 ELSE 1 END, s`},
+	// ORDER BY GROUPING that PostgreSQL refuses
+	{name: "o/no-group-by", sql: `SELECT count(*) AS n FROM gw_t ORDER BY GROUPING(s)`},
+	{name: "o/nonkey", sql: `SELECT s FROM gw_t GROUP BY ROLLUP (s) ORDER BY GROUPING(t)`},
+	{name: "o/distinct", sql: `SELECT DISTINCT s FROM gw_t GROUP BY ROLLUP (s) ORDER BY GROUPING(s)`},
+	// GROUPING inside QUALIFY (outside a window call, and in the ORDER BY of
+	// one), measured on the derived-table spelling
+	{name: "q/outside-window", sql: `SELECT s FROM gw_t GROUP BY ROLLUP (s) QUALIFY GROUPING(s) = 0 AND row_number() OVER () > 0`,
+		pg: `SELECT s FROM (SELECT s, GROUPING(s) AS g, row_number() OVER () AS r FROM gw_t GROUP BY ROLLUP (s)) q WHERE g = 0 AND r > 0`},
+	{name: "q/order-rn", sql: `SELECT s FROM gw_t GROUP BY ROLLUP (s) QUALIFY row_number() OVER (PARTITION BY GROUPING(s) ORDER BY count(*) DESC, s) = 1`,
+		pg: `SELECT s FROM (SELECT s, row_number() OVER (PARTITION BY GROUPING(s) ORDER BY count(*) DESC, s) AS r FROM gw_t GROUP BY ROLLUP (s)) q WHERE r = 1`},
+	{name: "q/computed", sql: `SELECT lower(s) AS k FROM gw_t GROUP BY ROLLUP (lower(s)) QUALIFY sum(count(*)) OVER (PARTITION BY GROUPING(lower(s))) = 7 AND count(*) > 1`,
+		pg: `SELECT k FROM (SELECT lower(s) AS k, count(*) AS n, sum(count(*)) OVER (PARTITION BY GROUPING(lower(s))) AS w FROM gw_t GROUP BY ROLLUP (lower(s))) q WHERE w = 7 AND n > 1`},
+	// nested windows
+	{name: "n/two-in-expr", sql: `SELECT s, sum(count(*)) OVER (PARTITION BY GROUPING(s)) - count(*) OVER (PARTITION BY GROUPING(s)) AS d FROM gw_t GROUP BY ROLLUP (s)`},
+	{name: "n/coalesce-lag", sql: `SELECT s, COALESCE(lag(count(*)) OVER (PARTITION BY GROUPING(s) ORDER BY s), 0) AS l FROM gw_t GROUP BY ROLLUP (s)`},
+	{name: "n/case-of-window", sql: `SELECT COALESCE(s,'hi') AS k, CASE WHEN count(*) OVER (PARTITION BY GROUPING(COALESCE(s,'hi'))) > 1 THEN 'many' ELSE 'one' END AS w FROM gw_t GROUP BY ROLLUP (COALESCE(s,'hi'))`},
+	// derived tables carrying the grouped rows, the window above or inside
+	{name: "c/derived-computed-above", sql: `SELECT k, g, count(*) OVER (PARTITION BY g) AS c FROM (SELECT COALESCE(s,'hi') AS k, GROUPING(COALESCE(s,'hi')) AS g FROM gw_t GROUP BY ROLLUP (COALESCE(s,'hi'))) q`},
+	{name: "c/derived-inside-ordered", ordered: true, sql: `SELECT k, c FROM (SELECT s AS k, count(*) OVER (PARTITION BY GROUPING(s)) AS c FROM gw_t GROUP BY ROLLUP (s)) q ORDER BY c, k NULLS FIRST`},
+	{name: "c/cte-orderby-inside", ordered: true, sql: `WITH q AS (SELECT s, GROUPING(s) AS g FROM gw_t GROUP BY ROLLUP (s)) SELECT s, g, count(*) OVER (PARTITION BY g) AS c FROM q ORDER BY g DESC, s`},
+	// GROUPING with no GROUP BY outside a window, and an aggregate in a
+	// window spec with no GROUP BY (the e01 neighbour): measured, not fixed
+	{name: "z/nogroup-proj", sql: `SELECT GROUPING(s) AS g FROM gw_t`},
+	{name: "z/win-agg-nogroup", sql: `SELECT count(*) OVER (PARTITION BY count(*)) AS c FROM gw_t`},
 }
 
-func u1590bCells() []struct{ name, sql string } {
-	var out []struct{ name, sql string }
+// u1590bCell is one statement. pg, when set, is the spelling measured on
+// PostgreSQL (QUALIFY, which it lacks, as a derived table); ordered cells are
+// compared row for row in the order they arrive, every one of them with a
+// total ORDER BY.
+type u1590bCell struct {
+	name, sql, pg string
+	ordered       bool
+}
+
+func u1590bCells() []u1590bCell {
+	var out []u1590bCell
 	for _, k := range u1590bKeys {
+		r := strings.NewReplacer("{K}", k.k, "{G}", k.g)
 		for _, tp := range u1590bKeyTemplates {
-			q := strings.NewReplacer("{K}", k.k, "{G}", k.g).Replace(tp.q)
-			out = append(out, struct{ name, sql string }{k.name + "/" + tp.name, q})
+			c := u1590bCell{name: k.name + "/" + tp.name, sql: r.Replace(tp.sql), ordered: tp.ordered}
+			if tp.pg != "" {
+				c.pg = r.Replace(tp.pg)
+			}
+			out = append(out, c)
 		}
 	}
 	return append(out, u1590bFixed...)
+}
+
+// u1590bOrderedRender is byRender without the sort: the rows in arrival order.
+func u1590bOrderedRender(res *oracle.Result) string {
+	var rows []string
+	for _, r := range brCells(res) {
+		cells := make([]string, len(r))
+		for i, v := range r {
+			if v == nil {
+				cells[i] = "NULL"
+				continue
+			}
+			cells[i] = fmt.Sprint(v)
+		}
+		rows = append(rows, strings.Join(cells, ","))
+	}
+	return fmt.Sprintf("ordered rows=%d %s", len(rows), strings.Join(rows, " | "))
 }
 
 func u1590bPGAnswers(t *testing.T) map[string]string {
@@ -181,7 +318,8 @@ func u1590bPGAnswers(t *testing.T) map[string]string {
 
 // u1590bResidual are cells still wrong at this fix, each with its cause; the
 // test holds them WRONG so a later fix has to delete the line.
-// Neither is a GROUPING defect and both answer the same at the base.
+// The first two are not GROUPING defects; every one answers the same at the
+// base (0ff2efdf) as here.
 var u1590bResidual = map[string]string{
 	// bigint / numeric keeps ADR-0024's fixed division scale (21 fraction
 	// digits here), where PostgreSQL's select_div_scale keeps 16: the
@@ -190,6 +328,20 @@ var u1590bResidual = map[string]string{
 	// GROUPING(<output alias>) is refused 42703 on both sides; the message
 	// reads `unknown column "k"` here, `column "k" does not exist` there.
 	"x/alias-grouping": "42703 on both sides; message wording differs",
+	// Round 3, each the same at the base and at this fix (lines for #1590):
+	// the WINDOW clause is not parsed (42601 where PostgreSQL answers).
+	"e05-named-win": "named WINDOW clause unsupported: 42601",
+	// ORDER BY a value COMPUTED from GROUPING(k) is #597's bound (0A000):
+	// only a bare call reads its slot.
+	"o/expr-plus": "ORDER BY GROUPING(k) + 0: computed sort key over an aggregate refused 0A000 (#597)",
+	"o/expr-case": "ORDER BY CASE WHEN GROUPING(k) ...: computed sort key over an aggregate refused 0A000 (#597)",
+	// GROUPING in QUALIFY outside a window call is skipped by the QUALIFY
+	// outer-aggregate hoist: no rows where PostgreSQL's derived-table
+	// spelling answers six, silently.
+	"q/outside-window": "QUALIFY GROUPING(k) outside a window call: rows=0, silently",
+	// an aggregate inside a window spec with no GROUP BY does not make the
+	// query aggregated: a row per input row where PostgreSQL answers one.
+	"z/win-agg-nogroup": "count(*) OVER (PARTITION BY count(*)) with no GROUP BY: 7 rows where PostgreSQL answers 1",
 }
 
 // TestArc1590bGroupingInWindowEveryArm holds every cell to PostgreSQL 17.11's
@@ -201,7 +353,14 @@ func TestArc1590bGroupingInWindowEveryArm(t *testing.T) {
 	if p := os.Getenv("U1590B_LIST"); p != "" {
 		var b strings.Builder
 		for _, c := range cells {
-			fmt.Fprintf(&b, "%s\t%s\n", c.name, c.sql)
+			sql, ord := c.sql, 0
+			if c.pg != "" {
+				sql = c.pg
+			}
+			if c.ordered {
+				ord = 1
+			}
+			fmt.Fprintf(&b, "%s\t%d\t%s\n", c.name, ord, sql)
 		}
 		if err := os.WriteFile(p, []byte(b.String()), 0o644); err != nil {
 			t.Fatal(err)
@@ -238,6 +397,11 @@ func TestArc1590bGroupingInWindowEveryArm(t *testing.T) {
 			go func() {
 				defer wg.Done()
 				res, err := arm.run(c.sql)
+				if c.ordered && err == nil {
+					gots[i] = u1590bOrderedRender(res)
+					oks[i] = gots[i] == want
+					return
+				}
 				gots[i], oks[i] = u1590Judge(want, res, err)
 			}()
 		}

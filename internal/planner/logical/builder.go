@@ -70,6 +70,14 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 	if len(orderByAggs) > 0 {
 		hasAgg = true
 	}
+	// So does a GROUPING(...) inside a window's spec. Only the aggregate
+	// block validates a GROUPING call's arguments, and with no aggregate
+	// built the call was evaluated over raw rows: `SELECT count(*) OVER
+	// (PARTITION BY GROUPING(s)) FROM t` answered a row per input row where
+	// PostgreSQL 17.11 raises 42803 (#1590).
+	if !hasAgg && windowSpecHoldsGrouping(info) {
+		hasAgg = true
+	}
 	// So does a HAVING clause, with or without an aggregate in it: it makes
 	// the whole input ONE group. Without this `SELECT 1 FROM t HAVING
 	// COUNT(*) > 5` built no Aggregate, the HAVING's aggregate had nothing to
@@ -128,6 +136,9 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 	var groupingCalls []GroupingCall
 	groupingSlots := map[int]string{}
 	groupingSlotFor := map[string]string{}
+	// orderGroupingSlots maps a GROUPING call written in ORDER BY (the call
+	// node itself, not its text) to its slot, for resolveOrderBy.
+	orderGroupingSlots := map[*plansql.FuncCallNode]string{}
 
 	// allocGroupingSlot validates one GROUPING call's arguments and returns
 	// the slot its bitmask is published under, reusing the slot when the same
@@ -391,8 +402,19 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 		// no-op and the term is dropped rather than materialized. WITH a
 		// GROUP BY it is not a no-op, and that case is still refused (#597).
 		for _, oAgg := range orderByAggs {
+			// GROUPING(...) in ORDER BY is not an aggregate: it takes its
+			// bitmask slot, as in the SELECT list, HAVING and a window spec,
+			// and resolveOrderBy sorts a bare call on that slot. Skipped, it
+			// had no column to name, and the sort was refused unless a window
+			// spec had hoisted the same call as an aggregate — which read
+			// count(k), not the grouping set (#1590).
 			if strings.EqualFold(oAgg.Name, "grouping") {
-				continue // not an aggregate; it has its own slot family
+				slot, err := allocGroupingSlot(oAgg)
+				if err != nil {
+					return nil, err
+				}
+				orderGroupingSlots[oAgg] = slot
+				continue
 			}
 			if _, err := reuseOrAddAggregate(oAgg, &aggs, &aggCounter); err != nil {
 				return nil, err
@@ -779,7 +801,7 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 	// ones it cannot — an ORDER BY that resolves to nothing is an error, not
 	// a silently arbitrary order (#320).
 	if len(info.OrderBy) > 0 && !sortBeforeProject {
-		child, orderExprs, err := resolveOrderBy(plan, projectNode, info)
+		child, orderExprs, err := resolveOrderBy(plan, projectNode, info, orderGroupingSlots)
 		if err != nil {
 			return nil, err
 		}
@@ -1067,6 +1089,23 @@ func windowItemNode(col plansql.SelectColumn) *plansql.WindowFuncNode {
 //
 // The window's own OUTPUT is deliberately not a term: it is what the operator
 // computes, not what it reads.
+// windowSpecHoldsGrouping reports whether a window spec in the SELECT list or
+// in QUALIFY calls GROUPING(...).
+func windowSpecHoldsGrouping(info *plansql.SelectInfo) bool {
+	terms := qualifyWindowTerms(info)
+	for _, col := range info.Columns {
+		terms = append(terms, windowSpecTerms(col)...)
+	}
+	for _, term := range terms {
+		for _, fn := range plansql.FindAllAggregates(term) {
+			if strings.EqualFold(fn.Name, "grouping") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func windowSpecTerms(col plansql.SelectColumn) []plansql.Node {
 	if col.ASTExpr == nil {
 		return nil
