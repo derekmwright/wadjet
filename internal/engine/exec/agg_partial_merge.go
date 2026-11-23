@@ -51,7 +51,10 @@ func (h *HashAggregate) CloneSink() SinkSource {
 	// bound that over-states only ever keeps the adaptive path.
 	clone.inputRowBound = h.inputRowBound
 	// The parent's input estimate caps a clone's initial capacity under a
-	// budget (presizeBound); it is not an upward presize for the clone.
+	// budget (presizeBound); it is not an upward presize for the clone. It is
+	// copied WHOLE: presizeBound divides it by cloneNDVDivisor for a
+	// partitioned clone, as it does the primary's InputRowHint, so dividing
+	// here too would divide twice.
 	clone.presizeRowCap = h.InputRowHint
 	if clone.presizeRowCap <= 0 {
 		clone.presizeRowCap = h.presizeRowCap

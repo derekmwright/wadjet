@@ -237,7 +237,8 @@ type HashAggregate struct {
 	cloneNDVDivisor int
 	// presizeRowCap is a clone's copy of its parent's InputRowHint, read
 	// ONLY as the cap presizeBound applies under a budget (a clone consumes
-	// a subset of its parent's input). It never sizes a clone upward:
+	// a subset of its parent's input; presizeBound divides it by
+	// cloneNDVDivisor for a partitioned clone). It never sizes a clone upward:
 	// clones keep InputRowHint at zero so k clones do not each presize for
 	// the whole input.
 	presizeRowCap int64

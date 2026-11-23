@@ -27,10 +27,31 @@ package exec
 // estimate costs a few doublings and never an answer: every structure capped
 // here grows on demand. Without a budget, or without an estimate, n is
 // returned unchanged — the unbudgeted engine allocates exactly what it did.
+//
+// A partitioned aggregate (cloneNDVDivisor = k > 1) is one of k sinks that
+// each own a hash partition of the key space: the primary (workerSinks[0])
+// and k-1 clones. Each one's share of the estimate is about rows/k, so the
+// cap is that share, rounded UP (a positive estimate never becomes the zero
+// that means "unknown"). The division happens HERE, once, for the primary and
+// the clones alike: the primary keeps the whole estimate in InputRowHint and
+// the clones keep it in presizeRowCap, both undivided, and every other reader
+// of either (the upward hint in resolveIndices, the flat-accumulator hint,
+// inputRowBound) still sees the whole estimate. The share is a sizing
+// heuristic, not a bound on a partition's groups: under skew one partition can
+// receive every group, and it grows — and is charged for growing — exactly as
+// an aggregate whose estimate was low does. Before this, every one of k
+// partitions sized for the WHOLE estimate (#1706: seven clones of a
+// 5,000-row LATERAL body each force-charged a 4,096-slot pool chunk for one
+// group, and a hash join's first reservation refused or not by how many of
+// them had been released). That narrows the window in which a join's first
+// reservation races partitions' releases; it does not remove the class.
 func (h *HashAggregate) presizeBound(n int) int {
 	rows := h.InputRowHint
 	if rows <= 0 {
 		rows = h.presizeRowCap
+	}
+	if d := int64(h.cloneNDVDivisor); rows > 0 && d > 1 {
+		rows = (rows-1)/d + 1 // ceiling, without the overflow of rows+d-1
 	}
 	if rows <= 0 || int64(n) <= rows || h.Spill == nil {
 		return n
