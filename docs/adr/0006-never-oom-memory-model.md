@@ -1,6 +1,6 @@
 # ADR-0006: Never-OOM memory — shared pool, ownership ledger, spill-everywhere
 
-Status: Accepted (accounting overhaul landed 2026-05-30, 35f6730; recorded 2026-07-25; amended 2026-08-17, 2026-09-03, 2026-09-04, 2026-09-18, 2026-09-19, 2026-11-21 and 2026-11-22 — see Amendments)
+Status: Accepted (accounting overhaul landed 2026-05-30, 35f6730; recorded 2026-07-25; amended 2026-08-17, 2026-09-03, 2026-09-04, 2026-09-18, 2026-09-19, 2026-11-21, 2026-11-22 and 2026-11-23 — see Amendments)
 
 ## Context
 
@@ -835,3 +835,75 @@ change, not fixed:
 Making those verdicts independent of the order — what a join's first
 reservation may wait for, or what an upstream breaker's clones may hold
 while a sibling build admits — is a decision this record has not taken.
+
+### 2026-11-23: the group-state pool's first chunk takes the same bound (#1706, the fourth site)
+
+**The mechanism, measured.** After the presize cap above, a budgeted
+aggregate's index, key mirrors and flat accumulators followed its input
+estimate, but its group-state pool did not: `groupStatePool.alloc` appended a
+4096-slot chunk (98,304 bytes) on the first group, whatever the input, and
+`groupMemoryUsage` charges chunk capacity, so `reconcileGroupMemory` forced
+about 107 KB of `spill tracking` for ONE group — 98,304 of it the pool. The
+lateral cells of `coordinator.TestArc1681dBoolCorrelatedBodyEveryArm`
+(`outer/<col>/eq/lateral`, a correlated `CROSS JOIN LATERAL (SELECT count(*)
+…)`) and the DISTINCT lateral cells of
+`coordinator.TestArcLTACorrelatedBodyIsEvaluatedPerOuterRowOnEveryArm`
+(`distinct/eq`, `distinct/mixed` under LATERAL, LEFT and comma) run that
+aggregate partitioned: the clone count is the pipeline's worker count,
+`runtime.NumCPU()` (24 on the measuring host; GOMAXPROCS does not change it),
+and every clone that receives a row charges. Six or seven clones received a
+group each — 535-643 KB forced on a 512 KiB budget before the join above them
+first reserved. The clones release in `HashAggregate.Close` as the drain
+emits each partition, on the drain's goroutines, while the join build already
+consumes the first partitions' rows; the first event that differs between a
+refusing and an answering run is how many of those releases land before the
+join's first arrival reservation (one: `used=535461, requested=24632`,
+refused; two: `used=428380`, answered). The 2026-11-22 amendment's
+"mechanism unresolved" for the LT DISTINCT cells is this one: the DISTINCT
+state there is one group of a few bytes per clone; the charge was the pool.
+
+**The rule now.** Under a budget the pool's first chunk is the aggregate's
+`presizeBound(4096)` (the input estimate, or a clone's parent estimate), and
+later chunks double from it up to 4096; without a budget, or with an estimate
+of 4096 or more, the chunks are exactly the base's. A clone of those cells now
+charges 9,173 bytes, so even all 24 clones and the join's first arrival fit
+in 512 KiB whichever releases first: the verdict no longer has an order to
+depend on. Base against tip, 30 fresh processes per cell, at GOMAXPROCS 1, 2,
+4 and the default, with the join's arrival delayed 100 ms, and with every
+aggregate release held 100 ms (also at GOMAXPROCS 1): the 1681d lateral cells
+refused in every base run of the free and held orders (160-232 refusals over
+30 runs; 12 of 30 runs under the delay) and in no tip run; the six LT DISTINCT
+cells refused in every base run of the free and held orders (155-180 over 30
+runs; none under the delay) and in no tip run, and none of the 33 aggregated
+LATERAL cells that gate tolerated a refusal on refused at the tip. Every
+answer is PostgreSQL's, so the two gates' tolerated-refusal lists
+(`bcBudgetBounded`, `ltBudgetBounded`) are gone and their spilled arms assert
+the rows. Gate: `exec.TestABudgetedAggregatesGroupStatePoolIsBoundedByItsInput`.
+
+**What it does not cover, and a correction.**
+`coordinator.TestF1AKeylessJoinAsksForWhatItNeeds/480`'s control (`SELECT
+COUNT(*) FROM (SELECT DISTINCT c_i32 FROM typemx) x JOIN (SELECT DISTINCT k
+FROM typemx_dim) y ON x.a = y.b`) is unchanged by this rule: its estimate is
+5,000 rows, so the pool keeps its 4096-slot chunk. The 2026-11-22 amendment
+called its charge "REAL group state … about 118 KB per clone"; measured, a
+clone of it holds about 200 groups in about 155 KB, of which 98,304 is that
+pool chunk (4,800 bytes used), 16,384 the string index, about 13 KB the key
+mirrors and about 24 KB the per-group state. The 24 clones hold about 4,800
+groups and 3.7 MB forced; they run on the generic map (a NULL key leaves the
+integer path), where `canUseExternalMerge` is false, so the clone drain bound
+(`PartialDrainBytes`, 16,384 at 24 workers) never fires. Without the pool
+chunk the clones would still hold about 1.4 MB, so a smaller first chunk would
+not decide this verdict. At the base and at this change alike (its
+aggregates' charges are byte-identical in the trace) it refused every free
+run (30 at each GOMAXPROCS) and every run with the releases held, and with
+the join's arrival delayed 100 ms answered PostgreSQL's 3 in 12 of 30 base
+and 22 of 30 tip runs, 13 and 16 of 30 when the two were interleaved in one
+binary; with one pipeline worker
+(`WADJET_SCAN_WORKERS=1`) the serial aggregate spills, holds 336 KB and the
+build refuses, with two or four it answered. Its verdict therefore follows
+the worker count and the release order, and making it independent of them —
+bounding a generic-path clone (a drain for the generic map), not partitioning
+an aggregate that cannot drain under a budget, or ordering a join's first
+reservation after an upstream breaker's release — is the decision the
+2026-11-22 amendment left open; it is still not taken. The pin stays a
+refusal; it is the order class, not an accounting drift.

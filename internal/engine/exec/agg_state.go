@@ -58,21 +58,47 @@ func (gs *groupState) ensureExtras() *groupStateExtras {
 // at SF1 create 1.5M heap objects; with chunk allocation, they create ~366.
 // Each chunk is a single contiguous array; pointers into it remain valid
 // because new chunks don't move old ones.
+//
+// The first chunk is charged in full (groupMemoryUsage counts chunk
+// capacity), so under a memory budget its size is the aggregate's
+// presizeBound like every other up-front capacity (#1706): firstChunk holds
+// that bound, and later chunks double from it up to groupStateChunkSize.
+// Zero means groupStateChunkSize — an unbudgeted aggregate allocates exactly
+// the 4096-slot chunks it always did.
 type groupStatePool struct {
-	chunks [][]groupState
-	pos    int // position within current chunk
+	chunks     [][]groupState
+	pos        int // position within current chunk
+	firstChunk int
 }
 
 const groupStateChunkSize = 4096
 
 func (p *groupStatePool) alloc() *groupState {
 	if len(p.chunks) == 0 || p.pos >= len(p.chunks[len(p.chunks)-1]) {
-		p.chunks = append(p.chunks, make([]groupState, groupStateChunkSize))
+		p.chunks = append(p.chunks, make([]groupState, p.nextChunkSize()))
 		p.pos = 0
 	}
 	gs := &p.chunks[len(p.chunks)-1][p.pos]
 	p.pos++
 	return gs
+}
+
+// nextChunkSize is the length of the chunk alloc appends: firstChunk (when
+// set below groupStateChunkSize) for the first, then twice the last chunk,
+// never more than groupStateChunkSize. A preAlloc'd chunk larger than that is
+// followed by groupStateChunkSize chunks, as before.
+func (p *groupStatePool) nextChunkSize() int {
+	if len(p.chunks) == 0 {
+		if p.firstChunk > 0 && p.firstChunk < groupStateChunkSize {
+			return p.firstChunk
+		}
+		return groupStateChunkSize
+	}
+	n := 2 * len(p.chunks[len(p.chunks)-1])
+	if n > groupStateChunkSize {
+		n = groupStateChunkSize
+	}
+	return n
 }
 
 // preAlloc pre-allocates a single large initial chunk to avoid repeated

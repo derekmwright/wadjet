@@ -786,6 +786,7 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) error {
 	}
 	htInitSize = h.presizeBound(htInitSize)
 	intHTInitSize = h.presizeBound(intHTInitSize)
+	h.gsPool.firstChunk = h.presizeBound(groupStateChunkSize)
 
 	// Group-index LAYOUT, decided here and only here, from the bounds the
 	// sink's owner declared before the first row: an epoch byte cap

@@ -1782,7 +1782,7 @@ func (h *HashAggregate) resetGroupStateAfterSpill() {
 	// Drop the group-state pool — its chunks are no longer referenced once
 	// the slice headers above are nil. Resetting the pool lets GC reclaim
 	// the chunks; without this, the chunk arrays stay live as roots.
-	h.gsPool = groupStatePool{}
+	h.gsPool = groupStatePool{firstChunk: h.presizeBound(groupStateChunkSize)}
 	// intFlatAccs was nil'd by materializeFlatAccums, but be explicit here
 	// for the case where we're called from a test path that bypassed it.
 	h.intFlatAccs = nil

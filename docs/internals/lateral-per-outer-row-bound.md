@@ -139,23 +139,21 @@ SQL reference with the deadline that bounds it.
 ## Boundaries left
 
 - A hash aggregate (DISTINCT, GROUP BY) or a window over one on a hash join's
-  build side at a 512 KiB budget may refuse with `hash join build: memory
-  budget exceeded … forced by "spill tracking"` — nondeterministically for
-  the lateral spellings, deterministically for the user-written `GROUP BY …
-  QUALIFY` block under a LEFT join, identically at base. The five-arm gate
-  bounds those cells' spilled arm to {PostgreSQL's rows, that refusal}; the
-  other four arms assert the rows. Filing candidate (exec/memory). Under a
-  budget an aggregate's presize is now capped by its input estimate
-  (ADR-0006, 2026-11-22), and over this gate's tiny `lt_i` fixture that
-  closed the grouped cells only: the spilled arm refused the `groupLimit/eq`
-  cells (LATERAL, LEFT, comma) in each of 6 runs before the cap (3, 3 and 2
-  of the three in the runs counted cell by cell) and in none of 6 runs after
-  it. The DISTINCT lateral cells still refuse after it, on a subset that
-  changes from run to run: `distinct/eq` and `distinct/mixed` under LATERAL,
-  LEFT and comma refused 6, 5, 4, 6, 4 and 3 of those six cells over 6 runs
-  at the cap (5, 5 and 3 in the base runs counted cell by cell). Their
-  mechanism is not diagnosed and the cap does not explain them, so the class
-  stays open over small inputs too, not only above the estimate.
+  build side at a 512 KiB budget refused with `hash join build: memory budget
+  exceeded … forced by "spill tracking"`, nondeterministically for the lateral
+  spellings, and the five-arm gate bounded those cells' spilled arm to
+  {PostgreSQL's rows, that refusal}. It no longer does: the spilled arm asserts
+  the rows of every cell. Under a budget an aggregate's presize is capped by its
+  input estimate (ADR-0006, 2026-11-22), which closed the `groupLimit/eq` cells
+  (refused in each of 6 runs before, none of 6 after), and the group-state
+  pool's first chunk takes the same bound (ADR-0006, 2026-11-23): every
+  partitioned clone that received one group had charged a 4096-slot chunk
+  (98,304 bytes), so the DISTINCT lateral cells (`distinct/eq`,
+  `distinct/mixed` under LATERAL, LEFT and comma) refused 3 to 6 of six in every
+  free base run, and none of the 33 aggregated lateral cells refused in any of
+  180 runs after it, free and in both forced orders. The class stays open above
+  the estimate: F1A/480's DISTINCT over 5,000 rows, whose clones cannot drain on
+  the generic map, refuses or answers by the release order.
 - A window above a lateral join runs on the single-process pipeline when
   requested through the DAG. `refuseWindowOverDependentJoin` handles the
   bounded and unbounded shapes; `WindowOverLateralLocalRoutes` measures the
