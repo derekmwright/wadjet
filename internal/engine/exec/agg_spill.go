@@ -6,6 +6,7 @@ package exec
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -45,6 +46,9 @@ func (h *HashAggregate) flushSpillBuffer() error {
 }
 
 func (h *HashAggregate) Finalize(_ context.Context) error {
+	if h.closed {
+		return errAggregateClosed
+	}
 	// Once Finalize starts, the aggregate is no longer a viable cooperative
 	// spill target — it's about to drain its in-memory state into the merger.
 	// Deregister here so peer operators don't waste a RequestRelief call on
@@ -147,11 +151,16 @@ func (h *HashAggregate) Finalize(_ context.Context) error {
 	return nil
 }
 
-// Close releases any tracker reservation HashAggregate still holds for
-// group-state memory and buffered-but-unspilled rows. Without this, a
-// non-spilling HashAggregate accumulates a phantom reservation in the
-// shared tracker for the lifetime of the process; see HashJoin.Close for
-// the full background.
+// Close releases everything the aggregate holds: the drain goroutines, the
+// adopted partitions, the relief-registry slot, the spill files and the
+// streaming merger, every in-memory group structure and off-heap
+// reservation, and LAST the tracker charge for group state and
+// buffered-but-unspilled rows. Without the charge release a non-spilling
+// HashAggregate accumulates a phantom reservation in the shared tracker for
+// the lifetime of the process (see HashJoin.Close); without the structure
+// drop the charge is released while the state stays reachable from anything
+// that still references the operator (#1685). Close is idempotent; Init,
+// Consume, Finalize and Next called after it return errAggregateClosed.
 func (h *HashAggregate) Close() error {
 	// Stop the parallel drain FIRST and wait for it: its goroutines own the
 	// adopted partitions (each closes its own unit, and with it that unit's
@@ -171,14 +180,6 @@ func (h *HashAggregate) Close() error {
 		h.unregisterAccounted = nil
 	}
 	if h.Spill != nil {
-		if h.trackedGroupMem > 0 {
-			h.Spill.ReleaseTracking(h.trackedGroupMem)
-			h.trackedGroupMem = 0
-		}
-		if h.spillBufferBytes > 0 {
-			h.Spill.ReleaseTracking(h.spillBufferBytes)
-			h.spillBufferBytes = 0
-		}
 		// Legacy raw-row spill files never consumed by Finalize (error or
 		// early-cancel path). On the shared-manager path nothing else
 		// removes them (#324); on the owned path this merely beats
@@ -199,21 +200,95 @@ func (h *HashAggregate) Close() error {
 		os.Remove(path)
 	}
 	h.drainedRuns = nil
+
+	// Under h.mu: SpillSome, EstimateRelief, Inspect, StateBytes and
+	// DrainOnHeapPressure can reach this operator from another goroutine
+	// while it closes, and they read the fields dropped here.
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	// Drop the group state BEFORE releasing its charge: the tracker must not
+	// tell a peer operator the bytes are free while this operator can still
+	// reach them (#1685). Off-heap reservations are returned to the OS here;
+	// heap state is collectable once this returns.
+	h.dropGroupStateLocked()
+	if h.Spill != nil {
+		if h.trackedGroupMem > 0 {
+			h.Spill.ReleaseTracking(h.trackedGroupMem)
+		}
+		if h.spillBufferBytes > 0 {
+			h.Spill.ReleaseTracking(h.spillBufferBytes)
+		}
+	}
+	h.trackedGroupMem = 0
+	h.spillBufferBytes = 0
+	h.closed = true
+	return nil
+}
+
+// errAggregateClosed is what a pipeline entry point answers once Close has
+// run. The group state is gone, so answering "no rows" instead would turn a
+// lifecycle bug into a silently empty result; before Close dropped the
+// state, a Consume after Close faulted on the int index's unmapped arrays.
+var errAggregateClosed = errors.New("hash aggregate: used after Close")
+
+// dropGroupStateLocked removes every reference the aggregate holds to group
+// state and per-batch scratch, on every key path: the hash indexes, the
+// per-group state slices, the key mirrors, the flat accumulators, the
+// groupState chunk pool, the scalar accumulators, the raw-row buffer and the
+// emission caches. Off-heap reservations (this instance's, and any retired by
+// a whole-state reset) are unmapped exactly once: each registry pointer is
+// cleared with its Close. Configuration (column lists, resolved types,
+// schemas) is kept; it is not group state and holds no batch data.
+//
+// Caller holds h.mu, and no cursor, merger or drain goroutine may still be
+// reading the arrays (Close stops them first).
+func (h *HashAggregate) dropGroupStateLocked() {
+	// Generic, string and compact paths.
+	h.keys = nil
+	h.serializedKeys = nil
+	h.compactKeys = nil
+	h.strGroupIndex = nil
+	h.strGroupStates = nil
+	h.strNullGroupIdx = -1
+	h.genKeyIdx = nil
+	h.genKeyNext = nil
+	h.keySerCols = nil
+	h.keyBuf = nil
+	h.resetStateByteCounters()
+	// Int-keyed paths (single-int, packed, compact) and the SoA arrays.
+	h.intGroupIndex = nil
+	h.intTwoLevel = nil
+	h.intGroupStates = nil
+	h.numIntGroups = 0
+	h.intKeys = nil
+	h.intFlatAccs = nil
+	h.packedIdx = nil
+	h.packedTwoLevel = nil
+	h.packedKeys = nil
+	h.packedCols = nil
+	h.groupIndexBuf = nil
+	h.freeGroupIDs = nil
+	h.drainK = 0
+	h.nextDrainPartition = 0
+	// The chunk allocator every *groupState above points into.
+	h.gsPool = groupStatePool{}
+	// Scalar fast path.
+	h.scalarAccs = nil
+	// Raw-row buffer (the caller releases its charge).
 	h.spillBuffer = nil
-	// Unmap off-heap state LAST: every slice referencing the reservations
-	// (flat accs, key SoAs — including any adopted from merged clones) is
-	// dropped above or dead with this instance. Drop the slice headers
-	// explicitly so a use-after-Close is a nil-index panic rather than a
-	// fault into unmapped memory.
+	// Emission caches and the router's per-Consume hand-off.
+	h.emitSchema = nil
+	h.emitSchemaSet = false
+	h.partialMergerSchema = nil
+	h.provHashes = nil
+	h.provPlan = nil
+	// Off-heap LAST: every slice header into the reservations is nil above,
+	// so nothing left on h can address unmapped memory.
 	if h.offheap != nil {
-		h.intFlatAccs = nil
-		h.packedKeys = nil
-		h.intKeys = nil
 		h.offheap.Close()
 		h.offheap = nil
 	}
 	h.closeRetiredOffheap()
-	return nil
 }
 
 // Inspect implements memory.AccountedOperator. Wait-free w.r.t. the registry
@@ -397,6 +472,9 @@ func (h *HashAggregate) SpillSome(target int64) (int64, error) {
 // aggregate_parallel_emit.go. The serial fallback below streams this
 // aggregate's own state and then each adopted partition in turn.
 func (h *HashAggregate) Next(ctx context.Context) (*batch.RecordBatch, error) {
+	if h.closed {
+		return nil, errAggregateClosed
+	}
 	if h.emit != nil {
 		return h.emit.next()
 	}

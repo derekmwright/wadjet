@@ -570,6 +570,11 @@ type HashAggregate struct {
 	// The package-level TwoLevelConversions is worker-wide and cannot be
 	// attributed to one operator when tasks run concurrently.
 	indexConversions int
+
+	// closed is set by Close once the group state is dropped; Init, Consume,
+	// Finalize and Next then return errAggregateClosed. At the END of the
+	// struct for the hot-loop offset reason above.
+	closed bool
 }
 
 // SetEpochByteCap declares that this aggregate's owner will finalize it and

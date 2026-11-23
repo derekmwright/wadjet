@@ -34,6 +34,9 @@ func NewHashAggregate(groupByCols []string, aggs []AggColumn) *HashAggregate {
 }
 
 func (h *HashAggregate) Init(_ context.Context) error {
+	if h.closed {
+		return errAggregateClosed
+	}
 	// Re-Init on an instance whose previous emission is still fanned out
 	// would strand the drain's goroutines on state we are about to reset.
 	if h.emit != nil {
@@ -81,6 +84,9 @@ func (h *HashAggregate) ConsumeHashed(ctx context.Context, b *batch.RecordBatch,
 func (h *HashAggregate) Consume(_ context.Context, b *batch.RecordBatch) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if h.closed {
+		return errAggregateClosed
+	}
 	// Zero-column batches (#277, the Q18 fused-chain breaker panic —
 	// SF100 stacks show duration=0s tasks dying on their FIRST batch, a
 	// 0-row 0-column one, in consumeBatch's updater-selection loop which
