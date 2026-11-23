@@ -36,6 +36,13 @@ func NewCachedStore(inner objstore.Store, cache *LRUCache, tracker *memory.Track
 	return &CachedStore{inner: inner, cache: cache, tracker: tracker}
 }
 
+// downloadForcePurpose is what a download buffer's forced charge is attributed
+// to: the purpose the bare ForceReserve here always recorded. Every release
+// of that charge goes back through ReleaseForced under it, so the forced
+// census of the worker-lifetime tracker counts the downloads in flight rather
+// than every download the worker ever made (#1685).
+const downloadForcePurpose = memory.ForceUnattributed
+
 // readFully drains rc into a buffer sized by size when known, charging the
 // tracker for the buffer's lifetime. The returned release must be called
 // exactly once, after the bytes are handed to the cache (or on error paths
@@ -66,16 +73,16 @@ func (s *CachedStore) readFully(rc io.ReadCloser, size int64, bucket, key string
 			rc.Close()
 		}
 		if charged > 0 && s.tracker != nil {
-			s.tracker.Release(charged)
+			s.tracker.ReleaseForced(charged, downloadForcePurpose)
 		}
 	}()
 
 	if size > 0 {
 		// Charge BEFORE the allocation so pressure machinery sees it coming.
 		if s.tracker != nil {
-			s.tracker.ForceReserve(size)
+			s.tracker.ForceReserveFor(size, downloadForcePurpose)
 			charged = size
-			release = func() { s.tracker.Release(size) }
+			release = func() { s.tracker.ReleaseForced(size, downloadForcePurpose) }
 		}
 		// Pre-allocate buffer using known file size to avoid io.ReadAll's
 		// O(log n) doubling strategy (512 → 1K → ... → 40MB = ~17 copies).
@@ -101,9 +108,9 @@ func (s *CachedStore) readFully(rc io.ReadCloser, size int64, bucket, key string
 	}
 	if s.tracker != nil && len(data) > 0 {
 		n := int64(len(data))
-		s.tracker.ForceReserve(n)
+		s.tracker.ForceReserveFor(n, downloadForcePurpose)
 		charged = n
-		release = func() { s.tracker.Release(n) }
+		release = func() { s.tracker.ReleaseForced(n, downloadForcePurpose) }
 	}
 	returned = true
 	return data, release, nil

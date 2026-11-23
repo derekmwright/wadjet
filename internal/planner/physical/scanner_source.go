@@ -210,14 +210,17 @@ func (inner *scanSourceInner) drainSlotCharges() {
 // batches stranded in batchCh by cancellation or never sent by an exiting
 // worker. Callers must ensure the rg/scan workers have exited first (the
 // charges live on a shared worker-level tracker; a racing Store here would
-// leak its bytes for the worker's lifetime).
+// leak its bytes for the worker's lifetime). Every charge here was taken by
+// trackScanBatch as a forced charge, so it comes off the forced census under
+// the same purpose; a plain Release left the census describing batches that
+// no longer exist on every cancelled or failed scan (#1685).
 func (inner *scanSourceInner) drainBatchCharges() {
 	if inner.memTracker == nil {
 		return
 	}
 	inner.batchCharges.Range(func(k, _ any) bool {
 		if n, ok := inner.batchCharges.LoadAndDelete(k); ok {
-			inner.memTracker.Release(n.(int64))
+			inner.memTracker.ReleaseForced(n.(int64), memory.ForceScanDecodedBatch)
 		}
 		return true
 	})

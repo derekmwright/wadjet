@@ -10,6 +10,7 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec"
+	"github.com/derekmwright/wadjet/internal/engine/memory"
 	pqt "github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -559,7 +560,7 @@ func (l *countingLedger) Reserve(n int64) error {
 	return nil
 }
 
-func (l *countingLedger) ForceReserve(n int64) {
+func (l *countingLedger) ForceReserveFor(n int64, _ memory.ForcePurpose) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.balance += n
@@ -567,6 +568,12 @@ func (l *countingLedger) ForceReserve(n int64) {
 	if l.balance > l.peak {
 		l.peak = l.balance
 	}
+}
+
+func (l *countingLedger) ReleaseForced(n int64, _ memory.ForcePurpose) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.balance -= n
 }
 
 func (l *countingLedger) Release(n int64) {
@@ -698,6 +705,55 @@ func TestDecodeAheadIter_LedgerBalancedOnAllPaths(t *testing.T) {
 	}
 	if balance, _, _, _ := mid.snapshot(); balance != 0 {
 		t.Errorf("ledger balance after mid-stream close = %d, want 0", balance)
+	}
+}
+
+// TestDecodeAheadIter_TrackerForcedCensusBalanced (#1685): on the worker's
+// real shared tracker the cursor group's forced charge comes back off the
+// forced census, on a full drain and on a mid-stream Close, for a ledger that
+// admits read-ahead and for one that admits only the cursor. It used to be
+// released as a plain charge, so the census grew by every cursor group the
+// worker ever decoded and never came down.
+func TestDecodeAheadIter_TrackerForcedCensusBalanced(t *testing.T) {
+	data := manyRowGroupFile(t, 12, 50)
+	schema := []pqt.Column{{Name: "id", Type: pqt.TypeInt64}}
+	for _, tc := range []struct {
+		name   string
+		budget int64
+		mid    bool
+	}{
+		{"unlimited/drain", 0, false},
+		{"unlimited/mid-close", 0, true},
+		{"cursor-only/drain", 1, false},
+		{"cursor-only/mid-close", 1, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tr := memory.NewTracker("worker-pool", tc.budget)
+			it, err := OpenDecodeAheadIter(openFileReader(t, data), schema, nil, 0, 1,
+				DecodeAheadOpts{Workers: 4, Window: NewDecodeWindowWithLedger(0, tr)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.mid {
+				if _, err := it.Next(); err != nil {
+					t.Fatal(err)
+				}
+			} else if _, err := drainGroupIter(t, it); err != nil {
+				t.Fatalf("drain: %v", err)
+			}
+			if err := it.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if tr.Peak() == 0 {
+				t.Fatal("the window never charged the tracker")
+			}
+			if got := tr.Used(); got != 0 {
+				t.Errorf("used after close = %d, want 0", got)
+			}
+			if total, top, n := tr.ForcedBytes(); total != 0 {
+				t.Errorf("forced census after close = %d (largest %d by %q), want 0", total, n, top.String())
+			}
+		})
 	}
 }
 

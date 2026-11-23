@@ -178,4 +178,10 @@ func TestCachedStoreReleasesLedgerOnPanic(t *testing.T) {
 		t.Fatalf("LEDGER LEAK: worker tracker Used() %d -> %d (%d bytes charged and never "+
 			"released) after a recovered panic", before, after, after-before)
 	}
+	// The charge was forced, so it must come back off the forced census too
+	// (#1685), not only off the total.
+	if total, top, n := tracker.ForcedBytes(); total != 0 {
+		t.Fatalf("forced census after a recovered panic = %d (largest %d by %q), want 0",
+			total, n, top.String())
+	}
 }

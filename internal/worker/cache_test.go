@@ -4,6 +4,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -263,5 +264,62 @@ func TestCachedStore_DownloadTransientCharged(t *testing.T) {
 	rc.Close()
 	if tracker.Used() != 0 || tracker.Peak() != peak {
 		t.Fatal("cache hit must not charge the tracker")
+	}
+}
+
+// sizeStore serves one body with a chosen reported size: 0 takes readFully's
+// unknown-size path, a size past the body's end with a failing reader takes
+// its read-error path.
+type sizeStore struct {
+	objstore.Store
+	body io.Reader
+	size int64
+}
+
+func (s *sizeStore) Get(_ context.Context, _, key string) (io.ReadCloser, objstore.ObjectInfo, error) {
+	return io.NopCloser(s.body), objstore.ObjectInfo{Key: key, Size: s.size}, nil
+}
+
+type failingReader struct{}
+
+func (failingReader) Read([]byte) (int, error) { return 0, errors.New("injected: read failed") }
+
+// TestCachedStore_DownloadForcedCensusBalanced (#1685): a download buffer is a
+// forced charge on the worker-lifetime tracker, and every way readFully gives
+// it back (the sized and unknown-size hand-offs to the cache, the sized read
+// error) gives it back AS a forced charge. A plain release left the forced
+// census growing by every download the worker ever made, so a refusal on
+// that tracker named bytes that were long gone.
+func TestCachedStore_DownloadForcedCensusBalanced(t *testing.T) {
+	const payload = "parquet-data-1"
+	for _, tc := range []struct {
+		name    string
+		store   objstore.Store
+		wantErr bool
+	}{
+		{"sized", &sizeStore{body: strings.NewReader(payload), size: int64(len(payload))}, false},
+		{"unknown-size", &sizeStore{body: strings.NewReader(payload), size: 0}, false},
+		{"read-error", &sizeStore{body: failingReader{}, size: 1 << 20}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tracker := memory.NewTracker("worker", 1<<30)
+			cs := NewCachedStore(tc.store, NewLRUCache(1<<20), tracker)
+			rc, _, err := cs.Get(context.Background(), "b", "k")
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("Get error = %v, want error %v", err, tc.wantErr)
+			}
+			if rc != nil {
+				rc.Close()
+			}
+			if tracker.Peak() <= 0 {
+				t.Fatal("the download was never charged")
+			}
+			if used := tracker.Used(); used != 0 {
+				t.Errorf("used = %d, want 0", used)
+			}
+			if total, top, n := tracker.ForcedBytes(); total != 0 {
+				t.Errorf("forced census = %d (largest %d by %q), want 0", total, n, top.String())
+			}
+		})
 	}
 }

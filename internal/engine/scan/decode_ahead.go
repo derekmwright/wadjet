@@ -11,6 +11,7 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec"
+	"github.com/derekmwright/wadjet/internal/engine/memory"
 	pqt "github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -119,6 +120,10 @@ type decodeSlot struct {
 	est   int64 // window bytes reserved for this group
 	off   int64 // file-absolute row offset of this group's first row
 	ahead bool  // admitted as non-cursor: delivery/drop decrements win.ahead
+	// forced records that est was charged to the ledger with ForceReserveFor
+	// (the cursor group), so credit gives it back with ReleaseForced. Not
+	// derived from ahead, which delivery clears.
+	forced bool
 }
 
 // DecodeAheadOpts sizes a DecodeAheadIter.
@@ -225,14 +230,24 @@ type DecodeAdmission interface {
 // the byte cost must ride the same ledger as every other operator.
 //
 // Reserve returns a non-nil error to deny (nothing retained on denial);
-// ForceReserve charges unconditionally — used for the delivery-cursor
-// group, which is always admitted but whose bytes are still real.
+// ForceReserveFor charges unconditionally — used for the delivery-cursor
+// group, which is always admitted but whose bytes are still real — and
+// ReleaseForced gives such a charge back under the same purpose, so the
+// ledger's forced census (memory/forced.go) counts outstanding bytes rather
+// than every cursor group the worker ever decoded (#1685). Release is for
+// bytes Reserve admitted.
 // All methods must be safe for concurrent use and must not block.
 type WindowLedger interface {
 	Reserve(n int64) error
-	ForceReserve(n int64)
+	ForceReserveFor(n int64, p memory.ForcePurpose)
 	Release(n int64)
+	ReleaseForced(n int64, p memory.ForcePurpose)
 }
+
+// windowForcePurpose is what the cursor group's forced charge is attributed
+// to. It is the purpose the bare ForceReserve this seam used to call
+// recorded; the fix that pairs the release does not also re-attribute it.
+const windowForcePurpose = memory.ForceUnattributed
 
 // DecodeWindow is a byte budget shared by one or more DecodeAheadIters.
 // Its mutex doubles as the owning iterators' state lock.
@@ -285,7 +300,11 @@ func (w *DecodeWindow) credit(slot *decodeSlot) {
 		w.ahead--
 	}
 	if w.ledger != nil {
-		w.ledger.Release(slot.est)
+		if slot.forced {
+			w.ledger.ReleaseForced(slot.est, windowForcePurpose)
+		} else {
+			w.ledger.Release(slot.est)
+		}
 	}
 }
 
@@ -602,7 +621,7 @@ func (it *DecodeAheadIter) decodeLoop() {
 				holdsToken = true
 			}
 		} else if it.win.ledger != nil {
-			it.win.ledger.ForceReserve(est)
+			it.win.ledger.ForceReserveFor(est, windowForcePurpose)
 		}
 		it.nextIdx++
 		it.win.inflight += est
@@ -619,7 +638,8 @@ func (it *DecodeAheadIter) decodeLoop() {
 		for g := adviseLo; g < adviseHi; g++ {
 			it.adviseGroup(g, ranges, blooms)
 		}
-		slot := &decodeSlot{est: est, ahead: isAhead, off: rowOffsetAt(it.rowOffsets, idx)}
+		slot := &decodeSlot{est: est, ahead: isAhead, forced: !isAhead && it.win.ledger != nil,
+			off: rowOffsetAt(it.rowOffsets, idx)}
 		if pruned := it.pruneGroup(idx, ranges, blooms); !pruned {
 			t0 := time.Now()
 			b, err := ReadRowGroupNativeBacked(it.fr, idx, it.readSchema, it.cache, it.backing)
