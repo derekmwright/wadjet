@@ -49,6 +49,10 @@ func TestTaskFieldCarrierCoverage(t *testing.T) {
 		"DegradedMemory": notFile, "EstimatedBytes": notFile,
 		"Priority": notFile, "PriorityDeep": notFile,
 
+		// A worker-local per-execution nonce (16 hex chars from crypto/rand,
+		// #1709), never serialized (json:"-"): no path of any kind.
+		"ExecutionID": notFile,
+
 		// SQLText is SQL, not a file path — the pipeline path's whole
 		// reason for being exempt from a wire-level stamp (see the
 		// comment above asyncCtx in SubmitSQL, coordinator.go).
