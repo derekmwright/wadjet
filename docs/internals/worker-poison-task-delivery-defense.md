@@ -95,7 +95,10 @@ consumer (`tasks`, `pritasks-leaf` or `pritasks-deep`, with the cluster id
 inserted when one is configured) reports `num_pending > 0`,
 `num_ack_pending = 0` and `num_waiting = 0` (no pull request waiting at the
 server), while the worker is alive and idle. About 30 s after its last
-delivery the worker logs the WARN above. The same three counters also
+delivery the worker logs the WARN above, which names the lane and its
+durable (`lane=main consumer=tasks`, `lane=pri-leaf consumer=pritasks-leaf`,
+`lane=pri-deep consumer=pritasks-deep`), so it can be read against that
+durable's consumer info. The same three counters also
 describe a lane whose worker is not running at all (measured with the worker
 stopped), so the counters identify the stall only while the worker is up;
 the WARN line is the worker's side of it. The durable is shared by every
@@ -138,7 +141,84 @@ redelivers it. A shorter heartbeat lowers the silence that triggers that drop
 from 30 s to 2h; measured with a stalling proxy, drops occurred at h = 1, 2
 and 5 s and at the 15 s default. The heartbeat therefore stays at the
 library default (15 s). That recovery-path defect is a separate open line on
-issue #857 and is not described further here.
+issue #857; what an operator sees of it is described next.
+
+### JetStream intake: what an operator sees of the two signatures
+
+Source: internal/worker/worker.go (taskLoop, handleTask) and
+internal/natsconn/natsconn.go (the asynchronous error handler on every
+connection the worker and the coordinator open). Issue #857. These are log
+lines only: the intake loop, the iterator options, acknowledgement, AckWait,
+retry and reconnect behaviour are unchanged.
+
+**What the logs carry.**
+
+- Every intake-loop line names the lane and the lane's durable consumer:
+  `task intake loop starting`, `task intake: creating messages iterator`,
+  `task intake: iterator error` and the debug `task intake: delivery` all
+  carry `lane=<main|pri-leaf|pri-deep>` and `consumer=<durable>`.
+- Per delivery: `failed to unmarshal task` carries the message's `subject`
+  (the lanes' subjects are disjoint), and the WARN
+  `task redelivered — prior delivery lost or unacked` carries `stream` and
+  `consumer` beside `stream_seq` and `num_delivered`.
+- Every NATS asynchronous error is logged at ERROR through slog's default
+  logger (stderr): `NATS asynchronous error` with `error`, `connection_id`
+  and, when it concerns a subscription, `subject`. This replaces the
+  library's default handler, which wrote the same facts to stderr as plain
+  text, for every asynchronous error; the new handler logs every one too.
+- A client-side slow consumer is logged as
+  `NATS slow consumer: messages dropped client-side` with `subject` and
+  `dropped_total`. Its limits, which the line also states in its own
+  attributes:
+  - it is written once per slow-consumer EPISODE (nats.go reports the
+    transition into slow-consumer state and re-arms after the subscription
+    next accepts a message), not once per dropped message;
+  - `dropped_total` is the subscription's cumulative count when the line is
+    written, and it counts every dropped frame, heartbeats and 408 status
+    frames included, not only tasks;
+  - for an intake iterator the subject is the iterator's private inbox
+    (`_INBOX.…`). The public iterator API does not expose that inbox, so
+    the line cannot name the lane or the task. No sound attribution from
+    the public API was found; none is invented.
+
+**Signature 1: queued, no pull waiting (the lost wake-up above).** Consumer
+info of the lane's durable: `num_pending > 0`, `num_ack_pending = 0`,
+`num_waiting = 0`. Logs: about 30 s after the last delivery, one
+`task intake: iterator error` WARN with `error="nats: no heartbeat received"`
+naming the lane and the durable. No slow-consumer line belongs to this
+signature.
+
+**Signature 2: delivered and unacknowledged, never received (the untracked
+pull request).** Consumer info of the lane's durable: `num_ack_pending ≥ 1`
+with `num_pending = 0` and `num_redelivered = 0`, and, at idle,
+`num_waiting` greater than the number of live workers on that lane (each
+healthy worker holds exactly one pull request per lane). Logs, in order:
+
+1. one `task intake: iterator error` WARN (`no heartbeat received`) per
+   connection silence, naming the lane and the durable; the excess pull
+   requests form after these, and in the measured sequence it took two of
+   them before a burst dropped a task;
+2. one `NATS slow consumer: messages dropped client-side` ERROR with the
+   iterator's inbox as `subject` and a `dropped_total`;
+3. nothing for the dropped task until AckWait (10 min) has passed and it is
+   redelivered; then `task redelivered — prior delivery lost or unacked`
+   with `num_delivered=2`, its `stream`, `consumer` and `stream_seq`.
+
+**What an operator still cannot see.**
+
+- Which lane a slow-consumer line belongs to, or which task (if any) it
+  dropped: the line names an inbox, and its count mixes tasks with
+  heartbeats and 408 frames. A lane-labelled iterator WARN shortly before it
+  on the same worker makes a lane likely, but that is an inference, not an
+  attribution.
+- The excess pull requests themselves: no log line or alarm compares the
+  durable's `num_waiting` with the number of live workers; it is visible
+  only in consumer info.
+- The dropped task before its redelivery: between the drop and AckWait the
+  task appears only as `num_ack_pending` in consumer info.
+- A task whose deliveries are all dropped until MaxDeliver (3) is reached:
+  the server's `MAX_DELIVERIES` advisory has no subscriber in this
+  repository, so nothing is logged when that consumer stops delivering it.
 
 **Permanent correction and removal of this limitation.** A released nats.go
 version that contains the fix (#2241 or an equivalent), adopted through a

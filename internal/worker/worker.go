@@ -1636,7 +1636,15 @@ func sweepDirContents(dir string, logger *slog.Logger) (int, int64) {
 }
 
 func (w *Worker) taskLoop(ctx context.Context, consumer jetstream.Consumer, sem chan struct{}, lane string) {
-	w.logger.Info("task intake loop starting", "lane", lane)
+	// Every intake log line names the lane AND the lane's durable consumer,
+	// so a line can be matched to the consumer info it concerns (#857e).
+	// CachedInfo reads the info cached when the consumer was created; it
+	// makes no server request.
+	durable := ""
+	if ci := consumer.CachedInfo(); ci != nil {
+		durable = ci.Name
+	}
+	w.logger.Info("task intake loop starting", "lane", lane, "consumer", durable)
 	// Persistent pull subscription with slot-gated Next() instead of a
 	// 500ms-polled one-shot Fetch. The polled Fetch churned ~2 pull
 	// requests/second/worker, and each request-expiry boundary is a race
@@ -1665,7 +1673,7 @@ func (w *Worker) taskLoop(ctx context.Context, consumer jetstream.Consumer, sem 
 	// intake: the lost wake-up stall".
 	it, err := consumer.Messages(jetstream.PullMaxMessages(1))
 	if err != nil {
-		w.logger.Error("task intake: creating messages iterator", "error", err)
+		w.logger.Error("task intake: creating messages iterator", "lane", lane, "consumer", durable, "error", err)
 		return
 	}
 	defer it.Stop()
@@ -1735,7 +1743,7 @@ func (w *Worker) taskLoop(ctx context.Context, consumer jetstream.Consumer, sem 
 			// Transient iterator error (missed heartbeats during a NATS
 			// hiccup): surface it — silent intake failures are how the
 			// Q08 stall stayed invisible — and back off briefly.
-			w.logger.Warn("task intake: iterator error", "error", err)
+			w.logger.Warn("task intake: iterator error", "lane", lane, "consumer", durable, "error", err)
 			select {
 			case <-ctx.Done():
 				return
@@ -1744,7 +1752,7 @@ func (w *Worker) taskLoop(ctx context.Context, consumer jetstream.Consumer, sem 
 			continue
 		}
 
-		w.logger.Debug("task intake: delivery", "lane", lane, "subject", msg.Subject())
+		w.logger.Debug("task intake: delivery", "lane", lane, "consumer", durable, "subject", msg.Subject())
 		w.wg.Add(1)
 		go func(m jetstream.Msg) {
 			defer w.wg.Done()
@@ -1813,7 +1821,7 @@ func (noopAcker) InProgress() {}
 func (w *Worker) handleTask(ctx context.Context, msg jetstream.Msg) {
 	var task distributed.Task
 	if err := distributed.Unmarshal(msg.Data(), &task); err != nil {
-		w.logger.Error("failed to unmarshal task", "error", err)
+		w.logger.Error("failed to unmarshal task", "subject", msg.Subject(), "error", err)
 		msg.Term()
 		return
 	}
@@ -1830,6 +1838,7 @@ func (w *Worker) handleTask(ctx context.Context, msg jetstream.Msg) {
 			w.logger.Warn("task redelivered — prior delivery lost or unacked",
 				"task_id", task.ID, "query_id", task.QueryID,
 				"num_delivered", meta.NumDelivered,
+				"stream", meta.Stream, "consumer", meta.Consumer,
 				"stream_seq", meta.Sequence.Stream)
 		}
 	}

@@ -14,11 +14,13 @@ package natsconn
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/url"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"time"
 
 	natsserver "github.com/nats-io/nats-server/v2/server"
@@ -207,9 +209,73 @@ func (e *EmbeddedNATS) Shutdown() {
 	e.logger.Info("embedded NATS shut down")
 }
 
+// asyncErrors is the asynchronous error handler installed on every
+// connection this package opens, in place of nats.go's default handler.
+//
+// The default (nats.go v1.51.0, defaultErrHandler) writes EVERY asynchronous
+// error to stderr as "<error> on connection [<cid>]", followed by
+// "for subscription on <subject>" when the error concerns a subscription.
+// This handler keeps all of that: every asynchronous error is logged at Error
+// level through slog's default logger (stderr unless the process installs
+// another default; nothing in this repository does), with the error, the
+// connection id and the subscription's subject.
+//
+// A slow-consumer error also carries the subscription's dropped count. What
+// that line can and cannot say (repeated in its own attributes and in
+// docs/internals/worker-poison-task-delivery-defense.md):
+//   - nats.go reports it once per slow-consumer EPISODE (on the transition
+//     into slow-consumer state, re-armed by the next message the
+//     subscription accepts), not once per dropped message;
+//   - dropped_total is the subscription's cumulative count when the line is
+//     written, and it counts every dropped frame, heartbeats and 408 status
+//     frames included, not only tasks;
+//   - for a JetStream pull iterator the subject is the iterator's private
+//     inbox (_INBOX.…). The public iterator API does not expose that inbox,
+//     so this line alone cannot name the intake lane or the task.
+//
+// The callback runs on nats.go's asynchronous-callback goroutine. It makes no
+// server request and does no I/O beyond the log line. The only lock it takes
+// is the subscription's own mutex, briefly, inside Subscription.Dropped (the
+// default handler takes the same mutex to read the subject). It does not take
+// the connection's lock: the connection id is cached on connect and on
+// reconnect instead of read through Conn.GetClientID in the callback.
+type asyncErrors struct {
+	cid atomic.Uint64
+}
+
+// noteConnected caches the server-assigned connection id. It is called after
+// the initial connect and from the reconnect handler, never from handle.
+func (a *asyncErrors) noteConnected(nc *nats.Conn) {
+	if id, err := nc.GetClientID(); err == nil {
+		a.cid.Store(id)
+	}
+}
+
+func (a *asyncErrors) handle(_ *nats.Conn, sub *nats.Subscription, err error) {
+	attrs := []any{"error", err, "connection_id", a.cid.Load()}
+	if sub != nil {
+		attrs = append(attrs, "subject", sub.Subject)
+	}
+	if !errors.Is(err, nats.ErrSlowConsumer) {
+		slog.Error("NATS asynchronous error", attrs...)
+		return
+	}
+	if sub != nil {
+		if dropped, derr := sub.Dropped(); derr == nil {
+			attrs = append(attrs, "dropped_total", dropped)
+		}
+	}
+	attrs = append(attrs,
+		"reported", "once per slow-consumer episode, not per message",
+		"dropped_counts", "every dropped frame, heartbeats and 408 status frames included, not only tasks",
+		"attribution", "a JetStream pull iterator's subject is its private inbox; this line does not name the lane or the task")
+	slog.Error("NATS slow consumer: messages dropped client-side", attrs...)
+}
+
 // Connect creates a NATS client connection over TCP.
 // If tlsCfg is non-nil, the connection uses TLS (mTLS when client certs are configured).
 func Connect(url string, tlsCfg *tls.Config) (*nats.Conn, error) {
+	ae := &asyncErrors{}
 	opts := []nats.Option{
 		nats.MaxReconnects(-1),
 		nats.ReconnectWait(time.Second),
@@ -218,9 +284,11 @@ func Connect(url string, tlsCfg *tls.Config) (*nats.Conn, error) {
 				slog.Warn("NATS disconnected", "error", err)
 			}
 		}),
-		nats.ReconnectHandler(func(_ *nats.Conn) {
+		nats.ReconnectHandler(func(nc *nats.Conn) {
+			ae.noteConnected(nc)
 			slog.Info("NATS reconnected")
 		}),
+		nats.ErrorHandler(ae.handle),
 	}
 	if tlsCfg != nil {
 		opts = append(opts, nats.Secure(tlsCfg))
@@ -230,6 +298,7 @@ func Connect(url string, tlsCfg *tls.Config) (*nats.Conn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("connecting to NATS: %w", err)
 	}
+	ae.noteConnected(nc)
 	return nc, nil
 }
 
@@ -260,6 +329,7 @@ func BuildNATSClientTLS(certFile, keyFile, caFile string) (*tls.Config, error) {
 // ConnectInProcess creates a NATS client connection using in-process communication.
 // This avoids TCP overhead when the client is co-located with the embedded NATS server.
 func ConnectInProcess(server *natsserver.Server) (*nats.Conn, error) {
+	ae := &asyncErrors{}
 	nc, err := nats.Connect(server.ClientURL(),
 		nats.InProcessServer(server),
 		nats.MaxReconnects(-1),
@@ -269,13 +339,16 @@ func ConnectInProcess(server *natsserver.Server) (*nats.Conn, error) {
 				slog.Warn("NATS disconnected", "error", err)
 			}
 		}),
-		nats.ReconnectHandler(func(_ *nats.Conn) {
+		nats.ReconnectHandler(func(nc *nats.Conn) {
+			ae.noteConnected(nc)
 			slog.Info("NATS reconnected")
 		}),
+		nats.ErrorHandler(ae.handle),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("connecting to NATS in-process: %w", err)
 	}
+	ae.noteConnected(nc)
 	return nc, nil
 }
 
