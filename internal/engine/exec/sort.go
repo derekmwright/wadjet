@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -93,13 +94,24 @@ type Sort struct {
 	// consumesSinceSpill counts Consumes for the TEST-ONLY spill forcing knob
 	// (sort_force_spill.go). Untouched when the knob is disarmed.
 	consumesSinceSpill int64
+	// closed is set by Close; every later call returns errSortClosed.
+	closed bool
 }
+
+// errSortClosed is returned by a call on a Sort after Close: the operator
+// has dropped what it buffered and materialized, so Next would otherwise
+// hand out batches whose charge is gone, and Consume would charge a tracker
+// nothing will release again.
+var errSortClosed = errors.New("sort: used after Close")
 
 func NewSort(keys []SortKey) *Sort {
 	return &Sort{Keys: keys, Limit: -1}
 }
 
 func (s *Sort) Init(_ context.Context) error {
+	if s.closed {
+		return errSortClosed
+	}
 	s.batches = nil
 	s.totalRows = 0
 	s.sorted = nil
@@ -114,6 +126,9 @@ func (s *Sort) Init(_ context.Context) error {
 func (s *Sort) Consume(_ context.Context, b *batch.RecordBatch) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed {
+		return errSortClosed
+	}
 	if s.schema == nil {
 		// A key that resolves to no column is a planner bug, and skipping it
 		// is how that bug stays invisible: the sort "succeeds" and the rows
@@ -277,6 +292,10 @@ func (s *Sort) Finalize(_ context.Context) error {
 	// Deregister now so the registry stops considering us. Close still
 	// deregisters as a backstop.
 	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return errSortClosed
+	}
 	s.finalized = true
 	s.mu.Unlock()
 	if s.unregisterAccounted != nil {
@@ -537,6 +556,12 @@ func (s *Sort) MergeSink(other SinkSource) {
 // can reclaim immediately. Without this, a non-spilling Sort accumulates a
 // phantom reservation in the shared tracker for the lifetime of the
 // process; see HashJoin.Close for the full background.
+//
+// Everything is dropped under s.mu BEFORE the charge goes back (the
+// aggregate's order, 1685b): the buffered input, the materialized sorted
+// output and the merge. Before #1685 (line 1706l) the charge was released
+// first and s.sorted stayed reachable from a held Sort, and Next after Close
+// handed those batches out again. A call after Close returns errSortClosed.
 func (s *Sort) Close() error {
 	if s.unregisterAccounted != nil {
 		s.accState.Store(int32(memory.OpClosed))
@@ -544,19 +569,24 @@ func (s *Sort) Close() error {
 		s.unregisterAccounted = nil
 	}
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.closed = true
 	if s.merger != nil || len(s.mergeRuns) > 0 {
 		// Early cancel mid-merge: close cursors and delete run scratch.
+		// finishMergeLocked drops the merge and the buffered batches before
+		// it releases their charge.
 		s.finishMergeLocked()
 	}
 	removeRunFiles(s.runFiles)
 	s.runFiles = nil
+	s.batches = nil
+	s.totalRows = 0
+	s.sorted = nil
+	s.pos = 0
 	if s.Spill != nil && s.trackedMem > 0 {
 		s.Spill.ReleaseTracking(s.trackedMem)
 		s.trackedMem = 0
 	}
-	s.batches = nil
-	s.totalRows = 0
-	s.mu.Unlock()
 	return nil
 }
 
@@ -627,6 +657,9 @@ func (s *Sort) SpillSome(_ int64) (int64, error) {
 // streams from the k-way run merger; otherwise it drains the materialized
 // s.sorted list.
 func (s *Sort) Next(_ context.Context) (*batch.RecordBatch, error) {
+	if s.closed {
+		return nil, errSortClosed
+	}
 	if s.merger != nil || s.mergeDone {
 		return s.nextMerged()
 	}

@@ -250,6 +250,37 @@ func (s *spillState) cleanup() {
 	clear(s.partProbeFiles)
 }
 
+// dispose is HashJoin.Close's teardown of the grace state, on every route:
+// it aborts (closes, then removes) every writer still open — the build
+// writers stay open until the first NextFlush and the probe writers until the
+// probe ends, so a cancelled or failed join, or one closed before its probe,
+// still holds them — removes the runs already closed, and drops every
+// structure that holds batches. abort is idempotent, so a writer an earlier
+// close or abort already finished is not closed twice. Caller holds the
+// join's mu; probeMu is taken for the probe writers, in that order.
+func (s *spillState) dispose() {
+	for _, w := range s.partBuildWriters {
+		w.abort()
+	}
+	s.partBuildWriters = nil
+	s.probeMu.Lock()
+	for _, w := range s.partProbeWriters {
+		w.abort()
+	}
+	s.partProbeWriters = nil
+	s.probeMu.Unlock()
+	s.cleanup()
+	s.spilledParts = nil
+	s.partBuildFiles = nil
+	s.partProbeFiles = nil
+	s.partBuildBatches = nil
+	s.partMemory = nil
+	s.batchPartID = nil
+	s.openAccum = [numSpillPartitions]*batch.RecordBatch{}
+	s.openAccumData = [numSpillPartitions]int64{}
+	s.partRowScratch = [numSpillPartitions][]int{}
+}
+
 // ---- Columnar Batch Spill I/O ----
 
 // spillBatchWriter accumulates batches and writes them to a single file.
@@ -1181,11 +1212,14 @@ type preloadedBuild struct {
 	err     error
 }
 
-// loadBuildBatches reads all build spill files for a partition from disk.
-func (h *HashJoin) loadBuildBatches(partID int) ([]*batch.RecordBatch, error) {
-	ss := h.spillState
+// loadBuildRuns reads a partition's build spill files from disk. The prefetch
+// goroutine runs it, so it takes the paths rather than reading the join's
+// spill state: that goroutine is not joined by the probe that started it
+// until the probe's Close, and the join's Close tears the state down under
+// h.mu, which the goroutine does not hold.
+func loadBuildRuns(paths []string) ([]*batch.RecordBatch, error) {
 	var buildBatches []*batch.RecordBatch
-	for _, path := range ss.partBuildFiles[partID] {
+	for _, path := range paths {
 		batches, err := readSpillBatches(path)
 		if err != nil {
 			return nil, fmt.Errorf("reading build spill: %w", err)
@@ -1486,6 +1520,9 @@ func (p *HashJoinProbe) hasPendingUnmatched() bool {
 // HasPendingFlush returns true if there are spilled partitions still left to
 // process, or if a RIGHT/FULL join still owes its unmatched build rows.
 func (p *HashJoinProbe) HasPendingFlush() bool {
+	if p.closed || p.join.closed.Load() {
+		return false
+	}
 	if p.hasPendingUnmatched() {
 		return true
 	}
@@ -1512,6 +1549,9 @@ func (p *HashJoinProbe) HasPendingFlush() bool {
 // in-memory slice before yielding any — for SF100 Q05 lineitem⋈orders that
 // pinned tens of GB of joined output simultaneously.
 func (p *HashJoinProbe) NextFlush(ctx context.Context) (*batch.RecordBatch, error) {
+	if p.closed || p.join.closed.Load() {
+		return nil, errHashJoinClosed
+	}
 	ss := p.join.spillState
 	if ss == nil {
 		// No spill: the only thing a drained probe still owes is a RIGHT or
@@ -1535,16 +1575,17 @@ func (p *HashJoinProbe) NextFlush(ctx context.Context) (*batch.RecordBatch, erro
 		// Kick off the first partition's build prefetch.
 		if len(p.spillFlushPartIDs) > 0 {
 			p.spillFlushPrefetch = make(chan preloadedBuild, 1)
-			firstID := p.spillFlushPartIDs[0]
+			paths := ss.partBuildFiles[p.spillFlushPartIDs[0]]
 			ch := p.spillFlushPrefetch
 			go func() {
-				// Decoding a spill run on a goroutine nobody joins: a panic
-				// in the decoder ends the process unless it is delivered
-				// down the same channel the error travels (#511).
+				// Decoding a spill run on a goroutine nobody joins until the
+				// probe's Close: a panic in the decoder ends the process
+				// unless it is delivered down the same channel the error
+				// travels (#511).
 				defer CatchQueryPanic(ctx, "join spill build prefetch", func(err error) {
 					ch <- preloadedBuild{nil, err}
 				})
-				b, err := p.join.loadBuildBatches(firstID)
+				b, err := loadBuildRuns(paths)
 				ch <- preloadedBuild{b, err}
 			}()
 		}
@@ -1621,13 +1662,15 @@ func (p *HashJoinProbe) openNextSpillPartition(ctx context.Context) error {
 	p.spillFlushPartIdx++
 
 	pf := <-p.spillFlushPrefetch
+	// The send this channel owed has been received: Close must not wait on it.
+	p.spillFlushPrefetch = nil
 	if pf.err != nil {
 		return fmt.Errorf("processing spilled partition %d: %w", partID, pf.err)
 	}
 
 	// Kick off the next partition's prefetch (overlap I/O with build+probe).
 	if p.spillFlushPartIdx < len(p.spillFlushPartIDs) {
-		nextID := p.spillFlushPartIDs[p.spillFlushPartIdx]
+		paths := p.join.spillState.partBuildFiles[p.spillFlushPartIDs[p.spillFlushPartIdx]]
 		p.spillFlushPrefetch = make(chan preloadedBuild, 1)
 		ch := p.spillFlushPrefetch
 		go func() {
@@ -1636,11 +1679,9 @@ func (p *HashJoinProbe) openNextSpillPartition(ctx context.Context) error {
 			defer CatchQueryPanic(ctx, "join spill build prefetch", func(err error) {
 				ch <- preloadedBuild{nil, err}
 			})
-			b, err := p.join.loadBuildBatches(nextID)
+			b, err := loadBuildRuns(paths)
 			ch <- preloadedBuild{b, err}
 		}()
-	} else {
-		p.spillFlushPrefetch = nil
 	}
 
 	if len(pf.batches) == 0 {

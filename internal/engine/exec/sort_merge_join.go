@@ -4,6 +4,7 @@ package exec
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -89,7 +90,15 @@ type SortMergeJoin struct {
 	pending   []smjPair
 	exhausted bool
 	done      bool
+	// closed is set by Close under mu; every later call returns
+	// errSortMergeJoinClosed.
+	closed bool
 }
+
+// errSortMergeJoinClosed is returned by a call on a SortMergeJoin after
+// Close: Next would otherwise report a closed join as exhausted (an empty
+// answer), and Consume would charge a tracker nothing will release again.
+var errSortMergeJoinClosed = errors.New("sort-merge join: used after Close")
 
 // smjSide is one side's buffering/spill core: Sort's accumulate → self-spill
 // sorted runs pattern, parameterized by the side's join-key sort keys.
@@ -192,6 +201,12 @@ func (j *SortMergeJoin) Init(_ context.Context) error {
 // Build drains the build-side (right) source, mirroring HashJoin.Build's
 // contract: inits and closes the source, reports row progress.
 func (j *SortMergeJoin) Build(ctx context.Context, source Source) error {
+	j.mu.Lock()
+	closed := j.closed
+	j.mu.Unlock()
+	if closed {
+		return errSortMergeJoinClosed
+	}
 	if err := source.Init(ctx); err != nil {
 		return fmt.Errorf("build source init: %w", err)
 	}
@@ -234,6 +249,9 @@ func (j *SortMergeJoin) Consume(_ context.Context, b *batch.RecordBatch) error {
 func (j *SortMergeJoin) consume(side *smjSide, b *batch.RecordBatch) error {
 	j.mu.Lock()
 	defer j.mu.Unlock()
+	if j.closed {
+		return errSortMergeJoinClosed
+	}
 	FlattenForConsumer(b, nil) // retained past the batch cycle: views must not survive
 	if side.schema == nil {
 		// Resolve the side's key names against the actual schema before
@@ -389,6 +407,10 @@ func (j *SortMergeJoin) publishOwnedLocked() {
 // merge one output batch at a time.
 func (j *SortMergeJoin) Finalize(_ context.Context) error {
 	j.mu.Lock()
+	if j.closed {
+		j.mu.Unlock()
+		return errSortMergeJoinClosed
+	}
 	if !j.buildDone {
 		j.mu.Unlock()
 		return fmt.Errorf("sort-merge join: build phase not complete")
@@ -568,6 +590,9 @@ func (j *SortMergeJoin) openStream(side *smjSide) (*smjStream, error) {
 // memory: one batch per live run cursor per side, the pinned duplicate-group
 // batches, and the pending flush window.
 func (j *SortMergeJoin) Next(_ context.Context) (*batch.RecordBatch, error) {
+	if j.closed {
+		return nil, errSortMergeJoinClosed
+	}
 	if j.done {
 		return nil, nil
 	}
@@ -773,6 +798,12 @@ func (j *SortMergeJoin) teardownLocked() {
 		j.rstream.close()
 		j.rstream = nil
 	}
+	// Drop every batch reference first, then release (the aggregate's order,
+	// 1685b): the group's pinned batches and the pending pairs went AFTER
+	// their reservations before #1685 (line 1706l).
+	j.group.refs = nil
+	j.pending = nil
+	j.groupActive = false
 	for _, side := range []*smjSide{&j.probe, &j.build} {
 		removeRunFiles(side.runFiles)
 		side.runFiles = nil
@@ -791,11 +822,8 @@ func (j *SortMergeJoin) teardownLocked() {
 			j.Spill.Tracker().Release(j.pendingRelease)
 		}
 	}
-	j.group.refs = nil
 	j.group.reserved = 0
 	j.pendingRelease = 0
-	j.pending = nil
-	j.groupActive = false
 	j.done = true
 }
 
@@ -809,6 +837,7 @@ func (j *SortMergeJoin) Close() error {
 		j.unregisterAccounted = nil
 	}
 	j.mu.Lock()
+	j.closed = true
 	j.teardownLocked()
 	j.mu.Unlock()
 	return nil

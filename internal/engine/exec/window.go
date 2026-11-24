@@ -4,6 +4,7 @@ package exec
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -426,7 +427,15 @@ type Window struct {
 	// consumesSinceSpill counts Consumes for the TEST-ONLY spill forcing knob
 	// (window_force_spill.go). Untouched when the knob is disarmed.
 	consumesSinceSpill int64
+	// closed is set by Close; every later call returns errWindowClosed.
+	closed bool
 }
+
+// errWindowClosed is returned by a call on a Window after Close: the
+// operator has dropped its buffered input and computed results, so Next
+// would otherwise hand out batches whose charge is gone, and Init would
+// register a closed operator for relief again.
+var errWindowClosed = errors.New("window: used after Close")
 
 // NewWindow creates a new window operator.
 // NewWindow copies the spec slice. retypeValueColumns REWRITES OutputType in
@@ -445,6 +454,9 @@ func NewWindow(cols []WindowColumn) *Window {
 }
 
 func (w *Window) Init(_ context.Context) error {
+	if w.closed {
+		return errWindowClosed
+	}
 	w.batches = nil
 	w.totalRows = 0
 	w.result = nil
@@ -478,6 +490,9 @@ func (w *Window) Init(_ context.Context) error {
 func (w *Window) Consume(_ context.Context, b *batch.RecordBatch) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if w.closed {
+		return errWindowClosed
+	}
 	if w.schema == nil {
 		w.schema = b.Schema
 		// Bind first: retypeValueColumns and windowOutputColumn look the
@@ -581,6 +596,10 @@ func (w *Window) flushSpillLocked() (int64, error) {
 
 func (w *Window) Finalize(_ context.Context) error {
 	w.mu.Lock()
+	if w.closed {
+		w.mu.Unlock()
+		return errWindowClosed
+	}
 	w.finalized = true
 	w.mu.Unlock()
 	if w.unregisterAccounted != nil {
@@ -820,8 +839,16 @@ func (w *Window) buildOutputSchema() []parquet.Column {
 // registry. The previous no-op leaked a phantom reservation for the lifetime
 // of the process when a Window accumulated but never spilled and Finalize was
 // not reached (early cancel).
+//
+// Everything is dropped under w.mu BEFORE the charge goes back (the
+// aggregate's order, 1685b): the buffered input, the computed results and the
+// external stream. Before #1685 (line 1706l) Close released the charge but
+// kept w.batches and w.result reachable from a held Window, and Next after
+// Close handed the results out again. A call after Close returns
+// errWindowClosed.
 func (w *Window) Close() error {
 	w.mu.Lock()
+	w.closed = true
 	if w.ext != nil {
 		// Early cancel mid-stream: close cursors and delete run scratch.
 		w.ext.cleanup()
@@ -829,6 +856,11 @@ func (w *Window) Close() error {
 	}
 	removeRunFiles(w.runFiles)
 	w.runFiles = nil
+	w.batches = nil
+	w.totalRows = 0
+	w.result = nil
+	w.pos = 0
+	w.groups = nil
 	if w.Spill != nil {
 		if w.trackedMem > 0 {
 			w.Spill.ReleaseTracking(w.trackedMem)
@@ -847,6 +879,9 @@ func (w *Window) Close() error {
 // Next returns windowed results in batches. On the external path it streams
 // one partition at a time from the final pass's merge.
 func (w *Window) Next(_ context.Context) (*batch.RecordBatch, error) {
+	if w.closed {
+		return nil, errWindowClosed
+	}
 	if w.ext != nil {
 		return w.nextExternal()
 	}

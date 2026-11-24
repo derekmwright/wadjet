@@ -4,6 +4,7 @@ package exec
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -335,7 +336,18 @@ type HashJoin struct {
 	// Grace Hash Join spill state. Non-nil when build-side data has been
 	// partitioned and spilled to disk due to memory pressure.
 	spillState *spillState
+
+	// closed is set by Close. Build and every probe entry point read it and
+	// return errHashJoinClosed: a closed join has dropped its build side, and
+	// a probe of it would otherwise answer "no match" for every row. Atomic
+	// because probe clones read it without h.mu. Kept at the end of the struct
+	// so the hot fields above keep their offsets.
+	closed atomic.Bool
 }
+
+// errHashJoinClosed is returned by a call on a HashJoin, or on a probe of
+// one, after Close (or on a probe after its own Close).
+var errHashJoinClosed = errors.New("hash join: used after Close")
 
 // BloomPushdownOp returns a UnaryOperator that pre-filters probe batches using
 // the build-side bloom filter. Must be called after Build() completes.
@@ -1074,6 +1086,9 @@ func (h *HashJoin) warmBuildNullBitmaps() {
 // Uses parallel workers when the build side is large enough to benefit from
 // concurrent hash table construction with per-worker local tables.
 func (h *HashJoin) Build(ctx context.Context, source Source) error {
+	if h.closed.Load() {
+		return errHashJoinClosed
+	}
 	// Build pulls directly from a Source (no pipeline loop in between) and
 	// stores or key-reads what it pulls — arriving view batches must be
 	// materialized at this boundary.
@@ -2844,6 +2859,9 @@ type HashJoinProbe struct {
 	// Clone() mints a fresh probe, so parallel workers never share one. See
 	// join_emit_reuse.go for the ownership rule.
 	emitBuf probeEmitBuf
+
+	// closed is set by this probe's Close (owner goroutine only).
+	closed bool
 }
 
 // probeResume is the suspended position of a probe's fan-out: which probe row
@@ -2877,6 +2895,9 @@ func (p *HashJoinProbe) Init(_ context.Context) error {
 	// A probe reused across queries must not carry last query's emit storage
 	// (different schema, and its consumers are long gone).
 	p.emitBuf.reset()
+	if p.closed || p.join.closed.Load() {
+		return errHashJoinClosed
+	}
 	if !p.join.buildDone {
 		return fmt.Errorf("hash join build phase not complete")
 	}
@@ -3032,6 +3053,9 @@ func (p *HashJoinProbe) HasPendingOutput() bool { return p.res.active }
 // NextOutput resumes a suspended fan-out and returns the next bounded slice
 // of the current input batch's join output.
 func (p *HashJoinProbe) NextOutput(ctx context.Context) (*batch.RecordBatch, error) {
+	if p.closed || p.join.closed.Load() {
+		return nil, errHashJoinClosed
+	}
 	if !p.res.active {
 		return nil, nil
 	}
@@ -3062,6 +3086,9 @@ func (p *HashJoinProbe) finishResume() {
 }
 
 func (p *HashJoinProbe) Execute(ctx context.Context, in *batch.RecordBatch) (*batch.RecordBatch, error) {
+	if p.closed || p.join.closed.Load() {
+		return nil, errHashJoinClosed
+	}
 	if in.HasViews() {
 		p.prepareViewInput(in)
 	}
@@ -4755,8 +4782,28 @@ func (p *HashJoinProbe) FlushUnmatched(leftSchema []parquet.Column) *batch.Recor
 // Close drops the fan-out cursor's reference to the last input batch. A probe
 // closed mid-suspension (a cancelled query) would otherwise keep that batch
 // reachable for as long as the operator is.
+// Close drops everything this probe holds and closes what it has open: the
+// suspended fan-out cursor, the reusable output storage (whose views point
+// into build batches), the scratch buffers, and on a spill replay the open
+// probe-run reader, the partition's temporary join and the in-flight build
+// prefetch, which it waits for so no goroutine reads a run after Close. A
+// call after Close returns errHashJoinClosed. Idempotent.
 func (p *HashJoinProbe) Close() error {
+	p.closed = true
 	p.res = probeResume{}
+	if p.spillFlushPrefetch != nil {
+		// Exactly one send is owed on a non-nil channel (the prefetch
+		// goroutine always sends, a panic included); receiving it joins the
+		// goroutine and drops the batches it loaded.
+		<-p.spillFlushPrefetch
+		p.spillFlushPrefetch = nil
+	}
+	p.closeCurrentSpillPartition()
+	p.spillFlushPartIDs = nil
+	p.emitBuf.reset()
+	p.pairsBuf, p.sortBuf, p.semiSelBuf, p.lookupBuf = nil, nil, nil, nil
+	p.indexBuf, p.buildIndexBuf, p.keyBuf = nil, nil, nil
+	p.outPool, p.largeOutPool = nil, nil
 	return nil
 }
 
@@ -4773,12 +4820,41 @@ func (p *HashJoinProbe) Close() error {
 // reports inflated PoolPressure to the coordinator and worker-side spill
 // thresholds fire prematurely. With many concurrent broadcast joins (e.g.,
 // TPC-H Q02), phantom reservations accumulate query-over-query.
+//
+// The order is the aggregate's (1685b): under h.mu, first drop every reference
+// to build state and close-and-remove every spill run, open writers included,
+// THEN give the charge back, so a peer reading the tracker never sees bytes
+// reported free that this join can still reach. Before #1706 (line 1706l) the
+// charge went back first and outside the lock, and only the files of writers
+// already closed by the first NextFlush were removed: a join cancelled or
+// failed in its build or probe, or closed before the probe, left every open
+// writer's file, descriptor and buffer behind, and its grace state (open
+// accumulators, per-partition batches) stayed reachable on every route.
 func (h *HashJoin) Close() error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	// A relief call selected before the build's unregister may land here or
 	// later; it must find nothing to evict (#1706, line 1706k).
-	h.mu.Lock()
 	h.reliefClosed = true
-	h.mu.Unlock()
+	h.closed.Store(true)
+
+	// The grace build's partition files are removed by the flush loop only
+	// when the query RUNS TO COMPLETION (#625); every other route reaches
+	// them here. dispose closes and removes the writers still open as well as
+	// the runs already closed, and drops the partition bookkeeping.
+	if h.spillState != nil {
+		h.spillState.dispose()
+		h.spillState = nil
+	}
+	h.buildBatches = nil
+	h.parts = nil
+	h.matchedAlloc = false
+	h.rowMatched = nil
+	h.bloom = nil
+	h.bloomMask = 0
+	h.nePairs = nil
+	h.keyBuf = nil
+
 	if h.MemTracker != nil && h.trackedMem > 0 {
 		// Give each bucket back under the purpose it was charged with, so the
 		// forced census returns to zero rather than describing memory that is
@@ -4796,22 +4872,6 @@ func (h *HashJoin) Close() error {
 	}
 	h.trackedHashOverhead = 0
 	h.forcedStoreBytes = 0
-	h.buildBatches = nil
-	h.parts = make([]joinIndexPart, len(h.parts))
-	h.matchedAlloc = false
-	h.rowMatched = nil
-	h.bloom = nil
-	h.bloomMask = 0
-	// The grace build's partition files are removed by the flush loop when
-	// it reaches its last partition — i.e. only when the query RUNS TO
-	// COMPLETION. A cancelled or failed query left every build-spill-*.bin
-	// and probe-part-*.bin behind, and nothing ever revisited them (#625).
-	// cleanup() is written to be safe to call while cloned probes still
-	// hold this spillState: it clears the bookkeeping as it deletes, which
-	// is what keeps a later HasPendingFlush from re-opening a deleted file.
-	if h.spillState != nil {
-		h.spillState.cleanup()
-	}
 	return nil
 }
 
