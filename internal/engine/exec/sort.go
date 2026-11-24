@@ -475,8 +475,18 @@ func (s *Sort) CloneSink() SinkSource {
 // the primary FIRST, then release the clone, so the shared tracker never
 // under-reports in between. No-op when neither side tracks (the
 // single-process planner path).
+//
+// The primary is still registered for relief while it merges (Finalize
+// unregisters), so the whole merge runs under s.mu: a relief call (Inspect,
+// EstimateRelief, SpillSome, DrainOnHeapPressure, all under s.mu) waits for it
+// rather than flushing a half-merged buffer and its accounting (#1706, line
+// 1706n). Lock order is unchanged: nothing below calls the relief registry;
+// the tracker calls are atomics. The clone is quiescent (its worker ended)
+// and registered only on its tracking-only view, which never asks for relief.
 func (s *Sort) MergeSink(other SinkSource) {
 	o := other.(*Sort)
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	// A primary that never consumed a batch itself (warmup filtered out,
 	// every source batch claimed by a clone worker — a scheduling race) has
 	// no schema, and finalize would gather the merged rows into ZERO output
@@ -505,6 +515,7 @@ func (s *Sort) MergeSink(other SinkSource) {
 	s.batches = append(s.batches, o.batches...)
 	s.totalRows += o.totalRows
 	o.batches = nil
+	runPhaseHook(PhaseSortMerge, s)
 	if o.trackedMem > 0 {
 		if s.Spill != nil {
 			s.Spill.TrackBatch(o.trackedMem)

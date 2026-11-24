@@ -1,0 +1,49 @@
+// SPDX-License-Identifier: MIT
+
+package exec
+
+import "sync/atomic"
+
+// PhaseSite names a point inside an operator phase that mutates state the
+// relief registry can reach (Inspect, EstimateRelief, SpillSome,
+// DrainOnHeapPressure) while the operator is still registered: a clone merge,
+// or a hash join's build tail.
+type PhaseSite string
+
+const (
+	// PhaseSortMerge is inside Sort.MergeSink, after the clone's batches have
+	// moved and before their accounting has.
+	PhaseSortMerge PhaseSite = "Sort.MergeSink"
+	// PhaseAggMerge is inside HashAggregate.MergeSink's state merge, after the
+	// clone's run lists have moved and before its group state has.
+	PhaseAggMerge PhaseSite = "HashAggregate.MergeSink"
+	// PhaseJoinBuildTail is inside a partitioned HashJoin build after the last
+	// accumulator froze and before the matched bitmaps and the bloom filter
+	// are built from the index.
+	PhaseJoinBuildTail PhaseSite = "HashJoin.buildTail"
+)
+
+// phaseHook runs at a PhaseSite with the operator in that phase. nil in
+// production.
+var phaseHook atomic.Pointer[func(PhaseSite, any)]
+
+// SetPhaseHook installs f to run at every PhaseSite and returns the restore.
+// TEST-ONLY: with memory.SetReliefCallHook it lands a relief call the registry
+// selected at a chosen point inside the victim's phase on every run, instead
+// of sampling the scheduler (#1706, line 1706n). f runs on the operator's own
+// goroutine, holding whatever lock the phase holds there: it must not call the
+// operator's locking methods.
+func SetPhaseHook(f func(PhaseSite, any)) func() {
+	var p *func(PhaseSite, any)
+	if f != nil {
+		p = &f
+	}
+	prev := phaseHook.Swap(p)
+	return func() { phaseHook.Store(prev) }
+}
+
+func runPhaseHook(site PhaseSite, op any) {
+	if f := phaseHook.Load(); f != nil {
+		(*f)(site, op)
+	}
+}

@@ -71,8 +71,17 @@ func (h *HashAggregate) CloneSink() SinkSource {
 // SpillManager view; their own charge is released at clone Close, AFTER
 // this recharge, so the tracker never under-reports in between). No-op when
 // h.Spill is nil — the single-process planner path.
+//
+// The primary is still registered for relief while it merges (Finalize
+// unregisters), and the merge rewrites the group state a relief SpillSome
+// drains, so it runs under h.mu like Consume: a relief call waits for it
+// (#1706, line 1706n). Lock order is unchanged: nothing below takes h.mu again
+// or calls the relief registry (the tracker calls are atomics); the clone is
+// quiescent and registered only on its tracking-only view.
 func (h *HashAggregate) MergeSink(other SinkSource) {
 	o := other.(*HashAggregate)
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	// Partitioned-disjoint adoption: keys never overlap across sinks, so
 	// re-inserting the clone's groups into the primary's table (a serial
 	// O(total groups) rehash) is pure waste — keep the clone's state and
@@ -119,6 +128,7 @@ func (h *HashAggregate) mergeSinkState(o *HashAggregate) {
 		h.partialSpillFiles = append(h.partialSpillFiles, o.partialSpillFiles...)
 		o.partialSpillFiles = nil
 	}
+	runPhaseHook(PhaseAggMerge, h)
 	// The LEGACY raw-row pair, for the same reason. A clone that took the
 	// raw-row branch owns spilled row FILES and the in-memory buffer that has
 	// not reached one yet, and Close removes the files and drops the buffer —

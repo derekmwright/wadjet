@@ -111,12 +111,20 @@ func (h *HashJoin) buildPartitioned(ctx context.Context, source Source) error {
 	// Freeze any remaining open per-partition accumulators so their buffered
 	// rows are indexed and joined into the build side before probe begins. This
 	// extends the arena, so it must run before arenaMatched is sized below.
+	//
+	// The build tail, through warmBuildNullBitmaps, stays under mu: the join is
+	// still registered and open to relief until Build returns, and a relief
+	// SpillSome evicts the very parts, arena and batches the tail reads to size
+	// the matched bitmaps, fill the bloom filter, reconcile the index charge and
+	// warm the null bitmaps (#1706, line 1706n). Lock order is unchanged:
+	// nothing in the tail calls the relief registry (the tracker calls are
+	// atomics); applyBuildSchemaHint takes mu itself, so it runs after.
 	h.mu.Lock()
 	if err := h.freezeAllOpenAccums(); err != nil {
 		h.mu.Unlock()
 		return fmt.Errorf("freezing accumulators at build end: %w", err)
 	}
-	h.mu.Unlock()
+	runPhaseHook(PhaseJoinBuildTail, h)
 
 	// Allocate matched bitmap for right/full outer join and right semi/anti tracking
 	if (h.JoinType == RightJoin || h.JoinType == FullOuterJoin ||
@@ -134,6 +142,7 @@ func (h *HashJoin) buildPartitioned(ctx context.Context, source Source) error {
 	h.reconcileHashMemory()
 
 	h.warmBuildNullBitmaps()
+	h.mu.Unlock()
 	h.applyBuildSchemaHint()
 	h.buildDone = true
 	return nil
