@@ -34,6 +34,20 @@ type JoinFloorSnapshot struct {
 	ScanDecodedBatch int64
 	ScanPooledBuffer int64
 	JoinIndex        int64
+	// Forced is the whole forced census at that instant, every purpose.
+	Forced int64
+
+	tracker *memory.Tracker
+}
+
+// Ledger is what the snapshot's tracker holds NOW — read after the query, it
+// is what the query left behind: used bytes and forced bytes.
+func (s JoinFloorSnapshot) Ledger() (used, forced int64) {
+	if s.tracker == nil {
+		return 0, 0
+	}
+	f, _, _ := s.tracker.ForcedBytes()
+	return s.tracker.Used(), f
 }
 
 var (
@@ -63,13 +77,24 @@ func noteJoinFloor(t *memory.Tracker) {
 	if t == nil || !joinFloorTaken.CompareAndSwap(false, true) {
 		return
 	}
+	// Each purpose is read once and Forced is their sum, so the census fields
+	// agree with each other. Used is a separate read: with another goroutine
+	// charging, it can be a charge ahead of or behind them.
+	var census [memory.ForceSpillTracking + 1]int64
+	var forced int64
+	for p := range census {
+		census[p] = t.ForcedFor(memory.ForcePurpose(p))
+		forced += census[p]
+	}
 	joinFloorSnap.Store(&JoinFloorSnapshot{
 		Seen:             true,
 		Used:             t.Used(),
-		ScanFileLoad:     t.ForcedFor(memory.ForceScanFileLoad),
-		ScanDecodedBatch: t.ForcedFor(memory.ForceScanDecodedBatch),
-		ScanPooledBuffer: t.ForcedFor(memory.ForceScanPooledBuffer),
-		JoinIndex:        t.ForcedFor(memory.ForceJoinIndex),
+		ScanFileLoad:     census[memory.ForceScanFileLoad],
+		ScanDecodedBatch: census[memory.ForceScanDecodedBatch],
+		ScanPooledBuffer: census[memory.ForceScanPooledBuffer],
+		JoinIndex:        census[memory.ForceJoinIndex],
+		Forced:           forced,
+		tracker:          t,
 	})
 }
 

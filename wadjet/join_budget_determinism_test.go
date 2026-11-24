@@ -42,7 +42,8 @@ import (
 // forced orders, with the unbudgeted engine's answer.
 //
 // The contrast arm keeps the old measurement live: with the rule's kill switch
-// off, the same shape still refuses.
+// off, the same shape still refuses when the read-ahead's charges land before
+// the build's reservations (DecodeFirst); with the scheduler free it may answer.
 
 const readAheadPinRuns = 20
 
@@ -86,14 +87,50 @@ func TestAScansDecodedReadAheadNoLongerOverdrawsTheBudget(t *testing.T) {
 		restore()
 	}
 
-	// Contrast: the rule off is the base, and the base refuses this shape.
+	// Contrast: the rule off is the base, and the base's read-ahead overdraws
+	// this shape's budget. It is asserted in the ORDER that makes the overdraw
+	// certain — DecodeFirst lands every read-ahead's decoded charge before each
+	// build reservation — so the refusal is the rule's absence and not the
+	// scheduler's luck. (Until #1706 r2 this arm ran with the scheduler free and
+	// required a refusal; that is not deterministic — at GOMAXPROCS=1 the base
+	// itself answered in 2 of 25 processes at GOGC=75, 1706i_r1.md §6 — so it
+	// asserted something the base does not guarantee.)
 	withReadAheadAdmission(t, false)
-	_, err = tmRun(ctx, db, wideJoinSQL)
-	if err == nil {
-		t.Fatal("with the read-ahead admission switched off this shape answered: the base refused it on " +
-			"every run, so either something else now bounds the read-ahead or the switch no longer reaches it")
+	refusal := func(err error) bool {
+		return err != nil && strings.Contains(err.Error(), "memory budget exceeded") &&
+			strings.Contains(err.Error(), "scan decoded batch")
 	}
-	if !strings.Contains(err.Error(), "memory budget exceeded") {
-		t.Fatalf("rule off: refused for another reason: %v", err)
+	//
+	// How far the read-ahead CAN run is the scan's workers plus its queue, and
+	// with one worker (WADJET_SCAN_WORKERS=1, or a host whose CPU count is 1 —
+	// `taskset -c 0`) it fits this budget and the base answers even in this
+	// order; from two workers up it does not (measured at 1, 2, 3, 4, 8). The
+	// worker count is the precondition of the overdraw, not the scheduler's
+	// call, so it is set here rather than inherited from the host.
+	t.Setenv("WADJET_SCAN_WORKERS", "4")
+	restore := physical.ForceScanReadAheadOrder(physical.ReadAheadOrderDecodeFirst)
+	for run := 0; run < 3; run++ {
+		_, err = tmRun(ctx, db, wideJoinSQL)
+		if err == nil {
+			t.Fatalf("rule off, decode first, run %d: this shape answered. With every read-ahead charge landed "+
+				"before each build reservation the base refuses it, so either something else now bounds the "+
+				"read-ahead or the switch no longer reaches it", run)
+		}
+		if !refusal(err) {
+			t.Fatalf("rule off, decode first, run %d: refused for another reason than the read-ahead's "+
+				"decoded charge: %v", run, err)
+		}
+	}
+	restore()
+	// With the scheduler free and the rule off, whether the read-ahead gets
+	// ahead of the build is the scheduler's call, so this run cannot prove a
+	// refusal. What it can prove: it gives the unbudgeted engine's answer or
+	// that one named refusal, never a third outcome.
+	got, err := rowsText(t, db, wideJoinSQL)
+	switch {
+	case err == nil && got != want:
+		t.Fatalf("rule off, scheduler free: answered %s, the unbudgeted engine answers %s", got, want)
+	case err != nil && !refusal(err):
+		t.Fatalf("rule off, scheduler free: refused for another reason than the read-ahead's decoded charge: %v", err)
 	}
 }
