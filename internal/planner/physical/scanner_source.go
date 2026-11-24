@@ -100,13 +100,13 @@ type scanSourceInner struct {
 	failedFiles  int
 	firstFileErr error // sample error from the first file failure
 
-	// fatalScanErr is a failure the scan must NOT tolerate, however many
-	// other files succeeded. failedFiles is deliberately forgiving — it only
-	// fails the scan when EVERY file failed, because a since-deleted object
-	// is a survivable degradation. A recovered panic is not in that class: a
-	// footer decoder that panicked has no idea how many row groups it should
-	// have produced, so tolerating it drops that file's rows and answers a
-	// wrong number (#511).
+	// fatalScanErr is a recovered panic on a footer reader (#511): a decoder
+	// that panicked has no idea how many row groups it should have produced.
+	// It is checked first so its error, not a failedFiles count, is the one
+	// reported. failedFiles is no longer forgiving: it used to fail the scan
+	// only when EVERY file failed, treating a since-deleted object as a
+	// survivable degradation, which answered without that file's rows as
+	// success (#1710). Any failed file now fails the scan.
 	fatalScanErr error
 
 	// pooledBufs tracks []byte buffers obtained from readBufPool during
@@ -484,6 +484,14 @@ func (s *scannerExecSource) Init(ctx context.Context) error {
 				sampleErr = fmt.Sprintf(": %v", inner.firstFileErr)
 			}
 			return fmt.Errorf("scan %s: all %d files failed to read (%d failures)%s", s.tableName, len(inner.files), inner.failedFiles, sampleErr)
+		}
+		// And if ANY file failed: the scan would otherwise answer without that
+		// file's rows, as success (#1710). A file the manifest lists and the
+		// store cannot serve is a failed statement, never a shorter answer.
+		if inner.failedFiles > 0 {
+			cancel()
+			return fmt.Errorf("scan %s: %d of %d files failed to read: %w",
+				s.tableName, inner.failedFiles, len(inner.files), inner.firstFileErr)
 		}
 
 		// Initialize batch pool from the LARGEST row group: GetForSize

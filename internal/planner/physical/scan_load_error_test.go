@@ -310,7 +310,7 @@ func TestScanLoadErrorFailsTheScan(t *testing.T) {
 	faults := []loadFault{faultGetError, faultTruncate, faultFooter}
 	for _, mode := range modes {
 		for _, f := range faults {
-			for _, v := range []struct{ onRA, cold bool }{{false, false}, {true, false}} {
+			for _, v := range []struct{ onRA, cold bool }{{false, false}, {true, false}, {true, true}} {
 				// target the LAST file: its row groups are the scan's last.
 				c := loadErrCase{mode: mode, fault: f, onReaderAt: v.onRA, cold: v.cold}
 				t.Run(fmt.Sprintf("%s/%s/readerAt=%v/cold=%v", mode, f, v.onRA, v.cold), func(t *testing.T) {
