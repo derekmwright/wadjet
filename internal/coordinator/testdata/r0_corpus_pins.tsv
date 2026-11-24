@@ -9,6 +9,9 @@
 #     1 x PostgreSQL's answer, on each fixture.
 # Re-pinned at #1681 line 1681a (a semi/anti residual with a NULL operand is UNKNOWN, not its zero value):
 #   own/semi, semi_rows, semi_base, anti, anti_rows on all six arms: wrong:<digest> executor -> right (30 cells).
+# Re-pinned at #1613 line 1613a (the root SELECT-list pass reads a bare UNION's GroupByAll dedup as forwarding
+#   its input's columns, so the SELECT list over it gets a StageProject; R0_PINS_WRITE artifacts reviewed, rows copied):
+#   own/union_distinct_cast, union_cast_values on dag, dag-shuffled, dag-morsel4: wrong:2431f11a9551 emission -> right (6 cells).
 #
 # A pin of "wrong" or "refused" is a RECORDED KNOWN DEFECT on issue #1678 (or the issue its class names),
 # NOT an acceptance. The test fails when a cell's verdict differs from its pin in EITHER direction: the
@@ -145,9 +148,9 @@ own	union_nojoin	dag-morsel4	right	-	-
 own	union_nojoin	localD	right	-	status=established
 own	union_distinct_cast	single	right	-	-
 own	union_distinct_cast	spilled512k	right	-	-
-own	union_distinct_cast	dag	wrong:2431f11a9551	emission	-
-own	union_distinct_cast	dag-shuffled	wrong:2431f11a9551	emission	-
-own	union_distinct_cast	dag-morsel4	wrong:2431f11a9551	emission	-
+own	union_distinct_cast	dag	right	-	-
+own	union_distinct_cast	dag-shuffled	right	-	-
+own	union_distinct_cast	dag-morsel4	right	-	-
 own	union_distinct_cast	localD	right	-	status=established
 own	union_join	single	right	-	-
 own	union_join	spilled512k	right	-	-
@@ -319,9 +322,9 @@ own	computed_null	dag-morsel4	wrong:4943005eb162	emission	-
 own	computed_null	localD	right	-	status=established
 own	union_cast_values	single	right	-	-
 own	union_cast_values	spilled512k	right	-	-
-own	union_cast_values	dag	wrong:2431f11a9551	emission	-
-own	union_cast_values	dag-shuffled	wrong:2431f11a9551	emission	-
-own	union_cast_values	dag-morsel4	wrong:2431f11a9551	emission	-
+own	union_cast_values	dag	right	-	-
+own	union_cast_values	dag-shuffled	right	-	-
+own	union_cast_values	dag-morsel4	right	-	-
 own	union_cast_values	localD	right	-	status=established
 own	limit_set_cast	single	right	-	-
 own	limit_set_cast	spilled512k	right	-	-

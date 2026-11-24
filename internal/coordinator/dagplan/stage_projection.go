@@ -474,7 +474,7 @@ func (p *StagePlanner) attachScanSelectProjections(root *logical.Node, stages []
 		// the coverage decision downstream handle that case instead — it
 		// puts the projection above the sort, where nothing needs the
 		// dropped columns.
-		if projectionNeedsItsOwnStage(s, aliasedSpecsFor(proj, specs, slotPassThrough)) &&
+		if projectionNeedsItsOwnStage(stages, i, aliasedSpecsFor(proj, specs, slotPassThrough)) &&
 			orderingSurvivesAProjectStage(stages, i, aliasedSpecsFor(proj, specs, slotPassThrough)) &&
 			(viaSort == nil || projectionCoversSortKeys(
 				aliasedSpecsFor(proj, specs, slotPassThrough), viaSort.SortKeys)) {

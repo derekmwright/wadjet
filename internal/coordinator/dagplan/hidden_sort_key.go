@@ -169,6 +169,29 @@ func forwardsInputColumns(typ string) bool {
 	return false
 }
 
+// isNameTransparentDedup reports whether s is a keys-only GroupByAll
+// aggregate: the dedup half of a bare UNION (emitSetOpDedup). It groups by
+// EVERY input column and computes nothing, so it ships its input's schema
+// verbatim (stageStreamColumnsFiltered already models it so). Its Stage
+// carries no column list of its own, so stageEmittedColumns alone reports it
+// as emitting NOTHING — which made the root SELECT-list pass decline a
+// projection over it, and the client got the union's raw columns in place of
+// the SELECT list (#1613).
+//
+// Only the SELECT-list placement reads through it (projectionNeedsItsOwnStage).
+// emittedThroughPassThrough still treats it as unmodelled: reading through it
+// there arms the gather-reachability refusal inside PlanDistributed for the
+// ORDER BY forms whose sort is fused onto the dedup, and the asynchronous
+// door, which runs such a statement as one pipeline task and answers it,
+// turns every PlanDistributed error into a refusal (measured on
+// TestArcUNSetOperationMatrix's async arms, right at the base).
+func isNameTransparentDedup(s *Stage) bool {
+	return s != nil && s.GroupByAll && len(s.ProjectExprs) == 0 && len(s.AggSpecs) == 0 &&
+		len(s.GroupByCols) == 0 && len(s.FusedAggSpecs) == 0 && len(s.FusedAggGroupBy) == 0 &&
+		len(s.Dependencies) == 1 &&
+		(s.Type == StageAggregate || s.Type == StageFinalAggregate || s.Type == StageMergeAggregate)
+}
+
 // passThroughDepth bounds the walk below a pass-through stage. Stage graphs
 // are acyclic and these chains are one or two long in practice; the bound is
 // there so a malformed graph cannot spin.

@@ -21,7 +21,13 @@ Source: internal/coordinator/dagplan/set_op_stages.go — emitSetOpStages (ADR-0
 //	UNION      → the same StageUnion plus a GroupByAll final_aggregate that
 //	             dedups the concatenation. The dedup is Singleton: correct,
 //	             but one task holds the whole distinct set (see the note on
-//	             emitSetOpDedup).
+//	             emitSetOpDedup). The dedup lists no columns of its own
+//	             and ships its input's; the root SELECT-list pass reads
+//	             through it (isNameTransparentDedup), so a SELECT list
+//	             over a bare UNION gets a StageProject above the dedup, the
+//	             mechanism the UNION ALL form uses. Until #1613 they read
+//	             it as emitting nothing: the list was evaluated nowhere and
+//	             the client got the union's raw columns.
 //	INTERSECT  → the same StageUnion with per-arm TAG columns appended
 //	EXCEPT       (arm 0 rows carry (1,0), arm 1 rows (0,1)), then a grouped
 //	             counting final_aggregate: GROUP BY the full result row,

@@ -77,13 +77,27 @@ func stageCollapsesItsInput(s *Stage) bool {
 }
 
 // projectionNeedsItsOwnStage reports whether specs must be materialized above
-// the producer rather than fused into it: the producer collapses its input,
-// and the projection does more than name what the producer already emits.
-func projectionNeedsItsOwnStage(s *Stage, specs []physical.ProjectExprSpec) bool {
+// the producer at producerIdx rather than fused into it: the producer
+// collapses its input, and the projection does more than name what the
+// producer already emits.
+func projectionNeedsItsOwnStage(stages []Stage, producerIdx int, specs []physical.ProjectExprSpec) bool {
+	s := &stages[producerIdx]
 	if !stageCollapsesItsInput(s) || len(specs) == 0 {
 		return false
 	}
 	emitted := stageEmittedColumns(s)
+	if isNameTransparentDedup(s) {
+		// A bare UNION's dedup lists no columns of its own and ships its
+		// input's: read them through it, or every spec looks unevaluable and
+		// the SELECT list is evaluated nowhere (#1613).
+		idx := make(map[string]int, len(stages))
+		for i := range stages {
+			idx[stages[i].ID] = i
+		}
+		if dep, ok := idx[s.Dependencies[0]]; ok {
+			emitted = emittedThroughPassThrough(stages, idx, &stages[dep])
+		}
+	}
 	// A sort already FUSED onto this producer runs before anything inserted
 	// above it, so a key the projection would have to compute can never
 	// exist in time. Decline: assertGatherOutputIsReachable then refuses the
