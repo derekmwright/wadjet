@@ -60,25 +60,19 @@ var spillFileSeq atomic.Int64
 
 // SpillManager handles spilling data to disk when memory budget is exceeded.
 type SpillManager struct {
-	dir     string
+	// dir is where this manager's spill files go. A root manager's is fixed
+	// at construction; a statement scope's is created on first use beneath
+	// its pool's directory and removed by the scope's Cleanup (StatementScope).
+	dir     *spillDir
 	tracker *Tracker
 	mu      sync.Mutex
 	files   []string
 
-	// --- AccountedOperator registry (Phase 2) ---
-	// The new registry replacing spillables/departed. Operators register via
-	// RegisterAccounted and the floating-budget RequestRelief ranks them by
-	// SpillableBytes. accountedPeak survives an operator's Close so a closed
-	// operator's peak OwnedBytes is still reported by Inspect.
-	accountedMu   sync.Mutex
-	accounted     []AccountedOperator
-	accountedPeak map[uint64]int64 // InstanceID -> peak OwnedBytes
-	// departed coalesces closed operators' final snapshots by Name (max peak
-	// wins, count recorded) so Inspect stays bounded by the number of DISTINCT
-	// operator names. A per-instance list here grows for the worker's lifetime
-	// and its full dump rode every "task completed" log line — 48KB lines that
-	// saturated journald and froze workers into reap (2026-08-15 seizures).
-	departed map[string]*departedFootprint
+	// The AccountedOperator relief registry. A POINTER, so a statement scope
+	// shares its pool's registry and relief crosses the statements of one
+	// pool (ADR-0006's 2026-11-24 amendment), while TrackingOnlyView and
+	// DegradedView keep registries of their own.
+	*reliefRegistry
 
 	// reservoirs sources the floating operator budget (GOMEMLIMIT − Σreservoir
 	// actual − GC headroom). In Phase 3 it is wired for ACCOUNTING/observability
@@ -96,13 +90,6 @@ type SpillManager struct {
 
 	cheapFrac float64 // --spill-cheap-fraction, default 0.90
 
-	// relief bookkeeping for RequestRelief: per-instance cooldown after a
-	// delivered<claimed shortfall, and a round-robin cursor for the
-	// rotate-on-unrelieved-pressure pass.
-	reliefMu       sync.Mutex
-	lastReliefAt   map[uint64]time.Time
-	rotationCursor int
-
 	// trackingOnly makes ShouldSpillFor/ShouldSpill answer false
 	// unconditionally while TrackBatch/ReleaseTracking still charge the
 	// shared tracker. See TrackingOnlyView.
@@ -114,6 +101,156 @@ type SpillManager struct {
 	degradedBudget int64
 }
 
+// reliefRegistry is the AccountedOperator registry and its relief
+// bookkeeping. Operators register via RegisterAccounted and RequestRelief
+// ranks them by SpillableBytes. accountedPeak survives an operator's Close so
+// a closed operator's peak OwnedBytes is still reported by Inspect.
+type reliefRegistry struct {
+	accountedMu   sync.Mutex
+	accounted     []AccountedOperator
+	accountedPeak map[uint64]int64 // InstanceID -> peak OwnedBytes
+	// departed coalesces closed operators' final snapshots by Name (max peak
+	// wins, count recorded) so Inspect stays bounded by the number of DISTINCT
+	// operator names. A per-instance list here grows for the worker's lifetime
+	// and its full dump rode every "task completed" log line — 48KB lines that
+	// saturated journald and froze workers into reap (2026-08-15 seizures).
+	departed map[string]*departedFootprint
+
+	// relief bookkeeping for RequestRelief: per-instance cooldown after a
+	// delivered<claimed shortfall, and a round-robin cursor for the
+	// rotate-on-unrelieved-pressure pass.
+	reliefMu       sync.Mutex
+	lastReliefAt   map[uint64]time.Time
+	rotationCursor int
+}
+
+func newReliefRegistry() *reliefRegistry {
+	return &reliefRegistry{
+		accountedPeak: make(map[uint64]int64),
+		lastReliefAt:  make(map[uint64]time.Time),
+	}
+}
+
+// spillDir is a manager's spill directory. A root's path is fixed and exists
+// from construction. A statement scope's (parent != "") is created on first
+// use and removed, with everything in it, by the scope's Cleanup. A use after
+// that Cleanup gets the removed path back, so a late file creation fails
+// instead of writing into a directory nothing will remove.
+type spillDir struct {
+	parent string // the pool's directory; "" for a root
+	path   string
+
+	mu     sync.Mutex
+	made   bool
+	closed bool
+}
+
+// get returns the directory, creating a scope's on first use. A scope whose
+// directory cannot be created writes into its pool's directory instead, which
+// is where every statement wrote before statement scopes existed.
+func (d *spillDir) get() string {
+	if d == nil {
+		return ""
+	}
+	if d.parent == "" {
+		return d.path
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if !d.made && !d.closed {
+		if err := os.Mkdir(d.path, 0o700); err != nil && !os.IsExist(err) {
+			return d.parent
+		}
+		d.made = true
+	}
+	return d.path
+}
+
+// remove deletes a scope's directory and everything in it. A root's directory
+// is shared by every scope and every pool on the same scratch root, and is
+// never removed here.
+func (d *spillDir) remove() error {
+	if d == nil || d.parent == "" {
+		return nil
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.closed = true
+	if !d.made {
+		return nil
+	}
+	d.made = false
+	return os.RemoveAll(d.path)
+}
+
+// statementScopeSeq numbers statement scopes for their directory names.
+var statementScopeSeq atomic.Int64
+
+// StatementScope returns a manager for ONE statement of the pool sm heads. It
+// charges sm's tracker and registers on sm's relief registry, so the
+// statements of one pool share one budget and relieve one another
+// (ADR-0006's 2026-11-24 amendment); its thresholds are sm's. What it owns is
+// its FILES: they go in a directory of its own beneath sm's
+// (`<scratch>/wadjet-spill/stmt-<pid>-<n>`, created on first use), and its
+// Cleanup removes that directory and nothing else — never another statement's
+// files, never the pool's. A scope of a scope is a scope of the same pool.
+func (sm *SpillManager) StatementScope() *SpillManager {
+	parent := sm.dir
+	if parent != nil && parent.parent != "" {
+		parent = &spillDir{path: parent.parent}
+	}
+	var dir *spillDir
+	if parent != nil {
+		dir = &spillDir{
+			parent: parent.path,
+			path:   filepath.Join(parent.path, fmt.Sprintf("stmt-%d-%d", os.Getpid(), statementScopeSeq.Add(1))),
+		}
+	}
+	return &SpillManager{
+		dir:                  dir,
+		tracker:              sm.tracker,
+		reliefRegistry:       sm.reliefRegistry,
+		reservoirs:           sm.reservoirs,
+		floatingBudgetActive: sm.floatingBudgetActive,
+		cheapFrac:            sm.cheapFrac,
+		trackingOnly:         sm.trackingOnly,
+		degradedBudget:       sm.degradedBudget,
+	}
+}
+
+// SharesRegistryWith reports whether sm and other register on one relief
+// registry: true for a pool and its statement scopes, false for views with a
+// registry of their own. For identity assertions.
+func (sm *SpillManager) SharesRegistryWith(other *SpillManager) bool {
+	return sm != nil && other != nil && sm.reliefRegistry == other.reliefRegistry
+}
+
+// RegistryCensus is the size of every per-instance structure of a relief
+// registry: what a pool that outlives its statements must hold to a bound.
+type RegistryCensus struct {
+	Live      int // registered operators
+	Slots     int // capacity of the registrant slice (stale slots are nil)
+	Peaks     int // accountedPeak entries (live instances only)
+	Cooldowns int // lastReliefAt entries (live instances only)
+	Departed  int // departed summaries: one per distinct operator NAME, by design
+}
+
+// Census returns the registry's sizes.
+func (sm *SpillManager) Census() RegistryCensus {
+	sm.accountedMu.Lock()
+	c := RegistryCensus{
+		Live:     len(sm.accounted),
+		Slots:    cap(sm.accounted),
+		Peaks:    len(sm.accountedPeak),
+		Departed: len(sm.departed),
+	}
+	sm.accountedMu.Unlock()
+	sm.reliefMu.Lock()
+	c.Cooldowns = len(sm.lastReliefAt)
+	sm.reliefMu.Unlock()
+	return c
+}
+
 // defaultSpillCheapFraction is the fraction of the floating operator budget at
 // which SpillCheap operators begin spilling. The deploy can override it via
 // --spill-cheap-fraction; the SF100 A/B tunes it (design memo R1).
@@ -121,16 +258,15 @@ const defaultSpillCheapFraction = 0.90
 
 // NewSpillManager creates a spill manager that writes temp files to the given directory.
 func NewSpillManager(dir string, tracker *Tracker) (*SpillManager, error) {
-	spillDir := filepath.Join(dir, "wadjet-spill")
-	if err := os.MkdirAll(spillDir, 0700); err != nil {
+	root := filepath.Join(dir, "wadjet-spill")
+	if err := os.MkdirAll(root, 0700); err != nil {
 		return nil, fmt.Errorf("creating spill dir: %w", err)
 	}
 	return &SpillManager{
-		dir:           spillDir,
-		tracker:       tracker,
-		cheapFrac:     defaultSpillCheapFraction,
-		accountedPeak: make(map[uint64]int64),
-		lastReliefAt:  make(map[uint64]time.Time),
+		dir:            &spillDir{path: root},
+		tracker:        tracker,
+		cheapFrac:      defaultSpillCheapFraction,
+		reliefRegistry: newReliefRegistry(),
 	}, nil
 }
 
@@ -175,12 +311,11 @@ func (sm *SpillManager) SetCheapFraction(f float64) {
 // cannot honor SpillSome.
 func (sm *SpillManager) TrackingOnlyView() *SpillManager {
 	return &SpillManager{
-		dir:           sm.dir,
-		tracker:       sm.tracker,
-		cheapFrac:     sm.cheapFrac,
-		accountedPeak: make(map[uint64]int64),
-		lastReliefAt:  make(map[uint64]time.Time),
-		trackingOnly:  true,
+		dir:            sm.dir,
+		tracker:        sm.tracker,
+		cheapFrac:      sm.cheapFrac,
+		reliefRegistry: newReliefRegistry(),
+		trackingOnly:   true,
 	}
 }
 
@@ -202,8 +337,7 @@ func (sm *SpillManager) DegradedView(budgetCap int64) *SpillManager {
 		dir:            sm.dir,
 		tracker:        sm.tracker,
 		cheapFrac:      sm.cheapFrac,
-		accountedPeak:  make(map[uint64]int64),
-		lastReliefAt:   make(map[uint64]time.Time),
+		reliefRegistry: newReliefRegistry(),
 		degradedBudget: budgetCap,
 	}
 }
@@ -712,7 +846,7 @@ func (sm *SpillManager) SpillRows(rows []map[string]any) (string, error) {
 	}
 
 	id := spillFileSeq.Add(1)
-	path := filepath.Join(sm.dir, fmt.Sprintf("spill-%d.%d.bin", os.Getpid(), id))
+	path := filepath.Join(sm.dir.get(), fmt.Sprintf("spill-%d.%d.bin", os.Getpid(), id))
 
 	f, err := os.Create(path)
 	if err != nil {
@@ -928,7 +1062,10 @@ func ReadSpilledRows(path string) ([]map[string]any, error) {
 	return rows, nil
 }
 
-// Cleanup removes all spill files.
+// Cleanup removes the spill files this manager recorded. On a statement
+// scope it then removes the scope's directory with everything in it — every
+// file an operator of that statement wrote there, recorded or not — and
+// never touches another scope's directory or the pool's own files.
 func (sm *SpillManager) Cleanup() error {
 	sm.mu.Lock()
 	files := sm.files
@@ -940,6 +1077,9 @@ func (sm *SpillManager) Cleanup() error {
 		if err := os.Remove(f); err != nil && firstErr == nil {
 			firstErr = err
 		}
+	}
+	if err := sm.dir.remove(); err != nil && firstErr == nil {
+		firstErr = err
 	}
 	return firstErr
 }
@@ -968,9 +1108,10 @@ func (sm *SpillManager) RemoveSpilled(path string) {
 	os.Remove(path)
 }
 
-// SpillDir returns the directory used for spill files.
+// SpillDir returns the directory used for spill files. On a statement scope
+// the first call creates it (StatementScope).
 func (sm *SpillManager) SpillDir() string {
-	return sm.dir
+	return sm.dir.get()
 }
 
 // SpilledFiles returns the list of current spill files.
@@ -1149,7 +1290,25 @@ func (sm *SpillManager) opByID(id uint64) AccountedOperator {
 	return nil
 }
 
+// cooldown rests a LIVE instance. The relief call that decides to rest it runs
+// outside accountedMu, so the instance may have unregistered by now; an entry
+// written for it then would never be read or deleted again, one per such
+// event for the pool's life (#1706, 1706j's residual). The liveness check and
+// the write happen under accountedMu, the lock unregister holds while it
+// deletes the entry, in unregister's own order (accountedMu, then reliefMu).
 func (sm *SpillManager) cooldown(id uint64) {
+	sm.accountedMu.Lock()
+	defer sm.accountedMu.Unlock()
+	live := false
+	for _, op := range sm.accounted {
+		if op.Inspect().InstanceID == id {
+			live = true
+			break
+		}
+	}
+	if !live {
+		return
+	}
 	sm.reliefMu.Lock()
 	if sm.lastReliefAt == nil {
 		sm.lastReliefAt = make(map[uint64]time.Time)

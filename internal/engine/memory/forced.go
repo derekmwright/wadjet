@@ -46,6 +46,10 @@ const (
 	numForcePurposes
 )
 
+// NumForcePurposes is the number of purposes, so a census check can walk
+// every one of them (ForcedBytes skips negatives, which hides an over-release).
+const NumForcePurposes = numForcePurposes
+
 // String is the name a WARN line and a refusal message use.
 func (p ForcePurpose) String() string {
 	switch p {

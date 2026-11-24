@@ -32,6 +32,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
 	"github.com/derekmwright/wadjet/internal/engine/expr"
+	"github.com/derekmwright/wadjet/internal/engine/memory"
 	"github.com/derekmwright/wadjet/internal/engine/scan"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	"github.com/derekmwright/wadjet/internal/planner/physical"
@@ -344,8 +345,13 @@ type Coordinator struct {
 	queryMetas map[string]*queryMeta         // queryID -> metadata for result retrieval
 	querySem   chan struct{}                 // limits concurrent inflight queries
 	localSem   chan struct{}                 // limits concurrent local fast-path executions
-	localHits  atomic.Int64                  // queries served by the local fast path
-	localBails atomic.Int64                  // local runs aborted over result budget, re-dispatched as DAG
+	// localPool is the ONE query-execution memory pool of this
+	// coordinator's local execution, shared by the fast path and the
+	// refused-plan route (localExecutionPool).
+	localPoolOnce sync.Once
+	localPool     *memory.ExecutionPool
+	localHits     atomic.Int64 // queries served by the local fast path
+	localBails    atomic.Int64 // local runs aborted over result budget, re-dispatched as DAG
 	// localCorrelated counts queries whose plan the stage DAG refused
 	// (per-row correlated subquery, #359) and that were routed to the
 	// coordinator-local single-process pipeline instead.

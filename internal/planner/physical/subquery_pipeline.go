@@ -62,6 +62,9 @@ func (p *Planner) forSubquery() *Planner {
 	// the earlier measurement, B2). A child gets its own; memoization is a
 	// within-one-build economy, never a promise across builds.
 	sub.subqueryDeclCache = &subqueryDeclMemo{}
+	// Its own build record: the map is written as joins are planned, and a
+	// child planner may plan from an execution goroutine.
+	sub.joinBuilds = nil
 	sub.MaterializedInputs = nil
 	sub.StreamingSources = nil
 	sub.ScanFileFilter = nil

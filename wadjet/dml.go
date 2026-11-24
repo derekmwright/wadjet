@@ -373,7 +373,9 @@ func (db *DB) deleteOnce(ctx context.Context, info *plansql.DeleteInfo) (*ExecRe
 		return nil, fmt.Errorf("reading manifest for %q: %w", info.Table, err)
 	}
 
-	predicate, err := BuildDMLPredicate(info.DMLTarget, schema, db.dmlSubqueryEnv(ctx))
+	subEnv := db.dmlSubqueryEnv(ctx)
+	defer subEnv.Release()
+	predicate, err := BuildDMLPredicate(info.DMLTarget, schema, subEnv)
 	if err != nil {
 		return nil, err
 	}
@@ -450,7 +452,9 @@ func (db *DB) updateOnce(ctx context.Context, info *plansql.UpdateInfo) (*ExecRe
 		return nil, fmt.Errorf("reading manifest for %q: %w", info.Table, err)
 	}
 
-	predicate, err := BuildDMLPredicate(info.DMLTarget, schema, db.dmlSubqueryEnv(ctx))
+	subEnv := db.dmlSubqueryEnv(ctx)
+	defer subEnv.Release()
+	predicate, err := BuildDMLPredicate(info.DMLTarget, schema, subEnv)
 	if err != nil {
 		return nil, err
 	}
@@ -621,6 +625,8 @@ func (db *DB) mergeOnce(ctx context.Context, info *plansql.MergeInfo) (*ExecResu
 	}
 	ev := db.buildMergeEvaluator(ctx, info, targetMeta.Schema.Columns, targetAlias, sourceAlias, sourceColNames,
 		sourceResult.OutputSchema, sourceResult.pgCategoryPos)
+	// The ON / WHEN / SET subqueries charged the DB pool through ev.sub.
+	defer ev.sub.Release()
 
 	// Parse ON condition into equality key pairs for row matching
 	onKeys, err := parseOnKeys(info.OnCondition, targetAlias, sourceAlias)
@@ -3642,6 +3648,19 @@ type DMLSubqueryEnv struct {
 	// Clock binds the statement's clock functions (expr.WithStatementClock,
 	// #1566) in a clause with no subquery too.
 	Clock expr.CompileOption
+	// release returns what the environment's subqueries charged to the
+	// DB's pool (physical.Planner.ReleaseSubqueryEnv). The statement that
+	// built the environment calls Release when it is done with the
+	// predicate, on every exit.
+	release func()
+}
+
+// Release returns the environment's budget charges; safe on a nil
+// environment and more than once.
+func (s *DMLSubqueryEnv) Release() {
+	if s != nil && s.release != nil {
+		s.release()
+	}
 }
 
 // clock is the statement-clock option of an environment that may be nil.
@@ -4383,7 +4402,7 @@ func (db *DB) dmlSubqueryEnv(ctx context.Context) *DMLSubqueryEnv {
 	// as 54000 where this engine's own rule is 21000.
 	opts = append(opts, expr.WithSetRowBound(physical.MaxInlinedInSetRows()))
 	return &DMLSubqueryEnv{Runner: db.dmlSubqueryRunner(ctx), InnerCols: innerCols, Opts: opts,
-		Clock: expr.WithStatementClock(ctx)}
+		Clock: expr.WithStatementClock(ctx), release: p.ReleaseSubqueryEnv}
 }
 
 // dmlSubqueryRunner executes a DML predicate's subquery through DB.Query — the

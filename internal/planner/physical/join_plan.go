@@ -453,6 +453,7 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 		buildStart = make(chan struct{})
 	}
 	buildDone := make(chan struct{})
+	p.noteJoinBuild(hj, buildDone, buildStart != nil)
 	var buildErr error
 	var rbBuildSource exec.Source = buildSource // may be wrapped with bloom
 	go func() {

@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -26,6 +27,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/distributed"
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/engine/expr"
+	"github.com/derekmwright/wadjet/internal/engine/memory"
 	"github.com/derekmwright/wadjet/internal/metrics"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	"github.com/derekmwright/wadjet/internal/planner/physical"
@@ -72,6 +74,29 @@ type Server struct {
 	policies *auth.PolicySet
 	metrics  *metrics.Metrics // nil = no metrics
 	audit    *auth.AuditLogger
+
+	// localPool is the ONE query-execution memory pool of this server's
+	// local path (no coordinator): its concurrent requests share one budget
+	// (ADR-0006's 2026-11-24 amendment). With a coordinator every query is
+	// the coordinator's and runs under ITS pools; this one is never built.
+	localPoolOnce sync.Once
+	localPool     *memory.ExecutionPool
+}
+
+// localExecutionPool builds the local path's pool on first use: the detected
+// default budget (75% of the cgroup limit, else of physical memory), which is
+// what each request planned under before, now shared. A spill directory that
+// cannot be created leaves a tracker without spill governance, never a
+// private pool per request.
+func (s *Server) localExecutionPool() *memory.ExecutionPool {
+	s.localPoolOnce.Do(func() {
+		s.localPool = memory.NewExecutionPool("query", 0, "")
+		if err := s.localPool.Err(); err != nil {
+			s.logger.Warn("HTTP local execution: the spill directory could not be created; "+
+				"requests charge the memory budget but cannot spill", "error", err)
+		}
+	})
+	return s.localPool
 }
 
 // New creates a new HTTP server.
@@ -171,6 +196,9 @@ func (s *Server) Mux() chi.Router {
 // #803 wiring exists to remove.
 func (s *Server) newPlanner(r *http.Request) *physical.Planner {
 	p := physical.NewPlanner(s.catalog)
+	pool := s.localExecutionPool()
+	p.SharedTracker = pool.Tracker()
+	p.SharedSpillMgr = pool.SpillManager()
 	p.SortMergeJoinBytes = s.config.SortMergeJoinBytes
 	p.LateMaterialization = s.config.LateMaterialization
 	p.BushyJoinReorder = s.config.BushyJoinReorder

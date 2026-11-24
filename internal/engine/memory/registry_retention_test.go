@@ -58,7 +58,7 @@ func TestRegistryUnregisterLeavesNoStaleSlot(t *testing.T) {
 	}
 	for name, order := range orders {
 		t.Run(name, func(t *testing.T) {
-			sm := &SpillManager{}
+			sm := &SpillManager{reliefRegistry: &reliefRegistry{}}
 			sentinel := &fakeAccountedOp{id: NextInstanceID(), name: "sentinel", state: OpActive}
 			sm.RegisterAccounted(sentinel) // a worker's permanent registrant (the decoded cache)
 			ops := make([]*fakeAccountedOp, 5)
@@ -107,7 +107,7 @@ type retentionOp struct {
 func TestRegistryUnregisteredOperatorBecomesUnreachable(t *testing.T) {
 	for _, pos := range []int{0, 1, 2} {
 		t.Run(string(rune('0'+pos)), func(t *testing.T) {
-			sm := &SpillManager{}
+			sm := &SpillManager{reliefRegistry: &reliefRegistry{}}
 			sm.RegisterAccounted(&fakeAccountedOp{id: NextInstanceID(), name: "sentinel", state: OpActive})
 			collected := make(chan int, 3)
 			unregs := make([]func(), 3)

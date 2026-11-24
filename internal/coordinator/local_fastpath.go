@@ -96,6 +96,39 @@ const DefaultLocalFastPathBytes = config.DefaultLocalFastPathBytes
 // Overflow routes to the DAG — degraded latency, never a queue.
 const defaultLocalFastPathConcurrency = 4
 
+// localExecutionPool is the coordinator's ONE pool for statements it executes
+// itself: the small-query fast path and the refused-plan route
+// (refused_local.go) share it, so their concurrent statements share one
+// budget instead of each holding all of it (ADR-0006's 2026-11-24
+// amendment). Its budget is the figure each of those statements used to get
+// for itself, 8 × the routing threshold (DefaultLocalFastPathBytes when the
+// fast path is disabled): one statement alone runs under exactly the budget
+// it had. Built on first use and kept for the coordinator's life; a spill
+// directory that cannot be created leaves a tracker without spill governance,
+// never a private pool per statement (memory.NewExecutionPool).
+func (c *Coordinator) localExecutionPool() *memory.ExecutionPool {
+	c.localPoolOnce.Do(func() {
+		base := c.localFastPathBytes()
+		if base <= 0 {
+			base = DefaultLocalFastPathBytes
+		}
+		c.localPool = memory.NewExecutionPool("query", 8*base, "")
+		if err := c.localPool.Err(); err != nil {
+			c.logger.Warn("coordinator local execution: the spill directory could not be created; "+
+				"local statements charge the memory budget but cannot spill", "error", err)
+		}
+	})
+	return c.localPool
+}
+
+// useLocalPool hands a coordinator-local planner the coordinator's pool, the
+// way a worker executor hands its planners the worker's.
+func (c *Coordinator) useLocalPool(p *physical.Planner) {
+	pool := c.localExecutionPool()
+	p.SharedTracker = pool.Tracker()
+	p.SharedSpillMgr = pool.SpillManager()
+}
+
 // localFastPathBytes resolves Config.LocalFastPathBytes: <=0 = disabled.
 func (c *Coordinator) localFastPathBytes() int64 {
 	if v := c.config.LocalFastPathBytes; v > 0 {
@@ -181,8 +214,9 @@ func (c *Coordinator) tryLocalFastPath(queryID string, lp *statementPlan, start 
 
 	// Pipeline breakers spill past the budget; the budget only bounds
 	// resident operator state, so a misestimate degrades to disk instead
-	// of coordinator OOM.
-	planner.MemoryBudget = 8 * threshold
+	// of coordinator OOM. The budget is the coordinator's local pool,
+	// shared with every other local statement (localExecutionPool).
+	c.useLocalPool(planner)
 	lp.opts.applyLocal(planner)
 	logicalPlan, err := lp.consume("the local fast path")
 	if err != nil {

@@ -133,6 +133,12 @@ type Planner struct {
 	// (defer order at the call sites), so nothing is freed under a live
 	// operator.
 	builtJoins []*exec.HashJoin
+	// joinBuilds is each built join's build goroutine: its barrier, and
+	// whether it waits for a start signal (reverse bloom). A plan that FAILS
+	// may hold joins whose builds are still running (deferred builds) or
+	// were never started (reverse bloom), and closeAbandonedJoins needs to
+	// know which. Per planner: forSubquery gives a child its own.
+	joinBuilds map[*exec.HashJoin]joinBuild
 
 	// SortMergeJoinBytes gates the sort-merge join path for big-vs-big inner
 	// equi-joins (docs/design/sort-merge-join.md). A join takes SMJ only when
@@ -220,27 +226,31 @@ func (p *Planner) resources() *queryResources {
 // first call. Uses MemoryBudget if set, otherwise auto-detects from system
 // memory (cgroup or physical). Returns nil if no memory limit can be determined.
 func (p *Planner) getSpillManager() *memory.SpillManager {
-	// Shared pool (worker-level, injected by Executor) takes precedence so
-	// all concurrent tasks spill against one budget.
-	if p.SharedSpillMgr != nil {
-		return p.SharedSpillMgr
-	}
 	r := p.resources()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.spillMgr != nil {
 		return r.spillMgr
 	}
-	budget := p.MemoryBudget
-	if budget <= 0 {
-		budget = memory.DetectBudget()
+	// An injected pool — a worker executor's, or an engine instance's
+	// (memory.ExecutionPool) — takes precedence, so every concurrent
+	// statement of the instance spills against ONE budget. The statement
+	// uses a SCOPE of the pool's manager: same tracker, same relief
+	// registry, its own spill directory, which plan.Cleanup removes without
+	// touching another statement's files (ADR-0006's 2026-11-24 amendment).
+	if p.SharedSpillMgr != nil {
+		r.spillMgr = p.SharedSpillMgr.StatementScope()
+		r.memTracker = r.spillMgr.Tracker()
+		return r.spillMgr
 	}
-	if budget <= 0 {
-		// Fall back to 75% of physical memory
-		if phys := memory.DetectPhysicalMemory(); phys > 0 {
-			budget = int64(float64(phys) * 0.75)
-		}
+	// A pool with a tracker and no manager (its spill directory could not be
+	// created) runs its statements without spill governance. It never makes
+	// a private pool per statement: that would hand each statement the full
+	// budget again.
+	if p.SharedTracker != nil {
+		return nil
 	}
+	budget := memory.ResolveExecutionBudget(p.MemoryBudget)
 	if budget <= 0 {
 		return nil
 	}
@@ -264,6 +274,9 @@ func (p *Planner) getMemTracker() *memory.Tracker {
 	// Shared pool takes precedence (worker-level pool across tasks).
 	if p.SharedTracker != nil {
 		return p.SharedTracker
+	}
+	if p.SharedSpillMgr != nil {
+		return p.SharedSpillMgr.Tracker()
 	}
 	r := p.resources()
 	r.mu.Lock()
@@ -370,12 +383,17 @@ func (r *queryResources) hasSubqueryCharges() bool {
 	return len(r.inSubqueries) > 0
 }
 
-// spillManagerIfSet returns the per-query spill manager without creating one.
-func (p *Planner) spillManagerIfSet() *memory.SpillManager {
-	r := p.resources()
+// releaseSpillScope removes the statement's spill files: its scope's
+// directory when the statement ran on a pool, the files its private manager
+// recorded otherwise. Idempotent. Never the pool's manager itself, which
+// getSpillManager never stores here.
+func (r *queryResources) releaseSpillScope() {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.spillMgr
+	sm := r.spillMgr
+	r.mu.Unlock()
+	if sm != nil {
+		_ = sm.Cleanup()
+	}
 }
 
 // cteMaterialized stores the pre-computed results of a CTE in one of two

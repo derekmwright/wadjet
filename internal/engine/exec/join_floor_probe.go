@@ -98,6 +98,24 @@ func noteJoinFloor(t *memory.Tracker) {
 	})
 }
 
+// spillReplayHook runs as a probe opens each spilled partition for replay,
+// before it reads the partition's files. nil in production.
+var spillReplayHook atomic.Pointer[func()]
+
+// SetSpillReplayHook installs f to run as a hash join's probe opens each
+// spilled partition for replay, and returns the restore. TEST-ONLY: it is
+// how a gate holds one statement IN its replay while another statement of
+// the same pool is cancelled and cleaned up (ADR-0006's 2026-11-24
+// amendment), instead of sampling the scheduler.
+func SetSpillReplayHook(f func()) func() {
+	var p *func()
+	if f != nil {
+		p = &f
+	}
+	prev := spillReplayHook.Swap(p)
+	return func() { spillReplayHook.Store(prev) }
+}
+
 // arrivalReserveHook runs at the top of every arrival (and arrival-chunk)
 // reservation of a grace build. nil in production.
 var arrivalReserveHook atomic.Pointer[func()]

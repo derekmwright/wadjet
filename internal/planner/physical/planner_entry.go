@@ -227,17 +227,24 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 	// predicate no row ever reaches, which the operator-level check cannot
 	// (#631 follow-up).
 	if err := refuseUnrepresentableRealInList(node); err != nil {
+		p.closeAbandonedJoins()
 		p.resources().releaseSubqueryCharges()
 		p.releaseCTECache()
 		p.releaseScanCache()
+		p.resources().releaseSpillScope()
 		return nil, err
 	}
 
 	source, ops, sink, err := p.buildPipeline(ctx, node)
 	if err != nil {
+		// A join whose build ran during planning holds its reservations
+		// until it is closed; on an engine pool they would otherwise stay
+		// charged for the instance's life (ADR-0006, 2026-11-24).
+		p.closeAbandonedJoins()
 		p.resources().releaseSubqueryCharges()
 		p.releaseCTECache()  // free CTE spill scratch on the no-Cleanup path
 		p.releaseScanCache() // drop the scan cache's tracker reservation
+		p.resources().releaseSpillScope()
 		return nil, err
 	}
 
@@ -309,24 +316,20 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 	// scan cache release matters most on the shared-tracker path: its
 	// reservation would otherwise outlive the query as a permanent
 	// phantom on the worker-lifetime tracker.
+	//
+	// Always attached, and the spill scope is read when it RUNS: a correlated
+	// subquery builds its pipeline during execution and may be the first to
+	// ask for the statement's manager. On a pool (injected manager) that is
+	// the statement's scope, whose Cleanup removes this statement's spill
+	// directory and nothing of any other statement's (ADR-0006's 2026-11-24
+	// amendment).
 	res := p.resources()
-	if sm := p.spillManagerIfSet(); sm != nil {
-		plan.Cleanup = func() {
-			p.closeBuiltJoins()
-			res.releaseSubqueryCharges()
-			p.releaseCTECache()
-			p.releaseScanCache()
-			sm.Cleanup()
-		}
-	} else if p.cteCacheHasCollectors() || p.scanCache != nil || len(p.builtJoins) > 0 || res.hasSubqueryCharges() {
-		// Shared (worker-injected) spill manager: its dir outlives this
-		// query, so the collectors' scratch must be released explicitly.
-		plan.Cleanup = func() {
-			p.closeBuiltJoins()
-			res.releaseSubqueryCharges()
-			p.releaseCTECache()
-			p.releaseScanCache()
-		}
+	plan.Cleanup = func() {
+		p.closeBuiltJoins()
+		res.releaseSubqueryCharges()
+		p.releaseCTECache()
+		p.releaseScanCache()
+		res.releaseSpillScope()
 	}
 
 	// No stage generation here. The local entry plans a PIPELINE; the stage
@@ -335,9 +338,11 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 	// planner depend on the distributed one (LICENSING.md, ADR-0037).
 	// dagplan.PlanStages is the distributed entry.
 	if err := p.EnforceQueryLimits(ctx, node); err != nil {
+		p.closeAbandonedJoins()
 		p.resources().releaseSubqueryCharges()
 		p.releaseCTECache()
 		p.releaseScanCache()
+		p.resources().releaseSpillScope()
 		return nil, err
 	}
 

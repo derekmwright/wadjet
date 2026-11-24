@@ -21,6 +21,18 @@ func (p *Planner) EnsureMemoryTracker() {
 	p.getSpillManager()
 }
 
+// ReleaseSubqueryEnv is the teardown of a compiling-only door, the one a
+// physical plan's Cleanup is for every other statement: it returns every
+// IN-subquery membership set compiled under this planner's budget and removes
+// the statement's spill scope. A DML predicate's environment calls Plan never,
+// so without it those charges would outlive the statement — permanently, on
+// an engine instance's pool (ADR-0006's 2026-11-24 amendment). Idempotent.
+func (p *Planner) ReleaseSubqueryEnv() {
+	r := p.resources()
+	r.releaseSubqueryCharges()
+	r.releaseSpillScope()
+}
+
 func (p *Planner) SubqueryEnv(ctx context.Context) (expr.SubqueryRunner, plansql.TableColumns, []expr.CompileOption) {
 	p.PlanCtx = ctx
 	return p.subqueryRunner, p.SubqueryInnerColumns(),

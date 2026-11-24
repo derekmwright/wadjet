@@ -23,6 +23,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/config"
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/engine/expr"
+	"github.com/derekmwright/wadjet/internal/engine/memory"
 	"github.com/derekmwright/wadjet/internal/natsconn"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	"github.com/derekmwright/wadjet/internal/planner/physical"
@@ -36,11 +37,17 @@ import (
 
 // DB is the main entry point for embedded usage of Wadjet.
 type DB struct {
-	store              objstore.Store
-	catalog            *catalog.Catalog
-	bucket             string
-	memoryBudget       int64
-	spillDir           string
+	store        objstore.Store
+	catalog      *catalog.Catalog
+	bucket       string
+	memoryBudget int64
+	spillDir     string
+	// pool is this DB's ONE query-execution memory pool: every statement of
+	// the DB charges its tracker and spills through scopes of its manager,
+	// so concurrent statements share Config.MemoryBudget instead of each
+	// holding all of it (ADR-0006's 2026-11-24 amendment). Built by Open,
+	// garbage with the DB.
+	pool               *memory.ExecutionPool
 	logger             *slog.Logger
 	authProvider       *auth.Provider    // nil = no auth enforcement
 	alertScheduler     *alerts.Scheduler // non-nil when EnableAlerts is set
@@ -181,6 +188,11 @@ func Open(ctx context.Context, cfg Config) (*DB, error) {
 		sortMergeJoinBytes:  cfg.SortMergeJoinBytes,
 		lateMaterialization: cfg.LateMaterialization,
 		bushyJoinReorder:    cfg.BushyJoinReorder,
+		pool:                memory.NewExecutionPool("query", cfg.MemoryBudget, cfg.SpillDir),
+	}
+	if err := db.pool.Err(); err != nil {
+		cfg.Logger.Warn("wadjet.Open: the spill directory could not be created; statements charge the "+
+			"memory budget but cannot spill", "spill_dir", cfg.SpillDir, "error", err)
 	}
 
 	// Attaching a policy set to a catalog is what BINDS its names to that
@@ -349,6 +361,11 @@ func (db *DB) newPlanner(ctx context.Context) *physical.Planner {
 	p := physical.NewPlanner(db.catalog)
 	p.MemoryBudget = db.memoryBudget
 	p.SpillDir = db.spillDir
+	// The DB's pool, handed over exactly as a worker executor hands over its
+	// own (SharedTracker / SharedSpillMgr): the statement spills through a
+	// scope of it and never builds a private one.
+	p.SharedTracker = db.pool.Tracker()
+	p.SharedSpillMgr = db.pool.SpillManager()
 	p.SortMergeJoinBytes = db.sortMergeJoinBytes
 	p.LateMaterialization = db.lateMaterialization
 	p.BushyJoinReorder = db.bushyJoinReorder

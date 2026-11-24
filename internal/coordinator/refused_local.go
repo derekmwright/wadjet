@@ -53,7 +53,7 @@ func (c *Coordinator) runRefusedLocal(
 	// ManifestSnapshot ExecuteSQL/SubmitSQL attached (#502), so a table
 	// PlanDistributed's failed attempt already read is not read again here.
 	planner := physical.NewPlannerForContext(ctx, c.catalog)
-	planner.MemoryBudget = 8 * base
+	c.useLocalPool(planner) // the fast path's pool: one per coordinator
 	lp.opts.applyLocal(planner)
 	logicalPlan, err := lp.consume(what + " route")
 	if err != nil {

@@ -1658,6 +1658,9 @@ func (p *HashJoinProbe) NextFlush(ctx context.Context) (*batch.RecordBatch, erro
 // its pre-fetched build batches, builds a temp HashJoin, kicks off the next
 // partition's prefetch, and opens its first probe spill file.
 func (p *HashJoinProbe) openNextSpillPartition(ctx context.Context) error {
+	if f := spillReplayHook.Load(); f != nil {
+		(*f)()
+	}
 	partID := p.spillFlushPartIDs[p.spillFlushPartIdx]
 	p.spillFlushPartIdx++
 

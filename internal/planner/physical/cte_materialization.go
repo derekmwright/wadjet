@@ -146,6 +146,48 @@ func (p *Planner) closeBuiltJoins() {
 		hj.Close()
 	}
 	p.builtJoins = nil
+	p.joinBuilds = nil
+}
+
+// joinBuild is one built join's build goroutine (buildJoin).
+type joinBuild struct {
+	done  <-chan struct{} // closed when the build goroutine returns
+	gated bool            // the build waits for a start signal (reverse bloom)
+}
+
+// noteJoinBuild records hj's build goroutine for closeAbandonedJoins.
+func (p *Planner) noteJoinBuild(hj *exec.HashJoin, done <-chan struct{}, gated bool) {
+	if p.joinBuilds == nil {
+		p.joinBuilds = make(map[*exec.HashJoin]joinBuild)
+	}
+	p.joinBuilds[hj] = joinBuild{done: done, gated: gated}
+}
+
+// closeAbandonedJoins is closeBuiltJoins for a plan that FAILED, so no
+// Pipeline will ever run, wait on a build barrier, or call Cleanup. A join
+// whose build ran during planning holds its reservations until it is closed,
+// and on an engine instance's pool they would otherwise stay charged for the
+// instance's life (ADR-0006's 2026-11-24 amendment; at a 256 KiB budget a
+// cross join refused while planned stranded 236,632 bytes). Close is never
+// called under a running build: a deferred build is waited for (it reads its
+// own build side and ends), and a gated build that was never started has
+// reserved nothing and is left parked, as it was before.
+func (p *Planner) closeAbandonedJoins() {
+	for _, hj := range p.builtJoins {
+		if b, ok := p.joinBuilds[hj]; ok {
+			select {
+			case <-b.done:
+			default:
+				if b.gated {
+					continue
+				}
+				<-b.done
+			}
+		}
+		hj.Close()
+	}
+	p.builtJoins = nil
+	p.joinBuilds = nil
 }
 
 // releaseScanCache drops every duplicate-scan cache entry so cached
@@ -188,28 +230,6 @@ func (p *Planner) releaseCTECache() {
 	// recorded failure would refuse a query that has not been tried.
 	p.cteInProgress = nil
 	p.cteMaterializeErr = nil
-}
-
-// cteCacheHasCollectors reports whether any cached CTE holds spill-backed
-// state that requires an explicit release at query end.
-func (p *Planner) cteCacheHasCollectors() bool {
-	// A shared evaluation is opened by its first reader, which may be an
-	// expression subquery that runs after Plan returns — so the cleanup is
-	// owed to every statement that could open one.
-	if p.onceCTEs != nil {
-		return true
-	}
-	for _, mat := range p.cteCache {
-		if mat.coll != nil {
-			return true
-		}
-	}
-	for _, mat := range p.nestedCTECache {
-		if mat.coll != nil {
-			return true
-		}
-	}
-	return false
 }
 
 // cteMaterializingSink records the CTE body's own pipeline schema as the CTE
