@@ -588,7 +588,13 @@ func (w *Window) flushSpillLocked() (int64, error) {
 	freed := w.trackedMem
 	w.Spill.ReleaseTracking(freed)
 	w.trackedMem = 0
-	if w.accInstanceID != 0 {
+	// Not once Finalize has unregistered the instance: finalizeExternal
+	// flushes the in-memory remainder AFTER the unregister deleted the
+	// published entry, and publishing then re-created it for an instance
+	// nothing will unpublish again — one entry per spilling window
+	// statement for the tracker's life (1685e; an engine instance's pool and
+	// a worker's both outlive their statements).
+	if w.accInstanceID != 0 && memory.OpState(w.accState.Load()) != memory.OpClosed {
 		w.Spill.Tracker().PublishOwned(w.accInstanceID, 0)
 	}
 	return freed, nil

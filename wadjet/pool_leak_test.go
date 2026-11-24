@@ -41,6 +41,12 @@ func TestPoolManyStatementsLeaveNoState(t *testing.T) {
 			_, err = db.Query(ctx, "SELECT count(*) FROM wide a CROSS JOIN wide b WHERE a.k + b.k < 10")
 			kinds["refused-cross"]++
 			err = nil
+		case i%50 == 10:
+			// A window that spills: Finalize unregisters it and then flushes
+			// its remainder, which used to re-publish the instance on the
+			// pool's tracker forever (window.go flushSpillLocked).
+			_, err = db.Query(ctx, "SELECT count(*) AS n, max(r) AS m FROM (SELECT row_number() OVER (ORDER BY pad DESC) AS r FROM wide) q")
+			kinds["window-spill"]++
 		case i%7 == 0:
 			_, err = db.Query(ctx, "SELECT nosuch FROM wide")
 			kinds["planning-error"]++
