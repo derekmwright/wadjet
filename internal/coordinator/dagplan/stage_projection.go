@@ -474,8 +474,29 @@ func (p *StagePlanner) attachScanSelectProjections(root *logical.Node, stages []
 		// the coverage decision downstream handle that case instead — it
 		// puts the projection above the sort, where nothing needs the
 		// dropped columns.
+		// The ordering fused onto a bare UNION's dedup is the derived
+		// table's own ORDER BY when nothing above the SELECT list sorts:
+		// no consumer reads it, so it need not survive the projection
+		// (#1613: otherwise the pass declined and the client got the
+		// union's raw columns).
+		orderingUnread := isNameTransparentDedup(s) && onlyLimitsAbove(root, projNode)
+		orderingSurvives := orderingSurvivesAProjectStage(stages, i, aliasedSpecsFor(proj, specs, slotPassThrough))
+		// The same unread ordering on a STANDALONE sort above the dedup
+		// (the derived table's ORDER BY carries a filter written above it,
+		// so it did not fuse): the sort fragment projects after its sort,
+		// limit and filter have run, so the SELECT list rides on it — the
+		// #656 follow-up's placement for a sort above a scan.
+		if orderingUnread && viaSort != nil && len(viaSort.ProjectExprs) == 0 &&
+			projectionNeedsItsOwnStage(stages, i, aliasedSpecsFor(proj, specs, slotPassThrough)) {
+			aliased, ok := respellSpecsOverProducerOutput(stages, i, aliasedSpecsFor(proj, specs, slotPassThrough))
+			if ok && specsResolveAgainstStageOutput(stages, i, aliased) {
+				viaSort.ProjectExprs = aliased
+				repointGatherRenames(gather, aliased)
+				return stages
+			}
+		}
 		if projectionNeedsItsOwnStage(stages, i, aliasedSpecsFor(proj, specs, slotPassThrough)) &&
-			orderingSurvivesAProjectStage(stages, i, aliasedSpecsFor(proj, specs, slotPassThrough)) &&
+			(orderingSurvives || orderingUnread) &&
 			(viaSort == nil || projectionCoversSortKeys(
 				aliasedSpecsFor(proj, specs, slotPassThrough), viaSort.SortKeys)) {
 			// Written against what the producer EMITS, not what the query
@@ -497,6 +518,9 @@ func (p *StagePlanner) attachScanSelectProjections(root *logical.Node, stages []
 					return gather.OutputRenames[j].IsAgg, true
 				})
 				keys := stages[i].SortKeys
+				if !orderingSurvives {
+					keys = nil // unread (orderingUnread): declare none
+				}
 				stages = insertProjectStageAbove(stages, i, aliased)
 				carryOrderingOntoProjectStage(stages, len(stages)-1, keys)
 				repointGatherRenames(gather, aliased)

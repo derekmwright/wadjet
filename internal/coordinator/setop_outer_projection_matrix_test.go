@@ -34,6 +34,10 @@ import (
 // the plan unmodelled, and the client got the union's raw columns under their
 // raw names: `SELECT r + 100 AS z FROM (… UNION …) s` answered `r` unchanged,
 // and `nosuchfn(r)` was never compiled anywhere, so it was not refused.
+// The same held when the bare UNION carried its OWN ORDER BY inside the
+// derived table: the sort fused onto the dedup (or, under an outer WHERE, sat
+// as a standalone sort above it) and the pass declined to hide an ordering no
+// consumer reads.
 //
 // This is the boundary matrix: outer projection kinds over inner shapes, on
 // the embedded engine (single, spilled512k), the stage DAG (dag, dag-shuffled,
@@ -83,6 +87,20 @@ func m1613Cells() []m1613Cell {
 		{"union_derived", "SELECT id, v FROM (SELECT id, v FROM sp_p UNION SELECT id, v FROM sp_q) w"},
 		{"distinct", "SELECT DISTINCT id, v FROM sp_p"},
 		{"group_by", "SELECT id, max(v) AS v FROM sp_p GROUP BY id"},
+		// The derived table's OWN ORDER BY (a bare UNION's, fused onto its
+		// dedup) under the outer SELECT list, with and without LIMIT, and
+		// the siblings that carry the same inner ORDER BY ... LIMIT (#1613
+		// round 2). Every key list is a total order over the distinct rows,
+		// so each LIMIT is deterministic.
+		{"union_ord_limit", "SELECT id, v FROM sp_p UNION SELECT id, v FROM sp_q ORDER BY v NULLS LAST, id NULLS LAST LIMIT 3"},
+		{"union_ord", "SELECT id, v FROM sp_p UNION SELECT id, v FROM sp_q ORDER BY v"},
+		{"union_ord_pos_limit", "SELECT id, v FROM sp_p UNION SELECT id, v FROM sp_q ORDER BY 2 DESC, 1 LIMIT 4"},
+		{"union3_ord_limit", "SELECT id, v FROM sp_p UNION SELECT id, v FROM sp_q UNION SELECT id, v FROM sp_r ORDER BY v NULLS LAST, id NULLS LAST LIMIT 4"},
+		{"union_all_ord_limit", "SELECT id, v FROM sp_p UNION ALL SELECT id, v FROM sp_q ORDER BY v NULLS LAST, id NULLS LAST LIMIT 3"},
+		{"distinct_ord_limit", "SELECT DISTINCT id, v FROM sp_p ORDER BY v NULLS LAST, id NULLS LAST LIMIT 3"},
+		{"intersect_ord_limit", "SELECT id, v FROM sp_p INTERSECT SELECT id, v FROM sp_q ORDER BY v NULLS LAST, id NULLS LAST LIMIT 3"},
+		{"union_offset0", "SELECT id, v FROM sp_p UNION SELECT id, v FROM sp_q OFFSET 0"},
+		{"union_limit_all", "SELECT id, v FROM sp_p UNION SELECT id, v FROM sp_q LIMIT 100"},
 	}
 	outers := []struct{ name, mode, sel, tail string }{
 		{"bare", "bag", "SELECT v FROM", ""},
@@ -132,6 +150,15 @@ func m1613Cells() []m1613Cell {
 		{"adj/qualified", "bag", "SELECT s.v + 1 AS z, s.id FROM " + pq + " s"},
 		{"adj/union_of_unions", "bag", "SELECT v + 1 AS z FROM (" + pq[1:len(pq)-1] + " UNION SELECT id, v FROM sp_r) s"},
 		{"adj/intersect_over_union", "bag", "SELECT v + 1 AS z FROM (SELECT id, v FROM " + pq + " w INTERSECT SELECT id, v FROM sp_q) s"},
+		// A bare UNION's own ORDER BY ... LIMIT under the SELECT list, with
+		// an outer LIMIT (counted: which rows survive it is unspecified), an
+		// outer DISTINCT, and an outer ORDER BY on a key the list drops.
+		{"adj/inner_ord_outer_limit", "bag", "SELECT count(*) AS n FROM (SELECT v + 1 AS z FROM (" + pq[1:len(pq)-1] + " ORDER BY v NULLS LAST, id NULLS LAST LIMIT 3) s LIMIT 2) t"},
+		{"adj/inner_ord_outer_distinct", "bag", "SELECT DISTINCT v + 1 AS z FROM (" + pq[1:len(pq)-1] + " ORDER BY v NULLS LAST, id NULLS LAST LIMIT 3) s"},
+		{"adj/inner_ord_one_col", "bag", "SELECT v + 1 AS j FROM (SELECT v FROM sp_p UNION SELECT v FROM sp_q ORDER BY v NULLS LAST LIMIT 2) u"},
+		{"adj/inner_ord_shadow_neg", "bag", "SELECT -v AS v FROM (SELECT v FROM sp_p UNION SELECT v FROM sp_q ORDER BY v NULLS LAST LIMIT 3) u"},
+		{"adj/inner_ord_shadow_outer_order", "ordered", "SELECT -v AS v FROM (SELECT v FROM sp_p UNION SELECT v FROM sp_q ORDER BY v NULLS LAST LIMIT 3) u ORDER BY v"},
+		{"adj/inner_ord_outer_order_dropped", "ordered", "SELECT v + 1 AS z FROM (" + pq[1:len(pq)-1] + " ORDER BY v NULLS LAST, id NULLS LAST LIMIT 3) s ORDER BY id DESC"},
 	}
 	for _, in := range inners {
 		for _, o := range outers {
@@ -407,6 +434,9 @@ var m1613KnownDefects = func() map[string]string {
 	for _, name := range []string{
 		"order_limit/union", "order_expr/union", "order_limit/union3", "order_expr/union3",
 		"order_limit/union_derived", "order_expr/union_derived", "adj/order_dropped",
+		// OFFSET 0 inside the derived table plans like the bare form: the
+		// outer sort fuses onto the dedup the same way (refused at base too).
+		"order_limit/union_offset0", "order_expr/union_offset0",
 	} {
 		for _, a := range []string{"dag", "dag-shuffled", "dag-morsel4"} {
 			out[name+"|"+a] = "refused:0A000"

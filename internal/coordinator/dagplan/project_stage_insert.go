@@ -368,6 +368,24 @@ func orderingSurvivesAProjectStage(stages []Stage, producerIdx int, specs []phys
 	return projectionCoversSortKeys(specs, s.SortKeys)
 }
 
+// onlyLimitsAbove reports whether every node from root down to the SELECT
+// list's projection projNode is a LIMIT: nothing above the SELECT list sorts,
+// so an ordering BELOW it — a derived table's own ORDER BY, fused onto the
+// producer — is read by no consumer and the result's row order is unspecified
+// (#1613). A Sort, Distinct or Filter on the path answers false.
+func onlyLimitsAbove(root, projNode *logical.Node) bool {
+	for n := root; n != nil; {
+		if n == projNode {
+			return true
+		}
+		if n.Type != logical.NodeLimit || len(n.Children) != 1 {
+			return false
+		}
+		n = n.Children[0]
+	}
+	return false
+}
+
 // carryOrderingOntoProjectStage copies a producer's ordering onto the stage
 // inserted above it, so the consumer that reads the ordering off its direct
 // dependency still finds one.

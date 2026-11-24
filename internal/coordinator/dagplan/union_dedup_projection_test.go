@@ -84,3 +84,58 @@ func TestUnionDedupOrderByFormStillPlans(t *testing.T) {
 	}
 	t.Fatalf("no GroupByAll dedup stage\n%s", stageSummary(stages))
 }
+
+// #1613 round 2: the bare UNION's OWN ORDER BY inside the derived table. The
+// sort fuses onto the dedup (or, under a WHERE written above it, sits as a
+// standalone sort over the dedup), its keys are columns the SELECT list drops,
+// and the pass declined so as not to hide that ordering, though no consumer
+// reads it: nothing sorts above the SELECT list. The invariant: the gather's
+// input computes the list, and when that input is an inserted StageProject it
+// declares no ordering on keys it no longer emits.
+func TestUnionDedupInnerOrderBySelectListIsEvaluated(t *testing.T) {
+	cat, ctx := setupTPCHCatalog(t)
+	const arms = "SELECT n_nationkey AS k, n_regionkey AS r FROM nation UNION SELECT r_regionkey, r_regionkey FROM region"
+	for _, tc := range []struct {
+		name, sql, expr string
+	}{
+		{"order_limit_fused", "SELECT k + 100 AS z FROM (" + arms + " ORDER BY r, k LIMIT 3) s", "k + 100"},
+		{"order_no_limit_fused", "SELECT k + 100 AS z FROM (" + arms + " ORDER BY r) s", "k + 100"},
+		{"unknown_function", "SELECT nosuchfn(k) AS z FROM (" + arms + " ORDER BY r, k LIMIT 3) s", "nosuchfn"},
+		{"filter_above_standalone_sort", "SELECT k + 100 AS z FROM (" + arms + " ORDER BY r, k LIMIT 3) s WHERE s.k > 1", "k + 100"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stages := sqlToStages(t, cat, ctx, tc.sql, 3)
+			var gather *Stage
+			for i := range stages {
+				if stages[i].Type == StageExchangeGather {
+					gather = &stages[i]
+				}
+			}
+			if gather == nil || len(gather.Dependencies) != 1 {
+				t.Fatalf("no single-input gather\n%s", stageSummary(stages))
+			}
+			var carrier *Stage
+			for i := range stages {
+				if stages[i].ID == gather.Dependencies[0] {
+					carrier = &stages[i]
+				}
+			}
+			found := false
+			for _, sp := range carrier.ProjectExprs {
+				if strings.Contains(strings.ToLower(sp.Expr), tc.expr) {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("the gather's input %s does not compute %q: the SELECT list is evaluated nowhere\n%s",
+					carrier.ID, tc.expr, stageSummary(stages))
+			}
+			if carrier.Type == StageProject && len(carrier.SortKeys) != 0 {
+				t.Fatalf("%s declares an ordering on %v, which its projection drops", carrier.ID, carrier.SortKeys)
+			}
+			if err := ValidateNativeDAGShape(stages); err != nil {
+				t.Fatalf("validate: %v", err)
+			}
+		})
+	}
+}

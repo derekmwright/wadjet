@@ -27,7 +27,12 @@ Source: internal/coordinator/dagplan/set_op_stages.go — emitSetOpStages (ADR-0
 //	             over a bare UNION gets a StageProject above the dedup, the
 //	             mechanism the UNION ALL form uses. Until #1613 they read
 //	             it as emitting nothing: the list was evaluated nowhere and
-//	             the client got the union's raw columns.
+//	             the client got the union's raw columns. The UNION's own
+//	             ORDER BY inside a derived table (fused onto the dedup, or a
+//	             standalone sort above it under an outer WHERE) is read by
+//	             no consumer when only LIMITs stand above the SELECT list
+//	             (onlyLimitsAbove), so the list goes above it without the
+//	             ordering: a StageProject declaring none, or on the sort.
 //	INTERSECT  → the same StageUnion with per-arm TAG columns appended
 //	EXCEPT       (arm 0 rows carry (1,0), arm 1 rows (0,1)), then a grouped
 //	             counting final_aggregate: GROUP BY the full result row,
