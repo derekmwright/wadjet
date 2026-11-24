@@ -134,7 +134,7 @@ func TestLoadGate_AConsumerWaitsOnlyForBytesTheWorkersWillRelease(t *testing.T) 
 	g := newLoadGate(100, 1)
 	held := &fileSlot{}
 	held.rgRemaining.Store(2)
-	held.ahead.Store(2) // both row groups it owes are being decoded by workers
+	held.owed.Store(0) // both row groups it owes are being decoded by workers
 	if err := g.acquireFor(ctx, 100, held, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -147,11 +147,13 @@ func TestLoadGate_AConsumerWaitsOnlyForBytesTheWorkersWillRelease(t *testing.T) 
 		t.Fatalf("the consumer did not wait for bytes the workers will release (err=%v)", err)
 	case <-time.After(50 * time.Millisecond):
 	}
-	// One read-ahead finishes and the holder's last row group is handed over
-	// undecoded: it now owes a row group only the consumer decodes. A release
-	// elsewhere is what wakes a waiter; this one is a lane nobody else holds.
+	// The holder is shown owing a row group only the consumer decodes. (A real
+	// holder's owed never rises — fileSlot.releasesWithoutConsumer — so this
+	// is the gate's re-evaluation alone, not a transition the scan makes.) A
+	// release elsewhere is what wakes a waiter; this one is a lane nobody else
+	// holds.
 	held.rgRemaining.Store(1)
-	held.ahead.Store(0)
+	held.owed.Store(1)
 	g.mu.Lock()
 	g.take(1, nil)
 	g.mu.Unlock()
@@ -182,8 +184,8 @@ func TestLoadGate_AConsumerWaitsOnlyForBytesTheWorkersWillRelease(t *testing.T) 
 func TestLoadGate_AConsumerWaitsWhenTheWorkersAloneFreeEnough(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	owes := func(n int64) *fileSlot { s := &fileSlot{}; s.rgRemaining.Store(1); return s }
-	free := func() *fileSlot { s := &fileSlot{}; s.rgRemaining.Store(1); s.ahead.Store(1); return s }
+	owes := func(n int64) *fileSlot { s := &fileSlot{}; s.rgRemaining.Store(1); s.owed.Store(1); return s }
+	free := func() *fileSlot { s := &fileSlot{}; s.rgRemaining.Store(1); return s }
 
 	g := newLoadGate(100, loadGateMaxLanes)
 	dep, ind := owes(20), free()
@@ -245,10 +247,10 @@ func TestLoadGate_AReadAheadYieldsOnlyWhenTheConsumerNeedsItsSlotAndItsRoom(t *t
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	free := &fileSlot{}
-	free.rgRemaining.Store(1)
-	free.ahead.Store(1)
+	free.rgRemaining.Store(1) // owed 0: a worker is decoding it
 	owes := &fileSlot{}
 	owes.rgRemaining.Store(1)
+	owes.owed.Store(1)
 
 	// Room the workers will free: the consumer coming does not stop the wait.
 	g := newLoadGate(100, 1)

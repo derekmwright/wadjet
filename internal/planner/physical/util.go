@@ -382,11 +382,16 @@ type fileSlot struct {
 	forcedBytes  int64               // of chargedBytes, the part taken PAST the budget (memory.ForceScanFileLoad)
 	gateBytes    int64               // bytes admitted on inner.loadGate; released with the buffer
 	rgRemaining  atomic.Int64        // refcount of unprocessed row groups; release on 0
-	// ahead counts this slot's row groups a worker is decoding as an admitted
-	// read-ahead (decodeOrDefer, from admission until its decode returns).
-	// When it covers rgRemaining, the slot's gate bytes come back with no help
-	// from the scan's consumer (releasesWithoutConsumer).
-	ahead atomic.Int64
+	// owed counts this slot's row groups whose decode still needs the scan's
+	// consumer or has not been taken: rgRemaining less the admitted read-aheads
+	// a worker is decoding. It starts at rgRemaining (buildRGUnits); an
+	// admitted read-ahead takes one off before its load (decodeOrDefer) and
+	// gives it back only if it yields at the gate, before the slot can load
+	// (failGate, under mu); the consumer's decode takes one off after its
+	// release (readRGFor). An admitted read-ahead's own release leaves it
+	// unchanged. At 0 the slot's gate bytes come back with no help from the
+	// consumer (releasesWithoutConsumer).
+	owed atomic.Int64
 	// wanted is closed when the scan's consumer comes to load this slot
 	// (ensureLoadedFor with demand): a read-ahead waiting in the load gate
 	// while it holds the slot then yields if its wait is owed to the consumer.
@@ -682,13 +687,22 @@ func (s *fileSlot) markWanted() {
 // is an admitted read-ahead a worker is decoding, so its gate bytes come back
 // whatever the consumer does. A row group handed over undecoded, or one no
 // worker has taken (once the scan is on demand it is handed over when taken),
-// is decoded only by the consumer. The two counters are read apart: a
-// read-ahead admitted but not yet counted in ahead reads as owed to the
-// consumer (which then does not wait), and one whose release landed before its
-// ahead decrement reads as covered — its decode is done. Neither order makes a
-// wait that could be on the consumer.
+// is decoded only by the consumer.
+//
+// It reads one counter, owed, and for a slot holding the gate (the only slots
+// the gate asks about) owed never rises: it rises only when a read-ahead
+// yields, and a read-ahead yields only while its slot is unloaded, before it
+// lets go of the slot's mutex, so before the slot can hold the gate. Every
+// other step lowers owed or leaves it, and the consumer lowers it only after
+// its row group's release. So a holder never reads as worker-released while
+// it owes the consumer a row group; reading "owed to the consumer" a moment
+// late errs toward not waiting. A consumer that waits therefore waits only
+// for holders that do release without it, each of which broadcasts when it
+// does (#1706 r2: two counters read apart — rgRemaining down at the release,
+// a separate in-flight count down when the step returned — made a holder
+// whose last row group was a placeholder read worker-released in between).
 func (s *fileSlot) releasesWithoutConsumer() bool {
-	return s.ahead.Load() >= s.rgRemaining.Load()
+	return s.owed.Load() <= 0
 }
 
 // failGate records a gate admission that did not happen. A read-ahead that
@@ -698,6 +712,7 @@ func (s *fileSlot) releasesWithoutConsumer() bool {
 func (s *fileSlot) failGate(err error) error {
 	if errors.Is(err, errLoadGateYield) {
 		s.loaded = false
+		s.owed.Add(1) // the row group goes back to the consumer before the slot can load
 		return err
 	}
 	s.loadErr = err
@@ -1076,6 +1091,7 @@ func (inner *scanSourceInner) buildRGUnits(ctx context.Context) {
 		// If keptInFile is 0, we still leave the slot with refcount 0
 		// (it never gets loaded, which is what we want).
 		slot.rgRemaining.Store(keptInFile)
+		slot.owed.Store(keptInFile)
 	}
 }
 
@@ -1318,6 +1334,11 @@ func (inner *scanSourceInner) readRGFor(ctx context.Context, unitIdx int, demand
 	if slot := inner.rgUnits[unitIdx].slot; slot != nil {
 		if _, err := slot.ensureLoadedFor(inner, ctx, demand); errors.Is(err, errLoadGateYield) {
 			return nil, true
+		}
+		if demand {
+			// After the release inside readRG: until then the row group still
+			// reads as owed to the consumer (fileSlot.owed).
+			defer slot.owed.Add(-1)
 		}
 	}
 	return inner.readRG(ctx, unitIdx), false

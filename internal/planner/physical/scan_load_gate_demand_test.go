@@ -111,6 +111,7 @@ func gateDemandScan(t *testing.T, cat *catalog.Catalog, cols []parquet.Column, f
 	for name, e := range files {
 		s := &fileSlot{entry: e, wantRG: []int{0, 1}}
 		s.rgRemaining.Store(2)
+		s.owed.Store(2)
 		slots[name] = s
 	}
 	for _, u := range order {
@@ -407,5 +408,11 @@ func assertScanHoldsNothing(t *testing.T, inner *scanSourceInner, tracker *memor
 	}
 	if f, _, _ := tracker.ForcedBytes(); f != 0 {
 		t.Fatalf("the forced census still holds %d bytes after the scan", f)
+	}
+	// Every row group's step took it off its slot's owed exactly once.
+	for _, u := range inner.rgUnits {
+		if o, r := u.slot.owed.Load(), u.slot.rgRemaining.Load(); o != 0 || r != 0 {
+			t.Fatalf("%s: owed=%d rgRemaining=%d after the scan, want 0 and 0", u.slot.entry.Path, o, r)
+		}
 	}
 }

@@ -216,21 +216,30 @@ func (inner *scanSourceInner) admitReadAhead(unitIdx int) bool {
 // the consumer (loadGate.acquireFor): the worker holds the slot the consumer
 // needs, and the consumer holds the room.
 //
-// While it is admitted and decoding, the row group counts in its slot's ahead,
-// which is how the gate tells a holder the workers will release from one only
-// the consumer can (fileSlot.releasesWithoutConsumer).
+// Once admitted, the row group no longer counts in its slot's owed (unless it
+// yields), which is how the gate tells a holder the workers will release from
+// one only the consumer can (fileSlot.releasesWithoutConsumer).
 func (inner *scanSourceInner) decodeOrDefer(ctx context.Context, unitIdx int) (b *batch.RecordBatch, deferred bool) {
 	inner.awaitConsumerFirst(ctx)
 	if !inner.admitReadAhead(unitIdx) {
 		return nil, true
 	}
 	if slot := inner.rgUnits[unitIdx].slot; slot != nil {
-		slot.ahead.Add(1)
-		defer slot.ahead.Add(-1)
+		slot.owed.Add(-1) // a worker's now; failGate gives it back on a yield
 	}
 	b, yielded := inner.readRGFor(ctx, unitIdx, false)
+	if h := readAheadReturnHook.Load(); h != nil {
+		(*h)(unitIdx)
+	}
 	return b, yielded
 }
+
+// readAheadReturnHook, when set, runs as an admitted read-ahead's decode (or
+// yield) returns, before decodeOrDefer does. TEST-ONLY (nil in production): it
+// lets a gate pause a worker between its row group's release and the end of
+// its step, the window in which the load gate's view of who can release a
+// slot's bytes changes (#1706 r2).
+var readAheadReturnHook atomic.Pointer[func(unitIdx int)]
 
 // --- test-only ordering hook ---
 
