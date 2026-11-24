@@ -685,33 +685,47 @@ func (inner *scanSourceInner) scanWorker(ctx context.Context) {
 		}
 
 		file := inner.files[idx]
-		var reader *parquet.Reader
-		if ras, ok := inner.cat.Store().(objstore.ReaderAtStore); ok {
-			rac, size, err := ras.GetReaderAt(ctx, inner.cat.Bucket(), file.Path)
-			if err != nil {
-				continue
+		reader, err := func() (*parquet.Reader, error) {
+			if ras, ok := inner.cat.Store().(objstore.ReaderAtStore); ok {
+				rac, size, err := ras.GetReaderAt(ctx, inner.cat.Bucket(), file.Path)
+				if err != nil {
+					return nil, fmt.Errorf("get: %w", err)
+				}
+				reader, err := parquet.NewReader(rac, size)
+				if err != nil {
+					rac.Close()
+					return nil, fmt.Errorf("parquet: %w", err)
+				}
+				return reader, nil
 			}
-			reader, err = parquet.NewReader(rac, size)
-			if err != nil {
-				rac.Close()
-				continue
-			}
-		} else {
 			rc, _, err := inner.cat.Store().Get(ctx, inner.cat.Bucket(), file.Path)
 			if err != nil {
-				continue
+				return nil, fmt.Errorf("get: %w", err)
 			}
 			data, err := readAllSized(rc, file.SizeBytes, true)
 			rc.Close()
 			if err != nil {
-				continue
+				return nil, fmt.Errorf("read: %w", err)
 			}
 			inner.trackPooledBuf(data)
-			reader, err = parquet.NewReaderFromBytesCached(data,
+			reader, err := parquet.NewReaderFromBytesCached(data,
 				footerCacheIdentity(inner.cat, file, int64(len(data))))
 			if err != nil {
-				continue
+				return nil, fmt.Errorf("parquet (%d bytes): %w", len(data), err)
 			}
+			return reader, nil
+		}()
+		if err != nil {
+			// A file that cannot be fetched or opened fails the scan: skipping
+			// it answers without its rows, as success (#1710). A cancelled
+			// scan (LIMIT satisfied, statement cancelled) stays a cancellation.
+			if ctx.Err() == nil {
+				select {
+				case inner.errCh <- fmt.Errorf("loading %s: %w", file.Path, err):
+				default:
+				}
+			}
+			return
 		}
 
 		b, err := readBatchDirect(reader, inner.schema, inner.requiredCols, inner.scanPreds...)

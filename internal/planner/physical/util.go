@@ -1242,6 +1242,15 @@ func (inner *scanSourceInner) readRG(ctx context.Context, unitIdx int) *batch.Re
 	rdr, err := unit.slot.ensureLoaded(inner, ctx)
 	if err != nil || rdr == nil {
 		unit.slot.releaseRG(inner, unit.rgIndex)
+		// A file that cannot be fetched or opened fails the scan, the same as
+		// a decode error below: skipping it answers without its rows, as
+		// success (#1710). A cancelled scan stays a cancellation.
+		if err != nil && ctx.Err() == nil {
+			select {
+			case inner.errCh <- fmt.Errorf("loading %s row group %d: %w", unit.slot.entry.Path, unit.rgIndex, err):
+			default:
+			}
+		}
 		return nil
 	}
 	// Dictionary-probe pruning: an equality conjunct whose constant is
