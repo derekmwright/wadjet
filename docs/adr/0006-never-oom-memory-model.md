@@ -1002,3 +1002,72 @@ code (no partitioned aggregate presizes there) and keep their rates. Making
 these verdicts independent of the order — what a join's first reservation may
 wait for, or what a clone that cannot drain may hold — is still the decision
 the 2026-11-22 amendment left open; this change does not take it.
+
+### 2026-11-23 (correction to 2026-11-21): a scan's consumer never waits in the load gate for bytes only it can release (#1706)
+
+**What the 2026-11-21 amendment got wrong.** It says a decode the consumer is
+waiting for "never waits on the budget", and that a scan on demand skips the
+load admission's bounded wait. Both were true of the tracker reservation
+(`ReserveOrForce`) and false of the scan's LOAD GATE, a byte bound on
+concurrent file loads sized at a quarter of the budget (`loadGate`,
+`buildRGUnits`), in front of which the consumer's own load still waited, with
+no bound. A slot's gate bytes come back only when its LAST row group has been
+decoded (`releaseRG`), and once a scan is on demand its remaining row groups
+are placeholders only the consumer decodes. So the consumer, taking a
+placeholder of a file not yet loaded, could wait for bytes held by a file
+whose last row group was a placeholder behind it in the batch channel: a wait
+on itself, while the workers waited on the full channel. TPC-H Q09, Q16 and
+Q18 at SF1 under a 16 MiB budget never returned in 5 of 10 fresh runs (0 of 5
+without a budget). Observed in an instrumented run (Q16, `partsupp`): the
+consumer waited for 5,510,808 bytes against a 4,194,304-byte gate held
+entirely by one slot, loaded by a worker, whose one remaining row group was a
+placeholder not yet decoded. A second form held the same cycle through a
+mutex: a read-ahead admitted before the scan went on demand waited in the
+gate while holding its slot, and the consumer, decoding that slot's next
+placeholder, waited for the slot.
+
+**The rule now.** No goroutine waits in the gate for room whose release
+needs the scan's consumer to make progress. The consumer — the goroutine
+calling `Next`, or a parallel pipeline's workers, which share the source —
+loads as before while its bytes would fit once the holders the workers alone
+will release have released (a holder each of whose owed row groups is an
+admitted read-ahead being decoded), and is admitted at once, past the gate's
+bound, when the room it needs is held for row groups only the consumer
+decodes. A read-ahead waiting in the gate holds its slot while it waits; it
+goes on waiting as before unless the consumer comes for that slot while the
+room it waits for is held for row groups only the consumer decodes, and then
+it stops, admitting nothing, and hands its row group to the consumer.
+
+Under a parallel pipeline the base's consumer waits often ended through a
+sibling consumer: in one instrumented Q09 at SF1 under 16 MiB the base's
+lineitem consumers waited in the gate 24 times, many of the waits
+overlapping, and each ended within 0.3–40 ms.
+The gate cannot tell whether a sibling will make that progress or is itself
+parked behind the waiter (in the gate, or downstream in a partitioned
+aggregate's queues), so room owed to the consumer counts as room that does
+not come back while a consumer waits. That is a change from the base in runs
+the base answered: there the consumers' loads past the gate overlap where
+they used to follow one another. They are charged as before — the gate is not
+the ledger; every load and every decoded batch is charged to the tracker
+exactly as it was, so what the scan holds is what it charges, and only the
+gate's own count passes its bound. Without a budget a scan is never on demand
+and nothing changes.
+
+A first form that admitted every consumer load at once, and stopped every
+waiting read-ahead as soon as its scan went on demand, also ended the hang
+but moved verdicts the base answered: over that form and two intermediate
+ones Q09 alone at 16 MiB refused `memory budget exceeded` at a hash join
+build in 5 of 345 executions, one of them with no consumer load past the gate
+at all (the eager hand-over alone). The rule above refused none of 90, and
+TPC-H Q09, Q16 and Q18 at 16 MiB returned with the expected answers in 30 of
+30 fresh processes (24, 4 and 1 scan workers). The 90 against 345 does not
+separate the two rates by itself; what the rule removes is the hand-over in
+runs where no wait could be on the consumer.
+
+Gates: `physical.TestAConsumerNeverWaitsInTheLoadGateForBytesOnlyItCanRelease`
+and `physical.TestAConsumerNeverWaitsOnASlotWhoseLoaderWaitsInTheLoadGate`
+(the two cycles, built from their ingredients on the real decode path, on the
+row-group and the whole-file load; both hang at the base),
+`physical.TestLoadGate_AConsumerWaitsOnlyForBytesTheWorkersWillRelease`,
+`physical.TestLoadGate_AConsumerWaitsWhenTheWorkersAloneFreeEnough`,
+`physical.TestLoadGate_AReadAheadYieldsOnlyWhenTheConsumerNeedsItsSlotAndItsRoom`.
