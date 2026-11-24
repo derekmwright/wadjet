@@ -301,11 +301,21 @@ func (h *HashAggregate) dropGroupStateLocked() {
 
 // Inspect implements memory.AccountedOperator. Wait-free w.r.t. the registry
 // but takes h.mu to read group-state fields consistently.
+//
+// h.mu alone does not make those reads safe once Finalize (or Close) has
+// started: Finalize sets reliefClosed under h.mu, then stores OpClosed and
+// rewrites the group state, the merger and the accounting WITHOUT h.mu. A
+// stale Inspect (RequestRelief's after-read of an operator it selected
+// earlier) that takes h.mu between that unlock and the OpClosed store read
+// accState as active and raced those writes. reliefClosed is read under the
+// lock that wrote it, so the closed footprint is returned from that point
+// (#1706, line 1706n round 2) — what the OpClosed store returns an instant
+// later anyway.
 func (h *HashAggregate) Inspect() memory.OperatorFootprint {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	st := memory.OpState(h.accState.Load())
-	if st == memory.OpClosed || h.Spill == nil || !h.canUseExternalMerge() {
+	if h.reliefClosed || st == memory.OpClosed || h.Spill == nil || !h.canUseExternalMerge() {
 		return memory.OperatorFootprint{
 			State: memory.OpClosed, InstanceID: h.accInstanceID, Name: h.accName(),
 		}

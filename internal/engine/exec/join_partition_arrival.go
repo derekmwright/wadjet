@@ -48,6 +48,26 @@ func (h *HashJoin) buildPartitioned(ctx context.Context, source Source) error {
 	// and the legacy-flat-then-reactively-converted paths benefit from being
 	// reachable by the cooperative-spill advisor.
 
+	// h.mu is taken by hand below (per arrival, and for the build tail), and
+	// Build's deferred relief close locks it again. Every way out of a held
+	// region — a refusal, an error, a panic on its way to the query boundary —
+	// therefore releases it here, exactly once: a path that left it held
+	// blocked this goroutine forever in that defer, the refusal or the panic
+	// never reached the caller, and the join stayed registered with h.mu held,
+	// wedging the next registry pass (#1706, line 1706n round 2). held is a
+	// variable, not a per-arrival defer, so the arrival loop keeps its cost
+	// (buildParallelKeyOnly's sourceMu pattern). The windows inside a held
+	// region that release h.mu (around RequestRelief and the arrival-reserve
+	// hook) re-take it on the way out even when what they call panics, so
+	// held is true exactly when h.mu is held.
+	held := false
+	defer func() {
+		if held {
+			held = false
+			h.mu.Unlock()
+		}
+	}()
+
 	for {
 		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("join build cancelled: %w", err)
@@ -65,6 +85,7 @@ func (h *HashJoin) buildPartitioned(ctx context.Context, source Source) error {
 		}
 
 		h.mu.Lock()
+		held = true
 
 		// Narrow filtered semi/anti builds to keys + filter columns before any
 		// storage decision: the partition scatter, per-partition accumulators,
@@ -82,7 +103,7 @@ func (h *HashJoin) buildPartitioned(ctx context.Context, source Source) error {
 			}
 			h.tryEnableIntKey(b)
 			if h.buildKeyErr != nil {
-				return h.buildKeyErr
+				return h.buildKeyErr // the deferred release unlocks h.mu
 			}
 
 			// This build can evict, so its index is PER PARTITION: evicting a
@@ -101,10 +122,10 @@ func (h *HashJoin) buildPartitioned(ctx context.Context, source Source) error {
 		}
 
 		if err := h.absorbArrivalBatch(b); err != nil {
-			h.mu.Unlock()
-			return err
+			return err // the deferred release unlocks h.mu
 		}
 
+		held = false
 		h.mu.Unlock()
 	}
 
@@ -120,9 +141,9 @@ func (h *HashJoin) buildPartitioned(ctx context.Context, source Source) error {
 	// nothing in the tail calls the relief registry (the tracker calls are
 	// atomics); applyBuildSchemaHint takes mu itself, so it runs after.
 	h.mu.Lock()
+	held = true
 	if err := h.freezeAllOpenAccums(); err != nil {
-		h.mu.Unlock()
-		return fmt.Errorf("freezing accumulators at build end: %w", err)
+		return fmt.Errorf("freezing accumulators at build end: %w", err) // the deferred release unlocks h.mu
 	}
 	runPhaseHook(PhaseJoinBuildTail, h)
 
@@ -142,6 +163,7 @@ func (h *HashJoin) buildPartitioned(ctx context.Context, source Source) error {
 	h.reconcileHashMemory()
 
 	h.warmBuildNullBitmaps()
+	held = false
 	h.mu.Unlock()
 	h.applyBuildSchemaHint()
 	h.buildDone = true
@@ -169,10 +191,14 @@ func (h *HashJoin) absorbArrivalBatch(b *batch.RecordBatch) error {
 		// TEST-ONLY (SetArrivalReserveHook), disarmed in production: one
 		// relaxed load. h.mu is released around it for the reason the relief
 		// call in spillUntilCanReserve releases it — what the hook waits for
-		// may itself need this join's SpillSome.
+		// may itself need this join's SpillSome. h.mu is re-taken on the way
+		// out even if the hook panics: buildPartitioned's deferred release
+		// relies on it being held whenever control is in its held region.
 		h.mu.Unlock()
-		(*f)()
-		h.mu.Lock()
+		func() {
+			defer h.mu.Lock()
+			(*f)()
+		}()
 	}
 	cost := hashBuildBytes(b)
 	if joinFloorArmed.Load() {
@@ -806,9 +832,16 @@ func (h *HashJoin) spillUntilCanReserve(needed int64) error {
 		// concurrent operator's SpillSome takes ITS mu, never ours, so this is
 		// deadlock-free; we just shouldn't pin our partitioning loop while
 		// another operator does its own potentially-large spill.
+		//
+		// h.mu is re-taken on the way out even if RequestRelief panics (a
+		// victim's SpillSome raising, on this goroutine): buildPartitioned's
+		// deferred release relies on it being held here, and unlocking a
+		// mutex that is not held is a fatal error no boundary recovers.
 		h.mu.Unlock()
-		relieved, err := h.Spill.RequestRelief(gap)
-		h.mu.Lock()
+		relieved, err := func() (int64, error) {
+			defer h.mu.Lock()
+			return h.Spill.RequestRelief(gap)
+		}()
 		if err != nil {
 			return err
 		}

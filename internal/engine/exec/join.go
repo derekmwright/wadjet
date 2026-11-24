@@ -1162,6 +1162,20 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 	// SF10 deploy of 3b57e93 — task 3455f719 reaped 3× in 3 minutes).
 	progress := ProgressReporterFromContext(ctx)
 
+	// Each arrival below holds h.mu by hand. A panic raised inside it (on its
+	// way to the query boundary) left h.mu held, and this join's Close,
+	// Inspect and probe all lock it: the query hung in its own teardown
+	// instead of failing (#1706, line 1706n round 2). flatHeld is a variable,
+	// not a per-arrival defer, so the loop keeps its cost; every normal exit
+	// from the held region clears it before unlocking.
+	flatHeld := false
+	defer func() {
+		if flatHeld {
+			flatHeld = false
+			h.mu.Unlock()
+		}
+	}()
+
 	for {
 		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("join build cancelled: %w", err)
@@ -1179,6 +1193,7 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 		}
 
 		h.mu.Lock()
+		flatHeld = true
 		arrival := b
 		b = h.projectForStore(b)
 		if h.buildSchema == nil {
@@ -1192,6 +1207,7 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 			// Try to enable int64 fast path for single-column integer keys
 			h.tryEnableIntKey(b)
 			if h.buildKeyErr != nil {
+				flatHeld = false
 				h.mu.Unlock()
 				return h.buildKeyErr
 			}
@@ -1219,6 +1235,7 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 			h.updateKeyMinMax(b)
 			h.insertNEBatch(b)
 			h.buildRows += int64(b.ActiveLen())
+			flatHeld = false
 			h.mu.Unlock()
 			continue
 		}
@@ -1322,6 +1339,7 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 				strIdx.CheckGrow()
 			}
 			h.buildRows += int64(b.ActiveLen())
+			flatHeld = false
 			h.mu.Unlock()
 			continue
 		}
@@ -1337,6 +1355,7 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 		if h.MemTracker != nil {
 			cost := hashBuildBytes(b)
 			if err := h.MemTracker.Reserve(cost); err != nil {
+				flatHeld = false
 				h.mu.Unlock()
 				why := "no spill configured"
 				if h.Spill != nil && !h.probeRoutesByPartition() {
@@ -1456,6 +1475,7 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 		// array, consuming much more than EstimateBatchBytes predicted.
 		h.reconcileHashMemory()
 
+		flatHeld = false
 		h.mu.Unlock()
 	}
 

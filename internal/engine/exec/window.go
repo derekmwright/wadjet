@@ -601,11 +601,21 @@ func (w *Window) Finalize(_ context.Context) error {
 func (w *Window) finalizeExternal() error {
 	// The in-memory remainder joins the runs as one more sorted run; the
 	// multi-pass flow then has a single uniform input.
-	w.mu.Lock()
-	_, ferr := w.flushSpillLocked()
-	runs := w.runFiles
-	w.runFiles = nil
-	w.mu.Unlock()
+	//
+	// The flush sorts and writes a run under w.mu, and a panic it raises on its
+	// way to the query boundary must not leave w.mu held: Close and Inspect
+	// lock it, so the query hung in its own teardown instead of failing (#1706,
+	// line 1706n round 2). Once per Finalize, so a defer costs nothing. On a
+	// panic the runs stay in w.runFiles, where Close removes them.
+	var ferr error
+	var runs []string
+	func() {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		_, ferr = w.flushSpillLocked()
+		runs = w.runFiles
+		w.runFiles = nil
+	}()
 	if ferr != nil {
 		// runFiles was already taken; Close's backstop sees nil. Delete
 		// here or the runs outlive the query in the shared spill dir.
