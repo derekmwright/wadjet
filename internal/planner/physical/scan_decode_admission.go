@@ -51,8 +51,16 @@ import (
 // decoded charge as before, and once the scan is on demand its loads skip the
 // load admission's bounded wait too (rgSlabs.advance, fileSlot.ensureLoaded):
 // that wait overlapped a read-ahead load with the consumer's work, and on the
-// consumer's own goroutine it would stall the pipeline for the whole of it. Without a budget the rule costs nothing:
-// every read-ahead is admitted without touching the ledger.
+// consumer's own goroutine it would stall the pipeline for the whole of it. In
+// the scan's load gate (load_gate.go), whose bytes come back only when a file's
+// last row group is decoded, they wait only for room the workers alone will
+// free: a file whose remaining row groups include one handed over undecoded
+// is finished by the consumer, and waiting for it could be waiting on itself
+// (#1706: TPC-H Q09, Q16 and Q18 at SF1 under 16 MiB never returned in 5 of 10
+// runs). A read-ahead parked in that gate while holding a slot the consumer
+// comes for hands its row group over when the room it waits for is owed to the
+// consumer (decodeOrDefer). Without a budget the rule costs nothing: every
+// read-ahead is admitted without touching the ledger.
 
 // scanReadAheadAdmission is the kill switch. Off, a worker decodes every row
 // group it reaches, and charges it after the decode, as before #1706.
@@ -202,13 +210,26 @@ func (inner *scanSourceInner) admitReadAhead(unitIdx int) bool {
 }
 
 // decodeOrDefer is a worker's step for one row group: decode it, when its
-// read-ahead is admitted, or report that the consumer must decode it.
+// read-ahead is admitted, or report that the consumer must decode it. An
+// admitted read-ahead whose load waits in the load gate is handed over too
+// when the consumer comes for its slot and the room it waits for is owed to
+// the consumer (loadGate.acquireFor): the worker holds the slot the consumer
+// needs, and the consumer holds the room.
+//
+// While it is admitted and decoding, the row group counts in its slot's ahead,
+// which is how the gate tells a holder the workers will release from one only
+// the consumer can (fileSlot.releasesWithoutConsumer).
 func (inner *scanSourceInner) decodeOrDefer(ctx context.Context, unitIdx int) (b *batch.RecordBatch, deferred bool) {
 	inner.awaitConsumerFirst(ctx)
 	if !inner.admitReadAhead(unitIdx) {
 		return nil, true
 	}
-	return inner.readRG(ctx, unitIdx), false
+	if slot := inner.rgUnits[unitIdx].slot; slot != nil {
+		slot.ahead.Add(1)
+		defer slot.ahead.Add(-1)
+	}
+	b, yielded := inner.readRGFor(ctx, unitIdx, false)
+	return b, yielded
 }
 
 // --- test-only ordering hook ---

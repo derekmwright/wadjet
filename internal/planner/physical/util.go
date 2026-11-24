@@ -5,6 +5,7 @@ package physical
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -381,6 +382,16 @@ type fileSlot struct {
 	forcedBytes  int64               // of chargedBytes, the part taken PAST the budget (memory.ForceScanFileLoad)
 	gateBytes    int64               // bytes admitted on inner.loadGate; released with the buffer
 	rgRemaining  atomic.Int64        // refcount of unprocessed row groups; release on 0
+	// ahead counts this slot's row groups a worker is decoding as an admitted
+	// read-ahead (decodeOrDefer, from admission until its decode returns).
+	// When it covers rgRemaining, the slot's gate bytes come back with no help
+	// from the scan's consumer (releasesWithoutConsumer).
+	ahead atomic.Int64
+	// wanted is closed when the scan's consumer comes to load this slot
+	// (ensureLoadedFor with demand): a read-ahead waiting in the load gate
+	// while it holds the slot then yields if its wait is owed to the consumer.
+	wanted                 chan struct{}
+	wantedOnce, wantedShut sync.Once
 
 	// wantRG is the ascending list of row groups that survived pruning, set
 	// by buildRGUnits beside rgRemaining. rgs is the row-group-at-a-time
@@ -408,6 +419,21 @@ func newPreloadedFileSlot(entry catalog.FileEntry, fr *parquet.FileReader) *file
 // ensureLoaded loads the file's bytes on first call. Subsequent callers
 // see the cached reader. Returns the native reader for page reads.
 func (s *fileSlot) ensureLoaded(inner *scanSourceInner, ctx context.Context) (*parquet.FileReader, error) {
+	return s.ensureLoadedFor(inner, ctx, false)
+}
+
+// ensureLoadedFor is ensureLoaded for a read-ahead (demand=false, a row-group
+// worker) or for the scan's consumer (demand=true). The two differ only at the
+// load gate (load_gate.go): the consumer waits only while the room it needs
+// comes back without it; a read-ahead waits, unless the consumer comes for
+// this slot while the room is owed to the consumer — then it returns
+// errLoadGateYield with the slot left unloaded, holding nothing, and its row
+// group goes to the consumer.
+func (s *fileSlot) ensureLoadedFor(inner *scanSourceInner, ctx context.Context, demand bool) (*parquet.FileReader, error) {
+	if demand {
+		// Before the mutex, which a read-ahead waiting in the gate holds.
+		s.markWanted()
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.loaded {
@@ -463,9 +489,8 @@ func (s *fileSlot) ensureLoaded(inner *scanSourceInner, ctx context.Context) (*p
 			if peak < 1 {
 				peak = 1
 			}
-			if err := inner.loadGate.acquire(ctx, peak); err != nil {
-				s.loadErr = err
-				return nil, s.loadErr
+			if err := s.admitLoad(inner, ctx, peak, demand); err != nil {
+				return nil, s.failGate(err)
 			}
 			s.gateBytes = peak
 		}
@@ -474,7 +499,6 @@ func (s *fileSlot) ensureLoaded(inner *scanSourceInner, ctx context.Context) (*p
 		rgLoadsRowGroup.Add(1)
 		return s.nativeReader, nil
 	}
-	rgLoadsWholeFile.Add(1)
 
 	// Admit this load against the byte-budgeted gate so peak heap from
 	// loaded files is bounded by the gate's budget regardless of how many
@@ -482,15 +506,17 @@ func (s *fileSlot) ensureLoaded(inner *scanSourceInner, ctx context.Context) (*p
 	// slot's last row group is consumed (releaseRG) or the scan is torn
 	// down (drainAbandoned).
 	if inner.loadGate != nil {
-		if err := inner.loadGate.acquire(ctx, s.entry.SizeBytes); err != nil {
-			s.loadErr = err
-			return nil, s.loadErr
+		if err := s.admitLoad(inner, ctx, s.entry.SizeBytes, demand); err != nil {
+			return nil, s.failGate(err)
 		}
 		s.gateBytes = s.entry.SizeBytes
 		if s.gateBytes < 1 {
 			s.gateBytes = 1
 		}
 	}
+	// Counted once admitted: a read-ahead that yielded at the gate did not
+	// load, and the consumer's load of the same slot is the one counted.
+	rgLoadsWholeFile.Add(1)
 
 	// Reserve the file's bytes BEFORE the allocation so admission and spill
 	// pressure see the load coming instead of discovering it as drift. On a
@@ -624,9 +650,58 @@ func (s *fileSlot) releaseCharge(inner *scanSourceInner) {
 // Idempotent. Caller must hold s.mu.
 func (s *fileSlot) releaseGate(inner *scanSourceInner) {
 	if s.gateBytes > 0 && inner.loadGate != nil {
-		inner.loadGate.release(s.gateBytes)
+		inner.loadGate.releaseFor(s.gateBytes, s)
 	}
 	s.gateBytes = 0
+}
+
+// admitLoad takes n bytes on the scan's load gate for this slot's load
+// (load_gate.go): for the consumer's demand, waiting only while the room comes
+// back without the consumer; for a read-ahead, waiting until the room exists,
+// unless the consumer comes for this slot while the room is owed to it.
+func (s *fileSlot) admitLoad(inner *scanSourceInner, ctx context.Context, n int64, demand bool) error {
+	if demand {
+		return inner.loadGate.acquireDemand(ctx, n, s)
+	}
+	return inner.loadGate.acquireFor(ctx, n, s, s.wantedSignal())
+}
+
+// wantedSignal is closed once the scan's consumer has come for this slot.
+func (s *fileSlot) wantedSignal() chan struct{} {
+	s.wantedOnce.Do(func() { s.wanted = make(chan struct{}) })
+	return s.wanted
+}
+
+// markWanted closes wantedSignal.
+func (s *fileSlot) markWanted() {
+	sig := s.wantedSignal()
+	s.wantedShut.Do(func() { close(sig) })
+}
+
+// releasesWithoutConsumer reports whether every row group this slot still owes
+// is an admitted read-ahead a worker is decoding, so its gate bytes come back
+// whatever the consumer does. A row group handed over undecoded, or one no
+// worker has taken (once the scan is on demand it is handed over when taken),
+// is decoded only by the consumer. The two counters are read apart: a
+// read-ahead admitted but not yet counted in ahead reads as owed to the
+// consumer (which then does not wait), and one whose release landed before its
+// ahead decrement reads as covered — its decode is done. Neither order makes a
+// wait that could be on the consumer.
+func (s *fileSlot) releasesWithoutConsumer() bool {
+	return s.ahead.Load() >= s.rgRemaining.Load()
+}
+
+// failGate records a gate admission that did not happen. A read-ahead that
+// yielded leaves the slot unloaded — nothing is installed on it before the
+// gate — so the consumer's later demand loads it; any other error is the
+// slot's load error. Caller holds s.mu.
+func (s *fileSlot) failGate(err error) error {
+	if errors.Is(err, errLoadGateYield) {
+		s.loaded = false
+		return err
+	}
+	s.loadErr = err
+	return err
 }
 
 // releaseRG frees row group rgIdx's bytes and its tracker charge, and — when
@@ -673,7 +748,7 @@ func (s *fileSlot) releaseRG(inner *scanSourceInner, rgIdx int) {
 		sf.Close()
 	}
 	if gateN > 0 && inner.loadGate != nil {
-		inner.loadGate.release(gateN)
+		inner.loadGate.releaseFor(gateN, s)
 	}
 }
 
@@ -711,7 +786,7 @@ func (s *fileSlot) drainAbandoned(inner *scanSourceInner) {
 		sf.Close()
 	}
 	if gateN > 0 && inner.loadGate != nil {
-		inner.loadGate.release(gateN)
+		inner.loadGate.releaseFor(gateN, s)
 	}
 }
 
@@ -1234,6 +1309,20 @@ func (inner *scanSourceInner) finishRG(idx int, b *batch.RecordBatch) *batch.Rec
 // bytes lazily on first call (bounded by inner.loadGate) and releases them
 // once this slot's last row group has been processed. The decoded batch is
 // charged to the memory tracker until it leaves the scan source.
+//
+// readRGFor loads the slot first, for a read-ahead or for the consumer's
+// demand (fileSlot.ensureLoadedFor); yielded reports a read-ahead that gave
+// its row group to the consumer at the load gate, with nothing decoded,
+// loaded or released.
+func (inner *scanSourceInner) readRGFor(ctx context.Context, unitIdx int, demand bool) (b *batch.RecordBatch, yielded bool) {
+	if slot := inner.rgUnits[unitIdx].slot; slot != nil {
+		if _, err := slot.ensureLoadedFor(inner, ctx, demand); errors.Is(err, errLoadGateYield) {
+			return nil, true
+		}
+	}
+	return inner.readRG(ctx, unitIdx), false
+}
+
 func (inner *scanSourceInner) readRG(ctx context.Context, unitIdx int) *batch.RecordBatch {
 	unit := inner.rgUnits[unitIdx]
 	if unit.slot == nil {

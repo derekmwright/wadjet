@@ -812,9 +812,19 @@ func (inner *scanSourceInner) next(ctx context.Context) (*batch.RecordBatch, err
 				// A row group whose read-ahead was not admitted: decode it
 				// here, now that it is asked for. The floor — a decode the
 				// consumer is waiting for is never refused and never waits on
-				// the budget — is the ordinary decode path.
+				// the budget — is the ordinary decode path, except that its
+				// load waits in the load gate only for room the workers alone
+				// will free: the bytes there can be held for row groups behind
+				// this one in batchCh, which only the scan's consumer decodes
+				// (#1706, loadGate.acquireDemand).
 				idx := v.(int)
-				db := inner.finishRG(idx, inner.readRG(ctx, idx))
+				db, yielded := inner.readRGFor(ctx, idx, true)
+				if yielded {
+					// Unreachable — a demand's admission never yields — and
+					// a row group dropped here would be a silent short answer.
+					return nil, fmt.Errorf("scan %s: the consumer's load of row group %d yielded at the load gate", inner.tableName, idx)
+				}
+				db = inner.finishRG(idx, db)
 				if db == nil {
 					continue
 				}
