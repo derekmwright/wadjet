@@ -161,6 +161,8 @@ func (h *HashAggregate) adoptStateFrom(o *HashAggregate) {
 	}
 	h.groupColTypes = o.groupColTypes
 	h.groupColMeta = o.groupColMeta
+	h.resolveRepCols()
+	h.repDecMaxEff = append([]int(nil), o.repDecMaxEff...)
 	h.aggUpdaters = o.aggUpdaters
 	h.aggUpdatersNoNull = o.aggUpdatersNoNull
 	// Per-batch updater-selection scratch, normally sized by resolveIndices.

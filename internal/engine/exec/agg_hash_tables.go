@@ -42,6 +42,14 @@ func (h *HashAggregate) consumeBatch(b *batch.RecordBatch) {
 		return
 	}
 
+	// The representative rule's per-batch precheck (agg_representative.go):
+	// a batch proven unable to hold a smaller representative pays one
+	// compare per hit instead of the comparison.
+	h.repSkipFor = nil
+	if h.repActive && h.repCanSkipBatch(b) {
+		h.repSkipFor = b
+	}
+
 	// Select no-null-check updaters for columns without nulls in this batch.
 	// Applies to all grouped paths: int, compact, and generic.
 	for i := 0; i < len(h.Aggs); i++ {

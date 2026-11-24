@@ -1,3 +1,13 @@
 # arc UN: TestArcUNInBandMarkEveryArm's kept answers, the same on every arm. Columns: cell<TAB>answer<TAB>class.
 # r18: a set operation over a column of another declaration (a NUMERIC(10,2) arm, a NULL arm) is not marked and prints its one scale; PostgreSQL prints each value at its own arm's scale. A count, DISTINCT or GROUP BY over CAST(v AS TEXT) of such a column follows that text.
 # 2026-10-06 (arc PS stage 1, ADR-0024 §1 as amended): every r18 line is closed — each value prints its own display scale, so each cell answers PostgreSQL's text on every arm and its pin is deleted.
+# rep (2026-11-24, #1713, ADR-0024 §12): a UNION whose rv_n NUMERIC(10,2) arm (1.00, 1.50, 7.00) comes before un_x's (1, 1.5, 7) keeps the lower display scale on every arm, where PostgreSQL's default plan keeps the first met; each answer is PostgreSQL's default plan on the statement with the two arms swapped (measured 17.11, --locale=C).
+f3_un_unx	rows=9 0.00 | 0.0000000001 | 0.1 | 1 | 1.25 | 1.5 | 2.50 | 7 | NULL	rep
+nl_un_unx	rows=9 0.00 | 0.0000000001 | 0.1 | 1 | 1.25 | 1.5 | 2.50 | 7 | NULL	rep
+nr_un_unx	rows=9 0.00 | 0.0000000001 | 0.1 | 1 | 1.25 | 1.5 | 2.50 | 7 | NULL	rep
+f3_un_nxu	rows=9 0.00 | 0.0000000001 | 0.1 | 1 | 1.25 | 1.5 | 2.50 | 7 | NULL	rep
+nl_un_nxu	rows=9 0.00 | 0.0000000001 | 0.1 | 1 | 1.25 | 1.5 | 2.50 | 7 | NULL	rep
+nr_un_nxu	rows=9 0.00 | 0.0000000001 | 0.1 | 1 | 1.25 | 1.5 | 2.50 | 7 | NULL	rep
+f3_un_nux	rows=9 0.00 | 0.0000000001 | 0.1 | 1 | 1.25 | 1.5 | 2.50 | 7 | NULL	rep
+nl_un_nux	rows=9 0.00 | 0.0000000001 | 0.1 | 1 | 1.25 | 1.5 | 2.50 | 7 | NULL	rep
+nr_un_nux	rows=9 0.00 | 0.0000000001 | 0.1 | 1 | 1.25 | 1.5 | 2.50 | 7 | NULL	rep

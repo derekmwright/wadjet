@@ -28,6 +28,9 @@ func (h *HashAggregate) CloneSink() SinkSource {
 		// the merge reads past the end.
 		GroupingCalls:     h.GroupingCalls,
 		GroupingCallNames: h.GroupingCallNames,
+		// A clone meets members of the same groups, so it chooses among
+		// them under the same eligibility (agg_representative.go).
+		repEligAgg: h.repEligAgg,
 		// No spill manager — partial aggregates are small enough
 		strNullGroupIdx: -1, // defensive: Init sets it, but the zero value is a VALID slot
 	}
@@ -182,6 +185,7 @@ func (h *HashAggregate) mergeSinkState(o *HashAggregate) {
 	if len(h.groupColTypes) == 0 && len(o.groupColTypes) > 0 {
 		h.groupColTypes = o.groupColTypes
 		h.groupColMeta = o.groupColMeta
+		h.resolveRepCols()
 		if len(h.groupColIdx) == 0 {
 			h.groupColIdx = o.groupColIdx
 		}
@@ -314,6 +318,9 @@ func (h *HashAggregate) mergeSinkState(o *HashAggregate) {
 	// Normalize both sides to the generic map path so merge is uniform.
 	h.migrateToGenericMap()
 	o.migrateToGenericMap()
+	if h.repActive {
+		h.repFoldBound(o)
+	}
 
 	// Typed-generic sinks don't maintain strGroupIndex during consume;
 	// the dedup loop below probes it, so rebuild from serializedKeys.
@@ -339,6 +346,14 @@ func (h *HashAggregate) mergeSinkState(o *HashAggregate) {
 		if found {
 			gs := h.strGroupStates[gsIdx]
 			ext := gs.extras
+			// Two members of one group meet: the smaller representative's
+			// whole tuple survives, whichever clone held it (#1713). Read
+			// before the accumulators merge, which eligibility reads.
+			if h.repActive {
+				h.repStoredKeys(ext, h.serializedKeys[gsIdx])
+				h.repStoredKeys(oExt, key)
+				h.repMergeGroup(ext, oExt)
+			}
 			for j := range ext.accs {
 				ext.accs[j].Merge(&oExt.accs[j])
 			}

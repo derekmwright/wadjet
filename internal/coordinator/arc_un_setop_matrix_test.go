@@ -61,6 +61,14 @@ import (
 // (0, 3), i_fixed_{2_1,3_1,3_2,4_1,4_2,4_3}_one (0, 1); the other 630 count
 // statements answer alike either way and carry the statement as written
 // (measured 17.11 over all 648).
+//
+// REPRESENTATIVE (#1713, ADR-0024 §12, 2026-11-24): which of two equal values
+// a UNION keeps is the representative rule's — the lower display scale, on
+// every path — not the first one met. The nine u_fixed_{2,3,4}_0_{text,one,
+// zero} rows, whose first arm is rv_n's NUMERIC(10,2), carry the disposition
+// `rep`: the answer PostgreSQL gives with the arms swapped (that shape's
+// u_fixed_*_1_* row), with their own PostgreSQL answer beside it. Three of
+// them (u_fixed_*_0_one) were `fenced` before, so 15 rows are `fenced` now.
 
 // The default run is a deterministic 300-statement subset that covers every
 // arm kind × position × operation × read; WADJET_UN_SETOP_MATRIX=full runs

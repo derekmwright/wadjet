@@ -348,6 +348,42 @@ func (u *setOpSourceAdapter) RowsScanned() int64 {
 	return total
 }
 
+// The local set operations choose each member's representative by the
+// representative rule (ADR-0024's 2026-11-24 amendment, #1713), the one the
+// stage DAG's aggregates use: among the eligible members of one SQL-equal
+// row, the smallest under batch's representative order, compared whole-row
+// (setOpKeyer.repCompare). UNION's members are both arms'; INTERSECT's and
+// EXCEPT's are the LEFT arm's only, as PostgreSQL's are. An ALL form repeats
+// that one representative as many times as the multiplicity rule says, as
+// PostgreSQL's HashSetOp and SetOp do.
+
+// setOpGroup is one SQL-equal row's left-arm tally: its representative and
+// how many left members it has.
+type setOpGroup struct {
+	rep   map[string]any
+	count int
+}
+
+// tallyLeft groups the left arm by key in first-appearance order, keeping
+// each group's smallest representative.
+func tallyLeft(k *setOpKeyer, left []map[string]any) ([]string, map[string]*setOpGroup) {
+	order := make([]string, 0, len(left))
+	groups := make(map[string]*setOpGroup, len(left))
+	for _, row := range left {
+		key := k.key(row)
+		if g, ok := groups[key]; ok {
+			g.count++
+			if k.repCompare(row, g.rep) < 0 {
+				g.rep = row
+			}
+			continue
+		}
+		groups[key] = &setOpGroup{rep: row, count: 1}
+		order = append(order, key)
+	}
+	return order, groups
+}
+
 // intersectRows returns rows that appear in both left and right.
 // If all is true, preserves duplicate counts (min of left/right occurrences).
 func intersectRows(k *setOpKeyer, left, right []map[string]any, all bool) []map[string]any {
@@ -355,30 +391,22 @@ func intersectRows(k *setOpKeyer, left, right []map[string]any, all bool) []map[
 	for _, row := range right {
 		rightSet[k.key(row)]++
 	}
-
-	if all {
-		result := make([]map[string]any, 0)
-		for _, row := range left {
-			key := k.key(row)
-			if rightSet[key] > 0 {
-				result = append(result, row)
-				rightSet[key]--
-			}
-		}
-		return result
-	}
-
-	// INTERSECT (distinct): deduplicate, then keep only rows in both
-	seen := make(map[string]struct{}, len(left))
+	order, groups := tallyLeft(k, left)
 	result := make([]map[string]any, 0)
-	for _, row := range left {
-		key := k.key(row)
-		if _, already := seen[key]; already {
-			continue
+	for _, key := range order {
+		g, r := groups[key], rightSet[key]
+		n := 0
+		switch {
+		case r == 0:
+		case !all:
+			n = 1
+		case g.count < r:
+			n = g.count
+		default:
+			n = r
 		}
-		seen[key] = struct{}{}
-		if rightSet[key] > 0 {
-			result = append(result, row)
+		for i := 0; i < n; i++ {
+			result = append(result, g.rep)
 		}
 	}
 	return result
@@ -391,31 +419,21 @@ func exceptRows(k *setOpKeyer, left, right []map[string]any, all bool) []map[str
 	for _, row := range right {
 		rightSet[k.key(row)]++
 	}
-
-	if all {
-		result := make([]map[string]any, 0)
-		for _, row := range left {
-			key := k.key(row)
-			if rightSet[key] > 0 {
-				rightSet[key]--
-			} else {
-				result = append(result, row)
-			}
-		}
-		return result
-	}
-
-	// EXCEPT (distinct): deduplicate left, exclude rows in right
-	seen := make(map[string]struct{}, len(left))
+	order, groups := tallyLeft(k, left)
 	result := make([]map[string]any, 0)
-	for _, row := range left {
-		key := k.key(row)
-		if _, already := seen[key]; already {
-			continue
+	for _, key := range order {
+		g, r := groups[key], rightSet[key]
+		n := 0
+		switch {
+		case !all:
+			if r == 0 {
+				n = 1
+			}
+		case g.count > r:
+			n = g.count - r
 		}
-		seen[key] = struct{}{}
-		if rightSet[key] == 0 {
-			result = append(result, row)
+		for i := 0; i < n; i++ {
+			result = append(result, g.rep)
 		}
 	}
 	return result
@@ -513,14 +531,20 @@ func alignSetOpRows(want, have []parquet.Column, rows []map[string]any) []map[st
 
 // deduplicateRows removes duplicate rows from a slice of row maps.
 func deduplicateRows(k *setOpKeyer, rows []map[string]any) []map[string]any {
-	seen := make(map[string]struct{}, len(rows))
+	seen := make(map[string]int, len(rows))
 	result := make([]map[string]any, 0, len(rows))
 	for _, row := range rows {
 		key := k.key(row)
-		if _, exists := seen[key]; !exists {
-			seen[key] = struct{}{}
-			result = append(result, row)
+		if at, exists := seen[key]; exists {
+			// One SQL-equal row met again: the smaller representative,
+			// whole-row, whichever arm and position it came from (#1713).
+			if k.repCompare(row, result[at]) < 0 {
+				result[at] = row
+			}
+			continue
 		}
+		seen[key] = len(result)
+		result = append(result, row)
 	}
 	return result
 }

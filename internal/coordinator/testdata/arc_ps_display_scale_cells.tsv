@@ -69,3 +69,25 @@ r_union_count_zero	SELECT count(*) FROM (SELECT v FROM rv_n UNION SELECT v FROM 
 r_float_union	SELECT CAST(f AS TEXT) FROM (SELECT CAST('-0' AS DOUBLE PRECISION) AS f FROM un_u WHERE id = 1 UNION SELECT CAST('0' AS DOUBLE PRECISION) FROM un_u WHERE id = 2) s
 r_float_group	SELECT CAST(f AS TEXT), count(*) FROM (SELECT CAST('-0' AS DOUBLE PRECISION) AS f FROM un_u UNION ALL SELECT CAST('0' AS DOUBLE PRECISION) FROM un_x) a GROUP BY f
 r_big_group_case	SELECT CAST(k AS TEXT), count(*) FROM (SELECT CASE WHEN id <= 1500 THEN v ELSE CAST(v AS NUMERIC(10,2)) END AS k FROM rv_big) s GROUP BY k
+r_except_all	SELECT CAST(v AS TEXT) FROM (SELECT v FROM (SELECT v FROM un_x UNION ALL SELECT v FROM rv_n) a EXCEPT ALL SELECT v FROM un_u) s
+s_except_all_swapped	SELECT CAST(v AS TEXT) FROM (SELECT v FROM (SELECT v FROM rv_n UNION ALL SELECT v FROM un_x) a EXCEPT ALL SELECT v FROM un_u) s
+s_except_all_like	SELECT count(*) FROM (SELECT v FROM (SELECT v FROM rv_n UNION ALL SELECT v FROM un_x) a EXCEPT ALL SELECT v FROM un_u) s WHERE CAST(v AS TEXT) LIKE '%0'
+s_except_swapped	SELECT CAST(v AS TEXT) FROM (SELECT v FROM (SELECT v FROM rv_n UNION ALL SELECT v FROM un_x) a EXCEPT SELECT v FROM un_u) s
+s_union_like	SELECT count(*) FROM (SELECT v FROM un_x UNION SELECT v FROM rv_n) s WHERE CAST(v AS TEXT) LIKE '%.%'
+s_union_len	SELECT count(*) FROM (SELECT v FROM rv_n UNION SELECT v FROM un_x) s WHERE length(CAST(v AS TEXT)) <= 3
+s_union_join	SELECT count(*) FROM (SELECT v FROM rv_n UNION SELECT v FROM un_x) s JOIN un_u u ON CAST(s.v AS TEXT) = CAST(u.v AS TEXT)
+s_distinct_swapped	SELECT CAST(v AS TEXT) FROM (SELECT DISTINCT v FROM (SELECT v FROM rv_n UNION ALL SELECT v FROM un_x) a) s
+s_distinct_like	SELECT count(*) FROM (SELECT DISTINCT v FROM (SELECT v FROM rv_n UNION ALL SELECT v FROM un_x) a) s WHERE CAST(v AS TEXT) LIKE '%0'
+s_intersect_swapped	SELECT CAST(v AS TEXT) FROM (SELECT v FROM rv_n INTERSECT SELECT v FROM un_x) s
+s_intersect_like	SELECT count(*) FROM (SELECT v FROM rv_n INTERSECT SELECT v FROM un_x) s WHERE CAST(v AS TEXT) LIKE '%0'
+s_intersect_all_swapped	SELECT CAST(v AS TEXT) FROM (SELECT v FROM rv_n INTERSECT ALL SELECT v FROM un_x) s
+s_intersect_all_mult	SELECT CAST(v AS TEXT) FROM (SELECT v FROM (SELECT v FROM un_x UNION ALL SELECT v FROM rv_n) a INTERSECT ALL SELECT v FROM (SELECT v FROM rv_n UNION ALL SELECT v FROM rv_n) b) s
+s_group_like	SELECT count(*) FROM (SELECT v, count(*) AS c FROM (SELECT v FROM rv_n UNION ALL SELECT v FROM un_x) a GROUP BY v) s WHERE CAST(v AS TEXT) LIKE '%0'
+s_group_sum	SELECT CAST(v AS TEXT), sum(id), max(g) FROM (SELECT id, g, v FROM rv_n UNION ALL SELECT id, g, v FROM un_x) a GROUP BY v
+s_group_having	SELECT CAST(v AS TEXT), count(*) FROM (SELECT v FROM rv_n UNION ALL SELECT v FROM un_x) a GROUP BY v HAVING count(*) > 1
+s_grouping_sets	SELECT CAST(v AS TEXT), g, count(*) FROM (SELECT g, v FROM rv_n UNION ALL SELECT g, v FROM un_x) a GROUP BY GROUPING SETS ((v), (v, g))
+s_multi_text	SELECT CAST(a AS TEXT), CAST(b AS TEXT) FROM (SELECT x.v AS a, n.v AS b FROM un_x x JOIN rv_n n ON x.id = n.id UNION SELECT n.v, x.v FROM un_x x JOIN rv_n n ON x.id = n.id) s
+s_multi_like	SELECT count(*) FROM (SELECT x.v AS a, n.v AS b FROM un_x x JOIN rv_n n ON x.id = n.id UNION SELECT n.v, x.v FROM un_x x JOIN rv_n n ON x.id = n.id) s WHERE CAST(b AS TEXT) LIKE '%0'
+s_multi_group	SELECT CAST(a AS TEXT), CAST(b AS TEXT), count(*) FROM (SELECT x.v AS a, n.v AS b FROM un_x x JOIN rv_n n ON x.id = n.id UNION ALL SELECT n.v, x.v FROM un_x x JOIN rv_n n ON x.id = n.id) s GROUP BY a, b
+s_float_union_swapped	SELECT CAST(f AS TEXT) FROM (SELECT CAST('0' AS DOUBLE PRECISION) AS f FROM un_u WHERE id = 1 UNION SELECT CAST('-0' AS DOUBLE PRECISION) FROM un_u WHERE id = 2) s
+s_float_group_swapped	SELECT CAST(f AS TEXT), count(*) FROM (SELECT CAST('0' AS DOUBLE PRECISION) AS f FROM un_x UNION ALL SELECT CAST('-0' AS DOUBLE PRECISION) FROM un_u) a GROUP BY f

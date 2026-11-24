@@ -67,6 +67,9 @@ func (h *HashAggregate) consumeBatchCompactGroup(b *batch.RecordBatch) {
 		}
 		gs := h.gsPool.alloc()
 		gs.ensureExtras().keyValues = keyVals
+		if h.repActive {
+			h.repNoteBoxes(keyVals)
+		}
 		h.intGroupStates = append(h.intGroupStates, gs)
 		h.numIntGroups++
 		h.compactKeys = append(h.compactKeys, string(h.keyBuf))
@@ -88,6 +91,9 @@ func (h *HashAggregate) consumeBatchCompactGroup(b *batch.RecordBatch) {
 			newIdx := int32(h.numIntGroups)
 			gsIdx, ok := intIdx.GetOrInsertNoGrow(key, newIdx)
 			if ok {
+				if h.repActive && h.repSkipFor != b {
+					h.repCompactHit(b, row, gsIdx)
+				}
 				gi[si] = gsIdx
 			} else {
 				newGroup(row, key)
@@ -106,6 +112,9 @@ func (h *HashAggregate) consumeBatchCompactGroup(b *batch.RecordBatch) {
 			newIdx := int32(h.numIntGroups)
 			gsIdx, ok := intIdx.GetOrInsertNoGrow(key, newIdx)
 			if ok {
+				if h.repActive && h.repSkipFor != b {
+					h.repCompactHit(b, row, gsIdx)
+				}
 				gi[row] = gsIdx
 			} else {
 				newGroup(row, key)
@@ -394,6 +403,9 @@ func (h *HashAggregate) consumeBatchGenericSoA(b *batch.RecordBatch) {
 				}
 			}
 			gs.ensureExtras().keyValues = keyVals
+			if h.repActive {
+				h.repNoteBoxes(keyVals)
+			}
 			h.keys = append(h.keys, keyVals)
 		}
 		h.strGroupStates = append(h.strGroupStates, gs)
@@ -435,6 +447,9 @@ func (h *HashAggregate) consumeBatchGenericSoA(b *batch.RecordBatch) {
 			if head, ok := h.genKeyIdx.Get(ck); ok {
 				for g := head; g >= 0; g = h.genKeyNext[g] {
 					if serializedKeyMatchesRow(h.serializedKeys[g], kcols, row) {
+						if h.repActive && h.repSkipFor != b {
+							h.repDeferredFloatHit(b, row, g, kcols)
+						}
 						return g
 					}
 				}
@@ -470,6 +485,9 @@ func (h *HashAggregate) consumeBatchGenericSoA(b *batch.RecordBatch) {
 			serializeKey(row)
 			gsIdx, found := strIdx.GetOrInsert(h.keyBuf, int32(len(h.strGroupStates)))
 			if found {
+				if h.repActive && h.repSkipFor != b {
+					h.repSoAHit(b, row, gsIdx)
+				}
 				gi[si] = gsIdx
 			} else {
 				newGroup(row)
@@ -483,6 +501,9 @@ func (h *HashAggregate) consumeBatchGenericSoA(b *batch.RecordBatch) {
 			serializeKey(row)
 			gsIdx, found := strIdx.GetOrInsert(h.keyBuf, int32(len(h.strGroupStates)))
 			if found {
+				if h.repActive && h.repSkipFor != b {
+					h.repSoAHit(b, row, gsIdx)
+				}
 				gi[row] = gsIdx
 			} else {
 				newGroup(row)

@@ -1159,6 +1159,12 @@ type kWayMerger struct {
 	headSortKey []byte               // stable backing for head.SortKey
 	headKeyVals []partialKeyValue    // stable backing for head.KeyVals
 	headAccs    []kernel.Accumulator // stable backing for head.Accs
+
+	// keyTypes / eligAgg are the aggregate's key types and representative
+	// eligibility (agg_representative.go): on a key tie the smaller
+	// representative's whole tuple is the head's, whichever run held it.
+	keyTypes []batch.TypeID
+	eligAgg  int
 }
 
 func newKWayMerger(runs []partialRunSource, aggs []partialAggSpec) *kWayMerger {
@@ -1221,6 +1227,14 @@ func (m *kWayMerger) Next() (*partialGroup, error) {
 	for len(m.heap) > 0 && bytesCompare(m.heap[0].key, m.head.SortKey) == 0 {
 		next := m.heap.Pop()
 		other := m.runs[next.source].Peek()
+		// Two members of one group meet: the smaller representative wins,
+		// not the lower source index (the in-memory remainder, the LATEST
+		// input, is source 0). Compared before the accumulators merge,
+		// which eligibility reads (#1713).
+		if (m.eligAgg > 0 || len(m.keyTypes) > 0) && repPartialCompare(m.keyTypes, m.eligAgg, other, &m.head) < 0 {
+			copy(m.head.KeyVals, other.KeyVals)
+			RepresentativeReplacements.Add(1)
+		}
 		for i := range m.head.Accs {
 			m.head.Accs[i].Merge(&other.Accs[i])
 		}
@@ -1860,6 +1874,10 @@ func (h *HashAggregate) finalizeViaPartialMerge() error {
 	h.useGenericSoA = false
 
 	h.partialMerger = newKWayMerger(sources, specs)
+	if h.repActive {
+		h.partialMerger.keyTypes = h.groupColTypes
+		h.partialMerger.eligAgg = h.repEligAgg
+	}
 	return nil
 }
 

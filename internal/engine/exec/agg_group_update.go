@@ -32,15 +32,20 @@ func (h *HashAggregate) processRow(b *batch.RecordBatch, row int) {
 	// Use open-addressing string hash table to avoid GC overhead of map[string].
 	groupIdx, found := h.strIndexForRow().GetOrInsert(h.keyBuf, int32(len(h.strGroupStates)))
 	if found {
-		h.updateGroup(h.strGroupStates[groupIdx], b, row)
+		gs := h.strGroupStates[groupIdx]
+		if h.repActive && h.repSkipFor != b && gs != nil && gs.extras != nil {
+			h.repHit(b, row, h.repStoredKeys(gs.extras, h.serializedKeys[groupIdx]), gs.extras.accs)
+		}
+		h.updateGroup(gs, b, row)
 		return
 	}
 
-	// New group. Its key values are the first member's PRINTED boxes, so a
+	// New group. Its key values are the member's PRINTED boxes, so a
 	// DECIMAL key keeps that member's display scale through the output,
-	// the in-memory merge and the spill run's value section, as PostgreSQL's
-	// representative does (ADR-0024 §1 as amended; ADR-0013's representative
-	// class). The merge key is the value's (appendGroupKeyColumn).
+	// the in-memory merge and the spill run's value section. A later member
+	// of the group replaces them, whole, when it is the smaller
+	// representative (repHit; ADR-0024's 2026-11-24 amendment, #1713). The
+	// merge key is the value's (appendGroupKeyColumn).
 	keyVals := make([]any, len(h.GroupByCols))
 	for i, idx := range h.groupColIdx {
 		if idx >= 0 {
@@ -50,6 +55,9 @@ func (h *HashAggregate) processRow(b *batch.RecordBatch, row int) {
 	gs := h.gsPool.alloc()
 	ext := gs.ensureExtras()
 	ext.keyValues = keyVals
+	if h.repActive {
+		h.repNoteBoxes(keyVals)
+	}
 	ext.accs = make([]kernel.Accumulator, len(h.Aggs))
 	h.extrasAccsCount += int64(len(h.Aggs))
 	if h.needsDistinct {
@@ -103,7 +111,11 @@ func (h *HashAggregate) processRowGroupingSets(b *batch.RecordBatch, row int) {
 
 		groupIdx, found := h.strIndexForRow().GetOrInsert(h.keyBuf, int32(len(h.strGroupStates)))
 		if found {
-			h.updateGroup(h.strGroupStates[groupIdx], b, row)
+			gs := h.strGroupStates[groupIdx]
+			if h.repActive && h.repSkipFor != b && gs != nil && gs.extras != nil {
+				h.repHit(b, row, gs.extras.keyValues, gs.extras.accs)
+			}
+			h.updateGroup(gs, b, row)
 			continue
 		}
 
@@ -123,6 +135,9 @@ func (h *HashAggregate) processRowGroupingSets(b *batch.RecordBatch, row int) {
 		gs.setID = int32(setIdx)
 		ext := gs.ensureExtras()
 		ext.keyValues = keyVals
+		if h.repActive {
+			h.repNoteBoxes(keyVals)
+		}
 		ext.accs = make([]kernel.Accumulator, len(h.Aggs))
 		h.extrasAccsCount += int64(len(h.Aggs))
 		if h.needsDistinct {

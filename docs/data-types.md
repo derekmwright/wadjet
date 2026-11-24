@@ -64,7 +64,8 @@ CREATE TABLE transactions (
   operation prints each arm's
   value at that arm's scale. Equal values of different display scales are one
   value to every comparison, join, GROUP BY and DISTINCT (`2.50 = 2.5`);
-  which of them represents a group is the first met. A stored column created
+  which of them represents a group is the one with the lower display scale
+  (`2.5`), on every path (ADR-0024 §12). A stored column created
   `NUMERIC` keeps no display scale per value yet and prints its values
   without trailing zeros; arithmetic over values of different display scales,
   a numeric array's elements, and a choice over literals only

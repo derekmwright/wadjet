@@ -34,6 +34,28 @@ func newSetOpKeyer(schema []parquet.Column) *setOpKeyer {
 	return &setOpKeyer{cols: schema}
 }
 
+// repCompare orders two rows of one SQL-equal member under the
+// representative rule: lexicographic over the columns in schema order, each
+// by batch.RepCompareBox under its declared type. Negative means a is the
+// smaller. A row the schema does not describe compares 0, so the first one
+// met stays, as before (the untyped fallback has no order to apply).
+func (k *setOpKeyer) repCompare(a, b map[string]any) int {
+	if k == nil || len(a) != len(k.cols) || len(b) != len(k.cols) {
+		return 0
+	}
+	for i := range k.cols {
+		c := &k.cols[i]
+		t := batch.TypeID(c.Type)
+		if !batch.RepEligibleType(t) {
+			continue
+		}
+		if r := batch.RepCompareBox(t, a[c.Name], b[c.Name]); r != 0 {
+			return r
+		}
+	}
+	return 0
+}
+
 // key encodes one row. Columns are visited in SCHEMA order, which is the order
 // SQL says the arms correspond in, so no name sort is needed — and every field
 // is self-delimiting, so two adjacent values cannot run together.

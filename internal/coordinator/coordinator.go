@@ -2730,6 +2730,24 @@ func (c *Coordinator) reAggregatePartials(batches []*batch.RecordBatch, columns 
 		rank    int
 	}
 
+	// The key columns whose SQL-equal values can differ in representation
+	// (batch.RepEligibleType), and the representative order over them.
+	var repKeyCols []int
+	for _, ci := range groupByIdx {
+		if batch.RepEligibleType(batch.TypeID(schema[ci].Type)) {
+			repKeyCols = append(repKeyCols, ci)
+		}
+	}
+	repRowBeats := func(b *batch.RecordBatch, row int, kb *batch.RecordBatch, krow int) bool {
+		for _, ci := range repKeyCols {
+			t := batch.TypeID(schema[ci].Type)
+			if c := batch.RepCompareBox(t, b.Columns[ci].GetValueOf(row, false), kb.Columns[ci].GetValueOf(krow, false)); c != 0 {
+				return c < 0
+			}
+		}
+		return false
+	}
+
 	// Per-batch global row offset, so a group's first-occurrence position has a
 	// single monotonic index across all batches.
 	totalRows := 0
@@ -2782,6 +2800,12 @@ func (c *Coordinator) reAggregatePartials(batches []*batch.RecordBatch, columns 
 					groups[key] = mr
 					*ordered = append(*ordered, mr)
 					continue
+				}
+				// Two partials of one group meet: the group's key values
+				// are the smaller representative's, whole-row (ADR-0024
+				// §12, #1713), not whichever partial came first.
+				if len(repKeyCols) > 0 && repRowBeats(b, row, mr.sourceBatch, mr.sourceRow) {
+					mr.sourceBatch, mr.sourceRow = b, row
 				}
 				for ai, ext := range aggExtractors {
 					mr.aggVals[ai] = aggCols[ai].mergeFn(mr.aggVals[ai], ext(b, row))

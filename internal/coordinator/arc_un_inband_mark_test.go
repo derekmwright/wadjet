@@ -131,10 +131,14 @@ func unibKept() map[string]struct{ want, why string } {
 			continue
 		}
 		parts := strings.Split(line, "	")
-		if len(parts) != 3 || parts[2] != "r18" {
+		if len(parts) != 3 || (parts[2] != "r18" && parts[2] != "rep") {
 			panic(fmt.Sprintf("arc_un_inband_kept.tsv: malformed line %q", line))
 		}
-		out[parts[0]] = struct{ want, why string }{parts[1], unibR18}
+		why := unibR18
+		if parts[2] == "rep" {
+			why = unibRep
+		}
+		out[parts[0]] = struct{ want, why string }{parts[1], why}
 	}
 	return out
 }
@@ -144,6 +148,13 @@ func unibKept() map[string]struct{ want, why string } {
 // DECIMAL(38,10) and prints that one scale (numeric-decimal r18), the same on
 // every arm. PostgreSQL prints each value at its own arm's scale.
 const unibR18 = "r18: a set operation over a column of another declaration prints the result column's one scale"
+
+// unibRep: which of two equal values a set operation keeps is the
+// representative rule's (ADR-0024 §12, #1713) — the lower display scale, on
+// every path — where PostgreSQL's default plan keeps the first one its hash
+// table meets. Each `rep` line answers PostgreSQL's default plan on the same
+// statement with rv_n's arm and un_x's swapped.
+const unibRep = "rep: the representative among equal values is the lower display scale (ADR-0024 §12)"
 
 // unibArmKept is an asynchronous arm's answer where it is not the other
 // arms', the same at c67ebf5b: an error substring ("ERR ...") or the rows.

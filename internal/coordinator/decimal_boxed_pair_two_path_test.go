@@ -899,9 +899,12 @@ func TestMixedDecimalIntegerSetOpIsReconciled(t *testing.T) {
 	// Every expectation is PostgreSQL 17.11's answer for the identical rows,
 	// sorted as text. Each value prints its own display scale (ADR-0024 §11,
 	// arc PS stage 1): the integer arm's values print as integers, the
-	// DECIMAL(9,2) arm's at scale 2. A DISTINCT form keeps the FIRST arm's
-	// member of an equal pair, so `a UNION id` answers 2.00 and `id UNION a`
-	// answers 2 (PostgreSQL's HashAggregate, measured).
+	// DECIMAL(9,2) arm's at scale 2. PostgreSQL's DISTINCT form keeps the
+	// FIRST arm's member of an equal pair, so `a UNION id` answers 2.00 and
+	// `id UNION a` answers 2 (its HashAggregate, measured); this engine keeps
+	// the member with the lower display scale, 2, in both orders — the
+	// representative rule (ADR-0024 §12, #1713), whose `a UNION id` answer is
+	// PostgreSQL's `id UNION a` answer.
 	wantDistinct := func(two string) []string {
 		return []string{"-0.01", "0.00", "1", "12.75", two, "3", "4", "5",
 			"6", "7", "8", "9", "<nil>"}
@@ -918,7 +921,7 @@ func TestMixedDecimalIntegerSetOpIsReconciled(t *testing.T) {
 		want []string
 	}{
 		{"union_decimal_first",
-			fmt.Sprintf("SELECT a FROM %s UNION SELECT id FROM %s", dbpTable, dbpTable), wantDistinct("2.00")},
+			fmt.Sprintf("SELECT a FROM %s UNION SELECT id FROM %s", dbpTable, dbpTable), wantDistinct("2")},
 		{"union_integer_first",
 			fmt.Sprintf("SELECT id FROM %s UNION SELECT a FROM %s", dbpTable, dbpTable), wantDistinct("2")},
 		{"union_all_decimal_first",

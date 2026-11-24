@@ -175,7 +175,12 @@ named mechanism.
     statement answers alike either way and is compared with the statement as
     written. Which of two equal values a set operation keeps is itself plan
     order (PostgreSQL's HashAggregate keeps the first it meets), so a gate
-    that prints a representative states the plan it measured.
+    that prints a representative states the plan it measured. Since
+    2026-11-24 the engine's own representative is ADR-0024 §12's fixed,
+    value-based order on every path, so such a gate states that rule (and
+    which PostgreSQL plan, if any, it equals), not a PostgreSQL plan — three
+    of the 18 `fenced` rows, `u_fixed_{2,3,4}_0_one`, now carry that rule's
+    answer as the disposition `rep`.
 
 ### Amendment 2026-09-12: a per-RUN difference in the ROW SET under a TOTAL key is never one of these classes, and the ARMS have to be separable (#1058)
 

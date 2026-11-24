@@ -1490,8 +1490,12 @@ carrier:
   DISTINCT row, one join match, one set-operation member; every key — the
   in-memory group and join key, the spill run's merge key (a DECIMAL box
   read without its trailing zeros), the boxed coordinator key — is the
-  value's. Which of two equal values represents a group is the first one
-  met, as on PostgreSQL, where it depends on the plan; a predicate over the
+  value's. ~~Which of two equal values represents a group is the first one
+  met, as on PostgreSQL, where it depends on the plan.~~ **Replaced
+  2026-11-24 by §12:** the representative is the smallest member under one
+  fixed, value-based total order (the lower display scale first), chosen
+  whole-row on every path; "first met" depended on execution timing, worker
+  count, merge, spill and transport order (#1713). A predicate over the
   text of a set operation's output, which PostgreSQL may test before or
   after the operation chooses that representative, is ADR-0013 item 11.
 - **Where a display scale comes from in stage 1.** A value written from
@@ -1585,6 +1589,174 @@ Gated by `coordinator.TestArcPSDisplayScaleEveryArm` (eleven arms),
 `coordinator.TestArcNXNumericCarrierEveryArm`,
 `coordinator.TestArcGKGroupKeySpellingEveryArm` and
 `coordinator.TestLiteralScaleInADecimalFold`.
+
+### 12. The representative among SQL-equal values is the smallest under one fixed order (2026-11-24)
+
+Added 2026-11-24 on Derek Wright's ruling of that date (#1713). It
+**replaces** §11's "which of two equal values represents a group is the
+first one met".
+
+**Why.** SQL equality makes `7` and `7.00` one group, one DISTINCT row, one
+set-operation member; it does not say which of their stored
+representations the answer prints. "The first one met" is not a property
+of the statement: a morsel-parallel dedup kept whichever clone merged
+first (`7.00` from rv_n's arm in place of un_x's `7`, dag-morsel4, forced
+deterministically by `worker.ForceRepresentativeRace`); the embedded
+engine's parallel GROUP BY printed `7.00` on 29 of 40 runs and `7` on 11
+at four scan workers; a spilled aggregate kept the LAST spelling, because
+the in-memory remainder (the latest input) is the k-way merge's source 0.
+A predicate over the text (`LIKE '%0'`) then changed a COUNT between runs
+of one plan, which ADR-0013's 2026-09-12 amendment forbids. PostgreSQL's
+own representative depends on its plan (HashAggregate keeps the first it
+meets; a sort keeps whatever the sort leaves first, mixed within one
+answer; one measured default plan is a GroupAggregate), so no plan of
+PostgreSQL's is a contract to copy.
+
+**The rule.**
+
+1. **SQL equality is unchanged.** Grouping, DISTINCT and set-operation keys
+   compare exactly as before; only which member's stored representation is
+   kept changes.
+2. **One total order over the representations of one SQL-equal value**,
+   written once, in `batch/representative.go`:
+   - DECIMAL: the LOWER effective display scale first. The effective
+     display scale is the number of fraction digits the group key's box
+     prints (`DecimalColumn.Text(i, false)`): an explicit code `d` prints
+     `d` when the carrier's digits past `d` are zero (invariant I1) and the
+     carrier scale S otherwise; `DScaleCarrier` prints S; `DScaleUnknown`
+     prints the carrier trimmed, S less its trailing zeros (a zero carrier
+     trims to `0`). Two SQL-equal values with one effective display scale
+     print one text, so the order is total on what can coexist; the text
+     compared bytewise is the stated tie-break and never separates two of
+     them.
+   - FLOAT4 / FLOAT8: by the IEEE-754 bits, sign bit set first, then the
+     bits ascending: `-0` before `0`, and the NaN payloads (which the key
+     folds onto one NaN and no SQL spelling produces) in one fixed order.
+   - CIDR: the stored text is the representation and `10.0.0.1` /
+     `10.0.0.1/32` are one value (#546): the shorter text first, then the
+     text bytewise.
+
+   The minimum under a total order is commutative, associative and
+   idempotent, so every meet order keeps one survivor
+   (`batch.TestRepresentativeOrderIsATotalOrder`: antisymmetry, totality,
+   transitivity, and every fold order and reduction tree over random
+   multisets).
+3. **Whole row.** When two members of one group meet, the kept
+   representation is the ENTIRE key tuple of one member: tuples compare
+   lexicographically by the per-column order in key order, and the smaller
+   is kept. A tuple is never assembled column by column: members
+   `(7.00, 8)` and `(7, 8.00)` keep `(7, 8.00)`, never `(7, 8)`.
+4. **Eligibility by operand.** UNION, DISTINCT and GROUP BY: every member is
+   eligible. INTERSECT, INTERSECT ALL, EXCEPT and EXCEPT ALL: the
+   representative is a LEFT-arm member, as PostgreSQL's is under both
+   measured plans; among the left members, the order of item 2. An ALL form
+   repeats that one representative as many times as its multiplicity rule
+   says, as PostgreSQL's HashSetOp and SetOp do:
+   `(un_x UNION ALL rv_n) EXCEPT ALL un_u` answers `1, 1, 1, 1.5, 1.5, 7`
+   on every arm (the single-process paths answered `1, 1, 1.00, 1.5, 1.50,
+   7.00`, a left member per surviving occurrence). On the stage DAG the
+   counting aggregate reads a member's eligibility from the left arm's tag
+   (`HashAggregate.SetRepresentativeEligibility`, armed by the worker from
+   the emit operator that follows it): a stored group is eligible exactly
+   when its left count is positive, and an eligible member always beats an
+   ineligible one; the shuffle sender's precombine keeps the same
+   invariant for the rows it ships.
+
+**Where it applies** — every place two members of one group meet, each
+with a unit test that forces both arrival orders and asserts one survivor,
+and a negative control (the comparison removed there, the test fails):
+
+| meet point | code | test |
+|---|---|---|
+| generic consume hit | `processRow` → `repHit` | `exec.TestRepresentativeConsumeHitPaths` (processRow *) |
+| grouping sets | `processRowGroupingSets` → `repHit` | same (grouping sets) |
+| eager generic SoA hit (DECIMAL keys) | `consumeBatchGenericSoA` → `repSoAHit` | same (generic SoA *) |
+| deferred float-key hit | typed lookup → `repDeferredFloatHit` | same (deferred float64 *) |
+| compact multi-column hit (FLOAT4 beside narrow keys) | `consumeBatchCompactGroup` → `repCompactHit` | same (compact *) |
+| overlapping clone merge, worker breaker merge | `mergeSinkState` → `repMergeGroup` | `exec.TestRepresentativeCloneMerge` |
+| k-way spill run merge | `kWayMerger.Next` → `repPartialCompare` | `exec.TestRepresentativeSpillRunMerge`, `exec.TestRepresentativeKWayMergerTie` |
+| raw-row spill replay, partitioned-owner consumption, fan-out final merge of partials, the coordinator's DISTINCT dedup | re-enter the consume hit paths above | the consume tests; the matrices below |
+| set-operation eligibility (DAG counting aggregate) | `repHit` / `repMergeGroup` / `repPartialCompare` eligibility class | `exec.TestRepresentativeConsumeHitPaths` (eligibility *), `worker.TestSetOpCountingAggregateKeepsALeftRepresentative`, `worker.TestShufflePrecombineKeepsALeftRepresentative` |
+| embedded set-operation helpers | `deduplicateRows`, `intersectRows`, `exceptRows` (`physical/set_op_plan.go`) | `physical.TestSetOpRepresentativeRule` |
+
+`adoptStateFrom` into an empty aggregate and disjoint partition adoption
+carry representations through without comparing; UNION ALL transport
+selects nothing. The representations are already carried everywhere: the
+group key's box is the printed text, the spill run's value section and
+the `.wshf` exchange carry it (§11), so neither the run format nor a
+fragment spec changed.
+
+**Eligibility table** (which types let two SQL-equal values coexist with
+different stored representations in this engine; measured through the
+embedded engine with `x = y`, GROUP BY and UNION over both arrival orders,
+2026-11-24):
+
+| type | two representations of one value? | order |
+|---|---|---|
+| DECIMAL / NUMERIC | yes: a computed value's display scale (`7` / `7.00`), and DECIMAL columns of different declared scale | lower effective display scale first |
+| FLOAT8, FLOAT4 | yes: `-0` / `0` (one group, `-0 = 0`); NaN payloads fold to one key but no SQL spelling produces two | sign bit first, then bits |
+| CIDR | yes: `10.0.0.1` / `10.0.0.1/32` are one value and keep their stored text | shorter text first, then bytewise |
+| TEXT, BYTES | no: equality is byte equality (`--locale=C`) | — |
+| BOOL, INT32, INT64, PORT, PROTOCOL, DATE, TIMESTAMP, DURATION, IPV4, MAC | no: one integer each; every spelling parses to it (`'t'` / `'true'`, `'80'` / `'080'`, `'tcp'` / `6`, `'2020-1-1'` / `'2020-01-01'`) | — |
+| IPV6, UUID | no: 16 bytes, printed canonically (`::1` / `0:0:0:0:0:0:0:1`, upper / lower case) | — |
+| INTERVAL | not here: `'1 day'` and `'24 hours'` are two different values in this engine (`=` false), which PostgreSQL calls equal — a separate value gap, not a representative | — |
+| ARRAY, MAP, ROW, VECTOR | yes for float elements (`ARRAY[-0.0]` / `ARRAY[0.0]` group as one); NUMERIC elements print the carrier scale already | **excluded**, below |
+| composite keys | the tuple of its columns | item 3 |
+
+**Excluded, and left open on #1713:** MIN / MAX of NUMERIC keep their
+extremum and the carrier scale (`7.0000000000` where PostgreSQL prints a
+member), a representation defect of the accumulator, not of grouping; and a
+key that is an ARRAY, MAP, ROW or VECTOR keeps the first member met. Their
+float elements could be ordered by a recursive comparison over the boxed
+key without an accumulator change, but the hit path would have to box the
+incoming container to compare it, and a NUMERIC element's display scale is
+already lost, so the rule would be partial there; it waits for the
+container representation work.
+
+**Divergence from PostgreSQL** (measured on 17.11, `postgres:17-alpine`,
+`--locale=C --encoding=UTF8`, against the default plan, `enable_hashagg =
+off`, the statement fenced with `OFFSET 0` for a predicate over a set
+operation's or a grouping's text (ADR-0013 item 11), and the statement
+with its arms swapped). Of the 36 r_* and s_* representation cells of
+`coordinator.TestArcPSDisplayScaleEveryArm`, 20 answer PostgreSQL's pinned
+plan (its default plan; fenced for a predicate) and 16 do not; every one of
+the 16 is a statement whose arms put the wider spelling first (`rv_n`'s
+`7.00`, `0` before `-0`), and each answers PostgreSQL's DEFAULT plan on the
+same statement with its arms swapped — the same members met in the other
+order (`s_union_len` also the statement's own unfenced plans, which push
+the predicate into the arms). None answers outside every measured plan, and
+no row COUNT or multiplicity moved except through a predicate over the
+representation's text. The cost of the rule is this
+divergence: one answer per statement, independent of timing, worker count,
+merge, spill and transport order, where PostgreSQL's answer is its plan's.
+
+**Cost.** A batch whose every key column is proven unable to hold a
+smaller representative (a DECIMAL column uniform at its carrier scale with
+no group printed wider, a float column with no zero and no NaN) pays one
+test per batch and one compare per hit (`HashAggregate.repCanSkipBatch`);
+every other batch compares each hit with its group. Medians of ten
+interleaved runs, base ff6ddc85 against the rule, on a shared host
+(`exec.BenchmarkDecimalKeyGroupBy`, 32 batches of 2,048 rows, 1,024
+groups, SUM and COUNT; `benchstat`, p from the Mann-Whitney test):
+
+| benchmark | base | rule | change |
+|---|---|---|---|
+| DECIMAL key, one representation per group, 1 worker | 3.50 ms | 3.59 ms | ~ (p=0.53) |
+| DECIMAL key, one representation per group, 8 workers | 13.1 ms | 14.5 ms | ~ (p=0.19) |
+| DECIMAL key, two representations per group, 1 worker | 3.53 ms | 4.35 ms | **+23 % (p<0.001)** |
+| DECIMAL key, two representations per group, 8 workers | 20.3 ms | 22.7 ms | ~ (p=0.17) |
+| the 20 `BenchmarkHashAggregate*` benchmarks | | | none significant; geomean +0.1 % |
+
+The cost is where the rule works: a group whose members arrive in two
+spellings compares every hit. (Without the per-batch test, the first
+implementation cost +21 % on the one-representation case as well.)
+
+Gated by `coordinator.TestArcPSDisplayScaleEveryArm` and
+`coordinator.TestArcPSDisplayScaleEveryArmForced` (eleven arms, the
+representative race forced and not; the r_* and s_* cells, one per
+construct with a representation-sensitive read, kept answers named in
+`psDisplayScaleKept`), `wadjet.TestRepresentativeEmbeddedEveryWorkerCount`,
+the tests in the table above, and `batch.TestKeyDisplayScaleMatchesTheBox`.
 
 ## Consequences
 

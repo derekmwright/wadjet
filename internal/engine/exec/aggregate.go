@@ -457,6 +457,22 @@ type HashAggregate struct {
 	// then wrote the table to a run nothing reads: a GROUP BY answered 0 of
 	// 5,000 groups (#1706, line 1706k).
 	reliefClosed bool
+	// The representative rule (agg_representative.go; ADR-0024's
+	// 2026-11-24 amendment): repCols are the key positions whose type can
+	// carry two representations of one SQL-equal value; repEligAgg
+	// (aggregate index + 1, 0 for none) names the aggregate whose input
+	// marks an eligible member (a set operation's left arm); repActive is
+	// either.
+	repCols    []int
+	repEligAgg int
+	repActive  bool
+	// repDecMaxEff bounds, per repCols position, the effective display
+	// scale of every DECIMAL box a group holds (-1 before any); repSkipFor is
+	// the batch the per-batch precheck proved cannot hold a smaller
+	// representative (repCanSkipBatch), so its hits pay one compare.
+	repDecMaxEff []int
+	repSkipFor   *batch.RecordBatch
+	repRowCmp    []func(*batch.Vector, int, any) int
 	// partialMerger, when non-nil, drives streaming Next() from the
 	// k-way merge of partial-spill runs. Set by finalizeViaPartialMerge
 	// (streaming variant); each Next() pulls one batch's worth of merged

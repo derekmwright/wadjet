@@ -495,6 +495,7 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) error {
 			h.groupColMeta[i] = b.Schema[idx]
 		}
 	}
+	h.resolveRepCols()
 	h.aggColIdx = make([]int, len(h.Aggs))
 	h.aggColIdx2 = make([]int, len(h.Aggs))
 	h.aggColIdx3 = make([]int, len(h.Aggs))
@@ -731,6 +732,13 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) error {
 	// non-simple so all typed fast paths below stay dormant and grouping
 	// runs on the generic AoS accumulator path.
 	if !aggFastPaths.On() {
+		allSimpleAggs = false
+	}
+	// A set operation's counting aggregate reads each stored group's
+	// eligibility from its accumulators at every hit (repHit), which the
+	// two-phase SoA scatter has not yet updated for the batch's earlier rows:
+	// it takes the row-at-a-time path, whose accumulators are current.
+	if h.repEligAgg > 0 {
 		allSimpleAggs = false
 	}
 	h.simpleAggs = allSimpleAggs

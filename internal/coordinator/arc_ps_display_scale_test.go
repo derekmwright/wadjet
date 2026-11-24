@@ -50,9 +50,10 @@ func TestArcPSDisplayScaleEveryArm(t *testing.T) {
 // each morsel-parallel producer writes one chunk per Consume and each
 // morsel-parallel breaker takes the schedule least favourable to a merge that
 // keeps the first representative it meets. Only dag-morsel4 runs
-// morsel-parallel fragments, so only it is changed; every cell still answers
-// PostgreSQL's text there (#1713: a parallel dedup kept whichever clone merged
-// first, and `7.00` from rv_n's arm replaced un_x's `7`).
+// morsel-parallel fragments, so only it is changed; every cell answers what it
+// answers unforced (#1713: a parallel dedup kept whichever clone merged first,
+// and `7.00` from rv_n's arm replaced un_x's `7`; the representative rule now
+// chooses by value, so the schedule cannot move it).
 func TestArcPSDisplayScaleEveryArmForced(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: eleven arms over the display scale")
@@ -128,9 +129,38 @@ func psDisplayScaleMatrix(t *testing.T) {
 }
 
 // psDisplayScaleKept is the kept answer, the same on every arm, where it is
-// not PostgreSQL's — each one a later stage's, named by its row.
+// not PostgreSQL's pinned (default-plan) answer — each one named by its row.
+//
+// Every entry below is the REPRESENTATIVE RULE's (ADR-0024's 2026-11-24
+// amendment, #1713): among SQL-equal members the engine keeps the one with
+// the lower display scale (7 before 7.00) and -0 before 0, whole-row, on
+// every path, where PostgreSQL's default plan keeps the first one its hash
+// table meets. These cells' arms put rv_n's 7.00 / 0 first, so PostgreSQL's
+// default plan answers 7.00 / 0 and the engine 7 / -0. Each answer is
+// PostgreSQL's DEFAULT plan's answer to the statement with its arms swapped:
+// the same members, met in the other order. A plan-dependent representative
+// is not a defined SQL answer; one answer per statement, independent of
+// timing, workers, merges, spills and transport order, is the engine's
+// contract.
 func psDisplayScaleKept() map[string]string {
-	return map[string]string{}
+	return map[string]string{
+		"r_union_text_swapped":  "rows=7 0.00 | 0.0000000001 | 1 | 1.5 | 2.50 | 7 | NULL",
+		"r_group_key_swapped":   "rows=7 0.00,1 | 0.0000000001,1 | 1,3 | 1.5,2 | 2.50,1 | 7,2 | NULL,2",
+		"r_union_count_zero":    "rows=1 2",
+		"s_except_all_swapped":  "rows=11 0.00 | 0.0000000001 | 1 | 1 | 1 | 1.5 | 1.5 | 2.50 | 7 | NULL | NULL",
+		"s_except_all_like":     "rows=1 2",
+		"s_except_swapped":      "rows=6 0.00 | 0.0000000001 | 1 | 1.5 | 2.50 | NULL",
+		"s_union_len":           "rows=1 3",
+		"s_union_join":          "rows=1 1",
+		"s_distinct_swapped":    "rows=7 0.00 | 0.0000000001 | 1 | 1.5 | 2.50 | 7 | NULL",
+		"s_distinct_like":       "rows=1 2",
+		"s_group_like":          "rows=1 2",
+		"s_group_sum":           "rows=7 0.00,4,2 | 0.0000000001,4,2 | 1,8,3 | 1.5,4,1 | 2.50,6,3 | 7,6,2 | NULL,10,3",
+		"s_group_having":        "rows=4 1,3 | 1.5,2 | 7,2 | NULL,2",
+		"s_grouping_sets":       "rows=15 0.00,2,1 | 0.00,NULL,1 | 0.0000000001,2,1 | 0.0000000001,NULL,1 | 1,1,2 | 1,3,1 | 1,NULL,3 | 1.5,1,2 | 1.5,NULL,2 | 2.50,3,1 | 2.50,NULL,1 | 7,2,2 | 7,NULL,2 | NULL,3,2 | NULL,NULL,2",
+		"s_float_union_swapped": "rows=1 -0",
+		"s_float_group_swapped": "rows=1 -0,9",
+	}
 }
 
 // psDisplayScaleArmKept is the answer one arm keeps where it is not
@@ -147,6 +177,8 @@ func psDisplayScaleKept() map[string]string {
 //     scales of the rows it answers are PostgreSQL's.
 //   - r_big_group_case: the same arm refuses to merge a GROUP BY over a
 //     computed key (unibGroupByMerge), as the base does (#1713's cells).
+//   - s_grouping_sets: the asynchronous door has no distributed stage for
+//     GROUPING SETS and refuses it, as the base does.
 func psDisplayScaleArmKept() map[string]map[string]string {
 	shuffled := "ERR where an earlier file of the same stage input named it"
 	scalar := "ERR scalar subquery in a SELECT-list item has no distributed lowering"
@@ -160,6 +192,7 @@ func psDisplayScaleArmKept() map[string]map[string]string {
 		"k_big_distinct":         {"async-probesplit": "rows=12 1.00 | 1.00 | 1.00 | 1.50 | 1.50 | 1.50 | 2.5 | 2.5 | 2.5 | 7.25 | 7.25 | 7.25"},
 		"k_big_group_key_marked": {"async-probesplit": "rows=6 0.0000000001,600 | 1,600 | 1.5,600 | 2.50,9 | 7,600 | NULL,600"},
 		"r_big_group_case":       {"async-probesplit": "ERR is not in the partial result schema"},
+		"s_grouping_sets":        {"async": "ERR GROUPING SETS / ROLLUP / CUBE has no distributed stage", "async-probesplit": "ERR GROUPING SETS / ROLLUP / CUBE has no distributed stage"},
 	}
 }
 

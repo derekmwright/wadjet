@@ -1,4 +1,4 @@
-# arc UN: the set-operation matrix (TestArcUNSetOperationMatrix). id, disposition, the answer every answering arm gives, PostgreSQL 17.11's answer, the arms that refuse (each refusal identical at the base). A row whose disposition is `fenced` (ADR-0013 item 11) carries PostgreSQL's answer with the set operation fenced, `SELECT count(*) FROM (SELECT v FROM <body> OFFSET 0) q WHERE <predicate>`: unfenced, PostgreSQL's planner pushes the text predicate into each arm before the set operation chooses one representative of equal values, and these 18 count statements answer differently (the other 630 count statements answer alike, measured 17.11); every other row carries PostgreSQL's answer to the statement as written.
+# arc UN: the set-operation matrix (TestArcUNSetOperationMatrix). id, disposition, the answer every answering arm gives, PostgreSQL 17.11's answer, the arms that refuse (each refusal identical at the base). A row whose disposition is `fenced` (ADR-0013 item 11) carries PostgreSQL's answer with the set operation fenced, `SELECT count(*) FROM (SELECT v FROM <body> OFFSET 0) q WHERE <predicate>`: unfenced, PostgreSQL's planner pushes the text predicate into each arm before the set operation chooses one representative of equal values, and these 18 count statements answer differently (the other 630 count statements answer alike, measured 17.11); every other row carries PostgreSQL's answer to the statement as written. A row whose disposition is `rep` (#1713, ADR-0024 §12) carries the REPRESENTATIVE RULE's answer: among SQL-equal values the engine keeps the lower display scale on every path, where PostgreSQL's default plan keeps the first its hash table meets; the nine u_fixed_{2,3,4}_0_{text,one,zero} rows put rv_n's 1.00 / 7.00 first, and each answers what PostgreSQL answers with the arms swapped (the u_fixed_*_1_* row), its own PostgreSQL answer kept beside it; u_fixed_{2,3,4}_0_one were `fenced` before.
 ua_null_2_0_bare	pg	[["0.0000000001"],["1"],["1"],["1.5"],["7"],["NULL"],["NULL"],["NULL"],["NULL"]]	[["0.0000000001"],["1"],["1"],["1.5"],["7"],["NULL"],["NULL"],["NULL"],["NULL"]]	
 ua_null_2_0_text	pg	[["0.0000000001"],["1"],["1"],["1.5"],["7"],["NULL"],["NULL"],["NULL"],["NULL"]]	[["0.0000000001"],["1"],["1"],["1.5"],["7"],["NULL"],["NULL"],["NULL"],["NULL"]]	
 ua_null_2_0_one	pg	[["2"]]	[["2"]]	
@@ -864,9 +864,9 @@ u_expr_4_3_zero	pg	[["0"]]	[["0"]]
 u_expr_4_3_sum	pg	[["9.5000000001"]]	[["9.5000000001"]]	
 u_expr_4_3_group	pg	[["0.0000000001","1"],["1","1"],["1.5","1"],["7","1"],["NULL","1"]]	[["0.0000000001","1"],["1","1"],["1.5","1"],["7","1"],["NULL","1"]]	
 u_fixed_2_0_bare	pg	[["0"],["0.0000000001"],["1"],["1.5"],["2.5"],["7"],["NULL"]]	[["0"],["0.0000000001"],["1"],["1.5"],["2.5"],["7"],["NULL"]]	
-u_fixed_2_0_text	pg	[["0.00"],["0.0000000001"],["1.00"],["1.50"],["2.50"],["7.00"],["NULL"]]	[["0.00"],["0.0000000001"],["1.00"],["1.50"],["2.50"],["7.00"],["NULL"]]	dag,dag-shuffled,dag-morsel4,dag-eager,dag-skew,dag-aggsplit
-u_fixed_2_0_one	fenced	[["0"]]	[["0"]]	
-u_fixed_2_0_zero	pg	[["5"]]	[["5"]]	
+u_fixed_2_0_text	rep	[["0.00"],["0.0000000001"],["1"],["1.5"],["2.50"],["7"],["NULL"]]	[["0.00"],["0.0000000001"],["1.00"],["1.50"],["2.50"],["7.00"],["NULL"]]	dag,dag-shuffled,dag-morsel4,dag-eager,dag-skew,dag-aggsplit
+u_fixed_2_0_one	rep	[["1"]]	[["0"]]	
+u_fixed_2_0_zero	rep	[["2"]]	[["5"]]	
 u_fixed_2_0_sum	pg	[["12.0000000001"]]	[["12.0000000001"]]	
 u_fixed_2_0_group	pg	[["0","1"],["0.0000000001","1"],["1","1"],["1.5","1"],["2.5","1"],["7","1"],["NULL","1"]]	[["0","1"],["0.0000000001","1"],["1","1"],["1.5","1"],["2.5","1"],["7","1"],["NULL","1"]]	
 u_fixed_2_1_bare	pg	[["0"],["0.0000000001"],["1"],["1.5"],["2.5"],["7"],["NULL"]]	[["0"],["0.0000000001"],["1"],["1.5"],["2.5"],["7"],["NULL"]]	
@@ -876,9 +876,9 @@ u_fixed_2_1_zero	fenced	[["2"]]	[["2"]]
 u_fixed_2_1_sum	pg	[["12.0000000001"]]	[["12.0000000001"]]	
 u_fixed_2_1_group	pg	[["0","1"],["0.0000000001","1"],["1","1"],["1.5","1"],["2.5","1"],["7","1"],["NULL","1"]]	[["0","1"],["0.0000000001","1"],["1","1"],["1.5","1"],["2.5","1"],["7","1"],["NULL","1"]]	
 u_fixed_3_0_bare	pg	[["0"],["0.0000000001"],["1"],["1.5"],["2.5"],["7"],["NULL"]]	[["0"],["0.0000000001"],["1"],["1.5"],["2.5"],["7"],["NULL"]]	
-u_fixed_3_0_text	pg	[["0.00"],["0.0000000001"],["1.00"],["1.50"],["2.50"],["7.00"],["NULL"]]	[["0.00"],["0.0000000001"],["1.00"],["1.50"],["2.50"],["7.00"],["NULL"]]	dag,dag-shuffled,dag-morsel4,dag-eager,dag-skew,dag-aggsplit
-u_fixed_3_0_one	fenced	[["0"]]	[["0"]]	
-u_fixed_3_0_zero	pg	[["5"]]	[["5"]]	
+u_fixed_3_0_text	rep	[["0.00"],["0.0000000001"],["1"],["1.5"],["2.50"],["7"],["NULL"]]	[["0.00"],["0.0000000001"],["1.00"],["1.50"],["2.50"],["7.00"],["NULL"]]	dag,dag-shuffled,dag-morsel4,dag-eager,dag-skew,dag-aggsplit
+u_fixed_3_0_one	rep	[["1"]]	[["0"]]	
+u_fixed_3_0_zero	rep	[["2"]]	[["5"]]	
 u_fixed_3_0_sum	pg	[["12.0000000001"]]	[["12.0000000001"]]	
 u_fixed_3_0_group	pg	[["0","1"],["0.0000000001","1"],["1","1"],["1.5","1"],["2.5","1"],["7","1"],["NULL","1"]]	[["0","1"],["0.0000000001","1"],["1","1"],["1.5","1"],["2.5","1"],["7","1"],["NULL","1"]]	
 u_fixed_3_1_bare	pg	[["0"],["0.0000000001"],["1"],["1.5"],["2.5"],["7"],["NULL"]]	[["0"],["0.0000000001"],["1"],["1.5"],["2.5"],["7"],["NULL"]]	
@@ -894,9 +894,9 @@ u_fixed_3_2_zero	fenced	[["2"]]	[["2"]]
 u_fixed_3_2_sum	pg	[["12.0000000001"]]	[["12.0000000001"]]	
 u_fixed_3_2_group	pg	[["0","1"],["0.0000000001","1"],["1","1"],["1.5","1"],["2.5","1"],["7","1"],["NULL","1"]]	[["0","1"],["0.0000000001","1"],["1","1"],["1.5","1"],["2.5","1"],["7","1"],["NULL","1"]]	
 u_fixed_4_0_bare	pg	[["0"],["0.0000000001"],["1"],["1.5"],["2.5"],["7"],["NULL"]]	[["0"],["0.0000000001"],["1"],["1.5"],["2.5"],["7"],["NULL"]]	
-u_fixed_4_0_text	pg	[["0.00"],["0.0000000001"],["1.00"],["1.50"],["2.50"],["7.00"],["NULL"]]	[["0.00"],["0.0000000001"],["1.00"],["1.50"],["2.50"],["7.00"],["NULL"]]	dag,dag-shuffled,dag-morsel4,dag-eager,dag-skew,dag-aggsplit
-u_fixed_4_0_one	fenced	[["0"]]	[["0"]]	
-u_fixed_4_0_zero	pg	[["5"]]	[["5"]]	
+u_fixed_4_0_text	rep	[["0.00"],["0.0000000001"],["1"],["1.5"],["2.50"],["7"],["NULL"]]	[["0.00"],["0.0000000001"],["1.00"],["1.50"],["2.50"],["7.00"],["NULL"]]	dag,dag-shuffled,dag-morsel4,dag-eager,dag-skew,dag-aggsplit
+u_fixed_4_0_one	rep	[["1"]]	[["0"]]	
+u_fixed_4_0_zero	rep	[["2"]]	[["5"]]	
 u_fixed_4_0_sum	pg	[["12.0000000001"]]	[["12.0000000001"]]	
 u_fixed_4_0_group	pg	[["0","1"],["0.0000000001","1"],["1","1"],["1.5","1"],["2.5","1"],["7","1"],["NULL","1"]]	[["0","1"],["0.0000000001","1"],["1","1"],["1.5","1"],["2.5","1"],["7","1"],["NULL","1"]]	
 u_fixed_4_1_bare	pg	[["0"],["0.0000000001"],["1"],["1.5"],["2.5"],["7"],["NULL"]]	[["0"],["0.0000000001"],["1"],["1.5"],["2.5"],["7"],["NULL"]]	

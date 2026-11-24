@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/distributed"
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec"
@@ -187,6 +188,11 @@ func (p *cappedPartialAgg) ensureAgg(ctx context.Context, b *batch.RecordBatch) 
 	// conversion it can never amortize (exec/two_level_hash.go,
 	// twoLevelBoundedMinGroups; SF100 Q18 measured 3-4x on the stage).
 	p.agg.SetEpochByteCap(p.capBytes)
+	// A set operation's counting rows precombined here keep a LEFT-arm
+	// member as each row's representative whenever the row counts one, the
+	// invariant the counting aggregate downstream reads its eligibility
+	// from (exec.HashAggregate.SetRepresentativeEligibility, #1713).
+	p.agg.SetRepresentativeEligibility(dagplan.SetOpLeftCountCol)
 	if err := p.agg.Init(ctx); err != nil {
 		p.agg = nil
 		return fmt.Errorf("partial agg init: %w", err)

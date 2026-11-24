@@ -1826,6 +1826,7 @@ func (e *Executor) runFragmentWithBreakers(ctx context.Context, task distributed
 		}
 		breakers[i] = fb
 		defer fb.Cleanup()
+		setOpRepresentativeEligibility(fb.Op, middle[idx+1:])
 		fp.setAggregateLayout(fb.Op)
 	}
 
@@ -2060,6 +2061,27 @@ func drainThroughBreaker(ctx context.Context, src exec.Source, xform func(*batch
 	// downstream sink here is a retaining SinkSource (Sort/HashAggregate),
 	// so snapshotSel=true.
 	return drainFlushableOps(ctx, ops, true, consume)
+}
+
+// setOpRepresentativeEligibility gives an INTERSECT / EXCEPT counting
+// aggregate its representative eligibility: the emit operator that follows
+// it names the left arm's count column, and a group's representative must be
+// a left member whenever the group has one, as PostgreSQL's is (#1713).
+// Other aggregates are untouched.
+func setOpRepresentativeEligibility(op exec.SinkSource, after []distributed.OpSpec) {
+	agg, ok := op.(*exec.HashAggregate)
+	if !ok {
+		return
+	}
+	for _, s := range after {
+		if s.Type == distributed.OpSetOpEmit {
+			agg.SetRepresentativeEligibility(s.SetOpLeftCol)
+			return
+		}
+		if s.Type == distributed.OpHashAggregate || s.Type == distributed.OpSort {
+			return
+		}
+	}
 }
 
 // buildFragmentBreaker dispatches per-OpType breaker construction. Returns a
