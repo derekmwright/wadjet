@@ -1,4 +1,4 @@
-# arc PS stage 1: a NUMERIC value carries its display scale (TestArcPSDisplayScaleEveryArm). Fixture: unPGFixture + unibFixture. r18_*: numeric-decimal r18's COALESCE / CASE sub-cells and #764's statements; r4_*: set-operations r4 incl. the 2.50-veto sub-cell; c1647*: #1647's statement and its companion; i11_*: a text predicate over a set operation whose arms carry different display scales (ADR-0013 item 11: PostgreSQL's answer is its fenced statement's); k_*: a column whose values carry different display scales through every consumer that materializes it; i5_*: equal values of different display scales compare, join, group and dedup as one.
+# arc PS stage 1: a NUMERIC value carries its display scale (TestArcPSDisplayScaleEveryArm). Fixture: unPGFixture + unibFixture. r18_*: numeric-decimal r18's COALESCE / CASE sub-cells and #764's statements; r4_*: set-operations r4 incl. the 2.50-veto sub-cell; c1647*: #1647's statement and its companion; i11_*: a text predicate over a set operation whose arms carry different display scales (ADR-0013 item 11: PostgreSQL's answer is its fenced statement's); k_*: a column whose values carry different display scales through every consumer that materializes it; i5_*: equal values of different display scales compare, join, group and dedup as one. r_*: which of two equal values of different text (7 / 7.00, -0 / 0) a dedup or a grouping keeps, the first occurrence in arm then input order (#1713).
 r18_coalesce_lit13	SELECT id, COALESCE(n, 12.3456789012345) FROM un_t
 r18_coalesce_15	SELECT id, COALESCE(n, 1.5) FROM un_t
 r18_coalesce_150	SELECT id, COALESCE(n, 1.50) FROM un_t
@@ -55,3 +55,17 @@ k_distinct	SELECT DISTINCT k FROM (SELECT COALESCE(n, 1.5) AS k FROM un_t) s
 k_big_group_key	SELECT k, count(*) FROM (SELECT COALESCE(n, 2.5) AS k FROM rv_big) s GROUP BY k
 k_big_distinct	SELECT DISTINCT k FROM (SELECT COALESCE(n, 2.5) AS k FROM rv_big) s
 k_big_group_key_marked	SELECT v, count(*) FROM (SELECT v FROM rv_big UNION ALL SELECT 2.50 FROM un_u) s GROUP BY v
+r_union_text	SELECT CAST(v AS TEXT) FROM (SELECT v FROM un_x UNION SELECT v FROM rv_n) s
+r_union_text_swapped	SELECT CAST(v AS TEXT) FROM (SELECT v FROM rv_n UNION SELECT v FROM un_x) s
+r_union_all_distinct	SELECT CAST(v AS TEXT) FROM (SELECT DISTINCT v FROM (SELECT v FROM un_x UNION ALL SELECT v FROM rv_n) a) s
+r_group_key	SELECT CAST(v AS TEXT), c FROM (SELECT v, count(*) AS c FROM (SELECT v FROM un_x UNION ALL SELECT v FROM rv_n) a GROUP BY v) s
+r_group_key_swapped	SELECT CAST(v AS TEXT), c FROM (SELECT v, count(*) AS c FROM (SELECT v FROM rv_n UNION ALL SELECT v FROM un_x) a GROUP BY v) s
+r_intersect	SELECT CAST(v AS TEXT) FROM (SELECT v FROM un_x INTERSECT SELECT v FROM rv_n) s
+r_intersect_all	SELECT CAST(v AS TEXT) FROM (SELECT v FROM un_x INTERSECT ALL SELECT v FROM rv_n) s
+r_except	SELECT CAST(v AS TEXT) FROM (SELECT v FROM (SELECT v FROM un_x UNION ALL SELECT v FROM rv_n) a EXCEPT SELECT v FROM un_u) s
+r_count_distinct	SELECT count(DISTINCT v) FROM (SELECT v FROM un_x UNION ALL SELECT v FROM rv_n) a
+r_window_key	SELECT CAST(v AS TEXT), count(*) OVER (PARTITION BY v) FROM (SELECT v FROM un_x UNION ALL SELECT v FROM rv_n) a
+r_union_count_zero	SELECT count(*) FROM (SELECT v FROM rv_n UNION SELECT v FROM un_x) s WHERE CAST(v AS TEXT) LIKE '%0'
+r_float_union	SELECT CAST(f AS TEXT) FROM (SELECT CAST('-0' AS DOUBLE PRECISION) AS f FROM un_u WHERE id = 1 UNION SELECT CAST('0' AS DOUBLE PRECISION) FROM un_u WHERE id = 2) s
+r_float_group	SELECT CAST(f AS TEXT), count(*) FROM (SELECT CAST('-0' AS DOUBLE PRECISION) AS f FROM un_u UNION ALL SELECT CAST('0' AS DOUBLE PRECISION) FROM un_x) a GROUP BY f
+r_big_group_case	SELECT CAST(k AS TEXT), count(*) FROM (SELECT CASE WHEN id <= 1500 THEN v ELSE CAST(v AS NUMERIC(10,2)) END AS k FROM rv_big) s GROUP BY k

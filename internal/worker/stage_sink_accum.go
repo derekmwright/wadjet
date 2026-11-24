@@ -63,9 +63,12 @@ func (s *unpartitionedStageSink) acquireSlab() *stageSlab {
 	s.slabsMu.Lock()
 	defer s.slabsMu.Unlock()
 	if n := len(s.slabFree); n > 0 {
-		sl := s.slabFree[n-1]
-		s.slabFree = s.slabFree[:n-1]
-		return sl
+		if !forceRepresentativeRace.Load() {
+			sl := s.slabFree[n-1]
+			s.slabFree = s.slabFree[:n-1]
+			return sl
+		}
+		ForcedSlabSplits.Add(1)
 	}
 	sl := &stageSlab{}
 	s.slabAll = append(s.slabAll, sl)

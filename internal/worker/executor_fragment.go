@@ -1640,7 +1640,11 @@ func (e *Executor) runBreakerConsumeParallel(ctx context.Context, task distribut
 	var collapsed atomic.Bool
 	var collapseSeq atomic.Int64 // forcing knob's per-breaker phase; test only
 	g, gctx := errgroup.WithContext(ctx)
-	for i := 0; i < k; i++ {
+	forced := forceRepresentativeRace.Load() // test only: morsel_force_order.go
+	if forced {
+		g.Go(func() error { return runForcedBreakerSchedule(gctx, d, drivers) })
+	}
+	for i := 0; i < k && !forced; i++ {
 		driver := drivers[i]
 		// Worker 0 feeds the spill-armed primary, which may answer heap
 		// pressure by draining (#326); clones hold tracking-only spill

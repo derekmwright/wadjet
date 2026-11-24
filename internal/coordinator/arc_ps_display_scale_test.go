@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/derekmwright/wadjet/internal/worker"
 )
 
 // A NUMERIC VALUE CARRIES ITS DISPLAY SCALE (ADR-0024 §1 as amended
@@ -40,6 +42,32 @@ func TestArcPSDisplayScaleEveryArm(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: eleven arms over the display scale")
 	}
+	psDisplayScaleMatrix(t)
+}
+
+// TestArcPSDisplayScaleEveryArmForced is the same matrix with the worker's
+// representative race forced on every fragment (worker.ForceRepresentativeRace):
+// each morsel-parallel producer writes one chunk per Consume and each
+// morsel-parallel breaker takes the schedule least favourable to a merge that
+// keeps the first representative it meets. Only dag-morsel4 runs
+// morsel-parallel fragments, so only it is changed; every cell still answers
+// PostgreSQL's text there (#1713: a parallel dedup kept whichever clone merged
+// first, and `7.00` from rv_n's arm replaced un_x's `7`).
+func TestArcPSDisplayScaleEveryArmForced(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: eleven arms over the display scale")
+	}
+	prev := worker.ForceRepresentativeRace(true)
+	t.Cleanup(func() { worker.ForceRepresentativeRace(prev) })
+	splits := worker.ForcedSlabSplits.Load()
+	psDisplayScaleMatrix(t)
+	if worker.ForcedSlabSplits.Load() == splits {
+		t.Fatal("the forcing knob never split a stage sink's slab: the forced matrix tested nothing")
+	}
+}
+
+func psDisplayScaleMatrix(t *testing.T) {
+	t.Helper()
 	cells := wdConsumerTable(t, "testdata/arc_ps_display_scale_cells.tsv")
 	pg := map[string]string{}
 	for _, a := range wdConsumerTable(t, "testdata/arc_ps_display_scale_pg17.tsv") {
@@ -117,6 +145,8 @@ func psDisplayScaleKept() map[string]string {
 //   - k_big_*: the asynchronous door with its probe split forced answers
 //     rv_big's rows more than once (#1615), as the base does; the display
 //     scales of the rows it answers are PostgreSQL's.
+//   - r_big_group_case: the same arm refuses to merge a GROUP BY over a
+//     computed key (unibGroupByMerge), as the base does (#1713's cells).
 func psDisplayScaleArmKept() map[string]map[string]string {
 	shuffled := "ERR where an earlier file of the same stage input named it"
 	scalar := "ERR scalar subquery in a SELECT-list item has no distributed lowering"
@@ -129,6 +159,7 @@ func psDisplayScaleArmKept() map[string]map[string]string {
 		"k_big_groupkey_count":   {"async-probesplit": "rows=1 9"},
 		"k_big_distinct":         {"async-probesplit": "rows=12 1.00 | 1.00 | 1.00 | 1.50 | 1.50 | 1.50 | 2.5 | 2.5 | 2.5 | 7.25 | 7.25 | 7.25"},
 		"k_big_group_key_marked": {"async-probesplit": "rows=6 0.0000000001,600 | 1,600 | 1.5,600 | 2.50,9 | 7,600 | NULL,600"},
+		"r_big_group_case":       {"async-probesplit": "ERR is not in the partial result schema"},
 	}
 }
 
