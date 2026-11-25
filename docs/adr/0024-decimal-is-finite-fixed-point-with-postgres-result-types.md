@@ -1333,8 +1333,10 @@ the base too: `CAST(v AS TEXT)` with `ORDER BY 1` over a UNION on the six DAG ar
 on the asynchronous door (#656); `sum` over a quoted literal in the FIRST
 arm and the matrix's scalar-subquery arm `(SELECT max(v) FROM un_x)`
 are refused on every arm; `(SELECT 2.5)` answers. Without ORDER BY the DAG
-still omits the projection in `CAST(v AS TEXT) AS x` over UNION (distinct),
-publishing the numeric column named `v` (UN-F9). Its batch's own mark is
+omitted the projection in `CAST(v AS TEXT) AS x` over UNION (distinct),
+publishing the numeric column named `v` (UN-F9); #1613 corrected that, and
+the stage DAG now evaluates the SELECT list and publishes `x` (the ORDER BY
+form above is still refused). Its batch's own mark is
 preserved when the declared projection has a different type, so pgwire,
 HTTP and gRPC coordinator doors all box it through `Vector.GetValueOf` and
 print `1`. Previously HTTP and gRPC printed `1.0000000000`; that door
