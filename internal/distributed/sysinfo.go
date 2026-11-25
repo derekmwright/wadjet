@@ -57,8 +57,11 @@ func processRSSFromStatm(data []byte) (int64, bool) {
 	return pages * pageSize, true
 }
 
-// DirDiskUsage returns the total size of files in a directory (non-recursive).
-// Returns 0 on error.
+// DirDiskUsage returns the total size of the files directly in dir, plus the
+// spill files beneath dir/wadjet-spill: the ones directly in it (the pool's)
+// and the ones one level down in each statement scope's directory
+// (wadjet-spill/stmt-<pid>-<n>/, memory.SpillManager.StatementScope), which is
+// where a worker task's operator spill goes. Returns 0 on error.
 func DirDiskUsage(dir string) int64 {
 	if dir == "" {
 		return 0
@@ -67,24 +70,34 @@ func DirDiskUsage(dir string) int64 {
 	if err != nil {
 		return 0
 	}
-	var total int64
-	for _, e := range entries {
-		if !e.IsDir() {
-			if info, err := e.Info(); err == nil {
-				total += info.Size()
-			}
-		}
-	}
-	// Also check wadjet-spill subdirectory
+	total := sumFileSizes(entries)
 	spillDir := filepath.Join(dir, "wadjet-spill")
 	subEntries, err := os.ReadDir(spillDir)
-	if err == nil {
-		for _, e := range subEntries {
-			if !e.IsDir() {
-				if info, err := e.Info(); err == nil {
-					total += info.Size()
-				}
-			}
+	if err != nil {
+		return total
+	}
+	total += sumFileSizes(subEntries)
+	for _, e := range subEntries {
+		if !e.IsDir() {
+			continue
+		}
+		if scopeEntries, err := os.ReadDir(filepath.Join(spillDir, e.Name())); err == nil {
+			total += sumFileSizes(scopeEntries)
+		}
+	}
+	return total
+}
+
+// sumFileSizes totals the sizes of the non-directory entries; an entry that
+// vanished between the listing and its stat counts 0.
+func sumFileSizes(entries []os.DirEntry) int64 {
+	var total int64
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		if info, err := e.Info(); err == nil {
+			total += info.Size()
 		}
 	}
 	return total

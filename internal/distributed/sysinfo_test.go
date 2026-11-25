@@ -3,8 +3,12 @@
 package distributed
 
 import (
+	"os"
+	"path/filepath"
 	"runtime"
 	"testing"
+
+	"github.com/derekmwright/wadjet/internal/engine/memory"
 )
 
 // TestProcessRSS_NonZero asserts ProcessRSS returns a plausible non-zero figure
@@ -63,5 +67,43 @@ func TestProcessRSSFromStatm(t *testing.T) {
 				t.Fatalf("bytes = %d, want %d (%d pages × %d)", got, tc.want*pageSize, tc.want, pageSize)
 			}
 		})
+	}
+}
+
+// TestDirDiskUsage_CountsStatementScopeFiles pins that the worker heartbeat's
+// SpillDiskUsed sees operator spill. Every worker task's planner spills through
+// SharedSpillMgr.StatementScope(), whose files live in
+// <dir>/wadjet-spill/stmt-<pid>-<n>/ rather than directly in wadjet-spill/; a
+// count that skipped those directories reported ~0 for operator spill, and the
+// harness's spill_bytes / RunPeakSpillBytes read that figure.
+func TestDirDiskUsage_CountsStatementScopeFiles(t *testing.T) {
+	dir := t.TempDir()
+	sm, err := memory.NewSpillManager(dir, memory.NewTracker("test", 1<<30))
+	if err != nil {
+		t.Fatalf("NewSpillManager: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "root.bin"), make([]byte, 1000), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sm.SpillDir(), "pool.bin"), make([]byte, 200), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	scope := sm.StatementScope()
+	defer scope.Cleanup()
+	stmtDir := scope.SpillDir()
+	if filepath.Dir(stmtDir) != sm.SpillDir() {
+		t.Fatalf("statement scope dir %q is not directly under the pool's %q", stmtDir, sm.SpillDir())
+	}
+	if err := os.WriteFile(filepath.Join(stmtDir, "run.bin"), make([]byte, 5000), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := DirDiskUsage(dir), int64(1000+200+5000); got != want {
+		t.Fatalf("DirDiskUsage = %d, want %d (root file + pool file + statement-scope file)", got, want)
+	}
+	if err := scope.Cleanup(); err != nil {
+		t.Fatalf("scope Cleanup: %v", err)
+	}
+	if got, want := DirDiskUsage(dir), int64(1000+200); got != want {
+		t.Fatalf("after scope Cleanup DirDiskUsage = %d, want %d", got, want)
 	}
 }
