@@ -6,6 +6,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"slices"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -28,10 +32,12 @@ import (
 
 // poolBalance is a synchronized reading of the pool (no statement reserving).
 type poolBalance struct {
-	used   int64
-	forced [memory.NumForcePurposes]int64
-	live   int
-	owners int
+	used      int64
+	forced    [memory.NumForcePurposes]int64
+	live      int
+	peaks     int
+	cooldowns int
+	owners    int
 }
 
 func readPoolBalance(db *DB) poolBalance {
@@ -41,9 +47,33 @@ func readPoolBalance(db *DB) poolBalance {
 	for p := memory.ForcePurpose(0); p < memory.NumForcePurposes; p++ {
 		b.forced[p] = tr.ForcedFor(p)
 	}
-	b.live = db.pool.SpillManager().Census().Live
+	c := db.pool.SpillManager().Census()
+	b.live, b.peaks, b.cooldowns = c.Live, c.Peaks, c.Cooldowns
 	b.owners = len(tr.OwnedSnapshot())
 	return b
+}
+
+// openSpillFiles lists the files beneath root that this process still holds
+// open, by reading /proc/self/fd. A statement scope's Cleanup removes its
+// directory whole, so a spill file an operator left open disappears from the
+// directory listing all the same; only its open descriptor shows that the
+// operator never closed it (a hash join's grace writers before 6cb01933).
+// nil where /proc is not available.
+func openSpillFiles(t *testing.T, root string) []string {
+	t.Helper()
+	ents, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, e := range ents {
+		target, err := os.Readlink(filepath.Join("/proc/self/fd", e.Name()))
+		if err == nil && strings.HasPrefix(target, root+string(filepath.Separator)) {
+			out = append(out, target)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // poolCleanupDB is wideJoinDB's table plus a small table `vt` the victim's
@@ -116,6 +146,9 @@ func TestPoolCancelOrFailOneStatementLeavesTheSurvivorsBalance(t *testing.T) {
 				t.Fatal("the survivor never reached its gate")
 			}
 			alone := readPoolBalance(db)
+			root := db.pool.SpillManager().SpillDir()
+			aloneFiles := spillRootEntries(t, root)
+			aloneOpen := openSpillFiles(t, root)
 
 			vctx, cancel := context.WithCancel(ctx)
 			defer cancel()
@@ -169,6 +202,17 @@ func TestPoolCancelOrFailOneStatementLeavesTheSurvivorsBalance(t *testing.T) {
 			if after != alone {
 				t.Errorf("after the victim ended at %s the pool reads %+v; the survivor alone held %+v", cell, after, alone)
 			}
+			// The victim's whole teardown, on every exit path (6cb01933 made the
+			// hash join drop its files and state on each): no statement
+			// directory or file of its own under the spill root, and no spill
+			// file still held open — the second catches an operator that left
+			// a writer open, which the scope's directory removal would hide.
+			if files := spillRootEntries(t, root); !slices.Equal(files, aloneFiles) {
+				t.Errorf("after the victim ended at %s the spill root holds %v; the survivor alone held %v", cell, files, aloneFiles)
+			}
+			if open := openSpillFiles(t, root); !slices.Equal(open, aloneOpen) {
+				t.Errorf("after the victim ended at %s these spill files are still open: %v (the survivor alone held %v)", cell, open, aloneOpen)
+			}
 
 			gates[0].open()
 			<-sDone
@@ -176,6 +220,9 @@ func TestPoolCancelOrFailOneStatementLeavesTheSurvivorsBalance(t *testing.T) {
 				t.Errorf("survivor: %s %v, PostgreSQL 17.11 %s", sAns, sErr, poolJoinWant)
 			}
 			assertDBPoolQuiescent(t, db)
+			if open := openSpillFiles(t, root); len(open) != 0 {
+				t.Errorf("after both statements ended these spill files are still open: %v", open)
+			}
 		})
 	}
 }
