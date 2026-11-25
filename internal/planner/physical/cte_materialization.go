@@ -5,6 +5,7 @@ package physical
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
@@ -122,10 +123,24 @@ func (p *Planner) materializeCTEColumnar(ctx context.Context, sql string,
 	}
 	coll := &exec.SpillableBatchCollector{Spill: p.getSpillManager()}
 	sink := &cteMaterializingSink{coll: coll}
+	// The body's pipeline is closed when the run ends, on both exits: its
+	// operators (a window, a sort, an aggregate in the body) hold charges on
+	// the statement's tracker that only their Close releases. The collector
+	// keeps the materialized rows — its Close is a no-op and it holds
+	// flattened, detached batches; it is released by releaseCTECache. Before
+	// this a window in a CTE body stranded its tracked bytes, which on an
+	// engine instance's shared pool outlived the statement (147,528 bytes per
+	// statement in TestArcWDWindowConsumersEveryArm's 512 KiB arm; #1685,
+	// 1685e).
 	pipeline := &exec.Pipeline{Source: source, Ops: ops, Sink: sink}
 	if err := pipeline.Run(ctx); err != nil {
+		_ = pipeline.Close()
 		coll.Release()
 		return nil, nil, err
+	}
+	if err := pipeline.Close(); err != nil {
+		coll.Release()
+		return nil, nil, fmt.Errorf("closing CTE pipeline: %w", err)
 	}
 	schema := sink.schema
 	if schema == nil {

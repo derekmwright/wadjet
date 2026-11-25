@@ -12,8 +12,8 @@ import (
 )
 
 // TestPoolSubqueryRunsReleaseTheirCharges (1685e round 2). A subquery the
-// planner runs by itself (a correlated scalar subquery, once per outer row)
-// executed its pipeline and never closed it, so what its operators charged
+// planner runs by itself (a correlated scalar subquery, once per outer row;
+// a materialized CTE body) executed its pipeline and never closed it, so what its operators charged
 // stayed charged: an aggregate's group state was released only by a Close
 // that never came. On a per-statement tracker that died with the statement;
 // on an engine instance's shared pool it outlives the statement, so every run
@@ -56,6 +56,12 @@ func TestPoolSubqueryRunsReleaseTheirCharges(t *testing.T) {
 		// A join inside the subquery.
 		{"join", "SELECT k, (SELECT count(*) FROM pt a JOIN pt b ON a.id = b.id WHERE a.g = po.k) AS n FROM po ORDER BY k",
 			"[map[k:1 n:3] map[k:2 n:2]]"},
+		// A CTE referenced twice is materialized by its own pipeline
+		// (materializeCTEColumnar); a window in its body stranded its tracked
+		// bytes until that pipeline was closed (147,528 bytes per statement
+		// in TestArcWDWindowConsumersEveryArm's 512 KiB arm).
+		{"cte-window", "WITH q AS (SELECT id, sum(x) OVER (ORDER BY id) AS w FROM pt) SELECT count(*) AS n, sum(a.w) AS s FROM q a JOIN q b ON a.id = b.id",
+			"[map[n:5 s:260]]"},
 	}
 	tr := db.pool.Tracker()
 	for _, sh := range shapes {

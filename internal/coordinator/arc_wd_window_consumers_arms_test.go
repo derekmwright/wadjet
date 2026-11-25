@@ -42,16 +42,15 @@ func wdConsumerTable(t *testing.T, path string) [][2]string {
 // wdConsumerKeptArms is this engine's answer on ONE arm where it is not
 // PostgreSQL's, by cell and arm. The other four arms answer PostgreSQL's rows.
 //
-// A CTE self-join over two stacked windows under the 512 KiB spilled arm: the
-// stacked windows' spill tracking holds ~410 KB of the budget when the join
-// builds its 115 KB hash table, and the build refuses loudly. The `bare`
-// reading refuses at 978cd0e5 and 9420d256 too; the `issue` reading's numeric
-// result (2.5 widens the window column) is the 240 bytes that cross the
-// budget there. Filing candidate, not this seam: the value is never wrong.
-var wdConsumerKeptArms = map[string]map[string]string{
-	"cons/p2/bare/stack/cte_self":  {"spilled512k": "ERR - hash join build: query: memory budget exceeded"},
-	"cons/p2/issue/stack/cte_self": {"spilled512k": "ERR - hash join build: query: memory budget exceeded"},
-}
+// Empty since 1685e round 2. It held cons/p2/bare/stack/cte_self and
+// cons/p2/issue/stack/cte_self on the 512 KiB spilled arm, refused with
+// "hash join build: query: memory budget exceeded": the CTE self-join's
+// materialization ran the two stacked windows in a pipeline nobody closed,
+// so their spill tracking (~410 KB) was still charged when the join built
+// its 115 KB hash table. The materialization now closes its pipeline once
+// the rows are collected (cte_materialization.go), and both cells answer
+// PostgreSQL's rows on every arm.
+var wdConsumerKeptArms = map[string]map[string]string{}
 
 // EVERY CONSUMER ABOVE A WINDOW OVER A DERIVED TABLE THAT SHADOWS A COLUMN OF
 // ITS OWN INPUT, ON EVERY ARM (#1435). Above `(SELECT id, g, b * 2 AS
