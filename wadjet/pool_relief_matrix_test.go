@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -272,7 +273,7 @@ func runReliefMatrixCell(t *testing.T, cell reliefMatrixCell, budget int64) {
 		}
 		if !reachedPhase.Load() {
 			if scanWorkersOne() && cell.site != exec.PhaseJoinBuildTail {
-				t.Skipf("no clone merge at WADJET_SCAN_WORKERS=1: B ran serially (%s %v)", bAns, bErr)
+				t.Skipf("no clone merge at one scan worker: B ran serially (%s %v)", bAns, bErr)
 			}
 			t.Fatalf("B never entered %s (answer %s %v): the cell did not reach its phase", cell.site, bAns, bErr)
 		}
@@ -407,8 +408,15 @@ func (l *reliefLog) reset() {
 	l.mu.Unlock()
 }
 
+// scanWorkersOne mirrors the planner's scan parallelism
+// (physical.scanParallelism): WADJET_SCAN_WORKERS when positive, else
+// runtime.NumCPU(), which honours the affinity mask (taskset -c 0 gives 1).
+// At one worker a pipeline runs serially and never clone-merges.
 func scanWorkersOne() bool {
-	return os.Getenv("WADJET_SCAN_WORKERS") == "1"
+	if n, err := strconv.Atoi(os.Getenv("WADJET_SCAN_WORKERS")); err == nil && n > 0 {
+		return n == 1
+	}
+	return runtime.NumCPU() == 1
 }
 
 // TestPoolSortReliefAcrossStatementsAnswersExactly is round 1's reproduction
