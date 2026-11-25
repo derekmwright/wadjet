@@ -15,13 +15,15 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/derekmwright/wadjet/wadjet"
 )
 
 // Baseline files: per-query expected row count plus a checksum over the
 // query's full output. The checksum locks in row contents AND output
 // ordering — any silent regression in values, types, or ORDER BY fails the
-// corresponding subtest. SF0.01 runs by default in CI; SF1 is opt-in
-// (~1.5M lineitem rows, slower datagen).
+// corresponding subtest. SF0.01 runs in CI (ci.yml, "TPC-H Correctness");
+// SF1 is opt-in (~6M lineitem rows, loaded in chunks).
 const (
 	baselineFileSF001 = "baseline-sf001.json"
 	baselineFileSF1   = "baseline-sf1.json"
@@ -161,8 +163,7 @@ func writeBaseline(t *testing.T, file string, baseline map[int]baselineEntry) {
 // runBaselineCheck shares the per-query verify/regenerate flow between
 // scale factors. The two TestTPCHBaseline* tests are thin wrappers so they
 // can wire scale-specific datagen and the env-var name that opts SF1 in.
-func runBaselineCheck(t *testing.T, sf ScaleFactor, file string, regenerate bool) {
-	db := setupTPCH(t, sf)
+func runBaselineCheck(t *testing.T, db *wadjet.DB, file string, regenerate bool) {
 	ctx := context.Background()
 
 	queryNums := make([]int, 0, len(TPCHQueries))
@@ -228,7 +229,7 @@ func runBaselineCheck(t *testing.T, sf ScaleFactor, file string, regenerate bool
 //	WADJET_REGENERATE_BASELINE=1 go test -run TestTPCHBaselineSF001 ./benchmarks/tpch/
 func TestTPCHBaselineSF001(t *testing.T) {
 	regenerate := os.Getenv("WADJET_REGENERATE_BASELINE") == "1"
-	runBaselineCheck(t, SF001, baselineFileSF001, regenerate)
+	runBaselineCheck(t, setupTPCH(t, SF001), baselineFileSF001, regenerate)
 }
 
 // TestTPCHBaselineSF1 mirrors SF001 at scale 1 (~6M lineitem rows). Several
@@ -237,15 +238,20 @@ func TestTPCHBaselineSF001(t *testing.T) {
 // boundaries and far more groups in HashAggregate, so it surfaces shape and
 // scale issues that SF001 cannot.
 //
-// Opt-in via WADJET_TPCH_SF1=1 — datagen materialises ~6M rows in memory
-// (~30 s wall) so it is too heavy to run on every CI invocation. Regenerate
-// with WADJET_REGENERATE_BASELINE_SF1=1 alongside that flag.
+// Opt-in via WADJET_TPCH_SF1=1 — too heavy to run on every CI invocation.
+// Regenerate with WADJET_REGENERATE_BASELINE_SF1=1 alongside that flag.
+//
+// The data loads in chunks (setupTPCHStreaming, the loader
+// TestTPCHQueriesLarge uses), not through setupTPCH: holding all of SF1 as
+// row maps at once was killed at about 14 GB on a 15 GB host (#1712). The
+// chunked loader writes different row-group boundaries (65,536 rows per
+// group), so the stored checksums describe THAT layout.
 func TestTPCHBaselineSF1(t *testing.T) {
 	if os.Getenv("WADJET_TPCH_SF1") != "1" {
-		t.Skip("set WADJET_TPCH_SF1=1 to enable SF1 baseline (heavy: ~6M lineitem rows, ~30 s datagen)")
+		t.Skip("set WADJET_TPCH_SF1=1 to enable SF1 baseline (heavy: ~6M lineitem rows)")
 	}
 	regenerate := os.Getenv("WADJET_REGENERATE_BASELINE_SF1") == "1"
-	runBaselineCheck(t, SF1, baselineFileSF1, regenerate)
+	runBaselineCheck(t, setupTPCHStreaming(t, SF1), baselineFileSF1, regenerate)
 }
 
 func firstRow(rows []map[string]any) any {

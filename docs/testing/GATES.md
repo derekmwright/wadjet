@@ -16,6 +16,14 @@ now just points here; this is the full catalogue, verbatim, unchanged.
   # After (on feature branch)
   TPCH_SCALE=1 go test -v -run TestTPCHQueriesLarge -timeout 30m ./benchmarks/tpch/ 2>&1 | tee /tmp/bench-after.txt
   ```
+- **What checks TPC-H answers, and where** (#1712). A row-count check passes a wrong value with the right row count; only the value checks below can fail on one.
+  - CI (`ci.yml`, "TPC-H Correctness (SF0.01)", `go test -v -run 'TestTPCHQueries|TestTPCHBaselineSF001' ./benchmarks/tpch/`):
+    - `TestTPCHQueries`: FLOAT64 fixture, single process. Each query runs and returns the expected ROW COUNT (`expectedRowsSF001`; Q02/Q22 within 4). No values.
+    - `TestTPCHBaselineSF001`: FLOAT64 fixture, single process. VALUES: a checksum over every cell of all 22 answers, in output order, against `baseline-sf001.json` (floats rendered at 6 significant figures, so last-digit addition-order noise does not move it). Same 22 checksums in 160 fresh processes at `WADJET_SCAN_WORKERS=1`, 2, 4 and unset on one and two CPUs.
+    - `TestTPCHQueriesDecimal` (matched by the same unanchored regexp): DECIMAL(15,2) fixture, single process AND stage DAG. VALUES against stored DuckDB fingerprints, digit for digit; a query ending in `LIMIT` is compared in full without it and by count with it.
+    - `TestTPCHQueries{BushyForced,SortMergeJoinForced,LateMaterializationForced}` (same regexp): the same rows as the default configuration; relative, not against a reference.
+  - AWS gate lane C (`deploy/gates/runner.sh`): `TestTPCHQueries$` (row counts), `TestDuckDBCompare` (FLOAT64 fixture, both paths, VALUES against stored DuckDB fingerprints; Q02/Q22 by count within 4) and the DECIMAL tests above. Lanes PG1/PG2 run `task pg-oracle:test` / `task pg-oracle:test-decimal`: `TestPostgresOracle`, all 22 queries' VALUES against a live PostgreSQL 17 at SF0.01.
+  - Neither: `TestTPCHBaselineSF1` (opt-in, `WADJET_TPCH_SF1=1 go test -run TestTPCHBaselineSF1 -timeout 30m ./benchmarks/tpch/`; checksums against `baseline-sf1.json`, Q11 by row count within 5 because its HAVING threshold moves with float addition order; loads in chunks) and the CI `benchmark` job's `TestTPCHQueriesLarge` at SF1, which checks only that each query runs.
 - **Optimizations that can change the row set must register a kill switch** in `internal/optswitch` (env convention: `WADJET_<NAME>=0` disables) and pass the optimization-invariance oracle, which runs every corpus query with each switch individually disabled and asserts identical results:
   ```bash
   # TPC-H arm (SF0.01, ~30s, runs in CI)
