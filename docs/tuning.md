@@ -8,7 +8,7 @@ This guide covers how to configure Wadjet for different hardware profiles — fr
 |-----------|----------|----------|---------|------------------|
 | Worker concurrency | `--max-concurrent` | `worker.max_concurrent` | 4 | Parallel tasks per worker |
 | LRU cache size | `--cache-bytes` | `worker.cache_bytes` | 0 = auto (10% of the Go memory limit, ~7.5% of detected memory) | Parquet data cache |
-| Memory budget | `--memory-budget` | `worker.memory_budget` | 0 (auto-detect from cgroup, else unlimited) | Per-task memory limit before spilling to disk |
+| Memory budget | `--memory-budget` | `worker.memory_budget` | 0 (derived) | `wadjet serve` and an embedded DB: the engine instance's query-execution budget, shared by its concurrent statements; a `wadjetd` worker: the planner's per-task sizing figure, its pool being `--shared-pool-budget` ([Memory budget](configuration.md#memory-budget)) |
 | Spill directory | `--spill-dir` | `worker.spill_dir` | OS temp dir | Where spill files are written |
 | Result store | `--result-store` | `worker.result_store_bytes` | 512 MiB | In-memory cache for intermediate stage results (0 = disabled) |
 | Parquet compression | — | `parquet.compression` | snappy | Codec for written Parquet files |
@@ -288,7 +288,7 @@ rate(wadjet_cache_hits_total[5m]) / (rate(wadjet_cache_hits_total[5m]) + rate(wa
 
 ## Deep Dive: Memory Budget vs Disk Spill
 
-The `memory_budget` parameter controls the per-task threshold where pipeline breakers (HashJoin, HashAggregate, Sort, Window) spill intermediate state to disk instead of growing memory.
+The memory budget is where pipeline breakers (HashJoin, HashAggregate, Sort, Window) spill intermediate state to disk instead of growing memory. It is one pool per engine instance, shared by that instance's concurrent statements, and it covers tracked query-execution memory, not the whole process ([Memory budget](configuration.md#memory-budget) lists what it covers, what it does not and which flag sets it for each instance). Under `wadjet serve` and in an embedded DB, size it for every statement that runs at once, not for one: two concurrent statements draw on the same figure. On a `wadjetd` worker the pool is `--shared-pool-budget`, and `memory_budget` below is the per-task figure the planner sizes operators with.
 
 ```
 memory_budget = 0   → auto-detect a cgroup limit; unlimited only on an uncapped host

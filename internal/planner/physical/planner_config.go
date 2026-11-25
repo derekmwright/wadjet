@@ -53,7 +53,7 @@ type Planner struct {
 	// FigureColname (Projection.PublishedName, #732): a nested block's names
 	// are what the block above resolves against.
 	outputProjection *logical.Node
-	MemoryBudget     int64  // per-query memory budget in bytes (0 = unlimited)
+	MemoryBudget     int64  // budget of a planner with NO injected pool (SharedTracker/SharedSpillMgr); 0 = detected (getSpillManager)
 	SpillDir         string // directory for spill files (empty = os temp dir)
 
 	// ManifestSnapshot pins each table's manifest to one catalog read for

@@ -81,7 +81,8 @@ Key facts for sizing and reliability:
   dispatch, results, gather, TaskProgress over one multiplexed
   bidi stream per worker, plaintext intra-cluster). `nats` remains the
   data-plane default for small/legacy setups; use `grpc` in production.
-- **Memory envelope:** `--memory-budget` (per-task) and
+- **Memory envelope:** `--memory-budget` (the planner's per-task figure on a
+  worker; the shared pool of the wire door's fallback database) and
   `--shared-pool-budget` (worker-wide pool) auto-detect from the cgroup
   when 0. The validated SF100 shape on 32 GB workers:
   `--memory-budget=5015936171 --shared-pool-budget=20063744686
@@ -210,7 +211,7 @@ what a SET-style facility could expose cheaply vs never.
 | `--nats-url`, `--nats-port`, `--nats-store-dir` | — / 4222 | control plane | boot-only |
 | `--data-plane`, `--coord-data-plane` | nats | task/result transport | boot-only (streams established at start) |
 | `--cluster-id`, `--leaf-remote` | local | federation topology | boot-only |
-| `--memory-budget` | 0 = auto | per-task budget; also drives GOMEMLIMIT derivation | boot-only today (tracker budgets + GOMEMLIMIT cached at start) |
+| `--memory-budget` | 0 = auto | per-task planner figure on a worker; the engine instance's shared pool for the wire door's fallback database ([Memory budget](configuration.md#memory-budget)); also drives GOMEMLIMIT derivation | boot-only today (tracker budgets + GOMEMLIMIT cached at start) |
 | `--shared-pool-budget` | 0 = auto | worker-wide reservation pool | boot-only today (same) |
 | `--cache-bytes` | 0 = auto (10% of Go limit, ~7.5% detected) | LRU file cache size | boot-only (sized at start) |
 | `--spill-dir` | OS temp | spill volume | boot-only |

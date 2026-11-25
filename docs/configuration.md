@@ -105,7 +105,8 @@ passing `--result-store`.
 | `--nats-url` | NATS server URL (worker mode) | none |
 | `--cluster-id` | Unique cluster identifier for federated routing | `local` |
 | `--leaf-remote` | Remote NATS URLs for leaf node federation (repeatable) | none |
-| `--memory-budget` | Per-task memory budget in bytes (0 = auto-detect from cgroup, else unlimited) | `0` |
+| `--memory-budget` | Query-execution memory budget in bytes: the engine instance's budget, shared by its concurrent statements, under `wadjet serve`, the one-shot commands and the wire door's fallback database; the planner's per-task sizing figure on a `wadjetd` worker (0 = derived; see [Memory budget](#memory-budget)) | `0` |
+| `--shared-pool-budget` | A `wadjetd` worker's memory pool in bytes, shared by its concurrent tasks (0 = GOMEMLIMIT minus the file cache, at least 256 MiB) | `0` |
 | `--spill-dir` | Directory for spill-to-disk files | OS temp dir |
 | `--result-store` | In-memory result store capacity in bytes (0 = disabled) | `512 MiB` |
 | `--pg-addr` | PostgreSQL wire protocol listen address | `:5433` |
@@ -140,6 +141,43 @@ embedding the engine, two `wadjet.DB`s open at once hold different values and
 closing one takes its value with it — and a worker that re-plans a whole query
 from its text plans it under the setting of the COORDINATOR that dispatched it,
 not its own.
+
+#### Memory budget
+
+The memory budget is the budget for **tracked query-execution memory of one
+engine instance, shared by its concurrent statements** (ADR-0006, 2026-11-24
+amendment). Two statements running at once on one instance draw on the same
+budget; neither holds all of it for itself. One statement alone has the whole
+budget. Past the budget, hash joins, hash aggregates, sorts and windows spill
+to disk; a statement that cannot spill what it needs (a cross join's build,
+for one) is refused with `memory budget exceeded`.
+
+| engine instance | its budget | when the figure is 0 |
+|---|---|---|
+| embedded `wadjet.DB` | `Config.MemoryBudget` | 75% of the cgroup limit, else 75% of physical memory |
+| `wadjet serve`; `query`, `shell` and the other one-shot commands | `--memory-budget` | `serve`: `(GOMEMLIMIT − file cache) / (4 × --max-concurrent)`; the one-shot commands: as for `wadjet.DB` |
+| the PostgreSQL wire door's fallback database under `wadjetd serve` | `--memory-budget` | as for `wadjet serve` |
+| a coordinator's local execution (small-query fast path and refused-plan route, one pool) | `8 × --local-fastpath-bytes` | `8 × 64 MiB` when the fast path is disabled |
+| the HTTP API's local path (no coordinator) | detected | 75% of the cgroup limit, else 75% of physical memory |
+| a `wadjetd` worker | `--shared-pool-budget`, shared by its concurrent tasks; `--memory-budget` is the planner's per-task sizing figure there | GOMEMLIMIT − file cache (at least 256 MiB) |
+
+What the budget does **not** cover: result buffering (the coordinator's
+gathered result has its own per-query budget; the gathered result of
+`CREATE TABLE AS` and `INSERT … SELECT` is bounded per statement, see the SQL
+reference; results the wire protocol retains), ingest buffers and the write
+itself, compaction, the decoded row-group and footer caches, batch pools, the
+embedding application's own memory, Go runtime overhead and allocations no
+operator models. Each pool or engine instance in one process has its full
+budget: a standalone `wadjetd` runs three (the worker's, the coordinator's
+local pool and the wire door's fallback database), and an application that
+opens two `wadjet.DB`s has two.
+
+So the budget is **not a hard ceiling on process memory**, and what operators
+charge is not always what they hold (issue #1685 lists the measured gaps).
+Statements of one instance can also take memory from each other: one short of
+room can make another statement's operator spill. No statement is promised a
+share or a turn: a statement that answers alone can be refused beside another,
+and which one is refused can depend on which arrived first.
 
 #### Object-store circuit breaker
 
@@ -274,7 +312,7 @@ grpc:
 worker:
   max_concurrent: 4
   cache_bytes: 268435456      # 256 MB LRU cache
-  memory_budget: 0            # per-task memory budget (0 = unlimited, no spill)
+  memory_budget: 0            # --memory-budget (0 = derived; see Memory budget)
   spill_dir: ""               # spill directory (default: OS temp dir)
   result_store_bytes: 0       # in-memory result store (0 = disabled, use S3)
 
@@ -479,7 +517,7 @@ These constants are compiled into the binary and represent the default ingestion
 | Batch size | 2,048 rows | Rows per record batch during execution |
 | Worker concurrency | 4 tasks | Max concurrent tasks per worker |
 | Worker cache size | 256 MB | LRU cache for recently-read Parquet data |
-| Memory budget | 0 (auto-detect from cgroup, else unlimited) | Per-task memory limit before spilling to disk |
+| Memory budget | 0 (derived) | Tracked query-execution memory of one engine instance, shared by its concurrent statements, before operators spill (see [Memory budget](#memory-budget)) |
 | Spill directory | OS temp dir | Where HashJoin/Aggregate/Sort/Window spill files are written |
 | Result store | 512 MiB | In-memory result cache for intermediate stage results (0 = disabled) |
 | Inline result threshold | 512 KB | Results below this are embedded in NATS messages |
@@ -613,7 +651,7 @@ above.
 | Variable | Description |
 |----------|-------------|
 | `WADJET_WORKER_MAX_CONCURRENT` | Max concurrent tasks per worker |
-| `WADJET_WORKER_MEMORY_BUDGET` | Per-task memory budget |
+| `WADJET_WORKER_MEMORY_BUDGET` | `--memory-budget` (see [Memory budget](#memory-budget)) |
 | `WADJET_WORKER_SPILL_DIR` | Spill directory |
 
 The LRU cache size and the result-store capacity have no environment

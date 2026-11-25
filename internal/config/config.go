@@ -202,7 +202,7 @@ type GRPC struct {
 type Worker struct {
 	MaxConcurrent    int    `yaml:"max_concurrent"`
 	CacheBytes       int64  `yaml:"cache_bytes"`
-	MemoryBudget     int64  `yaml:"memory_budget"`      // per-task memory budget in bytes (0 = unlimited, no spill)
+	MemoryBudget     int64  `yaml:"memory_budget"`      // --memory-budget: the engine instance's shared query-execution budget, a worker's per-task sizing figure (0 = derived; docs/configuration.md)
 	SpillDir         string `yaml:"spill_dir"`          // directory for spill files (default: os temp dir)
 	ResultStoreBytes int64  `yaml:"result_store_bytes"` // in-memory result store capacity (0 = disabled)
 }

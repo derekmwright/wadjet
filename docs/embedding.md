@@ -83,7 +83,7 @@ The `Config` struct accepts:
 - `Bucket` — S3 bucket name
 - `MetaKV` — the catalog KV of a process that already holds one (the servers in this repository pass theirs). **With no `DataDir`, no `CatalogDir` and a nil `MetaKV` the catalog is in memory**: every table you create is process-local and gone at exit, and a `serve` process cannot see it. It names an internal type; an out-of-tree program uses `DataDir` or `CatalogDir`.
 - `Logger` — Optional `*slog.Logger` (defaults to slog.Default)
-- `MemoryBudget` — per-query memory budget in bytes (0 = unlimited); pipeline breakers spill past it
+- `MemoryBudget` — the budget in bytes for tracked query-execution memory of this database, shared by its concurrent statements (one statement alone has all of it; two running at once draw on the same figure); pipeline breakers spill past it. 0 = 75% of the cgroup limit, else 75% of physical memory. It is not a ceiling on process memory: see [Memory budget](configuration.md#memory-budget) for what it does not cover (result buffering, ingest, caches, a second `wadjet.DB` in the same process, your application's own memory)
 - `SpillDir` — directory for spill-to-disk files (empty = OS temp dir)
 - `AuthProvider` — optional `*auth.Provider`, enables ABAC enforcement at query level
 - `SortMergeJoinBytes`, `LateMaterialization`, `BushyJoinReorder` — planner knobs (0/false = off).

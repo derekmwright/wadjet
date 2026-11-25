@@ -105,8 +105,16 @@ type Config struct {
 	// servers in this repository). nil, with no CatalogDir or DataDir, is
 	// the in-memory catalog. It names an internal type and has no public
 	// constructor; an out-of-tree program uses DataDir or CatalogDir.
-	MetaKV       catalog.MetaKV
-	MemoryBudget int64          // per-query memory budget in bytes (0 = unlimited)
+	MetaKV catalog.MetaKV
+	// MemoryBudget is the budget in bytes for tracked query-execution memory
+	// of this DB, shared by its concurrent statements: two statements running
+	// at once draw on the one figure (one alone has all of it). 0 = 75% of the
+	// cgroup limit, else 75% of physical memory. It is not a ceiling on process
+	// memory: result buffering, ingest, compaction, caches, other DBs in the
+	// process and the application's own memory are outside it
+	// (docs/configuration.md "Memory budget", ADR-0006).
+	MemoryBudget int64
+
 	SpillDir     string         // directory for spill-to-disk files (empty = os temp dir)
 	AuthProvider *auth.Provider // optional: enables ABAC enforcement at query level
 	// SortMergeJoinBytes routes inner equi-joins whose sides BOTH exceed this

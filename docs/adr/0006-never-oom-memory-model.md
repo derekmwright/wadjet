@@ -1,6 +1,6 @@
 # ADR-0006: Never-OOM memory — shared pool, ownership ledger, spill-everywhere
 
-Status: Accepted (accounting overhaul landed 2026-05-30, 35f6730; recorded 2026-07-25; amended 2026-08-17, 2026-09-03, 2026-09-04, 2026-09-18, 2026-09-19, 2026-11-21, 2026-11-22 and 2026-11-23 (twice) — see Amendments)
+Status: Accepted (accounting overhaul landed 2026-05-30, 35f6730; recorded 2026-07-25; amended 2026-08-17, 2026-09-03, 2026-09-04, 2026-09-18, 2026-09-19, 2026-11-21, 2026-11-22, 2026-11-23 (twice) and 2026-11-24 — see Amendments)
 
 ## Context
 
@@ -11,7 +11,8 @@ heartbeat starvation followed by reap/redispatch loops.
 
 ## Decision
 
-- **One shared per-process pool budget** with per-task charges; the
+- **One shared per-process pool budget** with per-task charges (superseded
+  2026-11-24: one pool per engine instance, see Amendments); the
   coordinator admits and bin-packs against heartbeat-reported pool
   stats, and workers hold task starts until the pool has room.
 - **Tiered ownership ledger** for accounting: every buffer has one owner
@@ -233,7 +234,8 @@ as an assertion, with the `GOMAXPROCS=1` control it must agree with) and
 to keep).
 
 **What this arc DID settle about the ledger.** A downstream operator inherits
-an overdrawn tracker, and that is correct: there is one ledger per query and a
+an overdrawn tracker, and that is correct: there is one ledger per query (one
+per engine instance since 2026-11-24, shared by its statements) and a
 forced charge is resident memory, so an operator reserving against a floor that
 excludes somebody else's bytes reserves against a fiction. What must not happen
 is a charge for memory that does not exist yet — producer 5 pre-sized its index
@@ -1135,3 +1137,110 @@ two windows; both hang with the two counts),
 for the floor and the contrast,
 `wadjet.TestTheJoinsFloorIsOneNumberWhenTheScanCannotRunAhead` and
 `wadjet.TestAScansDecodedReadAheadNoLongerOverdrawsTheBudget`.
+
+### 2026-11-24: one query-execution memory pool per engine instance (#1685)
+
+Ruled by the maintainer 2026-11-24: the concurrent statements of one engine
+instance share its configured budget, as a worker's tasks already shared the
+worker's pool. Before this, embedded execution, `wadjet serve`, the
+coordinator's local execution and the HTTP API gave every statement a private
+tracker and spill manager holding the whole budget, so two statements together
+held 14.0 MB against a 10.5 MB budget, neither spilling nor refusing.
+
+**What this supersedes.** The Decision's first bullet said "one shared
+per-process pool budget with per-task charges", and the 2026-09-03 amendment
+said "there is one ledger per query". Both are replaced by the model below.
+The statements of an embedded DB, `wadjet serve`, the coordinator's local
+execution and the HTTP API's local path charge their instance's one tracker
+directly: no per-statement tracker exists. Per-task charges exist only on a
+worker's fragment path, as child trackers of the executor's pool, each with
+the pool's budget and every reservation charged to the pool as well
+(`internal/worker/executor.go` `newSpillManager`); a worker's pipeline tasks
+charge the pool directly. A process can hold several pools (below), so the
+pool is per engine instance, not per process. The 2026-09-03 reasoning about an overdrawn ledger still holds, with
+the ledger shared: a statement now inherits forced charges another statement
+of the same instance holds.
+
+**The model as built.** An engine instance owns one `memory.ExecutionPool`: a
+root tracker with the budget and one spill manager under
+`<scratch>/wadjet-spill`, created with the instance and handed to its
+planners through the same injection the worker executor uses
+(`SharedTracker` / `SharedSpillMgr`). Each statement spills through a
+statement scope of that manager: the same tracker and relief registry, its own
+directory `wadjet-spill/stmt-<pid>-<n>`, removed when the statement ends on
+every exit. A failed or cancelled statement's charges, forced charges included,
+leave the pool with it.
+
+| engine instance | its budget | when the figure is 0 |
+|---|---|---|
+| embedded `wadjet.DB` | `Config.MemoryBudget` | 75% of the cgroup limit, else 75% of physical memory |
+| `wadjet serve` (one DB) | `--memory-budget` | `(GOMEMLIMIT − file cache) / (4 × --max-concurrent)`, a figure first derived for one task and now the whole pool |
+| coordinator local execution (small-query fast path and refused-plan route: one pool) | `8 × --local-fastpath-bytes` | `8 × 64 MiB` when the fast path is disabled |
+| HTTP API local path (no coordinator) | detected | 75% of the cgroup limit, else 75% of physical memory |
+| `wadjetd` worker executor | `--shared-pool-budget` (`--memory-budget` is the planner's per-task sizing figure there) | GOMEMLIMIT − file cache |
+
+One statement alone runs under the budget it had before; only concurrent
+statements of one instance now compete.
+
+**What the budget covers.** Tracked query-execution memory: operator
+reservations and the forced charges ADR-0006's census lists, made by the
+statements of that instance, including the query a write runs (DELETE, UPDATE
+and MERGE subqueries, the SELECT of CREATE TABLE AS and INSERT … SELECT).
+
+**What it does not cover**, kept as explicit accounting gaps, not treated as
+covered:
+
+- result buffering: the coordinator's gathered result has its own per-query
+  budget (`gatherResultBudget`: configured, else half of GOMEMLIMIT, else
+  2 GiB), and a query-sourced write's gathered result its own per-statement
+  bound; pgwire's retained results;
+- ingest buffers and the write itself, compaction;
+- the decoded row-group and footer caches, batch pools;
+- other pools and other engine instances in the same process, each with its
+  full budget. A standalone `wadjetd` runs THREE execution pools in one
+  process: the worker executor's, the coordinator's local pool and the
+  PostgreSQL wire door's fallback database;
+- the embedding application's own memory, Go runtime overhead and allocations
+  no operator models.
+
+**It is not a hard process-memory ceiling**, and charged is not retained:
+#1685 records measured gaps between what operators hold and what they charge
+(the `<>` semi/anti distinct-pair build, the partitioned build's spill writers,
+among others). No claim of a process ceiling is made until every relevant
+consumer is covered.
+
+**Cross-statement relief is kept and guarded.** A statement short of room asks
+the pool's registry, which may pick a live operator of another statement. An
+operator yields only state that is evictable under its own lifecycle lock:
+relief that lands after a join's build or an aggregate's Finalize frees
+nothing (9704a10e), and a clone merge or a join's build tail runs under the
+operator's lock so a relief call waits for it (25e1ffe8, 114df371). Measured
+on the shared pool before those landed, relief from one statement drained a
+top-K sort's primary while its clone merge appended to it and the sort
+answered one scan batch's rows (2048 rows, minimum 0, for PostgreSQL's 3000
+and 1000); with them, 0 wrong in 300 rounds and 150 under the race detector.
+
+**Fairness and starvation between statements are open.** No statement is
+promised a winner, a share or a turn: a statement that answers alone can be
+refused beside another, both can refuse, and the outcome can depend on which
+arrived first (a cross join answered first and was refused second beside a
+hash join, measured). Those are lines on #1706. There is no admission
+scheduler and no scheduling guarantee; neither is authorized by this ruling.
+
+Gates: `wadjet.TestPoolStatementsOfOneDBShareOneBudget` (2, 4 and 8
+statements), `pgwire.TestWirePoolConnectionsShareOneBudget`,
+`coordinator.TestCoordinatorLocalPoolTopology`,
+`coordinator.TestCoordinatorLocalStatementsShareOnePool`,
+`coordinator.TestCoordinatorFailedLocalAttemptReleasesBeforeTheDAG`,
+`server.TestHTTPLocalPoolTopology`, `server.TestHTTPLocalRequestsShareOnePool`
+(identity and sharing per route);
+`physical.TestPoolCancelOneStatementWhileAnotherReplays`,
+`wadjet.TestPoolCancelOrFailOneStatementLeavesTheSurvivorsBalance`,
+`wadjet.TestPoolDMLMembershipChargesLeaveWithTheStatement`,
+`wadjet.TestPoolManyStatementsLeaveNoState` (cleanup, conservation, 10,000
+statements); `wadjet.TestPoolReliefCrossesStatementsSafely`,
+`wadjet.TestPoolReliefEveryRegistrantAcrossStatements`,
+`wadjet.TestPoolSortReliefAcrossStatementsAnswersExactly` (relief across
+statements at every registrant's lifecycle point);
+`wadjet.TestPoolContentionCompletesBounded` (every statement ends with an
+answer, a named refusal or its cancellation).

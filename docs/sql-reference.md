@@ -746,7 +746,7 @@ subquery's per-row runs and a recursive term's iterations read the one
 evaluation, as do the runs of a WITH item declared directly in a correlated
 subquery's block that reads no outer value (one declared inside a derived
 table in the correlated body is still evaluated per outer row). It is held under the
-statement's memory budget and spills past it, and `EXPLAIN VERBOSE` names it
+memory budget the statement shares with its engine instance's other statements and spills past it, and `EXPLAIN VERBOSE` names it
 (`CTE s: volatile, evaluated once; every reference reads that result`). A
 volatile CTE read once, and any deterministic CTE, is expanded into the plan
 at its reference, as before. On the
@@ -1057,7 +1057,9 @@ validated against the table identity the statement read. The command tag is
 
 **Both statements gather the whole result before they write**, on the process
 that runs the statement, and the size of that GATHERED RESULT is bounded: 64 MiB
-by default, or `Config.MemoryBudget` when one is configured. A result past the
+by default, or `Config.MemoryBudget` when one is configured: a bound of its own
+for each statement's gathered result, not a share of the engine instance's
+query-execution memory budget. A result past the
 bound is refused with SQLSTATE `53400` naming the bound, rather than truncated
 or attempted.
 

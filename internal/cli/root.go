@@ -196,7 +196,7 @@ func NewRootCmd(serve *cobra.Command) *cobra.Command {
 	rootCmd.PersistentFlags().StringVar(&natsTLSCA, "nats-tls-ca", "", "CA certificate file for NATS mTLS peer verification")
 	rootCmd.PersistentFlags().StringVar(&otelEndpoint, "otel-endpoint", "", "OTLP gRPC endpoint for tracing (e.g., localhost:4317)")
 	rootCmd.PersistentFlags().BoolVar(&otelInsecure, "otel-insecure", false, "Use plaintext gRPC for OTLP exporter")
-	rootCmd.PersistentFlags().Int64Var(&memoryBudget, "memory-budget", 0, "Per-task memory budget in bytes (0 = auto-detect from cgroup, or unlimited)")
+	rootCmd.PersistentFlags().Int64Var(&memoryBudget, "memory-budget", 0, "Query-execution memory budget in bytes: the engine instance's, shared by its concurrent statements (serve, query, shell, the wire door's fallback database); a worker's per-task planner sizing figure (its pool is --shared-pool-budget). 0 = derived (docs/configuration.md, Memory budget)")
 	rootCmd.PersistentFlags().Int64Var(&sharedPoolBudget, "shared-pool-budget", 0, "Worker-wide shared memory pool in bytes (0 = auto-detect: envelope minus cache). All concurrent tasks Reserve against this pool.")
 	rootCmd.PersistentFlags().BoolVar(&spillFloatingBudget, "spill-floating-budget", false, "Activate the floating-budget spill threshold (deploy-gated; requires Phase-4 mmap RSS accounting). Default false = tuned static 40%/90% thresholds.")
 	rootCmd.PersistentFlags().BoolVar(&mmapRelief, "mmap-relief", true, "MADV_DONTNEED relief of cold mmap'd cache files when total RSS exceeds the ceiling. Default true (validated free-to-faster at SF100 and under 512MB-4GB edge caps, 2026-06-11); --mmap-relief=false restores the dormant path (no tracking, no syscall).")
