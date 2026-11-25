@@ -67,14 +67,21 @@ func TestForceAggDrainEveryDrainsAndDoesNotChangeTheAnswer(t *testing.T) {
 		t.Fatal("ForceAggDrainEvery(2) forced no drain: the knob did not engage")
 	}
 
-	index := func(rows []map[string]any) map[int64][2]int64 {
+	// A group emitted twice must fail here, not collapse in the map: a
+	// duplicate whose last copy carries the full value would otherwise
+	// compare equal.
+	index := func(arm string, rows []map[string]any) map[int64][2]int64 {
 		m := make(map[int64][2]int64, len(rows))
 		for _, r := range rows {
-			m[r["k"].(int64)] = [2]int64{r["s"].(int64), r["n"].(int64)}
+			k := r["k"].(int64)
+			if prev, dup := m[k]; dup {
+				t.Fatalf("%s: key %d emitted twice: (sum,count)=%v then %v", arm, k, prev, [2]int64{r["s"].(int64), r["n"].(int64)})
+			}
+			m[k] = [2]int64{r["s"].(int64), r["n"].(int64)}
 		}
 		return m
 	}
-	refIdx, gotIdx := index(ref), index(got)
+	refIdx, gotIdx := index("reference", ref), index("forced-drain", got)
 	if len(refIdx) != len(gotIdx) {
 		t.Fatalf("groups: reference=%d forced-drain=%d", len(refIdx), len(gotIdx))
 	}
