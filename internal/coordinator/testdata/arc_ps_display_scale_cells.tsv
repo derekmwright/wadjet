@@ -91,3 +91,4 @@ s_multi_like	SELECT count(*) FROM (SELECT x.v AS a, n.v AS b FROM un_x x JOIN rv
 s_multi_group	SELECT CAST(a AS TEXT), CAST(b AS TEXT), count(*) FROM (SELECT x.v AS a, n.v AS b FROM un_x x JOIN rv_n n ON x.id = n.id UNION ALL SELECT n.v, x.v FROM un_x x JOIN rv_n n ON x.id = n.id) s GROUP BY a, b
 s_float_union_swapped	SELECT CAST(f AS TEXT) FROM (SELECT CAST('0' AS DOUBLE PRECISION) AS f FROM un_u WHERE id = 1 UNION SELECT CAST('-0' AS DOUBLE PRECISION) FROM un_u WHERE id = 2) s
 s_float_group_swapped	SELECT CAST(f AS TEXT), count(*) FROM (SELECT CAST('0' AS DOUBLE PRECISION) AS f FROM un_x UNION ALL SELECT CAST('-0' AS DOUBLE PRECISION) FROM un_u) a GROUP BY f
+s_float_probesplit_group	SELECT CASE WHEN b.id <= 1500 THEN CAST('-0' AS DOUBLE PRECISION) ELSE CAST('0' AS DOUBLE PRECISION) END AS f, count(*) FROM rv_big b JOIN rv_n n ON b.g = n.g GROUP BY 1

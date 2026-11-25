@@ -3,6 +3,8 @@
 package coordinator
 
 import (
+	"fmt"
+	"strconv"
 	"testing"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
@@ -23,11 +25,24 @@ func TestReAggregatePartialsKeepsTheSmallerRepresentative(t *testing.T) {
 	}{
 		{"decimal", parquet.Column{Name: "k", Type: parquet.TypeDecimal, Precision: 18, Scale: 4, Nullable: true}, "7.00", "7", "7"},
 		{"cidr", parquet.Column{Name: "k", Type: parquet.TypeCIDR, Nullable: true}, "10.0.0.1/32", "10.0.0.1", "10.0.0.1"},
+		// -0 and 0 are one value (kernel.CompareFloat64), so they are ONE
+		// group here as in every worker: the merge key folds them, and the
+		// group keeps -0, the rule's representative.
+		{"float64", parquet.Column{Name: "k", Type: parquet.TypeFloat64, Nullable: true}, "0", "-0", "-0"},
+		{"float32", parquet.Column{Name: "k", Type: parquet.TypeFloat32, Nullable: true}, "0", "-0", "-0"},
 	} {
 		schema := []parquet.Column{tc.col, {Name: "n", Type: parquet.TypeInt64}}
 		mk := func(k string, n int64) *batch.RecordBatch {
 			b := batch.NewRecordBatch(schema, 1)
-			b.Columns[0].SetValue(0, k)
+			switch tc.col.Type {
+			case parquet.TypeFloat64:
+				b.Columns[0].Float64Data[0], _ = strconv.ParseFloat(k, 64)
+			case parquet.TypeFloat32:
+				f, _ := strconv.ParseFloat(k, 32)
+				b.Columns[0].Float32Data[0] = float32(f)
+			default:
+				b.Columns[0].SetValue(0, k)
+			}
 			b.Columns[0].Nulls.SetValid(0)
 			b.Columns[1].Int64Data[0] = n
 			b.Columns[1].Nulls.SetValid(0)
@@ -45,7 +60,7 @@ func TestReAggregatePartialsKeepsTheSmallerRepresentative(t *testing.T) {
 			if out[0].Len != 1 {
 				t.Fatalf("%s %v: %d groups, want 1", tc.name, order, out[0].Len)
 			}
-			if got := out[0].Columns[0].GetValueOf(0, false); got != tc.want {
+			if got := fmt.Sprint(out[0].Columns[0].GetValueOf(0, false)); got != tc.want {
 				t.Errorf("%s %v: key %v, want %s", tc.name, order, got, tc.want)
 			}
 		}

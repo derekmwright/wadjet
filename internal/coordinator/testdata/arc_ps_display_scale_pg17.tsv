@@ -94,3 +94,4 @@ s_multi_like	rows=1 5
 s_multi_group	rows=8 0.00,0.0000000001,1 | 0.0000000001,0.00,1 | 1,1.00,2 | 1,2.50,1 | 1.5,1.50,2 | 2.50,1,1 | 7,7.00,2 | NULL,NULL,2
 s_float_union_swapped	rows=1 0
 s_float_group_swapped	rows=1 0,9
+s_float_probesplit_group	rows=1 -0,5570

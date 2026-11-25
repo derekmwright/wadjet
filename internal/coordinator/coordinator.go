@@ -2632,13 +2632,16 @@ func (c *Coordinator) reAggregatePartials(batches []*batch.RecordBatch, columns 
 			keyEncoders[gi] = func(b *batch.RecordBatch, row int, dst []byte) []byte {
 				return strconv.AppendInt(dst, b.Columns[ci].Int64Data[row], 10)
 			}
+		// The canonical value (ADR-0012 item 8): -0 and 0 are one value, so
+		// one group, as in every worker; formatted raw, a group whose
+		// workers' partials carried -0 and 0 split in two here (#1713 F1).
 		case parquet.TypeFloat32:
 			keyEncoders[gi] = func(b *batch.RecordBatch, row int, dst []byte) []byte {
-				return strconv.AppendFloat(dst, float64(b.Columns[ci].Float32Data[row]), 'g', -1, 32)
+				return strconv.AppendFloat(dst, float64(kernel.CanonicalFloat32(b.Columns[ci].Float32Data[row])), 'g', -1, 32)
 			}
 		case parquet.TypeFloat64:
 			keyEncoders[gi] = func(b *batch.RecordBatch, row int, dst []byte) []byte {
-				return strconv.AppendFloat(dst, b.Columns[ci].Float64Data[row], 'g', -1, 64)
+				return strconv.AppendFloat(dst, kernel.CanonicalFloat64(b.Columns[ci].Float64Data[row]), 'g', -1, 64)
 			}
 		case parquet.TypeString, parquet.TypeBytes, parquet.TypeIPv6, parquet.TypeUUID:
 			keyEncoders[gi] = func(b *batch.RecordBatch, row int, dst []byte) []byte {
