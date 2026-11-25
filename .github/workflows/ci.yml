@@ -118,7 +118,22 @@ jobs:
         run: go test -race -run 'Concurrent|Parallel|Race' ./internal/planner/... ./internal/engine/exec/ -timeout 10m
 
       - name: TPC-H Correctness (SF0.01)
-        run: go test -v -run TestTPCHQueries ./benchmarks/tpch/ -timeout 5m
+        # The regexp is unanchored on purpose: 'TestTPCHQueries' matches
+        #   TestTPCHQueries        FLOAT64 fixture, single process: each query
+        #                          runs and its ROW COUNT (Q02/Q22 within 4)
+        #   TestTPCHQueriesDecimal DECIMAL(15,2) fixture, single process AND
+        #                          stage DAG: VALUES against stored DuckDB
+        #                          fingerprints, digit for digit
+        #   TestTPCHQueries{BushyForced,SortMergeJoinForced,
+        #     LateMaterializationForced}  same rows as the default config
+        #   TestTPCHQueriesLarge   skips without TPCH_SCALE
+        # TestTPCHBaselineSF001 (#1712) adds VALUES on the FLOAT64 fixture: a
+        # checksum over every cell of all 22 answers, in output order,
+        # against benchmarks/tpch/baseline-sf001.json (floats at 6
+        # significant figures). It is ~1 s / ~400 MB on two CPUs and gave the
+        # same 22 checksums in 160 fresh processes (WADJET_SCAN_WORKERS=1, 2,
+        # 4 and unset, on 1 and 2 CPUs).
+        run: go test -v -run 'TestTPCHQueries|TestTPCHBaselineSF001' ./benchmarks/tpch/ -timeout 5m
 
       - name: Optimization-Invariance Oracle (SF0.01)
         # Kill-switch differential (#287): every query re-run with each
