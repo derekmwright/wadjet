@@ -107,3 +107,48 @@ func TestDirDiskUsage_CountsStatementScopeFiles(t *testing.T) {
 		t.Fatalf("after scope Cleanup DirDiskUsage = %d, want %d", got, want)
 	}
 }
+
+// TestDirDiskUsage_WalksTheWholeSpillTreeWithoutFollowingLinks pins that the
+// count does not depend on how deep under wadjet-spill an operator writes, and
+// that it neither follows a symbolic link below wadjet-spill (to a directory
+// outside it, or back up to make a cycle) nor counts dir's other
+// subdirectories.
+func TestDirDiskUsage_WalksTheWholeSpillTreeWithoutFollowingLinks(t *testing.T) {
+	dir := t.TempDir()
+	deep := filepath.Join(dir, "wadjet-spill", "stmt-1-1", "op", "part-3")
+	if err := os.MkdirAll(deep, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(deep, "run.bin"), make([]byte, 7000), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Not spill: a sibling of wadjet-spill, and a big directory outside dir.
+	other := filepath.Join(dir, "stage-cache")
+	if err := os.MkdirAll(other, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(other, "cached.bin"), make([]byte, 50000), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "big.bin"), make([]byte, 90000), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, "wadjet-spill", "stmt-1-1", "to-outside")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(dir, "wadjet-spill"), filepath.Join(deep, "cycle")); err != nil {
+		t.Fatal(err)
+	}
+	var links int64
+	for _, l := range []string{filepath.Join(dir, "wadjet-spill", "stmt-1-1", "to-outside"), filepath.Join(deep, "cycle")} {
+		fi, err := os.Lstat(l)
+		if err != nil {
+			t.Fatal(err)
+		}
+		links += fi.Size()
+	}
+	if got, want := DirDiskUsage(dir), 7000+links; got != want {
+		t.Fatalf("DirDiskUsage = %d, want %d (the file three levels below a statement scope + the two links' own sizes; nothing through a link, nothing in stage-cache)", got, want)
+	}
+}
