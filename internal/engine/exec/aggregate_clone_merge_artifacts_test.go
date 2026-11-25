@@ -118,7 +118,11 @@ func cmaDrain(t *testing.T, ctx context.Context, h *HashAggregate) map[string]in
 			break
 		}
 		for _, r := range b.ToRows() {
-			out[fmt.Sprint(r["k"])] = r["s"].(int64)
+			k := fmt.Sprint(r["k"])
+			if _, dup := out[k]; dup {
+				t.Fatalf("group key %v emitted twice", k)
+			}
+			out[k] = r["s"].(int64)
 		}
 	}
 	return out
@@ -361,7 +365,11 @@ func TestCloneRawRowArtifactsSurviveTheMerge(t *testing.T) {
 			break
 		}
 		for _, r := range b.ToRows() {
-			got[r["k"].(int64)] = r["nd"].(int64)
+			k := r["k"].(int64)
+			if _, dup := got[k]; dup {
+				t.Fatalf("group key %d emitted twice", k)
+			}
+			got[k] = r["nd"].(int64)
 		}
 	}
 	_ = clone.Close()

@@ -272,6 +272,9 @@ func TestExternalMergeSpill_GenericMultiColKey(t *testing.T) {
 	got := make(map[expectKey]float64, len(rows))
 	for _, r := range rows {
 		k := expectKey{r["region"].(string), r["year"].(int32)}
+		if _, dup := got[k]; dup {
+			t.Fatalf("group key %v emitted twice", k)
+		}
 		got[k] = r["total"].(float64)
 	}
 	if len(got) != len(expected) {
@@ -536,7 +539,11 @@ func TestExternalMergeSpill_StreamingNext(t *testing.T) {
 		}
 		nBatches++
 		for _, r := range out.ToRows() {
-			got[r["k"].(int64)] = r["total"].(int64)
+			k := r["k"].(int64)
+			if _, dup := got[k]; dup {
+				t.Fatalf("group key %d emitted twice", k)
+			}
+			got[k] = r["total"].(int64)
 		}
 	}
 	if nBatches < 2 {
@@ -637,7 +644,11 @@ func TestExternalMergeSpill_FinalizeAllSpilledNoRemainder(t *testing.T) {
 			break
 		}
 		for _, r := range out.ToRows() {
-			got[r["k"].(int64)] = r["total"].(int64)
+			k := r["k"].(int64)
+			if _, dup := got[k]; dup {
+				t.Fatalf("group key %d emitted twice", k)
+			}
+			got[k] = r["total"].(int64)
 		}
 	}
 	if err := h.Close(); err != nil {
@@ -734,7 +745,11 @@ func TestHashAggregateSpillable_FootprintAndSpillSome(t *testing.T) {
 			break
 		}
 		for _, r := range out.ToRows() {
-			got[r["k"].(int64)] = r["total"].(int64)
+			k := r["k"].(int64)
+			if _, dup := got[k]; dup {
+				t.Fatalf("group key %d emitted twice", k)
+			}
+			got[k] = r["total"].(int64)
 		}
 	}
 	if err := h.Close(); err != nil {
@@ -993,7 +1008,11 @@ func TestHashAggregateSpillable_RequestReliefRoutesHere(t *testing.T) {
 			break
 		}
 		for _, r := range out.ToRows() {
-			got[r["k"].(int64)] = r["total"].(int64)
+			k := r["k"].(int64)
+			if _, dup := got[k]; dup {
+				t.Fatalf("group key %d emitted twice", k)
+			}
+			got[k] = r["total"].(int64)
 		}
 	}
 	if err := h.Close(); err != nil {
@@ -1122,7 +1141,11 @@ func TestPartialDrain_IntKeyMultiSpill(t *testing.T) {
 			break
 		}
 		for _, r := range out.ToRows() {
-			got[r["k"].(int64)] = r["total"].(int64)
+			k := r["k"].(int64)
+			if _, dup := got[k]; dup {
+				t.Fatalf("group key %d emitted twice", k)
+			}
+			got[k] = r["total"].(int64)
 		}
 	}
 	if err := h.Close(); err != nil {
@@ -1234,7 +1257,11 @@ func TestPartialDrain_SelfSpill(t *testing.T) {
 			break
 		}
 		for _, r := range out.ToRows() {
-			got[r["k"].(int64)] = r["total"].(int64)
+			k := r["k"].(int64)
+			if _, dup := got[k]; dup {
+				t.Fatalf("group key %d emitted twice", k)
+			}
+			got[k] = r["total"].(int64)
 		}
 	}
 	if err := h.Close(); err != nil {
