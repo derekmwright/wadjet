@@ -1750,6 +1750,16 @@ groups, SUM and COUNT; `benchstat`, p from the Mann-Whitney test):
 The cost is where the rule works: a group whose members arrive in two
 spellings compares every hit. (Without the per-batch test, the first
 implementation cost +21 % on the one-representation case as well.)
+Re-measured on the rule rebased onto base 667d1ef1 (the same benchmark, ten
+interleaved runs, host load 3–11): the two-representation case at 1 worker
+is 3.09 ms against 4.11 ms, **+32.97 % (p=0.003)**; the other three
+`BenchmarkDecimalKeyGroupBy` rows and the 20 `BenchmarkHashAggregate*`
+benchmarks show no significant change (geomean of all 24 +0.86 %). The
+table above is the first measurement, against base ff6ddc85; both figures
+are this one case. This cost is accepted. A possible later optimization,
+not implemented: cache each group's effective display scale beside its
+stored representative, so a hit compares one integer instead of
+re-deriving the stored box's scale on every comparison.
 
 Gated by `coordinator.TestArcPSDisplayScaleEveryArm` and
 `coordinator.TestArcPSDisplayScaleEveryArmForced` (eleven arms, the
