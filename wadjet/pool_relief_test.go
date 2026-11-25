@@ -12,9 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec"
-	"github.com/derekmwright/wadjet/internal/engine/expr"
 	"github.com/derekmwright/wadjet/internal/engine/memory"
 	"github.com/derekmwright/wadjet/internal/storage/ingest"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -99,38 +97,11 @@ func addBigRowGroupCopy(t *testing.T, db *DB) {
 	}
 }
 
-// countGate blocks the call that brings its count to n, once, until released.
+// countGate is a hold armed by armLiveGate: reached closes when B is held,
+// release lets it go.
 type countGate struct {
-	n       int64
-	calls   atomic.Int64
 	reached chan struct{}
 	release chan struct{}
-}
-
-var (
-	countGatesMu sync.Mutex
-	countGates   = map[string]*countGate{}
-)
-
-func armCountGate(name string, n int64) *countGate {
-	g := &countGate{n: n, reached: make(chan struct{}), release: make(chan struct{})}
-	countGatesMu.Lock()
-	countGates[name] = g
-	countGatesMu.Unlock()
-	expr.RegisterFunc(name, func(args []any) any {
-		countGatesMu.Lock()
-		g := countGates[name]
-		countGatesMu.Unlock()
-		if g.calls.Add(1) == g.n {
-			close(g.reached)
-			select {
-			case <-g.release:
-			case <-time.After(poolGateDeadline):
-			}
-		}
-		return args[0]
-	}, expr.RetTypeOf(batch.TypeInt64))
-	return g
 }
 
 // TestPoolReliefCrossesStatementsSafely. Cells (B's lifecycle point when A
@@ -174,8 +145,16 @@ func TestPoolReliefCrossesStatementsSafely(t *testing.T) {
 			case "join-after-build":
 				go func() { <-gates[0].reached; close(bHeld); <-releaseB; gates[0].open() }()
 			case "aggregate-mid-consume":
-				g := armCountGate("pool_count_gate", 3000)
-				bSQL = "SELECT count(*) AS n, sum(c) AS s FROM (SELECT k, count(pool_count_gate(k)) AS c FROM wide GROUP BY k) q"
+				// Held once B's aggregate is live with spillable bytes; the
+				// gate is a filter below the aggregate (armLiveGate). One
+				// scan worker: a parallel GROUP BY partitions its groups
+				// into clones registered on tracking-only views (private
+				// registries, pipeline.go), so its primary may hold nothing
+				// another statement's relief can reach; the serial
+				// aggregate is the one that does.
+				t.Setenv("WADJET_SCAN_WORKERS", "1")
+				g := armLiveGate(db, "HashAggregate")
+				bSQL = "SELECT count(*) AS n, sum(c) AS s FROM (SELECT k, count(k) AS c FROM wide WHERE pool_count_gate(k) >= 0 GROUP BY k) q"
 				bWant = "[map[n:4000 s:4000]]"
 				go func() { <-g.reached; close(bHeld); <-releaseB; close(g.release) }()
 			}
