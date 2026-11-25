@@ -30,7 +30,19 @@ func (p *Planner) makeSubqueryRunner() expr.SubqueryRunner {
 		if ctx == nil {
 			ctx = context.Background()
 		}
-		return p.forSubquery().executeSubquery(ctx, sql)
+		// What this ONE run builds is released when it ends, as for a
+		// recursive term's iteration (recursive_cte_iteration.go): the child
+		// owns the joins it builds (forSubquery gives it its own record), and
+		// nothing reads them once its pipeline has run and closed. Without
+		// this no owner ever closed them — the parent's Cleanup closes only
+		// its own — and their build reservations stayed charged; on an
+		// engine instance's shared pool, past the statement (#1685, 1685e).
+		// closeAbandonedJoins waits for a build still running (a run that
+		// failed) and leaves a gated build that never started, which holds
+		// nothing.
+		sub := p.forSubquery()
+		defer sub.closeAbandonedJoins()
+		return sub.executeSubquery(ctx, sql)
 	}
 }
 
@@ -63,8 +75,12 @@ func (p *Planner) forSubquery() *Planner {
 	// within-one-build economy, never a promise across builds.
 	sub.subqueryDeclCache = &subqueryDeclMemo{}
 	// Its own build record: the map is written as joins are planned, and a
-	// child planner may plan from an execution goroutine.
+	// child planner may plan from an execution goroutine. The same for the
+	// joins it owns: `sub := *p` copied the parent's slice header, so a
+	// child's appends reached no owner (the parent's length never moved) and
+	// two children could append into one backing array.
 	sub.joinBuilds = nil
+	sub.builtJoins = nil
 	sub.MaterializedInputs = nil
 	sub.StreamingSources = nil
 	sub.ScanFileFilter = nil
@@ -592,16 +608,29 @@ func (p *Planner) ExecuteSubquerySchema(ctx context.Context, sql string, node pl
 		sink = collectSink
 	}
 
-	// Execute
+	// Execute. The run's pipeline is closed when the run ends, on both exits:
+	// its operators hold charges on the statement's tracker (an aggregate's
+	// group state, a sort's buffers, a join's index) and spill files, and
+	// only Close releases them. Without it every run of a correlated
+	// subquery stranded its aggregate's charge, which on an engine
+	// instance's shared pool outlived the statement and shrank every later
+	// statement's room (17,920 bytes of forced spill tracking per
+	// `SELECT k, (SELECT corr(x + po.k, y) FROM pt) FROM po`; #1685, 1685e).
 	pipeline := &exec.Pipeline{Source: source, Ops: ops, Sink: sink}
 	if err := pipeline.Run(ctx); err != nil {
+		_ = pipeline.Close()
 		return nil, nil, fmt.Errorf("subquery execution error: %w", err)
 	}
 
 	// Schema BEFORE ToRows: the sink keeps its captured schema across that
-	// call, but reading it first keeps the order a local fact.
+	// call, but reading it first keeps the order a local fact. The rows are
+	// boxed (copied out of the batches) before Close.
 	schema := collectSink.Schema()
-	return subqueryRowsPerColumn(schema, collectSink), schema, nil
+	rows := subqueryRowsPerColumn(schema, collectSink)
+	if err := pipeline.Close(); err != nil {
+		return nil, nil, fmt.Errorf("closing subquery pipeline: %w", err)
+	}
+	return rows, schema, nil
 }
 
 // subqueryRowsPerColumn preserves one map entry per positional output column,

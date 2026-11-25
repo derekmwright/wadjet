@@ -47,6 +47,17 @@ func TestPoolManyStatementsLeaveNoState(t *testing.T) {
 			// pool's tracker forever (window.go flushSpillLocked).
 			_, err = db.Query(ctx, "SELECT count(*) AS n, max(r) AS m FROM (SELECT row_number() OVER (ORDER BY pad DESC) AS r FROM wide) q")
 			kinds["window-spill"]++
+		case i%50 == 40:
+			// A correlated scalar subquery run once per outer row, an
+			// aggregate in each run: every run's pipeline and joins must be
+			// closed when it ends (subquery_pipeline.go), or its charge
+			// stays on the pool. PostgreSQL 17.11: 20 | 270.
+			var res *QueryResult
+			res, err = db.Query(ctx, "SELECT count(*) AS n, sum(m) AS s FROM (SELECT a.k, (SELECT max(b.k + a.k) FROM wide b WHERE b.k < 5) AS m FROM wide a WHERE a.k < 20) q")
+			if err == nil && fmt.Sprint(res.Rows) != "[map[n:20 s:270]]" {
+				t.Fatalf("statement %d: the correlated subquery answered %v, PostgreSQL 17.11 20 | 270", i, res.Rows)
+			}
+			kinds["correlated-subquery"]++
 		case i%7 == 0:
 			_, err = db.Query(ctx, "SELECT nosuch FROM wide")
 			kinds["planning-error"]++

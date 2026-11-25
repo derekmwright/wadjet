@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -737,17 +738,20 @@ func TestWithNoDataReadsNothingAndEvaluatesNothing(t *testing.T) {
 			if n := ctasScalar(t, ctx, db, "SELECT COUNT(*) AS c FROM "+tbl); n != 0 {
 				t.Errorf("the declared table holds %d rows", n)
 			}
-			// No scratch: a spilling operator that ran would leave one.
-			entries, err := os.ReadDir(scratch)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(entries) != 0 {
-				names := make([]string, 0, len(entries))
-				for _, e := range entries {
-					names = append(names, e.Name())
+			// No scratch: a spilling operator that ran would leave a file or
+			// a statement's spill directory. The DB's pool root
+			// (<scratch>/wadjet-spill) exists from Open on (1685e: one pool
+			// per engine instance) and is not one.
+			var names []string
+			_ = filepath.Walk(scratch, func(path string, _ os.FileInfo, err error) error {
+				if err != nil || path == scratch || path == filepath.Join(scratch, "wadjet-spill") {
+					return nil
 				}
-				t.Errorf("the declaration left %d scratch entries %v; nothing ran", len(entries), names)
+				names = append(names, strings.TrimPrefix(path, scratch))
+				return nil
+			})
+			if len(names) != 0 {
+				t.Errorf("the declaration left %d scratch entries %v; nothing ran", len(names), names)
 			}
 		})
 	}
