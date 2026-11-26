@@ -43,7 +43,7 @@ Two arms spelling the container alike (`SELECT x.id, (c_row).b FROM n x JOIN n y
 | **r19** `SELECT min(a) FROM t` | ARRAY min/max ordered by array_cmp | the container_sort.go order; nested arrays order as array_cmp does; no fixture gates ARRAY order against PostgreSQL | — | documented gap | — · [E14](#e14) | — | — |
 | **r20** `SELECT ARRAY[1.5] > ARRAY[1]` | ERROR 42883 operator does not exist: numeric[] > integer[] | t (measured): compares by value | — | kept superset | 2026-09-24 · [E79](#e79) | — | — |
 | **r21** `SELECT CAST(ARRAY[1,2] AS JSON)` | ERROR 42846 cannot cast type integer[] to json | [1,2] (measured), to_json's text | — | kept superset | 2026-09-24 · [E79](#e79) | — | — |
-| **r22** `SELECT ARRAY[INTERVAL '1 day']` | {"1 day"} | ERROR 0A000: an INTERVAL element compares by value through the DURATION carrier but has no text | 0A000 | refusal | 2026-09-24 · [E79](#e79) | — | — |
+| **r22** `SELECT ARRAY[INTERVAL '1 day']` | {"1 day"} | ERROR 0A000 `interval values cannot yet be used as an array element` (every arm, #1713d: an interval is never materialized, not even as an element) | 0A000 | refusal | 2026-09-24 · [E79](#e79); 2026-11-26 · [IV4](../0012-amendments.md#2026-11-26-an-interval-is-consumed-inline-or-refused-1713d) | #1713 | `physical.TestIntervalRuleAtTheBinder` |
 | **r23** `SELECT ARRAY[1, 'a']` | ERROR 22P02 invalid input syntax for type integer: "a" | ERROR 42000 batch: cannot store string into INT32 vector (measured): no common element type is resolved at plan time; recorded for repair | 42000 | documented gap | 2026-09-24 · [E79](#e79) | — | — |
 
 ## Source entries

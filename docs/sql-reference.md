@@ -5123,6 +5123,36 @@ represent. A timestamp minus a timestamp is PostgreSQL's INTERVAL, which this
 engine cannot hold as a column value: it answers the difference in
 milliseconds.
 
+**What an INTERVAL can and cannot do today.** There is no INTERVAL column
+type yet, so an interval is consumed inside the expression that computes it
+and never leaves it (#1713d):
+
+- It CAN be compared with another interval (`=`, `<>`, `<`, `<=`, `>`, `>=`,
+  `BETWEEN`, an inline `IN (…)` list, `IS [NOT] DISTINCT FROM`, a simple
+  `CASE`), by PostgreSQL's normalized value (`INTERVAL '1 day' = INTERVAL
+  '24 hours'` is true); computed with (`+`, `-`, `*` and `/` by a number,
+  unary minus, `CASE` / `COALESCE` / `NULLIF` / `GREATEST` / `LEAST` over
+  intervals); added to or subtracted from a DATE or TIMESTAMP (a TIMESTAMP,
+  `DATE_ADD` / `DATE_SUB` too); used as `TIME_BUCKET`'s stride; read by
+  `date_part('<field>', <interval>)`; and cast to text explicitly —
+  `CAST(INTERVAL '25 hours' AS TEXT)` is `25:00:00`, the way to display one.
+- It CANNOT (yet) be a query result column, a derived table's, CTE's,
+  set-operation arm's or VALUES row's column, a `GROUP BY` / `ORDER BY` /
+  `PARTITION BY` / window `ORDER BY` key, an aggregate's or window function's
+  argument, an array or row element, `EXTRACT`'s argument (use `date_part`),
+  an operand of `||`, compared with a subquery's column, a table function's
+  argument, or a value written to a column. Each is refused `0A000`
+  ("interval values cannot yet be used as …"); PostgreSQL's own refusals keep
+  their codes (`42804` for a `CASE` mixing an interval with a number, `42883`
+  for `interval = integer`, `22007` for text that is no interval).
+- A new column cannot be declared `INTERVAL` (`0A000`, every door). For a
+  stored duration declare `DURATION`: nanoseconds in one BIGINT (wire OID 20),
+  compared, summed and ordered as a number. Existing `DURATION` columns,
+  however they were declared, keep that meaning.
+- Interval text a single unit cannot hold (`CAST('1 day 02:00:00' AS
+  INTERVAL)` over a row) is refused `0A000` where it is compared, applied or
+  rendered.
+
 A TIMESTAMP result reaches the embedded API (`wadjet.QueryResult` rows), the
 HTTP and async query APIs and gRPC as epoch milliseconds, as a TIMESTAMP
 column always has: `DATE '1998-12-01' - INTERVAL '90' DAY` is `904694400000`
@@ -5642,7 +5672,7 @@ whose every argument is a numeric literal prints at one scale, `0.10` for the
 | TEXT (a column, `s \|\| ''`, `CAST(x AS TEXT)`) | anything but TEXT | 42804 — PostgreSQL has no assignment cast from text |
 | a quoted literal (`'2026-01-01'`, `'10.0.0.1'`, `'yes'`) | any type | read by the column's own input function — BOOLEAN takes `t`/`true`/`y`/`yes`/`on`/`1` and their negations, any unique prefix (22P02 / 22007 when it names no value) |
 | a numeric literal (`2.50`, `1e3`, `2.5`), bare or inside an expression | any type | read as the numeric value it spells: into TEXT its numeric text at its own scale (`2.50`, `1000`), into an integer rounded half away from zero (`2.5` → 3, `ABS(2.5)` → 3). So is a division or `SQRT` / `POWER` / `EXP` / `LN` / `LOG` / `EXTRACT` that PostgreSQL types numeric: computed and declared `double precision` here (`5 / 2.0` is OID 701; ADR-0024), but assigned to an integer as the numeric it is there, so `5 / 2.0` and `SQRT(6.25)` store 3 — through a derived table, a CTE, a join, a scalar subquery, a set operation or a MERGE's subquery source too. Over a float8 or an integer argument (`SQRT(4)`, `POWER(2, -1)`) the function is float8 in PostgreSQL too and rounds half to even, and so does `NULLIF(2.5, f)` over a float8 `f` (float8 there). An explicit `CAST(5 / 2.0 AS INTEGER)` is not an assignment: it rounds the double half to even, 2, where PostgreSQL answers 3 |
-| an INTERVAL | TEXT / anything else | its text (`1 day`) / 42804 |
+| an INTERVAL | any column | 0A000 — an interval is never stored (#1713d); `CAST(<interval> AS TEXT)` stores its text, and a DURATION column takes a nanosecond count |
 | `INT_TO_IP(n)`, `UUID()` and the other TEXT-declared address/UUID functions above | any type | read like a quoted literal (a superset; docs/postgres-differences.md) |
 | anything else (an integer into DATE, BOOLEAN or an address; a date into a number; a typed NULL of the wrong type) | | 42804 `column "x" is of type ... but expression is of type ...` |
 
