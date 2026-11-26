@@ -546,7 +546,9 @@ func (e *FuncCall) Eval(b *batch.RecordBatch, row int) any {
 	case e.nullifArms != nil:
 		out = evalNullIf(b, args, e.nullifArms)
 	default:
-		if v, inf := e.infiniteExtract(args); inf {
+		if v, ok := e.intervalExtract(args); ok {
+			out = v
+		} else if v, inf := e.infiniteExtract(args); inf {
 			out = v
 		} else {
 			out = e.fn(args)
