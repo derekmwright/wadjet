@@ -154,3 +154,154 @@ arith/justifyDays	a | 1 mon
 arith/extract	a | 30
 box/array	a,b,c | t,t,t
 box/arrayGroup	g | 1
+nullif/equal	a:interval | NULL
+nullif/equalMonth	a:interval | NULL
+nullif/unequal	a:interval | 1 day
+nullif/unequalText	a:interval | 2 days
+nullif/nullSecond	a:interval | 1 day
+nullif/nullFirst	a:interval | NULL
+nullif/cast	a:interval,b:interval | NULL,1 day
+nullif/unknown	a:interval,b:interval | NULL,1 day
+nullif/rows	id,n | 1,NULL; 2,NULL; 3,1 mon; 6,2 days; 9,NULL
+nullif/where	id | 1; 2; 9
+ext/greatestLeast	g:interval,l:interval | 10 days,2 days
+ext/month	g,l | 1 mon,1 mon
+ext/null	g,l | 25:00:00,-1 days
+ext/three	g,l | 1 day,1 year
+ext/unknown	g,l | 10 days,2 days
+ext/unknownBad	ERR 22007
+ext/rows	id,g | 1,2 days; 6,2 days; 7,10 days; 9,2 days; 12,2 days
+ext/coalesce	a | 1 day
+ext/coalesceUnknown	a | 1 day
+unk/right/1 day~24 hours	eq,ne,lt,le,gt,ge,dist,ndist | t,f,f,t,f,t,f,t
+unk/left/1 day~24 hours	eq,ne,lt,le,gt,ge,dist,ndist | t,f,f,t,f,t,f,t
+unk/cast/1 day~24 hours	eq,ne,lt,le,gt,ge,dist,ndist | t,f,f,t,f,t,f,t
+unk/right/2 days~10 days	eq,ne,lt,le,gt,ge,dist,ndist | f,t,t,t,f,f,t,f
+unk/left/2 days~10 days	eq,ne,lt,le,gt,ge,dist,ndist | f,t,t,t,f,f,t,f
+unk/cast/2 days~10 days	eq,ne,lt,le,gt,ge,dist,ndist | f,t,t,t,f,f,t,f
+unk/right/1 month~30 days	eq,ne,lt,le,gt,ge,dist,ndist | t,f,f,t,f,t,f,t
+unk/left/1 month~30 days	eq,ne,lt,le,gt,ge,dist,ndist | t,f,f,t,f,t,f,t
+unk/cast/1 month~30 days	eq,ne,lt,le,gt,ge,dist,ndist | t,f,f,t,f,t,f,t
+unk/right/1 day~25 hours	eq,ne,lt,le,gt,ge,dist,ndist | f,t,t,t,f,f,t,f
+unk/left/1 day~25 hours	eq,ne,lt,le,gt,ge,dist,ndist | f,t,t,t,f,f,t,f
+unk/cast/1 day~25 hours	eq,ne,lt,le,gt,ge,dist,ndist | f,t,t,t,f,f,t,f
+unk/in	a,b,c,d | t,t,f,NULL
+unk/between	a,b,c,d | t,t,t,f
+unk/case	a,b | 1,2
+unk/caseSubject	ERR 42883
+unk/bad	ERR 22007
+unk/row	id | 1; 2
+unk/rowLt	id | 1; 2; 6; 8; 12; 15
+unk/arith	a,b | t,t
+unk/number	ERR 42883
+range/yearsOk	a | 178956970 years
+range/yearsOver	ERR 22008
+range/yearsNegOver	ERR 22008
+range/yearsPast32	ERR 22015
+range/years32	ERR 22008
+range/monthsOk	a | 178956970 years 7 mons
+range/monthsOver	ERR 22015
+range/monthsNegOk	a | -178956970 years -8 mons
+range/daysOk	a | 2147483647 days
+range/daysOver	ERR 22015
+range/weeksOk	a | 2147483646 days
+range/weeksOver	ERR 22015
+range/hoursOk	a | 2562047788:00:00
+range/hoursOver	ERR 22015
+range/hoursNegOver	ERR 22015
+range/minutesOver	ERR 22015
+range/secondsOk	a | 2562047788:00:54
+range/secondsOver	ERR 22015
+range/past64	ERR 22015
+range/sqlYear	ERR 22008
+range/sqlDay	ERR 22015
+range/castYears	ERR 22008
+range/castDays	ERR 22015
+range/compare	ERR 22008
+range/tsShift	ERR 22015
+key/unionAllMax	a | 10 days
+ar/mulInt	a,b,c,d | 2 days,00:00:00,-3 days,06:00:00
+ar/mulMonths	a,b,c,d | 2 mons,3 years,1 mon 15 days,6 mons
+ar/mulFrac	a,b,c,d | 3 days,02:24:00,1 day 12:00:00,02:30:00
+ar/mulCascade	a,b,c,d | 2 mons 3 days,21 days,1 day 12:00:00,1 year 1 mon 6 days
+ar/mulTypes	a,b,c,d | 2 days,2 days 12:00:00,2 days,2 days
+ar/mulNeg	a,b,c,d | -1 mons -15 days,-15 days,-12:00:00,50:00:00
+ar/mulRounding	a,b,c | 1 day,46:00:00,15 days
+ar/mulSubSecond	a | 00:00:01.5
+ar/mulSubSecondCascade	a | 1 mon 00:00:00.2592
+ar/mulOverflow	ERR 22008
+ar/mulHuge	ERR 22008
+ar/mulNaN	ERR 22008
+ar/mulInf	a | infinity
+ar/mulBadText	ERR 22P02
+ar/mulNull	a,b,c | NULL,NULL,NULL
+ar/divWhole	a,b,c,d | 12:00:00,15 days,3 mons,00:30:00
+ar/divCascade	a,b,c,d | 10 days,08:00:00,1 mon 15 days,1 day 12:00:00
+ar/divFrac	a,b,c,d | 16:00:00,-1 days -12:00:00,2 days,2 mons 15 days
+ar/divMore	a,b,c,d | 1 mon,15 days,-16:00:00,1 day
+ar/divText	a | 12:00:00
+ar/divZero	ERR 22012
+ar/divSubSecond	a | 00:00:00.5
+ar/divSubSecondCascade	a | 1 mon 21 days 10:17:08.5344
+ar/divTiny	ERR 22008
+ar/plus	a,b,c,d | 1 day 01:00:00,1 mon 1 day,1 year 1 mon,01:30:00
+ar/minus	a,b,c,d | 1 day -01:00:00,1 mon -30 days,-01:00:00,-1 mons -1 days
+ar/plusZero	a,b | 00:00:00,1 day 25:00:00
+ar/plusOverflow	ERR 22008
+ar/plusOverflowMonths	ERR 22008
+ar/plusUnknown	a,b,c,d | 1 day 01:00:00,1 day 01:00:00,1 day -01:00:00,1 day
+ar/plusUnknownDate	ERR 22007
+ar/plusCast	a,b | 2 days,2 days
+ar/plusCompare	a,b | t,t
+ar/neg	a,b,c,d | -1 days,02:00:00,-1 years,00:00:00
+ar/negSum	a | -1 days -01:00:00
+ar/negOverflow	ERR 22008
+ar/unaryPlus	ERR 42883
+ar/plusNumber	ERR 42883
+ar/numberMinus	ERR 42883
+ar/numberPlus	ERR 42883
+ar/timesInterval	ERR 42883
+ar/numberDiv	ERR 42883
+ar/mod	ERR 42883
+ar/timesBool	ERR 42883
+ar/opaque	a | 2 days 04:00:00
+ar/opaqueNeg	a | -1 days -02:00:00
+ar/rows	id,d,p,n | 1,2 days,1 day 01:00:00,-1 days; 2,48:00:00,25:00:00,-24:00:00; 3,2 mons,1 mon 01:00:00,-1 mons; 8,-2 days,-1 days +01:00:00,1 day; 9,NULL,NULL,NULL
+ar/tsMul	a | 2024-02-02 00:00:00
+ar/tsMulBare	a | 2024-02-02 00:00:00
+ar/tsSum	a | 2024-03-01 00:00:00
+ar/tsNeg	a | 2024-02-29 00:00:00
+tsm/plusLeap	a,b,c,d | 2024-02-29 00:00:00,2023-02-28 00:00:00,2024-02-29 10:00:00,2023-02-28 00:00:00
+tsm/years	a,b,c,d | 2025-02-28 00:00:00,2023-02-28 00:00:00,2028-02-29 00:00:00,2025-02-28 00:00:00
+tsm/century	a,b,c,d | 2024-02-28 00:00:00,2120-02-29 00:00:00,2100-02-28 00:00:00,2100-02-28 00:00:00
+tsm/months	a,b,c,d | 2025-02-28 00:00:00,2024-09-30 00:00:00,2000-02-29 00:00:00,2023-12-31 10:00:00
+tsm/negative	a,b,c,d | 2023-02-28 00:00:00,2024-02-29 00:00:00,2024-02-29 00:00:00,2024-02-29 00:00:00
+tsm/chain	a,b,c | 2024-01-29 00:00:00,2024-03-01 00:00:00,2024-03-01 01:00:00
+tsm/date	a,b,c,d | 2024-02-29 00:00:00,2024-04-30 00:00:00,2024-02-29 00:00:00,2023-03-31 00:00:00
+tsm/castText	a,b | 2024-02-29 00:00:00,2024-02-29 00:00:00
+tsm/days	a,b,c | 2024-02-29 12:00:00,2023-03-01 12:00:00,2024-02-28 23:00:00
+ex/fields	a,b,c,d | 30,25,2,1
+ex/minuteQuarter	a,b,c,d | 30,2,0,0
+ex/negative	a,b,c,d | -30,-25,-2,-1
+ex/quarter	a,b,c,d | 0,1,4,1
+ex/zero	a,b,c,d | 0,0,0,0
+ex/second	a,b | 30.000000,-30.000000
+ex/epoch	a,b,c,d | 86400.000000,2592000.000000,31557600.000000,-31557600.000000
+ex/secondTimestamp	a | 5.000000
+ex/week	ERR 0A000
+ex/dow	ERR 0A000
+ex/doy	ERR 0A000
+ex/millisecond	a | 5000.000
+ex/decade	a | 2
+ex/cast	a,b | 30,3
+ex/opaque	a | 1
+ex/rows	id,d,h,e | 1,1,0,86400; 2,0,24,86400; 3,0,0,2592000; 8,-1,0,-86400; 9,NULL,NULL,NULL; 10,0,0,31557600
+dp/fields	a,b,c,d | 30,30,2592000,0
+dp/small	a,b,c,d | 31557600,5000,5000000,2
+dp/large	a,b,c,d | 2,2,2,-1
+dp/negative	a,b,c,d | -30,-30,-1,36741600
+dp/abbrev	a,b,c,d | 2,25,1,5.647452476472e+15
+dp/week	ERR 0A000
+dp/dow	ERR 0A000
+dp/bogus	ERR 22023
+dp/null	a | NULL

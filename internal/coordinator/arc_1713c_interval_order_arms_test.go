@@ -46,6 +46,44 @@ type ivCell struct {
 	name string
 	sql  string
 	ddl  bool
+	// typed: the answer file carries each column's PostgreSQL type, and
+	// the arms' declared types are checked against ivTypes.
+	typed bool
+}
+
+// ivPGTypeName names a PostgreSQL result OID the way ftTypeName names ours.
+func ivPGTypeName(oid uint32) string {
+	switch oid {
+	case 1186:
+		return "interval"
+	case 1114:
+		return "timestamp"
+	}
+	return ftPGTypeName(oid)
+}
+
+// ivHeaderTypes is the "name:type,…" header of an answer, or the answer
+// itself when it has none (an error, zero rows).
+func ivHeaderTypes(s string) string {
+	head, _, ok := strings.Cut(s, " | ")
+	if !ok {
+		return s
+	}
+	return head
+}
+
+// ivTypes is each typed cell's declared header on every arm. An interval
+// declares text here (temporal r20; PostgreSQL: interval, OID 1186).
+var ivTypes = map[string]string{
+	"nullif/equal":       "a:text",
+	"nullif/equalMonth":  "a:text",
+	"nullif/unequal":     "a:text",
+	"nullif/unequalText": "a:text",
+	"nullif/nullSecond":  "a:text",
+	"nullif/nullFirst":   "a:text",
+	"nullif/cast":        "a:text,b:text",
+	"nullif/unknown":     "a:text,b:text",
+	"ext/greatestLeast":  "g:text,l:text",
 }
 
 const ivAnswersPath = "testdata/arc_1713c_interval_order_pg17.tsv"
@@ -186,6 +224,179 @@ func ivCells() []ivCell {
 	// Containers.
 	add("box/array", "SELECT ARRAY[INTERVAL '1 day'] = ARRAY[INTERVAL '24 hours'] AS a, ARRAY[INTERVAL '2 days'] < ARRAY[INTERVAL '10 days'] AS b, ARRAY[INTERVAL '1 month'] = ARRAY[INTERVAL '30 days'] AS c")
 	add("box/arrayGroup", "SELECT count(*) AS g FROM (SELECT x FROM (VALUES (ARRAY[INTERVAL '1 day']), (ARRAY[INTERVAL '24 hours'])) v(x) GROUP BY x) t")
+	return append(out, ivCellsR2()...)
+}
+
+// ivCellsR2 is round 2's classes (#1713c r2): NULLIF / GREATEST / LEAST over
+// intervals, an interval beside an UNTYPED literal, the interval input
+// range, the arithmetic (* / + - unary minus, the operators that do not
+// exist), timestamp ± interval over month ends, and EXTRACT / date_part of
+// every field. typed cells carry the declared type of every column beside
+// the value (PostgreSQL's from the wire OID).
+func ivCellsR2() []ivCell {
+	var out []ivCell
+	add := func(name, sql string) { out = append(out, ivCell{name: name, sql: sql}) }
+	typed := func(name, sql string) { out = append(out, ivCell{name: name, sql: sql, typed: true}) }
+
+	// NULLIF over two intervals: PostgreSQL's value and wire type beside ours.
+	typed("nullif/equal", "SELECT NULLIF(INTERVAL '1 day', INTERVAL '24 hours') AS a")
+	typed("nullif/equalMonth", "SELECT NULLIF(INTERVAL '1 month', INTERVAL '30 days') AS a")
+	typed("nullif/unequal", "SELECT NULLIF(INTERVAL '1 day', INTERVAL '2 days') AS a")
+	typed("nullif/unequalText", "SELECT NULLIF(INTERVAL '2 days', INTERVAL '10 days') AS a")
+	typed("nullif/nullSecond", "SELECT NULLIF(INTERVAL '1 day', NULL) AS a")
+	typed("nullif/nullFirst", "SELECT NULLIF(CAST(NULL AS INTERVAL), INTERVAL '1 day') AS a")
+	typed("nullif/cast", "SELECT NULLIF(CAST('1 day' AS INTERVAL), CAST('24 hours' AS INTERVAL)) AS a, NULLIF(CAST('1 day' AS INTERVAL), CAST('25 hours' AS INTERVAL)) AS b")
+	typed("nullif/unknown", "SELECT NULLIF(INTERVAL '1 day', '24 hours') AS a, NULLIF(INTERVAL '1 day', '2 days') AS b")
+	add("nullif/rows", "SELECT id, NULLIF(CAST(s AS INTERVAL), INTERVAL '1 day') AS n FROM iv_s WHERE id IN (1, 2, 3, 6, 9) ORDER BY id")
+	add("nullif/where", "SELECT id FROM iv_s WHERE NULLIF(CAST(s AS INTERVAL), INTERVAL '24 hours') IS NULL ORDER BY id")
+
+	// GREATEST / LEAST over intervals.
+	typed("ext/greatestLeast", "SELECT GREATEST(INTERVAL '2 days', INTERVAL '10 days') AS g, LEAST(INTERVAL '2 days', INTERVAL '10 days') AS l")
+	add("ext/month", "SELECT GREATEST(INTERVAL '1 month', INTERVAL '29 days') AS g, LEAST(INTERVAL '1 month', INTERVAL '31 days') AS l")
+	add("ext/null", "SELECT GREATEST(INTERVAL '1 day', NULL, INTERVAL '25 hours') AS g, LEAST(NULL, INTERVAL '-1 day', INTERVAL '1 hour') AS l")
+	add("ext/three", "SELECT GREATEST(INTERVAL '23 hours', INTERVAL '1 day', INTERVAL '1439 minutes') AS g, LEAST(INTERVAL '1 year', INTERVAL '364 days', INTERVAL '13 months') AS l")
+	add("ext/unknown", "SELECT GREATEST(INTERVAL '2 days', '10 days') AS g, LEAST(INTERVAL '2 days', '10 days') AS l")
+	add("ext/unknownBad", "SELECT GREATEST(INTERVAL '1 day', '2024-01-01') AS g")
+	add("ext/rows", "SELECT id, GREATEST(CAST(s AS INTERVAL), INTERVAL '2 days') AS g FROM iv_s WHERE id IN (1, 6, 7, 9, 12) ORDER BY id")
+	add("ext/coalesce", "SELECT COALESCE(NULL, INTERVAL '1 day') AS a")
+	add("ext/coalesceUnknown", "SELECT COALESCE(NULL, INTERVAL '1 day', '2 days') AS a")
+
+	// An interval beside an UNTYPED literal: PostgreSQL resolves the
+	// unknown to interval.
+	for _, p := range [][2]string{{"1 day", "24 hours"}, {"2 days", "10 days"}, {"1 month", "30 days"}, {"1 day", "25 hours"}} {
+		k := p[0] + "~" + p[1]
+		add("unk/right/"+k, ivCmpSQL(ivSpell(p[0]), "'"+p[1]+"'"))
+		add("unk/left/"+k, ivCmpSQL("'"+p[0]+"'", ivSpell(p[1])))
+		add("unk/cast/"+k, ivCmpSQL(ivCast(p[0]), "'"+p[1]+"'"))
+	}
+	add("unk/in", "SELECT INTERVAL '1 day' IN ('24 hours', '2 days') AS a, '24 hours' IN (INTERVAL '1 day') AS b, INTERVAL '1 day' NOT IN ('24 hours') AS c, INTERVAL '2 days' IN ('10 days', NULL) AS d")
+	add("unk/between", "SELECT INTERVAL '3 days' BETWEEN '2 days' AND '10 days' AS a, '3 days' BETWEEN INTERVAL '2 days' AND INTERVAL '10 days' AS b, INTERVAL '25 hours' BETWEEN '1 day' AND '2 days' AS c, INTERVAL '1 month' NOT BETWEEN '29 days' AND '31 days' AS d")
+	add("unk/case", "SELECT CASE INTERVAL '1 day' WHEN '24 hours' THEN 1 ELSE 0 END AS a, CASE INTERVAL '2 days' WHEN '10 days' THEN 1 WHEN '48 hours' THEN 2 ELSE 0 END AS b")
+	add("unk/caseSubject", "SELECT CASE '24 hours' WHEN INTERVAL '1 day' THEN 1 ELSE 0 END AS a")
+	add("unk/bad", "SELECT INTERVAL '1 day' = 'abc' AS a")
+	add("unk/row", "SELECT id FROM iv_s WHERE CAST(s AS INTERVAL) = '24 hours' ORDER BY id")
+	add("unk/rowLt", "SELECT id FROM iv_s WHERE CAST(s AS INTERVAL) < '3 days' ORDER BY id")
+	add("unk/arith", "SELECT INTERVAL '1 day' * 2 = '48 hours' AS a, -INTERVAL '1 day' < '0 days' AS b")
+	add("unk/number", "SELECT INTERVAL '1 day' = 1 AS a")
+
+	// The interval input range, at the literal (PostgreSQL's interval_in).
+	for _, r := range []struct{ k, v string }{
+		{"yearsOk", "178956970 years"}, {"yearsOver", "178956971 years"}, {"yearsNegOver", "-178956971 years"},
+		{"yearsPast32", "2147483648 years"}, {"years32", "2147483647 years"},
+		{"monthsOk", "2147483647 months"}, {"monthsOver", "2147483648 months"}, {"monthsNegOk", "-2147483648 months"},
+		{"daysOk", "2147483647 days"}, {"daysOver", "2147483648 days"},
+		{"weeksOk", "306783378 weeks"}, {"weeksOver", "306783379 weeks"},
+		{"hoursOk", "2562047788 hours"}, {"hoursOver", "2562047789 hours"}, {"hoursNegOver", "-2562047789 hours"},
+		{"minutesOver", "153722867281 minutes"}, {"secondsOk", "9223372036854 seconds"}, {"secondsOver", "9223372036855 seconds"},
+		{"past64", "99999999999999999999 days"},
+	} {
+		add("range/"+r.k, "SELECT "+ivSpell(r.v)+" AS a")
+	}
+	add("range/sqlYear", "SELECT INTERVAL '178956971' YEAR AS a")
+	add("range/sqlDay", "SELECT INTERVAL '2147483648' DAY AS a")
+	add("range/castYears", "SELECT CAST('178956971 years' AS INTERVAL) AS a")
+	add("range/castDays", "SELECT CAST('2147483648 days' AS INTERVAL) AS a")
+	add("range/compare", "SELECT INTERVAL '2147483647 years' > INTERVAL '1 day' AS a")
+	add("range/tsShift", "SELECT CAST(TIMESTAMP '2024-01-01 00:00:00' + INTERVAL '100000000000 hours' AS TEXT) AS a")
+
+	// The representation class, pinned with the others: an interval after a
+	// projection is text.
+	add("key/unionAllMax", "SELECT max(x) AS a FROM (SELECT INTERVAL '2 days' AS x UNION ALL SELECT INTERVAL '10 days') t")
+
+	// Arithmetic.
+	add("ar/mulInt", "SELECT INTERVAL '1 day' * 2 AS a, INTERVAL '1 day' * 0 AS b, INTERVAL '1 day' * -3 AS c, 3 * INTERVAL '2 hours' AS d")
+	add("ar/mulMonths", "SELECT INTERVAL '1 month' * 2 AS a, INTERVAL '1 year' * 3 AS b, INTERVAL '1 month' * 1.5 AS c, INTERVAL '1 year' * 0.5 AS d")
+	add("ar/mulFrac", "SELECT INTERVAL '1 month' * 0.1 AS a, INTERVAL '1 day' * 0.1 AS b, INTERVAL '1 day' * 1.5 AS c, INTERVAL '1 hour' * 2.5 AS d")
+	add("ar/mulCascade", "SELECT INTERVAL '7 months' * 0.3 AS a, INTERVAL '1 month' * 0.7 AS b, INTERVAL '5 days' * 0.3 AS c, INTERVAL '1 year' * 1.1 AS d")
+	add("ar/mulTypes", "SELECT INTERVAL '1 day' * CAST(2 AS BIGINT) AS a, INTERVAL '1 day' * CAST(2.5 AS DOUBLE PRECISION) AS b, INTERVAL '1 day' * CAST(2 AS REAL) AS c, INTERVAL '1 day' * '2' AS d")
+	add("ar/mulNeg", "SELECT INTERVAL '-1 month' * 1.5 AS a, INTERVAL '1 month' * -0.5 AS b, INTERVAL '-1 day' * 0.5 AS c, INTERVAL '25 hours' * 2 AS d")
+	add("ar/mulRounding", "SELECT INTERVAL '1 month' * 0.0333333333 AS a, INTERVAL '23 hours' * 2 AS b, INTERVAL '30 days' * 0.5 AS c")
+	add("ar/mulSubSecond", "SELECT INTERVAL '1 second' * 1.5 AS a")
+	add("ar/mulSubSecondCascade", "SELECT INTERVAL '1 month' * 1.0000001 AS a")
+	add("ar/mulOverflow", "SELECT INTERVAL '2147483647 days' * 2 AS a")
+	add("ar/mulHuge", "SELECT INTERVAL '1 day' * 1e300 AS a")
+	add("ar/mulNaN", "SELECT INTERVAL '1 day' * CAST('NaN' AS DOUBLE PRECISION) AS a")
+	add("ar/mulInf", "SELECT INTERVAL '1 day' * CAST('Infinity' AS DOUBLE PRECISION) AS a")
+	add("ar/mulBadText", "SELECT INTERVAL '1 day' * 'abc' AS a")
+	add("ar/mulNull", "SELECT INTERVAL '1 day' * NULL AS a, CAST(NULL AS INTERVAL) * 2 AS b, INTERVAL '1 day' + CAST(NULL AS INTERVAL) AS c")
+	add("ar/divWhole", "SELECT INTERVAL '1 day' / 2 AS a, INTERVAL '1 month' / 2 AS b, INTERVAL '1 year' / 4 AS c, INTERVAL '2 hours' / 4 AS d")
+	add("ar/divCascade", "SELECT INTERVAL '1 month' / 3 AS a, INTERVAL '1 day' / 3 AS b, INTERVAL '3 months' / 2 AS c, INTERVAL '3 days' / 2 AS d")
+	add("ar/divFrac", "SELECT INTERVAL '1 day' / 1.5 AS a, INTERVAL '3 days' / -2 AS b, INTERVAL '1 day' / 0.5 AS c, INTERVAL '10 months' / 4 AS d")
+	add("ar/divMore", "SELECT INTERVAL '1 year' / 12 AS a, INTERVAL '1 year' / 24 AS b, INTERVAL '-1 day' / 1.5 AS c, INTERVAL '1 week' / 7 AS d")
+	add("ar/divText", "SELECT INTERVAL '1 day' / '2' AS a")
+	add("ar/divZero", "SELECT INTERVAL '1 day' / 0 AS a")
+	add("ar/divSubSecond", "SELECT INTERVAL '1 second' / 2 AS a")
+	add("ar/divSubSecondCascade", "SELECT INTERVAL '1 year' / 7 AS a")
+	add("ar/divTiny", "SELECT INTERVAL '1 day' / 1e-300 AS a")
+	add("ar/plus", "SELECT INTERVAL '1 day' + INTERVAL '1 hour' AS a, INTERVAL '1 month' + INTERVAL '1 day' AS b, INTERVAL '1 year' + INTERVAL '1 month' AS c, INTERVAL '1 hour' + INTERVAL '30 minutes' AS d")
+	add("ar/minus", "SELECT INTERVAL '1 day' - INTERVAL '1 hour' AS a, INTERVAL '1 month' - INTERVAL '30 days' AS b, INTERVAL '1 hour' - INTERVAL '2 hours' AS c, INTERVAL '-1 day' - INTERVAL '1 month' AS d")
+	add("ar/plusZero", "SELECT INTERVAL '1 day' + INTERVAL '-1 day' AS a, INTERVAL '25 hours' + INTERVAL '1 day' AS b")
+	add("ar/plusOverflow", "SELECT INTERVAL '2147483647 days' + INTERVAL '1 day' AS a")
+	add("ar/plusOverflowMonths", "SELECT INTERVAL '178956970 years' + INTERVAL '1 year' AS a")
+	add("ar/plusUnknown", "SELECT INTERVAL '1 day' + '1 hour' AS a, '1 hour' + INTERVAL '1 day' AS b, INTERVAL '1 day' - '1 hour' AS c, '2 days' - INTERVAL '1 day' AS d")
+	add("ar/plusUnknownDate", "SELECT '2024-01-01' + INTERVAL '1 day' AS a")
+	add("ar/plusCast", "SELECT CAST('1 day' AS INTERVAL) * 2 AS a, CAST('3 days' AS INTERVAL) - CAST('1 day' AS INTERVAL) AS b")
+	add("ar/plusCompare", "SELECT (INTERVAL '1 day' * 2) = INTERVAL '48 hours' AS a, (INTERVAL '1 day' + INTERVAL '1 hour') > INTERVAL '1 day' AS b")
+	add("ar/neg", "SELECT -INTERVAL '1 day' AS a, -INTERVAL '-2 hours' AS b, -INTERVAL '1 year' AS c, -INTERVAL '0 days' AS d")
+	add("ar/negSum", "SELECT -(INTERVAL '1 day' + INTERVAL '1 hour') AS a")
+	add("ar/negOverflow", "SELECT -INTERVAL '-2147483648 days' AS a")
+	add("ar/unaryPlus", "SELECT +INTERVAL '1 day' AS a")
+	add("ar/plusNumber", "SELECT INTERVAL '1 day' + 1 AS a")
+	add("ar/numberMinus", "SELECT INTERVAL '1 day' - 1 AS a")
+	add("ar/numberPlus", "SELECT 1 + INTERVAL '1 day' AS a")
+	add("ar/timesInterval", "SELECT INTERVAL '1 day' * INTERVAL '1 day' AS a")
+	add("ar/numberDiv", "SELECT 2 / INTERVAL '1 day' AS a")
+	add("ar/mod", "SELECT INTERVAL '1 day' % 2 AS a")
+	add("ar/timesBool", "SELECT INTERVAL '1 day' * TRUE AS a")
+	add("ar/opaque", "SELECT CAST('1 day 02:00:00' AS INTERVAL) * 2 AS a")
+	add("ar/opaqueNeg", "SELECT -CAST('1 day 02:00:00' AS INTERVAL) AS a")
+	add("ar/rows", "SELECT id, CAST(s AS INTERVAL) * 2 AS d, CAST(s AS INTERVAL) + INTERVAL '1 hour' AS p, -CAST(s AS INTERVAL) AS n FROM iv_s WHERE id IN (1, 2, 3, 8, 9) ORDER BY id")
+	add("ar/tsMul", "SELECT CAST(TIMESTAMP '2024-01-31 00:00:00' + (INTERVAL '1 day' * 2) AS TEXT) AS a")
+	add("ar/tsMulBare", "SELECT CAST(TIMESTAMP '2024-01-31 00:00:00' + INTERVAL '1 day' * 2 AS TEXT) AS a")
+	add("ar/tsSum", "SELECT CAST(TIMESTAMP '2024-01-31 00:00:00' + (INTERVAL '1 month' + INTERVAL '1 day') AS TEXT) AS a")
+	add("ar/tsNeg", "SELECT CAST(TIMESTAMP '2024-01-31 00:00:00' - (-INTERVAL '1 month') AS TEXT) AS a")
+
+	// timestamp ± interval: a month is a calendar month, its day clamped.
+	ts := func(from, op, iv string) string {
+		return "CAST(TIMESTAMP '" + from + "' " + op + " INTERVAL '" + iv + "' AS TEXT)"
+	}
+	add("tsm/plusLeap", "SELECT "+ts("2024-01-31 00:00:00", "+", "1 month")+" AS a, "+ts("2023-01-31 00:00:00", "+", "1 month")+" AS b, "+ts("2024-03-31 10:00:00", "-", "1 month")+" AS c, "+ts("2023-03-31 00:00:00", "-", "1 month")+" AS d")
+	add("tsm/years", "SELECT "+ts("2024-02-29 00:00:00", "+", "1 year")+" AS a, "+ts("2024-02-29 00:00:00", "-", "1 year")+" AS b, "+ts("2024-02-29 00:00:00", "+", "4 years")+" AS c, "+ts("2024-01-31 00:00:00", "+", "13 months")+" AS d")
+	add("tsm/century", "SELECT "+ts("2023-02-28 00:00:00", "+", "1 year")+" AS a, "+ts("2020-02-29 00:00:00", "+", "100 years")+" AS b, "+ts("2000-02-29 00:00:00", "+", "100 years")+" AS c, "+ts("2100-01-29 00:00:00", "+", "1 month")+" AS d")
+	add("tsm/months", "SELECT "+ts("2024-12-31 00:00:00", "+", "2 months")+" AS a, "+ts("2024-08-31 00:00:00", "+", "1 month")+" AS b, "+ts("2000-01-30 00:00:00", "+", "1 month")+" AS c, "+ts("2024-01-31 10:00:00", "+", "-1 month")+" AS d")
+	add("tsm/negative", "SELECT "+ts("2024-03-31 00:00:00", "+", "-13 months")+" AS a, "+ts("2024-01-31 00:00:00", "-", "-1 month")+" AS b, "+ts("2024-05-31 00:00:00", "-", "3 months")+" AS c, "+ts("2024-03-30 00:00:00", "-", "1 month")+" AS d")
+	add("tsm/chain", "SELECT CAST(TIMESTAMP '2024-01-31 00:00:00' + INTERVAL '1 month' - INTERVAL '1 month' AS TEXT) AS a, CAST(TIMESTAMP '2024-01-31 00:00:00' + INTERVAL '1 month' + INTERVAL '1 day' AS TEXT) AS b, CAST(TIMESTAMP '2024-01-31 23:00:00' + INTERVAL '1 month' + INTERVAL '2 hours' AS TEXT) AS c")
+	add("tsm/date", "SELECT CAST(DATE '2024-01-31' + INTERVAL '1 month' AS TEXT) AS a, CAST(DATE '2024-05-31' - INTERVAL '1 month' AS TEXT) AS b, CAST(INTERVAL '1 month' + DATE '2024-01-31' AS TEXT) AS c, CAST(DATE '2024-03-31' + INTERVAL '-1 year' AS TEXT) AS d")
+	add("tsm/castText", "SELECT CAST(TIMESTAMP '2024-01-31 00:00:00' + CAST('1 month' AS INTERVAL) AS TEXT) AS a, CAST(TIMESTAMP '2024-01-31 00:00:00' + '1 month' AS TEXT) AS b")
+	add("tsm/days", "SELECT CAST(TIMESTAMP '2024-02-28 12:00:00' + INTERVAL '1 day' AS TEXT) AS a, CAST(TIMESTAMP '2023-02-28 12:00:00' + INTERVAL '1 day' AS TEXT) AS b, CAST(TIMESTAMP '2024-03-01 00:00:00' - INTERVAL '25 hours' AS TEXT) AS c")
+
+	// EXTRACT (numeric on PostgreSQL, float-carried here: ADR-0024 §2c) and
+	// date_part (float8 on both) of an interval, every field.
+	add("ex/fields", "SELECT extract(day FROM INTERVAL '30 days') AS a, extract(hour FROM INTERVAL '25 hours') AS b, extract(month FROM INTERVAL '14 months') AS c, extract(year FROM INTERVAL '14 months') AS d")
+	add("ex/minuteQuarter", "SELECT extract(minute FROM INTERVAL '90 minutes') AS a, extract(quarter FROM INTERVAL '5 months') AS b, extract(minute FROM INTERVAL '25 hours') AS c, extract(day FROM INTERVAL '1 month') AS d")
+	add("ex/negative", "SELECT extract(day FROM INTERVAL '-30 days') AS a, extract(hour FROM INTERVAL '-25 hours') AS b, extract(month FROM INTERVAL '-14 months') AS c, extract(year FROM INTERVAL '-14 months') AS d")
+	add("ex/quarter", "SELECT extract(quarter FROM INTERVAL '-5 months') AS a, extract(quarter FROM INTERVAL '0 days') AS b, extract(quarter FROM INTERVAL '11 months') AS c, extract(quarter FROM INTERVAL '-12 months') AS d")
+	add("ex/zero", "SELECT extract(year FROM INTERVAL '1 day') AS a, extract(month FROM INTERVAL '1 day') AS b, extract(hour FROM INTERVAL '2 days') AS c, extract(minute FROM INTERVAL '2 hours') AS d")
+	add("ex/second", "SELECT extract(second FROM INTERVAL '90 seconds') AS a, extract(second FROM INTERVAL '-90 seconds') AS b")
+	add("ex/epoch", "SELECT extract(epoch FROM INTERVAL '1 day') AS a, extract(epoch FROM INTERVAL '1 month') AS b, extract(epoch FROM INTERVAL '1 year') AS c, extract(epoch FROM INTERVAL '-1 year') AS d")
+	add("ex/secondTimestamp", "SELECT extract(second FROM TIMESTAMP '2024-01-01 10:00:05') AS a")
+	add("ex/week", "SELECT extract(week FROM INTERVAL '30 days') AS a")
+	add("ex/dow", "SELECT extract(dow FROM INTERVAL '30 days') AS a")
+	add("ex/doy", "SELECT extract(doy FROM INTERVAL '30 days') AS a")
+	add("ex/millisecond", "SELECT extract(millisecond FROM INTERVAL '5 seconds') AS a")
+	add("ex/decade", "SELECT extract(decade FROM INTERVAL '25 years') AS a")
+	add("ex/cast", "SELECT extract(day FROM CAST('30 days' AS INTERVAL)) AS a, extract(day FROM (INTERVAL '1 day' * 3)) AS b")
+	add("ex/opaque", "SELECT extract(day FROM CAST('1 day 02:00:00' AS INTERVAL)) AS a")
+	add("ex/rows", "SELECT id, extract(day FROM CAST(s AS INTERVAL)) AS d, extract(hour FROM CAST(s AS INTERVAL)) AS h, date_part('epoch', CAST(s AS INTERVAL)) AS e FROM iv_s WHERE id IN (1, 2, 3, 8, 9, 10) ORDER BY id")
+	add("dp/fields", "SELECT date_part('day', INTERVAL '30 days') AS a, date_part('second', INTERVAL '90 seconds') AS b, date_part('epoch', INTERVAL '1 month') AS c, date_part('hour', INTERVAL '1 day') AS d")
+	add("dp/small", "SELECT date_part('epoch', INTERVAL '1 year') AS a, date_part('millisecond', INTERVAL '5 seconds') AS b, date_part('microsecond', INTERVAL '5 seconds') AS c, date_part('quarter', INTERVAL '5 months') AS d")
+	add("dp/large", "SELECT date_part('decade', INTERVAL '25 years') AS a, date_part('century', INTERVAL '250 years') AS b, date_part('millennium', INTERVAL '2500 years') AS c, date_part('year', INTERVAL '-14 months') AS d")
+	add("dp/negative", "SELECT date_part('minute', INTERVAL '-90 minutes') AS a, date_part('second', INTERVAL '-90 seconds') AS b, date_part('hour', INTERVAL '-90 minutes') AS c, date_part('epoch', INTERVAL '14 months') AS d")
+	add("dp/abbrev", "SELECT date_part('mon', INTERVAL '14 months') AS a, date_part('hrs', INTERVAL '25 hours') AS b, date_part('y', INTERVAL '14 months') AS c, date_part('epoch', INTERVAL '178956970 years') AS d")
+	add("dp/week", "SELECT date_part('week', INTERVAL '30 days') AS a")
+	add("dp/dow", "SELECT date_part('dow', INTERVAL '30 days') AS a")
+	add("dp/bogus", "SELECT date_part('bogus', INTERVAL '30 days') AS a")
+	add("dp/null", "SELECT date_part('day', CAST(NULL AS INTERVAL)) AS a")
 	return out
 }
 
@@ -281,6 +492,9 @@ func TestArc1713cMeasure(t *testing.T) {
 			header := make([]string, len(r.FieldDescriptions))
 			for i, fd := range r.FieldDescriptions {
 				header[i] = fd.Name
+				if c.typed {
+					header[i] += ":" + ivPGTypeName(fd.DataTypeOID)
+				}
 			}
 			rows := make([]string, len(r.Rows))
 			for i, row := range r.Rows {
@@ -303,10 +517,12 @@ func TestArc1713cMeasure(t *testing.T) {
 	}
 }
 
-// ivKnown is the pinned answer of a cell whose difference from PostgreSQL is
-// outside this line's seam, each identical at base 2fa0beeb and at the fix.
-// A key "cell@arm" overrides "cell" on that arm. A pin FAILS the moment the
-// arm starts agreeing or changes in any other way — delete or re-pin it then.
+// ivKnown is the pinned answer of a cell that does not give PostgreSQL's
+// answer: one outside this line's seam, identical at base 2fa0beeb and at
+// the fix, or a refusal the fix put where a silent wrong answer was (the
+// round-2 arithmetic cells below). A key "cell@arm" overrides "cell" on that
+// arm. A pin FAILS the moment the arm starts agreeing or changes in any other
+// way — delete or re-pin it then.
 //
 //   - key/*, order/* (but key/inSubquery, key/joinMixed below): the interval
 //     crossed a projection and is its rendered TEXT (r20), so the hash key,
@@ -323,10 +539,30 @@ func TestArc1713cMeasure(t *testing.T) {
 //   - box/subsecond: this engine refuses a sub-second interval (22007);
 //     box/multifield: input the single-unit fields cannot hold is OPAQUE text
 //     here (IntervalValue.text) and keeps the text order.
-//   - arith/*: interval arithmetic boxes 0 (`* 2`, `/ 2`, `+`, unary minus),
-//     `timestamp + INTERVAL '1 month'` overflows into March from January 31
-//     (Go's AddDate normalization; PostgreSQL clamps to the month's last
-//     day), extract of an interval is NULL, justify_days does not exist.
+//   - arith/justifyDays: justify_days does not exist (42883).
+//   - key/unionAllMax: the representation again — a UNION ALL arm's
+//     interval is text, and max reads "2 days" > "10 days".
+//   - ext/coalesce: COALESCE whose only typed arm is an interval declares
+//     float8 and the store refuses the box (no SQLSTATE; base-identical) —
+//     not changed by this line. unk/caseSubject: PostgreSQL resolves a
+//     quoted CASE subject to text and refuses `text = interval`; here it
+//     compares text. unk/number: `interval = integer` is 42883 there and f
+//     here. ar/unaryPlus: `+interval` is 42883 there and the interval here.
+//     ar/plusUnknownDate: `'2024-01-01' + INTERVAL '1 day'` reads the
+//     quoted operand as a date here (22007 there: interval input). All
+//     base-identical.
+//   - ar/*SubSecond*, ar/mulInf: the result needs a sub-second clock part or
+//     PostgreSQL 17's infinite interval, which IntervalValue (whole seconds,
+//     finite) cannot hold: refused 0A000 (the fix; they boxed 0 before).
+//     ar/opaque*, ex/opaque: interval input the single-unit fields cannot
+//     hold (IntervalValue.text) is refused 0A000 when applied, as addInterval
+//     already refused it (they boxed 0 / answered NULL before).
+//   - ex/second, ex/epoch, ex/secondTimestamp: EXTRACT is numeric on
+//     PostgreSQL (`30.000000`) and float-carried here (ADR-0024 §2c, the
+//     timestamp's EXTRACT the same): the same number, printed as the double.
+//     ex/millisecond, ex/decade: EXTRACT is rewritten to a field function and
+//     those fields have none (42883, for a timestamp too); date_part answers
+//     them (dp/*).
 var ivKnown = map[string]string{
 	"box/subsecond":              "ERR 22007",
 	"box/multifield":             "a,b,c | f,f,t",
@@ -353,13 +589,26 @@ var ivKnown = map[string]string{
 	"order/topN":                 "id | 12; 6",
 	"order/minMax":               "lo,hi | 1 day,25:00:00",
 	"order/values":               "x | 10 days; 2 days; 25:00:00",
-	"arith/times":                "a | 0",
-	"arith/div":                  "a | 0",
-	"arith/plus":                 "a | 0",
-	"arith/neg":                  "a | -0",
-	"arith/tsMonth":              "a | 2024-03-02 00:00:00",
 	"arith/justifyDays":          "ERR 42883",
-	"arith/extract":              "a | NULL",
+	"key/unionAllMax":            "a | 2 days",
+	"ext/coalesce":               "ERR ",
+	"unk/caseSubject":            "a | 0",
+	"unk/number":                 "a | f",
+	"ar/unaryPlus":               "a | 1 day",
+	"ar/plusUnknownDate":         "a | 1704153600000",
+	"ar/mulSubSecond":            "ERR 0A000",
+	"ar/mulSubSecondCascade":     "ERR 0A000",
+	"ar/mulInf":                  "ERR 0A000",
+	"ar/divSubSecond":            "ERR 0A000",
+	"ar/divSubSecondCascade":     "ERR 0A000",
+	"ar/opaque":                  "ERR 0A000",
+	"ar/opaqueNeg":               "ERR 0A000",
+	"ex/opaque":                  "ERR 0A000",
+	"ex/second":                  "a,b | 30,-30",
+	"ex/epoch":                   "a,b,c,d | 86400,2592000,31557600,-31557600",
+	"ex/secondTimestamp":         "a | 5",
+	"ex/millisecond":             "ERR 42883",
+	"ex/decade":                  "ERR 42883",
 }
 
 // ivAllPairs is every (l, r) with l < r whose LEFT row's text is not NULL —
@@ -418,9 +667,26 @@ func TestArc1713cIntervalOrderEveryArm(t *testing.T) {
 			}
 			continue
 		}
+		wantTypes := ""
+		if c.typed {
+			// The declared types ride beside the value: PostgreSQL's from
+			// the wire OID, ours from the result's column declaration, which
+			// is what pgwire publishes. Compared against ivTypes, never
+			// against PostgreSQL's (temporal r20: an interval declares text).
+			wantTypes = ivHeaderTypes(want)
+			want = ivNormalize(want)
+		}
 		for _, arm := range arms {
-			got := ivNormalize(arm.run(c.sql))
+			raw := arm.run(c.sql)
+			got := ivNormalize(raw)
 			dump.WriteString(c.name + "\t" + arm.name + "\t" + got + "\n")
+			if c.typed {
+				gotTypes := ivHeaderTypes(raw)
+				dump.WriteString(c.name + "\t" + arm.name + "\ttypes\t" + gotTypes + "\tPostgreSQL\t" + wantTypes + "\n")
+				if gotTypes != ivTypes[c.name] {
+					t.Errorf("%s on %s: declared %q, pinned %q (PostgreSQL 17.11 %q)", c.name, arm.name, gotTypes, ivTypes[c.name], wantTypes)
+				}
+			}
 			if pin := ivPin(c.name, arm.name); pin != "" {
 				pinned++
 				if got != pin {
@@ -444,7 +710,21 @@ func TestArc1713cIntervalOrderEveryArm(t *testing.T) {
 			equalSpellings++
 		}
 	}
-	if equalSpellings < 15 || pinned != 27*len(arms) {
+	wantPinned := 0
+	for _, c := range cells {
+		for _, arm := range arms {
+			if !c.ddl && ivPin(c.name, arm.name) != "" {
+				wantPinned++
+			}
+		}
+	}
+	for k := range ivKnown {
+		name, _, _ := strings.Cut(k, "@")
+		if _, ok := answers[name]; !ok {
+			t.Errorf("pin %s names no cell", k)
+		}
+	}
+	if equalSpellings < 15 || pinned != wantPinned {
 		t.Fatalf("%d equal-but-differently-spelled pairs, %d pinned (cell, arm) answers: the table must discriminate and every pin must be read", equalSpellings, pinned)
 	}
 }
