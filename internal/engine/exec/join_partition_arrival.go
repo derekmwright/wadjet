@@ -86,6 +86,11 @@ func (h *HashJoin) buildPartitioned(ctx context.Context, source Source) error {
 
 		h.mu.Lock()
 		held = true
+		if h.spillErr != nil {
+			// A relief eviction another operator drove into this build failed
+			// after it had begun moving a partition (spillOneInMemoryPartition).
+			return h.spillErr // the deferred release unlocks h.mu
+		}
 
 		// Narrow filtered semi/anti builds to keys + filter columns before any
 		// storage decision: the partition scatter, per-partition accumulators,
@@ -142,6 +147,11 @@ func (h *HashJoin) buildPartitioned(ctx context.Context, source Source) error {
 	// atomics); applyBuildSchemaHint takes mu itself, so it runs after.
 	h.mu.Lock()
 	held = true
+	if h.spillErr != nil {
+		// The last relief call that can reach this build lands before this
+		// lock or not at all (reliefClosed is set below, under it).
+		return h.spillErr // the deferred release unlocks h.mu
+	}
 	if err := h.freezeAllOpenAccums(); err != nil {
 		return fmt.Errorf("freezing accumulators at build end: %w", err) // the deferred release unlocks h.mu
 	}
@@ -722,6 +732,10 @@ func (h *HashJoin) spillOneInMemoryPartition() (int64, error) {
 		// disposition, rather than nil-ing a slot the probe will read (#832).
 		return 0, nil
 	}
+	if h.spillErr != nil {
+		// An earlier eviction failed part-way; this join cannot answer.
+		return 0, h.spillErr
+	}
 	if ss.partBuildWriters == nil {
 		// The build has ended and closed its writers; reliefClosed, set in
 		// the same step, keeps every relief entry point out. Freeing nothing
@@ -745,14 +759,29 @@ func (h *HashJoin) spillOneInMemoryPartition() (int64, error) {
 		return 0, err
 	}
 
-	// Mark spilled BEFORE writing, so any concurrent (re-entry-safe) callers
-	// see the partition as already in the spilled set.
+	// The run is created BEFORE the partition is marked spilled. The mark is
+	// what sends the partition's later arrivals and its probe rows to disk
+	// and what makes every later eviction skip it; marked over a run that
+	// does not exist, its resident batches were never written and never
+	// joined, and the build answered without them (#1706, line 1706o: a
+	// relief eviction whose file could not be created, on every join kind).
+	// A failed create therefore changes nothing: the partition stays
+	// resident, unmarked and charged, and the build can still answer.
+	w, err := ss.buildWriter(partID)
+	if err != nil {
+		return 0, fmt.Errorf("spilling partition %d: %w", partID, err)
+	}
 	ss.spilledParts[partID] = true
 
 	// Write each in-memory batch to the partition's long-lived spill writer
 	// then nil out the slot in h.buildBatches so the column data becomes
 	// GC-eligible. ss.partBuildBatches is the source of truth here; the
 	// parallel ss.batchPartID tells us which global slot holds each batch.
+	//
+	// From the mark on, a failure cannot be undone: some batches may be in
+	// the run and dropped from memory, and the run itself is torn. It becomes
+	// the join's sticky error, which its build returns (spillErr), whoever
+	// drove the eviction.
 	for i, pid := range ss.batchPartID {
 		if pid != partID {
 			continue
@@ -761,8 +790,9 @@ func (h *HashJoin) spillOneInMemoryPartition() (int64, error) {
 		if bb == nil {
 			continue // already evicted
 		}
-		if err := ss.writeBuildBatch(partID, bb); err != nil {
-			return 0, fmt.Errorf("spilling partition %d batch %d: %w", partID, i, err)
+		if err := w.writeBatch(bb); err != nil {
+			h.spillErr = fmt.Errorf("hash join: spilling partition %d batch %d: %w", partID, i, err)
+			return 0, h.spillErr
 		}
 		h.buildBatches[i] = nil
 	}
@@ -959,25 +989,27 @@ func (h *HashJoin) SpillSome(target int64) (int64, error) {
 		return 0, nil
 	}
 	h.mu.Lock()
-	if h.reliefClosed || !beginRelief(&h.accState) {
+	if h.reliefClosed || h.spillErr != nil || !beginRelief(&h.accState) {
 		h.mu.Unlock()
 		return 0, nil
 	}
 	defer endRelief(&h.accState)
 	defer h.mu.Unlock()
 	var freed int64
+	var err error
 	for freed < target {
-		n, err := h.spillOneInMemoryPartition()
-		if err != nil {
-			return freed, err
-		}
-		if n == 0 {
+		var n int64
+		n, err = h.spillOneInMemoryPartition()
+		if err != nil || n == 0 {
 			break
 		}
 		freed += n
 	}
+	// Published on the failure path too: a failed eviction may already have
+	// frozen an accumulator (its slack is charged then), and the registry
+	// ranks this join by what it publishes.
 	if h.accInstanceID != 0 {
 		h.MemTracker.PublishOwned(h.accInstanceID, h.trackedMem+int64(cap(h.keyBuf)))
 	}
-	return freed, nil
+	return freed, err
 }

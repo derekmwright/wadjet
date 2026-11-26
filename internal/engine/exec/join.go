@@ -311,6 +311,17 @@ type HashJoin struct {
 	// nothing once it is set.
 	reliefClosed bool
 
+	// spillErr, guarded by mu, is the first failure of an eviction that had
+	// already begun to move a partition to disk: the partition is marked
+	// spilled and some of its rows may be written, dropped from memory, or
+	// both, so its run cannot be trusted. It is sticky. An eviction a relief
+	// call drives returns its error to the REQUESTER (RequestRelief) or to
+	// nobody (the drift backstop), so the build that owns the partition reads
+	// it here and fails with it rather than answering without those rows
+	// (#1706, line 1706o). An eviction that fails before anything moved (its
+	// run could not be created) marks nothing and does not set it.
+	spillErr error
+
 	// forcedEvictSeen counts arriving build batches for the TEST-ONLY
 	// eviction forcing knob (join_force_spill.go). Written under h.mu on the
 	// build path and read nowhere else.

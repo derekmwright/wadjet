@@ -153,23 +153,34 @@ func newSpillState(dir string, schema []parquet.Column) *spillState {
 // batch, producing tens of thousands of ~100 KB files under SF100 workloads
 // and dominating wall time with file-open/close syscalls during probe flush.
 func (s *spillState) writeBuildBatch(partID int, b *batch.RecordBatch) error {
+	w, err := s.buildWriter(partID)
+	if err != nil {
+		return err
+	}
+	return w.writeBatch(b)
+}
+
+// buildWriter returns partID's build-run writer, creating it on first use.
+// An eviction calls it BEFORE it marks the partition spilled, so a run that
+// cannot be created leaves the partition resident and unmarked (#1706, line
+// 1706o).
+func (s *spillState) buildWriter(partID int) (*spillBatchWriter, error) {
 	if s.partBuildWriters == nil {
 		// The build ended and closed its writers (buildPartitioned's tail,
 		// which ends relief eligibility under the same lock). Reaching here
 		// means something evicted after that; refuse rather than open a run
 		// nothing will read.
-		return fmt.Errorf("hash join: build spill writers already closed (partition %d)", partID)
+		return nil, fmt.Errorf("hash join: build spill writers already closed (partition %d)", partID)
 	}
-	w, ok := s.partBuildWriters[partID]
-	if !ok {
-		var err error
-		w, err = newSpillBatchWriter(s.dir, "build-spill")
-		if err != nil {
-			return err
-		}
-		s.partBuildWriters[partID] = w
+	if w, ok := s.partBuildWriters[partID]; ok {
+		return w, nil
 	}
-	return w.writeBatch(b)
+	w, err := newSpillBatchWriter(s.dir, "build-spill")
+	if err != nil {
+		return nil, err
+	}
+	s.partBuildWriters[partID] = w
+	return w, nil
 }
 
 // closeBuildWriters flushes and closes all build-side spill writers, attaching
@@ -320,26 +331,101 @@ type spillBatchWriter struct {
 	w      *bufio.Writer
 	count  int
 	path   string
+	// err is the writer's first failure, sticky: once a batch failed part-way
+	// the run holds a torn batch (or the buffer lost bytes), so no later
+	// batch may be appended after it and close must not publish it. bufio's
+	// own error is sticky too, but only for the bytes IT failed to write; a
+	// batch that failed for another reason left bufio healthy with half a
+	// batch in it (#1706, line 1706o).
+	err error
+}
+
+// spillFaultStage names one fallible step of a spill run writer, for the
+// test-only fault seam below.
+type spillFaultStage int
+
+const (
+	spillFaultCreate spillFaultStage = iota
+	spillFaultWrite                  // a write that reaches the file (the buffer overflowed)
+	spillFaultFlush                  // the final flush at close
+	spillFaultSeek                   // the seek back to the batch count at close
+	spillFaultCount                  // the batch-count write at close
+	spillFaultClose                  // the file's close
+	// spillFaultBatch: writeColumnarBatch failing after it wrote part of a
+	// batch into the buffer (an encoding refusal, which leaves bufio healthy
+	// and the run torn).
+	spillFaultBatch
+)
+
+// spillWriterFault is a TEST-ONLY seam (disarmed in production: one relaxed
+// load per create, per write that reaches the file, and per close step). When
+// armed it is asked before each fallible step of a spill run writer and the
+// error it returns is that step's failure.
+var spillWriterFault atomic.Pointer[func(stage spillFaultStage, path string) error]
+
+func spillFault(stage spillFaultStage, path string) error {
+	if f := spillWriterFault.Load(); f != nil {
+		return (*f)(stage, path)
+	}
+	return nil
+}
+
+// faultWriter is the seam's view of the file below the buffer.
+type faultWriter struct {
+	w    io.Writer
+	path string
+}
+
+func (fw faultWriter) Write(p []byte) (int, error) {
+	if err := spillFault(spillFaultWrite, fw.path); err != nil {
+		return 0, err
+	}
+	return fw.w.Write(p)
 }
 
 func newSpillBatchWriter(dir, prefix string) (*spillBatchWriter, error) {
 	seq := spillFileSeq.Add(1)
 	path := filepath.Join(dir, fmt.Sprintf("%s-%d.%d.bin", prefix, os.Getpid(), seq))
+	if err := spillFault(spillFaultCreate, path); err != nil {
+		return nil, fmt.Errorf("creating spill file: %w", err)
+	}
 	f, err := os.Create(path)
 	if err != nil {
 		return nil, fmt.Errorf("creating spill file: %w", err)
 	}
 	wf, fl := diskio.NewWriter(f, diskio.Spill)
-	w := bufio.NewWriterSize(wf, 64*1024) // EXPERIMENT
+	var under io.Writer = wf
+	if spillWriterFault.Load() != nil {
+		under = faultWriter{w: wf, path: path}
+	}
+	w := bufio.NewWriterSize(under, 64*1024) // EXPERIMENT
 	// Reserve space for batch count (will be written on close)
 	var buf [4]byte
 	w.Write(buf[:4])
 	return &spillBatchWriter{dir: dir, prefix: prefix, f: f, fl: fl, w: w, path: path}, nil
 }
 
+// writeBatch appends b to the run. A failure is sticky (see err): this call
+// and every later writeBatch and close return it. A write the buffer could not
+// pass to the file is reported here, by the batch that hit it, rather than
+// only at close — writeColumnarBatch does not look at bufio's per-call errors.
 func (sw *spillBatchWriter) writeBatch(b *batch.RecordBatch) error {
-	if err := writeColumnarBatch(sw.w, b); err != nil {
-		return err
+	if sw.err != nil {
+		return sw.err
+	}
+	err := writeColumnarBatch(sw.w, b)
+	if err == nil {
+		err = spillFault(spillFaultBatch, sw.path)
+	}
+	if err != nil {
+		sw.err = fmt.Errorf("writing spill batch: %w", err)
+		return sw.err
+	}
+	// A zero-length Write returns bufio's sticky error, if any, and writes
+	// nothing.
+	if _, err := sw.w.Write(nil); err != nil {
+		sw.err = fmt.Errorf("writing spill batch: %w", err)
+		return sw.err
 	}
 	sw.count++
 	return nil
@@ -362,30 +448,38 @@ func (sw *spillBatchWriter) abort() {
 
 func (sw *spillBatchWriter) close() (string, error) {
 	if sw.f == nil {
-		return "", nil
+		return "", sw.err
 	}
 	// On any failure the file is unusable — remove it rather than strand
 	// a partial run in the shared spill dir (see abort).
-	if err := sw.w.Flush(); err != nil {
+	if sw.err != nil {
 		sw.abort()
-		return "", fmt.Errorf("flushing spill: %w", err)
+		return "", sw.err
+	}
+	if err := sw.flushForClose(); err != nil {
+		sw.err = fmt.Errorf("flushing spill: %w", err)
+		sw.abort()
+		return "", sw.err
 	}
 	// Seek back and write batch count
-	if _, err := sw.f.Seek(0, 0); err != nil {
+	if err := sw.seekForCount(); err != nil {
+		sw.err = fmt.Errorf("seeking spill batch count: %w", err)
 		sw.abort()
-		return "", err
+		return "", sw.err
 	}
 	var buf [4]byte
 	binary.LittleEndian.PutUint32(buf[:], uint32(sw.count))
-	if _, err := sw.f.Write(buf[:]); err != nil {
+	if err := sw.writeCount(buf[:]); err != nil {
+		sw.err = fmt.Errorf("writing spill batch count: %w", err)
 		sw.abort()
-		return "", err
+		return "", sw.err
 	}
 	sw.fl.Finish()
-	if err := sw.f.Close(); err != nil {
+	if err := sw.closeFile(); err != nil {
+		sw.err = fmt.Errorf("closing spill file: %w", err)
 		sw.f = nil
 		os.Remove(sw.path)
-		return "", err
+		return "", sw.err
 	}
 	sw.f = nil
 	if sw.count == 0 {
@@ -393,6 +487,41 @@ func (sw *spillBatchWriter) close() (string, error) {
 		return "", nil
 	}
 	return sw.path, nil
+}
+
+// The close steps, each behind the test-only fault seam.
+
+func (sw *spillBatchWriter) flushForClose() error {
+	if err := spillFault(spillFaultFlush, sw.path); err != nil {
+		return err
+	}
+	return sw.w.Flush()
+}
+
+func (sw *spillBatchWriter) seekForCount() error {
+	if err := spillFault(spillFaultSeek, sw.path); err != nil {
+		return err
+	}
+	_, err := sw.f.Seek(0, 0)
+	return err
+}
+
+func (sw *spillBatchWriter) writeCount(buf []byte) error {
+	if err := spillFault(spillFaultCount, sw.path); err != nil {
+		return err
+	}
+	_, err := sw.f.Write(buf)
+	return err
+}
+
+// closeFile closes the file whatever the seam says, so a seam failure does not
+// leak the descriptor.
+func (sw *spillBatchWriter) closeFile() error {
+	ferr := spillFault(spillFaultClose, sw.path)
+	if err := sw.f.Close(); err != nil {
+		return err
+	}
+	return ferr
 }
 
 // writeSpillBatches writes multiple batches to a new spill file.

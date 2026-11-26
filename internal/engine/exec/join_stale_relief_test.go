@@ -184,6 +184,10 @@ type staleFixture struct {
 	// afterBuild runs between the victim's Build and its probe, where the
 	// planner's build goroutine runs it (join_plan.go, deferred build).
 	afterBuild func(*testing.T, *HashJoin)
+	// fault, when set, places a file-system obstacle in the spill
+	// directory just before the held call lands and lifts it once the call
+	// returned (join_relief_fault_test.go).
+	fault *staleFault
 }
 
 var staleMain = staleFixture{
@@ -374,6 +378,61 @@ type staleOutcome struct {
 	reqPanic    any
 	evicted     int // victim partitions the held call evicted; -1 after Close (bookkeeping cleared)
 	usedAtClose int64
+	// filesAtClose counts what is left in the spill directory once both
+	// joins closed; landed is the fault schedules' consistency check of the
+	// victim and the tracker right after the held call returned ("" = held).
+	filesAtClose int
+	landed       string
+}
+
+// spillDirEntries counts the entries left in a spill directory.
+func spillDirEntries(t *testing.T, dir string) int {
+	t.Helper()
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(ents)
+}
+
+// landedConsistency checks, right after a held relief call returned and the
+// requester's Build ended, that the victim's bookkeeping, what it published to
+// the registry and the tracker agree. The victim is parked at an arrival
+// boundary (it holds no lock) and the requester has returned.
+func landedConsistency(victim, req *HashJoin, tr *memory.Tracker) string {
+	victim.mu.Lock()
+	defer victim.mu.Unlock()
+	var bad []string
+	if victim.accInstanceID != 0 {
+		if pub, own := tr.OwnedFor(victim.accInstanceID), victim.trackedMem+int64(cap(victim.keyBuf)); pub != own {
+			bad = append(bad, fmt.Sprintf("victim published %d, owns %d", pub, own))
+		}
+	}
+	if st := memory.OpState(victim.accState.Load()); st != memory.OpActive {
+		bad = append(bad, fmt.Sprintf("victim registry state %v, want active", st))
+	}
+	if used, sum := tr.Used(), victim.trackedMem+req.trackedMem; used != sum {
+		bad = append(bad, fmt.Sprintf("tracker used %d, the two joins track %d", used, sum))
+	}
+	if ss := victim.spillState; ss != nil {
+		for p := range ss.spilledParts {
+			if _, ok := ss.partBuildWriters[p]; !ok && len(ss.partBuildFiles[p]) == 0 {
+				bad = append(bad, fmt.Sprintf("partition %d marked spilled with no run", p))
+			}
+		}
+		for p, bs := range ss.partBuildBatches {
+			if ss.spilledParts[p] && len(bs) > 0 {
+				dropped := 0
+				for i, pid := range ss.batchPartID {
+					if pid == p && victim.buildBatches[i] == nil {
+						dropped++
+					}
+				}
+				bad = append(bad, fmt.Sprintf("partition %d marked spilled with %d batches resident, %d written and dropped", p, len(bs), dropped))
+			}
+		}
+	}
+	return strings.Join(bad, "; ")
 }
 
 // staleForceAt is the victim arrival the force schedule's first relief round
@@ -550,8 +609,17 @@ func runStaleRelief(t *testing.T, fx staleFixture, k staleKind, site memory.Reli
 		if !closed {
 			spilledBefore = victimSpilled()
 		}
+		if fx.fault != nil {
+			fx.fault.place(t, sm.SpillDir())
+		}
 		close(release)
 		<-reqDone
+		if fx.fault != nil {
+			fx.fault.lift()
+			if !closed {
+				out.landed = landedConsistency(victim, req, tr)
+			}
+		}
 		out.evicted = -1
 		if !closed {
 			out.evicted = victimSpilled() - spilledBefore
@@ -584,7 +652,18 @@ func runStaleRelief(t *testing.T, fx staleFixture, k staleKind, site memory.Reli
 	}
 	close(gateVictim)
 	if err := <-buildDone; err != nil {
-		t.Fatalf("victim build: %v", err)
+		if fx.fault == nil {
+			t.Fatalf("victim build: %v", err)
+		}
+		// Under an injected fault the victim's own Build failing is an
+		// outcome, not a harness failure: it is the loud end the fault
+		// test is looking for.
+		out.victimErr = err
+		victim.Close()
+		req.Close()
+		out.usedAtClose = tr.Used()
+		out.filesAtClose = spillDirEntries(t, sm.SpillDir())
+		return out
 	}
 	if fx.afterBuild != nil {
 		fx.afterBuild(t, victim)
@@ -621,6 +700,7 @@ func runStaleRelief(t *testing.T, fx staleFixture, k staleKind, site memory.Reli
 	}
 	req.Close()
 	out.usedAtClose = tr.Used()
+	out.filesAtClose = spillDirEntries(t, sm.SpillDir())
 	return out
 }
 

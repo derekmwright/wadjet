@@ -571,19 +571,19 @@ func lcRoutes() []lcRoute {
 			})
 			return p, err
 		}},
-		// A writer's batches go through a 64 KiB bufio.Writer whose write
-		// errors are sticky and are returned by the Flush in close(): a
-		// partition larger than the buffer meets ENOSPC DURING the build, and
-		// the join learns of it when the build's end closes the writers
-		// (#1706, line 1706o: they used to stay open until the first
-		// NextFlush, beside every probe writer).
+		// A writer's batches go through a 64 KiB bufio.Writer: a partition
+		// larger than the buffer meets ENOSPC DURING the build, and the batch
+		// whose bytes the buffer could not pass to the file reports it — the
+		// writer looks at bufio's sticky error after every batch and keeps it
+		// as its own (#1706, line 1706o; it used to surface only when the
+		// writers were closed).
 		{name: "build-write-enospc", jt: FullOuterJoin, budget: big, wantErr: "no space left on device", run: func(e *lcEnv) (*HashJoinProbe, error) {
 			e.faults.inject(e.t, []string{"build-spill"}, 2, 128, false)
 			err := e.build(nil)
 			e.faults.seal()
 			e.spilled()
-			if err != nil && !strings.Contains(err.Error(), "closing build writers") {
-				e.t.Errorf("expected the failure at the build writers' close, got %v", err)
+			if err != nil && !strings.Contains(err.Error(), "writing spill batch") {
+				e.t.Errorf("expected the failure at the batch whose write hit the file, got %v", err)
 			}
 			return nil, err
 		}},
