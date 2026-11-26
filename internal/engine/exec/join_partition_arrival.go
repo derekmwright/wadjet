@@ -163,6 +163,22 @@ func (h *HashJoin) buildPartitioned(ctx context.Context, source Source) error {
 	h.reconcileHashMemory()
 
 	h.warmBuildNullBitmaps()
+
+	// The build is over: nothing below writes a build row, so every spilled
+	// partition's run is complete and its writer (and the writer's buffer)
+	// can go now rather than at the first NextFlush, where it used to stay
+	// open beside every probe writer (#1706, line 1706o). Ending relief
+	// eligibility is part of the same step and under the same exclusion: a
+	// relief call the registry selected before Build's unregister can still
+	// land after this unlock, and an eviction then would write into a writer
+	// map that no longer exists. Build's deferred close sets reliefClosed
+	// again and unregisters outside h.mu (registry lock, then operator lock).
+	h.reliefClosed = true
+	if h.spillState != nil {
+		if err := h.spillState.closeBuildWriters(); err != nil {
+			return fmt.Errorf("closing build writers: %w", err) // the deferred release unlocks h.mu
+		}
+	}
 	held = false
 	h.mu.Unlock()
 	h.applyBuildSchemaHint()
@@ -704,6 +720,15 @@ func (h *HashJoin) spillOneInMemoryPartition() (int64, error) {
 		// happens, not only where the path is chosen. Freeing nothing makes
 		// spillUntilCanReserve stop and the build refuse loudly, which is the
 		// disposition, rather than nil-ing a slot the probe will read (#832).
+		return 0, nil
+	}
+	if ss.partBuildWriters == nil {
+		// The build has ended and closed its writers; reliefClosed, set in
+		// the same step, keeps every relief entry point out. Freeing nothing
+		// here as well, BEFORE the partition is marked spilled, means that a
+		// path which got past that check still cannot leave a partition
+		// marked spilled with no run behind it — the probe would route its
+		// rows to a replay that reads nothing (#1706, line 1706o).
 		return 0, nil
 	}
 	partID := ss.largestInMemoryPartition()

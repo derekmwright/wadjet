@@ -153,6 +153,13 @@ func newSpillState(dir string, schema []parquet.Column) *spillState {
 // batch, producing tens of thousands of ~100 KB files under SF100 workloads
 // and dominating wall time with file-open/close syscalls during probe flush.
 func (s *spillState) writeBuildBatch(partID int, b *batch.RecordBatch) error {
+	if s.partBuildWriters == nil {
+		// The build ended and closed its writers (buildPartitioned's tail,
+		// which ends relief eligibility under the same lock). Reaching here
+		// means something evicted after that; refuse rather than open a run
+		// nothing will read.
+		return fmt.Errorf("hash join: build spill writers already closed (partition %d)", partID)
+	}
 	w, ok := s.partBuildWriters[partID]
 	if !ok {
 		var err error
@@ -166,20 +173,31 @@ func (s *spillState) writeBuildBatch(partID int, b *batch.RecordBatch) error {
 }
 
 // closeBuildWriters flushes and closes all build-side spill writers, attaching
-// their output files to partBuildFiles. Caller must invoke this before probe
-// begins reading the spilled partitions.
+// their output files to partBuildFiles. The build calls it at its end, under
+// h.mu, in the same step that ends relief eligibility (buildPartitioned).
+//
+// Every writer is finished and dropped even when one fails: stopping at the
+// first error left the rest open, holding their descriptors and buffers, until
+// Close. After a failure the remaining writers are aborted (their runs are
+// unusable once the build has failed) and the first error is returned.
 func (s *spillState) closeBuildWriters() error {
+	var first error
 	for partID, w := range s.partBuildWriters {
+		if first != nil {
+			w.abort()
+			continue
+		}
 		path, err := w.close()
 		if err != nil {
-			return err
+			first = err
+			continue
 		}
 		if path != "" {
 			s.partBuildFiles[partID] = append(s.partBuildFiles[partID], path)
 		}
 	}
 	s.partBuildWriters = nil
-	return nil
+	return first
 }
 
 // largestInMemoryPartition returns the partition ID with the most memory usage.
@@ -212,19 +230,29 @@ func (s *spillState) writeProbeRow(partID int, b *batch.RecordBatch) error {
 	return w.writeBatch(b)
 }
 
-// closeProbeWriters flushes and closes all probe spill writers.
+// closeProbeWriters flushes and closes all probe spill writers. Like
+// closeBuildWriters it finishes and drops every writer even when one fails,
+// aborting those after the first failure, and returns the first error.
 func (s *spillState) closeProbeWriters() error {
+	s.probeMu.Lock()
+	defer s.probeMu.Unlock()
+	var first error
 	for partID, w := range s.partProbeWriters {
+		if first != nil {
+			w.abort()
+			continue
+		}
 		path, err := w.close()
 		if err != nil {
-			return err
+			first = err
+			continue
 		}
 		if path != "" {
 			s.partProbeFiles[partID] = append(s.partProbeFiles[partID], path)
 		}
 	}
 	s.partProbeWriters = nil
-	return nil
+	return first
 }
 
 // cleanup removes all spill files and clears the partition bookkeeping.
@@ -252,9 +280,9 @@ func (s *spillState) cleanup() {
 
 // dispose is HashJoin.Close's teardown of the grace state, on every route:
 // it aborts (closes, then removes) every writer still open — the build
-// writers stay open until the first NextFlush and the probe writers until the
-// probe ends, so a cancelled or failed join, or one closed before its probe,
-// still holds them — removes the runs already closed, and drops every
+// writers stay open until the build ends and the probe writers until the
+// probe ends, so a join cancelled or failed in its build or probe still
+// holds them — removes the runs already closed, and drops every
 // structure that holds batches. abort is idempotent, so a writer an earlier
 // close or abort already finished is not closed twice. Caller holds the
 // join's mu; probeMu is taken for the probe writers, in that order.
@@ -1559,14 +1587,12 @@ func (p *HashJoinProbe) NextFlush(ctx context.Context) (*batch.RecordBatch, erro
 		return p.FlushUnmatchedRows(), nil
 	}
 
-	// One-time init: collect partition IDs and close probe + build writers so
+	// One-time init: collect partition IDs and close the probe writers so
 	// spill files are flushed and readable before the probe reader opens them.
+	// The build writers were closed when the build ended (buildPartitioned).
 	if !p.spillFlushInit {
 		if err := ss.closeProbeWriters(); err != nil {
 			return nil, fmt.Errorf("closing probe writers: %w", err)
-		}
-		if err := ss.closeBuildWriters(); err != nil {
-			return nil, fmt.Errorf("closing build writers: %w", err)
 		}
 		p.spillFlushPartIDs = make([]int, 0, len(ss.spilledParts))
 		for id := range ss.spilledParts {

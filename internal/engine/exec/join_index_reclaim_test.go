@@ -30,6 +30,14 @@ import (
 // through spillUntilCanReserve, and returns how many it evicted.
 func evictAll(t *testing.T, hj *HashJoin) int {
 	t.Helper()
+	// The build closed its spill writers at its end (#1706, line 1706o), and
+	// production never evicts after that (reliefClosed). This measurement
+	// evicts a finished build directly, so it gives the build a writer map
+	// back; what it measures, the index an eviction frees, does not depend on
+	// when the writers close.
+	if ss := hj.spillState; ss != nil && ss.partBuildWriters == nil {
+		ss.partBuildWriters = make(map[int]*spillBatchWriter)
+	}
 	evicted := 0
 	for {
 		freed, err := hj.spillOneInMemoryPartition()

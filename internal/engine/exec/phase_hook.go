@@ -21,6 +21,12 @@ const (
 	// accumulator froze and before the matched bitmaps and the bloom filter
 	// are built from the index.
 	PhaseJoinBuildTail PhaseSite = "HashJoin.buildTail"
+	// PhaseJoinBuildEnd is in a registered HashJoin's Build after the build
+	// itself returned (on every path) and before Build's deferred close takes
+	// mu to end relief eligibility and unregister. No lock is held there: it
+	// is the window in which a relief call selected during the build can
+	// still take mu (#1706, line 1706o).
+	PhaseJoinBuildEnd PhaseSite = "HashJoin.buildEnd"
 )
 
 // phaseHook runs at a PhaseSite with the operator in that phase. nil in

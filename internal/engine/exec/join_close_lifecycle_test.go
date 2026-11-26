@@ -574,40 +574,30 @@ func lcRoutes() []lcRoute {
 		// A writer's batches go through a 64 KiB bufio.Writer whose write
 		// errors are sticky and are returned by the Flush in close(): a
 		// partition larger than the buffer meets ENOSPC DURING the build, and
-		// the join learns of it when the first NextFlush closes the writers.
+		// the join learns of it when the build's end closes the writers
+		// (#1706, line 1706o: they used to stay open until the first
+		// NextFlush, beside every probe writer).
 		{name: "build-write-enospc", jt: FullOuterJoin, budget: big, wantErr: "no space left on device", run: func(e *lcEnv) (*HashJoinProbe, error) {
 			e.faults.inject(e.t, []string{"build-spill"}, 2, 128, false)
-			if err := e.build(nil); err != nil {
-				return nil, err
-			}
+			err := e.build(nil)
 			e.faults.seal()
 			e.spilled()
-			p := e.newProbe()
-			if err := lcProbe(e.ctx, p, e.fix.probe, nil); err != nil {
-				return p, err
-			}
-			_, err := lcFlush(e.ctx, p, nil)
 			if err != nil && !strings.Contains(err.Error(), "closing build writers") {
 				e.t.Errorf("expected the failure at the build writers' close, got %v", err)
 			}
-			return p, err
+			return nil, err
 		}},
+		// The same with partitions smaller than the buffer: nothing reaches
+		// the file until the close's Flush.
 		{name: "build-flush-enospc", small: true, jt: InnerJoin, budget: small, wantErr: "no space left on device", run: func(e *lcEnv) (*HashJoinProbe, error) {
 			e.faults.inject(e.t, []string{"build-spill"}, 2, 128, false)
-			if err := e.build(nil); err != nil {
-				return nil, fmt.Errorf("the build itself failed (partitions must stay under the writer buffer): %w", err)
-			}
+			err := e.build(nil)
 			e.faults.seal()
 			e.spilled()
-			p := e.newProbe()
-			if err := lcProbe(e.ctx, p, e.fix.probe, nil); err != nil {
-				return p, err
-			}
-			_, err := lcFlush(e.ctx, p, nil)
 			if err != nil && !strings.Contains(err.Error(), "closing build writers") {
 				e.t.Errorf("expected the failure at the build writers' close, got %v", err)
 			}
-			return p, err
+			return nil, err
 		}},
 		{name: "probe-write-enospc", jt: FullOuterJoin, budget: big, wantErr: "no space left on device", run: func(e *lcEnv) (*HashJoinProbe, error) {
 			if err := e.build(nil); err != nil {

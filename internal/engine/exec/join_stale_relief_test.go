@@ -358,6 +358,12 @@ const (
 	landDuringProbe staleTiming = "during_probe"
 	// landAfterClose: the victim answered and was closed.
 	landAfterClose staleTiming = "after_close"
+	// landAtBuildEnd: released inside the victim's build tail (which holds
+	// mu, so the call waits for it) and landing in the window after the
+	// tail's unlock and before Build's deferred close takes mu again and
+	// unregisters — the window in which the tail has already closed the
+	// build's spill writers (#1706, line 1706o).
+	landAtBuildEnd staleTiming = "at_build_end"
 )
 
 // staleOutcome is what one schedule produced.
@@ -555,6 +561,27 @@ func runStaleRelief(t *testing.T, fx staleFixture, k staleKind, site memory.Reli
 	if timing == landDuringBuild {
 		landAndWait()
 	}
+	if timing == landAtBuildEnd {
+		restorePhase := SetPhaseHook(func(s PhaseSite, op any) {
+			if op != victim {
+				return
+			}
+			switch s {
+			case PhaseJoinBuildTail:
+				// The victim holds mu here: read its state directly.
+				if victim.spillState != nil {
+					spilledBefore = len(victim.spillState.spilledParts)
+				}
+				close(release)
+			case PhaseJoinBuildEnd:
+				// No lock is held: the released call takes mu now, in the
+				// window, and the victim waits until it has landed.
+				<-reqDone
+				out.evicted = victimSpilled() - spilledBefore
+			}
+		})
+		defer restorePhase()
+	}
 	close(gateVictim)
 	if err := <-buildDone; err != nil {
 		t.Fatalf("victim build: %v", err)
@@ -640,6 +667,28 @@ func TestStaleReliefAfterKeyRepair(t *testing.T) {
 				})
 			}
 		}
+	}
+}
+
+// TestStaleReliefAtBuildEnd lands the held call in the window between the
+// build tail's unlock and Build's deferred close (#1706, line 1706o): the tail
+// has closed the build's spill writers by then, so it must also have ended
+// relief eligibility under the same lock. A call landing there must evict
+// nothing, must not fail on the closed writers, and the victim must still
+// answer PostgreSQL's answer.
+func TestStaleReliefAtBuildEnd(t *testing.T) {
+	for _, k := range staleKinds {
+		t.Run(k.name, func(t *testing.T) {
+			out := runStaleRelief(t, staleMain, k, memory.ReliefSiteRequest, landAtBuildEnd)
+			checkStaleOutcome(t, staleMain, k, landAtBuildEnd, out)
+			if out.evicted != 0 {
+				t.Errorf("the relief call landing after the build tail evicted %d of the victim's "+
+					"partitions: its build writers were already closed", out.evicted)
+			}
+			if out.reqErr != nil && strings.Contains(out.reqErr.Error(), "already closed") {
+				t.Errorf("the relief call reached the victim's closed build writers: %v", out.reqErr)
+			}
+		})
 	}
 }
 

@@ -1127,6 +1127,7 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 			// registry may already hold this join for a SpillSome it calls
 			// after the unregister. Unregistering takes the registry lock and
 			// then mu (Inspect), so mu is released first.
+			runPhaseHook(PhaseJoinBuildEnd, h)
 			h.mu.Lock()
 			h.reliefClosed = true
 			h.mu.Unlock()
