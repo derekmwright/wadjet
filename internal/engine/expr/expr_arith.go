@@ -49,7 +49,7 @@ func (e *BinOp) Eval(b *batch.RecordBatch, row int) any {
 	// before the date arms, which read a quoted operand as a date; date ±
 	// interval is theirs (intervalArith declines it).
 	if eitherInterval(lv, rv) {
-		if v, ok := intervalArithFirst(e.Op, lv, rv); ok {
+		if v, ok := intervalArithFirst(e.Op, lv, rv, isUnknownLit(e.Left) || isUnknownLit(e.Right)); ok {
 			return v
 		}
 	}
@@ -76,7 +76,7 @@ func (e *BinOp) Eval(b *batch.RecordBatch, row int) any {
 		// interval ± a number or a boolean: no such operator (42883), where
 		// the numeric path below read the interval as 0.
 		if eitherInterval(lv, rv) {
-			if v, ok := intervalArith(e.Op, lv, rv); ok {
+			if v, ok := intervalArith(e.Op, lv, rv, isUnknownLit(e.Left) || isUnknownLit(e.Right)); ok {
 				return v
 			}
 		}

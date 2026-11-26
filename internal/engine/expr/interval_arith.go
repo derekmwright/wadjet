@@ -209,7 +209,12 @@ func intervalOperandName(v any) string {
 //     literal read as float8);
 //   - interval with a number, a boolean or another interval under any other
 //     operator: no such operator, 42883.
-func intervalArith(op string, lv, rv any) (any, bool) {
+//
+// quoted reports that the non-interval operand is a quoted LITERAL, SQL's
+// unknown, which PostgreSQL types from the interval beside it. A string from
+// anywhere else (a text column) is text: `±` leaves it to the caller's date
+// arms as before, and `*` / `/` have no `interval * text` (42883).
+func intervalArith(op string, lv, rv any, quoted bool) (any, bool) {
 	li, lok := lv.(IntervalValue)
 	ri, rok := rv.(IntervalValue)
 	if !lok && !rok {
@@ -229,7 +234,7 @@ func intervalArith(op string, lv, rv any) (any, bool) {
 			other = lv
 		}
 		if s, ok := other.(string); ok {
-			if !intervalInputText(s) {
+			if !quoted || !intervalInputText(s) {
 				return nil, false
 			}
 			oi := castToIntervalText(s)
@@ -249,6 +254,12 @@ func intervalArith(op string, lv, rv any) (any, bool) {
 		iv, other := li, rv
 		if rok {
 			iv, other = ri, lv
+		}
+		if _, text := other.(string); text && !quoted {
+			if lok {
+				raiseIntervalOperator(op, "interval", "text")
+			}
+			raiseIntervalOperator(op, "text", "interval")
 		}
 		f, ok := intervalFactor(other)
 		if !ok {
@@ -318,9 +329,9 @@ func eitherInterval(lv, rv any) bool { return isIntervalBox(lv) || isIntervalBox
 // every other operand pair carries only eitherInterval's two type checks.
 //
 //go:noinline
-func intervalArithFirst(op string, lv, rv any) (any, bool) {
+func intervalArithFirst(op string, lv, rv any, quoted bool) (any, bool) {
 	if op == "*" || op == "/" || op == "%" || intervalPair(lv, rv) {
-		return intervalArith(op, lv, rv)
+		return intervalArith(op, lv, rv, quoted)
 	}
 	return nil, false
 }

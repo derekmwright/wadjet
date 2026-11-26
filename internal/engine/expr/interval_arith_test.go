@@ -62,18 +62,26 @@ func TestIntervalArithIsPostgres(t *testing.T) {
 		{"2147483647 days + 1 day", func() any { return intervalAdd(d(2147483647), d(1), false) }, "ERR 22008"},
 		{"-1 day", func() any { return intervalNeg(d(1)) }, "-1 days"},
 		{"-(-2147483648 days)", func() any { return intervalNeg(d(-2147483648)) }, "ERR 22008"},
-		{"interval * interval", func() any { v, _ := intervalArith("*", d(1), d(1)); return v }, "ERR 42883"},
-		{"interval + 1", func() any { v, _ := intervalArith("+", d(1), int64(1)); return v }, "ERR 42883"},
-		{"interval * 'abc'", func() any { v, _ := intervalArith("*", d(1), "abc"); return v }, "ERR 22P02"},
-		{"interval + '1 hour'", func() any { v, _ := intervalArith("+", d(1), "1 hour"); return v }, "1 day 01:00:00"},
+		{"interval * interval", func() any { v, _ := intervalArith("*", d(1), d(1), false); return v }, "ERR 42883"},
+		{"interval + 1", func() any { v, _ := intervalArith("+", d(1), int64(1), false); return v }, "ERR 42883"},
+		{"interval * 'abc'", func() any { v, _ := intervalArith("*", d(1), "abc", true); return v }, "ERR 22P02"},
+		{"interval + '1 hour'", func() any { v, _ := intervalArith("+", d(1), "1 hour", true); return v }, "1 day 01:00:00"},
 	} {
 		if got := ivCatch(c.f); got != c.want {
 			t.Errorf("%s = %s, PostgreSQL 17.11 %s", c.name, got, c.want)
 		}
 	}
 	// A quoted operand that is not interval input is the date arms' to read.
-	if _, ok := intervalArith("+", d(1), "2024-01-01"); ok {
+	if _, ok := intervalArith("+", d(1), "2024-01-01", true); ok {
 		t.Error("interval + '2024-01-01' was taken as interval arithmetic")
+	}
+	// A string that is not a quoted literal (a text column's value) is text:
+	// never an interval under ±, and there is no `interval * text`.
+	if _, ok := intervalArith("+", d(1), "1 hour", false); ok {
+		t.Error("interval + a text column's '1 hour' was taken as interval arithmetic")
+	}
+	if got := ivCatch(func() any { v, _ := intervalArith("*", d(1), "2", false); return v }); got != "ERR 42883" {
+		t.Errorf("interval * a text column's '2' = %s, PostgreSQL 17.11 ERR 42883 (interval * text)", got)
 	}
 }
 

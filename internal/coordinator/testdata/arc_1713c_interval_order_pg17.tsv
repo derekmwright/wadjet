@@ -266,6 +266,8 @@ ar/mod	ERR 42883
 ar/timesBool	ERR 42883
 ar/opaque	a | 2 days 04:00:00
 ar/opaqueNeg	a | -1 days -02:00:00
+ar/textColPlus	ERR 42883
+ar/textColTimes	ERR 42883
 ar/rows	id,d,p,n | 1,2 days,1 day 01:00:00,-1 days; 2,48:00:00,25:00:00,-24:00:00; 3,2 mons,1 mon 01:00:00,-1 mons; 8,-2 days,-1 days +01:00:00,1 day; 9,NULL,NULL,NULL
 ar/tsMul	a | 2024-02-02 00:00:00
 ar/tsMulBare	a | 2024-02-02 00:00:00

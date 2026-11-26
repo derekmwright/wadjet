@@ -350,6 +350,10 @@ func ivCellsR2() []ivCell {
 	add("ar/timesBool", "SELECT INTERVAL '1 day' * TRUE AS a")
 	add("ar/opaque", "SELECT CAST('1 day 02:00:00' AS INTERVAL) * 2 AS a")
 	add("ar/opaqueNeg", "SELECT -CAST('1 day 02:00:00' AS INTERVAL) AS a")
+	// A text COLUMN is not SQL's unknown: PostgreSQL has no interval ± text
+	// nor interval * text.
+	add("ar/textColPlus", "SELECT id, INTERVAL '1 day' + s AS a FROM iv_s WHERE id IN (1, 6) ORDER BY id")
+	add("ar/textColTimes", "SELECT id, INTERVAL '1 day' * s AS a FROM iv_s WHERE id = 1")
 	add("ar/rows", "SELECT id, CAST(s AS INTERVAL) * 2 AS d, CAST(s AS INTERVAL) + INTERVAL '1 hour' AS p, -CAST(s AS INTERVAL) AS n FROM iv_s WHERE id IN (1, 2, 3, 8, 9) ORDER BY id")
 	add("ar/tsMul", "SELECT CAST(TIMESTAMP '2024-01-31 00:00:00' + (INTERVAL '1 day' * 2) AS TEXT) AS a")
 	add("ar/tsMulBare", "SELECT CAST(TIMESTAMP '2024-01-31 00:00:00' + INTERVAL '1 day' * 2 AS TEXT) AS a")
@@ -549,8 +553,10 @@ func TestArc1713cMeasure(t *testing.T) {
 //     compares text. unk/number: `interval = integer` is 42883 there and f
 //     here. ar/unaryPlus: `+interval` is 42883 there and the interval here.
 //     ar/plusUnknownDate: `'2024-01-01' + INTERVAL '1 day'` reads the
-//     quoted operand as a date here (22007 there: interval input). All
-//     base-identical.
+//     quoted operand as a date here (22007 there: interval input).
+//     ar/textColPlus: `interval + text_column` reads the column as a date
+//     here (temporal arc VL's text-date concession; NULL for '1 day') where
+//     PostgreSQL has no `interval + text` (42883). All base-identical.
 //   - ar/*SubSecond*, ar/mulInf: the result needs a sub-second clock part or
 //     PostgreSQL 17's infinite interval, which IntervalValue (whole seconds,
 //     finite) cannot hold: refused 0A000 (the fix; they boxed 0 before).
@@ -596,6 +602,7 @@ var ivKnown = map[string]string{
 	"unk/number":                 "a | f",
 	"ar/unaryPlus":               "a | 1 day",
 	"ar/plusUnknownDate":         "a | 1704153600000",
+	"ar/textColPlus":             "id,a | 1,NULL; 6,NULL",
 	"ar/mulSubSecond":            "ERR 0A000",
 	"ar/mulSubSecondCascade":     "ERR 0A000",
 	"ar/mulInf":                  "ERR 0A000",
