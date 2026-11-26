@@ -383,6 +383,12 @@ type staleOutcome struct {
 	// victim and the tracker right after the held call returned ("" = held).
 	filesAtClose int
 	landed       string
+	// backstopFailures is the manager's count of failed drift-backstop
+	// evictions when the run ended; victimName and victimID are the victim's
+	// identity as the registry saw it when the held call selected it.
+	backstopFailures int64
+	victimName       string
+	victimID         uint64
 }
 
 // spillDirEntries counts the entries left in a spill directory.
@@ -558,6 +564,7 @@ func runStaleRelief(t *testing.T, fx staleFixture, k staleKind, site memory.Reli
 	case <-time.After(60 * time.Second):
 		t.Fatalf("victim build never reached arrival %d", holdAt)
 	}
+	var out staleOutcome
 	selected := make(chan struct{})
 	release := make(chan struct{})
 	var taken, firstRound atomic.Bool
@@ -576,12 +583,13 @@ func runStaleRelief(t *testing.T, fx staleFixture, k staleKind, site memory.Reli
 		if s != site || !taken.CompareAndSwap(false, true) {
 			return
 		}
+		f := op.Inspect()
+		out.victimName, out.victimID = f.Name, f.InstanceID
 		close(selected)
 		<-release
 	})
 	defer restore()
 
-	var out staleOutcome
 	req := NewHashJoin(InnerJoin, []string{"x"}, []string{"rk"})
 	req.Spill, req.MemTracker = sm, tr
 	reqDone := make(chan struct{})
@@ -663,6 +671,7 @@ func runStaleRelief(t *testing.T, fx staleFixture, k staleKind, site memory.Reli
 		req.Close()
 		out.usedAtClose = tr.Used()
 		out.filesAtClose = spillDirEntries(t, sm.SpillDir())
+		out.backstopFailures = sm.BackstopEvictionFailures()
 		return out
 	}
 	if fx.afterBuild != nil {
@@ -701,6 +710,7 @@ func runStaleRelief(t *testing.T, fx staleFixture, k staleKind, site memory.Reli
 	req.Close()
 	out.usedAtClose = tr.Used()
 	out.filesAtClose = spillDirEntries(t, sm.SpillDir())
+	out.backstopFailures = sm.BackstopEvictionFailures()
 	return out
 }
 

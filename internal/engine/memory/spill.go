@@ -122,6 +122,11 @@ type reliefRegistry struct {
 	reliefMu       sync.Mutex
 	lastReliefAt   map[uint64]time.Time
 	rotationCursor int
+
+	// backstopFailures counts drift-backstop evictions whose SpillSome
+	// returned an error (forceSpillLargestOwned). The backstop has no caller
+	// to hand that error to, so it is logged and counted here instead.
+	backstopFailures atomic.Int64
 }
 
 func newReliefRegistry() *reliefRegistry {
@@ -1380,12 +1385,12 @@ func (sm *SpillManager) driftExceeds(frac float64) bool {
 func (sm *SpillManager) forceSpillLargestOwned(target int64) int64 {
 	sm.accountedMu.Lock()
 	var best AccountedOperator
-	var bestOwned int64
+	var bestF OperatorFootprint
 	for _, op := range sm.accounted {
 		f := op.Inspect()
-		if f.State == OpActive && f.OwnedBytes > bestOwned {
+		if f.State == OpActive && f.OwnedBytes > bestF.OwnedBytes {
 			best = op
-			bestOwned = f.OwnedBytes
+			bestF = f
 		}
 	}
 	sm.accountedMu.Unlock()
@@ -1393,8 +1398,32 @@ func (sm *SpillManager) forceSpillLargestOwned(target int64) int64 {
 		return 0
 	}
 	runReliefCallHook(ReliefSiteForceLargest, best)
-	n, _ := best.SpillSome(target)
+	n, err := best.SpillSome(target)
+	if err != nil {
+		// The backstop runs on a requester's behalf but is not the requester's
+		// failure, so the error is not returned to it. The victim keeps its own
+		// account of the failure: an operator whose failed spill left its state
+		// intact goes on to answer, and one whose state it tore fails its own
+		// statement with that error (#1706, line 1706o). What stays here is the
+		// operator's record: logged with the victim's identity and counted.
+		sm.backstopFailures.Add(1)
+		slog.Warn("relief backstop eviction failed",
+			"victim", bestF.Name,
+			"victim_instance_id", bestF.InstanceID,
+			"victim_owned_bytes", bestF.OwnedBytes,
+			"target_bytes", target,
+			"freed_bytes", n,
+			"err", err,
+		)
+	}
 	return n
+}
+
+// BackstopEvictionFailures returns how many drift-backstop evictions
+// (forceSpillLargestOwned) failed with an error on this manager's relief
+// registry. Each one is also logged at WARN with the victim's identity.
+func (sm *SpillManager) BackstopEvictionFailures() int64 {
+	return sm.backstopFailures.Load()
 }
 
 // Inspect returns the per-operator footprints for the AccountedOperator

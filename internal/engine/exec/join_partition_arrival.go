@@ -772,6 +772,9 @@ func (h *HashJoin) spillOneInMemoryPartition() (int64, error) {
 		return 0, fmt.Errorf("spilling partition %d: %w", partID, err)
 	}
 	ss.spilledParts[partID] = true
+	if h.relieving {
+		ss.reliefParts[partID] = true
+	}
 
 	// Write each in-memory batch to the partition's long-lived spill writer
 	// then nil out the slot in h.buildBatches so the column data becomes
@@ -791,7 +794,12 @@ func (h *HashJoin) spillOneInMemoryPartition() (int64, error) {
 			continue // already evicted
 		}
 		if err := w.writeBatch(bb); err != nil {
-			h.spillErr = fmt.Errorf("hash join: spilling partition %d batch %d: %w", partID, i, err)
+			if h.relieving {
+				h.spillErr = fmt.Errorf("hash join: relief eviction of partition %d failed: spilling partition %d batch %d: %w",
+					partID, partID, i, err)
+			} else {
+				h.spillErr = fmt.Errorf("hash join: spilling partition %d batch %d: %w", partID, i, err)
+			}
 			return 0, h.spillErr
 		}
 		h.buildBatches[i] = nil
@@ -995,6 +1003,8 @@ func (h *HashJoin) SpillSome(target int64) (int64, error) {
 	}
 	defer endRelief(&h.accState)
 	defer h.mu.Unlock()
+	h.relieving = true
+	defer func() { h.relieving = false }()
 	var freed int64
 	var err error
 	for freed < target {

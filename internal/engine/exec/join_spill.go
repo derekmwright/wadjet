@@ -73,6 +73,10 @@ type spillState struct {
 	dir           string
 	numPartitions int
 	spilledParts  map[int]bool // which partitions have been spilled to disk
+	// reliefParts marks the spilled partitions whose eviction a relief call
+	// drove (HashJoin.SpillSome). closeBuildWriters names a failure completing
+	// one of their runs as that relief eviction's failure.
+	reliefParts map[int]bool
 
 	// Build-side: per-partition batch lists (in-memory) and spill files (on disk).
 	// partBuildWriters is a long-lived per-partition writer that appends
@@ -137,6 +141,7 @@ func newSpillState(dir string, schema []parquet.Column) *spillState {
 		dir:              dir,
 		numPartitions:    numSpillPartitions,
 		spilledParts:     make(map[int]bool),
+		reliefParts:      make(map[int]bool),
 		partBuildBatches: make(map[int][]*batch.RecordBatch),
 		partBuildFiles:   make(map[int][]string),
 		partBuildWriters: make(map[int]*spillBatchWriter),
@@ -201,6 +206,12 @@ func (s *spillState) closeBuildWriters() error {
 		path, err := w.close()
 		if err != nil {
 			first = err
+			if s.reliefParts[partID] {
+				// The run was begun by a relief eviction another operator
+				// drove; its bytes never reached the file, so that eviction
+				// failed, and this build is where it is reported.
+				first = fmt.Errorf("hash join: relief eviction of partition %d failed: %w", partID, err)
+			}
 			continue
 		}
 		if path != "" {
@@ -285,6 +296,7 @@ func (s *spillState) cleanup() {
 		}
 	}
 	clear(s.spilledParts)
+	clear(s.reliefParts)
 	clear(s.partBuildFiles)
 	clear(s.partProbeFiles)
 }

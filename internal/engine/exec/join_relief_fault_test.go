@@ -3,8 +3,10 @@
 package exec
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,7 +20,7 @@ import (
 // (RequestRelief or the drift backstop calling the victim's SpillSome while
 // the victim is still building) can fail. Its error goes to the caller of
 // SpillSome: RequestRelief returns it to the requester, the drift backstop
-// discards it. Before the fix, spillOneInMemoryPartition marked the partition
+// logs it at WARN and counts it. Before the fix, spillOneInMemoryPartition marked the partition
 // spilled before its run existed, so a run that could not be created left a
 // partition marked spilled with its batches resident and never written, and
 // the victim answered without them on every join kind (inner 31516 rows
@@ -195,6 +197,9 @@ func staleSkew() staleFixture {
 //     fits the buffer) and the run's close fails at the victim's build end.
 //     The victim fails loudly.
 func TestReliefEvictionFailureIsAnsweredOrLoud(t *testing.T) {
+	// Every loud cell's error must name the failed relief eviction: the victim
+	// did not start it, another operator's relief call did.
+	const reliefWording = "relief eviction of partition"
 	cases := []struct {
 		name  string
 		fx    func() staleFixture
@@ -204,16 +209,22 @@ func TestReliefEvictionFailureIsAnsweredOrLoud(t *testing.T) {
 		// dropped: the torn partition must have had at least one batch
 		// written and dropped when the call returned.
 		dropped bool
+		// spillSomeErr: the held call's SpillSome itself returns an error (the
+		// create, write and encoder faults; the close steps fail later, in the
+		// victim's own build end). Through the drift backstop that error is
+		// logged at WARN with the victim's identity and counted, once.
+		spillSomeErr bool
 	}{
-		{"create", func() staleFixture { return staleMain }, func() *staleFault { return &staleFault{asDir: true} }, "", nil, false},
-		{"write", staleWide, func() *staleFault { return &staleFault{devFull: true} }, "spilling partition", nil, false},
+		{"create", func() staleFixture { return staleMain }, func() *staleFault { return &staleFault{asDir: true} }, "", nil, false, true},
+		{"write", staleWide, func() *staleFault { return &staleFault{devFull: true} }, "spilling partition", nil, false, true},
 		{name: "write-after-drop", fx: staleSkew, fault: func() *staleFault { return &staleFault{stage: spillFaultWrite, nth: 2} },
-			loud: "spilling partition 0", sites: []memory.ReliefSite{memory.ReliefSiteRequest}, dropped: true},
-		{"batch", func() staleFixture { return staleMain }, func() *staleFault { return &staleFault{stage: spillFaultBatch, once: true} }, "spilling partition", nil, false},
-		{"flush", func() staleFixture { return staleMain }, func() *staleFault { return &staleFault{devFull: true} }, "flushing spill", nil, false},
-		{"seek", func() staleFixture { return staleMain }, func() *staleFault { return &staleFault{stage: spillFaultSeek} }, "seeking spill batch count", nil, false},
-		{"count", func() staleFixture { return staleMain }, func() *staleFault { return &staleFault{stage: spillFaultCount} }, "writing spill batch count", nil, false},
-		{"close", func() staleFixture { return staleMain }, func() *staleFault { return &staleFault{stage: spillFaultClose} }, "closing spill file", nil, false},
+			loud: "relief eviction of partition 0 failed: spilling partition 0", sites: []memory.ReliefSite{memory.ReliefSiteRequest},
+			dropped: true, spillSomeErr: true},
+		{"batch", func() staleFixture { return staleMain }, func() *staleFault { return &staleFault{stage: spillFaultBatch, once: true} }, "spilling partition", nil, false, true},
+		{"flush", func() staleFixture { return staleMain }, func() *staleFault { return &staleFault{devFull: true} }, "flushing spill", nil, false, false},
+		{"seek", func() staleFixture { return staleMain }, func() *staleFault { return &staleFault{stage: spillFaultSeek} }, "seeking spill batch count", nil, false, false},
+		{"count", func() staleFixture { return staleMain }, func() *staleFault { return &staleFault{stage: spillFaultCount} }, "writing spill batch count", nil, false, false},
+		{"close", func() staleFixture { return staleMain }, func() *staleFault { return &staleFault{stage: spillFaultClose} }, "closing spill file", nil, false, false},
 	}
 	for _, c := range cases {
 		sites := c.sites
@@ -226,6 +237,7 @@ func TestReliefEvictionFailureIsAnsweredOrLoud(t *testing.T) {
 					fx := c.fx()
 					fx.fault = c.fault()
 					fx.fault.name = c.name
+					warns := captureBackstopWarns(t)
 					out := runStaleRelief(t, fx, k, site, landDuringBuild)
 					want := fx.pg[k.name]
 					verdict := "RIGHT"
@@ -236,8 +248,8 @@ func TestReliefEvictionFailureIsAnsweredOrLoud(t *testing.T) {
 						verdict = "WRONG"
 					}
 					staleLogMu.Lock()
-					t.Logf("FAULT %s/%s/%s verdict=%s victim{%v err=%v} requester{err=%v panic=%v} evicted=%d landed{%s} used_after_close=%d files_after_close=%d",
-						c.name, site, k.name, verdict, out.victim, out.victimErr, out.reqErr, out.reqPanic, out.evicted, out.landed, out.usedAtClose, out.filesAtClose)
+					t.Logf("FAULT %s/%s/%s verdict=%s victim{%v err=%v} requester{err=%v panic=%v} evicted=%d landed{%s} used_after_close=%d files_after_close=%d backstop_failures=%d",
+						c.name, site, k.name, verdict, out.victim, out.victimErr, out.reqErr, out.reqPanic, out.evicted, out.landed, out.usedAtClose, out.filesAtClose, out.backstopFailures)
 					staleLogMu.Unlock()
 					if out.reqPanic != nil {
 						t.Errorf("the relief call panicked in the requester: %v", out.reqPanic)
@@ -258,13 +270,19 @@ func TestReliefEvictionFailureIsAnsweredOrLoud(t *testing.T) {
 					} else {
 						if out.victimErr == nil {
 							t.Errorf("the victim answered (%v) after a relief eviction failed with its run torn; it must fail", out.victim)
-						} else if !strings.Contains(out.victimErr.Error(), c.loud) {
-							t.Errorf("the victim failed with %q, want the %s failure (%q)", out.victimErr, c.name, c.loud)
+						} else {
+							if !strings.Contains(out.victimErr.Error(), c.loud) {
+								t.Errorf("the victim failed with %q, want the %s failure (%q)", out.victimErr, c.name, c.loud)
+							}
+							if !strings.Contains(out.victimErr.Error(), reliefWording) {
+								t.Errorf("the victim failed with %q, which does not name the failed relief eviction (%q)", out.victimErr, reliefWording)
+							}
 						}
 						if c.dropped && !strings.Contains(out.landed, "resident, 1 written and dropped") {
 							t.Errorf("schedule not reached: the eviction did not fail after dropping a written batch (%s)", out.landed)
 						}
 					}
+					checkBackstopRecord(t, site, c.spillSomeErr, out, warns())
 					if out.usedAtClose != 0 {
 						t.Errorf("tracker holds %d bytes after both joins closed", out.usedAtClose)
 					}
@@ -274,5 +292,89 @@ func TestReliefEvictionFailureIsAnsweredOrLoud(t *testing.T) {
 				})
 			}
 		}
+	}
+}
+
+// backstopWarn is one WARN record the drift backstop logged for a failed
+// eviction.
+type backstopWarn struct {
+	victim string
+	id     uint64
+	err    string
+}
+
+// captureBackstopWarns routes the default logger, for the rest of the test,
+// to a handler that keeps the backstop's failed-eviction records, and
+// returns a reader of what it kept. No test in this package calls
+// t.Parallel, so the swap is not observed by another test.
+func captureBackstopWarns(t *testing.T) func() []backstopWarn {
+	t.Helper()
+	h := &backstopWarnHandler{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(h))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return func() []backstopWarn {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		return append([]backstopWarn(nil), h.got...)
+	}
+}
+
+type backstopWarnHandler struct {
+	mu  sync.Mutex
+	got []backstopWarn
+}
+
+func (h *backstopWarnHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h *backstopWarnHandler) WithAttrs([]slog.Attr) slog.Handler       { return h }
+func (h *backstopWarnHandler) WithGroup(string) slog.Handler            { return h }
+func (h *backstopWarnHandler) Handle(_ context.Context, r slog.Record) error {
+	if r.Level != slog.LevelWarn || r.Message != "relief backstop eviction failed" {
+		return nil
+	}
+	var w backstopWarn
+	r.Attrs(func(a slog.Attr) bool {
+		switch a.Key {
+		case "victim":
+			w.victim = a.Value.String()
+		case "victim_instance_id":
+			w.id = a.Value.Uint64()
+		case "err":
+			w.err = a.Value.String()
+		}
+		return true
+	})
+	h.mu.Lock()
+	h.got = append(h.got, w)
+	h.mu.Unlock()
+	return nil
+}
+
+// checkBackstopRecord asserts that a drift-backstop eviction whose SpillSome
+// failed is logged once at WARN with the victim's identity (the Name and
+// InstanceID the registry selected) and counted once, and that one which did
+// not fail is neither. RequestRelief returns the error to its requester
+// instead, so the backstop's record stays empty on that site.
+func checkBackstopRecord(t *testing.T, site memory.ReliefSite, spillSomeErr bool, out staleOutcome, warns []backstopWarn) {
+	t.Helper()
+	want := 0
+	if site == memory.ReliefSiteForceLargest && spillSomeErr {
+		want = 1
+	}
+	if out.backstopFailures != int64(want) {
+		t.Errorf("backstop failure counter = %d, want %d", out.backstopFailures, want)
+	}
+	if len(warns) != want {
+		t.Fatalf("backstop WARN records = %d (%+v), want %d", len(warns), warns, want)
+	}
+	if want == 0 {
+		return
+	}
+	w := warns[0]
+	if out.victimID == 0 || w.id != out.victimID || w.victim != out.victimName {
+		t.Errorf("backstop WARN names %q/%d, want the selected victim %q/%d", w.victim, w.id, out.victimName, out.victimID)
+	}
+	if w.err == "" {
+		t.Errorf("backstop WARN carries no error")
 	}
 }

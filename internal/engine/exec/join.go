@@ -316,11 +316,20 @@ type HashJoin struct {
 	// spilled and some of its rows may be written, dropped from memory, or
 	// both, so its run cannot be trusted. It is sticky. An eviction a relief
 	// call drives returns its error to the REQUESTER (RequestRelief) or to
-	// nobody (the drift backstop), so the build that owns the partition reads
-	// it here and fails with it rather than answering without those rows
+	// no statement (the drift backstop only logs and counts it), so the build
+	// that owns the partition reads it here and fails with it rather than
+	// answering without those rows
 	// (#1706, line 1706o). An eviction that fails before anything moved (its
 	// run could not be created) marks nothing and does not set it.
 	spillErr error
+
+	// relieving, guarded by mu, is true while SpillSome evicts on a relief
+	// call's behalf. A failure of an eviction it drives is then named a failed
+	// relief eviction in spillErr, and the partitions it marks are recorded
+	// (spillState.reliefParts) so a failure completing their runs at the
+	// build's end is named the same way: the build that reports it did not
+	// start that eviction (#1706, line 1706o).
+	relieving bool
 
 	// forcedEvictSeen counts arriving build batches for the TEST-ONLY
 	// eviction forcing knob (join_force_spill.go). Written under h.mu on the
