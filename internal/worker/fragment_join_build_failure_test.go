@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/derekmwright/wadjet/internal/distributed"
@@ -52,11 +53,18 @@ func TestFragmentJoinBuildFailureReleasesTheSharedPool(t *testing.T) {
 		name  string
 		typ   distributed.OpType
 		panic bool // fail by a panic in the build tail instead of a decode error
+		// arrivalPanic: fail by a panic raised in the build's second
+		// arrival, after the first was charged (the arrival seam, standing
+		// in for a panic in the build source's decoder: both unwind out of
+		// Build's arrival loop, with the join's lock released).
+		arrivalPanic bool
 	}{
-		{"hash-shuffle", distributed.OpHashJoinProbe, false},
-		{"broadcast-cache", distributed.OpBroadcastProbe, false},
-		{"hash-shuffle-panic", distributed.OpHashJoinProbe, true},
-		{"broadcast-cache-panic", distributed.OpBroadcastProbe, true},
+		{"hash-shuffle", distributed.OpHashJoinProbe, false, false},
+		{"broadcast-cache", distributed.OpBroadcastProbe, false, false},
+		{"hash-shuffle-panic", distributed.OpHashJoinProbe, true, false},
+		{"broadcast-cache-panic", distributed.OpBroadcastProbe, true, false},
+		{"hash-shuffle-arrival-panic", distributed.OpHashJoinProbe, false, true},
+		{"broadcast-cache-arrival-panic", distributed.OpBroadcastProbe, false, true},
 	} {
 		t.Run(route.name, func(t *testing.T) {
 			ex := NewExecutor(store, NewLRUCache(4*1024*1024), nil)
@@ -91,6 +99,16 @@ func TestFragmentJoinBuildFailureReleasesTheSharedPool(t *testing.T) {
 				defer exec.SetPhaseHook(func(site exec.PhaseSite, _ any) {
 					if site == exec.PhaseJoinBuildTail {
 						panic("injected build-tail panic")
+					}
+				})()
+			}
+			if route.arrivalPanic {
+				// The good run twice: two arrivals at least.
+				files = []string{goodKey, goodKey}
+				var arrivals atomic.Int32
+				defer exec.SetArrivalReserveHook(func() {
+					if arrivals.Add(1) == 2 {
+						panic("injected arrival panic")
 					}
 				})()
 			}
