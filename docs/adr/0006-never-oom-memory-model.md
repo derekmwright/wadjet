@@ -1268,7 +1268,12 @@ or panics closes the join before the error leaves the fragment builder.
 
 **A failed eviction.** Two rules hold for the grace join's evictions, whoever
 drives them (its own arrival, a reservation refusal, `RequestRelief` on
-another operator's behalf, or the drift backstop, which discards the error):
+another operator's behalf, or the drift backstop). `RequestRelief` returns a
+failed `SpillSome`'s error to its requester. The drift backstop does not return
+it, because the failure is not the requester's: it logs it at WARN with the
+victim's name and instance ID and counts it
+(`SpillManager.BackstopEvictionFailures`). In both cases the victim keeps its
+own record of the failure, as follows:
 
 - the evicted partition's run is created before the partition is marked
   spilled, so a run that cannot be created changes nothing and the build goes
@@ -1281,7 +1286,11 @@ another operator's behalf, or the drift backstop, which discards the error):
   (a write the buffer could not pass to the file is reported by the batch that
   hit it), and the join keeps the eviction's error, which its build returns.
   Write, flush, seek, count-write and close failures end the statement with an
-  error, never an answer.
+  error, never an answer. When a relief call drove the eviction, the victim's
+  error wraps the original I/O error and names it a failed relief eviction
+  ("hash join: relief eviction of partition N failed: ..."). This applies also
+  when the failure surfaces only when the victim closes the run at the end of
+  its build.
 
 The join's own evictions, its probe runs and its replay readers were already
 loud on every fault measured (`exec.TestJoinOwnSpillFailureIsLoud`, ten join
