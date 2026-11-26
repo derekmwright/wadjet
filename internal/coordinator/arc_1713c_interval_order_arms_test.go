@@ -5,6 +5,7 @@ package coordinator
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"os"
 	"strconv"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/derekmwright/wadjet/internal/engine/exec"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 	"github.com/derekmwright/wadjet/internal/worker"
 	"github.com/derekmwright/wadjet/wadjet"
 )
@@ -84,6 +86,36 @@ var ivTypes = map[string]string{
 	"nullif/cast":        "a:text,b:text",
 	"nullif/unknown":     "a:text,b:text",
 	"ext/greatestLeast":  "g:text,l:text",
+	// Round 3: an interval aggregate argument is refused before a header
+	// exists; a CASE / COALESCE interval declares text as the literal does;
+	// EXTRACT is float-carried (ADR-0024 §2c: PostgreSQL's numeric, OID
+	// 1700), date_part float8 on both.
+	"agg/countTimes":        "ERR 0A000",
+	"agg/countNeg":          "ERR 0A000",
+	"agg/countDistinctNeg":  "ERR 0A000",
+	"agg/countDistinctPlus": "ERR 0A000",
+	"agg/countRowsTimes":    "ERR 0A000",
+	"agg/countLit":          "ERR 0A000",
+	"agg/countCast":         "ERR 0A000",
+	"agg/maxLit":            "ERR 0A000",
+	"agg/maxArith":          "ERR 0A000",
+	"agg/maxCast":           "ERR 0A000",
+	"agg/minLit":            "ERR 0A000",
+	"agg/minArith":          "ERR 0A000",
+	"agg/minCast":           "ERR 0A000",
+	"agg/sumLit":            "ERR 0A000",
+	"agg/sumArith":          "ERR 0A000",
+	"agg/sumCast":           "ERR 0A000",
+	"agg/avgLit":            "ERR 0A000",
+	"agg/avgArith":          "ERR 0A000",
+	"agg/avgCast":           "ERR 0A000",
+	"choice/caseTimes":      "a:text",
+	"choice/caseNeg":        "a:text",
+	"choice/coalesceTimes":  "a:text",
+	"choice/case":           "a:text",
+	"choice/coalesceFirst":  "a:text",
+	"obs/extractType":       "a:double precision,b:double precision",
+	"obs/extractTsType":     "a:double precision,b:double precision",
 }
 
 const ivAnswersPath = "testdata/arc_1713c_interval_order_pg17.tsv"
@@ -224,7 +256,106 @@ func ivCells() []ivCell {
 	// Containers.
 	add("box/array", "SELECT ARRAY[INTERVAL '1 day'] = ARRAY[INTERVAL '24 hours'] AS a, ARRAY[INTERVAL '2 days'] < ARRAY[INTERVAL '10 days'] AS b, ARRAY[INTERVAL '1 month'] = ARRAY[INTERVAL '30 days'] AS c")
 	add("box/arrayGroup", "SELECT count(*) AS g FROM (SELECT x FROM (VALUES (ARRAY[INTERVAL '1 day']), (ARRAY[INTERVAL '24 hours'])) v(x) GROUP BY x) t")
-	return append(out, ivCellsR2()...)
+	out = append(out, ivCellsR2()...)
+	return append(out, ivCellsR3()...)
+}
+
+// ivCellsR3 is round 3's classes (#1713c r3): an interval as an AGGREGATE or
+// WINDOW function argument (refused 0A000 at plan time: no interval
+// accumulator or interval column type exists), interval arithmetic over a
+// CASE or COALESCE, the observations on ARRAY elements, time_bucket,
+// date_add and EXTRACT's type, and the rest of the store sweep (shapes that
+// carry an interval value into a projection). typed cells carry PostgreSQL's
+// wire type beside ours.
+func ivCellsR3() []ivCell {
+	var out []ivCell
+	add := func(name, sql string) { out = append(out, ivCell{name: name, sql: sql}) }
+	typed := func(name, sql string) { out = append(out, ivCell{name: name, sql: sql, typed: true}) }
+	c := "CAST(s AS INTERVAL)"
+
+	// Aggregate arguments.
+	typed("agg/countTimes", "SELECT count(INTERVAL '1 day' * 2) AS a")
+	typed("agg/countNeg", "SELECT count(-INTERVAL '1 day') AS a")
+	typed("agg/countDistinctNeg", "SELECT count(DISTINCT -INTERVAL '1 day') AS a")
+	typed("agg/countDistinctPlus", "SELECT count(DISTINCT INTERVAL '1 day' + INTERVAL '1 hour') AS a")
+	typed("agg/countRowsTimes", "SELECT count("+c+" * 2) AS a FROM iv_s")
+	add("agg/countGroupPlus", "SELECT id, count("+c+" + INTERVAL '1 hour') AS a FROM iv_s WHERE id IN (1, 3, 9) GROUP BY id ORDER BY id")
+	typed("agg/countLit", "SELECT count(INTERVAL '1 day') AS a")
+	typed("agg/countCast", "SELECT count("+c+") AS a FROM iv_s")
+	for _, f := range []string{"max", "min", "sum", "avg"} {
+		typed("agg/"+f+"Lit", "SELECT "+f+"(INTERVAL '1 day') AS a")
+		typed("agg/"+f+"Arith", "SELECT "+f+"(INTERVAL '1 day' * 2) AS a")
+		typed("agg/"+f+"Cast", "SELECT "+f+"("+c+") AS a FROM iv_s WHERE id IN (1, 6, 7, 12)")
+	}
+	add("agg/having", "SELECT count(*) AS n FROM iv_s HAVING max("+c+") > INTERVAL '1 day'")
+	add("agg/caseArg", "SELECT max(CASE WHEN id = 1 THEN INTERVAL '1 day' END) AS a FROM iv_s")
+	// Window function arguments.
+	add("win/maxLit", "SELECT max(INTERVAL '1 day') OVER () AS a")
+	add("win/countArith", "SELECT count(-INTERVAL '1 day') OVER () AS a")
+	add("win/firstArith", "SELECT first_value(INTERVAL '1 day' * 2) OVER () AS a")
+	add("win/lagCast", "SELECT id, lag("+c+") OVER (ORDER BY id) AS a FROM iv_s WHERE id IN (1, 2, 3) ORDER BY id")
+	add("win/sumCast", "SELECT id, sum("+c+") OVER (ORDER BY id) AS a FROM iv_s WHERE id IN (1, 2, 3) ORDER BY id")
+	// Not an interval argument: the window's PARTITION BY and a count(*)
+	// controls stay answered.
+	add("win/countStarControl", "SELECT count(*) OVER () AS a")
+	add("agg/countCompareControl", "SELECT count("+c+" = INTERVAL '1 day') AS a FROM iv_s")
+	add("agg/sumExtractControl", "SELECT sum(extract(day FROM "+c+")) AS a FROM iv_s")
+
+	// Arithmetic over a CASE or COALESCE that answers an interval.
+	typed("choice/caseTimes", "SELECT CASE WHEN true THEN INTERVAL '1 day' END * 2 AS a")
+	typed("choice/caseNeg", "SELECT -CASE WHEN true THEN INTERVAL '1 day' END AS a")
+	typed("choice/coalesceTimes", "SELECT COALESCE(INTERVAL '1 day', NULL) * 2 AS a")
+	typed("choice/case", "SELECT CASE WHEN true THEN INTERVAL '1 day' END AS a")
+	typed("choice/coalesceFirst", "SELECT COALESCE(INTERVAL '1 day', NULL) AS a")
+	add("choice/casePlus", "SELECT CASE WHEN true THEN INTERVAL '1 day' END + INTERVAL '1 hour' AS a")
+	add("choice/caseTs", "SELECT CAST(TIMESTAMP '2024-01-31 00:00:00' + CASE WHEN true THEN INTERVAL '1 month' END AS TEXT) AS a")
+	add("choice/caseCompare", "SELECT CASE WHEN true THEN INTERVAL '1 day' END = INTERVAL '24 hours' AS a")
+
+	// The reviewer's observations: answers recorded beside PostgreSQL's.
+	add("obs/arrayTimes", "SELECT ARRAY[INTERVAL '1 day' * 2] AS a")
+	add("obs/arrayNeg", "SELECT ARRAY[-INTERVAL '1 day'] AS a")
+	add("obs/arrayLit", "SELECT ARRAY[INTERVAL '1 day'] AS a")
+	add("obs/timeBucket", "SELECT time_bucket(INTERVAL '1 day' * 2, TIMESTAMP '2024-01-03 10:00:00') AS a")
+	add("obs/timeBucketLit", "SELECT time_bucket(INTERVAL '2 days', TIMESTAMP '2024-01-03 10:00:00') AS a")
+	add("obs/dateAdd", "SELECT CAST(date_add(DATE '2024-01-31', INTERVAL '1 day' * 2) AS TEXT) AS a")
+	add("obs/dateAddLit", "SELECT CAST(date_add(DATE '2024-01-31', INTERVAL '2 days') AS TEXT) AS a")
+	typed("obs/extractType", "SELECT extract(day FROM INTERVAL '30 days') AS a, date_part('day', INTERVAL '30 days') AS b")
+	typed("obs/extractTsType", "SELECT extract(day FROM TIMESTAMP '2024-01-31 00:00:00') AS a, date_part('day', TIMESTAMP '2024-01-31 00:00:00') AS b")
+
+	// The rest of the store sweep: an interval value carried into a
+	// projection, a key, a container or a subquery's answer.
+	add("sweep/scalarSubTimes", "SELECT (SELECT INTERVAL '1 day' * 2) AS a")
+	add("sweep/derivedTimes", "SELECT x FROM (SELECT INTERVAL '1 day' * 2 AS x) t")
+	add("sweep/cteNeg", "WITH t AS (SELECT -INTERVAL '1 day' AS x) SELECT x FROM t")
+	add("sweep/unionAllTimes", "SELECT count(*) AS n FROM (SELECT INTERVAL '1 day' * 2 AS x UNION ALL SELECT INTERVAL '1 hour') t")
+	add("sweep/valuesTimes", "SELECT x FROM (VALUES (INTERVAL '1 day' * 2)) v(x)")
+	add("sweep/orderByTimes", "SELECT id FROM iv_s WHERE id IN (1, 6) ORDER BY "+c+" * 2, id")
+	add("sweep/groupByTimes", "SELECT "+c+" * 2 AS k, count(*) AS n FROM iv_s WHERE id IN (1, 6) GROUP BY "+c+" * 2 ORDER BY n, k")
+	add("sweep/distinctNeg", "SELECT DISTINCT -INTERVAL '1 day' AS a")
+	add("sweep/concat", "SELECT 'x' || (INTERVAL '1 day' * 2) AS a")
+	add("sweep/castText", "SELECT CAST(INTERVAL '1 day' * 2 AS TEXT) AS a")
+	add("sweep/nullifTimes", "SELECT NULLIF(INTERVAL '1 day' * 2, INTERVAL '1 day') AS a")
+	add("sweep/greatestNeg", "SELECT GREATEST(-INTERVAL '1 day', INTERVAL '1 hour') AS a")
+	add("sweep/coalesceNeg", "SELECT COALESCE(-INTERVAL '1 day', INTERVAL '1 hour') AS a")
+	add("sweep/caseThenTimes", "SELECT CASE WHEN true THEN INTERVAL '1 day' * 2 END AS a")
+	add("sweep/rowsNeg", "SELECT id, -"+c+" AS n FROM iv_s WHERE id IN (1, 3, 9) ORDER BY id")
+	add("sweep/whereTimes", "SELECT id FROM iv_s WHERE "+c+" * 2 = INTERVAL '2 days' ORDER BY id")
+	add("sweep/inTimes", "SELECT INTERVAL '2 days' IN (INTERVAL '1 day' * 2, -INTERVAL '1 day') AS a")
+	add("sweep/rowCtor", "SELECT ROW(INTERVAL '1 day' * 2, 1) AS a")
+	// The edges of the rule: a quoted branch keeps a CASE / COALESCE off
+	// it, and an aggregate over a DERIVED interval column reads that
+	// column's text (r20), not an interval node.
+	add("sweep/caseQuotedAgg", "SELECT max(CASE WHEN id = 1 THEN INTERVAL '1 day' ELSE '2 days' END) AS a FROM iv_s")
+	add("sweep/caseQuotedTimes", "SELECT CASE WHEN true THEN INTERVAL '1 day' ELSE '2 days' END * 2 AS a")
+	add("sweep/coalesceQuotedTimes", "SELECT COALESCE(NULL, INTERVAL '1 day', '2 days') * 2 AS a")
+	add("sweep/caseQuoted", "SELECT CASE WHEN false THEN INTERVAL '1 day' ELSE '24 hours' END = INTERVAL '1 day' AS a, CASE WHEN false THEN INTERVAL '1 day' ELSE '2 days' END AS b")
+	add("sweep/caseQuotedBad", "SELECT CASE WHEN true THEN INTERVAL '1 day' ELSE 'x' END AS a")
+	add("sweep/coalesceQuotedBad", "SELECT COALESCE(INTERVAL '1 day', 'x') AS a")
+	add("sweep/caseColumnControl", "SELECT id, CASE WHEN id = 1 THEN INTERVAL '1 day' ELSE CAST(s AS INTERVAL) END * 2 AS a FROM iv_s WHERE id IN (1, 2) ORDER BY id")
+	add("sweep/derivedCount", "SELECT count(x) AS a FROM (SELECT INTERVAL '1 day' * 2 AS x) t")
+	add("sweep/derivedMax", "SELECT max(x) AS a FROM (SELECT -INTERVAL '1 day' AS x) t")
+	add("sweep/derivedSum", "SELECT sum(x) AS a FROM (SELECT CAST(s AS INTERVAL) AS x FROM iv_s) t")
+	return out
 }
 
 // ivCellsR2 is round 2's classes (#1713c r2): NULLIF / GREATEST / LEAST over
@@ -546,9 +677,7 @@ func TestArc1713cMeasure(t *testing.T) {
 //   - arith/justifyDays: justify_days does not exist (42883).
 //   - key/unionAllMax: the representation again — a UNION ALL arm's
 //     interval is text, and max reads "2 days" > "10 days".
-//   - ext/coalesce: COALESCE whose only typed arm is an interval declares
-//     float8 and the store refuses the box (no SQLSTATE; base-identical) —
-//     not changed by this line. unk/caseSubject: PostgreSQL resolves a
+//   - unk/caseSubject: PostgreSQL resolves a
 //     quoted CASE subject to text and refuses `text = interval`; here it
 //     compares text. unk/number: `interval = integer` is 42883 there and f
 //     here. ar/unaryPlus: `+interval` is 42883 there and the interval here.
@@ -569,13 +698,40 @@ func TestArc1713cMeasure(t *testing.T) {
 //     ex/millisecond, ex/decade: EXTRACT is rewritten to a field function and
 //     those fields have none (42883, for a timestamp too); date_part answers
 //     them (dp/*).
+//   - agg/*, win/* (round 3), key/countDistinct, order/minMax: an interval
+//     as an aggregate's or a window function's argument is refused 0A000 at
+//     plan time (physical.refuseIntervalAggregateArgument): no interval
+//     accumulator and no interval column type. The count cells' answers
+//     were right before and the statement is refused all the same — one
+//     rule for the argument, whatever the aggregate (the architect's
+//     ruling); min / max / sum / avg answered 0, NULL or the text order,
+//     and since round 2's arithmetic the argument met the store guard.
+//   - obs/array*: an ARRAY of INTERVAL is a DURATION array (ADR-0045 §1),
+//     printed here as its nanoseconds (the wire refuses it, #1268); round 2
+//     made `ARRAY[INTERVAL '1 day' * 2]` and `ARRAY[-INTERVAL '1 day']`
+//     the same DURATION array the bare literal already was. obs/timeBucket*:
+//     PostgreSQL has no time_bucket (42883); it is this engine's extension,
+//     and the arithmetic width now answers as the literal width did.
+//     obs/dateAdd*: date_add is timestamptz on PostgreSQL ("+00") and a
+//     timestamp here, the literal width and the arithmetic width alike.
+//   - sweep/rowCtor: the ROW(...) constructor spelling is a syntax error
+//     here (42601), every type alike. sweep/caseQuotedAgg: the CASE answers
+//     an interval (its quoted branch is interval input), so it is an
+//     interval aggregate argument, refused as agg/*. sweep/derivedSum: a
+//     DERIVED interval column is its text (r20), and sum(text) is 42883 —
+//     base-identical; an aggregate over a derived interval column is not an
+//     interval node and keeps its base answer (key/unionAllMax, sweep/derived*).
+//     sweep/caseQuotedBad, sweep/coalesceQuotedBad: PostgreSQL reads every
+//     quoted constant as interval input when it resolves the statement
+//     (22007 for 'x'); here a branch is cast only when it is reached, so the
+//     unreached 'x' is never read (base-identical).
 var ivKnown = map[string]string{
 	"box/subsecond":              "ERR 22007",
 	"box/multifield":             "a,b,c | f,f,t",
 	"key/groupBy":                "k,n | -1 days,1; 00:00:00,1; 1 day,1; 1 mon,1; 1 year,1; 10 days,1; 2 days,1; 24:00:00,1; 25:00:00,1; 30 days,1; 360 days,1; 720:00:00,1; NULL,1; 7 days,2",
 	"key/groupCount":             "g | 14",
 	"key/distinctCount":          "g | 14",
-	"key/countDistinct":          "n | 13",
+	"key/countDistinct":          "ERR 0A000",
 	"key/inSubquery":             "id | 2",
 	"key/inSubquery@single":      "(0 rows)",
 	"key/inSubquery@spilled512k": "(0 rows)",
@@ -593,11 +749,10 @@ var ivKnown = map[string]string{
 	"order/asc":                  "id | 8; 1; 3; 7; 6; 12",
 	"order/desc":                 "id | 12; 6; 7; 3; 1; 8",
 	"order/topN":                 "id | 12; 6",
-	"order/minMax":               "lo,hi | 1 day,25:00:00",
+	"order/minMax":               "ERR 0A000",
 	"order/values":               "x | 10 days; 2 days; 25:00:00",
 	"arith/justifyDays":          "ERR 42883",
 	"key/unionAllMax":            "a | 2 days",
-	"ext/coalesce":               "ERR ",
 	"unk/caseSubject":            "a | 0",
 	"unk/number":                 "a | f",
 	"ar/unaryPlus":               "a | 1 day",
@@ -616,6 +771,45 @@ var ivKnown = map[string]string{
 	"ex/secondTimestamp":         "a | 5",
 	"ex/millisecond":             "ERR 42883",
 	"ex/decade":                  "ERR 42883",
+	"agg/countTimes":             "ERR 0A000",
+	"agg/countNeg":               "ERR 0A000",
+	"agg/countDistinctNeg":       "ERR 0A000",
+	"agg/countDistinctPlus":      "ERR 0A000",
+	"agg/countRowsTimes":         "ERR 0A000",
+	"agg/countGroupPlus":         "ERR 0A000",
+	"agg/countLit":               "ERR 0A000",
+	"agg/countCast":              "ERR 0A000",
+	"agg/maxLit":                 "ERR 0A000",
+	"agg/maxArith":               "ERR 0A000",
+	"agg/maxCast":                "ERR 0A000",
+	"agg/minLit":                 "ERR 0A000",
+	"agg/minArith":               "ERR 0A000",
+	"agg/minCast":                "ERR 0A000",
+	"agg/sumLit":                 "ERR 0A000",
+	"agg/sumArith":               "ERR 0A000",
+	"agg/sumCast":                "ERR 0A000",
+	"agg/avgLit":                 "ERR 0A000",
+	"agg/avgArith":               "ERR 0A000",
+	"agg/avgCast":                "ERR 0A000",
+	"agg/having":                 "ERR 0A000",
+	"agg/caseArg":                "ERR 0A000",
+	"win/maxLit":                 "ERR 0A000",
+	"win/countArith":             "ERR 0A000",
+	"win/firstArith":             "ERR 0A000",
+	"win/lagCast":                "ERR 0A000",
+	"win/sumCast":                "ERR 0A000",
+	"obs/arrayTimes":             "a | [172800000000000]",
+	"obs/arrayNeg":               "a | [-86400000000000]",
+	"obs/arrayLit":               "a | [86400000000000]",
+	"obs/timeBucket":             "a | 1704153600000",
+	"obs/timeBucketLit":          "a | 1704153600000",
+	"obs/dateAdd":                "a | 2024-02-02 00:00:00",
+	"obs/dateAddLit":             "a | 2024-02-02 00:00:00",
+	"sweep/rowCtor":              "ERR 42601",
+	"sweep/caseQuotedAgg":        "ERR 0A000",
+	"sweep/derivedSum":           "ERR 42883",
+	"sweep/caseQuotedBad":        "a | 1 day",
+	"sweep/coalesceQuotedBad":    "a | 1 day",
 }
 
 // ivAllPairs is every (l, r) with l < r whose LEFT row's text is not NULL —
@@ -736,12 +930,60 @@ func TestArc1713cIntervalOrderEveryArm(t *testing.T) {
 	}
 }
 
+// ivStoreGuard is the batch layer's silent-write guard (batch.TypeMismatch):
+// a value the plan did not declare reached a typed vector. It is a backstop,
+// never an answer — the plan must declare what the expression produces or
+// refuse the statement with a SQLSTATE first.
+const ivStoreGuard = "cannot store"
+
+// TestArc1713cNoStoreGuardEveryArm drives every statement of the interval
+// table (#1713c), the round-3 store sweep included, on every arm and fails
+// if any error's text is the store guard's: an interval value the plan
+// declared as something else (float8 for an aggregate's argument, a CASE, a
+// COALESCE) must be declared or refused 0A000 at plan time, identically on
+// every arm. IV_ERRDUMP=<path> writes every (cell, arm, error text).
+func TestArc1713cNoStoreGuardEveryArm(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: six arms over the interval table")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	t.Cleanup(cancel)
+	writer, arms := ivArmsFixture(t, ctx)
+	var dump strings.Builder
+	defer func() {
+		if p := os.Getenv("IV_ERRDUMP"); p != "" {
+			if err := os.WriteFile(p, []byte(dump.String()), 0o644); err != nil {
+				t.Error(err)
+			}
+		}
+	}()
+	ran := 0
+	for _, c := range ivCells() {
+		if c.ddl {
+			if got := writer(c.sql); got != "ok" {
+				t.Fatalf("%s: %s", c.name, got)
+			}
+			continue
+		}
+		for _, arm := range arms {
+			_, errText := arm.exec(c.sql)
+			ran++
+			if errText != "" {
+				dump.WriteString(c.name + "\t" + arm.name + "\t" + errText + "\n")
+			}
+			if strings.Contains(errText, ivStoreGuard) {
+				t.Errorf("%s on %s reached the store guard\n  %s\n  %s", c.name, arm.name, c.sql, errText)
+			}
+		}
+	}
+	if ran < 6*300 {
+		t.Fatalf("only %d (cell, arm) runs: the sweep must cover the table", ran)
+	}
+}
+
 // ivArmsFixture is ftArmsFixture's five arms plus the coordinator's
 // small-query fast path, over one shared catalog; the writer runs the DDL.
-func ivArmsFixture(t *testing.T, ctx context.Context) (func(string) string, []struct {
-	name string
-	run  func(string) string
-}) {
+func ivArmsFixture(t *testing.T, ctx context.Context) (func(string) string, []ivArm) {
 	t.Helper()
 	infra := tmdInfra(t, ctx)
 	open := func(budget int64) *wadjet.DB {
@@ -763,23 +1005,99 @@ func ivArmsFixture(t *testing.T, ctx context.Context) (func(string) string, []st
 	coordB := tmdCoordinator(t, ctx, infra, func(c *Config) { c.BroadcastBytesOverride = 1 })
 	coordM := tmdCoordinatorWithWorkers(t, ctx, infra, func(w *worker.Config) { w.MorselWorkers = 4 })
 	coordF := tmdCoordinator(t, ctx, infra, func(c *Config) { c.LocalFastPathBytes = 64 << 20 })
+	spill := func(run func() (string, string)) (string, string) {
+		restoreDrain := exec.ForceAggDrainEvery(1)
+		restoreRuns := exec.ForceSmallSpillRuns(2)
+		defer func() { restoreRuns(); exec.ForceAggDrainEvery(restoreDrain) }()
+		return run()
+	}
 	return func(sql string) string {
 			_, err := writer.Query(ctx, sql)
 			return ftDDLRender(err)
-		}, []struct {
-			name string
-			run  func(string) string
-		}{
-			{"single", func(sql string) string { return ftRunSingle(ctx, writer, sql) }},
-			{"spilled512k", func(sql string) string {
-				restoreDrain := exec.ForceAggDrainEvery(1)
-				restoreRuns := exec.ForceSmallSpillRuns(2)
-				defer func() { restoreRuns(); exec.ForceAggDrainEvery(restoreDrain) }()
-				return ftRunSingle(ctx, spilled, sql)
+		}, []ivArm{
+			{"single", func(sql string) (string, string) { return ivRunSingle(ctx, writer, sql) }},
+			{"spilled512k", func(sql string) (string, string) {
+				return spill(func() (string, string) { return ivRunSingle(ctx, spilled, sql) })
 			}},
-			{"dag", func(sql string) string { return ftRunDAG(ctx, coord, sql) }},
-			{"dag-shuffled", func(sql string) string { return ftRunDAG(ctx, coordB, sql) }},
-			{"dag-morsel4", func(sql string) string { return ftRunDAG(ctx, coordM, sql) }},
-			{"dag-fastpath", func(sql string) string { return ftRunDAG(ctx, coordF, sql) }},
+			{"dag", func(sql string) (string, string) { return ivRunDAG(ctx, coord, sql) }},
+			{"dag-shuffled", func(sql string) (string, string) { return ivRunDAG(ctx, coordB, sql) }},
+			{"dag-morsel4", func(sql string) (string, string) { return ivRunDAG(ctx, coordM, sql) }},
+			{"dag-fastpath", func(sql string) (string, string) { return ivRunDAG(ctx, coordF, sql) }},
 		}
+}
+
+// ivArm is one execution arm. exec answers the rendered answer (ftRender's
+// form, an error as "ERR <SQLSTATE>") and the error's whole TEXT, "" when
+// the statement answered: the store sweep reads the text.
+type ivArm struct {
+	name string
+	exec func(string) (string, string)
+}
+
+func (a ivArm) run(sql string) string { got, _ := a.exec(sql); return got }
+
+// ivRunSingle is ftRunSingle that also answers the error text.
+func ivRunSingle(ctx context.Context, db *wadjet.DB, sql string) (out, errText string) {
+	defer func() {
+		if r := recover(); r != nil {
+			out, errText = fmt.Sprintf("PANIC %v", r), fmt.Sprintf("PANIC %v", r)
+		}
+	}()
+	res, err := db.Query(ctx, sql)
+	if err != nil {
+		return ftErr(err), err.Error()
+	}
+	cols := make([]parquet.Column, len(res.ColumnMetas))
+	for i, m := range res.ColumnMetas {
+		cols[i] = parquet.Column{Name: m.Name, Type: m.TypeID, Precision: m.Precision, Scale: m.Scale}
+	}
+	cells := make([][]any, len(res.Rows))
+	for i := range res.Rows {
+		cells[i] = res.Cells(i)
+	}
+	return ftEngineRender(cols, cells), ""
+}
+
+// ivRunDAG is ftRunDAG that also answers the error text.
+func ivRunDAG(ctx context.Context, c *Coordinator, sql string) (out, errText string) {
+	defer func() {
+		if r := recover(); r != nil {
+			out, errText = fmt.Sprintf("PANIC %v", r), fmt.Sprintf("PANIC %v", r)
+		}
+	}()
+	res, err := c.ExecuteSQL(ctx, sql)
+	if err != nil {
+		return ftErr(err), err.Error()
+	}
+	if res.Error != "" {
+		return "ERR " + res.Error, res.Error
+	}
+	cols := append([]parquet.Column(nil), res.OutputSchema()...)
+	var cells [][]any
+	if st := res.Stream(); st != nil {
+		defer st.Close()
+		for {
+			bb, berr := st.Next(ctx)
+			if berr != nil {
+				return ftErr(berr), berr.Error()
+			}
+			if bb == nil {
+				break
+			}
+			cells = append(cells, bb.ToRowValues()...)
+		}
+	} else {
+		rows, rerr := res.Rows()
+		if rerr != nil {
+			return ftErr(rerr), rerr.Error()
+		}
+		for _, r := range rows {
+			row := make([]any, len(cols))
+			for j, c := range cols {
+				row[j] = r[c.Name]
+			}
+			cells = append(cells, row)
+		}
+	}
+	return ftEngineRender(cols, cells), ""
 }

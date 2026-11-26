@@ -307,3 +307,78 @@ dp/week	ERR 0A000
 dp/dow	ERR 0A000
 dp/bogus	ERR 22023
 dp/null	a | NULL
+agg/countTimes	a:bigint | 1
+agg/countNeg	a:bigint | 1
+agg/countDistinctNeg	a:bigint | 1
+agg/countDistinctPlus	a:bigint | 1
+agg/countRowsTimes	a:bigint | 14
+agg/countGroupPlus	id,a | 1,1; 3,1; 9,0
+agg/countLit	a:bigint | 1
+agg/countCast	a:bigint | 14
+agg/maxLit	a:interval | 1 day
+agg/maxArith	a:interval | 2 days
+agg/maxCast	a:interval | 10 days
+agg/minLit	a:interval | 1 day
+agg/minArith	a:interval | 2 days
+agg/minCast	a:interval | 1 day
+agg/sumLit	a:interval | 1 day
+agg/sumArith	a:interval | 2 days
+agg/sumCast	a:interval | 13 days 25:00:00
+agg/avgLit	a:interval | 1 day
+agg/avgArith	a:interval | 2 days
+agg/avgCast	a:interval | 3 days 12:15:00
+agg/having	n | 15
+agg/caseArg	a | 1 day
+win/maxLit	a | 1 day
+win/countArith	a | 1
+win/firstArith	a | 2 days
+win/lagCast	id,a | 1,NULL; 2,1 day; 3,24:00:00
+win/sumCast	id,a | 1,1 day; 2,1 day 24:00:00; 3,1 mon 1 day 24:00:00
+win/countStarControl	a | 1
+agg/countCompareControl	a | 14
+agg/sumExtractControl	a | 416
+choice/caseTimes	a:interval | 2 days
+choice/caseNeg	a:interval | -1 days
+choice/coalesceTimes	a:interval | 2 days
+choice/case	a:interval | 1 day
+choice/coalesceFirst	a:interval | 1 day
+choice/casePlus	a | 1 day 01:00:00
+choice/caseTs	a | 2024-02-29 00:00:00
+choice/caseCompare	a | t
+obs/arrayTimes	a | {"2 days"}
+obs/arrayNeg	a | {"-1 days"}
+obs/arrayLit	a | {"1 day"}
+obs/timeBucket	ERR 42883
+obs/timeBucketLit	ERR 42883
+obs/dateAdd	a | 2024-02-02 00:00:00+00
+obs/dateAddLit	a | 2024-02-02 00:00:00+00
+obs/extractType	a:numeric,b:double precision | 30,30
+obs/extractTsType	a:numeric,b:double precision | 31,31
+sweep/scalarSubTimes	a | 2 days
+sweep/derivedTimes	x | 2 days
+sweep/cteNeg	x | -1 days
+sweep/unionAllTimes	n | 2
+sweep/valuesTimes	x | 2 days
+sweep/orderByTimes	id | 1; 6
+sweep/groupByTimes	k,n | 2 days,1; 4 days,1
+sweep/distinctNeg	a | -1 days
+sweep/concat	a | x2 days
+sweep/castText	a | 2 days
+sweep/nullifTimes	a | 2 days
+sweep/greatestNeg	a | 01:00:00
+sweep/coalesceNeg	a | -1 days
+sweep/caseThenTimes	a | 2 days
+sweep/rowsNeg	id,n | 1,-1 days; 3,-1 mons; 9,NULL
+sweep/whereTimes	id | 1; 2
+sweep/inTimes	a | t
+sweep/rowCtor	a | ("2 days",1)
+sweep/caseQuotedAgg	a | 2 days
+sweep/caseQuotedTimes	a | 2 days
+sweep/coalesceQuotedTimes	a | 2 days
+sweep/caseQuoted	a,b | t,2 days
+sweep/caseQuotedBad	ERR 22007
+sweep/coalesceQuotedBad	ERR 22007
+sweep/caseColumnControl	id,a | 1,2 days; 2,48:00:00
+sweep/derivedCount	a | 1
+sweep/derivedMax	a | -1 days
+sweep/derivedSum	a | 1 year 1 mon 416 days 769:00:00
