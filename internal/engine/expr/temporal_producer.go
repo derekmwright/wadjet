@@ -205,16 +205,25 @@ func producesInterval(e Expr) bool {
 			return l && !r
 		}
 	case *Case:
-		results := make([]Expr, 0, len(x.Whens)+1)
+		// No slice is built: a CAST over `ts + CASE …` asks this per row.
+		var c intervalChoice
 		for _, w := range x.Whens {
-			results = append(results, w.Result)
+			if !c.take(w.Result) {
+				return false
+			}
 		}
-		if x.Else != nil {
-			results = append(results, x.Else)
+		if x.Else != nil && !c.take(x.Else) {
+			return false
 		}
-		return producesIntervalChoice(results)
+		return c.saw
 	case *Coalesce:
-		return producesIntervalChoice(x.Args)
+		var c intervalChoice
+		for _, a := range x.Args {
+			if !c.take(a) {
+				return false
+			}
+		}
+		return c.saw
 	case *FuncCall:
 		switch strings.ToLower(x.Name) {
 		case "nullif":
@@ -230,19 +239,20 @@ func producesInterval(e Expr) bool {
 	return false
 }
 
-// producesIntervalChoice is intervalOrNullChoice over the compiled tree.
-func producesIntervalChoice(branches []Expr) bool {
-	saw := false
-	for _, b := range branches {
-		switch {
-		case producesInterval(b):
-			saw = true
-		case isNullLit(b):
-		default:
-			return false
-		}
+// intervalChoice is intervalOrNullChoice over the compiled tree, one branch
+// at a time: take reports whether the branch is an interval or NULL, and saw
+// whether an interval was among them.
+type intervalChoice struct{ saw bool }
+
+func (c *intervalChoice) take(b Expr) bool {
+	switch {
+	case producesInterval(b):
+		c.saw = true
+	case isNullLit(b):
+	default:
+		return false
 	}
-	return saw
+	return true
 }
 
 // intervalTextOperand is a quoted literal that reads as interval input:
