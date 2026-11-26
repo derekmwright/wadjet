@@ -53,7 +53,29 @@ func addInterval(t time.Time, iv IntervalValue, subtract bool) time.Time {
 	if subtract {
 		sign = -1
 	}
-	t = t.AddDate(sign*iv.Years, sign*iv.Months, sign*iv.Days)
+	// PostgreSQL's timestamp_pl_interval, in its order: the months first, a
+	// day past the new month's end CLAMPED to its last day (January 31 + 1
+	// month is February 29 in 2024, 28 in 2023), then the days as whole
+	// calendar days, then the clock part. AddDate did all three at once and
+	// normalized the overflow forward instead — January 31 + 1 month was
+	// March 2 (#1713c).
+	if months := sign * (iv.Years*12 + iv.Months); months != 0 {
+		y, m, d := t.Date()
+		total := int(m) - 1 + months
+		y += total / 12
+		mi := total % 12
+		if mi < 0 {
+			mi += 12
+			y--
+		}
+		mon := time.Month(mi + 1)
+		if last := time.Date(y, mon+1, 0, 0, 0, 0, 0, time.UTC).Day(); d > last {
+			d = last
+		}
+		hh, mm, ss := t.Clock()
+		t = time.Date(y, mon, d, hh, mm, ss, t.Nanosecond(), time.UTC)
+	}
+	t = t.AddDate(0, 0, sign*iv.Days)
 	// The clock part in checked int64 SECONDS, never time.Duration (int64
 	// nanoseconds, ±292 years): a wrapped Duration is an in-range instant the
 	// range seam cannot tell from a right one.
