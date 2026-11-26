@@ -26,8 +26,9 @@ import (
 //     (plural but at exactly 1), twelve months a year;
 //   - B1: an INTERVAL's clock part is summed in checked seconds, not in a
 //     time.Duration that wraps past ±292 years, so `+ INTERVAL '3000000
-//     hours'` is year 2368 and `'100000000000 hours'` is 22008 on every door
-//     with nothing stored (PostgreSQL says 22015 at the literal);
+//     hours'` is year 2368; `'100000000000 hours'` is refused at the literal
+//     with PostgreSQL's 22015 on every door, nothing stored (#1713c r2: it
+//     was 22008 when applied);
 //   - P1: an INTERVAL value assigned to a column (no INTERVAL column type
 //     exists) is PostgreSQL's: its text into TEXT, 42804 into anything else —
 //     not a code-less box-validation error.
@@ -85,10 +86,10 @@ func TestIntervalAnswersNothingBaseAnsweredRight(t *testing.T) {
 		{"SELECT CAST(TIMESTAMP '2026-03-03 00:00:00' - INTERVAL '3000000 hours' AS TEXT) AS v", "1683-12-06 00:00:00", ""},
 		{"SELECT CAST(DATE '2026-03-03' + INTERVAL '3000000 hours' AS TEXT) AS v", "2368-05-29 00:00:00", ""},
 		{"SELECT CAST(ts + INTERVAL '100000000000 seconds' AS TEXT) AS v FROM ivc", "5195-01-16 20:07:10", ""},
-		{"SELECT ts + INTERVAL '100000000000 hours' AS v FROM ivc", "", "22008"},
-		{"SELECT d + INTERVAL '100000000000 hours' AS v FROM ivc", "", "22008"},
-		{"SELECT date_add(ts, INTERVAL '100000000000 hours') AS v FROM ivc", "", "22008"},
-		{"SELECT id AS v FROM ivc WHERE ts + INTERVAL '100000000000 hours' > ts", "", "22008"},
+		{"SELECT ts + INTERVAL '100000000000 hours' AS v FROM ivc", "", "22015"},
+		{"SELECT d + INTERVAL '100000000000 hours' AS v FROM ivc", "", "22015"},
+		{"SELECT date_add(ts, INTERVAL '100000000000 hours') AS v FROM ivc", "", "22015"},
+		{"SELECT id AS v FROM ivc WHERE ts + INTERVAL '100000000000 hours' > ts", "", "22015"},
 	} {
 		res, err := db.Query(ctx, tc.sql)
 		if tc.state != "" {
@@ -103,10 +104,10 @@ func TestIntervalAnswersNothingBaseAnsweredRight(t *testing.T) {
 	}
 	// B1 on the write doors, and P1: nothing stored.
 	for _, tc := range []struct{ sql, state string }{
-		{"INSERT INTO ivc (id, ts) VALUES (2, TIMESTAMP '2026-03-03 00:00:00' + INTERVAL '100000000000 hours')", "22008"},
-		{"INSERT INTO ivc (id, ts) SELECT 3, ts + INTERVAL '100000000000 hours' FROM ivc WHERE id = 1", "22008"},
-		{"UPDATE ivc SET ts = ts + INTERVAL '100000000000 hours' WHERE id = 1", "22008"},
-		{"CREATE TABLE ivc_ctas AS SELECT ts + INTERVAL '100000000000 hours' AS v FROM ivc", "22008"},
+		{"INSERT INTO ivc (id, ts) VALUES (2, TIMESTAMP '2026-03-03 00:00:00' + INTERVAL '100000000000 hours')", "22015"},
+		{"INSERT INTO ivc (id, ts) SELECT 3, ts + INTERVAL '100000000000 hours' FROM ivc WHERE id = 1", "22015"},
+		{"UPDATE ivc SET ts = ts + INTERVAL '100000000000 hours' WHERE id = 1", "22015"},
+		{"CREATE TABLE ivc_ctas AS SELECT ts + INTERVAL '100000000000 hours' AS v FROM ivc", "22015"},
 		{"INSERT INTO ivc (id, n) VALUES (7, INTERVAL '1 day')", "42804"},
 		{"INSERT INTO ivc (id, n) VALUES (7, CAST('90 minutes' AS INTERVAL))", "42804"},
 		{"UPDATE ivc SET n = INTERVAL '1 day' WHERE id = 1", "42804"},

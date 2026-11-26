@@ -1695,5 +1695,49 @@ func intervalValueOf(n *plansql.IntervalLit) (IntervalValue, error) {
 			"interval unit %q is not supported; use YEAR, MONTH, WEEK, DAY, "+
 				"HOUR, MINUTE or SECOND", n.Unit)
 	}
+	if err := intervalLiteralRange(n); err != nil {
+		return IntervalValue{}, err
+	}
 	return iv, nil
+}
+
+// intervalLiteralRange refuses an interval literal or CAST PostgreSQL 17.11's
+// interval input refuses, at the literal (#1713c): its fields are months and
+// days in int32 and a clock part in int64 microseconds. A field past its
+// width is 22015 (`interval field value out of range`, DecodeInterval) —
+// months, days, weeks as days, hours, minutes, seconds as microseconds, and
+// a year count past int32 — and a year count that fits int32 but whose
+// months do not is 22008 (`interval out of range`, interval_in), measured
+// per unit at both edges. Such a literal used to be held as written and
+// compared, printed and applied (`INTERVAL '2147483647 years' > INTERVAL '1
+// day'` answered true).
+func intervalLiteralRange(n *plansql.IntervalLit) error {
+	v := int64(n.Value)
+	fieldOverflow := func() error {
+		return sqlerr.New("22015", "interval field value out of range: %s", sqlerr.Quote(fmt.Sprintf("%d %ss", n.Value, n.Unit)))
+	}
+	in32 := func(x int64) bool { return x >= -1<<31 && x <= 1<<31-1 }
+	switch n.Unit {
+	case "year":
+		if !in32(v) {
+			return fieldOverflow()
+		}
+		if !in32(v * 12) {
+			return sqlerr.New("22008", "interval out of range")
+		}
+	case "month", "day":
+		if !in32(v) {
+			return fieldOverflow()
+		}
+	case "week":
+		if !in32(v) || !in32(v*7) {
+			return fieldOverflow()
+		}
+	case "hour", "minute", "second":
+		unit := map[string]int64{"hour": 3600_000_000, "minute": 60_000_000, "second": 1_000_000}[n.Unit]
+		if _, ok := checkedMulAdd(v, unit, 0); !ok {
+			return fieldOverflow()
+		}
+	}
+	return nil
 }

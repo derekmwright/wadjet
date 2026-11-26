@@ -314,10 +314,19 @@ var (
 // this type cannot hold stays the text it was (IntervalValue.text), and text
 // PostgreSQL refuses is its 22007.
 func castToIntervalText(x string) IntervalValue {
-	if lit, err := plansql.ParseIntervalText(x); err == nil {
-		if iv, err := intervalValueOf(lit); err == nil {
+	lit, err := plansql.ParseIntervalText(x)
+	if err == nil {
+		iv, err := intervalValueOf(lit)
+		if err == nil {
 			return iv
 		}
+		if s := sqlerr.StateOf(err); s == "22015" || s == "22008" {
+			// Out of PostgreSQL's interval range: refused as the literal
+			// is (#1713c), never kept as opaque text.
+			panic(fatalEval{err})
+		}
+	} else if sqlerr.StateOf(err) == "22015" {
+		panic(fatalEval{err})
 	}
 	if pgIntervalInput(x) {
 		return IntervalValue{text: x}

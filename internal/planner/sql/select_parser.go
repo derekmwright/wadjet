@@ -4179,6 +4179,11 @@ func ParseIntervalText(s string) (*IntervalLit, error) {
 	}
 	n, err := strconv.Atoi(parts[0])
 	if err != nil {
+		// A count past int64 is PostgreSQL's interval field overflow, 22015,
+		// not a syntax error (#1713c, measured).
+		if ne, ok := err.(*strconv.NumError); ok && ne.Err == strconv.ErrRange {
+			return nil, sqlerr.New("22015", "interval field value out of range: %s", sqlerr.Quote(s))
+		}
 		return nil, sqlerr.New("22007", "invalid input syntax for type interval: %s", sqlerr.Quote(s))
 	}
 	if len(parts) == 1 {
