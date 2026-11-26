@@ -1784,6 +1784,13 @@ func nodeDeclaredTypeOf(node plansql.Node, decls ColDecls) (expr.DeclType, expr.
 			return expr.Decl(parquet.TypeFloat64), expr.Decided
 		}
 	case *plansql.FuncCallNode:
+		// NULLIF / GREATEST / LEAST over an interval answer an interval,
+		// declared as the interval literal is (temporal r20's text); the
+		// registry's float8 fallback refused the value at the store
+		// (#1713c).
+		if nodeIsInterval(n, decls) {
+			return expr.DeclType{}, expr.Undecided
+		}
 		return funcReturnType(n, decls)
 	case *plansql.ParenNode:
 		return nodeDeclaredType(n.Inner, decls)
