@@ -161,9 +161,9 @@ func arithProducedTemporal(op string, left, right Expr, b *batch.RecordBatch) ca
 	lk := producedTemporal(left, b)
 	rk := producedTemporal(right, b)
 	switch {
-	case (lk != castNotTemporal || textOperand(left, b)) && producesInterval(right):
+	case (lk != castNotTemporal || (textOperand(left, b) && !intervalTextOperand(left))) && producesInterval(right):
 		return castToTimestampKind
-	case op == "+" && (rk != castNotTemporal || textOperand(right, b)) && producesInterval(left):
+	case op == "+" && (rk != castNotTemporal || (textOperand(right, b) && !intervalTextOperand(right))) && producesInterval(left):
 		return castToTimestampKind
 	case op == "+" && ((lk == castToTimestampKind && isUnknownLit(right)) || (rk == castToTimestampKind && isUnknownLit(left))):
 		// `ts + '…'`: the quoted operand resolves to an INTERVAL
@@ -183,14 +183,47 @@ func isUnknownLit(e Expr) bool {
 	return ok
 }
 
-// producesInterval reports whether an operand is an INTERVAL: a literal, or a
-// cast to one.
+// producesInterval reports whether an operand is an INTERVAL: a literal, a
+// cast to one, or the interval arithmetic and choice constructs that answer
+// one (#1713c) — IsIntervalNode's rule over the compiled tree.
 func producesInterval(e Expr) bool {
-	if isIntervalLit(e) {
-		return true
+	switch x := e.(type) {
+	case *Lit:
+		return isIntervalLit(e)
+	case *Cast:
+		return strings.EqualFold(strings.TrimSpace(x.DestType), "interval")
+	case *UnaryOp:
+		return x.Op == "-" && producesInterval(x.Operand)
+	case *BinOp:
+		l, r := producesInterval(x.Left), producesInterval(x.Right)
+		switch x.Op {
+		case "+", "-":
+			return l && r
+		case "*":
+			return l != r
+		case "/":
+			return l && !r
+		}
+	case *FuncCall:
+		switch strings.ToLower(x.Name) {
+		case "nullif":
+			return len(x.Args) == 2 && producesInterval(x.Args[0])
+		case "greatest", "least":
+			for _, a := range x.Args {
+				if producesInterval(a) {
+					return true
+				}
+			}
+		}
 	}
-	c, ok := e.(*Cast)
-	return ok && strings.EqualFold(strings.TrimSpace(c.DestType), "interval")
+	return false
+}
+
+// intervalTextOperand is a quoted literal that reads as interval input:
+// beside an interval under ± it is an interval, not a date (#1713c).
+func intervalTextOperand(e Expr) bool {
+	s, ok := unknownLiteralText(e)
+	return ok && intervalInputText(s)
 }
 
 // textDayOperand is the one TEXT operand date arithmetic reads as a day: a

@@ -3,12 +3,33 @@
 package expr
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
+
+// ivCatch runs f and returns its value's rendering, or "ERR <SQLSTATE>" for a
+// fatal evaluation error.
+func ivCatch(f func() any) (out string) {
+	defer func() {
+		if r := recover(); r != nil {
+			fe, ok := r.(fatalEval)
+			if !ok {
+				panic(r)
+			}
+			out = "ERR " + sqlerr.StateOf(fe.err)
+		}
+	}()
+	v := f()
+	if iv, ok := v.(IntervalValue); ok {
+		return iv.String()
+	}
+	return fmt.Sprint(v)
+}
 
 // Issue #332 regression: a temporal COLUMN plus or minus an INTERVAL.
 //
@@ -260,19 +281,17 @@ func TestIntervalOperandCompilesGeneric(t *testing.T) {
 
 // TestIntervalOperandNonTemporalUnchanged: the operator resolves only what it
 // can prove is a date. A bare integer column has no unit to recover — reading
-// one as epoch days here would be a guess — so it stays numeric arithmetic,
-// exactly as before, rather than turning into a date string.
+// one as epoch days here would be a guess — so it is never turned into a date
+// string. Nor is it numeric arithmetic any more: `bigint - interval` has no
+// operator on PostgreSQL (42883), and the numeric path read the interval as
+// 0 and answered the column unchanged (#1713c r2).
 func TestIntervalOperandNonTemporalUnchanged(t *testing.T) {
 	b := dateArithBatch(t)
 	e := compileBinOp(&ColRef{Name: "n"}, &Lit{Val: IntervalValue{Days: 90}}, "-", nil)
-	got := e.Eval(b, 0)
-	if _, isText := got.(string); isText {
-		t.Errorf("int_col - INTERVAL '90' DAY = %v (%T), want the numeric answer: "+
-			"a bare number is not a date", got, got)
-	}
-	if f, ok := got.(float64); !ok || f != float64(epochDays(arithHi)) {
-		t.Errorf("int_col - INTERVAL '90' DAY = %v (%T), want %v",
-			got, got, float64(epochDays(arithHi)))
+	got := ivCatch(func() any { return e.Eval(b, 0) })
+	if got != "ERR 42883" {
+		t.Errorf("int_col - INTERVAL '90' DAY = %v, want ERR 42883 (PostgreSQL 17.11: "+
+			"operator does not exist: bigint - interval); a bare number is not a date", got)
 	}
 }
 

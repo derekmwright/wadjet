@@ -1137,7 +1137,7 @@ func compileBinOp(left, right Expr, op string, ctx *compileContext) Expr {
 	// projected NULL (issue #332). Only the generic BinOp knows this shape,
 	// so route it there. A date LITERAL already arrived here as a CastNode,
 	// which is not a Float64Expr, which is why that form always worked.
-	if isIntervalLit(left) || isIntervalLit(right) {
+	if producesInterval(left) || producesInterval(right) {
 		return &BinOp{Left: left, Right: right, Op: op}
 	}
 	// A quoted literal beside an operand that may be a DATE or a TIMESTAMP

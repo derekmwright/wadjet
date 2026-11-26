@@ -1716,6 +1716,11 @@ func nodeDeclaredTypeOf(node plansql.Node, decls ColDecls) (expr.DeclType, expr.
 		// String fallback — is what lets `ORDER BY -col` sort numerically:
 		// the hidden key materializes into a typed vector rather than into
 		// text, where "-0" vs "0" rendering used to decide the order.
+		if n.Op == "-" && nodeIsInterval(n.Inner, decls) {
+			// -interval is an interval (#1713c), declared as the literal
+			// is; the numeric fallback below declared float8 for it.
+			return expr.DeclType{}, expr.Undecided
+		}
 		if n.Op == "-" || n.Op == "+" {
 			if l, ok := expr.FoldedNegatedLiteral(n); ok {
 				// `-9223372036854775808` is bigint and
@@ -2376,6 +2381,13 @@ func binOpTemporalType(n *plansql.BinaryOp, decls ColDecls) (expr.DeclType, expr
 	lk := nodeTemporalKind(n.Left, decls)
 	rk := nodeTemporalKind(n.Right, decls)
 	switch {
+	case nodeIsInterval(n.Left, decls) && nodeIsInterval(n.Right, decls),
+		nodeIsQuotedIntervalText(n.Left) && nodeIsInterval(n.Right, decls),
+		nodeIsQuotedIntervalText(n.Right) && nodeIsInterval(n.Left, decls):
+		// interval ± interval, a quoted operand that reads as interval
+		// input among them, is an interval (PostgreSQL resolves the unknown
+		// to interval), declared as the literal is (#1713c).
+		return expr.DeclType{}, expr.Undecided
 	case (lk != temporalNone || nodeIsQuotedText(n.Left)) && nodeIsInterval(n.Right, decls):
 		return expr.Decl(parquet.TypeTimestamp), expr.Decided
 	case n.Op == "+" && (rk != temporalNone || nodeIsQuotedText(n.Right)) && nodeIsInterval(n.Left, decls):
@@ -2525,18 +2537,22 @@ func nodeIsQuotedText(node plansql.Node) bool {
 	return ok && l.Kind == plansql.LitString
 }
 
-// nodeIsInterval reports whether an operand is an INTERVAL: a literal, or a
-// cast to one.
-func nodeIsInterval(node plansql.Node, decls ColDecls) bool {
-	switch n := node.(type) {
-	case *plansql.ParenNode:
-		return nodeIsInterval(n.Inner, decls)
-	case *plansql.IntervalLit:
-		return true
-	case *plansql.CastNode:
-		return strings.EqualFold(strings.TrimSpace(n.TypeName), "interval")
+// nodeIsQuotedIntervalText reports a quoted literal that reads as interval
+// input (expr.IsIntervalInputText), which beside an interval operand of ±
+// is an interval rather than the date or timestamp other quoted text is.
+func nodeIsQuotedIntervalText(node plansql.Node) bool {
+	if p, ok := node.(*plansql.ParenNode); ok {
+		return nodeIsQuotedIntervalText(p.Inner)
 	}
-	return false
+	l, ok := node.(*plansql.Lit)
+	return ok && l.Kind == plansql.LitString && expr.IsIntervalInputText(l.Value)
+}
+
+// nodeIsInterval reports whether an operand is an INTERVAL: a literal, a
+// cast to one, or an operator or choice construct that answers one
+// (expr.IsIntervalNode, the compile's rule too; #1713c).
+func nodeIsInterval(node plansql.Node, decls ColDecls) bool {
+	return expr.IsIntervalNode(node)
 }
 
 // isTextColRef reports a column the catalog declares VARCHAR — a day to the

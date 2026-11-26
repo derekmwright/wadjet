@@ -42,7 +42,7 @@ double/zero/between	dag	ERR  subqueries require a SubqueryRunner	N-1 (filing can
 form/avgInt/castVarchar	all	{text} rows=1 0.4000	AVG over an integer renders scale 4 (postgres-differences "AVG renders fewer digits")
 form/avgInt/plusLit	all	{float} rows=1 1.4	AVG over an integer renders scale 4 (postgres-differences "AVG renders fewer digits")
 form/avgInt/proj	all	{numeric} rows=1 0.4000	AVG over an integer renders scale 4 (postgres-differences "AVG renders fewer digits")
-form/litInterval/plusLit	all	{text} rows=1 1	no INTERVAL value type (temporal#r20, #1318)
+form/litInterval/plusLit	all	ERR 42883 operator does not exist: interval + bigint	PostgreSQL's SQLSTATE since #1713c r2 (it answered 1: the interval read as 0); the message names the integer literal by its int64 carrier, bigint, where PostgreSQL names it integer
 form/litInterval/proj	all	{text} rows=1 01:00:00	no INTERVAL value type (temporal#r20, #1318)
 form/litText/plusLit	all	{float} rows=1 1	N-4 (filing candidate): text + integer answers ('abc' read as 0) where PostgreSQL raises 42883 (the dml-assignment#r5 text-arithmetic superset reached through a scalar subquery)
 int/agg/between	dag	ERR  subqueries require a SubqueryRunner	N-1 (filing candidate): the stage DAG resolves a scalar subquery in a comparison operand but has no BETWEEN arm, so the bounds reach the worker unresolved; the single-process arms answer PostgreSQL

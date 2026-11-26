@@ -44,6 +44,16 @@ func (e *BinOp) Eval(b *batch.RecordBatch, row int) any {
 		return nil
 	}
 
+	// Interval arithmetic (#1713c): interval ± interval (a quoted operand
+	// that reads as an interval among them), interval * / number. Asked
+	// before the date arms, which read a quoted operand as a date; date ±
+	// interval is theirs (intervalArith declines it).
+	if e.Op == "*" || e.Op == "/" || e.Op == "%" || intervalPair(lv, rv) {
+		if v, ok := intervalArith(e.Op, lv, rv); ok {
+			return v
+		}
+	}
+
 	// Date ± interval arithmetic. Subtraction is not commutative, so only the
 	// date-on-the-left form takes an interval on the right; `interval + date`
 	// is the one reversed shape that means anything.
@@ -62,6 +72,11 @@ func (e *BinOp) Eval(b *batch.RecordBatch, row int) any {
 			if dv, ok := temporalOperand(b, row, e.Right, rv); ok {
 				return intervalShift(dv, iv, false)
 			}
+		}
+		// interval ± a number or a boolean: no such operator (42883), where
+		// the numeric path below read the interval as 0.
+		if v, ok := intervalArith(e.Op, lv, rv); ok {
+			return v
 		}
 		// date - date and date ± n. Declines for everything that is not
 		// date arithmetic, leaving the numeric path below untouched (#340).
@@ -586,6 +601,11 @@ func (e *UnaryOp) Eval(b *batch.RecordBatch, row int) any {
 	// keeps `-int_col / 2` on the integer-division path (#369).
 	switch e.Op {
 	case "-":
+		// interval_um: every field negated (#1713c); ToFloat64 read the
+		// interval as 0 and answered -0.
+		if iv, ok := v.(IntervalValue); ok {
+			return intervalNeg(iv)
+		}
 		if i, ok := toInt64Safe(v); ok {
 			if i == math.MinInt64 {
 				// |MinInt64| has no int64 — two's complement has one more

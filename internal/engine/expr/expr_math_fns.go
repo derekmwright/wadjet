@@ -138,6 +138,14 @@ func fnMod(args []any) any {
 	if len(args) < 2 || args[0] == nil || args[1] == nil {
 		return nil
 	}
+	// There is no remainder of an interval (`interval % integer` is 42883 on
+	// PostgreSQL); ToFloat64 read the interval as 0 (#1713c).
+	if _, ok := args[0].(IntervalValue); ok {
+		raiseIntervalOperator("%", "interval", intervalOperandName(args[1]))
+	}
+	if _, ok := args[1].(IntervalValue); ok {
+		raiseIntervalOperator("%", intervalOperandName(args[0]), "interval")
+	}
 	// Integer remainder over two integers (#768): math.Mod answered `-0` for
 	// MOD(-6, 3), a signed zero no integer remainder has, and declared it
 	// double where PostgreSQL declares the argument's own integer width.
