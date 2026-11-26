@@ -1244,3 +1244,55 @@ statements); `wadjet.TestPoolReliefCrossesStatementsSafely`,
 statements at every registrant's lifecycle point);
 `wadjet.TestPoolContentionCompletesBounded` (every statement ends with an
 answer, a named refusal or its cancellation).
+
+### 2026-11-26: a grace join's build runs close at the build's end, and a failed eviction is answered or loud (#1706, line 1706o)
+
+Factual record; nothing here changes what is charged. The spill writers' and
+readers' buffers are still uncharged (the 2026-11-24 amendment's measured gap):
+`exec.TestJoinSpillBufferCensus` logs them beside a charge of zero. On the
+join-envelope shape (200,000 build rows, 400,000 probe rows) at 2 MiB the
+build holds 62 writers (4,063,232 bytes) during its arrivals, none after it
+returns; the probe holds 62 probe writers (4,063,232 bytes) and the replay one
+1 MiB reader at a time. At 8 MiB the figures are 55 writers (3,604,480 bytes),
+at 32 MiB 26 (1,703,936).
+
+**Lifecycle.** The partitioned build closes its build runs in its tail, under
+the join's lock, in the same critical section that ends relief eligibility
+(`reliefClosed`); they used to stay open until the first `NextFlush`, beside
+every probe writer. Nothing in production evicts a partition after that point:
+every entry to the eviction after the build is `SpillSome`, which refuses
+under the lock once `reliefClosed` is set, and an eviction that finds the
+writers closed frees nothing before it marks anything
+(`exec.TestStaleReliefAtBuildEnd`). A worker fragment whose join build fails
+or panics closes the join before the error leaves the fragment builder.
+
+**A failed eviction.** Two rules hold for the grace join's evictions, whoever
+drives them (its own arrival, a reservation refusal, `RequestRelief` on
+another operator's behalf, or the drift backstop, which discards the error):
+
+- the evicted partition's run is created before the partition is marked
+  spilled, so a run that cannot be created changes nothing and the build goes
+  on to answer. Before this, the mark came first: a relief eviction whose file
+  could not be created left the partition marked with its rows resident and
+  never written, and the victim answered without them on all ten join kinds
+  through both entry points (inner 31,516 rows for PostgreSQL 17.11's 32,000),
+  at 2fa0beeb as well;
+- from the mark on, a failure is sticky: the run writer keeps its first error
+  (a write the buffer could not pass to the file is reported by the batch that
+  hit it), and the join keeps the eviction's error, which its build returns.
+  Write, flush, seek, count-write and close failures end the statement with an
+  error, never an answer.
+
+The join's own evictions, its probe runs and its replay readers were already
+loud on every fault measured (`exec.TestJoinOwnSpillFailureIsLoud`, ten join
+kinds). The other spilling operators (HashAggregate, Sort, Window, the
+sort-merge join, the batch collector, the CTE spool) keep their state until
+their run is written and closed, so a failed relief spill leaves them
+answering and a failed own spill fails the statement
+(`exec.TestSpillFaultSweepIsLoudOrRight`). Gates:
+`exec.TestReliefEvictionFailureIsAnsweredOrLoud`,
+`exec.TestJoinOwnSpillFailureIsLoud`, `exec.TestSpillFaultSweepIsLoudOrRight`,
+`exec.TestJoinSpillBufferCensus`, `exec.TestHashJoinBuildWritersCloseAtBuildEnd`,
+`exec.TestStaleReliefAtBuildEnd`,
+`worker.TestFragmentJoinBuildFailureReleasesTheSharedPool`,
+`physical.TestPoolJoinBuildFailureReleasesOnEveryRoute`.
