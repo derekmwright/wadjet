@@ -352,6 +352,7 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 	if node == nil {
 		return &Lit{Val: nil}, nil
 	}
+	node = typeIntervalUnknowns(node)
 	switch n := node.(type) {
 	case *plansql.ColRef:
 		name := n.Column
